@@ -119,7 +119,12 @@ package g6lc_hyp_pkg;
       FreelistBanks: 2,
       IqBanks: 8,
       IqBankEntries: 4,
-      IqSpecWakeup: 2,
+      // Stalled-IRO WbReserve profile: speculative wakeup is OFF -- the
+      // consumer wakes on the registered real-WB capture only. Retained
+      // speculation (IqSpecWakeup!=0) is not falsely qualified: the
+      // reservation gate was not designed to cover spec-broadcast
+      // producers, so the legality below binds the pair.
+      IqSpecWakeup: 0,
       IqSteer: 1'b1,
       FeNextlineUntagged: 1'b1,
       FeNextlineEntries: 256,
@@ -182,8 +187,15 @@ package g6lc_hyp_pkg;
     ok &= h.IqBanks >= 1;
     ok &= !(h.IqBanks > 1) || (h.IqBankEntries >= 2);
     ok &= h.IqSpecWakeup inside {0, 1, 2};
+    // Stalled-IRO WbReserve admits only real-WB wakeup: a spec-broadcast
+    // producer could still stall after grant, which the reservation model
+    // forbids, so the two knobs may not combine.
+    ok &= !h.WbReserve || (h.IqSpecWakeup == 0);
     ok &= h.StoreFwdCycles inside {1, 3};
     ok &= h.LsuAguStages inside {1, 2};
+    // wt_dcache: the read ctrl/mems carry exactly the reference
+    // single-cycle arm (0) and the staged T1/T2 arm (2).
+    ok &= h.DcacheHitExtra inside {0, 2};
     ok &= h.CommitBundleStages <= 1;
     ok &= h.WbCaptureStages <= 1;
     ok &= h.DecodeStages inside {1, 3};

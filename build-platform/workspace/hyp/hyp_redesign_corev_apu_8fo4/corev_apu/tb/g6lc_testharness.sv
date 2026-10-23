@@ -544,23 +544,35 @@ module g6lc_testharness #(
   logic [AXI_ADDRESS_WIDTH-1:0] rom_addr;
   logic [AXI_DATA_WIDTH-1:0]    rom_rdata;
 
-  axi2mem #(
-    .AXI_ID_WIDTH   ( g6lc_axi_soc::IdWidthSlave ),
-    .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
-    .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),
-    .AXI_USER_WIDTH ( AXI_USER_WIDTH               )
+  g6lc_axi_soc::req_slv_t  rom_axi_req;
+  g6lc_axi_soc::resp_slv_t rom_axi_resp;
+  `AXI_ASSIGN_TO_REQ(rom_axi_req, master[g6lc_soc::ROM])
+  `AXI_ASSIGN_FROM_RESP(master[g6lc_soc::ROM], rom_axi_resp)
+
+  // The two-register ROM read (addr_q at the request edge, bank_rdata_q one
+  // edge later) makes rdata_o valid three edges after the request beat:
+  // the adapter pulses req_q at edge0, addr_q lands at edge1, bank data at
+  // edge2, and the adapter samples rdata_i at edge RD_LAT counted from
+  // edge0 (RD_LAT=1 is its combinational-memory case).
+  localparam int unsigned BootromReadLatency = 3;
+
+  g6lc_axi2mem_reg #(
+    .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH          ),
+    .AXI_DATA_WIDTH ( AXI_DATA_WIDTH             ),
+    .RD_LAT         ( BootromReadLatency         ),
+    .axi_req_t      ( g6lc_axi_soc::req_slv_t    ),
+    .axi_resp_t     ( g6lc_axi_soc::resp_slv_t   )
   ) i_axi2rom (
-    .clk_i  ( clk_i                   ),
-    .rst_ni ( ndmreset_n              ),
-    .slave  ( master[g6lc_soc::ROM] ),
-    .req_o  ( rom_req                 ),
-    .we_o   (                         ),
-    .addr_o ( rom_addr                ),
-    .be_o   (                         ),
-    .user_o (                         ),
-    .data_o (                         ),
-    .user_i ( '0                      ),
-    .data_i ( rom_rdata               )
+    .clk_i      ( clk_i        ),
+    .rst_ni     ( ndmreset_n   ),
+    .slv_req_i  ( rom_axi_req  ),
+    .slv_resp_o ( rom_axi_resp ),
+    .req_o      ( rom_req      ),
+    .we_o       (              ),
+    .addr_o     ( rom_addr     ),
+    .be_o       (              ),
+    .wdata_o    (              ),
+    .rdata_i    ( rom_rdata    )
   );
 
   bootrom i_bootrom (
@@ -1450,16 +1462,30 @@ module g6lc_testharness #(
   // M3 bring-up probe (+soc_trace): hart AR/R at the xbar slave port and the
   // ROM slave request path.
   logic soc_trace;
-  initial soc_trace = $test$plusargs("soc_trace");
+  int unsigned soc_lo, soc_hi;
+  int unsigned soc_cyc = 0;
+  initial begin
+    soc_trace = $test$plusargs("soc_trace");
+    soc_lo = 0;
+    soc_hi = 4000;
+    void'($value$plusargs("trace_from=%d", soc_lo));
+    void'($value$plusargs("trace_to=%d", soc_hi));
+  end
   always_ff @(posedge clk_i) begin
-    if (rst_ni && soc_trace && $time() < 4000 &&
+    if (!rst_ni) begin
+      soc_cyc = 0;
+    end else begin
+      soc_cyc++;
+    end
+    if (rst_ni && soc_trace && soc_cyc >= soc_lo && soc_cyc <= soc_hi &&
         (axi_g6lc_req.ar_valid || slave[0].ar_valid ||
          master[g6lc_soc::ROM].ar_valid || rom_req ||
          master[g6lc_soc::ROM].r_valid || axi_g6lc_resp.r_valid)) begin
-      $display("[soc] t=%0t | hart arv=%b arr=%b araddr=%h arid=%h rv=%b rr=%b | slv0 arv=%b arr=%b | rom arv=%b arr=%b addr=%h | romreq=%b romaddr=%h | romrv=%b romrr=%b rdata=%h rlast=%b",
+      $display("[soc] t=%0t | hart arv=%b arr=%b araddr=%h arid=%h rv=%b rr=%b rid=%h rlast=%b rdata=%h | slv0 arv=%b arr=%b | rom arv=%b arr=%b addr=%h | romreq=%b romaddr=%h | romrv=%b romrr=%b rdata=%h rlast=%b",
         $time,
         axi_g6lc_req.ar_valid, axi_g6lc_resp.ar_ready, axi_g6lc_req.ar.addr, axi_g6lc_req.ar.id,
         axi_g6lc_resp.r_valid, axi_g6lc_req.r_ready,
+        axi_g6lc_resp.r.id, axi_g6lc_resp.r.last, axi_g6lc_resp.r.data,
         slave[0].ar_valid, slave[0].ar_ready,
         master[g6lc_soc::ROM].ar_valid, master[g6lc_soc::ROM].ar_ready, master[g6lc_soc::ROM].ar_addr,
         rom_req, rom_addr,

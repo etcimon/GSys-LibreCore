@@ -337,7 +337,16 @@ assign wbuffer_all[k] = wbuffer_data_i[k];
   assign rd_port_busy = wr_cl_vld_i | inv_req_i;
 
   logic rd_req;
-  g6lc_hyp_rr_arb_tree #(
+  // Vendor arbiter semantics: gnt_o is the gnt_i-qualified, same-cycle
+  // service grant (capture=service), not the queued cell's capture pulse.
+  // The read-side pipeline depends on it: rd_ack_o tells each ctrl its
+  // SRAM access happened this cycle, and vld_sel_d/vld_req/bank_idx_q/
+  // cmp_en_q snapshot the live port operands for the next-cycle compare.
+  // The queued cell pulses gnt_o at queue capture while idx_o reflects a
+  // deferred queue head, so a port-2 store tag-check could service
+  // between a load's grant and verdict and feed it the wrong compare
+  // (B_LB0/B_LB7 stale forward in tb_g6lc_hyp8_dcache).
+  rr_arb_tree #(
       .NumIn    (NumPorts),
       .DataWidth(1)
   ) i_rr_arb_tree (

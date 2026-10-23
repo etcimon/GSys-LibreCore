@@ -115,6 +115,11 @@ const VALUE_FLAGS = new Set([
   "flavour",
   "jobs",
   "vthreads",
+  "plusarg",
+  "tail",
+  "tag",
+  "verlib",
+  "run-id",
   "env",
   "cmd-file",
 ]);

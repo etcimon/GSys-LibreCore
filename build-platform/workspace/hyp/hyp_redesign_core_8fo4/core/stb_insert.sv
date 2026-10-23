@@ -71,7 +71,13 @@ module stb_insert
   logic [DEPTH_SPEC-1:0]    s1_row_q, s1_col_q;
   logic [G6LCCfg.TRANS_ID_BITS-1:0] s1_tid_q;
 
-  wire ins_take = valid_i && !cancelled_mask_i[trans_id_i];
+  // The staged S1 record already owns its slot: it installs at the next
+  // edge, so a same-cycle arrival must not pick it again.
+  logic [DEPTH_SPEC-1:0]    reserved_slots, free_slots;
+  assign reserved_slots = s1_v_q ? s1_slot_q : '0;
+  assign free_slots     = ~(spec_valid_i | reserved_slots);
+
+  wire ins_take = valid_i && !flush_i && !cancelled_mask_i[trans_id_i];
 
   always_ff @(posedge clk_i or negedge rst_ni) begin : p_s1
     if (!rst_ni) begin
@@ -86,7 +92,7 @@ module stb_insert
       // cancel of the staged tid kills the writeback instead.
       s1_v_q <= ins_take;
       if (ins_take) begin
-        s1_slot_q            <= lowest_set(~spec_valid_i);
+        s1_slot_q            <= lowest_set(free_slots);
         s1_entry_q.address   <= paddr_i;
         s1_entry_q.data      <= data_i;
         s1_entry_q.be        <= be_i;
@@ -99,12 +105,19 @@ module stb_insert
         s1_entry_q.fwd_keep  <= fwd_keep_i;
         s1_tid_q             <= trans_id_i;
         for (int unsigned j = 0; j < DEPTH_SPEC; j++) begin
-          // spec_older[j][i]: entry j older than the arrival
-          s1_row_q[j] <= live_after_i[j] &&
-                         (!AGE_EN || ooo_older(spec_tid_i[j], trans_id_i));
+          // spec_older[j][i]: entry j older than the arrival. The pending
+          // S1 owner installs at this same edge, so its reserved slot is
+          // live for the new row and its trans_id is the staged one, not
+          // the array's current contents at that slot.
+          s1_row_q[j] <= (live_after_i[j] || (s2_wr_valid_o && s1_slot_q[j])) &&
+                         (!AGE_EN ||
+                          ooo_older((s1_slot_q[j] && s2_wr_valid_o) ? s1_tid_q : spec_tid_i[j],
+                                    trans_id_i));
           // spec_older[i][j]: the arrival older than entry j
-          s1_col_q[j] <= live_after_i[j] &&
-                         (AGE_EN && !ooo_older(spec_tid_i[j], trans_id_i));
+          s1_col_q[j] <= (live_after_i[j] || (s2_wr_valid_o && s1_slot_q[j])) &&
+                         (AGE_EN &&
+                          !ooo_older((s1_slot_q[j] && s2_wr_valid_o) ? s1_tid_q : spec_tid_i[j],
+                                     trans_id_i));
         end
       end
     end
@@ -121,5 +134,19 @@ module stb_insert
   assign s2_entry_o    = s1_entry_q;
   assign s2_older_row_o = s1_row_q;
   assign s2_older_col_o = s1_col_q;
+
+  //pragma translate_off
+  // An accepted store must always find a free slot — capacity is charged
+  // through the wrapper's ready credit, so this firing means the credit
+  // lied about reserved space (dropped work), not a legal overflow.
+  ins_take_has_free :
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+                   ins_take |-> (|free_slots))
+  else $error("[stb_insert] accepted a store with no free slot");
+  s1_slot_is_onehot :
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+                   s1_v_q |-> $onehot(s1_slot_q))
+  else $error("[stb_insert] staged slot is not one-hot: %b", s1_slot_q);
+  //pragma translate_on
 
 endmodule

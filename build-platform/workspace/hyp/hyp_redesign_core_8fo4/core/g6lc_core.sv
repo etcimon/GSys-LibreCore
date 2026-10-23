@@ -576,9 +576,9 @@ module g6lc_core
   logic [G6LCCfg.NrCommitPorts-1:0] commit_macro_ack;
 
   // hyp8 g10: cross-group seam wires.
-  logic [G6LCCfg.NrIssuePorts-1:0][2:0]             alu_fwd_a, alu_fwd_b;
+  logic [G6LCCfg.NrIssuePorts-1:0][3:0]             alu_fwd_a, alu_fwd_b;
   logic [G6LCCfg.TRANS_ID_BITS-1:0]                 alu_fwd_tid, alu_fwd_qtid;
-  logic [G6LCCfg.TRANS_ID_BITS-1:0]                 alu_fwd_rtid;
+  logic [G6LCCfg.TRANS_ID_BITS-1:0]                 alu_fwd_rtid, alu_fwd_htid;
   logic [31:0]                                    alu_fwd_low;
   logic [G6LCCfg.NR_SB_ENTRIES-1:0]               ld_checked;
   logic [G6LCCfg.NrCommitPorts-1:0]               commit_bundle_valid;
@@ -680,6 +680,7 @@ module g6lc_core
   // LSU
   logic [G6LCCfg.NrIssuePorts-1:0] lsu_valid_id_ex;
   logic lsu_ready_ex_id;
+  logic [2:0] lsu_count_ex_id;
 
   logic [G6LCCfg.TRANS_ID_BITS-1:0] load_trans_id_ex_id;
   logic [G6LCCfg.XLEN-1:0] load_result_ex_id;
@@ -2764,6 +2765,243 @@ assign irq_active = irq_i[smt_active_hart];
       if (sc_en) sc_print("final");
     end
   end
+
+  // +commit_trace (+trace_from/<c> 0, +trace_to=<c> 2000;
+  // +commit_trace_from/+commit_trace_to override):
+  // per-cycle commit-path observation for the scoreboard:269
+  // commit-validity failure. Two views per cycle:
+  //   [cmt]  shadow line -- every field is captured into shadow flops at
+  //          the posedge (always_ff, i.e. exactly the pre-edge state a
+  //          flop would capture) and printed one cycle later labelled
+  //          with the sampled edge. Settles by construction which value
+  //          the commit_ack_i |-> commit_instr_o.valid property read at
+  //          the ack edge. A `final` flush prints the last captured
+  //          sample so the line survives an assert-killed sim.
+  //   [cmtL] live line -- the same fields read at the same posedge in a
+  //          plain @(posedge) block; the SVA-suspect view for
+  //          comparison against the flop view.
+  if (G6LCCfg.OoOEn) begin : gen_commit_trace
+    localparam int unsigned CTNP = G6LCCfg.NrCommitPorts;
+    bit          ct_en;
+    int unsigned ct_from = 0, ct_to = 3000;
+    int unsigned ct_edge = 0;
+    // Live re-derivations of the commit-bundle terms, identical to
+    // i_sb_commit_bundle's equations, sampled with everything else.
+    logic [CTNP-1:0] ct_wbh_live, ct_ldok_live;
+    // Shadows (sampled edge label plus every reported field).
+    int unsigned                     ct_sedge;
+    logic                            ct_svalid;
+    logic [CTNP-1:0][G6LCCfg.TRANS_ID_BITS-1:0] ct_cptr_q, ct_sel_q;
+    logic [G6LCCfg.TRANS_ID_BITS-1:0]  ct_iptr_q;
+    int unsigned                     ct_issd_q;
+    logic                            ct_full_q, ct_emp_q;
+    logic [CTNP-1:0]                 ct_si_q, ct_sv_q, ct_sc_q, ct_sr_q;
+    int unsigned                     ct_sfu_q[CTNP];
+    logic [CTNP-1:0]                 ct_ldc_q, ct_wbh_q, ct_ldok_q;
+    logic [CTNP-1:0]                 ct_cv_q, ct_bv_q, ct_dr_q, ct_ack_q;
+    logic [CTNP-1:0]                 ct_dvld_q, ct_dack_q, ct_isv_q, ct_iack_q;
+    logic [CTNP-1:0]                 ct_dec_q, ct_fire_q;
+    logic                            ct_fiv_q, ct_fbv_q, ct_fdr_q, ct_frpl_q;
+    logic                            ct_hlt_q, ct_sup_q, ct_csrh_q, ct_seen_q;
+    logic                            ct_crrv_q, ct_exv_q, ct_brk_q, ct_sth_q;
+    logic                            ct_lsur_q;
+    int unsigned                     ct_cfu_q;
+    logic [G6LCCfg.TRANS_ID_BITS-1:0] ct_ctid_q;
+    logic [G6LCCfg.NrIssuePorts-1:0] ct_dvi_q, ct_dpack_q;
+    logic                            ct_cgo_q, ct_ren_q, ct_rob_q, ct_iqf_q;
+    logic                            ct_lsd_q, ct_lsg_q, ct_ggo_q, ct_gp_q;
+    logic                            ct_fl_q, ct_flu_q;
+    logic [G6LCCfg.NrIssuePorts-1:0] ct_gv_q;
+    logic [G6LCCfg.NrIssuePorts-1:0] ct_fev_q, ct_fer_q;
+    logic [G6LCCfg.VLEN-1:0]         ct_npc_q;
+
+    initial begin
+      ct_en = $test$plusargs("commit_trace");
+      void'($value$plusargs("trace_from=%d", ct_from));
+      void'($value$plusargs("trace_to=%d", ct_to));
+      void'($value$plusargs("commit_trace_from=%d", ct_from));
+      void'($value$plusargs("commit_trace_to=%d", ct_to));
+    end
+
+    always_comb begin
+      for (int unsigned i = 0; i < CTNP; i++) begin
+        ct_wbh_live[i] = 1'b0;
+        for (int unsigned w = 0; w < G6LCCfg.NrWbPorts; w++)
+          ct_wbh_live[i] |=
+              issue_stage_i.i_scoreboard.wt_valid_i[w] &&
+              (issue_stage_i.i_scoreboard.trans_id_i[w] ==
+               issue_stage_i.i_scoreboard.commit_sel_slot[i]);
+        ct_wbh_live[i] &=
+            !issue_stage_i.i_scoreboard.mem_q[
+              issue_stage_i.i_scoreboard.commit_sel_slot[i]].cancelled;
+        ct_ldok_live[i] =
+            (issue_stage_i.i_scoreboard.mem_q[
+              issue_stage_i.i_scoreboard.commit_sel_slot[i]].sbe.fu !=
+             g6lc_core_pkg::LOAD) ||
+            issue_stage_i.i_scoreboard.ld_checked_i[
+              issue_stage_i.i_scoreboard.commit_sel_slot[i]];
+      end
+    end
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        ct_edge   <= 0;
+        ct_sedge  <= 0;
+        ct_svalid <= 1'b0;
+      end else begin
+        ct_sedge  <= ct_edge + 1;
+        ct_edge   <= ct_edge + 1;
+        ct_svalid <= 1'b1;
+        ct_cptr_q <= issue_stage_i.i_scoreboard.commit_pointer_q;
+        ct_sel_q  <= issue_stage_i.i_scoreboard.commit_sel_slot;
+        ct_iptr_q <= issue_stage_i.i_scoreboard.issue_pointer_q;
+        ct_issd_q <= issue_stage_i.i_scoreboard.i_sb_lifecycle.sb_issued_cnt;
+        ct_full_q <= issue_stage_i.i_scoreboard.sb_full_o;
+        ct_emp_q  <= issue_stage_i.i_scoreboard.sb_empty_o;
+        for (int unsigned i = 0; i < CTNP; i++) begin
+          ct_si_q[i]  <= issue_stage_i.i_scoreboard.mem_q[
+              issue_stage_i.i_scoreboard.commit_sel_slot[i]].issued;
+          ct_sv_q[i]  <= issue_stage_i.i_scoreboard.mem_q[
+              issue_stage_i.i_scoreboard.commit_sel_slot[i]].sbe.valid;
+          ct_sc_q[i]  <= issue_stage_i.i_scoreboard.mem_q[
+              issue_stage_i.i_scoreboard.commit_sel_slot[i]].cancelled;
+          ct_sr_q[i]  <= issue_stage_i.i_scoreboard.mem_q[
+              issue_stage_i.i_scoreboard.commit_sel_slot[i]].replay;
+          ct_sfu_q[i] <= int'(issue_stage_i.i_scoreboard.mem_q[
+              issue_stage_i.i_scoreboard.commit_sel_slot[i]].sbe.fu);
+          ct_ldc_q[i] <= issue_stage_i.i_scoreboard.ld_checked_i[
+              issue_stage_i.i_scoreboard.commit_sel_slot[i]];
+          ct_cv_q[i]  <= issue_stage_i.i_scoreboard.commit_instr_o[i].valid;
+          ct_bv_q[i]  <= issue_stage_i.i_scoreboard.commit_bundle_valid_o[i];
+          ct_dr_q[i]  <= issue_stage_i.i_scoreboard.commit_drop_o[i];
+          ct_ack_q[i] <= issue_stage_i.i_scoreboard.commit_ack_i[i];
+          ct_dec_q[i] <= commit_stage_i.commit_dec[i];
+          ct_fire_q[i] <= commit_stage_i.fire[i];
+        end
+        ct_wbh_q  <= ct_wbh_live;
+        ct_ldok_q <= ct_ldok_live;
+        ct_dvld_q <= issue_stage_i.i_scoreboard.decoded_instr_valid_i;
+        ct_dack_q <= issue_stage_i.i_scoreboard.decoded_instr_ack_o;
+        ct_isv_q  <= issue_stage_i.i_scoreboard.issue_instr_valid_o;
+        ct_iack_q <= issue_stage_i.i_scoreboard.issue_ack_i;
+        ct_fiv_q  <= commit_stage_i.commit_instr_i[0].valid;
+        ct_fbv_q  <= commit_stage_i.commit_bundle_valid_i[0];
+        ct_fdr_q  <= commit_stage_i.commit_drop_i[0];
+        ct_frpl_q <= commit_stage_i.commit_replay_i[0];
+        ct_hlt_q  <= commit_stage_i.halt_i;
+        ct_sup_q  <= commit_stage_i.suppress[0];
+        ct_csrh_q <= commit_stage_i.csr_head;
+        ct_seen_q <= commit_stage_i.csr_seen_match;
+        ct_crrv_q <= commit_stage_i.csr_rdata_valid_i;
+        ct_exv_q  <= commit_stage_i.commit_instr_i[0].ex.valid;
+        ct_brk_q  <= commit_stage_i.break_from_trigger_i;
+        ct_sth_q  <= commit_stage_i.store_commit_hold;
+        ct_lsur_q <= commit_stage_i.commit_lsu_ready_i;
+        ct_cfu_q  <= int'(commit_stage_i.commit_instr_i[0].fu);
+        ct_ctid_q <= commit_stage_i.commit_instr_i[0].trans_id;
+        ct_dvi_q  <= issue_stage_i.gen_full_ooo.i_ooo_dispatch.dispatch_valid_i;
+        ct_dpack_q <= issue_stage_i.gen_full_ooo.i_ooo_dispatch.dispatch_ack_o;
+        ct_cgo_q  <= issue_stage_i.gen_full_ooo.i_ooo_dispatch.can_go;
+        ct_ren_q  <= issue_stage_i.gen_full_ooo.i_ooo_dispatch.ren_stall;
+        ct_rob_q  <= issue_stage_i.gen_full_ooo.i_ooo_dispatch.rob_full;
+        ct_iqf_q  <= issue_stage_i.gen_full_ooo.i_ooo_dispatch.iq_full;
+        ct_lsd_q  <= issue_stage_i.gen_full_ooo.i_ooo_dispatch.lsq_disp_block;
+        ct_lsg_q  <= issue_stage_i.gen_full_ooo.i_ooo_dispatch.lsq_grp_block;
+        ct_ggo_q  <= issue_stage_i.gen_full_ooo.i_ooo_dispatch.grp_go;
+        ct_gv_q   <= issue_stage_i.gen_full_ooo.i_ooo_dispatch.grp_v_q;
+        ct_gp_q   <= issue_stage_i.gen_full_ooo.i_ooo_dispatch.grp_pend_q;
+        ct_fl_q   <= issue_stage_i.gen_full_ooo.i_ooo_dispatch.flush_i;
+        ct_flu_q  <= issue_stage_i.gen_full_ooo.i_ooo_dispatch.flush_unissued_i;
+`ifdef G6LC_FETCH_B
+        ct_fev_q  <= i_frontend.fetch_entry_valid_o;
+        ct_fer_q  <= i_frontend.fetch_entry_ready_i;
+        ct_npc_q  <= i_frontend.npc_q;
+`endif
+        // Print the shadow of the PREVIOUS edge: this is the flop-view
+        // sample for the labelled cycle.
+        if (ct_svalid && ct_en && (ct_sedge >= ct_from) &&
+            (ct_sedge <= ct_to)) begin
+          // NOTE: the format must be a single string literal. A braced
+          // {"a","b"} concat is a packed vector: the pinned simulator
+          // folds it to a giant decimal and uses it AS the format.
+          $display("[cmt] c=%0d cptr=%0d/%0d sel=%0d/%0d iptr=%0d issd=%0d full=%b emp=%b s0=i%bv%bc%br%b/fu%0d/ldc%b/wbh%b/ldok%b s1=i%bv%bc%br%b/fu%0d/ldc%b/wbh%b/ldok%b cv=%b bv=%b drp=%b ack=%b dvld=%b dack=%b isv=%b iack=%b dec=%b fire=%b f0=iv%b/bv%b/dr%b/rp%b/hlt%b/sup%b/csr%b/seen%b/rrv%b/exv%b/brk%b/sth%b/lsur%b/fu%0d/t%0d dsp=dvi%b/dpk%b/cgo%b/ren%b/rob%b/iqf%b/lsd%b/lsg%b/go%b/gv%b/gp%b/fl%b/flu%b fe=fev%b/fer%b/npc%h",
+                   ct_sedge, ct_cptr_q[0], ct_cptr_q[1],
+                   ct_sel_q[0], ct_sel_q[1], ct_iptr_q, ct_issd_q,
+                   ct_full_q, ct_emp_q,
+                   ct_si_q[0], ct_sv_q[0], ct_sc_q[0], ct_sr_q[0],
+                   ct_sfu_q[0], ct_ldc_q[0], ct_wbh_q[0], ct_ldok_q[0],
+                   ct_si_q[1], ct_sv_q[1], ct_sc_q[1], ct_sr_q[1],
+                   ct_sfu_q[1], ct_ldc_q[1], ct_wbh_q[1], ct_ldok_q[1],
+                   ct_cv_q, ct_bv_q, ct_dr_q, ct_ack_q,
+                   ct_dvld_q, ct_dack_q, ct_isv_q, ct_iack_q,
+                   ct_dec_q, ct_fire_q,
+                   ct_fiv_q, ct_fbv_q, ct_fdr_q, ct_frpl_q, ct_hlt_q,
+                   ct_sup_q, ct_csrh_q, ct_seen_q, ct_crrv_q, ct_exv_q,
+                   ct_brk_q, ct_sth_q, ct_lsur_q, ct_cfu_q, ct_ctid_q,
+                   ct_dvi_q, ct_dpack_q, ct_cgo_q, ct_ren_q, ct_rob_q,
+                   ct_iqf_q, ct_lsd_q, ct_lsg_q, ct_ggo_q, ct_gv_q,
+                   ct_gp_q, ct_fl_q, ct_flu_q, ct_fev_q, ct_fer_q, ct_npc_q);
+        end
+      end
+    end
+
+    // Live same-edge read of the same fields (the SVA-suspect view).
+    int unsigned ctl_edge = 0;
+    always @(posedge clk_i) begin
+      if (!rst_ni) begin
+        ctl_edge = 0;
+      end else begin
+        ctl_edge = ctl_edge + 1;
+        if (ct_en && (ctl_edge >= ct_from) && (ctl_edge <= ct_to)) begin
+          $display("[cmtL] c=%0d cptr=%0d/%0d sel=%0d/%0d iptr=%0d s0i=%b s0v=%b s0c=%b s0r=%b s0fu=%0d cv=%b bv=%b drp=%b ack=%b dec=%b fire=%b",
+                   ctl_edge,
+                   issue_stage_i.i_scoreboard.commit_pointer_q[0],
+                   issue_stage_i.i_scoreboard.commit_pointer_q[1],
+                   issue_stage_i.i_scoreboard.commit_sel_slot[0],
+                   issue_stage_i.i_scoreboard.commit_sel_slot[1],
+                   issue_stage_i.i_scoreboard.issue_pointer_q,
+                   issue_stage_i.i_scoreboard.mem_q[
+                     issue_stage_i.i_scoreboard.commit_sel_slot[0]].issued,
+                   issue_stage_i.i_scoreboard.mem_q[
+                     issue_stage_i.i_scoreboard.commit_sel_slot[0]].sbe.valid,
+                   issue_stage_i.i_scoreboard.mem_q[
+                     issue_stage_i.i_scoreboard.commit_sel_slot[0]].cancelled,
+                   issue_stage_i.i_scoreboard.mem_q[
+                     issue_stage_i.i_scoreboard.commit_sel_slot[0]].replay,
+                   int'(issue_stage_i.i_scoreboard.mem_q[
+                     issue_stage_i.i_scoreboard.commit_sel_slot[0]].sbe.fu),
+                   {issue_stage_i.i_scoreboard.commit_instr_o[1].valid,
+                    issue_stage_i.i_scoreboard.commit_instr_o[0].valid},
+                   issue_stage_i.i_scoreboard.commit_bundle_valid_o,
+                   issue_stage_i.i_scoreboard.commit_drop_o,
+                   issue_stage_i.i_scoreboard.commit_ack_i,
+                   commit_stage_i.commit_dec, commit_stage_i.fire);
+        end
+      end
+    end
+
+    // Final flush: the last captured shadow (the ack edge itself when
+    // the run dies on the SVA) is printed so no sampled cycle is lost.
+    final begin
+      if (ct_svalid && ct_en && (ct_sedge >= ct_from) &&
+          (ct_sedge <= ct_to)) begin
+        $display("[cmt-final] c=%0d cptr=%0d/%0d sel=%0d/%0d iptr=%0d issd=%0d full=%b emp=%b s0=i%bv%bc%br%b/fu%0d/ldc%b/wbh%b/ldok%b s1=i%bv%bc%br%b/fu%0d/ldc%b/wbh%b/ldok%b cv=%b bv=%b drp=%b ack=%b dvld=%b dack=%b isv=%b iack=%b dec=%b fire=%b f0=iv%b/bv%b/dr%b/rp%b/hlt%b/sup%b/csr%b/seen%b/rrv%b/exv%b/brk%b/sth%b/lsur%b/fu%0d/t%0d",
+                 ct_sedge, ct_cptr_q[0], ct_cptr_q[1],
+                 ct_sel_q[0], ct_sel_q[1], ct_iptr_q, ct_issd_q,
+                 ct_full_q, ct_emp_q,
+                 ct_si_q[0], ct_sv_q[0], ct_sc_q[0], ct_sr_q[0],
+                 ct_sfu_q[0], ct_ldc_q[0], ct_wbh_q[0], ct_ldok_q[0],
+                 ct_si_q[1], ct_sv_q[1], ct_sc_q[1], ct_sr_q[1],
+                 ct_sfu_q[1], ct_ldc_q[1], ct_wbh_q[1], ct_ldok_q[1],
+                 ct_cv_q, ct_bv_q, ct_dr_q, ct_ack_q,
+                 ct_dvld_q, ct_dack_q, ct_isv_q, ct_iack_q,
+                 ct_dec_q, ct_fire_q,
+                 ct_fiv_q, ct_fbv_q, ct_fdr_q, ct_frpl_q, ct_hlt_q,
+                 ct_sup_q, ct_csrh_q, ct_seen_q, ct_crrv_q, ct_exv_q,
+                 ct_brk_q, ct_sth_q, ct_lsur_q, ct_cfu_q, ct_ctid_q);
+      end
+    end
+  end
   //pragma translate_on
 
   // U5 full OoO lives in issue_stage (g6lc_ooo_dispatch) when OoOEn=1.
@@ -2868,6 +3106,7 @@ assign irq_active = irq_i[smt_active_hart];
       .alu_fwd_tid_i        (alu_fwd_tid),
       .alu_fwd_qtid_i       (alu_fwd_qtid),
       .alu_fwd_rtid_i       (alu_fwd_rtid),
+      .alu_fwd_htid_i       (alu_fwd_htid),
       .ld_checked_o         (ld_checked),
       .commit_bundle_valid_o(commit_bundle_valid),
       .replay_i             (lsu_replay),
@@ -2932,6 +3171,7 @@ assign irq_active = irq_i[smt_active_hart];
       .resolve_branch_i        (resolve_branch_ex_id),          // in order to resolve the branch
       // LSU
       .lsu_ready_i             (lsu_ready_ex_id),
+      .lsu_count_i             (lsu_count_ex_id),
       .lsu_valid_o             (lsu_valid_id_ex),
       // Multiplier
       .mult_valid_o            (mult_valid_id_ex),
@@ -3055,6 +3295,7 @@ assign irq_active = irq_i[smt_active_hart];
       .alu_fwd_tid_o (alu_fwd_tid),
       .alu_fwd_qtid_o(alu_fwd_qtid),
       .alu_fwd_rtid_o(alu_fwd_rtid),
+      .alu_fwd_htid_o(alu_fwd_htid),
       .alu_fwd_low_o (alu_fwd_low),
       .ld_checked_i  (ld_checked),
       .replay_o      (lsu_replay),
@@ -3100,6 +3341,7 @@ assign irq_active = irq_i[smt_active_hart];
       .mult_valid_i(mult_valid_id_ex),
       // LSU
       .lsu_ready_o(lsu_ready_ex_id),
+      .lsu_count_o(lsu_count_ex_id),
       .lsu_valid_i(lsu_valid_id_ex),
 
       .load_result_o   (load_result_ex_id),
@@ -3300,6 +3542,7 @@ assign irq_active = irq_i[smt_active_hart];
   ) csr_regfile_i (
       .clk_i,
       .rst_ni,
+      .flush_i                 (flush_ctrl_id),
       .active_hart_i           (smt_active_hart),
       .lsu_hart_i              (lsu_ctx_hart),
       .lsu_chk_hart_i          (lsu_chk_ctx_hart),

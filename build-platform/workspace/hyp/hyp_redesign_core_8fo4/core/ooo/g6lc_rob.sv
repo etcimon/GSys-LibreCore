@@ -207,9 +207,18 @@ module g6lc_rob #(
     end
     assign do_alloc = any_a && !flush_i;
     assign tid_nx   = do_alloc ? alloc_tid_i[a_pick] : rob_q[s].tid;
+    // Cancel of the held tid and of each alloc tid do not wait on a_pick.
+    // A slot matches at most one alloc port, so the OR is the selected bit.
+    logic held_kill, alloc_kill;
+    logic [NR_ALLOC-1:0] alloc_kill_oh;
+    assign held_kill = cancelled_mask_i[rob_q[s].tid];
+    for (genvar a = 0; a < NR_ALLOC; a++) begin : gen_ak
+      assign alloc_kill_oh[a] = ahit[a] && cancelled_mask_i[alloc_tid_i[a]];
+    end
+    assign alloc_kill = |alloc_kill_oh;
     assign vld_nx   = flush_i ? 1'b0 : (slot_free ? 1'b0 : (do_alloc ? 1'b1 : rob_q[s].valid));
     assign cmp_nx   = flush_i ? 1'b0 :
-                      ((vld_nx && cancelled_mask_i[tid_nx]) || any_w) ? 1'b1 :
+                      ((vld_nx && (do_alloc ? alloc_kill : held_kill)) || any_w) ? 1'b1 :
                       (do_alloc ? 1'b0 : rob_q[s].complete);
     assign rob_d[s].valid    = vld_nx;
     assign rob_d[s].complete = cmp_nx;

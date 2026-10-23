@@ -30,17 +30,19 @@
 //
 // hyp8 (epoch + elastic drain):
 //  * Every entry carries the fetch epoch its window was accepted under
-//    (push_epoch_i). A window whose epoch has died presents nothing: no push,
-//    no replay, no consumed_o — the redirect that killed it already restarted
-//    the stream. Entries left behind inside the FIFOs are wrong-path: they
-//    are never delivered — a stale head occupies its drain position and is
-//    popped inside the consumed prefix (drop, not issue), preserving program
-//    order for the live entries behind it.
+//    (push_epoch_i) as provenance. A window whose epoch has died presents
+//    nothing: no push, no replay, no consumed_o — the redirect that killed
+//    it already restarted the stream. The epoch contract ends at ACCEPTANCE:
+//    once stored, an instruction record belongs to the queue and stays live
+//    until it is delivered downstream or the whole queue takes flush_i.
+//    A weak prediction redirect must NOT invalidate the accepted prefix —
+//    dropping stored entries would orphan their branch-target records
+//    (the shared target FIFO only pops on a delivered CF), which leaked
+//    records and deadlocked ready_o in hyp8-h34-epoch-diag-r1.
 //  * Drain is a two-step elastic handshake: per-lane eligibility is the
-//    FIFO's registered occupancy plus the head entry's epoch check
-//    ("registered eligibility"), then the prefix-fire step computes fires and
-//    stale drops together as one consumed prefix. fetch_entry_ready_i timing
-//    is unchanged: issue samples fetch_entry_o in the same cycle as valid.
+//    FIFO's registered occupancy, then the prefix-fire step computes the
+//    consumed prefix. fetch_entry_ready_i timing is unchanged: issue
+//    samples fetch_entry_o in the same cycle as valid.
 
 module instr_queue
   import g6lc_core_pkg::*;
@@ -139,7 +141,7 @@ module instr_queue
     logic [31:0]                     ex_tinst;   // tinst of exception
     logic                            ex_gva;
     logic [HidW-1:0]                 hart;       // fetch hart (L3 packet_hart)
-    logic [EW-1:0]                   epoch;      // hyp8: fetch epoch at push
+    logic [EW-1:0]                   epoch;      // hyp8: fetch epoch at push (provenance only — does not revoke an accepted entry)
     // O7o debug: monotonic per-instruction sequence, kept for the order probe.
     // This field is not used for any architectural handshake; it is trace/gate only.
     logic [15:0]                     push_seq;
@@ -178,8 +180,8 @@ module instr_queue
   // downstream handshake
   logic [NrIssue-1:0] fetch_entry_is_cf, fetch_entry_blocks_ss, fetch_entry_fire, fire_prefix;
   // hyp8: drain eligibility — per-lane occupancy is the registered FIFO
-  // counter; the head entry's epoch liveness and the stale prefix complete it
-  logic [NrFifo-1:0] lane_epoch_ok, lane_live, lane_stale;
+  // counter; acceptance already filtered the entry's epoch
+  logic [NrFifo-1:0] lane_live, lane_stale;
   logic [NrIssue-1:0] pos_stale, pos_present;  // per drain position
   logic [NrIssue-1:0] consumed_pos;            // fired or stale-dropped prefix
   logic [NrIssue-1:0] pos_go;                  // stale drop or port fire
@@ -385,9 +387,10 @@ module instr_queue
       for (int unsigned i = 0; i < NrFifo; i++) begin
         instr_data_in[f].instr    |= instr_i[i]     & {32{fsel_oh[f][i]}};
         instr_data_in[f].pc       |= addr_i[i]      & {G6LCCfg.VLEN{fsel_oh[f][i]}};
-        instr_data_in[f].cf       = cf_t'(logic'(instr_data_in[f].cf) |
-                                          (logic'(cf_type_i[i]) &
-                                           {$bits(cf_t){fsel_oh[f][i]}}));
+        // full-width OR-gather: the enum keeps its 3 bits (a one-bit
+        // logic'() cast folds Jump/Return into NoCF)
+        instr_data_in[f].cf = cf_t'(instr_data_in[f].cf |
+            (cf_type_i[i] & {$bits(cf_t){fsel_oh[f][i]}}));
         instr_data_in[f].ckpt_v   |= ckpt_v_i[i]    & fsel_oh[f][i];
         instr_data_in[f].ckpt_idx |= ckpt_idx_i[i]  & {$bits(ckpt_idx_i[i]){fsel_oh[f][i]}};
         instr_data_in[f].is_call  |= is_call_i[i]   & fsel_oh[f][i];
@@ -466,19 +469,18 @@ module instr_queue
     end
   end
 
-  // hyp8: per-lane eligibility = registered occupancy AND a live-epoch head.
-  // A stale head is presented to nobody; it occupies its position until it is
-  // dropped inside the consumed prefix below.
-  // One epoch compare per FIFO. Live and stale are the two polarities
-  // of that bit, so the presentable check does not wait on the stale OR.
+  // hyp8: per-lane eligibility = registered occupancy. Epoch liveness is
+  // decided at ACCEPTANCE (win_live on the push side); a stored entry is
+  // owned by the queue until delivered or flush_i — the lane_stale arm is
+  // kept as a constant-0 placeholder so the consumed-prefix structure is
+  // unchanged.
   for (genvar f = 0; f < NrFifo; f++) begin : gen_lane_elig
-    assign lane_epoch_ok[f] = instr_data_out[f].epoch == epoch_i;
-    assign lane_live[f]     = ~instr_queue_empty[f] && lane_epoch_ok[f];
-    assign lane_stale[f]    = ~instr_queue_empty[f] && !lane_epoch_ok[f];
+    assign lane_live[f]  = ~instr_queue_empty[f];
+    assign lane_stale[f] = 1'b0;
   end
 
-  // One-hot drain pointer: the selected lane is present when it is occupied
-  // and its epoch matches. A zero pointer selects nothing.
+  // One-hot drain pointer: the selected lane is present when it is occupied.
+  // A zero pointer selects nothing.
   for (genvar p = 0; p < NrIssue; p++) begin : gen_pos_state
     assign pos_stale[p]   = |(lane_stale & idx_ds[p]);
     assign pos_present[p] = |(lane_live & idx_ds[p]);
@@ -602,7 +604,9 @@ module instr_queue
 
   // One shared branch-target FIFO for all issue ports, so any firing CF pops it.
   // The consumed prefix (not the raw fire) keeps the pop aligned with the drain
-  // order; a stale position carries cf=NoCF on the dropped packet anyway.
+  // order. Target and instruction records are lifetime-paired: a stored CF
+  // entry always reaches delivery (or the whole queue takes flush_i), so its
+  // target is always popped — no epoch drop may strand it.
   assign pop_address = |(fetch_entry_is_cf & consumed_pos);
 
   // Highest consumed position wins, matching the ascending overwrite.
@@ -741,9 +745,9 @@ module instr_queue
   // once per delivered instruction of that hart — per-hart delivery order is
   // push order (compact insertion is program order and a packet is single-
   // hart), so the head is exactly that hart's oldest undelivered instruction.
-  // hyp8: stale-epoch heads are dropped inside the consumed prefix without
-  // being delivered, so the pending FIFOs must skip them too — a stale drop
-  // pops the frontier address of the entry's stamped hart.
+  // hyp8: every consumed position is a delivered entry (epoch filtering
+  // happens at acceptance; flush_i resets the frontier), so each pop passes
+  // one frontier address of the entry's stamped hart.
   // Mixed residency only: the whole block constant-folds to a '0 tie under
   // SmtDrainedHandoff and NrHarts==1.
   if (G6LCCfg.NrHarts > 1 && !G6LCCfg.SmtDrainedHandoff) begin : gen_pend_frontier
@@ -766,8 +770,8 @@ module instr_queue
 
     // Deliveries per hart this cycle: the consumed prefix is the queue's
     // actual pop — a port handshake without the earlier prefix pops nothing,
-    // and a stale-epoch position consumed without issue is a drop that the
-    // frontier must still pass (its hart is the entry's stamped hart).
+    // and every popped position delivers its entry (stale drops no longer
+    // exist: acceptance-time epoch filtering owns that contract).
     logic [G6LCCfg.NrHarts-1:0][PopW-1:0] pop_cnt;
     always_comb begin : gen_pend_pop
       pop_cnt = '0;
@@ -816,9 +820,10 @@ module instr_queue
 
 //pragma translate_off
     // Delivery order is push order per hart: the rank-th same-hart delivery
-    // this cycle must read the rank-th pending entry from the head. Stale
-    // drops leave the queue without an address to compare — only live fires
-    // are checked.
+    // this cycle must read the rank-th pending entry from the head. The
+    // !pos_stale guards are now dead (pos_stale is constant 0 — every
+    // consumed position is a live fire); kept so the check structure is
+    // unchanged if drops ever return through flush_i.
     always @(posedge clk_i) begin : gen_pend_order_check
       if (rst_ni && !flush_i) begin
         for (int unsigned p = 0; p < NrIssue; p++) begin
@@ -881,13 +886,20 @@ module instr_queue
     $stop();
   end
 
-  // Per-head class matches is_ctrl_instr. The one-hot reduce is the select.
-  always_comb begin : lane_class_chk
-    for (int unsigned f = 0; f < NrFifo; f++) begin
-      assert (lane_ctrl[f] == is_ctrl_instr(instr_data_out[f].instr))
-      else $error("[instr_queue] lane_ctrl diverged from is_ctrl_instr");
-      assert (lane_cf[f] == (instr_data_out[f].cf != g6lc_core_pkg::NoCF))
-      else $error("[instr_queue] lane_cf diverged from cf != NoCF");
+  // Per-head class matches the stored word's own classification. The
+  // one-hot reduce is the select. The contract is stored live head
+  // metadata, so the check samples at the clock edge (stable values) and
+  // only on nonempty heads -- not delta-cycle aliases mid-update.
+  always_ff @(posedge clk_i) begin : lane_class_chk
+    if (rst_ni && !flush_i) begin
+      for (int unsigned f = 0; f < NrFifo; f++) begin
+        if (!instr_queue_empty[f]) begin
+          assert (lane_ctrl[f] == is_ctrl_instr(instr_data_out[f].instr))
+          else $error("[instr_queue] lane_ctrl diverged from is_ctrl_instr");
+          assert (lane_cf[f] == (instr_data_out[f].cf != g6lc_core_pkg::NoCF))
+          else $error("[instr_queue] lane_cf diverged from cf != NoCF");
+        end
+      end
     end
   end
   // pragma translate_on

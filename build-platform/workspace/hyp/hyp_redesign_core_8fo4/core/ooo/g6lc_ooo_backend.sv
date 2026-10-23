@@ -103,6 +103,7 @@ module g6lc_ooo_backend
       .clk_i,
       .rst_ni,
       .raddr_i(raddr),
+      .read_enable_i('1),
       .rdata_o(rdata),
       .waddr_i('0),
       .wdata_i('0),

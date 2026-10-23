@@ -1,0 +1,41 @@
+{
+  "schema": "hyp8-cfg-elaboration.v1",
+  "sourceHashes": {
+    "config_pkg.sv": "bdecdc203b324c0ba03a3ab358601b6998369e1af2f6b8b25471ce0093b25aba",
+    "g6lc_hyp_pkg.sv": "1e84df2b90ebdb49702158fbbbb852f0e816779e31680d60376871b049fec322",
+    "g6lc64_hyp8_config_pkg.sv": "603c37b5fe6933786d5fab19e9ca649a1cda35c47ec3d6ab0ecaa310ea21ca8a",
+    "build_config_pkg.sv": "97486384663ae6888e90d769629c1e249e019921c0a05440866bef8ed6eb5e1b"
+  },
+  "scalarRawEvidence": "remote-runs/hyp8-cfg-capture-r1/output/scalar-probe.log",
+  "smt2Evidence": "remote-runs/hyp8-cfg-capture-smt2-r2/output/cfg-capture.json",
+  "scalarFields": 282,
+  "smt2Fields": 282,
+  "profileDifferences": {
+    "G6LCCfg.NrHarts": [
+      1,
+      2
+    ]
+  },
+  "excludedDeclarations": {
+    "G6LCCfg": [
+      "logic [63:0] HaltAddress;",
+      "logic [63:0] ExceptionAddress;",
+      "bit unsigned UseSharedTlb;",
+      "logic [63:0]                 DmBaseAddress;",
+      "logic [63:0][63:0]           PMPCfgRstVal;",
+      "logic [63:0][63:0]           PMPAddrRstVal;",
+      "bit [63:0]                   PMPEntryReadOnly;",
+      "noc_type_e                   NOCType;",
+      "logic [NrMaxRules-1:0][63:0] NonIdempotentAddrBase;",
+      "logic [NrMaxRules-1:0][63:0] NonIdempotentLength;",
+      "logic [NrMaxRules-1:0][63:0] ExecuteRegionAddrBase;",
+      "logic [NrMaxRules-1:0][63:0] ExecuteRegionLength;",
+      "logic [NrMaxRules-1:0][63:0] CachedRegionAddrBase;",
+      "logic [NrMaxRules-1:0][63:0] CachedRegionLength;",
+      "ai_cfg_t AiCfg;"
+    ],
+    "G6LCCfg.AiCfg": [],
+    "HypCfg": []
+  },
+  "note": "Initial scalar probe captured valid data but failed an incorrect host expectation AluStages=2. Source and elaboration both specify 3; raw scalar values were retained without re-execution. Maps cover scalar configuration fields, not elaborated per-net widths."
+}

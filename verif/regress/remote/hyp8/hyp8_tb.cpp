@@ -283,12 +283,37 @@ static const char *verilog_plusargs[] = {
     "smt_drain_strict",
     // T33/T34: per-event line for load-unit replays (core/cva6.sv census block)
     "lu_replay_trace",
+    // Common probe window: +trace_from=<c> / +trace_to=<c> bound every
+    // windowed diagnostic probe (ld_state, stq_trace, disp_trace, lsq_trace,
+    // commit_trace and the smt_flow_trace LSU/cancel probes).
+    "trace_from", "trace_to",
     // T35: store-buffer speculative-queue event trace (core/store_buffer.sv)
     "stq_trace", "stq_lo", "stq_hi",
+    // M3 bring-up: I$ state/handshake dump (core/cache_subsystem/g6lc_icache.sv).
+    "icf_trace",
+    // M3 bring-up: hart-AR → xbar → ROM slave path (corev_apu/src/g6lc_soc.sv).
+    "soc_trace",
     // AI island per-job PMU record (corev_apu/ai_island/g6lc_ai_island_top.sv,
     // translate_off): one AI_JOB line per completed descriptor, harvested by
     // verif/regress/ai-matrix-veri.sh AI_MATRIX_BENCH=1.
     "ai_pmu_trace",
+    // Batch N follow-up: LSQ load-release lifetime probe
+    // (core/ooo/g6lc_lsq.sv, translate_off) — per-entry done/unres/dwait/rel
+    // changes, dwait-set events, resolve masks, allocs, ev_complete.
+    "lsq_trace",
+    // Dispatch/IQ lifecycle probe (core/ooo/g6lc_ooo_dispatch.sv,
+    // translate_off): alloc/grant/take/pop/kill/wbclr/busyset/iro/rdy lines.
+    // Same allowlist rule as above.
+    "disp_trace",
+    // Commit-path observation probe (core/g6lc_core.sv gen_commit_trace,
+    // translate_off): shadow-sampled [cmt]/[cmtL]/[cmt-final] per-cycle
+    // lines. Prefix match also admits +commit_trace_from=<c> and
+    // +commit_trace_to=<c>.
+    "commit_trace",
+    // Load-FSM gate-term probe (core/load_unit.sv, translate_off): one
+    // [ldst] line per change of the accept/issue/hold signature — the
+    // parked-load discriminator. Same allowlist rule as above.
+    "ld_state",
     nullptr};
 
 // +mem_poke entries, applied inside the sim loop once main_time reaches cycle.

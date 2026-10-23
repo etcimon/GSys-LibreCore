@@ -141,18 +141,14 @@ module g6lc_rename_publish
       // The slot's alloc mask opens empty; only YOUNGER same-hart lanes
       // accumulate into it (they are the speculation the unwind squashes).
       if (lane_i[p].v && lane_i[p].do_ckpt) begin
-        automatic logic [PRF_ENTRIES-1:0] aval;
-        automatic logic [FPN-1:0]         faval;
-        aval  = '0;
-        faval = '0;
         for (int unsigned q = p + 1; q < NR_PORTS; q++) begin
           if (lane_i[q].v && lane_i[q].do_alloc &&
               (lane_i[q].hart == lane_i[p].hart))
-            aval |= PRF_ENTRIES'(1) <<
+            pub_ck_aval_o[p] |= PRF_ENTRIES'(1) <<
                     lane_i[q].prd[$clog2(PRF_ENTRIES > 1 ? PRF_ENTRIES : 2)-1:0];
           if (lane_i[q].v && lane_i[q].do_falloc &&
               (lane_i[q].hart == lane_i[p].hart))
-            faval |= FPN'(1) <<
+            pub_ck_faval_o[p] |= FPN'(1) <<
                      lane_i[q].fprd[$clog2(FPN > 1 ? FPN : 2)-1:0];
         end
         pub_ck_v_o[p]      = 1'b1;
@@ -160,8 +156,6 @@ module g6lc_rename_publish
         pub_ck_h_o[p]      = lane_i[p].hart;
         pub_ck_map_o[p]    = wm[lane_i[p].hart];
         pub_ck_fmap_o[p]   = fwm[lane_i[p].hart];
-        pub_ck_aval_o[p]   = aval;
-        pub_ck_faval_o[p]  = faval;
       end
     end
   end

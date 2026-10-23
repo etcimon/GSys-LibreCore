@@ -129,6 +129,20 @@ module g6lc_iq
   localparam int unsigned EW = (ENTRIES > 1) ? $clog2(ENTRIES) : 1;
   localparam int unsigned FCNT_W = $clog2(ENTRIES + 1);
 
+  // One countdown width for every spec-wakeup timer (bank, xbar, wrapper
+  // wires): sized to the longest producer latency class the countdown can
+  // carry. With IqSpecWakeup==0 the fields are inert but still sized
+  // correctly -- retained speculation is not silently truncated.
+  localparam int unsigned WAKE_MULT =
+      g6lc_hyp_pkg::hyp_mult_stages(HypCfg, int'(G6LCCfg.MultStages));
+  localparam int unsigned WAKE_LD = 2 + HypCfg.DcacheHitExtra + HypCfg.LoadUseExtra;
+  localparam int unsigned WAKE_A  = (WAKE_MULT > int'(HypCfg.AluStages))
+                                    ? WAKE_MULT : int'(HypCfg.AluStages);
+  localparam int unsigned WAKE_B  = (10 > WAKE_LD) ? 10 : WAKE_LD;
+  localparam int unsigned WAKE_MAX = (WAKE_A > WAKE_B) ? WAKE_A : WAKE_B;
+  localparam int unsigned WAKE_W0 = $clog2(WAKE_MAX + 1);
+  localparam int unsigned WAKE_W  = (WAKE_W0 < 1) ? 1 : WAKE_W0;
+
   // cls bit layout shared with g6lc_iq_bank / g6lc_iq_legal:
   //   {fp_consumer, cvxif, amo, csr_system, csr, store, load}
   localparam int unsigned C_LD = 0, C_ST = 1, C_CSR = 2, C_CSYS = 3,
@@ -174,27 +188,36 @@ module g6lc_iq
   logic [BANKS-1:0][NP-1:0]     balloc;
   logic [BANKS-1:0][NP-1:0]     back;
   logic [BANKS-1:0][NP-1:0][EW-1:0] bslot;
+  // Steer probe index for lane p's k-th candidate, evaluated as named
+  // wires so the placement process reads no conditional local.
+  logic [NP-1:0]                    steer_found;
+  logic [NP-1:0][BANKS-1:0][BW-1:0] steer_bank;
+  for (genvar p = 0; p < NP; p++) begin : gen_steer
+    for (genvar k = 0; k < BANKS; k++) begin : gen_stb
+      assign steer_bank[p][k] =
+          BW'((int'(steer_hint_i[p]) + k) % BANKS);
+    end
+  end
 
   always_comb begin
     automatic int unsigned used [BANKS];
     automatic logic [NP-1:0] fits;
     for (int unsigned b = 0; b < BANKS; b++) used[b] = 0;
     asgn = '0;
+    steer_found = '0;
     fits = '1;
     for (int unsigned p = 0; p < NP; p++) begin
       if (disp_valid_i[p]) begin
-        automatic logic found;
-        found = 1'b0;
         for (int unsigned k = 0; k < BANKS; k++) begin
-          automatic int unsigned b;
-          b = (int'(steer_hint_i[p]) + k) % BANKS;
-          if (!found && (int'(bank_free[b]) > used[b])) begin
-            asgn[p] = BW'(b);
-            used[b] = used[b] + 1;
-            found = 1'b1;
+          if (!steer_found[p] &&
+              (int'(bank_free[steer_bank[p][k]]) >
+               used[steer_bank[p][k]])) begin
+            asgn[p] = steer_bank[p][k];
+            used[steer_bank[p][k]] = used[steer_bank[p][k]] + 1;
+            steer_found[p] = 1'b1;
           end
         end
-        if (!found) fits[p] = 1'b0;
+        if (!steer_found[p]) fits[p] = 1'b0;
       end
     end
     group_fits = &fits;
@@ -216,8 +239,10 @@ module g6lc_iq
   logic [BANKS-1:0][1:0][4:0]       cand_wboff;
   logic [BANKS-1:0][1:0][3:0]       cand_gate;
   logic [BANKS-1:0][1:0]            cand_div;
+  logic [BANKS-1:0][1:0]            cand_port0;
   logic [BANKS-1:0][NP-1:0]         take_v;
   logic [BANKS-1:0][NP-1:0]         take_cand;
+  logic [BANKS-1:0][NP-1:0][EW-1:0] take_idx;
   logic [BANKS-1:0][NP-1:0]         aack;
   logic [BANKS-1:0][NP-1:0][EW-1:0] aack_idx;
   logic [BANKS-1:0][ENTRIES-1:0]    legal;
@@ -225,7 +250,7 @@ module g6lc_iq
   logic [BANKS-1:0][NP-1:0][PRF_W-1:0]  bcast_prd;
   logic [BANKS-1:0][NP-1:0][FPRF_W-1:0] bcast_fprd;
   logic [BANKS-1:0][NP-1:0]         bcast_fp;
-  logic [BANKS-1:0][NP-1:0][2:0]    bcast_cnt;
+  logic [BANKS-1:0][NP-1:0][WAKE_W-1:0] bcast_cnt;
   // hyp8 g7: producer tid + ALU/low-half class flags ride the
   // broadcast/xbar so consumers can arm the in-ALU forward path.
   logic [BANKS-1:0][NP-1:0][TID_W-1:0] bcast_tid;
@@ -234,7 +259,7 @@ module g6lc_iq
   logic [BANKS*NP-1:0][PRF_W-1:0]   xw_prd;
   logic [BANKS*NP-1:0][FPRF_W-1:0]  xw_fprd;
   logic [BANKS*NP-1:0]              xw_fp;
-  logic [BANKS*NP-1:0][2:0]         xw_cnt;
+  logic [BANKS*NP-1:0][WAKE_W-1:0]  xw_cnt;
   logic [BANKS*NP-1:0][TID_W-1:0]   xw_tid;
   logic [BANKS*NP-1:0]              xw_alu, xw_lo;
   logic [BANKS-1:0][ENTRIES-1:0]    info_v;
@@ -298,7 +323,8 @@ module g6lc_iq
         .NLANES   (NP),
         .NTAKE    (NP),
         .NXW      (BANKS*NP),
-        .HID_W    (HID_W)
+        .HID_W    (HID_W),
+        .WAKE_W   (WAKE_W)
     ) i_bank (
         .clk_i, .rst_ni, .flush_i,
         .cancelled_mask_i,
@@ -357,8 +383,10 @@ module g6lc_iq
         .cand_wboff_o(cand_wboff[b]),
         .cand_gate_o (cand_gate[b]),
         .cand_div_o  (cand_div[b]),
+        .cand_port0_o(cand_port0[b]),
         .take_v_i    (take_v[b]),
         .take_cand_i (take_cand[b]),
+        .take_idx_i  (take_idx[b]),
         .ack_v_i     (aack[b]),
         .ack_idx_i   (aack_idx[b]),
         .replay_i    (replay_valid_i),
@@ -385,7 +413,8 @@ module g6lc_iq
       .NTAKE (NP),
       .PRF_W (PRF_W),
       .FPRF_W(FPRF_W),
-      .TID_W (TID_W)
+      .TID_W (TID_W),
+      .WAKE_W(WAKE_W)
   ) i_xbar (
       .clk_i, .rst_ni, .flush_i,
       .b_v_i    (bcast_v),
@@ -443,6 +472,14 @@ module g6lc_iq
   scoreboard_entry_t [NP-1:0] pay_sbe;
   logic [NP-1:0][31:0]   pay_orig;
   logic [NP-1:0][PRF_W-1:0] pay_prd;
+  // Registered payload read: the port's accept is any bank's take on it.
+  logic [NP-1:0]         pay_read_en;
+  always_comb begin
+    pay_read_en = '0;
+    for (int unsigned p = 0; p < NP; p++)
+      for (int unsigned b = 0; b < BANKS; b++)
+        pay_read_en[p] |= take_v[b][p];
+  end
 
   logic [NP-1:0][BW-1:0] wr_bank;
   logic [NP-1:0][EW-1:0] wr_entry;
@@ -470,6 +507,7 @@ module g6lc_iq
       .wr_sbe_i  (disp_sbe_i),
       .wr_orig_i (disp_orig_i),
       .wr_prd_i  (disp_prd_i),
+      .rd_enable_i(pay_read_en),
       .rd_bank_i (pay_bank),
       .rd_entry_i(pay_entry),
       .rd_sbe_o  (pay_sbe),
@@ -504,6 +542,7 @@ module g6lc_iq
       .cand_wboff_i(cand_wboff),
       .cand_gate_i(cand_gate),
       .cand_div_i (cand_div),
+      .cand_port0_i(cand_port0),
       .lsu_ready_i, .fpu_ready_i, .csr_ready_i, .mult_ready_i,
       .pay_bank_o (pay_bank),
       .pay_entry_o(pay_entry),
@@ -517,6 +556,7 @@ module g6lc_iq
       .hyp_wb_reserve_stall_o,
       .take_v_o   (take_v),
       .take_cand_o(take_cand),
+      .take_idx_o (take_idx),
       .ack_v_o    (aack),
       .ack_idx_o  (aack_idx)
   );
@@ -540,5 +580,15 @@ module g6lc_iq
   // st_live_mask_i / sb_live_i are observability-only inputs carried over
   // from the unbanked queue (its liveness assertions lived at its tail);
   // they are intentionally unreferenced here pending the assertion port.
+
+  //pragma translate_off
+  // The countdown can represent every producer latency class (the width is
+  // derived from the largest one, so this is a construction check).
+  initial begin
+    assert ((1 << WAKE_W) > WAKE_MAX)
+      else $fatal(1, "g6lc_iq: WAKE_W=%0d cannot represent WAKE_MAX=%0d",
+                  WAKE_W, WAKE_MAX);
+  end
+  //pragma translate_on
 
 endmodule

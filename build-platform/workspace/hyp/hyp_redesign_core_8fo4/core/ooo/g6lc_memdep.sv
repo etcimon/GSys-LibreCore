@@ -24,7 +24,8 @@
 module g6lc_memdep #(
     parameter config_pkg::g6lc_cfg_t G6LCCfg = config_pkg::g6lc_cfg_empty,
     parameter int unsigned NR_SETS  = 64,
-    parameter int unsigned NR_TRAIN = 2
+    parameter int unsigned NR_TRAIN = 2,
+    parameter int unsigned NR_QUERY = 1
 ) (
     input  logic clk_i,
     input  logic rst_ni,
@@ -33,16 +34,18 @@ module g6lc_memdep #(
     // Train: store dispatch
     input  logic [NR_TRAIN-1:0]                    st_valid_i,
     input  logic [NR_TRAIN-1:0][G6LCCfg.VLEN-1:0]  st_pc_i,
-    // Query: load about to dispatch (registered -- verdict next cycle)
-    input  logic                     ld_query_i,
-    input  logic [G6LCCfg.VLEN-1:0]  ld_pc_i,
+    // Query: one load per issue lane (registered -- verdict next cycle).
+    // Lanes are independent, so a hit on lane 0 does not stall lane 1
+    // or the other hart.
+    input  logic [NR_QUERY-1:0]                    ld_query_i,
+    input  logic [NR_QUERY-1:0][G6LCCfg.VLEN-1:0]  ld_pc_i,
     // Observed memory-order violation this cycle, with the violating load's PC
     // (registered -- trains the table one cycle later)
     input  logic                     train_valid_i,
     input  logic [G6LCCfg.VLEN-1:0]  train_pc_i,
     input  logic                     store_pending_i,
-    output logic                     stall_o,
-    output logic                     predict_o
+    output logic [NR_QUERY-1:0]               stall_o,
+    output logic [NR_QUERY-1:0]               predict_o
 );
 
   localparam int unsigned SW = (NR_SETS <= 1) ? 1 : $clog2(NR_SETS);
@@ -53,8 +56,8 @@ module g6lc_memdep #(
   logic [NR_SETS-1:0] ld_wait_q, ld_wait_d;
 
   // hyp8: registered query + registered violation report
-  logic                    ld_query_q;
-  logic [G6LCCfg.VLEN-1:0] ld_pc_q;
+  logic [NR_QUERY-1:0]                    ld_query_q;
+  logic [NR_QUERY-1:0][G6LCCfg.VLEN-1:0] ld_pc_q;
   logic                    store_pending_q;
   logic                    train_valid_q;
   logic [G6LCCfg.VLEN-1:0] train_pc_q;
@@ -99,45 +102,43 @@ module g6lc_memdep #(
 
   // Registered query lookup: the verdict is captured so the consumer reads a
   // registered output the cycle after the query.
-  logic predict_d, stall_d;
-  always_comb begin
-    predict_d = 1'b0;
-    stall_d   = 1'b0;
-    if (enable_i && ld_query_q && store_pending_q) begin
-      // Classic store-set: load PC table hit with matching ssid
-      if (set_valid_q[idx(ld_pc_q)] &&
-          (set_ssid_q[idx(ld_pc_q)] == ssid(ld_pc_q) || ld_wait_q[idx(ld_pc_q)])) begin
-        predict_d = 1'b1;
-        stall_d   = 1'b1;
-      end
-    end
+  // One lookup per lane. Separate assigns so the lanes are not a
+  // serial chain, and a hit stays on that lane.
+  logic [NR_QUERY-1:0] predict_d, stall_d;
+  for (genvar q = 0; q < NR_QUERY; q++) begin : gen_q
+    logic hit_q;
+    assign hit_q = set_valid_q[idx(ld_pc_q[q])] &&
+        (set_ssid_q[idx(ld_pc_q[q])] == ssid(ld_pc_q[q]) ||
+         ld_wait_q[idx(ld_pc_q[q])]);
+    assign predict_d[q] = enable_i && ld_query_q[q] && store_pending_q && hit_q;
+    assign stall_d[q]   = predict_d[q];
   end
 
-  logic predict_q, stall_q;
+  logic [NR_QUERY-1:0] predict_q, stall_q;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       set_valid_q    <= '0;
       set_ssid_q     <= '0;
       ld_wait_q      <= '0;
-      ld_query_q     <= 1'b0;
+      ld_query_q     <= '0;
       ld_pc_q        <= '0;
       store_pending_q <= 1'b0;
       train_valid_q  <= 1'b0;
       train_pc_q     <= '0;
-      predict_q      <= 1'b0;
-      stall_q        <= 1'b0;
+      predict_q      <= '0;
+      stall_q        <= '0;
     end else begin
       set_valid_q     <= set_valid_d;
       set_ssid_q      <= set_ssid_d;
       ld_wait_q       <= ld_wait_d;
-      ld_query_q      <= ld_query_i && !flush_i;
+      ld_query_q      <= ld_query_i & {NR_QUERY{~flush_i}};
       ld_pc_q         <= ld_pc_i;
       store_pending_q <= store_pending_i;
       train_valid_q   <= train_valid_i && !flush_i;
       train_pc_q      <= train_pc_i;
-      predict_q       <= predict_d && !flush_i;
-      stall_q         <= stall_d && !flush_i;
+      predict_q       <= predict_d & {NR_QUERY{~flush_i}};
+      stall_q         <= stall_d & {NR_QUERY{~flush_i}};
     end
   end
 

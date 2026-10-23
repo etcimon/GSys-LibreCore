@@ -47,6 +47,14 @@ package g6lc_config_pkg;
   localparam G6LCConfigVExtEn = 0;
   localparam G6LCConfigRVZiCond = 1;
 
+  // hyp8 SMT2 integration seam: the default source profile stays
+  // single-hart; -DG6LC_HYP8_SMT2 selects the two-hart configuration.
+`ifdef G6LC_HYP8_SMT2
+  localparam int unsigned G6LCConfigNrHarts = 2;
+`else
+  localparam int unsigned G6LCConfigNrHarts = 1;
+`endif
+
   localparam G6LCConfigAxiIdWidth = 4;
   localparam G6LCConfigAxiAddrWidth = 64;
   localparam G6LCConfigAxiDataWidth = 64;
@@ -232,7 +240,7 @@ package g6lc_config_pkg;
       L2MshrDepth: unsigned'(0),
       L2DataBanks: unsigned'(0),
       L2RoundRobinEn: bit'(0),
-      NrHarts: unsigned'(1),
+      NrHarts: unsigned'(G6LCConfigNrHarts),
       SmtPolicy: config_pkg::SMT_HYBRID,
       SmtFetchQuantum: unsigned'(4),
       SmtStarveLimit: unsigned'(16),

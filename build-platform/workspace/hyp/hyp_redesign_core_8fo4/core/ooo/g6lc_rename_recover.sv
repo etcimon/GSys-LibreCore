@@ -324,6 +324,11 @@ module g6lc_rename_recover #(
     assign g_cnt[b] = |(rec_hoh_q & cnt_t[b]);
   end
 
+  // Per-hart retirement counters for the next-state process below --
+  // module-scope array so no shared automatic scalar is reused across
+  // loop iterations.
+  int unsigned n_ret[NH];
+
   // Slots reserved by the publishing group this cycle.
   logic [CKPT_DEPTH-1:0] rsvd_mask;
   always_comb begin
@@ -335,10 +340,11 @@ module g6lc_rename_recover #(
     end
   end
 
-  always_comb begin
+  always_comb begin : p_next_state
     automatic logic [PRF_ENTRIES-1:0] squashed, arch_ref, free_rep;
     automatic logic [FPN-1:0] fsquashed, farch_ref, ffree_rep;
-    automatic int unsigned n_ret;
+    automatic int unsigned rel2;
+    automatic logic [LVL_W:0] adv_h;
     map_d = map_q;
     amap_d = amap_q;
     free_d = free_q;
@@ -356,7 +362,8 @@ module g6lc_rename_recover #(
     ckpt_hart_d = ckpt_hart_q;
     squashed = '0; arch_ref = '0; free_rep = '0;
     fsquashed = '0; farch_ref = '0; ffree_rep = '0;
-    n_ret = 0;
+    rel2 = 0;
+    for (int unsigned h = 0; h < NH; h++) n_ret[h] = 0;
 
     // ---- publish -----------------------------------------------------
     if (pub_v_i) begin
@@ -441,9 +448,12 @@ module g6lc_rename_recover #(
     // drift already folded into pos_q), clamped to the live count exactly
     // as the arithmetic form did.
     if (rec_v_q) begin
-      automatic int unsigned rel2;
-      rel2 = (int'(g_pos) >= int'(g_cnt)) ? (int'(g_cnt) - 1)
-                                          : int'(g_pos);
+      // g_pos < g_cnt: the selected checkpoint is still inside the
+      // CURRENT live ring (pos_q was updated from head_d at the last
+      // edge). Outside it, every older checkpoint retired between
+      // select and repair, so the surviving older count is 0 -- the
+      // old g_cnt-1 clamp underflowed when g_cnt was already 0.
+      rel2 = (int'(g_pos) < int'(g_cnt)) ? int'(g_pos) : 0;
       squashed = g_alloc & ~free_rep;
       map_d[g_hart] = g_map;
       free_d = free_d | squashed;
@@ -459,13 +469,17 @@ module g6lc_rename_recover #(
 
     // ---- checkpoint retire ---------------------------------------------
     for (int unsigned h = 0; h < NH; h++) begin
-      n_ret = 0;
       for (int unsigned c = 0; c < NR_FREE; c++)
-        if (ckpt_retire_i[c] && (int'(commit_hart_i[c]) == h)) n_ret++;
-      if (n_ret > int'(ckpt_cnt_d[h])) n_ret = int'(ckpt_cnt_d[h]);
-      ckpt_head_d[h] = LVL_W'(int'(ckpt_slot(h, int'(ckpt_head_q[h]) + n_ret)) -
-                              h * CKPT_PER_HART);
-      ckpt_cnt_d[h]  = ckpt_cnt_d[h] - LVL_W'(n_ret);
+        if (ckpt_retire_i[c] && (int'(commit_hart_i[c]) == h)) n_ret[h]++;
+      if (n_ret[h] > int'(ckpt_cnt_d[h])) n_ret[h] = int'(ckpt_cnt_d[h]);
+      // Head is already the offset in this hart's ring. ckpt_slot added the
+      // hart base and this subtract removed it. n_ret fits in the live count,
+      // so one subtract wraps the sum.
+      adv_h = {1'b0, ckpt_head_q[h]} + (LVL_W + 1)'(n_ret[h]);
+      ckpt_head_d[h] = (adv_h >= (LVL_W + 1)'(CKPT_PER_HART))
+          ? LVL_W'(adv_h - (LVL_W + 1)'(CKPT_PER_HART))
+          : adv_h[LVL_W-1:0];
+      ckpt_cnt_d[h]  = ckpt_cnt_d[h] - LVL_W'(n_ret[h]);
     end
 
     // ---- architectural-map commit updates ------------------------------
@@ -654,14 +668,29 @@ module g6lc_rename_recover #(
     r2 = (loff >= int'(ckpt_head_q[rec_hart_q]))
          ? (loff - int'(ckpt_head_q[rec_hart_q]))
          : (loff + CKPT_PER_HART - int'(ckpt_head_q[rec_hart_q]));
-    if (r2 >= int'(ckpt_cnt_q[rec_hart_q]))
-      r2 = int'(ckpt_cnt_q[rec_hart_q]) - 1;
+    // Outside the live ring means every older checkpoint already
+    // retired: the arithmetic reference of the repair unwind is 0.
+    if (r2 >= int'(ckpt_cnt_q[rec_hart_q])) r2 = 0;
     ref_rel2 = LVL_W'(r2);
   end
+  // The select is only consumed when ref_take (cnt_m != 0): on an empty
+  // ring the arithmetic reference's rel = cnt_m-1 underflows unsigned and
+  // ref_level is garbage, while the one-hot form cleanly produces no slot
+  // match (sel_level '0, sel_take 0) -- the level is then don't-care, so
+  // equivalence is only owed when the select is taken.
   assert property (@(posedge clk_i) disable iff (!rst_ni)
-      mispredict_i |-> (sel_level == ref_level) && (sel_hart == ref_hart) &&
-                       (sel_take == ref_take))
-    else $fatal(1, "rename_recover: one-hot select != arithmetic select");
+      ref_take |-> (sel_level == ref_level) && (sel_hart == ref_hart) &&
+                   (sel_take == ref_take))
+    else $fatal(1, "rename_recover: one-hot select != arithmetic select (sel=%0d ref=%0d lvl=%0d hart=%0d cnt=%0d head=%0d)",
+                sel_level, ref_level, mispredict_level_i, mis_hart_g, cnt_m, head_m);
+  // Void-select evidence: a mispredict on an empty ring exercises the gate
+  // above; log when the underflowed reference diverged so the run shows the
+  // leg was taken rather than the check being silent.
+  always @(posedge clk_i) begin
+    if (rst_ni && mispredict_i && !ref_take && (sel_level != ref_level))
+      $display("[%0t] rename_recover: void select on empty ring: lvl=%0d sel_level=%0d ref_level=%0d cnt=%0d head=%0d",
+               $time, mispredict_level_i, sel_level, ref_level, cnt_m, head_m);
+  end
   assert property (@(posedge clk_i) disable iff (!rst_ni)
       rec_v_q |-> (g_alloc == ckpt_alloc_q[rec_level_q]) &&
                   (g_hart  == ckpt_hart_q[rec_level_q]) &&
@@ -672,10 +701,21 @@ module g6lc_rename_recover #(
                              (g_fmap   == ckpt_fmap_q[rec_level_q]))
     else $fatal(1, "rename_recover: FP repair gather != indexed read");
   assert property (@(posedge clk_i) disable iff (!rst_ni)
-      rec_v_q |-> (ref_rel2 == (((int'(g_pos) >= int'(g_cnt))
-                                 ? LVL_W'(int'(g_cnt) - 1) : g_pos))) &&
+      rec_v_q |-> (ref_rel2 == ((int'(g_pos) < int'(g_cnt))
+                                ? g_pos : LVL_W'(0))) &&
                   (g_cnt == ckpt_cnt_q[rec_hart_q]))
     else $fatal(1, "rename_recover: one-hot unwind depth != arithmetic");
+  for (genvar h = 0; h < NH; h++) begin : gen_ckpt_cnt_chk
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+        int'(ckpt_cnt_q[h]) <= CKPT_PER_HART)
+      else $fatal(1, "rename_recover: checkpoint count exceeds ring");
+  end
+  // Physical register 0 is the permanent x0 mapping and must never be busy:
+  // need_rd is 0 for any rd==0 int destination (dispatch), the freelist
+  // never returns tag 0, and the WB clear is prd!='0-gated. FP p0 is a real
+  // register (f0) -- fbusy_q is intentionally unchecked.
+  assert property (@(posedge clk_i) disable iff (!rst_ni) !busy_q[0])
+    else $fatal(1, "rename_recover: int busy[0] set (x0 physical tag marked busy)");
   // pragma translate_on
 
 endmodule

@@ -25,7 +25,14 @@
 module pmp
   import g6lc_core_pkg::*;
 #(
-    parameter config_pkg::g6lc_cfg_t G6LCCfg = config_pkg::g6lc_cfg_empty
+    parameter config_pkg::g6lc_cfg_t G6LCCfg = config_pkg::g6lc_cfg_empty,
+    // 1 = hyp8 staged boundary: the request fields (address, access type,
+    // privilege) are registered at this module edge and the verdict lands
+    // the following cycle (T3 datapath of the TLB lookup). 0 = the
+    // reference contract: combinational verdict on the live request, for
+    // consumers that read allow_o in the request cycle (the LSU data
+    // interface under DATA_VERDICT_STAGES==0).
+    parameter bit REG_VERDICT = 1'b1
 ) (
     input logic clk_i,
     input logic rst_ni,
@@ -41,24 +48,31 @@ module pmp
 );
   // hyp8: registered request boundary — every compare input is captured
   // here so the range selects below terminate at flops, and the verdict is
-  // the following cycle's value.
-  logic [G6LCCfg.PLEN-1:0] addr_q;
-  riscv::pmp_access_t      access_type_q;
-  riscv::priv_lvl_t        priv_lvl_q;
+  // the following cycle's value. REG_VERDICT==0 feeds the live request to
+  // the same compares instead (reference combinational form).
+  logic [G6LCCfg.PLEN-1:0] req_addr;
+  riscv::pmp_access_t      req_access_type;
+  riscv::priv_lvl_t        req_priv_lvl;
 
   if (G6LCCfg.NrPMPEntries > 0) begin : gen_pmp
     logic [(G6LCCfg.NrPMPEntries > 0 ? G6LCCfg.NrPMPEntries-1 : 0):0] match;
 
-    always_ff @(posedge clk_i or negedge rst_ni) begin : p_pmp_req
-      if (!rst_ni) begin
-        addr_q        <= '0;
-        access_type_q <= riscv::ACCESS_READ;
-        priv_lvl_q    <= riscv::PRIV_LVL_M;
-      end else begin
-        addr_q        <= addr_i;
-        access_type_q <= access_type_i;
-        priv_lvl_q    <= priv_lvl_i;
+    if (REG_VERDICT) begin : gen_reg_req
+      always_ff @(posedge clk_i or negedge rst_ni) begin : p_pmp_req
+        if (!rst_ni) begin
+          req_addr        <= '0;
+          req_access_type <= riscv::ACCESS_READ;
+          req_priv_lvl    <= riscv::PRIV_LVL_M;
+        end else begin
+          req_addr        <= addr_i;
+          req_access_type <= access_type_i;
+          req_priv_lvl    <= priv_lvl_i;
+        end
       end
+    end else begin : gen_comb_req
+      assign req_addr        = addr_i;
+      assign req_access_type = access_type_i;
+      assign req_priv_lvl    = priv_lvl_i;
     end
 
     for (genvar i = 0; i < G6LCCfg.NrPMPEntries; i++) begin
@@ -69,7 +83,7 @@ module pmp
       pmp_entry #(
           .G6LCCfg(G6LCCfg)
       ) i_pmp_entry (
-          .addr_i          (addr_q),
+          .addr_i          (req_addr),
           .conf_addr_i     (conf_addr_i[i]),
           .conf_addr_prev_i(conf_addr_prev),
           .conf_addr_mode_i(conf_i[i].addr_mode),
@@ -84,9 +98,9 @@ module pmp
       for (i = 0; i < G6LCCfg.NrPMPEntries; i++) begin
         // either we are in S or U mode or the config is locked in which
         // case it also applies in M mode
-        if (priv_lvl_q != riscv::PRIV_LVL_M || conf_i[i].locked) begin
+        if (req_priv_lvl != riscv::PRIV_LVL_M || conf_i[i].locked) begin
           if (match[i]) begin
-            if ((access_type_q & conf_i[i].access_type) != access_type_q) allow_o = 1'b0;
+            if ((req_access_type & conf_i[i].access_type) != req_access_type) allow_o = 1'b0;
             else allow_o = 1'b1;
             break;
           end
@@ -94,7 +108,7 @@ module pmp
       end
       if (i == G6LCCfg.NrPMPEntries) begin  // no PMP entry matched the address
         // allow all accesses from M-mode for no pmp match
-        if (priv_lvl_q == riscv::PRIV_LVL_M) allow_o = 1'b1;
+        if (req_priv_lvl == riscv::PRIV_LVL_M) allow_o = 1'b1;
         // disallow accesses for all other modes
         else
           allow_o = 1'b0;

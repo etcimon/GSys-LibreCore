@@ -23,7 +23,26 @@ if [[ "$FLAVOUR" != "hyp8" ]]; then
 fi
 
 VERLIB="${SOFT_LADDER_VERLIB:-work-ver-hyp8}"
-TARGET="${SOFT_LADDER_BUILD_TARGET:-g6lc64_hyp8}"
+# The model identity is part of the evidence: the target must be named
+# explicitly, never defaulted or aliased, so a stale proxy env cannot
+# mislabel an arbitrary build as hyp8.
+TARGET="${SOFT_LADDER_BUILD_TARGET:-}"
+case "$TARGET" in
+  g6lc64_hyp8)
+    TARGET_VLT_DEFS=""
+    TARGET_CFLAGS="-DG6LC_TB_OOO"
+    TARGET_HARTS=1
+    ;;
+  g6lc64_hyp8_smt2)
+    TARGET_VLT_DEFS="-DG6LC_HYP8_SMT2"
+    TARGET_CFLAGS="-DG6LC_TB_BANKED -DG6LC_TB_OOO"
+    TARGET_HARTS=2
+    ;;
+  *)
+    echo "[hyp8-build] usage: SOFT_LADDER_BUILD_TARGET=g6lc64_hyp8|g6lc64_hyp8_smt2 $0 hyp8 (got '${TARGET:-<unset>}')" >&2
+    exit 2
+    ;;
+esac
 JOBS="${SOFT_LADDER_BUILD_JOBS:-$( (command -v nproc >/dev/null && nproc) || echo 8)}"
 if [[ "$JOBS" == "$(nproc)" ]] || [[ "$JOBS" == "\$(nproc)" ]]; then
   JOBS=$( (command -v nproc >/dev/null && nproc) || echo 8)
@@ -122,10 +141,11 @@ export VPATH="$VERILATOR_ROOT/include:$ROOT"
 BUILD_LOG="${SOFT_LADDER_BUILD_LOG:-$VERLIB_DIR/build.log}"
 rm -f "$BUILD_LOG"
 log "building; full log -> $BUILD_LOG"
-log "target=$TARGET flist=$FLIST top=g6lc_testharness"
+log "target=$TARGET harts=$TARGET_HARTS flist=$FLIST top=g6lc_testharness"
 
 set +e
 "$VERILATOR" --no-timing verilator_config.vlt --assert \
+  $TARGET_VLT_DEFS \
   -f "$FLIST" \
   --threads "$VTHREADS" \
   --unroll-count 256 \
@@ -145,7 +165,7 @@ set +e
   --x-assign 0 \
   --x-initial 0 --x-initial-edge \
   -LDFLAGS "-L$RISCV/lib -L$SPIKE_INSTALL_DIR/lib -Wl,-rpath,$RISCV/lib -Wl,-rpath,$SPIKE_INSTALL_DIR/lib -lfesvr -lriscv -ldisasm -lyaml-cpp -lpthread" \
-  -CFLAGS "-DVL_DEBUG -I$SPIKE_INSTALL_DIR -I$SPIKE_INSTALL_DIR/include -I$ROOT/corev_apu/tb -I$ROOT/corev_apu/tb/dpi $BUILD_CXXFLAGS" \
+  -CFLAGS "-DVL_DEBUG -I$SPIKE_INSTALL_DIR -I$SPIKE_INSTALL_DIR/include -I$ROOT/corev_apu/tb -I$ROOT/corev_apu/tb/dpi $TARGET_CFLAGS $BUILD_CXXFLAGS" \
   --cc --vpi \
   --threads-dpi none \
   --top-module g6lc_testharness \

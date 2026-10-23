@@ -17,7 +17,9 @@ module g6lc_iq_xbar #(
     parameter int unsigned NTAKE  = 2,
     parameter int unsigned PRF_W  = 6,
     parameter int unsigned FPRF_W = 1,
-    parameter int unsigned TID_W  = 5
+    parameter int unsigned TID_W  = 5,
+    // Countdown width shared with g6lc_iq's WAKE_W derivation.
+    parameter int unsigned WAKE_W = 3
 ) (
     input  logic clk_i,
     input  logic rst_ni,
@@ -27,7 +29,7 @@ module g6lc_iq_xbar #(
     input  logic [BANKS-1:0][NTAKE-1:0][PRF_W-1:0]  b_prd_i,
     input  logic [BANKS-1:0][NTAKE-1:0][FPRF_W-1:0] b_fprd_i,
     input  logic [BANKS-1:0][NTAKE-1:0]            b_fp_i,
-    input  logic [BANKS-1:0][NTAKE-1:0][2:0]       b_cnt_i,
+    input  logic [BANKS-1:0][NTAKE-1:0][WAKE_W-1:0] b_cnt_i,
     // hyp8 g7: producer identity + class for the ptid forward and the
     // low-producer consumer-class gate.
     input  logic [BANKS-1:0][NTAKE-1:0][TID_W-1:0] b_tid_i,
@@ -38,7 +40,7 @@ module g6lc_iq_xbar #(
     output logic [BANKS*NTAKE-1:0][PRF_W-1:0]      xw_prd_o,
     output logic [BANKS*NTAKE-1:0][FPRF_W-1:0]     xw_fprd_o,
     output logic [BANKS*NTAKE-1:0]                 xw_fp_o,
-    output logic [BANKS*NTAKE-1:0][2:0]            xw_cnt_o,
+    output logic [BANKS*NTAKE-1:0][WAKE_W-1:0]     xw_cnt_o,
     output logic [BANKS*NTAKE-1:0][TID_W-1:0]      xw_tid_o,
     output logic [BANKS*NTAKE-1:0]                 xw_alu_o,
     output logic [BANKS*NTAKE-1:0]                 xw_lo_o

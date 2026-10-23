@@ -76,14 +76,15 @@ module ex_stage
     // hyp8 g7: per-issue-port in-ALU forward selects from the IRO; the
     // ALU0 select mirrors the alu_data[0] port pick below. Bit 2 selects
     // the registered A3 (result3_q) slot for LAT_ALU_FULL producers.
-    input  logic [G6LCCfg.NrIssuePorts-1:0][2:0] alu_fwd_a_i,
-    input  logic [G6LCCfg.NrIssuePorts-1:0][2:0] alu_fwd_b_i,
+    input  logic [G6LCCfg.NrIssuePorts-1:0][3:0] alu_fwd_a_i,
+    input  logic [G6LCCfg.NrIssuePorts-1:0][3:0] alu_fwd_b_i,
     // hyp8 g7: the ALU0 pipe-stage tids back to the IRO's forward-select
     // compare (A1 slot, then the registered A2/WB-record slot, then the
     // registered A3 slot).
     output logic [G6LCCfg.TRANS_ID_BITS-1:0]     alu_fwd_tid_o,
     output logic [G6LCCfg.TRANS_ID_BITS-1:0]     alu_fwd_qtid_o,
     output logic [G6LCCfg.TRANS_ID_BITS-1:0]     alu_fwd_rtid_o,
+    output logic [G6LCCfg.TRANS_ID_BITS-1:0]     alu_fwd_htid_o,
     // hyp8 g7: A1 low-32 forward tap (observability; the forward itself
     // is selected inside the ALU by fwd_a/fwd_b).
     output logic [31:0]                          alu_fwd_low_o,
@@ -129,8 +130,10 @@ module ex_stage
     input logic csr_commit_i,
     // MULT instruction is valid - ISSUE_STAGE
     input logic [G6LCCfg.NrIssuePorts-1:0] mult_valid_i,
-    // LSU is ready - ISSUE_STAGE
+    // LSU is ready - ISSUE_STAGE (queue has a free slot, not "empty")
     output logic lsu_ready_o,
+    // Queued LSU posts - ISSUE_STAGE
+    output logic [2:0] lsu_count_o,
     // LSU instruction is valid - ISSUE_STAGE
     input logic [G6LCCfg.NrIssuePorts-1:0] lsu_valid_i,
     // Load result is valid - ISSUE_STAGE
@@ -386,6 +389,7 @@ module ex_stage
 
   // from ALU to branch unit
   logic alu_branch_res;  // branch comparison result
+  exception_t branch_exception;  // B2 exception record, published only with br_lane_v
   logic [G6LCCfg.NrALUs-1:0][G6LCCfg.XLEN-1:0] alu_result;
   logic [G6LCCfg.XLEN-1:0] csr_result, mult_result, aes_result;
   logic [G6LCCfg.VLEN-1:0] branch_result;
@@ -514,7 +518,7 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
   // a branch steals the shared pipe first, then port 0's ALU op, then the
   // highest one-cycle port. Each pick carries that port's own spec-arm
   // metadata, so the forward tracks the actual occupant.
-  logic [2:0] alu0_fwd_a, alu0_fwd_b;
+  logic [3:0] alu0_fwd_a, alu0_fwd_b;
   always_comb begin
     alu0_fwd_a = '0;
     alu0_fwd_b = '0;
@@ -553,6 +557,10 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
   end
 
   logic alu_s2_a3, alu_s3_a3;
+  // hyp8: per-ALU result ownership of the packet on each fu_data port --
+  // an issued ALU result (alu_in / the actual per-port ALU valids), not
+  // merely a decoded one-cycle packet. Driven below beside alu_in.
+  logic [G6LCCfg.NrALUs-1:0] alu_result_owner;
   alu_wrapper #(
       .G6LCCfg  (G6LCCfg),
       .HypCfg   (HypCfg),
@@ -564,12 +572,14 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
       .fu_data_i       (alu_data),
       .fwd_a_i         (alu0_fwd_a),
       .fwd_b_i         (alu0_fwd_b),
+      .result_valid_i  (alu_result_owner),
       .result_o        (alu_result),
       .alu_branch_res_o(alu_branch_res),
       .alu_fwd_low_o   (alu_fwd_low_o),
       .alu_fwd_tid_o   (alu_fwd_tid_o),
       .alu_fwd_qtid_o  (alu_fwd_qtid_o),
       .alu_fwd_rtid_o  (alu_fwd_rtid_o),
+      .alu_fwd_htid_o  (alu_fwd_htid_o),
       .alu_s2_a3_o     (alu_s2_a3),
       .alu_s3_a3_o     (alu_s3_a3)
   );
@@ -600,10 +610,9 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
       .branch_result_o   (branch_result),
       .branch_predict_i,
       .resolved_branch_o (resolved_branch),
-      .resolve_branch_o,
-      .branch_exception_o(flu_exception_o)
+      .resolve_branch_o  (resolve_branch_raw),
+      .branch_exception_o(branch_exception)
   );
-  assign resolved_branch_o = resolved_branch;
 
   // 3. CSR (sequential)
   csr_buffer #(
@@ -636,9 +645,10 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
   // the scoreboard is assembled from aligned lane records, never from
   // live issue inputs -- under the staged FUs a live fu_data_i field at
   // completion time would carry a *different* instruction's trans_id
-  // (the emit base's one-cycle select). The issue-side wb_reserve table
-  // guarantees at most one lane completes per cycle on this shared port,
-  // so the select below is a record merge, not an arbitration.
+  // (the emit base's one-cycle select). The IRO-acceptance FLU reservation
+  // (g6lc_flu_reserve) admits at most one lane whose completion lands on
+  // this shared port per cycle, so the select below is a record merge,
+  // not an arbitration.
   //
   // Kill semantics: flush_i clears every lane record. A record whose tid
   // is already in cancelled_mask_i is suppressed at presentation -- H20:
@@ -656,6 +666,22 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
   assign alu_in = ~br_in & |alu_valid_i;
   assign csr_in = ~br_in & ~|alu_valid_i & |csr_valid_i;
   assign aes_in = ~br_in & ~|alu_valid_i & ~csr_in & |aes_valid_i;
+
+  // Result ownership per ALU slot: bit 0 mirrors the ALU0 lane-in select
+  // (a branch packet sharing the pipe owns a compare, not a result);
+  // bit 1 is any issued alu2 packet; extra ALUs take their port's ALU
+  // valid. flush_i drops ownership for the killed packet's cycle.
+  assign alu_result_owner[0] = alu_in && !flush_i;
+  if (G6LCCfg.NrALUs >= 2) begin : gen_alu2_owner
+    assign alu_result_owner[1] = (|alu2_valid_i) && !flush_i;
+  end
+  for (genvar a = 2; a < G6LCCfg.NrALUs; a++) begin : gen_alu_owner
+    if (a < G6LCCfg.NrIssuePorts) begin
+      assign alu_result_owner[a] = alu_valid_i[a] && !flush_i;
+    end else begin
+      assign alu_result_owner[a] = 1'b0;
+    end
+  end
 
   // Staggered ALU: the A2 register inside the ALU holds result_q and
   // fwd_tid2_q; only the valid needs the two-edge shift here. With
@@ -718,8 +744,9 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
   logic [G6LCCfg.XLEN-1:0]         alu_lane_res;
   // hyp8 r5: with AluStages==3 the A3-class (LAT_ALU_FULL) record is due
   // at +3 in the result3_q slot while low-class ops stay at +2 in
-  // result_q. The two terms are disjoint -- the WB reservation blocks a
-  // +2 candidate whose arrival would coincide with a +3 completion.
+  // result_q. The two terms are disjoint -- the IRO-acceptance WB
+  // reservation admits no +2 producer whose arrival would coincide with
+  // a +3 completion.
   assign alu_lane_v_raw = ALU_STAG ? ((alu_vld_q2 & ~alu_s2_a3) |
                                      (alu_vld_q3 &  alu_s3_a3))
                                    : alu_res_vld_q;
@@ -728,8 +755,19 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
                                    : alu_tid_q;
   assign alu_lane_res   = ALU_STAG ? alu_result[0]  : alu_res_q;
 
+  logic resolve_branch_raw;
   logic br_lane_v, alu_lane_v, csr_lane_v, aes_lane_v;
-  assign br_lane_v  = resolved_branch.valid & ~cancelled_mask_i[resolved_branch.trans_id];
+  assign br_lane_v  = resolved_branch.valid & ~cancelled_mask_i[resolved_branch.trans_id]
+                    & sb_live_i[resolved_branch.trans_id];
+  // A younger branch still in B1 when an older mispredict cancels its TID
+  // must not publish its redirect: both the resolve pulse and the record
+  // are qualified by the same cancellation-aware lane valid. A branch's
+  // own flush is still allowed (no combinational !flush_i here).
+  always_comb begin
+    resolved_branch_o = resolved_branch;
+    resolved_branch_o.valid = br_lane_v;
+  end
+  assign resolve_branch_o = resolve_branch_raw && br_lane_v;
   assign alu_lane_v = alu_lane_v_raw & ~cancelled_mask_i[alu_lane_tid];
   assign csr_lane_v = csr_vld_q & ~cancelled_mask_i[csr_tid_q];
   assign aes_lane_v = aes_vld_q & ~cancelled_mask_i[aes_tid_q];
@@ -739,14 +777,18 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
 
   // FLU writeback record merge (record select, priority as in the emit:
   // branch > alu > csr > mult > aes; the reservation table makes the
-  // priority unreachable in practice).
+  // priority unreachable in practice). The exception travels with the
+  // winning branch record only -- an ALU/CSR/mult/AES completion must not
+  // publish a branch's trap.
   always_comb begin
-    flu_result_o   = {{G6LCCfg.XLEN - G6LCCfg.VLEN{1'b0}}, branch_result};
-    flu_trans_id_o = resolved_branch.trans_id;
+    flu_result_o    = {{G6LCCfg.XLEN - G6LCCfg.VLEN{1'b0}}, branch_result};
+    flu_trans_id_o  = resolved_branch.trans_id;
+    flu_exception_o = '0;
     if (br_lane_v) begin
       // I14: flu tid/result of a CF is the resolving op's own record.
-      flu_result_o   = {{G6LCCfg.XLEN - G6LCCfg.VLEN{1'b0}}, branch_result};
-      flu_trans_id_o = resolved_branch.trans_id;
+      flu_result_o    = {{G6LCCfg.XLEN - G6LCCfg.VLEN{1'b0}}, branch_result};
+      flu_trans_id_o  = resolved_branch.trans_id;
+      flu_exception_o = branch_exception;
     end else if (alu_lane_v) begin
       flu_result_o   = alu_lane_res;
       flu_trans_id_o = alu_lane_tid;
@@ -761,6 +803,19 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
       flu_trans_id_o = aes_tid_q;
     end
   end
+
+//pragma translate_off
+  // Actual publication collision check: the IRO-acceptance reservation
+  // admits at most one FLU completion per cycle; a live overlap here
+  // means the merge above silently picked one record over another.
+  always_ff @(negedge clk_i) begin
+    if (rst_ni && !flush_i)
+      assert ($onehot0({br_lane_v, alu_lane_v, csr_lane_v, aes_lane_v,
+                       mult_valid}))
+        else $error("ex_stage: FLU publication collision br=%b alu=%b csr=%b aes=%b mult=%b",
+                    br_lane_v, alu_lane_v, csr_lane_v, aes_lane_v, mult_valid);
+  end
+//pragma translate_on
 
   // ready flags for FLU
   // OoO: csr_ready gates only the CSR hazard in issue_read_operands, not the
@@ -991,6 +1046,7 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
       .shared_tlb_flush_busy_o(shared_tlb_flush_busy_o),
       .fu_data_i              (lsu_data),
       .lsu_ready_o,
+      .lsu_count_o,
       .lsu_valid_i            (|lsu_valid_i),
       .speculative_load_i     (speculative_load),
       .load_trans_id_o,

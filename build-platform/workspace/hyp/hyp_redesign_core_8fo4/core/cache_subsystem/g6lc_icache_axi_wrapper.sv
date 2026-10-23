@@ -201,15 +201,30 @@ module g6lc_icache_axi_wrapper
 
   //pragma translate_off
   // M3 bring-up probe (+iax_trace): I$ miss → AXI handshake dump.
+  // +trace_from/+trace_to bound the cycle window (default 0..600).
   logic iax_trace;
-  initial iax_trace = $test$plusargs("icf_trace");
+  int unsigned iax_lo, iax_hi;
+  int unsigned iax_cyc = 0;
+  initial begin
+    iax_trace = $test$plusargs("icf_trace");
+    iax_lo = 0;
+    iax_hi = 600;
+    void'($value$plusargs("trace_from=%d", iax_lo));
+    void'($value$plusargs("trace_to=%d", iax_hi));
+  end
   always_ff @(posedge clk_i) begin
-    if (rst_ni && iax_trace && $time() < 600 && (axi_rd_req || axi_rd_valid || req_valid_q)) begin
-      $display("[iax] t=%0t rdreq=%b rdgnt=%b rvq=%b | ar_vld=%b ar_rdy=%b ar_addr=%h | r_vld=%b r_rdy=%b r_last=%b r_id=%h r_data=%h | rtrn_vld=%b",
-        $time, axi_rd_req, axi_rd_gnt, req_valid_q,
-        axi_req_o.ar_valid, axi_resp_i.ar_ready, axi_req_o.ar.addr,
-        axi_resp_i.r_valid, axi_req_o.r_ready, axi_resp_i.r.last, axi_resp_i.r.id, axi_resp_i.r.data,
-        icache_mem_rtrn_vld);
+    if (!rst_ni) begin
+      iax_cyc = 0;
+    end else begin
+      iax_cyc++;
+      if (iax_trace && iax_cyc >= iax_lo && iax_cyc <= iax_hi &&
+          (axi_rd_req || axi_rd_valid || req_valid_q)) begin
+        $display("[iax] t=%0t rdreq=%b rdgnt=%b rvq=%b | ar_vld=%b ar_rdy=%b ar_addr=%h | r_vld=%b r_rdy=%b r_last=%b r_id=%h r_data=%h | rtrn_vld=%b reqd_pa=%h",
+          $time, axi_rd_req, axi_rd_gnt, req_valid_q,
+          axi_req_o.ar_valid, axi_resp_i.ar_ready, axi_req_o.ar.addr,
+          axi_resp_i.r_valid, axi_req_o.r_ready, axi_resp_i.r.last, axi_resp_i.r.id, axi_resp_i.r.data,
+          icache_mem_rtrn_vld, req_data_q.paddr);
+      end
     end
   end
   //pragma translate_on

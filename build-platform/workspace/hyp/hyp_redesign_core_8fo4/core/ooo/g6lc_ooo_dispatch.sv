@@ -176,11 +176,10 @@ module g6lc_ooo_dispatch
   logic [NP-1:0][4:0] rs1_a, rs2_a, rd_a, rs3_a;
   logic [NP-1:0] is_fpr_rd_c, is_fpr_rs1_c, is_fpr_rs2_c, is_fpr_rs3_c;
   logic [NP-1:0][FPRF_W-1:0] fprs1, fprs2, fprs3, fprd, fprd_old;
-  logic [NP-1:0] rs3_rdy;
   logic ren_stall, can_go, lsq_disp_block, lsq_grp_block;
   logic [NP-1:0][PRF_W-1:0] prs1, prs2, prd, prd_old;
   logic [NP-1:0][CKPT_W-1:0] ren_ckpt_id;
-  logic [NP-1:0] rs1_rdy, rs2_rdy, ren_group_valid;
+  logic [NP-1:0] ren_group_valid;
   logic [G6LCCfg.NrWbPorts-1:0][PRF_W-1:0] wb_prd;
   logic [G6LCCfg.NR_SB_ENTRIES-1:0][PRF_W-1:0] tid_prd_q, tid_prd_d;
   logic [G6LCCfg.NR_SB_ENTRIES-1:0][PRF_W-1:0] tid_old_q, tid_old_d;
@@ -221,7 +220,8 @@ module g6lc_ooo_dispatch
   logic rob_empty, iq_empty;
   logic [$clog2(G6LCCfg.LsqLoadEntries+1)-1:0] ld_free;
   logic [$clog2(G6LCCfg.LsqStoreEntries+1)-1:0] st_free;
-  logic store_pend, stl_fwd, stl_stall, lsq_busy, md_stall, md_predict, mem_stall;
+  logic store_pend, stl_fwd, stl_stall, lsq_busy, mem_stall;
+  logic [NP-1:0] md_stall_v, md_predict_v;
   logic [G6LCCfg.NR_SB_ENTRIES-1:0] st_live_mask, st_unresolved_mask;
   logic [NH-1:0][G6LCCfg.NR_SB_ENTRIES-1:0] st_hart_mask;
   logic [G6LCCfg.VLEN-1:0] mem_violation_pc;
@@ -241,7 +241,21 @@ module g6lc_ooo_dispatch
   scoreboard_entry_t [NP-1:0] grp_sbe_q;
   logic [NP-1:0][31:0]     grp_orig_q;
   logic [NP-1:0][PRF_W-1:0] grp_prs1_q, grp_prs2_q, grp_prd_q;
-  logic [NP-1:0]           grp_rs1_rdy_q, grp_rs2_rdy_q, grp_rs3_rdy_q;
+  // Allocation readiness comes from rename's CURRENT busy bitmaps looked
+  // up by the final held-group physical tags -- a WB that lands between
+  // R1 capture and IQ allocation is visible here; the R1 ready snapshot
+  // is not consulted at this seam.
+  logic [PRF_N-1:0]        ren_int_busy;
+  logic [FPRF_N-1:0]       ren_fp_busy;
+  logic [NP-1:0]           grp_rs1_ready, grp_rs2_ready, grp_rs3_ready;
+  for (genvar p = 0; p < NP; p++) begin : gen_group_ready
+    assign grp_rs1_ready[p] = grp_is_fpr_rs1_q[p]
+        ? !ren_fp_busy[grp_fprs1_q[p]] : !ren_int_busy[grp_prs1_q[p]];
+    assign grp_rs2_ready[p] = grp_is_fpr_rs2_q[p]
+        ? !ren_fp_busy[grp_fprs2_q[p]] : !ren_int_busy[grp_prs2_q[p]];
+    assign grp_rs3_ready[p] = !grp_is_fpr_rs3_q[p] ||
+                              !ren_fp_busy[grp_fprs3_q[p]];
+  end
   logic [NP-1:0][FPRF_W-1:0] grp_fprs1_q, grp_fprs2_q, grp_fprs3_q;
   logic [NP-1:0][FPRF_W-1:0] grp_fprd_q;
   logic [NP-1:0]           grp_is_fpr_rs1_q, grp_is_fpr_rs2_q, grp_is_fpr_rs3_q;
@@ -256,13 +270,19 @@ module g6lc_ooo_dispatch
 
   // Allocation of the latched group: all-or-nothing, re-evaluated at
   // publish time against registered counts exactly as can_go was.
-  // hyp8: balanced popcounts instead of serial accumulates.
-  assign lsq_disp_block =
-      (int'($countones(is_ld)) > int'(ld_free)) ||
-      (int'($countones(is_st)) > int'(st_free));
-  assign lsq_grp_block =
-      (int'($countones(grp_is_ld_q)) > int'(ld_free)) ||
-      (int'($countones(grp_is_st_q)) > int'(st_free));
+  // hyp8: balanced popcounts instead of serial accumulates. The need
+  // count sits in the free counter's own unsigned width so the capacity
+  // compare is a plain same-width unsigned relation.
+  localparam int unsigned LDW = $clog2(G6LCCfg.LsqLoadEntries+1);
+  localparam int unsigned STW = $clog2(G6LCCfg.LsqStoreEntries+1);
+  logic [LDW-1:0] need_ld, grp_need_ld;
+  logic [STW-1:0] need_st, grp_need_st;
+  assign need_ld      = LDW'($countones(is_ld));
+  assign need_st      = STW'($countones(is_st));
+  assign grp_need_ld  = LDW'($countones(grp_is_ld_q));
+  assign grp_need_st  = STW'($countones(grp_is_st_q));
+  assign lsq_disp_block = (need_ld > ld_free) || (need_st > st_free);
+  assign lsq_grp_block  = (grp_need_ld > ld_free) || (grp_need_st > st_free);
 
   // can_go: registered counts only, plus "no group already in flight".
   assign can_go = !rob_full && !iq_full && !ren_stall && !flush_i &&
@@ -411,6 +431,7 @@ module g6lc_ooo_dispatch
       .rst_ni,
       .flush_i,
       .mispredict_i,
+      .flush_unissued_i,
       // Branch-tag plumbing: each dispatched branch recorded the checkpoint
       // level it consumed (rename's ckpt_id_o) keyed by its trans_id. On
       // resolve, the resolving branch's id selects its own level, so an OLDER
@@ -419,13 +440,14 @@ module g6lc_ooo_dispatch
       .hart_i    (dispatch_hart),
       // Per-hart flush is not driven at this level: with flush_hart_i tied
       // off, an in-flight group can only die via kill_all events
-      // (mispredict_i/flush_i), which also clear grp_pend_q -- a fully
-      // killed group therefore can never orphan the pending flag.
+      // (mispredict_i/flush_i/flush_unissued_i), which also clear
+      // grp_pend_q -- a fully killed group therefore can never orphan the
+      // pending flag.
       .flush_hart_i('0),
       .is_fpr_rd_i(is_fpr_rd_c), .is_fpr_rs1_i(is_fpr_rs1_c),
       .is_fpr_rs2_i(is_fpr_rs2_c),
       .rs3_i(rs3_a), .is_fpr_rs3_i(is_fpr_rs3_c),
-      .fprs3_o(fprs3), .rs3_ready_o(rs3_rdy),
+      .fprs3_o(fprs3), .rs3_ready_o(),
       .fprs1_o(fprs1), .fprs2_o(fprs2), .fprd_o(fprd), .fprd_old_o(fprd_old),
       .fwb_valid_i(fdata_wb_valid), .fwb_prd_i(fdata_wb_prd),
       .ffree_i(ffree_en), .ffree_prd_i(ffree_prd),
@@ -440,8 +462,12 @@ module g6lc_ooo_dispatch
       .prs2_o    (prs2),
       .prd_o     (prd),
       .prd_old_o (prd_old),
-      .rs1_ready_o(rs1_rdy),
-      .rs2_ready_o(rs2_rdy),
+      // R1 ready snapshots are capture-time diagnostics only -- IQ
+      // allocation readiness below reads int_busy_o/fp_busy_o instead.
+      .rs1_ready_o(),
+      .rs2_ready_o(),
+      .int_busy_o(ren_int_busy),
+      .fp_busy_o (ren_fp_busy),
       .ckpt_id_o (ren_ckpt_id),
       .ckpt_retire_i(ckpt_retire),
       .commit_valid_i(commit_wr),
@@ -488,7 +514,20 @@ module g6lc_ooo_dispatch
       end else if (ren_capture) begin
         grp_pend_q <= 1'b1;
       end
-      if (ren_pub) begin
+      // Kill outranks publish for grp_v_q. The dispatch_valid_i zombie
+      // mask below samples the scoreboard's PRE-flush presentation -- the
+      // presented lanes retract at this edge, not before -- so a rename
+      // publish coincident with mispredict/flush/flush_unissued would
+      // capture dead lanes into grp_v_q and dispatch_ack_o them a cycle
+      // later while the scoreboard presents nothing (the zombie also
+      // allocates IQ/LSQ entries on a non-flush edge). Sibling state
+      // written under ren_pub is inert while grp_v_q==0:
+      // grp_sbe_q/grp_orig_q/tid staging and grp_may_bypass_q reach
+      // consumers only through grp_v_q/grp_go/dispatch_ack_o, steer_q is
+      // a performance hint, and grp_pend_q already has kill priority.
+      if (mispredict_i || flush_i || flush_unissued_i) begin
+        grp_v_q <= '0;
+      end else if (ren_pub) begin
         // Mask the published lanes by the scoreboard's live view. A group
         // captured before a kill the rename pipe does not observe
         // (flush_unissued between the capture and publish edges, a
@@ -496,16 +535,17 @@ module g6lc_ooo_dispatch
         // dispatch_valid_i == 0 here and must not enter grp_v_q -- a
         // zombie lane would allocate an IQ/ROB entry and issue.
         grp_v_q <= ren_group_valid & dispatch_valid_i;
-        // Port-0 load verdict only (single query port -- see memdep below).
-        grp_may_bypass_q <= '0;
-        grp_may_bypass_q[0] <= G6LCCfg.MemDepPredEn && is_ld[0] && !md_predict;
+        // Each lane keeps its own store-set verdict. A hit on one load
+        // does not clear bypass on the other lanes or the other hart.
+        for (int unsigned p = 0; p < NP; p++)
+          grp_may_bypass_q[p] <= G6LCCfg.MemDepPredEn && is_ld[p] &&
+                                 !md_predict_v[p];
         // hyp8: bank steering -- lanes spread across consecutive banks
         // starting at a rotating base, so consecutive groups rotate and a
         // group's siblings wake each other through the short local path
         // when the predictor/decode order allows.
         steer_q <= steer_q + BW'(NP);
-      end else if ((grp_go && grp_done) || mispredict_i || flush_i ||
-                   flush_unissued_i) begin
+      end else if (grp_go && grp_done) begin
         grp_v_q <= '0;
       end
     end
@@ -530,7 +570,6 @@ module g6lc_ooo_dispatch
         grp_sbe_q[p] <= '0;
         grp_orig_q[p] <= '0;
         grp_prs1_q[p] <= '0; grp_prs2_q[p] <= '0; grp_prd_q[p] <= '0;
-        grp_rs1_rdy_q[p] <= '0; grp_rs2_rdy_q[p] <= '0; grp_rs3_rdy_q[p] <= '0;
         grp_fprs1_q[p] <= '0; grp_fprs2_q[p] <= '0; grp_fprs3_q[p] <= '0;
         grp_fprd_q[p] <= '0;
         grp_is_fpr_rs1_q[p] <= '0; grp_is_fpr_rs2_q[p] <= '0;
@@ -544,9 +583,6 @@ module g6lc_ooo_dispatch
         grp_prs1_q[p]  <= prs1[p];
         grp_prs2_q[p]  <= prs2[p];
         grp_prd_q[p]   <= prd[p];
-        grp_rs1_rdy_q[p] <= rs1_rdy[p];
-        grp_rs2_rdy_q[p] <= rs2_rdy[p];
-        grp_rs3_rdy_q[p] <= rs3_rdy[p];
         grp_fprs1_q[p] <= fprs1[p];
         grp_fprs2_q[p] <= fprs2[p];
         grp_fprs3_q[p] <= fprs3[p];
@@ -675,14 +711,28 @@ module g6lc_ooo_dispatch
   // M3 bring-up probe (+icf_trace): dispatch offer/ack handshake. Catches the
   // scoreboard's "Issue acknowledged but instruction is not valid" firing.
   logic disp_trace;
-  initial disp_trace = $test$plusargs("icf_trace");
+  int unsigned dsp_lo, dsp_hi;
+  initial begin
+    disp_trace = $test$plusargs("disp_trace");
+    dsp_lo = 0;
+    dsp_hi = 3000;
+    void'($value$plusargs("trace_from=%d", dsp_lo));
+    void'($value$plusargs("trace_to=%d", dsp_hi));
+  end
   always_ff @(negedge clk_i) begin
-    if (rst_ni && disp_trace && $time() < 420 && $time() > 280 &&
+    if (rst_ni && disp_trace && $time() >= dsp_lo && $time() <= dsp_hi &&
         (|dispatch_valid_i || |dispatch_ack_o || ren_capture || ren_pub || (|grp_v_q))) begin
-      $display("[dsp] t=%0t dv=%b dack=%b | cap=%b pub=%b cango=%b | grpv=%b go=%b iqdack=%b done=%b | lane0 pc=%h fu=%0d",
+      $display("[dsp] t=%0t dv=%b dack=%b | cap=%b pub=%b cango=%b | grpv=%b go=%b iqdack=%b done=%b | rg=%b gt0=%0d gt1=%0d sbe0=%0d sbe1=%0d dsbe0=%0d dsbe1=%0d | lane0 pc=%h fu=%0d | gf=%b asg=%0d,%0d bf=%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d bk=%b,%b",
         $time, dispatch_valid_i, dispatch_ack_o, ren_capture, ren_pub, can_go,
         grp_v_q, grp_go, iqdisp_ack, grp_done,
-        dispatch_sbe_i[0].pc, dispatch_sbe_i[0].fu);
+        ren_group_valid, grp_tid[0], grp_tid[1],
+        grp_sbe_q[0].trans_id, grp_sbe_q[1].trans_id,
+        dispatch_sbe_i[0].trans_id, dispatch_sbe_i[1].trans_id,
+        dispatch_sbe_i[0].pc, dispatch_sbe_i[0].fu,
+        i_iq.group_fits, i_iq.asgn[0], i_iq.asgn[1],
+        i_iq.bank_free[0], i_iq.bank_free[1], i_iq.bank_free[2], i_iq.bank_free[3],
+        i_iq.bank_free[4], i_iq.bank_free[5], i_iq.bank_free[6], i_iq.bank_free[7],
+        i_iq.back[i_iq.asgn[0]][0], i_iq.back[i_iq.asgn[1]][1]);
     end
   end
   //pragma translate_on
@@ -759,7 +809,9 @@ module g6lc_ooo_dispatch
 
   // mem_stall survives only as the lsq_stall_o PMU probe (loads are
   // ordered by the IQ's per-entry older-UNRESOLVED-store gate).
-  assign mem_stall = md_stall || stl_stall;
+  // Predictor hits are per load (may_bypass). A global stall here would
+  // freeze every hart's loads when one lane collides.
+  assign mem_stall = stl_stall;
 
   logic                                     iq_replay_v;
   logic [G6LCCfg.TRANS_ID_BITS-1:0]         iq_replay_t;
@@ -785,10 +837,10 @@ module g6lc_ooo_dispatch
       .disp_prs1_i     (grp_prs1_q),
       .disp_prs2_i     (grp_prs2_q),
       .disp_prd_i      (grp_prd_q),
-      .disp_rs1_ready_i(grp_rs1_rdy_q),
-      .disp_rs2_ready_i(grp_rs2_rdy_q),
+      .disp_rs1_ready_i(grp_rs1_ready),
+      .disp_rs2_ready_i(grp_rs2_ready),
       .disp_may_bypass_i(may_bypass),
-      .disp_rs3_ready_i(grp_rs3_rdy_q),
+      .disp_rs3_ready_i(grp_rs3_ready),
       .disp_fprs1_i(grp_fprs1_q), .disp_fprs2_i(grp_fprs2_q),
       .disp_fprs3_i(grp_fprs3_q),
       .disp_fpr_rs1_i(grp_is_fpr_rs1_q), .disp_fpr_rs2_i(grp_is_fpr_rs2_q),
@@ -869,10 +921,20 @@ module g6lc_ooo_dispatch
   end
 
   logic [NP-1:0] iss_pop;
+  // hyp8: while an FP operation holds a lane's staged record the shared
+  // FPRF's registered read addresses still belong to it; a new FP
+  // candidate may launch its read only on the current holder's pop edge.
+  logic fp_pending_hold;
+  assign fp_pending_hold = |(iss_v_q & iss_fpsel_q & ~iss_pop);
   for (genvar p = 0; p < NP; p++) begin : gen_take
     assign iss_pop[p]  = iss_v_q[p] && issue_ack_i[p];
+    // hyp8: a take under flush/cancel is not an accepted transfer — the
+    // candidate's read/capture must not launch on dead work.
     assign iqi_take[p] = iqi_valid[p] && !fp_blocked[p] &&
-                         (!iss_v_q[p] || iss_pop[p]);
+                         !flush_i && !flush_unissued_i &&
+                         !cancelled_mask_i[iqi_sbe[p].trans_id] &&
+                         (!iss_v_q[p] || iss_pop[p]) &&
+                         !(fp_need[p] && fp_pending_hold);
   end
   assign iq_issue_ack = iqi_take;
 
@@ -896,7 +958,11 @@ module g6lc_ooo_dispatch
         iss_spec_ab_q[p] <= '0;
         iss_ptid_q[p] <= '0;
       end else begin
-        if (flush_i || flush_unissued_i ||
+        // hyp8: the staged record survives flush_unissued_i — the partial
+        // kill only masks issue_valid_o for that cycle; accepted work is
+        // reoffered next cycle. A full flush or its own cancelled TID
+        // still clears it.
+        if (flush_i ||
             (iss_v_q[p] && cancelled_mask_i[iss_sbe_q[p].trans_id])) begin
           iss_v_q[p] <= 1'b0;
         end else if (iqi_take[p]) begin
@@ -921,6 +987,7 @@ module g6lc_ooo_dispatch
   // staged cycle (2-step read inside g6lc_prf).
   // ----------------------------------------------------------------------
   logic [NP*2-1:0][PRF_W-1:0] prf_raddr;
+  logic [NP*2-1:0]           prf_ren;
   logic [NP*2-1:0][G6LCCfg.XLEN-1:0] prf_rdata;
   localparam int unsigned PRF_WR = G6LCCfg.NrWbPorts + PRF_MIRROR;
   logic [PRF_WR-1:0][PRF_W-1:0] prf_waddr;
@@ -937,12 +1004,16 @@ module g6lc_ooo_dispatch
   logic [FPRF_WR-1:0][G6LCCfg.FLen-1:0] fprf_wdata;
   logic [FPRF_WR-1:0] fprf_we;
 
-  // hyp8: per-port independent assigns.
+  // hyp8: per-port independent assigns. The read enables follow the take
+  // so a stalled lane's staged record keeps the operand addresses it was
+  // granted (the integer PRF holds its last read while !iqi_take).
   for (genvar p = 0; p < NP; p++) begin : gen_prf_ra
     assign prf_raddr[p*2+0] = iqi_take[p] && iqi_sbe[p].ooo_renamed
                               ? PRF_W'(iqi_sbe[p].p_rs1) : '0;
     assign prf_raddr[p*2+1] = iqi_take[p] && iqi_sbe[p].ooo_renamed
                               ? PRF_W'(iqi_sbe[p].p_rs2) : '0;
+    assign prf_ren[p*2+0]   = iqi_take[p];
+    assign prf_ren[p*2+1]   = iqi_take[p];
   end
   for (genvar w = 0; w < G6LCCfg.NrWbPorts; w++) begin : gen_prf_wa
     assign prf_waddr[w] = wb_prd[w];
@@ -1008,6 +1079,7 @@ module g6lc_ooo_dispatch
       .clk_i,
       .rst_ni,
       .raddr_i(fprf_raddr),
+      .read_enable_i({3{|fp_take}}),
       .rdata_o(fprf_rdata),
       .waddr_i(fprf_waddr),
       .wdata_i(fprf_wdata),
@@ -1024,6 +1096,7 @@ module g6lc_ooo_dispatch
       .clk_i,
       .rst_ni,
       .raddr_i(prf_raddr),
+      .read_enable_i(prf_ren),
       .rdata_o(prf_rdata),
       .waddr_i(prf_waddr),
       .wdata_i(prf_wdata),
@@ -1214,38 +1287,31 @@ module g6lc_ooo_dispatch
   logic [G6LCCfg.NR_SB_ENTRIES-1:0]          rp_mask_q, rp_mask_d;
   logic [G6LCCfg.TRANS_ID_BITS-1:0]          rp_pend_tid;
 
-  // hyp8 scoreboard is 32 entries. $countones of the struct-width mask
-  // does not fold. Lowest-set one-hot, then a 5-bit OR tree for the index.
-  function automatic logic [31:0] rp_below32(input logic [31:0] x);
-    logic [31:0] below;
+  // hyp8: generic lowest-set select over NR_SB_ENTRIES (one pending bit
+  // per trans_id). Prefix-OR below-mask isolates the lowest set bit; each
+  // index bit is an OR over the one-hot's positions — no fixed-width
+  // reduction tree.
+  localparam int unsigned RP_N = G6LCCfg.NR_SB_ENTRIES;
+  function automatic logic [RP_N-1:0] rp_below(input logic [RP_N-1:0] x);
+    logic [RP_N-1:0] below;
     below = x << 1;
-    for (int unsigned l = 1; l < 32; l = l << 1)
+    for (int unsigned l = 1; l < RP_N; l = l << 1)
       below = below | (below << l);
     return below;
   endfunction
-  logic [31:0] rp_mask32, rp_oh;
-  logic [7:0][4:0] rp_n0;
-  logic [3:0][4:0] rp_n1;
-  logic [1:0][4:0] rp_n2;
-  assign rp_mask32 = rp_mask_q[31:0];
-  assign rp_oh = rp_mask32 & ~rp_below32(rp_mask32);
-  for (genvar g = 0; g < 8; g++) begin : gen_rp_n0
-    assign rp_n0[g] = (rp_oh[4*g]   ? 5'(4*g)     : '0) |
-                      (rp_oh[4*g+1] ? 5'(4*g + 1) : '0) |
-                      (rp_oh[4*g+2] ? 5'(4*g + 2) : '0) |
-                      (rp_oh[4*g+3] ? 5'(4*g + 3) : '0);
+  logic [RP_N-1:0] rp_oh;
+  assign rp_oh = rp_mask_q & ~rp_below(rp_mask_q);
+  for (genvar b = 0; b < G6LCCfg.TRANS_ID_BITS; b++) begin : gen_rp_index
+    logic [RP_N-1:0] terms;
+    for (genvar t = 0; t < RP_N; t++) begin : gen_term
+      assign terms[t] = rp_oh[t] && (((t >> b) & 1) != 0);
+    end
+    assign rp_pend_tid[b] = |terms;
   end
-  assign rp_n1[0] = rp_n0[0] | rp_n0[1];
-  assign rp_n1[1] = rp_n0[2] | rp_n0[3];
-  assign rp_n1[2] = rp_n0[4] | rp_n0[5];
-  assign rp_n1[3] = rp_n0[6] | rp_n0[7];
-  assign rp_n2[0] = rp_n1[0] | rp_n1[1];
-  assign rp_n2[1] = rp_n1[2] | rp_n1[3];
-  assign rp_pend_tid = G6LCCfg.TRANS_ID_BITS'(rp_n2[0] | rp_n2[1]);
 
   assign iq_replay_v = (|rp_mask_q) | lsq_replay_v | lsu_replay_i;
   always_comb begin
-    unique case ({|rp_mask32, lsq_replay_v})
+    unique case ({|rp_mask_q, lsq_replay_v})
       2'b10, 2'b11: iq_replay_t = rp_pend_tid;
       2'b01:        iq_replay_t = lsq_replay_t;
       default:      iq_replay_t = lsu_replay_tid_i;
@@ -1339,10 +1405,18 @@ module g6lc_ooo_dispatch
     assign memdep_st_pc[p] = grp_sbe_q[p].pc;
   end
 
+  logic [NP-1:0] md_query;
+  logic [NP-1:0][G6LCCfg.VLEN-1:0] md_pc;
+  for (genvar p = 0; p < NP; p++) begin : gen_md_q
+    assign md_query[p] = can_go && dispatch_valid_i[p] && is_ld[p];
+    assign md_pc[p]    = dispatch_sbe_i[p].pc;
+  end
+
   g6lc_memdep #(
       .G6LCCfg (G6LCCfg),
       .NR_SETS (64),
-      .NR_TRAIN(NP)
+      .NR_TRAIN(NP),
+      .NR_QUERY(NP)
   ) i_memdep (
       .clk_i,
       .rst_ni,
@@ -1350,17 +1424,15 @@ module g6lc_ooo_dispatch
       .enable_i(G6LCCfg.MemDepPredEn),
       .st_valid_i(memdep_st_v),
       .st_pc_i   (memdep_st_pc),
-      // hyp8: the query fires at the rename capture edge (can_go && valid
-      // && load); the verdict is registered inside g6lc_memdep and is
-      // sampled into the group record at publish. No issue-time
-      // combinational predictor feedback exists.
-      .ld_query_i(can_go && dispatch_valid_i[0] && is_ld[0]),
-      .ld_pc_i   (dispatch_sbe_i[0].pc),
+      // One query per issue lane at the rename capture edge. The verdict
+      // is registered and sampled into that lane's may_bypass at publish.
+      .ld_query_i(md_query),
+      .ld_pc_i   (md_pc),
       .train_valid_i(mem_violation_o),
       .train_pc_i  (mem_violation_pc),
       .store_pending_i(store_pend),
-      .stall_o   (md_stall),
-      .predict_o (md_predict)
+      .stall_o   (md_stall_v),
+      .predict_o (md_predict_v)
   );
 
   assign lsq_stall_o = mem_stall || lsq_disp_block ||
@@ -1371,5 +1443,140 @@ module g6lc_ooo_dispatch
   assign _unused = |iqi_spec | |iss_spec_q | |iss_prd_q | ld_full | st_full;
 
   // svt-stage: class ISS decision
-  // svt-stage: absorb ISS by=spec-wakeup cond="registered candidate replaces the operand latch; ack addresses the held candidate"
+  // hyp8: no absorb claim -- the staged presentation is not hidden by
+  // real-WB scheduling (IqSpecWakeup==0 in the executable profile).
+
+//pragma translate_off
+  // +disp_trace: dispatch/IQ lifecycle probe (diagnostic only).
+  localparam int unsigned IQE =
+      (NB <= 1) ? IQ_N : ((HypCfg.IqBankEntries < 1) ? 1 : HypCfg.IqBankEntries);
+  bit disp_life_trace;
+  int unsigned disp_cyc = 0;
+  int unsigned disp_lo, disp_hi;
+  logic [NB-1:0][IQE-1:0]                          dinfo_v;
+  logic [NB-1:0][IQE-1:0][G6LCCfg.TRANS_ID_BITS-1:0] dinfo_tid;
+  logic [NB-1:0][IQE-1:0][2:0]                     dinfo_rdy;
+  logic [NB-1:0][IQE-1:0]                          dacked;
+  initial begin
+    disp_life_trace = $test$plusargs("disp_trace");
+    disp_lo = 0;
+    disp_hi = 3000;
+    void'($value$plusargs("trace_from=%d", disp_lo));
+    void'($value$plusargs("trace_to=%d", disp_hi));
+  end
+
+  always @(posedge clk_i) begin
+    if (!rst_ni) begin
+      disp_cyc = 0;
+      dinfo_v = '0;
+      dacked = '0;
+    end else if (disp_life_trace) begin
+      disp_cyc++;
+      if (disp_cyc >= disp_lo && disp_cyc <= disp_hi) begin
+        for (int unsigned p = 0; p < NP; p++) begin
+          // IQ allocation: the all-or-nothing group ack places the lane
+          // on the steered bank's returned slot.
+          if (dispatch_ack_o[p]) begin
+            $display("[disp] alloc c=%0d p=%0d tid=%0d bank=%0d ent=%0d fu=%0d rd=%0d prs1=%0d prs2=%0d prd=%0d rs1_rdy=%b rs2_rdy=%b rs3_rdy=%b busy_prs1=%b busy_prs2=%b",
+                     disp_cyc, p, grp_tid[p], i_iq.asgn[p],
+                     i_iq.wr_entry[p], grp_sbe_q[p].fu,
+                     grp_sbe_q[p].rd, grp_prs1_q[p], grp_prs2_q[p],
+                     grp_prd_q[p], grp_rs1_ready[p], grp_rs2_ready[p],
+                     grp_rs3_ready[p],
+                     ren_int_busy[grp_prs1_q[p]],
+                     ren_int_busy[grp_prs2_q[p]]);
+            // Rename marks the new prd busy at the same publish edge.
+            $display("[disp] busyset c=%0d prd=%0d tid=%0d",
+                     disp_cyc, grp_prd_q[p], grp_tid[p]);
+          end
+        end
+        // Integer busy clears: wb completions plus commit-publish writes.
+        for (int unsigned w = 0; w < G6LCCfg.NrWbPorts; w++)
+          if (data_wb_valid[w])
+            $display("[disp] wbclr c=%0d port=%0d tid=%0d prd=%0d cmt=0",
+                     disp_cyc, w, wb_id_i[w], data_wb_prd[w]);
+        for (int unsigned c = 0; c < PRF_MIRROR; c++)
+          if (data_wb_valid[G6LCCfg.NrWbPorts + c])
+            $display("[disp] wbclr c=%0d port=%0d tid=%0d prd=%0d cmt=1",
+                     disp_cyc, G6LCCfg.NrWbPorts + c,
+                     commit_instr_i[c].trans_id,
+                     data_wb_prd[G6LCCfg.NrWbPorts + c]);
+        for (int unsigned p = 0; p < NP; p++) begin
+          // Arb select this cycle (grant at the take/accept decision).
+          if (i_iq.i_arb.win_v[p] && i_iq.i_arb.take_ok[p])
+            $display("[disp] grant c=%0d port=%0d tid=%0d bank=%0d ent=%0d",
+                     disp_cyc, p, i_iq.i_arb.win[p].tid,
+                     i_iq.i_arb.win[p].bank, i_iq.i_arb.win[p].entry);
+          if (i_iq.i_arb.win_v[p] && i_iq.i_arb.take_ok[p] &&
+              cancelled_mask_i[i_iq.i_arb.win[p].tid])
+            $display("[disp] kill c=%0d port=%0d tid=%0d why=arb_sel_cancel",
+                     disp_cyc, p, i_iq.i_arb.win[p].tid);
+          if (i_iq.i_arb.win_q[p].v &&
+              cancelled_mask_i[i_iq.i_arb.win_q[p].tid])
+            $display("[disp] kill c=%0d port=%0d tid=%0d why=arb_winq_cancel",
+                     disp_cyc, p, i_iq.i_arb.win_q[p].tid);
+          if (i_iq.i_arb.pres_q[p].v &&
+              cancelled_mask_i[i_iq.i_arb.pres_q[p].tid])
+            $display("[disp] kill c=%0d port=%0d tid=%0d why=arb_pres_cancel",
+                     disp_cyc, p, i_iq.i_arb.pres_q[p].tid);
+          // Take into dispatch staging and pop to the IRO.
+          if (iqi_take[p])
+            $display("[disp] take c=%0d port=%0d tid=%0d",
+                     disp_cyc, p, iqi_sbe[p].trans_id);
+          if (iss_pop[p])
+            $display("[disp] pop c=%0d port=%0d tid=%0d",
+                     disp_cyc, p, iss_sbe_q[p].trans_id);
+          if (issue_valid_o[p] || issue_ack_i[p])
+            $display("[disp] iro c=%0d port=%0d tid=%0d v=%b ack=%b",
+                     disp_cyc, p, iss_sbe_q[p].trans_id,
+                     issue_valid_o[p], issue_ack_i[p]);
+          // Kill-class events on the staged / presented records.
+          if (iss_v_q[p] && flush_i)
+            $display("[disp] kill c=%0d port=%0d tid=%0d why=flush",
+                     disp_cyc, p, iss_sbe_q[p].trans_id);
+          if (iss_v_q[p] && cancelled_mask_i[iss_sbe_q[p].trans_id])
+            $display("[disp] kill c=%0d port=%0d tid=%0d why=staged_cancel",
+                     disp_cyc, p, iss_sbe_q[p].trans_id);
+          if (iqi_valid[p] && cancelled_mask_i[iqi_sbe[p].trans_id])
+            $display("[disp] kill c=%0d port=%0d tid=%0d why=cand_cancel",
+                     disp_cyc, p, iqi_sbe[p].trans_id);
+          if (iqi_valid[p] && (flush_i || flush_unissued_i))
+            $display("[disp] kill c=%0d port=%0d tid=%0d why=flushblk",
+                     disp_cyc, p, iqi_sbe[p].trans_id);
+          if (iqi_valid[p] && fp_blocked[p])
+            $display("[disp] kill c=%0d port=%0d tid=%0d why=fpblk",
+                     disp_cyc, p, iqi_sbe[p].trans_id);
+        end
+        // Per-entry state: rdy-bit changes and entries that vanish
+        // without a bank ack (cancel/flush/take-side free or defect).
+        for (int unsigned b = 0; b < NB; b++) begin
+          for (int unsigned e = 0; e < IQE; e++) begin
+            if (dinfo_v[b][e] &&
+                dinfo_rdy[b][e] != i_iq.info_rdy[b][e] &&
+                i_iq.info_v[b][e])
+              $display("[disp] rdy c=%0d bank=%0d ent=%0d tid=%0d rdy=%b",
+                       disp_cyc, b, e, i_iq.info_tid[b][e],
+                       i_iq.info_rdy[b][e]);
+            if (dinfo_v[b][e] && !i_iq.info_v[b][e] && !dacked[b][e])
+              $display("[disp] kill c=%0d bank=%0d ent=%0d tid=%0d why=vanish canc=%b flush=%b",
+                       disp_cyc, b, e, dinfo_tid[b][e],
+                       cancelled_mask_i[dinfo_tid[b][e]],
+                       flush_i || flush_unissued_i);
+          end
+        end
+      end
+      dinfo_v   = i_iq.info_v;
+      dinfo_tid = i_iq.info_tid;
+      dinfo_rdy = i_iq.info_rdy;
+      for (int unsigned b = 0; b < NB; b++)
+        for (int unsigned e = 0; e < IQE; e++) begin
+          dacked[b][e] = 1'b0;
+          for (int unsigned p = 0; p < NP; p++)
+            if (i_iq.aack[b][p] && i_iq.aack_idx[b][p] == IQE'(e))
+              dacked[b][e] = 1'b1;
+        end
+    end
+  end
+//pragma translate_on
+
 endmodule

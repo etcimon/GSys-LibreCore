@@ -264,4 +264,75 @@ module g6lc_lsq_event #(
 
   // svt-stage: end E
   // svt-stage: class E value
+
+//pragma translate_off
+  // Evidence retention for the complete-event capture boundary: shadow
+  // each port's capture condition one edge, and if the staged output
+  // did not assert on the next edge, count it and report a bounded set
+  // of [lsq-ev-miss] lines. Non-fatal observation only.
+  logic [G6LCCfg.NrWbPorts-1:0]                          lsq_cap_d, lsq_cap_q;
+  logic [G6LCCfg.NrWbPorts-1:0][G6LCCfg.TRANS_ID_BITS-1:0] lsq_cap_id_q;
+  int unsigned                                          lsq_miss_cnt[G6LCCfg.NrWbPorts];
+  int unsigned                                          lsq_miss_printed = 0;
+  int unsigned                                          lsq_ev_cyc = 0;
+
+  always_comb
+    for (int unsigned w = 0; w < G6LCCfg.NrWbPorts; w++)
+      lsq_cap_d[w] = complete_valid_i[w] &&
+                     !cancelled_mask_i[complete_id_i[w]] && !flush_i;
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      lsq_cap_q    <= '0;
+      lsq_cap_id_q <= '0;
+      lsq_ev_cyc   <= 0;
+      foreach (lsq_miss_cnt[w]) lsq_miss_cnt[w] <= 0;
+    end else begin
+      lsq_ev_cyc <= lsq_ev_cyc + 1;
+      lsq_cap_q  <= lsq_cap_d;
+      for (int unsigned w = 0; w < G6LCCfg.NrWbPorts; w++)
+        if (complete_valid_i[w]) lsq_cap_id_q[w] <= complete_id_i[w];
+      for (int unsigned w = 0; w < G6LCCfg.NrWbPorts; w++)
+        if (lsq_cap_q[w] && !ev_complete_valid_o[w]) begin
+          lsq_miss_cnt[w] <= lsq_miss_cnt[w] + 1;
+          if (lsq_miss_printed < 8) begin
+            lsq_miss_printed++;
+            $display("[lsq-ev-miss] c=%0d w=%0d id=%0d (capture seen last edge, ev_complete never asserted)",
+                     lsq_ev_cyc, w, lsq_cap_id_q[w]);
+          end
+        end
+    end
+  end
+
+  final begin
+    for (int unsigned w = 0; w < G6LCCfg.NrWbPorts; w++)
+      $display("[lsq-ev-miss] summary w=%0d count=%0d", w, lsq_miss_cnt[w]);
+  end
+
+  // +lsq_trace: event-stage boundary probe — shows what gen_cmp captured.
+  bit lev_trace;
+  int unsigned lev_cyc = 0;
+  int unsigned lev_lo, lev_hi;
+  initial begin
+    lev_trace = $test$plusargs("lsq_trace");
+    lev_lo = 0;
+    lev_hi = 3000;
+    void'($value$plusargs("trace_from=%d", lev_lo));
+    void'($value$plusargs("trace_to=%d", lev_hi));
+  end
+  always @(posedge clk_i) begin
+    if (!rst_ni) lev_cyc = 0;
+    else if (lev_trace) begin
+      lev_cyc++;
+      if (lev_cyc >= lev_lo && lev_cyc <= lev_hi)
+      for (int unsigned w = 0; w < G6LCCfg.NrWbPorts; w++) begin
+        if (complete_valid_i[w] || ev_complete_valid_o[w])
+          $display("[lsq-ev] c=%0d w=%0d in_v=%b in_id=%0d in_st=%b canc=%b flush=%b out_v=%b out_id=%0d",
+                   lev_cyc, w, complete_valid_i[w], complete_id_i[w],
+                   complete_is_st_i[w], cancelled_mask_i[complete_id_i[w]],
+                   flush_i, ev_complete_valid_o[w], ev_complete_id_o[w]);
+      end
+    end
+  end
+//pragma translate_on
 endmodule

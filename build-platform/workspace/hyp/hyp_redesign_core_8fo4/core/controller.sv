@@ -239,7 +239,17 @@ assign commit_flush = ex_valid_i | eret_i
     // Note (R3a): do NOT flush_ex here -- that would drop older still-speculative
     // correct-path stores from the STQ. Younger-cancel must not mark STORE
     // cancelled (scoreboard); STQ flush remains full-flush only (fence/exception).
+    // Note (R28): gate on .valid. A stale resolve of an already-cancelled
+    // branch (dropped by an older mispredict) still carries is_mispredict=1;
+    // flushing IF without a redirect record makes the FTQ flush+push reseed
+    // npc_q (already stepped to next_block) and drops the real target.
+`ifdef G6LC_MUT_CTRL_STALE_RESOLVE
+    // Review-only mutation: the .valid gate is dropped -- a stale resolve
+    // flushes IF/unissued and the FTQ reseeds npc over the redirect target.
     if (resolved_branch_i.is_mispredict) begin
+`else
+    if (resolved_branch_i.valid && resolved_branch_i.is_mispredict) begin
+`endif
       // flush only un-issued instructions
       flush_unissued_comb    = 1'b1;
       // and if stage

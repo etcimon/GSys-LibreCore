@@ -144,8 +144,15 @@ module g6lc_lsq_slot #(
       st_pool = st_inv;
       for (int unsigned q = 0; q < NR_ALLOC; q++)
         if (q < p) begin
-          ld_pool &= ~ld_oh[q];
-          st_pool &= ~st_oh[q];
+          // Reserve an earlier port's pick only while that port actually
+          // allocates. Unmasked, a non-allocating port still consumes the
+          // lowest free slot in this pool, so a later allocating port can
+          // find its pool empty while the dispatch-side free count passed
+          // the group check: the alloc then drops silently and the op has
+          // no LSQ record for the rest of its lifetime (hyp8-osbi-ld-diag-r2:
+          // lane-1 load lost at ld_free==1, tid 21 never checked).
+          ld_pool &= ~(ld_oh[q] & {LD_ENTRIES{ld_alloc_i[q]}});
+          st_pool &= ~(st_oh[q] & {ST_ENTRIES{st_alloc_i[q]}});
         end
     end
     assign ld_oh[p] = ld_pool & (~ld_pool + {{LD_ENTRIES-1{1'b0}}, 1'b1});
@@ -241,11 +248,18 @@ module g6lc_lsq_slot #(
           st_d[i].addr   = ev_phys_addr_i[1];
           st_d[i].size   = ev_phys_size_i[1];
         end
-      for (int unsigned c = 0; c < G6LCCfg.NrCommitPorts; c++)
-        for (int unsigned i = 0; i < LD_ENTRIES; i++)
-          if (ev_commit_ld_i[c] && ld_q[i].valid && ld_q[i].id == ev_commit_id_i[c])
-            ld_d[i].valid = 1'b0;
     end
+
+    // Release committed loads by trans_id, on every commit port —
+    // idempotent by-id release, as for stores. A committed load can no
+    // longer be named by the violation CAM (commit already implies the
+    // checked verdict), so the entry's lifetime must not depend on the
+    // completion event having been captured. Unconditional: not gated
+    // on PHYS_VALIDATE (architectural contract, mirrors stores).
+    for (int unsigned c = 0; c < G6LCCfg.NrCommitPorts; c++)
+      for (int unsigned i = 0; i < LD_ENTRIES; i++)
+        if (ev_commit_ld_i[c] && ld_q[i].valid && ld_q[i].id == ev_commit_id_i[c])
+          ld_d[i].valid = 1'b0;
 
     // Multi-WB complete marks LOADS done; the entry frees only via the
     // release mask once no older store can still resolve against it.
@@ -298,13 +312,116 @@ module g6lc_lsq_slot #(
   end
 
   //pragma translate_off
-  for (genvar i = 0; i < ST_ENTRIES; i++) begin : gen_st_live_assert
-    ooo_lsq_st_live: assert property (@(posedge clk_i) disable iff (!rst_ni)
-        st_q[i].valid |-> sb_live_i[st_q[i].id]);
+  // Store release is a staged contract: commit_st registers into
+  // ev_commit_* (g6lc_lsq_event) one edge after the scoreboard clears
+  // sb_live, and the by-id entry release applies at the following edge.
+  // A store entry may therefore be valid with sb_live==0 for exactly
+  // one cycle, the cycle its release is pending.  rel_pend_st names
+  // that pending release; dead_st_* shadow the dead-entry facts into
+  // real flops so the assertions hold under either IEEE preponed or
+  // this simulator's post-edge sampling (same repair as store_buffer).
+  logic [ST_ENTRIES-1:0] rel_pend_st;
+  always_comb begin
+    rel_pend_st = '0;
+    for (int unsigned i = 0; i < ST_ENTRIES; i++)
+      for (int unsigned c = 0; c < G6LCCfg.NrCommitPorts; c++)
+        if (ev_commit_st_i[c] && ev_commit_id_i[c] == st_q[i].id)
+          rel_pend_st[i] = 1'b1;
   end
+
+  logic [ST_ENTRIES-1:0]                                dead_st_v_d, dead_st_v_q;
+  logic [ST_ENTRIES-1:0][G6LCCfg.TRANS_ID_BITS-1:0]   dead_st_id_d, dead_st_id_q;
+  always_comb begin
+    for (int unsigned i = 0; i < ST_ENTRIES; i++) begin
+      dead_st_v_d[i]  = st_q[i].valid && !sb_live_i[st_q[i].id];
+      dead_st_id_d[i] = st_q[i].id;
+    end
+  end
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      dead_st_v_q  <= '0;
+      dead_st_id_q <= '0;
+    end else begin
+      dead_st_v_q  <= dead_st_v_d;
+      dead_st_id_q <= dead_st_id_d;
+    end
+  end
+
+  for (genvar i = 0; i < ST_ENTRIES; i++) begin : gen_st_live_assert
+    // A valid entry whose tid is dead must have its by-id release pending
+    // this cycle (it clears at this edge).
+    ooo_lsq_st_live: assert property (@(posedge clk_i) disable iff (!rst_ni)
+        st_q[i].valid && !sb_live_i[st_q[i].id] |-> rel_pend_st[i]);
+    // ...and it must be gone (or re-tagged) at the next edge.
+    ooo_lsq_st_stale_one_cycle: assert property (@(posedge clk_i) disable iff (!rst_ni)
+        dead_st_v_q[i] |-> !st_q[i].valid || st_q[i].id != dead_st_id_q[i]);
+  end
+  // Load release now has the same staged contract as stores: commit_ld
+  // registers into ev_commit_* one edge after the scoreboard clears
+  // sb_live, and the unconditional by-id entry release applies at the
+  // following edge (or ld_release_i frees the entry earlier when the
+  // unres/dwait verdict completes).  A load entry may therefore be
+  // valid with sb_live==0 only while a release is pending this cycle.
+  // rel_pend_ld names the commit-event release; dead_ld_* shadow the
+  // dead-entry facts into real flops (same repair as the store side).
+  logic [LD_ENTRIES-1:0] rel_pend_ld;
+  always_comb begin
+    rel_pend_ld = '0;
+    for (int unsigned i = 0; i < LD_ENTRIES; i++)
+      for (int unsigned c = 0; c < G6LCCfg.NrCommitPorts; c++)
+        if (ev_commit_ld_i[c] && ev_commit_id_i[c] == ld_q[i].id)
+          rel_pend_ld[i] = 1'b1;
+  end
+
+  logic [LD_ENTRIES-1:0]                              dead_ld_v_d, dead_ld_v_q;
+  logic [LD_ENTRIES-1:0][G6LCCfg.TRANS_ID_BITS-1:0]   dead_ld_id_d, dead_ld_id_q;
+  always_comb begin
+    for (int unsigned i = 0; i < LD_ENTRIES; i++) begin
+      dead_ld_v_d[i]  = ld_q[i].valid && !sb_live_i[ld_q[i].id];
+      dead_ld_id_d[i] = ld_q[i].id;
+    end
+  end
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      dead_ld_v_q  <= '0;
+      dead_ld_id_q <= '0;
+    end else begin
+      dead_ld_v_q  <= dead_ld_v_d;
+      dead_ld_id_q <= dead_ld_id_d;
+    end
+  end
+
   for (genvar i = 0; i < LD_ENTRIES; i++) begin : gen_ld_live_assert
     ooo_lsq_ld_live: assert property (@(posedge clk_i) disable iff (!rst_ni)
-        ld_q[i].valid |-> sb_live_i[ld_q[i].id]);
+        ld_q[i].valid && !sb_live_i[ld_q[i].id] |->
+            (rel_pend_ld[i] || ld_release_i[i]));
+    ooo_lsq_ld_stale_one_cycle: assert property (@(posedge clk_i) disable iff (!rst_ni)
+        dead_ld_v_q[i] |-> !ld_q[i].valid || ld_q[i].id != dead_ld_id_q[i]);
+  end
+
+  // Allocation identity: an allocated tid must not already be held by
+  // another valid entry unless that entry is being released this cycle
+  // (tid reuse the edge after commit is legal).  A live duplicate would
+  // let staged by-id events land on the wrong record.
+  logic [NR_ALLOC-1:0] alloc_st_conflict, alloc_ld_conflict;
+  always_comb begin
+    alloc_st_conflict = '0;
+    alloc_ld_conflict = '0;
+    for (int unsigned p = 0; p < NR_ALLOC; p++) begin
+      for (int unsigned i = 0; i < ST_ENTRIES; i++)
+        if (st_q[i].valid && st_q[i].id == alloc_id_i[p] && !rel_pend_st[i])
+          alloc_st_conflict[p] = 1'b1;
+      for (int unsigned i = 0; i < LD_ENTRIES; i++)
+        if (ld_q[i].valid && ld_q[i].id == alloc_id_i[p] &&
+            !ld_release_i[i] && !rel_pend_ld[i])
+          alloc_ld_conflict[p] = 1'b1;
+    end
+  end
+  for (genvar p = 0; p < NR_ALLOC; p++) begin : gen_alloc_id_assert
+    ooo_lsq_alloc_st_id_unique: assert property (@(posedge clk_i) disable iff (!rst_ni)
+        st_alloc_i[p] |-> !alloc_st_conflict[p]);
+    ooo_lsq_alloc_ld_id_unique: assert property (@(posedge clk_i) disable iff (!rst_ni)
+        ld_alloc_i[p] |-> !alloc_ld_conflict[p]);
   end
   //pragma translate_on
 

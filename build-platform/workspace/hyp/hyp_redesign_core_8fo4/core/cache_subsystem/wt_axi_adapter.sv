@@ -792,20 +792,17 @@ assign icache_data_ack_o = icache_data_req_i & ~icache_data_full;
   initial assert (G6LCCfg.PLEN == 56);
   // pragma translate_on
 
-  // decode virtual read channels of icache
+  // Icache return is independent of the dcache decode below. Its own
+  // process keeps that 1-bit result off the dcache return chain.
+  logic ic_rtrn_go;
+  assign ic_rtrn_go = axi_rd_valid && (axi_rd_id_out == '0) && axi_rd_rdy;
+  always_comb begin : p_icache_rtrn
+    icache_rtrn_rd_en = ic_rtrn_go;
+    icache_rtrn_vld_d = ic_rtrn_go && axi_rd_last;
+  end
+
+  // decode virtual read channels of dcache
   always_comb begin : p_axi_rtrn_decode
-    // we are not ready when invalidating (or a self-invalidation is pending)
-    // note: b's are buffered separately
-    icache_rtrn_rd_en = 1'b0;
-    icache_rtrn_vld_d = 1'b0;
-
-    // decode virtual icache channel,
-    // this is independent on dcache decoding below
-    if (axi_rd_valid && axi_rd_id_out == 0 && axi_rd_rdy) begin
-      icache_rtrn_rd_en = 1'b1;
-      icache_rtrn_vld_d = axi_rd_last;
-    end
-
     dcache_rtrn_rd_en  = 1'b0;
     dcache_rtrn_vld_d  = 1'b0;
     dcache_rd_pop      = 1'b0;
@@ -1109,20 +1106,76 @@ assign icache_data_ack_o = icache_data_req_i & ~icache_data_full;
 `endif
 
   // M3 bring-up probe (+icf_trace): shared-miss-adapter AR/R dump.
+  // +trace_from/+trace_to bound the cycle window (default 0..3000).
   logic wta_trace;
-  initial wta_trace = $test$plusargs("icf_trace");
+  int unsigned wta_lo, wta_hi;
+  int unsigned wta_cyc = 0;
+  initial begin
+    wta_trace = $test$plusargs("icf_trace");
+    wta_lo = 0;
+    wta_hi = 3000;
+    void'($value$plusargs("trace_from=%d", wta_lo));
+    void'($value$plusargs("trace_to=%d", wta_hi));
+  end
   always_ff @(posedge clk_i) begin
-    if (rst_ni && wta_trace && $time() < 3000 &&
-        (icache_data_req_i || !icache_data_empty || !icache_rd_empty ||
-         axi_req_o.ar_valid || axi_resp_i.r_valid)) begin
-      $display("[wta] t=%0t icreq=%b icack=%b icempty=%b icrdfull=%b icrdempty=%b dc=%b | arb_req=%b idx=%b rdreq=%b rdgnt=%b | arv=%b arr=%b addr=%h | rv=%b rr=%b rlast=%b rid=%h rdata=%h",
-        $time, icache_data_req_i, icache_data_ack_o, icache_data_empty,
-        icache_rd_full, icache_rd_empty, !dcache_data_empty,
-        arb_req, arb_idx, axi_rd_req, axi_rd_gnt,
-        axi_req_o.ar_valid, axi_resp_i.ar_ready, axi_req_o.ar.addr,
-        axi_resp_i.r_valid, axi_rd_rdy, axi_resp_i.r.last, axi_resp_i.r.id, axi_resp_i.r.data);
+    if (!rst_ni) begin
+      wta_cyc = 0;
+    end else begin
+      wta_cyc++;
+      if (wta_trace && wta_cyc >= wta_lo && wta_cyc <= wta_hi &&
+          (icache_data_req_i || !icache_data_empty || !icache_rd_empty ||
+           axi_req_o.ar_valid || axi_resp_i.r_valid)) begin
+        $display("[wta] t=%0t icreq=%b icack=%b icempty=%b icrdfull=%b icrdempty=%b dc=%b | arb_req=%b idx=%b rdreq=%b rdgnt=%b | arv=%b arr=%b addr=%h | rv=%b rr=%b rlast=%b rid=%h rdata=%h",
+          $time, icache_data_req_i, icache_data_ack_o, icache_data_empty,
+          icache_rd_full, icache_rd_empty, !dcache_data_empty,
+          arb_req, arb_idx, axi_rd_req, axi_rd_gnt,
+          axi_req_o.ar_valid, axi_resp_i.ar_ready, axi_req_o.ar.addr,
+          axi_resp_i.r_valid, axi_rd_rdy, axi_resp_i.r.last, axi_resp_i.r.id, axi_resp_i.r.data);
+      end
+      // [wta2] event records for the I$ fill path (request fifo head, AR
+      // issue, R return, meta-fifo pop). Request-side vs return-side
+      // mis-association discrimination for hyp8-osbi-fe-diag-r1.
+      if (wta_trace && wta_cyc >= wta_lo && wta_cyc <= wta_hi) begin
+        if (icache_data_ack_o) begin
+          $display("[wta2] t=%0t ICREC push paddr=%h tid=%0d nc=%b",
+            $time, icache_data_i.paddr, icache_data_i.tid, icache_data_i.nc);
+        end
+        if (arb_ack[0] && axi_rd_gnt) begin
+          $display("[wta2] t=%0t AR head=%h araddr=%h arid=%h tid=%0d metapush=%b",
+            $time, icache_data.paddr, axi_rd_addr, axi_rd_id_in,
+            icache_data.tid, (arb_ack[0] & axi_rd_gnt));
+        end
+        if (ic_rtrn_go) begin
+          $display("[wta2] t=%0t R rid=%h last=%b rdata=%h metahead=%0d metaempty=%b",
+            $time, axi_rd_id_out, axi_rd_last, axi_rd_data,
+            icache_rtrn_tid_d, icache_rd_empty);
+        end
+        if (icache_rtrn_vld_q) begin
+          $display("[wta2] t=%0t RTRN tid=%0d data=%h",
+            $time, icache_rtrn_o.tid,
+            icache_rtrn_o.data[G6LCCfg.ICACHE_LINE_WIDTH-1:0]);
+        end
+      end
     end
   end
+
+  // Request-record integrity: the AR issued for an icache head must carry
+  // that head's paddr, and an id-0 read return must have a live meta entry
+  // (a return with no request record is exactly the mis-association class
+  // that installed pa-0x80012000 bytes under a va-0x80013000 miss).
+  ifill_ar_addr :
+  assert property (
+    @(posedge clk_i) disable iff (!rst_ni)
+    (arb_ack[0] && axi_rd_gnt)
+    |-> (axi_req_o.ar.addr == G6LCCfg.AxiAddrWidth'(icache_data.paddr)))
+  else $fatal(1, "[wt axi adapter] ifill AR addr %h != request head %h",
+              axi_req_o.ar.addr, icache_data.paddr);
+
+  ifill_rtrn_meta :
+  assert property (
+    @(posedge clk_i) disable iff (!rst_ni)
+    ic_rtrn_go |-> !icache_rd_empty)
+  else $fatal(1, "[wt axi adapter] id-0 read return with empty ifill meta fifo");
   //pragma translate_on
 
 endmodule  // wt_l15_adapter

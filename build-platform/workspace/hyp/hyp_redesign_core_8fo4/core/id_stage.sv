@@ -1715,9 +1715,10 @@ assign g1gy_lo =
                      decoded_instruction[i].pc, decoded_instruction[i].ex.valid);
     end
 //pragma translate_on
-  end else if (1'b0) begin
-    // Scalar drain. hyp8 SuperscalarEn is 1; a literal false keeps this arm
-    // out of the timing walk (the struct compare does not fold).
+  end else if (1'b0) begin : gen_scalar_drain
+    // Scalar drain. hyp8 SuperscalarEn is 1. A struct compare does not
+    // fold, so a true else is the timed head. The body stays for the
+    // single-issue shape; this profile does not elaborate it.
     always_comb begin
       issue_n = issue_q;
       if (HypCfg.DecodeStages == 1) fetch_entry_ready_o = '0;

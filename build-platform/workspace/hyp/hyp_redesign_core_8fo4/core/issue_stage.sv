@@ -103,14 +103,15 @@ module issue_stage
     // hyp8 g7: per-issue-port in-ALU forward selects - EX_STAGE (ALU0).
     // Bit 2 selects the registered A3 (result3_q) slot for LAT_ALU_FULL
     // producers.
-    output logic [G6LCCfg.NrIssuePorts-1:0][2:0] alu_fwd_a_o,
-    output logic [G6LCCfg.NrIssuePorts-1:0][2:0] alu_fwd_b_o,
+    output logic [G6LCCfg.NrIssuePorts-1:0][3:0] alu_fwd_a_o,
+    output logic [G6LCCfg.NrIssuePorts-1:0][3:0] alu_fwd_b_o,
     // hyp8 g7: ALU0 pipe-stage tids for the forward-select compare -
     // EX_STAGE (A1 slot, then the registered A2/WB-record slot, then the
     // registered A3 slot).
     input  logic [G6LCCfg.TRANS_ID_BITS-1:0] alu_fwd_tid_i,
     input  logic [G6LCCfg.TRANS_ID_BITS-1:0] alu_fwd_qtid_i,
     input  logic [G6LCCfg.TRANS_ID_BITS-1:0] alu_fwd_rtid_i,
+    input  logic [G6LCCfg.TRANS_ID_BITS-1:0] alu_fwd_htid_i,
     // hyp8 g10: LSQ checked bits — generated in g6lc_ooo_dispatch (LSQ
     // verdict), consumed by i_scoreboard.ld_checked_i, exported to
     // load_store_unit.ld_checked_i. '1 in the non-OoO shapes.
@@ -138,6 +139,8 @@ module issue_stage
     input logic resolve_branch_i,
     // Load store unit FU is ready - EX_STAGE
     input logic lsu_ready_i,
+    // Queued LSU posts - EX_STAGE
+    input logic [2:0] lsu_count_i,
     // Load store unit FU is valid - EX_STAGE
     output logic [G6LCCfg.NrIssuePorts-1:0] lsu_valid_o,
     // Mult FU is valid - EX_STAGE
@@ -295,6 +298,10 @@ module issue_stage
   logic              [G6LCCfg.NrIssuePorts-1:0][31:0] orig_instr_iro;
   logic              [G6LCCfg.NrIssuePorts-1:0]       issue_instr_valid_iro;
   logic              [G6LCCfg.NrIssuePorts-1:0]       issue_ack_iro;
+  // hyp8 WbReserve: IQ-side stall observation and the IRO-acceptance
+  // reservation's declined-offer pulse OR into the single PMU event.
+  logic                                                hyp_wb_reserve_stall_ooo;
+  logic                                                hyp_wb_reserve_stall_iro;
 
   
 
@@ -484,11 +491,14 @@ assign issue_instr_o    = issue_instr_iro[0];
         .ld_checked_o       (ld_checked),
         .lsu_replay_i       (replay_i),
         .lsu_replay_tid_i   (replay_tid_i),
-        .hyp_wb_reserve_stall_o,
+        .hyp_wb_reserve_stall_o (hyp_wb_reserve_stall_ooo),
         .ooo_drained_o      (ooo_drained_o)
     );
+    assign hyp_wb_reserve_stall_o =
+        hyp_wb_reserve_stall_ooo | hyp_wb_reserve_stall_iro;
   end else if (G6LCCfg.SliceOoOEn) begin : gen_slice_ooo
-    assign hyp_wb_reserve_stall_o = 1'b0;
+    assign hyp_wb_reserve_stall_ooo = 1'b0;
+    assign hyp_wb_reserve_stall_o = hyp_wb_reserve_stall_iro;
     assign ld_checked = '1;
     assign mem_violation    = 1'b0;
     assign mem_violation_id = '0;
@@ -529,7 +539,8 @@ assign issue_instr_o    = issue_instr_iro[0];
     );
   end else begin : gen_inorder_issue
     // Netlist-identity path: SB dispatch is FU issue
-    assign hyp_wb_reserve_stall_o = 1'b0;
+    assign hyp_wb_reserve_stall_ooo = 1'b0;
+    assign hyp_wb_reserve_stall_o = hyp_wb_reserve_stall_iro;
     assign ld_checked       = '1;
     assign mem_violation    = 1'b0;
     assign mem_violation_id = '0;
@@ -616,6 +627,7 @@ assign issue_instr_o    = issue_instr_iro[0];
       .orig_instr_i            (orig_instr_iro),
       .issue_instr_valid_i     (issue_instr_valid_iro),
       .issue_ack_o             (issue_ack_iro),
+      .hyp_wb_reserve_stall_o  (hyp_wb_reserve_stall_iro),
       // hyp8 g7: spec-arm metadata from the IQ + the ALU0 pipe tids,
       // producing the in-ALU forward selects back to ex_stage.
       .issue_spec_ab_i         (iro_spec_ab),
@@ -623,6 +635,7 @@ assign issue_instr_o    = issue_instr_iro[0];
       .alu_fwd_tid_i           (alu_fwd_tid_i),
       .alu_fwd_qtid_i          (alu_fwd_qtid_i),
       .alu_fwd_rtid_i          (alu_fwd_rtid_i),
+      .alu_fwd_htid_i          (alu_fwd_htid_i),
       .alu_fwd_a_o             (alu_fwd_a_o),
       .alu_fwd_b_o             (alu_fwd_b_o),
       .fwd_i                   (fwd),
@@ -648,6 +661,7 @@ assign issue_instr_o    = issue_instr_iro[0];
       .tinst_o                 (tinst_o),
       .branch_predict_o,
       .lsu_ready_i,
+      .lsu_count_i,
       .lsu_valid_o,
       .mult_valid_o,
       .fpu_ready_i,

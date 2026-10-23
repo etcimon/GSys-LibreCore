@@ -669,9 +669,22 @@ module g6lc_soc #(
   //pragma translate_off
   // M3 bring-up probe (+soc_trace): hart-AR → xbar → ROM slave path.
   logic soc_trace;
-  initial soc_trace = $test$plusargs("soc_trace");
+  int unsigned soc_lo, soc_hi;
+  int unsigned soc_cyc = 0;
+  initial begin
+    soc_trace = $test$plusargs("soc_trace");
+    soc_lo = 0;
+    soc_hi = 3000;
+    void'($value$plusargs("trace_from=%d", soc_lo));
+    void'($value$plusargs("trace_to=%d", soc_hi));
+  end
   always_ff @(posedge clk_uncore_i) begin
-    if (ndmreset_n && soc_trace && $time() < 3000 &&
+    if (!ndmreset_n) begin
+      soc_cyc = 0;
+    end else begin
+      soc_cyc++;
+    end
+    if (ndmreset_n && soc_trace && soc_cyc >= soc_lo && soc_cyc <= soc_hi &&
         (slv_req[0].ar_valid || mst_req[g6lc_soc::ROM].ar_valid || rom_req ||
          mst_resp[g6lc_soc::ROM].r_valid || slv_resp[0].r_valid)) begin
       $display("[soc] t=%0t | slv0 arv=%b arr=%b araddr=%h arid=%h rv=%b rr=%b | rom arv=%b arr=%b addr=%h id=%h rv=%b rr=%b rdata=%h rlast=%b | romreq=%b romaddr=%h romrdata=%h",

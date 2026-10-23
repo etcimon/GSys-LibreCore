@@ -374,10 +374,18 @@ package build_config_pkg;
                             ? unsigned'(4) : G6LCCfg.CohInvalDepth;
     cfg.CohAxiStarveLimit = (G6LCCfg.CohAxiStarveLimit == 0 && cfg.NrCores > 1)
                             ? unsigned'(16) : G6LCCfg.CohAxiStarveLimit;
-    // Hub shared AR/AW slots; 0 selects the default of 4 (FILL_ID + one spare
-    // must remain free in the hub's 4-bit ID space — check_cfg bounds 2..14).
-    cfg.CohMaxOutstanding = (G6LCCfg.CohMaxOutstanding == 0)
-                          ? unsigned'(4) : G6LCCfg.CohMaxOutstanding;
+    // Hub shared AR/AW slots. 0 selects max(4, 2 per core), capped at 14
+    // so FILL_ID and one spare stay free in the 4-bit mem-side ID space.
+    // A single core and a 2-core stream stay at 4. Four cores get 8.
+    // Eight cores get 14. An explicit package value is left alone.
+    begin
+      int unsigned coh_slots;
+      coh_slots = cfg.NrCores * 2;
+      if (coh_slots < 4) coh_slots = 4;
+      if (coh_slots > 14) coh_slots = 14;
+      cfg.CohMaxOutstanding = (G6LCCfg.CohMaxOutstanding == 0)
+                            ? coh_slots : G6LCCfg.CohMaxOutstanding;
+    end
     cfg.WayPredEn = G6LCCfg.WayPredEn;
     cfg.WayPredEntries = G6LCCfg.WayPredEntries;
     cfg.ReplPolicy = G6LCCfg.ReplPolicy;

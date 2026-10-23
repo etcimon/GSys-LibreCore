@@ -165,6 +165,7 @@ ${HYP_CORE_DIR}/core/smt/g6lc_smt_pc_bank.sv
 ${HYP_CORE_DIR}/core/smt/g6lc_smt_csr_bank.sv
 ${HYP_CORE_DIR}/core/smt/g6lc_issue_barrier.sv
 ${HYP_CORE_DIR}/core/ooo/g6lc_ooo_pkg.sv
+${HYP_CORE_DIR}/core/ooo/g6lc_flu_reserve.sv
 ${HYP_CORE_DIR}/core/ooo/g6lc_rat.sv
 ${HYP_CORE_DIR}/core/ooo/g6lc_freelist.sv
 ${HYP_CORE_DIR}/core/ooo/g6lc_rename.sv
@@ -252,6 +253,7 @@ ${HYP_CORE_DIR}/core/g6lc_core.sv
 ${HYP_CORE_DIR}/core/cache_subsystem/wt_dcache_ctrl.sv
 ${HYP_CORE_DIR}/core/cache_subsystem/wt_dcache_mem.sv
 ${HYP_CORE_DIR}/core/cache_subsystem/wt_dcache_missunit.sv
+${HYP_CORE_DIR}/core/cache_subsystem/wt_dcache_wbuffer_leg.sv
 ${HYP_CORE_DIR}/core/cache_subsystem/wt_dcache_wbuffer.sv
 ${HYP_CORE_DIR}/core/cache_subsystem/wt_dcache.sv
 ${HYP_CORE_DIR}/core/cache_subsystem/g6lc_icache.sv

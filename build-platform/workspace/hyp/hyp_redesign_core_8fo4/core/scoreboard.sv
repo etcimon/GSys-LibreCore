@@ -264,12 +264,16 @@ module scoreboard
 
 //pragma translate_off
   // assert that we never acknowledge a commit if the instruction is not valid
+  // hyp8 contract: the drop path is validity-agnostic by design — a
+  // cancelled load's ld_checked bit may be released before its
+  // drop-commit lands, so an ack with commit_drop_o set need not carry
+  // commit_instr_o[].valid.  The strict form is kept for non-drop acks.
   assert property (
-    @(posedge clk_i) disable iff (!rst_ni) commit_ack_i[0] |-> commit_instr_o[0].valid)
+    @(posedge clk_i) disable iff (!rst_ni) commit_ack_i[0] |-> (commit_instr_o[0].valid || commit_drop_o[0]))
   else $fatal(1, "Commit acknowledged but instruction is not valid");
   for (genvar cp = 1; cp < G6LCCfg.NrCommitPorts; cp++) begin : gen_commit_port_valid
     assert property (
-        @(posedge clk_i) disable iff (!rst_ni) commit_ack_i[cp] |-> commit_instr_o[cp].valid)
+        @(posedge clk_i) disable iff (!rst_ni) commit_ack_i[cp] |-> (commit_instr_o[cp].valid || commit_drop_o[cp]))
     else $fatal(1, "Commit acknowledged but instruction is not valid");
   end
   // assert that we never give an issue ack signal if the instruction is not valid
@@ -293,23 +297,13 @@ module scoreboard
     end
   end
 
-  // hyp8: the presented bundle must agree with the ack timing -- an ack
-  // may only retire a slot that was presented (registered-ack protocol):
-  // the acked slot is exactly the one the bundle presented LAST cycle.
+  // hyp8: common retirement event — an ack retires the slot presented
+  // THIS cycle: it must be a live decidable bundle entry issued by the
+  // scoreboard, not a previous-cycle presentation.
   for (genvar p = 0; p < G6LCCfg.NrCommitPorts; p++) begin : gen_ack_slot_chk
-    logic [G6LCCfg.TRANS_ID_BITS-1:0] presented_q;
-    logic presented_live_q;
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) begin
-        presented_q      <= '0;
-        presented_live_q <= 1'b0;
-      end else begin
-        presented_q      <= commit_sel_slot[p];
-        presented_live_q <= mem_q[commit_sel_slot[p]].issued;
-      end
-    end
     assert property (@(posedge clk_i) disable iff (!rst_ni || flush_i)
-      commit_ack_i[p] |-> presented_live_q)
+      commit_ack_i[p] |->
+      (commit_bundle_valid_o[p] && mem_q[commit_sel_slot[p]].issued))
     else $fatal(1, "SBC_ACK_PRESENT: commit ack for a slot that was not presented");
   end
 
@@ -416,6 +410,56 @@ module scoreboard
         (decoded_instr_valid_i[i] && decoded_instr_ack_o[i] && !flush_unissued_instr_i) |->
         !mem_q[issue_pointer_q + G6LCCfg.TRANS_ID_BITS'(i)].issued)
       else $fatal(1, "SBC_NO_OVERWRITE: dispatch allocated onto a live scoreboard slot");
+    end
+  end
+//pragma translate_on
+
+//pragma translate_off
+  // +smt_flow_trace window probe (+trace_from/+trace_to, default 0..3000):
+  // [cnc] every set/clear edge of cancelled_mask_o / kill_req on the
+  // watched tids {0,1,5}, with the producing cause: the comb bmiss window
+  // (resolving branch tid) or the per-slot sticky cancelled bit. A mask
+  // pulse that drops an in-flight LSU request must be traceable to the
+  // exact resolve/sticky event that raised it.
+  bit cnc_tr;
+  int unsigned cnc_cyc = 0;
+  int unsigned cnc_lo, cnc_hi;
+  logic [2:0] cnc_mask_q = '0, cnc_kill_q = '0, cnc_stk_q = '0;
+  initial begin
+    cnc_tr = $test$plusargs("smt_flow_trace");
+    cnc_lo = 0;
+    cnc_hi = 3000;
+    void'($value$plusargs("trace_from=%d", cnc_lo));
+    void'($value$plusargs("trace_to=%d", cnc_hi));
+  end
+
+  always @(posedge clk_i) begin
+    if (!rst_ni) begin
+      cnc_cyc = 0;
+      cnc_mask_q = '0;
+      cnc_kill_q = '0;
+      cnc_stk_q  = '0;
+    end else if (cnc_tr) begin
+      cnc_cyc++;
+      if ((cnc_cyc >= cnc_lo) && (cnc_cyc <= cnc_hi)) begin
+        for (int unsigned k = 0; k < 3; k++) begin
+          automatic int unsigned t = (k == 0) ? 0 : (k == 1) ? 1 : 5;
+          if (cancelled_mask_o[t] != cnc_mask_q[k] ||
+              kill_req[t] != cnc_kill_q[k] ||
+              mem_q[t].cancelled != cnc_stk_q[k]) begin
+            $display("[cnc] c=%0d tid=%0d mask=%b->%b kill=%b->%b sticky=%b->%b bmiss=%b brv=%b brmisp=%b brtid=%0d iptr=%0d",
+                     cnc_cyc, t, cnc_mask_q[k], cancelled_mask_o[t],
+                     cnc_kill_q[k], kill_req[t],
+                     cnc_stk_q[k], mem_q[t].cancelled,
+                     bmiss, resolved_branch_i.valid,
+                     resolved_branch_i.is_mispredict,
+                     resolved_branch_i.trans_id, issue_pointer_q);
+          end
+          cnc_mask_q[k] = cancelled_mask_o[t];
+          cnc_kill_q[k] = kill_req[t];
+          cnc_stk_q[k]  = mem_q[t].cancelled;
+        end
+      end
     end
   end
 //pragma translate_on

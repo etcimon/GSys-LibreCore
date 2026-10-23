@@ -109,6 +109,9 @@ module wt_dcache
   logic     [   G6LCCfg.DCACHE_LINE_WIDTH/8-1:0]                                  wr_cl_data_be;
   logic     [      G6LCCfg.DCACHE_SET_ASSOC-1:0]                                  wr_vld_bits;
   logic                                                                           wr_cl_inv;
+  // In-flight MSHR refill for the wbuffer fixup tag-miss contract
+  logic                                                                           mshr_vld;
+  logic     [           DCACHE_CL_IDX_WIDTH-1:0]                                  mshr_cl_idx;
   logic     [      G6LCCfg.DCACHE_SET_ASSOC-1:0]                                  wr_req;
   logic                                                                           wr_ack;
   logic     [           DCACHE_CL_IDX_WIDTH-1:0]                                  wr_idx;
@@ -220,6 +223,9 @@ module wt_dcache
       .wr_cl_user_o   (wr_cl_user),
       .wr_cl_data_be_o(wr_cl_data_be),
       .wr_vld_bits_o  (wr_vld_bits),
+      // MSHR occupancy export for the wbuffer fixup tag-miss contract
+      .mshr_vld_o     (mshr_vld),
+      .mshr_cl_idx_o  (mshr_cl_idx),
       // memory interface
       .mem_rtrn_vld_i (mem_rtrn_vld_i),
       .mem_rtrn_i     (mem_rtrn_i),
@@ -499,6 +505,9 @@ assign rd_prio[k] = 1'b1;
       .wr_cl_vld_i    (wr_cl_vld),
       .wr_cl_idx_i    (wr_cl_idx),
       .wr_cl_inv_i    (wr_cl_inv),
+      // in-flight refill (fixup tag-miss wait/drop contract)
+      .mshr_vld_i     (mshr_vld),
+      .mshr_cl_idx_i  (mshr_cl_idx),
       // single word write interface
       .wr_req_o       (wr_req),
       .wr_ack_i       (wr_ack),

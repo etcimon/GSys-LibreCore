@@ -225,6 +225,12 @@ src = edit_instance(src, "  commit_stage #(", ");", commit_edit)
 
 def csr_edit(block):
     block = add_param(block)
+    anchor = "      .clk_i,\n      .rst_ni,\n"
+    ins = ("""      // hyp8 g10: full pipeline flush frees the staged CSR request.
+      .flush_i                 (flush_ctrl_id),
+""")
+    assert anchor in block, "csr flush conn anchor"
+    block = block.replace(anchor, anchor + ins, 1)
     anchor = "      .csr_rdata_o             (csr_rdata_csr_commit),"
     ins = ("""
       .csr_rdata_valid_o      (csr_rdata_valid),""")

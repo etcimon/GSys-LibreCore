@@ -64,13 +64,14 @@ module issue_read_operands
     // hyp8 r5: tid of the op in the registered A3 result slot
     // (LAT_ALU_FULL producers under AluStages==3).
     input  logic [G6LCCfg.TRANS_ID_BITS-1:0] alu_fwd_rtid_i,
+    input  logic [G6LCCfg.TRANS_ID_BITS-1:0] alu_fwd_htid_i,
     // hyp8 g7: per-operand in-ALU forward select for ALU0, in the fu_data_o
     // domain: bit 0 picks the live A2-comb result (producer in the A1
     // registers), bit 1 the registered A2 result (producer in the A2
     // record), bit 2 the registered A3 result (producer in the A3
     // record). All zero for every non-spec-armed operand.
-    output logic [G6LCCfg.NrIssuePorts-1:0][2:0] alu_fwd_a_o,
-    output logic [G6LCCfg.NrIssuePorts-1:0][2:0] alu_fwd_b_o,
+    output logic [G6LCCfg.NrIssuePorts-1:0][3:0] alu_fwd_a_o,
+    output logic [G6LCCfg.NrIssuePorts-1:0][3:0] alu_fwd_b_o,
     // Forwarding - SCOREBOARD
     input forwarding_t fwd_i,
     // U5 OoO PRF operands (valid when OoOEn && issue_instr.ooo_renamed)
@@ -114,6 +115,9 @@ module issue_read_operands
     output branchpredict_sbe_t branch_predict_o,
     // Load store unit FU is ready - EX_STAGE
     input logic lsu_ready_i,
+    // Posts already in the LSU queue. The two AGU-shadow grants are
+    // counted here; a new grant is refused at 4.
+    input logic [2:0] lsu_count_i,
     // Load store unit FU is valid - EX_STAGE
     output logic [G6LCCfg.NrIssuePorts-1:0] lsu_valid_o,
     // Mult FU is valid - EX_STAGE
@@ -172,6 +176,9 @@ module issue_read_operands
     input logic [G6LCCfg.NrCommitPorts-1:0] we_fpr_i,
     // Issue stall - PERF_COUNTERS
     output logic stall_issue_o,
+    // hyp8 WbReserve: an offered FLU lane was declined by the
+    // IRO-acceptance reservation (PMU seam).
+    output logic hyp_wb_reserve_stall_o,
     // Information dedicated to RVFI - RVFI
     output logic [G6LCCfg.NrIssuePorts-1:0][G6LCCfg.XLEN-1:0] rvfi_rs1_o,
     // Information dedicated to RVFI - RVFI
@@ -233,7 +240,15 @@ module issue_read_operands
   logic [G6LCCfg.NrIssuePorts-1:0] stall_raw, stall_rs1, stall_rs2, stall_rs3;
   logic [G6LCCfg.NrIssuePorts-1:0] fu_busy;  // functional unit is busy
   fus_busy_t [G6LCCfg.NrIssuePorts-1:0] fus_busy;  // which functional units are considered busy
-  logic [G6LCCfg.NrIssuePorts-1:0] issue_ack;
+  // hyp8 WbReserve: the scoreboard's raw result BEFORE the
+  // casq/CVXIF/lr_sc/prefix post-processing. The FLU reservation offers
+  // on this vector and admits feed back into the final ack; only the
+  // final accepted lanes consume a reservation.
+  logic [G6LCCfg.NrIssuePorts-1:0] issue_ack_pre;
+  logic [G6LCCfg.NrIssuePorts-1:0] res_offer, res_accept, res_admit;
+  g6lc_core_pkg::fu_t  [G6LCCfg.NrIssuePorts-1:0] res_fu;
+  g6lc_core_pkg::fu_op [G6LCCfg.NrIssuePorts-1:0] res_op;
+  logic [G6LCCfg.NrIssuePorts-1:0][G6LCCfg.TRANS_ID_BITS-1:0] res_tid;
   // operands coming from regfile
   logic [G6LCCfg.NrIssuePorts-1:0][G6LCCfg.XLEN-1:0] operand_a_regfile, operand_b_regfile;
   // third operand from fp regfile or gp regfile if NR_RGPR_PORTS == 3
@@ -257,6 +272,10 @@ module issue_read_operands
   logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] fpu_hart_n, fpu_hart_q;
   logic [G6LCCfg.NrIssuePorts-1:0] alu2_valid_n, alu2_valid_q;
   logic [G6LCCfg.NrIssuePorts-1:0] lsu_valid_n, lsu_valid_q;
+  logic lsu_pipe_q;
+  logic lsu_full;
+  assign lsu_full = !lsu_ready_i ||
+      ((lsu_count_i + {2'b0, |lsu_valid_q} + {2'b0, lsu_pipe_q}) >= 3'd4);
   logic [G6LCCfg.NrIssuePorts-1:0] csr_valid_n, csr_valid_q;
   logic [G6LCCfg.NrIssuePorts-1:0] branch_valid_n, branch_valid_q;
   logic [G6LCCfg.NrIssuePorts-1:0] cvxif_valid_n, cvxif_valid_q;
@@ -597,20 +616,45 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
   assign stall_issue_o = stall_raw[0];
   assign tinst_o = G6LCCfg.RVH ? tinst_q : '0;
 
-  // ALU bypass signals (port0→port1 only; requires at least dual-issue)
+  // ALU bypass signals (port0→port1 only; requires at least dual-issue).
+  // Both lanes must hold a valid instruction: a same-cycle forward is only
+  // defined while the port-0 producer actually issues this cycle (under OoO
+  // a drained lane keeps its last record, whose stale fu/rd would alias).
   if (G6LCCfg.ALUBypass && G6LCCfg.NrIssuePorts > 1) begin
     assign is_alu_bypass =
+      issue_instr_valid_i[0] && issue_instr_valid_i[1] &&
       (issue_instr_i[0].fu == ALU && issue_instr_i[1].fu == ALU) &&
       !((issue_instr_i[0].op inside {CPOP, CPOPW}) || (issue_instr_i[1].op inside {CPOP, CPOPW}));
   end else begin
     assign is_alu_bypass = 1'b0;
   end
 
-  if (G6LCCfg.SuperscalarEn && G6LCCfg.NrALUs >= 2 && G6LCCfg.NrIssuePorts > 1) begin
+  // hyp8: port 0 stays on ALU0. A non-zero port's LAT_ALU_LOW is ALU2.
+  // That pipe has no staggered A3 taps, so ALU-full stays on ALU0. The
+  // IQ reserved FPU_WB (not FLU_WB) for the ALU2 winner; this bit is what
+  // makes alu2_valid_n fire and keeps the op off the shared one-cycle pick.
+  // The !WbReserve arm is the legacy fus_busy steer.
+  if (G6LCCfg.SuperscalarEn && G6LCCfg.NrALUs >= 2 && G6LCCfg.NrIssuePorts > 1 &&
+      !HypCfg.WbReserve) begin
     // Prefer secondary ALU unless bypass / FPU on port 1 forces primary.
     for (genvar i = 0; i < G6LCCfg.NrIssuePorts; i++) begin
-      assign use_alu2[i] = is_alu_bypass || (issue_instr_i[1].fu inside {FPU, FPU_VEC})
+      assign use_alu2[i] = is_alu_bypass ||
+                               (issue_instr_valid_i[1] &&
+                                (issue_instr_i[1].fu inside {FPU, FPU_VEC}))
                                ? fus_busy[i].alu : !fus_busy[i].alu2;
+    end
+  end else if (G6LCCfg.SuperscalarEn && G6LCCfg.NrALUs >= 2 &&
+               G6LCCfg.NrIssuePorts > 1) begin
+    for (genvar i = 0; i < G6LCCfg.NrIssuePorts; i++) begin : gen_alu2_wb
+      if (i == 0) begin : gen_p0
+        assign use_alu2[i] = 1'b0;
+      end else begin : gen_pn
+        assign use_alu2[i] = issue_instr_valid_i[i] &&
+            (issue_instr_i[i].fu == ALU) &&
+            (g6lc_ooo_pkg::ooo_lat_class(issue_instr_i[i].fu,
+                                         issue_instr_i[i].op) ==
+             g6lc_hyp_pkg::LAT_ALU_LOW);
+      end
     end
   end else begin
     assign use_alu2 = '0;
@@ -651,7 +695,12 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
       fus_busy[0].fpu_vec = 1'b1;
     end
 
-    if (!lsu_ready_i) begin
+    // Occupancy is outside this process. Inside, it is one bit, same
+    // shape as the old ready/strobe test. Depth is 4: count is posts
+    // already queued, lsu_valid_q and lsu_pipe_q are the two grants
+    // still in the AGU shadow. A new grant waits only when those sum
+    // to 4, or when lsu_ready_i says the queue is full.
+    if (lsu_full) begin
       fus_busy[0].load  = 1'b1;
       fus_busy[0].store = 1'b1;
     end
@@ -664,11 +713,14 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
       // Propagate structural hazards port-by-port (in-order multi-issue).
       //
       // Soft-ladder / monorepo-soak integration (R3a cont.6/14/15/18, hang-6/7):
-      // Under SuperscalarEn, after CTRL_FLOW / ALU / MULT / FPU / LOAD / STORE
-      // block *all* younger ports. This is intentional dual-issue throttle for
-      // OpenSBI FDT / callee-saved correctness until precise WAW dual-WB is
-      // proven. CSR/CVXIF remain port-0 only. See architecture/multi-threading/
-      // soft-ladder/monorepo-soak-integration.md and inventory b1-fdt-lenp-store.
+      // Under SuperscalarEn, CTRL_FLOW / ALU / MULT / FPU / LOAD / STORE still
+      // block a younger op that would share their pipe. The one LSU packet
+      // (shared TLB and depth-2 bypass) is the exception: an older ALU,
+      // branch, multiply, or non-memory FP op does not hold it, so one
+      // younger load or store keeps port 0's real credit. A second memory
+      // op stays blocked. CSR/CVXIF remain port-0 only. A second core is
+      // another core instance, not a second packet on this LSU. See
+      // architecture/multi-threading/soft-ladder/monorepo-soak-integration.md.
       for (int unsigned p = 1; p < G6LCCfg.NrIssuePorts; p++) begin
         fus_busy[p] = fus_busy[p-1];
 
@@ -676,90 +728,129 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
         fus_busy[p].csr   = 1'b1;
         fus_busy[p].cvxif = 1'b1;
 
-        unique case (issue_instr_i[p-1].fu)
-          NONE: fus_busy[p].none = 1'b1;
-          CTRL_FLOW: begin
-            // Full post-CF serialize under SS (jal/ret RA poison under partial).
-            if (G6LCCfg.SuperscalarEn) begin
-              fus_busy[p] = '1;
-            end else if (issue_instr_i[p-1].op == g6lc_core_pkg::ADD) begin
-              fus_busy[p].alu = 1'b1;
-              fus_busy[p].ctrl_flow = 1'b1;
-              fus_busy[p].csr = 1'b1;
-            end else begin
-              fus_busy[p] = '1;
+        // The in-order dual-issue throttle keys on the OLDER lane's
+        // presented record and must only apply while that lane holds a
+        // valid instruction this cycle. Under OoO the lanes drain
+        // independently: issue_instr_i[p-1] keeps its last presented record
+        // after the lane empties, and a stale fu would hold fus_busy[p] =
+        // '1 forever -- first port-1 presentation deadlocked commit
+        // (h33: stale port-0 STORE blocked tid 20's ALU c.nop).
+        if (issue_instr_valid_i[p-1]) begin
+          unique case (issue_instr_i[p-1].fu)
+            NONE: fus_busy[p].none = 1'b1;
+            CTRL_FLOW: begin
+              // Full post-CF serialize under SS. This loop is already
+              // inside if (SuperscalarEn), so the else never runs. A wide
+              // '1 there was the 14.5 arm (the op compare sat on the
+              // guard). The 1-bit else keeps the case exclusive.
+              if (G6LCCfg.SuperscalarEn) fus_busy[p] = '1;
+              else fus_busy[p].none = 1'b1;
             end
-          end
-          ALU: begin
-            // One ALU issue/cycle under SS until dual-WB clean on OpenSBI.
-            if (G6LCCfg.SuperscalarEn) begin
-              fus_busy[p] = '1;
-            end else if (use_alu2[p-1] && G6LCCfg.NrALUs >= 2) begin
-              fus_busy[p].alu2 = 1'b1;
-            end else begin
-              fus_busy[p].alu = 1'b1;
-              fus_busy[p].ctrl_flow = 1'b1;
-              fus_busy[p].csr = 1'b1;
+            ALU: begin
+              // One ALU issue/cycle under SS until dual-WB clean.
+              // A younger load/store does not read this '1; see lsu_hold.
+              if (G6LCCfg.SuperscalarEn) fus_busy[p] = '1;
+              else fus_busy[p].none = 1'b1;
             end
-          end
-          CSR: fus_busy[p] = '1;
-          MULT: begin
-            fus_busy[p].mult = 1'b1;
-            if (G6LCCfg.SuperscalarEn) fus_busy[p] = '1;
-          end
-          FPU, FPU_VEC: begin
-            fus_busy[p].fpu = 1'b1;
-            fus_busy[p].fpu_vec = 1'b1;
-            if (issue_instr_i[p].op inside {[FLD : FSB]}) begin
-              fus_busy[p].load  = 1'b1;
-              fus_busy[p].store = 1'b1;
+            CSR: fus_busy[p] = '1;
+            MULT: begin
+              fus_busy[p].mult = 1'b1;
+              if (G6LCCfg.SuperscalarEn) fus_busy[p] = '1;
             end
-            if (G6LCCfg.SuperscalarEn) fus_busy[p] = '1;
-          end
-          LOAD, STORE: begin
-            // Includes AMO (STORE FU). Full LSU serialize under SS.
-            fus_busy[p].load  = 1'b1;
-            fus_busy[p].store = 1'b1;
-            if (issue_instr_i[p-1].op inside {[FLD : FSB]}) begin
+            FPU, FPU_VEC: begin
               fus_busy[p].fpu = 1'b1;
               fus_busy[p].fpu_vec = 1'b1;
+              if (issue_instr_i[p].op inside {[FLD : FSB]}) begin
+                fus_busy[p].load  = 1'b1;
+                fus_busy[p].store = 1'b1;
+              end
+              if (G6LCCfg.SuperscalarEn) fus_busy[p] = '1;
             end
-            if (G6LCCfg.SuperscalarEn) begin
-              fus_busy[p] = '1;
+            LOAD, STORE: begin
+              // Includes AMO (STORE FU). Full LSU serialize under SS.
+              fus_busy[p].load  = 1'b1;
+              fus_busy[p].store = 1'b1;
+              if (issue_instr_i[p-1].op inside {[FLD : FSB]}) begin
+                fus_busy[p].fpu = 1'b1;
+                fus_busy[p].fpu_vec = 1'b1;
+              end
+              if (G6LCCfg.SuperscalarEn) begin
+                fus_busy[p] = '1;
+              end
             end
-          end
-          CVXIF: ;
-          default: ;
-        endcase
+            CVXIF: ;
+            default: ;
+          endcase
+        end
       end
     end
   end
 
   // select the right busy signal
   // this obviously depends on the functional unit we need
-  for (genvar i = 0; i < G6LCCfg.NrIssuePorts; i++) begin
+  // Holds are outside the fus_busy case. The '1 there marks every
+  // younger unit busy. These bits keep only the pipe the older op
+  // actually uses, plus port 0's real credit (flu_ready, mul in
+  // flight, LSU occupancy, fpu_ready). One LSU translation per cycle.
+  // ALU0 / branch / CSR / AES share the one-cycle pipe. ALU2 does not.
+  // A multiply and an FP arithmetic op have their own pipes.
+  for (genvar i = 0; i < G6LCCfg.NrIssuePorts; i++) begin : gen_fu_busy
+    logic lsu_hold, alu_pipe_hold, mul_hold, fp_hold;
+    if (i == 0) begin : gen_lsu0
+      assign lsu_hold      = fus_busy[0].load;
+      assign alu_pipe_hold = fus_busy[0].alu;
+      assign mul_hold      = fus_busy[0].mult;
+      assign fp_hold       = fus_busy[0].fpu;
+    end else begin : gen_lsu_n
+      logic older_fp_mem, older_one_cycle;
+      assign older_fp_mem = (issue_instr_i[i-1].fu == FPU ||
+                             issue_instr_i[i-1].fu == FPU_VEC) &&
+                            (issue_instr_i[i-1].op inside {[FLD : FSB]});
+      assign older_one_cycle = issue_instr_valid_i[i-1] &&
+          ((issue_instr_i[i-1].fu == ALU) ||
+           (issue_instr_i[i-1].fu == CTRL_FLOW) ||
+           (issue_instr_i[i-1].fu == CSR) ||
+           (issue_instr_i[i-1].fu == AES));
+      assign lsu_hold = fus_busy[0].load ||
+          (issue_instr_valid_i[i-1] &&
+           (issue_instr_i[i-1].fu != ALU) &&
+           (issue_instr_i[i-1].fu != CTRL_FLOW) &&
+           (issue_instr_i[i-1].fu != MULT) &&
+           (issue_instr_i[i-1].fu != NONE) &&
+           (issue_instr_i[i-1].fu != FPU) &&
+           (issue_instr_i[i-1].fu != FPU_VEC)) ||
+          (issue_instr_valid_i[i-1] && older_fp_mem);
+      assign alu_pipe_hold = fus_busy[0].alu || fus_busy[0].ctrl_flow ||
+                             older_one_cycle;
+      assign mul_hold = fus_busy[0].mult ||
+          (issue_instr_valid_i[i-1] && (issue_instr_i[i-1].fu == MULT));
+      assign fp_hold = fus_busy[0].fpu ||
+          (issue_instr_valid_i[i-1] &&
+           ((issue_instr_i[i-1].fu == FPU) ||
+            (issue_instr_i[i-1].fu == FPU_VEC)));
+    end
     always_comb begin
       unique case (issue_instr_i[i].fu)
         NONE: fu_busy[i] = fus_busy[i].none;
         ALU: begin
-          if (G6LCCfg.SuperscalarEn && use_alu2[i]) begin
-            fu_busy[i] = fus_busy[i].alu2;
-          end else begin
-            fu_busy[i] = fus_busy[i].alu;
-          end
+          // ALU2 was admitted by the IQ window. A younger ALU-full
+          // uses ALU0 only when that pipe is actually taken.
+          if (G6LCCfg.SuperscalarEn && use_alu2[i]) fu_busy[i] = 1'b0;
+          else fu_busy[i] = alu_pipe_hold;
         end
-        CTRL_FLOW: fu_busy[i] = fus_busy[i].ctrl_flow;
+        CTRL_FLOW: fu_busy[i] = (i == 0) ? fus_busy[i].ctrl_flow
+                                         : alu_pipe_hold;
         CSR: fu_busy[i] = fus_busy[i].csr;
-        MULT: fu_busy[i] = fus_busy[i].mult;
-        LOAD: fu_busy[i] = fus_busy[i].load;
-        STORE: fu_busy[i] = fus_busy[i].store;
+        MULT: fu_busy[i] = mul_hold;
+        LOAD:  fu_busy[i] = lsu_hold;
+        STORE: fu_busy[i] = lsu_hold;
         CVXIF: fu_busy[i] = fus_busy[i].cvxif;
-        AES: fu_busy[i] = fus_busy[i].aes;
+        AES: fu_busy[i] = (i == 0) ? fus_busy[i].aes : alu_pipe_hold;
         default:
         if (G6LCCfg.FpPresent) begin
           unique case (issue_instr_i[i].fu)
-            FPU: fu_busy[i] = fus_busy[i].fpu;
-            FPU_VEC: fu_busy[i] = fus_busy[i].fpu_vec;
+            FPU: fu_busy[i] = (i == 0) ? fus_busy[i].fpu : fp_hold;
+            FPU_VEC: fu_busy[i] = (i == 0) ? fus_busy[i].fpu_vec : fp_hold;
             default: fu_busy[i] = 1'b0;
           endcase
         end else begin
@@ -1065,21 +1156,24 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
     for (genvar p = 1; p < G6LCCfg.NrIssuePorts; p++) begin : gen_ssp
       logic [G6LCCfg.NrIssuePorts-1:0] m_r1, m_r2, m_r3;
       for (genvar e = 0; e < G6LCCfg.NrIssuePorts; e++) begin : gen_sse
+        // Same-cycle RAW is only defined while the older lane presents a
+        // valid instruction this cycle; a drained lane's stale rd must not
+        // stall the younger lane (same contract as the fus_busy throttle).
         logic c1, c2, c3;
-        assign c1 = (e < p) &&
+        assign c1 = (e < p) && issue_instr_valid_i[e] &&
             !issue_instr_i[p].use_zimm &&
             (!G6LCCfg.FpPresent ||
              (is_rs1_fpr(issue_instr_i[p].op) ==
               is_rd_fpr(issue_instr_i[e].op))) &&
             issue_instr_i[p].rs1 == issue_instr_i[e].rd &&
             issue_instr_i[p].rs1 != '0;
-        assign c2 = (e < p) &&
+        assign c2 = (e < p) && issue_instr_valid_i[e] &&
             (!G6LCCfg.FpPresent ||
              (is_rs2_fpr(issue_instr_i[p].op) ==
               is_rd_fpr(issue_instr_i[e].op))) &&
             issue_instr_i[p].rs2 == issue_instr_i[e].rd &&
             issue_instr_i[p].rs2 != '0;
-        assign c3 = (e < p) &&
+        assign c3 = (e < p) && issue_instr_valid_i[e] &&
             ((G6LCCfg.FpPresent && is_imm_fpr(issue_instr_i[p].op)) ?
                 is_rd_fpr(issue_instr_i[e].op) &&
                 issue_instr_i[e].rd ==
@@ -1160,7 +1254,7 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
           forward_rs2[0] = 1'b0;
           stall_rs2[0]   = 1'b0;
         end
-        if (OPERANDS_PER_INSTR == 3 && ~x_issue_resp_i.register_read[2]) begin
+        if (OPERANDS_PER_INSTR == 3 && ~x_issue_resp_i.register_read[CASQ_HI_IDX]) begin
           forward_rs3[0] = 1'b0;
           stall_rs3[0]   = 1'b0;
         end
@@ -1410,6 +1504,7 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
       alu_valid_q    <= '0;
       aes_valid_q    <= '0;
       lsu_valid_q    <= '0;
+      lsu_pipe_q     <= 1'b0;
       mult_valid_q   <= '0;
       fpu_valid_q    <= '0;
       fpu_fmt_q      <= '0;
@@ -1423,6 +1518,7 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
     end else begin
       alu_valid_q    <= alu_valid_n;
       aes_valid_q    <= aes_valid_n;
+      lsu_pipe_q     <= |lsu_valid_q;
       lsu_valid_q    <= lsu_valid_n;
       mult_valid_q   <= mult_valid_n;
       fpu_valid_q    <= fpu_valid_n;
@@ -1451,9 +1547,11 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
       // hyp8 r5: bit 2 -- the registered A3 slot, the LAT_ALU_FULL
       // producer's publish point under AluStages==3.
       alu_fwd_a_o[p][2] = spec_ab_q[p][0] && (ptid_q[p][0] == alu_fwd_rtid_i);
+      alu_fwd_a_o[p][3] = spec_ab_q[p][0] && (ptid_q[p][0] == alu_fwd_htid_i);
       alu_fwd_b_o[p][0] = spec_ab_q[p][1] && (ptid_q[p][1] == alu_fwd_tid_i);
       alu_fwd_b_o[p][1] = spec_ab_q[p][1] && (ptid_q[p][1] == alu_fwd_qtid_i);
       alu_fwd_b_o[p][2] = spec_ab_q[p][1] && (ptid_q[p][1] == alu_fwd_rtid_i);
+      alu_fwd_b_o[p][3] = spec_ab_q[p][1] && (ptid_q[p][1] == alu_fwd_htid_i);
     end
   end
 
@@ -1499,24 +1597,19 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
 
   // We can issue an instruction if we do not detect that any other instruction is writing the same
   // destination register.
-  // We also need to check if there is an unresolved branch in the scoreboard.
-  always_comb begin : issue_scoreboard
-    for (int unsigned i = 0; i < G6LCCfg.NrIssuePorts; i++) begin
-      // default assignment
-      issue_ack[i] = 1'b0;
-      // check that the instruction we got is valid
-      // and that the functional unit we need is not busy
-      if (issue_instr_valid_i[i] && !fu_busy[i]) begin
-        if (!stall_raw[i]) begin
-          issue_ack[i] = 1'b1;
-        end
-        if (issue_instr_i[i].ex.valid) begin
-          issue_ack[i] = 1'b1;
-        end
-      end
-    end
+  // Ack is valid, the unit is free, and either the operand stall is
+  // clear or the instruction is an exception (an exception acks even
+  // while operands stall). Same predicate as the nested ifs.
+  for (genvar i = 0; i < G6LCCfg.NrIssuePorts; i++) begin : gen_ackpre
+    assign issue_ack_pre[i] = issue_instr_valid_i[i] && !fu_busy[i] &&
+                               (!stall_raw[i] || issue_instr_i[i].ex.valid);
+  end
 
-    issue_ack_o = issue_ack;
+  always_comb begin : issue_scoreboard
+    // hyp8 WbReserve: the final ack is the raw result filtered by the
+    // FLU reservation admit (admit is 1 for non-FLU/exception lanes, so
+    // nothing else is blocked), then the legacy post-processing.
+    issue_ack_o = issue_ack_pre & res_admit;
     if (casq_stall) issue_ack_o[0] = 1'b0;
     // Do not acknowledge the issued instruction if transaction is not completed.
     if (issue_instr_i[0].fu == CVXIF && !(x_transaction_accepted_o || x_transaction_rejected)) begin
@@ -1529,10 +1622,15 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
         end
       end
     end
-    // In-order multi-issue: a bubble on port k kills ports k+1..N-1
+    // In-order multi-issue: a bubble on port k kills ports k+1..N-1.
+    // Under OoO each held lane drains independently -- a nonempty lane
+    // must be able to ack while a lower lane is empty -- so the strict
+    // lane-prefix kill applies only to the in-order stream.
     if (G6LCCfg.SuperscalarEn) begin
-      for (int unsigned p = 1; p < G6LCCfg.NrIssuePorts; p++) begin
-        if (!issue_ack_o[p-1]) issue_ack_o[p] = 1'b0;
+      if (!G6LCCfg.OoOEn) begin
+        for (int unsigned p = 1; p < G6LCCfg.NrIssuePorts; p++) begin
+          if (!issue_ack_o[p-1]) issue_ack_o[p] = 1'b0;
+        end
       end
       // Soft-ladder B1 (b1-amo-spin-lock): AMO only on issue port 0 under SS.
       // Port-1 AMO + hang-7 younger-cancel left amo_buffer wedged (depth 1,
@@ -1546,7 +1644,56 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
       // iter-012 note: force SI (issue_ack_o[p>0]=0) was PEEL_FDT-negative
       // (fw64e, same 12eb2/12b2a) — residual is not residual dual-issue pairs.
     end
+    // hyp8: the FU valid registers are suppressed on flush_i (fuv_en
+    // carries !flush_i), so an ack this cycle would be a transfer with no
+    // capture -- the final ack must be zero alongside them.
+    if (flush_i) issue_ack_o = '0;
   end
+
+  // ------------------------------------------------------------------
+  // hyp8 WbReserve: actual-acceptance FLU completion reservation.
+  //
+  // Offers are the raw scoreboard result qualified by validity and the
+  // absence of an exception/flush -- an exception retires without a FU
+  // result and must never consume a window slot. Accepts are the FINAL
+  // issue_ack_o under the same qualification, so a lane declined by
+  // casq/CVXIF/lr_sc post-processing reserves nothing. There is no
+  // combinational accept->admit edge inside the reserve.
+  // ------------------------------------------------------------------
+  logic [G6LCCfg.NrWbPorts-1:0]                        res_wb_valid;
+  logic [G6LCCfg.NrWbPorts-1:0][G6LCCfg.TRANS_ID_BITS-1:0] res_wb_tid;
+  for (genvar w = 0; w < G6LCCfg.NrWbPorts; w++) begin : gen_res_wb
+    assign res_wb_valid[w] = fwd_i.wb[w].valid && !fwd_i.wb[w].ex_valid;
+    assign res_wb_tid[w]   = fwd_i.wb[w].trans_id;
+  end
+
+  for (genvar p = 0; p < G6LCCfg.NrIssuePorts; p++) begin : gen_res_pack
+    assign res_fu[p]  = issue_instr_i[p].fu;
+    assign res_op[p]  = issue_instr_i[p].op;
+    assign res_tid[p] = issue_instr_i[p].trans_id;
+    assign res_offer[p]  = issue_ack_pre[p] && issue_instr_valid_i[p] &&
+                           !issue_instr_i[p].ex.valid && !flush_i;
+    assign res_accept[p] = issue_ack_o[p] && issue_instr_valid_i[p] &&
+                           !issue_instr_i[p].ex.valid && !flush_i;
+  end
+
+  g6lc_flu_reserve #(
+      .G6LCCfg (G6LCCfg),
+      .HypCfg  (HypCfg)
+  ) i_flu_reserve (
+      .clk_i,
+      .rst_ni,
+      .offer_i    (res_offer),
+      .accept_i   (res_accept),
+      .fu_i       (res_fu),
+      .op_i       (res_op),
+      .tid_i      (res_tid),
+      .sb_live_i  (fwd_i.still_issued),
+      .wb_valid_i (res_wb_valid),
+      .wb_tid_i   (res_wb_tid),
+      .admit_o    (res_admit),
+      .stall_o    (hyp_wb_reserve_stall_o)
+  );
 
   always_comb begin : gen_lr_sc_pair
     lr_sc_pair_d = lr_sc_pair_q;
@@ -1594,6 +1741,11 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
   localparam int unsigned G1GQ_RF_PORTS =
       (G6LCCfg.SuperscalarEn && G6LCCfg.NrHarts > 1) ?
           (G6LCCfg.NrRgprPorts + 1) : G6LCCfg.NrRgprPorts;
+  // Index of the optional extra g1gq read slot; clamped into range so the
+  // disabled-profile elaboration has no out-of-range access (the write is
+  // gated by G1GQ_RF_PORTS > NrRgprPorts below).
+  localparam int unsigned G1GQ_EXTRA_IDX =
+      (G1GQ_RF_PORTS > G6LCCfg.NrRgprPorts) ? G6LCCfg.NrRgprPorts : 0;
   logic [  G6LCCfg.NrRgprPorts-1:0][G6LCCfg.XLEN-1:0] rdata;
   logic [  G6LCCfg.NrRgprPorts-1:0][             4:0] raddr_pack;
   logic [  G6LCCfg.NrRgprPorts-1:0][             4:0] raddr_pack_base;
@@ -1644,7 +1796,7 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
     for (int unsigned p = 0; p < G6LCCfg.NrRgprPorts; p++)
       g1gq_raddr[p] = raddr_pack[p];
     if (G1GQ_RF_PORTS > G6LCCfg.NrRgprPorts)
-      g1gq_raddr[G6LCCfg.NrRgprPorts] = g1gq_raddr_i;
+      g1gq_raddr[G1GQ_EXTRA_IDX] = g1gq_raddr_i;
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -1763,7 +1915,11 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
     };
 
     if (G6LCCfg.SuperscalarEn) begin
-      if (!(issue_instr_i[0].fu inside {FPU, FPU_VEC} || issue_instr_i[0].op inside {[FLD:FSB]})) begin
+      // Port 0 keeps the shared FP read address only while it presents a
+      // valid FP-class instruction this cycle; a drained lane's stale fu/op
+      // must not steal port 1's FPR read.
+      if (!(issue_instr_valid_i[0] &&
+            (issue_instr_i[0].fu inside {FPU, FPU_VEC} || issue_instr_i[0].op inside {[FLD:FSB]}))) begin
         fp_raddr_pack = {
           issue_instr_i[1].result[4:0], issue_instr_i[1].rs2[4:0], issue_instr_i[1].rs1[4:0]
         };

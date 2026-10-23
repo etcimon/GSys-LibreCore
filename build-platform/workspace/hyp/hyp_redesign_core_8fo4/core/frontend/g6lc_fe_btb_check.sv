@@ -14,11 +14,16 @@
 //     predicted target equal to the RAS top is a return the untagged line
 //     learned correctly — no override.
 //
-// Disagreement issues a registered override #1 record {pc, epoch-bump}: the
-// stream restarts at the tagged prediction and every younger fetch dies by
-// epoch. A line guess of "taken" with no BTB hit and no RAS agreement falls
-// back to the sequential successor block. A "not-taken" guess contradicted
-// by a BTB hit redirects to the BTB target.
+// Disagreement issues an override #1 record {pc, epoch-bump}: every younger
+// fetch dies by epoch. The restart target is the queue frontier
+// (resume_pc_i — the successor of the newest instruction the queue has
+// accepted), NOT the tagged target and NOT next_block: the epoch kill drops
+// every in-flight window between the queue tail and this block, and only a
+// resume at the frontier refetches them (osbi fdt_next_tag: a stale
+// line-table taken on the ret block squelched the stream to next_block and
+// skipped the whole dispatch tail). Queue-owned entries still deliver and
+// retire; the checked block's CF then resolves architecturally against the
+// tagged predictors/RAS at execute time.
 //
 // The check is off both critical paths: the npc loop uses the line table
 // (same cycle), the response path uses the response-keyed predictors (stage
@@ -52,6 +57,10 @@ module g6lc_fe_btb_check
     input  btb_update_t             btb_update_i,
     // RAS top-of-stack snapshot (fetch hart)
     input  ras_t                    ras_predict_i,
+    // Queue-owned stream frontier for the restart: the successor of the
+    // newest instruction the queue has accepted for the checked window's
+    // hart. Combinational, sampled the cycle the check fires.
+    input  logic [G6LCCfg.VLEN-1:0] resume_pc_i,
     // Override #1 record (one-cycle pulse when the tagged check disagrees)
     output logic                    ov1_valid_o,
     output logic [G6LCCfg.VLEN-1:0] ov1_pc_o,
@@ -153,8 +162,12 @@ module g6lc_fe_btb_check
       ((btb_hit && (!chk_line_taken_q ||
                     (chk_line_target_q != btb_target && !ras_agree))) ||
        (!btb_hit && chk_line_taken_q && !ras_agree));
-  assign ov1_pc = btb_hit ? btb_target
-                          : G6LCCfg.VLEN'(g6lc_fetch_pkg::next_block(G6LCCfg, 64'(chk_vaddr_q)));
+  // The squelch restart is the queue frontier in both legs: restart after
+  // the newest accepted instruction so the epoch-killed windows between the
+  // queue tail and this block are refetched. The checked block's CF stays
+  // queued and resolves at execute time (the tagged target, if right, is
+  // reproposed by the stage-S verdict when the refetched block returns).
+  assign ov1_pc = resume_pc_i;
 
   assign ov1_valid_o = ov1;
   assign ov1_pc_o    = ov1_pc;

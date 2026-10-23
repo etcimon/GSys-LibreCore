@@ -348,15 +348,25 @@ assign cl_tag_d  = (areq_i.fetch_valid) ? areq_i.fetch_paddr[G6LCCfg.ICACHE_TAG_
   assign cl_index = vaddr_d[G6LCCfg.ICACHE_INDEX_WIDTH-1:ICACHE_OFFSET_WIDTH];
 
 
-  if (G6LCCfg.NOCType == config_pkg::NOC_TYPE_AXI4_ATOP) begin : gen_axi_offset
+  // hyp8 fetch is 64 bits (align 3) and the line offset is 4 bits.
+  // A shift by FETCH_ALIGN_BITS does not fold. Clear the low 3 bits.
+  // pragma translate_off
+  initial begin
+    assert (G6LCCfg.FETCH_ALIGN_BITS == 3);
+    assert (ICACHE_OFFSET_WIDTH == 4);
+    assert (G6LCCfg.NOCType == config_pkg::NOC_TYPE_AXI4_ATOP);
+  end
+  // pragma translate_on
+  if (1'b1) begin : gen_axi_offset
     // if we generate a noncacheable access, the word will be at offset 0 or 4 in the cl coming from memory
-    assign cl_offset_d = ( fetch_accept & dreq_i.req)      ? ICACHE_OFFSET_WIDTH'((dreq_i.vaddr >> G6LCCfg.FETCH_ALIGN_BITS) << G6LCCfg.FETCH_ALIGN_BITS) :
+    assign cl_offset_d = ( fetch_accept & dreq_i.req)      ? {dreq_i.vaddr[3], 3'b0} :
                          ( paddr_is_nc  & mem_data_req_o ) ? {{ICACHE_OFFSET_WIDTH-3{1'b0}}, cl_offset_q[2], 2'b0} : // needed since we transfer 32bit over a 64bit AXI bus in this case
         cl_offset_q;
     // request word address instead of cl address in case of NC access
     assign mem_data_o.paddr = (paddr_is_nc) ? {cl_tag_d, vaddr_q[G6LCCfg.ICACHE_INDEX_WIDTH-1:3], 3'b0} :                                         // align to 64bit
         {cl_tag_d, vaddr_q[G6LCCfg.ICACHE_INDEX_WIDTH-1:ICACHE_OFFSET_WIDTH], {ICACHE_OFFSET_WIDTH{1'b0}}}; // align to cl
-  end else begin : gen_piton_offset
+  end
+  if (1'b0) begin : gen_piton_offset
     // icache fills are either cachelines or 4byte fills, depending on whether they go to the Piton I/O space or not.
     // since the piton cache system replicates the data, we can always index the full CL
     assign cl_offset_d = (fetch_accept & dreq_i.req) ? {dreq_i.vaddr >> 2, 2'b0} : cl_offset_q;
@@ -976,21 +986,75 @@ assign cl_tag_d  = (areq_i.fetch_valid) ? areq_i.fetch_paddr[G6LCCfg.ICACHE_TAG_
   end
 `endif
 
-  // M3 bring-up probe (+icf_trace): first-300-cycle state/handshake dump.
-  // Sim-only; not part of the product logic.
+  // M3 bring-up probe (+icf_trace): state/handshake dump.
+  // Sim-only; not part of the product logic. +trace_from/+trace_to bound
+  // the cycle window (default 0..600, the original bring-up cap).
   logic icf_trace;
-  initial icf_trace = $test$plusargs("icf_trace");
+  int unsigned icf_lo, icf_hi;
+  int unsigned icf_cyc = 0;
+  initial begin
+    icf_trace = $test$plusargs("icf_trace");
+    icf_lo = 0;
+    icf_hi = 600;
+    void'($value$plusargs("trace_from=%d", icf_lo));
+    void'($value$plusargs("trace_to=%d", icf_hi));
+  end
   always_ff @(posedge clk_i) begin
-    if (rst_ni && icf_trace && $time() < 600) begin
-      $display("[icf] t=%0t st=%0d st_d=%0d en=%b cen=%b fcnt=%0d fdone=%b | req=%b rdy=%b vld=%b k1=%b k2=%b spec=%b | a_req=%b a_vld=%b a_ex=%b a_pa=%h | mreq=%b mack=%b mrtrn=%b rt=%0d | hit=%b nc=%b vaq=%h vad=%h",
-        $time, state_q, state_d, en_i, cache_en_q, flush_cnt_q, flush_done,
-        dreq_i.req, dreq_o.ready, dreq_o.valid, dreq_i.kill_s1, dreq_i.kill_s2, dreq_i.spec,
-        areq_o.fetch_req, areq_i.fetch_valid, areq_i.fetch_exception.valid,
-        areq_i.fetch_paddr,
-        mem_data_req_o, mem_data_ack_i, mem_rtrn_vld_i, mem_rtrn_i.rtype,
-        |cl_hit, paddr_is_nc, vaddr_q, vaddr_d);
+    if (!rst_ni) begin
+      icf_cyc = 0;
+    end else begin
+      icf_cyc++;
+      if (icf_trace && icf_cyc >= icf_lo && icf_cyc <= icf_hi) begin
+        $display("[icf] t=%0t st=%0d st_d=%0d en=%b cen=%b fcnt=%0d fdone=%b | req=%b rdy=%b vld=%b k1=%b k2=%b spec=%b | a_req=%b a_vld=%b a_ex=%b a_pa=%h | mreq=%b mack=%b mrtrn=%b rt=%0d | hit=%b nc=%b vaq=%h vad=%h",
+          $time, state_q, state_d, en_i, cache_en_q, flush_cnt_q, flush_done,
+          dreq_i.req, dreq_o.ready, dreq_o.valid, dreq_i.kill_s1, dreq_i.kill_s2, dreq_i.spec,
+          areq_o.fetch_req, areq_i.fetch_valid, areq_i.fetch_exception.valid,
+          areq_i.fetch_paddr,
+          mem_data_req_o, mem_data_ack_i, mem_rtrn_vld_i, mem_rtrn_i.rtype,
+          |cl_hit, paddr_is_nc, vaddr_q, vaddr_d);
+      end
+      // +ifill_trace (+icf_trace also enables): the fill-path request/
+      // install records — hyp8-osbi-fe-diag-r1 proved a line whose pushed
+      // bytes were pa-0x80012000's for a va-0x80013000 miss; these records
+      // pin whether the wrong address left on the request side or the
+      // wrong data returned.
+      if (icf_trace && icf_cyc >= icf_lo && icf_cyc <= icf_hi) begin
+        if (mem_data_req_o && mem_data_ack_i) begin
+          $display("[ifill] t=%0t REQ paddr=%h tid=%0d nc=%b cltd=%h cltq=%h vaq=%h avld=%b apa=%h",
+            $time, mem_data_o.paddr, mem_data_o.tid, mem_data_o.nc,
+            cl_tag_d, cl_tag_q, vaddr_q, areq_i.fetch_valid, areq_i.fetch_paddr);
+        end
+        if (cache_wren) begin
+          $display("[ifill] t=%0t INSTALL idx=%h tag=%h wayoh=%b rtid=%0d data=%h",
+            $time, vld_addr, cl_tag_q, vld_req, mem_rtrn_i.tid,
+            mem_rtrn_i.data[G6LCCfg.ICACHE_LINE_WIDTH-1:0]);
+        end
+      end
     end
   end
+
+  // Fill request/return tag ledger: the tag the accepted miss request was
+  // issued with must be the tag the returned line installs under. A return
+  // answering a different request record (meta/ordering skew below, or a
+  // second miss overwriting the record) trips here.
+  logic [G6LCCfg.ICACHE_TAG_WIDTH-1:0] ifill_req_tag_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      ifill_req_tag_q <= '0;
+    end else if (mem_data_req_o && mem_data_ack_i) begin
+      ifill_req_tag_q <= mem_data_o.paddr[
+          G6LCCfg.ICACHE_TAG_WIDTH+G6LCCfg.ICACHE_INDEX_WIDTH-1:
+          G6LCCfg.ICACHE_INDEX_WIDTH];
+    end
+  end
+
+  ifill_tag_match :
+  assert property (
+    @(posedge clk_i) disable iff (!rst_ni)
+    (cache_wren && (mem_rtrn_i.rtype == wt_cache_pkg::ICACHE_IFILL_ACK))
+    |-> (cl_tag_q == ifill_req_tag_q))
+  else $fatal(1, "[l1 icache] installed tag %h != request tag %h (ifill record mis-association)",
+              cl_tag_q, ifill_req_tag_q);
   //pragma translate_on
 
 endmodule  // g6lc_icache

@@ -56,6 +56,12 @@ module g6lc_rename
     input  logic [(NR_HARTS<1?1:NR_HARTS)-1:0] flush_hart_i,
     input  logic mispredict_i,
     input  logic [$clog2(CKPT_DEPTH+1)-1:0] mispredict_level_i,
+    // Unissued-window kill (controller flush_unissued): a group still in
+    // this pipe has not dispatched, so its scoreboard window is in the
+    // unissued tail and dies with the event. The stage must die with it —
+    // a survivor would publish later and dispatch's grp_pend_q (already
+    // cleared) could not keep a second group out of the pipe.
+    input  logic flush_unissued_i,
     input  logic [NR_PORTS-1:0][(NR_HARTS<=1?1:$clog2(NR_HARTS))-1:0] hart_i,
     input  logic [NR_PORTS-1:0]       valid_i,
     input  logic [NR_PORTS-1:0][4:0]  rs1_i,
@@ -80,6 +86,11 @@ module g6lc_rename
     output logic [NR_PORTS-1:0][FPRF_W-1:0] fprd_old_o,
     output logic [NR_PORTS-1:0]       rs1_ready_o,
     output logic [NR_PORTS-1:0]       rs2_ready_o,
+    // Current allocation readiness: the live busy bitmaps, so a WB that
+    // lands while a group waits in rename/backpressure is visible at IQ
+    // allocation even though the R1 ready snapshot is stale.
+    output logic [PRF_ENTRIES-1:0] int_busy_o,
+    output logic [(FPRF_ENTRIES < 1 ? 1 : FPRF_ENTRIES)-1:0] fp_busy_o,
     output logic [NR_PORTS-1:0][$clog2(CKPT_DEPTH+1)-1:0] ckpt_id_o,
     input  logic [NR_FREE-1:0]        ckpt_retire_i,
     output logic                      stall_o,
@@ -124,6 +135,8 @@ module g6lc_rename
   logic [FPN-1:0]                  ffree_q;
   logic [PRF_ENTRIES-1:0]          busy_q;
   logic [FPN-1:0]                  fbusy_q;
+  assign int_busy_o = busy_q;
+  assign fp_busy_o = fbusy_q;
   logic [NH-1:0][LVL_W-1:0]        ckpt_cnt_q;
   logic [NH-1:0][LVL_W-1:0]        ckpt_head_q;
   logic                            recovering;
@@ -146,7 +159,7 @@ module g6lc_rename
   // Kill decode: which in-flight lanes die at this edge.
   logic                          kill_all;
   logic [NH-1:0]                 kill_hart;
-  assign kill_all = mispredict_i || flush_i;
+  assign kill_all = mispredict_i || flush_i || flush_unissued_i;
   always_comb begin
     kill_hart = '0;
     for (int unsigned h = 0; h < NH; h++)

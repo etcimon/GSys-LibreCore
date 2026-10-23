@@ -133,23 +133,24 @@ module g6lc_lsq_verdict #(
   assign v_min = vmt[VLV][0];
   for (genvar s = 0; s < NSV; s++)
     assign v_oh[s] = vcand[s] && (st_win_dist_i[s] == v_min);
-  // Per-bit vector extract for the one-hot masked-OR gathers.
-  function automatic logic [NSV-1:0] vsb_id(
-      input logic [NSV-1:0][G6LCCfg.TRANS_ID_BITS-1:0] v,
-      input int unsigned b);
-    for (int unsigned s = 0; s < NSV; s++) vsb_id[s] = v[s][b];
-  endfunction
-  function automatic logic [NSV-1:0] vsb_pay(
-      input logic [NSV-1:0][G6LCCfg.VLEN-1:0] v, input int unsigned b);
-    for (int unsigned s = 0; s < NSV; s++) vsb_pay[s] = v[s][b];
-  endfunction
+  // Per-bit column of the one-hot masked OR. A function that walked
+  // every source billed that walk in series with the distance tree.
   assign viol_d = |v_oh;
   for (genvar b = 0; b < G6LCCfg.TRANS_ID_BITS; b++) begin : gen_vid
-    assign viol_id_d[b]   = |(v_oh & vsb_id(st_win_id_i, b));
-    assign viol_dist_d[b] = |(v_oh & vsb_id(st_win_dist_i, b));
+    logic [NSV-1:0] id_col, dist_col;
+    for (genvar s = 0; s < NSV; s++) begin : gen_col
+      assign id_col[s]   = st_win_id_i[s][b];
+      assign dist_col[s] = st_win_dist_i[s][b];
+    end
+    assign viol_id_d[b]   = |(v_oh & id_col);
+    assign viol_dist_d[b] = |(v_oh & dist_col);
   end
   for (genvar b = 0; b < G6LCCfg.VLEN; b++) begin : gen_vpay
-    assign viol_pay_d[b] = |(v_oh & vsb_pay(st_win_pay_i, b));
+    logic [NSV-1:0] pay_col;
+    for (genvar s = 0; s < NSV; s++) begin : gen_col
+      assign pay_col[s] = st_win_pay_i[s][b];
+    end
+    assign viol_pay_d[b] = |(v_oh & pay_col);
   end
 
   // hyp8 H3: a `wait` load verdict (an older store unresolved or a matched
@@ -160,21 +161,49 @@ module g6lc_lsq_verdict #(
   // a single tid sufficient regardless.
   logic                          wait_d;
   logic [G6LCCfg.TRANS_ID_BITS-1:0] wait_id_d;
-
-  always_comb begin
-    wait_d    = 1'b0;
-    wait_id_d = '0;
-    for (int unsigned l = NLD; l > 0; l--) begin
-      if (ld_ev_valid_i[l-1] && ld_wait_i[l-1] &&
-          !cancelled_mask_i[ld_ev_id_i[l-1]]) begin
-        wait_d    = 1'b1;
-        wait_id_d = ld_ev_id_i[l-1];
-      end
+  // Lowest staged wait wins, which is what the descending overwrite kept.
+  logic [NLD-1:0] wait_ok, wait_oh;
+  for (genvar l = 0; l < NLD; l++) begin : gen_wait_ok
+    assign wait_ok[l] = ld_ev_valid_i[l] && ld_wait_i[l] &&
+                        !cancelled_mask_i[ld_ev_id_i[l]];
+  end
+  assign wait_oh = wait_ok & (~wait_ok + {{NLD-1{1'b0}}, 1'b1});
+  assign wait_d  = |wait_oh;
+  for (genvar b = 0; b < G6LCCfg.TRANS_ID_BITS; b++) begin : gen_wait_id
+    logic [NLD-1:0] id_col;
+    for (genvar l = 0; l < NLD; l++) begin : gen_col
+      assign id_col[l] = ld_ev_id_i[l][b];
     end
+    assign wait_id_d[b] = |(wait_oh & id_col);
+  end
+  // Lowest live load event, for the registered STL mirror. No match
+  // leaves stall and forward clear; data holds in the flop.
+  logic [NLD-1:0] stl_ok, stl_oh;
+  logic           stl_any;
+  logic           stl_stall_d, stl_forward_d;
+  logic [G6LCCfg.XLEN-1:0] stl_data_d;
+  for (genvar l = 0; l < NLD; l++) begin : gen_stl_ok
+    assign stl_ok[l] = ld_ev_valid_i[l] && !cancelled_mask_i[ld_ev_id_i[l]];
+  end
+  assign stl_oh = stl_ok & (~stl_ok + {{NLD-1{1'b0}}, 1'b1});
+  assign stl_any = |stl_oh;
+  assign stl_stall_d   = |(stl_oh & ld_wait_i);
+  assign stl_forward_d = |(stl_oh & ~ld_wait_i & ld_win_valid_i);
+  for (genvar b = 0; b < G6LCCfg.XLEN; b++) begin : gen_stl_data
+    logic [NLD-1:0] pay_col;
+    for (genvar l = 0; l < NLD; l++) begin : gen_col
+      assign pay_col[l] = ld_win_pay_i[l][b];
+    end
+    assign stl_data_d[b] = |(stl_oh & pay_col);
   end
 
   // final_q bookkeeping: set when a load verdict lands, cleared when the
   // tid is re-allocated to a new load, killed, or the pipe flushes.
+  // Set on the registered V-stage verdict, not the input event: the
+  // release module's dwait bookkeeping lands on this same edge
+  // (vld -> dwait_q), so final becoming visible one edge earlier lets
+  // ld_checked_o publish while the store data the load must still wait
+  // on is in flight (dwait_q reads '0 for one cycle).
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       final_q <= '0;
@@ -186,8 +215,9 @@ module g6lc_lsq_verdict #(
       for (int unsigned p = 0; p < NR_ALLOC; p++)
         if (ld_alloc_i[p]) final_q[alloc_id_i[p]] <= 1'b0;
       for (int unsigned l = 0; l < NLD; l++)
-        if (ld_ev_valid_i[l] && !cancelled_mask_i[ld_ev_id_i[l]])
-          final_q[ld_ev_id_i[l]] <= 1'b1;
+        if (ld_verdict_valid_o[l] &&
+            !cancelled_mask_i[ld_verdict_id_o[l]])
+          final_q[ld_verdict_id_o[l]] <= 1'b1;
     end
   end
 
@@ -228,15 +258,9 @@ module g6lc_lsq_verdict #(
       // Observability STL outputs mirror the latest live load verdict
       // (functional publication is via ld_checked_o + the store-buffer
       // forward pair — L2).  A `wait` verdict appears on stl_stall_o.
-      stl_stall_o   <= 1'b0;
-      stl_forward_o <= 1'b0;
-      for (int l = NLD-1; l >= 0; l--) begin
-        if (ld_ev_valid_i[l] && !cancelled_mask_i[ld_ev_id_i[l]]) begin
-          stl_stall_o   <= ld_wait_i[l];
-          stl_forward_o <= !ld_wait_i[l] && ld_win_valid_i[l];
-          stl_data_o    <= ld_win_pay_i[l];
-        end
-      end
+      stl_stall_o   <= stl_stall_d;
+      stl_forward_o <= stl_forward_d;
+      if (stl_any) stl_data_o <= stl_data_d;
       // Violation: registered report + the IQ/scoreboard re-arm pulse; a
       // wait verdict pulses the same re-arm (violation wins the tid slot —
       // the dispatch merge's pending set carries a coincident loser).

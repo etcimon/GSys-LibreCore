@@ -441,7 +441,6 @@ module g6lc_lsq #(
   logic [NR_UPDATE-1:0][VIO_BANK-1:0]  vio_match_q, vio_unres_q, vio_nodata_q;
   logic [NR_UPDATE-1:0][VIO_BANK-1:0]  vio_older_q;
   logic [NR_UPDATE-1:0][VIO_BANK-1:0][IDW-1:0] vio_dist_q;
-
   // Virtual violation leaves: store event u vs same-cycle load event v
   // (v != u) and vs the deduplicated query record.  match/older/dist
   // are computed at the C stage and registered beside the bank outputs;
@@ -493,20 +492,18 @@ module g6lc_lsq #(
         // Other same-cycle load events: virtual leaf slots 0..NR-2.
         for (int unsigned v = 0; v < NR_UPDATE; v++) begin
           if (v != u) begin
-            automatic int unsigned li;
-            li = (v < u) ? v : v-1;
-            vv_id_d[u][li]  = ev_addr_id[v];
-            vv_pay_d[u][li] = ev_ld_pc[v];
+            vv_id_d[u][(v < u) ? v : v-1]  = ev_addr_id[v];
+            vv_pay_d[u][(v < u) ? v : v-1] = ev_ld_pc[v];
             if (ev_addr_valid[v] && !ev_addr_is_st[v] &&
                 !cancelled_mask_i[ev_addr_id[v]] &&
                 (!LSQ_HART_OWN || ev_ld_hart[v] == ev_st_hart[u])) begin
               lbe = lane_be(ev_addr[v], ev_addr_size[v]);
               if (same_word(ev_addr[v], ev_addr[u]) && (sbe & lbe) != '0)
-                vv_match_d[u][li] = 1'b1;
-              vv_older_d[u][li] = g6lc_ooo_pkg::ooo_age_older(
+                vv_match_d[u][(v < u) ? v : v-1] = 1'b1;
+              vv_older_d[u][(v < u) ? v : v-1] = g6lc_ooo_pkg::ooo_age_older(
                   IDW, 32'(ev_addr_id[u]), 32'(ev_addr_id[v]),
                   32'(commit_ptr_i));
-              vv_dist_d[u][li] = IDW'(g6lc_ooo_pkg::ooo_age_dist(
+              vv_dist_d[u][(v < u) ? v : v-1] = IDW'(g6lc_ooo_pkg::ooo_age_dist(
                   IDW, 32'(ev_addr_id[v]), 32'(commit_ptr_i)));
             end
           end
@@ -574,11 +571,11 @@ module g6lc_lsq #(
       for (int unsigned u = 0; u < NR_UPDATE; u++) begin
         for (int unsigned i = 0; i < VIO_BANK; i++) begin
           if (i < LD_ENTRIES) begin
-            vio_eid_q[u][i]  <= ld_q[i].id;
-            vio_epay_q[u][i] <= ld_q[i].pc;
+            vio_eid_q[u][i]    <= ld_q[i].id;
+            vio_epay_q[u][i]   <= ld_q[i].pc;
           end else begin
-            vio_eid_q[u][i]  <= '0;
-            vio_epay_q[u][i] <= '0;
+            vio_eid_q[u][i]    <= '0;
+            vio_epay_q[u][i]   <= '0;
           end
         end
         for (int unsigned i = 0; i < STL_BANK; i++) begin
@@ -820,6 +817,12 @@ module g6lc_lsq #(
         .DIR     (1'b1)
     ) i_vio_red (
         .clk_i, .rst_ni, .flush_i,
+        // Every resident younger load matching the eventing store is a
+        // violation candidate: the LSU's forward probe may have raced
+        // the store's resolution and the published data may be stale.
+        // The replay is the recovery — suppressing it committed stale
+        // data twice (h33: dwait-tracked lbu byte 0x88 vs stored 0xef;
+        // r5: unres-tracked ld published 0).
         .match_i  ({vv_match_q[u], vio_match_q[u]}),
         .unres_i  ({NR_UPDATE'(1'b0), vio_unres_q[u]}),
         .nodata_i ({NR_UPDATE'(1'b0), vio_nodata_q[u]}),
@@ -1183,5 +1186,76 @@ module g6lc_lsq #(
   assign mem_violation_o    = v_viol || phys_viol;
   assign mem_violation_id_o = v_viol ? v_viol_id : phys_viol_id;
   assign mem_violation_pc_o = v_viol ? v_viol_pc : phys_viol_pc;
+
+//pragma translate_off
+  // +lsq_trace: load-entry release lifetime probe (diagnostic only).
+  bit lsq_trace;
+  int unsigned lsq_cyc = 0;
+  int unsigned lsq_lo, lsq_hi;
+  logic [LD_ENTRIES-1:0]                            lp_seen;
+  logic [LD_ENTRIES-1:0]                            lp_done, lp_rel;
+  logic [LD_ENTRIES-1:0][IDW-1:0]                   lp_id;
+  logic [LD_ENTRIES-1:0][G6LCCfg.NR_SB_ENTRIES-1:0] lp_unres, lp_dwait;
+  initial begin
+    lsq_trace = $test$plusargs("lsq_trace");
+    lsq_lo = 0;
+    lsq_hi = 3000;
+    void'($value$plusargs("trace_from=%d", lsq_lo));
+    void'($value$plusargs("trace_to=%d", lsq_hi));
+  end
+
+  always @(posedge clk_i) begin
+    if (!rst_ni) begin
+      lsq_cyc = 0;
+      lp_seen = '0;
+    end else if (lsq_trace) begin
+      lsq_cyc++;
+      if (lsq_cyc >= lsq_lo && lsq_cyc <= lsq_hi) begin
+        for (int unsigned i = 0; i < LD_ENTRIES; i++) begin
+          if (ld_q[i].valid) begin
+            if (!lp_seen[i] || lp_done[i] != ld_q[i].done ||
+                lp_id[i] != ld_q[i].id ||
+                lp_unres[i] != i_release.unres_q[i] ||
+                lp_dwait[i] != i_release.dwait_q[i] ||
+                lp_rel[i]  != ld_release[i]) begin
+              $display("[lsq] c=%0d ld i=%0d id=%0d done=%b unres=%h dwait=%h rel=%b",
+                       lsq_cyc, i, ld_q[i].id, ld_q[i].done,
+                       i_release.unres_q[i], i_release.dwait_q[i],
+                       ld_release[i]);
+              lp_seen[i]  = 1'b1;
+              lp_done[i]  = ld_q[i].done;
+              lp_id[i]    = ld_q[i].id;
+              lp_unres[i] = i_release.unres_q[i];
+              lp_dwait[i] = i_release.dwait_q[i];
+              lp_rel[i]   = ld_release[i];
+            end
+          end else lp_seen[i] = 1'b0;
+        end
+        for (int unsigned v = 0; v < NLD; v++)
+          if (vld_v[v])
+            $display("[lsq] c=%0d dwait_set v=%0d id=%0d mask=%h",
+                     lsq_cyc, v, vld_id[v], vld_dwait[v]);
+        if (|st_resolved)
+          $display("[lsq] c=%0d st_resolved=%h", lsq_cyc, st_resolved);
+        if (|st_data_res)
+          $display("[lsq] c=%0d st_data_res=%h", lsq_cyc, st_data_res);
+        for (int unsigned p = 0; p < NR_ALLOC; p++)
+          if (ld_alloc_v[p])
+            $display("[lsq] c=%0d ld_alloc p=%0d idx=%0d id=%0d older=%h",
+                     lsq_cyc, p, ld_alloc_idx[p], alloc_id_i[p],
+                     alloc_older[p]);
+        for (int unsigned p = 0; p < G6LCCfg.NrWbPorts; p++) begin
+          if (complete_valid_i[p])
+            $display("[lsq] c=%0d complete_in p=%0d id=%0d is_st=%b canc=%b",
+                     lsq_cyc, p, complete_id_i[p], complete_is_st_i[p],
+                     cancelled_mask_i[complete_id_i[p]]);
+          if (ev_complete_valid[p])
+            $display("[lsq] c=%0d ev_complete p=%0d id=%0d is_st=%b",
+                     lsq_cyc, p, ev_complete_id[p], ev_complete_is_st[p]);
+        end
+      end
+    end
+  end
+//pragma translate_on
 
 endmodule

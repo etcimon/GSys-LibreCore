@@ -2,31 +2,32 @@
 // Copyright 2026 Etienne Cimon
 // SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
 //
-// csr_decode — C1 of the staged CSR file: registers the commit-side CSR
-// request {csr_op_i, csr_addr_i, csr_wdata_i} plus the committing
-// instruction's trans_id and virtualization context, and produces the
-// registered bank one-hot used by the read partition.
+// csr_decode — C1 of the staged CSR file: an explicitly OCCUPIED request
+// record for the commit-side CSR request {csr_op_i, csr_addr_i,
+// csr_wdata_i, commit_tid_i, v_i}, plus the registered bank one-hot used
+// by the read partition.
 //
-// Double-presentation suppression: under the group-6 two-phase commit
-// handshake csr_op_o/csr_wdata_o are driven during BOTH the request
-// cycle and the fire cycle (the head is held until commit_ack_i, which
-// returns +1). Without suppression the C1 register would execute the
-// same CSR request twice (once for each presented copy). The request is
-// therefore qualified: a presented request identical to the one just
-// captured (op/addr/wdata/trans_id, i.e. the still-held head) is
-// suppressed so each architectural request executes exactly once. A new
-// instruction reusing a trans_id index is never identical (different
-// tid), and a contiguous run of identical copies collapses to one
-// execution regardless of its length.
+// Occupancy contract: once a request is captured it is retained whole —
+// op, address, write data, trans_id, virtual context and bank one-hot do
+// not change while the record is held. consume_i (the csr_apply
+// retirement event) or flush_i frees it; a new request is accepted only
+// into an EMPTY record, so a still-present old request can never
+// re-capture itself on its own consume edge and double-presentation
+// suppression is unnecessary: the second presented copy of a held
+// request simply finds the record occupied. A new instruction arrives
+// only after the slot advanced, i.e. after the record was freed.
 //
-// Timing: the registered request surfaces the cycle after presentation;
-// the read mux / RMW / write decode all run on this record, so
-// csr_rdata_o / csr_exception_o are valid on the fire cycle — the
-// serialized CSR rank-4 cut of cut_minimization.md.
+// Completion identity is req_valid for the whole CSR class (CSR read/
+// write/set/clear, MRET/SRET/DRET/WFI, SFENCE/HFENCE, FENCE/FENCE.I);
+// req_rd_valid additionally distinguishes the four read-producing ops
+// whose data commit_stage consumes.
 //
-// CsrReadStages==1: NOT reachable under the two-phase commit handshake
-// (the request must be registered or the fire-cycle read has nothing to
-// consume); guarded below like RenameStages==1 in g6lc_rename.
+// CsrReadStages==1 presents the live request combinationally (the
+// wrapper's apply event consumes it in the same cycle); ==2 uses the
+// occupied register above. Other values are rejected at elaboration.
+//
+// CsrReadStages==1: combinational request path. CsrReadStages==2: the
+// held register described above.
 
 module csr_decode
   import g6lc_core_pkg::*;
@@ -37,13 +38,15 @@ module csr_decode
     input  logic                          clk_i,
     input  logic                          rst_ni,
     input  logic                          flush_i,
+    // retirement apply event: frees the occupied record
+    input  logic                          consume_i,
     // live commit-side request
     input  fu_op                          csr_op_i,
     input  logic [11:0]                   csr_addr_i,
     input  logic [G6LCCfg.XLEN-1:0]       csr_wdata_i,
     input  logic [G6LCCfg.TRANS_ID_BITS-1:0] commit_tid_i,
     input  logic                          v_i,
-    // registered request (C1)
+    // staged request
     output fu_op                          req_op_o,
     output logic [11:0]                   req_addr_o,
     output logic [G6LCCfg.XLEN-1:0]       req_wdata_o,
@@ -55,35 +58,24 @@ module csr_decode
 );
   // svt-stage: begin C1
 
-  // read-producing ops (also the ops whose rdata commit_stage consumes)
+  // read-producing ops (the ops whose rdata commit_stage consumes)
   localparam int unsigned N_READ_OPS = 4;
-  // the ops that carry architectural side effects through this file
-  localparam int unsigned N_REQ_OPS  = 8;
+  // every CSR-class op that carries an architectural effect through this
+  // file: ordinary CSR RMW + system/fence/privilege-return operations
+  localparam int unsigned N_REQ_OPS  = 13;
 
-  fu_op                       req_op_q;
-  logic [11:0]                req_addr_q;
-  logic [G6LCCfg.XLEN-1:0]    req_wdata_q;
-  logic [G6LCCfg.TRANS_ID_BITS-1:0] req_tid_q;
-  logic                       req_v_q;
-  logic                       req_valid_q, req_rd_valid_q;
-  logic [11:0]                req_bank_q, bank_sel_d;
-
-  logic is_req, is_rd_req, same_req;
+  logic is_req, is_rd_req;
 
   assign is_req = csr_op_i inside {CSR_WRITE, CSR_SET, CSR_CLEAR, CSR_READ,
-                                   MRET, SRET, DRET, WFI};
+                                   MRET, SRET, DRET, WFI,
+                                   SFENCE_VMA, HFENCE_VVMA, HFENCE_GVMA,
+                                   FENCE, FENCE_I};
   assign is_rd_req = csr_op_i inside {CSR_WRITE, CSR_SET, CSR_CLEAR, CSR_READ};
-
-  // the same request held for a second (or third) presentation cycle is
-  // suppressed: identical op/addr/wdata AND the same committing trans_id.
-  assign same_req = is_req && (csr_op_i    == req_op_q)
-                          && (csr_addr_i   == req_addr_q)
-                          && (csr_wdata_i  == req_wdata_q)
-                          && (commit_tid_i == req_tid_q);
 
   // ~12-bank partition of the CSR address space for the read mux. The
   // one-hot is metadata for the staged read; legality stays in the
-  // wrapper's privilege_check on the registered address.
+  // wrapper's privilege_check on the request address.
+  logic [11:0] bank_sel_d;
   always_comb begin
     bank_sel_d = '0;
     unique casez (csr_addr_i)
@@ -107,51 +99,80 @@ module csr_decode
     endcase
   end
 
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      req_op_q       <= ADD;   // CSR NOP
-      req_addr_q     <= '0;
-      req_wdata_q    <= '0;
-      req_tid_q      <= '0;
-      req_v_q        <= 1'b0;
-      req_valid_q    <= 1'b0;
-      req_rd_valid_q <= 1'b0;
-      req_bank_q     <= '0;
-    end else if (flush_i) begin
-      req_op_q       <= ADD;
-      req_valid_q    <= 1'b0;
-      req_rd_valid_q <= 1'b0;
-    end else begin
-      req_op_q       <= csr_op_i;
-      req_addr_q     <= csr_addr_i;
-      req_wdata_q    <= csr_wdata_i;
-      req_tid_q      <= commit_tid_i;
-      req_v_q        <= v_i;
-      req_valid_q    <= is_req && !same_req;
-      req_rd_valid_q <= is_rd_req && !same_req;
-      req_bank_q     <= bank_sel_d;
-    end
-  end
+  if (HypCfg.CsrReadStages == 1) begin : gen_comb_req
+    // one-stage profile: the live presentation IS the request; the
+    // wrapper's apply event consumes it in the same cycle.
+    assign req_op_o       = is_req ? csr_op_i : ADD;
+    assign req_addr_o     = csr_addr_i;
+    assign req_wdata_o    = csr_wdata_i;
+    assign req_tid_o      = commit_tid_i;
+    assign req_v_o        = v_i;
+    assign req_valid_o    = is_req;
+    assign req_rd_valid_o = is_rd_req;
+    assign req_bank_o     = bank_sel_d;
+    // no sequential request state in this profile
+    logic unused_sigs;
+    assign unused_sigs = consume_i & clk_i & rst_ni;
+  end else begin : gen_reg_req
+    // Occupied two-stage record: retain every captured field while the
+    // request is held; consume or flush frees it. A request is accepted
+    // only into an empty record — the old request is still occupied on
+    // its own consume edge, so nothing can replace it in place.
+    fu_op                       req_op_q;
+    logic [11:0]                req_addr_q;
+    logic [G6LCCfg.XLEN-1:0]    req_wdata_q;
+    logic [G6LCCfg.TRANS_ID_BITS-1:0] req_tid_q;
+    logic                       req_v_q;
+    logic                       req_valid_q, req_rd_valid_q;
+    logic [11:0]                req_bank_q;
 
-  // gated op: an invalid (suppressed/NOP) record presents ADD so every
-  // downstream consumer sees an inert request exactly once per real op.
-  assign req_op_o       = req_valid_q ? req_op_q : ADD;
-  assign req_addr_o     = req_addr_q;
-  assign req_wdata_o    = req_wdata_q;
-  assign req_tid_o      = req_tid_q;
-  assign req_v_o        = req_v_q;
-  assign req_valid_o    = req_valid_q;
-  assign req_rd_valid_o = req_rd_valid_q;
-  assign req_bank_o     = req_bank_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        req_op_q       <= ADD;   // CSR NOP
+        req_addr_q     <= '0;
+        req_wdata_q    <= '0;
+        req_tid_q      <= '0;
+        req_v_q        <= 1'b0;
+        req_valid_q    <= 1'b0;
+        req_rd_valid_q <= 1'b0;
+        req_bank_q     <= '0;
+      end else if (flush_i) begin
+        req_op_q       <= ADD;
+        req_valid_q    <= 1'b0;
+        req_rd_valid_q <= 1'b0;
+      end else if (consume_i) begin
+        req_valid_q    <= 1'b0;
+        req_rd_valid_q <= 1'b0;
+      end else if (!req_valid_q && is_req) begin
+        req_op_q       <= csr_op_i;
+        req_addr_q     <= csr_addr_i;
+        req_wdata_q    <= csr_wdata_i;
+        req_tid_q      <= commit_tid_i;
+        req_v_q        <= v_i;
+        req_valid_q    <= 1'b1;
+        req_rd_valid_q <= is_rd_req;
+        req_bank_q     <= bank_sel_d;
+      end
+      // occupied or no request: hold the record unchanged
+    end
+
+    // gated op: an empty record presents ADD so every downstream
+    // consumer sees an inert request.
+    assign req_op_o       = req_valid_q ? req_op_q : ADD;
+    assign req_addr_o     = req_addr_q;
+    assign req_wdata_o    = req_wdata_q;
+    assign req_tid_o      = req_tid_q;
+    assign req_v_o        = req_v_q;
+    assign req_valid_o    = req_valid_q;
+    assign req_rd_valid_o = req_rd_valid_q;
+    assign req_bank_o     = req_bank_q;
+  end
 
   // pragma translate_off
   initial begin
-    assert (HypCfg.CsrReadStages == 2) else
-      // hyp8 bring-up: adjacent string literals are not legal SV; the
-      // message is one literal (fenced for sim anyway).
-      $fatal(1, "csr_decode: CsrReadStages==1 is not reachable under the "
-                + "group-6 two-phase commit handshake — the request register "
-                + "is the handshake's C1 stage.");
+    assert (HypCfg.CsrReadStages inside {1, 2}) else
+      $fatal(1, "csr_decode: CsrReadStages must be 1 (combinational request) "
+                + "or 2 (occupied request register)");
   end
   // pragma translate_on
 

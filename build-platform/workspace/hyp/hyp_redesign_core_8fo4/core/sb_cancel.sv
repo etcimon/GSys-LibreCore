@@ -68,10 +68,19 @@ module sb_cancel
   // NPC reseed kills correct target-path ops; with reseed it double-pushes
   // RAS on re-fetched calls. Taken Jump still cancels.
   // I11: B never drops a mispredict because the target looks unusable.
+  // Record lifetime by slot identity: a resolve is authoritative only
+  // while its own scoreboard slot is still occupied (.issued). Commit-ack
+  // frees a cancelled entry by clearing .issued and .cancelled together,
+  // so an in-flight B2 record that lands after its slot's retire-as-drop
+  // free would otherwise read "not cancelled" on a dead TID and publish a
+  // dead-context redirect (hyp8-osbi-scalar-r10, stale resolve at
+  // c=967110 one edge after slot 7 freed).
 `ifdef G6LC_FETCH_B
-  assign bmiss_o = resolved_branch_i.valid && resolved_branch_i.is_mispredict;
+  assign bmiss_o = resolved_branch_i.valid && resolved_branch_i.is_mispredict
+                   && mem_q_i[resolved_branch_i.trans_id].issued;
 `else
   assign bmiss_o = resolved_branch_i.valid && resolved_branch_i.is_mispredict
+                   && mem_q_i[resolved_branch_i.trans_id].issued
                    && !(G6LCCfg.NrHarts > 1 &&
                         resolved_branch_i.cf_type == g6lc_core_pkg::JumpR &&
                         !g6lc_jalr_usable::usable(

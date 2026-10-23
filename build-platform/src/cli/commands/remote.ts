@@ -273,12 +273,38 @@ export const remoteCommand: Command = {
     if (vthreads && !rest.includes("--vthreads")) {
       rest.push("--vthreads", vthreads);
     }
-    if (flagBool(args.flags, "allow-overlap") && !rest.includes("--allow-overlap")) {
-      rest.push("--allow-overlap");
-    }
     const extraEnv = flagString(args.flags, "env");
     if (extraEnv) {
       rest.push("--env", extraEnv);
+    }
+    // Verilator-style `+plusarg` positionals are proxy `--plusarg` options
+    // (the run/di subparsers reject bare `+` tokens), and `--plusarg=X`
+    // accepts a comma-separated list.
+    if (subcommand === "run" || subcommand === "di" || subcommand === "soak") {
+      const plusargs: string[] = [];
+      for (let i = rest.length - 1; i >= 0; i--) {
+        if (rest[i]!.startsWith("+")) {
+          plusargs.unshift(rest[i]!);
+          rest.splice(i, 1);
+        }
+      }
+      const flagPlusarg = flagString(args.flags, "plusarg");
+      if (flagPlusarg) {
+        plusargs.push(...flagPlusarg.split(",").filter((p) => p.length));
+      }
+      for (const p of plusargs) {
+        rest.push("--plusarg", p.startsWith("+") ? p : `+${p}`);
+      }
+      const tail = flagString(args.flags, "tail");
+      if (tail && !rest.includes("--tail")) {
+        rest.push("--tail", tail);
+      }
+      for (const f of ["tag", "verlib", "run-id"] as const) {
+        const v = flagString(args.flags, f);
+        if (v && !rest.includes(`--${f}`)) {
+          rest.push(`--${f}`, v);
+        }
+      }
     }
     // `--timeout` is a proxy GLOBAL (before subcommand). `--cmd-file` is a
     // `shell` subparser flag and must sit before `shell -- <command>`.
@@ -290,6 +316,11 @@ export const remoteCommand: Command = {
     const cmdFile = flagString(args.flags, "cmd-file");
     if (cmdFile && !rest.includes("--cmd-file")) {
       subFlags.push("--cmd-file", cmdFile);
+    }
+    // Goes in subFlags, not rest: for `shell` everything after `--` is the
+    // remote command itself, so a trailing flag would land inside it.
+    if (flagBool(args.flags, "allow-overlap") && !rest.includes("--allow-overlap")) {
+      subFlags.push("--allow-overlap");
     }
     if (subcommand === "shell" && rest.length > 0 && rest[0] !== "--") {
       rest.unshift("--");

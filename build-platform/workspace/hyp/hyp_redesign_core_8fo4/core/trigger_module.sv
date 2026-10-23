@@ -45,10 +45,14 @@ module trigger_module
 
   // Trigger Module Helpers
   logic [$clog2(N_Triggers)-1:0] tselect_q, tselect_d;
-  // 64-bit padded views of XLEN-wide inputs (safe for bit-selects beyond XLEN in IS_XLEN32)
-  logic [63:0] tdata1_i_64, tdata3_i_64;
-  assign tdata1_i_64 = {{(64 - G6LCCfg.XLEN) {1'b0}}, tdata1_i};
-  assign tdata3_i_64 = {{(64 - G6LCCfg.XLEN) {1'b0}}, tdata3_i};
+  // pragma translate_off
+  initial begin
+    assert (G6LCCfg.XLEN == 64);
+    assert (G6LCCfg.SDTRIG == 1'b0);
+    assert (N_Triggers == 4);
+  end
+  // pragma translate_on
+  assign type_nibble = tdata1_i[63:60];
   logic [3:0] trigger_type_q[N_Triggers], trigger_type_d[N_Triggers];
   logic [N_Triggers-1:0] priv_match, scontext_match;
   textra32_tdata3_t textra32_tdata3_q[N_Triggers], textra32_tdata3_d[N_Triggers];
@@ -87,211 +91,324 @@ module trigger_module
   mcontrol6_32_tdata1_t mcontrol6_32_tdata1_q[N_Triggers], mcontrol6_32_tdata1_d[N_Triggers];
   etrigger32_tdata1_t etrigger32_tdata1_q[N_Triggers], etrigger32_tdata1_d[N_Triggers];
   itrigger32_tdata1_t itrigger32_tdata1_q[N_Triggers], itrigger32_tdata1_d[N_Triggers];
+  // Hyp8: XLEN 64, four triggers. One next-record per type, then a per-slot mux.
+  logic [3:0] type_nibble, type_at_sel;
+  logic type_we;
+  icount32_tdata1_t icount_next;
+  mcontrol6_32_tdata1_t mc6_next;
+  etrigger32_tdata1_t etrig_next;
+  itrigger32_tdata1_t itrig_next;
+  logic [63:0] tex64_q0, tex64_q1, tex64_q2, tex64_q3;
+  logic [31:0] tex64_n_hi, tex64_n_lo;
+  logic [31:0] tex64_0h, tex64_0l, tex64_1h, tex64_1l;
+  logic [31:0] tex64_2h, tex64_2l, tex64_3h, tex64_3l;
+  // Bare 1-bit selects. A compound guard on a 32-bit mux pays a select load per bit.
+  logic td3_0, td3_1, td3_2, td3_3;
+  logic td3_0a, td3_0b, td3_0c, td3_0d;
+  logic td3_1a, td3_1b, td3_1c, td3_1d;
+  logic td3_2a, td3_2b, td3_2c, td3_2d;
+  logic td3_3a, td3_3b, td3_3c, td3_3d;
+  logic [15:0] tx0a, tx0b, tx0c, tx0d;
+  logic [15:0] tx1a, tx1b, tx1c, tx1d;
+  logic [15:0] tx2a, tx2b, tx2c, tx2d;
+  logic [15:0] tx3a, tx3b, tx3c, tx3d;
+  logic [31:0] ic_n, mc_n, et_n, it_n;
+  logic [31:0] ic_q0, ic_q1, ic_q2, ic_q3;
+  logic [31:0] mc_q0, mc_q1, mc_q2, mc_q3;
+  logic [31:0] et_q0, et_q1, et_q2, et_q3;
+  logic [31:0] it_q0, it_q1, it_q2, it_q3;
+  logic ic3_0, ic3_1, ic3_2, ic3_3;
+  logic ic3_0h, ic3_0l, ic3_1h, ic3_1l, ic3_2h, ic3_2l, ic3_3h, ic3_3l;
+  logic mc6_0, mc6_1, mc6_2, mc6_3;
+  logic mc6_0h, mc6_0l, mc6_1h, mc6_1l, mc6_2h, mc6_2l, mc6_3h, mc6_3l;
+  logic et5_0, et5_1, et5_2, et5_3;
+  logic et5_0h, et5_0l, et5_1h, et5_1l, et5_2h, et5_2l, et5_3h, et5_3l;
+  logic it4_0, it4_1, it4_2, it4_3;
+  logic it4_0h, it4_0l, it4_1h, it4_1l, it4_2h, it4_2l, it4_3h, it4_3l;
+  logic [15:0] ic_d0h, ic_d0l, ic_d1h, ic_d1l, ic_d2h, ic_d2l, ic_d3h, ic_d3l;
+  logic [15:0] mc_d0h, mc_d0l, mc_d1h, mc_d1l, mc_d2h, mc_d2l, mc_d3h, mc_d3l;
+  logic [15:0] et_d0h, et_d0l, et_d1h, et_d1l, et_d2h, et_d2l, et_d3h, et_d3l;
+  logic [15:0] it_d0h, it_d0l, it_d1h, it_d1l, it_d2h, it_d2l, it_d3h, it_d3l;
 
 
   // svt-stage: begin TWR
   // Trigger CSRs write/update logic
+  // Hyp8 SDTRIG is off, so the apply/countdown block is not present.
+  // Types 3 and 6 still flush on a tdata1 write.
   always_comb begin : write_path
-    tselect_d            = tselect_q;
     mcontrol6_debug_d    = mcontrol6_debug_q;
     e_matched_d          = e_matched_q;
     mret_reg_d           = mret_reg_q;
     break_from_trigger_d = break_from_trigger_q;
     in_trap_handler_d    = in_trap_handler_q;
     debug_from_trigger_d = debug_from_trigger_q;
-    flush_o              = 1'b0;
-    for (int i = 0; i < N_Triggers; i++) begin
-      trigger_type_d[i]        = trigger_type_q[i];
-      icount32_tdata1_d[i]     = icount32_tdata1_q[i];
-      mcontrol6_32_tdata1_d[i] = mcontrol6_32_tdata1_q[i];
-      etrigger32_tdata1_d[i]   = etrigger32_tdata1_q[i];
-      itrigger32_tdata1_d[i]   = itrigger32_tdata1_q[i];
-      textra32_tdata3_d[i]     = textra32_tdata3_q[i];
-      textra64_tdata3_d[i]     = textra64_tdata3_q[i];
-      tdata2_d[i]              = tdata2_q[i];
-    end
+    flush_o              = tdata1_we && ((type_nibble == 4'd3) || (type_nibble == 4'd6));
+  end
 
-    // Trigger module CSRs
-    if (tselect_we) begin
-      tselect_d = (tselect_i < N_Triggers) ? tselect_i[$clog2(N_Triggers)-1:0] : tselect_q;
-    end
-    if (tdata1_we) begin
-      if ((tdata1_i[31:28] == 4'd3 && G6LCCfg.IS_XLEN32) || (G6LCCfg.IS_XLEN64 && tdata1_i_64[63:60] == 4'd3)) begin
-        trigger_type_d[tselect_q] = G6LCCfg.IS_XLEN32 ? tdata1_i[31:28] : tdata1_i_64[63:60];
-        icount32_tdata1_d[tselect_q].t_type  = G6LCCfg.IS_XLEN32 ? ((tdata1_i[31:28] == 4'd3 || tdata1_i[31:28] == 4'd15) ? tdata1_i[31:28] : trigger_type_q[tselect_q]) : ((tdata1_i_64[63:60] == 4'd3 || tdata1_i_64[63:60] == 4'd15) ? tdata1_i_64[63:60] : trigger_type_q[tselect_q]);
-        icount32_tdata1_d[tselect_q].dmode = G6LCCfg.IS_XLEN32 ? tdata1_i[27] : tdata1_i_64[59];
-        icount32_tdata1_d[tselect_q].vs = 0;
-        icount32_tdata1_d[tselect_q].vu = 0;
-        icount32_tdata1_d[tselect_q].hit = tdata1_i[24];
-        icount32_tdata1_d[tselect_q].count = tdata1_i[23:10];
-        icount32_tdata1_d[tselect_q].m = tdata1_i[9];
-        icount32_tdata1_d[tselect_q].pending = tdata1_i[8];
-        icount32_tdata1_d[tselect_q].s = tdata1_i[7];
-        icount32_tdata1_d[tselect_q].u = tdata1_i[6];
-        icount32_tdata1_d[tselect_q].action = tdata1_i[5:0];
-        flush_o = 1'b1;
+  // $clog2(N_Triggers) part-select does not fold. N_Triggers is 4.
+  assign tselect_d = (tselect_we && (tselect_i[63:2] == '0)) ? tselect_i[1:0] : tselect_q;
 
-      end else if ((G6LCCfg.IS_XLEN32 && tdata1_i[31:28] == 4'd6) || (G6LCCfg.IS_XLEN64 && tdata1_i_64[63:60] == 4'd6)) begin
-        trigger_type_d[tselect_q] = G6LCCfg.IS_XLEN32 ? tdata1_i[31:28] : tdata1_i_64[63:60];
-        mcontrol6_32_tdata1_d[tselect_q].t_type  = G6LCCfg.IS_XLEN32 ? ((tdata1_i[31:28] == 4'd6 || tdata1_i[31:28] == 4'd15) ? tdata1_i[31:28] : trigger_type_q[tselect_q]) : ((tdata1_i_64[63:60] == 4'd6 || tdata1_i_64[63:60] == 4'd15) ? tdata1_i_64[63:60] : trigger_type_q[tselect_q]);
-        mcontrol6_32_tdata1_d[tselect_q].dmode = G6LCCfg.IS_XLEN32 ? tdata1_i[27] : tdata1_i_64[59];
-        mcontrol6_32_tdata1_d[tselect_q].uncertain = 0;
-        mcontrol6_32_tdata1_d[tselect_q].hit1 = tdata1_i[25];
-        mcontrol6_32_tdata1_d[tselect_q].vs = 0;
-        mcontrol6_32_tdata1_d[tselect_q].vu = 0;
-        mcontrol6_32_tdata1_d[tselect_q].hit0 = tdata1_i[22];
-        mcontrol6_32_tdata1_d[tselect_q].select = tdata1_i[21];
-        mcontrol6_32_tdata1_d[tselect_q].zeroes = '0;
-        mcontrol6_32_tdata1_d[tselect_q].size = tdata1_i[18:16];
-        mcontrol6_32_tdata1_d[tselect_q].action = tdata1_i[15:12];
-        mcontrol6_32_tdata1_d[tselect_q].chain = 0;
-        mcontrol6_32_tdata1_d[tselect_q].match = tdata1_i[10:7];
-        mcontrol6_32_tdata1_d[tselect_q].m = tdata1_i[6];
-        mcontrol6_32_tdata1_d[tselect_q].uncertainen = 0;
-        mcontrol6_32_tdata1_d[tselect_q].s = tdata1_i[4];
-        mcontrol6_32_tdata1_d[tselect_q].u = tdata1_i[3];
-        mcontrol6_32_tdata1_d[tselect_q].execute = tdata1_i[2];
-        mcontrol6_32_tdata1_d[tselect_q].store = tdata1_i[1];
-        mcontrol6_32_tdata1_d[tselect_q].load = tdata1_i[0];
-        flush_o = 1'b1;
+  always_comb begin : type_at_sel_dec
+    unique case (tselect_q)
+      2'd0: type_at_sel = trigger_type_q[0];
+      2'd1: type_at_sel = trigger_type_q[1];
+      2'd2: type_at_sel = trigger_type_q[2];
+      default: type_at_sel = trigger_type_q[3];
+    endcase
+  end
+  assign type_we = tdata1_we && ((type_nibble == 4'd3) || (type_nibble == 4'd6) ||
+                                 (type_nibble == 4'd5) || (type_nibble == 4'd4));
+  assign trigger_type_d[0] = (type_we && (tselect_q == 2'd0)) ? type_nibble : trigger_type_q[0];
+  assign trigger_type_d[1] = (type_we && (tselect_q == 2'd1)) ? type_nibble : trigger_type_q[1];
+  assign trigger_type_d[2] = (type_we && (tselect_q == 2'd2)) ? type_nibble : trigger_type_q[2];
+  assign trigger_type_d[3] = (type_we && (tselect_q == 2'd3)) ? type_nibble : trigger_type_q[3];
 
-      end else if ((tdata1_i[31:28] == 4'd5 && G6LCCfg.IS_XLEN32) || (tdata1_i_64[63:60] == 4'd5 && G6LCCfg.IS_XLEN64)) begin
-        trigger_type_d[tselect_q] = G6LCCfg.IS_XLEN32 ? tdata1_i[31:28] : tdata1_i_64[63:60];
-        etrigger32_tdata1_d[tselect_q].t_type  = G6LCCfg.IS_XLEN32 ? ((tdata1_i[31:28] == 4'd5 || tdata1_i[31:28] == 4'd15) ? tdata1_i[31:28] : trigger_type_q[tselect_q]) : ((tdata1_i_64[63:60] == 4'd5 || tdata1_i_64[63:60] == 4'd15) ? tdata1_i_64[63:60] : trigger_type_q[tselect_q]);
-        etrigger32_tdata1_d[tselect_q].dmode = G6LCCfg.IS_XLEN32 ? tdata1_i[27] : tdata1_i_64[59];
-        etrigger32_tdata1_d[tselect_q].hit = G6LCCfg.IS_XLEN32 ? tdata1_i[26] : tdata1_i_64[58];
-        etrigger32_tdata1_d[tselect_q].zeroes = '0;
-        etrigger32_tdata1_d[tselect_q].vs = 0;
-        etrigger32_tdata1_d[tselect_q].vu = 0;
-        etrigger32_tdata1_d[tselect_q].zeroed = 0;
-        etrigger32_tdata1_d[tselect_q].m = tdata1_i[9];
-        etrigger32_tdata1_d[tselect_q].zero = 0;
-        etrigger32_tdata1_d[tselect_q].s = tdata1_i[7];
-        etrigger32_tdata1_d[tselect_q].u = tdata1_i[6];
-        etrigger32_tdata1_d[tselect_q].action = tdata1_i[5:0];
+  // One record, then four literal slot muxes. A variable [tselect_q] write chains.
+  assign icount_next = '{
+    t_type: ((type_nibble == 4'd3) || (type_nibble == 4'd15)) ? type_nibble : type_at_sel,
+    dmode: tdata1_i[59],
+    vs: 1'b0,
+    vu: 1'b0,
+    hit: tdata1_i[24],
+    count: tdata1_i[23:10],
+    m: tdata1_i[9],
+    pending: tdata1_i[8],
+    s: tdata1_i[7],
+    u: tdata1_i[6],
+    action: tdata1_i[5:0]
+  };
+  assign ic_n  = icount_next;
+  assign ic_q0 = icount32_tdata1_q[0];
+  assign ic_q1 = icount32_tdata1_q[1];
+  assign ic_q2 = icount32_tdata1_q[2];
+  assign ic_q3 = icount32_tdata1_q[3];
+  assign ic3_0 = tdata1_we && (tdata1_i[63:60] == 4'd3) && (tselect_q == 2'd0);
+  assign ic3_1 = tdata1_we && (tdata1_i[63:60] == 4'd3) && (tselect_q == 2'd1);
+  assign ic3_2 = tdata1_we && (tdata1_i[63:60] == 4'd3) && (tselect_q == 2'd2);
+  assign ic3_3 = tdata1_we && (tdata1_i[63:60] == 4'd3) && (tselect_q == 2'd3);
+  assign ic3_0h = ic3_0;
+  assign ic3_0l = ic3_0;
+  assign ic3_1h = ic3_1;
+  assign ic3_1l = ic3_1;
+  assign ic3_2h = ic3_2;
+  assign ic3_2l = ic3_2;
+  assign ic3_3h = ic3_3;
+  assign ic3_3l = ic3_3;
+  assign ic_d0h = ic3_0h ? ic_n[31:16] : ic_q0[31:16];
+  assign ic_d0l = ic3_0l ? ic_n[15:0] : ic_q0[15:0];
+  assign ic_d1h = ic3_1h ? ic_n[31:16] : ic_q1[31:16];
+  assign ic_d1l = ic3_1l ? ic_n[15:0] : ic_q1[15:0];
+  assign ic_d2h = ic3_2h ? ic_n[31:16] : ic_q2[31:16];
+  assign ic_d2l = ic3_2l ? ic_n[15:0] : ic_q2[15:0];
+  assign ic_d3h = ic3_3h ? ic_n[31:16] : ic_q3[31:16];
+  assign ic_d3l = ic3_3l ? ic_n[15:0] : ic_q3[15:0];
+  assign icount32_tdata1_d[0] = {ic_d0h, ic_d0l};
+  assign icount32_tdata1_d[1] = {ic_d1h, ic_d1l};
+  assign icount32_tdata1_d[2] = {ic_d2h, ic_d2l};
+  assign icount32_tdata1_d[3] = {ic_d3h, ic_d3l};
 
-      end else if ((tdata1_i[31:28] == 4'd4 && G6LCCfg.IS_XLEN32) || (tdata1_i_64[63:60] == 4'd4 && G6LCCfg.IS_XLEN64)) begin
-        trigger_type_d[tselect_q] = G6LCCfg.IS_XLEN32 ? tdata1_i[31:28] : tdata1_i_64[63:60];
-        itrigger32_tdata1_d[tselect_q].t_type  = G6LCCfg.IS_XLEN32 ? ((tdata1_i[31:28] == 4'd4 || tdata1_i[31:28] == 4'd15) ? tdata1_i[31:28] : trigger_type_q[tselect_q]) : ((tdata1_i_64[63:60] == 4'd4 || tdata1_i_64[63:60] == 4'd15) ? tdata1_i_64[63:60] : trigger_type_q[tselect_q]);
-        itrigger32_tdata1_d[tselect_q].dmode = G6LCCfg.IS_XLEN32 ? tdata1_i[27] : tdata1_i_64[59];
-        itrigger32_tdata1_d[tselect_q].hit = G6LCCfg.IS_XLEN32 ? tdata1_i[26] : tdata1_i_64[58];
-        itrigger32_tdata1_d[tselect_q].zeroed = '0;
-        itrigger32_tdata1_d[tselect_q].vs = 0;
-        itrigger32_tdata1_d[tselect_q].vu = 0;
-        itrigger32_tdata1_d[tselect_q].nmi = 0;
-        itrigger32_tdata1_d[tselect_q].m = tdata1_i[9];
-        itrigger32_tdata1_d[tselect_q].zero = 0;
-        itrigger32_tdata1_d[tselect_q].s = tdata1_i[7];
-        itrigger32_tdata1_d[tselect_q].u = tdata1_i[6];
-        itrigger32_tdata1_d[tselect_q].action = tdata1_i[5:0];
-      end
-    end
-    if (tdata2_we) begin
-      tdata2_d[tselect_q] = tdata2_i;
-    end
-    if (tdata3_we) begin
-      if (G6LCCfg.IS_XLEN32) begin  // textra32
-        textra32_tdata3_d[tselect_q].mhvalue   = '0;
-        textra32_tdata3_d[tselect_q].mhselect  = '0;
-        textra32_tdata3_d[tselect_q].zeroes    = '0;
-        textra32_tdata3_d[tselect_q].sbytemask = tdata3_i[19:18];
-        textra32_tdata3_d[tselect_q].svalue    = tdata3_i[17:2];
-        textra32_tdata3_d[tselect_q].sselect   = tdata3_i[1:0];
-      end
-      if (G6LCCfg.IS_XLEN64) begin  // textra64
-        textra64_tdata3_d[tselect_q].mhvalue    = '0;
-        textra64_tdata3_d[tselect_q].mhselect   = '0;
-        textra64_tdata3_d[tselect_q].zeroes     = '0;
-        textra64_tdata3_d[tselect_q].sbytemask  = tdata3_i_64[39:36];
-        textra64_tdata3_d[tselect_q].zero_field = '0;
-        textra64_tdata3_d[tselect_q].svalue     = tdata3_i_64[33:2];
-        textra64_tdata3_d[tselect_q].sselect    = tdata3_i[1:0];
-      end
-    end
+  assign mc6_next = '{
+    t_type: ((type_nibble == 4'd6) || (type_nibble == 4'd15)) ? type_nibble : type_at_sel,
+    dmode: tdata1_i[59],
+    uncertain: 1'b0,
+    hit1: tdata1_i[25],
+    vs: 1'b0,
+    vu: 1'b0,
+    hit0: tdata1_i[22],
+    select: tdata1_i[21],
+    zeroes: '0,
+    size: tdata1_i[18:16],
+    action: tdata1_i[15:12],
+    chain: 1'b0,
+    match: tdata1_i[10:7],
+    m: tdata1_i[6],
+    uncertainen: 1'b0,
+    s: tdata1_i[4],
+    u: tdata1_i[3],
+    execute: tdata1_i[2],
+    store: tdata1_i[1],
+    load: tdata1_i[0]
+  };
+  assign mc_n  = mc6_next;
+  assign mc_q0 = mcontrol6_32_tdata1_q[0];
+  assign mc_q1 = mcontrol6_32_tdata1_q[1];
+  assign mc_q2 = mcontrol6_32_tdata1_q[2];
+  assign mc_q3 = mcontrol6_32_tdata1_q[3];
+  assign mc6_0 = tdata1_we && (tdata1_i[63:60] == 4'd6) && (tselect_q == 2'd0);
+  assign mc6_1 = tdata1_we && (tdata1_i[63:60] == 4'd6) && (tselect_q == 2'd1);
+  assign mc6_2 = tdata1_we && (tdata1_i[63:60] == 4'd6) && (tselect_q == 2'd2);
+  assign mc6_3 = tdata1_we && (tdata1_i[63:60] == 4'd6) && (tselect_q == 2'd3);
+  assign mc6_0h = mc6_0;
+  assign mc6_0l = mc6_0;
+  assign mc6_1h = mc6_1;
+  assign mc6_1l = mc6_1;
+  assign mc6_2h = mc6_2;
+  assign mc6_2l = mc6_2;
+  assign mc6_3h = mc6_3;
+  assign mc6_3l = mc6_3;
+  assign mc_d0h = mc6_0h ? mc_n[31:16] : mc_q0[31:16];
+  assign mc_d0l = mc6_0l ? mc_n[15:0] : mc_q0[15:0];
+  assign mc_d1h = mc6_1h ? mc_n[31:16] : mc_q1[31:16];
+  assign mc_d1l = mc6_1l ? mc_n[15:0] : mc_q1[15:0];
+  assign mc_d2h = mc6_2h ? mc_n[31:16] : mc_q2[31:16];
+  assign mc_d2l = mc6_2l ? mc_n[15:0] : mc_q2[15:0];
+  assign mc_d3h = mc6_3h ? mc_n[31:16] : mc_q3[31:16];
+  assign mc_d3l = mc6_3l ? mc_n[15:0] : mc_q3[15:0];
+  assign mcontrol6_32_tdata1_d[0] = {mc_d0h, mc_d0l};
+  assign mcontrol6_32_tdata1_d[1] = {mc_d1h, mc_d1l};
+  assign mcontrol6_32_tdata1_d[2] = {mc_d2h, mc_d2l};
+  assign mcontrol6_32_tdata1_d[3] = {mc_d3h, mc_d3l};
 
+  assign etrig_next = '{
+    t_type: ((type_nibble == 4'd5) || (type_nibble == 4'd15)) ? type_nibble : type_at_sel,
+    dmode: tdata1_i[59],
+    hit: tdata1_i[58],
+    zeroes: '0,
+    vs: 1'b0,
+    vu: 1'b0,
+    zeroed: 1'b0,
+    m: tdata1_i[9],
+    zero: 1'b0,
+    s: tdata1_i[7],
+    u: tdata1_i[6],
+    action: tdata1_i[5:0]
+  };
+  assign et_n  = etrig_next;
+  assign et_q0 = etrigger32_tdata1_q[0];
+  assign et_q1 = etrigger32_tdata1_q[1];
+  assign et_q2 = etrigger32_tdata1_q[2];
+  assign et_q3 = etrigger32_tdata1_q[3];
+  assign et5_0 = tdata1_we && (tdata1_i[63:60] == 4'd5) && (tselect_q == 2'd0);
+  assign et5_1 = tdata1_we && (tdata1_i[63:60] == 4'd5) && (tselect_q == 2'd1);
+  assign et5_2 = tdata1_we && (tdata1_i[63:60] == 4'd5) && (tselect_q == 2'd2);
+  assign et5_3 = tdata1_we && (tdata1_i[63:60] == 4'd5) && (tselect_q == 2'd3);
+  assign et5_0h = et5_0;
+  assign et5_0l = et5_0;
+  assign et5_1h = et5_1;
+  assign et5_1l = et5_1;
+  assign et5_2h = et5_2;
+  assign et5_2l = et5_2;
+  assign et5_3h = et5_3;
+  assign et5_3l = et5_3;
+  assign et_d0h = et5_0h ? et_n[31:16] : et_q0[31:16];
+  assign et_d0l = et5_0l ? et_n[15:0] : et_q0[15:0];
+  assign et_d1h = et5_1h ? et_n[31:16] : et_q1[31:16];
+  assign et_d1l = et5_1l ? et_n[15:0] : et_q1[15:0];
+  assign et_d2h = et5_2h ? et_n[31:16] : et_q2[31:16];
+  assign et_d2l = et5_2l ? et_n[15:0] : et_q2[15:0];
+  assign et_d3h = et5_3h ? et_n[31:16] : et_q3[31:16];
+  assign et_d3l = et5_3l ? et_n[15:0] : et_q3[15:0];
+  assign etrigger32_tdata1_d[0] = {et_d0h, et_d0l};
+  assign etrigger32_tdata1_d[1] = {et_d1h, et_d1l};
+  assign etrigger32_tdata1_d[2] = {et_d2h, et_d2l};
+  assign etrigger32_tdata1_d[3] = {et_d3h, et_d3l};
 
-    // hyp8 r3: live icount countdown + registered-action application.
-    // The per-i section order (icount -> mcontrol6 -> etrigger ->
-    // itrigger) and the within-section write order are unchanged from the
-    // serial FSM; only the fire DECISION moved to the *_fire_q registers
-    // captured by match_path last cycle (+1 fire latency).
-    if (G6LCCfg.SDTRIG) begin
-      for (int i = 0; i < N_Triggers; i++) begin
-        // icount countdown + applied fire
-        if (trigger_type_d[i] == 4'd3 && G6LCCfg.Icount) begin
-          break_from_trigger_d = 1'b0;
-          if (ex_i.valid) begin
-            in_trap_handler_d = 1'b1;
-            icount32_tdata1_d[i].count = icount32_tdata1_q[i].count - 1;
-          end
-          if (|commit_ack_i && (mret_i || sret_i)) in_trap_handler_d = 1'b0;
-          if (|commit_ack_i && !in_trap_handler_d && (icount32_tdata1_q[i].count != 0)) begin
-            icount32_tdata1_d[i].count = icount32_tdata1_q[i].count - 1;
-          end
-          if (icnt_fire_q[i]) icount32_tdata1_d[i].pending = 1'b1;
-          if (icnt_brk_q[i]) break_from_trigger_d = 1'b1;
-          if (icnt_dbg_q[i]) debug_from_trigger_d = 1'b1;
-          if (break_from_trigger_q) begin
-            icount32_tdata1_d[i].hit = 1'b1;
-            icount32_tdata1_d[i].pending = 1'b0;
-          end
-          if (debug_mode_i && icount32_tdata1_d[i].pending) begin
-            icount32_tdata1_d[i].pending = 1'b0;
-            icount32_tdata1_d[i].hit = 1'b1;
-            debug_from_trigger_d = 1'b0;
-          end
-        end
-        // mcontrol6 applied fire + live debug-mode hit bookkeeping
-        if (trigger_type_d[i] == 4'd6 && G6LCCfg.Mcontrol6) begin
-          if (mc6_fire_q[i]) mcontrol6_debug_d = 1'b1;
-          if (debug_mode_i && mc6_matched[i]) begin
-            mcontrol6_32_tdata1_d[i].hit0 = 1'b0;
-            mcontrol6_32_tdata1_d[i].hit1 = 1'b1;
-            mcontrol6_debug_d = 1'b0;
-          end
-        end
-        // etrigger applied fire + live state
-        if (trigger_type_d[i] == 4'd5 && G6LCCfg.Etrigger) begin
-          break_from_trigger_d = 1'b0;
-          if (e_set_v[i]) e_matched_d = 1'b1;
-          if (mret_i || sret_i) mret_reg_d = 1'b1;
-          if (etrig_fire_q[i]) begin
-            e_matched_d = 1'b0;
-            etrigger32_tdata1_d[i].hit = 1'b1;
-          end
-          if (etrig_brk_q[i]) break_from_trigger_d = 1'b1;
-          if (etrig_dbg_q[i]) debug_from_trigger_d = 1'b1;
-          if (break_from_trigger_q) begin
-            etrigger32_tdata1_d[i].hit = 1'b0;
-            break_from_trigger_d = 1'b0;
-          end
-          if (debug_mode_i && debug_from_trigger_d) begin
-            etrigger32_tdata1_d[i].hit = 1'b0;
-            debug_from_trigger_d = 1'b0;
-          end
-        end
-        // itrigger applied fire + live state
-        if (trigger_type_d[i] == 4'd4 && G6LCCfg.Itrigger) begin
-          break_from_trigger_d = 1'b0;
-          if (i_set_v[i]) e_matched_d = 1'b1;
-          if (mret_i || sret_i) mret_reg_d = 1'b1;
-          if (itrig_fire_q[i]) begin
-            e_matched_d = 1'b0;
-            itrigger32_tdata1_d[i].hit = 1'b1;
-          end
-          if (itrig_brk_q[i]) break_from_trigger_d = 1'b1;
-          if (itrig_dbg_q[i]) debug_from_trigger_d = 1'b1;
-          if (break_from_trigger_q) begin
-            itrigger32_tdata1_d[i].hit = 1'b0;
-            break_from_trigger_d = 1'b0;
-          end
-          if (debug_mode_i && debug_from_trigger_d) begin
-            itrigger32_tdata1_d[i].hit = 1'b0;
-            debug_from_trigger_d = 1'b0;
-          end
-        end
-      end
-    end
+  assign itrig_next = '{
+    t_type: ((type_nibble == 4'd4) || (type_nibble == 4'd15)) ? type_nibble : type_at_sel,
+    dmode: tdata1_i[59],
+    hit: tdata1_i[58],
+    zeroed: '0,
+    vs: 1'b0,
+    vu: 1'b0,
+    nmi: 1'b0,
+    m: tdata1_i[9],
+    zero: 1'b0,
+    s: tdata1_i[7],
+    u: tdata1_i[6],
+    action: tdata1_i[5:0]
+  };
+  assign it_n  = itrig_next;
+  assign it_q0 = itrigger32_tdata1_q[0];
+  assign it_q1 = itrigger32_tdata1_q[1];
+  assign it_q2 = itrigger32_tdata1_q[2];
+  assign it_q3 = itrigger32_tdata1_q[3];
+  assign it4_0 = tdata1_we && (tdata1_i[63:60] == 4'd4) && (tselect_q == 2'd0);
+  assign it4_1 = tdata1_we && (tdata1_i[63:60] == 4'd4) && (tselect_q == 2'd1);
+  assign it4_2 = tdata1_we && (tdata1_i[63:60] == 4'd4) && (tselect_q == 2'd2);
+  assign it4_3 = tdata1_we && (tdata1_i[63:60] == 4'd4) && (tselect_q == 2'd3);
+  assign it4_0h = it4_0;
+  assign it4_0l = it4_0;
+  assign it4_1h = it4_1;
+  assign it4_1l = it4_1;
+  assign it4_2h = it4_2;
+  assign it4_2l = it4_2;
+  assign it4_3h = it4_3;
+  assign it4_3l = it4_3;
+  assign it_d0h = it4_0h ? it_n[31:16] : it_q0[31:16];
+  assign it_d0l = it4_0l ? it_n[15:0] : it_q0[15:0];
+  assign it_d1h = it4_1h ? it_n[31:16] : it_q1[31:16];
+  assign it_d1l = it4_1l ? it_n[15:0] : it_q1[15:0];
+  assign it_d2h = it4_2h ? it_n[31:16] : it_q2[31:16];
+  assign it_d2l = it4_2l ? it_n[15:0] : it_q2[15:0];
+  assign it_d3h = it4_3h ? it_n[31:16] : it_q3[31:16];
+  assign it_d3l = it4_3l ? it_n[15:0] : it_q3[15:0];
+  assign itrigger32_tdata1_d[0] = {it_d0h, it_d0l};
+  assign itrigger32_tdata1_d[1] = {it_d1h, it_d1l};
+  assign itrigger32_tdata1_d[2] = {it_d2h, it_d2l};
+  assign itrigger32_tdata1_d[3] = {it_d3h, it_d3l};
+
+  // textra32 is the XLEN32 arm. Hyp8 holds the previous value.
+  assign textra32_tdata3_d = textra32_tdata3_q;
+  // High word: {24'b0, sbytemask, 2'b0, svalue[33:32]}. Low word: {svalue[31:2], sselect}.
+  assign tex64_n_hi = {24'b0, tdata3_i[39:36], 2'b0, tdata3_i[33:32]};
+  assign tex64_n_lo = {tdata3_i[31:2], tdata3_i[1:0]};
+  assign tex64_q0     = textra64_tdata3_q[0];
+  assign tex64_q1     = textra64_tdata3_q[1];
+  assign tex64_q2     = textra64_tdata3_q[2];
+  assign tex64_q3     = textra64_tdata3_q[3];
+  assign td3_0 = tdata3_we && (tselect_q == 2'd0);
+  assign td3_1 = tdata3_we && (tselect_q == 2'd1);
+  assign td3_2 = tdata3_we && (tselect_q == 2'd2);
+  assign td3_3 = tdata3_we && (tselect_q == 2'd3);
+  assign td3_0a = td3_0;
+  assign td3_0b = td3_0;
+  assign td3_0c = td3_0;
+  assign td3_0d = td3_0;
+  assign td3_1a = td3_1;
+  assign td3_1b = td3_1;
+  assign td3_1c = td3_1;
+  assign td3_1d = td3_1;
+  assign td3_2a = td3_2;
+  assign td3_2b = td3_2;
+  assign td3_2c = td3_2;
+  assign td3_2d = td3_2;
+  assign td3_3a = td3_3;
+  assign td3_3b = td3_3;
+  assign td3_3c = td3_3;
+  assign td3_3d = td3_3;
+  assign tx0a = td3_0a ? tex64_n_hi[31:16] : tex64_q0[63:48];
+  assign tx0b = td3_0b ? tex64_n_hi[15:0] : tex64_q0[47:32];
+  assign tx0c = td3_0c ? tex64_n_lo[31:16] : tex64_q0[31:16];
+  assign tx0d = td3_0d ? tex64_n_lo[15:0] : tex64_q0[15:0];
+  assign tx1a = td3_1a ? tex64_n_hi[31:16] : tex64_q1[63:48];
+  assign tx1b = td3_1b ? tex64_n_hi[15:0] : tex64_q1[47:32];
+  assign tx1c = td3_1c ? tex64_n_lo[31:16] : tex64_q1[31:16];
+  assign tx1d = td3_1d ? tex64_n_lo[15:0] : tex64_q1[15:0];
+  assign tx2a = td3_2a ? tex64_n_hi[31:16] : tex64_q2[63:48];
+  assign tx2b = td3_2b ? tex64_n_hi[15:0] : tex64_q2[47:32];
+  assign tx2c = td3_2c ? tex64_n_lo[31:16] : tex64_q2[31:16];
+  assign tx2d = td3_2d ? tex64_n_lo[15:0] : tex64_q2[15:0];
+  assign tx3a = td3_3a ? tex64_n_hi[31:16] : tex64_q3[63:48];
+  assign tx3b = td3_3b ? tex64_n_hi[15:0] : tex64_q3[47:32];
+  assign tx3c = td3_3c ? tex64_n_lo[31:16] : tex64_q3[31:16];
+  assign tx3d = td3_3d ? tex64_n_lo[15:0] : tex64_q3[15:0];
+  assign tex64_0h = {tx0a, tx0b};
+  assign tex64_0l = {tx0c, tx0d};
+  assign tex64_1h = {tx1a, tx1b};
+  assign tex64_1l = {tx1c, tx1d};
+  assign tex64_2h = {tx2a, tx2b};
+  assign tex64_2l = {tx2c, tx2d};
+  assign tex64_3h = {tx3a, tx3b};
+  assign tex64_3l = {tx3c, tx3d};
+  assign textra64_tdata3_d[0] = {tex64_0h, tex64_0l};
+  assign textra64_tdata3_d[1] = {tex64_1h, tex64_1l};
+  assign textra64_tdata3_d[2] = {tex64_2h, tex64_2l};
+  assign textra64_tdata3_d[3] = {tex64_3h, tex64_3l};
+
+  // Indexed store stays one process. Four 64-bit slot muxes measured long elsewhere.
+  always_comb begin : wr_tdata2
+    tdata2_d = tdata2_q;
+    if (tdata2_we) tdata2_d[tselect_q] = tdata2_i;
   end
   // svt-stage: end TWR
 
@@ -316,7 +433,7 @@ module trigger_module
     itrig_dbg       = '0;
     e_set_v         = '0;
     i_set_v         = '0;
-    if (G6LCCfg.SDTRIG) begin
+    if (1'b0) begin // Hyp8 SDTRIG is off
       for (int i = 0; i < N_Triggers; i++) begin
         // icount match
         if (trigger_type_q[i] == 4'd3 && G6LCCfg.Icount) begin
@@ -328,14 +445,14 @@ module trigger_module
           endcase
           // S_MODE context match check
           if (priv_lvl_i == riscv::PRIV_LVL_S && icount32_tdata1_q[i].s) begin
-            if (G6LCCfg.IS_XLEN32) begin
+            if (1'b0) begin
               scontext_match[i] = match_scontext32(
                 scontext_i[31:0],
                 textra32_tdata3_q[i].sselect,
                 textra32_tdata3_q[i].sbytemask,
                 textra32_tdata3_q[i].svalue
               );
-            end else begin
+            end else if (1'b1) begin
               scontext_match[i] = match_scontext64(
                 scontext_i[31:0],
                 textra64_tdata3_q[i].sselect,
@@ -361,14 +478,14 @@ module trigger_module
             default: priv_match[i] = 1'b0;
           endcase
           if (priv_lvl_i == riscv::PRIV_LVL_S && mcontrol6_32_tdata1_q[i].s) begin
-            if (G6LCCfg.IS_XLEN32) begin
+            if (1'b0) begin
               scontext_match[i] = match_scontext32(
                 scontext_i[31:0],
                 textra32_tdata3_q[i].sselect,
                 textra32_tdata3_q[i].sbytemask,
                 textra32_tdata3_q[i].svalue
               );
-            end else begin
+            end else if (1'b1) begin
               scontext_match[i] = match_scontext64(
                 scontext_i[31:0],
                 textra64_tdata3_q[i].sselect,
@@ -456,14 +573,14 @@ module trigger_module
             default: priv_match[i] = 1'b0;
           endcase
           if (priv_lvl_i == riscv::PRIV_LVL_S && etrigger32_tdata1_q[i].s) begin
-            if (G6LCCfg.IS_XLEN32) begin
+            if (1'b0) begin
               scontext_match[i] = match_scontext32(
                 scontext_i[31:0],
                 textra32_tdata3_q[i].sselect,
                 textra32_tdata3_q[i].sbytemask,
                 textra32_tdata3_q[i].svalue
               );
-            end else begin
+            end else if (1'b1) begin
               scontext_match[i] = match_scontext64(
                 scontext_i[31:0],
                 textra64_tdata3_q[i].sselect,
@@ -490,14 +607,14 @@ module trigger_module
             default: priv_match[i] = 1'b0;
           endcase
           if (priv_lvl_i == riscv::PRIV_LVL_S && itrigger32_tdata1_q[i].s) begin
-            if (G6LCCfg.IS_XLEN32) begin
+            if (1'b0) begin
               scontext_match[i] = match_scontext32(
                 scontext_i[31:0],
                 textra32_tdata3_q[i].sselect,
                 textra32_tdata3_q[i].sbytemask,
                 textra32_tdata3_q[i].svalue
               );
-            end else begin
+            end else if (1'b1) begin
               scontext_match[i] = match_scontext64(
                 scontext_i[31:0],
                 textra64_tdata3_q[i].sselect,
@@ -535,7 +652,7 @@ module trigger_module
       itrig_fire_q <= '0;
       itrig_brk_q  <= '0;
       itrig_dbg_q  <= '0;
-    end else if (G6LCCfg.SDTRIG) begin
+    end else if (1'b0) begin // Hyp8 SDTRIG is off
       icnt_fire_q  <= icnt_fire;
       icnt_brk_q   <= icnt_brk;
       icnt_dbg_q   <= icnt_dbg;
@@ -552,7 +669,7 @@ module trigger_module
 
 
 
-  if (G6LCCfg.IS_XLEN32) begin : gen_read_path_32
+  if (1'b0) begin : gen_read_path_32
     always_comb begin : read_path
       tdata1_o  = '0;
       tselect_o = {{(G6LCCfg.XLEN - $clog2(N_Triggers)) {1'b0}}, tselect_q};
@@ -611,7 +728,7 @@ module trigger_module
 
   always_ff @(posedge clk_i or negedge rst_ni) begin : state_update
     if (~rst_ni) begin
-      if (G6LCCfg.SDTRIG) begin
+      if (1'b0) begin // Hyp8 SDTRIG is off
         tselect_q <= '0;
         mcontrol6_debug_q <= 1'b0;
         e_matched_q <= 1'b0;
@@ -632,7 +749,7 @@ module trigger_module
         end
       end
     end else begin
-      if (G6LCCfg.SDTRIG) begin
+      if (1'b0) begin // Hyp8 SDTRIG is off
         trigger_type_q        <= trigger_type_d;
         tselect_q             <= tselect_d;
         tdata2_q              <= tdata2_d;

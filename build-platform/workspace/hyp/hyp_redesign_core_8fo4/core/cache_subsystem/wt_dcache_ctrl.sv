@@ -72,6 +72,8 @@ module wt_dcache_ctrl
     READ_V,      // hyp8: verdict on the +2 registered response
     MISS_REQ,
     MISS_WAIT,
+    MISS_RTRN_W,   // hyp8 DcacheHitExtra==2: refill word in mem T1/T2 pipe
+    MISS_RTRN_V,   // hyp8 DcacheHitExtra==2: emit response on rd_data_q
     KILL_MISS,
     KILL_MISS_ACK,
     REPLAY_REQ,
@@ -152,11 +154,18 @@ module wt_dcache_ctrl
 // end
 // ----------------------------------------------------------------
   // END sv-timing auto-correct (balance_mux rewrite)
-  // hyp8: under the +2 readout the valid bits at the missed index arrive
-  // with the verdict (READ_V), not with rd_req_q.
-  // hyp8 DcacheHitExtra is 2. The other arm does not fold (struct compare)
-  // and was timed as a second wide mux. Valid bits update on the verdict.
-  assign vld_data_d = (state_q == READ_V) ? rd_vld_bits_i : vld_data_q;
+  // hyp8 DcacheHitExtra is 2: the staged READ_WAIT/READ_V verdict.
+  // Valid bits at the missed index arrive with the verdict, not with
+  // rd_req_q. The single-cycle READ arm (DcacheHitExtra==0) stays in
+  // gen_fsm_hit0 and captures them at the SRAM-rdata cycle via rd_req_q,
+  // exactly as the reference upstream controller does.
+  localparam bit DCACHE_HIT0 = (HypCfg.DcacheHitExtra == 0);
+  if (!(HypCfg.DcacheHitExtra inside {0, 2})) begin : gen_bad_hit_extra
+    $error("wt_dcache_ctrl: HypCfg.DcacheHitExtra must be 0 or 2");
+  end
+  assign vld_data_d = DCACHE_HIT0 ? ((rd_req_q) ? rd_vld_bits_i : vld_data_q)
+                                  : ((state_q == READ_V) ? rd_vld_bits_i
+                                                         : vld_data_q);
   assign address_tag_d = (save_tag) ? req_port_i.address_tag : address_tag_q;
   assign address_idx_d = (req_port_o.data_gnt) ? req_port_i.address_index[G6LCCfg.DCACHE_INDEX_WIDTH-1:G6LCCfg.DCACHE_OFFSET_WIDTH] : address_idx_q;
   assign address_off_d = (req_port_o.data_gnt) ? req_port_i.address_index[G6LCCfg.DCACHE_OFFSET_WIDTH-1:0]                  : address_off_q;
@@ -168,18 +177,6 @@ module wt_dcache_ctrl
 
   assign req_port_o.data_rdata = rd_data_i;
 
-  // 8-way hyp8 set. A reduction of the struct-width port does not fold.
-  logic hit_any;
-  logic [1:0] rv_sel;
-  assign hit_any = |rd_hit_oh_i[7:0];
-  // READ_V priority, narrow, so the state case is a unique mux rather than
-  // a compound-guard chain: kill, replay, hit, else miss.
-  always_comb begin
-    if (req_port_i.kill_req) rv_sel = 2'd0;
-    else if (wr_cl_seen_q || !rd_ok_q) rv_sel = 2'd1;
-    else if ((hit_any || wbuffer_fwd_hit_i) && cache_en_i) rv_sel = 2'd2;
-    else rv_sel = 2'd3;
-  end
   assign req_port_o.data_ruser = rd_user_i;
   assign req_port_o.data_rid = id_q;
 
@@ -207,20 +204,171 @@ module wt_dcache_ctrl
   // main control logic
   ///////////////////////////////////////////////////////
 
-  always_comb begin : p_fsm
-    // default assignment
-    state_d                = state_q;
-    save_tag               = 1'b0;
-    rd_req_o               = 1'b0;
-    miss_req_o             = 1'b0;
-    req_port_o.data_rvalid = 1'b0;
-    req_port_o.data_gnt    = 1'b0;
-    wr_cl_seen_d           = wr_cl_seen_q;
-    rd_ok_d                = rd_ok_q;
+  // DCACHE_HIT0 folds the generate at elaboration: the single-cycle READ
+  // FSM is elaborated only for DcacheHitExtra==0, the staged-verdict FSM
+  // only for ==2 -- neither arm is timed beside the other.
+  if (DCACHE_HIT0) begin : gen_fsm_hit0
+    // Reference arm (core/cache_subsystem/wt_dcache_ctrl.sv): the
+    // single-cycle verdict — READ speculatively re-issues the read and
+    // resolves hit/miss/replay on the current-cycle rd_* inputs.
+    always_comb begin : p_fsm
+      // default assignment
+      state_d                = state_q;
+      save_tag               = 1'b0;
+      rd_req_o               = 1'b0;
+      miss_req_o             = 1'b0;
+      req_port_o.data_rvalid = 1'b0;
+      req_port_o.data_gnt    = 1'b0;
+      // the +2 bookkeeping flops are unused by this arm
+      wr_cl_seen_d           = wr_cl_seen_q;
+      rd_ok_d                = rd_ok_q;
 
-    // hyp8: the +2 lookup window opens on an accepted request and closes
-    // at the verdict; a refill anywhere in the window replays the lookup.
-    if (req_port_o.data_gnt || req_port_i.kill_req) begin
+      // interfaces
+      unique case (state_q)
+        //////////////////////////////////
+        // wait for an incoming request
+        IDLE: begin
+          if (req_port_i.data_req) begin
+            rd_req_o = 1'b1;
+            // if read ack then ack the `req_port_o`, and goto `READ` state
+            if (rd_ack_i) begin
+              state_d = READ;
+              req_port_o.data_gnt = 1'b1;
+            end
+          end
+        end
+        //////////////////////////////////
+        // check whether we have a hit
+        // in case the cache is disabled,
+        // or in case the address is NC, we
+        // reuse the miss mechanism to handle
+        // the request
+        READ, REPLAY_READ: begin
+          // speculatively request cache line
+          rd_req_o = 1'b1;
+
+          // kill -> go back to IDLE
+          if (req_port_i.kill_req) begin
+            state_d = IDLE;
+            req_port_o.data_rvalid = 1'b1;
+          end else if (req_port_i.tag_valid | state_q == REPLAY_READ) begin
+            save_tag = (state_q != REPLAY_READ);
+            if (wr_cl_vld_i || !rd_ack_q) begin
+              state_d = REPLAY_REQ;
+              // we've got a hit
+            end else if (((|rd_hit_oh_i) || wbuffer_fwd_hit_i) && cache_en_i) begin
+              state_d = IDLE;
+              req_port_o.data_rvalid = 1'b1;
+              // we can handle another request
+              if (rd_ack_i && req_port_i.data_req) begin
+                state_d = READ;
+                req_port_o.data_gnt = 1'b1;
+              end
+              // we've got a miss
+            end else begin
+              state_d = MISS_REQ;
+            end
+          end
+        end
+        //////////////////////////////////
+        // issue request
+        MISS_REQ: begin
+          miss_req_o = 1'b1;
+
+          if (req_port_i.kill_req) begin
+            req_port_o.data_rvalid = 1'b1;
+            if (miss_ack_i) begin
+              state_d = KILL_MISS;
+            end else begin
+              state_d = KILL_MISS_ACK;
+            end
+          end else if (miss_replay_i) begin
+            state_d = REPLAY_REQ;
+          end else if (miss_ack_i) begin
+            state_d = MISS_WAIT;
+          end
+        end
+        //////////////////////////////////
+        // wait until the memory transaction
+        // returns.
+        MISS_WAIT: begin
+          if (req_port_i.kill_req) begin
+            req_port_o.data_rvalid = 1'b1;
+            if (miss_rtrn_vld_i) begin
+              state_d = IDLE;
+            end else begin
+              state_d = KILL_MISS;
+            end
+          end else if (miss_rtrn_vld_i) begin
+            state_d = IDLE;
+            req_port_o.data_rvalid = 1'b1;
+          end
+        end
+        //////////////////////////////////
+        // replay read request
+        REPLAY_REQ: begin
+          rd_req_o = 1'b1;
+          if (req_port_i.kill_req) begin
+            req_port_o.data_rvalid = 1'b1;
+            state_d = IDLE;
+          end else if (rd_ack_i) begin
+            state_d = REPLAY_READ;
+          end
+        end
+        //////////////////////////////////
+        KILL_MISS_ACK: begin
+          miss_req_o = 1'b1;
+          // in this case the miss handler did not issue
+          // a transaction and we can safely go to idle
+          if (miss_replay_i) begin
+            state_d = IDLE;
+          end else if (miss_ack_i) begin
+            state_d = KILL_MISS;
+          end
+        end
+        //////////////////////////////////
+        // killed miss,
+        // wait until miss unit responds and
+        // go back to idle
+        KILL_MISS: begin
+          if (miss_rtrn_vld_i) begin
+            state_d = IDLE;
+          end
+        end
+        default: begin
+          // we should never get here
+          state_d = IDLE;
+        end
+      endcase  // state_q
+    end
+  end else begin : gen_fsm_hit2
+    // 8-way hyp8 set. A reduction of the struct-width port does not fold.
+    logic hit_any;
+    logic [1:0] rv_sel;
+    assign hit_any = |rd_hit_oh_i[7:0];
+    // READ_V priority, narrow, so the state case is a unique mux rather than
+    // a compound-guard chain: kill, replay, hit, else miss.
+    always_comb begin
+      if (req_port_i.kill_req) rv_sel = 2'd0;
+      else if (wr_cl_seen_q || !rd_ok_q) rv_sel = 2'd1;
+      else if ((hit_any || wbuffer_fwd_hit_i) && cache_en_i) rv_sel = 2'd2;
+      else rv_sel = 2'd3;
+    end
+
+    always_comb begin : p_fsm
+      // default assignment
+      state_d                = state_q;
+      save_tag               = 1'b0;
+      rd_req_o               = 1'b0;
+      miss_req_o             = 1'b0;
+      req_port_o.data_rvalid = 1'b0;
+      req_port_o.data_gnt    = 1'b0;
+      wr_cl_seen_d           = wr_cl_seen_q;
+      rd_ok_d                = rd_ok_q;
+
+      // hyp8: the +2 lookup window opens on an accepted request and closes
+      // at the verdict; a refill anywhere in the window replays the lookup.
+      if (req_port_o.data_gnt || req_port_i.kill_req) begin
       wr_cl_seen_d = 1'b0;
     end else if (wr_cl_vld_i && (state_q inside {READ, READ_WAIT, REPLAY_READ})) begin
       wr_cl_seen_d = 1'b1;
@@ -247,10 +395,10 @@ module wt_dcache_ctrl
       // reuse the miss mechanism to handle
       // the request
       READ, REPLAY_READ: begin
-        // hyp8 DcacheHitExtra is 2: the tag-presenting state only records
-        // the lookup and steps into READ_WAIT. The single-cycle re-issue
-        // arm is not in this core (the struct compare does not fold, so
-        // leaving it in source timed that cone).
+        // hyp8 DcacheHitExtra == 2: the tag-presenting state only records
+        // the lookup and steps into READ_WAIT; the verdict waits for the
+        // +2 registered response. The single-cycle re-issue arm lives in
+        // gen_fsm_hit0 (DcacheHitExtra == 0).
         if (req_port_i.kill_req) begin
           state_d = IDLE;
           req_port_o.data_rvalid = 1'b1;
@@ -326,9 +474,36 @@ module wt_dcache_ctrl
             state_d = KILL_MISS;
           end
         end else if (miss_rtrn_vld_i) begin
+          if (HypCfg.DcacheHitExtra == 0) begin
+            state_d = IDLE;
+            req_port_o.data_rvalid = 1'b1;
+          end else begin
+            // hyp8 DcacheHitExtra==2: the refill word rides the mem T1/T2
+            // staging (refill_vld_q/refill_word_q -> rd_data_c -> rd_data_q),
+            // so it reaches rd_data_i DcacheHitExtra cycles after the
+            // miss_rtrn_vld_i edge. Emitting rvalid here would sample the
+            // stale verdict-path data instead of the refill.
+            state_d = MISS_RTRN_W;
+          end
+        end
+      end
+      //////////////////////////////////
+      // hyp8 DcacheHitExtra==2: first staging cycle after the refill write;
+      // refill_vld_q presents the word on rd_data_c this cycle.
+      MISS_RTRN_W: begin
+        if (req_port_i.kill_req) begin
           state_d = IDLE;
           req_port_o.data_rvalid = 1'b1;
+        end else begin
+          state_d = MISS_RTRN_V;
         end
+      end
+      //////////////////////////////////
+      // hyp8 DcacheHitExtra==2: second staging cycle; rd_data_q now holds
+      // the refill word (byte-merged with the wbuffer snapshot).
+      MISS_RTRN_V: begin
+        state_d = IDLE;
+        req_port_o.data_rvalid = 1'b1;
       end
       //////////////////////////////////
       // replay read request
@@ -368,6 +543,7 @@ module wt_dcache_ctrl
         state_d = IDLE;
       end
     endcase  // state_q
+    end
   end
 
   ///////////////////////////////////////////////////////
@@ -407,6 +583,22 @@ module wt_dcache_ctrl
   ///////////////////////////////////////////////////////
 
   //pragma translate_off
+`ifdef G6LC_HYP8_DCTRL_TRACE
+  // Leaf debug: one line whenever the read-ctrl FSM moves or the port
+  // handshake wiggles. Compiled only for HYP8_LEAF=dcache runs.
+  int dtr_c = 0;
+  always_ff @(posedge clk_i) begin : p_dtrace
+    dtr_c <= dtr_c + 1;
+    if (rst_ni && (state_d != state_q || req_port_i.data_req ||
+                   req_port_i.tag_valid || req_port_o.data_rvalid))
+      $display("  [rdc] c=%0d st=%0d->%0d req=%b gnt=%b tv=%b rvld=%b rdreq=%b rdack=%b rdackq=%b wrclv=%b mreq=%b mack=%b mrpl=%b mrtrn=%b hit=%b fwd=%b",
+               dtr_c, state_q, state_d, req_port_i.data_req,
+               req_port_o.data_gnt, req_port_i.tag_valid,
+               req_port_o.data_rvalid, rd_req_o, rd_ack_i, rd_ack_q,
+               wr_cl_vld_i, miss_req_o, miss_ack_i, miss_replay_i,
+               miss_rtrn_vld_i, |rd_hit_oh_i, wbuffer_fwd_hit_i);
+  end
+`endif
 `ifndef VERILATOR
 
   hot1 :

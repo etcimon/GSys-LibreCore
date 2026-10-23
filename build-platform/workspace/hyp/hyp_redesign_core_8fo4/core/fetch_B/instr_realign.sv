@@ -70,17 +70,27 @@ module instr_realign
     // registered leftover_*_o values describe the window
     output logic                    bank_valid_o,
     output logic [G6LCCfg.VLEN-1:0] bank_pc_o,
-    // hyp8: a carry completion is pending its verdict
-    output logic                    pend_valid_o,
     // hyp8: this stage-B window completed a carry at slot0 (travels with the
     // window to the verdict stage)
     output logic carry_done_o,
-    // hyp8: verdict for the pending completer arrives from the frontend:
-    // resolve_i fires on the completing window's verdict cycle; keep_i holds
-    // the carry (protected split branch / refused window re-present); a
-    // resolve without keep finally drops the consumed carry.
-    input logic pend_resolve_i,
-    input logic pend_keep_i,
+    // hyp8: explicit prefix restore. The bank eagerly advances to each
+    // completing window's new tail (or clears when there is none); a later
+    // refusal/protected-branch verdict returns the OLD carry prefix from
+    // the completing window's own retained payload. restore_i has write
+    // priority over the normal stage-B update for its hart only; other
+    // harts' normal writes coexist. restore_pc_i is the consumed
+    // instruction's PC (= the carry's PC), restore_instr_i its carried
+    // lower half, restore_next_i the completing window's start address
+    // (= restore_pc_i + 2), supplied so the rollback path needs no adder.
+    input logic restore_i,
+    input logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] restore_hart_i,
+    input logic [G6LCCfg.VLEN-1:0] restore_pc_i,
+    input logic [15:0] restore_instr_i,
+    input logic [63:0] restore_next_i,
+    // hyp8: epoch the restored record belongs to — the completing window's
+    // own stream epoch on a protect restore, the post-replay epoch when the
+    // window is being re-presented
+    input logic [((HypCfg.FeEpochBits > 0) ? HypCfg.FeEpochBits : 1)-1:0] restore_epoch_i,
     // 32-bit block address - CACHE
     input logic [G6LCCfg.VLEN-1:0] address_i,
     // 32-bit block - CACHE
@@ -130,8 +140,18 @@ module instr_realign
   localparam int unsigned NrHalfWords = Geo.hw_per_w;
   localparam int unsigned HwIdxW = Geo.align_bits - 1;
   localparam int unsigned CurW = Geo.align_bits;
-  localparam bit FastContinuation = G6LCCfg.RVC && NrHalfWords > 1 &&
-      (NrHalfWords == (1 << HwIdxW)) && G6LCCfg.VLEN > CurW && G6LCCfg.VLEN <= 64;
+  // hyp8 geometry (RVC, power-of-two window, VLEN==64) makes this 1.
+  // The struct expression does not fold, so the slow-path add stayed on
+  // the cone. The else remains in source and is not elaborated here.
+  localparam bit FastContinuation = 1'b1;
+  // pragma translate_off
+  initial begin
+    assert (G6LCCfg.RVC && NrHalfWords > 1 &&
+            (NrHalfWords == (1 << HwIdxW)) && G6LCCfg.VLEN > CurW &&
+            G6LCCfg.VLEN <= 64)
+      else $error("instr_realign: FastContinuation literal 1 assumes the hyp8 fetch geometry");
+  end
+  // pragma translate_on
   localparam int unsigned EW = (HypCfg.FeEpochBits > 0) ? HypCfg.FeEpochBits : 1;
 
   // ------------------------------------------------------------------
@@ -183,6 +203,11 @@ module instr_realign
   logic [NH-1:0] carry_valid_bank_q;
   logic [NH-1:0][15:0] carry_instr_bank_q;
   logic [NH-1:0][G6LCCfg.VLEN-1:0] carry_addr_bank_q;
+  // hyp8: the epoch the carry record was produced under. Kill/flush are
+  // inert on the bank (SPEC L1), so a record can outlive the redirect that
+  // invalidated its stream; the epoch term re-keys it — only a window of
+  // the same stream may stitch.
+  logic [NH-1:0][EW-1:0] carry_epoch_bank_q;
   logic [15:0] carry_instr_d, carry_instr_q;
   logic [G6LCCfg.VLEN-1:0] carry_addr_d, carry_addr_q;
   logic carry_valid_d, carry_valid_q;
@@ -199,9 +224,15 @@ module instr_realign
   assign carry_instr_q = carry_instr_bank_q[a_hart_q];
   assign carry_addr_q  = carry_addr_bank_q[a_hart_q];
 
-  // leftover_complete(start_hw0=1) && rvi_prefix. Inlined so the 2-bit
-  // prefix test is not a function-call node on the select cone.
-  assign carry_ok = carry_valid_q && carry_next_match && (carry_instr_q[1:0] == 2'b11);
+  // leftover_complete(start_hw0=1) && rvi_prefix && same stream epoch. The
+  // epoch term is the stitch-time recheck of the kill/redirect the bank
+  // survived: a window whose own epoch differs from the record's is a
+  // different stream even when the address happens to be the successor.
+  // Inlined so the 2-bit prefix test is not a function-call node on the
+  // select cone.
+  assign carry_ok = carry_valid_q && carry_next_match &&
+                    (carry_epoch_bank_q[a_hart_q] == epoch_i) &&
+                    (carry_instr_q[1:0] == 2'b11);
 
   // Stage-B presented window: only a dead epoch suppresses the slots. A kill
   // (leftover_kill) does NOT invalidate the window — kill is inert on the
@@ -210,24 +241,29 @@ module instr_realign
   logic b_valid;
   assign b_valid = a_valid_q & ~a_stale;
 
-  // hyp8: deferred carry consumption. The reference dropped the carry the
-  // cycle the completing window was realigned, because cf_select (and hence
-  // "this is a predicted-taken split branch whose replay needs the carry")
-  // was computed in the same cycle. Here the verdict is two stages later, so
-  // a completion leaves the carry bank in place and arms pend_q instead; the
-  // frontend retires it (pend_resolve_i/!pend_keep_i) or keeps it
-  // (pend_keep_i: predicted-taken split branch, or the window was refused and
-  // will be re-presented). A fresh split overwrites the bank and voids the
-  // pending completion; a dead-epoch completer resolves with keep=0.
-  logic                    pend_q;
-  logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] pend_hart_q;
+  // hyp8: eager carry advance + explicit restore. The reference dropped
+  // the carry the cycle the completing window was realigned, because
+  // cf_select (and hence "this is a predicted-taken split branch whose
+  // replay needs the carry") was computed in the same cycle. Here the
+  // verdict is two stages later, so the bank instead advances to the
+  // completing window's own result immediately -- its new split tail when
+  // there is one, or the dropped carry when there is not -- and a later
+  // refusal/protected-branch verdict restores the OLD prefix explicitly
+  // through restore_i from the completing window's retained payload.
+  // A completion is just a normal bank write: carry_valid_d/carry_instr_d/
+  // carry_addr_d already carry the right outcome for both sub-cases.
   logic                    b_complete;
   logic                    b_carry_ok, b_valid_b;
-  assign b_complete = b_carry_ok & b_valid & ~a_kill_q;
-  // accept-time bank peek for leftover_retake
-  assign bank_valid_o  = carry_valid_bank_q[hart_i] | pend_q;
+  assign b_complete = b_carry_ok && b_valid && !a_kill_q && !flush_i;
+  // One gate for every bank/successor write: a live, unkilled, unflushed
+  // stage-B window. Kill, flush and epoch staleness are inert on carry
+  // state (SPEC L1).
+  logic bank_update;
+  assign bank_update = !flush_i &&
+      g6lc_fetch_pkg::leftover_update(flush_i, b_valid, a_kill_q);
+  // accept-time bank peek for leftover_retake (this hart's slot only)
+  assign bank_valid_o  = carry_valid_bank_q[hart_i];
   assign bank_pc_o     = carry_addr_bank_q[hart_i];
-  assign pend_valid_o  = pend_q;
 
   logic [NrHalfWords-1:0][15:0] hw;
   logic [NrHalfWords-1:0] hw_compressed;
@@ -247,10 +283,13 @@ module instr_realign
   assign hw_avail = CurW'(NrHalfWords) - hw_first;
 
   // hyp8 geometry (RVC, power-of-two window, VLEN in (align, 64]) makes
-  // FastContinuation constant 1. The add fallback was a second driver on
-  // carry_next_match and was the front of the carry cone. Silicon keeps the
-  // registered successor only.
+  // FastContinuation constant 1; the registered successor keeps
+  // carry_addr_q + 2 off the next window's feedback cone. Other geometries
+  // keep the direct add form in gen_continuation_slow. That arm is
+  // under a literal false here, so hyp8 does not time the add.
   // svt-pipe: no-cut on=carry_next_bank_q
+  // Literal true: FastContinuation as a localparam did not fold, so the
+  // slow-path add stayed on the cone. hyp8 geometry is the fast arm.
   if (1'b1) begin : gen_continuation
     // A134: a split can only start at the last available halfword. Its PC
     // is the window base plus the constant last-halfword offset.
@@ -266,13 +305,17 @@ module instr_realign
     assign window_next_pc = 64'(window_last_pc) + 64'd2;
     assign carry_next_match = 64'(a_addr_q) == carry_next_bank_q[a_hart_q];
     always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) carry_next_bank_q <= '0;
-      else if (g6lc_fetch_pkg::leftover_update(flush_i, b_valid, a_kill_q) && carry_valid_d)
-        carry_next_bank_q[a_hart_q] <= window_next_pc;
+      if (!rst_ni) begin
+        carry_next_bank_q <= '0;
+      end else begin
+        if (bank_update && carry_valid_d)
+          carry_next_bank_q[a_hart_q] <= window_next_pc;
+        // restore has write priority for its hart (mirrors the bank write)
+        if (restore_i)
+          carry_next_bank_q[restore_hart_i] <= restore_next_i;
+      end
     end
     // pragma translate_off
-    initial assert (FastContinuation)
-      else $error("instr_realign continuation requires hyp8 fetch geometry");
     always_ff @(posedge clk_i) if (rst_ni) begin
       for (int unsigned h = 0; h < NH; h++)
         if (carry_valid_bank_q[h])
@@ -280,6 +323,12 @@ module instr_realign
             else $error("realign continuation lost carry PC/hart alignment");
     end
     // pragma translate_on
+  end
+  // Not elaborated. A true else of the fast arm was still timed.
+  if (1'b0) begin : gen_continuation_slow
+    assign carry_next_match = 64'(a_addr_q) == 64'(carry_addr_q) + 64'd2;
+    assign window_last_pc   = a_addr_q +
+        G6LCCfg.VLEN'((int'(hw_avail) - 1) << 1);
   end
 
   // Parallel realignment (sv-timing A110). The serial walk — a cursor that
@@ -515,6 +564,7 @@ module instr_realign
       leftover_pending_o   <= 1'b0;
       leftover_valid_o     <= 1'b0;
       leftover_pc_o        <= '0;
+      carry_done_o         <= 1'b0;
       b_valid_b            <= 1'b0;
     end else begin
       if (flush_i) begin
@@ -535,45 +585,47 @@ module instr_realign
     end
   end
 
-  // Carry bank + pending completion: written by the stage-B window (valid and
-  // not killed, not stale). Kill, flush and epoch kill are INERT on carry
-  // state (SPEC L1): only a valid live window may produce a new carry or
-  // complete one. A completion retains the bank entry and arms pend_q; the
-  // frontend's verdict resolves the pend (keep = protected split branch /
-  // refused window). A foreign window while pend_q is armed leaves the bank
-  // untouched; a fresh split overwrites it and voids the pend (I4az).
+  // Carry bank: written unconditionally by each live stage-B window
+  // (bank_update). A completing window still writes — completion plus a
+  // fresh split preserves the new tail, completion alone drops the
+  // consumed carry (carry_valid_d = 0). Kill, flush and epoch staleness
+  // leave the bank untouched (SPEC L1). restore_i has write priority for
+  // its hart: a refused/protected verdict re-installs the OLD prefix the
+  // eager write consumed, replaying the stream's carry state as if the
+  // completing window had never published its tail.
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       carry_valid_bank_q <= '0;
       carry_instr_bank_q <= '0;
       carry_addr_bank_q  <= '0;
-      pend_q             <= 1'b0;
-      pend_hart_q        <= '0;
+      carry_epoch_bank_q <= '0;
     end else begin
-      if (pend_resolve_i) begin
-        if (!pend_keep_i) carry_valid_bank_q[pend_hart_q] <= 1'b0;
-        pend_q <= 1'b0;
+      if (bank_update) begin
+        carry_valid_bank_q[a_hart_q] <= carry_valid_d;
+        carry_instr_bank_q[a_hart_q] <= carry_instr_d;
+        carry_addr_bank_q[a_hart_q]  <= carry_addr_d;
+        carry_epoch_bank_q[a_hart_q] <= a_epoch_q;
       end
-      if (flush_i) pend_q <= 1'b0;
-      if (g6lc_fetch_pkg::leftover_update(flush_i, b_valid, a_kill_q)) begin
-        if (b_complete) begin
-          // retain the carry for the verdict; record who completed it
-          pend_q      <= 1'b1;
-          pend_hart_q <= a_hart_q;
-        end else if (carry_valid_d) begin
-          // a new split carry replaces the bank and voids an older pend
-          carry_instr_bank_q[a_hart_q] <= carry_instr_d;
-          carry_addr_bank_q[a_hart_q]  <= carry_addr_d;
-          carry_valid_bank_q[a_hart_q] <= carry_valid_d;
-          pend_q <= 1'b0;
-        end else if (!pend_q) begin
-          // foreign window, no pend: normal drop (carry_valid_d = 0)
-          carry_instr_bank_q[a_hart_q] <= carry_instr_d;
-          carry_addr_bank_q[a_hart_q]  <= carry_addr_d;
-          carry_valid_bank_q[a_hart_q] <= carry_valid_d;
-        end
-        // foreign window while pend_q: bank untouched
+      if (restore_i) begin
+        carry_valid_bank_q[restore_hart_i] <= 1'b1;
+        carry_instr_bank_q[restore_hart_i] <= restore_instr_i;
+        carry_addr_bank_q[restore_hart_i]  <= restore_pc_i;
+        carry_epoch_bank_q[restore_hart_i] <= restore_epoch_i;
       end
     end
   end
+
+  // pragma translate_off
+  // A restore must return an RVI lower half whose continuation is the
+  // completing window's own start address (carry PC + 2); the frontend
+  // builds the tuple from the retained window payload with no adder.
+  always_ff @(posedge clk_i) if (rst_ni && restore_i) begin
+    assert (restore_instr_i[1:0] == 2'b11)
+      else $error("instr_realign restore: prefix is not an RVI lower half");
+    assert (restore_next_i == 64'(restore_pc_i) + 64'd2)
+      else $error("instr_realign restore: next PC is not carry PC + 2");
+    assert (int'(restore_hart_i) < NH)
+      else $error("instr_realign restore: hart out of range");
+  end
+  // pragma translate_on
 endmodule

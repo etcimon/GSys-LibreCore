@@ -18,7 +18,10 @@
 // Modified by: Etienne Cimon (comb defaults; Verilator LATCH)
 // hyp8: staged around the A141 stationary-slot queue:
 //   stb_insert  — S1 capture (lowest-free + age row) / S2 queue writeback;
-//                 ready_o is registered and accounts for the staged record.
+//                 ready_o is a same-cycle reserved-capacity credit that
+//                 charges the staged record and the current arrival (a
+//                 registered ready alone was unsound: two owners could
+//                 claim the last free slot).
 //   stb_commit  — program-order head select + head-match gate + the
 //                 one-cycle spec->commit pend (committed stores survive flush).
 //   stb_drain   — the emit store_if kernel verbatim (program-order WT drain).
@@ -110,7 +113,9 @@ module store_buffer
     } fwd_rsp_o,
 
     input logic commit_i,  // commit the instruction which was placed there most recently
-    output logic commit_ready_o,  // commit queue is ready to accept another commit request
+    output logic commit_ready_o,  // commit queue ready AND (OoO) the committing
+                                 // tid is installed in the speculative queue —
+                                 // a staged S1/S2 arrival is not yet committable
     output logic ready_o,  // the store queue is ready to accept a new request
                            // it is only ready if it can unconditionally commit the instruction, e.g.:
                            // the commit buffer needs to be empty
@@ -253,7 +258,16 @@ module store_buffer
   logic [$clog2(DEPTH_COMMIT)-1:0] commit_read_pointer_n, commit_read_pointer_q;
   logic [$clog2(DEPTH_COMMIT)-1:0] commit_write_pointer_n, commit_write_pointer_q;
 
-  localparam bit LEGACY_SMT_KEEP = G6LCCfg.SuperscalarEn && G6LCCfg.NrHarts > 1 && !G6LCCfg.OoOEn;
+  // hyp8 OoOEn is 1, so the in-order SMT keep is false for every
+  // profile this package selects (including SMT2). The struct expression
+  // does not fold and was the fwd_keep cone.
+  localparam bit LEGACY_SMT_KEEP = 1'b0;
+  // pragma translate_off
+  initial begin
+    assert (!(G6LCCfg.SuperscalarEn && G6LCCfg.NrHarts > 1 && !G6LCCfg.OoOEn))
+      else $error("store_buffer: LEGACY_SMT_KEEP literal 0 does not match this config");
+  end
+  // pragma translate_on
 
   // Program order under OoO: circular trans_id distance from the oldest live
   // instruction, the same key g6lc_lsq.sv applies with commit_ptr_i.
@@ -416,33 +430,49 @@ module store_buffer
 
   end
 
-  // hyp8 speculative depth is 8. A serial cnt += inside the queue process
-  // was the occupancy cone. Pairwise adds are a depth-3 tree.
-  logic [7:0] spec_vb;
-  logic [1:0] spec_p0, spec_p1, spec_p2, spec_p3;
-  logic [2:0] spec_q0, spec_q1;
-  for (genvar i = 0; i < 8; i++) begin : gen_spec_vb
-    assign spec_vb[i] = speculative_queue_n[i].valid;
+  // hyp8: speculative occupancy, parameterized over DEPTH_SPEC — this is
+  // occupancy, not an 8-entry assumption. A serial cnt += inside the
+  // queue process was the cone; the leaves are the post-removal/
+  // post-insertion valid bits padded to a power of two and reduced as a
+  // balanced tree.
+  localparam int unsigned SPEC_PAD   = 1 << $clog2(DEPTH_SPEC);
+  localparam int unsigned SPEC_PAD_L = $clog2(SPEC_PAD);
+  localparam int unsigned SPEC_CNT_W = $clog2(DEPTH_SPEC + 1);
+  logic [SPEC_PAD-1:0]                     spec_vb;
+  logic [SPEC_PAD_L:0][SPEC_PAD-1:0][SPEC_CNT_W-1:0] spec_lvl;
+  for (genvar i = 0; i < SPEC_PAD; i++) begin : gen_spec_vb
+    if (i < DEPTH_SPEC) begin : gen_leaf
+      assign spec_vb[i]    = speculative_queue_n[i].valid;
+      assign spec_lvl[0][i] = SPEC_CNT_W'(spec_vb[i]);
+    end else begin : gen_pad0
+      assign spec_vb[i]    = 1'b0;
+      assign spec_lvl[0][i] = '0;
+    end
   end
-  assign spec_p0 = {1'b0, spec_vb[0]} + {1'b0, spec_vb[1]};
-  assign spec_p1 = {1'b0, spec_vb[2]} + {1'b0, spec_vb[3]};
-  assign spec_p2 = {1'b0, spec_vb[4]} + {1'b0, spec_vb[5]};
-  assign spec_p3 = {1'b0, spec_vb[6]} + {1'b0, spec_vb[7]};
-  assign spec_q0 = {1'b0, spec_p0} + {1'b0, spec_p1};
-  assign spec_q1 = {1'b0, spec_p2} + {1'b0, spec_p3};
-  assign speculative_status_cnt_n = {1'b0, spec_q0} + {1'b0, spec_q1};
+  for (genvar l = 0; l < SPEC_PAD_L; l++) begin : gen_spec_cnt
+    for (genvar i = 0; i < (SPEC_PAD >> (l + 1)); i++) begin : gen_node
+      assign spec_lvl[l+1][i] = spec_lvl[l][2*i] + spec_lvl[l][2*i+1];
+    end
+    for (genvar i = (SPEC_PAD >> (l + 1)); i < SPEC_PAD; i++) begin : gen_pad
+      assign spec_lvl[l+1][i] = '0;
+    end
+  end
+  assign speculative_status_cnt_n = spec_lvl[SPEC_PAD_L][0];
 
-  // hyp8: ready for the next arrival — registered from the post-edge
-  // occupancy (which already includes the staged S2 write) plus the
-  // same-cycle commit free. +1 vs the emit (rank 2); the S1 record is a
-  // flow-through stage, so it does not add a backpressure term.
-  logic ready_n;
-  assign ready_n = (speculative_status_cnt_n < $bits(speculative_status_cnt_n)'(DEPTH_SPEC)) ||
-                   |commit_pop_oh;
-  always_ff @(posedge clk_i or negedge rst_ni) begin : p_ready
-    if (~rst_ni) ready_o <= 1'b0;
-    else         ready_o <= ready_n;
-  end
+  // hyp8: credit for the NEXT store-unit admission — a registered ready
+  // alone was unsound: count_n already includes the S1->array
+  // installation, but the same-cycle arrival must be charged before
+  // another credit is advertised or the pending record and the arrival
+  // can both claim the last free slot. This is the same-cycle
+  // reserved-capacity calculation instead of a flow-through credit.
+  // commit_pop is NOT added back: the popped head's removal is already
+  // reflected in count_n. st_valid arrives on the store unit's
+  // registered VALID_STORE, so this does not create a ready->valid loop.
+  localparam int unsigned CREDIT_W = $clog2(DEPTH_SPEC + 2);
+  logic incoming_store;
+  assign incoming_store = valid_i && !flush_i && !cancelled_mask_i[trans_id_i];
+  assign ready_o = !flush_i &&
+    ((CREDIT_W'(speculative_status_cnt_n) + CREDIT_W'(incoming_store)) < CREDIT_W'(DEPTH_SPEC));
 
   // ----------------------------------------
   // stb_insert — S1 capture / S2 writeback
@@ -517,7 +547,29 @@ module store_buffer
   // hyp8: a commit in flight between the spec pop and the queue push is
   // still a pending store.
   assign no_st_pending_o = drain_no_st_pending && !commit_pend_v;
-  assign commit_ready_o  = drain_commit_ready && !commit_pend_v;
+
+  // hyp8: commit readiness additionally requires the committing store to be
+  // INSTALLED in the speculative queue. Arrivals are staged (stb_insert S1
+  // capture, S2 writeback), so a store that completed through valid_i this
+  // cycle is not visible to stb_commit for two edges; without this term a
+  // commit_i can fire while the entry is still in flight — headless pop, no
+  // pend push, and the committed store is silently lost (h34-r4:
+  // speculative_buffer_underflow @649). Presence, not head, is deliberate:
+  // ooo_commit_is_oldest still proves the popped head is the committing tid,
+  // and MIX_COMMIT's head_mismatch path is unchanged.
+  // There is no committing-hart input on this module; under a multi-hart
+  // profile whose scoreboard tids are not globally unique, this match must
+  // also compare the entry's .hart — recorded SMT2 obligation (single-hart
+  // hyp8: tid identity is complete).
+  logic commit_tid_present;
+  always_comb begin
+    commit_tid_present = 1'b0;
+    for (int unsigned i = 0; i < DEPTH_SPEC; i++)
+      commit_tid_present |= spec_valid_q[i] &&
+          (speculative_queue_q[i].trans_id == commit_trans_id_i);
+  end
+  assign commit_ready_o  = drain_commit_ready && !commit_pend_v &&
+                          (!G6LCCfg.OoOEn || commit_tid_present);
 
   assign rvfi_mem_paddr_o = spec_head.address;
 
@@ -630,6 +682,18 @@ module store_buffer
         break;
       end
     end
+    // hyp8: the pend record between spec pop and commit-queue push is
+    // already architectural — an unconditional committed-source match
+    // like the queue entries above, never gated by spec_stall_futile.
+    if (commit_push_valid &&
+        (po_eq(commit_push_entry.address[11:0], page_offset_i) ||
+         (G6LCCfg.RVZiCboz &&
+          commit_push_entry.cbo_op == CBO_ZERO &&
+          ((commit_push_entry.address[11:0] >> CBOZ_OFF_W) ==
+           (page_offset_i >> CBOZ_OFF_W))))) begin
+      page_offset_matches_now = 1'b1;
+      po_commit_match = 1'b1;
+    end
     if (!spec_stall_futile && valid_without_flush_i && spec_visible(trans_id_i) &&
         (po_eq(paddr_i[11:0], page_offset_i) ||
          (G6LCCfg.RVZiCboz && cbo_op_i == CBO_ZERO &&
@@ -733,6 +797,8 @@ module store_buffer
           .cmt_entries_i  (commit_queue_q),
           .cmt_valid_i    (cmt_valid),
           .cmt_rd_ptr_i   (commit_read_pointer_q),
+          .cmt_pending_valid_i (commit_push_valid),
+          .cmt_pending_entry_i (commit_push_entry),
           .ins_valid_i (ins_valid),
           .ins_tid_i   (ins_tid),
           .ins_hart_i  (ins_hart),
@@ -1109,8 +1175,29 @@ module store_buffer
   else
     $error("[Speculative Queue] You are trying to push new data although the buffer is not ready");
 
+  // Commit-edge facts shadowed into flops: a clocked property evaluates
+  // its expression after the triggering edge's own state updates under
+  // this simulator, so a consequence reading the just-popped head or the
+  // post-commit count can never observe the pre-commit facts (post-pop the
+  // head is empty and the count has already dropped). The shadows capture
+  // those facts with ordinary flop semantics and the checks below read only
+  // registered state, so they hold under either evaluation order.
+  logic                              commit_shadow_v_q;
+  logic                              commit_shadow_empty_q;
+  logic                              commit_shadow_headless_q;
+  logic [G6LCCfg.TRANS_ID_BITS-1:0]  commit_shadow_tid_q;
+  logic [G6LCCfg.TRANS_ID_BITS-1:0]  commit_shadow_head_tid_q;
+  always_ff @(posedge clk_i) begin
+    commit_shadow_v_q        <= commit_i;
+    commit_shadow_empty_q    <= commit_i && (speculative_status_cnt_q == 0);
+    commit_shadow_headless_q <= commit_i && !spec_head_valid;
+    commit_shadow_tid_q      <= commit_trans_id_i;
+    commit_shadow_head_tid_q <= spec_head.trans_id;
+  end
+
   speculative_buffer_underflow :
-  assert property (@(posedge clk_i) rst_ni && (speculative_status_cnt_q == 0) |-> !commit_i)
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+                   commit_shadow_v_q |-> !commit_shadow_empty_q)
   else $error("[Speculative Queue] You are committing although there are no stores to commit");
 
   commit_buffer_overflow :
@@ -1121,13 +1208,17 @@ module store_buffer
   // Commit is in program order, so the committing store is the oldest live
   // store and therefore the queue head. This catches any program-order
   // insertion error directly, at the handoff rather than in a later value.
+  // The shadowed commit-edge facts are checked on the following edge (see
+  // the shadow comment above): a same-edge read of spec_head already
+  // reflects the pop when the property evaluates under this simulator.
   ooo_commit_is_oldest :
   assert property (@(posedge clk_i) disable iff (!rst_ni)
-                   (G6LCCfg.OoOEn && commit_i) |->
-                   (spec_head_valid && spec_head.trans_id == commit_trans_id_i))
+                   (G6LCCfg.OoOEn && commit_shadow_v_q) |->
+                   (!commit_shadow_headless_q &&
+                    (commit_shadow_head_tid_q == commit_shadow_tid_q)))
   else
     $error("[Speculative Queue] OoO commit handoff took tid %0d, commit is retiring tid %0d",
-           spec_head.trans_id, commit_trans_id_i);
+           commit_shadow_head_tid_q, commit_shadow_tid_q);
 
   // U5.4 OoO: a store younger than the querying load must never reach it --
   // every forwarded byte has an older (visible) source.
@@ -1223,5 +1314,124 @@ module store_buffer
                     '0))
   else $error("[Commit Queue] cbo.zero commit entry is not line-aligned");
   //pragma translate_on
+
+//pragma translate_off
+  // +stq_trace: store-buffer match-source/drain probe (diagnostic only).
+  // Prints one line each time the union of the page-offset match sources,
+  // the commit-queue occupancy and the drain handshake moves — a held
+  // commit-class match leaves its owning source readable as the last line
+  // (h33-r7: pom=1 poso=0 sbe=0 wbe=1 needed the queue entry vs pend vs
+  // sticky vs gnt distinguished verbatim). +trace_from/+trace_to bound the
+  // cycle window (default 0..3000); stq_lo/stq_hi remain as overrides.
+  bit          stq_tr;
+  int unsigned stq_lo, stq_hi;
+  int unsigned stq_cyc = 0;
+  logic [4095:0] stq_sig, stq_sig_q = '0;
+  initial begin
+    stq_tr = $test$plusargs("stq_trace");
+    stq_lo = 0;
+    stq_hi = 3000;
+    void'($value$plusargs("trace_from=%d", stq_lo));
+    void'($value$plusargs("trace_to=%d", stq_hi));
+    void'($value$plusargs("stq_lo=%d", stq_lo));
+    void'($value$plusargs("stq_hi=%d", stq_hi));
+  end
+
+  always_comb begin
+    stq_sig = '0;
+    stq_sig[0]     = |spec_valid_q;
+    stq_sig[DEPTH_SPEC:1] = spec_valid_q;
+    for (int unsigned i = 0; i < DEPTH_COMMIT; i++) begin
+      stq_sig[16 + i*32 +: 32] = {commit_queue_q[i].valid,
+                                  commit_queue_q[i].wait_rvalid,
+                                  4'(commit_queue_q[i].cbo_op),
+                                  commit_queue_q[i].trans_id,
+                                  6'(i),
+                                  commit_queue_q[i].address[11:0]};
+    end
+    stq_sig[288] = commit_push_valid;
+    stq_sig[289] = commit_pend_v;
+    stq_sig[301:290] = commit_push_entry.address[11:0];
+    stq_sig[302 +: G6LCCfg.TRANS_ID_BITS] = commit_push_entry.trans_id;
+    stq_sig[318 +: 4] = commit_read_pointer_q;
+    stq_sig[322 +: 4] = commit_write_pointer_q;
+    stq_sig[326 +: 5] = 5'(commit_status_cnt_q);
+    stq_sig[331] = req_port_o.data_req;
+    stq_sig[332] = req_port_o.data_we;
+    stq_sig[344:333] = req_port_o.address_index;
+    stq_sig[345] = req_port_i.data_gnt;
+    stq_sig[346] = req_port_i.data_rvalid;
+    stq_sig[347] = drain_gnt;
+    stq_sig[348] = st_to_wbuf_grant;
+    stq_sig[349] = stall_st_pending_i;
+    stq_sig[350] = spec_head_mismatch;
+    stq_sig[351] = page_offset_sticky_v_q;
+    stq_sig[352] = page_offset_sticky_po_v_q;
+    stq_sig[364:353] = page_offset_sticky_po_q;
+    stq_sig[376:365] = page_offset_sticky_pa_q[11:0];
+    stq_sig[377] = s1_v;
+    stq_sig[378] = s2_wr_valid;
+    stq_sig[390:379] = s2_entry.address[11:0];
+    stq_sig[391 +: G6LCCfg.TRANS_ID_BITS] = s2_entry.trans_id;
+    stq_sig[400] = page_offset_matches_now;
+    stq_sig[401] = po_commit_match;
+    stq_sig[402] = po_spec_match;
+    stq_sig[403] = page_offset_matches_o;
+    stq_sig[404] = page_offset_spec_only_o;
+    stq_sig[405] = spec_stall_futile;
+    stq_sig[406] = load_paddr_valid_i;
+    stq_sig[418:407] = page_offset_i;
+    stq_sig[430:419] = load_paddr_i[11:0];
+    stq_sig[431] = commit_i;
+    stq_sig[432 +: G6LCCfg.TRANS_ID_BITS] = commit_trans_id_i;
+    stq_sig[440] = commit_ready_o;
+    stq_sig[441] = no_st_pending_o;
+    stq_sig[442] = drain_no_st_pending;
+    stq_sig[443] = store_buffer_empty_o;
+    stq_sig[444] = dcache_wbuffer_empty_i;
+    stq_sig[445] = flush_i;
+    stq_sig[446] = valid_i;
+    stq_sig[447] = valid_without_flush_i;
+    stq_sig[459:448] = paddr_i[11:0];
+    stq_sig[460 +: G6LCCfg.TRANS_ID_BITS] = trans_id_i;
+  end
+
+  always @(posedge clk_i) begin
+    if (!rst_ni) begin
+      stq_cyc  = 0;
+      stq_sig_q = '0;
+    end else if (stq_tr) begin
+      stq_cyc++;
+      if ((stq_sig != stq_sig_q) && (stq_cyc >= stq_lo) && (stq_cyc <= stq_hi)) begin
+        $write("[stq] c=%0d sv=%b", stq_cyc, spec_valid_q);
+        for (int unsigned i = 0; i < DEPTH_COMMIT; i++)
+          $write(" cq%0d=v%b/w%b/cb%0d/pa%x/t%0d", i,
+                 commit_queue_q[i].valid, commit_queue_q[i].wait_rvalid,
+                 commit_queue_q[i].cbo_op, commit_queue_q[i].address[11:0],
+                 commit_queue_q[i].trans_id);
+        $display(" pushv=%b pend=%b pushpa=%x pusht=%0d rdp=%0d wrp=%0d ccnt=%0d dreq=%b dwe=%b aidx=%x gnt=%b rvld=%b dgnt=%b s2w=%b ssp=%b hmis=%b stkv=%b stkpov=%b stkpo=%x stkpa=%x s1v=%b s2v=%b s2pa=%x s2tid=%0d mnow=%b pcm=%b psm=%b pom=%b poso=%b sfut=%b lpv=%b poi=%x lpa=%x cmti=%b cmtid=%0d crdy=%b nsp=%b dnsp=%b sbe=%b wbe=%b fls=%b vi=%b vwf=%b paddr=%x tid=%0d",
+                 commit_push_valid, commit_pend_v,
+                 commit_push_entry.address[11:0], commit_push_entry.trans_id,
+                 commit_read_pointer_q, commit_write_pointer_q,
+                 commit_status_cnt_q,
+                 req_port_o.data_req, req_port_o.data_we,
+                 req_port_o.address_index, req_port_i.data_gnt,
+                 req_port_i.data_rvalid, drain_gnt, st_to_wbuf_grant,
+                 stall_st_pending_i, spec_head_mismatch,
+                 page_offset_sticky_v_q, page_offset_sticky_po_v_q,
+                 page_offset_sticky_po_q, page_offset_sticky_pa_q[11:0],
+                 s1_v, s2_wr_valid, s2_entry.address[11:0], s2_entry.trans_id,
+                 page_offset_matches_now, po_commit_match, po_spec_match,
+                 page_offset_matches_o, page_offset_spec_only_o,
+                 spec_stall_futile, load_paddr_valid_i, page_offset_i,
+                 load_paddr_i[11:0], commit_i, commit_trans_id_i,
+                 commit_ready_o, no_st_pending_o, drain_no_st_pending,
+                 store_buffer_empty_o, dcache_wbuffer_empty_i, flush_i,
+                 valid_i, valid_without_flush_i, paddr_i[11:0], trans_id_i);
+        stq_sig_q = stq_sig;
+      end
+    end
+  end
+//pragma translate_on
 
 endmodule

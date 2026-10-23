@@ -1,0 +1,4 @@
+// Copyright (c) 2026 Etienne Cimon
+// SPDX-License-Identifier: MIT
+/dts-v1/;
+/include/ "g6lc-hyp8-platform.dtsi"

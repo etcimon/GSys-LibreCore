@@ -32,6 +32,9 @@ module g6lc_smt_csr_bank
 ) (
     input  logic clk_i,
     input  logic rst_ni,
+    // Full pipeline flush (controller flush_ctrl_id): frees any staged CSR
+    // request. Pipeline-wide — every resident bank drops its held request.
+    input  logic flush_i,
     input  logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] active_hart_i,
     // T6b-2b: hart owning the current load/store translation request. All
     // LSU-side architectural outputs (translation mode, ld/st privilege,
@@ -244,6 +247,7 @@ module g6lc_smt_csr_bank
     ) i_csr (
         .clk_i,
         .rst_ni,
+        .flush_i,
         .time_irq_i(time_irq_i[0]),
         .rtc_time_i,
         .flush_o,
@@ -486,6 +490,9 @@ module g6lc_smt_csr_bank
       ) i_csr (
           .clk_i,
           .rst_ni,
+          // the pipeline flush is not hart-scoped: it frees the staged
+          // request in every resident bank
+          .flush_i(flush_i),
           .time_irq_i(time_irq_i[h]),
           .rtc_time_i,
           .flush_o(flush_b[h]),

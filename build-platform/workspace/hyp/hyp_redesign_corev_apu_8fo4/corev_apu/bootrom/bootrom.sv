@@ -249,7 +249,7 @@ module bootrom (
 
     logic [$clog2(RomSize)-1:0] addr_q;
 
-    
+
 
   // BEGIN sv-timing auto-correct (balance_mux rewrite)
 // ----------------------------------------------------------------
@@ -277,7 +277,9 @@ always_ff @(posedge clk_i) begin
     // structural) is split into eight registered 32:1 bank reads plus a
     // registered bank select; the residual 8:1 select stays combinational.
     // Adds one read cycle on top of the emit's addr_q stage (the consumer,
-    // g6lc_axi2mem_reg, reads rdata_i two cycles after its request beat).
+    // g6lc_axi2mem_reg, samples rdata_i three edges after its request beat:
+    // req pulse at edge0, addr_q at edge1, this bank stage at edge2, and
+    // RD_LAT=3 counts the capture edge from edge0).
     localparam int unsigned BankSelW = ($clog2(RomSize) > 5)
                                      ? $clog2(RomSize) - 5 : 1;
     logic [7:0][63:0] bank_rdata_q;

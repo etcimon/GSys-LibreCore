@@ -3,7 +3,8 @@
 // W1, decision/select at W2, byte merge/coalesce + array write at W3),
 // registered data_gnt (+2 grant),
 // two-step drain select, wbuffer_data_o widened by the pending-export entry,
-// fixup version epochs, g6lc_hyp_rr_arb_tree arbiters.
+// fixup version epochs, vendor rr_arb_tree arbiters (the queued cell's
+// capture-pulse grant fed stale heads to live index/data consumers).
 // SPDX-FileCopyrightText: machine-generated
 // Copyright 2018 ETH Zurich and University of Bologna.
 // Copyright and related rights are licensed under the Solderpad Hardware
@@ -119,6 +120,10 @@ module wt_dcache_wbuffer
     input logic wr_cl_vld_i,
     input logic [DCACHE_CL_IDX_WIDTH-1:0] wr_cl_idx_i,
     input logic wr_cl_inv_i,  // cacheline write is an invalidation; no valid bits installed
+    // in-flight MSHR refill (same-index wait contract for the fixup
+    // tag-miss retry — see FIXUP_CHECK below)
+    input logic mshr_vld_i,
+    input logic [DCACHE_CL_IDX_WIDTH-1:0] mshr_cl_idx_i,
     // cache word write interface
     output logic [G6LCCfg.DCACHE_SET_ASSOC-1:0] wr_req_o,
     input logic wr_ack_i,
@@ -1060,11 +1065,24 @@ module wt_dcache_wbuffer
             end else if (fixup_check_en_q1) begin
               if (|fixup_hit_oh_q) begin
                 fixup_state_d = FIXUP_RETIRE;
+              end else if (mshr_vld_i && (mshr_cl_idx_i == paddr_cl_idx)) begin
+                // Tag miss while the missunit holds an in-flight refill for
+                // this index: the line may be installed this window, so
+                // retry the check after it lands.
+                fixup_state_d = FIXUP_PEND;
               end else begin
-                // Tag miss: line not resident. Keep the entry so loads can
-                // still forward until a refill makes the line visible, then
-                // retry the tag check. Popping here reopened the wbuffer hole
-                // on mini_stq_flush_fwd (checked-miss ACK, L1 empty).
+                // Tag miss with no same-index refill in flight. Contract:
+                // the entry was pushed on the memory ACK, so memory already
+                // holds these bytes and any later refill reads them — the
+                // deferred L1 write is redundant and the entry retires
+                // through the dead-entry path (be=0 -> pop/clear in PEND;
+                // no wr/inv port use, no PMU write pulse). Retrying until a
+                // refill that may never come livelocked the LSU: the head at
+                // 0x80001060 re-probed the tag port forever, the parked load
+                // held lsu_ready=0, and the commit head pinned behind it
+                // (h33 r6-diag wedge ~c886).
+                if (fixup_sel_bypass_q) fixup_bypass_d.be      = '0;
+                else                    fixup_d[fixup_head].be = '0;
                 fixup_state_d = FIXUP_PEND;
               end
             end
@@ -1588,11 +1606,29 @@ module wt_dcache_wbuffer
   ) i_wbuffer_leg (
       .clk_i        (clk_i),
       .rst_ni       (rst_ni),
+      // The snapshot is dead the cycle its evict asserts: rtrn_snap_v_q
+      // clears only at the evict edge, so unmasked the leg re-arms on the
+      // dying snapshot (go_q re-fires, fire_q re-captures) and a second
+      // leg_push_q/drop_q two cycles later pops the next return's FIFO
+      // entry under a stale id, stranding that return's tx_stat slot.
+      // Masking the three capture inputs makes the evict the same event
+      // that releases the return; ack_wr_lost retries never see evict.
+`ifdef G6LC_MUT_RTRN_SNAP_REARM
+      // Review-only mutation: the pre-fix arms. The dcache leaf's
+      // RTRN_GAP case must fail on this build (phantom pop strands the
+      // second return's tx_stat slot).
       .snap_v_i     (rtrn_snap_v_q),
       .fixup_hold_i (fixup_hold),
       .ack_wr_lost_i(ack_wr_lost),
       .fire_i       (leg_fire_d),
       .l1_i         (leg_l1_d),
+`else
+      .snap_v_i     (rtrn_snap_v_q && !evict),
+      .fixup_hold_i (fixup_hold),
+      .ack_wr_lost_i(ack_wr_lost),
+      .fire_i       (leg_fire_d && !evict),
+      .l1_i         (leg_l1_d && !evict),
+`endif
       .l1_oh_i      (leg_l1_oh_d),
       .paddr_i      (leg_paddr_d),
       .be_i         (leg_be_d),
@@ -1616,7 +1652,10 @@ module wt_dcache_wbuffer
   assign free_tx_slots = |(~tx_vld_o);
 
   // next word to lookup in the cache
-  g6lc_hyp_rr_arb_tree #(
+  // Vendor arbiter: tx_id must be the current free-slot pick at pop —
+  // tx_stat_d[tx_id].vld is written and miss_id_o rides it, so a queued
+  // head could allocate a stale slot.
+  rr_arb_tree #(
       .NumIn    (G6LCCfg.DCACHE_MAX_TX),
       .LockIn   (1'b1),
       .DataWidth(1)
@@ -1838,7 +1877,19 @@ module wt_dcache_wbuffer
           w1_w3hit_q    <= 1'b0;
           gnt_q         <= 1'b0;
         end else begin
-          w1_vld_q      <= req_port_i.data_req;
+          // Write-once per granted request. The producer observes the
+          // registered grant (gnt_q) the cycle after the W2 verdict; a
+          // back-to-back producer (stb_drain popping a commit-queue head)
+          // can drive the NEXT request on that very cycle, so data_req is
+          // not a request delimiter — an accepted bit held for the whole
+          // data_req assertion wedges the queue behind a dead W2 slot
+          // (h33-r7 wedge: second store's gnt never arrived). The suppress
+          // window is exactly the verdict->grant cycle: accepted pulses
+          // once so the re-captured verdict of the just-accepted record is
+          // ignored, and the W1 capture is gated off for that cycle so the
+          // stale record cannot re-enter and be re-accepted as the
+          // following request (a grant with no matching write).
+          w1_vld_q      <= req_port_i.data_req && !w1_accepted_q;
           w1_is_ni_q    <= is_ni;
           w1_tag_q      <= req_port_i.address_tag;
           w1_idx_q      <= req_port_i.address_index;
@@ -1850,10 +1901,7 @@ module wt_dcache_wbuffer
           w1_next_ptr_q <= next_ptr;
           w1_full_q     <= full;
           w1_w3hit_q    <= w3_tag_match;
-          // write-once per held data_req: after the W2 verdict the
-          // producer keeps asserting until it sees data_gnt, so the
-          // re-captured request must not write a second time.
-          w1_accepted_q <= req_port_i.data_req && (w1_accepted_q || e_accept);
+          w1_accepted_q <= e_accept;
           gnt_q         <= e_accept;
         end
       end
@@ -1911,7 +1959,10 @@ module wt_dcache_wbuffer
   );
 
   // next dirty word to serve
-  g6lc_hyp_rr_arb_tree #(
+  // Vendor arbiter: dirty_ptr indexes the live bdirty[] and the drained
+  // entry (dr_mux) must carry current data — a byte merge after a queue
+  // capture would otherwise drain a stale snapshot.
+  rr_arb_tree #(
       .NumIn   (G6LCCfg.WtDcacheWbufDepth),
       .LockIn  (1'b1),
       .DataType(wbuffer_t)
@@ -1930,7 +1981,10 @@ module wt_dcache_wbuffer
   );
 
   // next word to lookup in the cache
-  g6lc_hyp_rr_arb_tree #(
+  // Vendor arbiter: check_ptr indexes the live array for the check
+  // writeback (wbuffer_q[check_ptr_q1]); a stale queued index can mark
+  // the wrong slot checked.
+  rr_arb_tree #(
       .NumIn   (G6LCCfg.WtDcacheWbufDepth),
       .DataType(wbuffer_t)
   ) i_clean_rr (
@@ -2183,6 +2237,15 @@ module wt_dcache_wbuffer
           {fixup_wr_idx, fixup_wr_off} == smt_wt_address[G6LCCfg.DCACHE_INDEX_WIDTH-1:0]))
         $display("[smt-flow] wt_fixup_wr cycle=%0d idx=%h off=%h ways=%h be=%h data=%h ack=%b",
                  smt_wt_cycle, fixup_wr_idx, fixup_wr_off, fixup_wr_oh, fixup_wr_data_be, fixup_wr_data, fixup_wr_ack);
+      // Return ledger: every fifo push and every pop, including pops whose
+      // snapshot tx slot was already free (invisible to the wt_ack print).
+      if (miss_rtrn_vld_i)
+        $display("[smt-flow] wt_rpush cycle=%0d id=%0d empty=%b snapv=%b",
+                 smt_wt_cycle, miss_rtrn_id_i, rtrn_empty, rtrn_snap_v_q);
+      if (evict)
+        $display("[smt-flow] wt_evict cycle=%0d id=%0d txv=%b snapv=%b empty=%b push=%b drop=%b",
+                 smt_wt_cycle, rtrn_id, rtrn_tx.vld, rtrn_snap_v_q, rtrn_empty,
+                 leg_push_q, drop_q);
     end
   end
 `ifndef VERILATOR

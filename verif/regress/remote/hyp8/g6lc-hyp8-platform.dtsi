@@ -1,0 +1,99 @@
+// Copyright (c) 2026 Etienne Cimon
+// SPDX-License-Identifier: MIT
+//
+// Simulation boot profile for the materialized hyp8 configuration.
+// The advertised ISA follows the existing OpenSBI reference profile, with
+// Zicbom/Zacas removed because the hyp8 config disables them. Additional
+// optional RTL extensions are outside this boot profile's qualification.
+// CPU clock-frequency is deliberately absent: the structural 8-FO4 goal
+// is not a measured physical clock. The simulated RTC ticks every four
+// core cycles, matching the reference platform's timebase convention.
+
+/ {
+    #address-cells = <2>;
+    #size-cells = <2>;
+    compatible = "eth,ariane-bare-dev";
+    model = "GSys LibreCore hyp8 simulation";
+
+    chosen {
+        stdout-path = "/soc/uart@10000000:115200";
+    };
+
+    cpus {
+        #address-cells = <1>;
+        #size-cells = <0>;
+        timebase-frequency = <12500000>;
+
+        CPU0: cpu@0 {
+            device_type = "cpu";
+            compatible = "riscv";
+            reg = <0>;
+            status = "okay";
+            riscv,isa = "rv64imafdc_zba_zbb_zbs_zicboz_zicsr_zifencei";
+            riscv,isa-base = "rv64i";
+            riscv,isa-extensions = "i", "m", "a", "f", "d", "c",
+                                  "zba", "zbb", "zbs", "zicboz",
+                                  "zicsr", "zifencei";
+            mmu-type = "riscv,sv39";
+            tlb-split;
+            riscv,cboz-block-size = <64>;
+            i-cache-block-size = <16>;
+            i-cache-size = <16384>;
+            d-cache-block-size = <16>;
+            d-cache-size = <32768>;
+            CPU0_intc: interrupt-controller {
+                #address-cells = <0>;
+                #interrupt-cells = <1>;
+                interrupt-controller;
+                compatible = "riscv,cpu-intc";
+            };
+        };
+
+        cpu-map {
+            cluster0 {
+                core0 {
+                    thread0 { cpu = <&CPU0>; };
+                };
+            };
+        };
+    };
+
+    memory@80000000 {
+        device_type = "memory";
+        reg = <0x0 0x80000000 0x0 0x10000000>;
+    };
+
+    soc {
+        #address-cells = <2>;
+        #size-cells = <2>;
+        compatible = "simple-bus";
+        ranges;
+
+        clint@2000000 {
+            compatible = "sifive,clint0", "riscv,clint0";
+            interrupts-extended = <&CPU0_intc 3>, <&CPU0_intc 7>;
+            reg = <0x0 0x2000000 0x0 0xc0000>;
+        };
+
+        PLIC0: interrupt-controller@c000000 {
+            compatible = "sifive,plic-1.0.0", "riscv,plic0";
+            #address-cells = <0>;
+            #interrupt-cells = <1>;
+            interrupt-controller;
+            interrupts-extended = <&CPU0_intc 11>, <&CPU0_intc 9>;
+            reg = <0x0 0xc000000 0x0 0x4000000>;
+            riscv,ndev = <30>;
+        };
+
+        uart@10000000 {
+            compatible = "ns16550a";
+            reg = <0x0 0x10000000 0x0 0x1000>;
+            clock-frequency = <50000000>;
+            current-speed = <115200>;
+            interrupt-parent = <&PLIC0>;
+            interrupts = <1>;
+            reg-shift = <2>;
+            reg-io-width = <4>;
+        };
+    };
+};

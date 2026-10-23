@@ -9,9 +9,11 @@
 //   the candidate no younger candidate writes; commit queue: the newest
 //   in queue order; arrivals override the queue as today). F3 gathers
 //   the winning bytes and registers the response — forward data is valid
-//   StoreFwdCycles after the request. Slot payloads are stationary and
-//   persist >= 2 cycles after a slot frees, so F2/F3 reads of the queue
-//   arrays re-pair correctly with the F1 match snapshot.
+//   StoreFwdCycles after the request. The represented payload is
+//   snapshotted with the match: F1 captures every queue slot's data into
+//   f1_*_data_q and carries it to F2, so F3 emits the bytes the F1
+//   candidate bits were taken against even if a slot frees and is reused
+//   while the request is in flight.
 
 module stb_fwd
   import g6lc_core_pkg::*;
@@ -44,6 +46,11 @@ module stb_fwd
     input  entry_t [DEPTH_COMMIT-1:0]        cmt_entries_i,
     input  logic [DEPTH_COMMIT-1:0]          cmt_valid_i,
     input  logic [$clog2(DEPTH_COMMIT)-1:0]  cmt_rd_ptr_i,
+    // committed transfer landing at this edge (stb_commit's pend push):
+    // already architectural — the newest committed source, ranked after
+    // the speculative/live-insertion sources and before the queued ones
+    input  logic                             cmt_pending_valid_i,
+    input  entry_t                           cmt_pending_entry_i,
     // arriving-store candidates (the live valid_without_flush term and
     // the staged S1 insert record — both are program-younger terms the
     // emit folded into its same-cycle merge)
@@ -101,6 +108,14 @@ module stb_fwd
   logic [1:0][NB-1:0]              f1_ins_cand_q;
   logic [1:0]                      f1_ins_cboz_q;
   logic [1:0][G6LCCfg.XLEN-1:0]    f1_ins_data_q;
+  // hyp8: the payload a match refers to is captured WITH the match —
+  // a slot freed and reused before F3 must not lend its new data to an
+  // older request.
+  logic [DEPTH_SPEC-1:0][G6LCCfg.XLEN-1:0]   f1_spec_data_q;
+  logic [DEPTH_COMMIT-1:0][G6LCCfg.XLEN-1:0] f1_cmt_data_q;
+  logic [NB-1:0]               f1_pend_cand_q;
+  logic                        f1_pend_cboz_q;
+  logic [G6LCCfg.XLEN-1:0]     f1_pend_data_q;
   logic [DEPTH_SPEC-1:0][DEPTH_SPEC-1:0] f1_older_q;
   logic [$clog2(DEPTH_COMMIT)-1:0] f1_cmt_rd_ptr_q;
   logic                            f1_v_q;
@@ -119,6 +134,9 @@ module stb_fwd
   logic [1:0]                       f1_ins_match_c;
   logic [1:0][NB-1:0]               f1_ins_cand_c;
   logic [1:0]                       f1_ins_cboz_c;
+  logic                             f1_pend_match_c;
+  logic [NB-1:0]                    f1_pend_cand_c;
+  logic                             f1_pend_cboz_c;
 
   for (genvar i = 0; i < DEPTH_SPEC; i++) begin : gen_f1_spec
     assign f1_spec_match_c[i] =
@@ -168,6 +186,28 @@ module stb_fwd
       end
     end
   end
+  // pending committed transfer: same match/candidate shape as a queued
+  // commit entry (architectural — no speculative TID age filter)
+  assign f1_pend_match_c =
+      cmt_pending_valid_i &&
+      (pa_eq(cmt_pending_entry_i.address, req_pa_i) ||
+       cboz_covers(cmt_pending_entry_i.cbo_op,
+                   cmt_pending_entry_i.address, req_pa_i));
+  assign f1_pend_cboz_c = f1_pend_match_c &&
+      (G6LCCfg.RVZiCboz && cmt_pending_entry_i.cbo_op == CBO_ZERO);
+  for (genvar b = 0; b < NB; b++) begin : gen_f1_pend_b
+    if (G6LCCfg.RVZiCboz) begin : gen_cboz
+      assign f1_pend_cand_c[b] =
+          (cmt_pending_entry_i.cbo_op == CBO_ZERO) ?
+          (f1_pend_match_c &&
+           cboz_covers(cmt_pending_entry_i.cbo_op,
+                       cmt_pending_entry_i.address,
+                       req_pa_i + G6LCCfg.PLEN'(b))) :
+          (f1_pend_match_c && cmt_pending_entry_i.be[b]);
+    end else begin : gen_plain
+      assign f1_pend_cand_c[b] = f1_pend_match_c && cmt_pending_entry_i.be[b];
+    end
+  end
   for (genvar k = 0; k < 2; k++) begin : gen_f1_ins
     assign f1_ins_match_c[k] =
         ins_valid_i[k] &&
@@ -197,6 +237,8 @@ module stb_fwd
       f1_spec_cand_q <= '0; f1_spec_cboz_q <= '0;
       f1_cmt_cand_q  <= '0; f1_cmt_cboz_q  <= '0;
       f1_ins_cand_q  <= '0; f1_ins_cboz_q  <= '0; f1_ins_data_q <= '0;
+      f1_spec_data_q <= '0; f1_cmt_data_q  <= '0;
+      f1_pend_cand_q <= '0; f1_pend_cboz_q <= '0; f1_pend_data_q <= '0;
       f1_older_q     <= '0; f1_cmt_rd_ptr_q <= '0;
       f1_pa_q        <= '0; f1_tag_q       <= '0;
     end else if (flush_i) begin
@@ -215,6 +257,15 @@ module stb_fwd
         f1_ins_cand_q  <= f1_ins_cand_c;
         f1_ins_cboz_q  <= f1_ins_cboz_c;
         f1_ins_data_q  <= ins_data_i;
+        // represented data snapshot: F3 must read the payload the F1
+        // match was taken against, not whatever the slot holds by then
+        for (int unsigned i = 0; i < DEPTH_SPEC; i++)
+          f1_spec_data_q[i] <= spec_entries_i[i].data;
+        for (int unsigned i = 0; i < DEPTH_COMMIT; i++)
+          f1_cmt_data_q[i] <= cmt_entries_i[i].data;
+        f1_pend_cand_q <= f1_pend_cand_c;
+        f1_pend_cboz_q <= f1_pend_cboz_c;
+        f1_pend_data_q <= cmt_pending_entry_i.data;
       end
     end
   end
@@ -233,6 +284,11 @@ module stb_fwd
   logic [NB-1:0][1:0]              f2_ins_win_q;
   logic [NB-1:0]                   f2_ins_cboz_q;
   logic [1:0][G6LCCfg.XLEN-1:0]    f2_ins_data_q;
+  logic [DEPTH_SPEC-1:0][G6LCCfg.XLEN-1:0]   f2_spec_data_q;
+  logic [DEPTH_COMMIT-1:0][G6LCCfg.XLEN-1:0] f2_cmt_data_q;
+  logic [NB-1:0]                   f2_pend_cand_q;
+  logic                            f2_pend_cboz_q;
+  logic [G6LCCfg.XLEN-1:0]         f2_pend_data_q;
   logic [NB-1:0]                   f2_cover_q;
   logic                            f2_v_q;
   logic [TAG_W-1:0]                f2_tag_q;
@@ -291,7 +347,7 @@ module stb_fwd
     assign ins_cboz_c[b] = (f1_ins_cand_q[0][b] && f1_ins_cboz_q[0]) ||
                            (!f1_ins_cand_q[0][b] && f1_ins_cand_q[1][b] &&
                             f1_ins_cboz_q[1]);
-    assign cover_c[b] = (|f1_sc_b[b]) || cmt_any_c[b] ||
+    assign cover_c[b] = (|f1_sc_b[b]) || f1_pend_cand_q[b] || cmt_any_c[b] ||
                         (|{f1_ins_cand_q[0][b], f1_ins_cand_q[1][b]});
   end
 
@@ -300,6 +356,8 @@ module stb_fwd
       f2_v_q <= 1'b0;
       f2_spec_cboz_q <= '0;
       f2_ins_data_q <= '0;
+      f2_spec_data_q <= '0; f2_cmt_data_q <= '0;
+      f2_pend_cand_q <= '0; f2_pend_cboz_q <= '0; f2_pend_data_q <= '0;
       f2_tag_q <= '0;
     end else if (flush_i) begin
       f2_v_q <= 1'b0;
@@ -308,6 +366,13 @@ module stb_fwd
       f2_tag_q <= f1_tag_q;
       f2_ins_data_q <= f1_ins_data_q;
       f2_spec_cboz_q <= f1_spec_cboz_q;
+      if (f1_v_q) begin
+        f2_spec_data_q <= f1_spec_data_q;
+        f2_cmt_data_q  <= f1_cmt_data_q;
+        f2_pend_cand_q <= f1_pend_cand_q;
+        f2_pend_cboz_q <= f1_pend_cboz_q;
+        f2_pend_data_q <= f1_pend_data_q;
+      end
     end
   end
   for (genvar b = 0; b < NB; b++) begin : gen_p_f2
@@ -342,7 +407,7 @@ module stb_fwd
       // cbo.zero winners contribute '0 -- the emit masks the data
       // explicitly rather than relying on the posted payload being zero
       assign sr[0][i] = {8{f2_spec_win_q[b][i] && !f2_spec_cboz_q[i]}} &
-                        spec_entries_i[i].data[8*b +: 8];
+                        f2_spec_data_q[i][8*b +: 8];
     end
     for (genvar l = 0; l < SLV; l++) begin : gen_lvl
       for (genvar i = 0; i < DEPTH_SPEC; i++) begin : gen_or
@@ -357,15 +422,23 @@ module stb_fwd
         end
       end
     end
-    // arrivals win over every queued source (emit's overwrite order)
-    assign f3_data[8*b +: 8] =
-        (f2_ins_win_q[b] != 2'd3) ?
-            (f2_ins_cboz_q[b] ? 8'h00
-                              : f2_ins_data_q[f2_ins_win_q[b]][8*b +: 8]) :
-        (|f2_spec_win_q[b])     ? sr[SLV][0] :
-        f2_cmt_hit_q[b]         ? (f2_cmt_cboz_q[b] ? 8'h00
-                              : cmt_entries_i[f2_cmt_win_q[b]].data[8*b +: 8])
-                                : '0;
+    // arrivals win over every queued source (emit's overwrite order);
+    // the pending committed push ranks after the speculative/live
+    // sources and before the older committed queue.
+    // One mux. The four sources are arms, so their reads are not added.
+    always_comb begin
+      unique casez ({f2_ins_win_q[b] != 2'd3, |f2_spec_win_q[b],
+                     f2_pend_cand_q[b], f2_cmt_hit_q[b]})
+        4'b1???: f3_data[8*b +: 8] = f2_ins_cboz_q[b] ? 8'h00
+                                    : f2_ins_data_q[f2_ins_win_q[b]][8*b +: 8];
+        4'b01??: f3_data[8*b +: 8] = sr[SLV][0];
+        4'b001?: f3_data[8*b +: 8] = f2_pend_cboz_q ? 8'h00
+                                    : f2_pend_data_q[8*b +: 8];
+        4'b0001: f3_data[8*b +: 8] = f2_cmt_cboz_q[b] ? 8'h00
+                                    : f2_cmt_data_q[f2_cmt_win_q[b]][8*b +: 8];
+        default: f3_data[8*b +: 8] = '0;
+      endcase
+    end
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin : p_f3

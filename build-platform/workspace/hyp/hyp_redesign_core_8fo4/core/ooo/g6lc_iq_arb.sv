@@ -65,6 +65,8 @@ module g6lc_iq_arb
     input  logic [BANKS-1:0][1:0][4:0]        cand_wboff_i,
     input  logic [BANKS-1:0][1:0][3:0]        cand_gate_i,
     input  logic [BANKS-1:0][1:0]             cand_div_i,
+    // Serial FU classes (CSR/AMO/CVXIF): port-0-only candidates.
+    input  logic [BANKS-1:0][1:0]             cand_port0_i,
     // FU ready status for the take-gate ({lsu,fpu,csr,mult} order).
     input  logic                            lsu_ready_i,
     input  logic                            fpu_ready_i,
@@ -94,6 +96,9 @@ module g6lc_iq_arb
     // Back-signals to the banks.
     output logic [BANKS-1:0][NPORTS-1:0]      take_v_o,
     output logic [BANKS-1:0][NPORTS-1:0]      take_cand_o,
+    // Entry captured with the grant. take_cand is only which ranked
+    // slot it was; a one-cycle-late take must not follow a new cand one-hot.
+    output logic [BANKS-1:0][NPORTS-1:0][$clog2(ENTRIES > 1 ? ENTRIES : 2)-1:0] take_idx_o,
     output logic [BANKS-1:0][NPORTS-1:0]      ack_v_o,
     output logic [BANKS-1:0][NPORTS-1:0][$clog2(ENTRIES > 1 ? ENTRIES : 2)-1:0] ack_idx_o
 );
@@ -118,6 +123,7 @@ module g6lc_iq_arb
     logic [4:0]         wb_off;
     logic [3:0]         gate;     // {lsu,fpu,csr,mult} ready-gates
     logic               div;
+    logic               port0;    // serial class: issue port 0 only
   } sel_t;
 
   // Pending presentation: the select record captured at T+1, presented at
@@ -151,11 +157,43 @@ module g6lc_iq_arb
   logic [BANKS-1:0][1:0][4:0]       cand_wboff_q;
   logic [BANKS-1:0][1:0][3:0]       cand_gate_q;
   logic [BANKS-1:0][1:0]            cand_div_q;
+  logic [BANKS-1:0][1:0]            cand_port0_q;
+
+  // Snapshot of the candidate the one-hot was computed from. The payload
+  // mux and the tournament read these flops, so a new pair can be captured
+  // every cycle while the previous pair is granted.
+  logic [BANKS-1:0][1:0]            cand_v_h;
+  logic [BANKS-1:0][1:0][EW-1:0]    cand_i_h;
+  logic [BANKS-1:0][1:0][TID_W-1:0] cand_tid_h;
+  logic [BANKS-1:0][1:0]            cand_fp_h;
+  logic [BANKS-1:0][1:0]            cand_spec_h;
+  logic [BANKS-1:0][1:0][1:0]       cand_spec_ab_h;
+  logic [BANKS-1:0][1:0][1:0][TID_W-1:0] cand_ptid_h;
+  logic [BANKS-1:0][1:0]            cand_fluin_h;
+  logic [BANKS-1:0][1:0][1:0]       cand_wbport_h;
+  logic [BANKS-1:0][1:0][4:0]       cand_wboff_h;
+  logic [BANKS-1:0][1:0][3:0]       cand_gate_h;
+  logic [BANKS-1:0][1:0]            cand_div_h;
+  logic [BANKS-1:0][1:0]            cand_port0_h;
+
+  logic [NPAIR-1:0][3:0] pv_d;
+  logic [NPAIR-1:0][3:0] pv_q;
+  logic [NPAIR-1:0]      a0_d;
+  logic [NPAIR-1:0]      a0_q;
+  logic [NPAIR-1:0]      m1a_d;
+  logic [NPAIR-1:0]      m1a_q;
+  logic [NPAIR-1:0]      m1c_d;
+  logic [NPAIR-1:0]      m1c_q;
+  logic [NCAND-1:0][3:0] m_oh_d;
+  logic [NCAND-1:0][3:0] m_oh_q;
 
   // Presentation registers: win_q = selected at T+1, payload arrives T+2;
   // pres_q = un-acked hold (own sbe snapshot, payload regs may be reused).
   sel_t  [NPORTS-1:0] win_q;
   pres_t [NPORTS-1:0] pres_q;
+  // Tournament winner, consumed by take one cycle later.
+  sel_t [NPORTS-1:0] win_s;
+  logic [NPORTS-1:0] win_s_v;
 
   function automatic logic age_older(input logic [TID_W-1:0] a,
                                      input logic [TID_W-1:0] b);
@@ -177,91 +215,150 @@ module g6lc_iq_arb
   // lifetime of the pair it was captured with.
   // ----------------------------------------------------------------------
   localparam int unsigned NSLOT = BANKS * 2;
-  logic [NSLOT-1:0][NSLOT-1:0] aq_d, aq_q;
+  logic [NSLOT-1:0][NSLOT-1:0] aq_q;
+  logic [NSLOT-1:0][NSLOT-1:0] aq_h;
 
   function automatic int unsigned slot_of(input logic [BW-1:0] b,
                                           input logic ci);
     return int'(b) * 2 + int'(ci);
   endfunction
 
-  for (genvar a = 0; a < NSLOT; a++) begin : gen_aq_r
-    for (genvar b = 0; b < NSLOT; b++) begin : gen_aq_c
-      if (a == b) begin : gen_diag
-        assign aq_d[a][b] = 1'b0;
-      end else begin : gen_nd
-        assign aq_d[a][b] = age_older(cand_tid_i[a/2][a%2],
-                                      cand_tid_i[b/2][b%2]);
-      end
-    end
-  end
+  // The matrix is computed inside the capture flop (gen_aq below): a
+  // combinational read of cand_tid_i feeding a same-edge register misses
+  // the simulator's input-propagation settle for a leaf-driven port
+  // (hyp8-control-issue-r33: cand_tid_i={1,2} at the edge yet the
+  // generate/always_comb cone stayed at its time-0 value). A clocked
+  // RHS read observes the freshly driven value, exactly like the
+  // cand_tid_q capture next to it; the synthesized cone is identical.
 
   // ----------------------------------------------------------------------
   // Pair merge + port select over cand_q (cancelled dropped first)
   // ----------------------------------------------------------------------
-  sel_t [NCAND-1:0] merged;
+  // A trans_id already held by a win or pres record is not re-selected.
+  logic [BANKS-1:0][1:0] cand_owned;
+  for (genvar b = 0; b < BANKS; b++) begin : gen_own_b
+    for (genvar ci = 0; ci < 2; ci++) begin : gen_own_c
+      logic [NPORTS-1:0] ow;
+      for (genvar p = 0; p < NPORTS; p++) begin : gen_own_p
+        assign ow[p] = (win_q[p].v && (win_q[p].tid == cand_tid_q[b][ci])) ||
+                       (pres_q[p].v && (pres_q[p].tid == cand_tid_q[b][ci]));
+      end
+      assign cand_owned[b][ci] = |ow;
+    end
+  end
 
-  // hyp8: per-pair merge as a 4-record pool + gated selects. Per-bank
-  // ranking (cand0 older than cand1) makes the two-bank min/next two
-  // pairwise age compares; every pool/merged write is an independent LHS.
-  // hyp8 r5: the three order terms read the registered matrix (aq_q)
-  // instead of comparing tids -- indices are static slot numbers.
-  for (genvar pr = 0; pr < NPAIR; pr++) begin : gen_pmerge
+  sel_t [NCAND-1:0] merged;
+  // svt-stage: begin CTL
+  // One-bit pair order. No sel_t in this generate. The payload mux is
+  // the next cycle, so both issue ports still grant every cycle.
+  for (genvar pr = 0; pr < NPAIR; pr++) begin : gen_ctrl
     localparam int unsigned B0 = pr * 2;
     localparam int unsigned B1 = pr * 2 + 1;
-    // Clamped slot indices for the (possibly absent) odd second bank;
-    // pool[2]/pool[3] are already .v-masked when B1 is out of range.
     localparam int unsigned S00 = B0 * 2;
     localparam int unsigned S01 = B0 * 2 + 1;
     localparam int unsigned S10 = (B1 < BANKS) ? B1 * 2     : 0;
     localparam int unsigned S11 = (B1 < BANKS) ? B1 * 2 + 1 : 0;
-    sel_t [3:0] pool;
-    logic a0_old, m1a, m1c;
-    sel_t m0, m1;
+    logic a0_old;
+    logic m1a;
+    logic m1c;
+    logic oh1_0;
+    logic oh1_1;
+    logic oh1_2;
+    logic oh1_3;
 
+    for (genvar ci = 0; ci < 2; ci++) begin : gen_pv0
+      assign pv_d[pr][ci] = cand_v_q[B0][ci] &&
+          !cancelled_mask_i[cand_tid_q[B0][ci]] && !cand_owned[B0][ci];
+    end
+    for (genvar ci = 0; ci < 2; ci++) begin : gen_pv1
+      assign pv_d[pr][2+ci] = (B1 < BANKS) && cand_v_q[B1][ci] &&
+          !cancelled_mask_i[cand_tid_q[B1][ci]] && !cand_owned[B1][ci];
+    end
+    assign a0_old = pv_d[pr][0] && (!pv_d[pr][2] || !aq_q[S10][S00]);
+    assign m1a    = pv_d[pr][1] && (!pv_d[pr][2] || !aq_q[S10][S01]);
+    assign m1c    = pv_d[pr][3] && (!pv_d[pr][0] || !aq_q[S00][S11]);
+    assign a0_d[pr]  = a0_old;
+    assign m1a_d[pr] = m1a;
+    assign m1c_d[pr] = m1c;
+    assign oh1_0 = !a0_old && !m1c;
+    assign oh1_1 = a0_old && !m1a;
+    assign oh1_2 = a0_old && m1a;
+    assign oh1_3 = !a0_old && m1c;
+    // {bit3 S11, bit2 S01, bit1 S10, bit0 S00}
+    assign m_oh_d[pr*2]   = {1'b0, 1'b0, !a0_old, a0_old};
+    assign m_oh_d[pr*2+1] = {oh1_3, oh1_2, oh1_1, oh1_0};
+  end
+  // svt-stage: end CTL
+  // svt-stage: class CTL decision
+
+  // svt-stage: begin GRN
+  // Payload mux over the captured candidates.
+  for (genvar pr = 0; pr < NPAIR; pr++) begin : gen_wide
+    localparam int unsigned B0 = pr * 2;
+    localparam int unsigned B1 = pr * 2 + 1;
+    sel_t [3:0] pool;
+    sel_t m0, m1;
+    logic a0_old;
+    logic m1a;
+    logic m1c;
+    logic [3:0] held_s;
+    logic [3:0][TID_W-1:0] p_tid;
+    assign a0_old = a0_q[pr];
+    assign m1a    = m1a_q[pr];
+    assign m1c    = m1c_q[pr];
+    assign p_tid[0] = cand_tid_h[B0][0];
+    assign p_tid[1] = cand_tid_h[B0][1];
+    assign p_tid[2] = cand_tid_h[B1][0];
+    assign p_tid[3] = cand_tid_h[B1][1];
+    for (genvar s = 0; s < 4; s++) begin : gen_held
+      logic [NPORTS-1:0] ow;
+      for (genvar p = 0; p < NPORTS; p++) begin : gen_ow
+        assign ow[p] = (win_s_v[p] && (win_s[p].tid == p_tid[s])) ||
+                       (win_q[p].v && (win_q[p].tid == p_tid[s])) ||
+                       (pres_q[p].v && (pres_q[p].tid == p_tid[s]));
+      end
+      assign held_s[s] = |ow;
+    end
     for (genvar ci = 0; ci < 2; ci++) begin : gen_a
+      logic vv;
+      assign vv = pv_q[pr][ci] && !held_s[ci];
       assign pool[ci] = '{
-        v: cand_v_q[B0][ci] && !cancelled_mask_i[cand_tid_q[B0][ci]],
-        bank: BW'(B0), ci: 1'(ci), entry: cand_i_q[B0][ci],
-        tid: cand_tid_q[B0][ci], fp: cand_fp_q[B0][ci],
-        spec: cand_spec_q[B0][ci], spec_ab: cand_spec_ab_q[B0][ci],
-        ptid: cand_ptid_q[B0][ci], flu_in: cand_fluin_q[B0][ci],
-        wb_port: cand_wbport_q[B0][ci], wb_off: cand_wboff_q[B0][ci],
-        gate: cand_gate_q[B0][ci], div: cand_div_q[B0][ci]};
+        v: vv,
+        bank: BW'(B0), ci: 1'(ci), entry: cand_i_h[B0][ci],
+        tid: cand_tid_h[B0][ci], fp: cand_fp_h[B0][ci],
+        spec: cand_spec_h[B0][ci], spec_ab: cand_spec_ab_h[B0][ci],
+        ptid: cand_ptid_h[B0][ci], flu_in: cand_fluin_h[B0][ci],
+        wb_port: cand_wbport_h[B0][ci], wb_off: cand_wboff_h[B0][ci],
+        gate: cand_gate_h[B0][ci], div: cand_div_h[B0][ci],
+        port0: cand_port0_h[B0][ci]};
     end
     for (genvar ci = 0; ci < 2; ci++) begin : gen_c
+      logic vv;
+      assign vv = pv_q[pr][2+ci] && !held_s[2+ci];
       assign pool[2+ci] = '{
-        v: (B1 < BANKS) && cand_v_q[B1][ci] &&
-           !cancelled_mask_i[cand_tid_q[B1][ci]],
-        bank: BW'(B1), ci: 1'(ci), entry: cand_i_q[B1][ci],
-        tid: cand_tid_q[B1][ci], fp: cand_fp_q[B1][ci],
-        spec: cand_spec_q[B1][ci], spec_ab: cand_spec_ab_q[B1][ci],
-        ptid: cand_ptid_q[B1][ci], flu_in: cand_fluin_q[B1][ci],
-        wb_port: cand_wbport_q[B1][ci], wb_off: cand_wboff_q[B1][ci],
-        gate: cand_gate_q[B1][ci], div: cand_div_q[B1][ci]};
+        v: vv,
+        bank: BW'(B1), ci: 1'(ci), entry: cand_i_h[B1][ci],
+        tid: cand_tid_h[B1][ci], fp: cand_fp_h[B1][ci],
+        spec: cand_spec_h[B1][ci], spec_ab: cand_spec_ab_h[B1][ci],
+        ptid: cand_ptid_h[B1][ci], flu_in: cand_fluin_h[B1][ci],
+        wb_port: cand_wbport_h[B1][ci], wb_off: cand_wboff_h[B1][ci],
+        gate: cand_gate_h[B1][ci], div: cand_div_h[B1][ci],
+        port0: cand_port0_h[B1][ci]};
     end
-
-    assign a0_old = pool[0].v &&
-        (!pool[2].v || !aq_q[S10][S00]);
-    assign m1a = pool[1].v &&
-        (!pool[2].v || !aq_q[S10][S01]);
-    assign m1c = pool[3].v &&
-        (!pool[0].v || !aq_q[S00][S11]);
-    // hyp8 r7: age is one aq_q bit. m_oh is which of the four static
-    // slots this merged candidate is (bit0 S00, bit1 S10, bit2 S01,
-    // bit3 S11). A 16-bit row mux plus an OR-reduce is the same bit
-    // and a deeper cone.
-    // {bit3, bit2, bit1, bit0}
-    assign m_oh[pr*2]   = {2'b00, !a0_old, a0_old};
-    assign m_oh[pr*2+1] = (a0_old && m1a) ? 4'b0100 :
-                          a0_old          ? 4'b0010 :
-                          m1c             ? 4'b1000 : 4'b0001;
     assign m0 = a0_old ? pool[0] : pool[2];
-    assign m1 = a0_old ? (m1a ? pool[1] : pool[2])
-                       : (m1c ? pool[3] : pool[0]);
+    always_comb begin
+      unique case ({a0_old, m1a, m1c})
+        3'b110, 3'b111: m1 = pool[1];
+        3'b100, 3'b101: m1 = pool[2];
+        3'b001, 3'b011: m1 = pool[3];
+        default:        m1 = pool[0];
+      endcase
+    end
     assign merged[pr*2+0] = m0.v ? m0 : sel_t'('0);
     assign merged[pr*2+1] = m1.v ? m1 : sel_t'('0);
   end
-
+  // svt-stage: end GRN
+  // svt-stage: class GRN decision
   // Port select: oldest eligible merged candidate per port; the first FP
   // consumer reserves the shared FP read-port set (later FP held).
   sel_t [NPORTS-1:0] win;
@@ -278,7 +375,6 @@ module g6lc_iq_arb
   // hyp8 r7: aold[c][k] = aq_q[slot(c)][slot(k)], both slots a
   // one-hot of four constants. Each term is one AND of two predicates
   // and one matrix bit. No NSLOT-wide reduce, no variable index.
-  logic [NCAND-1:0][3:0] m_oh;
   logic [NCAND-1:0][NCAND-1:0] aold;
   for (genvar c = 0; c < NCAND; c++) begin : gen_am_r
     for (genvar k = 0; k < NCAND; k++) begin : gen_am_c
@@ -295,23 +391,33 @@ module g6lc_iq_arb
         localparam int unsigned K01 = K00 + 1;
         localparam int unsigned K10 = ((PK * 2 + 1) < BANKS) ? (PK * 2 + 1) * 2 : 0;
         localparam int unsigned K11 = ((PK * 2 + 1) < BANKS) ? K10 + 1 : 0;
-        assign aold[c][k] =
-            (m_oh[c][0] & m_oh[k][0] & aq_q[C00][K00]) |
-            (m_oh[c][0] & m_oh[k][1] & aq_q[C00][K10]) |
-            (m_oh[c][0] & m_oh[k][2] & aq_q[C00][K01]) |
-            (m_oh[c][0] & m_oh[k][3] & aq_q[C00][K11]) |
-            (m_oh[c][1] & m_oh[k][0] & aq_q[C10][K00]) |
-            (m_oh[c][1] & m_oh[k][1] & aq_q[C10][K10]) |
-            (m_oh[c][1] & m_oh[k][2] & aq_q[C10][K01]) |
-            (m_oh[c][1] & m_oh[k][3] & aq_q[C10][K11]) |
-            (m_oh[c][2] & m_oh[k][0] & aq_q[C01][K00]) |
-            (m_oh[c][2] & m_oh[k][1] & aq_q[C01][K10]) |
-            (m_oh[c][2] & m_oh[k][2] & aq_q[C01][K01]) |
-            (m_oh[c][2] & m_oh[k][3] & aq_q[C01][K11]) |
-            (m_oh[c][3] & m_oh[k][0] & aq_q[C11][K00]) |
-            (m_oh[c][3] & m_oh[k][1] & aq_q[C11][K10]) |
-            (m_oh[c][3] & m_oh[k][2] & aq_q[C11][K01]) |
-            (m_oh[c][3] & m_oh[k][3] & aq_q[C11][K11]);
+        // One group per source slot. The four groups do not depend on
+        // each other; the age bit is their OR.
+        logic ag0;
+        logic ag1;
+        logic ag2;
+        logic ag3;
+        assign ag0 =
+            (m_oh_q[c][0] & m_oh_q[k][0] & aq_h[C00][K00]) |
+            (m_oh_q[c][0] & m_oh_q[k][1] & aq_h[C00][K10]) |
+            (m_oh_q[c][0] & m_oh_q[k][2] & aq_h[C00][K01]) |
+            (m_oh_q[c][0] & m_oh_q[k][3] & aq_h[C00][K11]);
+        assign ag1 =
+            (m_oh_q[c][1] & m_oh_q[k][0] & aq_h[C10][K00]) |
+            (m_oh_q[c][1] & m_oh_q[k][1] & aq_h[C10][K10]) |
+            (m_oh_q[c][1] & m_oh_q[k][2] & aq_h[C10][K01]) |
+            (m_oh_q[c][1] & m_oh_q[k][3] & aq_h[C10][K11]);
+        assign ag2 =
+            (m_oh_q[c][2] & m_oh_q[k][0] & aq_h[C01][K00]) |
+            (m_oh_q[c][2] & m_oh_q[k][1] & aq_h[C01][K10]) |
+            (m_oh_q[c][2] & m_oh_q[k][2] & aq_h[C01][K01]) |
+            (m_oh_q[c][2] & m_oh_q[k][3] & aq_h[C01][K11]);
+        assign ag3 =
+            (m_oh_q[c][3] & m_oh_q[k][0] & aq_h[C11][K00]) |
+            (m_oh_q[c][3] & m_oh_q[k][1] & aq_h[C11][K10]) |
+            (m_oh_q[c][3] & m_oh_q[k][2] & aq_h[C11][K01]) |
+            (m_oh_q[c][3] & m_oh_q[k][3] & aq_h[C11][K11]);
+        assign aold[c][k] = ag0 | ag1 | ag2 | ag3;
       end
     end
   end
@@ -329,11 +435,11 @@ module g6lc_iq_arb
         assign older_than_c[k] = elig[p][k] && aold[k][c];
       end
       assign elig[p][c]   = merged[c].v && !usedp[p][c] &&
-                            !(fp_taken_p[p] && merged[c].fp);
+                            !(fp_taken_p[p] && merged[c].fp) &&
+                            !(merged[c].port0 && (p != 0));
       assign win_oh[p][c] = elig[p][c] && !(|older_than_c);
     end
     assign win_v[p] = |win_oh[p];
-    // payload gather: masked-OR pairwise tree over NCAND
     logic [MLEV:0][NCAND-1:0][$bits(sel_t)-1:0] wt;
     for (genvar c = 0; c < NCAND; c++) begin : gen_wt0
       assign wt[0][c] = {$bits(sel_t){win_oh[p][c]}} & sel_t'(merged[c]);
@@ -355,7 +461,6 @@ module g6lc_iq_arb
     assign usedp[p+1]     = usedp[p] | win_oh[p];
     assign fp_taken_p[p+1] = fp_taken_p[p] | (win_v[p] && win[p].fp);
   end
-
   // ----------------------------------------------------------------------
   // hyp8 g7: take-time resource gate (WbReserve). Sliding windows, one
   // bit per future cycle per shared resource: FLU_IN (the shared ALU0
@@ -378,6 +483,22 @@ module g6lc_iq_arb
   logic               div_take;
   logic [RES_WIN-1:0] flu_in_next, flu_wb_next, fpu_wb_next;
 
+  // ALU2 is the non-zero port's LAT_ALU_LOW winner. The bank still marks
+  // every ALU flu_in with FLU offset 6; that triple is the class, so the
+  // tournament word does not grow. Port 0 stays on ALU0. ALU2 does not
+  // use the shared one-cycle operand register or FLU_WB: ex_stage presents
+  // it on FPU_WB two edges after fu_data (alu2_vld_q2), which is this same
+  // offset. A second such winner shares that one FPU_WB bit and blocks.
+  logic [NPORTS-1:0] alu2_p, eff_in, eff_flu, eff_fpu;
+  for (genvar p = 0; p < NPORTS; p++) begin : gen_alu2cls
+    assign alu2_p[p] = (p != 0) && win_s[p].flu_in &&
+                       (win_s[p].wb_port == WB_FLU) &&
+                       (win_s[p].wb_off == 5'd6);
+    assign eff_in[p]  = win_s[p].flu_in && !alu2_p[p];
+    assign eff_flu[p] = (win_s[p].wb_port == WB_FLU) && !alu2_p[p];
+    assign eff_fpu[p] = (win_s[p].wb_port == WB_FPU) || alu2_p[p];
+  end
+
   // hyp8: port p's block conditions are evaluated directly against the
   // window registers plus "an earlier port took the same resource this
   // cycle" compare terms; the only serial dependence is the take_ok
@@ -387,19 +508,19 @@ module g6lc_iq_arb
   logic [NPORTS-1:0]            res_block, gate_ok;
   logic [NPORTS-1:0]            w_flu_tk, w_fpu_tk, w_in_tk;
   for (genvar p = 0; p < NPORTS; p++) begin : gen_dec
-    assign dec_off[p] = RES_WIN'(1) << win[p].wb_off;
+    assign dec_off[p] = RES_WIN'(1) << win_s[p].wb_off;
   end
   for (genvar p = 0; p < NPORTS; p++) begin : gen_gate
     logic blk_in, blk_flu, blk_fpu, blk_div, blk_dliv;
     logic [NPORTS-1:0] ein, eflu, efpu, ediv;
     for (genvar q = 0; q < NPORTS; q++) begin : gen_earl
       if (q < p) begin : gen_q
-        assign ein[q]  = take_ok[q] && win[q].flu_in;
-        assign eflu[q] = take_ok[q] && (win[q].wb_port == WB_FLU) &&
-                         (win[q].wb_off == win[p].wb_off);
-        assign efpu[q] = take_ok[q] && (win[q].wb_port == WB_FPU) &&
-                         (win[q].wb_off == win[p].wb_off);
-        assign ediv[q] = take_ok[q] && (win[q].wb_port == WB_FLU);
+        assign ein[q]  = take_ok[q] && eff_in[q];
+        assign eflu[q] = take_ok[q] && eff_flu[q] &&
+                         (win_s[q].wb_off == win_s[p].wb_off);
+        assign efpu[q] = take_ok[q] && eff_fpu[q] &&
+                         (win_s[q].wb_off == win_s[p].wb_off);
+        assign ediv[q] = take_ok[q] && eff_flu[q];
       end else begin : gen_nq
         assign ein[q]  = 1'b0;
         assign eflu[q] = 1'b0;
@@ -407,33 +528,33 @@ module g6lc_iq_arb
         assign ediv[q] = 1'b0;
       end
     end
-    assign blk_in   = win[p].flu_in &&
+    assign blk_in   = eff_in[p] &&
                       (flu_in_q[KIN] || (|ein));
-    assign blk_flu  = (win[p].wb_port == WB_FLU) &&
+    assign blk_flu  = eff_flu[p] &&
                       ((|(flu_wb_q & dec_off[p])) || (|eflu));
-    assign blk_fpu  = (win[p].wb_port == WB_FPU) &&
+    assign blk_fpu  = eff_fpu[p] &&
                       ((|(fpu_wb_q & dec_off[p])) || (|efpu));
-    assign blk_div  = win[p].div &&
+    assign blk_div  = win_s[p].div &&
                       ((|flu_wb_q) || (|ediv) || div_live_q);
     assign blk_dliv = div_live_q &&
-                      (win[p].flu_in || (win[p].wb_port == WB_FLU));
+                      (eff_in[p] || eff_flu[p]);
     assign res_block[p] = blk_in | blk_flu | blk_fpu | blk_div | blk_dliv;
-    assign gate_ok[p]   = !(win[p].gate[0] && !lsu_ready_i) &&
-                          !(win[p].gate[1] && !fpu_ready_i) &&
-                          !(win[p].gate[2] && !csr_ready_i) &&
-                          !(win[p].gate[3] && !mult_ready_i);
-    assign take_ok[p] = win_v[p] && !res_block[p] && gate_ok[p];
-    assign w_in_tk[p]  = take_ok[p] && win[p].flu_in;
-    assign w_flu_tk[p] = take_ok[p] && (win[p].wb_port == WB_FLU);
-    assign w_fpu_tk[p] = take_ok[p] && (win[p].wb_port == WB_FPU);
+    assign gate_ok[p]   = !(win_s[p].gate[0] && !lsu_ready_i) &&
+                          !(win_s[p].gate[1] && !fpu_ready_i) &&
+                          !(win_s[p].gate[2] && !csr_ready_i) &&
+                          !(win_s[p].gate[3] && !mult_ready_i);
+    assign take_ok[p] = win_s_v[p] && !res_block[p] && gate_ok[p];
+    assign w_in_tk[p]  = take_ok[p] && eff_in[p];
+    assign w_flu_tk[p] = take_ok[p] && eff_flu[p];
+    assign w_fpu_tk[p] = take_ok[p] && eff_fpu[p];
   end
   logic [NPORTS-1:0] stall_p, div_tk;
   for (genvar p = 0; p < NPORTS; p++) begin : gen_stall
     // hyp8 H27: declined ONLY by a reservation slot (the port could
     // take and every FU ready-gate passed).
-    assign stall_p[p] = win_v[p] && res_block[p] && gate_ok[p] &&
+    assign stall_p[p] = win_s_v[p] && res_block[p] && gate_ok[p] &&
                         !pres_q[p].v;
-    assign div_tk[p]  = take_ok[p] && win[p].div;
+    assign div_tk[p]  = take_ok[p] && win_s[p].div;
   end
   assign hyp_wb_reserve_stall_o = |stall_p;
   assign div_take = |div_tk;
@@ -453,6 +574,27 @@ module g6lc_iq_arb
       flu_in_next  = flu_in_next  | in_mk[p];
       flu_wb_next  = flu_wb_next  | flu_mk[p];
       fpu_wb_next  = fpu_wb_next  | fpu_mk[p];
+    end
+  end
+
+  // Age tree ends here. Take, stall, and the reservation window read
+  // win_s, so they are a different reg-to-reg cone. A held presentation
+  // drops the staged winner; the next tournament fills it again.
+  always_ff @(posedge clk_i or negedge rst_ni) begin : win_s_regs
+    if (!rst_ni) begin
+      win_s_v <= '0;
+      for (int unsigned p = 0; p < NPORTS; p++) win_s[p] <= '0;
+    end else if (flush_i) begin
+      win_s_v <= '0;
+    end else begin
+      for (int unsigned p = 0; p < NPORTS; p++) begin
+        if (pres_q[p].v) begin
+          win_s_v[p] <= 1'b0;
+        end else begin
+          win_s[p]   <= win[p];
+          win_s_v[p] <= win_v[p];
+        end
+      end
     end
   end
 
@@ -486,6 +628,7 @@ module g6lc_iq_arb
   always_comb begin
     take_v_o = '0;
     take_cand_o = '0;
+    take_idx_o = '0;
     ack_v_o = '0;
     ack_idx_o = '0;
     pay_bank_o = '0;
@@ -529,13 +672,42 @@ module g6lc_iq_arb
       // hyp8 g7: a selected candidate takes only when the resource gate
       // admits it; a declined candidate simply stays in the cand
       // registers and is re-evaluated against the next capture.
-      if (!pres_q[p].v && win_v[p] && take_ok[p]) begin
-        take_v_o[win[p].bank][p] = 1'b1;
-        take_cand_o[win[p].bank][p] = win[p].ci;
-        pay_bank_o[p] = win[p].bank;
-        pay_entry_o[p] = win[p].entry;
+      // Current cancel mask: the live bit was decided on the snapshot.
+      if (!pres_q[p].v && win_s_v[p] && take_ok[p] &&
+          !cancelled_mask_i[win_s[p].tid]) begin
+        take_v_o[win_s[p].bank][p] = 1'b1;
+        take_cand_o[win_s[p].bank][p] = win_s[p].ci;
+        take_idx_o[win_s[p].bank][p] = win_s[p].entry;
+        pay_bank_o[p] = win_s[p].bank;
+        pay_entry_o[p] = win_s[p].entry;
       end
     end
+  end
+
+  // Candidate snapshot stays combinational: the tournament still sees
+  // the just-captured candidates. win_s is the real cut, one cycle
+  // before take. ARB_TAKE_P0_TID1 therefore sees take one tick later
+  // than the capture edge.
+  always_comb begin : grant_snap
+    pv_q   = pv_d;
+    a0_q   = a0_d;
+    m1a_q  = m1a_d;
+    m1c_q  = m1c_d;
+    m_oh_q = m_oh_d;
+    cand_v_h      = cand_v_q;
+    cand_i_h      = cand_i_q;
+    cand_tid_h    = cand_tid_q;
+    cand_fp_h     = cand_fp_q;
+    cand_spec_h   = cand_spec_q;
+    cand_spec_ab_h = cand_spec_ab_q;
+    cand_ptid_h   = cand_ptid_q;
+    cand_fluin_h  = cand_fluin_q;
+    cand_wbport_h = cand_wbport_q;
+    cand_wboff_h  = cand_wboff_q;
+    cand_gate_h   = cand_gate_q;
+    cand_div_h    = cand_div_q;
+    cand_port0_h  = cand_port0_q;
+    aq_h   = aq_q;
   end
 
   // ----------------------------------------------------------------------
@@ -555,6 +727,7 @@ module g6lc_iq_arb
       cand_wboff_q <= '0;
       cand_gate_q <= '0;
       cand_div_q <= '0;
+      cand_port0_q <= '0;
       aq_q <= '0;
       for (int unsigned p = 0; p < NPORTS; p++) begin
         win_q[p] <= '{v: 1'b0, default: '0};
@@ -580,7 +753,16 @@ module g6lc_iq_arb
       cand_wboff_q <= cand_wboff_i;
       cand_gate_q <= cand_gate_i;
       cand_div_q <= cand_div_i;
-      aq_q <= aq_d;
+      cand_port0_q <= cand_port0_i;
+      begin : gen_aq
+        for (int unsigned a = 0; a < NSLOT; a++) begin
+          for (int unsigned b = 0; b < NSLOT; b++) begin
+            if (a == b) aq_q[a][b] <= 1'b0;
+            else        aq_q[a][b] <= age_older(cand_tid_i[a/2][a%2],
+                                                cand_tid_i[b/2][b%2]);
+          end
+        end
+      end
       for (int unsigned p = 0; p < NPORTS; p++) begin
         // Held record: acked or cancelled -> free the port.
         if (pres_q[p].v &&
@@ -613,9 +795,9 @@ module g6lc_iq_arb
         // Fresh select: pres_q free (win_q is empty, acked, or moving)
         // and the resource gate admits the take; a cancelled winner is
         // dropped before it can hold the port.
-        if (!pres_q[p].v && win_v[p] && take_ok[p] &&
-            !cancelled_mask_i[win[p].tid])
-          win_q[p] <= win[p];
+        if (!pres_q[p].v && win_s_v[p] && take_ok[p] &&
+            !cancelled_mask_i[win_s[p].tid])
+          win_q[p] <= win_s[p];
       end
     end
   end

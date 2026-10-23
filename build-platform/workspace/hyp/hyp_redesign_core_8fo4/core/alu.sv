@@ -79,6 +79,13 @@ module alu
     input logic rst_ni,
     // FU data needed to execute instruction - ISSUE_STAGE
     input fu_data_t fu_data_i,
+    // hyp8: the op in fu_data_i owns an ALU RESULT (an arithmetic/logic/
+    // shift value destined for result_o). Branch-compare, CSR and AES
+    // class ops keep their A1 registers and branch path but do not own a
+    // result, so they must not claim an A3-class result slot that could
+    // shadow a younger valid A2 result. Independent of branch-compare
+    // activity (EQ still compares with result_valid_i = 0).
+    input logic result_valid_i,
     // FU data needed to execute CPOP/CPOPW - ISSUE_STAGE
     input fu_data_t fu_data_cpop_i,
     // ALU result - ISSUE_STAGE
@@ -98,6 +105,8 @@ module alu
     // result3_q forward source identity; tied to qtid when
     // HypCfg.AluStages==2 so the [2] operand pick is a safe alias).
     output logic [G6LCCfg.TRANS_ID_BITS-1:0] alu_fwd_rtid_o,
+    // Age-3 low hold: the grant after the IQ snap still matches this tid.
+    output logic [G6LCCfg.TRANS_ID_BITS-1:0] alu_fwd_htid_o,
     // hyp8: slot-class taps for the ex_stage FLU lane: the op in the
     // result_q slot / the result3_q slot is A3-class (LAT_ALU_FULL).
     // Both 0 when HypCfg.AluStages==2.
@@ -114,8 +123,8 @@ module alu
     // was in A1 two cycles ago). Driven by issue_read_operands from the
     // IQ spec-arm producer tids; all zero for every non-speculative
     // operand. New port (deviation).
-    input  logic [2:0] fwd_a_i,
-    input  logic [2:0] fwd_b_i
+    input  logic [3:0] fwd_a_i,
+    input  logic [3:0] fwd_b_i
 );
 
   if (HypCfg.AluStages >= 2 && HypCfg.AluStaggered) begin : gen_staggered
@@ -174,43 +183,71 @@ module alu
     // the only forward of an A3 result (result3_q), matching the
     // ex_stage rule that flu_valid for that op is alu_vld_q3 & alu_s3_a3.
     logic                    a3cls1_q, a3cls2_q, a3cls3_q;
-    logic                    fwd_a0, fwd_a1, fwd_a2, fwd_b0, fwd_b1, fwd_b2;
+    logic                    fwd_a0, fwd_a1, fwd_a2, fwd_a3;
+    logic                    fwd_b0, fwd_b1, fwd_b2, fwd_b3;
 
-    assign result3_eff = A3EN ? result3_q : result_q;
+    logic [G6LCCfg.XLEN-1:0] low_hold_q;
+    logic                    low_hold_v_q;
+    logic [G6LCCfg.XLEN-1:0] low_hold2_q;
+    logic                    low_hold2_v_q;
+    logic [31:0]             r3_lo;
+    logic [31:0]             r3_hi;
+    // Two 32-bit selects. One 64-bit ?: on this net measured 35.55.
+    always_comb begin
+      unique case ({A3EN, a3cls3_q})
+        2'b11: r3_lo = result3_q[31:0];
+        2'b10: r3_lo = low_hold_q[31:0];
+        default: r3_lo = result_q[31:0];
+      endcase
+    end
+    always_comb begin
+      unique case ({A3EN, a3cls3_q})
+        2'b11: r3_hi = result3_q[63:32];
+        2'b10: r3_hi = low_hold_q[63:32];
+        default: r3_hi = result_q[63:32];
+      endcase
+    end
+    assign result3_eff = {r3_hi, r3_lo};
     assign fwd_a0 = fwd_a_i[0] && !(A3EN && a3cls1_q);
     assign fwd_a1 = fwd_a_i[1] && !(A3EN && a3cls2_q);
-    assign fwd_a2 = fwd_a_i[2] && (!A3EN || a3cls3_q);
+    assign fwd_a2 = fwd_a_i[2] && (!A3EN || a3cls3_q || low_hold_v_q);
+    assign fwd_a3 = fwd_a_i[3] && low_hold2_v_q;
     assign fwd_b0 = fwd_b_i[0] && !(A3EN && a3cls1_q);
     assign fwd_b1 = fwd_b_i[1] && !(A3EN && a3cls2_q);
-    assign fwd_b2 = fwd_b_i[2] && (!A3EN || a3cls3_q);
+    assign fwd_b2 = fwd_b_i[2] && (!A3EN || a3cls3_q || low_hold_v_q);
+    assign fwd_b3 = fwd_b_i[3] && low_hold2_v_q;
     // Priority lives in a 2-bit code (distance 0, then 1, then 2). Each
     // half is its own unique case, so the wide select is one mux, not a
     // chain of ternaries, and each code drives 32 bits.
     logic [31:0] opa_lo, opa_hi, opb_lo, opb_hi;
-    logic [1:0] asel_lo, asel_hi, bsel_lo, bsel_hi;
+    logic [2:0] asel_lo, asel_hi, bsel_lo, bsel_hi;
     always_comb begin
-      if (fwd_a0) asel_hi = 2'd0;
-      else if (fwd_a1) asel_hi = 2'd1;
-      else if (fwd_a2) asel_hi = 2'd2;
-      else asel_hi = 2'd3;
+      if (fwd_a0) asel_hi = 3'd0;
+      else if (fwd_a1) asel_hi = 3'd1;
+      else if (fwd_a2) asel_hi = 3'd2;
+      else if (fwd_a3) asel_hi = 3'd3;
+      else asel_hi = 3'd4;
     end
     always_comb begin
-      if (fwd_a0) asel_lo = 2'd0;
-      else if (fwd_a1) asel_lo = 2'd1;
-      else if (fwd_a2) asel_lo = 2'd2;
-      else asel_lo = 2'd3;
+      if (fwd_a0) asel_lo = 3'd0;
+      else if (fwd_a1) asel_lo = 3'd1;
+      else if (fwd_a2) asel_lo = 3'd2;
+      else if (fwd_a3) asel_lo = 3'd3;
+      else asel_lo = 3'd4;
     end
     always_comb begin
-      if (fwd_b0) bsel_hi = 2'd0;
-      else if (fwd_b1) bsel_hi = 2'd1;
-      else if (fwd_b2) bsel_hi = 2'd2;
-      else bsel_hi = 2'd3;
+      if (fwd_b0) bsel_hi = 3'd0;
+      else if (fwd_b1) bsel_hi = 3'd1;
+      else if (fwd_b2) bsel_hi = 3'd2;
+      else if (fwd_b3) bsel_hi = 3'd3;
+      else bsel_hi = 3'd4;
     end
     always_comb begin
-      if (fwd_b0) bsel_lo = 2'd0;
-      else if (fwd_b1) bsel_lo = 2'd1;
-      else if (fwd_b2) bsel_lo = 2'd2;
-      else bsel_lo = 2'd3;
+      if (fwd_b0) bsel_lo = 3'd0;
+      else if (fwd_b1) bsel_lo = 3'd1;
+      else if (fwd_b2) bsel_lo = 3'd2;
+      else if (fwd_b3) bsel_lo = 3'd3;
+      else bsel_lo = 3'd4;
     end
     // Distance 0 low half is fwd_low (add_lo_q or the logic op). It matches
     // result_d[31:0] for a low-class producer and does not wait for add_hi.
@@ -219,6 +256,7 @@ module alu
         2'd0: opa_hi = result_d[63:32];
         2'd1: opa_hi = result_q[63:32];
         2'd2: opa_hi = result3_eff[63:32];
+        3'd3: opa_hi = low_hold2_q[63:32];
         default: opa_hi = fu_data_i.operand_a[63:32];
       endcase
     end
@@ -227,6 +265,7 @@ module alu
         2'd0: opa_lo = fwd_low;
         2'd1: opa_lo = result_q[31:0];
         2'd2: opa_lo = result3_eff[31:0];
+        3'd3: opa_lo = low_hold2_q[31:0];
         default: opa_lo = fu_data_i.operand_a[31:0];
       endcase
     end
@@ -235,6 +274,7 @@ module alu
         2'd0: opb_hi = result_d[63:32];
         2'd1: opb_hi = result_q[63:32];
         2'd2: opb_hi = result3_eff[63:32];
+        3'd3: opb_hi = low_hold2_q[63:32];
         default: opb_hi = fu_data_i.operand_b[63:32];
       endcase
     end
@@ -243,6 +283,7 @@ module alu
         2'd0: opb_lo = fwd_low;
         2'd1: opb_lo = result_q[31:0];
         2'd2: opb_lo = result3_eff[31:0];
+        3'd3: opb_lo = low_hold2_q[31:0];
         default: opb_lo = fu_data_i.operand_b[31:0];
       endcase
     end
@@ -253,6 +294,7 @@ module alu
     for (genvar k = 0; k < 32; k++) assign operand_a_rev32[k] = operand_a[31-k];
 
     logic [G6LCCfg.XLEN-1:0] operand_a_bitmanip, operand_a_cpop;
+    logic [31:0] cpop_lo, cpop_hi;
 
     assign adder_op_b_negate = fu_data_i.operation inside {EQ, NE, SUB, SUBW, ANDN, ORN, XNOR};
 
@@ -260,11 +302,20 @@ module alu
       operand_a_bitmanip = operand_a;
       // hyp8: the forwarded producer result replaces the CPOP operand too.
       unique case (asel_lo)
-        2'd0: operand_a_cpop = result_d;
-        2'd1: operand_a_cpop = result_q;
-        2'd2: operand_a_cpop = result3_eff;
-        default: operand_a_cpop = fu_data_cpop_i.operand_a;
-      endcase
+          3'd0: cpop_lo = result_d[31:0];
+          3'd1: cpop_lo = result_q[31:0];
+          3'd2: cpop_lo = result3_eff[31:0];
+          3'd3: cpop_lo = low_hold2_q[31:0];
+          default: cpop_lo = fu_data_cpop_i.operand_a[31:0];
+        endcase
+        unique case (asel_lo)
+          3'd0: cpop_hi = result_d[63:32];
+          3'd1: cpop_hi = result_q[63:32];
+          3'd2: cpop_hi = result3_eff[63:32];
+          3'd3: cpop_hi = low_hold2_q[63:32];
+          default: cpop_hi = fu_data_cpop_i.operand_a[63:32];
+        endcase
+      operand_a_cpop = {cpop_hi, cpop_lo};
 
       if (G6LCCfg.RVB) begin
         if (G6LCCfg.IS_XLEN64) begin
@@ -447,7 +498,7 @@ module alu
     // ex_stage WB lane record and as the sel_q forward source for a
     // dependent two pipe cycles behind.
     // -------------------------------------------------------
-    logic [G6LCCfg.TRANS_ID_BITS-1:0] fwd_tid_q, fwd_tid2_q, fwd_tid3_q;
+    logic [G6LCCfg.TRANS_ID_BITS-1:0] fwd_tid_q, fwd_tid2_q, fwd_tid3_q, fwd_tid4_q;
     always_ff @(posedge clk_i or negedge rst_ni) begin : alu_a2_reg
       if (!rst_ni) begin
         result_q   <= '0;
@@ -457,6 +508,21 @@ module alu
         result_q   <= A3EN ? result_d : (result_d | a3_d);
         fwd_tid_q  <= fu_data_i.trans_id;
         fwd_tid2_q <= fwd_tid_q;
+      end
+    end
+    always_ff @(posedge clk_i or negedge rst_ni) begin : alu_low_hold
+      if (!rst_ni) begin
+        low_hold_q    <= '0;
+        low_hold_v_q  <= 1'b0;
+        low_hold2_q   <= '0;
+        low_hold2_v_q <= 1'b0;
+        fwd_tid4_q    <= '0;
+      end else begin
+        low_hold_q    <= result_q;
+        low_hold_v_q  <= !a3cls2_q;
+        low_hold2_q   <= low_hold_q;
+        low_hold2_v_q <= low_hold_v_q;
+        fwd_tid4_q    <= fwd_tid3_q;
       end
     end
 
@@ -917,7 +983,10 @@ module alu
       end else begin
         result3_q  <= a3_d;
         fwd_tid3_q <= fwd_tid2_q;
-        a3cls1_q   <= alu_is_a3(fu_data_i.operation);
+        // only a result-owning op may claim an A3 result slot: a bystander
+        // (branch/CSR/AES-class op) keeps its compare/metadata registers
+        // but must not shadow a younger valid A2 result in result_q
+        a3cls1_q   <= result_valid_i && alu_is_a3(fu_data_i.operation);
         a3cls2_q   <= a3cls1_q;
         a3cls3_q   <= a3cls2_q;
       end
@@ -926,6 +995,7 @@ module alu
     assign alu_fwd_tid_o  = fwd_tid_q;
     assign alu_fwd_qtid_o = fwd_tid2_q;
     assign alu_fwd_rtid_o = A3EN ? fwd_tid3_q : fwd_tid2_q;
+    assign alu_fwd_htid_o = fwd_tid4_q;
     assign alu_s2_a3_o    = A3EN & a3cls2_q;
     assign alu_s3_a3_o    = A3EN & a3cls3_q;
     assign alu_result_d_o = result_d;
@@ -1195,6 +1265,7 @@ module alu
     assign alu_fwd_tid_o = '0;
     assign alu_fwd_qtid_o = '0;
     assign alu_fwd_rtid_o = '0;
+    assign alu_fwd_htid_o = '0;
     assign alu_s2_a3_o = 1'b0;
     assign alu_s3_a3_o = 1'b0;
     assign alu_result_d_o = '0;

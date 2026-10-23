@@ -975,6 +975,7 @@ module tb_g6lc_review_rename;
     .clk_i(clk),.rst_ni(rst_n),.flush_i(flush),.flush_hart_i(fl_hart),
     .mispredict_i(mispredict),
     .mispredict_level_i(mis_level),
+    .flush_unissued_i(1'b0),
     .hart_i(hid_p),
     .is_fpr_rd_i(is_fpr_rd), .is_fpr_rs1_i(is_fpr_rs1), .is_fpr_rs2_i(is_fpr_rs2),
     .rs3_i(rs3), .is_fpr_rs3_i(is_fpr_rs3), .fprs3_o(fprs3), .rs3_ready_o(rs3_rdy),
@@ -985,6 +986,7 @@ module tb_g6lc_review_rename;
     .valid_i(valid),.rs1_i(rs1),.rs2_i(rs2),.rd_i(rd),.need_rd_i(need_rd),
     .is_branch_i(is_branch),.prs1_o(prs1),.prs2_o(prs2),.prd_o(prd),
     .prd_old_o(prd_old),.rs1_ready_o(rs1_rdy),.rs2_ready_o(rs2_rdy),
+    .int_busy_o(),.fp_busy_o(),
     .ckpt_id_o(ckpt_id),.ckpt_retire_i(ckpt_ret),.stall_o(stall),
     .commit_valid_i(cm_v),.commit_hart_i(cm_hart),.commit_rd_i(cm_rd),.commit_prd_i(cm_prd),
     .wb_valid_i(wb_v),.wb_prd_i(wb_prd),.free_i(fr),.free_prd_i(fr_prd),.enable_i(enable));
@@ -4555,7 +4557,7 @@ module tb_g6lc_review_csrbank;
 
   g6lc_smt_csr_bank #(.G6LCCfg(C),.exception_t(exception_t),.jvt_t(jvt_t),
       .irq_ctrl_t(irq_ctrl_t),.scoreboard_entry_t(sbe_t),.rvfi_probes_csr_t(rvfi_csr_t)) dut(
-    .clk_i(clk),.rst_ni(rst_n),
+    .clk_i(clk),.rst_ni(rst_n),.flush_i(1'b0),
     .active_hart_i(active_hart),.lsu_hart_i(lsu_hart),.lsu_chk_hart_i(lsu_chk_hart),
     .switch_i(1'b0),.time_irq_i('0),.rtc_time_i('0),
     .flush_o(),.halt_csr_o(halt_csr),.hart_halt_o(hart_halt),

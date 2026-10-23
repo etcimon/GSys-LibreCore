@@ -4,36 +4,25 @@
 // SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
 // SPDX-FileCopyrightText: machine-generated
 //
-// hyp8 (group 6): the commit decision still evaluates combinationally on
-// the presented bundle in the presentation cycle (decision at t, as
-// today), and every architectural side effect still fires with that
-// decision. What changed is the acknowledge: commit_ack_o is now a
-// REGISTERED echo of the decision and returns to the scoreboard one
-// cycle later (t+1); the scoreboard holds the presented slot until the
-// ack arrives (its commit pointer only advances on ack), so the slot
-// clears one cycle later than the emit while the presentation/decision
-// timing is preserved.
+// hyp8 (group 6): one architectural retirement event per accepted
+// commit. The decision still evaluates combinationally on the presented
+// bundle and commit_ack_o IS that decision (fire): the scoreboard frees
+// the presented slot on the same event the architectural side effects
+// fire, so no suppression record is needed — a slot that cannot fire
+// stays presented until it can, and a fired slot is freed at once.
 //
-// Because the presentation persists through the ack cycle, the decision
-// block is gated by a suppression record (pend_q/pend_tid_q): a decision
-// already fired for the same presented transaction id is masked on the
-// following cycle so no side effect (we_*, commit_lsu_o, commit_csr_o,
-// fences, flush_commit_o, replay_o) can fire twice for one commit.
+// CSR ops keep a staged request under HypCfg.CsrReadStages: csr_op_o/
+// csr_wdata_o present while a committable CSR head is at port 0 (csr_req
+// requires commit_bundle_valid_i[0] too). With CsrReadStages==1 the
+// csr_regfile answers in the same cycle and the seen arm is bypassed;
+// with ==2 the fire waits for csr_seen_match plus the registered
+// rdata_valid. csr_exception_i merges only for the owning CSR head on
+// its response cycle — a non-CSR head never consumes a stale CSR
+// exception.
 //
-// CSR ops run a two-phase handshake for the (group-10) +1 csr_regfile:
-//   phase 1 (presentation): csr_op_o/csr_wdata_o are driven for the
-//     presented CSR head and csr_seen_q arms;
-//   phase 2 (next cycle): the decision fires, consuming csr_rdata_i and
-//     csr_exception_i live -- exactly "hold the presented CSR op and
-//     consume the read one cycle after presenting it".
-// SFENCE/HFENCE/FENCE/FENCE.I drain gates and csr_exception_i are
-// evaluated at fire time, so a held CSR retries each cycle exactly as the
-// emit stalled on the same presentation.
-//
-// Cut rank: +1 on commit_ack (rank 4 bookkeeping, the sb_commit_bundle
-// same-cycle WB merge compensates on the common path). Commit throughput
-// is one retire per two cycles per port; the legacy 2-port pairing still
-// retires a pair together.
+// SFENCE/HFENCE/FENCE/FENCE.I drain gates are still evaluated at fire
+// time, so a held head retries each cycle exactly as the emit stalled
+// on the same presentation.
 
 module commit_stage
   import g6lc_core_pkg::*;
@@ -189,40 +178,22 @@ module commit_stage
   assign tlb_flush_can_commit = no_st_pending_i && !shared_tlb_flush_busy_i;
 
   // ------------------------------------------------------------------
-  // hyp8: registered-ack bookkeeping. `commit_dec[p]` is the emit's
-  // same-cycle decision; `pend_q[p]` is its registered echo and IS
-  // commit_ack_o (returns t+1). While the same transaction id is still
-  // presented (the scoreboard holds the slot until the ack lands), the
-  // comb decision and every side effect are masked so nothing fires
-  // twice for one commit.
+  // hyp8: common retirement event. `commit_dec[p]` is the same-cycle
+  // decision and commit_ack_o IS that decision — no registered echo and
+  // no suppression record; a held presentation simply cannot fire, and a
+  // fired slot is freed on the same event its effects used.
   // ------------------------------------------------------------------
   logic [G6LCCfg.NrCommitPorts-1:0] commit_dec, fire;
-  logic [G6LCCfg.NrCommitPorts-1:0] pend_q;
-  logic [G6LCCfg.NrCommitPorts-1:0][G6LCCfg.TRANS_ID_BITS-1:0] pend_tid_q;
   logic [G6LCCfg.NrCommitPorts-1:0] suppress;
   // Decision-block values for the CSR request outputs (the request itself
   // is driven by csr_req; the fire re-drives the same values).
   fu_op csr_op_dec;
   logic [G6LCCfg.XLEN-1:0] csr_wdata_dec;
-  logic [G6LCCfg.NrCommitPorts-1:0] commit_macro_ack_dec, commit_macro_ack_q;
+  logic [G6LCCfg.NrCommitPorts-1:0] commit_macro_ack_dec;
 
-  for (genvar p = 0; p < G6LCCfg.NrCommitPorts; p++) begin : gen_pend
-    assign suppress[p] = pend_q[p] &&
-                         (commit_instr_i[p].trans_id == pend_tid_q[p]);
-    assign commit_ack_o[p] = pend_q[p];
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) begin
-        pend_q[p]    <= 1'b0;
-        pend_tid_q[p] <= '0;
-      end else if (flush_i) begin
-        pend_q[p]    <= 1'b0;
-        pend_tid_q[p] <= '0;
-      end else begin
-        pend_q[p]    <= fire[p];
-        pend_tid_q[p] <= commit_instr_i[p].trans_id;
-      end
-    end
-  end
+  assign suppress = '0;
+  assign commit_ack_o = fire;
+  assign commit_macro_ack_o = commit_macro_ack_dec;
 
   // ------------------------------------------------------------------
   // hyp8: CSR two-phase hold. A presented CSR head drives csr_op_o/
@@ -236,9 +207,11 @@ module commit_stage
 
   assign csr_head = (commit_instr_i[0].fu == CSR);
   // The request is driven while a committable-looking CSR head is
-  // presented: valid, no instruction exception, not halted, not dropped,
-  // not suppressed. Exactly the emit's commit-block preconditions.
+  // presented: valid, decidable, no instruction exception, not halted,
+  // not dropped, not suppressed. Exactly the emit's commit-block
+  // preconditions plus the bundle-valid presentation.
   assign csr_req = csr_head && commit_instr_i[0].valid && !halt_i &&
+                   commit_bundle_valid_i[0] &&
                    !commit_instr_i[0].ex.valid && !break_from_trigger_i &&
                    !commit_drop_i[0] && !suppress[0];
   assign csr_seen_match = csr_seen_q &&
@@ -330,11 +303,12 @@ module commit_stage
       // A dropped entry is squashed: it performs no architectural write.
     end else if (commit_instr_i[0].valid && commit_bundle_valid_i[0] &&
                  !halt_i && !suppress[0] &&
-                 // hyp8: a CSR head only enters the commit block once the
-                 // request has been held a full cycle (seen) AND the
-                 // registered CSR read response has landed -- before that
-                 // its side effects must not fire.
-                 (!csr_head || (csr_seen_match && csr_rdata_valid_i))) begin
+                 // hyp8: a CSR head enters the commit block only once the
+                 // csr_regfile response is live for its request —
+                 // same-cycle under CsrReadStages==1, or the armed seen
+                 // record plus the registered response under ==2.
+                 (!csr_head || ((HypCfg.CsrReadStages == 1 || csr_seen_match) &&
+                                csr_rdata_valid_i))) begin
       // we will not commit the instruction if we took an exception
       if (commit_instr_i[0].ex.valid || break_from_trigger_i) begin
         // Exception without drop: hold until exception handling
@@ -583,19 +557,8 @@ module commit_stage
     end else commit_macro_ack_dec = commit_dec;
   end
 
-  // hyp8: commit_macro_ack_o echoes the decision one cycle later, aligned
-  // with the registered commit_ack_o (the emit drove both off the same
-  // comb ack).
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      commit_macro_ack_q <= '0;
-    end else if (flush_i) begin
-      commit_macro_ack_q <= '0;
-    end else begin
-      commit_macro_ack_q <= commit_macro_ack_dec;
-    end
-  end
-  assign commit_macro_ack_o = commit_macro_ack_q;
+  // commit_macro_ack_o is the same-cycle macro/last-instr decision folded
+  // into the common event (assigned beside commit_ack_o above).
 
   // Dirty the FP state if we are committing anything related to the FPU
   // hyp8: keyed on the same-cycle fire (the architectural event), not on
@@ -628,10 +591,11 @@ module commit_stage
       // ------------------------
       // check for CSR exception
       // ------------------------
-      // hyp8: csr_exception_i is only meaningful on the CSR fire cycle --
-      // for any other presentation it belongs to no live request, so the
-      // merge is qualified by csr_seen_match.
-      if (csr_exception_i.valid && (!csr_head || csr_seen_match)) begin
+      // hyp8: csr_exception_i is only meaningful on the CSR head's
+      // response cycle — a non-CSR head must never consume a stale CSR
+      // exception, so the merge requires csr_head plus the live response.
+      if (csr_exception_i.valid && csr_head && csr_rdata_valid_i &&
+          (HypCfg.CsrReadStages == 1 || csr_seen_match)) begin
         exception_o      = csr_exception_i;
         // if no earlier exception happened the commit instruction will
         // still contain the instruction bits from the ID stage.

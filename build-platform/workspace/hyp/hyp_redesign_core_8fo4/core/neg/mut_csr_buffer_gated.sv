@@ -1,0 +1,213 @@
+// hyp8 provenance: ADAPTED (sv-timing emit base, registered lookup + credit)
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+// Copyright 2018 ETH Zurich and University of Bologna.
+// Copyright and related rights are licensed under the Solderpad Hardware
+// License, Version 0.51 (the "License"); you may not use this file except in
+// compliance with the License.  You may obtain a copy of the License at
+// http://solderpad.org/licenses/SHL-0.51. Unless required by applicable law
+// or agreed to in writing, software, hardware and materials distributed under
+// this License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+// CONDITIONS OF ANY KIND, either express or implied. See the License for the
+// specific language governing permissions and limitations under the License.
+//
+// Author: Florian Zaruba, ETH Zurich
+// Date: 05.05.2017
+// Description: Buffer to hold CSR address, this acts like a functional unit
+//              to the scoreboard.
+//
+// hyp8 (group 6): on the OoO path the per-tid commit lookup and the issue
+// credit are combinational again:
+//   - csr_addr_o is a combinational table read keyed by csr_commit_tid_i;
+//     csr_commit_i only releases the matching record, it never gates the
+//     address (a commit that has not happened yet must not starve the
+//     lookup of its own request).
+//   - csr_ready_o is the table credit computed from CURRENT free counts:
+//     (free_count + commit_release) >= (1 + csr_valid_i). The one-cycle
+//     IRO-to-table arrival interval covers the request presented this
+//     cycle; the staged CSR request register after this lookup supplies
+//     the pipeline boundary, so no second register is needed.
+// The in-order (OoOEn==0) single-entry path keeps its emit timing
+// bit-identically.
+
+
+// NEGATIVE CONTROL (verification only, not for the design): a mutated
+// copy of csr_buffer that restores the pre-repair commit-gated CSR
+// address lookup (csr_addr_o only answers while csr_commit_i is high).
+// tb_g6lc_hyp8_control asserts the real table answers the request's own
+// tid combinationally before any commit, and that this mutation does
+// not -- so the leaf fails if the gating is ever restored.
+module mut_csr_buffer_gated
+  import g6lc_core_pkg::*;
+#(
+    parameter config_pkg::g6lc_cfg_t G6LCCfg = config_pkg::g6lc_cfg_empty,
+    parameter g6lc_hyp_pkg::g6lc_hyp_cfg_t HypCfg = g6lc_hyp_pkg::HypDefault,
+    parameter type fu_data_t = logic
+) (
+    // Subsystem Clock - SUBSYSTEM
+    input logic clk_i,
+    // Asynchronous reset active low - SUBSYSTEM
+    input logic rst_ni,
+    // Flush CSR - CONTROLLER
+    input logic flush_i,
+    // OoO: drop table entries whose scoreboard slot was cancelled - ISSUE_STAGE
+    input logic [G6LCCfg.NR_SB_ENTRIES-1:0] cancelled_mask_i,
+    // FU data needed to execute instruction - ISSUE_STAGE
+    input fu_data_t fu_data_i,
+    // CSR FU is ready - ISSUE_STAGE
+    output logic csr_ready_o,
+    // CSR instruction is valid - ISSUE_STAGE
+    input logic csr_valid_i,
+    // CSR buffer result - ISSUE_STAGE
+    output logic [G6LCCfg.XLEN-1:0] csr_result_o,
+    // commit the pending CSR OP - TO_BE_COMPLETED
+    input logic csr_commit_i,
+    // trans_id of the committing CSR (OoO only) - COMMIT_STAGE
+    input logic [G6LCCfg.TRANS_ID_BITS-1:0] csr_commit_tid_i,
+    // CSR address to write - COMMIT_STAGE
+    output logic [11:0] csr_addr_o
+);
+
+  // In-order keeps the single-entry buffer bit-identically. OoO can issue a
+  // second CSR while an older one awaits commit, so the table is two entries
+  // and the commit selects its address by trans_id.
+  localparam int unsigned DEPTH = G6LCCfg.OoOEn ? 2 : 1;
+
+  typedef struct packed {
+    logic [11:0] csr_address;
+    logic [G6LCCfg.TRANS_ID_BITS-1:0] tid;
+    logic        valid;
+  } csr_ent_t;
+
+  csr_ent_t tab_d[DEPTH], tab_q[DEPTH];
+
+  // control logic, scoreboard signals
+  assign csr_result_o = fu_data_i.operand_a;
+
+  if (!G6LCCfg.OoOEn) begin : gen_inorder
+    assign csr_addr_o = tab_q[0].csr_address;
+
+    // write logic
+    always_comb begin : write
+      tab_d = tab_q;
+      // by default we are ready
+      csr_ready_o = 1'b1;
+      // if we have a valid uncommitted csr req or are just getting one WITHOUT a commit in, we are not ready
+      // Depth one on purpose: a second CSR must not be accepted before the first
+      // retires, or the two side effects could be applied out of program order.
+      if ((tab_q[0].valid || csr_valid_i) && ~csr_commit_i) csr_ready_o = 1'b0;
+      // if we got a valid from the scoreboard
+      // store the CSR address
+      if (csr_valid_i) begin
+        tab_d[0].csr_address = fu_data_i.operand_b[11:0];
+        tab_d[0].valid       = 1'b1;
+      end
+      // if we get a commit and no new valid instruction -> clear the valid bit
+      if (csr_commit_i && ~csr_valid_i) begin
+        tab_d[0].valid = 1'b0;
+      end
+      // clear the buffer if we flushed
+      if (flush_i) tab_d[0].valid = 1'b0;
+    end
+  end else begin : gen_ooo
+    // Ready is a table credit: at least one free entry, counting a slot the
+    // same-cycle commit is releasing and *excluding* the slot the CSR
+    // presented this cycle is taking. Issue acks a CSR one cycle before its
+    // csr_valid_i reaches this table, so the op acked last cycle is still
+    // allocating while the next issue decision reads this credit; without the
+    // csr_valid_i term two back-to-back CSRs could both be acked against one
+    // free entry and the second allocation was silently dropped (its commit
+    // then found no address and raised ILLEGAL_INSTR).
+    // hyp8: the credit reads CURRENT table state — the one-cycle IRO-to-
+    // table interval already covers the arriving request, and the staged
+    // request register after the lookup supplies the pipeline boundary.
+    logic commit_release, commit_hit;
+    int unsigned free_count;
+    always_comb begin
+      free_count = 0;
+      for (int unsigned i = 0; i < DEPTH; i++)
+        if (!tab_q[i].valid) free_count++;
+    end
+    always_comb begin
+      commit_release = 1'b0;
+      commit_hit     = 1'b0;
+      for (int unsigned i = 0; i < DEPTH; i++) begin
+        if (tab_q[i].valid && (tab_q[i].tid == csr_commit_tid_i)) begin
+          commit_hit = 1'b1;
+          if (csr_commit_i) commit_release = 1'b1;
+        end
+      end
+      csr_ready_o = (free_count + int'(commit_release)) >= (1 + int'(csr_valid_i));
+    end
+
+    // MUTATION: the address lookup is gated by csr_commit_i (the
+    // pre-repair behaviour). The commit stage's presented tid cannot
+    // resolve its own address until the commit itself is already
+    // running -- a request that has not yet committed is starved.
+    always_comb begin
+      csr_addr_o = '0;
+      if (csr_commit_i) begin
+        for (int unsigned i = 0; i < DEPTH; i++)
+          if (tab_q[i].valid && (tab_q[i].tid == csr_commit_tid_i))
+            csr_addr_o = tab_q[i].csr_address;
+      end
+    end
+
+    //pragma translate_off
+    always_ff @(posedge clk_i) begin
+      if (rst_ni && csr_commit_i) begin
+        if (!commit_hit) $error("csr commit without table entry");
+      end
+    end
+    //pragma translate_on
+
+    logic alloc_dropped;
+    always_comb begin : write_ooo
+      automatic logic allocated;
+      tab_d = tab_q;
+      allocated = 1'b0;
+      // Wrong-path squash frees the credit without a commit.
+      for (int unsigned i = 0; i < DEPTH; i++)
+        if (tab_d[i].valid && cancelled_mask_i[tab_d[i].tid])
+          tab_d[i].valid = 1'b0;
+      // Commit releases the entry whose trans_id is retiring.
+      for (int unsigned i = 0; i < DEPTH; i++)
+        if (csr_commit_i && tab_d[i].valid && (tab_d[i].tid == csr_commit_tid_i))
+          tab_d[i].valid = 1'b0;
+      // Allocate the lowest free entry.
+      for (int unsigned i = 0; i < DEPTH; i++)
+        if (csr_valid_i && !allocated && !tab_d[i].valid) begin
+          tab_d[i].valid       = 1'b1;
+          tab_d[i].tid         = fu_data_i.trans_id;
+          tab_d[i].csr_address = fu_data_i.operand_b[11:0];
+          allocated            = 1'b1;
+        end
+      if (flush_i) begin
+        for (int unsigned i = 0; i < DEPTH; i++) tab_d[i].valid = 1'b0;
+      end
+      // A presented CSR that finds no entry would commit with address 0; the
+      // credit above must make this unreachable.
+      alloc_dropped = csr_valid_i && !allocated && !flush_i;
+    end
+
+    //pragma translate_off
+    always_ff @(posedge clk_i) begin
+      if (rst_ni && alloc_dropped) $error("csr_buffer: CSR presented with no free table entry");
+    end
+    //pragma translate_on
+  end
+
+  // sequential process
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (~rst_ni) begin
+      for (int unsigned i = 0; i < DEPTH; i++) tab_q[i] <= csr_ent_t'('0);
+    end else begin
+      tab_q <= tab_d;
+    end
+  end
+
+  // HypCfg currently only documents the seam (the OoO staging is structural).
+  logic _unused_hyp;
+  assign _unused_hyp = &{1'b0, HypCfg.WbReserve};
+
+endmodule

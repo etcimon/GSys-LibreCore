@@ -55,8 +55,11 @@ module lsu_bypass
 
     // TO_BE_COMPLETED - TO_BE_COMPLETED
     output lsu_ctrl_t lsu_ctrl_o,
-    // TO_BE_COMPLETED - TO_BE_COMPLETED
-    output logic      ready_o
+    // Empty: the accelerator MMU waits for this. Not the issue credit.
+    output logic      ready_o,
+    // Posts captured in the queue (0..DEPTH). Issue adds the two grants
+    // still in the AGU shadow and stops at DEPTH.
+    output logic [2:0] count_o
 );
 
   // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
@@ -83,10 +86,14 @@ module lsu_bypass
   // svt-pipe: no-cut on=mem_n
   // svt-pipe: cycle lsu q=mem_n d=ready_o hold=lsu_req_valid_i steps=1
 
-  lsu_ctrl_t [1:0] mem_n, mem_q;
-  logic read_pointer_n, read_pointer_q;
-  logic write_pointer_n, write_pointer_q;
-  logic [1:0] status_cnt_n, status_cnt_q;
+  // Depth 4 covers the two-cycle AGU shadow plus a head waiting on
+  // the load or store unit. A depth-2 queue forced a grant, then a skip,
+  // because three back-to-back posts overflowed it.
+  localparam int unsigned DEPTH = 4;
+  lsu_ctrl_t [DEPTH-1:0] mem_n, mem_q;
+  logic [1:0] read_pointer_n, read_pointer_q;
+  logic [1:0] write_pointer_n, write_pointer_q;
+  logic [2:0] status_cnt_n, status_cnt_q;
 
   logic empty;
   
@@ -122,76 +129,74 @@ module lsu_bypass
 // end
 // ----------------------------------------------------------------
   // END sv-timing auto-correct (balance_mux rewrite)
-assign empty   = (status_cnt_q == 0);
+  assign empty   = (status_cnt_q == 0);
   assign ready_o = empty;
+  assign count_o = status_cnt_q;
 
+  lsu_ctrl_t req_wr;
   always_comb begin
-    automatic logic [1:0] status_cnt;
-    automatic logic write_pointer;
-    automatic logic read_pointer;
+    req_wr = lsu_req_i;
+    if (lsu_req_valid_i && lsu_req_i.is_speculative_load &&
+        resolved_branch_i.valid &&
+        (!G6LCCfg.OoOEn || !resolved_branch_i.is_mispredict)) begin
+      if (resolved_branch_i.is_mispredict)
+        req_wr.is_speculative_load_miss = 1'b1;
+      else
+        req_wr.is_speculative_load = 1'b0;
+    end
+  end
 
-    status_cnt = status_cnt_q;
+  // Pointers and the count. Payload slots are sibling generates so a
+  // variable index of the wide record is not on this cone.
+  always_comb begin
+    automatic logic [2:0] status_cnt;
+    automatic logic [1:0] write_pointer;
+    automatic logic [1:0] read_pointer;
+
+    status_cnt    = status_cnt_q;
     write_pointer = write_pointer_q;
-    read_pointer = read_pointer_q;
+    read_pointer  = read_pointer_q;
 
-    mem_n = mem_q;
-    // we've got a valid LSU request
     if (lsu_req_valid_i) begin
-      mem_n[write_pointer_q] = lsu_req_i;
-      if (lsu_req_i.is_speculative_load && resolved_branch_i.valid &&
-          (!G6LCCfg.OoOEn || !resolved_branch_i.is_mispredict)) begin
-        if (resolved_branch_i.is_mispredict) begin
-          // missprediction: mark speculative loads as misspredicted
-          mem_n[write_pointer_q].is_speculative_load_miss = 1'b1;
-        end else begin
-          // correct prediction: the load is no longer speculative
-          mem_n[write_pointer_q].is_speculative_load = 1'b0;
-        end
-      end
       write_pointer++;
       status_cnt++;
     end
-
     if (pop_ld_i) begin
-      // invalidate the result
-      mem_n[read_pointer_q].valid = 1'b0;
       read_pointer++;
       status_cnt--;
     end
-
     if (pop_st_i) begin
-      // invalidate the result
-      mem_n[read_pointer_q].valid = 1'b0;
       read_pointer++;
       status_cnt--;
     end
-
-    if (pop_st_i && pop_ld_i) mem_n = '0;
-
-    // T35: a cancelled STORE (AMOs included, fu == STORE) is marked the same
-    // way. The mask names a tid only until the cancelled entry is
-    // commit-dropped; a store held here behind a translation (PTW) or a full
-    // store buffer outlives that window, and without the sticky mark the
-    // store unit pushed it into the speculative queue under a tid whose slot
-    // was already free (server1 Linux, cycle 76,935,847) or re-allocated.
-    if (G6LCCfg.OoOEn) begin
-      for (int unsigned i = 0; i < 2; i++) begin
-        if (mem_n[i].valid && (mem_n[i].fu == LOAD || mem_n[i].fu == STORE) &&
-            cancelled_mask_i[mem_n[i].trans_id])
-          mem_n[i].is_speculative_load_miss = 1'b1;
-      end
-    end
-
     if (flush_i) begin
-      status_cnt = '0;
+      status_cnt    = '0;
       write_pointer = '0;
-      read_pointer = '0;
-      mem_n = '0;
+      read_pointer  = '0;
     end
-    // default assignments
     read_pointer_n  = read_pointer;
     write_pointer_n = write_pointer;
     status_cnt_n    = status_cnt;
+  end
+
+  for (genvar s = 0; s < DEPTH; s++) begin : gen_slot
+    always_comb begin
+      mem_n[s] = mem_q[s];
+      if (flush_i || (pop_ld_i && pop_st_i)) begin
+        mem_n[s] = '0;
+      end else if (lsu_req_valid_i && (write_pointer_q == 2'(s))) begin
+        mem_n[s] = req_wr;
+      end
+      if (!flush_i && !(pop_ld_i && pop_st_i) &&
+          (pop_ld_i || pop_st_i) && (read_pointer_q == 2'(s)))
+        mem_n[s].valid = 1'b0;
+      // T35: sticky cancel. The mask names a tid only until the entry
+      // is commit-dropped; a store held for translation outlives that.
+      if (G6LCCfg.OoOEn && mem_n[s].valid &&
+          (mem_n[s].fu == LOAD || mem_n[s].fu == STORE) &&
+          cancelled_mask_i[mem_n[s].trans_id])
+        mem_n[s].is_speculative_load_miss = 1'b1;
+    end
   end
 
   // hyp8: registered head — the emit bypassed a live request through the
@@ -201,10 +206,19 @@ assign empty   = (status_cnt_q == 0);
   // request presentation; recorded). mem_n[read_pointer_n] already
   // equals the arriving request when the queue drains to empty, so no
   // separate bypass path is needed.
-  lsu_ctrl_t head_q;
+  lsu_ctrl_t head_q, head_d;
+  // Constant slot arms. A variable index of this record is a per-bit select.
+  always_comb begin
+    unique case (read_pointer_n)
+      2'd0: head_d = mem_n[0];
+      2'd1: head_d = mem_n[1];
+      2'd2: head_d = mem_n[2];
+      default: head_d = mem_n[3];
+    endcase
+  end
   always_ff @(posedge clk_i or negedge rst_ni) begin : p_head
     if (~rst_ni) head_q <= '0;
-    else         head_q <= mem_n[read_pointer_n];
+    else         head_q <= head_d;
   end
 
   always_comb begin : output_assignments
@@ -228,4 +242,70 @@ assign empty   = (status_cnt_q == 0);
       read_pointer_q  <= read_pointer_n;
     end
   end
+
+//pragma translate_off
+  // +smt_flow_trace window probe (+trace_from/+trace_to, default 0..3000):
+  // [lsqb]  per-cycle queue state — mem entries, pointers, count, the
+  //         posted request, both pops, flush and the presented head.
+  // [lsqb-evt] labelled queue events: insert, pop_ld, pop_st, flush,
+  //         cancel-mask mark, and head-slot overwrite (insert while full).
+  bit lsqb_tr;
+  int unsigned lsqb_cyc = 0;
+  int unsigned lsqb_lo, lsqb_hi;
+  initial begin
+    lsqb_tr = $test$plusargs("smt_flow_trace");
+    lsqb_lo = 0;
+    lsqb_hi = 3000;
+    void'($value$plusargs("trace_from=%d", lsqb_lo));
+    void'($value$plusargs("trace_to=%d", lsqb_hi));
+  end
+
+  always @(posedge clk_i) begin
+    if (!rst_ni) begin
+      lsqb_cyc = 0;
+    end else if (lsqb_tr) begin
+      lsqb_cyc++;
+      if ((lsqb_cyc >= lsqb_lo) && (lsqb_cyc <= lsqb_hi)) begin
+        $display("[lsqb] c=%0d cnt=%0d rd=%b wp=%b m0[v=%b fu=%0d tid=%0d slm=%b] m1[v=%b fu=%0d tid=%0d slm=%b] m2[v=%b tid=%0d] m3[v=%b tid=%0d] ins_v=%b ins_tid=%0d ins_fu=%0d pld=%b pst=%b fls=%b out[v=%b fu=%0d tid=%0d slm=%b]",
+                 lsqb_cyc, status_cnt_q, read_pointer_q, write_pointer_q,
+                 mem_q[0].valid, mem_q[0].fu, mem_q[0].trans_id,
+                 mem_q[0].is_speculative_load_miss,
+                 mem_q[1].valid, mem_q[1].fu, mem_q[1].trans_id,
+                 mem_q[1].is_speculative_load_miss,
+                 mem_q[2].valid, mem_q[2].trans_id,
+                 mem_q[3].valid, mem_q[3].trans_id,
+                 lsu_req_valid_i, lsu_req_i.trans_id, lsu_req_i.fu,
+                 pop_ld_i, pop_st_i, flush_i,
+                 lsu_ctrl_o.valid, lsu_ctrl_o.fu, lsu_ctrl_o.trans_id,
+                 lsu_ctrl_o.is_speculative_load_miss);
+        if (lsu_req_valid_i)
+          $display("[lsqb-evt] c=%0d insert tid=%0d fu=%0d wp=%b cnt=%0d %s",
+                   lsqb_cyc, lsu_req_i.trans_id, lsu_req_i.fu,
+                   write_pointer_q, status_cnt_q,
+                   (status_cnt_q >= 4) ? "OVERWRITE-FULL" :
+                   (write_pointer_q == read_pointer_q &&
+                    status_cnt_q != 0) ? "WP-EQ-RD" : "ok");
+        if (pop_ld_i)
+          $display("[lsqb-evt] c=%0d pop_ld head_tid=%0d head_fu=%0d",
+                   lsqb_cyc, mem_q[read_pointer_q].trans_id,
+                   mem_q[read_pointer_q].fu);
+        if (pop_st_i)
+          $display("[lsqb-evt] c=%0d pop_st head_tid=%0d head_fu=%0d",
+                   lsqb_cyc, mem_q[read_pointer_q].trans_id,
+                   mem_q[read_pointer_q].fu);
+        if (flush_i)
+          $display("[lsqb-evt] c=%0d flush", lsqb_cyc);
+        if (G6LCCfg.OoOEn) begin
+          for (int unsigned i = 0; i < 4; i++) begin
+            if (mem_q[i].valid && !mem_q[i].is_speculative_load_miss &&
+                (mem_q[i].fu == LOAD || mem_q[i].fu == STORE) &&
+                cancelled_mask_i[mem_q[i].trans_id])
+              $display("[lsqb-evt] c=%0d cancel-mark idx=%0d tid=%0d fu=%0d",
+                       lsqb_cyc, i, mem_q[i].trans_id, mem_q[i].fu);
+          end
+        end
+      end
+    end
+  end
+//pragma translate_on
 endmodule

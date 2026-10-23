@@ -182,8 +182,21 @@ assign span_bytes = cf_pc_i - cf_target_i;
   localparam int unsigned HI_W  = 64 - LOW_W;
   logic [HI_W-1:0] base_hi_p1_q, base_hi_p1_d;
   logic [LOW_W:0]  pc_low_sum, fill_low_sum;
-  assign pc_low_sum   = {1'b0, base_q[LOW_W-1:0]} + ((LOW_W + 1)'(replay_q)   << ALIGN);
-  assign fill_low_sum = {1'b0, base_q[LOW_W-1:0]} + ((LOW_W + 1)'(fill_ptr_q) << ALIGN);
+  // hyp8: NR_ENTRIES=8 and ALIGN=3, so LOW_W is 6 and HI_W is 58.
+  // A part-select whose bound is $clog2(...) is billed as a variable
+  // shift. The hit uses the literal ranges. The localparam stays for
+  // the rest of the module.
+  // pragma translate_off
+  initial begin
+    assert (LOW_W == 6 && HI_W == 58)
+      else $error("g6lc_loop_buffer: literal hit slices assume LOW_W=6");
+  end
+  // pragma translate_on
+  logic [6:0] pc_low_lit, fill_low_lit;
+  assign pc_low_lit   = {1'b0, base_q[5:0]} + {1'b0, replay_q[2:0], 3'b0};
+  assign fill_low_lit = {1'b0, base_q[5:0]} + {1'b0, fill_ptr_q[2:0], 3'b0};
+  assign pc_low_sum   = pc_low_lit;
+  assign fill_low_sum = fill_low_lit;
   function automatic logic addr_eq(input logic [G6LCCfg.VLEN-1:0] a, input logic [LOW_W:0] low_sum);
     logic hi_eq;
     // Carry picks a registered high alternative. A unique case is one mux;
@@ -198,17 +211,17 @@ assign span_bytes = cf_pc_i - cf_target_i;
   // Lookup hit compares, outside addr_eq so the high PC is not one
   // function node. [63:32] and [31:LOW_W] are the high field.
   logic seq_lo, seq_hi_hi, seq_hi_lo, seq_in_body, seq_epoch;
-  assign seq_lo = lookup_vaddr_i[LOW_W-1:0] == pc_low_sum[LOW_W-1:0];
+  assign seq_lo = lookup_vaddr_i[5:0] == pc_low_lit[5:0];
   always_comb begin
-    unique case (pc_low_sum[LOW_W])
-      1'b1:    seq_hi_hi = lookup_vaddr_i[63:32] == base_hi_p1_q[HI_W-1:HI_W-32];
+    unique case (pc_low_lit[6])
+      1'b1:    seq_hi_hi = lookup_vaddr_i[63:32] == base_hi_p1_q[57:26];
       default: seq_hi_hi = lookup_vaddr_i[63:32] == base_q[63:32];
     endcase
   end
   always_comb begin
-    unique case (pc_low_sum[LOW_W])
-      1'b1:    seq_hi_lo = lookup_vaddr_i[31:LOW_W] == base_hi_p1_q[31-LOW_W:0];
-      default: seq_hi_lo = lookup_vaddr_i[31:LOW_W] == base_q[31:LOW_W];
+    unique case (pc_low_lit[6])
+      1'b1:    seq_hi_lo = lookup_vaddr_i[31:6] == base_hi_p1_q[25:0];
+      default: seq_hi_lo = lookup_vaddr_i[31:6] == base_q[31:6];
     endcase
   end
   assign seq_epoch   = arm_epoch_q == epoch_i;

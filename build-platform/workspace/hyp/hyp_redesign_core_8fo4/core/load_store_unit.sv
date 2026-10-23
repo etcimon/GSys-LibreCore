@@ -77,6 +77,9 @@ module load_store_unit
     input fu_data_t fu_data_i,
     // Load Store Unit is ready - ISSUE_STAGE
     output logic lsu_ready_o,
+    // Queued posts, not including the two-cycle AGU shadow. Issue
+    // treats lsu_ready_o as "count < 4". This is the count itself.
+    output logic [2:0] lsu_count_o,
     // Load Store Unit instruction is valid - ISSUE_STAGE
     input logic lsu_valid_i,
     // Signals speculative loads for non-idempotent load handling - EX_STAGE
@@ -573,7 +576,12 @@ module load_store_unit
   pmp_data_if #(
       .G6LCCfg      (G6LCCfg),
       .icache_areq_t(icache_areq_t),
-      .exception_t  (exception_t)
+      .exception_t  (exception_t),
+      // Reference one-cycle MMU contract: store_unit/load_unit consume
+      // lsu_paddr_o / lsu_exception_o in the request cycle — the staged
+      // (2) variant is for consumers that wait on lsu_valid_o, which
+      // this LSU does not.
+      .DATA_VERDICT_STAGES(0)
   ) i_pmp_data_if (
       .clk_i               (clk_i),
       .rst_ni              (rst_ni),
@@ -643,7 +651,7 @@ module load_store_unit
       unique case (mmu_state_q)
         G6LC: begin
           // Only the accelerator is requesting, and the lsu bypass queue is empty.
-          if (acc_mmu_req_i.acc_mmu_req && !lsu_valid_i && lsu_ready_o) begin
+          if (acc_mmu_req_i.acc_mmu_req && !lsu_valid_i && (lsu_count_o == 3'd0)) begin
             // Lock the MMU to the accelerator.
             // If the issue stage is firing a mem op in this cycle,
             // the bypass queue will buffer it.
@@ -1160,8 +1168,12 @@ module load_store_unit
       .resolved_branch_i,
 
       .lsu_ctrl_o(lsu_ctrl_byp),
-      .ready_o   (lsu_ready_o)
+      .ready_o   (),
+      .count_o   (lsu_count_o)
   );
+  // Issue credit: one free queue slot. Empty stays inside the bypass
+  // for the accelerator MMU (lsu_count_o == 0).
+  assign lsu_ready_o = (lsu_count_o < 3'd4);
 
   assign rvfi_lsu_ctrl_o = lsu_ctrl;
 

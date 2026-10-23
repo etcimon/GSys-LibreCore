@@ -1130,11 +1130,34 @@ assign ldbuf_full = &ldbuf_valid_q;
   end
   assign pub_idx_w = pub_or[NLD-1];
   assign pub_any   = |pub_oh;
+  // Drain mask, outside rvalid_output. A procedural scan that rewrote
+  // ldbuf_r sat after the publish arm and was billed in series with it.
+  // Lowest index wins, the same rule as that scan. Publish and the
+  // exception arm still own the slot when they fire.
+  logic [NLD-1:0] drn_ok, drn_oh;
+  logic [LD_IDX_W-1:0] drn_part [NLD];
+  logic [LD_IDX_W-1:0] drn_or [NLD];
+  logic [LD_IDX_W-1:0] drn_idx_w;
+  logic                drn_any;
+  for (genvar di = 0; di < NLD; di++) begin : gen_drn_ok
+    assign drn_ok[di] = rpend_q[di] && ldbuf_valid_q[di] &&
+                        (ldbuf_flushed_q[di] || rkill_q[di]);
+  end
+  assign drn_oh = drn_ok & (~drn_ok + {{NLD-1{1'b0}}, 1'b1});
+  for (genvar di = 0; di < NLD; di++) begin : gen_drn_part
+    assign drn_part[di] = drn_oh[di] ? LD_IDX_W'(di) : '0;
+  end
+  assign drn_or[0] = drn_part[0];
+  for (genvar di = 1; di < NLD; di++) begin : gen_drn_or
+    assign drn_or[di] = drn_or[di-1] | drn_part[di];
+  end
+  assign drn_idx_w = drn_or[NLD-1];
+  assign drn_any   = |drn_oh;
   // Same predicate as the old exception arm, using kill_req_w rather than
   // the FSM output so the kill OR is not behind load_control.
   assign ex_pub = req_port_i.data_rvalid && ldbuf_valid_q[rresp_idx] &&
                   !ldbuf_flushed_q[rresp_idx] &&
-                  ((ldbuf_last_id_q != rresp_idx) || !kill_req_w) &&
+                  ((ldbuf_last_id_q == rresp_idx) || !kill_req_w) &&
                   ex_i.valid && !ex_ptw_i && state_q[LU_B_SEND_TAG];
 
   // decoupled rvalid/publish process
@@ -1169,15 +1192,10 @@ assign ldbuf_full = &ldbuf_valid_q;
 
     // drain pick (no publish): a tombstoned or tag-killed slot that has
     // captured its response frees here — LSU tombstones survive flush
-    // but never produce a writeback.
-    if (!ldbuf_r) begin
-      for (int unsigned i = 0; i < G6LCCfg.NrLoadBufEntries; i++) begin
-        if (!ldbuf_r && rpend_q[i] && ldbuf_valid_q[i] &&
-            (ldbuf_flushed_q[i] || rkill_q[i])) begin
-          ldbuf_r      = 1'b1;
-          ldbuf_rindex = ldbuf_id_t'(i);
-        end
-      end
+    // but never produce a writeback. drn_oh is the lowest such slot.
+    if (!ldbuf_r && drn_any) begin
+      ldbuf_r      = 1'b1;
+      ldbuf_rindex = ldbuf_id_t'(drn_idx_w);
     end
 
     // an exception occurred during translation
@@ -1811,5 +1829,96 @@ assign ldbuf_full = &ldbuf_valid_q;
   assert property (@(posedge clk_i) disable iff (!rst_ni) rf_st_fwd_done == st_fwd_done)
     else $fatal(1, "load_unit hyp8 st_fwd_done mismatch");
   //pragma translate_on
+
+//pragma translate_off
+  // +ld_state: load-FSM gate-term probe (diagnostic only). One line each
+  // time the union of the accept/issue/hold terms moves — a parked load
+  // leaves its holding term readable as the last line (the r6-diag wedge
+  // needed every gate verbatim, not an inferred state).
+  // Window: +trace_from=<c>/+trace_to=<c> (default 0..3000).
+  // +smt_flow_trace additionally enables:
+  //   [ldfsm]  every state_q transition, printed whether or not valid_i is
+  //            set — an input whose queue entry vanished mid-transaction
+  //            must not silence the FSM record.
+  //   [ldport] per-cycle dcache load-port handshake (req/gnt/tag/kill/rvalid).
+  bit ld_state_tr;
+  bit ld_diag_tr;
+  int unsigned ld_state_cyc = 0;
+  int unsigned ld_tr_lo, ld_tr_hi;
+  logic [49+G6LCCfg.TRANS_ID_BITS:0] ld_sig, ld_sig_q = '0;
+  logic [9:0] ld_fsm_q = '0;
+  initial begin
+    ld_state_tr = $test$plusargs("ld_state");
+    ld_diag_tr  = $test$plusargs("smt_flow_trace");
+    ld_tr_lo = 0;
+    ld_tr_hi = 3000;
+    void'($value$plusargs("trace_from=%d", ld_tr_lo));
+    void'($value$plusargs("trace_to=%d", ld_tr_hi));
+  end
+
+  assign ld_sig = {
+      state_q,                                            // 10
+      valid_i, accept_req_w, ldbuf_full,                  // 3
+      req_port_o.data_req, req_port_i.data_gnt,
+      req_port_i.data_rvalid,                             // 3
+      req_port_o.kill_req, req_port_o.tag_valid, pop_ld_o,// 3
+      page_offset_matches_i, page_offset_spec_only_i,
+      st_pipeline_busy,                                   // 3
+      st_fwd_covers, store_buffer_empty_i,
+      dcache_wbuffer_empty_i,                             // 3
+      spec_issue_ok, lu_issue_now, cancelled_request,     // 3
+      translation_req_o, dtlb_hit_i, ex_i.valid, flush_i, // 4
+      lu_replay_o,                                        // 1
+      wpo_cnt_q,                                          // 8
+      ldbuf_valid_q,                                      // 8
+      load_pa_v_q,                                        // 1
+      lsu_ctrl_i.trans_id                                 // TRANS_ID_BITS
+  };
+
+  always @(posedge clk_i) begin
+    if (!rst_ni) begin
+      ld_state_cyc = 0;
+      ld_sig_q = '0;
+      ld_fsm_q = '0;
+    end else begin
+      ld_state_cyc++;
+      if (ld_state_tr && (ld_state_cyc >= ld_tr_lo) &&
+          (ld_state_cyc <= ld_tr_hi) && (ld_sig != ld_sig_q)) begin
+        $display("[ldst] c=%0d st=%b v=%b acc=%b lbf=%b ldb=%b dreq=%b gnt=%b rvld=%b kill=%b tv=%b pop=%b pom=%b poso=%b stb=%b fwd=%b sbe=%b wbe=%b spok=%b isn=%b cnc=%b treq=%b dtlb=%b exv=%b fls=%b rpl=%b wpo=%0d pav=%b tid=%0d va=%x pa=%x",
+                 ld_state_cyc, state_q, valid_i, accept_req_w, ldbuf_full,
+                 ldbuf_valid_q, req_port_o.data_req, req_port_i.data_gnt,
+                 req_port_i.data_rvalid, req_port_o.kill_req,
+                 req_port_o.tag_valid, pop_ld_o, page_offset_matches_i,
+                 page_offset_spec_only_i, st_pipeline_busy, st_fwd_covers,
+                 store_buffer_empty_i, dcache_wbuffer_empty_i, spec_issue_ok,
+                 lu_issue_now, cancelled_request, translation_req_o,
+                 dtlb_hit_i, ex_i.valid, flush_i, lu_replay_o, wpo_cnt_q,
+                 load_pa_v_q, lsu_ctrl_i.trans_id, lsu_ctrl_i.vaddr,
+                 load_pa_q);
+      end
+      ld_sig_q = ld_sig;
+      if (ld_diag_tr && (ld_state_cyc >= ld_tr_lo) &&
+          (ld_state_cyc <= ld_tr_hi)) begin
+        if (state_q != ld_fsm_q) begin
+          $display("[ldfsm] c=%0d st=%b->%b tid=%0d slm=%b dreq=%b gnt=%b rvld=%b kill=%b tv=%b exv=%b exptw=%b cnc=%b cmask=%b pop=%b fls=%b",
+                   ld_state_cyc, ld_fsm_q, state_q, lsu_ctrl_i.trans_id,
+                   lsu_ctrl_i.is_speculative_load_miss,
+                   req_port_o.data_req, req_port_i.data_gnt,
+                   req_port_i.data_rvalid, req_port_o.kill_req,
+                   req_port_o.tag_valid, ex_i.valid, ex_ptw_i,
+                   cancelled_request,
+                   cancelled_mask_i[lsu_ctrl_i.trans_id], pop_ld_o,
+                   flush_i);
+        end
+        $display("[ldport] c=%0d dreq=%b gnt=%b tv=%b kill=%b rvld=%b did=%0d rid=%0d",
+                 ld_state_cyc, req_port_o.data_req, req_port_i.data_gnt,
+                 req_port_o.tag_valid, req_port_o.kill_req,
+                 req_port_i.data_rvalid, req_port_o.data_id,
+                 req_port_i.data_rid);
+      end
+      ld_fsm_q = state_q;
+    end
+  end
+//pragma translate_on
 
 endmodule

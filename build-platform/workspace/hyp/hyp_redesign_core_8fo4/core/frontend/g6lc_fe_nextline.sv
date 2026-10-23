@@ -59,6 +59,13 @@ module g6lc_fe_nextline
     input  logic [G6LCCfg.VLEN-1:0] train_pc_i,     // source block address
     input  logic                    train_taken_i,  // 0 = unlearn the entry
     input  logic [G6LCCfg.VLEN-1:0] train_target_i, // taken target block
+    // taken-write qualifier: an entry may only hold a guess the tagged
+    // check (g6lc_fe_btb_check) can adjudicate — a JumpR guess via the
+    // tagged BTB, a Return guess via the RAS. Direct Jump/Branch outcomes
+    // arrive with train_tagdom_i=0: the block's stream guess stays untaken
+    // and its CF is re-predicted at the verdict stage on every pass,
+    // instead of being cached where no tagged predictor can endorse it.
+    input  logic                    train_tagdom_i,
 
     output logic [G6LCCfg.VLEN-1:0] npc_o,          // npc_q (enqueue cursor)
     output logic [G6LCCfg.VLEN-1:0] npc_d_o,        // next cursor (kernel out)
@@ -144,7 +151,10 @@ module g6lc_fe_nextline
       end else if (flush_i) begin
         ltaken_q <= '0;
       end else if (train_valid_i) begin
-        ltaken_q[wr_idx]  <= train_taken_i;
+        // the taken flag doubles as the valid bit — masking it with
+        // train_tagdom_i both refuses non-adjudicable taken guesses and
+        // clears a stale entry on any not-taken/unqualified write
+        ltaken_q[wr_idx]  <= train_taken_i & train_tagdom_i;
         ltarget_q[wr_idx] <= train_target_i;
       end
     end

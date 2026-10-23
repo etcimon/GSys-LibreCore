@@ -206,19 +206,30 @@ module frontend
   logic ov_ras_push, ov_ras_pop;
   logic [G6LCCfg.VLEN-1:0] ov_ras_update;
   logic [EW-1:0] ov_spec_epoch;
-  // instr_realign stage-B outputs and carry-verdict handshake
+  // instr_realign stage-B outputs and the carry-restore verdict
   logic [NrInstr-1:0] rl_valid;
   logic [NrInstr-1:0][G6LCCfg.VLEN-1:0] rl_addr, rl_base, rl_off;
   logic [NrInstr-1:0][31:0] rl_instr;
-  logic rl_serving_unaligned, rl_carry_done, rl_pend_valid, rl_bank_valid;
+  logic rl_serving_unaligned, rl_carry_done, rl_bank_valid;
   logic [G6LCCfg.VLEN-1:0] rl_bank_pc;
-  logic pend_resolve, pend_keep;
+  logic s_live, carry_restore;
   // override #1 train taps
   logic ov1_train_valid, ov1_train_taken;
   logic [G6LCCfg.VLEN-1:0] ov1_train_pc, ov1_train_target;
 
   logic replay, replay_q;
   logic [G6LCCfg.VLEN-1:0] replay_addr, replay_addr_q;
+  // ov1 squelch frontier: the stream position an override restart must
+  // target — the successor of the newest instruction the queue has accepted
+  // for the streaming hart. Queue-accepted entries are irrevocable (they
+  // deliver and retire), so every position they own is already spoken for;
+  // every in-flight window younger than them dies with the record's epoch
+  // bump and must be re-fetched. Re-keyed to the applying redirect's target
+  // (a redirect either flushes the queue or leaves only entries older than
+  // the restart point); advanced to the last accepted slot's successor on
+  // every queue push.
+  logic [G6LCCfg.NrHarts-1:0][G6LCCfg.VLEN-1:0] resume_pc_q;
+  logic [G6LCCfg.VLEN-1:0] resume_push_next, resume_d;
   // redirect record (g6lc_fe_redirect outputs) and same-cycle arbiter events
   logic red_valid, red_step, red_reseed, red_trap;
   logic [3:0] red_src;
@@ -364,24 +375,32 @@ module frontend
   // covers the interval.
   logic bp_pend_q;
   logic [G6LCCfg.VLEN-1:0] bp_tgt_q;
+  // The stream epoch the pend's target was established under — re-keyed the
+  // same way as the carry record: a pend whose epoch died is a stale filter
+  // and must stop suppressing returns of the post-redirect stream.
+  logic [EW-1:0] bp_pend_epoch_q;
   logic [2:0] bp_misp_ttl_q;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      bp_pend_q     <= 1'b0;
-      bp_tgt_q      <= '0;
-      bp_misp_ttl_q <= '0;
+      bp_pend_q       <= 1'b0;
+      bp_tgt_q        <= '0;
+      bp_pend_epoch_q <= '0;
+      bp_misp_ttl_q   <= '0;
     end else if (is_mispredict) begin
-      bp_pend_q     <= 1'b1;
-      bp_tgt_q      <= resolved_branch_i.target_address;
-      bp_misp_ttl_q <= 3'd7;
+      bp_pend_q       <= 1'b1;
+      bp_tgt_q        <= resolved_branch_i.target_address;
+      // the record bumps the epoch at the same edge the pend arms
+      bp_pend_epoch_q <= fe_epoch + EW'(1);
+      bp_misp_ttl_q   <= 3'd7;
     end else if (flush_i | smt_restore_flush) begin
       bp_pend_q     <= 1'b0;
       bp_misp_ttl_q <= '0;
     end else if (ov2_valid) begin
-      bp_pend_q     <= 1'b1;
-      bp_tgt_q      <= ov2_pc;
-      bp_misp_ttl_q <= '0;
+      bp_pend_q       <= 1'b1;
+      bp_tgt_q        <= ov2_pc;
+      bp_pend_epoch_q <= fe_epoch + EW'(1);
+      bp_misp_ttl_q   <= '0;
     end else if (bp_pend_q && icache_dreq_i.valid &&
         g6lc_fetch_pkg::same_win(G6LCCfg, 64'(icache_dreq_i.vaddr), 64'(bp_tgt_q))) begin
       bp_pend_q     <= 1'b0;
@@ -394,10 +413,10 @@ module frontend
     end
   end
 
-  // hyp8: a split completion waiting on its verdict — pend armed (completing
-  // window downstream) or a carry still banked (half instruction buffered).
+  // A buffered half instruction requires its sequential continuation.
+  // Completed prefixes travel in the window payload used by carry_restore.
   logic split_wait;
-  assign split_wait = rl_pend_valid | rl_bank_valid;
+  assign split_wait = rl_bank_valid;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -724,10 +743,18 @@ module frontend
   // Line-table training, highest priority first: resolve (the architecturally
   // true outcome), then override #2 (response verdict), then override #1
   // (tagged BTB check). resolve trains on any active-hart CF outcome.
-  logic nl_train_valid, nl_train_taken;
+  logic nl_train_valid, nl_train_taken, nl_train_tagdom;
   logic [G6LCCfg.VLEN-1:0] nl_train_pc, nl_train_target;
-  logic ov2_train_valid, ov2_train_taken;
+  logic ov2_train_valid, ov2_train_taken, ov2_train_tagdom;
   logic [G6LCCfg.VLEN-1:0] ov2_train_pc, ov2_train_target;
+
+  // Mirrors gen_no_chk_btb in g6lc_fe_btb_check: a cached taken guess is
+  // adjudicable only where a tagged predictor can back it — the check's
+  // tagged BTB (JumpR), or the RAS (Return). Under TAGE_LITE+BPIndirectEn
+  // the check owns no tagged BTB, leaving RAS-backed Returns alone.
+  localparam bit CHK_TAGGED_BTB =
+      (G6LCCfg.BTBEntries != 0) && HypCfg.FeOverridePred
+      && !(G6LCCfg.BPType == config_pkg::TAGE_LITE && G6LCCfg.BPIndirectEn);
 
   logic resolve_train;
   assign resolve_train = resolution_for_active && resolved_branch_i.valid
@@ -738,16 +765,27 @@ module frontend
       nl_train_pc     = resolved_branch_i.pc;
       nl_train_taken  = resolved_branch_i.is_taken;
       nl_train_target = resolved_branch_i.target_address;
+      // Only tag-domain CF outcomes may leave a taken guess; a direct
+      // Jump/Branch resolve cached here would re-fire override #1 on every
+      // sequential revisit (no adjudicator exists for it) — train_tagdom=0
+      // clears/refuses instead.
+      nl_train_tagdom = (resolved_branch_i.cf_type == g6lc_core_pkg::Return)
+                        || (resolved_branch_i.cf_type == g6lc_core_pkg::JumpR
+                            && CHK_TAGGED_BTB);
     end else if (ov2_train_valid) begin
       nl_train_valid  = 1'b1;
       nl_train_pc     = ov2_train_pc;
       nl_train_taken  = ov2_train_taken;
       nl_train_target = ov2_train_target;
+      nl_train_tagdom = ov2_train_tagdom;
     end else begin
       nl_train_valid  = ov1_train_valid;
       nl_train_pc     = ov1_train_pc;
       nl_train_taken  = ov1_train_taken;
       nl_train_target = ov1_train_target;
+      // override #1 only trains on a tagged BTB hit — tag-domain by
+      // construction
+      nl_train_tagdom = 1'b1;
     end
   end
 
@@ -770,6 +808,7 @@ module frontend
       .train_pc_i    (nl_train_pc),
       .train_taken_i (nl_train_taken),
       .train_target_i(nl_train_target),
+      .train_tagdom_i(nl_train_tagdom),
       .npc_o          (npc_q),
       .npc_d_o        (npc_d),
       .fetch_address_o(fetch_address),
@@ -804,6 +843,7 @@ module frontend
       .push_line_target_i (line_target),
       .btb_update_i       (btb_update),
       .ras_predict_i      (ras_predict),
+      .resume_pc_i        (resume_d),
       .ov1_valid_o        (ov1_valid),
       .ov1_pc_o           (ov1_pc),
       .train_valid_o      (ov1_train_valid),
@@ -855,7 +895,8 @@ module frontend
       | smt_restore_flush | reseed_now;
 
   // Re-align: leftover_kill is misp/flush/replay. In the staged design the
-  // carry never drops at accept; the verdict retires it via pend_resolve.
+  // carry bank advances to each window's own tail at stage B; a refused or
+  // protected verdict restores the old prefix via restore_i below.
   instr_realign #(
       .G6LCCfg(G6LCCfg),
       .HypCfg (HypCfg)
@@ -878,10 +919,18 @@ module frontend
       .leftover_pc_o      (),
       .bank_valid_o       (rl_bank_valid),
       .bank_pc_o          (rl_bank_pc),
-      .pend_valid_o       (rl_pend_valid),
       .carry_done_o       (rl_carry_done),
-      .pend_resolve_i     (pend_resolve),
-      .pend_keep_i        (pend_keep),
+      // the stage-S verdict returns the consumed prefix when the
+      // completing window is refused or its split branch is protected
+      .restore_i          (carry_restore),
+      .restore_hart_i     (meta_d_q.hart),
+      .restore_pc_i       (s_addr[0]),
+      .restore_instr_i    (s_instr[0][15:0]),
+      .restore_next_i     (64'(s_vaddr)),
+      // epoch the restored record belongs to: the replayed stream's own on
+      // a replay restore (the record bumps it), otherwise the completing
+      // window's epoch — which under s_live is the current stream epoch.
+      .restore_epoch_i    (EW'(fe_epoch) + EW'(replay)),
       .address_i          (realigner_vaddr),
       .data_i             (realigner_data),
       .valid_o            (rl_valid),
@@ -895,7 +944,9 @@ module frontend
   // and leftover-retake filters — all carried over from the reference)
   assign icache_take = (icache_dreq_i.valid | lbuf_inject)
       && !kill_drop
-      && g6lc_fetch_pkg::bp_ret_ok(bp_pend_q,
+      // pend armed under a dead epoch filters nothing: the redirect it came
+      // from already restarted the stream
+      && g6lc_fetch_pkg::bp_ret_ok(bp_pend_q && (bp_pend_epoch_q == fe_epoch),
           g6lc_fetch_pkg::same_win(G6LCCfg,
               64'(icache_dreq_i.valid ? icache_dreq_i.vaddr : ftq_head_vaddr),
               64'(bp_tgt_q)))
@@ -1119,7 +1170,7 @@ module frontend
       // same-cycle queue handshake
       .consumed_i          (instr_queue_consumed),
       // stage-S products
-      .s_valid_o           (),
+      .s_valid_o           (s_live),
       .s_win_o             (s_win),
       .s_vaddr_o           (s_vaddr),
       .s_instr_o           (s_instr),
@@ -1148,15 +1199,20 @@ module frontend
       .train_valid_o       (ov2_train_valid),
       .train_pc_o          (ov2_train_pc),
       .train_taken_o       (ov2_train_taken),
-      .train_target_o      (ov2_train_target)
+      .train_target_o      (ov2_train_target),
+      .train_tagdom_o      (ov2_train_tagdom)
   );
 
-  // carry pend verdict: resolve when the completing window reaches stage S;
-  // keep the carry for a protected split branch or a refused (replayed)
-  // completing window — the reference's leftover_branch_bp_fire /
-  // leftover_slot0_push exceptions, moved to the verdict stage.
-  assign pend_resolve = rl_pend_valid & s_carry_done;
-  assign pend_keep    = s_protect | (replay & s_carry_done);
+  // carry restore verdict: when the completing window reaches stage S and
+  // is refused (replayed) or its split branch is protected, hand the OLD
+  // carry prefix back to the realigner bank — the reference's
+  // leftover_branch_bp_fire / leftover_slot0_push exceptions, moved to
+  // the verdict stage. A normal verdict does nothing: the bank already
+  // advanced to the window's own tail at stage B. Architectural and
+  // reseed kills suppress the restore; a queue replay is not meta_clear
+  // until its registered redirect applies later.
+  assign carry_restore = s_live && s_carry_done &&
+                         (s_protect || replay) && !meta_clear && !arch_now;
 
   // ==================================================================
   // Prediction structures
@@ -1397,6 +1453,36 @@ module frontend
     assign ckpt_slot_idx   = '0;
   end
 
+  // Frontier advance: every slot the queue accepted this cycle is owned —
+  // its instruction is stream-committed — so the restart point moves to the
+  // last accepted slot's successor. An applying redirect re-keys the whole
+  // frontier instead (the queue flush or the record's own ordering makes
+  // any pre-redirect tail unreachable for the new stream). meta_d_q.hart is
+  // the window hart the queue push used; the chk-block hart tracked it.
+  always_comb begin
+    resume_push_next = resume_pc_q[meta_d_q.hart];
+    for (int unsigned i = 0; i < NrInstr; i++) begin
+      if (instr_queue_consumed[i])
+        resume_push_next = s_addr[i] +
+            g6lc_fetch_pkg::pc_ilen(G6LCCfg, s_instr[i][15:0]);
+    end
+  end
+  // resume_d includes this cycle's push so the frontier is always one
+  // stream position past every instruction that will ever be delivered.
+  assign resume_d = (|instr_queue_consumed) ? resume_push_next
+                                            : resume_pc_q[meta_d_q.hart];
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      resume_pc_q <= '0;
+    end else begin
+      if (red_valid)
+        resume_pc_q[smt_hart_i] <= red_pc;
+      else if (|instr_queue_consumed)
+        resume_pc_q[meta_d_q.hart] <= resume_push_next;
+    end
+  end
+
   // ==================================================================
   // instr_queue — elastic epoch-aware per-lane FIFOs + prefix fire
   // ==================================================================
@@ -1470,12 +1556,17 @@ module frontend
   // verilog_lint: waive always-ff-non-reset
   always_ff @(posedge clk_i) begin
     if (rst_ni && fwt_en && $time() < 200000) begin
-      if (icache_dreq_i.valid || icache_take || kill_s1 || kill_s2 || ov2_valid
-          || flush_i || is_mispredict || replay || red_valid) begin
-        $display("[win] t=%0t rsp=%b vaddr=%h take=%b k1=%b k2=%b ov2=%b red=%b fl=%b mp=%b rp=%b ep=%0d vmask=%b iqr=%b npc=%h",
+      if (icache_dreq_i.valid || icache_take || kill_s1 || kill_s2 || ov1_valid
+          || ov2_valid || flush_i || is_mispredict || replay || red_valid
+          || (|instr_queue_consumed)) begin
+        $display("[win] t=%0t rsp=%b vaddr=%h take=%b k1=%b k2=%b ov1=%b ov2=%b red=%b fl=%b mp=%b rp=%b src=%0d redpc=%h res=%h ep=%0d vmask=%b iqr=%b npc=%h lo=%b lopc=%h loep=%0d",
                  $time, icache_dreq_i.valid, icache_dreq_i.vaddr, icache_take,
-                 kill_s1, kill_s2, ov2_valid, red_valid, flush_i, is_mispredict,
-                 replay, fe_epoch, iq_valid, instr_queue_ready, npc_d);
+                 kill_s1, kill_s2, ov1_valid, ov2_valid, red_valid, flush_i,
+                 is_mispredict, replay, red_src, red_pc, resume_d,
+                 fe_epoch, iq_valid, instr_queue_ready, npc_d,
+                 i_instr_realign.carry_valid_bank_q[smt_hart_i],
+                 i_instr_realign.carry_addr_bank_q[smt_hart_i],
+                 i_instr_realign.carry_epoch_bank_q[smt_hart_i]);
       end
     end
   end

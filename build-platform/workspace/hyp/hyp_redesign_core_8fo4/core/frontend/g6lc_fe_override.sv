@@ -123,12 +123,25 @@ module g6lc_fe_override
     output logic                    train_valid_o,
     output logic [G6LCCfg.VLEN-1:0] train_pc_o,
     output logic                    train_taken_o,
-    output logic [G6LCCfg.VLEN-1:0] train_target_o
+    output logic [G6LCCfg.VLEN-1:0] train_target_o,
+    // the predicting slot's CF class is inside the tagged check's
+    // adjudication domain (Return -> RAS; JumpR -> tagged BTB only where
+    // g6lc_fe_btb_check's i_chk_btb is live). Only such verdicts may leave
+    // a taken guess in the untagged line table: a guess the check cannot
+    // back re-fires override #1 on every revisit.
+    output logic                    train_tagdom_o
 );
 
   localparam int unsigned NrInstr = G6LCCfg.INSTR_PER_FETCH;
   localparam int unsigned IdxW = (NrInstr > 1) ? $clog2(NrInstr) : 1;
   localparam int unsigned EW = (HypCfg.FeEpochBits > 0) ? HypCfg.FeEpochBits : 1;
+  // Mirrors gen_no_chk_btb in g6lc_fe_btb_check: the tagged check can only
+  // back a JumpR guess where its tagged BTB instance is live. Under
+  // TAGE_LITE + BPIndirectEn that instance is compiled out, leaving the RAS
+  // as the only adjudicator — Return guesses alone are tag-domain.
+  localparam bit CHK_TAGGED_BTB =
+      (G6LCCfg.BTBEntries != 0) && HypCfg.FeOverridePred
+      && !(G6LCCfg.BPType == config_pkg::TAGE_LITE && G6LCCfg.BPIndirectEn);
 
   // ------------------------------------------------------------------
   // Stage L — lookup register
@@ -266,6 +279,7 @@ module g6lc_fe_override
   logic [NrInstr-1:0] slot_ras_pop;
   logic [NrInstr-1:0][G6LCCfg.VLEN-1:0] slot_pred, slot_ras_upd;
   logic [G6LCCfg.VLEN-1:0] predict_address;
+  logic                    pred_tagdom;
   logic [G6LCCfg.VLEN-1:0] sel_cf_pc;
   logic ras_push_d, ras_pop_d;
   logic [G6LCCfg.VLEN-1:0] ras_update_d;
@@ -357,12 +371,16 @@ module g6lc_fe_override
 
   always_comb begin : cf_reduce
     predict_address = '0;
+    pred_tagdom     = 1'b0;
     sel_cf_pc       = '0;
     ras_update_d    = '0;
     ras_push_d      = 1'b0;
     for (int i = 0; i < NrInstr; i++) begin
       // pred_win / cf_win / call_win are one-hot, so this is an OR tree.
       predict_address |= pred_win[i] ? slot_pred[i] : '0;
+      pred_tagdom     |= pred_win[i]
+                         && ((cf_type[i] == JumpR && CHK_TAGGED_BTB)
+                             || (cf_type[i] == Return));
       sel_cf_pc       |= cf_win[i]   ? l_addr_q[i]  : '0;
       ras_push_d      |= call_win[i] && consumed_i[i];
       ras_update_d    |= call_win[i] ? slot_ras_upd[i] : '0;
@@ -414,9 +432,10 @@ module g6lc_fe_override
   assign ras_pop_o     = s_live & ras_pop_d;
   assign ras_update_o  = ras_update_d;
   assign spec_epoch_o  = l_epoch_q;
-  // pend bookkeeping tracks window PRESENCE, not epoch liveness: a
-  // dead-epoch completer still resolves the pend (with keep=0, dropping the
-  // carry of the dead stream)
+  // carry bookkeeping tracks window PRESENCE, not epoch liveness: a
+  // dead-epoch completer still advertises s_carry_done_o, but the
+  // frontend's restore gate is s_live-qualified, so a dead stream simply
+  // leaves its eagerly-advanced carry bank untouched
   assign s_carry_done_o       = l_valid_q & l_carry_done_q;
   assign s_serving_unaligned_o = l_unaligned_q;
   // split-branch carry protection: the completing window predicted a taken
@@ -445,6 +464,7 @@ module g6lc_fe_override
       train_pc_o     <= '0;
       train_taken_o  <= 1'b0;
       train_target_o <= '0;
+      train_tagdom_o <= 1'b0;
     end else if (flush_i) begin
       ov2_valid_o   <= 1'b0;
       train_valid_o <= 1'b0;
@@ -460,6 +480,7 @@ module g6lc_fe_override
       train_pc_o     <= l_vaddr_q;
       train_taken_o  <= bp_fire_live;
       train_target_o <= predict_address;
+      train_tagdom_o <= pred_tagdom;
     end
   end
   // svt-stage: end S

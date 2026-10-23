@@ -72,6 +72,11 @@ module wt_dcache_missunit
     output logic [G6LCCfg.DCACHE_USER_LINE_WIDTH-1:0] wr_cl_user_o,
     output logic [G6LCCfg.DCACHE_LINE_WIDTH/8-1:0] wr_cl_data_be_o,
     output logic [G6LCCfg.DCACHE_SET_ASSOC-1:0] wr_vld_bits_o,
+    // MSHR occupancy for the wbuffer's fixup tag-miss contract: a fixup
+    // entry whose tag check misses must retry only while a refill for the
+    // same index could still be in flight (see wt_dcache_wbuffer).
+    output logic mshr_vld_o,
+    output logic [DCACHE_CL_IDX_WIDTH-1:0] mshr_cl_idx_o,
     // memory interface
     input logic mem_rtrn_vld_i,
     input dcache_rtrn_t mem_rtrn_i,
@@ -692,6 +697,9 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
 
   assign wr_cl_tag_o = mshr_q.paddr[G6LCCfg.DCACHE_TAG_WIDTH+G6LCCfg.DCACHE_INDEX_WIDTH-1:G6LCCfg.DCACHE_INDEX_WIDTH];
   assign wr_cl_off_o = mshr_q.paddr[G6LCCfg.DCACHE_OFFSET_WIDTH-1:0];
+  // In-flight refill export (same index slice as wr_cl_idx_o's MSHR arm).
+  assign mshr_vld_o    = mshr_vld_q;
+  assign mshr_cl_idx_o = mshr_q.paddr[G6LCCfg.DCACHE_INDEX_WIDTH-1:G6LCCfg.DCACHE_OFFSET_WIDTH];
   assign wr_cl_data_o = mem_rtrn_i.data;
   assign wr_cl_user_o = mem_rtrn_i.user;
   assign wr_cl_data_be_o = (cl_write_en) ? '1 : '0;// we only write complete cachelines into the memory
@@ -709,6 +717,12 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
   assign miss_can_take   = !miss_is_write && (!mshr_vld_q || load_ack);
   // Load-miss memory request. Kept out of the IDLE priority nest so the
   // valid bit is not charged for every preceding guard.
+  // CAS match is two half compares. They read the same return dword
+  // and do not depend on each other.
+  logic cas_eq_lo, cas_eq_hi, cas_eq;
+  assign cas_eq_lo = amo_rtrn_mux[31:0] == amo_req_i.operand_c[31:0];
+  assign cas_eq_hi = amo_rtrn_mux[63:32] == amo_req_i.operand_c[63:32];
+  assign cas_eq    = cas_eq_lo && cas_eq_hi;
   logic load_miss_go;
   assign load_miss_go = (state_q == IDLE) && !(flush_i || (enable_i && !enable_q)) &&
                         !(G6LCCfg.RVA && amo_req_i.req) && (|miss_req_masked_d) &&
@@ -912,8 +926,7 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
           if (cas_ld_ack) begin
             // Full 64-bit lane (dword CAS is naturally aligned)
             cas_old_d = amo_rtrn_mux;
-            cas_new_d = (amo_rtrn_mux == amo_req_i.operand_c) ? amo_req_i.operand_b
-                                                              : amo_rtrn_mux;
+            cas_new_d = cas_eq ? amo_req_i.operand_b : amo_rtrn_mux;
             state_d   = AMO_CAS_ST;
           end
         end
@@ -993,6 +1006,7 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
   bit smt_mu_trace, smt_mu_watch;
   logic [G6LCCfg.PLEN-1:0] smt_mu_address;
   int unsigned smt_mu_cycle = 0;
+  logic [G6LCCfg.DCACHE_MAX_TX-1:0] smt_txv_q = '0;
   initial begin
     smt_mu_watch = $value$plusargs("smt_mem_watch=%h", smt_mu_address);
     smt_mu_trace = $test$plusargs("smt_flow_trace") || smt_mu_watch;
@@ -1020,6 +1034,28 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
           smt_mu_address[G6LCCfg.DCACHE_INDEX_WIDTH-1:G6LCCfg.DCACHE_OFFSET_WIDTH]))
         $display("[smt-flow] wt_refill cycle=%0d idx=%h tag=%h way=%0d nc=%b data=%h",
                  smt_mu_cycle, wr_cl_idx_o, wr_cl_tag_o, mshr_q.repl_way, mshr_q.nc, wr_cl_data_o);
+      // Return-channel ledger: every memory return the adapter presents, the
+      // demux verdict, and the in-flight store count that gates the write
+      // port's miss_rtrn_vld. Unfiltered — returns are rare.
+      if (mem_rtrn_vld_i)
+        $display("[smt-flow] wt_rtrn cycle=%0d rtype=%0d tid=%0d sinf=%0d mshrv=%b mpi=%0d st=%0d sack=%b lack=%b",
+                 smt_mu_cycle, mem_rtrn_i.rtype, mem_rtrn_i.tid, stores_inflight_q,
+                 mshr_vld_q, mshr_q.miss_port_idx, state_q, store_ack, load_ack);
+      if (store_sent)
+        $display("[smt-flow] wt_ssent cycle=%0d tid=%0d pa=%h sinf=%0d",
+                 smt_mu_cycle, mem_req_c.tid, mem_req_c.paddr, stores_inflight_q);
+      if (|miss_replay_o)
+        $display("[smt-flow] wt_replay cycle=%0d idx=%0d paddr=%h txcol=%b rdcol=%b mreq=%b mreqm=%b can=%b st=%0d txv=%h",
+                 smt_mu_cycle, miss_port_idx, miss_paddr_i[miss_port_idx],
+                 tx_rdwr_collision, mshr_rdrd_collision_d[miss_port_idx],
+                 miss_req_i, miss_req_masked_d, miss_can_take, state_q, tx_vld_i);
+      if (tx_vld_i != smt_txv_q) begin
+        for (int t = 0; t < G6LCCfg.DCACHE_MAX_TX; t++)
+          if (tx_vld_i[t] != smt_txv_q[t])
+            $display("[smt-flow] wt_txv cycle=%0d slot=%0d vld=%b pa=%h",
+                     smt_mu_cycle, t, tx_vld_i[t], tx_paddr_i[t]);
+        smt_txv_q <= tx_vld_i;
+      end
     end
   end
 `ifndef VERILATOR

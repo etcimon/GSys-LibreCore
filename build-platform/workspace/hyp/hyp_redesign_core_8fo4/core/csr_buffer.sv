@@ -17,16 +17,16 @@
 //              to the scoreboard.
 //
 // hyp8 (group 6): on the OoO path the per-tid commit lookup and the issue
-// credit are registered (+1 each):
-//   - csr_addr_o is the commit-cycle-matched address captured the cycle
-//     after csr_commit_i/csr_commit_tid_i are presented, which is also the
-//     cycle the commit bundle's side effects apply under the new
-//     scoreboard handshake (tier2_tier3.md csr_buffer).
-//   - csr_ready_o is the table credit computed from REGISTERED free
-//     counts -- a freed/allocated slot moves the credit one cycle later,
-//     never a cycle early. A CSR is only ever readable through a matching
-//     table record (the lookup carries a hit flag the commit stage's
-//     invariant can check).
+// credit are combinational again:
+//   - csr_addr_o is a combinational table read keyed by csr_commit_tid_i;
+//     csr_commit_i only releases the matching record, it never gates the
+//     address (a commit that has not happened yet must not starve the
+//     lookup of its own request).
+//   - csr_ready_o is the table credit computed from CURRENT free counts:
+//     (free_count + commit_release) >= (1 + csr_valid_i). The one-cycle
+//     IRO-to-table arrival interval covers the request presented this
+//     cycle; the staged CSR request register after this lookup supplies
+//     the pipeline boundary, so no second register is needed.
 // The in-order (OoOEn==0) single-entry path keeps its emit timing
 // bit-identically.
 
@@ -112,76 +112,44 @@ module csr_buffer
     // csr_valid_i term two back-to-back CSRs could both be acked against one
     // free entry and the second allocation was silently dropped (its commit
     // then found no address and raised ILLEGAL_INSTR).
-    // hyp8: the credit is REGISTERED -- issue reads the credit a cycle
-    // later under the I1/I2 split, so a registered count is the safe form:
-    // a slot freed by cancel/commit moves the credit +1 late, never early.
-    logic commit_release, commit_release_q;
-    logic csr_valid_q;
-    logic [1:0] free_count_q;
-    int unsigned fc_c;
-    always_ff @(posedge clk_i or negedge rst_ni) begin : credit_regs
-      if (!rst_ni) begin
-        free_count_q      <= 2'(DEPTH);
-        commit_release_q  <= 1'b0;
-        csr_valid_q       <= 1'b0;
-      end else if (flush_i) begin
-        free_count_q      <= 2'(DEPTH);
-        commit_release_q  <= 1'b0;
-        csr_valid_q       <= 1'b0;
-      end else begin
-        free_count_q     <= 2'(fc_c);
-        commit_release_q <= commit_release;
-        csr_valid_q      <= csr_valid_i;
-      end
-    end
+    // hyp8: the credit reads CURRENT table state — the one-cycle IRO-to-
+    // table interval already covers the arriving request, and the staged
+    // request register after the lookup supplies the pipeline boundary.
+    logic commit_release, commit_hit;
+    int unsigned free_count;
     always_comb begin
-      fc_c = 0;
+      free_count = 0;
       for (int unsigned i = 0; i < DEPTH; i++)
-        if (!tab_q[i].valid) fc_c++;
+        if (!tab_q[i].valid) free_count++;
     end
     always_comb begin
       commit_release = 1'b0;
+      commit_hit     = 1'b0;
       for (int unsigned i = 0; i < DEPTH; i++) begin
-        if (csr_commit_i && tab_q[i].valid && (tab_q[i].tid == csr_commit_tid_i))
-          commit_release = 1'b1;
+        if (tab_q[i].valid && (tab_q[i].tid == csr_commit_tid_i)) begin
+          commit_hit = 1'b1;
+          if (csr_commit_i) commit_release = 1'b1;
+        end
       end
-      csr_ready_o = (free_count_q + 2'(commit_release_q)) >= (1 + 2'(csr_valid_q));
+      csr_ready_o = (free_count + int'(commit_release)) >= (1 + int'(csr_valid_i));
     end
 
-    // The commit stage reads the address of the CSR it is retiring, identified
-    // by trans_id -- issue order and commit order no longer coincide.
-    // hyp8: the lookup is REGISTERED. The match runs against the live table
-    // during the commit-presentation cycle and lands in csr_addr_q for the
-    // side-effect cycle; a lookup with no matching record presents addr 0
-    // and a 0 hit flag (the translate_off check below flags it).
-    logic [11:0] csr_addr_q;
-    logic        csr_addr_hit_q;
-    logic [11:0] csr_addr_d;
-    logic        csr_hit_d;
+    // The commit stage reads the address of the CSR it is retiring,
+    // identified by trans_id -- issue order and commit order no longer
+    // coincide. hyp8: the match is combinational on the live table keyed
+    // by csr_commit_tid_i alone; csr_commit_i only releases the record
+    // (in write_ooo below) and never gates the address.
     always_comb begin
-      csr_addr_d = '0;
-      csr_hit_d  = 1'b0;
+      csr_addr_o = '0;
       for (int unsigned i = 0; i < DEPTH; i++)
-        if (csr_commit_i && tab_q[i].valid && (tab_q[i].tid == csr_commit_tid_i)) begin
-          csr_addr_d = tab_q[i].csr_address;
-          csr_hit_d  = 1'b1;
-        end
+        if (tab_q[i].valid && (tab_q[i].tid == csr_commit_tid_i))
+          csr_addr_o = tab_q[i].csr_address;
     end
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) begin
-        csr_addr_q    <= '0;
-        csr_addr_hit_q <= 1'b0;
-      end else begin
-        csr_addr_q    <= csr_addr_d;
-        csr_addr_hit_q <= csr_hit_d;
-      end
-    end
-    assign csr_addr_o = csr_addr_q;
 
     //pragma translate_off
     always_ff @(posedge clk_i) begin
       if (rst_ni && csr_commit_i) begin
-        if (!csr_hit_d) $error("csr commit without table entry");
+        if (!commit_hit) $error("csr commit without table entry");
       end
     end
     //pragma translate_on
@@ -220,9 +188,6 @@ module csr_buffer
       if (rst_ni && alloc_dropped) $error("csr_buffer: CSR presented with no free table entry");
     end
     //pragma translate_on
-
-    logic _unused_hit;
-    assign _unused_hit = csr_addr_hit_q;
   end
 
   // sequential process

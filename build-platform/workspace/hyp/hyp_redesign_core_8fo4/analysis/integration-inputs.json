@@ -1,0 +1,73 @@
+{
+  "schema": "hyp8-integration-input-review.v1",
+  "matched_boot_profiles": {
+    "dtb_evidence": "remote-runs/hyp8-dtb-contract-r1/output/dtb-contract.json",
+    "firmware_evidence": "remote-runs/hyp8-firmware-r1/output/firmware-build.json",
+    "status": "built and input-verified; not executed",
+    "advertised_isa": "rv64imafdc_zba_zbb_zbs_zicboz_zicsr_zifencei",
+    "qualification_scope": "reference boot ISA subset; additional optional RTL extensions are not qualified by this profile",
+    "strict_smt2": {
+      "harts": 2,
+      "firmware_sha256": "49fbd7d928252b2fab5bab18929c2556efdbabeaf56d62009cb944377a9605d7",
+      "dtb_sha256": "42d27db8642c8731864b96772aa368dd05643a1b76bb48d69fd0d249a01a8a48",
+      "payload_sha256": "2b7cdc0495bd00e5a814d5316ae4708229967065131d3e4f3fdffdde95584016"
+    },
+    "linux_scalar": {
+      "harts": 1,
+      "firmware_sha256": "a9218107ce26c7d00a99ae188dc7ca8c1f77f2b16e4ef8d4c46e2ef4a026a37b",
+      "dtb_sha256": "f64c1f6fca7ce9be95c9f5f80f78b2eaacff4f4730ca8cde691ad6762a4ebdb7",
+      "payload_sha256": "da38306f4cff20c50ea61c7bf29f0657c0fc3d981b655847f129acff9570d481"
+    },
+    "linux_smt2": {
+      "harts": 2,
+      "firmware_sha256": "86495d4c411e49ce262b9eed23aa427576734cc9b5ac1b991d6761cf60852d2c",
+      "dtb_sha256": "fc0fd28f4a95ca5989279a53df0a390ffaecc29696365cc6fc2daa5279e7f39d",
+      "payload_sha256": "da38306f4cff20c50ea61c7bf29f0657c0fc3d981b655847f129acff9570d481"
+    },
+    "source_changes": "Only the pre-existing pinned non-PIE and CLINT/platform recipes were applied. fw_base.S, sbi_init.c, sbi_hsm.c, platform/generic/platform.c and libfdt/fdt_ro.c retain their exact upstream hashes."
+  },
+  "strict_dual_reference": {
+    "directory": "remote-runs/ooocoh-fp2-smt2intfp-osbi-r4/output",
+    "opensbi_commit": "455de672dd7c2aa1992df54dfb08dc11abbc1b1a",
+    "firmware_sha256": "35b77222064beceabe2f891a4d9fa29e135794375565268321ac27733cbf1347",
+    "dtb_sha256": "9946927eb21943bf636b5fabf32e3a8b16df2cfbd71c8c8f8b89d606894e847f",
+    "harts": 2,
+    "cores": 1,
+    "observed_isa_string": "rv64imafdc_zba_zbb_zbs_zicbom_zicboz_zacas",
+    "status": "reference input, not yet configuration-aligned for hyp8",
+    "mismatch": "DTB advertises zicbom and zacas; hyp8 disables both"
+  },
+  "linux_reference": {
+    "directory": "/opt/testharness/runs/linux-payload-l1s2",
+    "firmware_sha256": "4793be09daa7bfec1cb7166ceabd4b6d6145480b903ef09fd3e171c85aead9bc",
+    "dtb_sha256": "9c2827f60f0dd4727eef78af25d942b9e7a9573b8113c5688205b210bb83cdd9",
+    "payload_sha256": "da38306f4cff20c50ea61c7bf29f0657c0fc3d981b655847f129acff9570d481",
+    "initrd_sha256": "0fe114275350a498dc07b97f7736f91994bd1a16e74ad50c14ddad28d766d959",
+    "harts": 2,
+    "cores": 1,
+    "memory_base": "0x80000000",
+    "memory_size": "0x10000000",
+    "initrd_start": "0x84000000",
+    "initrd_end": "0x840e3800",
+    "userspace_markers": ["G6LC_LINUX_INIT_UP", "G6LC_LINUX_SHELL"],
+    "status": "reference input, source/profile identity and DTB adaptation required before qualification",
+    "mismatch": "DTB advertises H, zicbom and zacas; hyp8 disables all three"
+  },
+  "smoke_inputs": {
+    "selected_sources": ["h34_shift_dep.S", "h33_st_fwd.S"],
+    "directory": "build-platform/workspace/build/sv-timing/hyp8-src/tb/tests",
+    "excluded": {
+      "hyp8_smoke.S": "duplicate forward numeric label sends zero-terminator branch into UART polling rather than completion",
+      "h3_load_replay.S": "4096-byte loop bound does not establish the documented 32-KiB cache-miss envelope"
+    }
+  },
+  "concurrency": {
+    "decision": "explicit overlap opt-in for isolated work within measured spare capacity; no shared source mutation or workload termination",
+    "observed_logical_cpus": 12,
+    "observed_existing_model_cpu_total_approx": 4,
+    "observed_available_memory_mib": 83948,
+    "compiler_jobs_limit": 2,
+    "simulation_threads_limit": 1,
+    "performance_claim": "none; host wall-clock timing under overlap is not a comparative performance measurement"
+  }
+}

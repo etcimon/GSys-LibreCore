@@ -1,0 +1,53 @@
+{
+  "schema": "hyp8-abstract-counterexamples.v1",
+  "scope": "Hand-executed source equations; not Verilator, not a boot diagnosis",
+  "retire_wakeup": [
+    {
+      "cycle": 0,
+      "commit_fire": 1,
+      "delayed_ack": 0,
+      "write_enable": 1,
+      "mirror_wakeup": 0
+    },
+    {
+      "cycle": 1,
+      "commit_fire": 0,
+      "delayed_ack": 1,
+      "write_enable": 0,
+      "mirror_wakeup": 0
+    }
+  ],
+  "fp_countdown": {
+    "latency": 10,
+    "initial_count_math": 8,
+    "stored_three_bit_count": 0,
+    "completion_offset": 16,
+    "reservation_window_bits": 16,
+    "stored_reservation_mask": 0
+  },
+  "store_insert": [
+    {
+      "edge": 0,
+      "queue_valid_before": 0,
+      "incoming": "A",
+      "chosen_slot": 0,
+      "installed": null
+    },
+    {
+      "edge": 1,
+      "queue_valid_before": 0,
+      "incoming": "B",
+      "chosen_slot": 0,
+      "installed": "A at slot 0"
+    },
+    {
+      "edge": 2,
+      "queue_valid_before": 1,
+      "incoming": null,
+      "chosen_slot": null,
+      "installed": "B replaces A at slot 0"
+    }
+  ],
+  "source_identity_check_utc": "2026-10-22T00:12:24.626683+00:00",
+  "changed_since_inventory": []
+}

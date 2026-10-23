@@ -68,32 +68,61 @@ module g6lc_iq_legal
   // ----------------------------------------------------------------------
   // Class frontiers: oldest CSR / store tid across banks, merged by the
   // circular age key and registered.
-  logic             csr_front_v_q, st_front_v_q;
-  logic [TID_W-1:0] csr_front_tid_q, st_front_tid_q;
-  logic             csr_front_v_d, st_front_v_d;
-  logic [TID_W-1:0] csr_front_tid_d, st_front_tid_d;
+  // One frontier per hart. Hart 0's oldest store does not hold hart 1's
+  // store, and the same for CSRs. NH==1 keeps the bank-merged frontier.
+  logic [NH-1:0]             csr_front_v_q, st_front_v_q;
+  logic [NH-1:0][TID_W-1:0]  csr_front_tid_q, st_front_tid_q;
+  logic [NH-1:0]             csr_front_v_d, st_front_v_d;
+  logic [NH-1:0][TID_W-1:0]  csr_front_tid_d, st_front_tid_d;
   logic             mem_stall_q;
   logic [TID_W-1:0] commit_ptr_q;
 
   always_comb begin
-    csr_front_v_d = 1'b0;
+    csr_front_v_d = '0;
     csr_front_tid_d = '0;
-    st_front_v_d = 1'b0;
+    st_front_v_d = '0;
     st_front_tid_d = '0;
-    for (int unsigned b = 0; b < BANKS; b++) begin
-      if (csr_oldest_v_i[b] &&
-          !(csr_front_v_d &&
-            ooo_age_older(TID_W, 32'(csr_front_tid_d),
-                          32'(csr_oldest_tid_i[b]), 32'(commit_ptr_i)))) begin
-        csr_front_v_d   = 1'b1;
-        csr_front_tid_d = csr_oldest_tid_i[b];
+    if (NH <= 1) begin
+      for (int unsigned b = 0; b < BANKS; b++) begin
+        if (csr_oldest_v_i[b] &&
+            !(csr_front_v_d[0] &&
+              ooo_age_older(TID_W, 32'(csr_front_tid_d[0]),
+                            32'(csr_oldest_tid_i[b]), 32'(commit_ptr_i)))) begin
+          csr_front_v_d[0]   = 1'b1;
+          csr_front_tid_d[0] = csr_oldest_tid_i[b];
+        end
+        if (st_oldest_v_i[b] &&
+            !(st_front_v_d[0] &&
+              ooo_age_older(TID_W, 32'(st_front_tid_d[0]),
+                            32'(st_oldest_tid_i[b]), 32'(commit_ptr_i)))) begin
+          st_front_v_d[0]   = 1'b1;
+          st_front_tid_d[0] = st_oldest_tid_i[b];
+        end
       end
-      if (st_oldest_v_i[b] &&
-          !(st_front_v_d &&
-            ooo_age_older(TID_W, 32'(st_front_tid_d),
-                          32'(st_oldest_tid_i[b]), 32'(commit_ptr_i)))) begin
-        st_front_v_d   = 1'b1;
-        st_front_tid_d = st_oldest_tid_i[b];
+    end else begin
+      for (int unsigned b = 0; b < BANKS; b++) begin
+        for (int unsigned e = 0; e < ENTRIES; e++) begin
+          if (info_v_i[b][e] && info_cls_i[b][e][C_CSR]) begin
+            automatic logic [HID_W-1:0] h;
+            h = info_hart_i[b][e];
+            if (!csr_front_v_d[h] ||
+                ooo_age_older(TID_W, 32'(info_tid_i[b][e]),
+                              32'(csr_front_tid_d[h]), 32'(commit_ptr_i))) begin
+              csr_front_v_d[h]   = 1'b1;
+              csr_front_tid_d[h] = info_tid_i[b][e];
+            end
+          end
+          if (info_v_i[b][e] && info_cls_i[b][e][C_ST]) begin
+            automatic logic [HID_W-1:0] h;
+            h = info_hart_i[b][e];
+            if (!st_front_v_d[h] ||
+                ooo_age_older(TID_W, 32'(info_tid_i[b][e]),
+                              32'(st_front_tid_d[h]), 32'(commit_ptr_i))) begin
+              st_front_v_d[h]   = 1'b1;
+              st_front_tid_d[h] = info_tid_i[b][e];
+            end
+          end
+        end
       end
     end
   end
@@ -132,15 +161,17 @@ module g6lc_iq_legal
       for (int unsigned e = 0; e < ENTRIES; e++) begin
         automatic logic head_only, is_ld, is_csr, is_st;
         automatic logic older_csr, older_st;
+        automatic logic [HID_W-1:0] h;
         head_only = info_cls_i[b][e][C_CVXI] | info_cls_i[b][e][C_AMO] |
                     info_cls_i[b][e][C_CSYS];
         is_ld  = info_cls_i[b][e][C_LD];
         is_csr = info_cls_i[b][e][C_CSR];
         is_st  = info_cls_i[b][e][C_ST];
-        // N1d / T24 via the registered class frontier: an entry of the
-        // class is legal only when the frontier IS its own tid.
-        older_csr = csr_front_v_q && (csr_front_tid_q != info_tid_i[b][e]);
-        older_st  = st_front_v_q  && (st_front_tid_q  != info_tid_i[b][e]);
+        h = info_hart_i[b][e];
+        // N1d / T24: oldest of THIS hart only. Another hart's store or
+        // CSR does not hold this one.
+        older_csr = csr_front_v_q[h] && (csr_front_tid_q[h] != info_tid_i[b][e]);
+        older_st  = st_front_v_q[h] && (st_front_tid_q[h] != info_tid_i[b][e]);
         legal_d[b][e] =
             !(head_only && !at_head_q[b][e]) &&
             !(is_ld && (mem_stall_q ||
@@ -156,9 +187,9 @@ module g6lc_iq_legal
       legal_o <= '0;
       at_head_q <= '0;
       unres_q <= '0;
-      csr_front_v_q <= 1'b0;
+      csr_front_v_q <= '0;
       csr_front_tid_q <= '0;
-      st_front_v_q <= 1'b0;
+      st_front_v_q <= '0;
       st_front_tid_q <= '0;
       mem_stall_q <= 1'b0;
       commit_ptr_q <= '0;
@@ -166,7 +197,7 @@ module g6lc_iq_legal
       legal_o <= '0;
       at_head_q <= '0;
       unres_q <= '0;
-      csr_front_v_q <= 1'b0;
+      csr_front_v_q <= '0;
       st_front_v_q <= 1'b0;
       mem_stall_q <= 1'b0;
     end else begin

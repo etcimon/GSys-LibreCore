@@ -127,6 +127,48 @@ package g6lc_ooo_pkg;
     endcase
   endfunction
 
+  // hyp8 WbReserve: FLU result distance in cycles from the IRO acceptance
+  // edge to the op's fixed writeback (the value the reservation window
+  // shifts against). Returns 0 for ops with no fixed reservation: the
+  // variable-latency divider (handled by the owner/TID claim instead) and
+  // every non-FLU class (no FLU resource consumed).
+  function automatic int unsigned ooo_flu_cycles(
+      input config_pkg::g6lc_cfg_t cfg,
+      input g6lc_hyp_pkg::g6lc_hyp_cfg_t h,
+      input g6lc_core_pkg::fu_t fu, input g6lc_core_pkg::fu_op op);
+    unique case (fu)
+      g6lc_core_pkg::ALU: begin
+        // Staggered ALU (AluStages>=2): low-class ops publish after the
+        // low-word stage (distance 2), full-latency ops after AluStages;
+        // a non-staggered ALU completes in 1.
+        if (h.AluStages >= 2 && h.AluStaggered)
+          return (ooo_lat_class(fu, op) == g6lc_hyp_pkg::LAT_ALU_LOW)
+                 ? 2 : int'(h.AluStages);
+        return 1;
+      end
+      g6lc_core_pkg::CTRL_FLOW: return 2;  // B2 resolve record
+      g6lc_core_pkg::CSR,
+      g6lc_core_pkg::AES:       return 1;  // one-edge completion
+      g6lc_core_pkg::MULT:
+        return (ooo_lat_class(fu, op) == g6lc_hyp_pkg::LAT_MUL)
+               ? g6lc_hyp_pkg::hyp_mult_stages(h, int'(cfg.MultStages))
+               : 0;  // divider: variable latency, owner-keyed claim
+      default: return 0;
+    endcase
+  endfunction
+
+  // Reservation window width: candidate offsets are 1+ooo_flu_cycles, so
+  // the window must reach the largest supported offset plus one.
+  function automatic int unsigned ooo_flu_res_win(
+      input config_pkg::g6lc_cfg_t cfg,
+      input g6lc_hyp_pkg::g6lc_hyp_cfg_t h);
+    int unsigned m;
+    m = g6lc_hyp_pkg::hyp_mult_stages(h, int'(cfg.MultStages));
+    if (int'(h.AluStages) > m) m = int'(h.AluStages);
+    if (m < 2) m = 2;
+    return 2 + m;
+  endfunction
+
   // Replay broadcast record (kill-by-tid re-arm, analysis/g6lc_iq.md): the
   // LSU-side producer lands later (dispatch ties it low for now); the iq
   // ports carry the two fields directly.

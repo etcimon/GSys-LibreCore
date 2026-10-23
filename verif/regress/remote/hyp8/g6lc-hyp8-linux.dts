@@ -1,0 +1,11 @@
+// Copyright (c) 2026 Etienne Cimon
+// SPDX-License-Identifier: MIT
+/include/ "g6lc-hyp8.dts"
+
+/ {
+    chosen {
+        bootargs = "console=ttyS0,115200 earlycon=sbi maxcpus=1 nokaslr rdinit=/init loglevel=7";
+        linux,initrd-start = <0x0 0x84000000>;
+        linux,initrd-end = <0x0 0x840e3800>;
+    };
+};

@@ -102,9 +102,10 @@ module g6lc_lsq_release #(
         // Verdict-driven data-wait set (entry found by transaction id).
         for (int unsigned v = 0; v < NLD; v++) begin
           if (vld_dwait_v_i[v] && ld_valid_i[i] &&
-              ld_id_i[i] == vld_dwait_id_i[v])
+              ld_id_i[i] == vld_dwait_id_i[v]) begin
             dwait_q[i] <= (dwait_q[i] & ~st_data_res_i &
                            ~cancelled_mask_i) | vld_dwait_i[v];
+          end
         end
         // Allocation snapshot (overrides — the entry starts clean).
         for (int unsigned p = 0; p < NR_ALLOC; p++) begin

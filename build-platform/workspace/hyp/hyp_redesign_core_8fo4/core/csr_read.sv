@@ -13,11 +13,11 @@
 // register, which is the serialized timing cut — the per-bank split would
 // buy wiring locality, not budget; recorded deviation in decisions.md).
 //
-// rdata validity: the request is registered in C1, so the comb read mux
-// and this RMW both evaluate during the fire cycle — csr_rdata_o and
-// csr_exception_o are live exactly when commit_stage consumes them.
-// rdata_valid_o is the C1 read-request flag (one cycle after
-// presentation), exported for the commit-stage handshake check.
+// rdata validity: the staged request's comb read mux and this RMW both
+// evaluate on the apply cycle — csr_rdata_o and csr_exception_o are live
+// exactly when commit_stage consumes them. rdata_valid_o is the request
+// valid (not the read-request flag): a valid MRET/WFI/fence completes
+// the same handshake even though it produces no read data.
 
 module csr_read
   import g6lc_core_pkg::*;
@@ -88,9 +88,10 @@ module csr_read
     end
   end
 
-  // the C1 record is the handshake: a read request presented last cycle
-  // has its rdata live this (fire) cycle.
-  assign rdata_valid_o = req_rd_valid_i;
+  // completion is request validity, not read-production: a system
+  // operation (MRET/WFI/fence) has no read data but still completes.
+  // req_rd_valid_i keeps distinguishing data-producing ops upstream.
+  assign rdata_valid_o = req_valid_i;
 
   // svt-stage: end C2
   // svt-stage: class C2 value

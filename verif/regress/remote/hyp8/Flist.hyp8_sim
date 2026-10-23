@@ -164,6 +164,7 @@ ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/smt/g6
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/smt/g6lc_smt_csr_bank.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/smt/g6lc_issue_barrier.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_ooo_pkg.sv
+${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_flu_reserve.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_rat.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_freelist.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_rename.sv
@@ -254,6 +255,7 @@ ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_c
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cache_subsystem/wt_dcache_ctrl.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cache_subsystem/wt_dcache_mem.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cache_subsystem/wt_dcache_missunit.sv
+${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cache_subsystem/wt_dcache_wbuffer_leg.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cache_subsystem/wt_dcache_wbuffer.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cache_subsystem/wt_dcache.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cache_subsystem/g6lc_icache.sv

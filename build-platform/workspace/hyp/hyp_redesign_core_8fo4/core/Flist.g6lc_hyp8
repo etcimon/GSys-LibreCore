@@ -149,6 +149,7 @@ ${HYP_CORE_DIR}/core/smt/g6lc_smt_pc_bank.sv
 ${HYP_CORE_DIR}/core/smt/g6lc_smt_csr_bank.sv
 ${HYP_CORE_DIR}/core/smt/g6lc_issue_barrier.sv
 ${HYP_CORE_DIR}/core/ooo/g6lc_ooo_pkg.sv
+${HYP_CORE_DIR}/core/ooo/g6lc_flu_reserve.sv
 ${HYP_CORE_DIR}/core/ooo/g6lc_rat.sv
 ${HYP_CORE_DIR}/core/ooo/g6lc_freelist.sv
 ${HYP_CORE_DIR}/core/ooo/g6lc_rename.sv

@@ -28,6 +28,7 @@ module g6lc_prf #(
     input  logic clk_i,
     input  logic rst_ni,
     input  logic [NR_READ-1:0][PRF_W-1:0]      raddr_i,
+    input  logic [NR_READ-1:0]                 read_enable_i,
     output logic [NR_READ-1:0][DATA_WIDTH-1:0] rdata_o,
     input  logic [NR_WRITE-1:0][PRF_W-1:0]     waddr_i,
     input  logic [NR_WRITE-1:0][DATA_WIDTH-1:0] wdata_i,
@@ -66,7 +67,11 @@ module g6lc_prf #(
       waddr_q <= '0;
       wdata_q <= '0;
     end else begin
-      raddr_q <= raddr_i;
+      // A read port keeps its launched address while the owning lane's
+      // staged record waits for issue_ack; only an accepted take replaces
+      // it, so the step-2 mux still answers the staged operation's operands.
+      for (int unsigned r = 0; r < NR_READ; r++)
+        if (read_enable_i[r]) raddr_q[r] <= raddr_i[r];
       // pending write record: applied to the array at this edge and held
       // for the step-2 bypass compare of the read launched this cycle
       we_q    <= we_i;
@@ -79,28 +84,26 @@ module g6lc_prf #(
   // bank (the 30 FO4 field). The highest matching port wins, same as the
   // ascending loop. Phys 0 stays zero when ZERO_REG_ZERO.
   for (genvar e = 0; e < PRF_ENTRIES; e++) begin : gen_wr
-    logic [NR_WRITE-1:0] whit;
-    logic                do_wr;
-    logic [31:0]         whi, wlo;
+    logic [NR_WRITE-1:0]   whit;
+    logic                  do_wr;
+    logic [DATA_WIDTH-1:0] selected_data;
     for (genvar w = 0; w < NR_WRITE; w++) begin : gen_whit
       assign whit[w] = we_i[w] && (waddr_i[w] == PRF_W'(e)) &&
                        ((e != 0) || !ZERO_REG_ZERO);
     end
     always_comb begin
-      do_wr = 1'b0;
-      whi   = '0;
-      wlo   = '0;
+      do_wr         = 1'b0;
+      selected_data = '0;
       for (int unsigned w = 0; w < NR_WRITE; w++) begin
         if (whit[w]) begin
-          do_wr = 1'b1;
-          whi   = wdata_i[w][63:32];
-          wlo   = wdata_i[w][31:0];
+          do_wr         = 1'b1;
+          selected_data = wdata_i[w];
         end
       end
     end
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) mem_q[e] <= '0;
-      else if (do_wr) mem_q[e] <= {whi, wlo};
+      else if (do_wr) mem_q[e] <= selected_data;
     end
   end
 

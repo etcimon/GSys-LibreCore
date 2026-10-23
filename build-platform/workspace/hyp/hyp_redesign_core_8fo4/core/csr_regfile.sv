@@ -48,6 +48,8 @@ module csr_regfile
     input logic clk_i,
     // Asynchronous reset active low - SUBSYSTEM
     input logic rst_ni,
+    // Full pipeline flush - CONTROLLER (frees the staged CSR request)
+    input logic flush_i,
     // Timer threw an interrupt - SUBSYSTEM
     input logic time_irq_i,
     // Platform mtime counter value, only used when G6LCCfg.SstcEn - SUBSYSTEM
@@ -290,17 +292,38 @@ module csr_regfile
   logic [63:0] cycle_q, cycle_d;
   logic [63:0] instret_q, instret_d;
   logic [MHPMCounterNum+3-1:0] mcountinhibit_d, mcountinhibit_q;
+
+  // ------------------------------------------------------------------
+  // hyp8: request identity and apply event. The staged request owns the
+  // CSR transaction while its committing head is presented; csr_apply is
+  // that head's common retirement event (the same commit_ack_i[0] the
+  // scoreboard consumes). Decode and legality evaluate the held request
+  // regardless of csr_apply — that keeps the write-enable/exception/
+  // commit path free of a combinational loop. csr_apply is NOT gated by
+  // flush_i: a retiring xRET/fence can itself raise the same-cycle
+  // flush. Completion is the ID-qualified request match, so WFI/MRET/
+  // fences complete the handshake exactly like read-producing ops.
+  // ------------------------------------------------------------------
+  logic csr_request_match, csr_apply;
+  logic mret_raw, sret_raw, dret_raw;
+  assign csr_request_match = req_valid && (commit_instr_i.fu == CSR) &&
+                             (req_tid == commit_instr_i.trans_id);
+  assign csr_apply = csr_request_match && commit_ack_i[0] && !ex_i.valid;
+  assign csr_rdata_valid_o = csr_request_match;
+  assign mret = mret_raw && csr_apply;
+  assign sret = sret_raw && csr_apply;
+  assign dret = dret_raw && csr_apply;
+
   csr_decode #(
       .G6LCCfg(G6LCCfg),
       .HypCfg  (HypCfg)
   ) i_csr_decode (
       .clk_i          (clk_i),
       .rst_ni         (rst_ni),
-      // hyp8 bring-up fix: this module has no flush_i port. The staged C1
-      // request is cancelled only by a trap presentation at commit
-      // (ex_i.valid); every other kill is gated upstream in commit_stage's
-      // csr_req. v_q is the same architectural V the sibling blocks stage.
-      .flush_i        (ex_i.valid),
+      // the request dies with the pipeline flush or with a trap
+      // presentation at commit; apply frees it on the retirement event
+      .flush_i        (flush_i || ex_i.valid),
+      .consume_i      (csr_apply),
       .csr_op_i       (csr_op_i),
       .csr_addr_i     (csr_addr_i),
       .csr_wdata_i    (csr_wdata_i),
@@ -328,10 +351,13 @@ module csr_regfile
       .csr_wdata_o            (csr_wdata),
       .csr_we_o               (csr_we),
       .csr_rd_en_o            (csr_rd_en),
-      .mret_o                 (mret),
-      .sret_o                 (sret),
-      .dret_o                 (dret),
-      .rdata_valid_o          (csr_rdata_valid_o)
+      // return controls are raw candidates; the architectural effect is
+      // qualified by csr_apply above. The wrapper's ID-qualified request
+      // match is the authoritative completion signal.
+      .mret_o                 (mret_raw),
+      .sret_o                 (sret_raw),
+      .dret_o                 (dret_raw),
+      .rdata_valid_o          ()
   );
 
   csr_write #(
@@ -403,7 +429,7 @@ module csr_regfile
       .commit_ack_i     (commit_ack_i),
       .ex_valid_i       (ex_i.valid),
       .debug_mode_i     (debug_mode_q),
-      .mcountinhibit_i  (mcountinhibit_q),
+      .mcountinhibit_i  (32'(mcountinhibit_q)),
       .cycle_o          (cycle_incr),
       .instret_o        (instret_incr)
   );
@@ -969,6 +995,15 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
   logic [G6LCCfg.XLEN-1:0] tselect_to_tm;
   logic [G6LCCfg.XLEN-1:0] tselect_from_tm;
   logic tselect_we, tdata1_we, tdata2_we, tdata3_we;
+  // hyp8: raw write-candidate strobes; the architectural strobes below are
+  // qualified by csr_apply (declared near the csr_decode instance)
+  logic tselect_we_c, tdata1_we_c, tdata2_we_c, tdata3_we_c;
+  logic perf_we_c;
+  assign tselect_we = tselect_we_c && csr_apply;
+  assign tdata1_we  = tdata1_we_c  && csr_apply;
+  assign tdata2_we  = tdata2_we_c  && csr_apply;
+  assign tdata3_we  = tdata3_we_c  && csr_apply;
+  assign perf_we_o  = perf_we_c    && csr_apply;
   logic flush_from_tm;
   logic break_from_trigger;
   logic debug_from_trigger;
@@ -1967,10 +2002,10 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
       tdata2_to_tm = '0;
       tdata3_to_tm = '0;
       tselect_to_tm = '0;
-      tselect_we = 1'b0;
-      tdata1_we  = 1'b0;
-      tdata2_we  = 1'b0;
-      tdata3_we  = 1'b0;
+      tselect_we_c = 1'b0;
+      tdata1_we_c  = 1'b0;
+      tdata2_we_c  = 1'b0;
+      tdata3_we_c  = 1'b0;
       bk_wr_trig_uae   = 1'b0;
       bk_wr_trig_vuae  = 1'b0;
       bk_wr_trig_flush = 1'b0;
@@ -1980,7 +2015,7 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
         riscv::CSR_TSELECT: begin
           if (G6LCCfg.SDTRIG) begin
             tselect_to_tm = csr_wdata;
-            tselect_we    = csr_we;
+            tselect_we_c    = csr_we;
           end else begin
             bk_wr_trig_uae = 1'b1;
           end
@@ -1988,7 +2023,7 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
         riscv::CSR_TDATA1: begin
           if (G6LCCfg.SDTRIG) begin
             tdata1_to_tm = csr_wdata;
-            tdata1_we    = csr_we;
+            tdata1_we_c    = csr_we;
             bk_wr_trig_flush = flush_from_tm;
           end else begin
             bk_wr_trig_uae = 1'b1;
@@ -1997,7 +2032,7 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
         riscv::CSR_TDATA2: begin
           if (G6LCCfg.SDTRIG) begin
             tdata2_to_tm = csr_wdata;
-            tdata2_we    = csr_we;
+            tdata2_we_c    = csr_we;
           end else begin
             bk_wr_trig_uae = 1'b1;
           end
@@ -2005,7 +2040,7 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
         riscv::CSR_TDATA3: begin
           if (G6LCCfg.SDTRIG) begin
             tdata3_to_tm = csr_wdata;
-            tdata3_we    = csr_we;
+            tdata3_we_c    = csr_we;
           end else begin
             bk_wr_trig_uae = 1'b1;
           end
@@ -2212,7 +2247,6 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
         stval_w      = stval_q;
         satp_w       = satp_q;
       end
-      if (G6LCCfg.RVS) satp = satp_q;
       bk_wr_s_uae   = 1'b0;
       bk_wr_s_vuae  = 1'b0;
       bk_wr_s_flush = 1'b0;
@@ -2516,6 +2550,7 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
 
   always_comb begin : csr_wr_h
     automatic logic [G6LCCfg.XLEN-1:0] mask;
+    automatic hgatp_t hgatp;
       if (G6LCCfg.RVH) begin
         hstatus_w    = hstatus_q;
         hedeleg_w    = hedeleg_q;
@@ -2577,12 +2612,58 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
             bk_wr_h_uae = 1'b1;
           end
         end
-        // hyp8 RVH is 0. The hypervisor write arms do not fold and the
-        // HGATP next-value was on the register-file cone. These CSRs
-        // raise an illegal write.
-        riscv::CSR_HTVAL, riscv::CSR_HTINST, riscv::CSR_HGEIE, riscv::CSR_HGATP,
-        riscv::CSR_HTIMEDELTA, riscv::CSR_HTIMEDELTAH:
-          bk_wr_h_uae = 1'b1;
+        riscv::CSR_HTVAL: begin
+          if (G6LCCfg.RVH) begin
+            htval_w = csr_wdata;
+          end else begin
+            bk_wr_h_uae = 1'b1;
+          end
+        end
+        riscv::CSR_HTINST: begin
+          if (G6LCCfg.RVH) begin
+            htinst_w = {{G6LCCfg.XLEN - 32{1'b0}}, csr_wdata[31:0]};
+          end else begin
+            bk_wr_h_uae = 1'b1;
+          end
+        end
+        //TODO Hyp: implement hgeie write
+        riscv::CSR_HGEIE: begin
+          if (!G6LCCfg.RVH) begin
+            bk_wr_h_uae = 1'b1;
+          end
+        end
+        riscv::CSR_HGATP: begin
+          if (G6LCCfg.RVH) begin
+            // intercept HGATP writes if in HS-Mode and TVM is enabled
+            if (priv_lvl_o == riscv::PRIV_LVL_S && !v_q && mstatus_q.tvm)
+              bk_wr_h_uae = 1'b1;
+            else begin
+              hgatp = hgatp_t'(csr_wdata);
+              //hardwire PPN[1:0] to zero
+              hgatp[1:0] = 2'b0;
+              // only make VMID_LEN - 1 bit stick, that way software can figure out how many VMID bits are supported
+              hgatp.vmid = hgatp.vmid & {{(G6LCCfg.VMIDW - G6LCCfg.VMID_WIDTH) {1'b0}}, {G6LCCfg.VMID_WIDTH{1'b1}}};
+              // only update if we actually support this mode
+              if (config_pkg::vm_mode_t'(hgatp.mode) == config_pkg::ModeOff ||
+                            config_pkg::vm_mode_t'(hgatp.mode) == G6LCCfg.MODE_SV)
+                hgatp_w = hgatp;
+            end
+            // changing the mode can have side-effects on address translation (e.g.: other instructions), re-fetch
+            // the next instruction by executing a flush
+            bk_wr_h_flush = 1'b1;
+          end else begin
+            bk_wr_h_uae = 1'b1;
+          end
+        end
+        // U9.1: htimedelta write (HS/M). VS access is blocked by CSR privilege decode.
+        riscv::CSR_HTIMEDELTA: begin
+          if (G6LCCfg.RVH) htimedelta_w[G6LCCfg.XLEN-1:0] = csr_wdata;
+          else bk_wr_h_uae = 1'b1;
+        end
+        riscv::CSR_HTIMEDELTAH: begin
+          if (G6LCCfg.RVH && G6LCCfg.IS_XLEN32) htimedelta_w[63:32] = csr_wdata[31:0];
+          else bk_wr_h_uae = 1'b1;
+        end
           default: ;
         endcase
       end
@@ -2699,7 +2780,7 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
   always_comb begin : csr_wr_ctr
       cycle_w   = cycle_incr;
       instret_w = instret_incr;
-      perf_we_o   = 1'b0;
+      perf_we_c   = 1'b0;
       perf_data_o = 'b0;
       bk_wr_ctr_uae   = 1'b0;
       bk_wr_ctr_vuae  = 1'b0;
@@ -2745,7 +2826,7 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
                 riscv::CSR_MHPM_EVENT_29,
                 riscv::CSR_MHPM_EVENT_30,
                 riscv::CSR_MHPM_EVENT_31 :     begin
-          perf_we_o   = 1'b1;
+          perf_we_c   = 1'b1;
           perf_data_o = csr_wdata;
         end
 
@@ -2778,7 +2859,7 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
                 riscv::CSR_MHPM_COUNTER_29,
                 riscv::CSR_MHPM_COUNTER_30,
                 riscv::CSR_MHPM_COUNTER_31 :  begin
-          perf_we_o   = 1'b1;
+          perf_we_c   = 1'b1;
           perf_data_o = csr_wdata;
         end
 
@@ -2811,7 +2892,7 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
                 riscv::CSR_MHPM_COUNTER_29H,
                 riscv::CSR_MHPM_COUNTER_30H,
                 riscv::CSR_MHPM_COUNTER_31H :  begin
-          perf_we_o = 1'b1;
+          perf_we_c = 1'b1;
           if (G6LCCfg.IS_XLEN32) perf_data_o = csr_wdata;
           else bk_wr_ctr_uae = 1'b1;
         end
@@ -2822,6 +2903,8 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
   end
 
   always_comb begin : csr_wr_pmp
+      automatic logic [11:0] pmp_index;
+      pmp_index = '0;
       pmpcfg_w  = pmpcfg_q;
       pmpaddr_w = pmpaddr_q;
       bk_wr_pmp_uae   = 1'b0;
@@ -2847,13 +2930,13 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
                 riscv::CSR_PMPCFG14,
                 riscv::CSR_PMPCFG15: begin
           // index is calculated using PMPCFG0 as the offset
-          automatic logic [11:0] index = csr_addr.address[11:0] - riscv::CSR_PMPCFG0;
+          pmp_index = csr_addr.address[11:0] - riscv::CSR_PMPCFG0;
 
           // if index is not even and XLEN==64, raise exception
-          if (G6LCCfg.IS_XLEN64 && index[0] == 1'b1) bk_wr_pmp_uae = 1'b1;
+          if (G6LCCfg.IS_XLEN64 && pmp_index[0] == 1'b1) bk_wr_pmp_uae = 1'b1;
           else begin
             for (int i = 0; i < G6LCCfg.XLEN / 8; i++) begin
-              if (!pmpcfg_q[index*4+i].locked) pmpcfg_w[index*4+i] = csr_wdata[i*8+:8];
+              if (!pmpcfg_q[pmp_index*4+i].locked) pmpcfg_w[pmp_index*4+i] = csr_wdata[i*8+:8];
             end
           end
         end
@@ -2922,10 +3005,10 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
                 riscv::CSR_PMPADDR62,
                 riscv::CSR_PMPADDR63: begin
           // index is calculated using PMPADDR0 as the offset
-          automatic logic [11:0] index = csr_addr.address[11:0] - riscv::CSR_PMPADDR0;
+          pmp_index = csr_addr.address[11:0] - riscv::CSR_PMPADDR0;
           // check if the entry or the entry above is locked
-          if (!pmpcfg_q[index].locked && !(pmpcfg_q[index+1].locked && pmpcfg_q[index+1].addr_mode == riscv::TOR)) begin
-            pmpaddr_w[index] = csr_wdata[G6LCCfg.PLEN-3:0];
+          if (!pmpcfg_q[pmp_index].locked && !(pmpcfg_q[pmp_index+1].locked && pmpcfg_q[pmp_index+1].addr_mode == riscv::TOR)) begin
+            pmpaddr_w[pmp_index] = csr_wdata[G6LCCfg.PLEN-3:0];
           end
         end
           default: ;
@@ -3365,79 +3448,84 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
   always_comb begin : csr_update
     // hyp8: phase B -- holds through the per-bank writers (*_w), then the
     // original post-write overrides verbatim, in the original order.
-    acc_cons_d = acc_cons_w;
-    aicfg_d = aicfg_w;
-    aiperm_d = aiperm_w;
-    aiqbase_d = aiqbase_w;
-    aiqctl_d = aiqctl_w;
-    aiqhead_d = aiqhead_w;
-    aiscale_d = aiscale_w;
-    aistatus_d = aistatus_w;
-    aizp_d = aizp_w;
-    cycle_d = cycle_w;
-    dcache_d = dcache_w;
-    dcsr_d = dcsr_w;
-    dpc_d = dpc_w;
-    dscratch0_d = dscratch0_w;
-    dscratch1_d = dscratch1_w;
-    fcsr_d = fcsr_w;
-    fiom_d = fiom_w;
-    hcbcfe_d = hcbcfe_w;
-    hcbie_d = hcbie_w;
-    hcbze_d = hcbze_w;
-    hcounteren_d = hcounteren_w;
-    hedeleg_d = hedeleg_w;
-    hgatp_d = hgatp_w;
-    hideleg_d = hideleg_w;
-    hstatus_d = hstatus_w;
-    hstce_d = hstce_w;
-    htimedelta_d = htimedelta_w;
-    htinst_d = htinst_w;
-    htval_d = htval_w;
-    icache_d = icache_w;
-    instret_d = instret_w;
-    jvt_d = jvt_w;
-    mcause_d = mcause_w;
-    mcbcfe_d = mcbcfe_w;
-    mcbie_d = mcbie_w;
-    mcbze_d = mcbze_w;
-    mcounteren_d = mcounteren_w;
-    mcountinhibit_d = mcountinhibit_w;
-    medeleg_d = medeleg_w;
-    mepc_d = mepc_w;
-    mideleg_d = mideleg_w;
-    mie_d = mie_w;
-    mip_d = mip_w;
-    mpbmte_d = mpbmte_w;
-    mscratch_d = mscratch_w;
-    mstatus_d = mstatus_w;
-    mstce_d = mstce_w;
-    mtinst_d = mtinst_w;
-    mtval2_d = mtval2_w;
-    mtval_d = mtval_w;
-    mtvec_d = mtvec_w;
-    pmpaddr_d = pmpaddr_w;
-    pmpcfg_d = pmpcfg_w;
-    satp_d = satp_w;
-    scause_d = scause_w;
-    scbcfe_d = scbcfe_w;
-    scbie_d = scbie_w;
-    scbze_d = scbze_w;
-    scontext_d = scontext_w;
-    scounteren_d = scounteren_w;
-    sepc_d = sepc_w;
-    sscratch_d = sscratch_w;
-    stimecmp_d = stimecmp_w;
-    stval_d = stval_w;
-    stvec_d = stvec_w;
-    vsatp_d = vsatp_w;
-    vscause_d = vscause_w;
-    vsepc_d = vsepc_w;
-    vsscratch_d = vsscratch_w;
-    vsstatus_d = vsstatus_w;
-    vstimecmp_d = vstimecmp_w;
-    vstval_d = vstval_w;
-    vstvec_d = vstvec_w;
+    // csr_apply selects the write candidates; a presented-but-unapplied
+    // request holds state. Autonomous work (counter increments, the MTVEC
+    // reset-load default) does not wait for the apply event.
+    acc_cons_d = csr_apply ? acc_cons_w : acc_cons_q;
+    aicfg_d = csr_apply ? aicfg_w : aicfg_q;
+    aiperm_d = csr_apply ? aiperm_w : aiperm_q;
+    aiqbase_d = csr_apply ? aiqbase_w : aiqbase_q;
+    aiqctl_d = csr_apply ? aiqctl_w : aiqctl_q;
+    aiqhead_d = csr_apply ? aiqhead_w : aiqhead_q;
+    aiscale_d = csr_apply ? aiscale_w : aiscale_q;
+    aistatus_d = csr_apply ? aistatus_w : aistatus_q;
+    aizp_d = csr_apply ? aizp_w : aizp_q;
+    cycle_d = csr_apply ? cycle_w : cycle_incr;
+    dcache_d = csr_apply ? dcache_w : dcache_q;
+    dcsr_d = csr_apply ? dcsr_w : dcsr_q;
+    dpc_d = csr_apply ? dpc_w : dpc_q;
+    dscratch0_d = csr_apply ? dscratch0_w : dscratch0_q;
+    dscratch1_d = csr_apply ? dscratch1_w : dscratch1_q;
+    fcsr_d = csr_apply ? fcsr_w : fcsr_q;
+    fiom_d = csr_apply ? fiom_w : fiom_q;
+    hcbcfe_d = csr_apply ? hcbcfe_w : hcbcfe_q;
+    hcbie_d = csr_apply ? hcbie_w : hcbie_q;
+    hcbze_d = csr_apply ? hcbze_w : hcbze_q;
+    hcounteren_d = csr_apply ? hcounteren_w : hcounteren_q;
+    hedeleg_d = csr_apply ? hedeleg_w : hedeleg_q;
+    hgatp_d = csr_apply ? hgatp_w : hgatp_q;
+    hideleg_d = csr_apply ? hideleg_w : hideleg_q;
+    hstatus_d = csr_apply ? hstatus_w : hstatus_q;
+    hstce_d = csr_apply ? hstce_w : hstce_q;
+    htimedelta_d = csr_apply ? htimedelta_w : htimedelta_q;
+    htinst_d = csr_apply ? htinst_w : htinst_q;
+    htval_d = csr_apply ? htval_w : htval_q;
+    icache_d = csr_apply ? icache_w : icache_q;
+    instret_d = csr_apply ? instret_w : instret_incr;
+    jvt_d = csr_apply ? jvt_w : jvt_q;
+    mcause_d = csr_apply ? mcause_w : mcause_q;
+    mcbcfe_d = csr_apply ? mcbcfe_w : mcbcfe_q;
+    mcbie_d = csr_apply ? mcbie_w : mcbie_q;
+    mcbze_d = csr_apply ? mcbze_w : mcbze_q;
+    mcounteren_d = csr_apply ? mcounteren_w : mcounteren_q;
+    mcountinhibit_d = csr_apply ? mcountinhibit_w : mcountinhibit_q;
+    medeleg_d = csr_apply ? medeleg_w : medeleg_q;
+    mepc_d = csr_apply ? mepc_w : mepc_q;
+    mideleg_d = csr_apply ? mideleg_w : mideleg_q;
+    mie_d = csr_apply ? mie_w : mie_q;
+    mip_d = csr_apply ? mip_w : mip_q;
+    mpbmte_d = csr_apply ? mpbmte_w : mpbmte_q;
+    mscratch_d = csr_apply ? mscratch_w : mscratch_q;
+    mstatus_d = csr_apply ? mstatus_w : mstatus_q;
+    mstce_d = csr_apply ? mstce_w : mstce_q;
+    mtinst_d = csr_apply ? mtinst_w : mtinst_q;
+    mtval2_d = csr_apply ? mtval2_w : mtval2_q;
+    mtval_d = csr_apply ? mtval_w : mtval_q;
+    mtvec_d = csr_apply ? mtvec_w
+              : (mtvec_rst_load_q ? {{G6LCCfg.XLEN - G6LCCfg.VLEN{1'b0}}, boot_addr_i} + 'h40
+                                  : mtvec_q);
+    pmpaddr_d = csr_apply ? pmpaddr_w : pmpaddr_q;
+    pmpcfg_d = csr_apply ? pmpcfg_w : pmpcfg_q;
+    satp_d = csr_apply ? satp_w : satp_q;
+    scause_d = csr_apply ? scause_w : scause_q;
+    scbcfe_d = csr_apply ? scbcfe_w : scbcfe_q;
+    scbie_d = csr_apply ? scbie_w : scbie_q;
+    scbze_d = csr_apply ? scbze_w : scbze_q;
+    scontext_d = csr_apply ? scontext_w : scontext_q;
+    scounteren_d = csr_apply ? scounteren_w : scounteren_q;
+    sepc_d = csr_apply ? sepc_w : sepc_q;
+    sscratch_d = csr_apply ? sscratch_w : sscratch_q;
+    stimecmp_d = csr_apply ? stimecmp_w : stimecmp_q;
+    stval_d = csr_apply ? stval_w : stval_q;
+    stvec_d = csr_apply ? stvec_w : stvec_q;
+    vsatp_d = csr_apply ? vsatp_w : vsatp_q;
+    vscause_d = csr_apply ? vscause_w : vscause_q;
+    vsepc_d = csr_apply ? vsepc_w : vsepc_q;
+    vsscratch_d = csr_apply ? vsscratch_w : vsscratch_q;
+    vsstatus_d = csr_apply ? vsstatus_w : vsstatus_q;
+    vstimecmp_d = csr_apply ? vstimecmp_w : vstimecmp_q;
+    vstval_d = csr_apply ? vstval_w : vstval_q;
+    vstvec_d = csr_apply ? vstvec_w : vstvec_q;
     // untouched state holds (verbatim from the original defaults)
     priv_lvl_d   = priv_lvl_q;
     v_d          = v_q;
@@ -3449,11 +3537,14 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
     end
     eret_o         = 1'b0;
     set_debug_pc_o = 1'b0;
-    // merged write-path sidebands
-    flush_req                       = flush_req_w;
+    // merged write-path sidebands. Flush/dirty candidates are architectural
+    // effects: only the applying transaction raises them. The decoded
+    // access exceptions stay unconditional so commit sees the held
+    // request's legality before (and independently of) the apply event.
+    flush_req                       = csr_apply && flush_req_w;
     update_access_exception         = uae_w;
     virtual_update_access_exception = vuae_w;
-    dirty_fp_state_csr              = dfsc_w;
+    dirty_fp_state_csr              = csr_apply && dfsc_w;
 
     if (G6LCCfg.IS_XLEN64) begin
       if (G6LCCfg.RVS) mstatus_d.sxl = riscv::XLEN_64;
@@ -3472,6 +3563,7 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
     // mark the floating point extension register as dirty
     if (G6LCCfg.FpPresent && (dirty_fp_state_csr || dirty_fp_state_i)) begin
       mstatus_d.fs = riscv::Dirty;
+      if (G6LCCfg.RVH && v_q) vsstatus_d.fs = riscv::Dirty;
     end
     // mark the vector extension register as dirty
     if (G6LCCfg.RVV && dirty_v_state_i) begin
@@ -3992,6 +4084,8 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
     automatic hgatp_t hgatp;
     automatic logic [63:0] instret;
     automatic logic [G6LCCfg.XLEN-1:0] rf_mask;
+    automatic logic [11:0] pmp_index;
+    automatic logic dir_vec_only;
 
     if (G6LCCfg.RVS) begin
       satp = satp_q;
@@ -4001,6 +4095,18 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
       vsatp = vsatp_q;
     end
     instret         = instret_q;
+    rf_mask         = '0;
+    pmp_index       = '0;
+    dir_vec_only    = 1'b0;
+    // Combinational defaults for the output mirrors: every later section
+    // overwrites these on every path, but always_comb requires a driven
+    // value on all control paths regardless of configuration.
+    rf_trap_to_priv_lvl = riscv::PRIV_LVL_M;
+    rf_trap_to_v        = 1'b0;
+    rf_en_ld_st_translation_o   = 1'b0;
+    rf_en_ld_st_g_translation_o = 1'b0;
+    rf_ld_st_priv_lvl_o         = riscv::priv_lvl_t'('0);
+    rf_ld_st_v_o                = 1'b0;
 
     rf_mcountinhibit_d = mcountinhibit_q;
 
@@ -4020,26 +4126,20 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
 
     rf_perf_we_o                       = 1'b0;
     rf_perf_data_o                     = 'b0;
-    if (G6LCCfg.RVZCMT) begin
-      rf_jvt_d = jvt_q;
-    end
+    rf_jvt_d = jvt_q;
     rf_fcsr_d       = fcsr_q;
 
     rf_priv_lvl_d   = priv_lvl_q;
     rf_v_d          = v_q;
     rf_debug_mode_d = debug_mode_q;
 
-    if (G6LCCfg.DebugEn) begin
-      rf_dcsr_d      = dcsr_q;
-      rf_dpc_d       = dpc_q;
-      rf_dscratch0_d = dscratch0_q;
-      rf_dscratch1_d = dscratch1_q;
-    end
+    rf_dcsr_d      = dcsr_q;
+    rf_dpc_d       = dpc_q;
+    rf_dscratch0_d = dscratch0_q;
+    rf_dscratch1_d = dscratch1_q;
     rf_mstatus_d = mstatus_q;
-    if (G6LCCfg.RVH) begin
-      rf_hstatus_d  = hstatus_q;
-      rf_vsstatus_d = vsstatus_q;
-    end
+    rf_hstatus_d  = hstatus_q;
+    rf_vsstatus_d = vsstatus_q;
 
     // check whether we come out of reset
     // this is a workaround. some tools have issues
@@ -4063,11 +4163,9 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
     rf_mcause_d     = mcause_q;
     rf_mcounteren_d = mcounteren_q;
     rf_mscratch_d   = mscratch_q;
-    if (G6LCCfg.TvalEn) rf_mtval_d = mtval_q;
-    if (G6LCCfg.RVH) begin
-      rf_mtinst_d = mtinst_q;
-      rf_mtval2_d = mtval2_q;
-    end
+    rf_mtval_d = mtval_q;
+    rf_mtinst_d = mtinst_q;
+    rf_mtval2_d = mtval2_q;
 
     rf_fiom_d     = fiom_q;
     rf_dcache_d   = dcache_q;
@@ -4102,21 +4200,24 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
     if (G6LCCfg.RVH) rf_htimedelta_d = htimedelta_q;
     else rf_htimedelta_d = '0;
 
+    rf_vstvec_d                 = vstvec_q;
+    rf_vsscratch_d              = vsscratch_q;
+    rf_vsepc_d                  = vsepc_q;
+    rf_vscause_d                = vscause_q;
+    rf_vstval_d                 = vstval_q;
+    rf_vsatp_d                  = vsatp_q;
+    rf_hgatp_d                  = hgatp_q;
+    rf_hedeleg_d                = hedeleg_q;
+    rf_hideleg_d                = hideleg_q;
+    rf_hcounteren_d             = hcounteren_q;
+    rf_htinst_d                 = htinst_q;
+    rf_htval_d                  = htval_q;
     if (G6LCCfg.RVH) begin
-      rf_vstvec_d                 = vstvec_q;
-      rf_vsscratch_d              = vsscratch_q;
-      rf_vsepc_d                  = vsepc_q;
-      rf_vscause_d                = vscause_q;
-      rf_vstval_d                 = vstval_q;
-      rf_vsatp_d                  = vsatp_q;
-      rf_hgatp_d                  = hgatp_q;
-      rf_hedeleg_d                = hedeleg_q;
-      rf_hideleg_d                = hideleg_q;
       rf_hgeie_d                  = hgeie_q;
-      rf_hcounteren_d             = hcounteren_q;
-      rf_htinst_d                 = htinst_q;
-      rf_htval_d                  = htval_q;
       rf_en_ld_st_g_translation_d = en_ld_st_g_translation_q;
+    end else begin
+      rf_hgeie_d                  = '0;
+      rf_en_ld_st_g_translation_d = '0;
     end
 
     if (G6LCCfg.RVS) begin
@@ -4129,6 +4230,7 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
       rf_satp_d       = satp_q;
     end
 
+    rf_scontext_d = scontext_q;
     rf_en_ld_st_translation_d = en_ld_st_translation_q;
     rf_dirty_fp_state_csr     = 1'b0;
 
@@ -4776,12 +4878,11 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
         end
 
         riscv::CSR_MTVEC: begin
-          logic DirVecOnly;
-          DirVecOnly = G6LCCfg.DirectVecOnly ? 1'b0 : csr_wdata[0];
-          rf_mtvec_d = {csr_wdata[G6LCCfg.XLEN-1:2], 1'b0, DirVecOnly};
+          dir_vec_only = G6LCCfg.DirectVecOnly ? 1'b0 : csr_wdata[0];
+          rf_mtvec_d = {csr_wdata[G6LCCfg.XLEN-1:2], 1'b0, dir_vec_only};
           // we are in vector mode, this implementation requires the additional
           // alignment constraint of 64 * 4 bytes
-          if (DirVecOnly) rf_mtvec_d = {csr_wdata[G6LCCfg.XLEN-1:8], 7'b0, DirVecOnly};
+          if (dir_vec_only) rf_mtvec_d = {csr_wdata[G6LCCfg.XLEN-1:8], 7'b0, dir_vec_only};
         end
         riscv::CSR_MCOUNTEREN: begin
           if (G6LCCfg.RVU) rf_mcounteren_d = {{G6LCCfg.XLEN - 32{1'b0}}, csr_wdata[31:0]};
@@ -5038,13 +5139,13 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
                 riscv::CSR_PMPCFG14,
                 riscv::CSR_PMPCFG15: begin
           // index is calculated using PMPCFG0 as the offset
-          automatic logic [11:0] index = csr_addr.address[11:0] - riscv::CSR_PMPCFG0;
+          pmp_index = csr_addr.address[11:0] - riscv::CSR_PMPCFG0;
 
           // if index is not even and XLEN==64, raise exception
-          if (G6LCCfg.IS_XLEN64 && index[0] == 1'b1) rf_update_access_exception = 1'b1;
+          if (G6LCCfg.IS_XLEN64 && pmp_index[0] == 1'b1) rf_update_access_exception = 1'b1;
           else begin
             for (int i = 0; i < G6LCCfg.XLEN / 8; i++) begin
-              if (!pmpcfg_q[index*4+i].locked) rf_pmpcfg_d[index*4+i] = csr_wdata[i*8+:8];
+              if (!pmpcfg_q[pmp_index*4+i].locked) rf_pmpcfg_d[pmp_index*4+i] = csr_wdata[i*8+:8];
             end
           end
         end
@@ -5113,14 +5214,108 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
                 riscv::CSR_PMPADDR62,
                 riscv::CSR_PMPADDR63: begin
           // index is calculated using PMPADDR0 as the offset
-          automatic logic [11:0] index = csr_addr.address[11:0] - riscv::CSR_PMPADDR0;
+          pmp_index = csr_addr.address[11:0] - riscv::CSR_PMPADDR0;
           // check if the entry or the entry above is locked
-          if (!pmpcfg_q[index].locked && !(pmpcfg_q[index+1].locked && pmpcfg_q[index+1].addr_mode == riscv::TOR)) begin
-            rf_pmpaddr_d[index] = csr_wdata[G6LCCfg.PLEN-3:0];
+          if (!pmpcfg_q[pmp_index].locked && !(pmpcfg_q[pmp_index+1].locked && pmpcfg_q[pmp_index+1].addr_mode == riscv::TOR)) begin
+            rf_pmpaddr_d[pmp_index] = csr_wdata[G6LCCfg.PLEN-3:0];
           end
         end
         default: rf_update_access_exception = 1'b1;
       endcase
+    end
+    // hyp8: transaction authorization. When the held request is not the
+    // applying commit event, the decoded write candidates do not apply:
+    // restore the state defaults and clear the effect strobes. The decoded
+    // access exceptions intentionally survive -- legality is a property of
+    // the request, not of the apply event. This mirrors the phase-B
+    // csr_apply ? _w : _q defaults so the split and the monolithic
+    // reference express the same transaction boundary.
+    if (!csr_apply) begin
+      rf_acc_cons_d = acc_cons_q;
+      rf_aicfg_d = aicfg_q;
+      rf_aiperm_d = aiperm_q;
+      rf_aiqbase_d = aiqbase_q;
+      rf_aiqctl_d = aiqctl_q;
+      rf_aiqhead_d = aiqhead_q;
+      rf_aiscale_d = aiscale_q;
+      rf_aistatus_d = aistatus_q;
+      rf_aizp_d = aizp_q;
+      rf_cycle_d = cycle_incr;
+      rf_dcache_d = dcache_q;
+      rf_dcsr_d = dcsr_q;
+      rf_dpc_d = dpc_q;
+      rf_dscratch0_d = dscratch0_q;
+      rf_dscratch1_d = dscratch1_q;
+      rf_fcsr_d = fcsr_q;
+      rf_fiom_d = fiom_q;
+      rf_hcbcfe_d = hcbcfe_q;
+      rf_hcbie_d = hcbie_q;
+      rf_hcbze_d = hcbze_q;
+      rf_hcounteren_d = hcounteren_q;
+      rf_hedeleg_d = hedeleg_q;
+      rf_hgatp_d = hgatp_q;
+      rf_hideleg_d = hideleg_q;
+      rf_hstatus_d = hstatus_q;
+      rf_hstce_d = hstce_q;
+      rf_htimedelta_d = htimedelta_q;
+      rf_htinst_d = htinst_q;
+      rf_htval_d = htval_q;
+      rf_icache_d = icache_q;
+      rf_instret_d = instret_incr;
+      rf_jvt_d = jvt_q;
+      rf_mcause_d = mcause_q;
+      rf_mcbcfe_d = mcbcfe_q;
+      rf_mcbie_d = mcbie_q;
+      rf_mcbze_d = mcbze_q;
+      rf_mcounteren_d = mcounteren_q;
+      rf_mcountinhibit_d = mcountinhibit_q;
+      rf_medeleg_d = medeleg_q;
+      rf_mepc_d = mepc_q;
+      rf_mideleg_d = mideleg_q;
+      rf_mie_d = mie_q;
+      rf_mip_d = mip_q;
+      rf_mpbmte_d = mpbmte_q;
+      rf_mscratch_d = mscratch_q;
+      rf_mstatus_d = mstatus_q;
+      rf_mstce_d = mstce_q;
+      rf_mtinst_d = mtinst_q;
+      rf_mtval2_d = mtval2_q;
+      rf_mtval_d = mtval_q;
+      rf_mtvec_d = mtvec_rst_load_q ? {{G6LCCfg.XLEN - G6LCCfg.VLEN{1'b0}}, boot_addr_i} + 'h40
+                   : mtvec_q;
+      rf_pmpaddr_d = pmpaddr_q;
+      rf_pmpcfg_d = pmpcfg_q;
+      rf_satp_d = satp_q;
+      rf_scause_d = scause_q;
+      rf_scbcfe_d = scbcfe_q;
+      rf_scbie_d = scbie_q;
+      rf_scbze_d = scbze_q;
+      rf_scontext_d = scontext_q;
+      rf_scounteren_d = scounteren_q;
+      rf_sepc_d = sepc_q;
+      rf_sscratch_d = sscratch_q;
+      rf_stimecmp_d = stimecmp_q;
+      rf_stval_d = stval_q;
+      rf_stvec_d = stvec_q;
+      rf_vsatp_d = vsatp_q;
+      rf_vscause_d = vscause_q;
+      rf_vsepc_d = vsepc_q;
+      rf_vsscratch_d = vsscratch_q;
+      rf_vsstatus_d = vsstatus_q;
+      rf_vstimecmp_d = vstimecmp_q;
+      rf_vstval_d = vstval_q;
+      rf_vstvec_d = vstvec_q;
+      if (G6LCCfg.RVH) begin
+        rf_hgeie_d = hgeie_q;
+        rf_en_ld_st_g_translation_d = en_ld_st_g_translation_q;
+      end
+      rf_flush_req = 1'b0;
+      rf_dirty_fp_state_csr = 1'b0;
+      rf_perf_we_o = 1'b0;
+      rf_tselect_we = 1'b0;
+      rf_tdata1_we = 1'b0;
+      rf_tdata2_we = 1'b0;
+      rf_tdata3_we = 1'b0;
     end
     if (G6LCCfg.IS_XLEN64) begin
       if (G6LCCfg.RVS) rf_mstatus_d.sxl = riscv::XLEN_64;
@@ -5947,7 +6142,11 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
       wfi_d = 1'b0;
       // or alternatively if there is no exception pending and we are not in debug mode wait here
       // for the interrupt
-    end else if (((G6LCCfg.DebugEn && !debug_mode_q) && req_op == WFI && !ex_i.valid) || (!G6LCCfg.DebugEn && req_op == WFI && !ex_i.valid)) begin
+    end else if (csr_apply &&
+        (((G6LCCfg.DebugEn && !debug_mode_q) && req_op == WFI && !ex_i.valid) || (!G6LCCfg.DebugEn && req_op == WFI && !ex_i.valid))) begin
+      // hyp8: entering sleep is an architectural side effect; only the
+      // applying WFI transaction may raise it -- and a WFI that does not
+      // apply must never clear an existing sleep
       wfi_d = 1'b1;
     end
   end
