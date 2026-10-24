@@ -2239,7 +2239,11 @@ prerequisite for this work under the existing dual license. No licensing policy 
   `store_buffer` LATCH (66 warnings; the t53 server1 build had 4 LATCH
   lines: three in the pre-A141 `core_if`, one in `g6lc_iq`). The one
   left, `g6lc_iq.sv` dispatch `low_p` (declared inside the per-port `if`
-  for ports ≥ 2), is hoisted the same way; verdict: the next build.
+  for ports ≥ 2), is hoisted the same way. **Verified: `ooocoh-t62`
+  (HEAD) builds with 40 warnings and no LATCH line (t54/t60: 52), and
+  its battery is Spike-exact at the t60 cycle counts (s11 10,983) — the
+  hoists are the no-ops they claim to be; its traces carry the new
+  `… exception @ … hart <h>` lines.**
 - [ ] **A148 — SMT frontend isolation (from T51's window).** (a) An
   in-flight demand fetch of the outgoing hart is translated under the
   incoming hart's context after a coarse switch (one spurious PTW walk,
