@@ -2314,13 +2314,16 @@ prerequisite for this work under the existing dual license. No licensing policy 
   (`l1s2y`, `linux-payload-l1s2`) reaches `G6LC_LINUX_INIT_UP` and
   `G6LC_LINUX_SHELL` by 500 M cycles — the t53 trajectory to the
   console line (`jffs2: ve` at 2.504 s, the self-test, `Run /init` at
-  8.05 s)** — and its single-hart L1 with the live oracle is `l1s1w` (`linux-payload-l1s1u`, the
-  `cpu@1`-disabled, libgcc-fixed payload `l1s1t` used; the first attempt
+  8.05 s)** — and **its single-hart L1 with the live oracle (`l1s1w`,
+  `linux-payload-l1s1u`) reaches `G6LC_LINUX_SHELL` at ≈ 436 M cycles
+  (l1s1t's 430 M) with the oracle at 0 over 69.1 M loads / 44.4 M stores
+  (retire 320 M). HEAD is boot-qualified on all four lanes (ooo L1/L3,
+  server1 one/two harts) and is the boot set from here.** (The payload
+  `l1s1u` is the `cpu@1`-disabled, libgcc-fixed one `l1s1t` used; the first attempt
   `l1s1v` took `linux-payload-l1s1` by mistake — the Oct-14 two-cpu,
   pre-libgcc payload — and died of `init`'s missing `libgcc_s.so.1` at
   8.1 s like `l1s2t`, with the oracle at 0 over 69.1 M loads to retire
-  325 M: a payload verdict, not an RTL one). Until they land, the
-  boot set stays t59.
+  325 M: a payload verdict, not an RTL one.)
 - [x] **T49 — Zicbom block vs the 16-byte L1 line (follow-up of T44,
   2026-10-19).** The same units assumption sat on the CMO side: a
   `cbo.inval` reached the cluster engine as one address and the engine
