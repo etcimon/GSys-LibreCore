@@ -460,10 +460,12 @@ module g6lc_iq_legal
         automatic logic             ou;
         h = info_hart_i[b][e];
         ou = 1'b0;
+        // r68: the reference must scan for the same occupant identity the
+        // live form registers (fact_tid = next-state tid).
         for (int unsigned s = 0; s < G6LCCfg.NR_SB_ENTRIES; s++) begin
           if (st_unresolved_mask_i[s] &&
               (NH <= 1 || st_hart_mask_i[h][s]) &&
-              ooo_age_older(TID_W, 32'(s), 32'(info_tid_i[b][e]),
+              ooo_age_older(TID_W, 32'(s), 32'(fact_tid[b][e]),
                             32'(commit_ptr_i)))
             ou = 1'b1;
         end
