@@ -356,20 +356,26 @@ def main():
             raise FileNotFoundError(
                 f'manifest.json: expected exactly 1 match, found {len(roots)}')
         root = roots[0]
+        # Closure layouts: the lead's materialized `hyp_core/` tree, or the
+        # repo-relative closure build_closure.py writes (the hyp tree under
+        # its build-platform/workspace path).
+        hyp_core = 'hyp_core'
+        if not (root / 'hyp_core').is_dir() and                 (root / 'build-platform/workspace/hyp/hyp_redesign_core_8fo4').is_dir():
+            hyp_core = 'build-platform/workspace/hyp/hyp_redesign_core_8fo4'
         flist = pick(str(Path(spec['flist']).name))
         for line in flist.read_text().splitlines():
             line = line.strip()
             if not line or line.startswith('#'):
                 continue
             if line.startswith('+incdir+'):
-                rel = line[len('+incdir+'):].replace('${HYP_CORE_DIR}', 'hyp_core')
+                rel = line[len('+incdir+'):].replace('${HYP_CORE_DIR}', hyp_core)
                 incdirs.append('-I' + str(root / rel))
             elif line.startswith('+define+'):
                 defines.append('-D' + line[len('+define+'):])
             elif line.startswith('+'):
                 continue
             else:
-                rel = line.replace('${HYP_CORE_DIR}', 'hyp_core')
+                rel = line.replace('${HYP_CORE_DIR}', hyp_core)
                 hit = root / rel
                 if not hit.is_file():
                     raise FileNotFoundError(f'flist source missing: {rel}')
