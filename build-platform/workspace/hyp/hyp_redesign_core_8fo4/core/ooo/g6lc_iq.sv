@@ -188,40 +188,97 @@ module g6lc_iq
   logic [BANKS-1:0][NP-1:0]     balloc;
   logic [BANKS-1:0][NP-1:0]     back;
   logic [BANKS-1:0][NP-1:0][EW-1:0] bslot;
-  // Steer probe index for lane p's k-th candidate, evaluated as named
-  // wires so the placement process reads no conditional local.
-  logic [NP-1:0]                    steer_found;
-  logic [NP-1:0][BANKS-1:0][BW-1:0] steer_bank;
-  for (genvar p = 0; p < NP; p++) begin : gen_steer
-    for (genvar k = 0; k < BANKS; k++) begin : gen_stb
-      assign steer_bank[p][k] =
-          BW'((int'(steer_hint_i[p]) + k) % BANKS);
-    end
+  // r69 P1: first-fit steer as a one-hot rotate (analyze-r68 :216, 182.4
+  // into->out -- the `(hint + k) % BANKS` on a non-power-of-two expression
+  // was billed as a divider and the k-scan as a BANKS-deep priority chain).
+  // Per lane, in lane order: eligible banks (free entries > entries already
+  // taken by earlier lanes this cycle) as a one-hot vector, rotated right by
+  // the hint so the first fit is the lowest set bit, isolated with x & -x,
+  // rotated back. BANKS is a power of two (asserted), so the rotate is the
+  // modulo. Exact vs the scan (equivalence kept under translate_off).
+  logic [NP-1:0] steer_found;
+  function automatic logic [BANKS-1:0] rotr(input logic [BANKS-1:0] x,
+                                            input logic [BW-1:0] s);
+    return (x >> s) | (x << (BW'(BANKS) - s));
+  endfunction
+  function automatic logic [BANKS-1:0] rotl(input logic [BANKS-1:0] x,
+                                            input logic [BW-1:0] s);
+    return (x << s) | (x >> (BW'(BANKS) - s));
+  endfunction
+  logic [BANKS-1:0][BW-1:0] bank_idx_c;
+  for (genvar b = 0; b < BANKS; b++) begin : gen_bidx
+    assign bank_idx_c[b] = BW'(b);
   end
-
   always_comb begin
-    automatic int unsigned used [BANKS];
+    automatic int unsigned usedc [BANKS]; // entries taken by earlier lanes
+    automatic logic [BANKS-1:0] elig, rot, pick_r, pick;
     automatic logic [NP-1:0] fits;
-    for (int unsigned b = 0; b < BANKS; b++) used[b] = 0;
+    elig = '0; rot = '0; pick_r = '0; pick = '0;
+    for (int unsigned b = 0; b < BANKS; b++) usedc[b] = 0;
     asgn = '0;
     steer_found = '0;
     fits = '1;
     for (int unsigned p = 0; p < NP; p++) begin
       if (disp_valid_i[p]) begin
-        for (int unsigned k = 0; k < BANKS; k++) begin
-          if (!steer_found[p] &&
-              (int'(bank_free[steer_bank[p][k]]) >
-               used[steer_bank[p][k]])) begin
-            asgn[p] = steer_bank[p][k];
-            used[steer_bank[p][k]] = used[steer_bank[p][k]] + 1;
-            steer_found[p] = 1'b1;
-          end
-        end
+        for (int unsigned b = 0; b < BANKS; b++)
+          elig[b] = (int'(bank_free[b]) > usedc[b]);
+        rot    = rotr(elig, steer_hint_i[p]);
+        pick_r = rot & (~rot + 1'b1);
+        pick   = rotl(pick_r, steer_hint_i[p]);
+        steer_found[p] = |pick;
+        for (int unsigned b = 0; b < BANKS; b++)
+          asgn[p] |= {BW{pick[b]}} & bank_idx_c[b];
+        for (int unsigned b = 0; b < BANKS; b++)
+          if (pick[b]) usedc[b] = usedc[b] + 1;
         if (!steer_found[p]) fits[p] = 1'b0;
       end
     end
     group_fits = &fits;
   end
+
+  //pragma translate_off
+  // r69 P1 equivalence: the pre-r69 modulo scan, recomputed every cycle.
+  logic [NP-1:0][BW-1:0] ref_asgn;
+  logic                  ref_fits;
+  function automatic logic [NP*BW:0] ref_steer();
+    int unsigned used [BANKS];
+    logic [NP-1:0] found, fits;
+    logic [NP-1:0][BW-1:0] a;
+    for (int unsigned b = 0; b < BANKS; b++) used[b] = 0;
+    a = '0; found = '0; fits = '1;
+    for (int unsigned p = 0; p < NP; p++) begin
+      if (disp_valid_i[p]) begin
+        for (int unsigned k = 0; k < BANKS; k++) begin
+          int unsigned bk;
+          bk = (int'(steer_hint_i[p]) + k) % BANKS;
+          if (!found[p] && (int'(bank_free[bk]) > used[bk])) begin
+            a[p] = BW'(bk); used[bk] = used[bk] + 1; found[p] = 1'b1;
+          end
+        end
+        if (!found[p]) fits[p] = 1'b0;
+      end
+    end
+    return {&fits, a};
+  endfunction
+  assign {ref_fits, ref_asgn} = ref_steer();
+  int unsigned r69_steer_n = 0;
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && !$isunknown({disp_valid_i, bank_free, steer_hint_i})) begin
+      r69_steer_n <= r69_steer_n + 1;
+      g6lc_r69_steer_eq: assert (group_fits === ref_fits &&
+                                 (!group_fits || asgn === ref_asgn))
+        else $error("g6lc_iq: equiv steer");
+    end
+  end
+  initial begin
+    assert ((BANKS & (BANKS - 1)) == 0)
+      else $fatal(1, "g6lc_iq: steer rotate needs power-of-two BANKS");
+  end
+  final begin
+    if ($test$plusargs("equiv_report"))
+      $display("[equiv] g6lc_iq r69 steer: checked=%0d", r69_steer_n);
+  end
+  //pragma translate_on
 
   // ----------------------------------------------------------------------
   // Banks
