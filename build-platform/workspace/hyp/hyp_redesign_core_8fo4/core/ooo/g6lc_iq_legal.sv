@@ -170,16 +170,36 @@ module g6lc_iq_legal
         assign swin[h][k] = k_v[k] && k_st[k] && (k_h[k] == HID_W'(h)) &&
                             !(|solder);
       end
-      always_comb begin
-        fh_csr_v[h]   = |cwin[h];
-        fh_st_v[h]    = |swin[h];
-        fh_csr_tid[h] = '0;
-        fh_st_tid[h]  = '0;
-        for (int unsigned k = 0; k < NBE; k++) begin
-          fh_csr_tid[h] |= cwin[h][k] ? k_tid[k] : '0;
-          fh_st_tid[h]  |= swin[h][k] ? k_tid[k] : '0;
+      // r68b: the per-hart tid gather as a balanced masked-OR tree
+      // (log2(NBE) levels) instead of the NBE-deep serial `|=` chain --
+      // the module's billed into->out limiter (analyze-r68 :179 21.85).
+      // cwin/swin are one-hot0 per hart, so the gather is exact.
+      localparam int unsigned GLV = (NBE > 1) ? $clog2(NBE) : 1;
+      logic [GLV:0][NBE-1:0][TID_W-1:0] cgt, sgt;
+      for (genvar k = 0; k < NBE; k++) begin : gen_g0
+        assign cgt[0][k] = {TID_W{cwin[h][k]}} & k_tid[k];
+        assign sgt[0][k] = {TID_W{swin[h][k]}} & k_tid[k];
+      end
+      for (genvar l = 0; l < GLV; l++) begin : gen_gl
+        for (genvar t = 0; t < NBE; t++) begin : gen_gt
+          if (t < ((NBE + (1 << l) - 1) >> (l + 1))) begin : gen_in
+            if ((2 * t + 1) < ((NBE + (1 << l) - 1) >> l)) begin : gen_pair
+              assign cgt[l+1][t] = cgt[l][2*t] | cgt[l][2*t+1];
+              assign sgt[l+1][t] = sgt[l][2*t] | sgt[l][2*t+1];
+            end else begin : gen_odd
+              assign cgt[l+1][t] = cgt[l][2*t];
+              assign sgt[l+1][t] = sgt[l][2*t];
+            end
+          end else begin : gen_pad
+            assign cgt[l+1][t] = '0;
+            assign sgt[l+1][t] = '0;
+          end
         end
       end
+      assign fh_csr_v[h]   = |cwin[h];
+      assign fh_st_v[h]    = |swin[h];
+      assign fh_csr_tid[h] = cgt[GLV][0];
+      assign fh_st_tid[h]  = sgt[GLV][0];
     end
   end else begin : gen_fh_off
     assign fh_csr_v   = '0;
@@ -188,18 +208,39 @@ module g6lc_iq_legal
     assign fh_st_tid  = '0;
   end
 
+  // r68b: one-hot masked-OR gathers of the bank frontier tids (balanced).
+  logic [BANKS-1:0]            csr_front_tid_gather_v, st_front_tid_gather_v;
+  logic [BANKS-1:0][TID_W-1:0] csr_gm, st_gm;
+  logic [TID_W-1:0]            csr_front_tid_gather, st_front_tid_gather;
+  assign csr_front_tid_gather_v = csr_win;
+  assign st_front_tid_gather_v  = st_win;
+  for (genvar b = 0; b < BANKS; b++) begin : gen_fgm
+    assign csr_gm[b] = {TID_W{csr_win[b]}} & csr_oldest_tid_i[b];
+    assign st_gm[b]  = {TID_W{st_win[b]}}  & st_oldest_tid_i[b];
+  end
+  always_comb begin
+    csr_front_tid_gather = '0;
+    st_front_tid_gather  = '0;
+    for (int unsigned b = 0; b < BANKS; b++) begin
+      csr_front_tid_gather |= csr_gm[b];
+      st_front_tid_gather  |= st_gm[b];
+    end
+  end
+
   always_comb begin
     csr_front_v_d = '0;
     csr_front_tid_d = '0;
     st_front_v_d = '0;
     st_front_tid_d = '0;
     if (NH <= 1) begin
-      csr_front_v_d[0] = |csr_win;
-      st_front_v_d[0]  = |st_win;
-      for (int unsigned b = 0; b < BANKS; b++) begin
-        if (csr_win[b]) csr_front_tid_d[0] = csr_oldest_tid_i[b];
-        if (st_win[b])  st_front_tid_d[0]  = st_oldest_tid_i[b];
-      end
+      csr_front_v_d[0] = |csr_front_tid_gather_v;
+      st_front_v_d[0]  = |st_front_tid_gather_v;
+      // r68b: csr_win/st_win are one-hot0 (asserted below), so the serial
+      // last-wins `if` chain over BANKS arms is a masked-OR gather: one AND
+      // level and a log2(BANKS) OR tree instead of a BANKS-deep priority
+      // mux (the module's into->out limiter, analyze-r68 :179 21.85).
+      csr_front_tid_d[0] = csr_front_tid_gather;
+      st_front_tid_d[0]  = st_front_tid_gather;
     end else begin
       csr_front_v_d   = fh_csr_v;
       csr_front_tid_d = fh_csr_tid;
