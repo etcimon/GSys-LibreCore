@@ -59,6 +59,10 @@ TESTS = [
     # out) on the pre-r68 g6lc_iq_legal; the kernel-spinlock shape.
     ('hyp8_amo_ready_order', 'verif/tests/custom/hyp8_amo_ready_order.S',
      '80001000'),
+    # r68 F14 discriminator: plain sd vs sc.d at the addr[8:6] != 0 offset
+    # class; distinct fail codes name the owning path.
+    ('hyp8_f14_store_offset', 'verif/tests/custom/hyp8_f14_store_offset.S',
+     '80001000'),
 ]
 LINK_LD = 'verif/tests/custom/common/link_verilator.ld'
 GCC_FLAGS = ['-march=rv64imafdc_zicsr_zifencei', '-mabi=lp64d',
