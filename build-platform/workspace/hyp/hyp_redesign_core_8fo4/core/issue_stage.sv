@@ -100,6 +100,12 @@ module issue_stage
     input logic flu_ready_i,
     // CSR buffer admission credit - EX_STAGE (OoO only)
     input logic csr_ready_i,
+    // hyp8 r33: CSR address-table free-entry credit — the OoO dispatch
+    // group gate; the dispatched CSR table strobes back to EX_STAGE.
+    input  logic [1:0] csr_credit_i,
+    output logic [G6LCCfg.NrIssuePorts-1:0] csr_disp_valid_o,
+    output logic [G6LCCfg.NrIssuePorts-1:0][G6LCCfg.TRANS_ID_BITS-1:0] csr_disp_tid_o,
+    output logic [G6LCCfg.NrIssuePorts-1:0][11:0] csr_disp_addr_o,
     // hyp8 g7: per-issue-port in-ALU forward selects - EX_STAGE (ALU0).
     // Bit 2 selects the registered A3 (result3_q) slot for LAT_ALU_FULL
     // producers.
@@ -456,6 +462,10 @@ assign issue_instr_o    = issue_instr_iro[0];
         .lsu_ready_i      (lsu_ready_i),
         .fpu_ready_i      (fpu_ready_i),
         .csr_ready_i      (csr_ready_i),
+        .csr_credit_i     (csr_credit_i),
+        .csr_disp_valid_o (csr_disp_valid_o),
+        .csr_disp_tid_o   (csr_disp_tid_o),
+        .csr_disp_addr_o  (csr_disp_addr_o),
         .mult_ready_i     (flu_ready_i),
         .issue_op_a_o     (ooo_op_a),
         .issue_op_b_o     (ooo_op_b),
@@ -512,6 +522,9 @@ assign issue_instr_o    = issue_instr_iro[0];
     assign ooo_op_c_v = '0;
     assign iro_spec_ab = '0;
     assign iro_ptid    = '0;
+    assign csr_disp_valid_o = '0;
+    assign csr_disp_tid_o   = '0;
+    assign csr_disp_addr_o  = '0;
     assign ooo_rename_stall_o = 1'b0;
     assign ooo_iq_full_o      = 1'b0;
     assign ooo_rob_full_o     = 1'b0;
@@ -557,6 +570,9 @@ assign issue_instr_o    = issue_instr_iro[0];
     assign ooo_op_c_v = '0;
     assign iro_spec_ab = '0;
     assign iro_ptid    = '0;
+    assign csr_disp_valid_o = '0;
+    assign csr_disp_tid_o   = '0;
+    assign csr_disp_addr_o  = '0;
     assign ooo_rename_stall_o = 1'b0;
     assign ooo_iq_full_o      = 1'b0;
     assign ooo_rob_full_o     = 1'b0;

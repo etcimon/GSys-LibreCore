@@ -42,6 +42,9 @@ module g6lc_lsq_cam_bank #(
     input  logic [G6LCCfg.TRANS_ID_BITS-1:0] ev_id_i,
     input  logic [G6LCCfg.PLEN-1:0]          ev_addr_i,
     input  logic [1:0]                       ev_size_i,
+    // hyp8 T1 item 2: the event's byte-lane footprint and the cancel
+    // read both carried as stage-E registrations.
+    input  logic [(G6LCCfg.XLEN+7)/8-1:0]    ev_be_i,
     input  logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] ev_hart_i,
 
     // The bank's projected entries (registered state).
@@ -84,9 +87,19 @@ module g6lc_lsq_cam_bank #(
 
   // hyp8: per-entry compare vectors (independent LHS) instead of the
   // procedural serial scan — identical dataflow, parallel depth.
-  logic [LANES-1:0]    ev_be;
-  logic                ev_qual;
+  // hyp8 T1 item 2: the entry's byte-lane footprint is a stored field
+  // (written with the address) and the event's is the staged ev_be_i,
+  // so no variable shift sits on this cone.  The cancelled-mask read
+  // registers beside the compare (ccl_q): (raw & valid & !cancelled)
+  // delayed is bit-identical to (raw & valid) delayed AND !cancelled
+  // delayed, so the dynamic index leaves the per-entry series.
   logic [ENTRIES-1:0]  match_d, unres_d, nodata_d;
+  logic                ccl_q;
+  logic [ENTRIES-1:0]  match_q, unres_q, nodata_q;
+`ifdef G6LC_MUT_T1_CAMBE
+  // Review mutant: pre-T1 recomputed lane_be and in-cone cancel.
+  logic [LANES-1:0] ev_be;
+  logic             ev_qual;
   assign ev_qual = ev_valid_i && !cancelled_mask_i[ev_id_i];
   always_comb ev_be = ev_qual ? lane_be(ev_addr_i, ev_size_i) : '0;
   for (genvar i = 0; i < ENTRIES; i++) begin : gen_cam_cmp
@@ -95,28 +108,125 @@ module g6lc_lsq_cam_bank #(
     assign addr_ok = same_h && ent_i[i].addr_v;
     assign word_hit = addr_ok && same_word(ent_i[i].addr, ev_addr_i) &&
                       ((lane_be(ent_i[i].addr, ent_i[i].size) & ev_be) != '0);
+    assign unres_d[i]  = same_h && !ent_i[i].addr_v;
+    assign match_d[i]  = word_hit;
+    assign nodata_d[i] = word_hit && !ent_i[i].data_v;
+  end
+`else
+  for (genvar i = 0; i < ENTRIES; i++) begin : gen_cam_cmp
+    logic same_h, addr_ok, word_hit;
+    assign same_h  = ev_valid_i && ent_i[i].valid && (ent_i[i].hart == ev_hart_i);
+    assign addr_ok = same_h && ent_i[i].addr_v;
+    assign word_hit = addr_ok && same_word(ent_i[i].addr, ev_addr_i) &&
+                      ((ent_i[i].be & ev_be_i) != '0);
     // Live, same hart, no address yet: it may alias when it resolves —
     // the verdict stage combines this with age.
     assign unres_d[i]  = same_h && !ent_i[i].addr_v;
     assign match_d[i]  = word_hit;
     assign nodata_d[i] = word_hit && !ent_i[i].data_v;
   end
+`endif
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      match_o  <= '0;
-      unres_o  <= '0;
-      nodata_o <= '0;
+      match_q  <= '0;
+      unres_q  <= '0;
+      nodata_q <= '0;
+      ccl_q    <= 1'b0;
     end else if (flush_i) begin
-      match_o  <= '0;
-      unres_o  <= '0;
-      nodata_o <= '0;
+      match_q  <= '0;
+      unres_q  <= '0;
+      nodata_q <= '0;
+      ccl_q    <= 1'b0;
     end else begin
-      match_o  <= match_d;
-      unres_o  <= unres_d;
-      nodata_o <= nodata_d;
+      match_q  <= match_d;
+      unres_q  <= unres_d;
+      nodata_q <= nodata_d;
+`ifdef G6LC_MUT_T1_CAMBE
+      ccl_q    <= 1'b1;
+`else
+      ccl_q    <= !cancelled_mask_i[ev_id_i];
+`endif
     end
   end
+  assign match_o  = match_q  & {ENTRIES{ccl_q}};
+  assign unres_o  = unres_q  & {ENTRIES{ccl_q}};
+  assign nodata_o = nodata_q & {ENTRIES{ccl_q}};
+
+  //pragma translate_off
+  // hyp8 T1 item 2: equivalence + the plan's cancel guard.
+  //  - ent.be is a pure function of the stored {addr,size} written at
+  //    the address edge — checked live.
+  //  - ev_be_i is the same function of the staged {ev_addr_i,ev_size_i}.
+  //  - the whole pre-T1 datapath (in-cone ev_qual + recomputed lane_be)
+  //    is rebuilt and its registered form compared against the outputs.
+  //  - plan guard: a match bit must never survive for a killed event.
+  logic [ENTRIES-1:0] ref_match_d, ref_unres_d, ref_nodata_d;
+  logic [ENTRIES-1:0] ref_match_q, ref_unres_q, ref_nodata_q;
+  logic [G6LCCfg.TRANS_ID_BITS-1:0] ev_id_q;
+  logic                     ref_ev_qual;
+  assign ref_ev_qual = ev_valid_i && !cancelled_mask_i[ev_id_i];
+  always_comb begin : p_t1_cam_ref
+    automatic logic [LANES-1:0] rbe;
+    rbe = ref_ev_qual ? lane_be(ev_addr_i, ev_size_i) : '0;
+    for (int unsigned i = 0; i < ENTRIES; i++) begin
+      ref_match_d[i]  = ref_ev_qual && ent_i[i].valid &&
+                        (ent_i[i].hart == ev_hart_i) && ent_i[i].addr_v &&
+                        same_word(ent_i[i].addr, ev_addr_i) &&
+                        ((lane_be(ent_i[i].addr, ent_i[i].size) & rbe) != '0);
+      ref_unres_d[i]  = ref_ev_qual && ent_i[i].valid &&
+                        (ent_i[i].hart == ev_hart_i) && !ent_i[i].addr_v;
+      ref_nodata_d[i] = ref_match_d[i] && !ent_i[i].data_v;
+    end
+  end
+  int unsigned t1_cam_n = 0;
+  always_ff @(posedge clk_i or negedge rst_ni) begin : p_t1_cam_eq
+    if (!rst_ni) begin
+      ref_match_q  <= '0;
+      ref_unres_q  <= '0;
+      ref_nodata_q <= '0;
+      ev_id_q      <= '0;
+      t1_cam_n     <= 0;
+    end else if (flush_i) begin
+      ref_match_q  <= '0;
+      ref_unres_q  <= '0;
+      ref_nodata_q <= '0;
+      ev_id_q      <= '0;
+    end else begin
+      ref_match_q  <= ref_match_d;
+      ref_unres_q  <= ref_unres_d;
+      ref_nodata_q <= ref_nodata_d;
+      ev_id_q      <= ev_id_i;
+      if (!$isunknown({match_o, unres_o, nodata_o})) begin
+        t1_cam_n <= t1_cam_n + 1;
+        g6lc_t1_cam_eq: assert (match_o === ref_match_q &&
+                                unres_o === ref_unres_q &&
+                                nodata_o === ref_nodata_q)
+          else $error("g6lc_lsq_cam_bank: equiv cambe");
+        for (int unsigned i = 0; i < ENTRIES; i++) begin
+          g6lc_t1_cam_oa: assert (!(match_o[i]) ||
+                                  !cancelled_mask_i[ev_id_q])
+            else $error("g6lc_lsq_cam_bank: equiv cambe (killed match)");
+        end
+      end
+      if (ev_valid_i && !$isunknown(ev_be_i)) begin
+        g6lc_t1_cam_be: assert (ev_be_i === lane_be(ev_addr_i, ev_size_i))
+          else $error("g6lc_lsq_cam_bank: equiv cambe (ev_be)");
+      end
+      for (int unsigned i = 0; i < ENTRIES; i++) begin
+        if (ent_i[i].valid && ent_i[i].addr_v && !$isunknown(ent_i[i].be)) begin
+          g6lc_t1_cam_eb: assert (
+              ent_i[i].be === lane_be(ent_i[i].addr, ent_i[i].size))
+            else $error("g6lc_lsq_cam_bank: equiv cambe (ent be %0d)", i);
+        end
+      end
+    end
+  end
+  final begin
+    if ($test$plusargs("equiv_report"))
+      $display("[equiv] g6lc_lsq_cam_bank cambe: checked=%0d", t1_cam_n);
+  end
+  //pragma translate_on
 
   // svt-stage: end C
   // svt-stage: class C value

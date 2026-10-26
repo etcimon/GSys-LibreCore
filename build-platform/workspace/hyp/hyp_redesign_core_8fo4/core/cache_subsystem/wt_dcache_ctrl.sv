@@ -211,6 +211,14 @@ module wt_dcache_ctrl
     // Reference arm (core/cache_subsystem/wt_dcache_ctrl.sv): the
     // single-cycle verdict — READ speculatively re-issues the read and
     // resolves hit/miss/replay on the current-cycle rd_* inputs.
+    // r54: shared READ/REPLAY_READ arm predicates hoisted to wires —
+    // same cone, single evaluation instead of per-use recompute.
+    logic rd_hit_fwd, req_rd_ack, tagv_seen, replay_cond;
+    assign rd_hit_fwd  = (|rd_hit_oh_i) || wbuffer_fwd_hit_i;
+    assign req_rd_ack  = rd_ack_i && req_port_i.data_req;
+    assign tagv_seen   = req_port_i.tag_valid | (state_q == REPLAY_READ);
+    assign replay_cond = wr_cl_vld_i || !rd_ack_q;
+
     always_comb begin : p_fsm
       // default assignment
       state_d                = state_q;
@@ -251,19 +259,16 @@ module wt_dcache_ctrl
           if (req_port_i.kill_req) begin
             state_d = IDLE;
             req_port_o.data_rvalid = 1'b1;
-          end else if (req_port_i.tag_valid | state_q == REPLAY_READ) begin
+          end else if (tagv_seen) begin
             save_tag = (state_q != REPLAY_READ);
-            if (wr_cl_vld_i || !rd_ack_q) begin
+            if (replay_cond) begin
               state_d = REPLAY_REQ;
               // we've got a hit
-            end else if (((|rd_hit_oh_i) || wbuffer_fwd_hit_i) && cache_en_i) begin
-              state_d = IDLE;
+            end else if (rd_hit_fwd && cache_en_i) begin
+              state_d = req_rd_ack ? READ : IDLE;
               req_port_o.data_rvalid = 1'b1;
               // we can handle another request
-              if (rd_ack_i && req_port_i.data_req) begin
-                state_d = READ;
-                req_port_o.data_gnt = 1'b1;
-              end
+              req_port_o.data_gnt = req_rd_ack;
               // we've got a miss
             end else begin
               state_d = MISS_REQ;
@@ -342,6 +347,14 @@ module wt_dcache_ctrl
       endcase  // state_q
     end
   end else begin : gen_fsm_hit2
+    // r42-T item 16 classify: the item's transform — tag-compare verdict
+    // staged T1/T2, miss/replay bookkeeping precomputed and consumed as
+    // bits — is already realized here. rd_hit_oh_i and
+    // wbuffer_fwd_hit_i arrive on the +2 registered mem pipe;
+    // mshr_rdrd_collision_q in wt_dcache_missunit is the T1-registered
+    // collide bit consumed as miss_replay_i in MISS_REQ; rv_sel is the
+    // narrow 2-bit preselect (kill → replay → hit → miss). No rewrite
+    // needed; the residual state_d depth is the enum-case floor itself.
     // 8-way hyp8 set. A reduction of the struct-width port does not fold.
     logic hit_any;
     logic [1:0] rv_sel;
@@ -354,6 +367,14 @@ module wt_dcache_ctrl
       else if ((hit_any || wbuffer_fwd_hit_i) && cache_en_i) rv_sel = 2'd2;
       else rv_sel = 2'd3;
     end
+
+    // r54: shared READ/REPLAY_READ arm predicates hoisted to wires —
+    // same cone, single evaluation instead of per-use recompute.
+    logic rd_hit_fwd, req_rd_ack, tagv_seen, replay_cond;
+    assign rd_hit_fwd  = (|rd_hit_oh_i) || wbuffer_fwd_hit_i;
+    assign req_rd_ack  = rd_ack_i && req_port_i.data_req;
+    assign tagv_seen   = req_port_i.tag_valid | (state_q == REPLAY_READ);
+    assign replay_cond = wr_cl_vld_i || !rd_ack_q;
 
     always_comb begin : p_fsm
       // default assignment

@@ -57,6 +57,10 @@ module g6lc_ai_gemm_seq #(
     // single C read port); columns past n are masked.
     parameter int unsigned OutCols   = 1,
     parameter bit          DotPipeFloat = 1'b0, // 0: combinational g6lc_ai_pe_dot_float; 1: pipelined dot product with valid handshake
+    // 0: combinational g6lc_ai_pe_dot (one multiply + log2(2*Lanes) adds per
+    // cycle); 1: g6lc_ai_pe_dot_pipe, one tree level per stage on the SAME
+    // start/valid handshake and latency as the float pipe. Bit-identical sums.
+    parameter bit          DotPipeInt   = 1'b0,
     parameter int unsigned MaxAROut  = 2,  // I3: multi-outstanding AR; live = 2
     // Shared DRAM stripe (g6lc_ai_island_cfg_pkg). N=1 leaves MaxBurstBeats
     // at 255 so the live 256³ fixture stays bit-identical. N>1 caps each
@@ -553,14 +557,19 @@ module g6lc_ai_gemm_seq #(
     col_v[g] = (32'(g) < cols_eff) && (j_q + 32'(g) < n_q);
 
   for (genvar g = 0; g < int'(OutCols); g++) begin : gen_pe_cols
-    // Integer/INT4 path
-    g6lc_ai_pe_dot #(.Lanes(PeLanes)) i_pe_int (
-        .a_i     (pe_a),
-        .b_i     (pe_b[g]),
-        .valid_i (pe_v),
-        .numfmt_i(numfmt_q),
-        .sum_o   (pe_sum_int[g])
-    );
+    // Integer/INT4 path -- combinational cell unless the pipelined one is
+    // selected (then this instance would be dead area).
+    if (!DotPipeInt) begin : gen_pe_int_comb
+      g6lc_ai_pe_dot #(.Lanes(PeLanes)) i_pe_int (
+          .a_i     (pe_a),
+          .b_i     (pe_b[g]),
+          .valid_i (pe_v),
+          .numfmt_i(numfmt_q),
+          .sum_o   (pe_sum_int[g])
+      );
+    end else begin : gen_pe_int_pipe_only
+      assign pe_sum_int[g] = '0;
+    end
 
     // Floating path (FP8/FP16/BF16/FP32) — combinational baseline
     g6lc_ai_pe_dot_float #(.Lanes(PeLanes)) i_pe_float (
@@ -577,12 +586,18 @@ module g6lc_ai_gemm_seq #(
   // dot_start is asserted with each MAC issue; dot_sum/dot_first/... are valid
   // DOT_LATENCY-1 cycles later, matching dot_valid_o.  DOT_LATENCY is the
   // dot product's registered Latency plus the one-cycle output register.
-  localparam int unsigned DOT_LATENCY = DotPipeFloat ?
+  // Both pipes have the same Latency, so one metadata pipe serves either.
+  localparam bit DotPipeAny = DotPipeFloat || DotPipeInt;
+  localparam int unsigned DOT_LATENCY = DotPipeAny ?
       ($clog2(PeLanes < 1 ? 1 : PeLanes) + 5) : 1;
 
   logic dot_start;
   logic dot_valid;
   logic [31:0] dot_sum [OutCols];
+  // per-pipe raw outputs (muxed on the per-job format select below)
+  logic        dot_valid_f, dot_valid_i;
+  logic [31:0] dot_sum_f [OutCols];
+  logic [31:0] dot_sum_i [OutCols];
   logic        dot_cv_out [OutCols];
   logic dot_first_out, dot_last_out;
   logic [31:0] dot_i_out, dot_j_out;
@@ -592,25 +607,74 @@ module g6lc_ai_gemm_seq #(
   // all pipelined results have returned and their C writes have been issued.
   logic [$clog2(PeLanes)+4:0] dot_pending_q;
 
+  // Format selection: integer/INT4 vs floating (declared here because the
+  // pipe muxes below read it). numfmt_q is constant for a tile, so the mux
+  // is a per-job static select.
+  localparam logic [2:0] AI_FMT_INT  = 3'd0;
+  localparam logic [2:0] AI_FMT_INT4 = 3'd1;
+  logic pe_float_en;
+  // Only dispatch to the float dot for implemented FP families
+  // (FP8 E4M3/E5M2, FP16, BF16, FP32).  SP24 and reserved codes stay on the
+  // integer path where the sequencer's numfmt check / descriptor grant will
+  // reject them before the MAC.
+  // Static per job (numfmt_q is latched at start), so this is a configuration
+  // select rather than a per-cycle mux in the MAC's critical path.
+  assign pe_float_en = (numfmt_q inside {3'd3, 3'd4, 3'd5, 3'd6, 3'd7});
+  // The current tile's dot products go through a registered pipe (either
+  // family) -- the single predicate every pipelined-path arm reads.
+  logic dot_pipe_en;
+  assign dot_pipe_en = (DotPipeFloat && pe_float_en) || (DotPipeInt && !pe_float_en);
+
   generate
-    if (DotPipeFloat) begin : gen_dot_pipe
+    if (DotPipeFloat) begin : gen_dot_pipe_float
       logic dot_valid_col [OutCols];
       for (genvar g = 0; g < int'(OutCols); g++) begin : gen_dot_pipe_cols
         g6lc_ai_pe_dot_float_pipe #(.Lanes(PeLanes)) i_pe_float_pipe (
             .clk_i    (clk_i),
             .rst_ni   (rst_ni),
-            .start_i  (dot_start),
+            .start_i  (dot_start && pe_float_en),
             .a_i      (pe_a_float),
             .b_i      (pe_b_float[g]),
             .valid_i  (pe_v),
             .numfmt_i (numfmt_q),
-            .sum_o    (dot_sum[g]),
+            .sum_o    (dot_sum_f[g]),
             .flags_o  (),
             .valid_o  (dot_valid_col[g])
         );
       end
       // All column pipes share start and latency; column 0 is the handshake.
-      assign dot_valid = dot_valid_col[0];
+      assign dot_valid_f = dot_valid_col[0];
+    end else begin : gen_dot_pipe_float_off
+      assign dot_valid_f = 1'b0;
+      always_comb for (int unsigned g = 0; g < OutCols; g++) dot_sum_f[g] = '0;
+    end
+    if (DotPipeInt) begin : gen_dot_pipe_int
+      logic dot_valid_col_i [OutCols];
+      for (genvar g = 0; g < int'(OutCols); g++) begin : gen_dot_pipe_int_cols
+        g6lc_ai_pe_dot_pipe #(.Lanes(PeLanes)) i_pe_int_pipe (
+            .clk_i    (clk_i),
+            .rst_ni   (rst_ni),
+            .start_i  (dot_start && !pe_float_en),
+            .a_i      (pe_a),
+            .b_i      (pe_b[g]),
+            .valid_i  (pe_v),
+            .numfmt_i (numfmt_q),
+            .sum_o    (dot_sum_i[g]),
+            .valid_o  (dot_valid_col_i[g])
+        );
+      end
+      assign dot_valid_i = dot_valid_col_i[0];
+    end else begin : gen_dot_pipe_int_off
+      assign dot_valid_i = 1'b0;
+      always_comb for (int unsigned g = 0; g < OutCols; g++) dot_sum_i[g] = '0;
+    end
+    if (DotPipeAny) begin : gen_dot_pipe
+      // The tile format is constant while its dots are in flight (numfmt_q is
+      // latched at job start and ST_MAC drains dot_pending before leaving),
+      // so the per-job select is exact for the returning results too.
+      assign dot_valid = pe_float_en ? dot_valid_f : dot_valid_i;
+      always_comb for (int unsigned g = 0; g < OutCols; g++)
+        dot_sum[g] = pe_float_en ? dot_sum_f[g] : dot_sum_i[g];
 
       logic [DOT_LATENCY-1:0] dot_first_pipe, dot_last_pipe;
       logic [DOT_LATENCY-1:0][31:0] dot_i_pipe, dot_j_pipe;
@@ -654,18 +718,17 @@ module g6lc_ai_gemm_seq #(
     end
   endgenerate
 
-  // Format selection: integer/INT4 vs floating.
-  // numfmt_q is constant for a tile, so the mux is a per-job static select.
-  localparam logic [2:0] AI_FMT_INT  = 3'd0;
-  localparam logic [2:0] AI_FMT_INT4 = 3'd1;
-  logic pe_float_en;
-  // Only dispatch to the float dot for implemented FP families
-  // (FP8 E4M3/E5M2, FP16, BF16, FP32).  SP24 and reserved codes stay on the
-  // integer path where the sequencer's numfmt check / descriptor grant will
-  // reject them before the MAC.
-  // Static per job (numfmt_q is latched at start), so this is a configuration
-  // select rather than a per-cycle mux in the MAC's critical path.
-  assign pe_float_en = (numfmt_q inside {3'd3, 3'd4, 3'd5, 3'd6, 3'd7});
+  // pragma translate_off
+  // +dot_trace: per-cycle pipelined-dot handshake window (r68 int-pipe bring-up).
+  int unsigned dot_tr_cyc = 0;
+  always @(posedge clk_i) if (rst_ni) begin
+    dot_tr_cyc++;
+    if ($test$plusargs("dot_trace") && dot_tr_cyc < 400 && (dot_start || dot_valid || dot_pending_q != '0))
+      $display("[dot] c=%0d st=%0d start=%b valid=%b vf=%b vi=%b pend=%0d fp=%b fmt=%0d i=%0d m=%0d sum=%h first=%b last=%b sumv_q=%b",
+               dot_tr_cyc, state_q, dot_start, dot_valid, dot_valid_f, dot_valid_i, dot_pending_q, pe_float_en, numfmt_q, i_q, m_q, dot_sum[0], dot_first_out, dot_last_out, sum_v_q);
+  end
+  // pragma translate_on
+  // Combinational (non-pipelined) sum select; see pe_float_en above.
   always_comb for (int unsigned g = 0; g < OutCols; g++)
     pe_sum[g] = pe_float_en ? pe_sum_float[g] : pe_sum_int[g];
 
@@ -1923,8 +1986,8 @@ module g6lc_ai_gemm_seq #(
 
           // ---- issue the next step ----------------------------------------
           if (mac_active) begin
-            // Tag the pipelined dot product when this is a float tile.
-            dot_start      = mac_active && pe_float_en;
+            // Tag the pipelined dot product when this tile's family is pipelined.
+            dot_start      = mac_active && dot_pipe_en;
             dot_first_issue= (t_q == 0);
             dot_last_issue = last_step;
             dot_i_issue    = i_q;
@@ -1932,7 +1995,7 @@ module g6lc_ai_gemm_seq #(
 
             // Capture what the PE produced this cycle. (i,j,t) are the issue
             // coordinates; they advance in the index logic below.
-            if (DotPipeFloat && pe_float_en) begin
+            if (dot_pipe_en) begin
               // Dot output is captured directly in the main always_ff below;
               // these always_comb values are not used for the pipelined path.
               for (int unsigned g = 0; g < OutCols; g++) sum_d[g] = '0;
@@ -2350,7 +2413,7 @@ module g6lc_ai_gemm_seq #(
       // F0b-2: advance the pipeline stage. For the pipelined floating path the
       // dot product valid/data are sampled directly from the pipe output; the
       // integer path continues to use the combinational `sum_*_d` values.
-      if (DotPipeFloat && pe_float_en) begin
+      if (dot_pipe_en) begin
         for (int unsigned g = 0; g < OutCols; g++) begin
           sum_q[g]    <= dot_valid ? dot_sum[g] : '0;
           sum_cv_q[g] <= dot_valid ? dot_cv_out[g] : 1'b0;
@@ -2448,7 +2511,7 @@ module g6lc_ai_gemm_seq #(
       // Outstanding pipelined dot transactions. This is the ONLY thing that
       // keeps ST_MAC from exiting while results are still in the FP pipe --
       // i_q reaching m only means issue finished, not that C is written.
-      dot_pending_q <= DotPipeFloat && pe_float_en
+      dot_pending_q <= dot_pipe_en
                        ? dot_pending_q
                          + (dot_start ? 1'd1 : 1'd0)
                          - ((dot_valid && dot_pending_q != '0) ? 1'd1 : 1'd0)

@@ -231,6 +231,16 @@ assign wbuffer_all[k] = wbuffer_data_i[k];
   logic [G6LCCfg.DCACHE_USER_WIDTH-1:0] wbuffer_ruser, ruser;
   logic [G6LCCfg.PLEN-1:0] wbuffer_cmp_addr;
 
+  // T1-domain forward readout: the byte-wise merge evaluated on the live
+  // wbuffer_all export. wbuffer_be/wbuffer_rdata/wbuffer_ruser are the
+  // readout's T2-domain aliases -- combinational on the single-cycle
+  // read-ctrl arm, T1-registered on the DcacheHitExtra==2 arm so the
+  // complete forward representation {byte-valid, data, user} crosses the
+  // T1->T2 edge as a snapshot (r38; see gen_rsp_pipe below).
+  logic [(G6LCCfg.XLEN/8)-1:0]          fwd_be_c;
+  logic [G6LCCfg.XLEN-1:0]              fwd_data_c;
+  logic [G6LCCfg.DCACHE_USER_WIDTH-1:0] fwd_user_c;
+
   logic cmp_en_d, cmp_en_q;
   logic rd_acked;
   logic wr_denied;
@@ -250,6 +260,10 @@ assign wbuffer_all[k] = wbuffer_data_i[k];
   logic [G6LCCfg.DCACHE_SET_ASSOC-1:0]                   hit_sel;
   logic [WbufferAllDepth-1:0]                            merge_hit;
   logic [WbufferAllDepth-1:0][(G6LCCfg.XLEN/8)-1:0]      merge_vld;
+  // r58-D1: per-arm leaf source for the byte-lane tree — the piped arm
+  // supplies the T1 snapshot, the live arm the wbuffer array directly.
+  logic [WbufferAllDepth-1:0][G6LCCfg.XLEN-1:0]              wbuf_dat_src;
+  logic [WbufferAllDepth-1:0][G6LCCfg.DCACHE_USER_WIDTH-1:0] wbuf_usr_src;
   logic [G6LCCfg.DCACHE_SET_ASSOC-1:0][G6LCCfg.XLEN-1:0] rdata_arr;
   logic [G6LCCfg.DCACHE_SET_ASSOC-1:0][G6LCCfg.DCACHE_USER_WIDTH-1:0] ruser_arr;
   logic                                                  rd_refill;
@@ -373,55 +387,69 @@ assign wbuffer_all[k] = wbuffer_data_i[k];
   assign rd_acked = rd_req & ~rd_port_busy;
 `endif
 
-  always_comb begin : p_bank_req
-    vld_we    = wr_cl_vld_i;
-    wr_denied = 1'b0;
-    inv_ack_o = 1'b0;
-    bank_req  = '0;
-    wr_ack_o  = '0;
-    bank_we   = '0;
-    bank_idx  = '{default: wr_idx_i};
+  // r52-B2: decode the read/write bank one-hots independently. The
+  // original accumulated `bank_req` (`|=`) and overwrote `bank_idx`,
+  // which chained the write arm behind the read arm. A granted write
+  // can never overlap the granted data-read bank — the grant condition
+  // denies exactly that collision (`!(rd_ack && bank_collision)` when
+  // the read touches data) — so `rd_bank_oh & wr_bank_oh` is always 0
+  // and the OR-merge is identical. Per bank the read wins only its own
+  // index slot, matching the original `bank_idx[rd_bank]=rd_idx`
+  // overwrite; every other bank keeps the wr_idx_i default.
+  logic                        refill_line;
+  logic                        wr_wants, wr_grant_ok, wr_block;
+  logic [DCACHE_NUM_BANKS-1:0] rd_bank_oh, wr_bank_oh;
 
-    for (int k = 0; k < NumPorts; k++) begin
-      bank_collision[k] = rd_off_i[k][G6LCCfg.DCACHE_OFFSET_WIDTH-1:G6LCCfg.XLEN_ALIGN_BYTES] == wr_off_i[G6LCCfg.DCACHE_OFFSET_WIDTH-1:G6LCCfg.XLEN_ALIGN_BYTES];
-    end
+  assign refill_line = wr_cl_vld_i & |wr_cl_we_i;
 
-    if (wr_cl_vld_i & |wr_cl_we_i) begin
-      // Cache-line refill has highest priority.  A pending invalidation must
-      // wait until the line write completes.
-      bank_req = '1;
-      bank_we  = '1;
-      bank_idx = '{default: wr_cl_idx_i};
-    end else begin
-      // SL-W explicit invalidation has priority over single-word writes.
-      if (inv_req_i) begin
-        inv_ack_o = 1'b1;
-        vld_we    = 1'b1;
-      end
+  for (genvar k = 0; k < NumPorts; k++) begin : gen_bank_collision
+    assign bank_collision[k] =
+        rd_off_i[k][G6LCCfg.DCACHE_OFFSET_WIDTH-1:G6LCCfg.XLEN_ALIGN_BYTES] ==
+        wr_off_i[G6LCCfg.DCACHE_OFFSET_WIDTH-1:G6LCCfg.XLEN_ALIGN_BYTES];
+  end
 
-      if (rd_acked) begin
-        if (!rd_tag_only_i[vld_sel_d]) begin
-          bank_req = dcache_cl_bin2oh(
-              rd_off_i[vld_sel_d][G6LCCfg.DCACHE_OFFSET_WIDTH-1:G6LCCfg.XLEN_ALIGN_BYTES]);
-          bank_idx[rd_off_i[vld_sel_d][G6LCCfg.DCACHE_OFFSET_WIDTH-1:G6LCCfg.XLEN_ALIGN_BYTES]] = rd_idx_i[vld_sel_d];
-        end
-      end
+  assign rd_bank_oh =
+      (rd_acked && !rd_tag_only_i[vld_sel_d] && !refill_line)
+          ? dcache_cl_bin2oh(
+                rd_off_i[vld_sel_d][G6LCCfg.DCACHE_OFFSET_WIDTH-1:G6LCCfg.XLEN_ALIGN_BYTES])
+          : '0;
+  assign wr_wants    = |wr_req_i;
+  assign wr_grant_ok = wr_wants &&
+      (rd_tag_only_i[vld_sel_d] ||
+       !(rd_ack_o[vld_sel_d] && bank_collision[vld_sel_d]));
+  assign wr_block    = wr_wants && !wr_grant_ok;
+  assign wr_bank_oh  = (wr_grant_ok && !refill_line)
+      ? dcache_cl_bin2oh(
+            wr_off_i[G6LCCfg.DCACHE_OFFSET_WIDTH-1:G6LCCfg.XLEN_ALIGN_BYTES])
+      : '0;
 
-      if (|wr_req_i) begin
-        if (rd_tag_only_i[vld_sel_d] || !(rd_ack_o[vld_sel_d] && bank_collision[vld_sel_d])) begin
-          wr_ack_o = 1'b1;
-          bank_req |= dcache_cl_bin2oh(
-              wr_off_i[G6LCCfg.DCACHE_OFFSET_WIDTH-1:G6LCCfg.XLEN_ALIGN_BYTES]
-          );
-          bank_we =
-              dcache_cl_bin2oh(wr_off_i[G6LCCfg.DCACHE_OFFSET_WIDTH-1:G6LCCfg.XLEN_ALIGN_BYTES]);
-        end else begin
-          wr_denied = 1'b1;
-          vld_we    = 1'b1;
-        end
-      end
+  // Cache-line refill has highest priority; a pending invalidation
+  // waits until the line write completes. SL-W explicit invalidation
+  // has priority over single-word writes (denied writes still set the
+  // valid-write-enable, as before).
+  assign bank_req  = refill_line ? '1 : (rd_bank_oh | wr_bank_oh);
+  assign bank_we   = refill_line ? '1 : wr_bank_oh;
+  assign vld_we    = wr_cl_vld_i | (!refill_line & (inv_req_i | wr_block));
+  assign wr_denied = !refill_line & wr_block;
+  assign inv_ack_o = !refill_line & inv_req_i;
+  assign wr_ack_o  = !refill_line & wr_grant_ok;
+
+  for (genvar b = 0; b < DCACHE_NUM_BANKS; b++) begin : gen_bank_idx
+    assign bank_idx[b] = refill_line ? wr_cl_idx_i :
+        (rd_bank_oh[b] ? rd_idx_i[vld_sel_d] : wr_idx_i);
+  end
+
+  //pragma translate_off
+  // The grant predicate makes read/write same-bank overlap impossible;
+  // if it ever held, the OR-merge would silently drop the read index.
+  always_ff @(posedge clk_i) begin : p_rd_wr_bank_disjoint
+    if (rst_ni) begin
+      g6lc_rd_wr_bank_disjoint:
+      assert ((rd_bank_oh & wr_bank_oh) == '0)
+        else $error("wt_dcache_mem: granted read and write collide on a bank");
     end
   end
+  //pragma translate_on
 
   ///////////////////////////////////////////////////////
   // tag comparison, hit generatio, readoud muxes
@@ -478,9 +506,9 @@ assign wbuffer_all[k] = wbuffer_data_i[k];
   // entry, lowest index first: the wbuffer entry (youngest; upstream keeps one
   // per word), then the fixup entries newest-first.
 `ifdef G6LC_MUT_WBUF_FWD_ONE_HOT
-  assign wbuffer_rdata = wbuffer_all[wbuffer_hit_idx].data;   // review mutation: the pre-fix single-entry forward
-  assign wbuffer_ruser = wbuffer_all[wbuffer_hit_idx].user;
-  assign wbuffer_be    = (|merge_hit) ? wbuffer_all[wbuffer_hit_idx].valid : '0;
+  assign fwd_data_c = wbuffer_all[wbuffer_hit_idx].data;   // review mutation: the pre-fix single-entry forward
+  assign fwd_user_c = wbuffer_all[wbuffer_hit_idx].user;
+  assign fwd_be_c   = (|merge_hit) ? wbuffer_all[wbuffer_hit_idx].valid : '0;
 `else
   // per byte lane: the lowest-index matching entry that holds the byte.
   // A140: the serial "first hit wins" scan over WbufferAllDepth entries is a
@@ -491,6 +519,10 @@ assign wbuffer_all[k] = wbuffer_data_i[k];
   // (A140, paired placement): worst arrival -26% for +31% of this module's
   // logic area; the prefix-one-hot AND-OR form measured -7% at -4.5% area and
   // is the area-neutral alternative recorded in the review.
+  // r43-T T4 countercase: the flat AND-OR byte merge (valid under the
+  // T47 one-holder-per-byte invariant, $onehot0 checked) re-measured
+  // WORSE on this board — module rr 33.3 -> 35.0 FO4 as the merge feeds
+  // rd_data_c -> the T1/T2 response registers; the balanced tree stays.
   typedef struct packed {
     logic       v;
     logic [7:0] d;
@@ -503,9 +535,9 @@ assign wbuffer_all[k] = wbuffer_data_i[k];
     fwd_leaf_t [WbufferAllDepth-1:0] node [0:FWD_LVL];
     for (genvar e = 0; e < WbufferAllDepth; e++) begin : gen_leaf
       assign node[0][e].v = merge_hit[e] & merge_vld[e][k];
-      assign node[0][e].d = wbuffer_all[e].data[8*k+:8];
+      assign node[0][e].d = wbuf_dat_src[e][8*k+:8];
       if (k < FWD_USER_BYTES) begin : gen_user_leaf
-        assign node[0][e].u = wbuffer_all[e].user[8*k+:8];
+        assign node[0][e].u = wbuf_usr_src[e][8*k+:8];
       end else begin : gen_no_user_leaf
         assign node[0][e].u = '0;
       end
@@ -519,22 +551,23 @@ assign wbuffer_all[k] = wbuffer_data_i[k];
         end
       end
     end
-    assign wbuffer_be[k]         = node[FWD_LVL][0].v;
-    assign wbuffer_rdata[8*k+:8] = node[FWD_LVL][0].v ? node[FWD_LVL][0].d : 8'h0;
+    assign fwd_be_c[k]         = node[FWD_LVL][0].v;
+    assign fwd_data_c[8*k+:8]  = node[FWD_LVL][0].v ? node[FWD_LVL][0].d : 8'h0;
     if (k < FWD_USER_BYTES) begin : gen_user_out
-      assign wbuffer_ruser[8*k+:8] = node[FWD_LVL][0].v ? node[FWD_LVL][0].u : 8'h0;
+      assign fwd_user_c[8*k+:8] = node[FWD_LVL][0].v ? node[FWD_LVL][0].u : 8'h0;
     end
   end
   if (G6LCCfg.DCACHE_USER_WIDTH > FWD_USER_BYTES * 8) begin : gen_user_tail
-    assign wbuffer_ruser[G6LCCfg.DCACHE_USER_WIDTH-1:FWD_USER_BYTES*8] = '0;
+    assign fwd_user_c[G6LCCfg.DCACHE_USER_WIDTH-1:FWD_USER_BYTES*8] = '0;
   end
 `endif
   // Complete-word forward: every byte of the XLEN readout is in the buffer.
   // A cache-miss load of that word must not issue a refill (stale DRAM) while
   // the store is still sitting in the wbuffer. Per-word miss-unit *masking* of
   // colliding loads was tried and reverted (starves FDT walks); completing the
-  // load here does not hold miss-port arbitration.
-  assign fwd_hit_c = (|merge_hit) && (&wbuffer_be);
+  // load here does not hold miss-port arbitration. fwd_hit_c is assigned per
+  // response arm below: the hit term is the T2-domain wbuffer hit vector
+  // (registered on the piped arm, live on the single-cycle arm).
 
   if (G6LCCfg.NOCType == config_pkg::NOC_TYPE_AXI4_ATOP) begin : gen_axi_offset
     // In case of an uncached read, return the desired G6LCCfg.XLEN-bit segment of the most recent AXI read
@@ -565,13 +598,33 @@ assign wbuffer_all[k] = wbuffer_data_i[k];
 
   // hyp8: T1 tag-compare stage -> T2 way/data stage (DcacheHitExtra==2).
   // T1 captures the tag compare, the SRAM rdata word per way, the wbuffer
-  // compare vector and byte-valid masks, and the refill-word select. T2 runs
-  // the hit select and byte merge against those registers and registers the
-  // response, so rd_hit_oh_o / rd_vld_bits_o / rd_data_o / rd_user_o /
-  // wbuffer_fwd_hit_o arrive +2 cycles after the accepted request. The
-  // per-entry byte masks are snapshotted at T1 so a drain between T1 and T2
-  // cannot silently retract forwarded bytes; entry data/user ride live —
-  // a drained slot's payload is not rewritten in the same window.
+  // compare vector, the merged forward representation {byte-valid, data,
+  // user}, and the refill-word select. T2 runs the hit select and byte
+  // merge against those registers and registers the response, so
+  // rd_hit_oh_o / rd_vld_bits_o / rd_data_o / rd_user_o /
+  // wbuffer_fwd_hit_o arrive +2 cycles after the accepted request.
+  //
+  // r38: the forward payload crosses the T1->T2 edge inside the snapshot,
+  // not as a live re-read. wbuffer_all is positional: the fixup queue's
+  // export slots are a tail-relative view, and a fixup entry -- created
+  // when a store is memory-ACKed before its tag check -- pops on the same
+  // edge its deferred array write lands. A load whose T1 catch of the
+  // entry was followed by that pop re-read the cleared slot at T2 and
+  // overlaid the captured byte-valids with the drained payload, masking
+  // the already-written array word (the OpenSBI libfdt store->load
+  // livelock: an sw to a stack cell with the caller's lw ~36 cycles later
+  // returning the pre-store value). The fix evaluates the merge tree on
+  // the live T1 inputs and registers its result; T2 never reads
+  // wbuffer_all.
+  //
+  // empty_o is deliberately unchanged: a fixup entry's bytes are already
+  // in memory -- the memory write was acknowledged, which is exactly why
+  // the record was deferred to the fixup queue -- so fence-level
+  // visibility for other observers does not depend on the entry's
+  // residency; the snapshot only covers the same-core RAW ordering the
+  // wbuffer forward contract owns. Caveat: that guarantee is per-core --
+  // another agent's visibility still derives from the acknowledged
+  // memory write, not from this forward.
   if (HypCfg.DcacheHitExtra == 2) begin : gen_rsp_pipe
     logic [G6LCCfg.DCACHE_SET_ASSOC-1:0] hit_t1_q, hit_t2_q;
     logic [G6LCCfg.DCACHE_SET_ASSOC-1:0] vld_t1_q, vld_t2_q;
@@ -579,6 +632,10 @@ assign wbuffer_all[k] = wbuffer_data_i[k];
     logic [G6LCCfg.DCACHE_SET_ASSOC-1:0][G6LCCfg.DCACHE_USER_WIDTH-1:0] ruser_cl_q;
     logic [WbufferAllDepth-1:0]                       wbuf_hit_oh_q;
     logic [WbufferAllDepth-1:0][(G6LCCfg.XLEN/8)-1:0] wbuf_vld_q;
+    // r58-D1: per-entry {data,user} snapshot so the byte-lane merge tree
+    // runs at T2 on registers (never live wbuffer_all — r38 pop-race).
+    logic [WbufferAllRaw-1:0][G6LCCfg.XLEN-1:0]               wbuf_data_arr_q;
+    logic [WbufferAllRaw-1:0][G6LCCfg.DCACHE_USER_WIDTH-1:0]   wbuf_user_arr_q;
     logic                                             refill_vld_q;
     logic [G6LCCfg.XLEN-1:0]                          refill_word_q;
     logic [G6LCCfg.DCACHE_USER_WIDTH-1:0]             refill_user_q;
@@ -587,13 +644,45 @@ assign wbuffer_all[k] = wbuffer_data_i[k];
     logic                                             fwd_hit_q;
 
     assign hit_sel         = hit_t1_q;
+`ifdef G6LC_MUT_WBUF_FWD_LIVE_T2
+    // Review mutation: the pre-fix T2 readout -- the hit one-hot and the
+    // per-entry byte-valids are captured at T1 while the merge tree still
+    // re-reads the positional payload live at T2.
     assign merge_hit       = wbuf_hit_oh_q;
     assign merge_vld       = wbuf_vld_q;
+    for (genvar k = 0; k < WbufferAllDepth; k++) begin : gen_live_mut_src
+      assign wbuf_dat_src[k] = wbuffer_all[k].data;
+      assign wbuf_usr_src[k] = wbuffer_all[k].user;
+    end
+    assign wbuffer_be      = fwd_be_c;
+    assign wbuffer_rdata   = fwd_data_c;
+    assign wbuffer_ruser   = fwd_user_c;
+`else
+    // r58-D1: hit one-hot and byte-valids are the T1 snapshot; the tree
+    // reads wbuf_data_arr_q/wbuf_user_arr_q (snapshot), so the whole
+    // merge — not just its inputs — is T2-domain. wbuffer_*_o alias the
+    // T2 combinational merge (rd_data_c merges them into the response).
+    assign merge_hit       = wbuf_hit_oh_q;
+    assign merge_vld       = wbuf_vld_q;
+    for (genvar e = 0; e < WbufferAllDepth; e++) begin : gen_snap_src
+      if (e < WbufferAllRaw) begin : gen_snap_real
+        assign wbuf_dat_src[e] = wbuf_data_arr_q[e];
+        assign wbuf_usr_src[e] = wbuf_user_arr_q[e];
+      end else begin : gen_snap_pad
+        assign wbuf_dat_src[e] = '0;
+        assign wbuf_usr_src[e] = '0;
+      end
+    end
+    assign wbuffer_be      = fwd_be_c;
+    assign wbuffer_rdata   = fwd_data_c;
+    assign wbuffer_ruser   = fwd_user_c;
+`endif
     assign rdata_arr       = rdata_cl_q;
     assign ruser_arr       = ruser_cl_q;
     assign rd_refill       = refill_vld_q;
     assign rd_refill_word  = refill_word_q;
     assign rd_refill_user  = refill_user_q;
+    assign fwd_hit_c       = (|wbuf_hit_oh_q) && (&wbuffer_be);
 
     assign rd_hit_oh_o      = hit_t2_q;
     assign rd_vld_bits_o    = vld_t2_q;
@@ -609,6 +698,8 @@ assign wbuffer_all[k] = wbuffer_data_i[k];
         ruser_cl_q     <= '0;
         wbuf_hit_oh_q  <= '0;
         wbuf_vld_q     <= '0;
+        wbuf_data_arr_q <= '0;
+        wbuf_user_arr_q <= '0;
         refill_vld_q   <= 1'b0;
         refill_word_q  <= '0;
         refill_user_q  <= '0;
@@ -619,7 +710,11 @@ assign wbuffer_all[k] = wbuffer_data_i[k];
         ruser_cl_q    <= ruser_cl;
         wbuf_hit_oh_q <= wbuffer_hit_oh;
         for (int k = 0; k < WbufferAllDepth; k++)
-          wbuf_vld_q[k] <= wbuffer_all[k].valid;
+          wbuf_vld_q[k]      <= wbuffer_all[k].valid;
+        for (int k = 0; k < WbufferAllRaw; k++) begin
+          wbuf_data_arr_q[k] <= wbuffer_all[k].data;
+          wbuf_user_arr_q[k] <= wbuffer_all[k].user;
+        end
         refill_vld_q  <= wr_cl_vld_i;
         refill_word_q <= wr_cl_data_i[wr_cl_off*G6LCCfg.XLEN+:G6LCCfg.XLEN];
         refill_user_q <= wr_cl_user_i[wr_cl_off*G6LCCfg.DCACHE_USER_WIDTH+:G6LCCfg.DCACHE_USER_WIDTH];
@@ -641,17 +736,83 @@ assign wbuffer_all[k] = wbuffer_data_i[k];
         fwd_hit_q <= fwd_hit_c;
       end
     end
+
+    //pragma translate_off
+    // r38 forward-snapshot equivalence: whenever every wbuffer_all slot
+    // that contributed to the T1 capture is still present at T2 with an
+    // unchanged byte-valid mask and payload, the registered forward word
+    // must equal the live merge recomputed over the same hit set. A
+    // snapshot divergence in the common (non-race) case is caught here;
+    // the pop-between-stages race exempts itself by changing the slot.
+    logic [WbufferAllDepth-1:0]                    fsnap_ok;
+    logic [(G6LCCfg.XLEN/8)-1:0]                   fsnap_be;
+    logic [G6LCCfg.XLEN-1:0]                       fsnap_dat;
+    logic [G6LCCfg.DCACHE_USER_WIDTH-1:0]          fsnap_usr;
+    logic                                          fsnap_chk, fsnap_err;
+    // r58-D1: the reference merge now runs over the SAME T1 snapshot the
+    // DUT tree reads (wbuf_*_arr_q/wbuf_vld_q/wbuf_hit_oh_q) — it checks
+    // the tree's serial-vs-balanced form, not live-vs-registered (which
+    // is now structurally impossible by construction).
+    always_comb begin
+      for (int e = 0; e < WbufferAllDepth; e++)
+        fsnap_ok[e] = 1'b1;  // snapshot inputs — always self-consistent
+      fsnap_be  = '0;
+      fsnap_dat = '0;
+      fsnap_usr = '0;
+      for (int e = WbufferAllRaw - 1; e >= 0; e--)
+        for (int k = 0; k < G6LCCfg.XLEN / 8; k++)
+          if (wbuf_hit_oh_q[e] && wbuf_vld_q[e][k]) begin
+            fsnap_be[k]       = 1'b1;
+            fsnap_dat[8*k+:8] = wbuf_data_arr_q[e][8*k+:8];
+            if (k < ((G6LCCfg.DCACHE_USER_WIDTH / 8 <
+                      G6LCCfg.XLEN / 8) ? G6LCCfg.DCACHE_USER_WIDTH / 8
+                                       : G6LCCfg.XLEN / 8))
+              fsnap_usr[8*k+:8] = wbuf_user_arr_q[e][8*k+:8];
+          end
+      fsnap_err = (fsnap_be != fwd_be_c);
+      for (int k = 0; k < G6LCCfg.XLEN / 8; k++)
+        if (fsnap_be[k] && (fsnap_dat[8*k+:8] != fwd_data_c[8*k+:8]))
+          fsnap_err = 1'b1;
+      for (int k = 0; k < ((G6LCCfg.DCACHE_USER_WIDTH / 8 <
+                            G6LCCfg.XLEN / 8) ?
+                           G6LCCfg.DCACHE_USER_WIDTH / 8 :
+                           G6LCCfg.XLEN / 8); k++)
+        if (fsnap_be[k] && (fsnap_usr[8*k+:8] != fwd_user_c[8*k+:8]))
+          fsnap_err = 1'b1;
+    end
+    assign fsnap_chk = |wbuf_hit_oh_q && &(~wbuf_hit_oh_q | fsnap_ok);
+    int unsigned fwd_snap_n = 0;
+    always_ff @(posedge clk_i) begin : p_fwd_snap_eq
+      if (rst_ni && fsnap_chk) begin
+        fwd_snap_n <= fwd_snap_n + 1;
+`ifndef G6LC_MUT_WBUF_FWD_LIVE_T2
+        g6lc_fwd_snap_eq: assert (!fsnap_err)
+          else $error("wt_dcache_mem: fwd snapshot diverged from live merge");
+`endif
+      end
+    end
+    final begin
+      if ($test$plusargs("equiv_report"))
+        $display("[equiv] wt_dcache_mem fwd_snap: checked=%0d", fwd_snap_n);
+    end
+    //pragma translate_on
   end else begin : gen_rsp_live
     assign hit_sel         = rd_hit_oh_c;
     assign merge_hit       = wbuffer_hit_oh;
     for (genvar k = 0; k < WbufferAllDepth; k++) begin : gen_merge_vld_live
       assign merge_vld[k] = wbuffer_all[k].valid;
+      assign wbuf_dat_src[k] = wbuffer_all[k].data;
+      assign wbuf_usr_src[k] = wbuffer_all[k].user;
     end
     assign rdata_arr       = rdata_cl;
     assign ruser_arr       = ruser_cl;
     assign rd_refill       = wr_cl_vld_i;
     assign rd_refill_word  = wr_cl_data_i[wr_cl_off*G6LCCfg.XLEN+:G6LCCfg.XLEN];
     assign rd_refill_user  = wr_cl_user_i[wr_cl_off*G6LCCfg.DCACHE_USER_WIDTH+:G6LCCfg.DCACHE_USER_WIDTH];
+    assign wbuffer_be      = fwd_be_c;
+    assign wbuffer_rdata   = fwd_data_c;
+    assign wbuffer_ruser   = fwd_user_c;
+    assign fwd_hit_c       = (|wbuffer_hit_oh) && (&wbuffer_be);
 
     assign rd_hit_oh_o      = rd_hit_oh_c;
     assign rd_vld_bits_o    = rd_vld_bits_c;

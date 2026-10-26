@@ -180,22 +180,43 @@ module lsu_bypass
   end
 
   for (genvar s = 0; s < DEPTH; s++) begin : gen_slot
+    // r42-T item 23 (A22): the serial field-override chain becomes
+    // parallel arms. The cancel index is predecoded per source record so
+    // the wr/q merge select happens BEFORE the trans_id -> cancelled
+    // mask dynamic read instead of after it.
     always_comb begin
+      logic do_flush, wr_s, pop_s, mx_cncl;
+      do_flush = flush_i || (pop_ld_i && pop_st_i);
+      wr_s     = !do_flush && lsu_req_valid_i && (write_pointer_q == 2'(s));
+      pop_s    = !do_flush && (pop_ld_i || pop_st_i) &&
+                 (read_pointer_q == 2'(s));
+`ifdef G6LC_MUT_T2_LBYP_MEMN
       mem_n[s] = mem_q[s];
-      if (flush_i || (pop_ld_i && pop_st_i)) begin
+      if (do_flush) begin
         mem_n[s] = '0;
-      end else if (lsu_req_valid_i && (write_pointer_q == 2'(s))) begin
+      end else if (wr_s) begin
         mem_n[s] = req_wr;
       end
-      if (!flush_i && !(pop_ld_i && pop_st_i) &&
-          (pop_ld_i || pop_st_i) && (read_pointer_q == 2'(s)))
+      if (pop_s)
         mem_n[s].valid = 1'b0;
-      // T35: sticky cancel. The mask names a tid only until the entry
-      // is commit-dropped; a store held for translation outlives that.
       if (G6LCCfg.OoOEn && mem_n[s].valid &&
           (mem_n[s].fu == LOAD || mem_n[s].fu == STORE) &&
           cancelled_mask_i[mem_n[s].trans_id])
         mem_n[s].is_speculative_load_miss = 1'b1;
+`else
+      mx_cncl = G6LCCfg.OoOEn &&
+          (wr_s ? (req_wr.fu == LOAD || req_wr.fu == STORE) &&
+                  cancelled_mask_i[req_wr.trans_id]
+                : (mem_q[s].fu == LOAD || mem_q[s].fu == STORE) &&
+                  cancelled_mask_i[mem_q[s].trans_id]);
+      mem_n[s] = do_flush ? '0 : (wr_s ? req_wr : mem_q[s]);
+      if (pop_s)
+        mem_n[s].valid = 1'b0;
+      // T35: sticky cancel. The mask names a tid only until the entry
+      // is commit-dropped; a store held for translation outlives that.
+      if (mem_n[s].valid && mx_cncl)
+        mem_n[s].is_speculative_load_miss = 1'b1;
+`endif
     end
   end
 
@@ -306,6 +327,37 @@ module lsu_bypass
         end
       end
     end
+  end
+
+  // r42-T item 23 equivalence: the parallel-arm mem_n must equal the
+  // serial override chain every cycle.
+  int unsigned t2_lbyp_n = 0;
+  lsu_ctrl_t ref_n;
+  bit ref_flush, ref_wr, ref_pop;
+  always_ff @(posedge clk_i) begin
+    if (rst_ni) begin
+      t2_lbyp_n <= t2_lbyp_n + 1;
+      ref_flush = flush_i || (pop_ld_i && pop_st_i);
+      for (int unsigned s = 0; s < DEPTH; s++) begin
+        ref_n   = mem_q[s];
+        ref_wr  = !ref_flush && lsu_req_valid_i && (write_pointer_q == 2'(s));
+        ref_pop = !ref_flush && (pop_ld_i || pop_st_i) &&
+                  (read_pointer_q == 2'(s));
+        if (ref_flush) ref_n = '0;
+        else if (ref_wr) ref_n = req_wr;
+        if (ref_pop) ref_n.valid = 1'b0;
+        if (G6LCCfg.OoOEn && ref_n.valid &&
+            (ref_n.fu == LOAD || ref_n.fu == STORE) &&
+            cancelled_mask_i[ref_n.trans_id])
+          ref_n.is_speculative_load_miss = 1'b1;
+        g6lc_t2_lbyp_eq: assert (mem_n[s] === ref_n)
+          else $error("lsu_bypass: equiv mem_n slot=%0d", s);
+      end
+    end
+  end
+  final begin
+    if ($test$plusargs("equiv_report"))
+      $display("[equiv] lsu_bypass memn: checked=%0d", t2_lbyp_n);
   end
 //pragma translate_on
 endmodule

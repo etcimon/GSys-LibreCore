@@ -171,6 +171,28 @@ module g6lc_shared_tlb #(
   logic flush_vmid_is0;
   logic flush_gpaddr_is0;
 
+  // r42-T item 19: the live-arm flush select staged as registered
+  // next-state bits (as item 16's T1/T2 split). flush_state_d already
+  // encodes next-cycle ownership, so walk_own_q == (state==FLUSH_READ)
+  // and walk_blk_q == (state!=IDLE) cycle-exactly; the miss-accept cone
+  // reads bits instead of decoding the 3-state FSM inline.
+  // svt-pipe: cycle stlb q=walk_own_q,walk_blk_q d=flush_state_d steps=1
+  logic walk_own_q, walk_blk_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      walk_own_q <= 1'b0;
+      walk_blk_q <= 1'b0;
+    end else begin
+`ifdef G6LC_MUT_T2_STLB_FLUSHSEL
+      walk_own_q <= 1'b0;
+      walk_blk_q <= 1'b0;
+`else
+      walk_own_q <= (flush_state_d == FLUSH_READ);
+      walk_blk_q <= (flush_state_d != IDLE);
+`endif
+    end
+  end
+
   logic [G6LCCfg.SharedTlbDepth-1:0][SHARED_TLB_WAYS-1:0] shared_tag_valid_q, shared_tag_valid_d;
 
   logic [               SHARED_TLB_WAYS-1:0] shared_tag_valid;
@@ -434,12 +456,21 @@ assign shared_tlb_access_o = shared_tlb_access_q;
     i_req_d             = i_req_q;
 
     //owning read ports while flush walker is active
+`ifdef G6LC_MUT_T2_STLB_FLUSHSEL
     if (flush_state_q == FLUSH_READ) begin
       tag_rd_en   = '1;
       pte_rd_en   = '1;
       tag_rd_addr = flush_idx_q;
       pte_rd_addr = flush_idx_q;
     end else if ((flush_state_q != IDLE) || flush_i || flush_vvma_i || flush_gvma_i) begin
+`else
+    if (walk_own_q) begin
+      tag_rd_en   = '1;
+      pte_rd_en   = '1;
+      tag_rd_addr = flush_idx_q;
+      pte_rd_addr = flush_idx_q;
+    end else if (walk_blk_q || flush_i || flush_vvma_i || flush_gvma_i) begin
+`endif
       //minimal approach holding lookup quiet during flush
       // if we got an ITLB miss
     end else if ((|v_st_enbl[1][HYP_EXT:0]) & itlb_access_i & ~itlb_hit_i & ~dtlb_access_i) begin
@@ -481,6 +512,8 @@ assign shared_tlb_access_o = shared_tlb_access_q;
     shared_tlb_hit_d = 1'b0;
     dtlb_update_o    = '0;
     itlb_update_o    = '0;
+    // r63: default so a non-hit path never infers a latch on patched_pte
+    patched_pte      = '0;
     match_asid       = '{default: 0};
     match_vmid       = G6LCCfg.RVH ? '{default: 0} : '{default: 1};
     match_hart       = HART_TAG ? '{default: 0} : '{default: 1};
@@ -799,6 +832,8 @@ assign shared_tlb_access_o = shared_tlb_access_q;
 
       current_vmid_matches = ((shared_tag_rd[i].v_st_enbl[HYP_EXT] && (flush_vmid_q == shared_tag_rd[i].vmid)) ||!shared_tag_rd[i].v_st_enbl[HYP_EXT]);
 
+`ifdef G6LC_MUT_T3_STLB_VVMA
+      // Review mutant: the pre-r43 priority if-chain.
       if(G6LCCfg.RVH && shared_tag_valid[i] && shared_tag_rd[i].v_st_enbl[HYP_EXT*2] && shared_tag_rd[i].v_st_enbl[0]) begin
         if (flush_asid_is0 && flush_vaddr_is0 && current_vmid_matches) begin
           vvma_match_way[i] = 1'b1;
@@ -810,8 +845,66 @@ assign shared_tlb_access_o = shared_tlb_access_q;
           vvma_match_way[i] = 1'b1;
         end
       end
+`else
+      // r43-T T5 (A22): the four exclusive vvma arms factor to
+      // (vaddr0 || addr_matches) && (asid0 || (!g && asid_eq)) — the
+      // priority chain is exact-flattened into parallel arm values.
+      if(G6LCCfg.RVH && shared_tag_valid[i] && shared_tag_rd[i].v_st_enbl[HYP_EXT*2] && shared_tag_rd[i].v_st_enbl[0]) begin
+        vvma_match_way[i] = current_vmid_matches &&
+            (flush_vaddr_is0 || flush_addr_matches) &&
+            (flush_asid_is0 ||
+             (!pte[i][0].g && (flush_asid_q == shared_tag_rd[i].asid)));
+      end
+`endif
     end
   end
+
+//pragma translate_off
+`ifndef G6LC_MUT_T3_STLB_VVMA
+  // r43-T T5 equivalence: recompute the pre-r43 priority chain and
+  // compare every cycle.
+  int unsigned t3_stlb_vvma_n = 0;
+  logic [SHARED_TLB_WAYS-1:0] vvma_ref;
+  always_comb begin
+    for (int unsigned i = 0; i < SHARED_TLB_WAYS; i++) begin
+      logic [G6LCCfg.PtLevels-1:0] fvpn;
+      logic [G6LCCfg.PtLevels-1:0] flvl;
+      logic                        fam, fnap, ulm, cvm;
+      fvpn = '0; flvl = '0; fam = 1'b0; fnap = 1'b0; ulm = 1'b0;
+      for (int unsigned level = 0; level < G6LCCfg.PtLevels; level++)
+        fvpn[level] = flush_vaddr_q[12 + VPN_SEG_W*level +: VPN_SEG_W] == shared_tag_rd[i].vpn[level];
+      for (int unsigned level = 0; level < G6LCCfg.PtLevels; level++) begin
+        ulm = 1'b1;
+        for (int unsigned k = level; k < G6LCCfg.PtLevels; k++)
+          ulm &= fvpn[k];
+        flvl[level] = ulm && ((level==0) ? 1'b1: shared_tag_rd[i].is_page[G6LCCfg.PtLevels-1-level][0]);
+      end
+      if (G6LCCfg.SvnapotEn && shared_tag_rd[i].is_napot_64k)
+        fnap = ((G6LCCfg.PtLevels > 1) ? (&fvpn[G6LCCfg.PtLevels-1:1]) : 1'b1) && (flush_vaddr_q[12+VPN_SEG_W-1:16]==shared_tag_rd[i].vpn[0][VPN_SEG_W-1:4]);
+      fam = (|flvl) || fnap;
+      cvm = ((shared_tag_rd[i].v_st_enbl[HYP_EXT] && (flush_vmid_q == shared_tag_rd[i].vmid)) || !shared_tag_rd[i].v_st_enbl[HYP_EXT]);
+      vvma_ref[i] = 1'b0;
+      if(G6LCCfg.RVH && shared_tag_valid[i] && shared_tag_rd[i].v_st_enbl[HYP_EXT*2] && shared_tag_rd[i].v_st_enbl[0]) begin
+        if (flush_asid_is0 && flush_vaddr_is0 && cvm) vvma_ref[i] = 1'b1;
+        else if (flush_asid_is0 && fam && !flush_vaddr_is0 && cvm) vvma_ref[i] = 1'b1;
+        else if(!pte[i][0].g && fam && (flush_asid_q == shared_tag_rd[i].asid) && !flush_vaddr_is0 && !flush_asid_is0 && cvm) vvma_ref[i] = 1'b1;
+        else if(!pte[i][0].g && flush_vaddr_is0 && (flush_asid_q == shared_tag_rd[i].asid) && !flush_asid_is0 && cvm) vvma_ref[i] = 1'b1;
+      end
+    end
+  end
+  always_ff @(posedge clk_i) begin
+    if (rst_ni) begin
+      t3_stlb_vvma_n <= t3_stlb_vvma_n + 1;
+      g6lc_t3_stlb_vvma_eq: assert (vvma_match_way === vvma_ref)
+        else $error("g6lc_shared_tlb: equiv vvma %b vs %b", vvma_match_way, vvma_ref);
+    end
+  end
+  final begin
+    if ($test$plusargs("equiv_report"))
+      $display("[equiv] g6lc_shared_tlb vvma: checked=%0d", t3_stlb_vvma_n);
+  end
+`endif
+//pragma translate_on
 
   always_comb begin : gvma_match_logic
     gvma_match_way = '0;
@@ -1004,6 +1097,27 @@ assign shared_tlb_access_o = shared_tlb_access_q;
       assign shared_tag_rd[i] = '0;
     end
   end
+
+//pragma translate_off
+  // r42-T item 19 equivalence: the staged ownership bits must equal the
+  // FSM decode they replaced every cycle.
+  int unsigned t2_stlb_flushsel_n = 0;
+  always_ff @(posedge clk_i) begin
+    if (rst_ni) begin
+      t2_stlb_flushsel_n <= t2_stlb_flushsel_n + 1;
+      g6lc_t2_stlb_flushsel_eq: assert (
+        (walk_own_q === (flush_state_q == FLUSH_READ)) &&
+        (walk_blk_q === (flush_state_q != IDLE)))
+        else $error("shared_tlb: equiv flushsel own=%b/%b blk=%b/%b",
+                    walk_own_q, flush_state_q == FLUSH_READ,
+                    walk_blk_q, flush_state_q != IDLE);
+    end
+  end
+  final begin
+    if ($test$plusargs("equiv_report"))
+      $display("[equiv] g6lc_shared_tlb flushsel: checked=%0d", t2_stlb_flushsel_n);
+  end
+//pragma translate_on
 endmodule
 
 /* verilator lint_on WIDTH */

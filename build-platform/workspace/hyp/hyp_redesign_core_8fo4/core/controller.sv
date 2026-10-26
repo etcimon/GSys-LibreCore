@@ -93,6 +93,11 @@ module controller
     input bp_resolve_t resolved_branch_i,
     // We got an instruction which altered the CSR, flush the pipeline - CSR_REGFILE
     input logic flush_csr_i,
+    // pc of that CSR instruction (valid with flush_csr_i). csr_write
+    // registers flush_csr_i one cycle after the CSR's commit_ack, so
+    // pc_commit_i already names the next head (or a freed slot) when the
+    // flush arrives; the refetch must be formed from the CSR's own pc.
+    input logic [G6LCCfg.VLEN-1:0] csr_flush_pc_i,
     // fence.i in - ACC_DISPATCH
     input logic fence_i_i,
     // fence in - ACC_DISPATCH
@@ -165,8 +170,11 @@ module controller
     return (m > d) ? m : d;
   endfunction
 
+  // r43-T T1(b): the rename term carries the kernel's extra RR-a stage
+  // (RenameResolveStages-1 added edges on the capture->publish path).
   localparam int unsigned DRAIN_CYCLES = hyp_max4(
-      hyp_max4(HypCfg.DecodeStages + 2, HypCfg.RenameStages + 1,
+      hyp_max4(HypCfg.DecodeStages + 2,
+               HypCfg.RenameStages + HypCfg.RenameResolveStages,
                HypCfg.AluStages + 2, 3),
       HypCfg.DcacheHitExtra + 3, HypCfg.CsrReadStages + 1, 1);
   localparam int unsigned DRAIN_W = (DRAIN_CYCLES > 1) ? $clog2(DRAIN_CYCLES) : 1;
@@ -477,6 +485,11 @@ assign commit_flush = ex_valid_i | eret_i
     flush_tlb_gvma_o       = flush_tlb_gvma_comb;
     mem_replay_pc_o        = mem_replay_comb;
 
+    // r42-T item 23 countercase: an A22 parallel-arm rewrite of this
+    // case measured WORSE on the board (controller 25.1 -> 67.2 FO4,
+    // analyze-ghz-r4 vs r3b) — the per-output comb|d0|d2 arms extended
+    // the flush_*_comb cones instead of sharing the case select.
+    // Reverted under T1 discipline; the exclusive-arm case is kept.
     if (DRAIN_CYCLES > 1) begin
       unique case (drain_sel)
         2'd0: begin
@@ -530,7 +543,12 @@ assign commit_flush = ex_valid_i | eret_i
           drain_setpc_q <= 1'b0;
         end else if (refetch_flush || kill_only_flush) begin
           drain_cnt_q    <= DRAIN_CYCLES - 1;
-          drain_pc_q     <= pc_commit_i;
+          // r59: the CSR side-effect flush is registered one cycle after
+          // the CSR retired, so its refetch pc is the CSR's own pc carried
+          // with the flush, not the head presented now (which is already
+          // the next instruction -- the old form resumed at next.pc + 4 and
+          // dropped one instruction after every flushing CSR write).
+          drain_pc_q     <= flush_csr_i ? csr_flush_pc_i : pc_commit_i;
           drain_replay_q <= mem_replay_comb;
           // the refetch qualifier is latched separately from the kill
           // mask: drain_force also raises flush_unissued, so a mask bit
@@ -574,4 +592,5 @@ assign commit_flush = ex_valid_i | eret_i
       flush_dcache_o   <= flush_dcache;
     end
   end
+
 endmodule

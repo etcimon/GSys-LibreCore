@@ -198,6 +198,7 @@ ${HYP_CORE_DIR}/core/load_store_unit.sv
 ${HYP_CORE_DIR}/core/lsu_bypass.sv
 ${HYP_CORE_DIR}/core/mult.sv
 ${HYP_CORE_DIR}/core/multiplier.sv
+${HYP_CORE_DIR}/core/mult_clmul.sv
 ${HYP_CORE_DIR}/core/serdiv.sv
 ${HYP_CORE_DIR}/core/perf_counters.sv
 ${HYP_CORE_DIR}/core/g6lc_regfile_ff.sv
@@ -335,6 +336,8 @@ ${HYP_CORE_DIR}/core/g6lc_mmu/g6lc_mmu.sv
 ${HYP_CORE_DIR}/core/g6lc_mmu/g6lc_ptw.sv
 ${HYP_CORE_DIR}/core/g6lc_mmu/g6lc_tlb.sv
 ${HYP_CORE_DIR}/core/g6lc_mmu/g6lc_shared_tlb.sv
+${HYP_CORE_DIR}/core/g6lc_mmu/g6lc_tlb_miss_router.sv
+${HYP_CORE_DIR}/core/g6lc_mmu/g6lc_ptw_leg_decode.sv
 ${HYP_APU_DIR}/corev_apu/tb/g6lc_axi_pkg.sv
 ${HYP_APU_DIR}/corev_apu/tb/axi_intf.sv
 ${HYP_APU_DIR}/corev_apu/register_interface/src/reg_intf.sv

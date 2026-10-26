@@ -340,6 +340,85 @@ module g6lc_rename_recover #(
     end
   end
 
+  // hyp8 T1 item 9: row-local publish marks. The live-slot test is
+  // evaluated per slot with the slot's static slice owner (slices are
+  // contiguous fixed ranges, so the hart a slot belongs to is a constant,
+  // clamped to the last hart for a stray slot beyond NH*CKPT_PER_HART —
+  // identical to live_slot's largest-hh rule); the checkpoint write hit
+  // is a one-hot slot decode per port instead of a dynamic-index write
+  // (rsvd_mask[s] and a port hit are the same predicate), and the
+  // per-slot mark/write values are masked-OR columns rather than
+  // mux-selected reads.
+  logic [NR_PORTS-1:0][CKPT_DEPTH-1:0] pub_ck_oh;
+  logic [CKPT_DEPTH-1:0][NR_PORTS-1:0] pub_ck_oh_t;
+  for (genvar p = 0; p < NR_PORTS; p++)
+    for (genvar s = 0; s < CKPT_DEPTH; s++) begin
+      assign pub_ck_oh[p][s] =
+          pub_ck_v_i[p] && (int'(pub_ck_slot_i[p]) == s);
+      assign pub_ck_oh_t[s][p] = pub_ck_oh[p][s];
+    end
+
+  logic [CKPT_DEPTH-1:0]                 t1_live_s, t1_wr_s;
+  logic [CKPT_DEPTH-1:0][PRF_ENTRIES-1:0] t1_aval_s, t1_mk_s;
+  logic [CKPT_DEPTH-1:0][FPN-1:0]        t1_faval_s, t1_fmk_s;
+  logic [CKPT_DEPTH-1:0][HID_W-1:0]      t1_hart_s;
+  for (genvar s = 0; s < CKPT_DEPTH; s++) begin : gen_pub_row
+    localparam int unsigned HS =
+        (s / CKPT_PER_HART < NH) ? s / CKPT_PER_HART : NH - 1;
+    localparam int unsigned BASE = HS * CKPT_PER_HART;
+    assign t1_live_s[s] =
+        (((int'(s) - int'(BASE)) >= int'(ckpt_head_q[HS]))
+          ? (int'(s) - int'(BASE) - int'(ckpt_head_q[HS]))
+          : (int'(s) - int'(BASE) + int'(CKPT_PER_HART) -
+             int'(ckpt_head_q[HS])))
+        < int'(ckpt_cnt_q[HS]);
+    assign t1_wr_s[s] = pub_v_i && (|pub_ck_oh_t[s]);
+    for (genvar i = 0; i < PRF_ENTRIES; i++) begin : gen_av
+      logic [NR_PORTS-1:0] vcol;
+      logic [NH-1:0]       mcol;
+      for (genvar p = 0; p < NR_PORTS; p++)
+        assign vcol[p] = pub_ck_oh[p][s] && pub_ck_aval_i[p][i];
+      for (genvar h = 0; h < NH; h++)
+        assign mcol[h] = (ckpt_hart_q[s] == HID_W'(h)) && pub_mark_i[h][i];
+      assign t1_aval_s[s][i] = |vcol;
+      assign t1_mk_s[s][i]   = |mcol;
+    end
+    for (genvar i = 0; i < FPN; i++) begin : gen_fav
+      logic [NR_PORTS-1:0] vcol;
+      logic [NH-1:0]       mcol;
+      for (genvar p = 0; p < NR_PORTS; p++)
+        assign vcol[p] = pub_ck_oh[p][s] && pub_ck_faval_i[p][i];
+      for (genvar h = 0; h < NH; h++)
+        assign mcol[h] = (ckpt_hart_q[s] == HID_W'(h)) && pub_fmark_i[h][i];
+      assign t1_faval_s[s][i] = |vcol;
+      assign t1_fmk_s[s][i]   = |mcol;
+    end
+    for (genvar b = 0; b < HID_W; b++) begin : gen_hb
+      logic [NR_PORTS-1:0] hcol;
+      for (genvar p = 0; p < NR_PORTS; p++)
+        assign hcol[p] = pub_ck_oh[p][s] && pub_ck_h_i[p][b];
+      assign t1_hart_s[s][b] = |hcol;
+    end
+  end
+
+  // hyp8 T1 item 9: post-publish next row values, computed as a live row
+  // vector so the equivalence tap below is a plain continuous read of the
+  // live path rather than a conditional write inside p_next_state.
+  // Per slot: write hit -> port value, else live -> OR the hart's mark,
+  // else hold -- identical to the per-slot arm applied in p_next_state.
+  logic [CKPT_DEPTH-1:0][PRF_ENTRIES-1:0] pub_alloc_v;
+  logic [CKPT_DEPTH-1:0][FPN-1:0]         pub_falloc_v;
+  logic [CKPT_DEPTH-1:0][HID_W-1:0]       pub_hart_v;
+  for (genvar s = 0; s < CKPT_DEPTH; s++) begin : gen_pub_v
+    assign pub_alloc_v[s]  = t1_wr_s[s]   ? t1_aval_s[s] :
+                             t1_live_s[s] ? (ckpt_alloc_q[s] | t1_mk_s[s])
+                                         : ckpt_alloc_q[s];
+    assign pub_falloc_v[s] = t1_wr_s[s]   ? t1_faval_s[s] :
+                             t1_live_s[s] ? (ckpt_falloc_q[s] | t1_fmk_s[s])
+                                         : ckpt_falloc_q[s];
+    assign pub_hart_v[s]   = t1_wr_s[s]   ? t1_hart_s[s] : ckpt_hart_q[s];
+  end
+
   always_comb begin : p_next_state
     automatic logic [PRF_ENTRIES-1:0] squashed, arch_ref, free_rep;
     automatic logic [FPN-1:0] fsquashed, farch_ref, ffree_rep;
@@ -381,8 +460,9 @@ module g6lc_rename_recover #(
       end
       busy_d  = busy_d  | pub_busy_set_i;
       fbusy_d = fbusy_d | pub_fbusy_set_i;
-      // Alloc marks: OR into every live same-hart slot except the slots
-      // reserved by this group (they take their own value below).
+`ifdef G6LC_MUT_T1_RNREC
+      // Review mutant: pre-T1 publish section — per-entry live_slot loop
+      // plus dynamic-index writes, restored on the live path.
       for (int unsigned s = 0; s < CKPT_DEPTH; s++) begin
         if (live_slot(s) && !rsvd_mask[s]) begin
           ckpt_alloc_d[s]  = ckpt_alloc_d[s]  | pub_mark_i[ckpt_hart_q[s]];
@@ -396,6 +476,16 @@ module g6lc_rename_recover #(
           ckpt_falloc_d[pub_ck_slot_i[p]] = pub_ck_faval_i[p];
         end
       end
+`else
+      // hyp8 T1 item 9: per-slot exclusive arms applied as one row
+      // vector. A write hit and a reservation are the same decoded
+      // predicate (t1_wr_s), so the two old loops collapse into the
+      // pub_*_v rows: hit → port value, else live → OR the hart's mark,
+      // else hold.
+      ckpt_hart_d   = pub_hart_v;
+      ckpt_alloc_d  = pub_alloc_v;
+      ckpt_falloc_d = pub_falloc_v;
+`endif
     end
 
     // ---- reserve ------------------------------------------------------
@@ -716,6 +806,59 @@ module g6lc_rename_recover #(
   // register (f0) -- fbusy_q is intentionally unchecked.
   assert property (@(posedge clk_i) disable iff (!rst_ni) !busy_q[0])
     else $fatal(1, "rename_recover: int busy[0] set (x0 physical tag marked busy)");
+
+  // hyp8 T1 item 9: row-local publish equivalence — the pre-T1 loop form
+  // (live_slot mark-OR + dynamic-index writes) is recomputed from the
+  // registered state and compared every cycle against the live path's
+  // post-publish rows (pub_*_v are the actual nets p_next_state applies).
+  logic [CKPT_DEPTH-1:0][PRF_ENTRIES-1:0] t1_pub_alloc_tap;
+  logic [CKPT_DEPTH-1:0][FPN-1:0]         t1_pub_falloc_tap;
+  logic [CKPT_DEPTH-1:0][HID_W-1:0]       t1_pub_hart_tap;
+  assign t1_pub_alloc_tap  = pub_alloc_v;
+  assign t1_pub_falloc_tap = pub_falloc_v;
+  assign t1_pub_hart_tap   = pub_hart_v;
+  logic [CKPT_DEPTH-1:0][PRF_ENTRIES-1:0] t1_ref_alloc;
+  logic [CKPT_DEPTH-1:0][FPN-1:0]         t1_ref_falloc;
+  logic [CKPT_DEPTH-1:0][HID_W-1:0]       t1_ref_hart;
+  always_comb begin : p_t1_rnrec_ref
+    t1_ref_alloc  = ckpt_alloc_q;
+    t1_ref_falloc = ckpt_falloc_q;
+    t1_ref_hart   = ckpt_hart_q;
+    if (pub_v_i) begin
+      for (int unsigned s = 0; s < CKPT_DEPTH; s++) begin
+        if (live_slot(s) && !rsvd_mask[s]) begin
+          t1_ref_alloc[s]  = t1_ref_alloc[s]  | pub_mark_i[ckpt_hart_q[s]];
+          t1_ref_falloc[s] = t1_ref_falloc[s] | pub_fmark_i[ckpt_hart_q[s]];
+        end
+      end
+      for (int unsigned p = 0; p < NR_PORTS; p++) begin
+        if (pub_ck_v_i[p] && (int'(pub_ck_slot_i[p]) < CKPT_DEPTH)) begin
+          t1_ref_hart[pub_ck_slot_i[p]]   = HID_W'(pub_ck_h_i[p]);
+          t1_ref_alloc[pub_ck_slot_i[p]]  = pub_ck_aval_i[p];
+          t1_ref_falloc[pub_ck_slot_i[p]] = pub_ck_faval_i[p];
+        end
+      end
+    end
+  end
+  int unsigned t1_rnrec_n = 0;
+  always_ff @(posedge clk_i) begin : p_t1_rnrec_eq
+    if (rst_ni) begin
+      if (pub_v_i && !$isunknown({t1_pub_alloc_tap, t1_pub_falloc_tap,
+                       t1_pub_hart_tap})) begin
+        t1_rnrec_n <= t1_rnrec_n + 1;
+        g6lc_t1_rnrec_eq: assert (
+            (t1_pub_alloc_tap  === t1_ref_alloc) &&
+            (t1_pub_falloc_tap === t1_ref_falloc) &&
+            (t1_pub_hart_tap   === t1_ref_hart))
+          else $error("g6lc_rename_recover: equiv pubmarks");
+      end
+    end
+  end
+  final begin
+    if ($test$plusargs("equiv_report"))
+      $display("[equiv] g6lc_rename_recover pubmarks: checked=%0d",
+               t1_rnrec_n);
+  end
   // pragma translate_on
 
 endmodule

@@ -264,6 +264,9 @@ module g6lc_iq
   logic [BANKS*NP-1:0]              xw_alu, xw_lo;
   logic [BANKS-1:0][ENTRIES-1:0]    info_v;
   logic [BANKS-1:0][ENTRIES-1:0][TID_W-1:0] info_tid;
+  // r68: next-state tid per entry (g6lc_iq_legal registers per-entry
+  // facts for the occupant present at the next edge).
+  logic [BANKS-1:0][ENTRIES-1:0][TID_W-1:0] info_tid_d;
   logic [BANKS-1:0][ENTRIES-1:0][HID_W-1:0] info_hart;
   logic [BANKS-1:0][ENTRIES-1:0][6:0] info_cls;
   logic [BANKS-1:0][ENTRIES-1:0]    info_bypass;
@@ -392,6 +395,7 @@ module g6lc_iq
         .replay_i    (replay_valid_i),
         .info_v_o    (info_v[b]),
         .info_tid_o  (info_tid[b]),
+        .info_tid_d_o(info_tid_d[b]),
         .info_hart_o (info_hart[b]),
         .info_cls_o  (info_cls[b]),
         .info_bypass_o(info_bypass[b]),
@@ -449,6 +453,7 @@ module g6lc_iq
       .clk_i, .rst_ni, .flush_i,
       .info_v_i           (info_v),
       .info_tid_i         (info_tid),
+      .info_tid_d_i       (info_tid_d),
       .info_hart_i        (info_hart),
       .info_cls_i         (info_cls),
       .info_bypass_i      (info_bypass),
@@ -520,6 +525,7 @@ module g6lc_iq
   // ----------------------------------------------------------------------
   g6lc_iq_arb #(
       .G6LCCfg(G6LCCfg),
+      .HypCfg (HypCfg),
       .BANKS  (BANKS),
       .ENTRIES(ENTRIES),
       .TID_W  (TID_W),
@@ -588,6 +594,38 @@ module g6lc_iq
     assert ((1 << WAKE_W) > WAKE_MAX)
       else $fatal(1, "g6lc_iq: WAKE_W=%0d cannot represent WAKE_MAX=%0d",
                   WAKE_W, WAKE_MAX);
+  end
+
+  // r68 L3 contract at the IQ -> issue promise ("I deliver program order
+  // for the classes that require it"): a head-only entry (AMO/LR/SC,
+  // system CSR, CVXIF) is granted only while its tid is the commit head.
+  // The grant is one cycle after candidacy and the head cannot move past
+  // an un-executed head-only op, so the check is strict. Names the owner
+  // of a non-head serial issue on the grant cycle (r62 D1).
+  int unsigned r68_take_n = 0;
+  always_ff @(posedge clk_i) begin : p_r68_take
+    if (rst_ni && !flush_i) begin
+      for (int unsigned b = 0; b < BANKS; b++) begin
+        for (int unsigned p = 0; p < NP; p++) begin
+          if (take_v[b][p] &&
+              !$isunknown({info_tid[b][take_idx[b][p]],
+                           info_cls[b][take_idx[b][p]]})) begin
+            r68_take_n <= r68_take_n + 1;
+            g6lc_r68_take_head_only: assert (
+                !(info_cls[b][take_idx[b][p]][C_CVXI] |
+                  info_cls[b][take_idx[b][p]][C_AMO] |
+                  info_cls[b][take_idx[b][p]][C_CSYS]) ||
+                (info_tid[b][take_idx[b][p]] == commit_ptr_i))
+              else $error("g6lc_iq: head-only tid=%0d granted (bank %0d port %0d) while commit_ptr=%0d",
+                          info_tid[b][take_idx[b][p]], b, p, commit_ptr_i);
+          end
+        end
+      end
+    end
+  end
+  final begin
+    if ($test$plusargs("equiv_report"))
+      $display("[equiv] g6lc_iq r68 head-only grants: checked=%0d", r68_take_n);
   end
   //pragma translate_on
 

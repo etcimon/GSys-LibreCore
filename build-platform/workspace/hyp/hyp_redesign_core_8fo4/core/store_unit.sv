@@ -323,6 +323,12 @@ assign result_o = lsu_ctrl_i.data;
 `endif
 
   logic [G6LCCfg.PLEN-1:0] paddr_to_sb;
+  // r42-T R6 classify: the 42.3-FO4 reg->out arm reaching here is
+  // paddr_i (g6lc_mmu_paddr from the DTLB) -> this align select ->
+  // store_buffer. LsuAguStages==2 already registers the AGU result; the
+  // launch is the DTLB PPN mux inside the MMU, so a second register here
+  // would add a cycle without removing the DTLB leg — classified, not
+  // re-registered (see implementation-log r42-T R6).
   // Physical address presented to the store buffer (line-aligned for cbo.zero)
   assign paddr_to_sb = (G6LCCfg.RVZiCboz && cbo_op_q == g6lc_core_pkg::CBO_ZERO)
                            ? (paddr_i & ~(G6LCCfg.PLEN'(CBOZ_LINE_B) - G6LCCfg.PLEN'(1)))
@@ -354,6 +360,36 @@ assign result_o = lsu_ctrl_i.data;
                         (lsu_ctrl_i.is_speculative_load_miss || cancelled_mask_i[lsu_ctrl_i.trans_id]);
 `endif
 
+  // r62: the request at the bypass head is an AMO whose OWN entry already
+  // sits in the depth-1 amo_buffer (the instruction was presented to the
+  // store unit twice -- a replay re-issue after the first copy had been
+  // posted). Holding it in WAIT_STORE_READY behind itself is a self-
+  // deadlock: the resident entry fires only on amo_valid_commit, which
+  // needs the head's result, which needs this very request (r34q probe:
+  // push at 21,945,777 with amo_valid_commit_i=0, then amo_valid=1 and
+  // trans_id 7 at the head forever; Linux stalls at its first spinlock).
+  // The duplicate is consumed and re-published (valid_o for the SB entry)
+  // without a second push.
+  logic amo_dup;
+  logic amo_dup_q;
+  assign amo_dup = G6LCCfg.RVA && valid_i && instr_is_amo && !amo_buffer_ready &&
+                   (amo_tid_q == lsu_ctrl_i.trans_id);
+  //pragma translate_off
+  longint unsigned amo_dup_n = 0;
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && (state_q == IDLE) && !st_cancelled && amo_dup) begin
+      amo_dup_n <= amo_dup_n + 1;
+      if ($test$plusargs("stq_trace"))
+        $display("[su] amo duplicate re-presented tid=%0d vaddr=%h (n=%0d)",
+                 lsu_ctrl_i.trans_id, lsu_ctrl_i.vaddr, amo_dup_n + 1);
+    end
+  end
+  final begin
+    if ($test$plusargs("equiv_report"))
+      $display("[equiv] store_unit amo_dup: consumed=%0d", amo_dup_n);
+  end
+  //pragma translate_on
+
   always_comb begin : store_control
     translation_req_o      = 1'b0;
     valid_o                = 1'b0;
@@ -383,7 +419,7 @@ assign result_o = lsu_ctrl_i.data;
             pop_st_o = 1'b0;
           end
 
-          if (!st_ready) begin
+          if (!st_ready && !amo_dup) begin
             state_d  = WAIT_STORE_READY;
             pop_st_o = 1'b0;
           end
@@ -393,7 +429,8 @@ assign result_o = lsu_ctrl_i.data;
       VALID_STORE: begin
         valid_o = 1'b1;
         // post this store to the store buffer if we are not flushing
-        if (!flush_i) st_valid = 1'b1;
+        // (r62: a duplicate AMO re-publishes only -- its entry is resident)
+        if (!flush_i && !amo_dup_q) st_valid = 1'b1;
 
         st_valid_without_flush = 1'b1;
 
@@ -433,7 +470,9 @@ assign result_o = lsu_ctrl_i.data;
           translation_req_o = 1'b0;
           pop_st_o          = 1'b1;
           state_d           = IDLE;
-        end else if (st_ready && dtlb_hit_i) begin
+        end else if ((st_ready || amo_dup) && dtlb_hit_i) begin
+          // r62: amo_dup -- the buffer is "ready" for this request because
+          // the resident entry IS this request; IDLE consumes it next.
           state_d = IDLE;
         end
       end
@@ -511,6 +550,10 @@ assign result_o = lsu_ctrl_i.data;
   // Re-aligner
   // -----------
   // re-align the write data to comply with the address offset
+  // r42-T item 23 classify: this cone is the data_align barrel shifter
+  // on endian_data — the exclusive arms (AMO passthrough / align /
+  // CBO_ZERO) are already single-level over the shifter; the shifter is
+  // the floor, not the arm select. Recorded, no RTL spent.
   always_comb begin
     st_be_n = lsu_ctrl_i.be;
     // don't shift the data if we are going to perform an AMO as we still need to operate on this data
@@ -577,10 +620,37 @@ assign result_o = lsu_ctrl_i.data;
   assign phys_hart_o = G6LCCfg.CohPolicy == config_pkg::COH_OOO ? st_hart_q : '0;
   assign phys_size_o = G6LCCfg.CohPolicy == config_pkg::COH_OOO ? st_data_size_q : '0;
 
-  assign st_ready = store_buffer_ready & amo_buffer_ready;
+  // r61: readiness is per destination. The reference ANDed both buffers,
+  // which was harmless in-order (an AMO could only be accepted after every
+  // older store had been posted). Under OoO issue a YOUNGER AMO can reach
+  // the amo_buffer first; gating an older plain store on amo_buffer_ready
+  // then deadlocks: the store never posts, so it never commits, so the AMO
+  // behind it never reaches the commit head, so the buffer never pops
+  // (r31 Linux stall: SU WAIT_STORE_READY, STQ empty, amo_rdy=0, head store
+  // tid 0 behind amo tid in the buffer). A plain store needs only the
+  // store buffer; an AMO needs only the amo_buffer -- commit order and the
+  // AMO's no_st_pending gate keep the memory order unchanged.
+  // r62c: an AMO may post only when it is the committing (port-0) head —
+  // the depth-1 buffer must never be taken by a younger AMO ahead of the
+  // head's own request (r37p: post-flush slot 5 posted while slot 3 was
+  // the head; slot 3 then waited on the buffer forever). AMOs are a
+  // head-only issue class, so this gate is normally already true; it is
+  // the structural guarantee when issue order and LSU arrival order
+  // disagree (flush recovery).
+  // r67 countercase: gating the AMO post on `trans_id == commit_tran_id_i`
+  // deadlocked hyp8_amo_store_order at its first AMO (the AMO never left
+  // the IQ -- legality, not the SU, held it; see implementation-log r67).
+  // The gate is withdrawn; the age invariant must be enforced at issue.
+  assign st_ready = (G6LCCfg.RVA && instr_is_amo) ? amo_buffer_ready
+                                                  : store_buffer_ready;
   // Kill buffered AMO when its SB entry is younger-cancelled and not yet at commit.
   // ready_o is fifo empty: !ready ⇒ occupancy=1.
-  assign amo_cancel = G6LCCfg.RVA && !amo_buffer_ready && cancelled_mask_i[amo_tid_q];
+  // r61: the cancel mask names a tid only for the T35 lifetime; an AMO
+  // posted after its owner's cancel pulse has already passed would sit
+  // in the buffer forever (its slot is freed, nothing commits it) and
+  // block every later AMO. Sweep on owner liveness as csr_buffer does.
+  assign amo_cancel = G6LCCfg.RVA && !amo_buffer_ready &&
+                      (cancelled_mask_i[amo_tid_q] || !sb_live_i[amo_tid_q]);
 
   // ---------------
   // Store Queue
@@ -684,8 +754,13 @@ assign result_o = lsu_ctrl_i.data;
       amo_op_q       <= AMO_NONE;
       cbo_op_q       <= g6lc_core_pkg::CBO_NONE;
       amo_tid_q      <= '0;
+      amo_dup_q      <= 1'b0;
     end else begin
       state_q        <= state_d;
+      // r62: the accepted request (IDLE -> VALID_STORE) is a duplicate of
+      // the resident amo_buffer entry; VALID_STORE re-publishes without a
+      // second push.
+      amo_dup_q      <= (state_q == IDLE) && !st_cancelled && amo_dup;
       st_be_q        <= st_be_n;
       st_data_q      <= st_data_n;
       // Capture expected when accepting a new store/AMO (same cycle as st_data_n)

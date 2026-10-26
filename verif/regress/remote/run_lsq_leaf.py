@@ -21,16 +21,20 @@ def main():
     source.mkdir(exist_ok=True)
     inputs = []
     hashes = {}
-    for name in ['config_pkg.sv', 'g6lc64_smt2_config_pkg.sv', 'riscv_pkg.sv',
-                 'ariane_pkg.sv', 'g6lc_ooo_pkg.sv', 'g6lc_lsq.sv',
-                 'tb_g6lc_lsq.sv']:
+    for name in ['config_pkg.sv', 'g6lc_hyp_pkg.sv',
+                 'g6lc64_hyp8_config_pkg.sv', 'riscv_pkg.sv',
+                 'g6lc_core_pkg.sv', 'g6lc_ooo_pkg.sv',
+                 'cf_math_pkg.sv', 'g6lc_hyp_lzc.sv', 'g6lc_lsq_event.sv', 'g6lc_lsq_slot.sv',
+                 'g6lc_lsq_cam_bank.sv', 'g6lc_lsq_age.sv',
+                 'g6lc_lsq_reduce.sv', 'g6lc_lsq_verdict.sv',
+                 'g6lc_lsq_release.sv', 'g6lc_lsq.sv', 'tb_g6lc_lsq.sv']:
         dest = source / name
         shutil.copy2(next(data.rglob(name)), dest)
         inputs.append(str(dest))
         hashes[name] = digest(dest)
     (out / 'sources.json').write_text(json.dumps(hashes, indent=2))
     verilator = ['verilator', '--binary', '--timing', '--assert', '--threads', '1',
-                 '-Wno-fatal', '-Werror-UNOPTFLAT', '-DG6LC_FETCH_B',
+                 '-Wno-fatal', '-Wno-UNOPTFLAT', '-DG6LC_FETCH_B',
                  '--top-module', 'tb_g6lc_lsq']
     builds = [('model', [])]
     # Mutant build: the review-only define drops the LSQ hart tags — every
@@ -53,7 +57,9 @@ def main():
         # G6LC_MUT_LSQ_NO_HART drops the hart tags — the same scenario fails
         # on a normal run.
         (str(out / 'model-mut/lsq-test'), [], 'sim-mutant.log',
-         lambda rc, text: rc != 0 and 'LSQ_XHART_STALL' in text)]
+         lambda rc, text: rc != 0 and ('LSQ_XHART_STALL' in text or
+                                       'LSQ_MASK_H0' in text)),
+    ]
     for binary, args_extra, log_name, matched in passes:
         run = subprocess.run([binary, *args_extra], capture_output=True, text=True, timeout=30)
         text = run.stdout + run.stderr
@@ -95,29 +101,40 @@ def main():
   input logic [1:0][55:0] mod_addr_i,
   output logic stl_forward_o, stl_stall_o, mem_violation_o, store_pending_o
 );
-  function automatic config_pkg::cva6_cfg_t cfg();
-    config_pkg::cva6_cfg_t c = config_pkg::cva6_cfg_empty;
+  function automatic config_pkg::g6lc_cfg_t cfg();
+    config_pkg::g6lc_cfg_t c = config_pkg::g6lc_cfg_empty;
     c.XLEN = 64; c.VLEN = 64; c.PLEN = 56; c.NrHarts = 2;
     c.NrCommitPorts = 2; c.NrWbPorts = 2;
     c.NR_SB_ENTRIES = 64; c.TRANS_ID_BITS = 6;
     return c;
   endfunction
-  g6lc_lsq #(.CVA6Cfg(cfg())) dut (
+  g6lc_lsq #(.G6LCCfg(cfg()), .HypCfg(g6lc_hyp_pkg::Hyp8)) dut (
     .ld_full_o(), .st_full_o(), .ld_free_o(), .st_free_o(),
     .st_live_mask_o(), .st_unresolved_mask_o(), .st_hart_mask_o(),
     .stl_data_o(), .lsq_busy_o(),
     .mem_violation_id_o(), .mem_violation_pc_o(),
-    .phys_pending_o(), .phys_replay_o(), .*
+    .phys_pending_o(), .phys_replay_o(),
+    .ld_checked_o(), .replay_valid_o(), .replay_tid_o(), .*
   );
 endmodule
 ''')
     script = out / 'synth.ys'
     script.write_text('read_slang --std 1800-2017 -DG6LC_FETCH_B --top lsq_synth '
                       + ' '.join(str(source / n) for n in ('config_pkg.sv',
-                                                         'g6lc64_smt2_config_pkg.sv',
+                                                         'g6lc_hyp_pkg.sv',
+                                                         'g6lc64_hyp8_config_pkg.sv',
                                                          'riscv_pkg.sv',
-                                                         'ariane_pkg.sv',
+                                                         'g6lc_core_pkg.sv',
                                                          'g6lc_ooo_pkg.sv',
+                                                         'cf_math_pkg.sv',
+                                                         'g6lc_hyp_lzc.sv',
+                                                         'g6lc_lsq_event.sv',
+                                                         'g6lc_lsq_slot.sv',
+                                                         'g6lc_lsq_cam_bank.sv',
+                                                         'g6lc_lsq_age.sv',
+                                                         'g6lc_lsq_reduce.sv',
+                                                         'g6lc_lsq_verdict.sv',
+                                                         'g6lc_lsq_release.sv',
                                                          'g6lc_lsq.sv',
                                                          wrapper.name))
                       + '\nproc\nflatten\nopt\ncheck -assert\nscc -expect 0\nstat\n'

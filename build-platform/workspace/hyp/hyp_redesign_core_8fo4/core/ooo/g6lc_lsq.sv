@@ -182,6 +182,8 @@ module g6lc_lsq #(
     logic [G6LCCfg.PLEN-1:0]          addr;
     logic [G6LCCfg.XLEN-1:0]          data;
     logic [1:0]                       size;
+    // hyp8 T1 item 2: byte-lane footprint, written with the address.
+    logic [LANES-1:0]                 be;
   } st_ent_t;
 
   typedef struct packed {
@@ -192,6 +194,8 @@ module g6lc_lsq #(
     logic [HID_W-1:0]                 hart;
     logic [G6LCCfg.PLEN-1:0]          addr;
     logic [1:0]                       size;
+    // hyp8 T1 item 2: byte-lane footprint, written with the address.
+    logic [LANES-1:0]                 be;
     logic [G6LCCfg.VLEN-1:0]          pc;
   } ld_ent_t;
 
@@ -203,6 +207,8 @@ module g6lc_lsq #(
     logic [HID_W-1:0]                 hart;
     logic [G6LCCfg.PLEN-1:0]          addr;
     logic [1:0]                       size;
+    // hyp8 T1 item 2: stored byte-lane footprint.
+    logic [LANES-1:0]                 be;
   } cam_ent_t;
 
   st_ent_t [ST_ENTRIES-1:0] st_q;
@@ -213,6 +219,7 @@ module g6lc_lsq #(
   logic [NR_UPDATE-1:0][IDW-1:0]       ev_addr_id;
   logic [NR_UPDATE-1:0][G6LCCfg.PLEN-1:0] ev_addr;
   logic [NR_UPDATE-1:0][1:0]           ev_addr_size;
+  logic [NR_UPDATE-1:0][LANES-1:0]     ev_addr_be;
   logic [NR_UPDATE-1:0]                ev_data_valid;
   logic [NR_UPDATE-1:0][IDW-1:0]       ev_data_id;
   logic [NR_UPDATE-1:0][G6LCCfg.XLEN-1:0] ev_data;
@@ -224,6 +231,7 @@ module g6lc_lsq #(
   logic [IDW-1:0]                     ev_query_id;
   logic [G6LCCfg.PLEN-1:0]            ev_query_addr;
   logic [1:0]                         ev_query_size;
+  logic [LANES-1:0]                   ev_query_be;
   logic [HID_W-1:0]                   ev_query_hart;
   logic [1:0]                         ev_phys_valid;
   logic [1:0][G6LCCfg.PLEN-1:0]       ev_phys_addr;
@@ -252,6 +260,7 @@ module g6lc_lsq #(
       .ev_addr_id_o       (ev_addr_id),
       .ev_addr_o          (ev_addr),
       .ev_addr_size_o     (ev_addr_size),
+      .ev_addr_be_o       (ev_addr_be),
       .ev_data_valid_o    (ev_data_valid),
       .ev_data_id_o       (ev_data_id),
       .ev_data_o          (ev_data),
@@ -265,6 +274,7 @@ module g6lc_lsq #(
       .ev_query_id_o      (ev_query_id),
       .ev_query_addr_o    (ev_query_addr),
       .ev_query_size_o    (ev_query_size),
+      .ev_query_be_o      (ev_query_be),
       .ev_query_hart_o    (ev_query_hart),
       .ev_phys_valid_o    (ev_phys_valid),
       .ev_phys_addr_o     (ev_phys_addr),
@@ -281,6 +291,7 @@ module g6lc_lsq #(
   logic [NR_UPDATE-1:0][G6LCCfg.VLEN-1:0] ev_ld_pc;
   logic [NR_ALLOC-1:0]                  ld_alloc_v;
   logic [NR_ALLOC-1:0][$clog2(LD_ENTRIES)-1:0] ld_alloc_idx;
+  logic [NR_ALLOC-1:0][LD_ENTRIES-1:0]  ld_alloc_oh;
   logic [LD_ENTRIES-1:0]                ld_release;
 
   g6lc_lsq_slot #(
@@ -299,6 +310,7 @@ module g6lc_lsq #(
       .ev_addr_id_i    (ev_addr_id),
       .ev_addr_i       (ev_addr),
       .ev_addr_size_i  (ev_addr_size),
+      .ev_addr_be_i    (ev_addr_be),
       .ev_data_valid_i (ev_data_valid),
       .ev_data_id_i    (ev_data_id),
       .ev_data_i       (ev_data),
@@ -320,7 +332,8 @@ module g6lc_lsq #(
       .ev_ld_hart_o    (ev_ld_hart),
       .ev_ld_pc_o      (ev_ld_pc),
       .ld_alloc_v_o    (ld_alloc_v),
-      .ld_alloc_idx_o  (ld_alloc_idx)
+      .ld_alloc_idx_o  (ld_alloc_idx),
+      .ld_alloc_oh_o   (ld_alloc_oh)
   );
 
   // Occupancy flags depend only on registered state — the emit's
@@ -382,6 +395,7 @@ module g6lc_lsq #(
           st_cam[b][e].hart   = st_q[b*BSZ_S+e].hart;
           st_cam[b][e].addr   = st_q[b*BSZ_S+e].addr;
           st_cam[b][e].size   = st_q[b*BSZ_S+e].size;
+          st_cam[b][e].be     = st_q[b*BSZ_S+e].be;
         end
       end
     for (int unsigned b = 0; b < NB_L; b++)
@@ -394,6 +408,7 @@ module g6lc_lsq #(
           ld_cam[b][e].hart   = ld_q[b*BSZ_L+e].hart;
           ld_cam[b][e].addr   = ld_q[b*BSZ_L+e].addr;
           ld_cam[b][e].size   = ld_q[b*BSZ_L+e].size;
+          ld_cam[b][e].be     = ld_q[b*BSZ_L+e].be;
         end
       end
   end
@@ -536,6 +551,36 @@ module g6lc_lsq #(
   logic [NR_UPDATE-1:0][STL_BANK-1:0][G6LCCfg.XLEN-1:0] stl_epay_q;
   logic [STL_BANK-1:0][IDW-1:0]                     q_eid_q;
   logic [STL_BANK-1:0][G6LCCfg.XLEN-1:0]            q_epay_q;
+  // r53-B6: pairwise leaf age matrices for the reducers, compare-form
+  // (ooo_age_older over the same leaf ids this edge snapshots).
+  // age[r][c] = "r older than c"; relative order of two live ids is
+  // pivot-invariant under commit_ptr_i movement (it can only retire
+  // entries, and a retired leaf is dead in cand). The store matrix
+  // serves both the per-update stl reducer and the q reducer (same
+  // st entry ids); the vio matrix covers {vv_id_d, ld ids}.
+  logic [STL_BANK-1:0][STL_BANK-1:0]                st_age_d, st_age_q;
+  logic [NR_UPDATE-1:0][VIO_LEAF-1:0][VIO_LEAF-1:0] vio_age_d, vio_age_q;
+  for (genvar r = 0; r < STL_BANK; r++) begin : gen_st_age_r
+    for (genvar c = 0; c < STL_BANK; c++) begin : gen_st_age_c
+      assign st_age_d[r][c] = g6lc_ooo_pkg::ooo_age_older(
+          IDW, 32'(st_q[r].id), 32'(st_q[c].id), 32'(commit_ptr_i));
+    end
+  end
+  for (genvar u = 0; u < NR_UPDATE; u++) begin : gen_vio_age_u
+    for (genvar r = 0; r < VIO_LEAF; r++) begin : gen_vio_age_r
+      for (genvar c = 0; c < VIO_LEAF; c++) begin : gen_vio_age_c
+        logic [31:0] rid, cid;
+        assign rid = (r < VIO_BANK)
+            ? 32'((r < LD_ENTRIES) ? ld_q[r].id : '0)
+            : 32'(vv_id_d[u][r-VIO_BANK]);
+        assign cid = (c < VIO_BANK)
+            ? 32'((c < LD_ENTRIES) ? ld_q[c].id : '0)
+            : 32'(vv_id_d[u][c-VIO_BANK]);
+        assign vio_age_d[u][r][c] = g6lc_ooo_pkg::ooo_age_older(
+            IDW, rid, cid, 32'(commit_ptr_i));
+      end
+    end
+  end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -550,6 +595,8 @@ module g6lc_lsq #(
       stl_epay_q <= '0;
       q_eid_q    <= '0;
       q_epay_q   <= '0;
+      st_age_q   <= '0;
+      vio_age_q  <= '0;
     end else if (flush_i) begin
       vv_match_q <= '0;
       vv_older_q <= '0;
@@ -562,12 +609,16 @@ module g6lc_lsq #(
       stl_epay_q <= '0;
       q_eid_q    <= '0;
       q_epay_q   <= '0;
+      st_age_q   <= '0;
+      vio_age_q  <= '0;
     end else begin
       vv_match_q <= vv_match_d;
       vv_older_q <= vv_older_d;
       vv_dist_q  <= vv_dist_d;
       vv_id_q    <= vv_id_d;
       vv_pay_q   <= vv_pay_d;
+      st_age_q   <= st_age_d;
+      vio_age_q  <= vio_age_d;
       for (int unsigned u = 0; u < NR_UPDATE; u++) begin
         for (int unsigned i = 0; i < VIO_BANK; i++) begin
           if (i < LD_ENTRIES) begin
@@ -602,12 +653,29 @@ module g6lc_lsq #(
 
   // Event context pipeline: ctx1 registers beside the CAM stage,
   // ctx2 beside reduce — the verdict names its tid from ctx2.
+  // r43-T T3: HypCfg.LsqReduceStages==2 adds ctx3 beside R2 so the
+  // event/verdict pairing keeps the same distance as the reduce.
+  localparam bit LRED2 = (HypCfg.LsqReduceStages >= 2);
   logic [NR_UPDATE-1:0]        uctx1_v, uctx1_is_st;
   logic [NR_UPDATE-1:0][IDW-1:0] uctx1_id;
   logic [NR_UPDATE-1:0]        uctx2_v, uctx2_is_st;
   logic [NR_UPDATE-1:0][IDW-1:0] uctx2_id;
   logic                        qctx1_v, qctx2_v;
   logic [IDW-1:0]              qctx1_id, qctx2_id;
+  logic [NR_UPDATE-1:0]        uctx3_v, uctx3_is_st;
+  logic [NR_UPDATE-1:0][IDW-1:0] uctx3_id;
+  logic                        qctx3_v;
+  logic [IDW-1:0]              qctx3_id;
+  // The verdict-side context is ctx2 (1-stage reduce) or ctx3 (2-stage).
+  logic [NR_UPDATE-1:0]        uctxV_v, uctxV_is_st;
+  logic [NR_UPDATE-1:0][IDW-1:0] uctxV_id;
+  logic                        qctxV_v;
+  logic [IDW-1:0]              qctxV_id;
+  assign uctxV_v     = LRED2 ? uctx3_v     : uctx2_v;
+  assign uctxV_is_st = LRED2 ? uctx3_is_st : uctx2_is_st;
+  assign uctxV_id    = LRED2 ? uctx3_id    : uctx2_id;
+  assign qctxV_v     = LRED2 ? qctx3_v     : qctx2_v;
+  assign qctxV_id    = LRED2 ? qctx3_id    : qctx2_id;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -615,11 +683,15 @@ module g6lc_lsq #(
       uctx2_v <= '0;
       qctx1_v <= 1'b0;
       qctx2_v <= 1'b0;
+      uctx3_v <= '0;
+      qctx3_v <= 1'b0;
     end else if (flush_i) begin
       uctx1_v <= '0;
       uctx2_v <= '0;
       qctx1_v <= 1'b0;
       qctx2_v <= 1'b0;
+      uctx3_v <= '0;
+      qctx3_v <= 1'b0;
     end else begin
       for (int unsigned u = 0; u < NR_UPDATE; u++) begin
         uctx1_v[u]     <= ev_addr_valid[u] && !cancelled_mask_i[ev_addr_id[u]];
@@ -633,6 +705,17 @@ module g6lc_lsq #(
       qctx1_id <= ev_query_id;
       qctx2_v  <= qctx1_v && !cancelled_mask_i[qctx1_id];
       qctx2_id <= qctx1_id;
+      // r43-T T3: third context stage beside R2 (kill-gated the same
+      // way as ctx1->ctx2) when the reduce runs in two stages.
+      if (LRED2) begin
+        for (int unsigned u = 0; u < NR_UPDATE; u++) begin
+          uctx3_v[u]     <= uctx2_v[u] && !cancelled_mask_i[uctx2_id[u]];
+          uctx3_is_st[u] <= uctx2_is_st[u];
+          uctx3_id[u]    <= uctx2_id[u];
+        end
+        qctx3_v  <= qctx2_v && !cancelled_mask_i[qctx2_id];
+        qctx3_id <= qctx2_id;
+      end
     end
   end
 
@@ -661,6 +744,7 @@ module g6lc_lsq #(
           .ev_id_i    (ev_addr_id[u]),
           .ev_addr_i  (ev_addr[u]),
           .ev_size_i  (ev_addr_size[u]),
+          .ev_be_i    (ev_addr_be[u]),
           .ev_hart_i  (ev_ld_hart[u]),
           .ent_i      (st_cam[b]),
           .match_o    (stl_match_q[u][b*BSZ_S +: BSZ_S]),
@@ -706,6 +790,7 @@ module g6lc_lsq #(
           .ev_id_i    (ev_addr_id[u]),
           .ev_addr_i  (ev_addr[u]),
           .ev_size_i  (ev_addr_size[u]),
+          .ev_be_i    (ev_addr_be[u]),
           .ev_hart_i  (ev_st_hart[u]),
           .ent_i      (ld_cam[b]),
           .match_o    (vio_match_q[u][b*BSZ_L +: BSZ_L]),
@@ -749,6 +834,7 @@ module g6lc_lsq #(
         .ev_id_i    (ev_query_id),
         .ev_addr_i  (ev_query_addr),
         .ev_size_i  (ev_query_size),
+        .ev_be_i    (ev_query_be),
         .ev_hart_i  (ev_query_hart),
         .ent_i      (st_cam[b]),
         .match_o    (q_match_q[b*BSZ_S +: BSZ_S]),
@@ -790,6 +876,7 @@ module g6lc_lsq #(
   for (genvar u = 0; u < NR_UPDATE; u++) begin : gen_reduce
     g6lc_lsq_reduce #(
         .G6LCCfg (G6LCCfg),
+        .HypCfg  (HypCfg),
         .NLEAF   (STL_LEAF),
         .PAYW    (G6LCCfg.XLEN),
         .DIR     (1'b0)
@@ -799,6 +886,7 @@ module g6lc_lsq #(
         .unres_i  (stl_unres_q[u]),
         .nodata_i (stl_nodata_q[u]),
         .older_i  (stl_older_q[u]),
+        .age_i    (st_age_q),
         .dist_i   (stl_dist_q[u]),
         .ent_id_i (stl_eid_q),
         .ent_pay_i(stl_epay_q[u]),
@@ -812,9 +900,13 @@ module g6lc_lsq #(
     );
     g6lc_lsq_reduce #(
         .G6LCCfg (G6LCCfg),
+        .HypCfg  (HypCfg),
         .NLEAF   (VIO_LEAF),
         .PAYW    (G6LCCfg.VLEN),
-        .DIR     (1'b1)
+        .DIR     (1'b1),
+        // The violation direction publishes id/dist/PC only — the
+        // data-wait decode is dead work here.
+        .TRACK_WAIT(1'b0)
     ) i_vio_red (
         .clk_i, .rst_ni, .flush_i,
         // Every resident younger load matching the eventing store is a
@@ -827,6 +919,7 @@ module g6lc_lsq #(
         .unres_i  ({NR_UPDATE'(1'b0), vio_unres_q[u]}),
         .nodata_i ({NR_UPDATE'(1'b0), vio_nodata_q[u]}),
         .older_i  ({vv_older_q[u], vio_older_q[u]}),
+        .age_i    (vio_age_q[u]),
         .dist_i   ({vv_dist_q[u], vio_dist_q[u]}),
         .ent_id_i ({vv_id_q[u], vio_eid_q[u]}),
         .ent_pay_i({vv_pay_q[u], vio_epay_q[u]}),
@@ -842,6 +935,7 @@ module g6lc_lsq #(
 
   g6lc_lsq_reduce #(
       .G6LCCfg (G6LCCfg),
+      .HypCfg  (HypCfg),
       .NLEAF   (STL_LEAF),
       .PAYW    (G6LCCfg.XLEN),
       .DIR     (1'b0)
@@ -851,6 +945,7 @@ module g6lc_lsq #(
       .unres_i  (q_unres_q),
       .nodata_i (q_nodata_q),
       .older_i  (q_older_q),
+      .age_i    (st_age_q),
       .dist_i   (q_dist_q),
       .ent_id_i (q_eid_q),
       .ent_pay_i(q_epay_q),
@@ -875,15 +970,15 @@ module g6lc_lsq #(
 
   always_comb begin
     for (int unsigned u = 0; u < NR_UPDATE; u++) begin
-      ld_ev_v[u]   = uctx2_v[u] && !uctx2_is_st[u];
-      ld_ev_id[u]  = uctx2_id[u];
+      ld_ev_v[u]   = uctxV_v[u] && !uctxV_is_st[u];
+      ld_ev_id[u]  = uctxV_id[u];
       ld_win_v[u]  = stl_r_v[u];
       ld_win_pay[u]= stl_r_pay[u];
       ld_wait[u]   = stl_r_wait[u];
       ld_dwait[u]  = stl_r_dwait[u];
     end
-    ld_ev_v[NR_UPDATE]   = qctx2_v;
-    ld_ev_id[NR_UPDATE]  = qctx2_id;
+    ld_ev_v[NR_UPDATE]   = qctxV_v;
+    ld_ev_id[NR_UPDATE]  = qctxV_id;
     ld_win_v[NR_UPDATE]  = q_r_v;
     ld_win_pay[NR_UPDATE]= q_r_pay;
     ld_wait[NR_UPDATE]   = q_r_wait;
@@ -912,7 +1007,7 @@ module g6lc_lsq #(
       .ld_win_pay_i  (ld_win_pay),
       .ld_wait_i     (ld_wait),
       .ld_dwait_i    (ld_dwait),
-      .st_ev_valid_i (uctx2_v & uctx2_is_st),
+      .st_ev_valid_i (uctxV_v & uctxV_is_st),
       .st_win_valid_i(vio_r_v),
       .st_win_id_i   (vio_r_id),
       .st_win_dist_i (vio_r_dist),
@@ -982,6 +1077,16 @@ module g6lc_lsq #(
   logic [LD_ENTRIES-1:0]              ld_valid_pack, ld_done_pack;
   logic [LD_ENTRIES-1:0][IDW-1:0]     ld_id_pack;
 
+  // hyp8 T1 item 7: verdict→entry hit decoded once here (the wrapper
+  // owns the entry→id table) so the release module sees one-hot rows.
+  // Declared before i_release — slang requires declaration before use.
+  logic [NLD-1:0][LD_ENTRIES-1:0] vld_ld_hit;
+  always_comb begin
+    for (int unsigned v = 0; v < NLD; v++)
+      for (int unsigned i = 0; i < LD_ENTRIES; i++)
+        vld_ld_hit[v][i] = vld_v[v] && (ld_q[i].id == vld_id[v]);
+  end
+
   g6lc_lsq_release #(
       .G6LCCfg   (G6LCCfg),
       .LD_ENTRIES(LD_ENTRIES),
@@ -994,11 +1099,13 @@ module g6lc_lsq #(
       .ld_id_i      (ld_id_pack),
       .ld_alloc_v_i (ld_alloc_v),
       .ld_alloc_idx_i(ld_alloc_idx),
+      .ld_alloc_oh_i (ld_alloc_oh),
       .alloc_older_i(alloc_older),
       .st_resolved_i(st_resolved),
       .st_data_res_i(st_data_res),
       .vld_dwait_v_i (vld_v),
       .vld_dwait_id_i(vld_id),
+      .vld_ld_hit_i  (vld_ld_hit),
       .vld_dwait_i   (vld_dwait),
       .unres_empty_o (unres_empty),
       .dwait_empty_o (dwait_empty),
@@ -1139,17 +1246,32 @@ module g6lc_lsq #(
   localparam int unsigned LdSelLeaves = 1 << $clog2(LD_ENTRIES);
   localparam int unsigned LdSelW = (LD_ENTRIES > 1) ? $clog2(LD_ENTRIES) : 1;
   logic [2*LdSelLeaves-1:1]           pv_pick_valid;
+`ifdef G6LC_MUT_T2_LSQ_PICKDIST
+  // Review mutant: 32-bit distances, the pre-r42 form.
   logic [2*LdSelLeaves-1:1][31:0]     pv_pick_dist;
-  logic [2*LdSelLeaves-1:1][LdSelW-1:0] pv_pick_slot;
   logic [LD_ENTRIES-1:0][31:0]        ld_dist;
+`else
+  // r42-T R5: the circular distance is < 2**IDW; carry IDW+1 bits with
+  // bit IDW as the invalid sentinel instead of a 32-bit magnitude.
+  logic [2*LdSelLeaves-1:1][IDW:0]    pv_pick_dist;
+  logic [LD_ENTRIES-1:0][IDW:0]       ld_dist;
+`endif
+  logic [2*LdSelLeaves-1:1][LdSelW-1:0] pv_pick_slot;
   for (genvar j = 0; j < LD_ENTRIES; j++) begin : gen_ld_dist
-    assign ld_dist[j] = g6lc_ooo_pkg::ooo_age_dist(
-        IDW, 32'(ld_q[j].id), 32'(commit_ptr_i));
+    assign ld_dist[j] = $bits(ld_dist[j])'(g6lc_ooo_pkg::ooo_age_dist(
+        IDW, 32'(ld_q[j].id), 32'(commit_ptr_i)));
   end
   for (genvar j = 0; j < LdSelLeaves; j++) begin : gen_pv_leaf
     if (j < LD_ENTRIES) begin : gen_entry
       assign pv_pick_valid[LdSelLeaves+j] =
+`ifdef G6LC_MUT_T2_LSQ_PICKDIST
           phys_alias_cand[j] && ld_dist[j] != 32'hFFFF_FFFF;
+`else
+          // ooo_age_dist returns < 2**IDW (top bit 0); the old 32'hFF..
+          // compare was tautological, so the valid arm reduces to the
+          // candidate bit. Pad leaves carry the '1 sentinel.
+          phys_alias_cand[j];
+`endif
       assign pv_pick_dist[LdSelLeaves+j] = ld_dist[j];
       assign pv_pick_slot[LdSelLeaves+j] = LdSelW'(j);
     end else begin : gen_pad
@@ -1186,6 +1308,52 @@ module g6lc_lsq #(
   assign mem_violation_o    = v_viol || phys_viol;
   assign mem_violation_id_o = v_viol ? v_viol_id : phys_viol_id;
   assign mem_violation_pc_o = v_viol ? v_viol_pc : phys_viol_pc;
+
+//pragma translate_off
+  // r42-T R5 equivalence: recompute the pre-r42 32-bit pv tournament.
+  int unsigned t2_pvpick_n = 0;
+  logic [2*LdSelLeaves-1:1][31:0]       pvref_dist;
+  logic [2*LdSelLeaves-1:1]             pvref_valid;
+  logic [2*LdSelLeaves-1:1][LdSelW-1:0] pvref_slot;
+  logic [LD_ENTRIES-1:0][31:0]          pvref_ldist;
+  for (genvar j = 0; j < LD_ENTRIES; j++) begin : gen_pvref_d
+    assign pvref_ldist[j] = g6lc_ooo_pkg::ooo_age_dist(
+        IDW, 32'(ld_q[j].id), 32'(commit_ptr_i));
+  end
+  for (genvar j = 0; j < LdSelLeaves; j++) begin : gen_pvref_leaf
+    if (j < LD_ENTRIES) begin : ge
+      assign pvref_valid[LdSelLeaves+j] =
+          phys_alias_cand[j] && pvref_ldist[j] != 32'hFFFF_FFFF;
+      assign pvref_dist[LdSelLeaves+j] = pvref_ldist[j];
+      assign pvref_slot[LdSelLeaves+j] = LdSelW'(j);
+    end else begin : gp
+      assign pvref_valid[LdSelLeaves+j] = 1'b0;
+      assign pvref_dist[LdSelLeaves+j]  = '1;
+      assign pvref_slot[LdSelLeaves+j]  = '0;
+    end
+  end
+  for (genvar n = 1; n < LdSelLeaves; n++) begin : gen_pvref_pick
+    logic tr;
+    assign tr = pvref_valid[2*n+1] &&
+                (!pvref_valid[2*n] || pvref_dist[2*n+1] < pvref_dist[2*n]);
+    assign pvref_valid[n] = pvref_valid[2*n] | pvref_valid[2*n+1];
+    assign pvref_dist[n]  = tr ? pvref_dist[2*n+1] : pvref_dist[2*n];
+    assign pvref_slot[n]  = tr ? pvref_slot[2*n+1] : pvref_slot[2*n];
+  end
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && !flush_i) begin
+      t2_pvpick_n <= t2_pvpick_n + 1;
+      g6lc_t2_pvpick_eq: assert (
+          pv_pick_valid[1] === pvref_valid[1] &&
+          (!pv_pick_valid[1] || pv_pick_slot[1] === pvref_slot[1]))
+        else $error("g6lc_lsq: equiv pv_pick");
+    end
+  end
+  final begin
+    if ($test$plusargs("equiv_report"))
+      $display("[equiv] g6lc_lsq pvpick: checked=%0d", t2_pvpick_n);
+  end
+//pragma translate_on
 
 //pragma translate_off
   // +lsq_trace: load-entry release lifetime probe (diagnostic only).

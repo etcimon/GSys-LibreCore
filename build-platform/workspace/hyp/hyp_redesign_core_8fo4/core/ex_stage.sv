@@ -124,6 +124,12 @@ module ex_stage
     output logic resolve_branch_o,
     // CSR instruction is valid - ISSUE_STAGE
     input logic [G6LCCfg.NrIssuePorts-1:0] csr_valid_i,
+    // hyp8 r33: CSR table allocation strobes from dispatch + the table's
+    // free-entry credit back to the dispatch group gate - ISSUE_STAGE.
+    input  logic [G6LCCfg.NrIssuePorts-1:0] csr_disp_valid_i,
+    input  logic [G6LCCfg.NrIssuePorts-1:0][G6LCCfg.TRANS_ID_BITS-1:0] csr_disp_tid_i,
+    input  logic [G6LCCfg.NrIssuePorts-1:0][11:0] csr_disp_addr_i,
+    output logic [1:0] csr_credit_o,
     // CSR address to write - COMMIT_STAGE
     output logic [11:0] csr_addr_o,
     // CSR commit - COMMIT_STAGE
@@ -462,6 +468,8 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
   fu_data_t branch_data;
   logic [G6LCCfg.VLEN-1:0] rs1_forwarding;
   logic [G6LCCfg.VLEN-1:0] rs2_forwarding;
+`ifdef G6LC_MUT_T2_EXSTAGE_OCDATA
+  // Review mutant: port-priority chain, the pre-r42 form.
   always_comb begin
     // Priority: highest issue port with a one-cycle op (branch/ALU/CSR/AES)
     one_cycle_data = one_cycle_select[0] ? fu_data_i[0] : '0;
@@ -477,6 +485,74 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
       end
     end
   end
+`else
+  // r42-T R4: one-hot AND-OR on one_cycle_select. The ports are mutually
+  // exclusive by the g6lc_flu_reserve allocation (asserted below); under
+  // exclusivity the OR-fold equals the old last-wins chain. The no-select
+  // defaults are preserved exactly (port-0 forwarding operands).
+  always_comb begin
+    one_cycle_data  = '0;
+    rs1_forwarding  = '0;
+    rs2_forwarding  = '0;
+    if (one_cycle_select[0]) begin
+      one_cycle_data  = fu_data_i[0];
+      rs1_forwarding  = rs1_forwarding_i[0];
+      rs2_forwarding  = rs2_forwarding_i[0];
+    end
+    if (G6LCCfg.SuperscalarEn) begin
+      for (int unsigned p = 1; p < G6LCCfg.NrIssuePorts; p++) begin
+        if (one_cycle_select[p]) begin
+          one_cycle_data  |= fu_data_i[p];
+          rs1_forwarding  |= rs1_forwarding_i[p];
+          rs2_forwarding  |= rs2_forwarding_i[p];
+        end
+      end
+    end
+    if (~|one_cycle_select) begin
+      rs1_forwarding = rs1_forwarding_i[0];
+      rs2_forwarding = rs2_forwarding_i[0];
+    end
+  end
+`endif
+//pragma translate_off
+  // r42-T R4 equivalence: every cycle recompute the pre-r42 last-wins
+  // priority chain and compare; the counter prints under +equiv_report.
+  fu_data_t ocdata_ref;
+  logic [G6LCCfg.VLEN-1:0] rs1_fwd_ref, rs2_fwd_ref;
+  always_comb begin
+    ocdata_ref  = one_cycle_select[0] ? fu_data_i[0] : '0;
+    rs1_fwd_ref = rs1_forwarding_i[0];
+    rs2_fwd_ref = rs2_forwarding_i[0];
+    if (G6LCCfg.SuperscalarEn) begin
+      for (int unsigned p = 1; p < G6LCCfg.NrIssuePorts; p++) begin
+        if (one_cycle_select[p]) begin
+          ocdata_ref  = fu_data_i[p];
+          rs1_fwd_ref = rs1_forwarding_i[p];
+          rs2_fwd_ref = rs2_forwarding_i[p];
+        end
+      end
+    end
+  end
+  int unsigned t2_ocdata_n = 0;
+  always_ff @(posedge clk_i) begin
+    if (rst_ni) begin
+      t2_ocdata_n <= t2_ocdata_n + 1;
+      g6lc_t2_ocdata_eq: assert (
+          one_cycle_data === ocdata_ref &&
+          rs1_forwarding === rs1_fwd_ref &&
+          rs2_forwarding === rs2_fwd_ref)
+        else $error("ex_stage: equiv one_cycle_data");
+      g6lc_t2_ocdata_oh: assert ($onehot0(one_cycle_select))
+        else $error("ex_stage: one_cycle_select not one-hot %b",
+                    one_cycle_select);
+    end
+  end
+  final begin
+    if ($test$plusargs("equiv_report"))
+      $display("[equiv] ex_stage ocdata: checked=%0d", t2_ocdata_n);
+  end
+//pragma translate_on
+
   // I14: branch_unit fu_data is the CF issue port, never a later one-cycle
   // steal. SI const-folds to fu_data_i[0]. Same pick as IRO pc/compressed/bp.
   always_comb begin
@@ -624,6 +700,11 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
       .rst_ni,
       .flush_i,
       .cancelled_mask_i,
+      .sb_live_i   (sb_live_i),
+      .disp_valid_i(csr_disp_valid_i),
+      .disp_tid_i  (csr_disp_tid_i),
+      .disp_addr_i (csr_disp_addr_i),
+      .csr_credit_o(csr_credit_o),
       .fu_data_i   (one_cycle_data),
       .csr_valid_i (|csr_valid_i),
       .csr_ready_o (csr_ready),
@@ -772,7 +853,12 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
   assign csr_lane_v = csr_vld_q & ~cancelled_mask_i[csr_tid_q];
   assign aes_lane_v = aes_vld_q & ~cancelled_mask_i[aes_tid_q];
 
-  assign flu_valid_o = br_lane_v | alu_lane_v | csr_lane_v | aes_lane_v |
+  logic                              flu_valid_c;
+  logic [G6LCCfg.XLEN-1:0]           flu_result_c;
+  logic [G6LCCfg.TRANS_ID_BITS-1:0]  flu_trans_id_c;
+  exception_t                        flu_exception_c;
+
+  assign flu_valid_c = br_lane_v | alu_lane_v | csr_lane_v | aes_lane_v |
                        mult_valid;
 
   // FLU writeback record merge (record select, priority as in the emit:
@@ -781,28 +867,119 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
   // winning branch record only -- an ALU/CSR/mult/AES completion must not
   // publish a branch's trap.
   always_comb begin
-    flu_result_o    = {{G6LCCfg.XLEN - G6LCCfg.VLEN{1'b0}}, branch_result};
-    flu_trans_id_o  = resolved_branch.trans_id;
-    flu_exception_o = '0;
+    flu_result_c    = {{G6LCCfg.XLEN - G6LCCfg.VLEN{1'b0}}, branch_result};
+    flu_trans_id_c  = resolved_branch.trans_id;
+    flu_exception_c = '0;
     if (br_lane_v) begin
       // I14: flu tid/result of a CF is the resolving op's own record.
-      flu_result_o    = {{G6LCCfg.XLEN - G6LCCfg.VLEN{1'b0}}, branch_result};
-      flu_trans_id_o  = resolved_branch.trans_id;
-      flu_exception_o = branch_exception;
+      flu_result_c    = {{G6LCCfg.XLEN - G6LCCfg.VLEN{1'b0}}, branch_result};
+      flu_trans_id_c  = resolved_branch.trans_id;
+      flu_exception_c = branch_exception;
     end else if (alu_lane_v) begin
-      flu_result_o   = alu_lane_res;
-      flu_trans_id_o = alu_lane_tid;
+      flu_result_c   = alu_lane_res;
+      flu_trans_id_c = alu_lane_tid;
     end else if (csr_lane_v) begin
-      flu_result_o   = csr_res_q;
-      flu_trans_id_o = csr_tid_q;
+      flu_result_c   = csr_res_q;
+      flu_trans_id_c = csr_tid_q;
     end else if (mult_valid) begin
-      flu_result_o   = mult_result;
-      flu_trans_id_o = mult_trans_id;
+      flu_result_c   = mult_result;
+      flu_trans_id_c = mult_trans_id;
     end else if (aes_lane_v) begin
-      flu_result_o   = aes_result;
-      flu_trans_id_o = aes_tid_q;
+      flu_result_c   = aes_result;
+      flu_trans_id_c = aes_tid_q;
     end
   end
+
+`ifdef G6LC_MUT_T2_WBCAP
+  localparam bit WBCAP = 1'b0;  // review mutant: pre-r42 combinational publish
+`else
+  localparam bit WBCAP = (HypCfg.WbCaptureStages != 0);
+`endif
+  if (WBCAP) begin : gen_wb_capture
+    // r42-T item 20 / WbCaptureStages (rank 1): one registered FLU
+    // publication record {valid, tid, result, ex} between the lane merge
+    // and the WB fabric. flush_i clears the valid (killed records never
+    // publish); the lane valids are already cancellation-qualified.
+    // The +1 distance is derived through g6lc_ooo_pkg::ooo_flu_cycles
+    // (HypCfg.WbCaptureStages) — no consumer constant is hand-edited.
+    // svt-stage: begin WBC
+    // svt-pipe: protocol wbc valid=wbc_vld_q id=wbc_tid_q flush=flush_i
+    // svt-pipe: cycle wbc q=wbc_res_q d=flu_result_o hold=1'b0 steps=1
+    logic                             wbc_vld_q;
+    logic [G6LCCfg.TRANS_ID_BITS-1:0] wbc_tid_q;
+    logic [G6LCCfg.XLEN-1:0]          wbc_res_q;
+    exception_t                       wbc_ex_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (~rst_ni) begin
+        wbc_vld_q <= 1'b0;
+        wbc_tid_q <= '0;
+        wbc_res_q <= '0;
+        wbc_ex_q  <= '0;
+      end else if (flush_i) begin
+        wbc_vld_q <= 1'b0;
+        wbc_tid_q <= '0;
+        wbc_res_q <= '0;
+        wbc_ex_q  <= '0;
+      end else begin
+        wbc_vld_q <= flu_valid_c;
+        wbc_tid_q <= flu_trans_id_c;
+        wbc_res_q <= flu_result_c;
+        wbc_ex_q  <= flu_exception_c;
+      end
+    end
+    assign flu_valid_o     = wbc_vld_q;
+    assign flu_trans_id_o  = wbc_tid_q;
+    assign flu_result_o    = wbc_res_q;
+    assign flu_exception_o = wbc_ex_q;
+    // svt-stage: end WBC
+  end else begin : gen_wb_passthrough
+    assign flu_valid_o     = flu_valid_c;
+    assign flu_trans_id_o  = flu_trans_id_c;
+    assign flu_result_o    = flu_result_c;
+    assign flu_exception_o = flu_exception_c;
+  end
+
+//pragma translate_off
+  // r42-T item-20 equivalence: the published record must equal the
+  // previous cycle's lane-merge output (one clean edge, no drop/dup).
+  int unsigned t2_wbcap_n = 0;
+  logic                             wbc_vld_ref_q;
+  logic [G6LCCfg.TRANS_ID_BITS-1:0] wbc_tid_ref_q;
+  logic [G6LCCfg.XLEN-1:0]          wbc_res_ref_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (~rst_ni || flush_i) begin
+      wbc_vld_ref_q <= 1'b0;
+      wbc_tid_ref_q <= '0;
+      wbc_res_ref_q <= '0;
+    end else begin
+      wbc_vld_ref_q <= flu_valid_c;
+      wbc_tid_ref_q <= flu_trans_id_c;
+      wbc_res_ref_q <= flu_result_c;
+    end
+  end
+  always_ff @(posedge clk_i) begin
+    if (rst_ni) begin
+      t2_wbcap_n <= t2_wbcap_n + 1;
+      if (WBCAP) begin
+        g6lc_t2_wbcap_eq: assert (
+            flu_valid_o === wbc_vld_ref_q &&
+            (!wbc_vld_ref_q ||
+             (flu_trans_id_o === wbc_tid_ref_q &&
+              flu_result_o === wbc_res_ref_q)))
+          else $error("ex_stage: equiv wbcapture record");
+        // The record may not double-publish a completed lane.
+        g6lc_t2_wbcap_nodup: assert (!(flu_valid_o && wbc_vld_ref_q &&
+                                     flu_trans_id_o === wbc_tid_ref_q &&
+                                     flu_valid_c === 1'b0))
+          else $error("ex_stage: wbcapture duplicate publish");
+      end
+    end
+  end
+  final begin
+    if ($test$plusargs("equiv_report"))
+      $display("[equiv] ex_stage wbcapture: checked=%0d", t2_wbcap_n);
+  end
+//pragma translate_on
 
 //pragma translate_off
   // Actual publication collision check: the IRO-acceptance reservation

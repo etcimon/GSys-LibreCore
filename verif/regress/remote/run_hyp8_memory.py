@@ -89,6 +89,24 @@ LEAFS = {
         'model': 'hyp8_issue',
         'token': 'HYP8_ISSUE_PASS',
     },
+    # r68 IQ legality occupant-identity leaf: the real g6lc_iq_legal behind
+    # a bank stand-in with the bank's pend-staged allocation timing. A
+    # head-only (AMO/LR/SC, system CSR, CVXIF) occupant is never legal
+    # off the commit head -- not even in its first live cycle, whatever
+    # record its slot held before (the r62 kernel LR/SC wedge owner); a
+    # fresh load/store/CSR waits for facts computed for itself. Negative
+    # control: HYP8_EXTRA_DEFINES=G6LC_MUT_IQLEG_STALE_OCCUPANT -> L1 fails
+    # by name and the module's own r68 assertion fires.
+    'iqleg': {
+        'sources': COMMON + [
+            'g6lc_ooo_pkg.sv', 'g6lc_iq_legal.sv',
+            'tb_g6lc_hyp8_iqleg.sv',
+        ],
+        'includes': [],
+        'top': 'tb_g6lc_hyp8_iqleg',
+        'model': 'hyp8_iqleg',
+        'token': 'HYP8_IQLEG_PASS',
+    },
     # The dispatch leaf compiles the actual full core flist (the uploaded
     # closure carries Flist.g6lc_hyp8 plus every source and include-dir
     # file it names) rather than a hand-picked subset: the seam under test
@@ -227,6 +245,23 @@ LEAFS = {
         'verilate_timeout': 1800,
         'make_timeout': 1800,
     },
+    # MMU leaf (r45): UseSharedTlb=0 miss/return specialization
+    # (g6lc_tlb_miss_router) mitred against the real g6lc_shared_tlb's
+    # bypass arm on every output every cycle, plus the g6lc_tlb
+    # row-flush-predicate rewrite exercised by fill/lookup/flush with an
+    # independent entry-outcome oracle. A bench-embedded router copy with
+    # its I-return arm suppressed is the negative control.
+    'mmu': {
+        'flist': 'core/Flist.g6lc_hyp8',
+        'bench': 'verif/tb/core/tb_g6lc_hyp8_control.sv',
+        'extra_defines': ['G6LC_HYP8_MMU_LEAF'],
+        'stub': 'verif/tb/apu/g6lc_dram_peek64_stub.cpp',
+        'top': 'tb_g6lc_hyp8_mmu',
+        'model': 'hyp8_mmu',
+        'token': 'HYP8_MMU_PASS',
+        'verilate_timeout': 1800,
+        'make_timeout': 1800,
+    },
     # Controller flush-gate leaf (r28): an invalid resolve record (valid=0)
     # must raise no flush even with a stale is_mispredict=1 field standing
     # (the ghost-flush/FTQ-reseed loss of the redirect target); a valid
@@ -240,6 +275,21 @@ LEAFS = {
         'top': 'tb_g6lc_hyp8_ctrl',
         'model': 'hyp8_ctrl',
         'token': 'HYP8_CTRL_PASS',
+        'verilate_timeout': 1800,
+        'make_timeout': 1800,
+    },
+    # Loop-buffer hit-identity leaf (r31): the real g6lc_loop_buffer on the
+    # full flist. A hit registered for head H must not inject H's block under
+    # a different head/epoch, and a flush coincident with detection must not
+    # re-arm. Mutant A/B: HYP8_EXTRA_DEFINES=G6LC_MUT_LBUF_STALE_HIT restores
+    # consume-without-identity -> LBUF_STALE_NO_INJECT fails.
+    'lbuf': {
+        'flist': 'core/Flist.g6lc_hyp8',
+        'bench': 'verif/tb/core/tb_g6lc_hyp8_control.sv',
+        'stub': 'verif/tb/apu/g6lc_dram_peek64_stub.cpp',
+        'top': 'tb_g6lc_hyp8_lbuf',
+        'model': 'hyp8_lbuf',
+        'token': 'HYP8_LBUF_PASS',
         'verilate_timeout': 1800,
         'make_timeout': 1800,
     },
@@ -366,7 +416,9 @@ def main():
     verilator = [str(verilator_drv), '--cc', '--main', '--exe', '--timing',
                  '--assert',
                  '--threads', '1', '-Wno-fatal', '-Werror-LATCH',
-                 *(defines if 'flist' in spec else ['-DG6LC_FETCH_B']),
+                 *(defines if 'flist' in spec else
+                   ['-DG6LC_FETCH_B'] + ['-D' + d for d in shlex.split(
+                       os.environ.get('HYP8_EXTRA_DEFINES', ''))]),
                  *incdirs,
                  '--top-module', spec['top']]
     mdir = 'model'

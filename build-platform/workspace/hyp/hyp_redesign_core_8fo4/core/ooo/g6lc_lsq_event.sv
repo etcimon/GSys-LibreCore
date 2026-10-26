@@ -90,6 +90,9 @@ module g6lc_lsq_event #(
     output logic [NR_UPDATE-1:0][G6LCCfg.TRANS_ID_BITS-1:0]       ev_addr_id_o,
     output logic [NR_UPDATE-1:0][G6LCCfg.PLEN-1:0]                ev_addr_o,
     output logic [NR_UPDATE-1:0][1:0]                             ev_addr_size_o,
+    // hyp8 T1 item 2: the address event's byte-lane footprint staged
+    // beside the address (the CAM stage shifts nothing).
+    output logic [NR_UPDATE-1:0][(G6LCCfg.XLEN+7)/8-1:0]            ev_addr_be_o,
     output logic [NR_UPDATE-1:0]                                  ev_data_valid_o,
     output logic [NR_UPDATE-1:0][G6LCCfg.TRANS_ID_BITS-1:0]       ev_data_id_o,
     output logic [NR_UPDATE-1:0][G6LCCfg.XLEN-1:0]                ev_data_o,
@@ -106,6 +109,8 @@ module g6lc_lsq_event #(
     output logic [G6LCCfg.TRANS_ID_BITS-1:0]                      ev_query_id_o,
     output logic [G6LCCfg.PLEN-1:0]                               ev_query_addr_o,
     output logic [1:0]                                            ev_query_size_o,
+    // hyp8 T1 item 2: the query event's byte-lane footprint, staged.
+    output logic [(G6LCCfg.XLEN+7)/8-1:0]                          ev_query_be_o,
     output logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] ev_query_hart_o,
 
     output logic [1:0]                                            ev_phys_valid_o,
@@ -128,6 +133,23 @@ module g6lc_lsq_event #(
   // consumers, which re-check cancelled_mask_i[id] at apply time — the
   // in-place kill is therefore the consumer-side gate, while capture-time
   // gating keeps an already-dead id out of the pipe entirely.
+  // hyp8 T1 item 2: byte-lane footprint of an access inside its aligned
+  // XLEN word — the emit base's lane_be, verbatim.
+  localparam int unsigned LANES = (G6LCCfg.XLEN + 7) / 8;
+  function automatic logic [LANES-1:0] lane_be(
+      input logic [G6LCCfg.PLEN-1:0] a,
+      input logic [1:0]              size
+  );
+    automatic logic [LANES-1:0] m;
+    m = '0;
+    for (int unsigned b = 0; b < LANES; b++)
+      if (b < (1 << size)) m[b] = 1'b1;
+    if (G6LCCfg.XLEN == 64)
+      lane_be = m << a[2:0];
+    else
+      lane_be = m << a[1:0];
+  endfunction
+
   for (genvar u = 0; u < NR_UPDATE; u++) begin : gen_upd
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
@@ -136,6 +158,7 @@ module g6lc_lsq_event #(
         ev_addr_id_o[u]     <= '0;
         ev_addr_o[u]        <= '0;
         ev_addr_size_o[u]   <= '0;
+        ev_addr_be_o[u]     <= '0;
         ev_data_valid_o[u]  <= 1'b0;
         ev_data_id_o[u]     <= '0;
         ev_data_o[u]        <= '0;
@@ -149,6 +172,7 @@ module g6lc_lsq_event #(
           ev_addr_id_o[u]    <= addr_id_i[u];
           ev_addr_o[u]       <= addr_i[u];
           ev_addr_size_o[u]  <= addr_size_i[u];
+          ev_addr_be_o[u]    <= lane_be(addr_i[u], addr_size_i[u]);
         end
         ev_data_valid_o[u] <= st_data_valid_i[u] && !cancelled_mask_i[st_data_id_i[u]];
         if (st_data_valid_i[u]) begin
@@ -207,6 +231,7 @@ module g6lc_lsq_event #(
       ev_query_id_o    <= '0;
       ev_query_addr_o  <= '0;
       ev_query_size_o  <= '0;
+      ev_query_be_o    <= '0;
       ev_query_hart_o  <= '0;
     end else if (flush_i) begin
       ev_query_valid_o <= 1'b0;
@@ -216,6 +241,7 @@ module g6lc_lsq_event #(
         ev_query_id_o   <= ld_query_id_i;
         ev_query_addr_o <= ld_query_addr_i;
         ev_query_size_o <= ld_query_size_i;
+        ev_query_be_o   <= lane_be(ld_query_addr_i, ld_query_size_i);
         ev_query_hart_o <= ld_query_hart_i;
       end
     end
@@ -249,7 +275,42 @@ module g6lc_lsq_event #(
   end
 
   // Conservative occupancy: every staged record keeps the queue busy.
+  // hyp8 T1 item 12: the count is a balanced pairwise sum over a packed
+  // source vector (SelectIncrement — same popcount, log depth instead
+  // of the serial accumulator chain).
+  localparam int unsigned NSRC =
+      2*NR_UPDATE + G6LCCfg.NrWbPorts + G6LCCfg.NrCommitPorts + 3;
+  localparam int unsigned CNTW = $bits(ev_count_o);
+  logic [NSRC-1:0] ev_cnt_src;
   always_comb begin
+    ev_cnt_src = '0;
+    for (int unsigned u = 0; u < NR_UPDATE; u++) begin
+      ev_cnt_src[u]                = ev_addr_valid_o[u];
+      ev_cnt_src[NR_UPDATE+u]      = ev_data_valid_o[u];
+    end
+    for (int unsigned w = 0; w < G6LCCfg.NrWbPorts; w++)
+      ev_cnt_src[2*NR_UPDATE+w] = ev_complete_valid_o[w];
+    for (int unsigned c = 0; c < G6LCCfg.NrCommitPorts; c++)
+      ev_cnt_src[2*NR_UPDATE+G6LCCfg.NrWbPorts+c] =
+          ev_commit_st_o[c] | ev_commit_ld_o[c];
+    ev_cnt_src[NSRC-3] = ev_query_valid_o;
+    ev_cnt_src[NSRC-2] = |ev_phys_valid_o;
+    ev_cnt_src[NSRC-1] = |ev_mod_valid_o;
+  end
+  always_comb begin : p_ev_count
+    logic [CNTW-1:0] acc [NSRC];
+    int unsigned nn;
+    for (int unsigned i = 0; i < NSRC; i++)
+      acc[i] = CNTW'(ev_cnt_src[i]);
+    nn = NSRC;
+    while (nn > 1) begin
+      for (int unsigned i = 0; i < nn/2; i++)
+        acc[i] = acc[2*i] + acc[2*i+1];
+      if (nn % 2 != 0) acc[nn/2] = acc[nn-1];
+      nn = (nn + 1) / 2;
+    end
+`ifdef G6LC_MUT_T1_EVCOUNT
+    // Review mutant: pre-T1 serial accumulator on the live path.
     ev_count_o = '0;
     for (int unsigned u = 0; u < NR_UPDATE; u++) begin
       ev_count_o = ev_count_o + ev_addr_valid_o[u] + ev_data_valid_o[u];
@@ -260,7 +321,41 @@ module g6lc_lsq_event #(
       ev_count_o = ev_count_o + (ev_commit_st_o[c] | ev_commit_ld_o[c]);
     ev_count_o = ev_count_o + ev_query_valid_o
                + (|ev_phys_valid_o) + (|ev_mod_valid_o);
+`else
+    ev_count_o = acc[0];
+`endif
   end
+
+  //pragma translate_off
+  // hyp8 T1 item 12: equivalence — the serial form is recomputed and
+  // compared against the balanced tree every cycle.
+  logic [CNTW-1:0] t1_ref_count;
+  always_comb begin : p_t1_evc_ref
+    t1_ref_count = '0;
+    for (int unsigned u = 0; u < NR_UPDATE; u++)
+      t1_ref_count = t1_ref_count + ev_addr_valid_o[u] + ev_data_valid_o[u];
+    for (int unsigned w = 0; w < G6LCCfg.NrWbPorts; w++)
+      t1_ref_count = t1_ref_count + ev_complete_valid_o[w];
+    for (int unsigned c = 0; c < G6LCCfg.NrCommitPorts; c++)
+      t1_ref_count = t1_ref_count + (ev_commit_st_o[c] | ev_commit_ld_o[c]);
+    t1_ref_count = t1_ref_count + ev_query_valid_o
+                 + (|ev_phys_valid_o) + (|ev_mod_valid_o);
+  end
+  int unsigned t1_evc_n = 0;
+  always_ff @(posedge clk_i) begin : p_t1_evc_eq
+    if (rst_ni) begin
+      if (!$isunknown(ev_count_o)) begin
+        t1_evc_n <= t1_evc_n + 1;
+        g6lc_t1_evc_eq: assert (ev_count_o === t1_ref_count)
+          else $error("g6lc_lsq_event: equiv evcount");
+      end
+    end
+  end
+  final begin
+    if ($test$plusargs("equiv_report"))
+      $display("[equiv] g6lc_lsq_event evcount: checked=%0d", t1_evc_n);
+  end
+  //pragma translate_on
 
   // svt-stage: end E
   // svt-stage: class E value

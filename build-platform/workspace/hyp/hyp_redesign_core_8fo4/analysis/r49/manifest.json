@@ -1,0 +1,16 @@
+{
+  "r49-loop_buffer-pre": "d1f2b972ac9bdea265de1d86d2587ffab737fd8baa980185e3e2bbc3d2634e60",
+  "r49-loop_buffer-post": "44772d18eca96f9e19011586a7e939d1319d0716870c68049d096b820ba15144",
+  "r49-rename_recover-pre": "c273cd24041f4f0bbf5e9fd69b99a11e1a469dbedff1c575cac7eba123db5dec",
+  "r49-rename_recover-post": "c273cd24041f4f0bbf5e9fd69b99a11e1a469dbedff1c575cac7eba123db5dec",
+  "boards": {
+    "pre": "analyze-r49-pre.json",
+    "post-maskmerge": "analyze-r49-post.json",
+    "post-hoist": "analyze-r49-post2.json",
+    "post-final": "analyze-r49-post3.json"
+  },
+  "verdict": {
+    "g6lc_loop_buffer": "KEPT 32.78->26.90 (regtoreg), no kind above new max; intoout unchanged 23.20",
+    "g6lc_rename_recover": "REVERTED to pre (c273cd24); countercases: in-block masks 36.25@600, hoisted masks 36.25@494"
+  }
+}

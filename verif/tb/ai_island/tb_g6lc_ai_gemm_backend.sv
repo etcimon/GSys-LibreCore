@@ -24,6 +24,8 @@ module tb_g6lc_ai_gemm_backend
     parameter int unsigned NCH        = 2,
     parameter int unsigned DRAM_CLASS = AI_DRAM_SIM_AXI,
     parameter bit          DOT_PIPE_FLOAT = 1'b0,
+    // r68: pipelined integer dot (g6lc_ai_pe_dot_pipe); same handshake/latency
+    parameter bit          DOT_PIPE_INT   = 1'b0,
     // Provisioning overrides for the +measure sweep only.  0 keeps the shipped
     // value, so an unset build is byte-identical to the directed configuration.
     // PE_LANES raises the arithmetic peak (PeLanes MAC/cycle) and AR_PROVISION
@@ -283,6 +285,7 @@ module tb_g6lc_ai_gemm_backend
       .PeLanes    ( GEMM_LANES ),
       .OutCols    ( OUT_COLS ),
       .DotPipeFloat( DOT_PIPE_FLOAT ),
+      .DotPipeInt  ( DOT_PIPE_INT ),
       .MaxAROut   ( GEMM_MAX_AR ),
       .ReuseBEn   ( REUSE_EN ),
       .ReuseAEn   ( REUSE_EN ),

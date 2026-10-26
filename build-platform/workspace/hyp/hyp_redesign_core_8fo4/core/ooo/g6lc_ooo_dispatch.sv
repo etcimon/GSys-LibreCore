@@ -87,6 +87,16 @@ module g6lc_ooo_dispatch
     input  logic                                             fpu_ready_i,
     input  logic                                             csr_ready_i,
     input  logic                                             mult_ready_i,
+    // hyp8 r33: CSR address-table credit (free entries after the buffer's
+    // sweeps). A group is consumed only when the table can hold every
+    // CSR-class lane it carries — a resource released in commit order is
+    // allocated in program order, so the group waits, never partially.
+    input  logic [1:0]                                         csr_credit_i,
+    // Allocation strobes for csr_buffer: one per lane the cycle the lane
+    // is consumed into the IQ (dispatch_ack_o && CSR class).
+    output logic [G6LCCfg.NrIssuePorts-1:0]                      csr_disp_valid_o,
+    output logic [G6LCCfg.NrIssuePorts-1:0][G6LCCfg.TRANS_ID_BITS-1:0] csr_disp_tid_o,
+    output logic [G6LCCfg.NrIssuePorts-1:0][11:0]                  csr_disp_addr_o,
     output logic [G6LCCfg.NrIssuePorts-1:0][G6LCCfg.XLEN-1:0] issue_op_a_o,
     output logic [G6LCCfg.NrIssuePorts-1:0][G6LCCfg.XLEN-1:0] issue_op_b_o,
     output logic [G6LCCfg.NrIssuePorts-1:0]                   issue_op_a_valid_o,
@@ -277,10 +287,27 @@ module g6lc_ooo_dispatch
   localparam int unsigned STW = $clog2(G6LCCfg.LsqStoreEntries+1);
   logic [LDW-1:0] need_ld, grp_need_ld;
   logic [STW-1:0] need_st, grp_need_st;
+  // r42-T item 21: legality predecoded at ren_pub — grp_go reads these
+  // registered counts instead of same-cycle popcounts over the group
+  // registers. Stale after a kill/consume, but grp_go then reads
+  // grp_v_q==0 (or the kill terms), so they are unobservable there.
+  logic [LDW-1:0]          grp_need_ld_q;
+  logic [STW-1:0]          grp_need_st_q;
+  logic [1:0]              grp_csr_need_q;
   assign need_ld      = LDW'($countones(is_ld));
   assign need_st      = STW'($countones(is_st));
+`ifdef G6LC_MUT_T2_DISP_GRPGO
+  // Review mutant: the pre-r42 same-cycle popcounts on grp_go's cone.
   assign grp_need_ld  = LDW'($countones(grp_is_ld_q));
   assign grp_need_st  = STW'($countones(grp_is_st_q));
+`else
+  // r42-T item 21: the held group's LSQ demand and CSR credit need are
+  // predecoded at the ren_pub edge — grp_go's grant cone reads
+  // registered counts against the live free counters; kill still
+  // dominates as the last AND in grp_go (and through grp_v_q itself).
+  assign grp_need_ld  = grp_need_ld_q;
+  assign grp_need_st  = grp_need_st_q;
+`endif
   assign lsq_disp_block = (need_ld > ld_free) || (need_st > st_free);
   assign lsq_grp_block  = (grp_need_ld > ld_free) || (grp_need_st > st_free);
 
@@ -298,12 +325,35 @@ module g6lc_ooo_dispatch
 
   logic grp_go;
   logic [NP-1:0] iqdisp_ack;
+  // r33: CSR-class lanes of the held group (same predicate as
+  // alloc_cls[C_CSR]: fu == CSR covers MRET/WFI/fences/system CSRs). The
+  // group is consumed only when the address table can hold every CSR
+  // lane — kill-dominates ordering and the all-or-nothing ack are
+  // untouched: a credit-short group simply waits in grp_v_q.
+  logic [NP-1:0] grp_csr;
+  logic [1:0]    csr_need;
+  for (genvar p = 0; p < NP; p++) begin : gen_grp_csr
+    assign grp_csr[p] = grp_v_q[p] && (grp_sbe_q[p].fu == CSR);
+  end
+`ifdef G6LC_MUT_T2_DISP_GRPGO
+  assign csr_need = 2'($countones(grp_csr));
+`else
+  assign csr_need = grp_csr_need_q;
+`endif
   assign grp_go = (|grp_v_q) && !rob_full && !iq_full && !lsq_grp_block &&
-                  !flush_i && !flush_unissued_i;
+                  !flush_i && !flush_unissued_i &&
+                  (csr_credit_i >= csr_need);
   // The scoreboard consumes the group when the IQ confirms the whole
   // placement -- disp_ack_o on the IQ is already all-or-nothing over the
   // lanes it is shown (dead lanes stay off the bus and need no ack).
   assign dispatch_ack_o = iqdisp_ack & grp_v_q & {NP{grp_go}};
+  // Program-order table ownership: the consume strobes carry the held
+  // lane's trans_id and the CSR immediate the decoder left in result.
+  for (genvar p = 0; p < NP; p++) begin : gen_csr_disp
+    assign csr_disp_valid_o[p] = dispatch_ack_o[p] && grp_csr[p];
+    assign csr_disp_tid_o[p]   = grp_tid[p];
+    assign csr_disp_addr_o[p]  = grp_sbe_q[p].result[11:0];
+  end
   // The group retires when every LIVE lane was acknowledged.
   logic grp_done;
   assign grp_done = &(iqdisp_ack | ~grp_v_q) && (|grp_v_q);
@@ -343,6 +393,26 @@ module g6lc_ooo_dispatch
   // The FP PRF has NO commit-write mirror (commit_stage never substitutes
   // an FP value -- see the emit-base comment for the derivation).
   //pragma translate_off
+  // r42-T item 21 equivalence: while a group is held (|grp_v_q), the
+  // predecoded legality counts must equal the same-cycle popcounts they
+  // replaced. Kill/consume edges clear grp_v_q, which is exactly where
+  // the registered counts may stale — the guard bounds the check to the
+  // observable window.
+  int unsigned t2_grpgo_n = 0;
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && (|grp_v_q)) begin
+      t2_grpgo_n <= t2_grpgo_n + 1;
+      g6lc_t2_grpgo_eq: assert (
+          grp_need_ld === LDW'($countones(grp_is_ld_q)) &&
+          grp_need_st === STW'($countones(grp_is_st_q)) &&
+          csr_need === 2'($countones(grp_csr)))
+        else $error("g6lc_ooo_dispatch: equiv grp_go legality");
+    end
+  end
+  final begin
+    if ($test$plusargs("equiv_report"))
+      $display("[equiv] g6lc_ooo_dispatch grpgo: checked=%0d", t2_grpgo_n);
+  end
   always_ff @(posedge clk_i) begin
     if (rst_ni && G6LCCfg.FpPresent) begin
       for (int unsigned c = 0; c < G6LCCfg.NrCommitPorts; c++) begin
@@ -550,6 +620,32 @@ module g6lc_ooo_dispatch
       end
     end
   end
+
+`ifndef G6LC_MUT_T2_DISP_GRPGO
+  // r42-T item 21: predecode the held group's LSQ demand and CSR credit
+  // need at the publish edge. The popcount then sits behind the edge and
+  // grp_go compares registered counts against the live free counters.
+  // The csr need counts only the lanes grp_v_q actually captures —
+  // ren_group_valid masked by the scoreboard's live view (same mask as
+  // the grp_v_q write above); the need counts keep the old unmasked
+  // is_ld/is_st shape (grp_is_*_q were stored unmasked too).
+  logic [NP-1:0] ren_csr_pub;
+  for (genvar p = 0; p < NP; p++) begin : gen_ren_csr_pub
+    assign ren_csr_pub[p] = ren_group_valid[p] && dispatch_valid_i[p] &&
+                            (dispatch_sbe_i[p].fu == CSR);
+  end
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      grp_need_ld_q  <= '0;
+      grp_need_st_q  <= '0;
+      grp_csr_need_q <= '0;
+    end else if (ren_pub) begin
+      grp_need_ld_q  <= LDW'($countones(is_ld));
+      grp_need_st_q  <= STW'($countones(is_st));
+      grp_csr_need_q <= 2'($countones(ren_csr_pub));
+    end
+  end
+`endif
 
   // Published scoreboard-entry record per lane (combinational assembly).
   scoreboard_entry_t [NP-1:0] sbe_pub;
@@ -894,6 +990,10 @@ module g6lc_ooo_dispatch
   logic [NP-1:0][31:0]     iss_orig_q;
   logic [NP-1:0][PRF_W-1:0] iss_prd_q;
   logic [NP-1:0]           iss_fpsel_q;
+  // r44: the FP-use class predicates (rs1/rs2/imm use the FP operand
+  // file) captured at the same iqi_take edge as iss_sbe_q/iss_fpsel_q —
+  // state-derived, no new latency, holds exactly when those hold.
+  logic [NP-1:0]           iss_fpa_q, iss_fpb_q, iss_fpc_q;
   logic [NP-1:0]           iss_spec_q;
   logic [NP-1:0][1:0]      iss_spec_ab_q;
   logic [NP-1:0][1:0][G6LCCfg.TRANS_ID_BITS-1:0] iss_ptid_q;
@@ -954,6 +1054,9 @@ module g6lc_ooo_dispatch
         iss_orig_q[p] <= '0;
         iss_prd_q[p] <= '0;
         iss_fpsel_q[p] <= '0;
+        iss_fpa_q[p] <= '0;
+        iss_fpb_q[p] <= '0;
+        iss_fpc_q[p] <= '0;
         iss_spec_q[p] <= '0;
         iss_spec_ab_q[p] <= '0;
         iss_ptid_q[p] <= '0;
@@ -971,6 +1074,12 @@ module g6lc_ooo_dispatch
           iss_orig_q[p]<= iqi_orig[p];
           iss_prd_q[p] <= iqi_prd[p];
           iss_fpsel_q[p] <= fp_port_sel[p];
+          iss_fpa_q[p] <= G6LCCfg.FpPresent && fp_port_sel[p] &&
+                          iqi_sbe[p].ooo_renamed && is_rs1_fpr(iqi_sbe[p].op);
+          iss_fpb_q[p] <= G6LCCfg.FpPresent && fp_port_sel[p] &&
+                          iqi_sbe[p].ooo_renamed && is_rs2_fpr(iqi_sbe[p].op);
+          iss_fpc_q[p] <= G6LCCfg.FpPresent && fp_port_sel[p] &&
+                          iqi_sbe[p].ooo_renamed && is_imm_fpr(iqi_sbe[p].op);
           iss_spec_q[p]  <= iqi_spec[p];
           iss_spec_ab_q[p] <= iqi_spec_ab[p];
           iss_ptid_q[p]  <= iqi_ptid[p];
@@ -1163,16 +1272,57 @@ module g6lc_ooo_dispatch
       end
     end
     logic fp_a, fp_b;
-    assign fp_a = G6LCCfg.FpPresent && iss_fpsel_q[p] &&
-                  iss_sbe_q[p].ooo_renamed && is_rs1_fpr(iss_sbe_q[p].op);
-    assign fp_b = G6LCCfg.FpPresent && iss_fpsel_q[p] &&
-                  iss_sbe_q[p].ooo_renamed && is_rs2_fpr(iss_sbe_q[p].op);
-    assign op_a_agu[p] = fp_a ? ((|fh_a) ? ofa[WLV][0]
-                                         : G6LCCfg.XLEN'(fprf_rdata[0]))
-                            : ((|hit_a) ? oa[WLV][0] : prf_rdata[p*2+0]);
-    assign op_b_pre[p] = fp_b ? ((|fh_b) ? ofb[WLV][0]
-                                         : G6LCCfg.XLEN'(fprf_rdata[1]))
-                            : ((|hit_b) ? ob[WLV][0] : prf_rdata[p*2+1]);
+    assign fp_a = iss_fpa_q[p];
+    assign fp_b = iss_fpb_q[p];
+    // r46: flat AND-OR select (was a nested 2:1 chain). The four quadrant
+    // predicates {fp,fp-file,int,int-file} partition the space exactly.
+    logic sel_fpb_a, sel_fpf_a, sel_ib_a, sel_if_a;
+    logic sel_fpb_b, sel_fpf_b, sel_ib_b, sel_if_b;
+    // ofa/oa are zero whenever their hit vectors are zero (masked
+    // writeback data), so the bypass terms gate on fp_ alone.
+    assign sel_fpb_a = fp_a;
+    assign sel_fpf_a = fp_a && !(|fh_a);
+    assign sel_ib_a  = !fp_a;
+    assign sel_if_a  = !fp_a && !(|hit_a);
+    assign sel_fpb_b = fp_b;
+    assign sel_fpf_b = fp_b && !(|fh_b);
+    assign sel_ib_b  = !fp_b;
+    assign sel_if_b  = !fp_b && !(|hit_b);
+    assign op_a_agu[p] = (ofa[WLV][0] & {G6LCCfg.XLEN{sel_fpb_a}})
+                       | (G6LCCfg.XLEN'(fprf_rdata[0]) & {G6LCCfg.XLEN{sel_fpf_a}})
+                       | (oa[WLV][0] & {G6LCCfg.XLEN{sel_ib_a}})
+                       | (prf_rdata[p*2+0] & {G6LCCfg.XLEN{sel_if_a}});
+    assign op_b_pre[p] = (ofb[WLV][0] & {G6LCCfg.XLEN{sel_fpb_b}})
+                       | (G6LCCfg.XLEN'(fprf_rdata[1]) & {G6LCCfg.XLEN{sel_fpf_b}})
+                       | (ob[WLV][0] & {G6LCCfg.XLEN{sel_ib_b}})
+                       | (prf_rdata[p*2+1] & {G6LCCfg.XLEN{sel_if_b}});
+    //pragma translate_off
+    // Reference for the flat select: the pre-r46 nested mux form,
+    // compared every cycle, plus an exact-onehot check on the quadrant.
+    logic [G6LCCfg.XLEN-1:0] ref_op_a, ref_op_b;
+    assign ref_op_a = fp_a ? ((|fh_a) ? ofa[WLV][0]
+                                      : G6LCCfg.XLEN'(fprf_rdata[0]))
+                           : ((|hit_a) ? oa[WLV][0] : prf_rdata[p*2+0]);
+    assign ref_op_b = fp_b ? ((|fh_b) ? ofb[WLV][0]
+                                      : G6LCCfg.XLEN'(fprf_rdata[1]))
+                           : ((|hit_b) ? ob[WLV][0] : prf_rdata[p*2+1]);
+    always_ff @(posedge clk_i) begin
+      if (rst_ni) begin
+        g6lc_opasm_eq_a: assert (op_a_agu[p] === ref_op_a)
+          else $error("g6lc_ooo_dispatch: op_a_agu flat/AND-OR diverged");
+        g6lc_opasm_eq_b: assert (op_b_pre[p] === ref_op_b)
+          else $error("g6lc_ooo_dispatch: op_b_pre flat/AND-OR diverged");
+        g6lc_opasm_oh_a: assert (
+            $onehot({fp_a && (|fh_a), fp_a && !(|fh_a),
+                     !fp_a && (|hit_a), !fp_a && !(|hit_a)}))
+          else $error("g6lc_ooo_dispatch: op_a select quadrant not onehot");
+        g6lc_opasm_oh_b: assert (
+            $onehot({fp_b && (|fh_b), fp_b && !(|fh_b),
+                     !fp_b && (|hit_b), !fp_b && !(|hit_b)}))
+          else $error("g6lc_ooo_dispatch: op_b select quadrant not onehot");
+      end
+    end
+    //pragma translate_on
   end
 
   // hyp8: per-port independent assigns; the op_c FP bypass uses the same
@@ -1207,9 +1357,7 @@ module g6lc_ooo_dispatch
     assign issue_op_a_valid_o[p] = issue_valid_o[p] && iss_sbe_q[p].ooo_renamed;
     assign issue_op_b_valid_o[p] = issue_valid_o[p] && iss_sbe_q[p].ooo_renamed;
     assign issue_op_c_o[p] = (|fh_c) ? oc[WLV][0] : fprf_rdata[2];
-    assign issue_op_c_valid_o[p] =
-        G6LCCfg.FpPresent && issue_valid_o[p] && iss_sbe_q[p].ooo_renamed &&
-        iss_fpsel_q[p] && is_imm_fpr(iss_sbe_q[p].op);
+    assign issue_op_c_valid_o[p] = issue_valid_o[p] && iss_fpc_q[p];
   end
 
   // Live AGU at issue: vaddr = imm + rs1 (matches load_store_unit AGU)
@@ -1576,6 +1724,46 @@ module g6lc_ooo_dispatch
               dacked[b][e] = 1'b1;
         end
     end
+  end
+
+  // r44 state-derived-cache invariant: the captured FP-use predicates
+  // must equal the expressions they cache, evaluated over the held
+  // iss_fpsel_q/iss_sbe_q record — checked every cycle (rst_ni), not
+  // only while the lane is valid, since the registers hold across
+  // flush/cancel/pop exactly like the record they shadow.
+  int unsigned fp_pred_checked_n = 0;
+  int unsigned fp_pred_active_fp_n = 0;
+  int unsigned fp_pred_active_int_n = 0;
+  for (genvar p = 0; p < NP; p++) begin : gen_fp_pred_eq
+    logic ref_fpa, ref_fpb, ref_fpc;
+    assign ref_fpa = G6LCCfg.FpPresent && iss_fpsel_q[p] &&
+                     iss_sbe_q[p].ooo_renamed && is_rs1_fpr(iss_sbe_q[p].op);
+    assign ref_fpb = G6LCCfg.FpPresent && iss_fpsel_q[p] &&
+                     iss_sbe_q[p].ooo_renamed && is_rs2_fpr(iss_sbe_q[p].op);
+    assign ref_fpc = G6LCCfg.FpPresent && iss_fpsel_q[p] &&
+                     iss_sbe_q[p].ooo_renamed && is_imm_fpr(iss_sbe_q[p].op);
+    always_ff @(posedge clk_i) begin
+      if (rst_ni) begin
+        if (p == 0) fp_pred_checked_n <= fp_pred_checked_n + 1;
+        if (p == 0 && iss_v_q[p] &&
+            (iss_fpa_q[p] || iss_fpb_q[p] || iss_fpc_q[p]))
+          fp_pred_active_fp_n <= fp_pred_active_fp_n + 1;
+        if (p == 0 && iss_v_q[p] && !iss_fpsel_q[p])
+          fp_pred_active_int_n <= fp_pred_active_int_n + 1;
+        g6lc_fp_pred_eq : assert (
+            iss_fpa_q[p] === ref_fpa &&
+            iss_fpb_q[p] === ref_fpb &&
+            iss_fpc_q[p] === ref_fpc)
+          else $error("g6lc_ooo_dispatch: FP predicate cache diverged lane %0d (%b%b%b != %b%b%b)",
+                      p, iss_fpa_q[p], iss_fpb_q[p], iss_fpc_q[p],
+                      ref_fpa, ref_fpb, ref_fpc);
+      end
+    end
+  end
+  final begin
+    if ($test$plusargs("equiv_report"))
+      $display("[equiv] g6lc_ooo_dispatch fp_pred: checked=%0d lane0_active_fp=%0d lane0_active_int=%0d",
+               fp_pred_checked_n, fp_pred_active_fp_n, fp_pred_active_int_n);
   end
 //pragma translate_on
 

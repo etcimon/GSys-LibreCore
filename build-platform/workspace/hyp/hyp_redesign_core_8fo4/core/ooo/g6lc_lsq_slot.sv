@@ -63,6 +63,9 @@ module g6lc_lsq_slot #(
     input  logic [NR_UPDATE-1:0][G6LCCfg.TRANS_ID_BITS-1:0]  ev_addr_id_i,
     input  logic [NR_UPDATE-1:0][G6LCCfg.PLEN-1:0]           ev_addr_i,
     input  logic [NR_UPDATE-1:0][1:0]                        ev_addr_size_i,
+    // hyp8 T1 item 2: the staged byte-lane footprint, registered beside
+    // the event address in g6lc_lsq_event.
+    input  logic [NR_UPDATE-1:0][(G6LCCfg.XLEN+7)/8-1:0]         ev_addr_be_i,
     input  logic [NR_UPDATE-1:0]                             ev_data_valid_i,
     input  logic [NR_UPDATE-1:0][G6LCCfg.TRANS_ID_BITS-1:0]  ev_data_id_i,
     input  logic [NR_UPDATE-1:0][G6LCCfg.XLEN-1:0]           ev_data_i,
@@ -95,12 +98,33 @@ module g6lc_lsq_slot #(
     // Allocation index per port (release snapshots its older-store mask
     // into the entry being written).
     output logic [NR_ALLOC-1:0]                           ld_alloc_v_o,
-    output logic [NR_ALLOC-1:0][$clog2(LD_ENTRIES)-1:0]   ld_alloc_idx_o
+    output logic [NR_ALLOC-1:0][$clog2(LD_ENTRIES)-1:0]   ld_alloc_idx_o,
+    // hyp8 T1 item 7: the same pick as a one-hot (release's per-entry
+    // alloc_hit without a per-entry index compare).
+    output logic [NR_ALLOC-1:0][LD_ENTRIES-1:0]           ld_alloc_oh_o
 );
 
   localparam int unsigned HID_W =
       $clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2);
+  localparam int unsigned LANES = (G6LCCfg.XLEN + 7) / 8;
   localparam bit PHYS_VALIDATE = G6LCCfg.CohPolicy == config_pkg::COH_OOO;
+
+  // Byte-lane footprint of an access inside its aligned XLEN word — the
+  // emit base's lane_be, verbatim (used on the PHYS_VALIDATE write path;
+  // the AGU path carries the staged ev_addr_be_i).
+  function automatic logic [LANES-1:0] lane_be(
+      input logic [G6LCCfg.PLEN-1:0] a,
+      input logic [1:0]              size
+  );
+    automatic logic [LANES-1:0] m;
+    m = '0;
+    for (int unsigned b = 0; b < LANES; b++)
+      if (b < (1 << size)) m[b] = 1'b1;
+    if (G6LCCfg.XLEN == 64)
+      lane_be = m << a[2:0];
+    else
+      lane_be = m << a[1:0];
+  endfunction
 
   st_ent_t [ST_ENTRIES-1:0] st_q, st_d;
   ld_ent_t [LD_ENTRIES-1:0] ld_q, ld_d;
@@ -157,6 +181,152 @@ module g6lc_lsq_slot #(
     end
     assign ld_oh[p] = ld_pool & (~ld_pool + {{LD_ENTRIES-1{1'b0}}, 1'b1});
     assign st_oh[p] = st_pool & (~st_pool + {{ST_ENTRIES-1{1'b0}}, 1'b1});
+    // hyp8 T1 item 7: the allocated slot decoded at the source.
+    assign ld_alloc_oh_o[p] = ld_oh[p] & {LD_ENTRIES{ld_alloc_i[p]}};
+  end
+
+  // hyp8 T1 item 14: row-local hit decodes for every write source into
+  // the store/load records. Each source's per-entry hit is a one-hot
+  // column gather computed in parallel; the per-entry arm then selects
+  // the winning source's value instead of the serial override chain
+  // (the arm VALUES chained through 21 deps in the source-order form).
+  logic [NR_UPDATE-1:0][ST_ENTRIES-1:0] st_ahit_m;
+  logic [NR_UPDATE-1:0][LD_ENTRIES-1:0] ld_ahit_m;
+  logic [NR_UPDATE-1:0][ST_ENTRIES-1:0] st_dhit_m;
+  logic [ST_ENTRIES-1:0]                st_phit, st_cmt;
+  logic [LD_ENTRIES-1:0]                ld_phit, ld_cmt, ld_cpl;
+  logic [NR_ALLOC-1:0][ST_ENTRIES-1:0]  st_alloc_hit_m;
+  logic [NR_ALLOC-1:0][LD_ENTRIES-1:0]  ld_alloc_hit_m;
+  for (genvar u = 0; u < NR_UPDATE; u++) begin : gen_slot_hit_u
+    logic ev_st_ok, ev_ld_ok, ev_d_ok;
+    assign ev_st_ok = !PHYS_VALIDATE && ev_addr_valid_i[u] &&
+                      ev_addr_is_st_i[u] &&
+                      !cancelled_mask_i[ev_addr_id_i[u]];
+    assign ev_ld_ok = !PHYS_VALIDATE && ev_addr_valid_i[u] &&
+                      !ev_addr_is_st_i[u] &&
+                      !cancelled_mask_i[ev_addr_id_i[u]];
+    assign ev_d_ok  = ev_data_valid_i[u] &&
+                      !cancelled_mask_i[ev_data_id_i[u]];
+    for (genvar i = 0; i < ST_ENTRIES; i++) begin : gen_st_hit
+      assign st_ahit_m[u][i] = ev_st_ok && st_q[i].valid &&
+                               st_q[i].id == ev_addr_id_i[u];
+      assign st_dhit_m[u][i] = ev_d_ok && st_q[i].valid &&
+                               st_q[i].id == ev_data_id_i[u];
+    end
+    for (genvar i = 0; i < LD_ENTRIES; i++) begin : gen_ld_hit
+      assign ld_ahit_m[u][i] = ev_ld_ok && ld_q[i].valid &&
+                               ld_q[i].id == ev_addr_id_i[u];
+    end
+  end
+  for (genvar i = 0; i < ST_ENTRIES; i++) begin : gen_st_hit2
+    assign st_phit[i] = PHYS_VALIDATE && ev_phys_valid_i[1] &&
+                        st_q[i].valid && sb_live_i[st_q[i].id] &&
+                        !cancelled_mask_i[ev_phys_id_i[1]] &&
+                        st_q[i].id == ev_phys_id_i[1] &&
+                        st_q[i].hart == ev_phys_hart_i[1];
+    logic [G6LCCfg.NrCommitPorts-1:0] ccol;
+    for (genvar c = 0; c < G6LCCfg.NrCommitPorts; c++)
+      assign ccol[c] = ev_commit_st_i[c] && st_q[i].valid &&
+                       st_q[i].id == ev_commit_id_i[c];
+    assign st_cmt[i] = |ccol;
+    for (genvar p = 0; p < NR_ALLOC; p++)
+      assign st_alloc_hit_m[p][i] = st_alloc_i[p] && st_oh[p][i];
+  end
+  for (genvar i = 0; i < LD_ENTRIES; i++) begin : gen_ld_hit2
+    assign ld_phit[i] = PHYS_VALIDATE && ev_phys_valid_i[0] &&
+                        ld_q[i].valid && sb_live_i[ld_q[i].id] &&
+                        !cancelled_mask_i[ev_phys_id_i[0]] &&
+                        ld_q[i].id == ev_phys_id_i[0] &&
+                        ld_q[i].hart == ev_phys_hart_i[0];
+    logic [G6LCCfg.NrCommitPorts-1:0] ccol;
+    for (genvar c = 0; c < G6LCCfg.NrCommitPorts; c++)
+      assign ccol[c] = ev_commit_ld_i[c] && ld_q[i].valid &&
+                       ld_q[i].id == ev_commit_id_i[c];
+    assign ld_cmt[i] = |ccol;
+    logic [G6LCCfg.NrWbPorts-1:0] wcol;
+    for (genvar w = 0; w < G6LCCfg.NrWbPorts; w++)
+      assign wcol[w] = ev_complete_valid_i[w] && !ev_complete_is_st_i[w] &&
+                       !cancelled_mask_i[ev_complete_id_i[w]] &&
+                       ld_q[i].valid && ld_q[i].id == ev_complete_id_i[w];
+    assign ld_cpl[i] = |wcol;
+    for (genvar p = 0; p < NR_ALLOC; p++)
+      assign ld_alloc_hit_m[p][i] = ld_alloc_i[p] && ld_oh[p][i];
+  end
+  // Per-entry winning update port (last in program order, matching the
+  // emit's u-loop write order).
+  logic [ST_ENTRIES-1:0][$clog2(NR_UPDATE)-1:0] st_au, st_du;
+  logic [LD_ENTRIES-1:0][$clog2(NR_UPDATE)-1:0] ld_au;
+  for (genvar i = 0; i < ST_ENTRIES; i++) begin : gen_st_u
+    always_comb begin
+      st_au[i] = '0;
+      st_du[i] = '0;
+      for (int unsigned u = 0; u < NR_UPDATE; u++) begin
+        if (st_ahit_m[u][i]) st_au[i] = u[$clog2(NR_UPDATE)-1:0];
+        if (st_dhit_m[u][i]) st_du[i] = u[$clog2(NR_UPDATE)-1:0];
+      end
+    end
+  end
+  for (genvar i = 0; i < LD_ENTRIES; i++) begin : gen_ld_u
+    always_comb begin
+      ld_au[i] = '0;
+      for (int unsigned u = 0; u < NR_UPDATE; u++)
+        if (ld_ahit_m[u][i]) ld_au[i] = u[$clog2(NR_UPDATE)-1:0];
+    end
+  end
+  logic [ST_ENTRIES-1:0] st_ahit, st_dhit, st_ahit_a;
+  logic [LD_ENTRIES-1:0] ld_ahit, ld_ahit_a, st_alloc_any, ld_alloc_any;
+  for (genvar i = 0; i < ST_ENTRIES; i++) begin : gen_st_any
+    logic [NR_UPDATE-1:0] acol, dcol;
+    logic [NR_ALLOC-1:0]  pcol;
+    for (genvar u = 0; u < NR_UPDATE; u++) begin
+      assign acol[u] = st_ahit_m[u][i];
+      assign dcol[u] = st_dhit_m[u][i];
+    end
+    for (genvar p = 0; p < NR_ALLOC; p++)
+      assign pcol[p] = st_alloc_hit_m[p][i];
+    assign st_ahit[i] = |acol;
+    assign st_dhit[i] = |dcol;
+    assign st_alloc_any[i] = |pcol;
+  end
+  for (genvar i = 0; i < LD_ENTRIES; i++) begin : gen_ld_any
+    logic [NR_UPDATE-1:0] acol;
+    logic [NR_ALLOC-1:0]  pcol;
+    for (genvar u = 0; u < NR_UPDATE; u++)
+      assign acol[u] = ld_ahit_m[u][i];
+    for (genvar p = 0; p < NR_ALLOC; p++)
+      assign pcol[p] = ld_alloc_hit_m[p][i];
+    assign ld_ahit[i] = |acol;
+    assign ld_alloc_any[i] = |pcol;
+  end
+  // Per-port alloc value select (at most one port hits each entry).
+  logic [ST_ENTRIES-1:0][G6LCCfg.TRANS_ID_BITS-1:0] st_alloc_id_sel;
+  logic [ST_ENTRIES-1:0][HID_W-1:0]               st_alloc_h_sel;
+  logic [LD_ENTRIES-1:0][G6LCCfg.TRANS_ID_BITS-1:0] ld_alloc_id_sel;
+  logic [LD_ENTRIES-1:0][HID_W-1:0]               ld_alloc_h_sel;
+  logic [LD_ENTRIES-1:0][G6LCCfg.VLEN-1:0]        ld_alloc_pc_sel;
+  for (genvar i = 0; i < ST_ENTRIES; i++) begin : gen_st_asel
+    always_comb begin
+      st_alloc_id_sel[i] = '0;
+      st_alloc_h_sel[i]  = '0;
+      for (int unsigned p = 0; p < NR_ALLOC; p++)
+        if (st_alloc_hit_m[p][i]) begin
+          st_alloc_id_sel[i] = alloc_id_i[p];
+          st_alloc_h_sel[i]  = alloc_hart_i[p];
+        end
+    end
+  end
+  for (genvar i = 0; i < LD_ENTRIES; i++) begin : gen_ld_asel
+    always_comb begin
+      ld_alloc_id_sel[i] = '0;
+      ld_alloc_h_sel[i]  = '0;
+      ld_alloc_pc_sel[i] = '0;
+      for (int unsigned p = 0; p < NR_ALLOC; p++)
+        if (ld_alloc_hit_m[p][i]) begin
+          ld_alloc_id_sel[i] = alloc_id_i[p];
+          ld_alloc_h_sel[i]  = alloc_hart_i[p];
+          ld_alloc_pc_sel[i] = alloc_pc_i[p];
+        end
+    end
   end
 
   always_comb begin
@@ -165,6 +335,8 @@ module g6lc_lsq_slot #(
     ld_alloc_v_o   = '0;
     ld_alloc_idx_o = '0;
 
+`ifdef G6LC_MUT_T1_SLOT
+    // Review mutant: pre-T1 serial override chain on the live path.
     // Multi-port alloc (program order p=0 first) — emit behaviour kept.
     for (int unsigned p = 0; p < NR_ALLOC; p++) begin
       if (ld_alloc_i[p]) begin
@@ -177,6 +349,7 @@ module g6lc_lsq_slot #(
             ld_d[i].hart   = alloc_hart_i[p];
             ld_d[i].addr   = '0;
             ld_d[i].size   = '0;
+            ld_d[i].be     = '0;
             ld_d[i].pc     = alloc_pc_i[p];
             ld_alloc_v_o[p]   = 1'b1;
             ld_alloc_idx_o[p] = $clog2(LD_ENTRIES)'(i);
@@ -194,6 +367,7 @@ module g6lc_lsq_slot #(
             st_d[i].addr   = '0;
             st_d[i].data   = '0;
             st_d[i].size   = 2'b10;
+            st_d[i].be     = '0;
           end
         end
       end
@@ -210,6 +384,7 @@ module g6lc_lsq_slot #(
               st_d[i].addr_v = 1'b1;
               st_d[i].addr   = ev_addr_i[u];
               st_d[i].size   = ev_addr_size_i[u];
+              st_d[i].be     = ev_addr_be_i[u];
             end
         end else begin
           for (int unsigned i = 0; i < LD_ENTRIES; i++)
@@ -217,6 +392,7 @@ module g6lc_lsq_slot #(
               ld_d[i].addr_v = 1'b1;
               ld_d[i].addr   = ev_addr_i[u];
               ld_d[i].size   = ev_addr_size_i[u];
+              ld_d[i].be     = ev_addr_be_i[u];
             end
         end
       end
@@ -239,6 +415,7 @@ module g6lc_lsq_slot #(
           ld_d[i].addr_v = 1'b1;
           ld_d[i].addr   = ev_phys_addr_i[0];
           ld_d[i].size   = ev_phys_size_i[0];
+          ld_d[i].be     = lane_be(ev_phys_addr_i[0], ev_phys_size_i[0]);
         end
       for (int unsigned i = 0; i < ST_ENTRIES; i++)
         if (ev_phys_valid_i[1] && st_q[i].valid && sb_live_i[st_q[i].id] &&
@@ -247,6 +424,7 @@ module g6lc_lsq_slot #(
           st_d[i].addr_v = 1'b1;
           st_d[i].addr   = ev_phys_addr_i[1];
           st_d[i].size   = ev_phys_size_i[1];
+          st_d[i].be     = lane_be(ev_phys_addr_i[1], ev_phys_size_i[1]);
         end
     end
 
@@ -286,6 +464,96 @@ module g6lc_lsq_slot #(
             st_d[i].valid = 1'b0;
       end
     end
+`else
+    // hyp8 T1 item 14: parallel arms. Alloc and the event/commit hits
+    // are disjoint by construction (events/commit require st_q.valid,
+    // alloc requires !valid), so per entry each field takes exactly one
+    // precomputed value; the write-order equivalents are:
+    //   alloc → addr event → data event → phys → commit_ld → done →
+    //   release → commit_st → kill → flush.
+    for (int unsigned p = 0; p < NR_ALLOC; p++) begin
+      ld_alloc_v_o[p]   = ld_alloc_i[p] && (|ld_oh[p]);
+      ld_alloc_idx_o[p] = '0;
+      for (int unsigned i = 0; i < LD_ENTRIES; i++)
+        if (ld_oh[p][i]) ld_alloc_idx_o[p] = $clog2(LD_ENTRIES)'(i);
+    end
+    for (int unsigned i = 0; i < LD_ENTRIES; i++) begin
+      if (ld_alloc_any[i]) begin
+        ld_d[i].valid  = 1'b1;
+        ld_d[i].addr_v = 1'b0;
+        ld_d[i].done   = 1'b0;
+        ld_d[i].id     = ld_alloc_id_sel[i];
+        ld_d[i].hart   = ld_alloc_h_sel[i];
+        ld_d[i].addr   = '0;
+        ld_d[i].size   = '0;
+        ld_d[i].be     = '0;
+        ld_d[i].pc     = ld_alloc_pc_sel[i];
+      end
+    end
+    for (int unsigned i = 0; i < ST_ENTRIES; i++) begin
+      if (st_alloc_any[i]) begin
+        st_d[i].valid  = 1'b1;
+        st_d[i].addr_v = 1'b0;
+        st_d[i].data_v = 1'b0;
+        st_d[i].id     = st_alloc_id_sel[i];
+        st_d[i].hart   = st_alloc_h_sel[i];
+        st_d[i].addr   = '0;
+        st_d[i].data   = '0;
+        st_d[i].size   = 2'b10;
+        st_d[i].be     = '0;
+      end
+    end
+
+    // Staged AGU address / data events (PHYS_VALIDATE folds this path).
+    for (int unsigned i = 0; i < ST_ENTRIES; i++) begin
+      if (st_ahit[i]) begin
+        st_d[i].addr_v = 1'b1;
+        st_d[i].addr   = ev_addr_i[st_au[i]];
+        st_d[i].size   = ev_addr_size_i[st_au[i]];
+        st_d[i].be     = ev_addr_be_i[st_au[i]];
+      end
+      if (st_dhit[i]) begin
+        st_d[i].data_v = 1'b1;
+        st_d[i].data   = ev_data_i[st_du[i]];
+      end
+    end
+    for (int unsigned i = 0; i < LD_ENTRIES; i++) begin
+      if (ld_ahit[i]) begin
+        ld_d[i].addr_v = 1'b1;
+        ld_d[i].addr   = ev_addr_i[ld_au[i]];
+        ld_d[i].size   = ev_addr_size_i[ld_au[i]];
+        ld_d[i].be     = ev_addr_be_i[ld_au[i]];
+      end
+    end
+
+    // PHYS_VALIDATE updates from the staged phys records.
+    if (PHYS_VALIDATE) begin
+      for (int unsigned i = 0; i < LD_ENTRIES; i++)
+        if (ld_phit[i]) begin
+          ld_d[i].addr_v = 1'b1;
+          ld_d[i].addr   = ev_phys_addr_i[0];
+          ld_d[i].size   = ev_phys_size_i[0];
+          ld_d[i].be     = lane_be(ev_phys_addr_i[0], ev_phys_size_i[0]);
+        end
+      for (int unsigned i = 0; i < ST_ENTRIES; i++)
+        if (st_phit[i]) begin
+          st_d[i].addr_v = 1'b1;
+          st_d[i].addr   = ev_phys_addr_i[1];
+          st_d[i].size   = ev_phys_size_i[1];
+          st_d[i].be     = lane_be(ev_phys_addr_i[1], ev_phys_size_i[1]);
+        end
+    end
+
+    // Commit release (loads and stores), complete marks, ld_release.
+    for (int unsigned i = 0; i < LD_ENTRIES; i++)
+      if (ld_cmt[i]) ld_d[i].valid = 1'b0;
+    for (int unsigned i = 0; i < LD_ENTRIES; i++)
+      if (ld_cpl[i]) ld_d[i].done = 1'b1;
+    for (int unsigned i = 0; i < LD_ENTRIES; i++)
+      if (ld_release_i[i]) ld_d[i].valid = 1'b0;
+    for (int unsigned i = 0; i < ST_ENTRIES; i++)
+      if (st_cmt[i]) st_d[i].valid = 1'b0;
+`endif
 
     // Drop cancelled younger memory ops (tid == SB slot).
     for (int unsigned i = 0; i < ST_ENTRIES; i++)
@@ -422,6 +690,156 @@ module g6lc_lsq_slot #(
         st_alloc_i[p] |-> !alloc_st_conflict[p]);
     ooo_lsq_alloc_ld_id_unique: assert property (@(posedge clk_i) disable iff (!rst_ni)
         ld_alloc_i[p] |-> !alloc_ld_conflict[p]);
+  end
+
+  // hyp8 T1 item 14: whole-next-state shadow — the pre-T1 serial form is
+  // recomputed into shadow registers from its own state and compared
+  // against the live st_q/ld_q every cycle.
+  st_ent_t [ST_ENTRIES-1:0] t1_ref_st_d, t1_ref_st_q;
+  ld_ent_t [LD_ENTRIES-1:0] t1_ref_ld_d, t1_ref_ld_q;
+  always_comb begin : p_t1_slot_ref
+    t1_ref_st_d = t1_ref_st_q;
+    t1_ref_ld_d = t1_ref_ld_q;
+    for (int unsigned p = 0; p < NR_ALLOC; p++) begin
+      if (ld_alloc_i[p]) begin
+        for (int unsigned i = 0; i < LD_ENTRIES; i++)
+          if (ld_oh[p][i]) begin
+            t1_ref_ld_d[i].valid  = 1'b1;
+            t1_ref_ld_d[i].addr_v = 1'b0;
+            t1_ref_ld_d[i].done   = 1'b0;
+            t1_ref_ld_d[i].id     = alloc_id_i[p];
+            t1_ref_ld_d[i].hart   = alloc_hart_i[p];
+            t1_ref_ld_d[i].addr   = '0;
+            t1_ref_ld_d[i].size   = '0;
+            t1_ref_ld_d[i].be     = '0;
+            t1_ref_ld_d[i].pc     = alloc_pc_i[p];
+          end
+      end
+      if (st_alloc_i[p]) begin
+        for (int unsigned i = 0; i < ST_ENTRIES; i++)
+          if (st_oh[p][i]) begin
+            t1_ref_st_d[i].valid  = 1'b1;
+            t1_ref_st_d[i].addr_v = 1'b0;
+            t1_ref_st_d[i].data_v = 1'b0;
+            t1_ref_st_d[i].id     = alloc_id_i[p];
+            t1_ref_st_d[i].hart   = alloc_hart_i[p];
+            t1_ref_st_d[i].addr   = '0;
+            t1_ref_st_d[i].data   = '0;
+            t1_ref_st_d[i].size   = 2'b10;
+            t1_ref_st_d[i].be     = '0;
+          end
+      end
+    end
+    for (int unsigned u = 0; u < NR_UPDATE; u++) begin
+      if (!PHYS_VALIDATE && ev_addr_valid_i[u] &&
+          !cancelled_mask_i[ev_addr_id_i[u]]) begin
+        if (ev_addr_is_st_i[u]) begin
+          for (int unsigned i = 0; i < ST_ENTRIES; i++)
+            if (t1_ref_st_q[i].valid &&
+                t1_ref_st_q[i].id == ev_addr_id_i[u]) begin
+              t1_ref_st_d[i].addr_v = 1'b1;
+              t1_ref_st_d[i].addr   = ev_addr_i[u];
+              t1_ref_st_d[i].size   = ev_addr_size_i[u];
+              t1_ref_st_d[i].be     = ev_addr_be_i[u];
+            end
+        end else begin
+          for (int unsigned i = 0; i < LD_ENTRIES; i++)
+            if (t1_ref_ld_q[i].valid &&
+                t1_ref_ld_q[i].id == ev_addr_id_i[u]) begin
+              t1_ref_ld_d[i].addr_v = 1'b1;
+              t1_ref_ld_d[i].addr   = ev_addr_i[u];
+              t1_ref_ld_d[i].size   = ev_addr_size_i[u];
+              t1_ref_ld_d[i].be     = ev_addr_be_i[u];
+            end
+        end
+      end
+      if (ev_data_valid_i[u] && !cancelled_mask_i[ev_data_id_i[u]]) begin
+        for (int unsigned i = 0; i < ST_ENTRIES; i++)
+          if (t1_ref_st_q[i].valid &&
+              t1_ref_st_q[i].id == ev_data_id_i[u]) begin
+            t1_ref_st_d[i].data_v = 1'b1;
+            t1_ref_st_d[i].data   = ev_data_i[u];
+          end
+      end
+    end
+    if (PHYS_VALIDATE) begin
+      for (int unsigned i = 0; i < LD_ENTRIES; i++)
+        if (ev_phys_valid_i[0] && t1_ref_ld_q[i].valid &&
+            sb_live_i[t1_ref_ld_q[i].id] &&
+            !cancelled_mask_i[ev_phys_id_i[0]] &&
+            t1_ref_ld_q[i].id == ev_phys_id_i[0] &&
+            t1_ref_ld_q[i].hart == ev_phys_hart_i[0]) begin
+          t1_ref_ld_d[i].addr_v = 1'b1;
+          t1_ref_ld_d[i].addr   = ev_phys_addr_i[0];
+          t1_ref_ld_d[i].size   = ev_phys_size_i[0];
+          t1_ref_ld_d[i].be     = lane_be(ev_phys_addr_i[0],
+                                        ev_phys_size_i[0]);
+        end
+      for (int unsigned i = 0; i < ST_ENTRIES; i++)
+        if (ev_phys_valid_i[1] && t1_ref_st_q[i].valid &&
+            sb_live_i[t1_ref_st_q[i].id] &&
+            !cancelled_mask_i[ev_phys_id_i[1]] &&
+            t1_ref_st_q[i].id == ev_phys_id_i[1] &&
+            t1_ref_st_q[i].hart == ev_phys_hart_i[1]) begin
+          t1_ref_st_d[i].addr_v = 1'b1;
+          t1_ref_st_d[i].addr   = ev_phys_addr_i[1];
+          t1_ref_st_d[i].size   = ev_phys_size_i[1];
+          t1_ref_st_d[i].be     = lane_be(ev_phys_addr_i[1],
+                                        ev_phys_size_i[1]);
+        end
+    end
+    for (int unsigned c = 0; c < G6LCCfg.NrCommitPorts; c++)
+      for (int unsigned i = 0; i < LD_ENTRIES; i++)
+        if (ev_commit_ld_i[c] && t1_ref_ld_q[i].valid &&
+            t1_ref_ld_q[i].id == ev_commit_id_i[c])
+          t1_ref_ld_d[i].valid = 1'b0;
+    for (int unsigned w = 0; w < G6LCCfg.NrWbPorts; w++) begin
+      if (ev_complete_valid_i[w] && !ev_complete_is_st_i[w] &&
+          !cancelled_mask_i[ev_complete_id_i[w]])
+        for (int unsigned i = 0; i < LD_ENTRIES; i++)
+          if (t1_ref_ld_q[i].valid &&
+              t1_ref_ld_q[i].id == ev_complete_id_i[w])
+            t1_ref_ld_d[i].done = 1'b1;
+    end
+    for (int unsigned i = 0; i < LD_ENTRIES; i++)
+      if (ld_release_i[i]) t1_ref_ld_d[i].valid = 1'b0;
+    for (int unsigned c = 0; c < G6LCCfg.NrCommitPorts; c++)
+      if (ev_commit_st_i[c])
+        for (int unsigned i = 0; i < ST_ENTRIES; i++)
+          if (t1_ref_st_q[i].valid &&
+              t1_ref_st_q[i].id == ev_commit_id_i[c])
+            t1_ref_st_d[i].valid = 1'b0;
+    for (int unsigned i = 0; i < ST_ENTRIES; i++)
+      if (t1_ref_st_d[i].valid && cancelled_mask_i[t1_ref_st_d[i].id])
+        t1_ref_st_d[i].valid = 1'b0;
+    for (int unsigned i = 0; i < LD_ENTRIES; i++)
+      if (t1_ref_ld_d[i].valid && cancelled_mask_i[t1_ref_ld_d[i].id])
+        t1_ref_ld_d[i].valid = 1'b0;
+    if (flush_i) begin
+      t1_ref_st_d = '0;
+      t1_ref_ld_d = '0;
+    end
+  end
+  int unsigned t1_slot_n = 0;
+  always_ff @(posedge clk_i or negedge rst_ni) begin : p_t1_slot_eq
+    if (!rst_ni) begin
+      t1_ref_st_q <= '0;
+      t1_ref_ld_q <= '0;
+      t1_slot_n   <= 0;
+    end else begin
+      t1_ref_st_q <= t1_ref_st_d;
+      t1_ref_ld_q <= t1_ref_ld_d;
+      if (!$isunknown({st_q, ld_q})) begin
+        t1_slot_n <= t1_slot_n + 1;
+        g6lc_t1_slot_eq: assert (st_q === t1_ref_st_q &&
+                                 ld_q === t1_ref_ld_q)
+          else $error("g6lc_lsq_slot: equiv arms");
+      end
+    end
+  end
+  final begin
+    if ($test$plusargs("equiv_report"))
+      $display("[equiv] g6lc_lsq_slot arms: checked=%0d", t1_slot_n);
   end
   //pragma translate_on
 

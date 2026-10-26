@@ -705,6 +705,10 @@ assign icache_data_ack_o = icache_data_req_i & ~icache_data_full;
     icache_first_d         = icache_first_q;
     dcache_first_d         = dcache_first_q;
 
+    // r42-T item 23 classify: the ~25-FO4 cone at this arm is the wide
+    // line-assemble shift ({axi_rd_data, shift_q[...]}) — a data-path
+    // pack, not an exclusive-arm dependency chain; no A22 applies, the
+    // shifter is the floor. Recorded, no RTL spent.
     if (icache_rtrn_rd_en) begin
       icache_first_d = axi_rd_last;
       if (G6LCCfg.ICACHE_LINE_WIDTH == G6LCCfg.AxiDataWidth) begin

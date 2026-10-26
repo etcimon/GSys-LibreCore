@@ -3042,3 +3042,3890 @@ a windowed frontend diag (+fe_trace +win_trace +icf_trace
 +smt_flow_trace, +-200 cycles) to name the gate that stopped fetch
 issue at the mtvec boundary (FTQ head, pending resolve/flush,
 queue-full, or a fetch sideband parked on the CSR write).
+
+
+## r31 — loop-buffer inject identity + hang-dump CSR/FE owners (2026-10-23)
+
+**Defect (loop buffer)**: `hit_q`/`hit_data_q` were captured at `seq_hit`
+for `lookup_vaddr_i` (the FTQ head) but `consume_o = hit_q &&
+lookup_ready_i` never re-checked that the head being injected into was
+still the same head/epoch; `seq_hit` also did not require the head to be
+valid. A flush/reseed between detection and consume (FTQ re-pushed with a
+redirect target; the lbuf flush did not include `reseed_now`) injected the
+OLD block's bytes under the NEW head address.
+
+**Diff** (all under `hyp_redesign_core_8fo4/core/`):
+  - `frontend/g6lc_loop_buffer.sv`: new input `lookup_valid_i`; new
+    registers `hit_vaddr_q`/`hit_epoch_q` captured with the hit;
+    `seq_hit` now requires `lookup_valid_i`;
+    `hit_live = hit_q && lookup_valid_i && lookup_vaddr_i==hit_vaddr_q &&
+    hit_epoch_q==epoch_i`; `hit_o`/`consume_o`/`active_o` all gated by
+    `hit_live`; flush dominates the hit register (no re-arm on the flush
+    cycle); stale hits (`hit_q && !hit_live`) are retired, not injected;
+    new translate_off assertion `g6lc_loop_buffer: inject identity`.
+    The old expressions are preserved under `ifdef
+    G6LC_MUT_LBUF_STALE_HIT` as a review mutation.
+  - `fetch_B/frontend.sv`: `i_lbuf` gains `.lookup_valid_i(ftq_head_valid)`
+    and `.flush_i(... | reseed_now)`.
+  - `g6lc_core.sv`: `hd_print()` gains `[hang] CSR seam` (csr_buffer
+    tab_q[0..1] + commit_hit/commit_release, csr_decode staged-request
+    taps, rdata_valid, commit_csr, commit port 0) and `[hang] FE` (FTQ
+    head/full/cf_hold/demand/pf, iq_ready/halt/reseed/flush/replay/
+    mispredict/epoch/npc, redirect_inflight/lost, fetch-entry handshake,
+    lbuf state, icache_dreq ready). `md_stall` -> `|md_stall_v` tracks
+    the external rename.
+  - `smt/g6lc_smt_csr_bank.sv`: new translate_off `dbg_csr_req_*` tap
+    arrays assigned inside `gen_single`/`gen_csr` — Verilator cannot
+    index `gen_csr[h]` scopes from outside, so the bank surfaces the
+    per-hart staged request (valid/op/addr/tid/match/apply) as flat
+    arrays; hd_print indexes them by the port-0 head's hart.
+  - `Flist.g6lc_hyp8`, `verif/regress/remote/hyp8/Flist.hyp8_sim`:
+    `g6lc_ooo_pkg.sv` moved before `axi_pkg.sv` — required because the
+    external pass added `g6lc_ooo_pkg::ooo_lat_class(...)` to
+    `issue_read_operands.sv`, which otherwise fails elaboration:
+    `%Error-PKGNODECL: ... issue_read_operands.sv:654:14: Package/class
+    'g6lc_ooo_pkg' not found, and needs to be predeclared (IEEE
+    1800-2017 26.3)`.
+
+**Directed leaf** (`lbuf` section of tb_g6lc_hyp8_control.sv, tag
+hyp8-control-lbuf-r1b): arm on a taken branch at B+0x18->B, fill D0..D3,
+normal hits at B and B+8, reseed-without-flush under a held hit
+(LBUF_STALE_NO_INJECT / LBUF_DEMAND_RESUMES / LBUF_REHIT_D2), epoch bump
+under a held hit (LBUF_EPOCH_NO_INJECT), flush coincident with detection
+(LBUF_FLUSH_NO_INJECT). Result:
+
+    HYP8_LBUF_PASS checked=22
+    HYP8_LBUF_LEAF_PASS warnings=none census={'PINMISSING': 3,
+      'LITENDIAN': 7, 'WIDTHEXPAND': 15, 'WIDTHTRUNC': 2}
+
+Mutant (tag hyp8-control-lbuf-r1mut, HYP8_EXTRA_DEFINES=
+G6LC_MUT_LBUF_STALE_HIT) fails the stale-hit protection check, proving
+the bench discriminates:
+
+    FAIL LBUF_STALE_NO_INJECT
+
+**Discriminator re-run on the frozen r30 model** (tag
+hyp8-osbi-scalar-r13-hang, frozen fw a9218107, +stall_census
++hang_dump=2000): wedge reproduces, `*** [mc_verdict] FAIL: a core ran
+and then stopped retiring (exit code 126)`; 1,153,186 hart-0 RVFI
+retires, last at 0x8000ea9a. Three dump bursts at cyc 3608591/3609591/
+3610591; the head of the scoreboard is the csrrw itself:
+
+    [hang] SB head slot=22 issued=1 valid=0 cancelled=0 replay=0 fu=6
+      op=33 pc=000000008000ea9e tid=0 ex=0 | port0 valid=0 fu=6
+      pc=000000008000ea9e ack=0 drop=0 | commit_ptr=22 issue_ptr=21
+    [hang] LSQ ld[0] id=0 addr_v=1 done=0 addr=00000080040038
+    [hang] LSU bypass ... LU state=1 ldbuf_v=00000010 ...
+
+Contrary to the r30 note ("the csrrw was never fetched"), the SB head
+entry shows the mtvec write WAS issued and never produced a committable
+result. mtvec grep on trace_rvfi_hart_00.dasm: 0 literal hits (the dasm
+prints encodings); the same mtvec-op encodings 0x30561673/0x30561073
+retired earlier at 0x8000ea70/0x8000ea78 in the same function.
+
+**r31 build**: closure hyp8-integration-r31-closure (816 files), tag
+hyp8-integration-r31c. Lint scalar rc=0 (WIDTHEXPAND 343/WIDTHTRUNC
+87/LATCH 3 — identical to r30), smt2 rc=0 (WIDTHEXPAND 354/WIDTHTRUNC
+97/LATCH 5 — +1 expand, +2 latch vs r30's 353/97/3). Model sha256
+7116737ac7284e55859ea692795a23878a0df118ddf49e8e27c05b16a9b9549e.
+sha-diff vs r30 closure (17 files): MINE —
+fetch_B/frontend.sv, frontend/g6lc_loop_buffer.sv, g6lc_core.sv,
+smt/g6lc_smt_csr_bank.sv, Flist.hyp8_sim; EXTERNAL — ex_stage.sv,
+include/build_config_pkg.sv, issue_read_operands.sv, issue_stage.sv,
+load_store_unit.sv, lsu_bypass.sv, ooo/g6lc_flu_reserve.sv,
+ooo/g6lc_iq_arb.sv, ooo/g6lc_iq_bank.sv, ooo/g6lc_iq_legal.sv,
+ooo/g6lc_memdep.sv, ooo/g6lc_ooo_dispatch.sv. Session-window churn
+(sha-before -> sha-after): only my 5 core-tree files changed; no
+external edits landed during the pass.
+
+**Smokes (r31)**: hyp8-h34-r30 SUCCESS (tohost=0) @682 (= r30 @682);
+hyp8-h33-r26 FAIL — budget-out, no real tohost (r30 passed @889);
+hyp8-branch-cancel-r17 SUCCESS (tohost=0) @473 (r30 @475). A/B closure
+hyp8-integration-r31x-closure = r30 + only my 5 files (external hunks in
+g6lc_core.sv reverted, `md_stall` restored) builds clean (model sha256
+62926815268e405638608a99f8da27d0dec889e7db868642fcb9dcb2380d85ab) and
+hyp8-h33-r26x passes @889 — the h33 store-forward regression is owned by
+the EXTERNAL edits; branch-cancel also passes on r31x @475.
+
+**Witness hyp8-osbi-scalar-r14** (r31 model, same recipe + stall_census/
+hang_dump): wedge does NOT reproduce — 2,049,766 RVFI retires (census
+ret=2,066,236), max retirement gap 314 cycles, zero [hang] lines, zero
+%Error, zero UART, verdict `SUCCESS (tohost = 0) after 6000000 cycles
+[cycle budget reached: no tohost verdict]` with NO mc_verdict FAIL.
+Attribution witness hyp8-osbi-scalar-r14x (r31x model): the wedge DOES
+reproduce bit-for-bit (same ret=1,165,719 census, same SB head
+0x8000ea9e fu=6 op=33 issued=1 valid=0, FAIL exit code 126) — the
+external edits, not the loop-buffer fix, carry the r14 repair. The lbuf
+fix is a real latent-defect repair (mutant-proven) but not the wedge
+cause. On the reproducing wedge the new B2 diagnostics resolve the
+owner:
+
+    [hang] CSR seam: buf[0] v=1 tid=23 addr=da0 | buf[1] v=1 tid=5
+      addr=c01 | hit=0 rel=0 rdy=0 | req v=0 op=0 addr=305 tid=10 |
+      match=0 apply=0 rdata_v=0 | commit_csr=0 | port0 v=0 fu=6 tid=22
+      ack=0
+    [hang] FE: head v=1 pc=000000008000eb5e ftq_full=0 cf_hold=1
+      demand=0 pf=0 | iq_rdy=0 halt=0 reseed=0 flush=0 replay=0 misp=0
+      epoch=4 npc=000000008000eb60 | red_iq=0 lost=0 fe_v=01 fe_rdy=00 |
+      lbuf act=0 hold=0 hit=0 armed=0 capt=0 | ic_rdy=1
+
+Read: the staged CSR request register is EMPTY (req v=0; the mtvec op
+is not parked in csr_regfile), the csr_buffer holds two unrelated
+transactions (tid=23 addr 0xda0, tid=5 addr 0xc01), and the frontend
+already ran ahead to pc=0x8000eb5e with the loop buffer fully idle —
+the wedge is downstream of decode, in the CSR ex/commit publish path
+consistent with SB head issued=1 valid=0 and the unresolved
+LSQ ld[0]/ldbuf entry.
+
+Evidence: local pulls hyp8-osbi-scalar-r13-hang/, hyp8-r31-smokes/,
+hyp8-r31x-h33/, hyp8-bc-ab/, hyp8-osbi-scalar-r14/,
+hyp8-osbi-scalar-r14x/, hyp8-integration-r31b|31c|31x/output/results.json,
+hyp8-control-lbuf-r1b|r1mut/output/; remote run dirs under
+/opt/testharness/runs/ of the same names.
+
+## r32 — CSR table identity (alloc cancel-qualification + owner-liveness release)
+
+### STEP 1 — discriminating trace: H-LEAK refuted, H-CREDIT refuted
+
+Probe build `hyp8-integration-r31xp` (r31x basis = r30 + agent r31 files +
+`+csrtab_trace` event trace in csr_buffer.sv gen_ooo and an IRO-side
+`[csrtab] iro_ack` print; model sha256
+`715cf64e846177edc3db89b1fe92fbfe59af6d031812918d21532ad27fa2f9aa`).
+Witness `hyp8-osbi-scalar-r14xp` (+csrtab_trace +stall_census
++hang_dump=2000, pinned fw a9218107…): wedge reproduces bit-for-bit —
+1,153,186 hart-0 RVFI retires, last retired pc `0x8000ea9a`, exit 126,
+102 `[hang]` lines, 1084 `[csrtab]` lines.
+
+Wedge-window csrtab excerpt (allocs show cmask, release/cancel events
+follow each entry):
+
+    [csrtab] cyc=3606456 cancel_sweep ent=0 tid=27 addr=30a
+    [csrtab] cyc=3606511 alloc tid=8  addr=305 ent=0 cmask=0 allocated=1 dropped=0 free=2 tab={0,0}
+    [csrtab] cyc=3606512 alloc tid=9  addr=30a ent=1 cmask=0 allocated=1 dropped=0 free=1 tab={1,0}
+    [csrtab] cyc=3606518 release tid=8  hit=1 tab={1,1}
+    [csrtab] cyc=3606520 release tid=9  hit=1 tab={0,1}
+    [csrtab] cyc=3606524 alloc tid=10 addr=305 ent=0 cmask=0 allocated=1 dropped=0 free=2 tab={0,0}
+    [csrtab] cyc=3606526 release tid=10 hit=1 tab={1,0}
+    [csrtab] cyc=3606545 iro_ack tid=23 pc=000000008000eaa2 csr_ready_i=1
+    [csrtab] cyc=3606546 alloc tid=23 addr=da0 ent=0 cmask=0 allocated=1 dropped=0 free=2 tab={0,0}
+    [csrtab] cyc=3606586 iro_ack tid=5  pc=000000008000ead2 csr_ready_i=1
+    [csrtab] cyc=3606587 alloc tid=5  addr=c01 ent=1 cmask=0 allocated=1 dropped=0 free=1 tab={1,0}
+    (no further [csrtab] lines — table frozen for the remaining ~2.4M cycles)
+
+Final hang state (identical all three dumps):
+
+    [hang] SB head slot=22 issued=1 valid=0 cancelled=0 replay=0 fu=6 op=33
+           pc=000000008000ea9e tid=0 ex=0 | port0 valid=0 fu=6
+           pc=000000008000ea9e ack=0 drop=0 | commit_ptr=22 issue_ptr=21
+    [hang] CSR seam: buf[0] v=1 tid=23 addr=da0 | buf[1] v=1 tid=5 addr=c01
+           | hit=0 rel=0 rdy=0 | req v=0 op=0 addr=305 tid=10 | match=0
+           apply=0 rdata_v=0 | commit_csr=0 | port0 v=0 fu=6 tid=22 ack=0
+
+Findings:
+
+- **H-LEAK refuted.** Both resident entries allocated with `cmask=0`; the
+  run contains zero cancelled arrivals against the table. No same-edge
+  cancelled arrival ever occurred.
+- **H-CREDIT refuted.** `dropped=1` never fired; every `iro_ack` shows
+  `csr_ready_i=1` and every alloc found a free entry; the IRO→table
+  distance is a uniform one cycle.
+- The wedged head (tid 22, `csrrw mtvec` at 0x8000ea9e) produced **no**
+  `iro_ack` and **no** table alloc anywhere in the run — the slot's
+  `issued` bit is set at scoreboard allocation into the issue ring
+  (sb_lifecycle.sv:345 `a_mem issued:1`), not at FU grant.
+- **Actual mechanism — admission-order priority inversion.** The
+  operand-stalled `csrrw mtvec` (reads a2) waited in the IQ while two
+  younger, operand-ready CSRs (`0x8000eaa2`→`da0`, `0x8000ead2`→`c01`)
+  were acked and took both table entries. `csr_ready` then stuck at 0:
+  the residents can only release at commit, but in-order commit is
+  behind the never-issuable head → deadlock. The table is correct;
+  the admission order is not safe for a DEPTH=2 credit-limited buffer.
+
+### STEP 2 — csr_buffer identity hardening (real latent bug, not this wedge)
+
+Implemented as specified, kept because the cancelled-arrival race is a
+genuine latent defect proven by the leaf mutant:
+
+- `csr_buffer.sv`: `sb_live_i [NR_SB_ENTRIES]` input routed from the
+  scoreboard `issued` vector through `ex_stage` (`.sb_live_i(sb_live_i)`
+  on `csr_buffer_i`); `alloc_ok = csr_valid_i && !cancelled_mask_i[tid]
+  && !flush_i`; owner-liveness sweep `tab_d[i].valid &= sb_live_i[tid]`
+  before cancel/release/alloc; `free_count` computed from the swept
+  table (same-cycle credit for dying entries); translate_off liveness
+  + onehot-tid assertions; `[csrtab]` probe retained; old unqualified
+  behaviour wrapped under `G6LC_MUT_CSRTAB_LEAK`.
+- Leaf `tb_g6lc_hyp8_csr` extended (50→63 checks): same-edge cancelled
+  arrival leaves no entry, pre-allocated dead-slot entry freed by the
+  liveness sweep, back-to-back legal CSRs unchanged.
+- `hyp8-control-csr-r7`: `HYP8_CSR_PASS checked=63`,
+  `HYP8_CSR_LEAF_PASS warnings=none census={'SELRANGE': 8}`.
+- `hyp8-control-csr-r7mut` (`G6LC_MUT_CSRTAB_LEAK`):
+  `FAIL CSRTAB_CANCELLED_ARR_NO_ENTRY` — discriminates as required.
+- r15x trace shows the qualification firing in-system:
+  `[csrtab] cyc=3602768 cancelled-arrival ignored tid=5 addr=b05`.
+
+### STEP 3 — h33 bisection: each external group independently breaks it
+
+- `hyp8-integration-r32a` (r32 + LSU-credit group → r30: lsu_bypass,
+  load_store_unit, issue_read_operands, issue_stage, ex_stage externals,
+  g6lc_core lsu_count hunks; sha `3d40815b…`): h33 FAIL — 400k
+  budget-out, jmp resolves 36286, gap=72.
+- `hyp8-integration-r32b` (r32 + OoO group → r30: flu_reserve, iq_arb,
+  iq_bank, iq_legal, memdep, ooo_dispatch; sha `2df650c0…`): h33 FAIL —
+  400k budget-out, jmp resolves 36294, gap=51 (same signature as r32).
+- `hyp8-h33-r27x` (r32x = r30 + agent files + STEP-2 fix): **PASS @889**
+  — the csr_buffer change is exonerated.
+- Only shared external across both builds is
+  `include/build_config_pkg.sv` (CohMaxOutstanding scaling) — a proven
+  no-op at NrCores=1 (coh_slots = 4 either way). ⇒ the h33 store-forward
+  livelock has a sufficient fault in **each** external group (dual
+  regression), not one group.
+
+### STEP 4 — r32 build of record and witnesses
+
+- `hyp8-integration-r32` (tree: r31 + STEP-2 fix + all external edits):
+  lint scalar rc=0 WIDTHEXPAND 343 / WIDTHTRUNC 87 / LATCH 3 (identical
+  to r31); smt2 rc=0 354 / 97 / 5 (identical). Model sha256
+  `d5c567b8315a7c81ef26cdcbc1402d0ccea0a953a916acfb60faa8e04e9c5f25`.
+- Smokes: `hyp8-h34-r31` PASS @682; `hyp8-h33-r27` FAIL (400k
+  budget-out livelock, expected — external); `hyp8-branch-cancel-r18`
+  PASS @473.
+- Witness `hyp8-osbi-scalar-r15`: **no wedge** — 2,049,766 RVFI retires,
+  last retired pc `0x800128a4` at budget end, 0 `[hang]` lines, 0
+  `%Error`, 0 UART bytes, budget-out SUCCESS only, max retirement gap
+  314. External edits keep the repair.
+- Attribution `hyp8-osbi-scalar-r15x` (r30 + agent files + STEP-2 fix):
+  **wedge reproduces bit-for-bit** — 1,153,186 retires, last pc
+  `0x8000ea9a`, same tab={23@da0, 5@c01} freeze, same census
+  (ret=1,165,719), FAIL exit 126. ⇒ the STEP-2 fix does not own the
+  wedge repair; the external edits do (consistent with the priority-
+  inversion mechanism — the fix hardens identity, not admission order).
+
+### Churn and sha records
+
+- Closure diff r31→r32: `core/csr_buffer.sv` (MINE), `core/ex_stage.sv`
+  (MINE: `.sb_live_i` connect), `verif/regress/remote/hyp8/hyp8_tb.cpp`
+  (MINE: csrtab_trace allowlist). No other file changed.
+- Tree churn r31-after→r32 (`analysis/r32-tree-sha.txt`):
+  `core/csr_buffer.sv` and `core/ex_stage.sv` only — no external edits
+  landed during r32.
+- Model shas: r32 `d5c567b8…`, r32a `3d40815b…`, r32b `2df650c0…`,
+  r32x `d9f00970…`, r31xp `715cf64e…`.
+- Bench/tooling touched: `verif/tb/core/tb_g6lc_hyp8_control.sv`
+  (csr leaf +63 checks, `sb_live` driver), `verif/regress/remote/
+  run_hyp8_memory.py` (HYP8_EXTRA_DEFINES now honoured on source-list
+  leafs).
+
+### Follow-up for the r33 brief
+
+The wedge needs an admission-order fix, not an identity fix: either gate
+CSR `iro_ack` on "no older live CSR slot" (CSR admits strictly in
+dispatch order) or charge the credit against older un-acked CSRs so a
+DEPTH=2 table can never be captured entirely by younger instructions.
+The `+csrtab_trace` evidence identifies the exact starvation window
+(cyc 3606546–3606587) for an A/B rerun.
+
+
+## r33 — CSR table allocation at dispatch (program-order ownership) + frontier finding
+
+The r13/r14x CSR wedge mechanism, closed architecturally. A resource
+released in commit order must be allocated in program order; the r32
+fix hardened identity but left admission at IRO grant, where a held
+older CSR is invisible to the IQ-resident frontier.
+
+### STEP 1 — `+iqleg_trace` finding: X-BLIND confirmed
+
+`hyp8-osbi-scalar-r14xq` on the r31xq probe model (wedge reproduced
+bit-for-bit: 1,153,186 retires, last pc `0x8000ea9a`, 102 `[hang]`
+lines, 9350 `[iqleg]` lines, 1084 `[csrtab]` lines). The discriminating
+window shows the wedged head is not in the IQ banks — it sits in the
+arbiter's presentation slot, where the legality frontier cannot see it:
+
+```
+[iqleg] arb   cyc=3606544 p=0 win_q={v1,t23,b3,e1} pres_q={v0,t22,b6,e0} iv=1 iack=1 csr_rdy=1
+[iqleg] iro   cyc=3606545 p0 tid=23 pc=000000008000eaa2 fu=6 csr_rdy=1 ack=1
+[iqleg] csrtab cyc=3606545 iro_ack tid=23 csr_ready_i=1
+[iqleg] csrtab cyc=3606546 alloc tid=23 addr=da0 ent=0 free=2
+[iqleg] legal cyc=3606500-40 front_v=0 front_tid=0 oldest_v=00000000
+```
+
+tid 22 (`csrrw a2,mtvec,a2`, operand-stalled on a2) was taken from the
+bank into `pres_q` while IRO held it un-acked; with `front_v=0` the
+younger bank-resident CSRs (23, then 5) were `legal=1`, won `win_q`,
+and were IRO-acked into both table entries at cyc 3606545/3606586.
+Neither X-FRONT defect fired: the merge, the `older_t` row, and the
+`csr_oldest_tid_o` select were all observed correct once the bank held
+both younger CSRs (`front_tid=22` at 3606542 — too late; the arbiter
+had already consumed them). Verdict: **X-BLIND** — an arbiter-held op
+is invisible to the IQ-resident frontier. The fix therefore cannot be
+a legality repair; ownership has to move to dispatch.
+
+### STEP 2 — dispatch-time allocation
+
+`csr_buffer.sv` gen_ooo:
+
+- New dispatch ports `disp_valid_i[NR_PORTS]`, `disp_tid_i`,
+  `disp_addr_i` (the sbe `result[11:0]`, confirmed as the CSR immediate
+  carrier). Entries allocate in lane order into the lowest free slots
+  after the r32 liveness/cancel/commit sweeps — program order by
+  construction; an older stalled CSR always already owns its entry.
+- `csr_valid_i`/`fu_data_i` no longer allocate; they serve only the
+  commit release lookup. `csr_credit_o` (free entries post-sweep) is
+  exported through ex_stage → g6lc_core → issue_stage to
+  `g6lc_ooo_dispatch`, which gates group acceptance on
+  `csr_credit >= popcount(CSR-class lanes)` using the `alloc_cls[C_CSR]`
+  predicate — all-or-nothing under the r25 group ack and r19
+  kill-dominates ordering.
+- IRO-side `csr_ready_i` is now "the presented tid owns an entry"
+  (structurally always true for a live CSR) — verified by the L3
+  assertion `csr_valid_i |-> |fu_entry`, plus `$onehot0` per tid and
+  owner-liveness assertions from r32.
+- Mutant `G6LC_MUT_CSRTAB_IRO_ALLOC` restores IRO-time allocation.
+
+### Leaves
+
+- `hyp8-control-csr-r8`: `HYP8_CSR_PASS checked=75` — the exact
+  inversion (stalled oldest + two ready younger), the credit<2 group
+  stall, dispatch-alloc + cancel sweep, and the back-to-back regression
+  all covered; leaf census `{'SELRANGE': 13}`, no warnings.
+- `hyp8-control-csr-r8mut`: fails at `[424] CSRTAB_INV_A_OWNS_LOW` —
+  the mutant restores the inversion and the leaf discriminates it.
+- `hyp8-control-dispatch` re-run: `HYP8_DISPATCH_PASS checked=66` —
+  the group gate change did not regress dispatch checks.
+
+### r33 build of record + smokes + witnesses
+
+- `hyp8-integration-r33` (r32 + STEP-2, externals kept): lint scalar
+  rc=0 343/87/3, smt2 rc=0 354/97/5 — identical to r32. Model sha256
+  `b5ae0816c2e6cff2c0bb75359ca7c235e5c54c01ced977e2515535ad2acd53a3`.
+- `hyp8-integration-r33x` (r30 + agent files + r32 fix + r33 fix):
+  lint scalar 343/87/3, smt2 353/97/5. Model sha256
+  `e185e8e6b22ef596fbd2f928e972afd2ad6df2efe010e164b3fa7e6d2c288948`.
+- Smokes (`hyp8-r33-smokes`): `hyp8-h34-r32` PASS @682;
+  `hyp8-h33-r28` FAIL (400k budget-out — expected, the external groups
+  own the store-forward livelock); `hyp8-branch-cancel-r19` PASS @473;
+  `hyp8-h33-r28x` PASS @889; `hyp8-branch-cancel-r19x` PASS @475 —
+  identical to r32 cycle counts.
+- Witness `hyp8-osbi-scalar-r16` (r33, `+csrtab_trace +stall_census
+  +hang_dump=2000`): **no wedge** — budget-out SUCCESS at 6M, census
+  ret=2,066,236 (bit-identical to r15), 0 `[hang]`, 0 `%Error`, 0 UART.
+- Attribution `hyp8-osbi-scalar-r16x` (r33x): the dispatch-time alloc
+  trace is correct end-to-end (240 `[csrtab]` lines of paired
+  disp_alloc→fu_grant→release; no inversion) — but the run aborted at
+  cyc 3600670 on the new L3 assertion `csr_valid_i |-> |fu_entry`: a
+  CSR granted at the FU whose owner slot died between dispatch and
+  presentation legitimately has no entry (the liveness sweep already
+  freed it; its result is dropped). The assertion was over-strict and
+  was relaxed post-r33 to exempt dead/cancelled/flush grants — r17x on
+  r34x carries the relaxed form and completes the wedge-window proof.
+
+### Provenance
+
+- Closure diff r32→r33 (all mine): `core/csr_buffer.sv`,
+  `core/ex_stage.sv`, `core/g6lc_core.sv`, `core/issue_stage.sv`,
+  `core/ooo/g6lc_ooo_dispatch.sv`,
+  `verif/regress/remote/hyp8/hyp8_tb.cpp` (`iqleg_trace` allowlist).
+  r33x = r33x-closure regenerated from r30 + the agent file set +
+  r32/r33 fixes; no new external edits landed during r33.
+- Tooling: `verif/tb/core/tb_g6lc_hyp8_control.sv` (csr section → 75
+  checks, credit-gated dispatch driver); `run_r33_smokes.py`,
+  `run_r16_witness.py`, `run_r16x_witness.py`,
+  `assemble_r33_closures.py` under `C:/Users/etcim/cva6-artifacts/`.
+
+
+## r34 — T1 rank-0 structural pass + analyze-ghz-r2
+
+Rank-0 combinational-identity rewrites against the timing board's
+ranked cones, with per-item equivalence discipline (reference kept
+under translate_off, `assert(new===old)` every active cycle, a
+`G6LC_MUT_T1_*` mutant re-selecting the old path, and a
+`[equiv] <module> <item>: checked=N` report at $finish under
+`+equiv_report`). Baseline = r33 / r33x trees.
+
+### B0 — board reproduction
+
+`analyze-ghz-r1` reproduced bit-for-bit as `boards/hyp8-core/
+analyze-ghz-r1b.json`: every dFO4 = +0.0 except the two legitimate
+r33-edited files (csr_buffer +15.0 from dispatch allocation,
+g6lc_ooo_dispatch +0.4 from the credit gate). Verified command saved
+to `boards/hyp8-core/analyze-ghz-r1.cmd` (sv-timing analyze,
+--files-from inputs/hyp8-core.f, --param-map inputs/param-map-hyp8.json,
+--width-map inputs/width-map.json, --assume-xlen 64, --package-mode
+packages, --all-modules --stages, --target-mhz 5000 --fo4-ps 20
+--budget-margin 0.2, RUST_MIN_STACK=16M).
+
+### B1 — model-truth (rename_resolve hi_last)
+
+Single-module measure (`boards/hyp8-core/analyze-ren-t1b1.json`,
+36 nodes / 23 regions / 34 paths): inline log-depth prefix-OR
+measured 30.1 FO4 vs 8.0 budget (board-billed cone 41.6). The
+functional rewrite attempts (prefix-OR, packed slices, element
+arrays) all broke the `g6lc_t1_renres_eq` equivalence in
+g6lc_rename.sv — item 1 **not landed**; `g6lc_rename_resolve.sv` and
+`g6lc_rename.sv` reverted to r33 state (verified against
+t1-tree-sha-before).
+
+### B2 — landed items (with equivalence discipline)
+
+Per-item rewritten-cone FO4 from the single-module reanalysis
+runs (module-level worst on the r2 board can sit on a different cone):
+
+| item | module | cone r1 | cone r2 | [equiv] counter |
+|------|--------|---------|---------|-----------------|
+| 15   | g6lc_iq_legal (serial-class legality from age-matrix row) | 28.8 (pres 122.0, stitch-of-record 222.7) | 16.4 (pres 21.9, stitch 134.2) | leg |
+| 13   | sb_lifecycle (exclusive arms + one-hot alloc) | 24.6 | 16.4 | col |
+| 9    | g6lc_rename_recover (row-local alloc marks) | 20.0 | 16.0 | pubmarks |
+| 11   | g6lc_fe_override (late-select RAS link adds) | 19.8 | 16.4 | ras_upd |
+| 3    | g6lc_tlb (flat PLRU set/clear masks) | 19.4 | 18.0 | plru |
+| 7    | g6lc_lsq_release (unique-case arms, source one-hot) | 17.6 | 13.4 | arms |
+| 12   | g6lc_lsq_event (SelectIncrement ev_count) | 17.1 | 16.4 | evcount |
+| 14   | g6lc_lsq_slot (row-local hit decode) | 16.4 | 15.6 | arms |
+| 2    | g6lc_lsq_cam_bank (be carried in cam entry) | 15.0 | 11.0 | cambe |
+
+Not landed: item 1 rename_resolve (equivalence failures, reverted).
+Discarded by measurement: item 18 alu one-hot shifter 27.9→48.0;
+item 5 lsq_reduce id/pay carry 38.2→43.5 (discard notes kept in
+core/alu.sv and core/ooo/g6lc_lsq_reduce.sv). Excluded per brief
+(rank-1 / externally-owned): IRO, lsu_bypass, iq_bank, iq_arb,
+ooo_dispatch, LSU/load_unit, ptw, multiplier, lbuf peek, sb_commit.
+
+### B3 — leaves (r75 control closure)
+
+- `hyp8-control-dispatch-r38`: HYP8_DISPATCH_PASS checked=66 —
+  equiv counts leg=416 evcount=416 cambe=9 arms(release)=9
+  arms(slot)=9 pubmarks=38.
+- `hyp8-control-csr-r9t1`: HYP8_CSR_PASS checked=75 (same as r8).
+- `hyp8-control-lsq-r*` : HYP8_LSQ_PASS checked=24 + equivs.
+- `hyp8-control-alu-r9t1`: HYP8_ALU_PASS checked=23.
+- Census: identical warning census to the pre-T1 leaf baseline.
+
+### B4 — r34 / r34x of record
+
+- `hyp8-integration-r34` (r33 + T1): lint scalar 343/87/3,
+  smt2 354/97/3 (LATCH 3 — T1 pass removed the 2 leftover latches);
+  model sha256 `2c449f7ecf101f392ec5766d16343e39faae58420cc31f7c8c275a0e0628caef`.
+- `hyp8-integration-r34x` (r33x + T1 incl. iq_legal port):
+  lint scalar 343/87/3, smt2 353/97/3; model sha256
+  `46e5037e851fa45d35a2a8e8641745fea34dbdfbcfc737a5c22589e6f5e46cd2`.
+- Smokes (`hyp8-r34-smokes`) bit-identical to r33/r33x:
+  h34 @682, h33 400k budget-fail (external store-forward livelock,
+  unchanged), bc @473 | r34x: h33x @889, bcx @475. equiv=29 lines/run.
+- Witness `hyp8-osbi-scalar-r17` (r34, +stall_census +hang_dump=2000
+  +equiv_report): budget-out SUCCESS, mc_verdict exit 0, gap 314,
+  **final census ret=2,066,236 — bit-identical to r16**; 0 [hang],
+  0 %Error, 0 UART. equiv counts: leg/col/evcount/arms/slot/arms/
+  cambe(×16)/plru(×2) all checked≈6.0M, ras_upd=54,836,
+  pubmarks=1,152,473.
+- Witness `hyp8-osbi-scalar-r17x` (r34x): got **past** the
+  0x8000ea9e CSR wedge (1,218,494 retires > r14x's 1,153,186 — the
+  dispatch-allocation ownership proof holds on the external-free
+  model), then stopped at ~cyc 3,775,788 on a **different,
+  previously-unreachable wedge**: empty-pipeline frontend starvation
+  (`sb_empty=1`, issue_valid=00, CSR seam empty/rdy=1, FE head
+  demand=1 with epoch-reseed cycling fe_v=00). mc_verdict FAIL 126,
+  ret=1,218,494, 18 [hang] lines, 0 %Error, all equivs>0. r16x had
+  aborted at cyc 3,600,670 on the strict L3 assertion, before this
+  window. Attribution run `hyp8-osbi-scalar-r16xr` on
+  `hyp8-integration-r33xr` (r34x minus every T1 file = r33x + the
+  relaxed assertion only; model sha
+  a2088cb5199c2185fe2de8e52527021e0ab74ff2f0250ada1294e26c38c224a9)
+  reproduces the wedge **bit-for-bit**: identical ret=1,218,494,
+  identical 18 [hang] lines (onset cyc 3,775,788, SB head
+  0x8000c9ec), identical census — the frontend-starvation wedge is
+  **latent in r33x, not T1-induced**, and the T1 pass is
+  cycle-transparent on the x profile too. Root cause of the new
+  wedge (FE reseed cycling with sb_empty, epoch advancing while
+  fe_v=00) is a separate open defect on the external-free model.
+
+### B4 — analyze-ghz-r2 board
+
+`boards/hyp8-core/analyze-ghz-r2.json` (r34 tree, verified r1
+command) + `clock-r2-vs-r1.csv`. Board structural clock **0.81 GHz**
+(49.2 FO4, g6lc_shared_tlb reg-to-reg :860 — the known RVH-arm path
+the tool cannot exclude per-path; its live cone is 28.3). The top
+LIVE limit is **39.0 FO4 ≈ 1.03 GHz**, a tie between `csr_buffer`
+(reg-to-reg :240, +15.0 — the r33 dispatch-allocation cone,
+pre-existing since r33, not a T1 regression) and `g6lc_ptw`'s live
+cone (39.0; its billed 43.1 is RVH-arm). IQ-complex stitched path
+**222.7 → 134.2 FO4** (`g6lc_iq` stitch column; iq_legal pres
+122.0 → 21.9, module 28.8 → 16.4, dFO4 −12.4 — the single largest
+module move on the board). Other T1 module moves at min-fo4 10:
+g6lc_tlb 40.7→38.5 (−2.2), g6lc_lsq_event 29.0→25.1 (−3.9); all
+other modules dFO4 +0.0 except csr_buffer +15.0 and
+g6lc_ooo_dispatch +0.4 (both legitimate r33 changes). Unmoved
+clock-setters: rename_resolve 41.6 in-stage RR (item 1 not landed),
+lsq_reduce 38.2 in-stage R (item 5 discarded), iq_arb 34.8,
+iq_bank 32.3, loop_buffer 31.8, icache 22.0 (+0.0), alu 27.9
+(item 18 discarded).
+
+### Provenance / tree churn
+
+- r34 = r33 closure + 14 files (13 T1 + hyp8_tb.cpp); r34x = r33x
+  closure + 13 files with iq_legal ported onto the r30 scalar-frontier
+  base. Manifests regenerated (693 unique on-disk files).
+- t1-tree-sha-before diff: exactly the 13 edited files, all mine —
+  zero external churn during T1.
+- Closure tags: `hyp8-integration-r34{,x}-closure`,
+  `hyp8-control-r75-closure`; runs `hyp8-control-{dispatch-r38,
+  csr-r9t1,lsq,alu-r9t1}`, `hyp8-r34-smokes`,
+  `hyp8-osbi-scalar-r17{,x}`; boards `analyze-ghz-r1b`,
+  `analyze-ren-t1b1`, `analyze-ghz-r2`, `clock-r2-vs-r1.csv`.
+
+
+---
+
+## r35 (part 1) — FE reseed-cycling trace, 20M witness, csr_buffer alloc rank-0, hi_last fixture
+
+### S1 — `[win]` windowed probe + r17xq trace (H-OV confirmed)
+
+`core/fetch_B/frontend.sv`: the `[win]` lifecycle probe's
+`$time() < 200000` cap replaced by the `+trace_from`/`+trace_to`
+cycle window (same convention as `+commit_trace` in g6lc_core.sv),
+gated on `+fetch_win_trace`; the line gained `rpl`/`rpa`
+(instr_queue replay_o/replay_addr_o), `fev`
+(fetch_entry_valid_o), `fpush`/`fpop`/`fhv`/`fhva`/`ftqf`
+(FTQ), `dmd`/`dmfr`/`rsnw` (demand/fire/reseed_now), `dreq`/`drva`/
+`irdy` (icache_dreq_o.req/vaddr, icache_dreq_i.ready) and `lt`.
+Plusargs `fetch_win_trace`, `trace_from`, `trace_to` already in the
+hyp8_tb.cpp allowlist. Build `hyp8-integration-r34xq` (= r34x
+closure + probe only); run `hyp8-osbi-scalar-r17xq`
+(+fetch_win_trace +trace_from=3773000 +trace_to=3776500
++stall_census +hang_dump=2000, 6M budget).
+
+Result: wedge reproduced **bit-for-bit** — ret=1,218,494,
+FAIL 126, identical 18 `[hang]` lines, 0 %Error, 0 UART, firmware
+sha a9218107… (probe non-invasive). 2914 `[win]` lines captured.
+
+The wedge is an exact ~11-cycle self-squash loop, onset ≈ cyc
+3773774 (first `red=1 src=9` after the last healthy fetch burst),
+steady from 3773783. One loop pass (verbatim, ep=6→7 shown):
+
+```
+[win] cyc=3773773 … rsp=0 vaddr=…ca20 ov1=1 src=10 redpc=…ca1e res=…ca1e ep=6 lo=1 lopc=…ca1e fev=00 fhva=…ca28 dreq=1 drva=…ca28
+[win] cyc=3773774 … k1=1 k2=1 red=1 src=9 redpc=…ca1e res=…ca1e ep=7 rsnw=1 dreq=0 drva=…ca1e
+[win] cyc=3773775 … dmd=1 dmfr=1 dreq=1 drva=…ca1e fhv=1
+[win] cyc=3773778 … rsp=1 vaddr=…ca1e take=1 irdy=1
+[win] cyc=3773780 … npc advances ca20→ca28→ca30, fpush=1, loep 6→7 (carry epoch follows)
+[win] cyc=3773782 … lt=1 dreq=1 drva=…ca28
+[win] cyc=3773783 … rsp=1 vaddr=…ca20 take=1 ov1=1 irdy=1
+[win] cyc=3773784 … k1=1 k2=1 red=1 src=9 redpc=…ca1e ep=0 rsnw=1
+```
+
+full excerpt: `hyp8-osbi-scalar-r17xq/win_onset.txt` (132 lines,
+cyc 3773770–3773930 = ~2.5 passes).
+
+Disassembly of the loop site (fw_payload.elf, sha a9218107…):
+
+```
+8000ca1a: fe9fa0ef  jal  ra,80007a02 <misa_extension_imp>   # call: test bit 68
+8000ca1e: 20050163  beqz a0,8000cc20                       # 32-bit insn at ca1e-ca21 — straddles the 16B I$ line boundary at ca20
+8000ca22: 6499      lui  s1,0x6
+8000ca24: 05600513  li   a0,86
+8000ca28: fdbfa0ef  jal  ra,80007a02 <misa_extension_imp>   # FTQ head inside the wedge
+8000ca2c: c119      beqz a0,8000ca32
+8000ca2e: 6004e493  ori  s1,s1,1536
+8000ca32: 30049073  csrw mstatus,s1
+```
+
+**Verdict: H-OV survives.** `src=9` = `SRC_OV1` (stage-1
+override; SRC_REPLAY=8, SRC_OV2=10 — `g6lc_fe_redirect.sv:97-100`).
+Every pass: both I$ lines arrive and are taken (`rsp=1 take=1` on
+vaddr ca1e *and* ca20 — the straddle's two halves land, `lo=1
+lopc=ca1e` carry holds with epoch tracking `loep` following `ep`),
+`lt=1` (line-taken guess) precedes `ov1=1` on the cycle the second
+line completes, then `k1=k2=1 red=1 rsnw=1` squashes the whole
+window and reseeds to **redpc=0x8000ca1e — the straddled beqz's own
+vaddr** (== `res`, the resume pointer), not its target (0x8000cc20
+if taken) nor fallthrough (0x8000ca22). Because `beqz` target =
+vaddr+imm, redirect-to-self is consistent with the override's
+immediate decode reading `imm=0` for the carry-completed
+instruction — the branch's high bytes live in the second line,
+which the ov1 target path apparently never sees. The verdict
+re-decides identically each pass (no resolve feedback can arrive —
+nothing is ever admitted), so the loop is stable; epochs cycle
+0→7.
+
+Refuted: **H-RL** — the carry is live each pass (`lo=1`,
+`lopc=ca1e`, `loep` tracks `ep`) and both lines `take=1`; the kill
+is what prevents use, not a dropped carry. **H-REP** — `rp=0` and
+`rpl=0` in all 2914 lines; the queue never replays
+(`rpa=0x80012960` is an inert leftover). Also refuted as
+first-false: **I$→realign** (lines delivered and taken every pass),
+**realign→IQ** as a data-path failure — `vmask=0000`/`fev=00`, but
+the `k1/k2` kill arrives *because of* the ov1 verdict, so the empty
+presentation is downstream of the wrong squash, not its cause.
+**First-false promise: predictor→FTQ (the SRC_OV1 verdict's
+redirect target / re-fire discipline on a straddled CF).**
+
+### S2 — `hyp8-osbi-scalar-r18` (r34, 20M-cycle witness)
+
+r34 model sha `2c449f7e…` (unchanged since B4), firmware sha
+a9218107…, `+time_out=20000000 +max-cycles=20000000
++debug_disable +quiet_axi +tohost_addr=0x80041730 +stall_census
++hang_dump=2000 +equiv_report`. Verdict: **SUCCESS, budget
+reached, no tohost** — `*** SUCCESS *** (tohost = 0) after
+20000000 cycles`, mc_verdict exit 0, all cores retired, **max
+retirement gap 314** (same as r16/r17). Final census cyc
+19,999,986: **ret=6,900,750**, ipc 0.345 sustained at every 2M
+checkpoint — no slowdown, no wedge, the external-free frontend
+self-squash does not exist on the tree-of-record profile (the
+wedge is only reachable on the r30-base r34x/r33x profile).
+0 `[hang]` lines, 0 `%Error`, **0 UART bytes** (firmware still
+in pre-console code at the 20M cutoff). `[ckpt] final`:
+allocs=1,123,475 pops=939,988, pop_mismatch=0, restores=38,657,
+restore_mismatch=0, mispredicts br=22,521 ret=0 jmp=16,136.
+`[equiv]` all >0: leg/col/evcount/arms/cambe(×16)/plru(×2)
+checked=19,999,976–86 (every cycle), ras_upd=183,248,
+pubmarks=3,846,820. Wall 5,910,705 ms ≈ 98.5 min. No last-pc
+marker — budget-out runs emit no hang dump; retirement was
+uninterrupted to the cutoff.
+
+### S3 — csr_buffer :240 two-lane alloc → parallel free-vector picks (rank-0)
+
+`core/csr_buffer.sv` (the analyze-ghz-r2 live clock-setter, 39.0
+FO4): the serial in-place lane scan (lane 1 saw lane 0's write
+through tab_d, chaining through the table writes) replaced by a
+swept free vector `free_v[DEPTH]` (`!valid | !sb_live | cancelled |
+commit-release`, computed once on tab_q), per-lane one-hot picks
+`alloc_take[p] = rem & ~below` with `below` the log-depth
+prefix-OR of `rem = free_v & ~alloc_used` (A140 isolate form;
+DEPTH=2), per-entry one-hot masked writes, and
+`csr_credit_o = popcount(free_v)` (one 2-bit add). The old serial
+scan remains under `G6LC_MUT_T1_CSRALLOC` (live-path mutant) and as
+the translate_off `ref_tab`/`ref_free` reference, asserted every
+cycle (`tab_d === ref_tab && csr_credit_o === 2'(ref_free)` —
+assertion compiled out under the mutant, which re-selects the old
+expression on the live path) plus `[equiv] csr_buffer alloc:
+checked=N` on `+equiv_report`.
+
+Measurement (`--modules csr_buffer`, verified analyze flags):
+**39.0 → 22.9 FO4** (`analyze-csra-t1.json` worst_path_fo4
+22.9075) — the live board limit drops to ~32.x (ptw live 39.0
+remains; csr_buffer is off the critical list at 5000 MHz/20 ps/0.2
+units). Leaf `hyp8-control-csr-r10`: `HYP8_CSR_PASS checked=75`,
+`[equiv] csr_buffer alloc: checked=77`, `HYP8_CSR_LEAF_PASS
+warnings=none census={'SELRANGE': 13}`; `hyp8-control-csr-r10mut`
+(mutant): `HYP8_CSR_PASS checked=75` — T1 identity discipline
+(mutant proves the wiring, not discrimination).
+
+### S4 — E6 fixture: hi_last function-billing over-read
+
+`sv-timing/fixtures/auto_correct/fn_prefix_or_billing.sv` (MIT,
+Etienne Cimon): four forms of a 6-input highest-set one-hot —
+`hi_last` as a `function` with the `l <<= 1` prefix loop vs the
+explicit inline prefix-OR, each in standalone and gather-context
+(7-call) shape. Readings (`analyze` on the fixture): call 9.0,
+inline 14.1, call_gather 15.0, inline_gather 33.4 FO4 — **the
+function-vs-inline billing gap is context-bound and reverses
+standalone**; it does not reproduce a universal call-form penalty,
+which is what the fixture documents. Golden test
+`fn_prefix_or_billing_goldens_pin_current_readings` pins the four
+readings (passes); `fn_prefix_or_forms_measure_within_spread` is
+`#[ignore]`-marked expected-mismatch (the 41.6→30.1
+rename_resolve gap is therefore recorded as unresolved
+context-bound billing, not a defect to fix in the cost table —
+no analyzer/cost-table changes). `cargo test -p sv-timing-core
+--lib fn_prefix_or`: 1 passed, 1 ignored.
+
+### Deferred / not landed
+
+- The frontend self-squash fix: deliberately **not authored** —
+  the trace evidence above goes to the lead for the design (per
+  the r35 brief; expected r36). Probe-only closure
+  `hyp8-integration-r34xq` retains the `[win]` instrumentation.
+- rename_resolve item 1 (hi_last inline): still not landed (r34
+  note stands — equivalence failed; single-module measured 30.1).
+- r35 tree churn vs the r34 closure: **exactly 2 files, both
+  mine** — `core/csr_buffer.sv` (S3 rewrite) and
+  `core/fetch_B/frontend.sv` (S1 probe). The walk also lists 6
+  "NEW" paths (`alu_shift_hi.sv`, `g6lc_fetch_dbg.sv`,
+  `neg/mut_*.sv` ×3, `hpdcache_typedef.svh`) — all unreferenced
+  working-tree files absent from every closure since r33 (the
+  closure manifest is build-flist driven; `g6_fetch_dbg`/
+  `alu_shift_hi` sit only in the sv-timing analyzer flist), not
+  r35 churn. Zero external edits observed.
+- Tags: build `hyp8-integration-r34xq` (model sha `4d1702f9…`,
+  lint scalar 343/87/3, smt2 353/97/3 — identical census to
+  r34x); runs `hyp8-osbi-scalar-r17xq`, `hyp8-osbi-scalar-r18`,
+  `hyp8-control-csr-r10{,mut}`; board
+  `boards/hyp8-core/analyze-csra-t1.json`; closure
+  `hyp8-integration-r34xq-closure`; fixture
+  `sv-timing/fixtures/auto_correct/fn_prefix_or_billing.sv`.
+
+## r36 — override-#1 identical-state refire (livelock) + unlearn delivery; boot observability
+
+### Defect (from r17xq/r34xq probe evidence)
+
+`src=9 (SRC_OV1)` leg-2 squelch loop on the straddled `beqz a0` at
+0x8000ca1e: the check's unbacked-taken clause redirected to
+`resume_pc_i` = the queue frontier = the CF's own vaddr, killing the
+very window (0x8000ca20) that carries the CF's second half. The
+frontier could never advance; the refetch re-pushed the same block
+with the same untagged guess → identical {chk_vaddr, resume} → refire,
+~11-cycle period, `fe_v=00` forever.
+
+### Fix (core/frontend/g6lc_fe_btb_check.sv — D1, by contract)
+
+An override is a prediction correction and must not be re-applied to an
+identical state. A registered `sq_q = {valid, vaddr, resume}` records
+the last leg-2 fire; leg 2 is suppressed when the same block is
+re-checked at the same frozen frontier (`sq_valid && chk_vaddr ==
+sq_vaddr && resume == sq_resume`). The guess is left to architectural
+resolution — the stream follows it, the CF resolves at execute, a wrong
+guess recovers — slower than the squelch, never a livelock. `sq_q`
+clears on `flush_bp_i`, on a leg-1 fire, and on any frontier move
+(`resume != sq_resume`) so genuinely new states are never suppressed.
+Leg 1 (tagged-BTB leg) unchanged. Old leg 2 kept under review mutant
+`G6LC_MUT_FE_OV1_REFIRE`; translate_off assertion "ov1 refire on
+identical state" added; stale comment amended with the straddle caveat.
+
+### Leaf (verif/tb/core/tb_g6lc_hyp8_control.sv section F)
+
+`hyp8-control-linecheck-r3c` (closure `hyp8-control-r77-closure`):
+`HYP8_LINECHECK_PASS checked=53` (36 prior + 17 new) —
+LINECHECK_OV1_FIRE / _UNLEARN_EMIT / _UNLEARN_LANDS / _OV1_ONCE /
+_OV1_NEW_STATE + straddle-walk checks. `hyp8-control-linecheck-r3mut`
+fails at `LINECHECK_OV1_ONCE` (mutant refires on identical state).
+
+### Unlearn delivery (D2)
+
+The r17xq2 probe (`hyp8-integration-r34xq2`, `+fetch_win_trace`
+3773000–3776500) reproduced the wedge bit-for-bit (ret=1,218,494,
+FAIL 126, 18 [hang] lines identical to r16xr) and captured the
+arbitration on every pass of the loop: at each leg-2 fire
+`o1v=1 o1p=0x8000ca38 o1t=0` (the unlearn for the checked block) and
+`o2v=1 o2p=0x8000ca1e o2t=0` (a same-cycle override-#2 train) — and the
+delivered `nl_train` carried ov2's record (`nlv=1 nlp=…ca1e nlt=0
+widx=67`), never ov1's. The `resolve > ov2 > ov1` priority in
+`frontend.sv` dropped the unlearn every cycle: the wrong guess
+survived its own refutation and the refetch re-read `lt=1` — the
+refire's self-sustaining half.
+
+Fix (core/fetch_B/frontend.sv): an ov1 unlearn
+(`ov1_train_valid && !ov1_train_taken`) is promoted above ov2, below
+only the architectural resolve — a refutation of the guess that just
+caused a squelch must never be dropped to a lower-priority producer.
+Plus a translate_off delivery assertion: an ov1 unlearn with no
+same-cycle resolve must appear on `nl_train` verbatim
+("frontend: ov1 unlearn dropped by train arbitration"). LINECHECK_
+UNLEARN_WINS is not expressible at the pair leaf (the arbiter lives in
+frontend.sv, outside the check+nextline pair); coverage is the
+assertion exercised by all model runs plus the r19xv2 witness through
+the wedge region.
+
+### Integration
+
+- Closures `hyp8-integration-r36{,x}-closure` = r34{,x} + exactly
+  {`core/csr_buffer.sv` (r35 alloc), `core/fetch_B/frontend.sv` (probe),
+  `core/frontend/g6lc_fe_btb_check.sv` (D1)}; `hyp8_tb.cpp` re-staged.
+- `hyp8-integration-r36`: model sha `c3b6f025…`, lint scalar 343/87/3,
+  smt2 354/97/3 (identical census to r34). D1-only model.
+- `hyp8-integration-r36x`: model sha `e90c1c10…`, lint scalar 343/87/3,
+  smt2 353/97/3 (identical census to r34x). D1-only model.
+- Combined-fix rebuilds (D1 + D2): `hyp8-integration-r36v2` model sha
+  `24a25a92…`, lint scalar 343/87/3, smt2 354/97/3;
+  `hyp8-integration-r36xv2` model sha `7625bc45…`, lint scalar
+  343/87/3, smt2 353/97/3 — censuses identical to r36/r36x (the D2 mux
+  + assertion add no lint delta).
+- Smokes (v2 models, `hyp8-r36v2-smokes`) bit-identical: h34=682,
+  bc=473, h33x=889, bcx=475 real tohost + 30 equiv entries each;
+  h33 on r36v2 budget-out 400000 (external store-forward line,
+  expected).
+- Witness `hyp8-osbi-scalar-r19x` (r36x D1-only, 6M): SUCCESS
+  budget-out, rc=0, `[mc_verdict] all 1 core(s) retired
+  instructions`, ret=1,703,355 @ cyc 5,999,986 (vs ret=1,218,494
+  frozen at the r16xr wedge), max retirement gap 371, 0 [hang],
+  0 %Error, 0 UART, 0 refire-assertion hits, 30 [equiv] lines —
+  D1 alone breaks the livelock (the suppress lets the straddled
+  window complete so the frontier advances).
+- Witness `hyp8-osbi-scalar-r19xv2` (r36xv2 D1+D2, 6M): SUCCESS
+  budget-out, rc=0, `[mc_verdict] all 1 core(s) retired
+  instructions`, ret=1,703,285 @ cyc 5,999,986, 0 [hang], 0 %Error,
+  0 UART, 0 assertion hits (refire and unlearn-drop both silent),
+  30 [equiv] lines, ckpt clean (pop_mismatch=0,
+  restore_mismatch=0). Ret differs from D1-only r19x by −70
+  (1,703,285 vs 1,703,355): the unlearn now lands, clearing the
+  poisoned guess and altering the speculative trajectory — the
+  intended D2 effect, not a regression.
+- Witness `hyp8-osbi-scalar-r19v2` (r36v2 D1+D2, 20M, +equiv_report
+  +rvfi_cycle_stamp): SUCCESS budget-out, rc=0, `[mc_verdict] all 1
+  core(s) retired instructions`, exit 0, ret=6,789,008 @ cyc
+  19,999,986 (r18/r34: 6,900,750 — the suppress changes speculation
+  trajectory by construction; −1.6% retires, not a hang signature),
+  uniform ipc 0.339 at every 2M census, 0 [hang], 0 %Error, 0 UART,
+  0 assertion hits (refire + unlearn-drop), 30 [equiv] lines
+  (csr_buffer alloc checked=19,999,986 etc.), ckpt clean
+  (pop_mismatch=0, restore_mismatch=0). Wall 6,047 s.
+
+### Boot observability (r18/r34, 20M, no fix — facts only)
+
+- PC histogram of the last 200k RVFI retires (cyc 19,420,806–19,999,978):
+  100% inside OpenSBI's libfdt walk — `fdt_offset_ptr` 133,072,
+  `fdt_next_tag` 55,561, `fdt_next_node` 10,098,
+  `fdt_subnode_offset_namelen` 1,269. Milestone PCs: 2M→`fdt_next_node`,
+  6M→`fdt_offset_ptr`, 12M→`fdt_offset_ptr`. Retire stream ran to the
+  final cycle (6,900,750 lines, last retire cyc 19,999,978) — the core
+  is processing its embedded FDT, not parked in `sbi_hart_hang`; an
+  FDT-walk livelock is not excluded by the histogram alone.
+- UART path: harness models `mock_uart` at UARTBase 0x1000_0000
+  (`InclUART=0` under Verilator → `mock_uart` instantiates on the same
+  axi2apb window; THR byte → `$write %c` to sim stdout; LSR always
+  THRE/TEMT). The dtb's `stdout-path=/soc/uart@10000000` ns16550a and
+  `console=ttyS0,115200 earlycon=sbi` bootargs target exactly that
+  window — the path is fully modeled; "0 UART bytes" is a genuine
+  no-write fact (OpenSBI never reached console output), not an
+  instrument gap.
+- Payload identity: `linux_scalar` — OpenSBI generic `fw_payload`
+  (FW_TEXT_START=0x80000000, FW_PAYLOAD_OFFSET=0x200000) carrying
+  `linux-payload.bin` (a real Linux kernel + initramfs at 0x84000000),
+  dtb `g6lc-hyp8-linux.dtb`. fw sha `a9218107…` pinned in
+  `analysis/integration-inputs.json`.
+- r19x (r36x D1-only, 6M) last-200k-retire histogram: `fdt_offset_ptr`
+  104,574, `__sbi_expected_trap` 44,962, `fdt_next_tag` 28,490,
+  `fdt_get_property_namelen_` 2,087, `fdt_next_node` 1,952,
+  `fdt_ro_probe_` 1,920, sbi_mem*/strlen helpers — the same FDT-parser
+  trajectory at 6M as r18 shows at 20M; retire #627,782 (≈2M census
+  point) at PC 0x800128c0 (fdt_offset_ptr region). Progress past the
+  wedge is real retirement work, not a redirect loop.
+- r19v2 (r36v2 D1+D2, 20M) last-200k-retire histogram (cyc
+  19,405,474–19,999,986): `fdt_offset_ptr` 134,300, `fdt_next_tag`
+  54,633, `fdt_next_node` 9,744, `fdt_subnode_offset_namelen` 1,323 —
+  ~99.4% inside the libfdt walk, statistically identical to r18.
+  Milestones: 2M→`fdt_next_tag` (0x800129a0), 6M→`fdt_offset_ptr`
+  (0x800128c0), 12M→`fdt_offset_ptr` (0x800128f4), last retire
+  @19,999,986→`fdt_next_tag` (0x80012aa4). No `sbi_hart_hang`, timer,
+  delay, or lock-spin symbols anywhere in the window; the fix does not
+  change where the core spends its time — OpenSBI's embedded-FDT parse
+  is simply a ~20M-cycle workload on this model.
+
+## r37 — libfdt residence: progress analysis + reference comparison
+
+**Verdict: value-livelock, not slow progress.** The r19v2 residence is a
+stable self-restart: `fdt_subnode_offset_namelen` calls
+`fdt_next_node(fdt, 0, &depth)` forever because the caller's depth cell
+always reads back 0 — a speculative stack store→load visibility defect,
+the first wrong value is **not** a DTB word. No firmware or RTL change
+was made; mechanism reported for fix authorization.
+
+### STEP 1 — progress vs cycle (r19v2 RVFI trace, fw sha a9218107)
+
+- `fdt_next_node` entry (0x80012b16): **4903 retires, every one with
+  a1=0** — every call restarts the walk at structure offset 0.
+- `fdt_next_tag` outcomes per call chain: tag `3` (NOP) ×12,257, tag
+  `1` (BEGIN_NODE) ×4,902. Per-call loop shapes: `[8:B, 24:P, 40:P, 0]`
+  ×3,676; `[8:B, 0]` ×1,225; one `[8,24,40,72,0]`; one empty.
+- The validation call `fdt_next_tag(fdt, 0, &next)` always writes
+  `nextoffset=8` correctly; the in-loop tags then walk 24→40→…→0 —
+  **every DTB structure word loaded is correct** (verified against ELF
+  bytes; header loads too: totalsize 0x843, off_struct 0x38,
+  size_struct 0x63c, version 0x11).
+- Caller chain (nm + full-ELF disasm, `hyp8-r37-caller3`): the looping
+  `fdt_subnode_offset_namelen` instance was entered once at cyc 75,805
+  from `fdt_path_offset_namelen` (jal @0x8001378a, name-ptr a2=0x8001f479),
+  itself reached via `fdt_path_offset` (jal @0x80013842) called from
+  **`fw_platform_init`** (jal sites 0x80007276/0x80007338/0x800073ee) —
+  OpenSBI platform bring-up resolving FDT paths before console output.
+- Inside `fdt_subnode_offset_namelen`: loop back-edge at 0x800133de →
+  `jal fdt_next_node` @0x800133e6 (ret 0x800133ea); the depth-guard
+  branch @0x800133f4 sees depth==0 every iteration → skips the name
+  compare → restarts with offset 0. `fdt_next_node` correctly returns
+  nodeoff=0 to the caller (raw records: caller `mv s1,a0` writes 0;
+  the compressed epilogue insns are absent from trace format, a
+  display omission, not a control divergence).
+- DTB census: totalsize 0x843, 14 BEGIN_NODE tags, 57 props, 86 tags;
+  root children `chosen`@0x7a, `cpus`@0x134, `memory@`@0x3af,
+  `soc`@0x3eb. A complete root-child walk should return 0x7a first and
+  finish in ~86 tag steps — the observed stream never leaves offset-0
+  restarts, so the same offsets repeat with identical data = livelock.
+
+### STEP 2 — production reference (archive, no new run needed)
+
+- `linux-probe-l1ooo-trace` (production `core/` on this testharness,
+  full RVFI): **15,812,118 retires**, first UART store at retire
+  ordinal **1,297,731**, 4,761 UART stores total, OpenSBI v1.5 banner
+  reached, exit 0. hyp8 r19v2: ~6.8M retires, zero UART — 5× the
+  production count-to-banner with no banner. (Production run reported
+  max retire gaps 270–276 cyc — diagnostics, not the defect.)
+
+### STEP 3 — first wrong value (hyp8-r37-cell2 capture)
+
+- `fdt_next_node`'s internal depth cell is coherent **inside the
+  callee**: `lw a5,0(s2)` @0x80012b78, `+1`, `sw a5,0(s2)` @0x80012b7e.
+- The caller's load of the **same stack cell** (~36 cyc later) reads the
+  stale init value every time:
+
+  ```
+  cyc=81524 LD pc=80012b78 depth val=0
+  cyc=81547 ST pc=80012b7e depth val=0x1
+  cyc=81583 LD pc=800133ea depth val=0   ← stale
+  cyc=86063 LD pc=80012b78 depth val=1
+  cyc=86086 ST pc=80012b7e depth val=0x2
+  cyc=86122 LD pc=800133ea depth val=0   ← stale
+  ```
+
+- Owner boundary: **store→load visibility/forwarding for a speculative
+  stack store** (callee sw retires, caller lw 36 cyc later sees old
+  data) — LSQ/write-buffer forwarding region, not D$ contents, not the
+  DTB. Broken §4.3 promise: `analysis/execution-path-plan.md:119` —
+  F6, "pending + committed-pending visible to hazards/forwarding".
+- Mechanism chain: depth stays 0 → branch @0x800133f4 skips name check
+  → `fdt_next_node` returns 0 → loop re-calls with a1=0 → livelock.
+- No one-line identity defect pinpointed inside RTL in this brief; fix
+  design deferred to lead (candidate: verify the forwarding/visibility
+  path for a store retired while a younger same-address load was
+  already in flight, or a speculative-slot release ordering issue).
+
+
+## r38 (part 1) — store→load visibility miss localization
+
+Diagnosis only, on the r36v2 model (sha `24a25a92…`); run
+`hyp8-osbi-ld-vis-r1` (r19v2 recipe, 90k-cycle budget) with
+`+ld_state +ld_lo=81400 +ld_hi=81700 +stq_trace +lsq_trace
++commit_trace +trace_from=81400 +trace_to=81700 +disp_trace
++rvfi_cycle_stamp +stall_census`. No RTL change. Probes:
+`C:/Users/etcim/cva6-artifacts/hyp8-r38-ldvis/`.
+
+### Same-address check (RVFI mem fields) — confirmed
+
+```
+cyc=81524 LD pc=80012b78 x15=0 addr=0000000080046ed8
+cyc=81547 ST pc=80012b7e      addr=0000000080046ed8 sval=0x1
+cyc=81583 LD pc=800133ea x15=0 addr=0000000080046ed8   ← stale
+cyc=86063 LD pc=80012b78 x15=1 addr=0000000080046ed8
+cyc=86086 ST pc=80012b7e      addr=0000000080046ed8 sval=0x2
+cyc=86122 LD pc=800133ea x15=0 addr=0000000080046ed8   ← stale
+```
+
+Store (`sw a5,0(s2)`, 4B) and caller load (`lw a5,-0xb8(s2)`, base
+operand 0x80046f20 + imm -0xb8) both target byte `0x80046ed8`.
+
+### Store lifetime (iteration 1, tid=0, pc=0x80012b7e, data=1)
+
+- alloc @81508; wb @81539; commit fire/ack @81541 (`[cmt] c=81541
+  ... ack=11 dec=11 fire=11`).
+- store_buffer: `commit_push` @81542 (`pushv=1 pend=1 pushpa=ed8
+  pusht=0`); `cq0=v1 paed8/t0` @81543; drain request `dreq=1 dwe=1
+  aidx=ed8` @81543-44; D$ store-port grant `gnt=1 dgnt=1 s2w=1`
+  @81545; commit-queue pop @81546 → page-offset sticky armed
+  (`stkv=1 stkpov=1 stkpo=ed8`).
+- WT wbuffer (`wt_*` events): `wt_alloc ptr=0 data=1 be=0f` @81544;
+  store-side tag-check reads (port 3) @81547-51; `wt_check ptr=0
+  wtag=...8ddb hit=01` @81550-54 — the line WAS resident (way0).
+  Two wbuffer records cover the word: tid=1 (older entry, same
+  line, merged drain word `0000000100000001`) and tid=0 (this
+  store). Both pushed TXs to the bus @81547/81548.
+- Record tid=1: `wt_rtrn` @81559 (sack), **array write
+  `wt_word idx=ed off=8 ways=01 data=1 ack=1` @81562**, evict
+  @81563, txv clear @81564 → `dcache_wbuffer_empty_i` (wbe)=1
+  @81564 → store-buffer sticky cleared @81565.
+- Record tid=0: `wt_ack ... checked=0 hit=01 fix_push=1` @81567 →
+  **`wt_fixup_push pa=ed8 be=0f data=1` @81567** — ACKed before its
+  tag check completed → post-ACK fixup queue, array write deferred;
+  `wt_evict id=0 push=1`. The fixup entry then occupies
+  `fixup_wbuffer_o[0]` = `wbuffer_all[10]` (WtDcacheWbufDepth=8 →
+  WbufExportDepth=10; hit bit = 0x400).
+- **`wt_fixup_wr idx=ed off=8 ways=01 data=1 ack=1` @81573** — the
+  deferred array write → `fixup_pop` at the 81573→74 edge.
+
+### Stale-load tuple (tid=15, pc=0x800133ea, 4B)
+
+- alloc @81563; `[lsq] ld_alloc p=0 idx=0 id=15 older=00000000` —
+  no unresolved older store tracked (store already retired).
+- addr valid @81570 (`LSQ[0] addr_v=1 addr=80046ed8`); lsqb insert
+  @81571; issue/pop @81572.
+- `[ldst] c=81572 v=1 acc=1 dreq=1 gnt=1 pop=1 pom=0 poso=0 stb=0
+  fwd=0 sbe=1 wbe=1 treq=1` — no STB forward candidate, no
+  page-offset match; `[stq] lpv=1 poi=ed8 lpa=ed8` but `pom=0`
+  (spec/cmt/pend/S1/S2/sticky all legitimately empty — the store
+  had fully drained to the D$).
+- Load-unit FSM: `st=0000000001` (LU_S_IDLE) @81572 →
+  `st=0000000100` (LU_S_SEND_TAG) @81573 → IDLE; **no
+  WAIT_PAGE_OFFSET** (`wpo=0` throughout). LSQ: `dwait_set v=0`
+  @81573, `unres=0` — verdict "none" (no wait, no forward).
+- `LU-REQ id=0 idx=ed8` @81572 → `LU-TAG` @81573 → **`LU-RSP rid=0
+  rdata=0` @81575** → `LU-WB tid=15` @81576 → `complete_in` @81577
+  → retire (RVFI) @81583, x15=0.
+
+### Where the bytes were at the load's D$ request (@81572)
+
+Not in the spec queue, commit queue, commit_pend, S1/S2, or the
+R3a sticky — all correctly empty (handoff to the D$ had completed).
+Inside the D$: the fixup entry (pa=ed8, data=1) was alive in
+`fixup_wbuffer_o[0]` AND the array word already held 1 (written
+@81562 by the sibling record). The D$ forward path DID match:
+`wt_lookup c=81573 port=1 pa=...ed8 ... forward=00000400 be=0f`
+(bit10 = fixup slot 0). `wbuffer_fwd_hit` suppressed any refill —
+the response was resolved entirely by the forward overlay.
+
+### The miss — T1/T2 forward-merge race on the fixup export
+
+`wt_dcache_mem` runs the response in two stages
+(`HypCfg.DcacheHitExtra==2`, gen_rsp_pipe :575-643): T1 latches
+`wbuf_hit_oh_q` and per-entry byte-valids `wbuf_vld_q`; T2 merges
+`rd_data_c` and registers `rd_data_q`. The hit/valid vectors are
+T1 snapshots, **but the leaf payload is read live**:
+`node[0][e].d = wbuffer_all[e].data` (:506).
+
+`fixup_wbuffer_o` is **positional**, not slot-stable
+(wt_dcache_wbuffer.sv:1200-1259): `fwd_ent[i]` maps newest-first
+via `usrc = (fixup_tail + 2D-1-ufifo) % D` and emits `'0` once
+`ufifo >= fixup_cnt`. A `fixup_pop` therefore retracts the whole
+exported payload one edge after its array-write ack.
+
+Cycle-exact race:
+
+```
+81573: load T1 — live wbuffer_hit_oh=0x400 (fixup entry alive)
+       → wbuf_hit_oh_q[10]=1, wbuf_vld_q[10]=0f latched @73→74
+81573: wt_fixup_wr ack=1 → fixup_pop → fixup_cnt→0 @73→74
+       → wbuffer_all[10] = '0 during 81574
+81574: T2 — merge_hit[10]&merge_vld[10]=1 → wbuffer_be=0f,
+       but wbuffer_all[10].data is now 0 → rd_data_c = 0
+81575: rd_data_q = 0 → LU-RSP rdata=0 → x15=0 @81583
+```
+
+The overlay also **masked a correct resident array word** (the same
+store's bytes were written to idx=ed/off=8/way0 @81562). The
+invariant claimed at wt_dcache_mem.sv:572-574 ("a drain between T1
+and T2 cannot silently retract forwarded bytes; a drained slot's
+payload is not rewritten in the same window") holds for in-place
+`wbuffer_q` slots but is **false for `fixup_wbuffer_o`**: pop
+empties the slot entirely and push remaps it (tail-relative).
+
+Iteration 2 is identical: `wt_fixup_push pa=ed8 data=2` @86106 →
+live `forward=0x400` at the caller load's T1 @86112,
+`wt_fixup_wr ack=1` @86112 → pop @112→113 → T2 reads dead slot →
+`LU-RSP rdata=0` @86114 → x15=0 @86122.
+
+### Contrast — callee reload LD@0x80012b78 @86063 (returned 1)
+
+- tid=15 (re-allocated ~86042); `LU-REQ id=0 idx=ed8` @86052 →
+  `LU-TAG` @86053 → **`LU-RSP rid=0 rdata=1` @86055** → retire
+  @86063.
+- At its T1 @86053 there was **no** fixup/wbuffer entry for ed8
+  (`forward=0` — the iteration-2 store was still in the STB:
+  `wt_alloc` @86083). Its response came through the plain
+  array/refill read path — no forward overlay, no race.
+
+The miss is timing/path specific: it fires only when a load's D$
+access lands in the narrow fixup-entry window (push→pop ≈ 6-7
+cycles) such that the entry is alive at T1 and dead at T2.
+
+### First-false promise
+
+**wbuffer→load forward** — inside `wt_dcache_mem`'s staged
+response: the T1-snapshotted forward decision (`merge_hit`,
+`merge_vld`) is honored at T2 against a **live, positional** fixup
+export whose payload is retracted by `fixup_pop` in the T1→T2 gap.
+All other candidates are exonerated by the tuples: the store_buffer
+contract was fully discharged (spec/cmt/pend/S1/sticky empty only
+*after* the D$ had accepted and made the bytes forward-visible —
+wbe@81564 predates but does not gate the fixup export), the LSQ
+verdict was faithful (`older=0`, `unres=0`, `dwait=0` — the store
+had retired before the load allocated), and the load-unit
+interlock was faithful (`pom=0` correctly reported STB-side
+emptiness; the load correctly proceeded to the D$ forward path).
+
+Broken §4.3 promise (refined from r37): F6 — "pending +
+committed-pending visible to hazards/forwarding". The bytes were
+visible at T1 but the promise was silently retracted before the
+response beat. Owner boundary: `wt_dcache_mem.sv` gen_rsp_pipe
+merge (live `wbuffer_all[e].data` leaf) ×
+`wt_dcache_wbuffer.sv` positional `fwd_ent`/`fixup_wbuffer_o`
+export.
+
+No RTL change made; fix design deferred to the lead (options noted:
+T1-snapshot the forwarded payload; hold the fixup export stable one
+extra cycle past pop; or T2-revalidate + replay).
+
+## r38 — wbuffer→load forward payload snapshot (T1 representation) + witness r20
+
+Fix per PL-P2/PL-P3 (the same rule F6 imposed on stb_fwd in r1): the
+wbuffer→load forward must cross the D$ T1→T2 edge as a complete
+representation {hit one-hot, byte-valid, DATA}, not as a match whose
+payload is re-read live at T2. r37/r38-part-1 showed the r37
+fdt_next_node value-livelock was caused by exactly this: a load whose
+T1 matched a positional fixup export (`forward=0x400`, slot 10) had
+its T2 land after `fixup_pop` retracted the export; the live reread
+returned 0 and the forward overlay masked the already-correct array
+word.
+
+### RTL (wt_dcache_mem.sv, gen_rsp_pipe DcacheHitExtra=2 arm)
+
+- T1: alongside `wbuf_hit_oh_q`/valid capture, the per-byte forward
+  word selected by the live hit one-hot from live `wbuffer_all[*].data`
+  (including positional fixup export slots) is computed and registered
+  into `fwd_data_q`.
+- T2: merges `fwd_data_q` bytes under captured byte-valid with the
+  array read; the fixed path never reads `wbuffer_all` at T2.
+- Old live-T2 form preserved under `G6LC_MUT_WBUF_FWD_LIVE_T2`.
+- translate_off: every-cycle equivalence assertion (slot still valid
+  and unchanged at T2 → registered word == live word) +
+  `[equiv] wt_dcache_mem fwd_snap: checked=N` under `+equiv_report`.
+- `empty_o` unchanged — fixup bytes are already memory-visible (the
+  entry exists only because memory ACK happened before the tag check),
+  so fence-level visibility holds; the forward covers same-core RAW
+  ordering only (per-core observer caveat recorded in the file).
+
+Churn vs r36v2/r36xv2 closures: exactly ONE file
+(`core/cache_subsystem/wt_dcache_mem.sv`, sha aef1d9713ce77045…).
+
+### Leaf (tb_g6lc_hyp8_dcache)
+
+- `hyp8-control-dcache-dchx2-r48`: `HYP8_DCACHE_PASS checked=292
+  dchx=2 stores=102`; `[equiv] wt_dcache_mem fwd_snap: checked=852`.
+  New DCHX_FIXUP_WINDOW_FWD case drives the traced lifecycle
+  (push@N, load T1@N+6, pop@N+6→N+7, T2@N+7) via a RETIRE write+pop
+  (the dead-entry drop retains payload and cannot expose the mutant);
+  plus pop-before-T1 (plain array read) and pop-after-T2 (live
+  forward) variants.
+- `hyp8-control-dcache-dchx2-r48mut`: fails at
+  `FAIL DCHX_FIXUP_WINDOW_FWD` — assertion
+  tb_g6lc_hyp8_control.sv:3668 @11066, as required.
+- `hyp8-control-dcache-dchx0-r20`: `HYP8_DCACHE_PASS checked=313
+  dchx=0 stores=112` (no T1/T2 split; window witness vacuous).
+- `hyp8-control-memory-r31` (neighbour): `HYP8_MEMORY_PASS
+  checked=99`, unchanged.
+
+### Closures / lint / builds
+
+- r38 = r36v2 + fix; r38x = r36xv2 + fix (693 files each).
+- `hyp8-integration-r38`: lint scalar 343/87/3, SMT2 354/97/3, 0
+  errors; build rc=0; model sha
+  676610eb132df76cc7db4f31e802cb1891d728b178aa60f84e1430ed6f4c967f.
+- `hyp8-integration-r38x`: lint scalar 343/87/3, SMT2 353/97/3
+  (r36xv2 baseline — the external-free profile has carried 353 since
+  r34xq; brief's 354 figure is the r36v2 census), 0 errors; build
+  rc=0; model sha
+  e5edfdf740709f58f165baee280de54ebe1c6a66ce5065ae50a08eaa53d7c5cd.
+
+### Smokes (hyp8-r38-smokes)
+
+- h34-r38 682, bc-r38 473, h33x-r38x 889, bcx-r38x 475 — bit-identical
+  to r36v2/r36xv2, 31 equiv counters each (30 + fwd_snap).
+- **h33-r38: 400k budget-out → real `*** SUCCESS *** (tohost = 0)
+  after 969 cycles`.** Positive delta on the flagged forward path:
+  h33_st_fwd was silently wedging on the same fixup-pop T1/T2 race on
+  the scalar profile (r36v2 showed `[cycle budget reached: no tohost
+  verdict]`); the snapshot fix returns the forwarded data and the
+  program completes. fwd_snap exercised: checked=68 (h33-r38), 74
+  (h33-r38x).
+
+### Witness hyp8-osbi-scalar-r20x (r38x, 6M, +equiv_report)
+
+- `*** SUCCESS *** (tohost = 0) after 6000000 cycles [cycle budget
+  reached: no tohost verdict]`; mc_verdict exit 0; ckpt final clean
+  (pop_mismatch=0, restore_mismatch=0); rc=120 standing budget-out
+  convention; wall 32.6 min.
+- ret=**1,920,215** (vs 1,703,285 on r19xv2); ipc 0.314/0.323/0.320
+  at 2M/4M/final census; 0 [hang], 0 %Error, 0 assertion hits.
+- **UART: THE GATE IS OPEN.** First UART store pc 0x80010e1e
+  (uart8250_putc) @cyc 4,757,906, retire ordinal **1,531,354**
+  (production reference: 1,297,731 — +18% deeper pipeline, expected).
+  315 bytes total, verbatim:
+  `ESC \r\nOpenSBI v1.5\r\n` + the ASCII logo through `|_|\r\n\r\n`.
+- Milestone retire ordinals (cycle): sbi_init 314,041 (984,661);
+  sbi_domain_init 315,295 (992,073); sbi_hsm_init 354,412 (1,192,096);
+  sbi_hart_init 1,151,960 (3,602,732); sbi_console_init 1,205,724
+  (3,784,909); first UART 1,531,354 (4,757,906); sbi_irqchip_init
+  1,695,236 (5,383,870). sbi_timer_init / sbi_ecall_init / Boot HART
+  line / payload jump: NOT reached within 6M (banner bytes were the
+  logo only). Last pc @5,999,986 = 0x80012898 fdt_offset_ptr (legit
+  FDT walk, blob at 0x82200000).
+- fdt_next_node entries: 544 over 6M vs 4,903 livelock restarts on
+  r19v2 — real walks.
+- equiv: 31 counters; fwd_snap checked=**987,677**; csr_buffer alloc /
+  lsq arms/evcount/col / iq_legal / tlb plru ×2 ≈ 5,999,986; cambe
+  ×16 = 5,996,496; ras_upd 44,245; pubmarks 1,110,029.
+- mem side note: mem_viol=23 at final census (standing counter, grew
+  7→9→23 — speculative violations replayed; same counter nonzero on
+  prior witnesses).
+
+### Witness hyp8-osbi-scalar-r20 (r38, 20M, +equiv_report)
+
+
+### Witness hyp8-osbi-scalar-r20 (r38, 20M, +equiv_report)
+
+- `*** SUCCESS *** (tohost = 0) after 20000000 cycles [cycle budget
+  reached: no tohost verdict]`; mc_verdict exit 0; ckpt final clean
+  (pop_mismatch=0, restore_mismatch=0); wall 98.7 min; rc=120
+  convention; 0 [hang], 0 %Error, 0 assertion hits.
+- ret=**5,622,020**; ipc 0.323/0.325/0.326 at 10/12/14M, 0.281 final
+  (the last window is the spin below); mem_viol=379.
+- equiv: 31 counters; fwd_snap checked=**2,659,179**; csr_buffer
+  alloc/tlb plru x2 19,999,986; cambe x16 19,997,631.
+- Milestone retire cycles: sbi_init 980,598; sbi_domain_init 987,437;
+  sbi_hsm_init 1,187,385; sbi_hart_init 3,597,224; sbi_console_init
+  3,778,788; sbi_irqchip_init 4,739,788; sbi_ecall_register_extension
+  entries from 16,262,171. fdt_next_node entries 757 (legit walks).
+  banner / Boot HART / payload jump: NOT reached.
+- **0 UART bytes.** The scalar profile is a second-order witness: it
+  progressed ~2x slower through init (fdt_getprop/domain phases) and
+  at ~16.26M entered a NEW spin in sbi_ecall_register_extension
+  (79,499 iterations of the list-walk loop 0x80008d2a-8d38 to budget
+  out; last pc 0x80008d38 @19,999,976). Mechanism captured verbatim:
+  the circular-list walk loads head->next=0x800405a0 correctly, walks
+  nodes 0x800405a0 (TIME)->0x800405d8 (RFNC)->0x80040610 (sPI)->
+  0x80040648 (SRST 0x10), then node 0x80040648's `next` at
+  mem[0x80040648] returns **0** instead of &head=0x80040518 -- the
+  pointer stored by that node's own insert (`sd a3,0(a1)`) ~600
+  cycles earlier. a5=0 then spins on mem[0]/mem[0x18] reads at ~47
+  cycles/iter. Same defect CLASS as r37 (committed-store -> later-
+  load reads zero), but PERSISTENT (600+ cycle distance -- not the
+  T1/T2 window the r38 snapshot covers). r19v2 never reached this
+  site (its livelock was ~10x earlier), so this is a previously
+  unexercised path on the scalar profile -- r38 exposed it by fixing
+  the first blocker. fwd_snap: 2.66M checks, 0 assertion hits.
+- r20-vs-r20x retire-PC stream compare (evidence for the profile
+  divergence): identical until retire ordinal 5,255, where r20x
+  squashed a `ret @0x80012ada` (redirect straight to the RAS-predicted
+  return target, architecturally equivalent) while r20 retired it;
+  streams re-sync with +1 shift for 310 retires then diverge again --
+  pre-existing profile behavior. Zero trap-handler-body executions on
+  both traces (no M-mode interrupts).
+
+Next-step note for the lead: the r20 spin localizes to a persistent
+committed-store visibility miss (a node `next` link stored by a
+prior registration read back as 0 by a walk ~600 cycles later --
+array-level staleness, not a forwarding window). Candidates: fixup
+write updating memory but not the resident D$ line the walk hits, or
+the store never reaching the array. Not diagnosed further here.
+
+## r39 (part 1) — second visibility miss localization + r21x
+
+### r38 second miss localized: wbuffer retire drops a re-drained entry's L1-write obligation (resident line never updated)
+
+Diagnostic run `hyp8-osbi-ecall-vis-r1` on the r38 model
+(sha 676610eb132df76cc7db4f31e802cb1891d728b178aa60f84e1430ed6f4c967f),
+16.29M-cycle windowed probes (+ld_state/+ld_trace window, +stq_trace,
++lsq_trace, +commit_trace, +disp_trace, +smt_flow_trace, +stall_census,
++equiv_report, +rvfi_cycle_stamp). Verdict `*** SUCCESS *** after
+16290000 cycles [budget]`, ckpt clean, fwd_snap=2,659,179, 0 asserts.
+
+**D$ line state for 0x80040640 (idx=0x64):**
+`wt_refill cycle=16263020 idx=64 tag=00000080040 way=3 nc=0
+data=00000000000000000000000080009130` — resident in **way 3**,
+offset-8 word = 0 (correct pre-insert content). No wt_inval, no
+eviction, no second refill for idx=64 at any later cycle in the whole
+run — the line stayed resident with the refill-time word until the end.
+
+**Store lifetime (both stores to 0x80040648):**
+- `wt_alloc cycle=16263521 ptr=0 merge=0 be=ff data=0x80040648`
+  (store A, `sd a1,0(a1)`); tag checks `wt_check ptr=0 wtag=100080c9
+  hit=08` @16263528-36 — line confirmed resident, way 3.
+- TX sends: `wt_tx @16263524 id=3 data=0x80040648` and
+  `wt_tx @16263525 id=2 data=0x80040648` (dirty→0, txblock→1, bytes in
+  flight to memory).
+- **store B (`sd a3,0(a1)`, data=0x80040518) merged into the SAME entry
+  while in flight**: `wt_alloc cycle=16263529 ptr=0 merge=1
+  data=0x80040518 | before: valid=ff dirty=00 txblock=ff` — bytes
+  re-dirtied (state 111), must re-drain.
+- `wt_ack cycle=16263540 id=3 ptr=0 wtag=100080c9 data=0x80040518
+  be=00 checked=1 hit=08 wr_req=00 wr_ack=0 fix_push=0 check_wr=0` —
+  `ack_be = tx.be & ~dirty = 0` (all bytes re-dirtied) so BOTH retire
+  legs are masked (`leg_l1_d` and `leg_fire_d` both require `|ack_be`,
+  wt_dcache_wbuffer.sv:1574-1600): no array write, no fixup — `drop_q`
+  evict; txblock cleared (entry survives 110).
+- Re-drain: `wt_tx cycle=16263542 id=3 data=0x80040518` (the merged
+  bytes sent again; dirty→0, txblock→1, tx_stat[3] records ptr=0).
+- `wt_ack cycle=16263544 id=2 ptr=0 wtag=100080c9 be=00 checked=1
+  hit=08 wr_req=00 fix_push=0` — the second return's snapshot also
+  caught dirty=ff (pre-@542-drain) → drop. The evict cleared ALL byte
+  valids (`evbe & ~dirty`, live dirty now 0) → **the entry was freed
+  while send @16263542 (id=3) was still in flight.**
+- `wt_alloc cycle=16263546 ptr=0 merge=0 data=0x80040648` — ptr=0
+  reallocated to the `0x80040610` store (wtag 80c9→80c2).
+- `wt_ack cycle=16263558 id=3 ptr=0 wtag=100080c2 be=ff checked=1
+  hit=04` — the orphaned return resolves ptr=0 to the NEW occupant's
+  word (cross-retire); `wt_word cycle=16263557 idx=61 off=0 ways=04
+  data=0x80040648` wrote the *new* occupant's data into idx=61 —
+  correct value only by coincidence (both words wanted 0x80040648).
+- **No `wt_word idx=64` in the window at all** (all 72 log-wide are
+  <15M, FDT era). **No `wt_fixup_push` for wtag 80c9/80ca.**
+- The `0x80040650` stores (wtag 80ca, ptr=1) hit the SAME pattern:
+  merged @16263539 while in flight, ACKs @16263548/52 dropped be=00 —
+  also never wrote the array (invisible: the `prev` field is never read
+  by the walk).
+
+**Load (`ld a5,0(a5)` @0x80008d36 → 0x80040648):**
+port=1 lookups @16263906/909/938/941 all `hit=00 forward=00 be=00
+result=0`; `LU-RSP rid=0 rdata=0` @16263908 — hit-latency response, no
+port=3 recheck, **no refill** (the spin's address-0 lookups DID miss
+and refill normally — port=3 `refill=1` + wt_refill on idx=1). The
+load was served the stale resident word (0) — ~79,499 identical
+iterations to budget-out. Secondary anomaly: the port=1 `hit` print
+reads 00 while the same line checked hit=08 for the store — worth a
+probe-semantics check, but does not change the outcome (array word = 0
+either way).
+
+**Store's bytes at the load's T1/T2:** only in memory (the three
+wt_tx sends); absent from the array, absent from the wbuffer (entry
+freed @16263544), absent from the fixup queue. Persistent — not a
+window race.
+
+**First-false promise:** the wbuffer retire released an entry on an
+earlier ACK while a *re-drain* of the same entry's bytes was still
+in flight. `ack_be = rtrn_tx.be & ~dirty` (:1723) masks the
+L1-write and fixup legs for bytes a younger same-word store re-dirtied
+(correct), but the subsequent `drop_q`/`valid_mid` release
+(:2097-2102, :1534-1545) frees the entry as soon as the re-drained
+send clears `dirty` — without waiting for that send's own ACK. The
+re-drain's L1-write obligation was held only inside the entry and dies
+with it; tx_stat keeps pointing at the freed slot, whose reallocation
+turns the surviving return into a cross-retire against a different
+word. §4.3 F6 refined: "a checked resident-line store must terminate
+in an array write or a fixup; `checked=1 hit!=0` must never end in a
+silent drop." Defect site: wt_dcache_wbuffer.sv retire/leg paths
+(shared by r38 and r38x — the trigger is the multi-send + merge-in-
+flight + interleaved-ACK interleaving; timing-dependent).
+
+**Siblings confirmed innocent:** STB/commit drained before the D$
+events; LSQ `older=0` verdicts faithful; no other write to 0x80040648
+in the window; r38's T1/T2 snapshot not involved (forward=00 at the
+load — the store had left the buffer ~360 cycles earlier).
+
+### hyp8-osbi-scalar-r21x (r38x, 20M) — second miss does NOT reproduce; new assertion abort at 17.01M
+
+Model sha e5edfdf740709f58f165baee280de54ebe1c6a66ce5065ae50a08eaa53d7c5cd,
+fw a9218107…. **Aborted** at cycle 17,010,870 on
+`load_unit.sv:1477 misaligned_entry_excepts` (misaligned load-buffer
+entry did not complete with LD_ADDR_MISALIGNED and a killed request).
+rc=255, 0 [hang], 2 %Error lines, no end-of-run equiv counters
+(aborted before report). ret=5,471,606; census @16M: ret=5,190,520,
+ipc=0.324, mem_viol=69.
+
+- **UART = 315 bytes, byte-identical to r20x** (`\x1b\r\nOpenSBI
+  v1.5\r\n` + logo through `|_|\r\n\r\n`); first UART store at retire
+  ordinal 1,531,354 (same ordinal as r20x). No Platform Name / Boot
+  HART / Domain lines (aborted before them).
+- Milestones (ordinal/cycle): sbi_domain_init 315,294/992,073;
+  sbi_hsm_init 354,411/1,192,096; sbi_hart_init 1,151,959/3,602,732;
+  **sbi_timer_init 3,615,886/11,330,397**; **sbi_ecall_init
+  5,471,453/17,009,632**; sbi_ecall_register_extension first entry
+  5,471,477/17,009,894. Payload jump / S-mode: not reached.
+- **ecall_exts_list walk: 194 retires in pc 0x80008d* total — no
+  spin.** The last ~80 retires show `sbi_ecall_register_extension`
+  working correctly end-to-end: the list walk read the right `next`
+  pointers (`mem[0x800405a0]=0x800405d8`, TIME/RFNC name words
+  0x54494d45/0x52464e43), inserted node 0x80040610 with all seven
+  linking stores, restored ra/s0 from the stack (0x80009162 /
+  0x80045f10) and retired `ret` @17,010,858. The misaligned-entry
+  assertion fired ~12 cycles after that `ret`, on a younger
+  (post-return) load.
+- Verdict: the persistent store→load visibility miss is **not
+  reproduced on the external-free line** — same shared wbuffer RTL,
+  different interleaving exposure. The r21x abort is a third,
+  distinct signature in the load_unit misaligned-completion contract;
+  not localized here.
+
+### Artifacts / provenance
+- ecall-vis run: /opt/testharness/runs/hyp8-osbi-ecall-vis-r1
+  (run-hyp8.log ~7.6 GB); local extracted views:
+  cva6-artifacts/hyp8-r39-ecallvis/{win-all,win-wt,win-addr}.txt +
+  full probes file.
+- r21x run: /opt/testharness/runs/hyp8-osbi-scalar-r21x;
+  cva6-artifacts/hyp8-osbi-scalar-r21x/results.json.
+- Churn this pass: analysis/implementation-log.md only. No RTL change.
+
+## r41 — wbuffer single-TX drain discipline + IRO T50 lag + cfg legality (r38/r38x overlay)
+
+Three defects repaired, all in the write-buffer drain/retire path plus
+the legacy IRO multiplier-writeback arm. Frozen tree assembled as
+closures r41 (= r38 + 3 files) and r41x (= r38x + 3 files, x-line IRO
+port); each manifest records exactly three sha256 differences vs its
+parent (see below). No commit; hashes pin the evidence.
+
+### Defects and mechanism
+
+1. **D1 grant-window recapture (first-false promise).** Under
+   `HypCfg.WbufPipelined` the drain stage `gen_drain_reg`
+   (wt_dcache_wbuffer.sv) recaptured `dr_ptr/dr_mux/dr_bdirty/dr_vld`
+   from `wbuffer_q` every `!drain_hold_q` cycle. The grant at N+1
+   (`dirty_rd_en = miss_req_o && miss_ack_i`) updates `dirty`/`txblock`
+   in `wbuffer_d`, visible only at N+2, so the N+1 capture re-offered a
+   just-granted entry at N+2 — a second TX for bytes already in flight
+   (two in-flight TXs on different AXI ids; violates the byte-state
+   contract bdirty-excludes-txblock). Fix: module-level
+   `drn_hit[gi] = miss_req_o && miss_ack_i && (dr_ptr == gi)` and
+   `dirty_sendable = WbufPipelined ? (dirty & ~drn_hit) : dirty` feeding
+   `i_dirty_rr.req_i` and `dr_vld`. Live arm is literal identity
+   (`assign dirty_sendable = dirty;`) to avoid the
+   dirty_ptr→drn→req→dirty_ptr combinational loop. Mutant
+   `G6LC_MUT_WBUF_DRAIN_RECAPTURE` restores the unmasked request.
+   Assertion `g6lc_tx_single`: on `miss_req_o && miss_ack_i`,
+   `wbuffer_q[dr_ptr].txblock=='0 && tx_cnt_q[dr_ptr]=='0`; $error plus
+   `[equiv] wt_dcache_wbuffer tx_single: checked=N viol=N` under
+   +equiv_report.
+2. **One-cycle-late `dr_vld` after an ack** (leaf-exposed): `dr_vld`
+   stayed asserted for one cycle after an acknowledgement, letting a
+   level acceptor resend. Caught by the J0 `DCHX_SINGLE_TX` check and
+   the tx_single assertion; fixed by the same masked-request change
+   (dr_vld <= |dirty_sendable).
+3. **Dead-pop `txblock` release** (leaf-exposed): a dead-pop eviction
+   could clear `txblock` while a transaction was still in flight.
+   Caught by the `g6lc_tx_single` assertion (`txblock==0` on accept)
+   and the J1 ledger scenario; fixed by ownership-gating the txblock
+   release on the in-flight ledger (`tx_cnt_q`/`last_tx_gi`, viol
+   counter printed in the same equiv line).
+
+4. **IRO T50 lag, legacy arm only** (issue_read_operands.sv): under
+   `!HypCfg.WbReserve` a `MulWbLag = hyp_mult_stages(...)-1` shift
+   register of `|mult_valid_q` (`mult_wb_block`) replaces the single
+   `if (|mult_valid_q)` rule — ports reference commit 5c5829b52. The
+   `WbReserve` arm is unchanged (`assign mult_wb_block = |mult_valid_q`).
+   Same hunk applied to the x-line IRO variant (staging-r41x).
+5. **`hyp_cfg_ok` legality** (g6lc_hyp_pkg.sv): added
+   `ok &= h.WbReserve || (h.AluStages == 1)` — the legacy structural-
+   hazard arm models one-cycle FLU classes; a staged ALU needs the
+   reservation model. HypDefault (1,0) and Hyp8 (3,1) both pass.
+
+### Leaf matrix (tb_g6lc_hyp8_control.sv, section J; run_hyp8_memory.py)
+
+| run | build | verdict |
+|---|---|---|
+| hyp8-control-dcache-dchx0-r41base | baseline section J, dchx0 | `HYP8_DCACHE_PASS checked=313 dchx=0 stores=112` |
+| hyp8-control-dcache-dchx2-r41 | r41 plain, dchx2 | `HYP8_DCACHE_PASS checked=277 dchx=2 stores=88`; `tx_single: checked=88`, `l1_obligation: dropped=2`, `fwd_snap: checked=732` |
+| hyp8-control-dcache-dchx2-r41recap | +G6LC_MUT_WBUF_DRAIN_RECAPTURE | J1/J2 pass, then `FAIL DCHX_SINGLE_TX` (expected negative control; log shows `g6lc_tx_single violation: entry 0 txblock=ff tx_cnt=1` at c=2150) |
+| hyp8-control-dcache-dchx2-r41recapfi | +RECAPTURE +G6LC_MUT_WBUF_FREE_INFLIGHT | `FAIL DCHX_REDIRTY_REDRAIN_L1` inside J1 (expected ledger negative control) |
+| hyp8-control-dcache-dchx0-r41 | r41 plain, dchx0 (live arm) | `FAIL D_NO_PMU_PULSE` — r41 path performs a fixup write/invalidate where the baseline dead-drops (sim.log c=404-408: `evict sid=2 ... push=1 drop=0`, fx FSM busy), so the expected PMU pulse is absent. Open item; not iterated further per the minimal-gate directive. |
+
+### Closures (sha256 diffs vs parents, manifest-pinned)
+
+- r41 (693 files, parent r38): wt_dcache_wbuffer.sv 5967b9f5→bb38a121,
+  g6lc_hyp_pkg.sv c4e9c656→16dd24c3, issue_read_operands.sv 8815f819→910c10b9.
+- r41x (693 files, parent r38x): wbuffer 5967b9f5→bb38a121,
+  g6lc_hyp_pkg.sv c4e9c656→16dd24c3, issue_read_operands.sv
+  1e1f0010→ce85915f (x-line port).
+- Working tree re-verified identical to closure contents (same shas).
+- Closures: cva6-artifacts/closures/hyp8-integration-r41{,x}-closure.
+
+### Integration lint + build (remote, testharness_proxy `py` → run_hyp8_integration.py)
+
+- `hyp8-integration-r41`: **build_complete**; 693 source files; model
+  sha256 3144a8a1f766eccb9665e1fc269a94d3085ad850f221f7d9833f437b4dd9f8d2;
+  build rc=0; runtime dep check 204 files vs pinned runtime header.
+  Lint scalar rc=0 %Error=0; smt2 rc=0 %Error=0. Census identical to
+  r38 modulo WIDTHEXPAND/WIDTHTRUNC: scalar 343/87/3 (WIDTHCONCAT),
+  smt2 354/97/3; LATCH=3 (all tier-U axi_riscv_amos_alu.sv).
+  Artifacts: cva6-artifacts/hyp8-integration-r41/{results.json,
+  lint-scalar.log, lint-smt2.log, build-harness.log}.
+- `hyp8-integration-r41x`: **build_complete**; model sha256
+  7929daa7a818b5b0f15c5fd4ab71ee66c8db22ad98c43b33266f03d7ecb90c88.
+  Lint scalar rc=0 %Error=0 (343/87/3), smt2 rc=0 %Error=0 (353/97/3).
+  Artifacts: cva6-artifacts/hyp8-integration-r41x/.
+
+### Smokes (run_r41_smokes.py, +time_out/+max-cycles=400000 +debug_disable +quiet_axi +equiv_report +tohost_addr=0x80001000)
+
+ELF shas are record-only (rebuilt per run; not bit-reproducible vs the
+r38 pins — same srcSha256 + gccSha256). Model shas pin-matched.
+
+| run | cycles | expected | verdict |
+|---|---|---|---|
+| hyp8-h34-r41 | 682 | 682 | SUCCESS, bit-identical; tx_single checked=0 |
+| hyp8-h33-r41 | 969 | 969 | SUCCESS, bit-identical; tx_single checked=10 viol=0, l1_obligation dropped=5, fwd_snap 46 |
+| hyp8-branch-cancel-r41 | 473 | 473 | SUCCESS, bit-identical |
+| hyp8-h33-r41x | **899** | 889 | SUCCESS tohost=0 but +10 cycles vs r38x — attributable to the drain-recapture fix (a removed redundant re-send serializes the drain differently; tx_single checked=10 viol=0, l1_obligation dropped=3, fwd_snap 60). Recorded, not hand-waved. |
+| hyp8-branch-cancel-r41x | 475 | 475 | SUCCESS, bit-identical |
+
+Artifacts: cva6-artifacts/hyp8-r41-smokes/results.json;
+remote /opt/testharness/runs/hyp8-r41-smokes + per-test run dirs.
+
+### Witnesses (detached, left running)
+
+- `hyp8-osbi-scalar-r22`: model hyp8-integration-r41, fw_payload.elf sha
+  a9218107… (pinned), argv `+time_out=20000000 +max-cycles=20000000
+  +debug_disable +quiet_axi +tohost_addr=0x80041730 +stall_census
+  +hang_dump=2000 +equiv_report +rvfi_cycle_stamp`, launched via
+  `proxy py run_r22_witness.py --tag hyp8-r22-witness-launch`;
+  remote pid 1202929, run dir /opt/testharness/runs/hyp8-osbi-scalar-r22.
+- `hyp8-osbi-scalar-r22x`: same argv on the r41x model, pid 1202930,
+  /opt/testharness/runs/hyp8-osbi-scalar-r22x.
+- Predictions: r22 must pass the 16.26M sbi_ecall_register_extension
+  site (the r39 miss); r22x either passes or re-hits the r21x
+  load_unit.sv:1477 misaligned_entry_excepts abort at ~17.01M (third
+  signature, out of scope here). **Verdicts pending — detached, not
+  polled.**
+
+### Open items
+- rr fairness note: in the pipelined arm `i_dirty_rr.gnt_i(dirty_rd_en)`
+  advances the pointer on the live pick `dirty_ptr` while the granted
+  entry is the registered `dr_ptr` — fairness only, not correctness.
+- dchx0 D_NO_PMU_PULSE divergence (fixup-vs-dead-drop) — unresolved,
+  deferred at the minimal gate.
+- Neighbour `memory` leaf not re-run this batch (minimal gate).
+- ELF hashes are record-only going forward (rebuilds not bit-stable).
+
+### r41 addendum — witness verdicts (polled after r42-T board close)
+
+The two detached 20M witnesses both **aborted on the r41 `g6lc_tx_single`
+assertion** — the r41 repair does NOT hold under real traffic:
+
+- `hyp8-osbi-scalar-r22` (r41 model): `%Error: wt_dcache_wbuffer.sv:2406`
+  `g6lc_tx_single` — "second send while TX in flight: entry 0 txblock=80
+  tx_cnt=1" at cycle 971182 (~0.97M), preceded by a sustained burst of
+  `l1_obligation ... freed by drop` events. `Verilog $stop` abort.
+  Remote log: /opt/testharness/runs/hyp8-osbi-scalar-r22/run-hyp8.log.
+- `hyp8-osbi-scalar-r22x` (r41x model): identical signature at cycle
+  289632 (~0.29M). Remote log:
+  /opt/testharness/runs/hyp8-osbi-scalar-r22x/run-hyp8.log.
+
+Neither prediction was reached: r22 died ~15.3M cycles before the
+16.26M `sbi_ecall_register_extension` site; r22x never approached the
+17.01M `misaligned_entry_excepts` signature. The witnesses are not
+running (both aborted; no remote verilator processes remain).
+
+Static narrowing on the shipped tree: the failing grant reached
+`dr_ptr=0` while `wbuffer_q[0].txblock==8'h80` and `tx_cnt_q[0]==1`.
+`bdirty[k]` (and therefore the arbiter-visible `dirty[k]`) is forced to
+zero whenever ANY `txblock` bit is set, and `dirty_sendable` masks the
+just-granted entry via `drn_hit` — so a *fresh* pick of a blocked entry
+is impossible. The residual hole is therefore one of: (a) a drain
+record captured while the entry was sendable surviving a drop+realloc
+of that slot into a state whose ledger no longer matches the captured
+view; (b) a `tx_cnt`/`txblock` release-vs-decrement skew on the drop
+path (`ev_gi && rtrn_tx.vld` gates both, but `evbe` coverage is
+per-byte — a partial release leaves `txblock` set while `tx_cnt` has
+already decremented, and the converse half-release is unhandled); or
+(c) a return-FIFO pop whose `rtrn_ptr` snapshot names the wrong entry
+under drop bursts. Also noted: `wbuffer_d[gi].txblock[k]` has no
+`wr_gi` clear term, so a reallocated slot inherits stale `txblock` —
+that wedges the entry (it can never become `bdirty`) rather than
+double-sends, but it is a real liveness hole adjacent to this one.
+`hyp8-h34-r41x` was never launched (run dir absent) — the x-line h34
+smoke evidence is missing.
+
+This is a first-false-promise miss on real traffic; the dchx2 leaf
+matrix (man_dup) does not exercise the drop-burst interleaving that
+produces it. An r41v2 closure + rebuild + rewitness is required before
+the wbuffer repair can be called verified; decision left to the plan
+owner. The r42-T tree below was measured on the same wbuffer source.
+
+### r41v2 diagnostic — predictions (written before launch, 2026-10-24)
+
+Diagnostic model = r41x closure + `wt_dcache_wbuffer.sv` with the
+new translate_off `g6lc_free_slot_clean` invariant
+(`(|wbuffer_q[k].valid == 0) |-> (txblock == '0 && tx_cnt_q[k] == '0)`)
+— it fires at the first free-with-ownership-residue slot and names the
+entry/cycle so the windowed trace identifies the last clearing path.
+No functional RTL change. Run: r41x reproduction (aborts at 289632),
+`+smt_flow_trace +equiv_report` added to the r22x argv, window ≈
+cycles 286600–289700.
+
+Three named-mechanism predictions:
+
+- **(a) Held D2 drain record surviving a drop/realloc of the same
+  slot.** Predicts: the last `wt_alloc` to ptr 0 lands while
+  `drain_hold_q` still carries the old record — i.e. an `smt-flow`
+  `wt_alloc` line for ptr 0 after the drop, with no intervening
+  `wt_tx`/`dr_vld` recapture, followed by a `wt_tx` whose dr_ptr=0
+  grant fires `g6lc_tx_single`.
+- **(b) txblock clear not ownership-gated while tx_cnt=1.** Predicts:
+  a `txblock 1→0` transition on entry 0 byte 7 (`txblock=80` at the
+  abort names byte 7) in the window with **no** `wt_ack` covering that
+  byte's TX — i.e. an `ev_gi`/`vkc_gi`/inval clear while
+  `tx_cnt_q[0]=1`. (`wr_gi` has no txblock term, so a merge cannot
+  clear it; but a freed-with-txblock slot reallocated by `wr_gi`
+  *inherits* txblock — that variant shows as `g6lc_free_slot_clean`
+  firing at the free, then `wt_alloc` to the same ptr.)
+- **(c) W2S return snapshot naming the wrong entry under drop
+  bursts.** Predicts: `rtrn_ptr != tx_stat_q[rtrn_id].ptr` at an
+  `evict` — visible as a `wt_evict` line whose ptr release lands on an
+  entry other than the one the TX id named at push.
+
+Discriminator: if `g6lc_free_slot_clean` fires *before* the final
+`wt_tx`, the residue existed at free time → (b)-family; if the slot is
+clean until the anomalous grant, the captured-record path (a) or the
+snapshot path (c) owns it.
+
+## hyp8 r42-T — Tier 1/2 structural FO4 pass (2026-10-24)
+
+Scope: structural timing only. Per the deferred-validation decision no
+leaves, smokes, or witnesses were run on the r42-T tree; functional
+evidence for these rewrites is their in-tree equivalence assertions and
+review mutants plus the r42-T lint below. Tools: sv-timing delay-v44 /
+correction-v5, parser pin v0.13.5, IR v5; board argv =
+analyze-ghz-r3.cmd with `inputs/param-map-hyp8-v2.json` (AluStages=3,
+RVH=0, CohPolicy=COH_FILTERED pinned — the r1/r2 alu/lsq/shared_tlb
+rows were measurement errors, superseded per T9).
+
+### Board result (post-revert tree)
+
+`boards/hyp8-core/analyze-ghz-r4.json` (full `--all-modules --stages`,
+45 live modules) + `clock-r4-vs-r3b.txt` (top-45 diff):
+
+- Structural clock **0.96 GHz / 41.6 FO4** — `g6lc_rename_resolve`
+  in-stage RR (the retained explicit `hi_last` prefix OR). Identical
+  limiter to r3b: the pass held the top-of-board flat; every landed
+  item's target cone was below the global limiter after the
+  countercase reverts.
+- Top rows: shared_tlb 39.6 (:841), lsq_reduce 38.2 (in-stage R),
+  ptw 37.4 (:604), g6lc_tlb 36.4 (:602), load_unit 36.1 (into L2),
+  iq_arb 34.8 (ARB), wt_dcache_mem 33.3 (:526), iq_bank 32.3 (SEL),
+  rename_recover 31.8 (:589), loop_buffer 31.8 (:236).
+- Movers vs r3b: `g6lc_rob` −1.9 (item-23 parallel-arm pick),
+  `g6lc_ooo_dispatch` −0.4 (item-21 predecode). `g6lc_core` +14.7 is a
+  translate_off hang-dump instrumentation cone (hierarchical CSR taps
+  added under `//pragma translate_off` for H5 blame locality; the
+  analyzer charges them into the module row) — not an RTL regression.
+- Stitched (cross-module) top-10, for the record: iq→iq_arb 134.2,
+  dispatch→iq 124.7, iq→iq_legal 122.5, iq→iq_bank 121.1,
+  iq→iq_payload 117.9, iq→iq_xbar 105.2, hpdcache_ctrl→pe 92.6,
+  mmu→shared_tlb 84.9, lsq→lsq_event 76.1, dispatch→lsq 75.0 FO4 —
+  all port-bridge bookkeeping cones, not structural clock-setters.
+- Six-module `--modules` run (v2 map, `--stages`), worst in→reg /
+  reg→reg / reg→out per module: g6lc_lsq_reduce 38.2 (in-stage R);
+  alu 24.6/27.9/24.6 (A3); stb_fwd 25.6 (F1); wt_dcache_wbuffer
+  21.9/22.0/22.0 (:1826); ex_stage 16.4 (rr :852); multiplier 16.2
+  (S2); store_buffer 15.4 (rr :412); g6lc_lsq 11.5 rr + 65.0 in→out.
+  JSON: boards/hyp8-core/analyze-six-r4.json.
+
+### Item census (file:line, rank, before→after, mutant, counter)
+
+G1 multiplier — all landed, mutants `G6LC_MUT_T2_MULT_{CLMUL,CORR,CSEL}`,
+counters `multiplier clmul|corr|csel`, board multiplier 16.2 (S2):
+- R1 new file `core/mult_clmul.sv` (tier-R header; slice-accumulate
+  CLMUL S2–S7, publishes at S7 with vld/tid/op lockstep); instantiated
+  in `multiplier.sv:624`; added to `core/Flist.g6lc_hyp8:185` and
+  `verif/regress/remote/hyp8/Flist.hyp8_sim:200`.
+- R1' two CSA correction rows in S2 (`multiplier.sv:225-315`),
+  pre-S1 CPA removed.
+- R1" S7 carry-select high half, candidates formed in S6
+  (`multiplier.sv:539-620`).
+
+G2 alu/ex_stage:
+- R3 shift_hi group to A2 with A2→A3 registered result — landed;
+  alu worst 27.9 in-stage A3 (unchanged limiter).
+- R4 one-hot AND-OR on `one_cycle_select`/`rs{1,2}_forwarding` —
+  ex_stage.sv:489-518; mutant `G6LC_MUT_T2_EXSTAGE_OCDATA`;
+  counter `ex_stage ocdata`.
+- Item 20 `WbCaptureStages` — rank-1, Hyp8=1: registered FLU
+  publication record in ex_stage.sv:899-943; mutant
+  `G6LC_MUT_T2_WBCAP`; counter `ex_stage wbcapture`; +1 FLU distance
+  derived inside `g6lc_ooo_pkg::ooo_flu_cycles`; hyp_cfg_ok legality
+  added (`WbCaptureStages==0 || WbReserve`).
+
+G3 LSQ:
+- R5 `pick_dist` narrowed to IDW+1 with all-ones sentinel —
+  g6lc_lsq_reduce.sv:86/164, g6lc_lsq.sv:1176/1235; mutant
+  `G6LC_MUT_T2_LSQ_PICKDIST`; counters `g6lc_lsq_reduce pickdist`,
+  `g6lc_lsq pvpick`. lsq_reduce is now the #3 module row (38.2
+  in-stage R) — below the limiter; noted as the next candidate.
+- Item 12: already realized (balanced pairwise `evcount` from the
+  earlier T1 batch) — classified, no change.
+- V-window re-time: **not landed** — the conditional in the plan
+  (fold the gather into the registered verdict stage without changing
+  `ld_checked`) was not met; `g6lc_lsq_verdict` untouched.
+
+G4 memory:
+- R7a **countercase** (load_unit.sv:651): the non-idempotent verdict
+  select on `load_pa_now_v` fed the FSM decode back into its own
+  control cone — 57.1/57.9 FO4 vs retained 36.1; reverted.
+- R7b **not landed**: the registered publish record cannot replace the
+  combinational pick without a protocol answer for which cycle the
+  shared PPN port belongs to a held key; deferred with R7a (in-file
+  note).
+- R8 **not landed**: `stb_insert`/`stb_fwd`/`store_buffer` already
+  carry the A141 `spec_older` pairwise matrix + per-byte
+  youngest-writer form from earlier work (store_buffer.sv:854) —
+  classified as already realized; rank popcounts already absent.
+- R6 **classified** (store_unit.sv:326): the 42.3 reg→out arm launches
+  from the DTLB PPN mux inside the MMU; `LsuAguStages==2` already
+  registers the AGU result, so a second register would add a cycle
+  without removing the DTLB leg. No change.
+
+G5 wbuffer:
+- R2 **not landed**: `wt_dcache_fixupq.sv` not created; the fixup/
+  coalesce logic remains inside `wt_dcache_wbuffer.sv`
+  (fixup_push/alloc/tail ~:701-870). Deferred — and now gated by the
+  r41 `tx_single` witness failure, which must be root-caused before
+  further wbuffer surgery.
+
+G6 issue/IQ/dispatch:
+- R9 `cnt_zero_q` predecode at the countdown edge — g6lc_iq_bank.sv
+  :190/366/1515; mutant `G6LC_MUT_T2_IQ_CNTZ`; counter
+  `g6lc_iq_bank cntz`. iq_bank 32.3 in-stage SEL.
+- Item 17 **countercase** (issue_read_operands.sv:763): independent
+  per-port hold vectors — the broader limiter stayed 46.4 and the
+  rewrite added structural complexity; reverted.
+- Item 21 dispatch legality/steer predecode from `grp_*_q` —
+  g6lc_ooo_dispatch.sv:290/304/396/625; mutant
+  `G6LC_MUT_T2_DISP_GRPGO`; counter `g6lc_ooo_dispatch grpgo`;
+  −0.4 FO4 on the module row.
+- Item 8 **classified**: `g6lc_iq_arb` already registers bank
+  candidates in `cand_q` at T+1 (g6lc_iq_arb.sv:8) — the SEL→ARB
+  candidate register the item asked to restore is already present; no
+  `IqCandStage` field added, no `ooo_flu_cycles` change needed.
+
+G7 translation/frontend/retire:
+- Item 4 **countercase** (g6lc_ptw.sv:563): the registered post-
+  `data_rvalid` decode bundle billed the whole decode cone even though
+  consumed a stage later — 37.4 → 63.8/64.5 FO4; reverted incl. the
+  temporary `PtwDecodeStage` field.
+- Item 19 landed — g6lc_shared_tlb.sv:186/459: live-arm flush-select
+  decode staged on registered `walk_own_q`/`walk_blk_q`; mutant
+  `G6LC_MUT_T2_STLB_FLUSHSEL`; counter `g6lc_shared_tlb flushsel`;
+  svt-pipe annotation `cycle stlb q=walk_own_q,walk_blk_q
+  d=flush_state_d steps=1`. Board 39.6 (:841).
+- Item 16 **classified** (wt_dcache_ctrl.sv:345): already realized by
+  the `DcacheHitExtra==2` T1/T2 staging; no new structure.
+- Item 1: retained the explicit `hi_last` prefix OR (41.6 FO4 —
+  the board limiter). Item 1(c) **countercase**
+  (rename_resolve.sv:120): predecoded `rd` one-hot indexed select
+  measured 41.6 → 49.5; reverted.
+- Item 23 landed where equivalent: `g6lc_rob` parallel ahit/whit pick
+  (:184-349, counter `g6lc_rob pick`, −1.9), `csr_buffer` one-hot tid
+  alloc (:156-179, `csr_buffer alloc`), `lsu_bypass` parallel mem_n
+  (:183-332, `lsu_bypass memn`), plus `g6lc_tlb plru`,
+  `sb_lifecycle col`, `g6lc_rename_recover pubmarks`,
+  `g6lc_fe_override ras_upd`, `g6lc_iq_legal leg` arm rewrites with
+  their `[equiv]` counters. **Controller arm countercase**
+  (controller.sv:480): the A22 parallel-arm rewrite measured
+  25.1 → 67.2 FO4; reverted.
+- Items 13/9/11 untouched (landed earlier).
+
+### Lint census (remote, run_hyp8_integration lint phase only)
+
+| tag | scalar %Error | smt2 %Error | smt2 WIDTHEXPAND/WIDTHTRUNC/LATCH |
+|---|---|---|---|
+| hyp8-integration-r42t-g1 | 0 | 0 | 354/97/3 |
+| hyp8-integration-r42t-g2 | 0 | 0 | 354/97/3 |
+| hyp8-integration-r42t-g3 | 0 | 0 | 355/97/3 (+1 WIDTHEXPAND, site not pinned) |
+| hyp8-integration-r42t-g7 | — | — | run dir created 12:52, output empty — sync produced no payload; superseded by r42t-final2 |
+| hyp8-integration-r42t-final | 84 | — | **lint_failed**: `g6lc_rob.sv:362-369` — the item-23 equivalence block indexed the `gen_slot` generate scope with a procedural loop variable (`gen_slot[s]`); generate scopes only take constant indices. Fix: check moved inside `gen_slot` (genvar `s`), per-slot `[equiv] g6lc_rob pick[<s>]` counters |
+| hyp8-integration-r42t-final2 | 0 | 0 | 354/97/3 — **build_complete**, model sha256 `d0c51e28c69360ee18b52723979855af1e45abf1e4cc732a0bcdfaf07479b544`, 694 staged files |
+
+r42t-final2 scalar census: 343 WIDTHEXPAND, 123 LITENDIAN,
+87 WIDTHTRUNC, 10 CMPCONST, 9 UNSIGNED, 9 CASEINCOMPLETE, 5 STMTDLY,
+4 IMPLICITSTATIC, 3 WIDTHCONCAT, 3 LATCH, 1 SYMRSVDWORD, 1 COMBDLY —
+identical to the r41 baseline. The g3 +1 WIDTHEXPAND is gone in the
+final tree (removed with the reverted items). runtimeDepChecked=true
+(204 dep files), pinned Verilator 5.008.
+
+LATCH=3 everywhere is the tier-U `axi_riscv_amos_alu.sv` triplet.
+**Transport note:** the `r42t-final2` closure was delivered by cloning
+the already-synced `r42t-final` remote closure (`cp -a`) and pushing
+only `g6lc_rob.sv` + the regenerated `manifest.json` through
+`Remote.push` (the proxy's 12 MB tar-over-ssh closure upload kept
+dying on ControlMaster resets); the remote runner was then launched
+detached with `TH_DATA_DIR`/`TH_OUT_DIR`. Manifest sha-verification of
+all 694 staged files passed inside the run.
+
+### Deferred / next tier (explicit)
+
+- r42-T leaves, smokes, witnesses: **deferred by the user** — none run;
+  the equivalence evidence is the in-tree `[equiv]` counters (24
+  counters total) and the `G6LC_MUT_T2_*` review mutants.
+- Rename 1′ RR-a/RR-b with `prev2` and the Batch E wbuffer redesign:
+  deliberately not attempted (ownership change without a witness).
+- **Gating item:** the r41 witness failure (addendum above) — an
+  in-flight-TX hole remains in `wt_dcache_wbuffer` under drop bursts;
+  fix + r41v2 closure + rewitness required before the wbuffer repair
+  is verified, and before G5 R2 should proceed.
+
+---
+
+## r43-T (tangent) — top-down FO4 reduction, lint-only gate
+
+User-directed tangent off the r41v2 diagnostic: work the r4 board's
+>=20-FO4 list top-down, rank-1 changes allowed even where they add a
+cycle, validation deferred to lint only. **No leaves, no smokes, no
+witnesses were run in this pass.** Working tree: r43-T.
+
+### Board result (same argv as r4: --all-modules --stages, v2 param map,
+### --target-mhz 5000 --fo4-ps 20 --budget-margin 0.2)
+
+`boards/hyp8-core/analyze-ghz-r5.json` + `clock-r5-vs-r4.txt`:
+**structural clock 0.96 -> 1.03 GHz (41.6 -> 38.6 FO4)**; new clock-setter
+is `g6lc_shared_tlb` (reg-to-reg :791, the SFENCE.VMA flush-match decode).
+
+Landed:
+
+| item | module | cone | r4 -> r5 | rank / mechanism |
+|------|--------|------|----------|------------------|
+| T1 | g6lc_rename_resolve | in-stage RR | **41.6 -> 3.5** | (a) position-ordered balanced late-select `(|h[5:3]) ? chain(5,4,3) : chain(2,1,0,arch)` replacing the `hi_last` one-hot + masked-OR gather on every gathered field; (b) `HypCfg.RenameResolveStages` (Hyp8=2): RR-a registers per-lane match vectors `h_s1_q/h_s2_q/h_s3_q` + `rra_q` lane records, RR-b does late-select + rs_rdy clear; third producer record `prev2_i` added through g6lc_rename/g6lc_rename_publish, cleared in g6lc_rename_recover, dispatch `grp_pend_q` serialization extended by one. Module is off the top-45 entirely |
+| T2 | g6lc_ptw | Svnapot rr | 37.4 -> 37.5 (+0.1) | `HypCfg.PtwDecodeStage` (Hyp8=1): new `PTE_DECODE` state — raw `data_rdata` -> `pte_q` at rvalid, registered decode bundle next cycle, every PTE_LOOKUP arm reads bundle bits only; +1 cycle/level on a TLB miss (walk latency). Kept: module-neutral but removes the raw-PTE cone from the FSM and the locus moved from :604 to :763 |
+| T3 | g6lc_lsq_reduce | R | 38.2 -> 29.9 (-8.3) | `HypCfg.LsqReduceStages` (Hyp8=2): R1 registers `{pick_valid,pick_slot,pick_dist,wait_d,dwait_ids}`, R2 does the one-hot decode + id/pay gathers + publishes `win_*`; R->V distance derived from the field |
+| T5 | g6lc_shared_tlb | rr | 39.6 -> 38.6 (-1.0) | VVMA lookup-path predicate work kept; the remaining :791 limiter is the SFENCE 4-arm flush decode — same exclusive-arm class as the T4/T6/T9 countercases, no safe flat rewrite |
+| T7 | g6lc_iq_arb | ARB bundle | 34.8 -> 33.5 (-1.3) | `cand_cancl_q` captured at candidate capture (live mask remains authoritative final AND) + `HypCfg.IqArbStages` (Hyp8=2): ARB1 tournament -> registered `win_s_q`, ARB2 take/presentation; owned-TID exclusion and `!pres_q[p].v` stay live. Earlier real-path measure ~48.8 -> 35.6 |
+
+Reverted countercases (old form restored, countercase note in-file):
+
+| item | module | result | why reverted |
+|------|--------|--------|--------------|
+| T4 | wt_dcache_mem :526 | 33.3 -> 35.0 | flat AND-OR per-byte merge replaced the priority tree — charged all cones, lost the exclusive-case accounting (same class as T6/T9) |
+| T6 | g6lc_iq_bank SEL | 32.3 -> 38.0 | registered `legal_q` at the bank boundary worsened SEL |
+| T8 | load_unit | 37.5 -> 37.5 | `LuTransStage` staged MMU response relocated the cone to ~36.15 but the existing FSM state path (load_unit.sv:1162) stayed the limiter — full revert including the HypCfg field |
+| T9 | alu A3 | 27.9 -> 73.8 | one-hot `a3_sel_q` arm-group predecode + flat AND-OR destroyed the 35-arm unique-case's exclusive-arm accounting — worst countercase of the pass |
+
+Classified without a change (cone inspected, no safe rewrite):
+
+- `g6lc_rename_recover` (31.8): true worst is :451 (39.3, the publish
+  per-port dynamic-index write into the architectural map — map-RAM
+  write-port redesign, a backend seam, out of tangent scope); the :589
+  board row is a 25-LHS bundle makespan.
+- `g6lc_loop_buffer` (31.8): :236 `hit_live` 64-bit compare is
+  live-input — feeds `consume_o`/`hit_q` next-state; staging changes
+  the output contract.
+- `sb_lifecycle` (28.9): :362 flagged "P10 handshake lock, InsertReg
+  refuse" by the analyzer — port-indexed alloc gather, no deeper cone.
+- `g6lc_fe_override` (30.2): :421 is a 13-LHS bundle makespan.
+- `g6lc_tlb` (36.4): countercase already recorded (T5).
+- Skipped per plan: tier-U fpnew_*/aes, wt_axi_adapter (classified),
+  wt_dcache_wbuffer (r41v2 owns), controller A22 (prior countercase),
+  g6lc_core (translate_off instrumentation taps), nonexistent
+  wt_dcache_fixupq.sv.
+- `g6lc_shared_tlb` :791 (new clock-setter): 4-arm SFENCE exclusive
+  decode — the T4/T6/T9 countercase class; a staged-flush rank-1 is
+  the only remaining lever and is deferred (flush semantics change).
+
+New HypCfg fields this pass: `RenameResolveStages` (HypDefault 1,
+Hyp8 2), `IqArbStages` (1|2, Hyp8 2). (`PtwDecodeStage`,
+`LsqReduceStages` were added earlier in the pass; `LuTransStage`
+added-then-reverted with T8; `WbCaptureStages` stays 0.)
+
+Lint gate (the only validation): remote full-top lint of the r43-T
+closure (`hyp8-r43t-closure`, 694 staged files + manifest sha-verify)
+via `run_hyp8_lint_only.py` — tag `r43t-lint3`,
+**scalar rc=0, smt2 rc=0; 0 %Error both profiles**; census scalar
+344 WIDTHEXPAND / 87 WIDTHTRUNC / 3 WIDTHCONCAT, smt2 355/97/3 —
++1 WIDTHEXPAND per profile vs the r41 baseline (new r42/r43 code);
+the `prev2_sh` packed->unpacked array assignment flagged as
+`SEL unexpected` (g6lc_rename_resolve.sv:413) was fixed element-wise
+before the passing run.
+
+### r41xdiag collection (collateral to the tangent)
+
+The already-running windowed diagnostic `hyp8-osbi-scalar-r41xdiag`
+was collected after it finished on its own (not relaunched): same
+signature as r22/r22x — `g6lc_tx_single` abort at cycle 289,632
+(remote run dir + pulled `remote-runs/hyp8-osbi-scalar-r41xdiag/`).
+Trace evidence for the r41v2 continuation: entry 0's byte 7
+(be=80, pa 0x800403f7, wtag 0x1000807e) was sent **twice** —
+`wt_tx id=1` @289618 and `wt_tx id=2` @289619 — while the recapture
+mask should have made the second pick impossible. Global send/evict
+tally is otherwise balanced (6406 sends / 6404 evicts, the 2 leftovers
+being the unreturned tail); the alloc stream shows `ptr=1 merge=0
+hit=01` @289616 opening a second live slot for the same word while
+entry 0 still had an in-flight byte — consistent with prediction (a):
+a held/stale drain record offered again after a drop/realloc window,
+the `drn_hit` mask keyed on `dr_ptr` protecting the wrong slot. The
+pre-abort burst of `L1 obligation dropped` events on entries 0/1 is
+the realloc churn that primes the stale record. Adjacent confirmed
+static hole (unchanged, r41v2 owns): `wbuffer_d[gi].txblock[k]` has
+no `wr_gi` clear — a realloc'd slot inherits stale txblock/valid/dirty
+state.
+
+## r41v2 — write-buffer drain repair round 2 (LockIn root + return-view + W3-hit bypass)
+
+### Root mechanism (r41xdiag trace, cycle-pinned)
+
+Entry 0's byte 7 (be=80, pa 0x800403f7, wtag 0x1000807e) drained once
+correctly and then again one cycle later: `wt_tx id=1` @289618 and
+`wt_tx id=2` @289619 — the second send carried no `wt_ssent` (the miss
+unit never sent it; the write-buffer committed it internally) and
+`g6lc_tx_single` fired at 289632 (`txblock=80 tx_cnt=1`).
+
+The drain record (`dr_ptr`/`dr_vld`/`drain_hold_q`) is NOT the stale
+party: `i_dirty_rr` was instantiated with `.LockIn(1'b1)`, and in the
+vendor `rr_arb_tree`, LockIn freezes `req_q` while a request waits for
+its grant (`lock_d = req_o & ~gnt_i`; while `lock_q`, `req_d = req_q`
+ignores live `req_i`). The W-buffer already holds the offer stable in
+`drain_hold_q`/`dr_*`, so the arbiter lock was redundant — and at the
+grant edge the `drn_hit` mask removed the just-granted entry from the
+LIVE request vector while the arbiter kept replaying the FROZEN mask:
+the D1 capture after the ack re-picked entry 0 with its txblock/tx_cnt
+update one edge late. Two sends, one byte, two tx ids — the memory-
+reorder hazard the single-TX ledger exists to forbid.
+
+The W2/W3 same-word-alias hypothesis from the earlier report is
+DISPROVEN for this abort: the `wt_alloc ptr=1 merge=0` @289616 carried
+store operand base 0x800403f9 -> word 0x800403f8, while entry 0 held
+word 0x800403f0 — a legitimate different-word allocation. (The earlier
+read of the alloc as a same-word second slot was wrong; `hit=%h` in the
+wt_alloc line prints the OLD occupant's resident hit_oh, not the
+request's hit vector.)
+
+### Fixes (wt_dcache_wbuffer.sv only; one-file churn)
+
+- **F-d (root):** `i_dirty_rr` LockIn 1'b1 -> 1'b0 (`WBUF_DRAIN_LOCKIN`
+  localparam); `drain_hold_q`/`dr_*` is the sole offer-stability
+  mechanism. Review mutant `G6LC_MUT_WBUF_DRAIN_LOCKIN` restores the
+  frozen pick. New Verilator-active `g6lc_drn_norepick` (drn_hit_q
+  history): a grant whose pick was just granted last cycle is a
+  violation.
+- **F-a:** `rtrn_wb` reads the LIVE entry through the registered
+  pointer (`wbuffer_q[rtrn_snap_ptr_q]`); `rtrn_snap_ptr_q`/
+  `rtrn_snap_tx_q` retained. `ack_be`, `leg_l1_d`, `leg_fire_d`,
+  `rtrn_checked_mid`, `vmid_clr`, byte release now observe one state —
+  the frozen `rtrn_snap_wb_q` view let snapshot-dirty force `ack_be=0`
+  while the live release freed the bytes (`l1_obligation dropped`,
+  nonzero in h33-r41x and churning before both aborts). The obligation
+  drop is now a hard `g6lc_l1_obl` assertion (counter kept;
+  `G6LC_MUT_WBUF_SNAP_VIEW` keeps counter-only mode). Timing cost: the
+  8:1 indexed wbuffer_q read re-enters the return-leg cone.
+- **F-b:** a fresh non-merge alloc fully initializes byte state —
+  valid/dirty from `wrv_be`, txblock=0, checked=0, hit_oh=0; `w3_merge_q`
+  carries merge-vs-fresh through the W3 descriptor (`wrv_merge`).
+  `g6lc_alloc_clean` names any fresh alloc landing on a slot with
+  tx_cnt>0 or txblock!=0.
+- **F-c (structural, disproven-root but requested):** W2 coalesce
+  decision includes the W3-pending same-tag write (`w1_w3hit_q`, merge
+  target `w3_ptr_q`); mutant `G6LC_MUT_WBUF_W3_HIT_BYPASS` drops it.
+  NOTE on reachability: under the W1 write-once suppression protocol a
+  valid W1 capture can never coincide with a pending W3 write — a W3
+  occupant implies an `e_accept` in the previous cycle, which suppresses
+  that capture and forces a recapture after the write lands. The bypass
+  is defense-in-depth (vacuous today); the real guards are the new
+  Verilator-active invariants: `g6lc_hit_hot1_v` ($onehot0 of
+  wbuffer_hit_oh, duplicated out of `ifndef VERILATOR`) and
+  `g6lc_word_uniq` (no two live slots share a wtag, pairwise).
+
+### Closures (sha-pinned, exactly-one-file churn)
+
+- `hyp8-integration-r41v2-closure` (693 files, parent r41):
+  wt_dcache_wbuffer.sv `bb38a121` -> `95f4be4e`; no other churn.
+- `hyp8-integration-r41v2x-closure` (693 files, parent r41x):
+  wt_dcache_wbuffer.sv `bb38a121` -> `95f4be4e`; no other churn
+  (the wbuffer file is identical across the two lines; the x-line
+  delta lives in issue_read_operands).
+
+### Module timing (--modules wt_dcache_wbuffer, v2 param map)
+
+22.0 -> 24.9 FO4 structural clock for the module; the new limiter is
+the W2->W2S crossing (:2004 rdy/e_accept into the W3 descriptor regs),
++2.9 FO4 consistent with the F-a live indexed read re-entering the
+return-leg cone. Not a top-45 clock-setter (board clock remains
+shared_tlb :791 at 38.6). JSON: boards/hyp8-core/analyze-wbuf-r41v2.json.
+
+### Remote evidence
+
+- Integration lint r41v2 (run_hyp8_lint_only.py, tag
+  hyp8-integration-r41v2): **scalar rc=0 (343/87/3), smt2 rc=0
+  (354/97/3), 0 %Error both profiles** — census identical to the r41
+  baseline. r41v2x lint: **scalar rc=0, smt2 rc=0, 0 %Error**.
+- Integration lint+build r41v2/r41v2x (run_hyp8_integration.py):
+  BUILD OK both lines. Model sha256: r41v2
+  `bb2309c4c9cee2345af0713156e92b6a3d73423049f7f3f7b4f60fcfe16bea61`,
+  r41v2x `d5982add800ee061045b90854d94ae5f8f4db1bd8f37999e35f918f16ec02336`.
+- Smokes (run_r41v2_smokes.py): **r41v2 line h34=682 / h33=969 /
+  branch-cancel=473** (bit-identical to r41 — the repair did not move
+  any of the three paths); **r41v2x line h34=682 / h33=899 /
+  branch-cancel=475** — h34x first record, x-line h33 holds at 899
+  (the +10 vs the pre-F-a 889 expectation is the F-a live-view change
+  attributed earlier; tx_single checked=10 viol=0).
+- Witnesses hyp8-osbi-scalar-r23 / -r23x (20M, +stall_census
+  +hang_dump=2000 +equiv_report +rvfi_cycle_stamp,
+  +tohost_addr=0x80041730, fw_payload sha-pinned): **both FAILED at
+  ~24.6k cycles** — r23 at cycle 24,594, r23x at 24,596, identical
+  signature: `wt_dcache_wbuffer.sv:2554 g6lc_l1_obl`:
+  "[l1 dcache wbuffer] checked+resident entry 0 wtag=00000010008dec
+  freed by drop without L1 write" — preceded by sustained
+  `l1_obligation dropped` churn on entry 0; boot trace parked at
+  npc=0x10040 (bootrom park loop). The F-a live-view repair did not
+  eliminate the obligation drop; the hard g6lc_l1_obl assertion fired
+  instead of a silent violation, which is the intended fail-loud
+  behaviour — the surviving mechanism is a third drop path the
+  snapshot view did not cover (investigation open; the
+  r41xdiag/r41v2 evidence names the drop+realloc window on the same
+  slot as the prime suspect). OpenSBI retirement is NOT restored on
+  this line. Also note: the frozen r41v2/r41v2x models predate r43-T
+  and still carry the latent hi_last lowest-set (oldest-wins)
+  direction bug found in the rename_resolve equivalence review —
+  see the hyp8-l3-r1 section.
+
+## hyp8-l3-r1 — OpenSBI on the ooocoh L2/L3 stack (first simulation of the r43-T tree)
+
+User request: run OpenSBI on the single-core no-hub ooocoh L2/L3
+cache stack (`g6lc64_smt2_l3` field set) on the CURRENT hyp8 tree —
+r41v2 functional + r42-T/r43-T structural. This run is also the first
+simulation of that tree (the tangent gate was lint-only). Reference
+analogue `ooocoh-p2-osbi-smt2l3-L0-r2` (T8c, AGENTS-ooo-plan:1717):
+stock OpenSBI retires at 14.3M cycles on the reference core under a
+20M cap. The two-core hub/int2 variant was NOT attempted — hyp8 is
+single-hart.
+
+### Config seam + copied fields
+
+`core/include/g6lc64_hyp8_config_pkg.sv`: `ifdef G6LC_HYP8_L3` next to
+`G6LC_HYP8_SMT2` selects the L2/L3/WtAxiAllocEn field set copied
+verbatim from `core/include/g6lc64_smt2_l3_config_pkg.sv` —
+L2En=1, L2LineWidth=512, L2MshrDepth=2, L3En=1, L3LineWidth=512,
+L3MshrDepth=4, WtAxiAllocEn=1, L3InclusiveEn=0, L2TagSramEn=1,
+L2WriteUpdateEn=1, L2PrefetchEn=0, and every L2*/L3* set/way/bank
+field; else-branch keeps the existing zeros, so the scalar and SMT2
+profiles are identity. The hyp APU tree already instantiates
+`g6lc_l2_top`/`g6lc_l3_top` under `L2En`/`L3En` (Flist.hyp8_apu
+:397/:401) — no production-core port was needed. `wt_axi_adapter`
+`WtAxiAllocEn` handling mirrored (T8a finding: without allocate
+attributes the L2 is a bypass). Harness: `g6lc64_hyp8_l3` added to
+`verif/regress/remote/hyp8/hyp8-build-harness.sh`
+(`-DG6LC_HYP8_L3`, harts=1, same CFLAGS as g6lc64_hyp8). DTS:
+`verif/regress/remote/hyp8/g6lc-hyp8-l3.dts` from g6lc-hyp8.dts +
+l2-cache/l3-cache nodes chained `next-level-cache` from the cpu node
+exactly as `ariane-smt2-l3.dts`, geometry matching the copied fields.
+
+### Firmware (stock OpenSBI, no edits — P1)
+
+`build_boot_firmware.py`, OpenSBI pin `455de672`:
+- fw_payload.elf sha256
+  `01ae648d85a77acae08d106708a3ceba115f092747c5a7d284e1ca831c3d4f5f`
+- g6lc-hyp8-l3-linux.dtb sha256
+  `d60d477d398d4450d69973f8306c1948fa3b44cd106aab05f674eacf2e63c54c`
+- tohost `0x80041730`
+
+### Closure + lint + build (r6 — final)
+
+`hyp8-l3-r6-closure`: 822 files, manifest sha256
+`6e39a3b104652fd00593b6a0da2a46178a95bb1246e9ba29a371a42890c896dc`
+— the r43-T tree + the config seam + harness/DTS additions + the
+assertion-reference corrections below. Integration
+`hyp8-l3-integration-r6` (sha-verified source, pinned Verilator
+5.008-causal + private runtime dfbc2c4a…, riscv gcc 14.2.0):
+
+- lint scalar rc=0 (343 EXPAND/87 TRUNC/3 CONCAT, 0 %Error)
+- lint smt2   rc=0 (354/97/3, 0 %Error)
+- lint l3     rc=0 (354/90/5, 0 %Error)
+- build g6lc64_hyp8_l3 rc=0, model sha256
+  `15539b40acc9abf28d5c44a880bbb5d24a0ab61cd987121026df7c16988c4946`
+
+### First-simulation assertion exposure (r1→r6 debugging record)
+
+First simulation of the r43-T assertion set surfaced four
+reference-side bugs — all translate_off, all fixed by aligning the
+reference to the staged RTL, none touching functional logic:
+
+1. r1: all three smokes stopped at `g6lc_iq_arb.sv:923`
+   `g6lc_t3_iq_arb_moh` (staged m_oh drift) — first-simulation
+   exposure of the staged-arbiter reference.
+2. r3: h34 passed (813); h33 `g6lc_t2_pickdist_eq`
+   (g6lc_lsq_reduce.sv:344) — the R5-era reference compared
+   `pick_valid[1]`/`pick_dist[1]`/`pick_slot[1]`, undriven once the
+   tree splits at FBASE under LsqReduceStages>=2; replaced with the
+   root_* vs one-edge-delayed reference tree compare. branch-cancel
+   `g6lc_t2_mult_csel_eq2` (multiplier.sv:737) — `prod_q` registers
+   at S7 while the product reference carried only a single-edge
+   delay; added the second delayed reference stage.
+3. r4: h34 813 / bc 516 pass; h33 `g6lc_t3_lsqr2_eq`
+   (g6lc_lsq_reduce.sv:432) — field dump (r5) showed
+   v=1/1 leaf=001/001 id=11/11 **dist=01/00** pay/wait/dwait equal:
+   same winning slot, different dist. Root cause: a local register
+   named `ref_dist` inside `gen_lsq_r2_eq` shadowed the module-level
+   `ref_dist` tournament array, so `ref_dist <= ref_dist[1]` sampled
+   the register's own bit 1 — stuck at 0 — instead of the reference
+   root. Renamed to `ref_d`/`ref2_d`; h34/bc had passed only because
+   their winning picks carried dist=0. NOT an RTL defect.
+4. r43-T review also corrected a semantic bug in the
+   `g6lc_rename_resolve` equivalence gather: `hi_last` computed the
+   LOWEST set bit (oldest producer wins) while the documented
+   contract and the live late-select are newest-wins (highest
+   index). The translate_off reference was corrected to a true
+   highest-set helper; the frozen r41v2/r41v2x models still carry
+   the original gather — a latent functional bug on that line.
+
+### Smokes on the L3 model (r6, all PASS)
+
+`+time_out=400000 +max-cycles=400000 +debug_disable +quiet_axi
++equiv_report +tohost_addr=0x80001000`:
+
+- hyp8-h34-l3r6: **real tohost, 813 cycles**, 111 equiv lines,
+  0 errors; elf `02dec56a…`
+- hyp8-h33-l3r6: **real tohost, 1141 cycles**, 111 equiv lines,
+  0 errors; elf `69bb52f1…`
+- hyp8-branch-cancel-l3r6: **real tohost, 516 cycles**, 111 equiv
+  lines, 0 errors; elf `cc8b8ccc…`
+- model sha `15539b40…` pin-verified per run.
+
+### Witness launch (detached, not awaited)
+
+`hyp8-osbi-l3-r1` launched 2026-10-24 ~19:33 UTC on the r6 model
+(sha-pinned `15539b40…`), fw_payload sha-pinned `01ae648d…`:
+
+```
+Variane_testharness +time_out=30000000 +max-cycles=30000000
+  +debug_disable +quiet_axi +tohost_addr=0x80041730 +stall_census
+  +hang_dump=2000 +equiv_report +rvfi_cycle_stamp fw_payload.elf
+```
+
+Predictions (written before launch): banner later than r20x's 4.76M
+cycles — the L2/L3 miss latency adds to every boot fetch — and after
+the reference's 14.3M-cycle ooocoh-p2 retirement as a plausible upper
+marker under the 30M cap; `l3_hit` census expected ≈0 per T8c (the
+L3 sees almost no hits at this footprint). The r41v2 wbuffer
+assertion set rides in this build — `g6lc_l1_obl`/`g6lc_tx_single`
+will fail loud if the surviving drop mechanism recurs on the L2/L3
+path. Verdict: **aborted at cycle 483,343** — not a boot. The model
+hit `g6lc_spec_entry_live` at `core/store_buffer.sv:1292`:
+"[Speculative Queue] entry 0 holds tid 28 whose scoreboard slot is
+not live", then `$stop`. No UART bytes, no banner, no tohost
+verdict, no stall census, no equivalence report (pulled artifacts:
+`remote-runs/hyp8-osbi-l3-r1/` — run-hyp8.log, results.json,
+summary.{txt,json}). Preceded by 6,799 `l1_obligation ... freed by
+drop` records; boot trace parked around npc=0x10040/0x10000 (the
+bootrom wait loop — same signature as the r23/r23x aborts). The
+store-buffer scoreboard liveness failure is distinct from the r23
+wbuffer leg and remains open — see the r41v2 section for the
+state of that investigation.
+
+## Segment card — rename gather direction (hi_last oldest vs newest)
+
+Question (from lead review of hyp8-l3-r1 item 4): the shipped
+`hi_last` in `g6lc_rename_resolve` isolates the LOWEST set producer
+bit (oldest-wins), while the module contract ("priority mux
+newest-wins" per g6lc_rename.md) requires the HIGHEST. Was the
+r43-T reference correction (hi_last → hi_first in the eqf gather)
+right, and does the shipped line carry a real functional bug?
+
+Discriminator: `verif/tests/custom/hyp8_raw_window.S` — eight
+variants each building a two/three-writer window on one rd with a
+consumer whose correct input is the newest writer's value:
+V0 [li a5,5; li a5,7; mv a0,a5], V1 same pattern shifted one slot,
+V2 independent filler between second writer and consumer,
+V3 dependent WAW pair (li;addi), V4 three-writer WAW, V5 FP pair
+(fmv.w.x f5 x2; fmv.x.w), V6 single-writer control, V7 spaced pair
+(published-map control). Observed consumer values packed as a
+32-bit signature → tohost; all-newest expected 0x7a977739.
+
+Runs (pinned models, elf sha `d1b9799a…`/`83aca27f…`, tohost
+0x80001000):
+- **hyp8-integration-r41v2** (frozen line, hi_last = oldest-wins
+  live): SUCCESS at 649 cycles — all variants observed newest.
+- **hyp8-l3-integration-r6** (r43-T late-select = newest-wins
+  live): SUCCESS at 775 cycles, all variants observed newest
+  (rvfi tail: `sw a0 → mem 0x80001000 = 1`, s11=0x7a977739).
+  One earlier invocation on this same model/elf flaked to a
+  budget-out at 400k with a cause=2 trap at 0x8000005e and an
+  odd retire stream (handler fetch + resumed stream + a retired
+  tohost store that the tracer did not count); 3/3 subsequent
+  runs passed cleanly at 775 cycles. Recorded as a
+  nondeterministic L3-path anomaly (fetch or store drain), not a
+  rename-semantics divergence — see open items.
+
+Multi-hot census (diagnostic closures, translate_off counters
+inside gen_lane — no RTL change):
+- `hyp8-r41v2-mhdiag` (model `efa26743…`, scalar build): h34
+  hits p1 f0=15 f2=7; h33 hits p1 f0=26 f1=10 f2=26; all other
+  lanes/fields zero. **multi=0 diverge=0 everywhere** — the
+  producer vectors are at most single-hot on the frozen pipeline.
+  hyp8-rawwin-mhdiag (the discriminator itself on this model):
+  p1 f0=9 f1=4 f2=7, **multi=0 diverge=0** — the directed
+  two-writer patterns also never reach a multi-hot window.
+- `hyp8-l3-mhdiag` (model `421d7870…`, L3 build, RRS=2 live):
+  h34 hits p1 f0=15 f2=7; h33 hits p1 f0=22 f1=11 f2=22;
+  **multi=0 diverge=0 everywhere** — the deeper r43-T window does
+  not hold two producers of one rd on these tests either.
+
+Why the frozen line is correct anyway (structural): on the
+RRS=1 pipe, r1_v_q is a single-cycle pulse, s2 drains every
+occupied cycle, and prev1 has a one-cycle lifetime. Dispatch's
+grp_pend_q serializes group captures to ≥4 edges apart (pend set
+at capture, cleared at ren_pub — the cycle after publish). So at
+any resolve cycle, prev0/prev1 records are always dead; the only
+live producer a lane can see is a same-group older lane — at most
+one per field (lane 0 for lane 1). hi_last vs hi_first pick the
+SAME bit on a single-hot vector: **the direction is structurally
+unobservable on the shipped 1-stage pipeline.** The "latent
+direction bug" in the frozen models is real in the code but
+unreachable — the OpenSBI boots on that line neither exercised
+nor refuted it.
+
+Conclusion: newest-wins (hi_first / the late-select) is the
+correct contract direction and is what the r43-T live path
+implements; the frozen line's oldest-wins gather is a latent,
+structurally unreachable divergence — the shipped pipeline can
+never present two live producers to one field, so the direction
+bit is unobservable (measured: 0 multi-hot across h34+h33+rawwin
+on BOTH lines). The OpenSBI boots on the frozen line neither
+exercised nor refuted it, and the r43-T newest-wins path is
+observationally identical on every variant. The earlier r2
+latesel fire (pick=47 ref=20 at cycle ~300) is therefore best
+explained as the RR-a/RR-b producer-record boundary shifting a
+single producer between stages — the bookkeeping hole the
+prev2_sh/cover_eq fix addressed — not a true two-producer
+multi-hot; with multi=0 measured on the verdict vectors, no
+semantic correction beyond that bookkeeping fix was needed. The
+hi_first reference stands as the contract-correct checker; the
+"latent functional bug" wording in item 4 is narrowed to a latent,
+unreachable code divergence.
+
+Open items:
+- The single flaky r6 rawwin run (cause=2 trap loop at
+  0x8000005e on an `or`; retired sw tohost=1 not counted by the
+  tracer) — same family as the store-path anomalies under
+  investigation on the L3 line; not reproduced in 3 reruns.
+- The census only covers h34/h33/rawwin; multi-hot could
+  conceivably arise in longer workloads — but the grp_pend
+  serialization bound (≥4-edge captures vs 1-cycle record
+  lifetime) says it is structurally impossible on the frozen
+  line, and the r6 verdict window shows the same single-hot bound
+  under RRS=2 on all tests run.
+
+## r44 (functional batch, implementation)
+
+Scope: hyp8 only, no new files. Three execution-path repairs plus
+leaf-bench coverage; cycle contracts preserved (no new pipeline
+stages, no new ports, no config fields — pub/drain latency,
+DcacheHitExtra behavior, and LsqReduceStages counts unchanged for
+the shipped 8/10-leaf callers; the small-N shapes are corrected to
+the configured count (see lsq_reduce below)).
+
+Edits (pre-r44 snapshots: cva6-artifacts/r44/pre/ + MANIFEST.sha256):
+- core/load_unit.sv (+178 diff lines): the publication/drain
+  selection at :1119-1247 replaced serial low-bit priority + linear
+  index OR + indexed gathers with balanced first-valid heap trees
+  (PLEAVES padded, lowest-eligible-index wins, index-0 default when
+  nothing eligible — the original retire_idx semantics incl.
+  exception cycles). Merged payload rides the tree (pub_payload_t
+  {meta,word}; word = per-byte fwd overlay) so ldbuf_rdata,
+  trans_id_o and fwd_merged_data are selected directly — exception/
+  spec/store-forward override priorities and the ldbuf_rindex/free
+  side effects untouched. translate_off miter: independent
+  ascending-scan reference index per edge, index/any/record/word
+  compared; non-vacuous (multi-eligible and partial-forward edges
+  exercised by the memory leaf).
+- core/cache_subsystem/wt_dcache_mem.sv (+128): FWD byte reduction
+  split at the EXISTING T1 register edge. PARTIAL_FWD =
+  (DcacheHitExtra==2), forced 0 under the three mutant defines
+  (FWD_ONE_HOT, FWD_LIVE_T2, new rollback G6LC_MUT_T4_DCFWD_FULL_T1).
+  Under PARTIAL_FWD the padded associative left-valid-wins tree runs
+  FWD_SPLIT levels live, the [byte][part] {v,d,u} frontier is
+  captured at T1, and the remaining levels finish at T2 — no live
+  slot is re-read at T2. Under !PARTIAL_FWD the original full merge
+  + capture is retained exactly. The fsnap linear-capture checker
+  still verifies the T2 word/BE/user tuple.
+- core/ooo/g6lc_lsq_reduce.sv (+157) + g6lc_lsq.sv (+5): new param
+  TRACK_WAIT (default 1; i_vio_red passes 0 — its wait/dwait were
+  already unconnected — i_stl_red/i_q_red keep 1). TRACK_WAIT=0
+  removes the cand_nd/cand_ur cones and ties wait_d/dwait_d to 0.
+  All slot widths use SW=(LG>0?LG:1); SL/FBASE derive from true LG —
+  NLEAF==1 gives SL=0, NLEAF==2 gives SL=1 (FBASE=1 either way) —
+  with an explicit no-invalid-range generate arm. RSTG = (LsqReduceStages>=2)
+  regardless of tree geometry (was: silently 1 when FBASE<2 — the
+  r43-T 2-stage request was being dropped on small-N instances; all
+  callers now get exactly the configured count). R1 captures NFR
+  group-winner id/pay snapshots (GROUP_LEAVES=1<<SL contiguous
+  leaves per frontier node, local gather only — no global dynamic
+  read); R2's final index is root_s>>SL into the NFR snapshots.
+  Cost: a bounded local mux enters R1 (reported, not assumed a win).
+- verif/tb/core/tb_g6lc_hyp8_memory.sv (+111): response-slot
+  publication/drain cases through the existing request/response/
+  forward/verdict drivers — two eligible slots different TIDs/data
+  (lowest publishes first, next publishes the following cycle),
+  partial forward-byte overlay, empty/default-0, flush/tombstone
+  drain; own-rid misaligned-exception cases kept.
+- verif/tb/core/tb_g6lc_hyp8_control.sv (+423): (a) lsq reducer
+  checker — selected 10-instance matrix (NLEAF,stages,DIR,TRACK_WAIT)
+  = (1,1,0,1) (1,2,0,1) (2,1,0,1) (2,2,0,1) (3,2,0,1) (8,1,0,1)
+  (8,2,0,1) (8,2,1,0) (10,2,0,1) (10,1,1,1); directed empty / highest-real-
+  leaf-only / equal-distance ties (lowest slot wins) / duplicated
+  waiting TIDs / flush between R1/R2; payloads randomized on every
+  input edge; independent scalar scan sampled at input, expected
+  output delayed by exactly the configured stage count. (b) dcache
+  K-section on an isolated wt_dcache_mem — sources in three padded-
+  tree frontier groups (wbuffer slot2 / fixup0 all-idx10 / fixup6
+  all-idx16) with overlapping valid bytes, distinct data AND user
+  bytes; K1 group0 wins all bytes; K2 cross-group byte overlay;
+  K3 T1 capture then fixup pop+reuse before T2 (response must carry
+  the snapshot); K4 no-hit. Driver note: on this driver under remote
+  Verilator v5.008 --timing, mid-task writes on the unpacked-array
+  DUT ports were not observed to re-trigger downstream comb
+  evaluation, so km_* inputs are clock-staged registers; the request task
+  grants for exactly one cycle and the fixup-reuse write lands at
+  the T1 edge.
+
+Evidence (remote ovh_calltorch, Verilator v5.008, closure
+hyp8-r44-closure 393 files; runs under remote-runs/hyp8-r44-*):
+- memory leaf:  HYP8_MEMORY_PASS checked=120          (memory-r2)
+- lsq leaf:     HYP8_LSQ_PASS checked=2018, 0 event misses (lsq-r2)
+- dcache +2:    HYP8_DCACHE_PASS checked=290          (dcache-r13)
+- rollback +2, -DG6LC_MUT_T4_DCFWD_FULL_T1: PASS checked=290 —
+  identical response tuple  (dcache-r15-fullt1)
+- mutant -DG6LC_MUT_WBUF_FWD_LIVE_T2: FAIL caught by the existing
+  DCHX_FIXUP_WINDOW_FWD check — discriminated  (dcache-r16-livet2)
+- dcache +0 (-DG6LC_HYP8_DCHX0): FAIL D_NO_PMU_PULSE at the D
+  dead-entry drop check — BASELINE failure, NOT r44: reproduced
+  bit-for-bit with the pre-r44 wt_dcache_mem swapped into the same
+  closure/bench (hyp8-r44-premem-closure, run premem-dchx0).
+  First +0 leaf run since the bench progressed past B_LB0; the
+  fixup dead-entry path pulses pm_fixup_write/inval under the
+  0-arm where the check expects none. Not retuned per brief —
+  recorded as blocker.
+- Full-top lint (run_hyp8_lint_l3.py on hyp8-r44-int-closure,
+  817 files, tag hyp8-r44-lint): scalar rc=0 (343/87/3
+  EXPAND/TRUNC/CONCAT), smt2 rc=0 (354/97/3), l3 rc=0 (354/90/5);
+  0 %Error all; the only LATCH warnings are 3 in vendor
+  axi_riscv_amos_alu.sv (pre-existing upstream).
+
+Timing (analyzer binary sha256 d837e8798a2b34800c2ec13abda21ee69
+e88d5558e57b9d1085c049057f08a91 — identical before/after):
+- before: boards/hyp8-core/analyze-r44-before.{json,log}
+- after:  boards/hyp8-core/analyze-r44-after.{json,log}
+  (cwd build/sv-timing/hyp8-src, param map
+  analysis/r44-param-map.json, --all-modules --stages,
+  5000MHz/20ps FO4/margin 0.2). Region-graph deltas present in all
+  four touched modules (wt_dcache_mem 60->74, load_unit 140->150,
+  g6lc_lsq_reduce 35->56 regions). Per-caller NLEAF/PAYW
+  specialization is NOT in the scalar map — for paired analysis use
+  pre copies at cva6-artifacts/r44/pre/ vs working tree, or the
+  int closure manifest (hyp8-r44-int-closure/manifest.json) for
+  exact post shas.
+- No claim of boot, Linux retirement, or physical closure from
+  this batch.
+
+### r44 rework (timing countercases, consolidated)
+
+Lead-measured before->after on the first r44 aggregate: load module
+36.15->38.3, L5 regtoout 34.65->38.3; cache RR 33.346->34.046
+(intoreg 37.6 unchanged); LSQ reduce RR 29.9->62.65, intoreg
+22.1->37.2 — countercases, reworked as follows. First-attempt
+variants are retained in cva6-artifacts/r44/candidates/ (passing
+leaf evidence above stands; they are validated candidates awaiting
+finer tool/physical evidence, not enabled in the tree):
+
+- wt_dcache_mem-partial-frontier.sv (sha 59b58e34...): restored to
+  the pre-r44 file in-tree; the bench K-section coverage is kept.
+  The +0 baseline failure record above is unchanged.
+- load_unit-heap-tree.sv (sha 410bdc96...): replaced by parallel
+  prefix priority masks + balanced masked-OR gathers — pub_oh/
+  drn_oh = first-eligible one-hot (`!(|ok[j-1:0])` prefix exclude),
+  pub_select_oh adds the empty-case slot-0 default; leaves gate
+  index/payload by the masks, node combine is a pure OR, no valid
+  tree and no final payload mux. $onehot(pub_select_oh) asserted;
+  the independent-scan miter is unchanged.
+- g6lc_lsq_reduce-compact-payload.sv (sha 491e3d0c...): the NFR
+  group-winner R1 gather is reverted — r1_id/r1_pay are full-NLEAF
+  snapshot arrays again (`r1_id <= ent_id_i`), R2 gathers
+  r1_id[root_s]/r1_pay[root_s] exactly as pre-r44. KEPT: TRACK_WAIT
+  specialization (i_vio_red ties the wait cones to 0), the row-local
+  dwait decoder + its translate_off scan miter, SW safe widths, the
+  FBASE==1 tie arm, and the geometry-independent
+  RSTG=(LsqReduceStages>=2) fix. Remaining cs0/cs1 in gen_pick_hi
+  now use SW.
+
+Dispatch candidate (fifth file, separately measured): the 54.6-FO4
+ISS limiter traced to gen_op_asm fp_a/fp_b — three FP-use predicates
+(is_rs1_fpr/is_rs2_fpr/is_imm_fpr over the staged record) are now
+captured at the same iqi_take edge as iss_sbe_q/iss_fpsel_q
+(iss_fpa_q/iss_fpb_q/iss_fpc_q, hold under flush/cancel/pop like the
+record they shadow). fp_a/fp_b and issue_op_c_valid_o read the
+cached bits; fh_c bypass gating and all valid/ack/operand wiring
+unchanged. translate_off per-lane === invariant against the original
+expressions over the held record (checked/active_fp/active_int
+counters under +equiv_report). Pre-copy frozen at
+r44/pre/core/ooo/g6lc_ooo_dispatch.sv; candidate variant at
+r44/candidates/g6lc_ooo_dispatch-fp-pred-cache.sv.
+
+Measurements (same binary sha d837e879..., same map/inputs):
+- A/B/C refined: boards/hyp8-core/analyze-r44-refined.{json,log}
+- dispatch candidate (on top of A/B/C):
+  boards/hyp8-core/analyze-r44-dispatch.{json,log}
+Verdict is the lead's; no remote reruns authorized yet.
+
+### r44 final verification (post-review, post-verdict)
+
+Lead verdict on the refined aggregate: KEEP priority-mask load select
+(L5 regtoout 34.65->30.25, module 36.15 unchanged), KEEP LSQ
+TRACK_WAIT/row-local decode/small-N fix (module 29.9 unchanged — no
+winner-tree gain claimed), KEEP dispatch predicate cache (ISS module
+max 54.6->48.3, in-stage 54.6->27.0 with displaced into-stage
+24.15->48.3; intoreg 9.2->9.55, RR 22.3->23.35). wt_dcache_mem is the
+exact pre-r44 file (sha 1597b4ee53200de75e56 — identical to
+r44/pre). Counter observability fix: lane0_active_fp now requires
+iss_v_q and is labelled lane0 (p0-only counters).
+
+Final source sha256 (truncated 20):
+  load_unit.sv          c9b243b2e0341e77dbf5
+  wt_dcache_mem.sv      1597b4ee53200de75e56   (= r44/pre)
+  g6lc_lsq.sv           f6f83fb55915ed721792
+  g6lc_lsq_reduce.sv    ab0494c31b97547ef794
+  g6lc_ooo_dispatch.sv  619c3d84651b386dd213
+  tb_g6lc_hyp8_control  bdceca80ba1b35b134e9
+  tb_g6lc_hyp8_memory   8f1d50b92e8d9aa0ab97
+
+Leaf evidence on the final source-pinned closure (hyp8-r44-closure,
+393 files, manifest sha-pinned; remote ovh_calltorch, Verilator
+v5.008; runs remote-runs/hyp8-r44f-*):
+- memory   HYP8_MEMORY_PASS   checked=120
+- lsq      HYP8_LSQ_PASS      checked=2018
+- dcache +2 (restored wt_dcache_mem + retained K frontier/snapshot/
+  reuse coverage): HYP8_DCACHE_PASS checked=290 dchx=2
+- dispatch HYP8_DISPATCH_PASS checked=115, pop_take_same=0
+  (r2 rerun, hyp8-r44f-dispatch-r2 — supersedes the checked=91 r1
+  run, which indexed issue_cnt with out-of-range tids 32..34/60..61;
+  N2/N3 now use tids 8/9/10, unrelated WB 28/29, and wait_issue
+  range-checks tid<NSB). The serialized arbiter never coincided
+  iss_pop & iqi_take; reported as observed-not-covered. pop_take_n
+  now accumulates $countones(iss_pop & iqi_take) per edge.
+- +0 dcache NOT rerun (known baseline failure, recorded above).
+
+Dispatch bench addition (section N, port-driven only): stalls
+issue_ack_i, admits fadd_sbe, waits for the staged iss record, holds
+through unrelated wb_once traffic and a flush_unissued mask cycle
+(ivalid/iopc_v masked that cycle, record+class reoffered), releases
+and admits an alu_sbe while ack is held low to inspect ITS staged
+class bits (all-zero FP bits, int operand validities); N2 repeats
+int->FP; N3 kills a held FP record with flush_i (no reoffer, no
+issue). The DUT's own per-lane === invariant ran the whole time
+(counters: fp_pred checked/lane0_active_* under +equiv_report).
+
+Full-top lint on the final int closure (hyp8-r44-int-closure, 817
+files; run tag hyp8-r44f-lint): scalar rc=0 (343/87/3
+EXPAND/TRUNC/CONCAT), smt2 rc=0 (354/97/3), l3 rc=0 (354/90/5),
+0 %Error; the only LATCH are the 3 pre-existing vendor
+axi_riscv_amos_alu inferences.
+
+git diff --check on handoff files: no real trailing whitespace in
+added lines (the tool flags every '+' line because the touched
+files carry CRLF endings; a per-line scan of the new regions shows
+none). Licensing: existing per-file tier/headers preserved (hyp core/**
+files inherit upstream notices under the default U tier); RTL
+changes were not relicensed; no new files, manifests unchanged.
+No boot/Linux/frequency claim is made by this batch.
+
+### r45 execution record (post-verdict verification)
+
+Timing verdict (lead): KEEP A/B/C. Boards: analyze-r45-before/after
+under boards/hyp8-core/, binary d837e879..., r44-param-map.json.
+
+Leaf evidence (closure hyp8-r45-closure, 394 files sha-pinned; remote
+ovh_calltorch, Verilator v5.008 driver; runs remote-runs/hyp8-r45-*):
+
+- mmu leaf `tb_g6lc_hyp8_mmu` (top appended to tb_g6lc_hyp8_control.sv;
+  runner entry 'mmu' in run_hyp8_memory.py): **HYP8_MMU_PASS
+  checked=716 miter=771** — tag hyp8-r45-mmu-r6 (canonical; r4 same
+  verdict before the probe ifdef).
+
+  Router miter: old g6lc_shared_tlb (UseSharedTlb=0, real module) vs
+  new g6lc_tlb_miss_router, all outputs compared at every edge over
+  DEPTHS {2,3,64} x HYP_EXT {0,1} (group1 runs RVH=1). Directed:
+  I-only / D-only / simultaneous (D-hit suppresses I) / no-owner
+  return (hit=1, updates 0) / live stage-flag switches / distinct
+  returned hart+asid+vmid+content / all flush types / full 2*depth
+  quiet window with exact resume edge (MMU*_W_WINDOW) / reset midwalk;
+  then a 300-cycle deterministic varying-input soak. miter=771 edges.
+
+  Depth-1: the old reference does NOT elaborate at SharedTlbDepth=1 —
+  probe tag hyp8-r45-mmu-refd1 (G6LC_MMU_REF_D1) fails verilation with
+  %Error-UNSUPPORTED 'left < right of bit extract: 11<12' at
+  g6lc_shared_tlb.sv:478/480/495/497 (unsupported reference geometry).
+  The new router IS exercised at depth 1 (i_dut_d1) against the
+  explicit 2-cycle quiet-window expectation (MMU0_W1_WINDOW pass).
+
+  Negative control: bench copy tb_mmu_router_mut with the I-return arm
+  suppressed (if (1'b0)) — standing instance proves discrimination
+  (MMU_MUT_IROUTE_DROPPED/DISC pass in the good run); the
+  G6LC_HYP8_MMU_MUTANT build (tag hyp8-r45-mmu-mut) swaps it into the
+  i_dut slot and fails by name: **FAIL MMU0_IRET_VALID** (named I-route
+  check, not a timeout/compile failure).
+
+  TLB predicate leaf: real g6lc_tlb with the new row-flush predicate
+  generates + in-DUT old-form miter (ref_row_sfence/ref_row_addr_match
+  asserted === every rst_ni cycle; MMU_MITER_EQ_FINAL). External
+  oracle over entries {4,4,16}x stages {1,3,3} (HYP_EXT=0) and
+  {4,16} x {1,3} (HYP_EXT=1/RVH): 4K/superpage/NAPOT-64K fills,
+  distinct PPN/context, global-vs-ASID discrimination, VMID
+  discrimination, flush all/addr-only/asid-only/both, flush-beats-fill
+  priority (TLB0_FLUSH_BEATS_FILL). All port-driven; no forced state.
+  TlbStages=3 sampled at two edges through the TLB (the third PMP step
+  lives in g6lc_mmu, not exercised here).
+
+- memory leaf (retained r44 cases + H section): **HYP8_MEMORY_PASS
+  checked=129** — tag hyp8-r45-memory-r3 (+9 over r44's 120). H section
+  drives the PA-capture qualification by ports: no capture with
+  data_gnt=0 & dtlb_hit=0 (H_IDLE_HIT0_NOCAP, H_GNT_HIT0_NOCAP),
+  capture on hit while held in WAIT_GNT (H_GNT_HIT1_CAP, H_PA_HELD,
+  H_PA_VAL=0x81234000), no capture under held cancel
+  (H_CANCEL_NOCAP), PA-valid clears on release (H_PA_CLEARED). The
+  in-DUT g6lc_pa_now_eq invariant (load_pa_now_v === valid_i &&
+  translation_req_o && dtlb_hit_i) ran the whole time.
+
+- Dispatch/dcache/lsq untouched this round (dispatch leaf not rerun;
+  wt_dcache_mem still exact r44/pre restoration 1597b4ee).
+
+Two pre-existing defects surfaced by the leaf (both flagged to lead):
+
+1. g6lc_tlb.sv plru_node_ents: `lvl = $clog2(n+1)` yields the correct
+   BFS level only when n+1 is a power of two; for every other tree node
+   sidx underflows -> empty SETM/CLRM mask -> right-side tree nodes never
+   update (N=4: entry 3 unreplaceable; LRU order wrong). Discriminating
+   evidence in hyp8-r45-mmu-dbg11 sim.log: t=7455 lu_hit_rsp=0100 (hit
+   on entry 2), plru_tree_q=001011 -> live flat form produced
+   n=001010 but the priority-loop reference produced 001110 (node2 must
+   set). Never flagged earlier because no prior leaf instantiates
+   g6lc_tlb and a hit on a slot >=2 is required to expose it. Dead high
+   bits: plru_tree_q is sized 2*(N-1) but replace_en only decodes real
+   nodes 0..2^PLRU_LVL-2, so the phantom bits are pure dead state.
+   Applied minimal fix: `lvl = $clog2(n+2)-1`, and narrowed the
+   g6lc_t1_plru_eq equivalence compare to the real-node prefix
+   (PLRU_REAL = 2^PLRU_LVL-1) since the reference only models real
+   nodes. Both changes sit in the same source region; the fix is
+   confirmed by the leaf passing end-to-end.
+
+2. g6lc_shared_tlb.sv enabled arm (UseSharedTlb=1): elaboration probe
+   (i_stbl_probe behind G6LC_MMU_STBL_PROBE; tag hyp8-r45-mmu-r5)
+   shows the shared-table path elaborates but trips -Werror-LATCH on
+   `patched_pte` (g6lc_shared_tlb.sv:511): tag_comparison assigns it
+   only inside the way-hit condition — a real latch, dormant because
+   hyp8 always builds UseSharedTlb=0. Not fixed here (module was not in
+   the r45 brief; the arm is unreachable in the shipped config).
+
+Bench-side fixes made while bringing the leaf up (no RTL effect):
+- tb_g6lc_hyp8_memory.sv configuration(): added c.PPNW=44 — the leaf
+  cfg came from g6lc_cfg_empty (PPNW=0), degenerating dtlb_ppn_i to a
+  [-1:0] port; only visible once H_PA_VAL read PA content.
+- Driver-struct discipline: dynamic-indexed writes into packed
+  multi-dim vectors (and field-select port expressions on unpacked
+  struct arrays) do not propagate through DUT ports under this
+  Verilator (--timing); TLB stimulus uses one shared packed-struct
+  driver + runtime selector mux in the port expressions instead.
+- st1 lookups now hold lu_access_i across one edge so the TLB PLRU
+  pointer actually advances on comb hits.
+
+Lint (int closure hyp8-r45-int-closure, 818 files; tag hyp8-r45-lint):
+scalar rc=0 (343/87/3 EXPAND/TRUNC/CONCAT), smt2 rc=0 (354/97/3),
+l3 rc=0 (354/90/5) — all 0 %Error; only the 3 pre-existing vendor
+axi_riscv_amos_alu LATCH warnings. verilator_bin sha
+3e622e33b741d1b2ba69. Manifest sha for g6lc_tlb matches final source
+(1173f9bc5c7f6cfb07e0).
+
+Source shas (sha256, 20-char prefix, final):
+  g6lc_tlb_miss_router.sv (new)  0536c44cbfd31fc54e5d
+  g6lc_mmu.sv                    77b7f1b7a9bb8eef1c71
+  g6lc_tlb.sv                    1173f9bc5c7f6cfb07e0
+  load_unit.sv                   1ad322f2f59d6acc0dd0
+  tb_g6lc_hyp8_control.sv        b436cd6a7fc446084088
+  tb_g6lc_hyp8_memory.sv         f28914da632c1fc55ea1
+  run_hyp8_memory.py             6ce4ddbab9b3331fc6df
+  Flist.g6lc_hyp8                0ae81ebfd99a3d2d23cb
+  Flist.hyp8_apu                 4400397f23397199d916
+  Flist.hyp8_sim                 991aa19b6262d9a12794
+  .licensing-tiers               1564bd41e30540a8a336
+  REUSE.toml                     ecfeb1dbcced2dec3895
+  inputs/hyp8-core.f             0fbfc57aa8605cbe63e1
+
+Licensing: .licensing-tiers carries the exact-path R rule
+`R build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_mmu/
+g6lc_tlb_miss_router.sv` (after the broad hyp U rule at :277);
+REUSE.toml annotates the same full path (Case-A aggregate). No stale
+root-path `core/g6lc_mmu/...` rule remains. Existing files not
+relicensed. No commits, no firmware, no boot/frequency/physical claim.
+
+### r46 execution record
+
+Two threads: scalar OpenSBI discrimination (r43 rank-1 stages vs store
+path for the 483k spec_entry_live stop) and one structural item
+(dispatch operand select).
+
+THREAD 1 — OpenSBI scalar, two closures:
+
+- hyp8-r46a-closure (818 files): full current working tree,
+  g6lc_hyp_pkg sha 9f49a8b5f375d1703095bff.
+- hyp8-r46b-closure: identical tree EXCEPT the closure copy of
+  g6lc_hyp_pkg.sv Hyp8 literal — RenameResolveStages 2->1,
+  LsqReduceStages 2->1, IqArbStages 2->1, PtwDecodeStage 1->0
+  (closure-only; working tree untouched). Closure pkg sha
+  12576a2b82ec7e17fc49 (manifest key carries the incdir double-slash
+  `include//g6lc_hyp_pkg.sv`; first r46b run failed input-hash check
+  on a stale manifest entry and was rerun after fixing it).
+
+Integration (run_hyp8_integration.py, scalar target g6lc64_hyp8):
+- hyp8-integration-r46a: build_complete, lint scalar+smt2 rc=0/0
+  %Error, model sha 9db431b94c3fe119b94864.
+- hyp8-integration-r46b: build_complete (HYP8_ALLOW_OVERLAP=1 recorded
+  — witness r24a already running), lint rc=0/0 %Error, model sha
+  a59b8eee5203eda1eb0389da3c4f609e.  No first-elaboration fixes needed.
+
+Smokes (real tohost, +tohost_addr=0x80001000, 400k budget):
+- r46a: h34=685, h33=1010, bc=492 (vs r41's 682/969/473; structural
+  stages active — drift expected, reported).
+- r46b: h34=682, h33=969, bc=473 — exactly the r41 numbers under the
+  rank-1 config.
+
+Witnesses (frozen fw_payload.elf a9218107..., +tohost_addr=0x80041730,
++stall_census +hang_dump=2000 +equiv_report +rvfi_cycle_stamp
++stq_trace +stq_lo=470000 +stq_hi=490000 — sb_trace does not exist as
+a plusarg; stq_trace window used instead, 20M budget, detached):
+- hyp8-osbi-scalar-r24a (r46a model): launched ~20:12:28Z; **reproduced
+  the stop — [444284] store_buffer.sv:1292 ooo_spec_entry_live "entry 0
+  holds tid 25 whose scoreboard slot is not live", $stop abort**.
+  stq_count=0 (abort at 444k preceded the 470k window). results.json
+  pulled to remote-runs/hyp8-r46a-witness-launch/.
+- hyp8-osbi-scalar-r24b (r46b model): launched ~20:18:42Z; probed at
+  ~20:28Z — log past cycle 490,000 (stq window fully captured, 8890 stq
+  lines), ZERO errors, still running. It has crossed both 444,284 (A's
+  abort) and 483,343 (the L3 stop).
+- Discrimination per the stated map: A reproduced spec_entry_live, B
+  passed the reference point => the r43 rank-1 stages own the stop;
+  the store path is exonerated at this resolution. B outcome beyond
+  ~490k pending (20M budget; not awaited).
+
+THREAD 2 — g6lc_ooo_dispatch operand select (gen_op_asm :1277/:1280):
+replaced the nested 2:1 chains with flat AND-OR. Two variants measured
+with the exact r44/r45 argv (same binary/map):
+- Variant G (gated selects, |fh_a/|hit_a in the AND): dispatch module
+  max 48.3 -> 25.3 (regtoout @:371 gen_wb_tag); intoout 23.5,
+  intoreg 9.55, regtoreg 23.35. Operand-mux cone <=4.0.
+- Variant S (masked-bypass, kept): identical board — module max 25.3.
+  ofa/oa are zero when their hit vectors are zero, so the bypass terms
+  gate on fp_ alone; kept because the AND is one term shorter.
+Recorded countercase: G identical to S on this board (no T9-style
+billing regression either way). translate_off reference: pre-r46
+nested expression compared === every cycle + $onehot on the select
+quadrant (per-lane, under rst_ni). Working tree dispatch sha
+c3d91a2a3a151e21b565. Awaiting lead verdict; dispatch leaf (A/B/C/N)
+runs on a fresh closure only after acceptance.
+
+### r46 bisection pass (post-verdict)
+
+Dispatch-S verdict: KEPT (48.3->25.3 module max; G/S boards identical --
+recorded countercase showing flat AND-OR selects are not uniformly
+penalized, contra the T9 lesson). Dispatch leaf on fresh closure
+hyp8-r46-closure (394 files): **HYP8_DISPATCH_PASS checked=115
+pop_take_same=0 opasm_int=0 opasm_fp=0** (tag hyp8-r46-dispatch).
+Non-vacuity result: the === miter's bypass terms were never exercised
+-- zero edges with hit_a/fh_a set (in every directed case the WB lands
+while the consumer is still upstream of iss staging). File-path arm was
+checked every cycle; bypass arms are untested by this leaf. Reported
+to lead; a directed staged-record WB-hit case would need a bench delta.
+
+Field bisection of the spec_entry_live stop (closures built from the
+r46a tree -- pre-dispatch-S; Hyp8 pkg patched in closure copy only;
+both manifest keys `include/g6lc_hyp_pkg.sv` + `include//...` updated;
+first c1 attempt failed hash check on the missed second key, rerun):
+- c1 RenameResolveStages=2 only: hyp8-integration-r46c1 build_complete
+  model 1f0699ab4005b7362635; smokes 683/981/476; witness
+  hyp8-osbi-scalar-r25c1 launched ~20:41Z (stq window 430-450k).
+- c2 IqArbStages=2 only: hyp8-integration-r46c2 model
+  efc48fbe97cb1613f609; smokes 684/1003/490; r25c2 launched ~20:50Z.
+- c3 LsqReduceStages=2 only: hyp8-integration-r46c3 model
+  b504a7e242892ab92544; smokes 682/969/473 (identical to rank-1 B);
+  r25c3 launched ~20:55Z.
+- c4 PtwDecodeStage=1 only: hyp8-integration-r46c4 model
+  bc15bb90c2b14f856b6d; smokes 682/969/473; r25c4 launched ~20:56Z.
+All witnesses: fw a9218107..., +tohost_addr=0x80041730 +stall_census
++hang_dump=2000 +equiv_report +rvfi_cycle_stamp +stq_trace
++stq_lo=430000 +stq_hi=450000, 20M budget, detached.
+HYP8_ALLOW_OVERLAP=1 recorded for the c-builds (r24b still running).
+
+Early fleet probe (~20:57Z): r25c1 stq max_cycle=449,996 zero errors --
+RenameResolveStages=2 ALONE does not reproduce at/near 444k.
+r25c2 stq max_cycle=450,000 zero errors -- IqArbStages=2 alone does not
+reproduce either. r25c3/r25c4 still pre-window; r24b past 490k clean.
+Pending: c3/c4 window crossing and all four to 20M or abort.
+
+Fleet probe ~21:07Z: ALL FOUR c-witnesses crossed the 430-450k
+window with zero errors (r25c1 449,996; r25c2/r25c3/r25c4 450,000) and
+r24b continues past 490k. No single r43 field alone reproduces
+spec_entry_live at/near A's 444,284 stop -- if one fires later the
+hang_dump/stq evidence names it; if none fire, the stop is a
+multi-field interaction (A ran all four at r43 values together).
+Witnesses left running to their 20M budgets.
+
+## r46 mechanism trace + dispatch op-select non-vacuity (~21:35Z)
+
+### hyp8-osbi-scalar-r24a-win (r46a model 9db431b9, fw a9218107)
+Reproduced the abort: [444284] store_buffer.sv:1292 ooo_spec_entry_live
+"entry 0 holds tid 25 whose scoreboard slot is not live". Traces:
++stq_trace 430-450k, +commit_trace_from/to 430-450k, +disp_trace,
++trace_from/to 430-450k, +hang_dump=2000. Extract at
+remote-runs/hyp8-r46-t25/ (disp/stq/cmt filtered dumps).
+
+tid 25 lifetime (store, fu=2, prd=0):
+- 444255 disp alloc bank0 ent0 (rs1_rdy=0/rs2_rdy=1)
+- 444260 rdy=111
+- 444262 disp kill why=vanish canc=1 flush=0 (group kill: bank1 ent0
+  tid26 killed same cycle) -- cancelled_mask[25] rises
+- 444264 disp take port=0 -- TAKEN 2 CYCLES AFTER THE KILL: the
+  IqArbStages=2 registered winner was already frozen at ARB when the
+  cancel landed; the take-ack consumed a dead entry
+- 444265 pop + iro v=1 ack=1 -- dead record issued
+- 444269 stq vi=1 vwf=1 paddr=f20 tid=25 (store_unit s1)
+- 444270 stq s1v=1 s2v=1 s2pa=f20 s2tid=25 (s2)
+- 444270..443 sv stays 0, s2w/dgnt=0: spec push waits on the
+  drain/wbuffer path ~14 cycles
+- 444284 spec entry written with sb_live[25]=0 -> assert fires same
+  edge (sv never printed 1; $stop beat the signature-change line)
+
+Verdict on the mask-lifetime hypothesis: CONFIRMED with a refinement.
+Commit pointer had already moved past 25 (cmt cptr 26->27 ~444263;
+f0/t26 drop fires 444263), so cancelled_mask[25] and sb_live[25] both
+fell ~444263-264 -- LONG before the spec entry landed at 444284. The
+insert gate !cancelled_mask_i[tid] (store_unit.sv:584) is transient and
+had expired; sb_live is not checked at insert. The enabling defect is
+upstream: the take-after-kill -- a registered ARB winner is not
+re-qualified against cancel, so a vanished IQ entry was issued.
+Secondary: the s2 entry survived ~14 cycles of drain wait instead of
+being squashed by its cancel, and the spec-push admission test is the
+expired mask rather than sb_live.
+
+### Bisection update (r25c2 verdict in)
+r25c2 (IqArbStages=2 only, model efc48fbe) ABORTED at [3763469]
+g6lc_lsq_cam_bank.sv:209 gen_upd_pipe[1] g6lc_t1_cam_oa -- "killed
+match": the LSQ CAM produced a match on a cancelled tid. Same class as
+the STQ assert: a dead tid propagated into a downstream consumer.
+IqArbStages=2 alone is sufficient for take-after-kill propagation; the
+r46a failure site needs the other rank-2 stages' added store-path
+latency for the dead tid to reach the STQ spec queue past the mask
+window instead of tripping an earlier LSQ check (or being absorbed).
+Still running clean: r24b (rank-1 baseline, past 490k, 34MB log),
+r25c1 (RR=2), r25c3 (LsqReduce=2), r25c4 (PtwDecode=1) -- all past
+their 430-450k windows, no errors at ~21:34Z probe. r25c2 dead;
+r24a-win dead (expected abort). No boot claim: nothing reached tohost.
+
+### Dispatch leaf, op-select bypass arms (tag hyp8-r46-dispatch-r3)
+Bench sec_o added (tb_g6lc_hyp8_control.sv sha 6b7622ff86b71b95eda6;
+dispatch RTL unchanged at c3d91a2a3a151e21b565). Port-driven: hold
+issue_ack_i low, admit a consumer dependent on an issued producer, and
+HOLD the WB bus presented across the wake->take->iss_v window (the r5
+select reads registered wakeup, so a 1-cycle wb_once can never overlap
+the staged window -- a re-presented WB is legal stimulus).
+HYP8_DISPATCH_PASS checked=125 pop_take_same=0 opasm_int=1 opasm_fp=1
+-- both bypass arms exercised exactly one staged-overlap edge each;
+opa/opb ports and opa_last/opb_last carry the WB data. First attempt
+(hyp8-r46-dispatch-r2, wb_once version) passed vacuously again
+(opasm=0/0) -- recorded as evidence the arms are unreachable via
+single-cycle WB presentation under the r5 registered-wake select.
+
+## r47 -- IQ-arb sticky kill (take-after-kill repair)
+
+Root cause (accepted): g6lc_iq_arb sampled cancelled_mask_i only at
+candidate capture (cand_cancl_q, C) and re-polled it live at take. The
+mask names a tid only until commit-drop (~2 cycles), so a pulse in the
+un-sampled middle of the ARB_STG=2 flight (C=444261, kill C+1,
+take C+3) was missed: the record was taken and issued dead (r46 tid-25
+trace; r25c2's 3763469 lsq_cam killed-match is the same defect one
+scoreboard seam earlier).
+
+### TIMING FIRST (over-budget, reported before other results)
+boards/hyp8-core/analyze-r47-iqarb.json (exact r44/r45 argv, same
+analyzer binary/map, delay-v44 + correction-v5):
+- r45 baseline (analyze-r45-after): ARB in-stage 33.50, GRN->ARB into
+  21.45, module regtoreg 28.41.
+- r47 final: ARB in-stage **33.85** (+0.35 over the 33.5 limit),
+  GRN->ARB into 24.4, regtoreg ~30.01 (win_s_regs accumulate cone,
+  :625/:634).
+- The 33.85 is an independent-LHS bundle / dependency-floor makespan
+  artifact at the ARB out0 presentation bundle (:794), NOT a data-cone
+  increase: identical 33.85 across four structural variants (baseline
+  gate-form; mask_any refactor; separate win_kill_regs always_ff; and a
+  control variant whose take-gate comb was literally pre-r47 text). Raw
+  path even FELL 388.6->368.2 with the same 27.2 deflated chain. No
+  timing-clean formulation was found that changes the billed number;
+  the +0.35 is flagged here for the lead's verdict.
+- VERDICT (lead): ACCEPT as measured -- bundle-makespan billing
+  shift (pre-r47-text control measured identically, raw chain fell),
+  and the fix repairs a baseline defect (r24b's 17.2M killed-match
+  stop is the decisive evidence).
+
+### Implementation (g6lc_iq_arb.sv only, sha efd11367fb892a885ff5)
+- mask_q <= cancelled_mask_i every cycle; cleared on flush/reset
+  (whole-mask register, covers the tournament-cycle sample).
+- kill_h[b][ci] <= cancelled_mask_i[cand_tid_q[b][ci]] in
+  arb_stg_regs (ARB_STG==2 only; C+1 CTL-snapshot read, register-
+  indexed). ARB_STG==1 ties kill_h=0 -- mask_q already covers its only
+  unsampled middle cycle.
+- win_kill_next[p] = kill_h[win[p].bank][win[p].ci] |
+  mask_any[win[p].tid] | (win_s_kill[p] && win_v[p] &&
+  win[p].tid==win_s[p].tid); mask_any = cancelled_mask_i|mask_q.
+  T35-style: kills ACCUMULATE on the held/re-selected record because
+  the mask is transient.
+- DEVIATION from the literal take-gate instruction, equivalent-or-
+  stronger form kept: the accumulated verdict squashes the winner at
+  staging -- win_s_v[p] <= win_v[p] && !win_kill_next[p] -- so a killed
+  record is never a staged winner at all (covers take AND the
+  stall/held bookkeeping), while take_grant keeps exactly its pre-r47
+  cone (!pres_q.v && take_ok && !cancelled_mask_i[win_s.tid]).
+  win_s_kill lives in a separate always_ff (win_kill_regs) to keep the
+  analyzer's per-block bundle billing clean; self-clears when pres_q
+  owns the port. A k=3 pulse during the take window blocks take_grant
+  that cycle (live read) and the accumulated verdict suppresses the
+  record at the next staging edge, so it can never retry.
+- take_grant remains the single grant point: take_v/ack/pay outputs and
+  ALL reservation side effects (w_in_tk, w_flu_tk, w_fpu_tk, div_tk,
+  ein/eflu/efpu/ediv window enables) derive from it, so a killed record
+  never takes and never reserves a WB slot.
+- Mutant G6LC_MUT_IQ_ARB_NO_STICKY_KILL restores win_s_v<=win_v (live
+  read only, the defect form).
+- Header + block comments updated to the C/C+1/C+2/C+3 sampled-
+  coverage timeline (:44-53, :230-249, :804-832).
+- g6lc_iq_bank.sv (sha 99ca345ae4dba4b2c233): translate_off
+  "take on dead entry" $error when a take addresses an entry with
+  valid=0 -- detection only, no masking.
+- No store-path RTL touched.
+
+### Leaf verification (closure hyp8-r47-closure, 394 files;
+###   tb_g6lc_hyp8_control.sv e3e19d54e901971e20bf, run_hyp8_memory.py
+###   6ce4ddbab9b3331fc6df)
+- hyp8-r47-issue-r4 (final structure): HYP8_ISSUE_PASS checked=99 --
+  k in {0,1,2,3} single-cycle cancel pulses on ARB_STG=2 (i_arb2) and
+  ARB_STG=1 baseline (i_arb, kept for the authored fixed-edge checks),
+  no-cancel control takes at the expected edge, no take_v/ack_v/issue
+  and no bank pop for any cancelled tid, held-record no-duplicate
+  checks. Earlier run history: r1 failed ARB_TAKE_P0_TID1 (bench
+  assumed ARB1 edge; added i_arb2 for Hyp8 ARB2); r2 failed
+  ARB_TAKE_TID5 (stale fixed-edge expectation vs the real WbReserve
+  deferral; converted to bounded poll); r3 passed gate-form
+  checked=99; r4 re-passes the final suppress-form checked=99.
+- hyp8-r47-issue-mut2 (G6LC_MUT_IQ_ARB_NO_STICKY_KILL): fails by name
+  at [1529] F_ARB2_K1_TAKE -- sticky coverage is what kills the take.
+
+### Scalar closure + lint + smokes
+- hyp8-r47-int-closure (818 files, full tree incl. dispatch S c3d91a2a
+  + all r43 stages at Hyp8 values + r47 arb/bank).
+- hyp8-integration-r47: build_complete, model sha 7b1c5d1d...; lint
+  scalar rc=0 / smt2 rc=0, 0 %Error, LATCH=3 (the three pre-existing
+  vendor axi_riscv_amos_alu latches).
+- hyp8-r47-lint-l3 (run_hyp8_lint_l3.py, all three profiles):
+  scalar rc=0 (WEXP343/WTRUNC87/WCONCAT3), smt2 rc=0 (354/97/3),
+  l3 rc=0 (354/90/5); %Error=0, LATCH=3 everywhere -- identical census
+  to r45.
+- Smokes (tag hyp8-r47, model 7b1c5d1d): h34_shift_dep 685,
+  h33_st_fwd 1010, hyp8_branch_cancel 492 -- IDENTICAL to r46a
+  685/1010/492; all tohost=0 SUCCESS. No smoke hits a kill case.
+
+### Witnesses
+- hyp8-osbi-scalar-r26 launched ~22:20Z detached on model 7b1c5d1d,
+  fw a9218107..., +tohost_addr=0x80041730 +stall_census
+  +hang_dump=2000 +equiv_report +rvfi_cycle_stamp +stq_trace
+  430000-450000; 20M budget. Confirmed running (log growing).
+  Prediction: crosses 444284 and 3763469 clean.
+- Collected statuses at ~22:21Z probe:
+  - r24b (rank-1 baseline): DEAD at [17247934]
+    g6lc_lsq_cam_bank.sv:209 "equiv cambe (killed match)" -- the SAME
+    defect class fires in the all-1-stages baseline too, ~17.2M cycles
+    in (much rarer window: ARB_STG=1 leaves only one unsampled cycle).
+  - r25c2 (IqArb=2): DEAD [3763469] same assert (already known).
+  - r25c1 (RR=2): running clean, ~44.5MB log.
+  - r25c3 (LsqReduce=2): running clean, ~37.6MB.
+  - r25c4 (PtwDecode=1): running clean, ~37.6MB.
+- No tohost anywhere; no boot/Linux/frequency/physical claim.
+
+### Source shas (sha256 20-char)
+g6lc_iq_arb efd11367fb892a885ff5 | g6lc_iq_bank 99ca345ae4dba4b2c233 |
+tb_g6lc_hyp8_control e3e19d54e901971e20bf | run_hyp8_memory.py
+6ce4ddbab9b3331fc6df | leaf closure hyp8-r47-closure (manifest pins
+both) | int closure hyp8-r47-int-closure | model 7b1c5d1d | board
+analyze-r47-iqarb.json.
+
+
+## r48 -- PTW legacy-arm structural split + load_unit PA-capture split (2026-10-2x)
+
+Lead's r48 brief: make the PDEC arm selection structural so the inactive
+profile does not bill a dead procedural arm; split the load_unit PA
+capture register's valid bit off its deep data-enable cone; exclude
+g6lc_shared_tlb from the active board; re-emit the top-16 active
+ranking.  All measured with the exact r44/r45 analyze argv
+(analyze-r48-ptw-load.json, board sha 2ba401ededf7831a).
+
+### r48A g6lc_ptw: legacy decode arm -> g6lc_ptw_leg_decode module
+
+- The 37.55 FO4 module limiter at :763 lived inside the `if (PDEC)
+  ... else` LEGACY verdict arm -- dead under Hyp8 PtwDecodeStage=1 but
+  billed into g6lc_ptw by the syntactic parser.
+- Fix: `if (!PDEC) begin : gen_legacy_dec` instantiates new module
+  g6lc_ptw_leg_decode carrying the legacy verdict body verbatim
+  (defaults replayed at head, identical semantics); g6lc_ptw merges
+  leg_* into the FSM next-state only under `data_rvalid_q && !PDEC`.
+  Single FSM kept; no forked state copy.  PDEC=1 ties leg_* to the
+  held-register defaults (dead constant assigns).
+- Result: g6lc_ptw active max 37.55 -> **35.7 @:535** (regtoreg, IDLE
+  top-pointer formation -- a real active path previously shadowed by
+  the dead arm).  g6lc_ptw_leg_decode standalone = 53.0 @:174 (dead
+  for the active profile; excluded, see r48C).  The syntactic instance
+  graph retains i_leg_dec plus one 88.7 FO4 port_bridged stitch on
+  g6lc_ptw.out0 -- same dead-arm artifact class as i_shared_tlb had;
+  noted, not an active path.
+- Lint/elaboration under both PDEC values:
+  - hyp8-r48-lint (PDEC=1 profile): scalar/smt2/l3 all rc=0, %Error=0,
+    LATCH=3 (pre-existing vendor axi_riscv_amos_alu); gen_pdec_eq
+    miter still elaborates.
+  - hyp8-r48b-lint (closure-only Hyp8 patch PtwDecodeStage=0, both
+    manifest keys updated): scalar/smt2/l3 all rc=0 -- i_leg_dec
+    instantiated and all ports bound; identical warning census.
+  - hyp8-integration-r48b: build_complete, model dc7d7b07; detached
+    witness hyp8-osbi-scalar-r48b launched 23:07Z with the standard
+    flags + stq window 430k-450k -- real walk traffic through the
+    extracted module (the mmu leaf never instantiates g6lc_ptw).
+- Source freeze: analysis/r48/pre/{g6lc_ptw.pre.sv,load_unit.pre.sv}
+  (r47-int-closure pinned copies) + manifest.json.
+
+### r48B load_unit: PA-capture valid/data split (KEPT)
+
+- Pre: module max 35.05 @:587 (regtoreg and regtoout co-limited on the
+  load_pa_now_v-gated 56-bit load_pa_q enable: cancel_hit 64:1 mask
+  read + pa_capture_state decode + ldbuf_full fanned onto every bit).
+- Change: load_pa_v_q keeps the full predicate; load_pa_q's data flop
+  captures on `valid_i && dtlb_hit_i` alone.
+- Legality (verified before edit): (1) load_pa_q consumers are only
+  the four pa_hold_lo mux arms gated by load_pa_v_q, plus a
+  translate_off $display (:2031, cosmetic -- may print transient data
+  while v=0).  (2) While the load is head, lsu_ctrl.fu==LOAD keeps the
+  shared MMU port pointed at this vaddr, so dtlb_ppn_i is this load's
+  own lookup and cannot change under a continuously asserted hit
+  (removal drops hit first; a refill needs a miss-side walk that
+  re-enters pa_capture_state and recaptures under load_pa_now_v as
+  before).  Head-admission transients sit under v_q=0/pa_drop.  (3)
+  pa_drop (flush|!valid|pop) clears v on the pop edge -- unchanged.
+- Result: module max 35.05 -> **30.25 @:1286** (regtoout); the capture
+  cone itself is now 22.7.  No other load_unit kind rose above the old
+  max.  KEPT per the brief's rule.
+- Evidence: translate_off shadow register replays the old
+  load_pa_now_v-gated capture; g6lc_pa_shadow_eq asserts
+  load_pa_v_q |-> load_pa_q === shadow every cycle.  hyp8-r48-memory:
+  **HYP8_MEMORY_PASS checked=129** (H section incl. shadow, no fire).
+  hyp8-r48-lint2 (combined r48 tree): scalar/smt2/l3 rc=0, %Error=0,
+  census identical to pre-change.
+
+### r48C active-board exclusions + re-emit
+
+- clock_exclude.txt += g6lc_shared_tlb (not instantiated: gen_shared_table
+  needs G6LCCfg.UseSharedTlb=1; hyp8 runs UseSharedTlb=0 via
+  g6lc_tlb_miss_router) and g6lc_ptw_leg_decode (not instantiated:
+  needs HypCfg.PtwDecodeStage=0; hyp8 runs 1).  Justifications
+  recorded in analysis/timing-summary.json exclusions_added_r48.
+- analysis/timing-summary.json re-emitted (schema
+  hyp8-timing-active-board.v1; pre file frozen to
+  r48/pre/timing-summary.pre.json).  Top-16 active ranking (all 16
+  live modules):
+
+  1. g6lc_ptw 35.7 (rr @:535; stitch 88.7 = dead i_leg_dec bridge)
+  2. g6lc_iq_arb 33.9 (in-stage ARB; r47 billing floor, lead-accepted)
+  3. wt_dcache_mem 33.3  4. g6lc_iq_bank 32.3  5. g6lc_rename_recover 31.8
+  6. g6lc_loop_buffer 31.8  7. g6lc_tlb 31.0  8. load_unit 30.2 (L5)
+  9. g6lc_fe_override 30.2  10. g6lc_lsq_reduce 29.9
+  11. g6lc_slice_dispatch 29.9  12. wt_dcache_ctrl 28.6
+  13. issue_read_operands 28.0  14. alu 27.9  15. sb_commit_bundle 27.4
+  16. store_unit 26.7
+
+  Structural FO4 (lower_to_ir), not STA sign-off.
+
+### Witness census update (23:07Z probe; supersedes r47 status lines)
+
+- hyp8-osbi-scalar-r26 (r47 fixed tree): RUNNING, ~7.62M cycles (rvfi
+  stamp @7620217), 0 errors -- crossed r46a's 444,284 and c2's
+  3,763,469.  Next barrier: the 17.25M killed-match cluster.
+- hyp8-osbi-scalar-r25c1 (RenameResolve=2): COMPLETED the 20M-cycle
+  budget, "SUCCESS (tohost = 0) [cycle budget reached: no tohost
+  verdict]" -- clean run, NOT a boot claim.
+- r24b / r25c3 / r25c4: all DEAD on g6lc_lsq_cam_bank.sv:209 killed-match
+  at 17,247,934 / 17,247,990 / 17,247,934 -- the baseline + two
+  single-field runs hit the same class r47 repairs, ~17.2M deep.
+- r25c2: DEAD [3,763,469] (known).
+- hyp8-osbi-scalar-r48b (PtwDecodeStage=0, leg_decode active):
+  launched 23:07Z, running.
+
+### Source shas (sha256)
+
+g6lc_ptw ec695990b47f97442416 | g6lc_ptw_leg_decode
+ef61932751867e814f7c | load_unit bf6b6a6401d563ccd9 | pre-ptw 785b0c2d
+| pre-load_unit 1ad322f2 | Flist.hyp8_sim 18a8486f | Flist.g6lc_hyp8
+286d534b | .licensing-tiers 0b8c8516 (leg_decode added as tier R) |
+REUSE.toml 05e11ca2 | closures: hyp8-r47-closure (395f, leaf),
+hyp8-r48-int-closure (819f), hyp8-r48b-closure (pkg 5991deb6) |
+r48b model dc7d7b07 | board analyze-r48-ptw-load.json 2ba401ed.
+
+## r49 — loop_buffer expected-PC register (KEPT) + rename_recover census (REVERTED)
+
+### g6lc_loop_buffer :236 — KEPT (32.78 -> 26.90)
+
+- Cone census: base_q[5:0] + {replay_q,3'b0} low add -> pc_low_lit[6]
+  carry -> unique-case select of base_hi_p1_q/base_q high halves ->
+  32b+26b compares -> 8-input AND -> out0/hit_q. Registered operands
+  (base_q, replay_q); the reconstruction is a fetch-path combinational
+  chain (pre-registered-compare form).
+- Transform (proven list: "predecode a compare whose operands are both
+  registered one cycle earlier into an existing register"): new
+  pc_cur_q maintains base_q + replay_q<<ALIGN, written on the same edge
+  as replay_q/base_q via pc_cur_d = base_d + (replay_d<<ALIGN) (own
+  always_comb reading the final _d values; covers every arm/fill/
+  consume/flush priority case identically). seq_hit is now one VLEN EQ.
+  No new latency: the adder sits on the register input, not the lookup.
+- Miter (translate_off): pc_cur_q === expect_pc and seq_hit ===
+  ref_seq_hit (old split-compare form via addr_eq) asserted every cycle.
+- Boards (exact r44/r45 argv): analyze-r49-pre.json /
+  analyze-r49-post{,2,3}.json. Final (post3): module max 32.78 ->
+  26.90 regtoreg @:352 (the pc_cur_d region's own dep-floor billing);
+  regtoout 32.78 -> 26.50 @:229; regtoreg cone 31.78 -> 25.50 @:229;
+  intoout unchanged 23.20. No kind exceeds 26.90; intoout max
+  unchanged. KEPT.
+- Scalar lint hyp8-r49-lint2 (closure hyp8-r49-lint-closure, 819 files):
+  rc=0, 0 %Error, LATCH=3 (pre-existing vendor), zero loop_buffer
+  warnings.
+- Shas: pre d1f2b972ac9b -> post 44772d18eca9.
+
+### g6lc_rename_recover :589 — REVERTED (census + two countercases)
+
+- Cone census: :589 sits in p_next_state, the unbanked always_comb
+  (lhs=25, writes=70, deps=64). The board value is an
+  independent-LHS-bundle makespan floor (31.8), not a gate-depth path:
+  raw chain deflates 248.7 -> 11.0 but the dep floor dominates; billed
+  chain rel2 -> ckpt_cnt_d[rec_hart] -> retire clamp -> ckpt_head_d ->
+  pos_d (@:640). P10 handshake lock: restore is indexed by a same-edge
+  pulse+index; InsertReg refused; staging prohibited.
+- Attempt 1 (in-block mask merge, balanced-reduction analog): sections
+  accumulated set/clear masks + one merged tail per bitmap. Result
+  36.25 @:600 — WORSE; the mask writes added to the same region's dep
+  count. Reverted.
+- Attempt 2 (masks hoisted to module scope, comb->comb read of amap_d/
+  owner_d per gen_posd precedent): 36.25 @:494 — identical floor billed
+  on the mask/merge region; the floor follows the dependency structure,
+  not the syntactic block, and cycles went 4->5.
+- Verdict: no proven-list transform improves; the same-edge indexed
+  restore forbids staging and the floor is inherent to the rec ->
+  cnt -> retire -> head -> pos dependency chain. File restored
+  byte-exact to pre (c273cd24041f4f0bbf5e9fd69..., verified sha), post3
+  re-measure reproduces pre exactly (31.8 @:589). Census + countercases
+  are the r49 artifact for this module.
+
+### Freeze + witness status (probe ~23:25Z)
+
+- analysis/r49/pre/{g6lc_loop_buffer,g6lc_rename_recover}.pre.sv +
+  analysis/r49/post/ + analysis/r49/manifest.json.
+- hyp8-osbi-scalar-r26 (r47 tree): RUNNING, ~12.70M cycles
+  (stall-census cyc=12000000, ret=3365591, ipc=0.280; trace stamp
+  12702252), zero verdict/error lines. Past 444,284 and 3,763,469;
+  next barrier 17.25M (the r24b/c3/c4 killed-match cluster).
+- hyp8-osbi-scalar-r48b (PDEC=0, extracted legacy arm active):
+  RUNNING, ~3.65M cycles (trace @3651620), zero verdict lines.
+- No tohost verdict anywhere -> no boot claim. The active PDEC=1 r48
+  tree still has no detached witness; the next full-tree closure must
+  carry r48+r49.
+
+## r50 -- full-tree closure + fresh active board (2026-10-25, ~23:55Z)
+
+- Closure hyp8-r50-closure (819 files: 491 flist + 311 include + 18
+  extra) pins the full current tree: r47 iq_arb sticky kill, r48A PTW
+  PDEC split (g6lc_ptw_leg_decode), r48B load_unit PA-capture split,
+  r49 loop_buffer pc_cur_q, dispatch S. No new RTL this round.
+- Lint hyp8-r50-lint: scalar rc=0 / smt2 rc=0 / l3 rc=0, 0 %Error in
+  all three; LATCH=3 each (pre-existing vendor axi_riscv_amos_alu).
+- Integration hyp8-integration-r50: build_complete, model sha
+  a3b320727d9286b4c48166cffcc201ba0c481f682de40b037decd9955e4902b9.
+- Smokes (real tohost=0 SUCCESS): h34 685 / h33 1010 / branch-cancel
+  492 -- IDENTICAL to the r46a/r47 baseline; the loop_buffer pc_cur_q
+  restructure did not move h34/h33 (no drift).
+- Witness hyp8-osbi-scalar-r27 launched detached ~23:46Z on the r50
+  model, fw_payload.elf sha a9218107 (verified at launch), flags
+  +time_out=20000000 +max-cycles=20000000 +debug_disable +quiet_axi
+  +tohost_addr=0x80041730 +stall_census +hang_dump=2000 +equiv_report
+  +rvfi_cycle_stamp +stq_trace +stq_lo=17240000 +stq_hi=17260000
+  (window moved to bracket the 17.25M killed-match barrier).
+- Active board re-emitted from a FRESH full run:
+  boards/hyp8-core/analyze-r50.json sha 6bd7c6f0f411b66b33c0..., exact
+  r44/r45 argv with param map analysis/r44-param-map.json (sha
+  75d16bc9, 62 keys incl. the rank-1 stage fields). Top-16 in
+  analysis/timing-summary.json: ptw 35.7, iq_arb 33.9, dcache_mem
+  33.3, iq_bank 32.3, rename_recover 31.8, tlb 31.0, load_unit 30.2,
+  fe_override 30.2, lsq_reduce 29.9, slice_dispatch 29.9, dcache_ctrl
+  28.6, iro 28.0, alu 27.9, sb_commit_bundle 27.4, loop_buffer 26.9
+  (was 31.8 @:236; new limiter :352), store_unit 26.7. Structural FO4,
+  not STA. Exclusions unchanged (g6lc_shared_tlb, g6lc_ptw_leg_decode).
+- MEASUREMENT-HYGIENE NOTE: the r49 boards (analyze-r49-{pre,post*}),
+  first r50 control run, were taken against inputs/param-map-hyp8.json
+  (45 keys, lacks HypCfg.{RenameResolve,IqArb,LsqReduce,PtwDecode}
+  fields and pins AluStages=2/IqSpecWakeup=2) -- a stale map, not the
+  r44 map. Under it iq_arb reads 54.66 / ptw 49.50; those numbers are
+  param-map artifacts, NOT regressions. loop_buffer/rename_recover are
+  stage-param-invariant (identical values under both maps) so the r49
+  keep/revert verdicts stand. Discarded control board sha
+  9ccd36319af5a467.
+- Witness status @~23:41Z: hyp8-osbi-scalar-r26 (r47 tree) running
+  ~14.0M (census cyc=14000000 ret=3947276 ipc=0.282), zero
+  verdict/error lines; 17.25M barrier next. hyp8-osbi-scalar-r48b
+  running ~6.0M clean. No tohost verdict anywhere -> no boot claim.
+
+### r26 final (collected ~00:13Z) -- STOPPED, new owner
+
+- hyp8-osbi-scalar-r26 (r47 tree) aborted at [19466403]:
+  load_unit.sv:1537 `misaligned_entry_excepts` -- "misaligned load
+  buffer entry did not complete with LD_ADDR_MISALIGNED and a killed
+  request" (Verilog $stop -> Aborting). Owner: ex_stage.lsu.load_unit,
+  misaligned-grant completion contract (grant+1 must be exception+
+  kill or translation-abort states; observed neither).
+- Cleared all three prior defect barriers first: 444,284 (r24a
+  spec_entry_live), 3,763,469 (r25c2 lsq_cam killed-match), and the
+  17,247,9xx cluster (r24b/c3/c4) -- the r47 sticky-kill repair is
+  confirmed against every prior stop class. The misaligned stop is a
+  NEW failure owner, ~534k cycles short of the 20M budget.
+- Last census cyc=18000000: ret=5094133 ipc=0.283; ldbuf_full=18,
+  mem_viol=388 (climbing from 16 @2M). No [equiv] lines emitted
+  (aborted before equiv report); no UART output in log. No tohost
+  verdict -> no boot claim.
+- r48b running ~10M clean @00:01Z; r27 (r50 tree) launched ~23:46Z,
+  ~2M @00:01Z. Whether r50 hits the same misaligned assert is an open
+  empirical question (r48B touched load_unit's PA capture, not the
+  misaligned path).
+
+## r50d -- misaligned_entry_excepts investigation (~00:25Z)
+
+- Code read (no RTL change): ldbuf_w = data_req & data_gnt (:1095);
+  grants only issue from IDLE/WAIT_GNT/SEND_TAG (:793-796). Under the
+  antecedent, C+1 state_q is confined to {SEND_TAG, ABORT_TRANSACTION,
+  ABORT_TRANSACTION_NI, WAIT_FLUSH}; the last three always carry
+  kill_req (kill_abort/abort_ni/flush :811-813) and satisfy disjunct
+  (b). A violation therefore implies state_q==SEND_TAG at C+1 with
+  either kill_req && !valid_o (kill w/o same-cycle rvalid publish; the
+  ex_pub arm :1237 requires data_rvalid in the kill cycle, rid==last
+  OR !kill) or !kill_req (ex_i absent or PTW-broadcast-suppressed,
+  kill_send :808) or pub_any stealing the shared valid_o (:1257 —
+  else-if ordering would lose the exception publish entirely).
+- Diagnostic: translate_off $error enrichment only (state_q, kill,
+  valid_o, ex_o, ex_i.v/cause, ex_ptw, flush, canc_hit, canc_mask,
+  dtlb_hit, rvalid, gnt, entry tid/op/off). hyp8-r50d-closure (819f),
+  hyp8-integration-r50d build_complete model 91f56a6e50af, lint
+  scalar/smt2 rc=0 0 %Error. hyp8-osbi-scalar-r27d launched ~00:22Z
+  detached, +ld_state +smt_flow_trace +trace_from=19460000
+  +trace_to=19467000 +stq_trace 17.24M-17.26M window.
+- r27 (r50 tree) running clean ~6M @00:22Z; r48b ~14M clean. Awaiting
+  the ~19.47M window on both for H1-vs-H2 discrimination.
+
+### r27d diagnostic result (~02:05Z) — send_tag_kill_rvalid fires
+
+- All three trees (r26/r47, r48b/PDEC=0, r27/r50) aborted at the
+  IDENTICAL cycle 19,466,403 — deterministic, instruction-driven.
+- r27d (diagnostic model 91f56a6e): aborted same cycle but on
+  send_tag_kill_rvalid (:1576) — "SEND_TAG kill without the matching
+  dummy data_rvalid". Both asserts describe the same event; the abort
+  print order differs across builds (identical waveforms, different
+  $error scheduling). Enriched misaligned message never printed.
+- Port timeline [ldport/ldfsm] 19466360-389 shows back-to-back grants
+  (did cycling 0/1/2) with rvalids ~3 cycles later, and exv=1 landing
+  one cycle AFTER the SEND_TAG of the earlier sequence (exv at 388 vs
+  tag at 387). Probe lines for 19466390-402 were lost to C stdio
+  buffering on abort (stderr %Error jumped ahead; ~14 cycles of
+  [ldport] never flushed).
+- wt_dcache_ctrl gen_fsm_hit2 reading: every serving state answers
+  kill_req with same-cycle data_rvalid (READ/READ_WAIT/READ_V/
+  MISS_REQ/MISS_WAIT/MISS_RTRN_W/REPLAY_REQ); only IDLE and
+  KILL_MISS/KILL_MISS_ACK do not — and IDLE is unreachable at a tag
+  cycle (grant consumed the request one cycle earlier). Remaining
+  violators: (a) rid-mismatch — rvalid present but mapping to an
+  older in-flight slot (back-to-back grants share the port), or
+  (b) ldbuf_rindex-vs-last_id conflation — pub_any at :1257 wins the
+  shared index over rresp_idx even when the correct dummy rvalid
+  arrives, which also suppresses ex_pub (else-if) so the exception
+  publish can be stolen by an unrelated slot's data completion.
+- Open: kill reason at 403 is the last unknown — own-fault
+  (ex_i.valid&&!ex_ptw&&!flush&&!mask) => real lost completion (H2);
+  cancel/flush kill (mask||flush term) => precise drop, assertion gap
+  (H1). send_tag_kill_rvalid's message lacks the fields; proposed next
+  diagnostic prints rresp_idx/data_rid/ex_i/canc fields in BOTH
+  asserts (or a single shared violation dump). Awaiting verdict.
+- Side note: r27d log is 6.9G — smt_flow_trace's OTHER probes
+  ([smt-flow]/[smt-probe]/[lsqb]/retire/wb) are NOT bounded by
+  +trace_from/+trace_to; only ldst/ldfsm/ldport are.
+
+### r50e diagnostic (~02:30Z)
+
+- Board procedure locked (lead verdict): boards/hyp8-core/analyze-r50.cmd
+  records the exact argv naming analysis/r44-param-map.json (map sha
+  75d16bc9...30e9) + board sha 6bd7c6f0...; execution-path-plan.md E1
+  amended — a board without correct-map argv + recorded map sha is invalid.
+- load_unit.sv (diagnostic only): send_tag_kill_rvalid $error now prints
+  state_q, rvalid, did, rid, rresp_idx, ldbuf_rindex, last_id, pub_any,
+  ex_i.{valid,cause}, ex_ptw_i, flush_i, cancel_hit, canc_mask[last_tid].
+  Probe survival: [ldfsm]/[ldport] re-gated to (ld_state || smt_flow_trace)
+  inside the window and every windowed line $fflush'd (r27d lost
+  19466390-402 to C stdio buffering on abort).
+- hyp8-r50e-closure 819 files (load_unit sha 2e1969a5);
+  hyp8-integration-r50e build_complete, model 52fb8df4a7ee,
+  lint scalar/smt2 rc=0, 0 %Error, LATCH=3 (pre-existing).
+- hyp8-osbi-scalar-r27e launched ~02:25Z detached: standard flags +
+  stq 17.24-17.26M + ld_state + trace_from=19460000 + trace_to=19467000,
+  NO +smt_flow_trace (6.9G flood removed). r27 already dead at 19466403
+  (identical to r26/r48b) — no kill needed.
+- ANALYTIC RESULT (ex retention, settles (iii)/(b)): the killed entry's
+  exception is DROPPED, not retained, when ex_pub loses the response
+  cycle. ex_pub (:1237-1240) is single-shot: requires
+  req_port_i.data_rvalid && state_q[LU_B_SEND_TAG] && ex_i.valid &&
+  !ex_ptw_i && ((last_id==rresp_idx) || !kill_req_w), and sits behind
+  `else if` under pub_any (:1257/:1263). The rvalid captures into the
+  slot (rpend_q/rdata_q :506-508) and marks rkill_q (:509); next cycle
+  drn_ok (:1167-1169) drains it silently via the drain pick (:1276-1279).
+  No other arm sets ex_o.valid (:1253 default; only :1268, :1288);
+  ex_o.cause/tval are driven LIVE from ex_i (:678-682) — nothing stores
+  the exception for retry. Additionally a killed LIVE-tid slot is
+  pub_ok-eligible (pub_ok does not check rkill_q, :1158-1160) — it can
+  publish the dummy response as real data (misaligned_entry_no_data's
+  target). For a live tid with ex_ptw_i=0 this is a real lost completion
+  (H2): silent drain pop => the head's tid never completes => wedge.
+  For a dead tid (flush_i/cancelled_mask kill, which requires
+  ex_ptw_i=1 per kill_send :808-809) the drain is the legal precise
+  drop => H1. Discriminator at 403 is exactly
+  ex_ptw_i + cancelled_mask_i[last_tid] + flush_i — all printed by the
+  r50e diagnostic.
+
+### r51 sticky exception-pending + strict ex priority (load_unit)
+
+- Ruling (lead): implement r51 now, in parallel with r27e. Sticky
+  ex-pending for own-fault SEND_TAG kills; captured ex record; strict
+  exception priority over the data tree; deferred pop via drn
+  tombstone; misaligned_entry_excepts becomes a deferred/eventual form
+  with the precise-drop disjunct; send_tag_kill_rvalid tests
+  rresp_idx==last_id (D$ response identity, not the publish pick).
+- Final structure (load_unit sha e44cbe41): pending-exception FIFO —
+  shift register, head at index 0, entry = {slot, slot_oh, tid,
+  exception_t}. ex_pend_set arms on own-fault kill
+  (state_q[SEND_TAG] && ex_i.valid && !ex_ptw_i && valid &&
+  !flushed_d). Depth = NrLoadBufEntries (pending entry holds its slot;
+  overflow impossible). Registered head readiness pend_rdy_q/liveness
+  pend_dead_q evaluated one cycle ahead on pend_d[0] so the publish
+  gate reads registers only. Publish = cnt>0 && rdy && !dead &&
+  !flush_i && pend_state_ok, where pend_state_ok = {SEND_TAG, ABORT,
+  ABORT_NI, WAIT_FLUSH, WAIT_WB_EMPTY} | (!valid_i && !WPO) — FSM
+  states where no head publish arm (WT fault / SPEC writeoff /
+  st_fwd_done) can fire; unsafe states resolve bounded, empty head
+  drains to !valid_i — liveness via commit-stall backpressure.
+  Publish carries no pop: the slot is tombstoned (rkill_q OR head's
+  slot_oh, guarded by ldbuf_valid) and freed by the drn pick next
+  cycle — keeps the gate out of the ldbuf_valid_d register cone.
+  Dead-head pop is unconditional (precise drop, never publishes).
+  pub_ok excludes rkill_q/ex_pend_q slots (dummy-as-data hazard closed
+  by logic; misaligned_entry_no_data retained as the check).
+  ex_pend_sticky_drop assert: a publish never lands for a tid
+  cancelled the previous cycle (same-cycle landing is legal — pub_ok
+  reads flushed_q, never the live mask, so the scoreboard already
+  tolerates WB-on-cancel-edge).
+- Mutant: G6LC_MUT_LSU_EXPEND forces ex_pend_set=0 and restores the
+  old pub_any-over-ex_pub priority — leaf fails by name.
+- Leaf (remote, pinned harness): hyp8-r51-memory-l HYP8_MEMORY_PASS
+  checked=152 on the final structure — L1 kill-cycle contention
+  (exception wins, other slot publishes next cycle), L2 delayed dummy
+  (exactly once), L3 cancel-at-kill (silent drain), L4 control.
+  Mutant hyp8-r51-memory-mut2 fails by name: I1_EX_WINS.
+- TIMING — structural debt, lead ruling "accept as measured":
+  exact argv + r44 map 75d16bc9. History: slot-bit+pub-gate 56.40,
+  st_fwd gating 62.10, state-set gate 48.4/52.4, per-slot FIFO 43.0,
+  +live-mask removal 42.55, +one-hot head 42.05, +registered
+  rdy/dead FINAL 41.05 regtoout load_unit.out0 @L1360 (independent-LHS
+  bundle lhs=8 writes=18 makespan=41.0 deps=18, raw 92.6->deflated
+  14.5); plain-path max 35.05; regtoreg 33.50. Reference 30.25 was the
+  same bundle class on the same region (makespan billing, not a real
+  cone — deflated numbers ~14-16 both sides). The mandatory residual
+  is the publish-gate field (state_ok + registered rdy/dead + flush).
+  Recorded as structural debt "load_unit exception publish-port
+  arbitration"; candidate future specialization: an exception-only
+  completion needs no data path — a dedicated exception WB lane /
+  WbReserve slot would take the pending publish off the shared
+  valid_o/trans_id_o port entirely. Deferred to a later pass.
+- Boards: analyze-r51[a..l]-loadunit.json under
+  build/sv-timing/hyp8-src/boards/hyp8-core/ (c,d,e,f,g,h,i,j,k,l on
+  the final lineage).
+
+### r51 closure / r27e verdict / r28
+
+- r27e (r50e tree, enriched send_tag_kill_rvalid): DEAD at [19466403]
+  — identical cycle to r26/r48b/r27 (fully deterministic). Verbatim:
+    [19466403] %Error: load_unit.sv:1576: Assertion failed in
+    TOP...i_load_unit.send_tag_kill_rvalid: SEND_TAG kill without the
+    matching dummy data_rvalid (state_q=0000000100 rvalid=1 did=2
+    rid=0 rresp_idx=0 rindex=1 last_id=0 pub_any=1 ex_i.v=1
+    ex_i.cause=0000000000000004 ex_ptw=0 flush=0 canc_hit=0
+    canc_mask=0)
+  Shape: dummy rvalid WAS present and addressed the killed entry
+  (rresp_idx=0 == last_id=0) but the OLD assert tested the publish
+  pick (ldbuf_rindex=1) — pub_any stole the shared index in the kill
+  cycle. ex_i.v=1 cause=4 (LD_ADDR_MISALIGNED) ex_ptw=0 flush=0
+  canc_hit=0 canc_mask=0 -> LIVE own-fault exception dropped on the
+  floor: H2 CONFIRMED. r51 (sticky ex-pending FIFO + strict ex
+  priority + rresp_idx==last_id property) is the fix for exactly this
+  shape. No H1 precise-drop disjunct needed for this event.
+- hyp8-r51-closure: 819 files, pins load_unit e44cbe41 (final FIFO +
+  registered-rdy structure). (Leaf bench tb_g6lc_hyp8_memory 074f15b9
+  lives in the leaf closure hyp8-r51-leaf-closure, not the sim flist.)
+- hyp8-integration-r51: build_complete, model
+  cd44a9134e99f702717789884714e34f292769956aa30a5cc5d2354b251bfe0d;
+  lint scalar/smt2 rc=0, 0 %Error, LATCH=3 vendor pre-existing.
+  (First attempt 07:25Z stopped at build_blocked_by_overlap while
+  r27e ran; re-ran clean at 07:17Z after r27e's abort.)
+- hyp8-r51-lint-l3: scalar/smt2/l3 all rc=0, 0 %Error, LATCH=3.
+- hyp8-r51-smokes (real tohost): h34=685 / h33=1010 / bc=492 —
+  identical to r50 baseline, zero drift.
+- hyp8-osbi-scalar-r28: launched detached ~07:23Z on model cd44a913,
+  fw_payload a9218107, standard flags only (20M budget, stall_census,
+  hang_dump, equiv_report, rvfi_cycle_stamp; no stq/ld_state/smt_flow
+  windows). r27e showed rvalid=1 so no cache-side gate on the launch.
+
+### r52 structural pass (boards analyze-r52pre/b/c/d/r52; exact argv, r44 map 75d16bc9)
+
+- B1 g6lc_ptw gen_pdec_dec: shared predicates hoisted to
+  continuous-assign wires (pte_is_leaf/napot64k/perm_i_fault/perm_d_ok/
+  ptr_last/g_tr/gpptr); pdec_dec no longer reads dec_d.* — intra-block
+  field chain broken. Module 35.7 -> 27.4 (PTW-DEC into 35.7->17.4,
+  new limiter the pre-existing PTW-V arm :930). KEPT. r52b-ptw board.
+- B2 wt_dcache_mem p_bank_req: read/write one-hots decoded
+  independently (rd_bank_oh/wr_bank_oh, grant=rd_tag_only ||
+  !(rd_ack&&collision); disjointness asserted translate_off
+  g6lc_rd_wr_bank_disjoint); bank_idx per-bank rd-wins-own-bank;
+  wr_denied/vld_we/inv_ack_o/wr_ack_o separate assigns. Cone
+  37.6 intoout/intoreg :429 -> gone (residual intoreg 28.4@:325);
+  module clock unchanged 33.35 (untouched forward tree :544, billed
+  identically). KEPT. r52c board. Forward tree (L508-545) untouched
+  per brief.
+- B3 g6lc_fe_override: predict_fetchable evaluated per slot before
+  the pred_win OR-gather (slot_fetch, pred_fetchable=|(pred_win &
+  slot_fetch)); invariant cf!=NoCF => slot_pred_v asserted
+  translate_off g6lc_feovr_predwin (bp_valid |-> |pred_win). Stage S
+  30.25@:421 -> 24.9@:354 (pre-existing second path); guess_ok/
+  ov2_pc_o not the new limiter (chain is the cf_win/sel region :354).
+  KEPT. r52c board.
+- B4 g6lc_iq_bank (ge1,ge2) pair tree: 32.30 -> 42.45 — WORSE.
+  Reverted byte-exact (sha 99ca345a == r51 pin). COUNTERCASE,
+  board analyze-r52d-iq.json kept.
+- B5 g6lc_iq_arb: per-port block split into presentation + take
+  always_comb; ack dynamic-index writes -> per-bank decoded assigns.
+  33.85@:794 -> 32.85@:787 (take cone now bills separately).
+  KEPT. r52d/r52 boards.
+- B6 g6lc_lsq_reduce: design note only — analysis/r52-lsq-age-matrix.md
+  (maintained pairwise age matrix vs compare-matrix; est. R1 29.9 ->
+  ~10 FO4; awaiting ruling).
+- Final board analyze-r52.json sha d6ffd997 (cmd header of record):
+  active top: load_unit 41.0 (debt), dcache_mem 33.3, iq_arb 32.9,
+  iq_bank 32.3, rename_recover 31.8, tlb 31.0, lsq_reduce 29.9,
+  slice_dispatch 29.9, dcache_ctrl 28.6, iro 28.0, alu 27.9,
+  sb_commit 27.4, ptw 27.4, loop_buffer 26.9, store_unit 26.7,
+  fe_override 24.9. No module rose vs pre.
+- Verify: hyp8-r52-lint scalar/smt2/l3 all rc=0, 0 %Error, LATCH=3
+  vendor pre-existing. hyp8-r52-leaves: HYP8_MMU_PASS checked=716
+  miter=771; HYP8_DCACHE_PASS checked=290 dchx=2 (pipelined; the
+  single-cycle DCHX0 config's known D_NO_PMU_PULSE failure is
+  untouched); HYP8_MEMORY_PASS checked=152.
+- hyp8-r52-closure: 819 files (491 flist + 311 include + 18 extra).
+  hyp8-integration-r52: build allowed under HYP8_ALLOW_OVERLAP=1
+  (r28 witness in flight); model + smokes reported below.
+  hyp8-integration-r52 (HYP8_ALLOW_OVERLAP=1, r28 in flight):
+  build_complete, model dd7c36e0d868c9fa..., lint scalar/smt2 rc=0
+  0 %Error. hyp8-r52-smokes (real tohost): h34=685 / h33=1010 /
+  bc=492 — identical to r50/r51 baseline, zero drift.
+  r28 witness alive ~4.89M cycles @07:47Z, censuses clean
+  (mem_viol=16 flat).
+
+### r53 structural pass (pre board analyze-r52.json d6ffd997; final analyze-r53.json fd874eb7)
+
+- X1 g6lc_slice_dispatch: confirmed NOT in the active Hyp8 profile
+  (issue_stage.sv gen_slice_ooo arm requires SliceOoOEn; hyp8 cfg
+  SliceOoOEn=0/OoOEn=1). Added to inputs/clock_exclude.txt;
+  justification in analyze-r53.cmd header.
+- T1 g6lc_tlb hit prefix: multi-hit reachable only via inconsistent
+  page tables or a software SFENCE race (a hit suppresses any second
+  fill) — outside contract. tlb_above/tlb_hi1 prefix removed; rsp
+  gather masked-ORs tlb_hitv; translate_off
+  g6lc_tlb_hit_onehot0 asserts $onehot0 gated on rq_access.
+  Module 31.0 -> 30.85 (T2-into 31.0->26.0, new top :634). KEPT.
+- B6 g6lc_lsq_reduce: distance tournament -> registered pairwise
+  compare matrix. Parent computes st_age_q (shared by i_stl_red +
+  i_q_red — stl_eid_q/q_eid_q snapshot the same st_q[*].id at the same
+  edge, verified) and vio_age_q[u] (covers vv virtual leaves) via
+  ooo_age_older at the C-stage edge; pivot-invariance argued (retired
+  leaves dead in cand). win_mask = cand & ~|(cand & row/col) per DIR;
+  lowest-index one-hot for the equal-id tie; dist_i payload-only;
+  R1/R2 RSTG split preserved. Module 29.9 -> 15.10 (intoreg :229 —
+  above the ~12 stretch target, halved). KEPT.
+  In-DUT miter g6lc_lsq_red_age_miter vs verbatim translate_off
+  tournament (ref_*); G6LC_MUT_LSQ_AGE_DIR flips row/col.
+- D1 wt_dcache_mem :544 investigation -> analysis/r53-dcache-fwd.md
+  (chain census, wtag ~50b x8 compares, rd_tag live port; 3 candidates
+  incl. T1-registered compare + alloc-edge bypass hazard analysis).
+- Leaf repair (bench predates the E-C-R-V staged LSQ + file split):
+  tb_g6lc_lsq interface g6lc_cfg_t/G6LCCfg+HypCfg; do_query waits the
+  registered verdict; wait_verdict latches the 1-cycle
+  forward/stall/violation pulses + viol_id; F/G scenarios added
+  (youngest-of-two DIR=0 oracle, oldest-violator DIR=1 oracle);
+  run_lsq_leaf.py input list extended to the split modules (+pkgs,
+  cf_math_pkg, yosys_bin via data), verilator PATH wrapper, mutant
+  expectation accepts LSQ_MASK_H0 (broadcast semantics catch the
+  dropped hart tags by name).
+- Verify: hyp8-r53-lint scalar/smt2/l3 all rc=0, 0 %Error, LATCH=3.
+  LSQ leaf (hyp8-r53-lsq16/17): see below. hyp8-integration-r53
+  build_complete model 52c906d3 (HYP8_ALLOW_OVERLAP=1, r28 in flight).
+  hyp8-r53-smokes: h34=685 / h33=1010 / bc=492 — identical.
+- Final board analyze-r53.json sha fd874eb7: load_unit 41.0 (debt),
+  dcache_mem 33.3, iq_arb 32.9, iq_bank 32.3, rename_recover 31.8,
+  tlb 30.9, dcache_ctrl 28.6, iro 28.0, alu 27.9, sb_commit 27.4,
+  ptw 27.4, loop_buffer 26.9, store_unit 26.7, axi_adapter 26.2,
+  ai_exec 26.1, aes 26.0, sb_lifecycle 25.9. g6lc_lsq_reduce 15.10
+  (off top-18); slice_dispatch excluded. No module rose.
+
+### r54 structural pass (pre board analyze-r53.json fd874eb7; final analyze-r54.json cdd0c594)
+
+- B4b g6lc_iq_bank e_cancl (32.3 regtoout :382): ruled out — a
+  cancelled-but-valid entry could still win cand0/cand1 and displace a
+  live candidate that cycle (perf-visible, not logic-equivalent);
+  gen_take_dead :1457 cannot be shown unreachable. Live read kept.
+- alu :711 dense-control cone (27.87): split the two serial >>>
+  loops into per-result always_comb — COUNTERCASE 27.87->48.05
+  (the split billed each loop's full shamt chain separately),
+  reverted byte-exact.
+- g6lc_iq_arb :787 take decode (32.85): per-bank one-hot decode for
+  take_v_o/take_cand_o/take_idx_o — COUNTERCASE 32.85->34.21,
+  reverted byte-exact (dynamic index write was cheaper than the
+  3-bank compare fanout).
+- wt_dcache_ctrl :255 hit0 READ/REPLAY_READ arm (28.57): hoisted
+  rd_hit_fwd/req_rd_ack/tagv_seen/replay_cond to gen_fsm_hit0-scope
+  wires; state_d single-write per arm (kill the IDLE-then-READ
+  overwrite). KEPT 28.57->24.02.
+- issue_read_operands fus_busy :1666 (28.0): COUNTERCASE-DECLARED —
+  two prior rewrites of this exact prefix-copy chain measured 46.4
+  (in-file record :765-768); 28.0 is the dependency floor. No edit.
+- sb_commit_bundle :368 cport_valid (27.40): replaced the
+  !ex_merged.valid read with the equivalent direct predicate
+  !(sel_sbe.ex.valid || (wb_hit && wbex.valid)) — cuts the
+  cport_ex->cport_valid block dep. KEPT 27.40->25.40.
+- Board note: g6lc_lsq_reduce drifts 15.10->16.5 on an unchanged file
+  (analyzer variance, same delta on both r54 boards; still << its
+  pre-r53 29.9). No other module rose.
+- Verify: hyp8-r54-lint scalar/smt2/l3 all rc=0, 0 %Error, LATCH=3.
+  hyp8-r54-closure 819 files.
+
+### r55 witnesses / board hygiene (pre board analyze-r54.json cdd0c594)
+
+- r28 (hyp8-osbi-scalar-r28, r51 model): RAN TO 20M BUDGET-OUT,
+  past the 19,466,403 deterministic r51-barrier abort — the pending-
+  exception FIFO repair is confirmed by the witness (no abort line;
+  clean CPU-time exit at 19,999,981). [equiv] counters all live:
+  cambe 19,982,037; lsq_reduce pickdist/dwait/lsqr2 ~19.98M (the r53
+  age-matrix miter across the whole run — zero divergence);
+  fwd_snap 1,764,815; pub_tree multi=7658 pfwd=0; tx_single 345,279
+  viol=0; l1_obligation dropped=302,834. No tohost verdict (witness is
+  liveness-only; budget reached). Not restarted.
+- hyp8-r55-closure: 819 files; tree = r54 + lead's line-ending
+  normalization (alu.sv 787cc3cf, sb_commit_bundle c5c11fca,
+  g6lc_lsq_reduce 12b39f31 — recorded in manifest note).
+- hyp8-integration-r55: build_complete model 34a5c9dd (scalar/smt2
+  lint rc=0 inline; HYP8_ALLOW_OVERLAP=1, r28 in flight at launch).
+  hyp8-r55-smokes on the new model: 685/1010/492 — identical.
+- X2 g6lc_ai_exec: CONFIRMED not instantiated under Hyp8
+  (frequency_closure.uninstantiated_modules; it lives under
+  cvxif_g6lc_ai with no active g6lc_ai_coprocessor instance).
+  Added to inputs/clock_exclude.txt; re-emitted analyze-r55.json
+  sha 75fd8a1d — corrected top-16 drops ai_exec (26.1); no other
+  change, zero rises.
+- hyp8-l3-integration-r55: build_complete model b40475f8 on
+  hyp8-l3-r55-closure (824 files, scalar/smt2/l3 lint rc=0).
+- hyp8-osbi-l3-r2 launched ~08:59Z (detached, standard flags, 30M,
+  fw 01ae648d stock) on model b40475f8. PAST the r1 discriminator:
+  771,776 cycles at ~09:04Z > r1's 483,343 abort (store_buffer
+  g6lc_spec_entry_live), still running.
+
+### r55b r28 progress analysis (forensic, no new sim)
+
+- r28 retired 5,612,115 instrs in 20M cycles, ipc 0.281 flat
+  (0.278->0.283 across 10M->20M census) — real retirement throughout,
+  not a stall.
+- PC evidence: at ~10M cycles the retired PCs sat in
+  fdt_supernode_atdepth_offset / fdt_parent_offset / fdt_getprop /
+  irqchip_plic_cold_init / fdt_parse_hart_id (real OpenSBI cold-boot
+  FDT+PLIC work). At ~19.9M the last-2000 histogram is dominated by
+  nputs (0x80009f80-0x80009fc0 = the per-char lbu/jalr/bne loop),
+  printc, print, and uart8250_putc/set_reg (0x80010e5c-0x80010e72 +
+  the set_reg sw/sh/sb to uart8250_base) — the OpenSBI console output
+  path. PC region changed 10M->20M => forward progress, not a spin.
+  VERDICT (a): it was emitting the banner char-by-char through printf
+  when the 20M budget hit; per-char printf at ~0.28 ipc is just slow.
+- UART: zero [uart] lines in run-hyp8.log, but the disasm proves
+  uart8250_putc executes its sw/sh/sb to uart8250_base — the harness
+  does not emit [uart] trace lines on this model (r1 also had
+  uart_lines=0), so absence of a banner in the log is NOT absence of
+  console output; the PC path is the evidence.
+- Stall census: dominant class = ack_full (1,906,322 of 3,705,793
+  ack_cyc); dmiss/dc_req/dc_gnt/mshr all 0 — no memory bottleneck.
+  flush_cyc=17,949 trivial.
+- mem_viol: grew 16 -> 1200 over the run (same climb shape as r26's
+  16->258->333; memory-order violation replays, not an assert).
+- l1_obligation dropped=302834 plain=302834: counts LEGAL obligation
+  drops via the plain-drop path (the equiv counter that replaced the
+  r41v2 hard assertion); every drop took the legal path (plain=dropped
+  count), high rate but no violation — the assertion never fired.
+- l3-r2: alive ~1.14M cycles; its tail sits in a tight 8-PC loop
+  inside fdt_offset_ptr (0x800128c8-0x800128e4) with a dominant
+  3-instr bne/store encoding repeated ~1600x — heavier than r28's
+  print loop; watch whether it exits FDT traversal into PLIC/print
+  or is a real livelock at the next probe.
+
+### r56 (UART observability + r29 witness; l3-r2 discrimination; load_unit census)
+
+- A UART: InclUART=0 under Verilator -> mock_uart; its uart_tx already
+  $write("%c")s each THR byte to stdout but r28's log has ZERO banner
+  bytes (53 'OSBI/boot' hits were all [boot] reset-trace lines) — the
+  raw %c stream is invisible to [uart] grep and may be suppressed in
+  the causal build. Added a TB-only probe at the APB boundary in
+  corev_apu/tb/g6lc_peripherals.sv (translate_off): fires on
+  uart_psel&penable&pwrite&THR-offset, prints "[uart] <char>", dumps
+  bytes to uart.txt, final "[uart] uart_bytes=N". Covers both the
+  apb_uart and mock_uart arms. hyp8-r56-closure 819f;
+  hyp8-integration-r56 build_complete model c11570a0 (lint rc=0).
+  hyp8-osbi-scalar-r29 launched ~09:19Z detached (INT_TAG
+  hyp8-integration-r56, fw a9218107, standard flags, 60M budget);
+  alive ~231k cycles at ~09:21Z.
+- B l3-r2 discrimination: r28's first uart8250_putc-range PC at
+  5,433,078, first print/nputs-range at 5,941,767 (fdt range interleaved
+  through init). l3-r2: fdt-range only, last fdt PC 3,079,877, ZERO
+  print/uart hits; at ~3.96M cycles still in fdt_offset_ptr region —
+  below the 2x discriminator (~10.9M no-print), keep watching. L3 DTS
+  adds l2/l3 nodes => some FDT-walk inflation is legitimate.
+- C load_unit census (analyze-r55 75fd8a1d): 41.05 regtoout bundle
+  (r51 debt), 35.05 regtoout plain state_q->state_d :1360, 33.5
+  regtoreg state_d unique-case :1046 (dep floor deps=31). Candidates
+  C1 (B1-class predicate hoist, est ~-9 FO4) / C2 (publish-vs-state
+  always_comb split, ~-3) written to analysis/r56-load-unit-publish.md.
+
+### r57 (load_unit C1-null / C2-skipped; UART read/AXI probes; r30 witness)
+
+- load_unit C1 (predicate hoist d_rvalid/kill_req/lu_valid/ex_v/ex_ptw
+  into load_control): analyze-r57a measured 41.05 -> 41.05 — NULL.
+  The dep floor is state_d's own arm-to-arm write chain, not input
+  recompute. C1 reverted; the file was restored byte-exact from the
+  r55 closure pin (sha e44cbe41, LF) after the manual revert left a
+  CRLF residual.
+- load_unit C2 (publish-vs-state always_comb split): SKIPPED with
+  reason — rvalid_output already owns valid_o/trans_id_o/rdata_o; the
+  only mixed writes left are pop_ld_o/lu_replay_o/miss_req_o inside
+  ~10 nested state_q arms, so splitting them duplicates the FSM (a
+  replication edit, not a safe equivalent). The dep floor needs a
+  single-state_d-write FSM restructure, which is out of scope for an
+  equivalent-rewrite pass. load_unit 41.05 remains accepted r51 debt.
+  Ruling (b) accepted; no leaf/mutant rerun needed (tree = r55 pin).
+- UART probes (TB-only, translate_off, in g6lc_peripherals.sv):
+  [uart] THR-write log + uart.txt + uart_bytes; [uart-rd] read-side
+  probe (first 200 + per-offset histogram); [uart-axi-ar]/[uart-axi-r]
+  AR/R handshake log at the UART slave port. All in hyp8-r56-closure.
+- hyp8-integration-r57 build on hyp8-r56-closure (819f).
+
+### r57 resolution — OpenSBI v1.5 banner CONFIRMED (r30)
+
+- hyp8-integration-r57 build_complete on hyp8-r56-closure (all UART
+  probes). hyp8-osbi-scalar-r30 launched ~10:01Z (r57 model, 60M).
+- At ~5.51M cycles r30 emitted the first [uart] byte; at ~5.6M the
+  stream reached 315 bytes = the full "OpenSBI v1.5" ASCII banner
+  (verbatim in uart.txt: ESC\r\nOpenSBI v1.5\r\n + the logo).
+- Path proof: [uart-axi-ar] addr=10000014 (LSR) at master[UART];
+  [uart-axi-r] data=...60... resp=0; [uart-rd] off=5 data=60.
+  The putc poll reads THRE|TEMT, writes THR — correct 16550 flow.
+  The r55b "14M cycles in nputs/putc, 0 bytes" was the invisible %c
+  stream (mock_uart's $write had no [uart] tag), NOT a stall: r28
+  was printing the banner when its 20M budget hit.
+- Discriminators resolved: H1 (read never reaches APB) dead — AR
+  arrives at master[UART]. H2 (bridge returns 0) dead — [uart-rd]
+  off=5 data=60. H3 confirmed — real banner emission.
+- l3-r2: 16.67M, alive, forward progress (left fdt_offset_ptr ~9.4M,
+  did post-FDT work, back in FDT for a later init pass).
+- r29: 13.7M still running on the write-probe-only model (its %c
+  bytes are invisible but the PCs prove the same banner emission).
+
+### r58 (wt_dcache_mem D1 repartition; UART banner confirmed on r30)
+
+- W thread: r30 emitted the complete OpenSBI v1.5 banner (uart.txt
+  verbatim — ESC + logo + \r\n). UART path works end-to-end
+  ([uart-axi-ar] addr=10000014, [uart-axi-r] data=..60.., [uart-rd]
+  off=5 data=60, [uart] bytes). r28's "14M in putc, 0 bytes" was the
+  invisible %c stream, never a stall. r30 past banner at 8.5M in
+  post-FDT platform-info work; l3-r2 19.4M same 0x80004b region.
+- S D1 wt_dcache_mem (DcacheHitExtra==2 repartition): T1 now captures
+  wbuf_hit_oh_q + per-entry {valid,data,user} snapshot
+  (wbuf_vld_q/wbuf_data_arr_q/wbuf_user_arr_q); T2 runs the byte-lane
+  merge tree on the SNAPSHOT via wbuf_dat_src/wbuf_usr_src (live arm
+  unchanged). merge_hit=wbuf_hit_oh_q, merge_vld=wbuf_vld_q,
+  wbuffer_*=fwd_*_c (T2 comb). Removed dead wbuf_be_q/wbuf_data_q/
+  wbuf_user_q. fwd_snap equiv re-pointed: serial recompute over the
+  same T1 snapshot inputs vs the balanced-tree result.
+- Board analyze-r58a: wt_dcache_mem 33.35 -> 28.4 FO4, ZERO module
+  rises. KEPT (accept rule met). Flop add: (WbufferAllDepth-1)x
+  (XLEN+USER) - XLEN/8 bits net.
+- Verification: hyp8-r58-leaf-closure (395f). HYP8_DCACHE_PASS
+  checked=290 dchx=2 stores=88 (pipelined), HYP8_MMU_PASS checked=716
+  miter=771, HYP8_ISSUE_PASS checked=99, HYP8_MEMORY_PASS checked=152
+  all identical to baseline. G6LC_MUT_WBUF_FWD_LIVE_T2 mutant fails by
+  name (FAIL DCHX_FIXUP_WINDOW_FWD at tb_g6lc_hyp8_control:4067) after
+  fixing the mutant arm to live-read wbuffer_all via gen_live_mut_src
+  (the shared-leaf-source patch had snapshot-reads in both arms).
+  hyp8-integration-r58 build_complete model 65643d24, lint scalar/smt2
+  rc=0. hyp8-r58-smokes 685/1010/492 identical. Flop cost ~+2224
+  (WbufferAllDepth=32 x 72b snapshot - 72b removed merge regs).
+  File LF-normalized (i/lf w/lf).
+
+### r58b (D1 refinement — narrowed snapshot; smt2-r1 queued)
+
+- Lead refinement: snapshot only real entries — wbuf_data_arr_q/
+  wbuf_user_arr_q narrowed to [WbufferAllRaw-1:0] (19 entries); pad
+  entries (19..31) tied '0 via gen_snap_src/gen_snap_pad generate
+  (wbuffer_all pads are '0 at :183 so merge_hit is always 0 there).
+  T1 capture + fsnap recompute bounded by WbufferAllRaw. Flop cost
+  final: 19x(64+8) - (64+8+8) ~= +1,288 flops.
+- analyze-r58b: wt_dcache_mem 28.4 UNCHANGED, zero rises.
+- Re-verified: HYP8_DCACHE_PASS checked=290 dchx=2 stores=88 +
+  HYP8_MMU_PASS checked=716 miter=771 (hyp8-r58b-dleaf);
+  G6LC_MUT_WBUF_FWD_LIVE_T2 fails by name (FAIL DCHX_FIXUP_WINDOW_FWD
+  tb_g6lc_hyp8_control:4067, hyp8-r58b-dmut); hyp8-r58-lint-l3
+  scalar/smt2/l3 all rc=0 (LATCH=3); hyp8-r58-smokes2 685/1010/492.
+- hyp8-osbi-scalar-r29 killed (redundant — r30 covers the banner).
+- hyp8-smt2-integration-r58 building (SOFT_LADDER_BUILD_TARGET=
+  g6lc64_hyp8_smt2) for hyp8-osbi-smt2-r1 (60M, fw a9218107).
+
+### r58c consolidated summary (pre-r52 -> post-r58b)
+
+Module board (pre board analyze-r52pre -> analyze-r58b; active ≥20 FO4
+that changed, plus accepted debt/floors):
+
+  module                    pre     post    note
+  wt_dcache_mem             37.60   28.40   r52-B2 one-hots + r58-D1 T2-snapshot
+  g6lc_ptw                  35.70   27.40   r52-B1 pdec hoists
+  g6lc_iq_arb               33.85   32.85   r52-B5 presentation/take split
+  g6lc_tlb                  31.00   30.85   r53-T1 masked-OR hit gather
+  g6lc_fe_override          30.25   24.90   r52-B3 slot_fetch before gather
+  g6lc_lsq_reduce           29.90   16.50   r53-B6 compare-form age matrix
+  wt_dcache_ctrl            28.57   24.02   r54 state_d predicate hoist
+  sb_commit_bundle          27.40   25.40   r54 ex_merged.valid direct form
+  load_unit                 41.05   41.05   accepted r51 debt (C1-null, C2-skipped)
+  g6lc_iq_bank              32.30   32.30   floor (B4 countercase, e_cancl ruled)
+  g6lc_iq_arb               -       32.85   (kept at 32.85 post-B5)
+  issue_read_operands       28.00   28.00   dependency floor (2 prior 46.4 cases)
+  alu                       27.87   27.87   floor (>>> split 48.05, one-hot 73.8)
+
+  Excluded (uninstantiated, clock_exclude.txt): g6lc_ai_exec 31.57,
+  g6lc_slice_dispatch 29.85, g6lc_shared_tlb 51.25, g6lc_ptw_leg_decode
+  53.00 — raw JSON values are not active-profile costs.
+
+Countercases (board file -> measured):
+  g6lc_iq_bank ge1/ge2 pair tree   r52 B4   32.3 -> 42.45  (byte-exact revert)
+  g6lc_iq_bank e_cancl live read   r54      ruled out pre-edit (dead-entry
+                                            displaces live cand; gen_take_dead
+                                            unreachable-proof fails)
+  alu serial >>> per-result split  r54      27.87 -> 48.05 (byte-exact revert)
+  g6lc_iq_arb per-bank 1hot decode r54      32.85 -> 34.21 (byte-exact revert)
+  issue_read_operands fus_busy     r54      2 prior prefix-copy cases = 46.4;
+                                            28.0 is the deps=80 dependency floor
+  load_unit C1 predicate hoist     r57      41.05 -> 41.05 null (input preds
+                                            already shared; floor is arm-to-arm
+                                            state_d chain) — reverted
+  load_unit C2 pub/state split     r57      skipped — only pop_ld/lu_replay/
+                                            miss_req remain inside the FSM;
+                                            splitting = FSM replication, not
+                                            equivalent hoist
+  dcache B4 (r52) iq_bank pair     recorded countercase territory, not retried
+
+Witnesses (tag / model / fw / outcome):
+  hyp8-osbi-scalar-r28  r51 model       a9218107  20M budget-out, PAST the
+                          19,466,403 r51-barrier (all [equiv] counters live,
+                          0 divergences); no tohost — liveness witness
+  hyp8-osbi-scalar-r29  r56 write-probe a9218107  killed ~13.7M (redundant
+                          after r30 proved the banner path)
+  hyp8-osbi-scalar-r30  r57 full-probe  a9218107  OpenSBI v1.5 banner CONFIRMED
+                          (uart.txt verbatim); alive ~13.9M post-banner
+  hyp8-osbi-l3-r2       r55 l3 b40475f8 stock     alive ~24.5M, past r1's
+                          483,343 death and the 10.9M fdt discriminator
+  hyp8-osbi-smt2-r1     r58 smt2        a9218107  launched ~11:10Z, 60M
+  hyp8-osbi-l3-r1       r55 l3          stock     died 483,343 on
+                          store_buffer g6lc_spec_entry_live (pre-r47)
+
+### r58d (l3-r2 budget-out; l3-r3 + smt2-r1 launched; r30 platform table)
+
+- hyp8-osbi-l3-r2 FINISHED 30M budget-out, clean: no tohost verdict
+  (same framing as r28). Final PC 0x8000eff0. All [equiv] counters
+  live at end: fwd_snap checked=2,822,711 (the r58 D1 snapshot check
+  ran the whole run — zero divergence), pub_tree checked=29,999,986
+  multi=9,458 pfwd=0, tx_single checked=502,462 viol=0, l1_obligation
+  dropped=353,370 plain=353,370.
+- r30: ~21.25M printed the full OpenSBI platform table verbatim —
+  "Platform Name : GSys LibreCore hyp8 simulation", uart8250 console,
+  aclint-mtimer @12.5MHz, Runtime SBI Version 2.0, Domain0 root with
+  the UART region 0x10000000-0x10000fff R,W mapped (matches DTS).
+- hyp8-l3-integration-r58 build_complete (hyp8-l3-r58-closure 824f);
+  hyp8-osbi-l3-r3 launched ~11:53Z (80M, stock fw, standard flags,
+  UART probes on the r58 L3 model).
+- hyp8-osbi-smt2-r1 launched ~11:10Z (60M, g6lc64_hyp8_smt2 model,
+  fw a9218107, UART probes).
+- r30 at ~22.87M: full OpenSBI cold-boot dump COMPLETE through
+  Boot HART MIDELEG=0x0 — Domain0/root, all platform devices, heap
+  stats, Boot HART ID/Priv/ISA block. Next bytes = payload output.
+
+### r58e (r30 handoff confirmed; l3-r3 launch bug; smt2-r1 dead-fetch)
+
+- r30: 26,976,331 — still in sbi_hart_switch_mode + sbi_malloc (the
+  OpenSBI domain-init handoff); uart_n=2627, last bytes are the
+  Boot HART MIDELEG/MEDELEG trailing zeros. No payload PCs yet, no
+  trap. ret 5.61M->5.90M ipc 0.28->0.27. Classification (i): still
+  printing/handing off — payload entry imminent.
+- l3-r3: launch assert bug — my sed clone kept the r55 MODEL_SHA pin
+  (b40475f8) vs the r58 model (dc3316c8). Fix: pin updated, relaunch
+  as hyp8-osbi-l3-r3b.
+- smt2-r1: KILLED (SIGTERM at 15M). [boot] trace shows npc advancing
+  (0x10000->0x10040...) — fetch works, but ret=0 forever — the
+  bootrom spins in a wait that never resolves on g6lc64_hyp8_smt2.
+  Classified: harness/DTS wiring (no SMT2 smoke exists on this
+  harness — the smokes run on scalar only). Not an RTL bug.
+
+### r59 arch-redirect skip — fix
+Mechanism (probe-verified, `hyp8-probe-r59m5` `[r59]` lines): flushing CSR writes are applied deferred through csr_buffer; `controller.drain_seq` latched `drain_pc_q <= pc_commit_i` at the deferred `flush_csr_i` trigger, by which the commit head had rotated to the younger instruction, so the commit-redirect resumed at `next.pc+4` — dropping exactly one instruction after every flushing CSR (OpenSBI `sbi_hart_switch_mode` lost `csrw mepc` + the `j`→`mret` tail: the r30 infinite loop; no run ever reached the payload). When the pipeline was drained the stale slot read produced arbitrary backward resumes.
+Fix: csr pc carried with the registered flush — `csr_write.sv`/`csr_regfile.sv` stamp `commit_instr_i.pc` at `csr_apply` (the retire cycle) into `flush_pc_o`; `smt/g6lc_smt_csr_bank.sv` selects it per hart like `flush_o`; `g6lc_core.sv` routes `flush_csr_pc_ctrl` to `controller.csr_flush_pc_i`; `drain_pc_q <= flush_csr_i ? csr_flush_pc_i : pc_commit_i`; `smt_arch_redirect_pc` uses `pc_commit_fe`. Second defect found by the directed test: the deferred-flush window let the younger marker commit/execute before the squash (t2=2 double-execute) — fixed by `commit_stage.sv` `csr_hold_q` one-cycle commit suppression after every CSR fire.
+Verification (`hyp8-integration-r59c`, model sha d243c0e0): lint scalar/smt2 rc=0 (3 LATCH baseline); smokes h34=685/h33=1010/bc=492 identical; `hyp8_csr_flush_skip` `*** SUCCESS ***` 2350 cyc (was 14680193 fail on r58). markerA now retires t2=1 (was 2). r58 closures: hyp8-r59c-closure 820 files, hyp8-r59-leaf-closure 395. Witnesses: r31 launched on r59c (60M); l3-r3b killed; l3-r4 pending r59 L3 build. RVFI gap: flushing-CSR commit records still absent — `commit_drop_o = sel_mem.cancelled` in sb_commit_bundle; the flushing CSR's slot is cancelled when it acks so `commit_ack & ~commit_drop` masks the record (also gates smt_retire_valid) — retirement-observability defect, not fixed.
+Board (lead, same argv as r53/r55; `boards/hyp8-core/analyze-r59.{json,cmd}` sha 6db2db2615dc635d): commit_stage 21.50, controller 25.10, csr_regfile 37.37 — unchanged vs analyze-r58b; csr_write/g6lc_smt_csr_bank/g6lc_core carry no clock-setting path; no module rose. The fix is timing-neutral on this board.
+Line endings: all five RTL edits preserved their files' existing eol (controller/csr_write LF; csr_regfile/g6lc_core/smt_csr_bank CRLF).
+
+### r59b rvfi dropped-commit records — fix
+Mechanism (probe `hyp8-probe-r59rv2`, `[rvp]` lines): flushing-CSR commits are clean at the scoreboard — `mack=1 drop=0 ack=1` at the commit cycle (e.g. t=418, pcc=0x80000010). The records were dropped trace-side: `g6lc_rvfi_probes.sv` stages instr→instr_dly_q→instr_q for the H12 post-write CSR pairing and cleared the whole pack on `flush_i`; the deferred csr_write flush fires one cycle after the ack and killed the staged frame. Same mechanism ate mret/mispredict records (any redirecting instruction whose flush lands while its frame is staged).
+Fix (trace-side only, `g6lc_rvfi_probes.sv`): on `flush_i` keep staged frames that captured a real retire (`commit_ack && !commit_drop || ex_commit_valid`) instead of zeroing the pack; csr_q follows its surviving frame.
+Verified (`hyp8-probe-r59rv3`, r59c source + fix): `trace_rvfi_hart_00.dasm` now shows `csrw mstatus` @0x80000010 and @0x800002a2 (0x30001073) and `mret` @0x80000214/0x80000332 (0x30200073); `hyp8_csr_flush_skip` still `*** SUCCESS ***` 2350 cyc; smokes on the fixed model identical: h34=685 / h33=1010 / bc=492 (record visibility is trace-side — no cycle delta, as expected).
+Note: the r59c integration model predates this trace fix; it lands in the next integration build.
+Witnesses: r31 (r59c model, 60M) running — at last poll still in OpenSBI init (~4.3M cyc, PC 0x80012xxx, 0 payload PCs ≥0x80200000 yet); l3-r4 (hyp8-l3-integration-r59, 80M) running. Lint: `hyp8-r59-lint-l3` rc=0, 0 %Error. Board `analyze-r59` (lead): commit_stage/controller/csr_regfile unchanged, no rises.
+
+### r60 arch-redirect + rvfi record fix — integrated
+`hyp8-r60-closure` (820 files) + `hyp8-integration-r60b` (model sha 64567e84…): lint scalar/smt2 rc=0 (first attempt's build blocked by witness overlap — relaunched with HYP8_ALLOW_OVERLAP=1); `hyp8-r60-lint-l3` clean (0 %Error all profiles). Smokes `hyp8-r60-*`: h34=685 / h33=1010 / bc=492 — identical; `hyp8_csr_flush_skip` `*** SUCCESS ***` 2350 cyc. Production-model rvfi (`hyp8-r60-hyp8_csr_flush_skip/trace_rvfi_hart_00.dasm`) shows `csrw mstatus` 0x30001073 (4×, incl. 0x80000010 + window-boundary 0x800002a2) and mret records — the r59b trace fix verified on the real build.
+Witnesses running: `hyp8-osbi-scalar-r31` (r59c model, 60M; still OpenSBI init, 0 PCs ≥0x80200000 at ~5M) and `hyp8-osbi-l3-r4` (hyp8-l3-integration-r59, 80M).
+
+### r61 open: hyp8-osbi-scalar-r31 kernel-side stall (facts, hypotheses, next checks)
+Facts (r31, r59c model, linux-scalar fw a9218107): OpenSBI v1.5 dump complete (uart.txt 2,627 B, through `Boot HART MEDELEG`), `sbi_hart_switch_mode` completed (no 0x8000efxx loop), payload entered ~21.77M, kernel running at high-half VAs (satp live). Trace frozen at cycle 21,945,565 in a 7-instruction poll loop 0xffffffff8005a8ac..a8ba (lw/ld pointer-table walk in kernel data 0xffffffff81216450/480, c.beqz flag test; poll word 0xffffffff81216480 reads constant 0x11). LSQ st[1] id=5 / st[2] id=7 to 0xffffffff81216468 valid, undrained — most likely the speculative post-loop stores re-allocated per iteration (not a drain defect; unproven). iti/rvfi: zero interrupt-cause trap records in the whole run. No kernel UART text (earlycon=sbi → the first printk would appear as SBI console ecalls → UART bytes; none) — the stall is before the first printk.
+Platform facts: DTS `riscv,isa` does not advertise sstc (kernel uses the SBI timer path); hyp8 config `SstcEn=1`; DTS timebase 12.5 MHz, clint@2000000 with MTIP/MSIP to CPU0_intc 3/7; OpenSBI reported `aclint-mtimer @ 12500000Hz`.
+Hypotheses: H1 a lock/flag wait on a word that an earlier atomic (lr/sc or AMO) left in a bad state (0x11 constant) — pre-irq early boot, which fits "before first printk"; H2 timer-tick wait with no interrupt delivery (CLINT mtime/mtimecmp/time_irq or mie/mideleg) — only if the kernel had already enabled interrupts; H3 store-drain defect — only if ids 5/7 are older than the retiring tid.
+Earliest discriminating checks (next session): (1) symbolize the loop PCs/data with a payload-matched vmlinux — candidates: /opt/testharness/cache/openwrt/build_dir/target-riscv64_riscv64_musl/linux-sifiveu_generic/linux-6.6.93/{vmlinux,System.map}; confirm the match by comparing payload.bin against the Image produced by that tree (sha256) before trusting symbols; (2) from the rvfi tail: last sstatus/sie writes (interrupts enabled or not), count of `ecall` with PC ≥ 0x80200000, and any `lr.w/d`, `sc.w/d`, `amo*` records targeting 0xffffffff81216480/468 with their results; (3) if H2: `[hang]` mip/mie/mideleg/mtimecmp/mtime and whether any AXI write hit the mtimer window; (4) if H3: compare st ids 5/7 against the commit pointer in the hang dump.
+Witnesses at hand-off: r31 hung (alive, 21.95M, no tohost); l3-r4 (r59 L3 model, 80M) running in OpenSBI init; r28/r30 retired. Boot claim: none — OpenSBI completes and the kernel starts; Linux does not yet reach its console.
+
+### r61 store/AMO readiness deadlock — fix
+Root cause (lead): `store_unit.sv` `st_ready = store_buffer_ready & amo_buffer_ready` — under OoO issue a younger AMO reached amo_buffer first (amo_rdy=0 in the r31 [hang] dump) so the older plain store at the SB head could never post (WAIT_STORE_READY), and the AMO never reached commit to free the buffer. Now `st_ready = instr_is_amo ? amo_buffer_ready : store_buffer_ready`.
+Evidence: r31 + l3-r4 both wedged identically at ~21.9M/ret=5,984,752 / ~ret=6,614,057 with `SU state=3 tid_q=7 treq=1 dtlb_hit=1 st_ready=0`, `dc_req=0`, LSQ `st[1]/st[2]` to 0xffffffff81216468, head `fu=2 op=62 pc=ffffffff8005a91a`.
+`hyp8-r61-closure` (821 files, +hyp8_amo_store_order.S) + `hyp8-integration-r61b` (sha 994d9db9e434f182): lint scalar/smt2 rc=0, `hyp8-r61-lint-l3` clean. Smokes `hyp8-r61-*`: h34=685 / h33=1010 / bc=492 / csr_flush_skip SUCCESS 2350 — unchanged.
+Directed test `hyp8_amo_store_order`: FAILED tohost=2 at 942 cyc on BOTH r61b and r60b — does NOT reproduce the wedge (no timeout on the old model) and verdict unchanged by the fix — flagged; the kernel witness is the real proof.
+Leaves: rerun on the correct leaf closure (first attempt used the integration closure — missing tb_g6lc_hyp8_memory.sv).
+Witness: `hyp8-osbi-scalar-r32` launched on r61b (60M, UART probe, fw a9218107); l3-r4 left wedged on the pre-fix model.
+
+### r61b amo_buffer owner-liveness sweep (lead)
+The r61 directed test did not reproduce the wedge on the old model (hyp8 memory-op ordering did not let the younger AMO ahead of the older store), which points at the alternative mechanism for r31: a wrong-path AMO posted into the depth-1 amo_buffer AFTER its cancel pulse had expired (T35 lifetime), i.e. a DEAD entry no commit will ever pop — same class as the r47 arbiter and csr_buffer liveness sweeps. `store_unit.sv`: `amo_cancel` now also fires on `!sb_live_i[amo_tid_q]` (flush_amo_buffer still refuses while amo_valid_commit_i). The r61 st_ready decoupling stays (it is independently correct). Test `hyp8_amo_store_order.S`: v2 chain fixed (was storing to address 0 — the tohost=2/raw 5 fail on both models), new v4 trains a branch not-taken then takes it after a slow chain so the fall-through amoadd is speculatively issued and cancelled; the correct path then needs the buffer (wedge = budget-out) and checks lock2 unchanged by the wrong path.
+
+### r61c store/AMO liveness sweep — fix v2
+Second mechanism (lead): `store_unit.sv` `amo_cancel` now also fires on `!sb_live_i[amo_tid_q]` — a wrong-path AMO posted after its cancel pulse expired is a dead entry nothing pops (same class as the csr_buffer liveness sweep). r61 st_ready decoupling retained. Test `hyp8_amo_store_order.S` fixed (v2 addr-0 bug) + v4 (branch-trained not-taken, last iteration taken after a slow chain → fall-through amoadd speculatively issued+cancelled; lock2 must stay 7).
+`hyp8-r61c-closure` (821) + `hyp8-integration-r61c` (build_complete) + `hyp8-l3-integration-r61c-2` (L3, build_complete): lint scalar/smt2 rc=0, `hyp8-r61c-lint-l3` clean (lint_complete, 0 %Error).
+Smokes (all five SUCCESS): h34=685 / h33=1010 / bc=492 / csr_flush_skip=2350 / amo_store_order=SUCCESS 2091.
+Non-vacuity check: `hyp8_amo_store_order` also SUCCESS at 2091 on the OLD `hyp8-integration-r60b` model — the directed test still does NOT trigger the deadlock on the buggy model (the microbench can't create the younger-AMO-holds-buffer-while-older-store-waits interlock); it is functional coverage only, the kernel witness is the wedge reproducer.
+Leaves (r61c-leaf-closure, 395): HYP8_ISSUE_PASS checked=99 + HYP8_MEMORY_PASS checked=152, rc=0, warnings=none.
+Witnesses: r32 + l3-r4 killed; `hyp8-osbi-scalar-r33` launched on r61c (60M); `hyp8-osbi-l3-r5` launched on `hyp8-l3-integration-r61c-2` (80M) — both alive. Next watchpoint: whether they clear the ~21.9M-cycle 0xffffffff8005a91a store-translation wedge.
+
+### r62 open: hyp8-osbi-scalar-r33 (r61c) wedges at the same kernel AMO (facts + next check)
+r33 (r61c: st_ready decoupling + amo_buffer liveness sweep) froze with the identical `[hang]` block as r31 (cyc≈21,949,773): SB head slot 3 = fu STORE-class op 62 (AMO) pc 0xffffffff8005a91a, issued=1 valid=0; SU state=WAIT_STORE_READY tid_q=7 treq=1 dtlb_hit=1 st_ready=0; amo_rdy=0 (amo_buffer occupied); STQ spec=0 commit=0; LSQ st[1] id=5 / st[2] id=7 addr 0x...81216468 (= x9+0x18, the AMO target) addr_v=data_v=1; IQ holds AMO instances at the same pc (slot 11 op 62, slot 9 op 64) with ready=0010010; LSU bypass cnt=1 (e1 fu=2 tid=5); dc_req=0; no interrupt/ecall records.
+Reading: with `st_ready` for an AMO = amo_buffer_ready, state 3 + amo_rdy=0 means the SU is holding an AMO (slot 7) behind an AMO already in the depth-1 amo_buffer (slot 5), while the commit head (slot 3) is a third AMO instance with no result. AMOs are a head-only IQ class (g6lc_iq_legal C_AMO: legal only when tid == commit_ptr, registered compare), so slots 5 and 7 can only have issued when they were at the head — i.e. they are OLDER instances of the spin-loop AMO that already retired (or should have) and whose amo_buffer/LSQ bookkeeping was never released, OR slot 3's AMO issued and was dropped from the LSU without a result (T40 pop / replay path) so the head can never complete. The r61 fixes were correct in their own right but are not the owner of this wedge.
+Earliest discriminating check (next session): windowed trace from the first issue of the slot-3 AMO (pc 0xffffffff8005a91a): per cycle — IQ take of slots 3/5/7 (legal/at_head), lsu_bypass push/pop with tid, SU state/trans_id_q/valid_o/pop_st_o/translation_req_o/dtlb_hit_i/ex_i.valid, amo_buffer push/pop/flush with amo_tid_q and amo_resp.ack, commit amo_valid_commit/commit_ack for the AMO slots, LSQ st alloc/release for ids 3/5/7, and the branch resolution/cancel pulses of the loop. Expected outcomes: (a) an AMO retired without its amo_buffer pop (amo_resp.ack missed → fifo full forever) → fix the pop/ack handshake; (b) slot 3 popped from the bypass without posting (exception/replay pop with no re-issue) → fix the pop path; (c) a retired AMO's LSQ st entry never released → LSQ release for AMO class.
+Also noted: `hyp8_amo_store_order.S` passes on both old and fixed models (v1–v4 do not reproduce the wedge; coverage only) — the kernel witness remains the reproducer; a directed test for the spin-loop AMO shape (amoswap in a predicted loop, branch resolving late) is still to be written once the mechanism is pinned.
+Witnesses at hand-off: r33 wedged (alive, no tohost), l3-r5 running (r61c L3, 80M; expected to wedge the same way), r31/r32/l3-r4 killed.
+
+### r63 timing-hoist pass
+Edits (equivalent rewrites, no functional change):
+- `ooo/g6lc_rename_recover.sv`: `ckpt_cnt_pre` wire carries base+reserve+repair; retire loop reads the wire and writes `ckpt_cnt_d[h]` once per hart (was RMW across 4 legs).
+- `g6lc_mmu/g6lc_tlb.sv`: `row_inval[i]` per-row generate wires flatten the RVH sfence/vvma/gvma arm chain; `tags_n[i].valid` is a two-arm mux (inval | update).
+- `ooo/g6lc_iq_arb.sv`: `pres_live[p]`/`win_live[p]` hoisted; presentation split into control block (valid+ack) and payload block (payload driven whenever a record is present; live source selected by pres_live — pres_q[p].v-only sel would leak stale payload when pres is dead-but-set behind a live win).
+- `sb_lifecycle.sv`: `issue_open[i] = ~issue_full[i]` wire; offer/ack cone reads the wire.
+- `g6lc_mmu/g6lc_shared_tlb.sv`: `patched_pte = '0` default in tag_comparison (removes the dormant latch — documented).
+Verification: `hyp8-r63-closure` (821) + `hyp8-integration-r63` (sha 01721c8b73b0b1, build_complete): lint scalar/smt2 rc=0; `hyp8-r63-lint-l3` clean (0 %Error all profiles). Smokes all five SUCCESS — h34=685 / h33=1010 / bc=492 / csr_flush_skip=2350 / amo_store_order=2091 (identical to r61c — rewrites are neutral as expected). Leaves (r63-leaf-closure, 395): HYP8_ISSUE_PASS checked=99 + HYP8_MEMORY_PASS checked=152, rc=0.
+Not yet done: `g6lc_ptw_leg_decode` L174 and `ooo/g6lc_slice_dispatch` L202 hoists + `shared_tlb` L579 dependency hoist (excluded-module measurement items), `analyze-r63.json`/`analyze-r63-all.json` board runs (sv-timing toolchain is lead-side).
+
+### r63 lead review + board (analyze-r63.json sha c058046d35d7b263, argv in analyze-r63.cmd)
+- g6lc_tlb per-row `tags_n` split: 30.85 -> 48.62 (dense-control-cone billing of the per-row generate) — COUNTERCASE, reverted byte-exact to the r61c pin (sha d7dbb51b).
+- g6lc_rename_recover ckpt_cnt_pre hoist: 31.80 -> 31.80 (null) — reverted byte-exact (c273cd24); the 31.8 is the bundle makespan on 26 LHS with max_field 11.0 and no intra-block dependency to hoist — a floor under this analyzer.
+- g6lc_iq_arb pres_live/win_live + control/payload split: 32.85 -> **30.61** regtoout L826 — KEPT (payload select by pres_live is the equivalent form: a dead-but-set pres with a live win must serve the win payload).
+- sb_lifecycle issue_open wire: 25.87 -> **24.87** — KEPT.
+- g6lc_shared_tlb `patched_pte='0` default: 51.25 unchanged (excluded arm) — KEPT as the dormant-latch fix; its dependency hoist, g6lc_ptw_leg_decode L174 and g6lc_slice_dispatch L202 remain TODO (r64).
+- Hygiene: the sidekick's edits re-encoded three files' non-ASCII comment characters (cp1252 mojibake) and wrote g6lc_iq_arb.sv with LF; the lead restored the exact bytes (per-line cp1252->utf-8 inverse) and CRLF; diffs vs the r61c pins now contain only the intended RTL lines (iq_arb 34 lines, sb_lifecycle 8, shared_tlb 2). No module rose on the active board (g6lc_rvfi_probes 7.5->8.5 from the r59b trace fix).
+- Lint/smokes/leaves of the sidekick's r63 run (hyp8-integration-r63 sha 01721c8b) covered the tlb/rename_recover variants that are now reverted; the kept set is a subset, re-gated in the next integration.
+
+### r64 S6 excluded-arm hoists (partial)
+- `g6lc_mmu/g6lc_ptw_leg_decode.sv` L174: shared leaf-PTE predicates hoisted to wires `leg_ppn_hi_err`/`leg_misaligned`/`leg_gtrans_i_ok`/`leg_gtrans_d_ok` — the two identical ppn-high guards, the misaligned gate, and both g-translation conditions now evaluate once.
+- Pending (not applied): `ooo/g6lc_slice_dispatch` L202, `g6lc_mmu/g6lc_shared_tlb` L579 dependency hoists; `analyze-r64-all.json` board + closure-only lint configs (UseSharedTlb=1/PtwDecodeStage=0/SliceOoOEn=1).
+- `hyp8-r64-closure` (821) + `hyp8-integration-r64` build_complete, lint scalar/smt2 rc=0; smokes all five SUCCESS (685/1010/492/2350/2091 — identical).
+
+### r62 probe status
+`hyp8-probe-r62b2` probe model built (store_unit/amo_buffer/commit_stage/iq_arb/lsu_bypass/g6lc_lsq/controller +r62_trace windowed displays, window 21.9M-21.96M); `hyp8-osbi-scalar-r34p` launched (linux fw a9218107, 22.2M) — running, pre-window. First probe build attempt failed on a non-signal `take` in iq_arb; fixed.
+
+### r64 S6 lead measurement
+- g6lc_ptw_leg_decode predicate hoist: 53.0 -> 53.0 (analyze-r64.json sha 40510e4243f4bbd3) — null: the limiter is the `leg_state_d` unique-case crit arm (28.5, prep_arm 28.5), not an intra-block dependency; reverted byte-exact to the r63 pin. The PDEC=0 arm would need the same bundle-capture split the active PDEC arm got in r43-T (a stage, config-gated) — recorded under r64-program S6 as a stage item, not a hoist.
+- slice_dispatch L202 / shared_tlb L579 hoists and the closure-only lint trio remain TODO (sidekick context-limited; one item per handoff).
+
+### r62 probe result — AMO-buffer self-deadlock mechanism (evidence)
+Witness `hyp8-osbi-scalar-r34q` on probe model `hyp8-probe-r62c` (+fetch_win_trace windowed displays in store_unit/amo_buffer/commit_stage/iq_arb/lsu_bypass/g6lc_lsq/controller, window 21.9M-21.96M); 420,006 `[r62]` lines; wedge reproduced at ~21.9458M (75 [hang] dumps, budget-out 22.2M, ret frozen at 5,984,752 as r31/r33).
+
+Timeline (cycles):
+- ~21.900.0xx-21.945.5xx: normal flow — plain stores (op 0x25/0x26) through SU (state_q 00->01->00, pop_st_o pulses); amo_buffer empty (amo_valid=0). Earlier AMOs committed correctly (21924023 push with amo_valid_commit_i=1 -> amo_resp.ack=1 at 21924038 -> commit_ack at 21924062, pc=0xffffffff8065b814, amo_valid_commit_o=1 flush_commit_o=1).
+- cyc 21,945,777: `amo_buffer valid_i=1 no_st_pending_i=1 amo_valid_commit_i=0 flush_i=0 cancel_i=0` — a SPECULATIVE AMO push lands with NO commit validation. From 21,945,778 on: `amo_valid=1` permanently, `cancel_i=0`, `cancelled_mask_i=0` — the entry is never cancelled (its tid is live — the head AMO's own slot).
+- Frozen state (identical 21.9459M→22.1999M): `store_unit state_q=11(WAIT_STORE_READY/3) instr_is_amo=1 trans_id_q=7 st_ready=0 amo_buffer_ready=0 translation_req_o=1 dtlb_hit_i=1 lsu_ctrl.vaddr=0xffffffff81216468`; `commit_stage pc=0xffffffff8005a91a fu=2 op=3e valid=0 amo_valid_commit_o=0`; `controller` all flush legs 0.
+
+Mechanism: the head AMO (pc=0xffffffff8005a91a, LSQ st[2] id=7, vaddr 0xffffffff81216468) speculatively pushed into amo_buffer at 21945777 while amo_buffer_ready was momentarily 1; the FSM stayed in WAIT_STORE_READY — the push consumed the sole buffer slot but was not marked posted. The resident entry can only fire on `amo_req = no_st_pending & amo_valid_commit & amo_valid`; `amo_valid_commit_o` requires the commit-head AMO to be `valid`, which requires the SU's result, which requires the entry to fire — self-deadlock. No cancel/flush leg ever fires for the entry (sb_live sees it live).
+
+Owner: store_unit.sv AMO post/FSM handshake — either the state must advance on the accepted push (register the post) or `st_ready` must treat a resident own-tid entry as already-posted; the `treq=1 dtlb_hit=1` field is the same stale signal observed in the unprobed [hang] dumps (the SU is simultaneously asserting a DTLB request that reports hit — part of the same held cycle).
+
+Artifacts: /opt/testharness/runs/hyp8-osbi-scalar-r34q/run-hyp8.log (420k r62 lines + 75 hang dumps), /opt/testharness/runs/hyp8-r62-ev/output/pull_r62_events.log (event extraction), tools/pull_r62_tail.py + pull_r62_events.py.
+
+### r62 fix (lead): store_unit duplicate-AMO self-deadlock
+Mechanism (r34q probe): an AMO already posted into the depth-1 amo_buffer is presented to the store unit AGAIN (same trans_id at the bypass head — a replay re-issue after the first copy had posted; the SB entry's valid was cleared by the replay so the head shows valid=0). The second copy waits in WAIT_STORE_READY on amo_buffer_ready, which only clears when the resident entry fires on amo_valid_commit — which needs the head's result — which needs this request: self-deadlock (Linux first spinlock, ret frozen at 5,984,752 on r31/r33/r34q).
+Fix: `amo_dup = valid_i && instr_is_amo && !amo_buffer_ready && (amo_tid_q == lsu_ctrl_i.trans_id)`. IDLE accepts the duplicate even with st_ready=0 (pop + VALID_STORE); VALID_STORE re-publishes valid_o but suppresses the second push (`amo_dup_q`); WAIT_STORE_READY exits on amo_dup. translate_off counter `[equiv] store_unit amo_dup: consumed=N` (+stq_trace prints each). The r61/r61c changes stay. Still to establish: WHY the AMO was re-issued (replay of a head-only op) — a replay of a posted AMO should be impossible or should flush the buffer; tracked as r62b.
+
+### r65 store_unit amo_dup fix — verification
+Lead fix in store_unit.sv: `amo_dup` consumes a re-presented AMO whose own entry is already resident in amo_buffer (re-publishes valid_o without a second push; `[equiv] store_unit amo_dup: consumed=N` counter). `hyp8-r65-closure` (821) + `hyp8-integration-r65` (sha 49c41cc904ca5d, build_complete): lint scalar/smt2 rc=0; `hyp8-r65-lint-l3` 0 %Error all profiles. Smokes all five SUCCESS — h34=685 / h33=1010 / bc=492 / csr_flush_skip=2350 / amo_store_order=2091 (identical). Leaves (r65-leaf-closure, 395): HYP8_ISSUE_PASS checked=99 + HYP8_MEMORY_PASS checked=152, rc=0.
+Witness `hyp8-osbi-scalar-r35` launched on r65 (60M, linux fw a9218107, +stall_census +hang_dump=2000 +equiv_report +rvfi_cycle_stamp) — watchpoint: crossing the ~22.3M-cycle AMO self-deadlock point where r31/r33/r34q froze.
+
+### r62b root cause (lead): stale at_head legality on IQ entry re-allocation
+r34q event list: tid-5 AMO (op 0x40) issued at 21,945,775 and posted into amo_buffer at 21,945,777 while the commit head was the OLDER tid-7 AMO (pc 0xffffffff8005a91a, valid=0); tid 7 then waits in WAIT_STORE_READY on amo_buffer_ready forever (its result is what amo_valid_commit needs). AMOs are a head-only IQ class, so a younger AMO must never issue: `g6lc_iq_legal` computes `at_head_d[b][e] = (info_tid == commit_ptr_i)` registered to `at_head_q`, and `legal_d` registered to `legal_o` — at_head_q is one cycle staler than the entry's class/tid. When an IQ entry is re-allocated right after its previous head-only occupant left from the head, the stale at_head_q=1 makes the NEW occupant legal for one cycle; a ready AMO (spin-loop operands are ready) issues non-head. Fix: `legal_d` requires `at_head_q && (info_tid_i == commit_ptr_q)` (live tid vs registered pointer) — rejects the stale bit, keeps the "legal the cycle after it reaches the head" contract. The r62 `amo_dup` SU handling and r61/r61c changes stay (defensive; `amo_dup` consumed=0 expected). Verification: hyp8-integration-r66, smokes, issue leaf, lint x3, witness r36.
+
+### r66 iq_legal at_head staleness fix — verification
+Lead fix in `ooo/g6lc_iq_legal.sv`: `at_head_q` is one cycle staler than the entry's class/tid — a re-allocated IQ entry inherited at_head=1 and let the younger tid-5 AMO issue non-head (speculatively posting to amo_buffer before its commit turn). `legal_d` now requires `at_head_q && (info_tid_i == commit_ptr_q)`. `hyp8-r66-closure` (821) + `hyp8-integration-r66` (sha f090ec28d85bce, build_complete): lint scalar/smt2 rc=0; `hyp8-r66-lint-l3` 0 %Error all profiles. Smokes all five SUCCESS — h34=685 / h33=1010 / bc=492 / csr_flush_skip=2350 / amo_store_order=2091 (identical). Leaves (r66-leaf-closure, 395): HYP8_ISSUE_PASS checked=99 + HYP8_MEMORY_PASS checked=152, rc=0.
+Witness `hyp8-osbi-scalar-r36` launched on r66 (60M, linux fw a9218107, +stall_census +hang_dump=2000 +equiv_report +rvfi_cycle_stamp) — watchpoint: crossing the ~22.3M-cycle AMO self-deadlock point where r31/r33/r34q/r35 froze.
+
+### r62c open (lead): r36 wedges identically after the at_head fix — refined hypothesis + next probe
+r36 (r66: iq_legal live tid compare + SU amo_dup + r61/r61c) wedged with the same signature (ret 5,984,752; SU WAIT_STORE_READY tid 7; amo buffer resident; commit port0 pc 0xffffffff8005a91a op 0x3e valid=0; `[hang]` commit_ptr=3). The r34q event list shows the loop body has TWO AMOs: pc 0x...a91a (op 0x3e) and pc 0x...a922 (op 0x40); bypass program order per iteration is tid3(store 0x26) -> tid5(AMO 0x40 @a922) -> tid7(AMO 0x3e @a91a of the next iteration). tid 5 pushed into amo_buffer at 21,945,777 (amo_valid_commit_i=0), tid 7 then stalls behind it.
+Refined reading: tid 5 (a922, iteration k-1) is OLDER than tid 7 (a91a, iteration k) in program order and may well have issued legitimately at the head; the deadlock then is that the COMMIT PORT presents slot 7 (pc a91a, valid=0) while the resident buffer entry belongs to slot 5, so `amo_valid_commit` (which needs the presented head to be the valid AMO) never rises for slot 5 — i.e. a commit-presentation/reclaim-pointer disagreement (sb_commit_bundle port-0 select vs scoreboard commit_ptr; MixedSmt head select / privileged-head reroute) rather than an issue-legality or buffer-readiness defect. The `[hang]` line `SB head slot=3 ... commit_ptr=3` with port0 pc a91a (slot 7) is consistent with port 0 not presenting commit_ptr.
+Next probe (one run, r62 model rebuilt on r66, window 21.94M-21.95M): per cycle print scoreboard commit_ptr, sb_commit_bundle sel_oh/p0 selection terms (priv, p0_oh, cptr_oh, head_slot_i/head_valid_i), commit port0 {slot, tid, pc, op, valid, issued, cancelled}, iq_legal at_head_q/legal_o for the IQ entries holding tids 3/5/7, amo_buffer push tid (trans_id_q at valid_i), amo_valid_commit_o. Expected: identify why slot 5's AMO is not presented at port 0 when it is the oldest unreclaimed entry (or, if commit_ptr really is 7, why tid 5 was legal). Fix follows from that answer; the three defensive changes already landed stay.
+Verification state of the r66 tree: lint x3 clean, five smokes identical (685/1010/492/2350/2091), issue/memory leaves pass. Witness: r36 wedged (no tohost); l3-r5 stale (pre-r62 model) — kill at next session start.
+
+### r62c probe result (r66 tree, r37p witness)
+Wedged identically (ret=5,984,752, budget-out 22.0M); 100,010 [r62] lines. Key events: flush at ~21945736 (commit_ptr 13→0, head_valid_c_o=0); commits remarched 0→1→3; head = SB tid 3 (pc=0xffffffff8005a91a op=0x3e, the AMO). LSU id 5 AMO (op=0x40) pushed into amo_buffer at 21945786 while commit_ptr=3 (non-head); LSU id 7's AMO (op=0x3e — the head's own LSU-side request) presented at 21945790 and locked SU state 11 trans_id_q=7 forever. amo_dup consumed=0 — resident entry is LSU id 5, held request is id 7 — different ids, not a re-presentation. Port 0 presents commit_sel_slot_i[0]=00011 throughout the freeze.
+
+### r62c probe result — lead reading
+r37p (r66 probe model) events: 21,945,719 LSU id 21 AMO (op 0x3e) posts normally; 21,945,729 id 23 AMO (0x40) waits; **21,945,736 a flush** (SB commit_pointer 13 -> 0, epoch bump) ; 21,945,782 the commit head is SB slot 3 = AMO op 0x3e pc 0x...a91a with issued=1 valid=0; 21,945,784 LSU request id 5 (op 0x40) arrives and posts into amo_buffer at 21,945,786 (not at head); 21,945,790 LSU request id 7 (op 0x3e) arrives and freezes in WAIT_STORE_READY; slot 3's own LSU request never appears after the flush; slot 5 is never presented at port 0; commit_ptr stays 3.
+Two sharpened hypotheses: (H-A, favoured) the flush at 21,945,736 cleared the lsu_bypass/store-unit request of the already-ISSUED head AMO (slot 3) while the scoreboard kept the entry (issued=1) — an orphaned request: the entry can never obtain a result and the pipeline wedges behind it (the younger AMOs 5/7 then merely decorate the wedge). Owner: the flush class raised at 21,945,736 (which legs? frontend redirect / flush_unissued / mem replay) vs lsu_bypass's flush handling — the bypass must only drop requests whose SB entries are also squashed, or the scoreboard must clear `issued` for dropped requests so they re-issue. (H-B) tids 5/7 issued despite the head-only class — check whether their IQ takes preceded the flush (then legality is irrelevant) or followed it (then the r66 gate did not hold). Discriminator: the same probe window with `[r62:controller]` flush legs decoded at 21,945,736 and the lsu_bypass flush/pop lines for id 3 (or whichever id slot 3's request carried) between 21,945,700 and 21,945,740, plus the IQ take cycles for ids 5/7.
+State at hand-off: r66 tree lint x3 clean, five smokes identical, leaves pass; witnesses r36/r37p wedged at 21.95M; l3-r5 killed. No boot claim.
+
+### r62c flush census
+Flush at 21945735-39: flush_if/id/ex=1 with set_pc_commit_o=1 at 21945739 (commit-driven redirect); cancelled_mask_i=0 throughout (full-slot clear, not masked cancel). Pre-flush in-flight LSU reqs: id 21 op 0x3e (pushed buffer @21945719), id 23 op 0x40 (@21945729), id 25 op 0x3e (@21945735) — all dropped by the flush; LSU ids restart post-flush (id 0 @21945766). Post-flush order: head becomes SB tid 3 @21945782 (pc=0xffffffff8005a91a op=0x3e valid=0); LSU id 5 (AMO op 0x40) issues @21945784 → buffer push @21945786; LSU id 7 (AMO op 0x3e = the head's own LSU-side request) issues @21945790 → SU locks state 11 trans_id_q=7. LSU trans_ids are allocated in LSU-arbitration order (younger AMO won the race), NOT SB program order.
+
+### r62c flush census — lead reading and hand-off
+Facts: commit-redirect flush (set_pc_commit at 21,945,739; flush_if/id/ex 735–739) restores the SB pointer 13 -> 0; the three in-flight LSU AMO requests (ids 21/23/25) are dropped with their SB entries (correct: they belong to the squashed window). Post-flush allocation is program-ordered 0,1,2,3(AMO @a91a = head),4,5(AMO @a922),6,7(AMO @a91a next iteration). LSU requests then arrive as id 0 (store), id 5 (AMO, younger) at 21,945,784 -> posts into amo_buffer at 21,945,786, id 7 (AMO, younger) at 21,945,790 -> WAIT_STORE_READY; slot 3's own LSU request never appears although `issued=1`; commit port 0 presents slot 3 (valid=0) forever. `[hang]` op values are hex (op=62 -> 0x62 AMO_MINDU-range AMO; 64 -> 0x64) — both are AMO-class (SU instr_is_amo=1).
+Two defects to separate (both post-flush): (D1) head-only legality did not hold — slots 5 and 7 (AMO class) issued while commit_ptr was 3; the r66 live compare makes this impossible IF `commit_ptr_i` wired into g6lc_iq_legal is the scoreboard commit pointer the probe printed — check the wiring (issue_stage -> g6lc_iq -> g6lc_iq_legal `.commit_ptr_i`) and print at_head_q/legal_o for the entries holding tids 3/5/7 at 21,945,780–790; (D2) slot 3's issued request is missing from the LSU: trace the IQ take of tid 3 (g6lc_iq_bank take_v/cand for the entry with tid 3) and the lsu_bypass push — if it was taken and never pushed (or pushed and dropped by the tail of the drain flush at 739), the fix is in the issue->bypass handoff across the counted drain (a take in the drain's last cycles must either be replayed or must clear `issued`). Defensive fix regardless (lead design, not yet applied): in store_unit accept AMOs only when `lsu_ctrl_i.trans_id == commit_tran_id_i` (the committing/head tid) — `st_ready = instr_is_amo ? (amo_buffer_ready && at_head) : store_buffer_ready` — so a younger AMO can never occupy the depth-1 buffer ahead of the head; with D2 fixed this gate is never exercised (assert-and-count it).
+- r62c defensive gate applied (lead): store_unit `st_ready` for AMOs = `amo_buffer_ready && (lsu_ctrl_i.trans_id == commit_tran_id_i)`; a younger AMO can no longer occupy the depth-1 buffer ahead of the head. D1/D2 investigation (why slots 5/7 issued non-head post-flush; where slot 3's request went) remains open and is the next probe.
+
+### r67 amo_at_head gate — verification + smoke regression
+Lead fix in `store_unit.sv`: `st_ready` for AMOs = `amo_buffer_ready && amo_at_head` where `amo_at_head = (lsu_ctrl_i.trans_id == commit_tran_id_i)` — AMOs post only at commit head. `hyp8-r67-closure` (821) + `hyp8-integration-r67` (sha 5d76323255117d, build_complete): lint scalar/smt2 rc=0; `hyp8-r67-lint-l3` 0 %Error all profiles. Smokes: h34=685 / h33=1010 / bc=492 / csr_flush_skip=2350 SUCCESS — **hyp8_amo_store_order FAIL: wedged 400k cycles, no tohost verdict, ret halted at first AMO (PCs ~0x80000144-48, loads retiring before it)**. Leaves: HYP8_ISSUE_PASS checked=99 + HYP8_MEMORY_PASS checked=152 rc=0 (memory leaf's AMO cases did not stall — bench drives the head tid correctly). Regression hypothesis: the younger/early AMO request can occupy the single store_unit lane waiting on `amo_at_head` while the actual head instruction can't reach the SU to complete — commit_ptr never reaches the AMO's tid — a new circular dependency upstream of the buffer (no RTL change made; directed test unchanged). Witness `hyp8-osbi-scalar-r38` launched on r67 (60M, linux fw, +equiv_report) — will report whether the kernel AMO path wedges early or reaches the ~22.3M point.
+
+### r67 countercase + D1 probe (lead)
+The r67 SU gate (AMO posts only when trans_id == commit_tran_id_i) deadlocked `hyp8_amo_store_order` at its first AMO (400k, no tohost) while h34/h33/bc/csr_flush_skip stayed green and r38 (linux) kept retiring to ≥20M. The `+iqleg_trace` probe (hyp8-probe-iqleg) shows the v1 AMO (tid 0x0c, cls C_ST|C_AMO) is NEVER taken: legal_i=1 at cyc 434 (ready=0), then legal_o cleared from 435 on with commit_ptr_i==0x0c (it is the head) — the entry is held by a legality term other than the head compare: the store-order arm `!(is_st && older_st)` (st_front frontier) or the at_head bit index (the probe's at_head_q bit 24 may not be this entry's). The SU gate turned this latent IQ-side stall into a wedge; without the gate the AMO was posted by a path that is not the normal take (to be identified: dispatch-time lsu path / a take not logged). Gate WITHDRAWN (store_unit back to r61c st_ready form); r61/r61c/r62 amo_dup and the r66 iq_legal live compare stay. Next: (1) in g6lc_iq_legal print the four legal_d terms separately for the AMO entry (head_only arm, is_ld arm, is_csr arm, is_st/older_st arm with st_front_v_q/st_front_tid_q) on the directed test; (2) find the path that issues an AMO when legal_o=0 (grep iq_bank take gating and any LSU dispatch bypass); the fix is at that path — AMOs must issue only via the legal head-only take.
+
+### r68 D1 + mc target prep
+**D1 (iqleg term probe, probe models hyp8-probe-iqleg2 / hyp8-probe-iqleg-r67):** `hyp8_amo_store_order` + `+iqleg_trace`. Term breakdown for the wedging run's stuck AMO entry: `b=4 e=0 tid=0x12 cls=0010010` (C_ST|C_AMO) with `commit_ptr=0x0c` — the AMO is YOUNGER than the head and correctly `legal_d=0` (t_hd=1 since tid!=ptr_q; t_st=1 since st_front=0x0e older). The real freeze: `commit_ptr0` pinned at `0x0c` forever — the head op (tid 0x0c, cls=0000001 C_LD taken at cyc 430 legal=1) never completes because its LSU request sits behind the younger AMO's gated SU request in the lsu_bypass FIFO — LSU-ordering head-of-line deadlock, not IQ legality. On the passing run (current tree, r67 gate withdrawn): same AMO stays illegal while younger (correct), reaches head at ~cyc 713 (ptr=0x12, sfront=self) -> legal_d=1 -> issue; SUCCESS 2091 cycles. Other AMOs take with legal_i=1 ready=1 (real issues); legal_i=0 takes (cyc 1144/1174/1248/1278) are kill/cancel-path takes of dead entries.
+**r38 verdict (r67 gate):** wedged at cyc=21947800, ret=5,984,752 — SU `state=3 tid_q=5` (the YOUNGER AMO's request holds the store-unit lane, not the head's own tid 7/3); `st_ready=0` forever because commit_ptr can't reach tid 5 while the head AMO's LSU request waits behind tid 5 in the LSU FIFO. The amo_at_head gate moved the circular wait from amo_buffer to store_unit + starves older LSU traffic — reverted by lead; store_unit back to r61c form.
+**mc target:** g6lc64_hyp8_mc_config_pkg.sv created (NrCores=4, NrHarts=1, NrIssuePorts=8, L2 256KiB/L3 1MiB unconditional, SnoopFilterEn=1, CohInvalDepth=4, CohAxiStarveLimit=16); Flist.hyp8_mc_sim swaps the config pkg; hyp8-build-harness.sh gained g6lc64_hyp8_mc (TARGET_HARTS=4); g6lc-hyp8-mc.dts + g6lc-hyp8-mc-linux.dts (4 cpu@/intc, 4-hart clint/plic, L2/L3 nodes; dtb sha 08f301e8); linux-mc fw profile in build_boot_firmware.py; run_hyp8_integration.py gained HYP8_BUILD_TARGET env + HYP8_LINT_MC mc lint profile (mc flist). hyp8-mc-integration-r1 building.
+
+### r68 lead synthesis — the kernel wedge owner, refined to one discriminating check
+Established: (1) AMOs only issue head-legal via the normal take; (2) takes with legal_i=0 exist as KILL-PATH takes of cancelled entries; (3) the lsu_bypass is a single in-order FIFO into one store_unit lane, so a stalled store-class request at its head blocks every request behind it, including an older one; (4) in the kernel wedge the post-flush LSU requests id 5 (AMO @a922) and id 7 (AMO @a91a) arrive BEFORE the head slot 3's own request and cannot have been head-legal (commit_ptr went 0->1->3). Therefore ids 5/7 were most likely NOT live issues of the post-flush slots 5/7 but DEAD pre-flush IQ entries taken through the kill path (or surviving in the arb's staged registers across the flush) whose cancel-mask bit had expired and whose tid had just been re-allocated to live post-flush instructions — the request enters the LSU with a reused tid, posts into amo_buffer (owner-liveness sweep sees the NEW live slot 5 and keeps it), and the second dead request blocks the bypass head in WAIT_STORE_READY, starving slot 3's real request behind it. This is the r47 class (cancel lifetime vs late consumer) at the IQ->LSU seam.
+Discriminating check (one grep on the r37p/r62 log, no sim): for the LSU requests id 5 @21,945,784 and id 7 @21,945,790, find the IQ/arb take lines that produced them (bank/entry, legal_i, source pres/win/win_s) and the DISPATCH cycle of those IQ entries. Dispatch before the flush at 21,945,735 => dead entry survived the flush (find the register: iq_bank entry valid, arb win_q/pres_q/win_s, lsu_bypass) and the fix is to clear it on flush_i / drop its request (also: a kill-path take must never assert issue_valid toward an FU). Dispatch after => revisit legality.
+Changes standing from r61–r67: st_ready decoupling, amo_buffer liveness sweep, SU amo_dup, iq_legal live compare (all verified; none is the owner). The r67 SU gate is withdrawn (countercase).
+
+### r68 — IQ legality occupant identity (D1 owner), lr_sc window consequence, int-dot pipeline (2026-10-26)
+Lead-authored. Reasoning lenses: coding-philosophy §0 (weigh links, change the surviving mechanism), workflow P2/P4/T1/T2/T6/T7/T9, heuristics H1/H2/H5, RT-P2 (identity precedes correlation), RT §4.4 (repetition is not generality), ALGORITHMS A120/A134 (facts registered at their update edge).
+
+SEGMENT CARD
+  QUESTION      Why do post-flush head-only ops (lr.d/sc.d, tids 5/7) issue while commit_ptr=3, and why does the head lr.d (tid 3) never reach the LSU (r62c D1/D2)?
+  ENVELOPE      g6lc64_hyp8 r66/r67 trees; r37p/r34q probe facts; hyp8_amo_store_order r67 wedge and the lead's iqleg term probe (r68 D1).
+  CONTRACT      g6lc_iq_legal: "a bit may stay 0 a cycle longer, never 1 too early" — for the occupant it serves.
+  OBSERVATIONS  (a) r37p: younger head-only tids issued ~6 cycles after allocation with ready operands; (b) iqleg probe: "takes with legal_i=0" at cyc 1144/1174/1248/1278 — but g6lc_iq_arb.take_v_o fires only on take_grant, which excludes every killed record, so those are NOT kill-path takes; (c) the directed test hyp8_amo_store_order was written on the premise "under OoO the younger address-ready AMO reaches the amo_buffer first" — i.e. non-head AMO issue was the observed normal; (d) legal_d reads the entry's record with no liveness term and legal_o is one register behind it.
+  MECHANISM     legal_o(t+1)=legal_d(t) is computed from whatever record slot (b,e) holds at t. A new occupant lands at A+2 (pend-staged alloc); legal_o(A+2) was formed at A+1 from the STALE record (invalid, previous class/tid). For a stale non-ordering class (every slot after reset/flush: cls=0; most slots in steady state) legal_d=1, so a fresh head-only/load/store/CSR entry whose operands are ready at dispatch is a candidate in its first live cycle regardless of commit_ptr / frontier / unresolved stores. Captured by the arbiter at A+2, granted A+3 while legal_o has already dropped to 0 — exactly observation (b). The hole is slot-history dependent, which is why the lead's single-entry inspection (b=4 e=0, previous occupant a gated load → stale 0) saw "correct" legality and generalized wrongly (RT §4.4).
+  CONSEQUENCE   Linux spin loop (W6): sc.d tid 5 and lr.d tid 7 issue non-head; tid 7 opens issue_read_operands.lr_sc_pair keyed to itself; the head lr.d tid 3 is a non-SC store-class op and is refused issue_ack while the window is open; the window closes only on an SC issue or !still_issued[7] — tid 7 cannot retire behind 3. D2 = tid 3 was never issued (SB `issued` records allocation, RT 10.5), not lost in the LSU. r67's SU gate turned the same early issue into an LSU head-of-line wedge (directed test) — a store unit cannot repair issue order by waiting.
+  ALTERNATIVE   lead r68 synthesis: dead pre-flush entries taken through a kill path with reused tids. Rejected: take_v_o requires take_grant = !kill; flush clears bank/arb/bypass registers; the directed-test wedge has no flush at all.
+  DISCRIMINATOR leaf tb_g6lc_hyp8_iqleg (bank stand-in with the pend-staged alloc timing): L1 fresh head-only non-head must read legal=0 in its first live cycle. Pre-r68 form (mutant G6LC_MUT_IQLEG_STALE_OCCUPANT) reads 1. Full-core: hyp8_amo_ready_order.S (older AMO/LR with a late operand directly ahead of a ready younger AMO/SC/LR) wedges on the old tree, completes on the new.
+  RESULT        leaf HYP8_IQLEG_PASS checked=23 locally (Verilator 5.020) and on the pinned remote toolchain (hyp8-r68-iqleg-leaf, zero diagnostics of any class); mutant fails L1 by name AND the module's new L3 assertion fires at the exact cycle (hyp8-r68-iqleg-leaf-mut). Full hyp8 core lint (local, -Wno-BLKANDNBLK for the stock-5.020 cvfpu limitation): 0 %Error, no diagnostic in the touched modules. Integration build + smokes: hyp8-integration-r68c launched (closure hyp8-r68-closure, 729 files, built by the new verif/regress/remote/hyp8/build_closure.py — the r20b relative-include file is now mechanized).
+  LIMITS        No boot claim. The kernel witness (hyp8-osbi-scalar) must be re-run on r68 to confirm the ~21.95M wedge clears; the lr_sc_pair window is now bounded by head-only LR issue (closes on the LR's own retirement), not redesigned.
+  NEXT ARTIFACT landed: assertions g6lc_r68_iqleg_head_only (g6lc_iq_legal), g6lc_r68_take_head_only (g6lc_iq), g6lc_r68_su_amo_head (store_unit); leaf `iqleg` in run_hyp8_memory.py; directed test in run_hyp8_integration.py TESTS.
+
+Changes (hyp tree):
+- `ooo/g6lc_iq_legal.sv`: per-entry facts (at_head_d, unres_d) register against the bank's NEXT-state tid (`info_tid_d_i`, new port) so a landing occupant's first live cycle reads facts about itself; `info_v_q` warm gate on the frontier-dependent classes (CSR/store: the frontier registered this cycle was formed from last cycle's live records); `legal_d &= info_v_i`; r66 live compare kept as defence; mutant `G6LC_MUT_IQLEG_STALE_OCCUPANT`; L3 assertion.
+- `ooo/g6lc_iq_bank.sv`: `ord` record bit (|cls[5:0]) set at allocation; `ready` reads `(legal_i || !ord)` so unordered classes never wait on registered legality (an OR2 beside rs1_ok's own OR level — no select-cone depth change); `info_tid_d_o` export (e_d.tid: alloc mux over the registered pend record, no cancel/ack term).
+- `ooo/g6lc_iq.sv`: wiring + grant-time assertion.
+- `store_unit.sv`: r67 gate stays withdrawn (lead); L3 assertion "AMO at the bypass head is the commit head" under OoOEn.
+Latency effects (recorded): head-only and load legality keep their intended distance (facts from e_d); CSR/store legality is one cycle later at allocation only (warm); unordered classes unchanged (previously they could lose a cycle depending on the slot's stale class — now deterministic).
+Timing note (structural): at_head_d/unres_d cones start one mux level later (e_d.tid = alloc_hit ? pend_rec.tid : e_q.tid); legal_d gains two AND inputs on a reg->reg cone. Board to be re-run (`analyze --stages` on the edited set) before the next S-item; no module is expected to rise above the 32.3 iq_bank clock-setter.
+
+Repo-side artifacts (tier T, MIT): `verif/tb/core/tb_g6lc_hyp8_iqleg.sv`, `verif/regress/remote/hyp8/{run_iqleg_leaf.sh,lint_hyp8_core_local.sh,build_closure.py}`, `verif/tests/custom/hyp8_amo_ready_order.S`, leaf `iqleg` + TESTS row.
+
+AI island (production tree, tier R): `corev_apu/ai_island/g6lc_ai_pe_dot_pipe.sv` — pipelined INT8/INT4 dot product (M1 two 8x4 half products, M2 combine, one adder-tree level per stage, two output registers; Latency = $clog2(Lanes)+5 = the float pipe's OBSERVED valid_o, its header's "+4" is one short — the sequencer metadata pipe is tuned to the observed value). Bit-identical to g6lc_ai_pe_dot (narrow growing-width tree, exact for Lanes<=512). `g6lc_ai_gemm_seq.sv` gains `DotPipeInt` on the same start/valid handshake (`dot_pipe_en`), the comb int cell is not instantiated when selected. Verified: tb_g6lc_ai_pe_dot_pipe (Lanes 1/4/8/16, random INT8/INT4, masks, bubbles, latency) and run-gemm-backend.sh dpf=2 — every live-format golden passes for nch=1,2,4,8. Structural effect (not STA): the integer MAC cell's reg->reg cone drops from ~130 FO4 (8x8 mul + 9 adds, Lanes=256) to one 8x4 multiply or one <=25-bit add (~10 FO4), i.e. the 2 GHz nameplate stops being structurally impossible for the integer path; MAC/s remains port-bound (8 B/cycle, scaling-100tops.md §4.2). `AiIslandPeImplMask` is unchanged.

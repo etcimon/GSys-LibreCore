@@ -95,28 +95,41 @@ module multiplier
     // word is an XOR gather of the bit-selected shifted terms — write it
     // as a balanced pairwise XOR tree (associative op, identical value).
     // (the original loop's i == XLEN term is dead: operand_b >> XLEN is 0)
-    localparam int unsigned CML = $clog2(G6LCCfg.XLEN);
-    logic [G6LCCfg.XLEN-1:0] cm_t [CML+1][G6LCCfg.XLEN];
-    for (genvar cl = 0; cl <= CML; cl++) begin : gen_cml
-      for (genvar t = 0; t < G6LCCfg.XLEN; t++) begin : gen_cmt
-        if (cl == 0) begin : gen_leaf
-          assign cm_t[0][t] = operand_b[t] ? (operand_a << t) : '0;
-        end else if (t < ((G6LCCfg.XLEN + (1 << cl) - 1) >> cl)) begin : gen_pair
-          if (2 * t + 1 < ((G6LCCfg.XLEN + (1 << (cl - 1)) - 1) >> (cl - 1))) begin : gen_p2
-            assign cm_t[cl][t] = cm_t[cl-1][2*t] ^ cm_t[cl-1][2*t+1];
-          end else begin : gen_odd
-            assign cm_t[cl][t] = cm_t[cl-1][2*t];
+    // r42-T R1: in the eight-stage build the whole tree is dead — the
+    // product is slice-accumulated in mult_clmul across S2-S7 instead, so
+    // the in->reg cone disappears entirely (not just retimed into S2).
+`ifdef G6LC_MUT_T2_MULT_CLMUL
+    localparam bit CLM_TREE = 1'b1;
+`else
+    localparam bit CLM_TREE = (MSTAGES != 8);
+`endif
+    if (CLM_TREE) begin : gen_clm_tree
+      localparam int unsigned CML = $clog2(G6LCCfg.XLEN);
+      logic [G6LCCfg.XLEN-1:0] cm_t [CML+1][G6LCCfg.XLEN];
+      for (genvar cl = 0; cl <= CML; cl++) begin : gen_cml
+        for (genvar t = 0; t < G6LCCfg.XLEN; t++) begin : gen_cmt
+          if (cl == 0) begin : gen_leaf
+            assign cm_t[0][t] = operand_b[t] ? (operand_a << t) : '0;
+          end else if (t < ((G6LCCfg.XLEN + (1 << cl) - 1) >> cl)) begin : gen_pair
+            if (2 * t + 1 < ((G6LCCfg.XLEN + (1 << (cl - 1)) - 1) >> (cl - 1))) begin : gen_p2
+              assign cm_t[cl][t] = cm_t[cl-1][2*t] ^ cm_t[cl-1][2*t+1];
+            end else begin : gen_odd
+              assign cm_t[cl][t] = cm_t[cl-1][2*t];
+            end
+          end else begin : gen_pad
+            assign cm_t[cl][t] = '0;
           end
-        end else begin : gen_pad
-          assign cm_t[cl][t] = '0;
         end
       end
-    end
-    assign clmul_d = cm_t[CML][0];
+      assign clmul_d = cm_t[CML][0];
 
-    // clmulr + clmulh result generator
-    for (genvar i = 0; i < G6LCCfg.XLEN; i++) begin
-      assign clmulr_d[i] = clmul_d[(G6LCCfg.XLEN-1)-i];
+      // clmulr + clmulh result generator
+      for (genvar i = 0; i < G6LCCfg.XLEN; i++) begin
+        assign clmulr_d[i] = clmul_d[(G6LCCfg.XLEN-1)-i];
+      end
+    end else begin : gen_no_clm_tree
+      assign clmul_d  = '0;
+      assign clmulr_d = '0;
     end
   end else begin : gen_no_bitmanip
     assign clmul_rmode = 1'b0;
@@ -192,7 +205,12 @@ module multiplier
     localparam int unsigned NPART = AW;             // one AND row per b_u bit
     localparam int unsigned RW = G6LCCfg.XLEN * 2;
     localparam int unsigned HW = RW / 2;
-    localparam int unsigned NOPS = NPART + 2;
+    // r42-T R1' needs three correction rows (~a_sh, ~b_sh, +2) after
+    // the sign-bit split; NOPS=NPART+2 parked rows0[NPART+2] one slot
+    // out of bounds and the +2 never entered the ladder (caught by
+    // g6lc_t2_mult_corr_eq on the first r43-T simulation).  Under the
+    // mutant the extra slot carries the constant '0 it already wrote.
+    localparam int unsigned NOPS = NPART + 3;
     localparam int unsigned LEVELS = 2 * $clog2(NOPS); // >= real depth; rows park at 2
     localparam int unsigned LPS = 3;                   // compressor levels per stage (67 rows need 10; extras park at 2)
 
@@ -209,33 +227,66 @@ module multiplier
     // A*B == a_u*b_u - 2**(XLEN+1)*(a_top*B_u + b_top*A_u) (mod 2**RW)
     // unchanged.
     logic [AW-1:0] a_q, b_q;
+    // r42-T R1': only the operand sign bits cross the S1 boundary; the two
+    // sign-correction summands enter the S2 CSA ladder as AND-masked rows
+    // (no carry-propagate add in the operand cycle).
+    logic           atop_q, btop_q;
+`ifdef G6LC_MUT_T2_MULT_CORR
+    // Review mutant: pre-S1 correction CPA, the pre-r42 form.
     logic [AW:0]   corr_d, corr_q;
     assign corr_d = (a_u[AW-1] ? {1'b0, b_u} : '0) + (b_u[AW-1] ? {1'b0, a_u} : '0);
+`endif
 
     logic [G6LCCfg.TRANS_ID_BITS-1:0] tid_sq[7];
     logic                             vld_sq[7];
     fu_op                             op_sq[7];
+`ifdef G6LC_MUT_T2_MULT_CLMUL
+    // Review mutant: pre-S1 CLMUL tree + shift chain, the pre-r42 form.
     logic [G6LCCfg.XLEN-1:0]          clm_sq[7], clmr_sq[7];
+`else
+    // r42-T R1: the CLMUL operands (already bit-reversed for CLMULR/H) are
+    // registered once at the S1 edge; mult_clmul slices b_q from there.
+    // a_q/b_q cannot be reused — they hold the 65-bit sign-extended a_u/b_u.
+    logic [G6LCCfg.XLEN-1:0]          clm_a_q, clm_b_q;
+`endif
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (~rst_ni) begin
         a_q       <= '0;
         b_q       <= '0;
-        corr_q    <= '0;
+        atop_q    <= '0;
+        btop_q    <= '0;
         vld_sq[0] <= 1'b0;
         tid_sq[0] <= '0;
         op_sq[0]  <= MUL;
+`ifdef G6LC_MUT_T2_MULT_CORR
+        corr_q    <= '0;
+`endif
+`ifdef G6LC_MUT_T2_MULT_CLMUL
         clm_sq[0] <= '0;
         clmr_sq[0]<= '0;
+`else
+        clm_a_q   <= '0;
+        clm_b_q   <= '0;
+`endif
       end else begin
         a_q       <= a_u;
         b_q       <= b_u;
-        corr_q    <= corr_d;
+        atop_q    <= a_u[AW-1];
+        btop_q    <= b_u[AW-1];
         vld_sq[0] <= mult_valid;
         tid_sq[0] <= trans_id_i;
         op_sq[0]  <= operation_i;
+`ifdef G6LC_MUT_T2_MULT_CORR
+        corr_q    <= corr_d;
+`endif
+`ifdef G6LC_MUT_T2_MULT_CLMUL
         clm_sq[0] <= clmul_d;
         clmr_sq[0]<= clmulr_d;
+`else
+        clm_a_q   <= operand_a;
+        clm_b_q   <= operand_b;
+`endif
       end
     end
 
@@ -250,15 +301,31 @@ module multiplier
     for (genvar k = 0; k < NPART; k++) begin : gen_term
       assign term[k] = RW'({AW{b_q[k]}} & a_q) << k;
     end
+`ifdef G6LC_MUT_T2_MULT_CORR
     logic [RW-1:0] corr_sh;
     assign corr_sh = RW'(corr_q) << AW;
+`else
+    // r42-T R1': the two correction summands are formed after the S1
+    // register and land as two CSA rows (no pre-S1 CPA).  Algebra:
+    // -( (corrA + corrB) << AW ) == ~corrA_sh + ~corrB_sh + 2  (mod 2**RW).
+    logic [AW-1:0] corr_a_row, corr_b_row;
+    assign corr_a_row = {AW{atop_q}} & b_q;
+    assign corr_b_row = {AW{btop_q}} & a_q;
+`endif
 
     logic [RW-1:0] rows0[NOPS];
     for (genvar k = 0; k < NPART; k++) begin : gen_row
       assign rows0[k] = term[k];
     end
-    assign rows0[NPART] = ~corr_sh;
+`ifdef G6LC_MUT_T2_MULT_CORR
+    assign rows0[NPART]   = ~corr_sh;
     assign rows0[NPART+1] = RW'(1);
+    assign rows0[NPART+2] = '0;
+`else
+    assign rows0[NPART]   = ~(RW'(corr_a_row) << AW);
+    assign rows0[NPART+1] = ~(RW'(corr_b_row) << AW);
+    assign rows0[NPART+2] = RW'(2);
+`endif
 
     logic [RW-1:0] rr_q[4][NOPS];
     // ---- S2: LPS compressor levels; no carry propagates ----
@@ -298,14 +365,18 @@ module multiplier
           vld_sq[0+1] <= 1'b0;
           tid_sq[0+1] <= '0;
           op_sq[0+1]  <= MUL;
+`ifdef G6LC_MUT_T2_MULT_CLMUL
           clm_sq[0+1] <= '0;
           clmr_sq[0+1]<= '0;
+`endif
         end else begin
           vld_sq[0+1] <= vld_sq[0];
           tid_sq[0+1] <= tid_sq[0];
           op_sq[0+1]  <= op_sq[0];
+`ifdef G6LC_MUT_T2_MULT_CLMUL
           clm_sq[0+1] <= clm_sq[0];
           clmr_sq[0+1]<= clmr_sq[0];
+`endif
         end
       end
     end
@@ -345,14 +416,18 @@ module multiplier
           vld_sq[1+1] <= 1'b0;
           tid_sq[1+1] <= '0;
           op_sq[1+1]  <= MUL;
+`ifdef G6LC_MUT_T2_MULT_CLMUL
           clm_sq[1+1] <= '0;
           clmr_sq[1+1]<= '0;
+`endif
         end else begin
           vld_sq[1+1] <= vld_sq[1];
           tid_sq[1+1] <= tid_sq[1];
           op_sq[1+1]  <= op_sq[1];
+`ifdef G6LC_MUT_T2_MULT_CLMUL
           clm_sq[1+1] <= clm_sq[1];
           clmr_sq[1+1]<= clmr_sq[1];
+`endif
         end
       end
     end
@@ -392,14 +467,18 @@ module multiplier
           vld_sq[2+1] <= 1'b0;
           tid_sq[2+1] <= '0;
           op_sq[2+1]  <= MUL;
+`ifdef G6LC_MUT_T2_MULT_CLMUL
           clm_sq[2+1] <= '0;
           clmr_sq[2+1]<= '0;
+`endif
         end else begin
           vld_sq[2+1] <= vld_sq[2];
           tid_sq[2+1] <= tid_sq[2];
           op_sq[2+1]  <= op_sq[2];
+`ifdef G6LC_MUT_T2_MULT_CLMUL
           clm_sq[2+1] <= clm_sq[2];
           clmr_sq[2+1]<= clmr_sq[2];
+`endif
         end
       end
     end
@@ -439,14 +518,18 @@ module multiplier
           vld_sq[3+1] <= 1'b0;
           tid_sq[3+1] <= '0;
           op_sq[3+1]  <= MUL;
+`ifdef G6LC_MUT_T2_MULT_CLMUL
           clm_sq[3+1] <= '0;
           clmr_sq[3+1]<= '0;
+`endif
         end else begin
           vld_sq[3+1] <= vld_sq[3];
           tid_sq[3+1] <= tid_sq[3];
           op_sq[3+1]  <= op_sq[3];
+`ifdef G6LC_MUT_T2_MULT_CLMUL
           clm_sq[3+1] <= clm_sq[3];
           clmr_sq[3+1]<= clmr_sq[3];
+`endif
         end
       end
     end
@@ -456,31 +539,56 @@ module multiplier
     wire [RW-1:0] reduce_carry = rr_q[3][1];
     // svt-stage: begin S6
     // ---- S6: first CPA half (low HW bits + carry) ----
-    logic [HW-1:0] lo_q, hi_sum_q, hi_carry_q;
+    logic [HW-1:0] lo_q;
     logic          lo_cout_q;
+`ifdef G6LC_MUT_T2_MULT_CSEL
+    // Review mutant: hi CPA deferred to S7, the pre-r42 form.
+    logic [HW-1:0] hi_sum_q, hi_carry_q;
+`else
+    // r42-T R1": carry-select on the high half — both candidates are
+    // formed here from the registered reduce rows; S7 only selects on
+    // lo_cout_q.
+    logic [HW-1:0] hi0_q, hi1_q;
+    wire  [HW-1:0] hi0_d = reduce_sum[RW-1:HW] + reduce_carry[RW-1:HW];
+    wire  [HW-1:0] hi1_d = hi0_d + HW'(1);
+`endif
     wire  [HW:0]   lo_sum = {1'b0, reduce_sum[HW-1:0]} + {1'b0, reduce_carry[HW-1:0]};
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (~rst_ni) begin
         lo_q        <= '0;
         lo_cout_q   <= 1'b0;
+`ifdef G6LC_MUT_T2_MULT_CSEL
         hi_sum_q    <= '0;
         hi_carry_q  <= '0;
+`else
+        hi0_q       <= '0;
+        hi1_q       <= '0;
+`endif
         vld_sq[5]   <= 1'b0;
         tid_sq[5]   <= '0;
         op_sq[5]    <= MUL;
+`ifdef G6LC_MUT_T2_MULT_CLMUL
         clm_sq[5]   <= '0;
         clmr_sq[5]  <= '0;
+`endif
       end else begin
         lo_q        <= lo_sum[HW-1:0];
         lo_cout_q   <= lo_sum[HW];
+`ifdef G6LC_MUT_T2_MULT_CSEL
         hi_sum_q    <= reduce_sum[RW-1:HW];
         hi_carry_q  <= reduce_carry[RW-1:HW];
+`else
+        hi0_q       <= hi0_d;
+        hi1_q       <= hi1_d;
+`endif
         vld_sq[5]   <= vld_sq[4];
         tid_sq[5]   <= tid_sq[4];
         op_sq[5]    <= op_sq[4];
+`ifdef G6LC_MUT_T2_MULT_CLMUL
         clm_sq[5]   <= clm_sq[4];
         clmr_sq[5]  <= clmr_sq[4];
+`endif
       end
     end
 
@@ -495,19 +603,58 @@ module multiplier
         vld_sq[6]   <= 1'b0;
         tid_sq[6]   <= '0;
         op_sq[6]    <= MUL;
+`ifdef G6LC_MUT_T2_MULT_CLMUL
         clm_sq[6]   <= '0;
         clmr_sq[6]  <= '0;
+`endif
       end else begin
+`ifdef G6LC_MUT_T2_MULT_CSEL
         prod_q      <= {hi_sum_q + hi_carry_q + HW'(lo_cout_q), lo_q};
+`else
+        prod_q      <= {(lo_cout_q ? hi1_q : hi0_q), lo_q};
+`endif
         vld_sq[6]   <= vld_sq[5];
         tid_sq[6]   <= tid_sq[5];
         op_sq[6]    <= op_sq[5];
+`ifdef G6LC_MUT_T2_MULT_CLMUL
         clm_sq[6]   <= clm_sq[5];
         clmr_sq[6]  <= clmr_sq[5];
+`endif
       end
     end
-    assign clmul_s7 = clm_sq[6];
+`ifdef G6LC_MUT_T2_MULT_CLMUL
+    assign clmul_s7  = clm_sq[6];
     assign clmulr_s7 = clmr_sq[6];
+`else
+    // r42-T R1: the carry-less product is slice-accumulated across the
+    // S2-S7 edges in mult_clmul (one 8-bit slice of b_q per stage, two
+    // slices on S2 and S3); it publishes here in vld/tid/op lockstep.
+    // svt-pipe: protocol cl valid=clm_vld_o id=clm_tid_o flush=flush_i
+    logic                          clm_vld_o;
+    logic [G6LCCfg.TRANS_ID_BITS-1:0] clm_tid_o;
+    fu_op                          clm_op_o;
+    mult_clmul #(
+        .G6LCCfg(G6LCCfg),
+        .HypCfg (HypCfg)
+    ) i_clmul (
+        .clk_i       (clk_i),
+        .rst_ni      (rst_ni),
+        // Liveness is owned by mult.sv's cancellation pipe (the multiplier
+        // module itself carries no flush); the slice pipeline need only
+        // hold vld/tid/op in lockstep with the data.
+        .flush_i     (1'b0),
+        .valid_i     (vld_sq[0]),
+        .trans_id_i  (tid_sq[0]),
+        .operation_i (op_sq[0]),
+        .a_i         (clm_a_q),
+        .b_i         (clm_b_q),
+        .clmul_o     (clmul_s7),
+        .clmulr_o    (clmulr_s7),
+        .valid_o     (clm_vld_o),
+        .trans_id_o  (clm_tid_o),
+        .operation_o (clm_op_o)
+    );
+`endif
 
     // the module-level clmul_q/clmulr_q registers only exist in the
     // legacy path; tie them off here so no signal is left undriven.
@@ -547,6 +694,116 @@ module multiplier
       end
     end
     // svt-stage: end S8
+
+    //pragma translate_off
+    // r42-T equivalence: every rewritten expression keeps its pre-r42
+    // reference form next to it and is compared every cycle; the counters
+    // print under +equiv_report.
+    int unsigned t2_mult_corr_n = 0, t2_mult_csel_n = 0, t2_mult_clmul_n = 0;
+    // R1': the two CSA rows must equal the pre-S1 correction CPA shifted.
+    logic [AW:0] corr_ref_d;
+    assign corr_ref_d = (atop_q ? {1'b0, b_q} : '0) + (btop_q ? {1'b0, a_q} : '0);
+    always_ff @(posedge clk_i) begin : p_t2_corr_eq
+      if (rst_ni) begin
+        t2_mult_corr_n <= t2_mult_corr_n + 1;
+        g6lc_t2_mult_corr_eq: assert (
+            rows0[NPART] + rows0[NPART+1] + rows0[NPART+2] ===
+            (~(RW'(corr_ref_d) << AW) + RW'(1)))
+          else $error("multiplier: equiv corr rows");
+      end
+    end
+    // R1": the carry-select pair must equal the deferred hi CPA.
+    logic [HW-1:0] hi_sum_ref_q, hi_carry_ref_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (~rst_ni) begin
+        hi_sum_ref_q   <= '0;
+        hi_carry_ref_q <= '0;
+      end else begin
+        hi_sum_ref_q   <= reduce_sum[RW-1:HW];
+        hi_carry_ref_q <= reduce_carry[RW-1:HW];
+      end
+    end
+    // r43-T first-sim catch: prod_q is registered one edge AFTER the S6
+    // carry-select pair, so the full-product check needs the reference
+    // delayed a second edge -- the single-edge form compared prod_q to
+    // the previous instruction's reduce halves.
+    logic [HW-1:0] hi_sum_ref2_q, hi_carry_ref2_q, lo_ref_q;
+    logic          lo_cout_ref_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (~rst_ni) begin
+        hi_sum_ref2_q   <= '0;
+        hi_carry_ref2_q <= '0;
+        lo_ref_q        <= '0;
+        lo_cout_ref_q   <= 1'b0;
+      end else begin
+        hi_sum_ref2_q   <= hi_sum_ref_q;
+        hi_carry_ref2_q <= hi_carry_ref_q;
+        lo_ref_q        <= lo_q;
+        lo_cout_ref_q   <= lo_cout_q;
+      end
+    end
+    always_ff @(posedge clk_i) begin : p_t2_csel_eq
+      if (rst_ni) begin
+        t2_mult_csel_n <= t2_mult_csel_n + 1;
+`ifndef G6LC_MUT_T2_MULT_CSEL
+        g6lc_t2_mult_csel_eq: assert (
+            (lo_cout_q ? hi1_q : hi0_q) ===
+            (hi_sum_ref_q + hi_carry_ref_q + HW'(lo_cout_q)))
+          else $error("multiplier: equiv csel");
+`endif
+        g6lc_t2_mult_csel_eq2: assert (
+            prod_q === {hi_sum_ref2_q + hi_carry_ref2_q +
+                        HW'(lo_cout_ref_q), lo_ref_q})
+          else $error("multiplier: equiv csel prod");
+      end
+    end
+`ifndef G6LC_MUT_T2_MULT_CLMUL
+    // R1: reference = the pre-S1 XOR tree on the current operands, delayed
+    // through the same seven edges the old shift chain used.
+    logic [G6LCCfg.XLEN-1:0] cm_ref [7];
+    logic [G6LCCfg.XLEN-1:0] cm_ref_d;
+    always_comb begin : p_clm_ref_tree
+      automatic logic [G6LCCfg.XLEN-1:0] acc;
+      acc = '0;
+      for (int unsigned t = 0; t < G6LCCfg.XLEN; t++)
+        acc ^= operand_b[t] ? (operand_a << t) : '0;
+      cm_ref_d = acc;
+    end
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (~rst_ni) cm_ref <= '{default: '0};
+      else begin
+        cm_ref[0] <= cm_ref_d;
+        for (int unsigned s = 1; s < 7; s++) cm_ref[s] <= cm_ref[s-1];
+      end
+    end
+    always_ff @(posedge clk_i) begin : p_t2_clmul_eq
+      if (rst_ni) begin
+        t2_mult_clmul_n <= t2_mult_clmul_n + 1;
+        g6lc_t2_mult_clmul_eq: assert (clmul_s7 === cm_ref[6])
+          else $error("multiplier: equiv clmul");
+        // clmulr_o is the bit-reverse of the same accumulated product.
+        for (int unsigned i = 0; i < G6LCCfg.XLEN; i++) begin
+          g6lc_t2_mult_clmulr_eq: assert (clmulr_s7[i] === clmul_s7[G6LCCfg.XLEN-1-i])
+            else $error("multiplier: equiv clmulr");
+        end
+        // Lockstep: the module's record track equals the parent's S7 regs.
+        g6lc_t2_mult_clmul_vld: assert (clm_vld_o === vld_sq[6])
+          else $error("multiplier: equiv clmul vld");
+        g6lc_t2_mult_clmul_tid: assert (clm_tid_o === tid_sq[6])
+          else $error("multiplier: equiv clmul tid");
+        g6lc_t2_mult_clmul_op: assert (clm_op_o === op_sq[6])
+          else $error("multiplier: equiv clmul op");
+      end
+    end
+`endif
+    final begin
+      if ($test$plusargs("equiv_report")) begin
+        $display("[equiv] multiplier corr: checked=%0d", t2_mult_corr_n);
+        $display("[equiv] multiplier csel: checked=%0d", t2_mult_csel_n);
+        $display("[equiv] multiplier clmul: checked=%0d", t2_mult_clmul_n);
+      end
+    end
+    //pragma translate_on
   end else if (MSTAGES > 1) begin : gen_legacy_pipe
     // ---------------------------------------------------------------
     // MSTAGES in {2,3,4}: the emit's tiled-product form, unchanged

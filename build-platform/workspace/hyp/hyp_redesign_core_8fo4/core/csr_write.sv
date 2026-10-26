@@ -22,15 +22,26 @@ module csr_write
     // comb flush request decided by csr_update (write side effects,
     // fence.i, satp change, MPRV, PMP change, eret/dret returns)
     input  logic                          flush_req_i,
-    output logic                          flush_o
+    // pc of the applying CSR instruction (commit_instr.pc on the apply
+    // cycle); captured with the request so the controller forms the
+    // refetch pc from the CSR itself, not from the head presented one
+    // cycle later (r59: the deferred flush used to resume at
+    // next_head.pc + 4 and skipped one instruction after every flushing
+    // CSR write -- OpenSBI's sbi_hart_switch_mode lost its mret).
+    input  logic [G6LCCfg.VLEN-1:0]       flush_pc_i,
+    output logic                          flush_o,
+    // registered alongside flush_o: valid in the flush_o cycle
+    output logic [G6LCCfg.VLEN-1:0]       flush_pc_o
 );
   // svt-stage: begin C3
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      flush_o <= 1'b0;
+      flush_o    <= 1'b0;
+      flush_pc_o <= '0;
     end else begin
       flush_o <= flush_req_i;
+      if (flush_req_i) flush_pc_o <= flush_pc_i;
     end
   end
 

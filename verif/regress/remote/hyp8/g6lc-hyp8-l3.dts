@@ -1,0 +1,41 @@
+// Copyright (c) 2026 Etienne Cimon
+// SPDX-License-Identifier: MIT
+/include/ "g6lc-hyp8.dts"
+
+// ooocoh L2/L3 stack on the hyp8 single-hart profile — the cache nodes
+// chain exactly as corev_apu/bootrom/ariane-smt2-l3.dts (the reference
+// single-core no-hub L3 boot). Sizes/sets/ways match the copied package
+// fields (L2ByteSize=262144, L2SetAssoc=8, L2LineWidth=512 bit -> 64 B,
+// 512 sets; L3ByteSize=1048576, L3SetAssoc=16, 64 B lines -> 1024 sets).
+
+&CPU0 {
+    next-level-cache = <&L2>;
+};
+
+/ {
+    soc {
+        // Shared L2. Soft node for the next-level-cache phandle;
+        // reserved MMIO hole, not a bus slave.
+        L2: l2-cache@1f000000 {
+            compatible = "cache";
+            reg = <0x0 0x1f000000 0x0 0x1000>;
+            cache-level = <2>;
+            cache-unified;
+            cache-size = <262144>;
+            cache-block-size = <64>;
+            cache-sets = <512>;
+            next-level-cache = <&L3>;
+        };
+
+        // Shared L3; non-inclusive (L3InclusiveEn=0).
+        L3: l3-cache@1f001000 {
+            compatible = "cache";
+            reg = <0x0 0x1f001000 0x0 0x1000>;
+            cache-level = <3>;
+            cache-unified;
+            cache-size = <1048576>;
+            cache-block-size = <64>;
+            cache-sets = <1024>;
+        };
+    };
+};

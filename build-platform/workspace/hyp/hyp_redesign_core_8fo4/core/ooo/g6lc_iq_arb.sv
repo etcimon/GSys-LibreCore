@@ -28,15 +28,35 @@
 // Selection is admitted only when both presentation slots are free (a held
 // presentation blocks the next grant by one bubble after a stall) -- the
 // conservative direction, never an early release.
+// HypCfg.IqArbStages==2 (r43-T T7) inserts a real register between the
+// T+1 CTL decode (pv/a0/m1a/m1c/m_oh) and the GRN merge + port
+// tournament, and snapshots cand_*_q/aq_q with it: take slides to the
+// following cycle, so every take-relative distance below is unchanged
+// while candidate->take latency grows by one.
 //
 // Kill identity: cancelled candidates are dropped before select (mask on
 // cand_q), held/pending records drop on their tid appearing in
 // cancelled_mask_i, and flush_i clears every register.
+// hyp8 r47 sticky kill coverage (the mask names a tid only until its
+// commit-drop, so a pulse shorter than the candidate->take flight must
+// be accumulated on the held record, not re-polled at take):
+//   C    capture        cand_cancl_q  (predecoded at CTL time)
+//   C+1  CTL snapshot   kill_h        (ARB_STG==2 register beside CTL)
+//   C+2  GRN/tournament mask_q        (whole-mask register, read at take)
+//   C+3  take           cancelled_mask_i live
+// win_s_kill ORs every sampled bit onto the tournament winner and
+// carries while the same record is re-selected, so a take blocked in
+// the window that retries on the stale snapshot stays dead; a drained
+// or replaced winner self-cleans. Any sampled set bit folds into
+// take_grant: a killed record is never taken and never reserves a WB
+// slot. ARB_STG==1 covers C..C+2 with cand_cancl_q / mask_q / live --
+// kill_h is not needed.
 
 module g6lc_iq_arb
   import g6lc_ooo_pkg::*;
 #(
     parameter config_pkg::g6lc_cfg_t G6LCCfg = config_pkg::g6lc_cfg_empty,
+    parameter g6lc_hyp_pkg::g6lc_hyp_cfg_t HypCfg = g6lc_hyp_pkg::Hyp8,
     parameter int unsigned BANKS   = 8,
     parameter int unsigned ENTRIES = 4,
     parameter int unsigned TID_W   = 5,
@@ -103,6 +123,12 @@ module g6lc_iq_arb
     output logic [BANKS-1:0][NPORTS-1:0][$clog2(ENTRIES > 1 ? ENTRIES : 2)-1:0] ack_idx_o
 );
 
+`ifdef G6LC_MUT_T3_IQ_ARB
+  localparam int unsigned ARB_STG = 1;
+`else
+  localparam int unsigned ARB_STG = (HypCfg.IqArbStages == 2) ? 2 : 1;
+`endif
+
   localparam int unsigned BW = (BANKS > 1) ? $clog2(BANKS) : 1;
   localparam int unsigned EW = (ENTRIES > 1) ? $clog2(ENTRIES) : 1;
   localparam int unsigned NPAIR = (BANKS + 1) / 2;
@@ -158,6 +184,10 @@ module g6lc_iq_arb
   logic [BANKS-1:0][1:0][3:0]       cand_gate_q;
   logic [BANKS-1:0][1:0]            cand_div_q;
   logic [BANKS-1:0][1:0]            cand_port0_q;
+  // r43-T T7: cancel-mask bit predecoded at candidate capture so CTL does
+  // not index the live mask; the live mask stays authoritative at the
+  // take gate and the issue presentation below.
+  logic [BANKS-1:0][1:0]            cand_cancl_q;
 
   // Snapshot of the candidate the one-hot was computed from. The payload
   // mux and the tournament read these flops, so a new pair can be captured
@@ -191,9 +221,43 @@ module g6lc_iq_arb
   // pres_q = un-acked hold (own sbe snapshot, payload regs may be reused).
   sel_t  [NPORTS-1:0] win_q;
   pres_t [NPORTS-1:0] pres_q;
+  // r63: shared presentation predicates hoisted once per port so the
+  // control and payload cones below read a single wire each.
+  logic [NPORTS-1:0] pres_live, win_live;
+  for (genvar gp = 0; gp < NPORTS; gp++) begin : gen_pres_live
+    assign pres_live[gp] = pres_q[gp].v && !cancelled_mask_i[pres_q[gp].tid];
+    assign win_live[gp]  = win_q[gp].v  && !cancelled_mask_i[win_q[gp].tid];
+  end
   // Tournament winner, consumed by take one cycle later.
   sel_t [NPORTS-1:0] win_s;
   logic [NPORTS-1:0] win_s_v;
+  // hyp8 r47: sticky kill coverage across the candidate->take window.
+  // cancelled_mask_i is transient -- a tid is named only until its
+  // commit-drop -- so a one-cycle pulse has to be sampled in EVERY
+  // cycle the record spends in flight, not re-polled at take:
+  //   C    capture        cand_cancl_q (predecoded, gates the CTL pick)
+  //   C+1  CTL snapshot   kill_h (ARB_STG==2: live mask indexed by
+  //                         cand_tid_q, registered beside the CTL bits)
+  //   C+2  GRN/tournament mask_q (whole-mask register, read at take)
+  //   C+3  take           cancelled_mask_i live
+  // ARB_STG==1 merges C+1/C+2 into one comb cycle: C cand_cancl_q, C+1
+  // mask_q at take, C+2 live -- kill_h stays 0.
+  logic [G6LCCfg.NR_SB_ENTRIES-1:0] mask_q;
+  logic [BANKS-1:0][1:0]            kill_h;
+  logic [NPORTS-1:0]                win_s_kill;
+  logic [NPORTS-1:0]                take_kill, take_grant;
+  // One vector OR of the live and C+1 mask copies -- the staged-winner
+  // kill accumulator reads it with a single indexed read instead of
+  // two (identical coverage, one gate shallower). win_kill_next is the
+  // accumulated "this record was killed in some sampled flight cycle"
+  // verdict for the record the tournament just picked.
+  logic [G6LCCfg.NR_SB_ENTRIES-1:0] mask_any;
+  logic [NPORTS-1:0]                win_kill_next;
+  assign mask_any = cancelled_mask_i | mask_q;
+  // r43-T T7b countercase: a one-hot tid stored beside each record
+  // (live cancel check as mask & tid_oh AND/OR-reduce) measured worse
+  // than the index mux — 54.0 FO4 on the presentation path; reverted.
+  // The live index read stays.
 
   function automatic logic age_older(input logic [TID_W-1:0] a,
                                      input logic [TID_W-1:0] b);
@@ -266,6 +330,7 @@ module g6lc_iq_arb
     logic oh1_2;
     logic oh1_3;
 
+`ifdef G6LC_MUT_T3_IQ_ARB
     for (genvar ci = 0; ci < 2; ci++) begin : gen_pv0
       assign pv_d[pr][ci] = cand_v_q[B0][ci] &&
           !cancelled_mask_i[cand_tid_q[B0][ci]] && !cand_owned[B0][ci];
@@ -274,6 +339,16 @@ module g6lc_iq_arb
       assign pv_d[pr][2+ci] = (B1 < BANKS) && cand_v_q[B1][ci] &&
           !cancelled_mask_i[cand_tid_q[B1][ci]] && !cand_owned[B1][ci];
     end
+`else
+    for (genvar ci = 0; ci < 2; ci++) begin : gen_pv0
+      assign pv_d[pr][ci] = cand_v_q[B0][ci] &&
+          !cand_cancl_q[B0][ci] && !cand_owned[B0][ci];
+    end
+    for (genvar ci = 0; ci < 2; ci++) begin : gen_pv1
+      assign pv_d[pr][2+ci] = (B1 < BANKS) && cand_v_q[B1][ci] &&
+          !cand_cancl_q[B1][ci] && !cand_owned[B1][ci];
+    end
+`endif
     assign a0_old = pv_d[pr][0] && (!pv_d[pr][2] || !aq_q[S10][S00]);
     assign m1a    = pv_d[pr][1] && (!pv_d[pr][2] || !aq_q[S10][S01]);
     assign m1c    = pv_d[pr][3] && (!pv_d[pr][0] || !aq_q[S00][S11]);
@@ -363,6 +438,15 @@ module g6lc_iq_arb
   // consumer reserves the shared FP read-port set (later FP held).
   sel_t [NPORTS-1:0] win;
   logic [NPORTS-1:0] win_v;
+  // r47: per-port accumulated kill verdict for the tournament output
+  // (kill_h C+1, mask_any = live|mask_q for the current and previous
+  // cycles, carried while the same record is re-selected).
+  for (genvar p = 0; p < NPORTS; p++) begin : gen_wkn
+    assign win_kill_next[p] = kill_h[win[p].bank][win[p].ci] |
+                              mask_any[win[p].tid] |
+                              (win_s_kill[p] && win_v[p] &&
+                               (win[p].tid == win_s[p].tid));
+  end
 
   // hyp8: the serial best-scan fold is replaced by per-port compare
   // vectors. Port p's eligible set = merged[c].v not already used and not
@@ -515,12 +599,14 @@ module g6lc_iq_arb
     logic [NPORTS-1:0] ein, eflu, efpu, ediv;
     for (genvar q = 0; q < NPORTS; q++) begin : gen_earl
       if (q < p) begin : gen_q
-        assign ein[q]  = take_ok[q] && eff_in[q];
-        assign eflu[q] = take_ok[q] && eff_flu[q] &&
+        // r47: only a granted take reserves -- a killed winner must not
+        // consume an earlier-port slot on the way out.
+        assign ein[q]  = take_grant[q] && eff_in[q];
+        assign eflu[q] = take_grant[q] && eff_flu[q] &&
                          (win_s[q].wb_off == win_s[p].wb_off);
-        assign efpu[q] = take_ok[q] && eff_fpu[q] &&
+        assign efpu[q] = take_grant[q] && eff_fpu[q] &&
                          (win_s[q].wb_off == win_s[p].wb_off);
-        assign ediv[q] = take_ok[q] && eff_flu[q];
+        assign ediv[q] = take_grant[q] && eff_flu[q];
       end else begin : gen_nq
         assign ein[q]  = 1'b0;
         assign eflu[q] = 1'b0;
@@ -544,9 +630,18 @@ module g6lc_iq_arb
                           !(win_s[p].gate[2] && !csr_ready_i) &&
                           !(win_s[p].gate[3] && !mult_ready_i);
     assign take_ok[p] = win_s_v[p] && !res_block[p] && gate_ok[p];
-    assign w_in_tk[p]  = take_ok[p] && eff_in[p];
-    assign w_flu_tk[p] = take_ok[p] && eff_flu[p];
-    assign w_fpu_tk[p] = take_ok[p] && eff_fpu[p];
+    // hyp8 r47: a winner whose tid was named by the mask at ANY
+    // sampled cycle since its capture never reaches win_s_v at all
+    // (the accumulate lives in the win_s register) -- the take gate
+    // still reads the live mask for a kill landing in the take cycle
+    // itself. All take-decision consumers (take_v, win_q capture,
+    // w_*_tk -> window masks, div_tk, earlier-port block terms) derive
+    // from this point.
+    assign take_kill[p]  = cancelled_mask_i[win_s[p].tid];
+    assign take_grant[p] = !pres_q[p].v && take_ok[p] && !take_kill[p];
+    assign w_in_tk[p]  = take_grant[p] && eff_in[p];
+    assign w_flu_tk[p] = take_grant[p] && eff_flu[p];
+    assign w_fpu_tk[p] = take_grant[p] && eff_fpu[p];
   end
   logic [NPORTS-1:0] stall_p, div_tk;
   for (genvar p = 0; p < NPORTS; p++) begin : gen_stall
@@ -554,7 +649,7 @@ module g6lc_iq_arb
     // take and every FU ready-gate passed).
     assign stall_p[p] = win_s_v[p] && res_block[p] && gate_ok[p] &&
                         !pres_q[p].v;
-    assign div_tk[p]  = take_ok[p] && win_s[p].div;
+    assign div_tk[p]  = take_grant[p] && win_s[p].div;
   end
   assign hyp_wb_reserve_stall_o = |stall_p;
   assign div_take = |div_tk;
@@ -582,17 +677,50 @@ module g6lc_iq_arb
   // drops the staged winner; the next tournament fills it again.
   always_ff @(posedge clk_i or negedge rst_ni) begin : win_s_regs
     if (!rst_ni) begin
-      win_s_v <= '0;
+      win_s_v    <= '0;
+      win_s_kill <= '0;
       for (int unsigned p = 0; p < NPORTS; p++) win_s[p] <= '0;
     end else if (flush_i) begin
-      win_s_v <= '0;
+      win_s_v    <= '0;
+      win_s_kill <= '0;
     end else begin
       for (int unsigned p = 0; p < NPORTS; p++) begin
         if (pres_q[p].v) begin
-          win_s_v[p] <= 1'b0;
+          win_s_v[p]    <= 1'b0;
         end else begin
-          win_s[p]   <= win[p];
-          win_s_v[p] <= win_v[p];
+          win_s[p]      <= win[p];
+          // r47: kills ACCUMULATE on the held record, T35-style -- the
+          // mask is transient, so a pulse caught at any flight cycle
+          // marks the record dead for the rest of its in-flight life
+          // (see win_kill_next for the accumulated verdict). The
+          // verdict squashes win_s_v at staging rather than gating the
+          // take: a killed record is never a staged winner, so
+          // take_grant's cone is unchanged from pre-r47.
+`ifdef G6LC_MUT_IQ_ARB_NO_STICKY_KILL
+          // Bug form: no sticky coverage -- only the live mask read at
+          // the take gate (the transient-miss defect).
+          win_s_v[p]    <= win_v[p];
+`else
+          win_s_v[p]    <= win_v[p] && !win_kill_next[p];
+`endif
+        end
+      end
+    end
+  end
+
+  // r47 kill accumulator in its own register (kept out of win_s_regs:
+  // the analyzer bills per-block write bundles).
+  always_ff @(posedge clk_i or negedge rst_ni) begin : win_kill_regs
+    if (!rst_ni) begin
+      win_s_kill <= '0;
+    end else if (flush_i) begin
+      win_s_kill <= '0;
+    end else begin
+      for (int unsigned p = 0; p < NPORTS; p++) begin
+        if (pres_q[p].v) begin
+          win_s_kill[p] <= 1'b0;
+        end else begin
+          win_s_kill[p] <= win_kill_next[p];
         end
       end
     end
@@ -625,56 +753,76 @@ module g6lc_iq_arb
   // Presentation: held record wins over a fresh win_q. Payload registers
   // (addressed at T+1 by the winning indices) supply win_q's sbe/orig/prd.
   // ----------------------------------------------------------------------
-  always_comb begin
-    take_v_o = '0;
-    take_cand_o = '0;
-    take_idx_o = '0;
-    ack_v_o = '0;
-    ack_idx_o = '0;
-    pay_bank_o = '0;
-    pay_entry_o = '0;
-    issue_valid_o = '0;
-    issue_spec_o = '0;
-    issue_spec_ab_o = '0;
-    issue_ptid_o = '0;
-    for (int unsigned p = 0; p < NPORTS; p++) begin
+  // r43-T T7: one block per presentation port — each output column is an
+  // independent cone instead of one serial always_comb sweep (independent-
+  // LHS bundle recipe). The per-port logic is unchanged.
+  // r43-T T7b countercase: the pres>win>take chain written as plain
+  // assigns measured 58.3 FO4 in this model vs 36.3 for the per-port
+  // always_comb — the procedural form stays.
+  for (genvar p = 0; p < NPORTS; p++) begin : gen_pres
+    // r52-B5: the presentation cone and the take cone are independent
+    // outputs — split into two always_comb so the analyzer bills them
+    // as separate bundles instead of one shared makespan. The ack
+    // dynamic-index writes are per-bank decodes (bank==b compare), the
+    // same selects the indexed write produced.
+    always_comb begin
+      issue_valid_o[p] = 1'b0;
+      issue_spec_o[p] = '0;
+      issue_spec_ab_o[p] = '0;
+      issue_ptid_o[p] = '0;
       issue_sbe_o[p] = '0;
       issue_orig_o[p] = '0;
       issue_prd_o[p] = '0;
-      if (pres_q[p].v && !cancelled_mask_i[pres_q[p].tid]) begin
-        issue_valid_o[p] = 1'b1;
+      for (int unsigned b = 0; b < BANKS; b++) begin
+        ack_v_o[b][p] = 1'b0;
+        ack_idx_o[b][p] = '0;
+      end
+      // control: valid + ack from the live record's position
+      issue_valid_o[p] = pres_live[p] | win_live[p];
+      for (int unsigned b = 0; b < BANKS; b++) begin
+        ack_v_o[b][p] = issue_ack_i[p] && issue_valid_o[p]
+                        && ((pres_live[p] ? pres_q[p].bank : win_q[p].bank) == b);
+        ack_idx_o[b][p] = ack_v_o[b][p]
+                            ? (pres_live[p] ? pres_q[p].entry : win_q[p].entry)
+                            : '0;
+      end
+      // payload: driven whenever a source record is present; only the
+      // live source's payload is architecturally visible.
+      if (pres_live[p]) begin
         issue_spec_o[p] = pres_q[p].spec;
         issue_spec_ab_o[p] = pres_q[p].spec_ab;
         issue_ptid_o[p] = pres_q[p].ptid;
         issue_sbe_o[p] = pres_q[p].sbe;
         issue_orig_o[p] = pres_q[p].orig;
         issue_prd_o[p] = pres_q[p].prd;
-        if (issue_ack_i[p]) begin
-          ack_v_o[pres_q[p].bank][p] = 1'b1;
-          ack_idx_o[pres_q[p].bank][p] = pres_q[p].entry;
-        end
-      end else if (win_q[p].v && !cancelled_mask_i[win_q[p].tid]) begin
-        issue_valid_o[p] = 1'b1;
+      end else begin
         issue_spec_o[p] = win_q[p].spec;
         issue_spec_ab_o[p] = win_q[p].spec_ab;
         issue_ptid_o[p] = win_q[p].ptid;
         issue_sbe_o[p] = pay_sbe_i[p];
         issue_orig_o[p] = pay_orig_i[p];
         issue_prd_o[p] = pay_prd_i[p];
-        if (issue_ack_i[p]) begin
-          ack_v_o[win_q[p].bank][p] = 1'b1;
-          ack_idx_o[win_q[p].bank][p] = win_q[p].entry;
-        end
       end
+    end
+
+    always_comb begin
+      for (int unsigned b = 0; b < BANKS; b++) begin
+        take_v_o[b][p] = 1'b0;
+        take_cand_o[b][p] = 1'b0;
+        take_idx_o[b][p] = '0;
+      end
+      pay_bank_o[p] = '0;
+      pay_entry_o[p] = '0;
       // Select for the NEXT presentation whenever no held record owns the
       // port: win_q is either empty, being acknowledged, or about to move
       // into pres_q, so the port never loses a cycle in steady state.
       // hyp8 g7: a selected candidate takes only when the resource gate
       // admits it; a declined candidate simply stays in the cand
       // registers and is re-evaluated against the next capture.
-      // Current cancel mask: the live bit was decided on the snapshot.
-      if (!pres_q[p].v && win_s_v[p] && take_ok[p] &&
-          !cancelled_mask_i[win_s[p].tid]) begin
+      // hyp8 r47: the grant carries the sticky kill terms -- live mask,
+      // mask_q and the C+1 kill_h hop -- so a pulse in any flight cycle
+      // kills the take, not just one coincident with this read.
+      if (take_grant[p]) begin
         take_v_o[win_s[p].bank][p] = 1'b1;
         take_cand_o[win_s[p].bank][p] = win_s[p].ci;
         take_idx_o[win_s[p].bank][p] = win_s[p].entry;
@@ -688,26 +836,75 @@ module g6lc_iq_arb
   // the just-captured candidates. win_s is the real cut, one cycle
   // before take. ARB_TAKE_P0_TID1 therefore sees take one tick later
   // than the capture edge.
-  always_comb begin : grant_snap
-    pv_q   = pv_d;
-    a0_q   = a0_d;
-    m1a_q  = m1a_d;
-    m1c_q  = m1c_d;
-    m_oh_q = m_oh_d;
-    cand_v_h      = cand_v_q;
-    cand_i_h      = cand_i_q;
-    cand_tid_h    = cand_tid_q;
-    cand_fp_h     = cand_fp_q;
-    cand_spec_h   = cand_spec_q;
-    cand_spec_ab_h = cand_spec_ab_q;
-    cand_ptid_h   = cand_ptid_q;
-    cand_fluin_h  = cand_fluin_q;
-    cand_wbport_h = cand_wbport_q;
-    cand_wboff_h  = cand_wboff_q;
-    cand_gate_h   = cand_gate_q;
-    cand_div_h    = cand_div_q;
-    cand_port0_h  = cand_port0_q;
-    aq_h   = aq_q;
+  // r43-T T7: HypCfg.IqArbStages==2 makes the CTL outputs and the
+  // candidate snapshot real registers — the pair-order/cancel/owned cone
+  // (CTL) evaluates in the capture cycle and is frozen at this edge, and
+  // GRN + the port tournament + win_s run one cycle later. The live
+  // re-checks are unchanged: held_s excludes win_s/win_q/pres_q tids at
+  // GRN time and the take grant folds cancelled_mask_i on win_s.tid
+  // with the r47 sticky samples (kill_h for the CTL-snapshot cycle,
+  // mask_q for the tournament cycle), so a stale frozen bit or a
+  // mid-flight kill pulse can only waste a grant cycle, never issue a
+  // dead or duplicate op. Cost: +1 cycle candidate->take. Mutant
+  // G6LC_MUT_T3_IQ_ARB forces the single-cycle form; mutant
+  // G6LC_MUT_IQ_ARB_NO_STICKY_KILL keeps only the live take read.
+  if (ARB_STG == 2) begin : gen_arb_stg
+    always_ff @(posedge clk_i or negedge rst_ni) begin : arb_stg_regs
+      if (!rst_ni) begin
+        pv_q <= '0; a0_q <= '0; m1a_q <= '0; m1c_q <= '0; m_oh_q <= '0;
+        aq_h <= '0;
+        cand_v_h <= '0; cand_i_h <= '0; cand_tid_h <= '0; cand_fp_h <= '0;
+        cand_spec_h <= '0; cand_spec_ab_h <= '0; cand_ptid_h <= '0;
+        cand_fluin_h <= '0; cand_wbport_h <= '0; cand_wboff_h <= '0;
+        cand_gate_h <= '0; cand_div_h <= '0; cand_port0_h <= '0;
+        kill_h <= '0;
+      end else if (flush_i) begin
+        // Only the control bits gate a GRN pick; payload regs are dead
+        // while every pv bit is 0.
+        pv_q <= '0; a0_q <= '0; m1a_q <= '0; m1c_q <= '0; m_oh_q <= '0;
+        kill_h <= '0;
+      end else begin
+        pv_q <= pv_d; a0_q <= a0_d; m1a_q <= m1a_d; m1c_q <= m1c_d;
+        m_oh_q <= m_oh_d; aq_h <= aq_q;
+        cand_v_h <= cand_v_q; cand_i_h <= cand_i_q;
+        cand_tid_h <= cand_tid_q; cand_fp_h <= cand_fp_q;
+        cand_spec_h <= cand_spec_q; cand_spec_ab_h <= cand_spec_ab_q;
+        cand_ptid_h <= cand_ptid_q; cand_fluin_h <= cand_fluin_q;
+        cand_wbport_h <= cand_wbport_q; cand_wboff_h <= cand_wboff_q;
+        cand_gate_h <= cand_gate_q; cand_div_h <= cand_div_q;
+        cand_port0_h <= cand_port0_q;
+        // r47: the C+1 sticky sample -- the live mask indexed by the
+        // candidate tids, a register-indexed read landing in a register.
+        for (int unsigned b = 0; b < BANKS; b++)
+          for (int unsigned ci = 0; ci < 2; ci++)
+            kill_h[b][ci] <= cancelled_mask_i[cand_tid_q[b][ci]];
+      end
+    end
+  end else begin : gen_arb_comb
+    // Independent LHS so each snapshot alias is billed as its own cone
+    // instead of one serial always_comb sweep (iq_bank e_d emit recipe).
+    assign pv_q   = pv_d;
+    assign a0_q   = a0_d;
+    assign m1a_q  = m1a_d;
+    assign m1c_q  = m1c_d;
+    assign m_oh_q = m_oh_d;
+    assign cand_v_h      = cand_v_q;
+    assign cand_i_h      = cand_i_q;
+    assign cand_tid_h    = cand_tid_q;
+    assign cand_fp_h     = cand_fp_q;
+    assign cand_spec_h   = cand_spec_q;
+    assign cand_spec_ab_h = cand_spec_ab_q;
+    assign cand_ptid_h   = cand_ptid_q;
+    assign cand_fluin_h  = cand_fluin_q;
+    assign cand_wbport_h = cand_wbport_q;
+    assign cand_wboff_h  = cand_wboff_q;
+    assign cand_gate_h   = cand_gate_q;
+    assign cand_div_h    = cand_div_q;
+    assign cand_port0_h  = cand_port0_q;
+    assign aq_h   = aq_q;
+    // r47: ARB_STG==1 has no C+1 register stage; mask_q at the take
+    // covers the only unsampled middle cycle, so kill_h stays 0.
+    assign kill_h = '0;
   end
 
   // ----------------------------------------------------------------------
@@ -728,6 +925,8 @@ module g6lc_iq_arb
       cand_gate_q <= '0;
       cand_div_q <= '0;
       cand_port0_q <= '0;
+      cand_cancl_q <= '0;
+      mask_q <= '0;
       aq_q <= '0;
       for (int unsigned p = 0; p < NPORTS; p++) begin
         win_q[p] <= '{v: 1'b0, default: '0};
@@ -735,6 +934,8 @@ module g6lc_iq_arb
       end
     end else if (flush_i) begin
       cand_v_q <= '0;
+      cand_cancl_q <= '0;
+      mask_q <= '0;
       aq_q <= '0;
       for (int unsigned p = 0; p < NPORTS; p++) begin
         win_q[p].v <= 1'b0;
@@ -754,6 +955,12 @@ module g6lc_iq_arb
       cand_gate_q <= cand_gate_i;
       cand_div_q <= cand_div_i;
       cand_port0_q <= cand_port0_i;
+      for (int unsigned b = 0; b < BANKS; b++)
+        for (int unsigned ci = 0; ci < 2; ci++)
+          cand_cancl_q[b][ci] <= cancelled_mask_i[cand_tid_i[b][ci]];
+      // r47: whole-mask register -- covers the GRN/tournament cycle at
+      // take time. Cleared on flush with every record.
+      mask_q <= cancelled_mask_i;
       begin : gen_aq
         for (int unsigned a = 0; a < NSLOT; a++) begin
           for (int unsigned b = 0; b < NSLOT; b++) begin
@@ -793,11 +1000,12 @@ module g6lc_iq_arb
           end
         end
         // Fresh select: pres_q free (win_q is empty, acked, or moving)
-        // and the resource gate admits the take; a cancelled winner is
-        // dropped before it can hold the port.
-        if (!pres_q[p].v && win_s_v[p] && take_ok[p] &&
-            !cancelled_mask_i[win_s[p].tid])
+        // and the grant admits the take; a winner killed in any
+        // sampled cycle of its flight is dropped before it can hold
+        // the port.
+        if (take_grant[p]) begin
           win_q[p] <= win_s[p];
+        end
       end
     end
   end
@@ -824,6 +1032,63 @@ module g6lc_iq_arb
           else $fatal(1, "iq_arb ARB: age matrix bit mismatch slots %0d/%0d",
                       a, b);
       end
+    end
+  end
+
+  // r43-T T7 (IqArbStages==2): the frozen CTL/snapshot registers must be
+  // exactly the previous cycle's combinational values — the staged GRN
+  // then reads the same operands the single-cycle form would have.
+  // The reference copies are shadow registers, never a $past of a
+  // combinational signal: under Verilator that lowers to a __Vsampled
+  // copy written in the NBA region, which is the POST-edge settled
+  // value — the check then compares the stage register against the
+  // next cycle's comb and misfires on every input change (hyp8-l3-r1
+  // cycle-14 g6lc_t3_iq_arb_moh fire).  A shadow captured in the same
+  // clocked region reads the same pre-edge settle as arb_stg_regs
+  // itself, so the compare is exact.
+  if (ARB_STG == 2) begin : gen_arbstg_eq
+    int unsigned t3_iq_arb_n = 0;
+    logic                             flush_eq_q;
+    logic [NPAIR-1:0][3:0]            pv_eq_q;
+    logic [NCAND-1:0][3:0]            m_oh_eq_q;
+    logic [NSLOT-1:0][NSLOT-1:0]      aq_eq_q;
+    logic [BANKS-1:0][1:0][TID_W-1:0] cand_tid_eq_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin : gen_arbstg_eq_regs
+      if (!rst_ni) begin
+        t3_iq_arb_n  <= 0;
+        flush_eq_q   <= 1'b1;
+        pv_eq_q      <= '0;
+        m_oh_eq_q    <= '0;
+        aq_eq_q      <= '0;
+        cand_tid_eq_q <= '0;
+      end else begin
+        t3_iq_arb_n  <= t3_iq_arb_n + 1;
+        flush_eq_q   <= flush_i;
+        pv_eq_q      <= pv_d;
+        m_oh_eq_q    <= m_oh_d;
+        aq_eq_q      <= aq_q;
+        cand_tid_eq_q <= cand_tid_q;
+        if (!flush_eq_q) begin
+          g6lc_t3_iq_arb_pv: assert (pv_q == pv_eq_q)
+            else $error("g6lc_iq_arb: staged pv drift");
+          g6lc_t3_iq_arb_moh: assert (m_oh_q == m_oh_eq_q)
+            else $error("g6lc_iq_arb: staged m_oh drift");
+          g6lc_t3_iq_arb_aq: assert (aq_h == aq_eq_q)
+            else $error("g6lc_iq_arb: staged aq drift");
+          g6lc_t3_iq_arb_tid: assert (cand_tid_h == cand_tid_eq_q)
+            else $error("g6lc_iq_arb: staged cand_tid drift");
+        end else begin
+          // The edge after a flush must hold the flush value, not a
+          // frozen comb: arb_stg_regs zeroes the CTL bits while
+          // aq_h/cand_*_h hold (dead while pv is 0).
+          g6lc_t3_iq_arb_flc: assert (pv_q == '0 && m_oh_q == '0)
+            else $error("g6lc_iq_arb: staged flush clear drift");
+        end
+      end
+    end
+    final begin
+      if ($test$plusargs("equiv_report"))
+        $display("[equiv] g6lc_iq_arb arbstg: checked=%0d", t3_iq_arb_n);
     end
   end
   // pragma translate_on

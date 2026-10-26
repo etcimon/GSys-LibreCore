@@ -35,6 +35,8 @@ DTBS = {
     "g6lc-hyp8-smt2.dtb": "42d27db8642c8731864b96772aa368dd05643a1b76bb48d69fd0d249a01a8a48",
     "g6lc-hyp8-linux.dtb": "f64c1f6fca7ce9be95c9f5f80f78b2eaacff4f4730ca8cde691ad6762a4ebdb7",
     "g6lc-hyp8-smt2-linux.dtb": "fc0fd28f4a95ca5989279a53df0a390ffaecc29696365cc6fc2daa5279e7f39d",
+    "g6lc-hyp8-mc-linux.dtb": "24bdd6a7dfd042f40b322fb0e3a0170767c44dd7d3f55dbfbea2b79fd3b8036b",
+    "g6lc-hyp8-mc.dtb": "7813ffd528dc25e1d6213421a7019ba00ad66406ae7a1683a10087027056ca86",
 }
 STRICT_ELF = "7e4142ac43378329957c1a7f270a1c426d85f08caa32adcc3ea7a9fa62647b78"
 STRICT_BINARY = "2b7cdc0495bd00e5a814d5316ae4708229967065131d3e4f3fdffdde95584016"
@@ -128,6 +130,8 @@ def main():
         ("strict-smt2", 2, "g6lc-hyp8-smt2.dtb", "strict-payload.bin"),
         ("linux-scalar", 1, "g6lc-hyp8-linux.dtb", "linux-payload.bin"),
         ("linux-smt2", 2, "g6lc-hyp8-smt2-linux.dtb", "linux-payload.bin"),
+        ("linux-mc", 8, "g6lc-hyp8-mc-linux.dtb", "linux-payload.bin"),
+        ("strict-mc", 8, "g6lc-hyp8-mc.dtb", "strict-payload.bin"),
     )
     for name, harts, dtb, payload in profiles:
         build = out / f"build-{name}"

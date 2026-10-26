@@ -22,6 +22,9 @@ package g6lc_hyp_pkg;
     bit AluStaggered;
     // Rename: pipeline stages through map/freelist (g6lc_rename.md).
     int unsigned RenameStages;
+    // Rename: 1 = single-cycle R2 resolve; 2 = RR-a compare register +
+    // RR-b late-select (g6lc_rename.md, r43-T T1(b)).
+    int unsigned RenameResolveStages;
     // Rename: freelist bank count (g6lc_rename.md).
     int unsigned FreelistBanks;
     // Issue queue: number of banks (g6lc_iq.md).
@@ -68,6 +71,16 @@ package g6lc_hyp_pkg;
     int unsigned CsrReadStages;
     // MMU/TLB: lookup staging through the TLBs (t1_rest.md g6lc_tlb/mmu).
     int unsigned TlbStages;
+    // PTW: 0 = single-cycle PTE verdict; 1 = registered decode bundle +
+    // PTE_DECODE verdict state (r43-T T2).
+    int unsigned PtwDecodeStage;
+    // LSQ reduce: 1 = single R stage; 2 = R1 tournament + R2 publish
+    // (r43-T T3). The wrapper's event-context pipeline extends to match.
+    int unsigned LsqReduceStages;
+    // IQ arb: 1 = CTL+GRN combinational; 2 = registered CTL outputs and
+    // candidate snapshot feeding GRN/port-select (r43-T T7). Take moves
+    // one cycle later; take-relative distances are unchanged.
+    int unsigned IqArbStages;
     // FPU: latency override on, use package fp latencies (t1_rest.md fpu_wrap).
     bit FpuLatOverride;
     // LSQ: CAM/age-check banking factor (g6lc_lsq.md).
@@ -81,6 +94,7 @@ package g6lc_hyp_pkg;
       AluStages: 1,
       AluStaggered: 1'b0,
       RenameStages: 1,
+      RenameResolveStages: 1,
       FreelistBanks: 1,
       IqBanks: 1,
       IqBankEntries: 0,
@@ -102,6 +116,9 @@ package g6lc_hyp_pkg;
       DecodeStages: 1,
       CsrReadStages: 1,
       TlbStages: 1,
+      PtwDecodeStage: 0,
+      LsqReduceStages: 1,
+      IqArbStages: 1,
       FpuLatOverride: 1'b0,
       LsqCamBanks: 1,
       WbufPipelined: 1'b0
@@ -116,6 +133,7 @@ package g6lc_hyp_pkg;
       AluStages: 3,
       AluStaggered: 1'b1,
       RenameStages: 3,
+      RenameResolveStages: 2,
       FreelistBanks: 2,
       IqBanks: 8,
       IqBankEntries: 4,
@@ -135,6 +153,15 @@ package g6lc_hyp_pkg;
       LsuAguStages: 2,
       DcacheHitExtra: 2,
       CommitBundleStages: 1,
+      // r42-T item 20 countercase: the gated implementation stays
+      // (registered FLU publication record in ex_stage, mutant
+      // G6LC_MUT_T2_WBCAP, counter `ex_stage wbcapture`) but OFF in
+      // Hyp8 — the ex_stage row was 16.4 FO4 before and after, so the
+      // record bought no structural gain while adding +1 cycle to every
+      // fixed FLU class' dependence chain under IqSpecWakeup=0.
+      // Re-enable only when the FLU publication mux sets the clock.
+      // With the field at 0, ooo_flu_cycles returns the pre-r42
+      // distances by construction (the +1 term is gated on the field).
       WbCaptureStages: 0,
       WbReserve: 1'b1,
       WbLanes: 6,
@@ -142,6 +169,9 @@ package g6lc_hyp_pkg;
       DecodeStages: 3,
       CsrReadStages: 2,
       TlbStages: 3,
+      PtwDecodeStage: 1,
+      LsqReduceStages: 2,
+      IqArbStages: 2,
       FpuLatOverride: 1'b1,
       LsqCamBanks: 2,
       WbufPipelined: 1'b1
@@ -184,6 +214,10 @@ package g6lc_hyp_pkg;
     ok = 1'b1;
     ok &= !h.AluStaggered || (h.AluStages inside {2, 3});
     ok &= h.RenameStages inside {1, 2, 3};
+    ok &= h.RenameResolveStages inside {1, 2};
+    // The two-cycle resolve needs the staged rename (the RR-a register
+    // sits inside the R2 kernel, which exists only under RenameStages 3).
+    ok &= (h.RenameResolveStages == 1) || (h.RenameStages == 3);
     ok &= h.IqBanks >= 1;
     ok &= !(h.IqBanks > 1) || (h.IqBankEntries >= 2);
     ok &= h.IqSpecWakeup inside {0, 1, 2};
@@ -191,16 +225,28 @@ package g6lc_hyp_pkg;
     // producer could still stall after grant, which the reservation model
     // forbids, so the two knobs may not combine.
     ok &= !h.WbReserve || (h.IqSpecWakeup == 0);
+    // The legacy structural-hazard arm models only one-cycle FLU classes
+    // (ALU/branch/CSR/AES write back at t+1) plus the T50 multiplier lag;
+    // a staged ALU publishes past t+1 and needs the reservation model.
+    ok &= h.WbReserve || (h.AluStages == 1);
     ok &= h.StoreFwdCycles inside {1, 3};
     ok &= h.LsuAguStages inside {1, 2};
     // wt_dcache: the read ctrl/mems carry exactly the reference
     // single-cycle arm (0) and the staged T1/T2 arm (2).
     ok &= h.DcacheHitExtra inside {0, 2};
     ok &= h.CommitBundleStages <= 1;
+    // The publication record adds one cycle to every fixed FLU class; the
+    // distance is carried only by the reservation model (the legacy
+    // !WbReserve arm has fixed t+1 structural-hazard rules and cannot
+    // absorb the extra edge).
+    ok &= (h.WbCaptureStages == 0) || h.WbReserve;
     ok &= h.WbCaptureStages <= 1;
     ok &= h.DecodeStages inside {1, 3};
     ok &= h.CsrReadStages inside {1, 2};
     ok &= h.TlbStages inside {1, 3};
+    ok &= h.PtwDecodeStage <= 1;
+    ok &= h.LsqReduceStages inside {1, 2};
+    ok &= h.IqArbStages inside {1, 2};
     ok &= !h.FeOverridePred || (h.FeEpochBits >= 2);
     ok &= h.LsqCamBanks >= 1;
     return ok;

@@ -255,8 +255,45 @@ module wt_dcache_wbuffer
 
   tx_stat_t [G6LCCfg.DCACHE_MAX_TX-1:0] tx_stat_d, tx_stat_q;
   wbuffer_t [G6LCCfg.WtDcacheWbufDepth-1:0] wbuffer_d, wbuffer_q;
+  // hyp8 r41: primary contract is one in-flight TX per entry, enforced
+  // at selection time. bdirty[] already suppresses an entry while ANY
+  // txblock bit is set, but under WbufPipelined the D1 drain capture
+  // reads wbuffer_q one cycle before the grant's dirty/txblock update
+  // lands: a capture taken on the grant cycle re-offers the same bytes
+  // at D2 with a second tx slot -- the r39 double send. drn_hit marks
+  // the entry granted this cycle; dirty_sendable masks it out of the
+  // arbiter pick and the D1 dr_vld for exactly that cycle (a second
+  // contiguous send of the same entry still requires a full return
+  // epoch, so tx_cnt <= 1 is the structural invariant). The mask puts
+  // miss_ack_i through one AND onto the rr_arb request inputs and the
+  // D1 flops; the arbiter's gnt_i already sampled the same ack, so no
+  // new input class enters the cone. Measured on the analyze-ghz-r3
+  // board. The live arm keeps dirty_sendable = dirty literally: there
+  // dr_ptr is combinational off the arbiter request and the mask would
+  // close a loop.
+  // hyp8 r40 (defense in depth): per-entry count of in-flight memory
+  // transactions. An entry's L1-write obligation is owned until the
+  // LAST transaction whose tx_stat[].ptr names it has returned: a
+  // checked+resident store must terminate in an array write or a fixup
+  // push, never a silent drop. While the count exceeds one the covered
+  // bytes stay valid (a clean covered byte becomes 3'b100 --
+  // held-clean: sent, returned, still forwarded, txblock released so a
+  // re-dirty merge drains normally); the last return releases every
+  // clean byte and the slot is withheld from allocation while any
+  // count is open. Under the r41 invariant the count never exceeds one,
+  // so the ledger reduces to the old release rule; it stays as the
+  // negative-control surface. The r15 fixup-queue "dead-entry drop" is
+  // unaffected: it applies to tag-miss stores; this is the
+  // resident-hit retire path.
+  localparam int unsigned TXC_W = $clog2(G6LCCfg.DCACHE_MAX_TX + 1);
+  logic [G6LCCfg.WtDcacheWbufDepth-1:0][TXC_W-1:0] tx_cnt_d, tx_cnt_q;
+  logic [G6LCCfg.WtDcacheWbufDepth-1:0]            tx_inflight, entry_freed;
   logic [G6LCCfg.WtDcacheWbufDepth-1:0] valid;
   logic [G6LCCfg.WtDcacheWbufDepth-1:0] dirty;
+  // hyp8 r41: drn_hit = entry granted a TX this cycle (drn_gi export);
+  // dirty_sendable = arbiter request after the recapture mask.
+  logic [G6LCCfg.WtDcacheWbufDepth-1:0] drn_hit;
+  logic [G6LCCfg.WtDcacheWbufDepth-1:0] dirty_sendable;
   logic [G6LCCfg.WtDcacheWbufDepth-1:0] tocheck;
   logic [G6LCCfg.WtDcacheWbufDepth-1:0] wbuffer_hit_oh, inval_hit;
   //logic     [G6LCCfg.WtDcacheWbufDepth-1:0][7:0]    bdirty;
@@ -278,7 +315,7 @@ module wt_dcache_wbuffer
   // consumer shares the select.
   tx_stat_t                            rtrn_tx;
   wbuffer_t                            rtrn_wb;
-  logic                                          w3_vld_q, w3_is_ni_q;
+  logic                                          w3_vld_q, w3_is_ni_q, w3_merge_q;
   logic [$clog2(G6LCCfg.WtDcacheWbufDepth)-1:0]  w3_ptr_q;
   logic [G6LCCfg.DCACHE_TAG_WIDTH+G6LCCfg.DCACHE_INDEX_WIDTH-
          G6LCCfg.XLEN_ALIGN_BYTES-1:0]           w3_wtag_q;
@@ -306,7 +343,21 @@ module wt_dcache_wbuffer
   wbuffer_t                            rtrn_snap_wb_q;
   logic [G6LCCfg.MEM_TID_WIDTH-1:0]    rtrn_id_raw;
   assign rtrn_tx  = rtrn_snap_tx_q;
+`ifdef G6LC_MUT_WBUF_SNAP_VIEW
+  // r41v2 review mutant: the frozen W2S snapshot view.
   assign rtrn_wb  = rtrn_snap_wb_q;
+`else
+  // hyp8 r41v2: the return legs read the live entry record through the
+  // registered snapshot pointer so the ack_be decision and the byte
+  // release observe one state. The frozen snapshot let a drain or merge
+  // between capture and evict split the views: snapshot-dirty forced
+  // ack_be=0 while the live release freed the bytes — a checked+resident
+  // word freed without its L1 write (the l1_obligation drops). Timing
+  // note: this puts an 8:1 indexed wbuffer_q read back into the
+  // return-leg cone (rtrn_wb feeds ack_be/leg_*/vmid_clr) — measured
+  // with the module board.
+  assign rtrn_wb  = wbuffer_q[rtrn_snap_ptr_q];
+`endif
   assign rtrn_id  = rtrn_snap_id_q;
 
 
@@ -1351,6 +1402,12 @@ module wt_dcache_wbuffer
   // D1 captures the rr pick (pointer, record, its sendable-byte vector);
   // D2 offers the held selection until miss_ack_i — a younger dirty word
   // arriving while a request waits cannot move that request's payload.
+  // hyp8 r41: the capture runs off dirty_sendable, not dirty. On the
+  // grant cycle the just-accepted entry still reads dirty in wbuffer_q
+  // (its dirty/txblock next-state update lands one edge later), so an
+  // unmasked recapture would re-offer bytes already in flight. The
+  // drn_hit mask closes that one-cycle window; dr_mux/dr_bdirty of a
+  // masked re-pick are never offered because dr_vld drops with the mask.
   logic                        dr_vld;
   wbuffer_t                    dr_mux;
   logic [(G6LCCfg.XLEN/8)-1:0] dr_bdirty;
@@ -1367,11 +1424,19 @@ module wt_dcache_wbuffer
           dr_vld       <= 1'b0;
         end else begin
           drain_hold_q <= miss_req_o && !miss_ack_i;
-          if (!drain_hold_q) begin
+          // hyp8 r41: a grant CONSUMES the request. Recapture on the
+          // grant cycle too, not only while unheld — otherwise dr_vld
+          // stays asserted one cycle past the ack and a level
+          // acceptor re-sends the same entry (dchx2 leaf: held request
+          // re-acked at N+1, g6lc_tx_single). The masked re-pick names
+          // the next sendable entry (dirty_sendable excludes the just-
+          // granted one, whose dirty/txblock update lands an edge late)
+          // or drops dr_vld when nothing else is sendable — no bubble.
+          if (!drain_hold_q || miss_ack_i) begin
             dr_ptr    <= dirty_ptr;
             dr_mux    <= wbuffer_dirty_mux;
             dr_bdirty <= bdirty[dirty_ptr];
-            dr_vld    <= |dirty;
+            dr_vld    <= |dirty_sendable;
           end
         end
       end
@@ -1535,6 +1600,36 @@ module wt_dcache_wbuffer
   always_ff @(posedge clk_i or negedge rst_ni) begin : p_drop
     if (!rst_ni) drop_q <= 1'b0;
     else         drop_q <= leg_go_q && !leg_fire_q && !ack_wr_lost;
+  end
+  // The leg-time invalidate view of the dropping pop, registered beside
+  // drop_q: wr_cl_inv_i is live and can deassert between go and drop, so
+  // the L1-obligation check reads this capture, not the live rtrn_inv.
+  logic drop_inv_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin : p_drop_inv
+    if (!rst_ni) drop_inv_q <= 1'b0;
+    else         drop_inv_q <= leg_go_q && rtrn_inv;
+  end
+  // The leg-time "check completed on this entry" view, registered beside
+  // drop_q.  When the tag-check return for rtrn_ptr lands on the leg
+  // decision, check_wr writes this entry's data into the L1 hit way
+  // itself (p_wr_data check_wr arm), so leg_l1_d is correctly
+  // suppressed and the drop's obligation is discharged by the check.
+  logic drop_chk_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin : p_drop_chk
+    if (!rst_ni) drop_chk_q <= 1'b0;
+    else         drop_chk_q <= leg_go_q && chk_hit[rtrn_ptr] && (|rd_hit_oh_q);
+  end
+  // The leg-time L1-write flag of the dropping pop, registered beside
+  // drop_q.  leg_l1_q re-samples l1_i every cycle (l1_q <= l1_i &&
+  // (!go_q || lost)), so reading it at the drop cycle sees the NEXT
+  // leg's decision — the h33 trace showed the ack write landing via
+  // ack_wr_sel (wt_word@479) while the drop-cycle leg_l1_q was already
+  // 0.  Captured at go, drop_l1_q is the authoritative "this pop wrote
+  // the array" bit.
+  logic drop_l1_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin : p_drop_l1
+    if (!rst_ni) drop_l1_q <= 1'b0;
+    else         drop_l1_q <= leg_go_q && leg_l1_q;
   end
 
   // Fixup push and L1-only drop both pop one cycle after the grant.
@@ -1795,6 +1890,7 @@ module wt_dcache_wbuffer
     if (!rst_ni) begin
       w3_vld_q   <= 1'b0;
       w3_is_ni_q <= 1'b0;
+      w3_merge_q <= 1'b0;
       w3_ptr_q   <= '0;
       w3_wtag_q  <= '0;
       w3_be_q    <= '0;
@@ -1802,6 +1898,7 @@ module wt_dcache_wbuffer
       w3_wuser_q <= '0;
     end else if (HypCfg.WbufPipelined) begin
       w3_vld_q   <= e_accept;
+      w3_merge_q <= e_hit_any;
       w3_ptr_q   <= wr_ptr;
       w3_wtag_q  <= {e_tag,
                      e_idx[G6LCCfg.DCACHE_INDEX_WIDTH-1:G6LCCfg.XLEN_ALIGN_BYTES]};
@@ -1825,9 +1922,14 @@ module wt_dcache_wbuffer
   logic [G6LCCfg.DCACHE_TAG_WIDTH+G6LCCfg.DCACHE_INDEX_WIDTH-
          G6LCCfg.XLEN_ALIGN_BYTES-1:0]           wrv_wtag;
   logic                                          wrv_isni;
+  // hyp8 r41v2: merge-vs-fresh travels with the W3 descriptor so the
+  // array write can tell a coalesce (byte-OR into a live entry) from a
+  // fresh allocation (owns the whole slot).
+  logic                                          wrv_merge;
   assign wrv_be    = HypCfg.WbufPipelined ? w3_be_q    : e_be;
   assign wrv_data  = HypCfg.WbufPipelined ? w3_wdata_q : e_wdata;
   assign wrv_user  = HypCfg.WbufPipelined ? w3_wuser_q : e_wuser;
+  assign wrv_merge = HypCfg.WbufPipelined ? w3_merge_q : e_hit_any;
   assign wrv_wtag  = HypCfg.WbufPipelined
       ? w3_wtag_q
       : {e_tag,
@@ -1916,12 +2018,21 @@ module wt_dcache_wbuffer
       // hyp8 r5: a live W3 pending write answers the coalesce select
       // (same-tag store merges into the pending slot) and holds its array
       // slot out of the lowest-free pool via w3_pend_oh.
+      // hyp8 r41v2 review mutant G6LC_MUT_WBUF_W3_HIT_BYPASS: drop the
+      // W3-pending bypass from the W2 decision — a same-word store one
+      // cycle behind a pending W3 write allocates a second live slot.
+      logic w1_w3hit_eff;
+`ifdef G6LC_MUT_WBUF_W3_HIT_BYPASS
+      assign w1_w3hit_eff = 1'b0;
+`else
+      assign w1_w3hit_eff = w1_w3hit_q;
+`endif
       assign wr_ptr   = (|w1_hit_oh_q) ? w1_hit_ptr_q
-                                       : (w1_w3hit_q ? w3_ptr_q
-                                                     : w1_next_ptr_q);
-      assign rdy      = (|w1_hit_oh_q) | w1_w3hit_q | (~w1_full_q);
+                                       : (w1_w3hit_eff ? w3_ptr_q
+                                                       : w1_next_ptr_q);
+      assign rdy      = (|w1_hit_oh_q) | w1_w3hit_eff | (~w1_full_q);
       assign e_accept = e_req && rdy && !ni_conflict;
-      assign e_hit_any = (|w1_hit_oh_q) | w1_w3hit_q;
+      assign e_hit_any = (|w1_hit_oh_q) | w1_w3hit_eff;
       assign req_port_o.data_gnt = gnt_q;
     end else begin : gen_w_live
       assign e_req    = req_port_i.data_req;
@@ -1941,10 +2052,17 @@ module wt_dcache_wbuffer
 
   // next free entry in the buffer -- hyp8 r5: a W3-pending write owns
   // its slot already, so it counts as occupied for the lowest-free pick.
+  // hyp8 r40: a slot with an in-flight TX count is occupied even if its
+  // valid bytes are all retired -- reallocating it would hand a stale
+  // tx_stat pointer to a live return (the r39 cross-retire).
   g6lc_hyp_lzc #(
       .WIDTH(G6LCCfg.WtDcacheWbufDepth)
   ) i_vld_lzc (
+`ifdef G6LC_MUT_WBUF_FREE_INFLIGHT
       .in_i   (~(valid | w3_pend_oh)),
+`else
+      .in_i   (~(valid | w3_pend_oh | tx_inflight)),
+`endif
       .cnt_o  (next_ptr),
       .empty_o(full)
   );
@@ -1959,19 +2077,55 @@ module wt_dcache_wbuffer
   );
 
   // next dirty word to serve
+  // hyp8 r41: single in-flight TX per entry by construction. The
+  // pipelined drain registers its pick at D1 while the grant's
+  // dirty/txblock update lands one edge later; drn_hit masks the just-
+  // granted entry out of this pick for that one cycle so the recapture
+  // cannot re-offer bytes already in flight (the r39 double send:
+  // wt_tx @16263524 id=3 / @16263525 id=2, same ptr same be). The live
+  // arm must stay the literal identity: dr_ptr is combinational off
+  // this arbiter's request there, so masking would close a
+  // dirty_ptr -> drn_hit -> req_i loop.
+`ifdef G6LC_MUT_WBUF_DRAIN_RECAPTURE
+  // r41 mutant D-a: restore the unmasked recapture request.
+  assign dirty_sendable = dirty;
+`else
+  if (HypCfg.WbufPipelined) begin : gen_drn_sendable
+    assign dirty_sendable = dirty & ~drn_hit;
+  end else begin : gen_drn_sendable
+    assign dirty_sendable = dirty;
+  end
+`endif
   // Vendor arbiter: dirty_ptr indexes the live bdirty[] and the drained
   // entry (dr_mux) must carry current data — a byte merge after a queue
-  // capture would otherwise drain a stale snapshot.
+  // capture would otherwise drain a stale snapshot. rr fairness note:
+  // gnt_i advances the arbiter on the live pick dirty_ptr while the
+  // granted drain entry is the registered dr_ptr — ordering only, not
+  // correctness.
+  // hyp8 r41v2: LockIn must stay off here. The pipelined drain already
+  // holds its offer in dr_*/drain_hold_q, so the arbiter lock is
+  // redundant — and while lock_q holds, req_d replays the FROZEN
+  // request mask, so the grant-cycle recapture's drn_hit mask cannot
+  // remove the just-granted entry: the capture stores the frozen pick
+  // and re-offers it one cycle after the ack (r41xdiag @289618/289619:
+  // dr_ptr stayed on the granted entry, its txblock/tx_cnt update
+  // landed an edge late, g6lc_tx_single).
+`ifdef G6LC_MUT_WBUF_DRAIN_LOCKIN
+  // r41v2 review mutant: restore the frozen-pick arbiter.
+  localparam bit WBUF_DRAIN_LOCKIN = 1'b1;
+`else
+  localparam bit WBUF_DRAIN_LOCKIN = 1'b0;
+`endif
   rr_arb_tree #(
       .NumIn   (G6LCCfg.WtDcacheWbufDepth),
-      .LockIn  (1'b1),
+      .LockIn  (WBUF_DRAIN_LOCKIN),
       .DataType(wbuffer_t)
   ) i_dirty_rr (
       .clk_i  (clk_i),
       .rst_ni (rst_ni),
       .flush_i('0),
       .rr_i   ('0),
-      .req_i  (dirty),
+      .req_i  (dirty_sendable),
       .gnt_o  (),
       .data_i (wbuffer_q),
       .gnt_i  (dirty_rd_en),
@@ -2063,7 +2217,7 @@ module wt_dcache_wbuffer
   for (genvar gi = 0; gi < G6LCCfg.WtDcacheWbufDepth; gi++) begin : gen_wbuf_n
     logic                            chk_gi, vkc_gi, inv_gi, ev_gi, drn_gi,
                                      wr_gi, vkhold_gi, checked_mid,
-                                     checked_clr, checked_set,
+                                     checked_clr, checked_set, last_tx_gi,
                                      ev_vk_any, valid_all_gone, tag_eq;
     logic [(G6LCCfg.XLEN/8)-1:0]     evbe, valid_mid, vmid_clr;
     // Tag hit of this slot. Same as the old indexed compare AND the
@@ -2075,11 +2229,22 @@ module wt_dcache_wbuffer
     assign inv_gi = inval_hit[gi];
     assign ev_gi  = evict && (rtrn_ptr == WBW'(gi));
     assign drn_gi = miss_req_o && miss_ack_i && (dr_ptr == WBW'(gi));
+    assign drn_hit[gi] = drn_gi;
     // hyp8 r5: the store-write term is the W3 apply under WbufPipelined
     // (registered descriptor), the live W2 accept otherwise.
     assign wr_gi  = HypCfg.WbufPipelined ? (w3_vld_q && (w3_ptr_q == WBW'(gi)))
                                          : (e_accept && (wr_ptr == WBW'(gi)));
     assign evbe   = rtrn_tx.be;
+    // hyp8 r40: in-flight ownership. A real return decrements; a send
+    // increments; the freed byte release and the free decision belong
+    // to the LAST in-flight return for this entry only. Dead pops
+    // (rtrn_tx.vld==0, an already-freed tx slot) carry a stale ptr and
+    // must neither decrement nor release bytes.
+    assign last_tx_gi   = rtrn_tx.vld && (tx_cnt_q[gi] <= TXC_W'(1));
+    assign tx_cnt_d[gi] = tx_cnt_q[gi] + TXC_W'(drn_gi) -
+                          TXC_W'(ev_gi && rtrn_tx.vld);
+    assign tx_inflight[gi] = |tx_cnt_q[gi];
+    assign entry_freed[gi] = valid_all_gone;
     // checked after tag-return and invalidate. Clear wins over the
     // tag-hit set, which wins over the registered bit.
     assign checked_clr = vkc_gi | inv_gi;
@@ -2094,7 +2259,17 @@ module wt_dcache_wbuffer
     // is true, so vkc_gi stays 0. ORing it into the byte clear pulled
     // the tag compare onto this cone. The clear is the evict bytes.
     for (genvar k = 0; k < (G6LCCfg.XLEN / 8); k++) begin : gen_vmid
+`ifdef G6LC_MUT_WBUF_FREE_INFLIGHT
       assign vmid_clr[k] = ev_gi & evbe[k] & ~wbuffer_q[gi].dirty[k];
+`else
+      // hyp8 r40: while another TX still names this entry the covered
+      // bytes stay valid -- a clean covered byte becomes 3'b100
+      // (held-clean). The last in-flight return releases every clean
+      // byte, not only its own tx.be coverage: earlier returns already
+      // retired their bytes and only this return remains outstanding.
+      // Dirty bytes always stay (they re-drain under their own send).
+      assign vmid_clr[k] = ev_gi & last_tx_gi & ~wbuffer_q[gi].dirty[k];
+`endif
       assign valid_mid[k] = ~vmid_clr[k] & wbuffer_q[gi].valid[k];
     end
     assign ev_vk_any      = ev_gi && vkhold_gi &&
@@ -2103,17 +2278,31 @@ module wt_dcache_wbuffer
 
     // valid: wr > evict-clear > void-keep clear > hold
     // dirty: wr > drain > hold
-    // txblock: drain > evict > void-keep clear > hold
+    // txblock: wr > drain > evict > void-keep clear > hold
     // data/user: wr only
+    // hyp8 r41v2: a fresh (non-merge) alloc owns the whole slot — no
+    // stale valid/dirty/txblock byte survives from the previous life.
+    // A merge keeps the byte-OR update of the live entry.
     for (genvar k = 0; k < (G6LCCfg.XLEN / 8); k++) begin : gen_wbf
       assign wbuffer_d[gi].valid[k] =
-          (wr_gi && wrv_be[k]) ? 1'b1 : valid_mid[k];
+          (wr_gi && !wrv_merge) ? wrv_be[k]
+          : (wr_gi && wrv_be[k]) ? 1'b1 : valid_mid[k];
       assign wbuffer_d[gi].dirty[k] =
-          (wr_gi && wrv_be[k]) ? 1'b1
+          (wr_gi && !wrv_merge) ? wrv_be[k]
+          : (wr_gi && wrv_be[k]) ? 1'b1
           : (drn_gi && tx_be[k]) ? 1'b0 : wbuffer_q[gi].dirty[k];
+      // hyp8 r41: the txblock release is byte release on the send side,
+      // so it is ownership-gated like the valid release: a real return
+      // (rtrn_tx.vld) unblocks only its own covered bytes; a dead pop
+      // (vld==0, stale ptr/be) unblocks nothing. Without the gate a
+      // stale evict could un-block a byte still in flight and let it
+      // resend (dchx2 leaf: dead-pop evict cleared txblock mid-flight,
+      // the re-drain then granted with tx_cnt=1 — g6lc_tx_single).
       assign wbuffer_d[gi].txblock[k] =
-          (drn_gi && tx_be[k]) ? 1'b1
-          : (ev_gi && evbe[k]) ? (vkhold_gi && !wbuffer_q[gi].dirty[k])
+          (wr_gi && !wrv_merge) ? 1'b0
+          : (drn_gi && tx_be[k]) ? 1'b1
+          : (ev_gi && rtrn_tx.vld && evbe[k])
+              ? (vkhold_gi && !wbuffer_q[gi].dirty[k])
           : vkc_gi ? 1'b0 : wbuffer_q[gi].txblock[k];
       assign wbuffer_d[gi].data[k*8+:8] =
           (wr_gi && wrv_be[k]) ? wrv_data[k*8+:8]
@@ -2126,6 +2315,7 @@ module wt_dcache_wbuffer
         wr_gi ? 1'b0 : valid_all_gone ? 1'b0 : checked_mid;
     assign wbuffer_d[gi].hit_oh =
         (chk_gi && (|wbuffer_q[gi].valid)) ? rd_hit_oh_q
+        : (wr_gi && !wrv_merge) ? '0
                                            : wbuffer_q[gi].hit_oh;
     assign wbuffer_d[gi].wtag =
         wr_gi ? wrv_wtag : wbuffer_q[gi].wtag;
@@ -2149,6 +2339,7 @@ module wt_dcache_wbuffer
     if (!rst_ni) begin
       wbuffer_q    <= '{default: '0};
       tx_stat_q    <= '{default: '0};
+      tx_cnt_q     <= '0;
       ni_pending_q <= '0;
       check_ptr_q  <= '0;
       check_ptr_q1 <= '0;
@@ -2164,6 +2355,7 @@ module wt_dcache_wbuffer
     end else begin
       wbuffer_q    <= wbuffer_d;
       tx_stat_q    <= tx_stat_d;
+      tx_cnt_q     <= tx_cnt_d;
       ni_pending_q <= ni_pending_d;
       void_keep_q  <= void_keep_d;
       check_ptr_q  <= check_ptr_d;
@@ -2248,6 +2440,176 @@ module wt_dcache_wbuffer
                  leg_push_q, drop_q);
     end
   end
+
+  // hyp8 r40: in-flight ownership invariants. Every processed real
+  // return names an entry whose send-side count is still open — an
+  // entry is released only by its last return, so a zero count here
+  // means an orphaned TX pointer (the r39 cross-retire). The count can
+  // never exceed the TX id space: every in-flight TX holds a distinct
+  // id, so an overflow send would imply a duplicated live id.
+  always_ff @(posedge clk_i) begin : p_tx_own
+    if (rst_ni && evict && rtrn_tx.vld) begin
+      g6lc_tx_orphan: assert (tx_cnt_q[rtrn_ptr] != '0)
+        else $fatal(1,
+            "[l1 dcache wbuffer] orphaned TX pointer: entry %0d released while TX %0d in flight",
+            rtrn_ptr, rtrn_id);
+    end
+    if (rst_ni && miss_req_o && miss_ack_i) begin
+      g6lc_tx_ovf: assert (tx_cnt_q[dr_ptr] != TXC_W'(G6LCCfg.DCACHE_MAX_TX))
+        else $fatal(1,
+            "[l1 dcache wbuffer] in-flight TX count overflow on entry %0d",
+            dr_ptr);
+    end
+  end
+
+  // hyp8 r41: one in-flight TX per entry — a byte is sent at most once
+  // per dirty epoch. At a grant the offered entry must show no txblock
+  // (no byte already sent) and no open in-flight count; the r39 D1
+  // recapture re-offered the just-granted entry with both still zero in
+  // wbuffer_q, which this predicate catches at the second grant.
+  // Under the recapture review mutant the leaf bench owns the verdict:
+  // violations are counted/logged, not raised — Verilator turns $error
+  // into $stop, which would preempt the DCHX_SINGLE_TX leaf check.
+  int unsigned tx_single_n    = 0;
+  int unsigned tx_single_viol = 0;
+  always_ff @(posedge clk_i) begin : p_tx_single
+    if (rst_ni && miss_req_o && miss_ack_i) begin
+      tx_single_n <= tx_single_n + 1;
+      g6lc_tx_single: assert (wbuffer_q[dr_ptr].txblock == '0 &&
+                              tx_cnt_q[dr_ptr] == '0)
+        else begin
+          tx_single_viol <= tx_single_viol + 1;
+`ifdef G6LC_MUT_WBUF_DRAIN_RECAPTURE
+          $display(
+              "[l1 dcache wbuffer] g6lc_tx_single violation: entry %0d txblock=%h tx_cnt=%0d",
+              dr_ptr, wbuffer_q[dr_ptr].txblock, tx_cnt_q[dr_ptr]);
+`else
+          $error(
+              "[l1 dcache wbuffer] second send while TX in flight: entry %0d txblock=%h tx_cnt=%0d",
+              dr_ptr, wbuffer_q[dr_ptr].txblock, tx_cnt_q[dr_ptr]);
+`endif
+        end
+    end
+  end
+
+  // hyp8 r41v2 diagnostic: a fully-freed entry must carry no ownership
+  // residue. Every txblock/tx_cnt release path (real-return evict,
+  // vkc_gi, VoidKeep clear, inval) is supposed to leave a free slot
+  // clean; the first fire names the entry and the cycle so the
+  // windowed trace can identify which clearing path ran.
+  always_ff @(posedge clk_i) begin : p_free_slot_clean
+    if (rst_ni) begin
+      for (int unsigned k = 0; k < G6LCCfg.WtDcacheWbufDepth; k++) begin
+        g6lc_free_slot_clean: assert (
+            (|wbuffer_q[k].valid) ||
+            ((wbuffer_q[k].txblock == '0) && (tx_cnt_q[k] == '0)))
+          else $error(
+              "[l1 dcache wbuffer] free slot %0d retains ownership: txblock=%h tx_cnt=%0d valid=%h",
+              k, wbuffer_q[k].txblock, tx_cnt_q[k], wbuffer_q[k].valid);
+      end
+    end
+  end
+
+  // hyp8 r41v2: one entry per word, Verilator-active. The `hot1`
+  // property below sits under `ifndef VERILATOR` and never fired on any
+  // witness — wbuffer_hit_oh is the merge/coalesce vector and two set
+  // bits means two live slots hold one wtag (double-hold, double-send).
+  always_ff @(posedge clk_i) begin : p_word_uniq
+    if (rst_ni) begin
+      g6lc_hit_hot1_v: assert ($onehot0(wbuffer_hit_oh))
+        else $error(
+            "[l1 dcache wbuffer] wbuffer_hit_oh=%h not onehot0 — live slots share a wtag",
+            wbuffer_hit_oh);
+      for (int unsigned i = 0; i < G6LCCfg.WtDcacheWbufDepth; i++) begin
+        for (int unsigned j = i + 1; j < G6LCCfg.WtDcacheWbufDepth; j++) begin
+          g6lc_word_uniq: assert (
+              !((|wbuffer_q[i].valid) && (|wbuffer_q[j].valid) &&
+                (wbuffer_q[i].wtag == wbuffer_q[j].wtag)))
+            else $error(
+                "[l1 dcache wbuffer] slots %0d/%0d share wtag %h",
+                i, j, wbuffer_q[i].wtag);
+        end
+      end
+      // F-b: a fresh non-merge alloc must not inherit in-flight
+      // ownership — the free pick already excludes tx_inflight; this
+      // names a pick that raced a grant in the same cycle.
+      for (int unsigned k = 0; k < G6LCCfg.WtDcacheWbufDepth; k++) begin
+        g6lc_alloc_clean: assert (
+            !((HypCfg.WbufPipelined
+                 ? (w3_vld_q && !w3_merge_q && (w3_ptr_q == WBW'(k)))
+                 : (e_accept && !e_hit_any && (wr_ptr == WBW'(k)))) &&
+              ((tx_cnt_q[k] != '0) || (wbuffer_q[k].txblock != '0))))
+          else $error(
+              "[l1 dcache wbuffer] fresh alloc on slot %0d with in-flight ownership: tx_cnt=%0d txblock=%h",
+              k, tx_cnt_q[k], wbuffer_q[k].txblock);
+      end
+    end
+  end
+
+  // hyp8 r41v2: the cycle after a grant the drain must not offer the
+  // just-granted entry — the r41xdiag double send was a frozen arbiter
+  // pick surviving the grant cycle. drn_hit_q registers the grant mask.
+  logic [G6LCCfg.WtDcacheWbufDepth-1:0] drn_hit_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin : p_drn_hist
+    if (!rst_ni) drn_hit_q <= '0;
+    else         drn_hit_q <= drn_hit;
+  end
+  always_ff @(posedge clk_i) begin : p_drn_norepick
+    if (rst_ni) begin
+      g6lc_drn_norepick: assert (
+          !(miss_req_o && miss_ack_i && drn_hit_q[dr_ptr]))
+        else $error(
+            "[l1 dcache wbuffer] drain re-offer of just-granted entry %0d (frozen pick survived grant)",
+            dr_ptr);
+    end
+  end
+
+  // hyp8 r40: L1 obligation ledger. A checked+hit entry freed by a
+  // plain drop lost its array write — the r39 failure mode. Counted
+  // under +equiv_report; the r15 fixup "dead-entry drop" is a miss
+  // path and never matches this predicate.
+  // hyp8 r41v2: drop_q also covers the L1-only pop — a leg_go whose
+  // captured leg_l1_q commits the array write on the same pop
+  // (ack_wr_sel). A checked+hit entry freed by that class discharges
+  // its obligation; h33's drops=3-5 are that class. Only a plain drop
+  // (drop_q with no leg_l1_q write) is a violation. l1_obl_n keeps the
+  // r41-comparable count of every checked+hit drop-pop; l1_obl_plain_n
+  // is the violation class.
+  int unsigned l1_obl_n       = 0;
+  int unsigned l1_obl_plain_n = 0;
+  always_ff @(posedge clk_i) begin : p_l1_obl
+    if (rst_ni && drop_q && (|entry_freed) && rtrn_tx.vld &&
+        rtrn_wb.checked && (|rtrn_wb.hit_oh)) begin
+      l1_obl_n <= l1_obl_n + 1;
+      if (!leg_l1_q) begin
+        l1_obl_plain_n <= l1_obl_plain_n + 1;
+        $display("[l1 dcache wbuffer] L1 obligation dropped: entry %0d wtag=%h freed by plain drop l1=%b inv=%b chk=%b checkwr=%b ackbe=%h",
+                 rtrn_ptr, rtrn_wb.wtag, drop_l1_q, drop_inv_q, drop_chk_q,
+                 check_wr, ack_be);
+`ifndef G6LC_MUT_WBUF_SNAP_VIEW
+        // hyp8 r41v2: three leg-time exemptions discharge the
+        // obligation beside the plain drop: the pop's own L1 write
+        // (drop_l1_q — leg_l1_q re-samples every cycle, so it must be
+        // captured at go), an invalidate-path drop (drop_inv_q), and a
+        // drop whose tag check lands on the decision (drop_chk_q).
+        // Anything left over is the violation.  Under the
+        // snapshot-view mutant the counter keeps counting.
+        g6lc_l1_obl: assert (drop_l1_q || drop_inv_q || drop_chk_q)
+          else $fatal(1,
+              "[l1 dcache wbuffer] checked+resident entry %0d wtag=%h freed by drop without L1 write",
+              rtrn_ptr, rtrn_wb.wtag);
+`endif
+      end
+    end
+  end
+  final begin
+    if ($test$plusargs("equiv_report")) begin
+      $display("[equiv] wt_dcache_wbuffer l1_obligation: dropped=%0d plain=%0d",
+               l1_obl_n, l1_obl_plain_n);
+      $display("[equiv] wt_dcache_wbuffer tx_single: checked=%0d viol=%0d",
+               tx_single_n, tx_single_viol);
+    end
+  end
 `ifndef VERILATOR
 
   hot1 :
@@ -2288,9 +2650,12 @@ module wt_dcache_wbuffer
 
   for (genvar k = 0; k < G6LCCfg.WtDcacheWbufDepth; k++) begin : gen_assert1
     for (genvar j = 0; j < (G6LCCfg.XLEN / 8); j++) begin : gen_assert2
+      // hyp8 r40: 3'b100 is held-clean -- the byte's send already
+      // returned but another TX still names the entry, so the byte is
+      // kept for forwarding until the last in-flight return frees it.
       byteStates :
       assert property (
-        @(posedge clk_i) disable iff (!rst_ni) {wbuffer_q[k].valid[j], wbuffer_q[k].dirty[j], wbuffer_q[k].txblock[j]} inside {3'b000, 3'b110, 3'b101, 3'b111} )
+        @(posedge clk_i) disable iff (!rst_ni) {wbuffer_q[k].valid[j], wbuffer_q[k].dirty[j], wbuffer_q[k].txblock[j]} inside {3'b000, 3'b100, 3'b110, 3'b101, 3'b111} )
       else
         $fatal(
             1,

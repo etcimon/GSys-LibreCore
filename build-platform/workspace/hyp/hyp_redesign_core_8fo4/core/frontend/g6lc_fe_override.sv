@@ -254,9 +254,17 @@ module g6lc_fe_override
 
   // direct targets as one three-operand sum each (base + off + imm)
   logic [NrInstr-1:0][G6LCCfg.VLEN-1:0] direct_rvi_target, direct_rvc_target;
+  // hyp8 T1 item 11: RAS link candidates precomputed per slot (late
+  // select): the +2/+4 choice becomes a mux on finished sums instead of
+  // an add whose third operand is itself selected.
+  logic [NrInstr-1:0][G6LCCfg.VLEN-1:0] ras_upd2_c, ras_upd4_c;
   for (genvar i = 0; i < NrInstr; i++) begin : gen_direct_target
     assign direct_rvi_target[i] = l_base_q[i] + l_off_q[i] + rvi_imm_i[i];
     assign direct_rvc_target[i] = l_base_q[i] + l_off_q[i] + rvc_imm_i[i];
+    assign ras_upd2_c[i]        = l_base_q[i] + l_off_q[i]
+                                  + G6LCCfg.VLEN'(2);
+    assign ras_upd4_c[i]        = l_base_q[i] + l_off_q[i]
+                                  + G6LCCfg.VLEN'(4);
   end
 
   logic [NrInstr-1:0] is_branch, is_call, is_jump, is_return, is_jalr;
@@ -334,7 +342,12 @@ module g6lc_fe_override
         slot_pred_v[i] = 1'b1;
       end
       if (is_call[i]) begin
-        slot_ras_upd[i] = l_base_q[i] + l_off_q[i] + (rvc_call_i[i] ? G6LCCfg.VLEN'(2) : G6LCCfg.VLEN'(4));
+`ifdef G6LC_MUT_T1_FEOVR
+        slot_ras_upd[i] = l_base_q[i] + l_off_q[i] +
+            (rvc_call_i[i] ? G6LCCfg.VLEN'(2) : G6LCCfg.VLEN'(4));
+`else
+        slot_ras_upd[i] = rvc_call_i[i] ? ras_upd2_c[i] : ras_upd4_c[i];
+`endif
       end
       // Leftover-complete RVI jal is slot0 and wins over every later slot.
       if (i == 0 && l_unaligned_q && instruction_valid[0] && rvi_jump_i[0]) begin
@@ -343,7 +356,7 @@ module g6lc_fe_override
         slot_pred[0]    = direct_rvi_target[0];
         slot_pred_v[0]  = 1'b1;
         if (rvi_call_i[0]) begin
-          slot_ras_upd[0] = l_base_q[0] + l_off_q[0] + G6LCCfg.VLEN'(4);
+          slot_ras_upd[0] = ras_upd4_c[0];
         end
       end
     end
@@ -404,9 +417,22 @@ module g6lc_fe_override
     for (int i = 0; i < NrInstr; i++) cf_t8[i] = (cf_type[i] != NoCF);
   end
 
+  // r52-B3: fetchability evaluated per slot before the pred_win gather
+  // instead of after it. pred_win is one-hot, so
+  // |(pred_win & slot_fetch) == predict_fetchable(slot_pred[win]) ==
+  // predict_fetchable(predict_address) whenever bp_valid (every arm
+  // that sets cf_type!=NoCF also sets slot_pred_v — asserted below);
+  // !bp_valid makes both forms 0.
+  logic [NrInstr-1:0] slot_fetch;
+  for (genvar i = 0; i < NrInstr; i++) begin : gen_slot_fetch
+    assign slot_fetch[i] = g6lc_fetch_pkg::predict_fetchable(
+        G6LCCfg, 64'(slot_pred[i]), fetch_translation_en_i);
+  end
+  logic pred_fetchable;
+  assign pred_fetchable = |(pred_win & slot_fetch);
+
   logic bp_fire_live;
-  assign bp_fire_live = s_live && bp_valid
-      && g6lc_fetch_pkg::predict_fetchable(G6LCCfg, 64'(predict_address), fetch_translation_en_i)
+  assign bp_fire_live = s_live && bp_valid && pred_fetchable
       && g6lc_fetch_pkg::cf_consumed(cf_v8, cf_t8, cf_c8);
 
   // ------------------------------------------------------------------
@@ -485,5 +511,41 @@ module g6lc_fe_override
   end
   // svt-stage: end S
   // svt-stage: class S value
+
+//pragma translate_off
+  // hyp8 T1 item 11: precomputed ras link candidates equal the
+  // select-inside-add reference every cycle a call lane is present.
+  int unsigned t1_feovr_n = 0;
+  always_ff @(posedge clk_i) begin : p_t1_feovr_eq
+    if (rst_ni) begin
+      for (int i = 0; i < NrInstr; i++) begin
+        logic [G6LCCfg.VLEN-1:0] ref_upd;
+        ref_upd = l_base_q[i] + l_off_q[i] +
+            (rvc_call_i[i] ? G6LCCfg.VLEN'(2) : G6LCCfg.VLEN'(4));
+        if (is_call[i] && l_valid_q) begin
+          t1_feovr_n <= t1_feovr_n + 1;
+`ifndef G6LC_MUT_T1_FEOVR
+          g6lc_t1_feovr_eq: assert (slot_ras_upd[i] === ref_upd)
+            else $error("g6lc_fe_override: equiv ras_upd");
+`endif
+        end
+      end
+    end
+  end
+  final begin
+    if ($test$plusargs("equiv_report"))
+      $display("[equiv] g6lc_fe_override ras_upd: checked=%0d", t1_feovr_n);
+  end
+
+  // r52-B3 invariant: every cf_type!=NoCF slot also drives slot_pred_v,
+  // so a live window with a CF has a non-empty pred_win; without it the
+  // pre-gather slot_fetch OR would silently drop a real prediction.
+  always_ff @(posedge clk_i) begin : p_feovr_predwin
+    if (rst_ni && s_live) begin
+      g6lc_feovr_predwin: assert (!bp_valid || |pred_win)
+        else $error("g6lc_fe_override: bp_valid without a pred_win slot");
+    end
+  end
+//pragma translate_on
 
 endmodule

@@ -260,6 +260,12 @@ module aes
 
   // AES 32-bit final round: rotate the registered sbox output by the
   // instruction byte index and XOR with rs1 (exactly the original).
+  // r42-T item 23 classify (A18): the 44.9-FO4 reg->out cone
+  // (sbox_*_q/orig_q -> rotate+mixcolumn -> XOR -> result) is a
+  // presentation path on a serialized multi-cycle operation — the AES
+  // op already occupies the FU for several cycles, so this cone is
+  // classified multi-cycle, not a single-cycle rank-0 kernel.
+  // svt-pipe: multi-cycle on=aes op occupancy
   logic [31:0] sbox_fwd_rot, sbox_inv_rot, mix_fwd_rot, mix_inv_rot;
   assign sbox_fwd_rot = ({24'b0, sbox_fwd_q} << {orig_q[5:4], 3'b000}) |
                         ({24'b0, sbox_fwd_q} >> (32 - {orig_q[5:4], 3'b000}));

@@ -191,7 +191,19 @@ module commit_stage
   logic [G6LCCfg.XLEN-1:0] csr_wdata_dec;
   logic [G6LCCfg.NrCommitPorts-1:0] commit_macro_ack_dec;
 
-  assign suppress = '0;
+  // r59: one-cycle commit hold after every CSR fire. csr_write registers
+  // the CSR's side-effect flush one cycle after the apply (H14), so the
+  // cycle after a CSR retires is inside its flush window: the next head
+  // must not fire there, or it retires once before the flush and again
+  // after the refetch (hyp8_csr_flush_skip: markerA committed with
+  // t2=2). The reference raised the flush in the CSR's own commit cycle
+  // and blocked port 1 behind a CSR, which made this window empty.
+  logic csr_hold_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) csr_hold_q <= 1'b0;
+    else         csr_hold_q <= commit_csr_o;
+  end
+  assign suppress = {G6LCCfg.NrCommitPorts{csr_hold_q}};
   assign commit_ack_o = fire;
   assign commit_macro_ack_o = commit_macro_ack_dec;
 

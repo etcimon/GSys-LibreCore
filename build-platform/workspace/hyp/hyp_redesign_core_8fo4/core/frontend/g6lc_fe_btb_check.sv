@@ -156,17 +156,62 @@ module g6lc_fe_btb_check
   //    that the RAS cannot explain as a correct return prediction).
   // 2) taken guess with no tagged backing (no BTB hit, RAS disagrees):
   //    fall through sequentially.
-  logic ov1;
+  logic leg1, leg2, ov1;
   logic [G6LCCfg.VLEN-1:0] ov1_pc;
-  assign ov1 = live && HypCfg.FeOverridePred &&
-      ((btb_hit && (!chk_line_taken_q ||
-                    (chk_line_target_q != btb_target && !ras_agree))) ||
-       (!btb_hit && chk_line_taken_q && !ras_agree));
+  assign leg1 = live && HypCfg.FeOverridePred && btb_hit &&
+      (!chk_line_taken_q ||
+       (chk_line_target_q != btb_target && !ras_agree));
+
+  // r36: a leg-2 squelch restarts at the queue frontier, which is correct
+  // only if the frontier can advance afterwards. When the frontier
+  // instruction is the CF itself (a branch straddling into the checked
+  // block — its first half is accepted only together with the very window
+  // the squelch kills), the refetch reproduces an identical {block,
+  // frontier} state and the same override re-fires forever. Suppress a
+  // leg-2 fire that exactly repeats the last one: same checked block, same
+  // frontier. The guess is then left to architectural resolution — the
+  // stream follows it, the CF resolves at execute, and a wrong guess
+  // recovers — slower than the squelch but never a livelock.
+  logic                    sq_valid_q;
+  logic [G6LCCfg.VLEN-1:0] sq_vaddr_q, sq_resume_q;
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      sq_valid_q  <= 1'b0;
+      sq_vaddr_q  <= '0;
+      sq_resume_q <= '0;
+    end else if (flush_bp_i || leg1 ||
+                 (sq_valid_q && (resume_pc_i != sq_resume_q))) begin
+      // a flush, a leg-1 override, or any frontier advance retires the
+      // record — a later leg-2 on a genuinely new state must be allowed
+      sq_valid_q <= 1'b0;
+    end else if (leg2) begin
+      sq_valid_q  <= 1'b1;
+      sq_vaddr_q  <= chk_vaddr_q;
+      sq_resume_q <= resume_pc_i;
+    end
+  end
+
+`ifdef G6LC_MUT_FE_OV1_REFIRE
+  // Review-only mutation: leg 2 re-fires on an identical state (the r35
+  // wedge — the squelch looped on the straddled beqz at 0x8000ca1e).
+  assign leg2 = live && HypCfg.FeOverridePred &&
+      !btb_hit && chk_line_taken_q && !ras_agree;
+`else
+  assign leg2 = live && HypCfg.FeOverridePred &&
+      !btb_hit && chk_line_taken_q && !ras_agree &&
+      !(sq_valid_q && (chk_vaddr_q == sq_vaddr_q) &&
+        (resume_pc_i == sq_resume_q));
+`endif
+  assign ov1 = leg1 || leg2;
   // The squelch restart is the queue frontier in both legs: restart after
-  // the newest accepted instruction so the epoch-killed windows between the
-  // queue tail and this block are refetched. The checked block's CF stays
-  // queued and resolves at execute time (the tagged target, if right, is
-  // reproposed by the stage-S verdict when the refetched block returns).
+  // the newest accepted instruction so the epoch-killed windows between
+  // the queue tail and this block are refetched. The checked block's CF
+  // stays queued and resolves at execute time (the tagged target, if
+  // right, is reproposed by the stage-S verdict when the refetched block
+  // returns) — unless the CF straddles into the checked block, in which
+  // case its first half dies with the killed window and the frontier can
+  // never advance past it; the leg-2 suppress above covers that case.
   assign ov1_pc = resume_pc_i;
 
   assign ov1_valid_o = ov1;
@@ -179,5 +224,16 @@ module g6lc_fe_btb_check
   assign train_pc_o     = chk_vaddr_q;
   assign train_taken_o  = btb_hit;
   assign train_target_o = btb_target;
+
+//pragma translate_off
+  // An override is a prediction correction: it must never be re-applied to
+  // an identical state (r36 — the suppress above makes this unreachable;
+  // under G6LC_MUT_FE_OV1_REFIRE it fires on the second identical squelch).
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && leg2 && sq_valid_q &&
+        (chk_vaddr_q == sq_vaddr_q) && (resume_pc_i == sq_resume_q))
+      $error("g6lc_fe_btb_check: ov1 refire on identical state");
+  end
+//pragma translate_on
 
 endmodule

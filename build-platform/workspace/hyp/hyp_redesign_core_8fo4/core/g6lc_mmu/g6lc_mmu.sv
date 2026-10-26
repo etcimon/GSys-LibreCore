@@ -471,66 +471,116 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
     end
   end
 
-  g6lc_shared_tlb #(
-      .G6LCCfg          (G6LCCfg),
-      .SHARED_TLB_WAYS  (2),
-      .HYP_EXT          (HYP_EXT),
-      .pte_g6lc_t       (pte_g6lc_t),
-      .tlb_update_g6lc_t(tlb_update_g6lc_t)
-  ) i_shared_tlb (
-      .clk_i         (clk_i),
-      .rst_ni        (rst_ni),
-      .flush_i       (flush_tlb_i),
-      .flush_vvma_i  (flush_tlb_vvma_i),
-      .flush_gvma_i  (flush_tlb_gvma_i),
-      .s_st_enbl_i   (enable_translation_i),
-      .g_st_enbl_i   (enable_g_translation_i),
-      .v_i           (v_i),
-      .s_ld_st_enbl_i(en_ld_st_translation_i),
-      .g_ld_st_enbl_i(en_ld_st_g_translation_i),
-      .ld_st_v_i     (ld_st_v_i),
+  if (G6LCCfg.UseSharedTlb) begin : gen_shared_table
+    g6lc_shared_tlb #(
+        .G6LCCfg          (G6LCCfg),
+        .SHARED_TLB_WAYS  (2),
+        .HYP_EXT          (HYP_EXT),
+        .pte_g6lc_t       (pte_g6lc_t),
+        .tlb_update_g6lc_t(tlb_update_g6lc_t)
+    ) i_shared_tlb (
+        .clk_i         (clk_i),
+        .rst_ni        (rst_ni),
+        .flush_i       (flush_tlb_i),
+        .flush_vvma_i  (flush_tlb_vvma_i),
+        .flush_gvma_i  (flush_tlb_gvma_i),
+        .s_st_enbl_i   (enable_translation_i),
+        .g_st_enbl_i   (enable_g_translation_i),
+        .v_i           (v_i),
+        .s_ld_st_enbl_i(en_ld_st_translation_i),
+        .g_ld_st_enbl_i(en_ld_st_g_translation_i),
+        .ld_st_v_i     (ld_st_v_i),
 
-      // hyp8: delayed bundle — verdict-aligned with the staged TLB hits
-      .dtlb_asid_i  (dtlb_asid_dly[STLB_DLY]),
-      .itlb_asid_i  (itlb_asid_dly[STLB_DLY]),
-      .lu_vmid_i    (dtlb_vmid_dly[STLB_DLY]),
-      .itlb_vmid_i  (itlb_vmid_dly[STLB_DLY]),
-      .itlb_hart_i  (itlb_hart_dly[STLB_DLY]),
-      .dtlb_hart_i  (dtlb_hart_dly[STLB_DLY]),
-      // from TLBs
-      // did we miss?
-      .itlb_access_i(itlb_acc_dly[STLB_DLY]),
-      .itlb_hit_i   (itlb_lu_hit),
-      .itlb_vaddr_i (itlb_va_dly[STLB_DLY]),
+        // hyp8: delayed bundle — verdict-aligned with the staged TLB hits
+        .dtlb_asid_i  (dtlb_asid_dly[STLB_DLY]),
+        .itlb_asid_i  (itlb_asid_dly[STLB_DLY]),
+        .lu_vmid_i    (dtlb_vmid_dly[STLB_DLY]),
+        .itlb_vmid_i  (itlb_vmid_dly[STLB_DLY]),
+        .itlb_hart_i  (itlb_hart_dly[STLB_DLY]),
+        .dtlb_hart_i  (dtlb_hart_dly[STLB_DLY]),
+        // from TLBs
+        // did we miss?
+        .itlb_access_i(itlb_acc_dly[STLB_DLY]),
+        .itlb_hit_i   (itlb_lu_hit),
+        .itlb_vaddr_i (itlb_va_dly[STLB_DLY]),
 
-      .dtlb_access_i(dtlb_acc_dly[STLB_DLY]),
-      .dtlb_hit_i   (dtlb_lu_hit),
-      .dtlb_vaddr_i (dtlb_va_dly[STLB_DLY]),
+        .dtlb_access_i(dtlb_acc_dly[STLB_DLY]),
+        .dtlb_hit_i   (dtlb_lu_hit),
+        .dtlb_vaddr_i (dtlb_va_dly[STLB_DLY]),
 
-      .asid_to_be_flushed_i(asid_to_be_flushed_i),
-      .vaddr_to_be_flushed_i(vaddr_to_be_flushed_i),
-      .vmid_to_be_flushed_i(vmid_to_be_flushed_i),
-      .gpaddr_to_be_flushed_i(gpaddr_to_be_flushed_i),
-      // to TLBs, update logic
-      .itlb_update_o(update_itlb),
-      .dtlb_update_o(update_dtlb),
-      .flush_busy_o(shared_tlb_flush_busy_o),
-      // Performance counters
-      .itlb_miss_o(itlb_miss_o),
-      .dtlb_miss_o(dtlb_miss_o),
-      .shared_tlb_miss_i(shared_tlb_miss),
+        .asid_to_be_flushed_i(asid_to_be_flushed_i),
+        .vaddr_to_be_flushed_i(vaddr_to_be_flushed_i),
+        .vmid_to_be_flushed_i(vmid_to_be_flushed_i),
+        .gpaddr_to_be_flushed_i(gpaddr_to_be_flushed_i),
+        // to TLBs, update logic
+        .itlb_update_o(update_itlb),
+        .dtlb_update_o(update_dtlb),
+        .flush_busy_o(shared_tlb_flush_busy_o),
+        // Performance counters
+        .itlb_miss_o(itlb_miss_o),
+        .dtlb_miss_o(dtlb_miss_o),
+        .shared_tlb_miss_i(shared_tlb_miss),
 
-      .shared_tlb_access_o(shared_tlb_access),
-      .shared_tlb_hit_o   (shared_tlb_hit),
-      .shared_tlb_vaddr_o (shared_tlb_vaddr),
+        .shared_tlb_access_o(shared_tlb_access),
+        .shared_tlb_hit_o   (shared_tlb_hit),
+        .shared_tlb_vaddr_o (shared_tlb_vaddr),
 
-      .itlb_req_o         (itlb_req),
-      // to update shared tlb
-      .shared_tlb_update_i(update_shared_tlb)
-  );
+        .itlb_req_o         (itlb_req),
+        // to update shared tlb
+        .shared_tlb_update_i(update_shared_tlb)
+    );
+  end else begin : gen_miss_router
+    // UseSharedTlb=0: only the miss/return function survives (r45). The
+    // quiet-window walk after each flush input is preserved cycle-exact;
+    // context fields echo from the returned update record.
+    g6lc_tlb_miss_router #(
+        .G6LCCfg          (G6LCCfg),
+        .HYP_EXT          (HYP_EXT),
+        .tlb_update_g6lc_t(tlb_update_g6lc_t)
+    ) i_miss_router (
+        .clk_i         (clk_i),
+        .rst_ni        (rst_ni),
+        .flush_i       (flush_tlb_i),
+        .flush_vvma_i  (flush_tlb_vvma_i),
+        .flush_gvma_i  (flush_tlb_gvma_i),
+        .s_st_enbl_i   (enable_translation_i),
+        .g_st_enbl_i   (enable_g_translation_i),
+        .v_i           (v_i),
+        .s_ld_st_enbl_i(en_ld_st_translation_i),
+        .g_ld_st_enbl_i(en_ld_st_g_translation_i),
+        .ld_st_v_i     (ld_st_v_i),
+
+        // from TLBs — same delayed verdict-aligned bundle as the table arm
+        .itlb_access_i(itlb_acc_dly[STLB_DLY]),
+        .itlb_hit_i   (itlb_lu_hit),
+        .itlb_vaddr_i (itlb_va_dly[STLB_DLY]),
+
+        .dtlb_access_i(dtlb_acc_dly[STLB_DLY]),
+        .dtlb_hit_i   (dtlb_lu_hit),
+        .dtlb_vaddr_i (dtlb_va_dly[STLB_DLY]),
+
+        // to TLBs, update logic
+        .itlb_update_o(update_itlb),
+        .dtlb_update_o(update_dtlb),
+        .flush_busy_o(shared_tlb_flush_busy_o),
+        // Performance counters
+        .itlb_miss_o(itlb_miss_o),
+        .dtlb_miss_o(dtlb_miss_o),
+        .shared_tlb_miss_i(shared_tlb_miss),
+
+        .shared_tlb_access_o(shared_tlb_access),
+        .shared_tlb_hit_o   (shared_tlb_hit),
+        .shared_tlb_vaddr_o (shared_tlb_vaddr),
+
+        .itlb_req_o         (itlb_req),
+        // to update shared tlb
+        .shared_tlb_update_i(update_shared_tlb)
+    );
+  end
 
   g6lc_ptw #(
       .G6LCCfg          (G6LCCfg),
+      .HypCfg           (HypCfg),
       .pte_g6lc_t       (pte_g6lc_t),
       .tlb_update_g6lc_t(tlb_update_g6lc_t),
       .dcache_req_i_t   (dcache_req_i_t),

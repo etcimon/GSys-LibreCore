@@ -370,8 +370,11 @@ module sb_commit_bundle
     logic rec_valid;
     always_comb begin : cport_valid
       rec_valid = (sel_sbe.valid | wb_hit) && ld_ok;
+      // r54: !ex_merged.valid spelled out — ex_merged.valid ==
+      // sel_sbe.ex.valid || (wb_hit && wbex.valid) in every arm of
+      // cport_ex; the direct predicate cuts the cross-block dep.
       if (G6LCCfg.CohPolicy == config_pkg::COH_OOO &&
-          !sel_mem.cancelled && !ex_merged.valid &&
+          !sel_mem.cancelled && !(sel_sbe.ex.valid || (wb_hit && wbex.valid)) &&
           (|(sel_oh[i] & phys_pending_i) ||
            (phys_mod_i && sel_sbe.fu == g6lc_core_pkg::LOAD)))
         rec_valid = 1'b0;

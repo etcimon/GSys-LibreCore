@@ -64,6 +64,7 @@ ${HYP_CORE_DIR}/core/include/g6lc_hyp_pkg.sv
 ${HYP_CORE_DIR}/core/include/g6lc64_hyp8_config_pkg.sv
 ${HYP_CORE_DIR}/core/include/riscv_pkg.sv
 ${HYP_CORE_DIR}/core/include/g6lc_core_pkg.sv
+${HYP_CORE_DIR}/core/ooo/g6lc_ooo_pkg.sv
 ${HYP_CORE_DIR}/third_party/vendor/pulp-platform/axi/src/axi_pkg.sv
 ${HYP_CORE_DIR}/core/include/wt_cache_pkg.sv
 ${HYP_CORE_DIR}/core/include/std_cache_pkg.sv
@@ -148,7 +149,6 @@ ${HYP_CORE_DIR}/core/smt/g6lc_smt_regfile.sv
 ${HYP_CORE_DIR}/core/smt/g6lc_smt_pc_bank.sv
 ${HYP_CORE_DIR}/core/smt/g6lc_smt_csr_bank.sv
 ${HYP_CORE_DIR}/core/smt/g6lc_issue_barrier.sv
-${HYP_CORE_DIR}/core/ooo/g6lc_ooo_pkg.sv
 ${HYP_CORE_DIR}/core/ooo/g6lc_flu_reserve.sv
 ${HYP_CORE_DIR}/core/ooo/g6lc_rat.sv
 ${HYP_CORE_DIR}/core/ooo/g6lc_freelist.sv
@@ -182,6 +182,7 @@ ${HYP_CORE_DIR}/core/load_store_unit.sv
 ${HYP_CORE_DIR}/core/lsu_bypass.sv
 ${HYP_CORE_DIR}/core/mult.sv
 ${HYP_CORE_DIR}/core/multiplier.sv
+${HYP_CORE_DIR}/core/mult_clmul.sv
 ${HYP_CORE_DIR}/core/serdiv.sv
 ${HYP_CORE_DIR}/core/perf_counters.sv
 ${HYP_CORE_DIR}/core/g6lc_regfile_ff.sv
@@ -319,3 +320,5 @@ ${HYP_CORE_DIR}/core/g6lc_mmu/g6lc_mmu.sv
 ${HYP_CORE_DIR}/core/g6lc_mmu/g6lc_ptw.sv
 ${HYP_CORE_DIR}/core/g6lc_mmu/g6lc_tlb.sv
 ${HYP_CORE_DIR}/core/g6lc_mmu/g6lc_shared_tlb.sv
+${HYP_CORE_DIR}/core/g6lc_mmu/g6lc_tlb_miss_router.sv
+${HYP_CORE_DIR}/core/g6lc_mmu/g6lc_ptw_leg_decode.sv

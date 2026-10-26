@@ -38,8 +38,19 @@ case "$TARGET" in
     TARGET_CFLAGS="-DG6LC_TB_BANKED -DG6LC_TB_OOO"
     TARGET_HARTS=2
     ;;
+  g6lc64_hyp8_l3)
+    TARGET_VLT_DEFS="-DG6LC_HYP8_L3"
+    TARGET_CFLAGS="-DG6LC_TB_OOO"
+    TARGET_HARTS=1
+    ;;
+  g6lc64_hyp8_mc)
+    TARGET_VLT_DEFS="-DG6LC_HYP8_MC"
+    TARGET_CFLAGS="-DG6LC_TB_BANKED -DG6LC_TB_OOO"
+    TARGET_HARTS=8
+    FLIST_MC="verif/regress/remote/hyp8/Flist.hyp8_mc_sim"
+    ;;
   *)
-    echo "[hyp8-build] usage: SOFT_LADDER_BUILD_TARGET=g6lc64_hyp8|g6lc64_hyp8_smt2 $0 hyp8 (got '${TARGET:-<unset>}')" >&2
+    echo "[hyp8-build] usage: SOFT_LADDER_BUILD_TARGET=g6lc64_hyp8|g6lc64_hyp8_smt2|g6lc64_hyp8_l3|g6lc64_hyp8_mc $0 hyp8 (got '${TARGET:-<unset>}')" >&2
     exit 2
     ;;
 esac
@@ -60,7 +71,7 @@ fi
 
 log() { echo "[hyp8-build] $*"; }
 
-FLIST="verif/regress/remote/hyp8/Flist.hyp8_sim"
+FLIST="${FLIST_MC:-verif/regress/remote/hyp8/Flist.hyp8_sim}"
 TB_CPP="verif/regress/remote/hyp8/hyp8_tb.cpp"
 [[ -f "$FLIST" ]] || { log "missing $FLIST"; exit 1; }
 [[ -f "$TB_CPP" ]] || { log "missing $TB_CPP"; exit 1; }

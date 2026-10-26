@@ -664,6 +664,11 @@ module g6lc_core
   // fixed latency units
   logic flu_ready_ex_id;
   logic csr_ready_ex_id;
+  // hyp8 r33: CSR table dispatch-allocation strobes + free-entry credit
+  logic [G6LCCfg.NrIssuePorts-1:0] csr_disp_valid_id_ex;
+  logic [G6LCCfg.NrIssuePorts-1:0][G6LCCfg.TRANS_ID_BITS-1:0] csr_disp_tid_id_ex;
+  logic [G6LCCfg.NrIssuePorts-1:0][11:0] csr_disp_addr_id_ex;
+  logic [1:0] csr_credit_ex_id;
   logic [G6LCCfg.TRANS_ID_BITS-1:0] flu_trans_id_ex_id;
   logic flu_valid_ex_id;
   logic [G6LCCfg.XLEN-1:0] flu_result_ex_id;
@@ -1048,6 +1053,8 @@ assign irq_active = irq_i[smt_active_hart];
   // --------------
   logic set_pc_ctrl_pcgen;
   logic flush_csr_ctrl;
+  // r59: pc of the CSR whose deferred side-effect flush is flush_csr_ctrl
+  logic [G6LCCfg.VLEN-1:0] flush_csr_pc_ctrl;
   logic flush_unissued_instr_ctrl_id;
   logic flush_ctrl_if;
   logic flush_ctrl_id;
@@ -1485,7 +1492,9 @@ assign irq_active = irq_i[smt_active_hart];
       smt_arch_redirect_hart = whart_commit_id[0];
       // A memory-order replay refetches the committing PC itself, like halt —
       // banking pc+4 would restart the hart one instruction late.
-      smt_arch_redirect_pc = pc_commit + G6LCCfg.VLEN'(
+      // r59: the counted drain raises set_pc on its last cycle; the pc is
+      // the captured drain pc (pc_commit_fe), never the live head.
+      smt_arch_redirect_pc = pc_commit_fe + G6LCCfg.VLEN'(
           (halt_ctrl || mem_replay_pc_ctrl_pcgen) ? 0 : 4);
     end
     if (eret) begin
@@ -2683,7 +2692,11 @@ assign irq_active = irq_i[smt_active_hart];
     end
     function automatic void hd_print();
       automatic int unsigned hs;
+      // CSR-seam taps surface per hart; blame the hart owning the port-0 head.
+      automatic int unsigned ch;
       hs = int'(issue_stage_i.i_scoreboard.commit_sel_slot[0]);
+      ch = int'(commit_instr_id_commit[0].hart_id) < SCNH
+           ? int'(commit_instr_id_commit[0].hart_id) : 0;
       $display("[hang] cyc=%0d since_ack=%0d sb_empty=%b flush_if=%b flush_ex=%b halt=%b lsu_ready=%b", sc_cyc, sc_cyc - hd_last_ack,
                smt_sb_empty, flush_ctrl_if, flush_ctrl_ex, halt_ctrl, ex_stage_i.lsu_i.lsu_ready_o);
       $display("[hang] SB head slot=%0d issued=%b valid=%b cancelled=%b replay=%b fu=%0d op=%0d pc=%h tid=%0d ex=%b | port0 valid=%b fu=%0d pc=%h ack=%b drop=%b | commit_ptr=%0d issue_ptr=%0d",
@@ -2712,7 +2725,7 @@ assign irq_active = irq_i[smt_active_hart];
       $display("[hang] IQ issue_valid=%b issue_ack=%b st_unresolved=%h st_live=%h md_stall=%b stl_stall=%b",
                issue_stage_i.gen_full_ooo.i_ooo_dispatch.iqi_valid, issue_stage_i.gen_full_ooo.i_ooo_dispatch.iq_issue_ack,
                issue_stage_i.gen_full_ooo.i_ooo_dispatch.st_unresolved_mask, issue_stage_i.gen_full_ooo.i_ooo_dispatch.st_live_mask,
-               issue_stage_i.gen_full_ooo.i_ooo_dispatch.md_stall, issue_stage_i.gen_full_ooo.i_ooo_dispatch.stl_stall);
+               |issue_stage_i.gen_full_ooo.i_ooo_dispatch.md_stall_v, issue_stage_i.gen_full_ooo.i_ooo_dispatch.stl_stall);
       for (int i = 0; i < issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.ST_ENTRIES; i++)
         if (issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.st_q[i].valid)
           $display("[hang] LSQ st[%0d] id=%0d addr_v=%b data_v=%b addr=%h", i,
@@ -2741,6 +2754,38 @@ assign irq_active = irq_i[smt_active_hart];
                ex_stage_i.lsu_i.i_store_unit.store_buffer_i.commit_status_cnt_q,
                ex_stage_i.lsu_i.i_store_unit.page_offset_matches_o,
                ex_stage_i.lsu_i.i_store_unit.amo_buffer_ready);
+      // H5 blame locality: the held CSR request on the ex_stage buffer and the
+      // staged commit-side request (csr_decode record + request match/apply).
+      $display("[hang] CSR seam: buf[0] v=%b tid=%0d addr=%h | buf[1] v=%b tid=%0d addr=%h | hit=%b rdy=%b | req v=%b op=%0d addr=%h tid=%0d | match=%b apply=%b rdata_v=%b | commit_csr=%b | port0 v=%b fu=%0d tid=%0d ack=%b",
+               ex_stage_i.csr_buffer_i.tab_q[0].valid, ex_stage_i.csr_buffer_i.tab_q[0].tid,
+               ex_stage_i.csr_buffer_i.tab_q[0].csr_address,
+               ex_stage_i.csr_buffer_i.tab_q[1].valid, ex_stage_i.csr_buffer_i.tab_q[1].tid,
+               ex_stage_i.csr_buffer_i.tab_q[1].csr_address,
+               ex_stage_i.csr_buffer_i.gen_ooo.commit_hit,
+               ex_stage_i.csr_ready,
+               csr_regfile_i.dbg_csr_req_valid[ch], csr_regfile_i.dbg_csr_req_op[ch],
+               csr_regfile_i.dbg_csr_req_addr[ch], csr_regfile_i.dbg_csr_req_tid[ch],
+               csr_regfile_i.dbg_csr_req_match[ch], csr_regfile_i.dbg_csr_req_apply[ch],
+               csr_rdata_valid,
+               csr_commit_commit_ex,
+               commit_instr_id_commit[0].valid, commit_instr_id_commit[0].fu,
+               commit_instr_id_commit[0].trans_id, commit_ack[0]);
+      // H5 blame locality: the frontend demand gate (FTQ head, redirect
+      // bookkeeping, loop buffer, I$ request handshake).
+      $display("[hang] FE: head v=%b pc=%h ftq_full=%b cf_hold=%b demand=%b pf=%b | iq_rdy=%b halt=%b reseed=%b flush=%b replay=%b misp=%b epoch=%0d npc=%h | red_iq=%b lost=%b fe_v=%b fe_rdy=%b | lbuf act=%b hold=%b hit=%b armed=%b capt=%b | ic_rdy=%b",
+               i_frontend.ftq_head_valid, i_frontend.ftq_head_vaddr,
+               i_frontend.ftq_full, i_frontend.cf_hold_q,
+               i_frontend.demand_req, i_frontend.pf_req,
+               i_frontend.instr_queue_ready, i_frontend.halt_frontend_i,
+               i_frontend.reseed_now, i_frontend.flush_i, i_frontend.replay_q,
+               i_frontend.is_mispredict, i_frontend.fe_epoch, i_frontend.npc_q,
+               i_frontend.redirect_inflight_q, i_frontend.redirect_lost_q,
+               i_frontend.fetch_entry_valid_o, i_frontend.fetch_entry_ready_i,
+               i_frontend.lbuf_active, i_frontend.lbuf_hold,
+               i_frontend.gen_ftq.gen_lbuf.i_lbuf.hit_q,
+               i_frontend.gen_ftq.gen_lbuf.i_lbuf.armed_q,
+               i_frontend.gen_ftq.gen_lbuf.i_lbuf.capturing_q,
+               i_frontend.icache_dreq_i.ready);
     endfunction
     if (G6LCCfg.DCacheType == config_pkg::HPDCACHE_WT ||
         G6LCCfg.DCacheType == config_pkg::HPDCACHE_WB ||
@@ -3162,6 +3207,10 @@ assign irq_active = irq_i[smt_active_hart];
       // fixed latency unit ready
       .flu_ready_i             (flu_ready_ex_id),
       .csr_ready_i             (csr_ready_ex_id),
+      .csr_credit_i            (csr_credit_ex_id),
+      .csr_disp_valid_o        (csr_disp_valid_id_ex),
+      .csr_disp_tid_o          (csr_disp_tid_id_ex),
+      .csr_disp_addr_o         (csr_disp_addr_id_ex),
       // ALU
       .alu_valid_o             (alu_valid_id_ex),
       .aes_valid_o             (aes_valid_id_ex),
@@ -3334,6 +3383,10 @@ assign irq_active = irq_i[smt_active_hart];
       .resolve_branch_o(resolve_branch_ex_id),
       // CSR
       .csr_valid_i(csr_valid_id_ex),
+      .csr_disp_valid_i(csr_disp_valid_id_ex),
+      .csr_disp_tid_i  (csr_disp_tid_id_ex),
+      .csr_disp_addr_i (csr_disp_addr_id_ex),
+      .csr_credit_o    (csr_credit_ex_id),
       .csr_addr_o(csr_addr_ex_csr),
       .csr_commit_i(csr_commit_commit_ex),  // from commit
       .csr_hs_ld_st_inst_o(csr_hs_ld_st_inst_ex),  // signals a Hypervisor Load/Store Instruction
@@ -3550,6 +3603,7 @@ assign irq_active = irq_i[smt_active_hart];
       .time_irq_i,
       .rtc_time_i,
       .flush_o                 (flush_csr_ctrl),
+      .flush_pc_o              (flush_csr_pc_ctrl),
       .halt_csr_o              (halt_csr_ctrl),
       .hart_halt_o             (smt_csr_hart_halt),
       .wfi_wake_o              (core_wake_o),
@@ -3864,6 +3918,7 @@ assign irq_active = irq_i[smt_active_hart];
       .set_debug_pc_i        (set_debug_pc),
       .resolved_branch_i     (resolved_branch_ctrl),
       .flush_csr_i           (flush_csr_ctrl),
+      .csr_flush_pc_i        (flush_csr_pc_ctrl),
       .fence_i_i             (fence_i_commit_controller),
       .fence_i               (fence_commit_controller),
       .sfence_vma_i          (sfence_vma_commit_controller),

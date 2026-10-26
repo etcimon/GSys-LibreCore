@@ -132,26 +132,31 @@ package g6lc_ooo_pkg;
   // shifts against). Returns 0 for ops with no fixed reservation: the
   // variable-latency divider (handled by the owner/TID claim instead) and
   // every non-FLU class (no FLU resource consumed).
+  // r42-T item 20: HypCfg.WbCaptureStages adds the ex_stage publication
+  // record edge to every fixed class (the divider is owner-keyed and is
+  // unaffected).
   function automatic int unsigned ooo_flu_cycles(
       input config_pkg::g6lc_cfg_t cfg,
       input g6lc_hyp_pkg::g6lc_hyp_cfg_t h,
       input g6lc_core_pkg::fu_t fu, input g6lc_core_pkg::fu_op op);
+    int unsigned wbc;
+    wbc = int'(h.WbCaptureStages);
     unique case (fu)
       g6lc_core_pkg::ALU: begin
         // Staggered ALU (AluStages>=2): low-class ops publish after the
         // low-word stage (distance 2), full-latency ops after AluStages;
         // a non-staggered ALU completes in 1.
         if (h.AluStages >= 2 && h.AluStaggered)
-          return (ooo_lat_class(fu, op) == g6lc_hyp_pkg::LAT_ALU_LOW)
-                 ? 2 : int'(h.AluStages);
-        return 1;
+          return ((ooo_lat_class(fu, op) == g6lc_hyp_pkg::LAT_ALU_LOW)
+                  ? 2 : int'(h.AluStages)) + wbc;
+        return 1 + wbc;
       end
-      g6lc_core_pkg::CTRL_FLOW: return 2;  // B2 resolve record
+      g6lc_core_pkg::CTRL_FLOW: return 2 + wbc;  // B2 resolve record
       g6lc_core_pkg::CSR,
-      g6lc_core_pkg::AES:       return 1;  // one-edge completion
+      g6lc_core_pkg::AES:       return 1 + wbc;  // one-edge completion
       g6lc_core_pkg::MULT:
         return (ooo_lat_class(fu, op) == g6lc_hyp_pkg::LAT_MUL)
-               ? g6lc_hyp_pkg::hyp_mult_stages(h, int'(cfg.MultStages))
+               ? g6lc_hyp_pkg::hyp_mult_stages(h, int'(cfg.MultStages)) + wbc
                : 0;  // divider: variable latency, owner-keyed claim
       default: return 0;
     endcase
@@ -166,7 +171,8 @@ package g6lc_ooo_pkg;
     m = g6lc_hyp_pkg::hyp_mult_stages(h, int'(cfg.MultStages));
     if (int'(h.AluStages) > m) m = int'(h.AluStages);
     if (m < 2) m = 2;
-    return 2 + m;
+    // WbCaptureStages shifts the deepest fixed class by one more slot.
+    return 2 + m + int'(h.WbCaptureStages);
   endfunction
 
   // Replay broadcast record (kill-by-tid re-arm, analysis/g6lc_iq.md): the

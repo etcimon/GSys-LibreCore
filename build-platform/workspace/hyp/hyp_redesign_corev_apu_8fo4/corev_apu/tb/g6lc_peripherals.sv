@@ -311,6 +311,60 @@ module g6lc_peripherals #(
         );
     end
 
+    //pragma translate_off
+    // r56: UART TX observability at the APB boundary — fires for both
+    // the apb_uart and mock_uart arms. Logs every write to the THR
+    // register (offset 0 at reg-shift 2) as [uart] <char>, dumps raw
+    // bytes to uart.txt in the run dir, and prints a uart_bytes count.
+    integer uart_fd = -1;
+    int unsigned uart_bytes = 0;
+    always_ff @(posedge clk_i) begin
+      if (rst_ni && uart_psel && uart_penable && uart_pwrite &&
+          (((uart_paddr >> 2) & 3'h7) == 3'd0)) begin
+        if (uart_fd == -1) uart_fd = $fopen("uart.txt", "w");
+        $display("[uart] %c", byte'(uart_pwdata[7:0]));
+        if (uart_fd != 0) begin
+          $fwrite(uart_fd, "%c", byte'(uart_pwdata[7:0]));
+          $fflush(uart_fd);
+        end
+        uart_bytes <= uart_bytes + 1;
+      end
+      // r57: read-side probe — LSR reads during the putc poll are the
+      // discriminator for a THRE-spin (prdata==0 forever) vs a real
+      // write path. Cap at first 200 reads, then a per-offset histogram.
+      if (rst_ni && uart_psel && uart_penable && !uart_pwrite) begin
+        int off; off = (uart_paddr >> 2) & 3'h7;
+        if (uart_rd_n < 200) begin
+          $display("[uart-rd] off=%0d data=%02x", off, uart_prdata[7:0]);
+        end
+        uart_rd_n <= uart_rd_n + 1;
+        uart_rd_hist[off] <= uart_rd_hist[off] + 1;
+      end
+    end
+    // r57: AXI-side discriminator — log AR/R handshake on the UART
+    // slave port so "read never arrives at the APB bridge" vs "bridge
+    // returns 0" is decidable. Capped like the APB probe.
+    int unsigned uart_axi_rd_n = 0;
+    always_ff @(posedge clk_i) begin
+      if (rst_ni && uart.ar_valid && uart.ar_ready) begin
+        if (uart_axi_rd_n < 200)
+          $display("[uart-axi-ar] addr=%08x", uart.ar_addr);
+        uart_axi_rd_n <= uart_axi_rd_n + 1;
+      end
+      if (rst_ni && uart.r_valid && uart.r_ready) begin
+        if (uart_axi_rd_n < 400)
+          $display("[uart-axi-r] data=%016x resp=%0d", uart.r_data, uart.r_resp);
+      end
+    end
+    int unsigned uart_rd_n = 0;
+    int unsigned uart_rd_hist [8] = '{default: 0};
+    final begin
+      $display("[uart] uart_bytes=%0d uart_reads=%0d", uart_bytes, uart_rd_n);
+      for (int i = 0; i < 8; i++)
+        if (uart_rd_hist[i]) $display("[uart-rd] off=%0d count=%0d", i, uart_rd_hist[i]);
+    end
+    //pragma translate_on
+
     // ---------------
     // 3. SPI
     // ---------------

@@ -58,6 +58,8 @@ module csr_regfile
     input logic [63:0] rtc_time_i,
     // send a flush request out when a CSR with a side effect changes - CONTROLLER
     output logic flush_o,
+    // pc of the CSR instruction that raised flush_o (valid with flush_o) - CONTROLLER
+    output logic [G6LCCfg.VLEN-1:0] flush_pc_o,
     // halt requested - CONTROLLER
     output logic halt_csr_o,
     // G6LC core sleep gate: the WFI wake-up condition of wfi_ctrl evaluated from the
@@ -366,7 +368,10 @@ module csr_regfile
       .clk_i       (clk_i),
       .rst_ni      (rst_ni),
       .flush_req_i (flush_req),
-      .flush_o     (flush_o)
+      // csr_apply holds the CSR head at commit_instr_i on this cycle
+      .flush_pc_i  (commit_instr_i.pc),
+      .flush_o     (flush_o),
+      .flush_pc_o  (flush_pc_o)
   );
 
   csr_trap #(
@@ -2638,6 +2643,11 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
             if (priv_lvl_o == riscv::PRIV_LVL_S && !v_q && mstatus_q.tvm)
               bk_wr_h_uae = 1'b1;
             else begin
+              // r42-T item 23 classify (A18): the ~44-FO4 in->out cone
+              // here is the csr_wdata -> hgatp decode -> write
+              // presentation path — a serialized single-CSR write under
+              // csr_apply (and dead logic under hyp8, RVH=0). Multi-
+              // cycle tagged; no RTL spent in this pass.
               hgatp = hgatp_t'(csr_wdata);
               //hardwire PPN[1:0] to zero
               hgatp[1:0] = 2'b0;

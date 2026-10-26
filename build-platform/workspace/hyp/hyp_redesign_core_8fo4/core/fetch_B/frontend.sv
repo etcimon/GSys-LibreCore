@@ -600,7 +600,8 @@ module frontend
       ) i_lbuf (
           .clk_i,
           .rst_ni,
-          .flush_i       (flush_i | is_mispredict | flush_bp_i | smt_restore_flush),
+          .flush_i       (flush_i | is_mispredict | flush_bp_i | smt_restore_flush
+                          | reseed_now),
           .enable_i      (1'b1),
           .epoch_i       (fe_epoch),
           // arm on the verdict of the window that produced the taken CF
@@ -613,6 +614,7 @@ module frontend
           .fill_vaddr_i  (icache_dreq_i.vaddr),
           .fill_data_i   (icache_dreq_i.data[G6LCCfg.FETCH_WIDTH-1:0]),
           .lookup_vaddr_i(ftq_head_vaddr),
+          .lookup_valid_i(ftq_head_valid),
           .lookup_ready_i(instr_queue_ready & ~halt_frontend_i),
           .hit_o         (lbuf_hit),
           .data_o        (lbuf_data),
@@ -772,6 +774,19 @@ module frontend
       nl_train_tagdom = (resolved_branch_i.cf_type == g6lc_core_pkg::Return)
                         || (resolved_branch_i.cf_type == g6lc_core_pkg::JumpR
                             && CHK_TAGGED_BTB);
+    end else if (ov1_train_valid && !ov1_train_taken) begin
+      // r36 (D2): override #1's unlearn is the refutation of the guess
+      // that just caused a squelch — it must never be dropped to a
+      // lower-priority producer in the same cycle, or the poisoned
+      // entry refires the same override forever (the r35 wedge: ov2's
+      // train {ca1e,0} outranked the unlearn {ca38,0} on every pass and
+      // the taken guess survived its own refutation). Only a same-cycle
+      // architectural resolve outranks it.
+      nl_train_valid  = 1'b1;
+      nl_train_pc     = ov1_train_pc;
+      nl_train_taken  = ov1_train_taken;
+      nl_train_target = ov1_train_target;
+      nl_train_tagdom = 1'b1;
     end else if (ov2_train_valid) begin
       nl_train_valid  = 1'b1;
       nl_train_pc     = ov2_train_pc;
@@ -788,6 +803,18 @@ module frontend
       nl_train_tagdom = 1'b1;
     end
   end
+
+//pragma translate_off
+  // r36 (D2): an ov1 unlearn is a refutation of a cached guess — it must
+  // always reach the line table unless a same-cycle architectural
+  // resolve outranks it. A drop re-poisons the entry (r35 wedge).
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && ov1_train_valid && !ov1_train_taken && !resolve_train)
+      assert (nl_train_valid && nl_train_pc == ov1_train_pc &&
+              !nl_train_taken)
+        else $error("frontend: ov1 unlearn dropped by train arbitration");
+  end
+//pragma translate_on
 
   g6lc_fe_nextline #(
       .G6LCCfg(G6LCCfg),
@@ -1538,9 +1565,18 @@ module frontend
   // stage-S presentation).
   // -------------------------------------------------------------------------
   logic fwt_en, kcheck_en;
+  int unsigned fwt_from = 0, fwt_to = 200000, fwt_cyc = 0;
   initial begin
     fwt_en = $test$plusargs("fetch_win_trace");
     kcheck_en = $test$plusargs("fetch_kill_check");
+    void'($value$plusargs("trace_from=%d", fwt_from));
+    void'($value$plusargs("trace_to=%d", fwt_to));
+  end
+
+  // verilog_lint: waive always-ff-non-reset
+  always_ff @(posedge clk_i) begin
+    if (!rst_ni) fwt_cyc <= 0;
+    else         fwt_cyc <= fwt_cyc + 1;
   end
 
   // verilog_lint: waive always-ff-non-reset
@@ -1555,18 +1591,35 @@ module frontend
 
   // verilog_lint: waive always-ff-non-reset
   always_ff @(posedge clk_i) begin
-    if (rst_ni && fwt_en && $time() < 200000) begin
+    if (rst_ni && fwt_en && fwt_cyc >= fwt_from && fwt_cyc <= fwt_to) begin
       if (icache_dreq_i.valid || icache_take || kill_s1 || kill_s2 || ov1_valid
           || ov2_valid || flush_i || is_mispredict || replay || red_valid
-          || (|instr_queue_consumed)) begin
-        $display("[win] t=%0t rsp=%b vaddr=%h take=%b k1=%b k2=%b ov1=%b ov2=%b red=%b fl=%b mp=%b rp=%b src=%0d redpc=%h res=%h ep=%0d vmask=%b iqr=%b npc=%h lo=%b lopc=%h loep=%0d",
-                 $time, icache_dreq_i.valid, icache_dreq_i.vaddr, icache_take,
+          || (|instr_queue_consumed) || icache_dreq_o.req || demand_req
+          || ftq_push || ftq_pop || replay_q || reseed_now) begin
+        $display("[win] cyc=%0d t=%0t rsp=%b vaddr=%h take=%b k1=%b k2=%b ov1=%b ov2=%b red=%b fl=%b mp=%b rp=%b src=%0d redpc=%h res=%h ep=%0d vmask=%b iqr=%b npc=%h lo=%b lopc=%h loep=%0d rpl=%b rpa=%h fev=%b fpush=%b fpop=%b fhv=%b ftqf=%b fhva=%h dmd=%b dmfr=%b rsnw=%b dreq=%b drva=%h irdy=%b lt=%b chk=%h o1v=%b o1p=%h o1t=%b o2v=%b o2p=%h o2t=%b o2g=%b sep=%0d sl=%b slv=%h rsv=%b nlv=%b nlp=%h nlt=%b nlg=%b widx=%0d ridx=%0d ltq=%b",
+                 fwt_cyc, $time, icache_dreq_i.valid, icache_dreq_i.vaddr,
+                 icache_take,
                  kill_s1, kill_s2, ov1_valid, ov2_valid, red_valid, flush_i,
                  is_mispredict, replay, red_src, red_pc, resume_d,
                  fe_epoch, iq_valid, instr_queue_ready, npc_d,
                  i_instr_realign.carry_valid_bank_q[smt_hart_i],
                  i_instr_realign.carry_addr_bank_q[smt_hart_i],
-                 i_instr_realign.carry_epoch_bank_q[smt_hart_i]);
+                 i_instr_realign.carry_epoch_bank_q[smt_hart_i],
+                 replay_q, replay_addr_q, fetch_entry_valid_o,
+                 ftq_push, ftq_pop, ftq_head_valid, ftq_full, ftq_head_vaddr,
+                 demand_req, demand_fire, reseed_now,
+                 icache_dreq_o.req, icache_dreq_o.vaddr,
+                 icache_dreq_i.ready, line_taken,
+                 i_fe_btb_check.chk_vaddr_q,
+                 ov1_train_valid, ov1_train_pc, ov1_train_taken,
+                 ov2_train_valid, ov2_train_pc, ov2_train_taken,
+                 ov2_train_tagdom, i_fe_override.spec_epoch_o,
+                 i_fe_override.s_live, i_fe_override.l_vaddr_q,
+                 resolve_train,
+                 nl_train_valid, nl_train_pc, nl_train_taken, nl_train_tagdom,
+                 i_fe_nextline.gen_line_table.wr_idx,
+                 i_fe_nextline.gen_line_table.rd_idx,
+                 i_fe_nextline.gen_line_table.ltaken_q[i_fe_nextline.gen_line_table.rd_idx]);
       end
     end
   end

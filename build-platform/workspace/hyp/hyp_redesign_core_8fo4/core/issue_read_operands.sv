@@ -664,6 +664,43 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
   // Issue Stage
   // ---------------
 
+  // T50: FLU writeback-port reservation for the multiplier's product. A MULT
+  // acknowledged at decision cycle t drives mult_valid_q (the multiplier's
+  // input) at t+1 and its product reaches the shared FLU port MultStages
+  // cycles later, at t+1+MultStages. A one-cycle FLU op (ALU / branch / CSR /
+  // AES) acknowledged at t' writes back at t'+1, and ex_stage's result mux
+  // prefers it — so an acknowledgement at t' = t + MultStages silently drops
+  // the product (the scoreboard entry stays `issued`, the core hangs). The
+  // upstream rule (`|mult_valid_q`, i.e. t' = t+1) is exact only for the
+  // one-register multiplier; carry the issue pulse MultStages-1 more cycles
+  // and block the one-cycle classes in the colliding cycle only. Divisions
+  // ride the same pulse (harmless: their completion is guarded by
+  // mult_ready_i going low for the whole division).
+  // hyp8: under HypCfg.WbReserve the g6lc_flu_reserve table already
+  // reserves the multiplier's publication slot (offset 1 + ooo_flu_cycles
+  // per class), so the legacy one-register rule stays; the lag shift
+  // register repairs only the !WbReserve structural-hazard arm.
+  localparam int unsigned MulWbLag =
+      (g6lc_hyp_pkg::hyp_mult_stages(HypCfg, G6LCCfg.MultStages) > 1)
+          ? g6lc_hyp_pkg::hyp_mult_stages(HypCfg, G6LCCfg.MultStages) - 1 : 0;
+  logic mult_wb_block;
+  if (!HypCfg.WbReserve && MulWbLag > 0) begin : gen_mul_wb_block_lag
+    logic [MulWbLag-1:0] mult_issued_sr_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        mult_issued_sr_q <= '0;
+      end else begin
+        mult_issued_sr_q[0] <= |mult_valid_q;
+        for (int unsigned s = 1; s < MulWbLag; s++) begin
+          mult_issued_sr_q[s] <= mult_issued_sr_q[s-1];
+        end
+      end
+    end
+    assign mult_wb_block = mult_issued_sr_q[MulWbLag-1];
+  end else begin : gen_mul_wb_block_direct
+    assign mult_wb_block = |mult_valid_q;
+  end
+
   always_comb begin : structural_hazards
     fus_busy = '0;
     // CVXIF is always ready to try a new transaction on 1st issue port
@@ -683,7 +720,9 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
 
     // after a multiplication was issued we can only issue another multiplication
     // otherwise we will get contentions on the fixed latency bus
-    if (|mult_valid_q) begin
+    // T50: the contention cycle follows the multiplier's depth (mult_wb_block
+    // below) — `|mult_valid_q` is the MultStages == 1 case only.
+    if (mult_wb_block) begin
       fus_busy[0].alu = 1'b1;
       fus_busy[0].aes = 1'b1;
       fus_busy[0].ctrl_flow = 1'b1;
@@ -721,6 +760,12 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
       // op stays blocked. CSR/CVXIF remain port-0 only. A second core is
       // another core instance, not a second packet on this LSU. See
       // architecture/multi-threading/soft-ladder/monorepo-soak-integration.md.
+      // r42-T item 17 countercase: two "per-port independent hold"
+      // rewrites (pair-wise fu decode, then shared lane_lock/lane_none
+      // prefix-OR) both measured 46.4 FO4 vs 28.0 for this prefix copy
+      // on analyze-ghz-r4 — the fus_busy[p-1] copy is wires in the
+      // mut form, so breaking the chain buys nothing while the '1
+      // override adds a select the case didn't need. Reverted (T1).
       for (int unsigned p = 1; p < G6LCCfg.NrIssuePorts; p++) begin
         fus_busy[p] = fus_busy[p-1];
 
@@ -2153,6 +2198,7 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
     )))
     else $warning("Got unknown value in one of the operands");
   end
+
   //pragma translate_on
 
 

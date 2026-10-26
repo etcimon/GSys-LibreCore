@@ -47,6 +47,7 @@ module g6lc_loop_buffer
     input  logic [DATA_W-1:0]       fill_data_i,
     // Sequential lookup (FTQ head)
     input  logic [G6LCCfg.VLEN-1:0] lookup_vaddr_i,
+    input  logic                    lookup_valid_i,  // FTQ head is valid
     input  logic                    lookup_ready_i,  // consumer accepts inject
     output logic                    hit_o,
     output logic [DATA_W-1:0]       data_o,
@@ -100,13 +101,24 @@ module g6lc_loop_buffer
   logic             armed_q, armed_d;
   logic [G6LCCfg.VLEN-1:0] base_q, base_d;  // loop start (back-edge target)
   logic [G6LCCfg.VLEN-1:0] end_q, end_d;    // PC of back-edge branch
+  // r49: expected head PC maintained as a register. It is written on the same
+  // edge as base_q/replay_q (pc_cur_d derives from the final base_d/replay_d),
+  // so the lookup hit is a single EQ instead of low-add -> carry -> high
+  // select -> compare. No new latency: the register input, not the fetch
+  // path, carries the reconstruction adder.
+  logic [G6LCCfg.VLEN-1:0] pc_cur_q, pc_cur_d;
   localparam int unsigned EW = (HypCfg.FeEpochBits > 0) ? HypCfg.FeEpochBits : 1;
   // hyp8: epoch the body was captured under; a hit is only offered while that
   // epoch is still the live fetch epoch
   logic [EW-1:0] arm_epoch_q, arm_epoch_d;
   // hyp8: registered hit (rank 2/4): detect at the head this cycle, inject the
   // block the next. hit_q holds until the consumer accepts (lookup_ready_i).
+  // hit_vaddr_q/hit_epoch_q pin the registration to the head it was detected
+  // for: a reseed/epoch change under a held hit retires it instead of
+  // injecting the old block under the new head.
   logic                hit_q;
+  logic [G6LCCfg.VLEN-1:0] hit_vaddr_q;
+  logic [EW-1:0]       hit_epoch_q;
   logic [DATA_W-1:0]   hit_data_q;
 
   // Short backward edge: target < pc and body fits in NR_ENTRIES fetch blocks
@@ -208,48 +220,59 @@ assign span_bytes = cf_pc_i - cf_target_i;
     return (a[LOW_W-1:0] == low_sum[LOW_W-1:0]) && hi_eq;
   endfunction
 
-  // Lookup hit compares, outside addr_eq so the high PC is not one
-  // function node. [63:32] and [31:LOW_W] are the high field.
-  logic seq_lo, seq_hi_hi, seq_hi_lo, seq_in_body, seq_epoch;
-  assign seq_lo = lookup_vaddr_i[5:0] == pc_low_lit[5:0];
-  always_comb begin
-    unique case (pc_low_lit[6])
-      1'b1:    seq_hi_hi = lookup_vaddr_i[63:32] == base_hi_p1_q[57:26];
-      default: seq_hi_hi = lookup_vaddr_i[63:32] == base_q[63:32];
-    endcase
-  end
-  always_comb begin
-    unique case (pc_low_lit[6])
-      1'b1:    seq_hi_lo = lookup_vaddr_i[31:6] == base_hi_p1_q[25:0];
-      default: seq_hi_lo = lookup_vaddr_i[31:6] == base_q[31:6];
-    endcase
-  end
+  // Lookup hit compare. r49: the expected head PC is the registered pc_cur_q
+  // (base_q + replay_q<<ALIGN by invariant), so the hit is one VLEN equality.
+  logic seq_in_body, seq_epoch;
   assign seq_epoch   = arm_epoch_q == epoch_i;
   assign seq_in_body = {1'b0, replay_q} < body_len_q;
   logic seq_hit;
-  assign seq_hit = enable_i && armed_q && seq_epoch && seq_lo &&
-                   seq_hi_lo && seq_hi_hi && seq_in_body;
+  assign seq_hit = enable_i && armed_q && lookup_valid_i && seq_epoch &&
+                   (lookup_vaddr_i == pc_cur_q) && seq_in_body;
 
   // hyp8: the hit and its payload are registered; the frontend suppresses the
   // demand request on hold_o while the hit lands, then lbuf_inject takes the
   // response port the next cycle. The registered hit survives a not-ready
-  // lookup cycle until consume.
+  // lookup cycle until consume — but only while the head it was detected for
+  // is still presented under the same epoch (hit_live). A reseed/redirect that
+  // re-pushes the FTQ under a held hit would otherwise inject the OLD block's
+  // bytes under the NEW head address (the inject uses ftq_head_vaddr).
+  logic hit_live;
+  assign hit_live  = hit_q && lookup_valid_i && (lookup_vaddr_i == hit_vaddr_q) &&
+                     (hit_epoch_q == epoch_i);
   assign hold_o    = seq_hit;
-  assign hit_o     = hit_q;
   assign data_o    = hit_data_q;
-  assign active_o  = hit_q | seq_hit;  // demand suppressed while hit pending/held
+`ifdef G6LC_MUT_LBUF_STALE_HIT
+  // Review-only mutation: the held hit is consumed without re-checking head
+  // identity — a reseed under a pending hit injects the old block under the
+  // new head.
+  assign hit_o     = hit_q;
+  assign active_o  = hit_q | seq_hit;
   assign consume_o = hit_q && lookup_ready_i;
+`else
+  assign hit_o     = hit_live;
+  assign active_o  = hit_live | seq_hit;  // demand suppressed while hit pending/held
+  assign consume_o = hit_live && lookup_ready_i;
+`endif
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      hit_q      <= 1'b0;
-      hit_data_q <= '0;
-    end else if (flush_i || consume_o) begin
-      hit_q      <= seq_hit && !consume_o;
-      hit_data_q <= data_q[replay_q];
+      hit_q       <= 1'b0;
+      hit_vaddr_q <= '0;
+      hit_epoch_q <= '0;
+      hit_data_q  <= '0;
+    end else if (flush_i) begin
+      // flush dominates: a coincident detection does not re-arm the hit
+      hit_q <= 1'b0;
+    end else if (consume_o || (hit_q && !hit_live)) begin
+      hit_q       <= seq_hit && !consume_o;
+      hit_vaddr_q <= lookup_vaddr_i;
+      hit_epoch_q <= epoch_i;
+      hit_data_q  <= data_q[replay_q];
     end else if (seq_hit) begin
-      hit_q      <= 1'b1;
-      hit_data_q <= data_q[replay_q];
+      hit_q       <= 1'b1;
+      hit_vaddr_q <= lookup_vaddr_i;
+      hit_epoch_q <= epoch_i;
+      hit_data_q  <= data_q[replay_q];
     end
   end
 
@@ -319,7 +342,14 @@ assign span_bytes = cf_pc_i - cf_target_i;
         capturing_d = 1'b0;
       end
     end
+
   end
+
+  // Expected head PC of the NEXT state, derived from the final base_d/
+  // replay_d (unconditional, so every arm/fill/consume/flush priority case
+  // is covered identically). Own always_comb: the reconstruction adder is a
+  // register input, off the fetch path and off the next-state bundle.
+  always_comb pc_cur_d = base_d + (G6LCCfg.VLEN'(replay_d) << ALIGN);
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -333,6 +363,7 @@ assign span_bytes = cf_pc_i - cf_target_i;
       base_hi_p1_q <= HI_W'(1);
       end_q       <= '0;
       arm_epoch_q <= '0;
+      pc_cur_q    <= '0;
     end else begin
       data_q      <= data_d;
       body_len_q  <= body_len_d;
@@ -344,6 +375,7 @@ assign span_bytes = cf_pc_i - cf_target_i;
       base_hi_p1_q <= base_hi_p1_d;
       end_q       <= end_d;
       arm_epoch_q <= arm_epoch_d;
+      pc_cur_q    <= pc_cur_d;
     end
   end
 
@@ -354,13 +386,29 @@ assign span_bytes = cf_pc_i - cf_target_i;
   logic [G6LCCfg.VLEN-1:0] expect_pc, expect_fill;
   assign expect_pc   = base_q + (G6LCCfg.VLEN'(replay_q)   << ALIGN);
   assign expect_fill = base_q + (G6LCCfg.VLEN'(fill_ptr_q) << ALIGN);
+  // r49 reference: the old seq_hit computed the hit against the split
+  // low-add/carry/high-select compare. pc_cur_q must equal expect_pc, and
+  // seq_hit must equal the old-form hit every cycle.
+  logic ref_seq_hit;
+  assign ref_seq_hit = enable_i && armed_q && lookup_valid_i &&
+                       (arm_epoch_q == epoch_i) &&
+                       addr_eq(lookup_vaddr_i, pc_low_sum) &&
+                       ({1'b0, replay_q} < body_len_q);
   always_ff @(posedge clk_i) if (rst_ni) begin
+    assert (pc_cur_q === expect_pc)
+    else $error("g6lc_loop_buffer: pc_cur_q differs from base+replay<<ALIGN");
+    assert (seq_hit === ref_seq_hit)
+    else $error("g6lc_loop_buffer: r49 registered-compare hit differs from reference");
     assert (base_hi_p1_q == base_q[G6LCCfg.VLEN-1:LOW_W] + HI_W'(1))
     else $error("g6lc_loop_buffer: base_hi_p1_q lost the base invariant");
     assert (addr_eq(lookup_vaddr_i, pc_low_sum) == (lookup_vaddr_i == expect_pc))
     else $error("g6lc_loop_buffer: split lookup compare differs from the reference");
     assert (addr_eq(fill_vaddr_i, fill_low_sum) == (fill_vaddr_i == expect_fill))
     else $error("g6lc_loop_buffer: split fill compare differs from the reference");
+    // consume only ever injects the block registered for THIS head/epoch
+    assert (!consume_o || (lookup_valid_i && lookup_vaddr_i == hit_vaddr_q &&
+                           hit_epoch_q == epoch_i))
+    else $error("g6lc_loop_buffer: inject identity");
   end
   //pragma translate_on
 

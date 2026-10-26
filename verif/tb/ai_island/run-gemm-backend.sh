@@ -41,9 +41,11 @@ build_nch() {
   local nch="$1"
   local dpf="$2"
   local mdir="$3"
+  # dpf: 0 both combinational, 1 pipelined float, 2 pipelined float + int
   mkdir -p "$mdir"
   verilator --binary --timing -Wno-fatal -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-UNOPTFLAT \
-    -GDOT_PIPE_FLOAT="$dpf" \
+    -GDOT_PIPE_FLOAT="$(( dpf >= 1 ? 1 : 0 ))" \
+    -GDOT_PIPE_INT="$(( dpf >= 2 ? 1 : 0 ))" \
     -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-PINCONNECTEMPTY -Wno-CASEINCOMPLETE \
     -GNCH="$nch" \
     -GPE_LANES="$PE_LANES" \
@@ -81,6 +83,7 @@ build_nch() {
   "$ROOT/corev_apu/src/g6lc_ai_dram_backend.sv" \
   "$ROOT/corev_apu/ai_island/include/g6lc_ai_fp_pkg.sv" \
   "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot.sv" \
+  "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot_pipe.sv" \
   "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot_float.sv" \
   "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot_float_pipe.sv" \
   "$ROOT/corev_apu/ai_island/g6lc_ai_tile_sram.sv" \
@@ -93,7 +96,9 @@ build_nch() {
 DEFAULT_NCHS=(1 2 4 8)
 # shellcheck source=nch-from-env.inc.sh
 . "$(dirname "$0")/nch-from-env.inc.sh"
-DPF_LIST=(0 1)
+DPF_LIST=(0 1 2)
+# Opt-in subset, e.g. AI_GEMM_DPF_LIST="2" for the pipelined-int build alone.
+if [[ -n "${AI_GEMM_DPF_LIST:-}" ]]; then read -r -a DPF_LIST <<< "$AI_GEMM_DPF_LIST"; fi
 if [[ "${AI_GEMM_PANEL_REUSE:-0}" == "1" ]]; then
   DPF_LIST=(0)
 fi
@@ -105,5 +110,5 @@ done
 if [[ "${AI_GEMM_PANEL_REUSE:-0}" == "1" ]]; then
   echo "PASS tb_g6lc_ai_gemm_backend panel_reuse nch=${NCH_LIST[*]} dpf=0"
 else
-  echo "PASS tb_g6lc_ai_gemm_backend nch=${NCH_LIST[*]} dpf=0,1"
+  echo "PASS tb_g6lc_ai_gemm_backend nch=${NCH_LIST[*]} dpf=0,1,2"
 fi

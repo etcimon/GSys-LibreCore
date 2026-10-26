@@ -248,6 +248,13 @@ module load_unit
   // tombstone (flushed) or a killed request (rkill_q).
   logic [G6LCCfg.NrLoadBufEntries-1:0] rpend_q;
   logic [G6LCCfg.NrLoadBufEntries-1:0] rkill_q;
+  // r51: sticky exception-pending per slot. A tag killed on the entry's
+  // own fault (ex_i.valid && !ex_ptw_i at SEND_TAG) owes exactly one
+  // exception publish, even when the dummy response is delayed or the
+  // publish port is busy. The publish record itself lives in the
+  // pending FIFO below; the per-slot bit marks the slot (pub_ok
+  // exclusion, lifetime clears).
+  logic [G6LCCfg.NrLoadBufEntries-1:0] ex_pend_q;
   logic [G6LCCfg.XLEN-1:0]             rdata_q [G6LCCfg.NrLoadBufEntries];
   logic [G6LCCfg.NrLoadBufEntries-1:0] fwd_reqed_q;
   logic [G6LCCfg.NrLoadBufEntries-1:0] fwd_seen_q;
@@ -256,6 +263,31 @@ module load_unit
   logic [G6LCCfg.NrLoadBufEntries-1:0] fwd_possible_q;
   ldbuf_id_t rresp_idx;    // slot named by the incoming data_rid
   ldbuf_id_t retire_idx;   // slot publishing this cycle (L5 pick)
+  // r51: pending-exception FIFO — shift register, head at index 0, so
+  // the deferred publish reads registers (slot/tid/exception record)
+  // rather than a variable-indexed slot pick. Depth equals
+  // NrLoadBufEntries: a pending entry holds its slot until publish+1,
+  // so pendings can never outnumber slots and the FIFO cannot overflow.
+  // Publish order is arm order.
+  typedef struct packed {
+    ldbuf_id_t                        slot;
+    // One-hot copy of slot: head checks (response captured, slot
+    // liveness, tombstone write) reduce AND/OR on vectors instead of
+    // indexing with the binary id.
+    logic [G6LCCfg.NrLoadBufEntries-1:0] slot_oh;
+    logic [G6LCCfg.TRANS_ID_BITS-1:0] tid;
+    exception_t                       ex;
+  } pend_entry_t;
+  pend_entry_t pend_q [G6LCCfg.NrLoadBufEntries];
+  pend_entry_t pend_d [G6LCCfg.NrLoadBufEntries];
+  pend_entry_t pend_new;
+  localparam int unsigned PEND_CNT_W =
+      (G6LCCfg.NrLoadBufEntries <= 1) ? 2 : $clog2(G6LCCfg.NrLoadBufEntries + 1);
+  logic [PEND_CNT_W-1:0] pend_cnt_q, pend_cnt_d;
+  // Registered head readiness/liveness, evaluated one cycle ahead on
+  // pend_d[0] so the publish gate reads registers only.
+  logic      pend_rdy_q, pend_rdy_d, pend_dead_q, pend_dead_d;
+  logic      ex_pend_any, ex_pend_sel, pend_state_ok, pend_pop;
 
   // hyp8 H5: speculative-wakeup miss replay. The IQ releases a load's
   // dependents on a countdown calibrated to the D$ hit latency — the
@@ -512,6 +544,14 @@ assign ldbuf_full = &ldbuf_valid_q;
         rpend_q[ldbuf_rindex] <= 1'b0;
         rkill_q[ldbuf_rindex] <= 1'b0;
       end
+      // r51: a pending slot whose deferred exception published this
+      // cycle is tombstoned; the drn pick frees it next cycle (the
+      // publish itself carries no pop, keeping the publish gate out of
+      // the ldbuf_valid_d register cone). Under G6LC_MUT_LSU_EXPEND
+      // the FIFO never fills so pend_pop is unreachable.
+      if (pend_pop && (|(ldbuf_valid_q & pend_q[0].slot_oh))) begin
+        rkill_q <= rkill_q | pend_q[0].slot_oh;
+      end
       // hyp8 H5: per-slot age since the D$ request grant (miss replay)
       if (ldbuf_w) begin
         miss_age_q[ldbuf_windex] <= LD_AGE_W'(1);
@@ -529,6 +569,78 @@ assign ldbuf_full = &ldbuf_valid_q;
         fwd_data_q[fwd_rsp_i.tag]     <= fwd_rsp_i.data;
         fwd_be_q[fwd_rsp_i.tag]       <= fwd_rsp_i.be;
         fwd_possible_q[fwd_rsp_i.tag] <= fwd_rsp_i.forward_possible;
+      end
+    end
+  end
+
+  // r51: set on an own-fault SEND_TAG kill of a live entry. A same-cycle
+  // ex publish pops the slot in this cycle (ldbuf_valid_d clears), which
+  // wins over the set below — pending never arms for a publish that
+  // already happened. A slot dying on this edge (flush/cancel/flush-
+  // tombstone) drains without ever publishing: ldbuf_flushed_d covers
+  // flush_i, the per-slot cancel hit and a same-cycle cancelled grant.
+  logic ex_pend_set;
+`ifdef G6LC_MUT_LSU_EXPEND
+  assign ex_pend_set = 1'b0;
+`else
+  assign ex_pend_set = state_q[LU_B_SEND_TAG] && ex_i.valid && !ex_ptw_i &&
+                       ldbuf_valid_q[ldbuf_last_id_q] &&
+                       !ldbuf_flushed_d[ldbuf_last_id_q];
+`endif
+
+  // Record pushed at the kill edge: the slot identity, the entry's
+  // transaction id and the live exception record (which is only valid
+  // this cycle — deferred publish must not read ex_i later).
+  always_comb begin : ex_pend_new
+    pend_new.slot    = ldbuf_last_id_q;
+    pend_new.slot_oh = G6LCCfg.NrLoadBufEntries'(1) << ldbuf_last_id_q;
+    pend_new.tid     = ldbuf_q[ldbuf_last_id_q].trans_id;
+    pend_new.ex      = ex_i;
+  end
+
+  always_comb begin : ex_pend_fifo
+    for (int i = 0; i < G6LCCfg.NrLoadBufEntries; i++)
+      pend_d[i] = pend_q[i];
+    pend_cnt_d = pend_cnt_q;
+    if (pend_pop) begin
+      for (int i = 0; i < G6LCCfg.NrLoadBufEntries - 1; i++)
+        pend_d[i] = pend_q[i+1];
+    end
+    if (ex_pend_set)
+      pend_d[pend_cnt_q - PEND_CNT_W'(pend_pop)] = pend_new;
+    if (pend_pop && !ex_pend_set)
+      pend_cnt_d = pend_cnt_q - 1'b1;
+    else if (!pend_pop && ex_pend_set)
+      pend_cnt_d = pend_cnt_q + 1'b1;
+  end
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin : ex_pend_ff
+    if (!rst_ni) begin
+      ex_pend_q   <= '0;
+      pend_cnt_q  <= '0;
+      pend_rdy_q  <= 1'b0;
+      pend_dead_q <= 1'b1;
+      for (int i = 0; i < G6LCCfg.NrLoadBufEntries; i++)
+        pend_q[i] <= '0;
+    end else begin
+      pend_q      <= pend_d;
+      pend_cnt_q  <= pend_cnt_d;
+      pend_rdy_q  <= pend_rdy_d;
+      pend_dead_q <= pend_dead_d;
+`ifndef G6LC_MUT_LSU_EXPEND
+      // Pending record popped (published or dead-head drop): the slot's
+      // pending bit clears; the tombstone rkill_q write is in ldbuf_ff.
+      // The vector clear precedes the index set — a SEND_TAG arm can
+      // coincide with a head publish (both fire in a safe state), and
+      // the armed slot is never the popped one.
+      if (pend_pop)
+        ex_pend_q <= ex_pend_q & ~pend_q[0].slot_oh;
+      if (ex_pend_set)
+        ex_pend_q[ldbuf_last_id_q] <= 1'b1;
+`endif
+      for (int i = 0; i < G6LCCfg.NrLoadBufEntries; i++) begin
+        if (!ldbuf_valid_d[i] || ldbuf_flushed_d[i])
+          ex_pend_q[i] <= 1'b0;
       end
     end
   end
@@ -560,19 +672,61 @@ assign ldbuf_full = &ldbuf_valid_q;
   // on every bit of the captured physical address. Pop still wins over
   // a same-cycle sample.
   logic                    pa_drop;
-  assign load_pa_now_v = valid_i && translation_req_o && dtlb_hit_i;
+  // r43-T T8 countercase: a full registered MMU-response boundary
+  // ({dtlb_hit, dtlb_ppn, ex} captured under valid_i && translation_req_o,
+  // sticky tr_gnt_q for grant-before-response, resp_rdy WAIT_GNT deferral,
+  // staged paddr_ni/ex publish, one-shot fwd_req) measured 37.5 -> 37.5
+  // FO4 on analyze-ghz (lu-t8-a.json): the module limiter is the
+  // state_q->state_d FSM path through the cancelled_request tail
+  // (:1162, never touches the response inputs) and the 36.1 in-path
+  // simply relocated onto the new tr_* regs (36.15 unchanged). The
+  // request-side reads (tr_idle_ok, spec gates, spec_issue_ok) must stay
+  // live regardless, and a SEND_TAG-window late fault cannot be captured
+  // by a req-gated record at all. +1 load-use for zero FO4. Reverted.
+  // r45: decode the PA-capture window directly instead of reading back
+  // translation_req_o (which stays a continuous state decode elsewhere).
+  // Under valid_i && dtlb_hit_i the request cone's tr_idle_ok term is
+  // constant 1, accept_req_w reduces to !ldbuf_full, and
+  // ~cancelled_request reduces to !OoOEn || !cancel_hit — rank-0
+  // absorption of those redundant terms on identical inputs; the FSM
+  // decode itself is unchanged and still drives translation_req_o.
+  // Exact equivalence to the composed form is asserted under
+  // translate_off.
+  logic                    pa_capture_state;
+  assign pa_capture_state = state_q[1] ||
+      (state_q[6] && (G6LCCfg.MmuPresent || G6LCCfg.NonIdemPotenceEn)) ||
+      ((state_q[0] || state_q[2]) && !ldbuf_full);
+  assign load_pa_now_v = valid_i && dtlb_hit_i &&
+      (!G6LCCfg.OoOEn || !cancel_hit) && pa_capture_state;
   assign load_pa_now   = G6LCCfg.PLEN'({dtlb_ppn_i, lsu_ctrl_i.vaddr[11:0]});
   assign pa_drop = flush_i | ~valid_i | pop_ld_o;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       load_pa_v_q <= 1'b0;
-      load_pa_q   <= '0;
     end else if (pa_drop) begin
       load_pa_v_q <= 1'b0;
     end else if (load_pa_now_v) begin
       load_pa_v_q <= 1'b1;
-      load_pa_q   <= load_pa_now;
     end
+  end
+  // r48: split the deep capture predicate off the 56-bit data register.
+  // load_pa_q only has to be right on edges that set load_pa_v_q and on
+  // cycles load_pa_v_q holds a live key. While a load is head,
+  // lsu_ctrl.fu==LOAD keeps the shared MMU port pointed at this
+  // request's own vaddr, so dtlb_ppn_i is this load's lookup — stable
+  // because the held head keeps lsu_ctrl_i.vaddr constant and a TLB
+  // entry cannot change under a continuously asserted hit (removal
+  // drops the hit first; a refill requires a miss-side walk that
+  // re-enters a pa_capture_state and recaptures under load_pa_now_v
+  // exactly as before). The cheaper valid_i && dtlb_hit_i enable
+  // therefore rewrites the same key while the valid bit is set; every
+  // consumer reads load_pa_q only through the pa_hold_lo selects gated
+  // by load_pa_v_q. Exact equivalence is asserted under translate_off.
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni)
+      load_pa_q <= '0;
+    else if (valid_i && dtlb_hit_i)
+      load_pa_q <= load_pa_now;
   end
   // One select into every physical-address bit is a 56-way fanout.
   // hyp8 PLEN is 56. Four copies of each select drive 14 bits. Now
@@ -632,12 +786,21 @@ assign ldbuf_full = &ldbuf_valid_q;
   assign req_port_o.data_id = ldbuf_windex;
   // user field not used
   assign req_port_o.data_wuser = '0;
-  // directly forward exception fields (valid bit is set below)
-  assign ex_o.cause = ex_i.cause;
-  assign ex_o.tval = ex_i.tval;
-  assign ex_o.tval2 = G6LCCfg.RVH ? ex_i.tval2 : '0;
-  assign ex_o.tinst = G6LCCfg.RVH ? ex_i.tinst : '0;
-  assign ex_o.gva = G6LCCfg.RVH ? ex_i.gva : 1'b0;
+  // directly forward exception fields (valid bit is set below). r51: the
+  // deferred-pending mux lives below, next to the publish pick — a
+  // pending publish presents the record captured at its kill edge; every
+  // other publish keeps the live ex_i fields.
+  assign ex_o.cause = ex_pend_sel ? pend_q[0].ex.cause : ex_i.cause;
+  assign ex_o.tval  = ex_pend_sel ? pend_q[0].ex.tval  : ex_i.tval;
+  assign ex_o.tval2 = G6LCCfg.RVH
+                      ? (ex_pend_sel ? pend_q[0].ex.tval2 : ex_i.tval2)
+                      : '0;
+  assign ex_o.tinst = G6LCCfg.RVH
+                      ? (ex_pend_sel ? pend_q[0].ex.tinst : ex_i.tinst)
+                      : '0;
+  assign ex_o.gva   = G6LCCfg.RVH
+                      ? (ex_pend_sel ? pend_q[0].ex.gva   : ex_i.gva)
+                      : 1'b0;
 
   // Check that NI operations follow the necessary conditions.
   // FSE S2 audit: speculative loads never issue to non-idempotent regions until
@@ -648,6 +811,14 @@ assign ldbuf_full = &ldbuf_valid_q;
   logic not_commit_time;
   logic inflight_stores;
   logic stall_ni;
+  // r42-T R7a countercase: two formulations of "the FSM reads only
+  // load_pa_v_q/load_pa_now_v + a 1-bit verdict" both measured worse on
+  // analyze-ghz-r4 (57.9 FO4 with the region check on pa_out_lo; 57.1
+  // with a captured pa_ni_q selected by load_pa_now_v — the select
+  // cascades translation_req_o's FSM decode back into the 37-arm
+  // state_d case). An exact-equivalent verdict needs the same
+  // protocol answer as R7b (which cycle the shared port's PPN is this
+  // load's when a held key exists); deferred to that tier. Reverted.
   assign paddr_ni = config_pkg::is_inside_nonidempotent_regions(
       G6LCCfg, {{52 - G6LCCfg.PPNW{1'b0}}, dtlb_ppn_i, 12'd0}
   );
@@ -1097,66 +1268,147 @@ assign ldbuf_full = &ldbuf_valid_q;
   // read, so no forward/violation check can apply to it.
   assign rresp_idx = (G6LCCfg.NrLoadBufEntries > 1) ? ldbuf_id_t'(req_port_i.data_rid)
                                                   : ldbuf_id_t'(1'b0);
-  assign ldbuf_rdata = ldbuf_q[retire_idx];
-
   // Publish mask: one bit per slot, same predicate as the reference scan
   // (response captured, not tombstoned, LSQ verdict final, forward
   // resolved). Lowest index wins, which is what `if (!valid_o)` kept.
   // valid_o still means "this slot's trans_id and data".
   localparam int unsigned NLD = (G6LCCfg.NrLoadBufEntries > 0) ? G6LCCfg.NrLoadBufEntries : 1;
-  logic [NLD-1:0] pub_ok, pub_oh;
+  localparam int unsigned LD_IDX_W = (NLD <= 1) ? 1 : $clog2(NLD);
+  logic [NLD-1:0] pub_ok;
   for (genvar i = 0; i < NLD; i++) begin : gen_pub_ok
     assign pub_ok[i] = rpend_q[i] && ldbuf_valid_q[i] && !ldbuf_flushed_q[i] &&
+                       !rkill_q[i] && !ex_pend_q[i] &&
                        ld_checked_i[ldbuf_q[i].trans_id] &&
                        (!fwd_reqed_q[i] || fwd_seen_q[i]);
   end
-  assign pub_oh = pub_ok & (~pub_ok + {{NLD-1{1'b0}}, 1'b1});
-
-  // One-hot to index, outside the publish process. A procedural scan
-  // that rewrote retire_idx sat in front of the exception arm, and that
-  // arm also reads kill_req, so the buffer mux was billed after kill.
-  localparam int unsigned LD_IDX_W = (NLD <= 1) ? 1 : $clog2(NLD);
-  logic [LD_IDX_W-1:0] pub_part [NLD];
-  logic [LD_IDX_W-1:0] pub_or [NLD];
-  logic [LD_IDX_W-1:0] pub_idx_w;
-  logic                pub_any;
-  logic                ex_pub;
-  for (genvar pi = 0; pi < NLD; pi++) begin : gen_pub_part
-    assign pub_part[pi] = pub_oh[pi] ? LD_IDX_W'(pi) : '0;
-  end
-  assign pub_or[0] = pub_part[0];
-  for (genvar pi = 1; pi < NLD; pi++) begin : gen_pub_or
-    assign pub_or[pi] = pub_or[pi-1] | pub_part[pi];
-  end
-  assign pub_idx_w = pub_or[NLD-1];
-  assign pub_any   = |pub_oh;
   // Drain mask, outside rvalid_output. A procedural scan that rewrote
   // ldbuf_r sat after the publish arm and was billed in series with it.
   // Lowest index wins, the same rule as that scan. Publish and the
   // exception arm still own the slot when they fire.
-  logic [NLD-1:0] drn_ok, drn_oh;
-  logic [LD_IDX_W-1:0] drn_part [NLD];
-  logic [LD_IDX_W-1:0] drn_or [NLD];
-  logic [LD_IDX_W-1:0] drn_idx_w;
-  logic                drn_any;
+  logic [NLD-1:0] drn_ok;
   for (genvar di = 0; di < NLD; di++) begin : gen_drn_ok
     assign drn_ok[di] = rpend_q[di] && ldbuf_valid_q[di] &&
                         (ldbuf_flushed_q[di] || rkill_q[di]);
   end
-  assign drn_oh = drn_ok & (~drn_ok + {{NLD-1{1'b0}}, 1'b1});
-  for (genvar di = 0; di < NLD; di++) begin : gen_drn_part
-    assign drn_part[di] = drn_oh[di] ? LD_IDX_W'(di) : '0;
+
+  // r44: parallel prefix priority masks + balanced masked-OR gathers.
+  // Each direction first computes a one-hot first-eligible mask
+  // (lowest slot index wins, `!(|ok[j-1:0])` is the prefix exclude),
+  // then a padded binary OR tree reduces the mask-gated index/payload
+  // leaves. The publish tree carries the slot's merged response word —
+  // the per-byte D$/forward overlay evaluated unmasked at the leaf — so
+  // rvalid_output and L4 never re-gather by index. pub_select_oh adds
+  // the empty case: when no slot is eligible, leaf 0 is selected so the
+  // root carries slot 0's payload/index — the same default the old
+  // `retire_idx = '0` select produced (exception arm included).
+  localparam int unsigned PLEAVES = (NLD <= 1) ? 1 : (1 << $clog2(NLD));
+  typedef struct packed {
+    ldbuf_t                  meta;
+    logic [G6LCCfg.XLEN-1:0] word;
+  } pub_payload_t;
+  logic [NLD-1:0]                     pub_oh, pub_select_oh, drn_oh;
+  logic [2*PLEAVES-1:1][LD_IDX_W-1:0] pub_itree, drn_itree;
+  pub_payload_t [2*PLEAVES-1:1]       pub_ptree;
+  logic [LD_IDX_W-1:0]                pub_idx_w;
+  logic                             pub_any;
+  logic                             ex_pub;
+  logic [LD_IDX_W-1:0]                drn_idx_w;
+  logic                             drn_any;
+  assign pub_any = |pub_ok;
+  assign drn_any = |drn_ok;
+  assign ex_pend_any = (pend_cnt_q != '0);
+  // r51: the head record publishes once its slot's (dummy) response is
+  // captured — strict priority over the data tree. Readiness is
+  // registered one cycle ahead on the next head (pend_d[0]): pushing
+  // to an empty FIFO makes the new record head, a pop makes the next
+  // entry head, otherwise the current head's rpend keeps accumulating.
+  assign pend_rdy_d  = |(rpend_q & pend_d[0].slot_oh);
+  // Dead-record suppression: a head whose entry is already dead is a
+  // precise drop and never publishes. Uses the registered pending bit
+  // only — the data publish path (pub_ok) reads flushed_q, never the
+  // live cancelled_mask_i, so the scoreboard already tolerates a
+  // writeback landing on the cancel edge; a cancel/flush before this
+  // cycle has already cleared ex_pend_q (reflected at the next edge).
+  // A record pushed to head this edge is live by construction — its
+  // ex_pend_q bit only lands at the edge — so the push itself marks it
+  // live (ex_pend_set already requires !flushed_d on the slot).
+  assign pend_dead_d = !((|(ex_pend_q & pend_d[0].slot_oh)) ||
+                         (ex_pend_set &&
+                          (pend_d[0].slot_oh == pend_new.slot_oh)));
+  // r51 state gate: a pending publish must never race the FSM-head
+  // publish arms below (translation fault, speculative write-off, STQ
+  // forward completion — the combinational trans_id_o overrides in
+  // rvalid_output). Those arms fire only in WAIT_TRANSLATION /
+  // WAIT_SPEC_LOAD / IDLE / WAIT_GNT / WAIT_PAGE_OFFSET, so the
+  // complement states are unconditionally safe; the rest are safe with
+  // no head — !valid_i gates IDLE/WAIT_GNT via accept_req and the WT/
+  // SPEC arms directly, while WPO's fwd_final site is the one head
+  // publish not gated by valid_i, so WPO is excluded outright (it
+  // resolves bounded through the wpo_cnt replay timeout). Waited
+  // states resolve bounded and an empty head drains to !valid_i, so
+  // the pending publish is never starved. The pending pop is deferred
+  // (the record's slot is marked rkill_q; the drn pick frees it next
+  // cycle), keeping this gate out of the ldbuf_valid_d register cone.
+  assign pend_state_ok =
+      state_q[LU_B_SEND_TAG] | state_q[LU_B_ABORT_TRANSACTION] |
+      state_q[LU_B_ABORT_TRANSACTION_NI] | state_q[LU_B_WAIT_FLUSH] |
+      state_q[LU_B_WAIT_WB_EMPTY] |
+      (!valid_i && !state_q[LU_B_WAIT_PAGE_OFFSET]);
+  // A dead head pops unconditionally (precise drop — free the queue
+  // slot); a live head pops only on publish (ready + safe state).
+  // flush_i stays live: a flush kills every entry this cycle.
+  assign ex_pend_sel = ex_pend_any && pend_rdy_q && !pend_dead_q &&
+                       !flush_i && pend_state_ok;
+  assign pend_pop    = ex_pend_any &&
+                       (pend_dead_q || flush_i ||
+                        (pend_rdy_q && pend_state_ok));
+  for (genvar j = 0; j < NLD; j++) begin : gen_pub_priority
+    if (j == 0) begin
+      assign pub_oh[j] = pub_ok[j];
+      assign drn_oh[j] = drn_ok[j];
+    end else begin
+      assign pub_oh[j] = pub_ok[j] && !(|pub_ok[j-1:0]);
+      assign drn_oh[j] = drn_ok[j] && !(|drn_ok[j-1:0]);
+    end
+    if (j == 0) assign pub_select_oh[j] = pub_oh[j] || !pub_any;
+    else        assign pub_select_oh[j] = pub_oh[j];
   end
-  assign drn_or[0] = drn_part[0];
-  for (genvar di = 1; di < NLD; di++) begin : gen_drn_or
-    assign drn_or[di] = drn_or[di-1] | drn_part[di];
+  for (genvar j = 0; j < PLEAVES; j++) begin : gen_pub_leaf
+    if (j < NLD) begin : gen_real_leaf
+      pub_payload_t slot_payload;
+      assign slot_payload.meta = ldbuf_q[j];
+      for (genvar b = 0; b < G6LCCfg.XLEN / 8; b++) begin : gen_leaf_word
+        assign slot_payload.word[b*8 +: 8] =
+            (fwd_possible_q[j] && fwd_be_q[j][b])
+                ? fwd_data_q[j][b*8 +: 8]
+                : rdata_q[j][b*8 +: 8];
+      end
+      assign pub_itree[PLEAVES+j] = pub_oh[j] ? LD_IDX_W'(j) : '0;
+      assign drn_itree[PLEAVES+j] = drn_oh[j] ? LD_IDX_W'(j) : '0;
+      assign pub_ptree[PLEAVES+j] = pub_select_oh[j] ? slot_payload : '0;
+    end else begin : gen_pad_leaf
+      assign pub_itree[PLEAVES+j] = '0;
+      assign drn_itree[PLEAVES+j] = '0;
+      assign pub_ptree[PLEAVES+j] = '0;
+    end
   end
-  assign drn_idx_w = drn_or[NLD-1];
-  assign drn_any   = |drn_oh;
+  for (genvar n = 1; n < PLEAVES; n++) begin : gen_pub_node
+    assign pub_itree[n] = pub_itree[2*n] | pub_itree[2*n+1];
+    assign drn_itree[n] = drn_itree[2*n] | drn_itree[2*n+1];
+    assign pub_ptree[n] = pub_ptree[2*n] | pub_ptree[2*n+1];
+  end
+  assign pub_idx_w   = pub_itree[1];
+  assign drn_idx_w   = drn_itree[1];
+  assign ldbuf_rdata = pub_ptree[1].meta;
   // Same predicate as the old exception arm, using kill_req_w rather than
   // the FSM output so the kill OR is not behind load_control.
+  // flushed_d reduction: on a valid slot new_hit is unreachable
+  // (allocator never writes an occupied slot) and hold is covered by
+  // !flushed_q, so only flush_i || old_hit must be checked.
   assign ex_pub = req_port_i.data_rvalid && ldbuf_valid_q[rresp_idx] &&
                   !ldbuf_flushed_q[rresp_idx] &&
+                  !flush_i &&
+                  !cancelled_mask_i[ldbuf_q[rresp_idx].trans_id] &&
                   ((ldbuf_last_id_q == rresp_idx) || !kill_req_w) &&
                   ex_i.valid && !ex_ptw_i && state_q[LU_B_SEND_TAG];
 
@@ -1169,17 +1421,41 @@ assign ldbuf_full = &ldbuf_valid_q;
     ldbuf_r    = 1'b0;
     ldbuf_rindex = '0;
     retire_idx = '0;
-    trans_id_o = ldbuf_q[retire_idx].trans_id;
+    trans_id_o = ldbuf_q[0].trans_id;
     valid_o    = 1'b0;
     ex_o.valid = 1'b0;
 
-    // publish pick: pub_oh is already the lowest set bit.
+    // publish pick: the pub tree root already names the lowest eligible
+    // slot, and pub_ptree[1] carries its meta + merged word.
+    // r51: exception publications take strict priority over the data
+    // tree — a faulted entry's one-shot publish may not be stolen by an
+    // unrelated slot's data. The pending arm serves deferred kills, the
+    // ex arm the same-cycle kill. Under G6LC_MUT_LSU_EXPEND the pending
+    // arm is absent and the data tree outranks the exception arm again.
+`ifdef G6LC_MUT_LSU_EXPEND
     if (pub_any) begin
       retire_idx   = ldbuf_id_t'(pub_idx_w);
       valid_o      = 1'b1;
-      trans_id_o   = ldbuf_q[retire_idx].trans_id;
+      trans_id_o   = pub_ptree[1].meta.trans_id;
       ldbuf_r      = 1'b1;
       ldbuf_rindex = retire_idx;
+    end else if (ex_pub) begin
+      trans_id_o   = ldbuf_q[rresp_idx].trans_id;
+      valid_o      = 1'b1;
+      ex_o.valid   = 1'b1;
+      ldbuf_r      = 1'b1;
+      ldbuf_rindex = rresp_idx;
+    end
+`else
+    if (ex_pend_sel) begin
+      // Deferred faulted entry: the record captured at the kill edge is
+      // presented (ex_o fields mux above); the kill resolved the request.
+      // The slot is not popped here: the publish marks it rkill_q at
+      // the edge and the drn pick frees it a cycle later, keeping this
+      // arm's state gate out of the ldbuf_valid_d register cone.
+      trans_id_o   = pend_q[0].tid;
+      valid_o      = 1'b1;
+      ex_o.valid   = 1'b1;
     end else if (ex_pub) begin
       // Faulted load: publish in the same cycle as kill_req. ex_pub
       // already includes !kill_req_w for the tag that owns this response.
@@ -1188,7 +1464,14 @@ assign ldbuf_full = &ldbuf_valid_q;
       ex_o.valid   = 1'b1;
       ldbuf_r      = 1'b1;
       ldbuf_rindex = rresp_idx;
+    end else if (pub_any) begin
+      retire_idx   = ldbuf_id_t'(pub_idx_w);
+      valid_o      = 1'b1;
+      trans_id_o   = pub_ptree[1].meta.trans_id;
+      ldbuf_r      = 1'b1;
+      ldbuf_rindex = retire_idx;
     end
+`endif
 
     // drain pick (no publish): a tombstoned or tag-killed slot that has
     // captured its response frees here — LSU tombstones survive flush
@@ -1291,14 +1574,11 @@ assign ldbuf_full = &ldbuf_valid_q;
   // hyp8 L4/L5: the publishing slot's captured response is merged with
   // its staged forward response — forward bytes override the D$ word
   // wherever the buffer flagged forward_possible (byte-exact youngest-
-  // writer data owned by the store buffer side).
+  // writer data owned by the store buffer side). r44: the merge rides
+  // the publish tree, so this is a read of the root payload, not an
+  // indexed gather.
   logic [G6LCCfg.XLEN-1:0] fwd_merged_data;
-  for (genvar b = 0; b < G6LCCfg.XLEN / 8; b++) begin : gen_fwd_merge
-    assign fwd_merged_data[b*8 +: 8] =
-        (fwd_possible_q[retire_idx] && fwd_be_q[retire_idx][b])
-            ? fwd_data_q[retire_idx][b*8 +: 8]
-            : rdata_q[retire_idx][b*8 +: 8];
-  end
+  assign fwd_merged_data = pub_ptree[1].word;
 
   assign load_rdata = st_fwd_done ? st_fwd_data_i : fwd_merged_data;
   assign load_addr_offset = st_fwd_done
@@ -1460,21 +1740,59 @@ assign ldbuf_full = &ldbuf_valid_q;
   // A misaligned load is granted before its exception is known, so a
   // misaligned offset in the load buffer is legal. The contract is precise
   // delivery: the entry completes once, with the misaligned exception, and its
-  // data return is killed rather than retired. The killed request is answered
-  // by the data cache with a dummy rvalid in the kill cycle. Under address
-  // translation the grant can precede a DTLB miss (T27, the Linux unaligned-
-  // access probe right after satp was written): the request is then aborted
-  // with a kill and no completion, the walk runs, and the re-issued load
-  // delivers the exception -- so the cycle after the grant is either the
-  // exception completion or the translation abort; misaligned_entry_no_data
-  // keeps the "never retires data" half in both cases.
-  misaligned_entry_excepts :
-  assert property (@(posedge clk_i) disable iff (~rst_ni)
-      ldbuf_w && offset_misaligned(ldbuf_wdata.operation, ldbuf_wdata.address_offset)
-      |=> (valid_o && ex_o.valid && ex_o.cause == riscv::LD_ADDR_MISALIGNED && req_port_o.kill_req) ||
-          (req_port_o.kill_req && !valid_o &&
-           (state_q[LU_B_ABORT_TRANSACTION] || state_q[LU_B_ABORT_TRANSACTION_NI] || state_q[LU_B_WAIT_FLUSH])))
-  else $error("misaligned load buffer entry did not complete with LD_ADDR_MISALIGNED and a killed request");
+  // data return is killed rather than retired. r51 made the completion
+  // deferred: the killed tag's dummy response may land cycles after the
+  // kill (or coincide with an unrelated publish), so the property tracks
+  // each misaligned slot across its lifetime — at its pop it must either
+  // publish the exception (same-cycle kill or the rkill_q marker of an
+  // earlier kill), have already published it via the WAIT_TRANSLATION
+  // head arm (mis_done_q, the DTLB-miss abort path), or pop as a precise
+  // drop (tombstoned/cancelled/flushed). A silent drain of a live entry
+  // — the r30-class lost completion — still fails. Under address
+  // translation the grant can precede a DTLB miss (T27); the aborted
+  // request's slot drains after the head-arm publish, which mis_done_q
+  // records. misaligned_entry_no_data keeps the "never retires data"
+  // half in every case.
+  logic [NLD-1:0] mis_trk_q, mis_done_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      mis_trk_q  <= '0;
+      mis_done_q <= '0;
+    end else begin
+      for (int i = 0; i < NLD; i++) begin
+        if (ldbuf_w && ldbuf_windex == ldbuf_id_t'(i) &&
+            offset_misaligned(ldbuf_wdata.operation, ldbuf_wdata.address_offset))
+          mis_trk_q[i] <= 1'b1;
+        else if (ldbuf_r && ldbuf_rindex == ldbuf_id_t'(i))
+          mis_trk_q[i] <= 1'b0;
+        if (valid_o && ex_o.valid &&
+            ex_o.cause == riscv::LD_ADDR_MISALIGNED &&
+            trans_id_o == ldbuf_q[i].trans_id)
+          mis_done_q[i] <= 1'b1;
+        else if (ldbuf_r && ldbuf_rindex == ldbuf_id_t'(i))
+          mis_done_q[i] <= 1'b0;
+      end
+    end
+  end
+  for (genvar gi = 0; gi < NLD; gi++) begin : gen_misaligned_entry_check
+    misaligned_entry_excepts :
+    assert property (@(posedge clk_i) disable iff (~rst_ni)
+        (mis_trk_q[gi] && ldbuf_r && ldbuf_rindex == ldbuf_id_t'(gi)) |->
+          (valid_o && ex_o.valid &&
+           ex_o.cause == riscv::LD_ADDR_MISALIGNED &&
+           (trans_id_o == ldbuf_q[gi].trans_id) &&
+           ((req_port_o.kill_req && ldbuf_last_id_q == ldbuf_id_t'(gi)) ||
+            rkill_q[gi] || ex_pend_q[gi])) ||
+          mis_done_q[gi] ||
+          (ldbuf_flushed_q[gi] ||
+           cancelled_mask_i[ldbuf_q[gi].trans_id] || flush_i))
+    else $error("misaligned load buffer slot %0d popped without its exception (state_q=%b kill=%b valid_o=%b ex_o=%b ex_o.cause=%h tid_o=%0d slot_tid=%0d rkill=%b done=%b flushed=%b canc=%b flush=%b pend=%b rvalid=%b rid=%0d last=%0d)",
+        gi, state_q, req_port_o.kill_req, valid_o, ex_o.valid, ex_o.cause,
+        trans_id_o, ldbuf_q[gi].trans_id, rkill_q[gi], mis_done_q[gi],
+        ldbuf_flushed_q[gi], cancelled_mask_i[ldbuf_q[gi].trans_id],
+        flush_i, ex_pend_q[gi], req_port_i.data_rvalid,
+        req_port_i.data_rid, ldbuf_last_id_q);
+  end
   misaligned_entry_no_data :
   assert property (@(posedge clk_i) disable iff (~rst_ni)
       ldbuf_r && valid_o && !ex_o.valid |-> !offset_misaligned(ldbuf_rdata.operation, ldbuf_rdata.address_offset))
@@ -1484,13 +1802,126 @@ assign ldbuf_full = &ldbuf_valid_q;
       valid_o && ex_o.valid && ex_o.cause == riscv::LD_ADDR_MISALIGNED
       |-> (G6LCCfg.TvalEn ? ex_o.tval[G6LCCfg.XLEN_ALIGN_BYTES-1:0] != '0 : ex_o.tval == '0))
   else $error("misaligned load tval does not follow TvalEn");
-  // A killed tag is always answered by a dummy rvalid for that same request —
-  // the exception writeback relies on it to retire exactly once.
+  // r51: a kill-cycle response must be for the killed tag itself (the
+  // dummy, on its own rid — rresp_idx is the response identity, not the
+  // publish pick) or for a legitimately outstanding request. r30's
+  // latching of the publish index conflated the two; the deferred
+  // pending arm also makes a response delayed past the kill cycle legal
+  // (the LSU no longer requires same-cycle presence).
   send_tag_kill_rvalid :
   assert property (@(posedge clk_i) disable iff (~rst_ni)
-      (state_q[LU_B_SEND_TAG] && req_port_o.kill_req)
-      |-> req_port_i.data_rvalid && (ldbuf_rindex == ldbuf_last_id_q))
-  else $error("SEND_TAG kill without the matching dummy data_rvalid");
+      (state_q[LU_B_SEND_TAG] && req_port_o.kill_req &&
+       req_port_i.data_rvalid && (rresp_idx != ldbuf_last_id_q))
+      |-> ldbuf_valid_q[rresp_idx] && !ldbuf_flushed_q[rresp_idx] &&
+          !rkill_q[rresp_idx])
+  else $error("SEND_TAG kill-cycle response for a dead/reused slot (state_q=%b rvalid=%b did=%0d rid=%0d rresp_idx=%0d rindex=%0d last_id=%0d pub_any=%b pend_any=%b ex_i.v=%b ex_i.cause=%h ex_ptw=%b flush=%b canc_hit=%b canc_mask=%b)",
+      state_q, req_port_i.data_rvalid, req_port_o.data_id,
+      req_port_i.data_rid, rresp_idx, ldbuf_rindex, ldbuf_last_id_q,
+      pub_any, ex_pend_any, ex_i.valid, ex_i.cause, ex_ptw_i, flush_i,
+      cancel_hit, cancelled_mask_i[ldbuf_q[ldbuf_last_id_q].trans_id]);
+
+  // r51: a pending publish may land on the cancel edge (the data path
+  // already tolerates that — the scoreboard drops WBs to cancelled
+  // tids), but a cancel one cycle earlier must have been caught by the
+  // sticky ex_pend_q clear: the record's tid was dead before this
+  // cycle began, so the head must have been dropped, not published.
+  ex_pend_sticky_drop :
+  assert property (@(posedge clk_i) disable iff (~rst_ni)
+      !(ex_pend_sel &&
+        $past(cancelled_mask_i[pend_q[0].tid]) &&
+        (pend_q[0].tid == $past(pend_q[0].tid))))
+  else $error("pending exception published for a tid cancelled last cycle (sticky clear missed it) slot=%0d tid=%0d ex_pend=%b",
+      pend_q[0].slot, pend_q[0].tid, ex_pend_q[pend_q[0].slot]);
+
+  // r44 pub/drain select miter: the priority-mask + masked-OR trees
+  // are compared every cycle against an independent ascending first-hit
+  // scan (the form they replaced) — the selected index, the any flags,
+  // the ldbuf meta readout and the merged forward word must all agree.
+  // multi/pfwd count the non-vacuous cases: >=2 simultaneously eligible
+  // slots, and a published slot whose forward overlay covers some but
+  // not all bytes.
+  logic [LD_IDX_W-1:0]       ref_pub_idx, ref_drn_idx;
+  logic                      ref_pub_any, ref_drn_any;
+  logic [G6LCCfg.XLEN-1:0]   ref_pub_word;
+  always_comb begin
+    ref_pub_idx = '0;
+    ref_pub_any = 1'b0;
+    for (int unsigned i = 0; i < NLD; i++) begin
+      if (!ref_pub_any && pub_ok[i]) begin
+        ref_pub_any = 1'b1;
+        ref_pub_idx = LD_IDX_W'(i);
+      end
+    end
+    ref_drn_idx = '0;
+    ref_drn_any = 1'b0;
+    for (int unsigned i = 0; i < NLD; i++) begin
+      if (!ref_drn_any && drn_ok[i]) begin
+        ref_drn_any = 1'b1;
+        ref_drn_idx = LD_IDX_W'(i);
+      end
+    end
+    for (int unsigned b = 0; b < G6LCCfg.XLEN / 8; b++) begin
+      ref_pub_word[b*8 +: 8] =
+          (fwd_possible_q[ref_pub_idx] && fwd_be_q[ref_pub_idx][b])
+              ? fwd_data_q[ref_pub_idx][b*8 +: 8]
+              : rdata_q[ref_pub_idx][b*8 +: 8];
+    end
+  end
+  int unsigned pub_tree_checked_n = 0;
+  int unsigned pub_tree_multi_n   = 0;
+  int unsigned pub_tree_pfwd_n    = 0;
+  always_ff @(posedge clk_i) begin
+    if (rst_ni) begin
+      pub_tree_checked_n <= pub_tree_checked_n + 1;
+      if ($countones(pub_ok) > 1)
+        pub_tree_multi_n <= pub_tree_multi_n + 1;
+      if (pub_any && fwd_possible_q[pub_idx_w] &&
+          (fwd_be_q[pub_idx_w] != '0) && (fwd_be_q[pub_idx_w] != '1))
+        pub_tree_pfwd_n <= pub_tree_pfwd_n + 1;
+      g6lc_pub_oh1 : assert ($onehot(pub_select_oh))
+        else $error("load_unit: pub_select_oh not onehot: %b", pub_select_oh);
+      g6lc_pub_tree_eq : assert (
+          pub_any === ref_pub_any && pub_idx_w === ref_pub_idx &&
+          drn_any === ref_drn_any && drn_idx_w === ref_drn_idx &&
+          ldbuf_rdata === ldbuf_q[ref_pub_idx] &&
+          fwd_merged_data === ref_pub_word)
+        else $error("load_unit: pub tree diverged from first-hit scan (pub %b/%b idx %0d/%0d drn %b/%b idx %0d/%0d)",
+                    pub_any, ref_pub_any, pub_idx_w, ref_pub_idx,
+                    drn_any, ref_drn_any, drn_idx_w, ref_drn_idx);
+    end
+  end
+  // r45: the direct pa_capture_state decode must equal the composed form
+  // valid_i && translation_req_o && dtlb_hit_i every cycle — the
+  // absorption identity the rewrite is proved by, checked on the live
+  // inputs (tr_idle_ok / accept_req_w / cancelled_request stay live).
+  always_ff @(posedge clk_i) begin
+    if (rst_ni) begin
+      g6lc_pa_now_eq : assert (load_pa_now_v ===
+                               (valid_i && translation_req_o && dtlb_hit_i))
+        else $error("load_unit: load_pa_now_v diverged from translation_req_o decode");
+    end
+  end
+  // r48: free-running data-capture equivalence — the shadow replays the
+  // pre-r48 load_pa_now_v-gated capture; whenever the held key is live it
+  // must bit-match the register the cheap qualifier actually wrote.
+  logic [G6LCCfg.PLEN-1:0] shadow_pa_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni)
+      shadow_pa_q <= '0;
+    else if (load_pa_now_v)
+      shadow_pa_q <= load_pa_now;
+  end
+  always_ff @(posedge clk_i) begin
+    if (rst_ni) begin
+      g6lc_pa_shadow_eq : assert (!load_pa_v_q || (load_pa_q === shadow_pa_q))
+        else $error("load_unit: free-running load_pa_q diverged from capture shadow");
+    end
+  end
+  final begin
+    if ($test$plusargs("equiv_report"))
+      $display("[equiv] load_unit pub_tree: checked=%0d multi=%0d pfwd=%0d",
+               pub_tree_checked_n, pub_tree_multi_n, pub_tree_pfwd_n);
+  end
   //pragma translate_on
 
   // svt-stage: end L4
@@ -1836,11 +2267,13 @@ assign ldbuf_full = &ldbuf_valid_q;
   // leaves its holding term readable as the last line (the r6-diag wedge
   // needed every gate verbatim, not an inferred state).
   // Window: +trace_from=<c>/+trace_to=<c> (default 0..3000).
-  // +smt_flow_trace additionally enables:
+  // +smt_flow_trace or +ld_state additionally enables:
   //   [ldfsm]  every state_q transition, printed whether or not valid_i is
   //            set — an input whose queue entry vanished mid-transaction
   //            must not silence the FSM record.
   //   [ldport] per-cycle dcache load-port handshake (req/gnt/tag/kill/rvalid).
+  // Each windowed line is $fflush'd so an unhandled $error/$stop cannot
+  // strand the last cycles in the C stdio buffer.
   bit ld_state_tr;
   bit ld_diag_tr;
   int unsigned ld_state_cyc = 0;
@@ -1895,9 +2328,10 @@ assign ldbuf_full = &ldbuf_valid_q;
                  dtlb_hit_i, ex_i.valid, flush_i, lu_replay_o, wpo_cnt_q,
                  load_pa_v_q, lsu_ctrl_i.trans_id, lsu_ctrl_i.vaddr,
                  load_pa_q);
+        $fflush;
       end
       ld_sig_q = ld_sig;
-      if (ld_diag_tr && (ld_state_cyc >= ld_tr_lo) &&
+      if ((ld_state_tr || ld_diag_tr) && (ld_state_cyc >= ld_tr_lo) &&
           (ld_state_cyc <= ld_tr_hi)) begin
         if (state_q != ld_fsm_q) begin
           $display("[ldfsm] c=%0d st=%b->%b tid=%0d slm=%b dreq=%b gnt=%b rvld=%b kill=%b tv=%b exv=%b exptw=%b cnc=%b cmask=%b pop=%b fls=%b",
@@ -1909,12 +2343,14 @@ assign ldbuf_full = &ldbuf_valid_q;
                    cancelled_request,
                    cancelled_mask_i[lsu_ctrl_i.trans_id], pop_ld_o,
                    flush_i);
+          $fflush;
         end
         $display("[ldport] c=%0d dreq=%b gnt=%b tv=%b kill=%b rvld=%b did=%0d rid=%0d",
                  ld_state_cyc, req_port_o.data_req, req_port_i.data_gnt,
                  req_port_o.tag_valid, req_port_o.kill_req,
                  req_port_i.data_rvalid, req_port_o.data_id,
                  req_port_i.data_rid);
+        $fflush;
       end
       ld_fsm_q = state_q;
     end

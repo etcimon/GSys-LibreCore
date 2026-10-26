@@ -186,6 +186,10 @@ module sb_lifecycle
   for (genvar i = 0; i < G6LCCfg.NrIssuePorts; i++) begin : gen_issue_full
     assign issue_full[i] = sb_free_cnt < $clog2(G6LCCfg.NR_SB_ENTRIES+1)'(i + 1);
   end
+  // r63: the port-open predicate is shared by the offer/ack cone below --
+  // one wire each instead of two reads of the comparator.
+  logic [G6LCCfg.NrIssuePorts-1:0] issue_open;
+  assign issue_open = ~issue_full;
 
   assign sb_full_o  = issue_full[0];
   assign sb_empty_o = sb_issued_cnt == '0;
@@ -235,8 +239,8 @@ module sb_lifecycle
       // make sure we assign the correct trans ID
       issue_instr_o[i].trans_id = issue_pointer[i];
 
-      issue_instr_valid_o[i]    = decoded_instr_valid_i[i] & ~issue_full[i];
-      decoded_instr_ack_o[i]    = issue_ack_i[i] & ~issue_full[i];
+      issue_instr_valid_o[i]    = decoded_instr_valid_i[i] & issue_open[i];
+      decoded_instr_ack_o[i]    = issue_ack_i[i] & issue_open[i];
     end
   end
 
@@ -292,9 +296,54 @@ module sb_lifecycle
   end
   assign num_issue = $bits(num_issue)'($countones(alloc_fire));
 
+  // hyp8 T1 item 13: the dynamic mem_q[tid] reads become masked-OR
+  // columns — the tid decode is per-port one-hot, the gathered field a
+  // single AND-OR instead of an indexed read on the slot cone.
+  logic [G6LCCfg.NrWbPorts-1:0]               wb_issued_c;
+  logic [G6LCCfg.NrWbPorts-1:0]               wb_dr_c, wb_mi_c, wb_lm_c;
+  logic                                       vio_issued_c;
+  logic                                       lur_issued_c, lur_load_c;
+`ifndef G6LC_MUT_T1_SBLC
+  logic [G6LCCfg.NR_SB_ENTRIES-1:0] vio_col, lur_vcol, lur_fcol;
+  for (genvar i = 0; i < G6LCCfg.NrWbPorts; i++) begin : gen_wbc
+    logic [G6LCCfg.NR_SB_ENTRIES-1:0] icol, dcol, mcol, lcol;
+    for (genvar s = 0; s < G6LCCfg.NR_SB_ENTRIES; s++) begin : gen_wbcs
+      assign icol[s] = (trans_id_i[i] == G6LCCfg.TRANS_ID_BITS'(s)) &&
+                       mem_q[s].issued;
+      assign dcol[s] = (trans_id_i[i] == G6LCCfg.TRANS_ID_BITS'(s)) &&
+                       mem_q[s].sbe.is_double_rd_macro_instr;
+      assign mcol[s] = (trans_id_i[i] == G6LCCfg.TRANS_ID_BITS'(s)) &&
+                       mem_q[s].sbe.is_macro_instr;
+      assign lcol[s] = (trans_id_i[i] == G6LCCfg.TRANS_ID_BITS'(s)) &&
+                       mem_q[s].sbe.is_last_macro_instr;
+    end
+    assign wb_issued_c[i] = |icol;
+    assign wb_dr_c[i]     = |dcol;
+    assign wb_mi_c[i]     = |mcol;
+    assign wb_lm_c[i]     = |lcol;
+  end
+  for (genvar s = 0; s < G6LCCfg.NR_SB_ENTRIES; s++) begin : gen_vs
+    assign vio_col[s]  = (mem_violation_id_i ==
+                          G6LCCfg.TRANS_ID_BITS'(s)) && mem_q[s].issued;
+    assign lur_vcol[s] = (lu_replay_id_i ==
+                          G6LCCfg.TRANS_ID_BITS'(s)) && mem_q[s].issued;
+    assign lur_fcol[s] = (lu_replay_id_i ==
+                          G6LCCfg.TRANS_ID_BITS'(s)) &&
+                         (mem_q[s].sbe.fu == g6lc_core_pkg::LOAD);
+  end
+  assign vio_issued_c = |vio_col;
+  assign lur_issued_c = |lur_vcol;
+  assign lur_load_c   = |lur_fcol;
+`endif
+
   logic [G6LCCfg.NrWbPorts-1:0] wb_fire;
   for (genvar i = 0; i < G6LCCfg.NrWbPorts; i++)
-    assign wb_fire[i] = wt_valid_i[i] && mem_q[trans_id_i[i]].issued;
+    assign wb_fire[i] = wt_valid_i[i] &&
+`ifdef G6LC_MUT_T1_SBLC
+        mem_q[trans_id_i[i]].issued;
+`else
+        wb_issued_c[i];
+`endif
 
   for (genvar s = 0; s < G6LCCfg.NR_SB_ENTRIES; s++) begin : gen_mn
     logic [G6LCCfg.NrIssuePorts-1:0] a_sel;
@@ -354,12 +403,20 @@ module sb_lifecycle
     for (genvar i = 0; i < G6LCCfg.NrWbPorts; i++) begin
       assign w_sel[i]  = wb_fire[i] &&
                          (trans_id_i[i] == G6LCCfg.TRANS_ID_BITS'(s));
+`ifdef G6LC_MUT_T1_SBLC
       assign wp_sel[i] = wb_fire[i] &&
                          mem_q[trans_id_i[i]].sbe.is_double_rd_macro_instr &&
                          mem_q[trans_id_i[i]].sbe.is_macro_instr &&
                          mem_q[trans_id_i[i]].sbe.is_last_macro_instr &&
                          (8'(trans_id_i[i]) - 8'd1 ==
                           G6LCCfg.TRANS_ID_BITS'(s));
+`else
+      // hyp8 T1 item 13: gathered columns instead of indexed reads.
+      assign wp_sel[i] = wb_fire[i] &&
+                         wb_dr_c[i] && wb_mi_c[i] && wb_lm_c[i] &&
+                         (8'(trans_id_i[i]) - 8'd1 ==
+                          G6LCCfg.TRANS_ID_BITS'(s));
+`endif
     end
     assign w_hit_s  = |w_sel;
     assign wp_hit_s = |wp_sel;
@@ -397,12 +454,20 @@ module sb_lifecycle
     assign rep_mid = c_hit ? 1'b0
                      : (a_hit ? 1'b0 : mem_q[s].replay);
     assign v_hit = G6LCCfg.OoOEn && mem_violation_i &&
+`ifdef G6LC_MUT_T1_SBLC
                    mem_q[mem_violation_id_i].issued &&
+`else
+                   vio_issued_c &&
+`endif
                    (mem_violation_id_i == G6LCCfg.TRANS_ID_BITS'(s)) &&
                    !(can_mid && !rep_mid);
     assign l_hit = G6LCCfg.OoOEn && lu_replay_i &&
+`ifdef G6LC_MUT_T1_SBLC
                    mem_q[lu_replay_id_i].issued &&
                    (mem_q[lu_replay_id_i].sbe.fu == g6lc_core_pkg::LOAD) &&
+`else
+                   lur_issued_c && lur_load_c &&
+`endif
                    (lu_replay_id_i == G6LCCfg.TRANS_ID_BITS'(s)) &&
                    !(can_mid && !rep_mid);
     assign can_mid2 = (c_hit || v_hit || l_hit) ? 1'b1
@@ -827,6 +892,38 @@ module sb_lifecycle
         if (misp_hist[b] > 0) $write(" %0d:%0d", b * 4, misp_hist[b]);
       $write("\n");
     end
+  end
+
+  // hyp8 T1 item 13: masked-OR columns equal the indexed reads they
+  // replaced, checked every cycle on the live ids.
+  int unsigned t1_sblc_n = 0;
+  always_ff @(posedge clk_i) begin : p_t1_sblc_eq
+    if (rst_ni) begin
+      t1_sblc_n <= t1_sblc_n + 1;
+`ifndef G6LC_MUT_T1_SBLC
+      for (int w = 0; w < G6LCCfg.NrWbPorts; w++) begin
+        g6lc_t1_sblc_wi: assert (wb_issued_c[w] ===
+            mem_q[trans_id_i[w]].issued)
+          else $error("sb_lifecycle: equiv wb_issued");
+        g6lc_t1_sblc_wr: assert ({wb_dr_c[w], wb_mi_c[w], wb_lm_c[w]} ===
+            {mem_q[trans_id_i[w]].sbe.is_double_rd_macro_instr,
+             mem_q[trans_id_i[w]].sbe.is_macro_instr,
+             mem_q[trans_id_i[w]].sbe.is_last_macro_instr})
+          else $error("sb_lifecycle: equiv wb macro flags");
+      end
+      g6lc_t1_sblc_v: assert (vio_issued_c ===
+          mem_q[mem_violation_id_i].issued)
+        else $error("sb_lifecycle: equiv vio_issued");
+      g6lc_t1_sblc_l: assert ({lur_issued_c, lur_load_c} ===
+          {mem_q[lu_replay_id_i].issued,
+           (mem_q[lu_replay_id_i].sbe.fu == g6lc_core_pkg::LOAD)})
+        else $error("sb_lifecycle: equiv lu_replay");
+`endif
+    end
+  end
+  final begin
+    if ($test$plusargs("equiv_report"))
+      $display("[equiv] sb_lifecycle col: checked=%0d", t1_sblc_n);
   end
 //pragma translate_on
 

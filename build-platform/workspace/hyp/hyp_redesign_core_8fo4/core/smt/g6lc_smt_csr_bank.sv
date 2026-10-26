@@ -53,6 +53,8 @@ module g6lc_smt_csr_bank
     input  logic [(G6LCCfg.NrHarts < 1 ? 1 : G6LCCfg.NrHarts)-1:0] time_irq_i,
     input  logic [63:0] rtc_time_i,
     output logic flush_o,
+    // pc of the CSR instruction that raised flush_o (valid with flush_o)
+    output logic [G6LCCfg.VLEN-1:0] flush_pc_o,
     output logic halt_csr_o,
     // Per-hart WFI halt (bank-local). Thread select must use this vector so an
     // inactive bank woken by timer/IPI becomes ready without waiting to be active.
@@ -231,6 +233,18 @@ module g6lc_smt_csr_bank
   localparam int unsigned NH    = (G6LCCfg.NrHarts < 1) ? 1 : G6LCCfg.NrHarts;
   localparam int unsigned HID_W = (NH <= 1) ? 1 : $clog2(NH);
 
+  //pragma translate_off
+  // Per-hart staged-request taps for the [hang] CSR seam dump: the request
+  // register lives inside per-bank generate scopes Verilator cannot index
+  // from outside, so the bank surfaces them as flat arrays.
+  logic [NH-1:0]                        dbg_csr_req_valid;
+  fu_op                                 dbg_csr_req_op [NH];
+  logic [NH-1:0][11:0]                  dbg_csr_req_addr;
+  logic [NH-1:0][G6LCCfg.TRANS_ID_BITS-1:0] dbg_csr_req_tid;
+  logic [NH-1:0]                        dbg_csr_req_match;
+  logic [NH-1:0]                        dbg_csr_req_apply;
+  //pragma translate_on
+
   // ---------- single-hart path ----------
   if (NH <= 1) begin : gen_single
     csr_regfile #(
@@ -251,6 +265,7 @@ module g6lc_smt_csr_bank
         .time_irq_i(time_irq_i[0]),
         .rtc_time_i,
         .flush_o,
+        .flush_pc_o,
         .halt_csr_o,
         .wfi_wake_o,
         .commit_instr_i,
@@ -349,6 +364,14 @@ module g6lc_smt_csr_bank
         .store_result_i,
         .break_from_trigger_o
     );
+    //pragma translate_off
+    assign dbg_csr_req_valid[0] = i_csr.req_valid;
+    assign dbg_csr_req_op[0]    = i_csr.req_op;
+    assign dbg_csr_req_addr[0]  = i_csr.req_addr;
+    assign dbg_csr_req_tid[0]   = i_csr.req_tid;
+    assign dbg_csr_req_match[0] = i_csr.csr_request_match;
+    assign dbg_csr_req_apply[0] = i_csr.csr_apply;
+    //pragma translate_on
     assign hart_halt_o = halt_csr_o;  // width-1 vector
     // T6b-2b single-hart ties: LSU and fetch context collapse onto the one bank.
     assign irq_ctrl_b_o[0]   = irq_ctrl_o;
@@ -426,6 +449,7 @@ module g6lc_smt_csr_bank
 
     // Bank outputs
     logic flush_b[NH];
+    logic [G6LCCfg.VLEN-1:0] flush_pc_b[NH];
     logic halt_b[NH];
     logic wake_b[NH];
     logic [G6LCCfg.XLEN-1:0] csr_rdata_b[NH];
@@ -496,6 +520,7 @@ module g6lc_smt_csr_bank
           .time_irq_i(time_irq_i[h]),
           .rtc_time_i,
           .flush_o(flush_b[h]),
+          .flush_pc_o(flush_pc_b[h]),
           .halt_csr_o(halt_b[h]),
           .wfi_wake_o(wake_b[h]),
           .commit_instr_i(commit_instr_i),
@@ -594,6 +619,14 @@ module g6lc_smt_csr_bank
           .store_result_i,
           .break_from_trigger_o(brk_trig_b[h])
       );
+      //pragma translate_off
+      assign dbg_csr_req_valid[h] = i_csr.req_valid;
+      assign dbg_csr_req_op[h]    = i_csr.req_op;
+      assign dbg_csr_req_addr[h]  = i_csr.req_addr;
+      assign dbg_csr_req_tid[h]   = i_csr.req_tid;
+      assign dbg_csr_req_match[h] = i_csr.csr_request_match;
+      assign dbg_csr_req_apply[h] = i_csr.csr_apply;
+      //pragma translate_on
     end
 
     always_comb begin : wake_any
@@ -657,6 +690,7 @@ module g6lc_smt_csr_bank
       lsu_chk_ctx = LSU_CTX_MUT ? active_hart_i : lsu_chk_hart_i;
       // CSR-write side-effect flush belongs to the committing hart
       flush_o                  = flush_b[commit_instr_i.hart_id];
+      flush_pc_o               = flush_pc_b[commit_instr_i.hart_id];
       // WFI: under drained handoff the whole backend is empty at a switch, so
       // a WFI's halt still gates the commit stage globally. Under mixed
       // residency only the per-hart hart_halt_o parks the owning hart in the

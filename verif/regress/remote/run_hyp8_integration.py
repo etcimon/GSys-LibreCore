@@ -50,6 +50,15 @@ TESTS = [
     ('h33_st_fwd', f'{TEST_DIR}/h33_st_fwd.S', '80001000'),
     ('hyp8_branch_cancel', 'verif/tests/custom/hyp8_branch_cancel.S',
      '80001000'),
+    ('hyp8_csr_flush_skip', 'verif/tests/custom/hyp8_csr_flush_skip.S',
+     '80001000'),
+    ('hyp8_amo_store_order', 'verif/tests/custom/hyp8_amo_store_order.S',
+     '80001000'),
+    # r68: head-only issue order under OoO readiness (older AMO/LR with a
+    # late operand in front of a ready younger AMO/SC/LR). Wedges (budget
+    # out) on the pre-r68 g6lc_iq_legal; the kernel-spinlock shape.
+    ('hyp8_amo_ready_order', 'verif/tests/custom/hyp8_amo_ready_order.S',
+     '80001000'),
 ]
 LINK_LD = 'verif/tests/custom/common/link_verilator.ld'
 GCC_FLAGS = ['-march=rv64imafdc_zicsr_zifencei', '-mabi=lp64d',
@@ -137,17 +146,21 @@ def main():
                SPIKE_INSTALL_DIR=SPIKE, RISCV=RISCV)
 
     # --- 3. full-top lint, scalar then SMT2 -------------------------------
-    for name, defs in (('scalar', []), ('smt2', ['-DG6LC_HYP8_SMT2'])):
+    lint_profiles = [('scalar', []), ('smt2', ['-DG6LC_HYP8_SMT2'])]
+    if os.environ.get('HYP8_LINT_MC'):
+        lint_profiles.append(('mc', []))
+    for name, defs in lint_profiles:
         log = out / f'lint-{name}.log'
         cmd = [VERILATOR, '--lint-only', '--no-timing', '--assert',
                *defs, '-Wall', *WARN_POLICY,
                '--top-module', 'g6lc_testharness',
-               '-f', FLIST, 'verilator_config.vlt']
+               '-f', ('verif/regress/remote/hyp8/Flist.hyp8_mc_sim'
+                      if name == 'mc' else FLIST), 'verilator_config.vlt']
         (out / f'command-lint-{name}.json').write_text(json.dumps(cmd, indent=2))
         rc = run(cmd, log, env=env, cwd=src, timeout=1200)
         results['lint'][name] = {'rc': rc, 'warnings': census(log),
                                  'log': f'lint-{name}.log'}
-    if any(results['lint'][n]['rc'] != 0 for n in ('scalar', 'smt2')):
+    if any(results['lint'][n]['rc'] != 0 for n in results['lint']):
         results['status'] = 'lint_failed'
         (out / 'results.json').write_text(json.dumps(results, indent=2))
         raise SystemExit('full-top lint failed; see lint-*.log')
@@ -184,7 +197,7 @@ def main():
     else:
         # --- 5. isolated scalar build --------------------------------------
         build_env = dict(env,
-                         SOFT_LADDER_BUILD_TARGET='g6lc64_hyp8',
+                         SOFT_LADDER_BUILD_TARGET=os.environ.get('HYP8_BUILD_TARGET', 'g6lc64_hyp8'),
                          SOFT_LADDER_VERLIB=str(out / 'model'),
                          SOFT_LADDER_BUILD_JOBS='2',
                          SOFT_LADDER_VERILATOR_THREADS='1',

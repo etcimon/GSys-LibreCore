@@ -146,6 +146,9 @@ module g6lc_iq_bank
     // Per-entry info for g6lc_iq_legal.
     output logic [ENTRIES-1:0]                info_v_o,
     output logic [ENTRIES-1:0][TID_W-1:0]     info_tid_o,
+    // r68: next-state tid (the occupant at the next edge) so the legality
+    // module registers per-entry facts for the occupant they will serve.
+    output logic [ENTRIES-1:0][TID_W-1:0]     info_tid_d_o,
     output logic [ENTRIES-1:0][HID_W-1:0]     info_hart_o,
     output logic [ENTRIES-1:0][6:0]           info_cls_o,
     output logic [ENTRIES-1:0]                info_bypass_o,
@@ -187,12 +190,24 @@ module g6lc_iq_bank
     // arms complete through the registered rdy alone.
     logic                rs1_low, rs2_low;
     logic [WAKE_W-1:0]   rs1_cnt, rs2_cnt, rs3_cnt;
+    // hyp8 r42-T R9: the countdown-zero flag is predecoded at the
+    // countdown update edge (e_d.rsX_cntz = (rXc == '0)), so the SEL
+    // ready arm and the rXr/rXc cones read a registered bit instead of
+    // a WAKE_W-wide NOR off e_q.
+    logic                rs1_cntz, rs2_cntz, rs3_cntz;
     // hyp8 g7: trans_id of the ALU-class producer that spec-armed this
     // operand (set only when the arming broadcast was ALU-class). The
     // issue stage matches it against the ALU pipe-stage tids for the
     // distance-1/2 in-ALU operand forward.
     logic [TID_W-1:0]    rs1_ptid, rs2_ptid;
     logic [3:0]          fu;   // fu_t of the op (arb resource gating)
+    // r68: the op belongs to a class with an ordering rule in
+    // g6lc_iq_legal (|cls[5:0]: ld/st/csr/csys/amo/cvxif). Only such
+    // entries read legal_i; the others are legal by construction, so a
+    // legality bit that is 0 for one cycle after allocation (the
+    // registered facts are formed for the new occupant first) does not
+    // cost them an issue cycle.
+    logic                ord;
   } iqb_entry_t;
 
   iqb_entry_t [ENTRIES-1:0] e_q, e_d;
@@ -306,6 +321,15 @@ module g6lc_iq_bank
     return (fu == FU_MULT) && (lat != g6lc_hyp_pkg::LAT_MUL);
   endfunction
 
+  // r43-T T6 countercase: a registered bank-boundary legal_q (the
+  // monotonic legality bit from g6lc_iq_legal, cleared on !valid/flush)
+  // was measured and reverted. The SEL presentation cone is not gated
+  // by the legality input — the limiter is the candidate age/select
+  // matrix — and the extra reader moved it 32.3 -> 33.0 FO4. The
+  // apparent 38.0-FO4 pend_slot_q path in --modules runs is an
+  // exclusive-case-mux artifact discounted to 9.5 under --all-modules.
+  // Live legal_i stays on the ready term.
+
   // ----------------------------------------------------------------------
   // svt-stage: begin SEL
   // Candidate eligibility: live, not taken, not cancelled, rdy bits set
@@ -351,12 +375,26 @@ module g6lc_iq_bank
     // left is the distance-1 LAT_ALU_LOW bypass (rsX_low && cnt==0).
     // Each source is its own assign so the two src_done calls are not
     // one statement chained onto ready.
+`ifdef G6LC_MUT_T2_IQ_CNTZ
+    // Review mutant: the pre-r42 wide zero compare on the live select.
     assign rs1_ok = e_q[e].rs1_rdy ||
         (e_q[e].rs1_spec && e_q[e].rs1_low && (e_q[e].rs1_cnt == '0));
     assign rs2_ok = e_q[e].rs2_rdy ||
         (e_q[e].rs2_spec && e_q[e].rs2_low && (e_q[e].rs2_cnt == '0));
+`else
+    // r42-T R9: the distance-1 LAT_ALU_LOW arm reads the zero flag
+    // registered with the countdown update.
+    assign rs1_ok = e_q[e].rs1_rdy ||
+        (e_q[e].rs1_spec && e_q[e].rs1_low && e_q[e].rs1_cntz);
+    assign rs2_ok = e_q[e].rs2_rdy ||
+        (e_q[e].rs2_spec && e_q[e].rs2_low && e_q[e].rs2_cntz);
+`endif
+    // r68: legal_i is consulted only by ordering-ruled classes (ord); the
+    // OR sits beside rs1_ok's own OR level, so the select cone keeps its
+    // depth while an unordered op never waits on a registered legality.
     assign ready[e] = e_q[e].valid && !e_q[e].issued &&
-        !e_cancl[e] && legal_i[e] && rs1_ok && rs2_ok && e_q[e].rs3_rdy;
+        !e_cancl[e] && (legal_i[e] || !e_q[e].ord) &&
+        rs1_ok && rs2_ok && e_q[e].rs3_rdy;
   end
 
   // hyp8 r5: registered-rdy select with the narrow LAT_ALU_LOW same-cycle
@@ -900,8 +938,10 @@ module g6lc_iq_bank
       rs1_spec: 1'b0, rs2_spec: 1'b0, rs3_spec: 1'b0,
       rs1_low: 1'b0, rs2_low: 1'b0,
       rs1_cnt: '0, rs2_cnt: '0, rs3_cnt: '0,
+      rs1_cntz: 1'b1, rs2_cntz: 1'b1, rs3_cntz: 1'b1,
       rs1_ptid: '0, rs2_ptid: '0,
-      fu: alloc_fu_i[p]};
+      fu: alloc_fu_i[p],
+      ord: |alloc_cls_i[p][5:0]};
     for (genvar e = 0; e < ENTRIES; e++) begin : gen_ahp
       assign alloc_hit_p[p][e] = pend_slot_q[p][e];
     end
@@ -1123,7 +1163,13 @@ module g6lc_iq_bank
         2'b1?: r1r = 1'b0;
         2'b01: r1r = nrec_sel.rs1_rdy || pend_wb1[e];
         default: r1r = (e_q[e].rs1_rdy || (e_q[e].valid && rs1_hit[e]) || z1 ||
-                        (tick1 && (e_q[e].rs1_cnt == '0))) &&
+                        (tick1 &&
+`ifdef G6LC_MUT_T2_IQ_CNTZ
+                         (e_q[e].rs1_cnt == '0)
+`else
+                         e_q[e].rs1_cntz
+`endif
+                        )) &&
                        !(replay_i && e_q[e].valid && e_q[e].rs1_spec);
       endcase
     end
@@ -1132,7 +1178,13 @@ module g6lc_iq_bank
         2'b1?: r2r = 1'b0;
         2'b01: r2r = nrec_sel.rs2_rdy || pend_wb2[e];
         default: r2r = (e_q[e].rs2_rdy || (e_q[e].valid && rs2_hit[e]) || z2 ||
-                        (tick2 && (e_q[e].rs2_cnt == '0))) &&
+                        (tick2 &&
+`ifdef G6LC_MUT_T2_IQ_CNTZ
+                         (e_q[e].rs2_cnt == '0)
+`else
+                         e_q[e].rs2_cntz
+`endif
+                        )) &&
                        !(replay_i && e_q[e].valid && e_q[e].rs2_spec);
       endcase
     end
@@ -1141,7 +1193,13 @@ module g6lc_iq_bank
         2'b1?: r3r = 1'b0;
         2'b01: r3r = nrec_sel.rs3_rdy || pend_wb3[e];
         default: r3r = (e_q[e].rs3_rdy || (e_q[e].valid && rs3_hit[e]) || z3 ||
-                        (tick3 && (e_q[e].rs3_cnt == '0))) &&
+                        (tick3 &&
+`ifdef G6LC_MUT_T2_IQ_CNTZ
+                         (e_q[e].rs3_cnt == '0)
+`else
+                         e_q[e].rs3_cntz
+`endif
+                        )) &&
                        !(replay_i && e_q[e].valid && e_q[e].rs3_spec);
       endcase
     end
@@ -1159,7 +1217,11 @@ module g6lc_iq_bank
           !(replay_i && e_q[e].valid)));
     always_comb begin
       unique casez ({flush_i || alloc_hit[e], fast1, pipe1, z1,
+`ifdef G6LC_MUT_T2_IQ_CNTZ
                      tick1 && (e_q[e].rs1_cnt != '0)})
+`else
+                     tick1 && !e_q[e].rs1_cntz})
+`endif
         5'b1????: r1c = '0;
         5'b01???: r1c = '0;
         5'b0011?: r1c = '0;
@@ -1170,7 +1232,11 @@ module g6lc_iq_bank
     end
     always_comb begin
       unique casez ({flush_i || alloc_hit[e], fast2, pipe2, z2,
+`ifdef G6LC_MUT_T2_IQ_CNTZ
                      tick2 && (e_q[e].rs2_cnt != '0)})
+`else
+                     tick2 && !e_q[e].rs2_cntz})
+`endif
         5'b1????: r2c = '0;
         5'b01???: r2c = '0;
         5'b0011?: r2c = '0;
@@ -1181,7 +1247,11 @@ module g6lc_iq_bank
     end
     always_comb begin
       unique casez ({flush_i || alloc_hit[e], pipe3, z3,
+`ifdef G6LC_MUT_T2_IQ_CNTZ
                      tick3 && (e_q[e].rs3_cnt != '0)})
+`else
+                     tick3 && !e_q[e].rs3_cntz})
+`endif
         4'b1???: r3c = '0;
         4'b011?: r3c = '0;
         4'b010?: r3c = wk_c3[e] - WAKE_W'(1);
@@ -1266,10 +1336,17 @@ module g6lc_iq_bank
     assign e_d[e].rs1_cnt  = r1c;
     assign e_d[e].rs2_cnt  = r2c;
     assign e_d[e].rs3_cnt  = r3c;
+    // R9: the zero flag is a single NOR of the next count, registered
+    // beside it — every reader sees a flop output, not a re-compare.
+    assign e_d[e].rs1_cntz = (r1c == '0);
+    assign e_d[e].rs2_cntz = (r2c == '0);
+    assign e_d[e].rs3_cntz = (r3c == '0);
     assign e_d[e].rs1_ptid = r1p;
     assign e_d[e].rs2_ptid = r2p;
     assign e_d[e].fu       = flush_i ? '0 : (alloc_hit[e] ? nrec_sel.fu
                                                         : e_q[e].fu);
+    assign e_d[e].ord      = !flush_i &&
+        (alloc_hit[e] ? nrec_sel.ord : e_q[e].ord);
   end
   logic [ENTRIES-1:0] e_vd;
   for (genvar e = 0; e < ENTRIES; e++) begin : gen_evd
@@ -1312,6 +1389,10 @@ module g6lc_iq_bank
   for (genvar e = 0; e < ENTRIES; e++) begin : gen_info
     assign info_v_o[e]     = e_q[e].valid;
     assign info_tid_o[e]   = e_q[e].tid;
+    // r68: next-state tid for the legality module's per-entry facts
+    // (registered pend record through the alloc mux -- no cancel/ack
+    // term on this cone).
+    assign info_tid_d_o[e] = e_d[e].tid;
     assign info_hart_o[e]  = e_q[e].hart;
     assign info_cls_o[e]   = e_q[e].cls;
     assign info_bypass_o[e] = e_q[e].may_bypass;
@@ -1390,6 +1471,17 @@ module g6lc_iq_bank
     assert (HypCfg.IqSpecWakeup == 0)
       else $fatal(1, "iq_bank: spec broadcast is literal-off; IqSpecWakeup must be 0");
   end
+  // hyp8 r47: detection for the take-after-kill class -- a take must
+  // never address an entry whose valid bit is already 0 (the r46a
+  // scalar witness issued a record killed two cycles earlier; with the
+  // sticky take_grant in g6lc_iq_arb this stays unreachable).
+  for (genvar e = 0; e < ENTRIES; e++) begin : gen_take_dead
+    for (genvar p = 0; p < NTAKE; p++) begin : gen_take_dead_p
+      assert property (@(posedge clk_i) disable iff (!rst_ni || flush_i)
+          (take_v_i[p] && (take_idx_i[p] == EW'(e))) |-> e_q[e].valid)
+        else $error("iq_bank: take on dead entry e%0d port %0d", e, p);
+    end
+  end
   // ----------------------------------------------------------------------
   // hyp8 r5 equivalence reference: pre-restructure same-cycle select
   // terms. ref_cntX mirrors the un-shifted arm (one count longer than the
@@ -1461,7 +1553,21 @@ module g6lc_iq_bank
         (e_q[e].valid && !alloc_hit[e] && !flush_i && !replay_i && rs3_hit[e])
         |=> e_q[e].rs3_rdy || !e_q[e].valid)
       else $fatal(1, "iq_bank SEL: rs3 WB hit did not capture e%0d", e);
+    // r42-T R9 equivalence: the predecoded zero flag tracks the count.
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+        e_q[e].valid |->
+        (e_q[e].rs1_cntz === (e_q[e].rs1_cnt == '0)) &&
+        (e_q[e].rs2_cntz === (e_q[e].rs2_cnt == '0)) &&
+        (e_q[e].rs3_cntz === (e_q[e].rs3_cnt == '0)))
+      else $error("iq_bank: equiv cntz e%0d", e);
   end
+  int unsigned t2_iq_cntz_n = 0;
+  always_ff @(posedge clk_i) if (rst_ni) t2_iq_cntz_n <= t2_iq_cntz_n + 1;
+  final begin
+    if ($test$plusargs("equiv_report"))
+      $display("[equiv] g6lc_iq_bank cntz: checked=%0d", t2_iq_cntz_n);
+  end
+
   // pragma translate_on
 
 endmodule

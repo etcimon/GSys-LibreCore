@@ -168,9 +168,22 @@ module g6lc_rvfi_probes
       instr_q     <= '0;
       csr_q       <= '0;
     end else if (flush_i) begin
-      instr_dly_q <= '0;
-      instr_q     <= '0;
-      csr_q       <= '0;
+      // r59b: a staged frame that captured a real commit ack (or an
+      // exception) already retired and must still emit -- instruction
+      // conservation. The flush may only drop frames that never retired;
+      // the paired csr word follows its surviving instr frame.
+      if (|(instr.commit_ack & ~instr.commit_drop) || instr.ex_commit_valid)
+        instr_dly_q <= instr;
+      else
+        instr_dly_q <= '0;
+      if (|(instr_dly_q.commit_ack & ~instr_dly_q.commit_drop)
+          || instr_dly_q.ex_commit_valid) begin
+        instr_q <= instr_dly_q;
+        csr_q   <= csr;
+      end else begin
+        instr_q <= '0;
+        csr_q   <= '0;
+      end
     end else begin
       instr_dly_q <= instr;
       instr_q     <= instr_dly_q;

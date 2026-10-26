@@ -233,6 +233,20 @@ package g6lc_config_pkg;
       ZihintpauseEn: bit'(1),
       SvpbmtEn: bit'(1),
       ZawrsEn: bit'(1),
+      // hyp8 L3 integration seam: the default profile keeps the L2/L3
+      // engines dark; -DG6LC_HYP8_L3 selects the ooocoh L2->L3->PF->DRAM
+      // stack, values copied verbatim from g6lc64_smt2_l3 (the single-
+      // core no-hub L3 package; ooocoh-p2-osbi-smt2l3-L0-r2 booted stock
+      // OpenSBI on it).
+`ifdef G6LC_HYP8_L3
+      L2En: bit'(1),
+      L2ByteSize: unsigned'(262144),
+      L2SetAssoc: unsigned'(8),
+      L2LineWidth: unsigned'(512),
+      L2MshrDepth: unsigned'(2),
+      L2DataBanks: unsigned'(4),
+      L2RoundRobinEn: bit'(0),
+`else
       L2En: bit'(0),
       L2ByteSize: unsigned'(0),
       L2SetAssoc: unsigned'(0),
@@ -240,6 +254,7 @@ package g6lc_config_pkg;
       L2MshrDepth: unsigned'(0),
       L2DataBanks: unsigned'(0),
       L2RoundRobinEn: bit'(0),
+`endif
       NrHarts: unsigned'(G6LCConfigNrHarts),
       SmtPolicy: config_pkg::SMT_HYBRID,
       SmtFetchQuantum: unsigned'(4),
@@ -280,21 +295,42 @@ package g6lc_config_pkg;
       MemDepPredEn: bit'(1),
       OoORetireWidth: unsigned'(0),
       MultStages: unsigned'(8),  // hyp8: latency parameter co-emitted with the 8-stage multiplier (group 7)
+`ifdef G6LC_HYP8_L3
+      L3En: bit'(1),
+      L3ByteSize: unsigned'(1048576),
+      L3SetAssoc: unsigned'(16),
+      L3LineWidth: unsigned'(512),
+      L3MshrDepth: unsigned'(4),
+      L3DataBanks: unsigned'(4),
+`else
       L3En: bit'(0),
       L3ByteSize: unsigned'(0),
       L3SetAssoc: unsigned'(0),
       L3LineWidth: unsigned'(0),
       L3MshrDepth: unsigned'(0),
       L3DataBanks: unsigned'(0),
+`endif
       ServerPrefetchEn: bit'(0),
       ServerPfStreams: unsigned'(0),
       ServerPfDistance: unsigned'(0),
+`ifdef G6LC_HYP8_L3
+      // WtAxiAllocEn emits BUFFERABLE|MODIFIABLE|RD_ALLOC|WR_ALLOC at the
+      // WT boundary — without the attributes the L2/L3 chain is a bypass
+      // (T8a). Inclusive off; tag SRAM and write-update per the reference.
+      WtAxiAllocEn: bit'(1),
+      L3InclusiveEn: bit'(0),
+      L2TagSramEn: bit'(1),
+      L2WriteUpdateEn: bit'(1),
+      L2CmoEn: bit'(1),
+      L2PostedWriteEn: bit'(1),
+`else
       WtAxiAllocEn: bit'(0),
       L3InclusiveEn: bit'(0),
       L2TagSramEn: bit'(0),
       L2WriteUpdateEn: bit'(0),
       L2CmoEn: bit'(0),
       L2PostedWriteEn: bit'(0),
+`endif
       L2WriteTrackDepth: unsigned'(4),
       L2ReadTrackDepth: unsigned'(4),
       L2PrefetchEn: bit'(0),

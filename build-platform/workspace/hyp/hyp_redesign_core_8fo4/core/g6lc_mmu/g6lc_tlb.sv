@@ -335,6 +335,12 @@ module g6lc_tlb
     for (int unsigned i = 0; i < TLB_ENTRIES; i++) begin
       // First level match, this may be a giga page, check the ASID flags as well
       // if the entry is associated to a global address, don't match the ASID (ASID is don't care)
+      // r43-T T5 countercase: a registered asid_ok_q (A134 — cached
+      // state-only predicate via the update-muxed tag/g) re-measured
+      // WORSE: module rr 36.4 -> 37.8 FO4. The asid compare was never
+      // the limiter here (the tags_q->flush->tags_n loop at ~:613 and
+      // the vpn_match cone at ~:283 are); the extra register only added
+      // a reader to the bundle. Live compare stays.
       match_asid[i] = ((rq_asid == tags_q[i].asid || content_q[i].pte.g) && rq_s_enbl) || !rq_s_enbl;
 
       if (G6LCCfg.RVH) begin
@@ -371,7 +377,7 @@ module g6lc_tlb
   } tlb_rsp_t;
 
   tlb_rsp_t rsp_i [TLB_ENTRIES];
-  logic [TLB_ENTRIES-1:0] tlb_hitv, tlb_hi1;
+  logic [TLB_ENTRIES-1:0] tlb_hitv;
 
   for (genvar gi = 0; gi < TLB_ENTRIES; gi++) begin : gen_rsp_rec
     // hyp8: disjoint per-field assigns. The emit's sequential `gp`/`gc`
@@ -437,15 +443,14 @@ module g6lc_tlb
     assign tlb_hitv[gi] = rsp_i[gi].hit;
   end
 
-  // highest-set one-hot (downward prefix OR) -- the emit's loop made the
-  // last matching entry win.
-  logic [TLB_ENTRIES-1:0] tlb_above;
-  always_comb begin : p_tlb_above
-    tlb_above = tlb_hitv >> 1;
-    for (int unsigned l = 1; l < TLB_ENTRIES; l = l << 1)
-      tlb_above = tlb_above | (tlb_above >> l);
-  end
-  assign tlb_hi1 = tlb_hitv & ~tlb_above;
+  // r53-T1: the response gather uses tlb_hitv directly as a masked-OR.
+  // The old highest-set prefix (tlb_above/tlb_hi1) existed only for a
+  // multi-hit "last entry wins" rule. A multi-hit requires two live
+  // entries matching one VA at different page sizes — a second fill is
+  // suppressed whenever the first entry hits, so coexistence is only
+  // reachable via inconsistent page tables or a software SFENCE race,
+  // both outside the design contract. The $onehot0 assert below now
+  // carries that contract explicitly.
   assign lu_hit  = tlb_hitv;
   assign rsp_hit = |tlb_hitv;
 
@@ -453,7 +458,7 @@ module g6lc_tlb
   localparam int unsigned TRLV = (TLB_ENTRIES > 1) ? $clog2(TLB_ENTRIES) : 1;
   logic [TRLV:0][TLB_ENTRIES-1:0][$bits(tlb_rsp_t)-1:0] rsp_tree;
   for (genvar gi = 0; gi < TLB_ENTRIES; gi++) begin : gen_rsp_t0
-    assign rsp_tree[0][gi] = {$bits(tlb_rsp_t){tlb_hi1[gi]}} & tlb_rsp_t'(rsp_i[gi]);
+    assign rsp_tree[0][gi] = {$bits(tlb_rsp_t){tlb_hitv[gi]}} & tlb_rsp_t'(rsp_i[gi]);
   end
   for (genvar l = 0; l < TRLV; l++) begin : gen_rsp_lvl
     for (genvar t = 0; t < TLB_ENTRIES; t++) begin : gen_rsp_or
@@ -517,11 +522,6 @@ module g6lc_tlb
   logic vaddr_to_be_flushed_is0;  // VADDR from SFENCE.VMA (rs1) is 0, active high
   logic vmid_to_be_flushed_is0;  // indicates that the VMID provided is 0, active high
   logic gpaddr_to_be_flushed_is0;  // indicates that the GPADDR provided is 0, active high
-  logic flush_addr_napot_match;
-  logic flush_addr_matches;
-  logic [G6LCCfg.VpnLen-1:0] temp_stored_vpn;
-  logic [G6LCCfg.VpnLen-1:0] flush_vpn_masked;
-  logic [G6LCCfg.VpnLen-1:0] stored_vpn_masked;
   logic [G6LCCfg.VpnLen-1:0] vpn_to_store;
 
   // svt-stage: end T2
@@ -530,17 +530,73 @@ module g6lc_tlb
   assign vmid_to_be_flushed_is0   = ~(|vmid_to_be_flushed_i);
   assign gpaddr_to_be_flushed_is0 = ~(|gpaddr_to_be_flushed_i);
 
+  // r45: per-row flush predicates are generated wires, not sequential
+  // scratch inside update_flush.  The NAPOT compare drops the ignored low
+  // four VPN bits outright (vaddr[15:12]) instead of masking both sides
+  // of a full-width equality — for the supported PtLevels the packed
+  // tag's low VpnLen bits equal the old per-level concatenation.  The
+  // four SFENCE arms fold into one row predicate.
+  logic [TLB_ENTRIES-1:0] row_flush_addr_match;
+  logic [TLB_ENTRIES-1:0] row_sfence_match;
+  for (genvar e = 0; e < TLB_ENTRIES; e++) begin : gen_flush_match
+    logic [G6LCCfg.VpnLen-1:0] row_vpn;
+    logic nap;
+    assign row_vpn = G6LCCfg.VpnLen'(tags_q[e].vpn);
+    assign nap = G6LCCfg.SvnapotEn && tags_q[e].is_napot_64k &&
+                 (vaddr_to_be_flushed_i[G6LCCfg.VpnLen+11:16] ==
+                  row_vpn[G6LCCfg.VpnLen-1:4]);
+    assign row_flush_addr_match[e] = (|vaddr_level_match[e][0]) || nap;
+    assign row_sfence_match[e] = (!tags_q[e].v_st_enbl[HYP_EXT*2] || HYP_EXT == 0) &&
+        (vaddr_to_be_flushed_is0 || row_flush_addr_match[e]) &&
+        (asid_to_be_flushed_is0 ||
+         (!content_q[e].pte.g && asid_to_be_flushed_i == tags_q[e].asid));
+  end
+
+  //pragma translate_off
+  // r45 flush-predicate miter: the generated row predicates are compared
+  // every cycle against the independently recomputed old form — a
+  // masked-VPN NAPOT equality and the original four SFENCE arms, not the
+  // new predicate shape.
+  logic [TLB_ENTRIES-1:0] ref_row_addr_match, ref_row_sfence;
+  for (genvar e = 0; e < TLB_ENTRIES; e++) begin : gen_flush_ref
+    logic [G6LCCfg.VpnLen-1:0] ref_flush_vpn_m, ref_stored_vpn_m;
+    logic ref_nap;
+    assign ref_flush_vpn_m  = vaddr_to_be_flushed_i[G6LCCfg.VpnLen+11:12] &
+                              ~G6LCCfg.VpnLen'(15);
+    assign ref_stored_vpn_m = G6LCCfg.VpnLen'(tags_q[e].vpn) &
+                              ~G6LCCfg.VpnLen'(15);
+    assign ref_nap = G6LCCfg.SvnapotEn && tags_q[e].is_napot_64k &&
+                     (ref_flush_vpn_m == ref_stored_vpn_m);
+    assign ref_row_addr_match[e] = (|vaddr_level_match[e][0]) || ref_nap;
+    assign ref_row_sfence[e] = (!tags_q[e].v_st_enbl[HYP_EXT*2] || HYP_EXT == 0) &&
+        ((asid_to_be_flushed_is0 && vaddr_to_be_flushed_is0) ||
+         (asid_to_be_flushed_is0 && ref_row_addr_match[e] &&
+          !vaddr_to_be_flushed_is0) ||
+         (!content_q[e].pte.g && ref_row_addr_match[e] &&
+          (asid_to_be_flushed_i == tags_q[e].asid) &&
+          !vaddr_to_be_flushed_is0 && !asid_to_be_flushed_is0) ||
+         (!content_q[e].pte.g && vaddr_to_be_flushed_is0 &&
+          (asid_to_be_flushed_i == tags_q[e].asid) &&
+          !asid_to_be_flushed_is0));
+  end
+  always_ff @(posedge clk_i) begin
+    if (rst_ni) begin
+      g6lc_flush_addr_eq : assert (row_flush_addr_match === ref_row_addr_match)
+        else $error("g6lc_tlb: row_flush_addr_match diverged: %b vs %b",
+                    row_flush_addr_match, ref_row_addr_match);
+      g6lc_sfence_eq : assert (row_sfence_match === ref_row_sfence)
+        else $error("g6lc_tlb: row_sfence_match diverged: %b vs %b",
+                    row_sfence_match, ref_row_sfence);
+    end
+  end
+  //pragma translate_on
+
   // ------------------
   // Update and Flush
   // ------------------
   always_comb begin : update_flush
     tags_n                 = tags_q;
     content_n              = content_q;
-    temp_stored_vpn        = '0;
-    flush_vpn_masked       = '0;
-    stored_vpn_masked      = '0;
-    flush_addr_napot_match = 1'b0;
-    flush_addr_matches     = 1'b0;
     vpn_to_store           = '0;
 
     for (int unsigned i = 0; i < TLB_ENTRIES; i++) begin
@@ -562,32 +618,8 @@ module g6lc_tlb
         end
       end
 
-      if (tags_q[i].is_napot_64k && G6LCCfg.SvnapotEn) begin
-        temp_stored_vpn = G6LCCfg.VpnLen'({tags_q[i].vpn[2], tags_q[i].vpn[1], tags_q[i].vpn[0]});
-        // Mask the lower 4 bits of the VPN (addr[15:12]) for comparison
-        flush_vpn_masked = vaddr_to_be_flushed_i[G6LCCfg.VpnLen+11:12] & ~'hF;
-        stored_vpn_masked = temp_stored_vpn & ~'hF;
-        flush_addr_napot_match = (flush_vpn_masked == stored_vpn_masked);
-      end else begin
-        flush_addr_napot_match = 1'b0;
-      end
-      flush_addr_matches = |vaddr_level_match[i][0] || flush_addr_napot_match;
-
       if (flush_i) begin
-        if (!tags_q[i].v_st_enbl[HYP_EXT*2] || HYP_EXT == 0) begin
-          // invalidate logic
-          // flush everything if ASID is 0 and vaddr is 0 ("SFENCE.VMA x0 x0" case)
-          if (asid_to_be_flushed_is0 && vaddr_to_be_flushed_is0) tags_n[i].valid = 1'b0;
-          // flush vaddr in all addressing space ("SFENCE.VMA vaddr x0" case), it should happen only for leaf pages
-          else if (asid_to_be_flushed_is0 && (flush_addr_matches) && (~vaddr_to_be_flushed_is0))
-            tags_n[i].valid = 1'b0;
-          // the entry is flushed if it's not global and asid and vaddr both matches with the entry to be flushed ("SFENCE.VMA vaddr asid" case)
-          else if ((!content_q[i].pte.g) && (flush_addr_matches) && (asid_to_be_flushed_i == tags_q[i].asid ) && (!vaddr_to_be_flushed_is0) && (!asid_to_be_flushed_is0))
-            tags_n[i].valid = 1'b0;
-          // the entry is flushed if it's not global, and the asid matches and vaddr is 0. ("SFENCE.VMA 0 asid" case)
-          else if ((!content_q[i].pte.g) && (vaddr_to_be_flushed_is0) && (asid_to_be_flushed_i  == tags_q[i].asid ) && (!asid_to_be_flushed_is0))
-            tags_n[i].valid = 1'b0;
-        end
+        if (row_sfence_match[i]) tags_n[i].valid = 1'b0;
       end else if (flush_vvma_i && G6LCCfg.RVH) begin
         if (tags_q[i].v_st_enbl[HYP_EXT*2] && tags_q[i].v_st_enbl[0]) begin
           // invalidate logic
@@ -595,10 +627,10 @@ module g6lc_tlb
           if (asid_to_be_flushed_is0 && vaddr_to_be_flushed_is0 && ((tags_q[i].v_st_enbl[HYP_EXT] && lu_vmid_i == tags_q[i].vmid) || !tags_q[i].v_st_enbl[HYP_EXT]))
             tags_n[i].valid = 1'b0;
           // flush vaddr in all addressing space if current VMID matches ("SFENCE.VMA/HFENCE.VVMA vaddr x0" case), it should happen only for leaf pages
-          else if (asid_to_be_flushed_is0 && (flush_addr_matches) && (~vaddr_to_be_flushed_is0) && ((tags_q[i].v_st_enbl[HYP_EXT] && lu_vmid_i == tags_q[i].vmid) || !tags_q[i].v_st_enbl[HYP_EXT]))
+          else if (asid_to_be_flushed_is0 && (row_flush_addr_match[i]) && (~vaddr_to_be_flushed_is0) && ((tags_q[i].v_st_enbl[HYP_EXT] && lu_vmid_i == tags_q[i].vmid) || !tags_q[i].v_st_enbl[HYP_EXT]))
             tags_n[i].valid = 1'b0;
           // the entry is flushed if it's not global and asid and vaddr and current VMID matches with the entry to be flushed ("SFENCE.VMA/HFENCE.VVMA vaddr asid" case)
-          else if ((!content_q[i].pte.g) && (flush_addr_matches) && (asid_to_be_flushed_i  == tags_q[i].asid  && ((tags_q[i].v_st_enbl[HYP_EXT] && lu_vmid_i == tags_q[i].vmid) || !tags_q[i].v_st_enbl[HYP_EXT])) && (!vaddr_to_be_flushed_is0) && (!asid_to_be_flushed_is0))
+          else if ((!content_q[i].pte.g) && (row_flush_addr_match[i]) && (asid_to_be_flushed_i  == tags_q[i].asid  && ((tags_q[i].v_st_enbl[HYP_EXT] && lu_vmid_i == tags_q[i].vmid) || !tags_q[i].v_st_enbl[HYP_EXT])) && (!vaddr_to_be_flushed_is0) && (!asid_to_be_flushed_is0))
             tags_n[i].valid = 1'b0;
           // the entry is flushed if it's not global, and the asid and the current VMID matches and vaddr is 0. ("SFENCE.VMA/HFENCE.VVMA 0 asid" case)
           else if ((!content_q[i].pte.g) && (vaddr_to_be_flushed_is0) && (asid_to_be_flushed_i  == tags_q[i].asid  && ((tags_q[i].v_st_enbl[HYP_EXT] && lu_vmid_i == tags_q[i].vmid) || !tags_q[i].v_st_enbl[HYP_EXT])) && (!asid_to_be_flushed_is0))
@@ -650,9 +682,50 @@ module g6lc_tlb
   // PLRU - Pseudo Least Recently Used Replacement
   // -----------------------------------------------
   logic [2*(TLB_ENTRIES-1)-1:0] plru_tree_q, plru_tree_n;
+
+  // hyp8 T1 item 3: the PLRU update is written as flat set/clear masks per
+  // node instead of a per-entry `if (lu_hit[i])` priority loop (which the
+  // analyzer bills as an ENTRIES-deep serial chain). PLRU_SET/PLRU_CLR[n]
+  // are elaboration-time constant masks of the entries whose hit drives
+  // node n to 1/0; lu_hit_rsp is one-hot (asserted below), so at most one
+  // setter fires per node and the form is exact.
+  localparam int unsigned PLRU_LVL   = $clog2(TLB_ENTRIES);
+  localparam int unsigned PLRU_NODES = 2 * (TLB_ENTRIES - 1);
+
+  function automatic logic [TLB_ENTRIES-1:0] plru_node_ents(
+      input int unsigned n, input logic dir);
+    // Entries whose lookup hit writes node n (BFS index) with value dir:
+    // node n sits at level lvl = clog2(n+1), covers subtree index
+    // sidx = n - (2^lvl - 1); entry i drives it when (i >> shift) == sidx
+    // with shift = PLRU_LVL - lvl, and the written value is ~bit(i,shift-1).
+    logic [TLB_ENTRIES-1:0] m;
+    int unsigned lvl, sidx, shift;
+    m     = '0;
+    // BFS level of node n: floor(log2(n+1)) = clog2(n+2)-1.  The plain
+    // $clog2(n+1) form only yields the right level when n+1 is a power of
+    // two; for every other node sidx underflows and the mask is empty, so
+    // right-side tree nodes never updated (N=4: entry 3 unreplaceable).
+    lvl   = $clog2(n + 2) - 1;
+    sidx  = n - ((1 << lvl) - 1);
+    shift = PLRU_LVL - lvl;
+    for (int unsigned i = 0; i < TLB_ENTRIES; i++)
+      if (((i >> shift) == sidx) && ((((i >> (shift - 1)) & 32'b1) == 0) == dir))
+        m[i] = 1'b1;
+    return m;
+  endfunction
+
+`ifndef G6LC_MUT_T1_TLB_PLRU
+  for (genvar n = 0; n < PLRU_NODES; n++) begin : gen_plru
+    localparam logic [TLB_ENTRIES-1:0] SETM = plru_node_ents(n, 1'b1);
+    localparam logic [TLB_ENTRIES-1:0] CLRM = plru_node_ents(n, 1'b0);
+    assign plru_tree_n[n] =
+        (plru_tree_q[n] | (rq_access & |(lu_hit_rsp & SETM))) &
+        ~(rq_access & |(lu_hit_rsp & CLRM));
+  end
+`endif
+
   always_comb begin : plru_replacement
-    plru_tree_n = plru_tree_q;
-    replace_en  = '0;
+    replace_en = '0;
     // The PLRU-tree indexing:
     // lvl0        0
     //            / \
@@ -676,6 +749,10 @@ module g6lc_tlb
     // lu_hit[0]: plru_tree_n[0, 1, 3] = {0, 0, 0};
     // default: begin /* No hit */ end
     // endcase
+`ifdef G6LC_MUT_T1_TLB_PLRU
+    // Review mutant: the pre-T1 per-entry priority loop on the live path.
+    // Identity-equal to the flat set/clear form, so the leaf still passes.
+    plru_tree_n = plru_tree_q;
     for (
         int unsigned i = 0; i < TLB_ENTRIES; i++
     ) begin
@@ -697,6 +774,7 @@ module g6lc_tlb
         end
       end
     end
+`endif
     // Decode tree to write enable signals
     // Next for-loop basically creates the following logic for e.g. an 8 entry
     // TLB (note: pseudo-code obviously):
@@ -784,6 +862,58 @@ module g6lc_tlb
   else begin
     $error("More then one TLB entry selected for next replace!");
     $stop();
+  end
+
+  // r53-T1: the response gather is now a plain masked-OR over tlb_hitv,
+  // so a multi-hit is a contract violation rather than "last wins".
+  g6lc_tlb_hit_onehot0 : assert property (@(posedge clk_i)
+      disable iff (!rst_ni || !rq_access)
+      $onehot0(tlb_hitv))
+  else $error("g6lc_tlb: multi-hit on a valid lookup (inconsistent page tables or SFENCE race)");
+
+  // hyp8 T1 item 3: flat set/clear PLRU equivalence — the pre-T1 per-entry
+  // priority loop is recomputed here and compared against the live
+  // plru_tree_n every cycle; lu_hit_rsp must stay one-hot for the masks
+  // to be exact.
+  logic [PLRU_NODES-1:0] plru_ref_n;
+  always_comb begin : p_plru_ref
+    automatic int unsigned idx_base, shift, new_index;
+    plru_ref_n = plru_tree_q;
+    for (int unsigned i = 0; i < TLB_ENTRIES; i++) begin
+      idx_base  = 0;
+      shift     = 0;
+      new_index = 0;
+      if (lu_hit_rsp[i] & rq_access) begin
+        for (int unsigned lvl = 0; lvl < PLRU_LVL; lvl++) begin
+          idx_base  = $unsigned((2 ** lvl) - 1);
+          shift     = PLRU_LVL - lvl;
+          new_index = ~((i >> (shift - 1)) & 32'b1);
+          plru_ref_n[idx_base+(i>>shift)] = new_index[0];
+        end
+      end
+    end
+  end
+  // The tree register is sized 2*(N-1) but only nodes 0..2^PLRU_LVL-2 are
+  // real; the upper bits are dead state the mask form may still set (the
+  // priority-loop reference writes only real nodes).  Compare the real
+  // prefix only.
+  localparam int unsigned PLRU_REAL = (2 ** PLRU_LVL) - 1;
+  int unsigned t1_plru_n = 0;
+  always_ff @(posedge clk_i) begin : p_t1_plru_eq
+    if (rst_ni) begin
+      if (!$isunknown({plru_tree_n, lu_hit_rsp})) begin
+        t1_plru_n <= t1_plru_n + 1;
+        g6lc_t1_plru_eq: assert (plru_tree_n[PLRU_REAL-1:0] ===
+                                 plru_ref_n[PLRU_REAL-1:0])
+          else $error("g6lc_tlb: equiv plru");
+        g6lc_t1_plru_oh: assert ($onehot0(lu_hit_rsp))
+          else $error("g6lc_tlb: equiv plru (lu_hit_rsp not one-hot)");
+      end
+    end
+  end
+  final begin
+    if ($test$plusargs("equiv_report"))
+      $display("[equiv] g6lc_tlb plru: checked=%0d", t1_plru_n);
   end
 
   //pragma translate_on

@@ -27,6 +27,7 @@ module g6lc_ptw
   import g6lc_core_pkg::*;
 #(
     parameter config_pkg::g6lc_cfg_t G6LCCfg = config_pkg::g6lc_cfg_empty,
+    parameter g6lc_hyp_pkg::g6lc_hyp_cfg_t HypCfg = g6lc_hyp_pkg::Hyp8,
     parameter type pte_g6lc_t = logic,
     parameter type tlb_update_g6lc_t = logic,
     parameter type dcache_req_i_t = logic,
@@ -216,9 +217,59 @@ module g6lc_ptw
 // end
 // ----------------------------------------------------------------
   // END sv-timing auto-correct (balance_mux rewrite)
-assign pte = pte_g6lc_t'(data_rdata_q);
+  // r43-T T2: HypCfg.PtwDecodeStage splits the PTE verdict into the
+  // rdata cycle (decode bundle captured at the data_rvalid_q edge) and a
+  // real PTE_DECODE state (verdict on the registered bundle only). The
+  // review mutant restores the single-state verdict.
+`ifdef G6LC_MUT_T3_PTW_DECODE
+  localparam bit PDEC = 1'b0;
+`else
+  localparam bit PDEC = HypCfg.PtwDecodeStage[0];
+`endif
+  // Under PDEC the returned PTE is held in its own capture register:
+  // data_rdata_q free-runs on every edge and may not hold the line for
+  // the +1 verdict cycle (nor for the bundle's decode edge, which needs
+  // the same raw value the rdata cycle saw).
+  pte_g6lc_t pte_q;
+  assign pte = pte_g6lc_t'(PDEC ? pte_q : data_rdata_q);
 
-  enum logic [2:0] {
+  // r43-T T2 decode bundle: every decision predicate the PTE_LOOKUP arm
+  // used, plus the arm-dependent payload pieces (next-level pointer,
+  // level advance, RVH gp/gp-tw pointers). Computed combinationally off
+  // `pte` in the rdata cycle, registered into dec_q, consumed only by
+  // PTE_DECODE — the raw PTE is dead in the FSM after capture. The walk
+  // context the lead's bundle list names (hart/asid/vmid/vaddr/lvl/
+  // is_instr) already lives in the walk registers (tlb_update_*_q,
+  // vaddr_q, ptw_lvl_q, is_instr_ptw_q) and is stable across the added
+  // cycle, so it is read live rather than duplicated.
+  typedef struct packed {
+    pte_g6lc_t   pte;
+    logic        invalid;      // invalid-PTE predicate -> PROPAGATE_ERROR
+    logic        is_leaf;      // pte.r || pte.x
+    logic        napot_fault;  // SvnapotEn && n && leaf && !64k encoding
+    logic        napot_n;      // pte.n (is_napot_64k output gate)
+    logic        napot64k;     // 64KiB NAPOT encoding at lvl 2
+    logic        g_map;        // pte.g under the S_STAGE/!RVH qualifier
+    logic        perm_i_fault; // instr access fault
+    logic        itlb_upd_ok;  // instr TLB update qualifier
+    logic        perm_d_ok;    // data access permission incl. store w&d
+    logic        dtlb_upd_ok;  // data TLB update qualifier
+    logic        misaligned;   // |misaligned_page
+    logic        ptr_last;     // pointer at PtLevels-1 -> error
+    logic        rvh_ppn_err;  // 63:41 non-zero on VS stage (RVH)
+    logic        rvh_adu_err;  // pointer PTE with a|d|u (RVH)
+    logic        g_leaf_s;     // S_STAGE leaf + g-translation (RVH)
+    logic        g_leaf_i;     // G_INTERMED leaf (RVH)
+    logic        g_ptr_s;      // S_STAGE pointer + g-translation (RVH)
+    logic [G6LCCfg.GPLEN-1:0] gp_out;
+    logic [G6LCCfg.PLEN-1:0]  pptr_out;   // next ptw_pptr for the arm taken
+    logic [G6LCCfg.PLEN-1:0]  gpptr_out;  // next gptw_pptr (RVH)
+    logic [G6LCCfg.PtLevels-2:0] lvl_n0;  // ptw_lvl_n[0] = lvl+1
+    logic [G6LCCfg.PtLevels-2:0] lvl_nh;  // ptw_lvl_n[HYP_EXT] (RVH ptr)
+  } ptw_dec_t;
+  ptw_dec_t dec_d, dec_q;
+
+  typedef enum logic [3:0] {
     IDLE,
     WAIT_GRANT,
     PTE_LOOKUP,
@@ -226,9 +277,11 @@ assign pte = pte_g6lc_t'(data_rdata_q);
     PROPAGATE_ERROR,
     PROPAGATE_ACCESS_ERROR,
     KILL_REQ,
-    LATENCY
-  }
-      state_q, state_d;
+    LATENCY,
+    PTE_DECODE
+  } g6lc_ptw_state_e;
+  g6lc_ptw_state_e state_q, state_d;
+  logic [3:0] leg_state_d;
 
   logic [G6LCCfg.PtLevels-2:0] misaligned_page;
   logic shared_tlb_update_valid;
@@ -238,12 +291,13 @@ assign pte = pte_g6lc_t'(data_rdata_q);
   // S_STAGE -> S/VS-stage normal translation controlled by the satp/vsatp CSRs
   // G_INTERMED_STAGE -> Converts the S/VS-stage non-leaf GPA pointers to HPA (controlled by hgatp)
   // G_FINAL_STAGE -> Converts the S/VS-stage final GPA to HPA (controlled by hgatp)
-  enum logic [1:0] {
+  typedef enum logic [1:0] {
     S_STAGE,
     G_INTERMED_STAGE,
     G_FINAL_STAGE
-  }
-      ptw_stage_q, ptw_stage_d;
+  } g6lc_ptw_stage_e;
+  g6lc_ptw_stage_e ptw_stage_q, ptw_stage_d;
+  logic [1:0] leg_ptw_stage_d;
 
   // is this an instruction page table walk?
   logic is_instr_ptw_q, is_instr_ptw_n;
@@ -431,6 +485,213 @@ assign pte = pte_g6lc_t'(data_rdata_q);
   // unchanged: KILL_REQ still answers the killed request and the flush
   // drain below is untouched (lsu_exception_ptw_o ownership stays in
   // g6lc_mmu's T42 requester-match — the active walk owns the fault).
+  // r48: lift the PDEC/legacy decode split out of the `ptw` FSM.
+  // The constant `if (PDEC)` arm selection left the inactive arm's
+  // verdict cone textually inside the FSM, where the analyzer bills
+  // it on every profile (37.55 on the legacy NAPOT arm for PDEC=1).
+  // Each arm is now its own always_comb under a generate so a
+  // profile elaborates only its decode; the FSM merges the
+  // selected next-state outputs (shallow copies off the compute
+  // cone). Both bodies gate on the same (PTE_LOOKUP &&
+  // data_rvalid_q) condition the in-FSM arm had and replay the FSM
+  // defaults otherwise, so the merge is exact.
+  // leg_* = legacy-arm next-state outputs (PDEC=0 profile only).
+  logic                    leg_tlb_update_valid;
+  logic                    leg_is_napot_64k, leg_global_mapping_n;
+  logic [HYP_EXT:0][G6LCCfg.PtLevels-2:0] leg_ptw_lvl_n;
+  logic [G6LCCfg.PLEN-1:0] leg_ptw_pptr_n, leg_gptw_pptr_n;
+  logic [G6LCCfg.GPLEN-1:0] leg_gpaddr_n;
+  pte_g6lc_t               leg_gpte_d;
+
+  if (PDEC) begin : gen_pdec_dec
+    // r52-B1: the rdata-cycle decode wrote the dec_d bundle
+    // field-by-field and read earlier-written dec_d.* fields
+    // (is_leaf, napot64k, perm_i_fault, perm_d_ok, ptr_last,
+    // gpptr_out), which chained the block into a serial cone
+    // (dependency makespan 35.7 vs deflated 18.4). Every shared
+    // predicate is now a continuous-assign wire; pdec_dec writes
+    // each dec_d.* field from wires/inputs only and never reads
+    // dec_d.*. Identical logic, identical field timing.
+    logic                    pte_is_leaf;
+    logic                    pte_napot64k;
+    logic                    pte_perm_i_fault;
+    logic                    pte_perm_d_ok;
+    logic                    pte_ptr_last;
+    logic                    pte_g_tr;
+    logic [G6LCCfg.PLEN-1:0] pte_gpptr;
+
+    assign pte_is_leaf  = pte.r || pte.x;
+    assign pte_napot64k = (pte.ppn[3:0] == 4'b1000) && (ptw_lvl_q[0] == 2);
+    assign pte_perm_i_fault =
+        (!pte.x && (!G6LCCfg.RVH || ptw_stage_q != G_INTERMED_STAGE)) ||
+        !pte.a ||
+        (G6LCCfg.RVH && ptw_stage_q == G_INTERMED_STAGE && !pte.r);
+    assign pte_perm_d_ok = pte.a &&
+        ((pte.r && !hlvx_inst_i) ||
+         (pte.x && (mxr_i || hlvx_inst_i ||
+                    (ptw_stage_q == S_STAGE && vmxr_i && ld_st_v_i &&
+                     G6LCCfg.RVH)))) &&
+        (!lsu_is_store_i || (pte.w && pte.d) ||
+         (ptw_stage_q == G_INTERMED_STAGE && G6LCCfg.RVH));
+    assign pte_ptr_last = (ptw_lvl_q[0] == G6LCCfg.PtLevels - 1);
+    assign pte_g_tr     = (is_instr_ptw_q && enable_g_translation_i) ||
+                          (!is_instr_ptw_q && en_ld_st_g_translation_i);
+    assign pte_gpptr    = {pte.ppn, vaddr_lvl[0][ptw_lvl_q[0]],
+                           (G6LCCfg.PtLevels)'(0)};
+
+    // r43-T T2 bundle capture, verbatim from the FSM arm.
+    always_comb begin : pdec_dec
+      dec_d = dec_q;
+      if (state_q == PTE_LOOKUP && data_rvalid_q) begin
+              // svt-stage: begin PTW-DEC
+              // r43-T T2: the rdata cycle computes + registers the decode
+              // bundle; PTE_DECODE consumes bundle bits only next cycle.
+              dec_d = '0;
+              dec_d.pte     = pte;
+              dec_d.is_leaf = pte_is_leaf;
+              dec_d.g_map   = pte.g && (ptw_stage_q == S_STAGE || !G6LCCfg.RVH);
+              dec_d.invalid = !pte.v || (!pte.r && pte.w) ||
+                  (|pte.reserved && G6LCCfg.IS_XLEN64) ||
+                  (!G6LCCfg.SvpbmtEn && |pte.pbmt && G6LCCfg.IS_XLEN64) ||
+                  (G6LCCfg.SvpbmtEn && (pte.pbmt == 2'b11) && G6LCCfg.IS_XLEN64) ||
+                  (!G6LCCfg.SvnapotEn && pte.n) ||
+                  (G6LCCfg.SvnapotEn && !(pte.r || pte.x) && pte.n);
+              dec_d.napot_n   = pte.n;
+              dec_d.napot64k  = pte_napot64k;
+              dec_d.napot_fault = G6LCCfg.SvnapotEn && pte.n && pte_is_leaf &&
+                                  !pte_napot64k;
+              dec_d.perm_i_fault = pte_perm_i_fault;
+              dec_d.itlb_upd_ok = !pte_perm_i_fault &&
+                  ((G6LCCfg.RVH && ((ptw_stage_q == G_FINAL_STAGE) ||
+                                    !enable_g_translation_i)) || !G6LCCfg.RVH);
+              dec_d.perm_d_ok = pte_perm_d_ok;
+              dec_d.dtlb_upd_ok = pte_perm_d_ok &&
+                  ((G6LCCfg.RVH && ((ptw_stage_q == G_FINAL_STAGE) ||
+                                    !en_ld_st_g_translation_i)) || !G6LCCfg.RVH);
+              dec_d.misaligned = |misaligned_page;
+              dec_d.ptr_last   = pte_ptr_last;
+              dec_d.lvl_n0     = ptw_lvl_q[0] + 1'b1;
+              // Pointer-arm next-level pointer (the {ppn,vpn,pad}
+              // concatenation), covering every RVH arm; leaf/non-pointer
+              // arms never read pptr_out in the verdict.
+              if (!pte_is_leaf && !pte_ptr_last) begin
+                if (G6LCCfg.RVH) begin
+                  case (ptw_stage_q)
+                    S_STAGE: begin
+                      if (pte_g_tr) begin
+                        dec_d.g_ptr_s   = 1'b1;
+                        dec_d.gpptr_out = pte_gpptr;
+                        dec_d.pptr_out  = {
+                          hgatp_ppn_i[G6LCCfg.PPNW-1:2],
+                          pte_gpptr[G6LCCfg.SV+HYP_EXT*2-1:
+                                    G6LCCfg.SV-(G6LCCfg.VpnLen/G6LCCfg.PtLevels)],
+                          (G6LCCfg.PtLevels)'(0)
+                        };
+                        dec_d.lvl_nh    = ptw_lvl_q[0] + 1;
+                      end else begin
+                        dec_d.pptr_out  = pte_gpptr;
+                      end
+                    end
+                    G_INTERMED_STAGE:
+                      dec_d.pptr_out = {pte.ppn, vaddr_lvl[HYP_EXT][ptw_lvl_q[0]],
+                                        (G6LCCfg.PtLevels)'(0)};
+                    G_FINAL_STAGE:
+                      dec_d.pptr_out = {pte.ppn, vaddr_lvl[HYP_EXT*2][ptw_lvl_q[0]],
+                                        (G6LCCfg.PtLevels)'(0)};
+                    default: ;
+                  endcase
+                end else begin
+                  dec_d.pptr_out = pte_gpptr;
+                end
+              end
+              if (G6LCCfg.RVH) begin
+                // Leaf g-translation arms and the shared RVH checks --
+                // vaddr_lvl[HYP_EXT*]/gptw_pptr_q/gpaddr[z] are only driven
+                // under RVH, so their reads stay inside this guard.
+                if (pte_is_leaf && ptw_stage_q == S_STAGE && pte_g_tr) begin
+                  dec_d.g_leaf_s = 1'b1;
+                  dec_d.gp_out   = gpaddr[ptw_lvl_q[0]];
+                  dec_d.pptr_out = {
+                    hgatp_ppn_i[G6LCCfg.PPNW-1:2],
+                    gpaddr[ptw_lvl_q[0]][G6LCCfg.GPLEN-1:
+                                         G6LCCfg.SV-(G6LCCfg.VpnLen/G6LCCfg.PtLevels)],
+                    (G6LCCfg.PtLevels)'(0)
+                  };
+                end
+                if (pte_is_leaf && ptw_stage_q == G_INTERMED_STAGE) begin
+                  dec_d.g_leaf_i  = 1'b1;
+                  dec_d.pptr_out  = {pte.ppn[G6LCCfg.GPPNW-1:0], gptw_pptr_q[11:0]};
+                  if (ptw_lvl_q[0] == 1) dec_d.pptr_out[20:0] = gptw_pptr_q[20:0];
+                  if (ptw_lvl_q[0] == 0) dec_d.pptr_out[29:0] = gptw_pptr_q[29:0];
+                end
+                dec_d.rvh_adu_err = !pte_is_leaf && (pte.a || pte.d || pte.u);
+                dec_d.rvh_ppn_err =
+                    ((v_i && is_instr_ptw_q) || (ld_st_v_i && !is_instr_ptw_q)) &&
+                    ptw_stage_q == S_STAGE &&
+                    (|pte.ppn[G6LCCfg.PPNW-1:G6LCCfg.GPPNW] != 1'b0);
+              end
+              // svt-stage: end PTW-DEC
+      end
+    end
+  end else begin : gen_pdec_tie
+    assign dec_d = dec_q;
+  end
+
+  if (!PDEC) begin : gen_legacy_dec
+    // r48: legacy single-state verdict, extracted so this profile
+    // elaborates only the PDEC decode; the FSM merges leg_* below.
+    g6lc_ptw_leg_decode #(
+      .G6LCCfg    (G6LCCfg),
+      .pte_g6lc_t (pte_g6lc_t),
+      .HYP_EXT    (HYP_EXT)
+    ) i_leg_dec (
+      .pte                     (pte),
+      .ptw_stage_q             (ptw_stage_q),
+      .ptw_lvl_q               (ptw_lvl_q),
+      .vaddr_lvl               (vaddr_lvl),
+      .gpaddr                  (gpaddr),
+      .gptw_pptr_q             (gptw_pptr_q),
+      .ptw_pptr_q              (ptw_pptr_q),
+      .hgatp_ppn_i             (hgatp_ppn_i),
+      .is_instr_ptw_q          (is_instr_ptw_q),
+      .enable_g_translation_i  (enable_g_translation_i),
+      .en_ld_st_g_translation_i(en_ld_st_g_translation_i),
+      .misaligned_page         (misaligned_page),
+      .allow_access            (allow_access),
+      .v_i                     (v_i),
+      .ld_st_v_i               (ld_st_v_i),
+      .lsu_is_store_i          (lsu_is_store_i),
+      .hlvx_inst_i             (hlvx_inst_i),
+      .mxr_i                   (mxr_i),
+      .vmxr_i                  (vmxr_i),
+      .state_q                 (state_q),
+      .global_mapping_q        (global_mapping_q),
+      .gpaddr_q                (gpaddr_q),
+      .gpte_q                  (gpte_q),
+      .leg_state_d             (leg_state_d),
+      .leg_global_mapping_n    (leg_global_mapping_n),
+      .leg_is_napot_64k        (leg_is_napot_64k),
+      .leg_ptw_stage_d         (leg_ptw_stage_d),
+      .leg_ptw_lvl_n           (leg_ptw_lvl_n),
+      .leg_ptw_pptr_n          (leg_ptw_pptr_n),
+      .leg_gptw_pptr_n         (leg_gptw_pptr_n),
+      .leg_gpaddr_n            (leg_gpaddr_n),
+      .leg_gpte_d              (leg_gpte_d),
+      .leg_tlb_update_valid    (leg_tlb_update_valid)
+    );
+  end else begin : gen_legacy_tie
+    assign leg_state_d          = state_q;
+    assign leg_global_mapping_n = global_mapping_q;
+    assign leg_is_napot_64k     = 1'b0;
+    assign leg_ptw_stage_d      = ptw_stage_q;
+    assign leg_ptw_lvl_n        = ptw_lvl_q;
+    assign leg_ptw_pptr_n       = ptw_pptr_q;
+    assign leg_gptw_pptr_n      = gptw_pptr_q;
+    assign leg_gpaddr_n         = gpaddr_q;
+    assign leg_gpte_d           = '0;
+    assign leg_tlb_update_valid = 1'b0;
+  end
+
   always_comb begin : ptw
     automatic logic [G6LCCfg.PLEN-1:0] pptr;
     // default assignments
@@ -453,6 +714,8 @@ assign pte = pte_g6lc_t'(data_rdata_q);
     gpte_d                  = '0;
     ptw_stage_d             = ptw_stage_q;
     global_mapping_n        = global_mapping_q;
+    // r43-T T2: the decode bundle holds between capture edges.
+    // r48: dec_d is driven by gen_pdec_dec/gen_pdec_tie.
     // input registers
     tlb_update_asid_n       = tlb_update_asid_q;
     tlb_update_hart_n       = tlb_update_hart_q;
@@ -560,202 +823,138 @@ assign pte = pte_g6lc_t'(data_rdata_q);
       end
 
       PTE_LOOKUP: begin
+        // r42-T item 4 countercase: a registered decode bundle (parallel
+        // predicates + PTE_DEC consume state, gated by a PtwDecodeStage
+        // field) measured 64.5 FO4 vs this arm's 39.0 on the r4 board —
+        // the analyzer bills the decode compute cone regardless of which
+        // flop terminates it, and the +1 walk cycle is pure cost. The
+        // predicate-form/serial-form rewrite is retained in git as the
+        // equivalence-checked reference implementation; reverted (T1).
         // we wait for the valid signal
         if (data_rvalid_q) begin
-
-          // check if the global mapping bit is set
-          if (pte.g && (ptw_stage_q == S_STAGE || !G6LCCfg.RVH)) global_mapping_n = 1'b1;
-
-          // -------------
-          // Invalid PTE
-          // -------------
-          // If pte.v = 0, or if pte.r = 0 and pte.w = 1, or if pte.reserved !=0 in sv39 and sv39x4, stop and raise a page-fault exception.
-          // Reserved-field check: bits 60:54 must be 0; PBMT[62:61] allowed only with SvpbmtEn
-          // and menvcfg.PBMTE (PBMTE not threaded here — accept non-zero PBMT when SvpbmtEn);
-          // N bit handled by SvnapotEn.
-          if (!pte.v || (!pte.r && pte.w) ||
-              (|pte.reserved && G6LCCfg.IS_XLEN64) ||
-              (!G6LCCfg.SvpbmtEn && |pte.pbmt && G6LCCfg.IS_XLEN64) ||
-              (G6LCCfg.SvpbmtEn && (pte.pbmt == 2'b11) && G6LCCfg.IS_XLEN64) ||
-              (!G6LCCfg.SvnapotEn && pte.n) ||
-              (G6LCCfg.SvnapotEn && !(pte.r || pte.x) && pte.n))
-            state_d = PROPAGATE_ERROR;
-          // -----------
-          // Valid PTE
-          // -----------
-          else begin
-            state_d = LATENCY;
-            // if pte.r = 1 or pte.x = 1 it is a valid leaf PTE
-            if (pte.r || pte.x) begin
-              // A 64KiB NAPOT page is identified by the N-bit being set and PPN[3:0] encoding '1000'
-              if (G6LCCfg.SvnapotEn && pte.n) begin
-                // Svnapot: Check if the leaf PTE represents a 64KiB NAPOT page
-                is_napot_64k = (pte.ppn[3:0] == 4'b1000) && (ptw_lvl_q[0] == 2);
-                // Svnapot: Any other encoding with the N-bit set is a reserved format and must cause a page fault
-                // Additionally, fault if N is set on a megapage or gigapage
-                if (!is_napot_64k) begin
-                  state_d = PROPAGATE_ERROR;
-                end
-              end
-
-              if (G6LCCfg.RVH) begin
-                case (ptw_stage_q)
-                  S_STAGE: begin
-                    if ((is_instr_ptw_q && enable_g_translation_i) || (!is_instr_ptw_q && en_ld_st_g_translation_i)) begin
-                      state_d = WAIT_GRANT;
-                      ptw_stage_d = G_FINAL_STAGE;
-                      if (G6LCCfg.RVH) gpte_d = pte;
-                      ptw_lvl_n[HYP_EXT] = ptw_lvl_q[0];
-                      gpaddr_n = gpaddr[ptw_lvl_q[0]];
-                      ptw_pptr_n = {
-                        hgatp_ppn_i[G6LCCfg.PPNW-1:2],
-                        gpaddr[ptw_lvl_q[0]][G6LCCfg.GPLEN-1:G6LCCfg.SV-(G6LCCfg.VpnLen/G6LCCfg.PtLevels)],
-                        (G6LCCfg.PtLevels)'(0)
-                      };
-                      ptw_lvl_n[0] = '0;
-                    end
-                  end
-                  G_INTERMED_STAGE: begin
-                    state_d = WAIT_GRANT;
-                    ptw_stage_d = S_STAGE;
-                    ptw_lvl_n[0] = ptw_lvl_q[HYP_EXT];
-                    pptr = {pte.ppn[G6LCCfg.GPPNW-1:0], gptw_pptr_q[11:0]};
-                    if (ptw_lvl_q[0] == 1) pptr[20:0] = gptw_pptr_q[20:0];
-                    if (ptw_lvl_q[0] == 0) pptr[29:0] = gptw_pptr_q[29:0];
-                    ptw_pptr_n = pptr;
-                  end
-                  default: ;
-                endcase
-              end
-              // Valid translation found (either 1G, 2M or 4K entry)
-              if (is_instr_ptw_q) begin
-                // ------------
-                // Update ITLB
-                // ------------
-                // If page is not executable, we can directly raise an error. This
-                // doesn't put a useless entry into the TLB. The same idea applies
-                // to the access flag since we let the access flag be managed by SW.
-                if ((!pte.x && (!G6LCCfg.RVH || ptw_stage_q != G_INTERMED_STAGE)) || !pte.a
-                    || (G6LCCfg.RVH && ptw_stage_q == G_INTERMED_STAGE && !pte.r)) begin
-                  state_d = PROPAGATE_ERROR;
-                  if (G6LCCfg.RVH) ptw_stage_d = ptw_stage_q;
-                end else if ((G6LCCfg.RVH && ((ptw_stage_q == G_FINAL_STAGE) || !enable_g_translation_i)) || !G6LCCfg.RVH)
-                  shared_tlb_update_valid = 1'b1;
-
-              end else begin
-                // ------------
-                // Update DTLB
-                // ------------
-                // Check if the access flag has been set, otherwise throw a page-fault
-                // and let the software handle those bits.
-                // If page is not readable (there are no write-only pages)
-                // we can directly raise an error. This doesn't put a useless
-                // entry into the TLB.
-                if (
-                  (pte.a && ((pte.r && !hlvx_inst_i) || (pte.x && (mxr_i || hlvx_inst_i || (ptw_stage_q == S_STAGE && vmxr_i && ld_st_v_i && G6LCCfg.RVH)))))
-                    // Request is a store: perform some additional checks
-                    // If the request was a store and the page is not write-able, raise an error
-                    // the same applies if the dirty flag is not set
-                    // g-intermediate nodes however never need write-permission
-                    && (!lsu_is_store_i || (pte.w && pte.d) || (ptw_stage_q == G_INTERMED_STAGE && G6LCCfg.RVH))
-                ) begin
-                  if ((G6LCCfg.RVH && ((ptw_stage_q == G_FINAL_STAGE) || !en_ld_st_g_translation_i)) || !G6LCCfg.RVH)
-                    shared_tlb_update_valid = 1'b1;
-                end else begin
-                  state_d = PROPAGATE_ERROR;
-                  if (G6LCCfg.RVH) ptw_stage_d = ptw_stage_q;
-                end
-              end
-
-              // if there is a misaligned page, propagate error
-              if (|misaligned_page) begin
-                state_d = PROPAGATE_ERROR;
-                if (G6LCCfg.RVH) ptw_stage_d = ptw_stage_q;
-                shared_tlb_update_valid = 1'b0;
-              end
-
-              // check if 63:41 are all zeros
-              if (G6LCCfg.RVH) begin
-                if (((v_i && is_instr_ptw_q) || (ld_st_v_i && !is_instr_ptw_q)) && ptw_stage_q == S_STAGE && !((|pte.ppn[G6LCCfg.PPNW-1:G6LCCfg.GPPNW]) == 1'b0)) begin
-                  state_d = PROPAGATE_ERROR;
-                  ptw_stage_d = G_FINAL_STAGE;
-                end
-              end
-              // this is a pointer to the next TLB level
-            end else begin
-              // pointer to next level of page table
-
-              if (ptw_lvl_q[0] == G6LCCfg.PtLevels - 1) begin
-                // Should already be the last level page table => Error
-                ptw_lvl_n[0] = ptw_lvl_q[0];
-                state_d = PROPAGATE_ERROR;
-                if (G6LCCfg.RVH) ptw_stage_d = ptw_stage_q;
-
-
-              end else begin
-                ptw_lvl_n[0] = ptw_lvl_q[0] + 1'b1;
-                state_d = WAIT_GRANT;
-
-                if (G6LCCfg.RVH) begin
-                  case (ptw_stage_q)
-                    S_STAGE: begin
-                      if (G6LCCfg.RVH && ((is_instr_ptw_q && enable_g_translation_i) || (!is_instr_ptw_q && en_ld_st_g_translation_i))) begin
-                        ptw_stage_d = G_INTERMED_STAGE;
-                        ptw_lvl_n[HYP_EXT] = ptw_lvl_q[0] + 1;
-                        pptr = {pte.ppn, vaddr_lvl[0][ptw_lvl_q[0]], (G6LCCfg.PtLevels)'(0)};
-                        gptw_pptr_n = pptr;
-                        ptw_pptr_n = {
-                          hgatp_ppn_i[G6LCCfg.PPNW-1:2],
-                          pptr[G6LCCfg.SV+HYP_EXT*2-1:G6LCCfg.SV-(G6LCCfg.VpnLen/G6LCCfg.PtLevels)],
-                          (G6LCCfg.PtLevels)'(0)
-                        };
-                        ptw_lvl_n[0] = '0;
-                      end else begin
-                        ptw_pptr_n = {pte.ppn, vaddr_lvl[0][ptw_lvl_q[0]], (G6LCCfg.PtLevels)'(0)};
-                      end
-                    end
-                    G_INTERMED_STAGE: begin
-                      ptw_pptr_n = {
-                        pte.ppn, vaddr_lvl[HYP_EXT][ptw_lvl_q[0]], (G6LCCfg.PtLevels)'(0)
-                      };
-                    end
-                    G_FINAL_STAGE: begin
-                      ptw_pptr_n = {
-                        pte.ppn, vaddr_lvl[HYP_EXT*2][ptw_lvl_q[0]], (G6LCCfg.PtLevels)'(0)
-                      };
-                    end
-                    default: ;
-                  endcase
-                end else ptw_pptr_n = {pte.ppn, vaddr_lvl[0][ptw_lvl_q[0]], (G6LCCfg.PtLevels)'(0)};
-
-                if (G6LCCfg.RVH && (pte.a || pte.d || pte.u)) begin
-                  state_d = PROPAGATE_ERROR;
-                  ptw_stage_d = ptw_stage_q;
-                end
-
-              end
-
-              // check if 63:41 are all zeros
-              if (G6LCCfg.RVH) begin
-                if (((v_i && is_instr_ptw_q) || (ld_st_v_i && !is_instr_ptw_q)) && ptw_stage_q == S_STAGE && !((|pte.ppn[G6LCCfg.PPNW-1:G6LCCfg.GPPNW]) == 1'b0)) begin
-                  state_d = PROPAGATE_ERROR;
-                  ptw_stage_d = ptw_stage_q;
-                end
-              end
+          if (PDEC) begin
+            // svt-stage: begin PTW-DEC (dec_d capture lives in
+            // gen_pdec_dec)
+            state_d = PTE_DECODE;
+          end else begin
+            // r48: legacy verdict merged from gen_legacy_dec.
+            state_d                 = g6lc_ptw_state_e'(leg_state_d);
+            global_mapping_n        = leg_global_mapping_n;
+            is_napot_64k            = leg_is_napot_64k;
+            ptw_stage_d             = g6lc_ptw_stage_e'(leg_ptw_stage_d);
+            ptw_lvl_n               = leg_ptw_lvl_n;
+            ptw_pptr_n              = leg_ptw_pptr_n;
+            shared_tlb_update_valid = leg_tlb_update_valid;
+            if (G6LCCfg.RVH) begin
+              gpaddr_n    = leg_gpaddr_n;
+              gptw_pptr_n = leg_gptw_pptr_n;
+              gpte_d      = leg_gpte_d;
             end
-          end
-
-          // check if this access was actually allowed from a PMP perspective
-          if (!allow_access) begin
-            shared_tlb_update_valid = 1'b0;
-            // we have to return the failed address in bad_addr
-            ptw_pptr_n = ptw_pptr_q;
-            if (G6LCCfg.RVH) ptw_stage_d = ptw_stage_q;
-            state_d = PROPAGATE_ACCESS_ERROR;
           end
         end
         // we've got a data WAIT_GRANT so tell the cache that the tag is valid
       end
+      // svt-stage: begin PTW-V
+      // r43-T T2: verdict on the registered decode bundle only. Every
+      // read below is a dec_q field or an FSM/walk register — the raw
+      // PTE is dead in the FSM after the capture edge.
+      PTE_DECODE: begin
+        if (dec_q.g_map) global_mapping_n = 1'b1;
+        if (dec_q.invalid) begin
+          state_d = PROPAGATE_ERROR;
+        end else begin
+          state_d = LATENCY;
+          if (dec_q.is_leaf) begin
+            if (G6LCCfg.SvnapotEn && dec_q.napot_n) begin
+              is_napot_64k = dec_q.napot64k;
+              if (dec_q.napot_fault) state_d = PROPAGATE_ERROR;
+            end
+            if (G6LCCfg.RVH) begin
+              if (dec_q.g_leaf_s) begin
+                state_d = WAIT_GRANT;
+                ptw_stage_d = G_FINAL_STAGE;
+                gpte_d = dec_q.pte;
+                ptw_lvl_n[HYP_EXT] = ptw_lvl_q[0];
+                gpaddr_n = dec_q.gp_out;
+                ptw_pptr_n = dec_q.pptr_out;
+                ptw_lvl_n[0] = '0;
+              end
+              if (dec_q.g_leaf_i) begin
+                state_d = WAIT_GRANT;
+                ptw_stage_d = S_STAGE;
+                ptw_lvl_n[0] = ptw_lvl_q[HYP_EXT];
+                ptw_pptr_n = dec_q.pptr_out;
+              end
+            end
+            if (is_instr_ptw_q) begin
+              // ------------
+              // Update ITLB
+              // ------------
+              if (dec_q.perm_i_fault) begin
+                state_d = PROPAGATE_ERROR;
+                if (G6LCCfg.RVH) ptw_stage_d = ptw_stage_q;
+              end else if (dec_q.itlb_upd_ok)
+                shared_tlb_update_valid = 1'b1;
+            end else begin
+              // ------------
+              // Update DTLB
+              // ------------
+              if (dec_q.dtlb_upd_ok) shared_tlb_update_valid = 1'b1;
+              else begin
+                state_d = PROPAGATE_ERROR;
+                if (G6LCCfg.RVH) ptw_stage_d = ptw_stage_q;
+              end
+            end
+            // if there is a misaligned page, propagate error
+            if (dec_q.misaligned) begin
+              state_d = PROPAGATE_ERROR;
+              if (G6LCCfg.RVH) ptw_stage_d = ptw_stage_q;
+              shared_tlb_update_valid = 1'b0;
+            end
+            if (G6LCCfg.RVH && dec_q.rvh_ppn_err) begin
+              state_d = PROPAGATE_ERROR;
+              ptw_stage_d = G_FINAL_STAGE;
+            end
+          end else begin
+            // pointer to next level of page table
+            if (dec_q.ptr_last) begin
+              // Should already be the last level page table => Error
+              ptw_lvl_n[0] = ptw_lvl_q[0];
+              state_d = PROPAGATE_ERROR;
+              if (G6LCCfg.RVH) ptw_stage_d = ptw_stage_q;
+            end else begin
+              ptw_lvl_n[0] = dec_q.lvl_n0;
+              state_d = WAIT_GRANT;
+              ptw_pptr_n = dec_q.pptr_out;
+              if (G6LCCfg.RVH && dec_q.g_ptr_s) begin
+                ptw_stage_d = G_INTERMED_STAGE;
+                ptw_lvl_n[HYP_EXT] = dec_q.lvl_nh;
+                gptw_pptr_n = dec_q.gpptr_out;
+                ptw_lvl_n[0] = '0;
+              end
+            end
+            if (G6LCCfg.RVH && dec_q.rvh_adu_err) begin
+              state_d = PROPAGATE_ERROR;
+              ptw_stage_d = ptw_stage_q;
+            end
+            if (G6LCCfg.RVH && dec_q.rvh_ppn_err) begin
+              state_d = PROPAGATE_ERROR;
+              ptw_stage_d = G_FINAL_STAGE;
+            end
+          end
+        end
+        // check if this access was actually allowed from a PMP
+        // perspective — allow_access reads ptw_pptr_q, stable since
+        // WAIT_GRANT, so the live read is exact here.
+        if (!allow_access) begin
+          shared_tlb_update_valid = 1'b0;
+          // we have to return the failed address in bad_addr
+          ptw_pptr_n = ptw_pptr_q;
+          if (G6LCCfg.RVH) ptw_stage_d = ptw_stage_q;
+          state_d = PROPAGATE_ACCESS_ERROR;
+        end
+      end
+      // svt-stage: end PTW-V
       // Propagate error to MMU/LSU
       PROPAGATE_ERROR: begin
         state_d = LATENCY;
@@ -806,6 +1005,74 @@ assign pte = pte_g6lc_t'(data_rdata_q);
   assign endian_data = mbe_i ? byteSwapped_data : req_port_i.data_rdata;
 
   //pragma translate_off
+  // r43-T T2 equivalence: in PTE_DECODE every registered predicate must
+  // equal the same predicate recomputed from the captured PTE at the
+  // verdict cycle (plus the verdict-cycle walk context). A capture-edge
+  // mistake shows as a dec_q bit diverging from its recompute.
+  if (PDEC) begin : gen_pdec_eq
+    logic        ref_invalid, ref_leaf, ref_napot_fault, ref_perm_i;
+    logic        ref_itlb, ref_perm_d, ref_dtlb, ref_mis, ref_plast;
+    always_comb begin
+      ref_leaf = dec_q.pte.r || dec_q.pte.x;
+      ref_invalid = !dec_q.pte.v || (!dec_q.pte.r && dec_q.pte.w) ||
+          (|dec_q.pte.reserved && G6LCCfg.IS_XLEN64) ||
+          (!G6LCCfg.SvpbmtEn && |dec_q.pte.pbmt && G6LCCfg.IS_XLEN64) ||
+          (G6LCCfg.SvpbmtEn && (dec_q.pte.pbmt == 2'b11) && G6LCCfg.IS_XLEN64) ||
+          (!G6LCCfg.SvnapotEn && dec_q.pte.n) ||
+          (G6LCCfg.SvnapotEn && !(dec_q.pte.r || dec_q.pte.x) && dec_q.pte.n);
+      ref_napot_fault = G6LCCfg.SvnapotEn && dec_q.pte.n && ref_leaf &&
+          !((dec_q.pte.ppn[3:0] == 4'b1000) && (ptw_lvl_q[0] == 2));
+      ref_perm_i = (!dec_q.pte.x && (!G6LCCfg.RVH || ptw_stage_q != G_INTERMED_STAGE)) ||
+                   !dec_q.pte.a ||
+                   (G6LCCfg.RVH && ptw_stage_q == G_INTERMED_STAGE && !dec_q.pte.r);
+      ref_itlb = !ref_perm_i &&
+          ((G6LCCfg.RVH && ((ptw_stage_q == G_FINAL_STAGE) ||
+                            !enable_g_translation_i)) || !G6LCCfg.RVH);
+      ref_perm_d = dec_q.pte.a &&
+          ((dec_q.pte.r && !hlvx_inst_i) ||
+           (dec_q.pte.x && (mxr_i || hlvx_inst_i ||
+                            (ptw_stage_q == S_STAGE && vmxr_i && ld_st_v_i &&
+                             G6LCCfg.RVH)))) &&
+          (!lsu_is_store_i || (dec_q.pte.w && dec_q.pte.d) ||
+           (ptw_stage_q == G_INTERMED_STAGE && G6LCCfg.RVH));
+      ref_dtlb = ref_perm_d &&
+          ((G6LCCfg.RVH && ((ptw_stage_q == G_FINAL_STAGE) ||
+                            !en_ld_st_g_translation_i)) || !G6LCCfg.RVH);
+      ref_mis   = |misaligned_page;
+      ref_plast = (ptw_lvl_q[0] == G6LCCfg.PtLevels - 1);
+    end
+    int unsigned t3_ptwdec_n = 0;
+    always_ff @(posedge clk_i) begin
+      if (rst_ni) begin
+        if (state_q == PTE_DECODE) begin
+          t3_ptwdec_n <= t3_ptwdec_n + 1;
+          g6lc_t3_ptwdec_eq: assert (
+              dec_q.invalid === ref_invalid &&
+              dec_q.is_leaf === ref_leaf &&
+              dec_q.napot_fault === ref_napot_fault &&
+              dec_q.perm_i_fault === ref_perm_i &&
+              dec_q.itlb_upd_ok === ref_itlb &&
+              dec_q.perm_d_ok === ref_perm_d &&
+              dec_q.dtlb_upd_ok === ref_dtlb &&
+              dec_q.misaligned === ref_mis &&
+              dec_q.ptr_last === ref_plast)
+            else $error("g6lc_ptw: equiv ptwdec dec=(inv=%b leaf=%b nap=%b pi=%b it=%b pd=%b dt=%b mis=%b pl=%b) ref=(%b %b %b %b %b %b %b %b %b)",
+                        dec_q.invalid, dec_q.is_leaf, dec_q.napot_fault,
+                        dec_q.perm_i_fault, dec_q.itlb_upd_ok, dec_q.perm_d_ok,
+                        dec_q.dtlb_upd_ok, dec_q.misaligned, dec_q.ptr_last,
+                        ref_invalid, ref_leaf, ref_napot_fault, ref_perm_i,
+                        ref_itlb, ref_perm_d, ref_dtlb, ref_mis, ref_plast);
+        end
+      end
+    end
+    final begin
+      if ($test$plusargs("equiv_report"))
+        $display("[equiv] g6lc_ptw ptwdec: checked=%0d", t3_ptwdec_n);
+    end
+  end
+  //pragma translate_on
+
+  //pragma translate_off
   // T6b-4 debug: dump the walk context whenever a PTE lookup propagates an
   // error — identifies wrong-base/wrong-index/stale-response corruption.
   always_ff @(posedge clk_i) begin
@@ -834,6 +1101,8 @@ assign pte = pte_g6lc_t'(data_rdata_q);
       global_mapping_q  <= 1'b0;
       data_rdata_q      <= '0;
       data_rvalid_q     <= 1'b0;
+      pte_q             <= '0;
+      dec_q             <= '0;
       if (G6LCCfg.RVH) begin
         gpaddr_q          <= '0;
         gptw_pptr_q       <= '0;
@@ -855,6 +1124,14 @@ assign pte = pte_g6lc_t'(data_rdata_q);
       //data_rdata_q      <= req_port_i.data_rdata;
       data_rdata_q      <= endian_data;
       data_rvalid_q     <= req_port_i.data_rvalid;
+      // r43-T T2: the PTE capture holds the returned value for the whole
+      // decode+verdict window (data_rdata_q free-runs); the flush clears
+      // the bundle so a killed walk can never leak a stale verdict.
+      if (PDEC) begin
+        if (req_port_i.data_rvalid) pte_q <= endian_data;
+        if (flush_i) dec_q <= '0;
+        else         dec_q <= dec_d;
+      end
 
       if (G6LCCfg.RVH) begin
         gpaddr_q          <= gpaddr_n;

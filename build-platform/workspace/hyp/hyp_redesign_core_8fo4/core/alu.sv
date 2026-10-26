@@ -699,6 +699,9 @@ module alu
 
     // ---------
     // Shifts -- second level group (low amount bits), A3 stage
+    // hyp8 T1 item 18 was measured and DISCARDED: a one-hot 8:1 per-bit
+    // select bills deeper than the three-level serial >>> in this model
+    // (27.9 -> 48.0 FO4, board t1-g3).
     // ---------
     logic [G6LCCfg.XLEN:0] shift_right_result;
     logic [          32:0] shift_right_result32;
@@ -864,6 +867,13 @@ module alu
     logic [G6LCCfg.XLEN-1:0] s3_bit_indx;
     assign s3_bit_indx = G6LCCfg.RVB ? G6LCCfg.XLEN'(1) << s3_b[$clog2(G6LCCfg.XLEN)-1:0]
                                      : '0;
+    // r43-T T9 countercase: a one-hot a3_sel_q predecode (12 arm-group
+    // bits + packed sub-selects registered at the A2->A3 edge, a3_d as
+    // AND-OR over per-group values) measured 73.8 FO4 in-stage
+    // (alu-t9-a.json) vs ~26 for the 35-arm unique case -- the
+    // exclusive-case accounting charges each arm only its own cone while
+    // the flat AND-OR fans every group value into a3_d (same lesson as
+    // T4 wt_dcache_mem, T6 iq_bank). Reverted.
     always_comb begin : a3_result_mux
       a3_d = '0;
       rolw = '0;

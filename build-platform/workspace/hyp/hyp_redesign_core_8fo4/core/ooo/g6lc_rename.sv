@@ -118,11 +118,20 @@ module g6lc_rename
   localparam int unsigned NH    = (NR_HARTS < 1) ? 1 : NR_HARTS;
   localparam int unsigned FPN   = (FPRF_ENTRIES < 1) ? 1 : FPRF_ENTRIES;
   localparam int unsigned LVL_W = $clog2(CKPT_DEPTH+1);
+  // r43-T T1(b): resolve stage count; the review mutant restores the
+  // single-cycle form regardless of config.
+`ifdef G6LC_MUT_T3_RR_SPLIT
+  localparam int unsigned RRS = 1;
+`else
+  localparam int unsigned RRS = HypCfg.RenameResolveStages;
+`endif
 
 `ifndef SYNTHESIS
   initial begin
     if (HypCfg.RenameStages != 3)
       $error("g6lc_rename: staged rewrite requires HypCfg.RenameStages == 3");
+    if (!(RRS inside {1, 2}))
+      $error("g6lc_rename: HypCfg.RenameResolveStages must be 1 or 2");
   end
 `endif
 
@@ -149,9 +158,14 @@ module g6lc_rename
   logic [NH-1:0][LVL_W-1:0]      res_br_inc;
 
   // Pipeline registers: r1_q holds the captured reads (resolve input),
-  // s2_q holds the resolved lanes (publish input).
+  // s2_q holds the resolved lanes (publish input). s2_lane is the
+  // resolve output; rra_lane/res_vld expose the kernel's internal RR-a
+  // register (RRS==2) for kill accounting and pipe control.
   logic                          r1_v_q, s2_v_q;
   ooo_ren_lane_t [NR_PORTS-1:0]  r1_q, s2_q;
+  ooo_ren_lane_t [NR_PORTS-1:0]  s2_lane;
+  ooo_ren_lane_t [NR_PORTS-1:0]  rra_lane;
+  logic                          res_vld;
   // The group that published at the last edge -- invisible to the newest
   // R1 map read, still a producer. One-cycle lifetime.
   ooo_ren_lane_t [NR_PORTS-1:0]  prev1_q;
@@ -186,13 +200,19 @@ module g6lc_rename
   // lane's slot either drops with the ring unwind (mispredict -- the
   // reservation is the youngest work) or with the per-hart ring reset
   // (flush_hart); a surviving partial group never loses a mid-ring slot.
+  // rra_occ covers lanes resident in the resolve kernel under RRS==2 --
+  // a fully dying rra group has res_vld==0 but still holds picks.
+  logic                    rra_occ;
   logic [PRF_ENTRIES-1:0] kill_pick_mask;
   logic [FPN-1:0]         kill_fpick_mask;
   logic                   kill_v;
   always_comb begin
     kill_pick_mask = '0;
     kill_fpick_mask = '0;
-    if (r1_v_q || s2_v_q) begin
+    rra_occ = 1'b0;
+    for (int unsigned p = 0; p < NR_PORTS; p++)
+      rra_occ |= rra_lane[p].v;
+    if (r1_v_q || rra_occ || s2_v_q) begin
       for (int unsigned p = 0; p < NR_PORTS; p++) begin
         if (r1_v_q && lane_dies(r1_q[p])) begin
           if (r1_q[p].do_alloc)
@@ -210,6 +230,16 @@ module g6lc_rename
             kill_fpick_mask |= FPN'(1) <<
                 s2_q[p].fprd[$clog2(FPN > 1 ? FPN : 2)-1:0];
         end
+        // r43-T T1(b): lanes resident in the resolve kernel's RR-a
+        // register die on the same kill decode and return their picks.
+        if (lane_dies(rra_lane[p])) begin
+          if (rra_lane[p].do_alloc)
+            kill_pick_mask |= PRF_ENTRIES'(1) <<
+                rra_lane[p].prd[$clog2(PRF_ENTRIES > 1 ? PRF_ENTRIES : 2)-1:0];
+          if (rra_lane[p].do_falloc)
+            kill_fpick_mask |= FPN'(1) <<
+                rra_lane[p].fprd[$clog2(FPN > 1 ? FPN : 2)-1:0];
+        end
       end
     end
     kill_v = |kill_pick_mask | |kill_fpick_mask;
@@ -219,13 +249,28 @@ module g6lc_rename
   // R2 -- resolve (the kernel). prev0 is simply the group sitting in s2
   // (s2_eff: it has not published yet and its write lands no earlier than
   // the next edge); prev1 is the group that published at the last edge.
+  // r43-T T1(b): under RRS==2 the kernel holds its own RR-a register
+  // (rra) between r1 and s2; the rra lane record itself is the third
+  // producer slot, so no third record is needed at this level. res_vld
+  // presents the resolved group; rra_lane_o exposes the in-kernel record
+  // for the freelist kill accounting.
   // ---------------------------------------------------------------------
-  ooo_ren_lane_t [NR_PORTS-1:0] s2_lane;
-  g6lc_rename_resolve #(.NR_PORTS(NR_PORTS)) u_resolve (
-      .lane_i  (r1_q),
-      .prev0_i (s2_eff),
-      .prev1_i (prev1_q),
-      .lane_o  (s2_lane)
+  g6lc_rename_resolve #(
+      .NR_PORTS        (NR_PORTS),
+      .NR_HARTS        (NR_HARTS),
+      .HypCfg          (HypCfg)
+  ) u_resolve (
+      .clk_i      (clk_i),
+      .rst_ni     (rst_ni),
+      .kill_all_i (kill_all),
+      .kill_hart_i(kill_hart),
+      .lane_i     (r1_q),
+      .lane_v_i   (r1_surv),
+      .prev0_i    (s2_eff),
+      .prev1_i    (prev1_q),
+      .lane_o     (s2_lane),
+      .vld_o      (res_vld),
+      .rra_o      (rra_lane)
   );
 
   // ---------------------------------------------------------------------
@@ -282,8 +327,11 @@ module g6lc_rename
   // ---------------------------------------------------------------------
   logic can_capture, capture, s2_pub;
   assign s2_pub = s2_v_q;  // every occupied s2 publishes at this edge
-  assign can_capture = !(r1_v_q && s2_v_q) && !recovering &&
-                       !kill_all && !(|kill_hart);
+  // r43-T T1(b): the resolve kernel adds one in-flight slot under
+  // RRS==2; the same "capture only into headroom" gate extends to it
+  // (degenerates to !(r1_v_q && s2_v_q) at RRS==1 since res_vld==0).
+  assign can_capture = !(r1_v_q && (RRS == 1 || res_vld) && s2_v_q) &&
+                       !recovering && !kill_all && !(|kill_hart);
   // Group admission is all-or-nothing, as the unbanked ren_v group gate.
   assign capture = can_capture && enable_i && (|valid_i) && !r1_stall;
 
@@ -366,12 +414,18 @@ module g6lc_rename
 
   // Next-state validity helpers (a stage is alive if any lane survives the
   // kill decode -- dead lanes carry no state forward).
-  logic [NR_PORTS-1:0] r1_v_next, s2_v_next;
+  logic [NR_PORTS-1:0] r1_v_next, s2_v_next, r1_surv;
+  logic                s2_load;
   always_comb begin
     for (int unsigned p = 0; p < NR_PORTS; p++) begin
-      s2_v_next[p] = r1_q[p].v && r1_v_q && !lane_dies(r1_q[p]);
+      // Per-lane surviving-v of the r1 record at this edge: the RR-a
+      // register's lane_v_i under RRS==2, the s2 next-state under
+      // RRS==1 (the kernel masks its own output record then).
+      r1_surv[p] = r1_q[p].v && r1_v_q && !lane_dies(r1_q[p]);
+      s2_v_next[p] = (RRS == 2) ? s2_lane[p].v : r1_surv[p];
       r1_v_next[p] = r1_lane[p].v && !lane_dies(r1_lane[p]);
     end
+    s2_load = (RRS == 2) ? res_vld : r1_v_q;
   end
 
   // ---------------------------------------------------------------------
@@ -397,13 +451,16 @@ module g6lc_rename
         prev1_q[p] <= s2_eff[p];
         if (!s2_pub || lane_dies(s2_q[p])) prev1_q[p].v <= 1'b0;
       end
-      // s2 <- resolve(r1)
+      // s2 <- resolve output. Under RRS==2 the kernel's lane_o already
+      // carries kill-masked v bits (the RR-a register is the dying lane's
+      // home, not r1_q).
       if (kill_all) begin
         s2_v_q <= 1'b0;
-      end else if (r1_v_q) begin
+      end else if (s2_load) begin
         s2_q <= s2_lane;
-        for (int unsigned p = 0; p < NR_PORTS; p++)
-          if (lane_dies(r1_q[p])) s2_q[p].v <= 1'b0;
+        if (RRS == 1)
+          for (int unsigned p = 0; p < NR_PORTS; p++)
+            if (lane_dies(r1_q[p])) s2_q[p].v <= 1'b0;
         s2_v_q <= |s2_v_next;
       end else begin
         s2_v_q <= 1'b0;

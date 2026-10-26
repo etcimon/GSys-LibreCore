@@ -277,6 +277,13 @@ static const char *verilog_plusargs[] = {
     "stall_census",
     // +hang_dump=N (core/cva6.sv gen_stall_census): state dump after N cycles without a commit ack
     "hang_dump",
+    // +csrtab_trace (core/csr_buffer.sv gen_ooo): per-event CSR table trace
+    "csrtab_trace",
+    // +iqleg_trace (core/ooo/g6lc_iq{,_legal,_arb}.sv + issue_read_operands.sv):
+    // windowed CSR frontier/bank/arbiter/IRO port-0 state trace (r33 probe)
+    "iqleg_trace",
+    // +equiv_report (various modules, T1 pass): print [equiv] fire counts at $finish
+    "equiv_report",
     // +mmu_trace +mmu_lo +mmu_hi (core/cva6.sv gen_mmu_trace): windowed MMU/PTW/LSU translation state
     "mmu_trace", "mmu_lo", "mmu_hi",
     // +smt_drain_strict (core/cva6.sv ooo_switch_drained): stop on any drained-handoff witness, not only on resident OoO state

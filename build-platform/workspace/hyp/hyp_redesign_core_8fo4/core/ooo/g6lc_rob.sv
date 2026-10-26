@@ -181,29 +181,25 @@ module g6lc_rob #(
       assign ahit[a] = alloc_valid_i[a] && !full_o &&
                        ((tail_q + ROB_W'(a)) == ROB_W'(s));
     end
+    // r42-T item 23 (A22): ahit is one-hot0 — at most one a satisfies
+    // tail_q + a == s — so the last-match loop is a parallel OR of
+    // exclusive arms.
     always_comb begin
-      any_a  = 1'b0;
       a_pick = '0;
-      for (int unsigned a = 0; a < NR_ALLOC; a++) begin
-        if (ahit[a]) begin
-          any_a  = 1'b1;
-          a_pick = ROB_W'(a);
-        end
-      end
+      for (int unsigned a = 0; a < NR_ALLOC; a++)
+        a_pick |= ahit[a] ? ROB_W'(a) : '0;
+      any_a = |ahit;
     end
     for (genvar w = 0; w < NR_COMPLETE; w++) begin : gen_wh
       assign whit[w] = complete_valid_i[w] && rob_q[s].valid && !rob_q[s].complete &&
                        (rob_q[s].tid == complete_tid_i[w]);
     end
+    // r42-T item 23 (A22): whit is one-hot0 (complete tids are unique).
     always_comb begin
-      any_w = 1'b0;
-      c_exc = 1'b0;
-      for (int unsigned w = 0; w < NR_COMPLETE; w++) begin
-        if (whit[w]) begin
-          any_w = 1'b1;
-          c_exc = complete_exc_i[w];
-        end
-      end
+      c_exc = '0;
+      for (int unsigned w = 0; w < NR_COMPLETE; w++)
+        c_exc |= whit[w] ? complete_exc_i[w] : '0;
+      any_w = |whit;
     end
     assign do_alloc = any_a && !flush_i;
     assign tid_nx   = do_alloc ? alloc_tid_i[a_pick] : rob_q[s].tid;
@@ -221,6 +217,35 @@ module g6lc_rob #(
                       ((vld_nx && (do_alloc ? alloc_kill : held_kill)) || any_w) ? 1'b1 :
                       (do_alloc ? 1'b0 : rob_q[s].complete);
     assign rob_d[s].valid    = vld_nx;
+//pragma translate_off
+    // r42-T item 23 equivalence: the parallel pick must equal the
+    // serial last-match form every cycle (it differs only if ahit/whit
+    // is multi-hot, which would itself be a contract violation). The
+    // check lives inside gen_slot because a generate scope only takes a
+    // constant index.
+    int unsigned  t2_rob_pick_n = 0;
+    logic [ROB_W-1:0] ref_pick;
+    logic             ref_exc;
+    always_ff @(posedge clk_i) begin
+      if (rst_ni) begin
+        t2_rob_pick_n <= t2_rob_pick_n + 1;
+        ref_pick = '0;
+        ref_exc  = '0;
+        for (int unsigned a = 0; a < NR_ALLOC; a++)
+          if (ahit[a]) ref_pick = ROB_W'(a);
+        for (int unsigned w = 0; w < NR_COMPLETE; w++)
+          if (whit[w]) ref_exc = complete_exc_i[w];
+        g6lc_t2_rob_pick_eq: assert (
+          (a_pick === ref_pick) && (c_exc === ref_exc) &&
+          (any_a === |ahit)      && (any_w === |whit))
+          else $error("g6lc_rob: equiv pick slot=%0d", s);
+      end
+    end
+    final begin
+      if ($test$plusargs("equiv_report"))
+        $display("[equiv] g6lc_rob pick[%0d]: checked=%0d", s, t2_rob_pick_n);
+    end
+//pragma translate_on
     assign rob_d[s].complete = cmp_nx;
     assign rob_d[s].exc      = flush_i ? 1'b0 : (any_w ? c_exc : (do_alloc ? 1'b0 : rob_q[s].exc));
     assign rob_d[s].tid      = flush_i ? '0 : tid_nx;
