@@ -32,6 +32,7 @@ ${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_mem_store.sv
 ${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_pe_dot.sv
 ${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_pe_dot_float.sv
 ${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_pe_dot_float_pipe.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_pe_dot_pipe.sv
 ${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_policy_codec.sv
 ${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_policy_steer.sv
 ${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_policy_subcode.sv

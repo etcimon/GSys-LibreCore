@@ -33,6 +33,45 @@ module tb_g6lc_ai_scale_ladder;
     $display("LADDER V2    bytes/cy=%0d macs/cy=%0d balance=%0d", AiIslandV2ColumnArray.NocWidth/8, AiIslandV2ColumnArray.MacsPerCycle, AiIslandV2ColumnArray.MacsPerCycle/(AiIslandV2ColumnArray.NocWidth/8));
     $display("LADDER V3    clusters=%0d milli_tops=%0d dram_gbps=%0d", AiIslandV3Quad.Clusters, sketch_milli_tops(AiIslandV3Quad, 0), AiIslandV3Quad.DramGBps);
     $display("LADDER V4    clusters=%0d milli_tops=%0d dram_gbps=%0d", AiIslandV4Octo.Clusters, sketch_milli_tops(AiIslandV4Octo, 0), AiIslandV4Octo.DramGBps);
+    // r68: the four SKU steps per numeric format, and the bandwidth balance
+    // (numeric-formats-datapath.md §2): required DRAM GB/s at the step's peak
+    // = mac_rate * 2*w/T with T = the live 512 blocking. INT4/INT8/FP8 must fit
+    // the step's DramGBps nameplate; BF16/FP16/FP32 are declared half/quarter
+    // rate by the sketch itself, so their ratios are the checked quantity.
+    begin
+      ai_island_cfg_t steps [4];
+      string          names [4];
+      int unsigned    fmts  [6] = '{1, 0, 3, 6, 5, 7};   // INT4 INT8 FP8e4m3 BF16 FP16 FP32
+      int unsigned    wq    [6] = '{1, 2, 2, 4, 4, 8};   // element bytes * 2 (INT4 = 0.5 B)
+      string          fname [6] = '{"int4", "int8", "fp8", "bf16", "fp16", "fp32"};
+      steps = '{AiIslandV1WidePort, AiIslandV2ColumnArray, AiIslandV3Quad, AiIslandV4Octo};
+      names = '{"V1", "V2", "V3", "V4"};
+      for (int s = 0; s < 4; s++) begin
+        for (int f = 0; f < 6; f++) begin
+          longint unsigned milli, mac_per_s, bw_mbps;
+          milli = sketch_milli_tops(steps[s], fmts[f]);
+          // MAC/s = TOPS/2; bytes/MAC = 2w/T; GB/s*1000 = MAC/s * 2w / T / 1e6
+          mac_per_s = (milli * 1000000000) / 2;                 // milli-TOPS -> MAC/s
+          bw_mbps   = (mac_per_s * wq[f]) / (2 * AI_LIVE_MACS) / 1000000;   // MB/s
+          $display("LADDER %s %-4s milli_tops=%0d req_dram_mbps=%0d nameplate_gbps=%0d",
+                   names[s], fname[f], milli, bw_mbps, steps[s].DramGBps);
+          // the formats that must run at INT8-equivalent speed fit the nameplate
+          if (f < 3 && bw_mbps > steps[s].DramGBps * 1000) begin
+            $display("FAIL %s %s needs %0d MB/s > %0d GB/s nameplate", names[s], fname[f], bw_mbps, steps[s].DramGBps);
+            fails++;
+          end
+        end
+        // derived ratio table must hold on every step
+        if (sketch_milli_tops(steps[s], 1) != 2 * sketch_milli_tops(steps[s], 0)) begin $display("FAIL %s int4 ratio", names[s]); fails++; end
+        if (sketch_milli_tops(steps[s], 3) != sketch_milli_tops(steps[s], 0))     begin $display("FAIL %s fp8 ratio", names[s]); fails++; end
+        if (sketch_milli_tops(steps[s], 6) != sketch_milli_tops(steps[s], 0) / 2) begin $display("FAIL %s bf16 ratio", names[s]); fails++; end
+        if (sketch_milli_tops(steps[s], 7) != sketch_milli_tops(steps[s], 0) / 4) begin $display("FAIL %s fp32 ratio", names[s]); fails++; end
+      end
+      // the 100-TOPS definition (scaling-100tops.md §2): dense INT8, MAC=2 ops
+      if (sketch_milli_tops(AiIslandV4Octo, 0) < 98000) begin $display("FAIL V4 below the 100-TOPS class"); fails++; end
+      if (sketch_milli_tops(AiIslandV4Octo, 1) != 2 * sketch_milli_tops(AiIslandV4Octo, 0)) begin $display("FAIL V4 INT4 effective"); fails++; end
+    end
+
     // A deliberately illegal step must be refused (the check can say no).
     begin
       ai_island_cfg_t bad;

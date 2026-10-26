@@ -422,6 +422,7 @@ ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_pe_dot.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_pe_dot_float.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_pe_dot_float_pipe.sv
+${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_pe_dot_pipe.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_policy_codec.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_policy_subcode.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_policy_steer.sv

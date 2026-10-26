@@ -58,6 +58,7 @@ verilator --binary --timing -Wno-fatal -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-UNOPTF
   "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot.sv" \
   "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot_float.sv" \
   "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot_float_pipe.sv" \
+  "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot_pipe.sv" \
   "$ROOT/corev_apu/ai_island/g6lc_ai_policy_codec.sv" \
   "$ROOT/corev_apu/ai_island/g6lc_ai_policy_subcode.sv" \
   "$ROOT/corev_apu/ai_island/g6lc_ai_policy_steer.sv" \

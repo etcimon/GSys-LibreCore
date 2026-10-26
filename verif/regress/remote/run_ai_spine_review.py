@@ -407,13 +407,17 @@ def main():
     if os.environ.get("REVIEW_AI_QUEUED") == "1":
         mode.append("-GQueuedTest=1")
     if backend:
+        # dpf: 0 combinational, 1 pipelined float, 2 pipelined float + int
+        # (r68 g6lc_ai_pe_dot_pipe on the shared handshake).
         pipe = int(os.environ.get("REVIEW_AI_DOT_PIPE", "0"))
         channels = int(os.environ.get("REVIEW_AI_CHANNELS", "2"))
-        if pipe not in (0, 1) or channels not in (1, 2, 4, 8):
+        if pipe not in (0, 1, 2) or channels not in (1, 2, 4, 8):
             raise ValueError("unsupported backend test configuration")
         top = "tb_g6lc_ai_gemm_backend"
         mode = ["--main", "--timing", "-GPE_LANES=8", "-GMAX_DIM=64",
-                "-GDOT_PIPE_FLOAT=" + str(pipe), "-GNCH=" + str(channels)]
+                "-GDOT_PIPE_FLOAT=" + str(1 if pipe >= 1 else 0),
+                "-GDOT_PIPE_INT=" + str(1 if pipe >= 2 else 0),
+                "-GNCH=" + str(channels)]
         # Residency axis of the bench (+measure_reuse / +panel_reuse need the reuse blocks).
         if os.environ.get("REVIEW_AI_REUSE") == "1":
             mode.append("-GREUSE_EN=1")
