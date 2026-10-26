@@ -149,9 +149,23 @@ module g6lc_lsq_cam_bank #(
 `endif
     end
   end
-  assign match_o  = match_q  & {ENTRIES{ccl_q}};
-  assign unres_o  = unres_q  & {ENTRIES{ccl_q}};
-  assign nodata_o = nodata_q & {ENTRIES{ccl_q}};
+  // r68: the mask is sampled at E (ccl_q); a cancel landing in the C cycle
+  // itself would otherwise publish a match for an event the scoreboard has
+  // already killed (hyp8-osbi-scalar-r39 stopped at cyc 42,914 on
+  // g6lc_t1_cam_oa). The live mask re-qualifies the registered outputs: a
+  // cancelled event's match has no architectural meaning, so this is the
+  // conservative direction (channel 3), and the assertion below holds by
+  // construction. Cost: one dynamic mask read + AND on the reg->out cone.
+  logic [G6LCCfg.TRANS_ID_BITS-1:0] ev_id_c_q;
+  logic                             ccl_live;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) ev_id_c_q <= '0;
+    else         ev_id_c_q <= ev_id_i;
+  end
+  assign ccl_live = ccl_q && !cancelled_mask_i[ev_id_c_q];
+  assign match_o  = match_q  & {ENTRIES{ccl_live}};
+  assign unres_o  = unres_q  & {ENTRIES{ccl_live}};
+  assign nodata_o = nodata_q & {ENTRIES{ccl_live}};
 
   //pragma translate_off
   // hyp8 T1 item 2: equivalence + the plan's cancel guard.
@@ -199,9 +213,9 @@ module g6lc_lsq_cam_bank #(
       ev_id_q      <= ev_id_i;
       if (!$isunknown({match_o, unres_o, nodata_o})) begin
         t1_cam_n <= t1_cam_n + 1;
-        g6lc_t1_cam_eq: assert (match_o === ref_match_q &&
-                                unres_o === ref_unres_q &&
-                                nodata_o === ref_nodata_q)
+        g6lc_t1_cam_eq: assert (match_o === (ref_match_q & {ENTRIES{!cancelled_mask_i[ev_id_q]}}) &&
+                                unres_o === (ref_unres_q & {ENTRIES{!cancelled_mask_i[ev_id_q]}}) &&
+                                nodata_o === (ref_nodata_q & {ENTRIES{!cancelled_mask_i[ev_id_q]}}))
           else $error("g6lc_lsq_cam_bank: equiv cambe");
         for (int unsigned i = 0; i < ENTRIES; i++) begin
           g6lc_t1_cam_oa: assert (!(match_o[i]) ||
