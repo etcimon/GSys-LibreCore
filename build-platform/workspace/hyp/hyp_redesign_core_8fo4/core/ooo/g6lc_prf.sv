@@ -45,17 +45,31 @@ module g6lc_prf #(
 
   // Step 2: final mux + bypass compare on the pending write record
   // (highest write port wins on clash, as upstream's write-through).
+  // r74 (A104 one-hot select): the bypass is a highest-port-wins priority
+  // one-hot over the write hits and a masked OR of the write data, in
+  // parallel with the array read; the array word is taken only when no port
+  // hits. Same value as the last-writer loop (highest w wins).
+  logic [NR_READ-1:0][NR_WRITE-1:0] byp_hit, byp_pri;
+  for (genvar r = 0; r < NR_READ; r++) begin : gen_byp
+    for (genvar w = 0; w < NR_WRITE; w++) begin : gen_byp_w
+      assign byp_hit[r][w] = we_q[w] && (waddr_q[w] == raddr_q[r]) &&
+                             (!ZERO_REG_ZERO || waddr_q[w] != '0);
+      if (w == NR_WRITE - 1) begin : gen_top
+        assign byp_pri[r][w] = byp_hit[r][w];
+      end else begin : gen_lower
+        assign byp_pri[r][w] = byp_hit[r][w] && !(|byp_hit[r][NR_WRITE-1:w+1]);
+      end
+    end
+  end
   always_comb begin
     for (int unsigned r = 0; r < NR_READ; r++) begin
+      rdata_o[r] = '0;
       if (ZERO_REG_ZERO && raddr_q[r] == '0) begin
         rdata_o[r] = '0;
       end else begin
-        rdata_o[r] = mem_q[raddr_q[r]];
-        for (int unsigned w = 0; w < NR_WRITE; w++) begin
-          if (we_q[w] && waddr_q[w] == raddr_q[r] &&
-              (!ZERO_REG_ZERO || waddr_q[w] != '0))
-            rdata_o[r] = wdata_q[w];
-        end
+        for (int unsigned w = 0; w < NR_WRITE; w++)
+          rdata_o[r] |= {$bits(rdata_o[r]){byp_pri[r][w]}} & wdata_q[w];
+        if (!(|byp_hit[r])) rdata_o[r] = mem_q[raddr_q[r]];
       end
     end
   end

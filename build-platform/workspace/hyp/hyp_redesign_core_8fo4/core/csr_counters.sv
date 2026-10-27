@@ -56,8 +56,22 @@ module csr_counters
   end
 
   // 33-bit low-half sums; bit 32 is the same-cycle carry
-  assign instret_sum = {1'b0, instret_i[31:0]}
-                     + {1'b0, (instret_en ? instret_pop : 32'b0)};
+  // r74 (A120 late count off the adder): the retire count is 0..NrCommitPorts,
+  // so every candidate low-half sum is a constant increment of the registered
+  // counter computed in parallel; the popcount (and the enable) only select
+  // one of them as a one-hot. Exact: exactly one k equals the gated count.
+  logic [G6LCCfg.NrCommitPorts:0][32:0] instret_cand;
+  logic [G6LCCfg.NrCommitPorts:0]       instret_sel;
+  for (genvar k = 0; k <= G6LCCfg.NrCommitPorts; k++) begin : gen_instret_cand
+    assign instret_cand[k] = {1'b0, instret_i[31:0]} + 33'(k);
+    assign instret_sel[k]  = (k == 0) ? (!instret_en || instret_pop == 32'd0)
+                                      : (instret_en && instret_pop == 32'(k));
+  end
+  always_comb begin
+    instret_sum = '0;
+    for (int unsigned k = 0; k <= G6LCCfg.NrCommitPorts; k++)
+      instret_sum |= {33{instret_sel[k]}} & instret_cand[k];
+  end
   assign cycle_sum   = {1'b0, cycle_i[31:0]} + {32'b0, cycle_en};
 
   // independent high+1 candidates

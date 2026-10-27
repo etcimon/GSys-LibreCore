@@ -198,6 +198,7 @@ module wt_dcache_missunit
   logic amo_sel, miss_is_write;
   logic amo_req_d, amo_req_q;
   logic [63:0] amo_rtrn_mux;
+  logic [63:0] amo_raw_q;  // r74: registered raw return word (formation reads it)
   logic [G6LCCfg.XLEN-1:0] amo_data, amo_data_a, amo_data_b;
   logic [G6LCCfg.XLEN-1:0] amo_user;  //DCACHE USER ? G6LCCfg.DCACHE_USER_WIDTH
   logic [G6LCCfg.PLEN-1:0] tmp_paddr;
@@ -491,22 +492,24 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
 
     // Little Endian Calculation of return value from memory (when 32bit, we need to sign extend)
     logic [63:0] amoResult_32bitLE;
-    assign amoResult_32bitLE = {
-      {32{amo_rtrn_mux[amo_req_i.operand_a[2]*32+31]}}, amo_rtrn_mux[amo_req_i.operand_a[2]*32+:32]
-    };
+    // r74 (A118 explicit select): the word half is a 2:1 mux on operand_a[2],
+    // not an indexed part-select with a `*32` offset (billed as arithmetic).
+    logic [31:0] amo_raw_half;
+    assign amo_raw_half = amo_req_i.operand_a[2] ? amo_raw_q[63:32] : amo_raw_q[31:0];
+    assign amoResult_32bitLE = {{32{amo_raw_half[31]}}, amo_raw_half};
 
     // Big Endian Calculations of return value from memory with AMO operations (Bytes need swapping and sign extension is different)
     logic [63:0] amoResult_64bitBE;
     logic [31:0] amoResult_32bitBE_NoSign;
     logic [63:0] amoResult_32bitBE;
-    assign amoResult_64bitBE = {<<8{amo_rtrn_mux}};
-    assign amoResult_32bitBE_NoSign = {<<8{amo_rtrn_mux[amo_req_i.operand_a[2]*32+:32]}};
+    assign amoResult_64bitBE = {<<8{amo_raw_q}};
+    assign amoResult_32bitBE_NoSign = {<<8{amo_raw_half}};
     assign amoResult_32bitBE = {
-      {32{amo_rtrn_mux[amo_req_i.operand_a[2]*32+7]}}, amoResult_32bitBE_NoSign
+      {32{amo_raw_half[7]}}, amoResult_32bitBE_NoSign
     };  // +7 to the base address to find the sign bit, as in BE the Most Significant Byte is always at the lowest addressed byte.
 
     assign amoResult_BE = (amo_req_i.size == 2'b10) ? amoResult_32bitBE : amoResult_64bitBE;
-    assign amoResult_LE = (amo_req_i.size == 2'b10) ? amoResult_32bitLE : amo_rtrn_mux;
+    assign amoResult_LE = (amo_req_i.size == 2'b10) ? amoResult_32bitLE : amo_raw_q;
 
     // hyp8: registered formation step. The byte-order / sign-extend network is
     // a wide cone hanging off the return packet; it is captured every cycle
@@ -518,16 +521,26 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
     logic [63:0] amo_result_form;
     logic [63:0] amo_result_q;
     assign amo_result_form = mbe_i ? amoResult_BE : amoResult_LE;
+    // r74 (A106 snapshot / caller purpose): the only consumer of the formed
+    // word is the AMO_RESULT presentation one cycle after ATOMIC_ACK (the CAS
+    // compare and old-value capture read the raw word). Capture the raw
+    // 64-bit return word every cycle and form byte order / sign extension
+    // from the register in the presentation cycle: the 128->64 select and
+    // the swap/sign network no longer share one into->reg cone.
     always_ff @(posedge clk_i or negedge rst_ni) begin : p_amo_result_ff
-      if (!rst_ni) amo_result_q <= '0;
-      else         amo_result_q <= amo_result_form;
+      if (!rst_ni) amo_raw_q <= '0;
+      else         amo_raw_q <= amo_rtrn_mux;
     end
+    assign amo_result_q = amo_result_form;
 
     // Local dword CAS returns the saved old value; ATOP path uses mem rtrn mux.
+    // r74 (caller purpose): amo_resp_o.ack is asserted only in AMO_RESULT
+    // (registered formation) and AMO_CAS_ST_WAIT (cas_old_q); the consumer
+    // samples result with ack, so the live formation never has to reach the
+    // output. The live cone stays on the internal SC verdict only.
     assign amo_resp_o.result = (state_q inside {AMO_CAS_ST, AMO_CAS_ST_WAIT})
                                    ? cas_old_q
-                                   : (state_q == AMO_RESULT) ? amo_result_q
-                                                             : amo_result_form;
+                                   : amo_result_q;
     // end BIG ENDIAN CAPABLE logic for amo return value from memory
 
     assign amo_req_d = amo_req_i.req;
