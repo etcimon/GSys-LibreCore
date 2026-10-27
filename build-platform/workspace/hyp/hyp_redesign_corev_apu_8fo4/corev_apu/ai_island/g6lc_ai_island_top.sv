@@ -135,7 +135,7 @@ module g6lc_ai_island_top
   logic cmd_mmio_attempt, cmd_choose_sb, cmd_mmio_accept, cmd_quiescent;
   logic reg_write_error, reg_error_q;
   logic [11:0] cmd_region_decode;
-  wire legacy_sb_valid = sb_enq_valid_i && !cmd_mode_q;
+  wire legacy_sb_valid = sb_enq_valid_i && !cmd_mode_q;  // L0 leaf
   // Completion FIFO: host may claim multiple finishes; engine still single-outstanding.
   // Depth is clamped, not scaled: the FIFO only has to cover how many finishes
   // may pile up before software claims, and QueueDepth=64 would buy 4x the
@@ -810,8 +810,8 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
 
   // Descriptor fetch is 64 bytes of 8-byte beats. Probe the committed window
   // for that range. Sideband wins the probe when both kicks land together.
-  assign sb_fetch_try = EnableDmaFetch && legacy_sb_valid && (sb_desc_ptr_i != '0)
-      && fetch_ready;
+  // E2b L1: flat leaf conjunction.
+  assign sb_fetch_try = EnableDmaFetch && l_legacy_sb && l_sbptr_nz && fetch_ready;
   // The queue id rides in the doorbell write. The registered copy is the
   // previous doorbell, so a probe during that write has to use wdata.
   wire db_wr = req_i && we_i && (addr_i[15:0] == 16'h0108) && !cmd_mode_q;
@@ -821,7 +821,8 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
   assign probe_addr = cmd_mode_q ? (cmd_pop_valid ? AddrWidth'(cmd_pop_data[63:0]) : '0) :
                       (sb_fetch_try ? sb_desc_ptr_i : desc_ptr_q);
   assign probe_len  = AddrWidth'(g6lc_ai_desc_pkg::DescBytes);
-  assign desc_fetch_ok = probe_ok && (probe_addr[2:0] == 3'b0);
+  // E2b L1: child output + leaf align.
+  assign desc_fetch_ok = l_desc_ok;
 
   // Island-allocated sideband ticket: one stream for every producer.
   logic [31:0] sb_ticket_alloc_q;
@@ -850,8 +851,7 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
 
   // Sideband same-cycle submit only when not DMA-fetching a ptr
   logic sb_imm_submit;
-  assign sb_imm_submit = legacy_sb_valid &&
-      (!EnableDmaFetch || (sb_desc_ptr_i == '0));
+  assign sb_imm_submit = l_sb_imm;  // E2b: leaf (see L0 block)
 
   // Mux MMIO doorbell vs core sideband kick (sideband preferred).
   // A latched doorbell is one cycle wide. If the engine is busy, or the
@@ -862,10 +862,10 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
   logic                  submit_src_sb_mux;
   logic [QidWidth-1:0]   submit_qid_mux;
   logic [31:0]           submit_ticket_mux;
-  wire engine_let_through = !cpl_full && !cpl_push && fetch_ready && !fetch_start_q &&
-      (submit_ready || (!enable_q && !busy_engine));
-  wire sb_let_through = engine_let_through && !fetch_submit_pending_q;
-  wire db_let_through = sb_let_through && !(sb_enq_sticky_q || sb_imm_submit);
+  // E2b L1: flat leaf conjunctions (l_eng_let reads leaves only).
+  wire engine_let_through = l_eng_let;
+  wire sb_let_through = l_eng_let && !fetch_submit_pending_q;
+  wire db_let_through = l_eng_let && !fetch_submit_pending_q && !l_sb_stk_or_imm;
   always_comb begin
     submit_desc_mux = db_desc_hold_q;
     submit_src_sb_mux = 1'b0;
@@ -1093,6 +1093,12 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
           .MaxElementBytes(AiCfg.IslandFpEn ? 4 : 1),
           .NrChannels(IslandCfg.DramChannels),
           .ChanShift (IslandCfg.DramChanShift),
+          // Live dot cells are the pipelines (r2 default-cell decision,
+          // rank 1): int dot on g6lc_ai_pe_dot_pipe, float dot on
+          // g6lc_ai_pe_dot_float_pipe; the comb cells stay as non-live
+          // equivalence oracles (clock_exclude_ai.txt).
+          .DotPipeInt   (1'b1),
+          .DotPipeFloat (1'b1),
           .axi_req_t (axi_req_t),
           .axi_resp_t(axi_resp_t)
       ) i_gemm (
@@ -1143,6 +1149,16 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
       typedef logic [AxiDataWidth/8-1:0] eng_strb_t;
       typedef logic [0:0]                eng_user_t;
       `AXI_TYPEDEF_ALL(eng, eng_addr_t, eng_id_t, eng_data_t, eng_strb_t, eng_user_t)
+      // r11: the mst-side channel typedefs for the dispatch's axi_mux --
+      // a separate prefix so the generated req/resp names don't clash
+      // with the parameter axi_req_t/axi_resp_t.
+      typedef logic [AddrWidth-1:0]      mst_axi_addr_t;
+      typedef logic [AxiIdWidth-1:0]     mst_axi_id_t;
+      typedef logic [AxiDataWidth-1:0]   mst_axi_data_t;
+      typedef logic [AxiDataWidth/8-1:0] mst_axi_strb_t;
+      typedef logic [0:0]                mst_axi_user_t;
+      `AXI_TYPEDEF_ALL(mst_axi, mst_axi_addr_t, mst_axi_id_t,
+                       mst_axi_data_t, mst_axi_strb_t, mst_axi_user_t)
       g6lc_ai_cluster_dispatch #(
           .AddrWidth (AddrWidth),
           .DataWidth (AxiDataWidth),
@@ -1165,10 +1181,18 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
           .MaxElementBytes(AiCfg.IslandFpEn ? 4 : 1),
           .NrChannels(IslandCfg.DramChannels),
           .ChanShift (IslandCfg.DramChanShift),
+          .DotPipeInt   (1'b1),
+          .DotPipeFloat (1'b1),
           .axi_req_t (axi_req_t),
           .axi_resp_t(axi_resp_t),
           .eng_req_t (eng_req_t),
-          .eng_resp_t(eng_resp_t)
+          .eng_resp_t(eng_resp_t),
+          .eng_aw_chan_t (eng_aw_chan_t), .eng_w_chan_t (eng_w_chan_t),
+          .eng_b_chan_t  (eng_b_chan_t),  .eng_ar_chan_t(eng_ar_chan_t),
+          .eng_r_chan_t  (eng_r_chan_t),
+          .mst_aw_chan_t (mst_axi_aw_chan_t), .mst_w_chan_t (mst_axi_w_chan_t),
+          .mst_b_chan_t  (mst_axi_b_chan_t),  .mst_ar_chan_t(mst_axi_ar_chan_t),
+          .mst_r_chan_t  (mst_axi_r_chan_t)
         ) i_gemm (
           .clk_i,
           .rst_ni,
@@ -1580,10 +1604,12 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
   // Descriptor checks leave the GEMM unit idle and then start it, so a kick
   // during a job waits until the engine itself is idle and no new job is
   // accepted on this cycle.
+  // E2b L1: db_let_through's leaf set inlined (no L1->L1 read).
   wire dma_quiet = !busy_engine && gemm_ready && wr_ready
                    && !gemm_start && !wr_start
-                   && !(sb_enq_sticky_q || sb_imm_submit)
-                   && !((submit_pulse_q || db_pending_q) && db_let_through);
+                   && !l_sb_stk_or_imm
+                   && !(l_pend_or_pulse && l_eng_let && !fetch_submit_pending_q
+                        && !l_sb_stk_or_imm);
 
   assign cmd_region_decode = ai_queue_decode(addr_i, NumQueues);
   assign cmd_quiescent = cmd_count == 0 && cpl_empty && !busy_engine && !fetch_busy &&
@@ -1613,8 +1639,12 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
   assign cmd_mmio_accept = cmd_mmio_attempt && cmd_push_valid && !cmd_choose_sb && cmd_push_ready;
   assign sb_enq_ready_o = !cmd_mode_q ||
       (enable_q && cmd_push_ready && (!cmd_mmio_attempt || cmd_prefer_sb_q));
+  // E2b L1: dma_quiet's leaf set inlined.
   assign cmd_dispatch = cmd_mode_q && enable_q && cmd_pop_valid && !cpl_full && !cpl_push &&
-      dma_quiet && fetch_ready && !fetch_start_q && !fetch_submit_pending_q &&
+      !busy_engine && gemm_ready && wr_ready && !gemm_start && !wr_start &&
+      !l_sb_stk_or_imm &&
+      !(l_pend_or_pulse && l_eng_let && !fetch_submit_pending_q && !l_sb_stk_or_imm) &&
+      fetch_ready && !fetch_start_q && !fetch_submit_pending_q &&
       !fetch_err_complete_q && !fetch_refuse_q && !done_valid;
 
   if (IslandCfg.CommandDepth != 0) begin : gen_command_fifo
@@ -1671,198 +1701,447 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
     assign cmd_rejected_q = '0;
   end
 
+  // E2b: two-level predicate layer. L0 = leaves only (a register, an
+  // input, a child output, or ONE operator on those; shared
+  // sub-conjunctions are L0 only when they read leaves exclusively).
+  // L1 = every consumer predicate as ONE flat conjunction/disjunction of
+  // L0 leaves -- no L1 may read another L1.
+  logic l_sbptr_nz, l_dbptr_nz, l_legacy_sb, l_db_try, l_db_wdata31;
+  logic l_desc_ok, l_sb_imm, l_sb_stk_or_imm, l_pend_or_pulse, l_cpl_room;
+  logic l_eng_let;
+  always_comb begin
+    l_sbptr_nz      = (sb_desc_ptr_i != '0);
+    l_dbptr_nz      = (desc_ptr_q != '0);
+    l_legacy_sb     = sb_enq_valid_i && !cmd_mode_q;
+    l_db_try        = req_i && we_i && !reg_write_error && (addr_i[15:0] == 16'h0108);
+    l_db_wdata31    = wdata_i[31];
+    l_desc_ok       = probe_ok && (probe_addr[2:0] == 3'b0);
+    l_sb_imm        = l_legacy_sb && (!EnableDmaFetch || !l_sbptr_nz);
+    l_sb_stk_or_imm = sb_enq_sticky_q || l_sb_imm;
+    l_pend_or_pulse = submit_pulse_q || db_pending_q;
+    l_cpl_room      = (cpl_room_free < (CplCntW+3)'(CplFifoDepth));
+    l_eng_let       = !cpl_full && !cpl_push && fetch_ready && !fetch_start_q
+                      && (submit_ready || (!enable_q && !busy_engine));
+  end
+
+  // pragma translate_off
+  // E2b reference: the nested-form predicates the flat layer replaced.
+  logic ref_engine_lt, ref_sb_lt, ref_db_lt, ref_dma_quiet, ref_cmd_disp,
+        ref_sft, ref_dfo, ref_eerr, ref_eref, ref_cmdq, ref_rwe;
+  always_comb begin
+    ref_engine_lt = !cpl_full && !cpl_push && fetch_ready && !fetch_start_q &&
+        (submit_ready || (!enable_q && !busy_engine));
+    ref_sb_lt = ref_engine_lt && !fetch_submit_pending_q;
+    ref_db_lt = ref_sb_lt && !(sb_enq_sticky_q || sb_imm_submit);
+    ref_dma_quiet = !busy_engine && gemm_ready && wr_ready && !gemm_start &&
+        !wr_start && !(sb_enq_sticky_q || sb_imm_submit) &&
+        !((submit_pulse_q || db_pending_q) && ref_db_lt);
+    ref_sft = EnableDmaFetch && legacy_sb_valid && (sb_desc_ptr_i != '0) && fetch_ready;
+    ref_dfo = probe_ok && (probe_addr[2:0] == 3'b0);
+    ref_cmd_disp = cmd_mode_q && enable_q && cmd_pop_valid && !cpl_full && !cpl_push &&
+        ref_dma_quiet && fetch_ready && !fetch_start_q && !fetch_submit_pending_q &&
+        !fetch_err_complete_q && !fetch_refuse_q && !done_valid;
+    ref_eerr = EnableDmaFetch && fetch_err_complete_q && !done_valid &&
+        (cpl_room_free < (CplCntW+3)'(CplFifoDepth));
+    ref_eref = fetch_refuse_q && !done_valid && !ref_eerr &&
+        !(EnableDmaFetch && fetch_done && fetch_err) &&
+        (cpl_room_free < (CplCntW+3)'(CplFifoDepth));
+    ref_cmdq = cmd_count == 0 && cpl_empty && !busy_engine && !fetch_busy &&
+        fetch_ready && !fetch_start_q && !fetch_submit_pending_q &&
+        !fetch_err_complete_q && !fetch_refuse_q && !db_pending_q &&
+        !submit_pulse_q && !sb_enq_sticky_q && !sb_fetch_pending_q &&
+        !sb_enq_valid_i && !done_valid;
+    ref_rwe = IslandCfg.CommandDepth != 0 && req_i && we_i &&
+        ((cmd_mode_q && (addr_i == REG_OFF_CTL || addr_i == REG_OFF_DOORBELL ||
+                         cmd_region_decode[11] || addr_i == REG_OFF_REUSE_EPOCH ||
+                         addr_i == REG_OFF_VA_TURBO_LEVEL || addr_i == REG_OFF_VA_TURBO_RECIPE ||
+                         addr_i == REG_OFF_VA_TURBO_WINDOW)) ||
+         (addr_i == REG_OFF_CMD_MODE && wdata_i[0] != cmd_mode_q &&
+          (!ref_cmdq || (wdata_i[0] && !enable_q))));
+  end
+  int unsigned g6lc_ai_pred_eq;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) g6lc_ai_pred_eq <= 0;
+    else begin
+      g6lc_ai_pred_eq <= g6lc_ai_pred_eq + 1;
+      assert (engine_let_through == ref_engine_lt && sb_let_through == ref_sb_lt
+              && db_let_through == ref_db_lt && dma_quiet == ref_dma_quiet
+              && cmd_dispatch == ref_cmd_disp && fetch_error_fire == ref_eerr
+              && fetch_refuse_fire == ref_eref && cmd_quiescent == ref_cmdq
+              && reg_write_error == ref_rwe)
+        else $error("g6lc_ai_island_top: pred_eq mismatch %b vs %b",
+                    {engine_let_through, sb_let_through, db_let_through, dma_quiet,
+                     cmd_dispatch, fetch_error_fire, fetch_refuse_fire,
+                     cmd_quiescent, reg_write_error},
+                    {ref_engine_lt, ref_sb_lt, ref_db_lt, ref_dma_quiet,
+                     ref_cmd_disp, ref_eerr, ref_eref, ref_cmdq, ref_rwe});
+    end
+  end
+  final $display("[equiv] g6lc_ai_island_top pred_eq: checked=%0d", g6lc_ai_pred_eq);
+  // pragma translate_on
+
+  // E2: fetch/submit arm predicates, computed once as mutually exclusive
+  // wires (each arm includes the negation of the higher-priority arms;
+  // db sits highest because in the original sequential block the MMIO
+  // doorbell write came last and overrode the fifo/sb arms).
+  logic fa_cmd_ok, fa_cmd_refuse, fa_sb, fa_sb_refuse, fa_db_ok, fa_db_refuse;
+  // r7 R7/P6: db doorbell arms are the leaf family; cmd/sb arms read them.
+  always_comb begin
+    fa_db_ok = EnableDmaFetch && req_i && we_i && !reg_write_error
+        && (addr_i[15:0] == 16'h0108) && wdata_i[31]
+        && (desc_ptr_q != '0) && fetch_ready && !fetch_start_q
+        && !fetch_submit_pending_q && !fetch_err_complete_q
+        && !(EnableDmaFetch && l_legacy_sb && l_sbptr_nz && fetch_ready)
+        && l_desc_ok;
+    fa_db_refuse = EnableDmaFetch && req_i && we_i && !reg_write_error
+        && (addr_i[15:0] == 16'h0108) && wdata_i[31]
+        && (desc_ptr_q != '0) && fetch_ready && !fetch_start_q
+        && !fetch_submit_pending_q && !fetch_err_complete_q
+        && !(EnableDmaFetch && l_legacy_sb && l_sbptr_nz && fetch_ready)
+        && !l_desc_ok;
+  end
+  always_comb begin
+    fa_cmd_ok = cmd_mode_q && enable_q && cmd_pop_valid && !cpl_full && !cpl_push &&
+        !busy_engine && gemm_ready && wr_ready && !gemm_start && !wr_start &&
+        !l_sb_stk_or_imm &&
+        !(l_pend_or_pulse && l_eng_let && !fetch_submit_pending_q && !l_sb_stk_or_imm) &&
+        fetch_ready && !fetch_start_q && !fetch_submit_pending_q &&
+        !fetch_err_complete_q && !fetch_refuse_q && !done_valid
+        && !(32'(cmd_pop_data[103:96]) >= NumQueues
+             || cmd_pop_data[63:0] == 0 || !l_desc_ok)
+        && !fa_db_ok && !fa_db_refuse;
+    fa_cmd_refuse = cmd_mode_q && enable_q && cmd_pop_valid && !cpl_full && !cpl_push &&
+        !busy_engine && gemm_ready && wr_ready && !gemm_start && !wr_start &&
+        !l_sb_stk_or_imm &&
+        !(l_pend_or_pulse && l_eng_let && !fetch_submit_pending_q && !l_sb_stk_or_imm) &&
+        fetch_ready && !fetch_start_q && !fetch_submit_pending_q &&
+        !fetch_err_complete_q && !fetch_refuse_q && !done_valid
+        && (32'(cmd_pop_data[103:96]) >= NumQueues
+            || cmd_pop_data[63:0] == 0 || !l_desc_ok)
+        && !fa_db_ok && !fa_db_refuse;
+    fa_sb = !(cmd_mode_q && enable_q && cmd_pop_valid && !cpl_full && !cpl_push &&
+        !busy_engine && gemm_ready && wr_ready && !gemm_start && !wr_start &&
+        !l_sb_stk_or_imm &&
+        !(l_pend_or_pulse && l_eng_let && !fetch_submit_pending_q && !l_sb_stk_or_imm) &&
+        fetch_ready && !fetch_start_q && !fetch_submit_pending_q &&
+        !fetch_err_complete_q && !fetch_refuse_q && !done_valid)
+        && EnableDmaFetch && fetch_ready && !fetch_start_q
+        && !fetch_submit_pending_q && !fetch_err_complete_q
+        && !busy_engine && gemm_ready && wr_ready && !gemm_start && !wr_start
+        && !l_sb_stk_or_imm
+        && !(l_pend_or_pulse && l_eng_let && !fetch_submit_pending_q && !l_sb_stk_or_imm)
+        && ((l_legacy_sb && l_sbptr_nz && l_desc_ok)
+            || (sb_fetch_pending_q && !l_legacy_sb))
+        && !fa_db_ok && !fa_db_refuse;
+    fa_sb_refuse = !(cmd_mode_q && enable_q && cmd_pop_valid && !cpl_full && !cpl_push &&
+        !busy_engine && gemm_ready && wr_ready && !gemm_start && !wr_start &&
+        !l_sb_stk_or_imm &&
+        !(l_pend_or_pulse && l_eng_let && !fetch_submit_pending_q && !l_sb_stk_or_imm) &&
+        fetch_ready && !fetch_start_q && !fetch_submit_pending_q &&
+        !fetch_err_complete_q && !fetch_refuse_q && !done_valid)
+        && EnableDmaFetch && l_legacy_sb && l_sbptr_nz && fetch_ready && !l_desc_ok
+        && !fa_db_ok && !fa_db_refuse;
+  end
+
+  // pragma translate_off
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (rst_ni) begin
+      assert ($onehot0({fa_cmd_ok, fa_cmd_refuse, fa_sb, fa_sb_refuse,
+                        fa_db_ok, fa_db_refuse}))
+        else $error("g6lc_ai_island_top: fetch arm not onehot0 %b",
+                    {fa_cmd_ok, fa_cmd_refuse, fa_sb, fa_sb_refuse,
+                     fa_db_ok, fa_db_refuse});
+    end
+  end
+  int unsigned g6lc_ai_fetch_arm_oh;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) g6lc_ai_fetch_arm_oh <= 0;
+    else g6lc_ai_fetch_arm_oh <= g6lc_ai_fetch_arm_oh + 1;
+  end
+  final $display("[equiv] g6lc_ai_island_top fetch_arm_oh: checked=%0d",
+                 g6lc_ai_fetch_arm_oh);
+  // pragma translate_on
+
+  // E2c: the fetch/submit/state registers are split into per-group
+  // always_ff blocks (was one ~180-line monolithic block; the analyzer
+  // billed every non-blocking write as a serial statement chain).
+  // Each register is written in exactly one block; guards are the same
+  // expressions as before, recomputed per block from the write-class
+  // one-hot below. Same last-write-wins order inside each block.
+  logic mmio_we;
+  logic w_is_100, w_is_108, w_is_118, w_is_11c, w_in_descwin, w_in_queue;
+  logic [11:0] w_qdec;
+  logic [NumQueues-1:0] w_qhit;
+  // r7 R7/P6: one always_comb per output family -- the single block
+  // composed all nine writes as a serial makespan (~51.8).
+  always_comb begin
+    mmio_we = req_i && we_i && !reg_write_error;
+  end
+  always_comb begin
+    w_qdec = ai_queue_decode(addr_i[15:0], NumQueues);
+    for (int unsigned q = 0; q < NumQueues; q++)
+      w_qhit[q]  = w_qdec[11] && (w_qdec[10:3] == 8'(q));
+  end
+  always_comb begin
+    w_is_100     = mmio_we && (addr_i[15:0] == 16'h0100);
+    w_is_108     = mmio_we && (addr_i[15:0] == 16'h0108);
+    w_is_118     = mmio_we && (addr_i[15:0] == 16'h0118);
+    w_is_11c     = mmio_we && (addr_i[15:0] == 16'h011C);
+    w_in_descwin = mmio_we && (addr_i[15:0] >= 16'h0140) && (addr_i[15:0] < 16'h0180);
+  end
+  always_comb begin
+    w_in_queue   = mmio_we && !w_is_100 && !w_is_108 && !w_is_118 && !w_is_11c
+                   && !w_in_descwin
+                   && !(addr_i[15:0] == REG_OFF_REUSE_EPOCH
+                        || addr_i[15:0] == REG_OFF_VA_TURBO_LEVEL
+                        || addr_i[15:0] == REG_OFF_VA_TURBO_RECIPE
+                        || addr_i[15:0] == REG_OFF_VA_TURBO_WINDOW)
+                   && w_qdec[11];
+  end
+
+  // ---- fetch arm registers: addr/qid/ticket/src/start ----
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      enable_q            <= 1'b0;
-      wr_cpl_en_q         <= EnableDmaFetch;  // on when DMA path present
-      db_qid_q            <= '0;
-      db_ticket_q         <= '0;
-      db_desc_hold_q      <= '0;
-      submit_pulse_q      <= 1'b0;
-      db_pending_q        <= 1'b0;
-      desc_ptr_q          <= '0;
-      fetch_start_q       <= 1'b0;
-      fetch_err_complete_q <= 1'b0;
-      fetch_ticket_q      <= '0;
-      fetch_qid_q         <= '0;
-      fetch_submit_pending_q <= 1'b0;
-      fetch_err_ticket_q  <= '0;
-      fetch_src_sb_q      <= 1'b0;
-      fetch_addr_q        <= '0;
-      fetch_refuse_q      <= 1'b0;
-      fetch_refuse_sb_q   <= 1'b0;
+      fetch_start_q  <= 1'b0;
+      fetch_ticket_q <= '0;
+      fetch_qid_q    <= '0;
+      fetch_src_sb_q <= 1'b0;
+      fetch_addr_q   <= '0;
+    end else begin
+      fetch_start_q <= 1'b0;
+      unique case (1'b1)
+        fa_cmd_ok: begin
+          fetch_addr_q   <= cmd_pop_data[63:0];
+          fetch_qid_q    <= QidWidth'(cmd_pop_data[103:96]);
+          fetch_ticket_q <= cmd_pop_data[95:64];
+          fetch_src_sb_q <= cmd_pop_data[104];
+          fetch_start_q  <= 1'b1;
+        end
+        fa_sb: begin
+          fetch_addr_q   <= (legacy_sb_valid && (sb_desc_ptr_i != '0)) ? sb_desc_ptr_i
+                                                                      : sb_ptr_hold_q;
+          fetch_src_sb_q <= 1'b1;
+          fetch_start_q  <= 1'b1;
+          fetch_ticket_q <= (legacy_sb_valid && sb_desc_ptr_i != '0) ? sb_ticket_eff : sb_ticket_hold_q;
+          fetch_qid_q    <= QidWidth'((legacy_sb_valid && sb_desc_ptr_i != '0) ? sb_qid_i : sb_qid_hold_q);
+        end
+        fa_db_ok: begin
+          fetch_addr_q   <= desc_ptr_q;
+          fetch_src_sb_q <= 1'b0;
+          fetch_start_q  <= 1'b1;
+          fetch_ticket_q <= {9'h0, wdata_i[30:8]};
+          fetch_qid_q    <= QidWidth'(wdata_i[7:0]);
+        end
+        default: ;
+      endcase
+    end
+  end
+
+  // ---- fetch refuse registers ----
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      fetch_refuse_q        <= 1'b0;
+      fetch_refuse_sb_q     <= 1'b0;
       fetch_refuse_status_q <= ST_BAD_PTR;
       fetch_refuse_ticket_q <= '0;
-      reuse_epoch_q       <= '0;
-      va_level_req_q      <= '0;
-      pmu_va_level_q      <= '0;
-      va_recipe_req_q     <= '0;
-      pmu_va_recipe_q     <= '0;
-      window_valid_q      <= 1'b0;
-      pmu_window_q        <= 1'b0;
-      pmu_r_hold_q        <= '0;
-      pmu_w_hold_q        <= '0;
-      pmu_cy_hold_q       <= '0;
-      pmu_phase_hold_q    <= '0;
-      pmu_stall_hold_q    <= '0;
-      for (int unsigned i = 0; i < 16; i++) desc_words_q[i] <= '0;
-      for (int unsigned q = 0; q < NumQueues; q++) begin
-        base_q[q]  <= '0;
-        limit_q[q] <= '0;
-        perm_q[q]  <= '0;
-      end
     end else begin
-      submit_pulse_q       <= 1'b0;
-      fetch_start_q        <= 1'b0;
-      if (submit_pulse_q && !db_let_through)
-        db_pending_q <= 1'b1;
-      else if (db_pending_q && db_let_through)
-        db_pending_q <= 1'b0;
-      if (fetch_error_fire) fetch_err_complete_q <= 1'b0;
-      if (fetch_submit_pending_q && engine_let_through) fetch_submit_pending_q <= 1'b0;
-
-      // Requested level, sampled when the job completes. Applied level is 0.
-      if (gemm_done) begin
-        pmu_va_level_q <= va_level_req_q;
-        pmu_va_recipe_q <= va_recipe_req_q;
-        pmu_window_q <= window_valid_q;
-      end
-
-      // I3: latch GEMM PMU at job done.
-      // milli-GB/s = bytes * ClockKhz / cycles / 1000. Read bytes follow
-      // the port width. Write bytes stay 8, so a wider port does not bill
-      // a C handshake at AxiDataWidth. At 64 bits PmuCBytes == PmuBusBytes
-      // and this is the previous (r+w)*width product.
-      if (EnableDmaFetch && gemm_done) begin
-        pmu_r_hold_q  <= gemm_pmu_r;
-        pmu_w_hold_q  <= gemm_pmu_w;
-        pmu_cy_hold_q <= gemm_pmu_cy;
-        pmu_phase_hold_q <= gemm_pmu_phase;
-        pmu_stall_hold_q <= gemm_pmu_stall;
-      end
-
-      // Sideband kick with non-zero ptr ⇒ descriptor read, once the shared
-      // response is free. A kick during a job is held in sb_fetch_pending_q.
       if (fetch_refuse_fire) begin
         fetch_refuse_q    <= 1'b0;
         fetch_refuse_sb_q <= 1'b0;
       end
-      if (cmd_dispatch) begin
-        if (32'(cmd_pop_data[103:96]) >= NumQueues || cmd_pop_data[63:0] == 0 || !desc_fetch_ok) begin
-          fetch_refuse_q <= 1'b1;
-          fetch_refuse_sb_q <= cmd_pop_data[104];
+      unique case (1'b1)
+        fa_cmd_refuse: begin
+          fetch_refuse_q        <= 1'b1;
+          fetch_refuse_sb_q     <= cmd_pop_data[104];
           fetch_refuse_ticket_q <= cmd_pop_data[95:64];
           fetch_refuse_status_q <= 32'(cmd_pop_data[103:96]) >= NumQueues ? ST_BAD_QID : ST_BAD_PTR;
-        end else begin
-          fetch_addr_q <= cmd_pop_data[63:0];
-          fetch_qid_q <= QidWidth'(cmd_pop_data[103:96]);
-          fetch_ticket_q <= cmd_pop_data[95:64];
-          fetch_src_sb_q <= cmd_pop_data[104];
-          fetch_start_q <= 1'b1;
         end
-      end else if (EnableDmaFetch && fetch_ready && !fetch_start_q && !fetch_submit_pending_q &&
-          !fetch_err_complete_q && dma_quiet &&
-          ((legacy_sb_valid && (sb_desc_ptr_i != '0) && desc_fetch_ok) ||
-           (sb_fetch_pending_q && !legacy_sb_valid))) begin
-        fetch_addr_q   <= (legacy_sb_valid && (sb_desc_ptr_i != '0)) ? sb_desc_ptr_i
-                                                                    : sb_ptr_hold_q;
-        fetch_src_sb_q <= 1'b1;
-        fetch_start_q  <= 1'b1;
-        fetch_ticket_q <= (legacy_sb_valid && sb_desc_ptr_i != '0) ? sb_ticket_eff : sb_ticket_hold_q;
-        fetch_qid_q <= QidWidth'((legacy_sb_valid && sb_desc_ptr_i != '0) ? sb_qid_i : sb_qid_hold_q);
-      end else if (EnableDmaFetch && legacy_sb_valid && (sb_desc_ptr_i != '0)
-                   && fetch_ready && !desc_fetch_ok) begin
-        fetch_refuse_q    <= 1'b1;
-        fetch_refuse_sb_q <= 1'b1;
-        fetch_refuse_status_q <= (32'(sb_qid_i) >= NumQueues) ? ST_BAD_QID : ST_BAD_PTR;
-        fetch_refuse_ticket_q <= sb_ticket_eff;
-      end
+        fa_sb_refuse: begin
+          fetch_refuse_q        <= 1'b1;
+          fetch_refuse_sb_q     <= 1'b1;
+          fetch_refuse_status_q <= (32'(sb_qid_i) >= NumQueues) ? ST_BAD_QID : ST_BAD_PTR;
+          fetch_refuse_ticket_q <= sb_ticket_eff;
+        end
+        fa_db_refuse: begin
+          fetch_refuse_q        <= 1'b1;
+          fetch_refuse_sb_q     <= 1'b0;
+          fetch_refuse_status_q <= (32'(wdata_i[7:0]) >= NumQueues) ? ST_BAD_QID : ST_BAD_PTR;
+          fetch_refuse_ticket_q <= {9'h0, wdata_i[30:8]};
+        end
+        default: ;
+      endcase
+    end
+  end
 
-      // DMA fetch completion: load latch + submit, or bus-error complete
+  // ---- fetch error / submit-pending ----
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      fetch_err_complete_q   <= 1'b0;
+      fetch_err_ticket_q     <= '0;
+      fetch_submit_pending_q <= 1'b0;
+    end else begin
+      if (fetch_error_fire) fetch_err_complete_q <= 1'b0;
+      if (fetch_submit_pending_q && engine_let_through) fetch_submit_pending_q <= 1'b0;
       if (EnableDmaFetch && fetch_done) begin
         if (fetch_err) begin
           fetch_err_complete_q <= 1'b1;
-          fetch_err_ticket_q <= fetch_ticket_q;
+          fetch_err_ticket_q   <= fetch_ticket_q;
         end else begin
-          for (int unsigned i = 0; i < 16; i++)
-            desc_words_q[i] <= fetch_desc[i*32 +: 32];
-          // The fetched result owns its identity until the engine accepts it.
           fetch_submit_pending_q <= 1'b1;
-        end
-      end
-
-      if (req_i && we_i && !reg_write_error) begin
-        if (addr_i[15:0] == 16'h0100) begin
-          enable_q    <= wdata_i[0];
-          wr_cpl_en_q <= wdata_i[1];
-        end else if (addr_i[15:0] == 16'h0108) begin
-          db_qid_q    <= QidWidth'(wdata_i[7:0]);
-          db_ticket_q <= {9'h0, wdata_i[30:8]};
-          db_desc_hold_q <= desc_bits;
-          // [31]=fetch_from_mem (DMA); else immediate submit of latched desc
-          if (EnableDmaFetch && wdata_i[31] && (desc_ptr_q != '0) && fetch_ready
-              && !fetch_start_q && !fetch_submit_pending_q && !fetch_err_complete_q && !sb_fetch_try) begin
-            if (desc_fetch_ok) begin
-              fetch_addr_q   <= desc_ptr_q;
-              fetch_src_sb_q <= 1'b0;
-              fetch_start_q  <= 1'b1;
-              fetch_ticket_q <= {9'h0, wdata_i[30:8]};
-              fetch_qid_q <= QidWidth'(wdata_i[7:0]);
-              db_pending_q   <= 1'b0;
-            end else begin
-              fetch_refuse_q    <= 1'b1;
-              fetch_refuse_sb_q <= 1'b0;
-              fetch_refuse_status_q <= (32'(wdata_i[7:0]) >= NumQueues) ? ST_BAD_QID : ST_BAD_PTR;
-              fetch_refuse_ticket_q <= {9'h0, wdata_i[30:8]};
-              db_pending_q      <= 1'b0;
-            end
-          end else if (!(EnableDmaFetch && wdata_i[31] && (desc_ptr_q != '0))) begin
-            submit_pulse_q <= 1'b1;
-          end
-        end else if (addr_i[15:0] == 16'h0118) begin
-          desc_ptr_q[31:0] <= wdata_i;
-        end else if (addr_i[15:0] == 16'h011C) begin
-          desc_ptr_q[63:32] <= wdata_i;
-        end else if (addr_i[15:0] == REG_OFF_REUSE_EPOCH) begin
-          reuse_epoch_q <= wdata_i;
-          window_valid_q <= 1'b0;
-        end else if (addr_i[15:0] == REG_OFF_VA_TURBO_LEVEL) begin
-          va_level_req_q <= wdata_i[3:0];
-          window_valid_q <= 1'b0;
-        end else if (addr_i[15:0] == REG_OFF_VA_TURBO_RECIPE) begin
-          va_recipe_req_q <= wdata_i[4:0];
-          window_valid_q <= 1'b0;
-        end else if (addr_i[15:0] == REG_OFF_VA_TURBO_WINDOW) begin
-          window_valid_q <= wdata_i[0];
-        end else if (addr_i[15:0] >= 16'h0140 && addr_i[15:0] < 16'h0180) begin
-          desc_words_q[addr_i[5:2]] <= wdata_i;
-        end else begin
-          automatic logic [11:0] qd;
-          automatic int unsigned q;
-          qd = ai_queue_decode(addr_i[15:0], NumQueues);
-          q  = qd[10:3];
-          if (qd[11] && q < NumQueues) begin
-            unique case (qd[2:0])
-              3'd0: base_q[q][31:0]   <= wdata_i;
-              3'd1: base_q[q][63:32]  <= wdata_i;
-              3'd2: limit_q[q][31:0]  <= wdata_i;
-              3'd3: limit_q[q][63:32] <= wdata_i;
-              3'd4: perm_q[q]         <= wdata_i[1:0];
-              default: ;
-            endcase
-          end
         end
       end
     end
   end
 
+  // ---- descriptor word latch: fetch_done fill + MMIO 0x140 window ----
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      for (int unsigned i = 0; i < 16; i++) desc_words_q[i] <= '0;
+    end else begin
+      if (EnableDmaFetch && fetch_done && !fetch_err) begin
+        for (int unsigned i = 0; i < 16; i++)
+          desc_words_q[i] <= fetch_desc[i*32 +: 32];
+      end
+      if (w_in_descwin) desc_words_q[addr_i[5:2]] <= wdata_i;
+    end
+  end
+
+  // ---- enable / wr-cpl ----
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      enable_q    <= 1'b0;
+      wr_cpl_en_q <= EnableDmaFetch;  // on when DMA path present
+    end else if (w_is_100) begin
+      enable_q    <= wdata_i[0];
+      wr_cpl_en_q <= wdata_i[1];
+    end
+  end
+
+  // ---- doorbell registers + submit pulse/pending ----
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      db_qid_q       <= '0;
+      db_ticket_q    <= '0;
+      db_desc_hold_q <= '0;
+      submit_pulse_q <= 1'b0;
+      db_pending_q   <= 1'b0;
+    end else begin
+      submit_pulse_q <= 1'b0;
+      if (submit_pulse_q && !db_let_through)
+        db_pending_q <= 1'b1;
+      else if (db_pending_q && db_let_through)
+        db_pending_q <= 1'b0;
+      if (fa_db_ok || fa_db_refuse)
+        db_pending_q <= 1'b0;
+      if (w_is_108) begin
+        db_qid_q       <= QidWidth'(wdata_i[7:0]);
+        db_ticket_q    <= {9'h0, wdata_i[30:8]};
+        db_desc_hold_q <= desc_bits;
+        // [31]=fetch_from_mem moved to the fa_db_ok/fa_db_refuse arms (E2).
+        // The else arm below is the immediate submit of the latched desc.
+        if (!(EnableDmaFetch && wdata_i[31] && (desc_ptr_q != '0)))
+          submit_pulse_q <= 1'b1;
+      end
+    end
+  end
+
+  // ---- descriptor pointer ----
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) desc_ptr_q <= '0;
+    else begin
+      if (w_is_118) desc_ptr_q[31:0]  <= wdata_i;
+      if (w_is_11c) desc_ptr_q[63:32] <= wdata_i;
+    end
+  end
+
+  // ---- epoch / VA turbo request registers ----
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      reuse_epoch_q  <= '0;
+      va_level_req_q <= '0;
+      va_recipe_req_q <= '0;
+      window_valid_q <= 1'b0;
+    end else if (mmio_we) begin
+      if (addr_i[15:0] == REG_OFF_REUSE_EPOCH) begin
+        reuse_epoch_q <= wdata_i;
+        window_valid_q <= 1'b0;
+      end else if (addr_i[15:0] == REG_OFF_VA_TURBO_LEVEL) begin
+        va_level_req_q <= wdata_i[3:0];
+        window_valid_q <= 1'b0;
+      end else if (addr_i[15:0] == REG_OFF_VA_TURBO_RECIPE) begin
+        va_recipe_req_q <= wdata_i[4:0];
+        window_valid_q <= 1'b0;
+      end else if (addr_i[15:0] == REG_OFF_VA_TURBO_WINDOW) begin
+        window_valid_q <= wdata_i[0];
+      end
+    end
+  end
+
+  // ---- queue base/limit/perm (queue-region writes) ----
+  // E4: per-queue generate -- each queue's three registers live in their
+  // own always_ff under the constant-compare write one-hot (w_qhit[q]);
+  // no runtime index into the register arrays.
+  for (genvar q = 0; q < NumQueues; q++) begin : gen_queue_regs
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        base_q[q]  <= '0;
+        limit_q[q] <= '0;
+        perm_q[q]  <= '0;
+      end else if (w_in_queue && w_qhit[q]) begin
+        unique case (w_qdec[2:0])
+          3'd0: base_q[q][31:0]   <= wdata_i;
+          3'd1: base_q[q][63:32]  <= wdata_i;
+          3'd2: limit_q[q][31:0]  <= wdata_i;
+          3'd3: limit_q[q][63:32] <= wdata_i;
+          3'd4: perm_q[q]         <= wdata_i[1:0];
+          default: ;
+        endcase
+      end
+    end
+  end
+
+  // ---- GEMM PMU latches ----
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      pmu_va_level_q   <= '0;
+      pmu_va_recipe_q  <= '0;
+      pmu_window_q     <= 1'b0;
+      pmu_r_hold_q     <= '0;
+      pmu_w_hold_q     <= '0;
+      pmu_cy_hold_q    <= '0;
+      pmu_phase_hold_q <= '0;
+      pmu_stall_hold_q <= '0;
+    end else begin
+      if (gemm_done) begin
+        pmu_va_level_q  <= va_level_req_q;
+        pmu_va_recipe_q <= va_recipe_req_q;
+        pmu_window_q    <= window_valid_q;
+      end
+      if (EnableDmaFetch && gemm_done) begin
+        pmu_r_hold_q     <= gemm_pmu_r;
+        pmu_w_hold_q     <= gemm_pmu_w;
+        pmu_cy_hold_q    <= gemm_pmu_cy;
+        pmu_phase_hold_q <= gemm_pmu_phase;
+        pmu_stall_hold_q <= gemm_pmu_stall;
+      end
+    end
+  end
+
+  // E2: the completion-room check is computed once at CplCntW+3 bits
+  // (the four boolean terms need at most +3 above the counter width);
+  // the two fire terms share it instead of two separate 32-bit sums.
+  logic [CplCntW+2:0] cpl_room_free;
+  assign cpl_room_free = (CplCntW+3)'(cpl_count) + (CplCntW+3)'(busy_engine)
+      + (CplCntW+3)'(!fetch_ready) + (CplCntW+3)'(fetch_start_q)
+      + (CplCntW+3)'(fetch_submit_pending_q);
+  // E2b L1: flat leaf conjunctions on l_cpl_room; fetch_error_fire's
+  // leaf set is inlined inside fetch_refuse_fire (no L1->L1 read).
   assign fetch_error_fire = EnableDmaFetch && fetch_err_complete_q && !done_valid &&
-      (32'(cpl_count) + 32'(busy_engine) + 32'(!fetch_ready) + 32'(fetch_start_q) +
-       32'(fetch_submit_pending_q) < CplFifoDepth);
-  assign fetch_refuse_fire = fetch_refuse_q && !done_valid && !fetch_error_fire &&
-      !(EnableDmaFetch && fetch_done && fetch_err) &&
-      (32'(cpl_count) + 32'(busy_engine) + 32'(!fetch_ready) + 32'(fetch_start_q) +
-       32'(fetch_submit_pending_q) < CplFifoDepth);
+      l_cpl_room;
+  assign fetch_refuse_fire = fetch_refuse_q && !done_valid
+      && !(EnableDmaFetch && fetch_err_complete_q && !done_valid && l_cpl_room)
+      && !(EnableDmaFetch && fetch_done && fetch_err)
+      && l_cpl_room;
 
   // Completion FIFO push/pop (combinational one-cycle pulses into i_cpl_fifo)
   always_comb begin
@@ -1900,72 +2179,158 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
   logic        rvalid_n, rvalid_q;
   logic        cap_pending_q;
 
+  // E3: one-hot address classes for the rdata gather (A104). The priority
+  // case is replaced by a masked-OR of per-class values below; the case form
+  // stays as the translate_off reference asserted by g6lc_ai_rdata_eq.
+  localparam int unsigned RDCLS = 41;
+  logic [RDCLS-1:0] rcls;
+  logic [31:0]      rval [0:RDCLS-1];
+  always_comb begin
+    logic [15:0] a;
+    a = addr_i[15:0];
+    rcls = '0;
+    rcls[0]  = (a == 16'h0100); rval[0]  = {30'h0, wr_cpl_en_q, enable_q};
+    rcls[1]  = (a == 16'h0104); rval[1]  = {last_status, 14'h0, fetch_busy, busy};
+    rcls[2]  = (a == 16'h0108); rval[2]  = {db_ticket_q[23:0], 8'(db_qid_q)};
+    rcls[3]  = (a == 16'h010C); rval[3]  = {31'h0, done_sticky_q};
+    rcls[4]  = (a == 16'h0110); rval[4]  = done_ticket_hold_q;
+    rcls[5]  = (a == 16'h0114); rval[5]  = {16'h0, done_status_hold_q};
+    rcls[6]  = (a == 16'h0118); rval[6]  = desc_ptr_q[31:0];
+    rcls[7]  = (a == 16'h011C); rval[7]  = desc_ptr_q[63:32];
+    rcls[8]  = (a == REG_OFF_CMD_MODE);    rval[8]  = {31'd0, cmd_mode_q};
+    rcls[9]  = (a == REG_OFF_CMD_PTR_LO);  rval[9]  = cmd_ptr_q[31:0];
+    rcls[10] = (a == REG_OFF_CMD_PTR_HI);  rval[10] = cmd_ptr_q[63:32];
+    rcls[11] = (a == REG_OFF_CMD_TICKET);  rval[11] = cmd_ticket_q;
+    rcls[12] = (a == REG_OFF_CMD_QID);     rval[12] = {24'd0, cmd_qid_q};
+    rcls[13] = (a == REG_OFF_CMD_CREDITS); rval[13] = 32'(IslandCfg.CommandDepth) - 32'(cmd_count);
+    rcls[14] = (a == REG_OFF_CMD_RECEIPT_TICKET); rval[14] = cmd_receipt_ticket_q;
+    rcls[15] = (a == REG_OFF_CMD_RECEIPT_CODE);   rval[15] = cmd_receipt_code_q;
+    rcls[16] = (a == REG_OFF_CMD_ACCEPTED); rval[16] = cmd_accepted_q;
+    rcls[17] = (a == REG_OFF_CMD_REJECTED); rval[17] = cmd_rejected_q;
+    rcls[18] = (a == REG_OFF_REUSE_EPOCH);  rval[18] = reuse_epoch_q;
+    rcls[19] = (a == REG_OFF_VA_TURBO_LEVEL);   rval[19] = {20'h0, 4'h0, 4'h0, va_level_req_q};
+    rcls[20] = (a == PMU_OFF_VA_TURBO_LEVEL);   rval[20] = {20'h0, 4'h0, 4'h0, pmu_va_level_q};
+    rcls[21] = (a == REG_OFF_VA_TURBO_RECIPE);  rval[21] = {19'h0, 5'h0, 3'h0, va_recipe_req_q};
+    rcls[22] = (a == PMU_OFF_VA_TURBO_RECIPE);  rval[22] = {19'h0, 5'h0, 3'h0, pmu_va_recipe_q};
+    rcls[23] = (a == REG_OFF_VA_TURBO_WINDOW);  rval[23] = {31'h0, window_valid_q};
+    rcls[24] = (a == PMU_OFF_VA_TURBO_WINDOW);  rval[24] = {31'h0, pmu_window_q};
+    rcls[25] = (a == 16'h0180); rval[25] = pmu_r_hold_q;
+    rcls[26] = (a == 16'h0184); rval[26] = pmu_w_hold_q;
+    rcls[27] = (a == 16'h0188); rval[27] = pmu_cy_hold_q;
+    rcls[28] = (a == PMU_OFF_PHASE_LA);  rval[28] = pmu_phase_hold_q[0];
+    rcls[29] = (a == PMU_OFF_PHASE_LB);  rval[29] = pmu_phase_hold_q[1];
+    rcls[30] = (a == PMU_OFF_PHASE_MAC); rval[30] = pmu_phase_hold_q[2];
+    rcls[31] = (a == PMU_OFF_PHASE_STC); rval[31] = pmu_phase_hold_q[3];
+    rcls[32] = (a == PMU_OFF_STALL_AR);  rval[32] = pmu_stall_hold_q[0];
+    rcls[33] = (a == PMU_OFF_STALL_R);   rval[33] = pmu_stall_hold_q[1];
+    rcls[34] = (a == PMU_OFF_STALL_W);   rval[34] = pmu_stall_hold_q[2];
+    rcls[35] = (a == 16'h018C); rval[35] = pmu_gbps_x1000_q;
+    rcls[36] = (a == 16'h0190); rval[36] = pmu_policy_code_q;
+    rcls[37] = (a == 16'h0194); rval[37] = pmu_policy_word_q;
+    rcls[38] = (a == 16'h0198); rval[38] = pmu_policy_topo_q;
+    rcls[39] = (a == 16'h019C); rval[39] = pmu_policy_event_q;
+    rcls[40] = (a >= 16'h0140 && a < 16'h0180); rval[40] = desc_words_q[a[5:2]];
+  end
+
+  always_comb begin
+    logic [11:0] qd;
+    int unsigned q;
+    qd = '0;
+    q  = 0;
+    rdata_n  = '0;
+    rvalid_n = 1'b0;
+    if (req_i && !cap_sel) begin
+      rvalid_n = 1'b1;
+      for (int unsigned rc = 0; rc < RDCLS; rc++)
+        if (rcls[rc]) rdata_n |= rval[rc];
+      if (rcls == '0) begin
+        qd = ai_queue_decode(addr_i[15:0], NumQueues);
+        // E4: masked-OR over the per-queue one-hot -- no dynamic index.
+        for (int unsigned q = 0; q < NumQueues; q++) begin
+          if (qd[11] && (qd[10:3] == 8'(q))) begin
+            unique case (qd[2:0])
+              3'd0: rdata_n |= base_q[q][31:0];
+              3'd1: rdata_n |= base_q[q][63:32];
+              3'd2: rdata_n |= limit_q[q][31:0];
+              3'd3: rdata_n |= limit_q[q][63:32];
+              3'd4: rdata_n |= {30'h0, perm_q[q]};
+              default: ;
+            endcase
+          end
+        end
+      end
+    end
+  end
+
+  // pragma translate_off
+  logic [31:0] rdata_ref;
+  logic        rvalid_ref;
   always_comb begin
     logic [11:0] qd;
     int unsigned q;
     q  = 0;
     qd = '0;
-    rdata_n  = '0;
-    rvalid_n = 1'b0;
+    rdata_ref  = '0;
+    rvalid_ref = 1'b0;
     if (req_i && !cap_sel) begin
-      rvalid_n = 1'b1;
+      rvalid_ref = 1'b1;
       unique case (addr_i[15:0])
-        16'h0100: rdata_n = {30'h0, wr_cpl_en_q, enable_q};
-        16'h0104: rdata_n = {last_status, 14'h0, fetch_busy, busy};
-        16'h0108: rdata_n = {db_ticket_q[23:0], 8'(db_qid_q)};
-        16'h010C: rdata_n = {31'h0, done_sticky_q};
-        16'h0110: rdata_n = done_ticket_hold_q;
-        16'h0114: rdata_n = {16'h0, done_status_hold_q};
-        16'h0118: rdata_n = desc_ptr_q[31:0];
-        16'h011C: rdata_n = desc_ptr_q[63:32];
-        REG_OFF_CMD_MODE: rdata_n = {31'd0, cmd_mode_q};
-        REG_OFF_CMD_PTR_LO: rdata_n = cmd_ptr_q[31:0];
-        REG_OFF_CMD_PTR_HI: rdata_n = cmd_ptr_q[63:32];
-        REG_OFF_CMD_TICKET: rdata_n = cmd_ticket_q;
-        REG_OFF_CMD_QID: rdata_n = {24'd0, cmd_qid_q};
-        REG_OFF_CMD_CREDITS: rdata_n = 32'(IslandCfg.CommandDepth) - 32'(cmd_count);
-        REG_OFF_CMD_RECEIPT_TICKET: rdata_n = cmd_receipt_ticket_q;
-        REG_OFF_CMD_RECEIPT_CODE: rdata_n = cmd_receipt_code_q;
-        REG_OFF_CMD_ACCEPTED: rdata_n = cmd_accepted_q;
-        REG_OFF_CMD_REJECTED: rdata_n = cmd_rejected_q;
-        REG_OFF_REUSE_EPOCH: rdata_n = reuse_epoch_q;
+        16'h0100: rdata_ref = {30'h0, wr_cpl_en_q, enable_q};
+        16'h0104: rdata_ref = {last_status, 14'h0, fetch_busy, busy};
+        16'h0108: rdata_ref = {db_ticket_q[23:0], 8'(db_qid_q)};
+        16'h010C: rdata_ref = {31'h0, done_sticky_q};
+        16'h0110: rdata_ref = done_ticket_hold_q;
+        16'h0114: rdata_ref = {16'h0, done_status_hold_q};
+        16'h0118: rdata_ref = desc_ptr_q[31:0];
+        16'h011C: rdata_ref = desc_ptr_q[63:32];
+        REG_OFF_CMD_MODE: rdata_ref = {31'd0, cmd_mode_q};
+        REG_OFF_CMD_PTR_LO: rdata_ref = cmd_ptr_q[31:0];
+        REG_OFF_CMD_PTR_HI: rdata_ref = cmd_ptr_q[63:32];
+        REG_OFF_CMD_TICKET: rdata_ref = cmd_ticket_q;
+        REG_OFF_CMD_QID: rdata_ref = {24'd0, cmd_qid_q};
+        REG_OFF_CMD_CREDITS: rdata_ref = 32'(IslandCfg.CommandDepth) - 32'(cmd_count);
+        REG_OFF_CMD_RECEIPT_TICKET: rdata_ref = cmd_receipt_ticket_q;
+        REG_OFF_CMD_RECEIPT_CODE: rdata_ref = cmd_receipt_code_q;
+        REG_OFF_CMD_ACCEPTED: rdata_ref = cmd_accepted_q;
+        REG_OFF_CMD_REJECTED: rdata_ref = cmd_rejected_q;
+        REG_OFF_REUSE_EPOCH: rdata_ref = reuse_epoch_q;
         // [3:0] requested, [11:8] applied. Applied is 0.
-        REG_OFF_VA_TURBO_LEVEL: rdata_n = {20'h0, 4'h0, 4'h0, va_level_req_q};
-        PMU_OFF_VA_TURBO_LEVEL: rdata_n = {20'h0, 4'h0, 4'h0, pmu_va_level_q};
+        REG_OFF_VA_TURBO_LEVEL: rdata_ref = {20'h0, 4'h0, 4'h0, va_level_req_q};
+        PMU_OFF_VA_TURBO_LEVEL: rdata_ref = {20'h0, 4'h0, 4'h0, pmu_va_level_q};
         // [4:0] requested id, [12:8] applied id. Applied is 0.
-        REG_OFF_VA_TURBO_RECIPE: rdata_n = {19'h0, 5'h0, 3'h0, va_recipe_req_q};
-        PMU_OFF_VA_TURBO_RECIPE: rdata_n = {19'h0, 5'h0, 3'h0, pmu_va_recipe_q};
-        REG_OFF_VA_TURBO_WINDOW: rdata_n = {31'h0, window_valid_q};
-        PMU_OFF_VA_TURBO_WINDOW: rdata_n = {31'h0, pmu_window_q};
-        16'h0180: rdata_n = pmu_r_hold_q;
-        16'h0184: rdata_n = pmu_w_hold_q;
-        16'h0188: rdata_n = pmu_cy_hold_q;
-        PMU_OFF_PHASE_LA:  rdata_n = pmu_phase_hold_q[0];
-        PMU_OFF_PHASE_LB:  rdata_n = pmu_phase_hold_q[1];
-        PMU_OFF_PHASE_MAC: rdata_n = pmu_phase_hold_q[2];
-        PMU_OFF_PHASE_STC: rdata_n = pmu_phase_hold_q[3];
-        PMU_OFF_STALL_AR:  rdata_n = pmu_stall_hold_q[0];
-        PMU_OFF_STALL_R:   rdata_n = pmu_stall_hold_q[1];
-        PMU_OFF_STALL_W:   rdata_n = pmu_stall_hold_q[2];
-        16'h018C: rdata_n = pmu_gbps_x1000_q;
-        16'h0190: rdata_n = pmu_policy_code_q;
-        16'h0194: rdata_n = pmu_policy_word_q;
-        16'h0198: rdata_n = pmu_policy_topo_q;
-        16'h019C: rdata_n = pmu_policy_event_q;
+        REG_OFF_VA_TURBO_RECIPE: rdata_ref = {19'h0, 5'h0, 3'h0, va_recipe_req_q};
+        PMU_OFF_VA_TURBO_RECIPE: rdata_ref = {19'h0, 5'h0, 3'h0, pmu_va_recipe_q};
+        REG_OFF_VA_TURBO_WINDOW: rdata_ref = {31'h0, window_valid_q};
+        PMU_OFF_VA_TURBO_WINDOW: rdata_ref = {31'h0, pmu_window_q};
+        16'h0180: rdata_ref = pmu_r_hold_q;
+        16'h0184: rdata_ref = pmu_w_hold_q;
+        16'h0188: rdata_ref = pmu_cy_hold_q;
+        PMU_OFF_PHASE_LA:  rdata_ref = pmu_phase_hold_q[0];
+        PMU_OFF_PHASE_LB:  rdata_ref = pmu_phase_hold_q[1];
+        PMU_OFF_PHASE_MAC: rdata_ref = pmu_phase_hold_q[2];
+        PMU_OFF_PHASE_STC: rdata_ref = pmu_phase_hold_q[3];
+        PMU_OFF_STALL_AR:  rdata_ref = pmu_stall_hold_q[0];
+        PMU_OFF_STALL_R:   rdata_ref = pmu_stall_hold_q[1];
+        PMU_OFF_STALL_W:   rdata_ref = pmu_stall_hold_q[2];
+        16'h018C: rdata_ref = pmu_gbps_x1000_q;
+        16'h0190: rdata_ref = pmu_policy_code_q;
+        16'h0194: rdata_ref = pmu_policy_word_q;
+        16'h0198: rdata_ref = pmu_policy_topo_q;
+        16'h019C: rdata_ref = pmu_policy_event_q;
         default: begin
           if (addr_i[15:0] >= 16'h0140 && addr_i[15:0] < 16'h0180)
-            rdata_n = desc_words_q[addr_i[5:2]];
+            rdata_ref = desc_words_q[addr_i[5:2]];
           else begin
             qd = ai_queue_decode(addr_i[15:0], NumQueues);
             q  = qd[10:3];
             if (qd[11] && q < NumQueues) begin
               unique case (qd[2:0])
-                3'd0: rdata_n = base_q[q][31:0];
-                3'd1: rdata_n = base_q[q][63:32];
-                3'd2: rdata_n = limit_q[q][31:0];
-                3'd3: rdata_n = limit_q[q][63:32];
-                3'd4: rdata_n = {30'h0, perm_q[q]};
-                default: rdata_n = '0;
+                3'd0: rdata_ref = base_q[q][31:0];
+                3'd1: rdata_ref = base_q[q][63:32];
+                3'd2: rdata_ref = limit_q[q][31:0];
+                3'd3: rdata_ref = limit_q[q][63:32];
+                3'd4: rdata_ref = {30'h0, perm_q[q]};
+                default: rdata_ref = '0;
               endcase
             end
           end
@@ -1973,6 +2338,18 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
       endcase
     end
   end
+  int unsigned g6lc_ai_rdata_eq;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) g6lc_ai_rdata_eq <= 0;
+    else begin
+      g6lc_ai_rdata_eq <= g6lc_ai_rdata_eq + 1;
+      assert (rdata_n == rdata_ref && rvalid_n == rvalid_ref)
+        else $error("g6lc_ai_island_top: rdata_eq mismatch %h!=%h v%b!=%b",
+                    rdata_n, rdata_ref, rvalid_n, rvalid_ref);
+    end
+  end
+  final $display("[equiv] g6lc_ai_island_top rdata_eq: checked=%0d", g6lc_ai_rdata_eq);
+  // pragma translate_on
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin

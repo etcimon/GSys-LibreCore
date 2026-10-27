@@ -1,0 +1,2 @@
+##   0:00:00  Solver: z3
+##   0:00:00  Checking assumptions in step 0..

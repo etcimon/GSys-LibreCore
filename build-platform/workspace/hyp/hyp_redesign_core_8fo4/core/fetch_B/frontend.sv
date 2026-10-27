@@ -396,11 +396,26 @@ module frontend
     end else if (flush_i | smt_restore_flush) begin
       bp_pend_q     <= 1'b0;
       bp_misp_ttl_q <= '0;
-    end else if (ov2_valid) begin
+    end else if (hyp_fe_override2_o) begin
+      // r73: arm on the ov2 record's APPLY cycle, not on the raw verdict.
+      // ov2_valid could lose the same-cycle arbitration to a replay/ov1
+      // record (g6lc_fe_redirect weak chain: replay > ov1 > ov2); the pend
+      // then filtered for a target no record ever pushed, under the live
+      // epoch, so every return of the stream that was actually fetched was
+      // dropped — the r41b/r44b/r45b hold (cyc 15,690,822: FTQ empty,
+      // cf_hold=1, bp_pend=1 bp_tgt=800124d4 vs fetch_address=800133c0)
+      // and the r42/r43 run-away were both this filter. At apply fe_epoch
+      // already reads the record's epoch and red_pc is the pushed target.
       bp_pend_q       <= 1'b1;
-      bp_tgt_q        <= ov2_pc;
-      bp_pend_epoch_q <= fe_epoch + EW'(1);
+      bp_tgt_q        <= red_pc;
+      bp_pend_epoch_q <= fe_epoch;
       bp_misp_ttl_q   <= '0;
+    end else if (bp_pend_q && reseed_now &&
+        !g6lc_fetch_pkg::same_win(G6LCCfg, 64'(red_pc), 64'(bp_tgt_q))) begin
+      // a reseed to another target supersedes the stream the pend filters
+      // (its epoch dies at the same edge; this keeps the register honest)
+      bp_pend_q     <= 1'b0;
+      bp_misp_ttl_q <= '0;
     end else if (bp_pend_q && icache_dreq_i.valid &&
         g6lc_fetch_pkg::same_win(G6LCCfg, 64'(icache_dreq_i.vaddr), 64'(bp_tgt_q))) begin
       bp_pend_q     <= 1'b0;
@@ -472,7 +487,7 @@ module frontend
   logic pf_req;
   logic [G6LCCfg.VLEN-1:0] pf_vaddr;
   logic demand_req, demand_fire;
-  logic cf_hold_q;
+  logic cf_hold_q, ftq_empty;
 
   if (!FtqEn) begin : gen_no_ftq
     assign icache_dreq_o.req = instr_queue_ready & ~halt_frontend_i;
@@ -499,6 +514,7 @@ module frontend
     assign demand_req = 1'b0;
     assign demand_fire = 1'b0;
     assign cf_hold_q = 1'b0;
+    assign ftq_empty = 1'b1;
   end else begin : gen_ftq
     // After a redirect the queue must not be refilled sequentially until the
     // redirected fetch has been registered: otherwise if_ready keeps pushing
@@ -512,6 +528,22 @@ module frontend
       else if (icache_take) cf_hold_q <= 1'b0;  // redirect fetch presented
       else if (flush_i && !reseed_now) cf_hold_q <= 1'b0;
     end
+//pragma translate_off
+    // r71 witness (r41b @15,690,822): a held, empty FTQ with no redirect in
+    // flight cannot be refilled (if_ready=0, demand=0). Releasing the hold on
+    // ftq_empty was measured as a countercase (r42/r43: sequential run-away
+    // after a reseed burst, fetch never delivered); the hold is unchanged and
+    // the stuck state is only reported, with the lost redirect's bookkeeping.
+    int unsigned fe_hold_stuck_q;
+    always @(posedge clk_i) begin
+      if (!rst_ni || !cf_hold_q || !ftq_empty) fe_hold_stuck_q <= 0;
+      else fe_hold_stuck_q <= fe_hold_stuck_q + 1;
+      if (fe_hold_stuck_q == 256)
+        $display("[fe-hold-stuck] t=%0t fetch_address=%h npc=%h red_pc=%h red_pend=%b red_hold=%b red_inflight=%b red_lost=%b red_tail=%b epoch=%0d",
+                 $time, fetch_address, npc_q, redirect_pc_q, redirect_pend_q, redirect_hold,
+                 redirect_inflight_q, redirect_lost_q, redirect_tail_q, fe_epoch);
+    end
+//pragma translate_on
 
     // A reseed flushes and refills the queue, so treat that cycle as having
     // free space even if the pre-flush queue was full or held. The replay
@@ -562,7 +594,7 @@ module frontend
         .peek_valid_o (ftq_peek_valid),
         .peek_epoch_o (ftq_peek_epoch),
         .full_o       (ftq_full),
-        .empty_o      (),
+        .empty_o      (ftq_empty),
         .count_o      ()
     );
 

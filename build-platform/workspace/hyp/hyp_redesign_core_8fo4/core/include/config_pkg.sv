@@ -598,6 +598,12 @@ package config_pkg;
     // Issue width: 0 = auto (SuperscalarEn ? 2 : 1); else 1, or 2..G6LC_MAX_ISSUE_PORTS
     // when SuperscalarEn. Precursor knob for U5 multi-issue OoO scaling.
     int unsigned NrIssuePorts;
+    // Fetch window in bits: 0 = auto (build_fetch_width scales it with
+    // NrIssuePorts so every port has a slot in one packet); else an explicit
+    // {32,64,128,256}. An explicit width below the issue-scaled one is the
+    // "fetch-bound" shape: the instruction queue keeps NrIssuePorts drain
+    // positions (Geo.qslots) but refills at INSTR_PER_FETCH per cycle.
+    int unsigned FetchWidth;
     // Enable ALU-ALU bypass (superscalar mode only)
     bit          ALUBypass;
     // Number of commit ports. When SuperscalarEn and 0/under-sized, raised to
@@ -1064,6 +1070,13 @@ package config_pkg;
     assert (Cfg.FETCH_WIDTH == 32 || Cfg.FETCH_WIDTH == 64 ||
             Cfg.FETCH_WIDTH == 128 || Cfg.FETCH_WIDTH == 256)
     else $fatal(1, "[frontend] fetch width not supported");
+    // The hang-6 rule of build_fetch_width, made a legality statement now that
+    // FetchWidth can pin the window: multi-issue with RVC needs the 64-bit
+    // realign path (realign_bp_32 desyncs mid-RVI PCs).
+    assert (!(Cfg.RVC && Cfg.NrIssuePorts >= 2 && Cfg.FETCH_WIDTH < 64))
+    else $fatal(1, "[frontend] multi-issue with RVC needs FETCH_WIDTH >= 64");
+    assert (Cfg.FETCH_WIDTH <= Cfg.ICACHE_LINE_WIDTH)
+    else $fatal(1, "[frontend] fetch window wider than the I$ line");
     // Multi-issue width (superscalar precursor to OoO).
     assert (Cfg.NrIssuePorts >= 1 && Cfg.NrIssuePorts <= G6LC_MAX_ISSUE_PORTS);
     assert (!(Cfg.NrIssuePorts > 1 && !Cfg.SuperscalarEn));

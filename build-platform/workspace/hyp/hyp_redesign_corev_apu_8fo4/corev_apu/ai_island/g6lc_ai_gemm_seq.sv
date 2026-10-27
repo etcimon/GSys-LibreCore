@@ -58,6 +58,9 @@ module g6lc_ai_gemm_seq #(
     // single C read port); columns past n are masked.
     parameter int unsigned OutCols   = 1,
     parameter bit          DotPipeFloat = 1'b0, // 0: combinational g6lc_ai_pe_dot_float; 1: pipelined dot product with valid handshake
+    // 0: combinational g6lc_ai_pe_dot (128 FO4 class); 1: g6lc_ai_pe_dot_pipe,
+    // one tree level per stage on the SAME latency as the float pipe.
+    parameter bit          DotPipeInt   = 1'b0,
     parameter int unsigned MaxAROut  = 2,  // I3: multi-outstanding AR; live = 2
     // Shared DRAM stripe (g6lc_ai_island_cfg_pkg). N=1 leaves MaxBurstBeats
     // at 255 so the live 256³ fixture stays bit-identical. N>1 caps each
@@ -1315,13 +1318,17 @@ assign axi_req_o  = axi_req_d;
 
   for (genvar g = 0; g < int'(OutCols); g++) begin : gen_pe_cols
     // Integer/INT4 path
-    g6lc_ai_pe_dot #(.Lanes(PeLanes)) i_pe_int (
-        .a_i     (pe_a),
-        .b_i     (pe_b[g]),
-        .valid_i (pe_v),
-        .numfmt_i(numfmt_q),
-        .sum_o   (pe_sum_int[g])
-    );
+    if (!DotPipeInt) begin : gen_pe_int_comb
+      g6lc_ai_pe_dot #(.Lanes(PeLanes)) i_pe_int (
+          .a_i     (pe_a),
+          .b_i     (pe_b[g]),
+          .valid_i (pe_v),
+          .numfmt_i(numfmt_q),
+          .sum_o   (pe_sum_int[g])
+      );
+    end else begin : gen_pe_int_pipe_only
+      assign pe_sum_int[g] = '0;
+    end
 
     // Floating path (FP8/FP16/BF16/FP32) — combinational baseline
     g6lc_ai_pe_dot_float #(.Lanes(PeLanes)) i_pe_float (
@@ -1334,44 +1341,82 @@ assign axi_req_o  = axi_req_d;
     );
   end
 
-  // Pipelined floating dot-product handshake
+  // Pipelined dot-product handshake (float and/or int pipes).
   // dot_start is asserted with each MAC issue; dot_sum/dot_first/... are valid
   // DOT_LATENCY-1 cycles later, matching dot_valid_o.  DOT_LATENCY is the
   // dot product's registered Latency plus the one-cycle output register.
-  localparam int unsigned DOT_LATENCY = DotPipeFloat ?
+  // Both pipes have the same Latency, so one metadata pipe serves either.
+  localparam bit DotPipeAny = DotPipeFloat || DotPipeInt;
+  localparam int unsigned DOT_LATENCY = DotPipeAny ?
       ($clog2(PeLanes < 1 ? 1 : PeLanes) + 5) : 1;
 
   logic dot_start;
   logic dot_valid;
   logic [31:0] dot_sum [OutCols];
+  logic        dot_valid_f, dot_valid_i;
+  logic [31:0] dot_sum_f [OutCols];
+  logic [31:0] dot_sum_i [OutCols];
   logic        dot_cv_out [OutCols];
   logic dot_first_out, dot_last_out;
   logic [31:0] dot_i_out, dot_j_out;
   logic dot_first_issue, dot_last_issue;
   logic [31:0] dot_i_issue, dot_j_issue;
+  logic pe_float_en;
+  logic dot_pipe_en;
   // F0b-2: outstanding dot-product transactions so the MAC does not exit before
   // all pipelined results have returned and their C writes have been issued.
   logic [$clog2(PeLanes)+4:0] dot_pending_q;
 
   generate
-    if (DotPipeFloat) begin : gen_dot_pipe
+    if (DotPipeFloat) begin : gen_dot_pipe_float
       logic dot_valid_col [OutCols];
-      for (genvar g = 0; g < int'(OutCols); g++) begin : gen_dot_pipe_cols
+      for (genvar g = 0; g < int'(OutCols); g++) begin : gen_dot_pipe_fcols
         g6lc_ai_pe_dot_float_pipe #(.Lanes(PeLanes)) i_pe_float_pipe (
             .clk_i    (clk_i),
             .rst_ni   (rst_ni),
-            .start_i  (dot_start),
+            .start_i  (dot_start && pe_float_en),
             .a_i      (pe_a_float),
             .b_i      (pe_b_float[g]),
             .valid_i  (pe_v),
             .numfmt_i (numfmt_q),
-            .sum_o    (dot_sum[g]),
+            .sum_o    (dot_sum_f[g]),
             .flags_o  (),
             .valid_o  (dot_valid_col[g])
         );
       end
       // All column pipes share start and latency; column 0 is the handshake.
-      assign dot_valid = dot_valid_col[0];
+      assign dot_valid_f = dot_valid_col[0];
+    end else begin : gen_dot_float_off
+      assign dot_valid_f = 1'b0;
+      always_comb for (int unsigned g = 0; g < OutCols; g++) dot_sum_f[g] = '0;
+    end
+
+    if (DotPipeInt) begin : gen_dot_pipe_int
+      logic dot_valid_col_i [OutCols];
+      for (genvar g = 0; g < int'(OutCols); g++) begin : gen_dot_pipe_icols
+        g6lc_ai_pe_dot_pipe #(.Lanes(PeLanes)) i_pe_int_pipe (
+            .clk_i    (clk_i),
+            .rst_ni   (rst_ni),
+            .start_i  (dot_start && !pe_float_en),
+            .a_i      (pe_a),
+            .b_i      (pe_b[g]),
+            .valid_i  (pe_v),
+            .numfmt_i (numfmt_q),
+            .sum_o    (dot_sum_i[g]),
+            .valid_o  (dot_valid_col_i[g])
+        );
+      end
+      assign dot_valid_i = dot_valid_col_i[0];
+    end else begin : gen_dot_int_off
+      assign dot_valid_i = 1'b0;
+      always_comb for (int unsigned g = 0; g < OutCols; g++) dot_sum_i[g] = '0;
+    end
+
+    if (DotPipeAny) begin : gen_dot_pipe
+      // Static per job (numfmt_q is latched at start): the format select.
+      assign dot_valid = pe_float_en ? dot_valid_f : dot_valid_i;
+      always_comb for (int unsigned g = 0; g < OutCols; g++)
+        dot_sum[g] = pe_float_en ? dot_sum_f[g] : dot_sum_i[g];
 
       logic [DOT_LATENCY-1:0] dot_first_pipe, dot_last_pipe;
       logic [DOT_LATENCY-1:0][31:0] dot_i_pipe, dot_j_pipe;
@@ -1419,7 +1464,6 @@ assign axi_req_o  = axi_req_d;
   // numfmt_q is constant for a tile, so the mux is a per-job static select.
   localparam logic [2:0] AI_FMT_INT  = 3'd0;
   localparam logic [2:0] AI_FMT_INT4 = 3'd1;
-  logic pe_float_en;
   // Only dispatch to the float dot for implemented FP families
   // (FP8 E4M3/E5M2, FP16, BF16, FP32).  SP24 and reserved codes stay on the
   // integer path where the sequencer's numfmt check / descriptor grant will
@@ -1427,6 +1471,9 @@ assign axi_req_o  = axi_req_d;
   // Static per job (numfmt_q is latched at start), so this is a configuration
   // select rather than a per-cycle mux in the MAC's critical path.
   assign pe_float_en = (numfmt_q inside {3'd3, 3'd4, 3'd5, 3'd6, 3'd7});
+  // Pipelined datapath live for this job's format.
+  assign dot_pipe_en = (DotPipeFloat && pe_float_en) ||
+                       (DotPipeInt && !pe_float_en);
   always_comb for (int unsigned g = 0; g < OutCols; g++)
     pe_sum[g] = pe_float_en ? pe_sum_float[g] : pe_sum_int[g];
 
@@ -1459,6 +1506,22 @@ assign axi_req_o  = axi_req_d;
   logic [PitchShW-1:0] pitch_sh_c, pitch_sh_q;
   logic                cap_ok_c;
   assign pitch_sh_c  = PitchShW'(g6lc_ai_island_cfg_pkg::ai_flat_pitch_shift(k_bytes, LaneShift));
+  // pragma translate_off
+  // D1 equivalence: the clz-tree pitch must equal the serial-loop reference.
+  int unsigned g6lc_ai_pitch_eq;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) g6lc_ai_pitch_eq <= 0;
+    else begin
+      g6lc_ai_pitch_eq <= g6lc_ai_pitch_eq + 1;
+      assert (pitch_sh_c == PitchShW'(g6lc_ai_island_cfg_pkg::ai_flat_pitch_shift_ref(k_bytes, LaneShift)))
+        else $error("g6lc_ai_gemm_seq: pitch_eq mismatch %0d != %0d",
+                    pitch_sh_c, g6lc_ai_island_cfg_pkg::ai_flat_pitch_shift_ref(k_bytes, LaneShift));
+    end
+  end
+  final $display("[equiv] g6lc_ai_gemm_seq pitch_eq: checked=%0d", g6lc_ai_pitch_eq);
+  // pragma translate_on
+
+
   // Byte-capacity box: both operand panels must fit their banks at this pitch,
   // and k must fit the 16-bit lda/ldb it is compared against.
   // B rows are spread over OutCols groups of OperandWordsBGrp words each.
@@ -1908,7 +1971,8 @@ assign axi_req_o  = axi_req_d;
 
   // Put `nbytes` (4 or 8) of `payload` on the byte lane `addr` selects.
   // DataWidth=64 and an 8-byte-aligned pair lands in [63:0] with strobe 8'hFF.
-  function automatic wbeat_t wbeat_at(
+  // Bytes past the beat edge drop; the loop form is kept as wbeat_at_ref.
+  function automatic wbeat_t wbeat_at_ref(
       input logic [63:0] payload,
       input int unsigned nbytes,
       input logic [31:0] addr
@@ -1928,9 +1992,37 @@ assign axi_req_o  = axi_req_d;
     return b;
   endfunction
 
+  function automatic wbeat_t wbeat_at(
+      input logic [63:0] payload,
+      input int unsigned nbytes,
+      input logic [31:0] addr
+  );
+    // Barrel-shift form (D4): clamp the byte count to what fits past the
+    // lane, mask the payload, one shift for data and one for the strobe.
+    // `nfit` = bytes of payload surviving the beat edge (drops partial
+    // byte lane, matching the reference loop's `at < BytesPerBeat`).
+    automatic wbeat_t b;
+    automatic int unsigned nfit;
+    nfit  = (nbytes > BytesPerBeat - (unsigned'(addr) & (BytesPerBeat - 1)))
+          ? BytesPerBeat - (unsigned'(addr) & (BytesPerBeat - 1)) : nbytes;
+`ifdef G6LC_MUT_AI_WBEAT_LANE0
+    // Review mutant: lane forced to 0 � misaligned beats fail.
+    b.data = ((nfit >= 8) ? payload
+             : payload & ((64'd1 << (8 * nfit)) - 64'd1));
+    b.strb = BytesPerBeat'((8'd1 << nfit) - 8'd1);
+`else
+    b.data = ((nfit >= 8) ? payload
+             : payload & ((64'd1 << (8 * nfit)) - 64'd1))
+             << (8 * (unsigned'(addr) & (BytesPerBeat - 1)));
+    b.strb = BytesPerBeat'(((8'd1 << nfit) - 8'd1))
+             << (unsigned'(addr) & (BytesPerBeat - 1));
+`endif
+    return b;
+  endfunction
+
   // One C beat: the `nwords` (a power of two, 2 or StoreWordsMax) consecutive
   // 32-bit words placed at the byte lane the address selects (0 when aligned).
-  function automatic wbeat_t wbeat_words(
+  function automatic wbeat_t wbeat_words_ref(
       input logic [31:0] addr,
       input int unsigned nwords
   );
@@ -1946,6 +2038,27 @@ assign axi_req_o  = axi_req_d;
         bt.strb[at +: 4]    = 4'hF;
       end
     end
+    return bt;
+  endfunction
+
+  function automatic wbeat_t wbeat_words(
+      input logic [31:0] addr,
+      input int unsigned nwords
+  );
+    // Barrel-shift form (D4): pack c_rx_data, clamp to words that fit a
+    // beat (a word lands only when all 4 bytes do: at+3 < BytesPerBeat),
+    // one shift for data and strobe.
+    automatic wbeat_t bt;
+    automatic int unsigned wfit;
+    automatic logic [StoreWordsMax*32-1:0] pw;
+    for (int unsigned w = 0; w < StoreWordsMax; w++)
+      pw[32*w +: 32] = c_rx_data[w];
+    wfit = (nwords > (BytesPerBeat - (unsigned'(addr) & (BytesPerBeat - 1))) / 4)
+         ? (BytesPerBeat - (unsigned'(addr) & (BytesPerBeat - 1))) / 4 : nwords;
+    bt.data = (DataWidth'(pw) & ((DataWidth'(1) << (32 * wfit)) - 1))
+              << (8 * (unsigned'(addr) & (BytesPerBeat - 1)));
+    bt.strb = BytesPerBeat'(((8'd1 << (4 * wfit)) - 8'd1))
+              << (unsigned'(addr) & (BytesPerBeat - 1));
     return bt;
   endfunction
 
@@ -1997,10 +2110,16 @@ assign axi_req_o  = axi_req_d;
     return LaneW'(j & 32'(PeLanes - 1));
   endfunction
 
+  // pragma translate_off
+  initial assert (KPerBank == 0 || (KPerBank & (KPerBank - 1)) == 0)
+    else $fatal(1, "g6lc_ai_gemm_seq: KPerBank %0d not power-of-two", KPerBank);
+  // pragma translate_on
   function automatic logic [BankAddrW-1:0] c_bank_addr(
       input logic [31:0] i, j
   );
-    return BankAddrW'(int'(i) * KPerBank + int'(j >> LaneShift));
+    // D2b: KPerBank is asserted power-of-two (LimN and PeLanes are powers
+    // of two in every shipped cfg); the row*KPerBank is then a shift.
+    return BankAddrW'(int'(i) << $clog2(KPerBank) + int'(j >> LaneShift));
   endfunction
 
   logic [AddrWidth-1:0] a_cur, b_cur, a_ar_cur, b_ar_cur, c_store_addr;
@@ -2018,13 +2137,19 @@ assign axi_req_o  = axi_req_d;
                         32'(c_cols_row_q) == stc_i_q &&
                         c_cols_done_q >= stc_j_q + 32'(2 * TrailMinPairs));
   // Receive cursors (tile write / MAC)
-  assign a_cur        = a_addr(pa_q, i_q, t_q, lda_q);
-  assign b_cur        = b_addr(pb_q, t_q, j_q, ldb_q);
-  // Issue cursors (AR address may run ahead of receive)
+  // D2a registered cursors: a_cur_q/b_cur_q carry the receive element
+  // address; a_addr/b_addr stay as translate_off miters below. The row
+  // bases and per-job strides are job-constant registers latched at start.
+  logic [AddrWidth-1:0] a_cur_q, b_cur_q;
+  logic [AddrWidth-1:0] a_row_base_q, b_row_base_q;
+  logic [31:0]          stride_a_q, stride_b_q, stride_b_grp_q;
+  assign a_cur        = a_cur_q;
+  assign b_cur        = b_cur_q;
   assign a_ar_cur     = a_addr(pa_q, ar_i_q, ar_t_q, lda_q);
   assign b_ar_cur     = b_addr(pb_q, ar_t_q, ar_j_q, ldb_q);
-  // Store address uses trail cursor (not MAC i/j)
   assign c_store_addr = c_addr(pc_q, stc_i_q, stc_j_q, ldc_eff);
+  // Issue cursors (AR address may run ahead of receive)
+  // Store address uses trail cursor (not MAC i/j)
   assign ar_head_lane = ar_lane_mem_q[0];
 
   always_comb begin
@@ -2198,6 +2323,33 @@ assign axi_req_o  = axi_req_d;
     end
   end
 
+  // D6 hoist: AR/store issue address math moved out of the mega-block.
+  // Each *_pre wire is a pure function of registered state + axi_resp_s;
+  // the mega-block only selects/consumes them (same expressions, evaluated
+  // unconditionally -- functionally identical).
+  logic [AddrWidth-1:0] ar_a_pre_addr,  ar_b_pre_addr;
+  logic [BeatLaneW-1:0] ar_a_pre_lane,  ar_b_pre_lane;
+  logic [31:0]          ar_a_pre_rem,   ar_b_pre_rem;
+  logic [7:0]           ar_a_pre_nb,    ar_b_pre_nb;
+  logic [31:0]          ar_a_pre_elems, ar_b_pre_elems;
+  logic                 ar_a_pre_row_last, ar_b_pre_row_last;
+  always_comb begin
+    ar_a_pre_lane     = a_ar_cur[BeatAlignW-1:0];
+    ar_a_pre_addr     = beat_align(a_ar_cur);
+    ar_a_pre_rem      = beats_for_rem(k_bytes - ar_t_q, ar_a_pre_lane);
+    ar_a_pre_nb       = cap_beats_to_stripe(ar_a_pre_addr, ar_a_pre_rem);
+    ar_a_pre_elems    = elems_for_burst(k_bytes - ar_t_q, ar_a_pre_lane, ar_a_pre_nb);
+    ar_a_pre_row_last = (ar_t_q + ar_a_pre_elems) >= k_bytes;
+  end
+  always_comb begin
+    ar_b_pre_lane     = b_ar_cur[BeatAlignW-1:0];
+    ar_b_pre_addr     = beat_align(b_ar_cur);
+    ar_b_pre_rem      = beats_for_rem(k_bytes - ar_t_q, ar_b_pre_lane);
+    ar_b_pre_nb       = cap_beats_to_stripe(ar_b_pre_addr, ar_b_pre_rem);
+    ar_b_pre_elems    = elems_for_burst(k_bytes - ar_t_q, ar_b_pre_lane, ar_b_pre_nb);
+    ar_b_pre_row_last = (ar_t_q + ar_b_pre_elems) >= k_bytes;
+  end
+
   always_comb begin
     // defaults: idle banks + AXI
     for (int unsigned p = 0; p < PeLanes; p++) begin
@@ -2269,6 +2421,7 @@ assign axi_req_o  = axi_req_d;
     ar_i_d      = ar_i_q;
     ar_t_d      = ar_t_q;
     ar_j_d      = ar_j_q;
+
     ar_lane_push    = '0;
     ar_lane_push_en = 1'b0;
     ar_lane_pop_en  = 1'b0;
@@ -2378,10 +2531,8 @@ assign axi_req_o  = axi_req_d;
           // ---- Issue AR (may run concurrent with R) ----
           if (ar_hold_q) free_s = ar_hold_slot_q;
           if ((ar_hold_q || ar_inflight_q < ar_max_eff) && ar_i_q < m_q) begin
-            axi_req_d.ar.addr  = beat_align(a_ar_cur);
-            nb                 = cap_beats_to_stripe(
-                beat_align(a_ar_cur),
-                beats_for_rem(k_bytes - ar_t_q, a_ar_cur[BeatAlignW-1:0]));
+            axi_req_d.ar.addr  = ar_a_pre_addr;
+            nb                 = ar_a_pre_nb;
             axi_req_d.ar.len   = axi_pkg::len_t'(nb - 8'd1);
             if (SplitArId)
               axi_req_d.ar.id = ArIdBase + IdWidth'(free_s);
@@ -2389,13 +2540,13 @@ assign axi_req_o  = axi_req_d;
             if (axi_resp_s.ar_ready) begin
               ar_push         = 1'b1;
               ar_lane_push_en = 1'b1;
-              ar_lane_push    = a_ar_cur[BeatAlignW-1:0];
+              ar_lane_push    = ar_a_pre_lane;
               ar_slot_we       = SplitArId;
               ar_slot_widx     = free_s;
               ar_slot_push_row = ar_i_q;
               ar_slot_push_col = ar_t_q;
-              elems = elems_for_burst(k_bytes - ar_t_q, a_ar_cur[BeatAlignW-1:0], nb);
-              if (ar_t_q + elems >= k_bytes) begin
+              elems = ar_a_pre_elems;
+              if (ar_a_pre_row_last) begin
                 ar_t_en = 1'b1; ar_t_d = '0;
                 ar_i_en = 1'b1; ar_i_d = ar_i_q + 32'd1;
               end else begin
@@ -2525,10 +2676,8 @@ assign axi_req_o  = axi_req_d;
           // ---- Issue AR (may run concurrent with R) ----
           if (ar_hold_q) free_s = ar_hold_slot_q;
           if ((ar_hold_q || ar_inflight_q < ar_max_eff) && ar_j_q < n_q) begin
-            axi_req_d.ar.addr  = beat_align(b_ar_cur);
-            nb                 = cap_beats_to_stripe(
-                beat_align(b_ar_cur),
-                beats_for_rem(k_bytes - ar_t_q, b_ar_cur[BeatAlignW-1:0]));
+            axi_req_d.ar.addr  = ar_b_pre_addr;
+            nb                 = ar_b_pre_nb;
             axi_req_d.ar.len   = axi_pkg::len_t'(nb - 8'd1);
             if (SplitArId)
               axi_req_d.ar.id = ArIdBase + IdWidth'(free_s);
@@ -2536,13 +2685,13 @@ assign axi_req_o  = axi_req_d;
             if (axi_resp_s.ar_ready) begin
               ar_push         = 1'b1;
               ar_lane_push_en = 1'b1;
-              ar_lane_push    = b_ar_cur[BeatAlignW-1:0];
+              ar_lane_push    = ar_b_pre_lane;
               ar_slot_we       = SplitArId;
               ar_slot_widx     = free_s;
               ar_slot_push_row = ar_j_q;
               ar_slot_push_col = ar_t_q;
-              elems = elems_for_burst(k_bytes - ar_t_q, b_ar_cur[BeatAlignW-1:0], nb);
-              if (ar_t_q + elems >= k_bytes) begin
+              elems = ar_b_pre_elems;
+              if (ar_b_pre_row_last) begin
                 ar_t_en = 1'b1; ar_t_d = '0;
                 ar_j_en = 1'b1; ar_j_d = ar_j_q + 32'd1;
               end else begin
@@ -2685,7 +2834,7 @@ assign axi_req_o  = axi_req_d;
           // ---- issue the next step ----------------------------------------
           if (mac_active) begin
             // Tag the pipelined dot product when this is a float tile.
-            dot_start      = mac_active && pe_float_en;
+            dot_start      = mac_active && dot_pipe_en;
             dot_first_issue= (t_q == 0);
             dot_last_issue = last_step;
             dot_i_issue    = i_q;
@@ -3056,7 +3205,7 @@ assign axi_req_o  = axi_req_d;
     endcase
     // Accumulate mode enters the MAC through ST_LC so the tile holds C first.
     if (acc_mode_q && state_d == ST_MAC && state_q != ST_MAC && state_q != ST_LC)
-      state_d = ST_LC;
+      state_d = lc_mul_done ? ST_LC : state_q;  // hold until the seed product is ready
 
   end
 
@@ -3069,6 +3218,10 @@ assign axi_req_o  = axi_req_d;
       acc_mode_q <= 1'b0;
       pa_q <= '0; pb_q <= '0; pc_q <= '0;
       i_q <= '0; j_q <= '0; t_q <= '0;
+      stride_a_q <= '0; stride_b_q <= '0; stride_b_grp_q <= '0;
+      a_row_base_q <= '0; b_row_base_q <= '0;
+      a_cur_q <= '0; b_cur_q <= '0;
+
       for (int unsigned g = 0; g < OutCols; g++) begin acc_q[g] <= '0; sum_q[g] <= '0; sum_cv_q[g] <= 1'b0; end
       pitch_sh_q <= '0;
       err_q <= 1'b0;
@@ -3110,8 +3263,8 @@ assign axi_req_o  = axi_req_d;
       for (int unsigned g = 0; g < OutCols; g++) acc_q[g] <= acc_d[g];
       // F0b-2: advance the pipeline stage. For the pipelined floating path the
       // dot product valid/data are sampled directly from the pipe output; the
-      // integer path continues to use the combinational `sum_*_d` values.
-      if (DotPipeFloat && pe_float_en) begin
+      // non-pipelined path continues to use the combinational `sum_*_d` values.
+      if (dot_pipe_en) begin
         for (int unsigned g = 0; g < OutCols; g++) begin
           sum_q[g]    <= dot_valid ? dot_sum[g] : '0;
           sum_cv_q[g] <= dot_valid ? dot_cv_out[g] : 1'b0;
@@ -3156,6 +3309,20 @@ assign axi_req_o  = axi_req_d;
       if (ar_i_en) ar_i_q <= ar_i_d;
       if (ar_t_en) ar_t_q <= ar_t_d;
       if (ar_j_en) ar_j_q <= ar_j_d;
+    end
+  end
+
+  // D3: one-cycle-ahead AR candidates -- own always_ff per the rank-0
+  // register-group rule (they must not compose with the cursor ff).
+  // Sampled with the cursors that produced the payload and the job tag;
+  // validity is a comb compare of the sampled context against the live
+  // registers, so any cursor-write path is caught.
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+    end else begin
+
+
       // Lane FIFO: push on AR accept, pop on r.last (shift-register depth MaxAROut)
       if (ar_lane_push_en && ar_lane_pop_en) begin
         // pop head, push new at tail; depth unchanged (= ar_inflight_q)
@@ -3209,7 +3376,7 @@ assign axi_req_o  = axi_req_d;
       // Outstanding pipelined dot transactions. This is the ONLY thing that
       // keeps ST_MAC from exiting while results are still in the FP pipe --
       // i_q reaching m only means issue finished, not that C is written.
-      dot_pending_q <= DotPipeFloat && pe_float_en
+      dot_pending_q <= dot_pipe_en
                        ? dot_pending_q
                          + (dot_start ? 1'd1 : 1'd0)
                          - ((dot_valid && dot_pending_q != '0) ? 1'd1 : 1'd0)
@@ -3255,6 +3422,14 @@ assign axi_req_o  = axi_req_d;
         i_q   <= '0;
         j_q   <= '0;
         t_q   <= '0;
+        stride_a_q     <= fmt_ld_to_stride(lda_i);
+        stride_b_q     <= fmt_ld_to_stride(ldb_i);
+        stride_b_grp_q <= (accumulate_i ? 32'd1 : 32'(OutCols)) * fmt_ld_to_stride(ldb_i);
+        a_row_base_q   <= ptr_a_i;
+        b_row_base_q   <= ptr_b_i;
+        a_cur_q        <= ptr_a_i;
+        b_cur_q        <= ptr_b_i;
+
         burst_first_q <= 1'b0;
         ar_inflight_q <= '0;
         ar_i_q <= '0;
@@ -3289,6 +3464,8 @@ assign axi_req_o  = axi_req_d;
         i_q <= '0;
         j_q <= '0;
         t_q <= '0;
+        a_row_base_q <= pa_q; b_row_base_q <= pb_q;
+        a_cur_q      <= pa_q; b_cur_q      <= pb_q;
       end
 
       // A load: advance t by la_n_d (multi-byte unpack)
@@ -3297,15 +3474,21 @@ assign axi_req_o  = axi_req_d;
           err_q <= 1'b1;
         if (t_q + 32'(la_n_d) >= k_bytes) begin
           t_q <= '0;
-          if (i_q + 1 != m_q)
+          if (i_q + 1 != m_q) begin
             i_q <= i_q + 1;
-          else begin
+            a_row_base_q <= a_row_base_q + AddrWidth'(stride_a_q);
+            a_cur_q      <= a_row_base_q + AddrWidth'(stride_a_q);
+          end else begin
             i_q <= '0;
             j_q <= '0;
             t_q <= '0;
+            a_row_base_q <= pa_q;
+            a_cur_q      <= pa_q;
           end
-        end else
-          t_q <= t_q + 32'(la_n_d);
+        end else begin
+          t_q     <= t_q + 32'(la_n_d);
+          a_cur_q <= a_cur_q + AddrWidth'(32'(la_n_d));
+        end
       end
 
       // B load: advance t by lb_n_d, then j -- the same shape as the A load
@@ -3316,15 +3499,21 @@ assign axi_req_o  = axi_req_d;
           err_q <= 1'b1;
         if (t_q + 32'(lb_n_d) >= k_bytes) begin
           t_q <= '0;
-          if (j_q + 1 != n_q)
+          if (j_q + 1 != n_q) begin
             j_q <= j_q + 1;
-          else begin
+            b_row_base_q <= b_row_base_q + AddrWidth'(stride_b_q);
+            b_cur_q      <= b_row_base_q + AddrWidth'(stride_b_q);
+          end else begin
             i_q <= '0;
             j_q <= '0;
             t_q <= '0;
+            b_row_base_q <= pb_q;
+            b_cur_q      <= pb_q;
           end
-        end else
-          t_q <= t_q + 32'(lb_n_d);
+        end else begin
+          t_q     <= t_q + 32'(lb_n_d);
+          b_cur_q <= b_cur_q + AddrWidth'(32'(lb_n_d));
+        end
       end
 
       // MAC: t_q is reduction base; advance by PeLanes, then (i,j).
@@ -3341,10 +3530,27 @@ assign axi_req_o  = axi_req_d;
           if (j_q + cols_eff >= n_q) begin
             j_q <= '0;
             i_q <= i_q + 1;  // becomes m when last row completes
-          end else
+`ifdef G6LC_MUT_AI_CURSOR_STRIDE
+            // Review mutant: row base advances by 1, not the job stride.
+            a_row_base_q <= a_row_base_q + AddrWidth'(1);
+            a_cur_q      <= a_row_base_q + AddrWidth'(1);
+`else
+            a_row_base_q <= a_row_base_q + AddrWidth'(stride_a_q);
+            a_cur_q      <= a_row_base_q + AddrWidth'(stride_a_q);
+`endif
+            b_row_base_q <= pb_q;
+            b_cur_q      <= pb_q;
+          end else begin
             j_q <= j_q + cols_eff;
-        end else
+            b_row_base_q <= b_row_base_q + AddrWidth'(stride_b_grp_q);
+            b_cur_q      <= b_row_base_q + AddrWidth'(stride_b_grp_q);
+            a_cur_q      <= a_row_base_q;
+          end
+        end else begin
           t_q <= t_q + mac_step;
+          a_cur_q <= a_cur_q + AddrWidth'(mac_step);
+          b_cur_q <= b_cur_q + AddrWidth'(mac_step);
+        end
       end
 
       // Store cursor (trail during MAC or dedicated ST_STC)
@@ -3355,6 +3561,20 @@ assign axi_req_o  = axi_req_d;
     end
   end
 
+  // D2b: the lc_total/lc_beats job product m*n is computed once at job
+  // start by a 32-cycle shift-add accumulator (g6lc_ai_mul_seq) instead of
+  // an atomic multiplier evaluated every cycle.
+  logic        lc_mul_done;
+  logic [63:0] lc_mul_prod;
+  g6lc_ai_mul_seq #(.WA(32), .WB(32)) i_lc_mul (
+    .clk_i, .rst_ni,
+    .start_i   (state_q == ST_IDLE && start_i),
+    .a_i       (32'(m_i)),
+    .b_i       (32'(n_i)),
+    .done_o    (lc_mul_done),
+    .product_o (lc_mul_prod)
+  );
+
   // ST_LC loader state. Idle outside ST_LC so entry always starts clean.
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -3362,8 +3582,8 @@ assign axi_req_o  = axi_req_d;
       lc_burst_left_q <= '0; lc_ar_busy_q <= 1'b0; lc_buf_q <= '0; lc_buf_v_q <= 1'b0;
       lc_word_q <= '0; lc_e_q <= '0; lc_i_q <= '0; lc_j_q <= '0;
     end else if (state_q != ST_LC) begin
-      lc_total_q <= m_q * n_q;
-      lc_beats_q <= (32'((pc_q >> 2) & AddrWidth'(WordsPerBeat - 1)) + m_q * n_q
+      lc_total_q <= lc_mul_prod[31:0];
+      lc_beats_q <= (32'((pc_q >> 2) & AddrWidth'(WordsPerBeat - 1)) + lc_mul_prod[31:0]
                      + 32'(WordsPerBeat) - 32'd1) >> LcWordW;
       lc_issued_q <= '0; lc_recv_q <= '0; lc_burst_left_q <= '0; lc_ar_busy_q <= 1'b0;
       lc_buf_q <= '0; lc_buf_v_q <= 1'b0; lc_word_q <= '0;
@@ -3442,4 +3662,57 @@ assign axi_req_o  = axi_req_d;
   end
   // pragma translate_on
 
+  // pragma translate_off
+  // r7 R1: ready_o stays combinational (desc_engine same-cycle start
+  // coupling); every start must land while the sequencer is idle.
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      start_i |-> ready_o);
+
+  // pragma translate_off
+  // D4 equivalence: barrel-shift wbeat forms vs the loop references,
+  // addr swept by a free-running counter so every byte lane / word-fit
+  // combination is exercised (incl. the drop-at-edge corner cases).
+  int unsigned g6lc_ai_wbeat_eq;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) g6lc_ai_wbeat_eq <= 0;
+    else begin
+      g6lc_ai_wbeat_eq <= g6lc_ai_wbeat_eq + 1;
+      assert (wbeat_words(32'(c_store_addr) + g6lc_ai_wbeat_eq[5:0],
+                          wide_c_q ? StoreWordsMax : 2)
+              == wbeat_words_ref(32'(c_store_addr) + g6lc_ai_wbeat_eq[5:0],
+                                 wide_c_q ? StoreWordsMax : 2))
+        else $error("g6lc_ai_gemm_seq: wbeat_eq words mismatch");
+      assert (wbeat_at({c_r0_data, c_lo_q}, 8,
+                       32'(c_store_addr) + g6lc_ai_wbeat_eq[5:0])
+              == wbeat_at_ref({c_r0_data, c_lo_q}, 8,
+                              32'(c_store_addr) + g6lc_ai_wbeat_eq[5:0]))
+        else $error("g6lc_ai_gemm_seq: wbeat_eq at8 mismatch");
+      assert (wbeat_at(64'(c_r0_data), 4,
+                       32'(c_store_addr) + g6lc_ai_wbeat_eq[5:0])
+              == wbeat_at_ref(64'(c_r0_data), 4,
+                              32'(c_store_addr) + g6lc_ai_wbeat_eq[5:0]))
+        else $error("g6lc_ai_gemm_seq: wbeat_eq at4 mismatch");
+    end
+  end
+  final $display("[equiv] g6lc_ai_gemm_seq wbeat_eq: checked=%0d", g6lc_ai_wbeat_eq);
+
+  // D2a equivalence: registered cursors must equal the comb functions.
+  int unsigned g6lc_ai_acur_eq, g6lc_ai_bcur_eq;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin g6lc_ai_acur_eq <= 0; g6lc_ai_bcur_eq <= 0; end
+    else begin
+      g6lc_ai_acur_eq <= g6lc_ai_acur_eq + 1;
+      g6lc_ai_bcur_eq <= g6lc_ai_bcur_eq + 1;
+      assert (a_cur_q == a_addr(pa_q, i_q, t_q, lda_q))
+        else $error("g6lc_ai_gemm_seq: acur_eq mismatch %h != %h",
+                    a_cur_q, a_addr(pa_q, i_q, t_q, lda_q));
+      assert (b_cur_q == b_addr(pb_q, t_q, j_q, ldb_q))
+        else $error("g6lc_ai_gemm_seq: bcur_eq mismatch %h != %h",
+                    b_cur_q, b_addr(pb_q, t_q, j_q, ldb_q));
+    end
+  end
+  final $display("[equiv] g6lc_ai_gemm_seq acur_eq: checked=%0d", g6lc_ai_acur_eq);
+  final $display("[equiv] g6lc_ai_gemm_seq bcur_eq: checked=%0d", g6lc_ai_bcur_eq);
+
+  // pragma translate_on
 endmodule

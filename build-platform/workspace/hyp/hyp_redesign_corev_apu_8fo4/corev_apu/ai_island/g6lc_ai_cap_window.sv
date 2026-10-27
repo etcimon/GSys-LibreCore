@@ -90,6 +90,77 @@ assign _unused = ^{clk_i, rst_ni, we_i, wdata_i};
     return 4'($clog2(v == 0 ? 1 : v));
   endfunction
 
+
+  // r7 R7/A104: masked-OR read class -- the constant CAP_OFF_* arms become
+  // independent wires selected by a one-hot word compare.
+  logic [24:0] cap_hit;
+  logic [31:0]    cap_arm [25];
+  logic [31:0]    r_mask;
+  always_comb begin
+    cap_hit[0] = addr_i[15:2] == CAP_OFF_COMMAND_QUEUE[15:2];
+    cap_hit[1] = addr_i[15:2] == CAP_OFF_ACCMODE[15:2];
+    cap_hit[2] = addr_i[15:2] == CAP_OFF_BANK_A_BYTES[15:2];
+    cap_hit[3] = addr_i[15:2] == CAP_OFF_BANK_B_BYTES[15:2];
+    cap_hit[4] = addr_i[15:2] == CAP_OFF_COH[15:2];
+    cap_hit[5] = addr_i[15:2] == CAP_OFF_VERSION[15:2];
+    cap_hit[6] = addr_i[15:2] == CAP_OFF_CLUSTERS[15:2];
+    cap_hit[7] = addr_i[15:2] == CAP_OFF_MACS_CYCLE[15:2];
+    cap_hit[8] = addr_i[15:2] == CAP_OFF_CLOCK_KHZ[15:2];
+    cap_hit[9] = addr_i[15:2] == CAP_OFF_SRAM_BYTES[15:2];
+    cap_hit[10] = addr_i[15:2] == CAP_OFF_BLOCK_MNK[15:2];
+    cap_hit[11] = addr_i[15:2] == CAP_OFF_DRAM_GBPS[15:2];
+    cap_hit[12] = addr_i[15:2] == CAP_OFF_QUEUES[15:2];
+    cap_hit[13] = addr_i[15:2] == CAP_OFF_QOS[15:2];
+    cap_hit[14] = addr_i[15:2] == CAP_OFF_QUANTUM[15:2];
+    cap_hit[15] = addr_i[15:2] == CAP_OFF_DTYPE_MASK[15:2];
+    cap_hit[16] = addr_i[15:2] == CAP_OFF_DRAM_MEAS_X1000[15:2];
+    cap_hit[17] = addr_i[15:2] == CAP_OFF_CLUSTER_EN[15:2];
+    cap_hit[18] = addr_i[15:2] == CAP_OFF_DRAM_CLASS[15:2];
+    cap_hit[19] = addr_i[15:2] == CAP_OFF_DRAM_CHANS[15:2];
+    cap_hit[20] = addr_i[15:2] == CAP_OFF_NOC_WIDTH[15:2];
+    cap_hit[21] = addr_i[15:2] == CAP_OFF_MAX_AR_OUT[15:2];
+    cap_hit[22] = addr_i[15:2] == CAP_OFF_DRAM_TIMING[15:2];
+    cap_hit[23] = addr_i[15:2] == CAP_OFF_DRAM_STATUS[15:2];
+    cap_hit[24] = addr_i[15:2] == CAP_OFF_LAYOUT[15:2];
+    cap_arm[0] = IslandCfg.CommandDepth == 0 ? 32'd0 :
+              {16'(IslandCfg.CommandDepth), COMMAND_QUEUE_VERSION, COMMAND_QUEUE_FLAGS};
+    cap_arm[1] = {31'h0, AccumulateEn};
+    cap_arm[2] = BankABytes;
+    cap_arm[3] = BankBBytes;
+    cap_arm[4] = {31'h0, DmaInvalEn};
+    cap_arm[5] = {16'h0, AiIslandCapVersion};
+    cap_arm[6] = {16'(IslandCfg.ClustersEnabled), 16'(IslandCfg.Clusters)};
+    cap_arm[7] = 32'(IslandCfg.MacsPerCycle);
+    cap_arm[8] = 32'(IslandCfg.ClockKhz);
+    cap_arm[9] = 32'(IslandCfg.SramBytes);
+    cap_arm[10] = 32'(lg2u(IslandCfg.AccTileK)) << CAP_BLOCK_K_SHIFT
+                  | 32'(lg2u(IslandCfg.AccTileN)) << CAP_BLOCK_N_SHIFT
+                  | 32'(lg2u(IslandCfg.AccTileM)) << CAP_BLOCK_M_SHIFT;
+    cap_arm[11] = {meas_milli, 16'(IslandCfg.DramGBps)};
+    cap_arm[12] = {16'(IslandCfg.QueueDepth), 16'(IslandCfg.Queues)};
+    cap_arm[13] = 32'(IslandCfg.QosClasses);
+    cap_arm[14] = 32'(IslandCfg.WorkQuantumK);
+    cap_arm[15] = {16'h0, DtypeMask};
+    cap_arm[16] = dram_gbps_meas_x1000_i;
+    cap_arm[17] = (IslandCfg.ClustersEnabled >= 32) ? 32'hFFFF_FFFF
+                    : (32'h1 << IslandCfg.ClustersEnabled) - 32'h1;
+    cap_arm[18] = 32'(IslandCfg.DramClass);
+    cap_arm[19] = 32'(IslandCfg.DramChanShift) << CAP_CHANS_SHIFT_SHIFT
+                  | 32'(IslandCfg.DramChannels)  << CAP_CHANS_COUNT_SHIFT;
+    cap_arm[20] = 32'(IslandCfg.NocWidth);
+    cap_arm[21] = 32'(IslandCfg.MaxAROut);
+    cap_arm[22] = 32'(IslandCfg.DramTrp)  << CAP_TIMING_TRP_SHIFT
+                  | 32'(IslandCfg.DramTrcd) << CAP_TIMING_TRCD_SHIFT
+                  | 32'(IslandCfg.DramCas)  << CAP_TIMING_CAS_SHIFT;
+    cap_arm[23] = {30'h0,
+                     (IslandCfg.DramCas != 0),
+                     dram_init_done_i};
+    cap_arm[24] = AiIslandLayoutWord;
+    r_mask = '0;
+    for (int unsigned i = 0; i < 25; i++)
+      r_mask |= cap_arm[i] & {32{cap_hit[i]}};
+  end
+
   always_comb begin
     automatic int unsigned ch_r_idx, ch_w_idx;
     automatic logic        occ_hit;
@@ -110,68 +181,12 @@ assign _unused = ^{clk_i, rst_ni, we_i, wdata_i};
       // Occupancy windows are checked first and short-circuit the case: they are
       // two 8-entry ranges, which a flat CAP_OFF_* case would have to spell out
       // as 16 separate arms.
-      if (!occ_hit) unique case (addr_i[15:2])  // word index of CAP_OFF_*
-        CAP_OFF_COMMAND_QUEUE[15:2]:
-          rdata_n = IslandCfg.CommandDepth == 0 ? 32'd0 :
-              {16'(IslandCfg.CommandDepth), COMMAND_QUEUE_VERSION, COMMAND_QUEUE_FLAGS};
-        CAP_OFF_ACCMODE[15:2]: rdata_n = {31'h0, AccumulateEn};
-        CAP_OFF_BANK_A_BYTES[15:2]: rdata_n = BankABytes;
-        CAP_OFF_BANK_B_BYTES[15:2]: rdata_n = BankBBytes;
-        CAP_OFF_COH[15:2]:          rdata_n = {31'h0, DmaInvalEn};
-        CAP_OFF_VERSION[15:2]:
-          rdata_n = {16'h0, AiIslandCapVersion};
-        CAP_OFF_CLUSTERS[15:2]:
-          rdata_n = {16'(IslandCfg.ClustersEnabled), 16'(IslandCfg.Clusters)};
-        CAP_OFF_MACS_CYCLE[15:2]:
-          rdata_n = 32'(IslandCfg.MacsPerCycle);
-        CAP_OFF_CLOCK_KHZ[15:2]:
-          rdata_n = 32'(IslandCfg.ClockKhz);
-        CAP_OFF_SRAM_BYTES[15:2]:
-          rdata_n = 32'(IslandCfg.SramBytes);
-        // packed log2(M)|log2(N)|log2(K) — CAP_BLOCK_*_SHIFT
-        CAP_OFF_BLOCK_MNK[15:2]:
-          rdata_n = 32'(lg2u(IslandCfg.AccTileK)) << CAP_BLOCK_K_SHIFT
-                  | 32'(lg2u(IslandCfg.AccTileN)) << CAP_BLOCK_N_SHIFT
-                  | 32'(lg2u(IslandCfg.AccTileM)) << CAP_BLOCK_M_SHIFT;
-        // nameplate [15:0] | measured milli-GB/s [31:16] (saturates)
-        CAP_OFF_DRAM_GBPS[15:2]:
-          rdata_n = {meas_milli, 16'(IslandCfg.DramGBps)};
-        CAP_OFF_QUEUES[15:2]:
-          rdata_n = {16'(IslandCfg.QueueDepth), 16'(IslandCfg.Queues)};
-        CAP_OFF_QOS[15:2]:
-          rdata_n = 32'(IslandCfg.QosClasses);
-        CAP_OFF_QUANTUM[15:2]:
-          rdata_n = 32'(IslandCfg.WorkQuantumK);
-        CAP_OFF_DTYPE_MASK[15:2]:
-          rdata_n = {16'h0, DtypeMask};
-        CAP_OFF_DRAM_MEAS_X1000[15:2]:
-          rdata_n = dram_gbps_meas_x1000_i;
-        CAP_OFF_CLUSTER_EN[15:2]:
-          rdata_n = (IslandCfg.ClustersEnabled >= 32) ? 32'hFFFF_FFFF
-                    : (32'h1 << IslandCfg.ClustersEnabled) - 32'h1;
-        CAP_OFF_DRAM_CLASS[15:2]:
-          rdata_n = 32'(IslandCfg.DramClass);
-        CAP_OFF_DRAM_CHANS[15:2]:
-          rdata_n = 32'(IslandCfg.DramChanShift) << CAP_CHANS_SHIFT_SHIFT
-                  | 32'(IslandCfg.DramChannels)  << CAP_CHANS_COUNT_SHIFT;
-        CAP_OFF_NOC_WIDTH[15:2]:
-          rdata_n = 32'(IslandCfg.NocWidth);
-        CAP_OFF_MAX_AR_OUT[15:2]:
-          rdata_n = 32'(IslandCfg.MaxAROut);
-        CAP_OFF_DRAM_TIMING[15:2]:
-          rdata_n = 32'(IslandCfg.DramTrp)  << CAP_TIMING_TRP_SHIFT
-                  | 32'(IslandCfg.DramTrcd) << CAP_TIMING_TRCD_SHIFT
-                  | 32'(IslandCfg.DramCas)  << CAP_TIMING_CAS_SHIFT;
-        CAP_OFF_DRAM_STATUS[15:2]:
-          rdata_n = {30'h0,
-                     (IslandCfg.DramCas != 0),
-                     dram_init_done_i};
-        // AI-X9: operand layout, so software discovers that B is k-major rather
-        // than inferring it from a contract version it may never read.
-        CAP_OFF_LAYOUT[15:2]:
-          rdata_n = AiIslandLayoutWord;
-        default: rdata_n = 32'h0;
-      endcase
+      // r7 R7/A104: one-hot word-class compare + masked-OR over the
+      // constant arms (the unique-case serial arm chain composed ~40 FO4).
+      if (!occ_hit) begin
+        rdata_n = r_mask;
+      end
+
     end
   end
 

@@ -1,4 +1,4 @@
-// hyp8 provenance: AS-IS (sv-timing emit at the 8-FO4 budget)
+// hyp8 provenance: AS-IS (production corev_apu/ai_island copy; oracle restored per ai-hyp-r2)
 // Copyright 2026 Etienne Cimon
 // SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
 //
@@ -109,17 +109,7 @@ module g6lc_ai_pe_dot #(
   // zero for non-INT4, so the sum is bit-identical to the old Lanes-only tree.
   logic signed [31:0] tree_sum;
 
-  
-
-  // BEGIN sv-timing auto-correct (review-only credit)
-  // Latency-neutral FO4 screening credit — not a structural RTL rewrite.
-  // Human: balance exclusive select tree / reassoc hot arm; do not auto-merge.
-// sv-timing: origin <src>/corev_apu/ai_island/g6lc_ai_pe_dot.sv:124:9 edit=649
-  // [balance_mux] path=Some(6750) node=Some(23610) fo4 128.4->64.2: relocation t1_balance_mux; balance_mux credit path 6750 node 23610 exclusive residual 128.4->64.2 (latency-neutral) extras=0
-// sv-timing: origin <src>/corev_apu/ai_island/g6lc_ai_pe_dot.sv:124:9 edit=655
-  // [balance_mux] path=Some(16981) node=Some(23610) fo4 128.4->64.2: relocation t1_balance_mux; balance_mux credit path 16981 node 23610 exclusive residual 128.4->64.2 (latency-neutral) extras=0
-  // END sv-timing auto-correct (review-only credit)
-always_comb begin
+  always_comb begin
     automatic logic signed [7:0]  op_a, op_b;
     automatic logic signed [31:0] node [2*Lanes];
     automatic int unsigned cnt;

@@ -78,7 +78,7 @@ package g6lc_config_pkg;
   // this fix ("G1n: hang-7 raised NrLoadBufEntries to 8; 1-bit D\$ rid
   // truncated"); it was never propagated to the OoO packages, which
   // could not reach simulation to expose it.
-  localparam G6LCConfigDcacheIdWidth = 3;
+  localparam G6LCConfigDcacheIdWidth = 5;  // hyp8-mc: NrLoadBufEntries floors at NrIssuePorts*4 = 32 (r71: 3 fired the time-0 assert on model2)
   localparam G6LCConfigMemTidWidth = 2;
 
   localparam G6LCConfigWtDcacheWbufDepth = 8;
@@ -124,6 +124,7 @@ package g6lc_config_pkg;
       TechnoCut: bit'(0),
       SuperscalarEn: bit'(1),
       NrIssuePorts: unsigned'(8),  // hyp8-mc: 8-wide issue (max legal)
+      FetchWidth: unsigned'(64),   // hyp8-mc: fetch-bound 8-issue on the hardened 64-bit path (r72 A)
       ALUBypass: bit'(0),
       NrCommitPorts: unsigned'(2),
       AxiAddrWidth: unsigned'(G6LCConfigAxiAddrWidth),
@@ -178,7 +179,7 @@ package g6lc_config_pkg;
       BPIndirectEn: bit'(1),
       BPIndirectEntries: unsigned'(32),
       BPStatCorEn: bit'(1),
-      BPCkptDepth: unsigned'(32),
+      BPCkptDepth: unsigned'(128),  // hyp8-mc: >= derived RobEntries (NrIssuePorts*16 = 128)
       BPBaseHash: bit'(0),
       DmBaseAddress: 64'h0,
       TvalEn: bit'(G6LCConfigTvalEn),

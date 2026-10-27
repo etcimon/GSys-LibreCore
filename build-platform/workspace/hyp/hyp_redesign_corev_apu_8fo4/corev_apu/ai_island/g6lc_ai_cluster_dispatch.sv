@@ -35,6 +35,7 @@ module g6lc_ai_cluster_dispatch
     parameter int unsigned PeLanes    = 4,
     parameter int unsigned OutCols    = 1,
     parameter bit          DotPipeFloat = 1'b0,
+    parameter bit          DotPipeInt   = 1'b0,
     parameter int unsigned MaxAROut   = 2,
     parameter int unsigned NrChannels = 1,
     parameter int unsigned ChanShift  = 6,
@@ -48,7 +49,19 @@ module g6lc_ai_cluster_dispatch
     parameter type         axi_req_t  = logic,   // IdWidth
     parameter type         axi_resp_t = logic,
     parameter type         eng_req_t  = logic,   // IdWidth - clog2(Clusters)
-    parameter type         eng_resp_t = logic
+    parameter type         eng_resp_t = logic,
+    // r11: channel types explicit (no type() -- Verilator's typedef-of-
+    // member-select on a parameter type is an internal error).
+    parameter type         eng_aw_chan_t = logic,
+    parameter type         eng_w_chan_t  = logic,
+    parameter type         eng_b_chan_t  = logic,
+    parameter type         eng_ar_chan_t = logic,
+    parameter type         eng_r_chan_t  = logic,
+    parameter type         mst_aw_chan_t = logic,
+    parameter type         mst_w_chan_t  = logic,
+    parameter type         mst_b_chan_t  = logic,
+    parameter type         mst_ar_chan_t = logic,
+    parameter type         mst_r_chan_t  = logic
 ) (
     input  logic        clk_i,
     input  logic        rst_ni,
@@ -395,6 +408,7 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
         .PeLanes   (PeLanes),
         .OutCols   (OutCols),
         .DotPipeFloat(DotPipeFloat),
+        .DotPipeInt  (DotPipeInt),
         .MaxAROut  (MaxAROut),
         .NrChannels(NrChannels),
         .ChanShift (ChanShift),
@@ -463,16 +477,36 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
         if (e_done[c] && e_err[c]) any_err_q <= 1'b1;
     end
   end
-  assign ready_o = !busy_q && !start_q;
-  // one-cycle done when the last pending engine finishes (or an all-idle start)
-  assign done_o = (start_q && active_vec == '0) ||
-                  (busy_q && !start_q && pend_q != '0 && (pend_q & ~done_vec) == '0);
-  logic err_now;
+  // r7 R1: job-event outputs are flops at the module boundary -- the
+  // caller (island/desc) consumes them into its own cones.
+  logic ready_q, done_q, err_q;
+  logic done_n, err_now;
   always_comb begin
+    // one-cycle done when the last pending engine finishes
+    done_n = (start_q && active_vec == '0) ||
+             (busy_q && !start_q && pend_q != '0 && (pend_q & ~done_vec) == '0);
     err_now = any_err_q;
-    for (int unsigned c = 0; c < Clusters; c++) if (e_done[c] && e_err[c]) err_now = 1'b1;
+    for (int unsigned c = 0; c < Clusters; c++)
+      if (e_done[c] && e_err[c]) err_now = 1'b1;
   end
-  assign err_o = done_o && err_now;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin ready_q <= 1'b0; done_q <= 1'b0; err_q <= 1'b0; end
+    else begin
+      ready_q <= !busy_q && !start_q;
+      done_q  <= done_n;
+      err_q   <= done_n && err_now;
+    end
+  end
+  assign ready_o = ready_q;
+  assign done_o  = done_q;
+  assign err_o   = err_q;
+
+  // pragma translate_off
+  // r7 R1 seam invariant: a start lands only while the registered ready
+  // sampled it free (ready_q holds the pre-edge readiness).
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      start_i |-> !busy_q);
+  // pragma translate_on
 
   // PMU: slowest engine's cycles/phases, summed beats and stalls.
   always_comb begin
@@ -498,21 +532,11 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
     assign axi_req_o = e_req[0];
     assign e_resp[0] = axi_resp_i;
   end else begin : gen_mux
-    // Channel types taken from the request/response structs themselves.
-    typedef type(e_req[0].aw)     eng_aw_chan_t;
-    typedef type(e_req[0].w)      w_chan_t;
-    typedef type(e_resp[0].b)     eng_b_chan_t;
-    typedef type(e_req[0].ar)     eng_ar_chan_t;
-    typedef type(e_resp[0].r)     eng_r_chan_t;
-    typedef type(axi_req_o.aw)    mst_aw_chan_t;
-    typedef type(axi_resp_i.b)    mst_b_chan_t;
-    typedef type(axi_req_o.ar)    mst_ar_chan_t;
-    typedef type(axi_resp_i.r)    mst_r_chan_t;
     axi_mux #(
         .SlvAxiIDWidth (EngIdW),
         .slv_aw_chan_t (eng_aw_chan_t),
         .mst_aw_chan_t (mst_aw_chan_t),
-        .w_chan_t      (w_chan_t),
+        .w_chan_t      (eng_w_chan_t),
         .slv_b_chan_t  (eng_b_chan_t),
         .mst_b_chan_t  (mst_b_chan_t),
         .slv_ar_chan_t (eng_ar_chan_t),

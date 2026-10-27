@@ -888,7 +888,14 @@ assign ldbuf_full = &ldbuf_valid_q;
   logic tr_idle_ok, accept_req_w;
   logic st_idle, st_gnt, st_tag, st_xlat;
   logic tr_issue_st, tr_issue_acc, tr_issue, tr_xlat_en, tr_or_gx, tr_state;
-  assign tr_idle_ok = !G6LCCfg.SpeculativeSb || dtlb_hit_i || !lsu_ctrl_i.is_speculative_load;
+  // r71: under OoO the bypass never clears the same-cycle speculative flag
+  // (the earlier-port branch resolves later and queued entries are not
+  // updated), so a DTLB-missing flagged load ping-ponged IDLE<->WAIT_SPEC_LOAD
+  // forever (r41a @22,114,642: Linux's first FIX_FDT byte load). The commit
+  // head has no older unresolved branch by construction: not speculative.
+  logic spec_ld;
+  assign spec_ld = lsu_ctrl_i.is_speculative_load && (!G6LCCfg.OoOEn || not_commit_time);
+  assign tr_idle_ok = !G6LCCfg.SpeculativeSb || dtlb_hit_i || !spec_ld;
   assign accept_req_w = valid_i && !ldbuf_full;
   assign st_idle = state_q[0];
   assign st_gnt  = state_q[1];
@@ -907,7 +914,7 @@ assign ldbuf_full = &ldbuf_valid_q;
   // that still has to train. WAIT_GNT holds the request. A cancel clears it
   // in this cycle, matching the tail of load_control.
   logic spec_issue_ok, lu_issue_now;
-  assign spec_issue_ok = !G6LCCfg.SpeculativeSb || !lsu_ctrl_i.is_speculative_load
+  assign spec_issue_ok = !G6LCCfg.SpeculativeSb || !spec_ld
                       || (dtlb_hit_i && !paddr_ni);
   assign lu_issue_now = !page_offset_matches_i
                      && !(st_fwd_covers && !ld_checked_head);
@@ -962,7 +969,7 @@ assign ldbuf_full = &ldbuf_valid_q;
         if (accept_req) begin
           // translation_req_o is the continuous decode above.
           // check if load is speculative and non idempotent, if it is then stall and wait for branch result
-          if (!G6LCCfg.SpeculativeSb || !lsu_ctrl_i.is_speculative_load || (dtlb_hit_i && !paddr_ni)) begin
+          if (!G6LCCfg.SpeculativeSb || !spec_ld || (dtlb_hit_i && !paddr_ni)) begin
             // R3a: if STQ can fully satisfy this load, complete from forward
             // (no D$ request). Closes stack *nextoffset RAW without waiting for
             // STQ drain + wbuffer. Partial coverage still waits in WAIT_PAGE_OFFSET.
@@ -1093,7 +1100,7 @@ assign ldbuf_full = &ldbuf_valid_q;
         if (accept_req) begin
           // translation_req_o is the continuous decode above.
           // check if load is speculative and non idempotent, if it is then stall and wait for branch result
-          if (!G6LCCfg.SpeculativeSb || !lsu_ctrl_i.is_speculative_load || (dtlb_hit_i && !paddr_ni)) begin
+          if (!G6LCCfg.SpeculativeSb || !spec_ld || (dtlb_hit_i && !paddr_ni)) begin
             // check if the page offset matches with a store, if it does stall and wait
             // R3a: STQ forward path (mirror IDLE)
             if (st_pipeline_busy) begin
@@ -1971,9 +1978,9 @@ assign ldbuf_full = &ldbuf_valid_q;
         if (accept_req) begin
           // start the translation process even though we do not know if the addresses match this should ease timing
           // don't start the translation for speculative loads that miss on tlb
-          rf_translation_req_o = (!G6LCCfg.SpeculativeSb || dtlb_hit_i || !lsu_ctrl_i.is_speculative_load);
+          rf_translation_req_o = (!G6LCCfg.SpeculativeSb || dtlb_hit_i || !spec_ld);
           // check if load is speculative and non idempotent, if it is then stall and wait for branch result
-          if (!G6LCCfg.SpeculativeSb || !lsu_ctrl_i.is_speculative_load || (dtlb_hit_i && !paddr_ni)) begin
+          if (!G6LCCfg.SpeculativeSb || !spec_ld || (dtlb_hit_i && !paddr_ni)) begin
             // R3a: if STQ can fully satisfy this load, complete from forward
             // (no D$ request). Closes stack *nextoffset RAW without waiting for
             // STQ drain + wbuffer. Partial coverage still waits in 4'(LU_B_WAIT_PAGE_OFFSET).
@@ -2109,9 +2116,9 @@ assign ldbuf_full = &ldbuf_valid_q;
         if (accept_req) begin
           // start the translation process even though we do not know if the addresses match this should ease timing
           // don't start the translation for speculative loads that miss on tlb
-          rf_translation_req_o = (!G6LCCfg.SpeculativeSb || dtlb_hit_i || !lsu_ctrl_i.is_speculative_load);
+          rf_translation_req_o = (!G6LCCfg.SpeculativeSb || dtlb_hit_i || !spec_ld);
           // check if load is speculative and non idempotent, if it is then stall and wait for branch result
-          if (!G6LCCfg.SpeculativeSb || !lsu_ctrl_i.is_speculative_load || (dtlb_hit_i && !paddr_ni)) begin
+          if (!G6LCCfg.SpeculativeSb || !spec_ld || (dtlb_hit_i && !paddr_ni)) begin
             // check if the page offset matches with a store, if it does stall and wait
             // R3a: STQ forward path (mirror 4'(LU_B_IDLE))
             if (st_pipeline_busy) begin

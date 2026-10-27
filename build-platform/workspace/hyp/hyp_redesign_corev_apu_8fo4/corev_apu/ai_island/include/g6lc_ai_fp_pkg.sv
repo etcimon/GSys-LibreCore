@@ -246,6 +246,114 @@ package g6lc_ai_fp_pkg;
   // Used at the end of the BFP dot product. Uses round-to-nearest-even.
   // Returns {flags[4:0], result[31:0]} so the result and flags are a single
   // pure return value, avoiding output-argument loops in synthesis.
+  // pragma translate_off
+  // Reference form retained for equivalence miters (identical body; the
+  // live version below uses the log-depth msb bisection).
+  function automatic logic [36:0] bfp_mant_exp_to_fp32_ref(
+      input logic                          sign,
+      input logic signed [FP_DOT_MAXW-1:0] mant,
+      input logic signed [15:0]            exp
+  );
+    logic [FP_DOT_MAXW-1:0] abs_m, abs_m_rounded;
+    logic [7:0]             exp_field;
+    logic [22:0]            man_field;
+    logic [31:0]            result;
+    logic [4:0]             flags;
+    logic                   round_up;
+    int                     msb;
+    int                     shift;
+    int                     msb_eff;
+    logic [24:0]            m24, m24_rounded, m24_final;
+    logic [24:0]            m_sub, m_sub_rounded;
+    logic [FP_DOT_MAXW-1:0] discarded;
+    logic                   guard, sticky;
+
+    flags  = 5'd0;
+    result = 32'd0;
+    if (mant == FP_DOT_MAXW'(0)) return {flags, sign, 31'd0};
+    abs_m = mant[FP_DOT_MAXW-1] ? -mant : mant;
+    msb = $clog2(abs_m) - ((abs_m != FP_DOT_MAXW'(0) &&
+            (abs_m & (abs_m - FP_DOT_MAXW'(1))) != FP_DOT_MAXW'(0)) ? 1 : 0);
+    if (msb + int'(exp) > 127) begin
+      flags[2] = 1'b1;
+      return {flags, sign, 8'hff, 23'd0};
+    end
+    if (msb + int'(exp) < -126) begin
+      shift = -int'(exp) - 149;
+      if (shift <= 0) begin
+        abs_m_rounded = abs_m << (-shift);
+        if (abs_m_rounded >= (FP_DOT_MAXW'(1) << 23)) begin
+          man_field = 23'(abs_m_rounded - (FP_DOT_MAXW'(1) << 23));
+          return {flags, sign, 8'd1, man_field};
+        end
+        flags[0] = 1'b0;
+        return {flags, sign, 8'd0, 23'(abs_m_rounded)};
+      end else begin
+        if (shift >= FP_DOT_MAXW) begin
+          m_sub  = 25'd0; guard = 1'b0; sticky = 1'b0;
+        end else begin
+          m_sub     = 25'(abs_m >> shift);
+          discarded = (abs_m & ((FP_DOT_MAXW'(1) << shift) - FP_DOT_MAXW'(1)));
+          guard     = ((abs_m >> (shift - 1)) & FP_DOT_MAXW'(1)) != FP_DOT_MAXW'(0);
+          if (shift > 1)
+            sticky = (abs_m & ((FP_DOT_MAXW'(1) << (shift - 1)) - FP_DOT_MAXW'(1))) != FP_DOT_MAXW'(0);
+          else
+            sticky = 1'b0;
+        end
+        flags[0] = (guard || sticky) ? 1'b1 : 1'b0;
+        round_up = guard && (sticky || m_sub[0]);
+        m_sub_rounded = round_up ? m_sub + 25'd1 : m_sub;
+        if (m_sub_rounded == 25'h0800000) begin
+          flags[1] = 1'b0;
+          return {flags, sign, 8'd1, 23'd0};
+        end
+        if (m_sub_rounded == 25'd0 && (guard || sticky)) flags[1] = 1'b1;
+        return {flags, sign, 8'd0, m_sub_rounded[22:0]};
+      end
+    end
+    if (msb >= 23) begin
+      shift = msb - 23;
+      if (shift == 0) begin
+        m24 = 25'(abs_m); guard = 1'b0; sticky = 1'b0;
+      end else if (shift >= FP_DOT_MAXW) begin
+        m24 = 25'd0; guard = 1'b0; sticky = 1'b0;
+      end else begin
+        m24       = 25'(abs_m >> shift);
+        discarded = (abs_m & ((FP_DOT_MAXW'(1) << shift) - FP_DOT_MAXW'(1)));
+        guard     = ((abs_m >> (shift - 1)) & FP_DOT_MAXW'(1)) != FP_DOT_MAXW'(0);
+        if (shift > 1)
+          sticky = (abs_m & ((FP_DOT_MAXW'(1) << (shift - 1)) - FP_DOT_MAXW'(1))) != FP_DOT_MAXW'(0);
+        else
+          sticky = 1'b0;
+      end
+      flags[0] = (guard || sticky) ? 1'b1 : 1'b0;
+      round_up = guard && (sticky || m24[0]);
+      m24_rounded = round_up ? m24 + 25'd1 : m24;
+      if (m24_rounded == 25'h1000000) begin
+        m24_final = 25'h0800000;
+        msb_eff   = msb + 1;
+      end else begin
+        m24_final = m24_rounded;
+        msb_eff   = msb;
+      end
+      man_field = m24_final[22:0];
+    end else begin
+      m24       = 25'(abs_m << (23 - msb));
+      m24_final = m24;
+      msb_eff   = msb;
+      flags[0]  = 1'b0;
+      man_field = m24_final[22:0];
+    end
+    exp_field = 8'(msb_eff + int'(exp) + 127);
+    if (msb_eff + int'(exp) > 127) begin
+      flags[2] = 1'b1;
+      return {flags, sign, 8'hff, 23'd0};
+    end
+    result = {sign, exp_field, man_field};
+    return {flags, result};
+  endfunction
+  // pragma translate_on
+
   function automatic logic [36:0] bfp_mant_exp_to_fp32(
       input logic                          sign,
       input logic signed [FP_DOT_MAXW-1:0] mant,
@@ -274,10 +382,24 @@ package g6lc_ai_fp_pkg;
 
     abs_m = mant[FP_DOT_MAXW-1] ? -mant : mant;
 
-    // Find MSB position (floor(log2(abs_m))) using $clog2 and a power-of-2
-    // correction, avoiding self-referential loops in the priority encoder.
-    msb = $clog2(abs_m) - ((abs_m != FP_DOT_MAXW'(0) &&
-                            (abs_m & (abs_m - FP_DOT_MAXW'(1))) != FP_DOT_MAXW'(0)) ? 1 : 0);
+    // Find MSB position (floor(log2(abs_m))) by log-depth or-fold +
+    // popcount: orm's set bits form a prefix ending at the highest set
+    // bit, so countones(orm) - 1 is its index. The reference serial scan
+    // lives in bfp_mant_exp_to_fp32_ref for the equivalence miter.
+    begin
+      logic [FP_DOT_MAXW-1:0] orm;
+      orm = abs_m | (abs_m >> 1);
+      orm = orm | (orm >> 2);
+      orm = orm | (orm >> 4);
+      orm = orm | (orm >> 8);
+      orm = orm | (orm >> 16);
+      orm = orm | (orm >> 32);
+      orm = orm | (orm >> 64);
+      orm = orm | (orm >> 128);
+      orm = orm | (orm >> 256);
+      orm = orm | (orm >> 512);
+      msb = int'($countones(orm)) - 1;
+    end
 
     // If the true exponent is too large for finite FP32, return Inf.
     if (msb + int'(exp) > 127) begin

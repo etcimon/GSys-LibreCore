@@ -15,6 +15,10 @@ package g6lc_fetch_pkg;
     int unsigned align_bits;
     int unsigned slots;
     int unsigned log2_slots;
+    // r72 B: instruction-queue columns (>= slots, >= issue, power of two) —
+    // the drain exposes qslots positions, the realigner fills slots per packet
+    int unsigned qslots;
+    int unsigned log2_qslots;
     int unsigned hw_per_w;
     int unsigned issue;
     int unsigned harts;
@@ -43,6 +47,9 @@ package g6lc_fetch_pkg;
     g.align_bits  = cfg.FETCH_ALIGN_BITS;
     g.slots       = cfg.INSTR_PER_FETCH;
     g.log2_slots  = cfg.LOG2_INSTR_PER_FETCH;
+    g.qslots      = (cfg.NrIssuePorts > cfg.INSTR_PER_FETCH)
+                    ? (1 << $clog2(cfg.NrIssuePorts)) : cfg.INSTR_PER_FETCH;
+    g.log2_qslots = (g.qslots > 1) ? $clog2(g.qslots) : 1;
     g.hw_per_w    = cfg.FETCH_WIDTH / 16;
     g.issue       = cfg.NrIssuePorts;
     g.harts       = cfg.NrHarts;

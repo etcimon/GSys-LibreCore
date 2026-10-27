@@ -322,7 +322,8 @@ package build_config_pkg;
     // Front-end bus: enough bits for NrIssuePorts compressed (16b) or full (32b)
     // instructions, rounded up to the next supported power-of-two width.
     // Hang-6: dual+FETCH32 still BADOFFSET — residual is issue/commit, not width.
-    cfg.FETCH_WIDTH = build_fetch_width(cfg.NrIssuePorts, G6LCCfg.RVC);
+    cfg.FETCH_WIDTH = (G6LCCfg.FetchWidth != 0) ? G6LCCfg.FetchWidth
+                                               : build_fetch_width(cfg.NrIssuePorts, G6LCCfg.RVC);
     cfg.FETCH_ALIGN_BITS = $clog2(cfg.FETCH_WIDTH / 8);
     cfg.INSTR_PER_FETCH = cfg.FETCH_WIDTH / (G6LCCfg.RVC ? 16 : 32);
     cfg.LOG2_INSTR_PER_FETCH = cfg.INSTR_PER_FETCH > 1 ? $clog2(cfg.INSTR_PER_FETCH) : 1;

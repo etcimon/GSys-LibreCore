@@ -2786,7 +2786,69 @@ assign irq_active = irq_i[smt_active_hart];
                i_frontend.gen_ftq.gen_lbuf.i_lbuf.armed_q,
                i_frontend.gen_ftq.gen_lbuf.i_lbuf.capturing_q,
                i_frontend.icache_dreq_i.ready);
+      // r72: instruction-queue / realigner anatomy behind `fe_v=00` (r41b/r44b
+      // held-empty and r42/r43 run-away variants both never delivered a word).
+      $display("[hang] IQF: idx_ds=%b idx_is=%0d empty=%b full=%b usage0..3=%0d/%0d/%0d/%0d ready=%b replay=%b fe_valid=%b pos_present=%b block_any=%b consumed=%b | rl bank=%b serv_unal=%b carry_done=%b | red_pend=%b red_inflight=%b red_lost=%b red_tail=%b red_pc=%h bp_pend=%b bp_tgt=%h",
+               i_frontend.i_instr_queue.idx_ds_q, i_frontend.i_instr_queue.idx_is_q, i_frontend.i_instr_queue.instr_queue_empty, i_frontend.i_instr_queue.instr_queue_full,
+               i_frontend.i_instr_queue.instr_queue_usage[0], i_frontend.i_instr_queue.instr_queue_usage[1 % i_frontend.i_instr_queue.NrFifo], i_frontend.i_instr_queue.instr_queue_usage[2 % i_frontend.i_instr_queue.NrFifo], i_frontend.i_instr_queue.instr_queue_usage[3 % i_frontend.i_instr_queue.NrFifo],
+               i_frontend.i_instr_queue.ready_o, i_frontend.i_instr_queue.replay_o, i_frontend.i_instr_queue.fetch_entry_valid_o, i_frontend.i_instr_queue.pos_present, i_frontend.i_instr_queue.block_any, i_frontend.i_instr_queue.consumed_pos,
+               i_frontend.rl_bank_valid, i_frontend.rl_serving_unaligned, i_frontend.rl_carry_done,
+               i_frontend.redirect_pend_q, i_frontend.redirect_inflight_q, i_frontend.redirect_lost_q,
+               i_frontend.redirect_tail_q, i_frontend.redirect_pc_q, i_frontend.bp_pend_q, i_frontend.bp_tgt_q);
     endfunction
+    // r70: the load request / WT D$ anatomy behind a `LU state=WAIT_GNT`
+    // hang (r40 @22,114,642: four byte loads, no grant, ldbuf empty). Own
+    // generate scope because gen_cache_wt exists only for DCacheType == WT.
+    if (G6LCCfg.DCacheType == config_pkg::WT) begin : gen_hd_wt
+      int unsigned hd_wt_seen = 0;
+      always @(posedge clk_i) begin
+        if (hd_wt_seen != hd_n) begin
+          hd_wt_seen = hd_n;
+          $display("[hang] LU req: valid_i=%b tid=%0d vaddr=%h paddr=%h dtlb_hit=%b treq=%b ex=%b cancelled=%b | port data_req=%b gnt=%b tag_valid=%b kill=%b rvalid=%b | wbuf_not_ni=%b po_match=%b st_empty=%b no_st=%b",
+                   ex_stage_i.lsu_i.i_load_unit.valid_i, ex_stage_i.lsu_i.i_load_unit.lsu_ctrl_i.trans_id,
+                   ex_stage_i.lsu_i.i_load_unit.lsu_ctrl_i.vaddr, ex_stage_i.lsu_i.i_load_unit.paddr_i,
+                   ex_stage_i.lsu_i.i_load_unit.dtlb_hit_i, ex_stage_i.lsu_i.i_load_unit.translation_req_o,
+                   ex_stage_i.lsu_i.i_load_unit.ex_i.valid, ex_stage_i.lsu_i.i_load_unit.cancelled_request,
+                   ex_stage_i.lsu_i.i_load_unit.req_port_o.data_req, ex_stage_i.lsu_i.i_load_unit.req_port_i.data_gnt,
+                   ex_stage_i.lsu_i.i_load_unit.req_port_o.tag_valid, ex_stage_i.lsu_i.i_load_unit.req_port_o.kill_req,
+                   ex_stage_i.lsu_i.i_load_unit.req_port_i.data_rvalid,
+                   ex_stage_i.lsu_i.i_load_unit.dcache_wbuffer_not_ni_i, ex_stage_i.lsu_i.i_load_unit.page_offset_matches_i,
+                   ex_stage_i.lsu_i.i_load_unit.store_buffer_empty_i, ex_stage_i.lsu_i.i_load_unit.no_st_pending_i);
+          $display("[hang] D$ ld-port: rd_req=%b rd_ack=%b miss_req=%b miss_ack=%b miss_nc=%b miss_replay=%b miss_rtrn=%b wbuf_fwd_hit=%b wr_cl_vld=%b | ptw rd_req=%b miss_req=%b | missunit st=%0d mshr_vld=%b mshr_paddr=%h cnt=%0d | wbuf valid=%h empty=%b not_ni=%b tx_vld=%h | adp rvld=%b d1st=%b sinv=%b",
+                   gen_cache_wt.i_cache_subsystem.i_wt_dcache.rd_req[1],
+                   gen_cache_wt.i_cache_subsystem.i_wt_dcache.rd_ack[1],
+                   gen_cache_wt.i_cache_subsystem.i_wt_dcache.miss_req[1],
+                   gen_cache_wt.i_cache_subsystem.i_wt_dcache.miss_ack[1],
+                   gen_cache_wt.i_cache_subsystem.i_wt_dcache.miss_nc[1],
+                   gen_cache_wt.i_cache_subsystem.i_wt_dcache.miss_replay[1],
+                   gen_cache_wt.i_cache_subsystem.i_wt_dcache.miss_rtrn_vld[1],
+                   gen_cache_wt.i_cache_subsystem.i_wt_dcache.wbuffer_fwd_hit,
+                   gen_cache_wt.i_cache_subsystem.i_wt_dcache.wr_cl_vld,
+                   gen_cache_wt.i_cache_subsystem.i_wt_dcache.rd_req[0],
+                   gen_cache_wt.i_cache_subsystem.i_wt_dcache.miss_req[0],
+                   int'(gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.state_q),
+                   gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.mshr_vld_q,
+                   gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.mshr_q.paddr,
+                   gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.cnt_q,
+                   gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_wbuffer.valid,
+                   gen_cache_wt.i_cache_subsystem.i_wt_dcache.wbuffer_empty_o,
+                   gen_cache_wt.i_cache_subsystem.i_wt_dcache.wbuffer_not_ni_o,
+                   gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_wbuffer.tx_vld_o,
+                   gen_cache_wt.i_cache_subsystem.i_adapter.dcache_rtrn_vld_q,
+                   gen_cache_wt.i_cache_subsystem.i_adapter.dcache_first_q,
+                   gen_cache_wt.i_cache_subsystem.i_adapter.self_inval_pend_q);
+          // r71: the I$ / ITLB / PTW anatomy behind an `ic_rdy=0` fetch hang
+          // (r42b @15,298,922: FTQ head valid, demand=1, I$ never ready).
+          $display("[hang] I$: st=%0d flush_q=%b cache_en=%b inv_q=%b vaddr_q=%h nc=%b | dreq req=%b kill_s1=%b kill_s2=%b spec=%b ready=%b valid=%b | areq fetch_req=%b fetch_valid=%b ex=%b | mem_req=%b mem_ack=%b rtrn_vld=%b | adp irtrn=%b | mmu ptw_st=%0d ptw_active=%b walking_instr=%b itlb_acc=%b itlb_hit=%b",
+                   int'(gen_cache_wt.i_cache_subsystem.i_g6lc_icache.state_q), gen_cache_wt.i_cache_subsystem.i_g6lc_icache.flush_q, gen_cache_wt.i_cache_subsystem.i_g6lc_icache.cache_en_q, gen_cache_wt.i_cache_subsystem.i_g6lc_icache.inv_q, gen_cache_wt.i_cache_subsystem.i_g6lc_icache.vaddr_q, gen_cache_wt.i_cache_subsystem.i_g6lc_icache.paddr_is_nc,
+                   gen_cache_wt.i_cache_subsystem.i_g6lc_icache.dreq_i.req, gen_cache_wt.i_cache_subsystem.i_g6lc_icache.dreq_i.kill_s1, gen_cache_wt.i_cache_subsystem.i_g6lc_icache.dreq_i.kill_s2, gen_cache_wt.i_cache_subsystem.i_g6lc_icache.dreq_i.spec, gen_cache_wt.i_cache_subsystem.i_g6lc_icache.dreq_o.ready, gen_cache_wt.i_cache_subsystem.i_g6lc_icache.dreq_o.valid,
+                   gen_cache_wt.i_cache_subsystem.i_g6lc_icache.areq_o.fetch_req, gen_cache_wt.i_cache_subsystem.i_g6lc_icache.areq_i.fetch_valid, gen_cache_wt.i_cache_subsystem.i_g6lc_icache.areq_i.fetch_exception.valid,
+                   gen_cache_wt.i_cache_subsystem.i_g6lc_icache.mem_data_req_o, gen_cache_wt.i_cache_subsystem.i_g6lc_icache.mem_data_ack_i, gen_cache_wt.i_cache_subsystem.i_g6lc_icache.mem_rtrn_vld_i,
+                   gen_cache_wt.i_cache_subsystem.i_adapter.icache_rtrn_vld_o,
+                   int'(ex_stage_i.lsu_i.gen_mmu.i_g6lc_mmu.i_ptw.state_q), ex_stage_i.lsu_i.gen_mmu.i_g6lc_mmu.ptw_active, ex_stage_i.lsu_i.gen_mmu.i_g6lc_mmu.walking_instr, ex_stage_i.lsu_i.gen_mmu.i_g6lc_mmu.itlb_lu_access, ex_stage_i.lsu_i.gen_mmu.i_g6lc_mmu.itlb_lu_hit);
+        end
+      end
+    end
     if (G6LCCfg.DCacheType == config_pkg::HPDCACHE_WT ||
         G6LCCfg.DCacheType == config_pkg::HPDCACHE_WB ||
         G6LCCfg.DCacheType == config_pkg::HPDCACHE_WT_WB) begin : gen_sc_hpd

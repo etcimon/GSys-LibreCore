@@ -176,12 +176,15 @@ package g6lc_ai_island_cfg_pkg;
     stripe = unsigned'(1) << shift;
     off    = unsigned'(addr[31:0]) & (stripe - unsigned'(1));
     rem    = stripe - off;
-    // beat_bytes is a power of two at every call site (AXI beat, 8 B C word); a
-    // shift keeps this off the divider path when the address is a runtime value.
-    if ((beat_bytes & (beat_bytes - unsigned'(1))) == 0)
-      maxb = rem >> $clog2(beat_bytes);
-    else
-      maxb = rem / beat_bytes;
+    // D5: shift-only form — every call site passes a power-of-two beat_bytes
+    // (AXI beat = DataWidth/8, C word = 8); asserted, so the divider is gone
+    // and the stripe remainder is pure mask arithmetic.
+    // pragma translate_off
+    assert ((beat_bytes & (beat_bytes - unsigned'(1))) == 0)
+      else $fatal(1, "g6lc_ai_island_cfg_pkg: dram_beats_in_stripe non-pow2 beat_bytes %0d",
+                  beat_bytes);
+    // pragma translate_on
+    maxb = rem >> $clog2(beat_bytes);
     if (maxb == 0) maxb = unsigned'(1);
     if (maxb > unsigned'(255)) maxb = unsigned'(255);
     return maxb;
@@ -197,8 +200,23 @@ package g6lc_ai_island_cfg_pkg;
   // Row pitch (in bank words, as a shift) for a row of `k_bytes` bytes over
   // 2^lane_shift-byte bank words: the next power of two of ceil(k_bytes / lanes).
   // k_bytes == 0 or one word -> shift 0.
-  function automatic int unsigned ai_flat_pitch_shift(input logic [31:0] k_bytes,
-                                                      input int unsigned lane_shift);
+  // Balanced count-leading-zeros barrel (5 independent reduction levels,
+  // not a serial bit scan) — the AI-FLAT pitch shift sits on the AR-issue
+  // path in g6lc_ai_gemm_seq; the serial if-chain was the r0 census floor.
+  function automatic logic [5:0] ai_clz32(input logic [31:0] v);
+    logic [31:0] w;
+    logic [5:0]  c;
+    w = v; c = '0;
+    if (~|w[31:16]) begin c[4] = 1'b1; w = w << 16; end
+    if (~|w[31:24]) begin c[3] = 1'b1; w = w << 8;  end
+    if (~|w[31:28]) begin c[2] = 1'b1; w = w << 4;  end
+    if (~|w[31:30]) begin c[1] = 1'b1; w = w << 2;  end
+    if (~|w[31]   ) begin c[0] = 1'b1; w = w << 1;  end
+    return c;
+  endfunction
+
+  function automatic int unsigned ai_flat_pitch_shift_ref(input logic [31:0] k_bytes,
+                                                          input int unsigned lane_shift);
     logic [31:0] row_words;
     int unsigned sh;
     row_words = (k_bytes + (32'd1 << lane_shift) - 32'd1) >> lane_shift;
@@ -206,6 +224,23 @@ package g6lc_ai_island_cfg_pkg;
     for (int unsigned s = 0; s < 31; s++)
       if ((32'd1 << s) < row_words) sh = s + 1;
     return sh;
+  endfunction
+
+  function automatic int unsigned ai_flat_pitch_shift(input logic [31:0] k_bytes,
+                                                      input int unsigned lane_shift);
+    logic [31:0] row_words;
+    row_words = (k_bytes + (32'd1 << lane_shift) - 32'd1) >> lane_shift;
+    // ceil(log2(row_words)) via the balanced clz tree.
+`ifdef G6LC_MUT_AI_PITCH_OFF1
+    // Review mutant: floor(log2) instead of ceil -> undersized pitch.
+    return (row_words <= 1) ? 0 :
+           ((6'd32 - ai_clz32(row_words)) > 6'd31 ? 31 : int'(6'd32 - ai_clz32(row_words)));
+`else
+    // Reference loop saturates at sh=31 (s < 31); keep the same bound.
+    return (row_words <= 1) ? 0 :
+           ((6'd32 - ai_clz32(row_words - 1)) > 6'd31
+            ? 31 : int'(6'd32 - ai_clz32(row_words - 1)));
+`endif
   endfunction
 
   // `rows` rows at that pitch fit a bank of `words` words (64-bit compare: no wrap).
@@ -810,6 +845,42 @@ package g6lc_ai_island_cfg_pkg;
     int unsigned q;
     int unsigned idx;
     logic [2:0] word;
+    // E1: constant per-queue compares instead of subtract >> shift.
+    // The callers pass NumQueues as an elaboration constant, so each
+    // range test folds to two constant compares + a one-hot select.
+    dec  = '0;
+    word = addr[4:2];
+    if (nqueues != 0 && addr >= REG_OFF_QUEUE && addr < REG_OFF_QUEUE + 16'h20) begin
+      dec = {1'b1, 8'd0, word};
+    end else begin
+      for (int unsigned iq = 1; iq < 256; iq++) begin
+`ifdef G6LC_MUT_AI_QDEC_OFF
+        // Review mutant: queue windows shifted down by one slot.
+        if (iq <= 254 && iq + 1 < nqueues &&
+            32'(addr) >= 32'(REG_OFF_QUEUE_TAIL) + 32'(iq - 1) * 32'd32 &&
+            32'(addr) <  32'(REG_OFF_QUEUE_TAIL) + 32'(iq)     * 32'd32)
+          dec = {1'b1, 8'(iq + 1), word};
+`else
+        if (iq < nqueues &&
+            32'(addr) >= 32'(REG_OFF_QUEUE_TAIL) + 32'(iq - 1) * 32'd32 &&
+            32'(addr) <  32'(REG_OFF_QUEUE_TAIL) + 32'(iq)     * 32'd32)
+          dec = {1'b1, 8'(iq), word};
+`endif
+      end
+    end
+    return dec;
+  endfunction
+
+  // pragma translate_off
+  // Reference: the original subtract/shift form, kept for the miter.
+  function automatic logic [11:0] ai_queue_decode_ref(
+      input logic [15:0] addr,
+      input int unsigned nqueues
+  );
+    logic [11:0] dec;
+    int unsigned q;
+    int unsigned idx;
+    logic [2:0] word;
     dec  = '0;
     q    = 0;
     idx  = 0;
@@ -825,6 +896,7 @@ package g6lc_ai_island_cfg_pkg;
     end
     return dec;
   endfunction
+  // pragma translate_on
 
   // Live SKU: both queues on cluster 0. I2 grows this with ClustersEnabled.
   localparam int unsigned QueueClusterMap [0:1] = '{0, 0};

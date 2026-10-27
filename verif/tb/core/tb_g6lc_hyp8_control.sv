@@ -95,6 +95,12 @@ module tb_g6lc_hyp8_csr;
   logic buf_commit;
   logic [TID-1:0] buf_commit_tid;
   logic [NSB-1:0] cancel = '0;
+  logic [NSB-1:0] sb_live = '1;
+  // r33: dispatch allocation strobes + the table's free-entry credit.
+  logic [1:0]              disp_v = '0;
+  logic [1:0][TID-1:0]     disp_tid = '0;
+  logic [1:0][11:0]        disp_addr = '0;
+  logic [1:0]              buf_credit;
 
   // ---------------- commit <-> CSR file seam ----------------
   fu_op csr_op;
@@ -115,7 +121,9 @@ module tb_g6lc_hyp8_csr;
       .G6LCCfg(C), .HypCfg(H), .fu_data_t(fu_data_t)
   ) i_buf (
       .clk_i(clk), .rst_ni(rst_n), .flush_i(flush),
-      .cancelled_mask_i(cancel),
+      .cancelled_mask_i(cancel), .sb_live_i(sb_live),
+      .disp_valid_i(disp_v), .disp_tid_i(disp_tid),
+      .disp_addr_i(disp_addr), .csr_credit_o(buf_credit),
       .fu_data_i(fud), .csr_ready_o(buf_ready),
       .csr_valid_i(buf_valid), .csr_result_o(),
       .csr_commit_i(buf_commit), .csr_commit_tid_i(buf_commit_tid),
@@ -189,7 +197,7 @@ module tb_g6lc_hyp8_csr;
   ) i_csr (
       .clk_i(clk), .rst_ni(rst_n), .flush_i(flush),
       .time_irq_i(1'b0), .rtc_time_i('0),
-      .flush_o(flush_csr), .halt_csr_o(halt_csr), .wfi_wake_o(),
+      .flush_o(flush_csr), .flush_pc_o(), .halt_csr_o(halt_csr), .wfi_wake_o(),
       .commit_instr_i(ci[0]), .commit_ack_i(ack),
       .boot_addr_i(64'h8000_0000), .hart_id_i('0),
       .ex_i(ex_commit),
@@ -253,15 +261,34 @@ module tb_g6lc_hyp8_csr;
   task automatic clear_inputs;
     ci = '{default: '0}; ci_drop = '0; ci_replay = '0; bundle_v = '0;
     fud = '0; buf_valid = 0; cancel = '0; halt = 0; flush = 0;
+    disp_v = '0;
   endtask
 
-  // issue-side table allocation (the buffer accepts the presented CSR's
-  // {tid -> csr-address} one cycle before the commit head resolves it)
-  task automatic csr_alloc(input int tid, input logic [11:0] addr,
+  // r33: table ownership lands at DISPATCH — one lane strobe, in lane
+  // order, carrying the dispatched SBE's tid and result[11:0].
+  task automatic csr_disp(input int lane, input int tid,
+                          input logic [11:0] addr);
+    disp_v[lane] = 1; disp_tid[lane] = TID'(tid); disp_addr[lane] = addr;
+    tick();
+    disp_v = '0; #2;
+  endtask
+
+  // FU grant arrival (csr_valid_i): the presented CSR must already own an
+  // entry — feeds csr_result_o only; allocation happened at dispatch.
+  task automatic csr_grant(input int tid, input logic [11:0] addr,
                            input logic [C.XLEN-1:0] opa);
     fud.trans_id = TID'(tid); fud.operand_a = opa;
     fud.operand_b = C.XLEN'(addr);
     buf_valid = 1; tick(); buf_valid = 0; #2;
+  endtask
+
+  // issue-side table allocation + grant: dispatch takes the entry, the FU
+  // grant follows (keeps the frozen mut_csr_buffer_gated copy fed — it
+  // still allocates on csr_valid_i).
+  task automatic csr_alloc(input int tid, input logic [11:0] addr,
+                           input logic [C.XLEN-1:0] opa);
+    csr_disp(0, tid, addr);
+    csr_grant(tid, addr, opa);
   endtask
 
   // present a CSR scoreboard head (held until it fires)
@@ -286,9 +313,10 @@ module tb_g6lc_hyp8_csr;
     // ============ A: two-phase CSR write -> architectural apply ============
     // table credit: one free entry left after the first allocation
     csr_alloc(1, 12'h340, 64'hA5A5_0000_0000_00A5);   // MSCRATCH
-    check(buf_ready, "CSRBUF_CREDIT_AFTER_ONE");
+    check(buf_credit == 2'd1, "CSRBUF_CREDIT_AFTER_ONE");
     csr_alloc(2, 12'hB00, 64'h0);                     // MCYCLE (second slot)
-    check(!buf_ready, "CSRBUF_CREDIT_EXHAUSTED");
+    check(buf_credit == 2'd0, "CSRBUF_CREDIT_EXHAUSTED");
+    check(buf_ready, "CSRBUF_IRO_READY_ALWAYS");
     cancel[2] = 1'b1; tick(); cancel[2] = 1'b0;       // squash frees the probe slot
     csr_present(1, CSR_WRITE, 64'hA5A5_0000_0000_00A5);
     // request cycle: the tid's address resolves combinationally BEFORE
@@ -437,6 +465,106 @@ module tb_g6lc_hyp8_csr;
     check(cnt_cycle_o == 64'd41, "CNT_DEBUG_CYCLE_FREEZE");
     cnt_dbg = 0; cnt_ack = '0;
 
+    // ============ K: cancelled dispatch strobe allocates nothing ======
+    // A CSR whose owner slot is drop-committed on the SAME edge its
+    // dispatch strobe lands must leave no entry: the mask is set during
+    // the strobe cycle and clears at that edge — the leaked entry of the
+    // r14x wedge. G6LC_MUT_CSRTAB_LEAK (unqualified arrival, no liveness
+    // sweep) must fail CSRTAB_CANCELLED_ARR_NO_ENTRY.
+    sb_live[20] = 1'b1;                              // slot was issued upstream
+    cancel[20] = 1'b1;                               // slot squashed this edge
+    disp_v[0] = 1'b1; disp_tid[0] = TID'(20); disp_addr[0] = 12'h340;
+    tick(); disp_v = '0;                             // strobe vs cancel, one edge
+    cancel[20] = 1'b0; sb_live[20] = 1'b0;
+    check(!(i_buf.tab_q[0].valid || i_buf.tab_q[1].valid),
+          "CSRTAB_CANCELLED_ARR_NO_ENTRY");
+    tick();
+    check(!(i_buf.tab_q[0].valid || i_buf.tab_q[1].valid),
+          "CSRTAB_CANCELLED_ARR_NO_ENTRY_NEXT");
+    check(buf_credit == 2'd2, "CSRTAB_CREDIT_AFTER_CANCEL");
+    rst_n = 0; tick(); rst_n = 1;                  // fresh table for both copies
+
+    // ============ L: liveness sweep frees a pre-allocated dead entry ====
+    // The entry allocates while its slot is live; the slot then drops
+    // without commit (the cancel-mask edge was never observed — cleared
+    // before the table could see it). The sb_live sweep frees the entry
+    // one cycle later.
+    sb_live[21] = 1'b1;
+    csr_alloc(21, 12'h340, '0);                      // entry holds tid 21
+    check(i_buf.tab_q[0].valid || i_buf.tab_q[1].valid,
+          "CSRTAB_PRE_ALLOC_PRESENT");
+    sb_live[21] = 1'b0;                              // slot dies, no commit
+    tick();                                          // sweep applies
+    check(!(i_buf.tab_q[0].valid || i_buf.tab_q[1].valid),
+          "CSRTAB_LIVENESS_SWEEP");
+    check(buf_credit == 2'd2, "CSRTAB_CREDIT_AFTER_SWEEP");
+    rst_n = 0; tick(); rst_n = 1;                  // fresh table for both copies
+
+    // ============ M: back-to-back legal CSRs unchanged (regression) ====
+    sb_live[30] = 1'b1; sb_live[31] = 1'b1;
+    csr_alloc(30, 12'h340, '0);
+    csr_alloc(31, 12'h340, '0);                      // both entries resident
+    check(buf_credit == 2'd0, "CSRTAB_CREDIT_TWO_RESIDENT");
+    csr_present(30, CSR_WRITE, 64'h0000_0000_0000_00A0);
+    tick();
+    check(ack[0] == 1'b1, "CSRTAB_LEGAL_FIRE_0");
+    tick(); csr_release();
+    check(i_csr.mscratch_q == 64'h0000_0000_0000_00A0, "CSRTAB_FIRST_APPLIED");
+    check(buf_credit == 2'd1, "CSRTAB_CREDIT_ONE_FREE");
+    csr_present(31, CSR_WRITE, 64'h0000_0000_0000_00B0);
+    tick();
+    check(ack[0] == 1'b1, "CSRTAB_LEGAL_FIRE_1");
+    tick(); csr_release();
+    check(!(i_buf.tab_q[0].valid || i_buf.tab_q[1].valid),
+          "CSRTAB_ALL_RELEASED");
+    check(i_csr.mscratch_q == 64'h0000_0000_0000_00B0, "CSRTAB_SECOND_APPLIED");
+    rst_n = 0; tick(); rst_n = 1;
+
+    // ============ N: program-order ownership — inversion impossible ====
+    // r33: A is dispatched while operand-stalled; B and C are dispatched
+    // with ready operands. A's entry is owned at its dispatch edge, so
+    // B+C can never capture both entries ahead of it — with DEPTH=2, C's
+    // group stalls at dispatch until A commits. G6LC_MUT_CSRTAB_IRO_ALLOC
+    // (grant-time allocation) must fail CSRTAB_INV_A_OWNS_LOW.
+    sb_live[40] = 1'b1; sb_live[41] = 1'b1; sb_live[42] = 1'b1;
+    csr_disp(0, 40, 12'h340);                      // A dispatched, operands stall
+    check(i_buf.tab_q[0].valid && (i_buf.tab_q[0].tid == TID'(40)),
+          "CSRTAB_INV_A_OWNS_LOW");
+    csr_disp(1, 41, 12'hB00);                      // B dispatched, ready
+    check(i_buf.tab_q[1].valid && (i_buf.tab_q[1].tid == TID'(41)),
+          "CSRTAB_INV_B_OWNS_NEXT");
+    check(buf_credit == 2'd0, "CSRTAB_INV_CREDIT_EXHAUSTED");
+    // C's group waits at dispatch (no strobe, credit 0). A's operands
+    // arrive: FU grant, commit fires — A must commit before any younger
+    // entry exists beyond B.
+    csr_grant(40, 12'h340, '0);
+    csr_present(40, CSR_WRITE, 64'h0000_0000_0000_00C0);
+    tick();
+    check(ack[0] == 1'b1, "CSRTAB_INV_A_FIRES_FIRST");
+    tick(); csr_release();
+    check(i_csr.mscratch_q == 64'h0000_0000_0000_00C0, "CSRTAB_INV_A_APPLIED");
+    check(buf_credit == 2'd1, "CSRTAB_INV_CREDIT_AFTER_A");
+    csr_disp(0, 42, 12'hC00);                      // C takes A's freed entry
+    check(i_buf.tab_q[0].valid && (i_buf.tab_q[0].tid == TID'(42)),
+          "CSRTAB_INV_C_TAKES_A_SLOT");
+    check(buf_credit == 2'd0, "CSRTAB_INV_CREDIT_FULL_AGAIN");
+    rst_n = 0; tick(); rst_n = 1;
+
+    // ============ O: cancelled-after-dispatch freed by liveness ========
+    // Entry allocated at dispatch; the owner slot then dies without
+    // commit (cancel-mask edge never observed) — the sb_live sweep frees
+    // the entry one cycle later.
+    sb_live[50] = 1'b1;
+    csr_disp(0, 50, 12'h340);
+    check(i_buf.tab_q[0].valid && (i_buf.tab_q[0].tid == TID'(50)),
+          "CSRTAB_DISP_ALLOC_PRESENT");
+    sb_live[50] = 1'b0;                              // slot dies, no commit
+    tick();                                          // sweep applies
+    check(!(i_buf.tab_q[0].valid || i_buf.tab_q[1].valid),
+          "CSRTAB_DISP_LIVENESS_SWEEP");
+    check(buf_credit == 2'd2, "CSRTAB_DISP_CREDIT_AFTER_SWEEP");
+    rst_n = 0; tick(); rst_n = 1;
+
     $display("HYP8_CSR_PASS checked=%0d", checked);
     $finish;
   end
@@ -467,6 +595,17 @@ module tb_g6lc_hyp8_issue;
   endfunction
   localparam config_pkg::g6lc_cfg_t C = configuration();
   localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t H = g6lc_hyp_pkg::Hyp8;
+  // r47: the arb bench was authored for the single-cycle CTL->take
+  // (IqArbStages==1 -- every take/issue/ack check below is keyed to
+  // take at capture+2 edges). i_arb keeps that profile; i_arb2 runs
+  // Hyp8's IqArbStages==2 and is the r47 kill-sweep surface.
+  function automatic g6lc_hyp_pkg::g6lc_hyp_cfg_t hyp_arb1();
+    g6lc_hyp_pkg::g6lc_hyp_cfg_t c;
+    c = g6lc_hyp_pkg::Hyp8;
+    c.IqArbStages = 1;
+    return c;
+  endfunction
+  localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t H_ARB1 = hyp_arb1();
 
   localparam int BANKS = 4, ENTRIES = 4, NPORTS = 2, PRF_W = 6;
   localparam int TIDW = C.TRANS_ID_BITS;
@@ -552,7 +691,8 @@ module tb_g6lc_hyp8_issue;
       .rd_prd_o(mut_pay_prd));
 
   g6lc_iq_arb #(
-      .G6LCCfg(C), .BANKS(BANKS), .ENTRIES(ENTRIES), .TID_W(TIDW),
+      .G6LCCfg(C), .HypCfg(H_ARB1),
+      .BANKS(BANKS), .ENTRIES(ENTRIES), .TID_W(TIDW),
       .PRF_W(PRF_W), .NPORTS(NPORTS), .scoreboard_entry_t(sbe_t)
   ) i_arb (
       .clk_i(clk), .rst_ni(rst_n), .flush_i(flush),
@@ -574,6 +714,45 @@ module tb_g6lc_hyp8_issue;
       .hyp_wb_reserve_stall_o(),
       .take_v_o(take_v), .take_cand_o(take_cand),
       .ack_v_o(ack_v), .ack_idx_o(ack_idx));
+
+  // r47: second arb on the production Hyp8 profile (IqArbStages==2 --
+  // ARB_STG==2, take at capture+3). Same drive; its payload-read
+  // outputs are not connected to i_pay, only the take/issue lines are
+  // observed by the kill sweep.
+  logic [BANKS-1:0][NPORTS-1:0]      take_v2, take_cand2, ack_v2;
+  logic [BANKS-1:0][NPORTS-1:0][1:0] ack_idx2;
+  logic [NPORTS-1:0][1:0]            pay_bank2, pay_entry2;
+  sbe_t [NPORTS-1:0]                 issue_sbe2;
+  logic [NPORTS-1:0][31:0]           issue_orig2;
+  logic [NPORTS-1:0][PRF_W-1:0]      issue_prd2;
+  logic [NPORTS-1:0]                 issue_v2, issue_spec2;
+  logic [NPORTS-1:0][1:0]            issue_spec_ab2;
+  logic [NPORTS-1:0][1:0][TIDW-1:0]  issue_ptid2;
+
+  g6lc_iq_arb #(
+      .G6LCCfg(C), .HypCfg(H),
+      .BANKS(BANKS), .ENTRIES(ENTRIES), .TID_W(TIDW),
+      .PRF_W(PRF_W), .NPORTS(NPORTS), .scoreboard_entry_t(sbe_t)
+  ) i_arb2 (
+      .clk_i(clk), .rst_ni(rst_n), .flush_i(flush),
+      .cancelled_mask_i(cancel), .commit_ptr_i(commit_ptr),
+      .cand_v_i(cand_v), .cand_i_i(cand_i), .cand_tid_i(cand_tid),
+      .cand_fp_i(cand_fp), .cand_spec_i(cand_spec),
+      .cand_spec_ab_i(cand_spec_ab), .cand_ptid_i(cand_ptid),
+      .cand_fluin_i(cand_fluin), .cand_wbport_i(cand_wbport),
+      .cand_wboff_i(cand_wboff), .cand_gate_i(cand_gate),
+      .cand_div_i(cand_div), .cand_port0_i(cand_port0),
+      .lsu_ready_i(1'b1), .fpu_ready_i(1'b1), .csr_ready_i(1'b1),
+      .mult_ready_i(1'b1),
+      .pay_bank_o(pay_bank2), .pay_entry_o(pay_entry2),
+      .pay_sbe_i(pay_sbe), .pay_orig_i(pay_orig), .pay_prd_i(pay_prd),
+      .issue_sbe_o(issue_sbe2), .issue_orig_o(issue_orig2),
+      .issue_prd_o(issue_prd2), .issue_valid_o(issue_v2),
+      .issue_spec_o(issue_spec2), .issue_spec_ab_o(issue_spec_ab2),
+      .issue_ptid_o(issue_ptid2), .issue_ack_i(issue_ack),
+      .hyp_wb_reserve_stall_o(),
+      .take_v_o(take_v2), .take_cand_o(take_cand2),
+      .ack_v_o(ack_v2), .ack_idx_o(ack_idx2));
 
   // ------------------------- IRO-acceptance reservation -------------------------
   logic [NPORTS-1:0]            res_offer = '0, res_accept = '0;
@@ -908,10 +1087,20 @@ module tb_g6lc_hyp8_issue;
     issue_ack = 1; tick(); issue_ack = 0; #2;   // drain tid3
 
     // ============ B: held record >=3 cycles, no duplicate take ============
+    // tid1/tid2's real ALU WB reservations (off 6/7) still own arrival
+    // slots for the first cycles after capture -- the kept-offered
+    // candidate retakes each grant cycle and lands when the window
+    // clears, so poll instead of checking one fixed edge.
     offer(2, 0, 0, 5, 0, 0);   // bank2 c0 -> entry0 (tid5), kept offered
     tick();                    // capture
-    tick();                    // -> take on port0
-    check(take_v[2][0], "ARB_TAKE_TID5");
+    begin : arb_b
+      bit t5took = 1'b0;
+      for (int i = 0; i < 6 && !t5took; i++) begin
+        tick();
+        t5took = take_v[2][0];
+      end
+      check(t5took, "ARB_TAKE_TID5");
+    end
     tick();                    // -> present
     check(issue_v[0] && issue_sbe[0].trans_id == 4'd5, "ARB_PRES_TID5");
     // hold the presentation; the stale candidate stays offered.
@@ -1091,6 +1280,104 @@ module tb_g6lc_hyp8_issue;
     iro_expect_ack(1, 4, "IRO_PAIR_P1_ACK_AFTER_DRAIN");
     iro_v = '0; res_drain();
 
+    // ============ F: r47 sticky kill sweep ==========================
+    // One candidate; a one-cycle cancel pulse at offset-k windows from
+    // the capture edge; the in-flight record must never take or issue.
+    // i_arb is IqArbStages==1 (coverage C:cand_cancl_q / C+1:mask_q /
+    // C+2:live, take window W2); i_arb2 is Hyp8 IqArbStages==2 (adds
+    // C+1:kill_h, take window W3). The pulse is exactly one tick and
+    // cand_v drops after it, as a real bank drops the killed entry's
+    // candidate -- so a missed kill means the frozen in-flight record
+    // is taken dead.
+    begin : sec_f
+      // -- control: no cancel -> take on each arb's own edge -----------
+      begin : ctl
+        int unsigned tv1, tv2;
+        flush = 1'b1; tick(); flush = 1'b0; tick();
+        clear_cands(); cancel = '0;
+        tv1 = '0; tv2 = '0;
+        offer(3, 0, 0, 8, 0, 0);
+        repeat (7) begin
+          tick();
+          tv1 |= 32'(take_v[3][0] | take_v[3][1]);
+          tv2 |= 32'(take_v2[3][0] | take_v2[3][1]);
+        end
+        check(tv1 != 0, "F_CTL_ARB1_TAKE");
+        check(tv2 != 0, "F_CTL_ARB2_TAKE");
+        clear_cands();
+        issue_ack = 2'b11; tick(); issue_ack = '0; tick();
+      end
+      // -- i_arb2 (ARB_STG==2): pulse windows W0..W3 -------------------
+      for (int k = 0; k <= 3; k++) begin : k2
+        int unsigned tv, iv;
+        int unsigned tid;
+        flush = 1'b1; tick(); flush = 1'b0; tick();
+        clear_cands(); cancel = '0;
+        tid = 9 + k;
+        tv = '0; iv = '0;
+        offer(3, 0, 0, tid, 0, 0);
+        for (int t = 0; t < k; t++) tick();
+        cancel[tid] = 1'b1;
+        tick();
+        cancel[tid] = 1'b0;
+        clear_cands();
+        repeat (7) begin
+          tick();
+          tv |= 32'(take_v2[3][0] | take_v2[3][1]);
+          iv |= 32'(issue_v2[0] | issue_v2[1]);
+        end
+        check(tv == 0, $sformatf("F_ARB2_K%0d_TAKE", k));
+        check(iv == 0, $sformatf("F_ARB2_K%0d_ISSUE", k));
+      end
+      // -- i_arb (ARB_STG==1): pulse windows W0..W2; W3 is post-take --
+      for (int k = 0; k <= 2; k++) begin : k1
+        int unsigned tv, iv;
+        int unsigned tid;
+        flush = 1'b1; tick(); flush = 1'b0; tick();
+        clear_cands(); cancel = '0;
+        tid = 13 + k;
+        tv = '0; iv = '0;
+        offer(3, 0, 0, tid, 0, 0);
+        for (int t = 0; t < k; t++) tick();
+        cancel[tid] = 1'b1;
+        tick();
+        cancel[tid] = 1'b0;
+        clear_cands();
+        repeat (7) begin
+          tick();
+          tv |= 32'(take_v[3][0] | take_v[3][1]);
+          iv |= 32'(issue_v[0] | issue_v[1]);
+        end
+        check(tv == 0, $sformatf("F_ARB1_K%0d_TAKE", k));
+        check(iv == 0, $sformatf("F_ARB1_K%0d_ISSUE", k));
+      end
+      // -- ARB1 control at k=3: the take lands on W2 before the pulse --
+      begin : ctl_k3
+        int unsigned tv;
+        flush = 1'b1; tick(); flush = 1'b0; tick();
+        clear_cands(); cancel = '0;
+        tv = '0;
+        offer(3, 0, 0, 7, 0, 0);
+        repeat (3) begin
+          tick();
+          tv |= 32'(take_v[3][0] | take_v[3][1]);
+        end
+        cancel[7] = 1'b1;
+        tick();
+        cancel[7] = 1'b0;
+        tv |= 32'(take_v[3][0] | take_v[3][1]);
+        clear_cands();
+        repeat (4) begin
+          tick();
+          tv |= 32'(take_v[3][0] | take_v[3][1]);
+        end
+        // the W2 take fired while the mask was still low -- the late
+        // pulse must not retro-kill what already issued.
+        check(tv != 0, "F_ARB1_K3_POST_TAKE_OK");
+        issue_ack = 2'b11; tick(); issue_ack = '0; tick();
+      end
+    end
+
     $display("HYP8_ISSUE_PASS checked=%0d", checked);
     $finish;
   end
@@ -1160,6 +1447,15 @@ module tb_g6lc_hyp8_dispatch;
   sbe_t [NP-1:0]              dsbe;
   logic [NP-1:0][31:0]        dorig = '0;
   logic [NP-1:0]              dvalid = '0, dack;
+  // r33: CSR table credit + allocation strobes (driven/observed here —
+  // csr_buffer itself is instantiated in the CSR leaf section).
+  logic [1:0]                dcsr_credit = '0;
+  logic [NP-1:0]             dcsr_dv;
+  logic [NP-1:0][TID-1:0]    dcsr_dtid;
+  logic [NP-1:0][11:0]       dcsr_daddr;
+  logic [NP-1:0]             dcsr_dv_seen = '0;
+  logic [NP-1:0][TID-1:0]    dcsr_dtid_seen = '0;
+  logic [NP-1:0][11:0]       dcsr_daddr_seen = '0;
   sbe_t [NP-1:0]              isbe;
   logic [NP-1:0][31:0]        iorig;
   logic [NP-1:0]              ivalid;
@@ -1225,6 +1521,9 @@ module tb_g6lc_hyp8_dispatch;
       .issue_spec_ab_o(ispec_ab), .issue_ptid_o(iptid),
       .lsu_ready_i(1'b1), .fpu_ready_i(1'b1),
       .csr_ready_i(1'b1), .mult_ready_i(1'b1),
+      .csr_credit_i(dcsr_credit),
+      .csr_disp_valid_o(dcsr_dv), .csr_disp_tid_o(dcsr_dtid),
+      .csr_disp_addr_o(dcsr_daddr),
       .issue_op_a_o(iopa), .issue_op_b_o(iopb),
       .issue_op_a_valid_o(iopa_v), .issue_op_b_valid_o(iopb_v),
       .issue_op_c_o(iopc), .issue_op_c_valid_o(iopc_v),
@@ -1296,6 +1595,35 @@ module tb_g6lc_hyp8_dispatch;
   int                vio_cnt = 0;
   logic [TID-1:0]    vio_id_last = '0;
 
+  // r44 observability: does the serialized issue arbiter ever pop and
+  // take a lane on the same edge (iss_pop & iqi_take coincident)? Count
+  // only; the N-section stimulus does not force it.
+  int unsigned pop_take_n = 0;
+  always_ff @(posedge clk) begin
+    if (rst_n)
+      pop_take_n <= pop_take_n +
+                    $countones(i_dispatch.iss_pop & i_dispatch.iqi_take);
+  end
+
+  // r46 non-vacuity for the flat op-select miter: count edges where any
+  // lane's int bypass vectors (hit_a/hit_b) or FP vectors (fh_a/fh_b)
+  // were nonzero -- the === compare is only meaningful if those terms
+  // actually carried data.
+  int unsigned opasm_int_n = 0, opasm_fp_n = 0;
+  logic [NP-1:0] opasm_int_lane, opasm_fp_lane;
+  for (genvar p = 0; p < NP; p++) begin : gen_opasm_cov
+    assign opasm_int_lane[p] =
+        |(i_dispatch.gen_op_asm[p].hit_a | i_dispatch.gen_op_asm[p].hit_b);
+    assign opasm_fp_lane[p]  =
+        |(i_dispatch.gen_op_asm[p].fh_a | i_dispatch.gen_op_asm[p].fh_b);
+  end
+  always_ff @(posedge clk) begin
+    if (rst_n) begin
+      opasm_int_n <= opasm_int_n + (|opasm_int_lane);
+      opasm_fp_n  <= opasm_fp_n + (|opasm_fp_lane);
+    end
+  end
+
   // Acceptances are combinational and consumed at the posedge; sample
   // them just before the edge while the offers still stand.
   task automatic tick;
@@ -1342,6 +1670,11 @@ module tb_g6lc_hyp8_dispatch;
         // sb_live models entries once the IQ actually owns them.
         sb_live[i_dispatch.grp_sbe_q[p].trans_id] = 1'b1;
       end
+      if (dcsr_dv[p]) begin
+        dcsr_dv_seen[p]   = 1'b1;
+        dcsr_dtid_seen[p] = dcsr_dtid[p];
+        dcsr_daddr_seen[p] = dcsr_daddr[p];
+      end
     end
     clk = 1; #2; clk = 0; #2;
     cycles++;
@@ -1355,6 +1688,8 @@ module tb_g6lc_hyp8_dispatch;
 
   task automatic reset_all;
     rst_n = 0; dvalid = '0; dack_seen = '0; iack = '1;
+    dcsr_credit = '0; dcsr_dv_seen = '0;
+    dcsr_dtid_seen = '0; dcsr_daddr_seen = '0;
     wb_drive_v = '0; wb_drive_id = '0;
     wb_drive_data = '0; wb_drive_exc = '0;
     cwe = '0; cack = '0; misp = 0;
@@ -1459,6 +1794,7 @@ module tb_g6lc_hyp8_dispatch;
   endtask
 
   task automatic wait_issue(input int tid, input int maxc, input string tag);
+    check(tid >= 0 && tid < NSB, "WAIT_ISSUE_TID_RANGE");
     for (int c = 0; c < maxc; c++) begin
       if (issue_cnt[tid] >= 1) return;
       tick();
@@ -1493,6 +1829,17 @@ module tb_g6lc_hyp8_dispatch;
     e = '0; e.valid = 1; e.trans_id = TID'(tid);
     e.fu = CTRL_FLOW; e.op = EQ;
     e.rd = 5'd0; e.rs1 = 5'd5; e.rs2 = 5'd5;
+    return e;
+  endfunction
+
+  // CSR-class lane (r33): fu == CSR is the group-gate predicate; result
+  // carries the CSR immediate the table records.
+  function automatic sbe_t csr_sbe(input int tid, input logic [11:0] addr);
+    sbe_t e;
+    e = '0; e.valid = 1; e.trans_id = TID'(tid);
+    e.fu = CSR; e.op = CSR_WRITE;
+    e.rs1 = 5'd5; e.rd = 5'd7;
+    e.result = C.XLEN'(addr);
     return e;
   endfunction
 
@@ -2007,7 +2354,255 @@ module tb_g6lc_hyp8_dispatch;
           cnc_kill[9], "L_POST_WINDOW");
     check(cnc_mask[7], "L_POST_SLOT_WINDOW");
 
-    $display("HYP8_DISPATCH_PASS checked=%0d", checked);
+    // ------------- M: CSR table credit gates group acceptance (r33) ---
+    // A resource released in commit order is allocated in program order:
+    // a group is consumed only when the table can hold EVERY CSR lane it
+    // carries — it waits, never partially.
+    reset_all();
+    // A non-CSR group is never gated by the CSR credit.
+    dcsr_credit = 2'd0;
+    drive0(alu_sbe(23, 7, 1, 2), 32'h4C00_0023, "M_NONCSR_UNGATED");
+    check(dcsr_dv_seen == 2'b00, "M_NONCSR_NO_STROBE");
+    // Single CSR lane blocked at credit 0, freed at credit 1.
+    reset_all();
+    dsbe[0] = csr_sbe(24, 12'h340); dorig[0] = 0; dvalid[0] = 1;
+    repeat (6) tick();
+    check(dack_seen == 2'b00, "M_CSRCREDIT_ZERO_BLOCKS");
+    dcsr_credit = 2'd1;
+    for (int c = 0; c < 20 && !dack_seen[0]; c++) tick();
+    dvalid = '0;
+    check(dack_seen[0], "M_CSRCREDIT_ONE_ADMITS");
+    check(dcsr_dv_seen[0] && (dcsr_dtid_seen[0] == TID'(24)) &&
+          (dcsr_daddr_seen[0] == 12'h340), "M_CSRDISP_STROBE_LANE0");
+    // Two-CSR group with credit 1 waits; credit 2 admits both, strobes
+    // fire in lane order — never a partial allocation.
+    reset_all();
+    dcsr_credit = 2'd1;
+    dsbe[0] = csr_sbe(25, 12'h340); dsbe[1] = csr_sbe(26, 12'hB00);
+    dorig[0] = 0; dorig[1] = 1; dvalid = '1;
+    repeat (6) tick();
+    check(dack_seen == 2'b00, "M_CSRGROUP_CREDIT1_BLOCKS");
+    check(dcsr_dv_seen == 2'b00, "M_CSRGROUP_NO_PARTIAL_STROBE");
+    dcsr_credit = 2'd2;
+    for (int c = 0; c < 20 && !(&dack_seen); c++) tick();
+    dvalid = '0;
+    check(&dack_seen, "M_CSRGROUP_CREDIT2_ADMITS");
+    check(dcsr_dv_seen == 2'b11, "M_CSRGROUP_BOTH_STROBED");
+    check((dcsr_dtid_seen[0] == TID'(25)) &&
+          (dcsr_dtid_seen[1] == TID'(26)),
+          "M_CSRGROUP_STROBE_TIDS");
+
+    // ------------- N: FP predicate cache hold/retention (r44) ----------
+    // Port-driven: stall the issue lane, hold a staged FP record through
+    // unrelated WB traffic and a flush_unissued mask cycle, then let an
+    // independent integer op take the freed lane. The cached FP-use
+    // class bits and op_c_valid must stay tied to the SAME staged record
+    // the whole time. N1 holds FP->int; N2 holds int->FP; N3 kills a
+    // held FP record with flush_i (cancelled-mask path is the same
+    // clear). FADD classifies FP on rs2 + the rs3(imm) slot, rs1 is
+    // integer: expected bits {fpa,fpb,fpc} = {0,1,1}.
+    begin : sec_n
+      int  n_lane;
+      bit  n_a, n_b, n_c;
+      // N1: hold an FP record, mask it with flush_unissued, reoffer.
+      reset_all();
+      iack = '0;
+      drive0(fadd_sbe(30, 1, 5, 3, 4), 32'hF000_0030, "N1_FP_ADMIT");
+      n_lane = -1;
+      for (int c = 0; c < 40 && n_lane < 0; c++) begin
+        for (int p = 0; p < NP; p++)
+          if (i_dispatch.iss_v_q[p] &&
+              i_dispatch.iss_sbe_q[p].trans_id == TID'(30)) n_lane = p;
+        if (n_lane < 0) tick();
+      end
+      check(n_lane >= 0, "N1_FP_NEVER_STAGED");
+      n_a = i_dispatch.iss_fpa_q[n_lane];
+      n_b = i_dispatch.iss_fpb_q[n_lane];
+      n_c = i_dispatch.iss_fpc_q[n_lane];
+      check(!n_a && n_b && n_c, "N1_FP_CLASS_BITS");
+      check(iopc_v[n_lane], "N1_OPCV_WHILE_STALLED");
+      // Unrelated WB beats must not perturb the held record's class.
+      wb_once(28, 64'hDEAD_0001);
+      wb_once(29, 64'hDEAD_0002);
+      tick();
+      check(i_dispatch.iss_v_q[n_lane] &&
+            i_dispatch.iss_sbe_q[n_lane].trans_id == TID'(30),
+            "N1_RECORD_EVICTED");
+      check(i_dispatch.iss_fpa_q[n_lane] == n_a &&
+            i_dispatch.iss_fpb_q[n_lane] == n_b &&
+            i_dispatch.iss_fpc_q[n_lane] == n_c, "N1_CLASS_DRIFTED_WB");
+      check(iopc_v[n_lane], "N1_OPCV_DRIFTED_WB");
+      // flush_unissued masks issue validity for that cycle only — the
+      // record and its cached class survive and reoffer next cycle.
+      flush_un = 1'b1;
+      #1;
+      check(!ivalid[n_lane] && !iopc_v[n_lane], "N1_FLUSHUN_NOT_MASKED");
+      tick();
+      flush_un = 1'b0;
+      #1;
+      check(ivalid[n_lane] &&
+            i_dispatch.iss_sbe_q[n_lane].trans_id == TID'(30),
+            "N1_NO_REOFFER");
+      check(i_dispatch.iss_fpa_q[n_lane] == n_a &&
+            i_dispatch.iss_fpb_q[n_lane] == n_b &&
+            i_dispatch.iss_fpc_q[n_lane] == n_c, "N1_CLASS_DRIFTED_FLUSHUN");
+      check(iopc_v[n_lane], "N1_OPCV_AFTER_FLUSHUN");
+      // Release the lane; then hold ack LOW again so the integer
+      // replacement stays staged long enough to inspect its cached
+      // class bits (a popped record is gone — the bits must be sampled
+      // while the lane holds the record).
+      iack = '1;
+      wait_issue(30, 30, "N1_FP_LOST");
+      iack = '0;
+      drive0(alu_sbe(31, 2, 5, 6), 32'hF000_0031, "N1_INT_ADMIT");
+      n_lane = -1;
+      for (int c = 0; c < 40 && n_lane < 0; c++) begin
+        for (int p = 0; p < NP; p++)
+          if (i_dispatch.iss_v_q[p] &&
+              i_dispatch.iss_sbe_q[p].trans_id == TID'(31)) n_lane = p;
+        if (n_lane < 0) tick();
+      end
+      check(n_lane >= 0, "N1_INT_NEVER_STAGED");
+      check(!i_dispatch.iss_fpa_q[n_lane] &&
+            !i_dispatch.iss_fpb_q[n_lane] &&
+            !i_dispatch.iss_fpc_q[n_lane], "N1_INT_FP_BITS_SET");
+      check(ivalid[n_lane] && !iopc_v[n_lane], "N1_INT_OPCV_SET");
+      check(iopa_v[n_lane] && iopb_v[n_lane], "N1_INT_OPV");
+      iack = '1;
+      wait_issue(31, 30, "N1_INT_LOST");
+
+      // N2: opposite ordering — hold an integer record, replace with FP.
+      reset_all();
+      iack = '0;
+      drive0(alu_sbe(8, 3, 5, 6), 32'hF000_0032, "N2_INT_ADMIT");
+      n_lane = -1;
+      for (int c = 0; c < 40 && n_lane < 0; c++) begin
+        for (int p = 0; p < NP; p++)
+          if (i_dispatch.iss_v_q[p] &&
+              i_dispatch.iss_sbe_q[p].trans_id == TID'(8)) n_lane = p;
+        if (n_lane < 0) tick();
+      end
+      check(n_lane >= 0, "N2_INT_NEVER_STAGED");
+      check(!i_dispatch.iss_fpa_q[n_lane] &&
+            !i_dispatch.iss_fpb_q[n_lane] &&
+            !i_dispatch.iss_fpc_q[n_lane], "N2_INT_FP_BITS_SET");
+      check(ivalid[n_lane] && !iopc_v[n_lane], "N2_INT_OPCV_SET");
+      iack = '1;
+      wait_issue(8, 30, "N2_INT_LOST");
+      iack = '0;
+      drive0(fadd_sbe(9, 4, 5, 3, 4), 32'hF000_0033, "N2_FP_ADMIT");
+      n_lane = -1;
+      for (int c = 0; c < 40 && n_lane < 0; c++) begin
+        for (int p = 0; p < NP; p++)
+          if (i_dispatch.iss_v_q[p] &&
+              i_dispatch.iss_sbe_q[p].trans_id == TID'(9)) n_lane = p;
+        if (n_lane < 0) tick();
+      end
+      check(n_lane >= 0, "N2_FP_NEVER_STAGED");
+      check(!i_dispatch.iss_fpa_q[n_lane] &&
+            i_dispatch.iss_fpb_q[n_lane] &&
+            i_dispatch.iss_fpc_q[n_lane], "N2_FP_CLASS_BITS");
+      check(ivalid[n_lane] && iopc_v[n_lane], "N2_FP_OPCV");
+      iack = '1;
+      wait_issue(9, 30, "N2_FP_LOST");
+
+      // N3: a held FP record killed by full flush — issue validity is
+      // suppressed and never reoffers; the DUT's own per-lane ===
+      // invariant still holds across the stale cleared state.
+      reset_all();
+      iack = '0;
+      drive0(fadd_sbe(10, 5, 5, 3, 4), 32'hF000_0034, "N3_FP_ADMIT");
+      n_lane = -1;
+      for (int c = 0; c < 40 && n_lane < 0; c++) begin
+        for (int p = 0; p < NP; p++)
+          if (i_dispatch.iss_v_q[p] &&
+              i_dispatch.iss_sbe_q[p].trans_id == TID'(10)) n_lane = p;
+        if (n_lane < 0) tick();
+      end
+      check(n_lane >= 0, "N3_FP_NEVER_STAGED");
+      check(ivalid[n_lane] && iopc_v[n_lane], "N3_PRE_FLUSH_VALID");
+      flush = 1'b1;
+      tick();
+      flush = 1'b0;
+      tick();
+      check(!i_dispatch.iss_v_q[n_lane] && !ivalid[n_lane],
+            "N3_FLUSH_DID_NOT_KILL");
+      check(issue_cnt[10] == 0, "N3_KILLED_ISSUED");
+      repeat (3) tick();
+      check(!ivalid[n_lane], "N3_ZOMBIE_REOFFER");
+      iack = '1;
+    end
+
+    // ------------- O: staged-record WB bypass hits (r46) -------------
+    // Make the flat op-select miter non-vacuous. The r5 select reads
+    // the REGISTERED wakeup, so a one-cycle WB pulse can never overlap
+    // the staged window; instead hold the WB bus presented across the
+    // wake -> take -> iss_v window (a stalled/re-broadcast WB on the
+    // port is legal -- re-hits on an already-set rdy are harmless) and
+    // keep the lane held so the record is resident while wb_value_valid
+    // is still up. hit_a/fh_b must then present the WB data on the
+    // operand ports (opasm_int/opasm_fp count the edges).
+    begin : sec_o
+      int  n_lane;
+      // O1: integer rs1 -> hit_a / op_a.
+      reset_all();
+      drive0(alu_sbe(3, 3, 5, 6), 32'h0B01_0003);
+      wait_issue(3, 30, "O1_PRODUCER_NO_ISSUE");
+      iack = '0;
+      drive0(alu_sbe(4, 4, 3, 6), 32'h0B01_0004, "O1_CONSUMER_ADMIT");
+      // Present the producer WB and hold it until the consumer record
+      // is resident in iss; the bypass must supply op_a while the file
+      // write is still landing.
+      wb_drive_v[0]    = 1'b1;
+      wb_drive_id[0]   = TID'(3);
+      wb_drive_data[0] = 64'hCAFE_F00D;
+      n_lane = -1;
+      for (int c = 0; c < 10 && n_lane < 0; c++) begin
+        tick();
+        for (int p = 0; p < NP; p++)
+          if (i_dispatch.iss_v_q[p] &&
+              i_dispatch.iss_sbe_q[p].trans_id == TID'(4)) n_lane = p;
+      end
+      check(n_lane >= 0, "O1_CONSUMER_NEVER_STAGED");
+      #1;
+      check(iopa_v[n_lane] && iopa[n_lane] == 64'hCAFE_F00D,
+            "O1_OPERAND_NOT_WB_DATA");
+      wb_drive_v = '0;
+      tick();
+      iack = '1;
+      wait_issue(4, 30, "O1_CONSUMER_LOST");
+      check(opa_last[4] == 64'hCAFE_F00D, "O1_ISSUED_OPERAND");
+
+      // O2: FP rs2 -> fh_b / op_b (FADD classifies FP on rs2).
+      reset_all();
+      drive0(fadd_sbe(5, 1, 5, 3, 4), 32'h0B02_0005);
+      wait_issue(5, 30, "O2_PRODUCER_NO_ISSUE");
+      iack = '0;
+      drive0(fadd_sbe(6, 2, 5, 1, 4), 32'h0B02_0006, "O2_CONSUMER_ADMIT");
+      wb_drive_v[0]    = 1'b1;
+      wb_drive_id[0]   = TID'(5);
+      wb_drive_data[0] = 64'h4008_0000_0000_0000;
+      n_lane = -1;
+      for (int c = 0; c < 10 && n_lane < 0; c++) begin
+        tick();
+        for (int p = 0; p < NP; p++)
+          if (i_dispatch.iss_v_q[p] &&
+              i_dispatch.iss_sbe_q[p].trans_id == TID'(6)) n_lane = p;
+      end
+      check(n_lane >= 0, "O2_CONSUMER_NEVER_STAGED");
+      #1;
+      check(iopb_v[n_lane] &&
+            iopb[n_lane] == 64'h4008_0000_0000_0000,
+            "O2_OPERAND_NOT_WB_DATA");
+      wb_drive_v = '0;
+      tick();
+      iack = '1;
+      wait_issue(6, 30, "O2_CONSUMER_LOST");
+      check(opb_last[6] == 64'h4008_0000_0000_0000, "O2_ISSUED_OPERAND");
+    end
+
+    $display("HYP8_DISPATCH_PASS checked=%0d pop_take_same=%0d opasm_int=%0d opasm_fp=%0d",
+             checked, pop_take_n, opasm_int_n, opasm_fp_n);
     $finish;
   end
 endmodule
@@ -2557,6 +3152,69 @@ module tb_g6lc_hyp8_linecheck;
     check(!line_taken, "E_GUESS_CLEARED");
     step(1); check(!ov1_valid, "E_P50");
     step(1); check(!ov1_valid, "E_DRAIN");
+
+    // ---- F (r36): the straddle wedge — an untagged taken guess for block
+    //    0x10050 with the queue frontier frozen at 0x10044 (the straddled
+    //    CF's own address: its high half is inside 0x10050, the very block
+    //    the squelch kills, so the frontier can never advance). Leg 2 must
+    //    fire exactly once; an identical {block, frontier} re-presentation
+    //    is suppressed (the guess is left to architectural resolution).
+    //    The unlearn emitted with the fire must clear the cached guess.
+    //    Fetch blocks are 8 bytes: a mid-block reseed walks +8 per push.
+    train(64'h10050, 1'b1, 64'h1004c, 1'b1);  // tagdom=1: cached taken guess
+    reseed(64'h10044);                        // frontier = the straddled CF
+    step(1, 1'b0);                            // push 0x10044 — quiet
+    check(!ov1_valid, "F_P44");
+    step(1, 1'b0);                            // push 0x10048 — quiet
+    check(!ov1_valid, "F_P48");
+    step(1, 1'b0);                            // push 0x10050, lt=1, res held
+    check(ov1_valid && ov1_pc == 64'h10044, "LINECHECK_OV1_FIRE");
+    // the same cycle the fire emits an unlearn for the checked block
+    check(otr_v && !otr_taken && otr_pc == 64'h10050,
+          "LINECHECK_UNLEARN_EMIT");
+    // apply it the way the frontend arbiter delivers an uncontested
+    // ov1 train — the cached guess must be gone
+    train(64'h10050, 1'b0, 64'h0, 1'b1);
+    reseed(64'h10044);                        // ov1 redirect, frontier held
+    step(1, 1'b0);                            // push 0x10044 — quiet
+    step(1, 1'b0);                            // push 0x10048 — quiet; the
+                                            // rd-ahead now covers 0x10050
+    check(!line_taken, "LINECHECK_UNLEARN_LANDS");
+    step(1, 1'b0);                            // push 0x10050, now untaken
+    check(!ov1_valid, "F_CLEAN");
+
+    // ---- F2: the identical-state suppress with the unlearn LOST (the r35
+    //    wedge condition — the guess is still cached when the block is
+    //    re-pushed). Frontier frozen at 0x10040 so {0x10050,0x10040} is a
+    //    fresh state vs the F1 record {0x10050,0x10044}: leg 2 fires once,
+    //    then the identical re-presentation must NOT refire.
+    train(64'h10050, 1'b1, 64'h1004c, 1'b1);  // guess re-armed, never cleared
+    reseed(64'h10040);                        // frozen frontier, new state
+    step(1, 1'b0);                            // push 0x10040 — quiet
+    check(!ov1_valid, "F2_P40");
+    step(1, 1'b0);                            // push 0x10048 — quiet
+    check(!ov1_valid, "F2_P48");
+    step(1, 1'b0);                            // push 0x10050, lt=1 — fires
+    check(ov1_valid && ov1_pc == 64'h10040, "F2_FIRE");
+    reseed(64'h10040);                        // identical restart (frontier
+                                            // still frozen — the wedge's
+                                            // refetch with the guess intact)
+    step(1, 1'b0);                            // push 0x10040 — quiet
+    check(!ov1_valid, "F2_R40");
+    step(1, 1'b0);                            // push 0x10048 — quiet
+    check(!ov1_valid, "F2_R48");
+    step(1, 1'b0);                            // push 0x10050 — identical
+    check(!ov1_valid, "LINECHECK_OV1_ONCE");  // state: suppressed
+
+    // a genuinely new state (the frontier advanced) must be allowed: same
+    // block, different resume → the suppress retires, leg 2 fires again
+    reseed(64'h10040);
+    resume_pc = 64'h10058;                    // frontier moved past the CF
+    step(1, 1'b0);                            // push 0x10040 — quiet
+    step(1, 1'b0);                            // push 0x10048 — quiet
+    step(1, 1'b0);                            // push 0x10050, new frontier
+    check(ov1_valid && ov1_pc == 64'h10058, "LINECHECK_OV1_NEW_STATE");
+    resume_pc = '0;
 
     $display("HYP8_LINECHECK_PASS checked=%0d", checked);
     $finish;
@@ -3436,6 +4094,11 @@ module tb_g6lc_hyp8_dcache;
   // returns with man_vld/man_rtrn so the rtrn-gap interleave lands
   // cycle-exactly where the phantom-evict defect lived.
   logic         man_mode = 1'b0;
+  // man_dup (case J): while set under man_mode the model level-ACKs --
+  // every req-high cycle accepts the pending beat, so a single send
+  // allocates a second wbuffer tx slot, matching the core adapter's
+  // double-accept that gave the r39 entry two in-flight sends.
+  logic         man_dup = 1'b0;
   logic         man_pend_v = 1'b0;
   dcache_req_t  man_pend = '0;
   logic         man_vld  = 1'b0;
@@ -3489,9 +4152,10 @@ module tb_g6lc_hyp8_dcache;
       // edge detect on mem_req misses the follow-on descriptor.
       // No return is generated (the bench injects them); mem_capture
       // still applies store bytes so later refills carry them.
-      mem_ack         <= mem_req && !(man_pend_v &&
-                                       man_pend.paddr == mem_d.paddr &&
-                                       man_pend.rtype == mem_d.rtype);
+      mem_ack         <= mem_req && (man_dup ||
+                         !(man_pend_v &&
+                           man_pend.paddr == mem_d.paddr &&
+                           man_pend.rtype == mem_d.rtype));
       mem_rtrn_vld_ff <= 1'b0;
       man_pend_v      <= mem_req;
       if (mem_req && !(man_pend_v &&
@@ -3974,6 +4638,27 @@ module tb_g6lc_hyp8_dcache;
     end
   endtask
 
+  // flush_tx: inject a STORE_ACK return for every still-open tx slot.
+  // Returns whose auto pulse was suppressed under man_mode are lost
+  // permanently, so every tid left open at the end of a man_mode
+  // window must be returned by hand before drain_stores can converge.
+  task automatic flush_tx(input string tag);
+    int n, t, f;
+    begin
+      repeat (MEM_LAT + 4) tick();
+      for (n = 0; n < 64; n++) begin
+        f = -1;
+        for (t = 0; t < C.DCACHE_MAX_TX; t++)
+          if (dut.tx_vld[t]) f = t;
+        if (f < 0) n = 64;
+        else begin
+          man_return(C.MEM_TID_WIDTH'(f));
+          repeat (8) tick();
+        end
+      end
+    end
+  endtask
+
   localparam logic [63:0] BASE = 64'h0000_0000_8000_1050;
   localparam logic [63:0] D0   = 64'h1122_3344_5566_7788;
   localparam logic [63:0] D1   = 64'ha5a5_c3c3_dead_beef;
@@ -4003,6 +4688,177 @@ module tb_g6lc_hyp8_dcache;
   localparam logic [63:0] GAPB = 64'h0000_0000_8000_2e00;
   int gap_tid_a = -1, gap_tid_b = -1, gap_n = 0;
   logic gap_ev = 1'b0;
+  // FWD_WINDOW (case I) word: a fresh index; the line is made resident by
+  // a preload read so every ACK-pushed fixup entry takes the tag-hit
+  // write+pop leg (the r38 lifecycle), never the dead-entry drop.
+  localparam logic [63:0] FWIN = 64'h0000_0000_8000_3000;
+  // J (r40 entry-ownership) lines: fresh indices.
+  localparam logic [63:0] JW   = 64'h0000_0000_8000_4000;
+  localparam logic [63:0] JW2  = 64'h0000_0000_8000_4400;
+  localparam logic [63:0] JWB  = 64'h0000_0000_8000_4800;
+  localparam logic [63:0] JW3  = 64'h0000_0000_8000_4c00;
+  localparam logic [63:0] JX   = 64'h1111_0000_2222_3333;
+  localparam logic [63:0] JY   = 64'h8004_0518_600d_beef;
+  localparam logic [63:0] JC1  = 64'h0bad_c0de_0bad_c0de;
+  localparam logic [63:0] JC2  = 64'h5afe_5afe_5afe_5afe;
+  localparam logic [C.PLEN-1:0] JWA   = C.PLEN'(JW);
+  localparam logic [C.PLEN-1:0] JWBA  = C.PLEN'(JWB);
+  localparam logic [63:0]       JWTAG = JW >> 3;
+  localparam logic [63:0]       JWBTAG = JWB >> 3;
+  localparam logic [63:0]       JW2TAG = JW2 >> 3;
+  int win_n = 0, win_pops = 0, win_arm = 0, win_wn = 0;
+  logic [15:0] win_oh = '0;
+  logic [63:0] win_d = '0;
+
+  // ---- r44 K: isolated wt_dcache_mem merge-frontier cases ---------------
+  // The full-cache invariants keep at most one store source live for a
+  // word, so the cross-frontier-group priority of the forwarding merge is
+  // exercised on an isolated wt_dcache_mem driven by entry-register
+  // stimulus: wbuffer leaves sit in frontier groups 0/1, fixup exports in
+  // groups 1/2. Data AND user bytes are distinct per source; the response
+  // is read at the original +2 edge (the single edge under the dchx0 arm,
+  // where the same checks hold through the live full tree).
+  localparam type kwbuf_t = struct packed {
+    logic [C.DCACHE_TAG_WIDTH+(C.DCACHE_INDEX_WIDTH-C.XLEN_ALIGN_BYTES)-1:0]
+        wtag;
+    logic [C.XLEN-1:0]                          data;
+    logic [C.DCACHE_USER_WIDTH-1:0]             user;
+    logic [(C.XLEN/8)-1:0]                      dirty;
+    logic [(C.XLEN/8)-1:0]                      valid;
+    logic [(C.XLEN/8)-1:0]                      txblock;
+    logic                                       checked;
+    logic [C.DCACHE_SET_ASSOC-1:0]              hit_oh;
+  };
+  // rd_idx_i is the set index only: DCACHE_INDEX_WIDTH - OFFSET_WIDTH.
+  localparam int KM_SIW = C.DCACHE_INDEX_WIDTH - C.DCACHE_OFFSET_WIDTH;
+  // Mid-task writes do not propagate into instance input ports under
+  // --timing (the lsq leaf documents the same hazard): every i_kmem
+  // input is a continuous assign of a task-set register.
+  logic [NumPorts-1:0][C.DCACHE_TAG_WIDTH-1:0]    km_tag_r = '0;
+  logic [NumPorts-1:0][KM_SIW-1:0]                km_idx_r = '0;
+  logic [NumPorts-1:0][C.DCACHE_OFFSET_WIDTH-1:0] km_off_r = '0;
+  logic [NumPorts-1:0]                            km_req_r = '0;
+  logic [NumPorts-1:0]                            km_tagonly_r = '0;
+  logic [NumPorts-1:0]                            km_prio_r = '0;
+  kwbuf_t [C.WtDcacheWbufDepth+1:0]               km_wbuf_r = '{default: '0};
+  kwbuf_t [C.WtDcacheFixupDepth:0]                km_fx_r = '{default: '0};
+  logic [NumPorts-1:0][C.DCACHE_TAG_WIDTH-1:0]   km_tag;
+  logic [NumPorts-1:0][KM_SIW-1:0]               km_idx;
+  logic [NumPorts-1:0][C.DCACHE_OFFSET_WIDTH-1:0] km_off;
+  logic [NumPorts-1:0]                           km_req, km_tagonly, km_prio;
+  kwbuf_t [C.WtDcacheWbufDepth+1:0]              km_wbuf;
+  kwbuf_t [C.WtDcacheFixupDepth:0]               km_fx;
+  // Clocked staging into the port nets: a coroutine's partial writes do
+  // not re-trigger combinational evaluation here, so the inputs are
+  // sampled at each edge instead (one cycle of extra latency, absorbed
+  // by the ack-wait loop).
+  always_ff @(posedge clk) begin
+    km_tag <= km_tag_r;
+    km_idx <= km_idx_r;
+    km_off <= km_off_r;
+    km_req <= km_req_r;
+    km_tagonly <= km_tagonly_r;
+    km_prio <= km_prio_r;
+    km_wbuf <= km_wbuf_r;
+    km_fx <= km_fx_r;
+  end
+  logic [NumPorts-1:0]                            km_ack;
+  logic [C.DCACHE_SET_ASSOC-1:0]                  km_vld;
+  logic [C.DCACHE_SET_ASSOC-1:0]                  km_hitoh;
+  logic [C.XLEN-1:0]                              km_rdata;
+  logic [C.DCACHE_USER_WIDTH-1:0]                 km_ruser;
+  logic                                           km_fwd_hit;
+
+  wt_dcache_mem #(
+    .G6LCCfg  (C),
+    .HypCfg   (HC),
+    .DCACHE_CL_IDX_WIDTH (KM_SIW),
+    .NumPorts (NumPorts),
+    .wbuffer_t(kwbuf_t)
+  ) i_kmem (
+    .clk_i(clk), .rst_ni(rst_n),
+    .rd_prio_i(km_prio), .rd_tag_i(km_tag), .rd_idx_i(km_idx),
+    .rd_off_i(km_off), .rd_req_i(km_req), .rd_tag_only_i(km_tagonly),
+    .rd_ack_o(km_ack), .rd_vld_bits_o(km_vld), .rd_hit_oh_o(km_hitoh),
+    .rd_data_o(km_rdata), .rd_user_o(km_ruser),
+    .wr_cl_vld_i(1'b0), .wr_cl_nc_i(1'b0), .wr_cl_we_i('0),
+    .wr_cl_tag_i('0), .wr_cl_idx_i('0), .wr_cl_off_i('0),
+    .wr_cl_data_i('0), .wr_cl_user_i('0), .wr_cl_data_be_i('0),
+    .wr_vld_bits_i('0),
+    .wr_req_i('0), .wr_ack_o(), .wr_idx_i('0), .wr_off_i('0),
+    .wr_data_i('0), .wr_user_i('0), .wr_data_be_i('0),
+    .inv_req_i(1'b0), .inv_ack_o(), .inv_idx_i('0), .inv_way_oh_i('0),
+    .inv_vld_bits_i('0),
+    .wbuffer_data_i(km_wbuf), .fixup_wbuffer_i(km_fx),
+    .wbuffer_fwd_hit_o(km_fwd_hit)
+  );
+
+  // wtag = {tag, idx, off} >> 3, the compare word wt_dcache_mem builds.
+  function automatic kwbuf_t km_ent(
+      input logic [C.DCACHE_TAG_WIDTH-1:0]   tg,
+      input logic [KM_SIW-1:0]               ix,
+      input logic [C.DCACHE_OFFSET_WIDTH-1:0] of,
+      input logic [C.XLEN-1:0]               data,
+      input logic [C.DCACHE_USER_WIDTH-1:0]  usr,
+      input logic [(C.XLEN/8)-1:0]           vm);
+    logic [C.DCACHE_TAG_WIDTH+KM_SIW+C.DCACHE_OFFSET_WIDTH-1:0] a;
+    kwbuf_t e = '{default: '0};
+    a = {tg, ix, of};
+    e.wtag  = a >> C.XLEN_ALIGN_BYTES;
+    e.data  = data; e.user = usr; e.valid = vm;
+    return e;
+  endfunction
+
+  // Drive a single-port read; returns just after the accept edge (the tag
+  // is owed the following cycle).
+  // The port nets are clock-staged, so a request reaches the arbiter one
+  // edge after the _r write; rd_ack_o then grants combinationally during
+  // that cycle and the selection registers capture at the following
+  // edge.  Returns just after the capture edge — the caller's writes at
+  // that point land at the T1 edge.
+  task automatic km_req_send(input logic [C.DCACHE_TAG_WIDTH-1:0] tg,
+                             input logic [KM_SIW-1:0] ix,
+                             input logic [C.DCACHE_OFFSET_WIDTH-1:0] of);
+    int w = 0;
+    km_idx_r[P_LD] = ix; km_off_r[P_LD] = of; km_tag_r[P_LD] = tg;
+    km_req_r[P_LD] = 1'b1;
+    #1;
+    while (!km_ack[P_LD]) begin
+      if (w % 500 == 0)
+        $display("  [km] c=%0d req=%b ack=%b sel=%0d pbusy=%b",
+                 mon_c, i_kmem.rd_req_i, km_ack, i_kmem.vld_sel_d,
+                 i_kmem.rd_port_busy);
+      tick(); #1; w++;
+      check(w < 5000, "KM_ACK_TIMEOUT");
+    end
+    km_req_r[P_LD] = 1'b0;  // drops at the next edge: exactly one grant
+    tick();               // capture edge (vld_sel_q <= P_LD)
+  endtask
+
+  localparam logic [C.DCACHE_TAG_WIDTH-1:0]   KTAG =
+      C.DCACHE_TAG_WIDTH'(64'h1234);
+  localparam logic [KM_SIW-1:0] KIDX = 'h040;
+  localparam logic [C.DCACHE_OFFSET_WIDTH-1:0] KOFF = 'h8;
+  localparam logic [63:0] KD1 = 64'h1111_2222_3333_4444;
+  localparam logic [63:0] KD2 = 64'h5555_6666_7777_8888;
+  localparam logic [63:0] KD3 = 64'h9999_AAAA_BBBB_CCCC;
+  localparam logic [63:0] KD4 = 64'hDEAD_DEAD_DEAD_DEAD;
+  localparam logic [63:0] KU1 = 64'h0101_0202_0303_0404;
+  localparam logic [63:0] KU2 = 64'h0505_0606_0707_0808;
+  localparam logic [63:0] KU3 = 64'h0909_0A0A_0B0B_0C0C;
+  localparam logic [63:0] KU4 = 64'hF0F0_F0F0_F0F0_F0F0;
+  // Per-byte expected user merge: byte b takes user byte b of the entry
+  // that wins data byte b (the leaf tuple carries both).
+  function automatic logic [C.DCACHE_USER_WIDTH-1:0] km_uexp(
+      input logic [C.DCACHE_USER_WIDTH-1:0] u_lo,
+      input logic [C.DCACHE_USER_WIDTH-1:0] u_hi,
+      input int split);
+    logic [C.DCACHE_USER_WIDTH-1:0] u;
+    u = '0;
+    for (int b = 0; b < C.DCACHE_USER_WIDTH / 8; b++)
+      u[8*b +: 8] = (b < split) ? u_lo[8*b +: 8] : u_hi[8*b +: 8];
+    return u;
+  endfunction
 
   initial begin
     repeat (4) tick();
@@ -4211,13 +5067,434 @@ module tb_g6lc_hyp8_dcache;
     man_mode = 1'b0;
     load(GAPB, 2'b11, 3'd1, D1, "H_POST_LD");
 
+    // ---- I: fixup write+pop inside a load's T1->T2 window (r38) -------
+    // The r38 lifecycle: a store memory-ACKed before its tag check lands
+    // its deferred bytes in the fixup queue; once the line is resident
+    // the entry's own check hits -> FIXUP_RETIRE writes the array and the
+    // pop retires the positional export on the same edge. A same-word
+    // load whose T1 catches the entry must return the stored bytes: the
+    // forward crosses the edge as {hit,be,data}, not as a match whose
+    // payload is re-read live (the dead-entry drop is NOT a substitute:
+    // it zeroes be while the queue slot's data lingers and cnt falls a
+    // cycle later, so the live re-read still finds the bytes -- only the
+    // retire+pop kills the payload inside the window).
+    // Choreography per attempt (the F2 recipe): store to a fresh absent
+    // line -> checked-miss ACK -> fixup push; a held load to the other
+    // word of the same line takes an MSHR; four blocker stores keep
+    // |tocheck and the check pipe loaded so the entry's own tag read
+    // happens only after the refill installs the line -> RETIRE -> wr ->
+    // pop, which is the lifecycle the r38 caller's lw rode.
+    // I_A: pop after T2 -- the forward rides the still-live entry.
+    mshr_m0 = mshr_cnt;
+    store(FWIN, D1, 8'hff, 2'b11);
+    wait_store_memack_paddr(FWIN, "I");
+    for (int i = 0; i < 8; i++)
+      shadow[longint'(FWIN + 8) + i] = 8'hab;
+    mem_hold = 1'b1;
+    wait_store_rtrn("I");
+    load_start(FWIN + 8, 3'd6);
+    store(FIXBLK0, D0, 8'hff, 2'b11);
+    store(FIXBLK1, D1, 8'hff, 2'b11);
+    store(FIXBLK2, D2, 8'hff, 2'b11);
+    store(FIXBLK3, D0, 8'hff, 2'b11);
+    wait_fixup_nonempty("I");
+    mem_hold = 1'b0;
+    load_wait(64'habab_abab_abab_abab, "I_HELD_LD");
+    load(FWIN, 2'b11, 3'd2, D1, "I_POP_AFTER_T2");
+    drain_stores("I");
+    wait_fixup_empty("I");
+    check(mshr_cnt > mshr_m0, "I_MSHR_A");
+    check(fx_wr_pulses >= 1, "I_FIXUP_WRITE_A");
+    // I_B: pop before T1 -- the deferred array write already landed, so a
+    // plain array read returns the new data.
+    mshr_m0 = mshr_cnt;
+    store(FWIN + 64'h80, D2, 8'hff, 2'b11);
+    wait_store_memack_paddr(FWIN + 64'h80, "I");
+    for (int i = 0; i < 8; i++)
+      shadow[longint'(FWIN + 64'h80 + 8) + i] = 8'hab;
+    mem_hold = 1'b1;
+    wait_store_rtrn("I");
+    load_start(FWIN + 64'h80 + 8, 3'd6);
+    store(FIXBLK0, D0, 8'hff, 2'b11);
+    store(FIXBLK1, D1, 8'hff, 2'b11);
+    store(FIXBLK2, D2, 8'hff, 2'b11);
+    store(FIXBLK3, D0, 8'hff, 2'b11);
+    wait_fixup_nonempty("I");
+    mem_hold = 1'b0;
+    load_wait(64'habab_abab_abab_abab, "I_HELD_LD");
+    wait_fixup_empty("I");
+    load(FWIN + 64'h80, 2'b11, 3'd3, D2, "I_POP_BEFORE_T1");
+    drain_stores("I");
+    wait_fixup_empty("I");
+    check(mshr_cnt > mshr_m0, "I_MSHR_B");
+    // I_C: the window sweep. Attempt win_n issues the load win_n cycles
+    // after the refill installed the line (bounded by the entry's life);
+    // the RETIRE+pop tail is a fixed pipeline of a few cycles, so the
+    // delay span covers every pop-vs-T1 alignment. win_arm captures the
+    // live hit vector on the load's own T1 (vld_sel_q == P_LD); at T2 any
+    // captured slot whose live valid already fell is a pop inside the
+    // T1->T2 edge -- the exact r38 race, proven driven, not only
+    // approached (the export dies at the pop decision, ahead of
+    // fixup_empty falling, so busy() alone cannot witness it).
+    win_pops = 0;
+    for (win_n = 0; win_n < 16 && win_pops < 2; win_n++) begin
+      win_d = D0 + 64'(win_n);
+      mshr_m0 = mshr_cnt;
+      store(FWIN + 64'h100 + 64'(win_n) * 64'h80, win_d, 8'hff, 2'b11);
+      wait_store_memack_paddr(FWIN + 64'h100 + 64'(win_n) * 64'h80, "I");
+      for (int i = 0; i < 8; i++)
+        shadow[longint'(FWIN + 64'h100 + 64'(win_n) * 64'h80 + 8) + i] = 8'hab;
+      mem_hold = 1'b1;
+      wait_store_rtrn("I");
+      load_start(FWIN + 64'h100 + 64'(win_n) * 64'h80 + 8, 3'd6);
+      store(FIXBLK0, D0, 8'hff, 2'b11);
+      store(FIXBLK1, D1, 8'hff, 2'b11);
+      store(FIXBLK2, D2, 8'hff, 2'b11);
+      store(FIXBLK3, D0, 8'hff, 2'b11);
+      wait_fixup_nonempty("I");
+      mem_hold = 1'b0;
+      load_wait(64'habab_abab_abab_abab, "I_HELD_LD");
+      for (int d = 0; d < win_n && fixup_busy(); d++) tick();
+      win_arm = 0;
+      win_oh  = '0;
+      load_start(FWIN + 64'h100 + 64'(win_n) * 64'h80, 3'd4);
+      for (win_wn = 0; win_wn < 2000 && !ld_done; win_wn++) begin
+        if (win_arm) begin
+          for (int k = 0; k < 16; k++)
+            if (win_oh[k] && !dut.i_wt_dcache_mem.wbuffer_all[k].valid)
+              win_pops++;
+          win_arm = 0;
+        end
+        if ((|dut.i_wt_dcache_mem.wbuffer_hit_oh) &&
+            (dut.i_wt_dcache_mem.vld_sel_q == P_LD)) begin
+          win_arm = 1'b1;
+          win_oh  = 16'(dut.i_wt_dcache_mem.wbuffer_hit_oh);
+        end
+        tick();
+      end
+      check(ld_done, "DCHX_FIXUP_WINDOW_FWD_RSP");
+      check(ld_rdata === win_d, "DCHX_FIXUP_WINDOW_FWD");
+      check(ld_rid === ld_id, "DCHX_FIXUP_WINDOW_FWD_RID");
+      drain_stores("I");
+      wait_fixup_empty("I");
+      check(mshr_cnt > mshr_m0, "I_MSHR_C");
+      tick();
+    end
+`ifndef G6LC_HYP8_DCHX0
+    // dchx0 has no T1/T2 edge: the readout is single-cycle, so a pop
+    // between stages cannot exist and the window witness is vacuous.
+    check(win_pops >= 1, "DCHX_FIXUP_WINDOW_SEEN");
+`endif
+
+    // ---- J: one in-flight TX per entry (r41) + r40 ledger -----------
+    // The r39 failure (wt_dcache_wbuffer drain): under WbufPipelined the
+    // D1 capture recaptured the just-granted entry while its
+    // dirty/txblock update was still only in wbuffer_d, so the same
+    // bytes went out a second time under a second tx slot (wt_tx
+    // @16263524 id=3 / @16263525 id=2). The r41 contract: a grant names
+    // an entry with no txblock and no open count -- the dirty_sendable
+    // mask makes that hold by construction.
+    //   J0 (every build): man_dup level-ACKs a full-word store; exactly
+    //     ONE send must name the entry. Under the recapture mutant this
+    //     is the D-a negative control and the bench stops here.
+    //   J1/J2 (mutant builds only): the r40 ledger scenarios need a
+    //     real double send to exist, which only the recapture mutant
+    //     still produces. They run BEFORE J0 so a mutant build
+    //     exercises the ledger, then fails at DCHX_SINGLE_TX.
+    begin : j_scen
+      int           j_n, j_ptr, j_tid_a, j_tid_b, j_tid_c, j_two, j_sends;
+      logic [63:0]  j_wtag;
+      int           j_st0;
+
+      j_st0 = st_count;
+
+      // Prime JW's, JWB's, JW3's and JW2's lines resident so the
+      // stores' tag checks hit (load returns need the auto path --
+      // before man_mode).
+      for (int i = 0; i < 8; i++) begin
+        shadow[longint'(JW  + 8) + i] = 8'h5a;
+        shadow[longint'(JWB + 8) + i] = 8'ha6;
+        shadow[longint'(JW3 + 8) + i] = 8'h3c;
+        shadow[longint'(JW2 + 8) + i] = 8'hc1;
+      end
+      load(JW + 8, 2'b11, 3'd2, 64'h5a5a_5a5a_5a5a_5a5a, "J_PRIME");
+      load(JWB + 8, 2'b11, 3'd6, 64'ha6a6_a6a6_a6a6_a6a6, "J2_PRIME");
+      load(JW3 + 8, 2'b11, 3'd3, 64'h3c3c_3c3c_3c3c_3c3c, "J3_PRIME");
+      load(JW2 + 8, 2'b11, 3'd0, 64'hc1c1_c1c1_c1c1_c1c1, "J0_PRIME");
+
+`ifdef G6LC_MUT_WBUF_DRAIN_RECAPTURE
+      man_mode = 1'b1;
+
+      // J1 -- the r39 ordering on one entry. man_dup arms the
+      // level-ACK window so the first beat is double-accepted: two
+      // in-flight sends name the entry (the core adapter's behavior).
+      // The merge re-dirties the word while both are in flight; the
+      // first ACK drops on live-dirty and releases the re-drain, the
+      // second ACK then lands while the re-drain is still in flight --
+      // under the old free path it released the slot early.
+      store(JW, JX, 8'hff, 2'b11);
+      // Slot holding JW's entry.
+      j_ptr = -1;
+      for (j_n = 0; j_n < 2000; j_n++) begin
+        for (int e = 0; e < C.WtDcacheWbufDepth; e++)
+          if (|dut.i_wt_dcache_wbuffer.wbuffer_q[e].valid &&
+              dut.i_wt_dcache_wbuffer.wbuffer_q[e].wtag == JWTAG)
+            j_ptr = e;
+        if (j_ptr >= 0) j_n = 2000;
+        else tick();
+      end
+      check(j_ptr >= 0, "J1_ENTRY_SEEN");
+      // Double-accept window: two in-flight sends must name j_ptr.
+      man_dup = 1'b1;
+      j_two = 0; j_tid_a = -1; j_tid_b = -1;
+      for (j_n = 0; j_n < 2000; j_n++) begin
+        j_two = 0; j_tid_a = -1; j_tid_b = -1;
+        for (int t = 0; t < C.DCACHE_MAX_TX; t++)
+          if (dut.tx_vld[t] &&
+              int'(dut.i_wt_dcache_wbuffer.tx_stat_q[t].ptr) == j_ptr) begin
+            j_two++;
+            if (j_tid_a < 0) j_tid_a = t; else j_tid_b = t;
+          end
+        if (j_two >= 2) j_n = 2000;
+        else tick();
+      end
+      man_dup = 1'b0;
+      check(j_two >= 2, "J1_TWO_TX_SEEN");
+      // Merge re-dirties the whole word while both sends are in flight.
+      store(JW, JY, 8'hff, 2'b11);
+      // ACK #1: covered bytes are dirty (merged), drop -- the txblock
+      // release lets the re-drain send go out while send #2 is still
+      // in flight.
+      man_return(C.MEM_TID_WIDTH'(j_tid_a));
+      repeat (8) tick();
+      j_tid_c = -1;
+      for (j_n = 0; j_n < 2000; j_n++) begin
+        for (int t = 0; t < C.DCACHE_MAX_TX; t++)
+          if (dut.tx_vld[t] && t != j_tid_a && t != j_tid_b &&
+              int'(dut.i_wt_dcache_wbuffer.tx_stat_q[t].ptr) == j_ptr)
+            j_tid_c = t;
+        if (j_tid_c >= 0) j_n = 2000;
+        else tick();
+      end
+      check(j_tid_c >= 0, "J1_REDRAIN_TX_SEEN");
+      // ACK #2 -- under the old free path this emptied and released
+      // the entry while the re-drain was still in flight. Under the
+      // fix every byte stays valid (held-clean) until the last return.
+      man_return(C.MEM_TID_WIDTH'(j_tid_b));
+      repeat (8) tick();
+      check(|dut.i_wt_dcache_wbuffer.wbuffer_q[j_ptr].valid,
+            "DCHX_REDIRTY_REDRAIN_L1");
+      check(dut.i_wt_dcache_wbuffer.tx_inflight[j_ptr],
+            "DCHX_INFLIGHT_HELD");
+      // A third store would have taken the freed slot under the old
+      // path -- the word tag must still be JW's.
+      store(JW3, JC2, 8'hff, 2'b11);
+      check(dut.i_wt_dcache_wbuffer.wbuffer_q[j_ptr].wtag == JWTAG,
+            "DCHX_NO_INFLIGHT_REALLOC");
+      // ACK #3 -- the last send's return: frees and writes the array.
+      // Under the old path it cross-retires on the new occupant.
+      man_return(C.MEM_TID_WIDTH'(j_tid_c));
+      repeat (MEM_LAT + 20) tick();
+      // Return the sends suppressed under man_mode (JW3's sends; their
+      // auto-return pulses already fired and were masked).
+      flush_tx("J1");
+      man_mode = 1'b0;
+      drain_stores("J1");
+      wait_fixup_empty("J1");
+      // The resident line must now carry the merged value: read it back
+      // through the array (the entry is gone, so no forward can cover).
+      load(JW, 2'b11, 3'd4, JY, "DCHX_REDIRTY_LOAD");
+      load(JW3, 2'b11, 3'd5, JC2, "DCHX_NO_CROSS_RETIRE");
+
+      // J2 -- same double-accept, different byte coverage: a full-word
+      // store (two sends) re-dirtied only in bytes {3:1}, so the
+      // re-drain covers 0x0e. The first ACK retires clean bytes {0,4-7}
+      // (held-clean, not freed); the second lands while the re-drain
+      // is in flight -- the entry must still own every byte.
+      man_mode = 1'b1;
+      store(JWB, 64'h1111_2222_3333_4444, 8'hff, 2'b11);
+      j_ptr = -1;
+      for (j_n = 0; j_n < 2000; j_n++) begin
+        for (int e = 0; e < C.WtDcacheWbufDepth; e++)
+          if (|dut.i_wt_dcache_wbuffer.wbuffer_q[e].valid &&
+              dut.i_wt_dcache_wbuffer.wbuffer_q[e].wtag == JWBTAG)
+            j_ptr = e;
+        if (j_ptr >= 0) j_n = 2000;
+        else tick();
+      end
+      check(j_ptr >= 0, "J2_ENTRY_SEEN");
+      man_dup = 1'b1;
+      j_two = 0; j_tid_a = -1; j_tid_b = -1;
+      for (j_n = 0; j_n < 2000; j_n++) begin
+        j_two = 0; j_tid_a = -1; j_tid_b = -1;
+        for (int t = 0; t < C.DCACHE_MAX_TX; t++)
+          if (dut.tx_vld[t] &&
+              int'(dut.i_wt_dcache_wbuffer.tx_stat_q[t].ptr) == j_ptr) begin
+            j_two++;
+            if (j_tid_a < 0) j_tid_a = t; else j_tid_b = t;
+          end
+        if (j_two >= 2) j_n = 2000;
+        else tick();
+      end
+      man_dup = 1'b0;
+      check(j_two >= 2, "J2_TWO_TX_SEEN");
+      // Merge re-dirties bytes {3:1} only.
+      store(JWB, 64'h0000_0000_600d_d000, 8'h0e, 2'b11);
+      // ACK #1: ack_be = ff & ~dirty = 0xf1 -- retires clean bytes
+      // {0,4-7} and releases txblock so the re-drain goes out.
+      man_return(C.MEM_TID_WIDTH'(j_tid_a));
+      repeat (8) tick();
+      j_tid_c = -1;
+      for (j_n = 0; j_n < 2000; j_n++) begin
+        for (int t = 0; t < C.DCACHE_MAX_TX; t++)
+          if (dut.tx_vld[t] && t != j_tid_a && t != j_tid_b &&
+              int'(dut.i_wt_dcache_wbuffer.tx_stat_q[t].ptr) == j_ptr)
+            j_tid_c = t;
+        if (j_tid_c >= 0) j_n = 2000;
+        else tick();
+      end
+      check(j_tid_c >= 0, "J2_REDRAIN_TX_SEEN");
+      // ACK #2 while the re-drain is in flight -- every byte must
+      // still be valid in the entry (held-clean 3'b100).
+      man_return(C.MEM_TID_WIDTH'(j_tid_b));
+      repeat (8) tick();
+      check(dut.i_wt_dcache_wbuffer.wbuffer_q[j_ptr].valid == 8'hff,
+            "DCHX_HELD_NONLAST");
+      check(dut.i_wt_dcache_wbuffer.tx_inflight[j_ptr],
+            "DCHX_J2_INFLIGHT");
+      // Final return drains the entry; word = {1111_2222, 600d_d044}.
+      man_return(C.MEM_TID_WIDTH'(j_tid_c));
+      repeat (MEM_LAT + 20) tick();
+      flush_tx("J2");
+      man_mode = 1'b0;
+      drain_stores("J2");
+      wait_fixup_empty("J2");
+      load(JWB, 2'b11, 3'd7, 64'h1111_2222_600d_d044,
+           "DCHX_REDIRTY_WORD");
+`endif  // G6LC_MUT_WBUF_DRAIN_RECAPTURE
+
+      // J0 -- the r41 contract on the drain select itself. Under
+      // man_mode + man_dup the model level-ACKs: every req-high cycle
+      // accepts the pending beat, so an entry that stays on the
+      // request line past its grant is sent once per acked cycle. The
+      // fixed drain drops the entry off the pick in the grant cycle,
+      // so the run must show EXACTLY ONE tx naming the entry (the
+      // mutant build re-offers it and fails DCHX_SINGLE_TX below).
+      man_mode = 1'b1;
+      store(JW2, JC1, 8'hff, 2'b11);
+      j_ptr = -1;
+      for (j_n = 0; j_n < 2000; j_n++) begin
+        for (int e = 0; e < C.WtDcacheWbufDepth; e++)
+          if (|dut.i_wt_dcache_wbuffer.wbuffer_q[e].valid &&
+              dut.i_wt_dcache_wbuffer.wbuffer_q[e].wtag == JW2TAG)
+            j_ptr = e;
+        if (j_ptr >= 0) j_n = 2000;
+        else tick();
+      end
+      check(j_ptr >= 0, "J0_ENTRY_SEEN");
+      man_dup = 1'b1;
+      j_two = 0;
+      for (j_n = 0; j_n < 2000 && j_two == 0; j_n++) begin
+        for (int t = 0; t < C.DCACHE_MAX_TX; t++)
+          if (dut.tx_vld[t] &&
+              int'(dut.i_wt_dcache_wbuffer.tx_stat_q[t].ptr) == j_ptr)
+            j_two++;
+        if (j_two == 0) tick();
+      end
+      check(j_two >= 1, "J0_TX_SEEN");
+      // Keep the level-ACK window open until the wbuffer's own request
+      // line has dropped for a cycle -- the mutant's recaptured second
+      // send grants one cycle after the first, and the count is only
+      // taken once every re-offered beat has been granted. (mem_req is
+      // not used here: the missunit can drop the external line for a
+      // cycle between beats of the same burst.)
+      for (j_n = 0; j_n < 2000 &&
+                  dut.i_wt_dcache_wbuffer.miss_req_o; j_n++) tick();
+      tick();
+      man_dup = 1'b0;
+      j_two = 0; j_tid_a = -1;
+      for (int t = 0; t < C.DCACHE_MAX_TX; t++)
+        if (dut.tx_vld[t] &&
+            int'(dut.i_wt_dcache_wbuffer.tx_stat_q[t].ptr) == j_ptr) begin
+          j_two++;
+          j_tid_a = t;
+        end
+      check(j_two == 1, "DCHX_SINGLE_TX");
+      check(int'(dut.i_wt_dcache_wbuffer.tx_cnt_q[j_ptr]) <= 1,
+            "DCHX_TXCNT_LE1");
+      check(dut.i_wt_dcache_wbuffer.tx_single_n != 0,
+            "DCHX_TX_SINGLE_CTR");
+      // Return the one send; the word lands on the array.
+      man_return(C.MEM_TID_WIDTH'(j_tid_a));
+      repeat (MEM_LAT + 20) tick();
+      flush_tx("J0");
+      man_mode = 1'b0;
+      drain_stores("J0");
+      wait_fixup_empty("J0");
+      load(JW2, 2'b11, 3'd4, JC1, "DCHX_SINGLE_LOAD");
+
+`ifdef G6LC_MUT_WBUF_DRAIN_RECAPTURE
+      check(st_count == j_st0 + 6, "J_ST_COUNT");
+`else
+      check(st_count == j_st0 + 1, "J_ST_COUNT");
+`endif
+    end
+
+
+    // ---- K (r44): merge-frontier priority on i_kmem --------------------
+    // Per byte the lowest-index matching entry wins; entries are placed in
+    // different padded-tree frontier groups (wbuffer slot 2 -> group0;
+    // fixup slot 0 -> all-index 10, group1; fixup slot 6 -> all-index 16,
+    // group2) so every level of the split tree arbitrates a real pair.
+    km_wbuf_r[2] = km_ent(KTAG, KIDX, KOFF, KD1, KU1, 8'hff);
+    km_fx_r[0]   = km_ent(KTAG, KIDX, KOFF, KD2, KU2, 8'hff);
+    km_fx_r[6]   = km_ent(KTAG, KIDX, KOFF, KD3, KU3, 8'hff);
+    // K1: three sources, three groups, all bytes overlap -> the group0
+    // wbuffer entry wins every byte; all covered -> fwd_hit.
+    km_req_send(KTAG, KIDX, KOFF);
+    tick(); tick();
+    check(km_rdata == KD1, "K1_G0_WINS_DATA");
+    check(km_ruser == C.DCACHE_USER_WIDTH'(KU1), "K1_G0_WINS_USER");
+    check(km_fwd_hit, "K1_FWD_HIT");
+    // K2: no wbuffer source — fixup group1 slot covers bytes 0..3, fixup
+    // group2 slot covers all bytes -> partial overlay across groups.
+    km_wbuf_r = '{default: '0}; km_fx_r[0].valid = 8'h0f;
+    km_req_send(KTAG, KIDX, KOFF);
+    tick(); tick();
+    check(km_rdata == {KD3[63:32], KD2[31:0]}, "K2_XGROUP_OVERLAY_DATA");
+    check(km_ruser == km_uexp(KU2, KU3, 4), "K2_XGROUP_OVERLAY_USER");
+    check(km_fwd_hit, "K2_FWD_HIT");
+    // K3: T1 captures the frontier; the fixup export is popped and reused
+    // before T2 — the response must carry the T1-snapshot tuple, never
+    // the reused slot contents.  The staged write lands at the T1 edge so
+    // the live slot reads the new entry through the whole T2 window.
+    km_fx_r[0] = km_ent(KTAG, KIDX, KOFF, KD1, KU1, 8'hff);
+    km_fx_r[6] = '{default: '0};
+    km_req_send(KTAG, KIDX, KOFF);
+    km_fx_r[0] = km_ent(KTAG, KIDX, KOFF, KD4, KU4, 8'hff); // pop+reuse
+    tick(); tick();
+    check(km_rdata == KD1, "K3_T1_SNAPSHOT_DATA");
+    check(km_ruser == C.DCACHE_USER_WIDTH'(KU1), "K3_T1_SNAPSHOT_USER");
+    // K4: no matching source — no forward hit.
+    km_wbuf_r = '{default: '0}; km_fx_r = '{default: '0};
+    km_req_send(KTAG, KIDX, KOFF);
+    tick(); tick();
+    check(!km_fwd_hit, "K4_NO_FWD_HIT");
+
     // ---- every store drained out of the wbuffer -------------------------
     // The store port completes at data_gnt (wbuffer data_rvalid is '0 by
     // design, upstream included), so count grants, not rvalids.
     repeat (MEM_LAT + 20) tick();
     check(wbuf_empty, "ST_DRAIN_FINAL");
     check(!fixup_busy(), "FIXUP_DRAIN_FINAL");
-    check(st_count == 22, "ST_COUNT");
+    $display("  [st] final st_count=%0d win_n=%0d", st_count, win_n);
+`ifdef G6LC_MUT_WBUF_DRAIN_RECAPTURE
+    // J carries six stores under the recapture mutant (J1 3 + J2 2 + J0 1).
+    check(st_count == 38 + 5 * win_n, "ST_COUNT");
+`else
+    // Plain build: J0 is the only J store (r41 single send).
+    check(st_count == 33 + 5 * win_n, "ST_COUNT");
+`endif
 
     $display("HYP8_DCACHE_PASS checked=%0d dchx=%0d stores=%0d",
              checked, DCHX, st_count);
@@ -4761,8 +6038,241 @@ module tb_g6lc_hyp8_lsq;
     drv_ld_alloc = '0; drv_alloc_id = '0; drv_alloc_pc = '0;
     lsq_flush();
 
+    wait (red_done);
     $display("HYP8_LSQ_PASS checked=%0d", checked);
     $finish;
+  end
+
+  // ================= r44: g6lc_lsq_reduce parameterized checker ===========
+  // One instance per geometry covers NLEAF 1/2/3/8/10, stage counts 1/2,
+  // both DIR modes, and TRACK_WAIT 1/0 (the i_vio_red specialization).
+  // A shared stimulus vector drives each instance's low NLEAF leaves; the
+  // reference is an independent scalar scan of the sampled inputs delayed
+  // by exactly the configured stage count (never the DUT's own RSTG arm —
+  // that is what is being measured). Directed phases: empty, only the
+  // highest real leaf, equal-distance ties (lowest slot wins), duplicated
+  // waiting TIDs, a flush between R1 and R2, then randomized leaf payloads
+  // on every input edge.
+  localparam int RED_NINST = 10;
+  localparam int RED_NMAX  = 10;
+  localparam int unsigned RNL  [RED_NINST] = '{1,1,2,2,3,8,8,8,10,10};
+  localparam int unsigned RSTG [RED_NINST] = '{1,2,1,2,2,1,2,2,2,1};
+  localparam bit          RDIR [RED_NINST] = '{0,0,0,0,0,0,0,1,0,1};
+  localparam bit          RTW  [RED_NINST] = '{1,1,1,1,1,1,1,0,1,1};
+
+  function automatic g6lc_hyp_pkg::g6lc_hyp_cfg_t red_hyp(input int stg);
+    g6lc_hyp_pkg::g6lc_hyp_cfg_t h = g6lc_hyp_pkg::Hyp8;
+    h.LsqReduceStages = int'(stg);
+    return h;
+  endfunction
+  localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t RHC1 = red_hyp(1);
+  localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t RHC2 = red_hyp(2);
+
+  logic [RED_NMAX-1:0]           rs_match = '0, rs_unres = '0,
+                                 rs_nodata = '0, rs_older = '0;
+  logic [RED_NMAX-1:0][IDW-1:0]  rs_dist = '0, rs_id = '0;
+  logic [RED_NMAX-1:0][63:0]     rs_pay = '0;
+  logic                          rs_flush = 1'b0;
+  logic                          red_done = 1'b0;
+
+  logic [RED_NINST-1:0]               ro_v, ro_wait;
+  logic [RED_NINST-1:0][RED_NMAX-1:0] ro_leaf;
+  logic [RED_NINST-1:0][IDW-1:0]      ro_id, ro_dist;
+  logic [RED_NINST-1:0][63:0]         ro_pay;
+  logic [RED_NINST-1:0][NSB-1:0]      ro_dwait;
+
+  for (genvar ri = 0; ri < RED_NINST; ri++) begin : gen_red
+    g6lc_lsq_reduce #(
+      .G6LCCfg    (C),
+      .HypCfg     (RSTG[ri] == 2 ? RHC2 : RHC1),
+      .NLEAF      (RNL[ri]),
+      .PAYW       (64),
+      .DIR        (RDIR[ri]),
+      .TRACK_WAIT (RTW[ri])
+    ) i_red (
+      .clk_i        (clk),
+      .rst_ni       (rst_n),
+      .flush_i      (rs_flush),
+      .ent_id_i     (rs_id[RNL[ri]-1:0]),
+      .dist_i       (rs_dist[RNL[ri]-1:0]),
+      .ent_pay_i    (rs_pay[RNL[ri]-1:0]),
+      .match_i      (rs_match[RNL[ri]-1:0]),
+      .unres_i      (rs_unres[RNL[ri]-1:0]),
+      .nodata_i     (rs_nodata[RNL[ri]-1:0]),
+      .older_i      (rs_older[RNL[ri]-1:0]),
+      .win_valid_o  (ro_v[ri]),
+      .win_leaf_o   (ro_leaf[ri][RNL[ri]-1:0]),
+      .win_id_o     (ro_id[ri]),
+      .win_dist_o   (ro_dist[ri]),
+      .win_pay_o    (ro_pay[ri]),
+      .wait_o       (ro_wait[ri]),
+      .dwait_ids_o  (ro_dwait[ri])
+    );
+  end
+
+  typedef struct packed {
+    logic                v;
+    logic [RED_NMAX-1:0] leaf;
+    logic [IDW-1:0]      id;
+    logic [IDW-1:0]      ds;
+    logic [63:0]         pay;
+    logic                wt;
+    logic [NSB-1:0]      dwait;
+  } red_exp_t;
+
+  // Independent scalar scan of the current stimulus: candidates are
+  // match & older; DIR0 keeps the largest distance, DIR1 the smallest,
+  // and strict comparison keeps the first (lowest) slot on ties.
+  function automatic red_exp_t red_ref(input int ri);
+    red_exp_t e;
+    logic have;
+    logic [IDW-1:0] bd;
+    int bi;
+    e = '0;
+    have = 0; bd = '0; bi = 0;
+    for (int j = 0; j < RNL[ri]; j++) begin
+      if (rs_match[j] && rs_older[j]) begin
+        if (!have ||
+            (RDIR[ri] ? (rs_dist[j] < bd) : (rs_dist[j] > bd))) begin
+          have = 1'b1; bd = rs_dist[j]; bi = j;
+        end
+      end
+      if (RTW[ri]) begin
+        if (rs_older[j] && rs_match[j] && rs_nodata[j])
+          e.dwait[rs_id[j]] = 1'b1;
+        if (rs_older[j] && (rs_unres[j] || (rs_match[j] && rs_nodata[j])))
+          e.wt = 1'b1;
+      end
+    end
+    e.v = have;
+    if (have) begin
+      e.leaf = RED_NMAX'(1) << bi;
+      e.id   = rs_id[bi];
+      e.ds = bd;
+      e.pay  = rs_pay[bi];
+    end
+    return e;
+  endfunction
+
+  function automatic logic red_match(input int ri, input red_exp_t e);
+    if (ro_v[ri] !== e.v) return 0;
+    if (ro_wait[ri] !== e.wt || ro_dwait[ri] !== e.dwait) return 0;
+    if (!e.v) return 1;   // default-select payload fields are unconstrained
+    if ((ro_leaf[ri] & RED_NMAX'((1 << RNL[ri]) - 1)) !== e.leaf) return 0;
+    if (ro_id[ri] !== e.id || ro_dist[ri] !== e.ds ||
+        ro_pay[ri] !== e.pay) return 0;
+    return 1;
+  endfunction
+
+  task automatic red_drive(input int c);
+    rs_flush = 1'b0;
+    if (c < 4) begin
+      // empty
+      rs_match = '0; rs_unres = '0; rs_nodata = '0; rs_older = '0;
+      rs_dist = '0; rs_id = '0; rs_pay = '0;
+    end else if (c < 8) begin
+      // only the highest real leaf of some instance (bit 9 -> NLEAF10,
+      // 7 -> 8, 2 -> 3, 0 -> every instance).
+      rs_match = '0; rs_unres = '0; rs_nodata = '0; rs_older = '0;
+      rs_dist = '0; rs_id = '0; rs_pay = '0;
+      case (c)
+        4:       rs_match[9] = 1'b1;
+        5:       rs_match[7] = 1'b1;
+        6:       rs_match[2] = 1'b1;
+        default: rs_match[0] = 1'b1;
+      endcase
+      rs_older = rs_match;
+      for (int j = 0; j < RED_NMAX; j++) begin
+        rs_dist[j] = IDW'(j + 3);
+        rs_id[j]   = IDW'(j + 20);
+        rs_pay[j]  = 64'hD000_0000 + 64'(j);
+      end
+    end else if (c < 12) begin
+      // equal-distance ties over three leaves — the lowest slot wins for
+      // both DIR modes (strict compare keeps the leftmost record).
+      rs_match = '0; rs_unres = '0; rs_nodata = '0; rs_older = '0;
+      rs_dist = '0; rs_id = '0; rs_pay = '0;
+      begin
+        int base = (c - 8) % 3;
+        for (int t = 0; t < 3; t++) begin
+          int j = base + t;
+          rs_match[j] = 1'b1; rs_older[j] = 1'b1;
+          rs_dist[j]  = IDW'(9);
+          rs_id[j]    = IDW'(30 + j);
+          rs_pay[j]   = 64'h11E0_0000 + 64'(j);
+        end
+      end
+    end else if (c < 16) begin
+      // duplicated waiting TIDs: two cand_nd leaves share one id (dwait
+      // bit sets once); an unresolved leaf contributes wait only.
+      rs_match = '0; rs_unres = '0; rs_nodata = '0; rs_older = '0;
+      rs_dist = '0; rs_id = '0; rs_pay = '0;
+      rs_match[1] = 1'b1; rs_older[1] = 1'b1; rs_nodata[1] = 1'b1;
+      rs_match[4] = 1'b1; rs_older[4] = 1'b1; rs_nodata[4] = 1'b1;
+      rs_id[1] = IDW'(40); rs_id[4] = IDW'(40);
+      rs_dist[1] = IDW'(c); rs_dist[4] = IDW'(c + 1);
+      rs_unres[6] = 1'b1; rs_older[6] = 1'b1; rs_id[6] = IDW'(41);
+      // a leaf that matches but is not older must not be a candidate
+      rs_match[8] = 1'b1; rs_id[8] = IDW'(42); rs_dist[8] = IDW'(60);
+    end else if (c == 40 || c == 140) begin
+      // flush between R1 and R2 with a live pipeline: the checks expect
+      // cleared outputs for exactly the configured stage count.
+      rs_flush = 1'b1;
+      for (int j = 0; j < RED_NMAX; j++) begin
+        rs_match[j]  = $urandom_range(0, 1);
+        rs_unres[j]  = $urandom_range(0, 1);
+        rs_nodata[j] = $urandom_range(0, 1);
+        rs_older[j]  = $urandom_range(0, 1);
+        rs_dist[j]   = IDW'($urandom_range(0, 100));
+        rs_id[j]     = IDW'($urandom_range(0, NSB - 1));
+        rs_pay[j]    = {$urandom, $urandom};
+      end
+    end else begin
+      // random leaf payloads on every input edge
+      for (int j = 0; j < RED_NMAX; j++) begin
+        rs_match[j]  = $urandom_range(0, 1);
+        rs_unres[j]  = $urandom_range(0, 1);
+        rs_nodata[j] = $urandom_range(0, 1);
+        rs_older[j]  = $urandom_range(0, 1);
+        rs_dist[j]   = IDW'($urandom_range(0, 100));
+        rs_id[j]     = IDW'($urandom_range(0, NSB - 1));
+        rs_pay[j]    = {$urandom, $urandom};
+      end
+    end
+  endtask
+
+  initial begin : p_red
+    red_exp_t eh [RED_NINST][3];
+    int       pushed [RED_NINST];
+    int       blank  [RED_NINST];
+    for (int i = 0; i < RED_NINST; i++) begin
+      eh[i][0] = '0; eh[i][1] = '0; eh[i][2] = '0;
+      pushed[i] = 0; blank[i] = 0;
+    end
+    wait (rst_n);
+    repeat (2) tick();
+    for (int c = 0; c < 200; c++) begin
+      red_drive(c);
+      tick();
+      // A flush sampled at this edge clears every register for exactly
+      // the configured stage count — expected output is the zero record.
+      if (rs_flush)
+        for (int i = 0; i < RED_NINST; i++) blank[i] = RSTG[i];
+      for (int i = 0; i < RED_NINST; i++) begin
+        eh[i][2] = eh[i][1]; eh[i][1] = eh[i][0];
+        eh[i][0] = red_ref(i);
+        pushed[i]++;
+        if (blank[i] > 0) begin
+          check(!ro_v[i] && !ro_wait[i] && ro_dwait[i] == '0,
+                $sformatf("RED%0d_FLUSH_ZERO", i));
+          blank[i]--;
+        end else if (pushed[i] >= RSTG[i]) begin
+          check(red_match(i, eh[i][RSTG[i]-1]),
+                $sformatf("RED%0d_OUT", i));
+        end
+      end
+    end
+    red_done = 1'b1;
   end
 
   int wdog = 0;
@@ -4854,6 +6364,7 @@ module tb_g6lc_hyp8_ctrl;
       .set_debug_pc_i      (1'b0),
       .resolved_branch_i   (res),
       .flush_csr_i         (1'b0),
+      .csr_flush_pc_i      ('0),
       .fence_i_i           (1'b0),
       .fence_i             (1'b0),
       .sfence_vma_i        (1'b0),
@@ -4922,3 +6433,1224 @@ module tb_g6lc_hyp8_ctrl;
     $finish;
   end
 endmodule
+
+// ---------------------------------------------------------------------------
+// r31 loop-buffer hit-identity leaf — PASS token: HYP8_LBUF_PASS
+// The REAL g6lc_loop_buffer (NR_ENTRIES=8, DATA_W=64 = hyp8 FETCH_WIDTH).
+// Defect class: a hit registered for FTQ head H must not inject H's block
+// under a different head after a reseed/redirect that re-pushes the FTQ
+// without flushing the buffer (consume_o is the lbuf_inject handshake; the
+// inject address is ftq_head_vaddr). Also: seq_hit must require a valid
+// head, a flush coincident with detection must not re-arm, and an epoch
+// bump must retire a held hit. Review mutation G6LC_MUT_LBUF_STALE_HIT
+// restores consume-without-identity and must fail LBUF_STALE_NO_INJECT.
+// ---------------------------------------------------------------------------
+module tb_g6lc_hyp8_lbuf;
+  int checked = 0;
+  task check(input logic cond, input string name);
+    checked++;
+    if (!cond) begin
+      $display("FAIL %s", name);
+      $fatal(1, "tb_g6lc_hyp8_lbuf");
+    end
+  endtask
+
+  function automatic config_pkg::g6lc_cfg_t configuration();
+    return build_config_pkg::build_config(g6lc_config_pkg::g6lc_cfg);
+  endfunction
+  localparam config_pkg::g6lc_cfg_t C = configuration();
+  localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t HC = g6lc_hyp_pkg::Hyp8;
+  localparam int unsigned EW = (HC.FeEpochBits > 0) ? HC.FeEpochBits : 1;
+
+  logic                    clk = 0, rst_n = 0;
+  always #5 clk = ~clk;
+  logic                    flush = 0;
+  logic [EW-1:0]           epoch = '0;
+  logic                    cf_v = 0, cf_t = 0;
+  logic [C.VLEN-1:0]       cf_pc = '0, cf_tgt = '0;
+  logic                    f_v = 0;
+  logic [C.VLEN-1:0]       f_addr = '0;
+  logic [C.FETCH_WIDTH-1:0] f_data = '0;
+  logic [C.VLEN-1:0]       l_addr = '0;
+  logic                    l_valid = 0, l_ready = 0;
+  logic                    o_hit, o_active, o_consume, o_hold;
+  logic [C.FETCH_WIDTH-1:0] o_data;
+
+  g6lc_loop_buffer #(
+      .G6LCCfg   (C),
+      .HypCfg    (HC),
+      .NR_ENTRIES(8),
+      .DATA_W    (C.FETCH_WIDTH)
+  ) dut (
+      .clk_i          (clk),
+      .rst_ni         (rst_n),
+      .flush_i        (flush),
+      .enable_i       (1'b1),
+      .epoch_i        (epoch),
+      .cf_valid_i     (cf_v),
+      .cf_taken_i     (cf_t),
+      .cf_pc_i        (cf_pc),
+      .cf_target_i    (cf_tgt),
+      .fill_valid_i   (f_v),
+      .fill_vaddr_i   (f_addr),
+      .fill_data_i    (f_data),
+      .lookup_vaddr_i (l_addr),
+      .lookup_valid_i (l_valid),
+      .lookup_ready_i (l_ready),
+      .hit_o          (o_hit),
+      .data_o         (o_data),
+      .active_o       (o_active),
+      .consume_o      (o_consume),
+      .hold_o         (o_hold)
+  );
+
+  task automatic settle();
+    #2;
+  endtask
+  // one posedge, then read post-NBA comb (leaf-bench sample discipline)
+  task automatic step();
+    @(posedge clk); #2;
+  endtask
+
+  localparam logic [C.VLEN-1:0] B = 64'h0000_0000_8000_0100;
+  localparam logic [C.FETCH_WIDTH-1:0] D0 = 64'hD00D_0000_0000_0000;
+  localparam logic [C.FETCH_WIDTH-1:0] D1 = 64'hD00D_1111_1111_1111;
+  localparam logic [C.FETCH_WIDTH-1:0] D2 = 64'hD00D_2222_2222_2222;
+  localparam logic [C.FETCH_WIDTH-1:0] D3 = 64'hD00D_3333_3333_3333;
+
+  // Arm + fill a 4-entry body at base B under the current epoch.
+  task automatic arm_fill(input logic [C.FETCH_WIDTH-1:0] d0,
+                          input logic [C.FETCH_WIDTH-1:0] d1,
+                          input logic [C.FETCH_WIDTH-1:0] d2,
+                          input logic [C.FETCH_WIDTH-1:0] d3);
+    cf_v = 1; cf_t = 1; cf_pc = B + 64'h18; cf_tgt = B;
+    step();
+    cf_v = 0; cf_t = 0; cf_pc = '0; cf_tgt = '0; settle();
+    check(dut.capturing_q, "LBUF_ARM_CAPTURE");
+    f_v = 1; f_addr = B;        f_data = d0; step();
+    f_v = 1; f_addr = B + 64'h8;  f_data = d1; step();
+    f_v = 1; f_addr = B + 64'h10; f_data = d2; step();
+    f_v = 1; f_addr = B + 64'h18; f_data = d3; step();
+    f_v = 0; f_addr = '0; f_data = '0; settle();
+    check(dut.armed_q && dut.body_len_q == 4'd4 && !dut.capturing_q,
+          "LBUF_ARMED_LEN4");
+  endtask
+
+  initial begin
+    rst_n = 0;
+    repeat (3) step();
+    rst_n = 1;
+    step();
+
+    // ---- 1) arm + fill (epoch 0) ----
+    arm_fill(D0, D1, D2, D3);
+    check(dut.arm_epoch_q == EW'(0), "LBUF_ARM_EPOCH0");
+
+    // ---- 2) normal sequential hits: detect then consume ----
+    l_valid = 1; l_addr = B; l_ready = 1; settle();
+    check(o_hold && !o_consume, "LBUF_HOLD_B");
+    step();   // hit registers for head B
+    check(o_consume && o_data == D0, "LBUF_HIT_D0");
+    step();   // consume -> replay 0->1
+    l_addr = B + 64'h8; settle();
+    check(o_hold && !o_consume, "LBUF_HOLD_B8");
+    step();   // hit registers for head B+8
+    check(o_consume && o_data == D1, "LBUF_HIT_D1");
+    step();   // consume -> replay 1->2
+
+    // ---- 3) reseed-without-flush: head changes under a held hit ----
+    l_addr = B + 64'h10; l_ready = 0; settle();
+    check(o_hold, "LBUF_HOLD_B10");
+    step();   // hit arms for head B+0x10 (cursor 2, payload D2)
+    l_addr = 64'h0000_0000_8000_9000; l_ready = 1; settle();
+    check(!o_consume, "LBUF_STALE_NO_INJECT");
+    check(!o_active, "LBUF_DEMAND_RESUMES");
+    step();   // the stale hit retires (identity mismatch)
+    settle();
+    check(!o_consume && !o_active, "LBUF_STALE_QUIET");
+    // the body is still armed: re-present B+0x10 (cursor is at 2)
+    l_addr = B + 64'h10; settle();
+    check(o_hold && !o_consume, "LBUF_REHOLD_B10");
+    step();
+    check(o_consume && o_data == D2, "LBUF_REHIT_D2");
+    step();   // consume -> replay 2->3
+
+    // ---- 4) epoch bump under a held hit: no inject, hit retires ----
+    l_addr = B + 64'h18; l_ready = 0; settle();
+    check(o_hold, "LBUF_HOLD_B18");
+    step();   // hit arms for head B+0x18 under epoch 0
+    epoch = EW'(1); l_ready = 1; settle();
+    check(!o_consume, "LBUF_EPOCH_NO_INJECT");
+    step();   // stale-epoch hit retires
+    settle();
+    check(!dut.hit_q && !o_active, "LBUF_EPOCH_HIT_CLEAR");
+
+    // ---- 5) flush coincident with detection: no re-arm ----
+    arm_fill(D0, D1, D2, D3);
+    check(dut.arm_epoch_q == EW'(1), "LBUF_ARM_EPOCH1");
+    l_addr = B; l_ready = 0; l_valid = 1;
+    flush = 1; settle();
+    check(o_hold, "LBUF_FLUSH_HOLD_B");   // detection asserted same cycle
+    step();                               // flush dominates: no re-arm
+    flush = 0;
+    l_addr = 64'h0000_0000_8000_A000; l_ready = 1; settle();
+    check(!o_consume && !o_active, "LBUF_FLUSH_NO_INJECT");
+    check(!dut.armed_q, "LBUF_FLUSH_DISARMED");
+
+    $display("HYP8_LBUF_PASS checked=%0d", checked);
+    $finish;
+  end
+endmodule
+
+
+`ifdef G6LC_HYP8_MMU_LEAF
+// ---------------------------------------------------------------------------
+// tb_g6lc_hyp8_mmu: r45 MMU leaves.
+//
+//   ROUTER MITER: the real g6lc_shared_tlb built with UseSharedTlb=0 (the
+//   old bypass arm, flush-walk included) sits beside g6lc_tlb_miss_router
+//   on identical inputs; EVERY output (itlb/dtlb update records, miss PMU,
+//   flush_busy, access/hit/vaddr, itlb_req) is compared with === every
+//   negedge while inputs vary.  Matrix: HYP_EXT {0,1} (RVH 0/1 config
+//   clones) x SharedTlbDepth {2,3,64}; depth1 uses the new module alone
+//   against an explicit 2*depth+1 resume-edge expectation (the reference
+//   module's clog2(1) zero-width selects may not elaborate -- see
+//   G6LC_MMU_REF_D1 probe below).  The quiet window itself is preserved:
+//   after any flush input the walk reads/applies all SharedTlbDepth sets
+//   and miss accepts resume on exactly the same edge as the old module.
+//
+//   NEGATIVE CONTROL: tb_mmu_router_mut is a bench copy of the helper with
+//   the I-return arm suppressed (if (1'b0)); an I-owned return must make
+//   the copy and the DUT differ at a named check, so a dropped I route can
+//   never pass silently.
+//
+//   TLB ROW PREDICATES: real g6lc_tlb instances over a selected matrix
+//   {entries 4/16} x {HYP_EXT 0/1} x {TlbStages 1/3}.  TlbStages>=2 is TWO
+//   edges through this module (T1 captures, T2 responds).  External checks
+//   use independently expected entry outcomes (hit/miss/PTE), never the
+//   DUT's new row wires; the in-DUT miter still compares old/new row
+//   predicates every cycle.
+//
+// PASS token: HYP8_MMU_PASS
+// ---------------------------------------------------------------------------
+module tb_g6lc_hyp8_mmu;
+  import g6lc_core_pkg::*;
+
+  localparam config_pkg::g6lc_cfg_t C0 =
+      build_config_pkg::build_config(g6lc_config_pkg::g6lc_cfg);
+
+  // Config clones: raw cfg field overrides are re-run through
+  // build_config so derived widths (VpnLen, GPPNW, ...) stay consistent.
+  // RVH follows HYP_EXT; SharedTlbDepth varies per instance.
+  function automatic config_pkg::g6lc_cfg_t cfg_of(input bit rvh,
+                                                   input int unsigned depth);
+    config_pkg::g6lc_user_cfg_t raw = g6lc_config_pkg::g6lc_cfg;
+    raw.RVH = rvh;
+    raw.SharedTlbDepth = depth;
+    return build_config_pkg::build_config(raw);
+  endfunction
+  function automatic config_pkg::g6lc_cfg_t g6lc_shared_probe_cfg();
+    config_pkg::g6lc_user_cfg_t raw = g6lc_config_pkg::g6lc_cfg;
+    raw.UseSharedTlb = 1'b1;
+    raw.SharedTlbDepth = 4;
+    return build_config_pkg::build_config(raw);
+  endfunction
+  localparam config_pkg::g6lc_cfg_t C_G0 = cfg_of(1'b0, 64);  // actual hyp8 profile
+  localparam config_pkg::g6lc_cfg_t C_G1 = cfg_of(1'b1, 64);  // RVH profile
+  localparam config_pkg::g6lc_cfg_t C_D1 = cfg_of(1'b0, 1);   // depth-1 router
+
+  // PTE / update records — same packed layout g6lc_mmu declares locally.
+  localparam type pte_t = struct packed {
+    logic n;                 // 63 — Svnapot
+    logic [1:0] pbmt;        // 62:61 — Svpbmt
+    logic [6:0] reserved;    // 60:54
+    logic [C_G0.PPNW-1:0] ppn;
+    logic [1:0] rsw;
+    logic d; logic a; logic g; logic u; logic x; logic w; logic r; logic v;
+  };
+  localparam type upd0_t = struct packed {
+    logic valid;
+    logic is_napot_64k;
+    logic [C_G0.PtLevels-2:0][0:0] is_page;
+    logic [C_G0.VpnLen-1:0] vpn;
+    logic [C_G0.ASID_WIDTH-1:0] asid;
+    logic [C_G0.VMID_WIDTH-1:0] vmid;
+    logic [$clog2(C_G0.NrHarts > 1 ? C_G0.NrHarts : 2)-1:0] hart;
+    logic [0:0] v_st_enbl;
+    pte_t content;
+    pte_t g_content;
+  };
+  localparam type upd1_t = struct packed {
+    logic valid;
+    logic is_napot_64k;
+    logic [C_G1.PtLevels-2:0][1:0] is_page;
+    logic [C_G1.VpnLen-1:0] vpn;
+    logic [C_G1.ASID_WIDTH-1:0] asid;
+    logic [C_G1.VMID_WIDTH-1:0] vmid;
+    logic [$clog2(C_G1.NrHarts > 1 ? C_G1.NrHarts : 2)-1:0] hart;
+    logic [2:0] v_st_enbl;
+    pte_t content;
+    pte_t g_content;
+  };
+
+  logic clk = 0, rst_n = 0;
+  int checked = 0;
+  int unsigned cyc = 0;
+  always #5 clk = ~clk;
+  task tick(); @(posedge clk); #1; cyc++; endtask
+  task check(input logic cond, input string name);
+    checked++;
+    if (!cond) begin
+      $display("FAIL %s", name);
+      $fatal(1, "tb_g6lc_hyp8_mmu");
+    end
+  endtask
+
+  localparam int ND = 3;
+  localparam int unsigned DEPTHS[ND] = '{2, 3, 64};
+
+  // ======================= group 0: HYP_EXT=0 / RVH=0 =======================
+  logic                 f0, f0vv, f0gv;
+  logic                 s0e, g0e, v0m, s0le, g0le, lv0m;
+  logic                 iacc0, ihit0, dacc0, dhit0, smiss0;
+  logic [C_G0.VLEN-1:0] iva0, dva0;
+  upd0_t                upd0;
+  // reference-only context ports (the router echoes them from the update)
+  logic [C_G0.ASID_WIDTH-1:0] iasid0, dasid0, fasid0;
+  logic [C_G0.VMID_WIDTH-1:0] ivmid0, dvmid0, fvmid0;
+  logic [C_G0.VLEN-1:0]       fvaddr0;
+  logic [C_G0.GPLEN-1:0]      fgpaddr0;
+  logic                     ihart0, dhart0;
+
+  upd0_t [ND-1:0] oup0_i, oup0_d;
+  upd0_t [ND-1:0] nup0_i, nup0_d;
+  logic  [ND-1:0] oim0, odm0, ofb0, oacc0, ohit0, oireq0;
+  logic  [ND-1:0] nim0, ndm0, nfb0, nacc0, nhit0, nireq0;
+  logic  [ND-1:0][C_G0.VLEN-1:0] ova0, nva0;
+
+  for (genvar gi = 0; gi < ND; gi++) begin : gen_r0
+    localparam config_pkg::g6lc_cfg_t CD = cfg_of(1'b0, DEPTHS[gi]);
+    g6lc_shared_tlb #(
+        .G6LCCfg(CD), .SHARED_TLB_WAYS(2), .HYP_EXT(0),
+        .pte_g6lc_t(pte_t), .tlb_update_g6lc_t(upd0_t)
+    ) i_ref (
+        .clk_i(clk), .rst_ni(rst_n),
+        .flush_i(f0), .flush_vvma_i(f0vv), .flush_gvma_i(f0gv),
+        .s_st_enbl_i(s0e), .g_st_enbl_i(g0e), .v_i(v0m),
+        .s_ld_st_enbl_i(s0le), .g_ld_st_enbl_i(g0le), .ld_st_v_i(lv0m),
+        .dtlb_asid_i(dasid0), .itlb_asid_i(iasid0),
+        .lu_vmid_i(dvmid0), .itlb_vmid_i(ivmid0),
+        .itlb_hart_i(ihart0), .dtlb_hart_i(dhart0),
+        .itlb_access_i(iacc0), .itlb_hit_i(ihit0), .itlb_vaddr_i(iva0),
+        .dtlb_access_i(dacc0), .dtlb_hit_i(dhit0), .dtlb_vaddr_i(dva0),
+        .shared_tlb_miss_i(smiss0),
+        .asid_to_be_flushed_i(fasid0), .vaddr_to_be_flushed_i(fvaddr0),
+        .vmid_to_be_flushed_i(fvmid0), .gpaddr_to_be_flushed_i(fgpaddr0),
+        .itlb_update_o(oup0_i[gi]), .dtlb_update_o(oup0_d[gi]),
+        .itlb_miss_o(oim0[gi]), .dtlb_miss_o(odm0[gi]),
+        .flush_busy_o(ofb0[gi]),
+        .shared_tlb_access_o(oacc0[gi]), .shared_tlb_hit_o(ohit0[gi]),
+        .shared_tlb_vaddr_o(ova0[gi]), .itlb_req_o(oireq0[gi]),
+        .shared_tlb_update_i(upd0));
+`ifdef G6LC_HYP8_MMU_MUTANT
+    // negative-control build: the bench-local copy with the I-return arm
+    // suppressed stands in for the new router; the leaf must fail on the
+    // I-route miter/checks (MMU_MITER / MMU0_IRET_*).
+    tb_mmu_router_mut #(
+`else
+    g6lc_tlb_miss_router #(
+`endif
+        .G6LCCfg(CD), .HYP_EXT(0), .tlb_update_g6lc_t(upd0_t)
+    ) i_dut (
+        .clk_i(clk), .rst_ni(rst_n),
+        .flush_i(f0), .flush_vvma_i(f0vv), .flush_gvma_i(f0gv),
+        .s_st_enbl_i(s0e), .g_st_enbl_i(g0e), .v_i(v0m),
+        .s_ld_st_enbl_i(s0le), .g_ld_st_enbl_i(g0le), .ld_st_v_i(lv0m),
+        .itlb_access_i(iacc0), .itlb_hit_i(ihit0), .itlb_vaddr_i(iva0),
+        .dtlb_access_i(dacc0), .dtlb_hit_i(dhit0), .dtlb_vaddr_i(dva0),
+        .shared_tlb_miss_i(smiss0),
+        .itlb_update_o(nup0_i[gi]), .dtlb_update_o(nup0_d[gi]),
+        .itlb_miss_o(nim0[gi]), .dtlb_miss_o(ndm0[gi]),
+        .flush_busy_o(nfb0[gi]),
+        .shared_tlb_access_o(nacc0[gi]), .shared_tlb_hit_o(nhit0[gi]),
+        .shared_tlb_vaddr_o(nva0[gi]), .itlb_req_o(nireq0[gi]),
+        .shared_tlb_update_i(upd0));
+  end
+
+  // depth-1: new router against the explicit window expectation (the
+  // reference's $clog2(1)-wide selects are an unsupported geometry — the
+  // G6LC_MMU_REF_D1 build probe below is the elaboration evidence hook).
+  upd0_t nupd1_i, nupd1_d;
+  logic nim1, ndm1, nfb1, nacc1, nhit1, nireq1;
+  logic [C_D1.VLEN-1:0] nva1;
+  g6lc_tlb_miss_router #(
+      .G6LCCfg(C_D1), .HYP_EXT(0), .tlb_update_g6lc_t(upd0_t)
+  ) i_dut_d1 (
+      .clk_i(clk), .rst_ni(rst_n),
+      .flush_i(f0), .flush_vvma_i(f0vv), .flush_gvma_i(f0gv),
+      .s_st_enbl_i(s0e), .g_st_enbl_i(g0e), .v_i(v0m),
+      .s_ld_st_enbl_i(s0le), .g_ld_st_enbl_i(g0le), .ld_st_v_i(lv0m),
+      .itlb_access_i(iacc0), .itlb_hit_i(ihit0), .itlb_vaddr_i(iva0),
+      .dtlb_access_i(dacc0), .dtlb_hit_i(dhit0), .dtlb_vaddr_i(dva0),
+      .shared_tlb_miss_i(smiss0),
+      .itlb_update_o(nupd1_i), .dtlb_update_o(nupd1_d),
+      .itlb_miss_o(nim1), .dtlb_miss_o(ndm1),
+      .flush_busy_o(nfb1),
+      .shared_tlb_access_o(nacc1), .shared_tlb_hit_o(nhit1),
+      .shared_tlb_vaddr_o(nva1), .itlb_req_o(nireq1),
+      .shared_tlb_update_i(upd0));
+
+`ifdef G6LC_MMU_REF_D1
+  // Elaboration probe only: whether the UseSharedTlb=0 reference survives
+  // SharedTlbDepth=1 (its flush_idx/tag addresses go [-1:0] and the miss
+  // arms take [12 +: 0] selects).  If this build fails, depth-1 reference
+  // geometry is reported unsupported and the D1 checks stand on the
+  // explicit expectation alone.
+  upd0_t pup1_i, pup1_d;
+  logic pim1, pdm1, pfb1, pacc1, phit1, pireq1;
+  logic [C_D1.VLEN-1:0] pva1;
+  g6lc_shared_tlb #(
+      .G6LCCfg(C_D1), .SHARED_TLB_WAYS(2), .HYP_EXT(0),
+      .pte_g6lc_t(pte_t), .tlb_update_g6lc_t(upd0_t)
+  ) i_ref_d1 (
+      .clk_i(clk), .rst_ni(rst_n),
+      .flush_i(f0), .flush_vvma_i(f0vv), .flush_gvma_i(f0gv),
+      .s_st_enbl_i(s0e), .g_st_enbl_i(g0e), .v_i(v0m),
+      .s_ld_st_enbl_i(s0le), .g_ld_st_enbl_i(g0le), .ld_st_v_i(lv0m),
+      .dtlb_asid_i(dasid0), .itlb_asid_i(iasid0),
+      .lu_vmid_i(dvmid0), .itlb_vmid_i(ivmid0),
+      .itlb_hart_i(ihart0), .dtlb_hart_i(dhart0),
+      .itlb_access_i(iacc0), .itlb_hit_i(ihit0), .itlb_vaddr_i(iva0),
+      .dtlb_access_i(dacc0), .dtlb_hit_i(dhit0), .dtlb_vaddr_i(dva0),
+      .shared_tlb_miss_i(smiss0),
+      .asid_to_be_flushed_i(fasid0), .vaddr_to_be_flushed_i(fvaddr0),
+      .vmid_to_be_flushed_i(fvmid0), .gpaddr_to_be_flushed_i(fgpaddr0),
+      .itlb_update_o(pup1_i), .dtlb_update_o(pup1_d),
+      .itlb_miss_o(pim1), .dtlb_miss_o(pdm1),
+      .flush_busy_o(pfb1),
+      .shared_tlb_access_o(pacc1), .shared_tlb_hit_o(phit1),
+      .shared_tlb_vaddr_o(pva1), .itlb_req_o(pireq1),
+      .shared_tlb_update_i(upd0));
+`endif
+
+  // Elaboration witness for the enabled arm: g6lc_mmu wraps this same
+  // instantiation in gen_shared_table when G6LCCfg.UseSharedTlb=1.  The
+  // leaf config family runs UseSharedTlb=0, so without this instance the
+  // shared-table internals would never be elaborated by any leaf build.
+  // Driven by the group-0 stimulus purely as a compile/elaborate probe;
+  // its outputs are intentionally unobserved.  Gated behind
+  // G6LC_MMU_STBL_PROBE: the enabled arm trips -Werror-LATCH on the
+  // pre-existing patched_pte latch (g6lc_shared_tlb.sv tag_comparison),
+  // a dormant defect in a config hyp8 never builds.
+`ifdef G6LC_MMU_STBL_PROBE
+  localparam config_pkg::g6lc_cfg_t C_ST = g6lc_shared_probe_cfg();
+  g6lc_shared_tlb #(
+      .G6LCCfg(C_ST), .SHARED_TLB_WAYS(2), .HYP_EXT(0),
+      .pte_g6lc_t(pte_t), .tlb_update_g6lc_t(upd0_t)
+  ) i_stbl_probe (
+      .clk_i(clk), .rst_ni(rst_n),
+      .flush_i(f0), .flush_vvma_i(f0vv), .flush_gvma_i(f0gv),
+      .s_st_enbl_i(s0e), .g_st_enbl_i(g0e), .v_i(v0m),
+      .s_ld_st_enbl_i(s0le), .g_ld_st_enbl_i(g0le), .ld_st_v_i(lv0m),
+      .dtlb_asid_i(dasid0), .itlb_asid_i(iasid0),
+      .lu_vmid_i(dvmid0), .itlb_vmid_i(ivmid0),
+      .itlb_hart_i(ihart0), .dtlb_hart_i(dhart0),
+      .itlb_access_i(iacc0), .itlb_hit_i(ihit0), .itlb_vaddr_i(iva0),
+      .dtlb_access_i(dacc0), .dtlb_hit_i(dhit0), .dtlb_vaddr_i(dva0),
+      .shared_tlb_miss_i(smiss0),
+      .asid_to_be_flushed_i(fasid0), .vaddr_to_be_flushed_i(fvaddr0),
+      .vmid_to_be_flushed_i(fvmid0), .gpaddr_to_be_flushed_i(fgpaddr0),
+      .itlb_update_o(), .dtlb_update_o(),
+      .itlb_miss_o(), .dtlb_miss_o(), .flush_busy_o(),
+      .shared_tlb_access_o(), .shared_tlb_hit_o(),
+      .shared_tlb_vaddr_o(), .itlb_req_o(),
+      .shared_tlb_update_i(upd0));
+`endif
+
+  // negative control: bench copy with the I-return arm suppressed
+  upd0_t mup_i, mup_d;
+  logic mim, mdm, mfb, macc, mhit, mireq;
+  logic [C_G0.VLEN-1:0] mva;
+  tb_mmu_router_mut #(
+      .G6LCCfg(C_G0), .HYP_EXT(0), .tlb_update_g6lc_t(upd0_t)
+  ) i_mut (
+      .clk_i(clk), .rst_ni(rst_n),
+      .flush_i(f0), .flush_vvma_i(f0vv), .flush_gvma_i(f0gv),
+      .s_st_enbl_i(s0e), .g_st_enbl_i(g0e), .v_i(v0m),
+      .s_ld_st_enbl_i(s0le), .g_ld_st_enbl_i(g0le), .ld_st_v_i(lv0m),
+      .itlb_access_i(iacc0), .itlb_hit_i(ihit0), .itlb_vaddr_i(iva0),
+      .dtlb_access_i(dacc0), .dtlb_hit_i(dhit0), .dtlb_vaddr_i(dva0),
+      .shared_tlb_miss_i(smiss0),
+      .itlb_update_o(mup_i), .dtlb_update_o(mup_d),
+      .itlb_miss_o(mim), .dtlb_miss_o(mdm),
+      .flush_busy_o(mfb),
+      .shared_tlb_access_o(macc), .shared_tlb_hit_o(mhit),
+      .shared_tlb_vaddr_o(mva), .itlb_req_o(mireq),
+      .shared_tlb_update_i(upd0));
+
+  // ======================= group 1: HYP_EXT=1 / RVH=1 =======================
+  logic                 f1, f1vv, f1gv;
+  logic                 s1e, g1e, v1m, s1le, g1le, lv1m;
+  logic                 iacc1, ihit1, dacc1, dhit1, smiss1;
+  logic [C_G1.VLEN-1:0] iva1, dva1;
+  upd1_t                upd1;
+  logic [C_G1.ASID_WIDTH-1:0] iasid1, dasid1, fasid1;
+  logic [C_G1.VMID_WIDTH-1:0] ivmid1, dvmid1, fvmid1;
+  logic [C_G1.VLEN-1:0]       fvaddr1;
+  logic [C_G1.GPLEN-1:0]      fgpaddr1;
+  logic                     ihart1, dhart1;
+
+  upd1_t [ND-1:0] oup1_i, oup1_d;
+  upd1_t [ND-1:0] nup1_i, nup1_d;
+  logic  [ND-1:0] oim1, odm1, ofb1, oacc1, ohit1, oireq1;
+  logic  [ND-1:0] nim1b, ndm1b, nfb1b, nacc1b, nhit1b, nireq1b;
+  logic  [ND-1:0][C_G1.VLEN-1:0] ova1, nva1b;
+
+  for (genvar gi = 0; gi < ND; gi++) begin : gen_r1
+    localparam config_pkg::g6lc_cfg_t CD = cfg_of(1'b1, DEPTHS[gi]);
+    g6lc_shared_tlb #(
+        .G6LCCfg(CD), .SHARED_TLB_WAYS(2), .HYP_EXT(1),
+        .pte_g6lc_t(pte_t), .tlb_update_g6lc_t(upd1_t)
+    ) i_ref (
+        .clk_i(clk), .rst_ni(rst_n),
+        .flush_i(f1), .flush_vvma_i(f1vv), .flush_gvma_i(f1gv),
+        .s_st_enbl_i(s1e), .g_st_enbl_i(g1e), .v_i(v1m),
+        .s_ld_st_enbl_i(s1le), .g_ld_st_enbl_i(g1le), .ld_st_v_i(lv1m),
+        .dtlb_asid_i(dasid1), .itlb_asid_i(iasid1),
+        .lu_vmid_i(dvmid1), .itlb_vmid_i(ivmid1),
+        .itlb_hart_i(ihart1), .dtlb_hart_i(dhart1),
+        .itlb_access_i(iacc1), .itlb_hit_i(ihit1), .itlb_vaddr_i(iva1),
+        .dtlb_access_i(dacc1), .dtlb_hit_i(dhit1), .dtlb_vaddr_i(dva1),
+        .shared_tlb_miss_i(smiss1),
+        .asid_to_be_flushed_i(fasid1), .vaddr_to_be_flushed_i(fvaddr1),
+        .vmid_to_be_flushed_i(fvmid1), .gpaddr_to_be_flushed_i(fgpaddr1),
+        .itlb_update_o(oup1_i[gi]), .dtlb_update_o(oup1_d[gi]),
+        .itlb_miss_o(oim1[gi]), .dtlb_miss_o(odm1[gi]),
+        .flush_busy_o(ofb1[gi]),
+        .shared_tlb_access_o(oacc1[gi]), .shared_tlb_hit_o(ohit1[gi]),
+        .shared_tlb_vaddr_o(ova1[gi]), .itlb_req_o(oireq1[gi]),
+        .shared_tlb_update_i(upd1));
+    g6lc_tlb_miss_router #(
+        .G6LCCfg(CD), .HYP_EXT(1), .tlb_update_g6lc_t(upd1_t)
+    ) i_dut (
+        .clk_i(clk), .rst_ni(rst_n),
+        .flush_i(f1), .flush_vvma_i(f1vv), .flush_gvma_i(f1gv),
+        .s_st_enbl_i(s1e), .g_st_enbl_i(g1e), .v_i(v1m),
+        .s_ld_st_enbl_i(s1le), .g_ld_st_enbl_i(g1le), .ld_st_v_i(lv1m),
+        .itlb_access_i(iacc1), .itlb_hit_i(ihit1), .itlb_vaddr_i(iva1),
+        .dtlb_access_i(dacc1), .dtlb_hit_i(dhit1), .dtlb_vaddr_i(dva1),
+        .shared_tlb_miss_i(smiss1),
+        .itlb_update_o(nup1_i[gi]), .dtlb_update_o(nup1_d[gi]),
+        .itlb_miss_o(nim1b[gi]), .dtlb_miss_o(ndm1b[gi]),
+        .flush_busy_o(nfb1b[gi]),
+        .shared_tlb_access_o(nacc1b[gi]), .shared_tlb_hit_o(nhit1b[gi]),
+        .shared_tlb_vaddr_o(nva1b[gi]), .itlb_req_o(nireq1b[gi]),
+        .shared_tlb_update_i(upd1));
+  end
+
+  // ---------------------- output miter, every cycle ------------------------
+  int unsigned miter_n = 0;
+  bit miter_bad = 0;
+  always @(negedge clk) begin
+    if (rst_n) begin
+      for (int gi = 0; gi < ND; gi++) begin
+        if (!(oup0_i[gi] === nup0_i[gi] && oup0_d[gi] === nup0_d[gi] &&
+              oim0[gi] === nim0[gi] && odm0[gi] === ndm0[gi] &&
+              ofb0[gi] === nfb0[gi] && oacc0[gi] === nacc0[gi] &&
+              ohit0[gi] === nhit0[gi] && ova0[gi] === nva0[gi] &&
+              oireq0[gi] === nireq0[gi])) begin
+          miter_bad = 1'b1;
+          $display("MMU_MITER_G0 d%0d cyc%0d: iu %h/%h du %h/%h acc %b/%b hit %b/%b va %h/%h",
+                   DEPTHS[gi], cyc, oup0_i[gi], nup0_i[gi], oup0_d[gi], nup0_d[gi],
+                   oacc0[gi], nacc0[gi], ohit0[gi], nhit0[gi], ova0[gi], nva0[gi]);
+        end
+        if (!(oup1_i[gi] === nup1_i[gi] && oup1_d[gi] === nup1_d[gi] &&
+              oim1[gi] === nim1b[gi] && odm1[gi] === ndm1b[gi] &&
+              ofb1[gi] === nfb1b[gi] && oacc1[gi] === nacc1b[gi] &&
+              ohit1[gi] === nhit1b[gi] && ova1[gi] === nva1b[gi] &&
+              oireq1[gi] === nireq1b[gi])) begin
+          miter_bad = 1'b1;
+          $display("MMU_MITER_G1 d%0d cyc%0d: iu %h/%h du %h/%h acc %b/%b hit %b/%b va %h/%h",
+                   DEPTHS[gi], cyc, oup1_i[gi], nup1_i[gi], oup1_d[gi], nup1_d[gi],
+                   oacc1[gi], nacc1b[gi], ohit1[gi], nhit1b[gi], ova1[gi], nva1b[gi]);
+        end
+      end
+`ifdef G6LC_MMU_REF_D1
+      if (!(pup1_i === nupd1_i && pup1_d === nupd1_d && pacc1 === nacc1 &&
+            phit1 === nhit1 && pva1 === nva1 && pireq1 === nireq1 &&
+            pim1 === nim1 && pdm1 === ndm1 && pfb1 === nfb1))
+        miter_bad = 1'b1;
+`endif
+      miter_n++;
+    end
+  end
+
+  // ============================ g6lc_tlb leaf ===============================
+  function automatic g6lc_hyp_pkg::g6lc_hyp_cfg_t hyp_tlb(input int unsigned st);
+    g6lc_hyp_pkg::g6lc_hyp_cfg_t h = g6lc_hyp_pkg::Hyp8;
+    h.TlbStages = st;
+    return h;
+  endfunction
+
+  localparam int NT0 = 3, NT1 = 2;
+  localparam int unsigned T0E[NT0] = '{4, 4, 16};
+  localparam int unsigned T0S[NT0] = '{1, 3, 3};
+  localparam int unsigned T1E[NT1] = '{4, 16};
+  localparam int unsigned T1S[NT1] = '{1, 3};
+
+  // packed driver vectors (mid-task writes to unpacked-array ports do not
+  // re-trigger comb evaluation under remote Verilator v5.008 --timing;
+  // Driver bundle: packed-struct array; dynamic-indexed FIELD writes are
+  // reliable, whereas packed multi-dim element writes in tasks are not.
+  typedef struct packed {
+    upd0_t                      upd;
+    logic                       acc, fl, fvv, fgv, sen, gen, vm, hart;
+    logic [C_G0.ASID_WIDTH-1:0] asid, fa;
+    logic [C_G0.VMID_WIDTH-1:0] vmid, fv;
+    logic [C_G0.VLEN-1:0]       va, fva;
+    logic [C_G0.GPLEN-1:0]      fgpa;
+  } drv0_t;
+  drv0_t s0drv;
+  int    s0sel;
+  logic [NT0-1:0]                    t_hit0;
+  logic [NT0-1:0][C_G0.PtLevels-2:0] t_ispg0;
+  pte_t [NT0-1:0]                    t_ct0, t_gct0;
+  logic [NT0-1:0][C_G0.GPLEN-1:0]    t_gp0;
+
+  for (genvar gi = 0; gi < NT0; gi++) begin : gen_t0
+    localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t HT = hyp_tlb(T0S[gi]);
+    g6lc_tlb #(
+        .G6LCCfg(C_G0), .HypCfg(HT), .pte_g6lc_t(pte_t),
+        .tlb_update_g6lc_t(upd0_t), .TLB_ENTRIES(T0E[gi]), .HYP_EXT(0)
+    ) i_tlb (
+        .clk_i(clk), .rst_ni(rst_n),
+        .flush_i(s0drv.fl && (s0sel == gi)),
+        .flush_vvma_i(s0drv.fvv && (s0sel == gi)),
+        .flush_gvma_i(s0drv.fgv && (s0sel == gi)),
+        .s_st_enbl_i(s0drv.sen), .g_st_enbl_i(s0drv.gen),
+        .v_i(s0drv.vm),
+        .update_i((s0sel == gi) ? s0drv.upd : '0),
+        .lu_access_i(s0drv.acc && (s0sel == gi)),
+        .lu_asid_i(s0drv.asid),
+        .lu_vmid_i(s0drv.vmid), .lu_hart_i(s0drv.hart),
+        .lu_vaddr_i(s0drv.va),
+        .lu_gpaddr_o(t_gp0[gi]), .lu_content_o(t_ct0[gi]),
+        .lu_g_content_o(t_gct0[gi]),
+        .asid_to_be_flushed_i(s0drv.fa),
+        .vmid_to_be_flushed_i(s0drv.fv),
+        .vaddr_to_be_flushed_i(s0drv.fva),
+        .gpaddr_to_be_flushed_i(s0drv.fgpa),
+        .lu_is_page_o(t_ispg0[gi]), .lu_hit_o(t_hit0[gi]));
+  end
+
+  typedef struct packed {
+    upd1_t                      upd;
+    logic                       acc, fl, fvv, fgv, sen, gen, vm, hart;
+    logic [C_G1.ASID_WIDTH-1:0] asid, fa;
+    logic [C_G1.VMID_WIDTH-1:0] vmid, fv;
+    logic [C_G1.VLEN-1:0]       va, fva;
+    logic [C_G1.GPLEN-1:0]      fgpa;
+  } drv1_t;
+  drv1_t s1drv;
+  int    s1sel;
+  logic [NT1-1:0]                    t_hit1;
+  logic [NT1-1:0][C_G1.PtLevels-2:0] t_ispg1;
+  pte_t [NT1-1:0]                    t_ct1, t_gct1;
+  logic [NT1-1:0][C_G1.GPLEN-1:0]    t_gp1;
+
+  for (genvar gi = 0; gi < NT1; gi++) begin : gen_t1
+    localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t HT = hyp_tlb(T1S[gi]);
+    g6lc_tlb #(
+        .G6LCCfg(C_G1), .HypCfg(HT), .pte_g6lc_t(pte_t),
+        .tlb_update_g6lc_t(upd1_t), .TLB_ENTRIES(T1E[gi]), .HYP_EXT(1)
+    ) i_tlb (
+        .clk_i(clk), .rst_ni(rst_n),
+        .flush_i(s1drv.fl && (s1sel == gi)),
+        .flush_vvma_i(s1drv.fvv && (s1sel == gi)),
+        .flush_gvma_i(s1drv.fgv && (s1sel == gi)),
+        .s_st_enbl_i(s1drv.sen), .g_st_enbl_i(s1drv.gen),
+        .v_i(s1drv.vm),
+        .update_i((s1sel == gi) ? s1drv.upd : '0),
+        .lu_access_i(s1drv.acc && (s1sel == gi)),
+        .lu_asid_i(s1drv.asid),
+        .lu_vmid_i(s1drv.vmid), .lu_hart_i(s1drv.hart),
+        .lu_vaddr_i(s1drv.va),
+        .lu_gpaddr_o(t_gp1[gi]), .lu_content_o(t_ct1[gi]),
+        .lu_g_content_o(t_gct1[gi]),
+        .asid_to_be_flushed_i(s1drv.fa),
+        .vmid_to_be_flushed_i(s1drv.fv),
+        .vaddr_to_be_flushed_i(s1drv.fva),
+        .gpaddr_to_be_flushed_i(s1drv.fgpa),
+        .lu_is_page_o(t_ispg1[gi]), .lu_hit_o(t_hit1[gi]));
+  end
+
+  // ------------------------------ stimulus --------------------------------
+  task automatic r0_idle();
+    iacc0 = 0; ihit0 = 0; dacc0 = 0; dhit0 = 0; smiss0 = 0; upd0 = '0;
+    f0 = 0; f0vv = 0; f0gv = 0;
+  endtask
+  task automatic r1_idle();
+    iacc1 = 0; ihit1 = 0; dacc1 = 0; dhit1 = 0; smiss1 = 0; upd1 = '0;
+    f1 = 0; f1vv = 0; f1gv = 0;
+  endtask
+  task automatic t_idle();
+    s0drv = '0; s1drv = '0; s0sel = -1; s1sel = -1;
+  endtask
+
+  // TLB lookup: TlbStages>=2 is TWO edges through the module (T1 capture,
+  // T2 response); stages=1 answers combinationally the same cycle.
+  task automatic t0_look(int i, logic [C_G0.VLEN-1:0] va,
+                         logic [C_G0.ASID_WIDTH-1:0] asid,
+                         logic [C_G0.VMID_WIDTH-1:0] vmid);
+    s0sel = i;
+    s0drv.va = va; s0drv.asid = asid; s0drv.vmid = vmid;
+    s0drv.sen = 1'b1; s0drv.gen = 1'b0; s0drv.vm = 1'b0; s0drv.acc = 1'b1;
+    if (T0S[i] >= 2) begin
+      tick(); s0drv.acc = 1'b0; tick();
+    end else begin
+      // comb lookup: still hold the access across an edge so the PLRU
+      // pointer advances on hits (it only updates when a live hit is
+      // sampled at a clock edge).
+      #2; tick();
+    end
+  endtask
+  task automatic t1_look(int i, logic [C_G1.VLEN-1:0] va,
+                         logic [C_G1.ASID_WIDTH-1:0] asid,
+                         logic [C_G1.VMID_WIDTH-1:0] vmid,
+                         logic s_e, logic g_e, logic v_m);
+    s1sel = i;
+    s1drv.va = va; s1drv.asid = asid; s1drv.vmid = vmid;
+    s1drv.sen = s_e; s1drv.gen = g_e; s1drv.vm = v_m; s1drv.acc = 1'b1;
+    if (T1S[i] >= 2) begin
+      tick(); s1drv.acc = 1'b0; tick();
+    end else begin
+      #2; tick();
+    end
+  endtask
+
+  task automatic t0_fill(int i, logic [C_G0.VpnLen-1:0] vpn,
+                         logic [C_G0.ASID_WIDTH-1:0] asid, logic glob,
+                         logic [C_G0.PPNW-1:0] ppn, logic [1:0] ispg,
+                         logic napot);
+    s0sel = i;
+    // lu_hit_o is combinational and access-agnostic: park the lookup vaddr
+    // off-map so the fill edge is not suppressed by a leftover hit.
+    s0drv.va = 64'hFFFF_FF00_0000_0000; s0drv.acc = 1'b0;
+    s0drv.upd = '0;
+    s0drv.upd.valid = 1'b1;
+    s0drv.upd.vpn = vpn;
+    s0drv.upd.asid = asid;
+    s0drv.upd.v_st_enbl = 1'b1;          // {s} for HYP_EXT=0
+    s0drv.upd.is_page = ispg;
+    s0drv.upd.is_napot_64k = napot;
+    s0drv.upd.content.v = 1'b1;
+    s0drv.upd.content.g = glob;
+    s0drv.upd.content.ppn = ppn;
+    s0drv.upd.g_content.v = 1'b1;
+    s0drv.upd.g_content.ppn = ppn + 44'h111;
+    tick(); s0drv.upd.valid = 1'b0;
+  endtask
+  task automatic t1_fill(int i, logic [C_G1.VpnLen-1:0] vpn,
+                         logic [C_G1.ASID_WIDTH-1:0] asid,
+                         logic [C_G1.VMID_WIDTH-1:0] vmid,
+                         logic glob, logic [C_G1.PPNW-1:0] ppn,
+                         logic [2:0] vsen, logic napot);
+    s1sel = i;
+    s1drv.va = 64'hFFFF_FF00_0000_0000; s1drv.acc = 1'b0;
+    s1drv.upd = '0;
+    s1drv.upd.valid = 1'b1;
+    s1drv.upd.vpn = vpn;
+    s1drv.upd.asid = asid;
+    s1drv.upd.vmid = vmid;
+    s1drv.upd.v_st_enbl = vsen;          // {v,g,s} for HYP_EXT=1
+    s1drv.upd.is_page = '0;              // 4K pages in this leaf
+    s1drv.upd.is_napot_64k = napot;
+    s1drv.upd.content.v = 1'b1;
+    s1drv.upd.content.g = glob;
+    s1drv.upd.content.ppn = ppn;
+    s1drv.upd.g_content.v = 1'b1;
+    s1drv.upd.g_content.ppn = ppn + 44'h222;
+    tick(); s1drv.upd.valid = 1'b0;
+  endtask
+
+  logic [31:0] lfsr = 32'h5EED_CAFE;
+  task automatic vary();
+    // bounded deterministic input variation across both router groups
+    lfsr = lfsr ^ (lfsr << 13); lfsr = lfsr ^ (lfsr >> 17); lfsr = lfsr ^ (lfsr << 5);
+    iacc0 = lfsr[0]; ihit0 = lfsr[1]; dacc0 = lfsr[2]; dhit0 = lfsr[3];
+    smiss0 = lfsr[4];
+    iva0 = {32'h0000_0001, lfsr}; dva0 = {32'h0000_0002, lfsr};
+    s0e = lfsr[5]; s0le = lfsr[6]; g0e = lfsr[7]; g0le = lfsr[8];
+    v0m = lfsr[9]; lv0m = lfsr[10];
+    f0 = lfsr[11]; f0vv = 1'b0; f0gv = 1'b0;
+    upd0 = '0;
+    upd0.valid = lfsr[12];
+    upd0.vpn = C_G0.VpnLen'(lfsr[20:13]);
+    upd0.asid = C_G0.ASID_WIDTH'(lfsr[28:21]);
+    upd0.vmid = '0;
+    upd0.is_napot_64k = lfsr[29];
+    upd0.content.ppn = C_G0.PPNW'(lfsr);
+    upd0.g_content.ppn = C_G0.PPNW'(~lfsr);
+    iacc1 = lfsr[16]; ihit1 = lfsr[17]; dacc1 = lfsr[18]; dhit1 = lfsr[19];
+    smiss1 = lfsr[20];
+    iva1 = {32'h0000_0003, lfsr}; dva1 = {32'h0000_0004, lfsr};
+    s1e = lfsr[21]; s1le = lfsr[22]; g1e = lfsr[23]; g1le = lfsr[24];
+    v1m = lfsr[25]; lv1m = lfsr[26];
+    f1 = 1'b0; f1vv = lfsr[27]; f1gv = lfsr[28];
+    upd1 = '0;
+    upd1.valid = lfsr[30];
+    upd1.vpn = C_G1.VpnLen'(lfsr[20:13]);
+    upd1.asid = C_G1.ASID_WIDTH'(lfsr[28:21]);
+    upd1.vmid = C_G1.VMID_WIDTH'(lfsr[31:29]);
+    upd1.is_napot_64k = lfsr[29];
+    upd1.content.ppn = C_G1.PPNW'(lfsr);
+    upd1.g_content.ppn = C_G1.PPNW'(~lfsr);
+    tick();
+  endtask
+
+  initial begin
+    r0_idle(); r1_idle(); t_idle();
+    iasid0 = '0; dasid0 = '0; ivmid0 = '0; dvmid0 = '0; ihart0 = '0; dhart0 = '0;
+    fasid0 = '0; fvmid0 = '0; fvaddr0 = '0; fgpaddr0 = '0;
+    iasid1 = '0; dasid1 = '0; ivmid1 = '0; dvmid1 = '0; ihart1 = '0; dhart1 = '0;
+    fasid1 = '0; fvmid1 = '0; fvaddr1 = '0; fgpaddr1 = '0;
+    s0e = 0; g0e = 0; v0m = 0; s0le = 0; g0le = 0; lv0m = 0;
+    s1e = 0; g1e = 0; v1m = 0; s1le = 0; g1le = 0; lv1m = 0;
+    iva0 = '0; dva0 = '0; iva1 = '0; dva1 = '0;
+    repeat (3) tick();
+    rst_n = 1; tick();
+
+    // ---------- M1: I-only miss ----------
+    s0e = 1'b1; s0le = 1'b1;
+    iva0 = 64'h0000_0000_8000_1000; iacc0 = 1'b1; ihit0 = 1'b0; smiss0 = 1'b1;
+    #2;
+    check(oim0[2] && nim0[2] && nim1, "MMU0_I_MISS_PMU");
+    check(!oacc0[2] && !nacc0[2], "MMU0_I_NO_ACCESS_YET");
+    tick();
+    iacc0 = 1'b0; smiss0 = 1'b0; #2;
+    check(nacc0[2] && oacc0[2] && nacc1, "MMU0_I_ACCESS");
+    check(nva0[2] == 64'h0000_0000_8000_1000, "MMU0_I_VADDR");
+    check(nireq0[2] && oireq0[2], "MMU0_I_REQ");
+    check(!nup0_i[2].valid, "MMU0_I_NO_UPD");
+    tick();
+
+    // ---------- M2: D-only miss ----------
+    dva0 = 64'h0000_0000_8000_2000; dacc0 = 1'b1; dhit0 = 1'b0;
+    #2;
+    check(!odm0[2] && !ndm0[2], "MMU0_D_MISS_PMU0");  // smiss still 0
+    smiss0 = 1'b1; #2;
+    check(odm0[2] && ndm0[2], "MMU0_D_MISS_PMU");
+    tick();
+    dacc0 = 1'b0; smiss0 = 1'b0; #2;
+    check(nacc0[2] && !nireq0[2], "MMU0_D_ACCESS");
+    check(nva0[2] == 64'h0000_0000_8000_2000, "MMU0_D_VADDR");
+    tick();
+
+    // ---------- M3: simultaneous access; a D HIT still suppresses I ------
+    iva0 = 64'h0000_0000_8000_3000;
+    dva0 = 64'h0000_0000_8000_3800;
+    iacc0 = 1'b1; ihit0 = 1'b0; dacc0 = 1'b1; dhit0 = 1'b1;
+    #2; tick(); #2;
+    check(!nacc0[2], "MMU0_DHIT_SUPPRESS");          // nothing accepted
+    dacc0 = 1'b0; #2;                                // now the I miss lands
+    tick(); iacc0 = 1'b0; #2;
+    check(nacc0[2] && nireq0[2], "MMU0_I_AFTER_DHIT");
+    check(nva0[2] == 64'h0000_0000_8000_3000, "MMU0_I_VA_KEPT");
+    tick();
+
+    // ---------- M4: both-miss simultaneous -> D wins the arbiter ---------
+    iva0 = 64'h0000_0000_8000_4000; dva0 = 64'h0000_0000_8000_4800;
+    iacc0 = 1'b1; dacc0 = 1'b1; ihit0 = 1'b0; dhit0 = 1'b0;
+    tick(); iacc0 = 1'b0; dacc0 = 1'b0; #2;
+    check(nacc0[2] && !nireq0[2], "MMU0_D_WINS");
+    check(nva0[2] == 64'h0000_0000_8000_4800, "MMU0_D_VA");
+    tick();
+
+    // ---------- M5: return with no owner -> hit, updates stay 0 ----------
+    upd0 = '0;
+    upd0.valid = 1'b1; upd0.vpn = C_G0.VpnLen'(27'h12345);
+    upd0.asid = C_G0.ASID_WIDTH'(9); upd0.vmid = '0;
+    upd0.content.ppn = 44'hBEEF; upd0.content.v = 1'b1;
+    upd0.g_content.ppn = 44'hCAFE; upd0.g_content.v = 1'b1;
+    upd0.is_napot_64k = 1'b1;
+    #2;
+    check(ohit0[2] && nhit0[2], "MMU0_NOOWNER_HIT");
+    check(!nup0_i[2].valid && !nup0_d[2].valid, "MMU0_NOOWNER_QUIET");
+    tick(); upd0 = '0;
+
+    // ---------- M6: I-owned return echoes the record, v_st_enbl live -----
+    // capture an I miss while s-stage enabled, then flip the live stage
+    // enables before the return lands: the reply must carry the LIVE
+    // (post-switch) enable bits exactly as the old bypass did.
+    s0e = 1'b1; g0e = 1'b0; v0m = 1'b0;
+    iva0 = 64'h0000_0000_8000_5000; iacc0 = 1'b1; tick();
+    iacc0 = 1'b0; s0e = 1'b0;                         // owner held; flags flip
+    #2; check(nireq0[2], "MMU0_I_PENDING");
+    upd0 = '0;
+    upd0.valid = 1'b1; upd0.vpn = C_G0.VpnLen'(27'h54321);
+    upd0.asid = C_G0.ASID_WIDTH'(7);
+    upd0.content.ppn = 44'h0123; upd0.content.v = 1'b1;
+    upd0.g_content.ppn = 44'h0456; upd0.g_content.v = 1'b1;
+    #2;
+    check(nhit0[2], "MMU0_IRET_HIT");
+    check(nup0_i[2].valid === 1'b1, "MMU0_IRET_VALID");
+    check(nup0_i[2].vpn === C_G0.VpnLen'(27'h54321), "MMU0_IRET_VPN");
+    check(nup0_i[2].asid === C_G0.ASID_WIDTH'(7), "MMU0_IRET_ASID");
+    check(nup0_i[2].content.ppn === 44'h0123, "MMU0_IRET_PPN");
+    check(nup0_i[2].g_content.ppn === 44'h0456, "MMU0_IRET_GPPN");
+    check(nup0_i[2].v_st_enbl === 1'b0, "MMU0_IRET_LIVE_ENBL");
+    check(!nup0_d[2].valid, "MMU0_IRET_D_QUIET");
+    // the bench-copy mutant drops the I route -- named discrimination
+    check(!mup_i.valid, "MMU_MUT_IROUTE_DROPPED");
+    check(mup_i !== nup0_i[2], "MMU_MUT_IROUTE_DISC");
+    tick(); upd0 = '0; s0e = 1'b1;
+    tick();
+
+    // ---------- M7: quiet window after flush (all depths) ----------------
+    // Hold a continuous D miss; the walk reads+applies each of the
+    // SharedTlbDepth sets (2*depth blocked cycles), then the next IDLE
+    // cycle accepts and access resumes at loop tick 2*depth+1 — same edge
+    // as the reference (the miter) and the explicit bound (depth-1).
+    dacc0 = 1'b1; dhit0 = 1'b0; s0le = 1'b1;
+    f0 = 1'b1; tick(); f0 = 1'b0;
+    for (int k = 1; k <= 2*64+2; k++) begin
+      tick(); #1;
+      check(nacc0[2] === (k >= 2*64+1), "MMU0_W64_WINDOW");
+      check(nacc0[1] === (k >= 2*3+1), "MMU0_W3_WINDOW");
+      check(nacc0[0] === (k >= 2*2+1), "MMU0_W2_WINDOW");
+      check(nacc1 === (k >= 2*1+1), "MMU0_W1_WINDOW");
+    end
+    dacc0 = 1'b0; tick();
+
+    // ---------- M8: return routed as the quiet window starts ------------
+    // The registered request owner is a one-cycle marker (it clears the
+    // cycle after the accept): a return routes only while its req_q is
+    // high.  Accept a D miss, then land the update the very next cycle
+    // concurrent with a vvma flush — the owner routes it even as the walk
+    // begins; a further return deep inside the walk has no live owner and
+    // is dropped on both legs.
+    dva0 = 64'h0000_0000_8000_6000; dacc0 = 1'b1; tick();
+    dacc0 = 1'b0; f0vv = 1'b1;
+    upd0 = '0; upd0.valid = 1'b1;
+    upd0.vpn = C_G0.VpnLen'(27'h00099);
+    upd0.asid = C_G0.ASID_WIDTH'(3);
+    upd0.content.ppn = 44'h7777; upd0.content.v = 1'b1;
+    #2;
+    check(nup0_d[2].valid === 1'b1, "MMU0_WALK_D_RET");
+    check(nup0_d[2].vpn === C_G0.VpnLen'(27'h00099), "MMU0_WALK_D_VPN");
+    check(nup0_d[2].v_st_enbl === 1'b1, "MMU0_WALK_D_ENBL");  // ld side live
+    check(nhit0[2] && ohit0[2], "MMU0_WALK_HIT");
+    tick(); f0vv = 1'b0; upd0 = '0;
+    // mid-walk return, no live owner -> dropped (bypass semantics kept)
+    upd0 = '0; upd0.valid = 1'b1;
+    upd0.vpn = C_G0.VpnLen'(27'h000aa);
+    upd0.content.ppn = 44'h8888; upd0.content.v = 1'b1;
+    #2;
+    check(nhit0[2] === 1'b1, "MMU0_WALK_DROP_HIT");
+    check(!nup0_d[2].valid && !nup0_i[2].valid, "MMU0_WALK_DROP");
+    tick(); upd0 = '0;
+    // wait out the d64 quiet window on the deepest pair
+    for (int k = 0; k < 2*64+3; k++) tick();
+
+    // ---------- M9: gvma flush + reset midwalk ---------------------------
+    dacc0 = 1'b1;
+    f0gv = 1'b1; tick(); f0gv = 0;
+    repeat (10) tick();                    // inside the d64 walk
+    rst_n = 0; repeat (2) tick(); rst_n = 1; repeat (2) tick();
+    check(nacc0[0] === 1'b1, "MMU0_RST_RESUME");    // shallowest is idle again
+    dacc0 = 1'b0; tick();
+
+    // ---------- M10: HYP_EXT=1 group basics ------------------------------
+    s1e = 1'b1; g1e = 1'b1; v1m = 1'b1; s1le = 1'b1; g1le = 1'b1; lv1m = 1'b1;
+    iva1 = 64'h0000_0000_8000_7000; iacc1 = 1'b1; ihit1 = 1'b0;
+    tick(); iacc1 = 1'b0; #2;
+    check(nacc1b[2] && nireq1b[2], "MMU1_I_ACCESS");
+    // return with live 3-bit stage enables
+    s1e = 1'b1; g1e = 1'b0; v1m = 1'b1;
+    upd1 = '0; upd1.valid = 1'b1;
+    upd1.vpn = C_G1.VpnLen'(29'h0010_0000);
+    upd1.asid = C_G1.ASID_WIDTH'(4); upd1.vmid = C_G1.VMID_WIDTH'(2);
+    upd1.content.ppn = 44'h5151; upd1.content.v = 1'b1;
+    #2;
+    check(nup1_i[2].valid === 1'b1, "MMU1_IRET_VALID");
+    check(nup1_i[2].vmid === C_G1.VMID_WIDTH'(2), "MMU1_IRET_VMID");
+    check(nup1_i[2].v_st_enbl === 3'b101, "MMU1_IRET_ENBL");
+    tick(); upd1 = '0;
+    // gvma flush on the wide geometry
+    dacc1 = 1'b1; f1gv = 1'b1; tick(); f1gv = 1'b0;
+    for (int k = 1; k <= 2*64+2; k++) begin
+      tick(); #1;
+      check(nacc1b[2] === (k >= 2*64+1), "MMU1_W64_WINDOW");
+    end
+    dacc1 = 1'b0; tick();
+
+    // ---------- M11: deterministic varying-input soak --------------------
+    for (int k = 0; k < 300; k++) vary();
+    r0_idle(); r1_idle();
+    repeat (4) tick();
+
+    check(!miter_bad, "MMU_MITER_EQ");
+    check(miter_n > 400, "MMU_MITER_NONVACUOUS");
+
+    // ==================== TLB row-predicate exercises =====================
+    // Fills land wherever PLRU chooses; expectations are by address, not
+    // entry index.  st1 instances answer comb; st3 two edges later.
+    // T_A: 4K non-global, ASID-matched hit + PTE identity
+    t0_fill(0, C_G0.VpnLen'(27'h0000_021), C_G0.ASID_WIDTH'(5), 1'b0,
+            44'h0A0A, 2'b00, 1'b0);
+    t0_fill(2, C_G0.VpnLen'(27'h0000_021), C_G0.ASID_WIDTH'(5), 1'b0,
+            44'h0A0A, 2'b00, 1'b0);
+    t0_look(0, 64'h0000_0000_0002_1456, C_G0.ASID_WIDTH'(5), '0);
+    check(t_hit0[0] === 1'b1, "TLB0_4K_HIT");
+    check(t_ct0[0].ppn === 44'h0A0A, "TLB0_4K_PPN");
+    check(t_ct0[0].g === 1'b0, "TLB0_4K_NOTG");
+    s0drv.acc = 1'b0;
+    t0_look(0, 64'h0000_0000_0002_1456, C_G0.ASID_WIDTH'(6), '0);
+    check(t_hit0[0] === 1'b0, "TLB0_4K_ASID_MISS");
+    s0drv.acc = 1'b0;
+    // staged instance answers two edges later with the same outcome
+    t0_look(2, 64'h0000_0000_0002_1abc, C_G0.ASID_WIDTH'(5), '0);
+    check(t_hit0[2] === 1'b1, "TLB2_4K_HIT_ST3");
+    s0drv.acc = 1'b0;
+    tick();
+
+    // T_B: global entry ignores ASID; flush by ASID keeps it, flush-all kills
+    t0_fill(0, C_G0.VpnLen'(27'h0000_042), C_G0.ASID_WIDTH'(5), 1'b1,
+            44'h0B0B, 2'b00, 1'b0);
+    t0_look(0, 64'h0000_0000_0004_2abc, C_G0.ASID_WIDTH'(9), '0);
+    check(t_hit0[0] === 1'b1, "TLB0_GLB_HIT");
+    s0drv.acc = 1'b0;
+    s0drv.fa = C_G0.ASID_WIDTH'(5); s0drv.fva = '0;   // ASID-only flush
+    s0drv.fl = 1'b1; tick(); s0drv.fl = 1'b0;
+    t0_look(0, 64'h0000_0000_0004_2abc, C_G0.ASID_WIDTH'(9), '0);
+    check(t_hit0[0] === 1'b1, "TLB0_GLB_SURVIVES");
+    s0drv.acc = 1'b0;
+    t0_look(0, 64'h0000_0000_0002_1456, C_G0.ASID_WIDTH'(5), '0);
+    check(t_hit0[0] === 1'b0, "TLB0_ASID_FLUSHED");
+    s0drv.acc = 1'b0;
+
+    // T_C: address-only flush removes only the addressed entry
+    t0_fill(0, C_G0.VpnLen'(27'h0000_021), C_G0.ASID_WIDTH'(5), 1'b0,
+            44'h0A0A, 2'b00, 1'b0);
+    s0drv.fa = '0; s0drv.fva = 64'h0000_0000_0002_1000;
+    s0drv.fl = 1'b1; tick(); s0drv.fl = 1'b0;
+    t0_look(0, 64'h0000_0000_0002_1000, C_G0.ASID_WIDTH'(5), '0);
+    check(t_hit0[0] === 1'b0, "TLB0_ADDR_FLUSHED");
+    s0drv.acc = 1'b0;
+    t0_look(0, 64'h0000_0000_0004_2000, C_G0.ASID_WIDTH'(9), '0);
+    check(t_hit0[0] === 1'b1, "TLB0_ADDR_KEEP_OTHER");
+    s0drv.acc = 1'b0;
+
+    // T_D: flush-all then both-specified flush
+    s0drv.fa = '0; s0drv.fva = '0;
+    s0drv.fl = 1'b1; tick(); s0drv.fl = 1'b0;
+    t0_look(0, 64'h0000_0000_0004_2000, C_G0.ASID_WIDTH'(9), '0);
+    check(t_hit0[0] === 1'b0, "TLB0_FLUSH_ALL");
+    s0drv.acc = 1'b0;
+    t0_fill(0, C_G0.VpnLen'(27'h0000_063), C_G0.ASID_WIDTH'(2), 1'b0,
+            44'h0C0C, 2'b00, 1'b0);
+    s0drv.fa = C_G0.ASID_WIDTH'(2); s0drv.fva = 64'h0000_0000_0006_3000;
+    s0drv.fl = 1'b1; tick(); s0drv.fl = 1'b0;
+    t0_look(0, 64'h0000_0000_0006_3000, C_G0.ASID_WIDTH'(2), '0);
+    check(t_hit0[0] === 1'b0, "TLB0_FLUSH_BOTH");
+    s0drv.acc = 1'b0;
+
+    // T_E: NAPOT 64KiB: in-range lookups hit, in-range flush removes it
+    t0_fill(0, C_G0.VpnLen'(27'h0000_080), C_G0.ASID_WIDTH'(5), 1'b0,
+            44'h0D0D, 2'b00, 1'b1);
+    t0_look(0, 64'h0000_0000_0008_0123, C_G0.ASID_WIDTH'(5), '0);
+    check(t_hit0[0] === 1'b1, "TLB0_NAPOT_BASE");
+    s0drv.acc = 1'b0;
+    t0_look(0, 64'h0000_0000_0008_f000, C_G0.ASID_WIDTH'(5), '0);
+    check(t_hit0[0] === 1'b1, "TLB0_NAPOT_HIGH");
+    s0drv.acc = 1'b0;
+    t0_look(0, 64'h0000_0000_0009_0000, C_G0.ASID_WIDTH'(5), '0);
+    check(t_hit0[0] === 1'b0, "TLB0_NAPOT_BEYOND");
+    s0drv.acc = 1'b0;
+    s0drv.fa = '0; s0drv.fva = 64'h0000_0000_0008_7000;  // in-range flush vaddr
+    s0drv.fl = 1'b1; tick(); s0drv.fl = 1'b0;
+    t0_look(0, 64'h0000_0000_0008_0000, C_G0.ASID_WIDTH'(5), '0);
+    check(t_hit0[0] === 1'b0, "TLB0_NAPOT_FLUSHED");
+    s0drv.acc = 1'b0;
+
+    // T_F: superpage (mega) hit + flush/fill collision priority
+    t0_fill(0, C_G0.VpnLen'(27'h0000_100), C_G0.ASID_WIDTH'(5), 1'b0,
+            44'h0E0E, 2'b10, 1'b0);                    // is_page[1]: 2M mega
+    t0_look(0, 64'h0000_0000_001f_f000, C_G0.ASID_WIDTH'(5), '0);
+    check(t_hit0[0] === 1'b1, "TLB0_MEGA_OFF");
+    check(t_ispg0[0] === 2'b10, "TLB0_MEGA_ISPAGE");
+    s0drv.acc = 1'b0;
+    // flush coincident with a fill: flush wins, the entry never lands
+    s0drv.fa = '0; s0drv.fva = '0;
+    s0drv.fl = 1'b1;
+    s0drv.upd = '0;
+    s0drv.upd.valid = 1'b1; s0drv.upd.vpn = C_G0.VpnLen'(27'h0000_099);
+    s0drv.upd.asid = '0; s0drv.upd.v_st_enbl = 1'b1;
+    s0drv.upd.content.v = 1'b1; s0drv.upd.content.ppn = 44'h0F0F;
+    tick();
+    s0drv.fl = 1'b0; s0drv.upd.valid = 1'b0;
+    t0_look(0, 64'h0000_0000_0009_9000, C_G0.ASID_WIDTH'(0), '0);
+    check(t_hit0[0] === 1'b0, "TLB0_FLUSH_BEATS_FILL");
+    s0drv.acc = 1'b0;
+    tick();
+
+    // T_G: HYP_EXT=1 instance — s+g translation, VMID discrimination
+    t1_fill(0, C_G1.VpnLen'(29'h0000_0080), C_G1.ASID_WIDTH'(5),
+            C_G1.VMID_WIDTH'(2), 1'b0, 44'h1234, 3'b111, 1'b0);
+    t1_look(0, 64'h0000_0000_0008_0123, C_G1.ASID_WIDTH'(5),
+            C_G1.VMID_WIDTH'(2), 1'b1, 1'b1, 1'b1);
+    check(t_hit1[0] === 1'b1, "TLB1_HIT");
+    check(t_ct1[0].ppn === 44'h1234, "TLB1_PPN");
+    s1drv.acc = 1'b0;
+    t1_look(0, 64'h0000_0000_0008_0123, C_G1.ASID_WIDTH'(5),
+            C_G1.VMID_WIDTH'(3), 1'b1, 1'b1, 1'b1);
+    check(t_hit1[0] === 1'b0, "TLB1_VMID_MISS");
+    s1drv.acc = 1'b0;
+    // same fill/lookup pair through the staged 16-entry instance
+    t1_fill(1, C_G1.VpnLen'(29'h0000_0090), C_G1.ASID_WIDTH'(5),
+            C_G1.VMID_WIDTH'(2), 1'b0, 44'h5678, 3'b111, 1'b0);
+    t1_look(1, 64'h0000_0000_0009_0123, C_G1.ASID_WIDTH'(5),
+            C_G1.VMID_WIDTH'(2), 1'b1, 1'b1, 1'b1);
+    check(t_hit1[1] === 1'b1, "TLB1_HIT_ST3");
+    check(t_ct1[1].ppn === 44'h5678, "TLB1_PPN_ST3");
+    s1drv.acc = 1'b0;
+    tick();
+
+    check(!miter_bad, "MMU_MITER_EQ_FINAL");
+
+    $display("HYP8_MMU_PASS checked=%0d miter=%0d", checked, miter_n);
+    $finish;
+  end
+endmodule
+
+// ---------------------------------------------------------------------------
+// tb_mmu_router_mut: bench-local copy of g6lc_tlb_miss_router with the
+// I-return arm suppressed (if (1'b0)) — the r45 negative control.  Must be
+// kept in sync with the helper; used only by tb_g6lc_hyp8_mmu.
+// ---------------------------------------------------------------------------
+module tb_mmu_router_mut #(
+    parameter config_pkg::g6lc_cfg_t G6LCCfg = config_pkg::g6lc_cfg_empty,
+    parameter type tlb_update_g6lc_t = logic,
+    parameter int unsigned HYP_EXT = 0
+) (
+    input logic clk_i,
+    input logic rst_ni,
+    input logic flush_i,
+    input logic flush_vvma_i,
+    input logic flush_gvma_i,
+    input logic s_st_enbl_i,
+    input logic g_st_enbl_i,
+    input logic v_i,
+    input logic s_ld_st_enbl_i,
+    input logic g_ld_st_enbl_i,
+    input logic ld_st_v_i,
+    input  logic                    itlb_access_i,
+    input  logic                    itlb_hit_i,
+    input  logic [G6LCCfg.VLEN-1:0] itlb_vaddr_i,
+    input  logic                    dtlb_access_i,
+    input  logic                    dtlb_hit_i,
+    input  logic [G6LCCfg.VLEN-1:0] dtlb_vaddr_i,
+    input  logic            shared_tlb_miss_i,
+    input  tlb_update_g6lc_t shared_tlb_update_i,
+    output tlb_update_g6lc_t itlb_update_o,
+    output tlb_update_g6lc_t dtlb_update_o,
+    output logic itlb_miss_o,
+    output logic dtlb_miss_o,
+    output logic                    flush_busy_o,
+    output logic                    shared_tlb_access_o,
+    output logic                    shared_tlb_hit_o,
+    output logic [G6LCCfg.VLEN-1:0] shared_tlb_vaddr_o,
+    output logic                    itlb_req_o
+);
+  localparam int unsigned IW = (G6LCCfg.SharedTlbDepth > 1) ? $clog2(G6LCCfg.SharedTlbDepth) : 1;
+  typedef enum logic [1:0] {
+    IDLE,
+    READ_SET,
+    APPLY_SET
+  } walk_e;
+  walk_e walk_q, walk_d;
+  logic [IW-1:0] idx_q, idx_d;
+  logic [1:0][2:0] stage_en;
+  logic allow_req, pick_i, pick_d;
+  logic ireq_q, dreq_q, owner_i_q;
+  logic [G6LCCfg.VLEN-1:0] va_q;
+
+  assign stage_en = {{v_i, g_st_enbl_i, s_st_enbl_i}, {ld_st_v_i, g_ld_st_enbl_i, s_ld_st_enbl_i}};
+  assign allow_req = (walk_q == IDLE) && !flush_i && !flush_vvma_i && !flush_gvma_i;
+  assign pick_i = allow_req && (|stage_en[1][HYP_EXT:0]) &&
+                  itlb_access_i && !itlb_hit_i && !dtlb_access_i;
+  assign pick_d = allow_req && (|stage_en[0][HYP_EXT:0]) &&
+                  dtlb_access_i && !dtlb_hit_i;
+
+  always_comb begin : p_walk
+    walk_d = walk_q;
+    idx_d  = idx_q;
+    unique case (walk_q)
+      IDLE: begin
+        if (flush_i || flush_vvma_i || flush_gvma_i) begin
+          walk_d = READ_SET;
+          idx_d  = '0;
+        end
+      end
+      READ_SET: walk_d = APPLY_SET;
+      APPLY_SET: begin
+        if (idx_q == IW'(G6LCCfg.SharedTlbDepth - 1)) begin
+          walk_d = IDLE;
+          idx_d  = '0;
+        end else begin
+          walk_d = READ_SET;
+          idx_d  = idx_q + 1'b1;
+        end
+      end
+      default: walk_d = IDLE;
+    endcase
+  end
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin : p_regs
+    if (!rst_ni) begin
+      walk_q <= IDLE; idx_q <= '0;
+      ireq_q <= 1'b0; dreq_q <= 1'b0; owner_i_q <= 1'b0; va_q <= '0;
+    end else begin
+      walk_q <= walk_d; idx_q <= idx_d;
+      ireq_q <= pick_i; dreq_q <= pick_d;
+      if (pick_i) begin
+        va_q <= itlb_vaddr_i; owner_i_q <= 1'b1;
+      end else if (pick_d) begin
+        va_q <= dtlb_vaddr_i; owner_i_q <= 1'b0;
+      end
+    end
+  end
+
+  assign shared_tlb_access_o = ireq_q | dreq_q;
+  assign shared_tlb_vaddr_o  = va_q;
+  assign itlb_req_o          = ireq_q;
+  assign itlb_miss_o         = pick_i & shared_tlb_miss_i;
+  assign dtlb_miss_o         = pick_d & shared_tlb_miss_i;
+  assign flush_busy_o        = 1'b0;
+  assign shared_tlb_hit_o    = shared_tlb_update_i.valid;
+
+  tlb_update_g6lc_t reply;
+  always_comb begin : p_reply
+    reply             = '0;
+    reply.valid       = 1'b1;
+    reply.vpn         = shared_tlb_update_i.vpn;
+    reply.is_page     = shared_tlb_update_i.is_page;
+    reply.content     = shared_tlb_update_i.content;
+    reply.g_content   = shared_tlb_update_i.g_content;
+    reply.v_st_enbl   = stage_en[owner_i_q][HYP_EXT*2:0];
+    reply.asid        = shared_tlb_update_i.asid;
+    reply.vmid        = shared_tlb_update_i.vmid;
+    reply.hart        = shared_tlb_update_i.hart;
+    reply.is_napot_64k = shared_tlb_update_i.is_napot_64k;
+    itlb_update_o = '0;
+    dtlb_update_o = '0;
+    if (shared_tlb_update_i.valid) begin
+      if (1'b0) begin                    // MUTANT: I-return route dropped
+        itlb_update_o = reply;
+      end else if (dreq_q) begin
+        dtlb_update_o = reply;
+      end
+    end
+  end
+endmodule
+`endif // G6LC_HYP8_MMU_LEAF

@@ -160,7 +160,7 @@ assign full  = (cnt_q == CntW'(Depth));
   logic [AddrWidth-LineShift-1:0] aw_line0, aw_line1;
   logic [7:0] aw_nlines;
   always_comb begin
-    aw_last_byte = aw_addr_i + ((AddrWidth'(aw_len_i) + 1) << aw_size_i) - 1;
+    aw_last_byte = aw_addr_i + ((AddrWidth'(aw_len_i) + 1) << aw_size_i) - 1;  // kept: OR-form was the rise
     aw_line0  = aw_addr_i[AddrWidth-1:LineShift];
     aw_line1  = aw_last_byte[AddrWidth-1:LineShift];
     aw_nlines = 8'(aw_line1 - aw_line0);
@@ -168,6 +168,9 @@ assign full  = (cnt_q == CntW'(Depth));
 
   // Tail coalescing: single-line AW onto a single-line tail that still awaits
   // at least one B (the tail has not been consumed by bp) and has count room.
+  // G2 (A134): the tail entry's line/nlines/nb are kept in registers written
+  // at push instead of a dynamic q_q[wr_q-1] array read; the nb increments
+  // and the bp-side decrement that target the tail are mirrored below.
   logic            tail_same;
   logic [PtrW-1:0] tail_idx;
   assign tail_idx  = wr_q - PtrW'(1);
@@ -196,6 +199,26 @@ assign full  = (cnt_q == CntW'(Depth));
 `else
   assign landed_avail = (cnt_q != land_q);           // entries between rd and bp
 `endif
+
+  // pragma translate_off
+  // G2 reference: the dynamic array read the tail registers replaced.
+  logic tail_same_ref;
+  assign tail_same_ref = !none_pending_b && (aw_nlines == 8'd0) &&
+      (q_q[tail_idx].nlines == 8'd0) && (q_q[tail_idx].line == aw_line0) &&
+      (q_q[tail_idx].nb != '1);
+  int unsigned g6lc_ai_inval_tail_eq;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) g6lc_ai_inval_tail_eq <= 0;
+    else begin
+      g6lc_ai_inval_tail_eq <= g6lc_ai_inval_tail_eq + 1;
+      assert (tail_same == tail_same_ref)
+        else $error("g6lc_ai_inval_queue: tail_eq mismatch %b != %b",
+                    tail_same, tail_same_ref);
+    end
+  end
+  final $display("[equiv] g6lc_ai_inval_queue tail_eq: checked=%0d",
+                 g6lc_ai_inval_tail_eq);
+  // pragma translate_on
   assign take_head    = !walk_v_q && landed_avail;
 
   assign inval_valid_o = walk_v_q && !inval_out_q;

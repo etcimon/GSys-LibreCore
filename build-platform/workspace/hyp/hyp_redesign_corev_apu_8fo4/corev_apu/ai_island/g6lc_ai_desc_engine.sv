@@ -110,10 +110,21 @@ module g6lc_ai_desc_engine
     ST_CHK_DONE   = 4'd6,
     ST_GEMM       = 4'd7,
     ST_WR_DONE    = 4'd8,
+    ST_SPAN       = 4'd10,
     ST_COMPLETE   = 4'd9
   } state_e;
 
-  state_e state_q, state_d;
+  state_e state_q, state_d, prev_state_q;
+  // r7 R4: ST_SPAN computes the descriptor's three spans through
+  // g6lc_ai_mul_seq instead of the in-check combinational functions.
+  logic        sp_kick, spa_seen_q, spb_seen_q, spc_seen_q;
+  logic        spa_done, spb_done, spc_done;
+  logic [95:0] spa_prod, spb_prod;
+  logic [63:0] spc_prod;
+  logic [63:0] span_a_q, span_b_q, span_c_q;
+  logic [63:0] sp_tail_b, sp_stride_a, sp_stride_b;
+  logic [63:0] sp_prod_a, sp_prod_b;
+  logic [2:0]  sp_fmt;
   desc_t  desc_q, desc_d;
   logic [QidWidth-1:0] qid_q, qid_d;
   logic [31:0] ticket_q, ticket_d;
@@ -181,13 +192,20 @@ module g6lc_ai_desc_engine
 // end
 // ----------------------------------------------------------------
   // END sv-timing auto-correct (balance_mux rewrite)
-assign busy_o         = (state_q != ST_IDLE);
+  // r7 R1: job-event outputs are flops at the module boundary; pulses
+  // become one-cycle-delayed pulses; busy/last_status register the next
+  // state. submit_ready stays combinational -- the island submit arm
+  // samples it in the same edge that drives submit_valid.
+  logic        busy_q, wr_start_q, gemm_start_q;
+  logic [15:0] last_status_o_q;
+  desc_t       gemm_desc_q;
+  assign busy_o         = busy_q;
   assign submit_ready_o = (state_q == ST_IDLE) && enable_i;
   assign done_valid_o   = done_valid_q;
   assign done_ticket_o  = ticket_q;
   assign done_status_o  = status_q;
   assign done_irq_o     = done_valid_q && irq_q;
-  assign last_status_o  = last_status_q;
+  assign last_status_o  = last_status_o_q;
 
   // Programming is external-only for this unit
   assign prog_we_o    = prog_ext_we_i;
@@ -198,23 +216,114 @@ assign busy_o         = (state_q != ST_IDLE);
 
   // Completion word write (only asserted in ST_WR_DONE)
   logic wr_start_n;
-  assign wr_start_o = wr_start_n;
+  assign wr_start_o = wr_start_q;
   assign wr_addr_o  = AddrWidth'(desc_q.ptr_done);
   assign wr_data_o  = make_completion(ticket_q, status_q);
 
-  // GEMM params from latched descriptor
+  // GEMM params from latched descriptor -- captured with the start pulse.
   logic gemm_start_n;
-  assign gemm_start_o = gemm_start_n;
-  assign gemm_m_o     = desc_q.m;
-  assign gemm_n_o     = desc_q.n;
-  assign gemm_k_o     = desc_q.k;
-  assign gemm_lda_o   = desc_q.ld_ab[15:0];
-  assign gemm_ldb_o   = desc_q.ld_ab[31:16];
-  assign gemm_numfmt_o= desc_compute_numfmt(desc_q);
-  assign gemm_ptr_a_o = AddrWidth'(desc_q.ptr_a);
-  assign gemm_ptr_b_o = AddrWidth'(desc_q.ptr_b);
-  assign gemm_ptr_c_o = AddrWidth'(desc_q.ptr_c);
-  assign gemm_flags_o = desc_q.flags;
+  assign gemm_start_o = gemm_start_q;
+  assign gemm_m_o     = gemm_desc_q.m;
+  assign gemm_n_o     = gemm_desc_q.n;
+  assign gemm_k_o     = gemm_desc_q.k;
+  assign gemm_lda_o   = gemm_desc_q.ld_ab[15:0];
+  assign gemm_ldb_o   = gemm_desc_q.ld_ab[31:16];
+  assign gemm_numfmt_o= desc_compute_numfmt(gemm_desc_q);
+  assign gemm_ptr_a_o = AddrWidth'(gemm_desc_q.ptr_a);
+  assign gemm_ptr_b_o = AddrWidth'(gemm_desc_q.ptr_b);
+  assign gemm_ptr_c_o = AddrWidth'(gemm_desc_q.ptr_c);
+  assign gemm_flags_o = gemm_desc_q.flags;
+
+  // r7 R1 output registers: one always_ff, own register group.
+  // r7 R4: ST_SPAN machinery -- prev_state for the kick edge, sticky
+  // done flags (cleared on IDLE), span registers latched at each mul's
+  // done with the functions' saturation arithmetic.
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      prev_state_q <= ST_IDLE;
+      spa_seen_q   <= 1'b0; spb_seen_q <= 1'b0; spc_seen_q <= 1'b0;
+      span_a_q     <= '0; span_b_q <= '0; span_c_q <= '0;
+    end else begin
+      prev_state_q <= state_q;
+      if (state_q == ST_IDLE) begin
+        spa_seen_q <= 1'b0; spb_seen_q <= 1'b0; spc_seen_q <= 1'b0;
+      end else begin
+        if (spa_done) spa_seen_q <= 1'b1;
+        if (spb_done) spb_seen_q <= 1'b1;
+        if (spc_done) spc_seen_q <= 1'b1;
+      end
+      // r7 R4: replicate the functions' degenerate early returns --
+      // rows==0 (operand) and rows==0||cols==0 (result) return 1; the
+      // (rows-1) mul operand underflows to all-ones without this.
+      if (spa_done)
+        span_a_q <= (desc_q.m == 0)                             ? 64'd1
+                  : (|spa_prod[95:64])                          ? {64{1'b1}}
+                  : (sp_tail_b > ({64{1'b1}} - sp_prod_a))      ? {64{1'b1}}
+                  : ((sp_prod_a + sp_tail_b) == '0)             ? 64'd1
+                  :  sp_prod_a + sp_tail_b;
+      if (spb_done)
+        span_b_q <= (desc_q.n == 0)                             ? 64'd1
+                  : (|spb_prod[95:64])                          ? {64{1'b1}}
+                  : (sp_tail_b > ({64{1'b1}} - sp_prod_b))      ? {64{1'b1}}
+                  : ((sp_prod_b + sp_tail_b) == '0)             ? 64'd1
+                  :  sp_prod_b + sp_tail_b;
+      if (spc_done)
+        span_c_q <= (desc_q.m == 0 || desc_q.n == 0)            ? 64'd1
+                  : (spc_prod > ({64{1'b1}} >> 2))              ? {64{1'b1}}
+                  : spc_prod << 2;
+    end
+  end
+
+  // Operand composition (ai_row_bytes = elems << elem shift): strides at
+  // kick time from desc_q; tails are the k-element row bytes shared by A/B.
+  assign sp_fmt      = desc_compute_numfmt(desc_q);
+  assign sp_stride_a = 64'(g6lc_ai_island_cfg_pkg::ai_row_bytes(
+      sp_fmt, 32'(desc_q.ld_ab[15:0])));
+  assign sp_stride_b = 64'(g6lc_ai_island_cfg_pkg::ai_row_bytes(
+      sp_fmt, 32'(desc_q.ld_ab[31:16])));
+  assign sp_tail_b   = 64'(g6lc_ai_island_cfg_pkg::ai_row_bytes(
+      sp_fmt, desc_q.k));
+  assign sp_prod_a   = spa_prod[63:0];
+  assign sp_prod_b   = spb_prod[63:0];
+  assign sp_kick     = (state_q == ST_SPAN) && (prev_state_q != ST_SPAN);
+
+  g6lc_ai_mul_seq #(.WA(32), .WB(64)) i_span_a_mul (
+      .clk_i, .rst_ni,
+      .start_i   (sp_kick),
+      .a_i       (32'(desc_q.m) - 32'd1),
+      .b_i       (sp_stride_a),
+      .done_o    (spa_done),
+      .product_o (spa_prod));
+  g6lc_ai_mul_seq #(.WA(32), .WB(64)) i_span_b_mul (
+      .clk_i, .rst_ni,
+      .start_i   (sp_kick),
+      .a_i       (32'(desc_q.n) - 32'd1),
+      .b_i       (sp_stride_b),
+      .done_o    (spb_done),
+      .product_o (spb_prod));
+  g6lc_ai_mul_seq #(.WA(32), .WB(32)) i_span_c_mul (
+      .clk_i, .rst_ni,
+      .start_i   (sp_kick),
+      .a_i       (desc_q.m),
+      .b_i       (desc_q.n),
+      .done_o    (spc_done),
+      .product_o (spc_prod));
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      busy_q           <= 1'b0;
+      wr_start_q       <= 1'b0;
+      gemm_start_q     <= 1'b0;
+      last_status_o_q  <= '0;
+      gemm_desc_q      <= '0;
+    end else begin
+      busy_q           <= (state_d != ST_IDLE);
+      wr_start_q       <= wr_start_n;
+      gemm_start_q     <= gemm_start_n;
+      last_status_o_q  <= last_status_q;
+      if (gemm_start_n) gemm_desc_q <= desc_q;
+    end
+  end
 
   // After checks (and optional GEMM): completion DMA or done pulse
   function automatic logic want_wr_cpl(input desc_t d, input logic wr_en);
@@ -246,16 +355,13 @@ assign busy_o         = (state_q != ST_IDLE);
             // sv-timing: (RHS rewrite continuation removed) state_q == ST_CHK_A ? desc_q.ptr_a : desc_q.ptr_b, BeatBytes);
         check_len_o = AddrWidth'(g6lc_ai_island_cfg_pkg::ai_bus_len(
             state_q == ST_CHK_A ? desc_q.ptr_a : desc_q.ptr_b,
-            g6lc_ai_island_cfg_pkg::ai_operand_span(
-                state_q == ST_CHK_A ? desc_q.m : desc_q.n,
-                state_q == ST_CHK_A ? 32'(desc_q.ld_ab[15:0]) : 32'(desc_q.ld_ab[31:16]),
-                desc_q.k, desc_compute_numfmt(desc_q)), BeatBytes));
+            state_q == ST_CHK_A ? span_a_q : span_b_q, BeatBytes));
         check_need_r_o = 1'b1;
       end
       ST_CHK_C: begin
         check_req_o = 1'b1;
         check_addr_o = desc_q.ptr_c;
-        check_len_o = AddrWidth'(g6lc_ai_island_cfg_pkg::ai_result_span(desc_q.m, desc_q.n));
+        check_len_o = AddrWidth'(span_c_q);
         check_need_w_o = 1'b1;
       end
       ST_CHK_SCALE: begin
@@ -339,8 +445,12 @@ assign busy_o         = (state_q != ST_IDLE);
           state_d  = ST_COMPLETE;
         end else begin
           // Priority is clamped by software/S-mode policy; engine accepts 0..15.
-          state_d = ST_CHK_A;
+          state_d = ST_SPAN;
         end
+      end
+
+      ST_SPAN: begin
+        if (spa_seen_q && spb_seen_q && spc_seen_q) state_d = ST_CHK_A;
       end
 
       ST_CHK_A: begin
@@ -379,6 +489,7 @@ assign busy_o         = (state_q != ST_IDLE);
           end else state_d = ST_CHK_DONE;
         end
       end
+
 
       ST_CHK_DONE: begin
         // Null ptr_done: no completion word; else check writable before execute
@@ -450,7 +561,48 @@ assign busy_o         = (state_q != ST_IDLE);
     if (testmode_i && state_q == ST_IDLE) begin
       state_d = ST_IDLE;
     end
+
   end
+
+  // pragma translate_off
+  // r7 R4: the registered span must equal the function evaluated on the
+  // same descriptor the checker sees -- per check state, with a counter.
+  int unsigned g6lc_ai_span_eq;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) g6lc_ai_span_eq <= 0;
+    else if (check_req_o) begin
+      g6lc_ai_span_eq <= g6lc_ai_span_eq + 1;
+      if (state_q == ST_CHK_A)
+        assert (check_len_o == AddrWidth'(g6lc_ai_island_cfg_pkg::ai_bus_len(
+            desc_q.ptr_a,
+            g6lc_ai_island_cfg_pkg::ai_operand_span(
+                desc_q.m, 32'(desc_q.ld_ab[15:0]), desc_q.k,
+                desc_compute_numfmt(desc_q)), BeatBytes)))
+          else $error("desc_engine: span_a mismatch span=%0d fn=%0d",
+                      span_a_q, g6lc_ai_island_cfg_pkg::ai_operand_span(
+                          desc_q.m, 32'(desc_q.ld_ab[15:0]), desc_q.k,
+                          desc_compute_numfmt(desc_q)));
+      if (state_q == ST_CHK_B)
+        assert (check_len_o == AddrWidth'(g6lc_ai_island_cfg_pkg::ai_bus_len(
+            desc_q.ptr_b,
+            g6lc_ai_island_cfg_pkg::ai_operand_span(
+                desc_q.n, 32'(desc_q.ld_ab[31:16]), desc_q.k,
+                desc_compute_numfmt(desc_q)), BeatBytes)))
+          else $error("desc_engine: span_b mismatch span=%0d fn=%0d",
+                      span_b_q, g6lc_ai_island_cfg_pkg::ai_operand_span(
+                          desc_q.n, 32'(desc_q.ld_ab[31:16]), desc_q.k,
+                          desc_compute_numfmt(desc_q)));
+      if (state_q == ST_CHK_C)
+        assert (check_len_o == AddrWidth'(
+            g6lc_ai_island_cfg_pkg::ai_result_span(desc_q.m, desc_q.n)))
+          else $error("desc_engine: span_c mismatch span=%0d fn=%0d",
+                      span_c_q,
+                      g6lc_ai_island_cfg_pkg::ai_result_span(desc_q.m, desc_q.n));
+    end
+  end
+  final $display("[equiv] g6lc_ai_desc_engine span_eq: checked=%0d",
+                 g6lc_ai_span_eq);
+  // pragma translate_on
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin

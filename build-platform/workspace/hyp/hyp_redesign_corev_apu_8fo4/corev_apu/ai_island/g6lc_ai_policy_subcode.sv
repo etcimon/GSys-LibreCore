@@ -308,8 +308,18 @@ module g6lc_ai_policy_subcode
 // end
 // ----------------------------------------------------------------
   // END sv-timing auto-correct (balance_mux rewrite)
-assign ready_o = enable_i && !flush_i && !cancel_i && state_q == IDLE;
-    assign busy_o = state_q != IDLE;
+    // r7 R1: job-event outputs registered (one-cycle-delayed state).
+    logic ready_q, busy_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        ready_q <= 1'b0; busy_q <= 1'b0;
+      end else begin
+        ready_q <= enable_i && !flush_i && !cancel_i && state_q == IDLE;
+        busy_q  <= state_q != IDLE;
+      end
+    end
+    assign ready_o = ready_q;
+    assign busy_o  = busy_q;
     always_comb begin
       case (code_i)
         POLICY_DECODE: input_group = 2'd1;
@@ -333,6 +343,9 @@ assign ready_o = enable_i && !flush_i && !cancel_i && state_q == IDLE;
         (m_i & ((16'd1 << baseline_i.rows_log2) - 16'd1)) == 0 &&
         (n_i & ((16'd1 << baseline_i.cols_log2) - 16'd1)) == 0;
 
+    // r8 P6: one always_comb per output family -- the single block
+    // composed candidate/cost/winner as a serial makespan (~96.4).
+    // Family 1: candidate terms (r/c/d/ok/candidate_d).
     always_comb begin
       group_shape = GroupShapeLog2[int'(group_q)*6 +: 6];
       r = '0;
@@ -361,6 +374,10 @@ assign ready_o = enable_i && !flush_i && !cancel_i && state_q == IDLE;
         candidate_d.apply = r != 0 || c != 0;
         candidate_d.gain_16ths = policy_reuse_gain(r, c);
       end
+    end
+
+    // Family 2: cost/service terms (reads family-1 leaf wires r/c/d).
+    always_comb begin
       mgroups = m_q >> r;
       ngroups = n_q >> c;
       depth = 10'd1 << d;
@@ -374,6 +391,10 @@ assign ready_o = enable_i && !flush_i && !cancel_i && state_q == IDLE;
       if (full_service < {12'd0, step_cycles}) full_service = {12'd0, step_cycles};
       if (tail_service < {12'd0, step_cycles}) tail_service = {12'd0, step_cycles};
       if (tail == 0) tail_service = '0;
+    end
+
+    // Family 3: better/winner/choose (reads registered cost/candidate_ok).
+    always_comb begin
       better = candidate_ok_q && cost_q < best_cost_q;
       winner = better ? candidate_q : best_q;
       winner_index = better ? index_q : best_index_q;

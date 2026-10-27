@@ -126,6 +126,7 @@ package g6lc_config_pkg;
       TechnoCut: bit'(0),
       SuperscalarEn: bit'(1),
       NrIssuePorts: unsigned'(2),
+      FetchWidth: unsigned'(0),
       ALUBypass: bit'(0),
       NrCommitPorts: unsigned'(2),
       AxiAddrWidth: unsigned'(G6LCConfigAxiAddrWidth),

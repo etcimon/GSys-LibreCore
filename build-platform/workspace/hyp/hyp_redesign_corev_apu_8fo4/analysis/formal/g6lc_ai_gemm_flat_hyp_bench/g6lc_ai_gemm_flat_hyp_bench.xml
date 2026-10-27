@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+<testsuite timestamp="2026-10-26T20:18:12" hostname="etienne-lto" package="g6lc_ai_gemm_flat_hyp" id="0" name="bench" tests="10" errors="0" failures="0" time="16" skipped="0">
+<properties>
+<property name="os" value="Linux"/>
+<property name="expect" value="PASS"/>
+<property name="status" value="PASS"/>
+</properties>
+<testcase classname="bench" name="build execution" time="0">
+</testcase>
+<testcase classname="bench" name="Property ASSERT in g6lc_ai_gemm_flat_props at g6lc_ai_gemm_flat_props.sv:79.15-79.70" time="0" type="ASSERT" location="g6lc_ai_gemm_flat_props.sv:79.15-79.70" id="_witness_.check_137">
+</testcase>
+<testcase classname="bench" name="Property ASSERT in g6lc_ai_gemm_flat_props at g6lc_ai_gemm_flat_props.sv:83.53-83.85" time="0" type="ASSERT" location="g6lc_ai_gemm_flat_props.sv:83.53-83.85" id="_witness_.check_146">
+</testcase>
+<testcase classname="bench" name="Property ASSERT in g6lc_ai_gemm_flat_props at g6lc_ai_gemm_flat_props.sv:86.15-86.45" time="0" type="ASSERT" location="g6lc_ai_gemm_flat_props.sv:86.15-86.45" id="_witness_.check_150">
+</testcase>
+<testcase classname="bench" name="Property ASSERT in g6lc_ai_gemm_flat_props at g6lc_ai_gemm_flat_props.sv:90.30-90.106" time="0" type="ASSERT" location="g6lc_ai_gemm_flat_props.sv:90.30-90.106" id="_witness_.check_155">
+</testcase>
+<testcase classname="bench" name="Property ASSERT in g6lc_ai_gemm_flat_props at g6lc_ai_gemm_flat_props.sv:95.5-95.46" time="0" type="ASSERT" location="g6lc_ai_gemm_flat_props.sv:95.5-95.46" id="_witness_.check_164">
+</testcase>
+<testcase classname="bench" name="Property ASSERT in g6lc_ai_gemm_flat_props at g6lc_ai_gemm_flat_props.sv:97.7-97.101" time="0" type="ASSERT" location="g6lc_ai_gemm_flat_props.sv:97.7-97.101" id="_witness_.check_172">
+</testcase>
+<testcase classname="bench" name="Property ASSERT in g6lc_ai_gemm_flat_props at g6lc_ai_gemm_flat_props.sv:101.28-101.110" time="0" type="ASSERT" location="g6lc_ai_gemm_flat_props.sv:101.28-101.110" id="_witness_.check_183">
+</testcase>
+<testcase classname="bench" name="Property ASSERT in g6lc_ai_gemm_flat_props at g6lc_ai_gemm_flat_props.sv:108.9-108.104" time="0" type="ASSERT" location="g6lc_ai_gemm_flat_props.sv:108.9-108.104" id="_witness_.check_192">
+</testcase>
+<testcase classname="bench" name="Property ASSERT in g6lc_ai_gemm_flat_props at g6lc_ai_gemm_flat_props.sv:108.9-108.104" time="0" type="ASSERT" location="g6lc_ai_gemm_flat_props.sv:108.9-108.104" id="_witness_.check_197">
+</testcase>
+<testcase classname="bench" name="Property ASSERT in g6lc_ai_gemm_flat_props at g6lc_ai_gemm_flat_props.sv:109.7-109.90" time="0" type="ASSERT" location="g6lc_ai_gemm_flat_props.sv:109.7-109.90" id="_witness_.check_202">
+</testcase>
+<system-out>SBY 20:18:03 [g6lc_ai_gemm_flat_hyp_bench] Removing directory '/mnt/e/cva6/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/analysis/formal/g6lc_ai_gemm_flat_hyp_bench'.
+SBY 20:18:03 [g6lc_ai_gemm_flat_hyp_bench] Copy '/mnt/e/cva6/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/analysis/formal/../../corev_apu/include/g6lc_ai_island_cfg_pkg.sv' to '/mnt/e/cva6/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/analysis/formal/g6lc_ai_gemm_flat_hyp_bench/src/g6lc_ai_island_cfg_pkg.sv'.
+SBY 20:18:03 [g6lc_ai_gemm_flat_hyp_bench] Copy '/mnt/e/cva6/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/analysis/formal/g6lc_ai_gemm_flat_props.sv' to '/mnt/e/cva6/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/analysis/formal/g6lc_ai_gemm_flat_hyp_bench/src/g6lc_ai_gemm_flat_props.sv'.
+SBY 20:18:03 [g6lc_ai_gemm_flat_hyp_bench] engine_0: abc pdr
+SBY 20:18:03 [g6lc_ai_gemm_flat_hyp_bench] engine_1: smtbmc z3
+SBY 20:18:03 [g6lc_ai_gemm_flat_hyp_bench] base: starting process &quot;cd g6lc_ai_gemm_flat_hyp_bench/src; yosys -ql ../model/design.log ../model/design.ys&quot;
+SBY 20:18:03 [g6lc_ai_gemm_flat_hyp_bench] base: finished (returncode=0)
+SBY 20:18:04 [g6lc_ai_gemm_flat_hyp_bench] prep: starting process &quot;cd g6lc_ai_gemm_flat_hyp_bench/model; yosys -ql design_prep.log design_prep.ys&quot;
+SBY 20:18:04 [g6lc_ai_gemm_flat_hyp_bench] prep: finished (returncode=0)
+SBY 20:18:04 [g6lc_ai_gemm_flat_hyp_bench] aig: starting process &quot;cd g6lc_ai_gemm_flat_hyp_bench/model; yosys -ql design_aiger.log design_aiger.ys&quot;
+SBY 20:18:04 [g6lc_ai_gemm_flat_hyp_bench] smt2: starting process &quot;cd g6lc_ai_gemm_flat_hyp_bench/model; yosys -ql design_smt2.log design_smt2.ys&quot;
+SBY 20:18:04 [g6lc_ai_gemm_flat_hyp_bench] smt2: finished (returncode=0)
+SBY 20:18:04 [g6lc_ai_gemm_flat_hyp_bench] engine_1.basecase: starting process &quot;cd g6lc_ai_gemm_flat_hyp_bench; yosys-smtbmc -s z3 --presat --noprogress -t 2  --append 0 --dump-vcd engine_1/trace.vcd --dump-yw engine_1/trace.yw --dump-vlogtb engine_1/trace_tb.v --dump-smtc engine_1/trace.smtc model/design_smt2.smt2&quot;
+SBY 20:18:04 [g6lc_ai_gemm_flat_hyp_bench] engine_1.induction: starting process &quot;cd g6lc_ai_gemm_flat_hyp_bench; yosys-smtbmc -s z3 --presat -i --noprogress -t 2  --append 0 --dump-vcd engine_1/trace_induct.vcd --dump-yw engine_1/trace_induct.yw --dump-vlogtb engine_1/trace_induct_tb.v --dump-smtc engine_1/trace_induct.smtc model/design_smt2.smt2&quot;
+SBY 20:18:04 [g6lc_ai_gemm_flat_hyp_bench] engine_1.basecase: ##   0:00:00  Solver: z3
+SBY 20:18:04 [g6lc_ai_gemm_flat_hyp_bench] engine_1.basecase: ##   0:00:00  Checking assumptions in step 0..
+SBY 20:18:04 [g6lc_ai_gemm_flat_hyp_bench] engine_1.induction: ##   0:00:00  Solver: z3
+SBY 20:18:04 [g6lc_ai_gemm_flat_hyp_bench] engine_1.induction: ##   0:00:00  Trying induction in step 2..
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\rows [11] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\row [0] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\nb [4] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\nb [5] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\nb [6] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\nb [7] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\lane0 [0] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [0] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [1] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [2] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [3] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [4] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [5] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [6] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [7] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [8] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [9] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [10] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [11] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [12] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [13] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [14] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [15] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [16] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [17] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\addr [0] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\addr [1] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\addr [2] like $anyseq.
+SBY 20:18:09 [g6lc_ai_gemm_flat_hyp_bench] aig: Warning: Treating a total of 28 undriven bits in g6lc_ai_gemm_flat_props like $anyseq.
+SBY 20:18:11 [g6lc_ai_gemm_flat_hyp_bench] aig: finished (returncode=0)
+SBY 20:18:11 [g6lc_ai_gemm_flat_hyp_bench] engine_0: starting process &quot;cd g6lc_ai_gemm_flat_hyp_bench; yosys-abc -c 'read_aiger model/design_aiger.aig; fold; strash; pdr -v -l; write_cex -a engine_0/trace.aiw'&quot;
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: ======== ABC command line &quot;read_aiger model/design_aiger.aig; fold; strash; pdr -v -l; write_cex -a engine_0/trace.aiw&quot;
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: Warning: The last 9 outputs are interpreted as constraints.
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: Warning: The network is combinational.
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: VarMax = 300. FrameMax = 10000. QueMax = 0. TimeMax = 279. MonoCNF = no. SkipGen = no. SolveAll = no.
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: Proved output 7 in frame 0 (trivial).
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: Frame Clauses                                                     Max Queue Flops Time
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: 1 : 0 0                                                                 0     0      0.40 sec  T/O =  0  PRV =  1
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: 2 : 0 0 0                                                               0     0      0.40 sec  T/O =  0  PRV =  1
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: Proved output 0 in frame -1817469664 (converged).
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: Proved output 1 in frame -1817469660 (converged).
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: Proved output 2 in frame -1817469656 (converged).
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: Proved output 3 in frame -1817469652 (converged).
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: Proved output 4 in frame -1817469648 (converged).
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: Proved output 5 in frame -1817469644 (converged).
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: Proved output 6 in frame -1817469640 (converged).
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: Proved output 8 in frame -1817469632 (converged).
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: Block =    0  Oblig =     0  Clause =     0  Call =    16 (sat=0.0%)  Cex =   0  Start =   0
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: SAT solving =     0.28 sec ( 66.86 %)
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: unsat     =     0.28 sec ( 66.86 %)
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: sat       =     0.00 sec (  0.00 %)
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: Generalize  =     0.00 sec (  0.00 %)
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: Push clause =     0.00 sec (  0.00 %)
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: Ternary sim =     0.00 sec (  0.00 %)
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: Containment =     0.00 sec (  0.00 %)
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: CNF compute =     0.00 sec (  0.00 %)
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: Refinement  =     0.00 sec (  0.00 %)
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: TOTAL       =     0.42 sec (100.00 %)
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: Property proved.  Time =     0.44 sec
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: Counter-example is not available.
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: finished (returncode=0)
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_0: Status returned by engine: PASS
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_1.basecase: terminating process
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] engine_1.induction: terminating process
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] summary: Elapsed clock time [H:MM:SS (secs)]: 0:00:09 (9)
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] summary: Elapsed process time [H:MM:SS (secs)]: 0:00:16 (16)
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] summary: engine_0 (abc pdr) returned PASS
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] summary: engine_0 did not produce any traces
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] summary: engine_1 (smtbmc z3) did not return a status
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] summary: engine_1 did not produce any traces
+SBY 20:18:12 [g6lc_ai_gemm_flat_hyp_bench] DONE (PASS, rc=0)
+</system-out>
+<system-err>
+</system-err>
+</testsuite>
+</testsuites>

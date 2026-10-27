@@ -182,11 +182,183 @@ assign accept = valid_i && ready_o;
     );
 
     assign numfmt_o = metadata_q.numfmt;
-    assign topology_o = policy_topology(code_o, metadata_q.numfmt,
-        metadata_q.m, metadata_q.n, metadata_q.k, metadata_q.balance,
-        ReadBytesPerCycle, MinGain16ths, FormatSlotsLog2);
+    // r7 R1 / F1: the topology evaluator registers its result one cycle
+    // after code_o/metadata_q settle; both inputs are already flops, so
+    // topology_q is a clean flop-to-flop hop at the module boundary.
+    // r8 A134: policy_topology as a multi-cycle evaluator. The one-shot
+    // function's serial arithmetic (aligned_log2 x4 + reuse_gain x2 +
+    // balanced-row/col chain + base_step mul) is split over three stages
+    // on registered inputs; inputs (code_o, metadata_q) are already flops
+    // and stable across a job, so the stages run every cycle.
+    policy_topology_t topology_q;
+    // Stage 1: validity + slot/format selects + the four aligned_log2 +
+    // active_k -- each leaf in its own comb so no ff composes serial deps.
+    logic        t1_known_q, t1_valid_q;
+    logic [2:0]  t1_slots_q, t1_elem_bits_q, t1_fmt_q;
+    logic [2:0]  t1_row_log_q, t1_col_log_q, t1_row_max_q, t1_col_max_q;
+    logic [3:0]  t1_gain_q;
+    logic [15:0] t1_m_q, t1_n_q, t1_k_q, t1_active_k_q;
+    logic [1:0]  t1_balance_q;
+    policy_code_t t1_code_q;
+    logic [2:0]  s1_row_cap_w, s1_col_cap_w;
+    logic [2:0]  s1_row_log_w, s1_col_log_w, s1_row_max_w, s1_col_max_w;
+    logic [3:0]  s1_gain_w;
+    logic [2:0]  s1_slots_w;
+
+    always_comb begin
+      s1_row_cap_w = '0; s1_col_cap_w = '0;
+      unique case (code_o)
+        POLICY_BULK, POLICY_ATTENTION, POLICY_SPARSE: begin
+          s1_row_cap_w = 3'd2; s1_col_cap_w = 3'd2;
+        end
+        POLICY_WIDE:  begin s1_row_cap_w = 3'd1; s1_col_cap_w = 3'd3; end
+        POLICY_TALL:  begin s1_row_cap_w = 3'd3; s1_col_cap_w = 3'd1; end
+        POLICY_DECODE: s1_col_cap_w = 3'd4;
+        POLICY_ROUTED: begin s1_row_cap_w = 3'd1; s1_col_cap_w = 3'd2; end
+        default: ;
+      endcase
+    end
+    always_comb s1_row_log_w = policy_aligned_log2(metadata_q.m, s1_row_cap_w);
+    always_comb s1_col_log_w = policy_aligned_log2(metadata_q.n, s1_col_cap_w);
+    always_comb s1_row_max_w = policy_aligned_log2(metadata_q.m, 3'd4);
+    always_comb s1_col_max_w = policy_aligned_log2(metadata_q.n, 3'd4);
+    always_comb s1_gain_w    = policy_reuse_gain(s1_row_log_w, s1_col_log_w);
+    always_comb s1_slots_w   = FormatSlotsLog2[metadata_q.numfmt*4 +: 4];
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        t1_known_q <= 1'b0; t1_valid_q <= 1'b0;
+        t1_slots_q <= '0; t1_elem_bits_q <= '0; t1_fmt_q <= '0;
+        t1_row_log_q <= '0; t1_col_log_q <= '0; t1_row_max_q <= '0; t1_col_max_q <= '0;
+        t1_gain_q <= '0;
+        t1_m_q <= '0; t1_n_q <= '0; t1_k_q <= '0; t1_active_k_q <= '0;
+        t1_balance_q <= '0; t1_code_q <= policy_code_t'('0);
+      end else begin
+        t1_fmt_q       <= metadata_q.numfmt;
+        t1_slots_q     <= s1_slots_w;
+        t1_elem_bits_q <= policy_element_bits_log2(metadata_q.numfmt);
+        t1_known_q     <= policy_format_known(metadata_q.numfmt);
+        t1_valid_q     <= policy_format_known(metadata_q.numfmt) &&
+            metadata_q.m != 16'd0 && metadata_q.n != 16'd0 && metadata_q.k != 16'd0 &&
+            s1_slots_w != 4'd0 && s1_slots_w <= 4'd9;
+        t1_row_log_q   <= s1_row_log_w;
+        t1_col_log_q   <= s1_col_log_w;
+        t1_row_max_q   <= s1_row_max_w;
+        t1_col_max_q   <= s1_col_max_w;
+        t1_gain_q      <= s1_gain_w;
+        t1_m_q         <= metadata_q.m;
+        t1_n_q         <= metadata_q.n;
+        t1_k_q         <= metadata_q.k;
+        t1_active_k_q  <= (metadata_q.k < (16'd1 << s1_slots_w))
+                          ? metadata_q.k : (16'd1 << s1_slots_w);
+        t1_balance_q   <= metadata_q.balance;
+        t1_code_q      <= code_o;
+      end
+    end
+    // Stage 2: slot clamps + group/balanced evaluation -- leaf wires in
+    // combs, thin ff for the register group.
+    logic [2:0]  t2_slots_q, t2_fmt_q, t2_elem_bits_q;
+    logic        t2_known_q, t2_valid_q;
+    logic [2:0]  t2_row_log_q, t2_col_log_q;
+    logic [3:0]  t2_gain_q;
+    logic [15:0] t2_m_q, t2_n_q, t2_k_q, t2_active_k_q;
+    logic [1:0]  t2_balance_q;
+    policy_code_t t2_code_q;
+    logic [2:0]  s2_row_log_w, s2_col_log_w;
+    logic [3:0]  s2_gain_w;
+
+    always_comb begin
+      automatic logic [2:0] row_log, col_log, balanced_row, balanced_col;
+      automatic logic [3:0] group_log, gain, balanced_gain;
+      row_log = t1_row_log_q; col_log = t1_col_log_q;
+      if (int'(row_log) > int'(t1_slots_q)) row_log = 3'(t1_slots_q);
+      if (int'(row_log) + int'(col_log) > int'(t1_slots_q))
+        col_log = 3'(t1_slots_q - {1'b0, row_log});
+      gain = policy_reuse_gain(row_log, col_log);
+      group_log = {1'b0, t1_row_max_q} + {1'b0, t1_col_max_q};
+      if (group_log > 4'd4) group_log = 4'd4;
+      if (group_log > t1_slots_q) group_log = t1_slots_q;
+      balanced_row = 3'(group_log >> 1);
+      if (balanced_row > t1_row_max_q) balanced_row = t1_row_max_q;
+      balanced_col = 3'(group_log - {1'b0, balanced_row});
+      if (balanced_col > t1_col_max_q) begin
+        balanced_col = t1_col_max_q;
+        balanced_row = 3'(group_log - {1'b0, balanced_col});
+      end
+      balanced_gain = policy_reuse_gain(balanced_row, balanced_col);
+      if (balanced_gain > gain || (balanced_gain == gain &&
+          int'(group_log) > int'(row_log) + int'(col_log))) begin
+        row_log = balanced_row;
+        col_log = balanced_col;
+        gain    = balanced_gain;
+      end
+      s2_row_log_w = row_log;
+      s2_col_log_w = col_log;
+      s2_gain_w    = gain;
+    end
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        t2_slots_q <= '0; t2_fmt_q <= '0; t2_elem_bits_q <= '0;
+        t2_known_q <= 1'b0; t2_valid_q <= 1'b0;
+        t2_row_log_q <= '0; t2_col_log_q <= '0; t2_gain_q <= '0;
+        t2_m_q <= '0; t2_n_q <= '0; t2_k_q <= '0; t2_active_k_q <= '0;
+        t2_balance_q <= '0; t2_code_q <= policy_code_t'('0);
+      end else begin
+        t2_slots_q      <= t1_slots_q;
+        t2_fmt_q        <= t1_fmt_q;
+        t2_elem_bits_q  <= t1_elem_bits_q;
+        t2_known_q      <= t1_known_q;
+        t2_valid_q      <= t1_valid_q;
+        t2_row_log_q    <= s2_row_log_w;
+        t2_col_log_q    <= s2_col_log_w;
+        t2_gain_q       <= s2_gain_w;
+        t2_m_q          <= t1_m_q;
+        t2_n_q          <= t1_n_q;
+        t2_k_q          <= t1_k_q;
+        t2_active_k_q   <= t1_active_k_q;
+        t2_balance_q    <= t1_balance_q;
+        t2_code_q       <= t1_code_q;
+      end
+    end
+    // Stage 3: base_step + underfilled + balance_ok + apply latch.
+    policy_topology_t topology_d;
+    always_comb begin
+      automatic logic [63:0] base_step;
+      automatic logic        underfilled, balance_ok;
+      topology_d = '0;
+      if (t2_valid_q) begin
+        topology_d.valid          = 1'b1;
+        topology_d.slots_log2     = t2_slots_q;
+        topology_d.reduction_log2 = t2_slots_q;
+        topology_d.element_bits_log2 = t2_elem_bits_q;
+        base_step  = (64'(t2_m_q) + 64'(t2_n_q)) * policy_rowbytes(t2_active_k_q, t2_fmt_q);
+        underfilled = t2_k_q <= (16'd1 << (int'(t2_slots_q) - 1));
+        balance_ok  = t2_balance_q != 2'd0 || (t2_code_q == POLICY_DECODE);
+        if (t2_code_q != POLICY_MOVEMENT && balance_ok &&
+            (t2_row_log_q != 3'd0 || t2_col_log_q != 3'd0) &&
+            (t2_m_q >= 16'd8 || t2_n_q >= 16'd8) &&
+            int'(t2_gain_q) >= MinGain16ths &&
+            (underfilled || base_step >= 64'(ReadBytesPerCycle))) begin
+          topology_d.apply      = 1'b1;
+          topology_d.rows_log2  = t2_row_log_q;
+          topology_d.cols_log2  = t2_col_log_q;
+          topology_d.reduction_log2 =
+              4'(int'(t2_slots_q) - int'(t2_row_log_q) - int'(t2_col_log_q));
+          topology_d.gain_16ths = t2_gain_q;
+        end
+      end
+    end
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) topology_q <= '0;
+      else         topology_q <= topology_d;
+    end
+    assign topology_o = topology_q;
 
     // pragma translate_off
+    // r7 R1: ready_o stays combinational (codec-coupled accept path) --
+    // the seam invariant is that a start lands only while ready is live.
+    assert property (@(posedge clk_i) disable iff (!rst_ni) accept |-> ready_o);
     assert property (@(posedge clk_i) disable iff (!rst_ni)
         !policy_integer_format(numfmt_o) |-> !residual_skip_o);
     assert property (@(posedge clk_i) disable iff (!rst_ni)

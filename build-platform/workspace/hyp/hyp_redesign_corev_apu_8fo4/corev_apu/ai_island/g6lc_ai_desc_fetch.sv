@@ -151,9 +151,16 @@ assign axi_req_o  = axi_req_d;
     axi_req_d.r_ready  = state_q == ST_R && grant_i;
   end
 
+    // G4: the R-lane word offset is a parallel value decoded once at the
+  // source (beat_q * BeatBytes is a shift; BeatBytes and BusBytes are
+  // constants), not a multiply inside the next-state arm.
+  int unsigned r_lane;
   always_comb begin
-    int unsigned lane;
-    lane = 0;
+    r_lane = (BusBytes == BeatBytes) ? 0
+           : (unsigned'(addr_q) + unsigned'(beat_q) * BeatBytes) & (BusBytes - 1);
+  end
+
+always_comb begin
     state_d = state_q;
     beat_d  = beat_q;
     desc_d  = desc_q;
@@ -189,10 +196,8 @@ assign axi_req_o  = axi_req_d;
           if (axi_resp_s.r_valid) begin
           // Lane 0 on a bus that is already the beat width. A wider bus
           // carries the same 8 bytes at (addr + beat*BeatBytes) % BusBytes.
-          lane = (BusBytes == BeatBytes) ? 0
-               : (unsigned'(addr_q) + unsigned'(beat_q) * BeatBytes) & (BusBytes - 1);
           desc_d[beat_q*BeatBits +: BeatBits] =
-              BeatBits'(axi_resp_s.r.data >> (8 * lane));
+              BeatBits'(axi_resp_s.r.data >> (8 * r_lane));
           if (axi_resp_s.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
             err_d = 1'b1;
           // Two exit conditions, not one: r.last is the slave's word, the beat

@@ -45,6 +45,8 @@ module tb_g6lc_hyp8_memory;
     // scalar config's tval contract, two load-buffer slots so the kill-cycle
     // publish can be checked against the tag's own rid.
     c.GPLEN = 64; c.TvalEn = 1; c.NrLoadBufEntries = 2;
+    c.PPNW = 44;  // XLEN64 physical-tag width (build_config); cfg_empty
+                  // leaves it 0 and dtlb_ppn_i degenerates to [-1:0]
     return c;
   endfunction
   localparam config_pkg::g6lc_cfg_t C = configuration();
@@ -369,6 +371,17 @@ module tb_g6lc_hyp8_memory;
   dcache_req_o_t  lu_rpi = '{default: '0};
   dcache_req_i_t  lu_rpo;
   logic [C.DcacheIdWidth-1:0] lu_rid = '0;
+  // r44: publish/drain tree stimulus — verdict mask and the staged
+  // forward response are driven (were '1/'0 constants).
+  logic [C.NR_SB_ENTRIES-1:0] lu_lchk = '1;
+  typedef struct packed {
+    logic                                        valid;
+    logic [C.XLEN-1:0]                           data;
+    logic [(C.XLEN/8)-1:0]                       be;
+    logic                                        forward_possible;
+    logic [(C.NrLoadBufEntries > 1 ? $clog2(C.NrLoadBufEntries) : 1)-1:0] tag;
+  } lu_frsp_t;
+  lu_frsp_t       lu_frsp = '{default: '0};
   // write-only dump nets for unprobed outputs (sb_rsp_dump convention)
   logic           lu_d_pop, lu_d_treq, lu_d_hs, lu_d_hlvx, lu_d_pav,
                   lu_d_repl, lu_d_physv, lu_d_rpl;
@@ -406,8 +419,8 @@ module tb_g6lc_hyp8_memory;
       .dcache_wbuffer_not_ni_i(1'b1), .dcache_wbuffer_empty_i(1'b1),
       .phys_valid_o(lu_d_physv), .phys_addr_o(lu_d_physa),
       .phys_id_o(lu_d_pid), .phys_hart_o(lu_d_ph),
-      .phys_size_o(lu_d_ps), .ld_checked_i('1),
-      .fwd_req_o(), .fwd_rsp_i('0),
+      .phys_size_o(lu_d_ps), .ld_checked_i(lu_lchk),
+      .fwd_req_o(), .fwd_rsp_i(lu_frsp),
       .replay_o(lu_d_rpl), .replay_tid_o(lu_d_rid2));
 
   // ------------------------- stimulus -------------------------
@@ -496,6 +509,39 @@ module tb_g6lc_hyp8_memory;
     check(!sb_rpo.data_req, {tag, "_ONCE"});
   endtask
 
+  // r44: load_unit publish/drain drivers — grant one LD (the slot id is
+  // left in lu_rid), pulse a D$ response into a slot, pulse a staged
+  // store-forward response into a slot. All stimulus via ports.
+  task automatic lu_grant(input int tid, input logic [C.VLEN-1:0] va,
+                          input string tag);
+    lu_ctrl = '0;
+    lu_ctrl.valid = 1'b1; lu_ctrl.fu = LOAD; lu_ctrl.operation = LD;
+    lu_ctrl.vaddr = va; lu_ctrl.trans_id = TID'(tid); lu_ctrl.be = '1;
+    lu_ctid = TID'(tid); lu_paddr = va[C.PLEN-1:0];
+    lu_vld = 1'b1; lu_rpi.data_gnt = 1'b1;
+    #2;
+    lu_rid = lu_rpo.data_id;
+    check(lu_rpo.data_req && !lu_rpo.kill_req, {tag, "_REQ"});
+    tick();
+    lu_vld = 0; lu_ctrl = '0; lu_rpi.data_gnt = 0;
+  endtask
+
+  task automatic lu_rvalid(input int rid, input logic [C.XLEN-1:0] data);
+    lu_rpi.data_rvalid = 1'b1;
+    lu_rpi.data_rid    = C.DcacheIdWidth'(rid);
+    lu_rpi.data_rdata  = data;
+    tick();
+    lu_rpi.data_rvalid = 1'b0; lu_rpi.data_rdata = '0; lu_rpi.data_rid = '0;
+  endtask
+
+  task automatic lu_fresp(input int tag_, input logic [C.XLEN-1:0] data,
+                          input logic [(C.XLEN/8)-1:0] be, input logic poss);
+    lu_frsp = '{valid: 1'b1, data: data, be: be, forward_possible: poss,
+                tag: $bits(lu_frsp.tag)'(tag_)};
+    tick();
+    lu_frsp = '{default: '0};
+  endtask
+
   function automatic int slot_of(input logic [DS-1:0] oh);
     for (int i = 0; i < DS; i++) if (oh[i]) return i;
     return -1;
@@ -503,6 +549,7 @@ module tb_g6lc_hyp8_memory;
 
   initial begin
     automatic int a_slot, b_slot;
+    automatic int ridA, ridB, ridC, ridD;
     clear_inputs();
     spec_q = '{default: '0}; older_q = '0;
     cmt_q = '{default: '0}; cmt_v = '0;
@@ -817,6 +864,183 @@ module tb_g6lc_hyp8_memory;
     tick();
     lu_rpi = '{default: '0}; lu_ex_i = '{default: '0}; #2;
     check(!lu_rdy_v && !(|i_lu.ldbuf_valid_q), "LU_MIS2_FREED");
+
+    // =============== G: r44 publish/drain heap trees ===============
+    // The L5 publication select (balanced {valid,index,payload} trees):
+    // simultaneous eligible slots publish lowest-index first, the merged
+    // forward overlay rides the same payload, a tombstoned slot drains
+    // without a writeback, and an empty buffer presents the leaf-0
+    // default. Stimulus only via the request/response/fwd/verdict ports;
+    // the in-DUT miter checks the tree against the old first-hit scan.
+    lu_lchk = '1; lu_frsp = '{default: '0};
+
+    // G1: two slots eligible in the same cycle — lowest publishes first,
+    // the next slot publishes the following cycle.
+    lu_grant(10, 64'h0000_0000_0000_1000, "G1A"); ridA = lu_rid;
+    lu_grant(11, 64'h0000_0000_0000_1008, "G1B"); ridB = lu_rid;
+    check(ridB != ridA, "G1_SLOTS");
+    lu_fresp(ridA, '0, '0, 1'b0);
+    lu_fresp(ridB, '0, '0, 1'b0);
+    lu_lchk[10] = 1'b0; lu_lchk[11] = 1'b0;
+    lu_rvalid(ridA, 64'hAAAA_0001_1111_0001);
+    lu_rvalid(ridB, 64'hBBBB_0002_2222_0002);
+    check(!lu_rdy_v, "G1_HOLD0");
+    tick();
+    #2; check(!lu_rdy_v, "G1_HOLD1");
+    lu_lchk = '1; #2;
+    check(lu_rdy_v && !lu_ex_o.valid, "G1_PUB_A");
+    // the lowest-index slot publishes first, whichever tid that is
+    check(lu_tid_o == TID'((ridA < ridB) ? 10 : 11), "G1_TID_A");
+    check(lu_res == ((ridA < ridB) ? 64'hAAAA_0001_1111_0001
+                                  : 64'hBBBB_0002_2222_0002), "G1_DATA_A");
+    tick();
+    #2;
+    check(lu_rdy_v && !lu_ex_o.valid, "G1_PUB_B");
+    check(lu_tid_o == TID'((ridA < ridB) ? 11 : 10), "G1_TID_B");
+    check(lu_res == ((ridA < ridB) ? 64'hBBBB_0002_2222_0002
+                                  : 64'hAAAA_0001_1111_0001), "G1_DATA_B");
+    tick();
+    #2;
+    check(!lu_rdy_v, "G1_DONE");
+    check(lu_tid_o == i_lu.ldbuf_q[0].trans_id, "G1_DEF0");
+
+    // G2: partial forward overlay — different bytes from the D$ word and
+    // the forward response, merged by the publishing slot's payload.
+    lu_grant(12, 64'h0000_0000_0000_2000, "G2A"); ridC = lu_rid;
+    lu_fresp(ridC, 64'h0000_0000_AABB_CCDD, 8'h0F, 1'b1);
+    lu_rvalid(ridC, 64'h1122_3344_5566_7788);
+    #2;
+    check(lu_rdy_v && lu_tid_o == TID'(12), "G2_PUB");
+    check(lu_res == 64'h1122_3344_AABB_CCDD, "G2_MERGED");
+    tick();
+    #2;
+    check(!lu_rdy_v, "G2_DONE");
+
+    // G3: tombstone drain — the slot is flushed while its response is in
+    // flight; the captured response drains without publishing.
+    lu_grant(13, 64'h0000_0000_0000_3000, "G3A"); ridD = lu_rid;
+    flush = 1; tick(); flush = 0; tick();
+    lu_rvalid(ridD, 64'hDEAD_CAFE_0000_0013);
+    check(!lu_rdy_v, "G3_NOPUB");
+    tick();
+    #2;
+    check(!i_lu.ldbuf_valid_q[ridD], "G3_FREE");
+    check(!lu_rdy_v, "G3_EMPTY");
+
+    // =============== H: r45 PA-capture decode ===============
+    // load_pa_now_v now decodes state_q[1]/[6]/[0|2] directly instead of
+    // reading translation_req_o back.  Three port-driven edges qualify
+    // it: a held WAIT_GNT load must NOT capture while dtlb_hit_i=0, MUST
+    // capture the cycle the hit lands (still ungranted), and must NOT
+    // capture while cancelled.  The in-DUT g6lc_pa_now_eq invariant
+    // compares the new form to valid_i && translation_req_o && dtlb_hit_i
+    // every cycle; these checks make that equality non-vacuous on the
+    // inputs this decode actually reads.
+    lu_ctrl = '0; lu_vld = 0; lu_ex_i = '{default: '0}; lu_rpi = '{default: '0};
+    lu_dtlb_hit = 1'b0; lu_ppn = 44'h8_1234; lu_paddr = '0;
+    lu_lchk = '1; cancel = '0;
+    flush = 1; tick(); flush = 0; tick();
+
+    lu_ctrl.valid = 1'b1; lu_ctrl.fu = LOAD; lu_ctrl.operation = LD;
+    lu_ctrl.vaddr = 64'h0000_0000_0000_4000; lu_ctrl.trans_id = TID'(14);
+    lu_ctrl.be = '1; lu_ctid = TID'(14);
+    lu_vld = 1'b1; lu_rpi.data_gnt = 1'b0;
+    #2;
+    check(!i_lu.load_pa_now_v, "H_IDLE_HIT0_NOCAP");
+    check(!i_lu.load_pa_v_q, "H_PA_V0");
+    tick();                               // ungranted -> WAIT_GNT
+    #2;
+    check(i_lu.state_q[1], "H_WAIT_GNT");
+    check(!i_lu.load_pa_now_v, "H_GNT_HIT0_NOCAP");
+    lu_dtlb_hit = 1'b1;                   // translation lands, still WAIT_GNT
+    #2;
+    check(i_lu.load_pa_now_v, "H_GNT_HIT1_CAP");
+    tick();
+    #2;
+    check(i_lu.load_pa_v_q, "H_PA_HELD");
+    check(i_lu.load_pa_q == 56'({44'h8_1234, 12'h000}), "H_PA_VAL");
+    cancel[14] = 1'b1;                    // cancelled: no new capture
+    #2;
+    check(!i_lu.load_pa_now_v, "H_CANCEL_NOCAP");
+    tick();
+    lu_vld = 0; lu_ctrl = '0; cancel = '0; lu_rpi = '{default: '0};
+    tick(); #2;
+    check(!i_lu.load_pa_v_q, "H_PA_CLEARED");
+
+    // =============== I: r51 sticky exception pending ===============
+    // F1/F2 above are the r51 L4 control: the same-cycle kill publish is
+    // unchanged when nothing competes for the port.  The r26/r27/r48b
+    // witness failure (cycle 19,466,403) was the pre-r51 shape — a kill
+    // whose completion could lose the publish port to an unrelated slot
+    // or miss a late dummy response.  I1-I3 pin the new contract.
+    lu_ctrl = '0; lu_vld = 0; lu_ex_i = '{default: '0}; lu_rpi = '{default: '0};
+    lu_dtlb_hit = 1'b1; lu_ppn = 44'h8_0045; lu_paddr = '0;
+    lu_lchk = '1; cancel = '0;
+    flush = 1; tick(); flush = 0; tick();
+
+    // I1 (L1): an unrelated slot becomes publish-eligible in the same
+    // cycle as the kill's dummy response — the exception still publishes
+    // with strict priority and the data publishes the following cycle.
+    lu_grant(8, 64'h0000_0000_0000_5000, "I1A"); ridA = lu_rid;
+    lu_fresp(ridA, '0, '0, 1'b0);             // forward verdict for A
+    lu_rvalid(ridA, 64'h5A5A_5A5A_5A5A_5A5A);
+    lu_lchk[8] = 1'b0;                        // hold A's publish verdict
+    lu_grant(9, 64'h0000_0000_0000_6001, "I1B"); ridB = lu_rid;
+    check(i_lu.state_q[2], "I1_SEND_TAG");    // B's tag goes out now
+    lu_ex_i.valid = 1'b1; lu_ex_i.cause = 64'd4; lu_ex_i.tval = 64'h6001;
+    lu_rpi.data_rvalid = 1'b1; lu_rpi.data_rid = C.DcacheIdWidth'(ridB);
+    lu_lchk[8] = 1'b1;                        // A eligible this same cycle
+    #2;
+    check(lu_rpo.kill_req && lu_rpo.tag_valid, "I1_KILL");
+    check(lu_rdy_v && lu_ex_o.valid && lu_ex_o.cause == 64'd4 &&
+          lu_ex_o.tval == 64'h6001 && lu_tid_o == TID'(9), "I1_EX_WINS");
+    tick();                                   // publish consumed
+    lu_rpi = '{default: '0}; lu_ex_i = '{default: '0}; #2;
+    check(lu_rdy_v && !lu_ex_o.valid && lu_tid_o == TID'(8) &&
+          lu_res == 64'h5A5A_5A5A_5A5A_5A5A, "I1_DATA_NEXT");
+    tick(); #2;
+    check(!lu_rdy_v, "I1_ONCE");
+    check(!(|i_lu.ldbuf_valid_q), "I1_FREED");
+
+    // I2 (L2): the dummy response is a cycle late — the pending bit
+    // holds the faulted entry and the captured record publishes once the
+    // response lands, even with ex_i already cleared.
+    lu_grant(12, 64'h0000_0000_0000_7003, "I2"); ridB = lu_rid;
+    check(i_lu.state_q[2], "I2_SEND_TAG");
+    lu_ex_i.valid = 1'b1; lu_ex_i.cause = 64'd4; lu_ex_i.tval = 64'h7003;
+    #2;
+    check(lu_rpo.kill_req, "I2_KILL");
+    check(!lu_rdy_v, "I2_NO_PUB_AT_KILL");
+    tick();                                   // pend set at this edge
+    lu_ex_i = '{default: '0};                 // ex_i moves on
+    lu_rvalid(ridB, 64'h0);                   // delayed dummy captured
+    #2;
+    check(!lu_rdy_v, "I2_RDY_REG");           // head readiness registers a cycle
+    tick(); #2;
+    check(lu_rdy_v && lu_ex_o.valid && lu_ex_o.cause == 64'd4 &&
+          lu_ex_o.tval == 64'h7003 && lu_tid_o == TID'(12), "I2_DEFER_PUB");
+    tick(); #2;
+    check(!lu_rdy_v, "I2_ONCE");        // drain pop is silent
+    tick(); #2;
+    check(!(|i_lu.ldbuf_valid_q), "I2_FREED");
+
+    // I3 (L3): the faulting tid is cancelled in the kill cycle — precise
+    // drop: no publish of any kind, the slot drains silently.
+    lu_grant(3, 64'h0000_0000_0000_8005, "I3"); ridB = lu_rid;
+    check(i_lu.state_q[2], "I3_SEND_TAG");
+    lu_ex_i.valid = 1'b1; lu_ex_i.cause = 64'd4; lu_ex_i.tval = 64'h8005;
+    cancel[3] = 1'b1;
+    lu_rpi.data_rvalid = 1'b1; lu_rpi.data_rid = C.DcacheIdWidth'(ridB);
+    #2;
+    check(lu_rpo.kill_req, "I3_KILL");
+    check(!lu_rdy_v, "I3_NO_PUB");
+    tick();
+    lu_rpi = '{default: '0}; lu_ex_i = '{default: '0}; cancel = '0; #2;
+    check(!lu_rdy_v, "I3_STILL");
+    tick(); #2;
+    tick(); #2;
+    check(!i_lu.ldbuf_valid_q[ridB], "I3_DRAINED");
+    check(!lu_rdy_v, "I3_NEVER");
 
     $display("HYP8_MEMORY_PASS checked=%0d", checked);
     $finish;

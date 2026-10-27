@@ -112,9 +112,14 @@ module instr_queue
 
   localparam g6lc_fetch_pkg::fetch_geo_t Geo = g6lc_fetch_pkg::geo(G6LCCfg);
   localparam g6lc_fetch_pkg::fetch_en_t  En  = g6lc_fetch_pkg::en(G6LCCfg);
-  localparam int unsigned NrFifo = Geo.slots;
+  // r72 B: NrSlot packet slots per push (fetch width), NrFifo queue columns
+  // (>= NrSlot and >= NrIssue). Fetch-bound 8-issue keeps 64-bit packets and
+  // 8 drain positions; equal to the old single dimension whenever
+  // NrIssue <= NrSlot (bit-identical for the 2-issue profile).
+  localparam int unsigned NrSlot = Geo.slots;
+  localparam int unsigned NrFifo = Geo.qslots;
   localparam int unsigned NrIssue = Geo.issue;
-  localparam int unsigned IdxW = Geo.log2_slots;
+  localparam int unsigned IdxW = Geo.log2_qslots;
   localparam int unsigned HidW = Geo.hart_idx_w;
   localparam int unsigned EW = (HypCfg.FeEpochBits > 0) ? HypCfg.FeEpochBits : 1;
   // Per-slot instruction FIFO depth — the pending-frontier FIFOs below derive
@@ -152,8 +157,9 @@ module instr_queue
   logic [NrFifo-1:0] instr_queue_full, instr_queue_empty;
   logic [NrFifo-1:0] push_instr, push_instr_fifo, pop_instr;
   // input stream
-  logic [NrFifo-1:0] taken, branch_mask, valid, fifo_pos;
-  fifo_idx_t [NrFifo-1:0] slot_fifo;
+  logic [NrSlot-1:0] taken, branch_mask, valid;
+  logic [NrFifo-1:0] fifo_pos;
+  fifo_idx_t [NrSlot-1:0] slot_fifo;
   logic instr_overflow;
   logic [NrFifo-1:0] slot0_pos;
   logic slot0_full, lo_partial, rest_found;
@@ -164,7 +170,7 @@ module instr_queue
   // Sized to that bound ($clog2(NrFifo+1)): the sequence/index increments it
   // steps are precomputed per candidate step value (sv-timing SelectIncrement),
   // so one spare bit would double the candidate array for nothing.
-  localparam int unsigned ShamtW = $clog2(NrFifo + 1);
+  localparam int unsigned ShamtW = $clog2(NrSlot + 1);
   logic [ShamtW-1:0] shamt;
   // O7o: global per-instruction push sequence. push_seq_q is the next number to
   // hand out; push_seq_d is the next value after this cycle's push. Reset on
@@ -189,7 +195,7 @@ module instr_queue
   // Per FIFO head: control-flow class and predicted-taken, so the drain
   // pointer only one-hot-reduces a bit. The class must not wait on a 32-bit
   // select of the issued word. fetch_entry_o still carries the word itself.
-  logic [NrFifo-1:0] slot_ctrl;
+  logic [NrSlot-1:0] slot_ctrl;
   logic [NrFifo-1:0] lane_ctrl, lane_cf;
   logic [NrIssue-1:0] port_ctrl, port_cf;
   logic [NrIssue-1:0] block_any;
@@ -236,7 +242,7 @@ module instr_queue
   logic win_live;
   assign win_live = (push_epoch_i == epoch_i);
 
-  for (genvar i = 0; i < NrFifo; i++) begin : gen_taken
+  for (genvar i = 0; i < NrSlot; i++) begin : gen_taken
     assign taken[i] = cf_type_i[i] != g6lc_core_pkg::NoCF;
   end
 
@@ -244,21 +250,21 @@ module instr_queue
   always_comb begin : gen_branch_mask
     logic [7:0] taken8, mask8;
     taken8 = '0;
-    taken8[NrFifo-1:0] = taken;
-    mask8 = g6lc_fetch_pkg::packet_upto_cf(taken8, NrFifo);
-    branch_mask = mask8[NrFifo-1:0];
+    taken8[NrSlot-1:0] = taken;
+    mask8 = g6lc_fetch_pkg::packet_upto_cf(taken8, NrSlot);
+    branch_mask = mask8[NrSlot-1:0];
   end
 
   // Slots past the first predicted-taken CF are dropped here, not in L1: the
   // realigner still emitted them, and L2/L3 may drop but never modify (SPEC §0).
-  assign valid = valid_i & branch_mask & {NrFifo{win_live}};
+  assign valid = valid_i & branch_mask & {NrSlot{win_live}};
   // input slot i is served by FIFO (i + idx_is_q)
   always_comb begin : gen_compact_slots
     fifo_idx_t rank;
     rank = '0;
     fifo_pos = '0;
     slot_fifo = '0;
-    for (int unsigned s = 0; s < NrFifo; s++) begin
+    for (int unsigned s = 0; s < NrSlot; s++) begin
       slot_fifo[s] = (idx_is_q + rank) & IdxMask;
       if (valid[s]) begin
         fifo_pos[slot_fifo[s]] = 1'b1;
@@ -281,7 +287,7 @@ module instr_queue
       & {NrFifo{g6lc_fetch_pkg::packet_accept(address_overflow)}};
   // Rotated BACK into realigner slot order: the frontend's cf_consumed / ras_push
   // index by input slot, so returning FIFO order here would credit the wrong slot.
-  for (genvar s = 0; s < NrFifo; s++) begin : gen_consumed_slots
+  for (genvar s = 0; s < NrSlot; s++) begin : gen_consumed_slots
     assign consumed_o[s] = valid[s] && push_instr_fifo[slot_fifo[s]];
   end
 
@@ -290,7 +296,7 @@ module instr_queue
   always_comb begin : gen_rest_addr
     rest_addr = exception_addr_i;
     rest_found = 1'b0;
-    for (int unsigned i = 1; i < NrFifo; i++) begin
+    for (int unsigned i = 1; i < NrSlot; i++) begin
       if (valid[i] && !rest_found) begin
         rest_addr = addr_i[i];
         rest_found = 1'b1;
@@ -314,7 +320,7 @@ module instr_queue
   logic [ShamtW-1:0] valid_count;
   always_comb begin : gen_valid_count
     valid_count = '0;
-    for (int unsigned i = 0; i < NrFifo; i++) valid_count = valid_count + ShamtW'(valid[i]);
+    for (int unsigned i = 0; i < NrSlot; i++) valid_count = valid_count + ShamtW'(valid[i]);
   end
   logic [1:0] sh_sel;
   always_comb begin
@@ -338,14 +344,14 @@ module instr_queue
   // dynamic-index reads, and rank a serial popcount. Same picks written
   // as a last-match one-hot + masked-OR gathers; when no slot maps to a
   // fifo the original read slot 0 (s defaulted to '0) — keep that mux.
-  logic [NrFifo-1:0] fsel_oh[NrFifo];   // fsel_oh[f][i]: slot i feeds fifo f
-  logic [NrFifo-1:0] fsel_hit[NrFifo];  // any source (before last-match)
+  logic [NrSlot-1:0] fsel_oh[NrFifo];   // fsel_oh[f][i]: slot i feeds fifo f
+  logic [NrSlot-1:0] fsel_hit[NrFifo];  // any source (before last-match)
   logic [NrFifo-1:0] fsel_none;
   // Ranks are distinct, so at most one valid slot maps to a FIFO. The
   // higher-bit last-match OR was 4.4 FO4 on the fill-pointer chain and
   // selected the same slot as the hit.
   for (genvar f = 0; f < NrFifo; f++) begin : gen_fsel
-    for (genvar i = 0; i < NrFifo; i++) begin : gen_fsel_i
+    for (genvar i = 0; i < NrSlot; i++) begin : gen_fsel_i
       assign fsel_hit[f][i] = valid[i] && (slot_fifo[i] == fifo_idx_t'(f));
       assign fsel_oh[f][i]  = fsel_hit[f][i];
     end
@@ -356,7 +362,7 @@ module instr_queue
 
   // Control-flow opcode class, including a not-taken branch. Computed on
   // the push word so the drain only reduces a stored bit.
-  for (genvar i = 0; i < NrFifo; i++) begin : gen_slot_ctrl
+  for (genvar i = 0; i < NrSlot; i++) begin : gen_slot_ctrl
     logic rvi, c1, c2, op_br, op_jal, op_jalr, c1j, c1beq, c1bne, c2jr;
     assign rvi    = instr_i[i][1:0] == 2'b11;
     assign c1     = instr_i[i][1:0] == 2'b01;
@@ -384,7 +390,7 @@ module instr_queue
       instr_data_in[f].is_ret    = 1'b0;
       instr_data_in[f].is_ctrl   = 1'b0;
       instr_data_in[f].is_taken  = 1'b0;
-      for (int unsigned i = 0; i < NrFifo; i++) begin
+      for (int unsigned i = 0; i < NrSlot; i++) begin
         instr_data_in[f].instr    |= instr_i[i]     & {32{fsel_oh[f][i]}};
         instr_data_in[f].pc       |= addr_i[i]      & {G6LCCfg.VLEN{fsel_oh[f][i]}};
         // full-width OR-gather: the enum keeps its 3 bits (a one-bit
@@ -421,10 +427,10 @@ module instr_queue
       // slots of this push, then add the global packet counter. Same count
       // as the serial s2<s accumulate — $countones over the prefix mask.
       begin : rank_blk
-        automatic logic [NrFifo-1:0] below_m;
+        automatic logic [NrSlot-1:0] below_m;
         below_m = '0;
-        for (int unsigned i = 0; i < NrFifo; i++)
-          below_m |= {NrFifo{fsel_oh[f][i]}} & NrFifo'((NrFifo'(1) << i) - 1'b1);
+        for (int unsigned i = 0; i < NrSlot; i++)
+          below_m |= {NrSlot{fsel_oh[f][i]}} & NrSlot'((NrSlot'(1) << i) - 1'b1);
         instr_data_in[f].push_seq = push_seq_q +
             {{(16 - IdxW) {1'b0}},
              IdxW'($countones(valid & below_m))};
@@ -762,8 +768,8 @@ module instr_queue
     // Pushed FIFOs are contiguous from idx_is_q (compact insertion), so the
     // k-th pushed instruction's PC is instr_data_in[(idx_is_q + k) mod NrFifo]
     // for k < shamt — already in push order.
-    logic [NrFifo-1:0][G6LCCfg.VLEN-1:0] push_addr;
-    for (genvar k = 0; k < NrFifo; k++) begin : gen_push_addr
+    logic [NrSlot-1:0][G6LCCfg.VLEN-1:0] push_addr;
+    for (genvar k = 0; k < NrSlot; k++) begin : gen_push_addr
       assign push_addr[k] =
           instr_data_in[fifo_idx_t'((idx_is_q + fifo_idx_t'(k)) & IdxMask)].pc;
     end
@@ -799,7 +805,7 @@ module instr_queue
       end else begin
         for (int unsigned h = 0; h < G6LCCfg.NrHarts; h++) begin
           if (|shamt && hart_i == HidW'(h)) begin
-            for (int unsigned k = 0; k < NrFifo; k++) begin
+            for (int unsigned k = 0; k < NrSlot; k++) begin
               if (k < int'(shamt))
                 pend_mem[h][pend_wr_q[h] + PAW'(k)] <= push_addr[k];
             end

@@ -138,6 +138,12 @@ def main():
         argv = [
             "make", "-C", str(source), f"O={build}", "PLATFORM=generic",
             "FW_TEXT_START=0x80000000", "FW_PAYLOAD_OFFSET=0x200000",
+            # r70: the generic platform's default FW_PAYLOAD_FDT_ADDR (0x82200000)
+            # sits 32 MiB into the 63 MiB Linux payload at 0x80200000, so the
+            # fw_base.S FDT relocation overwrote the kernel image (r40 UART:
+            # "Next Arg1: 0x82200000"). 0x88000000 is clear of every payload
+            # and inside the 256 MiB memory node.
+            "FW_PAYLOAD_FDT_ADDR=0x88000000",
             f"FW_PAYLOAD_PATH={inputs / payload}", f"FW_FDT_PATH={inputs / dtb}",
             f"CROSS_COMPILE={CROSS}", "OPENSBI_ALLOW_NO_PIE=y",
             "PLATFORM_RISCV_ISA=rv64imafdc_zicsr_zifencei", "-j2",

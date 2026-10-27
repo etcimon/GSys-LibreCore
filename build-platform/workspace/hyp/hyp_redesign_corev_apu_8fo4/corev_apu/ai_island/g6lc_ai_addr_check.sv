@@ -104,14 +104,17 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
       input logic [1:0] perm,
       input addr_t base, limit, addr, len,
       input logic need_r, need_w);
-    addr_t span, last;
+    addr_t span;
+    logic [64:0] end65;
     logic in_range, perm_ok;
     // Zero length means a one-byte probe, so an empty range cannot pass.
     span = (len == '0) ? addr_t'(1) : len;
-    last = addr + span - addr_t'(1);
-    // `last >= addr` rejects a span that wraps the address space.
+    // G6: one shared 65-bit addr+span; the wrap test is the carry bit and
+    // `last < limit` becomes `end <= limit` (no wrap), so both compares run
+    // off the single adder instead of `addr + span - 1` feeding two compares.
+    end65 = 65'(addr) + 65'(span);
     in_range = v && (limit > base) && (addr >= base)
-        && (last >= addr) && (last < limit);
+        && !end65[64] && (end65[63:0] <= 64'(limit));
     perm_ok = (!need_r || perm[0]) && (!need_w || perm[1]);
     return in_range && perm_ok;
   endfunction

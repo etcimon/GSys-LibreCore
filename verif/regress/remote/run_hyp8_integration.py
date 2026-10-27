@@ -194,7 +194,7 @@ def main():
         'allowOverlap': allow,
         'capacity': {'nproc': nproc, 'loadavg': loadavg,
                      'mem': meminfo,
-                     'limits': {'buildJobs': 2, 'verilatorThreads': 1}},
+                     'limits': {'buildJobs': int(os.environ.get('HYP8_BUILD_JOBS', '2')), 'verilatorThreads': 1}},
     }
     if procs and not allow:
         results['status'] = 'build_blocked_by_overlap'
@@ -203,7 +203,7 @@ def main():
         build_env = dict(env,
                          SOFT_LADDER_BUILD_TARGET=os.environ.get('HYP8_BUILD_TARGET', 'g6lc64_hyp8'),
                          SOFT_LADDER_VERLIB=str(out / 'model'),
-                         SOFT_LADDER_BUILD_JOBS='2',
+                         SOFT_LADDER_BUILD_JOBS=os.environ.get('HYP8_BUILD_JOBS', '2'),
                          SOFT_LADDER_VERILATOR_THREADS='1',
                          VERILATOR_FLAVOUR='pinned',
                          VERILATOR_INSTALL_DIR='/opt/testharness/src/verilator-causal',
@@ -219,8 +219,10 @@ def main():
                  'SOFT_LADDER_VERILATOR_THREADS', 'VERILATOR_FLAVOUR',
                  'VERILATOR_INSTALL_DIR', 'VERILATOR_ROOT',
                  'SPIKE_INSTALL_DIR', 'RISCV')}}, indent=2))
+        # HYP8_BUILD_TIMEOUT: the 8-hart mc2 model needs >7200 s at -j2 (r69:
+        # the runner timed out while the orphaned make kept compiling).
         rc = run(cmd, out / 'build-harness.log', env=build_env, cwd=src,
-                 timeout=7200)
+                 timeout=int(os.environ.get('HYP8_BUILD_TIMEOUT', '7200')))
         model = out / 'model' / 'Variane_testharness'
         # Full built-model dependency check, same as the leaf runner: the
         # generated .d files must cite the pinned private runtime header.
