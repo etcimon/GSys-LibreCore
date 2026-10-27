@@ -1,5 +1,96 @@
 # AI island + Xg6lcai (ai-matrix) FO4 program — rewrite and measurement plan
 
+## r19 — GEMM functional windows implemented
+
+Final `analyze-ai-hyp-r19`: GEMM **119.50→97.65 FO4**, with new FP32,
+residency-span and C-store-plan leaves at **94.93 / 18.30 / 39.80**.
+The existing iterative multiplier is 20.00 and is now included in the
+timing closure. Matching baseline: `r19-before-complete`.
+Dispatch→GEMM improves 153.80→126.90; top→GEMM 157.05→130.15.
+New internal stitches remain over budget (up to 132.40).
+
+Backend, accumulate, signed/backpressure, 100k FP value/flag comparisons,
+reuse slots, single/two/four clusters, 128/512-bit stores and NCH=1/2 stripe
+checks pass. Canonical lint/synth remains blocked on the hyp config lookup.
+The additional preparation and W-beat latency is explicit, and MAC recurrence
+latency is preserved. See [gemm-functional-r19.md](gemm-functional-r19.md)
+for ownership, transform derivations, commands, hashes and readiness limits.
+
+## r18 — current worst two reduced
+
+Fresh `analyze-ai-hyp-r18-before` selected GEMM and cluster dispatch.
+Final `analyze-ai-hyp-r18`: **172.2→119.5** and **150.5→34.3** structural FO4.
+Seed capture uses the existing sum window; dispatch owns a staged descriptor
+prologue. Caller stitches dispatch→GEMM and top→dispatch improve to
+153.8 / 71.85; top→direct GEMM stays 157.05.
+
+Assertion-enabled backend and 112 accumulate checks pass in each DPF=0/2
+profile. Single/two/four-cluster mathematical goldens pass all three shapes.
+The old integer column-slice counterexample is fixed (C-bank shift/add
+precedence). Seed-product and load-completion joins now retain either arrival
+order. The aggregate host verify attempt failed on configuration/tool setup.
+
+Details, exact commands, source hashes, latency tradeoffs, warnings and
+remaining qualification limits: [worst-two-r18.md](worst-two-r18.md).
+This supersedes older board/status paragraphs below; 8-FO4 closure remains open.
+
+## r17 — policy caller split implemented
+
+The wrapper now owns request capture and coherent codec/topology publication;
+new topology and PMU publisher leaves implement the arithmetic and completion
+joins. Slot values retain four bits, flush kills pipeline tokens, and the
+island gates admission so its request pulse cannot be lost. The default
+service product is removed by the proved bound; a bounded exact shift/add
+fallback preserves custom parameters. Balanced selection uses fifteen
+constant candidates and registered tournament levels.
+
+Board `analyze-ai-hyp-r17`: steer 165.0→27.25 FO4; topology 27.8; publisher
+8.0; codec/subcode remain 85.8/80.3; island_top remains 43.9.
+Strict focused lint and the policy pipeline contract bench pass (5,568
+topology checks, 23 publications, 29 cancellations, three PMU orderings).
+Full hyp island DMA smoke passes GEMM and policy snapshots. Details, source
+contracts and limits are in `policy-steer-caller-split.md` and the r17 log.
+These are structural results, not whole-island 8-FO4 or STA closure.
+
+## r16 update — GEMM implementation and policy caller analysis
+
+`g6lc_ai_gemm_seq` now uses a hand-written functional control split, with
+independent AR, R/bank-write, C-store, MAC and job-state owners. Three AXI
+boundaries use five independent spill channels (AR, AW/W, R/B), controlled
+by `AxiCuts` (default enabled). A local five-step operand-burst preparation
+window holds one plan until AR acceptance; allocation and receive metadata
+remain owned by the sequencer. The previous control is available only under
+`G6LC_AI_GEMM_LEGACY_CONTROL` for ablation, with snapshots in `analysis/tools/zips`.
+
+Fresh full board: `analyze-ai-hyp-r16.json`. GEMM's reported intoout maximum
+fell from 171.15 to 119.5 and regtoout from 170.3 to 20.25, but regtoreg is
+172.2 (previous 170.3). **The module maximum did not improve.** Its leading
+dependency now includes the C seed-read / FP accumulator path. The C-store
+arithmetic has been separated from channel/control logic; a dedicated
+registered store planner and a staged receive decoder are still open.
+
+The final `nch=1,dpf=0` backend golden passes: 1041 cycles, 28 AR,
+106 R beats, 16 golden C checks, four equivalence counters at 1034.
+The earlier split-plus-cuts snapshot also passed at 934 cycles before the
+operand planner was added. Historical unsplit baseline: 956 cycles.
+No multichannel, pipelined-dot, multicluster, full-island or formal
+qualification is implied by this focused run. Verilator reported no new
+sequencer latch/multiple-driver errors; pre-existing comb PE latch warnings
+remain in this source closure.
+
+The requested policy analysis is in
+[`policy-steer-caller-split.md`](policy-steer-caller-split.md). It identifies
+the telemetry caller contract, four-bit slot truncation, missing alignment
+of the codec work pulse with topology, a parameter-proven removal of the
+service multiplier, and a 15-candidate parallel alternative to the serial
+balanced-shape calculation. Policy RTL is unchanged; those are proposed
+transforms, with mathematical checks rather than post-rewrite timing claims.
+
+Correction to earlier seam prose: final8 and r16 both report policy stitches
+156.84 / 177.64 / 181.18 FO4, **not all <=40**. Their broad bridge lists include
+unconnected formals, so use source-verified caller connections alongside
+these structural estimates. No physical 8-FO4 closure is claimed.
+
 Lead-authored 2026-10-26. Scope: every `g6lc_ai_*` module — the SoC island
 (`corev_apu/ai_island/`, `corev_apu/src/g6lc_ai_dram_*`, `corev_apu/include/g6lc_ai_island_cfg_pkg.sv`)
 and the core-side CVXIF ai-matrix unit (`core/cvxif_g6lc_ai/`). Method and honesty gate as
@@ -482,3 +573,16 @@ r10: R2 re-land attempt -- miters silent (plan values correct), golden
 `exp=16,16 got 0` persists; the fault is downstream (the receive/MAC
 consumer assumed `ar_*_pre` timing). Reverted to the pre-r10r2 zips.
 `analyze-ai-hyp-final6.json` is the board-of-record.
+
+## §8 Method carry-over to the core program (r76, lead)
+
+The core pass `hyp_redesign_core_8fo4/analysis/r76-program.md` adopts this
+document's §0/§5/§6 rules as its method of record (rank classes, keep/revert,
+lint-before-board, P6, caller-purposed stages, zip-before-edit). Results that
+feed back into this program's card: the P6 bundle class is resolved by the
+one-hot presentation form, not by a stage (`load_unit` 41.0 → 37.2 vs the
+registered record 47.0, reverted); a correctness gate must be formed from a
+registered/port superset of the deep decode (F15b); and an oracle's field
+provenance is checked before any datapath is blamed (F14 was the RVFI
+`mem_paddr` bus, not DRAM/atomics). Open island items (R2 consumer, R3, R6,
+R8, H1, R10, the gemm_seq per-family split) are unchanged by r76.
