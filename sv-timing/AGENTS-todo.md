@@ -2608,3 +2608,10 @@ Sparse soak evidence: `MONOREPO-SOAK.md` / `FO4-ALGORITHM-UPGRADES.md`.
   `sv-timing correct` and monorepo soak (default lean).
 - Next: residual hard paths under richer emit if needed; live AMOCAS enable on
   configs that want Zacas (RVA + `RVZacas:1`).
+- **r79 E6 model over-read:** constant-fold `range_check` /
+  `is_inside_*` package functions when all rule lengths are
+  elaboration constants (zero-length -> constant false; pow2+
+  aligned -> masked compare). Fixture:
+  `fixtures/fn_zero_len_range.sv` (registered in
+  `fixtures/filelist.txt`) — reproduces load_unit `stall_ni`
+  billing on a dead predicate.
