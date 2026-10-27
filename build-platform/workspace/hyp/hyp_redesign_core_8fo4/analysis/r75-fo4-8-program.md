@@ -123,5 +123,14 @@ countercase with its number so the pattern card learns.
 ## 6. Status
 
 - r75 landed: missunit formed-result stage (§4) — see implementation-log r75.
-- Everything else in §4 is planned, not done; the T2 items need the config
-  fields first (one `check_cfg` block), which is the next commit.
+- r76 (`r76-program.md`, implementation-log `## r76`): the T2 config fields
+  landed (`g6lc_hyp_pkg` — LoadPubStages, IqSteerStages, IqSelStages,
+  RenameReadStages, FreelistPickStages, StoreTransStages, TlbCtxStages,
+  LsqVerdictStages, CsrReadMuxStages, CommitStages, AesStages,
+  MissunitResultStages; `Hyp8Deep` + `-DG6LC_HYP8_DEEP`). The load_unit
+  "publish payload registered" row was implemented and measured as a
+  countercase (the 41.0 was the rvalid_output bundle makespan); the kept
+  move is the one-hot presentation (41.0 → 37.2, clock 0.97 → 1.08 GHz).
+  F15 (publish-port collision) fixed; F14 resolved as an RVFI observer
+  defect — 7/7 smokes. §4 rows otherwise still planned; B2 steer design
+  (latency-neutral early steer) is settled in r76-program §6.

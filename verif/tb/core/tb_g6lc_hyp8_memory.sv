@@ -50,6 +50,14 @@ module tb_g6lc_hyp8_memory;
     return c;
   endfunction
   localparam config_pkg::g6lc_cfg_t C = configuration();
+  // The deep-publish profile selects Hyp8Deep (LoadPubStages==2): the
+  // same bench runs both profiles; LU_PUB_LAT is the load-WB retime the
+  // data-arm publish checks must absorb.
+`ifdef G6LC_HYP8_DEEP
+  localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t TB_HYP = g6lc_hyp_pkg::Hyp8Deep;
+`else
+  localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t TB_HYP = g6lc_hyp_pkg::Hyp8;
+`endif
   localparam type cbo_t = logic [7:0];
   localparam cbo_t CBO_NONE_V = cbo_t'(g6lc_core_pkg::CBO_NONE);
   localparam cbo_t CBO_ZERO_V = cbo_t'(g6lc_core_pkg::CBO_ZERO);
@@ -297,7 +305,7 @@ module tb_g6lc_hyp8_memory;
   logic [75:0]       sb_rsp_dump;
 
   store_buffer #(
-      .G6LCCfg(C), .HypCfg(g6lc_hyp_pkg::Hyp8),
+      .G6LCCfg(C), .HypCfg(TB_HYP),
       .dcache_req_i_t(dcache_req_i_t), .dcache_req_o_t(dcache_req_o_t),
       .cbo_t(cbo_t)
   ) i_stb (
@@ -374,6 +382,12 @@ module tb_g6lc_hyp8_memory;
   // r44: publish/drain tree stimulus — verdict mask and the staged
   // forward response are driven (were '1/'0 constants).
   logic [C.NR_SB_ENTRIES-1:0] lu_lchk = '1;
+  // F15: the STQ-forward head-completion drivers (page-offset match,
+  // coverage valid/data/be) — constants until the collision case.
+  logic               lu_pom = 1'b0;
+  logic               lu_sfv = 1'b0;
+  logic [C.XLEN-1:0]  lu_sfd = '0;
+  logic [(C.XLEN/8)-1:0] lu_sfbe = '0;
   typedef struct packed {
     logic                                        valid;
     logic [C.XLEN-1:0]                           data;
@@ -394,7 +408,7 @@ module tb_g6lc_hyp8_memory;
   logic           lu_d_lh, lu_d_ph;
 
   load_unit #(
-      .G6LCCfg(C), .HypCfg(g6lc_hyp_pkg::Hyp8),
+      .G6LCCfg(C), .HypCfg(TB_HYP),
       .dcache_req_i_t(dcache_req_i_t), .dcache_req_o_t(dcache_req_o_t),
       .exception_t(lu_exception_t), .lsu_ctrl_t(lu_ctrl_t)
   ) i_lu (
@@ -410,10 +424,11 @@ module tb_g6lc_hyp8_memory;
       .page_offset_o(lu_d_po), .load_paddr_o(lu_d_lpa),
       .load_paddr_valid_o(lu_d_pav), .load_trans_id_o(lu_d_ltid),
       .load_hart_o(lu_d_lh),
-      .page_offset_matches_i(1'b0), .page_offset_spec_only_i(1'b0),
+      .page_offset_matches_i(lu_pom), .page_offset_spec_only_i(1'b0),
       .lu_replay_o(lu_d_repl), .lu_replay_id_o(lu_d_rid1),
       .store_buffer_empty_i(1'b1), .no_st_pending_i(1'b1),
-      .st_fwd_valid_i(1'b0), .st_fwd_data_i('0), .st_fwd_be_i('0),
+      .st_fwd_valid_i(lu_sfv), .st_fwd_data_i(lu_sfd),
+      .st_fwd_be_i(lu_sfbe),
       .commit_tran_id_i(lu_ctid),
       .req_port_i(lu_rpi), .req_port_o(lu_rpo),
       .dcache_wbuffer_not_ni_i(1'b1), .dcache_wbuffer_empty_i(1'b1),
@@ -1041,6 +1056,52 @@ module tb_g6lc_hyp8_memory;
     tick(); #2;
     check(!i_lu.ldbuf_valid_q[ridB], "I3_DRAINED");
     check(!lu_rdy_v, "I3_NEVER");
+
+    // =============== F15: publish-port collision (L5) ===============
+    // r76 F15: under hyp8 L5 a data slot publishes >=1 cycle after its
+    // rvalid, so a publish pick can coincide with an FSM-head
+    // completion. Slot A (older) has its response captured and its
+    // verdict asserted at t; at the same t younger load B is at the FSM
+    // head in IDLE, fully covered by the STQ with its own verdict
+    // final: B publishes at t (st_fwd_done), A publishes at t+1 with
+    // its D$ data — both completions seen, no slot lost. Under
+    // G6LC_MUT_LU_PUB_COLLIDE (the ungated pick) A is popped at t and
+    // never presents: F15_SLOT_PUB fails by name (and the in-DUT
+    // lu_pop_is_presented assertion fires on the stolen cycle).
+    lu_ctrl = '0; lu_vld = 0; lu_ex_i = '{default: '0}; lu_rpi = '{default: '0};
+    lu_dtlb_hit = 1'b1; lu_ppn = 44'h8_0045; lu_paddr = '0;
+    lu_lchk = '1; cancel = '0;
+    lu_pom = 1'b0; lu_sfv = 1'b0; lu_sfd = '0; lu_sfbe = '0;
+    flush = 1; tick(); flush = 0; tick();
+
+    lu_grant(4, 64'h0000_0000_0000_9000, "F15A"); ridA = lu_rid;
+    lu_fresp(ridA, '0, '0, 1'b0);
+    lu_lchk[4] = 1'b0;
+    lu_rvalid(ridA, 64'hF150_0000_0000_00A4);
+    #2; check(!lu_rdy_v, "F15_HOLD");
+    // t: B at the head, STQ-covered with its verdict final; A's verdict
+    // lands this same cycle.
+    lu_ctrl.valid = 1'b1; lu_ctrl.fu = LOAD; lu_ctrl.operation = LD;
+    lu_ctrl.vaddr = 64'h0000_0000_0000_A000; lu_ctrl.trans_id = TID'(6);
+    lu_ctrl.be = '1; lu_ctid = TID'(6); lu_paddr = 56'h0000_0000_00A000;
+    lu_vld = 1'b1;
+    lu_lchk[4] = 1'b1;
+    lu_pom = 1'b1;
+    lu_sfv = 1'b1; lu_sfd = 64'hF15F_0000_0000_00B6; lu_sfbe = '1;
+    #2;
+    check(lu_rdy_v && !lu_ex_o.valid && lu_tid_o == TID'(6),
+          "F15_HEAD_PUB");
+    check(lu_res == 64'hF15F_0000_0000_00B6, "F15_HEAD_DATA");
+    tick();                                  // B's completion consumed
+    lu_vld = 0; lu_ctrl = '0;
+    lu_pom = 1'b0; lu_sfv = 1'b0; lu_sfd = '0; lu_sfbe = '0;
+    #2;
+    check(lu_rdy_v && !lu_ex_o.valid && lu_tid_o == TID'(4),
+          "F15_SLOT_PUB");
+    check(lu_res == 64'hF150_0000_0000_00A4, "F15_SLOT_DATA");
+    tick(); #2;
+    check(!lu_rdy_v && !(|i_lu.ldbuf_valid_q), "F15_FREED");
+    check(i_lu.lu_f15_collide_n >= 1, "F15_COLLIDE_SEEN");
 
     $display("HYP8_MEMORY_PASS checked=%0d", checked);
     $finish;

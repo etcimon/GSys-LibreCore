@@ -1,0 +1,258 @@
+  // r77 P6: p_next_state split per output family, event skeleton
+  // (publish -> reserve -> wb clears -> commit frees -> kill -> rec
+  // repair -> ckpt retire -> amap commit -> per-hart flush -> full
+  // flush) replicated verbatim in each block keeping only that
+  // family's writes. A family block reads another family's FINAL _d
+  // wire only (amap_d/famap_d are A's output; free_rep stays a local
+  // inside D's chain). p_t1_rnrec_ref/_eq is the equivalence gate.
+  always_comb begin : p_amap    // A: architectural maps (commit)
+    amap_d  = amap_q;
+    famap_d = famap_q;
+    for (int unsigned c = 0; c < NR_FREE; c++) begin
+      if (FP_EN && commit_valid_i[c] && commit_is_fpr_i[c])
+        famap_d[commit_hart_i[c]][commit_rd_i[c]] = commit_fprd_i[c];
+      else if (commit_valid_i[c] && (commit_rd_i[c] != 5'd0) &&
+               (commit_prd_i[c] != '0))
+        amap_d[commit_hart_i[c]][commit_rd_i[c]] = commit_prd_i[c];
+    end
+  end
+
+  always_comb begin : p_ckpt    // B: checkpoint ring state
+    automatic int unsigned rel2;
+    automatic logic [LVL_W:0] adv_h;
+    automatic int unsigned n_ret[NH];
+    ckpt_head_d = ckpt_head_q;
+    ckpt_cnt_d = ckpt_cnt_q;
+    ckpt_alloc_d = ckpt_alloc_q;
+    ckpt_falloc_d = ckpt_falloc_q;
+    ckpt_hart_d = ckpt_hart_q;
+    for (int unsigned h = 0; h < NH; h++) n_ret[h] = 0;
+
+    // ---- publish -----------------------------------------------------
+    if (pub_v_i) begin
+`ifdef G6LC_MUT_T1_RNREC
+      // Review mutant: pre-T1 publish section: per-entry live_slot loop
+      // plus dynamic-index writes, restored on the live path.
+      for (int unsigned s = 0; s < CKPT_DEPTH; s++) begin
+        if (live_slot(s) && !rsvd_mask[s]) begin
+          ckpt_alloc_d[s]  = ckpt_alloc_d[s]  | pub_mark_i[ckpt_hart_q[s]];
+          ckpt_falloc_d[s] = ckpt_falloc_d[s] | pub_fmark_i[ckpt_hart_q[s]];
+        end
+      end
+      for (int unsigned p = 0; p < NR_PORTS; p++) begin
+        if (pub_ck_v_i[p] && (int'(pub_ck_slot_i[p]) < CKPT_DEPTH)) begin
+          ckpt_hart_d[pub_ck_slot_i[p]]   = HID_W'(pub_ck_h_i[p]);
+          ckpt_alloc_d[pub_ck_slot_i[p]]  = pub_ck_aval_i[p];
+          ckpt_falloc_d[pub_ck_slot_i[p]] = pub_ck_faval_i[p];
+        end
+      end
+`else
+      // hyp8 T1 item 9: per-slot exclusive arms applied as one row
+      // vector. A write hit and a reservation are the same decoded
+      // predicate (t1_wr_s), so the two old loops collapse into the
+      // pub_*_v rows: hit -> port value, else live -> OR the hart's
+      // mark, else hold.
+      ckpt_hart_d   = pub_hart_v;
+      ckpt_alloc_d  = pub_alloc_v;
+      ckpt_falloc_d = pub_falloc_v;
+`endif
+    end
+
+    // ---- reserve ------------------------------------------------------
+    if (res_v_i) begin
+      for (int unsigned h = 0; h < NH; h++)
+        ckpt_cnt_d[h] = ckpt_cnt_d[h] + res_br_inc_i[h];
+    end
+
+    // ---- registered mispredict repair ----------------------------------
+    if (rec_v_q) begin
+      rel2 = (int'(g_pos) < int'(g_cnt)) ? int'(g_pos) : 0;
+      ckpt_cnt_d[rec_hart_q] = LVL_W'(rel2);
+    end
+
+    // ---- checkpoint retire ---------------------------------------------
+    for (int unsigned h = 0; h < NH; h++) begin
+      for (int unsigned c = 0; c < NR_FREE; c++)
+        if (ckpt_retire_i[c] && (int'(commit_hart_i[c]) == h)) n_ret[h]++;
+      if (n_ret[h] > int'(ckpt_cnt_d[h])) n_ret[h] = int'(ckpt_cnt_d[h]);
+      // Head is already the offset in this hart's ring. ckpt_slot added the
+      // hart base and this subtract removed it. n_ret fits in the live count,
+      // so one subtract wraps the sum.
+      adv_h = {1'b0, ckpt_head_q[h]} + (LVL_W + 1)'(n_ret[h]);
+      ckpt_head_d[h] = (adv_h >= (LVL_W + 1)'(CKPT_PER_HART))
+          ? LVL_W'(adv_h - (LVL_W + 1)'(CKPT_PER_HART))
+          : adv_h[LVL_W-1:0];
+      ckpt_cnt_d[h]  = ckpt_cnt_d[h] - LVL_W'(n_ret[h]);
+    end
+
+    // ---- per-hart flush -------------------------------------------------
+    for (int unsigned h = 0; h < NH; h++) begin
+      if (flush_hart_i[h] && !flush_i) begin
+        ckpt_head_d[h] = '0;
+        ckpt_cnt_d[h]  = '0;
+      end
+    end
+
+    // ---- full flush -----------------------------------------------------
+    if (flush_i) begin
+      ckpt_head_d = '0;
+      ckpt_cnt_d  = '0;
+    end
+  end
+
+  always_comb begin : p_map     // C: speculative maps (publish + restore)
+    map_d  = map_q;
+    fmap_d = fmap_q;
+
+    // ---- publish -----------------------------------------------------
+    if (pub_v_i) begin
+      for (int unsigned p = 0; p < NR_PORTS; p++) begin
+        if (pub_map_wr_v_i[p])
+          map_d[pub_map_h_i[p]][pub_map_rd_i[p]] =
+              PRF_W'(pub_map_prd_i[p][PRF_W-1:0]);
+        if (pub_fmap_wr_v_i[p])
+          fmap_d[pub_map_h_i[p]][pub_map_rd_i[p]] =
+              FPRF_W'(pub_fmap_prd_i[p][FPRF_W-1:0]);
+      end
+    end
+
+    // ---- registered mispredict repair ----------------------------------
+    if (rec_v_q) begin
+      map_d[g_hart] = g_map;
+      if (FP_EN) fmap_d[g_hart] = g_fmap;
+    end
+
+    // ---- per-hart flush (reads A's final amap_d/famap_d) ---------------
+    for (int unsigned h = 0; h < NH; h++) begin
+      if (flush_hart_i[h] && !flush_i) begin
+        map_d[h] = amap_d[h];
+        if (FP_EN) fmap_d[h] = famap_d[h];
+      end
+    end
+
+    // ---- full flush -----------------------------------------------------
+    if (flush_i) begin
+      map_d  = amap_d;
+      if (FP_EN) fmap_d = famap_d;
+    end
+  end
+
+  always_comb begin : p_free    // D: free/busy/owner pools
+    automatic logic [PRF_ENTRIES-1:0] squashed, arch_ref, free_rep;
+    automatic logic [FPN-1:0] fsquashed, farch_ref, ffree_rep;
+    free_d = free_q;
+    busy_d = busy_q;
+    owner_d = owner_q;
+    fowner_d = fowner_q;
+    ffree_d = ffree_q;
+    fbusy_d = fbusy_q;
+    squashed = '0; arch_ref = '0; free_rep = '0;
+    fsquashed = '0; farch_ref = '0; ffree_rep = '0;
+
+    // ---- publish -----------------------------------------------------
+    if (pub_v_i) begin
+      for (int unsigned p = 0; p < NR_PORTS; p++) begin
+        if (pub_own_v_i[p])
+          owner_d[int'(pub_own_idx_i[p])] = HID_W'(pub_own_h_i[p]);
+        if (pub_fown_v_i[p])
+          fowner_d[int'(pub_fown_idx_i[p])] = HID_W'(pub_own_h_i[p]);
+      end
+      busy_d  = busy_d  | pub_busy_set_i;
+      fbusy_d = fbusy_d | pub_fbusy_set_i;
+    end
+
+    // ---- reserve ------------------------------------------------------
+    if (res_v_i) begin
+      free_d  = free_d  & ~res_pick_mask_i;
+      ffree_d = ffree_d & ~res_fpick_mask_i;
+    end
+
+    // ---- writeback busy clears ----------------------------------------
+    for (int unsigned w = 0; w < NR_WB; w++) begin
+      if (wb_valid_i[w] && wb_prd_i[w] != '0) busy_d[wb_prd_i[w]] = 1'b0;
+      if (FP_EN && fwb_valid_i[w]) fbusy_d[fwb_prd_i[w]] = 1'b0;
+    end
+
+    // ---- commit frees --------------------------------------------------
+    for (int unsigned f = 0; f < NR_FREE; f++) begin
+      if (free_i[f] && free_prd_i[f] != '0) begin
+        free_d[free_prd_i[f]] = 1'b1;
+        busy_d[free_prd_i[f]] = 1'b0;
+      end
+      if (FP_EN && ffree_i[f]) begin
+        ffree_d[ffree_prd_i[f]] = 1'b1;
+        fbusy_d[ffree_prd_i[f]] = 1'b0;
+      end
+    end
+
+    // ---- killed in-flight group: return its reservations exactly once --
+    if (kill_v_i) begin
+      free_d  = free_d  | kill_pick_mask_i;
+      ffree_d = ffree_d | kill_fpick_mask_i;
+    end
+
+    // Repair basis: everything currently free, commit frees and killed-
+    // group returns included (the unbanked free_rep = free + this-cycle
+    // frees; in-flight reservations are not free yet and are never in the
+    // checkpoint alloc masks, so they stay excluded either way).
+    free_rep  = free_d;
+    ffree_rep = ffree_d;
+
+    // ---- registered mispredict repair ----------------------------------
+    // Select was registered last cycle; the squash set is the checkpoint's
+    // alloc mask minus everything already free. Restore the map, repair --
+    // never reinstate -- free/busy, and unwind that hart's ring to the
+    // restored level.
+    if (rec_v_q) begin
+      squashed = g_alloc & ~free_rep;
+      free_d = free_d | squashed;
+      busy_d = busy_d & ~squashed;
+      if (FP_EN) begin
+        fsquashed = g_falloc & ~ffree_rep;
+        ffree_d = ffree_d | fsquashed;
+        fbusy_d = fbusy_d & ~fsquashed;
+      end
+    end
+
+    // ---- per-hart flush -------------------------------------------------
+    for (int unsigned h = 0; h < NH; h++) begin
+      if (flush_hart_i[h] && !flush_i) begin
+        arch_ref = '0;
+        for (int unsigned a = 0; a < 32; a++)
+          if (amap_d[h][a] != '0) arch_ref[amap_d[h][a]] = 1'b1;
+        for (int unsigned i = 1; i < PRF_ENTRIES; i++) begin
+          if ((int'(owner_d[i]) == h) && !arch_ref[i]) begin
+            free_d[i] = 1'b1;
+            busy_d[i] = 1'b0;
+          end
+        end
+        if (FP_EN) begin
+          farch_ref = '0;
+          for (int unsigned a = 0; a < 32; a++) farch_ref[famap_d[h][a]] = 1'b1;
+          for (int unsigned i = 0; i < FPN; i++) begin
+            if ((int'(fowner_d[i]) == h) && !farch_ref[i]) begin
+              ffree_d[i] = 1'b1;
+              fbusy_d[i] = 1'b0;
+            end
+          end
+        end
+      end
+    end
+
+    // ---- full flush -----------------------------------------------------
+    if (flush_i) begin
+      free_d = '0;
+      for (int unsigned i = 1; i < PRF_ENTRIES; i++) free_d[i] = 1'b1;
+      for (int unsigned h = 0; h < NH; h++)
+        for (int unsigned a = 0; a < 32; a++)
+          if (amap_d[h][a] != '0) free_d[amap_d[h][a]] = 1'b0;
+      busy_d = '0;
+      if (FP_EN) begin
+        ffree_d = '1;
+        for (int unsigned h = 0; h < NH; h++)
+          for (int unsigned a = 0; a < 32; a++) ffree_d[famap_d[h][a]] = 1'b0;
+        fbusy_d = '0;
+      end
+    end
+  end
+

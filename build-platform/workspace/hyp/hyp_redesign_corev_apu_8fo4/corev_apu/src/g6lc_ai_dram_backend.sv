@@ -72,6 +72,31 @@ module g6lc_ai_dram_backend
     logic [AXI_DATA_WIDTH-1:0]    wdata, rdata;
     logic [AXI_USER_WIDTH-1:0]    wuser, ruser;
 
+    //pragma translate_off
+    // F14 (r76) point (5): the axi2mem write actually performed; (r76b)
+    // the matching read side — addr latched, rdata printed next cycle.
+    bit f14_tr;
+    initial f14_tr = $test$plusargs("f14_trace");
+    logic [AXI_ADDR_WIDTH-1:0] f14_rd_q;
+    always_ff @(posedge clk_i) begin
+      if (!rst_ni) begin
+        f14_rd_q <= '0;
+      end else if (f14_tr) begin
+        if (req && we &&
+            (slave.aw_lock || addr[31:12] == 20'h80001))
+          $display("[f14] sim_axi_wr t=%0t addr=%h be=%h data=%h",
+                   $time, addr, be, wdata);
+        if (req && !we)
+          f14_rd_q <= addr;
+        else
+          f14_rd_q <= '0;
+        if (f14_rd_q[31:12] == 20'h80001 && f14_rd_q != '0)
+          $display("[f14] sim_axi_rd t=%0t addr=%h data=%h",
+                   $time, f14_rd_q, rdata);
+      end
+    end
+    //pragma translate_on
+
     axi2mem #(
         .AXI_ID_WIDTH   ( AXI_ID_WIDTH   ),
         .AXI_ADDR_WIDTH ( AXI_ADDR_WIDTH ),

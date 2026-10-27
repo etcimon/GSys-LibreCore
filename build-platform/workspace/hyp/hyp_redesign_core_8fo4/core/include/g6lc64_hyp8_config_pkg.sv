@@ -350,7 +350,13 @@ package g6lc_config_pkg;
   };
 
   // The hyp8 redesign seam — every `// hyp8:` knob bound at compile time.
+  // -DG6LC_HYP8_DEEP selects the r76 deep-publish profile (Hyp8 with
+  // LoadPubStages==2), same seam style as G6LC_HYP8_SMT2.
+`ifdef G6LC_HYP8_DEEP
+  localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t HypCfg = g6lc_hyp_pkg::Hyp8Deep;
+`else
   localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t HypCfg = g6lc_hyp_pkg::Hyp8;
+`endif
 
   // hyp8 bring-up: `initial` is illegal at package scope (a package body
   // parses even under translate_off), so the legality check runs at

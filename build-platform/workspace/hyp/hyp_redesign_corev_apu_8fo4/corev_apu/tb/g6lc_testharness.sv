@@ -2393,6 +2393,87 @@ module g6lc_testharness #(
     .CSYSACK('0)
   );
 `endif
+
+//pragma translate_off
+  // F14 (r76): sc.d AXI write-address discriminator, harness side.
+  // Points (2)-(4): DRAM slave side of i_axi_riscv_atomics, the atomics
+  // mst side, and the latency delayer output. Filtered to lock or the
+  // 0x80001 page so the log stays small; +f14_trace enables.
+  bit f14_tr, f14_trr;
+  initial f14_tr  = $test$plusargs("f14_trace");
+  initial f14_trr = $test$plusargs("f14_trace_r");
+  always_ff @(posedge clk_i) begin
+    if (ndmreset_n && f14_tr) begin
+      if (master[g6lc_soc::DRAM].aw_valid && master[g6lc_soc::DRAM].aw_ready &&
+          (master[g6lc_soc::DRAM].aw_lock ||
+           master[g6lc_soc::DRAM].aw_addr[31:12] == 20'h80001))
+        $display("[f14] slv_aw t=%0t addr=%h lock=%b atop=%h id=%h size=%h len=%h",
+                 $time, master[g6lc_soc::DRAM].aw_addr,
+                 master[g6lc_soc::DRAM].aw_lock, master[g6lc_soc::DRAM].aw_atop,
+                 master[g6lc_soc::DRAM].aw_id, master[g6lc_soc::DRAM].aw_size,
+                 master[g6lc_soc::DRAM].aw_len);
+      if (master[g6lc_soc::DRAM].ar_valid && master[g6lc_soc::DRAM].ar_ready &&
+          master[g6lc_soc::DRAM].ar_lock)
+        $display("[f14] slv_ar t=%0t addr=%h lock=%b atop=%h id=%h size=%h len=%h",
+                 $time, master[g6lc_soc::DRAM].ar_addr,
+                 master[g6lc_soc::DRAM].ar_lock, 4'h0,
+                 master[g6lc_soc::DRAM].ar_id, master[g6lc_soc::DRAM].ar_size,
+                 master[g6lc_soc::DRAM].ar_len);
+      if (dram.aw_valid && dram.aw_ready &&
+          (dram.aw_lock || dram.aw_addr[31:12] == 20'h80001))
+        $display("[f14] mst_aw t=%0t addr=%h lock=%b atop=%h id=%h size=%h len=%h",
+                 $time, dram.aw_addr, dram.aw_lock, dram.aw_atop, dram.aw_id,
+                 dram.aw_size, dram.aw_len);
+      if (dram.ar_valid && dram.ar_ready && dram.ar_lock)
+        $display("[f14] mst_ar t=%0t addr=%h lock=%b atop=%h id=%h size=%h len=%h",
+                 $time, dram.ar_addr, dram.ar_lock, 4'h0, dram.ar_id,
+                 dram.ar_size, dram.ar_len);
+      if (dram_lat.aw_valid && dram_lat.aw_ready &&
+          (dram_lat.aw_lock || dram_lat.aw_addr[31:12] == 20'h80001))
+        $display("[f14] dram_lat_aw t=%0t addr=%h lock=%b atop=%h id=%h size=%h len=%h",
+                 $time, dram_lat.aw_addr, dram_lat.aw_lock, dram_lat.aw_atop,
+                 dram_lat.aw_id, dram_lat.aw_size, dram_lat.aw_len);
+      // F14 (r76b): the debug-module SBA master — tohost is read through
+      // i_dm_axi_master (hyp axi_adapter) -> slave[1]. Unfiltered (rare).
+      if (dm_master_req && dm_master_gnt)
+        $display("[f14] dm_req t=%0t addr=%h we=%b",
+                 $time, dm_axi_m_req.ar.addr, 1'b0);
+      if (dm_master_r_valid)
+        $display("[f14] dm_rsp t=%0t rdata=%h", $time, dm_master_r_rdata);
+      if (dm_axi_m_req.ar_valid && dm_axi_m_resp.ar_ready)
+        $display("[f14] dm_ar t=%0t addr=%h id=%h size=%h len=%h",
+                 $time, dm_axi_m_req.ar.addr, dm_axi_m_req.ar.id,
+                 dm_axi_m_req.ar.size, dm_axi_m_req.ar.len);
+      if (dm_axi_m_resp.r_valid && dm_axi_m_req.r_ready)
+        $display("[f14] dm_r t=%0t data=%h id=%h last=%b resp=%h",
+                 $time, dm_axi_m_resp.r.data, dm_axi_m_resp.r.id,
+                 dm_axi_m_resp.r.last, dm_axi_m_resp.r.resp);
+      if (dm_axi_m_req.aw_valid && dm_axi_m_resp.aw_ready)
+        $display("[f14] dm_aw t=%0t addr=%h id=%h size=%h len=%h",
+                 $time, dm_axi_m_req.aw.addr, dm_axi_m_req.aw.id,
+                 dm_axi_m_req.aw.size, dm_axi_m_req.aw.len);
+      if (dm_axi_m_req.w_valid && dm_axi_m_resp.w_ready)
+        $display("[f14] dm_w t=%0t data=%h strb=%h last=%b",
+                 $time, dm_axi_m_req.w.data, dm_axi_m_req.w.strb,
+                 dm_axi_m_req.w.last);
+      if (dm_axi_m_resp.b_valid && dm_axi_m_req.b_ready)
+        $display("[f14] dm_b t=%0t id=%h resp=%h",
+                 $time, dm_axi_m_resp.b.id, dm_axi_m_resp.b.resp);
+      // +f14_trace_r: every R beat on the atomics slv and mst sides.
+      if (f14_trr) begin
+        if (master[g6lc_soc::DRAM].r_valid && master[g6lc_soc::DRAM].r_ready)
+          $display("[f14] slv_r t=%0t id=%h data=%h last=%b resp=%h",
+                   $time, master[g6lc_soc::DRAM].r_id,
+                   master[g6lc_soc::DRAM].r_data,
+                   master[g6lc_soc::DRAM].r_last,
+                   master[g6lc_soc::DRAM].r_resp);
+        if (dram.r_valid && dram.r_ready)
+          $display("[f14] mst_r t=%0t id=%h data=%h last=%b resp=%h",
+                   $time, dram.r_id, dram.r_data, dram.r_last, dram.r_resp);
+      end
+    end
+  end
+//pragma translate_on
 endmodule
 
 `include "g6lc_apu_xbar_hart.sv"

@@ -127,6 +127,13 @@ module store_buffer
     // T6b: hart of the arriving store, recorded on its speculative entry.
     input  logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] st_hart_i,
     output logic [G6LCCfg.PLEN-1:0] rvfi_mem_paddr_o,
+    // r76 F14: the accepted speculative-queue push — the committing
+    // instruction's own paddr for RVFI's mem_paddr (the bus above is
+    // the spec head at commit time, which under OoO issue is not the
+    // committing store).
+    output logic                           rvfi_st_push_valid_o,
+    output logic [G6LCCfg.TRANS_ID_BITS-1:0] rvfi_st_push_tid_o,
+    output logic [G6LCCfg.PLEN-1:0]        rvfi_st_push_paddr_o,
     input logic [G6LCCfg.XLEN-1:0] data_i,  // data which is placed in the queue
     input logic [(G6LCCfg.XLEN/8)-1:0] be_i,  // byte enable in
     input logic [1:0] data_size_i,  // type of request we are making (e.g.: bytes to write)
@@ -572,6 +579,12 @@ module store_buffer
                           (!G6LCCfg.OoOEn || commit_tid_present);
 
   assign rvfi_mem_paddr_o = spec_head.address;
+
+  // r76 F14: per-instruction paddr record — the same strobe/fields the
+  // insertion writes into the speculative queue.
+  assign rvfi_st_push_valid_o = valid_i;
+  assign rvfi_st_push_tid_o   = trans_id_i;
+  assign rvfi_st_push_paddr_o = paddr_i;
 
   // ----------------------------------------
   // stb_drain — Commit Queue - Memory Interface

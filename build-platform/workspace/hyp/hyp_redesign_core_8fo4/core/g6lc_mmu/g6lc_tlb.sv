@@ -623,21 +623,32 @@ module g6lc_tlb
       end else if (flush_vvma_i && G6LCCfg.RVH) begin
         if (tags_q[i].v_st_enbl[HYP_EXT*2] && tags_q[i].v_st_enbl[0]) begin
           // invalidate logic
+          // r78 A135: the VMID/ASID entry-match terms are shared by
+          // every flush rule below — hoisted once per entry.
+          automatic logic tl_vmid_ok =
+              (tags_q[i].v_st_enbl[HYP_EXT] &&
+               (lu_vmid_i == tags_q[i].vmid)) ||
+              !tags_q[i].v_st_enbl[HYP_EXT];
+          automatic logic tl_asid_ok =
+              (asid_to_be_flushed_i == tags_q[i].asid);
           // flush everything if current VMID matches and ASID is 0 and vaddr is 0 ("SFENCE.VMA/HFENCE.VVMA x0 x0" case)
-          if (asid_to_be_flushed_is0 && vaddr_to_be_flushed_is0 && ((tags_q[i].v_st_enbl[HYP_EXT] && lu_vmid_i == tags_q[i].vmid) || !tags_q[i].v_st_enbl[HYP_EXT]))
+          if (asid_to_be_flushed_is0 && vaddr_to_be_flushed_is0 && tl_vmid_ok)
             tags_n[i].valid = 1'b0;
           // flush vaddr in all addressing space if current VMID matches ("SFENCE.VMA/HFENCE.VVMA vaddr x0" case), it should happen only for leaf pages
-          else if (asid_to_be_flushed_is0 && (row_flush_addr_match[i]) && (~vaddr_to_be_flushed_is0) && ((tags_q[i].v_st_enbl[HYP_EXT] && lu_vmid_i == tags_q[i].vmid) || !tags_q[i].v_st_enbl[HYP_EXT]))
+          else if (asid_to_be_flushed_is0 && (row_flush_addr_match[i]) && (~vaddr_to_be_flushed_is0) && tl_vmid_ok)
             tags_n[i].valid = 1'b0;
           // the entry is flushed if it's not global and asid and vaddr and current VMID matches with the entry to be flushed ("SFENCE.VMA/HFENCE.VVMA vaddr asid" case)
-          else if ((!content_q[i].pte.g) && (row_flush_addr_match[i]) && (asid_to_be_flushed_i  == tags_q[i].asid  && ((tags_q[i].v_st_enbl[HYP_EXT] && lu_vmid_i == tags_q[i].vmid) || !tags_q[i].v_st_enbl[HYP_EXT])) && (!vaddr_to_be_flushed_is0) && (!asid_to_be_flushed_is0))
+          else if ((!content_q[i].pte.g) && (row_flush_addr_match[i]) && (tl_asid_ok && tl_vmid_ok) && (!vaddr_to_be_flushed_is0) && (!asid_to_be_flushed_is0))
             tags_n[i].valid = 1'b0;
           // the entry is flushed if it's not global, and the asid and the current VMID matches and vaddr is 0. ("SFENCE.VMA/HFENCE.VVMA 0 asid" case)
-          else if ((!content_q[i].pte.g) && (vaddr_to_be_flushed_is0) && (asid_to_be_flushed_i  == tags_q[i].asid  && ((tags_q[i].v_st_enbl[HYP_EXT] && lu_vmid_i == tags_q[i].vmid) || !tags_q[i].v_st_enbl[HYP_EXT])) && (!asid_to_be_flushed_is0))
+          else if ((!content_q[i].pte.g) && (vaddr_to_be_flushed_is0) && (tl_asid_ok && tl_vmid_ok) && (!asid_to_be_flushed_is0))
             tags_n[i].valid = 1'b0;
         end
       end else if (flush_gvma_i && G6LCCfg.RVH) begin
         if (tags_q[i].v_st_enbl[HYP_EXT]) begin
+          // r78 A135: shared gvma entry-VMID match.
+          automatic logic tl_gvmid_ok =
+              (vmid_to_be_flushed_i == tags_q[i].vmid);
           // invalidate logic
           // flush everything if vmid is 0 and addr is 0 ("HFENCE.GVMA x0 x0" case)
           if (vmid_to_be_flushed_is0 && gpaddr_to_be_flushed_is0) tags_n[i].valid = 1'b0;
@@ -645,10 +656,10 @@ module g6lc_tlb
           else if (vmid_to_be_flushed_is0 && (|vaddr_level_match[i][HYP_EXT]) && (~gpaddr_to_be_flushed_is0))
             tags_n[i].valid = 1'b0;
           // the entry vmid and gpaddr both match with the entry to be flushed ("HFENCE.GVMA gpaddr vmid" case)
-          else if ((|vaddr_level_match[i][HYP_EXT]) && (vmid_to_be_flushed_i == tags_q[i].vmid) && (~gpaddr_to_be_flushed_is0) && (~vmid_to_be_flushed_is0))
+          else if ((|vaddr_level_match[i][HYP_EXT]) && tl_gvmid_ok && (~gpaddr_to_be_flushed_is0) && (~vmid_to_be_flushed_is0))
             tags_n[i].valid = 1'b0;
           // the entry is flushed if the vmid matches and gpaddr is 0. ("HFENCE.GVMA 0 vmid" case)
-          else if ((gpaddr_to_be_flushed_is0) && (vmid_to_be_flushed_i == tags_q[i].vmid) && (!vmid_to_be_flushed_is0))
+          else if ((gpaddr_to_be_flushed_is0) && tl_gvmid_ok && (!vmid_to_be_flushed_is0))
             tags_n[i].valid = 1'b0;
         end
         // normal replacement

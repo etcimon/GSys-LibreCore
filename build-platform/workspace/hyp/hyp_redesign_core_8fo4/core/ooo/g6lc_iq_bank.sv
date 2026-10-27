@@ -419,11 +419,15 @@ module g6lc_iq_bank
   // is a constant.
   logic [ENTRIES-1:0] one_older;
   for (genvar e = 0; e < ENTRIES; e++) begin : gen_one
-    logic [ENTRIES-1:0] only;
-    for (genvar b = 0; b < ENTRIES; b++) begin : gen_b
-      assign only[b] = ort[e][b] && !(|(ort[e] & ~((ENTRIES'(1) << b))));
+    // r78: "exactly one older ready" as ENTRIES parallel equality
+    // compares OR'd (the single-hot table) instead of the N^2
+    // per-bit only[] mask — same function, one 4-input term per
+    // entry. Still no subtract on the candidate cone.
+    logic [ENTRIES-1:0] hit1;
+    for (genvar k = 0; k < ENTRIES; k++) begin : gen_k
+      assign hit1[k] = (ort[e] == (ENTRIES'(1) << k));
     end
-    assign one_older[e] = |only;
+    assign one_older[e] = |hit1;
   end
   for (genvar e = 0; e < ENTRIES; e++) begin : gen_cand
     assign ort[e] = ready & older_t[e];

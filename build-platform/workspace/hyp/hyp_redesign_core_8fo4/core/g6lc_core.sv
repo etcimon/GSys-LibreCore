@@ -1124,6 +1124,13 @@ assign irq_active = irq_i[smt_active_hart];
   //RVFI
   lsu_ctrl_t rvfi_lsu_ctrl;
   logic [G6LCCfg.PLEN-1:0] rvfi_mem_paddr;
+  // r76 F14: per-instruction store/AMO paddr records from the LSU.
+  logic                           rvfi_st_push_valid;
+  logic [G6LCCfg.TRANS_ID_BITS-1:0] rvfi_st_push_tid;
+  logic [G6LCCfg.PLEN-1:0]        rvfi_st_push_paddr;
+  logic                           rvfi_amo_push_valid;
+  logic [G6LCCfg.TRANS_ID_BITS-1:0] rvfi_amo_push_tid;
+  logic [G6LCCfg.PLEN-1:0]        rvfi_amo_push_paddr;
   logic [G6LCCfg.NrIssuePorts-1:0] rvfi_is_compressed;
   logic [G6LCCfg.NrIssuePorts-1:0][31:0] rvfi_instr_id;
   rvfi_probes_csr_t rvfi_csr;
@@ -3571,7 +3578,13 @@ assign irq_active = irq_i[smt_active_hart];
       .fet_pmpaddr_i           (fet_pmpaddr),
       //RVFI
       .rvfi_lsu_ctrl_o         (rvfi_lsu_ctrl),
-      .rvfi_mem_paddr_o        (rvfi_mem_paddr)
+      .rvfi_mem_paddr_o        (rvfi_mem_paddr),
+      .rvfi_st_push_valid_o    (rvfi_st_push_valid),
+      .rvfi_st_push_tid_o      (rvfi_st_push_tid),
+      .rvfi_st_push_paddr_o    (rvfi_st_push_paddr),
+      .rvfi_amo_push_valid_o   (rvfi_amo_push_valid),
+      .rvfi_amo_push_tid_o     (rvfi_amo_push_tid),
+      .rvfi_amo_push_paddr_o   (rvfi_amo_push_paddr)
   );
 
   // ---------
@@ -4553,6 +4566,12 @@ assign irq_active = irq_i[smt_active_hart];
       .wbdata_i    (wbdata_ex_id),
       .commit_ack_i(commit_ack),
       .mem_paddr_i (rvfi_mem_paddr),
+      .st_push_valid_i  (rvfi_st_push_valid),
+      .st_push_tid_i    (rvfi_st_push_tid),
+      .st_push_paddr_i  (rvfi_st_push_paddr),
+      .amo_push_valid_i (rvfi_amo_push_valid),
+      .amo_push_tid_i   (rvfi_amo_push_tid),
+      .amo_push_paddr_i (rvfi_amo_push_paddr),
       .debug_mode_i(debug_mode),
       .wdata_i     (wdata_commit_id),
 

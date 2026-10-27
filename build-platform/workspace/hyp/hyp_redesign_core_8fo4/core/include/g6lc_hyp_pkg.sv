@@ -87,6 +87,36 @@ package g6lc_hyp_pkg;
     int unsigned LsqCamBanks;
     // Write buffer: pipelined drain path (wt_dcache_wbuffer.md).
     bit WbufPipelined;
+    // LSU L5: 1 = combinational publish pick; 2 = registered select
+    // record (L5a) + presentation (L5b); load WB +1.
+    int unsigned LoadPubStages;
+    // IQ bank steer: 1 = same-cycle first fit; 2 = eligibility
+    // registered at the bank update edge (design r76 §B2; not
+    // implemented yet).
+    int unsigned IqSteerStages;
+    // IQ bank select/payload: 1 or 2 (design r69 P9; not implemented).
+    int unsigned IqSelStages;
+    // 1 or 2 (design r75 §4; not implemented).
+    int unsigned RenameReadStages;
+    // 1 or 2 (not implemented).
+    int unsigned FreelistPickStages;
+    // 1 or 2 (design r69 P7; not implemented).
+    int unsigned StoreTransStages;
+    // 1 or 2 (design r75 S4; not implemented).
+    int unsigned TlbCtxStages;
+    // 1 or 2 (design r69 P5; not implemented).
+    int unsigned LsqVerdictStages;
+    // 1 or 2 (not implemented).
+    int unsigned CsrReadMuxStages;
+    // 1 or 2 (not implemented).
+    int unsigned CommitStages;
+    // 1 or 3 (not implemented).
+    int unsigned AesStages;
+    // 1 or 2; 2 = the r75 formed-result register. Today's RTL registers
+    // the formed AMO result unconditionally (wt_dcache_missunit
+    // AMO_RESULT_FORM), so every profile binds 2 until the ==1 arm is
+    // written.
+    int unsigned MissunitResultStages;
   } g6lc_hyp_cfg_t;
 
   // Pre-redesign behaviour: single stages, no banking, no overrides.
@@ -121,7 +151,22 @@ package g6lc_hyp_pkg;
       IqArbStages: 1,
       FpuLatOverride: 1'b0,
       LsqCamBanks: 1,
-      WbufPipelined: 1'b0
+      WbufPipelined: 1'b0,
+      LoadPubStages: 1,
+      IqSteerStages: 1,
+      IqSelStages: 1,
+      RenameReadStages: 1,
+      FreelistPickStages: 1,
+      StoreTransStages: 1,
+      TlbCtxStages: 1,
+      LsqVerdictStages: 1,
+      CsrReadMuxStages: 1,
+      CommitStages: 1,
+      AesStages: 1,
+      // r76 note: wt_dcache_missunit registers the formed AMO result
+      // unconditionally (AMO_RESULT_FORM), so even the pre-redesign
+      // profile carries 2 — the ==1 arm does not exist yet.
+      MissunitResultStages: 2
   };
 
   // The 8-FO4 operating point.
@@ -174,7 +219,76 @@ package g6lc_hyp_pkg;
       IqArbStages: 2,
       FpuLatOverride: 1'b1,
       LsqCamBanks: 2,
-      WbufPipelined: 1'b1
+      WbufPipelined: 1'b1,
+      LoadPubStages: 1,
+      IqSteerStages: 1,
+      IqSelStages: 1,
+      RenameReadStages: 1,
+      FreelistPickStages: 1,
+      StoreTransStages: 1,
+      TlbCtxStages: 1,
+      LsqVerdictStages: 1,
+      CsrReadMuxStages: 1,
+      CommitStages: 1,
+      AesStages: 1,
+      // Same r76 note as HypDefault: the formed-result register is
+      // unconditional in today's missunit.
+      MissunitResultStages: 2
+  };
+
+  // r76 deep-publish profile: Hyp8 with LoadPubStages==2. The registered
+  // L5 select record it names was implemented and measured as a
+  // COUNTERCASE in r76 (analyze-r76-lu-deep: module 42.0 -> 47.0) and
+  // reverted, so today no RTL arm reads the field: this profile builds
+  // the same netlist as Hyp8 and only the LAT_LOAD / WAKE_LD sizing
+  // terms (+1, inert under IqSpecWakeup==0) differ. It is kept as the
+  // seam for the next load_unit stage attempt. The other new
+  // stage-count fields keep their Hyp8 value because the RTL arms they
+  // would gate do not exist yet (see each field's comment).
+  localparam g6lc_hyp_cfg_t Hyp8Deep = '{
+      AluStages: 3,
+      AluStaggered: 1'b1,
+      RenameStages: 3,
+      RenameResolveStages: 2,
+      FreelistBanks: 2,
+      IqBanks: 8,
+      IqBankEntries: 4,
+      IqSpecWakeup: 0,
+      IqSteer: 1'b1,
+      FeNextlineUntagged: 1'b1,
+      FeNextlineEntries: 256,
+      FeOverridePred: 1'b1,
+      FeEpochBits: 3,
+      LoadUseExtra: 2,
+      StoreFwdCycles: 3,
+      LsuAguStages: 2,
+      DcacheHitExtra: 2,
+      CommitBundleStages: 1,
+      WbCaptureStages: 0,
+      WbReserve: 1'b1,
+      WbLanes: 6,
+      MultStagesOverride: 0,
+      DecodeStages: 3,
+      CsrReadStages: 2,
+      TlbStages: 3,
+      PtwDecodeStage: 1,
+      LsqReduceStages: 2,
+      IqArbStages: 2,
+      FpuLatOverride: 1'b1,
+      LsqCamBanks: 2,
+      WbufPipelined: 1'b1,
+      LoadPubStages: 2,
+      IqSteerStages: 1,
+      IqSelStages: 1,
+      RenameReadStages: 1,
+      FreelistPickStages: 1,
+      StoreTransStages: 1,
+      TlbCtxStages: 1,
+      LsqVerdictStages: 1,
+      CsrReadMuxStages: 1,
+      CommitStages: 1,
+      AesStages: 1,
+      MissunitResultStages: 2
   };
 
   // Wakeup/contract latency classes used by scoreboard + functional units.
@@ -202,7 +316,8 @@ package g6lc_hyp_pkg;
       LAT_ALU_LOW:   return 1;
       LAT_ALU_FULL:  return h.AluStages;
       LAT_MUL:       return mult_stages;
-      LAT_LOAD:      return 2 + h.DcacheHitExtra + h.LoadUseExtra;
+      LAT_LOAD:      return 2 + h.DcacheHitExtra + h.LoadUseExtra +
+                           (h.LoadPubStages - 1);
       LAT_FP_FIXED:  return fp_lat;
       default:       return 0;  // LAT_NONSPEC: wake on real writeback only
     endcase
@@ -249,6 +364,18 @@ package g6lc_hyp_pkg;
     ok &= h.IqArbStages inside {1, 2};
     ok &= !h.FeOverridePred || (h.FeEpochBits >= 2);
     ok &= h.LsqCamBanks >= 1;
+    ok &= h.LoadPubStages inside {1, 2};
+    ok &= h.IqSteerStages inside {1, 2};
+    ok &= h.IqSelStages inside {1, 2};
+    ok &= h.RenameReadStages inside {1, 2};
+    ok &= h.FreelistPickStages inside {1, 2};
+    ok &= h.StoreTransStages inside {1, 2};
+    ok &= h.TlbCtxStages inside {1, 2};
+    ok &= h.LsqVerdictStages inside {1, 2};
+    ok &= h.CsrReadMuxStages inside {1, 2};
+    ok &= h.CommitStages inside {1, 2};
+    ok &= h.AesStages inside {1, 3};
+    ok &= h.MissunitResultStages inside {1, 2};
     return ok;
   endfunction
 

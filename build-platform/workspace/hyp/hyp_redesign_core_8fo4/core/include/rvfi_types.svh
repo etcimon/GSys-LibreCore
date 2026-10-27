@@ -134,6 +134,12 @@
   logic [Cfg.NrWbPorts-1:0][Cfg.XLEN-1:0] wbdata; \
   logic [Cfg.NrCommitPorts-1:0] commit_ack; \
   logic [Cfg.PLEN-1:0] mem_paddr; \
+  logic st_push_valid; \
+  logic [Cfg.TRANS_ID_BITS-1:0] st_push_tid; \
+  logic [Cfg.PLEN-1:0] st_push_paddr; \
+  logic amo_push_valid; \
+  logic [Cfg.TRANS_ID_BITS-1:0] amo_push_tid; \
+  logic [Cfg.PLEN-1:0] amo_push_paddr; \
   logic debug_mode; \
   logic [Cfg.NrCommitPorts-1:0][Cfg.XLEN-1:0] wdata; \
   logic branch_valid; \

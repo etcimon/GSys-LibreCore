@@ -77,6 +77,15 @@ module store_unit
     output logic [G6LCCfg.VLEN-1:0] vaddr_o,
     // RVFI information - RVFI
     output logic [G6LCCfg.PLEN-1:0] rvfi_mem_paddr_o,
+    // r76 F14: per-instruction paddr records for RVFI's mem_paddr —
+    // the STQ accept strobe (store) and the amo_buffer post (AMO),
+    // each with the instruction's own tid + translated paddr.
+    output logic                           rvfi_st_push_valid_o,
+    output logic [G6LCCfg.TRANS_ID_BITS-1:0] rvfi_st_push_tid_o,
+    output logic [G6LCCfg.PLEN-1:0]        rvfi_st_push_paddr_o,
+    output logic                           rvfi_amo_push_valid_o,
+    output logic [G6LCCfg.TRANS_ID_BITS-1:0] rvfi_amo_push_tid_o,
+    output logic [G6LCCfg.PLEN-1:0]        rvfi_amo_push_paddr_o,
     // Transformed trap instruction out - TO_BE_COMPLETED
     output logic [31:0] tinst_o,
     // TO_BE_COMPLETED - TO_BE_COMPLETED
@@ -700,6 +709,9 @@ assign result_o = lsu_ctrl_i.data;
       .paddr_i              (paddr_to_sb),
       .trans_id_i           (trans_id_q),
       .rvfi_mem_paddr_o     (rvfi_mem_paddr_o),
+      .rvfi_st_push_valid_o (rvfi_st_push_valid_o),
+      .rvfi_st_push_tid_o   (rvfi_st_push_tid_o),
+      .rvfi_st_push_paddr_o (rvfi_st_push_paddr_o),
       .data_i               (st_data_q),
       .cbo_op_i             (cbo_op_q),
       .be_i                 (st_be_q),
@@ -707,6 +719,13 @@ assign result_o = lsu_ctrl_i.data;
       .req_port_i           (req_port_i),
       .req_port_o           (req_port_o)
   );
+
+  // r76 F14: the amo_buffer post — the buffer's own accept strobe
+  // (valid_i) with the staged tid and the paddr field it records.
+  // (amo_buffer itself has no trans_id port; the tid lives here.)
+  assign rvfi_amo_push_valid_o = amo_buffer_valid;
+  assign rvfi_amo_push_tid_o   = trans_id_q;
+  assign rvfi_amo_push_paddr_o = paddr_i;
 
   if (G6LCCfg.RVA) begin
     amo_buffer #(

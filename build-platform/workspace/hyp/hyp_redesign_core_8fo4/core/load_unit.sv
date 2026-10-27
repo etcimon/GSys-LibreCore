@@ -1419,6 +1419,76 @@ assign ldbuf_full = &ldbuf_valid_q;
                   ((ldbuf_last_id_q == rresp_idx) || !kill_req_w) &&
                   ex_i.valid && !ex_ptw_i && state_q[LU_B_SEND_TAG];
 
+  // F15: the three FSM-head completion arms below (translation fault,
+  // mispredicted-speculative write-off, STQ-forward completion) override
+  // valid_o/trans_id_o unconditionally. Their !data_rvalid guards came
+  // from the in-order core where publish == rvalid; under hyp8 L5 a
+  // slot publishes >=1 cycle after its rvalid (once ld_checked_i is
+  // final), so the data publish pick can coincide with a head
+  // completion — the slot would be popped while its completion is
+  // never presented (a lost load writeback). The data arm yields to
+  // the head arms; the head arms themselves are unchanged.
+  logic head_pub_wt, head_pub_spec, head_pub_fwd, head_pub;
+  logic pub_fire;
+  assign head_pub_wt   = (G6LCCfg.MmuPresent || G6LCCfg.NonIdemPotenceEn) &&
+                         state_q[LU_B_WAIT_TRANSLATION] &&
+                         !req_port_i.data_rvalid && ex_i.valid && valid_i &&
+                         !cancelled_request;
+  assign head_pub_spec = G6LCCfg.SpeculativeSb &&
+                         state_q[LU_B_WAIT_SPEC_LOAD] &&
+                         lsu_ctrl_i.is_speculative_load_miss &&
+                         !req_port_i.data_rvalid && valid_i &&
+                         !cancelled_request;
+  // F15b: shallow superset of st_fwd_done built from registered state
+  // and port signals only (the FSM output itself is the deepest
+  // load_control product and dragged the pop path to 42.0 FO4).
+  // IDLE arm: st_fwd_done implies accept_req && !st_pipeline_busy &&
+  // page_offset_matches_i && st_fwd_covers && !data_rvalid &&
+  // ld_checked_head in state_q[IDLE] ⊂ this predicate; the
+  // WAIT_PAGE_OFFSET arm implies fwd_final && !data_rvalid =
+  // st_fwd_covers && ld_checked_head && !data_rvalid in state_q[WPO]
+  // ⊂ this predicate. st_fwd_done |-> head_pub_fwd is asserted in the
+  // translate_off block; the data arm merely yields a few extra rare
+  // cycles — a one-cycle delay for the slot, never a loss.
+  assign head_pub_fwd  = !req_port_i.data_rvalid && st_fwd_covers &&
+                         ld_checked_head &&
+                         (state_q[LU_B_IDLE] || state_q[LU_B_WAIT_PAGE_OFFSET]);
+  assign head_pub      = head_pub_wt | head_pub_spec | head_pub_fwd;
+`ifdef G6LC_MUT_LU_PUB_COLLIDE
+  // MUTANT: the pre-F15 ungated pick — a head completion steals a
+  // popped slot's completion.
+  assign pub_fire = pub_any;
+`else
+  assign pub_fire = pub_any && !head_pub;
+`endif
+
+  // r76 L5 one-hot arms (A22 exclusive arms / A104 OneHotSelect): the
+  // 7-arm last-writer-wins chain below was a 41-FO4 independent-LHS
+  // bundle. These predicates reproduce the chain's win/lose order
+  // exactly — pend > expub > data for the slot arms (EXPEND mutant
+  // swaps data over expub and drops pend), the FSM-head completions
+  // override the presented fields (never the pops), and drn pops only
+  // when no slot arm did.
+  logic a_pend, a_expub, a_data, a_drn, a_head;
+`ifdef G6LC_MUT_LSU_EXPEND
+  assign a_pend  = 1'b0;
+  assign a_data  = pub_fire;
+  assign a_expub = ex_pub && !a_data;
+`else
+  assign a_pend  = ex_pend_sel;
+  assign a_expub = ex_pub && !a_pend;
+  assign a_data  = pub_fire && !a_pend && !a_expub;
+`endif
+  assign a_head = head_pub;        // wt | spec | fwd (fwd = st_fwd_done)
+  assign a_drn  = drn_any && !a_expub && !a_data;
+`ifdef G6LC_MUT_LU_L5_ARMS
+  // MUTANT: unmasked presentation — a head completion ORs its tid over
+  // a concurrent ex/data arm's; the equivalence below must trip.
+  localparam logic L5_AMASK = 1'b1;
+`else
+  localparam logic L5_AMASK = 1'b0;
+`endif
+
   // decoupled rvalid/publish process
   always_comb begin : rvalid_output
     // G1l: leftover D$ rvalid with rid of a free slot must not pop or
@@ -1439,81 +1509,29 @@ assign ldbuf_full = &ldbuf_valid_q;
     // unrelated slot's data. The pending arm serves deferred kills, the
     // ex arm the same-cycle kill. Under G6LC_MUT_LSU_EXPEND the pending
     // arm is absent and the data tree outranks the exception arm again.
-`ifdef G6LC_MUT_LSU_EXPEND
-    if (pub_any) begin
-      retire_idx   = ldbuf_id_t'(pub_idx_w);
-      valid_o      = 1'b1;
-      trans_id_o   = pub_ptree[1].meta.trans_id;
-      ldbuf_r      = 1'b1;
-      ldbuf_rindex = retire_idx;
-    end else if (ex_pub) begin
-      trans_id_o   = ldbuf_q[rresp_idx].trans_id;
-      valid_o      = 1'b1;
-      ex_o.valid   = 1'b1;
-      ldbuf_r      = 1'b1;
-      ldbuf_rindex = rresp_idx;
-    end
-`else
-    if (ex_pend_sel) begin
-      // Deferred faulted entry: the record captured at the kill edge is
-      // presented (ex_o fields mux above); the kill resolved the request.
-      // The slot is not popped here: the publish marks it rkill_q at
-      // the edge and the drn pick frees it a cycle later, keeping this
-      // arm's state gate out of the ldbuf_valid_d register cone.
-      trans_id_o   = pend_q[0].tid;
-      valid_o      = 1'b1;
-      ex_o.valid   = 1'b1;
-    end else if (ex_pub) begin
-      // Faulted load: publish in the same cycle as kill_req. ex_pub
-      // already includes !kill_req_w for the tag that owns this response.
-      trans_id_o   = ldbuf_q[rresp_idx].trans_id;
-      valid_o      = 1'b1;
-      ex_o.valid   = 1'b1;
-      ldbuf_r      = 1'b1;
-      ldbuf_rindex = rresp_idx;
-    end else if (pub_any) begin
-      retire_idx   = ldbuf_id_t'(pub_idx_w);
-      valid_o      = 1'b1;
-      trans_id_o   = pub_ptree[1].meta.trans_id;
-      ldbuf_r      = 1'b1;
-      ldbuf_rindex = retire_idx;
-    end
-`endif
-
-    // drain pick (no publish): a tombstoned or tag-killed slot that has
-    // captured its response frees here — LSU tombstones survive flush
-    // but never produce a writeback. drn_oh is the lowest such slot.
-    if (!ldbuf_r && drn_any) begin
-      ldbuf_r      = 1'b1;
-      ldbuf_rindex = ldbuf_id_t'(drn_idx_w);
-    end
-
-    // an exception occurred during translation
-    // exceptions can retire out-of-order -> but we need to give priority to non-excepting load and stores
-    // so we simply check if we got an rvalid if so we prioritize it by not retiring the exception - we simply go for another
-    // round in the load FSM
-    if ((G6LCCfg.MmuPresent || G6LCCfg.NonIdemPotenceEn) && (state_q[LU_B_WAIT_TRANSLATION]) && !req_port_i.data_rvalid && ex_i.valid && valid_i && !cancelled_request) begin
-      trans_id_o = lsu_ctrl_i.trans_id;
-      valid_o = 1'b1;
-      ex_o.valid = 1'b1;
-    end
-
-    // raise valid when removing a misspredicted speculative load
-    if (G6LCCfg.SpeculativeSb && (state_q[LU_B_WAIT_SPEC_LOAD]) && lsu_ctrl_i.is_speculative_load_miss && !req_port_i.data_rvalid && valid_i && !cancelled_request) begin
-      trans_id_o = lsu_ctrl_i.trans_id;
-      valid_o = 1'b1;
-      ex_o.valid = 1'b0;
-    end
-
-    // R3a: STQ store→load forward completion (no D$ rvalid / ldbuf slot).
-    // hyp8: st_fwd_done is only set when the verdict is already final
-    // (the FSM holds the covered load until ld_checked_i asserts), so the
-    // publication is verdict-safe by construction.
-    if (st_fwd_done) begin
-      trans_id_o = lsu_ctrl_i.trans_id;
-      valid_o    = 1'b1;
-      ex_o.valid = 1'b0;
-    end
+    // one-hot presentation (r76): each output is a masked-OR over the
+    // arm predicates. The slot-arm presentation terms are masked by
+    // !a_head to reproduce today's override (a head completion kept
+    // the presented fields when it coincided with an ex/data arm);
+    // the pops are the same unmasked set as today.
+    valid_o    = a_pend | a_expub | a_data | a_head;
+    ex_o.valid = (a_pend | a_expub | head_pub_wt) &&
+                 !(head_pub_spec | st_fwd_done);
+    trans_id_o =
+        ({G6LCCfg.TRANS_ID_BITS{a_pend & (L5_AMASK | !a_head)}} &
+         pend_q[0].tid)
+      | ({G6LCCfg.TRANS_ID_BITS{a_expub & (L5_AMASK | !a_head)}} &
+         ldbuf_q[rresp_idx].trans_id)
+      | ({G6LCCfg.TRANS_ID_BITS{a_data & (L5_AMASK | !a_head)}} &
+         pub_ptree[1].meta.trans_id)
+      | ({G6LCCfg.TRANS_ID_BITS{a_head}} & lsu_ctrl_i.trans_id)
+      | ({G6LCCfg.TRANS_ID_BITS{~(a_pend | a_expub | a_data | a_head)}} &
+         ldbuf_q[0].trans_id);
+    ldbuf_r      = a_expub | a_data | a_drn;
+    ldbuf_rindex = ({LD_IDX_W{a_expub}} & ldbuf_id_t'(rresp_idx))
+                 | ({LD_IDX_W{a_data}}  & ldbuf_id_t'(pub_idx_w))
+                 | ({LD_IDX_W{a_drn}}   & ldbuf_id_t'(drn_idx_w));
+    retire_idx   = {LD_IDX_W{a_data}} & ldbuf_id_t'(pub_idx_w);
   end
 
   // svt-stage: end L5
@@ -1897,6 +1915,108 @@ assign ldbuf_full = &ldbuf_valid_q;
                     drn_any, ref_drn_any, drn_idx_w, ref_drn_idx);
     end
   end
+  // F15: a slot popped by the data publish arm is the slot presented —
+  // the FSM-head completion arms may never steal a popped slot's port
+  // slot. lu_f15_collide_n counts the collision cycles the gate
+  // actually arbitrates (evidence, not a correctness condition).
+  lu_pop_is_presented :
+  assert property (@(posedge clk_i) disable iff (~rst_ni)
+      (ldbuf_r && pub_fire) |->
+          (valid_o && (trans_id_o == ldbuf_q[ldbuf_rindex].trans_id)))
+    else $error("load_unit F15: popped slot not presented (rindex=%0d tid=%0d tid_o=%0d valid=%b head=%b%b%b)",
+                ldbuf_rindex, ldbuf_q[ldbuf_rindex].trans_id, trans_id_o,
+                valid_o, head_pub_wt, head_pub_spec, head_pub_fwd);
+  int unsigned lu_f15_collide_n = 0;
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && pub_any && head_pub)
+      lu_f15_collide_n <= lu_f15_collide_n + 1;
+  end
+  // F15b: the superset obligation — a real forward completion is always
+  // inside the shallow predicate.
+  lu_fwd_superset :
+  assert property (@(posedge clk_i) disable iff (~rst_ni)
+      st_fwd_done |-> head_pub_fwd)
+    else $error("load_unit F15b: st_fwd_done outside head_pub_fwd (state=%b covers=%b checked=%b rvalid=%b)",
+                state_q, st_fwd_covers, ld_checked_head,
+                req_port_i.data_rvalid);
+
+  // r76 L5 onehot: the old 7-arm last-writer-wins chain kept verbatim
+  // as ref_*; the masked-OR form must match it every cycle. The
+  // pend/expub slot arms are provably exclusive with a_head (the state
+  // gates in ex_pend_sel/ex_pub exclude exactly the states the head
+  // arms fire in) — asserted directly.
+  logic                      ref_valid, ref_ex_valid, ref_r;
+  logic [G6LCCfg.TRANS_ID_BITS-1:0] ref_tid;
+  ldbuf_id_t                 ref_rindex, ref_retire;
+  always_comb begin : ref_l5_chain
+    ref_valid   = 1'b0;
+    ref_ex_valid = 1'b0;
+    ref_tid     = ldbuf_q[0].trans_id;
+    ref_r       = 1'b0;
+    ref_rindex  = '0;
+    ref_retire  = '0;
+`ifdef G6LC_MUT_LSU_EXPEND
+    if (pub_fire) begin
+      ref_retire = ldbuf_id_t'(pub_idx_w); ref_valid = 1'b1;
+      ref_tid = pub_ptree[1].meta.trans_id; ref_r = 1'b1;
+      ref_rindex = ref_retire;
+    end else if (ex_pub) begin
+      ref_tid = ldbuf_q[rresp_idx].trans_id; ref_valid = 1'b1;
+      ref_ex_valid = 1'b1; ref_r = 1'b1; ref_rindex = rresp_idx;
+    end
+`else
+    if (ex_pend_sel) begin
+      ref_tid = pend_q[0].tid; ref_valid = 1'b1; ref_ex_valid = 1'b1;
+    end else if (ex_pub) begin
+      ref_tid = ldbuf_q[rresp_idx].trans_id; ref_valid = 1'b1;
+      ref_ex_valid = 1'b1; ref_r = 1'b1; ref_rindex = rresp_idx;
+    end else if (pub_fire) begin
+      ref_retire = ldbuf_id_t'(pub_idx_w); ref_valid = 1'b1;
+      ref_tid = pub_ptree[1].meta.trans_id; ref_r = 1'b1;
+      ref_rindex = ref_retire;
+    end
+`endif
+    if (!ref_r && drn_any) begin
+      ref_r = 1'b1; ref_rindex = ldbuf_id_t'(drn_idx_w);
+    end
+    if (head_pub_wt) begin
+      ref_tid = lsu_ctrl_i.trans_id; ref_valid = 1'b1;
+      ref_ex_valid = 1'b1;
+    end
+    if (head_pub_spec) begin
+      ref_tid = lsu_ctrl_i.trans_id; ref_valid = 1'b1;
+      ref_ex_valid = 1'b0;
+    end
+    if (st_fwd_done) begin
+      ref_tid = lsu_ctrl_i.trans_id; ref_valid = 1'b1;
+      ref_ex_valid = 1'b0;
+    end
+  end
+  int unsigned lu_l5_oh_n = 0;
+  lu_l5_onehot_eq :
+  assert property (@(posedge clk_i) disable iff (~rst_ni)
+      {valid_o, ex_o.valid, trans_id_o, ldbuf_r, ldbuf_rindex,
+       retire_idx} ===
+      {ref_valid, ref_ex_valid, ref_tid, ref_r, ref_rindex, ref_retire})
+    else $error("load_unit L5 onehot: arms %b != ref %b (arms=%b)",
+                {valid_o, ex_o.valid, trans_id_o, ldbuf_r, ldbuf_rindex,
+                 retire_idx},
+                {ref_valid, ref_ex_valid, ref_tid, ref_r, ref_rindex,
+                 ref_retire},
+                {a_pend, a_expub, a_data, a_drn, a_head});
+  lu_l5_arm_exclusive :
+  assert property (@(posedge clk_i) disable iff (~rst_ni)
+      $onehot0({a_pend | a_expub, a_head}))
+    else $error("load_unit L5 onehot: slot arm coincides with head");
+  always_ff @(posedge clk_i) begin
+    if (rst_ni)
+      lu_l5_oh_n <= lu_l5_oh_n + 1;
+  end
+  // r76 B1 countercase: the LoadPubStages==2 registered publish record
+  // (L5a select + L5b present) measured 47.0 FO4 vs the ==1 arm's 42.0
+  // on analyze-r76-lu-deep (limiter the pre-existing :1053 FSM path —
+  // in-stage L5 fell to 36.1 but the module max rose). Reverted to the
+  // ==1-only publish; the config field remains declared for a retry.
   // r45: the direct pa_capture_state decode must equal the composed form
   // valid_i && translation_req_o && dtlb_hit_i every cycle — the
   // absorption identity the rewrite is proved by, checked on the live
@@ -1928,6 +2048,9 @@ assign ldbuf_full = &ldbuf_valid_q;
     if ($test$plusargs("equiv_report"))
       $display("[equiv] load_unit pub_tree: checked=%0d multi=%0d pfwd=%0d",
                pub_tree_checked_n, pub_tree_multi_n, pub_tree_pfwd_n);
+    $display("[equiv] load_unit F15 head_pub&pub_any: n=%0d",
+             lu_f15_collide_n);
+    $display("[equiv] load_unit L5 onehot: checked=%0d", lu_l5_oh_n);
   end
   //pragma translate_on
 

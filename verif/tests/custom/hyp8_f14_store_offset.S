@@ -1,11 +1,24 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Etienne Cimon
 #
-# hyp8 F14 discriminator. hyp8_amo_ready_order v3 retired `sc.d 0x99 -> lockq`
-# at 0x...1140 in the rvfi trace while the harness read 0x99 at tohost
-# (0x...1000): a write landed with addr[8:6] cleared. This test performs the
-# SAME data layout and offsets with a plain `sd` (no reservation, no AXI lock)
-# and then an `sc.d` to a second word at an offset with addr[8:6] != 0.
+# hyp8 F14 discriminator (mechanism resolved r76): rvfi_tracer's
+# end_of_test fires on the reported mem_paddr, and RVFI's mem_paddr was
+# the speculative STQ HEAD at commit time — not the committing
+# instruction's own paddr. Under OoO issue the final `sw -> tohost`
+# sits in the STQ behind the still-uncommitted sc.d, so the sc.d's
+# commit presented mem_paddr=tohost with mem_wdata=0xAD (bit0 set) ->
+# the harness declared "tohost = 0xAD" and stopped the sim before the
+# sw ever drained (no AW to 0x80001000 exists on any probe). An
+# observer defect in RVFI paddr attribution, not memory corruption —
+# the AW/W path is correct at every stage (verified +f14_trace).
+# This test still discriminates the write path once the attribution
+# is right.
+#   tohost = 1   both paths wrote where the architecture wrote
+#   tohost = 76  (raw 0x99) the plain store already lands at tohost -> the
+#                defect is the store / DRAM / SBA path, not the exclusive one
+#   tohost = 86  (raw 0xAD) the sc.d lands at tohost -> SC-specific owner
+#   3            the plain store's own readback mismatched
+# Kept as a regression for both the write path and the attribution fix.
 #   tohost = 1   both paths wrote where the architecture wrote
 #   tohost = 76  (raw 0x99) the plain store already lands at tohost -> the
 #                defect is the store / DRAM / SBA path, not the exclusive one

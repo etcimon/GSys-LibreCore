@@ -67,6 +67,13 @@ module g6lc_rvfi_probes
     input logic      [    G6LCCfg.NrWbPorts-1:0][G6LCCfg.XLEN-1:0] wbdata_i,
     input logic      [G6LCCfg.NrCommitPorts-1:0]                   commit_ack_i,
     input logic      [         G6LCCfg.PLEN-1:0]                   mem_paddr_i,
+    // r76 F14: per-instruction store/AMO queue-accept paddr records.
+    input logic                                                  st_push_valid_i,
+    input logic      [G6LCCfg.TRANS_ID_BITS-1:0]                 st_push_tid_i,
+    input logic      [         G6LCCfg.PLEN-1:0]                 st_push_paddr_i,
+    input logic                                                  amo_push_valid_i,
+    input logic      [G6LCCfg.TRANS_ID_BITS-1:0]                 amo_push_tid_i,
+    input logic      [         G6LCCfg.PLEN-1:0]                 amo_push_paddr_i,
     input logic                                                    debug_mode_i,
     input logic      [G6LCCfg.NrCommitPorts-1:0][G6LCCfg.XLEN-1:0] wdata_i,
 
@@ -121,6 +128,12 @@ module g6lc_rvfi_probes
 
     instr.wbdata = wbdata_i;
     instr.mem_paddr = mem_paddr_i;
+    instr.st_push_valid  = st_push_valid_i;
+    instr.st_push_tid    = st_push_tid_i;
+    instr.st_push_paddr  = st_push_paddr_i;
+    instr.amo_push_valid = amo_push_valid_i;
+    instr.amo_push_tid   = amo_push_tid_i;
+    instr.amo_push_paddr = amo_push_paddr_i;
     instr.debug_mode = debug_mode_i;
 
     instr.commit_pointer = commit_pointer_i;

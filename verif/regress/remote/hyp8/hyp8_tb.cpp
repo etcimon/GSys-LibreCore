@@ -277,6 +277,11 @@ static const char *verilog_plusargs[] = {
     "stall_census",
     // +hang_dump=N (core/cva6.sv gen_stall_census): state dump after N cycles without a commit ack
     "hang_dump",
+    // +f14_trace (wt_axi_adapter/g6lc_testharness/g6lc_ai_dram_backend):
+    // r76 SC write-address discriminator probes
+    "f14_trace",
+    // +f14_trace_r (g6lc_testharness): every atomics slv/mst R beat
+    "f14_trace_r",
     // +csrtab_trace (core/csr_buffer.sv gen_ooo): per-event CSR table trace
     "csrtab_trace",
     // +iqleg_trace (core/ooo/g6lc_iq{,_legal,_arb}.sv + issue_read_operands.sv):

@@ -1194,6 +1194,11 @@ always_comb begin
     logic [(G6LCCfg.XLEN/8)-1:0] lsu_rmask;
     logic [(G6LCCfg.XLEN/8)-1:0] lsu_wmask;
     logic [G6LCCfg.XLEN-1:0] lsu_wdata;
+    // r76 F14: the store/AMO's own translated paddr, captured at its
+    // queue-accept strobe (mem_paddr is the spec STQ head at commit,
+    // not this instruction, under OoO issue).
+    logic [G6LCCfg.PLEN-1:0] lsu_paddr;
+    logic paddr_valid;
     logic [31:0] instr;
     logic branch_valid;
     logic is_taken;
@@ -1213,6 +1218,8 @@ always_comb begin
             lsu_rmask: '0,
             lsu_wmask: '0,
             lsu_wdata: '0,
+            lsu_paddr: '0,
+            paddr_valid: 1'b0,
             instr: instruction[i],
             branch_valid: 1'b0,
             is_taken: 1'b0,
@@ -1246,6 +1253,17 @@ always_comb begin
       mem_n[lsu_addr_trans_id].lsu_addr  = lsu_addr;
       mem_n[lsu_addr_trans_id].lsu_wmask = lsu_wmask;
       mem_n[lsu_addr_trans_id].lsu_wdata = wbdata[STORE_WB];
+    end
+    // r76 F14: per-instruction paddr capture — a store enters the
+    // speculative STQ (and an AMO the amo_buffer) strictly before its
+    // own commit, so the record is complete when the entry retires.
+    if (instr.st_push_valid) begin
+      mem_n[instr.st_push_tid].lsu_paddr   = instr.st_push_paddr;
+      mem_n[instr.st_push_tid].paddr_valid = 1'b1;
+    end
+    if (instr.amo_push_valid) begin
+      mem_n[instr.amo_push_tid].lsu_paddr   = instr.amo_push_paddr;
+      mem_n[instr.amo_push_tid].paddr_valid = 1'b1;
     end
   end
 
@@ -1298,8 +1316,14 @@ always_comb begin
       rvfi_instr_o[i].pc_rdata <= commit_instr_pc[i];
       rvfi_hart_o[i] <= instr.commit_instr_hart[i];
       rvfi_instr_o[i].mem_addr <= mem_q[commit_pointer[i]].lsu_addr;
-      // So far, only write paddr is reported. TODO: read paddr
-      rvfi_instr_o[i].mem_paddr <= mem_paddr;
+      // So far, only write paddr is reported. TODO: read paddr.
+      // r76 F14: a store/AMO reports the paddr captured at its own
+      // queue-accept strobe — the bus is the speculative STQ head at
+      // commit time, which under OoO issue is not the committing
+      // store (hyp8_f14_store_offset reported tohost=0xAD this way).
+      rvfi_instr_o[i].mem_paddr <=
+          mem_q[commit_pointer[i]].paddr_valid
+              ? mem_q[commit_pointer[i]].lsu_paddr : mem_paddr;
       // A store-conditional that fails performs no memory write. The mask is
       // captured at LSU time, before the outcome is known, so it has to be
       // suppressed here where the result is available: rd == 0 is success.
@@ -1453,4 +1477,21 @@ always_comb begin
     ;
   end
   // verilog_format: on
+  //------------------------------------------------------------------------
+  // r76 F14: a committing store/AMO must have its own paddr captured.
+  //------------------------------------------------------------------------
+`ifndef SYNTHESIS
+  for (genvar gi = 0; gi < G6LCCfg.NrCommitPorts; gi++) begin : gen_paddr_chk
+    lu_paddr_captured :
+    assert property (
+        @(posedge clk_i) disable iff (!rst_ni)
+        (commit_ack[gi] && !ex_commit_valid && !commit_drop[gi] &&
+         mem_q[commit_pointer[gi]].lsu_wmask != '0)
+        |-> mem_q[commit_pointer[gi]].paddr_valid)
+      else $error("rvfi F14: committing store/AMO tid=%0d with no captured paddr (wmask=%b)",
+                  commit_pointer[gi],
+                  mem_q[commit_pointer[gi]].lsu_wmask);
+  end
+`endif
+
 endmodule

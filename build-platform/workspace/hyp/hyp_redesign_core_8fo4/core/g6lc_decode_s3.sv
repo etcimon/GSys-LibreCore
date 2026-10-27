@@ -129,6 +129,26 @@ module g6lc_decode_s3
   // Arm identity comes from the op D2 decoded (SRET/MRET/DRET/WFI and the
   // sfence/hfence/CBO ops are set by exactly one arm each).
   // ---------------------------------------------------------------------
+  logic sys_f000, sys_f100;
+  logic ill_rs1rd, v_rs1rd;
+  logic c_sret, c_mret, c_dret, c_wfi, c_sf, c_hvv, c_hgv, c_ci, c_cf, c_cz;
+  logic ill_sret_u, v_sret_u, ill_sret_tsr, v_sret_tsr;
+  logic ill_mret, ill_dret;
+  logic ill_wfi_tw, v_wfi_vtw, ill_wfi_u, v_wfi_u;
+  logic ill_sf_tvm, v_sf_tvm;
+  logic ill_hgv_tvm;
+  logic ill_hlv, v_hlv;
+  logic ill_ci, v_ci, fix_ci;
+  logic ill_cf, v_cf;
+  logic ill_cz, v_cz;
+  logic ill_fp, ill_frm;
+  logic ill_ci_c, v_ci_c, f_ci_c;
+  logic ill_cf_c, v_cf_c, ill_cz_c, v_cz_c;
+  logic priv_ms_rd0;
+  logic fix_add;
+  logic illA, virA, illB, virB, illC, virC, illD, virD;
+
+
   always_comb begin : legality
     // hyp8: the emit's serial if-chain is rewritten as independent compare
     // nets. Set-only arms (the large majority) accumulate by OR. The three
@@ -138,25 +158,6 @@ module g6lc_decode_s3
     // arm that can co-fire with them is the rs1/rd-nonzero check (same
     // System/funct3==000 group, no op key), so pre/post-set partitioning
     // reproduces the emit's last-writer order exactly.
-    logic sys_f000, sys_f100;
-    logic ill_rs1rd, v_rs1rd;
-    logic c_sret, c_mret, c_dret, c_wfi, c_sf, c_hvv, c_hgv, c_ci, c_cf, c_cz;
-    logic ill_sret_u, v_sret_u, ill_sret_tsr, v_sret_tsr;
-    logic ill_mret, ill_dret;
-    logic ill_wfi_tw, v_wfi_vtw, ill_wfi_u, v_wfi_u;
-    logic ill_sf_tvm, v_sf_tvm;
-    logic ill_hgv_tvm;
-    logic ill_hlv, v_hlv;
-    logic ill_ci, v_ci, fix_ci;
-    logic ill_cf, v_cf;
-    logic ill_cz, v_cz;
-    logic ill_fp, ill_frm;
-    logic ill_ci_c, v_ci_c, f_ci_c;
-    logic ill_cf_c, v_cf_c, ill_cz_c, v_cz_c;
-    logic priv_ms_rd0;
-    logic fix_add;
-    logic illA, virA, illB, virB, illC, virC, illD, virD;
-
     sys_f000 = (instr.rtype.opcode == riscv::OpcodeSystem) &&
                (instr.itype.funct3 == 3'b000);
     sys_f100 = G6LCCfg.RVH && (instr.rtype.opcode == riscv::OpcodeSystem) &&
@@ -271,6 +272,9 @@ module g6lc_decode_s3
     illD = (c_hgv && !v_i) ? !priv_ms_rd0 : illC;
     virD = (c_hgv && v_i) ? 1'b1 : virC;
     illD = illD | ill_hgv_tvm;
+  end
+
+  always_comb begin : legality_out
     // --- post arms: HLV/HSV, CBO, fs, frm (set-only, last in the emit) ---
     illegal = ~ex_i.valid ? (illD | ill_hlv | ill_ci | ill_cf | ill_cz |
                              ill_fp | ill_frm)
@@ -282,6 +286,7 @@ module g6lc_decode_s3
             : fix_ci ? g6lc_core_pkg::CBO_FLUSH
             : (fix_add ? g6lc_core_pkg::ADD : dec_i.op);
   end
+
 
   // ---------------------------------------------------------------------
   // assembly: op corrections + CVXIF offload + accelerator override, in the

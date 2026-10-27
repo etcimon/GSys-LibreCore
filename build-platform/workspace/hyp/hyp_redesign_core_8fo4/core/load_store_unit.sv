@@ -230,7 +230,14 @@ module load_store_unit
     // RVFI information - RVFI
     output lsu_ctrl_t                    rvfi_lsu_ctrl_o,
     // RVFI information - RVFI
-    output logic      [G6LCCfg.PLEN-1:0] rvfi_mem_paddr_o
+    output logic      [G6LCCfg.PLEN-1:0] rvfi_mem_paddr_o,
+    // r76 F14: per-instruction store/AMO paddr records (store_unit)
+    output logic                           rvfi_st_push_valid_o,
+    output logic [G6LCCfg.TRANS_ID_BITS-1:0] rvfi_st_push_tid_o,
+    output logic [G6LCCfg.PLEN-1:0]        rvfi_st_push_paddr_o,
+    output logic                           rvfi_amo_push_valid_o,
+    output logic [G6LCCfg.TRANS_ID_BITS-1:0] rvfi_amo_push_tid_o,
+    output logic [G6LCCfg.PLEN-1:0]        rvfi_amo_push_paddr_o
 );
 
   // data is misaligned
@@ -774,6 +781,12 @@ module load_store_unit
       .translation_req_o    (g6lc_st_translation_req),
       .vaddr_o              (st_vaddr),
       .rvfi_mem_paddr_o     (rvfi_mem_paddr_o),
+      .rvfi_st_push_valid_o (rvfi_st_push_valid_o),
+      .rvfi_st_push_tid_o   (rvfi_st_push_tid_o),
+      .rvfi_st_push_paddr_o (rvfi_st_push_paddr_o),
+      .rvfi_amo_push_valid_o(rvfi_amo_push_valid_o),
+      .rvfi_amo_push_tid_o  (rvfi_amo_push_tid_o),
+      .rvfi_amo_push_paddr_o(rvfi_amo_push_paddr_o),
       .tinst_o              (st_tinst),
       .hs_ld_st_inst_o      (st_hs_ld_st_inst),
       .hlvx_inst_o          (st_hlvx_inst),

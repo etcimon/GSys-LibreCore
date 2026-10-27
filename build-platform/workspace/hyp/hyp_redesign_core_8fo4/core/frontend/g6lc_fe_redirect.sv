@@ -142,74 +142,108 @@ module g6lc_fe_redirect
   logic                    arb_trap;
   logic [3:0]              arb_src;
 
-  always_comb begin : arb_select
-    arb_valid  = 1'b1;
+  // r76 B3: the arbiter bundle is split per output family (P6). Each
+  // block replicates the arch_src skeleton verbatim and keeps only its
+  // family's writes; the lower-priority sources append behind the same
+  // "no arch winner" gate, computed here as the case falling through
+  // to default (arch_src names no known source).
+  logic arb_no_arch;
+  assign arb_no_arch =
+      !(arch_src inside {g6lc_fetch_pkg::SRC_EX,
+                         g6lc_fetch_pkg::SRC_ERET,
+                         g6lc_fetch_pkg::SRC_COMMIT,
+                         g6lc_fetch_pkg::SRC_PEER,
+                         g6lc_fetch_pkg::SRC_DEBUG,
+                         g6lc_fetch_pkg::SRC_RESTORE,
+                         g6lc_fetch_pkg::SRC_MISP});
+
+  always_comb begin : arb_select_id
+    arb_valid = 1'b1;
+    arb_src   = arch_src;
+    unique case (arch_src)
+      g6lc_fetch_pkg::SRC_EX,
+      g6lc_fetch_pkg::SRC_ERET,
+      g6lc_fetch_pkg::SRC_COMMIT,
+      g6lc_fetch_pkg::SRC_PEER,
+      g6lc_fetch_pkg::SRC_DEBUG,
+      g6lc_fetch_pkg::SRC_RESTORE,
+      g6lc_fetch_pkg::SRC_MISP: ;
+      default: begin
+        arb_valid = 1'b0;
+      end
+    endcase
+    // ---- lower-priority sources, only when no arch/misp winner ----
+    if (!arb_valid) begin
+      if (replay_i) begin
+        arb_valid  = 1'b1;
+        arb_src    = SRC_REPLAY;
+      end else if (ov1_valid_i) begin
+        arb_valid  = 1'b1;
+        arb_src    = SRC_OV1;
+      end else if (ov2_valid_i) begin
+        arb_valid  = 1'b1;
+        arb_src    = SRC_OV2;
+      end
+    end
+  end
+
+  always_comb begin : arb_select_pc
+    arb_pc = '0;
+    unique case (arch_src)
+      g6lc_fetch_pkg::SRC_EX:      arb_pc = trap_vector_base_i;
+      g6lc_fetch_pkg::SRC_ERET:    arb_pc = epc_i;
+      g6lc_fetch_pkg::SRC_COMMIT:  arb_pc = commit_next_pc;
+      g6lc_fetch_pkg::SRC_PEER:    arb_pc = peer_restart_pc_i;
+      g6lc_fetch_pkg::SRC_DEBUG:   arb_pc = debug_halt_pc;
+      g6lc_fetch_pkg::SRC_RESTORE: arb_pc = smt_npc_restore_i;
+      g6lc_fetch_pkg::SRC_MISP:    arb_pc = resolved_branch_i.target_address;
+      default: ;
+    endcase
+    if (arb_no_arch) begin
+      if (replay_i) begin
+        // Refused-window reseed: present the window again (reference
+        // seq_base = replay_addr_q semantics).
+        arb_pc = replay_addr_i;
+      end else if (ov1_valid_i) begin
+        arb_pc = ov1_pc_i;
+      end else if (ov2_valid_i) begin
+        arb_pc = ov2_pc_i;
+      end
+    end
+  end
+
+  always_comb begin : arb_select_ctl
     arb_step   = FtqEn;
     arb_reseed = 1'b1;
     arb_trap   = 1'b0;
-    arb_pc     = '0;
-    arb_src    = arch_src;
-
     unique case (arch_src)
       g6lc_fetch_pkg::SRC_EX: begin
-        arb_pc   = trap_vector_base_i;
         arb_trap = 1'b1;
       end
       g6lc_fetch_pkg::SRC_ERET: begin
-        arb_pc   = epc_i;
         arb_trap = 1'b1;
       end
       g6lc_fetch_pkg::SRC_COMMIT: begin
-        arb_pc     = commit_next_pc;
         arb_step   = FtqEn & ~halt_i;
         arb_reseed = flush_i;
       end
-      g6lc_fetch_pkg::SRC_PEER: begin
-        arb_pc = peer_restart_pc_i;
-      end
+      g6lc_fetch_pkg::SRC_PEER,
+      g6lc_fetch_pkg::SRC_MISP: ;
       g6lc_fetch_pkg::SRC_DEBUG: begin
-        arb_pc   = debug_halt_pc;
         arb_trap = 1'b1;
       end
       g6lc_fetch_pkg::SRC_RESTORE: begin
-        arb_pc = smt_npc_restore_i;
-        // With an FTQ the reseeded entry owns the restore window, so the NPC
-        // enqueue cursor must step past it like any other reseed.
+        // With an FTQ the reseeded entry owns the restore window, so the
+        // NPC enqueue cursor must step past it like any other reseed.
         arb_step = FtqEn;
       end
-      g6lc_fetch_pkg::SRC_MISP: begin
-        arb_pc = resolved_branch_i.target_address;
-      end
       default: begin
-        arb_valid  = 1'b0;
         arb_step   = 1'b0;
         arb_reseed = 1'b0;
       end
     endcase
-
-    // ---- lower-priority sources, only when no arch/misp winner ----
-    if (!arb_valid) begin
-      if (replay_i) begin
-        // Refused-window reseed: present the window again and, with an FTQ,
-        // step the enqueue cursor past it (same semantics as the reference
-        // seq_base = replay_addr_q path).
-        arb_valid  = 1'b1;
-        arb_src    = SRC_REPLAY;
-        arb_pc     = replay_addr_i;
-        arb_step   = FtqEn;
-        arb_reseed = 1'b1;
-      end else if (ov1_valid_i) begin
-        // Override #1 (BTB/RAS disagreement with the line guess)
-        arb_valid  = 1'b1;
-        arb_src    = SRC_OV1;
-        arb_pc     = ov1_pc_i;
-        arb_step   = FtqEn;
-        arb_reseed = 1'b1;
-      end else if (ov2_valid_i) begin
-        // Override #2 (response-side predictor verdict)
-        arb_valid  = 1'b1;
-        arb_src    = SRC_OV2;
-        arb_pc     = ov2_pc_i;
+    if (arb_no_arch) begin
+      if (replay_i || ov1_valid_i || ov2_valid_i) begin
         arb_step   = FtqEn;
         arb_reseed = 1'b1;
       end

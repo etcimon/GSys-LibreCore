@@ -135,7 +135,8 @@ module g6lc_iq
   // correctly -- retained speculation is not silently truncated.
   localparam int unsigned WAKE_MULT =
       g6lc_hyp_pkg::hyp_mult_stages(HypCfg, int'(G6LCCfg.MultStages));
-  localparam int unsigned WAKE_LD = 2 + HypCfg.DcacheHitExtra + HypCfg.LoadUseExtra;
+  localparam int unsigned WAKE_LD = 2 + HypCfg.DcacheHitExtra +
+      HypCfg.LoadUseExtra + (HypCfg.LoadPubStages - 1);
   localparam int unsigned WAKE_A  = (WAKE_MULT > int'(HypCfg.AluStages))
                                     ? WAKE_MULT : int'(HypCfg.AluStages);
   localparam int unsigned WAKE_B  = (10 > WAKE_LD) ? 10 : WAKE_LD;
@@ -209,32 +210,51 @@ module g6lc_iq
   for (genvar b = 0; b < BANKS; b++) begin : gen_bidx
     assign bank_idx_c[b] = BW'(b);
   end
-  always_comb begin
-    automatic int unsigned usedc [BANKS]; // entries taken by earlier lanes
-    automatic logic [BANKS-1:0] elig, rot, pick_r, pick;
-    automatic logic [NP-1:0] fits;
-    elig = '0; rot = '0; pick_r = '0; pick = '0;
-    for (int unsigned b = 0; b < BANKS; b++) usedc[b] = 0;
-    asgn = '0;
-    steer_found = '0;
-    fits = '1;
-    for (int unsigned p = 0; p < NP; p++) begin
-      if (disp_valid_i[p]) begin
-        for (int unsigned b = 0; b < BANKS; b++)
-          elig[b] = (int'(bank_free[b]) > usedc[b]);
-        rot    = rotr(elig, steer_hint_i[p]);
-        pick_r = rot & (~rot + 1'b1);
-        pick   = rotl(pick_r, steer_hint_i[p]);
-        steer_found[p] = |pick;
-        for (int unsigned b = 0; b < BANKS; b++)
-          asgn[p] |= {BW{pick[b]}} & bank_idx_c[b];
-        for (int unsigned b = 0; b < BANKS; b++)
-          if (pick[b]) usedc[b] = usedc[b] + 1;
-        if (!steer_found[p]) fits[p] = 1'b0;
-      end
+  // r77: lane-serial steer rewritten per output family (P6) with
+  // early-prepared eligibility (A120). ge[k][b] = "bank b can take a
+  // k-th entry" is a continuous compare off the registered bank_free,
+  // so each lane's eligibility muxes the precomputed compares by the
+  // count of earlier lanes' picks at that bank — the compare leaves
+  // the lane-serial chain entirely.
+  logic [NP:1][BANKS-1:0]  ge;
+  logic [NP-1:0][BANKS-1:0] pick_oh;
+  localparam int unsigned CW = $clog2(NP + 1);
+  for (genvar k = 1; k <= NP; k++) begin : gen_ge
+    for (genvar b = 0; b < BANKS; b++) begin : gen_ge_b
+      assign ge[k][b] = (int'(bank_free[b]) >= k);
     end
-    group_fits = &fits;
   end
+  for (genvar p = 0; p < NP; p++) begin : gen_steer_lane
+    logic [BANKS-1:0] elig, rot, pick_r;
+    // eligibility of this lane at each bank = "free > # earlier picks".
+    for (genvar b = 0; b < BANKS; b++) begin : gen_lane_elig
+      logic [CW-1:0] nused;
+      always_comb begin
+        nused = '0;
+        // only a LIVE earlier lane consumes an entry (the serial form
+        // skipped invalid lanes entirely; a dead lane 0 with a live lane 1
+        // is a legal group after a kill).
+        for (int unsigned j = 0; j < p; j++)
+          nused += CW'(pick_oh[j][b] & disp_valid_i[j]);
+      end
+      assign elig[b] = ge[nused + 1][b];
+    end
+    // x & -x lowest-priority pick inside the hint-rotated window,
+    // unchanged from the serial form.
+    always_comb begin : lane_pick
+      rot        = rotr(elig, steer_hint_i[p]);
+      pick_r     = rot & (~rot + 1'b1);
+      pick_oh[p] = rotl(pick_r, steer_hint_i[p]);
+    end
+    assign steer_found[p] = disp_valid_i[p] & (|pick_oh[p]);
+    always_comb begin : lane_asgn
+      asgn[p] = '0;
+      for (int unsigned b = 0; b < BANKS; b++)
+        if (disp_valid_i[p] && pick_oh[p][b])
+          asgn[p] |= bank_idx_c[b];
+    end
+  end
+  assign group_fits = &(~disp_valid_i | steer_found);
 
   //pragma translate_off
   // r69 P1 equivalence: the pre-r69 modulo scan, recomputed every cycle.
@@ -273,6 +293,8 @@ module g6lc_iq
   initial begin
     assert ((BANKS & (BANKS - 1)) == 0)
       else $fatal(1, "g6lc_iq: steer rotate needs power-of-two BANKS");
+    assert (NP <= BANKS)
+      else $fatal(1, "g6lc_iq: more issue lanes than steer banks");
   end
   final begin
     if ($test$plusargs("equiv_report"))

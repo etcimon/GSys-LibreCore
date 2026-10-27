@@ -1182,4 +1182,29 @@ assign icache_data_ack_o = icache_data_req_i & ~icache_data_full;
   else $fatal(1, "[wt axi adapter] id-0 read return with empty ifill meta fifo");
   //pragma translate_on
 
+  //pragma translate_off
+  // F14 (r76): sc.d AXI write-address discriminator — the write lands
+  // 0x80001140 -> 0x80001000 somewhere past the core. Point (1): the
+  // core's own AW handshake + the dcache request that produced it.
+  // Plusarg-gated, page-filtered so the log stays small.
+  bit f14_tr;
+  initial f14_tr = $test$plusargs("f14_trace");
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && f14_tr) begin
+      if (axi_req_o.aw_valid && axi_resp_i.aw_ready &&
+          (axi_req_o.aw.lock || axi_req_o.aw.addr[31:12] == 20'h80001))
+        $display("[f14] adapter_aw t=%0t addr=%h lock=%b atop=%h id=%h size=%h len=%h rtype=%0d amo=%0d paddr=%h",
+                 $time, axi_req_o.aw.addr, axi_req_o.aw.lock,
+                 axi_req_o.aw.atop, axi_req_o.aw.id, axi_req_o.aw.size,
+                 axi_req_o.aw.len, dcache_data.rtype, dcache_data.amo_op,
+                 dcache_data.paddr);
+      if (axi_req_o.ar_valid && axi_resp_i.ar_ready && axi_req_o.ar.lock)
+        $display("[f14] adapter_ar t=%0t addr=%h lock=%b atop=%h id=%h size=%h len=%h",
+                 $time, axi_req_o.ar.addr, axi_req_o.ar.lock,
+                 4'h0, axi_req_o.ar.id, axi_req_o.ar.size,
+                 axi_req_o.ar.len);
+    end
+  end
+  //pragma translate_on
+
 endmodule  // wt_l15_adapter

@@ -133,6 +133,10 @@ module rvfi_tracer #(
             rvfi_i[i].mem_paddr == TOHOST_ADDR &&
             rvfi_i[i].mem_wdata[0] == 1'b1) begin
           end_of_test_q <= rvfi_i[i].mem_wdata[31:0];
+          $display("*** [rvfi_tracer] INFO: end_of_test pc=%h insn=%h mem_addr=%h mem_paddr=%h mem_wmask=%h mem_wdata=%h\n",
+                   rvfi_i[i].pc_rdata, rvfi_i[i].insn,
+                   rvfi_i[i].mem_addr, rvfi_i[i].mem_paddr,
+                   rvfi_i[i].mem_wmask, rvfi_i[i].mem_wdata);
           $display("*** [rvfi_tracer] INFO: Simulation terminated after %d cycles!\n", cycles);
         end
         if (!trace_en) begin
