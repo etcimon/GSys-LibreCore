@@ -177,6 +177,7 @@ ${HYP_CORE_DIR}/core/ooo/g6lc_memdep.sv
 ${HYP_CORE_DIR}/core/ooo/g6lc_ooo_dispatch.sv
 ${HYP_CORE_DIR}/core/ooo/g6lc_ooo_backend.sv
 ${HYP_CORE_DIR}/core/issue_stage.sv
+${HYP_CORE_DIR}/core/g6lc_lu_result.sv
 ${HYP_CORE_DIR}/core/load_unit.sv
 ${HYP_CORE_DIR}/core/load_store_unit.sv
 ${HYP_CORE_DIR}/core/lsu_bypass.sv

@@ -21,6 +21,7 @@ SRCS=(
   "$HYP/stb_drain.sv"
   "/mnt/e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/third_party/vendor/pulp-platform/common_cells/src/cf_math_pkg.sv"
   "$HYP/hyp_cells/g6lc_hyp_lzc.sv"
+  "$HYP/g6lc_lu_result.sv"
   "$HYP/load_unit.sv"
   "$ROOT/verif/tb/core/tb_g6lc_hyp8_memory.sv"
 )
