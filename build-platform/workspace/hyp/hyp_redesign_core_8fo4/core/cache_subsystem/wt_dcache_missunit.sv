@@ -157,6 +157,7 @@ module wt_dcache_missunit
     LOAD_WAIT,
     AMO_WAIT,
     AMO_RESULT,
+    AMO_RESULT_FORM,  // r75: formed word registers here; AMO_RESULT presents it
     AMO_CAS_LD,
     AMO_CAS_LD_WAIT,
     AMO_CAS_ST,
@@ -527,11 +528,20 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
     // 64-bit return word every cycle and form byte order / sign extension
     // from the register in the presentation cycle: the 128->64 select and
     // the swap/sign network no longer share one into->reg cone.
+    // r75 (T2 stage, program §4): the formed word is registered as well, so
+    // the presentation cycle reads a flop (reg->out = one state mux). The ack
+    // moves one state later (AMO_WAIT -> AMO_RESULT_FORM -> AMO_RESULT): AMO
+    // result latency +1, depth-1 AMO acceptance unchanged (no new AMO until
+    // IDLE). CAS keeps its own path (cas_old_q, ack in AMO_CAS_ST_WAIT).
     always_ff @(posedge clk_i or negedge rst_ni) begin : p_amo_result_ff
-      if (!rst_ni) amo_raw_q <= '0;
-      else         amo_raw_q <= amo_rtrn_mux;
+      if (!rst_ni) begin
+        amo_raw_q    <= '0;
+        amo_result_q <= '0;
+      end else begin
+        amo_raw_q    <= amo_rtrn_mux;
+        amo_result_q <= amo_result_form;
+      end
     end
-    assign amo_result_q = amo_result_form;
 
     // Local dword CAS returns the saved old value; ATOP path uses mem rtrn mux.
     // r74 (caller purpose): amo_resp_o.ack is asserted only in AMO_RESULT
@@ -908,12 +918,18 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
             // hyp8: the result formation registers at this edge; the ack is
             // presented in AMO_RESULT (+1 cycle). AMO depth-1 is preserved —
             // the unit accepts no new AMO until IDLE.
-            state_d        = AMO_RESULT;
+            state_d        = AMO_RESULT_FORM;
           end
         end
       end
       //////////////////////////////////
-      // hyp8: registered AMO result step — amo_resp_o.ack + result one cycle
+      // r75: raw word captured at the ATOMIC_ACK edge, formed word captured
+      // at this edge, presented in AMO_RESULT.
+      AMO_RESULT_FORM: begin
+        if (G6LCCfg.RVA) state_d = AMO_RESULT;
+      end
+      //////////////////////////////////
+      // hyp8: registered AMO result step — amo_resp_o.ack + result two cycles
       // after the ATOMIC_ACK (the consumer sees a registered formation).
       AMO_RESULT: begin
         if (G6LCCfg.RVA) begin
