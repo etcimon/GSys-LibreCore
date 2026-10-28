@@ -856,6 +856,24 @@ fn run_zealcli(spec: &g6b_spec::BoardSpec, args: &[String]) -> ExitCode {
             }
         }
     }
+    // Applied after --script so `vi file` can be followed by `i` (Linux KEY_I=23).
+    if let Some(codes) = flag_value(args, "--then-keys") {
+        for code in codes.split(',').filter(|c| !c.trim().is_empty()) {
+            match code.trim().parse::<u16>() {
+                Ok(c) => {
+                    cli.keycode(c, true);
+                    cli.keycode(c, false);
+                }
+                Err(_) => {
+                    eprintln!("g6b: --then-keys wants Linux keycodes, not `{code}`");
+                    return ExitCode::from(2);
+                }
+            }
+            if frames {
+                show(&cli);
+            }
+        }
+    }
     if !frames {
         show(&cli);
     }
