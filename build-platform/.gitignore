@@ -5,15 +5,6 @@
 # Keep top-level snapshot archives and remote-run outputs local.
 /workspace/hyp/*.zip
 /workspace/hyp/**/remote-runs/
-# sby/yosys formal run outputs and editor leftovers inside the hyp tree
-/workspace/hyp/**/analysis/formal/*/model/
-/workspace/hyp/**/analysis/formal/*/PASS
-/workspace/hyp/**/analysis/formal/*/FAIL
-/workspace/hyp/**/analysis/formal/*/status
-/workspace/hyp/**/*.aig
-/workspace/hyp/**/*.aim
-/workspace/hyp/**/*.ywa
-/workspace/hyp/**/*.sqlite
 /workspace/hyp/**/*.bak
 /workspace/hyp/**/nul
 
@@ -29,6 +20,7 @@ bun.lockb
 # Platform run logs and caches
 /.cache/
 *.log
+!/workspace/hyp/**/*.log
 
 # Remote testharness credentials (never commit)
 .remote-ssh-creds

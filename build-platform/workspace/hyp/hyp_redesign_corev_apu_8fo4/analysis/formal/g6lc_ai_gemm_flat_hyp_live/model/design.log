@@ -1,0 +1,412 @@
+
+ /----------------------------------------------------------------------------\
+ |  yosys -- Yosys Open SYnthesis Suite                                       |
+ |  Copyright (C) 2012 - 2026  Claire Xenia Wolf <claire@yosyshq.com>         |
+ |  Distributed under an ISC-like license, type "license" to see terms        |
+ \----------------------------------------------------------------------------/
+ Yosys 0.68+1 (git sha1 c30457480, Release, GNU /usr/bin/c++ 13.3.0)
+
+-- Executing script file `../model/design.ys' --
+
+1. Executing SLANG frontend.
+Top level design units:
+    g6lc_ai_gemm_flat_props
+
+g6lc_ai_island_cfg_pkg.sv:179:28: warning: invalid UTF-8 sequence in source text [-Winvalid-source-encoding]
+    // D5: shift-only form <97> every call site passes a power-of-two beat_bytes
+                           ^
+g6lc_ai_island_cfg_pkg.sv:204:29: warning: invalid UTF-8 sequence in source text [-Winvalid-source-encoding]
+  // not a serial bit scan) <97> the AI-FLAT pitch shift sits on the AR-issue
+                            ^
+
+Build succeeded: 0 errors, 2 warnings
+
+1.1. Executing PROC_CLEAN pass (remove empty switches from decision trees).
+Found and cleaned up 1 empty switch in `\g6lc_ai_gemm_flat_props.$174'.
+Removing empty process `g6lc_ai_gemm_flat_props.$173'.
+Found and cleaned up 1 empty switch in `\g6lc_ai_gemm_flat_props.$154'.
+Found and cleaned up 1 empty switch in `\g6lc_ai_gemm_flat_props.$140'.
+Found and cleaned up 1 empty switch in `\g6lc_ai_gemm_flat_props.$127'.
+Found and cleaned up 1 empty switch in `\g6lc_ai_gemm_flat_props.$94'.
+Found and cleaned up 1 empty switch in `\g6lc_ai_gemm_flat_props.$0'.
+Cleaned up 6 empty switches.
+<suppressed ~42 debug messages>
+
+1.2. Executing TRIBUF pass.
+
+1.3. Executing PROC_RMDEAD pass (remove dead branches from decision trees).
+Marked 14 switch rules as full_case in process $0 in module g6lc_ai_gemm_flat_props.
+Removed a total of 0 dead cases.
+
+1.4. Executing PROC_PRUNE pass (remove redundant assignments in processes).
+Removed 12 redundant assignments.
+Promoted 12 assignments to connections.
+
+1.5. Executing PROC_INIT pass (extract init attributes).
+
+1.6. Executing PROC_ROM pass (convert switches to ROMs).
+Converted 0 switches.
+<suppressed ~33 debug messages>
+
+1.7. Executing PROC_MUX pass (convert decision trees to multiplexers).
+Creating decoders for process `\g6lc_ai_gemm_flat_props.$174'.
+     1/3: $188
+     2/3: $183
+     3/3: $178
+Creating decoders for process `\g6lc_ai_gemm_flat_props.$154'.
+     1/1: $164
+Creating decoders for process `\g6lc_ai_gemm_flat_props.$144'.
+     1/1: $147
+Creating decoders for process `\g6lc_ai_gemm_flat_props.$140'.
+Creating decoders for process `\g6lc_ai_gemm_flat_props.$134'.
+     1/1: $138
+Creating decoders for process `\g6lc_ai_gemm_flat_props.$127'.
+Creating decoders for process `\g6lc_ai_gemm_flat_props.$94'.
+Creating decoders for process `\g6lc_ai_gemm_flat_props.$0'.
+     1/31: $$root.g6lc_ai_island_cfg_pkg.ai_beats_for_rem.total$86
+     2/31: $$root.g6lc_ai_island_cfg_pkg.ai_beats_for_rem.total$84
+     3/31: $$root.g6lc_ai_island_cfg_pkg.ai_beats_for_rem.first$77
+     4/31: $92
+     5/31: $$root.g6lc_ai_island_cfg_pkg.ai_beats_for_rem.total$91
+     6/31: $$root.g6lc_ai_island_cfg_pkg.ai_beats_for_rem.more$90
+     7/31: $$root.g6lc_ai_island_cfg_pkg.ai_beats_for_rem.after$89
+     8/31: $$root.g6lc_ai_island_cfg_pkg.ai_beats_for_rem.first$88
+     9/31: $$root.g6lc_ai_island_cfg_pkg.ai_beats_for_rem.ai_beats_for_rem$87
+    10/31: $74
+    11/31: $$root.g6lc_ai_island_cfg_pkg.ai_beats_for_rem.ai_beats_for_rem$73
+    12/31: $$root.g6lc_ai_island_cfg_pkg.ai_clz32.c[0]$58
+    13/31: $$root.g6lc_ai_island_cfg_pkg.ai_clz32.w$57
+    14/31: $$root.g6lc_ai_island_cfg_pkg.ai_clz32.c[1]$53
+    15/31: $$root.g6lc_ai_island_cfg_pkg.ai_clz32.w$52
+    16/31: $$root.g6lc_ai_island_cfg_pkg.ai_clz32.c[2]$48
+    17/31: $$root.g6lc_ai_island_cfg_pkg.ai_clz32.w$47
+    18/31: $$root.g6lc_ai_island_cfg_pkg.ai_clz32.c[3]$43
+    19/31: $$root.g6lc_ai_island_cfg_pkg.ai_clz32.w$42
+    20/31: $$root.g6lc_ai_island_cfg_pkg.ai_clz32.c[4]$38
+    21/31: $$root.g6lc_ai_island_cfg_pkg.ai_clz32.w$37
+    22/31: $$root.g6lc_ai_island_cfg_pkg.ai_clz32.c[0]$30
+    23/31: $$root.g6lc_ai_island_cfg_pkg.ai_clz32.w$29
+    24/31: $$root.g6lc_ai_island_cfg_pkg.ai_clz32.c[1]$25
+    25/31: $$root.g6lc_ai_island_cfg_pkg.ai_clz32.w$24
+    26/31: $$root.g6lc_ai_island_cfg_pkg.ai_clz32.c[2]$20
+    27/31: $$root.g6lc_ai_island_cfg_pkg.ai_clz32.w$19
+    28/31: $$root.g6lc_ai_island_cfg_pkg.ai_clz32.c[3]$15
+    29/31: $$root.g6lc_ai_island_cfg_pkg.ai_clz32.w$14
+    30/31: $$root.g6lc_ai_island_cfg_pkg.ai_clz32.c[4]$10
+    31/31: $$root.g6lc_ai_island_cfg_pkg.ai_clz32.w$9
+
+1.8. Executing PROC_CLEAN pass (remove empty switches from decision trees).
+Found and cleaned up 1 empty switch in `\g6lc_ai_gemm_flat_props.$174'.
+Removing empty process `g6lc_ai_gemm_flat_props.$174'.
+Found and cleaned up 1 empty switch in `\g6lc_ai_gemm_flat_props.$154'.
+Removing empty process `g6lc_ai_gemm_flat_props.$154'.
+Found and cleaned up 1 empty switch in `\g6lc_ai_gemm_flat_props.$144'.
+Removing empty process `g6lc_ai_gemm_flat_props.$144'.
+Removing empty process `g6lc_ai_gemm_flat_props.$140'.
+Found and cleaned up 1 empty switch in `\g6lc_ai_gemm_flat_props.$134'.
+Removing empty process `g6lc_ai_gemm_flat_props.$134'.
+Removing empty process `g6lc_ai_gemm_flat_props.$127'.
+Removing empty process `g6lc_ai_gemm_flat_props.$94'.
+Found and cleaned up 29 empty switches in `\g6lc_ai_gemm_flat_props.$0'.
+Removing empty process `g6lc_ai_gemm_flat_props.$0'.
+Cleaned up 33 empty switches.
+
+1.9. Executing OPT_EXPR pass (perform const folding).
+Optimizing module g6lc_ai_gemm_flat_props.
+<suppressed ~62 debug messages>
+
+2. Executing PREP pass.
+
+2.1. Executing HIERARCHY pass (managing design hierarchy).
+
+2.1.1. Analyzing design hierarchy..
+Top module:  \g6lc_ai_gemm_flat_props
+
+2.1.2. Analyzing design hierarchy..
+Top module:  \g6lc_ai_gemm_flat_props
+Removed 0 unused modules.
+Module g6lc_ai_gemm_flat_props directly or indirectly contains formal properties -> setting "keep" attribute.
+
+2.2. Executing PROC pass (convert processes to netlists).
+
+2.2.1. Executing PROC_CLEAN pass (remove empty switches from decision trees).
+Cleaned up 0 empty switches.
+
+2.2.2. Executing PROC_RMDEAD pass (remove dead branches from decision trees).
+Removed a total of 0 dead cases.
+
+2.2.3. Executing PROC_PRUNE pass (remove redundant assignments in processes).
+Removed 0 redundant assignments.
+Promoted 0 assignments to connections.
+
+2.2.4. Executing PROC_INIT pass (extract init attributes).
+
+2.2.5. Executing PROC_ARST pass (detect async resets in processes).
+
+2.2.6. Executing PROC_ROM pass (convert switches to ROMs).
+Converted 0 switches.
+
+2.2.7. Executing PROC_MUX pass (convert decision trees to multiplexers).
+
+2.2.8. Executing PROC_DLATCH pass (convert process syncs to latches).
+
+2.2.9. Executing PROC_DFF pass (convert process syncs to FFs).
+
+2.2.10. Executing PROC_MEMWR pass (convert process memory writes to cells).
+
+2.2.11. Executing PROC_CLEAN pass (remove empty switches from decision trees).
+Cleaned up 0 empty switches.
+
+2.2.12. Executing OPT_EXPR pass (perform const folding).
+Optimizing module g6lc_ai_gemm_flat_props.
+
+2.3. Executing FUTURE pass.
+
+2.4. Executing OPT_EXPR pass (perform const folding).
+Optimizing module g6lc_ai_gemm_flat_props.
+
+2.5. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \g6lc_ai_gemm_flat_props..
+Removed 26 unused cells and 155 unused wires.
+<suppressed ~28 debug messages>
+
+2.6. Executing CHECK pass (checking for obvious problems).
+Checking module g6lc_ai_gemm_flat_props...
+Found and reported 0 problems.
+
+2.7. Executing OPT pass (performing simple optimizations).
+
+2.7.1. Executing OPT_EXPR pass (perform const folding).
+Optimizing module g6lc_ai_gemm_flat_props.
+
+2.7.2. Executing OPT_MERGE pass (detect identical cells).
+Finding identical cells in module `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 136 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 128 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 124 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 123 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+<suppressed ~39 debug messages>
+Removed a total of 13 cells.
+
+2.7.3. Executing OPT_MUXTREE pass (detect dead branches in mux trees).
+Running muxtree optimizer on module \g6lc_ai_gemm_flat_props..
+  Creating internal representation of mux trees.
+  Evaluating internal representation of mux trees.
+  Analyzing evaluation results.
+    dead port 1/2 on $mux $procmux$16.
+Removed 1 multiplexer ports.
+<suppressed ~66 debug messages>
+
+2.7.4. Executing OPT_REDUCE pass (consolidate $*mux and $reduce_* inputs).
+  Optimizing cells in module \g6lc_ai_gemm_flat_props.
+Performed a total of 0 changes.
+
+2.7.5. Executing OPT_MERGE pass (detect identical cells).
+Finding identical cells in module `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 122 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 117 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 116 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 114 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 113 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 111 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 110 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 108 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 107 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+<suppressed ~45 debug messages>
+Removed a total of 15 cells.
+
+2.7.6. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \g6lc_ai_gemm_flat_props..
+Removed 0 unused cells and 29 unused wires.
+<suppressed ~1 debug messages>
+
+2.7.7. Executing OPT_EXPR pass (perform const folding).
+Optimizing module g6lc_ai_gemm_flat_props.
+
+2.7.8. Rerunning OPT passes. (Maybe there is more to do..)
+
+2.7.9. Executing OPT_MUXTREE pass (detect dead branches in mux trees).
+Running muxtree optimizer on module \g6lc_ai_gemm_flat_props..
+  Creating internal representation of mux trees.
+  Evaluating internal representation of mux trees.
+  Analyzing evaluation results.
+Removed 0 multiplexer ports.
+<suppressed ~42 debug messages>
+
+2.7.10. Executing OPT_REDUCE pass (consolidate $*mux and $reduce_* inputs).
+  Optimizing cells in module \g6lc_ai_gemm_flat_props.
+Performed a total of 0 changes.
+
+2.7.11. Executing OPT_MERGE pass (detect identical cells).
+Finding identical cells in module `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 107 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Removed a total of 0 cells.
+
+2.7.12. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \g6lc_ai_gemm_flat_props..
+
+2.7.13. Executing OPT_EXPR pass (perform const folding).
+Optimizing module g6lc_ai_gemm_flat_props.
+
+2.7.14. Finished fast OPT passes. (There is nothing left to do.)
+
+2.8. Executing WREDUCE pass (reducing word size of cells).
+Removed top 9 bits (of 32) from port A of cell g6lc_ai_gemm_flat_props.$4 ($le).
+Removed top 31 bits (of 32) from port B of cell g6lc_ai_gemm_flat_props.$4 ($le).
+Removed top 1 bits (of 6) from port B of cell g6lc_ai_gemm_flat_props.$31 ($sub).
+Removed top 1 bits (of 6) from port B of cell g6lc_ai_gemm_flat_props.$32 ($gt).
+Removed top 9 bits (of 32) from port A of cell g6lc_ai_gemm_flat_props.$33 ($sub).
+Removed top 31 bits (of 32) from port B of cell g6lc_ai_gemm_flat_props.$33 ($sub).
+Removed top 8 bits (of 32) from port Y of cell g6lc_ai_gemm_flat_props.$33 ($sub).
+Removed top 26 bits (of 32) from port A of cell g6lc_ai_gemm_flat_props.$59 ($sub).
+Removed top 27 bits (of 32) from port B of cell g6lc_ai_gemm_flat_props.$59 ($sub).
+Removed top 25 bits (of 32) from port Y of cell g6lc_ai_gemm_flat_props.$59 ($sub).
+Removed top 41 bits (of 64) from port B of cell g6lc_ai_gemm_flat_props.$64 ($add).
+Removed top 31 bits (of 32) from port B of cell g6lc_ai_gemm_flat_props.$65 ($sub).
+Removed top 32 bits (of 64) from port A of cell g6lc_ai_gemm_flat_props.$66 ($shl).
+Removed top 41 bits (of 64) from port B of cell g6lc_ai_gemm_flat_props.$68 ($add).
+Removed top 31 bits (of 32) from port B of cell g6lc_ai_gemm_flat_props.$69 ($add).
+Removed top 32 bits (of 64) from port A of cell g6lc_ai_gemm_flat_props.$70 ($shl).
+Removed top 63 bits (of 64) from port B of cell g6lc_ai_gemm_flat_props.$71 ($add).
+Removed top 28 bits (of 32) from port B of cell g6lc_ai_gemm_flat_props.$79 ($add).
+Removed top 31 bits (of 32) from port B of cell g6lc_ai_gemm_flat_props.$80 ($sub).
+Removed top 31 bits (of 32) from port A of cell g6lc_ai_gemm_flat_props.$82 ($add).
+Removed top 3 bits (of 32) from port B of cell g6lc_ai_gemm_flat_props.$82 ($add).
+Removed top 2 bits (of 32) from port Y of cell g6lc_ai_gemm_flat_props.$82 ($add).
+Removed top 2 bits (of 32) from port A of cell g6lc_ai_gemm_flat_props.$83 ($gt).
+Removed top 24 bits (of 32) from port B of cell g6lc_ai_gemm_flat_props.$83 ($gt).
+Removed top 31 bits (of 32) from port B of cell g6lc_ai_gemm_flat_props.$97 ($ge).
+Removed top 14 bits (of 32) from port B of cell g6lc_ai_gemm_flat_props.$98 ($le).
+Removed top 31 bits (of 32) from port B of cell g6lc_ai_gemm_flat_props.$102 ($ge).
+Removed top 20 bits (of 32) from port B of cell g6lc_ai_gemm_flat_props.$103 ($le).
+Removed top 28 bits (of 32) from port B of cell g6lc_ai_gemm_flat_props.$113 ($lt).
+Removed top 7 bits (of 8) from port B of cell g6lc_ai_gemm_flat_props.$119 ($ge).
+Removed top 31 bits (of 32) from port B of cell g6lc_ai_gemm_flat_props.$126 ($ge).
+Removed top 32 bits (of 64) from port A of cell g6lc_ai_gemm_flat_props.$130 ($sub).
+Removed top 63 bits (of 64) from port B of cell g6lc_ai_gemm_flat_props.$130 ($sub).
+Removed top 31 bits (of 64) from port Y of cell g6lc_ai_gemm_flat_props.$130 ($sub).
+Removed top 63 bits (of 64) from port A of cell g6lc_ai_gemm_flat_props.$132 ($shl).
+Removed top 9 bits (of 64) from port A of cell g6lc_ai_gemm_flat_props.$133 ($lt).
+Removed top 32 bits (of 64) from port A of cell g6lc_ai_gemm_flat_props.$135 ($shl).
+Removed top 52 bits (of 64) from port B of cell g6lc_ai_gemm_flat_props.$136 ($le).
+Removed top 52 bits (of 64) from port B of cell g6lc_ai_gemm_flat_props.$139 ($lt).
+Removed top 31 bits (of 32) from port B of cell g6lc_ai_gemm_flat_props.$145 ($gt).
+Removed top 22 bits (of 32) from port B of cell g6lc_ai_gemm_flat_props.$148 ($add).
+Removed top 31 bits (of 32) from port B of cell g6lc_ai_gemm_flat_props.$149 ($sub).
+Removed top 31 bits (of 32) from port B of cell g6lc_ai_gemm_flat_props.$151 ($sub).
+Removed top 31 bits (of 32) from port A of cell g6lc_ai_gemm_flat_props.$152 ($shl).
+Removed top 9 bits (of 32) from port A of cell g6lc_ai_gemm_flat_props.$153 ($gt).
+Removed top 31 bits (of 32) from port B of cell g6lc_ai_gemm_flat_props.$157 ($ge).
+Removed top 24 bits (of 32) from port B of cell g6lc_ai_gemm_flat_props.$158 ($le).
+Removed top 24 bits (of 32) from port B of cell g6lc_ai_gemm_flat_props.$161 ($lt).
+Removed top 28 bits (of 32) from port A of cell g6lc_ai_gemm_flat_props.$167 ($sub).
+Removed top 31 bits (of 32) from port B of cell g6lc_ai_gemm_flat_props.$169 ($sub).
+Removed top 3 bits (of 32) from port Y of cell g6lc_ai_gemm_flat_props.$169 ($sub).
+Removed top 3 bits (of 32) from port A of cell g6lc_ai_gemm_flat_props.$169 ($sub).
+Removed top 53 bits (of 64) from port B of cell g6lc_ai_gemm_flat_props.$176 ($le).
+Removed top 63 bits (of 64) from port A of cell g6lc_ai_gemm_flat_props.$180 ($add).
+Removed top 53 bits (of 64) from port B of cell g6lc_ai_gemm_flat_props.$181 ($le).
+Removed top 32 bits (of 64) from port A of cell g6lc_ai_gemm_flat_props.$189 ($shl).
+Removed top 53 bits (of 64) from port A of cell g6lc_ai_gemm_flat_props.$190 ($add).
+Removed top 52 bits (of 64) from port B of cell g6lc_ai_gemm_flat_props.$191 ($le).
+Removed top 2 bits (of 32) from mux cell g6lc_ai_gemm_flat_props.$procmux$19 ($mux).
+Removed top 31 bits (of 32) from mux cell g6lc_ai_gemm_flat_props.$procmux$55 ($mux).
+Removed top 31 bits (of 32) from wire g6lc_ai_gemm_flat_props.$$root.g6lc_ai_island_cfg_pkg.ai_beats_for_rem.ai_beats_for_rem$73.
+Removed top 2 bits (of 32) from wire g6lc_ai_gemm_flat_props.$82y.
+Removed top 3 bits (of 32) from wire g6lc_ai_gemm_flat_props.$169y.
+Removed top 2 bits (of 32) from wire g6lc_ai_gemm_flat_props.$procmux$19_Y.
+
+2.9. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \g6lc_ai_gemm_flat_props..
+Removed 0 unused cells and 4 unused wires.
+<suppressed ~1 debug messages>
+
+2.10. Executing MEMORY_COLLECT pass (generating $mem cells).
+
+2.11. Executing OPT pass (performing simple optimizations).
+
+2.11.1. Executing OPT_EXPR pass (perform const folding).
+Optimizing module g6lc_ai_gemm_flat_props.
+
+2.11.2. Executing OPT_MERGE pass (detect identical cells).
+Finding identical cells in module `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 107 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 106 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+<suppressed ~3 debug messages>
+Removed a total of 1 cells.
+
+2.11.3. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \g6lc_ai_gemm_flat_props..
+Removed 0 unused cells and 1 unused wires.
+<suppressed ~1 debug messages>
+
+2.11.4. Finished fast OPT passes.
+
+2.12. Executing SORT pass.
+
+2.13. Printing statistics.
+
+=== g6lc_ai_gemm_flat_props ===
+
+        +----------Local Count, excluding submodules.
+        | 
+      101 wires
+     1980 wire bits
+       18 public wires
+      618 public wire bits
+       11 ports
+      298 port bits
+      106 cells
+       10   $add
+       18   $check
+        6   $ge
+        5   $gt
+        9   $le
+        4   $logic_and
+        3   $logic_not
+        7   $lt
+       22   $mux
+        1   $reduce_bool
+        4   $reduce_or
+        6   $shl
+       11   $sub
+
+2.14. Executing CHECK pass (checking for obvious problems).
+Checking module g6lc_ai_gemm_flat_props...
+Found and reported 0 problems.
+
+3. Executing HIERARCHY pass (managing design hierarchy).
+Attribute `top' found on module `g6lc_ai_gemm_flat_props'. Setting top module to g6lc_ai_gemm_flat_props.
+
+3.1. Analyzing design hierarchy..
+Top module:  \g6lc_ai_gemm_flat_props
+
+3.2. Analyzing design hierarchy..
+Top module:  \g6lc_ai_gemm_flat_props
+Removed 0 unused modules.
+Module g6lc_ai_gemm_flat_props directly or indirectly contains formal properties -> setting "keep" attribute.
+
+4. Executing jny backend.
+
+5. Executing RTLIL backend.
+Output filename: ../model/design.il
+
+End of script. Logfile hash: 6f7de07b09, time: 0.26s, user: 0.10s, system: 0.02s, MEM: 29.27 MB peak
+Yosys 0.68+1 (git sha1 c30457480, Release, GNU /usr/bin/c++ 13.3.0)
+Time spent: 22% 2x read_slang (0 sec), 20% 5x opt_clean (0 sec), ...

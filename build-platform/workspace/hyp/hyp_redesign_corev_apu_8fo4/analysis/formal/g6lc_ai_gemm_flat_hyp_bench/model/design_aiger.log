@@ -1,0 +1,444 @@
+
+ /----------------------------------------------------------------------------\
+ |  yosys -- Yosys Open SYnthesis Suite                                       |
+ |  Copyright (C) 2012 - 2026  Claire Xenia Wolf <claire@yosyshq.com>         |
+ |  Distributed under an ISC-like license, type "license" to see terms        |
+ \----------------------------------------------------------------------------/
+ Yosys 0.68+1 (git sha1 c30457480, Release, GNU /usr/bin/c++ 13.3.0)
+
+-- Executing script file `design_aiger.ys' --
+
+1. Executing RTLIL frontend.
+Input filename: design_prep.il
+
+2. Executing HIERARCHY pass (managing design hierarchy).
+Attribute `top' found on module `g6lc_ai_gemm_flat_props'. Setting top module to g6lc_ai_gemm_flat_props.
+
+2.1. Analyzing design hierarchy..
+Top module:  \g6lc_ai_gemm_flat_props
+
+2.2. Analyzing design hierarchy..
+Top module:  \g6lc_ai_gemm_flat_props
+Removed 0 unused modules.
+Module g6lc_ai_gemm_flat_props directly or indirectly contains formal properties -> setting "keep" attribute.
+
+3. Executing FORMALFF pass.
+
+4. Executing FLATTEN pass (flatten design).
+
+5. Executing SETUNDEF pass (replace undef values with defined constants).
+
+6. Executing OPT pass (performing simple optimizations).
+
+6.1. Executing OPT_EXPR pass (perform const folding).
+Optimizing module g6lc_ai_gemm_flat_props.
+<suppressed ~24 debug messages>
+
+6.2. Executing OPT_MERGE pass (detect identical cells).
+Finding identical cells in module `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 110 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 109 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+<suppressed ~3 debug messages>
+Removed a total of 1 cells.
+
+6.3. Executing OPT_MUXTREE pass (detect dead branches in mux trees).
+Running muxtree optimizer on module \g6lc_ai_gemm_flat_props..
+  Creating internal representation of mux trees.
+  Evaluating internal representation of mux trees.
+      Replacing known input bits on port B of cell $procmux$55: { 31'0000000000000000000000000000000 $$root.g6lc_ai_island_cfg_pkg.ai_beats_for_rem.ai_beats_for_rem$73 } -> 1
+  Analyzing evaluation results.
+Removed 0 multiplexer ports.
+<suppressed ~27 debug messages>
+
+6.4. Executing OPT_REDUCE pass (consolidate $*mux and $reduce_* inputs).
+  Optimizing cells in module \g6lc_ai_gemm_flat_props.
+    New input vector for $reduce_or cell $34: $33y [29:16]
+    Consolidated identical input bits for $mux cell $60:
+      Old ports: A={ $59y [6] $59y [6] $59y [6] $59y [6] $59y [6] $59y [6] $59y [6] $59y [6] $59y [6] $59y [6] $59y [6] $59y [6] $59y [6] $59y [6] $59y [6] $59y [6] $59y [6] $59y [6] $59y [6] $59y [6] $59y [6] $59y [6] $59y [6] $59y [6] $59y [6] $59y [6:0] }, B=31, Y=$60y
+      New ports: A=$59y [6:0], B=7'0011111, Y=$60y [6:0]
+      New connections: $60y [31:7] = { $60y [6] $60y [6] $60y [6] $60y [6] $60y [6] $60y [6] $60y [6] $60y [6] $60y [6] $60y [6] $60y [6] $60y [6] $60y [6] $60y [6] $60y [6] $60y [6] $60y [6] $60y [6] $60y [6] $60y [6] $60y [6] $60y [6] $60y [6] $60y [6] $60y [6] }
+    Consolidated identical input bits for $mux cell $procmux$14:
+      Old ports: A={ 3'000 $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 }, B=255, Y=\stripe_max
+      New ports: A=$$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97, B=29'00000000000000000000011111111, Y=\stripe_max [28:0]
+      New connections: \stripe_max [31:29] = 3'000
+    Consolidated identical input bits for $mux cell $procmux$31:
+      Old ports: A={ $94y [7] $94y [7] $94y [7] $94y [7] $94y [7] $94y [7] $94y [7] $94y [7] $94y [7] $94y [7] $94y [7] $94y [7] $94y [7] $94y [7] $94y [7] $94y [7] $94y [7] $94y [7] $94y [7] $94y [7] $94y [7] $94y [7] $94y [7] $94y [7] $94y [7:3] }, B=29'00000000000000000000000000001, Y=$$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97
+      New ports: A=$94y [7:3], B=5'00001, Y=$$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4:0]
+      New connections: $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [28:5] = { $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4] $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4] $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4] $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4] $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4] $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4] $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4] $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4] $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4] $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4] $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4] $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4] $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4] $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4] $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4] $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4] $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4] $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4] $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4] $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4] $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4] $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4] $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4] $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4] }
+  Optimizing cells in module \g6lc_ai_gemm_flat_props.
+    Consolidated identical input bits for $mux cell $61:
+      Old ports: A=$60y, B=0, Y=\pitch
+      New ports: A=$60y [6:0], B=7'0000000, Y=\pitch [6:0]
+      New connections: \pitch [31:7] = { \pitch [6] \pitch [6] \pitch [6] \pitch [6] \pitch [6] \pitch [6] \pitch [6] \pitch [6] \pitch [6] \pitch [6] \pitch [6] \pitch [6] \pitch [6] \pitch [6] \pitch [6] \pitch [6] \pitch [6] \pitch [6] \pitch [6] \pitch [6] \pitch [6] \pitch [6] \pitch [6] \pitch [6] \pitch [6] }
+    Consolidated identical input bits for $mux cell $101:
+      Old ports: A={ 24'000000000000000000000000 \nb }, B=\stripe_max, Y=\capped
+      New ports: A={ 21'000000000000000000000 \nb }, B=\stripe_max [28:0], Y=\capped [28:0]
+      New connections: \capped [31:29] = 3'000
+    Consolidated identical input bits for $mux cell $procmux$14:
+      Old ports: A=$$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97, B=29'00000000000000000000011111111, Y=\stripe_max [28:0]
+      New ports: A={ $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4] $$root.g6lc_ai_island_cfg_pkg.dram_beats_in_stripe.maxb$97 [4:0] }, B=6'011111, Y={ \stripe_max [8] \stripe_max [4:0] }
+      New connections: { \stripe_max [28:9] \stripe_max [7:5] } = { \stripe_max [8] \stripe_max [8] \stripe_max [8] \stripe_max [8] \stripe_max [8] \stripe_max [8] \stripe_max [8] \stripe_max [8] \stripe_max [8] \stripe_max [8] \stripe_max [8] \stripe_max [8] \stripe_max [8] \stripe_max [8] \stripe_max [8] \stripe_max [8] \stripe_max [8] \stripe_max [8] \stripe_max [8] \stripe_max [8] \stripe_max [4] \stripe_max [4] \stripe_max [4] }
+  Optimizing cells in module \g6lc_ai_gemm_flat_props.
+    Consolidated identical input bits for $mux cell $101:
+      Old ports: A={ 21'000000000000000000000 \nb }, B=\stripe_max [28:0], Y=\capped [28:0]
+      New ports: A={ 1'0 \nb }, B={ \stripe_max [8] \stripe_max [4] \stripe_max [4] \stripe_max [4] \stripe_max [4:0] }, Y=\capped [8:0]
+      New connections: \capped [28:9] = { \capped [8] \capped [8] \capped [8] \capped [8] \capped [8] \capped [8] \capped [8] \capped [8] \capped [8] \capped [8] \capped [8] \capped [8] \capped [8] \capped [8] \capped [8] \capped [8] \capped [8] \capped [8] \capped [8] \capped [8] }
+  Optimizing cells in module \g6lc_ai_gemm_flat_props.
+Performed a total of 8 changes.
+
+6.5. Executing OPT_MERGE pass (detect identical cells).
+Finding identical cells in module `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 109 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Removed a total of 0 cells.
+
+6.6. Executing OPT_SHARE pass.
+
+6.7. Executing OPT_DFF pass (perform DFF optimizations).
+
+6.8. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \g6lc_ai_gemm_flat_props..
+Removed 0 unused cells and 6 unused wires.
+<suppressed ~1 debug messages>
+
+6.9. Executing OPT_EXPR pass (perform const folding).
+Optimizing module g6lc_ai_gemm_flat_props.
+
+6.10. Rerunning OPT passes. (Maybe there is more to do..)
+
+6.11. Executing OPT_MUXTREE pass (detect dead branches in mux trees).
+Running muxtree optimizer on module \g6lc_ai_gemm_flat_props..
+  Creating internal representation of mux trees.
+  Evaluating internal representation of mux trees.
+  Analyzing evaluation results.
+Removed 0 multiplexer ports.
+<suppressed ~27 debug messages>
+
+6.12. Executing OPT_REDUCE pass (consolidate $*mux and $reduce_* inputs).
+  Optimizing cells in module \g6lc_ai_gemm_flat_props.
+Performed a total of 0 changes.
+
+6.13. Executing OPT_MERGE pass (detect identical cells).
+Finding identical cells in module `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 109 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Removed a total of 0 cells.
+
+6.14. Executing OPT_SHARE pass.
+
+6.15. Executing OPT_DFF pass (perform DFF optimizations).
+
+6.16. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \g6lc_ai_gemm_flat_props..
+
+6.17. Executing OPT_EXPR pass (perform const folding).
+Optimizing module g6lc_ai_gemm_flat_props.
+
+6.18. Finished fast OPT passes. (There is nothing left to do.)
+
+7. Executing TECHMAP pass (map to technology primitives).
+
+7.1. Executing Verilog-2005 frontend: /usr/local/bin/../share/yosys/techmap.v
+Parsing Verilog input from `/usr/local/bin/../share/yosys/techmap.v' to AST representation.
+Generating RTLIL representation for module `\_90_simplemap_bool_ops'.
+Generating RTLIL representation for module `\_90_simplemap_reduce_ops'.
+Generating RTLIL representation for module `\_90_simplemap_logic_ops'.
+Generating RTLIL representation for module `\_90_simplemap_compare_ops'.
+Generating RTLIL representation for module `\_90_simplemap_various'.
+Generating RTLIL representation for module `\_90_simplemap_registers'.
+Generating RTLIL representation for module `\_90_shift_ops_shr_shl_sshl_sshr'.
+Generating RTLIL representation for module `\_90_shift_shiftx'.
+Generating RTLIL representation for module `\_90_fa'.
+Generating RTLIL representation for module `\_90_lcu_brent_kung'.
+Generating RTLIL representation for module `\_90_alu'.
+Generating RTLIL representation for module `\_90_macc'.
+Generating RTLIL representation for module `\_90_alumacc'.
+Generating RTLIL representation for module `$__div_mod_u'.
+Generating RTLIL representation for module `$__div_mod_trunc'.
+Generating RTLIL representation for module `\_90_div'.
+Generating RTLIL representation for module `\_90_mod'.
+Generating RTLIL representation for module `$__div_mod_floor'.
+Generating RTLIL representation for module `\_90_divfloor'.
+Generating RTLIL representation for module `\_90_modfloor'.
+Generating RTLIL representation for module `\_90_pow'.
+Generating RTLIL representation for module `\_90_demux'.
+Generating RTLIL representation for module `\_90_lut'.
+Generating RTLIL representation for module `$connect'.
+Generating RTLIL representation for module `$input_port'.
+Successfully finished Verilog frontend.
+
+7.2. Continuing TECHMAP pass.
+Using extmapper simplemap for cells of type $reduce_or.
+Using extmapper simplemap for cells of type $logic_not.
+Using extmapper simplemap for cells of type $mux.
+Using extmapper simplemap for cells of type $not.
+Running "alumacc" on wrapper $extern:wrap:$gt:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=8:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$gt:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=8:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$gt:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=8:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=7:B_SIGNED=0:B_WIDTH=6:Y_WIDTH=8:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=7:B_SIGNED=0:B_WIDTH=6:Y_WIDTH=8:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=7:B_SIGNED=0:B_WIDTH=6:Y_WIDTH=8:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$gt:A_SIGNED=0:A_WIDTH=30:B_SIGNED=0:B_WIDTH=8:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$gt:A_SIGNED=0:A_WIDTH=30:B_SIGNED=0:B_WIDTH=8:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$gt:A_SIGNED=0:A_WIDTH=30:B_SIGNED=0:B_WIDTH=8:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$add:A_SIGNED=0:A_WIDTH=1:B_SIGNED=0:B_WIDTH=29:Y_WIDTH=30:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$add:A_SIGNED=0:A_WIDTH=1:B_SIGNED=0:B_WIDTH=29:Y_WIDTH=30:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$add:A_SIGNED=0:A_WIDTH=1:B_SIGNED=0:B_WIDTH=29:Y_WIDTH=30:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=1:Y_WIDTH=32:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=1:Y_WIDTH=32:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=1:Y_WIDTH=32:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$add:A_SIGNED=0:A_WIDTH=29:B_SIGNED=0:B_WIDTH=1:Y_WIDTH=29:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$add:A_SIGNED=0:A_WIDTH=29:B_SIGNED=0:B_WIDTH=1:Y_WIDTH=29:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$add:A_SIGNED=0:A_WIDTH=29:B_SIGNED=0:B_WIDTH=1:Y_WIDTH=29:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=32:Y_WIDTH=32:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=32:Y_WIDTH=32:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=32:Y_WIDTH=32:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $paramod$constmap:827c054e4672df4ad583268a8ddc9dc48f189841$paramod$cca1f005dbaa5e0b3de272f82920123cf951e346\_90_shift_ops_shr_shl_sshl_sshr for cells of type $shl.
+Running "alumacc" on wrapper $extern:wrap:$add:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=1:Y_WIDTH=32:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$add:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=1:Y_WIDTH=32:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$add:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=1:Y_WIDTH=32:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$add:A_SIGNED=0:A_WIDTH=64:B_SIGNED=0:B_WIDTH=29:Y_WIDTH=64:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$add:A_SIGNED=0:A_WIDTH=64:B_SIGNED=0:B_WIDTH=29:Y_WIDTH=64:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$add:A_SIGNED=0:A_WIDTH=64:B_SIGNED=0:B_WIDTH=29:Y_WIDTH=64:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=6:B_SIGNED=0:B_WIDTH=5:Y_WIDTH=7:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=6:B_SIGNED=0:B_WIDTH=5:Y_WIDTH=7:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=6:B_SIGNED=0:B_WIDTH=5:Y_WIDTH=7:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$le:A_SIGNED=0:A_WIDTH=29:B_SIGNED=0:B_WIDTH=1:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$le:A_SIGNED=0:A_WIDTH=29:B_SIGNED=0:B_WIDTH=1:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$le:A_SIGNED=0:A_WIDTH=29:B_SIGNED=0:B_WIDTH=1:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=29:B_SIGNED=0:B_WIDTH=1:Y_WIDTH=30:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=29:B_SIGNED=0:B_WIDTH=1:Y_WIDTH=30:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=29:B_SIGNED=0:B_WIDTH=1:Y_WIDTH=30:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$gt:A_SIGNED=0:A_WIDTH=6:B_SIGNED=0:B_WIDTH=5:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$gt:A_SIGNED=0:A_WIDTH=6:B_SIGNED=0:B_WIDTH=5:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$gt:A_SIGNED=0:A_WIDTH=6:B_SIGNED=0:B_WIDTH=5:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=6:B_SIGNED=0:B_WIDTH=5:Y_WIDTH=6:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=6:B_SIGNED=0:B_WIDTH=5:Y_WIDTH=6:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=6:B_SIGNED=0:B_WIDTH=5:Y_WIDTH=6:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$add:A_SIGNED=0:A_WIDTH=1:B_SIGNED=0:B_WIDTH=54:Y_WIDTH=54:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$add:A_SIGNED=0:A_WIDTH=1:B_SIGNED=0:B_WIDTH=54:Y_WIDTH=54:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$add:A_SIGNED=0:A_WIDTH=1:B_SIGNED=0:B_WIDTH=54:Y_WIDTH=54:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$le:A_SIGNED=0:A_WIDTH=64:B_SIGNED=0:B_WIDTH=12:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$le:A_SIGNED=0:A_WIDTH=64:B_SIGNED=0:B_WIDTH=12:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$le:A_SIGNED=0:A_WIDTH=64:B_SIGNED=0:B_WIDTH=12:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$gt:A_SIGNED=0:A_WIDTH=8:B_SIGNED=0:B_WIDTH=32:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$gt:A_SIGNED=0:A_WIDTH=8:B_SIGNED=0:B_WIDTH=32:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$gt:A_SIGNED=0:A_WIDTH=8:B_SIGNED=0:B_WIDTH=32:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$le:A_SIGNED=0:A_WIDTH=64:B_SIGNED=0:B_WIDTH=11:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$le:A_SIGNED=0:A_WIDTH=64:B_SIGNED=0:B_WIDTH=11:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$le:A_SIGNED=0:A_WIDTH=64:B_SIGNED=0:B_WIDTH=11:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$le:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=7:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$le:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=7:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$le:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=7:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$add:A_SIGNED=0:A_WIDTH=3:B_SIGNED=0:B_WIDTH=29:Y_WIDTH=29:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$add:A_SIGNED=0:A_WIDTH=3:B_SIGNED=0:B_WIDTH=29:Y_WIDTH=29:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$add:A_SIGNED=0:A_WIDTH=3:B_SIGNED=0:B_WIDTH=29:Y_WIDTH=29:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$ge:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=32:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$ge:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=32:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$ge:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=32:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$add:A_SIGNED=0:A_WIDTH=29:B_SIGNED=0:B_WIDTH=29:Y_WIDTH=29:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$add:A_SIGNED=0:A_WIDTH=29:B_SIGNED=0:B_WIDTH=29:Y_WIDTH=29:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$add:A_SIGNED=0:A_WIDTH=29:B_SIGNED=0:B_WIDTH=29:Y_WIDTH=29:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=29:B_SIGNED=0:B_WIDTH=1:Y_WIDTH=29:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=29:B_SIGNED=0:B_WIDTH=1:Y_WIDTH=29:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=29:B_SIGNED=0:B_WIDTH=1:Y_WIDTH=29:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=4:B_SIGNED=0:B_WIDTH=32:Y_WIDTH=32:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=4:B_SIGNED=0:B_WIDTH=32:Y_WIDTH=32:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=4:B_SIGNED=0:B_WIDTH=32:Y_WIDTH=32:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$gt:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=32:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$gt:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=32:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$gt:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=32:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Using extmapper simplemap for cells of type $logic_and.
+Running "alumacc" on wrapper $extern:wrap:$lt:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=8:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$lt:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=8:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$lt:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=8:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Using extmapper simplemap for cells of type $reduce_bool.
+Running "alumacc" on wrapper $extern:wrap:$le:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=8:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$le:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=8:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$le:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=8:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$gt:A_SIGNED=0:A_WIDTH=29:B_SIGNED=0:B_WIDTH=32:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$gt:A_SIGNED=0:A_WIDTH=29:B_SIGNED=0:B_WIDTH=32:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$gt:A_SIGNED=0:A_WIDTH=29:B_SIGNED=0:B_WIDTH=32:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $paramod$constmap:8b5526cab1f2b19f85f01c2b4addda1fa6ba4026$paramod$3397fd401bca6d5a7933ed227da04f250cc57c1a\_90_shift_ops_shr_shl_sshl_sshr for cells of type $shl.
+Running "alumacc" on wrapper $extern:wrap:$gt:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=1:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$gt:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=1:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$gt:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=1:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$lt:A_SIGNED=0:A_WIDTH=64:B_SIGNED=0:B_WIDTH=64:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$lt:A_SIGNED=0:A_WIDTH=64:B_SIGNED=0:B_WIDTH=64:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$lt:A_SIGNED=0:A_WIDTH=64:B_SIGNED=0:B_WIDTH=64:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$lt:A_SIGNED=0:A_WIDTH=61:B_SIGNED=0:B_WIDTH=64:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$lt:A_SIGNED=0:A_WIDTH=61:B_SIGNED=0:B_WIDTH=64:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$lt:A_SIGNED=0:A_WIDTH=61:B_SIGNED=0:B_WIDTH=64:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $paramod$constmap:88c3d3ca1c0ad3673388c983a19e3916d3c32226$paramod$160f353fe3871f761e46a987be0699411d285257\_90_shift_ops_shr_shl_sshl_sshr for cells of type $shl.
+Running "alumacc" on wrapper $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=1:Y_WIDTH=33:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=1:Y_WIDTH=33:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$sub:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=1:Y_WIDTH=33:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$le:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=32:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$le:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=32:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$le:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=32:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$lt:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=32:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$lt:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=32:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$lt:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=32:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$le:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=12:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$le:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=12:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$le:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=12:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Running "alumacc" on wrapper $extern:wrap:$le:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=18:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Using template $extern:wrap:$le:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=18:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47 for cells of type $extern:wrap:$le:A_SIGNED=0:A_WIDTH=32:B_SIGNED=0:B_WIDTH=18:Y_WIDTH=1:394426c56d1a028ba8fdd5469b163e04011def47.
+Using extmapper simplemap for cells of type $or.
+Using extmapper simplemap for cells of type $reduce_and.
+Using template $paramod$47f54ff2f0cc9449305556c1cf611d590a7c17fb\_90_alu for cells of type $alu.
+Using template $paramod$dc3d9690024fd29871c2ad116eaf4bb240343cd6\_90_alu for cells of type $alu.
+Using template $paramod$fbc7873bff55778c0b3173955b7e4bce1d9d6834\_90_alu for cells of type $alu.
+Using template $paramod$80fd49bc875a8a1ceaa5f1b164eef265e92f0909\_90_alu for cells of type $alu.
+Using template $paramod$c04af8dbf0e5d1d69bbccb2c7bd8a93fc9ef54dc\_90_alu for cells of type $alu.
+Using template $paramod$08eec5a6921d570f658f0ddff79a3d6fd06b1ec1\_90_alu for cells of type $alu.
+Using template $paramod$6ebf5bb4504c976bf41bb529df176e1cb6c13cf1\_90_alu for cells of type $alu.
+Using template $paramod$6a42b6fefed750f8a1c58eab59479d960557103c\_90_alu for cells of type $alu.
+Using template $paramod$a61948e245185c57f26f545f77929f97b3083723\_90_alu for cells of type $alu.
+Using template $paramod$fd686afb999c4136eb83fcb456f758924578074d\_90_alu for cells of type $alu.
+Using template $paramod$b15d28721ac58edd44c77fb51c9f8c001a741924\_90_alu for cells of type $alu.
+Using template $paramod$b8f7cfc21815ac650435f1c180d1d84f774de347\_90_alu for cells of type $alu.
+Using template $paramod$a40b3a69ab2154dca9743e30e1e84efb03b892b4\_90_alu for cells of type $alu.
+Using template $paramod$4f6944efa43705ebc83620d5a607f0aea58af367\_90_alu for cells of type $alu.
+Using template $paramod$688941bad11fc188bb3f4eda7d01bb74aefd0d86\_90_alu for cells of type $alu.
+Using template $paramod$91f82ead1edc61e0a1452110f15ef747116b421b\_90_alu for cells of type $alu.
+Using template $paramod$6e1431ee3eb1c7164010425539bb70260ea0fee1\_90_alu for cells of type $alu.
+Using template $paramod$8c43a4b340292425d0e15ee12ac6b01ca30bc5f3\_90_alu for cells of type $alu.
+Using template $paramod$b7dbb4ea758f2402846a04a06dfe9e2cbfb47604\_90_alu for cells of type $alu.
+Using template $paramod$88ebedc0964674c5b2e447c66b33a42fc7e7abe0\_90_alu for cells of type $alu.
+Using template $paramod$a7817265ef3ab2ee43da53bbd8a90f6450d412d9\_90_alu for cells of type $alu.
+Using template $paramod$165fdf60338663c1b1095d1639bc2761df5db061\_90_alu for cells of type $alu.
+Using template $paramod$039520c137afc9cd69dd56c3fb11a4e1fbe5f664\_90_alu for cells of type $alu.
+Using template $paramod$456cea4c5bfe031f8999cda9de4945293a381748\_90_alu for cells of type $alu.
+Using template $paramod$efe8b61f723a37f883fa3e6c72dc23c600be6401\_90_alu for cells of type $alu.
+Using template $paramod$a55d269037242acb578fc1d25501141e6158ef84\_90_alu for cells of type $alu.
+Using template $paramod$6383953d0f76a7be6a5a80caced99c7407f13ec2\_90_alu for cells of type $alu.
+Using extmapper simplemap for cells of type $xor.
+Using template $paramod\_90_fa\WIDTH=32'00000000000000000000000000100000 for cells of type $fa.
+Using template $paramod\_90_lcu_brent_kung\WIDTH=32'00000000000000000000000000100000 for cells of type $lcu.
+Using extmapper simplemap for cells of type $pos.
+Using template $paramod\_90_fa\WIDTH=32'00000000000000000000000000001000 for cells of type $fa.
+Using template $paramod\_90_lcu_brent_kung\WIDTH=32'00000000000000000000000000001000 for cells of type $lcu.
+Using template $paramod\_90_fa\WIDTH=32'00000000000000000000000000011101 for cells of type $fa.
+Using template $paramod\_90_lcu_brent_kung\WIDTH=32'00000000000000000000000000011101 for cells of type $lcu.
+Using template $paramod\_90_fa\WIDTH=32'00000000000000000000000000011110 for cells of type $fa.
+Using template $paramod\_90_lcu_brent_kung\WIDTH=32'00000000000000000000000000011110 for cells of type $lcu.
+Using template $paramod\_90_fa\WIDTH=32'00000000000000000000000001000000 for cells of type $fa.
+Using template $paramod\_90_lcu_brent_kung\WIDTH=32'00000000000000000000000001000000 for cells of type $lcu.
+Using template $paramod\_90_fa\WIDTH=32'00000000000000000000000000000111 for cells of type $fa.
+Using template $paramod\_90_lcu_brent_kung\WIDTH=32'00000000000000000000000000000111 for cells of type $lcu.
+Using template $paramod\_90_fa\WIDTH=32'00000000000000000000000000000110 for cells of type $fa.
+Using template $paramod\_90_lcu_brent_kung\WIDTH=32'00000000000000000000000000000110 for cells of type $lcu.
+Using template $paramod\_90_fa\WIDTH=32'00000000000000000000000000110110 for cells of type $fa.
+Using template $paramod\_90_lcu_brent_kung\WIDTH=32'00000000000000000000000000110110 for cells of type $lcu.
+Using template $paramod\_90_fa\WIDTH=32'00000000000000000000000000100001 for cells of type $fa.
+Using template $paramod\_90_lcu_brent_kung\WIDTH=32'00000000000000000000000000100001 for cells of type $lcu.
+Using extmapper simplemap for cells of type $and.
+No more expansions possible.
+<suppressed ~12012 debug messages>
+
+8. Executing OPT pass (performing simple optimizations).
+
+8.1. Executing OPT_EXPR pass (perform const folding).
+Optimizing module g6lc_ai_gemm_flat_props.
+<suppressed ~11789 debug messages>
+
+8.2. Executing OPT_MERGE pass (detect identical cells).
+Finding identical cells in module `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 11139 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 10329 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 10044 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 9877 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 9797 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 9748 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 9719 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 9692 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 9667 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 9642 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 9611 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 9584 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 9550 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 9526 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 9501 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 9489 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 9480 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 9478 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 9477 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+<suppressed ~4986 debug messages>
+Removed a total of 1662 cells.
+
+8.3. Executing OPT_DFF pass (perform DFF optimizations).
+
+8.4. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \g6lc_ai_gemm_flat_props..
+Removed 2098 unused cells and 5712 unused wires.
+<suppressed ~2099 debug messages>
+
+8.5. Finished fast OPT passes.
+
+9. Executing MEMORY_MAP pass (converting memories to logic and flip-flops).
+
+10. Executing FORMALFF pass.
+
+11. Executing SIMPLEMAP pass (map simple cells to gate primitives).
+
+12. Executing DFFUNMAP pass (unmap clock enable and synchronous reset from FFs).
+
+13. Executing AIGMAP pass (map logic to AIG).
+Module g6lc_ai_gemm_flat_props: replaced 3922 cells with 23359 new cells, skipped 3457 cells.
+  replaced 3 cell types:
+    1582 $_MUX_
+    1365 $_OR_
+     975 $_XOR_
+  not replaced 5 cell types:
+    2735 $_AND_
+     702 $_NOT_
+       2 $anyseq
+       9 $assert
+       9 $assume
+
+14. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \g6lc_ai_gemm_flat_props..
+Removed 0 unused cells and 2691 unused wires.
+<suppressed ~1 debug messages>
+
+15. Printing statistics.
+
+=== g6lc_ai_gemm_flat_props ===
+
+        +----------Local Count, excluding submodules.
+        | 
+    23259 wires
+    28988 wire bits
+       20 public wires
+      682 public wire bits
+       11 ports
+      298 port bits
+    26816 cells
+    11771   $_AND_
+    15025   $_NOT_
+        2   $anyseq
+        9   $assert
+        9   $assume
+
+16. Executing AIGER backend.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\rows [11] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\row [0] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\nb [4] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\nb [5] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\nb [6] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\nb [7] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\lane0 [0] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [0] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [1] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [2] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [3] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [4] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [5] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [6] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [7] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [8] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [9] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [10] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [11] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [12] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [13] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [14] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [15] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [16] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\k_bytes [17] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\addr [0] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\addr [1] like $anyseq.
+Warning: Treating undriven bit g6lc_ai_gemm_flat_props.\addr [2] like $anyseq.
+Warning: Treating a total of 28 undriven bits in g6lc_ai_gemm_flat_props like $anyseq.
+
+Warnings: 29 unique messages, 29 total
+End of script. Logfile hash: 847c69eb8d, time: 6.77s, user: 3.60s, system: 1.06s, MEM: 80.93 MB peak
+Yosys 0.68+1 (git sha1 c30457480, Release, GNU /usr/bin/c++ 13.3.0)
+Time spent: 28% 28x opt_expr (1 sec), 24% 1x techmap (1 sec), ...

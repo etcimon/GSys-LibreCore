@@ -1,0 +1,6 @@
+Elapsed clock time [H:MM:SS (secs)]: 0:00:09 (9)
+Elapsed process time [H:MM:SS (secs)]: 0:00:16 (16)
+engine_0 (abc pdr) returned PASS
+engine_0 did not produce any traces
+engine_1 (smtbmc z3) did not return a status
+engine_1 did not produce any traces

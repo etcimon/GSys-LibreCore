@@ -1,0 +1,8 @@
+# running in g6lc_ai_gemm_flat_hyp_bench/src/
+read_slang --std 1800-2017 --keep-hierarchy --top g6lc_ai_gemm_flat_props -DFORMAL -G LS=3 -G WORDS=2048 -G SLOTS=2 -G BPB=8 -G EPBS=3 -G NCH=2 -G CSH=6 g6lc_ai_island_cfg_pkg.sv g6lc_ai_gemm_flat_props.sv
+prep -top g6lc_ai_gemm_flat_props
+
+hierarchy -smtcheck
+rename -witness
+write_jny -no-connections ../model/design.json
+write_rtlil ../model/design.il

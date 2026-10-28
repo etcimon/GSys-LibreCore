@@ -28,6 +28,7 @@ build/
 *.vcd
 *.fsdb
 *.log
+!build-platform/workspace/hyp/**/*.log
 *.out
 *.jou
 *.o

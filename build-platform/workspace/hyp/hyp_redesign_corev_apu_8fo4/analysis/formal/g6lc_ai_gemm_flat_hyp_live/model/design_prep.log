@@ -1,0 +1,74 @@
+
+ /----------------------------------------------------------------------------\
+ |  yosys -- Yosys Open SYnthesis Suite                                       |
+ |  Copyright (C) 2012 - 2026  Claire Xenia Wolf <claire@yosyshq.com>         |
+ |  Distributed under an ISC-like license, type "license" to see terms        |
+ \----------------------------------------------------------------------------/
+ Yosys 0.68+1 (git sha1 c30457480, Release, GNU /usr/bin/c++ 13.3.0)
+
+-- Executing script file `design_prep.ys' --
+
+1. Executing RTLIL frontend.
+Input filename: design.il
+
+2. Executing SCC pass (detecting logic loops).
+Found 0 SCCs in module g6lc_ai_gemm_flat_props.
+Found 0 SCCs.
+
+3. Executing SIMPLEMAP pass (map simple cells to gate primitives).
+
+4. Executing MEMORY_NORDFF pass (extracting $dff cells from memories).
+
+5. Executing ASYNC2SYNC pass.
+
+6. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \g6lc_ai_gemm_flat_props..
+Removed 36 unused cells and 36 unused wires.
+<suppressed ~37 debug messages>
+
+7. Executing FORMALFF pass.
+
+8. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \g6lc_ai_gemm_flat_props..
+
+9. Executing CHECK pass (checking for obvious problems).
+Checking module g6lc_ai_gemm_flat_props...
+Found and reported 0 problems.
+
+10. Executing SETUNDEF pass (replace undef values with defined constants).
+
+11. Executing OPT pass (performing simple optimizations).
+
+11.1. Executing OPT_EXPR pass (perform const folding).
+Optimizing module g6lc_ai_gemm_flat_props.
+<suppressed ~2 debug messages>
+
+11.2. Executing OPT_MERGE pass (detect identical cells).
+Finding identical cells in module `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 108 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+Computing hashes of 107 cells of `\g6lc_ai_gemm_flat_props'.
+Finding duplicate cells in `\g6lc_ai_gemm_flat_props'.
+<suppressed ~2 debug messages>
+Removed a total of 1 cells.
+
+11.3. Executing OPT_DFF pass (perform DFF optimizations).
+
+11.4. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \g6lc_ai_gemm_flat_props..
+Removed 0 unused cells and 2 unused wires.
+<suppressed ~3 debug messages>
+
+11.5. Finished fast OPT passes.
+
+12. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \g6lc_ai_gemm_flat_props..
+Removed 0 unused cells and 2 unused wires.
+<suppressed ~1 debug messages>
+
+13. Executing RTLIL backend.
+Output filename: ../model/design_prep.il
+
+End of script. Logfile hash: d245170d15, time: 0.09s, user: 0.03s, system: 0.02s, MEM: 22.94 MB peak
+Yosys 0.68+1 (git sha1 c30457480, Release, GNU /usr/bin/c++ 13.3.0)
+Time spent: 39% 4x opt_clean (0 sec), 11% 1x formalff (0 sec), ...

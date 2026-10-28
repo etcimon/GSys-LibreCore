@@ -1,0 +1,67 @@
+
+ /----------------------------------------------------------------------------\
+ |  yosys -- Yosys Open SYnthesis Suite                                       |
+ |  Copyright (C) 2012 - 2026  Claire Xenia Wolf <claire@yosyshq.com>         |
+ |  Distributed under an ISC-like license, type "license" to see terms        |
+ \----------------------------------------------------------------------------/
+ Yosys 0.68+1 (git sha1 c30457480, Release, GNU /usr/bin/c++ 13.3.0)
+
+-- Executing script file `design_smt2.ys' --
+
+1. Executing RTLIL frontend.
+Input filename: design_prep.il
+
+2. Executing HIERARCHY pass (managing design hierarchy).
+Attribute `top' found on module `g6lc_ai_gemm_flat_props'. Setting top module to g6lc_ai_gemm_flat_props.
+
+2.1. Analyzing design hierarchy..
+Top module:  \g6lc_ai_gemm_flat_props
+
+2.2. Analyzing design hierarchy..
+Top module:  \g6lc_ai_gemm_flat_props
+Removed 0 unused modules.
+Module g6lc_ai_gemm_flat_props directly or indirectly contains formal properties -> setting "keep" attribute.
+
+3. Executing FORMALFF pass.
+
+4. Executing DFFUNMAP pass (unmap clock enable and synchronous reset from FFs).
+
+5. Printing statistics.
+
+=== g6lc_ai_gemm_flat_props ===
+
+        +----------Local Count, excluding submodules.
+        | 
+      101 wires
+     1916 wire bits
+       20 public wires
+      682 public wire bits
+       11 ports
+      298 port bits
+      105 cells
+        8   $add
+        2   $anyseq
+        8   $assert
+        9   $assume
+        6   $ge
+        5   $gt
+        9   $le
+        4   $logic_and
+        3   $logic_not
+        7   $lt
+       22   $mux
+        1   $reduce_bool
+        4   $reduce_or
+        6   $shl
+       11   $sub
+
+6. Executing SMT2 backend.
+
+6.1. Executing BMUXMAP pass.
+
+6.2. Executing DEMUXMAP pass.
+Creating SMT-LIBv2 representation of module g6lc_ai_gemm_flat_props.
+
+End of script. Logfile hash: 3dd6612678, time: 0.07s, user: 0.01s, system: 0.02s, MEM: 20.38 MB peak
+Yosys 0.68+1 (git sha1 c30457480, Release, GNU /usr/bin/c++ 13.3.0)
+Time spent: 55% 2x write_smt2 (0 sec), 27% 2x read_rtlil (0 sec), ...
