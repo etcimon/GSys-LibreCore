@@ -7,7 +7,10 @@
 pub const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Timing IR schema version (bump on breaking IR changes).
-pub const IR_VERSION: &str = "ir-v5";
+/// v6: `TimingModule::const_exprs` is populated from
+/// `LocalParameterDeclaration` / `ParamAssignment` nodes (was a
+/// shallow top-level scan; cached IR would resolve no values).
+pub const IR_VERSION: &str = "ir-v6";
 
 /// Opportunity/structural-emission semantics, independent of delay costs.
 /// v1 adds typed +/- offset candidates and unsigned selector indexing.
@@ -127,7 +130,12 @@ pub const CORRECTION_VERSION: &str = "correction-v5";
 /// procedural block only the latest write before the read, from another
 /// region that region's last write (the rename's repair of `free_d`, written
 /// after the allocation picks read it, was composed as their predecessor).
-pub const MEASUREMENT_VERSION: &str = "delay-v44";
+/// `delay-v45`: `Expr::const_value` resolves bound parameters and evaluable
+/// localparam defaults (`ConstSeed.values` via
+/// `Design::elaboration_const_seed`); a ternary / spine whose condition has
+/// a resolved value bills the live arm only — the previous form billed the
+/// `max` of both arms (r82: `Stages==1 ? record : live` kept the record).
+pub const MEASUREMENT_VERSION: &str = "delay-v45";
 
 /// Hint for which upstream pin the vendored tree should track (see tools/sv-parser.rev).
 pub const PARSER_PIN_HINT: &str = "v0.13.5";

@@ -3,6 +3,22 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## Cross-module stitch connectivity — analysis finding, implementation pending
+
+- [x] Audit `lower.rs::stitch_cross_module_paths`: representative module paths
+  are selected before composed cones, then summed when child output ports
+  exist. `port_bridged` does not prove parent-cone reachability or respect
+  register boundaries. The source/IR counterexample is the hyp GEMM r19
+  audit; A57's description now states this limitation.
+- [ ] Resolve actual port/bit/field and generate-instance connectivity in both
+  directions; stop at FF boundaries and select connected paths after cone
+  composition. Mark unresolved summaries explicitly unqualified.
+- [ ] Add package-local fixtures for an unrelated parent cone, registered child
+  output, real combinational bridge, parent-input→child-register path, and a
+  composed cone that exceeds the initially selected representative.
+- [ ] Verify the changed measurement on real host examples without assigning
+  any RTL timing credit or treating the old sums as valid upper bounds.
+
 ## A145 — IQ staged store-age gate: built, witnessed, timing-neutral, reverted
 
 - [x] `IqStagedStoreGate` trial: exact-rule random witness (3 × 200k, negative
@@ -2615,3 +2631,22 @@ Sparse soak evidence: `MONOREPO-SOAK.md` / `FO4-ALGORITHM-UPGRADES.md`.
   `fixtures/fn_zero_len_range.sv` (registered in
   `fixtures/filelist.txt`) — reproduces load_unit `stall_ni`
   billing on a dead predicate.
+- **r82 (B) DONE — delay-v45 / ir-v6:** `ConstSeed.values` +
+  `Expr::const_value` fold localparam/parameter-gated ternary arms
+  (`fo4_critical_cost_latticed`, `critical_spine_ops_latticed`) and
+  dep reads (`Expr::walk_read_idents` via `collect_dep_reads_fold`
+  in `RefOrderTree::from_nodes`). `Design::elaboration_const_seed`
+  resolves `const_exprs`/`TypedParameter` defaults;
+  `collect_const_exprs_in` now captures `LocalParameterDeclaration`
+  / header `#(parameter)` defaults (was a top-level-only scan —
+  `const_exprs` was silently empty). Fixture
+  `fixtures/localparam_gate_fold.sv` shows the fold
+  (`REC=(Stages==2)` dead arm no longer billed).
+  Residual: dead-arm-only assigns remain region nodes on
+  `lower.rs:712` path enumeration (node-pruning is a lowering
+  change, tracked below under (A)).
+- (A) still open: package-function constant folding —
+  `is_inside_*`/`range_check` calls stay `Unknown`/`Runtime` (their
+  bodies are off the delay graph; needs a package-function
+  evaluator). Same fix would prune dead-arm-only nodes from
+  region paths.

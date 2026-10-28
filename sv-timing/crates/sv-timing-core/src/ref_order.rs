@@ -91,9 +91,46 @@ fn dep_covers(writer: &str, read: &str) -> bool {
 
 /// Field-granular read keys of an expression, including identifiers inside
 /// the brackets of a flattened `a[i].f` member path (`wbuffer_q[ptr].wtag`
-/// reads `ptr`).
-fn collect_dep_reads(ex: &Expr, out: &mut Vec<String>) {
-    ex.walk_idents(&mut |id| push_dep_read(id, out));
+/// reads `ptr`). delay-v45: `walk_read_idents` folds ternary arms whose
+/// condition resolves through `seed.values` — the dead arm's identifiers
+/// are not dependencies.
+fn collect_dep_reads_fold(ex: &Expr, seed: &ConstSeed, out: &mut Vec<String>) {
+    ex.walk_read_idents(seed, &mut |id| push_dep_read(id, out));
+}
+
+/// Value map for the dep-read fold: the module's own `const_exprs` /
+/// `localparam` chain evaluated with no outer scope (host-bound
+/// parameters stay unresolved — their arms keep both reads).
+fn dep_fold_seed(module: &TimingModule) -> ConstSeed {
+    let empty_pkgs: BTreeMap<String, crate::ir::TimingPackage> = BTreeMap::new();
+    let empty_ints: BTreeMap<String, i64> = BTreeMap::new();
+    let resolver = crate::width::WidthResolver::from_parts(
+        &empty_pkgs,
+        &empty_ints,
+        &module.decls,
+        &module.ports,
+        &module.const_exprs,
+        &module.typedef_texts,
+        &module.package_imports,
+        None,
+    );
+    let mut seed = ConstSeed::from_names(
+        module
+            .localparams
+            .iter()
+            .cloned()
+            .chain(module.const_exprs.keys().cloned()),
+    );
+    for name in module
+        .localparams
+        .iter()
+        .chain(module.const_exprs.keys())
+    {
+        if let Some(v) = resolver.const_value(name) {
+            seed.values.insert(name.clone(), v);
+        }
+    }
+    seed
 }
 
 fn push_dep_read(id: &str, out: &mut Vec<String>) {
@@ -269,6 +306,7 @@ impl RefOrderTree {
     /// Build from IR nodes in **procedural (statement) order**.
     pub fn from_nodes(module: &TimingModule, nodes: &[NodeId]) -> Self {
         let param_names = param_name_set(module);
+        let dep_seed = dep_fold_seed(module);
         let bindings = BindingIndex::new(module);
         let mut tree = Self {
             procedural_ok: true,
@@ -315,7 +353,7 @@ impl RefOrderTree {
             };
             if let Some(ex) = rhs_ex {
                 collect_expr(&mut tree, &param_names, stmt_ord, nid, ex, &mut reads);
-                collect_dep_reads(ex, &mut dep_reads);
+                collect_dep_reads_fold(ex, &dep_seed, &mut dep_reads);
             }
             // Guards (if predicates, dynamic LHS indices) are reads of the
             // node: the select of `if (g) x = a` waits for `g`.
@@ -328,7 +366,7 @@ impl RefOrderTree {
                             reads.push(base);
                         }
                     });
-                    collect_dep_reads(&gex, &mut dep_reads);
+                    collect_dep_reads_fold(&gex, &dep_seed, &mut dep_reads);
                 }
             }
 

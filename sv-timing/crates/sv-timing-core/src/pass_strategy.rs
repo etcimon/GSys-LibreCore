@@ -191,7 +191,7 @@ pub fn plan_from_design(design: &TimingDesign) -> PassPlan {
         let seed = design
             .modules
             .get(&path.module)
-            .map(|m| ConstSeed::from_names(design.elaboration_const_names(m)))
+            .map(|m| design.elaboration_const_seed(m))
             .unwrap_or_else(ConstSeed::heuristic);
         for pid in classify_path(design, path, &seed) {
             *counts.entry(pid.as_str().into()).or_insert(0) += 1;

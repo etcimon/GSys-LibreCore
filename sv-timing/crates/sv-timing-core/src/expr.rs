@@ -17,6 +17,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ir::OperatorClass;
+use crate::width::parse_sv_int;
 
 /// Timing-oriented expression tree (structural, source-level).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -181,6 +182,11 @@ impl ConstClass {
 pub struct ConstSeed {
     /// Exact names (`CVA6Cfg.XLEN`, `PRECISION_BITS`, …).
     pub names: std::collections::BTreeSet<String>,
+    /// Resolved elaboration values (delay-v45): bound parameters and
+    /// evaluable localparam defaults, `name → i64`. Empty in a
+    /// names-only seed — `const_value` then returns `None` for idents
+    /// and ternary folds fall back to the both-arms max.
+    pub values: std::collections::BTreeMap<String, i64>,
     /// Nets proven zero in the low `K` bits (`aligned_address` → `LOG_NR_BYTES`).
     /// First-pass exclusive `{x[MSB:K], {K{0}}}` assigns. `ident + (y << K)` is
     /// then a field insert, not a CPA.
@@ -525,6 +531,13 @@ impl Expr {
                 then_e,
                 else_e,
             } => {
+                // delay-v45: a constant condition with a resolved value
+                // bills the live arm only — the dead arm is not in the
+                // netlist (r82: `REC ? r_q : f(a)` under `Stages==1`).
+                if let Some(v) = cond.const_value(seed) {
+                    let arm = if v != 0 { then_e } else { else_e };
+                    return arm.fo4_critical_cost_latticed(base, seed);
+                }
                 // Const condition is generate-if / param select: one arm exists
                 // in the netlist, so there is no 2.5 FO4 mux (pe_dot `i < CNT`).
                 if cond.const_class(seed).is_const() {
@@ -754,12 +767,142 @@ impl Expr {
         }
     }
 
+    /// Resolved elaboration value of this expression, when the seed
+    /// carries one (delay-v45). `None` when any operand is unresolved —
+    /// callers fall back to the `const_class` lattice, which knows
+    /// constness but not the value.
+    pub fn const_value(&self, seed: &ConstSeed) -> Option<i64> {
+        self.const_value_at(seed, 0)
+    }
+
+    fn const_value_at(&self, seed: &ConstSeed, depth: u32) -> Option<i64> {
+        if depth > 12 {
+            return None;
+        }
+        match self {
+            Expr::Literal { text } => parse_sv_int(text).map(|(_, v)| v),
+            Expr::Ident { name } => {
+                if let Some(v) = seed.values.get(name) {
+                    return Some(*v);
+                }
+                // `Pkg::member` / `Cfg.FIELD`: the member name alone may be
+                // bound in the host param-map.
+                let member = name.rsplit([':', '.']).find(|s| !s.is_empty())?;
+                seed.values.get(member).copied()
+            }
+            Expr::Unary { op, arg } => {
+                let v = arg.const_value_at(seed, depth + 1)?;
+                match op.as_str() {
+                    "-" => v.checked_neg(),
+                    "+" => Some(v),
+                    "!" => Some(i64::from(v == 0)),
+                    "~" => Some(!v),
+                    _ => None,
+                }
+            }
+            Expr::Binary {
+                op, left, right, ..
+            } => {
+                let l = left.const_value_at(seed, depth + 1);
+                let r = right.const_value_at(seed, depth + 1);
+                match op.as_str() {
+                    // Logical ops fold on a single resolved operand.
+                    "&&" => match (l, r) {
+                        (Some(0), _) | (_, Some(0)) => Some(0),
+                        (Some(a), Some(b)) => Some(i64::from(a != 0 && b != 0)),
+                        _ => None,
+                    },
+                    "||" => match (l, r) {
+                        (Some(v), _) if v != 0 => Some(1),
+                        (_, Some(v)) if v != 0 => Some(1),
+                        (Some(a), Some(b)) => Some(i64::from(a != 0 || b != 0)),
+                        _ => None,
+                    },
+                    _ => {
+                        let l = l?;
+                        let r = r?;
+                        match op.as_str() {
+                            "+" => l.checked_add(r),
+                            "-" => l.checked_sub(r),
+                            "*" => l.checked_mul(r),
+                            "/" => (r != 0).then(|| l / r),
+                            "%" => (r != 0).then(|| l % r),
+                            "**" => u32::try_from(r).ok().and_then(|p| l.checked_pow(p)),
+                            "<<" => u32::try_from(r).ok().and_then(|s| l.checked_shl(s)),
+                            ">>" | ">>>" => {
+                                u32::try_from(r).ok().and_then(|s| l.checked_shr(s))
+                            }
+                            "<" => Some(i64::from(l < r)),
+                            ">" => Some(i64::from(l > r)),
+                            "<=" => Some(i64::from(l <= r)),
+                            ">=" => Some(i64::from(l >= r)),
+                            "==" => Some(i64::from(l == r)),
+                            "!=" => Some(i64::from(l != r)),
+                            "&" => Some(l & r),
+                            "|" => Some(l | r),
+                            "^" => Some(l ^ r),
+                            _ => None,
+                        }
+                    }
+                }
+            }
+            Expr::Ternary {
+                cond,
+                then_e,
+                else_e,
+            } => {
+                let c = cond.const_value_at(seed, depth + 1)?;
+                if c != 0 {
+                    then_e.const_value_at(seed, depth + 1)
+                } else {
+                    else_e.const_value_at(seed, depth + 1)
+                }
+            }
+            Expr::Call { name, args } => match (name.as_str(), args.as_slice()) {
+                ("$clog2", [a]) => {
+                    let v = a.const_value_at(seed, depth + 1)?;
+                    Some(if v <= 1 { 0 } else { 64 - (v - 1).leading_zeros() as i64 })
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// Index/part-select arithmetic retains the cost of dynamic operations.
     pub fn fo4_critical_cost_as_index(&self, base: &dyn Fn(OperatorClass) -> f64) -> f64 {
         self.fo4_critical_cost(base)
     }
 
     /// Visit identifier names (not function names).
+    /// Read walk with the delay-v45 constant fold: a ternary whose
+    /// condition resolves through `seed.values` contributes only the
+    /// live arm's reads — the dead arm's identifiers are not
+    /// dependencies (a `Stages==2`-gated record does not make its
+    /// payload a read of the live `Stages==1` path).
+    pub fn walk_read_idents(&self, seed: &ConstSeed, f: &mut dyn FnMut(&str)) {
+        match self {
+            Expr::Ternary {
+                cond,
+                then_e,
+                else_e,
+            } => {
+                if let Some(v) = cond.const_value(seed) {
+                    let arm = if v != 0 { then_e } else { else_e };
+                    arm.walk_read_idents(seed, f);
+                } else {
+                    cond.walk_idents(f);
+                    then_e.walk_read_idents(seed, f);
+                    else_e.walk_read_idents(seed, f);
+                }
+            }
+            _ => self.walk_idents(f),
+        }
+    }
+
+    /// Every identifier spelled in the expression (both arms of a
+    /// conditional — for read/dependency tracking under a constant
+    /// fold use [`Expr::walk_read_idents`]).
     pub fn walk_idents(&self, f: &mut dyn FnMut(&str)) {
         match self {
             Expr::Ident { name } => f(name),
@@ -938,6 +1081,12 @@ impl Expr {
                 then_e,
                 else_e,
             } => {
+                // delay-v45: resolved constant condition → the live
+                // arm's spine only (see fo4_critical_cost_latticed).
+                if let Some(v) = cond.const_value(seed) {
+                    let arm = if v != 0 { then_e } else { else_e };
+                    return arm.critical_spine_ops_latticed(base, seed);
+                }
                 if cond.const_class(seed).is_const() {
                     let tc = then_e.fo4_critical_cost_latticed(base, seed);
                     let ec = else_e.fo4_critical_cost_latticed(base, seed);

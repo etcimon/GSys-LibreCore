@@ -885,18 +885,38 @@ fn collect_const_exprs_in<'a, T>(tree: &'a SyntaxTree, root: T) -> BTreeMap<Stri
 where
     T: IntoIterator<Item = RefNode<'a>>,
 {
+    fn one_pa(tree: &SyntaxTree, node: RefNode, out: &mut BTreeMap<String, String>) {
+        let RefNode::ParamAssignment(pa) = node else {
+            return;
+        };
+        let Some(name) = identifier_str(tree, RefNode::ParameterIdentifier(&pa.nodes.0)) else {
+            return;
+        };
+        let Some((_, expr)) = pa.nodes.2.as_ref() else {
+            return;
+        };
+        if let Some(text) = node_text(tree, expr) {
+            out.entry(name).or_insert(text);
+        }
+    }
     let mut out = BTreeMap::new();
     for node in root {
-        if let RefNode::ParamAssignment(pa) = node {
-            let Some(name) = identifier_str(tree, RefNode::ParameterIdentifier(&pa.nodes.0)) else {
-                continue;
-            };
-            let Some((_, expr)) = pa.nodes.2.as_ref() else {
-                continue;
-            };
-            if let Some(text) = node_text(tree, expr) {
-                out.entry(name).or_insert(text);
+        match node {
+            RefNode::ParamAssignment(_) => one_pa(tree, node, &mut out),
+            // `localparam int A = 1, B = 2` — the declaration wraps a
+            // `ListOfParamAssignments`-shaped `nodes.2` list of
+            // `ParamAssignment`s (delay-v45: module `localparam`
+            // defaults feed `ConstSeed.values`).
+            RefNode::LocalParameterDeclaration(
+                sv_parser::LocalParameterDeclaration::Param(p),
+            ) => {
+                for item in &p.nodes.2 {
+                    if let RefNode::ParamAssignment(_) = item {
+                        one_pa(tree, item, &mut out);
+                    }
+                }
             }
+            _ => {}
         }
     }
     out

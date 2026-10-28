@@ -1113,6 +1113,45 @@ impl TimingDesign {
         }
         names
     }
+
+    /// Names plus their resolved values (delay-v45): every
+    /// [`elaboration_const_names`] entry evaluated through
+    /// [`crate::width::WidthResolver`], which follows bound
+    /// parameters, module `const_exprs` and imported-package
+    /// `const_exprs` recursively. Only names with a value appear in
+    /// the map; the ternary/generate fold reads it to pick the live
+    /// arm instead of billing both.
+    pub fn elaboration_const_seed(&self, module: &TimingModule) -> crate::expr::ConstSeed {
+        let mut seed = crate::expr::ConstSeed::from_names(self.elaboration_const_names(module));
+        let resolver =
+            crate::width::WidthResolver::new(module, &self.packages, &self.param_map_ints);
+        for name in self.elaboration_const_names(module) {
+            if let Some(v) = resolver.const_value(&name) {
+                seed.values.insert(name, v);
+            }
+        }
+        for (name, _) in &module.const_exprs {
+            if let Some(v) = resolver.const_value(name) {
+                seed.values.insert(name.clone(), v);
+            }
+        }
+        // Header `#(parameter …)` defaults live on `TypedParameter`
+        // (scoped `default_expr` / raw `default_text`), not in
+        // `const_exprs`.
+        for p in &module.parameters {
+            if seed.values.contains_key(&p.name) {
+                continue;
+            }
+            let text = p
+                .default_expr
+                .as_deref()
+                .or(p.default_text.as_deref());
+            if let Some(v) = text.and_then(|t| resolver.eval_text(t)) {
+                seed.values.insert(p.name.clone(), v);
+            }
+        }
+        seed
+    }
 }
 
 /// Line-attributed cost for reports.

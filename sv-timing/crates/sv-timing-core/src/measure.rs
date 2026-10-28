@@ -130,7 +130,7 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
         .map(|(id, m)| {
             (
                 *id,
-                ConstSeed::from_names(design.elaboration_const_names(m)),
+                design.elaboration_const_seed(m),
             )
         })
         .collect();
@@ -3161,5 +3161,115 @@ mod tests {
             "gemm serial chain must not be an independent-LHS bundle: {:?}",
             best.class_note
         );
+    }
+
+    /// E6 billing truth for the `hi_last` prefix-OR one-hot
+    /// (fixtures/auto_correct/fn_prefix_or_billing.sv): a `for`-
+    /// body function call and the explicit inline prefix compute the
+    /// identical select. Pins the CURRENT readings as goldens — on
+    /// delay-v44 the isolated direction is reversed vs the hyp8 board
+    /// (41.6 call vs 30.1 inline on g6lc_rename_resolve): the boxed
+    /// call bills ~9/call while the single-region inline dep-floor is
+    /// deeper. The board over-read is context-bound.
+    #[test]
+    fn fn_prefix_or_billing_goldens_pin_current_readings() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/auto_correct/fn_prefix_or_billing.sv");
+        if !path.exists() {
+            return;
+        }
+        let mut lower = crate::lower::LowerOptions {
+            target: TimingTarget::new(5000.0, 20.0, 0.2),
+            cost_model: crate::cost_table::default_fo4_v1_embedded(),
+            ..Default::default()
+        };
+        lower.cost_model.id = "fo4-v1".into();
+        let out = crate::lower::analyze_files(&[path], &crate::ParseOptions::default(), &lower)
+            .expect("analyze");
+        let worst = |name: &str| -> f64 {
+            out.design
+                .paths
+                .iter()
+                .filter(|p| {
+                    out.design
+                        .modules
+                        .get(&p.module)
+                        .map(|m| m.name.as_str())
+                        == Some(name)
+                })
+                .map(|p| p.total_fo4)
+                .fold(0.0, f64::max)
+        };
+        for (name, lo, hi) in [
+            ("fn_prefix_or_call", 6.0, 12.0),
+            ("fn_prefix_or_inline", 11.0, 17.0),
+            ("fn_prefix_or_call_gather", 12.0, 18.0),
+            ("fn_prefix_or_inline_gather", 29.0, 38.0),
+        ] {
+            let w = worst(name);
+            assert!(
+                w >= lo && w <= hi,
+                "{name}: golden {lo}..{hi} FO4, measured {w:.1}"
+            );
+        }
+        // Documented direction: on this isolated fixture the call form
+        // measures shallower than the single-region inline form.
+        assert!(
+            worst("fn_prefix_or_call_gather") < worst("fn_prefix_or_inline_gather"),
+            "call_gather={:.1} must stay under inline_gather={:.1} until the \
+             region-boundary billing is reconciled",
+            worst("fn_prefix_or_call_gather"),
+            worst("fn_prefix_or_inline_gather")
+        );
+    }
+
+    /// Expected post-fix invariant: the function-call and inline forms
+    /// of the identical select measure within calibration spread of
+    /// each other. Currently fails — the boxed call is billed ~9 while
+    /// the inline dep-floor reaches ~33 (and on the hyp8 board the
+    /// relationship inverts), i.e. the gap is not yet a per-form
+    /// constant the cost table can pin.
+    #[test]
+    #[ignore = "expected-mismatch: function-call vs inline prefix-OR billing \
+                gap is context-bound (see fn_prefix_or_billing.sv header)"]
+    fn fn_prefix_or_forms_measure_within_spread() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/auto_correct/fn_prefix_or_billing.sv");
+        if !path.exists() {
+            return;
+        }
+        let mut lower = crate::lower::LowerOptions {
+            target: TimingTarget::new(5000.0, 20.0, 0.2),
+            cost_model: crate::cost_table::default_fo4_v1_embedded(),
+            ..Default::default()
+        };
+        lower.cost_model.id = "fo4-v1".into();
+        let out = crate::lower::analyze_files(&[path], &crate::ParseOptions::default(), &lower)
+            .expect("analyze");
+        let worst = |name: &str| -> f64 {
+            out.design
+                .paths
+                .iter()
+                .filter(|p| {
+                    out.design
+                        .modules
+                        .get(&p.module)
+                        .map(|m| m.name.as_str())
+                        == Some(name)
+                })
+                .map(|p| p.total_fo4)
+                .fold(0.0, f64::max)
+        };
+        for (a, b) in [
+            ("fn_prefix_or_call", "fn_prefix_or_inline"),
+            ("fn_prefix_or_call_gather", "fn_prefix_or_inline_gather"),
+        ] {
+            let (wa, wb) = (worst(a), worst(b));
+            assert!(
+                (wa - wb).abs() <= 3.0,
+                "{a}={wa:.1} vs {b}={wb:.1}: forms of the identical select \
+                 must measure within 3 FO4"
+            );
+        }
     }
 }
