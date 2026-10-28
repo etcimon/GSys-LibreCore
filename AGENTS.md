@@ -23,7 +23,7 @@ whole-repository scan.
 - Spec of record: `specs/riscv-spec.html` (RISC-V ISA Manual, Asciidoctor, ~93k lines, version 20260717).
 - Three Parts: **I** Unprivileged (`#vol:unpriv`, src line 1172), **II** Privileged (`#vol:priv`, 67256), **III** Profiles (`#vol:profiles`, 89395).
 - Core RTL: `core/` (the pipeline IP). SoC/integration: `corev_apu/`. Config surface: `core/include/`, `config/`.
-- Timing-reworked output: `out_rtl/` (local junction/symlink to `build-platform/workspace/hyp/`; gitignored). Functional work, including Vulkan 1.4 and grouped CTS, stays on `core/` and `corev_apu/`. FO4 carry-over into `out_rtl/` is deferred. See `AGENTS-build-platform.md` §2.5 and `AGENTS-configuration.md` §1.0c.
+- Timing-reworked output: `out_rtl/` (git symlink to `build-platform/workspace/hyp/`). Functional work, including Vulkan 1.4 and grouped CTS, stays on `core/` and `corev_apu/`. FO4 carry-over into `out_rtl/` is deferred. See `AGENTS-build-platform.md` §2.5 and `AGENTS-configuration.md` §1.0c.
 
 ---
 

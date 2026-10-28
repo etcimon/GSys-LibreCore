@@ -770,11 +770,11 @@ spawn package CLI via `tools/svt.py run`, write packages under
 synthetic STA fixtures. Package independence: never import monorepo modules into
 `sv-timing/crates/**`.
 
-**`out_rtl/` manual destination.** Repo-root `out_rtl` is a local junction or symlink to
+**`out_rtl/` manual destination.** Repo-root `out_rtl` is a symlink to
 `build-platform/workspace/hyp` (the 8 FO4 redesign of `core/` and `corev_apu/`).
 `--from-timing out_rtl` and `--from-timing out_rtl/hyp_redesign_core_8fo4`
 validate as schema `out-rtl-manual` without `portable.f` or `correct.json`.
-The path is gitignored; recreate the link locally.
+The workspace files stay gitignored; only the symlink is meant to be tracked.
 `--use-emit` does not switch the build onto that tree until a corrected
 filelist exists. Vulkan / CTS edits stay in `core/` and `corev_apu/`. Moving
 corrected behavior into `out_rtl/` for FO4 is deferred (`AGENTS-configuration.md`

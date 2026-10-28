@@ -1,8 +1,7 @@
-# out_rtl is a local junction/symlink onto build-platform/workspace/hyp.
-# Windows git cannot store that junction as mode 120000, so the path is
-# gitignored. Recreate with `mklink /J out_rtl build-platform\workspace\hyp`
-# or `ln -s build-platform/workspace/hyp out_rtl`.
-/out_rtl
+# out_rtl is a git symlink (mode 120000 → build-platform/workspace/hyp).
+# Ignore the workspace tree reached through the link. Do not add the tree.
+# Windows checkouts that cannot create NTFS symlinks keep a junction and
+# `git update-index --skip-worktree out_rtl` so status stays clean.
 /out_rtl/**
 *.swp
 *.swo

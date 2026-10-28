@@ -131,7 +131,7 @@ values are stamped onto the child env (`AI_ISLAND_DRAM_*`, `S4_FLAVOUR`).
 - **`--use-emit`:** expert; also export `CVA6_TIMINGS_EMIT_FLIST` (default **off**; never merges into `core/`).
 - Lint/synth remain on **live RTL** unless a consumer explicitly reads emit env.
 
-**Manual redesign destination — `out_rtl/`.** Repo-root `out_rtl` is a local junction or symlink to `build-platform/workspace/hyp/` (Windows: `mklink /J`). That tree is the sv-timing 8 FO4 redesign of the `core/` and `corev_apu/` RTL (`hyp_redesign_core_8fo4/`, `hyp_redesign_corev_apu_8fo4/`, `hyp_core_ws/`). The path is gitignored; clones recreate the link. Pass it as a manual output directory:
+**Manual redesign destination — `out_rtl/`.** Repo-root `out_rtl` is a git symlink (mode 120000) to `build-platform/workspace/hyp/`. That tree is the sv-timing 8 FO4 redesign of the `core/` and `corev_apu/` RTL (`hyp_redesign_core_8fo4/`, `hyp_redesign_corev_apu_8fo4/`, `hyp_core_ws/`). The link is tracked; the workspace contents stay gitignored. Windows checkouts that cannot create NTFS symlinks keep a junction plus `git update-index --skip-worktree out_rtl`. Pass it as a manual output directory:
 
 ```bash
 ./build.sh timings validate --from-timing out_rtl
