@@ -112,7 +112,9 @@ module cva6_shared_tlb #(
   // Re-pipelining contract (sv-timing A128; 14.7 adjusted FO4 on the
   // Nangate45 board): shared TLB: flush / lookup FSM.
   // svt-pipe: require-contract
+  // svt-pipe: protocol stlb valid=itlb_access_i flush=flush_i
   // svt-pipe: no-cut on=flush_state_q
+  // svt-pipe: cycle stlb q=flush_state_q d=flush_busy_o hold=itlb_access_i steps=1
 
   function logic [SHARED_TLB_WAYS-1:0] shared_tlb_way_bin2oh(input logic [$clog2(SHARED_TLB_WAYS
 )-1:0] in);

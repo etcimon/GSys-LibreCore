@@ -1,0 +1,8 @@
+dEQP-VK.api.command_buffers.allocate_many_primary
+dEQP-VK.api.command_buffers.allocate_many_secondary
+dEQP-VK.api.command_buffers.record_many_draws_primary_1
+dEQP-VK.api.command_buffers.record_many_draws_primary_2
+dEQP-VK.api.command_buffers.record_many_draws_secondary_1
+dEQP-VK.api.command_buffers.record_many_draws_secondary_2
+dEQP-VK.api.command_buffers.record_many_primary
+dEQP-VK.api.command_buffers.record_many_secondary

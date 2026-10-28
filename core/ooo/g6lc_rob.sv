@@ -66,8 +66,10 @@ module g6lc_rob #(
   // Re-pipelining contract (sv-timing A128; 77.9 adjusted FO4 on the
   // Nangate45 board): ROB: head / count next-state written by alloc, commit, cancel and flush in one function.
   // svt-pipe: require-contract
+  // svt-pipe: protocol rob valid=alloc_valid_i
   // svt-pipe: no-cut on=head_d
   // svt-pipe: no-cut on=count_d
+  // svt-pipe: cycle rob q=head_d d=retire_valid_o hold=alloc_valid_i steps=1
   // A136: the head re-anchor searches the post-free valid vector in
   // absolute slot order (two parallel-prefix find-firsts split at the
   // registered head) instead of rotating it by the head first; the head

@@ -36,11 +36,13 @@
 //   pay[]       : ue_sm5_session.pay -- ObjPay/cmdrec-arena write
 //                 checkpoints, checked after the indexed command:
 //                   tag 1 {tag, rec, n, (addr, word)*n}      ObjPay
-//                   tag 2 {tag, rec, cbuf, n, (idx, word)*n} arena
+//                   tag 2 {tag, rec, cbd, n, (waddr, word)*n}  cmdrec
+//                       payload chain (absolute PayMem words)
 //                   tag 3 {tag, rec, n, (byteaddr, word)*n}  aperture
 //                       descriptor records (shmem, §12.3 F5)
-//                 sentinel FFFFFFFF.  ObjPay contents are read back
-//                 through the TB's peek of the engine's payload SRAM.
+//                 sentinel FFFFFFFF.  ObjPay contents (incl. the
+//                 cmdrec chunk chains) are read back through the
+//                 TB's peek of the engine's payload cache + carve.
 // +ses=<name> selects a different session file set (used by the
 // ObjPay-FULL arm built with -GObjPayWords=512).
 module tb_g6lc_apu_vnfront;
@@ -59,7 +61,6 @@ module tb_g6lc_apu_vnfront;
   localparam int RECW  = 386;
   localparam int EXPW  = 386 * 256;
   localparam int PAYW  = 16384;
-  localparam int PayPerBuf = 256;
   localparam int Fences = 16;
   // ObjTab-V/ObjPay-V backing geometry: the ObjEntries=256 + 64 KiB
   // PayMem defaults mirror the vn_golden SLOTS/PAY_WORDS model; the
@@ -230,6 +231,11 @@ module tb_g6lc_apu_vnfront;
   apu_sh_desc_t       xdesc;
   logic [5:0]         xpush_n;
   logic [1023:0]      xpush;
+  // §5a G3b-iii: exec's indirect-fetch aperture port — dom=1 byte
+  // reads served one cycle later by the shared shmem model (below)
+  logic               xmp_v, xmp_rv;
+  apu_mp_req_t        xmp_req;
+  apu_mp_rsp_t        xmp_rsp;
 
   g6lc_apu_cmdexec #(.Enable(1'b1), .Fences(Fences)) i_exec (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
@@ -251,6 +257,9 @@ module tb_g6lc_apu_vnfront;
     .fence_signaled_o(f_fsig), .fence_lost_o(f_flost),
     .fence_clr_i(f_fclr), .fence_fail_i(f_ffail), .xf_o(), .rd_o(),
     .devlost_valid_o(), .devlost_ctx_o(), .dead_o(),
+    .mp_req_valid_o(xmp_v), .mp_req_ready_i(1'b1),
+    .mp_req_o(xmp_req),
+    .mp_rsp_valid_i(xmp_rv), .mp_rsp_i(xmp_rsp),
     .hold_i(1'b0), .idle_o(), .busy_o());
 
   // ---- shared backends with 4-master arbitration -----------------------
@@ -332,42 +341,52 @@ module tb_g6lc_apu_vnfront;
     .omt_req_valid_o(omt_v), .omt_req_ready_i(omt_r),
     .omt_req_o(omt_req),
     .omt_rsp_valid_i(omt_rv), .omt_rsp_i(omt_rsp));
-  g6lc_apu_cmdrec #(.Enable(1'b1), .NumBufs(16), .RecsPerBuf(64))
+  // §5a G3b-iii: PayMem-resident command buffers — cmdrec owns a
+  // fourth ObjPay client for its descriptor/chunk traffic
+  logic            cop_v, cop_r, cop_cv;
+  apu_objpay_req_t cop_req;
+  g6lc_apu_cmdrec #(.Enable(1'b1), .CbOpen(4))
   i_rec (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .req_valid_i(cr_vld), .req_ready_o(cr_rdy), .req_i(cr_req),
     .cpl_valid_o(cr_cvld), .cpl_ready_i(1'b1), .cpl_o(cr_cpl),
     .pay_valid_i(fpay_v), .pay_data_i(fpay_d),
-    .pay_ready_o(fpay_r));
+    .pay_ready_o(fpay_r),
+    .op_req_valid_o(cop_v), .op_req_ready_i(cop_r),
+    .op_req_o(cop_req),
+    .op_cpl_valid_i(cop_cv), .op_cpl_ready_o(), .op_cpl_i(op_cpl));
 
-  // §7b/5a-ii + G3b-ii: objpay shared front(0)/exec(1)/shcore-FILL(2),
-  // same grant scheme — a FILL streams its pCode words through here
+  // §7b/5a-ii + G3b-ii/iii: objpay shared front(0)/exec(1)/cmdrec(2)/
+  // shcore-FILL(3), vgtop priority order.  The owner latch is sticky
+  // (set at accept, replaced by the next accept) so a READN burst's
+  // per-word completions all route to the requester — req_ready stays
+  // low for the whole burst, so no new owner can intervene.
   logic               op_vld, op_rdy, op_cvld;
   apu_objpay_req_t    op_req;
   apu_objpay_cpl_t    op_cpl;
-  logic               op_busy = 1'b0;
   logic [1:0]         op_own = '0;
   logic               sop_v, sop_r;
   apu_objpay_req_t    sop_req;
   wire   op_take = op_vld && op_rdy;
-  wire   [1:0] op_sel = op_busy ? op_own
-                       : (fop_v ? 2'd0
-                          : (xop_v ? 2'd1 : 2'd2));
-  assign op_vld = op_sel == 2'd0 ? fop_v
-                : op_sel == 2'd1 ? xop_v : sop_v;
-  assign op_req = op_sel == 2'd0 ? fop_req
-                : op_sel == 2'd1 ? xop_req : sop_req;
-  assign fop_r  = op_sel == 2'd0 && op_rdy;
-  assign xop_r  = op_sel == 2'd1 && op_rdy;
-  assign sop_r  = op_sel == 2'd2 && op_rdy;
-  assign fop_cv = op_cvld && op_busy && op_own == 2'd0;
-  assign xop_cv = op_cvld && op_busy && op_own == 2'd1;
+  wire   [1:0] op_sel = fop_v ? 2'd0
+                       : (xop_v ? 2'd1
+                          : (cop_v ? 2'd2 : 2'd3));
+  assign op_vld = fop_v | xop_v | cop_v | sop_v;
+  assign op_req = fop_v ? fop_req
+                : xop_v ? xop_req
+                : cop_v ? cop_req : sop_req;
+  assign fop_r  = fop_v && op_rdy;
+  assign xop_r  = xop_v && !fop_v && op_rdy;
+  assign cop_r  = cop_v && !fop_v && !xop_v && op_rdy;
+  assign sop_r  = sop_v && !fop_v && !xop_v && !cop_v && op_rdy;
+  assign fop_cv = op_cvld && op_own == 2'd0;
+  assign xop_cv = op_cvld && op_own == 2'd1;
+  assign cop_cv = op_cvld && op_own == 2'd2;
   assign fop_cpl = op_cpl;
   assign xop_cpl = op_cpl;
   always @(posedge clk or negedge rst_ni)
-    if (!rst_ni) begin op_busy <= 1'b0; op_own <= '0; end
-    else if (op_take) begin op_busy <= 1'b1; op_own <= op_sel; end
-    else if (op_cvld) op_busy <= 1'b0;
+    if (!rst_ni) op_own <= '0;
+    else if (op_take) op_own <= op_sel;
 
   g6lc_apu_objpay #(.Enable(1'b1), .PayMemBytes(PayMemBytes)) i_pay (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
@@ -457,7 +476,7 @@ module tb_g6lc_apu_vnfront;
     .sm_busy_o(shb),
     .op_req_valid_o(sop_v), .op_req_ready_i(sop_r),
     .op_req_o(sop_req),
-    .op_cpl_valid_i(op_cvld && op_busy && op_own == 2'd2),
+    .op_cpl_valid_i(op_cvld && op_own == 2'd3),
     .op_cpl_i(op_cpl),
     .work_i(w_v_sh), .work_ready_o(w_r_sh),
     .work_ctype_i(w_o.ctype), .work_imm_i(w_o.rec.imm),
@@ -521,6 +540,19 @@ module tb_g6lc_apu_vnfront;
             fap_rdata[b*8 +: 8] <= shmem[apb(fap_addr + 32'(b))];
         end
       end
+      // G3b-iii: executor indirect fetch — dom=1 aperture reads land
+      // in the same array so buffer contents staged by front writes
+      // are coherent with what the executor reads back
+      xmp_rv <= 1'b0;
+      if (xmp_v) begin
+        if (xmp_req.we || !xmp_req.dom)
+          $fatal(1, "exec mp: unsupported write/guest-domain req");
+        xmp_rv <= 1'b1;
+        xmp_rsp.err <= 1'b0;
+        for (int b = 0; b < 8; b++)
+          xmp_rsp.rdata[b*8 +: 8] <=
+              shmem[apb(32'(xmp_req.addr) + 32'(b))];
+      end
     end
   end
 
@@ -579,46 +611,133 @@ module tb_g6lc_apu_vnfront;
   end
 
   // ---- record-append monitor (front cmdrec port) -----------------------
-  // The cmdrec stamps the stored record's imm[7] <- pay_top when an
-  // APPEND carries a payload — the request view shows imm[7]==0, so the
-  // monitor shadows each buffer's arena cursor and applies the same
-  // stamp.  BEGIN/RESET clear it; the cursor advances only on an OK
-  // completion (PAY_FULL drops the record, cursor unchanged).
+  // §5a G3b-iii: the recorder stamps the stored record's imm[7]
+  // with the payload's absolute PayMem word address — the request
+  // view shows imm[7]==0, so the monitor shadows each descriptor's
+  // chain state ({pay tail chunk, next payload word, next record
+  // row}) and snoops the cmdrec ObjPay client's ALLOC completions to
+  // predict it.  APPEND internals run record-ALLOC then payload-
+  // ALLOC; a pool walk visits every descriptor with a READN(d+8,4),
+  // which is how RESET_POOL/DESTROY_POOL clears the shadows.  BEGIN/
+  // RESET clear too; cursors advance only on an OK completion (FULL
+  // drops the record; a linked-but-unwritten chunk keeps its row).
   apu_cmdrec_rec_t last_rec;
   int              appends = 0;
-  logic [15:0]     pay_top_q [256];
-  logic [7:0]      pend_buf_q;
+  int              sh_payt [int];   // cbd -> pay tail-chunk base
+  int              sh_ptop [int];   // cbd -> next payload word
+  int              sh_row  [int];   // cbd -> next record row (1..)
+  bit              sh_recs [int];   // cbd -> record chain exists
+  logic [31:0]     pend_cbd_q;
   logic [15:0]     pend_pay_q;
-  logic            pend_app_q;
+  logic            pend_app_q, pend_ral_q, pend_pal_q;
+  logic            pend_pool_q, pool_walk_q;
+  apu_objpay_op_e  cop_opc_q;    // last accepted cmdrec ObjPay op
   always @(posedge clk or negedge rst_ni)
     if (!rst_ni) begin
-      pend_app_q <= 1'b0;
-      pend_buf_q <= '0;
-      pend_pay_q <= '0;
-      for (int i = 0; i < 256; i++) pay_top_q[i] = '0;
+      pend_app_q <= 1'b0; pend_pool_q <= 1'b0;
+      pend_ral_q <= 1'b0; pend_pal_q <= 1'b0;
+      cop_opc_q  <= APU_OBJPAY_OP_READ;
+      pend_cbd_q <= '0; pend_pay_q <= '0;
+      pool_walk_q <= 1'b0;
+      sh_payt.delete(); sh_ptop.delete();
+      sh_row.delete();  sh_recs.delete();
     end else begin
       if (fcr_v && fcr_r) begin
-        if (fcr_req.op == APU_CMDREC_OP_BEGIN)
-          pay_top_q[fcr_req.cbuf] <= '0;
-        else if (fcr_req.op == APU_CMDREC_OP_RESET)
-          for (int i = 0; i < 256; i++) pay_top_q[i] = '0;
-        else if (fcr_req.op == APU_CMDREC_OP_APPEND) begin
+        // F2: while a pool walk streams SWEEP interims, no further
+        // cmdrec request may issue — vnfront must hold off until the
+        // final non-SWEEP completion
+        if (pool_walk_q) begin
+          errors++;
+          $display("FAIL: cmdrec request op=%0d during pool walk",
+                   fcr_req.op);
+        end
+        if (fcr_req.op == APU_CMDREC_OP_RESET_POOL ||
+            fcr_req.op == APU_CMDREC_OP_DESTROY_POOL)
+          pool_walk_q <= 1'b1;
+        if (fcr_req.op == APU_CMDREC_OP_BEGIN) begin
+          // BEGIN frees any old chains then ALLOCs a fresh record
+          // chunk; the shadow just needs the post-BEGIN state
+          sh_recs[fcr_req.cbd] = 1;
+          sh_row [fcr_req.cbd] = 1;
+          sh_payt[fcr_req.cbd] = 0;
+          sh_ptop[fcr_req.cbd] = 0;
+        end else if (fcr_req.op == APU_CMDREC_OP_RESET) begin
+          sh_recs.delete(fcr_req.cbd);
+          sh_row .delete(fcr_req.cbd);
+          sh_payt.delete(fcr_req.cbd);
+          sh_ptop.delete(fcr_req.cbd);
+        end else if (fcr_req.op == APU_CMDREC_OP_RESET_POOL ||
+                     fcr_req.op == APU_CMDREC_OP_DESTROY_POOL) begin
+          // every visited descriptor announces itself with a
+          // READN(cbd+8,4) on the ObjPay port — cleared below
+          pend_pool_q <= 1'b1;
+        end else if (fcr_req.op == APU_CMDREC_OP_APPEND) begin
+          automatic bit ex = sh_recs.exists(fcr_req.cbd);
+          automatic bit ral = !ex || sh_row[fcr_req.cbd] > 63;
+          automatic bit pal =
+              fcr_req.pay_n != 16'h0 &&
+              (!sh_payt.exists(fcr_req.cbd) ||
+               sh_payt[fcr_req.cbd] == 0 ||
+               sh_ptop[fcr_req.cbd] + int'(fcr_req.pay_n) >
+               sh_payt[fcr_req.cbd] + 1024);
           last_rec   <= fcr_req.rec;
-          if (fcr_req.pay_n != 16'h0)
-            last_rec.imm[7] <= {16'h0, pay_top_q[fcr_req.cbuf]};
+          if (fcr_req.pay_n != 16'h0 && !pal)
+            last_rec.imm[7] <= 32'(sh_ptop[fcr_req.cbd]);
           pend_app_q <= 1'b1;
-          pend_buf_q <= fcr_req.cbuf;
+          pend_cbd_q <= fcr_req.cbd;
           pend_pay_q <= fcr_req.pay_n;
+          pend_ral_q <= ral;
+          pend_pal_q <= pal;
           appends     = appends + 1;
         end
       end
+      // the walk ends at the first non-SWEEP completion
+      if (fcr_cv && cr_cpl.status != APU_CMDREC_SWEEP)
+        pool_walk_q <= 1'b0;
+      if (pend_pool_q && cop_v && cop_r &&
+          cop_req.op == APU_OBJPAY_OP_READN && cop_req.words == 32'd4)
+      begin
+        // pool walk visiting a descriptor: cbd = addr - 8
+        automatic int cd = int'(cop_req.addr) - 8;
+        sh_recs.delete(cd); sh_row.delete(cd);
+        sh_payt.delete(cd); sh_ptop.delete(cd);
+      end
+      if (cop_v && cop_r) cop_opc_q <= cop_req.op;
+      if (pend_app_q && cop_cv &&
+          cop_opc_q == APU_OBJPAY_OP_ALLOC &&
+          op_cpl.status == APU_OBJPAY_OK) begin
+        // ALLOC completions arrive in request order: record chunk
+        // first, payload chunk second
+        if (pend_ral_q) begin
+          pend_ral_q <= 1'b0;
+          sh_recs[pend_cbd_q] = 1;
+          sh_row [pend_cbd_q] = 1;
+        end else if (pend_pal_q) begin
+          pend_pal_q <= 1'b0;
+          last_rec.imm[7]      <= op_cpl.base + 32'd1;
+          sh_payt[pend_cbd_q]  = int'(op_cpl.base);
+          sh_ptop[pend_cbd_q]  = int'(op_cpl.base) + 1;
+        end
+      end else if (pend_app_q && cop_cv &&
+                   cop_opc_q == APU_OBJPAY_OP_ALLOC) begin
+        // a failed ALLOC still consumes its due slot in the order
+        if (pend_ral_q)      pend_ral_q <= 1'b0;
+        else if (pend_pal_q) pend_pal_q <= 1'b0;
+      end
       if (pend_app_q && fcr_cv) begin
         pend_app_q <= 1'b0;
-        if (cr_cpl.status == APU_CMDREC_OK)
-          pay_top_q[pend_buf_q] <= pay_top_q[pend_buf_q] + pend_pay_q;
+        if (cr_cpl.status == APU_CMDREC_OK) begin
+          sh_row[pend_cbd_q] = sh_row.exists(pend_cbd_q)
+                               ? sh_row[pend_cbd_q] + 1 : 2;
+          if (pend_pay_q != 16'h0 && sh_ptop.exists(pend_cbd_q))
+            sh_ptop[pend_cbd_q] = sh_ptop[pend_cbd_q] +
+                                  int'(pend_pay_q);
+        end
       end
+      if (pend_pool_q && fcr_cv &&
+          cr_cpl.status != APU_CMDREC_SWEEP)
+        pend_pool_q <= 1'b0;
     end
-
   function automatic logic [31:0] ev(input int rec, input int w);
     return expm[rec * RECW + w];
   endfunction
@@ -730,7 +849,30 @@ module tb_g6lc_apu_vnfront;
       while (!f_done) begin
         @(negedge clk);
         tmo++;
-        if (tmo > 20000) $fatal(1, "timeout rec %0d", rec);
+        if (tmo > 20000) begin
+          // timeout forensics: front/cmdrec/exec/objtab/objpay FSM
+          // states plus the in-flight request beats — hierarchical
+          // probes are brittle by design (rename breaks the TB
+          // build, which is the intended tripwire)
+          $display("hang rec %0d: front.state=%0d rec.state=%0d exec.state=%0d ot.state=%0d pay.state=%0d",
+                   rec, i_front.gen_on.state_q, i_rec.gen_on.state_q,
+                   i_exec.gen_on.state_q, i_obj.gen_on.state_q,
+                   i_pay.gen_on.state_q);
+          $display("  front.crr.op=%0d rec.req.op=%0d rec.req.cbd=%08x front.crr.cbd=%08x op_own=%0d",
+                   i_front.gen_on.crr_q.op, i_rec.gen_on.req_q.op,
+                   i_rec.gen_on.req_q.cbd, i_front.gen_on.crr_q.cbd,
+                   op_own);
+          $display("  rec.opq.op=%0d addr=%08x words=%0d obi=%0d opn=%0d fop_v=%b xop_v=%b cop_v=%b sop_v=%b",
+                   i_rec.gen_on.opq_q.op, i_rec.gen_on.opq_q.addr,
+                   i_rec.gen_on.opq_q.words, i_rec.gen_on.obi_q,
+                   i_rec.gen_on.opn_q, fop_v, xop_v, cop_v, sop_v);
+          $display("  pay req.op=%0d addr=%08x words=%0d nb_n=%0d nb_i=%0d nb_off=%0d cvld=%b",
+                   i_pay.gen_on.req_q.op, i_pay.gen_on.req_q.addr,
+                   i_pay.gen_on.req_q.words, i_pay.gen_on.nb_n_q,
+                   i_pay.gen_on.nb_i_q, i_pay.gen_on.nb_off_q,
+                   op_cvld);
+          $fatal(1, "timeout rec %0d", rec);
+        end
       end
       cases++;
 
@@ -773,15 +915,19 @@ module tb_g6lc_apu_vnfront;
             payp += 2;
           end
         end else if (paym[payp] == 32'd2) begin
+          // §5a G3b-iii: cmdrec payloads live in the buffer's ObjPay
+          // chunk chain — the checkpoint word after `rec` is the
+          // descriptor word address (diagnostics only); each (idx,
+          // word) pair is an absolute PayMem word address
           pw_cbuf = paym[payp + 2];
           npw = int'(paym[payp + 3]);
           payp += 4;
           for (int i = 0; i < npw; i++) begin
             pw_addr = paym[payp];
-            check($sformatf("arena[%0d:%0d]", pw_cbuf, pw_addr),
-                  i_rec.gen_on.i_pay.sram[
-                    int'(pw_cbuf) * PayPerBuf + int'(pw_addr)]
-                  === paym[payp + 1]);
+            check($sformatf("paychain[@%0d:+%0d] @%0d got %08x exp %08x",
+                            pw_cbuf, i, pw_addr,
+                            pay_peek(pw_addr), paym[payp + 1]),
+                  pay_peek(pw_addr) === paym[payp + 1]);
             payp += 2;
           end
         end else if (paym[payp] == 32'd3) begin

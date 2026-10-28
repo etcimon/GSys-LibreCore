@@ -201,7 +201,9 @@ module id_stage #(
   // Re-pipelining contract (sv-timing A128; 10.9 adjusted FO4 on the
   // Nangate45 board): decode: the issue handshake is same-cycle.
   // svt-pipe: require-contract
+  // svt-pipe: protocol id valid=fetch_entry_valid_i
   // svt-pipe: no-cut on=issue_n
+  // svt-pipe: cycle id q=issue_n d=issue_entry_valid_o hold=fetch_entry_valid_i steps=1
 
   // ID/ISSUE register stage
   typedef struct packed {

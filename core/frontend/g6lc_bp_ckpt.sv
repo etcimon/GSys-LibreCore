@@ -128,6 +128,7 @@ module g6lc_bp_ckpt
   // svt-pipe: require-contract
   // svt-pipe: protocol ck valid=push_i flush=flush_i
   // svt-pipe: no-cut on=valid_d
+  // svt-pipe: cycle ck q=valid_d d=alloc_v_o hold=push_i steps=1
 
   localparam int unsigned NH = (CVA6Cfg.NrHarts < 1) ? 1 : CVA6Cfg.NrHarts;
   localparam int unsigned HID_W = (NH <= 1) ? 1 : $clog2(NH);

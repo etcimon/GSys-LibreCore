@@ -32,5 +32,9 @@ package g6lc_apu_mp_pkg;
     APU_MP_PUMP = 4,
     APU_MP_SH   = 5,
     APU_MP_RAST = 6,
-    APU_MP_N    = 7;
+    // §5a G3b-iii: cmdexec's indirect-command fetches (DrawIndirect/
+    // DrawIndexedIndirect/DispatchIndirect operand words out of the
+    // bound buffer's aperture extent)
+    APU_MP_EXEC = 7,
+    APU_MP_N    = 8;
 endpackage

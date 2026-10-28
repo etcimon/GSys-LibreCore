@@ -5,6 +5,11 @@
 # GEMM golden C vs class-0 striped DRAM slave (not LiteDRAM, not Variane).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+AI_RTL="${G6LC_AI_RTL_DIR:-$ROOT/corev_apu/ai_island}"
+. "$ROOT/verif/tb/ai_island/gemm-extra-sources.inc.sh"
+AI_INC="${G6LC_AI_INC_DIR:-$ROOT/corev_apu/include}"
+AI_SRC="${G6LC_AI_SRC_DIR:-$ROOT/corev_apu/src}"
+AI_CVXIF="${G6LC_AI_CVXIF_DIR:-$ROOT/core/cvxif_g6lc_ai}"
 cd "$ROOT"
 OUT="${AI_GEMM_BACKEND_OUT:-/tmp/g6lc-ai-gemm-backend}"
 if ! command -v verilator >/dev/null 2>&1; then
@@ -57,8 +62,8 @@ build_nch() {
   -I"$AXI/include" \
   -I"$CCELLS/include" \
   -I"$ROOT/core/include" \
-  -I"$ROOT/corev_apu/include" \
-  -I"$ROOT/corev_apu/ai_island/include" \
+  -I"$AI_INC" \
+  -I"$AI_RTL/include" \
   "$CCELLS/src/cf_math_pkg.sv" \
   "$CCELLS/src/lzc.sv" \
   "$CCELLS/src/counter.sv" \
@@ -78,16 +83,19 @@ build_nch() {
   "$ROOT/common/local/util/tc_sram_wrapper.sv" \
   "$ROOT/corev_apu/axi_mem_if/src/axi2mem.sv" \
   "$ROOT/common/local/util/sram.sv" \
-  "$ROOT/corev_apu/include/g6lc_ai_island_cfg_pkg.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_cap_window.sv" \
-  "$ROOT/corev_apu/src/g6lc_ai_dram_backend.sv" \
-  "$ROOT/corev_apu/ai_island/include/g6lc_ai_fp_pkg.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot_pipe.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot_float.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot_float_pipe.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_tile_sram.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_gemm_seq.sv" \
+  "$AI_INC/g6lc_ai_island_cfg_pkg.sv" \
+  "$AI_RTL/g6lc_ai_cap_window.sv" \
+  "$AI_SRC/g6lc_ai_dram_backend.sv" \
+  "$AI_RTL/include/g6lc_ai_fp_pkg.sv" \
+  "$AI_RTL/g6lc_ai_pe_dot.sv" \
+  "$AI_RTL/g6lc_ai_pe_dot_pipe.sv" \
+  "$AI_RTL/g6lc_ai_pe_dot_float.sv" \
+  "$AI_RTL/g6lc_ai_pe_dot_float_pipe.sv" \
+  "$AI_RTL/g6lc_ai_tile_sram.sv" \
+  "$AI_RTL/g6lc_ai_gemm_seq.sv" \
+  "${GEMM_EXTRA_SOURCES[@]}" \
+  "$AI_RTL/g6lc_ai_mul_seq.sv" \
+  "$AI_RTL/g6lc_ai_gemm_arplan.sv" \
   "$ROOT/verif/tb/ai_island/tb_g6lc_ai_gemm_backend.sv" \
     --top-module tb_g6lc_ai_gemm_backend \
     -Mdir "$mdir" -o tb_g6lc_ai_gemm_backend
@@ -110,5 +118,5 @@ done
 if [[ "${AI_GEMM_PANEL_REUSE:-0}" == "1" ]]; then
   echo "PASS tb_g6lc_ai_gemm_backend panel_reuse nch=${NCH_LIST[*]} dpf=0"
 else
-  echo "PASS tb_g6lc_ai_gemm_backend nch=${NCH_LIST[*]} dpf=0,1,2"
+  echo "PASS tb_g6lc_ai_gemm_backend nch=${NCH_LIST[*]} dpf=${DPF_LIST[*]}"
 fi

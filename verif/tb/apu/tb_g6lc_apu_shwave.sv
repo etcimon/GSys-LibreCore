@@ -752,17 +752,33 @@ module tb_g6lc_apu_shwave;
   endtask
 
   task automatic do_dispatch(input int gx, input int gy, input int gz,
-                             input int slot, output apu_sh_done_t pl);
+                             input int slot, output apu_sh_done_t pl,
+                             input int bx = 0, input int by = 0,
+                             input int bz = 0);
     longint t0;
     // valid/ready: assert only after the engine is observed idle —
     // holding work high across the ready-wait lets a second accept
     // slip through on the posedge between the first observed ready
     // and deassertion (the whole dispatch ran twice).
-    work_ctype = 32'(APU_VN_TYPE_VK_CMD_DISPATCH_EXT);
+    // G3b-iii: a nonzero {bx,by,bz} issues DISPATCH_BASE — shcore
+    // decodes {gx,gy,gz} from imm[5:7] halves and the base group
+    // from imm[0:2].
+    work_ctype = (bx | by | bz) != 0
+               ? 32'(APU_VN_TYPE_VK_CMD_DISPATCH_BASE_EXT)
+               : 32'(APU_VN_TYPE_VK_CMD_DISPATCH_EXT);
     work_imm = '0;
-    work_imm[15:0]  = gx[15:0];
-    work_imm[47:32] = gy[15:0];
-    work_imm[79:64] = gz[15:0];
+    if ((bx | by | bz) != 0) begin
+      work_imm[15:0]    = bx[15:0];
+      work_imm[47:32]   = by[15:0];
+      work_imm[79:64]   = bz[15:0];
+      work_imm[111:96]  = gx[15:0];
+      work_imm[143:128] = gy[15:0];
+      work_imm[175:160] = gz[15:0];
+    end else begin
+      work_imm[15:0]  = gx[15:0];
+      work_imm[47:32] = gy[15:0];
+      work_imm[79:64] = gz[15:0];
+    end
     disp_slot = slot[2:0];
     t0 = cyc;
     do @(negedge clk); while (!work_ready);
@@ -841,6 +857,7 @@ module tb_g6lc_apu_shwave;
     int gstage, gcount, gin, gout, gvb, ginst, gnin;
     longint ghlp;
     int base, ebase, mbase, cbase, now;
+    int dbx, dby, dbz, hoff;
     int boff_w [32];                 // bind entry -> .hex word off
     apu_sh_cpl_t cpl;
     apu_sh_done_t dpl;
@@ -857,9 +874,16 @@ module tb_g6lc_apu_shwave;
     gx = wbuf[3]; gy = wbuf[4]; gz = wbuf[5];
     flags = wbuf[6];
     mut = flags[1];
+    // G3b-iii DispatchBase (flags bit4): {gbx,gby,gbz} at [8..10]
+    // shifts the module image to [11..].
+    dbx = 0; dby = 0; dbz = 0; hoff = 8;
+    if (flags[4]) begin
+      dbx = int'(wbuf[8]); dby = int'(wbuf[9]); dbz = int'(wbuf[10]);
+      hoff = 11;
+    end
 
-    // commit module words at [8..8+n)
-    wr_words(8, n, 0);
+    // commit module words at [hoff..hoff+n)
+    wr_words(hoff, n, 0);
     do_commit(n, 0, cpl);
     if (ebuf[0] != 0) begin                 // expected commit fault
       cmp({file, ".ok"}, {31'h0, cpl.ok}, 0);
@@ -883,7 +907,7 @@ module tb_g6lc_apu_shwave;
     // (set,binding) share a boff row.  §12.3 C/5b: aux bit24 marks
     // an image/sampler bind — 5 meta words follow carrying the
     // record's bytes 10..27 ({h,w},{layers,mdim,fmt},swz,smp0,smp1).
-    base = 8 + n;
+    base = hoff + n;
     desc = '0;
     begin
       int ecnt [4];                    // record cursor (32 B units)
@@ -1054,7 +1078,7 @@ module tb_g6lc_apu_shwave;
       do_gfx(gstage == 0 ? APU_SH_WORK_VS : APU_SH_WORK_FS,
              gcount, gin, gout, gvb, ginst, 0, ghlp, dpl);
     else
-      do_dispatch(gx, gy, gz, 0, dpl);
+      do_dispatch(gx, gy, gz, 0, dpl, dbx, dby, dbz);
     if (ebuf[3] == 1) begin
       cmp({file, ".done"}, {24'h0, dpl.code}, APU_SH_DONE_OK);
     end else if (ebuf[3] == 2) begin
@@ -1331,10 +1355,12 @@ module tb_g6lc_apu_shwave;
 
   // single-vector arms — fn_deep: DONE_FAULT expected (depth-10 chain
   // overflows the CallDepth=8 stack); zerodim: gx=0 dispatch retires
-  // DONE_OK with no waves and no stores (preload image untouched)
-  string fault_names [2] = '{"fn_deep", "zerodim"};
+  // DONE_OK with no waves and no stores (preload image untouched);
+  // dispbase: DispatchBase {3,5,2} — WorkgroupId/GlobalInvocationId
+  // carry the base offset (flags bit4 header extension)
+  string fault_names [3] = '{"fn_deep", "zerodim", "dispbase"};
 
-  string names [56] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
+  string names [59] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
       "builtin_lid", "builtin_lindex", "compare", "composite",
       "intmix", "localsize32", "localsize64", "math450", "oob",
       "pushscale", "vec4arith",
@@ -1352,6 +1378,9 @@ module tb_g6lc_apu_shwave;
       "cts_imgcopy",
       // copy_ssbo_* probe: NumWorkGroups*WorkGroupSize + ArrayLength
       "cts_b2b",
+      // max_local_size/shared_var probes: 64-inv 8-wave geometry,
+      // workgroup-slab exchange across a barrier
+      "cts_mls64", "cts_shared1", "cts_sharedg",
       // §12.3 C/5b image corpus (texelFetch/imageLoad/imageStore/
       // textureLod bilinear+mip/address modes, sRGB, 2D-array, query)
       "texfetch", "texfetch_mip", "texlod_lin", "texlod_mip",
@@ -1397,8 +1426,11 @@ module tb_g6lc_apu_shwave;
       // cts_arrlensb carries no flippable arithmetic op either.
       // cts_wgloop's only site is the loop-counter increment —
       // flipping it would hang the loop (mut=False in DESC).
+      // cts_shared1's flippable ops are all shared-slab index math:
+      // oracle-invisible, and the single oracle-visible site is
+      // model-invisible (mut=False in DESC — no _mut_0 emitted).
       if (names[i] == "atomic_hist" || names[i] == "cts_arrlensb" ||
-          names[i] == "cts_wgloop")
+          names[i] == "cts_wgloop" || names[i] == "cts_shared1")
         continue;
       cases++;
       run_vec(names[i], {names[i], "_mut_0"});
@@ -1436,7 +1468,9 @@ module tb_g6lc_apu_shwave;
           names[i] == "bitops" || names[i] == "packops" ||
           names[i] == "dynvec" || names[i] == "fn_divret" ||
           names[i] == "cts_arrlensb" || names[i] == "nclamp" ||
-          names[i] == "cts_wgloop") continue;
+          names[i] == "cts_wgloop" || names[i] == "cts_mls64" ||
+          names[i] == "cts_shared1" || names[i] == "cts_sharedg")
+        continue;
       for (int s = 1; s <= 3; s++) begin
         if (only != "" && names[i] != only) continue;
         cases++;

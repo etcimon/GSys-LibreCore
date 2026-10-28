@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# CLI launcher for module regression tests.
+# Symlinked from <module>/test/regression.
+# Usage: ./regression [ctest args...]
+#   ./regression                       run all tests for this module
+#   ./regression -R search_timing      run matching test
+#   ./regression -R search_timing.tcl  .tcl suffix is stripped automatically
+#
+# Modeled after OpenROAD/test/shared/regression.sh
+
+set -e
+
+# Determine module name from current directory.
+script_path=$(realpath "$PWD")
+sta_home=$(cd "$(dirname "$(realpath "$0")")/.." && pwd)
+module=${script_path#${sta_home}/}
+module=${module%%/*}
+
+# Find build directory.
+if [ -d "${sta_home}/build" ]; then
+  build_dir="${sta_home}/build"
+else
+  echo "Error: no build directory found (tried build)"
+  exit 1
+fi
+
+# Rewrite -R argument: strip .tcl suffix, convert _ to . for ctest name matching.
+args=()
+next_is_pattern=false
+for arg in "$@"; do
+  if $next_is_pattern; then
+    arg="${arg%.tcl}"
+    arg="${arg//_/.}"
+    next_is_pattern=false
+  fi
+  if [ "$arg" = "-R" ]; then
+    next_is_pattern=true
+  fi
+  args+=("$arg")
+done
+
+cd "${build_dir}"
+
+# Default to parallel execution using all cores.
+if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+  numThreads=$(nproc --all)
+elif [[ "$OSTYPE" == "darwin"* ]]; then
+  numThreads=$(sysctl -n hw.ncpu)
+else
+  numThreads=2
+fi
+
+# Top-level test/ directory or project root: run all tests.
+# Module directory (e.g. dcalc/test): run only that module's tests.
+if [ "$module" = "test" ] || [ -z "$module" ]; then
+  ctest -j "${numThreads}" "${args[@]}"
+else
+  ctest -j "${numThreads}" -L "module_${module}" "${args[@]}"
+fi

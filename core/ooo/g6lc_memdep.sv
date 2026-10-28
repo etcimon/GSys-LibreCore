@@ -53,7 +53,14 @@ module g6lc_memdep #(
   // Re-pipelining contract (sv-timing A128; 47.9 adjusted FO4 on the
   // Nangate45 board): memory dependence predictor: set update.
   // svt-pipe: require-contract
+  // svt-pipe: protocol md valid=ld_query_i flush=flush_i
   // svt-pipe: no-cut on=set_ssid_q
+  // svt-pipe: cycle md q=set_ssid_q d=predict_o hold=ld_query_i steps=1
+  // The prediction is advisory: a load the predictor lets through is still
+  // ordered by the LSQ, whose violation report (train_valid_i) is what
+  // trains this table. A stage here moves when the hint is made, not what
+  // the machine computes (A149 M7).
+  // svt-pipe: hint md verified-by=train_valid_i
 
   localparam int unsigned SW = (NR_SETS <= 1) ? 1 : $clog2(NR_SETS);
 

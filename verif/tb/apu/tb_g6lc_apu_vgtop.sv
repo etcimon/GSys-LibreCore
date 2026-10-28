@@ -88,9 +88,11 @@ module tb_g6lc_apu_vgtop
   logic            cpl_v;
   logic            vg_mf;
   logic [31:0]     cpl_len;
-  logic [4:0]      mp_rv, mp_rr, mp_rsv;
-  apu_mp_req_t [4:0] mp_req;
-  apu_mp_rsp_t [4:0] mp_rsp;
+  // §5a G3b-iii: vgtop mp is now six requesters —
+  // {CTL,PUMP,SH,RAST,OBJ,EXEC}
+  logic [5:0]      mp_rv, mp_rr, mp_rsv;
+  apu_mp_req_t [5:0] mp_req;
+  apu_mp_rsp_t [5:0] mp_rsp;
   logic            w_v, w_done;
   logic            w_r;
   apu_cmdexec_work_t w_o;
@@ -134,16 +136,16 @@ module tb_g6lc_apu_vgtop
     .ap_base_i(64'(g6lc_apu_pkg::APU_SHM_BASE)),
     .xf_flush_i(1'b0), .xfer_busy_o(xf_busy));
 
-  // shared memory model: mp ports 0..3 -> {guest, aperture} backing
-  // vgtop port order {CTL,PUMP,SH,RAST,OBJ} — five requesters; the
+  // shared memory model: mp ports 0..3,5 -> {guest, aperture} backing
+  // vgtop port order {CTL,PUMP,SH,RAST,OBJ,EXEC} — six requesters; the
   // private arena and the objmem carve are contiguous (PWB+PPW==OBW)
   // so one PPW+OPW window covers both
   // port 4 is the ObjMem requester: its entry/directory/payload
   // writes into the static carve are internal traffic, exempt from
   // the guest-visible APGUARD allow-list
-  tb_apu_mp_mem #(.N(5), .GMW(GMW), .APW(APW),
+  tb_apu_mp_mem #(.N(6), .GMW(GMW), .APW(APW),
                   .PWB(PWB), .PPW(PPW + OPW),
-                  .GUARD_SKIP(5'b10000)) i_mem (
+                  .GUARD_SKIP(6'b010000)) i_mem (
     .clk_i(clk), .rst_ni(rst_ni),
     .req_valid_i(mp_rv), .req_ready_o(mp_rr), .req_i(mp_req),
     .rsp_valid_o(mp_rsv), .rsp_o(mp_rsp));
@@ -241,7 +243,7 @@ module tb_g6lc_apu_vgtop
             if (!i_mem.guard_ok(woff))
               $fatal(1, "APGUARD: xfer write outside allow-list off=%0x d=%02x",
                      woff, xww.data[8*b +: 8]);
-            i_mem.apm[apix(32'(woff >> 2))][8*(woff & 64'h3) +: 8] <=
+            i_mem.apm[apix(32'(woff >> 2))][8*(woff & 64'h3) +: 8] =
               xww.data[8*b +: 8];
           end
         xb_vld <= 1;
@@ -260,8 +262,8 @@ module tb_g6lc_apu_vgtop
   logic            o_chr, o_wv, o_dn, o_bsy, o_cpl, o_fp,
                    o_dotr, o_dotcv, o_mf, o_xbusy;
   g6lc_apu_bus_pkg::apu_dma_axi_req_t  o_xareq;
-  logic [3:0]      o_mpv;
-  apu_mp_req_t [3:0] o_mpreq;
+  logic [5:0]      o_mpv;
+  apu_mp_req_t [5:0] o_mpreq;
   logic [31:0]     o_cplen;
   logic [63:0]     o_fid2;
   logic [7:0]      o_fring;
@@ -271,7 +273,7 @@ module tb_g6lc_apu_vgtop
   logic [Rings-1:0][APU_VG_AP_WORD_W-1:0] o_re;
   logic [15:0]     o_liv;
   apu_objtab_cpl_t o_dotcpl;
-  apu_mp_rsp_t [3:0] mp_rsp0 = '{default: '0};
+  apu_mp_rsp_t [5:0] mp_rsp0 = '{default: '0};
   apu_vg_desc_t [APU_VG_MAX_DESC-1:0] d_empty = '{default: '0};
 
   g6lc_apu_vgtop #(.Enable(1'b0), .Rings(Rings)) i_off (
@@ -280,9 +282,9 @@ module tb_g6lc_apu_vgtop
     .chain_id_i('0), .chain_n_i('0), .chain_desc_i(d_empty),
     .cpl_valid_o(o_cpl), .cpl_ready_i(1'b0),
     .cpl_len_o(o_cplen), .mem_fault_o(o_mf),
-    .mp_req_valid_o(o_mpv), .mp_req_ready_i(4'b0000),
+    .mp_req_valid_o(o_mpv), .mp_req_ready_i(6'b000000),
     .mp_req_o(o_mpreq),
-    .mp_rsp_valid_i(4'b0000), .mp_rsp_i(mp_rsp0),
+    .mp_rsp_valid_i(6'b000000), .mp_rsp_i(mp_rsp0),
     .work_valid_o(o_wv), .work_ready_i(1'b0), .work_o(o_wo),
     .work_done_i(1'b0), .work_done_pl_i('0),
     .done_o(o_dn), .busy_o(o_bsy),

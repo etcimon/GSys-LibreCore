@@ -60,8 +60,11 @@ module fpu_wrap
   // Re-pipelining contract (sv-timing A128; 47.3 adjusted FO4 on the
   // Nangate45 board): FPU wrapper: operand formatting into fpnew, which has its own pipeline; the tag travels inside fpnew.
   // svt-pipe: require-contract
+  // svt-pipe: protocol fpu valid=fpu_valid_i
   // fpu_gen is a scope label; preserve the result bundle at the wrapper port.
   // svt-pipe: no-cut on=result_o
+  // svt-pipe: no-cut on=fpu_valid_o
+  // svt-pipe: cycle fpu q=result_o d=fpu_valid_o hold=fpu_valid_i steps=1
 
   // this is a workaround
   // otherwise compilation might issue an error if FLEN=0

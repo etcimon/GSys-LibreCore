@@ -1,0 +1,115 @@
+// Original Author: Phillip Johnston
+// Licensed under CC0 1.0 Universal
+// Original source: https://github.com/embeddedartistry/embedded-resources/blob/master/examples/cpp/dispatch.cpp
+// Original article: https://embeddedartistry.com/blog/2017/2/1/dispatch-queues?rq=dispatch
+//
+// Modified for OpenSTA to use C++20 non-spinning DynamicLatch for synchronization.
+
+#include "DispatchQueue.hh"
+
+namespace sta {
+
+DispatchQueue::DispatchQueue(size_t thread_count) :
+  threads_(thread_count)
+{
+  for(size_t i = 0; i < thread_count; i++)
+    threads_[i] = std::thread(&DispatchQueue::dispatch_thread_handler, this, i);
+}
+
+DispatchQueue::~DispatchQueue()
+{
+  terminateThreads();
+}
+
+void
+DispatchQueue::terminateThreads()
+{
+  // Signal to dispatch threads that it's time to wrap up
+  std::unique_lock<std::mutex> lock(lock_);
+  quit_ = true;
+  lock.unlock();
+  cv_.notify_all();
+
+  // Wait for threads to finish before we exit
+  for (auto &thread : threads_) {
+    if (thread.joinable()) {
+      thread.join();
+    }
+  }
+  quit_ = false;
+}
+
+void
+DispatchQueue::setThreadCount(size_t thread_count)
+{
+  terminateThreads();
+
+  threads_.resize(thread_count);
+  for(size_t i = 0; i < thread_count; i++) {
+    threads_[i] = std::thread(&DispatchQueue::dispatch_thread_handler, this, i);
+  }
+}
+
+size_t
+DispatchQueue::getThreadCount() const
+{
+  return threads_.size();
+}
+
+void
+DispatchQueue::finishTasks()
+{
+  pending_task_count_latch_.wait();
+}
+
+void
+DispatchQueue::dispatch(const fp_t& op)
+{
+  std::unique_lock<std::mutex> lock(lock_);
+  q_.push(op);
+  pending_task_count_latch_.countUp();
+
+  // Manual unlocking is done before notifying, to avoid waking up
+  // the waiting thread only to block again (see notify_one for details)
+  lock.unlock();
+  cv_.notify_one();
+}
+
+void
+DispatchQueue::dispatch(fp_t&& op)
+{
+  std::unique_lock<std::mutex> lock(lock_);
+  q_.push(std::move(op));
+  pending_task_count_latch_.countUp();
+
+  // Manual unlocking is done before notifying, to avoid waking up
+  // the waiting thread only to block again (see notify_one for details)
+  lock.unlock();
+  cv_.notify_one();
+}
+
+void
+DispatchQueue::dispatch_thread_handler(size_t i)
+{
+  std::unique_lock<std::mutex> lock(lock_);
+
+  do {
+    // Wait until we have data or a quit signal
+    cv_.wait(lock, [this] { return (!q_.empty() || quit_); } );
+
+    //after wait, we own the lock
+    if (!quit_ && !q_.empty()) {
+      auto op = std::move(q_.front());
+      q_.pop();
+
+      lock.unlock();
+
+      op(i);
+
+      pending_task_count_latch_.countDown();
+      lock.lock();
+    }
+  } while (!quit_);
+}
+
+} // namespace sta

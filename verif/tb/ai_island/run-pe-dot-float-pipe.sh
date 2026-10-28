@@ -11,6 +11,10 @@
 # Not Variane. Not a throughput number.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+AI_RTL="${G6LC_AI_RTL_DIR:-$ROOT/corev_apu/ai_island}"
+AI_INC="${G6LC_AI_INC_DIR:-$ROOT/corev_apu/include}"
+AI_SRC="${G6LC_AI_SRC_DIR:-$ROOT/corev_apu/src}"
+AI_CVXIF="${G6LC_AI_CVXIF_DIR:-$ROOT/core/cvxif_g6lc_ai}"
 OUT="${PE_DOT_FLOAT_PIPE_OUT:-/tmp/g6lc-ai-pe-dot-float-pipe}"
 LANES="${PE_DOT_FLOAT_PIPE_LANES:-8}"
 mkdir -p "$OUT"
@@ -26,11 +30,11 @@ fi
 
 "$VERILATOR" --cc --exe --build -j 2 \
   -Wno-fatal -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND \
-  -I"$ROOT/core/include" -I"$ROOT/corev_apu/include" \
+  -I"$ROOT/core/include" -I"$AI_INC" \
   -GLanes="$LANES" \
   "$ROOT/core/include/config_pkg.sv" \
-  "$ROOT/corev_apu/ai_island/include/g6lc_ai_fp_pkg.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot_float_pipe.sv" \
+  "$AI_RTL/include/g6lc_ai_fp_pkg.sv" \
+  "$AI_RTL/g6lc_ai_pe_dot_float_pipe.sv" \
   "$ROOT/verif/tb/ai_island/pe_dot_float_pipe_main.cpp" \
   --top-module g6lc_ai_pe_dot_float_pipe \
   -Mdir "$OUT" -o pe_dot_float_pipe >"$OUT/build.log" 2>&1 || {

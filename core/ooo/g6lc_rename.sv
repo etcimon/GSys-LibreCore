@@ -428,8 +428,11 @@ module g6lc_rename #(
   // scoreboard, so the protocol pragma waits for an id-less domain). The A122
   // sites map_d / fmap_d / favail are the latency-neutral bypasses first.
   // svt-pipe: require-contract
+  // svt-pipe: protocol ren valid=valid_i flush=flush_i
   // svt-pipe: no-cut on=map_d
   // svt-pipe: no-cut on=fmap_d
+  // svt-pipe: cycle ren q=map_d d=prd_o hold=valid_i steps=1
+  // svt-pipe: cut-ok ren on=prd_o
   always_comb begin
     // Block-locals are declared and defaulted here: one declared inside a
     // conditional scope reads as a latch to the elaborator.

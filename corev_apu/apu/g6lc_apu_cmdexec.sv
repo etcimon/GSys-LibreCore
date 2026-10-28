@@ -31,6 +31,7 @@ module g6lc_apu_cmdexec
   import g6lc_apu_cmdexec_pkg::*;
   import g6lc_apu_sh_pkg::*;
   import g6lc_apu_rast_pkg::*;
+  import g6lc_apu_mp_pkg::*;
 #(
   parameter bit          Enable = 1'b0,
   parameter int unsigned Fences = 16,
@@ -79,6 +80,15 @@ module g6lc_apu_cmdexec
   input  logic               sm_gnt_i,
   input  logic               sm_cpl_i,
   input  apu_sh_sm_cpl_t     sm_cpl_pl_i,
+  // §5a G3b-iii: dedicated aperture word port (vgtop mp index 5 /
+  // APU_MP_EXEC) — indirect-command operand words are fetched from
+  // the bound buffer's aperture extent at issue time, the same path
+  // xfer uses for bulk transfers
+  output logic               mp_req_valid_o,
+  input  logic               mp_req_ready_i,
+  output apu_mp_req_t        mp_req_o,
+  input  logic               mp_rsp_valid_i,
+  input  apu_mp_rsp_t        mp_rsp_i,
   output logic               work_valid_o,
   input  logic               work_ready_i,
   output apu_cmdexec_work_t  work_o,
@@ -134,6 +144,8 @@ module g6lc_apu_cmdexec
     assign op_cpl_ready_o  = 1'b0;
     assign sm_req_o        = 1'b0;
     assign sm_req_pl_o     = '0;
+    assign mp_req_valid_o  = 1'b0;
+    assign mp_req_o        = '0;
     assign work_valid_o    = 1'b0;
     assign work_o          = '0;
     assign xf_o            = '0;
@@ -155,6 +167,8 @@ module g6lc_apu_cmdexec
                     cr_req_ready_i | cr_cpl_valid_i | (|cr_cpl_i) |
                     ot_req_ready_i | ot_cpl_valid_i | (|ot_cpl_i) |
                     op_req_ready_i | op_cpl_valid_i | (|op_cpl_i) |
+                    mp_req_ready_i | mp_rsp_valid_i | (|mp_rsp_i) |
+                    sm_gnt_i | sm_cpl_i | (|sm_cpl_pl_i) |
                     work_ready_i | work_done_i | (|work_done_pl_i) |
                     (|fence_clr_i) | (|submit_i) | (|fence_fail_i);
   end else begin : gen_on
@@ -176,7 +190,7 @@ module g6lc_apu_cmdexec
       // pipeline module-handle block
       StSmReq, StSmCpl, StRsReq, StRsLookC, StRsFillC, StUnpD,
       StPBR, StPBRC,
-      StDsModR0, StDsModR1, StDsModRC,
+      StDsModR0, StDsModR1, StDsModR2, StDsModRC,
       StDrModR0, StDrModR1, StDrModR2, StDrModR3,
       StDrModRC0, StDrModRC1,
       StPayReq, StPayCpl,
@@ -211,7 +225,22 @@ module g6lc_apu_cmdexec
       StBrpIssue, StBrpClrN,
       // G1c/G2a: draw assembly tail — 44-word pipeline-state ObjPay
       // read, then per-binding buffer resolves through StXf* (mode VB/IB)
-      StDrPay, StDrPayCpl, StDrVbN, StDrIbN
+      StDrPay, StDrPayCpl, StDrVbN, StDrIbN,
+      // §5a G3b-iii: vkCmdExecuteCommands — one-deep {cbd,cursor}
+      // stack; the secondary's ObjTab handle arrives on the record's
+      // ObjPay payload stream (imm[7] + i), its cbd is the live
+      // entry's aux[63:32]; the pop restores the outer cursor but
+      // deliberately NOT the dynamic-state snapshot
+      StXcFetch, StXcFetchC, StXcLk, StXcLkC, StXcPop,
+      // §5a G3b-iii: command-buffer events — Set/ResetEvent ride the
+      // barrier drain then SETSTATE the event's bit 0; WaitEvents
+      // drains, then polls each listed event's state[0] every 64
+      // cycles (the issue/completion watchdog bounds the drain)
+      StEvSet, StEvSetC, StWvRd, StWvRdC, StWvLk, StWvLkC, StWvWait,
+      // §5a G3b-iii: indirect operand fetch — aperture beats of the
+      // bound buffer stream into ind_w_q, then the resolved record
+      // takes the direct-command assembly path
+      StIndRd, StIndRdC
     } state_e;
     state_e              state_q;
     // submit FIFO (flops)
@@ -221,8 +250,35 @@ module g6lc_apu_cmdexec
     apu_cmdexec_submit_t cur_q;
     logic [2:0]          buf_i_q;       // buffer index within submit
     logic [2:0]          pin_i_q;       // pin substep
-    logic [7:0]          rec_i_q;       // record cursor
-    logic [7:0]          rec_n_q;       // record count
+    logic [15:0]         rec_i_q;       // record cursor (chunked
+                                        // buffers exceed 8 bits)
+    logic [15:0]         rec_n_q;       // record count
+    logic [31:0]         cur_cbd_q;     // current buffer's descriptor
+                                        // word address (§5a G3b-iii)
+    // §5a G3b-iii: one-deep secondary-command-buffer stack —
+    // {cbd, cursor, count} of the suspended primary
+    logic                sec_v_q;
+    logic [31:0]         sec_cbd_q;
+    logic [31:0]         sec_payb_q;  // ExecuteCommands payload base
+    logic [15:0]         sec_ri_q, sec_rn_q;
+    logic [15:0]         sxc_i_q, sxc_n_q;  // ExecuteCommands list walk
+    logic [31:0]         xc_hnd_q;          // secondary handle fetched
+    logic [31:0]         xc_cbd_q;          // resolved secondary cbd
+    // §5a G3b-iii: command-buffer event machinery — pending action
+    // after the barrier drain (0 none, 1 set, 2 reset, 3 wait)
+    logic [1:0]          bar_act_q;
+    logic [15:0]         wv_i_q, wv_n_q;    // WaitEvents list walk
+    logic [6:0]          wv_cyc_q;          // 64-cycle poll divider
+    logic [31:0]         wv_hnd_q;          // event under poll
+    // §5a G3b-iii: indirect-command operand fetch — the bound
+    // buffer's resolved aperture base + byte span, beat cursor, and
+    // the fetched words (up to 4 aligned 64-bit beats cover the
+    // 12/16/20-byte command at any 4-byte-aligned offset)
+    logic                ind_q;             // record is indirect
+    logic                ind_idx_q;         // DrawIndexedIndirect
+    logic [63:0]         ind_base_q;        // aperture byte base
+    logic [2:0]          ind_i_q, ind_nb_q; // beat cursor / count
+    logic [7:0][31:0]    ind_w_q;           // raw beat halves
     apu_cmdrec_rec_t     rec_q;         // current record
     logic [2:0]          h_i_q;         // handle resolve cursor
     logic [6:0]          pay_i_q;       // §7b arena read cursor
@@ -258,7 +314,7 @@ module g6lc_apu_cmdexec
     // and subroutine returns; sm client request/completion holding
     logic [31:0]         ds_mh_q;       // compute module handle
     logic [31:0]         ds_mc_q;       // compute module {chunk,words}
-    logic [31:0]         rs_hnd_q, rs_cw_q;
+    logic [31:0]         rs_hnd_q, rs_cw_q, rs_spec_q;
     logic [2:0]          rs_slot_q;
     logic                rs_fault_q;
     state_e              rs_ret_q;
@@ -454,7 +510,12 @@ module g6lc_apu_cmdexec
         APU_VN_TYPE_VK_CMD_END_QUERY_EXT,
         APU_VN_TYPE_VK_CMD_WRITE_TIMESTAMP_EXT:
           return APU_CMDEXEC_CLS_STATE;
-        APU_VN_TYPE_VK_CMD_PIPELINE_BARRIER_EXT:
+        APU_VN_TYPE_VK_CMD_PIPELINE_BARRIER_EXT,
+        // §5a G3b-iii: event records ride the drain — the action
+        // (set/reset/wait) runs after outstanding work retires
+        APU_VN_TYPE_VK_CMD_SET_EVENT_EXT,
+        APU_VN_TYPE_VK_CMD_RESET_EVENT_EXT,
+        APU_VN_TYPE_VK_CMD_WAIT_EVENTS_EXT:
           return APU_CMDEXEC_CLS_BARRIER;
         APU_VN_TYPE_VK_CMD_DRAW_EXT,
         APU_VN_TYPE_VK_CMD_DRAW_INDEXED_EXT,
@@ -462,6 +523,7 @@ module g6lc_apu_cmdexec
         APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_EXT,
         APU_VN_TYPE_VK_CMD_DISPATCH_EXT,
         APU_VN_TYPE_VK_CMD_DISPATCH_INDIRECT_EXT,
+        APU_VN_TYPE_VK_CMD_DISPATCH_BASE_EXT,
         APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT,
         APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT,
         APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT,
@@ -514,8 +576,11 @@ module g6lc_apu_cmdexec
                         ? APU_XFER_OP_I2B :
                     rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT)
                         ? APU_XFER_OP_I2I : APU_XFER_OP_CLEARI,
-                   cbuf:     cur_q.crec[buf_i_q[1:0]],
-                   pay_base: rec_q.imm[7][15:0],
+                   // §5a G3b-iii: payloads are PayMem-resident — the
+                   // absolute word address stamped into imm[7] at
+                   // record time; the engine streams it over its own
+                   // ObjPay client (PAYREAD is retired)
+                   pay_base: rec_q.imm[7],
                    // region/range count rides imm[2] (CopyImage),
                    // imm[1] (B2I/I2B/CLEAR behind imageLayout) or
                    // imm[0] (CopyBuffer)
@@ -540,7 +605,24 @@ module g6lc_apu_cmdexec
     assign rd_o           = rd_q;
     wire rec_is_draw =
         rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT) ||
-        rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_EXT);
+        rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_EXT) ||
+        // §5a G3b-iii: resolved indirect draws assemble identically —
+        // the operand words were fetched into ind_w_q first
+        rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_EXT) ||
+        rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_EXT);
+    // fetched indirect-command word w (the operand can start on the
+    // second half of an aligned aperture beat).  The word arriving on
+    // this cycle's response beat must read through — the ind_w_q
+    // writes are nonblocking, so without the bypass the operand's
+    // trailing word would read one fetch stale (last-beat race: a
+    // DispatchIndirect operand issued gz=0 -> silent zero-dimension
+    // retire).
+    function automatic logic [31:0] f_iw(input logic [2:0] w);
+      automatic logic [2:0] iw = w + {2'b0, ind_base_q[2]};
+      if (iw == {ind_i_q, 1'b0}) return mp_rsp_i.rdata[31:0];
+      if (iw == {ind_i_q, 1'b1}) return mp_rsp_i.rdata[63:32];
+      return ind_w_q[iw];
+    endfunction
 
     always_comb begin
       cr_req_valid_o = 1'b0;
@@ -549,6 +631,8 @@ module g6lc_apu_cmdexec
       ot_req_o       = '0;
       op_req_valid_o = 1'b0;
       op_req_o       = '0;
+      mp_req_valid_o = 1'b0;
+      mp_req_o       = '0;
       sm_req_o       = 1'b0;
       sm_req_pl_o    = '0;
       work_valid_o   = 1'b0;
@@ -560,7 +644,8 @@ module g6lc_apu_cmdexec
           sm_req_o    = 1'b1;
           sm_req_pl_o = '{op: sm_op_q, pin: sm_pin_q,
                           slot: sm_slot_q, handle: sm_hnd_q,
-                          chunk: sm_chk_q, words: sm_nw_q};
+                          chunk: sm_chk_q, words: sm_nw_q,
+                          spec: rs_spec_q};
         end
         StPBR: begin
           op_req_valid_o = 1'b1;
@@ -577,14 +662,13 @@ module g6lc_apu_cmdexec
         StCntReq: begin
           cr_req_valid_o = 1'b1;
           cr_req_o       = '{op: APU_CMDREC_OP_COUNT,
-                             cbuf: cur_q.crec[buf_i_q[1:0]],
-                             default: '0};
+                             cbd: cur_cbd_q, default: '0};
         end
         StRdReq: begin
           cr_req_valid_o = 1'b1;
           cr_req_o       = '{op: APU_CMDREC_OP_READ,
-                             cbuf: cur_q.crec[buf_i_q[1:0]],
-                             idx: rec_i_q, default: '0};
+                             cbd: cur_cbd_q, idx: rec_i_q,
+                             default: '0};
         end
         StResReq: begin
           ot_req_valid_o = h_i_q != 3'd4 &&
@@ -595,18 +679,72 @@ module g6lc_apu_cmdexec
                              default: '0};
         end
         StPayReq: begin
-          cr_req_valid_o = 1'b1;
-          // the PushConstants arena payload keeps the offset+size
+          // §5a G3b-iii: payloads are PayMem-resident — one ObjPay
+          // READ per word at the record's absolute payload base
+          // (imm[7]).  The PushConstants payload keeps the offset+size
           // header words (pay[0..1]); the values start at +2
-          cr_req_o       = '{op: APU_CMDREC_OP_PAYREAD,
-                             cbuf: cur_q.crec[buf_i_q[1:0]],
-                             idx: 16'(rec_q.imm[7] + 32'(pay_i_q) +
-                                      (pay_push_q ? 32'd2 :
-                                       // BeginRP stream leads with
-                                       // {rp id, fb id, area} — 8
-                                       // words before clearValueCount
-                                       pay_clr_q ? 32'd8 : 32'd0)),
+          op_req_valid_o = 1'b1;
+          op_req_o       = '{op: APU_OBJPAY_OP_READ,
+                             addr: rec_q.imm[7] + 32'(pay_i_q) +
+                                   (pay_push_q ? 32'd2 :
+                                    // BeginRP stream leads with
+                                    // {rp id, fb id, area} — 8 words
+                                    // before clearValueCount
+                                    pay_clr_q ? 32'd8 : 32'd0),
                              default: '0};
+        end
+        // §5a G3b-iii: vkCmdExecuteCommands — the secondary-buffer
+        // {gen,slot} handles stream from the record's ObjPay payload;
+        // sec_payb_q holds the ExecuteCommands imm[7] because rec_q is
+        // overwritten by each secondary's own records
+        StXcFetch: begin
+          op_req_valid_o = 1'b1;
+          op_req_o       = '{op: APU_OBJPAY_OP_READ,
+                             addr: sec_payb_q + 32'(sxc_i_q),
+                             default: '0};
+        end
+        StXcLk: begin
+          ot_req_valid_o = 1'b1;
+          ot_req_o       = '{op: APU_OBJTAB_OP_LOOKUP,
+                             id: {32'h0, xc_hnd_q},
+                             kind: 6'(APU_VN_KIND_VK_COMMAND_BUFFER),
+                             default: '0};
+        end
+        // §5a G3b-iii: CmdSetEvent/CmdResetEvent — after the drain the
+        // event's ObjTab state bit 0 is written (EVENT_SET=1)
+        StEvSet: begin
+          ot_req_valid_o = 1'b1;
+          ot_req_o       = '{op: APU_OBJTAB_OP_SETSTATE,
+                             id: {32'h0, rec_q.handle[0]},
+                             kind: 6'(APU_VN_KIND_VK_EVENT),
+                             mask: 32'h1,
+                             value: bar_act_q == 2'd2 ? 32'h0
+                                                      : 32'h1,
+                             default: '0};
+        end
+        // §5a G3b-iii: CmdWaitEvents — event {gen,slot} handles stream
+        // from the record's ObjPay payload (imm[7] + i)
+        StWvRd: begin
+          op_req_valid_o = 1'b1;
+          op_req_o       = '{op: APU_OBJPAY_OP_READ,
+                             addr: rec_q.imm[7] + 32'(wv_i_q),
+                             default: '0};
+        end
+        StWvLk: begin
+          ot_req_valid_o = 1'b1;
+          ot_req_o       = '{op: APU_OBJTAB_OP_LOOKUP,
+                             id: {32'h0, wv_hnd_q},
+                             kind: 6'(APU_VN_KIND_VK_EVENT),
+                             default: '0};
+        end
+        // §5a G3b-iii: indirect operand fetch — one aligned 64-bit
+        // aperture beat per request (dom=1, byte address)
+        StIndRd: begin
+          mp_req_valid_o = 1'b1;
+          mp_req_o       = '{dom: 1'b1, we: 1'b0,
+                            addr: {ind_base_q[63:3], 3'b000} +
+                                  {58'h0, ind_i_q, 3'b000},
+                            wdata: '0, wstrb: '0};
         end
         StDsPipeReq: begin
           ot_req_valid_o = 1'b1;
@@ -672,10 +810,14 @@ module g6lc_apu_cmdexec
         end
         StDsRowNb, StDsRowRd: begin
           op_req_valid_o = 1'b1;
+          // ds_slo_q is the layout payload word base
+          // (aux[63:48] << 6), a 22-bit address.  The header and the
+          // bind rows sit at that base; a 16-bit slice aliases every
+          // layout whose chunk index is >= 1024.
           op_req_o       = '{op: APU_OBJPAY_OP_READ,
                              addr: state_q == StDsRowNb
-                                   ? {16'h0, ds_slo_q[15:0]}
-                                   : {16'h0, ds_slo_q[15:0]} + 32'd1 +
+                                   ? ds_slo_q
+                                   : ds_slo_q + 32'd1 +
                                      (32'(ds_i_q) << 1) +
                                      32'(ds_rh_q),
                              default: '0};
@@ -825,6 +967,27 @@ module g6lc_apu_cmdexec
         pin_i_q     <= '0;
         rec_i_q     <= '0;
         rec_n_q     <= '0;
+        cur_cbd_q   <= '0;
+        sec_v_q     <= 1'b0;
+        sec_cbd_q   <= '0;
+        sec_payb_q  <= '0;
+        sec_ri_q    <= '0;
+        sec_rn_q    <= '0;
+        sxc_i_q     <= '0;
+        sxc_n_q     <= '0;
+        xc_hnd_q    <= '0;
+        xc_cbd_q    <= '0;
+        bar_act_q   <= '0;
+        wv_i_q      <= '0;
+        wv_n_q      <= '0;
+        wv_cyc_q    <= '0;
+        wv_hnd_q    <= '0;
+        ind_q       <= 1'b0;
+        ind_idx_q   <= 1'b0;
+        ind_base_q  <= '0;
+        ind_i_q     <= '0;
+        ind_nb_q    <= '0;
+        ind_w_q     <= '0;
         rec_q       <= '0;
         h_i_q       <= '0;
         pay_i_q     <= '0;
@@ -845,6 +1008,7 @@ module g6lc_apu_cmdexec
         ds_mc_q     <= '0;
         rs_hnd_q    <= '0;
         rs_cw_q     <= '0;
+        rs_spec_q   <= '0;
         rs_slot_q   <= '0;
         rs_fault_q  <= 1'b0;
         rs_ret_q    <= StIdle;
@@ -1081,6 +1245,8 @@ module g6lc_apu_cmdexec
             else
               lost_q <= 1'b1;
             if (pin_i_q + 3'd1 >= {2'b0, cur_q.nbufs}) begin
+              // §5a G3b-iii: first buffer's descriptor block
+              cur_cbd_q <= cur_q.crec[0];
               state_q <= StCntReq;
             end else begin
               pin_i_q <= pin_i_q + 3'd1;
@@ -1094,10 +1260,13 @@ module g6lc_apu_cmdexec
             if (cr_cpl_i.status != APU_CMDREC_OK) begin
               lost_q  <= 1'b1;
               state_q <= StUnpReq;
-            end else if (cr_cpl_i.count == 8'h0) begin
-              state_q <= StUnpReq;
+            end else if (cr_cpl_i.count == 32'h0) begin
+              // §5a G3b-iii: an empty SECONDARY retires its
+              // ExecuteCommands step (pop), only a primary ends the
+              // buffer walk
+              state_q <= sec_v_q ? StXcPop : StUnpReq;
             end else begin
-              rec_n_q <= cr_cpl_i.count;
+              rec_n_q <= cr_cpl_i.count[15:0];
               rec_i_q <= '0;
               state_q <= StRdReq;
             end
@@ -1151,18 +1320,25 @@ module g6lc_apu_cmdexec
             end
           end
 
-          // ---- §7b: BindDescriptorSets arena walk ---------------------
-          StPayReq: if (cr_req_ready_i) state_q <= StPayCpl;
-          StPayCpl: if (cr_cpl_valid_i) begin
-            if (cr_cpl_i.status != APU_CMDREC_OK) begin
+          // ---- §7b: record-payload walk (§5a G3b-iii: ObjPay) -------
+          StPayReq: if (op_req_ready_i) state_q <= StPayCpl;
+          StPayCpl: if (op_cpl_valid_i) begin
+            if (op_cpl_i.status != APU_OBJPAY_OK) begin
               lost_q  <= 1'b1;
               state_q <= StUnpReq;
             end else begin
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+              $display("[DBG] pay rd i=%0d imm7=%08x rd=%08x vb=%0d push=%0d st=%0d t=%0t",
+                       pay_i_q, rec_q.imm[7], op_cpl_i.rdata, pay_vb_q,
+                       pay_push_q, op_cpl_i.status, $time);
+`endif
+// pragma translate_on
               if (pay_push_q) begin
                 // §7b: merge the PushConstants payload into the
                 // 32-word shadow at the imm[1] word offset
                 push_sh_q[32*(pay_dst_q + pay_i_q[5:0]) +: 32] <=
-                    cr_cpl_i.pdata;
+                    op_cpl_i.rdata;
                 if (pay_dst_q + pay_i_q[5:0] + 6'd1 > push_max_q)
                   push_max_q <= pay_dst_q + pay_i_q[5:0] + 6'd1;
               end else if (pay_vb_q) begin
@@ -1174,33 +1350,33 @@ module g6lc_apu_cmdexec
                 if (32'(pay_i_q) < pay_nset_q) begin
                   if (rec_q.imm[0] + 32'(pay_i_q) < 32'd16)
                     vb_hnd_q[4'(rec_q.imm[0] + 32'(pay_i_q))] <=
-                        cr_cpl_i.pdata;
+                        op_cpl_i.rdata;
                 end else if (pay_i_q[0] == pay_nset_q[0] &&
                              rec_q.imm[0] +
                                  32'((pay_i_q - 7'(pay_nset_q)) >> 1) <
                                  32'd16) begin
                   vb_off_q[4'(rec_q.imm[0] +
                               32'((pay_i_q - 7'(pay_nset_q)) >> 1))] <=
-                      cr_cpl_i.pdata;
+                      op_cpl_i.rdata;
                 end
               end else if (pay_ib_q) begin
                 // G1c: BindIndexBuffer's u64 offset — lo word only
-                if (pay_i_q == 7'd0) ib_off_q <= cr_cpl_i.pdata;
+                if (pay_i_q == 7'd0) ib_off_q <= op_cpl_i.rdata;
               end else if (pay_vp_q) begin
-                if (pay_i_q < 7'd6) vp_q[3'(pay_i_q)] <= cr_cpl_i.pdata;
+                if (pay_i_q < 7'd6) vp_q[3'(pay_i_q)] <= op_cpl_i.rdata;
               end else if (pay_sc_q) begin
-                if (pay_i_q < 7'd4) sc_q[2'(pay_i_q)] <= cr_cpl_i.pdata;
+                if (pay_i_q < 7'd4) sc_q[2'(pay_i_q)] <= op_cpl_i.rdata;
               end else if (pay_bc_q) begin
                 // G2a: vkCmdSetBlendConstants — four f32 words
                 if (pay_i_q < 7'd4)
-                  bconst_q[2'(pay_i_q)] <= cr_cpl_i.pdata;
+                  bconst_q[2'(pay_i_q)] <= op_cpl_i.rdata;
               end else if (pay_clr_q) begin
                 // word 0 of the walk is clearValueCount; the per-
                 // attachment 4-word clear values follow (G2a)
                 if (pay_i_q == 7'd0)
-                  clr_ok_q <= cr_cpl_i.pdata != 32'h0;
+                  clr_ok_q <= op_cpl_i.rdata != 32'h0;
                 else if (clr_ok_q)
-                  clearv_q[5'(pay_i_q - 7'd1)] <= cr_cpl_i.pdata;
+                  clearv_q[5'(pay_i_q - 7'd1)] <= op_cpl_i.rdata;
               end else if (pay_bind_q) begin
                 // §12.3 F5 bind stream: {set handle, ndyn} pairs for
                 // each bound set, then the call's dynamic-offset
@@ -1209,10 +1385,10 @@ module g6lc_apu_cmdexec
                   if (pay_i_q[0] == 1'b0) begin
                     snap_q.dset[2'(rec_q.imm[1] +
                                     {25'h0, pay_i_q[6:1]})] <=
-                        cr_cpl_i.pdata;
+                        op_cpl_i.rdata;
                   end else begin
                     pay_dnb_q[2'(pay_i_q[6:1])] <=
-                        cr_cpl_i.pdata[4:0];
+                        op_cpl_i.rdata[4:0];
                   end
                 end else begin
                   // dynamic-offset word: ordinal w maps to the w-th
@@ -1238,12 +1414,12 @@ module g6lc_apu_cmdexec
                     end
                     if ({1'b0, bs} < {1'b0, pay_nset_q} && bk < 5'd16)
                       snap_q.dyn[2'(rec_q.imm[1] + {30'h0, bs})]
-                              [bk[3:0]] <= cr_cpl_i.pdata;
+                              [bk[3:0]] <= op_cpl_i.rdata;
                   end
                 end
               end else begin
                 snap_q.dset[2'(rec_q.imm[1] + {24'h0, pay_i_q})] <=
-                    cr_cpl_i.pdata;
+                    op_cpl_i.rdata;
               end
               pay_i_q <= pay_i_q + 7'd1;
               state_q <= pay_i_q + 7'd1 >= pay_n_q
@@ -1428,15 +1604,80 @@ module g6lc_apu_cmdexec
               end
               APU_CMDEXEC_CLS_WORK: begin
                 if (rec_q.ctype ==
-                    32'(APU_VN_TYPE_VK_CMD_DISPATCH_EXT)) begin
+                    32'(APU_VN_TYPE_VK_CMD_DISPATCH_EXT) ||
+                    rec_q.ctype ==
+                    32'(APU_VN_TYPE_VK_CMD_DISPATCH_BASE_EXT)) begin
                   // §7b/5a-ii: no bound pipeline -> DEVICE_LOST, no
-                  // dispatch is issued
+                  // dispatch is issued.  §5a G3b-iii: DispatchBase
+                  // assembles identically — its imm carries
+                  // {baseX,Y,Z} at [0..2] and {gx,gy,gz} at [3..5],
+                  // which shcore decodes directly
                   if (snap_q.pipeline == 32'h0) begin
                     lost_q  <= 1'b1;
                     state_q <= StUnpReq;
                   end else begin
                     desc_q  <= '0;
                     state_q <= StDsPipeReq;
+                  end
+                end else if (rec_q.ctype ==
+                    32'(APU_VN_TYPE_VK_CMD_DISPATCH_INDIRECT_EXT)) begin
+                  // §5a G3b-iii: fetch the 12-byte
+                  // VkDispatchIndirectCommand from the bound buffer
+                  // (record handle[0]) at aperture offset imm[2:3]
+                  if (snap_q.pipeline == 32'h0) begin
+                    lost_q  <= 1'b1;
+                    state_q <= StUnpReq;
+                  end else begin
+                    ind_q     <= 1'b1;
+                    ind_idx_q <= 1'b0;
+                    xf_for_q  <= 2'd0;
+                    xf_opnd_q <= 2'd0;
+                    state_q   <= StXfBufReq;
+                  end
+                end else if (rec_q.ctype ==
+                    32'(APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_EXT) ||
+                    rec_q.ctype ==
+                    32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_EXT)) begin
+                  // §5a G3b-iii: same guards as a direct draw, then
+                  // the operand fetch.  drawCount (imm[0]) is clamped
+                  // to <= 1 — 0 is a no-op, >1 honours only the first
+                  // command
+                  if (snap_q.pipeline == 32'h0 ||
+                      (ca_valid_q == 4'h0 && !da_valid_q)) begin
+                    lost_q  <= 1'b1;
+                    state_q <= StUnpReq;
+                  end else if (rec_q.imm[0] == 32'h0) begin
+                    state_q <= StNextBuf;
+                  end else begin
+                    ind_q     <= 1'b1;
+                    ind_idx_q <= rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_EXT);
+                    xf_for_q  <= 2'd0;
+                    xf_opnd_q <= 2'd0;
+                    state_q   <= StXfBufReq;
+                  end
+                end else if (rec_q.ctype ==
+                    32'(APU_VN_TYPE_VK_CMD_EXECUTE_COMMANDS_EXT)) begin
+                  // §5a G3b-iii: one-deep {cbd,cursor} stack — the
+                  // primary suspends while each listed secondary runs
+                  // to its own count; dynamic state deliberately does
+                  // NOT restore on the pop
+                  if (sec_v_q) begin
+                    // a secondary inside a secondary: beyond the
+                    // settled one-deep stack
+                    lost_q  <= 1'b1;
+                    state_q <= StUnpReq;
+                  end else if (rec_q.imm[0] == 32'h0) begin
+                    state_q <= StNextBuf;
+                  end else begin
+                    sec_v_q   <= 1'b1;
+                    sec_cbd_q <= cur_cbd_q;
+                    sec_payb_q <= rec_q.imm[7];
+                    sec_ri_q  <= rec_i_q;
+                    sec_rn_q  <= rec_n_q;
+                    sxc_i_q   <= '0;
+                    sxc_n_q   <= 16'(rec_q.imm[0]);
+                    state_q   <= StXcFetch;
                   end
                 end else if (rec_is_draw) begin
                   // G1c/G2a: draw needs a bound graphics pipeline (the
@@ -1497,7 +1738,19 @@ module g6lc_apu_cmdexec
                   state_q <= StWork;
                 end
               end
-              APU_CMDEXEC_CLS_BARRIER:  state_q <= StDrain;
+              APU_CMDEXEC_CLS_BARRIER: begin
+                // §5a G3b-iii: the drain's post-action — 0 plain
+                // barrier, 1 SetEvent, 2 ResetEvent, 3 WaitEvents
+                bar_act_q <=
+                    rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_SET_EVENT_EXT)   ? 2'd1 :
+                    rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_RESET_EVENT_EXT) ? 2'd2 :
+                    rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_WAIT_EVENTS_EXT) ? 2'd3 :
+                                                                2'd0;
+                state_q   <= StDrain;
+              end
               default:                  state_q <= StNextBuf;
             endcase
           end
@@ -1541,6 +1794,7 @@ module g6lc_apu_cmdexec
               dr_pi_q     <= '0;
               desc_q      <= '0;
               rs_fault_q  <= 1'b0;
+              rs_spec_q   <= '0;
               pbr_addr_q  <= (32'(ot_cpl_i.entry.aux[31:16]) << 6) +
                              (rec_is_draw ? 32'd44 : 32'd0);
               pbr_ret_q   <= rec_is_draw ? StDrModR0 : StDsModR0;
@@ -1556,9 +1810,15 @@ module g6lc_apu_cmdexec
             state_q    <= StPBR;
           end
           StDsModR1: begin
-            ds_mc_q   <= pbr_data_q;
-            rs_hnd_q  <= ds_mh_q;
-            rs_cw_q   <= pbr_data_q;
+            ds_mc_q    <= pbr_data_q;
+            rs_hnd_q   <= ds_mh_q;
+            rs_cw_q    <= pbr_data_q;
+            pbr_addr_q <= pbr_addr_q + 32'd1;
+            pbr_ret_q  <= StDsModR2;
+            state_q    <= StPBR;
+          end
+          StDsModR2: begin
+            rs_spec_q <= pbr_data_q;
             rs_ret_q  <= StDsModRC;
             state_q   <= StRsReq;
           end
@@ -1572,7 +1832,7 @@ module g6lc_apu_cmdexec
                     {fault_q[5'(cur_q.ctx)][63:48] == 16'hFFFF
                          ? 16'hFFFF
                          : fault_q[5'(cur_q.ctx)][63:48] + 16'h1,
-                     rec_i_q, sm_flt_q, 16'h0, 16'h0};
+                     rec_i_q, sm_flt_q, 8'h0, 16'h0};
               if (rec_pin_q != 8'h0) begin
                 // no work was issued — the bundle never reached pinq;
                 // release the slot pins before the next record
@@ -1621,7 +1881,7 @@ module g6lc_apu_cmdexec
                     {fault_q[5'(cur_q.ctx)][63:48] == 16'hFFFF
                          ? 16'hFFFF
                          : fault_q[5'(cur_q.ctx)][63:48] + 16'h1,
-                     rec_i_q, sm_flt_q, 16'h0, 16'h0};
+                     rec_i_q, sm_flt_q, 8'h0, 16'h0};
               if (rec_pin_q != 8'h0) begin
                 // no work was issued — release the slot pins before
                 // the next record (the bundle never reached pinq)
@@ -1648,7 +1908,7 @@ module g6lc_apu_cmdexec
                     {fault_q[5'(cur_q.ctx)][63:48] == 16'hFFFF
                          ? 16'hFFFF
                          : fault_q[5'(cur_q.ctx)][63:48] + 16'h1,
-                     rec_i_q, sm_flt_q, 16'h0, 16'h0};
+                     rec_i_q, sm_flt_q, 8'h0, 16'h0};
               if (rec_pin_q != 8'h0) begin
                 // the VS resolve already pinned its slot — release it;
                 // no work was issued so the bundle never reached pinq
@@ -1996,7 +2256,189 @@ module g6lc_apu_cmdexec
           end
           StDrain: if (outst_q == 8'h0 ||
                        (outst_q == 8'h1 && work_done_i)) begin
-            state_q <= StNextBuf;
+            // §5a G3b-iii: a barrier record may carry an event action
+            if (bar_act_q == 2'd1 || bar_act_q == 2'd2) begin
+              state_q <= StEvSet;
+            end else if (bar_act_q == 2'd3) begin
+              wv_i_q   <= '0;
+              wv_cyc_q <= '0;
+              wv_n_q   <= 16'(rec_q.imm[0]);
+              state_q  <= rec_q.imm[0] == 32'h0 ? StNextBuf : StWvRd;
+            end else begin
+              state_q <= StNextBuf;
+            end
+          end
+          // set/reset: ObjTab SETSTATE on the record's event handle —
+          // a dead event between the resolve and the write loses the
+          // submission like any stale object
+          StEvSet:  if (ot_req_ready_i) state_q <= StEvSetC;
+          StEvSetC: if (ot_cpl_valid_i) begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              lost_q  <= 1'b1;
+              state_q <= StUnpReq;
+            end else begin
+              state_q <= StNextBuf;
+            end
+          end
+          // wait-events: fetch the i-th event handle from the record's
+          // ObjPay payload, LOOKUP it, poll state[0] every 64 cycles
+          StWvRd:  if (op_req_ready_i) state_q <= StWvRdC;
+          StWvRdC: if (op_cpl_valid_i) begin
+            if (op_cpl_i.status != APU_OBJPAY_OK) begin
+              lost_q  <= 1'b1;
+              state_q <= StUnpReq;
+            end else begin
+              wv_hnd_q <= op_cpl_i.rdata;
+              state_q  <= StWvLk;
+            end
+          end
+          StWvLk:  if (ot_req_ready_i) state_q <= StWvLkC;
+          StWvLkC: if (ot_cpl_valid_i) begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              // a dead event handle loses the submission like any
+              // stale record-time object
+              lost_q  <= 1'b1;
+              state_q <= StUnpReq;
+            end else if (ot_cpl_i.entry.state[0]) begin
+              // event set — advance to the next listed event
+              if (wv_i_q + 16'd1 < wv_n_q) begin
+                wv_i_q  <= wv_i_q + 16'd1;
+                state_q <= StWvRd;
+              end else begin
+                state_q <= StNextBuf;
+              end
+            end else begin
+              wv_cyc_q <= '0;
+              state_q  <= StWvWait;
+            end
+          end
+          StWvWait: begin
+            if (wv_cyc_q == 7'd63) begin
+              wv_cyc_q <= '0;
+              state_q  <= StWvLk;   // re-poll state[0]
+            end else begin
+              wv_cyc_q <= wv_cyc_q + 7'd1;
+            end
+          end
+          // indirect operand fetch: one aligned 64-bit aperture beat
+          // per request; the two halves land as flat stream words and
+          // f_iw extracts the command's word w
+          StIndRd:  if (mp_req_ready_i) state_q <= StIndRdC;
+          StIndRdC: if (mp_rsp_valid_i) begin
+            if (mp_rsp_i.err) begin
+              // out-of-window aperture read: submission lost, never a
+              // silent fabricated operand
+              lost_q  <= 1'b1;
+              state_q <= StUnpReq;
+            end else begin
+              ind_w_q[{ind_i_q, 1'b0}] <= mp_rsp_i.rdata[31:0];
+              ind_w_q[{ind_i_q, 1'b1}] <= mp_rsp_i.rdata[63:32];
+`ifdef G6LC_APU_DEBUG
+              $display("[ind t=%0d] base=%x i=%0d rd=%x", $time,
+                       ind_base_q, ind_i_q, mp_rsp_i.rdata);
+`endif
+              if (ind_i_q + 3'd1 >= ind_nb_q) begin
+                ind_q   <= 1'b0;
+                case (rec_q.ctype)
+                  APU_VN_TYPE_VK_CMD_DISPATCH_INDIRECT_EXT: begin
+                    rec_q.imm[0] <= f_iw(3'd0);
+                    rec_q.imm[1] <= f_iw(3'd1);
+                    rec_q.imm[2] <= f_iw(3'd2);
+                    desc_q  <= '0;
+                    state_q <= StDsPipeReq;
+                  end
+                  // VkDrawIndirectCommand / VkDrawIndexedIndirect-
+                  // Command — the rd_q prelude mirrors the direct
+                  // draw arm; the pipeline/attachment guard already
+                  // ran before the fetch
+                  APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_EXT,
+                  APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_EXT: begin
+                    desc_q  <= '0;
+                    rd_q.op          <= APU_RAST_OP_DRAW;
+                    rd_q.ca          <= ca_q;
+                    rd_q.ca_valid    <= ca_valid_q;
+                    rd_q.da          <= da_q;
+                    rd_q.da_valid    <= da_valid_q;
+                    rd_q.vp          <= '{x: vp_q[0], y: vp_q[1],
+                                          w: vp_q[2], h: vp_q[3],
+                                          minz: vp_q[4], maxz: vp_q[5]};
+                    rd_q.sc_x        <= sc_q[0][15:0];
+                    rd_q.sc_y        <= sc_q[1][15:0];
+                    rd_q.sc_w        <= sc_q[2][15:0];
+                    rd_q.sc_h        <= sc_q[3][15:0];
+                    rd_q.vb_base     <= '0;
+                    rd_q.vb_size     <= '0;
+                    rd_q.vb_stride   <= '0;
+                    rd_q.vb_rate     <= '0;
+                    rd_q.attr        <= '0;
+                    rd_q.ib_base     <= '0;
+                    rd_q.ib_size     <= '0;
+                    rd_q.ib_type     <= ind_idx_q ? ib_type_q : 2'd0;
+                    rd_q.vertex_count   <= f_iw(3'd0);
+                    rd_q.instance_count <= f_iw(3'd1);
+                    if (ind_idx_q) begin
+                      rd_q.first_vertex   <= '0;
+                      rd_q.first_index    <= f_iw(3'd2);
+                      rd_q.vertex_offset  <= f_iw(3'd3);
+                      rd_q.first_instance <= f_iw(3'd4);
+                    end else begin
+                      rd_q.first_vertex   <= f_iw(3'd2);
+                      rd_q.first_index    <= '0;
+                      rd_q.vertex_offset  <= '0;
+                      rd_q.first_instance <= f_iw(3'd3);
+                    end
+                    state_q <= StDsPipeReq;
+                  end
+                  default: begin
+                    lost_q  <= 1'b1;
+                    state_q <= StUnpReq;
+                  end
+                endcase
+              end else begin
+                ind_i_q <= ind_i_q + 3'd1;
+                state_q <= StIndRd;
+              end
+            end
+          end
+          // ---- §5a G3b-iii: secondary command buffers ---------------
+          // the record's payload streams {gen,slot} handle words; each
+          // is re-resolved live to its descriptor-block cbd
+          StXcFetch: if (op_req_ready_i) state_q <= StXcFetchC;
+          StXcFetchC: if (op_cpl_valid_i) begin
+            if (op_cpl_i.status != APU_OBJPAY_OK) begin
+              lost_q  <= 1'b1;
+              state_q <= StUnpReq;
+            end else begin
+              xc_hnd_q <= op_cpl_i.rdata;
+              state_q  <= StXcLk;
+            end
+          end
+          StXcLk:   if (ot_req_ready_i) state_q <= StXcLkC;
+          StXcLkC: if (ot_cpl_valid_i) begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              lost_q  <= 1'b1;
+              state_q <= StUnpReq;
+            end else begin
+              // the secondary's descriptor block rides its aux[63:32]
+              cur_cbd_q <= ot_cpl_i.entry.aux[63:32];
+              rec_i_q   <= '0;
+              state_q   <= StCntReq;
+            end
+          end
+          // a secondary ran to its count: fetch the next listed
+          // secondary, or restore the primary and advance past the
+          // ExecuteCommands record — no dynamic-state restore
+          StXcPop: begin
+            if (sxc_i_q + 16'd1 < sxc_n_q) begin
+              sxc_i_q <= sxc_i_q + 16'd1;
+              state_q <= StXcFetch;
+            end else begin
+              cur_cbd_q <= sec_cbd_q;
+              rec_i_q   <= sec_ri_q;
+              rec_n_q   <= sec_rn_q;
+              sec_v_q   <= 1'b0;
+              state_q   <= StNextBuf;
+            end
           end
 
           // ---- §12.3 C/5a: Xfer operand assembly ----------------------
@@ -2038,6 +2480,8 @@ module g6lc_apu_cmdexec
                     ot_cpl_i.entry.aux[44:40];
                 att_img_q[brp_ak_q].layers      <=
                     ot_cpl_i.entry.aux[53:45];
+                att_img_q[brp_ak_q].itype       <=
+                    ot_cpl_i.entry.state[20:19];
                 att_img_q[brp_ak_q].layer_bytes <=
                     {7'h0, ot_cpl_i.entry.state[18:0], 6'h0};
               end else if (xf_op_img) begin
@@ -2047,6 +2491,7 @@ module g6lc_apu_cmdexec
                   xf_img1_q.fmt         <= ot_cpl_i.entry.aux[39:32];
                   xf_img1_q.mips        <= ot_cpl_i.entry.aux[44:40];
                   xf_img1_q.layers      <= ot_cpl_i.entry.aux[53:45];
+                  xf_img1_q.itype       <= ot_cpl_i.entry.state[20:19];
                   xf_img1_q.layer_bytes <=
                       {7'h0, ot_cpl_i.entry.state[18:0], 6'h0};
                 end else begin
@@ -2055,6 +2500,7 @@ module g6lc_apu_cmdexec
                   xf_img0_q.fmt         <= ot_cpl_i.entry.aux[39:32];
                   xf_img0_q.mips        <= ot_cpl_i.entry.aux[44:40];
                   xf_img0_q.layers      <= ot_cpl_i.entry.aux[53:45];
+                  xf_img0_q.itype       <= ot_cpl_i.entry.state[20:19];
                   xf_img0_q.layer_bytes <=
                       {7'h0, ot_cpl_i.entry.state[18:0], 6'h0};
                 end
@@ -2088,7 +2534,30 @@ module g6lc_apu_cmdexec
                   xf_bs_q < rem_m ? xf_bs_q[31:0] : rem_m[31:0];
               automatic logic [31:0] xb =
                   ot_cpl_i.entry.aux[63:32] + xf_bo_q[31:0];
-              if (xf_for_q == 2'd1) begin
+              if (ind_q) begin
+                // §5a G3b-iii: the bound buffer's resolved aperture
+                // base carries the record's u64 offset (imm[2:3]);
+                // the operand must fit inside the operand extent —
+                // else the submission is lost, never a silent fetch
+                automatic logic [4:0]  lenb =
+                    ind_idx_q ? 5'd20 :
+                    rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_EXT)
+                        ? 5'd16 : 5'd12;
+                automatic logic [63:0] ib =
+                    64'(xb) + {32'h0, rec_q.imm[2]};
+                if (rec_q.imm[2] > xs ||
+                    xs - rec_q.imm[2] < 32'(lenb)) begin
+                  lost_q  <= 1'b1;
+                  state_q <= StUnpReq;
+                end else begin
+                  ind_base_q <= ib;
+                  ind_nb_q   <= 3'((32'(lenb) +
+                                    (ib[2] ? 32'd4 : 32'd0) + 7) >> 3);
+                  ind_i_q    <= '0;
+                  state_q    <= StIndRd;
+                end
+              end else if (xf_for_q == 2'd1) begin
                 // G1c: bound vertex buffer — aperture base += the
                 // recorded bind offset; effective bytes shrink alike
                 rd_q.vb_base[dr_bq[3:0]] <= xb + xf_xoff_q;
@@ -2520,8 +2989,10 @@ module g6lc_apu_cmdexec
             end
           end
           StDrIbN: begin
-            if (rec_q.ctype ==
-                    32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_EXT) &&
+            if ((rec_q.ctype ==
+                     32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_EXT) ||
+                 rec_q.ctype ==
+                     32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_EXT)) &&
                 ib_hnd_q != 32'h0) begin
               xf_for_q <= 2'd2;
               state_q  <= StXfBufReq;
@@ -2532,9 +3003,14 @@ module g6lc_apu_cmdexec
 
           // ---- next record / buffer -----------------------------------
           StNextBuf: begin
-            if (rec_i_q + 8'h1 < rec_n_q) begin
-              rec_i_q <= rec_i_q + 8'h1;
+            if (rec_i_q + 16'h1 < rec_n_q) begin
+              rec_i_q <= rec_i_q + 16'h1;
               state_q <= StRdReq;
+            end else if (sec_v_q) begin
+              // §5a G3b-iii: the running secondary hit its count —
+              // return to the suspended primary or the next listed
+              // secondary
+              state_q <= StXcPop;
             end else begin
               state_q <= StUnpReq;
             end
@@ -2564,9 +3040,10 @@ module g6lc_apu_cmdexec
               unp_ret_q <= StBufDone;
               state_q   <= StUnpD;
             end else if (buf_i_q + 3'd1 < {2'b0, cur_q.nbufs}) begin
-              buf_i_q <= buf_i_q + 3'd1;
-              rec_i_q <= '0;
-              state_q <= StCntReq;
+              buf_i_q   <= buf_i_q + 3'd1;
+              cur_cbd_q <= cur_q.crec[buf_i_q + 3'd1];
+              rec_i_q   <= '0;
+              state_q   <= StCntReq;
             end else begin
               state_q <= StFinalDrain;
             end
@@ -2610,6 +3087,9 @@ module g6lc_apu_cmdexec
 `endif
 // pragma translate_on
             done_seq_q <= done_seq_q + 16'h1;
+            // a submission that ended mid-secondary (lost) clears the
+            // stack — the next submission must not pop into it
+            sec_v_q <= 1'b0;
             if (cur_q.fence_idx != FENCE_NONE &&
                 cur_q.fence_idx < 5'(Fences)) begin
               fsig_q[cur_q.fence_idx[$clog2(Fences)-1:0]] <= 1'b1;
@@ -2687,6 +3167,7 @@ module g6lc_apu_cmdexec_fixture
   import g6lc_apu_cmdexec_pkg::*;
   import g6lc_apu_sh_pkg::*;
   import g6lc_apu_rast_pkg::*;
+  import g6lc_apu_mp_pkg::*;
 #(parameter bit Enable = 1'b0,
   parameter int unsigned Fences = 16,
   parameter int unsigned WorkBudgetLog2 = 30,
@@ -2720,6 +3201,11 @@ module g6lc_apu_cmdexec_fixture
   input  logic               sm_gnt_i,
   input  logic               sm_cpl_i,
   input  apu_sh_sm_cpl_t     sm_cpl_pl_i,
+  output logic               mp_req_valid_o,
+  input  logic               mp_req_ready_i,
+  output apu_mp_req_t        mp_req_o,
+  input  logic               mp_rsp_valid_i,
+  input  apu_mp_rsp_t        mp_rsp_i,
   output logic               work_valid_o,
   input  logic               work_ready_i,
   output apu_cmdexec_work_t  work_o,

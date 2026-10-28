@@ -129,7 +129,10 @@ module commit_stage
   // Re-pipelining contract (sv-timing A128; 26.7 adjusted FO4 on the
   // Nangate45 board): commit: architectural state update; the commit acknowledge is same-cycle.
   // svt-pipe: require-contract
+  // svt-pipe: protocol cm valid=flush_i
   // svt-pipe: no-cut on=casq_hi_rd_q
+  // svt-pipe: no-cut on=commit_ack_o
+  // svt-pipe: cycle cm q=casq_hi_rd_q d=commit_ack_o hold=flush_i steps=1
 
   // ila_0 i_ila_commit (
   //     .clk(clk_i), // input wire clk

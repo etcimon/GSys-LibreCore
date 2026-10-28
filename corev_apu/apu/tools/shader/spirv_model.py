@@ -558,8 +558,15 @@ class Model:
         self.np = words[2]
         self.gx, self.gy, self.gz = words[3], words[4], words[5]
         self.flags = words[6]
-        self.spv = words[8:8 + n]
-        p = 8 + n
+        # G3b-iii DispatchBase (flags bit4): {gbx,gby,gbz} between the
+        # tag word and the module; shwave adds them to WorkgroupId.
+        self.wb = (0, 0, 0)
+        hoff = 8
+        if self.flags & 0x10:
+            self.wb = (words[8], words[9], words[10])
+            hoff = 11
+        self.spv = words[hoff:hoff + n]
+        p = hoff + n
         # §12.1 F5: bind entries carry aux = {kind[23:16], dyn[8],
         # elem_idx[7:0]} — elem_idx is the record's index inside its
         # (set,binding) row so descriptor arrays share one row.
@@ -1293,16 +1300,17 @@ class Model:
         liy = (inv // lx) % ly if lx and ly else 0
         liz = inv // (lx * ly) if lx and ly else 0
         wgx, wgy, wgz = self.wg
+        wbx, wby, wbz = self.wb
         if bi == BI_GID:
-            return ((wgx * lx + lix) if c == 0 else
-                    (wgy * ly + liy) if c == 1 else
-                    (wgz * lz + liz) if c == 2 else 0)
+            return (((wgx + wbx) * lx + lix) if c == 0 else
+                    ((wgy + wby) * ly + liy) if c == 1 else
+                    ((wgz + wbz) * lz + liz) if c == 2 else 0)
         if bi == BI_LID:
             return lix if c == 0 else liy if c == 1 else \
                 liz if c == 2 else 0
         if bi == BI_WGID:
-            return wgx if c == 0 else wgy if c == 1 else \
-                wgz if c == 2 else 0
+            return wgx + wbx if c == 0 else wgy + wby if c == 1 else \
+                wgz + wbz if c == 2 else 0
         if bi == BI_NUMWG:
             return self.gx if c == 0 else self.gy if c == 1 else \
                 self.gz if c == 2 else 0

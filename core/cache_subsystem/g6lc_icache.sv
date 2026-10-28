@@ -95,7 +95,9 @@ module g6lc_icache
   // Re-pipelining contract (sv-timing A128; 52.5 adjusted FO4 on the
   // Nangate45 board): instruction cache: tag compare and fill FSM.
   // svt-pipe: require-contract
+  // svt-pipe: protocol ic valid=en_i flush=flush_i
   // svt-pipe: no-cut on=cl_tag_q
+  // svt-pipe: cycle ic q=cl_tag_q d=miss_o hold=en_i steps=1
 
   localparam ICACHE_OFFSET_WIDTH = $clog2(CVA6Cfg.ICACHE_LINE_WIDTH / 8);
   localparam ICACHE_NUM_WORDS = 2 ** (CVA6Cfg.ICACHE_INDEX_WIDTH - ICACHE_OFFSET_WIDTH);

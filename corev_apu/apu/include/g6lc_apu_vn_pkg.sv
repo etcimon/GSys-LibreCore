@@ -88,6 +88,7 @@ package g6lc_apu_vn_pkg;
   localparam int APU_VN_TYPE_VK_CREATE_COMMAND_POOL_EXT = 85;
   localparam int APU_VN_TYPE_VK_DESTROY_COMMAND_POOL_EXT = 86;
   localparam int APU_VN_TYPE_VK_RESET_COMMAND_POOL_EXT = 87;
+  localparam int APU_VN_TYPE_VK_TRIM_COMMAND_POOL_EXT = 154;
   localparam int APU_VN_TYPE_VK_ALLOCATE_COMMAND_BUFFERS_EXT = 88;
   localparam int APU_VN_TYPE_VK_FREE_COMMAND_BUFFERS_EXT = 89;
   localparam int APU_VN_TYPE_VK_BEGIN_COMMAND_BUFFER_EXT = 90;
@@ -125,6 +126,10 @@ package g6lc_apu_vn_pkg;
   localparam int APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT = 121;
   localparam int APU_VN_TYPE_VK_CMD_RESOLVE_IMAGE_EXT = 122;
   localparam int APU_VN_TYPE_VK_CMD_EXECUTE_COMMANDS_EXT = 136;
+  localparam int APU_VN_TYPE_VK_CMD_SET_EVENT_EXT = 123;
+  localparam int APU_VN_TYPE_VK_CMD_RESET_EVENT_EXT = 124;
+  localparam int APU_VN_TYPE_VK_CMD_WAIT_EVENTS_EXT = 125;
+  localparam int APU_VN_TYPE_VK_CMD_DISPATCH_BASE_EXT = 142;
   localparam int APU_VN_TYPE_VK_CREATE_FENCE_EXT = 35;
   localparam int APU_VN_TYPE_VK_DESTROY_FENCE_EXT = 36;
   localparam int APU_VN_TYPE_VK_RESET_FENCES_EXT = 37;
@@ -181,8 +186,8 @@ package g6lc_apu_vn_pkg;
     APU_VN_KIND_VK_DESCRIPTOR_SET = 21,
     APU_VN_KIND_VK_COMMAND_POOL = 22,
     APU_VN_KIND_VK_COMMAND_BUFFER = 23,
-    APU_VN_KIND_VK_SEMAPHORE = 24,
-    APU_VN_KIND_VK_EVENT = 25,
+    APU_VN_KIND_VK_EVENT = 24,
+    APU_VN_KIND_VK_SEMAPHORE = 25,
     APU_VN_KIND_VK_QUERY_POOL = 26,
     APU_VN_KIND_APU_VIRTIO_CTX = 27,
     APU_VN_KIND_APU_BLOB_SHMEM = 28
@@ -198,11 +203,11 @@ package g6lc_apu_vn_pkg;
     16'h040E, 16'h0421, 16'h042C, 16'hFFFF,
     16'h0431, 16'h0434, 16'h043E, 16'hFFFF,
     16'h0462, 16'h0471, 16'h0448, 16'h0455,
-    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h08AD,
-    16'h08B7, 16'h08BC, 16'h08C0, 16'h08C3,
-    16'h08C9, 16'h08D3, 16'h08D8, 16'h08E2,
-    16'h08E7, 16'h08EA, 16'h08ED, 16'h08F0,
-    16'h08FD, 16'h0915, 16'h0480, 16'h048F,
+    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h08EB,
+    16'h08F5, 16'h08FA, 16'h08FE, 16'h0901,
+    16'h0907, 16'h0911, 16'h0916, 16'h0920,
+    16'h0925, 16'h0928, 16'h092B, 16'h092E,
+    16'h093B, 16'h0953, 16'h0480, 16'h048F,
     16'h0494, 16'h04A2, 16'h04A7, 16'h04BF,
     16'h04C4, 16'h04CC, 16'h04E2, 16'h0505,
     16'h0511, 16'h0544, 16'h0550, 16'hFFFF,
@@ -212,35 +217,33 @@ package g6lc_apu_vn_pkg;
     16'h06C5, 16'h06C9, 16'h06D3, 16'h06D9,
     16'h069B, 16'h06AB, 16'h0610, 16'h0696,
     16'hFFFF, 16'h06FC, 16'h0707, 16'h070C,
-    16'h0710, 16'h071A, 16'h0720, 16'h072F,
-    16'h0731, 16'h0734, 16'h0753, 16'h075F,
-    16'hFFFF, 16'hFFFF, 16'h0769, 16'hFFFF,
-    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h0738,
-    16'h0747, 16'h0741, 16'h076C, 16'h0772,
-    16'h0779, 16'h077F, 16'h0785, 16'h078A,
-    16'h07E8, 16'h07F2, 16'h0836, 16'h080C,
-    16'h0821, 16'h0858, 16'h0852, 16'h085E,
-    16'h086D, 16'h087C, 16'h088F, 16'hFFFF,
-    16'hFFFF, 16'hFFFF, 16'h07BF, 16'h0907,
-    16'h090C, 16'h0902, 16'h0910, 16'hFFFF,
-    16'h074C, 16'h078E, 16'h07B5, 16'h07B8,
-    16'h08A9, 16'h031B, 16'h0467, 16'h0476,
-    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h0323,
+    16'h0714, 16'h071E, 16'h0724, 16'h0733,
+    16'h0735, 16'h0738, 16'h0757, 16'h0763,
+    16'hFFFF, 16'hFFFF, 16'h076D, 16'hFFFF,
+    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h073C,
+    16'h074B, 16'h0745, 16'h0770, 16'h0776,
+    16'h077D, 16'h0783, 16'h0789, 16'h078E,
+    16'h07EC, 16'h07F6, 16'h083A, 16'h0810,
+    16'h0825, 16'h085C, 16'h0856, 16'h0862,
+    16'h0871, 16'h0880, 16'h0893, 16'h08B1,
+    16'h08B5, 16'h08B9, 16'h07C3, 16'h0945,
+    16'h094A, 16'h0940, 16'h094E, 16'hFFFF,
+    16'h0750, 16'h0792, 16'h07B9, 16'h07BC,
+    16'h08AD, 16'h031B, 16'h0467, 16'h0476,
+    16'hFFFF, 16'hFFFF, 16'h08E3, 16'h0323,
     16'h0459, 16'h044C, 16'hFFFF, 16'h0337,
     16'h032F, 16'h035E, 16'h0364, 16'h0352,
-    16'h0343, 16'h038E, 16'hFFFF, 16'h0403,
+    16'h0343, 16'h038E, 16'h0710, 16'h0403,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'h0371, 16'h037C, 16'h0385,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h0648,
-    16'h07A0, 16'hFFFF, 16'h07BA, 16'hFFFF,
+    16'h07A4, 16'hFFFF, 16'h07BE, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
-    16'hFFFF, 16'hFFFF, 16'h091E, 16'h0923,
-    16'h0925, 16'hFFFF, 16'hFFFF, 16'hFFFF,
+    16'hFFFF, 16'hFFFF, 16'h095C, 16'h0961,
+    16'h0963, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
-    16'h0933, 16'h0944, 16'h0946, 16'h094A,
-    16'h094E, 16'hFFFF, 16'hFFFF, 16'hFFFF,
-    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
-    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
+    16'h0971, 16'h0982, 16'h0984, 16'h0988,
+    16'h098C, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
@@ -252,8 +255,10 @@ package g6lc_apu_vn_pkg;
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
-    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h0954,
-    16'h0957, 16'h0959, 16'hFFFF, 16'hFFFF,
+    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
+    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
+    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h0992,
+    16'h0995, 16'h0997, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
@@ -276,7 +281,7 @@ package g6lc_apu_vn_pkg;
     16'hFFFF, 16'hFFFF, 16'hFFFF
   };
 
-  localparam int APU_VN_DEC_ROM_WORDS = 2396;
+  localparam int APU_VN_DEC_ROM_WORDS = 2458;
   localparam logic [47:0] APU_VN_DEC_ROM [0:APU_VN_DEC_ROM_WORDS-1] = '{
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h0F0000000000, // RET a=0 b=0x0 
@@ -1657,14 +1662,14 @@ package g6lc_apu_vn_pkg;
     48'h03BB0000000D, // HANDLE a=59 b=0xD module:OPTIONAL KEEP
     48'h090100000000, // BLOB a=1 b=0x0 pName
     48'h048700000008, // PTR a=7 b=0x8 pSpecializationInfo KEEP
-    48'h017F00000000, // U32 a=127 b=0x0 mapEntryCount
+    48'h01FF00000000, // U32 a=127 b=0x0 mapEntryCount KEEP
     48'h070100000006, // ARRAY a=1 b=0x6 pMapEntries
-    48'h017F00000000, // U32 a=127 b=0x0 constantID
-    48'h017F00000000, // U32 a=127 b=0x0 offset
-    48'h027F00000000, // U64 a=127 b=0x0 size
+    48'h01FF00000000, // U32 a=127 b=0x0 constantID KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 offset KEEP
+    48'h02FF00000000, // U64 a=127 b=0x0 size KEEP
     48'h080000000000, // ENDARR a=0 b=0x0 
-    48'h027F00000000, // U64 a=127 b=0x0 dataSize
-    48'h090000000000, // BLOB a=0 b=0x0 pData
+    48'h02FF00000000, // U64 a=127 b=0x0 dataSize KEEP
+    48'h098000000000, // BLOB a=0 b=0x0 pData KEEP
     48'h03B80000000F, // HANDLE a=56 b=0xF layout:LOOKUP KEEP
     48'h033B00000011, // HANDLE a=59 b=0x11 basePipelineHandle:OPTIONAL
     48'h017F00000000, // U32 a=127 b=0x0 basePipelineIndex
@@ -2087,6 +2092,10 @@ package g6lc_apu_vn_pkg;
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h0E3A00000000, // END a=58 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
+    48'h030800000016, // HANDLE a=8 b=0x16 commandPool:LOOKUP
+    48'h010000000000, // U32 a=0 b=0x0 flags
+    48'h0E0000000000, // END a=0 b=0x0 
+    48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000005, // PTR a=0 b=0x5 pAllocateInfo
     48'h050000000040, // STYPE a=0 b=0x40 sType
     48'h0600000001ED, // PNEXT a=0 b=0x1ED pNext
@@ -2497,7 +2506,65 @@ package g6lc_apu_vn_pkg;
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 commandBufferCount
-    48'h090000000001, // BLOB a=0 b=0x1 pCommandBuffers
+    48'h098000000001, // BLOB a=0 b=0x1 pCommandBuffers KEEP
+    48'h0E0000000000, // END a=0 b=0x0 
+    48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
+    48'h030800000018, // HANDLE a=8 b=0x18 event:LOOKUP
+    48'h010000000000, // U32 a=0 b=0x0 stageMask
+    48'h0E0000000000, // END a=0 b=0x0 
+    48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
+    48'h030800000018, // HANDLE a=8 b=0x18 event:LOOKUP
+    48'h010000000000, // U32 a=0 b=0x0 stageMask
+    48'h0E0000000000, // END a=0 b=0x0 
+    48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
+    48'h010000000000, // U32 a=0 b=0x0 eventCount
+    48'h098000000001, // BLOB a=0 b=0x1 pEvents KEEP
+    48'h010100000000, // U32 a=1 b=0x0 srcStageMask
+    48'h010200000000, // U32 a=2 b=0x0 dstStageMask
+    48'h010300000000, // U32 a=3 b=0x0 memoryBarrierCount
+    48'h070000000000, // ARRAY a=0 b=0x0 pMemoryBarriers
+    48'h050000000046, // STYPE a=0 b=0x46 sType
+    48'h0600000001F6, // PNEXT a=0 b=0x1F6 pNext
+    48'h017F00000000, // U32 a=127 b=0x0 srcAccessMask
+    48'h017F00000000, // U32 a=127 b=0x0 dstAccessMask
+    48'h080000000000, // ENDARR a=0 b=0x0 
+    48'h010400000000, // U32 a=4 b=0x0 bufferMemoryBarrierCount
+    48'h070100000000, // ARRAY a=1 b=0x0 pBufferMemoryBarriers
+    48'h050000000047, // STYPE a=0 b=0x47 sType
+    48'h0600000001F7, // PNEXT a=0 b=0x1F7 pNext
+    48'h017F00000000, // U32 a=127 b=0x0 srcAccessMask
+    48'h017F00000000, // U32 a=127 b=0x0 dstAccessMask
+    48'h017F00000000, // U32 a=127 b=0x0 srcQueueFamilyIndex
+    48'h017F00000000, // U32 a=127 b=0x0 dstQueueFamilyIndex
+    48'h033800000007, // HANDLE a=56 b=0x7 buffer:LOOKUP
+    48'h027F00000000, // U64 a=127 b=0x0 offset
+    48'h027F00000000, // U64 a=127 b=0x0 size
+    48'h080000000000, // ENDARR a=0 b=0x0 
+    48'h010500000000, // U32 a=5 b=0x0 imageMemoryBarrierCount
+    48'h070200000000, // ARRAY a=2 b=0x0 pImageMemoryBarriers
+    48'h050000000048, // STYPE a=0 b=0x48 sType
+    48'h0600000001F9, // PNEXT a=0 b=0x1F9 pNext
+    48'h017F00000000, // U32 a=127 b=0x0 srcAccessMask
+    48'h017F00000000, // U32 a=127 b=0x0 dstAccessMask
+    48'h017F00000000, // U32 a=127 b=0x0 oldLayout
+    48'h017F00000000, // U32 a=127 b=0x0 newLayout
+    48'h017F00000000, // U32 a=127 b=0x0 srcQueueFamilyIndex
+    48'h017F00000000, // U32 a=127 b=0x0 dstQueueFamilyIndex
+    48'h033800000006, // HANDLE a=56 b=0x6 image:LOOKUP
+    48'h017F00000000, // U32 a=127 b=0x0 aspectMask
+    48'h017F00000000, // U32 a=127 b=0x0 baseMipLevel
+    48'h017F00000000, // U32 a=127 b=0x0 levelCount
+    48'h017F00000000, // U32 a=127 b=0x0 baseArrayLayer
+    48'h017F00000000, // U32 a=127 b=0x0 layerCount
+    48'h080000000000, // ENDARR a=0 b=0x0 
+    48'h0E0000000000, // END a=0 b=0x0 
+    48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
+    48'h010000000000, // U32 a=0 b=0x0 baseGroupX
+    48'h010100000000, // U32 a=1 b=0x0 baseGroupY
+    48'h010200000000, // U32 a=2 b=0x0 baseGroupZ
+    48'h010300000000, // U32 a=3 b=0x0 groupCountX
+    48'h010400000000, // U32 a=4 b=0x0 groupCountY
+    48'h010500000000, // U32 a=5 b=0x0 groupCountZ
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000003, // PTR a=0 b=0x3 pCreateInfo
@@ -2534,13 +2601,13 @@ package g6lc_apu_vn_pkg;
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h040100000000, // PTR a=1 b=0x0 pAllocator
     48'h040200000001, // PTR a=2 b=0x1 pSemaphore
-    48'h030900000018, // HANDLE a=9 b=0x18 pSemaphore:NEW
-    48'h0D0000000018, // OBJ a=0 b=0x18 
+    48'h030900000019, // HANDLE a=9 b=0x19 pSemaphore:NEW
+    48'h0D0000000019, // OBJ a=0 b=0x19 
     48'h0E4300000000, // END a=67 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
-    48'h030A00000018, // HANDLE a=10 b=0x18 semaphore:RETIRE
+    48'h030A00000019, // HANDLE a=10 b=0x19 semaphore:RETIRE
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
-    48'h0D0000000018, // OBJ a=0 b=0x18 
+    48'h0D0000000019, // OBJ a=0 b=0x19 
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000003, // PTR a=0 b=0x3 pCreateInfo
@@ -2549,22 +2616,22 @@ package g6lc_apu_vn_pkg;
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h040100000000, // PTR a=1 b=0x0 pAllocator
     48'h040200000001, // PTR a=2 b=0x1 pEvent
-    48'h030900000019, // HANDLE a=9 b=0x19 pEvent:NEW
-    48'h0D0000000019, // OBJ a=0 b=0x19 
+    48'h030900000018, // HANDLE a=9 b=0x18 pEvent:NEW
+    48'h0D0000000018, // OBJ a=0 b=0x18 
     48'h0E4400000000, // END a=68 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
-    48'h030A00000019, // HANDLE a=10 b=0x19 event:RETIRE
+    48'h030A00000018, // HANDLE a=10 b=0x18 event:RETIRE
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
-    48'h0D0000000019, // OBJ a=0 b=0x19 
+    48'h0D0000000018, // OBJ a=0 b=0x18 
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
-    48'h030800000019, // HANDLE a=8 b=0x19 event:LOOKUP
+    48'h030800000018, // HANDLE a=8 b=0x18 event:LOOKUP
     48'h0E4500000000, // END a=69 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
-    48'h030800000019, // HANDLE a=8 b=0x19 event:LOOKUP
+    48'h030800000018, // HANDLE a=8 b=0x18 event:LOOKUP
     48'h0E4600000000, // END a=70 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
-    48'h030800000019, // HANDLE a=8 b=0x19 event:LOOKUP
+    48'h030800000018, // HANDLE a=8 b=0x18 event:LOOKUP
     48'h0E4700000000, // END a=71 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000006, // PTR a=0 b=0x6 pCreateInfo
@@ -4041,8 +4108,8 @@ package g6lc_apu_vn_pkg;
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000010,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00001000, 32'h00000000,
-    32'h00000000, 32'h00000100, 32'h00000000, 32'h01000000,
+    32'h00000000, 32'h00001000, 32'h00001000, 32'h00000100,
+    32'h00001000, 32'h00000100, 32'h00000000, 32'h01000000,
     32'h01000000, 32'h00000080, 32'h00001000, 32'h00000FA0,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000004, 32'h00000010, 32'h00000010, 32'h00000010,
@@ -4056,8 +4123,8 @@ package g6lc_apu_vn_pkg;
     32'h00000000, 32'h00000000, 32'h00000020, 32'h00000004,
     32'h00000000, 32'h00000000, 32'h00004000, 32'h00000003,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000040, 32'h00000003, 32'h00000000, 32'h00000040,
-    32'h00000040, 32'h00000040, 32'h00000008, 32'h00000008,
+    32'h00000080, 32'h00000003, 32'h00000000, 32'h00000080,
+    32'h00000080, 32'h00000040, 32'h00000008, 32'h00000008,
     32'h00000008, 32'hFFFFFFFF, 32'h00000001, 32'h41700000,
     32'h3F800000, 32'h00000001, 32'h00000002, 32'h00000000,
     32'h00001000, 32'h00001000, 32'h00000002, 32'h00000000,
@@ -4333,7 +4400,7 @@ package g6lc_apu_vn_pkg;
   localparam int APU_VN_EXEC_WORDS = 136;
 
   localparam logic [287:0] APU_VN_QF2_ELT = {
-    32'h00000001, 32'h00000001, 32'h00000001, 32'h00000040,
+    32'h00000001, 32'h00000001, 32'h00000001, 32'h00000000,
     32'h00000001, 32'h00000007, 32'h00000000, 32'h00000000,
     32'h3B9BB07D
   };
@@ -4914,7 +4981,7 @@ package g6lc_apu_vn_pkg;
   localparam int APU_VN_BLOBMETA_AW = $clog2(APU_VN_BLOBMETA_WORDS);
   localparam int APU_VN_PROFILE_AW = $clog2(APU_VN_PROFILE_WORDS);
 
-  typedef enum logic [3:0] {
+  typedef enum logic [4:0] {
     APU_VN_ACT_UNSUPPORTED = 0,
     APU_VN_ACT_ALLOC = 1,
     APU_VN_ACT_RETIRE = 2,
@@ -4930,7 +4997,8 @@ package g6lc_apu_vn_pkg;
     APU_VN_ACT_MAP = 12,
     APU_VN_ACT_NOP_OK = 13,
     APU_VN_ACT_UPDATE = 14,
-    APU_VN_ACT_TRANSPORT = 15
+    APU_VN_ACT_TRANSPORT = 15,
+    APU_VN_ACT_EVENT = 16
   } apu_vn_act_e;
   localparam logic [7:0] APU_VN_ACT_F_REPLY = 8'h01;
   localparam logic [2:0] APU_VN_QSLOT_NONE = 3'h7;
@@ -4942,199 +5010,205 @@ package g6lc_apu_vn_pkg;
     logic [7:0]  flags;
   } apu_vn_act_t;
   localparam apu_vn_act_t APU_VN_ACT [0:APU_VN_DEC_TYPE_MAX] = '{
-    24'h107F01, // ALLOC kind=1 pq=7 cq=7 f=01
-    24'h207F00, // RETIRE kind=1 pq=7 cq=7 f=00
-    24'h408701, // QUERY kind=2 pq=0 cq=7 f=01
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
-    24'h000000, // unsupported
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
-    24'h000000, // unsupported
-    24'h000000, // unsupported
-    24'h10C701, // ALLOC kind=3 pq=0 cq=7 f=01
-    24'h20FF00, // RETIRE kind=3 pq=7 cq=7 f=00
-    24'h000000, // unsupported
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
-    24'h000000, // unsupported
-    24'h000000, // unsupported
-    24'h110701, // ALLOC kind=4 pq=0 cq=7 f=01
-    24'h900701, // SUBMIT kind=0 pq=0 cq=7 f=01
-    24'hA00701, // WAIT kind=0 pq=0 cq=7 f=01
-    24'hA00701, // WAIT kind=0 pq=0 cq=7 f=01
-    24'h120701, // ALLOC kind=8 pq=0 cq=7 f=01
-    24'h220700, // RETIRE kind=8 pq=0 cq=7 f=00
-    24'h000000, // unsupported
-    24'hC00700, // MAP kind=0 pq=0 cq=7 f=00
-    24'hC00701, // MAP kind=0 pq=0 cq=7 f=01
-    24'hC00701, // MAP kind=0 pq=0 cq=7 f=01
-    24'h000000, // unsupported
-    24'h300701, // BIND kind=0 pq=0 cq=7 f=01
-    24'h300701, // BIND kind=0 pq=0 cq=7 f=01
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
-    24'h000000, // unsupported
-    24'h000000, // unsupported
-    24'h000000, // unsupported
-    24'h114701, // ALLOC kind=5 pq=0 cq=7 f=01
-    24'h214700, // RETIRE kind=5 pq=0 cq=7 f=00
-    24'hA00701, // WAIT kind=0 pq=0 cq=7 f=01
-    24'hA00701, // WAIT kind=0 pq=0 cq=7 f=01
-    24'hA00701, // WAIT kind=0 pq=0 cq=7 f=01
-    24'h160701, // ALLOC kind=24 pq=0 cq=7 f=01
-    24'h260700, // RETIRE kind=24 pq=0 cq=7 f=00
-    24'h164701, // ALLOC kind=25 pq=0 cq=7 f=01
-    24'h264700, // RETIRE kind=25 pq=0 cq=7 f=00
-    24'h000701, // UNSUPPORTED kind=0 pq=0 cq=7 f=01
-    24'h000701, // UNSUPPORTED kind=0 pq=0 cq=7 f=01
-    24'h000701, // UNSUPPORTED kind=0 pq=0 cq=7 f=01
-    24'h168701, // ALLOC kind=26 pq=0 cq=7 f=01
-    24'h268700, // RETIRE kind=26 pq=0 cq=7 f=00
-    24'h000701, // UNSUPPORTED kind=0 pq=0 cq=7 f=01
-    24'h11C701, // ALLOC kind=7 pq=0 cq=7 f=01
-    24'h21C700, // RETIRE kind=7 pq=0 cq=7 f=00
-    24'h124701, // ALLOC kind=9 pq=0 cq=7 f=01
-    24'h224700, // RETIRE kind=9 pq=0 cq=7 f=00
-    24'h118701, // ALLOC kind=6 pq=0 cq=7 f=01
-    24'h218700, // RETIRE kind=6 pq=0 cq=7 f=00
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
-    24'h12C701, // ALLOC kind=11 pq=0 cq=7 f=01
-    24'h22C700, // RETIRE kind=11 pq=0 cq=7 f=00
-    24'h134701, // ALLOC kind=13 pq=0 cq=7 f=01
-    24'h234700, // RETIRE kind=13 pq=0 cq=7 f=00
-    24'hD40701, // NOP_OK kind=16 pq=0 cq=7 f=01
-    24'hD40700, // NOP_OK kind=16 pq=0 cq=7 f=00
-    24'h000000, // unsupported
-    24'h000000, // unsupported
-    24'h144701, // ALLOC kind=17 pq=0 cq=7 f=01
-    24'h144701, // ALLOC kind=17 pq=0 cq=7 f=01
-    24'h244700, // RETIRE kind=17 pq=0 cq=7 f=00
-    24'h13C701, // ALLOC kind=15 pq=0 cq=7 f=01
-    24'h23C700, // RETIRE kind=15 pq=0 cq=7 f=00
-    24'h130701, // ALLOC kind=12 pq=0 cq=7 f=01
-    24'h230700, // RETIRE kind=12 pq=0 cq=7 f=00
-    24'h138701, // ALLOC kind=14 pq=0 cq=7 f=01
-    24'h238700, // RETIRE kind=14 pq=0 cq=7 f=00
-    24'h150701, // ALLOC kind=20 pq=0 cq=7 f=01
-    24'h250700, // RETIRE kind=20 pq=0 cq=7 f=00
-    24'hB00701, // POOL_RESET kind=0 pq=0 cq=7 f=01
-    24'h154703, // ALLOC kind=21 pq=0 cq=7 f=03
-    24'h254701, // RETIRE kind=21 pq=0 cq=7 f=01
-    24'hE00700, // UPDATE kind=0 pq=0 cq=7 f=00
-    24'h14C701, // ALLOC kind=19 pq=0 cq=7 f=01
-    24'h24C700, // RETIRE kind=19 pq=0 cq=7 f=00
-    24'h148701, // ALLOC kind=18 pq=0 cq=7 f=01
-    24'h248700, // RETIRE kind=18 pq=0 cq=7 f=00
+    25'h0107F01, // ALLOC kind=1 pq=7 cq=7 f=01
+    25'h0207F00, // RETIRE kind=1 pq=7 cq=7 f=00
+    25'h0408701, // QUERY kind=2 pq=0 cq=7 f=01
+    25'h0400701, // QUERY kind=0 pq=0 cq=7 f=01
+    25'h0400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h000000, // unsupported
+    25'h0400701, // QUERY kind=0 pq=0 cq=7 f=01
+    25'h0400701, // QUERY kind=0 pq=0 cq=7 f=01
+    25'h0400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    25'h010C701, // ALLOC kind=3 pq=0 cq=7 f=01
+    25'h020FF00, // RETIRE kind=3 pq=7 cq=7 f=00
+    24'h000000, // unsupported
+    25'h0400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    25'h0110701, // ALLOC kind=4 pq=0 cq=7 f=01
+    25'h0900701, // SUBMIT kind=0 pq=0 cq=7 f=01
+    25'h0A00701, // WAIT kind=0 pq=0 cq=7 f=01
+    25'h0A00701, // WAIT kind=0 pq=0 cq=7 f=01
+    25'h0120701, // ALLOC kind=8 pq=0 cq=7 f=01
+    25'h0220700, // RETIRE kind=8 pq=0 cq=7 f=00
+    24'h000000, // unsupported
+    25'h0C00700, // MAP kind=0 pq=0 cq=7 f=00
+    25'h0C00701, // MAP kind=0 pq=0 cq=7 f=01
+    25'h0C00701, // MAP kind=0 pq=0 cq=7 f=01
+    24'h000000, // unsupported
+    25'h0300701, // BIND kind=0 pq=0 cq=7 f=01
+    25'h0300701, // BIND kind=0 pq=0 cq=7 f=01
+    25'h0400701, // QUERY kind=0 pq=0 cq=7 f=01
+    25'h0400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    25'h0114701, // ALLOC kind=5 pq=0 cq=7 f=01
+    25'h0214700, // RETIRE kind=5 pq=0 cq=7 f=00
+    25'h0A00701, // WAIT kind=0 pq=0 cq=7 f=01
+    25'h0A00701, // WAIT kind=0 pq=0 cq=7 f=01
+    25'h0A00701, // WAIT kind=0 pq=0 cq=7 f=01
+    25'h0164701, // ALLOC kind=25 pq=0 cq=7 f=01
+    25'h0264700, // RETIRE kind=25 pq=0 cq=7 f=00
+    25'h0160701, // ALLOC kind=24 pq=0 cq=7 f=01
+    25'h0260700, // RETIRE kind=24 pq=0 cq=7 f=00
+    25'h1000701, // EVENT kind=0 pq=0 cq=7 f=01
+    25'h1000701, // EVENT kind=0 pq=0 cq=7 f=01
+    25'h1000701, // EVENT kind=0 pq=0 cq=7 f=01
+    25'h0168701, // ALLOC kind=26 pq=0 cq=7 f=01
+    25'h0268700, // RETIRE kind=26 pq=0 cq=7 f=00
+    25'h0000701, // UNSUPPORTED kind=0 pq=0 cq=7 f=01
+    25'h011C701, // ALLOC kind=7 pq=0 cq=7 f=01
+    25'h021C700, // RETIRE kind=7 pq=0 cq=7 f=00
+    25'h0124701, // ALLOC kind=9 pq=0 cq=7 f=01
+    25'h0224700, // RETIRE kind=9 pq=0 cq=7 f=00
+    25'h0118701, // ALLOC kind=6 pq=0 cq=7 f=01
+    25'h0218700, // RETIRE kind=6 pq=0 cq=7 f=00
+    25'h0400701, // QUERY kind=0 pq=0 cq=7 f=01
+    25'h012C701, // ALLOC kind=11 pq=0 cq=7 f=01
+    25'h022C700, // RETIRE kind=11 pq=0 cq=7 f=00
+    25'h0134701, // ALLOC kind=13 pq=0 cq=7 f=01
+    25'h0234700, // RETIRE kind=13 pq=0 cq=7 f=00
+    25'h0D40701, // NOP_OK kind=16 pq=0 cq=7 f=01
+    25'h0D40700, // NOP_OK kind=16 pq=0 cq=7 f=00
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    25'h0144701, // ALLOC kind=17 pq=0 cq=7 f=01
+    25'h0144701, // ALLOC kind=17 pq=0 cq=7 f=01
+    25'h0244700, // RETIRE kind=17 pq=0 cq=7 f=00
+    25'h013C701, // ALLOC kind=15 pq=0 cq=7 f=01
+    25'h023C700, // RETIRE kind=15 pq=0 cq=7 f=00
+    25'h0130701, // ALLOC kind=12 pq=0 cq=7 f=01
+    25'h0230700, // RETIRE kind=12 pq=0 cq=7 f=00
+    25'h0138701, // ALLOC kind=14 pq=0 cq=7 f=01
+    25'h0238700, // RETIRE kind=14 pq=0 cq=7 f=00
+    25'h0150701, // ALLOC kind=20 pq=0 cq=7 f=01
+    25'h0250700, // RETIRE kind=20 pq=0 cq=7 f=00
+    25'h0B00701, // POOL_RESET kind=0 pq=0 cq=7 f=01
+    25'h0154703, // ALLOC kind=21 pq=0 cq=7 f=03
+    25'h0254701, // RETIRE kind=21 pq=0 cq=7 f=01
+    25'h0E00700, // UPDATE kind=0 pq=0 cq=7 f=00
+    25'h014C701, // ALLOC kind=19 pq=0 cq=7 f=01
+    25'h024C700, // RETIRE kind=19 pq=0 cq=7 f=00
+    25'h0148701, // ALLOC kind=18 pq=0 cq=7 f=01
+    25'h0248700, // RETIRE kind=18 pq=0 cq=7 f=00
+    24'h000000, // unsupported
+    25'h0158701, // ALLOC kind=22 pq=0 cq=7 f=01
+    25'h0258700, // RETIRE kind=22 pq=0 cq=7 f=00
+    25'h0B00701, // POOL_RESET kind=0 pq=0 cq=7 f=01
+    25'h015C701, // ALLOC kind=23 pq=0 cq=7 f=01
+    25'h025C700, // RETIRE kind=23 pq=0 cq=7 f=00
+    25'h0500001, // CB_BEGIN kind=0 pq=0 cq=0 f=01
+    25'h0600001, // CB_END kind=0 pq=0 cq=0 f=01
+    25'h0700001, // CB_RESET kind=0 pq=0 cq=0 f=01
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
     24'h000000, // unsupported
-    24'h158701, // ALLOC kind=22 pq=0 cq=7 f=01
-    24'h258700, // RETIRE kind=22 pq=0 cq=7 f=00
-    24'hB00701, // POOL_RESET kind=0 pq=0 cq=7 f=01
-    24'h15C701, // ALLOC kind=23 pq=0 cq=7 f=01
-    24'h25C700, // RETIRE kind=23 pq=0 cq=7 f=00
-    24'h500001, // CB_BEGIN kind=0 pq=0 cq=0 f=01
-    24'h600001, // CB_END kind=0 pq=0 cq=0 f=01
-    24'h700001, // CB_RESET kind=0 pq=0 cq=0 f=01
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
     24'h000000, // unsupported
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
     24'h000000, // unsupported
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
     24'h000000, // unsupported
     24'h000000, // unsupported
     24'h000000, // unsupported
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
     24'h000000, // unsupported
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0403F01, // QUERY kind=0 pq=7 cq=7 f=01
+    25'h0300701, // BIND kind=0 pq=0 cq=7 f=01
+    25'h0300701, // BIND kind=0 pq=0 cq=7 f=01
     24'h000000, // unsupported
     24'h000000, // unsupported
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0400701, // QUERY kind=0 pq=0 cq=7 f=01
+    25'h0400701, // QUERY kind=0 pq=0 cq=7 f=01
+    25'h0400701, // QUERY kind=0 pq=0 cq=7 f=01
     24'h000000, // unsupported
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    25'h0400701, // QUERY kind=0 pq=0 cq=7 f=01
+    25'h0400701, // QUERY kind=0 pq=0 cq=7 f=01
+    25'h0400701, // QUERY kind=0 pq=0 cq=7 f=01
+    25'h0400701, // QUERY kind=0 pq=0 cq=7 f=01
+    25'h0400701, // QUERY kind=0 pq=0 cq=7 f=01
+    25'h0400701, // QUERY kind=0 pq=0 cq=7 f=01
+    25'h0400701, // QUERY kind=0 pq=0 cq=7 f=01
+    25'h0D00700, // NOP_OK kind=0 pq=0 cq=7 f=00
+    25'h0110701, // ALLOC kind=4 pq=0 cq=7 f=01
     24'h000000, // unsupported
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h403F01, // QUERY kind=0 pq=7 cq=7 f=01
-    24'h300701, // BIND kind=0 pq=0 cq=7 f=01
-    24'h300701, // BIND kind=0 pq=0 cq=7 f=01
     24'h000000, // unsupported
     24'h000000, // unsupported
     24'h000000, // unsupported
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
     24'h000000, // unsupported
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
+    25'h0400701, // QUERY kind=0 pq=0 cq=7 f=01
+    25'h0400701, // QUERY kind=0 pq=0 cq=7 f=01
+    25'h0400701, // QUERY kind=0 pq=0 cq=7 f=01
     24'h000000, // unsupported
-    24'h110701, // ALLOC kind=4 pq=0 cq=7 f=01
     24'h000000, // unsupported
     24'h000000, // unsupported
+    25'h0148701, // ALLOC kind=18 pq=0 cq=7 f=01
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
     24'h000000, // unsupported
+    25'h0800000, // RECORD kind=0 pq=0 cq=0 f=00
     24'h000000, // unsupported
     24'h000000, // unsupported
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
     24'h000000, // unsupported
     24'h000000, // unsupported
     24'h000000, // unsupported
-    24'h148701, // ALLOC kind=18 pq=0 cq=7 f=01
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
     24'h000000, // unsupported
-    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
     24'h000000, // unsupported
+    25'h0F03F00, // TRANSPORT kind=0 pq=7 cq=7 f=00
+    25'h0F03F00, // TRANSPORT kind=0 pq=7 cq=7 f=00
+    25'h0F03F00, // TRANSPORT kind=0 pq=7 cq=7 f=00
     24'h000000, // unsupported
     24'h000000, // unsupported
     24'h000000, // unsupported
     24'h000000, // unsupported
     24'h000000, // unsupported
     24'h000000, // unsupported
-    24'hF03F00, // TRANSPORT kind=0 pq=7 cq=7 f=00
-    24'hF03F00, // TRANSPORT kind=0 pq=7 cq=7 f=00
-    24'hF03F00, // TRANSPORT kind=0 pq=7 cq=7 f=00
     24'h000000, // unsupported
+    25'h0F03F00, // TRANSPORT kind=0 pq=7 cq=7 f=00
+    25'h0F03F00, // TRANSPORT kind=0 pq=7 cq=7 f=00
+    25'h0F03F00, // TRANSPORT kind=0 pq=7 cq=7 f=00
+    25'h0F03F00, // TRANSPORT kind=0 pq=7 cq=7 f=00
+    25'h0400701, // QUERY kind=0 pq=0 cq=7 f=01
     24'h000000, // unsupported
     24'h000000, // unsupported
     24'h000000, // unsupported
     24'h000000, // unsupported
     24'h000000, // unsupported
     24'h000000, // unsupported
-    24'hF03F00, // TRANSPORT kind=0 pq=7 cq=7 f=00
-    24'hF03F00, // TRANSPORT kind=0 pq=7 cq=7 f=00
-    24'hF03F00, // TRANSPORT kind=0 pq=7 cq=7 f=00
-    24'hF03F00, // TRANSPORT kind=0 pq=7 cq=7 f=00
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
     24'h000000, // unsupported
     24'h000000, // unsupported
     24'h000000, // unsupported
@@ -5187,15 +5261,9 @@ package g6lc_apu_vn_pkg;
     24'h000000, // unsupported
     24'h000000, // unsupported
     24'h000000, // unsupported
-    24'h000000, // unsupported
-    24'h000000, // unsupported
-    24'h000000, // unsupported
-    24'h000000, // unsupported
-    24'h000000, // unsupported
-    24'h000000, // unsupported
-    24'hF03F00, // TRANSPORT kind=0 pq=7 cq=7 f=00
-    24'hF03F00, // TRANSPORT kind=0 pq=7 cq=7 f=00
-    24'hF03F00, // TRANSPORT kind=0 pq=7 cq=7 f=00
+    25'h0F03F00, // TRANSPORT kind=0 pq=7 cq=7 f=00
+    25'h0F03F00, // TRANSPORT kind=0 pq=7 cq=7 f=00
+    25'h0F03F00, // TRANSPORT kind=0 pq=7 cq=7 f=00
     24'h000000, // unsupported
     24'h000000, // unsupported
     24'h000000, // unsupported

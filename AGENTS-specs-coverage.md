@@ -15,6 +15,27 @@ headline view: it deliberately carries **no file references and no line numbers*
 
 ---
 
+## Hypothetical core timing refactor — targeted boundary evidence only
+
+The hypothetical redesign has additional directed coverage for load
+publication identity, partial-byte forwarding and snapshot retention,
+LSQ winner/event alignment at small queue geometries, and held
+integer/FP operand classification. Selected leaves and scalar/SMT2/L3
+lint pass. The single-cycle D-cache PMU check remains failing on its
+pre-change baseline, and same-lane issue pop/take coincidence was not
+observed. These checks do not promote integer/FP ISA compliance, complete
+memory-ordering coverage, production qualification, firmware boot or
+physical timing status.
+
+A later pass adds directed evidence for the disabled shared-TLB miss/return
+path (mitred against the original module), local SFENCE.VMA flush
+semantics including NAPOT, superpage, global and ASID cases, and load
+physical-address capture. A latent TLB replacement-policy (PLRU update)
+defect was found and repaired in the hypothetical core; a dormant latch in
+the unused enabled-shared-table arm is recorded, not fixed. VVMA/GVMA
+flushes, the PMP stage of the MMU and full privileged-ISA compliance are
+not promoted by these results.
+
 ## AI host execution contract — software coverage only
 
 Additional host protocol regressions cover queue-region separation, ticket-qualified completion,

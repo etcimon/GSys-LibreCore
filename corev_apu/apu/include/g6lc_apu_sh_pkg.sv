@@ -66,6 +66,7 @@ package g6lc_apu_sh_pkg;
   localparam logic [3:0] APU_SH_SC_PRIVATE      = 4'd6;
   localparam logic [3:0] APU_SH_SC_FUNCTION     = 4'd7;
   localparam logic [3:0] APU_SH_SC_PUSHCONST    = 4'd9;
+  localparam logic [3:0] APU_SH_SC_IMAGE        = 4'd11;
   localparam logic [3:0] APU_SH_SC_SBUF         = 4'd12;
 
   // ---- builtins (decor table builtin field) --------------------------
@@ -293,6 +294,9 @@ package g6lc_apu_sh_pkg;
   typedef struct packed {
     logic [2:0]      slot;      // committed module slot
     logic [15:0]     gx, gy, gz;
+    // §5a G3b-iii: vkCmdDispatchBase base offsets — WorkgroupId =
+    // wave coordinate + base (0 for Dispatch/DispatchIndirect)
+    logic [15:0]     gbx, gby, gbz;
     logic [31:0]     work_id;
     // graphics wave work immediates (APU_SH_WORK_VS / APU_SH_WORK_FS;
     // work_id carries the pseudo-ctype there): count, in/out record
@@ -338,6 +342,11 @@ package g6lc_apu_sh_pkg;
     logic [31:0]   handle;   // module {gen[15:0],slot[15:0]}
     logic [15:0]   chunk;    // FILL: ObjPay chunk (base>>6)
     logic [15:0]   words;    // FILL: pCode word count
+    // 0: unspecialized scan.  Else bit 31 is set and [30:0] is the
+    // ObjPay word of {count, (id, value32)*count}.  The residency
+    // hit key is {handle, spec} so two specializations of one module
+    // do not share a slot.
+    logic [31:0]   spec;
   } apu_sh_sm_req_t;
 
   typedef struct packed {

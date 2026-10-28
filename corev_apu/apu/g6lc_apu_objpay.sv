@@ -19,6 +19,9 @@
 //                                   outside PayMem OR inside an
 //                                   unallocated chunk
 //   READ(addr) -> {OK,rdata}/BOUNDS one word; same extent check
+//   READN(addr,n) -> {OK,rdata}*n   1<=n<=16, one 16-word-aligned
+//                                   line; one completion per word,
+//                                   req_ready low until the last beat
 //
 // §5a storage decisions:
 //   - the allocation bitmap is a tc_sram of NumChunks/64 64-bit words
@@ -108,6 +111,7 @@ module g6lc_apu_objpay
       StChkRd, StChkCap,
       StWStart, StWMrg, StWFlush, StWFlushM, StWFlushW,
       StWCap,
+      StNCap, StNBeat,
       StCpl
     } state_e;
 
@@ -132,6 +136,10 @@ module g6lc_apu_objpay
     logic [31:0]        wb_line_q;
     logic [511:0]       wb_data_q;
     logic [15:0]        wb_bm_q;
+    // READN burst state: words remaining, beat index, in-line offset
+    logic [4:0]         nb_n_q;
+    logic [4:0]         nb_i_q;
+    logic [3:0]         nb_off_q;
 
     // ---- bitmap SRAM ------------------------------------------------------
     logic                bmp_req, bmp_we;
@@ -151,8 +159,15 @@ module g6lc_apu_objpay
       unique case (state_q)
         StInit:   begin bmp_req = 1'b1; bmp_we = 1'b1;
                         bmp_addr = scan_q[BmpBits-1:0];
-                        bmp_wdata = (scan_q == BmpBits'(BmpWords - 1))
-                                    ? TailFill : 64'h0; end
+                        // §5a G3b-iii: chunk 0 stays marked — 0 is the
+                        // "none" sentinel for extent parkings (command-
+                        // buffer descriptor aux[63:32], pool chain
+                        // head, descriptor-pool free list), so no real
+                        // allocation may begin at word 0
+                        bmp_wdata = (scan_q == '0)
+                                    ? 64'h1
+                                    : (scan_q == BmpBits'(BmpWords - 1))
+                                      ? TailFill : 64'h0; end
         StBmpRd:  begin bmp_req = 1'b1;
                         bmp_addr = scan_q; end
         StChkRd:  begin bmp_req = 1'b1;
@@ -233,8 +248,25 @@ module g6lc_apu_objpay
 
     assign omp_req_valid_o = state_q == StOmReq;
     assign req_ready_o     = state_q == StIdle;
-    assign cpl_valid_o     = state_q == StCpl;
+    assign cpl_valid_o     = state_q == StCpl || state_q == StNBeat;
     assign cpl_o           = cpl_q;
+
+    // READN beat word: in-line index of beat nb_i_q
+    function automatic logic [31:0] nbeat_word(
+        input logic [511:0] line, input logic [3:0] off,
+        input logic [4:0] i);
+      return line[(4'(off) + 4'(i)) * 32 +: 32];
+    endfunction
+
+    // in-line word mask of the accepted READN burst [off, off+words)
+    // — the legality check guarantees off+words <= 16; keep the
+    // arithmetic 32-bit so words==16 doesn't wrap a 4-bit shift
+    logic [15:0] nb_mask;
+    always_comb begin
+      nb_mask = 16'( (32'hFFFF << req_q.addr[3:0]) &
+                     ~(32'hFFFF << (32'(req_q.addr[3:0]) +
+                                    req_q.words)) );
+    end
 
     assign omp_req_o = '{dir: 1'b1,
                         line_addr: om_line_q,
@@ -262,6 +294,7 @@ module g6lc_apu_objpay
         mark_w_q <= '0;
         wb_v_q <= 1'b0; wb_line_q <= '0; wb_data_q <= '0;
         wb_bm_q <= '0;
+        nb_n_q <= '0; nb_i_q <= '0; nb_off_q <= '0;
         om_we_q <= 1'b0; om_line_q <= '0; om_wdata_q <= '0;
         om_rdata_q <= '0;
       end else begin
@@ -335,7 +368,8 @@ module g6lc_apu_objpay
                 state_q <= wb_v_q ? StWFlush : StMarkRd;
               end
             end
-            APU_OBJPAY_OP_WRITE, APU_OBJPAY_OP_READ: begin
+            APU_OBJPAY_OP_WRITE, APU_OBJPAY_OP_READ,
+            APU_OBJPAY_OP_READN: begin
               if (req_i.addr >= PayWords) begin
                 cpl_q   <= '{status: APU_OBJPAY_BOUNDS, base: '0,
                              rdata: '0};
@@ -449,6 +483,30 @@ module g6lc_apu_objpay
             end else begin
               state_q <= StWStart;
             end
+          end else if (req_q.op == APU_OBJPAY_OP_READN) begin
+            // READN: burst of `words` words inside one 16-word line.
+            // Illegal bursts answer one BOUNDS completion.
+            if (req_q.words == 32'h0 || req_q.words > 32'd16 ||
+                32'(req_q.addr[3:0]) + req_q.words > 32'd16) begin
+              cpl_q   <= '{status: APU_OBJPAY_BOUNDS, base: '0,
+                           rdata: '0};
+              state_q <= StCpl;
+            end else begin
+              nb_n_q   <= 5'(req_q.words);
+              nb_i_q   <= '0;
+              nb_off_q <= req_q.addr[3:0];
+              // every requested word already merged in the one-line
+              // write buffer -> no objmem trip at all
+              if (wb_v_q && wb_line_q == (req_q.addr >> 4) &&
+                  (wb_bm_q & nb_mask) == nb_mask) begin
+                cpl_q   <= '{status: APU_OBJPAY_OK, base: '0,
+                             rdata: nbeat_word(wb_data_q,
+                                               req_q.addr[3:0], 0)};
+                state_q <= StNBeat;
+              end else begin
+                omp_call(1'b0, req_q.addr >> 4, '0, StNCap);
+              end
+            end
           end else begin
             // READ: serve straight out of the merge buffer when it
             // holds the word, else go to objmem
@@ -507,6 +565,33 @@ module g6lc_apu_objpay
                        rdata: om_rdata_q[req_q.addr[3:0] * 32
                                          +: 32]};
           state_q <= StCpl;
+        end
+
+        // ---------------- READN burst ------------------------------------
+        StNCap: begin
+          // line fetched; beat 0 goes out next cycle
+          cpl_q   <= '{status: APU_OBJPAY_OK, base: '0,
+                       rdata: (wb_v_q &&
+                               wb_line_q == (req_q.addr >> 4) &&
+                               wb_bm_q[nb_off_q])
+                              ? nbeat_word(wb_data_q, nb_off_q, 0)
+                              : nbeat_word(om_rdata_q, nb_off_q, 0)};
+          state_q <= StNBeat;
+        end
+        StNBeat: if (cpl_ready_i) begin
+          if (nb_i_q == nb_n_q - 5'd1) begin
+            state_q <= StIdle;
+          end else begin
+            logic [3:0] wi;
+            wi = nb_off_q + 4'(nb_i_q + 5'd1);
+            nb_i_q <= nb_i_q + 5'd1;
+            cpl_q  <= '{status: APU_OBJPAY_OK, base: '0,
+                        rdata: (wb_v_q &&
+                                wb_line_q == (req_q.addr >> 4) &&
+                                wb_bm_q[wi])
+                               ? wb_data_q[wi * 32 +: 32]
+                               : om_rdata_q[wi * 32 +: 32]};
+          end
         end
 
         // ---------------- completion -------------------------------------

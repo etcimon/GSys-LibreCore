@@ -229,6 +229,9 @@ module g6lc_lsq #(
   // svt-pipe: carry agu addr_i,addr_is_st_i,addr_size_i
   // svt-pipe: no-cut on=ld_d
   // svt-pipe: no-cut on=st_d
+  // svt-pipe: cycle agu q=ld_d d=st_d hold=addr_valid_i steps=1
+  // svt-pipe: cut-ok agu on=st_d
+  // No payload register: ld_d/st_d are written in the same cycle as addr_valid_i.
   always_comb begin
     // Declared and defaulted at block scope: a local declared inside a
     // conditional scope reads as a latch to the elaborator.

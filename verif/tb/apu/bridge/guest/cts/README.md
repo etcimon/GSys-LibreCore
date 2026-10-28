@@ -65,6 +65,24 @@ Results (`/results/TestResults.qpa`, `vulkaninfo-summary.txt`,
 no root needed.  `G6LC_CTS_RUN cases=<n> rc=<rc>` marks completion;
 a nonzero rc is reported as-is, never as PASS.
 `G6LC_CTS_CASELIST`/`G6LC_CTS_TIMEOUT` (default 4 h) override.
+`G6LC_ONLY=cts` skips the vk* leaves and runs only deqp-vk.
+
+Incremental must-pass lists, each a true subset of the pin (regenerate
+with `cts_ledger.py select`, then `debugfs -w write` into `ctsdata.img`
+because the guest reads the list from that image):
+
+- `caselists/cts-a-compute-basic.txt` — the full
+  `dEQP-VK.compute.pipeline.basic.*` group (80). Next group run after
+  `MaxWaves=16`.
+- `caselists/cts-a-image-objects.txt` — the 20 image 1D/3D object and
+  view cases that were open defects (20). Next group after the image
+  object contract.
+
+```
+G6LC_CTS=1 G6LC_ONLY=cts \
+  G6LC_CTS_CASELIST=caselists/cts-a-compute-basic.txt \
+  verif/tb/apu/bridge/run-guest.sh --venus-only
+```
 
 ## Ledger
 

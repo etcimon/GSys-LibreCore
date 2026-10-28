@@ -5,13 +5,17 @@
 # G6LC_MUT_INVAL_AT_AW mutation (inval before B: must fail INVAL_BEFORE_LANDED).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+AI_RTL="${G6LC_AI_RTL_DIR:-$ROOT/corev_apu/ai_island}"
+AI_INC="${G6LC_AI_INC_DIR:-$ROOT/corev_apu/include}"
+AI_SRC="${G6LC_AI_SRC_DIR:-$ROOT/corev_apu/src}"
+AI_CVXIF="${G6LC_AI_CVXIF_DIR:-$ROOT/core/cvxif_g6lc_ai}"
 cd "$ROOT"
 if ! command -v verilator >/dev/null 2>&1; then echo "SKIP no verilator"; exit 0; fi
 OUT="${AI_INVAL_QUEUE_OUT:-/tmp/g6lc-ai-inval-queue}"
 mkdir -p "$OUT"
 build() { # tag, extra verilator args
   verilator --binary --timing --assert -Wno-fatal -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND \
-    "$ROOT/corev_apu/ai_island/g6lc_ai_inval_queue.sv" \
+    "$AI_RTL/g6lc_ai_inval_queue.sv" \
     "$ROOT/verif/tb/ai_island/tb_g6lc_ai_inval_queue.sv" \
     --top-module tb_g6lc_ai_inval_queue -Mdir "$OUT/$1" -o tb ${2:-} > "$OUT/$1.build.log" 2>&1
 }

@@ -43,7 +43,9 @@ module g6lc_prf #(
   // Re-pipelining contract (sv-timing A128; 65.2 adjusted FO4 on the
   // Nangate45 board): physical register file: write ports into mem_q; a stage is a bypass-network change.
   // svt-pipe: require-contract
+  // svt-pipe: protocol prf valid=we_i
   // svt-pipe: no-cut on=mem_q
+  // svt-pipe: cycle prf q=mem_q d=rdata_o hold=we_i steps=1
 
   logic [PRF_ENTRIES-1:0][DATA_WIDTH-1:0] mem_q;
 

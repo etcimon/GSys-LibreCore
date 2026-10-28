@@ -37,6 +37,22 @@ runs Verilator through the remote proxy; its explicit
 Native-trace replay and future-array scheduling gains are not hardware MAC/s;
 use each matching synthesis/formal report for its area/assertion counts.
 
+For the experimental AI timing overlay, see
+[AI-island timing and ownership](../../docs/03_cva6_design/ai_island_hyp_timing.md).
+The r31–r39 caller check exposed an inactive GEMM skid capturing descriptor
+responses from a broadcast AXI response. Request selection and response
+qualification must describe the same owner; buffering changes when a client
+can accept data even when its functional state is idle. The recorded local
+FO4 values remain structural screening, with incomplete composition across
+generated arithmetic levels, rather than physical timing evidence.
+
+The r40/r41 follow-up repeats focused gates (completed-result oracle,
+policy caller, 16 remote cases), adds a cancellation regression (stale
+multiplier completion after abort), and leaves the aggregate gate open.
+Source record: `analysis/subcode-gemm-r40-r41-plan.md` and
+`subcode-gemm-r40-r41-results.json` in the AI overlay. No physical
+synthesis, DFT, area or power qualification is claimed.
+
 Rule of thumb: if a change forces edits deep inside `issue_read_operands.sv`, `scoreboard.sv`, or a
 cache controller, ask whether it could instead live behind CVXIF or a config gate. The core pipeline is
 the most expensive place to re-verify.

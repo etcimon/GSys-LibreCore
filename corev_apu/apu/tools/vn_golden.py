@@ -1410,13 +1410,32 @@ VK_OK = 0
 VK_NOT_READY = 1
 VK_ERR_OOM = 0xFFFFFFFE
 VK_ERR_OOPM = 0xFFFFFFFB   # VK_ERROR_OUT_OF_POOL_MEMORY (F5)
+VK_ERR_FRAG = 0xFFFFFFF4   # VK_ERROR_FRAGMENTED_POOL (G3b-iii)
 VK_ERR_LOST = 0xFFFFFFFC
 VK_ERR_FEATURE = 0xFFFFFFF8
 VK_ERR_UNKNOWN = 0xFFFFFFF3
 VK_ERR_EXT_HANDLE = 0xC4641CBD   # VK_ERROR_INVALID_EXTERNAL_HANDLE
 VK_ERR_FMTNS = 0xFFFFFFF5        # VK_ERROR_FORMAT_NOT_SUPPORTED
+VK_EVENT_SET, VK_EVENT_RESET = 3, 4      # G3b-iii event replies
 
 CB_REC, CB_EXEC, CB_PEND, CB_INV = 1, 2, 4, 8
+
+# §5a G3b-iii: command buffers live in PayMem — a 64-word descriptor
+# block per buffer (g6lc_apu_cmdrec_pkg.sv indices) plus chained
+# 1024-word record/payload chunks.
+CBD_WORDS = 64
+CB_CHUNK = 1024              # record/payload chunk words
+CB_REC_ROWS = 63             # record rows per chunk (w16..w1023)
+CBF_REC, CBF_SEALED, CBF_SECONDARY = 0, 1, 2
+CBF_OTIME, CBF_SIMULT, CBF_RPCONT = 3, 4, 5   # w0 flag bits
+CBD_W0 = 0                    # flags
+CBD_COUNT = 1                 # record count
+CBD_RECH, CBD_RECT, CBD_ROW = 2, 3, 4
+CBD_PAYH, CBD_PAYT, CBD_PTOP = 5, 6, 7
+CBD_POOL = 8                  # pool {gen,slot}
+CBD_OWN = 9                   # own {gen,slot}
+CBD_PPREV, CBD_PNEXT = 10, 11
+DS_FREE_MAX = 64              # vnfront_pkg DsFreeMax extents/pool
 
 KIND = {}      # filled from the model
 SESSION_EXP_N = 386
@@ -1426,7 +1445,6 @@ SESSION_MAX_REP = 352
 PAY_WORDS = 16384
 PAY_CHUNK = 64
 PAY_STAGE = 1024
-PAY_PER_BUF = 256
 APU_VN_FAULT_PAYLOAD = 9
 # §7b/5a-ii: pipelines keep no ObjPay extent — the staged payload is
 # consumed at creation and the object carries {slot, layout} in aux.
@@ -1496,6 +1514,35 @@ def img_mpitch(model, w, did, m):
 def img_layer_bytes(model, w, h, did, mips):
     return sum(img_mpitch(model, w, did, m) * img_mdim(h, m)
                for m in range(mips))
+
+
+def img_mipcap(ext):
+    """floor(log2(ext))+1, matching vnfront f_mipcap."""
+    n = 1
+    e = ext if ext else 1
+    i = 1
+    while i < 13 and (e >> i):
+        n = i + 1
+        i += 1
+    return n
+
+
+def img_view_dim(vt):
+    return {0: 2, 1: 0, 2: 4, 3: 5, 4: 3, 5: 1}.get(vt, 7)
+
+
+def img_view_compat(ity, dim, base, count, ilays):
+    if ity == 0:
+        return dim in (2, 3)
+    if ity == 1:
+        if dim in (0, 1):
+            return True
+        if dim == 5:
+            return count == 6 and base + 6 <= ilays
+        return False
+    if ity == 2:
+        return dim == 4 and base == 0 and count == 1
+    return False
 
 
 def f32_q44(f):
@@ -1738,19 +1785,23 @@ class FrontModel:
         self.freestk = []
         self.bump = 0
         self.ctxorder = {}
-        self.cb_alloc = [0] * self.CB_BUFS
-        self.cb_pool = [0] * self.CB_BUFS
-        self.cb_hnd = [0] * self.CB_BUFS
+        # §5a G3b-iii: command buffers are PayMem-resident — slot ->
+        # descriptor shadow; the physical image lives in self.pay
+        # (desc words w0..w11, record/payload chunk chains)
+        self.cbd = {}                          # slot -> desc shadow
+        self.cbd_by_addr = {}                  # desc addr -> shadow
         # executor fence arena: vkCreateFence claims an index into
         # aux[7:0]; ObjTab slots are global, not per-kind
         self.falloc = [0] * self.FENCES
-        self.recs = [[] for _ in range(self.CB_BUFS)]
-        self.rec_state = [0] * self.CB_BUFS   # 0 none,1 recording,2 sealed
         self.pushed = 0
         self.fence_sig = 0
         self.fence_lost = 0
         self.pd_id = 0             # last ALLOC'd VkPhysicalDevice id
         self.outstanding = []                  # (fence_slot, pin slots)
+        # §5a G3b-iii: submissions stalled on an unset CmdWaitEvents —
+        # {need [(slot,gen)], st resume-state, s cbd slot, out
+        # outstanding-index, done, lost}; a host vkSetEvent kicks them
+        self._ev_holds = []
         self.work_hold = False                 # TB: gate work_ready_i
         # §7b/5a-ii: ShaderCore slot manager + module code shadow
         # G3b-ii: module pCode lives in ObjPay and ShaderCore slots
@@ -1762,15 +1813,18 @@ class FrontModel:
         # allocator; standalone runs use this bitmap.
         self.ap = None
         self.pg_pages = [0] * VGP_PAGES
-        # §7b: ObjPay mirror -- chunk bitmap (first-fit like the RTL)
-        # plus a sparse content image for the .pay expectations
-        self.pay_used = [0] * (self.pay_words // PAY_CHUNK)
+        # §7b/§5a G3b-iii: ObjPay mirror — one bit per 64-word chunk
+        # (int bitmap, bit i = chunk i) plus the next-fit cursor as a
+        # bitmap-word index (g6lc_apu_objpay's cursor_q), plus a
+        # sparse content image for the .pay expectations.  Chunk 0 is
+        # reserved at init so no extent starts at word 0: aux[63:32]/
+        # pool-chain parkings use 0 as the "none" sentinel.
+        self.pay_bits = 1
+        self.pay_cur = 0
         self.pay = {}                          # addr -> word
-        # cmdrec per-buffer payload arenas
-        self.pay_top = [0] * self.CB_BUFS
-        self.pay_arena = [dict() for _ in range(self.CB_BUFS)]
-        # G1c: work-port sequence per cbuf incl. internal render-pass
-        # CLEAR items — filled by _disp_assembly_lost on a live replay
+        # G1c: work-port sequence per cbuf slot incl. internal
+        # render-pass CLEAR items — filled by _disp_assembly_lost on a
+        # live replay
         self.aux_work = {}
         # G1c: g6lc_apu_rast lazily ALLOC_PRIVs its 64 KiB scratch ring
         # on the first raster work item (CLEAR/DRAW) and never frees it
@@ -1927,33 +1981,65 @@ class FrontModel:
         return 'OK', s
 
     def pay_alloc(self, words):
-        """First-fit over PAY_CHUNK-word chunks -> base or None."""
+        """§5a G3b-iii: next-fit mirror of g6lc_apu_objpay's
+        StBmpCap — the scan starts at the cursor bitmap word, a run
+        may span words via a carried length but never the bitmap end
+        (wrap restarts it), and on a hit the cursor lands on the
+        word containing one-past-extent-end.  -> base or None."""
         if words == 0:
             return 0
         nch = (words + PAY_CHUNK - 1) // PAY_CHUNK
-        if nch > len(self.pay_used):
+        bmpw = (self.pay_words // PAY_CHUNK + 63) // 64
+        if nch > self.pay_words // PAY_CHUNK:
             return None
-        run = start = 0
-        for i, u in enumerate(self.pay_used):
-            if u == 0:
-                if run == 0:
-                    start = i
-                run += 1
-                if run == nch:
-                    for j in range(start, start + nch):
-                        self.pay_used[j] = 1
-                    return start * PAY_CHUNK
+        scan, wrap, run, run_s = self.pay_cur, 0, 0, 0
+        while True:
+            bits = (self.pay_bits >> (scan * 64)) & 0xFFFFFFFFFFFFFFFF
+            # lsb_free: free prefix length of this word
+            lsb = 64 if bits == 0 else (bits & -bits).bit_length() - 1
+            riw = 64
+            if nch <= 64:
+                # run_in_word: lowest index with nch consecutive free
+                free = (~bits) & 0xFFFFFFFFFFFFFFFF
+                m = free
+                for i in range(1, 64):
+                    if i < nch:
+                        m &= free >> i
+                riw = (m & -m).bit_length() - 1 if m else 64
+            if run + lsb >= nch:
+                a = run_s if run else scan * 64
+            elif riw != 64:
+                a = scan * 64 + riw
             else:
-                run = 0
-        return None
+                a = -1
+            if a >= 0:
+                b = a + nch
+                self.pay_bits |= ((1 << nch) - 1) << a
+                self.pay_cur = (b >> 6) % bmpw
+                return a * PAY_CHUNK
+            if wrap == bmpw - 1:
+                return None
+            if bits == 0:
+                if run == 0:
+                    run_s = scan * 64
+                run += 64
+            else:
+                ts = bits.bit_length() - 1        # top_set
+                run = 63 - ts
+                run_s = scan * 64 + ts + 1
+            wrap += 1
+            if scan == bmpw - 1:
+                scan, run, run_s = 0, 0, 0
+            else:
+                scan += 1
 
     def pay_free(self, base, words):
         if not words:
             return
-        for j in range(base // PAY_CHUNK,
-                       base // PAY_CHUNK +
-                       (words + PAY_CHUNK - 1) // PAY_CHUNK):
-            self.pay_used[j] = 0
+        a = base // PAY_CHUNK
+        nch = (words + PAY_CHUNK - 1) // PAY_CHUNK
+        self.pay_bits &= ~(((1 << nch) - 1) << a)
+        # §5a G3b-iii: FREE does not move the next-fit cursor
 
     def pay_free_of(self, e):
         """Free an entry's aux[63:32] = {base,words} extent."""
@@ -1962,15 +2048,147 @@ class FrontModel:
         if w:
             self.pay_free(b << 6, w)
 
-    def arena_append(self, cbuf, words):
-        """cmdrec payload arena bump-alloc -> base or None (PAY_FULL)."""
-        top = self.pay_top[cbuf]
-        if top + len(words) > PAY_PER_BUF:
-            return None
-        for i, w in enumerate(words):
-            self.pay_arena[cbuf][top + i] = w & 0xFFFFFFFF
-        self.pay_top[cbuf] += len(words)
-        return top
+    # ---- §5a G3b-iii: command-buffer descriptor helpers -------------
+    # The shadow dict keeps the cmdrec-visible fields; _cbd_sync
+    # writes w0..w7 back into the PayMem image the way the RTL's
+    # write-back descriptor cache leaves them.
+
+    def _cbd_sync(self, d):
+        for i, v in enumerate((d['flags'], d['count'], d['rech'],
+                               d['rect'], d['row'], d['payh'],
+                               d['payt'], d['ptop'])):
+            self.pay[d['addr'] + i] = v & 0xFFFFFFFF
+
+    def _cb_freechains(self, d):
+        """FREE both chunk chains, head-first (cmdrec fr_head walk)."""
+        for head in (d['rech'], d['payh']):
+            c = head
+            while c:
+                nxt = self.pay.get(c, 0)
+                self.pay_free(c, CB_CHUNK)
+                c = nxt
+        d['rech'] = d['rect'] = d['row'] = 0
+        d['payh'] = d['payt'] = d['ptop'] = 0
+        d['count'] = 0
+        d['recs'] = []
+
+    def _cb_begin(self, d, flags, ew=None):
+        """cmdrec BEGIN: free old chains, ALLOC one record chunk, set
+        the recording flags; -> status.  `ew` collects emitted
+        (addr, word) PayMem writes (chunk clears/links/records/
+        payloads — descriptor words are write-back cached, never
+        emitted)."""
+        self._cb_freechains(d)
+        nc = self.pay_alloc(CB_CHUNK)
+        if nc is None:
+            return 'FULL'
+        self.pay[nc] = 0                       # link word cleared
+        if ew is not None:
+            ew.append((nc, 0))
+        d['flags'] = (d['flags'] & (1 << CBF_SECONDARY)) | \
+                     (1 << CBF_REC) | (flags & 0x38)
+        d['rech'] = d['rect'] = nc
+        d['row'] = 1
+        self._cbd_sync(d)
+        return 'OK'
+
+    def _cb_reset(self, d):
+        """cmdrec RESET: free both chains, flags keep only SECONDARY."""
+        self._cb_freechains(d)
+        d['flags'] &= 1 << CBF_SECONDARY
+        self._cbd_sync(d)
+
+    def _cb_append(self, d, recd, pwords, ew=None):
+        """cmdrec APPEND mirror: record-chunk grow on row overflow,
+        payload chunks that never straddle, imm[7] = absolute payload
+        base; -> 'OK'/'FULL'/'PAY_FULL'."""
+        def ew_(a, w):
+            if ew is not None:
+                ew.append((a, w & 0xFFFFFFFF))
+        if not (d['flags'] & (1 << CBF_REC)):
+            return 'NOT_RECORDING'
+        nw = len(pwords)
+        if d['rect'] == 0 or d['row'] > CB_REC_ROWS:
+            nc = self.pay_alloc(CB_CHUNK)
+            if nc is None:
+                return 'FULL'
+            self.pay[nc] = 0
+            ew_(nc, 0)
+            if d['rect'] == 0:
+                # no chain yet (shouldn't happen under RECORDING —
+                # BEGIN always plants the head) — start one
+                d['rech'] = nc
+            else:
+                self.pay[d['rect']] = nc       # tail link
+                ew_(d['rect'], nc)
+            d['rect'] = nc
+            d['row'] = 1
+        if nw:
+            if d['payt'] == 0 or d['ptop'] + nw > d['payt'] + CB_CHUNK:
+                pnc = self.pay_alloc(CB_CHUNK)
+                if pnc is None:
+                    return 'PAY_FULL'
+                self.pay[pnc] = 0
+                ew_(pnc, 0)
+                if d['payt']:
+                    self.pay[d['payt']] = pnc  # link old tail
+                    ew_(d['payt'], pnc)
+                else:
+                    d['payh'] = pnc
+                d['payt'] = pnc
+                d['ptop'] = pnc + 1
+            recd['imm'][7] = d['ptop']         # absolute word addr
+            for i, w in enumerate(pwords):
+                self.pay[d['ptop'] + i] = w & 0xFFFFFFFF
+                ew_(d['ptop'] + i, w)
+            d['ptop'] += nw
+        # the record row lives at rect + row*16; keep the image true —
+        # the same packed apu_cmdrec_rec_t order the .exp record check
+        # uses (w0 spare, w1..8 imm, w9 kind bytes, w10..13 handle,
+        # w14 flags, w15 ctype)
+        base = d['rect'] + d['row'] * 16
+        rw = sess_rec_words(recd)
+        for i, w in enumerate(rw):
+            self.pay[base + i] = w & 0xFFFFFFFF
+            ew_(base + i, w)
+        d['count'] += 1
+        d['row'] += 1
+        d['recs'].append(recd)
+        self._cbd_sync(d)
+        return 'OK'
+
+    def _cb_unlink(self, d, pool_hnd):
+        """vnfront's per-buffer free: w10/w11 doubly-linked unlink
+        (prev.next := next / arg-pool head := next; next.prev :=
+        prev).  `pool_hnd` is the call-site pool handle — vkFree's
+        argument, or the descriptor's recorded pool on reap paths."""
+        prv = self.pay.get(d['addr'] + CBD_PPREV, 0)
+        nxt = self.pay.get(d['addr'] + CBD_PNEXT, 0)
+        if prv:
+            self.pay[prv + CBD_PNEXT] = nxt
+        else:
+            st2, _ps2, pe = self.resolve(pool_hnd,
+                                         KIND['VkCommandPool'])
+            if st2 == 'OK':
+                pe['aux'] = (pe['aux'] & 0xFFFFFFFF) | (nxt << 32)
+        if nxt:
+            self.pay[nxt + CBD_PPREV] = prv
+
+    def _cb_retire(self, s, e, pool_hnd=0):
+        """§5a G3b-iii: RESET the descriptor, unlink from the pool
+        chain, FREE the block — the RESET_CTX reap does the same."""
+        cbd = (e['aux'] >> 32) & 0xFFFFFFFF
+        d = self.cbd.pop(s, None)
+        if d is None:
+            d = self.cbd_by_addr.pop(cbd, None)
+        else:
+            self.cbd_by_addr.pop(d['addr'], None)
+        self.aux_work.pop(s, None)
+        if d is None or cbd == 0:
+            return
+        self._cb_freechains(d)
+        self._cb_unlink(d, pool_hnd or d['pool'])
+        self.pay_free(d['addr'], CBD_WORDS)
 
     # ---- G3b-ii: module code shadow + ObjTab pins --------------------
     # ShaderCore residency is an invisible eight-slot cache — the
@@ -2576,6 +2794,7 @@ class FrontModel:
                 'fmt': (ie['aux'] >> 32) & 0xFF,
                 'mips': (ie['aux'] >> 40) & 0x1F,
                 'layers': (ie['aux'] >> 45) & 0x1FF,
+                'itype': (ie['state'] >> 19) & 3,
                 'layb': (ie['state'] & 0x7FFFF) << 6}
 
     def _xfer_record_lost(self, session, r, aux):
@@ -2584,8 +2803,9 @@ class FrontModel:
         alignment rules.  True -> DEVICE_LOST."""
         T = session['T']
         ct = r['ctype']
-        ar = self.pay_arena[aux]
-        abase = r['imm'][7] & 0xFFFF
+        # §5a G3b-iii: the payload is PayMem at absolute addr imm[7]
+        ar = self.pay
+        abase = r['imm'][7] & 0xFFFFFFFF
 
         def a64(i):
             return (ar.get(abase + i, 0) |
@@ -2637,11 +2857,15 @@ class FrontModel:
                 hm = img_mdim(img['h'], mip)
                 rl = ew if rl0 == 0 else rl0
                 ih = eh if ih0 == 0 else ih0
+                if img.get('itype', 1) == 2:
+                    if bl != 0 or lc != 1 or ed < 1 or oz + ed > img['layers']:
+                        return True
+                    bl, lc = oz, ed
+                elif oz != 0 or ed != 1 or lc < 1 or bl + lc > img['layers']:
+                    return True
                 need = (bo + (((lc - 1) * ih + (eh - 1)) * rl + ew)
                         * bpp) if lc >= 1 else 0
                 if not (asp == 1 and mip < img['mips'] and
-                        lc >= 1 and bl + lc <= img['layers'] and
-                        oz == 0 and ed == 1 and
                         ew >= 1 and eh >= 1 and
                         ox + ew <= wm and oy + eh <= hm and
                         rl >= ew and ih >= eh and need <= buf[1]):
@@ -2663,13 +2887,22 @@ class FrontModel:
                 dox, doy, doz = (a32(o + 11), a32(o + 12),
                                  a32(o + 13))
                 ew, eh, ed = a32(o + 14), a32(o + 15), a32(o + 16)
+                if s0.get('itype', 1) != d0.get('itype', 1):
+                    return True
+                if s0.get('itype', 1) == 2:
+                    if (sbl != 0 or slc != 1 or dbl != 0 or dlc != 1 or
+                            ed < 1 or soz + ed > s0['layers'] or
+                            doz + ed > d0['layers']):
+                        return True
+                    sbl, slc, dbl, dlc = soz, ed, doz, ed
+                elif (soz != 0 or doz != 0 or ed != 1 or
+                      slc < 1 or slc != dlc or
+                      sbl + slc > s0['layers'] or
+                      dbl + dlc > d0['layers']):
+                    return True
                 if not (asp == 1 and das == 1 and
                         sm < s0['mips'] and dm < d0['mips'] and
-                        slc >= 1 and slc == dlc and
-                        sbl + slc <= s0['layers'] and
-                        dbl + dlc <= d0['layers'] and
-                        soz == 0 and doz == 0 and
-                        ew >= 1 and eh >= 1 and ed == 1 and
+                        ew >= 1 and eh >= 1 and
                         sox + ew <= img_mdim(s0['w'], sm) and
                         soy + eh <= img_mdim(s0['h'], sm) and
                         dox + ew <= img_mdim(d0['w'], dm) and
@@ -2683,10 +2916,15 @@ class FrontModel:
             nr = r['imm'][1] & 0xFFFF
             for i in range(nr):
                 o = 4 + 5 * i
-                if not (a32(o) == 1 and a32(o + 2) >= 1 and
-                        a32(o + 1) + a32(o + 2) <= img['mips'] and
-                        a32(o + 4) >= 1 and
-                        a32(o + 3) + a32(o + 4) <= img['layers']):
+                if img.get('itype', 1) == 2:
+                    if not (a32(o) == 1 and a32(o + 2) >= 1 and
+                            a32(o + 1) + a32(o + 2) <= img['mips'] and
+                            a32(o + 3) == 0 and a32(o + 4) == 1):
+                        return True
+                elif not (a32(o) == 1 and a32(o + 2) >= 1 and
+                          a32(o + 1) + a32(o + 2) <= img['mips'] and
+                          a32(o + 4) >= 1 and
+                          a32(o + 3) + a32(o + 4) <= img['layers']):
                     return True
             return False
         de = self._xfer_extent(r['handle'][0], r['kind'][0])
@@ -2710,25 +2948,84 @@ class FrontModel:
             return True
         return False
 
-    def _disp_assembly_lost(self, session, aux):
+    def _disp_assembly_lost(self, session, s, resume=None):
         """§7b/5a-ii + §12.3 F5: replay one command buffer's records
         the way cmdexec does at submit; True -> DEVICE_LOST on the
         fence.  Descriptor state resolves: bound set -> pipeline
         layout's declared set layout {gen,slot} (compatibility), set
-        poison bit, pool generation + reset epoch."""
+        poison bit, pool generation + reset epoch.
+
+        §5a G3b-iii: the record stream is the descriptor's chunk chain
+        (self.cbd[slot]); vkCmdExecuteCommands splices each listed
+        secondary's records inline through the one-deep stack — a
+        nested ExecuteCommands or a dead secondary handle loses the
+        submission, and dynamic state deliberately carries across the
+        pop (no restore).
+
+        A CmdWaitEvents whose events are not all set returns
+        [need, state] instead of a bool: the submission STALLS at that
+        record (mirroring cmdexec's poll) until a host vkSetEvent
+        lands — _ev_kick resumes the replay at the same record by
+        passing the state dict back in as `resume`."""
         T = session['T']
-        bound = 0
-        dset = [0] * 4
-        # G1c: draw-state mirror — vertex-buffer handles, index
-        # buffer, active color attachment
-        vbs = [0] * 16
-        ib = 0
-        ca_ok = False
-        # G1c: work-port sequence incl. internal render-pass CLEAR
-        # items (BeginRP loadOp CLEAR emits a CLEAR_ATTACHMENTS work
-        # before any following record work)
-        wk = []
-        for r in self.recs[aux]:
+        if resume is not None:
+            bound = resume['bound']
+            dset = resume['dset']
+            vbs = resume['vbs']
+            ib = resume['ib']
+            ca_ok = resume['ca_ok']
+            wk = resume['wk']
+            seq = resume['seq']
+            ri0 = resume['ri']
+        else:
+            bound = 0
+            dset = [0] * 4
+            # G1c: draw-state mirror — vertex-buffer handles, index
+            # buffer, active color attachment
+            vbs = [0] * 16
+            ib = 0
+            ca_ok = False
+            # G1c: work-port sequence incl. internal render-pass
+            # CLEAR items (BeginRP loadOp CLEAR emits a
+            # CLEAR_ATTACHMENTS work before any following record
+            # work)
+            wk = []
+            ri0 = 0
+            seq = None
+        d = self.cbd.get(s)
+        if d is None:
+            return True
+
+        def expand(recs, depth):
+            """Inline the secondary buffers' records; None -> lost."""
+            seq = []
+            for r in recs:
+                if r['ctype'] == T.get('vkCmdExecuteCommands', -1):
+                    if depth:
+                        return None        # beyond one-deep stack
+                    ab = r['imm'][7] & 0xFFFFFFFF
+                    for i in range(r['imm'][0] & 0xFFFF):
+                        sh = self.pay.get(ab + i, 0)
+                        st2, s2, _e2 = self.resolve(
+                            sh, KIND['VkCommandBuffer'])
+                        if st2 != 'OK':
+                            return None
+                        d2 = self.cbd.get(s2)
+                        if d2 is None:
+                            return None
+                        sub = expand(d2['recs'], depth + 1)
+                        if sub is None:
+                            return None
+                        seq += sub
+                else:
+                    seq.append(r)
+            return seq
+        if seq is None:
+            seq = expand(d['recs'], 0)
+            if seq is None:
+                return True
+        for ri in range(ri0, len(seq)):
+            r = seq[ri]
             ct = r['ctype']
             # generic per-record handle resolve (cmdexec StResReq)
             for i in range(4):
@@ -2737,13 +3034,20 @@ class FrontModel:
                     st, _s, _e = self.resolve(h, r['kind'][i])
                     if st != 'OK':
                         return True
-            if self.is_work(ct):
+            # §5a G3b-iii: an indirect draw with drawCount==0 fetches
+            # nothing and issues no work — no item, no rast scratch
+            ind_noop = ct in (T.get('vkCmdDrawIndirect', -1),
+                              T.get('vkCmdDrawIndexedIndirect', -1)) \
+                and (r['imm'][0] & 0xFFFF) == 0
+            if self.is_work(ct) and not ind_noop:
                 wk.append(ct)
                 # G1c: a draw routes to g6lc_apu_rast, which lazily
                 # ALLOC_PRIVs its 64 KiB scratch ring on first use and
                 # never frees it — the page count must mirror that
                 if ct in (T.get('vkCmdDraw', -1),
                           T.get('vkCmdDrawIndexed', -1),
+                          T.get('vkCmdDrawIndirect', -1),
+                          T.get('vkCmdDrawIndexedIndirect', -1),
                           T.get('vkCmdClearAttachments', -1)) and \
                         not self._rast_scr:
                     self._rast_scr = True
@@ -2751,26 +3055,88 @@ class FrontModel:
             if ct == T['vkCmdBindPipeline']:
                 bound = r['handle'][0]
             elif ct == T['vkCmdBindDescriptorSets']:
-                # §12.3 F5 arena stream: {handle,ndyn} pairs then the
-                # dynamic-offset words
-                abase = r['imm'][7] & 0xFFFF
+                # §12.3 F5 payload stream: {handle,ndyn} pairs then the
+                # dynamic-offset words — §5a G3b-iii: absolute PayMem
+                abase = r['imm'][7] & 0xFFFFFFFF
                 fs = r['imm'][1] & 0xFFFF
                 nset = r['imm'][2] & 0xFFFF
                 for i in range(max(0, min(nset, 4 - fs))):
-                    dset[fs + i] = self.pay_arena[aux].get(
-                        abase + 2 * i, 0)
+                    dset[fs + i] = self.pay.get(abase + 2 * i, 0)
+            elif ct in (T.get('vkCmdSetEvent', -1),
+                        T.get('vkCmdResetEvent', -1)):
+                # §5a G3b-iii: BARRIER class — drains, then writes the
+                # event's ObjTab state[0]; a dead event loses the
+                # submission like any stale record-time object
+                st2, _es, ee = self.resolve(r['handle'][0],
+                                            KIND['VkEvent'])
+                if st2 != 'OK':
+                    return True
+                ee['state'] = (ee['state'] & ~1) | \
+                    (1 if ct == T.get('vkCmdSetEvent', -2) else 0)
+            elif ct == T.get('vkCmdWaitEvents', -1):
+                # §5a G3b-iii: drains then polls each listed event's
+                # state[0] (64-cycle cadence); a dead handle loses the
+                # submission; an unset event STALLS the replay here —
+                # the submission stays outstanding (the A1 watchdog
+                # bounds a never-set event) until a host vkSetEvent
+                # resumes it at this same record
+                abase = r['imm'][7] & 0xFFFFFFFF
+                need = []
+                dead = False
+                for i in range(r['imm'][0] & 0xFFFF):
+                    eh = self.pay.get(abase + i, 0)
+                    st2, es_, ee = self.resolve(eh, KIND['VkEvent'])
+                    if st2 != 'OK':
+                        dead = True
+                        break
+                    if not (ee['state'] & 1):
+                        need.append((es_, ee['gen']))
+                if dead:
+                    return True
+                if need:
+                    self.aux_work[s] = wk
+                    return [need, dict(
+                        seq=seq, ri=ri, bound=bound,
+                        dset=list(dset), vbs=list(vbs), ib=ib,
+                        ca_ok=ca_ok, wk=wk)]
             elif ct in (T['vkCmdDispatch'],
+                        T.get('vkCmdDispatchBase', -1),
+                        T.get('vkCmdDispatchIndirect', -1),
                         T.get('vkCmdDraw', -1),
-                        T.get('vkCmdDrawIndexed', -1)):
+                        T.get('vkCmdDrawIndexed', -1),
+                        T.get('vkCmdDrawIndirect', -1),
+                        T.get('vkCmdDrawIndexedIndirect', -1)):
                 if rep_dbg:
                     sys.stderr.write('DISPDBG bound=%x dset=%s plw?\n'
                                      % (bound, ['%x' % d for d in dset]))
-                draw = ct != T['vkCmdDispatch']
+                compute = ct in (T['vkCmdDispatch'],
+                                 T.get('vkCmdDispatchBase', -1),
+                                 T.get('vkCmdDispatchIndirect', -1))
+                indirect = ct in (T.get('vkCmdDispatchIndirect', -1),
+                                  T.get('vkCmdDrawIndirect', -1),
+                                  T.get('vkCmdDrawIndexedIndirect', -1))
+                draw = not compute
                 # G1c: a draw also wants an active color attachment —
                 # either missing loses the submission like the
-                # no-pipeline dispatch
+                # no-pipeline dispatch (§5a G3b-iii: indirect draws
+                # take the same guard before the operand fetch)
                 if bound == 0 or (draw and not ca_ok):
                     return True
+                if ind_noop:
+                    continue
+                if indirect:
+                    # the operand struct reads through the bound
+                    # buffer's extent — off + len must fit
+                    be = self._xfer_extent(r['handle'][0],
+                                           r['kind'][0])
+                    if be is None:
+                        return True
+                    lenb = 20 \
+                        if ct == T.get('vkCmdDrawIndexedIndirect', -2) \
+                        else 16 if draw else 12
+                    off = r['imm'][2] & 0xFFFFFFFF
+                    if off > be[1] or be[1] - off < lenb:
+                        return True
                 st, _s, pe = self.resolve(bound, KIND['VkPipeline'])
                 if st != 'OK':
                     return True
@@ -2787,22 +3153,22 @@ class FrontModel:
                     return True
                 plpay = ((ple['aux'] >> 48) & 0xFFFF) << 6
                 plw = (ple['aux'] >> 32) & 0xFFFF
-                for s in range(4):
+                for dsi in range(4):
                     if rep_dbg:
                         sys.stderr.write(
                             'DISPDBG s=%d dset=%x plw=%d slid?\n'
-                            % (s, dset[s], plw))
-                    if dset[s] == 0 or plw < 4 + 2 * s:
+                            % (dsi, dset[dsi], plw))
+                    if dset[dsi] == 0 or plw < 4 + 2 * dsi:
                         continue
-                    slid = (self.pay.get(plpay + 2 + 2 * s, 0) |
-                            self.pay.get(plpay + 3 + 2 * s, 0) << 32)
+                    slid = (self.pay.get(plpay + 2 + 2 * dsi, 0) |
+                            self.pay.get(plpay + 3 + 2 * dsi, 0) << 32)
                     lst, lsl, lle = self.resolve(
                         slid, KIND['VkDescriptorSetLayout'])
                     if lst != 'OK':
                         return True
                     slh = ((lle['gen'] << 16) | lsl) & 0xFFFFFFFF
                     sst, _ssl, sse = self.resolve(
-                        dset[s], KIND['VkDescriptorSet'])
+                        dset[dsi], KIND['VkDescriptorSet'])
                     if sst != 'OK':
                         return True
                     if (sse['aux'] >> 31) & 1:
@@ -2932,23 +3298,16 @@ class FrontModel:
                         T.get('vkCmdNextSubpass', -1)):
                 pass    # state only — no operand resolution
             elif ct == T.get('vkCmdBindVertexBuffers', -1):
-                # G1c: arena = [bindingCount resolved handles]
-                # [bindingCount u64 offsets] at imm[7]
-                abase = r['imm'][7] & 0xFFFF
+                # G1c: payload = [bindingCount resolved handles]
+                # [bindingCount u64 offsets] at imm[7] — §5a G3b-iii:
+                # absolute PayMem addresses
+                abase = r['imm'][7] & 0xFFFFFFFF
                 fbnd = r['imm'][0] & 0xFFFF
                 nbind = r['imm'][1] & 0xFFFF
                 for i in range(min(nbind, 16 - fbnd)):
-                    vbs[fbnd + i] = self.pay_arena[aux].get(
-                        abase + i, 0)
+                    vbs[fbnd + i] = self.pay.get(abase + i, 0)
             elif ct == T.get('vkCmdBindIndexBuffer', -1):
                 ib = r['handle'][0]
-            elif ct == T.get('vkCmdDispatchIndirect', -1):
-                # issues on the work port -> shcore UNSUPPORTED.
-                # §7b exception contract: an engine-completion fault —
-                # the work item retires with undefined results, the
-                # sticky fault register counts it, and the submission
-                # continues (fence signals, reply stays VK_SUCCESS)
-                pass
             elif ct in (T['vkCmdCopyBuffer'], T['vkCmdFillBuffer'],
                         T['vkCmdUpdateBuffer'],
                         T['vkCmdCopyBufferToImage'],
@@ -2961,9 +3320,35 @@ class FrontModel:
                 # exception contract: execution-time, not submission-
                 # losing — the record's writes are suppressed and the
                 # remaining records/buffers continue
-                self._xfer_record_lost(session, r, aux)
-        self.aux_work[aux] = wk
+                self._xfer_record_lost(session, r, s)
+        self.aux_work[s] = wk
         return False
+
+    def _ev_kick(self, session):
+        """§5a G3b-iii: a host vkSetEvent releases every stalled
+        CmdWaitEvents poll whose needed events just became set — the
+        resume re-runs the wait record (a still-unset event re-holds
+        with refreshed need/state; a dead handle turns the release
+        into a lost submission)."""
+        for h in self._ev_holds:
+            if h['done']:
+                continue
+            kick = False
+            for es, eg in h['need']:
+                ee = self.ent[es] if 0 <= es < self.SLOTS else None
+                if ee is not None and ee['gen'] == eg and \
+                        (ee['state'] & 1):
+                    kick = True
+                    break
+            if not kick:
+                continue
+            rv = self._disp_assembly_lost(session, h['s'],
+                                          resume=h['st'])
+            if isinstance(rv, list):
+                h['need'], h['st'] = rv
+            else:
+                h['done'] = True
+                h['lost'] = rv
 
     def reset_ctx(self, ctx=0):
         """-> (retired, pinned remaining).  Walks the ctx list
@@ -3008,8 +3393,34 @@ class FrontModel:
                     self.pg_free((e['aux'] >> 32) & 0xFFFFFFFF,
                                  e['size'])
             elif e['kind'] == KIND['VkDescriptorPool']:
-                # §12.3 F5: pool record store pages at aux[31:0]
-                self.pg_free(e['aux'] & 0xFFFFFFFF, e['size'])
+                # §12.3 F5: pool record store pages at aux[31:0],
+                # size[31:0] bytes — §5a G3b-iii: size[63:32] parks a
+                # FREE_DESCRIPTOR_SET pool's free-list block
+                self.pg_free(e['aux'] & 0xFFFFFFFF,
+                             e['size'] & 0xFFFFFFFF)
+                flw = (e['size'] >> 32) & 0xFFFF
+                if flw:
+                    self.pay_free(((e['size'] >> 48) & 0xFFFF) << 6,
+                                  flw)
+            elif e['kind'] == KIND['VkCommandBuffer']:
+                # §5a G3b-iii: descriptor block + chains + pool unlink
+                self._cb_retire(s, e)
+            elif e['kind'] == KIND['VkCommandPool']:
+                # §5a G3b-iii: buffers retire before the pool in this
+                # walk, so the chain is normally empty — a pinned
+                # buffer skipped above can leave a node; free whatever
+                # is still linked (the dangling entry's own retire
+                # finds no shadow and skips the second free)
+                c = (e['aux'] >> 32) & 0xFFFFFFFF
+                while c:
+                    nxt = self.pay.get(c + CBD_PNEXT, 0)
+                    d = self.cbd_by_addr.pop(c, None)
+                    if d is not None:
+                        self._cb_freechains(d)
+                        self.cbd.pop(d['slot'], None)
+                        self.aux_work.pop(d['slot'], None)
+                    self.pay_free(c, CBD_WORDS)
+                    c = nxt
             if e['kind'] in pk and (e['aux'] >> 32):
                 self.pay_free(((e['aux'] >> 48) & 0xFFFF) << 6,
                               (e['aux'] >> 32) & 0xFFFF)
@@ -3223,8 +3634,10 @@ class FrontModel:
                             off, pit = acc, pt
                             w1, h1 = img_mdim(w, mm), img_mdim(hh, mm)
                         acc += pt * img_mdim(hh, mm)
+                    depth_pitch = lay if ((e['state'] >> 19) & 3) == 2 \
+                        else pit * h1
                     vals = [arr * lay + off, pit * h1, pit, lay,
-                            pit * h1]
+                            depth_pitch]
                     for i, v in enumerate(vals):
                         ew[2 * i] = v & 0xFFFFFFFF
                         ew[2 * i + 1] = (v >> 32) & 0xFFFFFFFF
@@ -3407,11 +3820,21 @@ class FrontModel:
                 elif obj_kind == KIND['VkDescriptorPool']:
                     # §12.3 F5: Σ pPoolSizes.descriptorCount records of
                     # backing through vgpages; aux[31:0]=page base,
-                    # aux[63:32]={nsets,bump}=0, state={maxSets,epoch=0}
+                    # aux[63:32]={nsets,bump}=0, state={maxSets,epoch=0}.
+                    # §5a G3b-iii: FREE_DESCRIPTOR_SET_BIT (imm[0][0])
+                    # also claims a {w0 count + DsFreeMax extents} ObjPay
+                    # free-list block parked in size[63:32], w0 = 0
                     dsum = sum(rec['pay'][2 * i + 1] & 0xFFFFFFFF
                                for i in range(rec['imm'][2] & 0xFFFF))
                     cap = min(dsum << 5, 0xFFFFFFFF)
                     pg = self.pg_alloc(cap, priv=True)
+                    flb = None
+                    if pg is not None and (rec['imm'][0] & 1):
+                        flb = self.pay_alloc(DS_FREE_MAX + 1)
+                        if flb is None:
+                            self.pg_free(pg, cap)
+                            out['result'] = VK_ERR_OOM
+                            pg = None
                     if pg is None:
                         out['result'] = VK_ERR_OOM
                     else:
@@ -3419,10 +3842,18 @@ class FrontModel:
                                                  obj_kind, par)
                         if st != 'OK':
                             self.pg_free(pg, cap)
+                            if flb is not None:
+                                self.pay_free(flb, DS_FREE_MAX + 1)
                             out['result'] = self._err(st)
                         else:
                             e = self.ent[slot]
                             e['size'] = cap
+                            if flb is not None:
+                                e['size'] |= \
+                                    (((flb >> 6) & 0xFFFF) << 48) | \
+                                    ((DS_FREE_MAX + 1) << 32)
+                                self.pay[flb] = 0
+                                out['payw'].append((flb, 0))
                             self.setaux(h, 0xFFFFFFFF, pg)
                             self.setauxhi(h, 0)
                             self.setstate(h, 0xFFFFFFFF,
@@ -3551,25 +3982,36 @@ class FrontModel:
                     # aux={usage,layers,mips,fmt,h,w}, state=lay>>6,
                     # size=layers*layer_bytes.
                     did = img_fmt_id(self.m, rec['imm'][2] & 0xFF)
+                    ity = rec['imm'][1]
                     w, hh = rec['imm'][3] & 0xFFFF, rec['imm'][4] & 0xFFFF
+                    depth = rec['imm'][5]
                     mips = rec['imm'][6] & 0x1F
                     lays = rec['imm'][7] & 0x1FF
+                    extmax = max(w, hh, depth & 0xFFFFFFFF)
+                    dim_ok = False
+                    if ity == 0:
+                        dim_ok = (hh == 1 and depth == 1 and
+                                  1 <= w <= 4096 and 1 <= lays <= 256)
+                    elif ity == 1:
+                        dim_ok = (depth == 1 and
+                                  1 <= w <= 4096 and 1 <= hh <= 4096 and
+                                  1 <= lays <= 256)
+                    elif ity == 2:
+                        dim_ok = (lays == 1 and
+                                  1 <= w <= 256 and 1 <= hh <= 256 and
+                                  1 <= depth <= 256)
+                    nlay = depth if ity == 2 else lays
+                    usage = rec['imm'][10]
                     if did == 0xFF:
                         out['result'] = VK_ERR_FMTNS
-                    elif (rec['imm'][1] != 1 or          # 2D only
-                          rec['imm'][5] != 1 or          # depth 1
-                          rec['imm'][8] != 1 or          # samples 1
-                          rec['imm'][9] > 1 or           # tiling
-                          not 1 <= w <= 4096 or
-                          not 1 <= hh <= 4096 or
-                          not 1 <= mips <= 13 or
-                          not 1 <= lays <= 256 or
-                          rec['imm'][10] == 0 or
-                          # G1c: usage ⊆ TS|TD|S|ST|CA; CA only on the
-                          # two color-attachment device formats
-                          rec['imm'][10] & ~0x1F or
-                          (rec['imm'][10] & 0x10 and
-                           did not in (2, 4))):
+                    elif (not dim_ok or
+                          rec['imm'][8] != 1 or
+                          rec['imm'][9] > 1 or
+                          not 1 <= mips <= img_mipcap(extmax) or
+                          usage == 0 or
+                          usage & ~0x3F or
+                          (usage & 0x10 and did not in (2, 3, 4, 5)) or
+                          (usage & 0x20 and did not in (12, 13))):
                         out['result'] = VK_ERR_FEATURE
                     else:
                         lay = img_layer_bytes(self.m, w, hh, did, mips)
@@ -3579,15 +4021,16 @@ class FrontModel:
                             out['result'] = self._err(st)
                         else:
                             e = self.ent[slot]
-                            e['size'] = lays * lay
+                            e['size'] = (nlay & 0x1FF) * lay
                             self.setaux(h, 0xFFFFFFFF,
                                         (hh << 16) | w)
                             self.setauxhi(h,
-                                          ((rec['imm'][10] & 0x3FF)
-                                           << 22)
-                                          | (lays << 13)
+                                          ((usage & 0x3FF) << 22)
+                                          | ((nlay & 0x1FF) << 13)
                                           | (mips << 8) | did)
-                            self.setstate(h, 0x7FFFF, lay >> 6)
+                            self.setstate(h, 0x1FFFFF,
+                                          ((ity & 3) << 19) |
+                                          ((lay >> 6) & 0x7FFFF))
                 elif obj_kind == KIND['VkImageView']:
                     # §12.3 C/5b view create — mirrors StImgVwCk; the
                     # image entry is the second resolve (lu[1]) and is
@@ -3598,17 +4041,23 @@ class FrontModel:
                                                KIND['VkImage'])
                     imips = (ie['aux'] >> 40) & 0x1F
                     ilays = (ie['aux'] >> 45) & 0x1FF
+                    ity = (ie['state'] >> 19) & 3
+                    vdim = img_view_dim(rec['imm'][1])
                     bm, bl = rec['imm'][8], rec['imm'][10]
                     lc = rec['imm'][9]
                     ac = rec['imm'][11]
                     if lc == 0xFFFFFFFF:
                         lc = imips - bm
                     if ac == 0xFFFFFFFF:
-                        ac = ilays - bl
+                        ac = (1 if ity == 2 else ilays) - bl
+                    ifmt = (ie['aux'] >> 32) & 0xFF
+                    asp_ok = (rec['imm'][7] == 2) if ifmt in (12, 13) \
+                        else (rec['imm'][7] == 1)
                     fmt_ok = img_fmt_id(self.m, rec['imm'][2] & 0xFF) \
-                        == (ie['aux'] >> 32) & 0xFF
-                    if (rec['imm'][1] not in (1, 5) or
-                            rec['imm'][7] != 1 or
+                        == ifmt
+                    if (vdim == 7 or
+                            not img_view_compat(ity, vdim, bl, ac, ilays) or
+                            not asp_ok or
                             rec['imm'][3] > 6 or rec['imm'][4] > 6 or
                             rec['imm'][5] > 6 or rec['imm'][6] > 6):
                         out['result'] = VK_ERR_FEATURE
@@ -3629,10 +4078,11 @@ class FrontModel:
                                         | ((rec['imm'][4] & 7) << 19)
                                         | ((rec['imm'][3] & 7) << 16)
                                         | (is_ & 0xFFFF))
+                            nlay = ilays if vdim == 4 else (
+                                6 if vdim == 5 else ac)
                             self.setauxhi(h,
-                                          ((1 if rec['imm'][1] == 5
-                                            else 0) << 24)
-                                          | ((ac & 0x3FF) << 14)
+                                          ((vdim & 7) << 24)
+                                          | ((nlay & 0x3FF) << 14)
                                           | ((bl & 0x3FF) << 4)
                                           | (lc & 0xF))
                 elif obj_kind == KIND['VkSampler']:
@@ -3746,12 +4196,57 @@ class FrontModel:
                         nsets = ((pe['aux'] >> 44) & 0xFFFFF
                                  if pe else 0)
                         bump = ((pe['aux'] >> 32) & 0xFFF if pe else 0)
+                        fl_bump = False
                         if (pe is None or
                                 pe['kind'] != KIND['VkDescriptorPool']
                                 or pe['gen'] != (ph >> 16) & 0xFFFF
-                                or nsets >= (pe['state'] >> 16)
-                                or bump * 32 + sbyt >
-                                (pe['size'] & 0xFFFFFFFF)):
+                                or nsets >= (pe['state'] >> 16)):
+                            out['result'] = VK_ERR_OOPM
+                            ds_err = True
+                            out['null_mask'].add(ei)
+                            continue
+                        flen = sbyt >> 5
+                        if (pe['size'] >> 32) & 0xFFFFFFFF:
+                            # §5a G3b-iii: FREE_DESCRIPTOR_SET pool —
+                            # first-fit the free list (w0 = used
+                            # slots, w1..DsFreeMax = {off,len} in 32B
+                            # units), falling back to bump space
+                            flb = ((pe['size'] >> 48) & 0xFFFF) << 6
+                            fn = self.pay.get(flb, 0) & 0xFF
+                            hit = -1
+                            live = False
+                            for fi in range(min(fn, DS_FREE_MAX)):
+                                ev = self.pay.get(flb + 1 + fi, 0)
+                                eo, el = (ev >> 16) & 0xFFFF, \
+                                    ev & 0xFFFF
+                                if el != 0:
+                                    live = True
+                                if el != 0 and el >= flen:
+                                    self.pay[flb + 1 + fi] = \
+                                        ((eo + flen) << 16) | \
+                                        (el - flen)
+                                    out['payw'].append(
+                                        (flb + 1 + fi,
+                                         ((eo + flen) << 16) |
+                                         (el - flen)))
+                                    sbase = (pe['aux'] & 0xFFFFFFFF) \
+                                        + (eo << 5)
+                                    fl_bump = True
+                                    hit = fi
+                                    break
+                            if hit < 0 and \
+                                    bump * 32 + sbyt > \
+                                    (pe['size'] & 0xFFFFFFFF):
+                                # bump exhausted — fragmented pool
+                                # only when live extents remain; with
+                                # none the store is simply out
+                                out['result'] = VK_ERR_FRAG if live \
+                                    else VK_ERR_OOPM
+                                ds_err = True
+                                out['null_mask'].add(ei)
+                                continue
+                        elif bump * 32 + sbyt > \
+                                (pe['size'] & 0xFFFFFFFF):
                             out['result'] = VK_ERR_OOPM
                             ds_err = True
                             out['null_mask'].add(ei)
@@ -3766,7 +4261,9 @@ class FrontModel:
                             ds_err = True
                             out['null_mask'].add(ei)
                             continue
-                        sbase = (pe['aux'] & 0xFFFFFFFF) + (bump << 5)
+                        if not fl_bump:
+                            sbase = (pe['aux'] & 0xFFFFFFFF) + \
+                                    (bump << 5)
                         se = self.ent[s]
                         se['size'] = ph & 0xFFFFFFFF
                         self.setaux(h, 0xFFFFFFFF,
@@ -3778,7 +4275,9 @@ class FrontModel:
                             self.apw32(out, sbase + 4 * k, 0)
                         pe['aux'] = (pe['aux'] & 0xFFFFFFFF) | \
                             ((((nsets + 1) & 0xFFFFF) << 44) |
-                             (((bump + (sbyt >> 5)) & 0xFFF) << 32))
+                             (((bump if fl_bump
+                                else bump + (sbyt >> 5)) & 0xFFF)
+                              << 32))
                 elif obj_kind == KIND['VkPipeline']:
                     if ct == session['T'].get('vkCreateGraphicsPipelines'):
                         # G1c: graphics element — staged keep words in
@@ -3858,25 +4357,65 @@ class FrontModel:
                         self.setauxhi(h, (le['gen'] << 16) | ls)
                 else:
                     for idv in blob_ids(slot):
-                        free = next((i for i in range(self.CB_BUFS)
-                                     if not self.cb_alloc[i]), -1)
-                        if obj_kind == KIND['VkCommandBuffer'] \
-                                and free < 0:
-                            out['result'] = VK_ERR_OOM
-                            break
-                        st, h, s = self.alloc(idv, obj_kind, par)
+                        # §5a G3b-iii: a command buffer is ObjTab entry
+                        # + a 64-word ObjPay descriptor block + a link
+                        # into the pool's descriptor chain — capacity
+                        # is PayMem, not a flop table; parent = pool
+                        cpar = hnd[lu[1]] \
+                            if obj_kind == KIND['VkCommandBuffer'] \
+                            and len(lu) > 1 else par
+                        st, h, s = self.alloc(idv, obj_kind, cpar)
                         if st != 'OK':
                             out['result'] = self._err(st)
                             break
                         if obj_kind == KIND['VkCommandBuffer']:
-                            st2, _ = self.setaux(h, 0xFF, free)
-                            if st2 != 'OK':
+                            cbd = self.pay_alloc(CBD_WORDS)
+                            if cbd is None:
+                                # PayMem exhausted -> OUT_OF_DEVICE_
+                                # MEMORY; the entry retires back out
+                                out['result'] = VK_ERR_OOM
+                                self.retire(idv, obj_kind)
+                                break
+                            _st2, ps2, pe = ('OK', -1, None)
+                            if len(lu) > 1:
+                                _st2, ps2, pe = self.resolve(
+                                    hnd[lu[1]], KIND['VkCommandPool'])
+                            else:
+                                _st2 = 'MISS'
+                            if _st2 != 'OK':
+                                # dead pool mid-alloc — free the
+                                # descriptor, retire the entry
+                                self.pay_free(cbd, CBD_WORDS)
+                                self.retire(idv, obj_kind)
                                 out['result'] = VK_ERR_UNKNOWN
                                 break
-                            self.cb_alloc[free] = 1
-                            self.cb_hnd[free] = h
-                            self.cb_pool[free] = hnd[lu[1]] \
-                                if len(lu) > 1 else 0
+                            head = ((pe['aux'] >> 32) & 0xFFFFFFFF
+                                    if pe is not None else 0)
+                            d = {'addr': cbd, 'slot': s,
+                                 'flags': (1 << CBF_SECONDARY)
+                                          if rec['imm'][0] else 0,
+                                 'count': 0, 'rech': 0, 'rect': 0,
+                                 'row': 0, 'payh': 0, 'payt': 0,
+                                 'ptop': 0, 'pool': hnd[lu[1]],
+                                 'own': h, 'pprev': 0, 'pnext': head,
+                                 'recs': []}
+                            self.cbd[s] = d
+                            self.cbd_by_addr[cbd] = d
+                            dw = (d['flags'], 0, 0, 0, 0, 0, 0, 0,
+                                  d['pool'], d['own'], 0, head)
+                            for i, w in enumerate(dw):
+                                self.pay[cbd + i] = w & 0xFFFFFFFF
+                                out['payw'].append(
+                                    (cbd + i, w & 0xFFFFFFFF))
+                            if head:
+                                self.pay[head + CBD_PPREV] = cbd
+                                out['payw'].append(
+                                    (head + CBD_PPREV, cbd))
+                            if pe is not None:
+                                pe['aux'] = (pe['aux'] & 0xFFFFFFFF) | \
+                                            (cbd << 32)
+                            self.setaux(h, 0xFFFFFFFF, 0)
+                            self.setauxhi(h, cbd)
 
         elif cls == 'RETIRE':
             rt = next((i for i in range(8)
@@ -3895,6 +4434,15 @@ class FrontModel:
                         out['result'] = VK_ERR_UNKNOWN
                         break
                     aux = e['aux'] & 0xFF
+                    if obj_kind == KIND['VkCommandBuffer']:
+                        # §5a G3b-iii: cmdrec RESET drops the chains,
+                        # w10/w11 unlink from the pool chain (the
+                        # call-site pool arg heads the unlink), the
+                        # descriptor block frees — all before the
+                        # entry's RETIRE
+                        self._cb_retire(
+                            s, e,
+                            hnd[lu[1]] if len(lu) > 1 else 0)
                 elif obj_kind in ar:
                     # §7b/5a-ii: aux carries the ShaderCore slot
                     # (modules, pipelines) or the aperture page base
@@ -3912,6 +4460,94 @@ class FrontModel:
                         # The op's operand is the parent SLOT (no
                         # directory probe), not the client id.
                         self.retire_kids(s, KIND['VkDescriptorPool'])
+                        # §5a G3b-iii: a FREE_DESCRIPTOR_SET pool parks
+                        # its free-list block in size[63:32] — the
+                        # retire frees it through the payf path
+                        pay_w = (e['size'] >> 32) & 0xFFFF
+                        pay_b = ((e['size'] >> 48) & 0xFFFF) << 6
+                elif obj_kind == KIND['VkCommandPool']:
+                    st, s, e = self.resolve(idv, obj_kind)
+                    if st != 'OK':
+                        out['result'] = VK_ERR_UNKNOWN
+                        break
+                    # §5a G3b-iii: DESTROY_POOL walks the descriptor
+                    # chain (aux[63:32] head) freeing each buffer's
+                    # chains + descriptor block; RETIRE_KIDS then
+                    # sweeps the buffer entries so the pool's RETIRE
+                    # cannot BUSY_CHILDREN
+                    c = (e['aux'] >> 32) & 0xFFFFFFFF
+                    while c:
+                        nxt = self.pay.get(c + CBD_PNEXT, 0)
+                        d = self.cbd_by_addr.pop(c, None)
+                        if d is not None:
+                            self._cb_freechains(d)
+                            self.cbd.pop(d['slot'], None)
+                            self.aux_work.pop(d['slot'], None)
+                        self.pay_free(c, CBD_WORDS)
+                        c = nxt
+                    self.retire_kids(s, KIND['VkCommandPool'])
+                elif obj_kind == KIND['VkDescriptorSet']:
+                    st, s, e = self.resolve(idv, obj_kind)
+                    if st != 'OK':
+                        out['result'] = VK_ERR_UNKNOWN
+                        break
+                    # §5a G3b-iii: a FREE_DESCRIPTOR_SET pool takes the
+                    # set's record extent back — resolve the minting
+                    # pool (set.size[31:0] = pool {gen,slot}) and the
+                    # layout (aux[63:32]) for the byte length; any dead
+                    # link retires the entry plain, the space stays
+                    # claimed
+                    ph_ = e['size'] & 0xFFFFFFFF
+                    ps_ = ph_ & 0xFFFF
+                    pe = self.ent[ps_] if ps_ < self.SLOTS else None
+                    layh = (e['aux'] >> 32) & 0xFFFFFFFF
+                    ls_ = layh & 0xFFFF
+                    le = self.ent[ls_] if ls_ < self.SLOTS else None
+                    flen = ((le['aux'] & 0xFFFF) >> 5
+                            if (le is not None
+                                and le['kind'] ==
+                                KIND['VkDescriptorSetLayout']
+                                and le['gen'] == (layh >> 16) & 0xFFFF
+                                and (le['aux'] & 0xFFFF) != 0) else 0)
+                    if (pe is not None
+                            and pe['kind'] == KIND['VkDescriptorPool']
+                            and pe['gen'] == (ph_ >> 16) & 0xFFFF
+                            and (pe['size'] >> 32) & 0xFFFFFFFF
+                            and flen):
+                        # insert {off,len} with in-place neighbour
+                        # absorb; first dead slot wins, else append,
+                        # else the extent leaks (list saturated)
+                        flb = ((pe['size'] >> 48) & 0xFFFF) << 6
+                        foff = (((e['aux'] & 0x1FFFFFF) << 2)
+                                - (pe['aux'] & 0xFFFFFFFF)) >> 5
+                        fn = self.pay.get(flb, 0) & 0xFF
+                        dead = -1
+                        for fi in range(min(fn, DS_FREE_MAX)):
+                            ev = self.pay.get(flb + 1 + fi, 0)
+                            eo, el = (ev >> 16) & 0xFFFF, ev & 0xFFFF
+                            if el == 0:
+                                if dead < 0:
+                                    dead = fi
+                            elif eo + el == foff or foff + flen == eo:
+                                foff = min(eo, foff)
+                                flen += el
+                                self.pay[flb + 1 + fi] = 0
+                                out['payw'].append((flb + 1 + fi, 0))
+                        if dead >= 0:
+                            wv = (foff << 16) | flen
+                            self.pay[flb + 1 + dead] = wv
+                            out['payw'].append((flb + 1 + dead, wv))
+                        elif fn < DS_FREE_MAX:
+                            wv = (foff << 16) | flen
+                            self.pay[flb + 1 + fn] = wv
+                            self.pay[flb] = fn + 1
+                            out['payw'].append((flb + 1 + fn, wv))
+                            out['payw'].append((flb, fn + 1))
+                        # nsets-- (bump parked)
+                        nh = (pe['aux'] >> 32) & 0xFFFFFFFF
+                        nh = (((nh >> 12) - 1) << 12) | (nh & 0xFFF)
+                        pe['aux'] = (pe['aux'] & 0xFFFFFFFF) | \
+                                    (nh << 32)
                 elif obj_kind in pk:
                     # §7b: payload kinds take the same pre-LOOKUP; the
                     # extent in aux[63:32] is freed after the RETIRE
@@ -3933,12 +4569,7 @@ class FrontModel:
                     break
                 if pay_w:
                     self.pay_free(pay_b, pay_w)
-                if obj_kind == KIND['VkCommandBuffer'] \
-                        and aux < self.CB_BUFS:
-                    self.cb_alloc[aux] = 0
-                    self.cb_pool[aux] = 0
-                    self.cb_hnd[aux] = 0
-                elif obj_kind == KIND['VkFence'] and aux < self.FENCES:
+                if obj_kind == KIND['VkFence'] and aux < self.FENCES:
                     self.falloc[aux] = 0
                 elif obj_kind == KIND['VkShaderModule']:
                     # an unzombied retire frees the pCode extent and
@@ -3976,9 +4607,11 @@ class FrontModel:
                         self.pg_free((aux_full >> 32) & 0xFFFFFFFF,
                                      e_sz)
                 elif obj_kind == KIND['VkDescriptorPool']:
-                    # §12.3 F5-d: record store at aux[31,0], size
-                    # bytes (the sets were already swept pre-RETIRE)
-                    self.pg_free(aux_full & 0xFFFFFFFF, e_sz)
+                    # §12.3 F5-d: record store at aux[31,0],
+                    # size[31:0] bytes — §5a G3b-iii: size[63:32]
+                    # parks the free-list block (freed via payw above)
+                    self.pg_free(aux_full & 0xFFFFFFFF,
+                                 e_sz & 0xFFFFFFFF)
 
         elif cls == 'BIND':
             t2 = (session['T'].get('vkBindBufferMemory2'),
@@ -4053,7 +4686,12 @@ class FrontModel:
         elif cls in ('CB_BEGIN', 'CB_END', 'CB_RESET', 'RECORD'):
             cb_q = act['cb_q']
             e = ent_of(cb_q)
-            aux = e['aux'] & 0xFF
+            # §5a G3b-iii: req.cbd = the descriptor block at
+            # aux[63:32]; a missing one is cmdrec BAD_BUF
+            cs_ = hnd[cb_q] & 0xFFFF
+            d = self.cbd.get(cs_)
+            if d is None or (e['aux'] >> 32) == 0:
+                d = None
             if cls == 'CB_BEGIN':
                 # §6.1 implicit reset: BEGIN on an EXECUTABLE buffer
                 # rewinds the stream.  A PENDING buffer means its owner
@@ -4062,32 +4700,44 @@ class FrontModel:
                 # so normalize the mark here (same result either way)
                 if e['state'] & CB_PEND:
                     e['state'] = (e['state'] & ~0xF) | CB_EXEC
-                if e['state'] & (CB_REC | CB_INV):
+                if e['state'] & (CB_REC | CB_INV) or d is None:
                     out['result'] = VK_ERR_UNKNOWN
                 else:
-                    self.rec_state[aux] = 1
-                    self.recs[aux] = []
-                    # cmdrec BEGIN clears the payload arena bump ptr
-                    self.pay_top[aux] = 0
-                    self.pay_arena[aux] = {}
-                    self.setstate(hnd[cb_q], 0xF, CB_REC)
+                    f0 = rec['imm'][0] & 0xFFFFFFFF
+                    # req.flags maps usage onto {rp_cont5, simult4,
+                    # one_time3}
+                    fl = ((f0 & 1) << 3) | ((f0 & 2) << 4) | \
+                         ((f0 & 4) << 2)
+                    xw = []
+                    if self._cb_begin(d, fl, xw) != 'OK':
+                        # record-chunk FULL -> UNKNOWN, no state move
+                        out['result'] = VK_ERR_UNKNOWN
+                    else:
+                        out['arenaw'] += [(d['addr'], a, w)
+                                          for a, w in xw]
+                        self.setstate(hnd[cb_q], 0xF, CB_REC)
             elif cls == 'CB_END':
-                if not (e['state'] & CB_REC):
+                if not (e['state'] & CB_REC) or d is None:
                     out['result'] = VK_ERR_UNKNOWN
                 else:
-                    self.rec_state[aux] = 2
+                    d['flags'] = (d['flags'] & ~(1 << CBF_REC)) | \
+                                 (1 << CBF_SEALED)
+                    self._cbd_sync(d)
                     self.setstate(hnd[cb_q], 0xF, CB_EXEC)
             elif cls == 'CB_RESET':
-                self.rec_state[aux] = 0
-                self.recs[aux] = []
-                # cmdrec RESET frees the payload arena too
-                self.pay_top[aux] = 0
-                self.pay_arena[aux] = {}
-                self.setstate(hnd[cb_q], 0xF, 0)
+                if e['state'] & CB_PEND:
+                    # reset on an in-flight buffer waits out the drain
+                    e['state'] = (e['state'] & ~0xF) | CB_EXEC
+                if d is None:
+                    out['result'] = VK_ERR_UNKNOWN
+                else:
+                    self._cb_reset(d)
+                    self.setstate(hnd[cb_q], 0xF, 0)
             else:
                 # §7b: pValues over 128 B joins the INVALID path
                 if not (e['state'] & CB_REC) or \
                         (e['state'] & (CB_INV | CB_PEND)) or \
+                        d is None or \
                         (ct == session['T']['vkCmdPushConstants']
                          and rec['imm'][2] > 128) or \
                         (ct == session['T'].get('vkCmdBindVertexBuffers')
@@ -4136,18 +4786,30 @@ class FrontModel:
                     recd = {'ctype': ct, 'flags': rec['flags'],
                             'handle': rh, 'kind': rk,
                             'imm': list(rec['imm'][:8]), 'spare': 0}
+                    # §5a G3b-iii: the indirect operand's byte offset
+                    # decodes into q[2] (u64) — the record carries it
+                    # in imm[2:3] for the executor's aperture fetch
+                    if ct in (session['T']['vkCmdDrawIndirect'],
+                              session['T']['vkCmdDrawIndexedIndirect'],
+                              session['T']['vkCmdDispatchIndirect']):
+                        recd['imm'][2] = rec['q'][2] & 0xFFFFFFFF
+                        recd['imm'][3] = (rec['q'][2] >> 32) & 0xFFFFFFFF
                     # §7b: BindDS streams resolved set handles then the
                     # dynamic offsets; PushConstants streams the staged
-                    # words verbatim -- both through the pay arena
+                    # words verbatim -- both through the payload chain
                     pwords = []
                     if ct == session['T']['vkCmdBindDescriptorSets']:
                         # §12.3 F5: the record stream is {set handle,
                         # ndyn} pairs for each bound set followed by the
                         # verbatim dynamic-offset words — the pair lets
                         # cmdexec group the dyn window per set without
-                        # re-reading the layouts
-                        nset = rec['imm'][2] & 0xFFFF
-                        ndyn = rec['imm'][3] & 0xFFFF
+                        # re-reading the layouts.  §5a G3b-iii: sets
+                        # past the 4-slot window (imm[1]=firstSet) are
+                        # dropped, dyn words cap at 64, and the offsets
+                        # sit after ALL staged set ids (2*orig nset)
+                        nset = min(rec['imm'][2] & 0xFFFF,
+                                   max(0, 4 - (rec['imm'][1] & 0xFFFF)))
+                        ndyn = min(rec['imm'][3] & 0xFFFF, 64)
                         for i in range(nset):
                             sid = rec['pay'][2 * i] | \
                                 (rec['pay'][2 * i + 1] << 32)
@@ -4160,7 +4822,8 @@ class FrontModel:
                                           if bst == 'OK' else 0)
                         for i in range(ndyn):
                             pwords.append(
-                                rec['pay'][nset * 2 + i] & 0xFFFFFFFF)
+                                rec['pay'][(rec['imm'][2] & 0xFFFF) * 2
+                                           + i] & 0xFFFFFFFF)
                     elif ct == session['T'].get('vkCmdBindVertexBuffers'):
                         # G1c: arena = [nbind resolved buffer handles]
                         # [nbind u64 offsets] — staged ids sit at
@@ -4179,12 +4842,32 @@ class FrontModel:
                             pwords.append(
                                 rec['pay'][2 * nb + i] & 0xFFFFFFFF
                                 if 2 * nb + i < len(rec['pay']) else 0)
+                    elif ct in (session['T'].get('vkCmdExecuteCommands'),
+                                session['T'].get('vkCmdWaitEvents')):
+                        # §5a G3b-iii: imm[0] staged u64 ids re-resolve
+                        # to one {gen,slot} handle word each — command
+                        # buffers for ExecuteCommands, events for
+                        # WaitEvents; a record-time miss stores 0 and
+                        # the executor refuses it at replay
+                        hkind = KIND['VkCommandBuffer'] \
+                            if ct == session['T'].get(
+                                'vkCmdExecuteCommands') \
+                            else KIND['VkEvent']
+                        for i in range(rec['imm'][0] & 0xFFFF):
+                            idv = (rec['pay'][2 * i] |
+                                   (rec['pay'][2 * i + 1] << 32)) \
+                                if 2 * i + 1 < len(rec['pay']) else 0
+                            bst, bs, be = self.resolve(idv, hkind)
+                            pwords.append(
+                                ((be['gen'] << 16) | bs)
+                                if bst == 'OK' else 0)
                     elif ct == session['T']['vkCmdPushConstants']:
                         pwords = [w & 0xFFFFFFFF for w in rec['pay']]
                     elif ct in (session['T'].get('vkCmdBeginRenderPass'),
                                 session['T'].get('vkCmdBeginRenderPass2'),
                                 session['T'].get('vkCmdSetViewport'),
                                 session['T'].get('vkCmdSetScissor'),
+                                session['T'].get('vkCmdSetBlendConstants'),
                                 session['T'].get('vkCmdBindIndexBuffer'),
                                 session['T']['vkCmdCopyBuffer'],
                                 session['T']['vkCmdFillBuffer'],
@@ -4193,26 +4876,25 @@ class FrontModel:
                                 session['T']['vkCmdCopyImageToBuffer'],
                                 session['T']['vkCmdCopyImage'],
                                 session['T']['vkCmdClearColorImage']):
-                        # §12.3 C/5a + C/5b: xfer operand payloads
-                        # stream verbatim through the cmdrec arena
-                        # (the engine replays them with PAYREAD at
-                        # pay_base = imm[7])
+                        # §12.3 C/5a + C/5b + G1c/G2a: xfer and
+                        # dynamic-state operand payloads stream
+                        # verbatim — the engine replays them from the
+                        # payload chunk chain at pay_base = imm[7]
                         pwords = [w & 0xFFFFFFFF for w in rec['pay']]
-                    if pwords:
-                        abase = self.arena_append(aux, pwords)
-                        if abase is None:
-                            # PAY_FULL: the record is dropped, the
-                            # buffer goes INVALID
-                            out['result'] = VK_ERR_UNKNOWN
-                            self.setstate(hnd[cb_q], 0xF, CB_INV)
-                        else:
-                            # cmdrec stamps imm[7] = the payload base
-                            recd['imm'][7] = abase
-                            for i, w in enumerate(pwords):
-                                out['arenaw'].append(
-                                    (aux, abase + i, w))
-                    if out['result'] == VK_OK:
-                        self.recs[aux].append(recd)
+                    # §5a G3b-iii: APPEND through the chunk chains —
+                    # a rejected append may still have linked a fresh
+                    # record chunk before the payload alloc failed, so
+                    # emit the collected writes either way
+                    xw = []
+                    st2 = self._cb_append(d, recd, pwords, xw)
+                    out['arenaw'] += [(d['addr'], a, w)
+                                      for a, w in xw]
+                    if st2 != 'OK':
+                        # chain FULL/PAY_FULL: the record is dropped,
+                        # the buffer goes INVALID
+                        out['result'] = VK_ERR_UNKNOWN
+                        self.setstate(hnd[cb_q], 0xF, CB_INV)
+                    else:
                         out['record'] = recd
 
         elif cls == 'SUBMIT':
@@ -4226,7 +4908,6 @@ class FrontModel:
                     fslot = fe['aux'] & 0xFF
             cbs = []
             pins = []
-            ok = True
             for idv in blob_ids(1):
                 st, s, e = self.resolve(idv, KIND['VkCommandBuffer'])
                 # a PENDING element means its owner submission is still
@@ -4236,26 +4917,45 @@ class FrontModel:
                 if st == 'OK' and (e['state'] & CB_PEND):
                     e['state'] = (e['state'] & ~0xF) | CB_EXEC
                 if st != 'OK' or not (e['state'] & CB_EXEC) or \
-                        (e['aux'] & 0xFF) >= self.CB_BUFS or \
-                        len(cbs) == 4:
+                        (e['aux'] >> 32) == 0 or s not in self.cbd:
+                    # §7b/§5a G3b-iii: reject the ELEMENT, not the
+                    # submission — the resolvable buffers still run
+                    # (Mesa's feedback CB fills the slot the guest
+                    # polls); the fence completes DEVICE_LOST below
                     out['result'] = VK_ERR_UNKNOWN
-                    ok = False
-                    break
-                cbs.append((s, e, e['aux'] & 0xFF))
-            if ok:
-                if not cbs:
-                    out['result'] = VK_ERR_UNKNOWN
-                else:
-                    self.pushed += 1
-                    work = []
+                    continue
+                cbs.append((s, e, s))
+            if not cbs:
+                out['result'] = VK_ERR_UNKNOWN
+            else:
+                work = []
+                # §5a G3b-iii chunked submission: the RTL pushes one
+                # apu_cmdexec_submit_t per <=4 resolved buffers, in
+                # order; only the last chunk carries the fence.
+                # Single-queue in-order execution makes the split
+                # invisible to the guest.
+                for ci in range(0, len(cbs), 4):
+                    chunk = cbs[ci:ci + 4]
                     lost_any = False
-                    for s, e, aux in cbs:
+                    self.pushed += 1
+                    for s, e, aux in chunk:
                         e['state'] = CB_PEND
                         pins.append(s)
                         # §7b/5a-ii: replay the buffer's records the
                         # way cmdexec does; a failed assembly marks the
-                        # submission lost and no work is issued
+                        # submission lost and no work is issued.
+                        # §5a G3b-iii: a CmdWaitEvents on an unset
+                        # event STALLS the submission — it stays
+                        # outstanding until a host vkSetEvent kicks
+                        # the replay
                         lost = self._disp_assembly_lost(session, aux)
+                        if isinstance(lost, list):
+                            need, rstate = lost
+                            self._ev_holds.append(dict(
+                                need=need, st=rstate, s=aux,
+                                out=len(self.outstanding),
+                                done=False, lost=False))
+                            lost = False
                         lost_any |= lost
                         if not lost:
                             # G1c: the work sequence includes the
@@ -4264,12 +4964,14 @@ class FrontModel:
                             work.extend(self.aux_work.get(aux, []))
                         # PIN via cmdexec (at submit)
                         e['pins'] += 1
-                    out['work'] = work
-                    self.outstanding.append((fslot, cbs, lost_any))
-                    # pins are held by the executor until completion;
-                    # the TB must not retire them out from under the
-                    # front (deterministic PINNED arm)
-                    self.work_hold = True
+                    self.outstanding.append(
+                        (fslot if ci + 4 >= len(cbs) else -1,
+                         chunk, lost_any))
+                out['work'] = work
+                # pins are held by the executor until completion;
+                # the TB must not retire them out from under the
+                # front (deterministic PINNED arm)
+                self.work_hold = True
             # §7b exception contract: a submit rejected before it
             # reaches the executor still completes the fence it
             # carried — vnfront pulses ex_fence_fail and cmdexec
@@ -4288,8 +4990,22 @@ class FrontModel:
                   session['T']['vkGetFenceStatus']: 'stat'}[ct]
             if wt in ('idle', 'wait'):
                 # model: the executor finishes all outstanding work by
-                # the time the wait completes
-                for fslot, cbs, lost in self.outstanding:
+                # the time the wait completes — except submissions
+                # still stalled on a CmdWaitEvents poll, whose fence
+                # stays unsignaled until the release lands
+                held = {h['out'] for h in self._ev_holds
+                        if not h['done']}
+                newout = []
+                remap = {}
+                for oi, (fslot, cbs, lost) in enumerate(
+                        self.outstanding):
+                    if oi in held:
+                        remap[oi] = len(newout)
+                        newout.append((fslot, cbs, lost))
+                        continue
+                    lost = lost or any(
+                        h['lost'] for h in self._ev_holds
+                        if h['out'] == oi)
                     for s, e, _aux in cbs:
                         e['pins'] -= 1
                         # §12.3 3d-d: execution completion restores
@@ -4300,7 +5016,14 @@ class FrontModel:
                         self.fence_sig |= 1 << fslot
                         if lost:
                             self.fence_lost |= 1 << fslot
-                self.outstanding = []
+                self.outstanding = newout
+                for h in self._ev_holds:
+                    if not h['done']:
+                        h['out'] = remap[h['out']]
+                # done holds always complete with their entry here —
+                # only the still-stalled ones carry forward
+                self._ev_holds = [h for h in self._ev_holds
+                                  if not h['done']]
                 if wt == 'wait':
                     mask = 0
                     for idv in blob_ids(0):
@@ -4353,13 +5076,51 @@ class FrontModel:
                     pe['state'] = ((pe['state'] & 0xFFFF0000) |
                                    ((pe['state'] + 1) & 0xFFFF))
                     pe['aux'] &= 0xFFFFFFFF
+                    # §5a G3b-iii: a FREE_DESCRIPTOR_SET pool's free
+                    # list resets to empty — the whole record store is
+                    # bump space again
+                    if (pe['size'] >> 32) & 0xFFFFFFFF:
+                        flb = ((pe['size'] >> 48) & 0xFFFF) << 6
+                        self.pay[flb] = 0
+                        out['payw'].append((flb, 0))
             else:
-                par = hnd[act['parent_q']] if act['parent_q'] != 7 else 0
-                for i in range(self.CB_BUFS):
-                    if self.cb_alloc[i] and self.cb_pool[i] == par:
-                        self.rec_state[i] = 0
-                        self.recs[i] = []
-                        self.setstate(self.cb_hnd[i], 0xF, 0)
+                # vkResetCommandPool — §5a G3b-iii: cmdrec RESET_POOL
+                # streams each chained descriptor (chains freed,
+                # flags keep SECONDARY) and vnfront clears each
+                # buffer's ObjTab state.  The pool is the SECOND
+                # LOOKUP slot (device is first) — same as the
+                # descriptor-pool arm's hnd[lu[1]]
+                par = hnd[lu[1]] if len(lu) > 1 else 0
+                pst, ps_, pe = self.resolve(par, KIND['VkCommandPool'])
+                if pst != 'OK':
+                    out['result'] = VK_ERR_UNKNOWN
+                else:
+                    c = (pe['aux'] >> 32) & 0xFFFFFFFF
+                    while c:
+                        d = self.cbd_by_addr.get(c)
+                        if d is not None:
+                            self._cb_reset(d)
+                            e2 = self.ent[d['slot']]
+                            if e2 is not None:
+                                e2['state'] &= ~0xF
+                        c = self.pay.get(c + CBD_PNEXT, 0)
+
+        elif cls == 'EVENT':
+            # §5a G3b-iii: host event ops — the event rides the second
+            # LOOKUP/OPTIONAL slot (device first); Set/Reset write
+            # state[0], GetEventStatus replies SET(3)/RESET(4)
+            es = lu[1] if len(lu) > 1 else -1
+            if es < 0:
+                out['result'] = VK_ERR_UNKNOWN
+            elif ct == session['T'].get('vkGetEventStatus'):
+                ee = ent_of(es)
+                out['result'] = 3 if (ee['state'] & 1) else 4
+            else:
+                ee = ent_of(es)
+                ee['state'] = (ee['state'] & ~1) | \
+                    (1 if ct == session['T'].get('vkSetEvent') else 0)
+                if ct == session['T'].get('vkSetEvent'):
+                    self._ev_kick(session)
 
         # gate the TB work port from a successful submit until the
         # first WAIT command, so command-buffer pins stay held for the
@@ -4422,10 +5183,12 @@ class FrontModel:
     def is_work(self, ct):
         nm = {v['type_id']: k for k, v in self.m.cmd_info.items()}
         name = nm.get(ct, '')
+        # §5a G3b-iii: ExecuteCommands is a control-flow record, not a
+        # work item — cmdexec replays the listed secondaries in place
         return name.startswith('vkCmd') and \
             any(name.startswith('vkCmd' + p) for p in
                 ('Draw', 'Dispatch', 'Copy', 'Fill', 'Update',
-                 'Clear', 'Blit', 'Resolve', 'ExecuteCommands'))
+                 'Clear', 'Blit', 'Resolve'))
 
 
 def sess_rec_words(recd):
@@ -5695,6 +6458,8 @@ class TransportModel:
                 rid, off, size = w[s], u64(s + 1), u64(s + 3)
                 b = self.blob_of(rid)
                 if b is None or off + size > b['size']:
+                    log.append('XSDBG stream%d rid=%x off=%x size=%x b=%s'
+                               % (i, rid, off, size, b))
                     return True
                 if self.reply is not None:
                     self.reply['pos'] = positions[i]
@@ -5705,6 +6470,7 @@ class TransportModel:
                 _c, fatal = self.exec_stream(getw, size, fm, ses, log,
                                              ctx, depth=depth + 1)
                 if fatal:
+                    log.append('XSDBG stream%d inner fatal' % i)
                     return True
         elif name == 'vkCreateRingMESA':
             # 0:type 1:flags 2-3:ring 4-5:pres64 6:sType
@@ -5812,6 +6578,8 @@ RES_REPLY  = 101
 RES_RING1  = 102
 RES_EXEC   = 103
 RES_RELOC  = 104         # kernel-offset relocation coverage blob
+RES_REPLY_X = 105        # xstreams: ≥128 KiB reply window so a
+                         # reply position ≥ 0x10000 is legal
 
 CTX_ID = 4
 
@@ -5917,7 +6685,14 @@ def load_shvec(name):
           (shv / (name + '.exp')).read_text().split()]
     n_spv, n_bind, n_push = hw[0], hw[1], hw[2]
     gx, gy, gz = hw[3], hw[4], hw[5]
+    # G3b-iii DispatchBase (flags bit4): {gbx,gby,gbz} sit between the
+    # tag word and the module; vkCmdDispatchBase in the session must
+    # carry the same base for the oracle image to line up
+    wb = (0, 0, 0)
     i = 8
+    if hw[6] & 0x10:
+        wb = tuple(hw[i:i + 3])
+        i += 3
     spv = hw[i:i + n_spv]
     i += n_spv
     binds = []
@@ -5936,7 +6711,7 @@ def load_shvec(name):
             i += 5
             b['img'] = {'w': hw_ & 0xFFFF, 'h': (hw_ >> 16) & 0xFFFF,
                         'fmt': mlf & 0xFF, 'mips': (mlf >> 8) & 0xF,
-                        'dim': (mlf >> 12) & 3,
+                        'dim': (mlf >> 12) & 7,
                         'layers': (mlf >> 16) & 0xFFFF,
                         'swz': swz, 's0': s0, 's1': s1}
         binds.append(b)
@@ -5979,7 +6754,7 @@ def load_shvec(name):
                          'oracle': oracle[n], 'model': model_w[n],
                          'cls': cls[n]})
     return {'name': name, 'spv': spv, 'gx': gx, 'gy': gy, 'gz': gz,
-            'push': push, 'binds': binds, 'inits': inits,
+            'wb': wb, 'push': push, 'binds': binds, 'inits': inits,
             'dyn_off': dyn_off, 'ebinds': ebinds, 'outs': outs,
             'commit_fault': commit_fault}
 
@@ -6969,6 +7744,55 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     device=V['dev'], buffer=bufs[n_bind],
                     memory=mems[n_bind], memoryOffset=0)),
             ]
+        if variant in ('dispind', 'exec2nd'):
+            # G3b-iii F8: dispind — DispatchIndirect operand buffer,
+            # {0,0,0} (no-op arm) then {gx,gy,gz} staged by
+            # UpdateBuffer at record time; exec2nd — the private
+            # readback dst for the post-ExecuteCommands CopyBuffer
+            bufs.append(0x5000_0000_1000 + n_bind * 0x1000_0001)
+            mems.append(0x6000_0000_1000 + n_bind * 0x1000_0001)
+            seg_a1 += [
+                ('vkCreateBuffer', dict(
+                    device=V['dev'],
+                    pCreateInfo=st('VkBufferCreateInfo', size=64,
+                                   usage=0x102, sharingMode=0,
+                                   queueFamilyIndexCount=0,
+                                   pQueueFamilyIndices=[]),
+                    pBuffer=bufs[n_bind])),
+                ('vkGetBufferMemoryRequirements', dict(
+                    device=V['dev'], buffer=bufs[n_bind],
+                    pMemoryRequirements=st('VkMemoryRequirements'))),
+                ('vkAllocateMemory', dict(
+                    device=V['dev'],
+                    pAllocateInfo=st('VkMemoryAllocateInfo',
+                                     allocationSize=64,
+                                     memoryTypeIndex=0, pNext=[]),
+                    pMemory=mems[n_bind])),
+                ('vkBindBufferMemory', dict(
+                    device=V['dev'], buffer=bufs[n_bind],
+                    memory=mems[n_bind], memoryOffset=0)),
+            ]
+        if variant == 'events':
+            # G3b-iii F8: two events — E1 is set+waited inside the
+            # buffer; E2 stays RESET at submit so the second
+            # CmdWaitEvents stalls until the host vkSetEvent in
+            # seg_b releases it
+            ev_h = [V['fen'] + 0x2000_0001,
+                    V['fen'] + 0x2000_0002]
+            seg_a1 += [
+                ('vkCreateEvent', dict(
+                    device=V['dev'],
+                    pCreateInfo=st('VkEventCreateInfo', flags=0),
+                    pEvent=ev_h[i])) for i in range(2)]
+        if variant == 'recmany':
+            # G3b-iii: record_many shape — four events cycle through
+            # the 5 000 recorded Set/Reset pairs
+            rm_ev = [V['fen'] + 0x2100_0000 + i for i in range(4)]
+            seg_a1 += [
+                ('vkCreateEvent', dict(
+                    device=V['dev'],
+                    pCreateInfo=st('VkEventCreateInfo', flags=0),
+                    pEvent=rm_ev[i])) for i in range(4)]
         if variant == 'xfer_copy':
             # §12.3 C/5a: staging src buffer, fill target, readback —
             # pure transfer operands (not descriptor-bound)
@@ -7354,6 +8178,19 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                          mems[n_bind])
                 assert base_b is not None, 'donecol blob refused'
                 blob_base.append(map_blob(RES_BLOB0 + n_bind))
+            if variant in ('dispind', 'exec2nd'):
+                # G3b-iii F8: backing blob for the extra buffer —
+                # dispind pre-stages the two operands at bytes 0/16
+                # ({0,0,0} no-op arm, then {gx,gy,gz}); exec2nd's is
+                # the private copy dst
+                base_b = create_blob_mem(RES_BLOB0 + n_bind, 64,
+                                         mems[n_bind])
+                assert base_b is not None, 'dispind blob refused'
+                blob_base.append(map_blob(RES_BLOB0 + n_bind))
+                if variant == 'dispind':
+                    apw(blob_base[n_bind],
+                        [0, 0, 0, 0, vec['gx'], vec['gy'],
+                         vec['gz'], 0])
             if variant == 'xfer_copy':
                 # memory-backed blobs for the three transfer-only
                 # buffers; the guest stages the copy source contents
@@ -7750,6 +8587,146 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 seg_a2.append(('vkCmdDispatch', dict(
                     commandBuffer=V['cb'], groupCountX=vec['gx'],
                     groupCountY=vec['gy'], groupCountZ=vec['gz'])))
+            elif variant == 'dispind':
+                # G3b-iii F8: DispatchIndirect — operand {0,0,0}
+                # (no-op arm) then {gx,gy,gz}, both staged in the
+                # blob-backed operand buffer at bytes 0/16
+                seg_a2 += [
+                    ('vkCmdDispatchIndirect', dict(
+                        commandBuffer=V['cb'], buffer=bufs[n_bind],
+                        offset=0)),
+                    ('vkCmdDispatchIndirect', dict(
+                        commandBuffer=V['cb'], buffer=bufs[n_bind],
+                        offset=16)),
+                ]
+            elif variant == 'dispbase':
+                # G3b-iii F8: DispatchBase — the base group offsets
+                # WorkgroupId/GlobalInvocationId; the dispbase shvec's
+                # oracle image carries the same base (vec['wb']) so the
+                # readback expectation shifts identically
+                gbx, gby, gbz = vec['wb']
+                seg_a2.append(('vkCmdDispatchBase', dict(
+                    commandBuffer=V['cb'],
+                    baseGroupX=gbx, baseGroupY=gby, baseGroupZ=gbz,
+                    groupCountX=vec['gx'], groupCountY=vec['gy'],
+                    groupCountZ=vec['gz'])))
+            elif variant == 'exec2nd':
+                # G3b-iii F8: two real secondaries (one EMPTY — zero
+                # records exercises the one-deep stack's immediate
+                # pop), then a record AFTER ExecuteCommands proves
+                # primary execution continues at its own cursor; the
+                # copy lands the dispatch outputs in rb for the
+                # readback gate
+                cb2 = V['fen'] + 0x1000_0001
+                cb3 = V['fen'] + 0x1000_0002
+                seg_a2 += [
+                    ('vkAllocateCommandBuffers', dict(
+                        device=V['dev'],
+                        pAllocateInfo=st('VkCommandBufferAllocateInfo',
+                                         commandPool=V['cp'], level=1,
+                                         commandBufferCount=2),
+                        pCommandBuffers=[cb2, cb3])),
+                    ('vkBeginCommandBuffer', dict(
+                        commandBuffer=cb2,
+                        pBeginInfo=st('VkCommandBufferBeginInfo',
+                                      flags=0,
+                                      pInheritanceInfo=st(
+                                          'VkCommandBufferInheritanceInfo',
+                                          renderPass=0, subpass=0,
+                                          framebuffer=0,
+                                          occlusionQueryEnable=0,
+                                          queryFlags=0,
+                                          pipelineStatistics=0)))),
+                    ('vkCmdDispatch', dict(
+                        commandBuffer=cb2, groupCountX=vec['gx'],
+                        groupCountY=vec['gy'],
+                        groupCountZ=vec['gz'])),
+                    ('vkEndCommandBuffer', dict(commandBuffer=cb2)),
+                    ('vkBeginCommandBuffer', dict(
+                        commandBuffer=cb3,
+                        pBeginInfo=st('VkCommandBufferBeginInfo',
+                                      flags=0,
+                                      pInheritanceInfo=st(
+                                          'VkCommandBufferInheritanceInfo',
+                                          renderPass=0, subpass=0,
+                                          framebuffer=0,
+                                          occlusionQueryEnable=0,
+                                          queryFlags=0,
+                                          pipelineStatistics=0)))),
+                    ('vkEndCommandBuffer', dict(commandBuffer=cb3)),
+                    ('vkCmdExecuteCommands', dict(
+                        commandBuffer=V['cb'], commandBufferCount=2,
+                        pCommandBuffers=[cb2, cb3])),
+                    # shader-write -> transfer-read ordering: the
+                    # copy's aperture reads must not race the
+                    # secondary's still-in-flight dispatch
+                    ('vkCmdPipelineBarrier', dict(
+                        commandBuffer=V['cb'],
+                        srcStageMask=0x2000, dstStageMask=0x8,
+                        dependencyFlags=0,
+                        memoryBarrierCount=0, pMemoryBarriers=[],
+                        bufferMemoryBarrierCount=0,
+                        pBufferMemoryBarriers=[],
+                        imageMemoryBarrierCount=0,
+                        pImageMemoryBarriers=[])),
+                    ('vkCmdCopyBuffer', dict(
+                        commandBuffer=V['cb'],
+                        srcBuffer=bufs[0], dstBuffer=bufs[n_bind],
+                        regionCount=1,
+                        pRegions=[st('VkBufferCopy', srcOffset=0,
+                                     dstOffset=0, size=32)])),
+                ]
+            elif variant == 'events':
+                # G3b-iii F8: CmdSetEvent->CmdWaitEvents in one buffer
+                # (passes at the barrier drain), then a second
+                # WaitEvents on the still-RESET E2 as the LAST record —
+                # the submission stalls on the poll until the host
+                # vkSetEvent in seg_b releases it
+                seg_a2 += [
+                    ('vkCmdDispatch', dict(
+                        commandBuffer=V['cb'], groupCountX=vec['gx'],
+                        groupCountY=vec['gy'],
+                        groupCountZ=vec['gz'])),
+                    ('vkCmdSetEvent', dict(
+                        commandBuffer=V['cb'], event=ev_h[0],
+                        stageMask=0x800)),
+                    ('vkCmdWaitEvents', dict(
+                        commandBuffer=V['cb'], eventCount=1,
+                        pEvents=[ev_h[0]],
+                        srcStageMask=0x2000, dstStageMask=0x8,
+                        memoryBarrierCount=0, pMemoryBarriers=[],
+                        bufferMemoryBarrierCount=0,
+                        pBufferMemoryBarriers=[],
+                        imageMemoryBarrierCount=0,
+                        pImageMemoryBarriers=[])),
+                    ('vkCmdWaitEvents', dict(
+                        commandBuffer=V['cb'], eventCount=1,
+                        pEvents=[ev_h[1]],
+                        srcStageMask=0x2000, dstStageMask=0x8,
+                        memoryBarrierCount=0, pMemoryBarriers=[],
+                        bufferMemoryBarrierCount=0,
+                        pBufferMemoryBarriers=[],
+                        imageMemoryBarrierCount=0,
+                        pImageMemoryBarriers=[])),
+                ]
+            elif variant == 'recmany':
+                # G3b-iii: record_many shape — 5 000
+                # CmdSetEvent/CmdResetEvent pairs grow ~160 record
+                # chunks so the sequential cursor + prefetch hop a
+                # chunk boundary ~160 times in one submission; every
+                # pair ends RESET so a post-fence vkGetEventStatus
+                # answering RESET proves the tail record executed.
+                # The closing dispatch keeps the readback gate
+                for i in range(5000):
+                    seg_a2.append(('vkCmdSetEvent', dict(
+                        commandBuffer=V['cb'], event=rm_ev[i & 3],
+                        stageMask=0x800)))
+                    seg_a2.append(('vkCmdResetEvent', dict(
+                        commandBuffer=V['cb'], event=rm_ev[i & 3],
+                        stageMask=0x800)))
+                seg_a2.append(('vkCmdDispatch', dict(
+                    commandBuffer=V['cb'], groupCountX=vec['gx'],
+                    groupCountY=vec['gy'], groupCountZ=vec['gz'])))
             elif variant != 'donecol':
                 # donecol emits its dispatch ahead of the collision
                 # pair above instead
@@ -7857,6 +8834,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 ('vkGetFenceStatus', dict(device=V['dev'],
                                           fence=V['fen'])),
             ]
+            if variant == 'events':
+                # G3b-iii F8: the host vkSetEvent lands while cmdexec
+                # is still parked on the second CmdWaitEvents' poll —
+                # vkDeviceWaitIdle/vkWaitForFences must not precede it
+                # or the release can never be delivered
+                seg_b.insert(1, ('vkSetEvent', dict(
+                    device=V['dev'], event=ev_h[1])))
             if variant == 'reloc_hold':
                 # §12.3 3d-d: MAP_BLOB races the in-flight submission —
                 # vgctl holds new dequeues, drains the engines to
@@ -7867,6 +8851,26 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 blob_base[defer_i] = map_blob(RES_BLOB0 + defer_i)
             note("B' segment B: QueueSubmit + waits")
             run_batches(compile_cmds(seg_b))
+
+            if variant == 'events':
+                # G3b-iii F8: after the fence — both events SET(3);
+                # vkResetEvent drops E1 to RESET(4)
+                run_batches(compile_cmds([
+                    ('vkGetEventStatus', dict(
+                        device=V['dev'], event=ev_h[0])),
+                    ('vkGetEventStatus', dict(
+                        device=V['dev'], event=ev_h[1])),
+                    ('vkResetEvent', dict(
+                        device=V['dev'], event=ev_h[0])),
+                    ('vkGetEventStatus', dict(
+                        device=V['dev'], event=ev_h[0])),
+                ]))
+            if variant == 'recmany':
+                # every event's last pair ended RESET(4)
+                run_batches(compile_cmds([
+                    ('vkGetEventStatus', dict(
+                        device=V['dev'], event=rm_ev[i]))
+                    for i in range(4)]))
 
             # ---- §12.3 3d-d post-submit relocation arms -------------- #
             if variant == 'rb_mapafter':
@@ -8270,6 +9274,213 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 run_batches(compile_cmds(seg_mc))
                 check_live()
 
+            if variant == 'allocmany':
+                # §5a G3b-iii: allocate_many shape — 10 000 live
+                # VkCommandBuffer objects, object count only (nothing
+                # is recorded).  Alloc/free batch at the
+                # VkCommandBuffer bound of 16 ids per call; the first
+                # 2 500 then free individually (RESET + O(1) unlink +
+                # descriptor FREE + RETIRE per buffer) and
+                # vkDestroyCommandPool sweeps the remaining 7 500
+                # (DESTROY_POOL walk + RETIRE_KIDS).  Needs
+                # --objslots above 10 000 plus the session's own
+                # entries
+                AM_N = 10000
+                AM_FREE = 2500
+                AM_CB0 = 0x7A00_0000_1000
+                AM_CP = 0x7B00_0000_1000
+                seg_am = [('vkCreateCommandPool', dict(
+                    device=V['dev'],
+                    pCreateInfo=st('VkCommandPoolCreateInfo',
+                                   queueFamilyIndex=0),
+                    pCommandPool=AM_CP))]
+                for i in range(0, AM_N, 16):
+                    seg_am.append(('vkAllocateCommandBuffers', dict(
+                        device=V['dev'],
+                        pAllocateInfo=st('VkCommandBufferAllocateInfo',
+                                         commandPool=AM_CP, level=0,
+                                         commandBufferCount=16),
+                        pCommandBuffers=[AM_CB0 + j * 0x1000_0001
+                                         for j in
+                                         range(i, i + 16)])))
+                note("B' allocmany: 10000 live VkCommandBuffer objects")
+                run_batches(compile_cmds(seg_am))
+                check_live()
+                seg_am = []
+                for i in range(0, AM_FREE, 16):
+                    seg_am.append(('vkFreeCommandBuffers', dict(
+                        device=V['dev'], commandPool=AM_CP,
+                        commandBufferCount=min(16, AM_FREE - i),
+                        pCommandBuffers=[AM_CB0 + j * 0x1000_0001
+                                         for j in
+                                         range(i,
+                                               min(i + 16,
+                                                   AM_FREE))])))
+                note("B' allocmany: free 2500")
+                run_batches(compile_cmds(seg_am))
+                check_live()
+                seg_am = [('vkDestroyCommandPool', dict(
+                    device=V['dev'], commandPool=AM_CP))]
+                note("B' allocmany: destroy pool sweeps 7500")
+                run_batches(compile_cmds(seg_am))
+                check_live()
+
+            if variant == 'xstreams':
+                # §6b: ExecuteCommandStreams is cursor-driven — ONE
+                # record with streamCount=9 (record ~71 words, over
+                # both retired limits: Streams=4 and the 40-word
+                # stage).  Each stream is a complete tiny command
+                # sequence ending in a reply (host EVENT commands);
+                # pReplyPositions lands every stream's reply at its
+                # own reply-window offset so per-stream positions
+                # are exercised.
+                XS_N = 9
+                xs_ev = [V['fen'] + 0x2400_0000 + i
+                         for i in range(XS_N)]
+                seg_xs = [('vkCreateEvent', dict(
+                    device=V['dev'],
+                    pCreateInfo=st('VkEventCreateInfo', flags=0),
+                    pEvent=xs_ev[i])) for i in range(XS_N)]
+                note("B' xstreams: create 9 events")
+                run_batches(compile_cmds(seg_xs))
+                check_live()
+                note("B' xstreams: ExecuteCommandStreams "
+                     "streamCount=9")
+                # dedicated ≥128 KiB reply blob so the LAST stream's
+                # reply position lands at 0x10004 — rep_pos_q must
+                # carry a byte offset wider than 16 bits
+                XS_REP_SIZE = 0x30000
+                create_blob(RES_REPLY_X, XS_REP_SIZE)
+                map_blob(RES_REPLY_X)
+                submit(VG_CTX_ATTACH, [RES_REPLY_X, 0], ctx=CTX_ID,
+                       exp_type=VG_RESP_NODATA)
+                rx = tm.rings[r0['slot']]
+                sw_x = vk('vkSetReplyCommandStreamMESA',
+                          pStream={'_ty': None,
+                                   'resourceId': RES_REPLY_X,
+                                   'offset': 0,
+                                   'size': XS_REP_SIZE})
+                ring_put(rx, sw_x)
+                pstreams = []
+                xpos = []
+                for i in range(XS_N):
+                    body = []
+                    if i & 1:
+                        w_s, a_s = vka('vkSetEvent', device=V['dev'],
+                                       event=xs_ev[i])
+                        rep_q.append(('vkSetEvent', a_s))
+                        body += w_s
+                    w_g, a_g = vka('vkGetEventStatus',
+                                   device=V['dev'], event=xs_ev[i])
+                    rep_q.append(('vkGetEventStatus', a_g))
+                    body += w_g
+                    apw((tm.blobs[RES_EXEC]['base_w'] << 2) +
+                        i * 256, body)
+                    pstreams.append({'_ty': None,
+                                     'resourceId': RES_EXEC,
+                                     'offset': i * 256,
+                                     'size': len(body) * 4})
+                    xpos.append(0x10004 if i == XS_N - 1 else i * 64)
+                exw = vk('vkExecuteCommandStreamsMESA',
+                         streamCount=XS_N, pStreams=pstreams,
+                         pReplyPositions=xpos,
+                         dependencyCount=0, pDependencies=[],
+                         flags=0)
+                ring_put(rx, exw)
+                tail_store(rx)
+                tm.drain_ring(rx, fm, ses, log)
+                wait_head(r0['slot'])
+                flush_replies()
+                check_live()
+
+            if variant == 'submit101':
+                # §5a G3b-iii chunked submission: the CTS
+                # trim_command_pool shape — 100 CBs + feedback = 101
+                # buffers in ONE VkSubmitInfo.  vnfront walks the
+                # whole pCommandBuffers blob and pushes one executor
+                # record per <=4 resolved buffers; only the last
+                # chunk carries the fence.  Each CB records a
+                # CmdSetEvent on one of 10 shared events
+                # (bufferNdx % 10 like the test); every event must
+                # reply SET afterwards or a chunk was dropped.
+                S1_N = 101
+                s1_ev = [V['fen'] + 0x2600_0000 + i for i in range(10)]
+                s1_cb = [0x7E00_0000_1000 + i * 0x1000_0001
+                         for i in range(S1_N)]
+                s1_fen = V['fen'] + 2
+                seg_s1 = [('vkCreateEvent', dict(
+                    device=V['dev'],
+                    pCreateInfo=st('VkEventCreateInfo', flags=0),
+                    pEvent=s1_ev[i])) for i in range(10)]
+                seg_s1.append(('vkCreateFence', dict(
+                    device=V['dev'],
+                    pCreateInfo=st('VkFenceCreateInfo', flags=0),
+                    pFence=s1_fen)))
+                for i in range(0, S1_N, 16):
+                    seg_s1.append(('vkAllocateCommandBuffers', dict(
+                        device=V['dev'],
+                        pAllocateInfo=st('VkCommandBufferAllocateInfo',
+                                         commandPool=V['cp'], level=0,
+                                         commandBufferCount=min(
+                                             16, S1_N - i)),
+                        pCommandBuffers=[
+                            s1_cb[j] for j in
+                            range(i, min(i + 16, S1_N))])))
+                for i in range(S1_N):
+                    seg_s1 += [
+                        ('vkBeginCommandBuffer', dict(
+                            commandBuffer=s1_cb[i],
+                            pBeginInfo=st('VkCommandBufferBeginInfo',
+                                          flags=0,
+                                          pInheritanceInfo=None))),
+                        ('vkCmdSetEvent', dict(
+                            commandBuffer=s1_cb[i],
+                            event=s1_ev[i % 10], stageMask=0x800)),
+                        ('vkEndCommandBuffer', dict(
+                            commandBuffer=s1_cb[i])),
+                    ]
+                seg_s1.append(('vkQueueSubmit', dict(
+                    queue=V['queue'], submitCount=1,
+                    pSubmits=[st(
+                        'VkSubmitInfo', waitSemaphoreCount=0,
+                        pWaitSemaphores=[], pWaitDstStageMask=[],
+                        commandBufferCount=S1_N,
+                        pCommandBuffers=s1_cb,
+                        signalSemaphoreCount=0,
+                        pSignalSemaphores=[])],
+                    fence=s1_fen)))
+                seg_s1 += [
+                    ('vkDeviceWaitIdle', dict(device=V['dev'])),
+                    ('vkWaitForFences', dict(
+                        device=V['dev'], fenceCount=1,
+                        pFences=[s1_fen], waitAll=1,
+                        timeout=0xFFFFFFFFFFFFFFFF)),
+                ]
+                note("B' submit101: 101 CBs, chunked submit, "
+                     "10 shared events")
+                run_batches(compile_cmds(seg_s1))
+                check_live()
+                seg_s1 = [('vkGetEventStatus', dict(
+                    device=V['dev'], event=s1_ev[i]))
+                          for i in range(10)]
+                note("B' submit101: all 10 events must reply SET")
+                run_batches(compile_cmds(seg_s1))
+                seg_s1 = [('vkDestroyEvent', dict(
+                    device=V['dev'], event=s1_ev[i]))
+                          for i in range(10)]
+                seg_s1.append(('vkDestroyFence', dict(
+                    device=V['dev'], fence=s1_fen)))
+                for i in range(0, S1_N, 16):
+                    seg_s1.append(('vkFreeCommandBuffers', dict(
+                        device=V['dev'], commandPool=V['cp'],
+                        commandBufferCount=min(16, S1_N - i),
+                        pCommandBuffers=[
+                            s1_cb[j] for j in
+                            range(i, min(i + 16, S1_N))])))
+                note("B' submit101: teardown")
+                run_batches(compile_cmds(seg_s1))
+                check_live()
+
             if variant == 'rerec':
                 # §6.1 implicit reset: re-BEGIN the SAME command buffer
                 # after its submission retired — the CTS device-local
@@ -8317,6 +9528,55 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 for j in range(4):
                     rec(EK_APRCHK, base_b + 4 * j, rr_pat, rr_pat, 0)
                 note("B' gates: rerec fill 4 words")
+
+            if variant == 'cbpoolreset':
+                # §5a G3b-iii: vkResetCommandPool then reuse — the
+                # CTS pool_reset_reuse shape.  RESET_POOL streams the
+                # chained descriptors (chains freed, SECONDARY kept),
+                # vnfront clears each buffer's state; the same cb then
+                # re-BEGINs, records, and resubmits.
+                pr_pat = 0xC0DE_5EE5
+                pr_ob = vec['outs'][0]['bind_idx']
+                seg_pr = [
+                    ('vkResetCommandPool', dict(
+                        device=V['dev'], commandPool=V['cp'],
+                        flags=0)),
+                    ('vkBeginCommandBuffer', dict(
+                        commandBuffer=V['cb'],
+                        pBeginInfo=st('VkCommandBufferBeginInfo',
+                                      flags=0,
+                                      pInheritanceInfo=None))),
+                    ('vkCmdFillBuffer', dict(
+                        commandBuffer=V['cb'], dstBuffer=bufs[pr_ob],
+                        dstOffset=0, size=16, data=pr_pat)),
+                    ('vkEndCommandBuffer', dict(commandBuffer=V['cb'])),
+                    ('vkCreateFence', dict(
+                        device=V['dev'],
+                        pCreateInfo=st('VkFenceCreateInfo', flags=0),
+                        pFence=V['fen'] + 1)),
+                    ('vkQueueSubmit', dict(
+                        queue=V['queue'], submitCount=1,
+                        pSubmits=[st(
+                            'VkSubmitInfo', waitSemaphoreCount=0,
+                            pWaitSemaphores=[], pWaitDstStageMask=[],
+                            commandBufferCount=1,
+                            pCommandBuffers=[V['cb']],
+                            signalSemaphoreCount=0,
+                            pSignalSemaphores=[])],
+                        fence=V['fen'] + 1)),
+                    ('vkDeviceWaitIdle', dict(device=V['dev'])),
+                    ('vkWaitForFences', dict(
+                        device=V['dev'], fenceCount=1,
+                        pFences=[V['fen'] + 1], waitAll=1,
+                        timeout=0xFFFFFFFFFFFFFFFF)),
+                ]
+                note("B' cbpoolreset: pool reset + rerecord + resubmit")
+                run_batches(compile_cmds(seg_pr))
+                base_b = blob_base[pr_ob]
+                W(TP_CHECK, CK_APR, 4, base_b)
+                for j in range(4):
+                    rec(EK_APRCHK, base_b + 4 * j, pr_pat, pr_pat, 0)
+                note("B' gates: cbpoolreset fill 4 words")
 
             # ---- segment C: reverse-order teardown -------------------- #
             seg_c = [
@@ -8822,6 +10082,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         spvd = G.TOOLS / 'shader' / 'corpus'
         is_blend = 'blend' in gfx
         is_wide = 'vbwide' in gfx
+        # G3b-iii F8: drawind/drawindx issue the same triangle through
+        # DrawIndirect/DrawIndexedIndirect — the operand sits at a
+        # 4-mod-8 byte offset inside a dedicated INDIRECT buffer to
+        # exercise the unaligned fetch word selection
+        is_drawindx = 'drawindx' in gfx
+        is_drawind = 'drawind' in gfx and not is_drawindx
         # statvp: pipeline carries a static pViewportState and the
         # command buffer emits NO SetViewport/SetScissor — coverage must
         # come from the ObjPay-baked viewport/scissor (the CTS
@@ -8839,7 +10105,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         X = {k: 0x4000_0000_1000 + i * 0x1000_0001 for i, k in enumerate(
             ('inst', 'pd', 'dev', 'queue', 'imem', 'img', 'view', 'rp',
              'fb', 'sm_vs', 'sm_fs', 'pl', 'gp', 'vmem', 'vb', 'vb2',
-             'rmem', 'rb', 'cp', 'cb', 'fen'))}
+             'rmem', 'rb', 'cp', 'cb', 'fen', 'ib2'))}
         RES_BLOB0 = 200
 
         CW = CH = 64                     # color attachment extent
@@ -9146,15 +10412,44 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     device=X['dev'], buffer=X['vb2'], memory=X['vmem'],
                     memoryOffset=0x800)),
             ]
+        # G3b-iii F8: the drawind/drawindx operand+index buffer — the
+        # indirect operand sits at byte offset 4 (4-mod-8 alignment
+        # arm), the drawindx u16 index list at offset 0x20
+        if is_drawind or is_drawindx:
+            seg_a1 += [
+                ('vkCreateBuffer', dict(
+                    device=X['dev'],
+                    pCreateInfo=st('VkBufferCreateInfo', size=0x200,
+                                   usage=0x100 |
+                                   (0x40 if is_drawindx else 0),
+                                   sharingMode=0,
+                                   queueFamilyIndexCount=0,
+                                   pQueueFamilyIndices=[]),
+                    pBuffer=X['ib2'])),
+                ('vkBindBufferMemory', dict(
+                    device=X['dev'], buffer=X['ib2'], memory=X['vmem'],
+                    memoryOffset=0xC00)),
+            ]
         run_batches(compile_cmds(seg_a1))
 
+        # vmem blob contents: vb words at 0, vb2 at 0x800 (wide); the
+        # indirect buffer's slice at 0xC00 carries the draw operand at
+        # +4 (word 0x301) and (drawindx) the u16 index list {0,1,2} at
+        # +0x20 (word 0x308)
+        vmem_words = vb_words + \
+            ([0] * ((0x800 - 4 * len(vb_words)) // 4) +
+             vb2_words if is_wide else [])
+        if is_drawind or is_drawindx:
+            vmem_words += [0] * (0x301 - len(vmem_words)) + \
+                [3, 1, 0, 0] + ([0] if is_drawindx else [])
+            if is_drawindx:
+                vmem_words += [0] * (0x308 - len(vmem_words)) + \
+                    [0x0001_0000, 0x0000_0002]
         # blob+map the three memories; guest posts the vertex data at
         # the vb's mapped offset (vbwide: vb2 words at vmem+0x800)
         for rid, mem, init in (
                 (RES_BLOB0, X['imem'], None),
-                (RES_BLOB0 + 1, X['vmem'],
-                 vb_words + ([0] * ((0x800 - 4 * len(vb_words)) // 4) +
-                             vb2_words if is_wide else [])),
+                (RES_BLOB0 + 1, X['vmem'], vmem_words),
                 (RES_BLOB0 + 2, X['rmem'], None)):
             base_b = create_blob_mem(
                 rid, 0x10000 if mem == X['imem']
@@ -9206,10 +10501,22 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 pScissors=[st('VkRect2D',
                     offset=st('VkOffset2D', x=0, y=0),
                     extent=st('VkExtent2D', width=CW, height=CH))])),
+        ]) + ([] if not is_drawindx else [
+            # drawindx binds the u16 {0,1,2} list inside ib2 before
+            # the indexed indirect record
+            ('vkCmdBindIndexBuffer', dict(
+                commandBuffer=X['cb'], buffer=X['ib2'],
+                offset=0x20, indexType=0)),
         ]) + [
-            ('vkCmdDraw', dict(
-                commandBuffer=X['cb'], vertexCount=3, instanceCount=1,
-                firstVertex=0, firstInstance=0)),
+            ([('vkCmdDrawIndirect', dict(
+                commandBuffer=X['cb'], buffer=X['ib2'], offset=4,
+                drawCount=1, stride=16))] if is_drawind else
+             [('vkCmdDrawIndexedIndirect', dict(
+                 commandBuffer=X['cb'], buffer=X['ib2'], offset=4,
+                 drawCount=1, stride=20))] if is_drawindx else
+             [('vkCmdDraw', dict(
+                 commandBuffer=X['cb'], vertexCount=3, instanceCount=1,
+                 firstVertex=0, firstInstance=0))])[0],
             ('vkCmdEndRenderPass', dict(commandBuffer=X['cb'])),
             ('vkCmdPipelineBarrier', dict(
                 commandBuffer=X['cb'],

@@ -92,6 +92,7 @@ vkUpdateDescriptorSets
 vkCreateCommandPool
 vkDestroyCommandPool
 vkResetCommandPool
+vkTrimCommandPool
 vkAllocateCommandBuffers
 vkFreeCommandBuffers
 vkBeginCommandBuffer
@@ -130,6 +131,10 @@ vkCmdClearDepthStencilImage
 vkCmdClearAttachments
 vkCmdResolveImage
 vkCmdExecuteCommands
+vkCmdSetEvent
+vkCmdResetEvent
+vkCmdWaitEvents
+vkCmdDispatchBase
 
 vkCreateFence
 vkDestroyFence

@@ -131,6 +131,16 @@ values are stamped onto the child env (`AI_ISLAND_DRAM_*`, `S4_FLAVOUR`).
 - **`--use-emit`:** expert; also export `CVA6_TIMINGS_EMIT_FLIST` (default **off**; never merges into `core/`).
 - Lint/synth remain on **live RTL** unless a consumer explicitly reads emit env.
 
+**Manual redesign destination — `out_rtl/`.** Repo-root `out_rtl` is a git symlink (mode 120000) to `build-platform/workspace/hyp/`. That tree is the sv-timing 8 FO4 redesign of the `core/` and `corev_apu/` RTL (`hyp_redesign_core_8fo4/`, `hyp_redesign_corev_apu_8fo4/`, `hyp_core_ws/`). The link is tracked; the workspace contents stay gitignored. Pass it as a manual output directory:
+
+```bash
+./build.sh timings validate --from-timing out_rtl
+./build.sh test --from-timing out_rtl/hyp_redesign_core_8fo4
+./build.sh diag run core --from-timing out_rtl
+```
+
+Validation accepts the redesign trees without `portable.f` / `analyze.json` and records schema `out-rtl-manual` (warnings, not errors). `--use-emit` still requires a corrected filelist and does not replace `core/` or `corev_apu/`. Those two trees remain the functional drafts: Vulkan 1.4 / CTS work lands there. Carrying that correctness into the FO4-oriented `out_rtl/` structure is deferred; an FO4 screen of `out_rtl/` is not closure and is not a reason to edit the redesign tree while a CTS group is open.
+
 ### 2.6 `clean` purposes & filters
 
 **Workspace + package leaves**

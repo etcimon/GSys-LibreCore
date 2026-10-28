@@ -432,16 +432,16 @@ module tb_g6lc_apu_sys_venus;
       $display("STALL chan awv=%0d wv=%0d arv=%0d rr=%0d br=%0d",
                areq.aw_valid, areq.w_valid, areq.ar_valid,
                areq.r_ready, areq.b_ready);
-      $display("STALL xf st=%0d busy=%0d exw_v=%0d xfrdy=%0d crv=%0d crrdy=%0d crcv=%0d",
+      $display("STALL xf st=%0d busy=%0d exw_v=%0d xfrdy=%0d opv=%0d oprdy=%0d opcv=%0d",
         i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_xf
           .gen_on.state_q,
         i_venus.i_dut.gen_venus.i_vgsys.gen_on.xfer_busy,
         i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.ex_work_v,
         i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.xf_work_rdy,
-        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.xf_cr_v,
-        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.xf_cr_rdy,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.xf_op_v,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.xf_op_rdy,
         i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
-          .xf_cr_cpl_rdy);
+          .xf_op_cpl_rdy);
       $display("STALL ex_st=%0d wsv=%0d",
         i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_exec
           .gen_on.state_q,

@@ -84,7 +84,9 @@ module wt_axi_adapter
   // Re-pipelining contract (sv-timing A128; 29.8 adjusted FO4 on the
   // Nangate45 board): AXI adapter: request / response FSMs.
   // svt-pipe: require-contract
+  // svt-pipe: protocol ax valid=inval_valid_i
   // svt-pipe: no-cut on=self_inval_pend_q
+  // svt-pipe: cycle ax q=self_inval_pend_q d=inval_apply_valid_o hold=inval_valid_i steps=1
 
   // support up to 512bit cache lines
   localparam AxiNumWords = (CVA6Cfg.ICACHE_LINE_WIDTH/CVA6Cfg.AxiDataWidth) * (CVA6Cfg.ICACHE_LINE_WIDTH > CVA6Cfg.DCACHE_LINE_WIDTH)  +

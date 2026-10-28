@@ -71,6 +71,7 @@ module g6lc_apu_xfer
   import g6lc_apu_pkg::*;
   import g6lc_apu_bus_pkg::*;
   import g6lc_apu_cmdrec_pkg::*;
+  import g6lc_apu_objpay_pkg::*;
   import g6lc_apu_cmdexec_pkg::*;
   import g6lc_apu_sh_pkg::*;
   import g6lc_apu_vn_pkg::*;
@@ -96,13 +97,14 @@ module g6lc_apu_xfer
   input  apu_xfer_desc_t    xf_i,
   output logic              done_o,
   output apu_sh_done_t      done_pl_o,
-  // cmdrec payload-arena reads (PAYREAD requester)
-  output logic              cr_req_valid_o,
-  input  logic              cr_req_ready_i,
-  output apu_cmdrec_req_t   cr_req_o,
-  input  logic              cr_cpl_valid_i,
-  output logic              cr_cpl_ready_o,
-  input  apu_cmdrec_cpl_t   cr_cpl_i,
+  // §5a G3b-iii: record payloads are PayMem chunks — operand words
+  // are read straight through ObjPay at the absolute xf_i.pay_base
+  output logic              op_req_valid_o,
+  input  logic              op_req_ready_i,
+  output apu_objpay_req_t   op_req_o,
+  input  logic              op_cpl_valid_i,
+  output logic              op_cpl_ready_o,
+  input  apu_objpay_cpl_t   op_cpl_i,
   // aperture base (mapping base = ap_base_i + operand offset)
   input  logic [63:0]       ap_base_i,
   // engine reset: cancel + drain DMA, drop work, return idle
@@ -140,15 +142,15 @@ module g6lc_apu_xfer
     assign work_ready_o   = 1'b0;
     assign done_o         = 1'b0;
     assign done_pl_o      = '0;
-    assign cr_req_valid_o = 1'b0;
-    assign cr_req_o       = '0;
-    assign cr_cpl_ready_o = 1'b0;
+    assign op_req_valid_o = 1'b0;
+    assign op_req_o       = '0;
+    assign op_cpl_ready_o = 1'b0;
     assign busy_o         = 1'b0;
     assign axi_req_o      = '0;
     logic unused;
     assign unused = clk_i | rst_ni | testmode_i | work_valid_i |
-                    (|work_i) | (|xf_i) | cr_req_ready_i |
-                    cr_cpl_valid_i | (|cr_cpl_i) | (|ap_base_i) |
+                    (|work_i) | (|xf_i) | op_req_ready_i |
+                    op_cpl_valid_i | (|op_cpl_i) | (|ap_base_i) |
                     flush_i | (|axi_rsp_i);
   end else begin : gen_on
 
@@ -195,7 +197,7 @@ module g6lc_apu_xfer
     // PAYREAD u64 service: the caller presets pay_adr_q + pay_ret_q and
     // enters XPay; on return pw_q holds the pair
     logic           pay_fly_q, pay_half_q;
-    logic [15:0]    pay_adr_q;
+    logic [31:0]    pay_adr_q;
     xf_state_e      pay_ret_q;
     logic [63:0]    pw_q;
     // FILL/UPDATE operands
@@ -763,9 +765,9 @@ module g6lc_apu_xfer
     // ---- PAYREAD port --------------------------------------------------
     // XPay (region/operand fetches) and XRun (UPDATE data words) share
     // the requester; at most one is active at a time.
-    assign cr_cpl_ready_o = 1'b1;
-    assign cr_req_o = '{op: APU_CMDREC_OP_PAYREAD, cbuf: xf_q.cbuf,
-                       idx: pay_adr_q, default: '0};
+    assign op_cpl_ready_o = 1'b1;
+    assign op_req_o = '{op: APU_OBJPAY_OP_READ, addr: pay_adr_q,
+                       words: '0, wdata: '0};
 
     assign busy_o    = state_q != XIdle;
     assign done_o    = state_q == XDone;
@@ -780,13 +782,13 @@ module g6lc_apu_xfer
     assign wr_settled = wr_done_q || !wr_iss_q || wr_fault;
 
     always_comb begin
-      cr_req_valid_o = 1'b0;
+      op_req_valid_o = 1'b0;
       rd_req_v       = 1'b0;
       wr_req_v       = 1'b0;
       if ((state_q == XPay || state_q == XImgRd) && !pay_fly_q)
-        cr_req_valid_o = 1'b1;
+        op_req_valid_o = 1'b1;
       if (state_q == XRun && is_upd &&
-          (upd_go || (up_ph_q && !pay_fly_q))) cr_req_valid_o = 1'b1;
+          (upd_go || (up_ph_q && !pay_fly_q))) op_req_valid_o = 1'b1;
       if (state_q == XReq && !discard) begin
         rd_req_v = is_rd && !rd_iss_q;
         wr_req_v = !wr_iss_q;
@@ -983,26 +985,26 @@ module g6lc_apu_xfer
           // shared u64 arena fetch: two PAYREADs into pw_q
           XPay: begin
             if (!pay_fly_q) begin
-              if (cr_req_ready_i) begin
+              if (op_req_ready_i) begin
                 pay_fly_q <= 1'b1;
-                pay_adr_q <= pay_adr_q + 16'd1;
+                pay_adr_q <= pay_adr_q + 32'd1;
               end
-            end else if (cr_cpl_valid_i) begin
+            end else if (op_cpl_valid_i) begin
               pay_fly_q <= 1'b0;
-              if (cr_cpl_i.status != APU_CMDREC_OK) begin
+              if (op_cpl_i.status != APU_OBJPAY_OK) begin
                 xf_fault_q <= 1'b1;
                 state_q    <= XDone;
               end else if (!pay_half_q) begin
-                pw_q[31:0] <= cr_cpl_i.pdata;
+                pw_q[31:0] <= op_cpl_i.rdata;
                 pay_half_q <= 1'b1;
               end else begin
-                pw_q[63:32] <= cr_cpl_i.pdata;
+                pw_q[63:32] <= op_cpl_i.rdata;
                 pay_half_q  <= 1'b0;
                 state_q     <= pay_ret_q;
               end
             end
             // a flush waits for an in-flight read to answer, then aborts
-            if (flush_i && !(pay_fly_q && !cr_cpl_valid_i)) begin
+            if (flush_i && !(pay_fly_q && !op_cpl_valid_i)) begin
               pay_fly_q <= 1'b0;
               state_q   <= XAbort;
             end
@@ -1186,33 +1188,33 @@ module g6lc_apu_xfer
 
           XRun: begin
             // UPDATE word fetch handshakes
-            if (upd_go && cr_req_ready_i) begin
+            if (upd_go && op_req_ready_i) begin
               pay_fly_q <= 1'b1;
-              pay_adr_q <= pay_adr_q + 16'd1;
+              pay_adr_q <= pay_adr_q + 32'd1;
             end
-            if (up_ph_q && !pay_fly_q && cr_req_ready_i &&
+            if (up_ph_q && !pay_fly_q && op_req_ready_i &&
                 is_upd) begin
               pay_fly_q <= 1'b1;
-              pay_adr_q <= pay_adr_q + 16'd1;
+              pay_adr_q <= pay_adr_q + 32'd1;
             end
-            if (pay_fly_q && cr_cpl_valid_i) begin
+            if (pay_fly_q && op_cpl_valid_i) begin
               pay_fly_q <= 1'b0;
-              if (cr_cpl_i.status != APU_CMDREC_OK) begin
+              if (op_cpl_i.status != APU_OBJPAY_OK) begin
                 xf_fault_q <= 1'b1;
               end else if (!up_ph_q) begin
-                up_lo_q <= cr_cpl_i.pdata;
+                up_lo_q <= op_cpl_i.rdata;
                 if (upd_n == 4'd8) begin
                   up_ph_q <= 1'b1;              // fetch the second word
                 end else begin
                   up_v_q           <= 1'b1;
-                  up_frag_q.data   <= {32'h0, cr_cpl_i.pdata};
+                  up_frag_q.data   <= {32'h0, op_cpl_i.rdata};
                   up_frag_q.keep   <= 8'h0f;
                   up_frag_q.offset <= csent_q;
                   up_frag_q.last   <= csent_q + 32'd4 == csz_q;
                 end
               end else begin
                 up_v_q           <= 1'b1;
-                up_frag_q.data   <= {cr_cpl_i.pdata, up_lo_q};
+                up_frag_q.data   <= {op_cpl_i.rdata, up_lo_q};
                 up_frag_q.keep   <= 8'hff;
                 up_frag_q.offset <= csent_q;
                 up_frag_q.last   <= csent_q + 32'd8 == csz_q;
@@ -1300,20 +1302,20 @@ module g6lc_apu_xfer
           // pay_adr advances past the region so sequential sweeps keep
           // walking the record
           XImgRd: begin
-            if (!pay_fly_q && cr_req_ready_i) pay_fly_q <= 1'b1;
-            if (pay_fly_q && cr_cpl_valid_i) begin
+            if (!pay_fly_q && op_req_ready_i) pay_fly_q <= 1'b1;
+            if (pay_fly_q && op_cpl_valid_i) begin
               pay_fly_q <= 1'b0;
-              if (cr_cpl_i.status != APU_CMDREC_OK) begin
+              if (op_cpl_i.status != APU_OBJPAY_OK) begin
                 xf_fault_q <= 1'b1;
                 state_q    <= XDone;
               end else begin
-                rg_q[rw_i_q] <= cr_cpl_i.pdata;
+                rg_q[rw_i_q] <= op_cpl_i.rdata;
                 pay_adr_q    <= pay_adr_q + 16'd1;
                 if (rw_i_q + 5'd1 >= rg_n_q) state_q <= rg_ret_q;
                 else                         rw_i_q <= rw_i_q + 5'd1;
               end
             end
-            if (flush_i && !(pay_fly_q && !cr_cpl_valid_i)) begin
+            if (flush_i && !(pay_fly_q && !op_cpl_valid_i)) begin
               pay_fly_q <= 1'b0;
               state_q   <= XAbort;
             end
@@ -1324,6 +1326,40 @@ module g6lc_apu_xfer
             automatic logic        v_ok;
             automatic logic [15:0] wm, hm;
             automatic logic [31:0] rl, ih;
+            automatic logic [31:0] sbl, slc, dbl, dlc;
+            // §9a: a 3D image stores depth as layers.  Map offset.z and
+            // extent.depth onto that range.  A clear of a 3D image
+            // (base 0, count 1) covers every slice.  The microprogram
+            // reads the spliced words on a later cycle.
+            sbl = 32'h0; slc = 32'h0; dbl = 32'h0; dlc = 32'h0;
+            if (is_i2i) begin
+              sbl = xf_q.img0.itype == 2'd2 ? rg_q[6] : rg_q[2];
+              slc = xf_q.img0.itype == 2'd2 ? rg_q[16] : rg_q[3];
+              dbl = xf_q.img1.itype == 2'd2 ? rg_q[13] : rg_q[9];
+              dlc = xf_q.img1.itype == 2'd2 ? rg_q[16] : rg_q[10];
+              if (xf_q.img0.itype == 2'd2) begin
+                rg_q[2] <= sbl;
+                rg_q[3] <= slc;
+              end
+              if (xf_q.img1.itype == 2'd2) begin
+                rg_q[9]  <= dbl;
+                rg_q[10] <= dlc;
+              end
+            end else if (is_b2i || is_i2b) begin
+              if (xf_q.img0.itype == 2'd2) begin
+                sbl = rg_q[10];
+                slc = rg_q[13];
+                rg_q[6] <= sbl;
+                rg_q[7] <= slc;
+              end else begin
+                sbl = rg_q[6];
+                slc = rg_q[7];
+              end
+            end
+            if (is_clr && xf_q.img0.itype == 2'd2 &&
+                rg_q[3] == 32'h0 && rg_q[4] == 32'd1) begin
+              rg_q[4] <= {22'h0, xf_q.img0.layers};
+            end
             v_ok = 1'b0;
             rl = 32'h0; ih = 32'h0;
             wm = 16'h0;  hm = 16'h0;
@@ -1333,7 +1369,9 @@ module g6lc_apu_xfer
                      rg_q[2] >= 32'd1 &&
                      rg_q[1] + rg_q[2] <= 32'(xf_q.img0.mips) &&
                      rg_q[4] >= 32'd1 &&
-                     rg_q[3] + rg_q[4] <= 32'(xf_q.img0.layers);
+                     (xf_q.img0.itype == 2'd2
+                        ? (rg_q[3] == 32'h0 && rg_q[4] == 32'd1)
+                        : (rg_q[3] + rg_q[4] <= 32'(xf_q.img0.layers)));
             end else if (is_i2i) begin
               // {srcSub, srcOff, dstSub, dstOff, extent}
               wm = f_mdim(xf_q.img0.w, 5'(rg_q[1][4:0]));
@@ -1341,12 +1379,15 @@ module g6lc_apu_xfer
               v_ok = rg_q[0] == 32'd1 && rg_q[7] == 32'd1 &&
                      rg_q[1] < 32'(xf_q.img0.mips) &&
                      rg_q[8] < 32'(xf_q.img1.mips) &&
-                     rg_q[3] >= 32'd1 && rg_q[3] == rg_q[10] &&
-                     rg_q[2] + rg_q[3] <= 32'(xf_q.img0.layers) &&
-                     rg_q[9] + rg_q[10] <= 32'(xf_q.img1.layers) &&
-                     rg_q[6] == 32'h0 && rg_q[13] == 32'h0 &&
+                     slc >= 32'd1 && slc == dlc &&
+                     sbl + slc <= 32'(xf_q.img0.layers) &&
+                     dbl + dlc <= 32'(xf_q.img1.layers) &&
+                     (xf_q.img0.itype == 2'd2 ||
+                      (rg_q[6] == 32'h0 && rg_q[16] == 32'd1)) &&
+                     (xf_q.img1.itype == 2'd2 ||
+                      (rg_q[13] == 32'h0 && rg_q[16] == 32'd1)) &&
                      rg_q[14] >= 32'd1 && rg_q[15] >= 32'd1 &&
-                     rg_q[16] == 32'd1 &&
+                     (xf_q.img0.itype == 2'd2 || rg_q[16] == 32'd1) &&
                      rg_q[4] + rg_q[14] <= 32'(wm) &&
                      rg_q[5] + rg_q[15] <= 32'(hm) &&
                      rg_q[11] + rg_q[14] <=
@@ -1355,21 +1396,18 @@ module g6lc_apu_xfer
                        32'(f_mdim(xf_q.img1.h, 5'(rg_q[8][4:0])));
             end else begin
               // B2I/I2B: {bufOff u64, rowLen, imgH, aspect, mip,
-              // baseLayer, layerCount, off.xyz, ext.whd}; the buffer
-              // operand is the source (B2I) or destination (I2B).  The
-              // bufferOffset upper word must be zero — image-class
-              // addressing is 32-bit aperture-relative — and the byte
-              // need is evaluated by the shared multiplier (CP_NEED),
-              // where any product or sum exceeding u32 faults.
+              // baseLayer, layerCount, off.xyz, ext.whd}.  3D uses
+              // off.z/extent.depth as the layer span (sbl/slc).
               wm = f_mdim(xf_q.img0.w, 5'(rg_q[5][4:0]));
               hm = f_mdim(xf_q.img0.h, 5'(rg_q[5][4:0]));
               rl = crl;
               ih = cih;
               v_ok = rg_q[4] == 32'd1 &&
                      rg_q[5] < 32'(xf_q.img0.mips) &&
-                     rg_q[7] >= 32'd1 &&
-                     rg_q[6] + rg_q[7] <= 32'(xf_q.img0.layers) &&
-                     rg_q[10] == 32'h0 && rg_q[13] == 32'd1 &&
+                     slc >= 32'd1 &&
+                     sbl + slc <= 32'(xf_q.img0.layers) &&
+                     (xf_q.img0.itype == 2'd2 ||
+                      (rg_q[10] == 32'h0 && rg_q[13] == 32'd1)) &&
                      rg_q[11] >= 32'd1 && rg_q[12] >= 32'd1 &&
                      rg_q[1] == 32'h0 &&               // bo[63:32] == 0
                      rg_q[8] + rg_q[11] <= 32'(wm) &&
@@ -1777,8 +1815,8 @@ module g6lc_apu_xfer
 
     `ifndef SYNTHESIS
     assert property (@(posedge clk_i) disable iff (!rst_ni)
-      cr_req_valid_o && !cr_req_ready_i |=>
-        cr_req_valid_o && $stable(cr_req_o));
+      op_req_valid_o && !op_req_ready_i |=>
+        op_req_valid_o && $stable(op_req_o));
     assert property (@(posedge clk_i) disable iff (!rst_ni)
       rd_req_v && !rd_req_rdy |=> rd_req_v && $stable(rd_req));
     assert property (@(posedge clk_i) disable iff (!rst_ni)
@@ -1795,6 +1833,7 @@ module g6lc_apu_xfer_fixture
   import g6lc_apu_pkg::*;
   import g6lc_apu_bus_pkg::*;
   import g6lc_apu_cmdrec_pkg::*;
+  import g6lc_apu_objpay_pkg::*;
   import g6lc_apu_cmdexec_pkg::*;
   import g6lc_apu_sh_pkg::*;
 #(
@@ -1811,12 +1850,12 @@ module g6lc_apu_xfer_fixture
   input  apu_xfer_desc_t    xf_i,
   output logic              done_o,
   output apu_sh_done_t      done_pl_o,
-  output logic              cr_req_valid_o,
-  input  logic              cr_req_ready_i,
-  output apu_cmdrec_req_t   cr_req_o,
-  input  logic              cr_cpl_valid_i,
-  output logic              cr_cpl_ready_o,
-  input  apu_cmdrec_cpl_t   cr_cpl_i,
+  output logic              op_req_valid_o,
+  input  logic              op_req_ready_i,
+  output apu_objpay_req_t   op_req_o,
+  input  logic              op_cpl_valid_i,
+  output logic              op_cpl_ready_o,
+  input  apu_objpay_cpl_t   op_cpl_i,
   input  logic [63:0]       ap_base_i,
   input  logic              flush_i,
   output logic              busy_o,

@@ -1,0 +1,104 @@
+// OpenSTA, Static Timing Analyzer
+// Copyright (c) 2026, Parallax Software, Inc.
+// 
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+// 
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// 
+// The origin of this software must not be misrepresented; you must not
+// claim that you wrote the original software.
+// 
+// Altered source versions must be plainly marked as such, and must not be
+// misrepresented as being the original software.
+// 
+// This notice may not be removed or altered from any source distribution.
+
+#pragma once
+
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "LibertyClass.hh"
+
+namespace sta {
+
+class WireloadForArea;
+
+using FanoutLength = std::pair<float,float>;
+using FanoutLengthSeq = std::vector<FanoutLength*>;
+using WireloadForAreaSeq = std::vector<WireloadForArea*>;
+
+const char *
+wireloadTreeString(WireloadTree tree);
+WireloadTree
+stringWireloadTree(std::string_view wire_load_type);
+
+const char *
+wireloadModeString(WireloadMode wire_load_mode);
+WireloadMode
+stringWireloadMode(std::string_view wire_load_mode);
+
+class Wireload
+{
+public:
+  Wireload(std::string name,
+           LibertyLibrary *library);
+  Wireload(std::string name,
+           LibertyLibrary *library,
+           float area,
+           float resistance,
+           float capacitance,
+           float slope);
+  virtual ~Wireload();
+  const std::string &name() const { return name_; }
+  void setArea(float area);
+  void setResistance(float res);
+  void setCapacitance(float cap);
+  void setSlope(float slope);
+  void addFanoutLength(float fanout,
+                       float length);
+  // Find wireload resistance/capacitance for fanout.
+  virtual void findWireload(float fanout,
+                            const OperatingConditions *op_cond,
+                            float &cap,
+                            float &res) const;
+
+protected:
+  std::string name_;
+  LibertyLibrary *library_;
+  float area_;
+  float resistance_;
+  float capacitance_;
+  // Fanout length extrapolation slope.
+  float slope_;
+  FanoutLengthSeq fanout_lengths_;
+};
+
+class WireloadSelection
+{
+public:
+  WireloadSelection(std::string name);
+  ~WireloadSelection();
+  const std::string &name() const { return name_; }
+  void addWireloadFromArea(float min_area,
+                           float max_area,
+                           const Wireload *wireload);
+  const Wireload *findWireload(float area) const;
+
+private:
+  const std::string name_;
+  WireloadForAreaSeq wireloads_;
+};
+
+} // namespace sta

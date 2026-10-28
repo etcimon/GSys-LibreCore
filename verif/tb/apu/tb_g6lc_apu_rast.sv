@@ -171,22 +171,22 @@ module tb_g6lc_apu_rast;
             automatic int unsigned v  = sh_i;
             if (sh_pos4) begin
               for (int c = 0; c < 4; c++)
-                i_mem.apm[apix((ob + v*144 + 4*c) >> 2)] <=
+                i_mem.apm[apix((ob + v*144 + 4*c) >> 2)] =
                   i_mem.apm[apix((ib + v*144 + 4*c) >> 2)];
             end else begin
-              i_mem.apm[apix((ob + v*144 + 0) >> 2)] <=
+              i_mem.apm[apix((ob + v*144 + 0) >> 2)] =
                 i_mem.apm[apix((ib + v*144 + 0) >> 2)];
-              i_mem.apm[apix((ob + v*144 + 4) >> 2)] <=
+              i_mem.apm[apix((ob + v*144 + 4) >> 2)] =
                 i_mem.apm[apix((ib + v*144 + 4) >> 2)];
               // Position.z = attr1.w (lets a case steer early-Z
               // through the per-vertex colour alpha); w = 1.0
-              i_mem.apm[apix((ob + v*144 + 8) >> 2)] <=
+              i_mem.apm[apix((ob + v*144 + 8) >> 2)] =
                 i_mem.apm[apix((ib + v*144 + 28) >> 2)];
-              i_mem.apm[apix((ob + v*144 + 12) >> 2)] <=
+              i_mem.apm[apix((ob + v*144 + 12) >> 2)] =
                 32'h3F800000;
             end
             for (int c = 0; c < 4; c++)
-              i_mem.apm[apix((ob + v*144 + 16 + 4*c) >> 2)] <=
+              i_mem.apm[apix((ob + v*144 + 16 + 4*c) >> 2)] =
                 i_mem.apm[apix((ib + v*144 + 16 + 4*c) >> 2)];
           end else begin
             // FS: fs_out[f].loc0 = fs_in[f].loc0 (varying slot at +16)
@@ -194,7 +194,7 @@ module tb_g6lc_apu_rast;
             automatic int unsigned ob = int'(sh_imm_q[2]);
             automatic int unsigned f  = sh_i;
             for (int c = 0; c < 4; c++)
-              i_mem.apm[apix((ob + f*144 + 4*c) >> 2)] <=
+              i_mem.apm[apix((ob + f*144 + 4*c) >> 2)] =
                 i_mem.apm[apix((ib + f*144 + 16 + 4*c) >> 2)];
             // G3a-i slot-8 tail: word0 FragDepth, word1 discard flag,
             // word2 sample mask (all-ones), word3 = 0 — same layout
@@ -213,11 +213,11 @@ module tb_g6lc_apu_rast;
               if (dbg_f8 && sh_f8 != 0)
                 $display("[F8] f=%0d fx=%08x fy=%08x px=%0d py=%0d fl=%0d",
                          f, fx, fy, pxi, pyi, fl[0]);
-              i_mem.apm[apix((ob + f*144 + 128) >> 2)] <= sh_f8z;
-              i_mem.apm[apix((ob + f*144 + 132) >> 2)] <= fl;
-              i_mem.apm[apix((ob + f*144 + 136) >> 2)] <=
+              i_mem.apm[apix((ob + f*144 + 128) >> 2)] = sh_f8z;
+              i_mem.apm[apix((ob + f*144 + 132) >> 2)] = fl;
+              i_mem.apm[apix((ob + f*144 + 136) >> 2)] =
                 32'hFFFFFFFF;
-              i_mem.apm[apix((ob + f*144 + 140) >> 2)] <= 32'h0;
+              i_mem.apm[apix((ob + f*144 + 140) >> 2)] = 32'h0;
             end
           end
           if (sh_i + 1 >= sh_n) shst <= SH_DONE;

@@ -86,11 +86,14 @@ maxPerStageDescriptorStorageImages = 16
 maxDescriptorSetSamplers = 16
 maxDescriptorSetSampledImages = 16
 maxDescriptorSetStorageImages = 16
+maxImageDimension1D = 4096
 maxImageDimension2D = 4096
+maxImageDimension3D = 256
+maxImageDimensionCube = 4096
 maxImageArrayLayers = 256
 maxPushConstantsSize = 128
-maxComputeWorkGroupSize = [64, 64, 64]
-maxComputeWorkGroupInvocations = 64
+maxComputeWorkGroupSize = [128, 128, 64]
+maxComputeWorkGroupInvocations = 128
 maxComputeSharedMemorySize = 16384
 minUniformBufferOffsetAlignment = 256
 minStorageBufferOffsetAlignment = 256
@@ -161,7 +164,10 @@ type1_heap = 1
 # G1c: GRAPHICS joins now that the raster engine + draw assembly exist.
 queueFlags = "GRAPHICS|COMPUTE|TRANSFER"
 queueCount = 1
-timestampValidBits = 64
+# No timestamp query execution yet.  0 is the honest value; a non-zero
+# count would require timestampPeriod and pull timestamp CTS into the
+# obligation set.
+timestampValidBits = 0
 minImageTransferGranularity = [1, 1, 1]
 
 [formats]
@@ -349,10 +355,19 @@ fields = ["pSetLayouts", "pPushConstantRanges.stageFlags",
           "pPushConstantRanges.offset", "pPushConstantRanges.size"]
 
 [keep.vkCreateComputePipelines]
-# per element {module id (2w), pSpecializationInfo presence (1w),
-#              layout id (2w)}
+# per element, vk.xml order: module id (2w), pSpecializationInfo
+# presence (1w).  Pointer hops are transparent, so the body fields
+# are named under stage: mapEntryCount, per entry {constantID,
+# offset, size(2w)}, dataSize(2w), pData words, then layout id (2w).
+# A null pSpecializationInfo omits the body (5-word element).
 fields = ["pCreateInfos.layout", "pCreateInfos.stage.module",
-          "pCreateInfos.stage.pSpecializationInfo"]
+          "pCreateInfos.stage.pSpecializationInfo",
+          "pCreateInfos.stage.mapEntryCount",
+          "pCreateInfos.stage.pMapEntries.constantID",
+          "pCreateInfos.stage.pMapEntries.offset",
+          "pCreateInfos.stage.pMapEntries.size",
+          "pCreateInfos.stage.dataSize",
+          "pCreateInfos.stage.pData"]
 
 [keep.vkCreateDescriptorPool]
 # §12.3 F5: {type, descriptorCount} pairs — the front sums the counts
@@ -658,6 +673,17 @@ fields = ["pViewports.x", "pViewports.y", "pViewports.width",
 # to ride the arena (buffer is the record's q-slot handle; indexType
 # stays in rec.imm[0])
 fields = ["offset"]
+
+# §5a G3b-iii: secondary command buffers — the recorded payload is the
+# pCommandBuffers id list (2w each); vnfront resolves each to the
+# object's {gen,slot} handle when it writes the record's PayMem payload
+[keep.vkCmdExecuteCommands]
+fields = ["pCommandBuffers"]
+
+# CmdWaitEvents' payload is the resolved {gen,slot} event-handle list;
+# the barrier bodies behind it are discarded (full-drain semantics)
+[keep.vkCmdWaitEvents]
+fields = ["pEvents"]
 
 [keep.vkCmdSetScissor]
 # per pScissors element {offset.x, offset.y, extent.width,

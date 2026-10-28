@@ -498,12 +498,13 @@ module tb_g6lc_apu_shcore;
     do_work(32'd999, 0, 0, 0, 0, dpl);
     cmp("unsup.code", {24'h0, dpl.code}, APU_SH_DONE_UNSUPPORTED);
 
-    // 3. vkCmdDispatchIndirect → UNSUPPORTED in 4a (group counts live
-    //    in a buffer — reading them is a 5-series integration item)
+    // 3. vkCmdDispatchIndirect → dispatch in §5a G3b-iii (the executor
+    //    has already fetched the group counts into imm[0..2]; shcore
+    //    sees the same shape as a direct vkCmdDispatch)
     cases++;
     do_work(32'(APU_VN_TYPE_VK_CMD_DISPATCH_INDIRECT_EXT),
             gx, gy, gz, 0, dpl);
-    cmp("ind.code", {24'h0, dpl.code}, APU_SH_DONE_UNSUPPORTED);
+    cmp("ind.code", {24'h0, dpl.code}, APU_SH_DONE_OK);
 
     // 4. work held while busy: present a record during an in-flight
     //    dispatch — work_ready_o must be low and the record must be

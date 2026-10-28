@@ -29,7 +29,8 @@ package g6lc_apu_cmdexec_pkg;
                                         // ctx_i) — keys the per-context
                                         // sticky fault register and the
                                         // watchdog device-loss pulse
-    logic [3:0][7:0] crec;              // cmdrec buffer indices
+    logic [3:0][31:0] crec;             // §5a G3b-iii: cmdrec
+                                        // descriptor word addrs (cbd)
     logic [3:0][31:0] chndl;            // objtab {gen,slot} handles
   } apu_cmdexec_submit_t;
 
@@ -50,8 +51,8 @@ package g6lc_apu_cmdexec_pkg;
     logic [31:0]        vp;             // first viewport imm word
     logic [31:0]        sc;             // first scissor imm word
     logic [15:0]        push;           // push-constant stageFlags word
-    logic [15:0]        push_base;      // §7b: cmdrec arena base of the
-                                        // last vkCmdPushConstants payload
+    logic [31:0]        push_base;      // §7b: PayMem word address of
+                                        // the last vkCmdPushConstants payload
     logic [15:0]        push_len;       // §7b: its byte size
     logic               rp_active;
     logic [3:0]         subpass;
@@ -96,14 +97,14 @@ package g6lc_apu_cmdexec_pkg;
     logic [15:0] w, h;         // mip-0 extent
     logic [7:0]  fmt;          // APU_IMG_FMT_* device format id
     logic [4:0]  mips;         // mipLevels
-    logic [9:0]  layers;       // arrayLayers
+    logic [9:0]  layers;       // arrayLayers, or depth for a 3D image
+    logic [1:0]  itype;        // VkImageType: 0=1D 1=2D 2=3D
     logic [31:0] layer_bytes;  // Σ_m pitch_m*h_m per layer
   } apu_xfer_img_t;
 
   typedef struct packed {
     apu_xfer_op_e    op;
-    logic [7:0]      cbuf;      // cmdrec arena owner buffer
-    logic [15:0]     pay_base;  // arena word base (rec.imm[7])
+    logic [31:0]     pay_base;  // PayMem word address (rec.imm[7])
     logic [15:0]     regions;   // COPY: regionCount (rec.imm[0])
     logic [31:0]     src_base;  // COPY: src buffer aperture offset
     logic [31:0]     src_size;  // COPY: src operand extent (bytes)

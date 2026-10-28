@@ -166,7 +166,10 @@ module scoreboard #(
   // (valid + trans_id, killed by the cancel the scoreboard itself raises) and
   // the issue acknowledge, each a one-cycle latency the consumers must absorb.
   // svt-pipe: require-contract
+  // svt-pipe: protocol sb valid=wt_valid_i
   // svt-pipe: no-cut on=mem_n
+  // svt-pipe: cycle sb q=mem_n d=issue_instr_valid_o hold=wt_valid_i steps=1
+  // svt-pipe: cut-ok sb on=issue_instr_valid_o
   logic [CVA6Cfg.NR_SB_ENTRIES-1:0] still_issued;
 
   logic [CVA6Cfg.NrIssuePorts-1:0] issue_full;

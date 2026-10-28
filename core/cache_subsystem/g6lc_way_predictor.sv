@@ -52,7 +52,9 @@ module g6lc_way_predictor
   // Re-pipelining contract (sv-timing A128; 23.2 adjusted FO4 on the
   // Nangate45 board): way predictor: table update.
   // svt-pipe: require-contract
+  // svt-pipe: protocol wp valid=lookup_i flush=flush_i
   // svt-pipe: no-cut on=mem_q
+  // svt-pipe: cycle wp q=mem_q d=valid_o hold=lookup_i steps=1
 
   localparam int unsigned IDX_W = (NR_ENTRIES <= 1) ? 1 : $clog2(NR_ENTRIES);
   localparam int unsigned WAY_W = (NR_WAYS <= 1) ? 1 : $clog2(NR_WAYS);

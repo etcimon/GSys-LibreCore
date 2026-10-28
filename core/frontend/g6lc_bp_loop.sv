@@ -44,7 +44,9 @@ module g6lc_bp_loop
   // Re-pipelining contract (sv-timing A128; 54.5 adjusted FO4 on the
   // Nangate45 board): loop predictor: table update state.
   // svt-pipe: require-contract
+  // svt-pipe: protocol lp valid=flush_i
   // svt-pipe: no-cut on=mem_q
+  // svt-pipe: cycle lp q=mem_q d=pred_o hold=flush_i steps=1
 
   localparam int unsigned OFFSET = CVA6Cfg.RVC == 1'b1 ? 1 : 2;
   localparam int unsigned IDX_W = (NR_ENTRIES <= 1) ? 1 : $clog2(NR_ENTRIES);

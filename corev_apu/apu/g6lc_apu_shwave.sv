@@ -46,7 +46,7 @@ module g6lc_apu_shwave
   parameter int unsigned ShaderLanes   = 8,
   parameter int unsigned ShaderVec     = 4,
   parameter int unsigned ShaderRegs    = 256,
-  parameter int unsigned MaxWaves      = 8,
+  parameter int unsigned MaxWaves      = 16,
   parameter int unsigned ShaderIds     = 1024,
   parameter int unsigned ShaderSlots   = 8,
   parameter int unsigned ShaderWords   = 2048,
@@ -412,6 +412,9 @@ module g6lc_apu_shwave
     logic [7:0]   lx_q, ly_q, lz_q, ninit_q;
     // workgroup/wave iteration
     logic [15:0]  wgx_q, wgy_q, wgz_q;
+    // §5a G3b-iii: vkCmdDispatchBase base group — WorkgroupId =
+    // wave coordinate + base
+    logic [15:0]  wbx_q, wby_q, wbz_q;
     logic [RL-1:0] wave_q;
     logic [7:0]   nwaves_q;
     logic [31:0]  tot_q;              // local invocations lx*ly*lz
@@ -482,6 +485,12 @@ module g6lc_apu_shwave
     logic [15:0]  at_op_q;             // opcode of in-flight atomic
     logic [31:0]  at_old_q;            // fetched old word
     logic [31:0]  at_new_q;            // RMW result being written back
+    // Same-address forwarding for back-to-back device RMWs.  The
+    // eight lanes of one imageAtomicAdd hit one texel; the next lane's
+    // read can otherwise observe the pre-instruction word.
+    logic         at_fwd_v_q;
+    logic [61:0]  at_fwd_a_q;
+    logic [31:0]  at_fwd_d_q;
     // call result shape (latched at W_TY1 — the frame records it so
     // OpReturnValue copies the right row count into the caller's reg)
     logic [15:0]  rsz_q;               // result type byte size
@@ -704,7 +713,7 @@ module g6lc_apu_shwave
     endfunction
     function automatic logic f_has_rty(input logic [15:0] o);
       unique case (o)
-        12,61,65,66,68,79,80,81,82,84,86,87,88,95,98,100,103,104,106,
+        12,60,61,65,66,68,79,80,81,82,84,86,87,88,95,98,100,103,104,106,
         109,110,111,112,124,126,127,128,
         129,130,131,132,133,134,135,136,137,138,139,142,143,144,145,
         146,147,148,164,165,166,167,168,169,170,171,172,173,174,175,
@@ -737,6 +746,7 @@ module g6lc_apu_shwave
         61,65,66,68,81,84,109,110,111,112,124,126,127,168,200:
                  f_nva = 3'd1;
         250,251: f_nva = 3'd1;              // cond / selector
+        60:      f_nva = 3'd3;              // ImageTexelPointer: img,coord,sample
         99:      f_nva = 3'd3;              // ImageWrite: img,coord,texel
         95:      f_nva = (wc > 6) ? 3'd3 : 3'd2;  // Fetch: img,coord[,lod]
         88:      f_nva = 3'd3;              // SampleExplicitLod + Lod op
@@ -826,16 +836,18 @@ module g6lc_apu_shwave
               : inv / ({24'h0, lx_q} * {24'h0, ly_q});
         unique case (bi)
           APU_SH_BI_GID: unique case (c)
-            0: f_bi = (32'(wgx_q) * lx_q) + lix;
-            1: f_bi = (32'(wgy_q) * ly_q) + liy;
-            2: f_bi = (32'(wgz_q) * lz_q) + liz;
+            0: f_bi = ((32'(wgx_q) + wbx_q) * lx_q) + lix;
+            1: f_bi = ((32'(wgy_q) + wby_q) * ly_q) + liy;
+            2: f_bi = ((32'(wgz_q) + wbz_q) * lz_q) + liz;
             default: f_bi = 0; endcase
           APU_SH_BI_LID: unique case (c)
             0: f_bi = lix; 1: f_bi = liy; 2: f_bi = liz;
             default: f_bi = 0; endcase
           APU_SH_BI_WGID: unique case (c)
-            0: f_bi = {16'h0, wgx_q}; 1: f_bi = {16'h0, wgy_q};
-            2: f_bi = {16'h0, wgz_q}; default: f_bi = 0; endcase
+            0: f_bi = {16'h0, wgx_q + wbx_q};
+            1: f_bi = {16'h0, wgy_q + wby_q};
+            2: f_bi = {16'h0, wgz_q + wbz_q};
+            default: f_bi = 0; endcase
           APU_SH_BI_NUMWG: unique case (c)
             0: f_bi = {16'h0, gx_q}; 1: f_bi = {16'h0, gy_q};
             2: f_bi = {16'h0, gz_q}; default: f_bi = 0; endcase
@@ -918,6 +930,8 @@ module g6lc_apu_shwave
                               f_tx_kind = k == 8'd1 || k == 8'd2;
         16'd98:               f_tx_kind = k == 8'd2 || k == 8'd3;
         16'd99:               f_tx_kind = k == 8'd3;
+        // OpImageTexelPointer: storage image only (r32ui/r32i atomics)
+        16'd60:               f_tx_kind = k == 8'd3;
         16'd103, 16'd104, 16'd106:
                               f_tx_kind = k <= 8'd3;
         default:              f_tx_kind = 1'b0;
@@ -2878,6 +2892,7 @@ module g6lc_apu_shwave
         eoff_q <= '0; escratch_q <= '0; eslab_q <= '0;
         lx_q <= '0; ly_q <= '0; lz_q <= '0; ninit_q <= '0;
         wgx_q <= '0; wgy_q <= '0; wgz_q <= '0;
+        wbx_q <= '0; wby_q <= '0; wbz_q <= '0;
         wave_q <= '0; nwaves_q <= '0; tot_q <= '0;
         for (int w = 0; w < MaxWaves; w++) begin
           pc_q[w] <= '0; cmask_q[w] <= '0; clbl_q[w] <= '0;
@@ -2957,6 +2972,7 @@ module g6lc_apu_shwave
         resn_q <= '0; rsz_q <= '0;
         f8l_q <= '0; f8b_q <= '0; f8d_q <= '0; fslate_q <= 1'b0;
         at_old_q <= '0; at_new_q <= '0; at_op_q <= '0;
+        at_fwd_v_q <= 1'b0; at_fwd_a_q <= '0; at_fwd_d_q <= '0;
         dmph_q <= '0; dmcol_q <= '0; dmp_q <= '0;
         for (int k = 0; k < 4; k++) begin
           dtm_q[k] <= '0; dres_q[k] <= '0;
@@ -3006,6 +3022,8 @@ module g6lc_apu_shwave
             for (int i = 0; i < 32; i++)
               push_q[i] <= push_i[i*32 +: 32];
             wgx_q <= '0; wgy_q <= '0; wgz_q <= '0;
+            wbx_q <= disp_pl_i.gbx; wby_q <= disp_pl_i.gby;
+            wbz_q <= disp_pl_i.gbz;
             wave_q <= '0; insns_q <= '0; robust_q <= '0;
             done_code_q <= '0; wait_q <= '0;
             wsw_q <= '0; nbar_q <= '0; nmem_q <= '0;
@@ -3376,7 +3394,7 @@ module g6lc_apu_shwave
               // QueryLevels (106)
               // G3a-ii: projected forms divide the coord first
               91,92,93,94: st_q <= W_TXJ0;
-              86,87,88,89,90,95,96,97,98,99,100,103,104,105,106:
+              60,86,87,88,89,90,95,96,97,98,99,100,103,104,105,106:
                            st_q <= W_TX0;
               // G2b derivative ops: quad = lanes {4k..4k+3}.
               // Fine: dPdx(l)=v[l|1]-v[l&~1], dPdy(l)=v[l|2]-v[l&~2];
@@ -4935,6 +4953,14 @@ module g6lc_apu_shwave
                   push_q[o32[31:2] > 31 ? 5'd31 : o32[6:2]];
               end
               st_q <= W_LSA;
+            end else if (tg[3:0] == APU_SH_SC_IMAGE) begin
+              // OpImageTexelPointer result: comp0 is already the
+              // absolute texel address.  Lane-serial RMW follows.
+              ls_bok_q  <= 1'b1;
+              ls_bind_q <= '0;
+              ls_off_q  <= o32;
+              ls_bsz_q  <= 32'hFFFF_FFFF;
+              st_q <= W_LSC;
             end else if (tg[3:0] == APU_SH_SC_UNIFORM ||
                          tg[3:0] == APU_SH_SC_SBUF) begin
               // §12.3 F5: {set,binding,idx} -> binding row -> record
@@ -5292,6 +5318,13 @@ module g6lc_apu_shwave
               done_code_q <= APU_SH_DONE_FAULT;
               fl_pc_q <= pc_q[wave_q]; fl_wave_q <= {8'h0, wave_q};
               st_q <= W_DONE;
+            end else if (tx_rec_q[126:124] != 3'd0 &&
+                         tx_rec_q[126:124] != 3'd1) begin
+              // §9a: 1D/3D/cube records exist; sampling them is
+              // Aggregation B.  Fault the submission, do not hang.
+              done_code_q <= APU_SH_DONE_FAULT;
+              fl_pc_q <= pc_q[wave_q]; fl_wave_q <= {8'h0, wave_q};
+              st_q <= W_DONE;
             end else begin
               tx_smp_q   <= tx_rec_q[223:160];
               tx_smpok_q <= tx_rec_q[71:64] == 8'd1;
@@ -5360,18 +5393,23 @@ module g6lc_apu_shwave
           // here and iterates in W_TXM to tx_mret_q.
           W_TX4: begin
             logic [7:0] at;
-            logic [4:0] lod;
+            logic [4:0] lod, bpp_w;
+            logic       isint_w;
             at = g6lc_apu_vn_pkg::APU_VN_IMG_ATTR[tx_rec_q[119:112]];
+            bpp_w = 5'(g6lc_apu_vn_pkg::APU_VN_IMG_BPP
+                       [tx_rec_q[119:112]]);
+            isint_w = at[3];
             tx_bad_q  <= 1'b0;
-            tx_bpp_q  <= 5'(g6lc_apu_vn_pkg::APU_VN_IMG_BPP
-                            [tx_rec_q[119:112]]);
+            // bpp/isint are registered below; the opcode-60 check must
+            // use these values, not the previous image's registers.
+            tx_bpp_q  <= bpp_w;
             tx_nch_q  <= {1'b0, at[2:0]} + 4'd1;
             tx_isflt_q <= at[4] || at[5];
             tx_isf16_q <= at[5];
-            tx_isint_q <= at[3];
+            tx_isint_q <= isint_w;
             tx_issr_q  <= at[7];
             tx_lvl_q   <= tx_rec_q[123:120];
-            tx_ly_q    <= (tx_rec_q[125:124] == 2'd1)
+            tx_ly_q    <= (tx_rec_q[126:124] == 3'd1)
                           ? 16'(va_q[1][ls_lane_q[2:0]][2]) : 16'h0;
             tx_bcol_q  <= {1'b0, tx_smp_q[16:14]};
             tx_cen_q   <= tx_smp_q[20];           // compareEnable
@@ -5410,10 +5448,18 @@ module g6lc_apu_shwave
                   st_q <= (opc_q == 16'd96 && !tx_msk_q[1])
                           ? W_TXL0
                           : ((tx_bsl_q != 3'd0) ? W_TXC0A : W_TXC0);
-                16'd95, 16'd98, 16'd99: begin    // fetch / read / write
+                16'd60, 16'd95, 16'd98, 16'd99: begin  // ptr / fetch / read / write
                   lod = (opc_q == 16'd95 && wc_q > 16'd6)
                         ? va_q[2][ls_lane_q[2:0]][0][4:0] : 5'h0;
-                  if (lod >= tx_rec_q[123:120]) begin
+                  // Image atomics are only required for 32-bit integer
+                  // texels.  Other formats fault rather than alias.
+                  if (opc_q == 16'd60 &&
+                      !(isint_w && bpp_w == 5'd4)) begin
+                    done_code_q <= APU_SH_DONE_FAULT;
+                    fl_pc_q <= pc_q[wave_q];
+                    fl_wave_q <= {8'h0, wave_q};
+                    st_q <= W_DONE;
+                  end else if (lod >= tx_rec_q[123:120]) begin
                     // out-of-range lod: robust zero / dropped store
                     robust_q <= robust_q + 1;
                     st_q <= W_TXR0;
@@ -5604,7 +5650,7 @@ module g6lc_apu_shwave
             // only a 2D-array image owns an array layer — on 2D/3D/
             // cube records coord.z is the proj divisor or the depth
             // reference, not a layer index (W_TX4 already cleared it)
-            if (tx_rec_q[125:124] == 2'd1)
+            if (tx_rec_q[126:124] == 3'd1)
               tx_ly_q <= 16'(t2_q[ls_lane_q[2:0]][1]);
             tx_lode_q <= le[8:0];
             if (tx_qlod_q) begin
@@ -5804,12 +5850,23 @@ module g6lc_apu_shwave
               tx_bad_q  <= 1'b1;
               st_q <= W_TXR0;          // zeros / dropped store
             end else begin
-              tx_ta_q <= tx_rec_q[31:0] +
-                         {16'h0, tx_ly_q} * tx_laysz_q +
-                         tx_mof0_q +
-                         {16'h0, tx_iv_q[15:0]} * tx_pit0_q +
-                         {16'h0, tx_iu_q[15:0]} * {27'h0, tx_bpp_q};
-              if (opc_q == 16'd99) begin
+              logic [31:0] ta;
+              ta = tx_rec_q[31:0] +
+                   {16'h0, tx_ly_q} * tx_laysz_q +
+                   tx_mof0_q +
+                   {16'h0, tx_iv_q[15:0]} * tx_pit0_q +
+                   {16'h0, tx_iu_q[15:0]} * {27'h0, tx_bpp_q};
+              tx_ta_q <= ta;
+              if (opc_q == 16'd60) begin
+                // pointer consumed by OpAtomic*: comp0 is the absolute
+                // texel address, comp1 storage class Image.  W_LS0
+                // then uses the lane-serial RMW already used for SSBOs.
+                wb_q[ls_lane_q[2:0]][0] <= ta;
+                wb_q[ls_lane_q[2:0]][1] <= {28'h0, APU_SH_SC_IMAGE};
+                wb_q[ls_lane_q[2:0]][2] <= '0;
+                wb_q[ls_lane_q[2:0]][3] <= '0;
+                st_q <= W_TXN;
+              end else if (opc_q == 16'd99) begin
                 tx_gb_q[0] <= 1'b0;
                 st_q <= W_TXE0;        // encode then write
               end else begin
@@ -6299,14 +6356,14 @@ module g6lc_apu_shwave
               16'd103: begin                // OpImageQuerySizeLod
                 wb_q[ls_lane_q[2:0]][0] <= {16'h0, tx_w0_q};
                 wb_q[ls_lane_q[2:0]][1] <= {16'h0, tx_h0_q};
-                if (tx_rec_q[125:124] == 2'd1)
+                if (tx_rec_q[126:124] == 3'd1)
                   wb_q[ls_lane_q[2:0]][2] <=
                     {16'h0, tx_rec_q[143:128]};
               end
               default: begin                // OpImageQuerySize
                 wb_q[ls_lane_q[2:0]][0] <= tx_rec_q[95:80];
                 wb_q[ls_lane_q[2:0]][1] <= tx_rec_q[111:96];
-                if (tx_rec_q[125:124] == 2'd1)
+                if (tx_rec_q[126:124] == 3'd1)
                   wb_q[ls_lane_q[2:0]][2] <=
                     {16'h0, tx_rec_q[143:128]};
               end
@@ -6560,20 +6617,28 @@ module g6lc_apu_shwave
                 if (!ls_store_q) wb_q[ls_lane_q[2:0]][0] <= '0;
                 st_q <= W_LSA;
               end else begin
-                at_old_q <= ls_addr_q[2] ? mem_rdata_i[63:32]
-                                         : mem_rdata_i[31:0];
-                at_new_q <= atomic_alu;
+                logic [31:0] oldw;
+                oldw = (at_fwd_v_q &&
+                        at_fwd_a_q == ls_addr_q[63:2])
+                       ? at_fwd_d_q
+                       : (ls_addr_q[2] ? mem_rdata_i[63:32]
+                                       : mem_rdata_i[31:0]);
+                at_old_q <= oldw;
+                at_new_q <= f_atomic(at_op_q, oldw, atb_w, atc_w);
                 if (!ls_store_q)
-                  wb_q[ls_lane_q[2:0]][0] <=
-                    ls_addr_q[2] ? mem_rdata_i[63:32]
-                                 : mem_rdata_i[31:0];
+                  wb_q[ls_lane_q[2:0]][0] <= oldw;
                 // AtomicLoad is read-only — skip the RMW write
                 st_q <= (at_op_q == 16'd227) ? W_LSA : W_ATW;
               end
             end
           end
           W_ATW: begin                    // RMW write issued (port)
-            if (mem_ready_i) st_q <= W_LS2;      // write response wait
+            if (mem_ready_i) begin
+              at_fwd_v_q <= 1'b1;
+              at_fwd_a_q <= ls_addr_q[63:2];
+              at_fwd_d_q <= at_new_q;
+              st_q <= W_LS2;                     // write response wait
+            end
           end
           // workgroup/scratch atomic: slab read in W_ATS0, RMW write
           // + old-word capture in W_ATS1 (no response handshake)
@@ -7105,6 +7170,8 @@ module g6lc_apu_shwave
           W_SCHED: begin
             int pick, first, w;
             logic any_live;
+            // A store between two atomic instructions must be visible.
+            at_fwd_v_q <= 1'b0;
             pick = -1; first = -1; any_live = 1'b0;
             for (int i = 1; i <= MaxWaves; i++) begin
               w = (32'(wave_q) + i) % MaxWaves;
@@ -7186,7 +7253,7 @@ module g6lc_apu_shwave_fixture
   parameter int unsigned ShaderLanes   = 8,
   parameter int unsigned ShaderVec     = 4,
   parameter int unsigned ShaderRegs    = 256,
-  parameter int unsigned MaxWaves      = 8,
+  parameter int unsigned MaxWaves      = 16,
   parameter int unsigned ShaderIds     = 1024,
   parameter int unsigned ShaderSlots   = 8,
   parameter int unsigned ShaderWords   = 2048,

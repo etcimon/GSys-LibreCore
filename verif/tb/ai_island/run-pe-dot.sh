@@ -19,6 +19,10 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$ROOT"
+AI_RTL="${G6LC_AI_RTL_DIR:-$ROOT/corev_apu/ai_island}"
+AI_INC="${G6LC_AI_INC_DIR:-$ROOT/corev_apu/include}"
+AI_SRC="${G6LC_AI_SRC_DIR:-$ROOT/corev_apu/src}"
+AI_CVXIF="${G6LC_AI_CVXIF_DIR:-$ROOT/core/cvxif_g6lc_ai}"
 
 if ! command -v verilator >/dev/null 2>&1; then
   echo "SKIP no verilator"
@@ -35,7 +39,7 @@ mkdir -p "$OUT"
 # module that has none. Suppressing the warning hid that during development.
 verilator --binary --timing -Wno-fatal -Wno-TIMESCALEMOD -Wno-UNUSED \
   -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-DECLFILENAME --unroll-count 512 \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot.sv" \
+  "$AI_RTL/g6lc_ai_pe_dot.sv" \
   "$ROOT/verif/tb/ai_island/tb_g6lc_ai_pe_dot.sv" \
   --top-module tb_g6lc_ai_pe_dot \
   -Mdir "$OUT" -o tb_pe_dot >"$OUT/build.log" 2>&1 || {

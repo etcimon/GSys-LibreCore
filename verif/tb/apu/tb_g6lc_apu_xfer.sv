@@ -6,11 +6,11 @@
 // vkCmdFillBuffer / vkCmdUpdateBuffer executed by the engine's checked
 // DMA pair against a burst-capable AXI aperture model.
 //
-// Composition: g6lc_apu_cmdrec (the real module — the TB stages
-// payload words through BEGIN/APPEND/pay-stream/END exactly like
-// vnpump's writer, and the DUT replays them through PAYREAD) +
-// g6lc_apu_xfer + a byte-accurate AXI slave over the aperture array
-// apm[].
+// Composition: g6lc_apu_objpay + g6lc_apu_objmem + the flat memory
+// (the TB stages payload words through ObjPay ALLOC + WRITEs; the
+// DUT replays them straight through its own ObjPay port at the
+// absolute xf_i.pay_base) + g6lc_apu_xfer + a byte-accurate AXI
+// slave over the aperture array apm[].
 //
 // AXI invariants, always on:
 //   * every AW/AR address (and every read-burst beat) inside the
@@ -41,10 +41,15 @@ module tb_g6lc_apu_xfer;
   import g6lc_apu_cfg_pkg::*;
   import g6lc_apu_pkg::*;
   import g6lc_apu_bus_pkg::*;
-  import g6lc_apu_cmdrec_pkg::*;
+  import g6lc_apu_objpay_pkg::*;
+  import g6lc_apu_objtab_pkg::*;
+  import g6lc_apu_mp_pkg::*;
   import g6lc_apu_cmdexec_pkg::*;
   import g6lc_apu_vn_pkg::*;
   import g6lc_apu_sh_pkg::*;
+
+  localparam int unsigned PayMemBytes = 1024 * 1024;  // 256Ki words
+  localparam int unsigned ObjEntries  = 256;
 
   localparam logic [63:0] AB   = APU_SHM_BASE;
   localparam int unsigned APW  = 32'h40000;            // 1 MiB / 4 B
@@ -84,40 +89,74 @@ module tb_g6lc_apu_xfer;
   apu_dma_axi_req_t   areq;
   apu_dma_axi_resp_t  arsp;
 
-  // cmdrec ports: TB staging requests vs DUT PAYREAD
-  logic               xf_cr_v, xf_cr_rdy, xf_cr_cpl_rdy;
-  apu_cmdrec_req_t    xf_cr_req;
-  logic               st_req_v = 0;
-  apu_cmdrec_req_t    st_req = '0;
-  logic               cr_req_v, cr_req_rdy, cr_cpl_v, cr_cpl_rdy;
-  apu_cmdrec_req_t    cr_req;
-  apu_cmdrec_cpl_t    cr_cpl;
-  logic               pay_v = 0, pay_rdy;
-  logic [31:0]        pay_d = '0;
-  logic               cpl_own_q;   // 0 = TB staging, 1 = DUT
+  // shared ObjPay port: the DUT wins; the TB stages payload only while
+  // the engine is idle, and a one-bit owner flop routes the completion
+  // (same pattern as tb_g6lc_apu_cmdrec)
+  logic            dut_op_v, dut_op_rdy;
+  apu_objpay_req_t dut_op_req;
+  logic            tb_op_v = 0, tb_op_rdy;
+  apu_objpay_req_t tb_op_req = '0;
+  logic            tb_own_q = 1'b0;   // the in-flight op is the TB's
+  logic            op_v, op_r;
+  apu_objpay_req_t op_req;
+  logic            op_cv;
+  apu_objpay_cpl_t op_c;
 
-  // staging only ever runs while the engine is idle, so a completion
-  // while cpl_own_q == 0 is always the staging request's
-  assign cr_req_v  = st_req_v | xf_cr_v;
-  assign cr_req    = st_req_v ? st_req : xf_cr_req;
-  assign xf_cr_rdy = xf_cr_v & !st_req_v & cr_req_rdy;
-  assign cr_cpl_rdy = cpl_own_q ? xf_cr_cpl_rdy : 1'b1;
-
-
+  assign op_v       = dut_op_v | tb_op_v;
+  assign op_req     = dut_op_v ? dut_op_req : tb_op_req;
+  assign dut_op_rdy = dut_op_v & op_r;
+  assign tb_op_rdy  = ~dut_op_v & tb_op_v & op_r;
 
   always_ff @(posedge clk or negedge rst_ni) begin
-    if (!rst_ni) cpl_own_q <= 1'b0;
-    else if (cr_req_v && cr_req_rdy) cpl_own_q <= !st_req_v;
+    if (!rst_ni) tb_own_q <= 1'b0;
+    else begin
+      if (tb_op_v && tb_op_rdy) tb_own_q <= 1'b1;
+      if (op_cv && tb_own_q)    tb_own_q <= 1'b0;
+    end
   end
 
-  g6lc_apu_cmdrec #(.Enable(1'b1), .NumBufs(2), .RecsPerBuf(64),
-                    .PayWordsPerBuf(1024)) i_rec (
+  // objmem plumbing (same as tb_g6lc_apu_cmdrec)
+  logic         omp_v, omp_r, omp_rv;
+  apu_omp_req_t omp_req;
+  apu_omp_rsp_t omp_rsp;
+  logic         omtr_r, omtr_rv;
+  apu_omt_rsp_t omtr_rsp;
+  logic         mp_v, mp_r, mp_rv;
+  apu_mp_req_t  mp_req;
+  apu_mp_rsp_t  mp_rsp;
+
+  g6lc_apu_objpay #(.Enable(1'b1), .PayMemBytes(PayMemBytes)) i_pay (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
-    .req_valid_i(cr_req_v), .req_ready_o(cr_req_rdy),
-    .req_i(cr_req),
-    .cpl_valid_o(cr_cpl_v), .cpl_ready_i(cr_cpl_rdy),
-    .cpl_o(cr_cpl),
-    .pay_valid_i(pay_v), .pay_data_i(pay_d), .pay_ready_o(pay_rdy));
+    .req_valid_i(op_v), .req_ready_o(op_r), .req_i(op_req),
+    .cpl_valid_o(op_cv), .cpl_ready_i(1'b1), .cpl_o(op_c),
+    .omp_req_valid_o(omp_v), .omp_req_ready_i(omp_r),
+    .omp_req_o(omp_req),
+    .omp_rsp_valid_i(omp_rv), .omp_rsp_i(omp_rsp));
+
+  g6lc_apu_objmem #(.Enable(1'b1), .ObjEntries(ObjEntries),
+                    .PayMemBytes(PayMemBytes),
+                    .DirCacheSets(8), .EntCacheLines(8),
+                    .PayCacheLines(4)) i_om (
+    .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
+    .omt_req_valid_i(1'b0), .omt_req_ready_o(omtr_r),
+    .omt_req_i(apu_omt_req_t'(0)),
+    .omt_rsp_valid_o(omtr_rv), .omt_rsp_o(omtr_rsp),
+    .omp_req_valid_i(omp_v), .omp_req_ready_o(omp_r),
+    .omp_req_i(omp_req),
+    .omp_rsp_valid_o(omp_rv), .omp_rsp_o(omp_rsp),
+    .mp_req_valid_o(mp_v), .mp_req_ready_i(mp_r),
+    .mp_req_o(mp_req),
+    .mp_rsp_valid_i(mp_rv), .mp_rsp_i(mp_rsp));
+
+  tb_apu_mp_mem #(.N(1), .GMW(1), .APW(0),
+                  .PWB(32'(APU_OBJMEM_OFF >> 2)),
+                  .PPW(32'((apu_objmem_pay_off(ObjEntries) +
+                            64'(PayMemBytes) - APU_OBJMEM_OFF) >> 2) +
+                        64))
+      i_mem (
+    .clk_i(clk), .rst_ni(rst_ni),
+    .req_valid_i(mp_v), .req_ready_o(mp_r), .req_i('{mp_req}),
+    .rsp_valid_o(mp_rv), .rsp_o('{mp_rsp}));
 
   g6lc_apu_xfer #(.Enable(1'b1), .ApuCfg(ApuVenus),
                   .FifoDepth(32)) i_dut (
@@ -125,16 +164,17 @@ module tb_g6lc_apu_xfer;
     .work_valid_i(w_v), .work_ready_o(w_rdy),
     .work_i(work), .xf_i(xf),
     .done_o(done), .done_pl_o(done_pl),
-    .cr_req_valid_o(xf_cr_v), .cr_req_ready_i(xf_cr_rdy),
-    .cr_req_o(xf_cr_req),
-    .cr_cpl_valid_i(cr_cpl_v), .cr_cpl_ready_o(xf_cr_cpl_rdy),
-    .cr_cpl_i(cr_cpl),
+    .op_req_valid_o(dut_op_v), .op_req_ready_i(dut_op_rdy),
+    .op_req_o(dut_op_req),
+    .op_cpl_valid_i(op_cv && !tb_own_q), .op_cpl_ready_o(),
+    .op_cpl_i(op_c),
     .ap_base_i(AB), .flush_i(flush),
     .busy_o(xf_busy),
     .axi_req_o(areq), .axi_rsp_i(arsp));
 
   // Enable=0 fixture: outputs stay constant-inactive
-  logic o_wr, o_dn, o_crv, o_crr, o_bsy;
+  logic o_wr, o_dn, o_opv, o_opr, o_bsy;
+  apu_objpay_req_t  o_opreq;
   apu_sh_done_t o_pl;
   apu_dma_axi_req_t o_areq;
   g6lc_apu_xfer_fixture #(.Enable(1'b0), .ApuCfg(ApuVenus)) i_off (
@@ -142,10 +182,10 @@ module tb_g6lc_apu_xfer;
     .work_valid_i(w_v), .work_ready_o(o_wr),
     .work_i(work), .xf_i(xf),
     .done_o(o_dn), .done_pl_o(o_pl),
-    .cr_req_valid_o(o_crv), .cr_req_ready_i(1'b0),
-    .cr_req_o(),
-    .cr_cpl_valid_i(1'b0), .cr_cpl_ready_o(o_crr),
-    .cr_cpl_i('0),
+    .op_req_valid_o(o_opv), .op_req_ready_i(1'b0),
+    .op_req_o(o_opreq),
+    .op_cpl_valid_i(1'b0), .op_cpl_ready_o(o_opr),
+    .op_cpl_i(apu_objpay_cpl_t'('0)),
     .ap_base_i(AB), .flush_i(flush),
     .busy_o(o_bsy),
     .axi_req_o(o_areq), .axi_rsp_i('0));
@@ -291,59 +331,40 @@ module tb_g6lc_apu_xfer;
                     where, ar_beats, r_n));
   endtask
 
-  // ---- cmdrec staging --------------------------------------------------------
-  // The TB mirrors the bump pointer of arena buffer 0.
-  int unsigned  pay_top = 0;
-  logic [31:0]  stage_w [1024];
+  // ---- ObjPay staging -----------------------------------------------------
+  // Payload words live at an absolute PayMem extent; xf.pay_base gets
+  // the ALLOC-returned base.
+  logic [31:0]      stage_w [1024];
+  apu_objpay_cpl_t  tc;
+  int unsigned      pb;
 
-  // drive one request (negedge-style stimulus like the sibling TBs);
-  // for a payload APPEND stream stage_w[] afterwards, then wait for
-  // the completion and require OK
-  task automatic do_op(input apu_cmdrec_op_e op, input int cbuf,
-                       input apu_cmdrec_rec_t rec, input int pay_n);
+  // one TB-direct ObjPay op (staging only ever runs while the engine
+  // is idle)
+  task automatic tb_op(input apu_objpay_op_e o, input logic [31:0] a,
+                       input logic [31:0] w, input logic [31:0] d);
     int mark = cycles;
     @(negedge clk);
-    st_req   = '{op: op, cbuf: 8'(cbuf), idx: '0, pay_n: 16'(pay_n),
-                 rec: rec};
-    st_req_v = 1'b1;
+    while (dut_op_v || !op_r) @(negedge clk);
+    tb_op_v   = 1'b1;
+    tb_op_req = '{op: o, addr: a, words: w, wdata: d};
     @(posedge clk);
-    while (!cr_req_rdy) begin
-      @(posedge clk);
-      if (cycles - mark > 100000)
-        $fatal(1, "do_op req stuck op=%0d cbuf=%0d", op, cbuf);
-    end
-    @(negedge clk);
-    st_req_v = 1'b0;
-    if (op == APU_CMDREC_OP_APPEND && pay_n != 0) begin
-      for (int i = 0; i < pay_n; i++) begin
-        pay_v = 1'b1;
-        pay_d = stage_w[i];
-        @(posedge clk);
-        while (!pay_rdy) @(posedge clk);
-        @(negedge clk);
-      end
-      pay_v = 1'b0;
-    end
-    while (!(cr_cpl_v && !cpl_own_q)) begin
+    @(negedge clk); tb_op_v = 1'b0;
+    while (!(op_cv && tb_own_q)) begin
       @(negedge clk);
-      if (cycles - mark > 100000)
-        $fatal(1, "do_op cpl stuck op=%0d cpl_v=%b own=%b st=%0d",
-               op, cr_cpl_v, cpl_own_q, i_rec.gen_on.state_q);
+      if (cycles - mark > 100000) $fatal(1, "tb_op stuck");
     end
-    check(cr_cpl.status == APU_CMDREC_OK,
-          $sformatf("cmdrec op %0d status %0d", op, cr_cpl.status));
+    tc = op_c;
+    @(posedge clk); @(negedge clk);
   endtask
 
-  task automatic begin_buf(input int cbuf);
-    do_op(APU_CMDREC_OP_BEGIN, cbuf, '0, 0);
-    if (cbuf == 0) pay_top = 0;
-  endtask
-  task automatic append_payload(input int cbuf, input int unsigned n);
-    do_op(APU_CMDREC_OP_APPEND, cbuf, '0, int'(n));
-    if (cbuf == 0) pay_top += n;
-  endtask
-  task automatic seal_buf(input int cbuf);
-    do_op(APU_CMDREC_OP_END, cbuf, '0, 0);
+  // ALLOC n payload words and copy stage_w[0..n-1] into the extent;
+  // returns the absolute PayMem word address via base
+  task automatic stage(input int unsigned n, output int unsigned base);
+    tb_op(APU_OBJPAY_OP_ALLOC, 0, 32'(n), 0);
+    check(tc.status == APU_OBJPAY_OK, "stage alloc OK");
+    base = tc.base;
+    for (int i = 0; i < int'(n); i++)
+      tb_op(APU_OBJPAY_OP_WRITE, 32'(base) + 32'(i), 0, stage_w[i]);
   endtask
 
   // ---- work issue -------------------------------------------------------------
@@ -410,8 +431,6 @@ module tb_g6lc_apu_xfer;
                           input logic [63:0] soff [], doff [], sz [],
                           input bit same_map,
                           output apu_sh_done_t pl);
-    int unsigned pb;
-    begin_buf(0);
     for (int r = 0; r < int'(nreg); r++) begin
       stage_w[6*r+0] = soff[r][31:0];
       stage_w[6*r+1] = soff[r][63:32];
@@ -420,10 +439,8 @@ module tb_g6lc_apu_xfer;
       stage_w[6*r+4] = sz[r][31:0];
       stage_w[6*r+5] = sz[r][63:32];
     end
-    pb = pay_top;
-    append_payload(0, 6*int'(nreg));
-    seal_buf(0);
-    issue('{op: APU_XFER_OP_COPY, cbuf: 8'd0, pay_base: 16'(pb),
+    stage(6*int'(nreg), pb);
+    issue('{op: APU_XFER_OP_COPY, pay_base: 32'(pb),
            regions: 16'(nreg),
            src_base: SRCB, src_size: BUFZ,
            dst_base: same_map ? SRCB : DSTB, dst_size: BUFZ, img0: '0, img1: '0},
@@ -567,15 +584,11 @@ module tb_g6lc_apu_xfer;
                            input int unsigned nr,
                            input logic [31:0] rg [],
                            output apu_sh_done_t pl);
-    int unsigned pb;
-    begin_buf(0);
     for (int i = 0; i < 4; i++) stage_w[i] = cw[i];
     for (int r = 0; r < int'(nr); r++)
       for (int w = 0; w < 5; w++) stage_w[4 + 5*r + w] = rg[5*r + w];
-    pb = pay_top;
-    append_payload(0, 4 + 5*int'(nr));
-    seal_buf(0);
-    issue('{op: APU_XFER_OP_CLEARI, cbuf: 8'd0, pay_base: 16'(pb),
+    stage(4 + 5*int'(nr), pb);
+    issue('{op: APU_XFER_OP_CLEARI, pay_base: 32'(pb),
            regions: 16'(nr),
            src_base: '0, src_size: '0,
            dst_base: '0, dst_size: '0, img0: im, img1: '0}, '0, pl);
@@ -589,14 +602,10 @@ module tb_g6lc_apu_xfer;
                          input int unsigned nr,
                          input logic [31:0] rg [],
                          output apu_sh_done_t pl);
-    int unsigned pb;
-    begin_buf(0);
     for (int r = 0; r < int'(nr); r++)
       for (int w = 0; w < 14; w++) stage_w[14*r + w] = rg[14*r + w];
-    pb = pay_top;
-    append_payload(0, 14*int'(nr));
-    seal_buf(0);
-    issue('{op: APU_XFER_OP_B2I, cbuf: 8'd0, pay_base: 16'(pb),
+    stage(14*int'(nr), pb);
+    issue('{op: APU_XFER_OP_B2I, pay_base: 32'(pb),
            regions: 16'(nr),
            src_base: bb[31:0], src_size: bs[31:0],
            dst_base: '0, dst_size: '0, img0: im, img1: '0}, '0, pl);
@@ -606,14 +615,10 @@ module tb_g6lc_apu_xfer;
                          input int unsigned nr,
                          input logic [31:0] rg [],
                          output apu_sh_done_t pl);
-    int unsigned pb;
-    begin_buf(0);
     for (int r = 0; r < int'(nr); r++)
       for (int w = 0; w < 14; w++) stage_w[14*r + w] = rg[14*r + w];
-    pb = pay_top;
-    append_payload(0, 14*int'(nr));
-    seal_buf(0);
-    issue('{op: APU_XFER_OP_I2B, cbuf: 8'd0, pay_base: 16'(pb),
+    stage(14*int'(nr), pb);
+    issue('{op: APU_XFER_OP_I2B, pay_base: 32'(pb),
            regions: 16'(nr),
            src_base: '0, src_size: '0,
            dst_base: bb[31:0], dst_size: bs[31:0], img0: im, img1: '0},
@@ -733,13 +738,12 @@ module tb_g6lc_apu_xfer;
 
     // ============ FILL =================================================
     cases++;
-    begin_buf(0);
     stage_w[0] = 32'h40; stage_w[1] = 0;          // dstOffset = 64
     stage_w[2] = 32'h200; stage_w[3] = 0;         // size = 512
-    append_payload(0, 4); seal_buf(0);
+    stage(4, pb);
     poison(DSTB, BUFZ);
     for (int i = 64; i < 64 + 512; i++) ewr8(DSTB + i, 8'h5A);
-    issue('{op: APU_XFER_OP_FILL, cbuf: 8'd0, pay_base: 16'(0),
+    issue('{op: APU_XFER_OP_FILL, pay_base: 32'(pb),
            regions: '0, src_base: '0, src_size: '0,
            dst_base: DSTB, dst_size: BUFZ, img0: '0, img1: '0}, 32'h5A5A_5A5A, pl);
     check(pl.code == APU_SH_DONE_OK, "fill done code");
@@ -748,13 +752,12 @@ module tb_g6lc_apu_xfer;
 
     // VK_WHOLE_SIZE tail
     cases++;
-    begin_buf(0);
     stage_w[0] = 32'h1FF0; stage_w[1] = 0;
     stage_w[2] = 32'hFFFF_FFFF; stage_w[3] = 32'hFFFF_FFFF;
-    append_payload(0, 4); seal_buf(0);
+    stage(4, pb);
     poison(DSTB, BUFZ);
     for (int i = 32'h1FF0; i < int'(BUFZ); i++) ewr8(DSTB + i, 8'hC3);
-    issue('{op: APU_XFER_OP_FILL, cbuf: 8'd0, pay_base: 16'(0),
+    issue('{op: APU_XFER_OP_FILL, pay_base: 32'(pb),
            regions: '0, src_base: '0, src_size: '0,
            dst_base: DSTB, dst_size: BUFZ, img0: '0, img1: '0}, 32'hC3C3_C3C3, pl);
     check(pl.code == APU_SH_DONE_OK, "fill WHOLE done code");
@@ -763,13 +766,12 @@ module tb_g6lc_apu_xfer;
 
     // misaligned dstOffset -> FAULT, zero bytes written
     cases++;
-    begin_buf(0);
     stage_w[0] = 32'h42; stage_w[1] = 0;
     stage_w[2] = 32'h100; stage_w[3] = 0;
-    append_payload(0, 4); seal_buf(0);
+    stage(4, pb);
     poison(DSTB, BUFZ);
     wmark = w_n;
-    issue('{op: APU_XFER_OP_FILL, cbuf: 8'd0, pay_base: 16'(0),
+    issue('{op: APU_XFER_OP_FILL, pay_base: 32'(pb),
            regions: '0, src_base: '0, src_size: '0,
            dst_base: DSTB, dst_size: BUFZ, img0: '0, img1: '0}, 32'hAAAA_AAAA, pl);
     check(pl.code == APU_SH_DONE_FAULT, "fill misaligned dstOff FAULT");
@@ -778,13 +780,12 @@ module tb_g6lc_apu_xfer;
 
     // misaligned size -> FAULT
     cases++;
-    begin_buf(0);
     stage_w[0] = 32'h0; stage_w[1] = 0;
     stage_w[2] = 32'h102; stage_w[3] = 0;
-    append_payload(0, 4); seal_buf(0);
+    stage(4, pb);
     poison(DSTB, BUFZ);
     wmark = w_n;
-    issue('{op: APU_XFER_OP_FILL, cbuf: 8'd0, pay_base: 16'(0),
+    issue('{op: APU_XFER_OP_FILL, pay_base: 32'(pb),
            regions: '0, src_base: '0, src_size: '0,
            dst_base: DSTB, dst_size: BUFZ, img0: '0, img1: '0}, 32'hBBBB_BBBB, pl);
     check(pl.code == APU_SH_DONE_FAULT, "fill misaligned size FAULT");
@@ -792,17 +793,16 @@ module tb_g6lc_apu_xfer;
 
     // ============ UPDATE ===============================================
     cases++;
-    begin_buf(0);
     stage_w[0] = 32'h80; stage_w[1] = 0;          // dstOffset = 128
     stage_w[2] = 32'd64; stage_w[3] = 0;          // dataSize = 64
     for (int i = 0; i < 16; i++)
       stage_w[4 + i] = 32'hD00D_0000 + 32'(i);
-    append_payload(0, 4 + 16); seal_buf(0);
+    stage(4 + 16, pb);
     poison(DSTB, BUFZ);
     for (int i = 0; i < 64; i++)
       ewr8(DSTB + 128 + i,
            8'((32'hD00D_0000 + 32'(i >> 2)) >> (8 * (i & 3))));
-    issue('{op: APU_XFER_OP_UPDATE, cbuf: 8'd0, pay_base: 16'(0),
+    issue('{op: APU_XFER_OP_UPDATE, pay_base: 32'(pb),
            regions: '0, src_base: '0, src_size: '0,
            dst_base: DSTB, dst_size: BUFZ, img0: '0, img1: '0}, '0, pl);
     check(pl.code == APU_SH_DONE_OK, "update done code");
@@ -811,13 +811,12 @@ module tb_g6lc_apu_xfer;
 
     // dataSize % 4 != 0 -> FAULT
     cases++;
-    begin_buf(0);
     stage_w[0] = 32'h0; stage_w[1] = 0;
     stage_w[2] = 32'd62; stage_w[3] = 0;
-    append_payload(0, 4); seal_buf(0);
+    stage(4, pb);
     poison(DSTB, BUFZ);
     wmark = w_n;
-    issue('{op: APU_XFER_OP_UPDATE, cbuf: 8'd0, pay_base: 16'(0),
+    issue('{op: APU_XFER_OP_UPDATE, pay_base: 32'(pb),
            regions: '0, src_base: '0, src_size: '0,
            dst_base: DSTB, dst_size: BUFZ, img0: '0, img1: '0}, '0, pl);
     check(pl.code == APU_SH_DONE_FAULT, "update misaligned FAULT");
@@ -825,15 +824,14 @@ module tb_g6lc_apu_xfer;
 
     // ============ negative: region past dst mapping ======================
     cases++;
-    begin_buf(0);
     stage_w[0] = 0; stage_w[1] = 0;               // srcOff = 0
     stage_w[2] = 32'h1000; stage_w[3] = 0;        // dstOff = 4096
     stage_w[4] = 32'h1400; stage_w[5] = 0;        // size = 5120 > rem
-    append_payload(0, 6); seal_buf(0);
+    stage(6, pb);
     fill_src(SRCB, BUFZ, 900);
     poison(DSTB, BUFZ);
     wmark = w_n;
-    issue('{op: APU_XFER_OP_COPY, cbuf: 8'd0, pay_base: 16'(0),
+    issue('{op: APU_XFER_OP_COPY, pay_base: 32'(pb),
            regions: 16'd1, src_base: SRCB, src_size: BUFZ,
            dst_base: DSTB, dst_size: BUFZ, img0: '0, img1: '0}, '0, pl);
     check(pl.code == APU_SH_DONE_FAULT, "oob copy FAULT");
@@ -842,14 +840,13 @@ module tb_g6lc_apu_xfer;
 
     // ============ negative: overlapping src/dst ==========================
     cases++;
-    begin_buf(0);
     stage_w[0] = 32'h0;    stage_w[1] = 0;        // src = [0,256)
     stage_w[2] = 32'h80;   stage_w[3] = 0;        // dst = [128,384)
     stage_w[4] = 32'h100;  stage_w[5] = 0;
-    append_payload(0, 6); seal_buf(0);
+    stage(6, pb);
     fill_src(SRCB, BUFZ, 901);
     wmark = w_n;
-    issue('{op: APU_XFER_OP_COPY, cbuf: 8'd0, pay_base: 16'(0),
+    issue('{op: APU_XFER_OP_COPY, pay_base: 32'(pb),
            regions: 16'd1, src_base: SRCB, src_size: BUFZ,
            dst_base: SRCB, dst_size: BUFZ, img0: '0, img1: '0}, '0, pl);
     check(pl.code == APU_SH_DONE_FAULT, "overlap copy FAULT");
@@ -1036,7 +1033,8 @@ module tb_g6lc_apu_xfer;
     end
 
     // ============ Enable=0 fixture ========================================
-    check(!o_wr && !o_dn && !o_crv && !o_bsy && o_areq == '0,
+    check(!o_wr && !o_dn && !o_opv && !o_opr && !o_bsy &&
+          o_areq == '0,
           "Enable=0 outputs quiet");
 
     $display("TB_XFER done: cases=%0d checks=%0d errors=%0d cycles=%0d",

@@ -480,13 +480,75 @@ module tb_g6lc_ai_gemm_backend
     end
   endtask
 
-  task automatic kick_gemm;
+  // Drive the request away from the sampling edge. The original posedge
+  // blocking assignments could make RTL and concurrent assertions see different
+  // start values, and occasionally looked like two accepts.
+`ifdef G6LC_AI_HYP_R19
+  logic [31:0] fp_check_a, fp_check_b;
+  logic [36:0] fp_check_result;
+  g6lc_ai_gemm_fp32_add i_fp_check (.a_i(fp_check_a), .b_i(fp_check_b), .result_o(fp_check_result));
+  function automatic logic [31:0] fp_random(input logic [31:0] x);
+    logic [31:0] v;
+    v = x ^ (x << 13); v ^= v >> 17; v ^= v << 5;
+    return v;
+  endfunction
+  task automatic check_fp32_add;
+    logic [31:0] random_state;
+    logic [36:0] expected;
+    random_state = 32'h91e1_0da5;
+    for (int t = 0; t < 100000; t++) begin
+      random_state = fp_random(random_state); fp_check_a = random_state;
+      random_state = fp_random(random_state); fp_check_b = random_state;
+      case (t % 16)
+        0: begin fp_check_a = {random_state[1],31'd0}; fp_check_b = {random_state[0],31'd0}; end
+        1: fp_check_b = fp_check_a ^ 32'h8000_0000;
+        2: fp_check_a = 32'd0;
+        3: fp_check_b = 32'h8000_0000;
+        4: fp_check_a[30:23] = 8'hff;
+        5: begin fp_check_a = 32'h7f80_0000; fp_check_b = 32'hff80_0000; end
+        6: begin fp_check_a[30:23] = '0; fp_check_b[30:23] = '0; end
+        7: begin fp_check_a = 32'h7f7f_ffff; fp_check_b = fp_check_a; end
+        8: fp_check_b[30:23] = fp_check_a[30:23] + 8'd1;
+        9: fp_check_b[30:23] = fp_check_a[30:23] + 8'd24;
+        10: fp_check_b[30:23] = fp_check_a[30:23] + 8'd25;
+        // r21 sign-magnitude corners: near cancellation one ulp apart,
+        // a negative operand shifted with set sticky bits, a zero against
+        // a tiny value (zero carries E=150), and opposite-sign subnormals.
+        11: fp_check_b = (fp_check_a ^ 32'h8000_0000) + (random_state[2] ? 32'd1 : -32'd1);
+        12: begin fp_check_b[31] = 1'b1; fp_check_b[30:23] = fp_check_a[30:23] - 8'(1 + random_state[6:3]); fp_check_b[0] = 1'b1; end
+        13: begin fp_check_a = {random_state[3], 31'd0}; fp_check_b[30:23] = 8'(random_state[7:4]); end
+        14: begin fp_check_a[30:23] = '0; fp_check_b[30:23] = '0; fp_check_b[31] = !fp_check_a[31]; end
+        default: ;
+      endcase
+      #1ps;
+      expected = g6lc_ai_fp_pkg::fp32_add(fp_check_a, fp_check_b);
+      if (fp_check_result !== expected)
+        $fatal(1, "FP32_EQ a=%h b=%h got=%h expected=%h", fp_check_a, fp_check_b, fp_check_result, expected);
+    end
+    $display("PASS FP32_EQ vectors=100000 flags_and_value=37");
+  endtask
+`endif
+  task automatic pulse_start;
+    @(negedge clk);
+    while (!ready && cycles < TO_RSP) begin tick; @(negedge clk); end
+    if (!ready) $fatal(1, "GEMM admission timeout");
     start = 1'b1;
     tick;
+    @(negedge clk);
     start = 1'b0;
+  endtask
+
+  task automatic kick_gemm;
+    pulse_start;
     while (!done && cycles < TO_RSP) tick;
     if (!done) begin
-      $error("timeout gemm cycles=%0d ar=%0d", cycles, n_ar);
+      $display("GEMM owner state=%0d issue=%0d/%0d/%0d store=%0d/%0d aw=%b w=%b lc=%0d/%0d recv=%0d/%0d busy=%b buf=%b",
+          i_gemm.state_q, i_gemm.i_q, i_gemm.j_q, i_gemm.t_q,
+          i_gemm.stc_i_q, i_gemm.stc_j_q, i_gemm.aw_sent_q, i_gemm.w_sent_q,
+          i_gemm.lc_e_q, i_gemm.lc_total_q, i_gemm.lc_recv_q, i_gemm.lc_beats_q,
+          i_gemm.lc_ar_busy_q, i_gemm.lc_buf_v_q);
+      $error("timeout gemm cycles=%0d ar=%0d shape=%0dx%0dx%0d fmt=%0d accumulate=%0d",
+             cycles, n_ar, gemm_m, gemm_n, gemm_k, gemm_numfmt, accumulate);
       errors++;
     end
     if (err) begin
@@ -866,7 +928,7 @@ module tb_g6lc_ai_gemm_backend
       gemm_lda = 16'(k_full); gemm_ldb = 16'(k_full);
       cycles = 0;
       // kick_gemm counts err as a test error; this job must be refused, so drive it here.
-      start = 1'b1; tick; start = 1'b0;
+      pulse_start;
       while (!done && cycles < TO_RSP) tick;
       if (!done) $fatal(1, "FLAT capacity: refusal did not complete");
       if (!err) $fatal(1, "FLAT capacity: n=%0d k=%0d FP32 must be refused", GEMM_MAXDIM, k_full);
@@ -1355,9 +1417,7 @@ module tb_g6lc_ai_gemm_backend
       r_beats = 0;
       return;
     end
-    start = 1'b1;
-    tick;
-    start = 1'b0;
+    pulse_start;
     guard = cycles;
     while (!done && cycles < guard + 100000) tick;
     if (!done || err) begin
@@ -1534,9 +1594,7 @@ module tb_g6lc_ai_gemm_backend
 
     // High run: policy off / fallback (max AR). Capture reference C.
     ar_max_val = 4'(GEMM_MAX_AR);
-    start = 1'b1;
-    tick;
-    start = 1'b0;
+    pulse_start;
     while (!done && cycles < TO_RSP) tick;
 
     if (!done) begin
@@ -1597,9 +1655,7 @@ module tb_g6lc_ai_gemm_backend
     if (4'(GEMM_MAX_AR) > 4'd2) begin
       while (!ready && cycles < TO_RSP) tick;
       ar_max_val = 4'd2;
-      start = 1'b1;
-      tick;
-      start = 1'b0;
+      pulse_start;
       while (!done && cycles < TO_RSP) tick;
       if (!done) begin
         $error("timeout low-ar gemm cycles=%0d ar=%0d", cycles, n_ar);
@@ -1662,6 +1718,9 @@ module tb_g6lc_ai_gemm_backend
 
     if ($test$plusargs("review_signed") || $test$plusargs("review_protocol")) signed_backend;
     if ($test$plusargs("review_accumulate")) accumulate_backend;
+`ifdef G6LC_AI_HYP_R19
+    if ($test$plusargs("review_fp32_add")) check_fp32_add;
+`endif
     if ($test$plusargs("review_flat")) flat_backend;
     if ($test$plusargs("review_slots")) slots_backend;
     if ($test$plusargs("review_protocol")) begin

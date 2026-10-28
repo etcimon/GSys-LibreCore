@@ -1,0 +1,215 @@
+// OpenSTA, Static Timing Analyzer
+// Copyright (c) 2025, Parallax Software, Inc.
+// 
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+// 
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// 
+// The origin of this software must not be misrepresented; you must not
+// claim that you wrote the original software.
+// 
+// Altered source versions must be plainly marked as such, and must not be
+// misrepresented as being the original software.
+// 
+// This notice may not be removed or altered from any source distribution.
+
+#include "StaMain.hh"
+#include "StaConfig.hh"  // STA_VERSION
+
+#include <stdio.h>
+#include <cstdlib>              // exit
+#include <filesystem>
+#include <string_view>
+#include <tcl.h>
+
+#ifdef BAZEL_BUILD
+  #include "bazel/tcl_library_init.h"
+  #include "src/tcl_readline_setup.h"
+#endif
+
+#if TCL_READLINE
+  #include <tclreadline.h>
+#endif
+
+#include "Sta.hh"
+
+namespace sta {
+extern const char *tcl_inits[];
+}
+
+using sta::stringEq;
+using sta::findCmdLineFlag;
+using sta::Sta;
+using sta::initSta;
+using sta::evalTclInit;
+using sta::sourceTclFile;
+using sta::parseThreadsArg;
+using sta::tcl_inits;
+
+// Swig uses C linkage for init functions.
+extern "C" {
+extern int Sta_Init(Tcl_Interp *interp);
+}
+
+static int cmd_argc;
+static char **cmd_argv;
+static const char *init_filename = ".sta";
+
+static void
+showUsage(std::string_view prog,
+          std::string_view init_filename);
+static int
+tclAppInit(Tcl_Interp *interp);
+static int
+staTclAppInit(int argc,
+              char *argv[],
+              std::string_view init_filename,
+              Tcl_Interp *interp);
+static void
+initStaApp(int &argc,
+           char *argv[],
+           Tcl_Interp *interp);
+
+int
+main(int argc,
+     char *argv[])
+{
+  if (argc == 2 && stringEq(argv[1], "-help")) {
+    showUsage(argv[0], init_filename);
+    return 0;
+  }
+  else if (argc == 2 && stringEq(argv[1], "-version")) {
+    printf("%s\n", STA_VERSION);
+    return 0;
+  }
+  else {
+    // Set argc to 1 so Tcl_Main doesn't source any files.
+    // Store argc and argv in static variables for tclAppInit.
+    cmd_argc = argc;
+    cmd_argv = argv;
+    // Tcl_Main never returns.
+    Tcl_Main(1, argv, tclAppInit);
+    return 0;
+  }
+}
+
+static int
+tclAppInit(Tcl_Interp *interp)
+{
+  return staTclAppInit(cmd_argc, cmd_argv, init_filename, interp);
+}
+
+// Tcl init executed inside Tcl_Main.
+static int
+staTclAppInit(int argc,
+              char *argv[],
+              std::string_view init_filename,
+              Tcl_Interp *interp)
+{
+#ifdef BAZEL_BUILD
+    if (in_bazel::SetupTclEnvironment(interp) == TCL_ERROR) {
+      return TCL_ERROR;
+    }
+#endif
+
+  // source init.tcl
+  if (Tcl_Init(interp) == TCL_ERROR)
+    return TCL_ERROR;
+
+  bool has_readline = false;
+#ifdef BAZEL_BUILD
+  has_readline = (ord::SetupTclReadlineLibrary(interp) == TCL_OK);
+#endif
+#if TCL_READLINE
+  if (Tclreadline_Init(interp) == TCL_ERROR)
+    return TCL_ERROR;
+  Tcl_StaticPackage(interp, "tclreadline", Tclreadline_Init, Tclreadline_SafeInit);
+  if (Tcl_EvalFile(interp, TCLRL_LIBRARY "/tclreadlineInit.tcl") != TCL_OK)
+    printf("Failed to load tclreadline.tcl\n");
+  else
+    has_readline = true;
+#endif
+
+  initStaApp(argc, argv, interp);
+
+  if (!findCmdLineFlag(argc, argv, "-no_splash"))
+    Tcl_Eval(interp, "sta::show_splash");
+
+  if (!findCmdLineFlag(argc, argv, "-no_init")) {
+    const char *home = getenv("HOME");
+    if (home) {
+      std::string init_path = home;
+      init_path += "/";
+      init_path.append(init_filename);
+      if (std::filesystem::is_regular_file(init_path.c_str()))
+        sourceTclFile(init_path.c_str(), true, true, interp);
+    }
+  }
+
+  bool exit_after_cmd_file = findCmdLineFlag(argc, argv, "-exit");
+
+  if (argc > 2
+      || (argc > 1 && argv[1][0] == '-')) {
+    showUsage(argv[0], init_filename);
+    exit(1);
+  }
+  else {
+    if (argc == 2) {
+      char *cmd_file = argv[1];
+      if (cmd_file) {
+        int result = sourceTclFile(cmd_file, false, false, interp);
+        if (exit_after_cmd_file) {
+          int exit_code = (result == TCL_OK) ? EXIT_SUCCESS : EXIT_FAILURE;
+          exit(exit_code);
+        }
+      }
+    }
+  }
+
+  return has_readline ? Tcl_Eval(interp, "::tclreadline::Loop") : TCL_OK;
+}
+
+static void
+initStaApp(int &argc,
+           char *argv[],
+           Tcl_Interp *interp)
+{
+  initSta();
+  Sta *sta = new Sta;
+  Sta::setSta(sta);
+  sta->makeComponents();
+  sta->setTclInterp(interp);
+  int thread_count = parseThreadsArg(argc, argv);
+  sta->setThreadCount(thread_count);
+
+  // Define swig TCL commands.
+  Sta_Init(interp);
+  // Eval encoded sta TCL sources.
+  evalTclInit(interp, tcl_inits);
+  Tcl_Eval(interp, "init_sta_cmds");
+}
+
+static void
+showUsage(std::string_view prog,
+          std::string_view init_filename)
+{
+  sta::print(stdout, "Usage: {} [-help] [-version] [-no_init] [-exit] cmd_file\n",
+             prog);
+  sta::print(stdout, "  -help              show help and exit\n");
+  sta::print(stdout, "  -version           show version and exit\n");
+  sta::print(stdout, "  -no_init           do not read {} init file\n",
+             init_filename);
+  sta::print(stdout, "  -threads count|max use count threads\n");
+  sta::print(stdout, "  -no_splash         do not show the license splash at startup\n");
+  sta::print(stdout, "  -exit              exit after reading cmd_file\n");
+  sta::print(stdout, "  cmd_file           source cmd_file\n");
+}

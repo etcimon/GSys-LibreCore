@@ -40,7 +40,10 @@ INIT_WORDS = 2
 ENTRY_WORDS = 4
 PHI_WORDS = 5              # npairs word + 4 packed (value,parent) words
 PHI_MAXPAIRS = 4
-MAX_LOCAL = 64
+MAX_LOCAL = 128
+MAX_LOCAL_X = 128
+MAX_LOCAL_Y = 128
+MAX_LOCAL_Z = 64
 
 # ---- fault codes (must match APU_SH_FAULT_*) ----------------------
 FAULT = dict(NONE=0, MAGIC=1, VERSION=2, CAP=3, MEMMODEL=4, ENTRY=5,
@@ -803,7 +806,9 @@ class Scanner:
         if ops[1] != 17:                # LocalSize
             raise Fault(FAULT['EXECMODE'], opc, at)
         lx, ly, lz = ops[2], ops[3], ops[4]
-        if lx * ly * lz > MAX_LOCAL or lx * ly * lz == 0:
+        if (lx * ly * lz > MAX_LOCAL or lx * ly * lz == 0 or
+                lx > MAX_LOCAL_X or ly > MAX_LOCAL_Y or
+                lz > MAX_LOCAL_Z):
             raise Fault(FAULT['LOCALSIZE'], opc, at)
         self.localsize = (lx, ly, lz)
 
@@ -918,6 +923,13 @@ class Scanner:
             sc = ops[2]
             init_ok = sc in (SC['FUNCTION'], SC['PRIVATE'],
                              SC['WORKGROUP']) and len(ops) == 4
+            # a Function zero-init is only a no-op in the entry
+            # function: entry-locals scratch clears per wave, but a
+            # callee's frame is not re-cleared per call — a dropped
+            # initializer there would silently differ, so fault VAR
+            if init_ok and sc == SC['FUNCTION']:
+                init_ok = self.entry is not None and \
+                    self.cur_func == self.entry['func']
             if init_ok:
                 w = self.consts.get(ops[3])
                 init_ok = w is not None and not any(

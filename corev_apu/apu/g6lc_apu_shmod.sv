@@ -64,6 +64,11 @@ module g6lc_apu_shmod
   output apu_sh_cpl_t  done_pl_o,
   input  logic         retire_i,
   input  logic [2:0]   retire_slot_i,
+  // COMPUTE-H1: specialization pairs for this FILL.  spec_n_i == 0
+  // keeps the SPIR-V default literals.
+  input  logic [5:0]    spec_n_i,
+  input  logic [1023:0] spec_id_i,
+  input  logic [1023:0] spec_val_i,
   // wave/TB read ports (1-cycle SRAM latency; !busy_o only)
   input  logic [2:0]   rd_slot_i,
   input  logic [15:0]  prog_addr_i,
@@ -299,7 +304,7 @@ module g6lc_apu_shmod
         // 5381 IsHelper (all fragment-only where S_OP says so)
         0,1,3,4,5,6,7,8,10,11,12,14,15,16,17,19,20,21,22,23,24,25,26,27,
         28,29,30,32,33,
-        41,42,43,44,46,48,49,50,51,52,54,55,56,57,59,61,62,65,66,68,71,72,
+        41,42,43,44,46,48,49,50,51,52,54,55,56,57,59,60,61,62,65,66,68,71,72,
         77,78,79,80,81,82,83,84,
         // §12.3 C/5b image ops — the implicit-lod forms (87,89,91,93,
         // 105) are fragment-only, gated on the execution model in
@@ -326,7 +331,7 @@ module g6lc_apu_shmod
       unique case (o)
         1,                                    // OpUndef
         61,65,66,68,77,78,79,80,81,82,83,84,
-        86,87,88,89,90,91,92,93,94,95,96,97,98,100,103,104,105,106,
+        60,86,87,88,89,90,91,92,93,94,95,96,97,98,100,103,104,105,106,
         109,110,111,112,124,126,127,128,129,
         130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,
         146,147,148,149,150,151,152,154,155,156,157,164,165,166,
@@ -346,6 +351,18 @@ module g6lc_apu_shmod
         19,20,21,22,23,24,25,26,27,28,29,30,32,33: is_type_op = 1'b1;
         default: is_type_op = 1'b0;
       endcase
+    endfunction
+    // Last matching SpecId wins.  A miss keeps the SPIR-V literal.
+    function automatic logic [31:0] f_spec(
+        input logic [31:0] id, input logic [31:0] dflt, input logic hit);
+      f_spec = dflt;
+      if (hit) begin
+        for (int i = 0; i < 32; i++) begin
+          if (i < 32'(spec_n_i) &&
+              spec_id_i[32*i +: 32] == id)
+            f_spec = spec_val_i[32*i +: 32];
+        end
+      end
     endfunction
     function automatic logic is_const_op(input logic [15:0] o);
       unique case (o)
@@ -388,7 +405,8 @@ module g6lc_apu_shmod
         APU_SH_SC_UNIFORMCONST, APU_SH_SC_INPUT, APU_SH_SC_OUTPUT,
         APU_SH_SC_UNIFORM,
         APU_SH_SC_WORKGROUP, APU_SH_SC_PRIVATE, APU_SH_SC_FUNCTION,
-        APU_SH_SC_PUSHCONST, APU_SH_SC_SBUF: is_sc_ok = 1'b1;
+        APU_SH_SC_PUSHCONST, APU_SH_SC_IMAGE, APU_SH_SC_SBUF:
+          is_sc_ok = 1'b1;
         default: is_sc_ok = 1'b0;
       endcase
     endfunction
@@ -619,6 +637,12 @@ module g6lc_apu_shmod
               // "none" sentinel
               drc_nb = de_rdata[29] ? de_rdata[23:16] : 8'hFF;
               unique case (ops_q[1][15:0])
+                // SpecId: the numeric id rides the high word (a spec
+                // constant is not an array, so it does not share that
+                // slot with ArrayStride).  Flag bit 1 marks it present.
+                1:  de_wdata = {ops_q[2],
+                                de_rdata[31:24] | 8'h02,
+                                drc_nb, de_rdata[15:0]};
                 33: de_wdata = {de_rdata[63:32], de_rdata[31:24],
                                 drc_nb, ops_q[2][7:0],
                                 de_rdata[7:0]};
@@ -813,6 +837,11 @@ module g6lc_apu_shmod
                   co_req = 1'b1; co_we = 1'b1;
                   co_addr = {slot_q, ops_q[1][9:0]};
                   co_wdata = crow_q;
+                  // decor of the composite, sampled on the next phase
+                  if (opc_q == 16'd51) begin
+                    de_req = 1'b1;
+                    de_addr = {slot_q, ops_q[1][9:0]};
+                  end
                 end else begin
                   rm_req = 1'b1; rm_we = 1'b1;
                   rm_addr = {slot_q, ops_q[1][9:0]};
@@ -822,9 +851,17 @@ module g6lc_apu_shmod
               end
               default: begin
                 unique case (ph_q)
+                  0: if (opc_q == 16'd50) begin
+                       // OpSpecConstant: decor arrives next cycle
+                       de_req = 1'b1;
+                       de_addr = {slot_q, ops_q[1][9:0]};
+                     end
                   1: begin co_req = 1'b1; co_we = 1'b1;
                        co_addr = {slot_q, ops_q[1][9:0]};
-                       co_wdata = crow_q; end
+                       co_wdata = {crow_q[511:32],
+                                   f_spec(de_rdata[63:32], crow_q[31:0],
+                                          opc_q == 16'd50 &&
+                                          de_rdata[25])}; end
                   2: begin rm_req = 1'b1; rm_we = 1'b1;
                        rm_addr = {slot_q, ops_q[1][9:0]};
                        rm_wdata = {2'b01, cn_q[3:0], ops_q[0][9:0],
@@ -1188,8 +1225,11 @@ module g6lc_apu_shmod
                   fl_code_q <= APU_SH_FAULT_EXECMODE;
                   fl_opc_q <= opc_q; fl_word_q <= at_q;
                   fail_q <= 1'b1; st_q <= S_DONE;
-                end else if (ops_q[2] * ops_q[3] * ops_q[4] == 0 ||
-                             ops_q[2] * ops_q[3] * ops_q[4] > 64) begin
+                end else if (ops_q[2] == 32'h0 || ops_q[3] == 32'h0 ||
+                             ops_q[4] == 32'h0 ||
+                             ops_q[2] > 32'd128 || ops_q[3] > 32'd128 ||
+                             ops_q[4] > 32'd64 ||
+                             ops_q[2] * ops_q[3] * ops_q[4] > 32'd128) begin
                   fl_code_q <= APU_SH_FAULT_LOCALSIZE;
                   fl_opc_q <= opc_q; fl_word_q <= at_q;
                   fail_q <= 1'b1; st_q <= S_DONE;
@@ -1496,12 +1536,19 @@ module g6lc_apu_shmod
                 // the pre-zeroed classes (W_SC0 clears Function/Private
                 // lane scratch per wave, W_SCLR the Workgroup slab)
                 // and only when S_VRB ph2 sees an all-zero const row —
-                // mirrors h_59 in spirv_scan.py
+                // mirrors h_59 in spirv_scan.py.  A Function-class
+                // init is a no-op only in the entry function: entry
+                // scratch clears per wave, a callee's frame does not
+                // re-clear per call, so a dropped zero-init there
+                // would silently differ — fault VAR instead
                 if (wc_q > 5 ||
                     (wc_q == 5 &&
                      ops_q[2][3:0] != APU_SH_SC_WORKGROUP &&
                      ops_q[2][3:0] != APU_SH_SC_PRIVATE &&
-                     ops_q[2][3:0] != APU_SH_SC_FUNCTION)) begin
+                     ops_q[2][3:0] != APU_SH_SC_FUNCTION) ||
+                    (wc_q == 5 &&
+                     ops_q[2][3:0] == APU_SH_SC_FUNCTION &&
+                     fn_id_q != ent_fn_q)) begin
                   fl_code_q <= APU_SH_FAULT_VAR; fl_opc_q <= opc_q;
                   fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
                 end else if (!is_sc_ok(ops_q[2][3:0])) begin
@@ -1937,7 +1984,32 @@ module g6lc_apu_shmod
                 end else if (ph_q == 6'(3 * (wc_q - 3))) begin
                   ph_q <= ph_q + 1;
                 end else begin
-                  at_q <= at_q + wc_q; st_q <= S_IW;
+                  // WorkgroupSize spec composite overrides the literal
+                  // LocalSize execution mode, which glslang leaves at
+                  // the default 1,1,1.
+                  if (opc_q == 16'd51 && de_rdata[29] &&
+                      de_rdata[23:16] == 8'(APU_SH_BI_WGSIZE) &&
+                      cn_q == 5'd3) begin
+                    if (crow_q[31:0] == 32'h0 ||
+                        crow_q[63:32] == 32'h0 ||
+                        crow_q[95:64] == 32'h0 ||
+                        crow_q[31:0] > 32'd128 ||
+                        crow_q[63:32] > 32'd128 ||
+                        crow_q[95:64] > 32'd64 ||
+                        crow_q[31:0] * crow_q[63:32] *
+                        crow_q[95:64] > 32'd128) begin
+                      fl_code_q <= APU_SH_FAULT_LOCALSIZE;
+                      fl_opc_q <= opc_q; fl_word_q <= at_q;
+                      fail_q <= 1'b1; st_q <= S_DONE;
+                    end else begin
+                      lx_q <= crow_q[7:0];
+                      ly_q <= crow_q[39:32];
+                      lz_q <= crow_q[71:64];
+                      at_q <= at_q + wc_q; st_q <= S_IW;
+                    end
+                  end else begin
+                    at_q <= at_q + wc_q; st_q <= S_IW;
+                  end
                 end
               end
               default: begin
@@ -2323,5 +2395,7 @@ module g6lc_apu_shmod_fixture
                    .ShaderIds(ShaderIds), .ShaderRegs(ShaderRegs),
                    .ShaderWords(ShaderWords),
                    .ShaderMembers(ShaderMembers),
-                   .ShaderInit(ShaderInit)) i_dut (.*);
+                   .ShaderInit(ShaderInit)) i_dut (
+    .spec_n_i('0), .spec_id_i('0), .spec_val_i('0),
+    .*);
 endmodule

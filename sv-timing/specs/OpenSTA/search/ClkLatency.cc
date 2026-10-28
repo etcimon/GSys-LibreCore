@@ -1,0 +1,314 @@
+// OpenSTA, Static Timing Analyzer
+// Copyright (c) 2026, Parallax Software, Inc.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+//
+// The origin of this software must not be misrepresented; you must not
+// claim that you wrote the original software.
+//
+// Altered source versions must be plainly marked as such, and must not be
+// misrepresented as being the original software.
+//
+// This notice may not be removed or altered from any source distribution.
+
+#include "ClkLatency.hh"
+
+#include <algorithm>
+
+#include "ClkInfo.hh"
+#include "Clock.hh"
+#include "ContainerHelpers.hh"
+#include "Debug.hh"
+#include "Graph.hh"
+#include "Liberty.hh"
+#include "Network.hh"
+#include "Path.hh"
+#include "Report.hh"
+#include "Search.hh"
+#include "StaState.hh"
+#include "Units.hh"
+
+namespace sta {
+
+ClkLatency::ClkLatency(StaState *sta) :
+  StaState(sta)
+{
+}
+
+ClkDelays
+ClkLatency::findClkDelays(const Clock *clk,
+                          const Scene *scene,
+                          bool include_internal_latency)
+{
+  ConstClockSeq clks;
+  clks.push_back(clk);
+  SceneSet scenes;
+  scenes.insert(scene);
+  ClkDelayMap clk_delay_map = findClkDelays(clks, scenes, include_internal_latency);
+  return clk_delay_map[clk];
+}
+
+void
+ClkLatency::reportClkLatency(ConstClockSeq &clks,
+                             const SceneSeq &scenes,
+                             bool include_internal_latency,
+                             int digits)
+{
+  const SceneSet scenes1 = Scene::sceneSet(scenes);
+  ClkDelayMap clk_delay_map = findClkDelays(clks, scenes1, include_internal_latency);
+
+  // Sort the clocks to report in a stable order.
+  ConstClockSeq sorted_clks;
+  for (const Clock *clk : clks)
+    sorted_clks.push_back(clk);
+  sort(sorted_clks, ClockNameLess());
+
+  for (const Clock *clk : sorted_clks) {
+    ClkDelays clk_delays = clk_delay_map[clk];
+    reportClkLatency(clk, clk_delays, digits);
+    report_->reportBlankLine();
+  }
+}
+
+void
+ClkLatency::reportClkLatency(const Clock *clk,
+                             ClkDelays &clk_delays,
+                             int digits)
+{
+  Unit *time_unit = units_->timeUnit();
+  report_->report("Clock {}", clk->name());
+  for (const RiseFall *src_rf : RiseFall::range()) {
+    for (const RiseFall *end_rf : RiseFall::range()) {
+      Path path_min;
+      Delay insertion_min;
+      Delay delay_min;
+      float internal_latency_min;
+      Delay latency_min;
+      bool exists_min;
+      clk_delays.delay(src_rf, end_rf, MinMax::min(), insertion_min, delay_min,
+                       internal_latency_min, latency_min, path_min, exists_min);
+      Path path_max;
+      Delay insertion_max;
+      Delay delay_max;
+      float internal_latency_max;
+      Delay latency_max;
+      bool exists_max;
+      clk_delays.delay(src_rf, end_rf, MinMax::max(), insertion_max, delay_max,
+                       internal_latency_max, latency_max, path_max, exists_max);
+      if (exists_min & exists_max) {
+        report_->report("{} -> {}", src_rf->name(), end_rf->name());
+        report_->report("    min     max");
+        report_->report("{:>7} {:>7} source latency",
+                        delayAsString(insertion_min, MinMax::min(), digits, this),
+                        delayAsString(insertion_max, MinMax::max(), digits, this));
+        report_->report("{:>7} {:>7} network latency {}",
+                        delayAsString(delay_min, MinMax::min(), digits, this),
+                        "",
+                        sdc_network_->pathName(path_min.pin(this)));
+        report_->report("{:>7} {:>7} network latency {}",
+                        "",
+                        delayAsString(delay_max, MinMax::max(), digits, this),
+                        sdc_network_->pathName(path_max.pin(this)));
+        if (internal_latency_min != 0.0 || internal_latency_max != 0.0)
+          report_->report("{:>7} {:>7} internal clock latency",
+                          time_unit->asString(internal_latency_min, digits),
+                          time_unit->asString(internal_latency_max, digits));
+        report_->report("---------------");
+        report_->report("{:>7} {:>7} latency",
+                        delayAsString(latency_min, MinMax::min(), digits, this),
+                        delayAsString(latency_max, MinMax::max(), digits, this));
+        Delay skew = delayDiff(latency_max, latency_min, this);
+        report_->report("        {:>7} skew",
+                        delayAsString(skew, MinMax::max(), digits, this));
+        report_->reportBlankLine();
+      }
+    }
+  }
+}
+
+ClkDelayMap
+ClkLatency::findClkDelays(ConstClockSeq &clks,
+                          const SceneSet &scenes,
+                          bool include_internal_latency)
+{
+  ConstClockSet clk_set;
+  for (const Clock *clk : clks)
+    clk_set.insert(clk);
+
+  ClkDelayMap clk_delay_map;
+  // Make entries for the relevant clocks to filter path clocks.
+  for (const Clock *clk : clks)
+    clk_delay_map[clk];
+
+  for (Vertex *clk_vertex : graph_->regClkVertices()) {
+    VertexPathIterator path_iter(clk_vertex, this);
+    while (path_iter.hasNext()) {
+      Path *path = path_iter.next();
+      const Scene *path_scene = path->scene(this);
+      const Clock *path_clk = path->clock(this);
+      if (path_clk && scenes.contains(path_scene) && clk_set.contains(path_clk)) {
+        auto delays_itr = clk_delay_map.find(path_clk);
+        if (delays_itr != clk_delay_map.end()) {
+          const ClockEdge *path_clk_edge = path->clkEdge(this);
+          ClkDelays &clk_delays = delays_itr->second;
+          const RiseFall *clk_rf = path_clk_edge->transition();
+          const MinMax *min_max = path->minMax(this);
+          const RiseFall *end_rf = path->transition(this);
+          Delay latency = ClkDelays::latency(path, this);
+          Delay clk_latency;
+          bool exists;
+          clk_delays.latency(clk_rf, end_rf, min_max, clk_latency, exists);
+          if (!exists || delayGreater(latency, clk_latency, min_max, this))
+            clk_delays.setLatency(clk_rf, end_rf, min_max, path,
+                                  include_internal_latency, this);
+        }
+      }
+    }
+  }
+  return clk_delay_map;
+}
+
+////////////////////////////////////////////////////////////////
+
+ClkDelays::ClkDelays()
+{
+  for (auto src_rf_index : RiseFall::rangeIndex()) {
+    for (auto end_rf_index : RiseFall::rangeIndex()) {
+      for (auto mm_index : MinMax::rangeIndex()) {
+        insertion_[src_rf_index][end_rf_index][mm_index] = 0.0;
+        delay_[src_rf_index][end_rf_index][mm_index] = 0.0;
+        internal_latency_[src_rf_index][end_rf_index][mm_index] = 0.0;
+        latency_[src_rf_index][end_rf_index][mm_index] = 0.0;
+        exists_[src_rf_index][end_rf_index][mm_index] = false;
+      }
+    }
+  }
+}
+
+void
+ClkDelays::delay(const RiseFall *src_rf,
+                 const RiseFall *end_rf,
+                 const MinMax *min_max,
+                 // Return values.
+                 Delay &insertion,
+                 Delay &delay,
+                 float &lib_clk_delay,
+                 Delay &latency,
+                 Path &path,
+                 bool &exists) const
+{
+  int src_rf_index = src_rf->index();
+  int end_rf_index = end_rf->index();
+  int mm_index = min_max->index();
+  path = path_[src_rf_index][end_rf_index][mm_index];
+  insertion = insertion_[src_rf_index][end_rf_index][mm_index];
+  delay = delay_[src_rf_index][end_rf_index][mm_index];
+  lib_clk_delay = internal_latency_[src_rf_index][end_rf_index][mm_index];
+  latency = latency_[src_rf_index][end_rf_index][mm_index];
+  exists = exists_[src_rf_index][end_rf_index][mm_index];
+}
+
+void
+ClkDelays::latency(const RiseFall *src_rf,
+                   const RiseFall *end_rf,
+                   const MinMax *min_max,
+                   // Return values.
+                   Delay &latency,
+                   bool &exists) const
+{
+  int src_rf_index = src_rf->index();
+  int end_rf_index = end_rf->index();
+  int mm_index = min_max->index();
+  latency = latency_[src_rf_index][end_rf_index][mm_index];
+  exists = exists_[src_rf_index][end_rf_index][mm_index];
+}
+
+void
+ClkDelays::setLatency(const RiseFall *src_rf,
+                      const RiseFall *end_rf,
+                      const MinMax *min_max,
+                      Path *path,
+                      bool include_internal_latency,
+                      StaState *sta)
+{
+  int src_rf_index = src_rf->index();
+  int end_rf_index = end_rf->index();
+  int mm_index = min_max->index();
+
+  Delay insertion = insertionDelay(path, sta);
+  insertion_[src_rf_index][end_rf_index][mm_index] = insertion;
+
+  Delay delay1 = delay(path, sta);
+  delay_[src_rf_index][end_rf_index][mm_index] = delay1;
+
+  float internal_latency = 0.0;
+  if (include_internal_latency) {
+    internal_latency = clkTreeDelay(path, sta);
+    internal_latency_[src_rf_index][end_rf_index][mm_index] = internal_latency;
+  }
+
+  Delay latency = delaySum(delay1, delaySum(insertion, internal_latency, sta), sta);
+  latency_[src_rf_index][end_rf_index][mm_index] = latency;
+
+  path_[src_rf_index][end_rf_index][mm_index] = *path;
+  exists_[src_rf_index][end_rf_index][mm_index] = true;
+}
+
+Delay
+ClkDelays::latency(Path *clk_path,
+                   StaState *sta)
+{
+  Delay insertion = insertionDelay(clk_path, sta);
+  Delay delay1 = delay(clk_path, sta);
+  float lib_clk_delay = clkTreeDelay(clk_path, sta);
+  return delaySum(delay1, delaySum(insertion, lib_clk_delay, sta), sta);
+}
+
+Delay
+ClkDelays::delay(Path *clk_path,
+                 StaState *sta)
+{
+  Arrival arrival = clk_path->arrival();
+  const ClockEdge *path_clk_edge = clk_path->clkEdge(sta);
+  return delayDiff(arrival, path_clk_edge->time(), sta);
+}
+
+Delay
+ClkDelays::insertionDelay(Path *clk_path,
+                          StaState *sta)
+{
+  const ClockEdge *clk_edge = clk_path->clkEdge(sta);
+  const Clock *clk = clk_edge->clock();
+  const RiseFall *clk_rf = clk_edge->transition();
+  const ClkInfo *clk_info = clk_path->clkInfo(sta);
+  const Pin *src_pin = clk_info->clkSrc();
+  const MinMax *min_max = clk_path->minMax(sta);
+  const Mode *mode = clk_path->mode(sta);
+  return sta->search()->clockInsertion(clk, src_pin, clk_rf, min_max, min_max, mode);
+}
+
+float
+ClkDelays::clkTreeDelay(Path *clk_path,
+                        StaState *sta)
+{
+  const Vertex *vertex = clk_path->vertex(sta);
+  const Pin *pin = vertex->pin();
+  const LibertyPort *port = sta->network()->libertyPort(pin);
+  const MinMax *min_max = clk_path->minMax(sta);
+  const RiseFall *rf = clk_path->transition(sta);
+  float slew = delayAsFloat(clk_path->slew(sta), min_max, sta);
+  return port->clkTreeDelay(slew, rf, min_max);
+}
+
+}  // namespace sta

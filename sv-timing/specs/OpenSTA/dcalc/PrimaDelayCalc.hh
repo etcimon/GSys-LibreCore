@@ -1,0 +1,276 @@
+// OpenSTA, Static Timing Analyzer
+// Copyright (c) 2026, Parallax Software, Inc.
+// 
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+// 
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// 
+// The origin of this software must not be misrepresented; you must not
+// claim that you wrote the original software.
+// 
+// Altered source versions must be plainly marked as such, and must not be
+// misrepresented as being the original software.
+// 
+// This notice may not be removed or altered from any source distribution.
+
+#pragma once
+
+#include <Eigen/SparseCore>
+#include <Eigen/SparseLU>
+#include <array>
+#include <map>
+#include <vector>
+
+#include "ArcDcalcWaveforms.hh"
+#include "LumpedCapDelayCalc.hh"
+#include "Parasitics.hh"
+
+namespace sta {
+
+class ArcDelayCalc;
+class StaState;
+class Scene;
+
+using PinNodeMap = std::map<const Pin*, size_t, PinIdLess>;
+using NodeIndexMap = std::map<const ParasiticNode*, size_t, ParasiticNodeLess>;
+using PortIndexMap = std::map<const Pin*, size_t>;
+using MatrixSd = Eigen::SparseMatrix<double>;
+using PinLMap = std::map<const Pin*, Eigen::VectorXd, PinIdLess>;
+using WatchPinValuesMap = std::map<const Pin*, FloatSeq, PinIdLess>;
+
+using Waveform = Table;
+
+ArcDelayCalc *
+makePrimaDelayCalc(StaState *sta);
+
+class PrimaDelayCalc : public DelayCalcBase,
+                       public ArcDcalcWaveforms
+{
+public:
+  PrimaDelayCalc(StaState *sta);
+  PrimaDelayCalc(const PrimaDelayCalc &dcalc);
+  ~PrimaDelayCalc() override;
+  ArcDelayCalc *copy() override;
+  void copyState(const StaState *sta) override;
+  std::string_view name() const override { return "prima"; }
+  void setPrimaReduceOrder(size_t order);
+  Parasitic *findParasitic(const Pin *drvr_pin,
+                           const RiseFall *rf,
+                           const Scene *scene,
+                           const MinMax *min_max) override;
+  bool reduceSupported() const override { return false; }
+  Parasitic *reduceParasitic(const Parasitic *parasitic_network,
+                             const Pin *drvr_pin,
+                             const RiseFall *rf,
+                             const Scene *scene,
+                             const MinMax *min_max) override;
+  ArcDcalcResult inputPortDelay(const Pin *drvr_pin,
+                                float in_slew,
+                                const RiseFall *rf,
+                                const Parasitic *parasitic,
+                                const LoadPinIndexMap &load_pin_index_map,
+                                const Scene *scene,
+                                const MinMax *min_max) override;
+  ArcDcalcResult gateDelay(const Pin *drvr_pin,
+                           const TimingArc *arc,
+                           const Slew &in_slew,
+                           float load_cap,
+                           const Parasitic *parasitic,
+                           const LoadPinIndexMap &load_pin_index_map,
+                           const Scene *scene,
+                           const MinMax *min_max) override;
+  ArcDcalcResultSeq gateDelays(ArcDcalcArgSeq &dcalc_args,
+                               const LoadPinIndexMap &load_pin_index_map,
+                               const Scene *scene,
+                               const MinMax *min_max) override;
+  std::string reportGateDelay(const Pin *drvr_pin,
+                              const TimingArc *arc,
+                              const Slew &in_slew,
+                              float load_cap,
+                              const Parasitic *parasitic,
+                              const LoadPinIndexMap &load_pin_index_map,
+                              const Scene *scene,
+                              const MinMax *min_max,
+                              int digits) override;
+  bool checkArgs(ArcDcalcArgSeq &dcalc_args,
+                 const Scene *scene,
+                 const MinMax *min_max);
+  std::string failureReason();
+
+  // Record waveform for drvr/load pin.
+  void watchPin(const Pin *pin) override;
+  void clearWatchPins() override;
+  PinSeq watchPins() const override;
+  Waveform watchWaveform(const Pin *pin) override;
+  
+protected:
+  void delaySlewPocv(ArcDcalcArg &dcalc_arg,
+                     size_t drvr_idx,
+                     ArcDelay &gate_delay,
+                     Slew &drvr_slew);
+  ArcDcalcResultSeq tableDcalcResults();
+  void simulate();
+  void simulate1(const MatrixSd &G,
+                 const MatrixSd &C,
+                 const Eigen::MatrixXd &B,
+                 const Eigen::VectorXd &x_init,
+                 const Eigen::MatrixXd &x_to_v,
+                 size_t order);
+  double maxTime();
+  double timeStep();
+  float driverResistance();
+  void updateCeffIdrvr();
+  void initSim();
+  void findLoads();
+  void findNodeCount();
+  void placeNode(ParasiticNode *node,
+                 size_t index);
+  void setOrder();
+  void initCeffIdrvr();
+  void setXinit();
+  std::pair<size_t, bool> nodeIndex(const ParasiticNode *node);
+  void stampEqns();
+  void stampDriver(const ArcDcalcArg &dcalc_arg,
+                   size_t drvr_idx);
+  void stampResistors(const Parasitic *parasitic);
+  void stampCapacitors(const Parasitic *parasitic,
+                       const ArcDcalcArg &dcalc_arg,
+                       NetSet &drvr_nets);
+  float pinCapacitance(const Pin *pin,
+                       const RiseFall *rf,
+                       bool includes_pin_caps);
+  void stampConductance(size_t n1,
+                        double g);
+  void stampConductance(size_t n1,
+                        size_t n2,
+                        double g);
+  void stampCapacitance(size_t n1,
+                        double cap);
+  void stampCapacitance(size_t n1,
+                        size_t n2,
+                        double cap);
+  void setPortCurrents();
+  void measureThresholds(double time);
+  double voltage(const Pin *pin);
+  double voltage(size_t node_idx);
+  double voltagePrev(size_t node_idx);
+  bool loadWaveformsFinished();
+  ArcDcalcResultSeq dcalcResults();
+
+  void recordWaveformStep(double time);
+  void makeWaveforms(const Pin *in_pin,
+                     const RiseFall *in_rf,
+                     const Pin *drvr_pin,
+                     const RiseFall *drvr_rf,
+                     const Pin *load_pin,
+                     const Scene *scene,
+                     const MinMax *min_max);
+  void primaReduce();
+  void primaReduce2();
+
+  void reportMatrix(std::string_view name,
+                    MatrixSd &matrix);
+  void reportMatrix(std::string_view name,
+                    Eigen::MatrixXd &matrix);
+  void reportMatrix(std::string_view name,
+                    Eigen::VectorXd &matrix);
+  void reportVector(std::string_view name,
+                    std::vector<double> &matrix);
+  void reportMatrix(MatrixSd &matrix);
+  void reportMatrix(Eigen::MatrixXd &matrix);
+  void reportMatrix(Eigen::VectorXd &matrix);
+  void reportVector(std::vector<double> &matrix);
+
+  ArcDcalcArgSeq *dcalc_args_{nullptr};
+  size_t drvr_count_;
+  float load_cap_;
+  const Scene *scene_{nullptr};
+  const MinMax *min_max_{nullptr};
+  Parasitics *parasitics_{nullptr};
+  const Parasitic *parasitic_network_{nullptr};
+  const RiseFall *drvr_rf_;
+  const LoadPinIndexMap *load_pin_index_map_{nullptr};
+
+  PinNodeMap pin_node_map_;     // Parasitic pin -> array index
+  NodeIndexMap node_index_map_; // Parasitic node -> array index
+  std::vector<OutputWaveforms*> output_waveforms_;
+  double resistance_sum_;
+  
+  float coupling_cap_multiplier_;
+  
+  size_t node_count_;           // Parasitic network node count
+  size_t port_count_;           // aka drvr_count_
+  size_t order_;                // node_count_ + port_count_
+
+  // MNA node eqns
+  // G*x(t) + C*x'(t) = B*u(t)
+  MatrixSd G_;
+  MatrixSd C_;
+  Eigen::MatrixXd B_;
+  Eigen::VectorXd x_init_;
+  Eigen::VectorXd u_;
+
+  // Prima reduced MNA eqns
+  size_t prima_order_{3};
+  Eigen::MatrixXd Vq_;
+  MatrixSd Gq_;
+  MatrixSd Cq_;
+  Eigen::MatrixXd Bq_;
+  Eigen::VectorXd xq_init_;
+
+  // Node voltages.
+  Eigen::VectorXd v_;                  // voltage[node_idx]
+  Eigen::VectorXd v_prev_;
+
+  // Indexed by driver index.
+  std::vector<double> ceff_;
+  // Ceff at Vth
+  std::vector<double> ceff_vth_;
+  std::vector<double> drvr_current_;
+
+  double time_step_;
+  double time_step_prev_;
+
+  // Waveform recording.
+  bool make_waveforms_{false};
+  const Pin *waveform_drvr_pin_{nullptr};
+  const Pin *waveform_load_pin_{nullptr};
+  FloatSeq drvr_voltages_;
+  FloatSeq load_voltages_;
+  WatchPinValuesMap watch_pin_values_;
+  FloatSeq times_;
+
+  float vdd_;
+  float vth_;
+  float vl_;
+  float vh_;
+
+  static constexpr size_t threshold_vl = 0;
+  static constexpr size_t threshold_vth = 1;
+  static constexpr size_t threshold_vh = 2;
+  static constexpr size_t measure_threshold_count_ = 3;
+  using ThresholdTimes = std::array<double, measure_threshold_count_>;
+  // Vl Vth Vh
+  ThresholdTimes measure_thresholds_;
+  // Indexed by node number.
+  std::vector<ThresholdTimes> threshold_times_;
+
+  // Delay calculator to use when ccs waveforms are missing from liberty.
+  ArcDelayCalc *table_dcalc_;
+
+  const char *failure_reason_;
+  ArcDcalcArg *failure_arg_;
+
+  using ArcDelayCalc::reduceParasitic;
+};
+
+} // namespace sta

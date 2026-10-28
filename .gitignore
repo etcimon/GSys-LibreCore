@@ -1,3 +1,6 @@
+# out_rtl junction mirrors build-platform/workspace/hyp. The index entry is a
+# symlink (120000 → build-platform/workspace/hyp). Do not add the tree.
+/out_rtl/**
 *.swp
 *.swo
 site/*

@@ -89,6 +89,7 @@ module instr_realign
   // svt-pipe: require-contract
   // svt-pipe: protocol rl valid=valid_i kill=kill_i flush=flush_i
   // svt-pipe: no-cut on=carry_addr_bank_q
+  // svt-pipe: cycle rl q=carry_addr_bank_q d=carry_next_bank_q hold=valid_i steps=1
 
   localparam g6lc_fetch_pkg::fetch_geo_t Geo = g6lc_fetch_pkg::geo(CVA6Cfg);
   // halfwords per fetch block, bits needed to index one, and the cursor width

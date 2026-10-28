@@ -255,10 +255,50 @@ module tb_g6lc_apu_objpay;
     end
   endtask
 
+  // READN: n (1..16) words inside one 16-word line -> n completions.
+  // A burst violating the line/word rules answers one BOUNDS cpl.
+  task automatic t_readn(input int a, input int n);
+    @(negedge clk);
+    while (!req_r) @(negedge clk);
+    req_v = 1'b1;
+    req   = '{op: APU_OBJPAY_OP_READN, addr: 32'(a),
+              words: 32'(n), wdata: '0};
+    @(posedge clk);
+    @(negedge clk); req_v = 1'b0;
+    begin
+      automatic bit legal = (a < PayWords) && (n >= 1) && (n <= 16) &&
+                            ((a % 16) + n <= 16) &&
+                            (m_acc(a) == APU_OBJPAY_OK);
+      if (!legal) begin
+        while (!cpl_v) @(negedge clk);
+        check($sformatf("readn(%0d,%0d) bounds", a, n),
+              cpl.status == APU_OBJPAY_BOUNDS);
+        @(posedge clk); @(negedge clk);
+        check($sformatf("readn(%0d,%0d) idle after bounds", a, n),
+              cpl_v == 1'b0);
+      end else begin
+        for (int i = 0; i < n; i++) begin
+          while (!cpl_v) @(negedge clk);
+          check($sformatf("readn(%0d,%0d) beat%0d status", a, n, i),
+                cpl.status == APU_OBJPAY_OK);
+          if (cpl.rdata !== m_mem[a + i])
+            $display("  rn(%0d+%0d) got=%08x exp=%08x",
+                     a, i, cpl.rdata, m_mem[a + i]);
+          check($sformatf("readn(%0d,%0d) beat%0d data", a, n, i),
+                cpl.rdata === m_mem[a + i]);
+          @(posedge clk); @(negedge clk);
+        end
+      end
+    end
+  endtask
+
   initial begin
     for (int i = 0; i < NumChunks; i++) m_bmp[i] = 0;
     for (int i = 0; i < PayWords; i++) m_mem[i] = '0;
     m_cursor = 0;
+    // mirror StInit: chunk 0 stays marked — 0 is the "none" sentinel for
+    // extent parkings, so no real allocation may begin at word 0
+    m_bmp[0] = 1;
     @(negedge clk); rst_ni = 1'b0;
     repeat (3) @(negedge clk); rst_ni = 1'b1;
     check("init quiet", cpl_v === 1'b0);
@@ -269,12 +309,13 @@ module tb_g6lc_apu_objpay;
 
     // ---- directed: alloc/write/read/free round trip -----------------
     cases++;
-    t_alloc(100, base_a);            // chunks 0-1 -> base 0
-    check("alloc100 base0", base_a == 0);
+    t_alloc(100, base_a);            // chunks 1-2 -> base 64 (chunk 0
+                                     // is the reserved sentinel)
+    check("alloc100 base64", base_a == 64);
     for (int i = 0; i < 100; i++) t_write(base_a + i, 32'hA5000000 + i);
     for (int i = 0; i < 100; i++) t_read(base_a + i);
-    t_alloc(40, base_b);             // 1 chunk -> base 128
-    check("alloc40 base128", base_b == 128);
+    t_alloc(40, base_b);             // 1 chunk -> base 192
+    check("alloc40 base192", base_b == 192);
     t_free(base_a, 100);
     t_alloc(60, base_c);             // next-fit resumes at chunk 3:
                                      // chunk 0-1 free -> base 0 anyway
@@ -296,19 +337,22 @@ module tb_g6lc_apu_objpay;
     check("words>65535 bounds", base_a == -1);
     // fill the rest of the arena chunk-by-chunk
     t_free(base_c, 60); t_free(base_b, 40); t_free(base_d, 200);
-    t_alloc(PayWords, base_a);       // whole arena
-    check("full-arena alloc", base_a == 0);
+    t_alloc(PayWords - 64, base_a);  // all allocatable space (chunk 0
+                                     // is permanently reserved)
+    check("full-arena alloc", base_a == 64);
     t_alloc(1, base_b);              // nothing left -> FULL
     check("exhausted full", base_b == -1);
-    t_free(base_a, PayWords);
+    t_free(base_a, PayWords - 64);
 
     // ---- bounds --------------------------------------------------------
     cases++;
     t_write(PayWords, 32'hDEAD);     // off end -> BOUNDS
     t_read(PayWords);
-    // unallocated chunk -> BOUNDS (extent check through the bitmap)
-    t_write(0, 32'h1234ABCD);        // chunk 0 now free -> BOUNDS
-    t_read(0);
+    // unallocated chunk -> BOUNDS (extent check through the bitmap);
+    // chunk 0 itself is permanently marked (reserved sentinel), so use
+    // chunk 3 — every chunk but 0 is free at this point
+    t_write(192, 32'h1234ABCD);      // chunk 3 free -> BOUNDS
+    t_read(192);
     t_alloc(64, base_a);             // one chunk -> word access ok
     t_write(base_a, 32'h1234ABCD);
     t_read(base_a);
@@ -343,6 +387,30 @@ module tb_g6lc_apu_objpay;
       for (int i = 0; i < 16; i++) t_read(base_a + i);
       t_free(base_a, 64);
       t_free(base_b, 64 * 64);
+    end
+
+    // ---- READN burst reads ----------------------------------------------
+    cases++;
+    begin
+      t_alloc(128, base_a);          // two chunks -> base somewhere
+      for (int i = 0; i < 128; i++)
+        t_write(base_a + i, 32'hCAFE0000 + i);
+      t_readn(base_a, 16);           // full aligned line
+      t_readn(base_a + 33, 7);       // mid-line partial burst
+      t_readn(base_a + 48, 16);      // line 3, whole line
+      t_readn(base_a + 1, 15);       // offset 1..15
+      // illegal bursts: cross-line, n=0, n>16, out of arena,
+      // unallocated chunk (past the 128-word extent)
+      t_readn(base_a + 12, 8);       // off=12 + 8 > 16 -> BOUNDS
+      t_readn(base_a, 0);            // n=0 -> BOUNDS
+      t_readn(base_a, 17);           // n>16 -> BOUNDS
+      t_readn(PayWords - 16, 4);     // out of arena -> BOUNDS
+      t_readn(base_a + 128, 4);      // unallocated chunk -> BOUNDS
+      // READN immediately after a same-line WRITE exercises the
+      // write-merge overlay path
+      t_write(base_a + 5, 32'h5555_0005);
+      t_readn(base_a, 16);
+      t_free(base_a, 128);
     end
 
     // ---- seeded random vs model -----------------------------------------

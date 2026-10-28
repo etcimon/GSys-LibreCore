@@ -1,0 +1,90 @@
+name: Labelled Ready to Sync Public
+
+on:
+  pull_request:
+    types: [labeled]
+
+env:
+  ROT13_STAGING_OWNER: ${{ secrets.ROT13_STAGING_OWNER }}
+  ROT13_UPSTREAM_OWNER: ${{ secrets.ROT13_UPSTREAM_OWNER }}
+  ROT13_UPSTREAM_BRANCH: ${{ secrets.ROT13_UPSTREAM_BRANCH }}
+
+jobs:
+  Push-To-Staging:
+    name: Push to staging
+    runs-on: ${{ vars.USE_SELF_HOSTED == 'true' && 'self-hosted' || 'ubuntu-latest' }}
+
+    permissions:
+      # Read-only access so we don't accidentally try to push to *this* repository.
+      contents: read
+      # Pull request write access, so we can remove the label.
+      issues: write
+      pull-requests: write
+      # Deployment write access, so we can add the nice deployment info.
+      deployments: write
+
+    # Only run on the private repository.
+    if: github.event.repository.private && github.event.label.name == 'Ready To Sync Public'
+    steps:
+    - name: Detect configuration
+      uses: The-OpenROAD-Project/actions/auto_config@main
+
+    - name: Removing label '${{ github.event.label.name }}'
+      uses: The-OpenROAD-Project/actions/remove_label@main
+      continue-on-error: true
+
+    - name: Clone repository
+      uses: The-OpenROAD-Project/actions/clone_from@main
+      with:
+        branch: ${{ env.PRIVATE_BRANCH }}
+        checkout: true
+
+    - name: Run security scan
+      uses: The-OpenROAD-Project/actions/security_scan_on_push@main
+
+    - name: Push to staging repository.
+      uses: The-OpenROAD-Project/actions/push_to@main
+      with:
+        owner: ${{ env.STAGING_OWNER }}
+        repo: ${{ env.STAGING_REPO }}
+        branch: ${{ env.STAGING_BRANCH }}
+        deployToken: ${{ secrets.STAGING_GITHUB_TOKEN }}
+        force: true
+
+    - id: resolve_key
+      name: Compute per-user secret key
+      env:
+        PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+      run: |
+        key=$(echo "$PR_AUTHOR" | tr 'a-z-' 'A-Z_')
+        echo "key=$key" >> "$GITHUB_OUTPUT"
+
+    - id: resolve_token
+      name: Pick per-user PAT or fall back to bot token
+      env:
+        USER_PAT: ${{ secrets[format('PAT_{0}', steps.resolve_key.outputs.key)] }}
+        BOT_TOKEN: ${{ secrets.STAGING_GITHUB_TOKEN }}
+      run: |
+        if [ -n "$USER_PAT" ]; then
+          echo "::add-mask::$USER_PAT"
+          echo "token=$USER_PAT" >> "$GITHUB_OUTPUT"
+          echo "source=user-pat" >> "$GITHUB_OUTPUT"
+          echo "Using per-user PAT for PR creation"
+        else
+          echo "::add-mask::$BOT_TOKEN"
+          echo "token=$BOT_TOKEN" >> "$GITHUB_OUTPUT"
+          echo "source=bot-fallback" >> "$GITHUB_OUTPUT"
+          echo "No per-user PAT found; falling back to bot token"
+        fi
+
+    - id: send_pr
+      name: Create PR if needed.
+      uses: The-OpenROAD-Project/actions/send_pr@main
+      env:
+        STAGING_GITHUB_TOKEN: ${{ steps.resolve_token.outputs.token }}
+
+    - name: Linking to PR using deployment.
+      uses: The-OpenROAD-Project/actions/link_pr@main
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        UPSTREAM_PR: ${{ steps.send_pr.outputs.pr }}

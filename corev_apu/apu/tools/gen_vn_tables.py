@@ -103,8 +103,15 @@ SRC = {'IMM': 0, 'Q': 1, 'CNT': 2, 'CONST': 3, 'EXEC': 4}
 ACT_CLASSES = ['UNSUPPORTED', 'ALLOC', 'RETIRE', 'BIND', 'QUERY',
                'CB_BEGIN', 'CB_END', 'CB_RESET', 'RECORD', 'SUBMIT',
                'WAIT', 'POOL_RESET', 'MAP', 'NOP_OK', 'UPDATE',
-               'TRANSPORT']
+               'TRANSPORT',
+               # §5a G3b-iii: host event ops — vkSetEvent/vkResetEvent
+               # SETSTATE the entry's bit 0, vkGetEventStatus replies
+               # VK_EVENT_SET/RESET.  The 17th class widens the enum
+               # (and apu_vn_act_t) to 5 bits.
+               'EVENT']
 ACT_F_REPLY = 0x01          # flags bit: GENERATE_REPLY
+ACT_BITS = (len(ACT_CLASSES) - 1).bit_length()   # class field width
+ACT_W = ACT_BITS + 6 + 3 + 3 + 8                 # apu_vn_act_t width
 QSLOT_NONE = 0x7            # all-ones sentinel of a 3-bit qslot field
 ROLES = {'LOOKUP': 0, 'NEW': 1, 'RETIRE': 2, 'OPTIONAL': 3}
 
@@ -960,7 +967,12 @@ class Model:
                     'vkFlushMappedMemoryRanges',
                     'vkInvalidateMappedMemoryRanges'):
             return 'MAP'
-        if name in ('vkCreatePipelineCache', 'vkDestroyPipelineCache'):
+        if name in ('vkCreatePipelineCache', 'vkDestroyPipelineCache',
+                    # §5a G3b-iii: pool trim releases free chunks back
+                    # to the OS — device-side the chain chunks are
+                    # PayMem extents; the no-op is honest (pool reset
+                    # already returns them)
+                    'vkTrimCommandPool'):
             return 'NOP_OK'
         if name == 'vkUpdateDescriptorSets':
             return 'UPDATE'
@@ -976,6 +988,8 @@ class Model:
                          'vkGetRenderAreaGranularity',
                          'vkGetImageSubresourceLayout'):
             return 'QUERY'
+        if name in ('vkGetEventStatus', 'vkSetEvent', 'vkResetEvent'):
+            return 'EVENT'
         if name.startswith('vkCreate') or name.startswith('vkAllocate') \
                 or name.startswith('vkGetDeviceQueue'):
             return 'ALLOC'
@@ -1910,7 +1924,7 @@ def emit_sv(model, asm, profile):
       '$clog2(APU_VN_PROFILE_WORDS);')
     A('')
     # action table (design doc 4c): one packed record per command type
-    A('  typedef enum logic [3:0] {')
+    A('  typedef enum logic [%d:0] {' % (ACT_BITS - 1))
     for i, cls in enumerate(ACT_CLASSES):
         A('    APU_VN_ACT_%s = %d%s'
           % (cls, i, ',' if i < len(ACT_CLASSES) - 1 else ''))
@@ -1934,7 +1948,7 @@ def emit_sv(model, asm, profile):
                 ((a['obj_kind'] & 0x3F) << 14) | \
                 ((a['parent_q'] & 7) << 11) | \
                 ((a['cb_q'] & 7) << 8) | (a['flags'] & 0xFF)
-            act_words.append("24'h%06X" % w)
+            act_words.append("%d'h%07X" % (ACT_W, w))
             act_notes.append('%s kind=%d pq=%d cq=%d f=%02X'
                              % (a['class'], a['obj_kind'], a['parent_q'],
                                 a['cb_q'], a['flags']))
@@ -2106,9 +2120,9 @@ def emit_md(model, asm, unfit):
     A('## Action classification (design doc 4c)')
     A('')
     A('`APU_VN_ACT[type]` is a packed `apu_vn_act_t` '
-      '`{act_class[3:0], obj_kind[5:0], parent_qslot[2:0], '
+      '`{act_class[4:0], obj_kind[5:0], parent_qslot[2:0], '
       'cmdbuf_qslot[2:0], flags[7:0]}` (class in the most significant '
-      'nibble).  `parent_qslot` is the first LOOKUP-role q slot, '
+      'bits).  `parent_qslot` is the first LOOKUP-role q slot, '
       '`cmdbuf_qslot` the q slot holding `commandBuffer` for RECORD/'
       'CB_* commands; both use `APU_VN_QSLOT_NONE` (all-ones) when '
       'absent.  `flags[0]` = `APU_VN_ACT_F_REPLY` (GENERATE_REPLY: the '

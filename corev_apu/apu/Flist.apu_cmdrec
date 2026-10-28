@@ -3,5 +3,10 @@
 +incdir+${CVA6_REPO_DIR}/corev_apu/apu/include
 ${CVA6_REPO_DIR}/core/include/config_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_cmdrec_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_objtab_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_objpay_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_mp_pkg.sv
 ${CVA6_REPO_DIR}/vendor/pulp-platform/tech_cells_generic/src/rtl/tc_sram.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_objmem.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_objpay.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_cmdrec.sv

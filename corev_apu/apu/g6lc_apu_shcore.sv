@@ -30,7 +30,7 @@ module g6lc_apu_shcore
   parameter int unsigned ShaderLanes   = 8,
   parameter int unsigned ShaderVec     = 4,
   parameter int unsigned ShaderRegs    = 256,
-  parameter int unsigned MaxWaves      = 8,
+  parameter int unsigned MaxWaves      = 16,
   parameter int unsigned ShaderIds     = 1024,
   parameter int unsigned ShaderSlots   = 8,
   parameter int unsigned ShaderWords   = 2048,
@@ -158,8 +158,16 @@ module g6lc_apu_shcore
     logic [159:0] phi_data;
     logic [127:0] entry_data;
 
+    // §5a G3b-iii: DispatchIndirect arrives with its {gx,gy,gz} already
+    // fetched into imm[0..2] by the executor; DispatchBase carries
+    // {baseX,Y,Z} in imm[0..2] and the counts in imm[3..5]
+    wire is_dbase = (work_ctype_i ==
+                     32'(APU_VN_TYPE_VK_CMD_DISPATCH_BASE_EXT));
     wire is_dispatch = (work_ctype_i ==
-                        32'(APU_VN_TYPE_VK_CMD_DISPATCH_EXT));
+                        32'(APU_VN_TYPE_VK_CMD_DISPATCH_EXT)) ||
+                       (work_ctype_i ==
+                        32'(APU_VN_TYPE_VK_CMD_DISPATCH_INDIRECT_EXT)) ||
+                       is_dbase;
     // graphics wave work (APU_SH_WORK_VS/FS pseudo-ctypes): a dispatch
     // whose imm words carry the record batch instead of gx/gy/gz; the
     // pseudo-ctype itself doubles as the work_id so completions are
@@ -173,6 +181,7 @@ module g6lc_apu_shcore
     typedef struct packed {
       logic          valid;
       logic [31:0]   handle;
+      logic [31:0]   spec;
       apu_sh_entry_t entry;
       logic [7:0]    pins;
       logic [3:0]    age;    // 0 = most recently resolved
@@ -201,6 +210,7 @@ module g6lc_apu_shcore
         if (i < ShaderSlots) begin
           if (res_q[i].valid &&
               res_q[i].handle == sm_req_pl_i.handle &&
+              res_q[i].spec == sm_req_pl_i.spec &&
               !res_hit) begin
             res_hit     = 1'b1;
             res_hit_idx = 3'(i);
@@ -229,7 +239,9 @@ module g6lc_apu_shcore
 
     // ---- FILL engine: stream the pCode words from ObjPay through the
     // shmod staging port, then run the commit scan ----------------------
-    typedef enum logic [1:0] { F_IDLE, F_READ, F_COMMIT, F_WAIT } fs_e;
+    typedef enum logic [2:0] {
+      F_IDLE, F_SP0, F_SP1, F_READ, F_COMMIT, F_WAIT
+    } fs_e;
     fs_e         fstate_q;
     logic [2:0]  f_slot_q;
     logic [31:0] f_handle_q;
@@ -237,11 +249,28 @@ module g6lc_apu_shcore
     logic [15:0] f_idx_q, f_words_q;
     logic        f_pin_q;
     logic        f_reqd_q;       // op READ request accepted
+    logic [31:0] f_spec_q;
+    logic [5:0]  f_specn_q;
+    logic [6:0]  f_spi_q;
+    logic [31:0] f_spid_q [32];
+    logic [31:0] f_spv_q [32];
+    logic [1023:0] f_spid_p, f_spv_p;
+    always_comb begin
+      f_spid_p = '0;
+      f_spv_p  = '0;
+      for (int i = 0; i < 32; i++) begin
+        f_spid_p[32*i +: 32] = f_spid_q[i];
+        f_spv_p[32*i +: 32]  = f_spv_q[i];
+      end
+    end
 
     assign sm_busy_o      = fstate_q != F_IDLE;
-    assign op_req_valid_o = fstate_q == F_READ && !f_reqd_q;
+    assign op_req_valid_o = (fstate_q == F_READ || fstate_q == F_SP0 ||
+                             fstate_q == F_SP1) && !f_reqd_q;
     assign op_req_o       = '{op: APU_OBJPAY_OP_READ,
-                             addr: f_base_q + 32'(f_idx_q),
+                             addr: fstate_q == F_READ
+                                   ? f_base_q + 32'(f_idx_q)
+                                   : {1'b0, f_spec_q[30:0]} + 32'(f_spi_q),
                              words: '0, wdata: '0};
 
     // staged word lands the cycle the ObjPay completion does
@@ -271,6 +300,7 @@ module g6lc_apu_shcore
         fstate_q <= F_IDLE; f_slot_q <= '0; f_handle_q <= '0;
         f_base_q <= '0; f_idx_q <= '0; f_words_q <= '0;
         f_pin_q <= 1'b0; f_reqd_q <= 1'b0;
+        f_spec_q <= '0; f_specn_q <= '0; f_spi_q <= '0;
       end else begin
         sm_cpl_v_q <= 1'b0;
         // external retire drops residency alongside the shmod mark
@@ -333,13 +363,16 @@ module g6lc_apu_shcore
                   f_idx_q    <= '0;
                   f_words_q  <= sm_req_pl_i.words;
                   f_pin_q    <= sm_req_pl_i.pin;
+                  f_spec_q   <= sm_req_pl_i.spec;
+                  f_specn_q  <= '0;
+                  f_spi_q    <= '0;
                   f_reqd_q   <= 1'b0;
                   res_q[vic_idx].valid <= 1'b0;
                   res_q[vic_idx].pins  <= '0;
                   res_q[vic_idx].age   <= 4'hF;   // MRU after fill:
                                                    // every other tag
                                                    // is younger
-                  fstate_q   <= F_READ;
+                  fstate_q   <= sm_req_pl_i.spec[31] ? F_SP0 : F_READ;
                 end
               end
               APU_SH_SM_UNPIN: begin
@@ -367,6 +400,55 @@ module g6lc_apu_shcore
                               entry: '0, fault: '0};
               end
             endcase
+          end
+          F_SP0: begin
+            if (!f_reqd_q && op_req_ready_i) f_reqd_q <= 1'b1;
+            if (f_reqd_q && op_cpl_valid_i) begin
+              f_reqd_q <= 1'b0;
+              if (op_cpl_i.status != APU_OBJPAY_OK ||
+                  op_cpl_i.rdata > 32'd32) begin
+                res_q[f_slot_q].valid <= 1'b0;
+                sm_cpl_v_q <= 1'b1;
+                sm_cpl_q <= '{ok: 1'b0, busy: 1'b0, slot: f_slot_q,
+                              entry: '0,
+                              fault: '{code: APU_SH_FAULT_CONST,
+                                       opcode: '0, word: '0}};
+                fstate_q <= F_IDLE;
+              end else if (op_cpl_i.rdata == 32'h0) begin
+                f_specn_q <= '0;
+                fstate_q  <= F_READ;
+              end else begin
+                f_specn_q <= op_cpl_i.rdata[5:0];
+                f_spi_q   <= 7'd1;   // first id word
+                fstate_q  <= F_SP1;
+              end
+            end
+          end
+          F_SP1: begin
+            if (!f_reqd_q && op_req_ready_i) f_reqd_q <= 1'b1;
+            if (f_reqd_q && op_cpl_valid_i) begin
+              f_reqd_q <= 1'b0;
+              if (op_cpl_i.status != APU_OBJPAY_OK) begin
+                res_q[f_slot_q].valid <= 1'b0;
+                sm_cpl_v_q <= 1'b1;
+                sm_cpl_q <= '{ok: 1'b0, busy: 1'b0, slot: f_slot_q,
+                              entry: '0,
+                              fault: '{code: APU_SH_FAULT_CONST,
+                                       opcode: '0, word: 16'(f_spi_q)}};
+                fstate_q <= F_IDLE;
+              end else begin
+                if (f_spi_q[0] == 1'b1)
+                  f_spid_q[f_spi_q[6:1]] <= op_cpl_i.rdata;
+                else
+                  f_spv_q[f_spi_q[6:1] - 6'd1] <= op_cpl_i.rdata;
+                if (f_spi_q + 7'd1 == {f_specn_q, 1'b0} + 7'd1) begin
+                  // spi was the last value word (2*count)
+                  fstate_q <= F_READ;
+                end else begin
+                  f_spi_q <= f_spi_q + 7'd1;
+                end
+              end
+            end
           end
           F_READ: begin
             if (!f_reqd_q && op_req_ready_i) f_reqd_q <= 1'b1;
@@ -396,6 +478,7 @@ module g6lc_apu_shcore
               if (c_done_pl_o.ok) begin
                 res_q[f_slot_q].valid  <= 1'b1;
                 res_q[f_slot_q].handle <= f_handle_q;
+                res_q[f_slot_q].spec   <= f_spec_q;
                 res_q[f_slot_q].entry  <= c_done_pl_o.entry;
                 res_q[f_slot_q].pins   <= f_pin_q ? 8'd1 : 8'h0;
                 res_touch(f_slot_q);
@@ -432,9 +515,21 @@ module g6lc_apu_shcore
           wid_q <= wid_q + 1;
           if (is_dispatch || is_gfx) begin
             disp_q.slot    <= disp_slot_i;
-            disp_q.gx      <= is_gfx ? '0 : work_imm_i[15:0];
-            disp_q.gy      <= is_gfx ? '0 : work_imm_i[47:32];
-            disp_q.gz      <= is_gfx ? '0 : work_imm_i[79:64];
+            disp_q.gx      <= is_gfx ? '0 :
+                              is_dbase ? work_imm_i[111:96]
+                                       : work_imm_i[15:0];
+            disp_q.gy      <= is_gfx ? '0 :
+                              is_dbase ? work_imm_i[143:128]
+                                       : work_imm_i[47:32];
+            disp_q.gz      <= is_gfx ? '0 :
+                              is_dbase ? work_imm_i[175:160]
+                                       : work_imm_i[79:64];
+            disp_q.gbx     <= is_gfx || !is_dbase ? '0
+                                                  : work_imm_i[15:0];
+            disp_q.gby     <= is_gfx || !is_dbase ? '0
+                                                  : work_imm_i[47:32];
+            disp_q.gbz     <= is_gfx || !is_dbase ? '0
+                                                  : work_imm_i[79:64];
             disp_q.imm     <= is_gfx ? work_imm_i : '0;
             disp_q.work_id <= is_gfx ? work_ctype_i : wid_q;
             disp_q_valid   <= 1'b1;
@@ -469,6 +564,9 @@ module g6lc_apu_shcore
       .wr_slot_i(fill_wr ? f_slot_q : wr_slot_i),
       .wr_addr_i(fill_wr ? f_idx_q : wr_addr_i),
       .wr_data_i(fill_wr ? op_cpl_i.rdata : wr_data_i),
+      .spec_n_i(f_specn_q),
+      .spec_id_i(f_spid_p),
+      .spec_val_i(f_spv_p),
       .commit_i(commit_i | fill_commit),
       .commit_pl_i(fill_commit
                    ? '{slot: f_slot_q, nwords: f_words_q}
@@ -536,7 +634,7 @@ module g6lc_apu_shcore_fixture
   parameter int unsigned ShaderLanes   = 8,
   parameter int unsigned ShaderVec     = 4,
   parameter int unsigned ShaderRegs    = 256,
-  parameter int unsigned MaxWaves      = 8,
+  parameter int unsigned MaxWaves      = 16,
   parameter int unsigned ShaderIds     = 1024,
   parameter int unsigned ShaderSlots   = 8,
   parameter int unsigned ShaderWords   = 2048,

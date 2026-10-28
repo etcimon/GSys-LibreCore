@@ -64,7 +64,9 @@ module csr_buffer
   // Re-pipelining contract (sv-timing A128; 30.6 adjusted FO4 on the
   // Nangate45 board): CSR buffer: the dual-entry CSR hazard table.
   // svt-pipe: require-contract
+  // svt-pipe: protocol cb valid=csr_valid_i flush=flush_i
   // svt-pipe: no-cut on=tab_q
+  // svt-pipe: cycle cb q=tab_q d=csr_result_o hold=csr_valid_i steps=1
 
   // In-order keeps the single-entry buffer bit-identically. OoO can issue a
   // second CSR while an older one awaits commit, so the table is two entries

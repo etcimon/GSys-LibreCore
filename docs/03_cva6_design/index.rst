@@ -51,6 +51,7 @@ Editor: **Florian Zaruba**
    ex_stage
    MMU
    commit_stage
+   ai_island_hyp_timing
 
 Indices and tables
 ------------------

@@ -1,0 +1,152 @@
+// OpenSTA, Static Timing Analyzer
+// Copyright (c) 2026, Parallax Software, Inc.
+// 
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+// 
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// 
+// The origin of this software must not be misrepresented; you must not
+// claim that you wrote the original software.
+// 
+// Altered source versions must be plainly marked as such, and must not be
+// misrepresented as being the original software.
+// 
+// This notice may not be removed or altered from any source distribution.
+
+#pragma once
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include "StaState.hh"
+#include "Zlib.hh"
+
+namespace sta {
+
+using VcdTime = int64_t;
+using VcdScope = std::vector<std::string>;
+
+// Sentinel for an unset begin/end time window bound.
+constexpr VcdTime vcd_null_time = -1;
+
+enum class VcdVarType {
+  wire,
+  reg,
+  parameter,
+  integer,
+  real,
+  supply0,
+  supply1,
+  time,
+  tri,
+  triand,
+  trior,
+  trireg,
+  tri0,
+  tri1,
+  wand,
+  wor,
+  unknown
+};
+
+class VcdReader;
+
+class VcdParse : public StaState
+{
+public:
+  VcdParse(Report *report,
+           Debug *debug);
+  void read(const char *filename,
+            VcdReader *reader,
+            VcdTime begin_time,
+            VcdTime end_time);
+
+private:
+  void parseTimescale();
+  void setTimeUnit(std::string_view time_unit,
+                   double time_scale);
+  void parseVar();
+  void parseScope();
+  void parseUpscope();
+  void parseVarValues();
+  std::string getToken();
+  std::string readStmtString();
+  std::vector<std::string> readStmtTokens();
+
+  VcdReader *reader_ = nullptr;
+  gzFile stream_;
+  std::string token_;
+  const char *filename_;
+  int file_line_ = 0;
+  int stmt_line_ = 0;
+
+  VcdTime time_ = 0;
+  VcdTime prev_time_ = 0;
+
+  // Arguments to VcdParse
+  VcdTime begin_time_ = vcd_null_time;
+  VcdTime end_time_ = vcd_null_time;
+
+  VcdScope scope_;
+
+  Report *report_;
+  Debug *debug_;
+};
+
+// Abstract class for VcdParse callbacks.
+class VcdReader
+{
+public:
+  virtual ~VcdReader() = default;
+  virtual void setDate(std::string_view date) = 0;
+  virtual void setComment(std::string_view comment) = 0;
+  virtual void setVersion(std::string_view version) = 0;
+  virtual void setTimeUnit(std::string_view time_unit,
+                           double time_unit_scale,
+                           double time_scale) = 0;
+  virtual void setTimeMin(VcdTime time) = 0;
+  virtual void setTimeMax(VcdTime time) = 0;
+  virtual void varMinDeltaTime(VcdTime min_delta_time) = 0;
+  virtual bool varIdValid(std::string_view id) = 0;
+  virtual void makeVar(const VcdScope &scope,
+                       std::string_view name,
+                       VcdVarType type,
+                       size_t width,
+                       std::string_view id) = 0;
+  virtual void varAppendValue(const std::string &id,
+                              VcdTime time,
+                              char value) = 0;
+  virtual void varAppendBusValue(const std::string &id,
+                                 VcdTime time,
+                                 std::string_view bus_value) = 0;
+};
+
+class VcdValue
+{
+public:
+  VcdValue();
+  VcdTime time() const { return time_; }
+  char value() const { return value_; }
+  void setValue(VcdTime time,
+                char value);
+  uint64_t busValue() const { return bus_value_; }
+  char value(int value_bit) const;
+
+private:
+  VcdTime time_;
+  // 01XUZ or '\0' when width > 1 to use bus_value_.
+  char value_;
+  uint64_t bus_value_;
+};
+
+} // namespace sta

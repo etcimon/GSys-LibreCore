@@ -100,7 +100,14 @@ module wt_dcache_missunit
   // Re-pipelining contract (sv-timing A128; 60.0 adjusted FO4 on the
   // Nangate45 board): miss unit: FSM with AXI handshakes; miss_req_i / miss_id_i are its protocol.
   // svt-pipe: require-contract
+  // svt-pipe: protocol mu valid=miss_req_i
   // svt-pipe: no-cut on=wr_cl_tag_o
+  // svt-pipe: cycle mu q=wr_cl_tag_o d=wr_cl_data_o hold=miss_req_i steps=1
+
+  // Outgoing memory request packet and its valid, assembled below and
+  // published through one assign each (A149 M12; see the `mem` contract).
+  dcache_req_t mem_req_c;
+  logic        mem_req_valid_c;
 
   // functions
   function automatic logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] dcache_way_bin2oh(
@@ -265,7 +272,7 @@ module wt_dcache_missunit
   always_comb begin : p_ack
     miss_ack_o = '0;
     if (!amo_sel) begin
-      miss_ack_o[miss_port_idx] = mem_data_ack_i & mem_data_req_o;
+      miss_ack_o[miss_port_idx] = mem_data_ack_i & mem_req_valid_c;
     end
   end
 
@@ -419,24 +426,35 @@ module wt_dcache_missunit
   assign cas_local_en = CVA6Cfg.RVA && CVA6Cfg.RVZacas && CVA6Cfg.IS_XLEN64
       && (amo_req_i.amo_op == AMO_CAS1) && (amo_req_i.size == 2'b11);
 
+  // Outgoing memory request packet (A149 M12). Assembled once as
+  // mem_req_c / mem_req_valid_c and published through one assign each, so a
+  // stage may register the whole packet and its valid together. The adapter
+  // obeys req/ack, so the handshake absorbs an added cycle; the FSM's acks are
+  // then the stage's acceptance (the tool rewires them to the stage enable).
+  // svt-pipe: protocol mem valid=mem_req_valid_c ready=mem_data_ack_i
+  // svt-pipe: result mem valid=mem_data_req_o mem_data_o
+  // svt-pipe: cut-ok mem
+  assign mem_data_o     = mem_req_c;
+  assign mem_data_req_o = mem_req_valid_c;
+
   // outgoing memory requests (AMOs are always uncached)
   // cas_amo_sel: CAS.D load/store uses AMO address/tid/nc but plain LD/ST rtype
-  assign mem_data_o.tid = (CVA6Cfg.RVA && (amo_sel || cas_amo_sel)) ? AmoTxId : miss_id_i[miss_port_idx];
-  assign mem_data_o.nc = (CVA6Cfg.RVA && (amo_sel || cas_amo_sel)) ? 1'b1 : miss_nc_i[miss_port_idx];
-  assign mem_data_o.way = (CVA6Cfg.RVA && (amo_sel || cas_amo_sel)) ? '0 : repl_way;
-  assign mem_data_o.data = (CVA6Cfg.RVA && cas_amo_sel && (state_q inside {AMO_CAS_ST, AMO_CAS_ST_WAIT}))
+  assign mem_req_c.tid = (CVA6Cfg.RVA && (amo_sel || cas_amo_sel)) ? AmoTxId : miss_id_i[miss_port_idx];
+  assign mem_req_c.nc = (CVA6Cfg.RVA && (amo_sel || cas_amo_sel)) ? 1'b1 : miss_nc_i[miss_port_idx];
+  assign mem_req_c.way = (CVA6Cfg.RVA && (amo_sel || cas_amo_sel)) ? '0 : repl_way;
+  assign mem_req_c.data = (CVA6Cfg.RVA && cas_amo_sel && (state_q inside {AMO_CAS_ST, AMO_CAS_ST_WAIT}))
                                ? cas_new_q
                                : (CVA6Cfg.RVA && amo_sel) ? amo_data : miss_wdata_i[miss_port_idx];
-  assign mem_data_o.user = (CVA6Cfg.RVA && amo_sel) ? amo_user : miss_wuser_i[miss_port_idx];
-  assign mem_data_o.size   = (CVA6Cfg.RVA && (amo_sel || cas_amo_sel)) ? {1'b0, amo_req_i.size}
+  assign mem_req_c.user = (CVA6Cfg.RVA && amo_sel) ? amo_user : miss_wuser_i[miss_port_idx];
+  assign mem_req_c.size   = (CVA6Cfg.RVA && (amo_sel || cas_amo_sel)) ? {1'b0, amo_req_i.size}
                                                                          : miss_size_i[miss_port_idx];
   // Plain load/store for local CAS.D — no AXI ATOP
-  assign mem_data_o.amo_op = (CVA6Cfg.RVA && amo_sel && !cas_amo_sel) ? amo_req_i.amo_op : AMO_NONE;
+  assign mem_req_c.amo_op = (CVA6Cfg.RVA && amo_sel && !cas_amo_sel) ? amo_req_i.amo_op : AMO_NONE;
 
   assign tmp_paddr         = (CVA6Cfg.RVA && (amo_sel || cas_amo_sel))
                                  ? amo_req_i.operand_a[CVA6Cfg.PLEN-1:0]
                                  : miss_paddr_i[miss_port_idx];
-  assign mem_data_o.paddr = paddrSizeAlign(tmp_paddr, mem_data_o.size);
+  assign mem_req_c.paddr = paddrSizeAlign(tmp_paddr, mem_req_c.size);
 
   ///////////////////////////////////////////////////////
   // back-off mechanism for LR/SC completion guarantee
@@ -461,7 +479,7 @@ module wt_dcache_missunit
   // keep track of pending stores
   logic store_sent;
   logic [$clog2(CVA6Cfg.DCACHE_MAX_TX + 1)-1:0] stores_inflight_d, stores_inflight_q;
-  assign store_sent = mem_data_req_o & mem_data_ack_i & (mem_data_o.rtype == DCACHE_STORE_REQ);
+  assign store_sent = mem_req_valid_c & mem_data_ack_i & (mem_req_c.rtype == DCACHE_STORE_REQ);
 
   assign stores_inflight_d = (store_ack && store_sent) ? stores_inflight_q     :
                              (store_ack)               ? stores_inflight_q - 1 :
@@ -572,8 +590,8 @@ module wt_dcache_missunit
     state_d          = state_q;
 
     flush_ack_o      = 1'b0;
-    mem_data_o.rtype = DCACHE_LOAD_REQ;
-    mem_data_req_o   = 1'b0;
+    mem_req_c.rtype = DCACHE_LOAD_REQ;
+    mem_req_valid_c   = 1'b0;
     amo_resp_o.ack   = 1'b0;
     amo_resp_o.result_hi = '0;
     amo_resp_o.dual_we = 1'b0;
@@ -617,8 +635,8 @@ module wt_dcache_missunit
           if (miss_is_write) begin
             // stall in case this write collides with the MSHR address
             if (!mshr_rdwr_collision) begin
-              mem_data_req_o   = 1'b1;
-              mem_data_o.rtype = DCACHE_STORE_REQ;
+              mem_req_valid_c   = 1'b1;
+              mem_req_c.rtype = DCACHE_STORE_REQ;
               if (!mem_data_ack_i) begin
                 state_d = STORE_WAIT;
               end
@@ -635,8 +653,8 @@ module wt_dcache_missunit
               // the load is not issued, so the arbiter can select the store port
               // in the next cycle.
             end else begin
-              mem_data_req_o   = 1'b1;
-              mem_data_o.rtype = DCACHE_LOAD_REQ;
+              mem_req_valid_c   = 1'b1;
+              mem_req_c.rtype = DCACHE_LOAD_REQ;
               update_lfsr      = all_ways_valid & mem_data_ack_i;  // need to evict a random way
               mshr_allocate    = mem_data_ack_i;
               if (!mem_data_ack_i) begin
@@ -650,8 +668,8 @@ module wt_dcache_missunit
       // wait until this request is acked
       STORE_WAIT: begin
         lock_reqs        = 1'b1;
-        mem_data_req_o   = 1'b1;
-        mem_data_o.rtype = DCACHE_STORE_REQ;
+        mem_req_valid_c   = 1'b1;
+        mem_req_c.rtype = DCACHE_STORE_REQ;
         if (mem_data_ack_i) begin
           state_d = IDLE;
         end
@@ -660,8 +678,8 @@ module wt_dcache_missunit
       // wait until this request is acked
       LOAD_WAIT: begin
         lock_reqs        = 1'b1;
-        mem_data_req_o   = 1'b1;
-        mem_data_o.rtype = DCACHE_LOAD_REQ;
+        mem_req_valid_c   = 1'b1;
+        mem_req_c.rtype = DCACHE_LOAD_REQ;
         if (mem_data_ack_i) begin
           update_lfsr   = all_ways_valid;  // need to evict a random way
           mshr_allocate = 1'b1;
@@ -675,8 +693,8 @@ module wt_dcache_missunit
         mask_reads = 1'b1;
         // these are writes, check whether they collide with MSHR
         if (|miss_req_masked_d && !mshr_rdwr_collision) begin
-          mem_data_req_o   = 1'b1;
-          mem_data_o.rtype = DCACHE_STORE_REQ;
+          mem_req_valid_c   = 1'b1;
+          mem_req_c.rtype = DCACHE_STORE_REQ;
         end
 
         if (wbuffer_empty_i && !mshr_vld_q) begin
@@ -703,11 +721,11 @@ module wt_dcache_missunit
             // AMOCAS.D: local uncached load → compare → store
             state_d = AMO_CAS_LD;
           end else begin
-            mem_data_o.rtype = DCACHE_ATOMIC_REQ;
+            mem_req_c.rtype = DCACHE_ATOMIC_REQ;
             amo_sel          = 1'b1;
             // if this is an LR, we need to consult the backoff counter
             if ((amo_req_i.amo_op != AMO_LR) || sc_backoff_over) begin
-              mem_data_req_o = 1'b1;
+              mem_req_valid_c = 1'b1;
               if (mem_data_ack_i) begin
                 state_d = AMO_WAIT;
               end
@@ -731,8 +749,8 @@ module wt_dcache_missunit
       AMO_CAS_LD: begin
         if (CVA6Cfg.RVA) begin
           cas_amo_sel      = 1'b1;
-          mem_data_o.rtype = DCACHE_LOAD_REQ;
-          mem_data_req_o   = 1'b1;
+          mem_req_c.rtype = DCACHE_LOAD_REQ;
+          mem_req_valid_c   = 1'b1;
           if (mem_data_ack_i) begin
             state_d = AMO_CAS_LD_WAIT;
           end
@@ -753,8 +771,8 @@ module wt_dcache_missunit
       AMO_CAS_ST: begin
         if (CVA6Cfg.RVA) begin
           cas_amo_sel      = 1'b1;
-          mem_data_o.rtype = DCACHE_STORE_REQ;
-          mem_data_req_o   = 1'b1;
+          mem_req_c.rtype = DCACHE_STORE_REQ;
+          mem_req_valid_c   = 1'b1;
           if (mem_data_ack_i) begin
             state_d = AMO_CAS_ST_WAIT;
           end
@@ -833,7 +851,7 @@ module wt_dcache_missunit
     if (!rst_ni) smt_mu_cycle = 0;
     else if (smt_mu_trace) begin
       smt_mu_cycle++;
-      if (CVA6Cfg.RVA && mem_data_req_o && (mem_data_o.rtype == DCACHE_ATOMIC_REQ) && (!smt_mu_watch ||
+      if (CVA6Cfg.RVA && mem_req_valid_c && (mem_req_c.rtype == DCACHE_ATOMIC_REQ) && (!smt_mu_watch ||
           (amo_req_i.operand_a[CVA6Cfg.PLEN-1:3] == smt_mu_address[CVA6Cfg.PLEN-1:3])))
         $display("[smt-flow] wt_amo_req cycle=%0d op=%0d pa=%h data=%h size=%0d ack=%b state=%0d",
                  smt_mu_cycle, amo_req_i.amo_op, amo_req_i.operand_a, amo_req_i.operand_b, amo_req_i.size,

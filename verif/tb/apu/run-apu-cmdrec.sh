@@ -32,6 +32,7 @@ if ! "$VERILATOR" --binary --timing --assert -Wall \
   -Wno-SYNCASYNCNET -Wno-DECLFILENAME -Wno-PINCONNECTEMPTY \
   "${VLTS[@]}" \
   -f "$ROOT/corev_apu/apu/Flist.apu_cmdrec" \
+  "$ROOT/verif/tb/apu/tb_apu_mp_mem.sv" \
   "$ROOT/verif/tb/apu/tb_g6lc_apu_cmdrec.sv" \
   --top-module tb_g6lc_apu_cmdrec \
   -Mdir "$OUT/sim" -o tb_g6lc_apu_cmdrec \
@@ -69,15 +70,16 @@ for en in 0 1; do
   fi
   echo "SYNTH OK Enable=$en"
 done
-# small-parameter screen (NumBufs=2, RecsPerBuf=4, PayWordsPerBuf=16):
-# exposes the control logic separately from the record + payload arenas
-yp="read_slang -f $ROOT/corev_apu/apu/Flist.apu_cmdrec --top g6lc_apu_cmdrec_fixture -GEnable=1 -GNumBufs=2 -GRecsPerBuf=4 -GPayWordsPerBuf=16; hierarchy -top g6lc_apu_cmdrec_fixture; flatten; proc; opt; memory_collect; check -assert; stat; synth -top g6lc_apu_cmdrec_fixture -noabc; check -assert; stat; select -assert-none t:\$dlatch t:\$_DLATCH_*"
+# small-parameter screen (CbOpen=2): exposes the control logic
+# separately from the descriptor-cache flops (the record/payload
+# arenas live in PayMem now — no retained SRAMs)
+yp="read_slang -f $ROOT/corev_apu/apu/Flist.apu_cmdrec --top g6lc_apu_cmdrec_fixture -GEnable=1 -GCbOpen=2; hierarchy -top g6lc_apu_cmdrec_fixture; flatten; proc; opt; memory_collect; check -assert; stat; synth -top g6lc_apu_cmdrec_fixture -noabc; check -assert; stat; select -assert-none t:\$dlatch t:\$_DLATCH_*"
 if ! "$YOSYS" -Q -T -p "$yp" > "$OUT/synth-small.log" 2>&1; then
-  echo "SYNTH FAILED Enable=1 NumBufs=2 RecsPerBuf=4 PayWordsPerBuf=16"
+  echo "SYNTH FAILED Enable=1 CbOpen=2"
   tail -n 40 "$OUT/synth-small.log"
   exit 1
 fi
-echo "SYNTH OK Enable=1 NumBufs=2 RecsPerBuf=4 PayWordsPerBuf=16"
+echo "SYNTH OK Enable=1 CbOpen=2"
 python3 - "$OUT" <<'PY'
 import re, sys, pathlib
 out = pathlib.Path(sys.argv[1])
@@ -92,8 +94,8 @@ for en in (0, 1):
     cells = re.search(r"Number of cells:\s+(\d+)", gate) or             re.search(r"^\s+(\d+) cells\b", gate, re.M)
     ffs = sum(int(n) for n, _ in re.findall(r"^\s+(\d+)\s+(\$_DFF\w*)", gate, re.M))
     probs = re.findall(r"Found and reported (\d+) problems\.", text)
-    # §7b: two retained tc_srams -- record arena + payload arena
-    need = 2 if en == 1 else 0
+    # G3b-iii: all state is flops + PayMem — no retained tc_srams
+    need = 0
     tag = "OK" if mem_n == need else "FAIL"
     if mem_n != need:
         ok = False
@@ -106,7 +108,7 @@ cells = re.search(r"Number of cells:\s+(\d+)", gate) or \
         re.search(r"^\s+(\d+) cells\b", gate, re.M)
 ffs = sum(int(n) for n, _ in re.findall(r"^\s+(\d+)\s+(\$_DFF\w*)", gate, re.M))
 mem = re.findall(r"^\s+(\d+)\s+(\$mem\S*)", gate, re.M)
-print(f"SYNTH Enable=1 NumBufs=2 RecsPerBuf=4 PayWordsPerBuf=16 "
+print(f"SYNTH Enable=1 CbOpen=2 "
       f"cells={cells.group(1) if cells else '?'} ffs={ffs} "
       f"retained_mem={sum(int(n) for n,_ in mem)}")
 print("RETAINED_MEM_ASSERT " + ("PASS" if ok else "FAIL"))

@@ -66,6 +66,7 @@ module g6lc_bp_ghist
   // svt-pipe: require-contract
   // svt-pipe: protocol gh valid=update_valid_i flush=flush_i
   // svt-pipe: no-cut on=ghist_d
+  // svt-pipe: cycle gh q=ghist_d d=folded_o hold=update_valid_i steps=1
 
   localparam int unsigned NH    = (CVA6Cfg.NrHarts < 1) ? 1 : CVA6Cfg.NrHarts;
   localparam int unsigned HID_W = (NH <= 1) ? 1 : $clog2(NH);

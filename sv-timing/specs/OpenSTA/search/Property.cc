@@ -1,0 +1,1563 @@
+// OpenSTA, Static Timing Analyzer
+// Copyright (c) 2026, Parallax Software, Inc.
+// 
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+// 
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// 
+// The origin of this software must not be misrepresented; you must not
+// claim that you wrote the original software.
+// 
+// Altered source versions must be plainly marked as such, and must not be
+// misrepresented as being the original software.
+// 
+// This notice may not be removed or altered from any source distribution.
+
+#include "Property.hh"
+
+#include <algorithm>
+#include <string>
+#include <tuple>
+#include <utility>
+
+#include "Clock.hh"
+#include "Format.hh"
+#include "Graph.hh"
+#include "Liberty.hh"
+#include "MinMax.hh"
+#include "Mode.hh"
+#include "Network.hh"
+#include "Path.hh"
+#include "PathEnd.hh"
+#include "PathExpanded.hh"
+#include "PortDirection.hh"
+#include "Scene.hh"
+#include "Sta.hh"
+#include "StringUtil.hh"
+#include "TimingArc.hh"
+#include "TimingRole.hh"
+#include "Transition.hh"
+#include "Units.hh"
+#include "power/Power.hh"
+
+namespace sta {
+
+class PropertyUnknown : public Exception
+{
+public:
+  PropertyUnknown(std::string_view type,
+                  std::string_view property);
+  const char *what() const noexcept override;
+
+private:
+  std::string msg_;
+};
+
+PropertyUnknown::PropertyUnknown(std::string_view type,
+                                 std::string_view property) :
+  msg_(sta::format("{} objects do not have a {} property.", type, property))
+{
+}
+
+const char *
+PropertyUnknown::what() const noexcept
+{
+  return msg_.c_str();
+}
+
+////////////////////////////////////////////////////////////////
+
+class PropertyTypeWrong : public Exception
+{
+public:
+  PropertyTypeWrong(const std::string &accessor,
+                    const std::string &type);
+  const char *what() const noexcept override;
+
+private:
+  std::string msg_;
+};
+
+PropertyTypeWrong::PropertyTypeWrong(const std::string &accessor,
+                                     const std::string &type) :
+  msg_(sta::format("property accessor {} is only valid for {} properties.",
+                   accessor, type))
+{
+}
+
+const char *
+PropertyTypeWrong::what() const noexcept
+{
+  return msg_.c_str();
+}
+////////////////////////////////////////////////////////////////
+
+PropertyValue::PropertyValue() :
+  type_(Type::none),
+  unit_(nullptr)
+{
+}
+
+PropertyValue::PropertyValue(std::string_view value) :
+  type_(Type::string),
+  unit_(nullptr)
+{
+  string_ = new std::string(value);
+}
+
+PropertyValue::PropertyValue(std::string value) :
+  type_(Type::string),
+  unit_(nullptr)
+{
+  string_ = new std::string(std::move(value));
+}
+
+PropertyValue::PropertyValue(float value,
+                             const Unit *unit) :
+  type_(Type::float_),
+  float_(value),
+  unit_(unit)
+{
+}
+
+PropertyValue::PropertyValue(bool value) :
+  type_(Type::bool_),
+  bool_(value),
+  unit_(nullptr)
+{
+}
+
+PropertyValue::PropertyValue(const LibertyLibrary *value) :
+  type_(Type::liberty_library),
+  liberty_library_(value),
+  unit_(nullptr)
+{
+}
+
+PropertyValue::PropertyValue(const LibertyCell *value) :
+  type_(Type::liberty_cell),
+  liberty_cell_(value),
+  unit_(nullptr)
+{
+}
+
+PropertyValue::PropertyValue(const LibertyPort *value) :
+  type_(Type::liberty_port),
+  liberty_port_(value),
+  unit_(nullptr)
+{
+}
+
+PropertyValue::PropertyValue(const Library *value) :
+  type_(Type::library),
+  library_(value),
+  unit_(nullptr)
+{
+}
+
+PropertyValue::PropertyValue(const Cell *value) :
+  type_(Type::cell),
+  cell_(value),
+  unit_(nullptr)
+{
+}
+
+PropertyValue::PropertyValue(const Port *value) :
+  type_(Type::port),
+  port_(value),
+  unit_(nullptr)
+{
+}
+
+PropertyValue::PropertyValue(const Instance *value) :
+  type_(Type::instance),
+  inst_(value),
+  unit_(nullptr)
+{
+}
+
+PropertyValue::PropertyValue(const Pin *value) :
+  type_(Type::pin),
+  pin_(value),
+  unit_(nullptr)
+{
+}
+
+PropertyValue::PropertyValue(PinSeq *value) :
+  type_(Type::pins),
+  pins_(value),
+  unit_(nullptr)
+{
+}
+
+PropertyValue::PropertyValue(PinSet *value) :
+  type_(Type::pins),
+  pins_(new PinSeq),
+  unit_(nullptr)
+{
+  for (const Pin *pin : *value)
+    pins_->push_back(pin);
+}
+
+PropertyValue::PropertyValue(const PinSet &value) :
+  type_(Type::pins),
+  pins_(new PinSeq),
+  unit_(nullptr)
+{
+  for (const Pin *pin : value)
+    pins_->push_back(pin);
+}
+
+PropertyValue::PropertyValue(const Net *value) :
+  type_(Type::net),
+  net_(value),
+  unit_(nullptr)
+{
+}
+
+PropertyValue::PropertyValue(const Clock *value) :
+  type_(Type::clk),
+  clk_(value),
+  unit_(nullptr)
+{
+}
+
+PropertyValue::PropertyValue(ClockSeq *value) :
+  type_(Type::clks),
+  clks_(new ClockSeq(*value)),
+  unit_(nullptr)
+{
+}
+
+PropertyValue::PropertyValue(ClockSet *value) :
+  type_(Type::clks),
+  clks_(new ClockSeq),
+  unit_(nullptr)
+{
+  for (Clock *clk : *value)
+    clks_->push_back(clk);
+}
+
+PropertyValue::PropertyValue(ConstPathSeq *value) :
+  type_(Type::paths),
+  paths_(new ConstPathSeq(*value)),
+  unit_(nullptr)
+{
+}
+
+PropertyValue::PropertyValue(PwrActivity *value) :
+  type_(Type::pwr_activity),
+  pwr_activity_(*value),
+  unit_(nullptr)
+{
+}
+
+PropertyValue::PropertyValue(const PropertyValue &value) :
+  type_(value.type_),
+  unit_(value.unit_)
+{
+  switch (type_) {
+  case Type::none:
+    break;
+  case Type::string:
+    string_ = new std::string(*value.string_);
+    break;
+  case Type::float_:
+    float_ = value.float_;
+    break;
+  case Type::bool_:
+    bool_ = value.bool_;
+    break;
+  case Type::liberty_library:
+    liberty_library_ = value.liberty_library_;
+    break;
+  case Type::liberty_cell:
+    liberty_cell_ = value.liberty_cell_;
+    break;
+  case Type::liberty_port:
+    liberty_port_ = value.liberty_port_;
+    break;
+  case Type::library:
+    library_ = value.library_;
+    break;
+  case Type::cell:
+    cell_ = value.cell_;
+    break;
+  case Type::port:
+    port_ = value.port_;
+    break;
+  case Type::instance:
+    inst_ = value.inst_;
+    break;
+  case Type::pin:
+    pin_ = value.pin_;
+    break;
+  case Type::pins:
+    pins_ = value.pins_ ? new PinSeq(*value.pins_) : nullptr;
+    break;
+  case Type::net:
+    net_ = value.net_;
+    break;
+  case Type::clk:
+    clk_ = value.clk_;
+    break;
+  case Type::clks:
+    clks_ = value.clks_ ? new ClockSeq(*value.clks_) : nullptr;
+    break;
+  case Type::paths:
+    paths_ = value.paths_ ? new ConstPathSeq(*value.paths_) : nullptr;
+    break;
+  case Type::pwr_activity:
+    pwr_activity_ = value.pwr_activity_;
+    break;
+  }
+}
+
+PropertyValue::PropertyValue(PropertyValue &&value) noexcept :
+  type_(value.type_),
+  unit_(value.unit_)
+{
+  switch (type_) {
+  case Type::none:
+    break;
+  case Type::string:
+    string_ = value.string_;
+    value.string_ = nullptr;
+    value.type_ = Type::none;
+    break;
+  case Type::float_:
+    float_ = value.float_;
+    break;
+  case Type::bool_:
+    bool_ = value.bool_;
+    break;
+  case Type::library:
+    library_ = value.library_;
+    break;
+  case Type::cell:
+    cell_ = value.cell_;
+    break;
+  case Type::port:
+    port_ = value.port_;
+    break;
+  case Type::liberty_library:
+    liberty_library_ = value.liberty_library_;
+    break;
+  case Type::liberty_cell:
+    liberty_cell_ = value.liberty_cell_;
+    break;
+  case Type::liberty_port:
+    liberty_port_ = value.liberty_port_;
+    break;
+  case Type::instance:
+    inst_ = value.inst_;
+    break;
+  case Type::pin:
+    pin_ = value.pin_;
+    break;
+  case Type::pins:
+    pins_ = value.pins_;
+    value.pins_ = nullptr;
+    break;
+  case Type::net:
+    net_ = value.net_;
+    break;
+  case Type::clk:
+    clk_ = value.clk_;
+    break;
+  case Type::clks:
+    clks_ = value.clks_;
+    // Steal the value.
+    value.clks_ = nullptr;
+    break;
+  case Type::paths:
+    paths_ = value.paths_;
+    // Steal the value.
+    value.paths_ = nullptr;
+    break;
+  case Type::pwr_activity:
+    pwr_activity_ = value.pwr_activity_;
+    break;
+  }
+}
+
+void
+PropertyValue::destroyActive()
+{
+  switch (type_) {
+  case Type::string:
+    delete string_;
+    break;
+  case Type::clks:
+    delete clks_;
+    break;
+  case Type::pins:
+    delete pins_;
+    break;
+  case Type::paths:
+    delete paths_;
+    break;
+  default:
+    break;
+  }
+}
+
+PropertyValue::~PropertyValue()
+{
+  destroyActive();
+}
+
+PropertyValue &
+PropertyValue::operator=(const PropertyValue &value)
+{
+  if (this == &value)
+    return *this;
+  destroyActive();
+  type_ = value.type_;
+  unit_ = value.unit_;
+
+  switch (type_) {
+  case Type::none:
+    break;
+  case Type::string:
+    string_ = new std::string(*value.string_);
+    break;
+  case Type::float_:
+    float_ = value.float_;
+    break;
+  case Type::bool_:
+    bool_ = value.bool_;
+    break;
+  case Type::library:
+    library_ = value.library_;
+    break;
+  case Type::cell:
+    cell_ = value.cell_;
+    break;
+  case Type::port:
+    port_ = value.port_;
+    break;
+  case Type::liberty_library:
+    liberty_library_ = value.liberty_library_;
+    break;
+  case Type::liberty_cell:
+    liberty_cell_ = value.liberty_cell_;
+    break;
+  case Type::liberty_port:
+    liberty_port_ = value.liberty_port_;
+    break;
+  case Type::instance:
+    inst_ = value.inst_;
+    break;
+  case Type::pin:
+    pin_ = value.pin_;
+    break;
+  case Type::pins:
+    pins_ = value.pins_ ? new PinSeq(*value.pins_) : nullptr;
+    break;
+  case Type::net:
+    net_ = value.net_;
+    break;
+  case Type::clk:
+    clk_ = value.clk_;
+    break;
+  case Type::clks:
+    clks_ = value.clks_ ? new ClockSeq(*value.clks_) : nullptr;
+    break;
+  case Type::paths:
+    paths_ = value.paths_ ? new ConstPathSeq(*value.paths_) : nullptr;
+    break;
+  case Type::pwr_activity:
+    pwr_activity_ = value.pwr_activity_;
+    break;
+  }
+  return *this;
+}
+
+PropertyValue &
+PropertyValue::operator=(PropertyValue &&value) noexcept
+{
+  if (this == &value)
+    return *this;
+  destroyActive();
+  type_ = value.type_;
+  unit_ = value.unit_;
+
+  switch (type_) {
+  case Type::none:
+    break;
+  case Type::string:
+    string_ = value.string_;
+    value.string_ = nullptr;
+    value.type_ = Type::none;
+    break;
+  case Type::float_:
+    float_ = value.float_;
+    break;
+  case Type::bool_:
+    bool_ = value.bool_;
+    break;
+  case Type::library:
+    library_ = value.library_;
+    break;
+  case Type::cell:
+    cell_ = value.cell_;
+    break;
+  case Type::port:
+    port_ = value.port_;
+    break;
+  case Type::liberty_library:
+    liberty_library_ = value.liberty_library_;
+    break;
+  case Type::liberty_cell:
+    liberty_cell_ = value.liberty_cell_;
+    break;
+  case Type::liberty_port:
+    liberty_port_ = value.liberty_port_;
+    break;
+  case Type::instance:
+    inst_ = value.inst_;
+    break;
+  case Type::pin:
+    pin_ = value.pin_;
+    break;
+  case Type::pins:
+    pins_ = value.pins_;
+    value.pins_ = nullptr;
+    break;
+  case Type::net:
+    net_ = value.net_;
+    break;
+  case Type::clk:
+    clk_ = value.clk_;
+    break;
+  case Type::clks:
+    clks_ = value.clks_;
+    value.clks_ = nullptr;
+    break;
+  case Type::paths:
+    paths_ = value.paths_;
+    value.paths_ = nullptr;
+    break;
+  case Type::pwr_activity:
+    pwr_activity_ = value.pwr_activity_;
+    break;
+  }
+  return *this;
+}
+
+std::string
+PropertyValue::to_string(const Network *network) const
+{
+  switch (type_) {
+  case Type::string:
+    return *string_;
+  case Type::float_:
+    return unit_->asString(float_, 6);
+  case Type::bool_:
+    // These are TCL true/false values.
+    if (bool_)
+      return "1";
+    else
+      return "0";
+  case Type::liberty_library:
+    return liberty_library_->name();
+  case Type::liberty_cell:
+    return liberty_cell_->name();
+  case Type::liberty_port:
+    return liberty_port_->name();
+  case Type::library:
+    return std::string(network->name(library_));
+  case Type::cell:
+    return std::string(network->name(cell_));
+  case Type::port:
+    return std::string(network->name(port_));
+  case Type::instance:
+    return network->pathName(inst_);
+  case Type::pin:
+    return network->pathName(pin_);
+  case Type::net:
+    return network->pathName(net_);
+  case Type::clk:
+    return clk_->name();
+  case Type::none:
+  case Type::pins:
+  case Type::clks:
+  case Type::paths:
+  case Type::pwr_activity:
+    return "";
+  }
+  return "";
+}
+
+const std::string &
+PropertyValue::stringValue() const
+{
+  if (type_ != Type::string)
+    throw PropertyTypeWrong("stringValue", "string");
+  return *string_;
+}
+
+float
+PropertyValue::floatValue() const
+{
+  if (type_ != Type::float_)
+    throw PropertyTypeWrong("floatValue", "float");
+  return float_;
+}
+
+bool
+PropertyValue::boolValue() const
+{
+  if (type_ != Type::bool_)
+    throw PropertyTypeWrong("boolValue", "boolt");
+  return bool_;
+}
+
+////////////////////////////////////////////////////////////////
+
+Properties::Properties(Sta *sta) :
+  sta_(sta)
+{
+}
+
+PropertyValue
+Properties::getProperty(const Library *lib,
+                        std::string_view property)
+{
+  Network *network = sta_->cmdNetwork();
+  if (property == "name"
+      || property == "full_name")
+    return PropertyValue(network->name(lib));
+  else {
+    PropertyValue value = registry_library_.getProperty(lib, property,
+                                                        "library", sta_);
+    if (value.type() != PropertyValue::Type::none)
+      return value;
+    else if (isUserProperty("library", property))
+      return value;
+    else
+      throw PropertyUnknown("library", property);
+  }
+}
+
+////////////////////////////////////////////////////////////////
+
+PropertyValue
+Properties::getProperty(const LibertyLibrary *lib,
+                        std::string_view property)
+{
+  if (property == "name"
+      || property == "full_name")
+    return PropertyValue(lib->name());
+  else if (property == "filename")
+    return PropertyValue(lib->filename());
+  else {
+    PropertyValue value = registry_liberty_library_.getProperty(lib, property,
+                                                                "liberty_library",
+                                                                sta_);
+    if (value.type() != PropertyValue::Type::none)
+      return value;
+    else if (isUserProperty("liberty_library", property))
+      return value;
+    else
+      throw PropertyUnknown("liberty library", property);
+  }
+}
+
+////////////////////////////////////////////////////////////////
+
+PropertyValue
+Properties::getProperty(const Cell *cell,
+                        std::string_view property)
+{
+  Network *network = sta_->cmdNetwork();
+  if (property == "name"
+      || property == "base_name")
+    return PropertyValue(network->name(cell));
+  else if (property == "full_name") {
+    Library *lib = network->library(cell);
+    std::string lib_name(network->name(lib));
+    std::string cell_name(network->name(cell));
+    std::string full_name = lib_name + network->pathDivider() + cell_name;
+    return PropertyValue(full_name);
+  }
+  else if (property == "library")
+    return PropertyValue(network->library(cell));
+  else if (property == "filename")
+    return PropertyValue(network->filename(cell));
+  else {
+    PropertyValue value = registry_cell_.getProperty(cell, property,
+                                                     "cell", sta_);
+    if (value.type() != PropertyValue::Type::none)
+      return value;
+    else if (isUserProperty("cell", property))
+      return value;
+    else
+      throw PropertyUnknown("cell", property);
+  }
+}
+
+////////////////////////////////////////////////////////////////
+
+PropertyValue
+Properties::getProperty(const LibertyCell *cell,
+                        std::string_view property)
+{
+  if (property == "name"
+      || property == "base_name")
+    return PropertyValue(cell->name());
+  else if (property == "full_name") {
+    Network *network = sta_->cmdNetwork();
+    LibertyLibrary *lib = cell->libertyLibrary();
+    std::string lib_name = lib->name();
+    const std::string& cell_name = cell->name();
+    std::string full_name = lib_name + network->pathDivider() + cell_name;
+    return PropertyValue(full_name);
+  }
+  else if (property == "filename")
+    return PropertyValue(cell->filename());
+  else if (property == "library")
+    return PropertyValue(cell->libertyLibrary());
+  else if (property == "is_buffer")
+    return PropertyValue(cell->isBuffer());
+  else if (property =="is_inverter")
+    return PropertyValue(cell->isInverter());
+  else if (property == "is_memory")
+    return PropertyValue(cell->isMemory());
+  else if (property == "dont_use")
+    return PropertyValue(cell->dontUse());
+  else if (property == "area")
+    return PropertyValue(cell->area(), sta_->units()->scalarUnit());
+  else {
+    PropertyValue value = registry_liberty_cell_.getProperty(cell, property,
+                                                             "liberty_cell", sta_);
+    if (value.type() != PropertyValue::Type::none)
+      return value;
+    else if (isUserProperty("liberty_cell", property))
+      return value;
+    else
+      throw PropertyUnknown("liberty cell", property);
+  }
+}
+
+////////////////////////////////////////////////////////////////
+
+PropertyValue
+Properties::getProperty(const Port *port,
+                        std::string_view property)
+{
+  Network *network = sta_->cmdNetwork();
+  if (property == "name"
+      || property == "full_name")
+    return PropertyValue(network->name(port));
+  else if (property == "direction"
+           || property == "port_direction")
+    return PropertyValue(network->direction(port)->name());
+  else if (property == "liberty_port")
+    return PropertyValue(network->libertyPort(port));
+
+  else if (property == "activity") {
+    const Instance *top_inst = network->topInstance();
+    const Pin *pin = network->findPin(top_inst, port);
+    const Scene *scene = sta_->cmdScene();
+    PwrActivity activity = sta_->activity(pin, scene);
+    return PropertyValue(&activity);
+  }
+
+  else if (property == "slack_max")
+    return portSlack(port, RiseFallBoth::riseFall(), MinMax::max());
+  else if (property == "slack_max_fall")
+    return portSlack(port, RiseFallBoth::fall(), MinMax::max());
+  else if (property == "slack_max_rise")
+    return portSlack(port, RiseFallBoth::rise(), MinMax::max());
+  else if (property == "slack_min")
+    return portSlack(port, RiseFallBoth::riseFall(), MinMax::min());
+  else if (property == "slack_min_fall")
+    return portSlack(port, RiseFallBoth::fall(), MinMax::min());
+  else if (property == "slack_min_rise")
+    return portSlack(port, RiseFallBoth::rise(), MinMax::min());
+
+  else if (property == "slew_max")
+    return portSlew(port, RiseFallBoth::fall(), MinMax::max());
+  else if (property == "slew_max_fall")
+    return portSlew(port, RiseFallBoth::fall(), MinMax::max());
+  else if (property == "slew_max_rise")
+    return portSlew(port, RiseFallBoth::rise(), MinMax::max());
+  else if (property == "slew_min")
+    return portSlew(port, RiseFallBoth::fall(), MinMax::min());
+  else if (property == "slew_min_rise")
+    return portSlew(port, RiseFallBoth::rise(), MinMax::min());
+  else if (property == "slew_min_fall")
+    return portSlew(port, RiseFallBoth::fall(), MinMax::min());
+
+  else {
+    PropertyValue value = registry_port_.getProperty(port, property,
+                                                     "port", sta_);
+    if (value.type() != PropertyValue::Type::none)
+      return value;
+    else if (isUserProperty("port", property))
+      return value;
+    else
+      throw PropertyUnknown("port", property);
+  }
+}
+
+PropertyValue
+Properties::portSlew(const Port *port,
+                     const RiseFallBoth *rf,
+                     const MinMax *min_max)
+{
+  Network *network = sta_->ensureLibLinked();
+  Instance *top_inst = network->topInstance();
+  Pin *pin = network->findPin(top_inst, port);
+  return pinSlew(pin, rf, min_max);
+}
+
+PropertyValue
+Properties::portSlack(const Port *port,
+                      const RiseFallBoth *rf,
+                      const MinMax *min_max)
+{
+  Network *network = sta_->ensureLibLinked();
+  Instance *top_inst = network->topInstance();
+  Pin *pin = network->findPin(top_inst, port);
+  return pinSlack(pin, rf, min_max);
+}
+
+////////////////////////////////////////////////////////////////
+
+PropertyValue
+Properties::getProperty(const LibertyPort *port,
+                        std::string_view property)
+{
+  if (property == "name")
+    return PropertyValue(port->name());
+  else if (property == "full_name")
+    return PropertyValue(port->name());
+  else if (property == "lib_cell")
+    return PropertyValue(port->libertyCell());
+  else if (property == "direction"
+           || property == "port_direction")
+    return PropertyValue(port->direction()->name());
+  else if (property == "capacitance") {
+    float cap = port->capacitance(RiseFall::rise(), MinMax::max());
+    return capacitancePropertyValue(cap);
+  }
+  else if (property == "is_clock")
+    return PropertyValue(port->isClock());
+  else if (property == "is_register_clock")
+    return PropertyValue(port->isRegClk());
+
+  else if (property == "drive_resistance") {
+    float res = port->driveResistance();
+    return resistancePropertyValue(res);
+  }
+  else if (property == "drive_resistance_min_rise") {
+    float res = port->driveResistance(RiseFall::rise(), MinMax::min());
+    return resistancePropertyValue(res);
+  }
+  else if (property == "drive_resistance_max_rise") {
+    float res = port->driveResistance(RiseFall::rise(), MinMax::max());
+    return resistancePropertyValue(res);
+  }
+  else if (property == "drive_resistance_min_fall") {
+    float res = port->driveResistance(RiseFall::fall(), MinMax::min());
+    return resistancePropertyValue(res);
+  }
+  else if (property == "drive_resistance_max_fall") {
+    float res = port->driveResistance(RiseFall::fall(), MinMax::max());
+    return resistancePropertyValue(res);
+  }
+
+  else if (property == "intrinsic_delay") {
+    ArcDelay delay = port->intrinsicDelay(sta_);
+    return delayPropertyValue(delay);
+  }
+  else if (property == "intrinsic_delay_min_rise") {
+    ArcDelay delay = port->intrinsicDelay(RiseFall::rise(),
+                                          MinMax::min(), sta_);
+    return delayPropertyValue(delay);
+  }
+  else if (property == "intrinsic_delay_max_rise") {
+    ArcDelay delay = port->intrinsicDelay(RiseFall::rise(),
+                                          MinMax::max(), sta_);
+    return delayPropertyValue(delay);
+  }
+  else if (property == "intrinsic_delay_min_fall") {
+    ArcDelay delay = port->intrinsicDelay(RiseFall::fall(),
+                                          MinMax::min(), sta_);
+    return delayPropertyValue(delay);
+  }
+  else if (property == "intrinsic_delay_max_fall") {
+    ArcDelay delay = port->intrinsicDelay(RiseFall::fall(),
+                                          MinMax::max(), sta_);
+    return delayPropertyValue(delay);
+  }
+  else {
+    PropertyValue value = registry_liberty_port_.getProperty(port, property,
+                                                             "liberty_port", sta_);
+    if (value.type() != PropertyValue::Type::none)
+      return value;
+    else if (isUserProperty("liberty_port", property))
+      return value;
+    else
+      throw PropertyUnknown("liberty port", property);
+  }
+}
+
+////////////////////////////////////////////////////////////////
+
+PropertyValue
+Properties::getProperty(const Instance *inst,
+                        std::string_view property)
+{
+  Network *network = sta_->ensureLinked();
+  LibertyCell *liberty_cell = network->libertyCell(inst);
+  if (property == "name")
+    return PropertyValue(network->name(inst));
+  else if (property == "full_name")
+    return PropertyValue(network->pathName(inst));
+  else if (property == "ref_name")
+    return PropertyValue(network->name(network->cell(inst)));
+  else if (property ==  "liberty_cell")
+    return PropertyValue(network->libertyCell(inst));
+  else if (property == "cell")
+    return PropertyValue(network->cell(inst));
+  else if (property == "is_hierarchical")
+    return PropertyValue(network->isHierarchical(inst));
+  else if (property == "is_buffer")
+    return PropertyValue(liberty_cell && liberty_cell->isBuffer());
+  else if (property == "is_clock_gate")
+    return PropertyValue(liberty_cell && liberty_cell->isClockGate());
+  else if (property == "is_inverter")
+    return PropertyValue(liberty_cell && liberty_cell->isInverter());
+  else if (property == "is_macro")
+    return PropertyValue(liberty_cell && liberty_cell->isMacro());
+  else if (property == "is_memory")
+    return PropertyValue(liberty_cell && liberty_cell->isMemory());
+  else {
+    PropertyValue value = registry_instance_.getProperty(inst, property,
+                                                         "instance", sta_);
+    if (value.type() != PropertyValue::Type::none)
+      return value;
+    else if (isUserProperty("instance", property))
+      return value;
+    else
+      throw PropertyUnknown("instance", property);
+  }
+}
+
+////////////////////////////////////////////////////////////////
+
+PropertyValue
+Properties::getProperty(const Pin *pin,
+                        std::string_view property)
+{
+  Network *network = sta_->ensureLinked();
+  if (property == "name"
+      || property == "lib_pin_name")
+    return PropertyValue(network->portName(pin));
+  else if (property == "full_name")
+    return PropertyValue(network->pathName(pin));
+  else if (property == "direction"
+           || property == "pin_direction")
+    return PropertyValue(network->direction(pin)->name());
+  else if (property == "is_hierarchical")
+    return PropertyValue(network->isHierarchical(pin));
+  else if (property == "is_port")
+    return PropertyValue(network->isTopLevelPort(pin));
+  else if (property == "is_clock") {
+    const LibertyPort *port = network->libertyPort(pin);
+    return PropertyValue(port->isClock());
+  }
+  else if (property == "is_register_clock") {
+    const LibertyPort *port = network->libertyPort(pin);
+    return PropertyValue(port && port->isRegClk());
+  }
+  else if (property == "clocks") {
+    const Mode *mode = sta_->cmdScene()->mode();
+    ClockSet clks = sta_->clocks(pin, mode);
+    return PropertyValue(&clks);
+  }
+  else if (property == "clock_domains") {
+    const Mode *mode = sta_->cmdScene()->mode();
+    ClockSet clks = sta_->clockDomains(pin, mode);
+    return PropertyValue(&clks);
+  }
+  else if (property == "activity") {
+    const Scene *scene = sta_->cmdScene();
+    PwrActivity activity = sta_->activity(pin, scene);
+    return PropertyValue(&activity);
+  }
+
+  else if (property == "arrival_max_rise")
+    return pinArrival(pin, RiseFallBoth::rise(), MinMax::max());
+  else if (property == "arrival_max_fall")
+    return pinArrival(pin, RiseFallBoth::fall(), MinMax::max());
+  else if (property == "arrival_min_rise")
+    return pinArrival(pin, RiseFallBoth::rise(), MinMax::min());
+  else if (property == "arrival_min_fall")
+    return pinArrival(pin, RiseFallBoth::fall(), MinMax::min());
+
+  else if (property == "slack_max")
+    return pinSlack(pin, RiseFallBoth::riseFall(), MinMax::max());
+  else if (property == "slack_max_fall")
+    return pinSlack(pin, RiseFallBoth::fall(), MinMax::max());
+  else if (property == "slack_max_rise")
+    return pinSlack(pin, RiseFallBoth::rise(), MinMax::max());
+  else if (property == "slack_min")
+    return pinSlack(pin, RiseFallBoth::riseFall(), MinMax::min());
+  else if (property == "slack_min_fall")
+    return pinSlack(pin, RiseFallBoth::fall(), MinMax::min());
+  else if (property == "slack_min_rise")
+    return pinSlack(pin, RiseFallBoth::rise(), MinMax::min());
+
+  else if (property == "slew_max")
+    return pinSlew(pin, RiseFallBoth::riseFall(), MinMax::max());
+  else if (property == "slew_max_fall")
+    return pinSlew(pin, RiseFallBoth::fall(), MinMax::max());
+  else if (property == "slew_max_rise")
+    return pinSlew(pin, RiseFallBoth::rise(), MinMax::max());
+  else if (property == "slew_min")
+    return pinSlew(pin, RiseFallBoth::riseFall(), MinMax::min());
+  else if (property == "slew_min_rise")
+    return pinSlew(pin, RiseFallBoth::rise(), MinMax::min());
+  else if (property == "slew_min_fall")
+    return pinSlew(pin, RiseFallBoth::fall(), MinMax::min());
+
+  else {
+    PropertyValue value = registry_pin_.getProperty(pin, property, "pin", sta_);
+    if (value.type() != PropertyValue::Type::none)
+      return value;
+    else if (isUserProperty("pin", property))
+      return value;
+    else
+      throw PropertyUnknown("pin", property);
+  }
+}
+
+PropertyValue
+Properties::pinArrival(const Pin *pin,
+                       const RiseFallBoth *rf,
+                       const MinMax *min_max)
+{
+  Arrival arrival = sta_->arrival(pin, rf, min_max);;
+  return PropertyValue(delayPropertyValue(arrival));
+}
+
+PropertyValue
+Properties::pinSlack(const Pin *pin,
+                     const RiseFallBoth *rf,
+                     const MinMax *min_max)
+{
+  Slack slack = sta_->slack(pin, rf, sta_->scenes(), min_max);
+  return PropertyValue(delayPropertyValue(slack));
+}
+
+PropertyValue
+Properties::pinSlew(const Pin *pin,
+                    const RiseFallBoth *rf,
+                    const MinMax *min_max)
+{
+  Graph *graph = sta_->ensureGraph();
+  Vertex *vertex, *bidirect_drvr_vertex;
+  graph->pinVertices(pin, vertex, bidirect_drvr_vertex);
+  Slew slew = min_max->initValue();
+  if (vertex) {
+    Slew vertex_slew = sta_->slew(vertex, rf, sta_->scenes(), min_max);
+    if (delayGreater(vertex_slew, slew, min_max, sta_))
+      slew = vertex_slew;
+  }
+  if (bidirect_drvr_vertex) {
+    Slew vertex_slew = sta_->slew(bidirect_drvr_vertex, rf,
+                                  sta_->scenes(), min_max);
+    if (delayGreater(vertex_slew, slew, min_max, sta_))
+      slew = vertex_slew;
+  }
+  return delayPropertyValue(slew);
+}
+
+////////////////////////////////////////////////////////////////
+
+PropertyValue
+Properties::getProperty(const Net *net,
+                        std::string_view property)
+{
+  Network *network = sta_->ensureLinked();
+  if (property == "name")
+    return PropertyValue(network->name(net));
+  else if (property == "full_name")
+    return PropertyValue(network->pathName(net));
+  else {
+    PropertyValue value = registry_net_.getProperty(net, property, "net", sta_);
+    if (value.type() != PropertyValue::Type::none)
+      return value;
+    else if (isUserProperty("net", property))
+      return value;
+    else
+      throw PropertyUnknown("net", property);
+  }
+}
+
+////////////////////////////////////////////////////////////////
+
+PropertyValue
+Properties::getProperty(Edge *edge,
+                        std::string_view property)
+{
+  if (property == "full_name") {
+    std::string full_name = edge->to_string(sta_);
+    return PropertyValue(full_name);
+  }
+  if (property == "delay_min_fall")
+    return edgeDelay(edge, RiseFall::fall(), MinMax::min());
+  else if (property == "delay_max_fall")
+    return edgeDelay(edge, RiseFall::fall(), MinMax::max());
+  else if (property == "delay_min_rise")
+    return edgeDelay(edge, RiseFall::rise(), MinMax::min());
+  else if (property == "delay_max_rise")
+    return edgeDelay(edge, RiseFall::rise(), MinMax::max());
+  else if (property == "sense")
+    return PropertyValue(to_string(edge->sense()));
+  else if (property == "from_pin")
+    return PropertyValue(edge->from(sta_->graph())->pin());
+  else if (property == "to_pin")
+    return PropertyValue(edge->to(sta_->graph())->pin());
+  else
+      throw PropertyUnknown("edge", property);
+}
+
+PropertyValue
+Properties::edgeDelay(Edge *edge,
+                      const RiseFall *rf,
+                      const MinMax *min_max)
+{
+  ArcDelay delay = 0.0;
+  bool delay_exists = false;
+  TimingArcSet *arc_set = edge->timingArcSet();
+  for (TimingArc *arc : arc_set->arcs()) {
+    const RiseFall *to_rf = arc->toEdge()->asRiseFall();
+    if (to_rf == rf) {
+      for (const Scene *scene : sta_->scenes()) {
+        DcalcAPIndex ap_index = scene->dcalcAnalysisPtIndex(min_max);
+        const ArcDelay &arc_delay = sta_->arcDelay(edge, arc, ap_index);
+        if (!delay_exists
+            || delayGreater(arc_delay, delay, min_max, sta_)) {
+          delay = arc_delay;
+          delay_exists = true;
+        }
+      }
+    }
+  }
+  return delayPropertyValue(delay);
+}
+
+////////////////////////////////////////////////////////////////
+
+PropertyValue
+Properties::getProperty(TimingArcSet *arc_set,
+                        std::string_view property)
+{
+  if (property == "name"
+      || property == "full_name") {
+    if (arc_set->isWire())
+      return PropertyValue("wire");
+    else {
+      std::string name = sta::format("{} {} -> {} {}",
+                                     arc_set->libertyCell()->name(),
+                                     arc_set->from()->name(),
+                                     arc_set->to()->name(),
+                                     arc_set->role()->to_string());
+      return PropertyValue(name);
+    }
+  }
+  else
+    throw PropertyUnknown("timing arc", property);
+}
+
+////////////////////////////////////////////////////////////////
+
+PropertyValue
+Properties::getProperty(const Clock *clk,
+                        std::string_view property)
+{
+  if (property == "name"
+      || property == "full_name")
+    return PropertyValue(clk->name());
+  else if (property == "period")
+    return PropertyValue(clk->period(), sta_->units()->timeUnit());
+  else if (property == "sources")
+    return PropertyValue(clk->pins());
+  else if (property == "is_generated")
+    return PropertyValue(clk->isGenerated());
+  else if (property == "is_virtual")
+    return PropertyValue(clk->isVirtual());
+  else if (property == "is_propagated")
+    return PropertyValue(clk->isPropagated());
+  else {
+    PropertyValue value = registry_clock_.getProperty(clk, property,
+                                                      "clock", sta_);
+    if (value.type() != PropertyValue::Type::none)
+      return value;
+    else if (isUserProperty("clock", property))
+      return value;
+    else
+      throw PropertyUnknown("clock", property);
+  }
+}
+
+////////////////////////////////////////////////////////////////
+
+PropertyValue
+Properties::getProperty(const Scene *scene,
+                        std::string_view property)
+{
+  if (property == "name"
+      || property == "full_name")
+    return PropertyValue(scene->name());
+  else
+    // Unknown properties throw PropertyUnknown; a user-defined property
+    // never set on this scene returns a none value.
+    return registry_scene_.getProperty(scene, property, "scene", sta_);
+}
+
+////////////////////////////////////////////////////////////////
+
+PropertyValue
+Properties::getProperty(const Mode *mode,
+                        std::string_view property)
+{
+  if (property == "name"
+      || property == "full_name")
+    return PropertyValue(mode->name());
+  else
+    // Unknown properties throw PropertyUnknown; a user-defined property
+    // never set on this mode returns a none value.
+    return registry_mode_.getProperty(mode, property, "mode", sta_);
+}
+
+////////////////////////////////////////////////////////////////
+
+PropertyValue
+Properties::getProperty(PathEnd *end,
+                        std::string_view property)
+{
+  if (property == "startpoint") {
+    PathExpanded expanded(end->path(), sta_);
+    return PropertyValue(expanded.startPath()->pin(sta_));
+  }
+  else if (property == "startpoint_clock")
+    return PropertyValue(end->path()->clock(sta_));
+  else if (property == "endpoint")
+    return PropertyValue(end->path()->pin(sta_));
+  else if (property == "endpoint_clock")
+    return PropertyValue(end->targetClk(sta_));
+  else if (property == "endpoint_clock_pin")
+    return PropertyValue(end->targetClkPath()->pin(sta_));
+  else if (property == "slack")
+    return PropertyValue(delayPropertyValue(end->slack(sta_)));
+  else if (property == "points") {
+    PathExpanded expanded(end->path(), sta_);
+    ConstPathSeq paths;
+    for (size_t i = expanded.startIndex(); i < expanded.size(); i++) {
+      const Path *path = expanded.path(i);
+      paths.push_back(path);
+    }
+    return PropertyValue(&paths);
+  }
+  else
+    throw PropertyUnknown("path end", property);
+}
+
+PropertyValue
+Properties::getProperty(Path *path,
+                        std::string_view property)
+{
+  if (property == "pin")
+    return PropertyValue(path->pin(sta_));
+  else if (property == "arrival")
+    return PropertyValue(delayPropertyValue(path->arrival()));
+  else if (property == "required")
+    return PropertyValue(delayPropertyValue(path->required()));
+  else if (property == "slack")
+    return PropertyValue(delayPropertyValue(path->slack(sta_)));
+  else
+    throw PropertyUnknown("path", property);
+}
+
+PropertyValue
+Properties::delayPropertyValue(Delay delay)
+{
+  return PropertyValue(delayAsFloat(delay), sta_->units()->timeUnit());
+}
+
+PropertyValue
+Properties::resistancePropertyValue(float res)
+{
+  return PropertyValue(res, sta_->units()->resistanceUnit());
+}
+
+PropertyValue
+Properties::capacitancePropertyValue(float cap)
+{
+  return PropertyValue(cap, sta_->units()->capacitanceUnit());
+}
+
+////////////////////////////////////////////////////////////////
+
+void
+Properties::defineProperty(std::string_view property,
+                           const PropertyRegistry<const Library *>::PropertyHandler &handler)
+{
+  registry_library_.defineProperty(property, handler);
+}
+
+void
+Properties::defineProperty(std::string_view property,
+                           const PropertyRegistry<const LibertyLibrary *>::PropertyHandler &handler)
+{
+  registry_liberty_library_.defineProperty(property, handler);
+}
+
+void
+Properties::defineProperty(std::string_view property,
+                           const PropertyRegistry<const Cell *>::PropertyHandler &handler)
+{
+  registry_cell_.defineProperty(property, handler);
+}
+
+void
+Properties::defineProperty(std::string_view property,
+                           const PropertyRegistry<const LibertyCell *>::PropertyHandler &handler)
+{
+  registry_liberty_cell_.defineProperty(property, handler);
+}
+
+void
+Properties::defineProperty(std::string_view property,
+                           const PropertyRegistry<const Port *>::PropertyHandler &handler)
+{
+  registry_port_.defineProperty(property, handler);
+}
+
+void
+Properties::defineProperty(std::string_view property,
+                           const PropertyRegistry<const LibertyPort *>::PropertyHandler &handler)
+{
+  registry_liberty_port_.defineProperty(property, handler);
+}
+
+void
+Properties::defineProperty(std::string_view property,
+                           const PropertyRegistry<const Instance *>::PropertyHandler &handler)
+{
+  registry_instance_.defineProperty(property, handler);
+}  
+
+void
+Properties::defineProperty(std::string_view property,
+                           const PropertyRegistry<const Pin *>::PropertyHandler &handler)
+{
+  registry_pin_.defineProperty(property, handler);
+}
+
+void
+Properties::defineProperty(std::string_view property,
+                           const PropertyRegistry<const Net *>::PropertyHandler &handler)
+{
+  registry_net_.defineProperty(property, handler);
+}
+
+void
+Properties::defineProperty(std::string_view property,
+                           const PropertyRegistry<const Clock *>::PropertyHandler &handler)
+{
+  registry_clock_.defineProperty(property, handler);
+}
+
+void
+Properties::defineProperty(std::string_view property,
+                           const PropertyRegistry<const Scene *>::PropertyHandler &handler)
+{
+  registry_scene_.defineProperty(property, handler);
+}
+
+void
+Properties::defineProperty(std::string_view property,
+                           const PropertyRegistry<const Mode *>::PropertyHandler &handler)
+{
+  registry_mode_.defineProperty(property, handler);
+}
+
+////////////////////////////////////////////////////////////////
+
+// Value type from the define_property -type argument.
+PropertyValue::Type
+Properties::propertyType(std::string_view type)
+{
+  if (type == "bool" || type == "boolean")
+    return PropertyValue::Type::bool_;
+  else if (type == "float" || type == "double" || type == "number")
+    return PropertyValue::Type::float_;
+  else if (type == "string")
+    return PropertyValue::Type::string;
+  else
+    sta_->report()->error(2210, "unknown property type '{}' (use bool, float or string).",
+                          type);
+  return PropertyValue::Type::none;
+}
+
+PropertyValue
+Properties::coercePropertyValue(PropertyValue::Type type,
+                                std::string_view value)
+{
+  switch (type) {
+  case PropertyValue::Type::bool_:
+    if (stringEqual(value, "true") || value == "1")
+      return PropertyValue(true);
+    if (stringEqual(value, "false") || value == "0")
+      return PropertyValue(false);
+    sta_->report()->error(2212, "'{}' is not a bool property value.", value);
+    return PropertyValue();
+  case PropertyValue::Type::float_: {
+    auto [number, valid] = stringFloat(std::string(value));
+    if (!valid)
+      sta_->report()->error(2215, "'{}' is not a float property value.", value);
+    return PropertyValue(number, sta_->units()->scalarUnit());
+  }
+  default:
+    return PropertyValue(std::string(value));
+  }
+}
+
+bool
+Properties::isUserProperty(std::string_view object_type,
+                           std::string_view property)
+{
+  return prop_types_.contains({std::string(object_type), std::string(property)});
+}
+
+PropertyKey::PropertyKey(const void *object,
+                         std::string_view property) :
+  object_(object),
+  property_(property)
+{
+}
+
+bool
+PropertyKey::operator<(const PropertyKey &key) const
+{
+  return std::tie(object_, property_)
+    < std::tie(key.object_, key.property_);
+}
+
+template<class TYPE>
+void
+Properties::defineProperty(std::string_view object_type,
+                           std::string_view property,
+                           std::string_view value_type)
+{
+  prop_types_[{std::string(object_type), std::string(property)}] =
+    propertyType(value_type);
+  std::string name(property);
+  typename PropertyRegistry<const TYPE *>::PropertyHandler handler =
+    [this, name] (const TYPE *object,
+                  Sta *) -> PropertyValue {
+      auto value_iter = prop_values_.find(PropertyKey(object, name));
+      if (value_iter != prop_values_.end())
+        return value_iter->second;
+      // Never set on this object.
+      return PropertyValue();
+    };
+  defineProperty(property, handler);
+}
+
+// Object types the tcl interface exposes user properties on.
+template void Properties::defineProperty<Scene>(std::string_view,
+                                                std::string_view,
+                                                std::string_view);
+template void Properties::defineProperty<Mode>(std::string_view,
+                                               std::string_view,
+                                               std::string_view);
+template void Properties::defineProperty<Library>(std::string_view,
+                                                  std::string_view,
+                                                  std::string_view);
+template void Properties::defineProperty<LibertyLibrary>(std::string_view,
+                                                         std::string_view,
+                                                         std::string_view);
+template void Properties::defineProperty<Cell>(std::string_view,
+                                               std::string_view,
+                                               std::string_view);
+template void Properties::defineProperty<LibertyCell>(std::string_view,
+                                                      std::string_view,
+                                                      std::string_view);
+template void Properties::defineProperty<Port>(std::string_view,
+                                               std::string_view,
+                                               std::string_view);
+template void Properties::defineProperty<LibertyPort>(std::string_view,
+                                                      std::string_view,
+                                                      std::string_view);
+template void Properties::defineProperty<Instance>(std::string_view,
+                                                   std::string_view,
+                                                   std::string_view);
+template void Properties::defineProperty<Pin>(std::string_view,
+                                              std::string_view,
+                                              std::string_view);
+template void Properties::defineProperty<Net>(std::string_view,
+                                              std::string_view,
+                                              std::string_view);
+template void Properties::defineProperty<Clock>(std::string_view,
+                                                std::string_view,
+                                                std::string_view);
+
+void
+Properties::setProperty(const void *object,
+                        std::string_view object_type,
+                        std::string_view property,
+                        std::string_view value)
+{
+  auto type_iter = prop_types_.find({std::string(object_type),
+                                     std::string(property)});
+  if (type_iter == prop_types_.end())
+    sta_->report()->error(2211, "{} property '{}' is not defined.",
+                          object_type, property);
+  prop_values_[PropertyKey(object, property)] =
+    coercePropertyValue(type_iter->second, value);
+}
+
+////////////////////////////////////////////////////////////////
+
+template<class TYPE>
+PropertyValue
+PropertyRegistry<TYPE>::getProperty(TYPE object,
+                                    std::string_view property,
+                                    std::string_view type_name,
+                                    Sta *sta)
+
+{
+  auto itr = registry_.find(property);
+  if (itr != registry_.end())
+    return itr->second(object, sta);
+  else
+    throw PropertyUnknown(type_name, property);
+}
+
+template<class TYPE>
+void
+PropertyRegistry<TYPE>::defineProperty(std::string_view property,
+                                       PropertyHandler handler)
+{
+  registry_[std::string(property)] = std::move(handler);
+}
+
+} // namespace sta

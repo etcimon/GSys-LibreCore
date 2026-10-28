@@ -4463,22 +4463,36 @@ endcase
 
 ## A57 — Cross-module stitch
 
-**Implementation.** effort in `opt.rs`; stitch in lower/measure (balanced
-and thorough).
+**Implementation.** `lower.rs::stitch_cross_module_paths`, called before
+`measure::compose_reg_to_reg_paths`; optimizer effort is controlled in `opt.rs`.
 
 ### Summary
 
-`OptEffort::Fast` is per-module only. `Balanced` (default O1/O2) and
-`Thorough` (O3) stitch paths across instance ports so a combo cone that
-leaves through an output and enters a child is one path. 4 GHz leftovers
-quoted in Part VII are **intra-module** emit primaries; stitch does not
-invent the gemm 18.5.
+The current analyze stitcher selects a representative worst path per module,
+recovers child output connections, and sums the child and parent path costs.
+`port_bridged` means output connections were recovered. It does **not** prove
+that the selected parent cone reads those nets, that the child path reaches
+the named output, or that no register separates the selected computations.
+
+Selection precedes additional cone composition, so a later composed path can
+exceed the retained representative. A reported sum can therefore overstate
+an unrelated connection and understate a real connected cone; it is not a
+reliable final upper bound.
+
+The hyp GEMM r19 audit demonstrates both limitations: a registered store-plan
+path is added to unrelated operand packing, while the FP stitch selects a
+21.55-FO4 result mux despite a subsequently composed 94.93-FO4 FP path.
+Pin/field-aware composition, register cuts and post-composition selection are
+open work in `AGENTS-todo.md`. Merely re-summing final module maxima is not
+the connectivity fix.
 
 ### High-level basis
 
-Stitch is analysis depth, not a transform. It can make a path **longer**
-(honest) and therefore more likely to fail. That is measurement
-correction in the P5 family. Do not disable stitch to make a soak green.
+The intended purpose is to expose combinational cones crossing hierarchy.
+Current rows are useful triage references, not qualified connected arrivals.
+Do not disable them to make a soak green, or award timing credit for changing
+an analysis label. The 4 GHz leftovers quoted in Part VII remain
+**intra-module** emit primaries; neither view supplies STA sign-off.
 
 ---
 

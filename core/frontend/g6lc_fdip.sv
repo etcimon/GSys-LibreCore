@@ -57,6 +57,7 @@ module g6lc_fdip
   // Nangate45 board): fetch-directed prefetcher: peek / issue state (id-less fetch domain).
   // svt-pipe: require-contract
   // svt-pipe: protocol fd valid=peek_valid_i flush=flush_i
+  // svt-pipe: cycle fd q=pma_ok d=pf_req_o hold=peek_valid_i steps=1
 
   logic pma_ok;
   logic [63:0] addr64;

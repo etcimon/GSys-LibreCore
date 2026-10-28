@@ -50,7 +50,9 @@ module g6lc_bp_ittage
   // Re-pipelining contract (sv-timing A128; 32.9 adjusted FO4 on the
   // Nangate45 board): indirect target predictor: table update state.
   // svt-pipe: require-contract
+  // svt-pipe: protocol it valid=flush_i
   // svt-pipe: no-cut on=mem_q
+  // svt-pipe: cycle it q=mem_q d=btb_prediction_o hold=flush_i steps=1
 
   localparam int unsigned OFFSET = CVA6Cfg.RVC == 1'b1 ? 1 : 2;
   localparam int unsigned NR_ROWS = NR_ENTRIES / CVA6Cfg.INSTR_PER_FETCH;

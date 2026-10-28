@@ -311,6 +311,8 @@ module tb_g6lc_apu_bridge
       for (int i = 0; i < 32; i++)
         fault_agg = fault_agg + 32'(ex_fault[i][63:48]);
     end
+    // Held in the wave, so the final stats line shows them even if a
+    // one-cycle done pulse is missed: {n60!=0, gx[6:0], code, ndone, dead, faults}.
     assign dbg_faults_o = {31'h0, ex_dead, fault_agg};
     wire [4:0]  om_mpf = {i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
                           .i_objmem.gen_on.mp_busy_q,
@@ -523,6 +525,35 @@ module tb_g6lc_apu_bridge
     // field is visible without a full state trace.
     wire [5:0]  fr_gpph  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
                            .i_pump.gen_on.i_fr.gen_on.gp_ph_q;
+    // G3b-iii xs-wedge taps (sel 100-103): the execbuffer park slot is
+    // park_q[Rings] (Rings=64); exposes which transport wait parked the
+    // stream and the parked byte position for guest-image forensics.
+    wire        pu_park_live  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                                .i_pump.gen_on.park_q[64].live;
+    wire        pu_park_isvq  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                                .i_pump.gen_on.park_q[64].is_vq;
+    wire [5:0]  pu_park_wring = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                                .i_pump.gen_on.park_q[64].wring;
+    wire        pu_park_depth = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                                .i_pump.gen_on.park_q[64].depth;
+    wire [31:0] pu_park_seqlo = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                                .i_pump.gen_on.park_q[64].seqno[31:0];
+    wire [31:0] pu_park_seqhi = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                                .i_pump.gen_on.park_q[64].seqno[63:32];
+    wire [31:0] pu_park_pos   = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                                .i_pump.gen_on.park_q[64].st0.pos;
+    wire [31:0] pu_vq_seq     = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                                .i_pump.gen_on.vq_seqno_q[31:0];
+    wire        pu_s0lv       = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                                .i_pump.gen_on.st_q[0].live;
+    wire        pu_s0rs       = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                                .i_pump.gen_on.st_q[0].ring_stream;
+    wire [1:0]  pu_s0knd      = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                                .i_pump.gen_on.st_q[0].kind;
+    wire [31:0] pu_s0pos      = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                                .i_pump.gen_on.st_q[0].pos;
+    wire [31:0] pu_s0byt      = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                                .i_pump.gen_on.st_q[0].bytes;
 
 `ifdef G6LC_APU_DEBUG
     // F5 bring-up trace (-D G6LC_APU_DEBUG): command decode +
@@ -598,6 +629,7 @@ module tb_g6lc_apu_bridge
     logic [31:0] pu_h_q[4];
     logic [7:0]  pu_rfl_q;
     logic        pu_s0lv_q, pu_s1lv_q;
+    logic [64:0] pu_pk_q;
     logic [6+32+64+64+32+32-1:0] pu_ex_q;
     always_ff @(posedge clk_i) begin
       if (!pu_s0lv_q && `_PU.st_q[0].live)
@@ -636,14 +668,30 @@ module tb_g6lc_apu_bridge
       end
       pu_s0lv_q <= `_PU.st_q[0].live;
       pu_s1lv_q <= `_PU.st_q[1].live;
+      // park-slot edges: which wait suspended a stream (exec slot is
+      // park_q[Rings]=64; ring slots 0..63 park on their own ring waits)
+      for (int i = 0; i <= 64; i++) begin
+        if (`_PU.park_q[i].live && !pu_pk_q[i])
+          $display("[f5pu2] PARK i=%0d isvq=%0d wring=%0d seq=%016x s0pos=%08x s0byt=%08x s0knd=%0d s0rs=%0d depth=%0d",
+                   i, `_PU.park_q[i].is_vq, `_PU.park_q[i].wring,
+                   `_PU.park_q[i].seqno, `_PU.park_q[i].st0.pos,
+                   `_PU.park_q[i].st0.bytes, `_PU.park_q[i].st0.kind,
+                   `_PU.park_q[i].st0.ring_stream,
+                   `_PU.park_q[i].depth);
+        if (!`_PU.park_q[i].live && pu_pk_q[i])
+          $display("[f5pu2] UNPARK i=%0d st=%0d", i, `_PU.state_q);
+        pu_pk_q[i] <= `_PU.park_q[i].live;
+      end
       // ring-record decode + wait resolution: which ctx's stream
       // executed which handle-addressed record (cross-ctx handle
       // collisions show sctx != the matched ring's ctx).
       // NB numeric state compares: hierarchical enum-member refs
-      // (``_PU.StTrDo) crash Verilator. StTrDo=12, StWaitR=19.
+      // (``_PU.StTrDo) crash Verilator. StTrDo=12, StWaitQ/H/B=16..18,
+      // StWaitR=19, StWaitVq=20.
       // Print only on change: a parked wait would otherwise emit one
       // line per cycle and drown the log.
-      if ((`_PU.state_q == 6'd12 || `_PU.state_q == 6'd19) &&
+      if ((`_PU.state_q == 6'd12 ||
+           (`_PU.state_q >= 6'd16 && `_PU.state_q <= 6'd20)) &&
           {`_PU.state_q, `_PU.cmd_type_q[`_PU.depth_q],
            `_PU.t_hnd_q, `_PU.t_val_q,
            `_PU.ring_q[0].head, `_PU.ring_q[1].head} != pu_ex_q)
@@ -708,8 +756,8 @@ module tb_g6lc_apu_bridge
     always_ff @(posedge clk_i) begin
       if (`_TOP.cr_req_valid && `_TOP.cr_req_ready &&
           `_TOP.cr_req.op != 4'd6)
-        $display("[f5cr] REQ op=%0d cbuf=%0d idx=%0d ct=%02x pn=%0d",
-                 `_TOP.cr_req.op, `_TOP.cr_req.cbuf, `_TOP.cr_req.idx,
+        $display("[f5cr] REQ op=%0d cbd=%08x idx=%0d ct=%02x pn=%0d",
+                 `_TOP.cr_req.op, `_TOP.cr_req.cbd, `_TOP.cr_req.idx,
                  `_TOP.cr_req.rec.ctype, `_TOP.cr_req.pay_n);
       if (`_TOP.cr_cpl_valid && `_TOP.cr_cpl_ready)
         $display("[f5cr] CPL st=%0d cnt=%0d ct=%02x",
@@ -844,6 +892,17 @@ module tb_g6lc_apu_bridge
         // sel67: §7b fault contract — {dead flag, aggregate
         //        execution-fault count across contexts}
         8'd67:   dbg_rdata_o = {31'h0, ex_dead, fault_agg};
+        // sel100-103: execbuffer park/wait wedge taps — which wait
+        //        parked the xs stream (is_vq/wring/seqno) vs the live
+        //        counters, plus the parked stream's byte position so
+        //        the wedging record can be found in the guest image.
+        8'd100:  dbg_rdata_o = {23'h0, pu_park_depth, pu_park_wring,
+                                  pu_park_isvq, pu_park_live,
+                                  pu_park_seqlo};
+        8'd101:  dbg_rdata_o = {pu_park_seqhi, pu_vq_seq};
+        8'd102:  dbg_rdata_o = {1'b0, pu_s0lv, pu_s0rs, pu_s0knd,
+                                  pu_s0pos[26:0], pu_s0byt};
+        8'd103:  dbg_rdata_o = {32'h0, pu_park_pos};
         default: begin
           if (dbg_sel_i >= 8'd16 && dbg_sel_i < 8'd20)
             dbg_rdata_o = 64'(r_head[dbg_sel_i[1:0]]);

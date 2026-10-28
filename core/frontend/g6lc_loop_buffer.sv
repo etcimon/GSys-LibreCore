@@ -74,6 +74,7 @@ module g6lc_loop_buffer
   // svt-pipe: require-contract
   // svt-pipe: protocol lb valid=cf_valid_i flush=flush_i
   // svt-pipe: no-cut on=fill_low_sum
+  // svt-pipe: cycle lb q=fill_low_sum d=data_o hold=cf_valid_i steps=1
 
   localparam int unsigned IDX_W = (NR_ENTRIES <= 1) ? 1 : $clog2(NR_ENTRIES);
   localparam int unsigned ALIGN = CVA6Cfg.FETCH_ALIGN_BITS;

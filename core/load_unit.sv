@@ -143,7 +143,9 @@ module load_unit
   // Re-pipelining contract (sv-timing A128; 59.3 adjusted FO4 on the
   // Nangate45 board): load unit FSM: the TLB / D$ handshakes are same-cycle.
   // svt-pipe: require-contract
+  // svt-pipe: protocol lu valid=valid_i
   // svt-pipe: no-cut on=state_q
+  // svt-pipe: cycle lu q=state_q d=state_d hold=valid_i steps=1
 
   enum logic [3:0] {
     IDLE,

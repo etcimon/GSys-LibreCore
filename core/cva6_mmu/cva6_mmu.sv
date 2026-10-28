@@ -149,6 +149,8 @@ module cva6_mmu
   // Re-pipelining contract (sv-timing A128; 45.7 adjusted FO4 on the
   // Nangate45 board): MMU: translation handshakes same-cycle with the TLBs.
   // svt-pipe: require-contract
+  // svt-pipe: protocol mmu valid=lsu_req_i flush=flush_i
+  // svt-pipe: cycle mmu q=lsu_req_i d=lsu_valid_o hold=lsu_req_i steps=1
 
   // memory management, pte for cva6 (Sv39 layout, MSB-first)
   // bit 63: N (Svnapot), bits 62:61: PBMT (Svpbmt), bits 60:54: reserved

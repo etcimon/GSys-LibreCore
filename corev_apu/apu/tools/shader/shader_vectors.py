@@ -390,6 +390,12 @@ DESC = {
     'cts_atomic1':  dict(groups=(1, 1, 1), fmt='z', push=0,
                          bindings=[(0, 0, 1, 1, 7 << 16)]),
     'cts_shared1':  dict(groups=(1, 1, 1), fmt='z', push=0,
+                         # mut=False: every arithmetic flip site lands
+                         # on shared-slab index math whose reads
+                         # collapse to equal-valued cells — oracle-
+                         # invisible, and the one oracle-visible site
+                         # (word 427) is model-invisible too.
+                         mut=False,
                          bindings=[(0, 0, 1, 1, 7 << 16)]),
     # cts_arrlen1 = read_unbound_ssbo: two bindings; bind1's record
     # sizes a 16-byte buffer so OpArrayLength of the runtime member
@@ -854,9 +860,15 @@ def emit(name, seed, spv_words, desc, inputs, expect_fault=(0, 0),
     base = os.path.join(OUT, '%s_%d' % (name, seed))
     push = desc.get('push', 0)
     bindings = desc['bindings']
+    # G3b-iii DispatchBase (desc['base'] = {gbx,gby,gz}): flags bit4
+    # parks the base group in 3 words between the tag and the module.
+    wbase = tuple(desc.get('base', (0, 0, 0)))
     hexw = [len(spv_words), len(bindings), push,
             desc['groups'][0], desc['groups'][1], desc['groups'][2],
-            (1 if expect_fault[0] else 0) | (2 if mutated else 0), 0]
+            (1 if expect_fault[0] else 0) | (2 if mutated else 0) |
+            (0x10 if any(wbase) else 0), 0]
+    if any(wbase):
+        hexw += list(wbase)
     hexw += spv_words
     # §12.3 F5: 5-word bind entries; aux = {kind[23:16], dyn[8],
     # elem_idx[7:0]} so elements of one descriptor array share a row.
@@ -1513,9 +1525,17 @@ def main():
                     u = open(base + '.uout.bin', 'rb').read()
                     m = open(base + '.out.bin', 'rb').read()
                     if u != m:
-                        mwords = mwords_c
                         owords = list(struct.unpack(
                             '<%dI' % (len(u) // 4), u))
+                        # The TB's "must differ" check runs RTL vs the
+                        # unmutated oracle words — a mutation that is
+                        # oracle-visible but model-invisible (e.g. an
+                        # index flip that lands on equal-valued shared
+                        # cells under our wave order) can never trip
+                        # it; screen it out here.
+                        if mc[1] == owords:
+                            continue
+                        mwords = mwords_c
                         # .exp oracle section = UNMUTATED lavapipe
                         # words (TB asserts "differs"); model section
                         # = the mutant's own model output.
@@ -1611,6 +1631,21 @@ def main():
                    gen_inputs(zero_desc, 7), expect_done=1,
                    oracle_out=[0] * 96)
     summary.append(base)
+    # G3b-iii DispatchBase: base group {3,5,2} must offset
+    # WorkgroupId and GlobalInvocationId.  lavapipe's oracle path
+    # issues a plain vkCmdDispatch (no vkCmdDispatchBase), so the
+    # ORACLE section folds the model image — Gate 1 carries the
+    # check.
+    db_desc = dict(groups=(2, 2, 1), fmt='z', push=0,
+                   base=(3, 5, 2),
+                   bindings=[(0, 0, 128, 1)])
+    db_words = read_spv(os.path.join(CORPUS, 'dbase.spv'))
+    spirv_scan.Scanner(db_words).scan()
+    bbase, mc = emit('dispbase', 0, db_words, db_desc,
+                     gen_inputs(db_desc, 7))
+    emit('dispbase', 0, db_words, db_desc, gen_inputs(db_desc, 7),
+         oracle_out=oracle_image(mc[1], mc, db_desc), model_cache=mc)
+    summary.append(bbase)
     print('wrote %d cases to %s' % (len(summary), OUT))
     return 0
 

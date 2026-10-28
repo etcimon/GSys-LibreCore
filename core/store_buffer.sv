@@ -344,6 +344,9 @@ module store_buffer
   // svt-pipe: protocol st valid=valid_i id=trans_id_i kill=cancelled_mask_i[$id] flush=flush_i
   // svt-pipe: no-cut on=speculative_queue_n
   // svt-pipe: no-cut on=spec_older_n
+  // svt-pipe: cycle st q=speculative_queue_n d=spec_older_n hold=valid_i steps=1
+  // svt-pipe: cut-ok st on=spec_older_n
+  // No payload register: the queue next-state is combinational with valid_i.
   always_comb begin : core_if
     automatic logic ins_active, lgcy_flush_keep;
     automatic logic [DEPTH_SPEC-1:0] cancel_hit, live_after;

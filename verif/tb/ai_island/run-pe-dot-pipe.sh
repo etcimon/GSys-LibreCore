@@ -7,6 +7,10 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$ROOT"
+AI_RTL="${G6LC_AI_RTL_DIR:-$ROOT/corev_apu/ai_island}"
+AI_INC="${G6LC_AI_INC_DIR:-$ROOT/corev_apu/include}"
+AI_SRC="${G6LC_AI_SRC_DIR:-$ROOT/corev_apu/src}"
+AI_CVXIF="${G6LC_AI_CVXIF_DIR:-$ROOT/core/cvxif_g6lc_ai}"
 OUT="${AI_PE_DOT_PIPE_OUT:-/tmp/g6lc-ai-pe-dot-pipe}"
 if ! command -v verilator >/dev/null 2>&1; then
   echo "SKIP no verilator"
@@ -18,8 +22,8 @@ for lanes in ${LANES_LIST:-1 4 16 256}; do
   verilator --binary --timing -Wno-fatal -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-UNOPTFLAT \
     -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -GLANES="$lanes" \
     -I"$ROOT/core/include" \
-    "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot.sv" \
-    "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot_pipe.sv" \
+    "$AI_RTL/g6lc_ai_pe_dot.sv" \
+    "$AI_RTL/g6lc_ai_pe_dot_pipe.sv" \
     "$ROOT/verif/tb/ai_island/tb_g6lc_ai_pe_dot_pipe.sv" \
     --top-module tb_g6lc_ai_pe_dot_pipe -Mdir "$mdir" -o tb_pe_dot_pipe > "$mdir/build.log" 2>&1 \
     || { tail -30 "$mdir/build.log"; exit 1; }

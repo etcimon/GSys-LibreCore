@@ -553,7 +553,10 @@ DRAM with on-chip caches.
       `pay_n` does not fit the remainder, a new chunk starts and the tail is wasted;
       `pay_n ≤ 1023` is already guaranteed by `PAY_MAX = 512`), and `imm[7]` now stores the
       **absolute PayMem word address** of the payload — the executor's `PAYREAD` becomes a
-      direct ObjPay read and the `cmdrec` `PAYREAD` op is retired.
+      direct ObjPay read and the `cmdrec` `PAYREAD` op is retired. Per-buffer record count
+      caps at **65,535**: `w1 count` is 32-bit but `cmdexec`'s `rec_i`/`rec_n` index is
+      16-bit, so `APPEND` at `count == 16'hFFFF` answers `FULL` (a record_many-scale
+      10 000-record buffer is far inside the bound).
     - *Read side.* ObjPay gains `APU_OBJPAY_OP_READN` (`words ≤ 16`, within one
       16-word-aligned line; one completion per word, `req_ready` low until the last) so a
       record costs one line fill + 16 beats instead of 16 round trips; vgtop's `opg_q`
@@ -588,13 +591,30 @@ DRAM with on-chip caches.
       drains, then polls the listed events' `state[0]` every 64 cycles until all are set
       (a host-set event arrives through vnfront's ring while the executor polls); the A1
       watchdog still bounds an event that is never set. The three `vkCmd*Event*` commands
-      join the profile command set (`vn_device_profile.toml` → regenerated tables); the host
-      trio leaves `UNSUPPORTED`.
+      join the profile command set (`vn_device_profile.toml` → regenerated tables), and the
+      host trio is the new `EVENT` action class — `vkSetEvent`/`vkResetEvent` `SETSTATE` the
+      entry's `state[0]`, `vkGetEventStatus` replies `VK_EVENT_SET`(3)/`VK_EVENT_RESET`(4)
+      from a `LOOKUP` (17 classes ⇒ `apu_vn_act_e` widened to 5 bits).
+    - *Completion streams.* cmdrec's `RESET_POOL`/`DESTROY_POOL` reply
+      streams (SWEEP interims + final OK) are consumed under a
+      state-gated ready (`pl_sweep_q` — ready only in `StPoolSweep`/
+      `StPoolDes`); tied-high ready is only legal for strictly
+      synchronous req→cpl ops — vnfront's per-SWEEP ObjTab `SETSTATE`
+      detour is longer than cmdrec's per-buffer loop, so a tied-high
+      ready dropped interims and could drop the final OK, deadlocking
+      the front (guest `pool_reset_reuse` fence-wait hang,
+      `repeated_reset_long` ring FATAL).
     - *Indirect.* `DrawIndirect`/`DrawIndexedIndirect`/`DispatchIndirect` read their
       `{count/x, instance/y, first/z, …}` words from the bound buffer through the
       executor's aperture path at issue time (`drawCount ≤ maxDrawIndirectCount = 1` for
       now, `stride` honoured); `DispatchBase` (core 1.1) adds the `baseGroup` triple to the
       dispatch work's `imm` and shwave's `WorkgroupId` builtin (`cts-device-group.md`).
+    - *Aggregation-D notes (costs carried knowingly).* `APPEND` costs 16 ObjPay `WRITE`s
+      per record plus one per payload word — `StPayW` accepts one word per ObjPay round
+      trip, so a record_many_primary-style stream is ~17+ round trips per record.
+      `RESET_POOL` over a `record_many`-scale pool (10 000 buffers) is ~30 ObjPay ops per
+      buffer (descriptor fetch + chain walks + frees). A `WRITEN` burst op (line-wide
+      record write, payload burst) is the D-item; nothing here changes the contract.
 
 ### 4b. Reply builder `g6lc_apu_vnrep` (interface of record, increment 3)
 
@@ -635,14 +655,17 @@ names and vk.xml, not hand-written per command:
 | `POOL_RESET` | `vkResetCommandPool`, `vkResetDescriptorPool` | `CmdRec.RESET` for every buffer of the pool (pool = parent in `ObjTab`) |
 | `MAP` | `vkMapMemory` (excluded), `vkUnmapMemory`, `vkFlush/InvalidateMappedMemoryRanges` | LOOKUP + no-op on a HOST_COHERENT type; the aperture is HOST_VISIBLE SHM |
 | `NOP_OK` | `vkCreatePipelineCache`-class, `vkDestroyPipelineCache` | ALLOC/RETIRE of a stateless object |
+| `EVENT` | `vkSetEvent`, `vkResetEvent`, `vkGetEventStatus` | `SETSTATE`/`LOOKUP` of the event entry's `state[0]`; status replies `VK_EVENT_SET`/`VK_EVENT_RESET` (§5a G3b-iii; 17th class, `apu_vn_act_e` is 5-bit) |
 
 Everything not classified is `UNSUPPORTED` → `VK_ERROR_FEATURE_NOT_PRESENT` and a
 diagnostic record; the generator lists the fallout so the set is tightened, never
-widened by accident. Generated membership (2026-10-04, 120 commands): ALLOC 25, RETIRE
-21, BIND 4, QUERY 17, CB_BEGIN/END/RESET 1/1/1, RECORD 35, SUBMIT 1, WAIT 5, POOL_RESET
-2, MAP 3, NOP_OK 2, `UPDATE` 1 (`vkUpdateDescriptorSets` — LOOKUPs of the set and the
+widened by accident. Generated membership (2026-10-18, 149 commands): ALLOC 26, RETIRE
+22, BIND 4, QUERY 25, CB_BEGIN/END/RESET 1/1/1, RECORD 40, SUBMIT 1, WAIT 5, POOL_RESET
+2, MAP 3, NOP_OK 3, EVENT 3 (`vkSetEvent`/`vkResetEvent`/`vkGetEventStatus`, §5a
+G3b-iii), `UPDATE` 1 (`vkUpdateDescriptorSets` — LOOKUPs of the set and the
 written buffers/views; descriptor contents are consumed by the shader core in increment
-4), UNSUPPORTED 1 (`vkGetQueryPoolResults` — needs executor query data; stays refused
+4), TRANSPORT 10 (internal ring ops — no guest API), UNSUPPORTED 1
+(`vkGetQueryPoolResults` — needs executor query data; stays refused
 until queries execute).
 
 ## 6. CmdRec and the submit-time executor
@@ -722,8 +745,12 @@ watchdog, period from `RingMonitorInfo`). Before every replying command the driv
 written at that window's start (`vkSeekReplyCommandStreamMESA(position)` moves the
 cursor). Large streams arrive by `vkExecuteCommandStreamsMESA(streams[], replyPositions[],
 deps, flags)`: each stream is a `{resourceId, offset, size}` window executed in order with
-the reply cursor seeked to `pReplyPositions[i]`. `vkWriteRingExtraMESA(ring, offset,
-value)` writes into the extra region. `vkSubmitVirtqueueSeqnoMESA` /
+the reply cursor seeked to `pReplyPositions[i]` — ExecuteCommandStreams is cursor-driven:
+stream tuples and reply positions are fetched from the record on demand; no stream-count
+device limit beyond the decoder's 16-bit record length (≤ 9361); Mesa emits one stream per
+CB per submit plus one per encoder growth chunk (`execute_large_primary` = 8).
+`vkWriteRingExtraMESA(ring, offset, value)` writes into the extra region.
+`vkSubmitVirtqueueSeqnoMESA` /
 `vkWaitVirtqueueSeqnoMESA` / `vkWaitRingSeqnoMESA` order the virtqueue and ring timelines.
 
 **Engines (interfaces of record):**
@@ -914,7 +941,7 @@ then fails; we report `VK_ERROR_UNKNOWN`):
 - Header: magic `0x07230203`, version 1.0–1.6, bound ≤ `ShaderIds` (default 1024 ids);
   `OpCapability Shader` (`Int64`/`Float64`/`Int16`/`Float16`/16-bit storage etc. fault);
   `OpMemoryModel Logical GLSL450`; one `OpEntryPoint GLCompute`; `OpExecutionMode
-  LocalSize x y z` (product ≤ 64 in the profile).
+  LocalSize x y z` (product ≤ 128; each of x,y ≤ 128 and z ≤ 64).
 - Types: `Void, Bool, Int 32 (signed/unsigned), Float 32, Vector 2–4, Matrix 2–4 columns,
   Array (constant length), RuntimeArray, Struct, Pointer {Input, Uniform, StorageBuffer,
   PushConstant, Workgroup, Function, Private}, Function (void, no params)`.
@@ -922,9 +949,38 @@ then fails; we report `VK_ERROR_UNKNOWN`):
   MatrixStride, ColMajor/RowMajor, BuiltIn {GlobalInvocationId, LocalInvocationId,
   WorkgroupId, LocalInvocationIndex, NumWorkgroups, WorkgroupSize}, NonWritable,
   NonReadable, Restrict, Aliased, RelaxedPrecision (ignored), NoContraction (honoured: §8)`.
-- Constants: `OpConstant{,True,False,Null,Composite}`; `OpSpecConstant*` accepted with
-  defaults, and `vkCreateComputePipelines` with `pSpecializationInfo ≠ NULL` is refused
-  until specialization is implemented.
+- Constants: `OpConstant{,True,False,Null,Composite}`; `OpSpecConstant` and
+  `OpSpecConstantComposite` fold specialization data on the compute FILL.
+  `size` 8 is `VK_ERROR_FEATURE_NOT_PRESENT`. `OpSpecConstantOp` and graphics
+  specialization are still refused. A null `pSpecializationInfo` stays the
+  5-word element.
+  **Decision (2026-10-18, COMPUTE-H1 — after G3b-iii):** specialization happens **at scan
+  time** in the residency FILL, because a fill already re-runs the commit scan from the
+  parked words. `vkCreate{Compute,Graphics}Pipelines` resolves `pSpecializationInfo` into a
+  parked ObjPay list of `{constantID, value32}` pairs (`SpecMax = 32` per stage; `size` 1, 2
+  or 4 → one 32-bit value, `size` 8 refused `FEATURE_NOT_PRESENT`), stored per stage in the
+  pipeline block (compute block 2 → 4 words `{handle, park, spec park, 0}`; graphics
+  48 → 52, `w48..51` = VS/FS `{spec park}` pairs). The residency key becomes
+  `{module handle, spec park}` (`0` = unspecialized) — `apu_sh_sm_req_t` gains
+  `spec[31:0]`, the tag compares both, identical spec data in two pipelines costs two slots
+  (a hash key is a later Aggregation-D refinement). The scanner (RTL `shmod` and
+  `spirv_scan.py`, mirror-first) loads the list, then folds `OpSpecConstant{,True,False}`
+  by `SpecId`, `OpSpecConstantComposite` as a composite of folded constants (the
+  `WorkgroupSize` builtin path sets `lx/ly/lz`), and `OpSpecConstantOp` for the integer /
+  logical / select / conversion subset the spec permits (`SConvert, UConvert, FConvert`
+  refused with the 64/16-bit types); anything else faults `CONST`. Specialized modules
+  are validated at pipeline create through the same FILL, so a bad specialization fails
+  `vkCreate*Pipelines`, never a dispatch.
+  **Decision (2026-10-18, COMPUTE-H3), applied:** `MaxWaves` default is **16**
+  (`shwave`/`shcore`/`vgtop`/`vgsys`). A workgroup holds the Vulkan 1.0 minimum
+  128 invocations (`maxComputeWorkGroupInvocations = 128`,
+  `maxComputeWorkGroupSize = (128, 128, 64)`, z capped at 64). The RF SRAM depth
+  and the per-wave control flops are twice the 8-wave screen — the first
+  Aggregation-D area point, taken for conformance.
+  `lx/ly/lz` stay 8-bit. **Image atomics:** `OpImageTexelPointer` on `r32i/r32ui` storage
+  images resolves `{record, coord}` to a byte address through the `imageStore` address
+  path and then runs the existing memory-atomic sequence — one `W_ITP` micro-step, no new
+  memory op. Other formats fault `IMAGE` (the spec only mandates 32-bit integer atomics).
 - 4a instructions: `OpVariable` (Function/Private/Workgroup → scratch/slab allocation at
   commit; Input builtins), `OpLoad`, `OpStore`, `OpAccessChain`/`OpInBoundsAccessChain`
   (constant and dynamic indices, strides/offsets from decorations for Uniform/StorageBuffer/
@@ -1246,9 +1302,9 @@ rectangle, not a limit. `Xfer` handles copies/clears/blits and MSAA resolve.
 ### 9a. Image dimensionality — object contract first, sampling second (Aggregation A3 / B; decision 2026-10-17)
 
 CTS-1 `api.object_management.*.{image_1d, image_3d, image_view_1d, image_view_1d_arr,
-image_view_3d}` fail today because `vkCreateImage` refuses `VK_IMAGE_TYPE_1D/3D` with
-`FEATURE_NOT_PRESENT`; 1D/3D images and every view type except cube-array are core 1.0, so
-the refusal is a conformance defect, not an honest NotSupported. The contract splits in two:
+image_view_3d}` is the object gate. `vkCreateImage` accepts 1D, 2D and 3D and
+`vkCreateImageView` accepts every view type except `CUBE_ARRAY`. Sampling a 1D, 3D or
+cube record faults the submission (Aggregation B). The contract splits in two:
 
 - **A3 — objects.** `vkCreateImage` accepts 1D, 2D and 3D; `vkCreateImageView` accepts
   `1D, 1D_ARRAY, 2D, 2D_ARRAY, 3D, CUBE` (`CUBE_ARRAY` stays NotSupported until

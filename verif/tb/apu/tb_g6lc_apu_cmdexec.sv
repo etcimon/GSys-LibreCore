@@ -114,7 +114,24 @@ module tb_g6lc_apu_cmdexec;
     .fence_clr_i(fclr), .fence_fail_i(ffail), .xf_o(), .rd_o(),
     .devlost_valid_o(dl_v), .devlost_ctx_o(dl_ctx),
     .dead_o(dl_dead),
+    .mp_req_valid_o(emp_v), .mp_req_ready_i(1'b1),
+    .mp_req_o(emp_req),
+    .mp_rsp_valid_i(emp_rv), .mp_rsp_i(emp_rsp),
     .hold_i(hold), .idle_o(ce_idle), .busy_o());
+  // §5a G3b-iii: the indirect-operand aperture port gets a null
+  // responder — no case here fetches indirect words (the vgsys
+  // vectors cover it); a request would still complete benignly
+  logic        emp_v, emp_rv = 1'b0;
+  apu_mp_req_t emp_req;
+  apu_mp_rsp_t emp_rsp;
+  always_ff @(posedge clk or negedge rst_ni) begin
+    if (!rst_ni) begin
+      emp_rv <= 1'b0; emp_rsp <= '0;
+    end else begin
+      emp_rv <= emp_v;
+      if (emp_v) emp_rsp <= '{rdata: '0, default: '0};
+    end
+  end
   g6lc_apu_cmdexec_fixture #(.Enable(1'b0), .Fences(Fences)) i_off (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .submit_valid_i(sub_v), .submit_ready_o(osub_r), .submit_i(sub),
@@ -135,6 +152,9 @@ module tb_g6lc_apu_cmdexec;
     .fence_clr_i(fclr), .fence_fail_i(ffail), .xf_o(), .rd_o(),
     .devlost_valid_o(odl_v), .devlost_ctx_o(odl_ctx),
     .dead_o(odl_dead),
+    .mp_req_valid_o(), .mp_req_ready_i(1'b0),
+    .mp_req_o(),
+    .mp_rsp_valid_i(1'b0), .mp_rsp_i(apu_mp_rsp_t'('0)),
     .hold_i(hold), .idle_o(), .busy_o());
 
   // ---- backend mux: TB setup vs executor ------------------------------
@@ -167,12 +187,23 @@ module tb_g6lc_apu_cmdexec;
   logic        tpay_v = 1'b0, tpay_r;
   logic [31:0] tpay_d = '0;
 
+  // §5a G3b-iii: cmdrec's ObjPay client rides the same behavioural
+  // paymem as the executor's op port (descriptor blocks, record/
+  // payload chunks, and the executor's payload reads share one image)
+  logic            rop_v, rop_r = 1'b1, rop_cv, rop_cr;
+  apu_objpay_req_t rop_req;
+  apu_objpay_cpl_t rop_cpl;
+
   g6lc_apu_cmdrec #(.Enable(1'b1)) i_rec (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .req_valid_i(cr_vld), .req_ready_o(cr_rdy), .req_i(cr_req),
     .cpl_valid_o(cr_cvld), .cpl_ready_i(cr_crdy), .cpl_o(cr_cpl),
     .pay_valid_i(tpay_v), .pay_data_i(tpay_d),
-    .pay_ready_o(tpay_r));
+    .pay_ready_o(tpay_r),
+    .op_req_valid_o(rop_v), .op_req_ready_i(rop_r),
+    .op_req_o(rop_req),
+    .op_cpl_valid_i(rop_cv), .op_cpl_ready_o(rop_cr),
+    .op_cpl_i(rop_cpl));
   // ---- objmem plumbing (ObjTab-V DRAM backing) --------------------
   logic         omt_v, omt_r, omt_rv;
   apu_omt_req_t omt_req;
@@ -231,23 +262,76 @@ module tb_g6lc_apu_cmdexec;
 
   // ---- G3b-ii: behavioural ObjPay + residency-manager models ------
   // exec reads pipeline module blocks ({handle,{chunk,words}}) from
-  // paymem — the TB writes them directly during setup.  The sm model
-  // mirrors shcore's residency table loosely: LOOKUP hit/miss, FILL
-  // takes the lowest free then the oldest unpinned slot (BUSY when
-  // all eight are pinned), UNPIN/INVAL bookkeeping.  One-cycle cpl.
-  logic [31:0] paymem [4096];
+  // paymem — the TB writes them directly during setup.  §5a G3b-iii:
+  // cmdrec's descriptor blocks and record/payload chunks live in the
+  // same image — the rop model is a bump allocator above the TB
+  // fixtures (chunks 40..52) implementing ALLOC/WRITE/READ/READN/FREE
+  // (FREE is a no-op — no reclaim is needed for these cases).  The sm
+  // model mirrors shcore's residency table loosely: LOOKUP hit/miss,
+  // FILL takes the lowest free then the oldest unpinned slot (BUSY
+  // when all eight are pinned), UNPIN/INVAL bookkeeping.  1-cycle cpl.
+  logic [31:0] paymem [32768];
+  logic [31:0] pay_bump = 32'd4096;   // first word above the fixtures
+  logic [3:0]  m_rn_rem = 0;
+  logic [31:0] m_rn_addr = '0;
   logic        xop_cv = 1'b0;
   always_ff @(posedge clk or negedge rst_ni) begin
     if (!rst_ni) begin
       xop_cv <= 1'b0; xop_cpl <= '0;
+      rop_cv <= 1'b0; rop_cpl <= '0; rop_r <= 1'b1;
+      m_rn_rem <= '0; m_rn_addr <= '0;
     end else begin
       xop_cv <= 1'b0;
       if (xop_v) begin
         xop_cv  <= 1'b1;
         xop_cpl <= '{status: APU_OBJPAY_OK,
                      rdata: xop_req.op == APU_OBJPAY_OP_READ
-                            ? paymem[xop_req.addr[11:0]] : 32'h0,
+                            ? paymem[xop_req.addr[14:0]] : 32'h0,
                      default: '0};
+      end
+      // cmdrec ObjPay client — one outstanding op, READN streams one
+      // completion per word (ready rises on the last beat)
+      rop_cv <= 1'b0;
+      if (m_rn_rem != 0) begin
+        rop_cv    <= 1'b1;
+        rop_cpl   <= '{status: APU_OBJPAY_OK,
+                      rdata: paymem[m_rn_addr[14:0]], default: '0};
+        m_rn_addr <= m_rn_addr + 32'd1;
+        m_rn_rem  <= m_rn_rem - 4'd1;
+        if (m_rn_rem == 4'd1) rop_r <= 1'b1;
+      end else if (rop_v && rop_r) begin
+        unique case (rop_req.op)
+          APU_OBJPAY_OP_ALLOC: begin
+            rop_cv    <= 1'b1;
+            rop_cpl   <= '{status: APU_OBJPAY_OK, base: pay_bump,
+                          default: '0};
+            pay_bump  <= (pay_bump + rop_req.words + 32'd63) &
+                         ~32'd63;
+          end
+          APU_OBJPAY_OP_WRITE: begin
+            paymem[rop_req.addr[14:0]] <= rop_req.wdata;
+            rop_cv  <= 1'b1;
+            rop_cpl <= '{status: APU_OBJPAY_OK, default: '0};
+          end
+          APU_OBJPAY_OP_READN: begin
+            rop_cv  <= 1'b1;
+            rop_cpl <= '{status: APU_OBJPAY_OK,
+                        rdata: paymem[rop_req.addr[14:0]],
+                        default: '0};
+            if (rop_req.words > 1) begin
+              m_rn_rem  <= rop_req.words[3:0] - 4'd1;
+              m_rn_addr <= rop_req.addr + 32'd1;
+              rop_r     <= 1'b0;
+            end
+          end
+          default: begin  // READ; FREE returns OK with no reclaim
+            rop_cv  <= 1'b1;
+            rop_cpl <= '{status: APU_OBJPAY_OK,
+                        rdata: rop_req.op == APU_OBJPAY_OP_READ
+                               ? paymem[rop_req.addr[14:0]] : 32'h0,
+                        default: '0};
+          end
+        endcase
       end
     end
   end
@@ -374,23 +458,27 @@ module tb_g6lc_apu_cmdexec;
   endtask
 
   // ---- backend setup helpers ------------------------------------------
-  task automatic cr_op(input apu_cmdrec_op_e o, input logic [7:0] b,
+  // pay stream magic — cases may switch it to keep streams
+  // distinguishable in paymem (case 7's push check)
+  logic [31:0] pay_magic = 32'hCAFE_0000;
+
+  task automatic cr_op(input apu_cmdrec_op_e o, input logic [31:0] b,
                        input logic [15:0] ix, input apu_cmdrec_rec_t r,
                        input logic [15:0] pn = '0);
     @(negedge clk); tcr_v = 1'b1;
-    tcr_req = '{op: o, cbuf: b, idx: ix, rec: r, pay_n: pn};
+    tcr_req = '{op: o, cbd: b, idx: ix, rec: r, pay_n: pn, flags: '0};
     @(posedge clk);
     while (!tcr_r) @(posedge clk);
     @(negedge clk); tcr_v = 1'b0;
-    // APPEND with pay_n streams its payload words one per cycle while
-    // the recorder sits in its StPay accept state. Hold pay_valid
-    // across the whole burst: the last word exits StPay on the same
-    // edge that accepts it, so polling pay_ready_o per word can miss
-    // the final handshake under post-edge sampling.
+    // APPEND with pay_n streams its payload words while the recorder
+    // walks its descriptor-open/ALLOC preamble to StPayW — each word
+    // holds until pay_ready_o is high at a negedge (the accepting
+    // posedge follows), then through that posedge before advancing
     if (pn != 0) begin
       @(negedge clk); tpay_v = 1'b1;
       for (int i = 0; i < pn; i++) begin
-        tpay_d = 32'hCAFE_0000 + 32'(i);
+        tpay_d = pay_magic + 32'(i);
+        while (!tpay_r) @(negedge clk);
         @(negedge clk);
       end
       tpay_v = 1'b0;
@@ -430,13 +518,17 @@ module tb_g6lc_apu_cmdexec;
   logic [31:0] cb_h, pipe_h, dset_h, buf0_h, buf1_h;
   logic [31:0] lay_h, gpipe_h, rp_h, fb_h, view_h, img_h;
   logic [15:0] seq0;
+  // §5a G3b-iii: cmdrec buffer identifiers are PayMem descriptor
+  // block addresses (allocated by vnfront in the real system — the
+  // TB plays that role at chunks 20..31)
+  logic [31:0] cbd [12];
 
   task automatic submit(input logic [4:0] f, input int nb,
-                        input logic [7:0] r0, input logic [31:0] h0,
-                        input logic [7:0] r1, input logic [31:0] h1);
+                        input logic [31:0] r0, input logic [31:0] h0,
+                        input logic [31:0] r1, input logic [31:0] h1);
     sub_v = 1'b1;
     sub = '{fence_idx: f, nbufs: 3'(nb), ctx: 8'h0,
-            crec: '{8'h0, 8'h0, r1, r0},
+            crec: '{32'h0, 32'h0, r1, r0},
             chndl: '{32'h0, 32'h0, h1, h0}};
     // wait for handshake
     while (!sub_r) @(posedge clk);
@@ -505,14 +597,21 @@ module tb_g6lc_apu_cmdexec;
           .mem_id(64'h1000_0000_0000_0006), .offset(64'd128));
     check("alloc cb", cb_h !== '0);
 
+    // §5a G3b-iii: 64-word zeroed descriptor block per buffer
+    for (int i = 0; i < 12; i++) begin
+      cbd[i] = 32'(20 + i) << 6;
+      for (int w = 0; w < 64; w++)
+        paymem[cbd[i] + 32'(w)] = 32'h0;
+    end
+
     // ---- case 1: record + submit buf0 ------------------------------------
-    cr_op(APU_CMDREC_OP_BEGIN, 0, 0, '0);
-    cr_op(APU_CMDREC_OP_APPEND, 0, 0,
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[0], 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, cbd[0], 0,
           mkrec(APU_VN_TYPE_VK_CMD_BIND_PIPELINE_EXT, pipe_h,
                 APU_VN_KIND_VK_PIPELINE, 0));
-    cr_op(APU_CMDREC_OP_APPEND, 0, 0,
+    cr_op(APU_CMDREC_OP_APPEND, cbd[0], 0,
           mkrec(APU_VN_TYPE_VK_CMD_DISPATCH_EXT, 0, 0, 32'h8));
-    cr_op(APU_CMDREC_OP_APPEND, 0, 0,
+    cr_op(APU_CMDREC_OP_APPEND, cbd[0], 0,
           mkrec(APU_VN_TYPE_VK_CMD_PIPELINE_BARRIER_EXT, 0, 0, 0));
     begin
       // one real region descriptor ({srcOff,dstOff,size} u64s = 6
@@ -521,14 +620,14 @@ module tb_g6lc_apu_cmdexec;
       apu_cmdrec_rec_t rr = mkrec(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT,
                                   buf0_h, APU_VN_KIND_VK_BUFFER, 1);
       rr.handle[1] = buf1_h; rr.kind[1] = APU_VN_KIND_VK_BUFFER;
-      cr_op(APU_CMDREC_OP_APPEND, 0, 0, rr, 6);
+      cr_op(APU_CMDREC_OP_APPEND, cbd[0], 0, rr, 6);
     end
-    cr_op(APU_CMDREC_OP_END, 0, 0, '0);
+    cr_op(APU_CMDREC_OP_END, cbd[0], 0, '0);
     check("record buf0", cr_cpl.status == APU_CMDREC_OK);
 
     tb_drv = 1'b0;
     seq0 = done_seq;
-    submit(5'd0, 1, 8'd0, cb_h, 8'h0, 32'h0);
+    submit(5'd0, 1, cbd[0], cb_h, 32'h0, 32'h0);
     wait_fence(0, 4000);
     check("work count", work_i == 2);
     check("work0 dispatch",
@@ -549,15 +648,15 @@ module tb_g6lc_apu_cmdexec;
 
     // ---- case 3: stale record handle -> DEVICE_LOST ----------------------
     tb_drv = 1'b1;
-    cr_op(APU_CMDREC_OP_BEGIN, 1, 0, '0);
-    cr_op(APU_CMDREC_OP_APPEND, 1, 0,
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[1], 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, cbd[1], 0,
           mkrec(APU_VN_TYPE_VK_CMD_DISPATCH_EXT, buf0_h + 32'h10000,
                 APU_VN_KIND_VK_BUFFER, 0));
-    cr_op(APU_CMDREC_OP_END, 1, 0, '0);
+    cr_op(APU_CMDREC_OP_END, cbd[1], 0, '0);
     tb_drv = 1'b0;
     begin
       int w0 = work_i;
-      submit(5'd1, 1, 8'd1, cb_h, 8'h0, 32'h0);
+      submit(5'd1, 1, cbd[1], cb_h, 32'h0, 32'h0);
       wait_fence(1, 4000);
       check("stale lost", flost[1] === 1'b1);
       check("stale no work", work_i == w0);
@@ -566,13 +665,13 @@ module tb_g6lc_apu_cmdexec;
 
     // ---- case 4: unsealed buffer -> DEVICE_LOST ---------------------------
     tb_drv = 1'b1;
-    cr_op(APU_CMDREC_OP_BEGIN, 2, 0, '0);
-    cr_op(APU_CMDREC_OP_APPEND, 2, 0,
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[2], 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, cbd[2], 0,
           mkrec(APU_VN_TYPE_VK_CMD_DISPATCH_EXT, 0, 0, 1));
     tb_drv = 1'b0;   // buffer left unsealed
     begin
       int w0 = work_i;
-      submit(5'd2, 1, 8'd2, cb_h, 8'h0, 32'h0);
+      submit(5'd2, 1, cbd[2], cb_h, 32'h0, 32'h0);
       wait_fence(2, 4000);
       check("unsealed lost", flost[2] === 1'b1);
       check("unsealed no work", work_i == w0);
@@ -581,24 +680,24 @@ module tb_g6lc_apu_cmdexec;
 
     // ---- case 5: two buffers in one submit -------------------------------
     // (DRAW_EXT would now gate on a bound graphics pipeline + active
-    // attachment; EXECUTE_COMMANDS stays a plain work record)
+    // attachment; RESOLVE_IMAGE stays a plain work record)
     tb_drv = 1'b1;
-    cr_op(APU_CMDREC_OP_BEGIN, 3, 0, '0);
-    cr_op(APU_CMDREC_OP_APPEND, 3, 0,
-          mkrec(APU_VN_TYPE_VK_CMD_EXECUTE_COMMANDS_EXT, 0, 0, 4));
-    cr_op(APU_CMDREC_OP_END, 3, 0, '0);
-    cr_op(APU_CMDREC_OP_BEGIN, 4, 0, '0);
-    cr_op(APU_CMDREC_OP_APPEND, 4, 0,
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[3], 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, cbd[3], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_RESOLVE_IMAGE_EXT, 0, 0, 4));
+    cr_op(APU_CMDREC_OP_END, cbd[3], 0, '0);
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[4], 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, cbd[4], 0,
           mkrec(APU_VN_TYPE_VK_CMD_DISPATCH_EXT, 0, 0, 2));
-    cr_op(APU_CMDREC_OP_END, 4, 0, '0);
+    cr_op(APU_CMDREC_OP_END, cbd[4], 0, '0);
     tb_drv = 1'b0;
     begin
       int w0 = work_i;
-      submit(5'd3, 2, 8'd3, cb_h, 8'd4, cb_h);
+      submit(5'd3, 2, cbd[3], cb_h, cbd[4], cb_h);
       wait_fence(3, 4000);
       check("two-buf work", work_i == w0 + 2);
       check("buf order0",
-            got_work[w0] == APU_VN_TYPE_VK_CMD_EXECUTE_COMMANDS_EXT);
+            got_work[w0] == APU_VN_TYPE_VK_CMD_RESOLVE_IMAGE_EXT);
       check("buf order1",
             got_work[w0 + 1] == APU_VN_TYPE_VK_CMD_DISPATCH_EXT);
       check("two-buf ok", flost[3] === 1'b0);
@@ -618,7 +717,7 @@ module tb_g6lc_apu_cmdexec;
     // Two payload records share the buffer's pay arena: BindDS lands at
     // base 0 (imm[7]=0), PushConstants at base 2 (imm[7]=2).
     tb_drv = 1'b1;
-    cr_op(APU_CMDREC_OP_BEGIN, 5, 0, '0);
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[5], 0, '0);
     begin
       // §12.3 F5 stream: {handle,ndyn} pairs then the call's
       // dynamic-offset words — 2 sets x 2 + 2 dyn = 6 words
@@ -627,14 +726,16 @@ module tb_g6lc_apu_cmdexec;
       rr.imm[1] = 32'd1;   // firstSet
       rr.imm[2] = 32'd2;   // descriptorSetCount
       rr.imm[3] = 32'd2;   // dynamicOffsetCount
-      cr_op(APU_CMDREC_OP_APPEND, 5, 0, rr, 16'd6);
+      cr_op(APU_CMDREC_OP_APPEND, cbd[5], 0, rr, 16'd6);
     end
     begin
       apu_cmdrec_rec_t pr = mkrec(
           APU_VN_TYPE_VK_CMD_PUSH_CONSTANTS_EXT, 0, 0, 0);
       pr.imm[0] = 32'hAB;  // stageFlags
       pr.imm[2] = 32'd8;   // size bytes
-      cr_op(APU_CMDREC_OP_APPEND, 5, 0, pr, 16'd2);
+      pay_magic = 32'hFEED_0000;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[5], 0, pr, 16'd2);
+      pay_magic = 32'hCAFE_0000;
     end
     // §7b/5a-ii: a DISPATCH here would enter the full descriptor
     // assembly (the CAFE dset handles resolve to nothing) and a DRAW
@@ -642,13 +743,13 @@ module tb_g6lc_apu_cmdexec;
     // attachment; probe the snap through a plain work record instead.
     // Dispatch assembly itself is covered end-to-end in
     // tb_g6lc_apu_vgtop.
-    cr_op(APU_CMDREC_OP_APPEND, 5, 0,
-          mkrec(APU_VN_TYPE_VK_CMD_EXECUTE_COMMANDS_EXT, 0, 0, 32'h4));
-    cr_op(APU_CMDREC_OP_END, 5, 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, cbd[5], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_RESOLVE_IMAGE_EXT, 0, 0, 32'h4));
+    cr_op(APU_CMDREC_OP_END, cbd[5], 0, '0);
     tb_drv = 1'b0;
     begin
       int w0 = work_i;
-      submit(5'd4, 1, 8'd5, cb_h, 8'h0, 32'h0);
+      submit(5'd4, 1, cbd[5], cb_h, 32'h0, 32'h0);
       wait_fence(4, 4000);
       check("bindds work", work_i == w0 + 1);
       // streamed pay words are CAFE_0000+i; F5 pairs then dyn words:
@@ -659,8 +760,12 @@ module tb_g6lc_apu_cmdexec;
       check("dset2", got_snap[w0].dset[2] === 32'hCAFE0002);
       check("dyn1_0", got_snap[w0].dyn[1][0] === 32'hCAFE0004);
       check("dyn2_0", got_snap[w0].dyn[2][0] === 32'hCAFE0005);
-      // push constants land after the 6-word bind stream in the arena
-      check("push_base", got_snap[w0].push_base === 16'd6);
+      // §5a G3b-iii: push_base is the absolute PayMem word address of
+      // the record's payload — the FEED stream must sit there
+      check("push_base",
+            got_snap[w0].push_base !== 32'h0 &&
+            paymem[got_snap[w0].push_base[14:0]] === 32'hFEED_0000 &&
+            paymem[got_snap[w0].push_base[14:0] + 1] === 32'hFEED_0001);
       check("push_len",  got_snap[w0].push_len === 16'd8);
       check("bindds no lost", flost[4] === 1'b0);
       cases++;
@@ -688,19 +793,19 @@ module tb_g6lc_apu_cmdexec;
     // normally (no DEVICE_LOST), and the context's sticky fault
     // register counts the fault.
     tb_drv = 1'b1;
-    cr_op(APU_CMDREC_OP_BEGIN, 6, 0, '0);
-    cr_op(APU_CMDREC_OP_APPEND, 6, 0,
-          mkrec(APU_VN_TYPE_VK_CMD_EXECUTE_COMMANDS_EXT, 0, 0, 32'h8));
-    cr_op(APU_CMDREC_OP_END, 6, 0, '0);
-    cr_op(APU_CMDREC_OP_BEGIN, 7, 0, '0);
-    cr_op(APU_CMDREC_OP_APPEND, 7, 0,
-          mkrec(APU_VN_TYPE_VK_CMD_EXECUTE_COMMANDS_EXT, 0, 0, 32'h9));
-    cr_op(APU_CMDREC_OP_END, 7, 0, '0);
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[6], 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, cbd[6], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_RESOLVE_IMAGE_EXT, 0, 0, 32'h8));
+    cr_op(APU_CMDREC_OP_END, cbd[6], 0, '0);
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[7], 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, cbd[7], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_RESOLVE_IMAGE_EXT, 0, 0, 32'h9));
+    cr_op(APU_CMDREC_OP_END, cbd[7], 0, '0);
     tb_drv = 1'b0;
     begin
       int w0 = work_i;
       fault_at = work_i;       // first work of this submit faults
-      submit(5'd6, 2, 8'd6, cb_h, 8'd7, cb_h);
+      submit(5'd6, 2, cbd[6], cb_h, cbd[7], cb_h);
       wait_fence(6, 4000);
       check("fault cont work", work_i == w0 + 2);
       check("fault cont ok", flost[6] === 1'b0);
@@ -724,19 +829,19 @@ module tb_g6lc_apu_cmdexec;
     // an all-pinned victim set (StShFillC -> StSmReq livelock).  After
     // the fence every slot must be unpinned.
     tb_drv = 1'b1;
-    cr_op(APU_CMDREC_OP_BEGIN, 10, 0, '0);
-    cr_op(APU_CMDREC_OP_APPEND, 10, 0,
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[10], 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, cbd[10], 0,
           mkrec(APU_VN_TYPE_VK_CMD_BIND_PIPELINE_EXT, pipe_h,
                 APU_VN_KIND_VK_PIPELINE, 0));
-    cr_op(APU_CMDREC_OP_APPEND, 10, 0,
+    cr_op(APU_CMDREC_OP_APPEND, cbd[10], 0,
           mkrec(APU_VN_TYPE_VK_CMD_DISPATCH_EXT, 0, 0, 32'h8));
-    cr_op(APU_CMDREC_OP_END, 10, 0, '0);
+    cr_op(APU_CMDREC_OP_END, cbd[10], 0, '0);
     tb_drv = 1'b0;
     begin
       int w0 = work_i;
       int pins = 0;
       pend_hold = 1'b1;          // no dones — the walk parks in FinalDrain
-      submit(5'd9, 1, 8'd10, cb_h, 8'h0, 32'h0);
+      submit(5'd9, 1, cbd[10], cb_h, 32'h0, 32'h0);
       repeat (600) @(negedge clk);
       for (int i = 0; i < 8; i++) pins += m_rs_pin[i];
       check("fd work issued", work_i == w0 + 1);
@@ -821,8 +926,8 @@ module tb_g6lc_apu_cmdexec;
     paymem[(51 << 6) + 5] = 32'd64;
     paymem[(51 << 6) + 6] = 32'd64;
     paymem[(51 << 6) + 7] = 32'd1;
-    cr_op(APU_CMDREC_OP_BEGIN, 11, 0, '0);
-    cr_op(APU_CMDREC_OP_APPEND, 11, 0,
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[11], 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, cbd[11], 0,
           mkrec(APU_VN_TYPE_VK_CMD_BIND_PIPELINE_EXT, gpipe_h,
                 APU_VN_KIND_VK_PIPELINE, 0));
     begin
@@ -830,26 +935,27 @@ module tb_g6lc_apu_cmdexec;
           APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_EXT, rp_h,
           APU_VN_KIND_VK_RENDER_PASS, 0);
       rr.handle[1] = fb_h; rr.kind[1] = APU_VN_KIND_VK_FRAMEBUFFER;
-      cr_op(APU_CMDREC_OP_APPEND, 11, 0, rr, 16'd1);
+      cr_op(APU_CMDREC_OP_APPEND, cbd[11], 0, rr, 16'd1);
     end
-    cr_op(APU_CMDREC_OP_APPEND, 11, 0,
+    cr_op(APU_CMDREC_OP_APPEND, cbd[11], 0,
           mkrec(APU_VN_TYPE_VK_CMD_DRAW_EXT, 0, 0, 32'd3));
-    cr_op(APU_CMDREC_OP_APPEND, 11, 0,
+    cr_op(APU_CMDREC_OP_APPEND, cbd[11], 0,
           mkrec(APU_VN_TYPE_VK_CMD_END_RENDER_PASS_EXT, 0, 0, 0));
-    cr_op(APU_CMDREC_OP_END, 11, 0, '0);
+    cr_op(APU_CMDREC_OP_END, cbd[11], 0, '0);
     tb_drv = 1'b0;
     begin
       int pins = 0;
       m_fill_fault_at = m_fill_i + 1;   // the second FILL (FS) faults
-      submit(5'd10, 1, 8'd11, cb_h, 8'h0, 32'h0);
+      submit(5'd10, 1, cbd[11], cb_h, 32'h0, 32'h0);
       wait_fence(10, 8000);
       for (int i = 0; i < 8; i++) pins += m_rs_pin[i];
       check("fsflt pins drained", pins == 0);
       check("fsflt no lost", flost[10] === 1'b0);
       check("fsflt fault cnt",
             i_dut.gen_on.fault_q[0][63:48] === 16'h0002);
+      // resolve-fault word: {count16, rec_i16, code8, pad24}
       check("fsflt fault code",
-            i_dut.gen_on.fault_q[0][39:32] === 8'h11);
+            i_dut.gen_on.fault_q[0][31:24] === 8'h11);
       cases++;
     end
 
@@ -859,20 +965,20 @@ module tb_g6lc_apu_cmdexec;
     // devlost pulses (vnpump marks the ctx's rings FATAL), dead stays
     // set and a follow-on submission retires lost without issuing work
     tb_drv = 1'b1;
-    cr_op(APU_CMDREC_OP_BEGIN, 8, 0, '0);
-    cr_op(APU_CMDREC_OP_APPEND, 8, 0,
-          mkrec(APU_VN_TYPE_VK_CMD_EXECUTE_COMMANDS_EXT, 0, 0, 32'hA));
-    cr_op(APU_CMDREC_OP_END, 8, 0, '0);
-    cr_op(APU_CMDREC_OP_BEGIN, 9, 0, '0);
-    cr_op(APU_CMDREC_OP_APPEND, 9, 0,
-          mkrec(APU_VN_TYPE_VK_CMD_EXECUTE_COMMANDS_EXT, 0, 0, 32'hB));
-    cr_op(APU_CMDREC_OP_END, 9, 0, '0);
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[8], 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, cbd[8], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_RESOLVE_IMAGE_EXT, 0, 0, 32'hA));
+    cr_op(APU_CMDREC_OP_END, cbd[8], 0, '0);
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[9], 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, cbd[9], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_RESOLVE_IMAGE_EXT, 0, 0, 32'hB));
+    cr_op(APU_CMDREC_OP_END, cbd[9], 0, '0);
     tb_drv = 1'b0;
     begin
       int w0 = work_i;
       int fault_cnt0 = i_dut.gen_on.fault_q[0][63:48];
       pend_hold = 1'b1;
-      submit(5'd7, 1, 8'd8, cb_h, 8'h0, 32'h0);
+      submit(5'd7, 1, cbd[8], cb_h, 32'h0, 32'h0);
       wait_fence(7, 8000);
       check("wd fence lost", flost[7] === 1'b1);
       check("wd devlost", dl_seen === 1'b1);
@@ -880,7 +986,7 @@ module tb_g6lc_apu_cmdexec;
       check("wd ctx", dl_ctx === 8'h00);
       // device dead: the next submission retires without issuing work
       seq0 = done_seq;
-      submit(5'd8, 1, 8'd9, cb_h, 8'h0, 32'h0);
+      submit(5'd8, 1, cbd[9], cb_h, 32'h0, 32'h0);
       wait_fence(8, 4000);
       check("dead fence lost", flost[8] === 1'b1);
       check("dead no work", work_i == w0 + 1);

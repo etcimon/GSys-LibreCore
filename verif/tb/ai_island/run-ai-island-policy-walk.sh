@@ -7,7 +7,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$ROOT"
 
-if [[ -d /root/tools/verilator-v5.008/bin ]]; then
+AI_RTL="${G6LC_AI_RTL_DIR:-$ROOT/corev_apu/ai_island}"
+. "$ROOT/verif/tb/ai_island/gemm-extra-sources.inc.sh"
+AI_INC="${G6LC_AI_INC_DIR:-$ROOT/corev_apu/include}"
+AI_SRC="${G6LC_AI_SRC_DIR:-$ROOT/corev_apu/src}"
+AI_CVXIF="${G6LC_AI_CVXIF_DIR:-$ROOT/core/cvxif_g6lc_ai}"
+POLICY_LEAVES=()
+for leaf in g6lc_ai_policy_topology g6lc_ai_policy_publish; do
+  if [[ -f "$AI_RTL/$leaf.sv" ]]; then POLICY_LEAVES+=("$AI_RTL/$leaf.sv"); fi
+done
+
+if [[ -z "${G6LC_FORCE_SYSTEM_VERILATOR:-}" && -d /root/tools/verilator-v5.008/bin ]]; then
   export PATH="/root/tools/verilator-v5.008/bin:${PATH}"
   export VERILATOR_ROOT="${VERILATOR_ROOT:-/root/tools/verilator-v5.008/share/verilator}"
 fi
@@ -25,6 +35,8 @@ JOB_STRIDE=$(python3 -c "import json; print(json.load(open('$OUT/walk.json'))['j
 
 echo "[ai-island-policy-walk] verilate → $OUT (verilator $(verilator --version 2>/dev/null | head -1))"
 verilator --binary --timing -Wno-fatal -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-UNOPTFLAT \
+  -I"$AI_INC" \
+  -I"$AI_RTL/include" \
   -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-PINCONNECTEMPTY -Wno-CASEINCOMPLETE \
   -I"$ROOT/vendor/pulp-platform/axi/include" \
   -I"$ROOT/vendor/pulp-platform/common_cells/include" \
@@ -44,26 +56,35 @@ verilator --binary --timing -Wno-fatal -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-UNOPTF
   "$ROOT/core/include/config_pkg.sv" \
   "$ROOT/vendor/pulp-platform/tech_cells_generic/src/rtl/tc_sram.sv" \
   "$ROOT/common/local/util/tc_sram_wrapper.sv" \
-  "$ROOT/corev_apu/include/g6lc_ai_island_cfg_pkg.sv" \
-  "$ROOT/corev_apu/ai_island/include/g6lc_ai_desc_pkg.sv" \
-  "$ROOT/corev_apu/ai_island/include/g6lc_ai_fp_pkg.sv" \
-  "$ROOT/corev_apu/ai_island/include/g6lc_ai_policy_pkg.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_addr_check.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_cap_window.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_desc_engine.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_desc_fetch.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_mem_store.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_tile_sram.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot_float.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot_float_pipe.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_policy_codec.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_policy_subcode.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_policy_steer.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_gemm_seq.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_dram_timing.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_cpl_fifo.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_island_top.sv" \
+  "$AI_INC/g6lc_ai_island_cfg_pkg.sv" \
+  "$AI_RTL/include/g6lc_ai_desc_pkg.sv" \
+  "$AI_RTL/include/g6lc_ai_fp_pkg.sv" \
+  "$AI_RTL/include/g6lc_ai_policy_pkg.sv" \
+  "$AI_RTL/g6lc_ai_addr_check.sv" \
+  "$AI_RTL/g6lc_ai_cap_window.sv" \
+  "$AI_RTL/g6lc_ai_desc_engine.sv" \
+  "$AI_RTL/g6lc_ai_desc_fetch.sv" \
+  "$AI_RTL/g6lc_ai_mem_store.sv" \
+  "$AI_RTL/g6lc_ai_tile_sram.sv" \
+  "$AI_RTL/g6lc_ai_pe_dot.sv" \
+  "$AI_RTL/g6lc_ai_pe_dot_pipe.sv" \
+  "$AI_RTL/g6lc_ai_pe_dot_float.sv" \
+  "$AI_RTL/g6lc_ai_pe_dot_float_pipe.sv" \
+  "$AI_RTL/g6lc_ai_policy_codec.sv" \
+  "$AI_RTL/g6lc_ai_policy_subcode.sv" \
+  "${POLICY_LEAVES[@]}" \
+  "$AI_RTL/g6lc_ai_policy_steer.sv" \
+  "$AI_RTL/g6lc_ai_gemm_seq.sv" \
+  "${GEMM_EXTRA_SOURCES[@]}" \
+  "$AI_RTL/g6lc_ai_mul_seq.sv" \
+  "$AI_RTL/g6lc_ai_gemm_arplan.sv" \
+  "$AI_RTL/g6lc_ai_dram_timing.sv" \
+  "$AI_RTL/g6lc_ai_cpl_fifo.sv" \
+  "$AI_RTL/g6lc_ai_axi_cut.sv" \
+  "$AI_RTL/g6lc_ai_cmd_fifo.sv" \
+  "$AI_RTL/g6lc_ai_inval_queue.sv" \
+  "$AI_RTL/g6lc_ai_cluster_dispatch.sv" \
+  "$AI_RTL/g6lc_ai_island_top.sv" \
   "$ROOT/verif/tb/ai_island/tb_g6lc_ai_island_dma.sv" \
   --top-module tb_g6lc_ai_island_dma \
   -Mdir "$OUT" -o tb_g6lc_ai_island_dma \

@@ -108,6 +108,10 @@ module alu
   // unit latency change, to be declared in ex_stage on the FLU's valid /
   // trans_id (flu_valid, trans_id_i, flush_i) so the result keeps its id.
   // svt-pipe: require-contract
+  // svt-pipe: no-cut on=result_o
+  // The execute step is measured in ex_stage (alu_result -> flu_result_o).
+  // adder_result is already the same-cycle split. It is not a cut-ok:
+  // a register here would move result_o and leave flu_valid_o on the old cycle.
 
   always_comb begin
     operand_a_bitmanip = operand_a;

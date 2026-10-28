@@ -108,20 +108,24 @@ module tb_apu_mp_mem
       rsp_valid_o <= '0;
       rsp_o       <= '{default: '0};
       for (int p = 0; p < N; p++) begin
-        cnt_q[p]  <= 0;
-        dice_q[p] <= 0;
-        rq_q[p]   <= '0;
+        cnt_q[p]  = 0;
+        dice_q[p] = 0;
+        rq_q[p]   = '0;
       end
     end else begin
       rsp_valid_o <= '0;
       for (int p = 0; p < N; p++) begin
-        dice_q[p] <= $urandom_range(99);
+        // BLKLOOPINIT: NBAs to an unpacked array inside a for loop
+        // are unsupported once a parent pokes the array
+        // hierarchically; these writes have no same-eval readers, so
+        // blocking is equivalent
+        dice_q[p] = $urandom_range(99);
         if (req_valid_i[p] && req_ready_o[p]) begin
           pend_q[p] <= 1'b1;
-          rq_q[p]   <= req_i[p];
-          cnt_q[p]  <= lat_min +
-                       ((lat_max > lat_min)
-                        ? $urandom_range(lat_max - lat_min) : 0);
+          rq_q[p]   = req_i[p];
+          cnt_q[p]  = lat_min +
+                      ((lat_max > lat_min)
+                       ? $urandom_range(lat_max - lat_min) : 0);
         end else if (pend_q[p]) begin
           if (cnt_q[p] <= 1) begin
             pend_q[p]      <= 1'b0;
@@ -140,13 +144,13 @@ module tb_apu_mp_mem
                     if (!GUARD_SKIP[p] && !guard_ok(64'(byt)))
                       $fatal(1, "APGUARD: aperture write outside allow-list off=%0x d=%02x",
                              byt, rq_q[p].wdata[b*8 +: 8]);
-                    apm[apix(byt >> 2)][8*(byt[1:0]) +: 8] <=
+                    apm[apix(byt >> 2)][8*(byt[1:0]) +: 8] =
                       rq_q[p].wdata[b*8 +: 8];
                   end else begin
                     if ((byt >> 2) >= GMW)
                       $fatal(1, "guest word %0d past dense model",
                              byt >> 2);
-                    gmem[byt >> 2][8*(byt[1:0]) +: 8] <=
+                    gmem[byt >> 2][8*(byt[1:0]) +: 8] =
                       rq_q[p].wdata[b*8 +: 8];
                   end
                 end
@@ -168,7 +172,7 @@ module tb_apu_mp_mem
               rsp_o[p].rdata <= d;
             end
           end else
-            cnt_q[p] <= cnt_q[p] - 1;
+            cnt_q[p] = cnt_q[p] - 1;
         end
       end
     end

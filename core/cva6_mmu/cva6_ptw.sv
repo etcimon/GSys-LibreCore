@@ -114,7 +114,9 @@ module cva6_ptw
   // Re-pipelining contract (sv-timing A128; 41.6 adjusted FO4 on the
   // Nangate45 board): page-table walker FSM.
   // svt-pipe: require-contract
+  // svt-pipe: protocol ptw valid=itlb_req_i flush=flush_i
   // svt-pipe: no-cut on=data_rdata_q
+  // svt-pipe: cycle ptw q=data_rdata_q d=ptw_active_o hold=itlb_req_i steps=1
 
   // input registers
   logic data_rvalid_q;

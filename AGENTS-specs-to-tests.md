@@ -17,6 +17,33 @@ matching row here so "which spec chapter is this test protecting?" stays answera
 
 ---
 
+## Hyp8 r44 timing-boundary checks — targeted evidence
+
+These checks exercise the hypothetical redesign, not the production-core
+qualification envelope. The source and run record is
+`build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/implementation-log.md`
+under r44 final verification; the design/timing comparison is in
+`analysis/r44-caller-specialization.md` beside it.
+
+| Architectural obligation | Test surface | Evidence and bounds |
+|---|---|---|
+| Integer load value/exception identity; store-to-load byte visibility | `verif/tb/core/tb_g6lc_hyp8_memory.sv`, `run_hyp8_memory.py` memory profile | `hyp8-r44f-memory`: 120 checks pass, including two eligible slots, partial forwarding, default selection and tombstone drain. |
+| Memory-order violation identity and delayed verdict/event pairing | `tb_g6lc_hyp8_control.sv`, LSQ profile | `hyp8-r44f-lsq`: 2018 checks pass; independent scalar winner model, ten selected configurations across 1/2/3/8/10 leaves and one/two stages, ties, changing payloads, waits and flush. Not full RVWMO qualification. |
+| Forwarded load data/user bytes survive export removal | Same control bench, D-cache profile | `hyp8-r44f-dcache`: +2 pipeline passes 290 checks; retained cases distinguish priority across groups and T1 snapshot from later slot reuse. The earlier live-T2 mutant fails. +0 still fails the same PMU-pulse check with pre-r44 memory RTL and remains unqualified. |
+| Integer/FP source classification follows the held issue record | Same control bench, dispatch profile | `hyp8-r44f-dispatch-r2`: 115 checks pass after correcting out-of-range test TIDs and adding an oracle range check. Held FP/int records, partial-flush reoffer and full flush covered; same-lane pop/take coincidence not observed. Not F/D arithmetic or full OoO qualification. |
+
+Final scalar/SMT2/L3 full-top lint passes with zero errors. These results
+promote no ISA chapter, OpenSBI/Linux boot, timing sign-off or production
+configuration status.
+
+r45 adds (record in `analysis/r45-mmu-request-specialization.md`):
+
+| Architectural obligation | Test surface | Evidence and bounds |
+|---|---|---|
+| Disabled shared TLB: miss arbitration, PTW request/return routing, flush quiet window | `tb_g6lc_hyp8_mmu` (control bench, `G6LC_HYP8_MMU_LEAF`), runner profile `mmu` | `hyp8-r45-mmu-r6`: 716 checks / 771 miter edges pass against the real disabled-table module over depths {2,3,64} x HYP_EXT {0,1}; negative control fails `MMU0_IRET_VALID`; depth-1 reference does not elaborate (unsupported geometry, new router checked alone). |
+| SFENCE.VMA flush semantics (all / address / ASID / both, global pages, NAPOT, superpages) and flush-over-fill priority in the local TLBs | Same leaf, TLB section, entries {4,16} x stages {1,3} x HYP_EXT {0,1} | Independent fill/lookup/flush oracle plus the in-DUT old-form predicate miter. Exposed and repaired a latent PLRU update defect (replacement policy only). Not VVMA/GVMA qualification. |
+| Load physical-address capture only under a live translation hit | `tb_g6lc_hyp8_memory.sv` section H | `hyp8-r45-memory-r3`: 129 checks pass; capture/hold/cancel/clear edges plus the retained capture invariant. |
+
 ## OoO coherence contract tests (2026-09-24; partial)
 
 - `tb_g6lc_coherence_hub.sv` scenarios 10/11 reproduce atomic R-before-B credit release

@@ -498,7 +498,10 @@ module g6lc_ooo_dispatch
   // flush_i), not a cut in the tables; the id is a struct member, which the
   // protocol word does not take yet.
   // svt-pipe: require-contract
+  // svt-pipe: protocol dsp valid=phys_valid_i
   // svt-pipe: no-cut on=tid_is_fpr_d
+  // svt-pipe: cycle dsp q=tid_is_fpr_d d=issue_valid_o hold=phys_valid_i steps=1
+  // svt-pipe: cut-ok dsp on=issue_valid_o
   always_comb begin
     tid_prd_d = tid_prd_q;
     tid_old_d = tid_old_q;

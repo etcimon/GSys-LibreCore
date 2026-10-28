@@ -47,6 +47,7 @@ module tb_g6lc_ai_gemm_stripe
     logic [ID_W-1:0]   id;
     logic [ADDR_W-1:0] addr;
     logic [7:0]        left;
+    logic [3:0]        delay_left;
   } rdq_t;
   rdq_t          rdq [0:1];
   logic [1:0]    rd_n;
@@ -73,7 +74,7 @@ module tb_g6lc_ai_gemm_stripe
   assign dram.b_id     = wr_id;
   assign dram.b_resp   = 2'b00;
   assign dram.b_user   = '0;
-  assign dram.r_valid  = rst_ni && (rd_n != 2'd0);
+  assign dram.r_valid  = rst_ni && (rd_n != 2'd0) && (rdq[rd_hd].delay_left == 0);
   assign dram.r_id     = rdq[rd_hd].id;
   assign dram.r_data   = ram[ram_idx(rdq[rd_hd].addr)];
   assign dram.r_resp   = 2'b00;
@@ -96,6 +97,11 @@ module tb_g6lc_ai_gemm_stripe
       ch_w[0] <= '0;
       ch_w[1] <= '0;
     end else begin
+      // Give the staged AR planner time to overlap two requests before
+      // requiring two distinct live IDs. A zero-latency one-beat response
+      // can legally free ID 2 before the next descriptor is prepared.
+      for (int s = 0; s < 2; s++)
+        if (rdq[s].delay_left != 0) rdq[s].delay_left <= rdq[s].delay_left - 4'd1;
       if (dram.aw_valid && dram.aw_ready) begin
         wr_busy <= 1'b1;
         wr_id   <= dram.aw_id;
@@ -116,6 +122,7 @@ module tb_g6lc_ai_gemm_stripe
         rdq[rd_tl].id   <= dram.ar_id;
         rdq[rd_tl].addr <= dram.ar_addr;
         rdq[rd_tl].left <= dram.ar_len;
+        rdq[rd_tl].delay_left <= (NCH > 1) ? 4'd12 : 4'd0;
         rd_tl <= ~rd_tl;
       end
       if (dram.r_valid && dram.r_ready) begin
@@ -254,8 +261,10 @@ module tb_g6lc_ai_gemm_stripe
       errors++;
     end
 
+    @(negedge clk);
     start = 1'b1;
     tick;
+    @(negedge clk);
     start = 1'b0;
 
     while (!done && cycles < TO) tick;

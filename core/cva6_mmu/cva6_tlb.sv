@@ -80,7 +80,9 @@ module cva6_tlb
   // Re-pipelining contract (sv-timing A128; 41.8 adjusted FO4 on the
   // Nangate45 board): TLB: tag match and replacement state.
   // svt-pipe: require-contract
+  // svt-pipe: protocol tlb valid=lu_access_i flush=flush_i
   // svt-pipe: no-cut on=tags_q
+  // svt-pipe: cycle tlb q=tags_q d=lu_hit_o hold=lu_access_i steps=1
 
   // SV39 defines three levels of page tables
   localparam bit HART_TAG = (CVA6Cfg.NrHarts > 1) && !CVA6Cfg.SmtDrainedHandoff;

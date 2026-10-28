@@ -1,0 +1,238 @@
+// OpenSTA, Static Timing Analyzer
+// Copyright (c) 2026, Parallax Software, Inc.
+// 
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+// 
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// 
+// The origin of this software must not be misrepresented; you must not
+// claim that you wrote the original software.
+// 
+// Altered source versions must be plainly marked as such, and must not be
+// misrepresented as being the original software.
+// 
+// This notice may not be removed or altered from any source distribution.
+
+%{
+
+#include "Property.hh"
+#include "Report.hh"
+#include "Sta.hh"
+
+using namespace sta;
+
+%}
+
+%inline %{
+
+PropertyValue
+library_property(const Library *lib,
+                 const char *property)
+{
+  Properties &properties = Sta::sta()->properties();
+  return properties.getProperty(lib, property);
+}
+
+PropertyValue
+liberty_library_property(const LibertyLibrary *lib,
+                         const char *property)
+{
+  Properties &properties = Sta::sta()->properties();
+  return properties.getProperty(lib, property);
+}
+
+PropertyValue
+cell_property(const Cell *cell,
+              const char *property)
+{
+  Properties &properties = Sta::sta()->properties();
+  return properties.getProperty(cell, property);
+}
+
+PropertyValue
+liberty_cell_property(const LibertyCell *cell,
+                      const char *property)
+{
+  Properties &properties = Sta::sta()->properties();
+  return properties.getProperty(cell, property);
+}
+
+PropertyValue
+port_property(const Port *port,
+              const char *property)
+{
+  Properties &properties = Sta::sta()->properties();
+  return properties.getProperty(port, property);
+}
+
+PropertyValue
+liberty_port_property(const LibertyPort *port,
+                      const char *property)
+{
+  Properties &properties = Sta::sta()->properties();
+  return properties.getProperty(port, property);
+}
+
+PropertyValue
+instance_property(const Instance *inst,
+                  const char *property)
+{
+  Properties &properties = Sta::sta()->properties();
+  return properties.getProperty(inst, property);
+}
+
+PropertyValue
+pin_property(const Pin *pin,
+             const char *property)
+{
+  Properties &properties = Sta::sta()->properties();
+  return properties.getProperty(pin, property);
+}
+
+PropertyValue
+net_property(const Net *net,
+             const char *property)
+{
+  Properties &properties = Sta::sta()->properties();
+  return properties.getProperty(net, property);
+}
+
+PropertyValue
+edge_property(Edge *edge,
+              const char *property)
+{
+  Properties &properties = Sta::sta()->properties();
+  return properties.getProperty(edge, property);
+}
+
+PropertyValue
+clock_property(Clock *clk,
+               const char *property)
+{
+  Properties &properties = Sta::sta()->properties();
+  return properties.getProperty(clk, property);
+}
+
+PropertyValue
+scene_property(Scene *scene,
+              const char *property)
+{
+  Properties &properties = Sta::sta()->properties();
+  return properties.getProperty(scene, property);
+}
+
+PropertyValue
+mode_property(Mode *mode,
+              const char *property)
+{
+  Properties &properties = Sta::sta()->properties();
+  return properties.getProperty(mode, property);
+}
+
+void
+define_property_cmd(const char *object_type,
+                    const char *property,
+                    const char *type)
+{
+  Properties &properties = Sta::sta()->properties();
+  std::string_view object_type_view(object_type);
+  if (object_type_view == "scene")
+    properties.defineProperty<Scene>(object_type, property, type);
+  else if (object_type_view == "mode")
+    properties.defineProperty<Mode>(object_type, property, type);
+  else if (object_type_view == "library")
+    properties.defineProperty<Library>(object_type, property, type);
+  else if (object_type_view == "liberty_library")
+    properties.defineProperty<LibertyLibrary>(object_type, property, type);
+  else if (object_type_view == "cell")
+    properties.defineProperty<Cell>(object_type, property, type);
+  else if (object_type_view == "liberty_cell")
+    properties.defineProperty<LibertyCell>(object_type, property, type);
+  else if (object_type_view == "port")
+    properties.defineProperty<Port>(object_type, property, type);
+  else if (object_type_view == "liberty_port")
+    properties.defineProperty<LibertyPort>(object_type, property, type);
+  else if (object_type_view == "instance")
+    properties.defineProperty<Instance>(object_type, property, type);
+  else if (object_type_view == "pin")
+    properties.defineProperty<Pin>(object_type, property, type);
+  else if (object_type_view == "net")
+    properties.defineProperty<Net>(object_type, property, type);
+  else if (object_type_view == "clock")
+    properties.defineProperty<Clock>(object_type, property, type);
+  else
+    Sta::sta()->report()->error(2209, "define_property -object_type {} not supported.",
+                                object_type);
+}
+
+void
+set_property_cmd(void *object,
+                 const char *object_type,
+                 const char *property,
+                 const char *value)
+{
+  Properties &properties = Sta::sta()->properties();
+  std::string_view object_type_view(object_type);
+  if (object_type_view == "Scene")
+    properties.setProperty(object, "scene", property, value);
+  else if (object_type_view == "Mode")
+    properties.setProperty(object, "mode", property, value);
+  else if (object_type_view == "Library")
+    properties.setProperty(object, "library", property, value);
+  else if (object_type_view == "LibertyLibrary")
+    properties.setProperty(object, "liberty_library", property, value);
+  else if (object_type_view == "Cell")
+    properties.setProperty(object, "cell", property, value);
+  else if (object_type_view == "LibertyCell")
+    properties.setProperty(object, "liberty_cell", property, value);
+  else if (object_type_view == "Port")
+    properties.setProperty(object, "port", property, value);
+  else if (object_type_view == "LibertyPort")
+    properties.setProperty(object, "liberty_port", property, value);
+  else if (object_type_view == "Instance")
+    properties.setProperty(object, "instance", property, value);
+  else if (object_type_view == "Pin")
+    properties.setProperty(object, "pin", property, value);
+  else if (object_type_view == "Net")
+    properties.setProperty(object, "net", property, value);
+  else if (object_type_view == "Clock")
+    properties.setProperty(object, "clock", property, value);
+  else
+    Sta::sta()->report()->error(2214, "set_property unsupported object type {}.",
+                                object_type);
+}
+
+PropertyValue
+path_end_property(PathEnd *end,
+                  const char *property)
+{
+  Properties &properties = Sta::sta()->properties();
+  return properties.getProperty(end, property);
+}
+
+PropertyValue
+path_property(Path *path,
+              const char *property)
+{
+  Properties &properties = Sta::sta()->properties();
+  return properties.getProperty(path, property);
+}
+
+PropertyValue
+timing_arc_property(TimingArcSet *arc_set,
+                    const char *property)
+{
+  Properties &properties = Sta::sta()->properties();
+  return properties.getProperty(arc_set, property);
+}
+
+%} // inline

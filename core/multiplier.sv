@@ -201,8 +201,12 @@ module multiplier
     // a matching boundary and consumer depth are implemented together.
     // svt-pipe: protocol mul valid=mult_valid_s1 id=trans_id_s1
     // svt-pipe: carry mul operator_s1,corr_q,clmul_s1,clmulr_s1
-    // svt-pipe: result mul valid=mult_valid_q id=trans_id_q operator_d corr_sh clmul_q clmulr_q
+    // svt-pipe: result mul valid=mult_valid_q id=trans_id_q operator_d corr_sh clmul_q clmulr_q mult_result_q
     // svt-pipe: latency mul CVA6Cfg.MultStages base=CVA6Cfg.MultStages
+    // gen_four_stage is the matching RTL boundary when MultStages > 3.
+    // base equals the parameter, so a further tool stage is refused.
+    // svt-pipe: cycle mul q=prod_sum_q d=mult_result_d hold=mult_valid_q steps=CVA6Cfg.MultStages
+    // svt-pipe: cut-ok mul on=mult_result_d
     // svt-pipe: no-cut on=prod_sum
     // Slice width of the second operand (A131): 16 bits with two stages
     // (A115), 8 bits with three — the third stage owns the sum of the
@@ -466,7 +470,12 @@ module multiplier
   // -----------------------
   // Output pipeline register
   // -----------------------
-  // svt-pipe: no-cut
+  // The output flops are the published MultStages boundary. A cut here
+  // would add a cycle mult.sv does not count.
+  // svt-pipe: no-cut on=mult_valid_q
+  // svt-pipe: no-cut on=trans_id_q
+  // svt-pipe: no-cut on=operator_q
+  // svt-pipe: no-cut on=mult_result_q
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (~rst_ni) begin
       mult_valid_q  <= '0;

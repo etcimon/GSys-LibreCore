@@ -349,6 +349,36 @@ test("validateTimingsOutDir fails missing dir", () => {
   expect(result.issues.some((i) => i.code === "dir-missing")).toBe(true);
 });
 
+test("validateTimingsOutDir accepts a manual out_rtl redesign root", () => {
+  const root = join(FIX, "out_rtl");
+  const tree = join(root, "hyp_redesign_core_8fo4", "core");
+  mkdirSync(tree, { recursive: true });
+  writeFileSync(join(tree, "alu.sv"), "module alu; endmodule\n");
+  const paths = makePaths(join(FIX, "ws"));
+  const ctx = fakeCtx(join(FIX, "repo"), paths);
+  const result = validateTimingsOutDir(ctx, {
+    fromTiming: root,
+    checkSourcePaths: false,
+  });
+  expect(result.ok).toBe(true);
+  expect(result.schemaHint).toBe("out-rtl-manual");
+  expect(result.fileCount).toBe(1);
+  expect(result.issues.some((i) => i.code === "manual-out-rtl")).toBe(true);
+  expect(result.issues.some((i) => i.level === "error")).toBe(false);
+  const child = validateTimingsOutDir(ctx, {
+    fromTiming: join(root, "hyp_redesign_core_8fo4"),
+    checkSourcePaths: false,
+  });
+  expect(child.ok).toBe(true);
+  const emit = validateTimingsOutDir(ctx, {
+    fromTiming: root,
+    requireEmit: true,
+    checkSourcePaths: false,
+  });
+  expect(emit.ok).toBe(false);
+  expect(emit.issues.some((i) => i.code === "emit-missing" || i.code === "emit-flist-missing")).toBe(true);
+});
+
 test("validateTimingsOutDir requireEmit", () => {
   const paths = makePaths(join(FIX, "ws"));
   const ctx = fakeCtx(join(FIX, "repo"), paths);

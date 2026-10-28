@@ -21,7 +21,14 @@ package g6lc_apu_objpay_pkg;
     APU_OBJPAY_OP_ALLOC = 3'd0,
     APU_OBJPAY_OP_FREE  = 3'd1,
     APU_OBJPAY_OP_WRITE = 3'd2,
-    APU_OBJPAY_OP_READ  = 3'd3
+    APU_OBJPAY_OP_READ  = 3'd3,
+    // §5a G3b-iii: burst read of `words` (1..16) consecutive words
+    // inside one 16-word-aligned line — one objmem line fill then one
+    // completion per word in address order, `req_ready` low until the
+    // last beat so the grant stays latched.  BOUNDS (one completion)
+    // for words==0, words>16, a range crossing the line, an
+    // out-of-arena or unallocated address.
+    APU_OBJPAY_OP_READN = 3'd4
   } apu_objpay_op_e;
 
   typedef enum logic [2:0] {

@@ -55,6 +55,11 @@ module branch_unit #(
   // Re-pipelining contract (sv-timing A128; 77.4 adjusted FO4 on the
   // Nangate45 board): branch resolution: pure datapath; resolved_branch_o feeds the controller the same cycle — an FLU / redirect latency decision.
   // svt-pipe: require-contract
+  // svt-pipe: protocol br valid=branch_valid_i
+  // svt-pipe: no-cut on=resolve_branch_o
+  // svt-pipe: cycle br q=target_address d=resolve_branch_o hold=branch_valid_i steps=1
+  // svt-pipe: cut-ok br on=resolve_branch_o
+  // target_address is the same-cycle split. No register: resolve stays with branch_valid_i.
 
   logic [CVA6Cfg.VLEN-1:0] target_address;
   logic [CVA6Cfg.VLEN-1:0] next_pc;

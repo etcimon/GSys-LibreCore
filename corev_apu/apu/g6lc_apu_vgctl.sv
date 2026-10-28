@@ -45,6 +45,7 @@ module g6lc_apu_vgctl
   import g6lc_apu_objtab_pkg::*;
   import g6lc_apu_vgpages_pkg::*;
   import g6lc_apu_objpay_pkg::*;
+  import g6lc_apu_cmdrec_pkg::*;
   import g6lc_apu_sh_pkg::*;
 #(
   parameter bit          Enable   = 1'b0
@@ -97,6 +98,16 @@ module g6lc_apu_vgctl
   input  logic            op_cpl_valid_i,
   output logic            op_cpl_ready_o,
   input  apu_objpay_cpl_t op_cpl_i,
+  // cmdrec port (§5a G3b-iii, third arbiter client in vgtop): a
+  // tombstoned command buffer's descriptor goes through a cmdrec
+  // RESET so both chunk chains free and any CbOpen-cached descriptor
+  // flushes/evicts before the block itself returns to ObjPay
+  output logic            cr_req_valid_o,
+  input  logic            cr_req_ready_i,
+  output apu_cmdrec_req_t cr_req_o,
+  input  logic            cr_cpl_valid_i,
+  output logic            cr_cpl_ready_o,
+  input  apu_cmdrec_cpl_t cr_cpl_i,
   output logic            sm_req_o,
   output apu_sh_sm_req_t  sm_req_pl_o,
   input  logic            sm_gnt_i,
@@ -164,6 +175,8 @@ module g6lc_apu_vgctl
     assign pg_cpl_ready_o = 1'b0;
     assign op_req_valid_o = 1'b0; assign op_req_o = '0;
     assign op_cpl_ready_o = 1'b0;
+    assign cr_req_valid_o = 1'b0; assign cr_req_o = '0;
+    assign cr_cpl_ready_o = 1'b0;
     assign sm_req_o = 1'b0;       assign sm_req_pl_o = '0;
     assign xs_valid_o = 1'b0;    assign xs_desc_o = '{default: '0};
     assign xs_ndesc_o = '0;      assign xs_off_o = '0;
@@ -176,11 +189,12 @@ module g6lc_apu_vgctl
     assign fence_ring_o = '0;
     logic unused;
     assign unused = clk_i | rst_ni | testmode_i | chain_valid_i |
-                    (|chain_n_i) | (|chain_desc_i[0]) | mem_rdata_i |
+                    (|chain_n_i) | (|chain_desc_i[0]) | (|mem_rdata_i) |
                     mem_ready_i | mem_rvalid_i | mem_err_i |
                     ot_req_ready_i | ot_cpl_valid_i | (|ot_cpl_i) |
                     pg_req_ready_i | pg_cpl_valid_i | (|pg_cpl_i) |
                     op_req_ready_i | op_cpl_valid_i | (|op_cpl_i) |
+                    cr_req_ready_i | cr_cpl_valid_i | (|cr_cpl_i) |
                     sm_gnt_i | sm_cpl_i | (|sm_cpl_pl_i) |
                     xs_ready_i | xs_done_i | xs_fault_i |
                     drain_idle_i |
@@ -201,6 +215,7 @@ module g6lc_apu_vgctl
       StMapMv, StMapMvF, StMapDevAux, StMapDevAuxC, StMapMvFail,
       StMvRd, StMvRdC, StMvWr, StMvWrC,
       StReapDec, StReapOpReq, StReapOpCpl, StReapSmReq, StReapSmCpl,
+      StReapCrReq, StReapCrCpl, StReapDsFl,
       StWrPrep, StWrFind, StWrFire, StWrCap, StDone, StFence
     } state_e;
     state_e state_q;
@@ -276,6 +291,13 @@ module g6lc_apu_vgctl
     // module-descriptor/state block at aux[31:16] (aux[6] = graphics)
     logic [15:0]  reap_gen_q, reap_slot_q;
     logic         reap_inval_q, reap_ppipe_q;
+    // §5a G3b-iii: op_req_o payload select — 0 = the aux/ppipe extent
+    // forms above, 1 = the raw command-buffer descriptor block at
+    // reap_cbd_q (aux[63:32] parks a word address, not {chunk,words}),
+    // 2 = the descriptor-pool free-list block in size[63:32] =
+    // {chunk[15:0], words[15:0]}
+    logic [1:0]   reap_opsel_q;
+    logic [31:0]  reap_cbd_q;
 
     // bytes remaining in current read desc
     logic [31:0] rd_rem;
@@ -464,13 +486,28 @@ module g6lc_apu_vgctl
     // pipeline parks its block in aux[31:16] instead (state block +
     // module descriptors) — aux[6] (graphics) picks the word count
     assign op_req_o = '{op: APU_OBJPAY_OP_FREE,
-                       addr: reap_ppipe_q
-                             ? ({16'h0, reap_aux_q[31:16]} << 6)
-                             : ({16'h0, reap_aux_q[63:48]} << 6),
-                       words: reap_ppipe_q
-                              ? (reap_aux_q[6] ? 32'd48 : 32'd2)
-                              : {16'h0, reap_aux_q[47:32]},
+                       addr: reap_opsel_q == 2'd1
+                             ? reap_cbd_q
+                             : reap_opsel_q == 2'd2
+                               ? ({16'h0, reap_size_q[63:48]} << 6)
+                               : reap_ppipe_q
+                                 ? ({16'h0, reap_aux_q[31:16]} << 6)
+                                 : ({16'h0, reap_aux_q[63:48]} << 6),
+                       words: reap_opsel_q == 2'd1
+                              ? 32'(APU_CBD_WORDS)
+                              : reap_opsel_q == 2'd2
+                                ? {16'h0, reap_size_q[47:32]}
+                                : reap_ppipe_q
+                                  ? (reap_aux_q[6] ? 32'd48 : 32'd2)
+                                  : {16'h0, reap_aux_q[47:32]},
                        default: '0};
+    // §5a G3b-iii: cmdrec RESET on the tombstoned buffer's descriptor —
+    // walks and frees both 1024-word chunk chains and evicts any
+    // CbOpen-cached descriptor copy before the block free
+    assign cr_req_valid_o = state_q == StReapCrReq;
+    assign cr_cpl_ready_o = state_q == StReapCrCpl;
+    assign cr_req_o = '{op: APU_CMDREC_OP_RESET,
+                       cbd: reap_cbd_q, default: '0};
     assign sm_req_o    = state_q == StReapSmReq;
     // G3b-ii: a swept module's residency line is invalidated by its
     // {gen,slot} handle — the entry is already tombstoned, so no
@@ -508,6 +545,7 @@ module g6lc_apu_vgctl
         reap_kind_q <= '0; reap_aux_q <= '0; reap_size_q <= '0;
         reap_gen_q <= '0; reap_slot_q <= '0;
         reap_inval_q <= 1'b0; reap_ppipe_q <= 1'b0;
+        reap_opsel_q <= '0;  reap_cbd_q <= '0;
         ctx_kill_valid_o <= 1'b0; ctx_kill_id_o <= '0;
         for (int i = 0; i < REQW; i++) req_ram[i] <= '0;
         for (int i = 0; i < RESPW; i++) resp_ram[i] <= '0;
@@ -973,6 +1011,7 @@ module g6lc_apu_vgctl
           // — an in-flight buffer tombstone leaks only its arena slot,
           // documented §12.3).
           StReapDec: begin
+            reap_opsel_q <= 2'd0;
             unique case (reap_kind_q)
               6'(APU_VN_KIND_VK_DEVICE_MEMORY): begin
                 // aperture extent at aux[63:32] (private base, or the
@@ -984,12 +1023,29 @@ module g6lc_apu_vgctl
                 state_q    <= StPgReq;
               end
               6'(APU_VN_KIND_VK_DESCRIPTOR_POOL): begin
-                // F5: descriptor record store at aux[31:0]
+                // F5: descriptor record store at aux[31:0]; §5a
+                // G3b-iii: a FREE_DESCRIPTOR_SET pool also owns the
+                // ObjPay free-list block in size[63:32], freed after
+                // the page store returns
                 pg_op_q    <= APU_VGPAGES_OP_FREE;
                 pg_base_q  <= reap_aux_q[31:0];
                 pg_bytes_q <= reap_size_q[31:0];
-                pg_ret_q   <= StOtCpl;
+                pg_ret_q   <= StReapDsFl;
                 state_q    <= StPgReq;
+              end
+              6'(APU_VN_KIND_VK_COMMAND_BUFFER): begin
+                // §5a G3b-iii: cmdrec RESET frees the buffer's record
+                // and payload chunk chains through cmdrec (CbOpen
+                // cache flush included); the 64-word descriptor block
+                // follows on the op port.  Every context-owned buffer
+                // tombstones its own descriptor, so the pool chain
+                // needs no walk here.  aux[63:32]==0 = descriptor
+                // alloc failed at vkAllocateCommandBuffers — nothing
+                // to reclaim
+                reap_cbd_q   <= reap_aux_q[63:32];
+                reap_opsel_q <= 2'd1;
+                state_q      <= reap_aux_q[63:32] != 32'h0
+                                ? StReapCrReq : StOtCpl;
               end
               6'(APU_VN_KIND_VK_DESCRIPTOR_SET_LAYOUT),
               6'(APU_VN_KIND_VK_PIPELINE_LAYOUT): begin
@@ -1026,6 +1082,22 @@ module g6lc_apu_vgctl
           end
           StReapSmReq: if (sm_gnt_i)       state_q <= StReapSmCpl;
           StReapSmCpl: if (sm_cpl_i)       state_q <= StOtCpl;
+          // §5a G3b-iii: command-buffer reap — cmdrec RESET walks and
+          // frees both chunk chains (CbOpen flush included), then the
+          // descriptor block goes back through the op port
+          StReapCrReq: if (cr_req_ready_i) state_q <= StReapCrCpl;
+          StReapCrCpl: if (cr_cpl_valid_i) state_q <= StReapOpReq;
+          // descriptor-pool reap tail: the record store is freed;
+          // a FREE_DESCRIPTOR_SET pool also returns its ObjPay
+          // free-list block (size[63:32] = {chunk,words})
+          StReapDsFl: begin
+            if (reap_size_q[63:32] != 32'h0) begin
+              reap_opsel_q <= 2'd2;
+              state_q      <= StReapOpReq;
+            end else begin
+              state_q <= StOtCpl;
+            end
+          end
 
           // ---- UNMAP_BLOB: memory returns to unbacked ---------------
           // §12.3 C: the guest extent is freed; a type-1 memory has no
@@ -1357,7 +1429,7 @@ module g6lc_apu_vgctl
     // SUBMIT_3D handoff fields
     logic unused;
     assign unused = testmode_i | ot_req_ready_i | (|ot_cpl_i) |
-                    (|op_cpl_i) | (|sm_cpl_pl_i);
+                    (|op_cpl_i) | (|cr_cpl_i) | (|sm_cpl_pl_i);
     assign xs_ndesc_o = ndesc_q;
     assign xs_off_o = 32'd32;
     assign xs_bytes_o = req_ram[6];
@@ -1375,6 +1447,7 @@ module g6lc_apu_vgctl_fixture
   import g6lc_apu_objtab_pkg::*;
   import g6lc_apu_vgpages_pkg::*;
   import g6lc_apu_objpay_pkg::*;
+  import g6lc_apu_cmdrec_pkg::*;
   import g6lc_apu_sh_pkg::*;
 #(
   parameter bit          Enable   = 1'b0
@@ -1415,6 +1488,12 @@ module g6lc_apu_vgctl_fixture
   input  logic            op_cpl_valid_i,
   output logic            op_cpl_ready_o,
   input  apu_objpay_cpl_t op_cpl_i,
+  output logic            cr_req_valid_o,
+  input  logic            cr_req_ready_i,
+  output apu_cmdrec_req_t cr_req_o,
+  input  logic            cr_cpl_valid_i,
+  output logic            cr_cpl_ready_o,
+  input  apu_cmdrec_cpl_t cr_cpl_i,
   output logic            sm_req_o,
   output apu_sh_sm_req_t  sm_req_pl_o,
   input  logic            sm_gnt_i,

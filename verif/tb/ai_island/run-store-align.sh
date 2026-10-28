@@ -4,6 +4,9 @@
 # Completion store: aligned 8-byte word, top lane of a 512-bit beat, refuse +4.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+AI_RTL="${G6LC_AI_RTL_DIR:-$ROOT/corev_apu/ai_island}"
+AI_INC="${G6LC_AI_INC_DIR:-$ROOT/corev_apu/include}"
+AI_SRC="${G6LC_AI_SRC_DIR:-$ROOT/corev_apu/src}"
 cd "$ROOT"
 if ! command -v verilator >/dev/null 2>&1; then
   echo "SKIP no verilator"
@@ -17,8 +20,8 @@ verilator --binary --timing -Wno-fatal -Wno-TIMESCALEMOD -Wno-UNUSED \
   -I"$AXI/include" \
   -I"$ROOT/corev_apu/include" \
   "$AXI/src/axi_pkg.sv" \
-  "$ROOT/corev_apu/include/g6lc_ai_island_cfg_pkg.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_mem_store.sv" \
+  "$AI_INC/g6lc_ai_island_cfg_pkg.sv" \
+  "$AI_RTL/g6lc_ai_mem_store.sv" \
   "$ROOT/verif/tb/ai_island/tb_g6lc_ai_store_align.sv" \
   --top-module tb_g6lc_ai_store_align \
   -Mdir "$OUT" -o tb_g6lc_ai_store_align

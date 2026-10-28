@@ -72,7 +72,7 @@ module g6lc_apu_vgtop
   // [VgGuestPages, VgPages) is the device-private arena
   parameter int unsigned VgGuestPages = APU_VG_GUEST_PAGES,
   parameter int unsigned ShaderRegs    = 256,
-  parameter int unsigned MaxWaves      = 8,
+  parameter int unsigned MaxWaves      = 16,
   parameter int unsigned ShaderIds     = 1024,
   parameter int unsigned ShaderSlots   = 8,
   parameter int unsigned ShaderWords   = 2048,
@@ -102,15 +102,17 @@ module g6lc_apu_vgtop
   // shared memory ports (§6c apu_mp handshake): [0]=CTL (vgctl,
   // guest), [1]=PUMP (vnpump, aperture+guest), [2]=SH (shader LSU,
   // aperture), [3]=RAST (raster gather/record/ROP, aperture),
-  // [4]=OBJ (objmem: ObjTab/ObjPay backing, aperture) — mapped onto
-  // APU_MP_{CTL,PUMP,SH,RAST,OBJ} by vgsys.
+  // [4]=OBJ (objmem: ObjTab/ObjPay backing, aperture),
+  // [5]=EXEC (cmdexec indirect-operand fetches, aperture — §5a
+  // G3b-iii) — mapped onto APU_MP_{CTL,PUMP,SH,RAST,OBJ,EXEC} by
+  // vgsys.
   // Requests hold until mp_req_ready_i; one mp_rsp_valid_i
   // returns per accepted request, writes included.
-  output logic [4:0]         mp_req_valid_o,
-  input  logic [4:0]         mp_req_ready_i,
-  output apu_mp_req_t [4:0]  mp_req_o,
-  input  logic [4:0]         mp_rsp_valid_i,
-  input  apu_mp_rsp_t [4:0]  mp_rsp_i,
+  output logic [5:0]         mp_req_valid_o,
+  input  logic [5:0]         mp_req_ready_i,
+  output apu_mp_req_t [5:0]  mp_req_o,
+  input  logic [5:0]         mp_rsp_valid_i,
+  input  apu_mp_rsp_t [5:0]  mp_rsp_i,
   // command-executor work port (TB work sink; dispatch-class records
   // are consumed internally by the ShaderCore, §7b/5a-ii; Xfer-class
   // records — CopyBuffer/FillBuffer/UpdateBuffer — go to the xfer
@@ -175,7 +177,7 @@ module g6lc_apu_vgtop
                     (|chain_id_i) | (|chain_n_i) | cpl_ready_i |
                     (|mp_req_ready_i) | (|mp_rsp_valid_i) |
                     (|mp_rsp_i[0]) | (|mp_rsp_i[1]) | (|mp_rsp_i[2]) |
-                    (|mp_rsp_i[3]) | (|mp_rsp_i[4]) |
+                    (|mp_rsp_i[3]) | (|mp_rsp_i[4]) | (|mp_rsp_i[5]) |
                     work_ready_i | work_done_i | (|work_done_pl_i) |
                     (|xf_axi_rsp_i) | (|ap_base_i) | xf_flush_i |
                     dbg_ot_valid_i | dbg_ot_cpl_ready_i | (|dbg_ot_req_i) |
@@ -204,8 +206,10 @@ module g6lc_apu_vgtop
     logic            pg_req_ready, pg_cpl_ready;
     apu_vgpages_req_t pg_req;
     apu_vgpages_cpl_t pg_cpl;
-    typedef enum logic [1:0] { OPG_PUMP, OPG_EXEC, OPG_CTL,
-                               OPG_SH } opg_e;
+    // §5a G3b-iii: cmdrec's PayMem chunk work and the xfer engine's
+    // payload reads join the ObjPay arbitration
+    typedef enum logic [2:0] { OPG_PUMP, OPG_EXEC, OPG_REC, OPG_XFER,
+                               OPG_CTL, OPG_SH } opg_e;
     // raster is the third, lowest-priority vgpages requester
     typedef enum logic [1:0] { PGG_PUMP, PGG_CTL, PGG_RAST } pgg_e;
     opg_e opg_q;
@@ -231,6 +235,11 @@ module g6lc_apu_vgtop
     // ShaderCore slot unrefs for entries the ctx sweep tombstones
     logic         vc_op_v, vc_op_rdy, vc_op_cpl_rdy;
     apu_objpay_req_t vc_op_req;
+    // §5a G3b-iii: RESET_CTX command-buffer reap rides cmdrec (third
+    // client, lowest priority) — a tombstoned buffer's RESET walks
+    // and frees both chunk chains before its descriptor frees
+    logic         vc_cr_v, vc_cr_rdy, vc_cr_cpl_rdy;
+    apu_cmdrec_req_t vc_cr_req;
     logic         vc_sm_req, vc_sm_gnt;
     apu_sh_sm_req_t vc_sm_req_pl;
     // §7b/5a-ii: the shared ShaderCore SM completion back to whichever
@@ -272,6 +281,10 @@ module g6lc_apu_vgtop
       .op_req_o(vc_op_req),
       .op_cpl_valid_i(op_cpl_valid && opg_q == OPG_CTL),
       .op_cpl_ready_o(vc_op_cpl_rdy), .op_cpl_i(op_cpl),
+      .cr_req_valid_o(vc_cr_v), .cr_req_ready_i(vc_cr_rdy),
+      .cr_req_o(vc_cr_req),
+      .cr_cpl_valid_i(cr_cpl_valid),
+      .cr_cpl_ready_o(vc_cr_cpl_rdy), .cr_cpl_i(cr_cpl),
       .sm_req_o(vc_sm_req), .sm_req_pl_o(vc_sm_req_pl),
       .sm_gnt_i(vc_sm_gnt),
       .sm_cpl_i(vp_sm_cpl), .sm_cpl_pl_i(vp_sm_cpl_pl),
@@ -375,6 +388,8 @@ module g6lc_apu_vgtop
     wire         work_is_disp = work_o.ctype ==
                        32'(APU_VN_TYPE_VK_CMD_DISPATCH_EXT) ||
                        work_o.ctype ==
+                       32'(APU_VN_TYPE_VK_CMD_DISPATCH_BASE_EXT) ||
+                       work_o.ctype ==
                        32'(APU_VN_TYPE_VK_CMD_DISPATCH_INDIRECT_EXT);
     // §12.3 C/5a+5b: Xfer-class records go to the internal DMA engine
     wire         work_is_xfer = work_o.ctype ==
@@ -392,12 +407,18 @@ module g6lc_apu_vgtop
                        work_o.ctype ==
                        32'(APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT);
     // draw-class records route to the raster engine: vkCmdDraw,
-    // vkCmdDrawIndexed, and in-render-pass vkCmdClearAttachments
-    // (CLEAR_COLOR_IMAGE stays on the Xfer DMA path)
+    // vkCmdDrawIndexed, the §5a indirect draws (the executor has
+    // already fetched their operands into rd_i), and in-render-pass
+    // vkCmdClearAttachments (CLEAR_COLOR_IMAGE stays on the Xfer DMA
+    // path)
     wire         work_is_draw = work_o.ctype ==
                        32'(APU_VN_TYPE_VK_CMD_DRAW_EXT) ||
                        work_o.ctype ==
                        32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_EXT) ||
+                       work_o.ctype ==
+                       32'(APU_VN_TYPE_VK_CMD_DRAW_INDIRECT_EXT) ||
+                       work_o.ctype ==
+                       32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_INDIRECT_EXT) ||
                        work_o.ctype ==
                        32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT);
     logic        xf_done, xf_work_rdy;
@@ -413,6 +434,10 @@ module g6lc_apu_vgtop
     // module handles while assembling draws/dispatches)
     logic               ex_sm_req, ex_sm_gnt;
     apu_sh_sm_req_t     ex_sm_req_pl;
+    // §5a G3b-iii: cmdexec aperture port — indirect-command operand
+    // fetches (mp index 5 = APU_MP_EXEC)
+    logic               ex_mp_v;
+    apu_mp_req_t        ex_mp_req;
     // G3b-ii: shcore's ObjPay client (module pCode fills)
     logic               sc_op_v, sc_op_rdy;
     apu_objpay_req_t    sc_op_req;
@@ -443,6 +468,11 @@ module g6lc_apu_vgtop
       .sm_req_o(ex_sm_req), .sm_req_pl_o(ex_sm_req_pl),
       .sm_gnt_i(ex_sm_gnt),
       .sm_cpl_i(vp_sm_cpl), .sm_cpl_pl_i(vp_sm_cpl_pl),
+      // §5a G3b-iii: indirect-command operand fetches ride the
+      // dedicated APU_MP_EXEC aperture port
+      .mp_req_valid_o(ex_mp_v), .mp_req_ready_i(mp_req_ready_i[5]),
+      .mp_req_o(ex_mp_req),
+      .mp_rsp_valid_i(mp_rsp_valid_i[5]), .mp_rsp_i(mp_rsp_i[5]),
       .work_valid_o(ex_work_v), .work_ready_i(ex_work_rdy),
       .work_o(work_o), .xf_o(ex_xfer), .rd_o(rs_rd),
       .work_done_i(ex_done_v),
@@ -461,15 +491,23 @@ module g6lc_apu_vgtop
       .busy_o(ex_busy));
 
     // ---- cmdrec -----------------------------------------------------------------
-    g6lc_apu_cmdrec #(.Enable(1'b1),
-                      .PayWordsPerBuf(CrPayWords)) i_rec (
+    // §5a G3b-iii: PayMem-resident command buffers — descriptor blocks
+    // + record/payload chunk chains behind a 4-entry write-back cache;
+    // an ObjPay client port carries every access
+    logic            rec_op_v, rec_op_rdy, rec_op_cpl_rdy;
+    apu_objpay_req_t rec_op_req;
+    g6lc_apu_cmdrec #(.Enable(1'b1), .CbOpen(4)) i_rec (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
       .req_valid_i(cr_req_valid), .req_ready_o(cr_req_ready),
       .req_i(cr_req),
       .cpl_valid_o(cr_cpl_valid), .cpl_ready_i(cr_cpl_ready),
       .cpl_o(cr_cpl),
       .pay_valid_i(vp_pay_v), .pay_data_i(vp_pay_d),
-      .pay_ready_o(vp_pay_rdy));
+      .pay_ready_o(vp_pay_rdy),
+      .op_req_valid_o(rec_op_v), .op_req_ready_i(rec_op_rdy),
+      .op_req_o(rec_op_req),
+      .op_cpl_valid_i(op_cpl_valid && opg_q == OPG_REC),
+      .op_cpl_ready_o(rec_op_cpl_rdy), .op_cpl_i(op_cpl));
 
     // ---- objmem: ObjTab/ObjPay private DRAM backing -----------------------
     // §5a G3b-i: entries, directory and free stack in the carve at
@@ -538,19 +576,31 @@ module g6lc_apu_vgtop
       .omp_rsp_valid_i(omp_rsp_v), .omp_rsp_i(omp_rsp));
 
     // §6c: vgctl's RESET_CTX reap frees join as a third requester;
-    // G3b-ii: shcore's FILL engine is the fourth (its module streams
-    // lose to every interactive client)
-    assign op_req_valid = vp_op_v | ex_op_v | vc_op_v | sc_op_v;
-    assign op_req = vp_op_v ? vp_op_req :
-                    ex_op_v ? ex_op_req :
-                    vc_op_v ? vc_op_req : sc_op_req;
-    assign vp_op_rdy = vp_op_v & op_req_ready;
-    assign ex_op_rdy = !vp_op_v & ex_op_v & op_req_ready;
-    assign vc_op_rdy = !vp_op_v & !ex_op_v & vc_op_v & op_req_ready;
-    assign sc_op_rdy = !vp_op_v & !ex_op_v & !vc_op_v & sc_op_v &
-                       op_req_ready;
+    // G3b-ii: shcore's FILL engine is a fourth (its module streams
+    // lose to every interactive client); G3b-iii: cmdrec's PayMem
+    // descriptor/chunk work and the xfer engine's payload reads are
+    // clients five and six (xfer ranks below recording — its reads
+    // replay already-sealed buffers)
+    assign op_req_valid = vp_op_v | ex_op_v | rec_op_v | vc_op_v |
+                          sc_op_v | xf_op_v;
+    assign op_req = vp_op_v  ? vp_op_req  :
+                    ex_op_v  ? ex_op_req  :
+                    rec_op_v ? rec_op_req :
+                    xf_op_v  ? xf_op_req  :
+                    vc_op_v  ? vc_op_req  : sc_op_req;
+    assign vp_op_rdy  = vp_op_v & op_req_ready;
+    assign ex_op_rdy  = !vp_op_v & ex_op_v & op_req_ready;
+    assign rec_op_rdy = !vp_op_v & !ex_op_v & rec_op_v & op_req_ready;
+    assign xf_op_rdy  = !vp_op_v & !ex_op_v & !rec_op_v & xf_op_v &
+                        op_req_ready;
+    assign vc_op_rdy  = !vp_op_v & !ex_op_v & !rec_op_v & !xf_op_v &
+                        vc_op_v & op_req_ready;
+    assign sc_op_rdy  = !vp_op_v & !ex_op_v & !rec_op_v & !xf_op_v &
+                        !vc_op_v & sc_op_v & op_req_ready;
     assign op_cpl_ready = (opg_q == OPG_PUMP) ? vp_op_cpl_rdy :
                           (opg_q == OPG_EXEC) ? ex_op_cpl_rdy :
+                          (opg_q == OPG_REC)  ? rec_op_cpl_rdy :
+                          (opg_q == OPG_XFER) ? xf_op_cpl_rdy :
                           (opg_q == OPG_CTL)  ? vc_op_cpl_rdy
                                               : 1'b1;
 
@@ -761,18 +811,18 @@ module g6lc_apu_vgtop
     // replayed from the cmdrec payload arena (a third, lowest-priority
     // requester).  The checked-DMA pair inside presents one AXI master —
     // vgsys joins it with apmem's through g6lc_apu_tdma.
-    logic xf_cr_v, xf_cr_rdy, xf_cr_cpl_rdy;
-    apu_cmdrec_req_t xf_cr_req;
+    logic xf_op_v, xf_op_rdy, xf_op_cpl_rdy;
+    apu_objpay_req_t xf_op_req;
     g6lc_apu_xfer #(.Enable(1'b1), .ApuCfg(ApuCfg)) i_xf (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
       .work_valid_i(ex_work_v && work_is_xfer),
       .work_ready_o(xf_work_rdy),
       .work_i(work_o), .xf_i(ex_xfer),
       .done_o(xf_done), .done_pl_o(xf_done_pl),
-      .cr_req_valid_o(xf_cr_v), .cr_req_ready_i(xf_cr_rdy),
-      .cr_req_o(xf_cr_req),
-      .cr_cpl_valid_i(cr_cpl_valid),
-      .cr_cpl_ready_o(xf_cr_cpl_rdy), .cr_cpl_i(cr_cpl),
+      .op_req_valid_o(xf_op_v), .op_req_ready_i(xf_op_rdy),
+      .op_req_o(xf_op_req),
+      .op_cpl_valid_i(op_cpl_valid && opg_q == OPG_XFER),
+      .op_cpl_ready_o(xf_op_cpl_rdy), .op_cpl_i(op_cpl),
       .ap_base_i(ap_base_i), .flush_i(xf_flush_i),
       .busy_o(xfer_busy_o),
       .axi_req_o(xf_axi_req_o), .axi_rsp_i(xf_axi_rsp_i));
@@ -864,20 +914,20 @@ module g6lc_apu_vgtop
     assign dbg_ot_cpl_valid_o = ot_cpl_valid && og_q == OG_DBG;
     assign dbg_ot_cpl_o = ot_cpl;
 
-    // ---- CmdRec arbitration: pump (front) > cmdexec > xfer ----------------
-    // §12.3 C/5a: the Xfer engine is the lowest-priority PAYREAD
-    // requester (replay of region/operand words and UpdateBuffer data)
-    typedef enum logic [1:0] { CG_PUMP, CG_EXEC, CG_XFER } cg_e;
+    // ---- CmdRec arbitration: pump (front) > cmdexec -----------------
+    // G3b-iii: PAYREAD is retired — the xfer engine reads payloads
+    // straight through ObjPay
+    typedef enum logic [1:0] { CG_PUMP, CG_EXEC, CG_CTL } cg_e;
     cg_e cg_q;
-    assign cr_req_valid = vp_cr_v | ex_cr_v | xf_cr_v;
+    assign cr_req_valid = vp_cr_v | ex_cr_v | vc_cr_v;
     assign cr_req = vp_cr_v ? vp_cr_req :
-                    ex_cr_v ? ex_cr_req : xf_cr_req;
+                    ex_cr_v ? ex_cr_req : vc_cr_req;
     assign vp_cr_rdy = vp_cr_v & cr_req_ready;
     assign ex_cr_rdy = !vp_cr_v & ex_cr_v & cr_req_ready;
-    assign xf_cr_rdy = !vp_cr_v & !ex_cr_v & xf_cr_v & cr_req_ready;
+    assign vc_cr_rdy = !vp_cr_v & !ex_cr_v & vc_cr_v & cr_req_ready;
     assign cr_cpl_ready = (cg_q == CG_PUMP) ? vp_cr_cpl_rdy :
                           (cg_q == CG_EXEC) ? ex_cr_cpl_rdy :
-                                              xf_cr_cpl_rdy;
+                                              vc_cr_cpl_rdy;
 
     // ---- shared memory ports (apu_mp) ----------------------------------------
     // [0] CTL: vgctl request/response words, guest absolute (dom=0);
@@ -888,7 +938,12 @@ module g6lc_apu_vgtop
     // [3] RAST: raster engine, aperture-relative (dom=1), the engine
     //     already drives a full apu_mp_req_t
     // [4] OBJ is driven by i_objmem above
-    assign mp_req_valid_o[3:0] = {rs_mp_v, sh_mem_req | sh_mem_we,
+    // [5] EXEC: cmdexec indirect-command operand fetches (G3b-iii);
+    // [4] OBJ is driven by i_objmem above
+    assign mp_req_valid_o[5]   = ex_mp_v;
+    assign mp_req_o[5]         = ex_mp_req;
+    assign mp_req_valid_o[3:0] = {rs_mp_v,
+                                  sh_mem_req | sh_mem_we,
                                   vp_mp_req, vc_mem_req};
     assign mp_req_o[0] = '{dom: vc_mem_dom, we: vc_mem_we,
                           addr: vc_mem_addr, wdata: vc_mem_wdata,
@@ -920,12 +975,14 @@ module g6lc_apu_vgtop
         if (ot_cpl_valid && ot_cpl_ready &&
             ot_cpl.status != APU_OBJTAB_SWEEP) og_q <= OG_NONE;
         if (cr_req_valid && cr_req_ready)
-          cg_q <= vp_cr_v ? CG_PUMP :
-                  ex_cr_v ? CG_EXEC : CG_XFER;
-        // §7b/5a-ii: ObjPay/vgpages grant owners, same latch scheme
+          cg_q <= vp_cr_v ? CG_PUMP : ex_cr_v ? CG_EXEC : CG_CTL;
+        // §7b/5a-ii: ObjPay/vgpages grant owners, same latch scheme;
+        // the latch holds across a READN burst (the owner field only
+        // moves when a new request is accepted)
         if (op_req_valid && op_req_ready)
-          opg_q <= vp_op_v ? OPG_PUMP : ex_op_v ? OPG_EXEC :
-                   vc_op_v ? OPG_CTL : OPG_SH;
+          opg_q <= vp_op_v  ? OPG_PUMP : ex_op_v ? OPG_EXEC :
+                   rec_op_v ? OPG_REC  : xf_op_v ? OPG_XFER :
+                   vc_op_v  ? OPG_CTL  : OPG_SH;
         if (pg_req_valid && pg_req_ready)
           pgg_q <= vp_pg_v ? PGG_PUMP : vc_pg_v ? PGG_CTL : PGG_RAST;
         // raster wave in flight on the shcore work port
@@ -996,7 +1053,7 @@ module g6lc_apu_vgtop_fixture
   parameter int unsigned VgPageBytes  = APU_VG_PAGE_BYTES,
   parameter int unsigned VgGuestPages = APU_VG_GUEST_PAGES,
   parameter int unsigned ShaderRegs    = 256,
-  parameter int unsigned MaxWaves      = 8,
+  parameter int unsigned MaxWaves      = 16,
   parameter int unsigned ShaderIds     = 1024,
   parameter int unsigned ShaderSlots   = 8,
   parameter int unsigned ShaderWords   = 2048,
@@ -1019,11 +1076,11 @@ module g6lc_apu_vgtop_fixture
   input  logic            cpl_ready_i,
   output logic [31:0]     cpl_len_o,
   output logic            mem_fault_o,
-  output logic [4:0]         mp_req_valid_o,
-  input  logic [4:0]         mp_req_ready_i,
-  output apu_mp_req_t [4:0]  mp_req_o,
-  input  logic [4:0]         mp_rsp_valid_i,
-  input  apu_mp_rsp_t [4:0]  mp_rsp_i,
+  output logic [5:0]         mp_req_valid_o,
+  input  logic [5:0]         mp_req_ready_i,
+  output apu_mp_req_t [5:0]  mp_req_o,
+  input  logic [5:0]         mp_rsp_valid_i,
+  input  apu_mp_rsp_t [5:0]  mp_rsp_i,
   output logic               work_valid_o,
   input  logic               work_ready_i,
   output apu_cmdexec_work_t  work_o,

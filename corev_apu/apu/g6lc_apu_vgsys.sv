@@ -62,7 +62,7 @@ module g6lc_apu_vgsys
   parameter int unsigned VgPageBytes  = APU_VG_PAGE_BYTES,
   parameter int unsigned VgGuestPages = APU_VG_GUEST_PAGES,
   parameter int unsigned ShaderRegs    = 256,
-  parameter int unsigned MaxWaves      = 8,
+  parameter int unsigned MaxWaves      = 16,
   parameter int unsigned ShaderIds     = 1024,
   parameter int unsigned ShaderSlots   = 8,
   parameter int unsigned ShaderWords   = 2048,
@@ -288,28 +288,37 @@ module g6lc_apu_vgsys
     end
 
     // ---- engine composition ------------------------------------------
-    // vgtop mp[0..4] map onto apmem requesters {CTL=2, PUMP=4, SH=5,
-    // RAST=6, OBJ=3}: [0..3] are the engines (packed slice
-    // RAST:PUMP), [4] is the objmem requester.
-    logic [4:0]        vgt_mp_req_v, vgt_mp_req_rdy, vgt_mp_rsp_v;
-    apu_mp_req_t [4:0] vgt_mp_req;
-    apu_mp_rsp_t [4:0] vgt_mp_rsp;
-    assign {mp_req_valid[APU_MP_OBJ],
+    // vgtop mp[0..5] map onto apmem requesters {CTL=2, PUMP=4, SH=5,
+    // RAST=6, OBJ=3, EXEC=7}: [0..3] are the engines (packed slice
+    // RAST:PUMP), [4] is the objmem requester, [5] is cmdexec's
+    // indirect-operand port (§5a G3b-iii).
+    logic [5:0]        vgt_mp_req_v, vgt_mp_req_rdy, vgt_mp_rsp_v;
+    apu_mp_req_t [5:0] vgt_mp_req;
+    apu_mp_rsp_t [5:0] vgt_mp_rsp;
+    assign {mp_req_valid[APU_MP_EXEC],
+            mp_req_valid[APU_MP_OBJ],
             mp_req_valid[APU_MP_RAST:APU_MP_PUMP],
             mp_req_valid[APU_MP_CTL]} = vgt_mp_req_v;
-    assign {vgt_mp_req_rdy[4],
+    assign {vgt_mp_req_rdy[5],
+            vgt_mp_req_rdy[4],
             vgt_mp_req_rdy[3:1],
-            vgt_mp_req_rdy[0]} = {mp_req_ready[APU_MP_OBJ],
+            vgt_mp_req_rdy[0]} = {mp_req_ready[APU_MP_EXEC],
+                                  mp_req_ready[APU_MP_OBJ],
                                   mp_req_ready[APU_MP_RAST:APU_MP_PUMP],
                                   mp_req_ready[APU_MP_CTL]};
-    assign {mp_req[APU_MP_OBJ], mp_req[APU_MP_RAST:APU_MP_PUMP],
+    assign {mp_req[APU_MP_EXEC],
+            mp_req[APU_MP_OBJ], mp_req[APU_MP_RAST:APU_MP_PUMP],
             mp_req[APU_MP_CTL]} = vgt_mp_req;
-    assign {vgt_mp_rsp_v[4], vgt_mp_rsp_v[3:1], vgt_mp_rsp_v[0]} =
-        {mp_rsp_valid[APU_MP_OBJ],
+    assign {vgt_mp_rsp_v[5],
+            vgt_mp_rsp_v[4], vgt_mp_rsp_v[3:1], vgt_mp_rsp_v[0]} =
+        {mp_rsp_valid[APU_MP_EXEC],
+         mp_rsp_valid[APU_MP_OBJ],
          mp_rsp_valid[APU_MP_RAST:APU_MP_PUMP],
          mp_rsp_valid[APU_MP_CTL]};
-    assign {vgt_mp_rsp[4], vgt_mp_rsp[3:1], vgt_mp_rsp[0]} =
-        {mp_rsp[APU_MP_OBJ], mp_rsp[APU_MP_RAST:APU_MP_PUMP],
+    assign {vgt_mp_rsp[5],
+            vgt_mp_rsp[4], vgt_mp_rsp[3:1], vgt_mp_rsp[0]} =
+        {mp_rsp[APU_MP_EXEC],
+         mp_rsp[APU_MP_OBJ], mp_rsp[APU_MP_RAST:APU_MP_PUMP],
          mp_rsp[APU_MP_CTL]};
     g6lc_apu_vgtop #(
       .Enable(1'b1), .Rings(Rings), .Fences(Fences),
@@ -438,7 +447,7 @@ module g6lc_apu_vgsys_fixture
   parameter int unsigned VgPageBytes  = APU_VG_PAGE_BYTES,
   parameter int unsigned VgGuestPages = APU_VG_GUEST_PAGES,
   parameter int unsigned ShaderRegs    = 256,
-  parameter int unsigned MaxWaves      = 8,
+  parameter int unsigned MaxWaves      = 16,
   parameter int unsigned ShaderIds     = 1024,
   parameter int unsigned ShaderSlots   = 8,
   parameter int unsigned ShaderWords   = 2048,

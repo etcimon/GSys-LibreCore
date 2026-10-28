@@ -1,0 +1,12 @@
+dEQP-VK.api.descriptor_pool.out_of_pool_memory
+dEQP-VK.api.descriptor_pool.repeated_free_reset_long
+dEQP-VK.api.descriptor_pool.repeated_free_reset_short
+dEQP-VK.api.descriptor_pool.repeated_reset_long
+dEQP-VK.api.descriptor_pool.repeated_reset_short
+dEQP-VK.api.descriptor_pool.zero_pool_size_count
+dEQP-VK.api.descriptor_set.descriptor_set_layout.empty_set.normal
+dEQP-VK.api.descriptor_set.descriptor_set_layout.empty_set.push_descriptor
+dEQP-VK.api.descriptor_set.descriptor_set_layout_binding.layout_binding_order
+dEQP-VK.api.descriptor_set.descriptor_set_layout_binding.update_subsequent_binding
+dEQP-VK.api.descriptor_set.descriptor_set_layout_lifetime.compute
+dEQP-VK.api.descriptor_set.descriptor_set_layout_lifetime.graphics

@@ -1,0 +1,160 @@
+// OpenSTA, Static Timing Analyzer
+// Copyright (c) 2026, Parallax Software, Inc.
+// 
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+// 
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// 
+// The origin of this software must not be misrepresented; you must not
+// claim that you wrote the original software.
+// 
+// Altered source versions must be plainly marked as such, and must not be
+// misrepresented as being the original software.
+// 
+// This notice may not be removed or altered from any source distribution.
+
+#pragma once
+
+#include <cstddef>
+#include <map>
+#include <queue>
+#include <utility>
+#include <vector>
+
+#include "Clock.hh"
+#include "Graph.hh"
+#include "MinMax.hh"
+#include "Mode.hh"
+#include "NetworkClass.hh"
+#include "SdcClass.hh"
+#include "SearchClass.hh"
+#include "StaState.hh"
+#include "Transition.hh"
+
+namespace sta {
+
+class GenclkInfo;
+class SearchPred;
+class TagGroupBldr;
+
+using ClockPinPair = std::pair<const Clock*,const Pin *>;
+
+class ClockPinPairLess
+{
+public:
+  bool operator()(const ClockPinPair &pair1,
+                  const ClockPinPair &pair2) const;
+};
+
+using GenclkInfoMap = std::map<Clock*, GenclkInfo*>;
+using GenclkSrcPathMap = std::map<ClockPinPair, std::vector<Path>, ClockPinPairLess>;
+using VertexGenclkSrcPathsMap = std::map<Vertex*, std::vector<const Path*>, VertexIdLess>;
+using VertexQueue = std::queue<Vertex*>;
+
+class Genclks : public StaState
+{
+public:
+  Genclks(const Mode *mode,
+          StaState *sta);
+  ~Genclks() override;
+  void clear();
+  void ensureInsertionDelays();
+  VertexSet *fanins(const Clock *clk);
+  void findLatchFdbkEdges(const Clock *clk);
+  EdgeSet &latchFdbkEdges(const Clock *clk);
+  void checkMaster(Clock *gclk,
+                   const Sdc *sdc);
+  void ensureMaster(Clock *gclk,
+                    const Sdc *sdc);
+  // Generated clock insertion delay.
+  Arrival insertionDelay(const Clock *clk,
+                         const Pin *pin,
+                         const RiseFall *rf,
+                         const EarlyLate *early_late) const;
+  // Generated clock source path for a clock path root.
+  const Path *srcPath(const Path *clk_path) const;
+  // Generated clock source path.
+  const Path *srcPath(const ClockEdge *clk_edge,
+                      const Pin *src_pin,
+                      const MinMax *min_max) const;
+  const Path *srcPath(const Clock *clk,
+                      const Pin *src_pin,
+                      const RiseFall *rf,
+                      const MinMax *min_max) const;
+  Vertex *srcPath(const Pin *pin) const;
+  Level clkPinMaxLevel(const Clock *clk) const;
+  void copyGenClkSrcPaths(Vertex *vertex,
+                          TagGroupBldr *tag_bldr);
+
+private:
+  void findInsertionDelays();
+  GenclkInfo *genclkInfo(const Clock *gclk) const;
+  void clearSrcPaths();
+  void recordSrcPaths(Clock *gclk);
+  void findInsertionDelays(Clock *gclk);
+  void seedClkVertices(Clock *clk,
+                       VertexQueue &fanin_queue,
+                       VertexSet &fanins,
+                       SearchPred &srch_pred);
+  size_t srcPathIndex(const RiseFall *clk_rf,
+                      const MinMax *min_max) const;
+  bool matchesSrcFilter(Path *path,
+                        const Clock *gclk) const;
+  void seedSrcPins(Clock *gclk,
+                   FilterPath *src_filter,
+                   VertexQueue &insert_queue,
+                   SearchPred &srch_pred);
+  void findSrcArrivals(Clock *gclk,
+                       GenclkInfo *genclk_info,
+                       VertexQueue &insert_queue);
+  FilterPath *makeSrcFilter(Clock *gclk,
+                            Sdc *sdc);
+  void deleteGenClkInfo();
+  virtual Tag *makeTag(const Clock *gclk,
+                       const Clock *master_clk,
+                       const Pin *master_pin,
+                       const RiseFall *rf,
+                       FilterPath *src_filter,
+                       Arrival insert,
+                       Scene *scene,
+                       const MinMax *min_max);
+  void findInsertionDelay(Clock *gclk);
+  void enqueueFanin(Vertex *vertex,
+                    VertexQueue &insert_queue,
+                    SearchPred &srch_pred);
+  void enqueueFanout(Vertex *vertex,
+                     VertexQueue &insert_queue,
+                     SearchPred &srch_pred);
+  GenclkInfo *makeGenclkInfo(Clock *gclk);
+  FilterPath *srcFilter(Clock *gclk);
+  void findFanin(Clock *gclk,
+                 VertexSet &fanins);
+  void findLatchFdbkEdges(const Clock *clk,
+                          GenclkInfo *genclk_info);
+  void findLatchFdbkEdges(Vertex *vertex,
+                          Level gclk_level,
+                          SearchPred &srch_pred,
+                          VertexSet &path_vertices,
+                          VertexSet &visited_vertices,
+                          EdgeSet &fdbk_edges);
+  void deleteGenclkSrcPaths(Clock *gclk);
+
+  const Mode *mode_;
+  bool found_insertion_delays_{false};
+  GenclkSrcPathMap genclk_src_paths_;
+  GenclkInfoMap genclk_info_map_;
+  VertexGenclkSrcPathsMap vertex_src_paths_map_;
+
+  friend class GenclkSrcArrivalVisitor;
+};
+
+} // namespace sta

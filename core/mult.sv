@@ -45,7 +45,10 @@ module mult
   // Re-pipelining contract (sv-timing A128; 25.6 adjusted FO4 on the
   // Nangate45 board): multiplier wrapper: carries the multiplier's cancellation liveness for MultStages cycles (A115); its depth follows the parameter.
   // svt-pipe: require-contract
+  // svt-pipe: protocol mw valid=mult_valid_i
   // svt-pipe: no-cut on=div_owner_live_q
+  // svt-pipe: no-cut on=mult_valid_o
+  // svt-pipe: cycle mw q=div_owner_live_q d=mult_valid_o hold=mult_valid_i steps=CVA6Cfg.MultStages
 
   logic mul_valid, mul_valid_raw;
   logic div_valid;

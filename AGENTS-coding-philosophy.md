@@ -20,6 +20,13 @@ It sits beside (never above) `AGENTS.md` Section 0 (SoC prime directive), `AGENT
 `AGENTS-configuration.md` for the current target constraints, and document the declared trade-offs
 before submitting RTL.
 
+`core/` and `corev_apu/` are the functional drafts. Their current hierarchy is not the
+timing-sound structure: logical depth and what a later sv-timing pass can still compute
+are the reason `out_rtl/` exists (`AGENTS-build-platform.md` §2.5). Implement correctness,
+including grouped Vulkan CTS, on the drafts. Treat `out_rtl/` as the manual destination
+for a later FO4-oriented carry onto a different structure. Do not land a CTS fix only in
+`out_rtl/`, and do not block a CTS group on an FO4 rewrite.
+
 ---
 
 ## 0. Fundamental bug-fixing and reverse-analysis philosophy

@@ -50,6 +50,9 @@ module aes
   // Re-pipelining contract (sv-timing A128; 83.7 adjusted FO4 on the
   // Nangate45 board): AES rounds: a pure datapath on the FLU port (see ex_stage); a stage here is an FLU latency decision.
   // svt-pipe: require-contract
+  // svt-pipe: no-cut on=result_o
+  // AES shares the FLU valid. The step is the ex_stage cycle on flu_result_o.
+  // No local register: result_o and flu_valid_o must stay in the same cycle.
 
   logic [63:0] sr;
   logic [ 7:0] sbox_in;

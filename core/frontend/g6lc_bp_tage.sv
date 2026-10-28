@@ -56,7 +56,9 @@ module g6lc_bp_tage
   // Re-pipelining contract (sv-timing A128; 29.2 adjusted FO4 on the
   // Nangate45 board): TAGE: table update and decay state.
   // svt-pipe: require-contract
+  // svt-pipe: protocol tg valid=flush_bp_i
   // svt-pipe: no-cut on=decay_cnt_q
+  // svt-pipe: cycle tg q=decay_cnt_q d=hist_update_valid_o hold=flush_bp_i steps=1
 
   localparam int unsigned OFFSET = CVA6Cfg.RVC == 1'b1 ? 1 : 2;
   localparam int unsigned NR_ROWS = NR_ENTRIES / CVA6Cfg.INSTR_PER_FETCH;

@@ -257,7 +257,9 @@ module csr_regfile
   // Re-pipelining contract (sv-timing A128; 87.0 adjusted FO4 on the
   // Nangate45 board): CSR file: register writes and PMP configuration are architectural state; no stage inside the write select.
   // svt-pipe: require-contract
+  // svt-pipe: protocol csr valid=acc_fflags_ex_valid_i
   // svt-pipe: no-cut on=pmpcfg_o
+  // svt-pipe: cycle csr q=pmpcfg_o d=csr_rdata_o hold=acc_fflags_ex_valid_i steps=1
 
   localparam logic [63:0] SMODE_STATUS_READ_MASK = ariane_pkg::smode_status_read_mask(CVA6Cfg);
   localparam logic [63:0] HS_DELEG_INTERRUPTS = {

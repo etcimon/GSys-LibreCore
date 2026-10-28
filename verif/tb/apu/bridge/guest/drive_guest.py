@@ -576,6 +576,15 @@ def main():
                                         "disable")
                 logflush = os.environ.get("G6LC_CTS_LOG_FLUSH",
                                           "disable")
+                # VN_DEBUG=no_abort: stock Mesa aborts a fence wait
+                # after ~2^14 relax iters. A 512^2 image dispatch is
+                # still retiring when that trips at this sim rate.
+                vn_debug = os.environ.get("G6LC_VN_DEBUG", "")
+                vn_prefix = f"VN_DEBUG={vn_debug} " if vn_debug else ""
+                cts_case = os.environ.get("G6LC_CTS_CASE", "")
+                case_arg = (f"--deqp-case='{cts_case}' "
+                            if cts_case else
+                            f"--deqp-caselist-file={caselist} ")
                 # case count for the marker: read the caselist out of
                 # the image host-side.  The guest may hold it mounted
                 # rw, but the caselist is static content written at
@@ -612,8 +621,8 @@ def main():
                         "[ -n \"$DEVID\" ] || { echo 'FAIL: no Venus "
                         "physical device for CTS' >&2; false; } && "
                         "set -o pipefail; "
-                        "./deqp-vk "
-                        f"--deqp-caselist-file={caselist} "
+                        f"{vn_prefix}./deqp-vk "
+                        f"{case_arg}"
                         f"--deqp-log-images={logimgs} "
                         f"--deqp-log-shader-sources={logshd} "
                         "--deqp-vk-device-id=$DEVID "
@@ -622,7 +631,8 @@ def main():
                         f"--deqp-log-flush={logflush} "
                         "--deqp-shadercache=disable "
                         "--deqp-archive-dir=/mnt/ctsdata "
-                        "2>&1 | tail -25",
+                        "2>&1 | tee /mnt/ctsdata/results/"
+                        "deqp-stdout.txt | tail -25",
                         timeout=int(os.environ.get(
                             "G6LC_CTS_TIMEOUT", "14400")))
                     # §7b exception contract: the bridge's sticky

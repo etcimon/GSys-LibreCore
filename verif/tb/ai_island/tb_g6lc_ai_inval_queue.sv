@@ -159,6 +159,24 @@ module tb_g6lc_ai_inval_queue;
     drain(500);
     if (total_invals < 45 + 2) $fatal(1, "S4: %0d invals", total_invals);
 
+    // Earliest B: the accepted AW may still be in an admission stage. It must
+    // make idle low immediately and retain its B until invalidation is owed.
+    begin
+      int unsigned before_invals;
+      before_invals = total_invals;
+      write(64'h8003_0000, 1, 3);
+      if (idle) $fatal(1, "S5 idle after accepted AW");
+      bresp();
+      drain(500);
+      if (total_invals != before_invals + 1) $fatal(1, "S5 earliest B lost");
+      // An unaligned beat crosses a cache-line boundary despite aw_len=0.
+      before_invals = total_invals;
+      write(64'h8003_103f, 1, 3);
+      bresp();
+      drain(500);
+      if (total_invals != before_invals + 2) $fatal(1, "S6 crossing beat lost a line");
+    end
+
     if (negative) $fatal(1, "ORACLE_NEGATIVE: forced failure to prove the verdict path");
     $display("PASS tb_g6lc_ai_inval_queue checks=%0d invals=%0d lines=%0d holds=%0d",
              checks, total_invals, total_lines_written, pmu_hold);

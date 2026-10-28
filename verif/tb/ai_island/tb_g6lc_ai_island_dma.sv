@@ -11,7 +11,11 @@
 `include "axi/typedef.svh"
 `include "axi/assign.svh"
 
-module tb_g6lc_ai_island_dma (
+module tb_g6lc_ai_island_dma #(
+    parameter bit DMA_INVAL_EN = 1'b0,
+    parameter bit ISLAND_FP_EN = 1'b1,
+    parameter bit SMALL_GEOMETRY = 1'b0
+) (
     input  logic        clk,
     input  logic        rst_ni,
     input  logic        req,
@@ -51,11 +55,11 @@ module tb_g6lc_ai_island_dma (
     PolicySubcodeEn: 1'b0,
     PolicySubcodeCacheEn: 1'b0,
     VaTurboEn: 1'b0,
-    IslandFpEn: 1'b1,
-    DmaInvalEn: 1'b0,
+    IslandFpEn: ISLAND_FP_EN,
+    DmaInvalEn: DMA_INVAL_EN,
     Int4En: 1'b1,
     Sparse24En: 1'b0,
-    FormatMask: 32'h0000_00FF,
+    FormatMask: ISLAND_FP_EN ? 32'h0000_00FF : 32'h0000_0003,
     TileM: 32'd8,
     TileN: 32'd8,
     TileK: 32'd8,
@@ -71,12 +75,45 @@ module tb_g6lc_ai_island_dma (
   gbus_resp_t axi_resp;
 
   logic [AI_DRAM_MAX_CHANNELS-1:0][31:0] ch_r, ch_w;
+  logic inval_valid, inval_ready, inval_done_q, inval_busy_q;
+  logic completion_valid;
+  logic [ADDR_W-1:0] inval_addr;
+  logic [2:0] inval_delay_q;
   assign ch_r = '0;
   assign ch_w = '0;
+  function automatic ai_island_cfg_t smoke_island_cfg();
+    ai_island_cfg_t c = AiIslandLatencyDefault;
+    if (SMALL_GEOMETRY) begin
+      c.MacsPerCycle = 8;
+      c.AccTileM = 8; c.AccTileN = 8; c.AccTileK = 8;
+      c.SramBytes = 4096;
+    end
+    return c;
+  endfunction
+  assign inval_ready = !inval_busy_q;
+  // CMO consumer: retain an accepted request for four cycles before done.
+  always_ff @(posedge clk or negedge rst_ni) begin
+    if (!rst_ni) begin
+      inval_busy_q <= 1'b0;
+      inval_done_q <= 1'b0;
+      inval_delay_q <= '0;
+    end else begin
+      inval_done_q <= 1'b0;
+      if (inval_busy_q) begin
+        if (inval_delay_q == 0) begin
+          inval_busy_q <= 1'b0;
+          inval_done_q <= 1'b1;
+        end else inval_delay_q <= inval_delay_q - 1'b1;
+      end else if (inval_valid && inval_ready) begin
+        inval_busy_q <= 1'b1;
+        inval_delay_q <= 3'd3;
+      end
+    end
+  end
 
   g6lc_ai_island_top #(
       .AiCfg(AiCfgOn),
-      .IslandCfg(AiIslandLatencyDefault),
+      .IslandCfg(smoke_island_cfg()),
       .EnableDmaFetch(1'b1),
       .AxiDataWidth(DATA_W),
       .AxiIdWidth(ID_W),
@@ -101,9 +138,11 @@ module tb_g6lc_ai_island_dma (
       .sb_desc_ptr_i(64'd0),
       .sb_last_ticket_o(),
       .sb_last_status_o(),
-      .sb_has_completion_o(),
+      .sb_has_completion_o(completion_valid),
       .sb_retired_valid_o(),
-      .sb_retired_ticket_o(), .dma_inval_valid_o(), .dma_inval_addr_o(), .dma_inval_ready_i(1'b0), .dma_inval_done_i(1'b0),
+      .sb_retired_ticket_o(),
+      .dma_inval_valid_o(inval_valid), .dma_inval_addr_o(inval_addr),
+      .dma_inval_ready_i(inval_ready), .dma_inval_done_i(inval_done_q),
       .axi_dma_req_o(axi_req),
       .axi_dma_resp_i(axi_resp),
       .dram_init_done_i(1'b1),
@@ -129,6 +168,7 @@ module tb_g6lc_ai_island_dma (
   wr_state_t wr_state;
   addr_t aw_addr_q;
   logic [7:0] aw_len_q;
+  logic [2:0] aw_size_q;
   id_t aw_id_q;
   logic [7:0] wr_beat;
 
@@ -142,6 +182,7 @@ module tb_g6lc_ai_island_dma (
       wr_state   <= WR_IDLE;
       aw_addr_q  <= '0;
       aw_len_q   <= '0;
+      aw_size_q  <= '0;
       aw_id_q    <= '0;
       wr_beat    <= '0;
     end else begin
@@ -166,6 +207,7 @@ module tb_g6lc_ai_island_dma (
           wr_state  <= WR_DATA;
           aw_addr_q <= axi_req.aw.addr;
           aw_len_q  <= axi_req.aw.len;
+          aw_size_q <= axi_req.aw.size;
           aw_id_q   <= axi_req.aw.id;
           wr_beat   <= '0;
         end
@@ -180,6 +222,76 @@ module tb_g6lc_ai_island_dma (
           wr_state <= WR_IDLE;
         end
       endcase
+    end
+  end
+
+  // Independent per-line B/invalidation scoreboard. Coalescing may invalidate
+  // several landed writes once; the last invalidation must cover the last B.
+  typedef logic [ADDR_W-7:0] line_t;
+  int unsigned landed [line_t];
+  int unsigned invalidations [line_t];
+  int unsigned last_inv_land [line_t];
+  int unsigned total_invals;
+  logic completion_prev_q;
+  int unsigned trace_cycle;
+  always @(posedge clk) begin
+    if (!rst_ni) trace_cycle = 0;
+    else begin
+      trace_cycle++;
+      if ($test$plusargs("trace_load")) begin
+        if (axi_req.ar_valid && axi_resp.ar_ready)
+          $display("TRACE %0d EXT_AR addr=%h len=%0d id=%0d",
+              trace_cycle, axi_req.ar.addr, axi_req.ar.len, axi_req.ar.id);
+        if (axi_resp.r_valid && axi_req.r_ready)
+          $display("TRACE %0d EXT_R addr=%h beat=%0d last=%b id=%0d",
+              trace_cycle, ar_addr_q, rd_beat, axi_resp.r.last, axi_resp.r.id);
+        if (i_dut.gen_dma_fetch.gen_one_engine.i_gemm.load_ar_fire)
+          $display("TRACE %0d GEMM_AR addr=%h len=%0d row=%0d",
+              trace_cycle, i_dut.gen_dma_fetch.gen_one_engine.i_gemm.read_req.ar.addr,
+              i_dut.gen_dma_fetch.gen_one_engine.i_gemm.read_req.ar.len,
+              i_dut.gen_dma_fetch.gen_one_engine.i_gemm.ar_i_q);
+        if (i_dut.gen_dma_fetch.gen_one_engine.i_gemm.load_r_fire)
+          $display("TRACE %0d GEMM_R row=%0d last=%b id=%0d",
+              trace_cycle, i_dut.gen_dma_fetch.gen_one_engine.i_gemm.receive_row,
+              i_dut.gen_dma_fetch.gen_one_engine.i_gemm.axi_resp_s.r.last,
+              i_dut.gen_dma_fetch.gen_one_engine.i_gemm.axi_resp_s.r.id);
+      end
+    end
+  end
+  always @(posedge clk) begin
+    if (!rst_ni) begin
+      landed.delete();
+      invalidations.delete();
+      last_inv_land.delete();
+      total_invals = 0;
+      completion_prev_q = 1'b0;
+    end else if (DMA_INVAL_EN) begin
+      if (wr_state == WR_RESP && axi_req.b_ready) begin
+        logic [ADDR_W-1:0] last_byte;
+        line_t first_line, last_line;
+        last_byte = aw_addr_q + ((ADDR_W'(aw_len_q) + 1) << aw_size_q) - 1;
+        first_line = aw_addr_q[ADDR_W-1:6];
+        last_line = last_byte[ADDR_W-1:6];
+        for (line_t l = first_line; l <= last_line; l++) landed[l]++;
+      end
+      if (inval_valid && inval_ready) begin
+        line_t l;
+        l = inval_addr[ADDR_W-1:6];
+        if (!landed.exists(l) || landed[l] <= invalidations[l])
+          $fatal(1, "DMA_INVAL_BEFORE_B line=%h", l);
+        invalidations[l]++;
+        last_inv_land[l] = landed[l];
+        total_invals++;
+      end
+      if (completion_valid && !completion_prev_q) begin
+        if (inval_busy_q || inval_valid || total_invals == 0 || wr_state != WR_IDLE)
+          $fatal(1, "DMA_COMPLETION_BEFORE_INVALIDATION_DRAIN");
+        foreach (landed[l])
+          if (last_inv_land[l] != landed[l])
+            $fatal(1, "DMA_COMPLETION_STALE_LINE line=%h", l);
+        $display("PASS DMA_INVAL_INTEGRATION invalidations=%0d", total_invals);
+      end
+      completion_prev_q = completion_valid;
     end
   end
 

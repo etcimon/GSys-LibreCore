@@ -61,6 +61,7 @@ module cva6_fifo_v3 #(
   // svt-pipe: require-contract
   // svt-pipe: protocol ff valid=push_i flush=flush_i
   // svt-pipe: no-cut on=usage_o
+  // svt-pipe: cycle ff q=usage_o d=full_o hold=push_i steps=1
 
   // local parameter
   // FIFO depth - handle the case of pass-through, synthesizer will do constant propagation

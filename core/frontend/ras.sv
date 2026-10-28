@@ -105,6 +105,7 @@ module ras #(
   // svt-pipe: require-contract
   // svt-pipe: protocol ra valid=push_i
   // svt-pipe: no-cut on=ra_d
+  // svt-pipe: cycle ra q=ra_d d=snap_top_o hold=push_i steps=1
 
   localparam int unsigned NH    = (CVA6Cfg.NrHarts < 1) ? 1 : CVA6Cfg.NrHarts;
   localparam int unsigned HID_W = (NH <= 1) ? 1 : $clog2(NH);

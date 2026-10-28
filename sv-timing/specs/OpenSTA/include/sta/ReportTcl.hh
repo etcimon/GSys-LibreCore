@@ -1,0 +1,80 @@
+// OpenSTA, Static Timing Analyzer
+// Copyright (c) 2026, Parallax Software, Inc.
+// 
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+// 
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// 
+// The origin of this software must not be misrepresented; you must not
+// claim that you wrote the original software.
+// 
+// Altered source versions must be plainly marked as such, and must not be
+// misrepresented as being the original software.
+// 
+// This notice may not be removed or altered from any source distribution.
+
+#pragma once
+
+#include <tcl.h>
+
+#include "Report.hh"
+
+namespace sta {
+
+// Encapsulate the Tcl stdout and stderr channels to print to the
+// report object so that the output from Tcl puts and errors can be
+// logged and redirected.
+//
+// Output streams that talk to TCL channels.
+// This directs all output on the Report object to the Tcl stdout channel.
+// Tcl output channels are encapsulated to print to the Report object
+// that supports redirection and logging as well as printing to the
+// underlying channel.
+class ReportTcl : public Report
+{
+public:
+  ReportTcl();
+  ~ReportTcl() override;
+  void logBegin(std::string_view filename) override;
+  void logEnd() override;
+  void redirectFileBegin(std::string_view filename) override;
+  void redirectFileAppendBegin(std::string_view filename) override;
+  void redirectFileEnd() override;
+  void redirectStringBegin() override;
+  const char *redirectStringEnd() override;
+  // This must be called after the Tcl interpreter has been constructed.
+  // It makes the encapsulated channels.
+  void setTclInterp(Tcl_Interp *interp) override;
+
+protected:
+  size_t printConsole(const char *buffer,
+                      size_t length) override;
+  void flush();
+
+private:
+  Tcl_ChannelType *makeEncapChannelType(Tcl_Channel channel,
+                                        char *channel_name,
+                                        Tcl_DriverOutputProc output_proc);
+  size_t printTcl(Tcl_Channel channel,
+                  const char *buffer,
+                  size_t length);
+
+  Tcl_Interp *interp_{nullptr};
+  // The original tcl channels.
+  Tcl_Channel tcl_stdout_{nullptr};
+  Tcl_Channel tcl_stderr_{nullptr};
+  // Encapsulated channels that print on this object.
+  Tcl_Channel tcl_encap_stdout_{nullptr};
+  Tcl_Channel tcl_encap_stderr_{nullptr};
+};
+
+} // namespace sta

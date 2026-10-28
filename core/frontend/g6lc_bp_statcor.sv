@@ -53,7 +53,9 @@ module g6lc_bp_statcor
   // Re-pipelining contract (sv-timing A128; 60.9 adjusted FO4 on the
   // Nangate45 board): statistical corrector: table update state.
   // svt-pipe: require-contract
+  // svt-pipe: protocol sc valid=flush_i
   // svt-pipe: no-cut on=tag_q
+  // svt-pipe: cycle sc q=tag_q d=pred_o hold=flush_i steps=1
   // A134: each row prepares its own next counter/tag state, selected by the
   // update index. This removes the indexed read -> train -> indexed write
   // feedback chain without delaying training or changing prediction latency.

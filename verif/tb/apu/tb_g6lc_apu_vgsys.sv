@@ -1552,17 +1552,17 @@ module tb_g6lc_apu_vgsys
                i_dut.gen_on.i_top.gen_on.vc_busy,
                i_dut.gen_on.i_top.gen_on.vp_busy,
                i_dut.gen_on.rst_q,
-               i_dut.gen_on.i_top.gen_on.i_tab.gen_on.init_q,
+               1'b0,
                i_dut.gen_on.i_top.gen_on.i_tab.gen_on.req_q.op,
                i_dut.gen_on.i_top.gen_on.i_tab.gen_on.req_q.id,
                i_dut.gen_on.i_top.gen_on.i_tab.gen_on.res_st_q,
                i_dut.gen_on.i_top.gen_on.i_tab.gen_on.cpl_q.handle,
                i_dut.gen_on.i_top.gen_on.i_tab.gen_on.cpl_q.status,
                i_dut.gen_on.i_top.gen_on.i_tab.gen_on.res_id_q,
-               i_dut.gen_on.i_top.gen_on.i_tab.gen_on.dir_rdata,
+               32'h0,
                i_dut.gen_on.i_top.gen_on.i_tab.gen_on.req_q.value,
                i_dut.gen_on.i_top.gen_on.i_tab.gen_on.req_q.mask,
-               i_dut.gen_on.i_top.gen_on.i_tab.gen_on.res_ent_q.aux,
+               64'h0,
                i_dut.gen_on.i_top.gen_on.i_tab.gen_on.cpl_q.entry.aux);
   end
   // 5b debug: front op-decode dump (imm fields) at decoder completion

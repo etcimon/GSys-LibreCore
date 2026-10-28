@@ -12,7 +12,7 @@
 // consume JSON / emit trees. See sv-timing/AGENTS-host.md.
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 import type { PlatformContext } from "../context.ts";
 import { flattenFlist, posixPath, type FlatManifest } from "./eda.ts";
@@ -1130,6 +1130,8 @@ export function resolveFromTimingDir(
     resolve(ctx.paths.build, "sv-timing", spec),
     resolve(ctx.paths.build, spec),
     resolve(ctx.paths.root, spec),
+    // Manual sv-timing redesign destination (repo-root out_rtl → workspace/hyp).
+    resolve(ctx.repoRoot, "out_rtl", spec),
     resolve(process.cwd(), spec),
   ];
   for (const c of candidates) {
@@ -1158,9 +1160,78 @@ export function parsePortableFlistPaths(content: string): string[] {
   return files;
 }
 
+const OUT_RTL_TREES = [
+  "hyp_redesign_core_8fo4",
+  "hyp_redesign_corev_apu_8fo4",
+  "hyp_core_ws",
+] as const;
+
+/** A hyp redesign tree under out_rtl/, not a stamp.json timings package. */
+interface ManualOutRtl {
+  emitDir: string;
+  svCount: number;
+}
+
+function countSvFiles(dir: string, cap: number): number {
+  let n = 0;
+  const stack = [dir];
+  while (stack.length > 0 && n < cap) {
+    const cur = stack.pop();
+    if (!cur) break;
+    let names: string[];
+    try {
+      names = readdirSync(cur);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (n >= cap) break;
+      if (name === "remote-runs" || name === ".git" || name === "node_modules") continue;
+      const p = join(cur, name);
+      let st;
+      try {
+        st = statSync(p);
+      } catch {
+        continue;
+      }
+      if (st.isDirectory()) stack.push(p);
+      else if (st.isFile() && name.endsWith(".sv")) n++;
+    }
+  }
+  return n;
+}
+
+/**
+ * Repo-root `out_rtl/` (symlink to `build-platform/workspace/hyp`) and its
+ * hyp8 redesign trees are a manual sv-timing output destination. They are
+ * usable as `--from-timing` without a stamp package. `--use-emit` still
+ * requires a corrected filelist and does not replace `core/` or `corev_apu/`.
+ */
+export function classifyManualOutRtl(dir: string): ManualOutRtl | null {
+  const name = basename(dir).toLowerCase();
+  if (name === "out_rtl" || name === "hyp") {
+    const present = OUT_RTL_TREES.filter((tree) => existsSync(join(dir, tree)));
+    if (present.length === 0) return null;
+    const emitName = present.find((tree) => tree.startsWith("hyp_redesign_")) ?? present[0];
+    const emitDir = join(dir, emitName);
+    return { emitDir, svCount: countSvFiles(emitDir, 2000) };
+  }
+  if (name.startsWith("hyp_redesign_") || name === "hyp_core_ws") {
+    if (
+      existsSync(join(dir, "core")) ||
+      existsSync(join(dir, "corev_apu")) ||
+      existsSync(join(dir, "analysis"))
+    ) {
+      return { emitDir: dir, svCount: countSvFiles(dir, 2000) };
+    }
+  }
+  return null;
+}
+
 /**
  * Structural validation of a timings precompile output directory.
  * Does not invoke the Rust CLI. See architecture/build-platform-workspace-lifecycle.md §5.
+ * `out_rtl/` is accepted as a manual redesign destination (warnings, not errors).
  */
 export function validateTimingsOutDir(
   ctx: PlatformContext,
@@ -1169,6 +1240,7 @@ export function validateTimingsOutDir(
   const dir = resolveFromTimingDir(ctx, opts.fromTiming);
   const issues: TimingsValidateIssue[] = [];
   const checkPaths = opts.checkSourcePaths !== false;
+  const manual = existsSync(dir) ? classifyManualOutRtl(dir) : null;
 
   if (!existsSync(dir)) {
     issues.push({
@@ -1199,11 +1271,22 @@ export function validateTimingsOutDir(
     "files.f",
   ]);
   if (!portableF) {
-    issues.push({
-      level: "error",
-      code: "portable-missing",
-      message: "expected portable.f (or analyze.f) in out-dir",
-    });
+    if (manual) {
+      issues.push({
+        level: "warn",
+        code: "manual-out-rtl",
+        message:
+          "manual out_rtl redesign tree (sv-timing output of core/ and corev_apu/); " +
+          "no portable.f. Functional drafts stay in core/ and corev_apu/. " +
+          "FO4 carry-over into this tree is deferred. --use-emit still needs a corrected filelist.",
+      });
+    } else {
+      issues.push({
+        level: "error",
+        code: "portable-missing",
+        message: "expected portable.f (or analyze.f) in out-dir",
+      });
+    }
   }
 
   let reportJson = findFirstExisting(dir, ["analyze.json", "correct.json"]);
@@ -1211,8 +1294,9 @@ export function validateTimingsOutDir(
   if (reportJson?.endsWith("correct.json")) reportKind = "correct";
   else if (reportJson?.endsWith("analyze.json")) reportKind = "analyze";
 
-  // Also accept any *.json that looks like analyze-result if canonical names missing
-  if (!reportJson) {
+  // Also accept any *.json that looks like analyze-result if canonical names missing.
+  // A manual out_rtl tree keeps its own notes; those are not a timings report.
+  if (!reportJson && !manual) {
     try {
       for (const name of readdirSync(dir)) {
         if (
@@ -1250,14 +1334,23 @@ export function validateTimingsOutDir(
   }
 
   if (!reportJson) {
-    issues.push({
-      level: "error",
-      code: "report-missing",
-      message: "expected analyze.json or correct.json (analyze-result schema)",
-    });
+    if (manual) {
+      issues.push({
+        level: "warn",
+        code: "manual-out-rtl-no-screen",
+        message:
+          "no analyze.json/correct.json; out_rtl is a manual redesign destination, not an FO4 screen",
+      });
+    } else {
+      issues.push({
+        level: "error",
+        code: "report-missing",
+        message: "expected analyze.json or correct.json (analyze-result schema)",
+      });
+    }
   }
 
-  let schemaHint: string | null = null;
+  let schemaHint: string | null = manual && !reportJson ? "out-rtl-manual" : null;
   let report: Record<string, unknown> | undefined;
   if (reportJson) {
     try {
@@ -1295,7 +1388,7 @@ export function validateTimingsOutDir(
     });
   }
 
-  let fileCount = 0;
+  let fileCount = manual && !portableF ? manual.svCount : 0;
   if (portableF) {
     try {
       const content = readFileSync(portableF, "utf8");
@@ -1339,7 +1432,7 @@ export function validateTimingsOutDir(
     join(dir, "emit"),
     join(dir, "out"),
   ];
-  let emitDir: string | null = null;
+  let emitDir: string | null = manual ? manual.emitDir : null;
   for (const c of emitCandidates) {
     if (existsSync(c)) {
       emitDir = c;

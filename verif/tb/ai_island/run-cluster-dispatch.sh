@@ -6,6 +6,12 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$ROOT"
+
+AI_RTL="${G6LC_AI_RTL_DIR:-$ROOT/corev_apu/ai_island}"
+. "$ROOT/verif/tb/ai_island/gemm-extra-sources.inc.sh"
+AI_INC="${G6LC_AI_INC_DIR:-$ROOT/corev_apu/include}"
+AI_SRC="${G6LC_AI_SRC_DIR:-$ROOT/corev_apu/src}"
+AI_CVXIF="${G6LC_AI_CVXIF_DIR:-$ROOT/core/cvxif_g6lc_ai}"
 if ! command -v verilator >/dev/null 2>&1; then
   echo "SKIP no verilator"
   exit 0
@@ -19,7 +25,7 @@ verilator --binary --timing -Wno-fatal -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-UNOPTF
   -I"$AXI/include" -I"$CCELLS/include" \
   -I"$ROOT/core/include" \
   -I"$ROOT/corev_apu/include" \
-  -I"$ROOT/corev_apu/ai_island/include" \
+  -I"$AI_RTL/include" \
   "$ROOT/core/include/config_pkg.sv" \
   "$CCELLS/src/cf_math_pkg.sv" \
   "$CCELLS/src/lzc.sv" \
@@ -48,14 +54,17 @@ verilator --binary --timing -Wno-fatal -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-UNOPTF
   "$ROOT/common/local/util/tc_sram_wrapper.sv" \
   "$ROOT/corev_apu/axi_mem_if/src/axi2mem.sv" \
   "$ROOT/common/local/util/sram.sv" \
-  "$ROOT/corev_apu/include/g6lc_ai_island_cfg_pkg.sv" \
-  "$ROOT/corev_apu/ai_island/include/g6lc_ai_fp_pkg.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot_float.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot_float_pipe.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_tile_sram.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_gemm_seq.sv" \
-  "$ROOT/corev_apu/ai_island/g6lc_ai_cluster_dispatch.sv" \
+  "$AI_INC/g6lc_ai_island_cfg_pkg.sv" \
+  "$AI_RTL/include/g6lc_ai_fp_pkg.sv" \
+  "$AI_RTL/g6lc_ai_pe_dot.sv" \
+  "$AI_RTL/g6lc_ai_pe_dot_float.sv" \
+  "$AI_RTL/g6lc_ai_pe_dot_float_pipe.sv" \
+  "$AI_RTL/g6lc_ai_tile_sram.sv" \
+  "$AI_RTL/g6lc_ai_mul_seq.sv" \
+  "$AI_RTL/g6lc_ai_gemm_arplan.sv" \
+  "$AI_RTL/g6lc_ai_gemm_seq.sv" \
+  "${GEMM_EXTRA_SOURCES[@]}" \
+  "$AI_RTL/g6lc_ai_cluster_dispatch.sv" \
   "$ROOT/corev_apu/src/g6lc_ai_dram_backend.sv" \
   "$ROOT/corev_apu/src/g6lc_ai_dram_join.sv" \
   "$ROOT/verif/tb/ai_island/tb_g6lc_ai_cluster_dispatch.sv" \

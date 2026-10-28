@@ -435,8 +435,12 @@ module g6lc_iq
   // A119 parallel grants and the A122 one-hot site (older_d) are the
   // latency-neutral forms that remain.
   // svt-pipe: require-contract
+  // svt-pipe: protocol iss valid=disp_valid_i
   // svt-pipe: no-cut on=q_after_issue
   // svt-pipe: no-cut on=older_d
+  // svt-pipe: cycle iss q=older_d d=issue_valid_o hold=disp_valid_i steps=1
+  // svt-pipe: cut-ok iss on=issue_valid_o
+  // No payload register: issue_valid_o is combinational with the granted entry.
   always_comb begin
     q_after_issue = q_chain;
     for (int unsigned g = 0; g < CVA6Cfg.NrIssuePorts; g++)

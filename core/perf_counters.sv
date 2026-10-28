@@ -149,7 +149,9 @@ module perf_counters
   // Re-pipelining contract (sv-timing A128; 70.8 adjusted FO4 on the
   // Nangate45 board): performance counters: the event group select and the counter increments; no in-flight operation.
   // svt-pipe: require-contract
+  // svt-pipe: protocol pc valid=we_i
   // svt-pipe: no-cut on=generic_counter_d
+  // svt-pipe: cycle pc q=generic_counter_d d=data_o hold=we_i steps=1
 
   typedef logic [11:0] csr_addr_t;
 

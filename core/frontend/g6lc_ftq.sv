@@ -60,6 +60,7 @@ module g6lc_ftq
   // svt-pipe: require-contract
   // svt-pipe: protocol fq valid=push_i flush=flush_i
   // svt-pipe: no-cut on=count_o
+  // svt-pipe: cycle fq q=count_o d=head_valid_o hold=push_i steps=1
 
   localparam int unsigned PTR_W = (DEPTH <= 1) ? 1 : $clog2(DEPTH);
 

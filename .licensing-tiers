@@ -333,6 +333,8 @@ R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_decode_s3.sv
 R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_fe_keep.sv
 R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_fifo_v3.sv
 R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_jalr_usable.sv
+R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_mmu/g6lc_tlb_miss_router.sv
+R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_mmu/g6lc_ptw_leg_decode.sv
 R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_regfile_ff.sv
 R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_rvc_enc.sv
 R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_sib_cjalr.sv
@@ -424,6 +426,8 @@ R   build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island
 R   build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_pe_dot_float_pipe.sv
 R   build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_policy_codec.sv
 R   build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_policy_steer.sv
+R   build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_policy_topology.sv
+R   build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_policy_publish.sv
 R   build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_tile_sram.sv
 R   build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/include/g6lc_ai_desc_pkg.sv
 R   build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/include/g6lc_ai_fp_pkg.sv
@@ -494,3 +498,11 @@ T   build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/verif/tb/core/tb_g6
 R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/neg/mut_commit_stage_delayed.sv
 R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/neg/mut_csr_buffer_gated.sv
 R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/neg/mut_iq_payload_comb.sv
+# Preserve the cluster RTL bench's existing dual-license declaration (r18 audit).
+R   verif/tb/ai_island/tb_g6lc_ai_cluster_dispatch.sv
+R   build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_gemm_fp32_add.sv
+R   build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_gemm_span.sv
+R   build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_gemm_store_plan.sv
+# r31-r39: retain existing declarations; align previously unmatched metadata.
+R   build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_pe_dot_pipe.sv
+R   verif/tb/ai_island/tb_g6lc_ai_inval_queue.sv

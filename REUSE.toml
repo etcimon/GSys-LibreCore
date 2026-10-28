@@ -173,6 +173,15 @@ precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Etienne Cimon"
 SPDX-License-Identifier = "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial"
 
+# Sole-authorship (Case A) RTL living under an otherwise tier-U directory
+# (hyp8 materialized core/g6lc_mmu/** defaults U; this file is
+# LibreCore-original).
+[[annotations]]
+path = ["build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_mmu/g6lc_tlb_miss_router.sv", "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_mmu/g6lc_ptw_leg_decode.sv"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Etienne Cimon"
+SPDX-License-Identifier = "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial"
+
 [[annotations]]
 path = [
   "verif/regress/ai-policy-subcode.sh",
@@ -357,6 +366,8 @@ path = [
   "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_pe_dot_float_pipe.sv",
   "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_policy_codec.sv",
   "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_policy_steer.sv",
+  "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_policy_topology.sv",
+  "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_policy_publish.sv",
   "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_tile_sram.sv",
   "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/include/g6lc_ai_desc_pkg.sv",
   "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/include/g6lc_ai_fp_pkg.sv",
@@ -418,6 +429,33 @@ paths = [
   "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/neg/mut_commit_stage_delayed.sv",
   "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/neg/mut_csr_buffer_gated.sv",
   "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/neg/mut_iq_payload_comb.sv"
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Etienne Cimon"
+SPDX-License-Identifier = "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial"
+
+[[annotations]]
+paths = ["verif/tb/ai_island/tb_g6lc_ai_cluster_dispatch.sv"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Etienne Cimon"
+SPDX-License-Identifier = "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial"
+SPDX-FileComment = "Preserves the existing RTL testbench declaration; r18 aligns the tier metadata without changing its license."
+
+[[annotations]]
+paths = [
+  "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_pe_dot_pipe.sv",
+  "verif/tb/ai_island/tb_g6lc_ai_inval_queue.sv"
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Etienne Cimon"
+SPDX-License-Identifier = "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial"
+SPDX-FileComment = "r31-r39 aligns metadata with the existing declarations; no source license is changed."
+
+[[annotations]]
+paths = [
+  "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_gemm_fp32_add.sv",
+  "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_gemm_span.sv",
+  "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_gemm_store_plan.sv"
 ]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Etienne Cimon"

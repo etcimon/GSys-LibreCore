@@ -32,6 +32,17 @@ package g6lc_apu_vnfront_pkg;
   // format + row packing in g6lc_apu_sh_pkg).
   localparam logic [31:0] APU_VK_ERROR_OUT_OF_POOL_MEMORY =
                                                         32'hFFFF_FFFB;
+  // §5a G3b-iii: VkResult -12 — FREE_DESCRIPTOR_SET pool whose free
+  // list has no fitting extent although free space remains
+  localparam logic [31:0] APU_VK_ERROR_FRAGMENTED_POOL =
+                                                        32'hFFFF_FFF4;
+  // §5a G3b-iii: VK_EVENT_SET/VK_EVENT_RESET ride the GetEventStatus
+  // reply's result field; the live bit is the event entry's state[0]
+  localparam logic [31:0] APU_VK_EVENT_SET             = 32'd3;
+  localparam logic [31:0] APU_VK_EVENT_RESET           = 32'd4;
+  // §5a G3b-iii: extents per pool free list (32B units), parked in
+  // the pool's ObjPay block w1..DsFreeMax
+  localparam int unsigned DsFreeMax = 64;
   // DESCRIPTOR_POOL entry:
   //   aux[31:0]   aperture byte base of the record store (vgpages)
   //   aux[43:32]  bump — records handed out, 32-byte units (bump

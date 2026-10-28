@@ -86,7 +86,13 @@ module tb_g6lc_ai_cluster_dispatch;
   g6lc_ai_cluster_dispatch #(
       .Clusters(2), .AddrWidth(AW), .DataWidth(DW), .IdWidth(IW), .MaxDim(64), .PeLanes(8),
       .MaxAROut(2), .axi_req_t(m6_req_t), .axi_resp_t(m6_resp_t),
-      .eng_req_t(e5_req_t), .eng_resp_t(e5_resp_t)
+      .eng_req_t(e5_req_t), .eng_resp_t(e5_resp_t),
+      .eng_aw_chan_t (e5_aw_chan_t), .eng_w_chan_t (e5_w_chan_t),
+      .eng_b_chan_t  (e5_b_chan_t),  .eng_ar_chan_t(e5_ar_chan_t),
+      .eng_r_chan_t  (e5_r_chan_t),
+      .mst_aw_chan_t (m6_aw_chan_t), .mst_w_chan_t (m6_w_chan_t),
+      .mst_b_chan_t  (m6_b_chan_t),  .mst_ar_chan_t(m6_ar_chan_t),
+      .mst_r_chan_t  (m6_r_chan_t)
   ) i_d2 (
       .clk_i(clk), .rst_ni(rst_n), .testmode_i(1'b0),
       .start_i(start[1]), .m_i(m), .n_i(n), .k_i(k), .lda_i(16'd64), .ldb_i(16'd64),
@@ -102,7 +108,13 @@ module tb_g6lc_ai_cluster_dispatch;
   g6lc_ai_cluster_dispatch #(
       .Clusters(4), .AddrWidth(AW), .DataWidth(DW), .IdWidth(IW), .MaxDim(64), .PeLanes(8),
       .MaxAROut(2), .axi_req_t(m6_req_t), .axi_resp_t(m6_resp_t),
-      .eng_req_t(e4_req_t), .eng_resp_t(e4_resp_t)
+      .eng_req_t(e4_req_t), .eng_resp_t(e4_resp_t),
+      .eng_aw_chan_t (e4_aw_chan_t), .eng_w_chan_t (e4_w_chan_t),
+      .eng_b_chan_t  (e4_b_chan_t),  .eng_ar_chan_t(e4_ar_chan_t),
+      .eng_r_chan_t  (e4_r_chan_t),
+      .mst_aw_chan_t (m6_aw_chan_t), .mst_w_chan_t (m6_w_chan_t),
+      .mst_b_chan_t  (m6_b_chan_t),  .mst_ar_chan_t(m6_ar_chan_t),
+      .mst_r_chan_t  (m6_r_chan_t)
   ) i_d4 (
       .clk_i(clk), .rst_ni(rst_n), .testmode_i(1'b0),
       .start_i(start[2]), .m_i(m), .n_i(n), .k_i(k), .lda_i(16'd64), .ldb_i(16'd64),
@@ -134,6 +146,23 @@ module tb_g6lc_ai_cluster_dispatch;
     if (err[which]) $fatal(1, "engine %0d err", which);
   endtask
 
+  // Independent integer GEMM oracle, rather than allowing a bank-index defect
+  // shared by the single engine and the dispatch engines to agree by accident.
+  function automatic logic [31:0] golden_c(input int row, column);
+    logic [63:0] a_word, b_word;
+    logic signed [7:0] a_byte, b_byte;
+    logic signed [31:0] sum;
+    sum = '0;
+    for (int t = 0; t < int'(k); t++) begin
+      a_word = mem_rd(PA + 64'(row * 64 + (t / 8) * 8));
+      b_word = mem_rd(PB + 64'(column * 64 + (t / 8) * 8));
+      a_byte = 8'(a_word >> (8 * (t % 8)));
+      b_byte = 8'(b_word >> (8 * (t % 8)));
+      sum += 32'(a_byte) * 32'(b_byte);
+    end
+    return sum;
+  endfunction
+
   task automatic compare(input string what);
     int r, c;
     logic [63:0] g, d2, d4;
@@ -142,6 +171,9 @@ module tb_g6lc_ai_cluster_dispatch;
         g  = mem_rd(PC0 + 64'((r * n + c) * 4));
         d2 = mem_rd(PC2 + 64'((r * n + c) * 4));
         d4 = mem_rd(PC4 + 64'((r * n + c) * 4));
+        if (g !== {golden_c(r,c+1),golden_c(r,c)})
+          $fatal(1, "%s: single C[%0d][%0d..] %h != mathematical golden %h",
+                 what,r,c,g,{golden_c(r,c+1),golden_c(r,c)});
         if (d2 !== g) $fatal(1, "%s: 2-cluster C[%0d][%0d..] %h != golden %h", what, r, c, d2, g);
         if (d4 !== g) $fatal(1, "%s: 4-cluster C[%0d][%0d..] %h != golden %h", what, r, c, d4, g);
       end

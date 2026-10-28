@@ -975,6 +975,7 @@ module tb_g6lc_review_rename;
     .clk_i(clk),.rst_ni(rst_n),.flush_i(flush),.flush_hart_i(fl_hart),
     .mispredict_i(mispredict),
     .mispredict_level_i(mis_level),
+    .flush_unissued_i(1'b0),
     .hart_i(hid_p),
     .is_fpr_rd_i(is_fpr_rd), .is_fpr_rs1_i(is_fpr_rs1), .is_fpr_rs2_i(is_fpr_rs2),
     .rs3_i(rs3), .is_fpr_rs3_i(is_fpr_rs3), .fprs3_o(fprs3), .rs3_ready_o(rs3_rdy),

@@ -56,7 +56,6 @@ module g6lc_apu_vnpump
   // instances × ring pair) with headroom — the descriptor/park state
   // below is real flops, not a bare constant.
   parameter int unsigned Rings   = 64,
-  parameter int unsigned Streams = 4,   // max ExecuteCommandStreams n
   parameter int unsigned TBUF    = 40,  // transport arg stage words
   // Ring ALIVE heartbeat: the guest-side ring watchdog clears the
   // ALIVE status bit on every wait iteration and aborts if the
@@ -320,12 +319,24 @@ module g6lc_apu_vnpump
     // staged words / wire fields
     logic [31:0] tbuf [2][TBUF];
     logic [5:0]  tb_i;
+    // cursor fetch: stage a slice of the record — tb_base_q/tb_n_q
+    // pick the record words, tb_i walks them, tr_ret_q is the state
+    // after the slice lands.  ExecuteCommandStreams uses this to read
+    // its stream tuples and reply positions on demand; the only
+    // stream-count bound left is the decoder's 16-bit record length.
+    logic [15:0] tb_base_q;
+    logic [6:0]  tb_n_q;
     logic [15:0] cmd_words_q [2];
     logic [31:0] cmd_type_q [2];
     logic [3:0]  cmd_cn_q [2];
     logic [63:0] t_hnd_q, t_val_q, t_off64_q, t_size64_q;
     logic [31:0] t_rid_q;
-    logic [3:0]  t_i_q;           // exec-window stream index
+    // ExecuteCommandStreams iteration: stream index plus the running
+    // record-word offsets of the current tuple and its reply position
+    logic [15:0] xs_cnt_q;
+    logic [15:0] xs_i_q;
+    logic [15:0] xs_tb_q;
+    logic [15:0] xs_rp_q;
     logic [APU_VG_AP_WORD_W-1:0] blob_base_w_q;
     logic [63:0] blob_size_q;
     logic [APU_VG_AP_WORD_W-1:0] wr_addr_q;
@@ -437,10 +448,12 @@ module g6lc_apu_vnpump
       StTrFire, StTrCap, StTrExec, StTrDo,
       StOtReq, StOtCpl, StOtDo, StCreate,
       StWinNext, StWaitVq, StWaitR,
+      StXsTuple, StXsRep, StXsOpen,
       StApWr, StHeadWr, StStatWr, StNext, StDecNext, StXsDone,
       StFatal, StFatalWr, StFatalNext, StFatalWr2
     } state_e;
     state_e state_q;
+    state_e tr_ret_q;
 
     // ---- stream byte addressing --------------------------------------------
     // byte offset of a word index within the current stream
@@ -478,11 +491,13 @@ module g6lc_apu_vnpump
     // ---- pump's own aperture/guest access ------------------------------------
     logic pump_re, pump_we, pump_gm;
     logic [APU_VG_AP_WORD_W-1:0] pump_addr;
-    // the transport fetch reads word tb_i of the current command
+    // the transport fetch reads record word tb_base_q + tb_i of the
+    // current command (whole-record staging uses tb_base_q == 0)
     logic [31:0] rd_boff;
     assign rd_boff = st_q[depth_q].pos +
-                     ((state_q == StTrFire) ? (32'(tb_i) << 2)
-                                            : (32'(cs_addr) << 2));
+                     ((state_q == StTrFire)
+                       ? ((32'(tb_base_q) + 32'(tb_i)) << 2)
+                       : (32'(cs_addr) << 2));
 
     assign pump_re = (state_q == StPollFire &&
                       ring_q[poll_q].live && !ring_q[poll_q].fatal &&
@@ -773,11 +788,14 @@ module g6lc_apu_vnpump
         for (int i = 0; i < TBUF; i++) begin
           tbuf[0][i] <= '0; tbuf[1][i] <= '0;
         end
-        tb_i <= '0;
+        tb_i <= '0; tb_base_q <= '0; tb_n_q <= '0;
+        tr_ret_q <= StIdle;
         cmd_words_q <= '{default: '0}; cmd_type_q <= '{default: '0};
         cmd_cn_q <= '{default: '0};
         t_hnd_q <= '0; t_val_q <= '0; t_off64_q <= '0; t_size64_q <= '0;
-        t_rid_q <= '0; t_i_q <= '0;
+        t_rid_q <= '0;
+        xs_cnt_q <= '0; xs_i_q <= '0;
+        xs_tb_q <= '0; xs_rp_q <= '0;
         blob_base_w_q <= '0; blob_size_q <= '0;
         wr_addr_q <= '0; wr_data_q <= '0;
         poll_q <= '0; gap_q <= '0; gap_cnt_q <= '0;
@@ -1045,8 +1063,21 @@ module g6lc_apu_vnpump
                   APU_VN_ACT[dec_op.cmd_type[8:0]].act_class
                   == APU_VN_ACT_TRANSPORT) begin
                 tb_i <= '0;
-                if (dec_op.words > 16'(TBUF)) state_q <= StFatal;
-                else                          state_q <= StTrFire;
+                tb_base_q <= '0;
+                tr_ret_q <= StTrExec;
+                if (dec_op.cmd_type == 32'hB4) begin
+                  // ExecuteCommandStreams is cursor-driven: stage the
+                  // 5-word header only; stream tuples and reply
+                  // positions are fetched on demand so the record is
+                  // never bounded by TBUF
+                  tb_n_q  <= 7'd5;
+                  state_q <= StTrFire;
+                end else if (dec_op.words > 16'(TBUF)) begin
+                  state_q <= StFatal;
+                end else begin
+                  tb_n_q  <= 7'(dec_op.words);
+                  state_q <= StTrFire;
+                end
               end else begin
                 fr_start_q <= 1'b1;
                 state_q <= StFrontWait;
@@ -1078,8 +1109,8 @@ module g6lc_apu_vnpump
               end else begin
                 tbuf[depth_q][tb_i] <= mp_rd32;
                 tb_i <= tb_i + 6'd1;
-                if (tb_i + 6'd1 >= 6'(cmd_words_q[depth_q]))
-                  state_q <= StTrExec;
+                if (tb_i + 7'd1 >= tb_n_q)
+                  state_q <= tr_ret_q;
                 else
                   state_q <= StTrFire;
               end
@@ -1105,15 +1136,25 @@ module g6lc_apu_vnpump
                 end
               end
               32'hB4: begin // ExecuteCommandStreams
-                if (depth_q || tbuf[depth_q][2] > 32'(Streams) ||
-                    tbuf[depth_q][2] == 32'h0)
+                // cursor-driven: the 5-word header is already staged;
+                // a stream count wider than 16 bits cannot fit any
+                // legal record (words are 16-bit), so it faults like
+                // a truncated stream.  xs_rp_q = 7 + 5*cnt positions
+                // the reply-position u64 array one multiply here only.
+                if (depth_q || tbuf[depth_q][2] == 32'h0 ||
+                    tbuf[depth_q][2][31:16] != 16'h0)
                   state_q <= StFatal;
                 else begin
-                  t_i_q <= '0;
-                  t_rid_q <= tbuf[depth_q][5];
-                  t_off64_q <= {tbuf[depth_q][7], tbuf[depth_q][6]};
-                  t_size64_q <= {tbuf[depth_q][9], tbuf[depth_q][8]};
-                  state_q <= StOtReq;
+                  xs_cnt_q  <= tbuf[depth_q][2][15:0];
+                  xs_i_q    <= '0;
+                  xs_tb_q   <= 16'd5;
+                  xs_rp_q   <= 16'd7 +
+                               16'd5 * tbuf[depth_q][2][15:0];
+                  tb_i      <= '0;
+                  tb_base_q <= 16'd5;
+                  tb_n_q    <= 7'd5;
+                  tr_ret_q  <= StXsTuple;
+                  state_q   <= StTrFire;
                 end
               end
               32'hBC: begin // CreateRing
@@ -1227,25 +1268,21 @@ module g6lc_apu_vnpump
                   state_q <= StNext;
                 end
               end
-              32'hB4: begin // window for stream t_i_q
+              32'hB4: begin // window for stream xs_i_q
                 if (t_off64_q + t_size64_q > blob_size_q)
                   state_q <= StFatal;
-                else begin
-                  if (rep_live_q) begin
-                    // positions array: n u64s at w (5+5n+2+2i)
-                    rep_pos_q <= 32'(
-                      {tbuf[depth_q][8 + 5 * tbuf[depth_q][2] + 2 * t_i_q],
-                       tbuf[depth_q][7 + 5 * tbuf[depth_q][2] + 2 * t_i_q]});
-                  end
-                  st_q[1] <= '{live: 1'b1, kind: SK_LIN_AP,
-                               ring: '0, base_head: '0,
-                               base_w: blob_base_w_q +
-                                       APU_VG_AP_WORD_W'(t_off64_q >> 2),
-                               bytes: 32'(t_size64_q), pos: '0,
-                               ctx: st_q[0].ctx, ring_stream: 1'b0};
-                  depth_q <= 1'b1;
-                  state_q <= StDecFire;
-                end
+                else if (rep_live_q) begin
+                  // positions array: n u64s at record words
+                  // (7+5n+2i) — fetch this stream's pair on demand;
+                  // blob_base_w_q/blob_size_q stay valid across the
+                  // fetch (no ObjTab op in between)
+                  tb_i      <= '0;
+                  tb_base_q <= xs_rp_q;
+                  tb_n_q    <= 7'd2;
+                  tr_ret_q  <= StXsRep;
+                  state_q   <= StTrFire;
+                end else
+                  state_q <= StXsOpen;
               end
               32'hBC: begin
                 // CreateRing validation per TransportModel.t_cmd:
@@ -1331,18 +1368,44 @@ module g6lc_apu_vnpump
             endcase
           end
 
+          // ---- ExecuteCommandStreams cursor ---------------------------------
+          // each stream's 5-word tuple {rid, off64, size64} and 2-word
+          // reply position are fetched from the record on demand —
+          // running word offsets, no multipliers in the loop
+          StXsTuple: begin
+            t_rid_q    <= tbuf[depth_q][0];
+            t_off64_q  <= {tbuf[depth_q][2], tbuf[depth_q][1]};
+            t_size64_q <= {tbuf[depth_q][4], tbuf[depth_q][3]};
+            state_q    <= StOtReq;
+          end
+          StXsRep: begin
+            rep_pos_q <= 32'({tbuf[depth_q][1], tbuf[depth_q][0]});
+            state_q   <= StXsOpen;
+          end
+          StXsOpen: begin
+            st_q[1] <= '{live: 1'b1, kind: SK_LIN_AP,
+                         ring: '0, base_head: '0,
+                         base_w: blob_base_w_q +
+                                 APU_VG_AP_WORD_W'(t_off64_q >> 2),
+                         bytes: 32'(t_size64_q), pos: '0,
+                         ctx: st_q[0].ctx, ring_stream: 1'b0};
+            depth_q <= 1'b1;
+            state_q <= StDecFire;
+          end
+
           // ---- ExecuteCommandStreams iteration -------------------------------
           StWinNext: begin
-            if (t_i_q + 4'd1 >= 4'(tbuf[depth_q][2])) begin
+            if (xs_i_q + 16'd1 >= xs_cnt_q) begin
               state_q <= StNext;        // outer command done
             end else begin
-              t_i_q <= t_i_q + 4'd1;
-              t_rid_q <= tbuf[depth_q][5 + 5 * (t_i_q + 4'd1)];
-              t_off64_q <= {tbuf[depth_q][7 + 5 * (t_i_q + 4'd1)],
-                            tbuf[depth_q][6 + 5 * (t_i_q + 4'd1)]};
-              t_size64_q <= {tbuf[depth_q][9 + 5 * (t_i_q + 4'd1)],
-                             tbuf[depth_q][8 + 5 * (t_i_q + 4'd1)]};
-              state_q <= StOtReq;
+              xs_i_q    <= xs_i_q + 16'd1;
+              xs_tb_q   <= xs_tb_q + 16'd5;
+              xs_rp_q   <= xs_rp_q + 16'd2;
+              tb_i      <= '0;
+              tb_base_q <= xs_tb_q + 16'd5;
+              tb_n_q    <= 7'd5;
+              tr_ret_q  <= StXsTuple;
+              state_q   <= StTrFire;
             end
           end
 
@@ -1559,7 +1622,6 @@ module g6lc_apu_vnpump_fixture
 #(
   parameter bit          Enable  = 1'b0,
   parameter int unsigned Rings   = 64,
-  parameter int unsigned Streams = 4,
   parameter int unsigned TBUF    = 40
 ) (
   input  logic            clk_i,
@@ -1635,6 +1697,6 @@ module g6lc_apu_vnpump_fixture
   output logic [Rings-1:0][31:0] ring_head_o,
   output logic [Rings-1:0][APU_VG_AP_WORD_W-1:0] ring_extra_w_o
 );
-  g6lc_apu_vnpump #(.Enable(Enable), .Rings(Rings), .Streams(Streams),
+  g6lc_apu_vnpump #(.Enable(Enable), .Rings(Rings),
                     .TBUF(TBUF)) i_dut (.*);
 endmodule

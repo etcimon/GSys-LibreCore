@@ -1,9 +1,10 @@
 // Copyright 2026 Etienne Cimon
 // SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
 // §12.3 C/5a Xfer engine standalone gate: g6lc_apu_xfer + the real
-// g6lc_apu_cmdrec (the TB stages payload arenas through it) + the
-// checked DMA pair (g6lc_apu_dma_read / g6lc_apu_dma_write) against a
-// burst-capable AXI aperture model.
+// ObjPay/ObjMem stack (the TB stages payload extents through ObjPay
+// ALLOC + WRITE and the DUT reads them through its own ObjPay port)
+// + the checked DMA pair (g6lc_apu_dma_read / g6lc_apu_dma_write)
+// against a burst-capable AXI aperture model.
 +incdir+${CVA6_REPO_DIR}/corev_apu/apu/include
 ${CVA6_REPO_DIR}/core/include/config_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/include/g6lc_apu_cfg_pkg.sv
@@ -18,9 +19,13 @@ ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_vn_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_srgb_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_sh_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_cmdrec_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_objtab_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_objpay_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_mp_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_cmdexec_pkg.sv
 ${CVA6_REPO_DIR}/vendor/pulp-platform/tech_cells_generic/src/rtl/tc_sram.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_dma_read.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_dma_write.sv
-${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_cmdrec.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_objmem.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_objpay.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_xfer.sv

@@ -54,8 +54,12 @@ ue_cneg_unbacked_1 \
 ue_cpos_texfetch_1 ue_cpos_texlod_lin_1 ue_cpos_imgloadstore_1 \
 ue_cneg_badfmt_1 ue_cneg_xfer_img_oob_1 \
 ue_cpos_rb_mapafter_1 ue_cpos_ubo_bindfirst_1 \
-ue_gpos_tri_1 ue_gpos_vbwide_1 ue_gpos_statvp_1
-ue_cpos_modres_1 ue_cpos_rerec_1"
+ue_gpos_tri_1 ue_gpos_vbwide_1 ue_gpos_statvp_1 ue_gpos_blend_1 \
+ue_cpos_defer2_1 ue_cpos_modres_1 ue_cpos_rerec_1 \
+ue_cpos_dispind_1 ue_cpos_dispbase_1 ue_cpos_exec2nd_1 \
+ue_cpos_events_1 ue_gpos_drawind_1 ue_gpos_drawindx_1 \
+ue_cpos_recmany_1 ue_cpos_allocmany_1 ue_cpos_cbpoolreset_1 \
+ue_cpos_xstreams_1 ue_cpos_submit101_1"
 ARMS="dev_reset q_reset venusoff worksink0 legality"
 
 cfail=0

@@ -144,7 +144,9 @@ module store_unit
   // Re-pipelining contract (sv-timing A128; 58.0 adjusted FO4 on the
   // Nangate45 board): store unit FSM: the store buffer handshake is same-cycle.
   // svt-pipe: require-contract
+  // svt-pipe: protocol su valid=valid_i
   // svt-pipe: no-cut on=trans_id_o
+  // svt-pipe: cycle su q=trans_id_o d=result_o hold=valid_i steps=1
 
   // align data to address e.g.: shift data to be naturally 64
   function automatic [CVA6Cfg.XLEN-1:0] data_align(logic [2:0] addr, logic [63:0] data);

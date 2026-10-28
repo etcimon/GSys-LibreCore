@@ -23,6 +23,7 @@ whole-repository scan.
 - Spec of record: `specs/riscv-spec.html` (RISC-V ISA Manual, Asciidoctor, ~93k lines, version 20260717).
 - Three Parts: **I** Unprivileged (`#vol:unpriv`, src line 1172), **II** Privileged (`#vol:priv`, 67256), **III** Profiles (`#vol:profiles`, 89395).
 - Core RTL: `core/` (the pipeline IP). SoC/integration: `corev_apu/`. Config surface: `core/include/`, `config/`.
+- Timing-reworked output: `out_rtl/` (git symlink to `build-platform/workspace/hyp/`). Functional work, including Vulkan 1.4 and grouped CTS, stays on `core/` and `corev_apu/`. FO4 carry-over into `out_rtl/` is deferred. See `AGENTS-build-platform.md` §2.5 and `AGENTS-configuration.md` §1.0c.
 
 ---
 
@@ -487,7 +488,8 @@ where useful, the source line `specs/riscv-spec.html:<n>`. A code reference is a
 | Vendored uncore controllers/PHY (DDR4, PCIe, Ethernet, HDMI, SATA/SD), `vendor sync/scan`, `corev_apu` integration | `agents/guides/AGENTS-controller-readiness.md` | (not ISA-normative; see `AGENTS-vendor.md` + `architecture/uncore/*`) | `build-platform/src/config/defaults.ts`, `build-platform/src/tooling/vendor.ts`, `corev_apu/src/ariane.sv:67-68`, `core/include/config_pkg.sv` |
 | **Foundry PDK / technology optimization**, memory compilers, tech-cell macros, ASIC tape-out mapping | `agents/guides/AGENTS-technology-optimization.md` (+ `AGENTS-technology.md`) | (not ISA-normative; PDK-swap seam) | `vendor/pulp-platform/tech_cells_generic/src/rtl/{tc_sram.sv,tc_clk.sv}`, `common/local/util/sram_cache.sv`, `pd/synth/Makefile`, `pd/pdk/` |
 | **Build / test / probe / verify / toolchain** | `AGENTS-build.md` → `build-platform/AGENTS.md` | (tooling; not ISA) | `build-platform/`, `.config.ts`, `build.sh` / `build.ps1` |
-| **Structural FO4 timing / auto-correct** (`sv-timing`) | `sv-timing/AGENTS.md` (+ `AGENTS-host.md`, `architecture/DESIGN.md`) | (not ISA; not STA sign-off) | `sv-timing/crates/*`, host `build-platform/src/tooling/timings.ts` |
+| **Structural FO4 timing / auto-correct** (`sv-timing`) | `sv-timing/AGENTS.md` (+ `AGENTS-host.md`, `architecture/DESIGN.md`) | (not ISA; not STA sign-off) | `sv-timing/crates/*`, host `build-platform/src/tooling/timings.ts`, manual output `out_rtl/` |
+| **FO4 redesign output vs functional drafts** | `AGENTS-build-platform.md` §2.5, `AGENTS-configuration.md` §1.0c | (screening, not CTS) | `out_rtl/` → `build-platform/workspace/hyp/`; drafts remain `core/`, `corev_apu/` |
 | **Emulation, boot-speed debug, commit tracing, replay/checkpoint, tandem-vs-RTL** (`g6lc_qemu`) | `g6lc_qemu/AGENTS.md` (+ `architecture/DESIGN.md`, `DIAG.md`) | (not ISA-normative; contracts consumed by pin in `g6lc_qemu/pins.toml`) | `g6lc_qemu/crates/*`, `architecture/g6lc-qemu/`; build-platform gateway `bun build-platform/src/cli/index.ts g6q [--remote] <cmd>`; RTL side of the comparison is `core/cva6_rvfi*.sv` |
 | **Pushing AI-tensor work from host Python and retrieving results** | `g6lc_qemu/architecture/AI_BRIDGE.md` (+ `architecture/ai-matrix/README.md` §1.1 for the two planes) | (not ISA-normative) | `g6lc_qemu/tools/ai_tensor_bridge.py`, `g6q_remote.py`; island contract `corev_apu/ai_island/`, host stack `ai-tensor/` |
 

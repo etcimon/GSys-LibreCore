@@ -113,6 +113,8 @@ module instr_queue
   // svt-pipe: require-contract
   // svt-pipe: protocol iq valid=valid_i flush=flush_i
   // svt-pipe: no-cut on=idx_is_q
+  // svt-pipe: cycle iq q=idx_is_q d=fetch_entry_o hold=valid_i steps=1
+  // No payload register: issue samples fetch_entry_o in the same cycle as valid_i.
 
   localparam g6lc_fetch_pkg::fetch_geo_t Geo = g6lc_fetch_pkg::geo(CVA6Cfg);
   localparam g6lc_fetch_pkg::fetch_en_t  En  = g6lc_fetch_pkg::en(CVA6Cfg);

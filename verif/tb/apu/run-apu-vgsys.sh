@@ -4,6 +4,8 @@
 # AXI4 master) — Verilator sim replaying the generated guest-script
 # tapes through real split virtqueues, plus the §6c negative arms;
 # VGSYS_SYNTH=1 adds the yosys Enable=0/1 screens.
+# Vectors are generated — regenerate after a model/contract change with
+#   bash verif/tb/apu/vn_vectors/regen_vectors.sh   (WSL python3)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 export CVA6_REPO_DIR="$ROOT"
@@ -81,8 +83,15 @@ ue_cneg_clear_oob_1 ue_cpos_ctxkill_reuse_1 \
 ue_cpos_rb_mapafter_1 ue_cpos_ubo_bindfirst_1 \
 ue_cpos_evict_1 ue_cpos_reloc_hold_1 \
 ue_cneg_evict_full_1 ue_cneg_bind_full_1 ue_cneg_stale_mem_1 \
-ue_gpos_tri_1 ue_gpos_vbwide_1 ue_gpos_statvp_1 ue_cpos_maxconc_1
-ue_cpos_modres_1 ue_cpos_rerec_1"
+ue_gpos_tri_1 ue_gpos_vbwide_1 ue_gpos_statvp_1 ue_gpos_blend_1 \
+ue_cpos_maxconc_1 ue_cpos_defer2_1 \
+ue_cpos_modres_1 ue_cpos_rerec_1 \
+ue_cpos_zerodisp_1 ue_cpos_shared1_1 ue_cpos_atomic1_1 \
+ue_cpos_arrlen1_1 ue_cpos_ctsb2b_1 \
+ue_cpos_dispind_1 ue_cpos_dispbase_1 ue_cpos_exec2nd_1 \
+ue_cpos_events_1 ue_gpos_drawind_1 ue_gpos_drawindx_1 \
+ue_cpos_recmany_1 ue_cpos_allocmany_1 ue_cpos_cbpoolreset_1 \
+ue_cpos_xstreams_1 ue_cpos_submit101_1"
 # G3b-i: the *full* negatives also run on a small-geometry build of
 # the same RTL (ObjEntries=256, 256 KiB PayMem) so the FULL paths
 # stay covered while the default geometry is the big one

@@ -86,7 +86,9 @@ module axi_shim #(
   // Re-pipelining contract (sv-timing A128; 13.7 adjusted FO4 on the
   // Nangate45 board): AXI shim: read / write FSMs.
   // svt-pipe: require-contract
+  // svt-pipe: protocol ax valid=wr_req_i
   // svt-pipe: no-cut on=wr_state_q
+  // svt-pipe: cycle ax q=wr_state_q d=wr_valid_o hold=wr_req_i steps=1
 
   localparam AddrIndex = ($clog2(AxiNumWords) > 0) ? $clog2(AxiNumWords) : 1;
 
