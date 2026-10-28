@@ -1,10 +1,8 @@
-# The workspace is fully managed by the build platform and never committed.
-# It holds installed tools (workspace/tooling) and all build outputs
-# (workspace/build), plus the generated Python environment.
-# Exception: workspace/hyp is the timing-reworked RTL tree (out_rtl mirrors
-# it) and is versioned; its remote-run artifacts and archives are not.
+# Keep managed tools, build outputs and Python environments local.
+# Track timing-reworked RTL and analysis under workspace/hyp; out_rtl mirrors it.
 /workspace/*
 !/workspace/hyp/
+# Keep top-level snapshot archives and remote-run outputs local.
 /workspace/hyp/*.zip
 /workspace/hyp/**/remote-runs/
 # sby/yosys formal run outputs and editor leftovers inside the hyp tree

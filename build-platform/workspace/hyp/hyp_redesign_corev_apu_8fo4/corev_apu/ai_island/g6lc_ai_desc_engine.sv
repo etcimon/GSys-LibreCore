@@ -242,7 +242,6 @@ module g6lc_ai_desc_engine
     if (!rst_ni) begin
       prev_state_q <= ST_IDLE;
       spa_seen_q   <= 1'b0; spb_seen_q <= 1'b0; spc_seen_q <= 1'b0;
-      span_a_q     <= '0; span_b_q <= '0; span_c_q <= '0;
     end else begin
       prev_state_q <= state_q;
       if (state_q == ST_IDLE) begin
@@ -252,26 +251,56 @@ module g6lc_ai_desc_engine
         if (spb_done) spb_seen_q <= 1'b1;
         if (spc_done) spc_seen_q <= 1'b1;
       end
-      // r7 R4: replicate the functions' degenerate early returns --
-      // rows==0 (operand) and rows==0||cols==0 (result) return 1; the
-      // (rows-1) mul operand underflows to all-ones without this.
-      if (spa_done)
-        span_a_q <= (desc_q.m == 0)                             ? 64'd1
-                  : (|spa_prod[95:64])                          ? {64{1'b1}}
-                  : (sp_tail_b > ({64{1'b1}} - sp_prod_a))      ? {64{1'b1}}
-                  : ((sp_prod_a + sp_tail_b) == '0)             ? 64'd1
-                  :  sp_prod_a + sp_tail_b;
-      if (spb_done)
-        span_b_q <= (desc_q.n == 0)                             ? 64'd1
-                  : (|spb_prod[95:64])                          ? {64{1'b1}}
-                  : (sp_tail_b > ({64{1'b1}} - sp_prod_b))      ? {64{1'b1}}
-                  : ((sp_prod_b + sp_tail_b) == '0)             ? 64'd1
-                  :  sp_prod_b + sp_tail_b;
-      if (spc_done)
-        span_c_q <= (desc_q.m == 0 || desc_q.n == 0)            ? 64'd1
-                  : (spc_prod > ({64{1'b1}} >> 2))              ? {64{1'b1}}
-                  : spc_prod << 2;
     end
+  end
+
+  // One extended add provides both the span and its saturation carry.
+  // Empty dimensions still return one, ahead of overflow/zero handling.
+  logic [64:0] span_a_sum, span_b_sum;
+  logic [63:0] sp_tail_q;
+  logic a_empty, b_empty, c_empty, a_over, b_over, c_over;
+  logic a_zero, b_zero;
+  logic [63:0] span_a_c, span_b_c, span_c_c;
+  // The descriptor is held throughout the sequential multiply window.
+  // Prepare its row-byte tail at launch, well before the products return.
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) sp_tail_q <= '0;
+    else if (sp_kick) sp_tail_q <= sp_tail_b;
+  end
+  assign span_a_sum = {1'b0, sp_prod_a} + {1'b0, sp_tail_q};
+  assign span_b_sum = {1'b0, sp_prod_b} + {1'b0, sp_tail_q};
+  // pragma translate_off
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      (spa_done || spb_done) |-> sp_tail_q == sp_tail_b);
+  // pragma translate_on
+  assign a_empty = desc_q.m == 0;
+  assign b_empty = desc_q.n == 0;
+  assign c_empty = a_empty || b_empty;
+  assign a_over = !a_empty && ((|spa_prod[95:64]) || span_a_sum[64]);
+  assign b_over = !b_empty && ((|spb_prod[95:64]) || span_b_sum[64]);
+  assign c_over = !c_empty && (|spc_prod[63:62]);
+  assign a_zero = !a_over && span_a_sum[63:0] == 0;
+  assign b_zero = !b_over && span_b_sum[63:0] == 0;
+  assign span_a_c = ({64{a_empty || a_zero}} & 64'd1) |
+                    {64{a_over}} |
+                    ({64{!a_empty && !a_over && !a_zero}} & span_a_sum[63:0]);
+  assign span_b_c = ({64{b_empty || b_zero}} & 64'd1) |
+                    {64{b_over}} |
+                    ({64{!b_empty && !b_over && !b_zero}} & span_b_sum[63:0]);
+  assign span_c_c = ({64{c_empty}} & 64'd1) |
+                    {64{c_over}} |
+                    ({64{!c_empty && !c_over}} & {spc_prod[61:0], 2'b00});
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) span_a_q <= '0;
+    else if (spa_done) span_a_q <= span_a_c;
+  end
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) span_b_q <= '0;
+    else if (spb_done) span_b_q <= span_b_c;
+  end
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) span_c_q <= '0;
+    else if (spc_done) span_c_q <= span_c_c;
   end
 
   // Operand composition (ai_row_bytes = elems << elem shift): strides at
@@ -341,6 +370,20 @@ module g6lc_ai_desc_engine
     svt_bm_top_p6654_n23316 = type(check_addr_o)'(g6lc_ai_island_cfg_pkg::ai_beat_lo(svt_bm_p6654_n23316_1, BeatBytes));
   end
   // END sv-timing auto-correct (balance_mux rewrite)
+  logic [AddrWidth-1:0] len_a_q, len_b_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin len_a_q <= '0; len_b_q <= '0; end
+    else begin
+      len_a_q <= AddrWidth'(g6lc_ai_island_cfg_pkg::ai_bus_len(desc_q.ptr_a, span_a_q, BeatBytes));
+      len_b_q <= AddrWidth'(g6lc_ai_island_cfg_pkg::ai_bus_len(desc_q.ptr_b, span_b_q, BeatBytes));
+    end
+  end
+  // pragma translate_off
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      state_q inside {ST_CHK_A, ST_CHK_B} |-> check_len_o == AddrWidth'(g6lc_ai_island_cfg_pkg::ai_bus_len(
+          state_q == ST_CHK_A ? desc_q.ptr_a : desc_q.ptr_b,
+          state_q == ST_CHK_A ? span_a_q : span_b_q, BeatBytes)));
+  // pragma translate_on
   always_comb begin
     check_req_o = 1'b0;
     check_qid_o = qid_q;
@@ -353,9 +396,9 @@ module g6lc_ai_desc_engine
         check_req_o = 1'b1;
         check_addr_o = svt_bm_top_p6654_n23316; // sv-timing: BalanceMux/rebalance #658 RHS rewrite
             // sv-timing: (RHS rewrite continuation removed) state_q == ST_CHK_A ? desc_q.ptr_a : desc_q.ptr_b, BeatBytes);
-        check_len_o = AddrWidth'(g6lc_ai_island_cfg_pkg::ai_bus_len(
-            state_q == ST_CHK_A ? desc_q.ptr_a : desc_q.ptr_b,
-            state_q == ST_CHK_A ? span_a_q : span_b_q, BeatBytes));
+        // r29: bus lengths are prepared facts (registered from the span
+        // results, which settle at least one cycle before ST_CHK_A).
+        check_len_o = state_q == ST_CHK_A ? len_a_q : len_b_q;
         check_need_r_o = 1'b1;
       end
       ST_CHK_C: begin

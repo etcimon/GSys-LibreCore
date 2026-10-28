@@ -106,30 +106,47 @@ module g6lc_ai_cluster_dispatch
       else $error("g6lc_ai_cluster_dispatch: Clusters=%0d must be a power of two", Clusters);
     assert (Clusters == 1 || IdWidth > $clog2(Clusters))
       else $error("g6lc_ai_cluster_dispatch: IdWidth=%0d too narrow for %0d clusters", IdWidth, Clusters);
-    assert ((SliceAlign & (SliceAlign - 1)) == 0)
+    assert (SliceAlign > 0 && (SliceAlign & (SliceAlign - 1)) == 0)
       else $error("g6lc_ai_cluster_dispatch: SliceAlign must be a power of two");
   end
   // pragma translate_on
 
-  // ---- slice arithmetic (registered at start; the engines start one cycle later) ----
+  // ---- owned descriptor preparation -----------------------------------------
+  // Each request remains owned through preparation, engine launch and join.
+  // No engine sees a partially prepared pointer or a live caller reuse key.
+  localparam int unsigned ClusterShift = $clog2(Clusters);
+  typedef enum logic [3:0] {
+    DP_IDLE, DP_ALIGN, DP_MUL_START, DP_MUL_WAIT,
+    DP_OFFSETS, DP_ADDR, DP_LAUNCH, DP_RUN
+  } dispatch_phase_t;
+  dispatch_phase_t phase_q, phase_d;
   logic        start_q;
   logic [31:0] m_q, n_q, k_q, slice_q;
+  logic [31:0] slice_round_q;
   logic [15:0] lda_q, ldb_q;
   logic [2:0]  fmt_q;
   logic        acc_q;
   logic [3:0]  armax_q;
   logic [AddrWidth-1:0] pa_q, pb_q, pc_q;
   logic [31:0] row_bytes_b;
+  logic reuse_a_q, reuse_b_q;
+  logic [31:0] reuse_a_epoch_q, reuse_b_epoch_q;
+  logic accept, span_done;
+  logic [Clusters-1:0] span_done_vec, span_seen_q;
 
+  // pragma translate_off
   function automatic logic [31:0] slice_cols(input logic [31:0] n);
     logic [31:0] s;
     s = (n + 32'(Clusters) - 32'd1) / 32'(Clusters);
     s = (s + 32'(SliceAlign) - 32'd1) & ~(32'(SliceAlign) - 32'd1);
     return s;
   endfunction
+  // pragma translate_on
 
   
 
+  // Historical pre-r18 auto-correct notes; the owned preparation stages below
+  // replace this former combinational slice_cols call.
   // BEGIN sv-timing auto-correct (balance_mux rewrite)
 // ----------------------------------------------------------------
 // sv-timing: always_ff factorize  (clock-aware ParallelScratch)
@@ -341,21 +358,44 @@ module g6lc_ai_cluster_dispatch
   // END sv-timing auto-correct (balance_mux rewrite)
 always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      start_q <= 1'b0;
-      m_q <= '0; n_q <= '0; k_q <= '0; slice_q <= '0;
+      m_q <= '0; n_q <= '0; k_q <= '0;
       lda_q <= '0; ldb_q <= '0; fmt_q <= '0; acc_q <= 1'b0; armax_q <= '0;
       pa_q <= '0; pb_q <= '0; pc_q <= '0;
-    end else begin
-      start_q <= start_i && ready_o;
-      if (start_i && ready_o) begin
-        m_q <= m_i; n_q <= n_i; k_q <= k_i; slice_q <= slice_cols(n_i);
+      reuse_a_q <= 1'b0; reuse_b_q <= 1'b0;
+      reuse_a_epoch_q <= '0; reuse_b_epoch_q <= '0;
+    end else if (accept) begin
+        m_q <= m_i; n_q <= n_i; k_q <= k_i;
         lda_q <= lda_i; ldb_q <= ldb_i; fmt_q <= numfmt_i; acc_q <= accumulate_i;
         armax_q <= ar_max_i;
         pa_q <= ptr_a_i; pb_q <= ptr_b_i; pc_q <= ptr_c_i;
-      end
+        reuse_a_q <= reuse_a_i; reuse_b_q <= reuse_b_i;
+        reuse_a_epoch_q <= reuse_a_epoch_i; reuse_b_epoch_q <= reuse_b_epoch_i;
     end
   end
+  // Preserve the original 32-bit modulo rounding, but express the asserted
+  // power-of-two division as wiring and put alignment on the next edge.
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) slice_round_q <= '0;
+    else if (accept)
+      slice_round_q <= (n_i + 32'(Clusters) - 32'd1) >> ClusterShift;
+  end
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) slice_q <= '0;
+    else if (phase_q == DP_ALIGN)
+      slice_q <= (slice_round_q + 32'(SliceAlign) - 32'd1) & ~(32'(SliceAlign) - 32'd1);
+  end
   assign row_bytes_b = ai_row_bytes(fmt_q, {16'd0, ldb_q});
+  // ldb is 16 bits and format scaling is at most four bytes: 18 bits suffice.
+  // Parallel bounded products keep all 50 bits before the AddrWidth cast.
+  // This preserves pointer arithmetic even when a B-panel span exceeds 4 GiB.
+  assign span_done = &(span_seen_q | span_done_vec);
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) span_seen_q <= '0;
+    else if (accept) span_seen_q <= '0;
+    else if (phase_q == DP_MUL_WAIT) span_seen_q <= span_seen_q | span_done_vec;
+  end
+  assign accept = start_i && ready_o;
+  assign start_q = phase_q == DP_LAUNCH;
 
   // ---- engines --------------------------------------------------------------------------
   logic        e_start  [Clusters];
@@ -382,20 +422,44 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
   logic [Clusters-1:0] pend_q;     // engines still owed a done
   logic [Clusters-1:0] done_vec;
   logic [Clusters-1:0] active_vec;
+  logic [Clusters-1:0] ready_vec;
   logic                any_err_q;
 
   for (genvar c = 0; c < int'(Clusters); c++) begin : gen_eng
-    always_comb begin
-      automatic logic [31:0] col0;
-      col0 = 32'(c) * slice_q;
-      e_active[c] = col0 < n_q;
-      e_n[c] = (n_q - col0 > slice_q) ? slice_q : (n_q - col0);
-      e_pb[c] = pb_q + AddrWidth'(col0 * row_bytes_b);
-      e_pc[c] = pc_q + AddrWidth'(col0 << 2);
-      e_start[c] = start_q && e_active[c];
+    logic [31:0] col0_q;
+    logic [49:0] b_offset_q, span_product;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) col0_q <= '0;
+      else if (phase_q == DP_OFFSETS) col0_q <= 32'(c) * slice_q;
     end
+    g6lc_ai_mul_seq #(.WA(32), .WB(18)) i_b_offset (
+      .clk_i, .rst_ni, .start_i(phase_q == DP_MUL_START),
+      .a_i(col0_q), .b_i(row_bytes_b[17:0]),
+      .done_o(span_done_vec[c]), .product_o(span_product)
+    );
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) b_offset_q <= '0;
+      else if (phase_q == DP_MUL_WAIT && span_done_vec[c]) b_offset_q <= span_product;
+    end
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin e_active[c] <= 1'b0; e_n[c] <= '0; end
+      else if (phase_q == DP_ADDR) begin
+        e_active[c] <= col0_q < n_q;
+        e_n[c] <= col0_q < n_q ?
+            ((n_q - col0_q > slice_q) ? slice_q : n_q - col0_q) : 32'd0;
+      end
+    end
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin e_pb[c] <= '0; e_pc[c] <= '0; end
+      else if (phase_q == DP_ADDR) begin
+        e_pb[c] <= pb_q + AddrWidth'(b_offset_q);
+        e_pc[c] <= pc_q + AddrWidth'(col0_q << 2);
+      end
+    end
+    assign e_start[c] = start_q && e_active[c];
     assign active_vec[c] = e_active[c];
     assign done_vec[c] = e_done[c];
+    assign ready_vec[c] = e_ready[c];
 
     g6lc_ai_gemm_seq #(
         .AddrWidth (AddrWidth),
@@ -441,12 +505,12 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
         .pmu_cycles_o (e_pmu_cy[c]),
         .pmu_phase_o  (e_phase[c]),
         .pmu_stall_o  (e_stall[c]),
-        .reuse_b_i(reuse_b_i),
-        .reuse_b_epoch_i(reuse_b_epoch_i),
+        .reuse_b_i(reuse_b_q),
+        .reuse_b_epoch_i(reuse_b_epoch_q),
         .reuse_b_invalidate_i(reuse_b_invalidate_i),
         .pmu_reuse_b_hit_o(e_hit_b[c]),
-        .reuse_a_i(reuse_a_i),
-        .reuse_a_epoch_i(reuse_a_epoch_i),
+        .reuse_a_i(reuse_a_q),
+        .reuse_a_epoch_i(reuse_a_epoch_q),
         .reuse_a_invalidate_i(reuse_a_invalidate_i),
         .pmu_reuse_a_hit_o(e_hit_a[c]),
         .axi_req_o  (e_req[c]),
@@ -455,57 +519,79 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
   end
 
   // ---- job bookkeeping ---------------------------------------------------------------------
+  always_comb begin
+    phase_d = phase_q;
+    unique case (phase_q)
+      DP_IDLE: if (accept) phase_d = DP_ALIGN;
+      DP_ALIGN: phase_d = DP_OFFSETS;
+      DP_OFFSETS: phase_d = DP_MUL_START;
+      DP_MUL_START: phase_d = DP_MUL_WAIT;
+      DP_MUL_WAIT: if (span_done) phase_d = DP_ADDR;
+      DP_ADDR: phase_d = DP_LAUNCH;
+      DP_LAUNCH: phase_d = active_vec == '0 ? DP_IDLE : DP_RUN;
+      DP_RUN: if ((pend_q & ~done_vec) == '0) phase_d = DP_IDLE;
+      default: phase_d = DP_IDLE;
+    endcase
+  end
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) phase_q <= DP_IDLE;
+    else phase_q <= phase_d;
+  end
+  assign busy_q = phase_q != DP_IDLE;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      busy_q <= 1'b0;
       pend_q <= '0;
       any_err_q <= 1'b0;
     end else begin
-      if (start_i && ready_o) begin
-        busy_q <= 1'b1;
+      if (accept) begin
+        pend_q <= '0;
         any_err_q <= 1'b0;
       end
       if (start_q) begin
         // engines with an empty slice owe nothing
         pend_q <= active_vec;
-        if (active_vec == '0) busy_q <= 1'b0;
-      end else if (busy_q) begin
+      end else if (phase_q == DP_RUN) begin
         pend_q <= pend_q & ~done_vec;
-        if ((pend_q & ~done_vec) == '0) busy_q <= 1'b0;
       end
       for (int unsigned c = 0; c < Clusters; c++)
-        if (e_done[c] && e_err[c]) any_err_q <= 1'b1;
+        if (phase_q == DP_RUN && pend_q[c] && e_done[c] && e_err[c]) any_err_q <= 1'b1;
     end
   end
   // r7 R1: job-event outputs are flops at the module boundary -- the
   // caller (island/desc) consumes them into its own cones.
-  logic ready_q, done_q, err_q;
+  logic done_q, err_q;
   logic done_n, err_now;
   always_comb begin
     // one-cycle done when the last pending engine finishes
     done_n = (start_q && active_vec == '0) ||
-             (busy_q && !start_q && pend_q != '0 && (pend_q & ~done_vec) == '0);
+             (phase_q == DP_RUN && pend_q != '0 && (pend_q & ~done_vec) == '0);
     err_now = any_err_q;
     for (int unsigned c = 0; c < Clusters; c++)
-      if (e_done[c] && e_err[c]) err_now = 1'b1;
+      if (phase_q == DP_RUN && pend_q[c] && e_done[c] && e_err[c]) err_now = 1'b1;
   end
   always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin ready_q <= 1'b0; done_q <= 1'b0; err_q <= 1'b0; end
+    if (!rst_ni) begin done_q <= 1'b0; err_q <= 1'b0; end
     else begin
-      ready_q <= !busy_q && !start_q;
       done_q  <= done_n;
       err_q   <= done_n && err_now;
     end
   end
-  assign ready_o = ready_q;
+  assign ready_o = !busy_q && (&ready_vec);
   assign done_o  = done_q;
   assign err_o   = err_q;
 
   // pragma translate_off
-  // r7 R1 seam invariant: a start lands only while the registered ready
-  // sampled it free (ready_q holds the pre-edge readiness).
+  // Preparation owns admission; no completion can escape before engine launch.
   assert property (@(posedge clk_i) disable iff (!rst_ni)
-      start_i |-> !busy_q);
+      start_i |-> ready_o);
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      start_q |-> slice_q == slice_cols(n_q));
+  for (genvar c = 0; c < Clusters; c++) begin : gen_launch_check
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+        e_start[c] |-> e_ready[c] &&
+        e_pb[c] == pb_q + AddrWidth'((32'(c) * slice_q) * row_bytes_b) &&
+        e_pc[c] == pc_q + AddrWidth'((32'(c) * slice_q) << 2));
+  end
   // pragma translate_on
 
   // PMU: slowest engine's cycles/phases, summed beats and stalls.

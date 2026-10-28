@@ -130,6 +130,19 @@ assign ready_o = svt_bm_top_p17046_n23781 & ~win_busy; // r7 R5 window gate
     assign accept = valid_i && ready_o;
     assign new_batch = !state_q.active || batch_first_i;
 
+    // r24: policy_sparse_residue(sample) is "six or more zero bytes", i.e.
+    // at most two nonzero bytes: clear the lowest set bit twice.
+    logic [7:0] nonzero_bytes, nonzero_m1, nonzero_m2;
+    logic sparse_residue_c;
+    always_comb for (int i = 0; i < 8; i++) nonzero_bytes[i] = |sample_i[i*8 +: 8];
+    assign nonzero_m1 = nonzero_bytes & (nonzero_bytes - 8'd1);
+    assign nonzero_m2 = nonzero_m1 & (nonzero_m1 - 8'd1);
+    assign sparse_residue_c = nonzero_m2 == 8'd0;
+    // pragma translate_off
+    always @(posedge clk_i) if (rst_ni)
+      assert (sparse_residue_c == policy_sparse_residue(sample_i))
+        else $error("sparse residue identity");
+    // pragma translate_on
     always_comb begin
       features = '0;
       if (accept) begin
@@ -138,7 +151,7 @@ assign ready_o = svt_bm_top_p17046_n23781 & ~win_busy; // r7 R5 window gate
         features.k = policy_bucket(k_i);
         features.opcode = opcode_i;
         features.balance = (balance_i == 2'd3) ? 2'd1 : balance_i;
-        features.sparse = sample_valid_i && policy_sparse_residue(sample_i);
+        features.sparse = sample_valid_i && sparse_residue_c;
         features.continuous = !new_batch &&
             ({features.m, features.n, features.k} == state_q.shape);
         features.shape_valid = (m_i != 16'd0) && (n_i != 16'd0) && (k_i != 16'd0);
@@ -147,18 +160,27 @@ assign ready_o = svt_bm_top_p17046_n23781 & ~win_busy; // r7 R5 window gate
 
     // Re-encode only on a new batch or a genuine feature change; a steady shape
     // reuses the committed candidate so the encoder is not in the per-job path.
-    assign evaluate = accept && (new_batch || features != state_q.signature);
-    assign encode_features = evaluate ? features : policy_features_t'('0);
+    // r26: evaluate/encode/miss run one stage later, from the captured
+    // features. The window gate keeps one sample in flight, so state_q is
+    // the same in the accept cycle and the f1 cycle; the accept-cycle
+    // mispredict input is captured alongside the features.
+    assign evaluate = f1_vld_q && (f1_new_batch_q || f1_features_q != state_q.signature);
+    // Encode beside the signature comparison; apply evaluate only at the
+    // candidate selection, keeping it out of the encoder's input path.
+    assign encode_features = f1_features_q;
     assign candidate = evaluate ? policy_encode(encode_features) : state_q.candidate;
-    assign miss = accept && !new_batch && state_q.prediction_pending &&
-        ((state_q.predicted != candidate) || mispredict_i);
+    assign miss = f1_vld_q && !f1_new_batch_q && state_q.prediction_pending &&
+        ((state_q.predicted != candidate) || f1_mispredict_q);
+    assign f1_evaluate_q = evaluate;
+    assign f1_candidate_q = candidate;
+    assign f1_miss_q = miss;
 
     // P6/rank-0: split the monolithic next-state comb into per-family
     // blocks. Each family reads state_q + inputs + other families' *_d
     // leaf wires -- never a mid-flight struct member.
     logic                  work_valid_d, held_d, warm_valid_d,
                            residual_skip_d, prediction_pending_d;
-    logic [47:0]           warm_addr_d;
+    logic [63:0]           warm_addr_d;
     policy_code_t          predicted_d;
 
     // r7 R5: stage registers between the three families. f1_q captures
@@ -169,9 +191,9 @@ assign ready_o = svt_bm_top_p17046_n23781 & ~win_busy; // r7 R5 window gate
     policy_features_t      f1_features_q;
     logic                  f1_evaluate_q, f1_new_batch_q, f1_miss_q,
                            f1_batch_last_q, f1_next_addr_valid_q,
-                           f1_exact_zero_q, f1_vld_q;
+                           f1_exact_zero_q, f1_vld_q, f1_mispredict_q;
     policy_code_t          f1_candidate_q;
-    logic [47:0]           f1_next_addr_q;
+    logic [63:0]           f1_next_addr_q;
     logic                  win_q0, win_q1, win_q2;
     wire                   win_busy = win_q0 || win_q1 || win_q2;
 
@@ -190,19 +212,19 @@ assign ready_o = svt_bm_top_p17046_n23781 & ~win_busy; // r7 R5 window gate
     // Family 1 register stage: accept-cycle capture.
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
-        f1_features_q <= '0; f1_evaluate_q <= 1'b0; f1_new_batch_q <= 1'b0;
-        f1_miss_q <= 1'b0; f1_batch_last_q <= 1'b0;
+        f1_features_q <= '0; f1_new_batch_q <= 1'b0;
+        f1_batch_last_q <= 1'b0; f1_mispredict_q <= 1'b0;
         f1_next_addr_valid_q <= 1'b0; f1_exact_zero_q <= 1'b0;
-        f1_candidate_q <= policy_code_t'('0); f1_next_addr_q <= '0; f1_vld_q <= 1'b0;
+        f1_next_addr_q <= '0; f1_vld_q <= 1'b0;
+      end else if (flush_i || !enable_i) begin
+        f1_vld_q <= 1'b0;
       end else begin
         f1_features_q        <= features;
-        f1_evaluate_q        <= evaluate;
         f1_new_batch_q       <= new_batch;
-        f1_miss_q            <= miss;
+        f1_mispredict_q      <= mispredict_i;
         f1_batch_last_q      <= batch_last_i;
         f1_next_addr_valid_q <= next_addr_valid_i;
         f1_exact_zero_q      <= exact_zero_i;
-        f1_candidate_q       <= candidate;
         f1_next_addr_q       <= next_addr_i;
         f1_vld_q             <= accept;
       end
@@ -219,7 +241,7 @@ assign ready_o = svt_bm_top_p17046_n23781 & ~win_busy; // r7 R5 window gate
                            f2_batch_last_q, f2_next_addr_valid_q,
                            f2_exact_zero_q, f2_vld_q;
     policy_code_t          f2_candidate_q;
-    logic [47:0]           f2_next_addr_q;
+    logic [63:0]           f2_next_addr_q;
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
@@ -230,6 +252,11 @@ assign ready_o = svt_bm_top_p17046_n23781 & ~win_busy; // r7 R5 window gate
         f2_miss_q <= 1'b0; f2_batch_last_q <= 1'b0;
         f2_next_addr_valid_q <= 1'b0; f2_exact_zero_q <= 1'b0;
         f2_candidate_q <= policy_code_t'('0); f2_next_addr_q <= '0; f2_vld_q <= 1'b0;
+      end else if (flush_i || !enable_i) begin
+        f2_vld_q <= 1'b0;
+        f2_committed_q <= 1'b0;
+        f2_predict_hit_q <= 1'b0;
+        f2_predict_miss_q <= 1'b0;
       end else begin
         // Passthroughs.
         f2_features_q        <= f1_features_q;
@@ -309,65 +336,50 @@ assign ready_o = svt_bm_top_p17046_n23781 & ~win_busy; // r7 R5 window gate
     end
 
     // Family 3: decodes + warm/residual/pending outputs from f2.
-    always_comb begin
-      selected_policy = policy_decode(f2_code_q);
-      predicted_d = (f2_vld_q && f2_features_q.continuous &&
+    assign selected_policy = policy_decode(f2_code_q);
+    assign predicted_d = (f2_vld_q && f2_features_q.continuous &&
                      f2_candidate_q == f2_code_q) ?
           f2_code_q : policy_successor(f2_code_q);
-      predicted_policy = policy_decode(predicted_d);
-      work_valid_d = f2_vld_q;
-      held_d = f2_vld_q && !f2_committed_q;
-      warm_valid_d = 1'b0;
-      warm_addr_d  = state_q.warm_addr;
-      residual_skip_d = 1'b0;
-      prediction_pending_d = 1'b0;
-      if (f2_vld_q) begin
-        residual_skip_d = f2_features_q.shape_valid &&
-            selected_policy.sparse_check && f2_exact_zero_q;
-        if (!f2_batch_last_q && f2_features_q.shape_valid &&
+    assign predicted_policy = policy_decode(predicted_d);
+    assign work_valid_d = f2_vld_q;
+    assign held_d = f2_vld_q && !f2_committed_q;
+    assign residual_skip_d = f2_vld_q && f2_features_q.shape_valid &&
+                            selected_policy.sparse_check && f2_exact_zero_q;
+    assign warm_valid_d = f2_vld_q && !f2_batch_last_q && f2_features_q.shape_valid &&
             f2_next_addr_valid_q &&
             predicted_policy.prefetch_depth != 2'd0 && !f2_miss_q &&
-            (f2_new_batch_q || state_q.cooldown == '0)) begin
-          warm_valid_d = 1'b1;
-          warm_addr_d  = f2_next_addr_q;
-          prediction_pending_d = 1'b1;
-        end
-      end
-    end
+            (f2_new_batch_q || state_q.cooldown == '0);
+    assign warm_addr_d = warm_valid_d ? f2_next_addr_q : state_q.warm_addr;
+    assign prediction_pending_d = warm_valid_d;
 
-    // Assemble the next state from the f2 stage.
-    always_comb begin
-      state_d = state_q;
-      state_d.active             = f2_vld_q ? !f2_batch_last_q : state_q.active;
-      state_d.work_valid         = work_valid_d;
-      state_d.warm_valid         = warm_valid_d;
-      state_d.warm_addr          = warm_addr_d;
-      state_d.residual_skip      = residual_skip_d;
-      state_d.evaluated          = f2_vld_q && f2_evaluate_q;
-      state_d.committed          = f2_committed_q;
-      state_d.held               = held_d;
-      state_d.predict_hit        = f2_predict_hit_q;
-      state_d.predict_miss       = f2_predict_miss_q;
-      state_d.shape              = f2_vld_q ?
-          {f2_features_q.m, f2_features_q.n, f2_features_q.k}
-          : state_q.shape;
-      if (f2_vld_q && f2_evaluate_q) begin
-        state_d.signature = f2_features_q;
-        state_d.candidate = f2_candidate_q;
-      end
-      state_d.code               = f2_code_q;
-      state_d.pending            = f2_pending_q;
-      state_d.votes              = f2_votes_q;
-      state_d.dwell              = f2_dwell_q;
-      state_d.cooldown           = f2_cooldown_q;
-      state_d.predicted          = predicted_d;
-      state_d.prediction_pending = prediction_pending_d;
-      if (flush_i || !enable_i) state_d = '0;
-    end
+    // Each publication field has its own cone. Idle f2 data must not replay
+    // pre-commit history when the previous work_valid pulse clears.
+    assign state_d.active = f2_vld_q ? !f2_batch_last_q : state_q.active;
+    assign state_d.work_valid = work_valid_d;
+    assign state_d.warm_valid = warm_valid_d;
+    assign state_d.warm_addr = warm_addr_d;
+    assign state_d.residual_skip = residual_skip_d;
+    assign state_d.evaluated = f2_vld_q && f2_evaluate_q;
+    assign state_d.committed = f2_vld_q && f2_committed_q;
+    assign state_d.held = held_d;
+    assign state_d.predict_hit = f2_vld_q && f2_predict_hit_q;
+    assign state_d.predict_miss = f2_vld_q && f2_predict_miss_q;
+    assign state_d.shape = f2_vld_q ?
+        {f2_features_q.m, f2_features_q.n, f2_features_q.k} : state_q.shape;
+    assign state_d.signature = f2_vld_q && f2_evaluate_q ? f2_features_q : state_q.signature;
+    assign state_d.candidate = f2_vld_q && f2_evaluate_q ? f2_candidate_q : state_q.candidate;
+    assign state_d.code = f2_vld_q ? f2_code_q : state_q.code;
+    assign state_d.pending = f2_vld_q ? f2_pending_q : state_q.pending;
+    assign state_d.votes = f2_vld_q ? f2_votes_q : state_q.votes;
+    assign state_d.dwell = f2_vld_q ? f2_dwell_q : state_q.dwell;
+    assign state_d.cooldown = f2_vld_q ? f2_cooldown_q : state_q.cooldown;
+    assign state_d.predicted = f2_vld_q ? predicted_d : state_q.predicted;
+    assign state_d.prediction_pending = f2_vld_q ? prediction_pending_d : state_q.prediction_pending;
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) state_q <= '0;
-      else if (testmode_i || f2_vld_q || flush_i || !enable_i || state_q.work_valid)
+      else if (flush_i || !enable_i) state_q <= '0;
+      else if (testmode_i || f2_vld_q || state_q.work_valid)
         state_q <= state_d;
     end
 
@@ -393,10 +405,10 @@ assign ready_o = svt_bm_top_p17046_n23781 & ~win_busy; // r7 R5 window gate
     assert property (@(posedge clk_i) disable iff (!rst_ni) commit_o |-> work_valid_o);
     assert property (@(posedge clk_i) disable iff (!rst_ni) warm_valid_o |-> work_valid_o);
     assert property (@(posedge clk_i) disable iff (!rst_ni)
-        residual_skip_o |-> work_valid_o && policy_o.sparse_check && $past(exact_zero_i));
+        residual_skip_o |-> work_valid_o && policy_o.sparse_check && $past(f2_exact_zero_q));
     assert property (@(posedge clk_i) disable iff (!rst_ni) !(predict_hit_o && predict_miss_o));
     assert property (@(posedge clk_i) disable iff (!rst_ni)
-        !valid_i && enable_i && !flush_i |=> $stable(code_o));
+        !f2_vld_q && enable_i && !flush_i |=> $stable(code_o));
     // pragma translate_on
   end else begin : gen_off
     assign ready_o = 1'b0;

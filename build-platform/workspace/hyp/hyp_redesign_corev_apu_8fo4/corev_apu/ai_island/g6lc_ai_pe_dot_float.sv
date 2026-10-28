@@ -148,25 +148,50 @@ module g6lc_ai_pe_dot_float #(
   end
   assign block_exp = exp_min[LEVELS][0];
 
-  // Align each product and reduce using an in-place tree. Alignment is a pure
-  // function so this block contains only the self-referential reduction.
-  always_comb begin
-    logic signed [MAXW-1:0] node [P2];
-    int unsigned cnt;
-    bfp_sum = MAXW'(0);
-    for (int unsigned l = 0; l < P2; l++) begin
-      node[l] = valid_arr[l] ? g6lc_ai_fp_pkg::fp_dot_product_aligned(prod[l], block_exp) : MAXW'(0);
-    end
-
-    cnt = P2;
-    while (cnt > 1) begin
-      for (int unsigned i = 0; i < (cnt >> 1); i++) begin
-        node[i] = node[2*i] + node[2*i+1];
+  // Compress complete aligned rows, retaining carry separately until the
+  // final pair. This removes serial carry propagation between tree levels.
+  function automatic int unsigned rows_at(input int unsigned level);
+    int unsigned n;
+    n = P2;
+    for (int unsigned l = 0; l < level; l++) n = 2*(n/3) + n%3;
+    return n;
+  endfunction
+  function automatic int unsigned compression_levels();
+    int unsigned n, levels;
+    n = P2;
+    levels = 0;
+    while (n > 2) begin n = 2*(n/3) + n%3; levels++; end
+    return levels;
+  endfunction
+  localparam int unsigned CsaLevels = compression_levels();
+  for (genvar level = 0; level <= CsaLevels; level++) begin : gen_compress
+    localparam int unsigned N = rows_at(level);
+    logic [MAXW-1:0] row [N];
+    if (level == 0) begin : gen_align
+      for (genvar l = 0; l < P2; l++) begin : gen_lane
+        assign row[l] = valid_arr[l] ?
+            g6lc_ai_fp_pkg::fp_dot_product_aligned(prod[l], block_exp) : MAXW'(0);
       end
-      // P2 is a power of two; no odd tail
-      cnt = cnt >> 1;
+    end else begin : gen_level
+      localparam int unsigned Prev = rows_at(level-1);
+      for (genvar g = 0; g < Prev/3; g++) begin : gen_triple
+        logic [MAXW-1:0] a, b, c, carry;
+        assign a = gen_compress[level-1].row[3*g];
+        assign b = gen_compress[level-1].row[3*g+1];
+        assign c = gen_compress[level-1].row[3*g+2];
+        assign carry = (a & b) | (a & c) | (b & c);
+        assign row[2*g] = a ^ b ^ c;
+        assign row[2*g+1] = {carry[MAXW-2:0], 1'b0};
+      end
+      for (genvar t = 0; t < Prev%3; t++) begin : gen_tail
+        assign row[2*(Prev/3)+t] = gen_compress[level-1].row[3*(Prev/3)+t];
+      end
     end
-    bfp_sum = node[0];
+  end
+  if (P2 == 1) begin : gen_single_sum
+    assign bfp_sum = gen_compress[CsaLevels].row[0];
+  end else begin : gen_pair_sum
+    assign bfp_sum = gen_compress[CsaLevels].row[0] + gen_compress[CsaLevels].row[1];
   end
 
   // Final output: continuous assignment to avoid always_comb priority-mux loops.

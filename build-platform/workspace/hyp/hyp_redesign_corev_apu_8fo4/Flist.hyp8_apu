@@ -424,8 +424,13 @@ ${HYP_APU_DIR}/corev_apu/ai_island/g6lc_ai_pe_dot_pipe.sv
 ${HYP_APU_DIR}/corev_apu/ai_island/g6lc_ai_fp_mac.sv
 ${HYP_APU_DIR}/corev_apu/ai_island/g6lc_ai_policy_codec.sv
 ${HYP_APU_DIR}/corev_apu/ai_island/g6lc_ai_policy_subcode.sv
+${HYP_APU_DIR}/corev_apu/ai_island/g6lc_ai_policy_topology.sv
+${HYP_APU_DIR}/corev_apu/ai_island/g6lc_ai_policy_publish.sv
 ${HYP_APU_DIR}/corev_apu/ai_island/g6lc_ai_policy_steer.sv
 ${HYP_APU_DIR}/corev_apu/ai_island/g6lc_ai_gemm_seq.sv
+${HYP_APU_DIR}/corev_apu/ai_island/g6lc_ai_gemm_fp32_add.sv
+${HYP_APU_DIR}/corev_apu/ai_island/g6lc_ai_gemm_span.sv
+${HYP_APU_DIR}/corev_apu/ai_island/g6lc_ai_gemm_store_plan.sv
 ${HYP_APU_DIR}/corev_apu/ai_island/g6lc_ai_mul_seq.sv
 ${HYP_APU_DIR}/corev_apu/ai_island/g6lc_ai_dram_timing.sv
 ${HYP_APU_DIR}/corev_apu/ai_island/g6lc_ai_cpl_fifo.sv

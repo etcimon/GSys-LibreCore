@@ -159,11 +159,18 @@ assign full  = (cnt_q == CntW'(Depth));
   logic [AddrWidth-1:0] aw_last_byte;
   logic [AddrWidth-LineShift-1:0] aw_line0, aw_line1;
   logic [7:0] aw_nlines;
+  // pragma translate_off
+  always @(posedge clk_i) if (rst_ni && aw_fire_i)
+    assert (aw_nlines == 8'(aw_line1 - aw_line0)) else $error("AW line arithmetic");
+  // pragma translate_on
   always_comb begin
-    aw_last_byte = aw_addr_i + ((AddrWidth'(aw_len_i) + 1) << aw_size_i) - 1;  // kept: OR-form was the rise
+    // r26: the line difference needs only the low 8 + LineShift address
+    // bits. (A one-hot constant-shift form of the burst bytes measured
+    // 70.0 on the structural board and was reverted.)
+    aw_last_byte = aw_addr_i + ((AddrWidth'(aw_len_i) + 1) << aw_size_i) - 1;
     aw_line0  = aw_addr_i[AddrWidth-1:LineShift];
     aw_line1  = aw_last_byte[AddrWidth-1:LineShift];
-    aw_nlines = 8'(aw_line1 - aw_line0);
+    aw_nlines = aw_last_byte[LineShift+7:LineShift] - aw_addr_i[LineShift+7:LineShift];
   end
 
   // Tail coalescing: single-line AW onto a single-line tail that still awaits
@@ -171,20 +178,54 @@ assign full  = (cnt_q == CntW'(Depth));
   // G2 (A134): the tail entry's line/nlines/nb are kept in registers written
   // at push instead of a dynamic q_q[wr_q-1] array read; the nb increments
   // and the bp-side decrement that target the tail are mirrored below.
+  // Two accepted AW descriptors decouple admission from the tail comparison.
+  // B may arrive before its descriptor reaches q_q; retain those credits and
+  // consume them in the same order as the accepted descriptors.
+  localparam int unsigned BCreditW = BeatCntW + $clog2(Depth + 2) + 1;
+  ent_t aw_skid_q [2];
+  logic skid_wr_q, skid_rd_q;
+  logic [1:0] skid_count_q;
+  logic push_aw, consume_b;
+  logic [BCreditW-1:0] b_credit_q;
+  logic [AddrWidth-LineShift-1:0] push_line;
+  logic [7:0] push_nlines;
+  assign push_line = aw_skid_q[skid_rd_q].line;
+  assign push_nlines = aw_skid_q[skid_rd_q].nlines;
+  assign push_aw = skid_count_q != 0 && (!full || tail_same);
+  assign consume_b = !none_pending_b && (b_fire_i || b_credit_q != 0);
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      aw_skid_q[0] <= '0;
+      aw_skid_q[1] <= '0;
+      skid_wr_q <= 1'b0;
+      skid_rd_q <= 1'b0;
+      skid_count_q <= '0;
+      b_credit_q <= '0;
+    end else begin
+      if (aw_fire_i) begin
+        aw_skid_q[skid_wr_q] <= '{line: aw_line0, nlines: aw_nlines, nb: BeatCntW'(1)};
+        skid_wr_q <= !skid_wr_q;
+      end
+      if (push_aw) skid_rd_q <= !skid_rd_q;
+      skid_count_q <= skid_count_q + 2'(aw_fire_i) - 2'(push_aw);
+      b_credit_q <= b_credit_q + BCreditW'(b_fire_i) - BCreditW'(consume_b);
+    end
+  end
+
   logic            tail_same;
   logic [PtrW-1:0] tail_idx;
   assign tail_idx  = wr_q - PtrW'(1);
-  assign tail_same = !none_pending_b && (aw_nlines == 8'd0) &&
-                     (q_q[tail_idx].nlines == 8'd0) && (q_q[tail_idx].line == aw_line0) &&
+  assign tail_same = !none_pending_b && (push_nlines == 8'd0) &&
+                     (q_q[tail_idx].nlines == 8'd0) && (q_q[tail_idx].line == push_line) &&
                      (q_q[tail_idx].nb != '1);
-  assign aw_hold_o = full && !tail_same;
+  assign aw_hold_o = skid_count_q == 2;
 
   // B consumption: the oldest not-yet-landed entry is q_q[bp_q].
   // A same-cycle coalescing push onto the bp entry keeps its count (+1 -1), so it
   // does not land on this B.
   logic b_lands_entry, same_cycle_refill;
-  assign same_cycle_refill = tail_same && aw_fire_i && (tail_idx == bp_q);
-  assign b_lands_entry = b_fire_i && !none_pending_b && (q_q[bp_q].nb == BeatCntW'(1)) &&
+  assign same_cycle_refill = tail_same && push_aw && (tail_idx == bp_q);
+  assign b_lands_entry = consume_b && (q_q[bp_q].nb == BeatCntW'(1)) &&
                          !same_cycle_refill;
 
   // Inval walker over landed entries (rd_q != bp_q).
@@ -203,8 +244,8 @@ assign full  = (cnt_q == CntW'(Depth));
   // pragma translate_off
   // G2 reference: the dynamic array read the tail registers replaced.
   logic tail_same_ref;
-  assign tail_same_ref = !none_pending_b && (aw_nlines == 8'd0) &&
-      (q_q[tail_idx].nlines == 8'd0) && (q_q[tail_idx].line == aw_line0) &&
+  assign tail_same_ref = !none_pending_b && (push_nlines == 8'd0) &&
+      (q_q[tail_idx].nlines == 8'd0) && (q_q[tail_idx].line == push_line) &&
       (q_q[tail_idx].nb != '1);
   int unsigned g6lc_ai_inval_tail_eq;
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -223,7 +264,8 @@ assign full  = (cnt_q == CntW'(Depth));
 
   assign inval_valid_o = walk_v_q && !inval_out_q;
   assign inval_addr_o  = {walk_line_q, {LineShift{1'b0}}};
-  assign idle_o        = empty && !walk_v_q && !inval_out_q;
+  assign idle_o        = empty && !walk_v_q && !inval_out_q &&
+                        skid_count_q == 0 && b_credit_q == 0;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -233,16 +275,16 @@ assign full  = (cnt_q == CntW'(Depth));
       pmu_invals_o <= '0; pmu_hold_o <= '0;
     end else begin
       // ---- push / coalesce ----
-      if (aw_fire_i) begin
+      if (push_aw) begin
         if (tail_same) q_q[tail_idx].nb <= q_q[tail_idx].nb + BeatCntW'(1);
         else begin
-          q_q[wr_q] <= '{line: aw_line0, nlines: aw_nlines, nb: BeatCntW'(1)};
+          q_q[wr_q] <= '{line: push_line, nlines: push_nlines, nb: BeatCntW'(1)};
           wr_q <= wr_q + PtrW'(1);
         end
       end
       if (aw_hold_o) pmu_hold_o <= pmu_hold_o + 32'd1;
       // ---- B: land the oldest pending entry ----
-      if (b_fire_i && !none_pending_b) begin
+      if (consume_b) begin
         // nb decrement and the coalescing increment never target the same
         // entry in one cycle unless the tail is the bp entry with nb>=2 (then
         // the two updates below are on different fields/values; keep it exact).
@@ -260,8 +302,8 @@ assign full  = (cnt_q == CntW'(Depth));
         rd_q <= rd_q + PtrW'(1);
       end
       // ---- occupancy ----
-      cnt_q  <= cnt_q  + CntW'(aw_fire_i && !tail_same) - CntW'(take_head);
-      land_q <= land_q + CntW'(aw_fire_i && !tail_same) - CntW'(b_lands_entry);
+      cnt_q  <= cnt_q  + CntW'(push_aw && !tail_same) - CntW'(take_head);
+      land_q <= land_q + CntW'(push_aw && !tail_same) - CntW'(b_lands_entry);
       // ---- inval issue / done ----
       if (inval_valid_o && inval_ready_i) inval_out_q <= 1'b1;
       if (inval_out_q && inval_done_i) begin
@@ -280,8 +322,17 @@ assign full  = (cnt_q == CntW'(Depth));
   always_ff @(posedge clk_i) if (rst_ni) begin
     assert (!(aw_fire_i && aw_hold_o))
       else $error("g6lc_ai_inval_queue: AW accepted while the queue held it");
-    assert (!(b_fire_i && none_pending_b))
-      else $error("g6lc_ai_inval_queue: B without a pending AW");
+    begin
+      logic [BCreditW-1:0] resident;
+      resident = BCreditW'(skid_count_q);
+      for (int i = 0; i < Depth; i++) resident += BCreditW'(q_q[i].nb);
+      assert (resident >= b_credit_q)
+        else $error("g6lc_ai_inval_queue: excess buffered B credits");
+      assert (!b_fire_i || resident > b_credit_q || aw_fire_i)
+        else $error("g6lc_ai_inval_queue: B without an accepted AW");
+    end
+    assert (skid_count_q <= 2)
+      else $error("g6lc_ai_inval_queue: AW skid overflow");
 `ifndef G6LC_MUT_INVAL_AT_AW
     // (off under the review mutation so the leaf's ORDER oracle, not this
     // bookkeeping check, is what catches an inval issued before its B)

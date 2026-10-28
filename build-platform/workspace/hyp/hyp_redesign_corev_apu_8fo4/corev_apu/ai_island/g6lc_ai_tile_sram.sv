@@ -18,6 +18,9 @@ module g6lc_ai_tile_sram #(
     parameter int unsigned DataWidth = 8,
     parameter int unsigned NumPorts  = 2,  // 2 (A/C), 4 (B quad), or 8 (B oct)
     parameter              ImplKey   = "g6lc_ai_tile",
+    // r23: operand banks register their read data (the sequencer's read
+    // stage); the C bank keeps the latency-0 read its store/seed paths assume.
+    parameter int unsigned ReadLatency = 0,
     // DEPENDENT
     parameter int unsigned AddrWidth = (NumWords > 1) ? $clog2(NumWords) : 1,
     parameter int unsigned BeWidth   = (DataWidth + 7) / 8
@@ -97,7 +100,7 @@ module g6lc_ai_tile_sram #(
         // Latency 0: the sequencer reads operands and drives the PE in the same
         // cycle, so a registered macro output would cost a whole MAC cycle.
         // This is the seam a PDK swap re-times, not the sequencer.
-        .Latency    (0),
+        .Latency    (ReadLatency),
         .SimInit    ("none"),
         .PrintSimCfg(1'b0),
         .ImplKey    (ImplKey)
@@ -161,7 +164,7 @@ module g6lc_ai_tile_sram #(
         .DataWidth  (DataWidth),
         .ByteWidth  (8),
         .NumPorts   (4),
-        .Latency    (0),
+        .Latency    (ReadLatency),
         .SimInit    ("none"),
         .PrintSimCfg(1'b0),
         .ImplKey    (ImplKey)
@@ -244,7 +247,7 @@ module g6lc_ai_tile_sram #(
         .DataWidth  (DataWidth),
         .ByteWidth  (8),
         .NumPorts   (8),
-        .Latency    (0),
+        .Latency    (ReadLatency),
         .SimInit    ("none"),
         .PrintSimCfg(1'b0),
         .ImplKey    (ImplKey)

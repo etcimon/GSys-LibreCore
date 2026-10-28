@@ -109,46 +109,81 @@ module g6lc_ai_pe_dot #(
   // zero for non-INT4, so the sum is bit-identical to the old Lanes-only tree.
   logic signed [31:0] tree_sum;
 
-  always_comb begin
-    automatic logic signed [7:0]  op_a, op_b;
-    automatic logic signed [31:0] node [2*Lanes];
-    automatic int unsigned cnt;
+  // Signed byte products as wired rows and four carry-save levels. INT4 uses
+  // two sign-extended nibbles. The sign row is complemented with a separate
+  // +1 operand, so no carry-propagate negation precedes the reduction.
+  logic signed [15:0] prod_lo_c [Lanes];
+  logic signed [15:0] prod_hi_c [Lanes];
+  for (genvar l = 0; l < Lanes; l++) begin : gen_lane_product
+    logic int4_lane;
+    assign int4_lane = numfmt_i == AI_FMT_INT4;
+    for (genvar s = 0; s < 2; s++) begin : gen_slot
+      logic [7:0] op_a, op_b;
+      logic live;
+      logic [15:0] product;
+      if (s == 0) begin : gen_low
+        assign op_a = int4_lane ? {{4{a_i[l][3]}}, a_i[l][3:0]} : a_i[l];
+        assign op_b = int4_lane ? {{4{b_i[l][3]}}, b_i[l][3:0]} : b_i[l];
+        assign live = valid_i[l];
+        assign prod_lo_c[l] = product & {16{live}};
+      end else begin : gen_high
+        assign op_a = {{4{a_i[l][7]}}, a_i[l][7:4]};
+        assign op_b = {{4{b_i[l][7]}}, b_i[l][7:4]};
+        assign live = valid_i[l] && int4_lane;
+        assign prod_hi_c[l] = product & {16{live}};
+      end
+      for (genvar level = 0; level <= 4; level++) begin : gen_csa
+        localparam int N = level == 0 ? 9 : level == 1 ? 6 :
+                           level == 2 ? 4 : level == 3 ? 3 : 2;
+        logic [15:0] row [N];
+        if (level == 0) begin : gen_rows
+          for (genvar bitno = 0; bitno < 7; bitno++) begin : gen_positive
+            assign row[bitno] = {16{op_b[bitno]}} &
+                {{(8-bitno){op_a[7]}}, op_a, {bitno{1'b0}}};
+          end
+          assign row[7] = ~({16{op_b[7]}} & {op_a[7], op_a, 7'b0});
+          assign row[8] = 16'd1;
+        end else begin : gen_level
+          localparam int Prev = level == 1 ? 9 : level == 2 ? 6 : level == 3 ? 4 : 3;
+          for (genvar g = 0; g < Prev/3; g++) begin : gen_triple
+            logic [15:0] a, b, c, carry;
+            assign a = gen_csa[level-1].row[3*g];
+            assign b = gen_csa[level-1].row[3*g+1];
+            assign c = gen_csa[level-1].row[3*g+2];
+            assign carry = (a & b) | (a & c) | (b & c);
+            assign row[2*g] = a ^ b ^ c;
+            assign row[2*g+1] = {carry[14:0], 1'b0};
+          end
+          for (genvar t = 0; t < Prev%3; t++) begin : gen_tail
+            assign row[2*(Prev/3)+t] = gen_csa[level-1].row[3*(Prev/3)+t];
+          end
+        end
+      end
+      assign product = gen_csa[4].row[0] + gen_csa[4].row[1];
+    end
+  end
 
-    for (int unsigned l = 0; l < Lanes; l++) begin
-      if (numfmt_i == AI_FMT_INT4) begin
-        // Two 4-bit signed operands packed into one byte. Sign-extend each
-        // nibble to 8 bits, then to 32 bits for the product. The existing 8x8
-        // multiplier now computes two 4x4 products per lane, doubling INT4
-        // throughput without a separate multiplier array.
-        op_a = $signed(a_i[l][3:0]);
-        op_b = $signed(b_i[l][3:0]);
-        node[2*l]   = valid_i[l] ? (32'($signed(op_a)) * 32'($signed(op_b))) : 32'sd0;
-        op_a = $signed(a_i[l][7:4]);
-        op_b = $signed(b_i[l][7:4]);
-        node[2*l+1] = valid_i[l] ? (32'($signed(op_a)) * 32'($signed(op_b))) : 32'sd0;
-      end else begin
-        // INT8 and future 8-bit-significand formats: one operand per byte.
-        // The upper product slot is zeroed so the tree remains the same shape.
-        node[2*l]   = valid_i[l]
-                    ? (32'($signed(a_i[l])) * 32'($signed(b_i[l])))
-                    : 32'sd0;
-        node[2*l+1] = 32'sd0;
+  // Explicit width-growing levels, including unchanged promotion of odd tails.
+  localparam int SumLevels = $clog2(2*Lanes);
+  for (genvar level = 0; level <= SumLevels; level++) begin : gen_sum_level
+    localparam int N = (2*Lanes + (1 << level) - 1) >> level;
+    localparam int W = (16 + level < 32) ? 16 + level : 32;
+    logic signed [W-1:0] value [N];
+    for (genvar i = 0; i < N; i++) begin : gen_node
+      if (level == 0) begin : gen_input
+        assign value[i] = i % 2 == 0 ? prod_lo_c[i/2] : prod_hi_c[i/2];
+      end else begin : gen_reduce
+        localparam int Prev = (2*Lanes + (1 << (level-1)) - 1) >> (level-1);
+        if (2*i+1 < Prev) begin : gen_pair
+          assign value[i] = W'($signed(gen_sum_level[level-1].value[2*i])) +
+                            W'($signed(gen_sum_level[level-1].value[2*i+1]));
+        end else begin : gen_tail
+          assign value[i] = W'($signed(gen_sum_level[level-1].value[2*i]));
+        end
       end
     end
-
-    cnt = 2*Lanes;
-    while (cnt > 1) begin
-      for (int unsigned i = 0; i < (cnt >> 1); i++) node[i] = node[2*i] + node[2*i+1];
-      // Odd tail: promote unchanged, which keeps a non-power-of-two `2*Lanes`
-      // exact without introducing a zero term.
-      // Promotion, not zero-padding: padding would be equally correct here but
-      // costs an adder per odd level for no arithmetic gain.
-      if (cnt[0]) node[cnt >> 1] = node[cnt-1];
-      cnt = (cnt + 1) >> 1;
-    end
-
-    tree_sum = node[0];
   end
+  assign tree_sum = 32'($signed(gen_sum_level[SumLevels].value[0]));
 
   assign sum_o = tree_sum;
 

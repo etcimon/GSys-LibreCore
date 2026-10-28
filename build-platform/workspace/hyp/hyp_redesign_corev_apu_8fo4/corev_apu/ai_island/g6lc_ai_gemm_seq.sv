@@ -76,6 +76,9 @@ module g6lc_ai_gemm_seq #(
     parameter int unsigned ReuseBSlots = 2,
     parameter bit          ReuseAEn   = 1'b0,
     parameter int unsigned MaxElementBytes = 4,
+    // Hyp timing seam: three elastic boundaries (AR, AW/W, R/B). Bypass is
+    // available for ablation; job-visible completion still waits for B/R drain.
+    parameter bit          AxiCuts = 1'b1,
     parameter type         axi_req_t  = logic,
     parameter type         axi_resp_t = logic
 ) (
@@ -889,8 +892,44 @@ module g6lc_ai_gemm_seq #(
 // end
 // ----------------------------------------------------------------
   // END sv-timing auto-correct (balance_mux rewrite)
-assign axi_req_o  = axi_req_d;
-  assign axi_resp_s = axi_resp_i;
+  // Local acceptance reserves metadata before a request crosses the cut.
+  // The spill cells retain payload under stall and cut the reverse ready path;
+  // simply delaying ready/valid would duplicate or lose AXI transactions.
+  localparam int ArCutW = $bits(axi_req_d.ar);
+  localparam int AwCutW = $bits(axi_req_d.aw);
+  localparam int WCutW  = $bits(axi_req_d.w);
+  localparam int RCutW  = $bits(axi_resp_i.r);
+  localparam int BCutW  = $bits(axi_resp_i.b);
+  logic [ArCutW-1:0] ar_cut_data;
+  logic [AwCutW-1:0] aw_cut_data;
+  logic [WCutW-1:0] w_cut_data;
+  logic [RCutW-1:0] r_cut_data;
+  logic [BCutW-1:0] b_cut_data;
+  spill_register #(.T(logic [ArCutW-1:0]), .Bypass(!AxiCuts)) i_ar_cut (
+    .clk_i, .rst_ni, .valid_i(axi_req_d.ar_valid), .ready_o(axi_resp_s.ar_ready),
+    .data_i(axi_req_d.ar), .valid_o(axi_req_o.ar_valid),
+    .ready_i(axi_resp_i.ar_ready), .data_o(ar_cut_data));
+  spill_register #(.T(logic [AwCutW-1:0]), .Bypass(!AxiCuts)) i_aw_cut (
+    .clk_i, .rst_ni, .valid_i(axi_req_d.aw_valid), .ready_o(axi_resp_s.aw_ready),
+    .data_i(axi_req_d.aw), .valid_o(axi_req_o.aw_valid),
+    .ready_i(axi_resp_i.aw_ready), .data_o(aw_cut_data));
+  spill_register #(.T(logic [WCutW-1:0]), .Bypass(!AxiCuts)) i_w_cut (
+    .clk_i, .rst_ni, .valid_i(axi_req_d.w_valid), .ready_o(axi_resp_s.w_ready),
+    .data_i(axi_req_d.w), .valid_o(axi_req_o.w_valid),
+    .ready_i(axi_resp_i.w_ready), .data_o(w_cut_data));
+  spill_register #(.T(logic [RCutW-1:0]), .Bypass(!AxiCuts)) i_r_cut (
+    .clk_i, .rst_ni, .valid_i(axi_resp_i.r_valid), .ready_o(axi_req_o.r_ready),
+    .data_i(axi_resp_i.r), .valid_o(axi_resp_s.r_valid),
+    .ready_i(axi_req_d.r_ready), .data_o(r_cut_data));
+  spill_register #(.T(logic [BCutW-1:0]), .Bypass(!AxiCuts)) i_b_cut (
+    .clk_i, .rst_ni, .valid_i(axi_resp_i.b_valid), .ready_o(axi_req_o.b_ready),
+    .data_i(axi_resp_i.b), .valid_o(axi_resp_s.b_valid),
+    .ready_i(axi_req_d.b_ready), .data_o(b_cut_data));
+  assign axi_req_o.ar = ar_cut_data;
+  assign axi_req_o.aw = aw_cut_data;
+  assign axi_req_o.w = w_cut_data;
+  assign axi_resp_s.r = r_cut_data;
+  assign axi_resp_s.b = b_cut_data;
 
   localparam int unsigned LimM = (MaxM != 0) ? MaxM : MaxDim;
   localparam int unsigned LimN = (MaxN != 0) ? MaxN : MaxDim;
@@ -980,7 +1019,8 @@ assign axi_req_o  = axi_req_d;
     ST_MAC   = 4'd4,
     ST_STC   = 4'd5,
     ST_DONE  = 4'd6,
-    ST_LC    = 4'd7   // accumulate: load the existing C tile before the MAC
+    ST_LC    = 4'd7,  // accumulate: load the existing C tile before the MAC
+    ST_PREP  = 4'd8   // residency facts, parallel with descriptor capture
   } state_e;
 
   state_e state_q, state_d;
@@ -997,8 +1037,17 @@ assign axi_req_o  = axi_req_d;
   logic [15:0] ldc_q;
   logic [31:0] ldc_eff;
   assign ldc_eff = (ldc_q == 16'd0) ? n_q : 32'(ldc_q);
-  logic [31:0] acc_q [OutCols];
-  logic [31:0] acc_d [OutCols];
+  // r22: two accumulator sets. Consecutive issue slots alternate between the
+  // column group at j_q (set 0) and the one at j_q + cols_eff (set 1), so a
+  // dependent addition on one set is two cycles apart and the FP adder holds
+  // one register between alignment and normalization.
+  logic [31:0] acc_q [2][OutCols];
+  logic [31:0] acc_d [2][OutCols];
+  logic        ph_q;              // issue slot within the pair
+  logic [31:0] j_pair_q;          // j_q + cols_eff, refreshed every cycle
+  logic [31:0] j_issue;
+  logic        pair_present;
+  logic        sum_ph_q, sum_ph_d;
   // F0b-2: one-cycle pipeline between the PE's pure reduction and the
   // accumulator. The pipeline carries not just the sum, but the i/j address
   // and first/last flags, because the C write and accumulator reset now happen
@@ -1010,6 +1059,16 @@ assign axi_req_o  = axi_req_d;
   logic        sum_v_q, sum_v_d;
   logic        sum_first_q, sum_first_d;
   logic        sum_last_q, sum_last_d;
+  // r21 commit token (completed element written from acc_q one edge later)
+  logic commit_v_q, commit_ph_q;
+  logic [31:0] commit_i_q, commit_j_q;
+  logic [OutCols-1:0] commit_cv_q;
+  // r22 accumulate stage 1 (aligned operands registered inside the adders)
+  logic s1_v_q, s1_ph_q, s1_last_q;
+  logic [31:0] s1_i_q, s1_j_q;
+  logic [OutCols-1:0] s1_cv_q, s1_bypass_q;
+  logic [31:0] s1_int_q [OutCols];
+  logic [31:0] s1_raw_q [OutCols];
   logic [31:0] sum_i_q, sum_i_d;
   logic [31:0] sum_j_q, sum_j_d;
   logic        err_q, err_d;
@@ -1053,6 +1112,7 @@ assign axi_req_o  = axi_req_d;
     logic [BeatLaneW-1:0] lane0;
     logic [31:0]          row;
     logic [31:0]          col;
+    logic [31:0]          rem;   // k_bytes - col
   } ar_slot_t;
   ar_slot_t             ar_slot_q [MaxAROut];
   logic                 ar_slot_we;
@@ -1106,6 +1166,9 @@ assign axi_req_o  = axi_req_d;
   logic [31:0] c_lo_q;
   logic        c_lo_we_d;
   logic [8:0]  stc_w_left_q, stc_w_left_d;  // remaining W beats (1..256)
+  logic [8:0]  w_fetch_q;                  // raw beats captured for the open plan
+  logic [31:0] w_column_q;                 // stc_j_q + (w_fetch_q << wsh_q), kept incrementally
+  logic        w_fetch_needed;
   logic [15:0] stc_elem_q, stc_elem_d;      // elements covered by open AW
   logic [15:0] stc_n_d;                     // elements retired on B
   logic [31:0] stc_i_q, stc_j_q;            // store cursor (row/col)
@@ -1189,12 +1252,23 @@ assign axi_req_o  = axi_req_d;
   assign c_r_addr = c_r0_addr;
   assign c_r_data = c_r0_data;
 
+  // r23: operand words are read one cycle before they are packed. The issue
+  // cursors advance on the read; the read stage carries the facts the
+  // packing, dot tags and seed read need.
+`ifdef G6LC_AI_GEMM_LEGACY_CONTROL
+  localparam int unsigned OperandReadLatency = 0;
+`else
+  localparam int unsigned OperandReadLatency = 1;
+`endif
+  logic rd_v_q, rd_ph_q, rd_first_q, rd_last_q;
+  logic [31:0] rd_t_q, rd_i_q, rd_j_q;
   for (genvar p = 0; p < int'(PeLanes); p++) begin : gen_a_banks
     g6lc_ai_tile_sram #(
         .NumWords (OperandWordsA),
         .DataWidth(8),
         .NumPorts (2),
-        .ImplKey  ("g6lc_ai_tile_a")
+        .ImplKey  ("g6lc_ai_tile_a"),
+        .ReadLatency(OperandReadLatency)
     ) i_tile_a (
         .clk_i, .rst_ni, .testmode_i,
         .r_req_i (a_r_req[p]), .r_addr_i(a_r_addr[p]), .r_data_o(a_r_data[p]),
@@ -1215,7 +1289,8 @@ assign axi_req_o  = axi_req_d;
         .NumWords (OperandWordsBGrp),
         .DataWidth(8),
         .NumPorts (2),  // AI-X9: 1R1W, same as A (was 8 for the oct drain)
-        .ImplKey  ("g6lc_ai_tile_b")
+        .ImplKey  ("g6lc_ai_tile_b"),
+        .ReadLatency(OperandReadLatency)
     ) i_tile_b (
         .clk_i, .rst_ni, .testmode_i,
         .r_req_i (b_r_req[g][p]), .r_addr_i(b_r_addr[g][p]), .r_data_o(b_r_data[g][p]),
@@ -1272,24 +1347,45 @@ assign axi_req_o  = axi_req_d;
     end
   end
 
-  // Latency=0 read muxes
+  // Indexed muxes expose the parallel bank selection. Padding retains bank zero
+  // for the old loop's unused index encodings; this table contains wiring only.
+  localparam int unsigned CReadMuxInputs = 1 << LaneW;
+  logic [31:0] c_read_mux_data [CReadMuxInputs];
+  for (genvar p = 0; p < CReadMuxInputs; p++) begin : gen_c_read_mux_input
+    if (p < PeLanes) assign c_read_mux_data[p] = c_r_data_b[p];
+    else assign c_read_mux_data[p] = c_r_data_b[0];
+  end
+  assign c_r0_data = c_read_mux_data[c_r0_bank];
+  assign c_r1_data = c_read_mux_data[c_r1_bank];
+  assign c_rx_data[0] = c_r0_data;
+  if (StoreWordsMax > 1) assign c_rx_data[1] = c_r1_data;
+  for (genvar w = 2; w < StoreWordsMax; w++) begin : gen_c_wide_read_mux
+    assign c_rx_data[w] = c_read_mux_data[c_rx_bank[w]];
+  end
+  // pragma translate_off
+  logic [31:0] r41_c0_ref, r41_c1_ref;
+  logic [31:0] r41_cx_ref [StoreWordsMax];
   always_comb begin
-    c_r0_data = c_r_data_b[0];
-    c_r1_data = c_r_data_b[0];
+    r41_c0_ref = c_r_data_b[0]; r41_c1_ref = c_r_data_b[0];
     for (int unsigned p = 1; p < PeLanes; p++) begin
-      if (c_r0_bank == LaneW'(p))
-        c_r0_data = c_r_data_b[p];
-      if (c_r1_bank == LaneW'(p))
-        c_r1_data = c_r_data_b[p];
+      if (c_r0_bank == LaneW'(p)) r41_c0_ref = c_r_data_b[p];
+      if (c_r1_bank == LaneW'(p)) r41_c1_ref = c_r_data_b[p];
     end
     for (int unsigned w = 0; w < StoreWordsMax; w++) begin
-      c_rx_data[w] = c_r_data_b[0];
+      r41_cx_ref[w] = c_r_data_b[0];
       for (int unsigned p = 1; p < PeLanes; p++)
-        if (c_rx_bank[w] == LaneW'(p)) c_rx_data[w] = c_r_data_b[p];
+        if (c_rx_bank[w] == LaneW'(p)) r41_cx_ref[w] = c_r_data_b[p];
     end
-    c_rx_data[0] = c_r0_data;
-    if (StoreWordsMax > 1) c_rx_data[1] = c_r1_data;
+    r41_cx_ref[0] = r41_c0_ref;
+    if (StoreWordsMax > 1) r41_cx_ref[1] = r41_c1_ref;
   end
+  always @(posedge clk_i) if (rst_ni) begin
+    if (c_r0_req) assert (c_r0_data === r41_c0_ref) else $fatal(1, "r41 C read port 0");
+    if (c_r1_req) assert (c_r1_data === r41_c1_ref) else $fatal(1, "r41 C read port 1");
+    for (int unsigned w = 2; w < StoreWordsMax; w++)
+      if (c_rx_req[w]) assert (c_rx_data[w] === r41_cx_ref[w]) else $fatal(1, "r41 C wide read");
+  end
+  // pragma translate_on
 
 
   // PE: multi-lane MAC (driven only in ST_MAC)
@@ -1310,11 +1406,11 @@ assign axi_req_o  = axi_req_d;
   // is g itself; accumulate mode advances one column at a time, so dot 0 must
   // follow the column's own group.
   logic [ColW-1:0]   grp_of [OutCols];
-  always_comb for (int unsigned g = 0; g < OutCols; g++) grp_of[g] = col_grp(j_q + 32'(g));
+  always_comb for (int unsigned g = 0; g < OutCols; g++) grp_of[g] = col_grp(j_issue + 32'(g));
   // Registers only (j_q, n_q, acc_mode_q): its own process so no read-data path
   // feeds back into the bank-request process through it.
   always_comb for (int unsigned g = 0; g < OutCols; g++)
-    col_v[g] = (32'(g) < cols_eff) && (j_q + 32'(g) < n_q);
+    col_v[g] = (32'(g) < cols_eff) && (j_issue + 32'(g) < n_q);
 
   for (genvar g = 0; g < int'(OutCols); g++) begin : gen_pe_cols
     // Integer/INT4 path
@@ -1348,7 +1444,7 @@ assign axi_req_o  = axi_req_d;
   // Both pipes have the same Latency, so one metadata pipe serves either.
   localparam bit DotPipeAny = DotPipeFloat || DotPipeInt;
   localparam int unsigned DOT_LATENCY = DotPipeAny ?
-      ($clog2(PeLanes < 1 ? 1 : PeLanes) + 5) : 1;
+      ($clog2(PeLanes < 1 ? 1 : PeLanes) + 6) : 1;
 
   logic dot_start;
   logic dot_valid;
@@ -1357,7 +1453,7 @@ assign axi_req_o  = axi_req_d;
   logic [31:0] dot_sum_f [OutCols];
   logic [31:0] dot_sum_i [OutCols];
   logic        dot_cv_out [OutCols];
-  logic dot_first_out, dot_last_out;
+  logic dot_first_out, dot_last_out, dot_ph_out;
   logic [31:0] dot_i_out, dot_j_out;
   logic dot_first_issue, dot_last_issue;
   logic [31:0] dot_i_issue, dot_j_issue;
@@ -1418,16 +1514,17 @@ assign axi_req_o  = axi_req_d;
       always_comb for (int unsigned g = 0; g < OutCols; g++)
         dot_sum[g] = pe_float_en ? dot_sum_f[g] : dot_sum_i[g];
 
-      logic [DOT_LATENCY-1:0] dot_first_pipe, dot_last_pipe;
+      logic [DOT_LATENCY-1:0] dot_first_pipe, dot_last_pipe, dot_ph_pipe;
       logic [DOT_LATENCY-1:0][31:0] dot_i_pipe, dot_j_pipe;
       logic [DOT_LATENCY-1:0][OutCols-1:0] dot_cv_pipe;
       logic [OutCols-1:0] col_v_vec;
-      always_comb for (int unsigned g = 0; g < OutCols; g++) col_v_vec[g] = col_v[g];
+      always_comb for (int unsigned g = 0; g < OutCols; g++) col_v_vec[g] = col_v_rd[g];
 
       always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
           dot_first_pipe <= '0;
           dot_last_pipe  <= '0;
+          dot_ph_pipe    <= '0;
           dot_i_pipe     <= '0;
           dot_j_pipe     <= '0;
           dot_cv_pipe    <= '0;
@@ -1436,6 +1533,7 @@ assign axi_req_o  = axi_req_d;
                              dot_start ? dot_first_issue : 1'b0};
           dot_last_pipe  <= {dot_last_pipe[DOT_LATENCY-2:0],
                              dot_start ? dot_last_issue : 1'b0};
+          dot_ph_pipe    <= {dot_ph_pipe[DOT_LATENCY-2:0], dot_start && rd_ph_q};
           dot_i_pipe     <= {dot_i_pipe[DOT_LATENCY-2:0],
                              dot_start ? dot_i_issue : 32'd0};
           dot_j_pipe     <= {dot_j_pipe[DOT_LATENCY-2:0],
@@ -1447,6 +1545,7 @@ assign axi_req_o  = axi_req_d;
 
       assign dot_first_out = dot_first_pipe[DOT_LATENCY-1];
       assign dot_last_out  = dot_last_pipe[DOT_LATENCY-1];
+      assign dot_ph_out    = dot_ph_pipe[DOT_LATENCY-1];
       assign dot_i_out     = dot_i_pipe[DOT_LATENCY-1];
       assign dot_j_out     = dot_j_pipe[DOT_LATENCY-1];
       always_comb for (int unsigned g = 0; g < OutCols; g++) dot_cv_out[g] = dot_cv_pipe[DOT_LATENCY-1][g];
@@ -1455,6 +1554,7 @@ assign axi_req_o  = axi_req_d;
       always_comb for (int unsigned g = 0; g < OutCols; g++) begin dot_sum[g] = '0; dot_cv_out[g] = 1'b0; end
       assign dot_first_out = 1'b0;
       assign dot_last_out  = 1'b0;
+      assign dot_ph_out    = 1'b0;
       assign dot_i_out     = '0;
       assign dot_j_out     = '0;
     end
@@ -1568,21 +1668,135 @@ assign axi_req_o  = axi_req_d;
   // Accumulate mode: the first partial of an element is added onto the C word
   // that ST_LC placed in the tile (read on port r0 in the drain cycle) instead of
   // starting from zero, so a K-split chained through C is one ordered reduction.
-  logic [31:0] mac_seed;
-  logic [36:0] mac_fp32_seed_add;
+  logic [31:0] mac_seed_q [2];
+  logic seed_capture, seed_set, issue_now, issue_sum_now;
+  logic [31:0] seed_i, seed_j;
   // The seed (accumulate mode) belongs to column 0: accumulate jobs run one
   // column at a time, so no other column ever needs it.
-  assign mac_seed          = acc_mode_q ? c_r0_data : 32'd0;
-  assign mac_fp32_seed_add = g6lc_ai_fp_pkg::fp32_add(mac_seed, sum_q[0]);
-  always_comb begin
-    for (int unsigned g = 0; g < OutCols; g++) begin
-      mac_fp32_add[g] = g6lc_ai_fp_pkg::fp32_add(acc_q[g], sum_q[g]);
-      mac_acc_next[g] = pe_float_en
-          ? (sum_first_q ? ((acc_mode_q && g == 0) ? mac_fp32_seed_add[31:0] : sum_q[g]) : mac_fp32_add[g][31:0])
-          : ((sum_first_q ? ((g == 0) ? mac_seed : 32'd0) : acc_q[g]) + sum_q[g]);
+  // Read C alongside the incoming partial, one edge before accumulation.
+  // The seed and sum/first/i/j enter their registers on the SAME edge. This
+  // cuts bank-address/decode/read from FP addition without moving its recurrence
+  // or changing dot-product latency. In pipelined mode use the returning tag,
+  // never the live issue cursor (which can be several output elements ahead).
+  // r21: the combinational-dot arm reads the live cursor facts directly
+  // (sum_*_d equal them whenever an issue happens), so the seed read does
+  // not depend on the issue bundle.
+  assign seed_capture = state_q == ST_MAC && acc_mode_q &&
+      (dot_pipe_en ? (dot_valid && dot_first_out) : (rd_v_q && rd_first_q));
+  assign seed_i = dot_pipe_en ? dot_i_out : rd_i_q;
+  assign seed_j = dot_pipe_en ? dot_j_out : rd_j_q;
+  assign seed_set = dot_pipe_en ? dot_ph_out : rd_ph_q;
+  // pragma translate_off
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      !dot_pipe_en |-> (seed_capture == (state_q == ST_MAC && acc_mode_q && sum_v_d && sum_first_d)) &&
+                       (!sum_v_d || (seed_i == sum_i_d && seed_j == sum_j_d)));
+  // pragma translate_on
+  // Register each seed response at its C-bank boundary, before the bank mux.
+  // Store reads keep their existing combinational port and one-beat-per-cycle
+  // fetch contract. Only first partials consume a seed, on the next edge; a
+  // later read may therefore reuse this bank after that edge.
+  logic [31:0] c_seed_data_q [PeLanes];
+  logic [LaneW-1:0] seed_bank_q [2];
+  for (genvar p = 0; p < PeLanes; p++) begin : gen_seed_response
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) c_seed_data_q[p] <= '0;
+      else if (seed_capture && c_r0_bank == LaneW'(p))
+        c_seed_data_q[p] <= c_r_data_b[p];
     end
   end
+  for (genvar s = 0; s < 2; s++) begin : gen_seed_owner
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) seed_bank_q[s] <= '0;
+      else if (seed_capture && seed_set == 1'(s)) seed_bank_q[s] <= c_r0_bank;
+    end
+    assign mac_seed_q[s] = c_seed_data_q[seed_bank_q[s]];
+  end
+  // pragma translate_off
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      state_q == ST_MAC && acc_mode_q && sum_v_q && sum_first_q |->
+      $past(seed_capture) && sum_i_q == $past(seed_i) && sum_j_q == $past(seed_j));
+  // pragma translate_on
+  // Stage 1 (sum_q valid): the base is the set's accumulator, or on the first
+  // partial the seed (accumulate mode, column 0) or zero. The adders register
+  // their aligned operands; the integer sum and the raw first partial (which
+  // the reference publishes unadded) are registered beside them.
+  // Stage 2 (s1_v_q): the normalized result updates the set's accumulator.
+  for (genvar g = 0; g < OutCols; g++) begin : gen_accumulate_column
+    logic [31:0] base, fp_result_bits;
+    logic seed_case;
+    assign seed_case = acc_mode_q && g == 0;
+    assign base = sum_first_q ? (seed_case ? mac_seed_q[sum_ph_q] : 32'd0)
+                              : acc_q[sum_ph_q][g];
+    g6lc_ai_gemm_fp32_add_p2 i_acc_add (
+      .clk_i, .rst_ni, .en_i(sum_v_q),
+      .a_i(base), .b_i(sum_q[g]), .result_o(mac_fp32_add[g])
+    );
+    assign fp_result_bits = mac_fp32_add[g][31:0];
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        s1_int_q[g] <= '0; s1_raw_q[g] <= '0; s1_bypass_q[g] <= 1'b0;
+      end else if (sum_v_q) begin
+        s1_int_q[g] <= base + sum_q[g];
+        s1_raw_q[g] <= sum_q[g];
+        s1_bypass_q[g] <= sum_first_q && !seed_case;
+      end
+    end
+    assign mac_acc_next[g] = pe_float_en ? (s1_bypass_q[g] ? s1_raw_q[g] : fp_result_bits)
+                                         : s1_int_q[g];
+  end
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      s1_v_q <= 1'b0; s1_ph_q <= 1'b0; s1_last_q <= 1'b0;
+      s1_i_q <= '0; s1_j_q <= '0; s1_cv_q <= '0;
+    end else begin
+      s1_v_q <= state_q == ST_MAC && sum_v_q;
+      if (sum_v_q) begin
+        s1_ph_q <= sum_ph_q; s1_last_q <= sum_last_q;
+        s1_i_q <= sum_i_q; s1_j_q <= sum_j_q;
+        for (int unsigned g = 0; g < OutCols; g++) s1_cv_q[g] <= sum_cv_q[g];
+      end
+    end
+  end
+  // pragma translate_off
+  // A set's partials are at least two edges apart, so its stage-1 result
+  // always lands before the next partial reads the accumulator.
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      sum_v_q && s1_v_q |-> sum_ph_q != s1_ph_q);
+  // pragma translate_on
 
+  logic span_valid, span_disjoint_a, span_disjoint_b;
+  if (ReuseAEn || ReuseBEn) begin : gen_span_facts
+    g6lc_ai_gemm_span #(.AddrWidth(AddrWidth)) i_span (
+      .clk_i, .rst_ni, .start_i(state_q == ST_IDLE && start_i),
+      .m_i, .n_i,
+      .k_bytes_i(g6lc_ai_island_cfg_pkg::ai_row_bytes(numfmt_i, k_i)),
+      .stride_a_i(g6lc_ai_island_cfg_pkg::ai_row_bytes(numfmt_i, {16'd0, lda_i})),
+      .stride_b_i(g6lc_ai_island_cfg_pkg::ai_row_bytes(numfmt_i, {16'd0, ldb_i})),
+      .ldc_i(ldc_i == 0 ? n_i : 32'(ldc_i)),
+      .pa_i(ptr_a_i), .pb_i(ptr_b_i), .pc_i(ptr_c_i),
+      .valid_o(span_valid), .disjoint_a_o(span_disjoint_a), .disjoint_b_o(span_disjoint_b)
+    );
+    // pragma translate_off
+    always @(posedge clk_i) if (rst_ni && state_q == ST_PREP && span_valid) begin
+      logic [31:0] sa, sb, sc;
+      logic [AddrWidth:0] ea, eb, ec;
+      sa = (m_q - 32'd1) * fmt_row_bytes({16'd0, lda_q}) + k_bytes;
+      sb = (n_q - 32'd1) * fmt_row_bytes({16'd0, ldb_q}) + k_bytes;
+      sc = ((m_q - 32'd1) * ldc_eff + n_q) << 2;
+      ea = {1'b0, pa_q} + (AddrWidth+1)'(sa);
+      eb = {1'b0, pb_q} + (AddrWidth+1)'(sb);
+      ec = {1'b0, pc_q} + (AddrWidth+1)'(sc);
+      assert (span_disjoint_a == (!ea[AddrWidth] && !ec[AddrWidth] &&
+          ({1'b0, pc_q} >= ea || {1'b0, pa_q} >= ec))) else $fatal(1, "SPAN_A_EQ");
+      assert (span_disjoint_b == (!eb[AddrWidth] && !ec[AddrWidth] &&
+          ({1'b0, pc_q} >= eb || {1'b0, pb_q} >= ec))) else $fatal(1, "SPAN_B_EQ");
+    end
+    // pragma translate_on
+  end else begin : gen_no_span_facts
+    assign span_valid = 1'b1;
+    assign span_disjoint_a = 1'b0;
+    assign span_disjoint_b = 1'b0;
+  end
   logic reuse_b_skip_q, reuse_b_safe;
   // Row base of the B panel in the operand bank: 0, or the slot's half when the
   // resident-B directory placed this job's panel in a slot (see gen_reuse_b).
@@ -1602,8 +1816,6 @@ assign axi_req_o  = axi_req_d;
     logic [31:0]     epoch_q [SlotsB];
     logic [SlotW-1:0] cur_q, victim_q, hit_idx;
     logic [31:0] job_epoch_q;
-    logic [31:0] b_span, c_span;
-    logic [AddrWidth:0] b_end, c_end;
     logic geometry_ok, disjoint, response_error, small_c;
 
     // The incoming job's key against every slot; the first hit wins (keys are
@@ -1621,16 +1833,23 @@ assign axi_req_o  = axi_req_d;
     assign hit_any = |hit_vec;
     // Fits one slot at this job's pitch; otherwise the panel takes the whole bank.
     assign small_c = SlotsB > 1 && g6lc_ai_island_cfg_pkg::ai_slot_small(n_grp_c, pitch_sh_c, SlotWordsB);
+    // Slot bases are an elaboration-time table (one constant per slot, the
+    // package's slot * words identity) selected by the slot index.
+    logic [OperandBankAddrW-1:0] slot_base_tab [SlotsB];
+    logic [OperandBankAddrW-1:0] slot_base_c;
+    for (genvar s = 0; s < SlotsB; s++) begin : gen_slot_base_tab
+      assign slot_base_tab[s] = OperandBankAddrW'(64'(s) * 64'(SlotWordsB));
+    end
+    assign slot_base_c = slot_base_tab[cur_q];
+    // pragma translate_off
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+        slot_base_c == OperandBankAddrW'(g6lc_ai_island_cfg_pkg::ai_slot_base(cur_q, SlotWordsB)));
+    // pragma translate_on
 
-    assign b_span = 32'(n_q - 32'd1) * fmt_row_bytes({16'd0, ldb_q}) + k_bytes;
-    assign c_span = ((32'(m_q) - 32'd1) * ldc_eff + 32'(n_q)) << 2;
-    assign b_end = {1'b0, pb_q} + (AddrWidth+1)'(b_span);
-    assign c_end = {1'b0, pc_q} + (AddrWidth+1)'(c_span);
     assign geometry_ok = m_q > 0 && m_q <= LimM && n_q > 0 && n_q <= LimN &&
                          k_q > 0 && cap_ok_c && ldb_q >= k_q[15:0] &&
                          numfmt_q inside {3'd0, 3'd1, 3'd3, 3'd4, 3'd5, 3'd6, 3'd7};
-    assign disjoint = !b_end[AddrWidth] && !c_end[AddrWidth] &&
-                      ({1'b0, pc_q} >= b_end || {1'b0, pb_q} >= c_end);
+    assign disjoint = span_valid && span_disjoint_b;
     // Combinational, not `cacheable_q`: the skip is now decided in ST_CHK too
     // (when A is also resident) and `cacheable_q` is still clear at that point.
     // The job's shape and pointers are latched at start and do not move, so this
@@ -1678,7 +1897,7 @@ assign axi_req_o  = axi_req_d;
           // one takes the whole bank and evicts every other slot. A small panel
           // landing next to a "big" resident also evicts it (they overlap).
           if (small_c) begin
-            b_base_q <= OperandBankAddrW'(g6lc_ai_island_cfg_pkg::ai_slot_base(cur_q, SlotWordsB));
+            b_base_q <= slot_base_c;
             big_q[cur_q] <= 1'b0;
             for (int unsigned s = 0; s < SlotsB; s++)
               if (SlotW'(s) != cur_q && big_q[s]) valid_q[s] <= 1'b0;
@@ -1734,19 +1953,12 @@ assign axi_req_o  = axi_req_d;
     logic [15:0] lda_saved_q;
     logic [2:0] fmt_q;
     logic [31:0] epoch_q, job_epoch_q;
-    logic [31:0] a_span, c_span;
-    logic [AddrWidth:0] a_end, c_end;
     logic geometry_ok, disjoint, response_error;
 
-    assign a_span = 32'(m_q - 32'd1) * fmt_row_bytes({16'd0, lda_q}) + k_bytes;
-    assign c_span = ((32'(m_q) - 32'd1) * ldc_eff + 32'(n_q)) << 2;
-    assign a_end = {1'b0, pa_q} + (AddrWidth+1)'(a_span);
-    assign c_end = {1'b0, pc_q} + (AddrWidth+1)'(c_span);
     assign geometry_ok = m_q > 0 && m_q <= LimM && n_q > 0 && n_q <= LimN &&
                          k_q > 0 && cap_ok_c && lda_q >= k_q[15:0] &&
                          numfmt_q inside {3'd0, 3'd1, 3'd3, 3'd4, 3'd5, 3'd6, 3'd7};
-    assign disjoint = !a_end[AddrWidth] && !c_end[AddrWidth] &&
-                      ({1'b0, pc_q} >= a_end || {1'b0, pa_q} >= c_end);
+    assign disjoint = span_valid && span_disjoint_a;
     // Combinational for the same reason as the B side, and here it is load
     // bearing: A's skip is decided in ST_CHK, where `cacheable_q` has just been
     // cleared by the start handshake, so keying off it would make the skip dead
@@ -2119,7 +2331,7 @@ assign axi_req_o  = axi_req_d;
   );
     // D2b: KPerBank is asserted power-of-two (LimN and PeLanes are powers
     // of two in every shipped cfg); the row*KPerBank is then a shift.
-    return BankAddrW'(int'(i) << $clog2(KPerBank) + int'(j >> LaneShift));
+    return BankAddrW'((int'(i) << $clog2(KPerBank)) + int'(j >> LaneShift));
   endfunction
 
   logic [AddrWidth-1:0] a_cur, b_cur, a_ar_cur, b_ar_cur, c_store_addr;
@@ -2145,49 +2357,105 @@ assign axi_req_o  = axi_req_d;
   logic [31:0]          stride_a_q, stride_b_q, stride_b_grp_q;
   assign a_cur        = a_cur_q;
   assign b_cur        = b_cur_q;
-  assign a_ar_cur     = a_addr(pa_q, ar_i_q, ar_t_q, lda_q);
-  assign b_ar_cur     = b_addr(pb_q, ar_t_q, ar_j_q, ldb_q);
+  // r21: the issue cursors advance one row at a time, so their row offsets
+  // are maintained incrementally in the function's 32-bit domain instead of
+  // multiplying the row index on the AR planner's capture path.
+  logic [31:0] ar_a_off_q, ar_b_off_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      ar_a_off_q <= '0; ar_b_off_q <= '0;
+    end else begin
+      if (ar_i_en) ar_a_off_q <= (ar_i_d == '0) ? 32'd0 : ar_a_off_q + stride_a_q;
+      if (ar_j_en) ar_b_off_q <= (ar_j_d == '0) ? 32'd0 : ar_b_off_q + stride_b_q;
+    end
+  end
+  assign a_ar_cur     = pa_q + AddrWidth'(ar_a_off_q + ar_t_q);
+  assign b_ar_cur     = pb_q + AddrWidth'(ar_b_off_q + ar_t_q);
+  // pragma translate_off
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      load_active |-> a_ar_cur == a_addr(pa_q, ar_i_q, ar_t_q, lda_q) &&
+                      b_ar_cur == b_addr(pb_q, ar_t_q, ar_j_q, ldb_q));
+  // pragma translate_on
+`ifdef G6LC_AI_GEMM_LEGACY_CONTROL
   assign c_store_addr = c_addr(pc_q, stc_i_q, stc_j_q, ldc_eff);
+`endif
+  logic store_plan_valid;
   // Issue cursors (AR address may run ahead of receive)
   // Store address uses trail cursor (not MAC i/j)
   assign ar_head_lane = ar_lane_mem_q[0];
 
+  // r21: one operand word address per cycle. The row byte base advances in
+  // whole lane groups (mac_step elements = PeLanes bytes, or 2*PeLanes INT4
+  // elements), so every lane of a bank word shares the row word, and the
+  // valid output columns of a group share the B row. Per-lane validity is
+  // the same fact the operand publication uses.
+  logic [31:0] rd_byte_base;
+  logic [OperandBankAddrW-1:0] a_rd_addr_c, b_rd_addr_c;
+  logic lane_live [PeLanes];
+  logic operand_active;
+  assign rd_byte_base = numfmt_q == 3'd1 ? t_q >> 1 : t_q << ai_fmt_shift();
+  assign a_rd_addr_c = a_bank_addr(i_q, rd_byte_base);
+  assign b_rd_addr_c = b_bank_addr(rd_byte_base, j_issue);
   always_comb begin
-    logic [31:0] byte_base, byte_idx;
-    byte_base = numfmt_q == 3'd1 ? t_q >> 1 : t_q << ai_fmt_shift();
-    byte_idx = '0;
     for (int unsigned p = 0; p < PeLanes; p++) begin
-      a_r_req[p] = 1'b0;
-      a_r_addr[p] = '0;
-      for (int unsigned g = 0; g < OutCols; g++) begin
-        b_r_req[g][p] = 1'b0;
-        b_r_addr[g][p] = '0;
-      end
-      byte_idx = byte_base + 32'(p);
-      if (state_q == ST_MAC && i_q < m_q &&
-          ((numfmt_q == 3'd1) ? t_q + 32'(p << 1) < k_q : byte_idx < k_bytes)) begin
-        a_r_req[p] = 1'b1;
-        a_r_addr[p] = a_bank_addr(i_q, byte_idx);
-        // Static destination index (a dynamic first index on the write side is a
-        // read-modify-write of the array to a synthesis frontend -> logic loop).
-        for (int unsigned g = 0; g < OutCols; g++)
-          for (int unsigned gg = 0; gg < OutCols; gg++)
-            if (col_v[g] && grp_of[g] == ColW'(gg)) begin
-              b_r_req[gg][p] = 1'b1;
-              b_r_addr[gg][p] = b_bank_addr(byte_idx, j_q + 32'(g));
-            end
+      a_r_req[p] = lane_live[p];
+      a_r_addr[p] = {OperandBankAddrW{lane_live[p]}} & a_rd_addr_c;
+      for (int unsigned gg = 0; gg < OutCols; gg++) begin
+        b_r_req[gg][p] = lane_live[p] &&
+            (acc_mode_q ? (col_v[0] && grp_of[0] == ColW'(gg)) : col_v[gg]);
+        b_r_addr[gg][p] = {OperandBankAddrW{b_r_req[gg][p]}} & b_rd_addr_c;
       end
     end
   end
+  // pragma translate_off
+  always @(posedge clk_i) if (rst_ni && operand_active) begin
+    assert (rd_byte_base[LaneShift-1:0] == '0 || PeLanes == 1)
+      else $error("operand byte base is not lane aligned");
+    for (int unsigned p = 0; p < PeLanes; p++)
+      assert (!lane_live[p] || a_rd_addr_c == a_bank_addr(i_q, rd_byte_base + 32'(p)))
+        else $error("lane %0d reads a different operand word", p);
+    for (int unsigned g = 0; g < OutCols; g++)
+      assert (!col_v[g] || b_rd_addr_c == b_bank_addr(rd_byte_base, j_issue + 32'(g)))
+        else $error("column %0d reads a different B word", g);
+  end
+  // pragma translate_on
 
+  // r21: the store-side read coordinates are functions of registers only
+  // (store cursor, running column, pair hold), prepared beside the request
+  // decision rather than inside it.
+  logic [LaneW-1:0]     rd_bank_c [StoreWordsMax];
+  logic [BankAddrW-1:0] rd_addr_c [StoreWordsMax];
+  logic [LaneW-1:0]     rd_single_bank_c, rd_hold_bank_c, seed_bank_c;
+  logic [BankAddrW-1:0] rd_single_addr_c, rd_hold_addr_c, seed_addr_c;
+  for (genvar w = 0; w < StoreWordsMax; w++) begin : gen_rd_coords
+    assign rd_bank_c[w] = c_bank(w_column_q + 32'(w));
+    assign rd_addr_c[w] = c_bank_addr(stc_i_q, w_column_q + 32'(w));
+  end
+  assign rd_single_bank_c = c_bank(stc_j_q);
+  assign rd_single_addr_c = c_bank_addr(stc_i_q, stc_j_q);
+  assign rd_hold_bank_c = c_bank(w_column_q + 32'(c_pair_hold_q));
+  assign rd_hold_addr_c = c_bank_addr(stc_i_q, w_column_q + 32'(c_pair_hold_q));
+  assign seed_bank_c = c_bank(seed_j);
+  assign seed_addr_c = c_bank_addr(seed_i, seed_j);
   always_comb begin
     logic trail, pair_store;
     logic [31:0] beats_done, column;
     pair_store = DataWidth >= 64 && !n_q[0];
+`ifdef G6LC_AI_GEMM_LEGACY_CONTROL
     trail = state_q == ST_MAC && DualCRead && DataWidth >= 64 && dot_pending_q == '0 &&
         !acc_mode_q && trail_ready;
+`else
+    // Once planned, the immutable committed columns belong to the store
+    // transaction until B, even if the MAC begins another pipelined dot.
+    trail = state_q == ST_MAC && store_plan_valid && !acc_mode_q;
+`endif
+`ifdef G6LC_AI_GEMM_LEGACY_CONTROL
     beats_done = 32'(stc_elem_q >> wsh_q) - 32'(stc_w_left_q);
     column = stc_j_q + (beats_done << wsh_q);
+`else
+    beats_done = 32'(w_fetch_q);
+    column = w_column_q;
+`endif
     c_r0_req = 1'b0;
     c_r0_bank = '0;
     c_r0_addr = '0;
@@ -2199,11 +2467,12 @@ assign axi_req_o  = axi_req_d;
       c_rx_bank[w] = '0;
       c_rx_addr[w] = '0;
     end
-    if (state_q == ST_MAC && acc_mode_q && sum_v_q && sum_first_q) begin
-      // Seed read for the element whose first partial drains this cycle.
+`ifdef G6LC_AI_GEMM_LEGACY_CONTROL
+    if (seed_capture) begin
+      // Capture alongside the first partial; the accumulator consumes it next cycle.
       c_r0_req  = 1'b1;
-      c_r0_bank = c_bank(sum_j_q);
-      c_r0_addr = c_bank_addr(sum_i_q, sum_j_q);
+      c_r0_bank = c_bank(seed_j);
+      c_r0_addr = c_bank_addr(seed_i, seed_j);
     end else if (trail || state_q == ST_STC) begin
       if (!pair_store) begin
         c_r0_req = 1'b1;
@@ -2230,98 +2499,173 @@ assign axi_req_o  = axi_req_d;
         end
       end
     end
-  end
-
-  always_comb begin
-    logic [31:0] t_byte_base;
-    t_byte_base = numfmt_q == 3'd1 ? t_q >> 1 : t_q << ai_fmt_shift();
-    for (int unsigned p = 0; p < PeLanes; p++) begin
-      pe_a[p] = '0;
-      pe_a_float[p] = '0;
-      pe_v[p] = 1'b0;
-      for (int unsigned g = 0; g < OutCols; g++) begin
-        pe_b[g][p] = '0;
-        pe_b_float[g][p] = '0;
-      end
+`else
+    // Flat one-hot request classes (seed capture first, then the planned
+    // store fetch) with masked-OR coordinate selection.
+    c_r0_req = rd_sel_seed || rd_sel_single || rd_sel_pair;
+    c_r0_bank = ({LaneW{rd_sel_seed}} & seed_bank_c) |
+                ({LaneW{rd_sel_single}} & rd_single_bank_c) |
+                ({LaneW{rd_sel_pair}} & (DualCRead ? rd_bank_c[0] : rd_hold_bank_c));
+    c_r0_addr = ({BankAddrW{rd_sel_seed}} & seed_addr_c) |
+                ({BankAddrW{rd_sel_single}} & rd_single_addr_c) |
+                ({BankAddrW{rd_sel_pair}} & (DualCRead ? rd_addr_c[0] : rd_hold_addr_c));
+    c_r1_req = DualCRead && rd_sel_pair;
+    c_r1_bank = {LaneW{c_r1_req}} & rd_bank_c[1];
+    c_r1_addr = {BankAddrW{c_r1_req}} & rd_addr_c[1];
+    // Wide beat: columns 2..W-1 of the beat as well.
+    for (int unsigned w = 2; w < StoreWordsMax; w++) begin
+      c_rx_req[w]  = c_r1_req && wide_c_q;
+      c_rx_bank[w] = {LaneW{c_rx_req[w]}} & rd_bank_c[w];
+      c_rx_addr[w] = {BankAddrW{c_rx_req[w]}} & rd_addr_c[w];
     end
-    if (state_q == ST_MAC && i_q < m_q) begin
-      for (int unsigned p = 0; p < PeLanes; p++) begin
-        if (numfmt_q == 3'd1) begin
-          // INT4: two elements per byte. Lane p covers elements
-          // (t_q + 2p) and (t_q + 2p + 1) in the same byte.
-          automatic logic [31:0] e0, e1;
-          e0 = t_q + 32'(p << 1);
-          e1 = e0 + 32'd1;
-          if (e0 < k_q) begin
-            // Mask the invalid nibble(s) to 0; the PE sign-extends the
-            // remaining nibble and computes two products, one of which is 0.
-            pe_a[p] = {(e1 < k_q) ? a_r_data[p][7:4] : 4'b0000,
-                       (e0 < k_q) ? a_r_data[p][3:0] : 4'b0000};
-            for (int unsigned g = 0; g < OutCols; g++)
-              pe_b[g][p] = {(e1 < k_q) ? b_r_data[grp_of[g]][p][7:4] : 4'b0000,
-                            (e0 < k_q) ? b_r_data[grp_of[g]][p][3:0] : 4'b0000};
-            pe_v[p] = 1'b1;
-          end
-        end else begin
-          // INT8/FP8/BF16/FP16/FP32: load bytes, then assemble elements
-          // into 32-bit float lanes.  `byte_idx` is the byte position
-          // along the K row; `k_bytes` comes from fmt_row_bytes().
-          automatic logic [31:0] byte_idx;
-          byte_idx = t_byte_base + 32'(p);
-          if (byte_idx < k_bytes) begin
-            pe_a[p] = $signed(a_r_data[p]);
-            for (int unsigned g = 0; g < OutCols; g++)
-              pe_b[g][p] = $signed(b_r_data[grp_of[g]][p]);
-          end
-        end
-      end
+`endif
+  end
+`ifndef G6LC_AI_GEMM_LEGACY_CONTROL
+  logic rd_sel_seed, rd_sel_store, rd_sel_single, rd_sel_pair;
+  // Seed reads belong to accumulate jobs; planned store fetches never run in
+  // ST_MAC for them (trail requires !acc_mode_q), so no priority term is needed.
+  assign rd_sel_seed = seed_capture;
+  assign rd_sel_store = w_fetch_needed &&
+      (state_q == ST_STC || (state_q == ST_MAC && !acc_mode_q));
+  // pragma translate_off
+  assert property (@(posedge clk_i) disable iff (!rst_ni) $onehot0({rd_sel_seed, rd_sel_store}));
+  // pragma translate_on
+  assign rd_sel_single = rd_sel_store && !store_pair;
+  assign rd_sel_pair = rd_sel_store && store_pair && aw_sent_q && stc_w_left_q != '0;
+`endif
 
-      // Assemble multi-byte floating operands (BF16/FP16/FP32) from the
-      // byte-lane read data. For INT8/FP8 this is a zero-extend; for
-      // FP16/BF16 it is two bytes little-endian; for FP32 it is four.
-      // INT4 stays in its own branch above.
-      if (numfmt_q != 3'd1) begin
-        // Bounded by the PeLanes parameter, not by the runtime mac_step:
-        // on this branch (numfmt != INT4) mac_step is PeLanes/bytes, so it
-        // can never exceed PeLanes and the extra iterations are inert.  A
-        // constant bound is what makes this loop elaborate under an open
-        // synthesis frontend -- with the runtime bound, Yosys read_slang
-        // tries to unroll it and exhausts its limit, which left the whole
-        // GEMM datapath without any gate-level area or timing evidence.
-        for (int unsigned e = 0; e < PeLanes; e++) begin
-          automatic logic [31:0] elem_t;
-          automatic logic [31:0] off;
-          elem_t = t_q + 32'(e);
-          off = 32'(e) << ai_fmt_shift();
-          if (int'(e) < int'(mac_step) && elem_t < k_q) begin
-            case (ai_fmt_bytes())
-              32'd1: begin
-                pe_a_float[e] = {24'b0, a_r_data[off]};
-                for (int unsigned g = 0; g < OutCols; g++)
-                  pe_b_float[g][e] = {24'b0, b_r_data[grp_of[g]][off]};
-              end
-              32'd2: begin
-                pe_a_float[e] = {16'b0, a_r_data[off+1], a_r_data[off]};
-                for (int unsigned g = 0; g < OutCols; g++)
-                  pe_b_float[g][e] = {16'b0, b_r_data[grp_of[g]][off+1], b_r_data[grp_of[g]][off]};
-              end
-              32'd4: begin
-                pe_a_float[e] = {a_r_data[off+3], a_r_data[off+2], a_r_data[off+1], a_r_data[off]};
-                for (int unsigned g = 0; g < OutCols; g++)
-                  pe_b_float[g][e] = {b_r_data[grp_of[g]][off+3], b_r_data[grp_of[g]][off+2],
-                                      b_r_data[grp_of[g]][off+1], b_r_data[grp_of[g]][off]};
-              end
-              default: begin
-                pe_a_float[e] = 32'd0;
-                for (int unsigned g = 0; g < OutCols; g++) pe_b_float[g][e] = 32'd0;
-              end
+  // Operand publication has no state: values and masks still enter the PE
+  // together. Format layouts are fixed wiring, not a runtime shifted index.
+  logic pack_byte, pack_half, pack_word;
+  logic [31:0] operand_byte_base, pk_byte_base;
+  logic [7:0] operand_b [OutCols][PeLanes];
+  logic [ColW-1:0] grp_of_rd [OutCols];
+  logic col_v_rd [OutCols];
+  assign operand_active = state_q == ST_MAC && i_q < m_q;
+  assign pk_byte_base = rd_t_q << ai_fmt_shift();
+  always_comb for (int unsigned g = 0; g < OutCols; g++) begin
+    grp_of_rd[g] = col_grp(rd_j_q + 32'(g));
+    col_v_rd[g] = (32'(g) < cols_eff) && (rd_j_q + 32'(g) < n_q);
+  end
+  assign pack_byte = ai_fmt_bytes() == 32'd1;
+  assign pack_half = ai_fmt_bytes() == 32'd2;
+  assign pack_word = ai_fmt_bytes() == 32'd4;
+  assign operand_byte_base = t_q << ai_fmt_shift();
+  for (genvar g = 0; g < OutCols; g++) begin : gen_operand_group
+    for (genvar p = 0; p < PeLanes; p++) begin : gen_byte
+      // Normal traversal advances j by OutCols; accumulate advances by one.
+      assign operand_b[g][p] = acc_mode_q ? b_r_data[grp_of_rd[g]][p] : b_r_data[g][p];
+    end
+  end
+  for (genvar p = 0; p < PeLanes; p++) begin : gen_operand_lane
+    logic nibble0_live, nibble1_live, byte_live, float_live;
+    logic [31:0] half_a, word_a;
+    assign nibble0_live = rd_v_q && rd_t_q + 32'(2*p) < k_q;
+    assign nibble1_live = rd_v_q && rd_t_q + 32'(2*p+1) < k_q;
+    assign byte_live = rd_v_q && pk_byte_base + 32'(p) < k_bytes;
+    assign float_live = rd_v_q && numfmt_q != 3'd1 &&
+                        32'(p) < mac_step && rd_t_q + 32'(p) < k_q;
+    assign pe_v[p] = numfmt_q == 3'd1 ? nibble0_live : float_live;
+    // Read requests use the live cursor; packing uses the read stage.
+    assign lane_live[p] = numfmt_q == 3'd1 ? (operand_active && t_q + 32'(2*p) < k_q)
+                                           : (operand_active && operand_byte_base + 32'(p) < k_bytes);
+    assign pe_a[p] = numfmt_q == 3'd1 ?
+        (nibble0_live ? {nibble1_live ? a_r_data[p][7:4] : 4'd0, a_r_data[p][3:0]} : 8'd0) :
+        (byte_live ? a_r_data[p] : 8'd0);
+    if (2*p+1 < PeLanes) begin : gen_half
+      assign half_a = {16'd0, a_r_data[2*p+1], a_r_data[2*p]};
+    end else assign half_a = '0;
+    if (4*p+3 < PeLanes) begin : gen_word
+      assign word_a = {a_r_data[4*p+3], a_r_data[4*p+2], a_r_data[4*p+1], a_r_data[4*p]};
+    end else assign word_a = '0;
+    assign pe_a_float[p] = float_live ?
+        (({32{pack_byte}} & {24'd0, a_r_data[p]}) |
+         ({32{pack_half}} & half_a) | ({32{pack_word}} & word_a)) : 32'd0;
+    for (genvar g = 0; g < OutCols; g++) begin : gen_column
+      logic [31:0] half_b, word_b;
+      assign pe_b[g][p] = numfmt_q == 3'd1 ?
+          (nibble0_live ? {nibble1_live ? operand_b[g][p][7:4] : 4'd0, operand_b[g][p][3:0]} : 8'd0) :
+          (byte_live ? operand_b[g][p] : 8'd0);
+      if (2*p+1 < PeLanes) begin : gen_half
+        assign half_b = {16'd0, operand_b[g][2*p+1], operand_b[g][2*p]};
+      end else assign half_b = '0;
+      if (4*p+3 < PeLanes) begin : gen_word
+        assign word_b = {operand_b[g][4*p+3], operand_b[g][4*p+2],
+                         operand_b[g][4*p+1], operand_b[g][4*p]};
+      end else assign word_b = '0;
+      assign pe_b_float[g][p] = float_live ?
+          (({32{pack_byte}} & {24'd0, operand_b[g][p]}) |
+           ({32{pack_half}} & half_b) | ({32{pack_word}} & word_b)) : 32'd0;
+    end
+  end
+  // pragma translate_off
+  always @(posedge clk_i) if (rst_ni && operand_active && !acc_mode_q)
+    assert ((j_issue & 32'(OutCols-1)) == 0)
+      else $error("normal MAC column group is not aligned");
+`ifdef G6LC_AI_HYP_R20_CHECK
+  int unsigned r20_operand_checks;
+  logic [7:0] r20_formats;
+  // Independent dynamic-index reference, sampled after the issue edge settles.
+  always @(negedge clk_i) begin : check_r20_operands
+    logic [31:0] base, e0, e1, off, af, bf;
+    logic [7:0] ai, bi;
+    logic v;
+    if (!rst_ni) begin
+      r20_operand_checks = 0;
+      r20_formats = '0;
+    end else begin
+      base = numfmt_q == 3'd1 ? rd_t_q >> 1 : rd_t_q << ai_fmt_shift();
+      for (int p = 0; p < PeLanes; p++) begin
+        ai = '0; af = '0; v = 1'b0;
+        e0 = rd_t_q + 32'(2*p); e1 = e0 + 32'd1;
+        off = 32'(p) << ai_fmt_shift();
+        if (rd_v_q) begin
+          if (numfmt_q == 3'd1) begin
+            v = e0 < k_q;
+            if (v) ai = {e1 < k_q ? a_r_data[p][7:4] : 4'd0, a_r_data[p][3:0]};
+          end else begin
+            if (base + 32'(p) < k_bytes) ai = a_r_data[p];
+            v = 32'(p) < mac_step && rd_t_q + 32'(p) < k_q;
+            if (v) case (ai_fmt_bytes())
+              1: af = {24'd0, a_r_data[off]};
+              2: af = {16'd0, a_r_data[off+1], a_r_data[off]};
+              4: af = {a_r_data[off+3], a_r_data[off+2], a_r_data[off+1], a_r_data[off]};
+              default: ;
             endcase
-            pe_v[e] = 1'b1;
           end
         end
+        assert (pe_v[p] === v && pe_a[p] === ai && pe_a_float[p] === af)
+          else $fatal(1, "r20 A/valid packing mismatch lane=%0d fmt=%0d", p, numfmt_q);
+        for (int g = 0; g < OutCols; g++) begin
+          bi = '0; bf = '0;
+          if (rd_v_q) begin
+            if (numfmt_q == 3'd1) begin
+              if (v) bi = {e1 < k_q ? b_r_data[grp_of_rd[g]][p][7:4] : 4'd0,
+                           b_r_data[grp_of_rd[g]][p][3:0]};
+            end else begin
+              if (base + 32'(p) < k_bytes) bi = b_r_data[grp_of_rd[g]][p];
+              if (v) case (ai_fmt_bytes())
+                1: bf = {24'd0, b_r_data[grp_of_rd[g]][off]};
+                2: bf = {16'd0, b_r_data[grp_of_rd[g]][off+1], b_r_data[grp_of_rd[g]][off]};
+                4: bf = {b_r_data[grp_of_rd[g]][off+3], b_r_data[grp_of_rd[g]][off+2],
+                         b_r_data[grp_of_rd[g]][off+1], b_r_data[grp_of_rd[g]][off]};
+                default: ;
+              endcase
+            end
+          end
+          assert (pe_b[g][p] === bi && pe_b_float[g][p] === bf)
+            else $fatal(1, "r20 B packing mismatch group=%0d lane=%0d fmt=%0d", g, p, numfmt_q);
+        end
+      end
+      if (rd_v_q) begin
+        r20_operand_checks = r20_operand_checks + PeLanes;
+        r20_formats = r20_formats | (8'd1 << numfmt_q);
       end
     end
   end
+  final $display("[r20] operand_checks=%0d formats=%b", r20_operand_checks, r20_formats);
+`endif
+  // pragma translate_on
 
   // D6 hoist: AR/store issue address math moved out of the mega-block.
   // Each *_pre wire is a pure function of registered state + axi_resp_s;
@@ -2333,6 +2677,7 @@ assign axi_req_o  = axi_req_d;
   logic [7:0]           ar_a_pre_nb,    ar_b_pre_nb;
   logic [31:0]          ar_a_pre_elems, ar_b_pre_elems;
   logic                 ar_a_pre_row_last, ar_b_pre_row_last;
+`ifdef G6LC_AI_GEMM_LEGACY_CONTROL
   always_comb begin
     ar_a_pre_lane     = a_ar_cur[BeatAlignW-1:0];
     ar_a_pre_addr     = beat_align(a_ar_cur);
@@ -2349,8 +2694,833 @@ assign axi_req_o  = axi_req_d;
     ar_b_pre_elems    = elems_for_burst(k_bytes - ar_t_q, ar_b_pre_lane, ar_b_pre_nb);
     ar_b_pre_row_last = (ar_t_q + ar_b_pre_elems) >= k_bytes;
   end
+`else
+  // The issue cursor remains owned by the sequencer. Plan exactly one burst
+  // from that stable cursor, hold all facts together until local AR acceptance,
+  // then resample the updated cursor. No speculative cursor or FIFO replay.
+  logic [2:0] ar_plan_phase_q;
+  logic ar_plan_b_q, ar_plan_valid;
+  logic [AddrWidth-1:0] ar_plan_addr_q;
+  logic [BeatLaneW-1:0] ar_plan_lane_q;
+  logic [31:0] ar_plan_rem_q, ar_plan_capacity_q, ar_plan_elems_q;
+  logic [7:0] ar_plan_nb_q;
+  logic ar_plan_last_q;
+  logic ar_plan_final_row_q, ar_plan_terminal_q;
+  // r23: beats left in the DRAM stripe at the planned (beat-aligned) address,
+  // as 2^(C-s) - offset/2^s with constant shifts (same identity as the store
+  // planner; the planned address is beat aligned so no sticky term exists).
+  logic [31:0] ar_stripe_beats_c;
+  if (NrChannels <= 1) begin : gen_ar_stripe_single
+    assign ar_stripe_beats_c = 32'd255;
+  end else if (ChanShift > BeatAlignW) begin : gen_ar_stripe
+    logic [31:0] ar_stripe_raw;
+    assign ar_stripe_raw = (32'd1 << (ChanShift - BeatAlignW)) -
+        ((32'(ar_plan_addr_q) & ((32'd1 << ChanShift) - 32'd1)) >> BeatAlignW);
+    assign ar_stripe_beats_c = ar_stripe_raw > 32'd255 ? 32'd255 : ar_stripe_raw;
+  end else begin : gen_ar_stripe_unit
+    assign ar_stripe_beats_c = 32'd1;
+  end
+  // pragma translate_off
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      ar_plan_phase_q == 3'd2 |-> ar_plan_nb_q > 0 &&
+      (32'(ar_plan_nb_q) > ar_stripe_beats_c ? ar_stripe_beats_c[7:0] : ar_plan_nb_q) ==
+          cap_beats_to_stripe(ar_plan_addr_q, ar_plan_nb_q));
+  // pragma translate_on
+  assign ar_plan_valid = ar_plan_phase_q == 3'd5 &&
+      ((state_q == ST_LA && !ar_plan_b_q) || (state_q == ST_LB && ar_plan_b_q));
+  always_ff @(posedge clk_i or negedge rst_ni) begin : plan_operand_burst
+    if (!rst_ni) begin
+      ar_plan_phase_q <= '0;
+      ar_plan_b_q <= 1'b0;
+      ar_plan_addr_q <= '0;
+      ar_plan_lane_q <= '0;
+      ar_plan_rem_q <= '0;
+      ar_plan_nb_q <= '0;
+      ar_plan_capacity_q <= '0;
+      ar_plan_elems_q <= '0;
+      ar_plan_last_q <= 1'b0;
+      ar_plan_final_row_q <= 1'b0;
+      ar_plan_terminal_q <= 1'b0;
+    end else if (!(state_q == ST_LA || state_q == ST_LB) ||
+                 (ar_plan_phase_q != 0 && ar_plan_b_q != (state_q == ST_LB))) begin
+      ar_plan_phase_q <= '0;
+    end else begin
+      unique case (ar_plan_phase_q)
+        3'd0: begin
+          ar_plan_b_q <= state_q == ST_LB;
+          ar_plan_addr_q <= beat_align(state_q == ST_LA ? a_ar_cur : b_ar_cur);
+          ar_plan_lane_q <= BeatLaneW'(state_q == ST_LA ? a_ar_cur : b_ar_cur);
+          ar_plan_rem_q <= k_bytes - ar_t_q;
+          ar_plan_final_row_q <= state_q == ST_LA ?
+              ar_i_q + 32'd1 >= m_q : ar_j_q + 32'd1 >= n_q;
+          ar_plan_phase_q <= 3'd1;
+        end
+        3'd1: begin
+          ar_plan_nb_q <= beats_for_rem(ar_plan_rem_q, ar_plan_lane_q);
+          ar_plan_phase_q <= 3'd2;
+        end
+        3'd2: begin
+          ar_plan_nb_q <= 32'(ar_plan_nb_q) > ar_stripe_beats_c ? ar_stripe_beats_c[7:0] : ar_plan_nb_q;
+          ar_plan_phase_q <= 3'd3;
+        end
+        3'd3: begin
+          // nb is >=1 on an offered burst. Count bytes, not numeric elements.
+          ar_plan_capacity_q <= (32'(ar_plan_nb_q) << BeatAlignW) - 32'(ar_plan_lane_q);
+          ar_plan_phase_q <= 3'd4;
+        end
+        3'd4: begin
+          ar_plan_elems_q <= ar_plan_rem_q < ar_plan_capacity_q ?
+                             ar_plan_rem_q : ar_plan_capacity_q;
+          ar_plan_last_q <= ar_plan_rem_q <= ar_plan_capacity_q;
+          ar_plan_terminal_q <= ar_plan_final_row_q &&
+                                ar_plan_rem_q <= ar_plan_capacity_q;
+          ar_plan_phase_q <= 3'd5;
+        end
+        3'd5: if (axi_req_d.ar_valid && axi_resp_s.ar_ready) ar_plan_phase_q <= '0;
+        default: ar_plan_phase_q <= '0;
+      endcase
+    end
+  end
+  assign ar_a_pre_addr = ar_plan_addr_q;
+  assign ar_b_pre_addr = ar_plan_addr_q;
+  assign ar_a_pre_lane = ar_plan_lane_q;
+  assign ar_b_pre_lane = ar_plan_lane_q;
+  assign ar_a_pre_rem = ar_plan_rem_q;
+  assign ar_b_pre_rem = ar_plan_rem_q;
+  assign ar_a_pre_nb = ar_plan_nb_q;
+  assign ar_b_pre_nb = ar_plan_nb_q;
+  assign ar_a_pre_elems = ar_plan_elems_q;
+  assign ar_b_pre_elems = ar_plan_elems_q;
+  assign ar_a_pre_row_last = ar_plan_last_q;
+  assign ar_b_pre_row_last = ar_plan_last_q;
+`endif
 
+  // Shared with the seed-product launch, including the reference control arm.
+  logic bad_job;
+  assign bad_job = m_q == 0 || n_q == 0 || k_q == 0 ||
+      m_q > LimM || n_q > LimN || !cap_ok_c ||
+      ai_fmt_bytes() > MaxElementBytes || lda_q < k_q[15:0] ||
+      ldb_q < k_q[15:0] ||
+      !g6lc_ai_island_cfg_pkg::ai_elem_aligned(pa_q, numfmt_q) ||
+      !g6lc_ai_island_cfg_pkg::ai_elem_aligned(pb_q, numfmt_q) ||
+      !g6lc_ai_island_cfg_pkg::ai_c_aligned(pc_q, n_q[0]);
+
+`ifndef G6LC_AI_GEMM_LEGACY_CONTROL
+  // r16 hand split. Each next-state/output family has one owner. Cross-family
+  // dependencies are transaction events, never partially assigned request structs.
+  // The legacy arm is retained only for same-source ablation with the cuts bypassed.
+  axi_req_t read_req, store_req;
+  logic load_a, load_b, load_active, load_ar_fire, load_r_fire;
+  logic load_r_match, load_done, skip_b, seed_done;
+  logic [ARSlotW-1:0] issue_slot, receive_slot;
+  logic [31:0] receive_row, receive_col, receive_count, receive_rem, receive_room;
+  logic [BeatLaneW-1:0] receive_lane;
+  logic load_ar_offer, load_r_ready, load_all_issued_q, load_empty_after;
+  logic [AddrWidth-1:0] lc_plan_addr;
+  logic [7:0] lc_plan_beats;
+  logic store_active, store_pair, store_reset, store_b_fire, store_rows_done;
+  logic [31:0] store_beats, store_beats_done;
+  logic [31:0] store_beat_addr;
+  logic [15:0] store_retire_elems;
+  wbeat_t store_word;
+
+  assign load_a = state_q == ST_LA;
+  assign load_b = state_q == ST_LB;
+  assign load_active = load_a || load_b;
+  assign load_ar_offer = load_active && !load_complete_q && !load_all_issued_q &&
+      ar_plan_valid && (ar_hold_q || ar_inflight_q < ar_max_eff);
+  assign load_r_ready = load_active && ar_inflight_q != '0 &&
+      (!SplitArId || !axi_resp_s.r_valid || load_r_match);
+  // r21: registered facts and the raw response. In ST_LA every presented R
+  // beat belongs to this load, so a final-beat error is visible on the
+  // response itself without the acceptance chain.
+  assign skip_b = ReuseBEn && reuse_b_skip_q && reuse_b_safe &&
+                  !reuse_b_invalidate_i && !err_q &&
+                  !(axi_resp_s.r_valid && axi_resp_s.r.resp[1]);
+  assign seed_done = lc_e_q >= lc_total_q && !lc_buf_v_q && !lc_ar_busy_q;
+  // Slot selection is shared by AR allocation and R matching. A stalled offer
+  // keeps its reserved ID even if an older response frees a lower-numbered slot.
+  always_comb begin : select_load_slots
+    logic found_free;
+    found_free = 1'b0;
+    issue_slot = '0;
+    receive_slot = '0;
+    load_r_match = !SplitArId;
+    if (SplitArId) begin
+      for (int unsigned s = 0; s < MaxAROut; s++) begin
+        if (!ar_slot_q[s].valid && !found_free) begin
+          issue_slot = ARSlotW'(s);
+          found_free = 1'b1;
+        end
+        if (ar_slot_q[s].valid &&
+            axi_resp_s.r.id == (ArIdBase + IdWidth'(s))) begin
+          receive_slot = ARSlotW'(s);
+          load_r_match = 1'b1;
+        end
+      end
+    end
+    if (ar_hold_q) issue_slot = ar_hold_slot_q;
+  end
+
+  // Accumulate-C reader: prepare the next descriptor while the current R
+  // burst drains. The cursor advances only on AR acceptance.
+  logic [1:0] lc_plan_phase_q;
+  logic [AddrWidth-1:0] lc_next_addr_q;
+  logic [31:0] lc_plan_left_q, lc_plan_limit_q, lc_plan_stripe_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) lc_next_addr_q <= '0;
+    else if (state_q != ST_LC) lc_next_addr_q <= beat_align(pc_q);
+    else if (lc_ar_fire)
+      lc_next_addr_q <= lc_next_addr_q + (AddrWidth'(lc_ar_beats) << BeatAlignW);
+  end
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      lc_plan_phase_q <= '0; lc_plan_addr <= '0; lc_plan_beats <= '0;
+      lc_plan_left_q <= '0; lc_plan_limit_q <= '0; lc_plan_stripe_q <= '0;
+    end else if (state_q != ST_LC) lc_plan_phase_q <= '0;
+    else begin
+      unique case (lc_plan_phase_q)
+        0: if (lc_issued_q < lc_beats_q) begin
+          lc_plan_addr <= lc_next_addr_q;
+          lc_plan_left_q <= lc_beats_q - lc_issued_q;
+          lc_plan_phase_q <= 1;
+        end
+        1: begin
+          lc_plan_limit_q <= lc_plan_left_q > MaxBurstBeats ? 32'(MaxBurstBeats) : lc_plan_left_q;
+          lc_plan_stripe_q <= g6lc_ai_island_cfg_pkg::dram_beats_in_stripe(
+              NrChannels, ChanShift, BytesPerBeat, 64'(lc_plan_addr));
+          lc_plan_phase_q <= 2;
+        end
+        2: begin
+          lc_plan_beats <= 8'(lc_plan_limit_q < lc_plan_stripe_q ? lc_plan_limit_q : lc_plan_stripe_q);
+          lc_plan_phase_q <= 3;
+        end
+        3: if (lc_ar_fire) lc_plan_phase_q <= 0;
+        default: lc_plan_phase_q <= 0;
+      endcase
+    end
+  end
+
+  always_comb begin : present_read_channels
+    read_req = '0;
+    read_req.ar.id = IdWidth'(2);
+    read_req.ar.size = axi_pkg::size_t'($clog2(BytesPerBeat));
+    read_req.ar.burst = axi_pkg::BURST_INCR;
+    read_req.ar.cache = axi_pkg::CACHE_MODIFIABLE;
+    if (load_active) begin
+      read_req.ar.addr = load_a ? ar_a_pre_addr : ar_b_pre_addr;
+      read_req.ar.len = axi_pkg::len_t'((load_a ? ar_a_pre_nb : ar_b_pre_nb) - 8'd1);
+      if (SplitArId) read_req.ar.id = ArIdBase + IdWidth'(issue_slot);
+      read_req.ar_valid = load_ar_offer;
+      read_req.r_ready = load_r_ready;
+    end else if (state_q == ST_LC) begin
+      read_req.ar.addr = lc_plan_addr;
+      read_req.ar.len = axi_pkg::len_t'(lc_plan_beats - 8'd1);
+      read_req.ar_valid = lc_plan_phase_q == 3 && !lc_ar_busy_q && lc_issued_q < lc_beats_q;
+      read_req.r_ready = lc_ar_busy_q && !lc_buf_v_q;
+    end
+  end
+  assign load_ar_fire = load_ar_offer && axi_resp_s.ar_ready;
+  assign load_r_fire = load_r_ready && axi_resp_s.r_valid;
+  assign lc_ar_fire = state_q == ST_LC && read_req.ar_valid && axi_resp_s.ar_ready;
+  assign lc_ar_beats = lc_plan_beats;
+  assign lc_r_fire = state_q == ST_LC && read_req.r_ready && axi_resp_s.r_valid;
+  assign lc_w_fire = state_q == ST_LC && lc_buf_v_q && lc_e_q < lc_total_q;
+
+  // R metadata is independent of AR issue. The accepted response owns its lane,
+  // cursor and ID until the bank write edge.
+  localparam int unsigned ReceiveCountW = BeatAlignW + 1;
+  logic receive_first, receive_fits;
+  logic [ReceiveCountW-1:0] receive_room_n, receive_limit;
+  assign receive_row = SplitArId ? ar_slot_q[receive_slot].row : (load_a ? i_q : j_q);
+  assign receive_col = SplitArId ? ar_slot_q[receive_slot].col : t_q;
+  assign receive_first = SplitArId ? ar_slot_q[receive_slot].first : burst_first_q;
+  assign receive_lane = receive_first ?
+      (SplitArId ? ar_slot_q[receive_slot].lane0 : ar_head_lane) : BeatLaneW'(0);
+  // r23: the remaining byte count is a carried fact (slot or ordered
+  // cursor), and the beat room is below 2*BytesPerBeat, so the select
+  // compares only the low bits once the high bits are known zero.
+  assign receive_rem = SplitArId ? ar_slot_q[receive_slot].rem : recv_rem_q;
+  assign receive_room = 32'(BytesPerBeat) - 32'(receive_lane);
+  assign receive_room_n = ReceiveCountW'(receive_room);
+  if (BytesPerBeat > PeLanes) begin : gen_receive_cap
+    assign receive_limit = receive_room_n > ReceiveCountW'(PeLanes) ?
+        ReceiveCountW'(PeLanes) : receive_room_n;
+  end else begin : gen_receive_no_cap
+    assign receive_limit = receive_room_n;
+  end
+  assign receive_fits = receive_rem[31:ReceiveCountW] == '0 &&
+      receive_rem[ReceiveCountW-1:0] < receive_limit;
+  assign receive_count = receive_fits ? 32'(receive_rem[ReceiveCountW-1:0]) : 32'(receive_limit);
+  // pragma translate_off
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      load_r_fire |-> receive_rem == k_bytes - receive_col);
+  logic [31:0] r41_receive_ref;
   always_comb begin
+    r41_receive_ref = receive_rem < receive_room ? receive_rem : receive_room;
+    if (r41_receive_ref > PeLanes) r41_receive_ref = PeLanes;
+  end
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      load_r_fire |-> receive_room <= 32'(BytesPerBeat) && receive_count == r41_receive_ref);
+  // pragma translate_on
+  // Ordered-ID receive remaining bytes: k_bytes - t_q while a load runs.
+  logic [31:0] recv_rem_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) recv_rem_q <= '0;
+    else if (!load_active) recv_rem_q <= k_bytes;
+    else if (load_r_fire)
+      recv_rem_q <= recv_rem_q <= 32'(load_a ? la_n_d : lb_n_d) ?
+                    k_bytes : recv_rem_q - 32'(load_a ? la_n_d : lb_n_d);
+  end
+
+  // r23: static per-bank write routing. Beat byte p lands in bank
+  // (col + p) mod PeLanes, so bank b takes byte p_b = (b - col_lane) mod
+  // PeLanes when p_b < count, at the word of (row, col) plus one when the
+  // lane wrapped (b < col_lane). No dynamic write index and one shared word.
+  logic [LaneW-1:0] rx_col_lane;
+  logic [OperandBankAddrW-1:0] rx_a_word_c, rx_b_word_c;
+  logic [ColW-1:0] rx_b_group;
+  assign rx_col_lane = LaneW'(receive_col & 32'(PeLanes - 1));
+  assign rx_a_word_c = a_bank_addr(receive_row, receive_col);
+  assign rx_b_word_c = b_bank_addr(receive_col, receive_row);
+  assign rx_b_group = col_grp(receive_row);
+  for (genvar b = 0; b < PeLanes; b++) begin : gen_rx_bank
+    logic [LaneW-1:0] lane_off;
+    logic live, carry;
+    logic [7:0] byte_c;
+    assign lane_off = LaneW'(b) - rx_col_lane;
+    assign live = load_r_fire && 32'(lane_off) < receive_count;
+    assign carry = LaneW'(b) < rx_col_lane;
+    assign byte_c = byte_from_beat(axi_resp_s.r.data,
+                                   BeatLaneW'(32'(receive_lane) + 32'(lane_off)));
+    assign a_w_req[b] = live && load_a;
+    assign a_w_addr[b] = rx_a_word_c + OperandBankAddrW'(carry);
+    assign a_w_data[b] = byte_c;
+    for (genvar g = 0; g < OutCols; g++) begin : gen_rx_group
+      assign b_w_req[g][b] = live && load_b && rx_b_group == ColW'(g);
+      assign b_w_addr[g][b] = rx_b_word_c + OperandBankAddrW'(carry);
+      assign b_w_data[g][b] = byte_c;
+    end
+  end
+  // pragma translate_off
+  always @(negedge clk_i) if (rst_ni && load_r_fire) begin
+    for (int unsigned p = 0; p < PeLanes; p++) begin
+      automatic logic [LaneW-1:0] bank;
+      if (32'(p) < receive_count) begin
+        bank = t_bank(receive_col + 32'(p));
+        if (load_a) begin
+          assert (a_w_req[bank] && a_w_addr[bank] == a_bank_addr(receive_row, receive_col + 32'(p)) &&
+                  a_w_data[bank] == byte_from_beat(axi_resp_s.r.data, BeatLaneW'(32'(receive_lane) + p)))
+            else $error("r23 A bank write routing differs for byte %0d", p);
+        end else begin
+          assert (b_w_req[rx_b_group][bank] &&
+                  b_w_addr[rx_b_group][bank] == b_bank_addr(receive_col + 32'(p), receive_row))
+            else $error("r23 B bank write routing differs for byte %0d", p);
+        end
+      end
+    end
+  end
+  // pragma translate_on
+
+  always_comb begin : account_load_transactions
+    ar_inflight_d = ar_inflight_q;
+    burst_first_d = burst_first_q;
+    if (state_q == ST_IDLE || (state_q == ST_CHK && !bad_job)) begin
+      ar_inflight_d = '0;
+      burst_first_d = 1'b0;
+    end else if (load_active) begin
+      unique case ({load_ar_fire, load_r_fire && axi_resp_s.r.last})
+        2'b10: begin
+          ar_inflight_d = ar_inflight_q + AROutW'(1);
+          if (ar_inflight_q == '0) burst_first_d = 1'b1;
+        end
+        2'b01: begin
+          ar_inflight_d = ar_inflight_q - AROutW'(1);
+          burst_first_d = ar_inflight_q > AROutW'(1);
+        end
+        2'b11: burst_first_d = 1'b1;
+        default: ;
+      endcase
+      if (load_r_fire && !axi_resp_s.r.last) burst_first_d = 1'b0;
+    end
+  end
+  logic load_complete_q, load_done_event;
+  // Completion belongs to accepted descriptors, for ordered and split IDs.
+  // Keep the terminal event through the seed-product join, even after the
+  // legacy issue cursor has reset on load_done. No R/write cycle is added.
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) load_all_issued_q <= 1'b0;
+    else if (!load_active || state_d != state_q) load_all_issued_q <= 1'b0;
+    else if (load_ar_fire && ar_plan_terminal_q) load_all_issued_q <= 1'b1;
+  end
+  assign load_empty_after =
+      (ar_inflight_q == '0 && load_ar_fire == (load_r_fire && axi_resp_s.r.last)) ||
+      (ar_inflight_q == AROutW'(1) && load_r_fire && axi_resp_s.r.last && !load_ar_fire);
+  assign load_done_event = load_active && load_empty_after &&
+      (load_all_issued_q || (load_ar_fire && ar_plan_terminal_q));
+  // A short panel can finish before the seed-product window. Preserve the
+  // receive completion while that join holds this load state; do not reissue it.
+  assign load_done = load_complete_q || load_done_event;
+  // pragma translate_off
+`ifdef G6LC_AI_HYP_R20_CHECK
+  logic r20_done_ref_q, r20_done_new_q, r20_done_check_q;
+  int unsigned r20_load_checks;
+  typedef struct packed {
+    logic [31:0] state, m, n, kb, row, col, count, issue_row, issue_col, inflight, inflight_next;
+    logic ar_fire, r_fire, r_last, all_issued, terminal, complete, done_event;
+  } r20_load_sample_t;
+  r20_load_sample_t r20_sample_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin : sample_r20_completion
+    logic [31:0] issued_next;
+    if (!rst_ni) begin
+      r20_done_ref_q <= 1'b0; r20_done_new_q <= 1'b0; r20_done_check_q <= 1'b0;
+      r20_load_checks <= 0;
+      r20_sample_q <= '0;
+    end else begin
+      issued_next = (load_a ? ar_i_q : ar_j_q) +
+          32'(load_ar_fire && (load_a ? ar_a_pre_row_last : ar_b_pre_row_last));
+      r20_done_ref_q <= load_complete_q || (load_active && (SplitArId ?
+          (issued_next >= (load_a ? m_q : n_q) && ar_inflight_d == '0) :
+          (load_r_fire && receive_col + receive_count >= k_bytes &&
+           receive_row + 32'd1 == (load_a ? m_q : n_q))));
+      r20_done_new_q <= load_done;
+      r20_done_check_q <= load_active;
+      r20_sample_q <= '{
+        state: 32'(state_q), m: m_q, n: n_q, kb: k_bytes,
+        row: receive_row, col: receive_col, count: receive_count,
+        issue_row: (load_a ? ar_i_q : ar_j_q), issue_col: ar_t_q,
+        inflight: 32'(ar_inflight_q), inflight_next: 32'(ar_inflight_d),
+        ar_fire: load_ar_fire, r_fire: load_r_fire, r_last: axi_resp_s.r.last,
+        all_issued: load_all_issued_q, terminal: ar_plan_terminal_q,
+        complete: load_complete_q, done_event: load_done_event};
+      if (load_active) r20_load_checks <= r20_load_checks + 1;
+    end
+  end
+  always @(negedge clk_i) if (rst_ni && r20_done_check_q)
+    assert (r20_done_new_q == r20_done_ref_q)
+      else $fatal(1, "r20 load completion diverged from r19: state=%0d m/n/kb=%0d/%0d/%0d recv=%0d/%0d/%0d issue=%0d/%0d inflight=%0d->%0d ar/r/last=%b%b%b issued/terminal=%b%b complete/event=%b%b ref/new=%b%b",
+          r20_sample_q.state, r20_sample_q.m, r20_sample_q.n, r20_sample_q.kb,
+          r20_sample_q.row, r20_sample_q.col, r20_sample_q.count,
+          r20_sample_q.issue_row, r20_sample_q.issue_col,
+          r20_sample_q.inflight, r20_sample_q.inflight_next,
+          r20_sample_q.ar_fire, r20_sample_q.r_fire, r20_sample_q.r_last,
+          r20_sample_q.all_issued, r20_sample_q.terminal,
+          r20_sample_q.complete, r20_sample_q.done_event, r20_done_ref_q, r20_done_new_q);
+  final $display("[r20] load_checks=%0d", r20_load_checks);
+`endif
+  // pragma translate_on
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) load_complete_q <= 1'b0;
+    else if (!load_active || state_d != state_q) load_complete_q <= 1'b0;
+    else if (load_done_event) load_complete_q <= 1'b1;
+  end
+
+  assign ar_lane_push_en = load_ar_fire;
+  assign ar_lane_push = load_a ? ar_a_pre_lane : ar_b_pre_lane;
+  assign ar_lane_pop_en = load_r_fire && axi_resp_s.r.last;
+  assign ar_slot_we = SplitArId && load_ar_fire;
+  assign ar_slot_widx = issue_slot;
+  assign ar_slot_push_row = load_a ? ar_i_q : ar_j_q;
+  assign ar_slot_push_col = ar_t_q;
+  assign ar_slot_r_en = SplitArId && load_r_fire;
+  assign ar_slot_ridx = receive_slot;
+  assign ar_slot_r_last = axi_resp_s.r.last;
+  assign ar_slot_ntake = receive_count;
+  assign la_n_d = (load_a && load_r_fire) ? receive_count[7:0] : 8'd0;
+  assign lb_n_d = (load_b && load_r_fire) ? receive_count[7:0] : 8'd0;
+  always_comb begin : advance_issue_cursor
+    ar_i_en = 1'b0; ar_j_en = 1'b0; ar_t_en = 1'b0;
+    ar_i_d = ar_i_q; ar_j_d = ar_j_q; ar_t_d = ar_t_q;
+    // Both loads share one planner, so its element count and row-last fact
+    // need no per-operand select here.
+    if (load_ar_fire) begin
+      ar_t_en = 1'b1;
+      if (ar_plan_last_q) begin
+        ar_t_d = '0;
+        if (load_a) begin ar_i_en = 1'b1; ar_i_d = ar_i_q + 32'd1; end
+        else begin ar_j_en = 1'b1; ar_j_d = ar_j_q + 32'd1; end
+      end else ar_t_d = ar_t_q + ar_plan_elems_q;
+    end
+    // r21: reset on registered phase facts. A rejected job never loads, so
+    // resetting through ST_CHK regardless of bad_job is equivalent; the A
+    // panel's completion is consumed from its recorded flag, after which no
+    // AR can be offered.
+    if (state_q == ST_CHK || (load_a && load_complete_q)) begin
+      ar_i_en = 1'b1; ar_i_d = '0;
+      ar_j_en = 1'b1; ar_j_d = '0;
+      ar_t_en = 1'b1; ar_t_d = '0;
+    end
+  end
+
+  // One C-store engine serves the MAC trail and the dedicated drain state.
+  // All burst limits are functions of registers, upstream of channel acceptance.
+  assign store_active = state_q == ST_STC ||
+      (state_q == ST_MAC && DualCRead && DataWidth >= 64 && !acc_mode_q &&
+       dot_pending_q == '0 && trail_ready);
+  assign store_pair = DataWidth >= 64 && !n_q[0];
+  assign store_rows_done = stc_i_q + 32'd1 >= m_q &&
+                           stc_j_q + 32'(store_retire_elems) >= n_q;
+  // The dedicated drain starts after the last token has written its element.
+  assign store_reset = state_q == ST_IDLE ||
+      (state_q == ST_MAC && (!DualCRead || acc_mode_q) &&
+       i_q >= m_q && dot_pending_q == '0 && !rd_v_q && !sum_v_q && !s1_v_q && !commit_v_q);
+
+  g6lc_ai_gemm_store_plan #(
+    .AddrWidth(AddrWidth), .DataWidth(DataWidth), .NrChannels(NrChannels),
+    .ChanShift(ChanShift), .MaxBurstBeats(MaxBurstBeats), .ShiftW(StoreShW)
+  ) i_store_plan (
+    .clk_i, .rst_ni, .job_start_i(state_q == ST_IDLE && start_i),
+    .base_i(ptr_c_i), .pitch_words_i(ldc_i == 0 ? n_i : 32'(ldc_i)),
+    .request_i(store_active && !aw_sent_q), .retire_i(store_b_fire),
+    .retire_row_i(stc_j_q + 32'(store_retire_elems) >= n_q),
+    .retire_words_i(store_retire_elems),
+    .n_i(n_q), .column_i(stc_j_q), .committed_i(c_cols_done_q),
+    .row_complete_i(state_q == ST_STC || stc_i_q < 32'(c_rows_done_q)),
+    .pair_i(store_pair), .wide_i(wide_c_q), .word_shift_i(wsh_q),
+    .valid_o(store_plan_valid), .addr_o(c_store_addr), .beats_o(store_beats)
+  );
+  // pragma translate_off
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      store_plan_valid |-> c_store_addr == c_addr(pc_q, stc_i_q, stc_j_q, ldc_eff));
+  // pragma translate_on
+  assign store_beats_done = 32'(w_fetch_q);
+  assign store_beat_addr = 32'(c_store_addr) +
+                          (store_beats_done << (32'd2 + 32'(wsh_q)));
+  logic w_payload_valid_q, w_payload_last_q, w_payload_available;
+  logic [DataWidth-1:0] w_payload_q;
+  logic [BytesPerBeat-1:0] w_mask_q;
+  logic [BeatLaneW-1:0] w_lane_q;
+  // The planner clamps bursts to 255 beats, so the fetch compare is 9 bits.
+  assign w_fetch_needed = store_plan_valid &&
+      (store_pair ? w_fetch_q < store_beats[8:0] : w_fetch_q == 0);
+  // pragma translate_off
+  assert property (@(posedge clk_i) disable iff (!rst_ni) store_plan_valid |-> store_beats < 32'd512);
+  // pragma translate_on
+  assign w_payload_available = w_fetch_needed && (!store_pair ||
+      (aw_sent_q && (DualCRead || (c_pair_hold_q && !w_payload_valid_q))));
+  // Fetch advances on raw capture, independently of AXI retirement. Therefore
+  // drain+refill captures the next bank word and sustains one beat per cycle.
+  // Both cursors are bounded by the same immutable, committed-credit plan.
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      w_payload_valid_q <= 1'b0; w_payload_q <= '0;
+      w_payload_last_q <= 1'b0; w_mask_q <= '0; w_lane_q <= '0;
+      w_fetch_q <= '0; w_column_q <= '0;
+    end else if ((state_q == ST_IDLE && start_i) || store_b_fire) begin
+      w_payload_valid_q <= 1'b0;
+      w_fetch_q <= '0;
+      // The read column restarts at the store cursor's new value on B.
+      w_column_q <= (state_q == ST_IDLE && start_i) ? 32'd0 : stc_j_d;
+    end else if (!w_payload_valid_q || axi_resp_s.w_ready) begin
+      w_payload_valid_q <= w_payload_available;
+      if (w_payload_available) begin
+        w_fetch_q <= w_fetch_q + 9'd1;
+        w_column_q <= w_column_q + (32'd1 << wsh_q);
+        w_payload_last_q <= !store_pair || 32'(w_fetch_q) + 32'd1 == store_beats;
+        w_lane_q <= BeatLaneW'(store_pair ? store_beat_addr : 32'(c_store_addr));
+        w_mask_q <= !store_pair ? BytesPerBeat'(4'hf) :
+            (wide_c_q ? {BytesPerBeat{1'b1}} : BytesPerBeat'(8'hff));
+        w_payload_q <= '0;
+        if (!store_pair) w_payload_q <= DataWidth'(c_r0_data);
+        else if (!DualCRead) w_payload_q <= DataWidth'({c_r0_data, c_lo_q});
+        else
+          for (int w = 0; w < DataWidth/32; w++)
+            w_payload_q[32*w +: 32] <= (wide_c_q || w < 2) ? c_rx_data[w] : 32'd0;
+      end
+    end
+  end
+  // pragma translate_off
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      w_fetch_needed |-> w_column_q == stc_j_q + (32'(w_fetch_q) << wsh_q));
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      store_plan_valid && store_pair && aw_sent_q |->
+      w_fetch_q <= store_beats[8:0] &&
+      stc_w_left_q <= store_beats[8:0] &&
+      w_fetch_q >= store_beats[8:0] - stc_w_left_q &&
+      w_fetch_q - (store_beats[8:0] - stc_w_left_q) == 9'(w_payload_valid_q));
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      w_payload_valid_q && !axi_resp_s.w_ready |=>
+      w_payload_valid_q && $stable({w_payload_q, w_mask_q, w_lane_q, w_payload_last_q}));
+`ifdef G6LC_AI_HYP_R19
+  int unsigned g6lc_ai_w_refills;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) g6lc_ai_w_refills <= 0;
+    else if (w_payload_valid_q && axi_resp_s.w_ready && w_payload_available)
+      g6lc_ai_w_refills <= g6lc_ai_w_refills + 1;
+  end
+  final $display("[r19] elastic_w_refills=%0d", g6lc_ai_w_refills);
+`endif
+  // pragma translate_on
+  assign store_word.data = w_payload_q << (8 * 32'(w_lane_q));
+  assign store_word.strb = w_mask_q << w_lane_q;
+  always_comb begin : present_store_channels
+    store_req = '0;
+    store_req.aw.id = IdWidth'(2);
+    store_req.aw.addr = c_store_addr;
+    store_req.aw.burst = axi_pkg::BURST_INCR;
+    store_req.aw.size = axi_pkg::size_t'(2);
+    store_req.w.data = store_word.data;
+    store_req.w.strb = store_word.strb;
+    store_req.w.last = w_payload_last_q;
+    if (store_pair) begin
+      store_req.aw.len = axi_pkg::len_t'(store_beats - 32'd1);
+      store_req.aw.size = axi_pkg::size_t'(32'd2 + 32'(wsh_q));
+    end
+    if (store_plan_valid) begin
+      store_req.aw_valid = !aw_sent_q;
+      if (store_pair) begin
+        store_req.w_valid = w_payload_valid_q;
+        store_req.b_ready = aw_sent_q && stc_w_left_q == '0;
+      end else begin
+        store_req.w_valid = w_payload_valid_q;
+        // Hold an early buffered B until both local AW and W have been accepted.
+        store_req.b_ready = aw_sent_q && w_sent_q;
+      end
+    end
+  end
+  assign store_b_fire = store_req.b_ready && axi_resp_s.b_valid;
+  assign store_retire_elems = store_pair ? stc_elem_q : 16'd1;
+  always_comb begin : advance_store
+    aw_sent_d = aw_sent_q;
+    w_sent_d = w_sent_q;
+    c_pair_hold_d = c_pair_hold_q;
+    c_lo_we_d = 1'b0;
+    stc_w_left_d = stc_w_left_q;
+    stc_elem_d = stc_elem_q;
+    stc_n_d = store_pair ? stc_elem_q : 16'd1;
+    stc_i_en = 1'b0; stc_i_d = stc_i_q;
+    stc_j_en = 1'b0; stc_j_d = stc_j_q;
+    if (store_req.aw_valid && axi_resp_s.aw_ready) begin
+      aw_sent_d = 1'b1;
+      stc_elem_d = store_pair ? (store_beats[15:0] << wsh_q) : 16'd1;
+      if (store_pair) begin
+        stc_w_left_d = store_beats[8:0];
+        w_sent_d = 1'b0;
+        c_pair_hold_d = 1'b0;
+      end
+    end
+    if (store_plan_valid && store_pair && aw_sent_q && stc_w_left_q != '0 &&
+        !DualCRead && !c_pair_hold_q) begin
+      c_lo_we_d = 1'b1;
+      c_pair_hold_d = 1'b1;
+    end
+    if (store_req.w_valid && axi_resp_s.w_ready) begin
+      if (store_pair) begin
+        stc_w_left_d = stc_w_left_q - 9'd1;
+        if (!DualCRead) c_pair_hold_d = 1'b0;
+        if (stc_w_left_q == 9'd1) w_sent_d = 1'b1;
+      end else w_sent_d = 1'b1;
+    end
+    if (store_b_fire) begin
+      aw_sent_d = 1'b0; w_sent_d = 1'b0;
+      c_pair_hold_d = 1'b0;
+      stc_elem_d = '0;
+      stc_j_en = 1'b1;
+      if (stc_j_q + 32'(store_retire_elems) >= n_q) begin
+        stc_j_d = '0;
+        stc_i_en = 1'b1; stc_i_d = stc_i_q + 32'd1;
+      end else stc_j_d = stc_j_q + 32'(store_retire_elems);
+    end
+    if (store_reset) begin
+      aw_sent_d = 1'b0; w_sent_d = 1'b0;
+      c_pair_hold_d = 1'b0;
+      stc_w_left_d = '0; stc_elem_d = '0;
+    end
+  end
+
+  always_comb begin : assemble_axi_request
+    axi_req_d = '0;
+    axi_req_d.ar = read_req.ar;
+    axi_req_d.ar_valid = read_req.ar_valid;
+    axi_req_d.r_ready = read_req.r_ready;
+    axi_req_d.aw = store_req.aw;
+    axi_req_d.aw_valid = store_req.aw_valid;
+    axi_req_d.w = store_req.w;
+    axi_req_d.w_valid = store_req.w_valid;
+    axi_req_d.b_ready = store_req.b_ready;
+  end
+
+  // FSM depends on completion events, not on fields assigned in channel blocks.
+  always_comb begin : advance_job
+    state_d = state_q;
+    unique case (state_q)
+      ST_IDLE: if (start_i) state_d = (ReuseAEn || ReuseBEn) ? ST_PREP : ST_CHK;
+      ST_PREP: if (span_valid) state_d = ST_CHK;
+      ST_CHK: begin
+        if (bad_job) state_d = ST_DONE;
+        else if (ReuseAEn && reuse_a_skip_q && reuse_a_safe && !reuse_a_invalidate_i)
+          state_d = skip_b ? ST_MAC : ST_LB;
+        else state_d = ST_LA;
+      end
+      // r21: the FSM consumes the recorded completion one edge after the
+      // terminal handshake; no acceptance logic sits on the state path.
+      ST_LA: if (load_complete_q) state_d = skip_b ? ST_MAC : ST_LB;
+      ST_LB: if (load_complete_q) state_d = ST_MAC;
+      ST_LC: begin
+        if (err_q) begin
+          if (!lc_ar_busy_q) state_d = ST_DONE;
+        end else if (seed_done) state_d = ST_MAC;
+      end
+      ST_MAC: begin
+        if (i_q >= m_q && stc_i_q >= m_q && !aw_sent_q && !rd_v_q && !sum_v_q && !s1_v_q &&
+            !commit_v_q && dot_pending_q == '0) state_d = ST_DONE;
+        else if (store_reset) state_d = ST_STC;
+      end
+      ST_STC: if (store_b_fire && store_rows_done) state_d = ST_DONE;
+      ST_DONE: state_d = ST_IDLE;
+      default: state_d = ST_IDLE;
+    endcase
+    if (acc_mode_q && state_d == ST_MAC && state_q != ST_MAC && state_q != ST_LC)
+      state_d = lc_mul_ready_q ? ST_LC : state_q;
+  end
+  always_comb begin : job_error
+    err_d = err_q;
+    if (state_q == ST_IDLE && start_i) err_d = 1'b0;
+    if (state_q == ST_CHK && bad_job) err_d = 1'b1;
+    if ((store_b_fire && axi_resp_s.b.resp[1]) ||
+        (lc_r_fire && axi_resp_s.r.resp[1])) err_d = 1'b1;
+  end
+
+  // r21: the last-partial fact follows the reduction cursor one edge ahead.
+  // t_q is zero whenever ST_MAC is entered, so outside the issuing window the
+  // register tracks the first step's verdict for the job's K and format.
+  logic mac_last_q, t_zero_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin mac_last_q <= 1'b0; t_zero_q <= 1'b1; end
+    else if (state_q == ST_MAC && i_q < m_q) begin
+      if (ph_q) begin
+        mac_last_q <= (t_q + mac_step >= k_q) ? (mac_step >= k_q)
+                                              : (t_q + (mac_step << 1) >= k_q);
+        t_zero_q <= t_q + mac_step >= k_q;
+      end
+    end else begin
+      mac_last_q <= mac_step >= k_q;
+      t_zero_q <= 1'b1;
+    end
+  end
+  // pragma translate_off
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      state_q == ST_MAC && i_q < m_q |-> mac_last_q == (t_q + mac_step >= k_q) && t_zero_q == (t_q == 0));
+  // pragma translate_on
+  // Issue (operand step into the dot or its registered sum) and accumulate
+  // are independent outputs; each has its own process (P6).
+  assign pair_present = j_pair_q < n_q;
+  // r23: `i_q < m_q` as a registered fact; it only changes when the MAC row
+  // cursor is written (row advance to m) or the job starts / the loads reset
+  // the cursor to zero.
+  logic rows_left_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) rows_left_q <= 1'b0;
+    else if (state_q == ST_MAC && rows_left_q && ph_q && t_q + mac_step >= k_q &&
+             j_q + (cols_eff << 1) >= n_q)
+      rows_left_q <= i_q + 32'd1 < m_q;
+    else if (state_q != ST_MAC) rows_left_q <= i_q < m_q;
+  end
+  // pragma translate_off
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      state_q == ST_MAC |-> rows_left_q == (i_q < m_q));
+  // pragma translate_on
+  assign j_issue = ph_q ? j_pair_q : j_q;
+  // Slot 1 issues only when a second column group exists; otherwise the slot
+  // is a bubble that keeps the set's two-edge spacing.
+  assign issue_now = state_q == ST_MAC && rows_left_q && (!ph_q || pair_present);
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      rd_v_q <= 1'b0; rd_ph_q <= 1'b0; rd_first_q <= 1'b0; rd_last_q <= 1'b0;
+      rd_t_q <= '0; rd_i_q <= '0; rd_j_q <= '0;
+    end else begin
+      rd_v_q <= issue_now;
+      if (issue_now) begin
+        rd_ph_q <= ph_q; rd_first_q <= t_zero_q; rd_last_q <= mac_last_q;
+        rd_t_q <= t_q; rd_i_q <= i_q; rd_j_q <= j_issue;
+      end
+    end
+  end
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin ph_q <= 1'b0; j_pair_q <= '0; end
+    else begin
+      ph_q <= (state_q == ST_MAC && rows_left_q) ? !ph_q : 1'b0;
+      j_pair_q <= j_q + cols_eff;
+    end
+  end
+  assign issue_sum_now = rd_v_q && !(DotPipeFloat && pe_float_en);
+  always_comb begin : issue_step
+    dot_start = rd_v_q && dot_pipe_en;
+    dot_first_issue = rd_v_q && rd_first_q;
+    dot_last_issue = rd_v_q && rd_last_q;
+    dot_i_issue = {32{rd_v_q}} & rd_i_q;
+    dot_j_issue = {32{rd_v_q}} & rd_j_q;
+    for (int unsigned g = 0; g < OutCols; g++) begin
+      sum_d[g] = {32{issue_sum_now}} & pe_sum[g];
+      sum_cv_d[g] = issue_sum_now && col_v_rd[g];
+    end
+    sum_v_d = issue_sum_now;
+    sum_first_d = issue_sum_now && rd_first_q;
+    sum_last_d = issue_sum_now && rd_last_q;
+    sum_i_d = {32{issue_sum_now}} & rd_i_q;
+    sum_j_d = {32{issue_sum_now}} & rd_j_q;
+    sum_ph_d = issue_sum_now && rd_ph_q;
+  end
+  // The accumulator is only read in ST_MAC (the commit token fires there,
+  // since the FSM waits for it), so it is held clear in every other state
+  // instead of being cleared on the entry edge from the next-state cone.
+  logic mac_state;
+  assign mac_state = state_q == ST_MAC;
+  for (genvar st = 0; st < 2; st++) begin : gen_accumulate_set
+    for (genvar g = 0; g < OutCols; g++) begin : gen_accumulate_partial
+      logic update;
+      assign update = s1_v_q && s1_cv_q[g] && s1_ph_q == st;
+      assign acc_d[st][g] = {32{mac_state}} & (update ? mac_acc_next[g] : acc_q[st][g]);
+    end
+  end
+  // r21 commit token: the completed element is written from the accumulator
+  // register on the edge after its last partial. The next element's first
+  // partial may overwrite acc_q on that same edge; the bank samples the
+  // retained value. The token owns publication, credit and drain decisions,
+  // so the FP result never feeds the bank router combinationally.
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      commit_v_q <= 1'b0; commit_i_q <= '0; commit_j_q <= '0; commit_cv_q <= '0; commit_ph_q <= 1'b0;
+    end else begin
+      commit_v_q <= s1_v_q && s1_last_q;
+      if (s1_v_q && s1_last_q) begin
+        commit_i_q <= s1_i_q; commit_j_q <= s1_j_q; commit_ph_q <= s1_ph_q;
+        commit_cv_q <= s1_cv_q;
+      end
+    end
+  end
+  // pragma translate_off
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      commit_v_q |-> !lc_w_fire && state_q == ST_MAC);
+  // pragma translate_on
+  always_comb begin : write_result_banks
+    c_w_req = 1'b0; c_w_bank = '0; c_w_addr = '0; c_w_data = '0;
+    for (int unsigned g = 0; g < OutCols; g++) begin
+      c_wx_req[g] = 1'b0; c_wx_bank[g] = '0;
+      c_wx_addr[g] = '0; c_wx_data[g] = '0;
+    end
+    if (commit_v_q) begin
+      for (int unsigned g = 0; g < OutCols; g++) begin
+        if (commit_cv_q[g]) begin
+          if (g == 0) begin
+            c_w_req = 1'b1; c_w_bank = c_bank(commit_j_q);
+            c_w_addr = c_bank_addr(commit_i_q, commit_j_q); c_w_data = acc_q[commit_ph_q][0];
+          end else begin
+            c_wx_req[g] = 1'b1; c_wx_bank[g] = c_bank(commit_j_q + 32'(g));
+            c_wx_addr[g] = c_bank_addr(commit_i_q, commit_j_q + 32'(g));
+            c_wx_data[g] = acc_q[commit_ph_q][g];
+          end
+        end
+      end
+    end else if (lc_w_fire) begin
+      c_w_req = 1'b1; c_w_bank = c_bank(lc_j_q);
+      c_w_addr = c_bank_addr(lc_i_q, lc_j_q);
+      c_w_data = lc_buf_q[32 * lc_word_q +: 32];
+    end
+  end
+`else
+  always_comb begin
+    // Reference control for ablation; not part of the default r16 implementation.
     // defaults: idle banks + AXI
     for (int unsigned p = 0; p < PeLanes; p++) begin
       a_w_req[p]  = 1'b0;
@@ -2464,9 +3634,11 @@ assign axi_req_o  = axi_req_d;
         stc_elem_d    = 8'd0;
         if (start_i) begin
           err_d   = 1'b0;
-          state_d = ST_CHK;
+          state_d = (ReuseAEn || ReuseBEn) ? ST_PREP : ST_CHK;
         end
       end
+
+      ST_PREP: if (span_valid) state_d = ST_CHK;
 
       ST_CHK: begin
         // AI-X9: B is k-major, so ldb must hold a row of k elements (was n).
@@ -3205,9 +4377,10 @@ assign axi_req_o  = axi_req_d;
     endcase
     // Accumulate mode enters the MAC through ST_LC so the tile holds C first.
     if (acc_mode_q && state_d == ST_MAC && state_q != ST_MAC && state_q != ST_LC)
-      state_d = lc_mul_done ? ST_LC : state_q;  // hold until the seed product is ready
+      state_d = lc_mul_ready_q ? ST_LC : state_q;  // hold until the seed product is ready
 
   end
+`endif
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -3222,7 +4395,8 @@ assign axi_req_o  = axi_req_d;
       a_row_base_q <= '0; b_row_base_q <= '0;
       a_cur_q <= '0; b_cur_q <= '0;
 
-      for (int unsigned g = 0; g < OutCols; g++) begin acc_q[g] <= '0; sum_q[g] <= '0; sum_cv_q[g] <= 1'b0; end
+      for (int unsigned g = 0; g < OutCols; g++) begin acc_q[0][g] <= '0; acc_q[1][g] <= '0; sum_q[g] <= '0; sum_cv_q[g] <= 1'b0; end
+      sum_ph_q <= 1'b0;
       pitch_sh_q <= '0;
       err_q <= 1'b0;
       done_q <= 1'b0;
@@ -3260,7 +4434,7 @@ assign axi_req_o  = axi_req_d;
       pmu_cy_q <= '0;
     end else begin
       state_q       <= state_d;
-      for (int unsigned g = 0; g < OutCols; g++) acc_q[g] <= acc_d[g];
+      for (int unsigned g = 0; g < OutCols; g++) begin acc_q[0][g] <= acc_d[0][g]; acc_q[1][g] <= acc_d[1][g]; end
       // F0b-2: advance the pipeline stage. For the pipelined floating path the
       // dot product valid/data are sampled directly from the pipe output; the
       // non-pipelined path continues to use the combinational `sum_*_d` values.
@@ -3274,6 +4448,7 @@ assign axi_req_o  = axi_req_d;
         sum_last_q  <= dot_valid ? dot_last_out  : 1'b0;
         sum_i_q     <= dot_valid ? dot_i_out     : '0;
         sum_j_q     <= dot_valid ? dot_j_out     : '0;
+        sum_ph_q    <= dot_valid && dot_ph_out;
       end else begin
         for (int unsigned g = 0; g < OutCols; g++) begin
           sum_q[g]    <= sum_d[g];
@@ -3284,6 +4459,7 @@ assign axi_req_o  = axi_req_d;
         sum_last_q  <= sum_last_d;
         sum_i_q     <= sum_i_d;
         sum_j_q     <= sum_j_d;
+        sum_ph_q    <= sum_ph_d;
       end
       err_q       <= err_d;
       // The pitch is fixed for the job at ST_CHK; every bank address from ST_LA on
@@ -3346,6 +4522,7 @@ assign axi_req_o  = axi_req_d;
           ar_slot_q[ar_slot_widx].lane0 <= ar_lane_push;
           ar_slot_q[ar_slot_widx].row   <= ar_slot_push_row;
           ar_slot_q[ar_slot_widx].col   <= ar_slot_push_col;
+          ar_slot_q[ar_slot_widx].rem   <= k_bytes - ar_slot_push_col;
         end
         if (ar_slot_r_en) begin
           if (ar_slot_r_last)
@@ -3360,13 +4537,16 @@ assign axi_req_o  = axi_req_d;
             // showed on SplitArId (NrChannels>1) with a row stride that does not
             // divide BytesPerBeat, which no power-of-two fixture produces;
             // ai_gemm_s8_asym_smoke (k=6) on ai-sc2 is the gate.
-            if (ar_slot_q[ar_slot_ridx].col + ar_slot_ntake >= k_bytes) begin
+            if (ar_slot_q[ar_slot_ridx].rem <= ar_slot_ntake) begin
               ar_slot_q[ar_slot_ridx].col <= '0;
+              ar_slot_q[ar_slot_ridx].rem <= k_bytes;
               ar_slot_q[ar_slot_ridx].row <=
                   ar_slot_q[ar_slot_ridx].row + 32'd1;
-            end else
+            end else begin
+              ar_slot_q[ar_slot_ridx].rem <= ar_slot_q[ar_slot_ridx].rem - ar_slot_ntake;
               ar_slot_q[ar_slot_ridx].col <=
                   ar_slot_q[ar_slot_ridx].col + ar_slot_ntake;
+            end
           end
         end
       end
@@ -3386,12 +4566,22 @@ assign axi_req_o  = axi_req_d;
       // group's valid columns are consecutive from sum_j_q, so the written count
       // is min(sum_j_q + cols_eff, n) -- except in ST_LC, whose C writes are the
       // seed load and not MAC progress.
+`ifdef G6LC_AI_GEMM_LEGACY_CONTROL
       if (state_q == ST_MAC && c_w_req && sum_j_q + cols_eff >= n_q)
         c_rows_done_q <= RowCountW'(sum_i_q) + RowCountW'(1);
       if (state_q == ST_MAC && c_w_req) begin
         c_cols_row_q  <= RowCountW'(sum_i_q);
         c_cols_done_q <= (sum_j_q + cols_eff > n_q) ? n_q : sum_j_q + cols_eff;
       end
+`else
+      // Credit follows the token's bank write, never the adder result.
+      if (commit_v_q && commit_j_q + cols_eff >= n_q)
+        c_rows_done_q <= RowCountW'(commit_i_q) + RowCountW'(1);
+      if (commit_v_q) begin
+        c_cols_row_q  <= RowCountW'(commit_i_q);
+        c_cols_done_q <= (commit_j_q + cols_eff > n_q) ? n_q : commit_j_q + cols_eff;
+      end
+`endif
       done_q        <= (state_q == ST_DONE);
 
       // I3: accumulate traffic while job is running
@@ -3422,9 +4612,14 @@ assign axi_req_o  = axi_req_d;
         i_q   <= '0;
         j_q   <= '0;
         t_q   <= '0;
-        stride_a_q     <= fmt_ld_to_stride(lda_i);
-        stride_b_q     <= fmt_ld_to_stride(ldb_i);
-        stride_b_grp_q <= (accumulate_i ? 32'd1 : 32'(OutCols)) * fmt_ld_to_stride(ldb_i);
+        // Incoming format owns these strides; numfmt_q still names the prior job.
+        stride_a_q <= g6lc_ai_island_cfg_pkg::ai_row_bytes(numfmt_i, {16'd0, lda_i});
+        stride_b_q <= g6lc_ai_island_cfg_pkg::ai_row_bytes(numfmt_i, {16'd0, ldb_i});
+        // OutCols is a power of two (elaboration check), so the group stride
+        // is a constant shift of the row stride, not a multiplier.
+        stride_b_grp_q <= accumulate_i ?
+            g6lc_ai_island_cfg_pkg::ai_row_bytes(numfmt_i, {16'd0, ldb_i}) :
+            (g6lc_ai_island_cfg_pkg::ai_row_bytes(numfmt_i, {16'd0, ldb_i}) << ColShift);
         a_row_base_q   <= ptr_a_i;
         b_row_base_q   <= ptr_b_i;
         a_cur_q        <= ptr_a_i;
@@ -3524,10 +4719,10 @@ assign axi_req_o  = axi_req_d;
       // `sum_first_q` in the next drain, which adds the first partial to 0.
       // Resetting acc_q at the element boundary would clear the running total
       // before the last partial has been drained into it.
-      if (state_q == ST_MAC && i_q < m_q) begin
+      if (state_q == ST_MAC && i_q < m_q && ph_q) begin
         if (t_q + mac_step >= k_q) begin
           t_q   <= '0;
-          if (j_q + cols_eff >= n_q) begin
+          if (j_q + (cols_eff << 1) >= n_q) begin
             j_q <= '0;
             i_q <= i_q + 1;  // becomes m when last row completes
 `ifdef G6LC_MUT_AI_CURSOR_STRIDE
@@ -3541,15 +4736,15 @@ assign axi_req_o  = axi_req_d;
             b_row_base_q <= pb_q;
             b_cur_q      <= pb_q;
           end else begin
-            j_q <= j_q + cols_eff;
-            b_row_base_q <= b_row_base_q + AddrWidth'(stride_b_grp_q);
-            b_cur_q      <= b_row_base_q + AddrWidth'(stride_b_grp_q);
+            j_q <= j_q + (cols_eff << 1);
+            b_row_base_q <= b_row_base_q + (AddrWidth'(stride_b_grp_q) << 1);
+            b_cur_q      <= b_row_base_q + (AddrWidth'(stride_b_grp_q) << 1);
             a_cur_q      <= a_row_base_q;
           end
         end else begin
           t_q <= t_q + mac_step;
-          a_cur_q <= a_cur_q + AddrWidth'(mac_step);
-          b_cur_q <= b_cur_q + AddrWidth'(mac_step);
+          a_cur_q <= a_cur_q + AddrWidth'(fmt_row_bytes(mac_step));
+          b_cur_q <= b_cur_q + AddrWidth'(fmt_row_bytes(mac_step));
         end
       end
 
@@ -3564,13 +4759,26 @@ assign axi_req_o  = axi_req_d;
   // D2b: the lc_total/lc_beats job product m*n is computed once at job
   // start by a 32-cycle shift-add accumulator (g6lc_ai_mul_seq) instead of
   // an atomic multiplier evaluated every cycle.
-  logic        lc_mul_done;
+  logic        lc_mul_done, lc_mul_ready_q, lc_mul_started_q, lc_mul_start;
   logic [63:0] lc_mul_prod;
+  // A pulse can complete during the A/B loads, long before ST_LC is reached.
+  // Retain its completion for this descriptor. Launch once, only for a checked
+  // accumulate job, so rejected/non-accumulate jobs cannot leave a stale multiply.
+  assign lc_mul_start = state_q == ST_CHK && !bad_job && acc_mode_q && !lc_mul_started_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin lc_mul_ready_q <= 1'b0; lc_mul_started_q <= 1'b0; end
+    else if (state_q == ST_IDLE && start_i) begin
+      lc_mul_ready_q <= 1'b0; lc_mul_started_q <= 1'b0;
+    end else begin
+      if (lc_mul_start) lc_mul_started_q <= 1'b1;
+      if (lc_mul_done) lc_mul_ready_q <= 1'b1;
+    end
+  end
   g6lc_ai_mul_seq #(.WA(32), .WB(32)) i_lc_mul (
     .clk_i, .rst_ni,
-    .start_i   (state_q == ST_IDLE && start_i),
-    .a_i       (32'(m_i)),
-    .b_i       (32'(n_i)),
+    .start_i   (lc_mul_start),
+    .a_i       (m_q),
+    .b_i       (n_q),
     .done_o    (lc_mul_done),
     .product_o (lc_mul_prod)
   );
@@ -3696,19 +4904,22 @@ assign axi_req_o  = axi_req_d;
   end
   final $display("[equiv] g6lc_ai_gemm_seq wbeat_eq: checked=%0d", g6lc_ai_wbeat_eq);
 
-  // D2a equivalence: registered cursors must equal the comb functions.
+  // D2a equivalence at the owning phase: load t is bytes; MAC t is elements.
+  // The other panel's cursor is intentionally idle while A or B loads.
   int unsigned g6lc_ai_acur_eq, g6lc_ai_bcur_eq;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin g6lc_ai_acur_eq <= 0; g6lc_ai_bcur_eq <= 0; end
     else begin
-      g6lc_ai_acur_eq <= g6lc_ai_acur_eq + 1;
-      g6lc_ai_bcur_eq <= g6lc_ai_bcur_eq + 1;
-      assert (a_cur_q == a_addr(pa_q, i_q, t_q, lda_q))
-        else $error("g6lc_ai_gemm_seq: acur_eq mismatch %h != %h",
-                    a_cur_q, a_addr(pa_q, i_q, t_q, lda_q));
-      assert (b_cur_q == b_addr(pb_q, t_q, j_q, ldb_q))
-        else $error("g6lc_ai_gemm_seq: bcur_eq mismatch %h != %h",
-                    b_cur_q, b_addr(pb_q, t_q, j_q, ldb_q));
+      if ((!SplitArId && state_q == ST_LA) || (state_q == ST_MAC && i_q < m_q)) begin
+        g6lc_ai_acur_eq <= g6lc_ai_acur_eq + 1;
+        assert (a_cur_q == a_addr(pa_q, i_q, state_q == ST_MAC ? fmt_row_bytes(t_q) : t_q, lda_q))
+          else $error("g6lc_ai_gemm_seq: acur_eq mismatch");
+      end
+      if ((!SplitArId && state_q == ST_LB) || (state_q == ST_MAC && i_q < m_q)) begin
+        g6lc_ai_bcur_eq <= g6lc_ai_bcur_eq + 1;
+        assert (b_cur_q == b_addr(pb_q, state_q == ST_MAC ? fmt_row_bytes(t_q) : t_q, j_q, ldb_q))
+          else $error("g6lc_ai_gemm_seq: bcur_eq mismatch");
+      end
     end
   end
   final $display("[equiv] g6lc_ai_gemm_seq acur_eq: checked=%0d", g6lc_ai_acur_eq);

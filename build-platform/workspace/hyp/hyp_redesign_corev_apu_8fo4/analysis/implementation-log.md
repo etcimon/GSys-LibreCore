@@ -1479,11 +1479,17 @@ The FP leaf preserves the reference's 37-bit results, including its existing
 non-IEEE corners; the 26-bit arithmetic, parallel sum polarities and constant
 normalization candidates do not change accumulator latency.
 
-Final `analyze-ai-hyp-r19`: GEMM 119.50→97.65 FO4; new FP/span/store leaves
+Final `analyze-ai-hyp-r19`: GEMM 119.50→98.00 FO4; new FP/span/store leaves
 94.93/18.30/39.80. The existing multiplier (20.00) was missing from the
 generated timing closure and is now included in both the final and matched
-baseline (`r19-before-complete`). Dispatch→GEMM is 126.90 (was 153.80);
-top→GEMM 130.15 (was 157.05). Internal stitches still reach 132.40.
+baseline (`r19-before-complete`). Dispatch→GEMM is 127.25 (was 153.80);
+top→GEMM 130.50 (was 157.05). Internal stitches still reach 132.75.
+
+Final stream refinement separates SRAM fetch from AXI retirement, retaining
+the W register cut while allowing simultaneous drain/refill. Token-conservation
+and payload-stability assertions pass, with nonzero refill witnesses in the
+reuse, cluster and wide gates. This removes the intermediate design's
+avoidable one-empty-cycle-per-beat limitation.
 
 Assertion-enabled backend/accumulate, signed/protocol, 100k FP reference
 vectors, reuse-slot, cluster, wide and stripe gates pass. The stripe harness
@@ -1492,3 +1498,191 @@ exercise two live IDs. Canonical lint/synth cannot resolve the production-path
 hyp config package; no aggregate qualification or physical closure is claimed.
 `analysis/gemm-functional-r19.md` records commands, artifacts, setup latency,
 counterexamples, existing warnings and remaining work.
+
+## ai-hyp-r19 — internal stitch audit and next strategies
+
+Fresh full IR reproduces the recorded local costs and IDs. All four internal
+stitches select parent path 1297, the 92.95 operand-format gather, despite no
+bridge-net RHS in that region. Span/store child selections end at register
+D; FP selects the 21.55 exception mux instead of its composed 94.93 cone.
+The stitcher adds representative module paths before cone composition;
+these rows are neither connected paths nor reliable final upper bounds.
+The earlier “AR presentation” label for 92.95 is corrected.
+
+Outlined prepared load-terminal facts, constant operand layouts, parallel
+rounded FP polarities, a C commit token using existing acc_q, and bounded
+stripe/successor planning. Arithmetic probes cover 148 legal outstanding
+events, 41,280 normal group cases, 315,657 rounding pairs and 1,048,512 stripe
+cases. No RTL changed and no new FO4 improvement is claimed.
+`analysis/gemm-internal-stitches-r19.md` records exact boundaries, assumptions,
+countercases, package-measurement gaps and future validation requirements.
+
+## ai-hyp-r30 — subcode shared sequential multiplier
+
+COST/SERVICE/TOTAL products through one g6lc_ai_mul_seq (launch on entry,
+advance on done); subcode 60.34→49.74. Policy bench passes. Tool scripts
+rewritten with LF endings (a CRLF rewrite had silently broken `set -o
+pipefail`). See `analysis/worst-modules-r30.md`.
+
+## ai-hyp-r29 — desc_engine prepared bus lengths
+
+`len_a_q`/`len_b_q` registered from the span results; `check_len_o` selects
+by state (asserted). Island DMA bench SUCCESS (447 cycles). See
+`analysis/worst-modules-r29.md`.
+
+## ai-hyp-r28 — exec requant
+
+Sixteen wired scale rows + 17-operand 3:2 tree registered at phase 2, CPA at
+phase 3 (+1 phase); `rq_adj` one-hot with `~t + !bump`. exec 62.55→26.07.
+Model checks 100k each; exec_dot 216 checks; requant unsimulated here.
+See `analysis/worst-modules-r28.md`.
+
+## ai-hyp-r27 — exec
+
+dot4 row trees landed (56.0→22.4, exec_dot 216 checks). Requant four-phase
+carry-save shift-add: algebra model-checked (100k pairs) but 80.5 on the
+structural board; reverted to the atomic three-phase multiply (62.55).
+enq-ready leaf blocked by the hyp exec's time-0 geometry assertion
+(pre-existing). See `analysis/worst-modules-r27.md`.
+
+## ai-hyp-r26 — worst-five plan, first landings
+
+Codec evaluate/encode/miss moved into the f1 stage with captured mispredict
+(59.30→39.40); inval_queue narrowed line subtract (52.25→46.54; one-hot
+burst-shift form 70.0 reverted); subcode gain table + registered threshold
+(62.24→60.34). Inval-queue and policy benches pass. See
+`analysis/worst-modules-r26.md`.
+
+## ai-hyp-r25 — subcode COST stage
+
+PREP registers shape facts; COST forms byte/service terms and the group
+product (+1 cycle per candidate). Frozen board subcode 62.24. Policy pipeline
+bench passes. See `analysis/worst-modules-r25.md`.
+
+## ai-hyp-r24 — worst non-GEMM modules
+
+pe_dot per-lane 16-bit-context products with masked valid/format
+(128.37→45.80); codec sparse residue as clear-two-bits identity, asserted
+(85.80→59.30); subcode shift-add byte products (80.26→78.92); exec scale
+narrowing measured 63.55 and reverted. GEMM remote gates (15) and the local
+policy pipeline bench pass. See `analysis/worst-modules-r24.md`.
+
+## ai-hyp-r23 — carried receive facts, static bank-write routing
+
+AR slot `rem` and ordered `recv_rem_q` replace `k_bytes - col` on the R
+decode; narrow beat-count select; per-bank static write routing with a shadow
+check of the per-byte original; constant-shift AR stripe cap (asserted);
+`rows_left_q`/`t_zero_q` facts; operand banks at ReadLatency 1 with a
+read-stage record feeding packing, dot tags and the seed read. Frozen board
+r23: GEMM 48.70, tile 19.00. Remote ai-gemm-r23-second/third (15 each) and
+their wide runs pass; first run's over-broad slot
+assertion narrowed to accepted beats (RTL unchanged). See
+`analysis/gemm-windows-r23.md`.
+
+## ai-hyp-r22 — interleaved two-set accumulator, two-stage FP adder
+
+Issue alternates column groups j_q / j_q + cols_eff per slot (bubble when no
+partner); set index rides dot tags, sum stage, stage 1 and the commit token.
+FP adder split into align/norm leaves with a registered aligned-operand
+boundary (`g6lc_ai_gemm_fp32_add_p2`); one adder per column handles seed,
+zero base and raw-first bypass. Frozen board r22: GEMM 55.80, align 37.70,
+norm 46.25. Remote ai-gemm-r22-first-r1 (15) and -wide-r1 pass; DPF=0 golden
+1394 cycles. Legacy ablation arm retired. See `analysis/gemm-windows-r22.md`.
+
+## ai-hyp-r21 — sign-magnitude FP, commit token, registered facts
+
+FP32 adder rewritten as sign-magnitude parallel sums with folded corrections
+and operand-half rounding (Python model vs reference: 596,864 pairs; bench
+miter 100k ×2 with four new corner classes). Commit token writes C from acc_q
+one edge later and owns credit/drain. Sequencer: FSM consumes recorded load
+completion; cursor resets on phase facts; incremental AR row offsets; constant
+group stride; registered last-step; single operand word address per cycle;
+running store column with prepared coordinates and one-hot request classes;
+accumulator cleared by state, not next-state; slot base table. Store plan:
+beats/stripe formed in CREDIT, clamps split per register.
+Frozen board r21: GEMM 61.50, FP 75.00, store plan 28.50. Remote
+ai-gemm-r21-final-r2 (15 cases) and -wide-r2 pass; DPF=0 golden 1365 cycles.
+Rejected: LB-side skip decision (slots PMU phase). See
+`analysis/gemm-windows-r21.md` and the r21 board manifest.
+
+## ai-hyp-r20 — prepared load completion and fixed operand wiring
+
+Implemented terminal-burst facts in the existing AR preparation window,
+retained all-issued ownership through the seed/load join, and separated scalar
+AR/R acceptance from payload assembly. Replaced runtime byte-index gathers
+with generated constant layouts; normal groups use direct wiring and
+accumulate groups retain indexing.
+
+Matched frozen delay-v45/ir-v6 board: GEMM 98.00→73.50 FO4; FP remains 94.93.
+Remote tags ai-gemm-r20-{baseline,first,wide}-r1 pass their focused gates.
+Old-expression shadows cover 62,576 lane samples / 21,898 load cycles;
+matched DPF=0 cycles stay 1344 and warning signatures match. The generic
+remote lint/synth gate still fails its production-path hyp config lookup.
+See `analysis/gemm-windows-r20.md` and the r20 board manifest for full source,
+runtime and run identities. No physical or aggregate closure is claimed.
+
+## ai-hyp-r31–r39 — nine timing reductions and caller ownership closure
+
+Completed the nine-module queue and recorded execution-path nodes, direct
+callers, applied transformations, rejected alternatives and residual owners
+in `analysis/nine-module-r31-r39.md` and its JSON companion.
+
+Matched delay-v45 local maxima (FO4): float pipe 50.77→37.25; subcode
+49.74→44.55; GEMM 48.70→46.95; float dot 47.14→30.27; invalidation
+46.54→26.30; normalization 46.25→36.45; integer dot 45.80→11.00;
+codec 39.40→36.90; descriptor 39.00→34.40. Generated arithmetic levels
+remain incompletely composed by this analyzer; dot maxima are local
+screening values, not complete operand-to-result arrivals.
+
+Focused local gates pass, including DPF=0/1/2, wide stores, policy, float
+and integer C++ oracles, invalidation negatives/mutation, and FP32 reference
+checks. The remote GEMM closure passes 16 selected cases.
+
+The island caller gate found descriptor-ID responses captured by an idle
+GEMM input skid. Response qualification now follows request ownership at
+the hyp island mux, for single and clustered GEMM. The original failing
+load shadow is retained. Corrected small-geometry off/on invalidation
+cases pass at 442/446 cycles; the default 512-lane enabled case passes at
+452 cycles with eight checked invalidations, 32,768 operand checks and
+109 load checks. Island maximum remains 43.95 FO4 (49/170 paths over 8).
+
+Final board: `analyze-ai-hyp-r39-owned-final`; matched file-list/parameter
+hashes, no skipped files. Final source captures:
+`analysis/tools/zips/island-r39-owned-closure.zip` and
+`analysis/tools/zips/r31-r39-owned-rtl-evidence.zip`; hashes are in the
+nine-module record. Design documentation and the SoC readiness guide were
+updated. Aggregate lint/sim/synth still fails its hyp configuration lookup
+and default core smokes. No physical, synthesis, DFT or full-core/Linux
+qualification is inferred from the focused passes.
+
+## ai-hyp-r40/r41 — subcode + GEMM reductions
+
+Frozen measurements (`analyze-ai-hyp-r41-final`): `g6lc_ai_policy_subcode`
+**44.55 → 30.40** FO4, paths over budget 43/67 → 31/81;
+`g6lc_ai_gemm_seq` **46.95 → 38.70**, 196/378 → 194/392.
+
+Mechanism: subcode gains a SHAPE preparation state (index→r/c geometry
+registered before PREP) and a parallel RANK-time choose threshold
+(`candidate_choose_q`/`best_choose_q`), replacing the serial candidate/
+cost/winner cone; the multiplier gains pending/owned tracking so an
+aborted evaluation cannot consume the previous job's product (the
+`mul_done_raw`/`mul_owned_q`/`eval_abort` drain-before-relaunch
+contract). GEMM's receive arithmetic becomes bounded field selects
+(`receive_room_n`/`receive_limit`/`receive_fits`) and the C-bank read
+mux becomes an indexed table (`c_read_mux_data`), both with
+translate_off reference checks.
+
+Latency: eight additional clocks per full subcode evaluation (SHAPE
+per candidate); cache-hit path and GEMM cycle cadence unchanged; an
+abort may now wait for the outstanding multiplier to drain. The
+completed-result oracle found a pre-r40 defect the old pipeline bench
+missed: a cancelled evaluation published a stale 8192/512 baseline-cost
+result (`r40-subcode-before2.log` tb:621).
+
+Aggregate `verify --lint --sim --synth --remote` rc=1: missing
+production-path hyp config package (confirmed repeated blocker), CV64
+smoke fail, CV32 Spike timeout, synth `Bad command` — only the
+hyp-package cause is proven pre-existing; the rest are reported, not
+diagnosed. Final source archive
+`gemm-r41-final-closure.zip` sha256
+`28bfd9fd75c19ac57bb5f117ae7754e8bd437b34d3837d733e05585768a4cd57`.

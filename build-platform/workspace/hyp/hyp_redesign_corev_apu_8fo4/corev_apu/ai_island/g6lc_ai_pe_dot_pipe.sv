@@ -67,12 +67,9 @@ module g6lc_ai_pe_dot_pipe #(
   localparam int unsigned NP     = 2 * Lanes;
   localparam int unsigned LEVELS = (NP <= 1) ? 1 : $clog2(NP);
   localparam int unsigned P2     = 1 << LEVELS;
-  // Latency: M1 + M2 + LEVELS tree stages + two output registers. The
-  // float pipe's valid_o is observed $clog2(Lanes)+5 edges after start_i
-  // (its header says +4; the sequencer's metadata shift register is tuned
-  // to the observed value), so the second output stage keeps both pipes on
-  // one dot_pending/metadata path.
-  localparam int unsigned LATENCY = LEVELS + 4;
+  // M1/M2/M3 + LEVELS tree stages + O1/O2. Both numeric pipelines return
+  // after $clog2(Lanes)+6 sampled edges, sharing GEMM's metadata pipeline.
+  localparam int unsigned LATENCY = LEVELS + 5;
   // Widest tree node: products are 16-bit signed, one bit per level.
   localparam int unsigned WMAX = 16 + LEVELS;
 
@@ -281,16 +278,21 @@ module g6lc_ai_pe_dot_pipe #(
   end
 
   // ---------------------------------------------------------------------------
-  // O1: sign-extend to the 32-bit wrapped sum; single output register (the
-  // third multiplier stage replaced the second output stage -- see LATENCY).
+  // O1/O2: extend the sum and match the float pipeline's decode-stage latency.
   // ---------------------------------------------------------------------------
+  logic o1_valid_q;
+  logic [31:0] o1_sum_q;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
+      o1_valid_q <= 1'b0;
+      o1_sum_q <= '0;
       valid_o <= 1'b0;
       sum_o   <= '0;
     end else begin
-      valid_o <= tree_start_q[LEVELS-1];
-      sum_o   <= 32'($signed(gen_lvl[LEVELS].lvl_q[0]));
+      o1_valid_q <= tree_start_q[LEVELS-1];
+      o1_sum_q <= 32'($signed(gen_lvl[LEVELS].lvl_q[0]));
+      valid_o <= o1_valid_q;
+      sum_o <= o1_sum_q;
     end
   end
 
@@ -301,9 +303,9 @@ module g6lc_ai_pe_dot_pipe #(
     assert (WMAX <= 31)
       else $error("g6lc_ai_pe_dot_pipe: Lanes=%0d exceeds the exact-sum width", Lanes);
     // Shared handshake with g6lc_ai_pe_dot_float_pipe: equal latency.
-    assert (LATENCY == $clog2(Lanes < 1 ? 1 : Lanes) + 5)
+    assert (LATENCY == $clog2(Lanes < 1 ? 1 : Lanes) + 6)
       else $error("g6lc_ai_pe_dot_pipe: latency %0d != float pipe %0d",
-                  LATENCY, $clog2(Lanes) + 5);
+                  LATENCY, $clog2(Lanes) + 6);
   end
 
   // B1 reference: the pre-rewrite two-multiplier product computed from the

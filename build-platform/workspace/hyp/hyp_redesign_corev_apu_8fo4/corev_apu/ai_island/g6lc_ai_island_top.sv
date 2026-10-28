@@ -985,7 +985,7 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
                gemm_axi_req /*verilator split_var*/;
 
   // I1-lite GEMM handshake / params (engine → unit)
-  logic        gemm_start, gemm_ready, gemm_done, gemm_err;
+  logic        gemm_start, gemm_ready, gemm_engine_ready, gemm_done, gemm_err;
   logic [31:0] gemm_m, gemm_n, gemm_k, gemm_flags;
   logic [15:0] gemm_lda, gemm_ldb;
   logic [2:0]  gemm_numfmt;
@@ -1011,6 +1011,9 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
     );
     axi_req_t  dma_mux_req /*verilator split_var*/;
     axi_resp_t dma_resp_int /*verilator split_var*/;
+    axi_resp_t fetch_axi_resp /*verilator split_var*/;
+    axi_resp_t store_axi_resp /*verilator split_var*/;
+    axi_resp_t gemm_axi_resp  /*verilator split_var*/;
     logic      fetch_grant_q;
     g6lc_ai_desc_fetch #(
         .AddrWidth  (AddrWidth),
@@ -1031,7 +1034,7 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
         .desc_o  (fetch_desc),
         .grant_i (fetch_grant_q),
         .axi_req_o  (fetch_axi_req),
-        .axi_resp_i (dma_resp_int)
+        .axi_resp_i (fetch_axi_resp)
     );
     g6lc_ai_mem_store #(
         .AddrWidth (AddrWidth),
@@ -1049,7 +1052,7 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
         .done_o  (wr_done),
         .err_o   (wr_err),
         .axi_req_o  (store_axi_req),
-        .axi_resp_i (dma_resp_int)
+        .axi_resp_i (store_axi_resp)
     );
     // Geometry from IslandCfg. M, N and K are separate so the VA panels
     // 512×512, 512×256 and 1024×128 share one MAC issue width.
@@ -1117,7 +1120,7 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
           .ptr_a_i  (gemm_ptr_a),
           .ptr_b_i  (gemm_ptr_b),
           .ptr_c_i  (gemm_ptr_c),
-          .ready_o  (gemm_ready),
+          .ready_o  (gemm_engine_ready),
           .done_o   (gemm_done),
           .err_o    (gemm_err),
           .pmu_r_beats_o(gemm_pmu_r),
@@ -1137,7 +1140,7 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
           .reuse_a_invalidate_i(!AiCfg.VaTurboEn),
           .pmu_reuse_a_hit_o(),
           .axi_req_o  (gemm_axi_req),
-          .axi_resp_i (dma_resp_int)
+          .axi_resp_i (gemm_axi_resp)
       );
   end else begin : gen_clusters
       // Engine-side AXI types: the dispatch's axi_mux prefixes clog2(Clusters) ID
@@ -1209,7 +1212,7 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
           .ptr_a_i  (gemm_ptr_a),
           .ptr_b_i  (gemm_ptr_b),
           .ptr_c_i  (gemm_ptr_c),
-          .ready_o  (gemm_ready),
+          .ready_o  (gemm_engine_ready),
           .done_o   (gemm_done),
           .err_o    (gemm_err),
           .pmu_r_beats_o(gemm_pmu_r),
@@ -1229,7 +1232,7 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
           .reuse_a_invalidate_i(!AiCfg.VaTurboEn),
           .pmu_reuse_a_hit_o(),
           .axi_req_o  (gemm_axi_req),
-          .axi_resp_i (dma_resp_int)
+          .axi_resp_i (gemm_axi_resp)
       );
   end
 
@@ -1244,6 +1247,13 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
     assign dma_mux_req = store_active ? store_axi_req
                        : gemm_active  ? gemm_axi_req
                        : (!fetch_ready ? fetch_axi_req : '0);
+
+    // Response skid buffers can accept while their client is idle. Qualify
+    // responses with the same owner as requests so a descriptor R or status B
+    // cannot enter an inactive GEMM buffer.
+    assign store_axi_resp = store_active ? dma_resp_int : '0;
+    assign gemm_axi_resp  = (!store_active && gemm_active) ? dma_resp_int : '0;
+    assign fetch_axi_resp = (!store_active && !gemm_active && !fetch_ready) ? dma_resp_int : '0;
     // The fetch shares this response. Sample ownership in a flop so the
     // grant does not comb-loop through fetch_ready, and so a GEMM beat
     // cannot retire a descriptor read.
@@ -1360,7 +1370,7 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
     end
     assign wr_done    = wr_done_q;
     assign wr_err     = 1'b0;
-    assign gemm_ready = 1'b1;
+    assign gemm_engine_ready = 1'b1;
     assign gemm_done  = gemm_done_q;
     assign gemm_err   = 1'b0;  // accept-only path when no DMA master
     assign gemm_pmu_r  = '0;
@@ -1393,6 +1403,14 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
   // gemm_start is never asserted and the policy remains idle.
   // ------------------------------------------------------------------
   logic             policy_ready, policy_work_valid;
+  localparam bit PolicyEnabled = AiCfg.PolicyCodecEn && AiCfg.PolicyBenefitEn;
+  logic policy_publish_ready, policy_flush;
+  // Admission owns the pulse: a busy policy evaluator cannot lose gemm_start.
+  // Flush on the failed job's completion, not its sticky err level (which is
+  // only cleared by the next start and would otherwise deadlock admission).
+  assign policy_flush = gemm_done && gemm_err;
+  assign gemm_ready = gemm_engine_ready &&
+      (!PolicyEnabled || (policy_ready && policy_publish_ready));
   logic             policy_eval, policy_commit, policy_hold;
   logic             policy_predict_hit, policy_predict_miss;
   logic             policy_warm_valid, policy_residual_skip;
@@ -1409,7 +1427,7 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
     .rst_ni,
     .testmode_i,
     .enable_i   (AiCfg.PolicyCodecEn),
-    .flush_i    (gemm_err),
+    .flush_i    (policy_flush),
     .valid_i    (gemm_start),
     .batch_first_i(gemm_start),
     .batch_last_i (gemm_start),
@@ -1454,61 +1472,30 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
                               policy_predict_hit, policy_hold, policy_commit,
                               policy_eval};
 
-  // Capture hold register when the policy work is valid, copy to sticky PMU
-  // when the GEMM job completes (same cadence as pmu_r/w/cy).
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      pmu_policy_code_hold <= '0;
-      pmu_policy_word_hold <= '0;
-      pmu_policy_topo_hold <= '0;
-      pmu_policy_event_hold <= '0;
-      pmu_policy_code_q     <= '0;
-      pmu_policy_word_q     <= '0;
-      pmu_policy_topo_q     <= '0;
-      pmu_policy_event_q    <= '0;
-      gemm_ar_max           <= 4'(IslandCfg.MaxAROut);
-    end else begin
-      if (gemm_err) begin
-        pmu_policy_code_hold <= '0;
-        pmu_policy_word_hold <= '0;
-        pmu_policy_topo_hold <= '0;
-        pmu_policy_event_hold <= '0;
-      end else if (policy_work_valid) begin
-        pmu_policy_code_hold <= {21'h0, 3'(policy_next_code), 3'(policy_code), 5'h0};
-        pmu_policy_word_hold <= {7'h0, 2'(policy.dataflow),
-                                 4'(policy.tile_m_log2), 4'(policy.tile_n_log2),
-                                 4'(policy.tile_k_log2), policy.sparse_check,
-                                 2'(policy.prefetch_depth), 8'(policy_numfmt)};
-        // policy.prefetch_depth is reported in the PMU word above but no longer
-        // caps the GEMM AR depth.  Measured on tb_g6lc_ai_gemm_backend (8x8x16,
-        // repeated passes, identical result digests at every depth): sequencer
-        // throughput rises monotonically with outstanding AR depth, so any cap
-        // below MaxAROut only loses MAC/cycle.  The old mapping requested
-        // 1+prefetch_depth, i.e. 2..4, which is a no-op at the live MaxAROut=2
-        // but costs -19.1% (depth 2), -12.6% (depth 3) and -6.2% (depth 4)
-        // against no steering on DramClass configs with MaxAROut=8.  A knob that
-        // can only lower a bound cannot beat leaving the bound alone, so the
-        // consumer is removed rather than retuned.  Reinstating it requires
-        // measured evidence that some code genuinely prefers a shallower depth.
-        gemm_ar_max <= 4'(IslandCfg.MaxAROut);
-        pmu_policy_topo_hold <= {9'h0, 1'(policy_topology_value.valid),
-                                 1'(policy_topology_value.apply),
-                                 3'(policy_topology_value.rows_log2),
-                                 3'(policy_topology_value.cols_log2),
-                                 4'(policy_topology_value.reduction_log2),
-                                 4'(policy_topology_value.slots_log2),
-                                 3'(policy_topology_value.element_bits_log2),
-                                 4'(policy_topology_value.gain_16ths)};
-        pmu_policy_event_hold <= policy_event_word;
-      end
-      if (gemm_done) begin
-        pmu_policy_code_q  <= pmu_policy_code_hold;
-        pmu_policy_word_q  <= pmu_policy_word_hold;
-        pmu_policy_topo_q  <= pmu_policy_topo_hold;
-        pmu_policy_event_q <= pmu_policy_event_hold;
-      end
-    end
-  end
+  // Result and completion may arrive in either order, including on one edge.
+  // A single owner prevents the next job overwriting an unfinished PMU record.
+  logic [127:0] policy_payload, policy_snapshot;
+  assign pmu_policy_code_hold = {21'h0, 3'(policy_next_code), 3'(policy_code), 5'h0};
+  assign pmu_policy_word_hold = {7'h0, 2'(policy.dataflow),
+      4'(policy.tile_m_log2), 4'(policy.tile_n_log2), 4'(policy.tile_k_log2),
+      policy.sparse_check, 2'(policy.prefetch_depth), 8'(policy_numfmt)};
+  assign pmu_policy_topo_hold = {9'h0, policy_topology_value.valid,
+      policy_topology_value.apply, policy_topology_value.rows_log2,
+      policy_topology_value.cols_log2, policy_topology_value.reduction_log2,
+      policy_topology_value.slots_log2, policy_topology_value.element_bits_log2,
+      policy_topology_value.gain_16ths};
+  assign pmu_policy_event_hold = policy_event_word;
+  assign policy_payload = {pmu_policy_code_hold, pmu_policy_word_hold,
+                           pmu_policy_topo_hold, pmu_policy_event_hold};
+  assign {pmu_policy_code_q, pmu_policy_word_q, pmu_policy_topo_q,
+          pmu_policy_event_q} = policy_snapshot;
+  assign gemm_ar_max = 4'(IslandCfg.MaxAROut);
+  g6lc_ai_policy_publish i_policy_publish (
+    .clk_i, .rst_ni, .start_i(gemm_start && PolicyEnabled),
+    .done_i(gemm_done), .cancel_i(policy_flush),
+    .result_valid_i(policy_work_valid), .result_i(policy_payload),
+    .ready_o(policy_publish_ready), .snapshot_o(policy_snapshot)
+  );
 
   g6lc_ai_desc_engine #(
       .NumQueues       (NumQueues),

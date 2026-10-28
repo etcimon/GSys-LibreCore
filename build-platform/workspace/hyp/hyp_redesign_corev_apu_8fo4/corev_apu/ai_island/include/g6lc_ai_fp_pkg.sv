@@ -543,4 +543,14 @@ package g6lc_ai_fp_pkg;
     res   = bfp_mant_exp_to_fp32(sign_c, msum, exp_c);
     return res;
   endfunction
+  // r22: aligned-operand boundary of the two-operand FP32 add
+  // (g6lc_ai_gemm_fp32_align -> g6lc_ai_gemm_fp32_norm). X keeps the larger
+  // exponent; Y is the shifted magnitude with its floor correction.
+  typedef struct packed {
+    logic        nan, inf_a, inf_b, sign_a, sign_b, zero_both;
+    logic        sx, sy, corr;
+    logic [7:0]  ec;
+    logic [23:0] x_mag;
+    logic [23:0] y_shift;
+  } fp32_align_t;
 endpackage

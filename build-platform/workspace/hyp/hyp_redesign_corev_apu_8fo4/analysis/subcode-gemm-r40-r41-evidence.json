@@ -1,0 +1,96 @@
+{
+  "scope": "Frozen structural screen plus focused simulation; aggregate verification failed. No physical or full-core qualification.",
+  "versions": {
+    "cost_model": "fo4-v1",
+    "ir": "ir-v6",
+    "measurement": "delay-v45",
+    "package": "0.1.0",
+    "parser_pin": "v0.13.5"
+  },
+  "measurement_manifest": "build-platform/workspace/build/sv-timing/hyp8-src/boards/ai-island/analyze-ai-hyp-r41-final.manifest.json",
+  "source_hashes_verified": 67,
+  "modules": {
+    "g6lc_ai_policy_subcode": {
+      "before": {
+        "max_fo4": 44.54588393764608,
+        "over_8": 43,
+        "paths": 67
+      },
+      "after": {
+        "max_fo4": 30.4,
+        "over_8": 31,
+        "paths": 81
+      }
+    },
+    "g6lc_ai_gemm_seq": {
+      "before": {
+        "max_fo4": 46.94588393764608,
+        "over_8": 196,
+        "paths": 378
+      },
+      "after": {
+        "max_fo4": 38.7,
+        "over_8": 194,
+        "paths": 392
+      }
+    }
+  },
+  "remote_positive_cases": [
+    "backend0-golden",
+    "backend0-review_accumulate",
+    "backend0-review_signed",
+    "backend0-review_protocol",
+    "backend0-review_slots",
+    "backend0-review_fp32_add",
+    "backend2-golden",
+    "backend2-review_accumulate",
+    "backend2-review_signed",
+    "backend2-review_protocol",
+    "backend2-review_slots",
+    "backend2-review_fp32_add",
+    "stripe1-golden",
+    "stripe2-golden",
+    "wide-golden",
+    "island-small-inval-golden"
+  ],
+  "remote_negative_rc": {
+    "original-canary": 1,
+    "backend0-negative": -6,
+    "backend2-negative": -6
+  },
+  "subcode_oracle": {
+    "checks": 300,
+    "winners": 158,
+    "fallbacks": 98,
+    "cache_hits": 56,
+    "abort_restart_cases": 6,
+    "last_restart_cycles": 784,
+    "baseline": "Failed on stale completion; no paired elapsed-cycle claim."
+  },
+  "aggregate_verify": {
+    "rc": 1,
+    "log": "build-platform/workspace/build/ai-gemm/r41-generic-verify.log"
+  },
+  "post_gate_change": "One empty always_comb block removed from policy; normalized full-file comparison passed. GEMM unchanged.",
+  "sha256": {
+    "verif/tb/ai_island/tb_g6lc_ai_policy_steer.sv": "cbd525aba1c85f6bf8716079389d1c84199847ea23051769e49ac906ef580fd7",
+    "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/analysis/tools/run_nine_gate.sh": "396fd29fd2b550ef42fed14aa0d28a76bf0511e6ddb51fef125a2eceadeb0e03",
+    "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/analysis/subcode-gemm-r40-r41-plan.md": "08a237a31df84ed3b2cf5def079f5904993538f910d99a4bf183577027676c64",
+    "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/analysis/subcode-gemm-r40-r41-results.json": "0b7eff816ebf78f9e48638c5d25f0e4f671637f67929fac966f83e0299f3dc11",
+    "build-platform/workspace/build/sv-timing/hyp8-src/boards/ai-island/analyze-ai-hyp-r41-final.manifest.json": "b490db4a9949013e040962bab3a490dc4fddb8e0f44f25dd340a615cc635abfc",
+    "build-platform/workspace/build/ai-gemm/r40-subcode-before.log": "ccf00e8057b752aae351ace3031b61ba99aa61e84b6841e038223e83786d1532",
+    "build-platform/workspace/build/ai-gemm/r40-subcode-before2.log": "930e61f7f288806c18363e2f91955806f36370312494912d476372647800d91f",
+    "build-platform/workspace/build/ai-gemm/r40-subcode-after.log": "f62cbc85b1cd18a429598007c7f264c9ea4e62b1c7f10d7d7d0f0492665cb1b1",
+    "build-platform/workspace/build/ai-gemm/r40-policy.log": "44a103aa376eae80773f15b52d0b54ecbbd5d40e72c20bbee33e3a70b59fe433",
+    "build-platform/workspace/build/ai-gemm/r41-generic-verify.log": "183d414ac13222b306e894d583ff1c2758eda2df85a39ce85741b50b4bde99f7",
+    "build-platform/workspace/build/ai-gemm/r41-timing.log": "1f8c376432486995b8f900dc40f3e16365636d8e20ee9e8e6756f470f442cf65",
+    "build-platform/workspace/build/ai-gemm/r41-remote/steps.json": "8ef68685ebfb21549e9faf3501d03a3d335bcc8618d5bb35e69edc8e78cef77c",
+    "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/analysis/tools/zips/gemm-r41-final-closure.zip": "28bfd9fd75c19ac57bb5f117ae7754e8bd437b34d3837d733e05585768a4cd57",
+    "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/analysis/tools/zips/subcode-gemm-pre-r40-r41.zip": "fd4adec14b5f823d1d52ba0b0441908a0eb494a15c6d8b6f0401c68a1fe9345d",
+    "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/analysis/tools/zips/subcode-gemm-pre-r40-verif.zip": "72c8871e3920a48fe5825812034f5070b0bdeebc31d70773584a6b525317b60d"
+  },
+  "evidence_archive": {
+    "path": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/analysis/tools/zips/subcode-gemm-r40-r41-evidence.zip",
+    "sha256": "c2fa9ed1d861b159d1f16e476f40638e0a85742e9c0c5a61ecfebbdfb9966a79"
+  }
+}

@@ -313,9 +313,36 @@ module g6lc_ai_exec
   logic        [31:0] dot4_u_sum;
   assign dot4_a = XLEN'(registers_i[0]);
   assign dot4_b = XLEN'(registers_i[1]);
+  // r27: each byte product is eight conditional shifted rows summed in a
+  // balanced tree (signed: operand a sign-extended, row 7 subtracted), so
+  // no atomic multiplier sits on the result path. Exact in 16 bits.
   for (genvar di = 0; di < 4; di++) begin : gen_dot4
-    assign dot4_s_p[di] = 32'(signed'(dot4_a[di*8 +: 8]) * signed'(dot4_b[di*8 +: 8]));
-    assign dot4_u_p[di] = 32'(dot4_a[di*8 +: 8] * dot4_b[di*8 +: 8]);
+    logic [7:0] ba, bb;
+    logic [15:0] sa_ext;
+    logic [15:0] rs [8];
+    logic [15:0] ru [8];
+    logic [15:0] ps, pu;
+    assign ba = dot4_a[di*8 +: 8];
+    assign bb = dot4_b[di*8 +: 8];
+    assign sa_ext = {{8{ba[7]}}, ba};
+    for (genvar bi = 0; bi < 8; bi++) begin : gen_rows
+      if (bi == 7) begin : gen_row_neg
+        assign rs[bi] = bb[bi] ? -(sa_ext << bi) : 16'd0;
+      end else begin : gen_row
+        assign rs[bi] = bb[bi] ? (sa_ext << bi) : 16'd0;
+      end
+      assign ru[bi] = bb[bi] ? ({8'd0, ba} << bi) : 16'd0;
+    end
+    assign ps = ((rs[0] + rs[1]) + (rs[2] + rs[3])) + ((rs[4] + rs[5]) + (rs[6] + rs[7]));
+    assign pu = ((ru[0] + ru[1]) + (ru[2] + ru[3])) + ((ru[4] + ru[5]) + (ru[6] + ru[7]));
+    assign dot4_s_p[di] = 32'(signed'(ps));
+    assign dot4_u_p[di] = {16'd0, pu};
+    // pragma translate_off
+    always_comb begin
+      assert (ps == 16'(signed'(ba) * signed'(bb)) && pu == 16'(ba * bb))
+        else $error("dot4 row tree identity");
+    end
+    // pragma translate_on
   end
   assign dot4_s_sum = dot4_s_p[0] + dot4_s_p[1] + dot4_s_p[2] + dot4_s_p[3];
   assign dot4_u_sum = dot4_u_p[0] + dot4_u_p[1] + dot4_u_p[2] + dot4_u_p[3];
@@ -361,7 +388,62 @@ module g6lc_ai_exec
   assign rq_sc_w   = signed'({{32{rq_sc[15]}}, rq_sc});
   // Multiply the registered extension. The read and the sign-extend are the
   // previous ST_RQ cycle, so they are not in series with this product.
-  assign rq_prod   = rq_aval_q * rq_sc_w;
+  // r28: the 48 x 16 product as sixteen wired rows (concatenation, no
+  // shifter; row 15 of the two's-complement scale inverted with its +1 as
+  // a seventeenth operand) reduced by a 3:2 carry-save tree in phase 2 and
+  // one carry-propagate add in phase 3. Modulo 2^48, identical to the
+  // truncated product. (The four-phase row-select form measured 80.5.)
+  logic [47:0] rq_row_all [17];
+  for (genvar bi = 0; bi < 16; bi++) begin : gen_rq_rows
+    logic [47:0] shifted;
+    if (bi == 0) begin : gen_rq_row0
+      assign shifted = rq_aval_q;
+    end else begin : gen_rq_rown
+      assign shifted = {rq_aval_q[47-bi:0], {bi{1'b0}}};
+    end
+    if (bi == 15) begin : gen_rq_row_neg
+      assign rq_row_all[bi] = {48{rq_sc[15]}} & ~shifted;
+    end else begin : gen_rq_row
+      assign rq_row_all[bi] = {48{rq_sc[bi]}} & shifted;
+    end
+  end
+  assign rq_row_all[16] = {47'd0, rq_sc[15]};
+  // Carry-save reduction: 17 -> 12 -> 8 -> 6 -> 4 -> 3 -> 2 operands.
+  function automatic logic [95:0] csa3(input logic [47:0] a, b, c);
+    return {(a ^ b ^ c), (((a & b) | (a & c) | (b & c)) << 1)};
+  endfunction
+  logic [47:0] l1 [12], l2 [8], l3 [6], l4 [4], l5 [3], l6 [2];
+  for (genvar i = 0; i < 5; i++) begin : gen_l1
+    assign {l1[2*i], l1[2*i+1]} = csa3(rq_row_all[3*i], rq_row_all[3*i+1], rq_row_all[3*i+2]);
+  end
+  assign l1[10] = rq_row_all[15];
+  assign l1[11] = rq_row_all[16];
+  for (genvar i = 0; i < 4; i++) begin : gen_l2
+    assign {l2[2*i], l2[2*i+1]} = csa3(l1[3*i], l1[3*i+1], l1[3*i+2]);
+  end
+  for (genvar i = 0; i < 2; i++) begin : gen_l3
+    assign {l3[2*i], l3[2*i+1]} = csa3(l2[3*i], l2[3*i+1], l2[3*i+2]);
+  end
+  assign l3[4] = l2[6];
+  assign l3[5] = l2[7];
+  for (genvar i = 0; i < 2; i++) begin : gen_l4
+    assign {l4[2*i], l4[2*i+1]} = csa3(l3[3*i], l3[3*i+1], l3[3*i+2]);
+  end
+  assign {l5[0], l5[1]} = csa3(l4[0], l4[1], l4[2]);
+  assign l5[2] = l4[3];
+  assign {l6[0], l6[1]} = csa3(l5[0], l5[1], l5[2]);
+  logic [47:0] rq_cs_sum_q, rq_cs_carry_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin : rq_cs_ff
+    if (!rst_ni) begin rq_cs_sum_q <= '0; rq_cs_carry_q <= '0; end
+    else if (state_q == ST_RQ && rq_ph_q == 2'd2) begin
+      rq_cs_sum_q <= l6[0]; rq_cs_carry_q <= l6[1];
+    end
+  end
+  assign rq_prod   = rq_cs_sum_q + rq_cs_carry_q;
+  // pragma translate_off
+  always @(posedge clk_i) if (rst_ni && state_q == ST_RQ && rq_ph_q == 2'd3)
+    assert (rq_prod == 48'(rq_aval_q * rq_sc_w)) else $error("requant product identity");
+  // pragma translate_on
 
   // rq_sh is a runtime amount. A variable shift is a barrel (~32 FO4).
   // Each amount is a constant shift; rq_sh only muxes the arm. sh==0 wraps
@@ -396,7 +478,17 @@ module g6lc_ai_exec
 
   assign rq_bump  = (rq_rem_q > rq_half) || ((rq_rem_q == rq_half) && rq_t_q[0]);
   assign rq_t_rnd = rq_bump ? (rq_t_q + 48'sd1) : rq_t_q;
-  assign rq_adj   = rq_sh0_q ? rq_prod_q : (rq_neg_q ? -rq_t_rnd : rq_t_rnd);
+  // r28: both polarities in parallel; the negation of the rounded value is
+  // ~t + (bump ? 0 : 1) (one add, no serial round-then-negate), selected
+  // one-hot with the shift-0 passthrough.
+  logic [47:0] rq_neg_rnd;
+  assign rq_neg_rnd = ~rq_t_q + 48'(!rq_bump);
+  assign rq_adj   = ({48{rq_sh0_q}} & rq_prod_q) |
+                    ({48{!rq_sh0_q && rq_neg_q}} & rq_neg_rnd) |
+                    ({48{!rq_sh0_q && !rq_neg_q}} & rq_t_rnd);
+  // pragma translate_off
+  always_comb assert (rq_neg_rnd == 48'(-rq_t_rnd)) else $error("requant negate identity");
+  // pragma translate_on
   assign rq_wz    = rq_adj[31:0] + 32'(rq_zp);
   assign rq_hi    = rq_wz > 32'sd127;
   assign rq_lo    = !rq_hi && (rq_wz < -32'sd128);
@@ -407,7 +499,7 @@ module g6lc_ai_exec
   // valid_o is still only ST_DONE.
   always_ff @(posedge clk_i or negedge rst_ni) begin : rq_ph_ff
     if (!rst_ni) rq_ph_q <= 2'd0;
-    else if (state_q == ST_RQ) rq_ph_q <= (rq_ph_q == 2'd2) ? 2'd0 : rq_ph_q + 2'd1;
+    else if (state_q == ST_RQ) rq_ph_q <= (rq_ph_q == 2'd3) ? 2'd0 : rq_ph_q + 2'd1;
     else rq_ph_q <= 2'd0;
   end
   always_ff @(posedge clk_i or negedge rst_ni) begin : rq_c_ff
@@ -420,15 +512,15 @@ module g6lc_ai_exec
   end
   always_ff @(posedge clk_i or negedge rst_ni) begin : rq_prod_ff
     if (!rst_ni) rq_prod_q <= '0;
-    else if (state_q == ST_RQ && rq_ph_q == 2'd2) rq_prod_q <= rq_prod;
+    else if (state_q == ST_RQ && rq_ph_q == 2'd3) rq_prod_q <= rq_prod;
   end
   always_ff @(posedge clk_i or negedge rst_ni) begin : rq_neg_ff
     if (!rst_ni) rq_neg_q <= 1'b0;
-    else if (state_q == ST_RQ && rq_ph_q == 2'd2) rq_neg_q <= rq_prod[47];
+    else if (state_q == ST_RQ && rq_ph_q == 2'd3) rq_neg_q <= rq_prod[47];
   end
   always_ff @(posedge clk_i or negedge rst_ni) begin : rq_sh0_ff
     if (!rst_ni) rq_sh0_q <= 1'b0;
-    else if (state_q == ST_RQ && rq_ph_q == 2'd2) rq_sh0_q <= (rq_sh == 4'd0);
+    else if (state_q == ST_RQ && rq_ph_q == 2'd3) rq_sh0_q <= (rq_sh == 4'd0);
   end
   always_ff @(posedge clk_i or negedge rst_ni) begin : rq_ux_ff
     if (!rst_ni) rq_ux_q <= '0;
@@ -835,7 +927,7 @@ module g6lc_ai_exec
       ST_RQ: begin
         // Phase 0 registers the index, phase 1 the extended accumulator,
         // phase 2 the product. Indices stay put until the round step.
-        state_d = (rq_ph_q == 2'd2) ? ST_RQ_S : ST_RQ;
+        state_d = (rq_ph_q == 2'd3) ? ST_RQ_S : ST_RQ;
       end
 
       ST_RQ_S: begin

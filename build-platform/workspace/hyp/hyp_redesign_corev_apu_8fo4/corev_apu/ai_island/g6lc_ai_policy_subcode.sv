@@ -1,4 +1,5 @@
 // hyp8 provenance: AS-IS (sv-timing emit at the 8-FO4 budget)
+// Modified by: Etienne Cimon (2026), r32 rank + r40 SHAPE/fact ownership decomposition.
 module g6lc_ai_policy_subcode
   import g6lc_ai_policy_pkg::*;
 #(
@@ -46,7 +47,8 @@ module g6lc_ai_policy_subcode
 `endif
 
   if (Enabled) begin : gen_on
-    typedef enum logic [2:0] {IDLE, PREP, SERVICE, TOTAL, COMPARE, CACHED} state_t;
+    // r25: COST evaluates the byte/service terms from facts registered in PREP.
+    typedef enum logic [3:0] {IDLE, PREP, COST, SERVICE, TOTAL, COMPARE, CACHED, RANK, SHAPE} state_t;
     state_t state_q;
     policy_topology_t base_q, candidate_q, candidate_d, best_q, winner;
     logic [8:0] m_q, n_q, k_q;
@@ -54,9 +56,57 @@ module g6lc_ai_policy_subcode
     logic [1:0] group_q, input_group;
     logic cache_valid_q, cache_match;
     logic candidate_ok_q, candidate_ok, eligible, better, choose;
+    logic better_q;
+    logic [7:0] m_align_q, n_align_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) better_q <= 1'b0;
+      else if (flush_i || !enable_i || cancel_i) better_q <= 1'b0;
+      else if (state_q == RANK) better_q <= candidate_ok_q && cost_q < best_cost_q;
+    end
+    for (genvar ga = 0; ga < 8; ga++) begin : gen_alignment
+      if (ga > 0 && ga <= 4) begin : gen_mask
+        always_ff @(posedge clk_i or negedge rst_ni) begin
+          if (!rst_ni) begin m_align_q[ga] <= 1'b0; n_align_q[ga] <= 1'b0; end
+          else if (state_q == IDLE && start_i) begin
+            m_align_q[ga] <= m_i[ga-1:0] == '0;
+            n_align_q[ga] <= n_i[ga-1:0] == '0;
+          end
+        end
+      end else begin : gen_constant
+        always_ff @(posedge clk_i or negedge rst_ni) begin
+          if (!rst_ni) begin m_align_q[ga] <= 1'b0; n_align_q[ga] <= 1'b0; end
+          else if (state_q == IDLE && start_i) begin
+            m_align_q[ga] <= ga == 0;
+            n_align_q[ga] <= ga == 0;
+          end
+        end
+      end
+    end
     logic [2:0] r, c;
     logic [3:0] d;
-    logic [5:0] group_shape;
+    logic [5:0] group_shape_i, group_shape_q;
+    logic [2:0] shape_r, shape_c;
+    logic [3:0] shape_sum_q;
+    always_comb begin
+      case (input_group)
+        2'd0: group_shape_i = GroupShapeLog2[5:0];
+        2'd1: group_shape_i = GroupShapeLog2[11:6];
+        2'd2: group_shape_i = GroupShapeLog2[17:12];
+        default: group_shape_i = GroupShapeLog2[23:18];
+      endcase
+    end
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) group_shape_q <= '0;
+      else if (state_q == IDLE && start_i) group_shape_q <= group_shape_i;
+    end
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin r <= '0; c <= '0; shape_sum_q <= '0; end
+      else if (state_q == SHAPE) begin
+        r <= shape_r;
+        c <= shape_c;
+        shape_sum_q <= {1'b0, shape_r} + {1'b0, shape_c};
+      end
+    end
     logic [8:0] mgroups, ngroups;
     logic [16:0] groups_q;
     logic [8:0] full_q;
@@ -68,11 +118,100 @@ module g6lc_ai_policy_subcode
     logic [15:0] full_bytes, tail_bytes;
     logic [15:0] full_service, tail_service;
     logic [3:0] step_cycles;
+    // r26: the reuse gain depends only on (r, c) in 0..4: an elaboration
+    // table selected by the pair replaces the package function's divide.
+    localparam logic [3:0] reuse_gain_tab [8][8] = '{
+      '{4'd0,4'd4,4'd6,4'd7,4'd7,4'd7,4'd15,4'd7},
+      '{4'd4,4'd8,4'd10,4'd11,4'd11,4'd11,4'd7,4'd3},
+      '{4'd6,4'd10,4'd12,4'd13,4'd13,4'd5,4'd3,4'd1},
+      '{4'd7,4'd11,4'd13,4'd14,4'd6,4'd2,4'd1,4'd0},
+      '{4'd7,4'd11,4'd13,4'd6,4'd3,4'd1,4'd0,4'd0},
+      '{4'd7,4'd11,4'd5,4'd2,4'd1,4'd0,4'd0,4'd0},
+      '{4'd15,4'd7,4'd3,4'd1,4'd0,4'd0,4'd0,4'd0},
+      '{4'd7,4'd3,4'd1,4'd0,4'd0,4'd0,4'd0,4'd0}};
+    // pragma translate_off
+    always @(posedge clk_i) if (rst_ni && state_q == PREP)
+      assert (reuse_gain_tab[r][c] == policy_reuse_gain(r, c)) else $error("reuse gain table");
+    // pragma translate_on
+    // r26: the self-charging threshold is one registered fact per
+    // evaluation; the per-candidate decision is a single compare.
+    logic [27:0] threshold_q;
+    logic threshold_ok_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin threshold_q <= '0; threshold_ok_q <= 1'b0; end
+      else begin
+        threshold_ok_q <= 64'(base_cost_q) > 64'(SwitchCycles) + 64'(EvaluationCycles) + 64'(MinSavingsCycles);
+        threshold_q <= 28'(64'(base_cost_q) - 64'(SwitchCycles) - 64'(EvaluationCycles) - 64'(MinSavingsCycles));
+      end
+    end
+    // r30 shared sequential multiplier: launched on entry to each product
+    // state; done is a one-cycle pulse the state consumes.
+    logic mul_start, mul_done, mul_done_raw, mul_launched_q;
+    logic mul_pending_q, mul_owned_q, eval_abort;
+    assign eval_abort = flush_i || !enable_i || cancel_i;
+    assign mul_done = mul_done_raw && mul_owned_q && !eval_abort;
+    logic [31:0] mul_a, mul_b;
+    logic [63:0] mul_product;
+    always_comb begin
+      mul_a = '0; mul_b = '0;
+      case (state_q)
+        COST: begin mul_a = 32'(mgroups_q); mul_b = 32'(ngroups_q); end
+        SERVICE: begin mul_a = 32'(full_q); mul_b = 32'(full_service_q); end
+        TOTAL: begin mul_a = 32'(groups_q); mul_b = 32'(service_q); end
+        default: ;
+      endcase
+    end
+    assign mul_start = state_q inside {COST, SERVICE, TOTAL} &&
+        !mul_launched_q && !mul_pending_q && !eval_abort;
+    // The shared multiplier cannot cancel. Drain aborted work before relaunch,
+    // and only publish completion owned by the current evaluation.
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin mul_pending_q <= 1'b0; mul_owned_q <= 1'b0; end
+      else begin
+        if (mul_done_raw) begin mul_pending_q <= 1'b0; mul_owned_q <= 1'b0; end
+        if (mul_start) begin mul_pending_q <= 1'b1; mul_owned_q <= 1'b1; end
+        if (eval_abort) mul_owned_q <= 1'b0;
+      end
+    end
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) mul_launched_q <= 1'b0;
+      else if (eval_abort || mul_done || !(state_q inside {COST, SERVICE, TOTAL})) mul_launched_q <= 1'b0;
+      else if (mul_start) mul_launched_q <= 1'b1;
+    end
+    g6lc_ai_mul_seq #(.WA(32), .WB(32)) i_mul (
+      .clk_i, .rst_ni, .start_i(mul_start), .a_i(mul_a), .b_i(mul_b),
+      .done_o(mul_done_raw), .product_o(mul_product)
+    );
+    // pragma translate_off
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+      mul_done && state_q == TOTAL |-> 28'(mul_product) == 28'(28'(groups_q) * 28'(service_q)));
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+        mul_done |-> mul_pending_q && mul_launched_q &&
+        (state_q inside {COST, SERVICE, TOTAL}));
+    // pragma translate_on
+    // r25 registered shape facts (PREP -> COST)
+    logic [2:0] r_q, c_q;
+    logic [9:0] tail_q;
+    logic [11:0] rb_full_q, rb_tail_q;
+    logic [8:0] mgroups_q, ngroups_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        r_q <= '0; c_q <= '0; tail_q <= '0; rb_full_q <= '0; rb_tail_q <= '0;
+        mgroups_q <= '0; ngroups_q <= '0;
+      end else if (state_q == PREP) begin
+        r_q <= r; c_q <= c; tail_q <= tail;
+        rb_full_q <= row_bytes(depth, fmt_q); rb_tail_q <= row_bytes(tail, fmt_q);
+        mgroups_q <= mgroups; ngroups_q <= ngroups;
+      end
+    end
 
     function automatic logic [11:0] row_bytes(input logic [9:0] count, input logic [2:0] fmt);
-      logic [14:0] bits;
-      bits = 15'(count) << policy_element_bits_log2(fmt);
-      return 12'((bits + 15'd7) >> 3);
+      case (fmt)
+        3'(config_pkg::AI_FMT_INT4): return 12'(({1'b0, count} + 11'd1) >> 1);
+        3'(config_pkg::AI_FMT_FP16), 3'(config_pkg::AI_FMT_BF16): return {1'b0, count, 1'b0};
+        3'(config_pkg::AI_FMT_FP32): return {count, 2'b00};
+        default: return {2'b00, count};
+      endcase
     endfunction
 
     
@@ -347,32 +486,31 @@ module g6lc_ai_policy_subcode
     // composed candidate/cost/winner as a serial makespan (~96.4).
     // Family 1: candidate terms (r/c/d/ok/candidate_d).
     always_comb begin
-      group_shape = GroupShapeLog2[int'(group_q)*6 +: 6];
-      r = '0;
-      c = '0;
+      shape_r = '0;
+      shape_c = '0;
       case (index_q)
-        3'd0: begin r = base_q.rows_log2; c = base_q.cols_log2; end
-        3'd2: c = 3'd4;
-        3'd3: begin r = 3'd1; c = 3'd3; end
-        3'd4: begin r = 3'd2; c = 3'd2; end
-        3'd5: begin r = 3'd3; c = 3'd1; end
-        3'd6: r = 3'd4;
-        3'd7: begin r = group_shape[5:3]; c = group_shape[2:0]; end
+        3'd0: begin shape_r = base_q.rows_log2; shape_c = base_q.cols_log2; end
+        3'd2: shape_c = 3'd4;
+        3'd3: begin shape_r = 3'd1; shape_c = 3'd3; end
+        3'd4: begin shape_r = 3'd2; shape_c = 3'd2; end
+        3'd5: begin shape_r = 3'd3; shape_c = 3'd1; end
+        3'd6: shape_r = 3'd4;
+        3'd7: begin shape_r = group_shape_q[5:3]; shape_c = group_shape_q[2:0]; end
         default: begin end
       endcase
-      d = base_q.slots_log2 - {1'b0, r} - {1'b0, c};
-      candidate_ok = r <= 4 && c <= 4 && int'(r) + int'(c) <= 4 &&
-          int'(r) + int'(c) <= int'(base_q.slots_log2) &&
-          (m_q & ((9'd1 << r) - 9'd1)) == 0 &&
-          (n_q & ((9'd1 << c) - 9'd1)) == 0 &&
-          (index_q == 0 || d >= FormatMinReductionLog2[int'(fmt_q)*4 +: 4]);
+    end
+    assign d = base_q.slots_log2 - shape_sum_q;
+    assign candidate_ok = r <= 3'd4 && c <= 3'd4 && shape_sum_q <= 4'd4 &&
+        shape_sum_q <= base_q.slots_log2 && m_align_q[r] && n_align_q[c] &&
+        (index_q == 0 || d >= FormatMinReductionLog2[int'(fmt_q)*4 +: 4]);
+    always_comb begin
       candidate_d = base_q;
       if (index_q != 0) begin
         candidate_d.rows_log2 = r;
         candidate_d.cols_log2 = c;
         candidate_d.reduction_log2 = d;
         candidate_d.apply = r != 0 || c != 0;
-        candidate_d.gain_16ths = policy_reuse_gain(r, c);
+        candidate_d.gain_16ths = reuse_gain_tab[r][c];
       end
     end
 
@@ -383,29 +521,56 @@ module g6lc_ai_policy_subcode
       depth = 10'd1 << d;
       tail = {1'b0, k_q} & (depth - 10'd1);
       inputs_per_group = (6'd1 << r) + (6'd1 << c);
-      full_bytes = 16'(inputs_per_group) * 16'(row_bytes(depth, fmt_q));
-      tail_bytes = 16'(inputs_per_group) * 16'(row_bytes(tail, fmt_q));
-      step_cycles = FormatStepCycles[int'(fmt_q)*4 +: 4];
-      full_service = 16'((32'(full_bytes) + ReadBytesPerCycle - 1) >> ReadShift);
-      tail_service = 16'((32'(tail_bytes) + ReadBytesPerCycle - 1) >> ReadShift);
-      if (full_service < {12'd0, step_cycles}) full_service = {12'd0, step_cycles};
-      if (tail_service < {12'd0, step_cycles}) tail_service = {12'd0, step_cycles};
-      if (tail == 0) tail_service = '0;
     end
+    // Independent byte and service cones; preserve the original truncations.
+    logic [15:0] full_service_raw, tail_service_raw;
+    assign full_bytes = (16'(rb_full_q) << r_q) + (16'(rb_full_q) << c_q);
+    assign tail_bytes = (16'(rb_tail_q) << r_q) + (16'(rb_tail_q) << c_q);
+    assign step_cycles = FormatStepCycles[int'(fmt_q)*4 +: 4];
+    assign full_service_raw = 16'((32'(full_bytes) + ReadBytesPerCycle - 1) >> ReadShift);
+    assign tail_service_raw = 16'((32'(tail_bytes) + ReadBytesPerCycle - 1) >> ReadShift);
+    assign full_service = full_service_raw < {12'd0, step_cycles} ?
+                          {12'd0, step_cycles} : full_service_raw;
+    assign tail_service = tail_q == 0 ? 16'd0 :
+                          (tail_service_raw < {12'd0, step_cycles} ?
+                           {12'd0, step_cycles} : tail_service_raw);
 
     // Family 3: better/winner/choose (reads registered cost/candidate_ok).
-    always_comb begin
-      better = candidate_ok_q && cost_q < best_cost_q;
-      winner = better ? candidate_q : best_q;
-      winner_index = better ? index_q : best_index_q;
-      winner_cost = better ? cost_q : best_cost_q;
-      // The evaluator charges ITSELF: a candidate must beat the baseline after
-      // paying the switch cost, the 32-cycle evaluation tax and a minimum
-      // margin. Without those terms it would report wins it cannot bank.
-      choose = winner_index != 0 &&
-          64'(winner_cost) + 64'(SwitchCycles) + 64'(EvaluationCycles) +
-          64'(MinSavingsCycles) < 64'(base_cost_q);
+    logic candidate_choose_q, best_choose_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin candidate_choose_q <= 1'b0; best_choose_q <= 1'b0; end
+      else if (state_q == RANK) begin
+        candidate_choose_q <= index_q != 0 && threshold_ok_q && cost_q < threshold_q;
+        best_choose_q <= best_index_q != 0 && threshold_ok_q && best_cost_q < threshold_q;
+      end
     end
+    assign better = better_q;
+    assign winner = better_q ? candidate_q : best_q;
+    assign winner_index = better_q ? index_q : best_index_q;
+    assign winner_cost = better_q ? cost_q : best_cost_q;
+    // The evaluator charges ITSELF: a candidate must beat the baseline after
+    // paying the switch cost, the 32-cycle evaluation tax and a minimum
+    // margin. Without those terms it would report wins it cannot bank.
+    assign choose = better_q ? candidate_choose_q : best_choose_q;
+    // pragma translate_off
+    always @(posedge clk_i) if (rst_ni) begin
+      if (state_q == PREP) begin
+        assert ({r, c} == {shape_r, shape_c} &&
+            shape_sum_q == {1'b0, r} + {1'b0, c}) else $fatal(1, "r40 shape ownership");
+        assert (d == base_q.slots_log2 - {1'b0, r} - {1'b0, c})
+          else $fatal(1, "r40 reduction geometry");
+        assert (candidate_ok == (r <= 4 && c <= 4 && int'(r) + int'(c) <= 4 &&
+            int'(r) + int'(c) <= int'(base_q.slots_log2) && m_align_q[r] && n_align_q[c] &&
+            (index_q == 0 || d >= FormatMinReductionLog2[int'(fmt_q)*4 +: 4])))
+          else $fatal(1, "r40 candidate eligibility");
+      end
+      if (state_q == COMPARE)
+        assert (choose == (winner_index != 0 &&
+            64'(winner_cost) + 64'(SwitchCycles) + 64'(EvaluationCycles) +
+            64'(MinSavingsCycles) < 64'(base_cost_q)))
+          else $fatal(1, "r40 winner threshold identity");
+    end
+    // pragma translate_on
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
@@ -453,26 +618,38 @@ module g6lc_ai_policy_subcode
               index_q <= '0;
               best_index_q <= '0;
               best_q <= baseline_i;
-              state_q <= PREP;
+              state_q <= SHAPE;
             end
           end
+          SHAPE: state_q <= PREP;
           PREP: begin
             candidate_q <= candidate_d;
             candidate_ok_q <= candidate_ok;
-            groups_q <= 17'(mgroups) * 17'(ngroups);
             full_q <= k_q >> d;
+            state_q <= COST;
+          end
+          // r30: the three products share one 32-cycle shift-add multiplier
+          // (g6lc_ai_mul_seq, 20 FO4). Each product state launches on entry
+          // and advances on done; SHAPE adds one cycle per candidate, so the
+          // fixed 32-cycle model charge does NOT hide the actual evaluator
+          // latency from the steering decision.
+          COST: begin
             full_service_q <= full_service;
             tail_service_q <= tail_service;
-            state_q <= SERVICE;
+            if (mul_done) begin
+              groups_q <= 17'(mul_product);
+              state_q <= SERVICE;
+            end
           end
-          SERVICE: begin
-            service_q <= 15'(25'(full_q) * 25'(full_service_q) + 25'(tail_service_q));
+          SERVICE: if (mul_done) begin
+            service_q <= 15'(25'(mul_product) + 25'(tail_service_q));
             state_q <= TOTAL;
           end
-          TOTAL: begin
-            cost_q <= 28'(groups_q) * 28'(service_q);
-            state_q <= COMPARE;
+          TOTAL: if (mul_done) begin
+            cost_q <= 28'(mul_product);
+            state_q <= RANK;
           end
+          RANK: state_q <= COMPARE;
           COMPARE: begin
             if (index_q == 0) begin
               best_cost_q <= cost_q;
@@ -498,7 +675,7 @@ module g6lc_ai_policy_subcode
               state_q <= IDLE;
             end else begin
               index_q <= index_q + 3'd1;
-              state_q <= PREP;
+              state_q <= SHAPE;
             end
           end
           CACHED: begin

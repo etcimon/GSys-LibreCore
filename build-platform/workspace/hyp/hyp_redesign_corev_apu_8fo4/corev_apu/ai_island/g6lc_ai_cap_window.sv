@@ -161,33 +161,29 @@ assign _unused = ^{clk_i, rst_ni, we_i, wdata_i};
       r_mask |= cap_arm[i] & {32{cap_hit[i]}};
   end
 
+  // r14/A104: the two 8-entry occupancy windows as one-hot word-address classes
+  // (constant equality per channel, no subtract/compare-range) and a masked-OR
+  // gather; the former dynamic-index 16-way read mux was the 40.6-FO4 limiter.
+  logic [AI_DRAM_MAX_CHANNELS-1:0] occ_r_hit, occ_w_hit;
+  logic [31:0]                     occ_r_word, occ_w_word;
+  logic                            occ_hit;
   always_comb begin
-    automatic int unsigned ch_r_idx, ch_w_idx;
-    automatic logic        occ_hit;
-    rdata_n   = '0;
-    rvalid_n  = 1'b0;
-    ch_r_idx  = 32'(addr_i[15:2]) - 32'(CAP_OFF_DRAM_CH_R[15:2]);
-    ch_w_idx  = 32'(addr_i[15:2]) - 32'(CAP_OFF_DRAM_CH_W[15:2]);
-    occ_hit   = 1'b0;
-    if (req_i) begin
-      rvalid_n = 1'b1;
-      if (ch_r_idx < AI_DRAM_MAX_CHANNELS) begin
-        rdata_n = ch_r_beats_i[ch_r_idx];
-        occ_hit = 1'b1;
-      end else if (ch_w_idx < AI_DRAM_MAX_CHANNELS) begin
-        rdata_n = ch_w_beats_i[ch_w_idx];
-        occ_hit = 1'b1;
-      end
-      // Occupancy windows are checked first and short-circuit the case: they are
-      // two 8-entry ranges, which a flat CAP_OFF_* case would have to spell out
-      // as 16 separate arms.
-      // r7 R7/A104: one-hot word-class compare + masked-OR over the
-      // constant arms (the unique-case serial arm chain composed ~40 FO4).
-      if (!occ_hit) begin
-        rdata_n = r_mask;
-      end
-
+    occ_r_word = '0;
+    occ_w_word = '0;
+    for (int unsigned ch = 0; ch < AI_DRAM_MAX_CHANNELS; ch++) begin
+      occ_r_hit[ch] = (addr_i[15:2] == 14'(CAP_OFF_DRAM_CH_R[15:2] + 14'(ch)));
+      occ_w_hit[ch] = (addr_i[15:2] == 14'(CAP_OFF_DRAM_CH_W[15:2] + 14'(ch)));
+      occ_r_word |= ch_r_beats_i[ch] & {32{occ_r_hit[ch]}};
+      occ_w_word |= ch_w_beats_i[ch] & {32{occ_w_hit[ch]}};
     end
+    occ_hit = (|occ_r_hit) | (|occ_w_hit);
+  end
+
+  always_comb begin
+    rvalid_n = req_i;
+    rdata_n  = '0;
+    if (req_i)
+      rdata_n = occ_hit ? (occ_r_word | occ_w_word) : r_mask;
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin

@@ -4,12 +4,13 @@
 //
 // Pipelined floating dot product for large lane counts (Lanes=256 target).
 //
-// Latency = $clog2(P2) + 4 cycles after a valid transaction is accepted.
+// Output is valid on sampled edge $clog2(P2)+6, counting acceptance as edge 1.
 // One dot product can be issued per cycle once the pipeline is filled, so
 // throughput is one dot per cycle at the cost of depth.
 //
 // Stages:
-//   1. decode & multiply per lane
+//   0. decode per lane and capture the format/lane-valid facts
+//   1. multiply registered operands per lane
 //   2. reduce product exponents to a block exponent and detect NaN/Inf
 //   3. align each product mantissa to the block exponent
 //   4..(4+LEVELS-1): balanced signed adder tree, one level per cycle
@@ -47,7 +48,7 @@ module g6lc_ai_pe_dot_float_pipe #(
   localparam int unsigned LEVELS = $clog2(P2);
   localparam int unsigned MAXW = g6lc_ai_fp_pkg::FP_DOT_MAXW;
 
-  localparam int unsigned LATENCY = LEVELS + 4;
+  localparam int unsigned LATENCY = LEVELS + 5;
 
   // fmt_ok is constant per tile
   logic fmt_ok;
@@ -388,7 +389,40 @@ assign fmt_ok = (numfmt_i == AI_FMT_FP8_E4M3) ||
   endfunction
 
   // ---------------------------------------------------------------------------
-  // Stage 1: decode and multiply
+  // Stage 0: decode operands, retaining lane ownership across issue bubbles.
+  g6lc_ai_fp_pkg::fp_dot_value_t s0_a_q [P2], s0_b_q [P2];
+  logic s0_lane_q [P2];
+  logic s0_start_q, s0_fmt_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      s0_start_q <= 1'b0;
+      s0_fmt_q <= 1'b0;
+    end else begin
+      s0_start_q <= start_i;
+      if (start_i) s0_fmt_q <= fmt_ok;
+    end
+  end
+  for (genvar g = 0; g < P2; g++) begin : gen_decode
+    if (g < Lanes) begin : gen_used
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          s0_a_q[g] <= '0;
+          s0_b_q[g] <= '0;
+          s0_lane_q[g] <= 1'b0;
+        end else if (start_i) begin
+          s0_a_q[g] <= g6lc_ai_fp_pkg::fp_dot_decode_value(a_i[g], numfmt_i);
+          s0_b_q[g] <= g6lc_ai_fp_pkg::fp_dot_decode_value(b_i[g], numfmt_i);
+          s0_lane_q[g] <= valid_i[g];
+        end
+      end
+    end else begin : gen_pad
+      assign s0_a_q[g] = '0;
+      assign s0_b_q[g] = '0;
+      assign s0_lane_q[g] = 1'b0;
+    end
+  end
+
+  // Stage 1: multiply the registered decoded operands.
   //
   // Per-lane always_ff blocks avoid for-loop procedural-variable ordering
   // problems; each lane captures its own local product and valid flags.
@@ -405,23 +439,17 @@ assign fmt_ok = (numfmt_i == AI_FMT_FP8_E4M3) ||
   logic                            s1_sign    [P2];
   logic                            s1_sign_d  [P2];
 
-  // Stage 1 combinational: decode, multiply and produce the next register value.
+  // Stage 1 combinational: multiply and produce the next register value.
   always_comb begin
     for (int unsigned g = 0; g < P2; g++) begin
-      g6lc_ai_fp_pkg::fp_dot_value_t dec_a;
-      g6lc_ai_fp_pkg::fp_dot_value_t dec_b;
       g6lc_ai_fp_pkg::fp_dot_product_t p;
-      dec_a = '0;
-      dec_b = '0;
       p     = prod_zero();
       if (g < Lanes) begin
-        dec_a = g6lc_ai_fp_pkg::fp_dot_decode_value(a_i[g], numfmt_i);
-        dec_b = g6lc_ai_fp_pkg::fp_dot_decode_value(b_i[g], numfmt_i);
-        if (fmt_ok)
-          p = g6lc_ai_fp_pkg::fp_dot_product(dec_a, dec_b);
+        if (s0_fmt_q)
+          p = g6lc_ai_fp_pkg::fp_dot_product(s0_a_q[g], s0_b_q[g]);
       end
-      if (g < Lanes && fmt_ok) begin
-        if (valid_i[g] && !p.is_nan && !p.is_inf && !p.is_zero) begin
+      if (g < Lanes && s0_fmt_q) begin
+        if (s0_lane_q[g] && !p.is_nan && !p.is_inf && !p.is_zero) begin
           s1_prod_d[g]   = '{sign: p.sign, mant: p.mant, exp: p.exp,
                              is_nan: p.is_nan, is_inf: p.is_inf, is_zero: p.is_zero};
           s1_vld_d[g]    = 1'b1;
@@ -431,8 +459,8 @@ assign fmt_ok = (numfmt_i == AI_FMT_FP8_E4M3) ||
           s1_vld_d[g]    = 1'b0;
           s1_exp_d[g]    = NO_EXP;
         end
-        s1_is_nan_d[g] = valid_i[g] && p.is_nan;
-        s1_is_inf_d[g] = valid_i[g] && p.is_inf;
+        s1_is_nan_d[g] = s0_lane_q[g] && p.is_nan;
+        s1_is_inf_d[g] = s0_lane_q[g] && p.is_inf;
         s1_sign_d[g]   = p.sign;
       end else begin
         s1_prod_d[g]   = prod_zero();
@@ -445,8 +473,8 @@ assign fmt_ok = (numfmt_i == AI_FMT_FP8_E4M3) ||
     end
   end
 
-  // Stage 1 register: only load when start_i is asserted.
-  // Gating on start_i is what makes back-to-back issue safe: a cycle with no
+  // Stage 1 register: only load when the decode stage owns a transaction.
+  // Gating on s0_start_q makes back-to-back issue safe: a cycle with no
   // new transaction must hold S1 so the downstream stages keep a stable product.
   generate
     for (genvar g = 0; g < P2; g++) begin : gen_s1_reg
@@ -458,7 +486,7 @@ assign fmt_ok = (numfmt_i == AI_FMT_FP8_E4M3) ||
           s1_is_nan[g]  <= 1'b0;
           s1_is_inf[g]  <= 1'b0;
           s1_sign[g]    <= 1'b0;
-        end else if (start_i) begin
+        end else if (s0_start_q) begin
           s1_prod[g]    <= s1_prod_d[g];
           s1_vld[g]     <= s1_vld_d[g];
           s1_exp[g]     <= s1_exp_d[g];
@@ -705,7 +733,7 @@ assign fmt_ok = (numfmt_i == AI_FMT_FP8_E4M3) ||
                                                                      final_bfp_sum[MAXW-1], final_bfp_sum,
                                                                      final_block_exp);
 
-  // valid_o tracks the start pulse through the pipeline. LATENCY = LEVELS + 4.
+  // valid_o tracks the start pulse through the pipeline. LATENCY = LEVELS + 5.
   // A shift register rather than a counter: with one issue per cycle there can
   // be LATENCY transactions in flight, and each needs its own valid slot.
   logic [LATENCY-1:0] vld;

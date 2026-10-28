@@ -1,19 +1,110 @@
 # AI island + Xg6lcai (ai-matrix) FO4 program — rewrite and measurement plan
 
+## r31–r39 queue
+
+Nine consecutive single-module tasks with owner paths, mechanisms and
+gates: [nine-module-r31-plan.md](nine-module-r31-plan.md).
+
+## r30 plan — subcode
+
+Nine path families with owners and mechanisms, caller contract and impact:
+[subcode-r30-plan.md](subcode-r30-plan.md).
+
+## r28 — exec requant
+
+exec **62.55→26.07** (wired-row carry-save product, parallel polarities);
+island maximum desc_engine 63.35. See [worst-modules-r28.md](worst-modules-r28.md).
+
+## r27 — exec
+
+dot4 products **56.0→22.4** (row trees, landed); requant carry-save
+countercase (80.5) reverted; exec maximum 62.55. See
+[worst-modules-r27.md](worst-modules-r27.md).
+
+## r26 — landed from the worst-five plan
+
+codec **59.30→39.40**, inval_queue 52.25→46.54, subcode 62.24→60.34; island
+maximum desc_engine 63.35. See [worst-modules-r26.md](worst-modules-r26.md).
+
+## r26 plan — worst five, callers and mechanisms
+
+Analysis only: [worst-five-r26-plan.md](worst-five-r26-plan.md) maps each
+module's execution paths, caller contract, the transform per path and its
+latency/throughput/verification impact, plus the over-budget path counts
+that define the remaining distance to 8 FO4.
+
+## r25 — subcode COST stage
+
+subcode **78.92→62.24**; island maximum desc_engine 63.35. See
+[worst-modules-r25.md](worst-modules-r25.md).
+
+## r24 — worst non-GEMM modules
+
+pe_dot **128.37→45.80**, codec **85.80→59.30**, subcode 80.26→78.92 by
+exact operator narrowing; exec unchanged (attempt reverted). See
+[worst-modules-r24.md](worst-modules-r24.md).
+
+## r23 — carried receive facts, static bank-write routing
+
+Frozen board GEMM **55.80→48.70** including a registered operand-bank read
+stage; FP stages 46.25/37.70; store plan 28.50. Remote gates pass (DPF=0
+golden 1394→1401). Remaining owners: the accumulate-mode seed read on the
+latency-0 C bank and the receive count select. See [gemm-windows-r23.md](gemm-windows-r23.md).
+
+## r22 — interleaved two-set accumulator, two-stage FP adder
+
+Matched frozen board: GEMM **61.50→55.80**; FP align/norm stages
+**37.70 / 46.25** (was one 75.00 cycle); store plan 28.50; span 18.30.
+Dependent FP additions are two cycles apart by construction; issue rate is
+unchanged for n ≥ 2·cols_eff. Focused remote gates pass.
+See [gemm-windows-r22.md](gemm-windows-r22.md).
+
+## r21 — sign-magnitude FP, commit token, registered sequencer facts
+
+Matched frozen board: GEMM **73.50→61.50**, FP **94.93→75.00**, store plan
+**39.80→28.50**; span 18.30. The FP leaf stays a one-cycle recurrence with
+parallel magnitude sums; C publication and credit follow a commit token one
+edge after the last partial. Focused remote gates pass with the extended FP
+corner miter. Rejected: an LB-side B-skip decision (PMU phase contract).
+See [gemm-windows-r21.md](gemm-windows-r21.md).
+
+## r20 — load-terminal facts and constant operand layouts
+
+Matched delay-v45 board: GEMM **98.00→73.50 FO4**. FP remains **94.93**,
+store-plan 39.80 and span 18.30. No MAC cycle added; matched DPF=0 golden
+remains 1344 cycles. Isolated remote backend, accumulation, signed/protocol,
+reuse, stripe, cluster and wide checks pass, with old-expression comparisons.
+Generic lint/synth still fail the hyp configuration lookup. See
+[gemm-windows-r20.md](gemm-windows-r20.md) for snapshots, hashes and caveats.
+
+## r19 follow-up — internal stitch audit
+
+The fresh full IR reproduces r19, but the internal 132.75/114.50/111.25 rows
+all append operand-gather path 1297 to unrelated child outputs. These are
+module-path summaries, not connected timing paths or reliable upper bounds.
+The 92.95 region is operand-format gathering, not AR presentation.
+See [gemm-internal-stitches-r19.md](gemm-internal-stitches-r19.md).
+
+Next candidates: prepared load-terminal facts, constant operand wiring,
+parallel FP rounding, C publication from the existing accumulator register,
+and bounded store geometry/prepared B successors. Arithmetic identities have
+bounded witnesses; none is an implemented or measured r20 gain.
+
 ## r19 — GEMM functional windows implemented
 
-Final `analyze-ai-hyp-r19`: GEMM **119.50→97.65 FO4**, with new FP32,
+Final `analyze-ai-hyp-r19`: GEMM **119.50→98.00 FO4**, with new FP32,
 residency-span and C-store-plan leaves at **94.93 / 18.30 / 39.80**.
 The existing iterative multiplier is 20.00 and is now included in the
 timing closure. Matching baseline: `r19-before-complete`.
-Dispatch→GEMM improves 153.80→126.90; top→GEMM 157.05→130.15.
-New internal stitches remain over budget (up to 132.40).
+Dispatch→GEMM improves 153.80→127.25; top→GEMM 157.05→130.50.
+New internal stitches remain over budget (up to 132.75).
 
 Backend, accumulate, signed/backpressure, 100k FP value/flag comparisons,
 reuse slots, single/two/four clusters, 128/512-bit stores and NCH=1/2 stripe
 checks pass. Canonical lint/synth remains blocked on the hyp config lookup.
-The additional preparation and W-beat latency is explicit, and MAC recurrence
-latency is preserved. See [gemm-functional-r19.md](gemm-functional-r19.md)
+The additional preparation and W-beat startup latency is explicit. Independent
+fetch/retire cursors permit full-rate W refill; MAC recurrence latency is
+preserved. See [gemm-functional-r19.md](gemm-functional-r19.md)
 for ownership, transform derivations, commands, hashes and readiness limits.
 
 ## r18 — current worst two reduced
