@@ -1018,6 +1018,10 @@ pub struct TimingDesign {
     /// True when package-mode denser surface was requested.
     #[serde(default)]
     pub package_mode: bool,
+    /// delay-v48: when true, `paths` keep dead-arm region nodes; when
+    /// false (default) each path is pruned to live dep-edge nodes.
+    #[serde(default)]
+    pub keep_dead_nodes: bool,
     /// Post-emptive path exceptions / classifications (also denormalized on each path).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub path_exceptions: Vec<crate::path_class::PathException>,
@@ -1074,6 +1078,7 @@ impl TimingDesign {
             paths: Vec::new(),
             opportunities: Vec::new(),
             target,
+            keep_dead_nodes: false,
             param_map_keys: Vec::new(),
             param_map_ints: BTreeMap::new(),
             width_map: BTreeMap::new(),

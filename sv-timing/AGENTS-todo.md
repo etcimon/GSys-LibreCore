@@ -2658,3 +2658,13 @@ Sparse soak evidence: `MONOREPO-SOAK.md` / `FO4-ALGORITHM-UPGRADES.md`.
   region path still bills its node at `load_unit` L1441). Next:
   dep-chain region paths or dead-node pruning so constant-folded
   arms drop off the measured cone.
+- **r85 dep-chain re-baseline (delay-v48 landed):** `paths[]` now
+  enumerate live dep-edge chains (`longest_comb_path` over `dep_pred`;
+  region paths filtered to `live_out`/`live_reg`). `dead_arm_region`
+  golden: dead arm pruned. L1239 `load_unit` 54.2 = REAL 12-node cone
+  (`ldbuf_w→lu_cancel_new→new_hit→flushed_d→ex_pend_set→pend_d→pend_q`
+  — statement-order under-billed it). Structural clock re-baselined to
+  75.0 `g6lc_ai_exec` reg→reg — every changed row is a measurement
+  correction under dep-chain semantics; `analyze-r85-all.json` is the
+  new baseline of record. Open: verify no dep edge crosses a
+  register boundary mislabeled comb (census the top chains).

@@ -2,3 +2,5 @@
 # Paths resolve against THIS file's directory (see architecture/PROJECT-AUTOCORRECT.md §2).
 comb_adder_cloud.sv
 fn_zero_len_range.sv
+localparam_gate_fold.sv
+dead_arm_region.sv

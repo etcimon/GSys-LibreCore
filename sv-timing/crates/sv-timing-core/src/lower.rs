@@ -37,6 +37,11 @@ pub struct LowerOptions {
     pub param_map: ParamMap,
     /// When true, prefer denser package/param surface notes (packages always parsed).
     pub package_mode: bool,
+    /// delay-v48: when true, `paths[]` keep every region node (old
+    /// statement-order enumeration); when false (default) each path is
+    /// pruned to nodes backward-reachable from its sink over the live
+    /// dep edges — dead-arm assigns drop off the measured cone.
+    pub keep_dead_nodes: bool,
     /// Resolved optimization dials. Only the **analysis** dials matter here
     /// (effort / cache_mode); transform dials are read by `sv-timing-transform`.
     /// See `architecture/OPTIMIZATION-LEVELS.md`.
@@ -51,6 +56,7 @@ impl Default for LowerOptions {
             module_filter: Vec::new(),
             param_map: ParamMap::new(),
             package_mode: false,
+            keep_dead_nodes: false,
             opt: crate::opt::OptOptions::default(),
         }
     }
@@ -88,6 +94,7 @@ pub fn lower_unit(unit: &ParsedUnit, opts: &LowerOptions) -> CoreResult<AnalyzeO
     design.param_map_ints = opts.param_map.int_entries();
     design.width_map = opts.param_map.width_map.clone();
     design.package_mode = opts.package_mode;
+    design.keep_dead_nodes = opts.keep_dead_nodes;
     let mut names = NameTable::new();
     let mut next_module: ModuleId = 0;
     let mut next_node: NodeId = 0;

@@ -282,6 +282,10 @@ enum Commands {
         /// Skip files the parser rejects instead of failing the run (reported, never silent).
         #[arg(long = "allow-parse-errors", default_value_t = false)]
         allow_parse_errors: bool,
+        /// delay-v48: keep dead-arm region nodes on `paths[]` (default
+        /// false — pruned to live dep-edge nodes). Set for before/after.
+        #[arg(long = "keep-dead-nodes", default_value_t = false)]
+        keep_dead_nodes: bool,
         /// JSONL algorithm trace (path_class / relocation / correct loop).
         #[arg(long = "trace-log")]
         trace_log: Option<PathBuf>,
@@ -1594,6 +1598,7 @@ fn main() -> ExitCode {
             cfg_snapshot,
             assume_xlen,
             package_mode,
+            keep_dead_nodes,
             allow_parse_errors,
             trace_log,
             ir_out,
@@ -1673,6 +1678,7 @@ fn main() -> ExitCode {
                     }
                 },
                 package_mode: package_mode_on(&package_mode),
+                keep_dead_nodes,
                 opt: opt.clone(),
             };
             // Keep fo4_ps override on model id only; table values from fo4-v1.
@@ -2003,6 +2009,7 @@ fn main() -> ExitCode {
                     module_filter,
                     param_map: base_param_map.clone(),
                     package_mode: base_package_mode,
+                    keep_dead_nodes: false,
                     opt: opt.clone(),
                 };
                 lower.cost_model.id = "fo4-v1".into();
@@ -2120,6 +2127,7 @@ fn main() -> ExitCode {
                         },
                         param_map: base_param_map.clone(),
                         package_mode: base_package_mode,
+                        keep_dead_nodes: false,
                         opt: opt.clone(),
                     };
                     let prepared = match analyze_files(&prepared_paths, &parse_opts, &lower) {
@@ -2557,6 +2565,7 @@ fn main() -> ExitCode {
                                     },
                                     param_map: base_param_map.clone(),
                                     package_mode: base_package_mode,
+                                    keep_dead_nodes: false,
                                     opt: opt.clone(),
                                 };
                                 lower.cost_model.id = "fo4-v1".into();
@@ -2944,6 +2953,7 @@ fn main() -> ExitCode {
                             module_filter: filter,
                             param_map: ParamMap::new(),
                             package_mode: false,
+                            keep_dead_nodes: false,
                             opt: OptOptions::default(),
                         };
                         match analyze_files(&paths, &parse_opts, &lower) {

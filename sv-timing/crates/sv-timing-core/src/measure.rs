@@ -600,6 +600,8 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
     let mut edges: Vec<(NodeId, NodeId)> = Vec::new();
     let mut reads_reg: Vec<NodeId> = Vec::new();
     let mut sinks: Vec<NodeId> = Vec::new();
+    let mut out_sinks: Vec<NodeId> = Vec::new();
+    let mut reg_sinks: Vec<NodeId> = Vec::new();
     for &nid in &comb_ids {
         let Some(n) = module.nodes.get(&nid) else {
             continue;
@@ -627,10 +629,16 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
             .as_deref()
             .map(|s| bindings.key(&ident_base(s), &n.loc))
             .unwrap_or_default();
-        if !lhs.is_empty()
-            && (related_in(&seq_reads_roots, &lhs) || related_in(&outputs_roots, &lhs))
-        {
-            sinks.push(nid);
+        if !lhs.is_empty() {
+            if related_in(&outputs_roots, &lhs) {
+                out_sinks.push(nid);
+            }
+            if related_in(&seq_reads_roots, &lhs) {
+                reg_sinks.push(nid);
+            }
+            if related_in(&seq_reads_roots, &lhs) || related_in(&outputs_roots, &lhs) {
+                sinks.push(nid);
+            }
         }
     }
     if sinks.is_empty() {
@@ -674,9 +682,57 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
     // delay-v43: a composed cone whose node list equals a region path (one
     // `assign x_d = f(y_q)`) re-tags that path's endpoints instead of being
     // dropped; the region default is in→out and hid the reg→reg kind.
+    // delay-v48: dep-edge predecessors (`edges` already folded by
+    // `walk_read_idents`) — `fans_in` statement-order links keep dead
+    // arms on every region path.
+    let mut dep_pred: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
+    for (src, dst) in &edges {
+        dep_pred.entry(*dst).or_default().push(*src);
+    }
+    // delay-v48: per-endpoint liveness — `live_out` (nodes feeding
+    // output sinks) vs `live_reg` (nodes feeding registered sinks).
+    // A dead-arm assign (`g_a`, the r84 `ex_pub` arm under
+    // `LoadExPubStages==2`) is backward-reachable from no output sink,
+    // so it drops off the `*toout` paths; it stays on `*toreg` paths
+    // when it still feeds a register.
+    if !design.keep_dead_nodes {
+        let reach = |seeds: &[NodeId]| -> BTreeSet<NodeId> {
+            let mut live = BTreeSet::new();
+            let mut stack: Vec<NodeId> = seeds.to_vec();
+            while let Some(n) = stack.pop() {
+                if live.insert(n) {
+                    if let Some(ps) = dep_pred.get(&n) {
+                        stack.extend(ps);
+                    }
+                }
+            }
+            live
+        };
+        let live_out = reach(&out_sinks);
+        let live_reg = reach(&reg_sinks);
+        for path in design.paths.iter_mut().filter(|p| p.module == mid) {
+            let live = if matches!(
+                path.path_kind,
+                crate::ir::PathKind::InToOut | crate::ir::PathKind::RegToOut
+            ) {
+                &live_out
+            } else {
+                &live_reg
+            };
+            path.nodes.retain(|n| live.contains(n));
+            if let Some(&last) = path.nodes.last() {
+                if let Some(n) = design.modules[&mid].nodes.get(&last) {
+                    path.primary_loc = n.loc.clone();
+                }
+            }
+        }
+        design
+            .paths
+            .retain(|p| p.module != mid || !p.nodes.is_empty());
+    }
     let mut retag: Vec<(Vec<NodeId>, PathEndpoint, PathEndpoint)> = Vec::new();
     for sink in sinks {
-        let nodes = longest_comb_path(module, &comb_ids, sink);
+        let nodes = longest_comb_path(module, &comb_ids, sink, Some(&dep_pred));
         if nodes.is_empty() {
             continue;
         }
@@ -892,12 +948,26 @@ fn ident_tokens(s: &str) -> Vec<String> {
     out
 }
 
-fn longest_comb_path(module: &TimingModule, comb: &BTreeSet<NodeId>, sink: NodeId) -> Vec<NodeId> {
+/// delay-v48: the longest comb chain backward from a sink walks the
+/// live **dep edges** (`dep_pred[dst] = src` where `src`'s lhs is
+/// actually read by `dst` after the `walk_read_idents` constant fold),
+/// not `fans_in` — `fans_in` carries statement-order chain links that
+/// put every earlier op in a region on every path through it, which
+/// kept dead-arm assigns (a `localparam`-gated `g_a`, the r84 `ex_pub`
+/// record arm) on the measured path. `--keep-dead-nodes` (`!folded`)
+/// falls back to the statement-order `fans_in` chain.
+fn longest_comb_path(
+    module: &TimingModule,
+    comb: &BTreeSet<NodeId>,
+    sink: NodeId,
+    dep_pred: Option<&BTreeMap<NodeId, Vec<NodeId>>>,
+) -> Vec<NodeId> {
     let mut best_pred: BTreeMap<NodeId, Option<NodeId>> = BTreeMap::new();
     let mut best_cost: BTreeMap<NodeId, f64> = BTreeMap::new();
     fn dfs(
         module: &TimingModule,
         comb: &BTreeSet<NodeId>,
+        dep_pred: Option<&BTreeMap<NodeId, Vec<NodeId>>>,
         id: NodeId,
         visiting: &mut BTreeSet<NodeId>,
         best_pred: &mut BTreeMap<NodeId, Option<NodeId>>,
@@ -917,11 +987,15 @@ fn longest_comb_path(module: &TimingModule, comb: &BTreeSet<NodeId>, sink: NodeI
         let mut pred = None;
         let mut pred_c = 0.0_f64;
         if let Some(n) = module.nodes.get(&id) {
-            for &p in &n.fans_in {
+            let preds: &[NodeId] = match dep_pred.and_then(|m| m.get(&id)) {
+                Some(list) => list,
+                None => &n.fans_in,
+            };
+            for &p in preds {
                 if !comb.contains(&p) {
                     continue;
                 }
-                let c = dfs(module, comb, p, visiting, best_pred, best_cost);
+                let c = dfs(module, comb, dep_pred, p, visiting, best_pred, best_cost);
                 if c > pred_c + 1e-12 {
                     pred_c = c;
                     pred = Some(p);
@@ -939,6 +1013,7 @@ fn longest_comb_path(module: &TimingModule, comb: &BTreeSet<NodeId>, sink: NodeI
     dfs(
         module,
         comb,
+        dep_pred,
         sink,
         &mut visiting,
         &mut best_pred,

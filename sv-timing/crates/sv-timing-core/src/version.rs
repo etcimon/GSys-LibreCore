@@ -145,7 +145,13 @@ pub const CORRECTION_VERSION: &str = "correction-v5";
 /// `localparam`-gated ternary's dead arm no longer contributes a dep
 /// edge to the output path (r84: `LU_EXPEND ? 0 : a_expub` drops the
 /// same-cycle `ex_pub` cone under `LoadExPubStages==2`).
-pub const MEASUREMENT_VERSION: &str = "delay-v47";
+/// `delay-v48`: `paths[]` are pruned to live nodes — each path keeps
+/// only nodes backward-reachable from its sink over the live dep
+/// edges; dead-arm assigns (folded reads) drop off the measured cone
+/// (`longest_comb_path` walks `dep_pred`; region paths in
+/// `design.paths` are filtered in `compose_module_paths`).
+/// `--keep-dead-nodes` restores the statement-order enumeration.
+pub const MEASUREMENT_VERSION: &str = "delay-v48";
 
 /// Hint for which upstream pin the vendored tree should track (see tools/sv-parser.rev).
 pub const PARSER_PIN_HINT: &str = "v0.13.5";
