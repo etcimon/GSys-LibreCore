@@ -2650,3 +2650,11 @@ Sparse soak evidence: `MONOREPO-SOAK.md` / `FO4-ALGORITHM-UPGRADES.md`.
   bodies are off the delay graph; needs a package-function
   evaluator). Same fix would prune dead-arm-only nodes from
   region paths.
+- **r84 measurement gap (delay-v47 residual):** `paths[]` enumerate
+  region nodes (`lower.rs` `node_ids` = all region ops in the comb
+  region), not dep-chains — a `localparam`-gated dead-arm assign
+  stays on the output path even though `walk_read_idents` folds its
+  dep edges (verified: `ex_pub`/`a_expub` pruned from reads yet the
+  region path still bills its node at `load_unit` L1441). Next:
+  dep-chain region paths or dead-node pruning so constant-folded
+  arms drop off the measured cone.

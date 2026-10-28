@@ -538,7 +538,16 @@ assign ldbuf_full = &ldbuf_valid_q;
       if (req_port_i.data_rvalid && ldbuf_valid_q[rresp_idx]) begin
         rpend_q[rresp_idx] <= 1'b1;
         rdata_q[rresp_idx] <= req_port_i.data_rdata;
+`ifdef G6LC_MUT_LU_EXPEND_DROP
+        // MUTANT: the ex_pub push without its tombstone — the slot is
+        // ex_pend-marked but never drn'd, so the leaf's exception cases
+        // must fail (the pushed record owns the publish while the slot
+        // leaks).
+        rkill_q[rresp_idx] <= (rresp_idx == ldbuf_last_id_q) && req_port_o.kill_req &&
+                              !(LU_EXPEND && ex_pub);
+`else
         rkill_q[rresp_idx] <= (rresp_idx == ldbuf_last_id_q) && req_port_o.kill_req;
+`endif
       end
       if (ldbuf_r) begin
         rpend_q[ldbuf_rindex] <= 1'b0;
@@ -579,13 +588,20 @@ assign ldbuf_full = &ldbuf_valid_q;
   // already happened. A slot dying on this edge (flush/cancel/flush-
   // tombstone) drains without ever publishing: ldbuf_flushed_d covers
   // flush_i, the per-slot cancel hit and a same-cycle cancelled grant.
+  // r84 LoadExPubStages==2: the same-cycle exception kill pushes the
+  // pending record instead of presenting (a_expub gated below). The
+  // deferred arm already subsumes ex_pub's predicates — today the push
+  // is dead-on-arrival because a_expub pops the slot the same edge —
+  // so the LU_EXPEND arm is an explicit no-op on the ==1 profile.
+  localparam bit LU_EXPEND = (HypCfg.LoadExPubStages == 2);
   logic ex_pend_set;
 `ifdef G6LC_MUT_LSU_EXPEND
   assign ex_pend_set = 1'b0;
 `else
-  assign ex_pend_set = state_q[LU_B_SEND_TAG] && ex_i.valid && !ex_ptw_i &&
-                       ldbuf_valid_q[ldbuf_last_id_q] &&
-                       !ldbuf_flushed_d[ldbuf_last_id_q];
+  assign ex_pend_set = (state_q[LU_B_SEND_TAG] && ex_i.valid && !ex_ptw_i &&
+                        ldbuf_valid_q[ldbuf_last_id_q] &&
+                        !ldbuf_flushed_d[ldbuf_last_id_q]) ||
+                       (LU_EXPEND && ex_pub);
 `endif
 
   // Record pushed at the kill edge: the slot identity, the entry's
@@ -1329,7 +1345,17 @@ assign ldbuf_full = &ldbuf_valid_q;
   // registered one cycle ahead on the next head (pend_d[0]): pushing
   // to an empty FIFO makes the new record head, a pop makes the next
   // entry head, otherwise the current head's rpend keeps accumulating.
-  assign pend_rdy_d  = |(rpend_q & pend_d[0].slot_oh);
+  // r84: under LU_EXPEND the ex_pub push coincides with the slot's
+  // response — rpend_q lands at the same edge as the record, so the
+  // arriving response must mark the head ready or the publish slips
+  // to +2. Gated to the ex_pub push (ex_pub ⇒ rresp_idx ==
+  // ldbuf_last_id_q == pend_new.slot) so deferred records keep their
+  // exact capture+2 readiness; dead under ==1.
+  logic [G6LCCfg.NrLoadBufEntries-1:0] live_rpend_oh;
+  assign live_rpend_oh = (LU_EXPEND && ex_pub)
+                         ? (G6LCCfg.NrLoadBufEntries'(1) << rresp_idx)
+                         : '0;
+  assign pend_rdy_d  = |((rpend_q | live_rpend_oh) & pend_d[0].slot_oh);
   // Dead-record suppression: a head whose entry is already dead is a
   // precise drop and never publishes. Uses the registered pending bit
   // only — the data publish path (pub_ok) reads flushed_q, never the
@@ -1476,11 +1502,14 @@ assign ldbuf_full = &ldbuf_valid_q;
   assign a_expub = ex_pub && !a_data;
 `else
   assign a_pend  = ex_pend_sel;
-  assign a_expub = ex_pub && !a_pend;
-  assign a_data  = pub_fire && !a_pend && !a_expub;
+  assign a_expub = !LU_EXPEND && ex_pub && !a_pend;
+  // r84: the a_expub reads in the data/drain masks are LU_EXPEND
+  // ternaries so the constant fold drops the ex_pub cone from the
+  // output path under ==2 (under ==1 each folds to !a_expub).
+  assign a_data  = pub_fire && !a_pend && (LU_EXPEND ? 1'b1 : !a_expub);
 `endif
   assign a_head = head_pub;        // wt | spec | fwd (fwd = st_fwd_done)
-  assign a_drn  = drn_any && !a_expub && !a_data;
+  assign a_drn  = drn_any && (LU_EXPEND ? 1'b1 : !a_expub) && !a_data;
 `ifdef G6LC_MUT_LU_L5_ARMS
   // MUTANT: unmasked presentation — a head completion ORs its tid over
   // a concurrent ex/data arm's; the equivalence below must trip.
@@ -1514,21 +1543,28 @@ assign ldbuf_full = &ldbuf_valid_q;
     // !a_head to reproduce today's override (a head completion kept
     // the presented fields when it coincided with an ex/data arm);
     // the pops are the same unmasked set as today.
-    valid_o    = a_pend | a_expub | a_data | a_head;
-    ex_o.valid = (a_pend | a_expub | head_pub_wt) &&
+    // r84: under LU_EXPEND the ex arm never presents — every a_expub
+    // read below is wrapped `LU_EXPEND ? 0 : a_expub` so the
+    // constant-condition fold drops the same-cycle ex_pub cone from
+    // the presentation muxes (under ==1 each ternary folds to a_expub).
+    valid_o    = a_pend | (LU_EXPEND ? 1'b0 : a_expub) | a_data | a_head;
+    ex_o.valid = (a_pend | (LU_EXPEND ? 1'b0 : a_expub) | head_pub_wt) &&
                  !(head_pub_spec | st_fwd_done);
     trans_id_o =
         ({G6LCCfg.TRANS_ID_BITS{a_pend & (L5_AMASK | !a_head)}} &
          pend_q[0].tid)
-      | ({G6LCCfg.TRANS_ID_BITS{a_expub & (L5_AMASK | !a_head)}} &
+      | ({G6LCCfg.TRANS_ID_BITS{(LU_EXPEND ? 1'b0 : a_expub) &
+                              (L5_AMASK | !a_head)}} &
          ldbuf_q[rresp_idx].trans_id)
       | ({G6LCCfg.TRANS_ID_BITS{a_data & (L5_AMASK | !a_head)}} &
          pub_ptree[1].meta.trans_id)
       | ({G6LCCfg.TRANS_ID_BITS{a_head}} & lsu_ctrl_i.trans_id)
-      | ({G6LCCfg.TRANS_ID_BITS{~(a_pend | a_expub | a_data | a_head)}} &
+      | ({G6LCCfg.TRANS_ID_BITS{~(a_pend | (LU_EXPEND ? 1'b0 : a_expub) |
+                                     a_data | a_head)}} &
          ldbuf_q[0].trans_id);
-    ldbuf_r      = a_expub | a_data | a_drn;
-    ldbuf_rindex = ({LD_IDX_W{a_expub}} & ldbuf_id_t'(rresp_idx))
+    ldbuf_r      = (LU_EXPEND ? 1'b0 : a_expub) | a_data | a_drn;
+    ldbuf_rindex = ({LD_IDX_W{LU_EXPEND ? 1'b0 : a_expub}} &
+                    ldbuf_id_t'(rresp_idx))
                  | ({LD_IDX_W{a_data}}  & ldbuf_id_t'(pub_idx_w))
                  | ({LD_IDX_W{a_drn}}   & ldbuf_id_t'(drn_idx_w));
     retire_idx   = {LD_IDX_W{a_data}} & ldbuf_id_t'(pub_idx_w);
@@ -1882,15 +1918,34 @@ assign ldbuf_full = &ldbuf_valid_q;
   int unsigned lu_l5_oh_n = 0;
   lu_l5_onehot_eq :
   assert property (@(posedge clk_i) disable iff (~rst_ni)
-      {valid_o, ex_o.valid, trans_id_o, ldbuf_r, ldbuf_rindex,
-       retire_idx} ===
-      {ref_valid, ref_ex_valid, ref_tid, ref_r, ref_rindex, ref_retire})
+      (!LU_EXPEND) |->
+      ({valid_o, ex_o.valid, trans_id_o, ldbuf_r, ldbuf_rindex,
+        retire_idx} ===
+       {ref_valid, ref_ex_valid, ref_tid, ref_r, ref_rindex, ref_retire}))
     else $error("load_unit L5 onehot: arms %b != ref %b (arms=%b)",
                 {valid_o, ex_o.valid, trans_id_o, ldbuf_r, ldbuf_rindex,
                  retire_idx},
                 {ref_valid, ref_ex_valid, ref_tid, ref_r, ref_rindex,
                  ref_retire},
                 {a_pend, a_expub, a_data, a_drn, a_head});
+  // r84 LU_EXPEND contract: under LoadExPubStages==2 every same-cycle
+  // exception kill pushes the pending record (the deferred arm already
+  // covers it; the explicit arm documents the mapping) and the record
+  // presents via a_pend — the ref chain's ex_pub arm maps to the push,
+  // not the presentation, so lu_l5_onehot_eq gates itself off.
+  lu_exp_push :
+  assert property (@(posedge clk_i) disable iff (~rst_ni)
+      (LU_EXPEND && ex_pub) |-> ex_pend_set)
+    else $error("load_unit LU_EXPEND: ex_pub without a pending-record push");
+  int unsigned lu_exp_push_n = 0, lu_exp_pres_n = 0;
+  always_ff @(posedge clk_i) begin
+    if (rst_ni) begin
+      if (LU_EXPEND && ex_pub)
+        lu_exp_push_n <= lu_exp_push_n + 1;
+      if (LU_EXPEND && a_pend)
+        lu_exp_pres_n <= lu_exp_pres_n + 1;
+    end
+  end
   lu_l5_arm_exclusive :
   assert property (@(posedge clk_i) disable iff (~rst_ni)
       $onehot0({a_pend | a_expub, a_head}))
@@ -1938,6 +1993,9 @@ assign ldbuf_full = &ldbuf_valid_q;
     $display("[equiv] load_unit F15 head_pub&pub_any: n=%0d",
              lu_f15_collide_n);
     $display("[equiv] load_unit L5 onehot: checked=%0d", lu_l5_oh_n);
+    if (LU_EXPEND)
+      $display("[equiv] load_unit expend: pushed=%0d presented=%0d",
+               lu_exp_push_n, lu_exp_pres_n);
   end
   //pragma translate_on
 

@@ -90,6 +90,10 @@ package g6lc_hyp_pkg;
     // LSU L5: 1 = combinational publish pick; 2 = registered select
     // record (L5a) + presentation (L5b); load WB +1.
     int unsigned LoadPubStages;
+    // LSU L5 exception publish: 1 = the same-cycle kill presents ex_i
+    // directly (ex_pub arm); 2 = every exception completion pushes the
+    // r51 pending record and presents +1 cycle. Fault path only.
+    int unsigned LoadExPubStages;
     // IQ bank steer: 1 = same-cycle first fit; 2 = eligibility
     // registered at the bank update edge (design r76 §B2; not
     // implemented yet).
@@ -153,6 +157,7 @@ package g6lc_hyp_pkg;
       LsqCamBanks: 1,
       WbufPipelined: 1'b0,
       LoadPubStages: 1,
+      LoadExPubStages: 1,
       IqSteerStages: 1,
       IqSelStages: 1,
       RenameReadStages: 1,
@@ -221,6 +226,7 @@ package g6lc_hyp_pkg;
       LsqCamBanks: 2,
       WbufPipelined: 1'b1,
       LoadPubStages: 1,
+      LoadExPubStages: 1,
       IqSteerStages: 1,
       IqSelStages: 1,
       RenameReadStages: 1,
@@ -278,6 +284,7 @@ package g6lc_hyp_pkg;
       LsqCamBanks: 2,
       WbufPipelined: 1'b1,
       LoadPubStages: 2,
+      LoadExPubStages: 2,
       IqSteerStages: 1,
       IqSelStages: 1,
       RenameReadStages: 1,
@@ -365,6 +372,7 @@ package g6lc_hyp_pkg;
     ok &= !h.FeOverridePred || (h.FeEpochBits >= 2);
     ok &= h.LsqCamBanks >= 1;
     ok &= h.LoadPubStages inside {1, 2};
+    ok &= h.LoadExPubStages inside {1, 2};
     ok &= h.IqSteerStages inside {1, 2};
     ok &= h.IqSelStages inside {1, 2};
     ok &= h.RenameReadStages inside {1, 2};

@@ -853,6 +853,11 @@ module tb_g6lc_hyp8_memory;
     lu_rpi.data_rdata = 64'hDEAD_BEEF;
     #2;
     check(lu_rpo.kill_req && lu_rpo.tag_valid, "LU_MIS_KILL");
+    if (TB_HYP.LoadExPubStages == 2) begin
+      // r84: the kill pushes the pending record — the exception
+      // presents on the following cycle.
+      tick(); #2;
+    end
     check(lu_rdy_v && lu_ex_o.valid && lu_ex_o.cause == 64'd4 &&
           lu_ex_o.tval == 64'h1, "LU_MIS_EX_PUBLISH");
     check(lu_tid_o == TID'(5), "LU_MIS_EX_TID");
@@ -874,6 +879,9 @@ module tb_g6lc_hyp8_memory;
     lu_ex_i.valid = 1'b1; lu_ex_i.cause = 64'd4; lu_ex_i.tval = 64'h5;
     lu_rpi.data_rvalid = 1'b1; lu_rpi.data_rid = lu_rid; #2;
     check(lu_rpo.kill_req, "LU_MIS2_KILL");
+    if (TB_HYP.LoadExPubStages == 2) begin
+      tick(); #2;
+    end
     check(lu_rdy_v && lu_ex_o.valid && lu_ex_o.cause == 64'd4 &&
           lu_tid_o == TID'(7), "LU_MIS2_EX_PUBLISH");
     tick();
@@ -1007,12 +1015,23 @@ module tb_g6lc_hyp8_memory;
     lu_lchk[8] = 1'b1;                        // A eligible this same cycle
     #2;
     check(lu_rpo.kill_req && lu_rpo.tag_valid, "I1_KILL");
-    check(lu_rdy_v && lu_ex_o.valid && lu_ex_o.cause == 64'd4 &&
-          lu_ex_o.tval == 64'h6001 && lu_tid_o == TID'(9), "I1_EX_WINS");
-    tick();                                   // publish consumed
-    lu_rpi = '{default: '0}; lu_ex_i = '{default: '0}; #2;
-    check(lu_rdy_v && !lu_ex_o.valid && lu_tid_o == TID'(8) &&
-          lu_res == 64'h5A5A_5A5A_5A5A_5A5A, "I1_DATA_NEXT");
+    if (TB_HYP.LoadExPubStages == 1) begin
+      check(lu_rdy_v && lu_ex_o.valid && lu_ex_o.cause == 64'd4 &&
+            lu_ex_o.tval == 64'h6001 && lu_tid_o == TID'(9), "I1_EX_WINS");
+      tick();                                 // publish consumed
+      lu_rpi = '{default: '0}; lu_ex_i = '{default: '0}; #2;
+      check(lu_rdy_v && !lu_ex_o.valid && lu_tid_o == TID'(8) &&
+            lu_res == 64'h5A5A_5A5A_5A5A_5A5A, "I1_DATA_NEXT");
+    end else begin
+      // r84 ==2: no same-cycle ex arm — the eligible data slot takes
+      // the port this cycle; the pending record presents next.
+      check(lu_rdy_v && !lu_ex_o.valid && lu_tid_o == TID'(8) &&
+            lu_res == 64'h5A5A_5A5A_5A5A_5A5A, "I1_DATA_FIRST");
+      tick();
+      lu_rpi = '{default: '0}; lu_ex_i = '{default: '0}; #2;
+      check(lu_rdy_v && lu_ex_o.valid && lu_ex_o.cause == 64'd4 &&
+            lu_ex_o.tval == 64'h6001 && lu_tid_o == TID'(9), "I1_EX_NEXT");
+    end
     tick(); #2;
     check(!lu_rdy_v, "I1_ONCE");
     check(!(|i_lu.ldbuf_valid_q), "I1_FREED");

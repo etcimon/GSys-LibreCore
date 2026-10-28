@@ -140,7 +140,12 @@ pub const CORRECTION_VERSION: &str = "correction-v5";
 /// zero-length `range_check` rule is constant false. `ConstSeed.fns`
 /// carries in-scope `function automatic` bodies for the call evaluator
 /// (r83 ii/iii pending).
-pub const MEASUREMENT_VERSION: &str = "delay-v46";
+/// `delay-v47`: the path-edge read enumeration (`node_read_symbols`)
+/// uses `Expr::walk_read_idents` with the elaboration seed — a
+/// `localparam`-gated ternary's dead arm no longer contributes a dep
+/// edge to the output path (r84: `LU_EXPEND ? 0 : a_expub` drops the
+/// same-cycle `ex_pub` cone under `LoadExPubStages==2`).
+pub const MEASUREMENT_VERSION: &str = "delay-v47";
 
 /// Hint for which upstream pin the vendored tree should track (see tools/sv-parser.rev).
 pub const PARSER_PIN_HINT: &str = "v0.13.5";

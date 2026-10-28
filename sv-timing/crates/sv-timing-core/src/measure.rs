@@ -470,6 +470,10 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
     let Some(module) = design.modules.get(&mid) else {
         return;
     };
+    // delay-v47: the dep-edge read walk folds ternary arms whose
+    // condition resolves through the elaboration seed — a
+    // `localparam`-gated dead arm does not reach the output path.
+    let dep_seed = design.elaboration_const_seed(module);
     let bindings = crate::ref_order::BindingIndex::new(module);
     let mut seq_lhs: BTreeSet<String> = BTreeSet::new();
     let mut seq_reads: BTreeSet<String> = BTreeSet::new();
@@ -490,7 +494,7 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
                                 seq_lhs.insert(b);
                             }
                         }
-                        for s in node_read_symbols(n) {
+                        for s in node_read_symbols(n, &dep_seed) {
                             seq_reads.insert(bindings.key(&s, &n.loc));
                         }
                     } else if n.assign_kind.is_comb_def() {
@@ -600,7 +604,7 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
         let Some(n) = module.nodes.get(&nid) else {
             continue;
         };
-        let reads: BTreeSet<_> = node_read_symbols_with_guards(module, n)
+        let reads: BTreeSet<_> = node_read_symbols_with_guards(module, n, &dep_seed)
             .into_iter()
             .map(|s| bindings.key(&s, &n.loc))
             .collect();
@@ -788,8 +792,12 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
 /// sits under and the index expressions of its LHS. `if (grant[g])
 /// q[slot_entry[g]].valid = 0` reads `grant` and `slot_entry` — without them
 /// the select cone never reaches the queue's next state.
-fn node_read_symbols_with_guards(module: &TimingModule, n: &IrNode) -> BTreeSet<String> {
-    let mut out = node_read_symbols(n);
+fn node_read_symbols_with_guards(
+    module: &TimingModule,
+    n: &IrNode,
+    seed: &ConstSeed,
+) -> BTreeSet<String> {
+    let mut out = node_read_symbols(n, seed);
     if let Some(gs) = module.guards.get(&n.id) {
         for g in gs {
             let g = g.strip_prefix('^').unwrap_or(g);
@@ -799,7 +807,7 @@ fn node_read_symbols_with_guards(module: &TimingModule, n: &IrNode) -> BTreeSet<
                     out.insert(b);
                 }
             }
-            Expr::parse(g).walk_idents(&mut |s| {
+            Expr::parse(g).walk_read_idents(seed, &mut |s| {
                 let b = ident_base(s);
                 if !b.is_empty() && looks_like_net(&b) {
                     out.insert(b);
@@ -810,7 +818,11 @@ fn node_read_symbols_with_guards(module: &TimingModule, n: &IrNode) -> BTreeSet<
     out
 }
 
-fn node_read_symbols(n: &IrNode) -> BTreeSet<String> {
+/// Path-edge read enumeration (delay-v47): `walk_read_idents` folds
+/// ternary arms whose condition resolves through `seed.values` — a
+/// `localparam`-gated dead arm does not contribute a dep edge. The raw
+/// `ident_tokens` fallback runs only when the RHS did not parse.
+fn node_read_symbols(n: &IrNode, seed: &ConstSeed) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let mut add = |s: &str| {
         let b = ident_base(s);
@@ -819,12 +831,16 @@ fn node_read_symbols(n: &IrNode) -> BTreeSet<String> {
         }
     };
     if let Some(ex) = &n.rhs_expr {
-        ex.walk_idents(&mut |s| add(s));
+        ex.walk_read_idents(seed, &mut |s| add(s));
     }
     if let Some(rhs) = &n.rhs {
-        Expr::parse(rhs).walk_idents(&mut |s| add(s));
-        for tok in ident_tokens(rhs) {
-            add(&tok);
+        let ex = Expr::parse(rhs);
+        if ex.is_opaque() {
+            for tok in ident_tokens(rhs) {
+                add(&tok);
+            }
+        } else {
+            ex.walk_read_idents(seed, &mut |s| add(s));
         }
     }
     out
