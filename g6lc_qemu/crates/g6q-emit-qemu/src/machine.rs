@@ -187,6 +187,10 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
         body.push_str("static const uint64_t dram_base = 0x80000000ULL;\n");
         body.push_str("static const uint64_t dram_size = 0x40000000ULL;\n");
     }
+    /* Pinned high-memory window for the optional second DRAM bank; the
+     * guest-side memory@ node and drive_guest.py DRAM2_BASE use the same
+     * 0xa0000000. */
+    body.push_str("static const uint64_t dram2_base = 0xa0000000ULL;\n");
     if crate::apu_bridge::enabled(model) {
         let apu = model.soc.apu.as_ref().unwrap();
         body.push_str(&format!(
@@ -576,6 +580,47 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
     body.push_str("    memory_region_init_ram(dram, NULL, \"g6lc.dram\",\n");
     body.push_str("                         dram_size, &error_fatal);\n");
     body.push_str("    memory_region_add_subregion(system_memory, dram_base, dram);\n\n");
+    /* Second DRAM bank for -m above the low bank's usable capacity: -m
+     * counts *usable* bytes, of which the low bank supplies
+     * dram_size - apu_shm_bytes (or the full dram_size without an APU
+     * aperture).  dram2_base is the machine family's pinned
+     * high-memory window — the same 0xa0000000 the guest-side
+     * g6lc-<target>.dts memory@ node and drive_guest.py DRAM2_BASE use;
+     * it sits above the DRAM region and the virtio-mmio window. */
+    let apu_carve = if crate::apu_bridge::enabled(model) {
+        "apu_shm_bytes"
+    } else {
+        "0"
+    };
+    body.push_str(
+        "    /* Optional second DRAM bank for -m above the low bank's\n",
+    );
+    body.push_str(
+        "     * usable capacity (-m counts usable bytes; the aperture is\n",
+    );
+    body.push_str(
+        "     * carved out of the low bank but still backed by QEMU RAM). */\n",
+    );
+    body.push_str("    {\n");
+    body.push_str(&format!(
+        "        const uint64_t low_usable = dram_size - {};\n",
+        apu_carve
+    ));
+    body.push_str("        if (machine->ram_size > low_usable) {\n");
+    body.push_str("            MemoryRegion *dram2 = g_new(MemoryRegion, 1);\n");
+    body.push_str("            memory_region_init_ram(dram2, NULL, \"g6lc.dram2\",\n");
+    body.push_str(
+        "                                   machine->ram_size - low_usable,\n",
+    );
+    body.push_str("                                   &error_fatal);\n");
+    body.push_str(
+        "            memory_region_add_subregion(system_memory,\n",
+    );
+    body.push_str(
+        "                                        dram2_base, dram2);\n",
+    );
+    body.push_str("        }\n");
+    body.push_str("    }\n\n");
 
     let has_mrom = model.soc.bootrom.is_some();
     let (mrom_base, mrom_size) = if let Some((b, s)) = model.soc.bootrom {
@@ -830,6 +875,9 @@ mod tests {
         assert!(f.header_is_valid());
         assert!(f.contents.contains("TYPE_G6LC_G6LC64_TEST_MACHINE"));
         assert!(f.contents.contains("0x80000000ULL"));
+        assert!(f.contents.contains("dram2_base = 0xa0000000ULL"));
+        assert!(f.contents.contains("g6lc.dram2"));
+        assert!(f.contents.contains("low_usable = dram_size - 0"));
         assert!(f.contents.contains("0x10000000ULL"));
         assert!(f.contents.contains("\"uart\""));
         assert!(f.contents.contains("mc->max_cpus = 4"));
@@ -903,6 +951,8 @@ mod tests {
         let m = TargetModel::new("t");
         let e = emit_machine(&m, "0.1.0", "sha256:abc");
         assert!(e.files[0].contents.contains("dram_base = 0x80000000ULL"));
+        assert!(e.files[0].contents.contains("dram2_base = 0xa0000000ULL"));
+        assert!(e.files[0].contents.contains("g6lc.dram2"));
     }
 
     fn apu_model() -> g6q_core::model::ApuModel {
@@ -953,6 +1003,9 @@ mod tests {
             .contains("strcmp(qom, \"g6lc-g6lc64_test-apu-bridge\") == 0"));
         // The aperture is a linear-map hole; the kernel image must load above it.
         assert!(f.contents.contains("apu_shm_base = 0x82000000ULL"));
+        assert!(f
+            .contents
+            .contains("low_usable = dram_size - apu_shm_bytes"));
         assert!(f
             .contents
             .contains("kernel_start_addr = apu_shm_base + apu_shm_bytes;"));

@@ -166,6 +166,7 @@
 	url = https://github.com/etcimon/OpenROAD.git
 	branch = g6lc
 	shallow = true
+	ignore = dirty
 [submodule "specs/VK-GL-CTS"]
 	path = specs/VK-GL-CTS
 	url = https://github.com/KhronosGroup/VK-GL-CTS.git

@@ -141,7 +141,7 @@ suite (sim / dual-hart / R3). Full detail: `AGENTS-build-platform.md` +
 4. diag status|run    — compartmentalized checks (per-test Verilator configs)
 5. verify / test      — AGENTS.md §0.2 gate and/or regression suites
    optional: timings compile -o <dir> → test --from-timing <dir>
-   manual redesign output: --from-timing out_rtl   (symlink → workspace/hyp; not a stamp package)
+   manual redesign output: --from-timing out_rtl   (local link → workspace/hyp; not a stamp package)
    gate-level STA: timings sta-rtl --target <cfg> [--platform nangate45|sky130hd] [--remote]
    free space: clean status | clean timings | clean svt | clean svt-tools --yes
 ```
