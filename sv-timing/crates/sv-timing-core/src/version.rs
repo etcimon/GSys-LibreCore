@@ -135,7 +135,12 @@ pub const CORRECTION_VERSION: &str = "correction-v5";
 /// `Design::elaboration_const_seed`); a ternary / spine whose condition has
 /// a resolved value bills the live arm only — the previous form billed the
 /// `max` of both arms (r82: `Stages==1 ? record : live` kept the record).
-pub const MEASUREMENT_VERSION: &str = "delay-v45";
+/// `delay-v46`: `Expr::const_value` folds `x < 0` → 0 / `x >= 0` → 1 when
+/// `x` is a `logic`-typed (unsigned) shape — the `a < 0` inside a
+/// zero-length `range_check` rule is constant false. `ConstSeed.fns`
+/// carries in-scope `function automatic` bodies for the call evaluator
+/// (r83 ii/iii pending).
+pub const MEASUREMENT_VERSION: &str = "delay-v46";
 
 /// Hint for which upstream pin the vendored tree should track (see tools/sv-parser.rev).
 pub const PARSER_PIN_HINT: &str = "v0.13.5";

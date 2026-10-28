@@ -1150,6 +1150,19 @@ impl TimingDesign {
                 seed.values.insert(p.name.clone(), v);
             }
         }
+        // delay-v46: `function automatic` bodies in scope for the
+        // constant-call fold (module's own + imported packages').
+        for fb in &module.function_bodies {
+            seed.fns.insert(fb.name.clone(), fb.clone());
+        }
+        for pkg_name in &module.package_imports {
+            let key = pkg_name.split("::").next().unwrap_or(pkg_name);
+            if let Some(pkg) = self.packages.get(key) {
+                for fb in &pkg.function_bodies {
+                    seed.fns.insert(fb.name.clone(), fb.clone());
+                }
+            }
+        }
         seed
     }
 }

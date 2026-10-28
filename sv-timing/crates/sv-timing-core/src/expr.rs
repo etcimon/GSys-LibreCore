@@ -187,6 +187,10 @@ pub struct ConstSeed {
     /// names-only seed — `const_value` then returns `None` for idents
     /// and ternary folds fall back to the both-arms max.
     pub values: std::collections::BTreeMap<String, i64>,
+    /// `function automatic` bodies visible at the seed's scope
+    /// (module + imported packages), keyed by name — delay-v46 reads
+    /// them for constant-call folding (`Expr::Call` → `const_value`).
+    pub fns: std::collections::BTreeMap<String, crate::ir::FunctionBody>,
     /// Nets proven zero in the low `K` bits (`aligned_address` → `LOG_NR_BYTES`).
     /// First-pass exclusive `{x[MSB:K], {K{0}}}` assigns. `ident + (y << K)` is
     /// then a field insert, not a CPA.
@@ -818,6 +822,31 @@ impl Expr {
                         (Some(a), Some(b)) => Some(i64::from(a != 0 || b != 0)),
                         _ => None,
                     },
+                    // delay-v46 (i): an unsigned operand against a
+                    // zero literal decides the compare — `x < 0` is
+                    // always false, `x >= 0` always true (`x` is a
+                    // `logic`-typed shape; `int`/`integer` locals stay
+                    // runtime).
+                    "<" | "<=" | ">" | ">=" => {
+                        if matches!(r, Some(0)) && Self::unsigned_expr(left) {
+                            return match op.as_str() {
+                                "<" => Some(0),
+                                ">=" => Some(1),
+                                ">" => Some(i64::from(l.is_some_and(|v| v > 0))),
+                                "<=" => Some(i64::from(l.is_some_and(|v| v <= 0))),
+                                _ => None,
+                            };
+                        }
+                        let l = l?;
+                        let r = r?;
+                        match op.as_str() {
+                            "<" => Some(i64::from(l < r)),
+                            ">" => Some(i64::from(l > r)),
+                            "<=" => Some(i64::from(l <= r)),
+                            ">=" => Some(i64::from(l >= r)),
+                            _ => None,
+                        }
+                    }
                     _ => {
                         let l = l?;
                         let r = r?;
@@ -832,10 +861,6 @@ impl Expr {
                             ">>" | ">>>" => {
                                 u32::try_from(r).ok().and_then(|s| l.checked_shr(s))
                             }
-                            "<" => Some(i64::from(l < r)),
-                            ">" => Some(i64::from(l > r)),
-                            "<=" => Some(i64::from(l <= r)),
-                            ">=" => Some(i64::from(l >= r)),
                             "==" => Some(i64::from(l == r)),
                             "!=" => Some(i64::from(l != r)),
                             "&" => Some(l & r),
@@ -866,6 +891,23 @@ impl Expr {
                 _ => None,
             },
             _ => None,
+        }
+    }
+
+    /// A `logic`-typed expression is unsigned: `x < 0` is constant
+    /// false and `x >= 0` constant true. Only `logic`/`packed` shapes
+    /// are treated unsigned — `int`/`integer` locals stay runtime.
+    fn unsigned_expr(e: &Expr) -> bool {
+        match e {
+            Expr::Ident { .. }
+            | Expr::Index { .. }
+            | Expr::PartSelect { .. }
+            | Expr::Concat { .. }
+            | Expr::Replicate { .. }
+            | Expr::Binary { .. } => true,
+            Expr::Unary { arg, .. } => Self::unsigned_expr(arg),
+            Expr::Literal { .. } | Expr::Ternary { .. } | Expr::Call { .. }
+            | Expr::Opaque { .. } => false,
         }
     }
 
