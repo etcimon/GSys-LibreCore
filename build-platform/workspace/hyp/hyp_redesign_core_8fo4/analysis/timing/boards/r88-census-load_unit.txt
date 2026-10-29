@@ -1,0 +1,89 @@
+path_id=11262 fo4=54.5 reg_to_reg class=plain load_unit.reg0/CP -> load_unit.reg1/D
+  L626 load_unit.sv
+  note: over-budget plain path — no exclusive/atomic exception; cycle lu: step state_q→state_d 34.8 FO4 over budget 8.0; cone stays on the board; P10 handshake lock (sa
+  n15034 L854   fo4=  2.0 fwd_byte_ok[b]                 <= ~lsu_ctrl_i.be[b] | st_fwd_be_i[b]
+  n15035 L856   fo4=  1.0 st_fwd_bytes                   <= &fwd_byte_ok
+  n15036 L857   fo4=  4.4 st_fwd_covers                  <= (G6LCCfg.CohPolicy != config_pkg::COH_OOO) &&
+                         st_fwd_valid_i && (
+  n15039 L875   fo4=  6.0 st_pipeline_busy               <= G6LCCfg.SpeculativeSb && G6LCCfg.SuperscalarEn &&
+                            page_offset_
+  n15063 L937   fo4=  7.0 req_port_o.data_req            <= !cancelled_request && (
+      state_q[LU_B_WAIT_GNT] ||
+      ((state_q[LU_B_IDLE] || stat
+  n15136 L1239  fo4=  6.9 ldbuf_w                        <= req_port_o.data_req & req_port_i.data_gnt
+  n14921 L498   fo4=  3.5 lu_cancel_new                  <= ldbuf_w && cancelled_mask_i[ldbuf_wdata.trans_id]
+  n14923 L503   fo4=  3.0 new_hit                        <= !flush_i && lu_cancel_new && (ldbuf_windex == ldbuf_id_t'(gi))
+  n14925 L505   fo4=  3.0 ldbuf_flushed_d[gi]            <= flush_i || old_hit || new_hit || hold
+  n14960 L601   fo4=  6.2 ex_pend_set                    <= (state_q[LU_B_SEND_TAG] && ex_i.valid && !ex_ptw_i &&
+                        ldbuf_valid_
+  n14968 L626   fo4=  7.5 pend_d[pend_cnt_q - PEND_CNT_W <= pend_new
+  n15163 L1368  fo4=  4.0 pend_dead_d                    <= !((|(ex_pend_q & pend_d[0].slot_oh)) ||
+                         (ex_pend_set &&
+         
+path_id=11261 fo4=53.5 reg_to_reg class=plain load_unit.reg0/CP -> load_unit.reg1/D
+  L626 load_unit.sv
+  note: over-budget plain path — no exclusive/atomic exception; cycle lu: step state_q→state_d 34.8 FO4 over budget 8.0; cone stays on the board; P10 handshake lock (sa
+  n15034 L854   fo4=  2.0 fwd_byte_ok[b]                 <= ~lsu_ctrl_i.be[b] | st_fwd_be_i[b]
+  n15035 L856   fo4=  1.0 st_fwd_bytes                   <= &fwd_byte_ok
+  n15036 L857   fo4=  4.4 st_fwd_covers                  <= (G6LCCfg.CohPolicy != config_pkg::COH_OOO) &&
+                         st_fwd_valid_i && (
+  n15039 L875   fo4=  6.0 st_pipeline_busy               <= G6LCCfg.SpeculativeSb && G6LCCfg.SuperscalarEn &&
+                            page_offset_
+  n15063 L937   fo4=  7.0 req_port_o.data_req            <= !cancelled_request && (
+      state_q[LU_B_WAIT_GNT] ||
+      ((state_q[LU_B_IDLE] || stat
+  n15136 L1239  fo4=  6.9 ldbuf_w                        <= req_port_o.data_req & req_port_i.data_gnt
+  n14921 L498   fo4=  3.5 lu_cancel_new                  <= ldbuf_w && cancelled_mask_i[ldbuf_wdata.trans_id]
+  n14923 L503   fo4=  3.0 new_hit                        <= !flush_i && lu_cancel_new && (ldbuf_windex == ldbuf_id_t'(gi))
+  n14925 L505   fo4=  3.0 ldbuf_flushed_d[gi]            <= flush_i || old_hit || new_hit || hold
+  n14960 L601   fo4=  6.2 ex_pend_set                    <= (state_q[LU_B_SEND_TAG] && ex_i.valid && !ex_ptw_i &&
+                        ldbuf_valid_
+  n14968 L626   fo4=  7.5 pend_d[pend_cnt_q - PEND_CNT_W <= pend_new
+  n15162 L1358  fo4=  3.0 pend_rdy_d                     <= |((rpend_q | live_rpend_oh) & pend_d[0].slot_oh)
+path_id=11197 fo4=50.5 reg_to_reg class=plain load_unit.reg0/CP -> load_unit.reg1/D
+  L626 load_unit.sv
+  note: over-budget plain path — no exclusive/atomic exception; cycle lu: step state_q→state_d 34.8 FO4 over budget 8.0; cone stays on the board; P10 handshake lock (sa
+  n15034 L854   fo4=  2.0 fwd_byte_ok[b]                 <= ~lsu_ctrl_i.be[b] | st_fwd_be_i[b]
+  n15035 L856   fo4=  1.0 st_fwd_bytes                   <= &fwd_byte_ok
+  n15036 L857   fo4=  4.4 st_fwd_covers                  <= (G6LCCfg.CohPolicy != config_pkg::COH_OOO) &&
+                         st_fwd_valid_i && (
+  n15039 L875   fo4=  6.0 st_pipeline_busy               <= G6LCCfg.SpeculativeSb && G6LCCfg.SuperscalarEn &&
+                            page_offset_
+  n15063 L937   fo4=  7.0 req_port_o.data_req            <= !cancelled_request && (
+      state_q[LU_B_WAIT_GNT] ||
+      ((state_q[LU_B_IDLE] || stat
+  n15136 L1239  fo4=  6.9 ldbuf_w                        <= req_port_o.data_req & req_port_i.data_gnt
+  n14921 L498   fo4=  3.5 lu_cancel_new                  <= ldbuf_w && cancelled_mask_i[ldbuf_wdata.trans_id]
+  n14923 L503   fo4=  3.0 new_hit                        <= !flush_i && lu_cancel_new && (ldbuf_windex == ldbuf_id_t'(gi))
+  n14925 L505   fo4=  3.0 ldbuf_flushed_d[gi]            <= flush_i || old_hit || new_hit || hold
+  n14960 L601   fo4=  6.2 ex_pend_set                    <= (state_q[LU_B_SEND_TAG] && ex_i.valid && !ex_ptw_i &&
+                        ldbuf_valid_
+  n14968 L626   fo4=  7.5 pend_d[pend_cnt_q - PEND_CNT_W <= pend_new
+
+=== ir_hot_nodes ===
+== load_unit nodes=312 launch_fo4={'14916': 2.4499999999999997, '14918': 2.4499999999999997, '14922': 7.699999999999999, '14924': 0.35, '14960': 9.1, '14961': 4.55, '14962': 4.55, '14963': 7.699999999999999, '14965': 0.35, '14966': 0.35, '14967': 0.35, '14968': 0.35, '14969': 0.35, '14970': 0.35, '14985': 9.1, '15025': 0.35, '15026': 0.35, '15027': 0.35, '15028': 0.35, '15029': 0.35, '15050': 9.1, '15051': 9.1, '15052': 9.1, '15053': 9.1, '15063': 9.1, '15064': 9.1, '15065': 9.1, '15066': 9.1, '15067': 9.1, '15069': 9.1, '15145': 0.35, '15147': 0.35, '15156': 7.699999999999999, '15157': 2.4499999999999997, '15160': 0.35, '15162': 0.35, '15164': 9.1, '15173': 7.699999999999999, '15187': 9.1, '15188': 9.1, '15189': 9.1, '15190': 9.1, '15201': 7.699999999999999, '15206': 7.699999999999999, '15218': 7.699999999999999, '15219': 7.699999999999999}
+     29.8 L1008  w=10   other      state_d                            <= LU_S_WAIT_GNT
+     29.8 L1011  w=10   other      state_d                            <= LU_S_ABORT_TRANSACTION
+     29.8 L1015  w=10   other      state_d                            <= LU_S_SEND_TAG
+     29.8 L1016  w=1    other      pop_ld_o                           <= 1'b1
+     29.8 L1137  w=10   other      state_d                            <= LU_S_WAIT_GNT
+     29.8 L1141  w=10   other      state_d                            <= LU_S_ABORT_TRANSACTION
+     29.8 L1145  w=10   other      state_d                            <= LU_S_SEND_TAG
+     29.8 L1146  w=1    other      pop_ld_o                           <= 1'b1
+     23.7 L745   w=56   other      load_pa_q                          <= load_pa_now
+     17.6 L1100  w=10   other      state_d                            <= LU_S_SEND_TAG
+     17.6 L1101  w=1    other      pop_ld_o                           <= 1'b1
+     16.1 L1026  w=10   other      state_d                            <= LU_S_WAIT_PAGE_OFFSET
+     16.1 L1155  w=10   other      state_d                            <= LU_S_WAIT_PAGE_OFFSET
+     15.0 L865   w=1    logic_bit  fwd_final                          <= st_fwd_covers & ld_checked_head
+     14.6 L1096  w=10   other      state_d                            <= LU_S_ABORT_TRANSACTION
+     14.5 L997   w=10   other      state_d                            <= LU_S_IDLE
+     14.5 L998   w=1    other      pop_ld_o                           <= 1'b1
+     14.5 L999   w=1    other      st_fwd_done                        <= 1'b1
+     14.5 L1126  w=10   other      state_d                            <= LU_S_IDLE
+     14.5 L1127  w=1    other      pop_ld_o                           <= 1'b1
+     14.5 L1128  w=1    other      st_fwd_done                        <= 1'b1
+     13.1 L1030  w=10   other      state_d                            <= LU_S_WAIT_SPEC_LOAD
+     13.1 L1159  w=10   other      state_d                            <= LU_S_WAIT_SPEC_LOAD
+     12.1 L844   w=1    logic_bit  stall_ni                           <= (inflight_stores || not_commit_time) && (paddr_ni && G6LCCfg.NonIdemPotenceEn)
+     12.1 L1069  w=10   other      state_d                            <= LU_S_WAIT_PAGE_OFFSET

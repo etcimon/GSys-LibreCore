@@ -1,0 +1,29 @@
+
+=== ir_hot_nodes ===
+== g6lc_ai_exec nodes=434 launch_fo4={'6753': 0.35, '6759': 4.55, '6762': 4.55, '6763': 4.55, '6764': 4.55, '6765': 4.55, '6766': 0.35, '6767': 0.35, '6768': 0.35, '6769': 0.35, '6795': 1.75, '6796': 0.7, '6797': 3.5, '6863': 1.75, '6864': 1.75, '6865': 3.5, '6866': 3.5, '6867': 0.35, '6880': 1.4, '6881': 1.75, '6882': 3.5, '6883': 0.35, '6885': 3.5, '6888': 1.75, '6889': 0.7, '6908': 4.55, '6909': 0.7, '6910': 3.5, '6911': 0.35, '6912': 1.75, '6913': 1.75, '6917': 0.35, '7062': 1.4, '7063': 1.4, '7064': 1.4, '7065': 1.4, '7066': 1.4, '7067': 1.4, '7068': 1.4, '7069': 1.75, '7070': 1.75, '7071': 1.75, '7072': 1.75, '7073': 1.0499999999999998, '7075': 3.5, '7076': 1.75, '7077': 1.75, '7078': 1.75, '7079': 1.75, '7080': 1.75, '7081': 1.75, '7083': 1.75, '7084': 1.75, '7085': 1.75, '7086': 1.75}
+     72.8 L587   w=32   mul        mac_prod_q[kk]                     <= ({32{mac_use_q[kk] && mma_dtype_q == 2'b00}} & 32'(signed'(16'(signed'(mac_a_q[kk]) * signed'(mac_b_q[kk])))))
+     22.2 L479   w=1    compare    rq_bump                            <= (rq_rem_q > rq_half) || ((rq_rem_q == rq_half) && rq_t_q[0])
+     21.6 L515   w=48   other      rq_prod_q                          <= rq_prod
+     21.6 L519   w=1    other      rq_neg_q                           <= rq_prod[47]
+     21.6 L523   w=1    logic_bit  rq_sh0_q                           <= (rq_sh == 4'd0)
+     20.9 L511   w=48   other      rq_aval_q                          <= rq_aval_w
+     20.6 L919   w=4    compare    mma_m_d                            <= mma_m_q + 4'd1
+     20.6 L921   w=1    other      state_d                            <= ST_DONE
+     19.6 L915   w=4    compare    mma_n_d                            <= mma_n_q + 4'd1
+     19.6 L917   w=4    other      mma_n_d                            <= '0
+     19.6 L947   w=4    compare    mma_m_d                            <= mma_m_q + 4'd1
+     19.6 L948   w=1    other      state_d                            <= ST_RQ
+     19.6 L949   w=1    other      state_d                            <= ST_DONE
+     19.6 L959   w=4    compare    mma_m_d                            <= mma_m_q + 4'd1
+     19.6 L960   w=1    other      state_d                            <= ST_DONE
+     19.0 L597   w=32   add_sub    mac_lane_sum                       <= mac_prod_q[0] + mac_prod_q[1] + mac_prod_q[2] + mac_prod_q[3]
+                      + mac_prod_q[4] + mac_pro
+     18.6 L942   w=4    compare    mma_n_d                            <= mma_n_q + 4'd1
+     18.6 L943   w=1    other      state_d                            <= ST_RQ
+     18.6 L945   w=4    other      mma_n_d                            <= '0
+     18.6 L956   w=4    compare    mma_n_d                            <= mma_n_q + 4'd1
+     18.6 L958   w=4    other      mma_n_d                            <= '0
+     18.1 L330   w=16   add_sub    rs[bi]                             <= bb[bi] ? -(sa_ext << bi) : 16'd0
+     17.0 L336   w=16   add_sub    ps                                 <= ((rs[0] + rs[1]) + (rs[2] + rs[3])) + ((rs[4] + rs[5]) + (rs[6] + rs[7]))
+     17.0 L337   w=16   add_sub    pu                                 <= ((ru[0] + ru[1]) + (ru[2] + ru[3])) + ((ru[4] + ru[5]) + (ru[6] + ru[7]))
+     16.1 L470   w=48   other      rq_prod_bits                       <= rq_prod_q

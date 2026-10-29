@@ -1,0 +1,66 @@
+path_id=9443 fo4=90.4 reg_to_reg class=plain g6lc_ai_exec.reg0/CP -> g6lc_ai_exec.reg1/D
+  L479 g6lc_ai_exec.sv
+  note: over-budget plain path — no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)
+  n6794 L373   fo4=  4.0 rq_sh                          <= rq_pack_q[27:24]
+  n6830 L466   fo4=  2.5 rq_half                        <= rq_half_sh[rq_sh]
+  n6836 L479   fo4= 22.2 rq_bump                        <= (rq_rem_q > rq_half) || ((rq_rem_q == rq_half) && rq_t_q[0])
+  n6838 L485   fo4= 12.2 rq_neg_rnd                     <= ~rq_t_q + 48'(!rq_bump)
+  n6839 L486   fo4= 20.4 rq_adj                         <= ({48{rq_sh0_q}} & rq_prod_q) |
+                    ({48{!rq_sh0_q && rq_neg_q}} & rq_neg_
+  n6840 L492   fo4= 10.0 rq_wz                          <= rq_adj[31:0] + 32'(rq_zp)
+  n6841 L493   fo4=  5.8 rq_hi                          <= rq_wz > 32'sd127
+  n6842 L494   fo4=  6.4 rq_lo                          <= !rq_hi && (rq_wz < -32'sd128)
+  n6843 L495   fo4=  2.5 rq_byte                        <= rq_hi ? 8'sd127 : rq_lo ? 8'sh80 : rq_wz[7:0]
+  n7075 L940   fo4=  4.5 tiles_d[mma_ta_q][rq_c_idx]    <= rq_byte
+path_id=9349 fo4=79.5 in_to_reg class=plain g6lc_ai_exec.in0 -> g6lc_ai_exec.reg1/D
+  L759 g6lc_ai_exec.sv
+  note: over-budget plain path — no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)
+  n6780 L325   fo4=  4.9 ba                             <= dot4_a[di*8 +: 8]
+  n6782 L327   fo4=  0.5 sa_ext                         <= {{8{ba[7]}}, ba}
+  n6783 L330   fo4= 18.1 rs[bi]                         <= bb[bi] ? -(sa_ext << bi) : 16'd0
+  n6786 L336   fo4= 17.0 ps                             <= ((rs[0] + rs[1]) + (rs[2] + rs[3])) + ((rs[4] + rs[5]) + (rs[6] + rs[7]))
+  n6788 L338   fo4=  0.0 dot4_s_p[di]                   <= 32'(signed'(ps))
+  n6790 L347   fo4= 13.0 dot4_s_sum                     <= dot4_s_p[0] + dot4_s_p[1] + dot4_s_p[2] + dot4_s_p[3]
+  n6970 L754   fo4=  2.5 dot4a_prod                     <= XLEN'(signed'(dot4_s_sum))
+  n6974 L759   fo4= 23.5 result_n                       <= dot4a_prod
+path_id=9341 fo4=56.0 in_to_reg class=plain g6lc_ai_exec.in0 -> g6lc_ai_exec.reg1/D
+  L330 g6lc_ai_exec.sv
+  note: over-budget plain path — no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)
+  n6780 L325   fo4=  4.9 ba                             <= dot4_a[di*8 +: 8]
+  n6782 L327   fo4=  0.5 sa_ext                         <= {{8{ba[7]}}, ba}
+  n6783 L330   fo4= 18.1 rs[bi]                         <= bb[bi] ? -(sa_ext << bi) : 16'd0
+  n6786 L336   fo4= 17.0 ps                             <= ((rs[0] + rs[1]) + (rs[2] + rs[3])) + ((rs[4] + rs[5]) + (rs[6] + rs[7]))
+  n6788 L338   fo4=  0.0 dot4_s_p[di]                   <= 32'(signed'(ps))
+  n6790 L347   fo4= 13.0 dot4_s_sum                     <= dot4_s_p[0] + dot4_s_p[1] + dot4_s_p[2] + dot4_s_p[3]
+  n6962 L742   fo4=  2.5 result_n                       <= XLEN'(signed'(dot4_s_sum))
+
+=== ir_hot_nodes ===
+== g6lc_ai_exec nodes=434 launch_fo4={'6753': 0.35, '6759': 5.6, '6762': 5.6, '6763': 5.6, '6764': 5.6, '6765': 5.6, '6766': 0.35, '6767': 0.35, '6768': 0.35, '6769': 0.35, '6795': 2.0999999999999996, '6796': 0.7, '6797': 3.5, '6839': 16.099999999999998, '6863': 2.0999999999999996, '6864': 2.0999999999999996, '6865': 3.5, '6866': 3.5, '6867': 0.35, '6880': 1.4, '6881': 2.0999999999999996, '6882': 3.5, '6883': 0.35, '6885': 3.5, '6888': 2.0999999999999996, '6889': 0.7, '6908': 5.6, '6909': 0.7, '6910': 3.5, '6911': 0.35, '6912': 2.0999999999999996, '6913': 2.0999999999999996, '6917': 0.35, '7062': 1.4, '7063': 1.4, '7064': 1.4, '7065': 1.4, '7066': 1.4, '7067': 1.4, '7068': 1.4, '7069': 2.0999999999999996, '7070': 2.0999999999999996, '7071': 2.0999999999999996, '7072': 2.0999999999999996, '7073': 1.0499999999999998, '7075': 3.5, '7076': 2.0999999999999996, '7077': 2.0999999999999996, '7078': 2.0999999999999996, '7079': 2.0999999999999996, '7080': 2.0999999999999996, '7081': 2.0999999999999996, '7083': 2.0999999999999996, '7084': 2.0999999999999996, '7085': 2.0999999999999996, '7086': 2.0999999999999996}
+     82.6 L587   w=32   mul        mac_prod_q[kk]                     <= ({32{mac_use_q[kk] && mma_dtype_q == 2'b00}} & 32'(signed'(16'(signed'(mac_a_q[kk]) * signed'(mac_b_q[kk])))))
+     28.4 L777   w=64   other      result_n                           <= '0
+     27.4 L776   w=64   other      result_n                           <= XLEN'(acc_get(acc_r_data, int'(idx_rs2)))
+     23.5 L759   w=64   other      result_n                           <= dot4a_prod
+     22.2 L479   w=1    compare    rq_bump                            <= (rq_rem_q > rq_half) || ((rq_rem_q == rq_half) && rq_t_q[0])
+     21.6 L515   w=48   other      rq_prod_q                          <= rq_prod
+     21.6 L519   w=1    other      rq_neg_q                           <= rq_prod[47]
+     21.6 L523   w=1    logic_bit  rq_sh0_q                           <= (rq_sh == 4'd0)
+     20.9 L511   w=48   other      rq_aval_q                          <= rq_aval_w
+     20.4 L486   w=48   logic_bit  rq_adj                             <= ({48{rq_sh0_q}} & rq_prod_q) |
+                    ({48{!rq_sh0_q && rq_neg_q}} & rq_neg_rnd) |
+            
+     19.2 L386   w=32   other      rq_aval                            <= acc_get(acc_r_data, int'(rq_c_q))
+     19.0 L597   w=32   add_sub    mac_lane_sum                       <= mac_prod_q[0] + mac_prod_q[1] + mac_prod_q[2] + mac_prod_q[3]
+                      + mac_prod_q[4] + mac_pro
+     18.1 L330   w=16   add_sub    rs[bi]                             <= bb[bi] ? -(sa_ext << bi) : 16'd0
+     17.1 L919   w=4    compare    mma_m_d                            <= mma_m_q + 4'd1
+     17.1 L921   w=1    other      state_d                            <= ST_DONE
+     17.0 L336   w=16   add_sub    ps                                 <= ((rs[0] + rs[1]) + (rs[2] + rs[3])) + ((rs[4] + rs[5]) + (rs[6] + rs[7]))
+     17.0 L337   w=16   add_sub    pu                                 <= ((ru[0] + ru[1]) + (ru[2] + ru[3])) + ((ru[4] + ru[5]) + (ru[6] + ru[7]))
+     16.8 L407   w=48   logic_bit  rq_row_all[bi]                     <= {48{rq_sc[bi]}} & shifted
+     16.1 L470   w=48   other      rq_prod_bits                       <= rq_prod_q
+     16.1 L917   w=4    other      mma_n_d                            <= '0
+     16.1 L947   w=4    compare    mma_m_d                            <= mma_m_q + 4'd1
+     16.1 L948   w=1    other      state_d                            <= ST_RQ
+     16.1 L949   w=1    other      state_d                            <= ST_DONE
+     16.1 L959   w=4    compare    mma_m_d                            <= mma_m_q + 4'd1
+     16.1 L960   w=1    other      state_d                            <= ST_DONE

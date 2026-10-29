@@ -477,7 +477,7 @@ module g6lc_ai_exec
   assign rq_t         = rq_ux >> rq_sh;
 
   assign rq_bump  = (rq_rem_q > rq_half) || ((rq_rem_q == rq_half) && rq_t_q[0]);
-  assign rq_t_rnd = rq_bump ? (rq_t_q + 48'sd1) : rq_t_q;
+  assign rq_t_rnd = rq_t_q + 48'(rq_bump);
   // r28: both polarities in parallel; the negation of the rounded value is
   // ~t + (bump ? 0 : 1) (one add, no serial round-then-negate), selected
   // one-hot with the shift-0 passthrough.
@@ -489,10 +489,41 @@ module g6lc_ai_exec
   // pragma translate_off
   always_comb assert (rq_neg_rnd == 48'(-rq_t_rnd)) else $error("requant negate identity");
   // pragma translate_on
-  assign rq_wz    = rq_adj[31:0] + 32'(rq_zp);
+  // r90: ST_RQ_R runs two phases - phase 0 captures rq_adj[31:0]
+  // (the only bits rq_wz reads) so the clamp/zero-point cone leaves
+  // the round cycle; phase 1 evaluates rq_wz/hi/lo/byte and the tile
+  // write. rq_hi/rq_lo parallel - rq_byte's priority is already
+  // exclusive.
+  logic [31:0]        rq_adj_q;
+  logic               rq_r_ph_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin : rq_r_ph_ff
+    if (!rst_ni) rq_r_ph_q <= 1'b0;
+    else         rq_r_ph_q <= (state_q == ST_RQ_R) ? !rq_r_ph_q : 1'b0;
+  end
+  always_ff @(posedge clk_i or negedge rst_ni) begin : rq_adj_ff
+    if (!rst_ni) rq_adj_q <= '0;
+    else if (state_q == ST_RQ_R && !rq_r_ph_q) rq_adj_q <= rq_adj[31:0];
+  end
+  assign rq_wz    = rq_adj_q + 32'(rq_zp);
   assign rq_hi    = rq_wz > 32'sd127;
-  assign rq_lo    = !rq_hi && (rq_wz < -32'sd128);
+  assign rq_lo    = rq_wz < -32'sd128;
   assign rq_byte  = rq_hi ? 8'sd127 : rq_lo ? 8'sh80 : rq_wz[7:0];
+//pragma translate_off
+  // One-cycle reference formula, recomputed live from the same inputs.
+  logic signed [31:0] rq_wz_ref;
+  logic               rq_hi_ref, rq_lo_ref;
+  logic [7:0]         rq_byte_ref;
+  assign rq_wz_ref   = rq_adj[31:0] + 32'(rq_zp);
+  assign rq_hi_ref   = rq_wz_ref > 32'sd127;
+  assign rq_lo_ref   = !rq_hi_ref && (rq_wz_ref < -32'sd128);
+  assign rq_byte_ref = rq_hi_ref ? 8'sd127 : rq_lo_ref ? 8'sh80 : rq_wz_ref[7:0];
+  always_ff @(posedge clk_i) begin : rq_ph_chk
+    if (rst_ni && state_q == ST_RQ_R && rq_r_ph_q) begin
+      assert (rq_adj_q == 32'(rq_adj)) else $error("rq_adj_q != rq_adj");
+      assert (rq_byte  == rq_byte_ref) else $error("rq_byte != rq_byte_ref");
+    end
+  end
+//pragma translate_on
 
   // 0 register the element index, 1 capture the extended accumulator,
   // 2 capture the product. One extra coprocessor cycle per element.
@@ -538,8 +569,8 @@ module g6lc_ai_exec
   // ------------------------------------------------------------------ combo
   // One (m,n) dot over K. Products are parallel lanes; the sum is one
   // adder, not mac_sum = mac_sum + product carried across TileK.
-  logic [7:0]         mac_a_q [TileK];
-  logic [7:0]         mac_b_q [TileK];
+  logic [8:0]         mac_a9_q [TileK];
+  logic [8:0]         mac_b9_q [TileK];
   logic               mac_use_q [TileK];
   logic signed [31:0] mac_prod_q [TileK];
   localparam int unsigned MAC_TIDX_W = (TileCount <= 1) ? 1 : $clog2(TileCount);
@@ -565,31 +596,55 @@ module g6lc_ai_exec
     assign a_byte = tiles_q[ta_i][ae];
     assign b_byte = tiles_q[tb_i][be];
     // ph 0 captures the selected bytes. The multiply reads those flops.
+    // ph 0 captures the dtype sign extension - one 9-bit operand per
+    // lane per side; a_sgn/b_sgn decide by dtype (00 s*s, 01 u*u,
+    // 10 s*u, 11 u*s). The U8xU8 arm previously truncated to 16' signed
+    // (F17: 200*200 went negative) - the 9x9 form is exact.
     always_ff @(posedge clk_i or negedge rst_ni) begin : mac_a_ff
-      if (!rst_ni) mac_a_q[kk] <= '0;
-      else if (state_q == ST_MMA && mma_ph_q == 2'd0) mac_a_q[kk] <= a_byte;
+      if (!rst_ni) mac_a9_q[kk] <= '0;
+      else if (state_q == ST_MMA && mma_ph_q == 2'd0)
+        mac_a9_q[kk] <= {((mma_dtype_q == 2'b00 || mma_dtype_q == 2'b10) & a_byte[7]), a_byte};
     end
     always_ff @(posedge clk_i or negedge rst_ni) begin : mac_b_ff
-      if (!rst_ni) mac_b_q[kk] <= '0;
-      else if (state_q == ST_MMA && mma_ph_q == 2'd0) mac_b_q[kk] <= b_byte;
+      if (!rst_ni) mac_b9_q[kk] <= '0;
+      else if (state_q == ST_MMA && mma_ph_q == 2'd0)
+        mac_b9_q[kk] <= {((mma_dtype_q == 2'b00 || mma_dtype_q == 2'b11) & b_byte[7]), b_byte};
     end
     always_ff @(posedge clk_i or negedge rst_ni) begin : mac_use_ff
       if (!rst_ni) mac_use_q[kk] <= 1'b0;
       else if (state_q == ST_MMA && mma_ph_q == 2'd0) mac_use_q[kk] <= use_k;
     end
-    // ph 1 captures the dtype-selected product, or zero when the lane is
-    // off. One assignment so the multiply stays one node. Widths match
-    // the old p_s/p_u (16) and p_su/p_us (17) captures. Signed and
-    // unsigned views are casts of the same byte.
+    // ph 1 captures the 18-bit signed product: 9 Baugh-Wooley rows
+    // (row[i<8] = {18{b9[i]}} & (sext18(a9) << i); row[8] = the -2^8
+    // sign weight) reduced with the file's csa3 and one 18-bit add.
+    logic signed [17:0] a9e, p18;
+    logic [17:0]        prow [9];
+    logic [47:0]        pa [6], pc [6];
+    assign a9e = {{9{mac_a9_q[kk][8]}}, mac_a9_q[kk]};
+    for (genvar ri = 0; ri < 9; ri++) begin : gen_prow
+      if (ri < 8) assign prow[ri] = {18{mac_b9_q[kk][ri]}} & (18'(a9e) << ri);
+      else        assign prow[ri] = {18{mac_b9_q[kk][8]}} & (-(18'(a9e) << 8));
+    end
+    assign {pa[0],pc[0]} = csa3(48'(prow[0]),48'(prow[1]),48'(prow[2]));
+    assign {pa[1],pc[1]} = csa3(48'(prow[3]),48'(prow[4]),48'(prow[5]));
+    assign {pa[2],pc[2]} = csa3(48'(prow[6]),48'(prow[7]),48'(prow[8]));
+    assign {pa[3],pc[3]} = csa3(48'(pa[0]),48'(pc[0]),48'(pa[1]));
+    assign {pa[4],pc[4]} = csa3(48'(pc[1]),48'(pa[2]),48'(pc[2]));
+    assign {pa[5],pc[5]} = csa3(48'(pa[3]),48'(pc[3]),48'(pa[4]));
+    assign p18 = 18'($signed(pc[4][17:0]) + $signed(pa[5][17:0]) + $signed(pc[5][17:0]));
     always_ff @(posedge clk_i or negedge rst_ni) begin : mac_prod_ff
       if (!rst_ni) mac_prod_q[kk] <= '0;
       else if (state_q == ST_MMA && mma_ph_q == 2'd1)
-        mac_prod_q[kk] <=
-            ({32{mac_use_q[kk] && mma_dtype_q == 2'b00}} & 32'(signed'(16'(signed'(mac_a_q[kk]) * signed'(mac_b_q[kk])))))
-          | ({32{mac_use_q[kk] && mma_dtype_q == 2'b01}} & 32'(signed'(16'(signed'({1'b0, mac_a_q[kk]}) * signed'({1'b0, mac_b_q[kk]})))))
-          | ({32{mac_use_q[kk] && mma_dtype_q == 2'b10}} & 32'(signed'(17'(signed'(mac_a_q[kk]) * signed'({1'b0, mac_b_q[kk]})))))
-          | ({32{mac_use_q[kk] && mma_dtype_q == 2'b11}} & 32'(signed'(17'(signed'({1'b0, mac_a_q[kk]}) * signed'(mac_b_q[kk])))));
+        mac_prod_q[kk] <= {32{mac_use_q[kk]}} & 32'(signed'(p18));
     end
+//pragma translate_off
+    always_ff @(posedge clk_i) begin : mac_prod_chk
+      if (rst_ni && state_q == ST_MMA && mma_ph_q == 2'd1 && mac_use_q[kk]) begin
+        assert (p18 == 18'(signed'(mac_a9_q[kk]) * signed'(mac_b9_q[kk])))
+          else $error("p18 != a9*b9 kk=%0d", kk);
+      end
+    end
+//pragma translate_on
   end
   // TileK is 8. Use and dtype were applied when the product was captured,
   // so phase 2 is one eight-operand sum. The log tree was the longer cone.
@@ -937,16 +992,20 @@ module g6lc_ai_exec
 
       ST_RQ_R: begin
         // y = clamp_s8(RHE(acc * scale, shift) + zp) on the round step.
-        if (rq_ok) tiles_d[mma_ta_q][rq_c_idx] = rq_byte;
-        if (mma_n_q + 4'd1 < mma_N_q) begin
-          mma_n_d = mma_n_q + 4'd1;
-          state_d = ST_RQ;
-        end else begin
-          mma_n_d = '0;
-          if (mma_m_q + 4'd1 < mma_M_q) begin
-            mma_m_d = mma_m_q + 4'd1;
+        // r90: two phases - rq_adj_q captures in phase 0; the tile write
+        // and (m,n)/state advance only in phase 1.
+        if (rq_r_ph_q) begin
+          if (rq_ok) tiles_d[mma_ta_q][rq_c_idx] = rq_byte;
+          if (mma_n_q + 4'd1 < mma_N_q) begin
+            mma_n_d = mma_n_q + 4'd1;
             state_d = ST_RQ;
-          end else state_d = ST_DONE;
+          end else begin
+            mma_n_d = '0;
+            if (mma_m_q + 4'd1 < mma_M_q) begin
+              mma_m_d = mma_m_q + 4'd1;
+              state_d = ST_RQ;
+            end else state_d = ST_DONE;
+          end
         end
       end
 

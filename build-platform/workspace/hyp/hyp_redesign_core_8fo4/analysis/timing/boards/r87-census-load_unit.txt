@@ -1,0 +1,49 @@
+path_id=11221 fo4=54.8 in_to_reg class=plain load_unit.in0 -> load_unit.reg1/D
+  L1015 load_unit.sv
+  note: over-budget plain path — no exclusive/atomic exception; cycle lu: step state_q→state_d 35.1 FO4 over budget 8.0; cone stays on the board
+  n15032 L842   fo4=  2.0 inflight_stores                <= !dcache_wbuffer_not_ni_i ||
+                           (G6LCCfg.OoOEn ? !no_st_pending_i :
+  n15033 L844   fo4= 22.6 stall_ni                       <= (inflight_stores || not_commit_time) && (paddr_ni && G6LCCfg.NonIdemPotenceEn)
+  n15084 L1015  fo4= 30.1 state_d                        <= LU_S_SEND_TAG
+path_id=11222 fo4=54.8 in_to_out class=plain load_unit.in0 -> load_unit.out0
+  L1016 load_unit.sv
+  note: over-budget plain path — no exclusive/atomic exception; cycle lu: step state_q→state_d 35.1 FO4 over budget 8.0; cone stays on the board
+  n15032 L842   fo4=  2.0 inflight_stores                <= !dcache_wbuffer_not_ni_i ||
+                           (G6LCCfg.OoOEn ? !no_st_pending_i :
+  n15033 L844   fo4= 22.6 stall_ni                       <= (inflight_stores || not_commit_time) && (paddr_ni && G6LCCfg.NonIdemPotenceEn)
+  n15085 L1016  fo4= 30.1 pop_ld_o                       <= 1'b1
+path_id=11223 fo4=54.8 in_to_reg class=plain load_unit.in0 -> load_unit.reg1/D
+  L1019 load_unit.sv
+  note: over-budget plain path — no exclusive/atomic exception; cycle lu: step state_q→state_d 35.1 FO4 over budget 8.0; cone stays on the board
+  n15032 L842   fo4=  2.0 inflight_stores                <= !dcache_wbuffer_not_ni_i ||
+                           (G6LCCfg.OoOEn ? !no_st_pending_i :
+  n15033 L844   fo4= 22.6 stall_ni                       <= (inflight_stores || not_commit_time) && (paddr_ni && G6LCCfg.NonIdemPotenceEn)
+  n15086 L1019  fo4= 30.1 state_d                        <= LU_S_ABORT_TRANSACTION_NI
+
+=== ir_hot_nodes ===
+== load_unit nodes=312 launch_fo4={'14916': 2.4499999999999997, '14918': 2.4499999999999997, '14922': 7.699999999999999, '14924': 0.35, '14960': 9.1, '14961': 4.55, '14962': 4.55, '14963': 7.699999999999999, '14965': 0.35, '14966': 0.35, '14967': 0.35, '14968': 0.35, '14969': 0.35, '14970': 0.35, '14985': 9.1, '15025': 0.35, '15026': 0.35, '15027': 0.35, '15028': 0.35, '15029': 0.35, '15050': 9.1, '15051': 9.1, '15052': 9.1, '15053': 9.1, '15063': 9.1, '15064': 9.1, '15065': 9.1, '15066': 9.1, '15067': 9.1, '15069': 9.1, '15145': 0.35, '15147': 0.35, '15156': 7.699999999999999, '15157': 2.4499999999999997, '15160': 0.35, '15162': 0.35, '15164': 9.1, '15173': 7.699999999999999, '15187': 9.1, '15188': 9.1, '15189': 9.1, '15190': 9.1, '15201': 7.699999999999999, '15206': 7.699999999999999, '15218': 7.699999999999999, '15219': 7.699999999999999}
+     30.1 L1015  w=10   other      state_d                            <= LU_S_SEND_TAG
+     30.1 L1016  w=1    other      pop_ld_o                           <= 1'b1
+     30.1 L1019  w=10   other      state_d                            <= LU_S_ABORT_TRANSACTION_NI
+     30.1 L1145  w=10   other      state_d                            <= LU_S_SEND_TAG
+     30.1 L1146  w=1    other      pop_ld_o                           <= 1'b1
+     30.1 L1149  w=10   other      state_d                            <= LU_S_ABORT_TRANSACTION_NI
+     28.1 L1100  w=10   other      state_d                            <= LU_S_SEND_TAG
+     28.1 L1101  w=1    other      pop_ld_o                           <= 1'b1
+     28.1 L1104  w=10   other      state_d                            <= LU_S_ABORT_TRANSACTION_NI
+     23.7 L745   w=56   other      load_pa_q                          <= load_pa_now
+     22.6 L844   w=1    logic_bit  stall_ni                           <= (inflight_stores || not_commit_time) && (paddr_ni && G6LCCfg.NonIdemPotenceEn)
+     18.6 L1011  w=10   other      state_d                            <= LU_S_ABORT_TRANSACTION
+     18.6 L1141  w=10   other      state_d                            <= LU_S_ABORT_TRANSACTION
+     16.1 L1026  w=10   other      state_d                            <= LU_S_WAIT_PAGE_OFFSET
+     16.1 L1155  w=10   other      state_d                            <= LU_S_WAIT_PAGE_OFFSET
+     15.0 L865   w=1    logic_bit  fwd_final                          <= st_fwd_covers & ld_checked_head
+     14.6 L1096  w=10   other      state_d                            <= LU_S_ABORT_TRANSACTION
+     14.5 L997   w=10   other      state_d                            <= LU_S_IDLE
+     14.5 L998   w=1    other      pop_ld_o                           <= 1'b1
+     14.5 L999   w=1    other      st_fwd_done                        <= 1'b1
+     14.5 L1126  w=10   other      state_d                            <= LU_S_IDLE
+     14.5 L1127  w=1    other      pop_ld_o                           <= 1'b1
+     14.5 L1128  w=1    other      st_fwd_done                        <= 1'b1
+     13.1 L1030  w=10   other      state_d                            <= LU_S_WAIT_SPEC_LOAD
+     13.1 L1159  w=10   other      state_d                            <= LU_S_WAIT_SPEC_LOAD

@@ -1,0 +1,6 @@
+argv: /e/cva6/sv-timing/target/release/sv-timing.exe analyze --files-from /e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/hyp8-core.f --modules --modules --target-mhz 5000 --fo4-ps 20 --budget-margin 0.2 --param-map /e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/../r88-param-map.json --stages --json-out /e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/boards/r90-st.json --ir-out /e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/boards/r90-st.ir.json
+58e3a789b79ff6e03183dfc6a92e1b0ca640cb2f8e82045dfb1c7595dbd05e47 */e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/../r88-param-map.json
+1ec1c28bc99f63c14e1f31c98a0507a95961fbdfea7b3bff38a1701ba6cca2d8 */e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/hyp8-core.f
+error: a value is required for '--modules <MODULES>' but none was supplied
+
+For more information, try '--help'.

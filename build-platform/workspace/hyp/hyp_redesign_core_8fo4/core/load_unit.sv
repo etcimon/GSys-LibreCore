@@ -595,14 +595,35 @@ assign ldbuf_full = &ldbuf_valid_q;
   // so the LU_EXPEND arm is an explicit no-op on the ==1 profile.
   localparam bit LU_EXPEND = (HypCfg.LoadExPubStages == 2);
   logic ex_pend_set;
+  logic ex_pend_slot_live;
+  // Same reduction as ex_pub (flushed_d): on a valid slot new_hit is
+  // unreachable (the allocator never writes an occupied slot) and hold
+  // is covered by !flushed_q, so only flush_i || old_hit must be
+  // checked. LDBUF_FALLTHROUGH keeps the full next-cycle form.
+  assign ex_pend_slot_live = LDBUF_FALLTHROUGH
+      ? (ldbuf_valid_q[ldbuf_last_id_q] &&
+         !ldbuf_flushed_d[ldbuf_last_id_q])
+      : (ldbuf_valid_q[ldbuf_last_id_q] &&
+         !ldbuf_flushed_q[ldbuf_last_id_q] && !flush_i &&
+         !cancelled_mask_i[ldbuf_q[ldbuf_last_id_q].trans_id]);
 `ifdef G6LC_MUT_LSU_EXPEND
   assign ex_pend_set = 1'b0;
 `else
   assign ex_pend_set = (state_q[LU_B_SEND_TAG] && ex_i.valid && !ex_ptw_i &&
-                        ldbuf_valid_q[ldbuf_last_id_q] &&
-                        !ldbuf_flushed_d[ldbuf_last_id_q]) ||
+                        ex_pend_slot_live) ||
                        (LU_EXPEND && ex_pub);
 `endif
+
+//pragma translate_off
+  always_ff @(posedge clk_i) begin : lu_exp_slot_chk
+    if (rst_ni && ldbuf_valid_q[ldbuf_last_id_q] &&
+        (ex_pend_slot_live !=
+         (ldbuf_valid_q[ldbuf_last_id_q] &&
+          !ldbuf_flushed_d[ldbuf_last_id_q]))) begin
+      $error("ex_pend_slot_live reduction");
+    end
+  end
+//pragma translate_on
 
   // Record pushed at the kill edge: the slot identity, the entry's
   // transaction id and the live exception record (which is only valid

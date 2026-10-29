@@ -367,7 +367,30 @@ assign shared_tlb_access_o = shared_tlb_access_q;
 
   assign flush_vmid_is0 = ~(|flush_vmid_q);
   assign flush_gpaddr_is0 = ~(|flush_gpaddr_q);
-  assign flush_match_way = (flush_kind_q == FLUSH_SFENCE)? sfence_match_way: (flush_kind_q == FLUSH_VVMA)? vvma_match_way: gvma_match_way;
+  // r90: the flush kind is registered at flush start — a one-hot keeps
+  // the two 2-bit compares off the apply path (exact: flush_kind_q is
+  // only written while leaving IDLE, with the same flush_i > vvma >
+  // gvma priority as the FSM's IDLE arm).
+  logic is_sfence_q, is_vvma_q, is_gvma_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (~rst_ni) {is_gvma_q, is_vvma_q, is_sfence_q} <= 3'b001;
+    else if (flush_state_q == IDLE) begin
+      if (flush_i)           {is_gvma_q, is_vvma_q, is_sfence_q} <= 3'b001;
+      else if (flush_vvma_i) {is_gvma_q, is_vvma_q, is_sfence_q} <= 3'b010;
+      else if (flush_gvma_i) {is_gvma_q, is_vvma_q, is_sfence_q} <= 3'b100;
+    end
+  end
+//pragma translate_off
+  always_ff @(posedge clk_i) begin : flush_kind_onehot_chk
+    if (rst_ni && flush_state_q != IDLE &&
+        ({is_gvma_q, is_vvma_q, is_sfence_q} !=
+         {flush_kind_q == FLUSH_GVMA, flush_kind_q == FLUSH_VVMA, flush_kind_q == FLUSH_SFENCE}))
+      $error("flush kind one-hot != flush_kind_q");
+  end
+//pragma translate_on
+  assign flush_match_way = ({SHARED_TLB_WAYS{is_sfence_q}} & sfence_match_way)
+                         | ({SHARED_TLB_WAYS{is_vvma_q}}   & vvma_match_way)
+                         | ({SHARED_TLB_WAYS{is_gvma_q}}   & gvma_match_way);
 
   assign shared_tag_wr.asid = shared_tlb_update_i.asid;
   assign shared_tag_wr.vmid = shared_tlb_update_i.vmid;
@@ -699,7 +722,7 @@ assign shared_tlb_access_o = shared_tlb_access_q;
 
     unique case (flush_state_q)
       IDLE: begin
-        if (flush_i) begin
+        if (G6LCCfg.UseSharedTlb && flush_i) begin
           flush_state_d = FLUSH_READ;
           flush_idx_d = '0;
           flush_asid_d = asid_to_be_flushed_i;
@@ -707,7 +730,7 @@ assign shared_tlb_access_o = shared_tlb_access_q;
           flush_kind_d = FLUSH_SFENCE;
           flush_vmid_d = '0;
           flush_gpaddr_d = '0;
-        end else if (flush_vvma_i) begin
+        end else if (G6LCCfg.UseSharedTlb && flush_vvma_i) begin
           flush_state_d = FLUSH_READ;
           flush_idx_d = '0;
           flush_asid_d = asid_to_be_flushed_i;
@@ -715,7 +738,7 @@ assign shared_tlb_access_o = shared_tlb_access_q;
           flush_kind_d = FLUSH_VVMA;
           flush_vmid_d = lu_vmid_i;
           flush_gpaddr_d = '0;
-        end else if (flush_gvma_i) begin
+        end else if (G6LCCfg.UseSharedTlb && flush_gvma_i) begin
           flush_state_d = FLUSH_READ;
           flush_idx_d = '0;
           flush_asid_d = '0;
@@ -962,7 +985,7 @@ assign shared_tlb_access_o = shared_tlb_access_q;
     tag_wr_en = '0;
     pte_wr_en = '0;
 
-    if (flush_state_q == FLUSH_APPLY) begin
+    if (G6LCCfg.UseSharedTlb && flush_state_q == FLUSH_APPLY) begin
       for (int unsigned i = 0; i < SHARED_TLB_WAYS; i++) begin
         if (flush_match_way[i]) begin
           shared_tag_valid_d[flush_idx_q][i] = 1'b0;
@@ -970,7 +993,7 @@ assign shared_tlb_access_o = shared_tlb_access_q;
       end
     end
 
-    if ((flush_state_q == IDLE) && !flush_i && !flush_vvma_i && !flush_gvma_i && shared_tlb_update_i.valid) begin
+    if (G6LCCfg.UseSharedTlb && (flush_state_q == IDLE) && !flush_i && !flush_vvma_i && !flush_gvma_i && shared_tlb_update_i.valid) begin
       for (int unsigned i = 0; i < SHARED_TLB_WAYS; i++) begin
         if (repl_way_oh_d[i]) begin
           shared_tag_valid_d[vpn_index][i] = 1'b1;

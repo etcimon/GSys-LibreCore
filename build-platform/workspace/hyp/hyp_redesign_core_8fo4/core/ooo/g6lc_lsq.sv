@@ -467,7 +467,34 @@ module g6lc_lsq #(
   logic [NR_UPDATE-1:0][NR_UPDATE-1:0][IDW-1:0] vv_dist_q, vv_id_q;
   logic [NR_UPDATE-1:0][NR_UPDATE-1:0][G6LCCfg.VLEN-1:0] vv_pay_q;
 
+  // Byte-enable as a constant table over {size, a[2:0]}: 32 slots of
+  // LANES bits — a 32:1 mux (~5.5 FO4) instead of the variable-shift
+  // barrel billed ~26 under the vv_* guards.
+  function automatic logic [31:0][LANES-1:0] lane_be_table();
+    logic [LANES-1:0] m;
+    for (int unsigned s = 0; s < 4; s++) begin
+      for (int unsigned off = 0; off < 8; off++) begin
+        m = '0;
+        for (int unsigned b = 0; b < LANES; b++)
+          if (b < (1 << s)) m[b] = 1'b1;
+        lane_be_table[{s[1:0], off[2:0]}] =
+            (G6LCCfg.XLEN == 64) ? (m << off[2:0]) : (m << off[1:0]);
+      end
+    end
+  endfunction
+  localparam logic [31:0][LANES-1:0] LANE_BE_TAB = lane_be_table();
+
   function automatic logic [LANES-1:0] lane_be(
+      input logic [G6LCCfg.PLEN-1:0] a,
+      input logic [1:0]              size
+  );
+    return LANE_BE_TAB[{size, a[2:0]}];
+  endfunction
+
+//pragma translate_off
+  // Reference loop form for the table check (time-0 exhausts all 32
+  // {size, off} slots).
+  function automatic logic [LANES-1:0] lane_be_ref(
       input logic [G6LCCfg.PLEN-1:0] a,
       input logic [1:0]              size
   );
@@ -476,10 +503,23 @@ module g6lc_lsq #(
     for (int unsigned b = 0; b < LANES; b++)
       if (b < (1 << size)) m[b] = 1'b1;
     if (G6LCCfg.XLEN == 64)
-      lane_be = m << a[2:0];
+      lane_be_ref = m << a[2:0];
     else
-      lane_be = m << a[1:0];
+      lane_be_ref = m << a[1:0];
   endfunction
+  initial begin : lane_be_tab_chk
+    logic [G6LCCfg.PLEN-1:0] ta;
+    for (int unsigned s = 0; s < 4; s++) begin
+      for (int unsigned o = 0; o < 8; o++) begin
+        ta = '0;
+        ta[2:0] = o[2:0];
+        if (lane_be(ta, 2'(s)) !== lane_be_ref(ta, 2'(s))) begin
+          $error("lane_be table != ref size=%0d off=%0d", s, o);
+        end
+      end
+    end
+  end
+//pragma translate_on
 
   function automatic logic same_word(
       input logic [G6LCCfg.PLEN-1:0] a,
@@ -491,10 +531,17 @@ module g6lc_lsq #(
       same_word = (a == b);
   endfunction
 
+  // Same hoist the file already uses for s_be[s]/ev0_be: the event
+  // byte enables are invariant in the (u,v) pair scan — compute them
+  // once per event instead of inside the guarded block.
+  logic [LANES-1:0] ev_be [NR_UPDATE];
+  logic [LANES-1:0] q_be;
+  for (genvar u = 0; u < NR_UPDATE; u++) begin : gen_ev_be
+    assign ev_be[u] = lane_be(ev_addr[u], ev_addr_size[u]);
+  end
+  assign q_be = lane_be(ev_query_addr, ev_query_size);
+
   always_comb begin
-    automatic logic [LANES-1:0] sbe, lbe;
-    sbe = '0;
-    lbe = '0;
     vv_match_d = '0;
     vv_older_d = '0;
     vv_dist_d  = '0;
@@ -503,7 +550,6 @@ module g6lc_lsq #(
     for (int unsigned u = 0; u < NR_UPDATE; u++) begin
       if (ev_addr_valid[u] && ev_addr_is_st[u] &&
           !cancelled_mask_i[ev_addr_id[u]]) begin
-        sbe = lane_be(ev_addr[u], ev_addr_size[u]);
         // Other same-cycle load events: virtual leaf slots 0..NR-2.
         for (int unsigned v = 0; v < NR_UPDATE; v++) begin
           if (v != u) begin
@@ -512,8 +558,7 @@ module g6lc_lsq #(
             if (ev_addr_valid[v] && !ev_addr_is_st[v] &&
                 !cancelled_mask_i[ev_addr_id[v]] &&
                 (!LSQ_HART_OWN || ev_ld_hart[v] == ev_st_hart[u])) begin
-              lbe = lane_be(ev_addr[v], ev_addr_size[v]);
-              if (same_word(ev_addr[v], ev_addr[u]) && (sbe & lbe) != '0)
+              if (same_word(ev_addr[v], ev_addr[u]) && (ev_be[u] & ev_be[v]) != '0)
                 vv_match_d[u][(v < u) ? v : v-1] = 1'b1;
               vv_older_d[u][(v < u) ? v : v-1] = g6lc_ooo_pkg::ooo_age_older(
                   IDW, 32'(ev_addr_id[u]), 32'(ev_addr_id[v]),
@@ -528,8 +573,7 @@ module g6lc_lsq #(
         vv_pay_d[u][NR_UPDATE-1] = q_ld_pc;
         if (q_ev_valid && !cancelled_mask_i[ev_query_id] &&
             (!LSQ_HART_OWN || ev_query_hart == ev_st_hart[u])) begin
-          lbe = lane_be(ev_query_addr, ev_query_size);
-          if (same_word(ev_query_addr, ev_addr[u]) && (sbe & lbe) != '0)
+          if (same_word(ev_query_addr, ev_addr[u]) && (ev_be[u] & q_be) != '0)
             vv_match_d[u][NR_UPDATE-1] = 1'b1;
           vv_older_d[u][NR_UPDATE-1] = g6lc_ooo_pkg::ooo_age_older(
               IDW, 32'(ev_addr_id[u]), 32'(ev_query_id),

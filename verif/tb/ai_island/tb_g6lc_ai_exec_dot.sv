@@ -128,6 +128,15 @@ module tb_g6lc_ai_exec_dot;
     chk(result_o === XLEN'(want), what);
   endtask
 
+  // Acc read of a negative element: compare the 32-bit accumulator only
+  // (result_o's extension above bit 31 is not what this check is for).
+  task automatic aread32(input int acc, input int elem, input logic [31:0] want,
+                         input string what);
+    issue(AI_MVACC, mk(5'(elem), 5'(acc), 5'd2), '{NREG{64'd0}});
+    chk(valid_o === 1'b1, {what, " valid"});
+    chk(result_o[31:0] === want, what);
+  endtask
+
   // MMA: rd = acc, rs1 = tile A, rs2 = tile B; dims from aicfg_i.
   task automatic mma(input opcode_t op, input int acc, input int ta, input int tb,
                      input logic [15:0] cfg);
@@ -210,6 +219,34 @@ module tb_g6lc_ai_exec_dot;
     for (int m = 0; m < 4; m++)
       for (int n = 0; n < 4; n++)
         aread(1, m * 8 + n, 2 * golden[m * 8 + n], "mma_u8 acc2");
+
+    // ---- F17: u8 lane products >= 32768 (255*255 = 65025 per lane, K=4 ->
+    // 260100 per element) must accumulate exactly (reference
+    // core/cvxif_g6lc_ai/g6lc_ai_exec.sv computes 32'(a*b)); the
+    // 16-bit-truncating arm made them negative.
+    for (int e = 0; e < 28; e++) begin
+      tset(4, e, 255);
+      tset(5, e, 255);
+    end
+    mma(AI_MMA_U8, 2, 4, 5, 16'h0222);
+    for (int m = 0; m < 4; m++)
+      for (int n = 0; n < 4; n++)
+        aread(2, m * 8 + n, 4 * 255 * 255, "mma_u8 F17 255x255");
+    // s8 x s8 with -128 * -128 = 16384 per lane (K=4 -> 65536) and a
+    // mixed-sign check: -128 * 127 = -16256 per lane (K=4 -> -65024).
+    for (int e = 0; e < 28; e++) begin
+      tset(6, e, 8'h80);
+      tset(7, e, 8'h80);
+    end
+    mma(AI_MMA_S8, 3, 6, 7, 16'h0222);
+    for (int m = 0; m < 4; m++)
+      for (int n = 0; n < 4; n++)
+        aread(3, m * 8 + n, 4 * 16384, "mma_s8 -128x-128");
+    for (int e = 0; e < 28; e++) tset(7, e, 8'h7f);
+    mma(AI_MMA_S8, 3, 6, 7, 16'h0222);
+    for (int m = 0; m < 4; m++)
+      for (int n = 0; n < 4; n++)
+        aread32(3, m * 8 + n, 32'(-4 * 16256), "mma_s8 -128x127");
 
     // ---- verdict ----------------------------------------------------------
     if (errors == 0)

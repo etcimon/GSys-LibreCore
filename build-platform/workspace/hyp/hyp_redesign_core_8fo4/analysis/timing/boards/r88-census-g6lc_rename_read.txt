@@ -1,0 +1,54 @@
+path_id=10697 fo4=54.1 in_to_out class=plain g6lc_rename_read.in0 -> g6lc_rename_read.out0
+  L292 g6lc_rename_read.sv
+  note: over-budget plain path — no exclusive/atomic exception
+  n12690 L278   fo4=  2.0 sbm[gp][ge]                    <= valid_i[ge] && is_branch_i[ge] &&
+                             (2'(hart_i[ge]) == 2'(hart_
+  n12692 L284   fo4=  1.0 sb_cnt[gp]                     <= 32'($countones(sbm[gp]))
+  n12696 L292   fo4= 46.6 lane_o[gp].ckpt_slot           <= 6'(ckpt_slot(int'(hart_i[gp]),
+            int'(32'(ckpt_head_q_i[hart_i[gp]]) +
+         
+  n12672 L238   fo4=  4.5 lane_o[gp].rs1_rdy             <= (rs1_i[gp] == 5'd0) ||
+                           !busy_q_i[PRF_W'(lane_o[gp].prs1[PRF_W-1
+path_id=10712 fo4=52.6 in_to_out class=plain g6lc_rename_read.in0 -> g6lc_rename_read.out0
+  L292 g6lc_rename_read.sv
+  note: over-budget plain path — no exclusive/atomic exception
+  n12690 L278   fo4=  2.0 sbm[gp][ge]                    <= valid_i[ge] && is_branch_i[ge] &&
+                             (2'(hart_i[ge]) == 2'(hart_
+  n12692 L284   fo4=  1.0 sb_cnt[gp]                     <= 32'($countones(sbm[gp]))
+  n12696 L292   fo4= 46.6 lane_o[gp].ckpt_slot           <= 6'(ckpt_slot(int'(hart_i[gp]),
+            int'(32'(ckpt_head_q_i[hart_i[gp]]) +
+         
+  n12697 L297   fo4=  0.0 lane_ckpt[gp]                  <= lane_o[gp].do_ckpt
+  n12698 L302   fo4=  2.0 hmatch[gp]                     <= lane_ckpt[gp] && (int'(hart_i[gp]) == gh)
+  n12699 L305   fo4=  1.0 hmc                            <= 32'($countones(hmatch))
+  n12700 L306   fo4=  0.0 res_br_inc_o[gh]               <= LVL_W'(hmc)
+path_id=10705 fo4=51.0 in_to_out class=plain g6lc_rename_read.in0 -> g6lc_rename_read.out0
+  L197 g6lc_rename_read.sv
+  note: over-budget plain path — no exclusive/atomic exception
+  n12644 L192   fo4=  5.0 taken_lt[gp]                   <= taken_lt[gp] | (lone_p[ge])
+  n12646 L197   fo4= 32.0 lone_p[gp]                     <= pick_free_mask (free_q_i  & bank_mask(gp) &
+                                          ~tak
+  n12648 L201   fo4=  1.0 alloc_ok[gp]                   <= |lone_p[gp]
+  n12650 L203   fo4=  1.0 alloc_do[gp]                   <= need_int[gp] && alloc_ok[gp]
+  n12687 L262   fo4= 12.0 lane_o[gp].prd                 <= alloc_do[gp]  ? 8'(mask_to_tag(lone_p[gp]))  : '0
+
+=== ir_hot_nodes ===
+== g6lc_rename_read nodes=65 launch_fo4=None
+     46.6 L292   w=32   add_sub    lane_o[gp].ckpt_slot               <= 6'(ckpt_slot(int'(hart_i[gp]),
+            int'(32'(ckpt_head_q_i[hart_i[gp]]) +
+            32'(ckpt_cnt_q_i[
+     32.0 L197   w=72   logic_bit  lone_p[gp]                         <= pick_free_mask (free_q_i  & bank_mask(gp) &
+                                          ~taken_lt[gp],  (gp == 1
+     30.1 L291   w=1    other      lane_o[gp].do_ckpt                 <= 1'b1
+     22.0 L199   w=1    logic_bit  flone_p[gp]                        <= pick_ffree_mask(ffree_q_i & fbank_mask(gp) &
+                                          ~ftaken_lt[gp], (gp == 
+     12.0 L262   w=1    mux        lane_o[gp].prd                     <= alloc_do[gp]  ? 8'(mask_to_tag(lone_p[gp]))  : '0
+      7.5 L235   w=1    mux        lane_o[gp].prs1                    <= 8'((rs1_i[gp] == 5'd0) ? '0 : map_q_i[hart_i[gp]][rs1_i[gp]])
+      7.5 L236   w=1    mux        lane_o[gp].prs2                    <= 8'((rs2_i[gp] == 5'd0) ? '0 : map_q_i[hart_i[gp]][rs2_i[gp]])
+      7.5 L237   w=1    mux        lane_o[gp].old                     <= 8'((rd_i[gp]  == 5'd0) ? '0 : map_q_i[hart_i[gp]][rd_i[gp]])
+      6.0 L264   w=1    mux        lane_o[gp].fprd                    <= falloc_do[gp] ? 8'(mask_to_ftag(flone_p[gp])) : '0
+      5.6 L320   w=4    add_sub    br_over[gh]                        <= (int'(ckpt_cnt_q_i[gh]) + int'(nbr_cnt)
+                     > CKPT_PER_HART)
+      5.0 L192   w=72   logic_bit  taken_lt[gp]                       <= taken_lt[gp] | (lone_p[ge])
+      5.0 L193   w=1    logic_bit  ftaken_lt[gp]                      <= ftaken_lt[gp] | (flone_p[ge])
+      5.0 L214   w=72   logic_bit  res_pick_mask_o                    <= res_pick_mask_o | (lone_p[g])

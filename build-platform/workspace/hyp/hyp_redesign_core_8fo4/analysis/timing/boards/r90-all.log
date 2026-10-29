@@ -1,0 +1,501 @@
+argv: /e/cva6/sv-timing/target/release/sv-timing.exe analyze --files-from /e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/hyp8-core.f --all-modules --target-mhz 5000 --fo4-ps 20 --budget-margin 0.2 --param-map /e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/../r88-param-map.json --stages --json-out /e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/boards/r90-all.json --ir-out /e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/boards/r90-all.ir.json
+58e3a789b79ff6e03183dfc6a92e1b0ca640cb2f8e82045dfb1c7595dbd05e47 */e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/../r88-param-map.json
+1ec1c28bc99f63c14e1f31c98a0507a95961fbdfea7b3bff38a1701ba6cca2d8 */e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/hyp8-core.f
+sv-timing-core 0.1.0 ir=ir-v6 measurement=delay-v49 correction=correction-v5 parser_pin=v0.13.5
+opt=-O2 (max_passes=4 worklist_width=1 cut=cost-balanced stages=1 min_gain=2 slack_target=0 area_weight=0 max_cells_per_fo4=16 reassoc=false effort=balanced cache=unit)
+target_mhz=5000
+from_cache=false
+modules=283
+paths=12600
+opportunities=2960
+ir_out=E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/boards/r90-all.ir.json
+  module SyncDpRam nodes=12 regions=7
+  module AsyncDpRam nodes=2 regions=2
+  module AsyncThreePortRam nodes=3 regions=3
+  module SyncThreePortRam nodes=3 regions=1
+  module SyncDpRam_ind_r_w nodes=2 regions=1
+  module fpnew_cast_multi nodes=530 regions=267
+  module fpnew_classifier nodes=17 regions=1
+  module gated_clk_cell nodes=3 regions=3
+  module pa_fdsu_ctrl nodes=141 regions=79
+  module pa_fdsu_ff1 nodes=108 regions=2
+  module pa_fdsu_pack_single nodes=70 regions=36
+  module pa_fdsu_prepare nodes=47 regions=40
+  module pa_fdsu_round_single nodes=138 regions=54
+  module pa_fdsu_special nodes=61 regions=44
+  module pa_fdsu_srt_single nodes=157 regions=75
+  module pa_fdsu_top nodes=0 regions=0
+  module pa_fpu_dp nodes=45 regions=27
+  module pa_fpu_frbus nodes=13 regions=8
+  module pa_fpu_src_type nodes=12 regions=12
+  module ct_vfdsu_ctrl nodes=70 regions=36
+  module ct_vfdsu_double nodes=0 regions=0
+  module ct_vfdsu_ff1 nodes=108 regions=1
+  module ct_vfdsu_pack nodes=154 regions=46
+  module ct_vfdsu_prepare nodes=185 regions=106
+  module ct_vfdsu_round nodes=405 regions=93
+  module ct_vfdsu_scalar_dp nodes=66 regions=13
+  module ct_vfdsu_srt_radix16_bound_table nodes=720 regions=21
+  module ct_vfdsu_srt_radix16_with_sqrt nodes=268 regions=182
+  module ct_vfdsu_srt nodes=232 regions=59
+  module ct_vfdsu_top nodes=0 regions=0
+  module fpnew_divsqrt_th_32 nodes=132 regions=71
+  module fpnew_divsqrt_th_64_multi nodes=147 regions=89
+  module fpnew_divsqrt_multi nodes=127 regions=77
+  module fpnew_fma_multi nodes=428 regions=270
+  module fmalza nodes=9 regions=9
+  module fpnew_fma nodes=304 regions=198
+  module fpnew_noncomp nodes=139 regions=77
+  module fpnew_opgroup_block nodes=26 regions=26
+  module fpnew_opgroup_fmt_slice nodes=35 regions=33
+  module fpnew_opgroup_multifmt_slice nodes=75 regions=65
+  module fpnew_rounding nodes=13 regions=4
+  module fpnew_top nodes=11 regions=11
+  module control_mvp nodes=1219 regions=198
+  module div_sqrt_top_mvp nodes=0 regions=0
+  module iteration_div_sqrt_mvp nodes=6 regions=6
+  module norm_div_sqrt_mvp nodes=199 regions=21
+  module nrbd_nrsc_mvp nodes=0 regions=0
+  module preprocess_mvp nodes=112 regions=49
+  module cvxif_compressed_if_driver nodes=16 regions=1
+  module cvxif_issue_register_commit_if_driver nodes=13 regions=8
+  module cvxif_fu nodes=13 regions=8
+  module cvxif_example_coprocessor nodes=17 regions=12
+  module instr_decoder nodes=26 regions=2
+  module compressed_instr_decoder nodes=8 regions=2
+  module copro_alu nodes=84 regions=8
+  module g6lc_ai_acc_bank nodes=12 regions=12
+  module g6lc_ai_exec nodes=448 regions=145
+  module g6lc_ai_coprocessor nodes=36 regions=19
+  module fifo_v3 nodes=35 regions=8
+  module g6lc_hyp_lfsr nodes=4 regions=3
+  module lfsr_8bit nodes=8 regions=2
+  module stream_arbiter nodes=0 regions=0
+  module stream_arbiter_flushable nodes=0 regions=0
+  module stream_mux nodes=4 regions=3
+  module stream_demux nodes=3 regions=2
+  module g6lc_hyp_lzc nodes=5 regions=5
+  module g6lc_hyp_rr_arb_tree nodes=23 regions=9
+  module lzc nodes=14 regions=14
+  module rr_arb_tree nodes=55 regions=42
+  module shift_reg nodes=7 regions=5
+  module unread nodes=0 regions=0
+  module popcount nodes=6 regions=6
+  module g6lc_hyp_popcount nodes=6 regions=6
+  module g6lc_hyp_exp_backoff nodes=14 regions=7
+  module counter nodes=0 regions=0
+  module delta_counter nodes=15 regions=7
+  module g6lc_rvfi_probes nodes=66 regions=3
+  module alu_shift_hi nodes=11 regions=1
+  module alu nodes=351 regions=174
+  module alu_wrapper nodes=3 regions=1
+  module aes nodes=142 regions=68
+  module fpu_wrap nodes=212 regions=34
+  module branch_unit nodes=114 regions=13
+  module compressed_decoder nodes=93 regions=1
+  module macro_decoder nodes=247 regions=3
+  module controller nodes=148 regions=14
+  module zcmt_decoder nodes=35 regions=2
+  module csr_buffer nodes=33 regions=10
+  module csr_decode nodes=49 regions=12
+  module csr_read nodes=24 regions=2
+  module csr_trap nodes=15 regions=2
+  module csr_irq nodes=8 regions=2
+  module csr_counters nodes=12 regions=11
+  module csr_write nodes=4 regions=1
+  module csr_regfile nodes=1293 regions=210
+  module trigger_module nodes=330 regions=192
+  module g6lc_decode_s1 nodes=13 regions=13
+  module g6lc_decode_s2 nodes=717 regions=16
+  module g6lc_decode_s3 nodes=134 regions=11
+  module decoder nodes=0 regions=0
+  module ex_stage nodes=179 regions=78
+  module id_stage nodes=132 regions=82
+  module issue_read_operands nodes=418 regions=173
+  module g6lc_slice_ist nodes=12 regions=7
+  module g6lc_slice_steer nodes=4 regions=4
+  module g6lc_slice_iq nodes=21 regions=7
+  module g6lc_slice_rmt nodes=20 regions=6
+  module g6lc_slice_dispatch nodes=35 regions=15
+  module g6lc_thread_select nodes=13 regions=13
+  module g6lc_hart_state nodes=4 regions=4
+  module g6lc_smt_regfile nodes=3 regions=3
+  module g6lc_smt_pc_bank nodes=4 regions=4
+  module g6lc_smt_csr_bank nodes=39 regions=39
+  module g6lc_issue_barrier nodes=126 regions=27
+  module g6lc_flu_reserve nodes=31 regions=7
+  module g6lc_rat nodes=25 regions=7
+  module g6lc_freelist nodes=35 regions=11
+  module g6lc_rename nodes=73 regions=12
+  module g6lc_rename_read nodes=66 regions=24
+  module g6lc_rename_resolve nodes=48 regions=33
+  module g6lc_rename_publish nodes=52 regions=1
+  module g6lc_rename_recover nodes=196 regions=55
+  module g6lc_prf nodes=22 regions=8
+  module g6lc_rob nodes=72 regions=40
+  module g6lc_iq nodes=39 regions=14
+  module g6lc_iq_bank nodes=398 regions=346
+  module g6lc_iq_xbar nodes=17 regions=1
+  module g6lc_iq_legal nodes=92 regions=44
+  module g6lc_iq_arb nodes=259 regions=97
+  module g6lc_iq_payload nodes=10 regions=2
+  module g6lc_lsq_event nodes=78 regions=7
+  module g6lc_lsq_slot nodes=114 regions=41
+  module g6lc_lsq_cam_bank nodes=24 regions=12
+  module g6lc_lsq_age nodes=10 regions=2
+  module g6lc_lsq_reduce nodes=70 regions=28
+  module g6lc_lsq_verdict nodes=66 regions=29
+  module g6lc_lsq_release nodes=21 regions=9
+  module g6lc_lsq nodes=221 regions=74
+  module g6lc_memdep nodes=36 regions=7
+  module g6lc_ooo_dispatch nodes=323 regions=203
+  module g6lc_ooo_backend nodes=4 regions=4
+  module issue_stage nodes=17 regions=11
+  module g6lc_lu_result nodes=19 regions=8
+  module load_unit nodes=313 regions=166
+  module load_store_unit nodes=106 regions=32
+  module lsu_bypass nodes=38 regions=10
+  module mult nodes=50 regions=21
+  module multiplier nodes=148 regions=69
+  module mult_clmul nodes=41 regions=7
+  module serdiv nodes=108 regions=40
+  module perf_counters nodes=184 regions=22
+  module g6lc_regfile nodes=9 regions=5
+  module g6lc_regfile_fpga nodes=18 regions=8
+  module sb_lifecycle nodes=139 regions=76
+  module sb_cancel nodes=10 regions=5
+  module sb_head nodes=40 regions=27
+  module sb_commit_bundle nodes=61 regions=58
+  module scoreboard nodes=1 regions=1
+  module raw_checker nodes=21 regions=11
+  module stb_insert nodes=29 regions=9
+  module stb_fwd nodes=114 regions=33
+  module stb_commit nodes=15 regions=9
+  module stb_drain nodes=34 regions=11
+  module store_buffer nodes=134 regions=55
+  module amo_buffer nodes=18 regions=18
+  module store_unit nodes=126 regions=26
+  module commit_stage nodes=138 regions=29
+  module axi_shim nodes=131 regions=52
+  module g6lc_accel_first_pass_decoder nodes=4 regions=4
+  module acc_dispatcher nodes=66 regions=44
+  module g6lc_fifo_v3 nodes=0 regions=0
+  module g6lc_hyp_fifo nodes=22 regions=10
+  module btb nodes=24 regions=13
+  module bht nodes=69 regions=15
+  module bht2lvl nodes=19 regions=10
+  module g6lc_bp_gshare nodes=26 regions=12
+  module g6lc_bp_ghist nodes=21 regions=13
+  module g6lc_bp_ckpt nodes=77 regions=45
+  module g6lc_bp_tage_table nodes=18 regions=7
+  module g6lc_bp_tage nodes=61 regions=25
+  module g6lc_bp_loop nodes=48 regions=24
+  module g6lc_bp_ittage nodes=30 regions=14
+  module g6lc_bp_statcor nodes=39 regions=13
+  module g6lc_bp_top nodes=58 regions=45
+  module g6lc_ftq nodes=41 regions=15
+  module g6lc_fdip nodes=12 regions=6
+  module g6lc_loop_buffer nodes=87 regions=20
+  module g6lc_fe_redirect nodes=69 regions=25
+  module g6lc_fe_nextline nodes=30 regions=13
+  module g6lc_fe_btb_check nodes=34 regions=16
+  module g6lc_fe_override nodes=150 regions=59
+  module g6lc_way_predictor nodes=22 regions=10
+  module g6lc_rrip_repl nodes=28 regions=12
+  module ras nodes=90 regions=33
+  module instr_realign nodes=145 regions=97
+  module instr_scan nodes=42 regions=17
+  module instr_queue nodes=161 regions=80
+  module frontend nodes=263 regions=118
+  module g6lc_core nodes=186 regions=140
+  module wt_dcache_ctrl nodes=155 regions=36
+  module wt_dcache_mem nodes=117 regions=77
+  module wt_dcache_missunit nodes=225 regions=83
+  module wt_dcache_wbuffer_leg nodes=26 regions=1
+  module wt_dcache_wbuffer nodes=466 regions=209
+  module wt_dcache nodes=59 regions=32
+  module g6lc_icache nodes=148 regions=53
+  module wt_cache_subsystem nodes=0 regions=0
+  module wt_axi_adapter nodes=233 regions=43
+  module tag_cmp nodes=20 regions=5
+  module axi_adapter nodes=182 regions=5
+  module miss_handler nodes=183 regions=7
+  module axi_adapter_arbiter nodes=33 regions=4
+  module cache_ctrl nodes=127 regions=5
+  module g6lc_icache_axi_wrapper nodes=29 regions=17
+  module std_cache_subsystem nodes=28 regions=16
+  module std_nbdcache nodes=5 regions=5
+  module hpdcache_mem_req_read_arbiter nodes=3 regions=3
+  module hpdcache_mem_req_write_arbiter nodes=11 regions=11
+  module hpdcache_demux nodes=2 regions=2
+  module hpdcache_lfsr nodes=7 regions=5
+  module hpdcache_sync_buffer nodes=9 regions=6
+  module hpdcache_fifo_reg nodes=28 regions=13
+  module hpdcache_fifo_reg_initialized nodes=23 regions=13
+  module hpdcache_fxarb nodes=5 regions=2
+  module hpdcache_rrarb nodes=10 regions=7
+  module hpdcache_mux nodes=5 regions=3
+  module hpdcache_decoder nodes=2 regions=1
+  module hpdcache_1hot_to_binary nodes=2 regions=1
+  module hpdcache_prio_1hot_encoder nodes=2 regions=2
+  module hpdcache_prio_bin_encoder nodes=2 regions=1
+  module hpdcache_sram nodes=3 regions=3
+  module hpdcache_sram_wbyteenable nodes=3 regions=3
+  module hpdcache_sram_wmask nodes=3 regions=3
+  module hpdcache_regbank_wbyteenable_1rw nodes=3 regions=1
+  module hpdcache_regbank_wmask_1rw nodes=3 regions=1
+  module hpdcache_data_downsize nodes=36 regions=9
+  module hpdcache_data_upsize nodes=37 regions=5
+  module hpdcache_data_resize nodes=2 regions=2
+  module hwpf_stride nodes=101 regions=13
+  module hwpf_stride_arb nodes=6 regions=3
+  module hwpf_stride_wrapper nodes=35 regions=11
+  module hpdcache nodes=81 regions=66
+  module hpdcache_amo nodes=22 regions=6
+  module hpdcache_cmo nodes=211 regions=25
+  module hpdcache_core_arbiter nodes=11 regions=5
+  module hpdcache_ctrl nodes=385 regions=174
+  module hpdcache_ctrl_pe nodes=306 regions=9
+  module hpdcache_memctrl nodes=201 regions=68
+  module hpdcache_cbuf nodes=13 regions=5
+  module hpdcache_miss_handler nodes=176 regions=56
+  module hpdcache_mshr nodes=68 regions=41
+  module hpdcache_rtab nodes=107 regions=59
+  module hpdcache_uncached nodes=230 regions=61
+  module hpdcache_victim_plru nodes=18 regions=12
+  module hpdcache_victim_random nodes=13 regions=9
+  module hpdcache_victim_sel nodes=1 regions=1
+  module hpdcache_wbuf nodes=122 regions=53
+  module hpdcache_flush nodes=56 regions=23
+  module hpdcache_mem_resp_demux nodes=4 regions=4
+  module hpdcache_mem_to_axi_read nodes=23 regions=5
+  module hpdcache_mem_to_axi_write nodes=41 regions=6
+  module g6lc_inval_retain nodes=20 regions=11
+  module g6lc_hpdcache_subsystem nodes=14 regions=14
+  module g6lc_hpdcache_subsystem_axi_arbiter nodes=44 regions=38
+  module g6lc_hpdcache_if_adapter nodes=220 regions=79
+  module g6lc_hpdcache_wrapper nodes=18 regions=8
+  module hpdcache_sram_1rw nodes=2 regions=1
+  module hpdcache_sram_wbyteenable_1rw nodes=2 regions=1
+  module hpdcache_sram_wmask_1rw nodes=2 regions=1
+  module pmp nodes=17 regions=7
+  module pmp_entry nodes=10 regions=3
+  module pmp_data_if nodes=71 regions=13
+  module tc_sram_wrapper nodes=0 regions=0
+  module tc_sram_wrapper_cache_techno nodes=0 regions=0
+  module tc_sram nodes=14 regions=4
+  module sram nodes=9 regions=2
+  module sram_cache nodes=8 regions=2
+  module g6lc_mmu nodes=221 regions=29
+  module g6lc_ptw nodes=248 regions=41
+  module g6lc_tlb nodes=139 regions=61
+  module g6lc_shared_tlb nodes=275 regions=54
+  module g6lc_tlb_miss_router nodes=50 regions=14
+  module g6lc_ptw_leg_decode nodes=65 regions=1
+json_out=E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/boards/r90-all.json
+  module alu
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    A1           1   0     118   13.2 /   8.0 !             -                       alu.sv:155-417  
+      bubble-up: covered — 51 reader(s), worst wait 1 cycle(s)
+    A2           1   0      42   26.1 /   8.0 !             -                       alu.sv:418-529  
+      bubble-up: covered — 37 reader(s), worst wait 1 cycle(s)
+    A3           1   0     191   40.6 /   8.0 !          26.1 /   8.0 (A2) !        alu.sv:530-1242  
+      bubble-up: covered — 13 reader(s), worst wait 1 cycle(s)
+
+  module branch_unit
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    B1           1   0      53   13.0 /   8.0 !             -                       branch_unit.sv:89-189  
+      bubble-up: covered — 33 reader(s), worst wait 1 cycle(s)
+    B2           1   0      61   27.4 /   8.0 !             -                       branch_unit.sv:190-400  
+      bubble-up: covered — 11 reader(s), worst wait 1 cycle(s)
+
+  module csr_decode
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    C1           1   0      49    9.5 /   8.0 !             -                       csr_decode.sv:59-179  
+      bubble-up: covered — 11 reader(s), worst wait 1 cycle(s)
+
+  module csr_read
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    C2           1   0      24    6.8 /   8.0               -                       csr_read.sv:46-96  
+
+  module csr_write
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    C3           1   0       4    5.5 /   8.0               -                       csr_write.sv:36-48  
+      bubble-up: covered — 0 reader(s), worst wait 0 cycle(s)
+
+  module trigger_module
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    TWR          1   0     194   16.8 /   8.0 !          12.2 /   8.0 (-) !         trigger_module.sv:134-413  
+    TMA          1   0      73    0.0 /   8.0               -                       trigger_module.sv:415-639  
+    TAC          1   0      20    3.5 /   8.0               -                       trigger_module.sv:641-668  
+
+  module ex_stage
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    WBC          1   0      16    5.5 /   8.0               -                       ex_stage.sv:912-941  
+      bubble-up: drag — 4 reader(s), worst wait 2 cycle(s); drag readers: g6lc_core.ex_stage_i wbdata_ex_id (line 3129, recurrence); collides with `svt-pipe: cycle` at E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing\../../core/ex_stage.sv:369
+
+  module id_stage
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    D1           1   0       7    9.0 /   8.0 !             -                       id_stage.sv:733-775  
+      bubble-up: covered — 3 reader(s), worst wait 1 cycle(s)
+    D2           1   0       6    0.0 /   8.0               -                       id_stage.sv:776-818  
+      bubble-up: covered — 3 reader(s), worst wait 1 cycle(s)
+    D3           1   0       3    7.0 /   8.0            10.2 /   8.0 (-) !         id_stage.sv:819-933  
+
+  module g6lc_rename_resolve
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    RR-a         1   0      32   12.1 /   8.0 !             -                       g6lc_rename_resolve.sv:143-247  
+      bubble-up: covered — 10 reader(s), worst wait 1 cycle(s)
+    RR-b         1   0      16   14.0 /   8.0 !             -                       g6lc_rename_resolve.sv:248-400  
+
+  module g6lc_iq_bank
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    ALC          1   0       7   11.0 /   8.0 !          24.9 /   8.0 (SEL) !       g6lc_iq_bank.sv:668-693  
+    SEL          1   0     391   30.1 /   8.0 !             -                       g6lc_iq_bank.sv:334-1467  
+      bubble-up: drag — 3 reader(s), worst wait 1 cycle(s); drag readers: g6lc_iq.i_bank ge (line 224, comb); g6lc_iq.i_bank tot (line 655, comb); g6lc_iq_bank lone (line 677, comb)
+
+  module g6lc_iq_arb
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    CTL          1   0      14    4.4 /   8.0            22.8 /   8.0 (ARB) !       g6lc_iq_arb.sv:315-366  
+    GRN          1   0      20   11.5 /   8.0 !             -                       g6lc_iq_arb.sv:369-435  
+    ARB          1   0     225   32.2 /   8.0 !          24.4 /   8.0 (GRN) !       g6lc_iq_arb.sv:170-1013  
+      bubble-up: absorbed — 17 reader(s), worst wait 1 cycle(s); cover by spec-wakeup (cond: registered age row is a static 2:1 or 4:1; ack addresses the held candidate) [unverified]; decision readers: g6lc_iq.i_arb pay_read_en (line 565, comb); g6lc_iq_arb a0_old (line 352, comb); g6lc_iq_arb a0_old (line 381, comb); g6lc_iq_arb held_s (line 395, comb); g6lc_iq_arb m1a (line 353, comb); g6lc_iq_arb m1a (line 382, comb); g6lc_iq_arb m1c (line 354, comb); g6lc_iq_arb m1c (line 383, comb); g6lc_iq_arb ow (line 391, comb); g6lc_iq_arb p_tid (line 384, comb); g6lc_iq_arb p_tid (line 385, comb); g6lc_iq_arb p_tid (line 386, comb); g6lc_iq_arb p_tid (line 387, comb); g6lc_iq_arb pv_d (line 344, comb); g6lc_iq_arb pv_d (line 348, comb); g6lc_iq_arb vv (line 399, comb); g6lc_iq_arb vv (line 412, comb); finding: unverified-cover: `spec-wakeup` cover precondition not visible in the IR (cond: registered age row is a static 2:1 or 4:1; ack addresses the held candidate)
+
+  module g6lc_lsq_event
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    E            1   0      78   26.1 /   8.0 !             -                       g6lc_lsq_event.sv:127-360  
+      bubble-up: covered — 42 reader(s), worst wait 1 cycle(s)
+
+  module g6lc_lsq_cam_bank
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    C            1   0      24   13.5 /   8.0 !             -                       g6lc_lsq_cam_bank.sv:57-245  
+      bubble-up: covered — 0 reader(s), worst wait 0 cycle(s)
+
+  module g6lc_lsq_reduce
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    R1           1   0      30    5.5 /   8.0               -                       g6lc_lsq_reduce.sv:63-185  
+      bubble-up: covered — 9 reader(s), worst wait 1 cycle(s)
+    R2           1   0      40    8.6 /   8.0 !          16.5 /   8.0 (R1) !        g6lc_lsq_reduce.sv:186-264  
+      bubble-up: covered — 8 reader(s), worst wait 1 cycle(s)
+
+  module g6lc_lsq_verdict
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    V            1   3      66   19.6 /   8.0 !             -                       g6lc_lsq_verdict.sv:95-275  
+      bubble-up: covered — 5 reader(s), worst wait 4 cycle(s)
+
+  module g6lc_ooo_dispatch
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    ISS          1   0     143   24.0 /   8.0 !          40.5 /   8.0 (-) !         g6lc_ooo_dispatch.sv:981-1484  
+      bubble-up: drag — 3 reader(s), worst wait 1 cycle(s); drag readers: g6lc_ooo_dispatch _unused (line 1591, comb); issue_stage.i_ooo_dispatch issue_instr_hs_o (line 334, output); issue_stage.i_ooo_dispatch issue_instr_o (line 333, output)
+
+  module load_unit
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    L3           1   0       1    3.8 /   8.0               -                       load_unit.sv:242-471  
+    L5           1   0      55   32.1 /   8.0 !          42.6 /   8.0 (-) !         load_unit.sv:1305-1594  
+    L2           1   0       6    5.0 /   8.0            29.4 /   8.0 (-) !         load_unit.sv:1595-1610  
+    L4           1   0       4      -                       -                       load_unit.sv:1654-2023  
+
+  module multiplier
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    S1           1   0      18    4.5 /   8.0               -                       multiplier.sv:221-293  
+      bubble-up: covered — 8 reader(s), worst wait 1 cycle(s)
+    S2           1   0      21   17.0 /   8.0 !             -                       multiplier.sv:294-383  
+      bubble-up: covered — 14 reader(s), worst wait 1 cycle(s)
+    S3           1   0      14   16.2 /   8.0 !             -                       multiplier.sv:384-434  
+      bubble-up: covered — 13 reader(s), worst wait 1 cycle(s)
+    S4           1   0      14   16.2 /   8.0 !             -                       multiplier.sv:435-485  
+      bubble-up: covered — 13 reader(s), worst wait 1 cycle(s)
+    S5           1   0      14   16.2 /   8.0 !             -                       multiplier.sv:486-536  
+      bubble-up: covered — 13 reader(s), worst wait 1 cycle(s)
+    S6           1   0      14    4.5 /   8.0               -                       multiplier.sv:540-595  
+      bubble-up: covered — 6 reader(s), worst wait 1 cycle(s)
+    S7           1   0      10    5.5 /   8.0               -                       multiplier.sv:596-664  
+      bubble-up: covered — 6 reader(s), worst wait 1 cycle(s)
+    S8           1   0      14   28.2 /   8.0 !             -                       multiplier.sv:665-696  
+      bubble-up: covered — 3 reader(s), worst wait 1 cycle(s)
+
+  module sb_commit_bundle
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    CB           1   0      61   21.9 /   8.0 !             -                       sb_commit_bundle.sv:66-421  
+
+  module scoreboard
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    RDY          1   0       1    0.0 /   8.0               -                       scoreboard.sv:131-467  
+
+  module stb_fwd
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    F1           1   0      47   25.6 /   8.0 !             -                       stb_fwd.sv:102-273  
+      bubble-up: covered — 18 reader(s), worst wait 1 cycle(s)
+    F2           1   0      46   24.3 /   8.0 !             -                       stb_fwd.sv:274-397  
+      bubble-up: covered — 8 reader(s), worst wait 1 cycle(s)
+    F3           1   0      21   22.0 /   8.0 !             -                       stb_fwd.sv:398-466  
+      bubble-up: covered — 8 reader(s), worst wait 1 cycle(s)
+
+  module g6lc_bp_tage
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    P1           1   0      17    4.5 /   8.0               -                       g6lc_bp_tage.sv:110-258  
+      bubble-up: covered — 2 reader(s), worst wait 1 cycle(s)
+    P2           1   1      15    6.0 /   8.0               -                       g6lc_bp_tage.sv:259-318  
+      bubble-up: covered — 3 reader(s), worst wait 2 cycle(s)
+
+  module g6lc_fe_nextline
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    NL           1   0      30   12.8 /   8.0 !             -                       g6lc_fe_nextline.sv:96-206  
+      bubble-up: absorbed — 14 reader(s), worst wait 1 cycle(s); cover by read-ahead (cond: line table read one cycle ahead; redirect record applies next cycle); decision readers: frontend.i_fe_nextline fetch_frontier_pc_o (line 771, output); frontend.i_fe_nextline ftq_push_vaddr (line 568, comb); frontend.i_fe_nextline icache_dreq_o (line 671, output); frontend.i_fe_nextline inflight_addr_q (line 761, flop); frontend.i_fe_nextline redirect_accept (line 366, comb); frontend.i_fe_nextline redirect_inflight_q (line 469, flop); frontend.i_fe_nextline redirect_lost_q (line 470, flop); frontend.i_fe_nextline snap_nb (line 766, comb); frontend.i_fe_nextline want_addr_q (line 722, flop); frontend.i_fe_nextline want_addr_q (line 732, flop); frontend.i_fe_nextline want_line_taken_q (line 724, flop); frontend.i_fe_nextline want_line_taken_q (line 734, flop); frontend.i_fe_nextline want_line_target_q (line 725, flop); frontend.i_fe_nextline want_line_target_q (line 735, flop)
+
+  module g6lc_fe_override
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    S            1   0     118   32.5 /   8.0 !             -                       g6lc_fe_override.sv:212-512  
+      bubble-up: covered — 28 reader(s), worst wait 1 cycle(s)
+
+  module wt_dcache_wbuffer
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    W2S          1   0      11    7.5 /   8.0               -                       wt_dcache_wbuffer.sv:1796-1815  
+      bubble-up: covered — 7 reader(s), worst wait 1 cycle(s)
+    W3           1   0      24   11.6 /   8.0 !             -                       wt_dcache_wbuffer.sv:1876-1938  
+      bubble-up: covered — 17 reader(s), worst wait 2 cycle(s)
+    W1           1   0      48   12.3 /   8.0 !          11.1 /   8.0 (-) !         wt_dcache_wbuffer.sv:1940-2170  
+      bubble-up: covered — 35 reader(s), worst wait 2 cycle(s)
+    W2           1   0     102   23.6 /   8.0 !          12.1 /   8.0 (-) !         wt_dcache_wbuffer.sv:2171-2710  
+      bubble-up: covered — 82 reader(s), worst wait 2 cycle(s)
+
+  module g6lc_ptw
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    PTW-DEC      1   0      32   14.7 /   8.0 !          25.8 /   8.0 (-) !         g6lc_ptw.sv:546-633  836: stray token `(dec_d` on `begin`; 836: stray token `capture` on `begin`; 836: stray token `lives` on `begin`; 836: stray token `in` on `begin`
+    PTW-V        1   0      45    8.5 /   8.0 !             -                       g6lc_ptw.sv:857-957  
+
+  module g6lc_tlb
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    T1           1   0      41    6.4 /   8.0               -                       g6lc_tlb.sv:166-326  
+      bubble-up: covered — 15 reader(s), worst wait 1 cycle(s)
+    T2           1   0      50    5.5 /   8.0               -                       g6lc_tlb.sv:327-527  
+      bubble-up: covered — 55 reader(s), worst wait 2 cycle(s)
+
+  stage users
+    alu                  stages=[A1,A2,A3] used_by=alu_wrapper.alu2_i (alu_wrapper.sv); alu_wrapper.alu_extra_i (alu_wrapper.sv); alu_wrapper.alu_i (alu_wrapper.sv)
+    branch_unit          stages=[B1,B2] used_by=ex_stage.branch_unit_i (ex_stage.sv)
+    csr_decode           stages=[C1] used_by=csr_regfile.i_csr_decode (csr_regfile.sv)
+    csr_read             stages=[C2] used_by=csr_regfile.i_csr_read (csr_regfile.sv)
+    csr_write            stages=[C3] used_by=csr_regfile.i_csr_write (csr_regfile.sv)
+    trigger_module       stages=[TWR,TMA,TAC] used_by=csr_regfile.trigger_module_i (csr_regfile.sv)
+    ex_stage             stages=[WBC] used_by=g6lc_core.ex_stage_i (g6lc_core.sv)
+    id_stage             stages=[D1,D2,D3] used_by=g6lc_core.id_stage_i (g6lc_core.sv)
+    g6lc_rename_resolve  stages=[RR-a,RR-b] used_by=g6lc_rename.u_resolve (g6lc_rename.sv)
+    g6lc_iq_bank         stages=[ALC,SEL] used_by=g6lc_iq.i_bank (g6lc_iq.sv)
+    g6lc_iq_arb          stages=[CTL,GRN,ARB] used_by=g6lc_iq.i_arb (g6lc_iq.sv)
+    g6lc_lsq_event       stages=[E] used_by=g6lc_lsq.i_event (g6lc_lsq.sv)
+    g6lc_lsq_cam_bank    stages=[C] used_by=g6lc_lsq.i_cam (g6lc_lsq.sv)
+    g6lc_lsq_reduce      stages=[R1,R2] used_by=g6lc_lsq.i_q_red (g6lc_lsq.sv); g6lc_lsq.i_stl_red (g6lc_lsq.sv); g6lc_lsq.i_vio_red (g6lc_lsq.sv)
+    g6lc_lsq_verdict     stages=[V] used_by=g6lc_lsq.i_verdict (g6lc_lsq.sv)
+    g6lc_ooo_dispatch    stages=[ISS] used_by=issue_stage.i_ooo_dispatch (issue_stage.sv)
+    load_unit            stages=[L3,L5,L2,L4] used_by=load_store_unit.i_load_unit (load_store_unit.sv)
+    multiplier           stages=[S1,S2,S3,S4,S5,S6,S7,S8] used_by=mult.i_multiplier (mult.sv)
+    sb_commit_bundle     stages=[CB] used_by=scoreboard.i_sb_commit_bundle (scoreboard.sv)
+    scoreboard           stages=[RDY] used_by=issue_stage.i_scoreboard (issue_stage.sv)
+    stb_fwd              stages=[F1,F2,F3] used_by=store_buffer.i_stb_fwd (store_buffer.sv)
+    g6lc_bp_tage         stages=[P1,P2] used_by=g6lc_bp_top.i_tage (g6lc_bp_top.sv)
+    g6lc_fe_nextline     stages=[NL] used_by=frontend.i_fe_nextline (frontend.sv)
+    g6lc_fe_override     stages=[S] used_by=frontend.i_fe_override (frontend.sv)
+    wt_dcache_wbuffer    stages=[W2S,W3,W1,W2] used_by=wt_dcache.i_wt_dcache_wbuffer (wt_dcache.sv)
+    g6lc_ptw             stages=[PTW-DEC,PTW-V] used_by=g6lc_mmu.i_ptw (g6lc_mmu.sv)
+    g6lc_tlb             stages=[T1,T2] used_by=g6lc_mmu.i_dtlb (g6lc_mmu.sv); g6lc_mmu.i_itlb (g6lc_mmu.sv)

@@ -1,0 +1,28 @@
+
+=== ir_hot_nodes ===
+== load_unit nodes=312 launch_fo4={'14916': 2.4499999999999997, '14918': 2.4499999999999997, '14922': 7.699999999999999, '14924': 0.35, '14960': 8.75, '14961': 4.55, '14962': 4.55, '14963': 7.699999999999999, '14965': 0.35, '14966': 0.35, '14967': 0.35, '14968': 0.35, '14969': 0.35, '14970': 0.35, '14985': 8.75, '15025': 0.35, '15026': 0.35, '15027': 0.35, '15028': 0.35, '15029': 0.35, '15050': 8.75, '15051': 8.75, '15052': 8.75, '15053': 8.75, '15063': 8.75, '15064': 8.75, '15065': 8.75, '15066': 8.75, '15067': 8.75, '15069': 8.75, '15145': 0.35, '15147': 0.35, '15156': 7.699999999999999, '15157': 2.4499999999999997, '15160': 0.35, '15162': 0.35, '15164': 8.75, '15173': 7.699999999999999, '15187': 8.75, '15188': 8.75, '15189': 8.75, '15190': 8.75, '15201': 7.699999999999999, '15206': 7.699999999999999, '15218': 7.699999999999999, '15219': 7.699999999999999}
+     22.7 L745   w=56   other      load_pa_q                          <= load_pa_now
+     22.6 L844   w=1    logic_bit  stall_ni                           <= (inflight_stores || not_commit_time) && (paddr_ni && G6LCCfg.NonIdemPotenceEn)
+     15.3 L1069  w=10   other      state_d                            <= LU_S_WAIT_PAGE_OFFSET
+     15.3 L1072  w=10   other      state_d                            <= LU_S_WAIT_GNT
+     15.0 L865   w=1    logic_bit  fwd_final                          <= st_fwd_covers & ld_checked_head
+     14.3 L1064  w=10   other      state_d                            <= LU_S_IDLE
+     14.3 L1065  w=1    other      pop_ld_o                           <= 1'b1
+     14.3 L1066  w=1    other      lu_replay_o                        <= 1'b1
+     12.9 L1214  w=1    logic_bit  pop_ld_o                           <= ~req_port_i.data_rvalid
+     12.5 L1008  w=10   other      state_d                            <= LU_S_WAIT_GNT
+     12.5 L1011  w=10   other      state_d                            <= LU_S_ABORT_TRANSACTION
+     12.5 L1015  w=10   other      state_d                            <= LU_S_SEND_TAG
+     12.5 L1016  w=1    other      pop_ld_o                           <= 1'b1
+     12.5 L1019  w=10   other      state_d                            <= LU_S_ABORT_TRANSACTION_NI
+     12.5 L1026  w=10   other      state_d                            <= LU_S_WAIT_PAGE_OFFSET
+     12.5 L1137  w=10   other      state_d                            <= LU_S_WAIT_GNT
+     12.5 L1141  w=10   other      state_d                            <= LU_S_ABORT_TRANSACTION
+     12.5 L1145  w=10   other      state_d                            <= LU_S_SEND_TAG
+     12.5 L1146  w=1    other      pop_ld_o                           <= 1'b1
+     12.5 L1149  w=10   other      state_d                            <= LU_S_ABORT_TRANSACTION_NI
+     12.5 L1155  w=10   other      state_d                            <= LU_S_WAIT_PAGE_OFFSET
+     11.9 L1210  w=10   other      state_d                            <= LU_S_WAIT_GNT
+     11.9 L1213  w=10   other      state_d                            <= LU_S_IDLE
+     11.3 L572   w=3    compare    miss_age_q[i]                      <= miss_age_q[i] + LD_AGE_W'(1)
+     11.1 L893   w=8    compare    wpo_cnt_q                          <= wpo_cnt_q + 8'd1

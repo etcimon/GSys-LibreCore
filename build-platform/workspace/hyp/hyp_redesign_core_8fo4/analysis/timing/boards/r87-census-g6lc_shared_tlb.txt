@@ -1,0 +1,69 @@
+path_id=14268 fo4=39.3 reg_to_reg class=plain g6lc_shared_tlb.reg0/CP -> g6lc_shared_tlb.reg1/D
+  L793 g6lc_shared_tlb.sv
+  note: over-budget plain path — no exclusive/atomic exception; cycle stlb: step flush_state_q→flush_busy_o is 2.0 FO4 within budget 8.0; this path is not that step and
+  n24680 L1097  fo4=  2.4 shared_tag_rd[i]               <= '0
+  n24610 L767   fo4=  4.0 flush_vpn_match[level]         <= flush_vaddr_q[12 + VPN_SEG_W*level +: VPN_SEG_W] == shared_tag_rd[i].vpn[level]
+  n24614 L780   fo4=  4.5 flush_addr_napot_matches       <= ((G6LCCfg.PtLevels > 1)? (&flush_vpn_match[G6LCCfg.PtLevels-1:1]): 1'b1) && (flush_vaddr_q
+  n24615 L783   fo4=  2.4 flush_addr_matches             <= (|flush_level_match) || flush_addr_napot_matches
+  n24619 L793   fo4= 13.5 sfence_match_way[i]            <= 1'b1
+  n24422 L370   fo4=  6.0 flush_match_way                <= (flush_kind_q == FLUSH_SFENCE)? sfence_match_way: (flush_kind_q == FLUSH_VVMA)? vvma_match
+  n24654 L968   fo4=  6.5 shared_tag_valid_d[flush_idx_q <= 1'b0
+path_id=14203 fo4=29.8 reg_to_reg class=plain g6lc_shared_tlb.reg0/CP -> g6lc_shared_tlb.reg1/D
+  L495 g6lc_shared_tlb.sv
+  note: over-budget plain path — no exclusive/atomic exception; cycle stlb: step flush_state_q→flush_busy_o is 2.0 FO4 within budget 8.0; this path is not that step and
+  n24418 L365   fo4=  4.2 v_st_enbl                      <= {{v_i, g_st_enbl_i, s_st_enbl_i}, {ld_st_v_i, g_ld_st_enbl_i, s_ld_st_enbl_i}}
+  n24465 L495   fo4= 25.6 tag_rd_addr                    <= dtlb_vaddr_i[12+:$clog2(G6LCCfg.SharedTlbDepth)]
+path_id=8641 fo4=28.6 in_to_out class=independent_lhs_bundle g6lc_shared_tlb.in0 -> g6lc_shared_tlb.out0
+  L495 g6lc_shared_tlb.sv
+  note: independent-LHS bundle lhs=8 writes=23 max_writes=4 max_field=25.6 sum_fields=191.5 makespan=28.6 cycles=4 wire=0.0 next_state=true write_only=8 depth=0 calls=1
+  n24438 L444   fo4=  0.0 itlb_req_d                     <= 1'b0
+  n24439 L445   fo4=  0.0 dtlb_req_d                     <= 1'b0
+  n24440 L447   fo4=  0.0 tlb_update_asid_d              <= tlb_update_asid_q
+  n24442 L449   fo4=  0.0 tlb_update_hart_d              <= tlb_update_hart_q
+  n24443 L451   fo4=  0.0 shared_tlb_access_d            <= '0
+  n24444 L452   fo4=  0.0 shared_tlb_vaddr_d             <= shared_tlb_vaddr_q
+  n24445 L454   fo4=  0.0 tag_rd_addr                    <= '0
+  n24447 L456   fo4=  0.0 i_req_d                        <= i_req_q
+  n24450 L470   fo4=  2.5 tag_rd_addr                    <= flush_idx_q
+  n24453 L478   fo4= 22.9 tag_rd_addr                    <= itlb_vaddr_i[12+:$clog2(G6LCCfg.SharedTlbDepth)]
+  n24457 L483   fo4= 22.9 itlb_req_d                     <= 1'b1
+  n24458 L484   fo4= 22.9 tlb_update_asid_d              <= itlb_asid_i
+  n24460 L486   fo4= 22.9 tlb_update_hart_d              <= itlb_hart_i
+  n24461 L488   fo4= 22.9 shared_tlb_access_d            <= '1
+  n24462 L489   fo4= 22.9 shared_tlb_vaddr_d             <= itlb_vaddr_i
+  n24463 L490   fo4= 22.9 i_req_d                        <= 1
+  n24465 L495   fo4= 25.6 tag_rd_addr                    <= dtlb_vaddr_i[12+:$clog2(G6LCCfg.SharedTlbDepth)]
+  n24469 L500   fo4= 23.9 dtlb_req_d                     <= 1'b1
+  n24470 L501   fo4= 23.9 tlb_update_asid_d              <= dtlb_asid_i
+  n24472 L503   fo4= 23.9 tlb_update_hart_d              <= dtlb_hart_i
+  n24473 L505   fo4= 23.9 shared_tlb_access_d            <= '1
+  n24474 L506   fo4= 23.9 shared_tlb_vaddr_d             <= dtlb_vaddr_i
+  n24475 L507   fo4= 23.9 i_req_d                        <= 0
+
+=== ir_hot_nodes ===
+== g6lc_shared_tlb nodes=271 launch_fo4={'24417': 6.3, '24419': 6.3, '24427': 10.149999999999999, '24428': 10.149999999999999, '24429': 10.149999999999999, '24447': 10.149999999999999, '24448': 3.0, '24449': 3.0, '24450': 3.0, '24451': 3.0, '24452': 3.0, '24453': 3.0, '24454': 3.0, '24455': 3.0, '24456': 3.0, '24457': 3.0, '24458': 3.0, '24459': 3.0, '24460': 3.0, '24461': 3.0, '24462': 3.0, '24463': 3.0, '24464': 3.0, '24465': 3.0, '24466': 3.0, '24467': 3.0, '24468': 3.0, '24469': 3.0, '24470': 3.0, '24471': 3.0, '24472': 3.0, '24473': 3.0, '24474': 3.0, '24475': 3.0, '24484': 6.3, '24485': 6.3, '24486': 6.3, '24487': 6.3, '24488': 6.3, '24489': 10.149999999999999, '24490': 6.3, '24491': 6.3, '24492': 6.3, '24493': 6.3, '24494': 6.3, '24495': 6.3, '24496': 6.3, '24497': 6.3, '24498': 6.3, '24499': 10.149999999999999, '24500': 6.3, '24501': 6.3, '24502': 6.3, '24503': 6.3, '24571': 0.7, '24572': 0.7, '24573': 0.7, '24601': 0.7, '24610': 0.7, '24614': 0.7, '24618': 0.7, '24619': 0.7, '24626': 0.7, '24630': 0.7, '24633': 0.7, '24654': 0.7, '24658': 0.7, '24659': 0.7, '24660': 0.7}
+     25.6 L495   w=1    other      tag_rd_addr                        <= dtlb_vaddr_i[12+:$clog2(G6LCCfg.SharedTlbDepth)]
+     23.9 L494   w=2    other      tag_rd_en                          <= '1
+     23.9 L496   w=2    other      pte_rd_en                          <= '1
+     23.9 L497   w=1    other      pte_rd_addr                        <= dtlb_vaddr_i[12+:$clog2(G6LCCfg.SharedTlbDepth)]
+     23.9 L499   w=1    other      dtlb_miss_o                        <= shared_tlb_miss_i
+     23.9 L500   w=1    other      dtlb_req_d                         <= 1'b1
+     23.9 L501   w=1    other      tlb_update_asid_d                  <= dtlb_asid_i
+     23.9 L502   w=1    other      tlb_update_vmid_d                  <= lu_vmid_i
+     23.9 L503   w=1    other      tlb_update_hart_d                  <= dtlb_hart_i
+     23.9 L505   w=1    other      shared_tlb_access_d                <= '1
+     23.9 L506   w=1    other      shared_tlb_vaddr_d                 <= dtlb_vaddr_i
+     23.9 L507   w=32   other      i_req_d                            <= 0
+     22.9 L477   w=2    other      tag_rd_en                          <= '1
+     22.9 L478   w=1    other      tag_rd_addr                        <= itlb_vaddr_i[12+:$clog2(G6LCCfg.SharedTlbDepth)]
+     22.9 L479   w=2    other      pte_rd_en                          <= '1
+     22.9 L480   w=1    other      pte_rd_addr                        <= itlb_vaddr_i[12+:$clog2(G6LCCfg.SharedTlbDepth)]
+     22.9 L482   w=1    other      itlb_miss_o                        <= shared_tlb_miss_i
+     22.9 L483   w=1    other      itlb_req_d                         <= 1'b1
+     22.9 L484   w=1    other      tlb_update_asid_d                  <= itlb_asid_i
+     22.9 L485   w=1    other      tlb_update_vmid_d                  <= itlb_vmid_i
+     22.9 L486   w=1    other      tlb_update_hart_d                  <= itlb_hart_i
+     22.9 L488   w=1    other      shared_tlb_access_d                <= '1
+     22.9 L489   w=1    other      shared_tlb_vaddr_d                 <= itlb_vaddr_i
+     22.9 L490   w=32   other      i_req_d                            <= 1
+     13.5 L793   w=1    other      sfence_match_way[i]                <= 1'b1

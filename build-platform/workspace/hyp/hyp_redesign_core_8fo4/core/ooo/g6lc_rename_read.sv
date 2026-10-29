@@ -76,9 +76,31 @@ module g6lc_rename_read
   localparam bit          FP_EN = (FPRF_ENTRIES >= 32);
   localparam int unsigned LVL_W = $clog2(CKPT_DEPTH+1);
   localparam int unsigned CKPT_PER_HART = (CKPT_DEPTH / NH < 1) ? 1 : CKPT_DEPTH / NH;
+  localparam int unsigned CPH_W = (CKPT_PER_HART <= 1) ? 1 : $clog2(CKPT_PER_HART);
+  localparam bit          CPH_POW2 = (CKPT_PER_HART & (CKPT_PER_HART - 1)) == 0;
+  localparam int unsigned SUM_W = LVL_W + 2;
+  localparam int unsigned SB_CNT_W = (NR_PORTS <= 1) ? 1 : $clog2(NR_PORTS + 1);
 
+  // Ring index within hart h's slice. head < CKPT_PER_HART,
+  // count <= CKPT_PER_HART and sb_cnt <= NR_PORTS, so with
+  // NR_PORTS <= CKPT_PER_HART the sum is under 3*CKPT_PER_HART —
+  // write the depth you mean (A140), not 32-bit int arithmetic.
+  function automatic logic [LVL_W-1:0] ckpt_slot_n(input int unsigned h,
+                                                 input logic [SUM_W-1:0] v);
+    logic [SUM_W-1:0] t;
+    if (CPH_POW2) begin
+      // Modulo is a bit slice; h * CKPT_PER_HART is a constant shift.
+      return LVL_W'((h << CPH_W) | int'(v[CPH_W-1:0]));
+    end
+    t = v;
+    for (int unsigned i = 0; i < 3; i++) if (t >= SUM_W'(CKPT_PER_HART)) t -= SUM_W'(CKPT_PER_HART);
+    return LVL_W'(h * CKPT_PER_HART + int'(t));
+  endfunction
+
+//pragma translate_off
   // Ring index within hart h's slice (three conditional subtractions cover
-  // head + count + NR_PORTS, as the unbanked ckpt_slot).
+  // head + count + NR_PORTS, as the unbanked ckpt_slot) — reference for
+  // the ckpt_slot_n equivalence check below.
   function automatic logic [LVL_W-1:0] ckpt_slot(input int unsigned h,
                                                input int unsigned v);
     int unsigned t;
@@ -86,6 +108,7 @@ module g6lc_rename_read
     for (int unsigned i = 0; i < 3; i++) if (t >= CKPT_PER_HART) t -= CKPT_PER_HART;
     return LVL_W'(h * CKPT_PER_HART + t);
   endfunction
+//pragma translate_on
 
   // Lowest set bit as a log-depth prefix OR (A136/A143: the mapped carry
   // chain of `fr & (~fr + 1)` measured +31% on the live board).
@@ -271,7 +294,7 @@ module g6lc_rename_read
   // same_before is a $countones over the earlier-lane mask; res_br_inc is
   // a per-hart count of ckpt lanes (the original dynamic += commute).
   logic [NR_PORTS-1:0] sbm [NR_PORTS];
-  logic [31:0]         sb_cnt [NR_PORTS];
+  logic [SB_CNT_W-1:0] sb_cnt [NR_PORTS];
   for (genvar gp = 0; gp < NR_PORTS; gp++) begin : gen_ckpt
     for (genvar ge = 0; ge < NR_PORTS; ge++) begin : gen_sbm
       if (ge < gp) begin : gen_e
@@ -281,19 +304,31 @@ module g6lc_rename_read
         assign sbm[gp][ge] = 1'b0;
       end
     end
-    assign sb_cnt[gp] = 32'($countones(sbm[gp]));
+    assign sb_cnt[gp] = SB_CNT_W'($countones(sbm[gp]));
+    logic [SUM_W-1:0] ck_sum;
+    assign ck_sum = SUM_W'(ckpt_head_q_i[hart_i[gp]]) +
+                    SUM_W'(ckpt_cnt_q_i[hart_i[gp]]) + SUM_W'(sb_cnt[gp]);
     always_comb begin : p_ckpt
       lane_o[gp].do_ckpt   = 1'b0;
       lane_o[gp].ckpt_slot = '0;
       if (valid_i[gp] && is_branch_i[gp] &&
-          (32'(ckpt_cnt_q_i[hart_i[gp]]) + sb_cnt[gp]
-             < 32'(CKPT_PER_HART))) begin
+          (SUM_W'(ckpt_cnt_q_i[hart_i[gp]]) + SUM_W'(sb_cnt[gp])
+             < SUM_W'(CKPT_PER_HART))) begin
         lane_o[gp].do_ckpt   = 1'b1;
-        lane_o[gp].ckpt_slot = 6'(ckpt_slot(int'(hart_i[gp]),
-            int'(32'(ckpt_head_q_i[hart_i[gp]]) +
-            32'(ckpt_cnt_q_i[hart_i[gp]]) + sb_cnt[gp])));
+        lane_o[gp].ckpt_slot = 6'(ckpt_slot_n(int'(hart_i[gp]), ck_sum));
       end
     end
+//pragma translate_off
+    always_comb begin : p_ckpt_eq
+      if (lane_o[gp].do_ckpt &&
+          (lane_o[gp].ckpt_slot !==
+           6'(ckpt_slot(int'(hart_i[gp]),
+              int'(32'(ckpt_head_q_i[hart_i[gp]]) +
+              32'(ckpt_cnt_q_i[hart_i[gp]]) + 32'(sb_cnt[gp])))))) begin
+        $error("ckpt_slot_n != ckpt_slot gp=%0d", gp);
+      end
+    end
+//pragma translate_on
     assign lane_ckpt[gp] = lane_o[gp].do_ckpt;
   end
   for (genvar gh = 0; gh < NH; gh++) begin : gen_brinc
@@ -315,10 +350,10 @@ module g6lc_rename_read
                        (int'(hart_i[gp]) == gh);
     end
     always_comb begin : p_brover
-      automatic int unsigned nbr_cnt;
-      nbr_cnt = int'($countones(hbr));
-      br_over[gh] = (int'(ckpt_cnt_q_i[gh]) + int'(nbr_cnt)
-                     > CKPT_PER_HART);
+      automatic logic [SUM_W-1:0] nbr_cnt;
+      nbr_cnt = SUM_W'($countones(hbr));
+      br_over[gh] = (SUM_W'(ckpt_cnt_q_i[gh]) + nbr_cnt
+                     > SUM_W'(CKPT_PER_HART));
     end
   end
   // hyp8 r4: capacity is bank-aware -- the group stalls iff any demanded

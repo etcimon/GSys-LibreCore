@@ -1,0 +1,22 @@
+argv: /e/cva6/sv-timing/target/release/sv-timing.exe analyze --files-from /e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/hyp8-core.f --modules load_unit --target-mhz 5000 --fo4-ps 20 --budget-margin 0.2 --param-map /e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/../r88-param-map.json --stages --json-out /e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/boards/r89-lu.json --ir-out /e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/boards/r89-lu.ir.json
+58e3a789b79ff6e03183dfc6a92e1b0ca640cb2f8e82045dfb1c7595dbd05e47 */e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/../r88-param-map.json
+1ec1c28bc99f63c14e1f31c98a0507a95961fbdfea7b3bff38a1701ba6cca2d8 */e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/hyp8-core.f
+sv-timing-core 0.1.0 ir=ir-v6 measurement=delay-v49 correction=correction-v5 parser_pin=v0.13.5
+opt=-O2 (max_passes=4 worklist_width=1 cut=cost-balanced stages=1 min_gain=2 slack_target=0 area_weight=0 max_cells_per_fo4=16 reassoc=false effort=balanced cache=unit)
+target_mhz=5000
+from_cache=false
+modules=1
+paths=243
+opportunities=99
+ir_out=E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/boards/r89-lu.ir.json
+  module load_unit nodes=313 regions=166
+json_out=E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/boards/r89-lu.json
+  module load_unit
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    L3           1   0       1    3.8 /   8.0               -                       load_unit.sv:242-471  
+    L5           1   0      55   32.1 /   8.0 !          42.6 /   8.0 (-) !         load_unit.sv:1305-1594  
+    L2           1   0       6    5.0 /   8.0            29.4 /   8.0 (-) !         load_unit.sv:1595-1610  
+    L4           1   0       4      -                       -                       load_unit.sv:1654-2023  
+
+  stage users
+    load_unit            stages=[L3,L5,L2,L4] used_by=-

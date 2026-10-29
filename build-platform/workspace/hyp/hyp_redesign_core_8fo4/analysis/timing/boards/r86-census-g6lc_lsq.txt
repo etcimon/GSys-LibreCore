@@ -1,0 +1,42 @@
+
+=== ir_hot_nodes ===
+== g6lc_lsq nodes=224 launch_fo4={'14404': 0.7, '14406': 0.7}
+     33.0 L521   w=1    other      vv_dist_d[u][(v < u) ? v : v-1]    <= IDW'(g6lc_ooo_pkg::ooo_age_dist(
+                  IDW, 32'(ev_addr_id[v]), 32'(commit_ptr_i)))
+     32.8 L350   w=4    compare    ld_free_o                          <= ld_free_o + 1'b1
+     32.8 L355   w=4    compare    st_free_o                          <= st_free_o + 1'b1
+     30.5 L537   w=1    other      vv_dist_d[u][NR_UPDATE-1]          <= IDW'(g6lc_ooo_pkg::ooo_age_dist(
+              IDW, 32'(ev_query_id), 32'(commit_ptr_i)))
+     29.0 L515   w=8    other      lbe                                <= lane_be(ev_addr[v], ev_addr_size[v])
+     26.5 L506   w=8    other      sbe                                <= lane_be(ev_addr[u], ev_addr_size[u])
+     26.5 L531   w=8    other      lbe                                <= lane_be(ev_query_addr, ev_query_size)
+     23.0 L518   w=1    other      vv_older_d[u][(v < u) ? v : v-1]   <= g6lc_ooo_pkg::ooo_age_older(
+                  IDW, 32'(ev_addr_id[u]), 32'(ev_addr_id[v]),
+                
+     22.6 L1206  w=1    compare    levt                               <= ev_phys_valid[0] && ev_phys_id[0] == ld_q[l].id &&
+                   ev_phys_hart[0] == ld_q[l].hart
+     22.0 L517   w=1    other      vv_match_d[u][(v < u) ? v : v-1]   <= 1'b1
+     20.7 L1193  w=56   mux        s_addr[s]                          <= s_sev[s] ? ev_phys_addr[1] : st_q[s].addr
+     20.5 L533   w=1    other      vv_match_d[u][NR_UPDATE-1]         <= 1'b1
+     20.5 L534   w=1    other      vv_older_d[u][NR_UPDATE-1]         <= g6lc_ooo_pkg::ooo_age_older(
+              IDW, 32'(ev_addr_id[u]), 32'(ev_query_id),
+              32'(comm
+     17.5 L510   w=1    other      vv_id_d[u][(v < u) ? v : v-1]      <= ev_addr_id[v]
+     17.5 L511   w=1    other      vv_pay_d[u][(v < u) ? v : v-1]     <= ev_ld_pc[v]
+     17.5 L527   w=1    other      vv_id_d[u][NR_UPDATE-1]            <= ev_query_id
+     17.5 L528   w=1    other      vv_pay_d[u][NR_UPDATE-1]           <= q_ld_pc
+     17.5 L1261  w=1    other      ld_dist[j]                         <= $bits(ld_dist[j])'(g6lc_ooo_pkg::ooo_age_dist(
+        IDW, 32'(ld_q[j].id), 32'(commit_ptr_i)))
+     17.0 L1224  w=1    compare    pm[s]                              <= st_q[s].valid && sb_live_i[st_q[s].id] &&
+              !cancelled_mask_i[st_q[s].id] &&
+              st_q[
+     13.5 L1195  w=8    other      s_be[s]                            <= lane_be(s_addr[s], s_size[s])
+     13.5 L1197  w=8    other      ev0_be                             <= lane_be(ev_phys_addr[0], ev_phys_size[0])
+     13.5 L1211  w=8    other      lbe                                <= lane_be(laddr, lsize)
+     12.9 L1215  w=1    compare    condA                              <= pv_live && ev_phys_hart[0] == ld_q[l].hart &&
+        g6lc_ooo_pkg::ooo_age_older(IDW, 32'(ev_phys_id[0]),
+ 
+     11.5 L1141  w=1    other      checked_q[ld_q[i].id]              <= 1'b1
+      9.8 L573   w=32   other      rid                                <= (r < VIO_BANK)
+            ? 32'((r < LD_ENTRIES) ? ld_q[r].id : '0)
+            : 32'(vv_id_d[u][r-VIO_BANK

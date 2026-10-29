@@ -24,13 +24,15 @@
 //     the (already multi-cycle) divide latency; in_rdy_o behaviour is
 //     unchanged -- STABLE_HANDSHAKE=0 still deasserts in_rdy_o in the accept
 //     cycle, so the caller sees the same handshake.
-//  2. The DIVIDE digit step computes the 64-bit subtract as a carry-select
-//     pair: low 32-bit difference plus two speculative high halves
-//     (borrow / no-borrow), selected by the registered-width carry-out of
-//     the low half in the same cycle. ab_comp (a==b, a>b unsigned) is
-//     derived from that same difference, so the reg->reg digit step is a
-//     32-bit add + a borrow select instead of a 64-bit subtract + a 64-bit
-//     compare in series. Still exactly one quotient digit per cycle.
+//  2. The DIVIDE digit step is one 65-bit subtract whose top bit is the
+//     borrow; ab_comp (a==b, a>b unsigned) is derived from that same
+//     difference, so no separate 64-bit compare sits in series. (r90: the
+//     earlier carry-select 32/32 form paid a 64-bit select on the
+//     speculative high halves under delay-v49.) Still exactly one
+//     quotient digit per cycle.
+//  3. r90 / F18: op_b_zero/op_b_neg_one in NORM use the lzc empty flag
+//     registered at accept (lzc_b_empty_q); the count compare it replaced
+//     fired for every divisor with bit WIDTH-1 set.
 //     flush_i is unchanged: it drops the FSM to IDLE and clears enables.
 //     No port changes.
 
@@ -103,6 +105,7 @@ module serdiv
   logic [WIDTH-1:0] lzc_a_input, lzc_b_input, op_b;
   logic [$clog2(WIDTH)-1:0] lzc_a_result, lzc_b_result;
   logic [$clog2(WIDTH)-1:0] lzc_a_q, lzc_b_q;
+  logic lzc_b_empty_q;
   logic [  $clog2(WIDTH+1):0] div_shift;
 
   logic a_reg_en, b_reg_en, res_reg_en, ab_comp, load_en, norm_en;
@@ -172,29 +175,24 @@ module serdiv
   // invert if necessary
   assign res_o = (res_inv_q) ? -$signed(out_mux) : out_mux;
 
-  // hyp8: carry-select 32/32 subtract. The low half's carry-out picks
-  // between two speculative high halves; equality and unsigned-greater
-  // come off the same difference, so the per-cycle step is a 32-bit add,
-  // a borrow select and a zero check -- one quotient digit per cycle.
-  localparam int unsigned HW = WIDTH / 2;
-  logic [HW:0]       lo_diff;
-  logic [HW:0]       hi_diff_b0, hi_diff_b1;
+  // hyp8 r90: the digit step is one 65-bit subtract; the carry-select
+  // form paid a 64-bit select on the speculative high halves
+  // (delay-v49: the adder is cheaper than b0/b1 + the borrow mux).
+  // Borrow = bit WIDTH; equality and unsigned-greater come off the same
+  // difference -- one quotient digit per cycle.
+  logic [WIDTH:0]    step_sub;
   logic [WIDTH-1:0]  step_diff;
   logic              step_borrow, step_zero, step_gt;
   logic [WIDTH-1:0]  add_out;
 
-  assign lo_diff   = {1'b0, op_a_q[HW-1:0]} + {1'b0, ~op_b_q[HW-1:0]} + {{HW{1'b0}}, 1'b1};
-  assign hi_diff_b0 = {1'b0, op_a_q[WIDTH-1:HW]} + {1'b0, ~op_b_q[WIDTH-1:HW]} + {{HW{1'b0}}, 1'b1};
-  assign hi_diff_b1 = {1'b0, op_a_q[WIDTH-1:HW]} + {1'b0, ~op_b_q[WIDTH-1:HW]};
-
-  assign step_diff = lo_diff[HW] ? {hi_diff_b0[HW-1:0], lo_diff[HW-1:0]}
-                                 : {hi_diff_b1[HW-1:0], lo_diff[HW-1:0]};
-  assign step_borrow = lo_diff[HW] ? ~hi_diff_b0[HW] : ~hi_diff_b1[HW];
+  assign step_sub    = {1'b0, op_a_q} - {1'b0, op_b_q};
+  assign step_diff   = step_sub[WIDTH-1:0];
+  assign step_borrow = step_sub[WIDTH];
   assign step_zero   = (step_diff == '0);
   assign step_gt     = ~step_borrow & ~step_zero;
 
   // at NORM the first partial remainder is +/- op_a (two's complement of
-  // the captured operand); in DIVIDE it is the carry-select difference
+  // the captured operand); in DIVIDE it is the step subtract difference
   // op_a_q - op_b_q.
   assign add_out = (state_q == NORM) ? (pm_sel_q ? op_a_raw_q : (~op_a_raw_q + {{WIDTH-1{1'b0}}, 1'b1}))
                                      : step_diff;
@@ -287,12 +285,13 @@ module serdiv
   // hyp8: flags are resolved in NORM from the registered operands and the
   // registered lzc counts (identical values, one stage later).
   logic op_b_zero_n, op_b_neg_one_n, res_inv_n, comp_inv_n, lzc_b_full;
-  // lzc_b_full mirrors lzc_b_no_one on the registered count: the lzc input
-  // was all-zero iff the count equals WIDTH. (For all-zero op_b the count
-  // wraps to 0 on the narrow lzc output; op_b_zero/neg_one then rely on
-  // the operand bits -- matching the original where no_one comes straight
-  // from the lzc, the raw sign still qualifies the flag.)
-  assign lzc_b_full     = (lzc_b_q == $clog2(WIDTH)'(WIDTH));
+  // lzc_b_full is the lzc's empty flag registered at accept (F18, r90):
+  // the earlier form compared the $clog2(WIDTH)-bit count with
+  // $clog2(WIDTH)'(WIDTH) == 0, i.e. it fired for ANY divisor whose lzc
+  // input has bit WIDTH-1 set, so udiv/urem with b >= 2^(WIDTH-1) took
+  // the "b == -1" early-out (quotient a, remainder 0). Upstream reads
+  // empty_o directly; this is that flag one stage later.
+  assign lzc_b_full     = lzc_b_empty_q;
   assign op_b_zero_n    = lzc_b_full & ~op_b_raw_q[$high(op_b_raw_q)];
   assign op_b_neg_one_n = lzc_b_full & op_b_raw_q[$high(op_b_raw_q)];
   assign res_inv_n      = (~op_b_zero_n | opcode_q[1]) & opcode_q[0] &
@@ -323,6 +322,7 @@ module serdiv
       opcode_q       <= '0;
       lzc_a_q        <= '0;
       lzc_b_q        <= '0;
+      lzc_b_empty_q  <= 1'b0;
       pm_sel_q       <= 1'b0;
       res_q          <= '0;
       cnt_q          <= '0;
@@ -352,6 +352,7 @@ module serdiv
         opcode_q   <= opcode_i;
         lzc_a_q    <= lzc_a_result;
         lzc_b_q    <= lzc_b_result;
+        lzc_b_empty_q <= lzc_b_no_one;
         pm_sel_q   <= ~(opcode_i[0] & (op_a_sign ^ op_b_sign));
       end
     end
@@ -360,6 +361,6 @@ module serdiv
   // Accept-cycle comb flags (op_b_zero/op_b_neg_one and the lzc empty
   // outputs) are superseded by the NORM forms; keep them consumed.
   logic _unused;
-  assign _unused = &{1'b0, lzc_a_no_one, lzc_b_no_one, op_b_zero, op_b_neg_one};
+  assign _unused = &{1'b0, lzc_a_no_one, op_b_zero, op_b_neg_one};
 
 endmodule

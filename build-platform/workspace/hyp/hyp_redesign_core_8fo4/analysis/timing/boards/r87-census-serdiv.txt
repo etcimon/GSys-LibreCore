@@ -1,0 +1,67 @@
+path_id=11348 fo4=83.3 reg_to_reg class=multi_cycle_tagged serdiv.reg0/CP -> serdiv.reg1/D
+  L199 serdiv.sv
+  note: multi_cycle tag; no exclusive/dense deflation
+  n15625 L187   fo4= 23.2 hi_diff_b0                     <= {1'b0, op_a_q[WIDTH-1:HW]} + {1'b0, ~op_b_q[WIDTH-1:HW]} + {{HW{1'b0}}, 1'b1}
+  n15627 L190   fo4= 24.0 step_diff                      <= lo_diff[HW] ? {hi_diff_b0[HW-1:0], lo_diff[HW-1:0]}
+                                 : {hi
+  n15631 L199   fo4= 31.8 add_out                        <= (state_q == NORM) ? (pm_sel_q ? op_a_raw_q : (~op_a_raw_q + {{WIDTH-1{1'b0}}, 1'b1}))
+    
+  n15679 L312   fo4=  2.5 op_a_d                         <= (a_reg_en) ? add_out : op_a_q
+path_id=11334 fo4=60.5 reg_to_out class=multi_cycle_tagged serdiv.reg0/CP -> serdiv.out0
+  L251 serdiv.sv
+  note: multi_cycle tag; independent-LHS bundle lhs=9 writes=9 max_writes=1 max_field=26.5 sum_fields=95.2 makespan=60.5 cycles=8 wire=0.0 next_state=true write_only=4 
+  n15625 L187   fo4= 23.2 hi_diff_b0                     <= {1'b0, op_a_q[WIDTH-1:HW]} + {1'b0, ~op_b_q[WIDTH-1:HW]} + {{HW{1'b0}}, 1'b1}
+  n15627 L190   fo4= 24.0 step_diff                      <= lo_diff[HW] ? {hi_diff_b0[HW-1:0], lo_diff[HW-1:0]}
+                                 : {hi
+  n15629 L193   fo4=  1.0 step_zero                      <= (step_diff == '0)
+  n15630 L194   fo4=  2.0 step_gt                        <= ~step_borrow & ~step_zero
+  n15632 L205   fo4=  3.0 ab_comp                        <= ((step_zero) | (step_gt ^ comp_inv_q)) & ((|op_a_q) | op_b_zero_q)
+  n15652 L249   fo4=  5.5 a_reg_en                       <= ab_comp
+  n15653 L250   fo4=  5.5 b_reg_en                       <= 1'b1
+  n15654 L251   fo4= 26.5 res_reg_en                     <= 1'b1
+  n15655 L255   fo4=  4.5 out_vld_o                      <= 1'b1
+path_id=11335 fo4=60.5 reg_to_reg class=multi_cycle_tagged serdiv.reg0/CP -> serdiv.reg1/D
+  L251 serdiv.sv
+  note: multi_cycle tag; independent-LHS bundle lhs=10 writes=10 max_writes=1 max_field=26.5 sum_fields=99.7 makespan=60.5 cycles=8 wire=0.0 next_state=true write_only=
+  n15625 L187   fo4= 23.2 hi_diff_b0                     <= {1'b0, op_a_q[WIDTH-1:HW]} + {1'b0, ~op_b_q[WIDTH-1:HW]} + {{HW{1'b0}}, 1'b1}
+  n15627 L190   fo4= 24.0 step_diff                      <= lo_diff[HW] ? {hi_diff_b0[HW-1:0], lo_diff[HW-1:0]}
+                                 : {hi
+  n15629 L193   fo4=  1.0 step_zero                      <= (step_diff == '0)
+  n15630 L194   fo4=  2.0 step_gt                        <= ~step_borrow & ~step_zero
+  n15632 L205   fo4=  3.0 ab_comp                        <= ((step_zero) | (step_gt ^ comp_inv_q)) & ((|op_a_q) | op_b_zero_q)
+  n15652 L249   fo4=  5.5 a_reg_en                       <= ab_comp
+  n15653 L250   fo4=  5.5 b_reg_en                       <= 1'b1
+  n15654 L251   fo4= 26.5 res_reg_en                     <= 1'b1
+  n15655 L255   fo4=  4.5 out_vld_o                      <= 1'b1
+  n15656 L256   fo4=  4.5 state_d                        <= FINISH
+
+=== ir_hot_nodes ===
+== serdiv nodes=108 launch_fo4={'15617': 1.4, '15619': 5.949999999999999, '15621': 1.75, '15622': 3.0, '15623': 3.0, '15624': 1.75, '15625': 1.75, '15626': 1.75, '15631': 21.0, '15632': 3.0, '15652': 3.0, '15653': 3.0, '15654': 3.0, '15655': 3.0, '15656': 3.0, '15657': 3.0, '15658': 3.0, '15668': 5.949999999999999, '15669': 5.949999999999999, '15670': 5.949999999999999, '15671': 5.949999999999999, '15672': 3.0, '15674': 3.0, '15675': 3.0, '15676': 3.0, '15679': 1.0499999999999998, '15680': 1.75, '15681': 1.0499999999999998}
+     31.8 L199   w=64   compare    add_out                            <= (state_q == NORM) ? (pm_sel_q ? op_a_raw_q : (~op_a_raw_q + {{WIDTH-1{1'b0}}, 1'b1}))
+                        
+     26.5 L251   w=1    other      res_reg_en                         <= 1'b1
+     24.5 L127   w=64   mux        lzc_a_input                        <= (opcode_i[0] & op_a_sign) ? {~op_a_i[$high(op_a_i)-1:0], 1'b1} : op_a_i
+     24.5 L128   w=64   mux        lzc_b_input                        <= (opcode_i[0] & op_b_sign) ? ~op_b_i : op_b_i
+     24.0 L190   w=64   mux        step_diff                          <= lo_diff[HW] ? {hi_diff_b0[HW-1:0], lo_diff[HW-1:0]}
+                                 : {hi_diff_b1[HW-1:0], lo
+     23.5 L275   w=1    other      a_reg_en                           <= 1'b0
+     23.5 L276   w=1    other      b_reg_en                           <= 1'b0
+     23.2 L186   w=33   add_sub    lo_diff                            <= {1'b0, op_a_q[HW-1:0]} + {1'b0, ~op_b_q[HW-1:0]} + {{HW{1'b0}}, 1'b1}
+     23.2 L187   w=33   add_sub    hi_diff_b0                         <= {1'b0, op_a_q[WIDTH-1:HW]} + {1'b0, ~op_b_q[WIDTH-1:HW]} + {{HW{1'b0}}, 1'b1}
+     15.5 L173   w=64   add_sub    res_o                              <= (res_inv_q) ? -$signed(out_mux) : out_mux
+     11.6 L188   w=33   add_sub    hi_diff_b1                         <= {1'b0, op_a_q[WIDTH-1:HW]} + {1'b0, ~op_b_q[WIDTH-1:HW]}
+      7.5 L152   w=8    add_sub    div_shift                          <= {1'b0, lzc_b_q} - shift_a_n
+      7.5 L170   w=64   mux        out_mux                            <= (rem_sel_q) ? (op_b_neg_one_q ? '0 : op_a_q) : (op_b_zero_q ? '1 : (op_b_neg_one_q ? op_a_q : res_q))
+      7.1 L212   w=6    compare    cnt_d                              <= (norm_en) ? div_shift[$clog2(WIDTH)-1:0] : (~cnt_zero) ? cnt_q - 1 : cnt_q
+      6.5 L261   w=1    other      state_d                            <= FINISH
+      6.5 L298   w=1    logic_bit  res_inv_n                          <= (~op_b_zero_n | opcode_q[1]) & opcode_q[0] &
+                          (op_a_raw_q[$high(op_a_raw_q)] ^ op_b_r
+      6.0 L157   w=1    mux        div_res_zero_d                     <= (norm_en) ? div_shift[$high(div_shift)] : div_res_zero_q
+      5.5 L249   w=1    other      a_reg_en                           <= ab_comp
+      5.5 L250   w=1    other      b_reg_en                           <= 1'b1
+      5.5 L258   w=1    other      state_d                            <= IDLE
+      5.5 L277   w=1    other      load_en                            <= 1'b0
+      5.5 L278   w=1    other      norm_en                            <= 1'b0
+      5.5 L296   w=1    logic_bit  op_b_zero_n                        <= lzc_b_full & ~op_b_raw_q[$high(op_b_raw_q)]
+      5.5 L314   w=64   mux        res_d                              <= (norm_en) ? '0 : (res_reg_en) ? {res_q[$high(res_q)-1:0], ab_comp} : res_q
+      5.5 L350   w=64   other      op_a_raw_q                         <= op_a_i
