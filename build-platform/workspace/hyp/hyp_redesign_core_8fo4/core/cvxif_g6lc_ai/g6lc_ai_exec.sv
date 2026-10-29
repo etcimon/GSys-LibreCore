@@ -257,13 +257,20 @@ module g6lc_ai_exec
   logic            setcfg_we_n, setcfg_we_q;
   logic [XLEN-1:0] setcfg_wdata_n, setcfg_wdata_q;
   logic            dirty_n, dirty_q;
-  logic signed [31:0] dot4a_dot_s, dot4a_acc_s;
+  logic signed [31:0] dot4a_sum_s, dot4a_acc_s;
   logic [XLEN-1:0]    dot4a_prod;
   // r91: dot4a_* are continuous assignments so the case arm's result_n
-  // keeps a single select under the Dot4Stages guard.
+  // keeps a single select under the Dot4Stages guard. r92: A85
+  // associative - the accumulator joins the four lane products as one
+  // five-operand add with a single final carry-propagate.
   assign dot4a_prod  = XLEN'(signed'(dot4_s_sum));
-  assign dot4a_dot_s = signed'(dot4a_prod[31:0]);
-  assign dot4a_acc_s = (NrRgprPorts >= 3) ? signed'(registers_i[2][31:0]) : '0;
+  assign dot4a_sum_s = 32'(dot4_s_p[0]) + 32'(dot4_s_p[1])
+                    + 32'(dot4_s_p[2]) + 32'(dot4_s_p[3]) + dot4a_acc_s;
+  if (NrRgprPorts >= 3) begin : gen_dot4a_acc
+    assign dot4a_acc_s = signed'(registers_i[2][31:0]);
+  end else begin : gen_dot4a_no_acc
+    assign dot4a_acc_s = '0;
+  end
 
   assign result_o       = result_q;
   assign hartid_o       = hartid_q;
@@ -318,50 +325,49 @@ module g6lc_ai_exec
     else poll_status = POLL_PENDING[1:0];
   end
 
-  // T0 dot4. Four byte products in parallel, then one four-operand sum.
-  // The old dot4_s8/dot4_u8 functions carried acc += aa*bb for four trips,
-  // and that function body was one ~280 FO4 node on result_n. Sum and
-  // valid still update together in ST_IDLE (no extra issue cycle).
-  logic [XLEN-1:0]    dot4_a, dot4_b;
-  logic signed [31:0] dot4_s_p [4];
-  logic        [31:0] dot4_u_p [4];
-  logic signed [31:0] dot4_s_sum;
-  logic        [31:0] dot4_u_sum;
+  // Four parallel byte products. Baugh-Wooley complements negative-weight
+  // cross terms; 16'h8100 is the correction, wired into unused row-0 bits.
+  // Signed range: [-65024, 65536]; unsigned: [0, 260100]. Both sums fit 18 bits.
+  logic [XLEN-1:0] dot4_a, dot4_b;
+  logic signed [16:0] dot4_s_p [4];
+  logic [16:0] dot4_u_p [4];
+  logic signed [17:0] dot4_s_sum;
+  logic [17:0] dot4_u_sum;
   assign dot4_a = XLEN'(registers_i[0]);
   assign dot4_b = XLEN'(registers_i[1]);
-  // r27: each byte product is eight conditional shifted rows summed in a
-  // balanced tree (signed: operand a sign-extended, row 7 subtracted), so
-  // no atomic multiplier sits on the result path. Exact in 16 bits.
   for (genvar di = 0; di < 4; di++) begin : gen_dot4
     logic [7:0] ba, bb;
-    logic [15:0] sa_ext;
-    logic [15:0] rs [8];
-    logic [15:0] ru [8];
+    logic [7:0] pp [8];
+    logic [15:0] rs [8], ru [8];
     logic [15:0] ps, pu;
     assign ba = dot4_a[di*8 +: 8];
     assign bb = dot4_b[di*8 +: 8];
-    assign sa_ext = {{8{ba[7]}}, ba};
     for (genvar bi = 0; bi < 8; bi++) begin : gen_rows
-      if (bi == 7) begin : gen_row_neg
-        assign rs[bi] = bb[bi] ? -(sa_ext << bi) : 16'd0;
-      end else begin : gen_row
-        assign rs[bi] = bb[bi] ? (sa_ext << bi) : 16'd0;
+      assign pp[bi] = ba & {8{bb[bi]}};
+      assign ru[bi] = {{(8-bi){1'b0}}, pp[bi], {bi{1'b0}}};
+      if (bi == 0) begin : gen_first
+        assign rs[bi] = {1'b1, 6'b0, 1'b1, ~pp[bi][7], pp[bi][6:0]};
+      end else if (bi == 7) begin : gen_last
+        assign rs[bi] = {1'b0, pp[bi][7], ~pp[bi][6:0], 7'b0};
+      end else begin : gen_middle
+        assign rs[bi] = {{(8-bi){1'b0}}, ~pp[bi][7], pp[bi][6:0], {bi{1'b0}}};
       end
-      assign ru[bi] = bb[bi] ? ({8'd0, ba} << bi) : 16'd0;
     end
     assign ps = ((rs[0] + rs[1]) + (rs[2] + rs[3])) + ((rs[4] + rs[5]) + (rs[6] + rs[7]));
     assign pu = ((ru[0] + ru[1]) + (ru[2] + ru[3])) + ((ru[4] + ru[5]) + (ru[6] + ru[7]));
-    assign dot4_s_p[di] = 32'(signed'(ps));
-    assign dot4_u_p[di] = {16'd0, pu};
-    // pragma translate_off
+    assign dot4_s_p[di] = {ps[15], ps};
+    assign dot4_u_p[di] = {1'b0, pu};
+    //pragma translate_off
     always_comb begin
       assert (ps == 16'(signed'(ba) * signed'(bb)) && pu == 16'(ba * bb))
-        else $error("dot4 row tree identity");
+        else $error("dot4 wired-row identity");
     end
-    // pragma translate_on
+    //pragma translate_on
   end
-  assign dot4_s_sum = dot4_s_p[0] + dot4_s_p[1] + dot4_s_p[2] + dot4_s_p[3];
-  assign dot4_u_sum = dot4_u_p[0] + dot4_u_p[1] + dot4_u_p[2] + dot4_u_p[3];
+  assign dot4_s_sum = 18'(dot4_s_p[0]) + 18'(dot4_s_p[1])
+                   + 18'(dot4_s_p[2]) + 18'(dot4_s_p[3]);
+  assign dot4_u_sum = 18'(dot4_u_p[0]) + 18'(dot4_u_p[1])
+                   + 18'(dot4_u_p[2]) + 18'(dot4_u_p[3]);
 
   // r91 Dot4Stages==2: the issue cycle registers the four per-lane
   // products (17-bit, sign- or zero-extended per opcode), the DOT4A
@@ -374,19 +380,26 @@ module g6lc_ai_exec
   always_ff @(posedge clk_i or negedge rst_ni) begin : dot_ff
     if (!rst_ni) begin
       for (int di = 0; di < 4; di++) dot_p_q[di] <= '0;
-      dot_acc_q  <= '0;
       dot_sext_q <= 1'b0;
     end else if (Dot4Stages == 2 && state_q == ST_IDLE && valid_i) begin
       if (opcode_i == AI_DOT4_U8) begin
-        for (int di = 0; di < 4; di++) dot_p_q[di] <= dot4_u_p[di][16:0];
-        dot_acc_q  <= '0;
+        for (int di = 0; di < 4; di++) dot_p_q[di] <= dot4_u_p[di];
         dot_sext_q <= 1'b0;
       end else if (opcode_i == AI_DOT4_S8 || opcode_i == AI_DOT4A_S8) begin
-        for (int di = 0; di < 4; di++) dot_p_q[di] <= dot4_s_p[di][16:0];
-        dot_acc_q  <= (opcode_i == AI_DOT4A_S8 && NrRgprPorts >= 3)
-                      ? signed'(registers_i[2][31:0]) : '0;
+        for (int di = 0; di < 4; di++) dot_p_q[di] <= dot4_s_p[di];
         dot_sext_q <= 1'b1;
       end
+    end
+  end
+  // r92: the accumulator is owned by the same ST_DOT4 record but has no
+  // product/sign dependency — a separate flop drops the nested decode
+  // and conditional-zero mux off the capture path. Zeroing on every
+  // other accepted IDLE op is intentional (the record is dead there).
+  always_ff @(posedge clk_i or negedge rst_ni) begin : dot_acc_ff
+    if (!rst_ni) dot_acc_q <= '0;
+    else if (Dot4Stages == 2 && state_q == ST_IDLE && valid_i) begin
+      if (opcode_i == AI_DOT4A_S8) dot_acc_q <= dot4a_acc_s;
+      else dot_acc_q <= '0;
     end
   end
   assign dot_sum32 = 32'(signed'(dot_p_q[0])) + 32'(signed'(dot_p_q[1]))
@@ -916,7 +929,7 @@ module g6lc_ai_exec
                 state_d    = ST_DOT4;
               end else begin
                 if (NrRgprPorts >= 3)
-                  result_n = XLEN'(signed'(dot4a_dot_s + dot4a_acc_s));
+                  result_n = XLEN'(dot4a_sum_s);
                 else result_n = dot4a_prod;
                 we_n     = 1'b1;
                 valid_n  = 1'b1;

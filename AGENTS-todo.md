@@ -1,5 +1,17 @@
 # AGENTS workflow todo / pending-log
 
+Hyp8 AI execution r92: latency-neutral wired signed-byte rows, bounded
+18-bit DOT4 sums, associative DOT4A accumulation and independent accumulator
+capture pass the expanded seven-configuration leaf matrix. Matched delay-v49
+maxima: one cycle / two ports 77.35 -> 60.44 FO4; one cycle / three ports
+89.35 -> 63.60; two cycles / either port count 40.85 -> 34.10. Default latency
+and both throughput contracts remain unchanged. Next two-stage limiters are
+ReLU indexing 34.10, requant rounding 32.27, and accumulator-read presentation
+31.51. Record and commands:
+`build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r92/worklog.md`.
+Aggregate verify remains unqualified (Hyp8 production-path flist mismatch,
+unrelated CV64 ISS failure and CV32 Spike timeout); no physical/8-FO4 closure.
+
 AI hyp r40/r41 completed reductions landed and gated
 (`analyze-ai-hyp-r41-final`): policy_subcode **44.55 → 30.40** FO4
 (paths over 8: 43/67 → 31/81); g6lc_ai_gemm_seq **46.95 → 38.70**

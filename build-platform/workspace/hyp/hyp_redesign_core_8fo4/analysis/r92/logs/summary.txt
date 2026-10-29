@@ -1,0 +1,8 @@
+d1n2 (-GD4S=1 -GNREG=2) PASS tb_g6lc_ai_exec_dot checks=140145
+d1n3 (-GD4S=1 -GNREG=3) PASS tb_g6lc_ai_exec_dot checks=140189
+d1n4 (-GD4S=1 -GNREG=4) PASS tb_g6lc_ai_exec_dot checks=140189
+d2n2 (-GD4S=2 -GNREG=2) PASS tb_g6lc_ai_exec_dot checks=141715
+d2n3 (-GD4S=2 -GNREG=3) PASS tb_g6lc_ai_exec_dot checks=141767
+d2n4 (-GD4S=2 -GNREG=4) PASS tb_g6lc_ai_exec_dot checks=141767
+d2n3x32 (-GD4S=2 -GNREG=3 -GXLEN=32) PASS tb_g6lc_ai_exec_dot checks=141767
+R92-LEAF-ALL-PASS

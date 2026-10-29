@@ -1,0 +1,12 @@
+["E:\\cva6\\sv-timing\\target\\release\\sv-timing.exe", "analyze", "--files-from", "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\timing\\hyp8-core.f", "--modules", "g6lc_ai_exec", "--target-mhz", "5000", "--fo4-ps", "20", "--budget-margin", "0.2", "--param-map", "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r92\\params-d2-r2.json", "--stages", "--json-out", "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\timing\\boards\\r92-before-d2-r2.json", "--ir-out", "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\timing\\boards\\r92-before-d2-r2.ir.json"]
+sv-timing-core 0.1.0 ir=ir-v6 measurement=delay-v49 correction=correction-v5 parser_pin=v0.13.5
+opt=-O2 (max_passes=4 worklist_width=1 cut=cost-balanced stages=1 min_gain=2 slack_target=0 area_weight=0 max_cells_per_fo4=16 reassoc=false effort=balanced cache=unit)
+target_mhz=5000
+from_cache=false
+modules=1
+paths=317
+opportunities=49
+ir_out=E:\cva6\build-platform\workspace\hyp\hyp_redesign_core_8fo4\analysis\timing\boards\r92-before-d2-r2.ir.json
+  module g6lc_ai_exec nodes=477 regions=151
+json_out=E:\cva6\build-platform\workspace\hyp\hyp_redesign_core_8fo4\analysis\timing\boards\r92-before-d2-r2.json
+stages: none (no svt-stage pragmas)
