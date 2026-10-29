@@ -4,3 +4,9 @@ comb_adder_cloud.sv
 fn_zero_len_range.sv
 localparam_gate_fold.sv
 dead_arm_region.sv
+reg_only_cone.sv
+if_const_arm.sv
+pkg_enum_fold.sv
+rep_select_loads.sv
+pkg_struct_field_fold.sv
+stmt_order_no_chain.sv

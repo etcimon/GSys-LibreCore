@@ -907,6 +907,7 @@ where
         }
     }
     let mut out = BTreeMap::new();
+    let mut enum_idx: i64 = 0;
     for node in root {
         match node {
             RefNode::ParamAssignment(_) => one_pa(tree, node, &mut out),
@@ -922,6 +923,23 @@ where
                         one_pa(tree, item, &mut out);
                     }
                 }
+            }
+            // delay-v49: enum member literals are elaboration
+            // constants — `COH_OOO = 2'd3` resolves `pkg::COH_OOO`;
+            // unassigned members take their implicit position index
+            // (reset at each typedef so consecutive members sequence).
+            RefNode::TypeDeclarationDataType(_) => enum_idx = 0,
+            RefNode::EnumNameDeclaration(e) => {
+                if let Some(name) = identifier_str(tree, RefNode::EnumIdentifier(&e.nodes.0)) {
+                    let text = match &e.nodes.2 {
+                        Some((_, expr)) => node_text(tree, expr),
+                        None => Some(enum_idx.to_string()),
+                    };
+                    if let Some(text) = text {
+                        out.entry(name).or_insert(text);
+                    }
+                }
+                enum_idx += 1;
             }
             _ => {}
         }
@@ -2843,6 +2861,12 @@ where
                 out.push((span0, preds.clone()));
             }
             for (_, _, pred, body) in &cs.nodes.4 {
+                // delay-v49: an else-if arm runs only when every prior
+                // predicate was FALSE — negate the previous decided
+                // predicate so `dead_guard` can fold the arm.
+                if let Some(last) = preds.last_mut() {
+                    *last = format!("!({last})");
+                }
                 if let Some(p) = node_text(tree, &pred.nodes.1).map(|t| t.trim().to_string()) {
                     preds.push(p);
                 }
@@ -2852,6 +2876,10 @@ where
                 }
             }
             if let Some((_, body)) = &cs.nodes.5 {
+                // else arm — runs only when the last predicate was FALSE.
+                if let Some(last) = preds.last_mut() {
+                    *last = format!("!({last})");
+                }
                 let sp = loop_source_span(tree, li, path_str, body);
                 if sp.origin == OriginKind::UserFile {
                     out.push((sp, preds.clone()));

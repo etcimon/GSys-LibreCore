@@ -2668,3 +2668,48 @@ Sparse soak evidence: `MONOREPO-SOAK.md` / `FO4-ALGORITHM-UPGRADES.md`.
   correction under dep-chain semantics; `analyze-r85-all.json` is the
   new baseline of record. Open: verify no dep edge crosses a
   register boundary mislabeled comb (census the top chains).
+- **r86-r88 dep-chain measurement truth (delay-v49 landed):** six
+  defects found by probing the model on `tmp/svt_probe/probe.sv`
+  shapes and the hyp8 top chains, all fixed package-first with
+  fixtures (`reg_only_cone`, `if_const_arm`, `pkg_enum_fold`,
+  `pkg_struct_field_fold`, `rep_select_loads`, `stmt_order_no_chain`):
+  (1) region paths were pruned by their stale default `InToOut` kind
+  before the retag, so a cone whose only sink is a register vanished
+  (`y_d = ~y_q + a_i` reported NO reg->reg path) — liveness is now
+  decided per path by its tail sink; (2) procedural `if (<const>)` /
+  `else` arms (`if (!G6LCCfg.UseSharedTlb) ... else <tag compare>`)
+  were billed — `dead_guard` folds them and `related_defs` skips dead
+  defs (shared_tlb 55.2 -> 39.3); (3) `pkg::ENUM` members and bound
+  struct fields (`G6LCCfg.CohPolicy == config_pkg::COH_OOO`) did not
+  resolve in `const_value`; (4) a folded sub-expression still created
+  dep edges (`PHYS_VALIDATE && !flush_i && (|eq)` kept the whole
+  65.0 g6lc_lsq cone alive) — `walk_read_idents` now recurses and a
+  constant sub-tree reads nothing (g6lc_lsq 65.0 -> 54.5, live row);
+  (5) `longest_comb_path` fell back to statement-order `fans_in` for a
+  node with no dep edge, chaining unrelated FSM statements onto the
+  previous deep statement (ai_exec +17.6, serdiv +10.2, the
+  `fn_prefix_or_inline_gather` golden 29..38 was that artefact; now
+  14..19); (6) `{W{s}} & x` paid no select broadcast while `s ? a : b`
+  paid W loads — replications of a non-constant 1-bit net now pay
+  `W` loads (constant replications are wires). Param-map truth:
+  `r84-param-map.json` carried `G6LCCfg.NonIdemPotenceEn=1` against the
+  elaborated `0` (`elaborated-scalar-param-map.json`); `r88-param-map`
+  corrects it and `stall_ni` leaves the load_unit row. Baseline of
+  record: `analysis/timing/boards/r88-all.json` (hyp8 core set:
+  g6lc_ai_exec 90.4, serdiv 73.1, load_unit 54.5, g6lc_lsq 54.5,
+  g6lc_rename_read 54.1, g6lc_shared_tlb 39.3).
+  **Open (model):** (a) region paths still sum every live node of a
+  multi-statement region (`stmt_order_no_chain` region path 23.4 for
+  two independent statements, tagged in->out) — `path_class` deflates
+  the sums heuristically; the principled form is region total = longest
+  dep chain ending in the region; (b) the load law has a cliff at
+  `load_fanout_cap` (64 loads = +21.0 FO4, 65 = +2.1 buffered), so
+  `({64{s}}&a)|({64{!s}}&b)` bills 6.0 against 23.5 for `s ? a : b` —
+  the unbuffered calibration (delay-v43) makes every 64-bit 2:1 select
+  >= 23.5 and puts 8 FO4 out of reach for any 64-bit datapath; a
+  `--load-model repaired` (buffer tree, +1 FO4 per 4x) alternative is a
+  calibration decision for the host, not a code fix; (c) the `mul`
+  operator bills an 8x8 product at 44.8 (16-bit) / 56.0 (32-bit
+  context) — width from the result context, not the operands; (d) the
+  bounded `function automatic` evaluator (zero-length
+  `is_inside_nonidempotent_regions`) is still open.

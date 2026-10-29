@@ -337,6 +337,18 @@ impl<'a> WidthResolver<'a> {
                 ("$bits", [a]) => self.expr_width(a).map(i64::from),
                 _ => None,
             },
+            // delay-v49: struct-field member access `Cfg.FIELD` on a
+            // bound parameter — the param-map key is the full dotted
+            // name (`G6LCCfg.CohPolicy`).
+            Expr::Index { base, index } => {
+                if let (Expr::Ident { name: b }, Expr::Ident { name: f }) =
+                    (base.as_ref(), index.as_ref())
+                {
+                    self.const_value(&format!("{b}.{f}"))
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }

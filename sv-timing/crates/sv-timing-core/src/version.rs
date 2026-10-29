@@ -151,7 +151,14 @@ pub const CORRECTION_VERSION: &str = "correction-v5";
 /// (`longest_comb_path` walks `dep_pred`; region paths in
 /// `design.paths` are filtered in `compose_module_paths`).
 /// `--keep-dead-nodes` restores the statement-order enumeration.
-pub const MEASUREMENT_VERSION: &str = "delay-v48";
+/// `delay-v49`: (1) per-path liveness by the tail node's sink
+/// membership — register-only cones keep a `RegToReg` path
+/// (`reg_only_cone`); (2) procedural `if (<const>)/else` guard arms
+/// fold — a constant-false arm's nodes are dead for path enumeration;
+/// (3) package enum member literals resolve as `pkg::NAME` and bare
+/// imported names in `Expr::const_value`; (4) `{W{s}} & x` replication
+/// operands pay the W-load select broadcast a mux select pays.
+pub const MEASUREMENT_VERSION: &str = "delay-v49";
 
 /// Hint for which upstream pin the vendored tree should track (see tools/sv-parser.rev).
 pub const PARSER_PIN_HINT: &str = "v0.13.5";

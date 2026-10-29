@@ -474,6 +474,24 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
     // condition resolves through the elaboration seed — a
     // `localparam`-gated dead arm does not reach the output path.
     let dep_seed = design.elaboration_const_seed(module);
+    // delay-v49: a node whose guard predicate const-folds to 0 is
+    // dead — a procedural `if (<param>)`/`else` arm that never runs
+    // (e.g. `if (!G6LCCfg.UseSharedTlb) … else` with the field bound
+    // 0). Dead nodes are not sinks and carry no dep edges, so the
+    // live-node pruning removes their whole cone.
+    let dead_guard: BTreeSet<NodeId> = module
+        .nodes
+        .keys()
+        .filter(|nid| {
+            module.guards.get(nid).is_some_and(|gs| {
+                gs.iter().any(|g| {
+                    let g = g.strip_prefix('^').unwrap_or(g);
+                    crate::expr::Expr::parse(g).const_value(&dep_seed) == Some(0)
+                })
+            })
+        })
+        .copied()
+        .collect();
     let bindings = crate::ref_order::BindingIndex::new(module);
     let mut seq_lhs: BTreeSet<String> = BTreeSet::new();
     let mut seq_reads: BTreeSet<String> = BTreeSet::new();
@@ -558,6 +576,13 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
             };
             let mut best: BTreeMap<crate::ir::RegionId, (u32, NodeId)> = BTreeMap::new();
             for &(region, pos, nid) in defs {
+                // delay-v49: a dead-guarded def must not shadow the
+                // live earlier write — `if (W>8) pa=…` at W=6 would
+                // otherwise be `o_o`'s only dep edge and the whole
+                // live cone would drop.
+                if dead_guard.contains(&nid) {
+                    continue;
+                }
                 if Some(region) == reader_region
                     && procedural.contains(&region)
                     && pos >= reader_pos
@@ -603,6 +628,9 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
     let mut out_sinks: Vec<NodeId> = Vec::new();
     let mut reg_sinks: Vec<NodeId> = Vec::new();
     for &nid in &comb_ids {
+        if dead_guard.contains(&nid) {
+            continue;
+        }
         let Some(n) = module.nodes.get(&nid) else {
             continue;
         };
@@ -616,7 +644,7 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
                 hits_seq = true;
             }
             for src in related_defs(r, nid, n.loc.byte_start) {
-                if src != nid && !edges.contains(&(src, nid)) {
+                if src != nid && !dead_guard.contains(&src) && !edges.contains(&(src, nid)) {
                     edges.push((src, nid));
                 }
             }
@@ -708,16 +736,35 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
             }
             live
         };
+        // delay-v49: seed `reg_sinks` with the register-write nodes
+        // themselves — an `a_i→r_q` intoreg path ends on the
+        // always_ff write (a seq-def node, not a comb feeder), so
+        // its endpoint is only live when it is seeded.
+        for (nid, n) in &module.nodes {
+            if n.assign_kind.is_seq_def() {
+                reg_sinks.push(*nid);
+            }
+        }
         let live_out = reach(&out_sinks);
         let live_reg = reach(&reg_sinks);
+        let mut live_any = live_out.clone();
+        live_any.extend(live_reg.iter().copied());
         for path in design.paths.iter_mut().filter(|p| p.module == mid) {
-            let live = if matches!(
-                path.path_kind,
-                crate::ir::PathKind::InToOut | crate::ir::PathKind::RegToOut
-            ) {
+            // delay-v49: decide liveness by the path's actual sink —
+            // region paths still carry the default `InToOut` kind here
+            // (the retag loop below hasn't run). A tail in `out_sinks`
+            // filters against `live_out`, a tail in `reg_sinks`
+            // against `live_reg`; a mid-chain tail (not itself a
+            // sink) keeps any node that reaches SOME sink — the union
+            // set — so a cone feeding an output is not dropped
+            // because its last statement was a dead write.
+            let tail = path.nodes.last();
+            let live = if tail.is_some_and(|t| out_sinks.contains(t)) {
                 &live_out
-            } else {
+            } else if tail.is_some_and(|t| reg_sinks.contains(t)) {
                 &live_reg
+            } else {
+                &live_any
             };
             path.nodes.retain(|n| live.contains(n));
             if let Some(&last) = path.nodes.last() {
@@ -987,8 +1034,13 @@ fn longest_comb_path(
         let mut pred = None;
         let mut pred_c = 0.0_f64;
         if let Some(n) = module.nodes.get(&id) {
-            let preds: &[NodeId] = match dep_pred.and_then(|m| m.get(&id)) {
-                Some(list) => list,
+            // delay-v49: when a dep map is provided a node absent
+            // from it has NO comb predecessors — falling back to the
+            // statement-order `fans_in` chained unrelated statements
+            // (ai_exec/serdiv over-chaining). `fans_in` is only for
+            // the legacy `None` caller.
+            let preds: &[NodeId] = match dep_pred {
+                Some(m) => m.get(&id).map(|v| v.as_slice()).unwrap_or(&[]),
                 None => &n.fans_in,
             };
             for &p in preds {
@@ -3295,7 +3347,11 @@ mod tests {
             ("fn_prefix_or_call", 6.0, 12.0),
             ("fn_prefix_or_inline", 11.0, 17.0),
             ("fn_prefix_or_call_gather", 12.0, 18.0),
-            ("fn_prefix_or_inline_gather", 29.0, 38.0),
+            // delay-v49: the seven lanes are independent statements —
+            // no statement-order fallback chains them (was 29..38 as a
+            // statement-order sum; the dep-chain reading is one lane
+            // plus the gather).
+            ("fn_prefix_or_inline_gather", 14.0, 19.0),
         ] {
             let w = worst(name);
             assert!(
@@ -3362,5 +3418,115 @@ mod tests {
                  must measure within 3 FO4"
             );
         }
+    }
+
+    /// delay-v49: a comb cone whose only sink is a register must keep
+    /// its `RegToReg` path under default (pruned) enumeration — the
+    /// r85 pruning filtered region paths by the stale `InToOut` kind
+    /// and dropped register-only cones entirely.
+    #[test]
+    fn reg_only_cone_keeps_reg_to_reg_path() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/reg_only_cone.sv");
+        if !path.exists() {
+            return;
+        }
+        let mut lower = crate::lower::LowerOptions {
+            target: TimingTarget::new(5000.0, 20.0, 0.2),
+            cost_model: crate::cost_table::default_fo4_v1_embedded(),
+            ..Default::default()
+        };
+        lower.cost_model.id = "fo4-v1".into();
+        let out = crate::lower::analyze_files(&[path], &crate::ParseOptions::default(), &lower)
+            .expect("analyze");
+        let m = out
+            .design
+            .modules
+            .values()
+            .find(|m| m.name == "reg_only_cone")
+            .expect("module");
+        let r2r: Vec<_> = out
+            .design
+            .paths
+            .iter()
+            .filter(|p| p.module == m.id && p.path_kind == crate::ir::PathKind::RegToReg)
+            .collect();
+        assert!(
+            !r2r.is_empty(),
+            "reg-only cones must keep a reg->reg path under default pruning"
+        );
+        let worst = r2r.iter().map(|p| p.total_fo4).fold(0.0, f64::max);
+        assert!(
+            worst >= 8.0,
+            "the z_d mux cone should bill near its comb cost, got {worst:.1}"
+        );
+    }
+
+    fn analyze_fixture_with(name: &str, map: &[(&str, i64)]) -> crate::lower::AnalyzeOutput {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures")
+            .join(name);
+        let mut lower = crate::lower::LowerOptions {
+            target: TimingTarget::new(5000.0, 20.0, 0.2),
+            cost_model: crate::cost_table::default_fo4_v1_embedded(),
+            ..Default::default()
+        };
+        lower.cost_model.id = "fo4-v1".into();
+        for (k, v) in map {
+            lower.param_map.insert(*k, serde_json::json!(*v));
+        }
+        crate::lower::analyze_files(&[path], &crate::ParseOptions::default(), &lower)
+            .expect("analyze")
+    }
+
+    fn worst_fo4_at(out: &crate::lower::AnalyzeOutput, module: &str, line: u32) -> f64 {
+        let m = out
+            .design
+            .modules
+            .values()
+            .find(|m| m.name == module)
+            .expect("module");
+        out.design
+            .paths
+            .iter()
+            .filter(|p| p.module == m.id && p.primary_loc.start_line == line)
+            .map(|p| p.total_fo4)
+            .fold(0.0, f64::max)
+    }
+
+    /// delay-v49: `localparam bit ON = Cfg.Policy == pkg::MODE_X` with the
+    /// struct field bound through the param-map folds, and a folded
+    /// `ON && …` chain reads nothing — the deep cone it gates is dead
+    /// whole (the g6lc_lsq `PHYS_VALIDATE` shape), live again at 3.
+    #[test]
+    fn struct_field_enum_fold_kills_the_and_chain() {
+        let dead = analyze_fixture_with("pkg_struct_field_fold.sv", &[("Cfg.Policy", 2)]);
+        let y_dead = worst_fo4_at(&dead, "pkg_struct_field_fold", 37);
+        assert!(y_dead < 5.0, "ON=0: y_o must not bill the deep cone, got {y_dead:.1}");
+        assert!(
+            !dead
+                .design
+                .paths
+                .iter()
+                .any(|p| p.primary_loc.start_line == 36),
+            "dead `deep` region must be pruned"
+        );
+        let live = analyze_fixture_with("pkg_struct_field_fold.sv", &[("Cfg.Policy", 3)]);
+        // The composed `deep → y_o` path is attributed to its hottest
+        // node (`deep`, L36).
+        let y_live = worst_fo4_at(&live, "pkg_struct_field_fold", 36);
+        assert!(y_live > 15.0, "ON=1: the deep cone must be live, got {y_live:.1}");
+    }
+
+    /// delay-v49: dep-chain enumeration has no statement-order fallback —
+    /// an independent statement after a deep one bills alone; a reader
+    /// of the deep statement still chains.
+    #[test]
+    fn statement_order_does_not_chain_independent_statements() {
+        let out = analyze_fixture_with("stmt_order_no_chain.sv", &[]);
+        let z_indep = worst_fo4_at(&out, "stmt_order_no_chain", 19);
+        assert!(z_indep < 5.0, "independent z_d must not inherit y_d, got {z_indep:.1}");
+        let z_chain = worst_fo4_at(&out, "stmt_order_chain", 41);
+        assert!(z_chain > 20.0, "z_d reading y_d must chain, got {z_chain:.1}");
     }
 }

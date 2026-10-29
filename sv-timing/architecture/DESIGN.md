@@ -740,6 +740,20 @@ Automatic correction refuses paths containing these updates until their
 source rewrite semantics are implemented; the emitter also refuses to
 treat a compound update as plain `=`. This prevents a parallel gather's
 accumulator dependency from disappearing solely because of source syntax.
+**Dep-chain liveness and folding (delay-v49).** Path enumeration is
+dependency-driven end to end: a node without a dependency edge has no
+predecessor (no statement-order fallback), a region path is filtered by
+the liveness set of its own tail sink (output, register, or either), and
+a sub-expression that folds to an elaboration constant — including bound
+struct fields (`Cfg.FIELD`), package enum members (`pkg::NAME`) and
+procedural `if (<const>)` arms — reads nothing and creates no edge, so
+the logic it gates is dead for the board. Replications of a non-constant
+1-bit net (`{W{s}} & x`) pay the same `W`-load select broadcast as a
+bare mux select; constant replications are wires. Known model limits:
+region paths still sum the live nodes of a multi-statement region (the
+`path_class` deflations apply), and the load law's cap cliff makes a
+>64-load net cheaper than a 64-load one.
+
 **Adjusted reading (A121).** `adjusted.rs` consumes two host artefacts the
 package does not produce — a per-module board of mapped delays (header-driven
 TSV) and a platform FO4 measured on the same liberty — and reports every

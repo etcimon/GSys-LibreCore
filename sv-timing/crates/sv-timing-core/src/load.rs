@@ -112,7 +112,25 @@ impl LoadCounts {
                 }
             }
             Expr::Concat { parts } => parts.iter().map(|p| self.data(p, w)).fold(0.0, f64::max),
-            Expr::Replicate { body, .. } => self.data(body, w),
+            // `{W{<1-bit>}} & x` — the replicated operand drives one
+            // mask gate per output bit, the same W-load fanout a
+            // bare-ident mux select pays (delay-v49; A144 Nangate45
+            // data). A compound 1-bit body pays the node's own
+            // compound-select charge instead of a bare-net charge.
+            Expr::Replicate { body, .. } => {
+                // delay-v49: a constant replication body (`{W{1'b0}}`,
+                // `{W{PARAM}}`) is wiring, not a select — walk its
+                // reads only. A bare net pays the W-load broadcast;
+                // a compound 1-bit body pays the compound charge.
+                if matches!(**body, Expr::Literal { .. } | Expr::Opaque { .. }) {
+                    self.data(body, w)
+                } else if let Some(id) = bare_select_ident(body) {
+                    self.add(id, w);
+                    0.0
+                } else {
+                    self.data(body, 1.0).max(w)
+                }
+            }
             Expr::Index { base, index } => {
                 let b = self.data(base, w);
                 if matches!(**index, Expr::PartSelect { .. } | Expr::Literal { .. }) {

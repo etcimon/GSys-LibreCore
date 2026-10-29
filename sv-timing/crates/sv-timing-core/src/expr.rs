@@ -923,7 +923,29 @@ impl Expr {
     /// dependencies (a `Stages==2`-gated record does not make its
     /// payload a read of the live `Stages==1` path).
     pub fn walk_read_idents(&self, seed: &ConstSeed, f: &mut dyn FnMut(&str)) {
+        // delay-v49: a sub-expression that folds to a constant reads
+        // nothing — `PHYS_VALIDATE && !flush_i && (|eq)` with the
+        // localparam bound 0 is dead whole, not only its ternary arms.
+        // (Signals never fold; an unsigned `x < 0` does, by design.)
+        if !matches!(self, Expr::Ident { .. }) && self.const_value(seed).is_some() {
+            return;
+        }
         match self {
+            Expr::Ident { name } => {
+                if seed.values.get(name).is_none() {
+                    f(name);
+                }
+            }
+            Expr::Literal { .. } | Expr::Opaque { .. } => {}
+            Expr::Unary { arg, .. } => arg.walk_read_idents(seed, f),
+            Expr::PartSelect { left, right, .. } => {
+                left.walk_read_idents(seed, f);
+                right.walk_read_idents(seed, f);
+            }
+            Expr::Binary { left, right, .. } => {
+                left.walk_read_idents(seed, f);
+                right.walk_read_idents(seed, f);
+            }
             Expr::Ternary {
                 cond,
                 then_e,
@@ -933,12 +955,29 @@ impl Expr {
                     let arm = if v != 0 { then_e } else { else_e };
                     arm.walk_read_idents(seed, f);
                 } else {
-                    cond.walk_idents(f);
+                    cond.walk_read_idents(seed, f);
                     then_e.walk_read_idents(seed, f);
                     else_e.walk_read_idents(seed, f);
                 }
             }
-            _ => self.walk_idents(f),
+            Expr::Concat { parts } => {
+                for p in parts {
+                    p.walk_read_idents(seed, f);
+                }
+            }
+            Expr::Replicate { count, body } => {
+                count.walk_read_idents(seed, f);
+                body.walk_read_idents(seed, f);
+            }
+            Expr::Index { base, index } => {
+                base.walk_read_idents(seed, f);
+                index.walk_read_idents(seed, f);
+            }
+            Expr::Call { args, .. } => {
+                for a in args {
+                    a.walk_read_idents(seed, f);
+                }
+            }
         }
     }
 

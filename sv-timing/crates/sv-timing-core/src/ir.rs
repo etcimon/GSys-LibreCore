@@ -1168,6 +1168,32 @@ impl TimingDesign {
                 }
             }
         }
+        // delay-v49: package-scoped constants — `pkg::NAME` (enum
+        // member literals now live in `const_exprs` too) and bare
+        // `NAME` after `import pkg::*` resolve in `Expr::const_value`
+        // so `G6LCCfg.CohPolicy == config_pkg::COH_OOO` folds.
+        for (pname, pkg) in &self.packages {
+            for (member, _) in &pkg.const_exprs {
+                let scoped = format!("{pname}::{member}");
+                if !seed.values.contains_key(&scoped) {
+                    if let Some(v) = resolver.const_value(&scoped) {
+                        seed.values.insert(scoped, v);
+                    }
+                }
+            }
+        }
+        for pkg_name in &module.package_imports {
+            let key = pkg_name.split("::").next().unwrap_or(pkg_name);
+            if let Some(pkg) = self.packages.get(key) {
+                for (member, _) in &pkg.const_exprs {
+                    if !seed.values.contains_key(member) {
+                        if let Some(v) = resolver.const_value(&format!("{key}::{member}")) {
+                            seed.values.insert(member.clone(), v);
+                        }
+                    }
+                }
+            }
+        }
         seed
     }
 }
