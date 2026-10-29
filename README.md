@@ -305,31 +305,30 @@ address/bank hints. Skipping still requires an independent exact-zero proof.
 | Host software (`ai-tensor`) | PyTorch `AiTensorLinear`/`Conv2d` + Diffusers; qualified recipes (LLM INT8 g128 + FP16 head; UNet INT8 g64 or BF16); `cost_model` calibrated on the measured points; QEMU B1 contract emulator boots OpenSBI and passes the queue smoke | virtual evidence (PSNR/perplexity, bytes), never RTL timing |
 | Policy codec / benefit steering | Isolated, verified RTL; off in production | control decisions, not throughput |
 
-The **~50× VA-Turbo figure** is the derived peak-rate comparison in the
-architecture record: the live sketch is **1 × 512 MAC/cycle at 2 GHz**
-(1.024 × 10¹² MAC/s, 2.048 INT8 TOPS), while the 8-cluster sketch is
-**8 × 4096 MAC/cycle at 1.5 GHz** (49.152 × 10¹² MAC/s, 98.3 INT8 TOPS), a
-**48×** ratio. The 98.3 TOPS point requires the feeding fabric to carry
-512 bytes/cycle (512 GB/s at the truncated 1 GHz class-0 clock), and
-`VaTurboEn` remains off in production. Its GPT-2 proof is narrower than a QEMU
-throughput run: `tools/va_select.py` executes pinned `distilgpt2@2290a626` on
-`software-reference-v2` at live AccTile geometry and selects INT8 K-group-128
-blocks with an FP16 `lm_head` — **0.369× FP32 weight bytes**, perplexity
-**−0.1 % / −0.3 %**, and top-1 **0.973 / 0.9745** on calibration/held-out. B1
-QEMU parity (`b1-parity-20260929-r10-queue`) separately proves OpenSBI plus the
-v2 descriptor/queue path (`ai.enq`/`ai.qfence`/`ai.poll`, ticket and completion
-word), not GPT-2 inference. Measured mixed residency is cumulative but much
-smaller: on the directed one-engine square job, **A-only or B-only** halves the
-32 INT8 operand beats and runs 189→164 cycles (**1.152×**), while **A+B**
-removes all operand reads and runs 189→139 (**1.359×**); FP32 is 669→596
-(**1.122×**) and 669→523 (**1.279×**). **C is not a resident operand**: with
-A+B resident, only MAC work and C writes remain. On the decode axis, resident B
-is INT8/FP32 **1.806×/1.859×** at n=8 and A+B **2.074×/2.107×**; intra-row C
-trailing removes the remaining store tail in the live `1×512×512` INT8 SoC
-point, giving cold **33,880 → resident 590 cycles** (**57.4×**), and the
-two-panel `1×768×512` layer reaches **39.3×**. The 48× therefore remains a
-fabric-gated nameplate analysis: GPT-2 proves recipe accuracy/offload on the
-software reference, QEMU proves contract plumbing, and neither is measured
+The **~50× VA-Turbo figure** is a measured **mixed-residency** result, not a
+scaling nameplate: on the live `1×512×512` INT8 SoC decode point, operand
+residency plus intra-row C trailing takes the job from cold **33,880 → resident
+590 cycles** (**57.4×**), and the two-panel `1×768×512` layer reaches
+**39.3×** — the B stream drops to zero loads on hits while only MAC work and C
+writes remain. The mechanism is exact operand reuse: on the directed
+one-engine square job, **A-only or B-only** halves the operand beats and gives
+**1.152×** INT8 / **1.122×** FP32, while **A+B** removes all operand reads and
+gives **1.359×** / **1.279×**; on the decode axis resident B reaches
+**1.806×/1.859×** at n=8 and **A+B 2.074×/2.107×**. **C is not a resident
+operand** — residency only removes A/B read traffic. Scaling is a separate
+derived figure: the live 1×512-MAC/cycle island at 2 GHz (2.048 INT8 TOPS)
+versus the 8×4096-MAC sketch at 1.5 GHz (98.3 INT8 TOPS) is a **48×** nameplate
+ratio, gated on the fabric carrying 512 bytes/cycle (512 GB/s at the truncated
+1 GHz class-0 clock), and `VaTurboEn` remains off in production. Its GPT-2
+proof is narrower than a QEMU throughput run: `tools/va_select.py` executes
+pinned `distilgpt2@2290a626` on `software-reference-v2` at live AccTile
+geometry and selects INT8 K-group-128 blocks with an FP16 `lm_head` —
+**0.369× FP32 weight bytes**, perplexity **−0.1 % / −0.3 %**, top-1
+**0.973 / 0.9745** on calibration/held-out. B1 QEMU parity
+(`b1-parity-20260929-r10-queue`) separately proves OpenSBI plus the v2
+descriptor/queue path (`ai.enq`/`ai.qfence`/`ai.poll`, ticket and completion
+word), not GPT-2 inference. So the ~50× is measured cycle residency on the SoC
+model, the 48× is a fabric-gated nameplate analysis, and neither is measured
 MAC/s or model inference throughput.
 
 `IslandFpEn` is **on** for `g6lc64_ai` since 2026-09-30 (the core-side T0 tile stays INT8);
