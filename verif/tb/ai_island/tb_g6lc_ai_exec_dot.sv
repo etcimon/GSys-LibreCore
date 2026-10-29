@@ -10,6 +10,7 @@
 `timescale 1ns/1ps
 
 module tb_g6lc_ai_exec_dot;
+  parameter int unsigned D4S = 1;
   import g6lc_ai_instr_pkg::*;
 
   localparam int unsigned XLEN = 64;
@@ -51,7 +52,8 @@ module tb_g6lc_ai_exec_dot;
       .AiCfg       (config_pkg::AiCfgOff),
       .hartid_t    (logic),
       .id_t        (logic),
-      .registers_t (registers_t)
+      .registers_t (registers_t),
+      .Dot4Stages  (D4S)
   ) i_dut (
       .clk_i (clk), .rst_ni (rst_n),
       .valid_i, .registers_i, .opcode_i, .instr_i,
@@ -106,7 +108,12 @@ module tb_g6lc_ai_exec_dot;
 
   task automatic t0_check(input opcode_t op, input registers_t regs,
                           input logic [XLEN-1:0] want, input string what);
+    // Dot4Stages=2 answers one cycle later than the 1-cycle T0 path —
+    // wait bounded for valid_o instead of assuming the issue+1 edge.
+    int w;
     issue(op, '0, regs);
+    w = 0;
+    while (valid_o !== 1'b1 && w < 8) begin @(posedge clk); #1; w++; end
     chk(valid_o === 1'b1, {what, " valid"});
     chkv(result_o, want, what);
   endtask

@@ -13,6 +13,7 @@ module g6lc_ai_coprocessor
     parameter int unsigned         NrRgprPorts         = 2,
     parameter int unsigned         XLEN                = 64,
     parameter config_pkg::ai_cfg_t AiCfg               = config_pkg::AiCfgOff,
+    parameter int unsigned         Dot4Stages          = 1,
     parameter type                 readregflags_t      = logic,
     parameter type                 writeregflags_t     = logic,
     parameter type                 id_t                = logic,
@@ -161,6 +162,7 @@ module g6lc_ai_coprocessor
       .NrRgprPorts(NrRgprPorts),
       .XLEN       (XLEN),
       .AiCfg      (AiCfg),
+      .Dot4Stages (Dot4Stages),
       .hartid_t   (hartid_t),
       .id_t       (id_t),
       .registers_t(registers_t)

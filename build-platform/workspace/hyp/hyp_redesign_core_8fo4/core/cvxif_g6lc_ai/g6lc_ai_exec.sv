@@ -11,6 +11,10 @@
 //
 // aicfg/ais owned by csr_regfile; sideband setcfg/dirty writeback.
 // Timing: multi-cycle MMA stalls issue via busy_o (no ex_stage cone growth).
+// r91: Dot4Stages=2 makes DOT4 latency 1 -> 2 cycles and issue
+// throughput one DOT4 per 2 cycles; valid_o/result_o protocol is
+// unchanged (the coprocessor waits on valid_o like for the multi-cycle
+// ops — see g6lc_ai_coprocessor res_* tracking).
 
 module g6lc_ai_exec
   import g6lc_ai_instr_pkg::*;
@@ -18,6 +22,10 @@ module g6lc_ai_exec
     parameter int unsigned           NrRgprPorts = 2,
     parameter int unsigned           XLEN        = 64,
     parameter config_pkg::ai_cfg_t   AiCfg       = config_pkg::AiCfgOff,
+    // r91: 1 = the DOT4 datapath completes in the issue cycle (today);
+    // 2 = lane products are captured at issue and summed the next cycle
+    // (latency 2, throughput one DOT4 per 2 cycles).
+    parameter int unsigned           Dot4Stages  = 1,
     parameter type                   hartid_t    = logic,
     parameter type                   id_t        = logic,
     parameter type                   registers_t = logic
@@ -190,16 +198,19 @@ module g6lc_ai_exec
   endfunction
 
   // ------------------------------------------------------------------ multi-cycle FSM
-  typedef enum logic [2:0] {
-    ST_IDLE  = 3'd0,
-    ST_MMA   = 3'd1,
-    ST_DONE  = 3'd2,
-    ST_RQ    = 3'd3,  // requant product
-    ST_RQ_S  = 3'd6,  // requant magnitude shift
-    ST_RQ_R  = 3'd7,  // requant round, zp, clamp, tile write
-    ST_RELU  = 3'd4,
-    ST_ENQ   = 3'd5   // ai.enq held until the island accepts (VALID/READY)
+  typedef enum logic [3:0] {
+    ST_IDLE  = 4'd0,
+    ST_MMA   = 4'd1,
+    ST_DONE  = 4'd2,
+    ST_RQ    = 4'd3,  // requant product
+    ST_RQ_S  = 4'd6,  // requant magnitude shift
+    ST_RQ_R  = 4'd7,  // requant round, zp, clamp, tile write
+    ST_RELU  = 4'd4,
+    ST_ENQ   = 4'd5,  // ai.enq held until the island accepts (VALID/READY)
+    ST_DOT4  = 4'd8   // r91: Dot4Stages==2 completion cycle
   } state_e;
+  initial assert (Dot4Stages inside {1, 2})
+    else $fatal(1, "g6lc_ai_exec: Dot4Stages must be 1 or 2");
   state_e state_q, state_d;
 
   logic [4:0]  mma_acc_q, mma_ta_q, mma_tb_q;
@@ -248,6 +259,11 @@ module g6lc_ai_exec
   logic            dirty_n, dirty_q;
   logic signed [31:0] dot4a_dot_s, dot4a_acc_s;
   logic [XLEN-1:0]    dot4a_prod;
+  // r91: dot4a_* are continuous assignments so the case arm's result_n
+  // keeps a single select under the Dot4Stages guard.
+  assign dot4a_prod  = XLEN'(signed'(dot4_s_sum));
+  assign dot4a_dot_s = signed'(dot4a_prod[31:0]);
+  assign dot4a_acc_s = (NrRgprPorts >= 3) ? signed'(registers_i[2][31:0]) : '0;
 
   assign result_o       = result_q;
   assign hartid_o       = hartid_q;
@@ -347,6 +363,61 @@ module g6lc_ai_exec
   assign dot4_s_sum = dot4_s_p[0] + dot4_s_p[1] + dot4_s_p[2] + dot4_s_p[3];
   assign dot4_u_sum = dot4_u_p[0] + dot4_u_p[1] + dot4_u_p[2] + dot4_u_p[3];
 
+  // r91 Dot4Stages==2: the issue cycle registers the four per-lane
+  // products (17-bit, sign- or zero-extended per opcode), the DOT4A
+  // accumulator, and the sext flag; the ST_DOT4 arm does the 5-operand
+  // sum and the writeback. busy_o = (state_q != ST_IDLE) holds the
+  // coprocessor's issue strobe for the extra cycle.
+  logic [16:0]        dot_p_q [4];
+  logic signed [31:0] dot_acc_q, dot_sum32;
+  logic               dot_sext_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin : dot_ff
+    if (!rst_ni) begin
+      for (int di = 0; di < 4; di++) dot_p_q[di] <= '0;
+      dot_acc_q  <= '0;
+      dot_sext_q <= 1'b0;
+    end else if (Dot4Stages == 2 && state_q == ST_IDLE && valid_i) begin
+      if (opcode_i == AI_DOT4_U8) begin
+        for (int di = 0; di < 4; di++) dot_p_q[di] <= dot4_u_p[di][16:0];
+        dot_acc_q  <= '0;
+        dot_sext_q <= 1'b0;
+      end else if (opcode_i == AI_DOT4_S8 || opcode_i == AI_DOT4A_S8) begin
+        for (int di = 0; di < 4; di++) dot_p_q[di] <= dot4_s_p[di][16:0];
+        dot_acc_q  <= (opcode_i == AI_DOT4A_S8 && NrRgprPorts >= 3)
+                      ? signed'(registers_i[2][31:0]) : '0;
+        dot_sext_q <= 1'b1;
+      end
+    end
+  end
+  assign dot_sum32 = 32'(signed'(dot_p_q[0])) + 32'(signed'(dot_p_q[1]))
+                   + 32'(signed'(dot_p_q[2])) + 32'(signed'(dot_p_q[3]))
+                   + dot_acc_q;
+//pragma translate_off
+  // ST_DOT4's result must equal the one-cycle formula recomputed from
+  // the captured products and accumulator.
+  always_ff @(posedge clk_i) begin : dot_ph_chk
+    if (rst_ni && state_q == ST_DOT4) begin
+      logic [31:0] sref, uref;
+      sref = 32'(signed'(dot_p_q[0])) + 32'(signed'(dot_p_q[1]))
+           + 32'(signed'(dot_p_q[2])) + 32'(signed'(dot_p_q[3]));
+      uref = {16'd0, dot_p_q[0][15:0]} + {16'd0, dot_p_q[1][15:0]}
+           + {16'd0, dot_p_q[2][15:0]} + {16'd0, dot_p_q[3][15:0]};
+      assert (dot_sum32 == (dot_sext_q ? (sref + dot_acc_q)
+                                       : (uref + dot_acc_q)))
+        else $error("dot4 staged sum identity");
+    end
+    // captured products equal the live issue-cycle values: re-derive
+    // the issue-cycle lane value from dot4_a/dot4_b at that edge.
+    if (rst_ni && Dot4Stages == 2 && state_q == ST_DOT4 &&
+        state_q != ST_IDLE) begin
+      for (int di = 0; di < 4; di++) begin
+        assert (dot_p_q[di][16] == (dot_sext_q ? dot_p_q[di][15] : 1'b0))
+          else $error("dot4 product extension");
+      end
+    end
+  end
+//pragma translate_on
+
   // Requant is four registered steps per element: extend, product, magnitude
   // shift, then round/zp/clamp. The tile write and the (m,n) advance happen
   // on the round step. valid_o is still only ST_DONE.
@@ -359,7 +430,9 @@ module g6lc_ai_exec
   logic signed [47:0] rq_aval_w, rq_aval_q, rq_sc_w, rq_prod;
   logic [1:0]         rq_ph_q;
   logic [15:0]        rq_c_q;
-  logic signed [47:0] rq_prod_q, rq_ux, rq_ux_q, rq_t, rq_t_q, rq_t_rnd, rq_adj;
+  logic signed [47:0] rq_prod_q, rq_ux, rq_ux_q, rq_t, rq_t_q;
+  logic        [31:0] rq_t_rnd, rq_adj;
+  logic        [47:0] rq_half_q;
   logic               rq_neg_q, rq_sh0_q, rq_bump;
   logic [47:0]        rq_mask, rq_half, rq_rem, rq_rem_q;
   logic signed [31:0] rq_wz;
@@ -476,18 +549,28 @@ module g6lc_ai_exec
   // register between those halves measured 32.8.
   assign rq_t         = rq_ux >> rq_sh;
 
-  assign rq_bump  = (rq_rem_q > rq_half) || ((rq_rem_q == rq_half) && rq_t_q[0]);
-  assign rq_t_rnd = rq_t_q + 48'(rq_bump);
+  assign rq_bump  = (rq_rem_q > rq_half_q) || ((rq_rem_q == rq_half_q) && rq_t_q[0]);
+  // r91: only the low 32 bits are consumed (rq_adj_q captures [31:0]);
+  // the rounded/negated/adjusted values are computed mod 2^32 — two's
+  // complement arithmetic is exact in the low word.
+  assign rq_t_rnd = rq_t_q[31:0] + 32'(rq_bump);
   // r28: both polarities in parallel; the negation of the rounded value is
   // ~t + (bump ? 0 : 1) (one add, no serial round-then-negate), selected
   // one-hot with the shift-0 passthrough.
-  logic [47:0] rq_neg_rnd;
-  assign rq_neg_rnd = ~rq_t_q + 48'(!rq_bump);
-  assign rq_adj   = ({48{rq_sh0_q}} & rq_prod_q) |
-                    ({48{!rq_sh0_q && rq_neg_q}} & rq_neg_rnd) |
-                    ({48{!rq_sh0_q && !rq_neg_q}} & rq_t_rnd);
+  logic [31:0] rq_neg_rnd;
+  assign rq_neg_rnd = ~rq_t_q[31:0] + 32'(!rq_bump);
+  assign rq_adj   = ({32{rq_sh0_q}} & rq_prod_q[31:0]) |
+                    ({32{!rq_sh0_q && rq_neg_q}} & rq_neg_rnd) |
+                    ({32{!rq_sh0_q && !rq_neg_q}} & rq_t_rnd);
   // pragma translate_off
-  always_comb assert (rq_neg_rnd == 48'(-rq_t_rnd)) else $error("requant negate identity");
+  logic signed [47:0] rq_adj_ref48, rq_trnd_ref48, rq_negrnd_ref48;
+  always_comb assert (rq_neg_rnd == 32'(-rq_t_rnd)) else $error("requant negate identity");
+  assign rq_trnd_ref48  = rq_t_q + 48'(rq_bump);
+  assign rq_negrnd_ref48 = ~rq_t_q + 48'(!rq_bump);
+  assign rq_adj_ref48   = ({48{rq_sh0_q}} & rq_prod_q) |
+                          ({48{!rq_sh0_q && rq_neg_q}} & rq_negrnd_ref48) |
+                          ({48{!rq_sh0_q && !rq_neg_q}} & rq_trnd_ref48);
+  always_comb assert (rq_adj == 32'(rq_adj_ref48)) else $error("requant narrow identity");
   // pragma translate_on
   // r90: ST_RQ_R runs two phases - phase 0 captures rq_adj[31:0]
   // (the only bits rq_wz reads) so the clamp/zero-point cone leaves
@@ -552,6 +635,13 @@ module g6lc_ai_exec
   always_ff @(posedge clk_i or negedge rst_ni) begin : rq_sh0_ff
     if (!rst_ni) rq_sh0_q <= 1'b0;
     else if (state_q == ST_RQ && rq_ph_q == 2'd3) rq_sh0_q <= (rq_sh == 4'd0);
+  end
+  always_ff @(posedge clk_i or negedge rst_ni) begin : rq_half_ff
+    // r91: the one-hot round constant is table-indexed by rq_sh (stable
+    // from ST_RQ on); register it so the bump compare does not pay the
+    // table lookup in ST_RQ_R phase 0.
+    if (!rst_ni) rq_half_q <= '0;
+    else if (state_q == ST_RQ && rq_ph_q == 2'd3) rq_half_q <= rq_half_sh[rq_sh];
   end
   always_ff @(posedge clk_i or negedge rst_ni) begin : rq_ux_ff
     if (!rst_ni) rq_ux_q <= '0;
@@ -758,9 +848,6 @@ module g6lc_ai_exec
     pmu_mma_n      = 1'b0;
     pmu_post_n     = 1'b0;
     pmu_t0_n       = 1'b0;
-    dot4a_prod     = '0;
-    dot4a_dot_s    = '0;
-    dot4a_acc_s    = '0;
 
     unique case (state_q)
       ST_IDLE: begin
@@ -794,27 +881,47 @@ module g6lc_ai_exec
               pmu_t0_n = 1'b1;
             end
             AI_DOT4_S8: begin
-              result_n = XLEN'(signed'(dot4_s_sum));
-              we_n     = 1'b1;
-              valid_n  = 1'b1;
-              pmu_t0_n = 1'b1;
+              if (Dot4Stages == 2) begin
+                // issue cycle: registers the lane products (dot_ff);
+                // identity through the mma_*_q completion record.
+                mma_hart_d = hartid_i;
+                mma_id_d   = id_i;
+                mma_rd_d   = rd_i;
+                state_d    = ST_DOT4;
+              end else begin
+                result_n = XLEN'(signed'(dot4_s_sum));
+                we_n     = 1'b1;
+                valid_n  = 1'b1;
+                pmu_t0_n = 1'b1;
+              end
             end
             AI_DOT4_U8: begin
-              result_n = XLEN'(dot4_u_sum);
-              we_n     = 1'b1;
-              valid_n  = 1'b1;
-              pmu_t0_n = 1'b1;
+              if (Dot4Stages == 2) begin
+                mma_hart_d = hartid_i;
+                mma_id_d   = id_i;
+                mma_rd_d   = rd_i;
+                state_d    = ST_DOT4;
+              end else begin
+                result_n = XLEN'(dot4_u_sum);
+                we_n     = 1'b1;
+                valid_n  = 1'b1;
+                pmu_t0_n = 1'b1;
+              end
             end
             AI_DOT4A_S8: begin
-              dot4a_prod  = XLEN'(signed'(dot4_s_sum));
-              dot4a_dot_s = signed'(dot4a_prod[31:0]);
-              if (NrRgprPorts >= 3) begin
-                dot4a_acc_s = signed'(registers_i[2][31:0]);
-                result_n    = XLEN'(signed'(dot4a_dot_s + dot4a_acc_s));
-              end else result_n = dot4a_prod;
-              we_n     = 1'b1;
-              valid_n  = 1'b1;
-              pmu_t0_n = 1'b1;
+              if (Dot4Stages == 2) begin
+                mma_hart_d = hartid_i;
+                mma_id_d   = id_i;
+                mma_rd_d   = rd_i;
+                state_d    = ST_DOT4;
+              end else begin
+                if (NrRgprPorts >= 3)
+                  result_n = XLEN'(signed'(dot4a_dot_s + dot4a_acc_s));
+                else result_n = dot4a_prod;
+                we_n     = 1'b1;
+                valid_n  = 1'b1;
+                pmu_t0_n = 1'b1;
+              end
             end
             AI_MVTA: begin
               // tile=rd, data=rs1 GPR, elem=rs2 field (0..31)
@@ -1036,6 +1143,19 @@ module g6lc_ai_exec
           pmu_t0_n = 1'b1;
           state_d  = ST_IDLE;
         end
+      end
+
+      ST_DOT4: begin
+        // Dot4Stages==2 completion: one 5-operand sum and the GPR
+        // writeback, one cycle after issue.
+        hartid_n = mma_hart_q;
+        id_n     = mma_id_q;
+        rd_n     = mma_rd_q;
+        result_n = dot_sext_q ? XLEN'(signed'(dot_sum32)) : XLEN'(dot_sum32);
+        we_n     = 1'b1;
+        valid_n  = 1'b1;
+        pmu_t0_n = 1'b1;
+        state_d  = ST_IDLE;
       end
 
       ST_DONE: begin

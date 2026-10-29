@@ -1,0 +1,4 @@
+      1      109718 Done                    | grep -E "PASS|FAIL|%Error|assert|error"
+      1 %Error: /mnt/e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cvxif_g6lc_ai/g6lc_ai_exec.sv:109: Verilog $stop
+      2 PASS tb_g6lc_ai_exec_dot checks=452
+      1 [0] %Error: g6lc_ai_exec.sv:109: Assertion failed in TOP.tb_g6lc_ai_enq_ready.dut: g6lc_ai_exec index geometry is the hyp8 AiCfgOff normalisation
