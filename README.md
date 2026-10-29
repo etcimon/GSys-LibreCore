@@ -305,11 +305,23 @@ address/bank hints. Skipping still requires an independent exact-zero proof.
 | Host software (`ai-tensor`) | PyTorch `AiTensorLinear`/`Conv2d` + Diffusers; qualified recipes (LLM INT8 g128 + FP16 head; UNet INT8 g64 or BF16); `cost_model` calibrated on the measured points; QEMU B1 contract emulator boots OpenSBI and passes the queue smoke | virtual evidence (PSNR/perplexity, bytes), never RTL timing |
 | Policy codec / benefit steering | Isolated, verified RTL; off in production | control decisions, not throughput |
 
-The balanced LLM/diffusion-shaped **scheduling fixtures** report modeled time
-reductions of **38.24% at SRAM128** and **3.55% at SRAM512** against their matched
-baseline. Per-format/state usage, negative results and the slightly better
-retrospective fixed-code comparison are retained. These figures are neither
-measured MAC/s nor a benchmark of a real LLM or diffusion model.
+The **~50× VA-Turbo figure** is the derived peak-rate comparison in the
+architecture record: the live sketch is **1 × 512 MAC/cycle at 2 GHz**
+(1.024 × 10¹² MAC/s, 2.048 INT8 TOPS), while the 8-cluster sketch is
+**8 × 4096 MAC/cycle at 1.5 GHz** (49.152 × 10¹² MAC/s, 98.3 INT8 TOPS), a
+**48×** ratio. The 98.3 TOPS point requires the feeding fabric to carry
+512 bytes/cycle (512 GB/s at the truncated 1 GHz class-0 clock), and
+`VaTurboEn` remains off in production. Its GPT-2 proof is narrower than a QEMU
+throughput run: `tools/va_select.py` executes pinned `distilgpt2@2290a626` on
+`software-reference-v2` at live AccTile geometry and selects INT8 K-group-128
+blocks with an FP16 `lm_head` — **0.369× FP32 weight bytes**, perplexity
+**−0.1 % / −0.3 %**, and top-1 **0.973 / 0.9745** on calibration/held-out. B1
+QEMU parity (`b1-parity-20260929-r10-queue`) separately proves OpenSBI plus the
+v2 descriptor/queue path (`ai.enq`/`ai.qfence`/`ai.poll`, ticket and completion
+word), not GPT-2 inference. The 48× therefore remains a fabric-gated nameplate
+analysis: GPT-2 proves recipe accuracy/offload on the software reference, QEMU
+proves contract plumbing, and neither is measured MAC/s or model inference
+throughput.
 
 `IslandFpEn` is **on** for `g6lc64_ai` since 2026-09-30 (the core-side T0 tile stays INT8);
 `PolicyCodecEn`/`PolicyBenefitEn` and `VaTurboEn` remain off in production. Open on the
