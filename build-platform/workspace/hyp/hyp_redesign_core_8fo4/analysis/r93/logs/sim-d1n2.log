@@ -1,0 +1,2 @@
+PASS tb_g6lc_ai_exec_dot checks=140303
+- /mnt/e/cva6/verif/tb/ai_island/tb_g6lc_ai_exec_dot.sv:553: Verilog $finish

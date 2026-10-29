@@ -1,5 +1,16 @@
 # AGENTS workflow todo / pending-log
 
+Hyp8 AI execution r93: one-cycle DOT4A configuration selection moved to
+elaboration, with one signed 32-bit result value extended at publication.
+Matched delay-v49 rows: 60.44 -> 45.60 FO4 (two ports), 63.60 -> 45.60
+(three ports); both two-stage bindings remain 34.10. Eight leaf bindings
+pass, including no-gap mixed DOT/scalar completion checks. Rejected sign-
+broadcast and sliced-result candidates are recorded in
+`build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r93/worklog.md`.
+Structural representation gain only; mapped timing is unmeasured. Aggregate
+verification failed: Hyp8 production-path config/flist mismatch plus CV64/CV32
+simulation failures. Exact command, logs and exit statuses are retained.
+
 Hyp8 AI execution r92: latency-neutral wired signed-byte rows, bounded
 18-bit DOT4 sums, associative DOT4A accumulation and independent accumulator
 capture pass the expanded seven-configuration leaf matrix. Matched delay-v49

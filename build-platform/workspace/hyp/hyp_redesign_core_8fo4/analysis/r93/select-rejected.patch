@@ -1,0 +1,183 @@
+diff --git a/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cvxif_g6lc_ai/g6lc_ai_exec.sv b/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cvxif_g6lc_ai/g6lc_ai_exec.sv
+index 9482f2cb9..4c03a17cf 100644
+--- a/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cvxif_g6lc_ai/g6lc_ai_exec.sv
++++ b/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cvxif_g6lc_ai/g6lc_ai_exec.sv
+@@ -258,19 +258,55 @@ module g6lc_ai_exec
+   logic [XLEN-1:0] setcfg_wdata_n, setcfg_wdata_q;
+   logic            dirty_n, dirty_q;
+   logic signed [31:0] dot4a_sum_s, dot4a_acc_s;
+-  logic [XLEN-1:0]    dot4a_prod;
+-  // r91: dot4a_* are continuous assignments so the case arm's result_n
+-  // keeps a single select under the Dot4Stages guard. r92: A85
+-  // associative - the accumulator joins the four lane products as one
+-  // five-operand add with a single final carry-propagate.
+-  assign dot4a_prod  = XLEN'(signed'(dot4_s_sum));
+-  assign dot4a_sum_s = 32'(dot4_s_p[0]) + 32'(dot4_s_p[1])
+-                    + 32'(dot4_s_p[2]) + 32'(dot4_s_p[3]) + dot4a_acc_s;
++  // r93: the opcode pulse selects the 18-bit DOT sum (or the fused
++  // DOT4A five-operand add) and a SINGLE sign bit, then the upper
++  // XLEN-32 bits are broadcast from that sign after selection - the
++  // DOT arms never pay a 64-bit data mux. DOT4A's sum exists only in
++  // the binding that can complete it.
++  logic [XLEN-1:0] result_other_n;
++  logic            dot_pub_s, dot_pub_u, dot_pub_a;
++  logic [17:0]     dot_plain_bits;
++  logic            dot_plain_sign, dot_result_sign;
++  logic [31:0]     dot_result_bits;
++  if (Dot4Stages == 1 && NrRgprPorts >= 3) begin : gen_dot4a_sum
++    assign dot4a_sum_s = 32'(dot4_s_p[0]) + 32'(dot4_s_p[1])
++                      + 32'(dot4_s_p[2]) + 32'(dot4_s_p[3]) + dot4a_acc_s;
++  end else begin : gen_no_dot4a_sum
++    assign dot4a_sum_s = '0;
++  end
+   if (NrRgprPorts >= 3) begin : gen_dot4a_acc
+     assign dot4a_acc_s = signed'(registers_i[2][31:0]);
+   end else begin : gen_dot4a_no_acc
+     assign dot4a_acc_s = '0;
+   end
++  // One-hot DOT pulses select only their own low bits; the sign is
++  // decided before the upper-word broadcast. Non-DOT results keep the
++  // original arbitrary-width formation via result_other_n.
++  assign dot_plain_bits  = ({18{dot_pub_s}} & dot4_s_sum)
++                         | ({18{dot_pub_u}} & dot4_u_sum);
++  assign dot_plain_sign  = dot_pub_s && dot4_s_sum[17];
++  assign dot_result_bits = {{14{dot_plain_sign}}, dot_plain_bits}
++                         | ({32{dot_pub_a}} & dot4a_sum_s);
++  assign dot_result_sign = dot_plain_sign | (dot_pub_a && dot4a_sum_s[31]);
++  assign result_n[31:0]  = result_other_n[31:0] | dot_result_bits;
++  if (XLEN > 32) begin : gen_result_upper
++    assign result_n[XLEN-1:32] = result_other_n[XLEN-1:32]
++                             | {(XLEN-32){dot_result_sign}};
++  end
++//pragma translate_off
++  always_ff @(posedge clk_i) begin : dot_pub_chk
++    if (rst_ni) begin
++      assert ($onehot0({dot_pub_s, dot_pub_u, dot_pub_a}));
++      if ({dot_pub_s, dot_pub_u, dot_pub_a} != '0)
++        assert (result_other_n == '0);
++      if (dot_pub_s) assert (result_n == XLEN'(signed'(dot4_s_sum)));
++      if (dot_pub_u) assert (result_n == XLEN'(dot4_u_sum));
++      if (dot_pub_a) assert (result_n == XLEN'(dot4a_sum_s));
++      if ({dot_pub_s, dot_pub_u, dot_pub_a} == '0)
++        assert (result_n == result_other_n);
++    end
++  end
++//pragma translate_on
+ 
+   assign result_o       = result_q;
+   assign hartid_o       = hartid_q;
+@@ -849,7 +885,10 @@ module g6lc_ai_exec
+     sb_ticket_n    = sb_ticket_q;
+     sb_desc_ptr_n  = sb_desc_ptr_q;
+ 
+-    result_n       = '0;
++    result_other_n       = '0;
++    dot_pub_s           = 1'b0;
++    dot_pub_u           = 1'b0;
++    dot_pub_a           = 1'b0;
+     hartid_n       = hartid_i;
+     id_n           = id_i;
+     valid_n        = 1'b0;
+@@ -869,14 +908,14 @@ module g6lc_ai_exec
+             AI_SETCFG: begin
+               setcfg_wdata_n = grant_setcfg(registers_i[0]);
+               setcfg_we_n    = 1'b1;
+-              result_n       = setcfg_wdata_n;
++              result_other_n       = setcfg_wdata_n;
+               we_n           = 1'b1;
+               dirty_n        = 1'b1;
+               valid_n        = 1'b1;
+               pmu_t0_n       = 1'b1;
+             end
+             AI_GETCFG: begin
+-              result_n = aicfg_i;
++              result_other_n = aicfg_i;
+               we_n     = 1'b1;
+               valid_n  = 1'b1;
+               pmu_t0_n = 1'b1;
+@@ -902,7 +941,7 @@ module g6lc_ai_exec
+                 mma_rd_d   = rd_i;
+                 state_d    = ST_DOT4;
+               end else begin
+-                result_n = XLEN'(signed'(dot4_s_sum));
++                dot_pub_s = 1'b1;
+                 we_n     = 1'b1;
+                 valid_n  = 1'b1;
+                 pmu_t0_n = 1'b1;
+@@ -915,7 +954,7 @@ module g6lc_ai_exec
+                 mma_rd_d   = rd_i;
+                 state_d    = ST_DOT4;
+               end else begin
+-                result_n = XLEN'(dot4_u_sum);
++                dot_pub_u = 1'b1;
+                 we_n     = 1'b1;
+                 valid_n  = 1'b1;
+                 pmu_t0_n = 1'b1;
+@@ -928,9 +967,8 @@ module g6lc_ai_exec
+                 mma_rd_d   = rd_i;
+                 state_d    = ST_DOT4;
+               end else begin
+-                if (NrRgprPorts >= 3)
+-                  result_n = XLEN'(dot4a_sum_s);
+-                else result_n = dot4a_prod;
++                if (NrRgprPorts >= 3) dot_pub_a = 1'b1;
++                else                        dot_pub_s = 1'b1;
+                 we_n     = 1'b1;
+                 valid_n  = 1'b1;
+                 pmu_t0_n = 1'b1;
+@@ -948,8 +986,8 @@ module g6lc_ai_exec
+             AI_MVACC: begin
+               // rd GPR, acc=rs1, elem=rs2 — Latency=0 combo read
+               if (idx_rs1 < AccCount && int'(idx_rs2) < AccElems) begin
+-                result_n  = XLEN'(acc_get(acc_r_data, int'(idx_rs2)));
+-              end else result_n = '0;
++                result_other_n  = XLEN'(acc_get(acc_r_data, int'(idx_rs2)));
++              end else result_other_n = '0;
+               we_n     = 1'b1;
+               valid_n  = 1'b1;
+               pmu_t0_n = 1'b1;
+@@ -1037,7 +1075,7 @@ module g6lc_ai_exec
+                 mma_rd_d       = rd_i;
+                 state_d        = ST_ENQ;
+               end else begin
+-                result_n = XLEN'(ENQ_FULL);
++                result_other_n = XLEN'(ENQ_FULL);
+                 we_n     = 1'b1;
+                 valid_n  = 1'b1;
+                 pmu_t0_n = 1'b1;
+@@ -1045,7 +1083,7 @@ module g6lc_ai_exec
+             end
+             AI_POLL: begin
+               // Status from poll_status wires (see above). Always complete T0.
+-              result_n = XLEN'(poll_status);
++              result_other_n = XLEN'(poll_status);
+               we_n     = 1'b1;
+               valid_n  = 1'b1;
+               pmu_t0_n = 1'b1;
+@@ -1057,7 +1095,7 @@ module g6lc_ai_exec
+               pmu_t0_n = 1'b1;
+             end
+             AI_EXPSEL: begin
+-              result_n = '0;
++              result_other_n = '0;
+               we_n     = 1'b1;
+               valid_n  = 1'b1;
+               pmu_t0_n = 1'b1;
+@@ -1149,7 +1187,7 @@ module g6lc_ai_exec
+           rd_n     = mma_rd_q;
+           // Attached island: its stream is the ticket; the local counter follows
+           // it so a later detach/poll_local keeps counting from the same point.
+-          result_n = XLEN'(isl_attached_i ? sb_enq_ticket_i : sb_ticket_q);
++          result_other_n = XLEN'(isl_attached_i ? sb_enq_ticket_i : sb_ticket_q);
+           ticket_d = (isl_attached_i ? sb_enq_ticket_i : sb_ticket_q) + 32'd1;
+           we_n     = 1'b1;
+           valid_n  = 1'b1;
+@@ -1164,7 +1202,7 @@ module g6lc_ai_exec
+         hartid_n = mma_hart_q;
+         id_n     = mma_id_q;
+         rd_n     = mma_rd_q;
+-        result_n = dot_sext_q ? XLEN'(signed'(dot_sum32)) : XLEN'(dot_sum32);
++        result_other_n = dot_sext_q ? XLEN'(signed'(dot_sum32)) : XLEN'(dot_sum32);
+         we_n     = 1'b1;
+         valid_n  = 1'b1;
+         pmu_t0_n = 1'b1;

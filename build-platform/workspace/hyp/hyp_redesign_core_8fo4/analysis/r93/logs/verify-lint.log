@@ -1,0 +1,41 @@
+
+[1mLint + elaboration (1 target(s))[0m
+
+[1mGate summary[0m
+[31m✗[0m FAIL  lint    g6lc64_hyp8            exit 1, 2 error(s) (1570 ms)
+[31m✗[0m FAIL  lint    g6lc64_hyp8            exit 2, 1 error(s) (174 ms)
+
+[1mlint log — g6lc64_hyp8[0m
+  %Error: Cannot find file containing module: 'E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv'
+          ... See the manual at https://verilator.org/verilator_doc.html?v=5.051 for more assistance.
+          ... Looked in:
+               E:/cva6/core/include\E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv
+               E:/cva6/core/include\E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv.v
+               E:/cva6/core/include\E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv.sv
+               E:/cva6/vendor/pulp-platform/common_cells/include\E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv
+               E:/cva6/vendor/pulp-platform/common_cells/include\E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv.v
+               E:/cva6/vendor/pulp-platform/common_cells/include\E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv.sv
+               E:/cva6/vendor/pulp-platform/common_cells/src\E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv
+               E:/cva6/vendor/pulp-platform/common_cells/src\E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv.v
+               E:/cva6/vendor/pulp-platform/common_cells/src\E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv.sv
+               E:/cva6/vendor/pulp-platform/axi/include\E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv
+               E:/cva6/vendor/pulp-platform/axi/include\E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv.v
+               E:/cva6/vendor/pulp-platform/axi/include\E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv.sv
+               E:/cva6/common/local/util\E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv
+               E:/cva6/common/local/util\E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv.v
+               E:/cva6/common/local/util\E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv.sv
+               E:/cva6/core/cache_subsystem/hpdcache/rtl/include\E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv
+               E:/cva6/core/cache_subsystem/hpdcache/rtl/include\E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv.v
+               E:/cva6/core/cache_subsystem/hpdcache/rtl/include\E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv.sv
+               E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv
+               E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv.v
+               E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv.sv
+               obj_dir\E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv
+               obj_dir\E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv.v
+               obj_dir\E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv.sv
+          ... With current working directory 'E:\cva6'
+  %Error: Exiting due to 1 error(s)
+
+[1mlint log — g6lc64_hyp8[0m
+  error: 'E:/cva6/core/include/g6lc64_hyp8_config_pkg.sv': No such file or directory
+[31m✗[0m Gate failed: 2 of 2 step(s).

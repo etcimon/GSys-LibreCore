@@ -258,14 +258,16 @@ module g6lc_ai_exec
   logic [XLEN-1:0] setcfg_wdata_n, setcfg_wdata_q;
   logic            dirty_n, dirty_q;
   logic signed [31:0] dot4a_sum_s, dot4a_acc_s;
-  logic [XLEN-1:0]    dot4a_prod;
-  // r91: dot4a_* are continuous assignments so the case arm's result_n
-  // keeps a single select under the Dot4Stages guard. r92: A85
-  // associative - the accumulator joins the four lane products as one
-  // five-operand add with a single final carry-propagate.
-  assign dot4a_prod  = XLEN'(signed'(dot4_s_sum));
-  assign dot4a_sum_s = 32'(dot4_s_p[0]) + 32'(dot4_s_p[1])
-                    + 32'(dot4_s_p[2]) + 32'(dot4_s_p[3]) + dot4a_acc_s;
+  // r93: specialize the DOT4A value at elaboration, before opcode
+  // publication. Both bindings expose one signed 32-bit value and
+  // extend it only at the result assignment. With an accumulator,
+  // retain r92's single five-operand sum (modulo 2^32).
+  if (NrRgprPorts >= 3) begin : gen_dot4a_sum
+    assign dot4a_sum_s = 32'(dot4_s_p[0]) + 32'(dot4_s_p[1])
+                      + 32'(dot4_s_p[2]) + 32'(dot4_s_p[3]) + dot4a_acc_s;
+  end else begin : gen_no_dot4a_sum
+    assign dot4a_sum_s = 32'(dot4_s_sum);
+  end
   if (NrRgprPorts >= 3) begin : gen_dot4a_acc
     assign dot4a_acc_s = signed'(registers_i[2][31:0]);
   end else begin : gen_dot4a_no_acc
@@ -928,9 +930,7 @@ module g6lc_ai_exec
                 mma_rd_d   = rd_i;
                 state_d    = ST_DOT4;
               end else begin
-                if (NrRgprPorts >= 3)
-                  result_n = XLEN'(dot4a_sum_s);
-                else result_n = dot4a_prod;
+                result_n = XLEN'(dot4a_sum_s);
                 we_n     = 1'b1;
                 valid_n  = 1'b1;
                 pmu_t0_n = 1'b1;

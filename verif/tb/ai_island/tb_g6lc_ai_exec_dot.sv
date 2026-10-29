@@ -205,6 +205,25 @@ module tb_g6lc_ai_exec_dot;
     @(posedge clk); #1;
   endtask
 
+  // Non-DOT result arms now share the result_other_n | dot_result_bits
+  // boundary — exercise each once through the normal completion path.
+  task automatic plain_check(input opcode_t op, input registers_t regs,
+                             input logic [XLEN-1:0] want,
+                             input bit dirty_exp, input string what,
+                             input logic [1:0] h = 0, input logic [3:0] i = 0,
+                             input logic [4:0] r = 5'd1);
+    set_meta(h, i, r);
+    issue(op, '0, regs);
+    chk(valid_o === 1'b1, {what, " valid"});
+    chk(busy_o === 1'b0, {what, " busy"});
+    chkv(result_o, want, what);
+    chk(hartid_o === h && id_o === i && rd_o === r, {what, " meta"});
+    chk(we_o === 1'b1, {what, " we"});
+    chk(pmu_op_o === 1'b1, {what, " pmu_op"});
+    chk(dirty_o === dirty_exp, {what, " dirty"});
+    chk(sb_enq_valid_o === 1'b0, {what, " sb_enq"});
+  endtask
+
   initial begin
     registers_t regs = '0;
     logic [31:0] golden [64];
@@ -375,6 +394,80 @@ module tb_g6lc_ai_exec_dot;
       end
       @(negedge clk); valid_i=0;
       chk(accepted==8 && retired==8,"tput exactly eight");
+    end
+
+
+
+    // ---- directed non-DOT result checks ------------------------------------
+    aicfg_i = 64'hFEDCBA9876543210;
+    plain_check(AI_GETCFG, regs, XLEN'(64'hFEDCBA9876543210), 0, "getcfg a");
+    aicfg_i = 64'h0123456789ABCDEF;
+    plain_check(AI_GETCFG, regs, XLEN'(64'h0123456789ABCDEF), 0, "getcfg b");
+    aicfg_i = '0;
+    regs = '0;
+    plain_check(AI_SETCFG, regs, XLEN'(AiContractVersion) << 16, 1,
+                "setcfg zero", 2'd2, 4'd7, 5'd11);
+    chk(setcfg_we_o === 1'b1, "setcfg we");
+    chkv(setcfg_wdata_o, XLEN'(AiContractVersion) << 16, "setcfg zero wdata");
+    ai_q_en_i = 1'b0;
+    plain_check(AI_POLL, regs, '0, 0, "poll pending");
+    plain_check(AI_ENQ, regs, XLEN'({XLEN{1'b1}}), 0, "enq full");
+
+    // ---- mixed-ops stream: DOT + non-DOT, no gaps, exact spacing -----------
+    begin : gen_mixed
+      opcode_t seq [8];
+      logic [XLEN-1:0] expected [16];
+      int due [16];
+      int accepted, retired, cycle, last_accept, previous_latency, latency;
+      bit fire;
+      seq = '{AI_DOT4_S8, AI_GETCFG, AI_DOT4_U8, AI_DOT4A_S8,
+              AI_POLL, AI_ENQ, AI_GETCFG, AI_DOT4_S8};
+      accepted=0; retired=0; cycle=0; last_accept=0; previous_latency=1;
+      while (cycle < 16*D4S+4) begin
+        @(negedge clk);
+        poison_inputs();
+        valid_i=(accepted<16) && !busy_o;
+        if (valid_i) begin
+          registers_i='0;
+          registers_i[0]=XLEN'(32'h80ff017f ^ accepted);
+          registers_i[1]=XLEN'(32'h02fe7f80 + accepted);
+          if(NREG>=3) registers_i[2]=XLEN'(32'h80000000 + 13*accepted);
+          aicfg_i=(accepted & 1) ? XLEN'(64'hFEDCBA9876543210)
+                                 : XLEN'(64'h0123456789ABCDEF);
+          opcode_i=seq[accepted%8];
+          instr_i='0;
+          set_meta(2'(accepted ^ 1),4'(accepted),5'(accepted+3));
+        end
+        @(posedge clk);
+        fire=valid_i && !busy_o;
+        if(fire) begin
+          latency=(opcode_i inside {AI_DOT4_S8,AI_DOT4_U8,AI_DOT4A_S8}) ? D4S : 1;
+          if(accepted>0) chk(cycle-last_accept==previous_latency,"mixed acceptance spacing");
+          case(opcode_i)
+            AI_GETCFG: expected[accepted]=aicfg_i;
+            AI_POLL: expected[accepted]='0;
+            AI_ENQ: expected[accepted]=XLEN'(ENQ_FULL);
+            default: expected[accepted]=XLEN'(dot_gold(opcode_i,registers_i));
+          endcase
+          due[accepted]=cycle+latency-1;
+          previous_latency=latency;
+          last_accept=cycle;
+          accepted++;
+        end
+        #1;
+        if(retired<accepted && due[retired]==cycle) begin
+          chk(valid_o===1'b1,"mixed exact valid");
+          chkv(result_o,expected[retired],"mixed data");
+          chk(id_o===4'(retired),"mixed id");
+          chk(hartid_o===2'(retired ^ 1),"mixed hart");
+          chk(rd_o===5'(retired+3),"mixed rd");
+          chk(we_o && pmu_t0_o && !dirty_o && !sb_enq_valid_o,"mixed side effects");
+          retired++;
+        end else chk(valid_o===1'b0,"mixed no extra completion");
+        cycle++;
+      end
+      @(negedge clk); valid_i=0; aicfg_i='0;
+      chk(accepted==16 && retired==16,"mixed exactly sixteen");
     end
 
     // ---- MMA 4x4x4 --------------------------------------------------------

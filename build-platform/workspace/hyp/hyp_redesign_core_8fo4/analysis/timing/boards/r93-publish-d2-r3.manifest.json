@@ -1,0 +1,35 @@
+{
+  "phase": "publish",
+  "Dot4Stages": 2,
+  "NrRgprPorts": 3,
+  "argv": [
+    "E:\\cva6\\sv-timing\\target\\release\\sv-timing.exe",
+    "analyze",
+    "--files-from",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\timing\\hyp8-core.f",
+    "--modules",
+    "g6lc_ai_exec",
+    "--target-mhz",
+    "5000",
+    "--fo4-ps",
+    "20",
+    "--budget-margin",
+    "0.2",
+    "--param-map",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r93\\params-d2-r3.json",
+    "--stages",
+    "--json-out",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\timing\\boards\\r93-publish-d2-r3.json",
+    "--ir-out",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\timing\\boards\\r93-publish-d2-r3.ir.json"
+  ],
+  "returncode": 0,
+  "baseline": "r92-final-d2-r3",
+  "source_commit": "7d01bc4df13905cb42b855ae03f625521838efc5",
+  "sha256": {
+    "build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\core\\cvxif_g6lc_ai\\g6lc_ai_exec.sv": "1cb9de38e5f9fa56537228c3d64f86ce5041da33376364af87e609011c068082",
+    "sv-timing\\target\\release\\sv-timing.exe": "8b8545483aaf6939d0abd570d7912cd54b3e8fda99d393ee6e5b5b01ecccecd9",
+    "build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\timing\\hyp8-core.f": "1ec1c28bc99f63c14e1f31c98a0507a95961fbdfea7b3bff38a1701ba6cca2d8",
+    "build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r93\\params-d2-r3.json": "1c666f2db1c73fe48b2b01072533704990775275620ee0b1df0924177300cf55"
+  }
+}
