@@ -318,10 +318,19 @@ blocks with an FP16 `lm_head` — **0.369× FP32 weight bytes**, perplexity
 **−0.1 % / −0.3 %**, and top-1 **0.973 / 0.9745** on calibration/held-out. B1
 QEMU parity (`b1-parity-20260929-r10-queue`) separately proves OpenSBI plus the
 v2 descriptor/queue path (`ai.enq`/`ai.qfence`/`ai.poll`, ticket and completion
-word), not GPT-2 inference. The 48× therefore remains a fabric-gated nameplate
-analysis: GPT-2 proves recipe accuracy/offload on the software reference, QEMU
-proves contract plumbing, and neither is measured MAC/s or model inference
-throughput.
+word), not GPT-2 inference. Measured mixed residency is cumulative but much
+smaller: on the directed one-engine square job, **A-only or B-only** halves the
+32 INT8 operand beats and runs 189→164 cycles (**1.152×**), while **A+B**
+removes all operand reads and runs 189→139 (**1.359×**); FP32 is 669→596
+(**1.122×**) and 669→523 (**1.279×**). **C is not a resident operand**: with
+A+B resident, only MAC work and C writes remain. On the decode axis, resident B
+is INT8/FP32 **1.806×/1.859×** at n=8 and A+B **2.074×/2.107×**; intra-row C
+trailing removes the remaining store tail in the live `1×512×512` INT8 SoC
+point, giving cold **33,880 → resident 590 cycles** (**57.4×**), and the
+two-panel `1×768×512` layer reaches **39.3×**. The 48× therefore remains a
+fabric-gated nameplate analysis: GPT-2 proves recipe accuracy/offload on the
+software reference, QEMU proves contract plumbing, and neither is measured
+MAC/s or model inference throughput.
 
 `IslandFpEn` is **on** for `g6lc64_ai` since 2026-09-30 (the core-side T0 tile stays INT8);
 `PolicyCodecEn`/`PolicyBenefitEn` and `VaTurboEn` remain off in production. Open on the
