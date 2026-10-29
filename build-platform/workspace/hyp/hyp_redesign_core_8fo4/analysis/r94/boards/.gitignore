@@ -1,0 +1,7 @@
+*.ir.json
+*.json
+*.log
+!before-*.manifest.json
+!final-*.manifest.json
+!before-*.peaks.json
+!final-*.peaks.json

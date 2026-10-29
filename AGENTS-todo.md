@@ -1,5 +1,17 @@
 # AGENTS workflow todo / pending-log
 
+Hyp8 r94: accepted static CLMUL rows (200.10 -> 14.40 FO4), parallel
+write-tracker age selection (119.90 -> 27.90 in L2/L3), and grouped floating
+exponent minima in the existing S1 window (62.55 -> 38.75 at 512 lanes).
+Matched delay-v49, 20 ps/FO4, budget 8; module-local structural evidence,
+not mapped timing. Latency/throughput preserved; independent CLMUL/tracker
+checks, exact floating old/new miter at 1/3/16/64 lanes and posted cache
+integration pass. Coherence counter trial rejected: counters have no live
+consumer; invalidation aggregate also needs an NBA/reset path audit.
+Next candidate rows: FLU reserve 67.45, L3 engine 62.69, GEMM sequencer 52.
+Aggregate verification remains blocked/failed; no Linux or 8-FO4 closure.
+Details: `build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r94/worklog.md`.
+
 Hyp8 AI execution r93: one-cycle DOT4A configuration selection moved to
 elaboration, with one signed 32-bit result value extended at publication.
 Matched delay-v49 rows: 60.44 -> 45.60 FO4 (two ports), 63.60 -> 45.60

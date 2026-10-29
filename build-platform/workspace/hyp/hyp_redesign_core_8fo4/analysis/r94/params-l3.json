@@ -1,0 +1,20 @@
+{
+  "AXI_ADDR_WIDTH": 64,
+  "AXI_DATA_WIDTH": 64,
+  "AXI_ID_WIDTH": 4,
+  "AXI_USER_WIDTH": 1,
+  "Enable": 1,
+  "LINE_WIDTH": 512,
+  "DATA_BANKS": 4,
+  "RR_EN": 0,
+  "FAIR_WRITES": 1,
+  "TAG_SRAM": 1,
+  "WRITE_UPDATE": 1,
+  "POSTED_WRITES": 1,
+  "WTRK_DEPTH": 4,
+  "RDTRK_DEPTH": 4,
+  "PF_EN": 0,
+  "BYTE_SIZE": 1048576,
+  "SET_ASSOC": 16,
+  "MSHR_DEPTH": 4
+}

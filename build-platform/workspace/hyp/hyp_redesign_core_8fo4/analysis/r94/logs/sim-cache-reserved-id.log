@@ -1,0 +1,14 @@
+[L2TB] config bytes=4096 ways=4 line_bits=512 mshr=4 banks=2 rr=0 latency=6 stalls=0 seed=600df00d
+[L2TB] phase=warm cycles=352 reads=16 writes=0 hits=0 misses=16 evictions=0 bypass=0 mshr_full=0 bank_conf=0
+[L2TB] traffic phase=warm mem_ar=16 mem_rbeats=128 mem_aw=0 mem_wbeats=0 fills=16
+[L2TB] phase=warm_hits cycles=352 reads=16 writes=0 hits=16 misses=0 evictions=0 bypass=0 mshr_full=0 bank_conf=0
+[L2TB] traffic phase=warm_hits mem_ar=0 mem_rbeats=0 mem_aw=0 mem_wbeats=0 fills=0
+[L2TB] phase=capacity cycles=2816 reads=128 writes=0 hits=0 misses=128 evictions=80 bypass=0 mshr_full=0 bank_conf=0
+[L2TB] traffic phase=capacity mem_ar=128 mem_rbeats=1024 mem_aw=0 mem_wbeats=0 fills=128
+[L2TB] phase=thrash cycles=2640 reads=120 writes=0 hits=0 misses=120 evictions=120 bypass=0 mshr_full=0 bank_conf=0
+[L2TB] traffic phase=thrash mem_ar=120 mem_rbeats=960 mem_aw=0 mem_wbeats=0 fills=120
+[L2TB] phase=hot_scan cycles=12672 reads=576 writes=0 hits=0 misses=576 evictions=576 bypass=0 mshr_full=0 bank_conf=0
+[L2TB] traffic phase=hot_scan mem_ar=576 mem_rbeats=4608 mem_aw=0 mem_wbeats=0 fills=576
+[194415000] %Error: g6lc_l2_top.sv:1116: Assertion failed in TOP.tb_g6lc_l2.dut.gen_l2.gen_trk.gen_wrid_chk: TOP.tb_g6lc_l2.dut.gen_l2.gen_trk.gen_wrid_chk: postable slave write arrived on reserved WR_ID
+%Error: /mnt/e/cva6/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/l2_cache/g6lc_l2_top.sv:1116: Verilog $stop
+Aborting...

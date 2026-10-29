@@ -1,0 +1,101 @@
+diff --git a/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/coherence/g6lc_coherence_hub.sv b/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/coherence/g6lc_coherence_hub.sv
+index 7bfde1384..6ef25eedb 100644
+--- a/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/coherence/g6lc_coherence_hub.sv
++++ b/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/coherence/g6lc_coherence_hub.sv
+@@ -454,6 +454,13 @@ assign mem_req_o            = core_req_i[0];
+     ot_entry_t aw_ot_q[OT_MAX], aw_ot_d[OT_MAX];
+     inv_ot_t   inv_ot_q[OT_MAX], inv_ot_d[OT_MAX];
+     logic [OT_CNT_W-1:0] ar_ot_cnt_q, ar_ot_cnt_d, aw_ot_cnt_q, aw_ot_cnt_d;
++    // r94: the four saturating serial decrements collapse into one
++    // event vector plus a single final subtract. Bits are per-path,
++    // not per-slot: held-B releases c, the incoming direct B, held-R
++    // releases c, the incoming direct R.
++    logic [2*NC+1:0]          aw_retire_events;
++    localparam int unsigned AW_CALC_W = $clog2(OT_MAX + 2*NC + 3);
++    logic [AW_CALC_W-1:0]     aw_count_base, aw_pop_count;
+     logic ar_ot_full, aw_ot_full;
+     logic [OT_W-1:0] ar_free_slot, aw_free_slot;
+     logic            ar_have_free, aw_have_free;
+@@ -468,7 +475,27 @@ assign mem_req_o            = core_req_i[0];
+           (aw_hold_q && aw_hold_slot_q == OT_W'(s));
+     end
+     assign ar_ot_full = &slot_used;
+-    assign aw_ot_full = &slot_used;
++    assign aw_ot_full   = &slot_used;
++    // r94: admit then retire once - the serial saturating decrements
++    // (four code sites, up to 2*NC+2 events) become one subtract.
++    assign aw_count_base = AW_CALC_W'(aw_ot_cnt_q) + AW_CALC_W'(aw_fire);
++    assign aw_pop_count  = AW_CALC_W'($countones(aw_retire_events));
++    assign aw_ot_cnt_d   = (aw_count_base > aw_pop_count)
++                         ? OT_CNT_W'(aw_count_base - aw_pop_count) : '0;
++// pragma translate_off
++    always_ff @(posedge clk_i) begin
++      if (rst_ni) begin : aw_cnt_chk
++        logic [OT_CNT_W-1:0] ref_cnt;
++        ref_cnt = aw_ot_cnt_q + OT_CNT_W'(aw_fire);
++        for (int e = 0; e < 2*NC+2; e++)
++          if (aw_retire_events[e] && ref_cnt != '0) ref_cnt = ref_cnt - 1'b1;
++        assert (aw_ot_cnt_d == ref_cnt)
++          else $error("aw_ot_cnt countones identity");
++        assert (aw_count_base <= AW_CALC_W'(OT_MAX))
++          else $error("aw_ot_cnt base overflow");
++      end
++    end
++// pragma translate_on
+ 
+     // Per-core invalidation delivery hold: while core c still has a same-line
+     // fill outstanding -- an AR that beat the write to the memory port and may
+@@ -705,7 +732,7 @@ assign mem_req_o            = core_req_i[0];
+       aw_rr_d     = aw_rr_q;
+       ar_rr_d     = ar_rr_q;
+       ar_ot_cnt_d = ar_ot_cnt_q;
+-      aw_ot_cnt_d = aw_ot_cnt_q;
++      aw_retire_events = '0;
+       w_owner_d   = w_owner_q;
+       w_busy_d    = w_busy_q;
+       w_slot_d    = w_slot_q;
+@@ -748,7 +775,7 @@ assign mem_req_o            = core_req_i[0];
+         core_resp_o[aw_winner].aw_ready = 1'b1;
+         aw_fire   = 1'b1;
+         aw_rr_d   = CID_W'((int'(aw_winner) + 1) % NC);
+-        aw_ot_cnt_d = aw_ot_cnt_q + 1'b1;
++        aw_ot_cnt_d = aw_ot_cnt_q; // admit folded into aw_count_base
+         aw_ot_d[aw_free_slot].valid    = 1'b1;
+         // AXI ATOP[5]=1 ⇒ R beat with AW id (load/swap/compare)
+         aw_ot_d[aw_free_slot].expect_r = core_req_i[aw_winner].aw.atop[5];
+@@ -817,7 +844,7 @@ assign mem_req_o            = core_req_i[0];
+               aw_ot_d[held_slot[c]].b_done = 1'b1;
+             end else begin
+               aw_ot_d[held_slot[c]].valid = 1'b0;
+-              if (aw_ot_cnt_d != '0) aw_ot_cnt_d = aw_ot_cnt_d - 1'b1;
++              aw_retire_events[c] = 1'b1;
+             end
+           end
+         end
+@@ -849,7 +876,7 @@ assign mem_req_o            = core_req_i[0];
+                 aw_ot_d[bs].b_done = 1'b1;
+               end else begin
+                 aw_ot_d[bs].valid = 1'b0;
+-                if (aw_ot_cnt_d != '0) aw_ot_cnt_d = aw_ot_cnt_d - 1'b1;
++                aw_retire_events[NC] = 1'b1;
+               end
+             end
+           end else begin
+@@ -890,7 +917,7 @@ assign mem_req_o            = core_req_i[0];
+               aw_ot_d[r_held_slot[c]].expect_r = 1'b0;
+               if (aw_ot_d[r_held_slot[c]].b_done) begin
+                 aw_ot_d[r_held_slot[c]].valid = 1'b0;
+-                if (aw_ot_cnt_d != '0) aw_ot_cnt_d = aw_ot_cnt_d - 1'b1;
++                aw_retire_events[NC+1+c] = 1'b1;
+               end
+             end
+           end
+@@ -934,7 +961,7 @@ assign mem_req_o            = core_req_i[0];
+               aw_ot_d[rs].expect_r = 1'b0;
+               if (aw_ot_d[rs].b_done) begin
+                 aw_ot_d[rs].valid = 1'b0;
+-                if (aw_ot_cnt_d != '0) aw_ot_cnt_d = aw_ot_cnt_d - 1'b1;
++                aw_retire_events[2*NC+1] = 1'b1;
+               end
+             end
+           end else if (!aw_ot_q[rs].r_held) begin

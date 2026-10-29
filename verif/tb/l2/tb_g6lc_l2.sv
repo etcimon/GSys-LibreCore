@@ -770,6 +770,11 @@ module tb_g6lc_l2;
                            input bit update_golden = 1);
     int unsigned guard = 0;
     id_t req_id = id_t'(total_writes);
+    // The outer posted-write engine reserves all-ones-minus-one for its
+    // downstream retagging. Ordinary clients must not allocate that ID.
+    // Lock/ATOP and FILL_ID-alias requests retain their existing coverage.
+    if (POSTED_WRITES && !locked && req_id == (id_t'('1) - 1'b1))
+      req_id = req_id - 1'b1;
     @(negedge clk);
     slv_req.aw = '0;
     slv_req.aw.addr = a;

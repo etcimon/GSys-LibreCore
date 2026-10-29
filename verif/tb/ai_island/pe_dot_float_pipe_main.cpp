@@ -211,6 +211,9 @@ public:
     explicit PipeTest(uint64_t seed) : random(seed) {
         Lanes = static_cast<int>(sizeof(dut.a_i) / sizeof(dut.a_i[0]));
         Latency = 4 + ceil_log2(Lanes);
+#ifdef G6LC_HYP8_FLOAT_PIPE
+        Latency = 5 + ceil_log2(Lanes); // Edge distance; acceptance counts as edge one.
+#endif
         reset();
     }
 
@@ -239,6 +242,9 @@ public:
             dut.clk_i = 0; dut.eval();
             dut.clk_i = 1; dut.eval();
         }
+#ifdef G6LC_HYP8_FLOAT_PIPE
+        transactions -= want.size(); // Reset cancels every pending transaction.
+#endif
         want.clear();
     }
 
@@ -309,6 +315,26 @@ int main(int argc, char** argv) {
         }
         PipeTest test(0x676c636670ULL);
         const int L = test.Lanes;
+
+#ifdef G6LC_HYP8_FLOAT_PIPE
+        // Reset while multiple owners are pending, then issue without idle gaps.
+        for (int i = 0; i < 3; ++i)
+            test.start_dot(7, std::vector<uint32_t>(L, 0x3f800000U),
+                           std::vector<uint32_t>(L, 0x40000000U),
+                           std::vector<bool>(L, true));
+        test.reset();
+        for (int pos : {0, 7, 8, 15, L - 1}) {
+            if (pos >= L) continue;
+            std::vector<uint32_t> a(L, 0x3f800000U), b(L, 0x3f800000U);
+            std::vector<bool> v(L, true);
+            a[pos] = 0x00800000U;
+            test.start_dot(7, a, b, v);
+            v[pos] = false;
+            test.start_dot(7, a, b, v);
+        }
+        test.start_dot(7, std::vector<uint32_t>(L, 0x7f800000U),
+                       std::vector<uint32_t>(L, 0), std::vector<bool>(L, false));
+#endif
 
         // Directed: 1.0 * 1.0 for every supported float format, all lanes valid.
         for (unsigned numfmt : {3U, 4U, 5U, 6U, 7U}) {

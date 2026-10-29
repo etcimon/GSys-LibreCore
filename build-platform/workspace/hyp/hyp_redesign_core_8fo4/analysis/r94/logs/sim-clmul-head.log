@@ -1,0 +1,2 @@
+PASS tb_clmul_hyp8 checks=3759
+- /mnt/e/cva6/verif/tb/core/multiplier_sbs/tb_clmul_hyp8.sv:138: Verilog $finish

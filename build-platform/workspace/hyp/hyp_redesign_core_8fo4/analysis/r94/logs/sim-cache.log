@@ -1,0 +1,35 @@
+[L2TB] config bytes=4096 ways=4 line_bits=512 mshr=4 banks=2 rr=0 latency=6 stalls=0 seed=600df00d
+[L2TB] phase=warm cycles=352 reads=16 writes=0 hits=0 misses=16 evictions=0 bypass=0 mshr_full=0 bank_conf=0
+[L2TB] traffic phase=warm mem_ar=16 mem_rbeats=128 mem_aw=0 mem_wbeats=0 fills=16
+[L2TB] phase=warm_hits cycles=352 reads=16 writes=0 hits=16 misses=0 evictions=0 bypass=0 mshr_full=0 bank_conf=0
+[L2TB] traffic phase=warm_hits mem_ar=0 mem_rbeats=0 mem_aw=0 mem_wbeats=0 fills=0
+[L2TB] phase=capacity cycles=2816 reads=128 writes=0 hits=0 misses=128 evictions=80 bypass=0 mshr_full=0 bank_conf=0
+[L2TB] traffic phase=capacity mem_ar=128 mem_rbeats=1024 mem_aw=0 mem_wbeats=0 fills=128
+[L2TB] phase=thrash cycles=2640 reads=120 writes=0 hits=0 misses=120 evictions=120 bypass=0 mshr_full=0 bank_conf=0
+[L2TB] traffic phase=thrash mem_ar=120 mem_rbeats=960 mem_aw=0 mem_wbeats=0 fills=120
+[L2TB] phase=hot_scan cycles=12672 reads=576 writes=0 hits=0 misses=576 evictions=576 bypass=0 mshr_full=0 bank_conf=0
+[L2TB] traffic phase=hot_scan mem_ar=576 mem_rbeats=4608 mem_aw=0 mem_wbeats=0 fills=576
+[L2TB] phase=wr_rd cycles=656 reads=32 writes=16 hits=16 misses=16 evictions=16 bypass=16 mshr_full=0 bank_conf=0
+[L2TB] traffic phase=wr_rd mem_ar=16 mem_rbeats=128 mem_aw=16 mem_wbeats=16 fills=16
+[L2TB] phase=nc cycles=176 reads=16 writes=0 hits=0 misses=0 evictions=0 bypass=16 mshr_full=0 bank_conf=0
+[L2TB] traffic phase=nc mem_ar=16 mem_rbeats=16 mem_aw=0 mem_wbeats=0 fills=0
+[L2TB] phase=lfsr cycles=10328 reads=446 writes=66 hits=24 misses=422 evictions=422 bypass=66 mshr_full=0 bank_conf=0
+[L2TB] traffic phase=lfsr mem_ar=422 mem_rbeats=3376 mem_aw=66 mem_wbeats=66 fills=422
+[L2TB] phase=reset_fill cycles=88 reads=4 writes=0 hits=0 misses=4 evictions=0 bypass=0 mshr_full=0 bank_conf=0
+[L2TB] traffic phase=reset_fill mem_ar=4 mem_rbeats=32 mem_aw=0 mem_wbeats=0 fills=4
+[L2TB] phase=all_ways_hit cycles=20 reads=4 writes=0 hits=4 misses=0 evictions=0 bypass=0 mshr_full=0 bank_conf=0
+[L2TB] traffic phase=all_ways_hit mem_ar=0 mem_rbeats=0 mem_aw=0 mem_wbeats=0 fills=0
+[L2TB] phase=protected_hot cycles=1184 reads=128 writes=0 hits=96 misses=32 evictions=32 bypass=0 mshr_full=0 bank_conf=0
+[L2TB] traffic phase=protected_hot mem_ar=32 mem_rbeats=256 mem_aw=0 mem_wbeats=0 fills=32
+[L2TB] phase=invalidate_masked cycles=121 reads=4 writes=1 hits=2 misses=2 evictions=0 bypass=1 mshr_full=0 bank_conf=0
+[L2TB] traffic phase=invalidate_masked mem_ar=2 mem_rbeats=16 mem_aw=1 mem_wbeats=1 fills=2
+[L2TB] phase=exclusive_nc cycles=27 reads=3 writes=0 hits=1 misses=0 evictions=0 bypass=2 mshr_full=0 bank_conf=0
+[L2TB] traffic phase=exclusive_nc mem_ar=2 mem_rbeats=2 mem_aw=0 mem_wbeats=0 fills=0
+[L2TB] phase=fill_error_no_install cycles=150 reads=4 writes=0 hits=0 misses=4 evictions=0 bypass=0 mshr_full=0 bank_conf=0
+[L2TB] traffic phase=fill_error_no_install mem_ar=4 mem_rbeats=32 mem_aw=0 mem_wbeats=0 fills=4
+[L2TB] phase=replacement_hole cycles=134 reads=6 writes=0 hits=0 misses=6 evictions=1 bypass=0 mshr_full=0 bank_conf=0
+[L2TB] traffic phase=replacement_hole mem_ar=6 mem_rbeats=48 mem_aw=0 mem_wbeats=0 fills=6
+[L2TB] policy checks lookups=1485 installs=1324 evictions=1247 victim_mask=1
+[L2TB] totals reads=1503 writes=83 hits=159 misses=1326 evictions=1247 bypass=101 mshr_full=0 bank_conf=0 cycles=31730
+[L2TB] RESULT pass
+- /mnt/e/cva6/verif/tb/l2/tb_g6lc_l2.sv:1337: Verilog $finish

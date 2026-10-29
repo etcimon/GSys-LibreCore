@@ -66,6 +66,7 @@ module mult_clmul
   localparam int unsigned NST = 6;                 // S2..S7 edges
 
   // Slice k of the carry-less product: XOR_j b_i[8k+j] ? (a_i << (8k+j)).
+// pragma translate_off
   function automatic logic [PW-1:0] slice_prod(
       input logic [XW-1:0] a, input logic [7:0] bs, input int unsigned s);
     logic [PW-1:0] acc;
@@ -74,6 +75,41 @@ module mult_clmul
       acc ^= bs[j] ? (PW'(a) << (SL * s + j)) : '0;
     return acc;
   endfunction
+// pragma translate_on
+
+  // r94: the eight slice products are static wired AND/XOR rows - the
+  // constant-shift calls are already foldable; this makes the wiring
+  // and XOR grouping explicit so no variable slice index survives.
+  logic [PW-1:0] slice_value[8];
+  for (genvar s = 0; s < 8; s++) begin : gen_slice
+    logic [XW-1:0] sa;
+    logic [7:0]    sb;
+    logic [PW-1:0] rows[8];
+    case (s)
+      0: begin assign sa = a_i;    assign sb = b_i[7:0];         end
+      1: begin assign sa = a_i;    assign sb = b_i[15:8];        end
+      2: begin assign sa = a_q[0]; assign sb = b_rem_s2_q[7:0];  end
+      3: begin assign sa = a_q[0]; assign sb = b_rem_s2_q[15:8]; end
+      4: begin assign sa = a_q[1]; assign sb = b_rem_s3_q[7:0];  end
+      5: begin assign sa = a_q[2]; assign sb = b_rem_s4_q[7:0];  end
+      6: begin assign sa = a_q[3]; assign sb = b_rem_s5_q[7:0];  end
+      default: begin assign sa = a_q[4]; assign sb = b_rem_s6_q[7:0]; end
+    endcase
+    for (genvar j = 0; j < 8; j++) begin : gen_row
+      localparam int SHIFT = 8 * s + j;
+      assign rows[j] = {{(PW-XW-SHIFT){1'b0}},
+                       (sa & {XW{sb[j]}}), {SHIFT{1'b0}}};
+    end
+    assign slice_value[s] = ((rows[0] ^ rows[1]) ^ (rows[2] ^ rows[3]))
+                          ^ ((rows[4] ^ rows[5]) ^ (rows[6] ^ rows[7]));
+    // pragma translate_off
+    always_ff @(posedge clk_i) begin
+      if (rst_ni)
+        assert (slice_value[s] == slice_prod(sa, sb, s))
+          else $error("clmul slice %0d wired-row identity", s);
+    end
+    // pragma translate_on
+  end
 
   // Slice schedule over the six edges: {0,1} on S2, {2,3} on S3, then one
   // slice each on S4..S7 — every stage folds at most a sixteen-term XOR
@@ -94,17 +130,14 @@ module mult_clmul
 
   always_comb begin : p_slices
     // S2: slices 0 and 1 — a_i/b_i are this token's own S1 registers
-    acc_d[0] = slice_prod(a_i, b_i[7:0], 0) ^
-               slice_prod(a_i, b_i[15:8], 1);
+    acc_d[0] = slice_value[0] ^ slice_value[1];
     // S3: slices 2 and 3 from the token's registered operands
-    acc_d[1] = acc_q[0] ^
-               slice_prod(a_q[0], b_rem_s2_q[7:0], 2) ^
-               slice_prod(a_q[0], b_rem_s2_q[15:8], 3);
+    acc_d[1] = acc_q[0] ^ slice_value[2] ^ slice_value[3];
     // S4..S7: one slice each (4,5,6,7)
-    acc_d[2] = acc_q[1] ^ slice_prod(a_q[1], b_rem_s3_q[7:0], 4);
-    acc_d[3] = acc_q[2] ^ slice_prod(a_q[2], b_rem_s4_q[7:0], 5);
-    acc_d[4] = acc_q[3] ^ slice_prod(a_q[3], b_rem_s5_q[7:0], 6);
-    acc_d[5] = acc_q[4] ^ slice_prod(a_q[4], b_rem_s6_q[7:0], 7);
+    acc_d[2] = acc_q[1] ^ slice_value[4];
+    acc_d[3] = acc_q[2] ^ slice_value[5];
+    acc_d[4] = acc_q[3] ^ slice_value[6];
+    acc_d[5] = acc_q[4] ^ slice_value[7];
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin : p_pipe

@@ -46,6 +46,13 @@ module g6lc_ai_pe_dot_float_pipe #(
   localparam logic signed [15:0] NO_EXP = 16'sd32767;
   localparam int unsigned P2 = 1 << ($clog2(Lanes < 1 ? 1 : Lanes));
   localparam int unsigned LEVELS = $clog2(P2);
+  // r94: the minimum-exponent search is pre-reduced in groups of
+  // EXP_GROUP_SIZE lanes during S1 (inside the existing multiply
+  // window); S2's tree then only walks the group roots.
+  localparam int unsigned EXP_GROUP_LEVELS = (LEVELS < 3) ? LEVELS : 3;
+  localparam int unsigned EXP_GROUP_SIZE   = 1 << EXP_GROUP_LEVELS;
+  localparam int unsigned EXP_GROUPS       = P2 / EXP_GROUP_SIZE;
+  localparam int unsigned EXP_TAIL_LEVELS  = LEVELS - EXP_GROUP_LEVELS;
   localparam int unsigned MAXW = g6lc_ai_fp_pkg::FP_DOT_MAXW;
 
   localparam int unsigned LATENCY = LEVELS + 5;
@@ -426,6 +433,37 @@ assign fmt_ok = (numfmt_i == AI_FMT_FP8_E4M3) ||
   //
   // Per-lane always_ff blocks avoid for-loop procedural-variable ordering
   // problems; each lane captures its own local product and valid flags.
+  // early_exp mirrors fp_dot_product's validity exactly: a lane's
+  // exponent joins the minimum iff both operands are finite non-zero
+  // and the lane is valid; eligibility never reads the product, so the
+  // group minima can register in the same S1 window.
+  logic signed [15:0] early_exp    [P2];
+  logic signed [15:0] group_min_d  [EXP_GROUPS];
+  logic signed [15:0] group_min_q  [EXP_GROUPS];
+  for (genvar g = 0; g < P2; g++) begin : gen_early_exp
+    assign early_exp[g] =
+        (s0_fmt_q && s0_lane_q[g] &&
+         !s0_a_q[g].is_nan && !s0_b_q[g].is_nan &&
+         !s0_a_q[g].is_inf && !s0_b_q[g].is_inf &&
+         !s0_a_q[g].is_zero && !s0_b_q[g].is_zero)
+        ? (s0_a_q[g].exp + s0_b_q[g].exp) : NO_EXP;
+  end
+  for (genvar grp = 0; grp < EXP_GROUPS; grp++) begin : gen_group_min
+    logic signed [15:0] gmin [0:EXP_GROUP_LEVELS][0:EXP_GROUP_SIZE-1];
+    for (genvar l = 0; l < EXP_GROUP_SIZE; l++)
+      assign gmin[0][l] = early_exp[grp * EXP_GROUP_SIZE + l];
+    for (genvar level = 1; level <= EXP_GROUP_LEVELS; level++)
+      for (genvar n = 0; n < (EXP_GROUP_SIZE >> level); n++)
+        assign gmin[level][n] =
+            (gmin[level-1][2*n] < gmin[level-1][2*n+1])
+            ? gmin[level-1][2*n] : gmin[level-1][2*n+1];
+    assign group_min_d[grp] = gmin[EXP_GROUP_LEVELS][0];
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni)         group_min_q[grp] <= NO_EXP;
+      else if (s0_start_q) group_min_q[grp] <= group_min_d[grp];
+    end
+  end
+
   g6lc_ai_fp_pkg::fp_dot_product_t s1_prod    [P2];
   g6lc_ai_fp_pkg::fp_dot_product_t s1_prod_d  [P2];
   logic                            s1_vld     [P2];
@@ -521,14 +559,15 @@ assign fmt_ok = (numfmt_i == AI_FMT_FP8_E4M3) ||
 
   // Stage 2 combinational: block exponent + NaN/Inf/Inf-sign flags.
   always_comb begin
-    logic signed [15:0] exp_min [0:LEVELS][0:P2-1];
+    logic signed [15:0] exp_min [0:EXP_TAIL_LEVELS][0:EXP_GROUPS-1];
     logic any_nan, any_inf, any_finite;
     logic has_pos_inf, has_neg_inf;
-    // Block exponent = min over valid exponents
-    for (int unsigned l = 0; l < P2; l++)
-      exp_min[0][l] = s1_vld[l] ? s1_exp[l] : NO_EXP;
-    for (int unsigned level = 1; level <= LEVELS; level++) begin
-      for (int unsigned i = 0; i < (P2 >> level); i++) begin
+    // Block exponent = min over the registered group minima; the group
+    // roots already encode invalid lanes as NO_EXP.
+    for (int unsigned l = 0; l < EXP_GROUPS; l++)
+      exp_min[0][l] = group_min_q[l];
+    for (int unsigned level = 1; level <= EXP_TAIL_LEVELS; level++) begin
+      for (int unsigned i = 0; i < (EXP_GROUPS >> level); i++) begin
         exp_min[level][i] = (exp_min[level-1][2*i] < exp_min[level-1][2*i+1]) ?
                             exp_min[level-1][2*i] : exp_min[level-1][2*i+1];
       end
@@ -548,13 +587,27 @@ assign fmt_ok = (numfmt_i == AI_FMT_FP8_E4M3) ||
         else            has_pos_inf = 1'b1;
       end
     end
-    s2_block_exp_d    = exp_min[LEVELS][0];
+    s2_block_exp_d    = exp_min[EXP_TAIL_LEVELS][0];
     s2_any_nan_d      = any_nan;
     s2_any_inf_d      = any_inf;
     s2_any_finite_d   = any_finite;
     s2_same_inf_sign_d = !(has_neg_inf && has_pos_inf);
     s2_inf_sign_d     = has_neg_inf;
   end
+// pragma translate_off
+  // The grouped S1/S2 split must equal the original single-pass minimum.
+  always_ff @(posedge clk_i) begin
+    if (rst_ni) begin : gexp_chk
+      logic signed [15:0] ref_min;
+      ref_min = NO_EXP;
+      for (int unsigned l = 0; l < P2; l++)
+        if ((s1_vld[l] ? s1_exp[l] : NO_EXP) < ref_min)
+          ref_min = s1_vld[l] ? s1_exp[l] : NO_EXP;
+      assert (s2_block_exp_d == ref_min)
+        else $error("grouped exponent-min identity");
+    end
+  end
+// pragma translate_on
 
   // Stage 2 register: product hold is per-lane above; this captures metadata.
   always_ff @(posedge clk_i or negedge rst_ni) begin

@@ -1,0 +1,16 @@
+PASS tb_clmul_hyp8 checks=3759
+PASS tb_clmul_hyp8 checks=3759
+PASS wtrk_r94 depth=1 checks=24963 pushes=509 pops=508 overlap=0
+PASS wtrk_r94 depth=3 checks=30604 pushes=1208 pops=1206 overlap=349
+PASS wtrk_r94 depth=4 checks=31616 pushes=1335 pops=1332 overlap=551
+PASS wtrk_r94 depth=8 checks=33307 pushes=1458 pops=1457 overlap=739
+PASS wtrk_r94 depth=4 checks=31616 pushes=1335 pops=1332 overlap=551
+PASS pe_dot_float_pipe Lanes=1 transactions=5033 checks=5033 latency=5 seed=0x676c636670
+PASS pe_dot_float_pipe Lanes=3 transactions=5033 checks=5033 latency=7 seed=0x676c636670
+PASS pe_dot_float_pipe Lanes=16 transactions=5039 checks=5039 latency=9 seed=0x676c636670
+PASS pe_dot_float_pipe Lanes=64 transactions=5039 checks=5039 latency=11 seed=0x676c636670
+[L2TB] RESULT pass
+PASS clmul negative control
+PASS floatpipe Lanes=512 elaboration/lint
+R94-LEAF-ALL-PASS
+Aggregate verification exit: 1

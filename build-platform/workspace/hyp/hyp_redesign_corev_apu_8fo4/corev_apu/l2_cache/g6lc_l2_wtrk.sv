@@ -63,9 +63,9 @@ module g6lc_l2_wtrk #(
     // an R1 hold against a live entry can be split write-around vs
     // write-update-hit (line0_wu_o).
     input  logic                        mark_i,
-    input  logic [$clog2(DEPTH)-1:0]    mark_idx_i,
+    input  logic [((DEPTH>1)?$clog2(DEPTH):1)-1:0] mark_idx_i,
     output logic                        full_o,
-    output logic [$clog2(DEPTH)-1:0]    alloc_idx_o,
+    output logic [((DEPTH>1)?$clog2(DEPTH):1)-1:0] alloc_idx_o,
     // Memory B channel: absorb a B into the oldest matching unserved entry
     // (matched on the downstream id).
     input  logic                        m_b_valid_i,
@@ -81,7 +81,7 @@ module g6lc_l2_wtrk #(
     output logic                        s_b_blocking_o,
     input  logic                        s_b_ready_i,
     output logic                        pop_o,
-    output logic [$clog2(DEPTH)-1:0]    pop_idx_o,
+    output logic [((DEPTH>1)?$clog2(DEPTH):1)-1:0] pop_idx_o,
     // Line hazard probes (registered request fields compared in the
     // parent): probe 0 is the R1 in-flight-request line, probe 1 the R2
     // AW-admission line (whose matching entry's downstream id is also
@@ -217,6 +217,9 @@ always_comb begin
   assign alloc_idx_o = free_idx;
 
   // Oldest select: pick the set-bit with no set-bit older than it.
+  // r94: the two call sites are parallel age-column reductions below;
+  // the function stays as the translate_off reference oracle only.
+// pragma translate_off
   function automatic logic [DEPTH-1:0] oldest(
       input logic [DEPTH-1:0] match,
       input logic [DEPTH-1:0] older_col [DEPTH]  // read as matrix (row per j)
@@ -231,6 +234,17 @@ always_comb begin
     end
     return res;
   endfunction
+// pragma translate_on
+
+  // age_column[e][j] is entry e's "j is older than me" view - the matrix
+  // transpose, so each candidate e AND-reduces only the matches that
+  // outrank it (one mask AND + one OR-reduce per candidate).
+  logic [DEPTH-1:0] age_column [DEPTH];
+  for (genvar e = 0; e < DEPTH; e++) begin : gen_age_col
+    for (genvar j = 0; j < DEPTH; j++) begin : gen_age_bit
+      assign age_column[e][j] = older_q[j][e];
+    end
+  end
 
   // --------------------
   // Memory B: oldest entry with matching downstream id that still waits
@@ -241,7 +255,8 @@ always_comb begin
   always_comb begin
     for (int unsigned e = 0; e < DEPTH; e++)
       m_match[e] = valid_q[e] && !b_pend_q[e] && (ent_dsid_q[e] == m_b_id_i);
-    m_sel = oldest(m_match, older_q);
+    for (int unsigned e = 0; e < DEPTH; e++)
+      m_sel[e] = m_match[e] && !(|(m_match & age_column[e]));
     m_sel_idx = '0;
     for (int unsigned e = 0; e < DEPTH; e++)
       if (m_sel[e]) m_sel_idx = IDX_W'(e);
@@ -256,11 +271,24 @@ always_comb begin
   always_comb begin
     for (int unsigned e = 0; e < DEPTH; e++)
       p_match[e] = valid_q[e] && b_pend_q[e];
-    p_sel = oldest(p_match, older_q);
+    for (int unsigned e = 0; e < DEPTH; e++)
+      p_sel[e] = p_match[e] && !(|(p_match & age_column[e]));
     p_sel_idx = '0;
     for (int unsigned e = 0; e < DEPTH; e++)
       if (p_sel[e]) p_sel_idx = IDX_W'(e);
   end
+// pragma translate_off
+  always_ff @(posedge clk_i) begin
+    if (rst_ni) begin
+      assert (m_sel == oldest(m_match, older_q))
+        else $error("wtrk m_sel oldest identity");
+      assert (p_sel == oldest(p_match, older_q))
+        else $error("wtrk p_sel oldest identity");
+      assert ($onehot0(m_sel) && $onehot0(p_sel))
+        else $error("wtrk oldest not onehot");
+    end
+  end
+// pragma translate_on
   assign s_b_valid_o = |p_match;
   assign s_b_id_o    = ent_id_q[p_sel_idx];
   assign s_b_resp_o  = b_resp_q[p_sel_idx];
