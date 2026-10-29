@@ -349,6 +349,22 @@ every layer. It has **zero runtime dependencies** and works on Windows, Linux an
 | **Bring in uncore IP** | `g6lc-build vendor list` → `vendor sync <id>` | [`AGENTS-vendor.md`](AGENTS-vendor.md) |
 | **Adapt to a foundry** | `g6lc-build tech status \| plan \| check` | [`AGENTS-technology.md`](AGENTS-technology.md) |
 
+### `out_rtl` / FO4-optimization workspace
+
+`out_rtl` is a tracked symlink to the gitignored
+[`build-platform/workspace/hyp/`](build-platform/workspace/hyp/) directory. It
+carries FO4-optimization copies/redesigns of the `core/` and `corev_apu/` RTL
+(for example `hyp_redesign_core_8fo4/` and `hyp_redesign_corev_apu_8fo4/`) and
+their analysis records. It is not the functional reference: Linux/OpenSBI
+behavior remains anchored in `core/` and `corev_apu/`. Use the workspace for
+caller-aware restructuring, pipeline windows and module splits that reduce
+structural FO4 while preserving OoO/SMT2 retirement and protocol semantics; an
+sv-timing screen is not STA, mapped synthesis, or boot qualification.
+
+A representative deep-redesign prompt is:
+
+> "Can you analyze the code base at build-platform/workspace/hyp/ and its analysis/ files regarding redesign with consideration for the core/ and corev_apu/ RTL as a sound linux-bootable reference, with the most particular focus along the methodological inferences made from the reasoning patterns rooted in AGENTS-code-philosophy.md (in which AGENTS-code-philosophy.md, AGENTS-SMT2-opensbi-reasoning-pattern-workflow.md, AGENTS-g6lc-opensbi-dev-heuristics.md is described) and top-level AGENTS-rt-learning-philosophy.md reading everything in its entirety, to further analyze the code bases along ooocoh/L3 and ai_island and proceed comprehensively with reference to opensbi source and with a lessened focus on testing while validating as necessary in consideration with core configurability along a comprehensive elaboration using the capabilities inferred with more efficient methodology, in reducing FO4 in the hypotheticals while fixing opensbi/linux boot from underlying understanding of the implied systemverilog exactedness required inferring large pass aggregated updates on making the core retire instructions properly with OoO and smt2 in the new redesign while using sv-timing and understanding from ALGORITHMS-EXPERTS.md to measure calibrated pipeline stages and windows respective to solution flexibility with n-issues along carry_over caller reference search implementing solutions that reduce FO4 and latency with consideration for openroad synthesis without running it, going as far as splitting modules into files, functional redesigns and refactors with caller consideration, without constraints, which aims at an objective of 8 FO4 with functional separation of concerns on caller purpose leading up to solutions, while considering high fo4 execution paths as latency bubble-up/contention points that are not offset by OoO requiring a more structural 8 FO4 and completing with verilator opensbi boot test/debugging and/or preparing to be valid for it, and make a plan which iterates all changed modules and callers to evaluate all execution paths on the hyp-redesign for restoring valid opensbi/linux retiring from the systemverilog logical structuring and anticipated gating and flow through abstract tracing, implementing by first creating a task for each high fo4 execution path file/module to be reduced using the reasoning methodologies?"
+
 Full command set: `status`, `doctor`, `probe`, `diag`, `man`, `setup`, `tools`,
 `vendor`, `mb`, `tech`, `build`, `test`, `verify`, `timings`, `tensor`, `clean`,
 `config`, `remote`, `g6q`, `g6b` — the registry is
