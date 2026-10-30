@@ -158,7 +158,11 @@ pub const CORRECTION_VERSION: &str = "correction-v5";
 /// (3) package enum member literals resolve as `pkg::NAME` and bare
 /// imported names in `Expr::const_value`; (4) `{W{s}} & x` replication
 /// operands pay the W-load select broadcast a mux select pays.
-pub const MEASUREMENT_VERSION: &str = "delay-v49";
+/// `delay-v50`: scope-resolved $countones delay is a balanced population
+/// count over its operand bits, using existing adder costs at each level.
+/// Nested intrinsic calls accumulate and parallel arms take their maximum;
+/// unresolved operand widths use the reference width and mark the node.
+pub const MEASUREMENT_VERSION: &str = "delay-v50";
 
 /// Hint for which upstream pin the vendored tree should track (see tools/sv-parser.rev).
 pub const PARSER_PIN_HINT: &str = "v0.13.5";

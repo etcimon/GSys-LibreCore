@@ -24,6 +24,27 @@
 
 ## Current correctness audit: source origins and validation
 
+### Population-count attribution (delay-v50)
+
+Ordinary RHS and guard attribution resolve `$countones` from the argument's
+width, independently of its32-bit SystemVerilog return type or an outer
+assignment cast. An N-bit operand is estimated as a balanced binary sum of
+one-bit leaves. Level k sums at most min(2^k,N) leaves and pays the existing
+adder cost at floor(log2(min(2^k,N)))+1 result bits. There are ceil(log2(N))
+levels; N=1 is wiring. This is a structural implementation assumption,
+not a new cell calibration or evidence that a particular mapped netlist
+balances the operator. No FO4 table or process input changes.
+
+A scope-aware expression callback charges intrinsic delay after argument
+arrival; nested calls add their delays and parallel branches take their
+maximum. Unknown operand width uses the32-bit reference and marks the node
+width_defaulted. Constant operands remain elaboration work.
+
+Scope limits remain explicit: function-body and context-free spine estimates
+still use coarse call classes; argument resize casts are not retained fully
+by the expression representation. Those cases need further qualification
+before their intrinsic geometry or projected cuts can be relied on.
+
 ### Row-local source preparation (A135)
 
 `row-local` compiles an explicitly bounded indexed table update into a

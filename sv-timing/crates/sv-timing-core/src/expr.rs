@@ -471,6 +471,18 @@ impl Expr {
         base: &dyn Fn(OperatorClass) -> f64,
         seed: &ConstSeed,
     ) -> f64 {
+        self.fo4_critical_cost_with_calls(base, seed, &|_, _| None)
+    }
+
+    /// Critical cost with scope-resolved, callee-only intrinsic delays.
+    /// Argument arrival remains part of this expression DAG; parallel arms
+    /// take their maximum and nested calls accumulate in dependency order.
+    pub fn fo4_critical_cost_with_calls(
+        &self,
+        base: &dyn Fn(OperatorClass) -> f64,
+        seed: &ConstSeed,
+        call_cost: &dyn Fn(&str, &[Expr]) -> Option<f64>,
+    ) -> f64 {
         // PASS-STRATEGY P1: Const ∘ Const is elaboration, not hardware.
         if self.const_class(seed).is_const() {
             return 0.0;
@@ -478,11 +490,11 @@ impl Expr {
         match self {
             Expr::Ident { .. } | Expr::Literal { .. } | Expr::Opaque { .. } => 0.0,
             Expr::Unary { op, arg, .. } => {
-                base(classify_unary(op)) + arg.fo4_critical_cost_latticed(base, seed)
+                base(classify_unary(op)) + arg.fo4_critical_cost_with_calls(base, seed, call_cost)
             }
             Expr::PartSelect { kind, left, right } => {
                 if kind.is_indexed() {
-                    left.fo4_critical_cost_latticed(base, seed)
+                    left.fo4_critical_cost_with_calls(base, seed, call_cost)
                 } else {
                     let _ = right;
                     0.0
@@ -515,7 +527,7 @@ impl Expr {
                     if n >= 3 {
                         let worst = runtime
                             .iter()
-                            .map(|l| l.fo4_critical_cost_latticed(base, seed))
+                            .map(|l| l.fo4_critical_cost_with_calls(base, seed, call_cost))
                             .fold(0.0_f64, f64::max);
                         return base(OperatorClass::AddSub)
                             + CSA_LEVEL_LOGIC_BITS
@@ -527,8 +539,8 @@ impl Expr {
                 let billed = billed_binary_class(op, *op_class, left, right, seed);
                 base(billed)
                     + left
-                        .fo4_critical_cost_latticed(base, seed)
-                        .max(right.fo4_critical_cost_latticed(base, seed))
+                        .fo4_critical_cost_with_calls(base, seed, call_cost)
+                        .max(right.fo4_critical_cost_with_calls(base, seed, call_cost))
             }
             Expr::Ternary {
                 cond,
@@ -540,49 +552,49 @@ impl Expr {
                 // netlist (r82: `REC ? r_q : f(a)` under `Stages==1`).
                 if let Some(v) = cond.const_value(seed) {
                     let arm = if v != 0 { then_e } else { else_e };
-                    return arm.fo4_critical_cost_latticed(base, seed);
+                    return arm.fo4_critical_cost_with_calls(base, seed, call_cost);
                 }
                 // Const condition is generate-if / param select: one arm exists
                 // in the netlist, so there is no 2.5 FO4 mux (pe_dot `i < CNT`).
                 if cond.const_class(seed).is_const() {
                     return then_e
-                        .fo4_critical_cost_latticed(base, seed)
-                        .max(else_e.fo4_critical_cost_latticed(base, seed));
+                        .fo4_critical_cost_with_calls(base, seed, call_cost)
+                        .max(else_e.fo4_critical_cost_with_calls(base, seed, call_cost));
                 }
                 // Nested `c ? Const : (c2 ? Const : … : datapath)` is one mux
                 // on the runtime spine (exception encodings vs datapath), not
                 // a serial mux per arm. `c ? runtime : …` does not flatten.
                 if let Some((conds, tail)) = const_then_chain(self, seed) {
-                    let mut m = tail.fo4_critical_cost_latticed(base, seed);
+                    let mut m = tail.fo4_critical_cost_with_calls(base, seed, call_cost);
                     for c in conds {
-                        m = m.max(c.fo4_critical_cost_latticed(base, seed));
+                        m = m.max(c.fo4_critical_cost_with_calls(base, seed, call_cost));
                     }
                     return base(OperatorClass::Mux) + m;
                 }
                 base(OperatorClass::Mux)
                     + cond
-                        .fo4_critical_cost_latticed(base, seed)
-                        .max(then_e.fo4_critical_cost_latticed(base, seed))
-                        .max(else_e.fo4_critical_cost_latticed(base, seed))
+                        .fo4_critical_cost_with_calls(base, seed, call_cost)
+                        .max(then_e.fo4_critical_cost_with_calls(base, seed, call_cost))
+                        .max(else_e.fo4_critical_cost_with_calls(base, seed, call_cost))
             }
             Expr::Concat { parts } => {
                 base(OperatorClass::Concat)
                     + parts
                         .iter()
-                        .map(|p| p.fo4_critical_cost_latticed(base, seed))
+                        .map(|p| p.fo4_critical_cost_with_calls(base, seed, call_cost))
                         .fold(0.0_f64, f64::max)
             }
             Expr::Replicate { count: _, body } => {
                 // IEEE 1800 replication count is a constant expression by rule.
                 // Charge the body only (PASS-STRATEGY P1 LRM context).
-                body.fo4_critical_cost_latticed(base, seed)
+                body.fo4_critical_cost_with_calls(base, seed, call_cost)
             }
             Expr::Index { base: b, index } => {
                 // A fixed `[msb:lsb]` bound is constant by LRM rule, so it contributes no
                 // delay. Indexed `+:` / `-:` width is also LRM-constant; the base
                 // index may be runtime (IEEE 1800 §11.5.1).
                 if is_constant_range_select(index) {
-                    return b.fo4_critical_cost_latticed(base, seed);
+                    return b.fo4_critical_cost_with_calls(base, seed, call_cost);
                 }
                 // delay-v33: a runtime index is a select — one 4:1 mux level
                 // (an `arr[idx]` read was free before, so a transform could
@@ -590,8 +602,8 @@ impl Expr {
                 // gain). A constant index / constant `+:` base is wiring.
                 if let Some(base_idx) = indexed_part_select_base(index) {
                     let inner = b
-                        .fo4_critical_cost_latticed(base, seed)
-                        .max(base_idx.fo4_critical_cost_latticed(base, seed));
+                        .fo4_critical_cost_with_calls(base, seed, call_cost)
+                        .max(base_idx.fo4_critical_cost_with_calls(base, seed, call_cost));
                     return if base_idx.const_class(seed).is_const() {
                         inner
                     } else {
@@ -599,8 +611,8 @@ impl Expr {
                     };
                 }
                 let inner = b
-                    .fo4_critical_cost_latticed(base, seed)
-                    .max(index.fo4_critical_cost_latticed(base, seed));
+                    .fo4_critical_cost_with_calls(base, seed, call_cost)
+                    .max(index.fo4_critical_cost_with_calls(base, seed, call_cost));
                 if index.const_class(seed).is_const() {
                     inner
                 } else {
@@ -612,10 +624,10 @@ impl Expr {
                     return 0.0;
                 }
                 let call_op = user_function_op_class(name, args.len());
-                base(call_op)
+                call_cost(name, args).unwrap_or_else(|| base(call_op))
                     + args
                         .iter()
-                        .map(|a| a.fo4_critical_cost_latticed(base, seed))
+                        .map(|a| a.fo4_critical_cost_with_calls(base, seed, call_cost))
                         .fold(0.0_f64, f64::max)
             }
         }
@@ -1235,7 +1247,7 @@ impl Expr {
                 }
                 s
             }
-            Expr::Call { args, .. } => {
+            Expr::Call { name, args } => {
                 let mut s = args
                     .iter()
                     .max_by(|a, b| {
@@ -1245,7 +1257,12 @@ impl Expr {
                     })
                     .map(|a| a.critical_spine_ops_latticed(base, seed))
                     .unwrap_or_default();
-                s.push((OperatorClass::Other, base(OperatorClass::Other)));
+                let class = if name == "$countones" && args.len() == 1 {
+                    OperatorClass::AddSub
+                } else {
+                    OperatorClass::Other
+                };
+                s.push((class, base(class)));
                 s
             }
         }
@@ -2025,6 +2042,7 @@ fn is_elab_system_fn(name: &str) -> bool {
     matches!(
         name,
         "$clog2" | "$bits" | "$unsigned" | "$signed" | "$ceil" | "$floor" | "$ln" | "$log10"
+            | "$countones"
     )
 }
 
@@ -2037,8 +2055,10 @@ fn is_fmt_scale_fn(name: &str) -> bool {
 /// User function FO4 class. `fmt_row_bytes` is a mux-of-shifts. Unknown
 /// calls stay Other: billing every 2-arg call as Mux re-inflated gemm
 /// next-state (v49 12→15). Wrap/convert bodies are a later inline pass.
-pub fn user_function_op_class(name: &str, _nargs: usize) -> OperatorClass {
-    if is_fmt_scale_fn(name) {
+pub fn user_function_op_class(name: &str, nargs: usize) -> OperatorClass {
+    if name == "$countones" && nargs == 1 {
+        OperatorClass::AddSub
+    } else if is_fmt_scale_fn(name) {
         OperatorClass::Mux
     } else {
         OperatorClass::Other

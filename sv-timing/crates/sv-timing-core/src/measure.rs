@@ -108,6 +108,51 @@ impl CostModel {
     }
 }
 
+/// Balanced population count, using the existing width-scaled adder model.
+/// At level k a subtree contains min(2^k, bits) one-bit leaves. Its result
+/// needs floor(log2(leaves))+1 bits. Padding a non-power-of-two input with
+/// zeros adds no runtime operator, and a singleton is wiring.
+fn population_count_cost(bits: u32, model: &CostModel) -> f64 {
+    if bits <= 1 {
+        return 0.0;
+    }
+    let levels = u32::BITS - (bits - 1).leading_zeros();
+    (1..=levels)
+        .map(|level| {
+            let leaves = (1_u64 << level).min(u64::from(bits));
+            let result_bits = u64::BITS - leaves.leading_zeros();
+            model.scaled_fo4(OperatorClass::AddSub, Some(result_bits))
+        })
+        .sum()
+}
+
+fn intrinsic_expr_cost(
+    expr: &Expr,
+    base: &dyn Fn(OperatorClass) -> f64,
+    seed: &ConstSeed,
+    widths: &crate::width::WidthResolver<'_>,
+    model: &CostModel,
+) -> f64 {
+    expr.fo4_critical_cost_with_calls(base, seed, &|name, args| {
+        if let ("$countones", [arg]) = (name, args) {
+            let bits = widths.expr_width(arg).unwrap_or(crate::width::REF_WIDTH);
+            Some(population_count_cost(bits, model))
+        } else {
+            None
+        }
+    })
+}
+
+fn intrinsic_width_defaulted(expr: &Expr, widths: &crate::width::WidthResolver<'_>) -> bool {
+    let mut defaulted = false;
+    expr.walk_calls(&mut |name, args| {
+        if let ("$countones", [arg]) = (name, args) {
+            defaulted |= widths.expr_width(arg).is_none();
+        }
+    });
+    defaulted
+}
+
 /// Attribute FO4 costs onto all nodes and regions; refresh path slack + max_freq.
 ///
 /// When a node has a parsed [`crate::expr::Expr`] tree, cost is the **critical
@@ -277,7 +322,9 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
                         if !ex.is_opaque() {
                             let gw = widths.node_widths(None, Some(&ex));
                             let gbase = |c: OperatorClass| model.scaled_fo4(c, gw.for_class(c));
-                            worst = worst.max(ex.fo4_critical_cost_latticed(&gbase, &seed));
+                            worst = worst.max(intrinsic_expr_cost(
+                                &ex, &gbase, &seed, &widths, model,
+                            ));
                         }
                     }
                     let levels = (gs.len() as f64).log2().ceil().max(0.0);
@@ -302,7 +349,16 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
                 // MMU `atomic_over_budget` 56 FO4 nodes. Opaque (parse failed)
                 // still falls through to `op_class`.
                 if !ex.is_opaque() {
-                    node.fo4_cost = ex.fo4_critical_cost_latticed(&base, &seed);
+                    node.fo4_cost = intrinsic_expr_cost(ex, &base, &seed, &widths, model);
+                    node.width_defaulted |= intrinsic_width_defaulted(ex, &widths);
+                    if let Some(guards) = guards_by_node.get(&node.id) {
+                        node.width_defaulted |= guards.iter().any(|g| {
+                            intrinsic_width_defaulted(
+                                &Expr::parse(g.strip_prefix('^').unwrap_or(g)),
+                                &widths,
+                            )
+                        });
+                    }
                     node.op_class = Some(ex.dominant_op_class_latticed(&seed));
                     // delay-v38: a runtime index selects among 2^k entries —
                     // ceil(k/2) 4:1 levels, not one. The expression bill
@@ -3477,6 +3533,55 @@ mod tests {
         }
         crate::lower::analyze_files(&[path], &crate::ParseOptions::default(), &lower)
             .expect("analyze")
+    }
+
+    #[test]
+    fn countones_intrinsic_has_operand_geometry_and_arrival_order() {
+        let mut out = analyze_fixture_with("countones_intrinsic.sv", &[]);
+        let model = CostModel {
+            load_per_fanout: 0.0,
+            ..Default::default()
+        };
+        attribute_costs(&mut out.design, &model);
+        let module = out.design.modules.values().find(|m| m.name == "countones_intrinsic").unwrap();
+        let cost = |lhs: &str| -> f64 {
+            module.nodes.values().filter(|n| n.lhs.as_deref() == Some(lhs))
+                .map(|n| n.fo4_cost).fold(0.0, f64::max)
+        };
+        // Independent level bills: 8 leaves need 2-, 3-, then 4-bit adders.
+        let eight = 2.0 + 2.0 * 3.0_f64.log2() + 4.0;
+        let sixteen = eight + 2.0 * 5.0_f64.log2();
+        let thirty_two = sixteen + 2.0 * 6.0_f64.log2();
+        for (lhs, expected) in [
+            ("small_o", eight), ("extended", eight), ("larger", sixteen),
+            ("one_bit", 0.0), ("parallel_count", model.mux + sixteen),
+            ("nested_count", eight + thirty_two), ("sum_count", 10.0 + sixteen),
+            ("literal_count", 0.0),
+        ] {
+            assert!((cost(lhs) - expected).abs() < 1e-6,
+                    "{lhs}: {} != {expected}", cost(lhs));
+        }
+        assert!(cost("guard_hit") > eight, "guard intrinsic was not billed");
+        let widths = crate::width::WidthResolver::new(
+            module, &out.design.packages, &out.design.param_map_ints,
+        );
+        let unknown = Expr::parse("$countones(unbound_operand)");
+        assert!(intrinsic_width_defaulted(&unknown, &widths));
+        let unknown_cost = intrinsic_expr_cost(
+            &unknown, &|c| model.base_fo4(c), &ConstSeed::heuristic(), &widths, &model,
+        );
+        assert!((unknown_cost - thirty_two).abs() < 1e-6);
+    }
+
+    #[test]
+    fn countones_intrinsic_padding_and_singleton_costs() {
+        let model = CostModel::default();
+        assert_eq!(population_count_cost(1, &model), 0.0);
+        assert_eq!(population_count_cost(2, &model), 2.0);
+        // Three live leaves need two 2-bit sums; the padded zero is wiring.
+        assert_eq!(population_count_cost(3, &model), 4.0);
+        assert!(population_count_cost(4, &model) > population_count_cost(3, &model));
+        assert!(population_count_cost(u32::MAX, &model).is_finite());
     }
 
     fn worst_fo4_at(out: &crate::lower::AnalyzeOutput, module: &str, line: u32) -> f64 {

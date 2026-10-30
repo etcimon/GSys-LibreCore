@@ -628,6 +628,13 @@ impl<'a> WidthResolver<'a> {
             }
             Expr::Call { name, args } => match (name.as_str(), args.as_slice()) {
                 ("$signed" | "$unsigned", [a]) => self.expr_dims(a, depth + 1),
+                // IEEE 1800 count-bits functions return an int. Intrinsic
+                // delay uses the argument width, not this return width or
+                // an enclosing result cast.
+                ("$countones", [_]) => Some(Dims {
+                    packed: vec![32],
+                    unpacked: 0,
+                }),
                 _ => None,
             },
             Expr::PartSelect { .. } | Expr::Opaque { .. } => None,
