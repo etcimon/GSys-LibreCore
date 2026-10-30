@@ -171,8 +171,21 @@ module g6lc_rvfi_probes
   // frame therefore pairs instr captured at the commit cycle (two stages)
   // with csr captured live one cycle later (one stage -- its comb value at
   // that point already includes the landed write). Both surfaces meet at
-  // +2, in retirement order. flush_i clears the staged pack so a drain
-  // cannot leak a stale observer frame into the new stream.
+  // +2, in retirement order.
+  //
+  // r100: the staged frames are never cleared on flush_i. Every field of a
+  // frame is a fact of the cycle it was captured in -- commit acks, the
+  // STQ/amo_buffer push strobes (r76 F14), the lsu_ctrl address/mask
+  // capture, the OoO operand re-capture, resolved branches -- and the rvfi
+  // issue_fifo consumes those strobes as state updates. The H12-era clear
+  // (narrowed in r59b to frames without a retire) dropped the push strobe
+  // of an OLDER store whose frame was staged when a younger branch's
+  // mispredict raised flush_ctrl_if: hyp8-osbi-scalar-r100b, cycle 1160942
+  // push of tid 13 (`sd ra,40(sp)`, sbi_scratch_alloc_offset), bnez
+  // mispredict at 1160943, retire at 1160944 with paddr_valid=0
+  // (lu_paddr_captured). Wrong-path allocations are already excluded in
+  // the consumer by the frame's own flush_unissued_instr; nothing else in
+  // a frame can be stale.
   rvfi_probes_instr_t instr_dly_q, instr_q;
   rvfi_probes_csr_t   csr_q;
 
@@ -181,23 +194,6 @@ module g6lc_rvfi_probes
       instr_dly_q <= '0;
       instr_q     <= '0;
       csr_q       <= '0;
-    end else if (flush_i) begin
-      // r59b: a staged frame that captured a real commit ack (or an
-      // exception) already retired and must still emit -- instruction
-      // conservation. The flush may only drop frames that never retired;
-      // the paired csr word follows its surviving instr frame.
-      if (|(instr.commit_ack & ~instr.commit_drop) || instr.ex_commit_valid)
-        instr_dly_q <= instr;
-      else
-        instr_dly_q <= '0;
-      if (|(instr_dly_q.commit_ack & ~instr_dly_q.commit_drop)
-          || instr_dly_q.ex_commit_valid) begin
-        instr_q <= instr_dly_q;
-        csr_q   <= csr;
-      end else begin
-        instr_q <= '0;
-        csr_q   <= '0;
-      end
     end else begin
       instr_dly_q <= instr;
       instr_q     <= instr_dly_q;
