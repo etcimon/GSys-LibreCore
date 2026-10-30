@@ -862,7 +862,7 @@ module tb_g6lc_apu_xfer;
       automatic apu_xfer_img_t im;
       automatic logic [31:0] rg [];
       im = '{base: IMGB, size: 1536, w: 16'd12, h: 16'd8, fmt: 8'd2,
-             mips: 5'd2, layers: 10'd2, layer_bytes: 32'd768};
+             mips: 5'd2, layers: 10'd2, itype: 2'd1, layer_bytes: 32'd768};
       // B2I: one region per mip covering both layers, packed rows
       // region {bo u64, rl, ih, asp, mip, bl, lc, x, y, z, w, h, d}
       rg = new[28];
@@ -914,7 +914,7 @@ module tb_g6lc_apu_xfer;
       automatic logic [31:0] rg [];
       automatic int unsigned fp;
       im = '{base: IMGB, size: 3584, w: 16'd16, h: 16'd16, fmt: 8'd2,
-             mips: 5'd3, layers: 10'd2, layer_bytes: 32'd1792};
+             mips: 5'd3, layers: 10'd2, itype: 2'd1, layer_bytes: 32'd1792};
       fp = 3584;
       cases++;
       poison(IMGB, fp);
@@ -944,7 +944,7 @@ module tb_g6lc_apu_xfer;
       begin
         automatic apu_xfer_img_t im2;
         im2 = '{base: IMGB, size: 7168, w: 16'd16, h: 16'd16, fmt: 8'd6,
-                mips: 5'd3, layers: 10'd2, layer_bytes: 32'd3584};
+                mips: 5'd3, layers: 10'd2, itype: 2'd1, layer_bytes: 32'd3584};
         cases++;
         fp = 7168;
         poison(IMGB, fp); fill_src(IMGB, fp, 79);
@@ -964,7 +964,7 @@ module tb_g6lc_apu_xfer;
       begin
         automatic apu_xfer_img_t im3;
         im3 = '{base: IMGB, size: 1024, w: 16'd16, h: 16'd16, fmt: 8'd7,
-                mips: 5'd1, layers: 10'd1, layer_bytes: 32'd1024};
+                mips: 5'd1, layers: 10'd1, itype: 2'd1, layer_bytes: 32'd1024};
         cases++;
         fp = 1024;
         poison(IMGB, fp); fill_src(IMGB, fp, 80);
@@ -981,7 +981,7 @@ module tb_g6lc_apu_xfer;
       begin
         automatic apu_xfer_img_t im4;
         im4 = '{base: IMGB, size: 1024, w: 16'd16, h: 16'd16, fmt: 8'd10,
-                mips: 5'd1, layers: 10'd1, layer_bytes: 32'd1024};
+                mips: 5'd1, layers: 10'd1, itype: 2'd1, layer_bytes: 32'd1024};
         cases++;
         fp = 1024;
         poison(IMGB, fp); fill_src(IMGB, fp, 81);
@@ -998,7 +998,7 @@ module tb_g6lc_apu_xfer;
       // (a) aspect != COLOR
       cases++;
       im = '{base: IMGB, size: 3584, w: 16'd16, h: 16'd16, fmt: 8'd2,
-             mips: 5'd3, layers: 10'd2, layer_bytes: 32'd1792};
+             mips: 5'd3, layers: 10'd2, itype: 2'd1, layer_bytes: 32'd1792};
       fp = 3584;
       poison(IMGB, fp); fill_src(IMGB, fp, 82);
       rg = new[5]; rg[0]=4; rg[1]=0; rg[2]=1; rg[3]=0; rg[4]=1;
@@ -1030,6 +1030,58 @@ module tb_g6lc_apu_xfer;
       run_clear(im, cw, 1, rg, pl);
       check(pl.code == APU_SH_DONE_FAULT, "clear lc0 FAULT");
       check(w_n == wmark, "clear lc0: zero W beats");
+    end
+
+    // ============ 1D r32_uint, height 1, VK_REMAINING_MIP_LEVELS =======
+    // CTS clear_color_image.1d uses a 256-wide chain and a second
+    // range whose levelCount is ~0.  An unclamped count never reaches
+    // XDone (the mip cursor is 4 bits).
+    begin
+      automatic apu_xfer_img_t im1;
+      automatic logic [31:0] cw [4];
+      automatic logic [31:0] rg [];
+      automatic logic [31:0] rge [];
+      // pitches 1024+512+256+128+64*5 = 2240
+      im1 = '{base: IMGB, size: 2240, w: 16'd256, h: 16'd1, fmt: 8'd10,
+              mips: 5'd9, layers: 10'd1, itype: 2'd0,
+              layer_bytes: 32'd2240};
+      cases++;
+      poison(IMGB, 2240);
+      fill_src(IMGB, 2240, 90);
+      cw[0]=32'hA5A5_A5A5; cw[1]=0; cw[2]=0; cw[3]=0;
+      rg = new[5];
+      rg[0]=1; rg[1]=4; rg[2]=32'hFFFF_FFFF; rg[3]=0; rg[4]=1;
+      rge = new[5];
+      rge[0]=1; rge[1]=4; rge[2]=5; rge[3]=0; rge[4]=1;
+      m_apply_clear(im1, cw, 1, rge);
+      cycles_mark = cycles;
+      run_clear(im1, cw, 1, rg, pl);
+      $display("CLEAR1D cycles=%0d", cycles - cycles_mark);
+      check(cycles - cycles_mark < 20000, "clear 1d remaining bounded");
+      check(pl.code == APU_SH_DONE_OK, "clear 1d remaining done code");
+      cmp_range(IMGB, IMGB + 2240, "clear 1d remaining");
+      axi_balance("clear 1d remaining");
+
+      // height-1 buffer->image of mip 0 (256 texels) and mip 8 (1 texel)
+      cases++;
+      rg = new[28];
+      rg[0]=0; rg[1]=0; rg[2]=0; rg[3]=0; rg[4]=1; rg[5]=0;
+      rg[6]=0; rg[7]=1; rg[8]=0; rg[9]=0; rg[10]=0;
+      rg[11]=256; rg[12]=1; rg[13]=1;
+      rg[14]=0; rg[15]=0; rg[16]=0; rg[17]=0; rg[18]=1; rg[19]=8;
+      rg[20]=0; rg[21]=1; rg[22]=0; rg[23]=0; rg[24]=0;
+      rg[25]=1; rg[26]=1; rg[27]=1;
+      poison(IMGB, 2240);
+      fill_src(SRCB, 1024, 91);
+      for (int i = 0; i < 1024; i++)
+        ewr8(IMGB + i, erd8(SRCB + i));
+      // mip 8 sits at offset 2240-64 = 2176; one texel, pitch 64
+      for (int i = 0; i < 4; i++)
+        ewr8(IMGB + 2176 + i, erd8(SRCB + i));
+      run_b2i(im1, SRCB, 1024, 2, rg, pl);
+      check(pl.code == APU_SH_DONE_OK, "b2i 1d done code");
+      cmp_range(IMGB, IMGB + 2240, "b2i 1d image");
+      axi_balance("b2i 1d");
     end
 
     // ============ Enable=0 fixture ========================================

@@ -192,6 +192,7 @@ ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_ooo_dispatch.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_ooo_backend.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/issue_stage.sv
+${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_lu_result.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/load_unit.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/load_store_unit.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/lsu_bypass.sv

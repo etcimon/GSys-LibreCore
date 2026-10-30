@@ -44,10 +44,10 @@ WARN_POLICY = [
 # via nm, so a run launched without +tohost_addr is a configuration error,
 # not a silent liveness-only verdict (a budget-out reads tohost==0 and would
 # mask a real 0x101 fail path, e.g. h33).
-TEST_DIR = 'build-platform/workspace/build/sv-timing/hyp8-src/tb/tests'
+TEST_DIR = 'verif/tests/custom'
 TESTS = [
-    ('h34_shift_dep', f'{TEST_DIR}/h34_shift_dep.S', '80001000'),
-    ('h33_st_fwd', f'{TEST_DIR}/h33_st_fwd.S', '80001000'),
+    ('h34_shift_dep', f'{TEST_DIR}/hyp8_h34_shift_dep.S', '80001000'),
+    ('h33_st_fwd', f'{TEST_DIR}/hyp8_h33_st_fwd.S', '80001000'),
     ('hyp8_branch_cancel', 'verif/tests/custom/hyp8_branch_cancel.S',
      '80001000'),
     ('hyp8_csr_flush_skip', 'verif/tests/custom/hyp8_csr_flush_skip.S',
@@ -89,6 +89,12 @@ def census(log):
         counts[key] = counts.get(key, 0) + 1
     counts['%Error'] = len(re.findall(r'%Error(?!-)', text))
     return counts
+
+
+def lint_failed(rc, warnings):
+    """Tool failures and RTL $error are fatal; other diagnostics need review."""
+    return (rc != 0 or warnings.get('%Error', 0) != 0
+            or warnings.get('%Warning-USERERROR', 0) != 0)
 
 
 def main():
@@ -164,10 +170,17 @@ def main():
         rc = run(cmd, log, env=env, cwd=src, timeout=1200)
         results['lint'][name] = {'rc': rc, 'warnings': census(log),
                                  'log': f'lint-{name}.log'}
-    if any(results['lint'][n]['rc'] != 0 for n in results['lint']):
+    if any(lint_failed(entry['rc'], entry['warnings'])
+           for entry in results['lint'].values()):
         results['status'] = 'lint_failed'
         (out / 'results.json').write_text(json.dumps(results, indent=2))
         raise SystemExit('full-top lint failed; see lint-*.log')
+
+    if os.environ.get('HYP8_LINT_ONLY'):
+        results['status'] = 'lint_only'
+        (out / 'results.json').write_text(json.dumps(results, indent=2))
+        (out / 'summary.txt').write_text('hyp8-integration: lint_only\n')
+        return 0
 
     # --- 4. overlap guard + capacity record -------------------------------
     guard = subprocess.run(['pgrep', '-a', '-f', GUARD_PATTERN],

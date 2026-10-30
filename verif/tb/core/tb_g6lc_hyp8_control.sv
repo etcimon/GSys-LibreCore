@@ -5906,10 +5906,80 @@ module tb_g6lc_hyp8_lsq;
   localparam logic [C.PLEN-1:0] A2 = C.PLEN'(64'h0000_0000_8000_3040);
   localparam logic [C.XLEN-1:0] SDAT = 64'h1122_3344_5566_7788;
 
+  task automatic credit_check(input int ld, input int st);
+    check(int'(lsq_ld_free) == ld, "CREDIT_LD");
+    check(int'(lsq_st_free) == st, "CREDIT_ST");
+    check(lsq_ld_full == (ld == 0), "CREDIT_LD_FULL");
+    check(lsq_st_full == (st == 0), "CREDIT_ST_FULL");
+  endtask
+  // Independent old serial calculation against actual registered slot validity.
+  always @(negedge clk) begin : credit_oracle
+    int ld, st;
+    ld = 0; st = 0;
+    if (rst_n) begin
+      for (int i = 0; i < NLD_S; i++) if (!dut.ld_q[i].valid) ld++;
+      for (int i = 0; i < NST_S; i++) if (!dut.st_q[i].valid) st++;
+      credit_check(ld, st);
+    end
+  end
+
   initial begin
     repeat (4) tick();
     rst_n = 1'b1;
     repeat (4) tick();
+
+    if ($test$plusargs("credit_only")) begin : credit_only
+      logic [NSB-1:0] live;
+      // 1: fill every credit 8..0 each queue
+      credit_check(8, 8);
+      for (int i = 0; i < 8; i++) begin
+        st_alloc(i); credit_check(8, 7-i);
+      end
+      for (int i = 0; i < 8; i++) begin
+        ld_alloc(8+i, C.VLEN'(64'h9000_0000 + 64'(i*8)));
+        credit_check(7-i, 0);
+      end
+      // 2: cancel even ids before the edge -> still counted occupied; then clear
+      drv_canc = NSB'(16'h5555); live = drv_sb_live;
+      #1; credit_check(0, 0); tick();
+      drv_canc = '0;
+      for (int i = 0; i < 16; i++) if (i % 2 == 0) live[i] = 0;
+      drv_sb_live = live;
+      credit_check(4, 4);
+      drv_canc = '1; tick();
+      drv_canc = '0; drv_sb_live = '0;
+      credit_check(8, 8);
+      // 3: lane-1-only load allocation
+      drv_ld_alloc = 2'b10; drv_alloc_id[1] = IDW'(16);
+      drv_sb_live[16] = 1;
+      #1; credit_check(8, 8); tick();
+      drv_ld_alloc = '0; drv_alloc_id[1] = '0;
+      credit_check(7, 8);
+      // 4: two stores concurrently; commit drains one
+      drv_st_alloc = 2'b11;
+      drv_alloc_id[0] = IDW'(17); drv_alloc_id[1] = IDW'(18);
+      drv_sb_live[17] = 1; drv_sb_live[18] = 1; tick();
+      drv_st_alloc = '0; drv_alloc_id = '0;
+      credit_check(7, 6);
+      st_commit(17); repeat (2) tick();
+      credit_check(7, 7);
+      // 5: cancel load16 + flush drains all
+      drv_canc[16] = 1; tick();
+      drv_canc[16] = 0; drv_sb_live[16] = 0;
+      credit_check(8, 7);
+      lsq_flush(); drv_sb_live = '0;
+      credit_check(8, 8);
+      // 6: reset while occupied clears the credits
+      ld_alloc(0, C.VLEN'(64'hA000_0000));
+      st_alloc(1);
+      credit_check(7, 7);
+      $display("CREDIT_RESET_ASSERT time=%0t", $time);
+      rst_n = 1'b0; #1; credit_check(8, 8); tick();
+      rst_n = 1'b1; drv_sb_live = '0; tick();
+      credit_check(8, 8);
+      $display("HYP8_LSQ_CREDIT_PASS checked=%0d", checked);
+      $finish;
+    end
 
     // ============== G1: late address resolution MUST flag the load ========
     // Store tid 20 allocated older, address still unresolved when load
@@ -6082,6 +6152,12 @@ module tb_g6lc_hyp8_lsq;
   logic [RED_NINST-1:0][NSB-1:0]      ro_dwait;
 
   for (genvar ri = 0; ri < RED_NINST; ri++) begin : gen_red
+    logic [RNL[ri]-1:0][RNL[ri]-1:0] test_age;
+    for (genvar r = 0; r < RNL[ri]; r++) begin : gen_test_age_r
+      for (genvar c = 0; c < RNL[ri]; c++) begin : gen_test_age_c
+        assign test_age[r][c] = rs_dist[r] < rs_dist[c];
+      end
+    end
     g6lc_lsq_reduce #(
       .G6LCCfg    (C),
       .HypCfg     (RSTG[ri] == 2 ? RHC2 : RHC1),
@@ -6095,6 +6171,7 @@ module tb_g6lc_hyp8_lsq;
       .flush_i      (rs_flush),
       .ent_id_i     (rs_id[RNL[ri]-1:0]),
       .dist_i       (rs_dist[RNL[ri]-1:0]),
+      .age_i        (test_age),
       .ent_pay_i    (rs_pay[RNL[ri]-1:0]),
       .match_i      (rs_match[RNL[ri]-1:0]),
       .unres_i      (rs_unres[RNL[ri]-1:0]),
@@ -6219,10 +6296,10 @@ module tb_g6lc_hyp8_lsq;
       // cleared outputs for exactly the configured stage count.
       rs_flush = 1'b1;
       for (int j = 0; j < RED_NMAX; j++) begin
-        rs_match[j]  = $urandom_range(0, 1);
-        rs_unres[j]  = $urandom_range(0, 1);
-        rs_nodata[j] = $urandom_range(0, 1);
-        rs_older[j]  = $urandom_range(0, 1);
+        rs_match[j]  = 1'($urandom_range(0, 1));
+        rs_unres[j]  = 1'($urandom_range(0, 1));
+        rs_nodata[j] = 1'($urandom_range(0, 1));
+        rs_older[j]  = 1'($urandom_range(0, 1));
         rs_dist[j]   = IDW'($urandom_range(0, 100));
         rs_id[j]     = IDW'($urandom_range(0, NSB - 1));
         rs_pay[j]    = {$urandom, $urandom};
@@ -6230,10 +6307,10 @@ module tb_g6lc_hyp8_lsq;
     end else begin
       // random leaf payloads on every input edge
       for (int j = 0; j < RED_NMAX; j++) begin
-        rs_match[j]  = $urandom_range(0, 1);
-        rs_unres[j]  = $urandom_range(0, 1);
-        rs_nodata[j] = $urandom_range(0, 1);
-        rs_older[j]  = $urandom_range(0, 1);
+        rs_match[j]  = 1'($urandom_range(0, 1));
+        rs_unres[j]  = 1'($urandom_range(0, 1));
+        rs_nodata[j] = 1'($urandom_range(0, 1));
+        rs_older[j]  = 1'($urandom_range(0, 1));
         rs_dist[j]   = IDW'($urandom_range(0, 100));
         rs_id[j]     = IDW'($urandom_range(0, NSB - 1));
         rs_pay[j]    = {$urandom, $urandom};
@@ -6242,6 +6319,7 @@ module tb_g6lc_hyp8_lsq;
   endtask
 
   initial begin : p_red
+    if (!$test$plusargs("credit_only")) begin
     red_exp_t eh [RED_NINST][3];
     int       pushed [RED_NINST];
     int       blank  [RED_NINST];
@@ -6273,6 +6351,7 @@ module tb_g6lc_hyp8_lsq;
       end
     end
     red_done = 1'b1;
+    end
   end
 
   int wdog = 0;
@@ -7654,3 +7733,329 @@ module tb_mmu_router_mut #(
   end
 endmodule
 `endif // G6LC_HYP8_MMU_LEAF
+
+// r97: independent calendar/owner model for parallel FLU admission.
+module g6lc_hyp8_flu_case #(
+    parameter int NP = 2, AS = 3, WC = 0, MS = 8,
+    parameter bit STAG = 1, ENABLE = 1
+) (output logic done_o);
+  import g6lc_core_pkg::*;
+  function automatic config_pkg::g6lc_cfg_t cfg();
+    config_pkg::g6lc_cfg_t c = config_pkg::g6lc_cfg_empty;
+    c.XLEN = 64; c.NrHarts = 1; c.NrIssuePorts = NP;
+    c.NrALUs = NP > 1 ? 2 : 1; c.SuperscalarEn = NP > 1;
+    c.OoOEn = 1; c.NR_SB_ENTRIES = 32; c.TRANS_ID_BITS = 5;
+    c.NrWbPorts = 2; c.MultStages = 2;
+    return c;
+  endfunction
+  function automatic g6lc_hyp_pkg::g6lc_hyp_cfg_t hyp();
+    g6lc_hyp_pkg::g6lc_hyp_cfg_t h = g6lc_hyp_pkg::Hyp8;
+    h.AluStages = AS; h.AluStaggered = STAG;
+    h.WbCaptureStages = WC; h.MultStagesOverride = MS; h.WbReserve = ENABLE;
+    return h;
+  endfunction
+  localparam config_pkg::g6lc_cfg_t C = cfg();
+  localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t H = hyp();
+  localparam int RW = g6lc_ooo_pkg::ooo_flu_res_win(C, H);
+  logic clk = 0, rst_n = 1;
+  logic [NP-1:0] offer, accept, filter, admit;
+  fu_t [NP-1:0] fu;
+  fu_op [NP-1:0] op;
+  logic [NP-1:0][4:0] tid;
+  logic [31:0] live;
+  logic [1:0] wb;
+  logic [1:0][4:0] wb_tid;
+  logic stall;
+  logic [RW-1:0] model_q = '0, observed_q;
+  logic model_div = 0, observed_div;
+  logic [4:0] model_tid = '0, observed_tid;
+  int checks = 0, fixed_count = 0, denied_count = 0, withheld_count = 0;
+  int wb_release_count = 0, reclaim_count = 0;
+  int unsigned seed = 32'h716d_823b ^ 32'(NP * 37 + AS * 17 + WC * 7 + MS);
+
+  g6lc_flu_reserve #(.G6LCCfg(C), .HypCfg(H)) dut (
+      .clk_i(clk), .rst_ni(rst_n), .offer_i(offer), .accept_i(accept),
+      .fu_i(fu), .op_i(op), .tid_i(tid), .sb_live_i(live),
+      .wb_valid_i(wb), .wb_tid_i(wb_tid), .admit_o(admit), .stall_o(stall));
+  if (ENABLE) begin : gen_observe
+    assign observed_q = dut.gen_reserve.reserved_q;
+    assign observed_div = dut.gen_reserve.div_live_q;
+    assign observed_tid = dut.gen_reserve.div_tid_q;
+  end else begin : gen_disabled
+    assign observed_q = '0;
+    assign observed_div = 0;
+    assign observed_tid = '0;
+  end
+
+  function automatic int unsigned random_word();
+    seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
+    return seed;
+  endfunction
+  task automatic idle();
+    offer = '0; accept = '0; filter = '1;
+    fu = '{default: NONE}; op = '{default: ADD}; tid = '0;
+    live = '1; wb = '0; wb_tid = '0;
+  endtask
+  task automatic step(input bit resetting = 0);
+    logic [RW-1:0] used, next_q;
+    logic claim, next_div, div_accept, release_wb;
+    logic [4:0] next_tid;
+    logic [NP-1:0] expected, is_div;
+    int unsigned cyc [NP];
+    rst_n = !resetting;
+    if (resetting) begin model_q = '0; model_div = 0; model_tid = '0; end
+    #2;
+    used = model_q; claim = model_div; expected = '1; is_div = '0;
+    for (int p = 0; p < NP; p++) begin
+      cyc[p] = (p != 0 && fu[p] == ALU &&
+          g6lc_ooo_pkg::ooo_lat_class(fu[p], op[p]) == g6lc_hyp_pkg::LAT_ALU_LOW)
+          ? 0 : g6lc_ooo_pkg::ooo_flu_cycles(C, H, fu[p], op[p]);
+      is_div[p] = fu[p] == MULT && cyc[p] == 0;
+      if (ENABLE && offer[p]) begin
+        if (is_div[p]) begin
+          expected[p] = !claim && used == '0;
+          if (expected[p]) claim = 1;
+        end else if (cyc[p] != 0) begin
+          expected[p] = !claim && !used[1 + cyc[p]];
+          if (expected[p]) used[1 + cyc[p]] = 1;
+        end
+      end
+    end
+    assert (admit === expected && stall === (|(offer & ~expected)))
+      else $fatal(1, "FLU_ADMIT np=%0d as=%0d wc=%0d checks=%0d got=%h expected=%h",
+                  NP, AS, WC, checks, admit, expected);
+    accept = resetting ? '0 : offer & expected & filter;
+    next_q = model_q; next_div = model_div; next_tid = model_tid;
+    div_accept = 0;
+    release_wb = (wb[0] && wb_tid[0] == model_tid) ||
+                 (wb[1] && wb_tid[1] == model_tid);
+    if (ENABLE && !resetting) begin
+      for (int p = 0; p < NP; p++) begin
+        if (accept[p] && cyc[p] != 0) begin
+          next_q[1 + cyc[p]] = 1; fixed_count++;
+        end
+        if (accept[p] && is_div[p]) begin
+          div_accept = 1; next_div = 1; next_tid = tid[p];
+        end
+        if (offer[p] && !expected[p]) denied_count++;
+        if (offer[p] && expected[p] && !filter[p]) withheld_count++;
+      end
+      next_q >>= 1;
+      if (!div_accept && model_div && (release_wb || !live[model_tid])) begin
+        next_div = 0;
+        if (release_wb) wb_release_count++;
+        else reclaim_count++;
+      end
+    end
+    #1; clk = 1; #2;
+    assert (observed_q === next_q && observed_div === next_div &&
+            (!next_div || observed_tid === next_tid))
+      else $fatal(1, "FLU_STATE np=%0d as=%0d wc=%0d checks=%0d", NP, AS, WC, checks);
+    model_q = next_q; model_div = next_div; model_tid = next_tid;
+    checks++;
+    clk = 0; #1;
+  endtask
+  task automatic reset_case();
+    idle(); step(1); step();
+  endtask
+
+  initial begin
+    done_o = 0;
+    reset_case();
+    // Withdrawn final acceptance must leave the calendar empty.
+    offer[0] = 1; fu[0] = CSR; op[0] = CSR_READ; filter = '0;
+    repeat (4) step();
+    // Equal slots, then different latency classes and ALU2 exemption.
+    filter = '1; offer = '1; fu = '{default: CSR};
+    op = '{default: CSR_READ}; step();
+    fu[0] = ALU; op[0] = SLL;
+    for (int p = 1; p < NP; p++) begin fu[p] = ALU; op[p] = ADD; end
+    step(); idle(); repeat (RW + 1) step();
+    // First resource is a divider; wrong WB retains it, correct WB releases it.
+    offer = '1; fu = '{default: CSR}; op = '{default: CSR_READ};
+    fu[0] = MULT; op[0] = DIV; tid[0] = 5'd31; step();
+    idle(); offer[0] = 1; fu[0] = CSR; op[0] = CSR_READ;
+    repeat (3) step();
+    wb[0] = 1; wb_tid[0] = 5'd30; step();
+    wb_tid[0] = 5'd31; step();
+    idle(); repeat (RW + 1) step();
+    // Reuse the released TID; scoreboard reclamation is an independent release.
+    offer[0] = 1; fu[0] = MULT; op[0] = DIV; tid[0] = 5'd31; step();
+    idle(); live[31] = 0; step(); reset_case();
+    // First fixed resource excludes a later divider; reset clears live work.
+    offer = '1; fu = '{default: MULT}; op = '{default: DIV};
+    fu[0] = CSR; op[0] = CSR_READ; step();
+    reset_case();
+    offer[0] = 1; fu[0] = MULT; op[0] = DIV; tid[0] = 5'd17; step();
+    reset_case();
+    // Full encoding sweep checks the candidate's package-based classifier oracle.
+    for (int f = 0; f < (1 << $bits(fu_t)); f++)
+      for (int o = 0; o < (1 << $bits(fu_op)); o++) begin
+        for (int p = 0; p < NP; p++) begin fu[p] = fu_t'(f); op[p] = fu_op'(o); end
+        step();
+      end
+    for (int n = 0; n < 10000; n++) begin
+      idle();
+      for (int p = 0; p < NP; p++) begin
+        offer[p] = 1'(random_word()); filter[p] = 1'(random_word());
+        tid[p] = 5'(random_word());
+        case (random_word() % 8)
+          0: begin fu[p] = CSR; op[p] = CSR_READ; end
+          1: begin fu[p] = AES; op[p] = ADD; end
+          2: begin fu[p] = ALU; op[p] = ADD; end
+          3: begin fu[p] = ALU; op[p] = SLL; end
+          4: begin fu[p] = MULT; op[p] = MUL; end
+          5: begin fu[p] = MULT; op[p] = DIV; end
+          6: begin fu[p] = LOAD; op[p] = LD; end
+          7: begin fu[p] = CTRL_FLOW; op[p] = JALR; end
+        endcase
+      end
+      if (n % 17 == 0) begin wb[1] = 1; wb_tid[1] = model_tid; end
+      if (n % 29 == 0) live[model_tid] = 0;
+      if (n % 41 == 0) begin offer = '0; filter = '0; end
+      step();
+    end
+    idle(); live = '0; repeat (RW + 2) step();
+    if (ENABLE)
+      assert (fixed_count > 0 && denied_count > 0 && withheld_count > 0 &&
+              wb_release_count > 0 && reclaim_count > 0)
+        else $fatal(1, "FLU_COVER np=%0d", NP);
+    $display("FLU_CASE_PASS np=%0d as=%0d stagger=%0d wc=%0d mult=%0d enabled=%0d checks=%0d fixed=%0d denied=%0d withheld=%0d wb=%0d reclaim=%0d",
+             NP, AS, STAG, WC, MS, ENABLE, checks, fixed_count, denied_count,
+             withheld_count, wb_release_count, reclaim_count);
+    done_o = 1;
+  end
+endmodule
+
+module tb_g6lc_hyp8_flu;
+  wire [7:0] done;
+  g6lc_hyp8_flu_case #(.NP(1), .AS(1), .STAG(0), .WC(0), .MS(1)) c0(done[0]);
+  g6lc_hyp8_flu_case #(.NP(2), .AS(3), .STAG(1), .WC(0), .MS(8)) c1(done[1]);
+  g6lc_hyp8_flu_case #(.NP(3), .AS(3), .STAG(1), .WC(1), .MS(0)) c2(done[2]);
+  g6lc_hyp8_flu_case #(.NP(4), .AS(3), .STAG(1), .WC(1), .MS(4)) c3(done[3]);
+  g6lc_hyp8_flu_case #(.NP(8), .AS(3), .STAG(1), .WC(1), .MS(4)) c4(done[4]);
+  g6lc_hyp8_flu_case #(.NP(4), .AS(1), .STAG(0), .WC(0), .MS(1)) c5(done[5]);
+  g6lc_hyp8_flu_case #(.NP(2), .AS(3), .STAG(0), .WC(1), .MS(2)) c6(done[6]);
+  g6lc_hyp8_flu_case #(.NP(8), .AS(1), .STAG(0), .WC(0), .MS(0), .ENABLE(0)) c7(done[7]);
+  initial begin
+    wait (&done);
+    $display("HYP8_FLU_PASS cases=8");
+    $finish;
+  end
+endmodule
+
+// r98: real CSR write-bank source extracted into private comparison wrappers.
+// This checks the combinational bank, not the complete CSR owner/apply protocol.
+module g6lc_hyp8_pmp_write_case #(
+    parameter int unsigned XLEN = 64,
+    parameter int unsigned PLEN = 56
+) (output logic done_o);
+  logic we, vs_mode;
+  logic [11:0] addr;
+  logic [XLEN-1:0] data;
+  riscv::pmpcfg_t [63:0] cfg_q, cfg_d, cfg_r;
+  logic [63:0][PLEN-3:0] aq, ad, ar;
+  logic [3:0] flags_d, flags_r;
+  int checked = 0;
+
+  g6lc_hyp8_pmp_bank_candidate #(.XLEN(XLEN), .PLEN(PLEN)) dut (
+    .csr_we(we), .vs_mode(vs_mode), .addr(addr), .csr_wdata(data), .pmpcfg_q(cfg_q),
+    .pmpaddr_q(aq), .pmpcfg_w(cfg_d), .pmpaddr_w(ad),
+    .bk_wr_pmp_uae(flags_d[0]), .bk_wr_pmp_vuae(flags_d[1]),
+    .bk_wr_pmp_flush(flags_d[2]), .bk_wr_pmp_dfsc(flags_d[3]));
+  g6lc_hyp8_pmp_bank_reference #(.XLEN(XLEN), .PLEN(PLEN)) reference (
+    .csr_we(we), .vs_mode(vs_mode), .addr(addr), .csr_wdata(data), .pmpcfg_q(cfg_q),
+    .pmpaddr_q(aq), .pmpcfg_w(cfg_r), .pmpaddr_w(ar),
+    .bk_wr_pmp_uae(flags_r[0]), .bk_wr_pmp_vuae(flags_r[1]),
+    .bk_wr_pmp_flush(flags_r[2]), .bk_wr_pmp_dfsc(flags_r[3]));
+
+  task automatic check(input logic ok, input string tag);
+    checked++;
+    if (ok !== 1'b1) begin
+      $display("PMP_WRITE_FAIL %s XLEN=%0d addr=%h we=%b data=%h",
+               tag, XLEN, addr, we, data);
+      $display("cfg_q=%h aq=%h", cfg_q, aq);
+      $display("actual cfg=%h addr=%h flags=%b", cfg_d, ad, flags_d);
+      $display("expect cfg=%h addr=%h flags=%b", cfg_r, ar, flags_r);
+      $fatal(1, "tb_g6lc_hyp8_pmp_write");
+    end
+  endtask
+  task automatic probe(input logic [11:0] a, input logic enable = 1'b1);
+    addr = a; we = enable; #1;
+    check(cfg_d === cfg_r && ad === ar && flags_d === flags_r, "bank_miter");
+  endtask
+
+  initial begin
+    done_o = 0; we = 0; addr = '0; vs_mode = 0;
+    data = XLEN'(64'h0123456789abcdef); cfg_q = '0; aq = '0;
+    for (int pattern = 0; pattern < 3; pattern++) begin
+      for (int e = 0; e < 64; e++) begin
+        cfg_q[e] = '0;
+        aq[e] = ((PLEN-2)'(1) << (PLEN-3)) | (PLEN-2)'(e*17+3);
+        if (pattern == 1) begin
+          cfg_q[e].locked = 1'(e % 2);
+          cfg_q[e].addr_mode = ((e % 3) == 0) ? riscv::TOR : riscv::NAPOT;
+        end else if (pattern == 2) begin
+          cfg_q[e] = riscv::pmpcfg_t'(8'(e*13+11));
+        end
+      end
+      for (int a = 0; a < 4096; a++) begin
+        for (int mode = 0; mode < 2; mode++) begin
+          vs_mode = 1'(mode);
+          probe(12'(a), 0);
+          check(cfg_d === cfg_q && ad === aq && flags_d == '0, "disabled_hold");
+          probe(12'(a), 1);
+        end
+      end
+    end
+    cfg_q = '0; aq = '0;
+    probe(12'h3a0);
+    check(cfg_d[0] == 8'hef && cfg_d[1] == 8'hcd &&
+          cfg_d[2] == 8'hab && cfg_d[3] == 8'h89, "cfg0_low_bytes");
+    if (XLEN == 64)
+      check(cfg_d[4] == 8'h67 && cfg_d[5] == 8'h45 &&
+            cfg_d[6] == 8'h23 && cfg_d[7] == 8'h01, "cfg0_high_bytes");
+    probe(12'h3a1);
+    if (XLEN == 64)
+      check(flags_d == 4'b0001 && cfg_d === cfg_q && ad === aq, "odd_cfg_traps");
+    else
+      check(flags_d == '0 && cfg_d[4] == 8'hef && cfg_d[5] == 8'hcd &&
+            cfg_d[6] == 8'hab && cfg_d[7] == 8'h89, "rv32_cfg1");
+    cfg_q[0].locked = 1;
+    probe(12'h3a0);
+    check(cfg_d[0] == cfg_q[0], "own_cfg_lock");
+    probe(12'h3b0);
+    check(ad === aq, "own_addr_lock");
+    cfg_q = '0; cfg_q[1].locked = 1; cfg_q[1].addr_mode = riscv::TOR;
+    probe(12'h3b0);
+    check(ad === aq, "next_tor_lock");
+    cfg_q[1].addr_mode = riscv::NAPOT;
+    probe(12'h3b0);
+    check(ad[0] == data[PLEN-3:0], "next_napot_no_lock");
+    cfg_q = '0; cfg_q[63].locked = 1; cfg_q[63].addr_mode = riscv::TOR;
+    probe(12'h3ee);
+    check(ad === aq, "entry62_neighbor");
+    cfg_q = '0;
+    probe(12'h3ef);
+    check(ad[63] == data[PLEN-3:0], "entry63_no_neighbor");
+    probe(12'h340);
+    check(cfg_d === cfg_q && ad === aq && flags_d == '0, "non_pmp_hold");
+    $display("HYP8_PMP_WRITE_CASE_PASS XLEN=%0d checked=%0d", XLEN, checked);
+    done_o = 1;
+  end
+endmodule
+
+module tb_g6lc_hyp8_pmp_write;
+  wire [1:0] done;
+  g6lc_hyp8_pmp_write_case #(.XLEN(32), .PLEN(34)) c32(done[0]);
+  g6lc_hyp8_pmp_write_case #(.XLEN(64), .PLEN(56)) c64(done[1]);
+  initial begin
+    wait (&done);
+    $display("HYP8_PMP_WRITE_PASS");
+    $finish;
+  end
+  initial begin
+    #1ms;
+    $fatal(1, "PMP write watchdog");
+  end
+endmodule

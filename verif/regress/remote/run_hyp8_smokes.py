@@ -14,6 +14,7 @@ AND a real tohost write recorded in results.json's `tohostPlusarg` path
 (the ELF declared tohost at 0x80001000 and the run was launched with it).
 A budget-out writes no verdict and is reported as `wedged`, never as pass.
 """
+import hashlib
 import json
 import os
 import re
@@ -21,6 +22,10 @@ import subprocess
 from pathlib import Path
 
 RUNS = Path('/opt/testharness/runs')
+
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def main():
@@ -32,16 +37,25 @@ def main():
     results = json.loads((intdir / 'results.json').read_text())
     model = intdir / 'model' / 'Variane_testharness'
     assert model.is_file(), f'model missing: {model}'
-    summary = {'intTag': tag, 'modelSha256': results['build'].get('modelSha256'),
+    assert results['status'] == 'build_complete' and results['build']['rc'] == 0
+    model_sha = digest(model)
+    assert model_sha == results['build']['modelSha256'], 'model identity changed'
+    summary = {'intTag': tag, 'modelSha256': model_sha,
                'tests': {}}
     rc_all = 0
     only = os.environ.get('HYP8_ONLY')
-    for name, entry in results['inputs'].items():
-        if not isinstance(entry, dict) or 'tohostPlusarg' not in entry:
-            continue
+    entries = {name: entry for name, entry in results['inputs'].items()
+               if isinstance(entry, dict)}
+    assert entries, 'no assembled test inputs'
+    assert not only or only in entries, f'unknown test: {only}'
+    for name, entry in entries.items():
+        assert entry['rc'] == 0 and 'tohostPlusarg' in entry, f'incomplete input: {name}'
+        assert entry['tohostPlusarg'] == f"+tohost_addr=0x{int(entry['tohost'], 16):x}"
         if only and name != only:
             continue
         elf = intdir / 'inputs' / f'{name}.elf'
+        elf_sha = digest(elf)
+        assert elf_sha == entry['elfSha256'], f'ELF identity changed: {name}'
         log = out / f'{name}.log'
         cmd = [str(model), entry['tohostPlusarg'], '+debug_disable',
                f'+max-cycles={budget}', *extra, str(elf)]
@@ -52,8 +66,9 @@ def main():
         verdict = [l for l in text.splitlines() if '***' in l]
         m = re.search(r'\*\*\* SUCCESS \*\*\*.*after (\d+) cycles', text)
         fail = re.search(r'\*\*\* FAILED \*\*\*.*tohost = (\S+)', text)
-        state = 'pass' if m else ('fail' if fail else 'wedged')
+        state = 'fail' if p.returncode != 0 or fail else ('pass' if m else 'wedged')
         summary['tests'][name] = {'rc': p.returncode, 'state': state,
+                                  'argv': cmd, 'elfSha256': elf_sha,
                                   'cycles': int(m.group(1)) if m else None,
                                   'verdict': verdict[-1:] , 'log': log.name}
         if state != 'pass':

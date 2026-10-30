@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 Etienne Cimon
 # SPDX-License-Identifier: MIT
-"""hyp8 leaf runner: HYP8_LEAF=memory|csr|issue|dispatch|realign|queue|alu
+"""hyp8 leaf runner: HYP8_LEAF=memory|csr|csr-credit|issue|dispatch|realign|queue|alu
 selects the boundary
 under test while sharing one closure/upload/runtime mechanism.
 
@@ -45,6 +45,18 @@ COMMON = [
     'g6lc_core_pkg.sv',
 ]
 LEAFS = {
+    'pmp-write': {
+        'sources': COMMON + [
+            'g6lc_ooo_pkg.sv', 'g6lc_hyp8_pmp_bank_reference.sv',
+            'g6lc_hyp8_pmp_bank_candidate.sv', 'tb_g6lc_hyp8_control.sv'],
+        'includes': ['g6lc_core_types.svh', 'rvfi_types.svh'],
+        'top': 'tb_g6lc_hyp8_pmp_write',
+        'model': 'hyp8_pmp_write',
+        'token': 'HYP8_PMP_WRITE_PASS',
+        'verify_manifest': True,
+        'x_initial_edge': True,
+        'strict_widths': True,
+    },
     'memory': {
         'sources': COMMON + [
             'g6lc_ooo_pkg.sv', 'g6lc_prf.sv', 'stb_insert.sv', 'stb_fwd.sv',
@@ -59,6 +71,7 @@ LEAFS = {
     },
     'csr': {
         'sources': COMMON + [
+            'g6lc_ooo_pkg.sv',
             'csr_decode.sv', 'csr_read.sv', 'csr_trap.sv', 'csr_irq.sv',
             'csr_counters.sv', 'csr_write.sv', 'csr_regfile.sv',
             'csr_buffer.sv', 'commit_stage.sv',
@@ -69,6 +82,18 @@ LEAFS = {
         'top': 'tb_g6lc_hyp8_csr',
         'model': 'hyp8_csr',
         'token': 'HYP8_CSR_PASS',
+    },
+    'csr-credit': {
+        'sources': COMMON + [
+            'g6lc_ooo_pkg.sv', 'csr_buffer.sv',
+            'tb_g6lc_hyp8_csr_credit.sv',
+        ],
+        'top': 'tb_g6lc_hyp8_csr_credit',
+        'model': 'hyp8_csr_credit',
+        'token': 'HYP8_CSR_CREDIT_PASS',
+        'verify_manifest': True,
+        'x_initial_edge': True,
+        'strict_widths': True,
     },
     'issue': {
         'sources': COMMON + [
@@ -88,6 +113,44 @@ LEAFS = {
         'top': 'tb_g6lc_hyp8_issue',
         'model': 'hyp8_issue',
         'token': 'HYP8_ISSUE_PASS',
+    },
+    'mshr': {
+        'sources': [
+            'g6lc_l2_mshr.sv', 'g6lc_l2_mshr_reference.sv',
+            'tb_g6lc_l2_units.sv'],
+        'includes': [],
+        'top': 'tb_g6lc_hyp8_mshr',
+        'model': 'hyp8_mshr',
+        'token': 'HYP8_MSHR_PASS',
+        'verify_manifest': True,
+        'x_initial_edge': True,
+        'strict_widths': True,
+    },
+    'lsq-credit': {
+        'sources': COMMON + [
+            'g6lc_ooo_pkg.sv', 'g6lc_lsq_event.sv', 'g6lc_lsq_slot.sv',
+            'g6lc_lsq_cam_bank.sv', 'g6lc_lsq_age.sv', 'g6lc_lsq_reduce.sv',
+            'g6lc_lsq_verdict.sv', 'g6lc_lsq_release.sv', 'g6lc_lsq.sv',
+            'tb_g6lc_hyp8_control.sv'],
+        'includes': ['g6lc_core_types.svh', 'rvfi_types.svh'],
+        'extra_defines': ['G6LC_HYP8_LSQ_LEAF'],
+        'top': 'tb_g6lc_hyp8_lsq',
+        'model': 'hyp8_lsq_credit',
+        'token': 'HYP8_LSQ_CREDIT_PASS',
+        'verify_manifest': True,
+        'x_initial_edge': True,
+        'strict_widths': True,
+    },
+    'flu': {
+        'sources': COMMON + [
+            'g6lc_ooo_pkg.sv', 'g6lc_flu_reserve.sv', 'tb_g6lc_hyp8_control.sv'],
+        'includes': ['g6lc_core_types.svh', 'rvfi_types.svh'],
+        'top': 'tb_g6lc_hyp8_flu',
+        'model': 'hyp8_flu',
+        'token': 'HYP8_FLU_PASS',
+        'verify_manifest': True,
+        'x_initial_edge': True,
+        'strict_widths': True,
     },
     # r68 IQ legality occupant-identity leaf: the real g6lc_iq_legal behind
     # a bank stand-in with the bank's pend-staged allocation timing. A
@@ -333,6 +396,20 @@ def main():
                 f'{name}: expected exactly 1 match, found {len(matches)}')
         return matches[0]
 
+    manifest_hash = None
+    if spec.get('verify_manifest'):
+        manifest = pick('manifest.json')
+        root = manifest.parent.resolve()
+        records = json.loads(manifest.read_text())['files']
+        if not isinstance(records, dict) or not records:
+            raise ValueError('empty or invalid source manifest')
+        for rel, expected in records.items():
+            hit = (root / rel).resolve()
+            if not hit.is_relative_to(root) or not hit.is_file() or digest(hit) != expected:
+                raise ValueError(f'source manifest mismatch: {rel}')
+        manifest_hash = digest(manifest)
+        print(f'HYP8_INPUT_MANIFEST_VERIFIED files={len(records)}')
+
     for name in spec.get('sources', []):
         dest = source / name
         shutil.copy2(pick(name), dest)
@@ -421,9 +498,12 @@ def main():
                VPATH=str(runtime / 'include'))
     verilator = [str(verilator_drv), '--cc', '--main', '--exe', '--timing',
                  '--assert',
+                 *(['--x-initial-edge'] if spec.get('x_initial_edge') else []),
+                 *(['-Werror-WIDTH', '-Werror-WIDTHEXPAND', '-Werror-WIDTHTRUNC']
+                   if spec.get('strict_widths') else []),
                  '--threads', '1', '-Wno-fatal', '-Werror-LATCH',
                  *(defines if 'flist' in spec else
-                   ['-DG6LC_FETCH_B'] + ['-D' + d for d in shlex.split(
+                   ['-DG6LC_FETCH_B'] + ['-D' + d for d in spec.get('extra_defines', [])] + ['-D' + d for d in shlex.split(
                        os.environ.get('HYP8_EXTRA_DEFINES', ''))]),
                  *incdirs,
                  '--top-module', spec['top']]
@@ -457,6 +537,7 @@ def main():
     for m in WARN_CENSUS.finditer(log_text):
         warn_census[m.group(1)] = warn_census.get(m.group(1), 0) + 1
     results = [{'log': f'build-{mdir}.log', 'warnings': warnings_seen,
+                'sourceManifestSha256': manifest_hash,
                 'warningCensus': warn_census,
                 'openDiagnostics': {c: warn_census.get(c, 0)
                                     for c in OPEN_WARN_CLASSES},

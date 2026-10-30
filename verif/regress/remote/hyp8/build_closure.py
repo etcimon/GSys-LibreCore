@@ -47,7 +47,6 @@ EXTRA_GLOBS = [
     'verif/tests/custom/hyp8_*.S',
     'verif/tb/core/tb_g6lc_hyp8_*.sv',
     'corev_apu/tb/dpi/*',
-    'build-platform/workspace/build/sv-timing/hyp8-src/tb/tests/*.S',
     'build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/neg/*.sv',
 ]
 VARS = {
