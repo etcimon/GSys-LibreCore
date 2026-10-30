@@ -655,6 +655,16 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
   // Evaluates to 9 for Sv39 and (unused but elaboration-legal) 1 for Sv32.
   localparam int unsigned MegaPageSubstWidth = PPNWMin - (G6LCCfg.VpnLen / G6LCCfg.PtLevels) - 8 - G6LCCfg.PtLevels;
 
+  // r100: the active instruction walk belongs to the request presented now
+  // (page-granular, like the data side's T42 compare on lsu_vaddr_q).
+  logic ptw_walk_is_fetch;
+`ifdef G6LC_MUT_MMU_PTW_FOREIGN
+  assign ptw_walk_is_fetch = 1'b1;   // review mutation: any walk's fault
+`else
+  assign ptw_walk_is_fetch = icache_areq_i.fetch_req &&
+      (update_vaddr[G6LCCfg.VLEN-1:12] == icache_areq_i.fetch_vaddr[G6LCCfg.VLEN-1:12]);
+`endif
+
   // The instruction interface is a simple request response interface
   always_comb begin : instr_interface
     // MMU disabled: just pass through
@@ -742,11 +752,25 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
             icache_areq_o.fetch_exception.gva   = v_i;
           end
         end
-      end else if (ptw_active && walking_instr) begin
+      end else if (ptw_active && walking_instr && ptw_walk_is_fetch) begin
         // ---------//
         // ITLB Miss
         // ---------//
         // watch out for exceptions happening during walking the page table
+        // r100 (fetch-side counterpart of T42): a walk result is delivered
+        // only to the fetch request whose page the walk was started for.
+        // On mret the CSR context (priv_lvl, satp translation) switches one
+        // cycle before the registered redirect reaches the frontend, so the
+        // still-presented M-mode window (0x800004f0, the mret's own line) is
+        // looked up under the kernel's satp, misses, and starts a walk nobody
+        // owns; the eret flush does not reach the PTW while that walk is
+        // killable, the walk errors ~25 cycles later, and the error landed
+        // on the pending mret-target fetch 0xffffffff80006e88 while its own
+        // lookup was still missing: Linux 6.6.93 took an instruction page
+        // fault at sepc == stval == __sbi_base_ecall+0x1a on its first SBI
+        // ecall and panicked (hyp8-osbi-scalar-r101, $time 22990878,
+        // [ptw-err] vaddr=800004f0 / [mmu-ife] fetch_va=ffffffff80006e88).
+        // A foreign walk's error is dropped; the requester's own walk follows.
         icache_areq_o.fetch_valid = ptw_error | ptw_access_exception;
         if (ptw_error) begin
           if (G6LCCfg.RVH && ptw_error_at_g_st) begin
