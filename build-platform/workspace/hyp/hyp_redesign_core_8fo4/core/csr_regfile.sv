@@ -2913,117 +2913,50 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
   end
 
   always_comb begin : csr_wr_pmp
-      automatic logic [11:0] pmp_index;
-      pmp_index = '0;
-      pmpcfg_w  = pmpcfg_q;
-      pmpaddr_w = pmpaddr_q;
-      bk_wr_pmp_uae   = 1'b0;
-      bk_wr_pmp_vuae  = 1'b0;
-      bk_wr_pmp_flush = 1'b0;
-      bk_wr_pmp_dfsc  = 1'b0;
-      if (csr_we) begin
-        unique case (conv_csr_addr.address)
-        riscv::CSR_PMPCFG0,
-                riscv::CSR_PMPCFG1,
-                riscv::CSR_PMPCFG2,
-                riscv::CSR_PMPCFG3,
-                riscv::CSR_PMPCFG4,
-                riscv::CSR_PMPCFG5,
-                riscv::CSR_PMPCFG6,
-                riscv::CSR_PMPCFG7,
-                riscv::CSR_PMPCFG8,
-                riscv::CSR_PMPCFG9,
-                riscv::CSR_PMPCFG10,
-                riscv::CSR_PMPCFG11,
-                riscv::CSR_PMPCFG12,
-                riscv::CSR_PMPCFG13,
-                riscv::CSR_PMPCFG14,
-                riscv::CSR_PMPCFG15: begin
-          // index is calculated using PMPCFG0 as the offset
-          pmp_index = csr_addr.address[11:0] - riscv::CSR_PMPCFG0;
+    bk_wr_pmp_uae = 1'b0;
+    bk_wr_pmp_vuae = 1'b0;
+    bk_wr_pmp_flush = 1'b0;
+    bk_wr_pmp_dfsc = 1'b0;
+    if (csr_we && G6LCCfg.IS_XLEN64) begin
+      case (csr_addr.address)
+        riscv::CSR_PMPCFG1, riscv::CSR_PMPCFG3,
+        riscv::CSR_PMPCFG5, riscv::CSR_PMPCFG7,
+        riscv::CSR_PMPCFG9, riscv::CSR_PMPCFG11,
+        riscv::CSR_PMPCFG13, riscv::CSR_PMPCFG15:
+          bk_wr_pmp_uae = 1'b1;
+        default: ;
+      endcase
+    end
+  end
 
-          // if index is not even and XLEN==64, raise exception
-          if (G6LCCfg.IS_XLEN64 && pmp_index[0] == 1'b1) bk_wr_pmp_uae = 1'b1;
-          else begin
-            for (int i = 0; i < G6LCCfg.XLEN / 8; i++) begin
-              if (!pmpcfg_q[pmp_index*4+i].locked) pmpcfg_w[pmp_index*4+i] = csr_wdata[i*8+:8];
-            end
-          end
-        end
-        riscv::CSR_PMPADDR0,
-                riscv::CSR_PMPADDR1,
-                riscv::CSR_PMPADDR2,
-                riscv::CSR_PMPADDR3,
-                riscv::CSR_PMPADDR4,
-                riscv::CSR_PMPADDR5,
-                riscv::CSR_PMPADDR6,
-                riscv::CSR_PMPADDR7,
-                riscv::CSR_PMPADDR8,
-                riscv::CSR_PMPADDR9,
-                riscv::CSR_PMPADDR10,
-                riscv::CSR_PMPADDR11,
-                riscv::CSR_PMPADDR12,
-                riscv::CSR_PMPADDR13,
-                riscv::CSR_PMPADDR14,
-                riscv::CSR_PMPADDR15,
-                riscv::CSR_PMPADDR16,
-                riscv::CSR_PMPADDR17,
-                riscv::CSR_PMPADDR18,
-                riscv::CSR_PMPADDR19,
-                riscv::CSR_PMPADDR20,
-                riscv::CSR_PMPADDR21,
-                riscv::CSR_PMPADDR22,
-                riscv::CSR_PMPADDR23,
-                riscv::CSR_PMPADDR24,
-                riscv::CSR_PMPADDR25,
-                riscv::CSR_PMPADDR26,
-                riscv::CSR_PMPADDR27,
-                riscv::CSR_PMPADDR28,
-                riscv::CSR_PMPADDR29,
-                riscv::CSR_PMPADDR30,
-                riscv::CSR_PMPADDR31,
-                riscv::CSR_PMPADDR32,
-                riscv::CSR_PMPADDR33,
-                riscv::CSR_PMPADDR34,
-                riscv::CSR_PMPADDR35,
-                riscv::CSR_PMPADDR36,
-                riscv::CSR_PMPADDR37,
-                riscv::CSR_PMPADDR38,
-                riscv::CSR_PMPADDR39,
-                riscv::CSR_PMPADDR40,
-                riscv::CSR_PMPADDR41,
-                riscv::CSR_PMPADDR42,
-                riscv::CSR_PMPADDR43,
-                riscv::CSR_PMPADDR44,
-                riscv::CSR_PMPADDR45,
-                riscv::CSR_PMPADDR46,
-                riscv::CSR_PMPADDR47,
-                riscv::CSR_PMPADDR48,
-                riscv::CSR_PMPADDR49,
-                riscv::CSR_PMPADDR50,
-                riscv::CSR_PMPADDR51,
-                riscv::CSR_PMPADDR52,
-                riscv::CSR_PMPADDR53,
-                riscv::CSR_PMPADDR54,
-                riscv::CSR_PMPADDR55,
-                riscv::CSR_PMPADDR56,
-                riscv::CSR_PMPADDR57,
-                riscv::CSR_PMPADDR58,
-                riscv::CSR_PMPADDR59,
-                riscv::CSR_PMPADDR60,
-                riscv::CSR_PMPADDR61,
-                riscv::CSR_PMPADDR62,
-                riscv::CSR_PMPADDR63: begin
-          // index is calculated using PMPADDR0 as the offset
-          pmp_index = csr_addr.address[11:0] - riscv::CSR_PMPADDR0;
-          // check if the entry or the entry above is locked
-          if (!pmpcfg_q[pmp_index].locked && !(pmpcfg_q[pmp_index+1].locked && pmpcfg_q[pmp_index+1].addr_mode == riscv::TOR)) begin
-            pmpaddr_w[pmp_index] = csr_wdata[G6LCCfg.PLEN-3:0];
-          end
-        end
-          default: ;
-        endcase
+  // Decode each row at a constant address. CSR RMW and architectural apply
+  // remain at their existing boundaries; this bank adds no state or cycle.
+  // VS remapping touches only 0x100..105 and 0x140..180, producing 0x2xx.
+  // PMP's 0x3a0..3ef domain therefore uses the retained original address.
+  for (genvar p = 0; p < 64; p++) begin : gen_pmp_write
+    localparam logic [11:0] CFG_ADDR = 12'(riscv::CSR_PMPCFG0) +
+        12'((p / (G6LCCfg.XLEN / 8)) * (G6LCCfg.XLEN / 32));
+    localparam logic [11:0] ADDR_ADDR = 12'(riscv::CSR_PMPADDR0) + 12'(p);
+    localparam int unsigned BYTE = p % (G6LCCfg.XLEN / 8);
+    logic next_tor_locked;
+    if (p < 63) begin : gen_neighbor
+      assign next_tor_locked = pmpcfg_q[p+1].locked &&
+                              pmpcfg_q[p+1].addr_mode == riscv::TOR;
+    end else begin : gen_last
+      // Architectural entry63 has no higher TOR entry.
+      assign next_tor_locked = 1'b0;
+    end
+    always_comb begin
+      pmpcfg_w[p] = pmpcfg_q[p];
+      pmpaddr_w[p] = pmpaddr_q[p];
+      if (csr_we) begin
+        if (csr_addr.address == CFG_ADDR && !pmpcfg_q[p].locked)
+          pmpcfg_w[p] = csr_wdata[BYTE*8+:8];
+        if (csr_addr.address == ADDR_ADDR &&
+            !pmpcfg_q[p].locked && !next_tor_locked)
+          pmpaddr_w[p] = csr_wdata[G6LCCfg.PLEN-3:0];
       end
+    end
   end
 
   always_comb begin : csr_wr_acc
@@ -5226,7 +5159,7 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
           // index is calculated using PMPADDR0 as the offset
           pmp_index = csr_addr.address[11:0] - riscv::CSR_PMPADDR0;
           // check if the entry or the entry above is locked
-          if (!pmpcfg_q[pmp_index].locked && !(pmpcfg_q[pmp_index+1].locked && pmpcfg_q[pmp_index+1].addr_mode == riscv::TOR)) begin
+          if (!pmpcfg_q[pmp_index].locked && !(pmp_index < 12'd63 && pmpcfg_q[pmp_index+1].locked && pmpcfg_q[pmp_index+1].addr_mode == riscv::TOR)) begin
             rf_pmpaddr_d[pmp_index] = csr_wdata[G6LCCfg.PLEN-3:0];
           end
         end
@@ -6719,4 +6652,3 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
 
 
 endmodule
-

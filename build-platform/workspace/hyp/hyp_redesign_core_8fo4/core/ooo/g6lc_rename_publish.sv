@@ -53,7 +53,7 @@ module g6lc_rename_publish
     output logic [NR_PORTS-1:0][7:0]  pub_fown_idx_o,
     // Branch checkpoint payloads (one per branch lane).
     output logic [NR_PORTS-1:0]       pub_ck_v_o,
-    output logic [NR_PORTS-1:0][5:0]  pub_ck_slot_o,
+    output logic [NR_PORTS-1:0][7:0]  pub_ck_slot_o,
     output logic [NR_PORTS-1:0][1:0]  pub_ck_h_o,
     output logic [NR_PORTS-1:0][31:0][PRF_W-1:0]  pub_ck_map_o,
     output logic [NR_PORTS-1:0][31:0][FPRF_W-1:0] pub_ck_fmap_o,

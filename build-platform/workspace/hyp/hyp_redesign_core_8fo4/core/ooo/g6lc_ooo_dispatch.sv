@@ -91,7 +91,7 @@ module g6lc_ooo_dispatch
     // sweeps). A group is consumed only when the table can hold every
     // CSR-class lane it carries — a resource released in commit order is
     // allocated in program order, so the group waits, never partially.
-    input  logic [1:0]                                         csr_credit_i,
+    input  logic [g6lc_ooo_pkg::ooo_csr_credit_bits(G6LCCfg)-1:0] csr_credit_i,
     // Allocation strobes for csr_buffer: one per lane the cycle the lane
     // is consumed into the IQ (dispatch_ack_o && CSR class).
     output logic [G6LCCfg.NrIssuePorts-1:0]                      csr_disp_valid_o,
@@ -152,6 +152,7 @@ module g6lc_ooo_dispatch
   localparam int unsigned ROB_W = ooo_rob_w(ROB_N);
   localparam int unsigned CKPT  = (G6LCCfg.BPCkptDepth == 0) ? 8 : G6LCCfg.BPCkptDepth;
   localparam int unsigned NP    = G6LCCfg.NrIssuePorts;
+  localparam int unsigned CSR_W = g6lc_ooo_pkg::ooo_csr_credit_bits(G6LCCfg);
 
   localparam int unsigned CKPT_W = $clog2(CKPT+1);
   localparam int unsigned PRF_MIRROR =
@@ -293,7 +294,7 @@ module g6lc_ooo_dispatch
   // grp_v_q==0 (or the kill terms), so they are unobservable there.
   logic [LDW-1:0]          grp_need_ld_q;
   logic [STW-1:0]          grp_need_st_q;
-  logic [1:0]              grp_csr_need_q;
+  logic [CSR_W-1:0]         grp_csr_need_q;
   assign need_ld      = LDW'($countones(is_ld));
   assign need_st      = STW'($countones(is_st));
 `ifdef G6LC_MUT_T2_DISP_GRPGO
@@ -331,12 +332,12 @@ module g6lc_ooo_dispatch
   // lane — kill-dominates ordering and the all-or-nothing ack are
   // untouched: a credit-short group simply waits in grp_v_q.
   logic [NP-1:0] grp_csr;
-  logic [1:0]    csr_need;
+  logic [CSR_W-1:0] csr_need;
   for (genvar p = 0; p < NP; p++) begin : gen_grp_csr
     assign grp_csr[p] = grp_v_q[p] && (grp_sbe_q[p].fu == CSR);
   end
 `ifdef G6LC_MUT_T2_DISP_GRPGO
-  assign csr_need = 2'($countones(grp_csr));
+  assign csr_need = CSR_W'($countones(grp_csr));
 `else
   assign csr_need = grp_csr_need_q;
 `endif
@@ -405,7 +406,7 @@ module g6lc_ooo_dispatch
       g6lc_t2_grpgo_eq: assert (
           grp_need_ld === LDW'($countones(grp_is_ld_q)) &&
           grp_need_st === STW'($countones(grp_is_st_q)) &&
-          csr_need === 2'($countones(grp_csr)))
+          csr_need === CSR_W'($countones(grp_csr)))
         else $error("g6lc_ooo_dispatch: equiv grp_go legality");
     end
   end
@@ -642,7 +643,7 @@ module g6lc_ooo_dispatch
     end else if (ren_pub) begin
       grp_need_ld_q  <= LDW'($countones(is_ld));
       grp_need_st_q  <= STW'($countones(is_st));
-      grp_csr_need_q <= 2'($countones(ren_csr_pub));
+      grp_csr_need_q <= CSR_W'($countones(ren_csr_pub));
     end
   end
 `endif

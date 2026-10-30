@@ -66,7 +66,7 @@ module g6lc_rename_recover #(
     input  logic [NR_PORTS-1:0]       pub_fown_v_i,
     input  logic [NR_PORTS-1:0][7:0]  pub_fown_idx_i,
     input  logic [NR_PORTS-1:0]       pub_ck_v_i,
-    input  logic [NR_PORTS-1:0][5:0]  pub_ck_slot_i,
+    input  logic [NR_PORTS-1:0][7:0]  pub_ck_slot_i,
     input  logic [NR_PORTS-1:0][1:0]  pub_ck_h_i,
     input  logic [NR_PORTS-1:0][31:0][PRF_W-1:0]  pub_ck_map_i,
     input  logic [NR_PORTS-1:0][31:0][FPRF_W-1:0] pub_ck_fmap_i,
@@ -118,6 +118,7 @@ module g6lc_rename_recover #(
   localparam int unsigned FPN   = (FPRF_ENTRIES < 1) ? 1 : FPRF_ENTRIES;
   localparam bit          FP_EN = (FPRF_ENTRIES >= 32);
   localparam int unsigned LVL_W = $clog2(CKPT_DEPTH+1);
+  localparam int unsigned SLOT_W = (CKPT_DEPTH <= 1) ? 1 : $clog2(CKPT_DEPTH);
   localparam int unsigned CKPT_PER_HART = (CKPT_DEPTH / NH < 1) ? 1 : CKPT_DEPTH / NH;
 
   function automatic logic [LVL_W-1:0] ckpt_slot(input int unsigned h,
@@ -336,7 +337,7 @@ module g6lc_rename_recover #(
     if (pub_v_i) begin
       for (int unsigned p = 0; p < NR_PORTS; p++)
         if (pub_ck_v_i[p] && (int'(pub_ck_slot_i[p]) < CKPT_DEPTH))
-          rsvd_mask[pub_ck_slot_i[p]] = 1'b1;
+          rsvd_mask[SLOT_W'(pub_ck_slot_i[p])] = 1'b1;
     end
   end
 
@@ -471,9 +472,9 @@ module g6lc_rename_recover #(
       end
       for (int unsigned p = 0; p < NR_PORTS; p++) begin
         if (pub_ck_v_i[p] && (int'(pub_ck_slot_i[p]) < CKPT_DEPTH)) begin
-          ckpt_hart_d[pub_ck_slot_i[p]]   = HID_W'(pub_ck_h_i[p]);
-          ckpt_alloc_d[pub_ck_slot_i[p]]  = pub_ck_aval_i[p];
-          ckpt_falloc_d[pub_ck_slot_i[p]] = pub_ck_faval_i[p];
+          ckpt_hart_d[SLOT_W'(pub_ck_slot_i[p])]   = HID_W'(pub_ck_h_i[p]);
+          ckpt_alloc_d[SLOT_W'(pub_ck_slot_i[p])]  = pub_ck_aval_i[p];
+          ckpt_falloc_d[SLOT_W'(pub_ck_slot_i[p])] = pub_ck_faval_i[p];
         end
       end
 `else
@@ -701,8 +702,8 @@ module g6lc_rename_recover #(
       // under do_ckpt in the same edge as the rest).
       for (int unsigned p = 0; p < NR_PORTS; p++) begin
         if (pub_v_i && pub_ck_v_i[p] && (int'(pub_ck_slot_i[p]) < CKPT_DEPTH)) begin
-          ckpt_fmap_q[pub_ck_slot_i[p]] <= pub_ck_fmap_i[p];
-          ckpt_map_q[pub_ck_slot_i[p]]  <= pub_ck_map_i[p];
+          ckpt_fmap_q[SLOT_W'(pub_ck_slot_i[p])] <= pub_ck_fmap_i[p];
+          ckpt_map_q[SLOT_W'(pub_ck_slot_i[p])]  <= pub_ck_map_i[p];
         end
       end
       if (flush_i) begin
@@ -833,9 +834,9 @@ module g6lc_rename_recover #(
       end
       for (int unsigned p = 0; p < NR_PORTS; p++) begin
         if (pub_ck_v_i[p] && (int'(pub_ck_slot_i[p]) < CKPT_DEPTH)) begin
-          t1_ref_hart[pub_ck_slot_i[p]]   = HID_W'(pub_ck_h_i[p]);
-          t1_ref_alloc[pub_ck_slot_i[p]]  = pub_ck_aval_i[p];
-          t1_ref_falloc[pub_ck_slot_i[p]] = pub_ck_faval_i[p];
+          t1_ref_hart[SLOT_W'(pub_ck_slot_i[p])]   = HID_W'(pub_ck_h_i[p]);
+          t1_ref_alloc[SLOT_W'(pub_ck_slot_i[p])]  = pub_ck_aval_i[p];
+          t1_ref_falloc[SLOT_W'(pub_ck_slot_i[p])] = pub_ck_faval_i[p];
         end
       end
     end

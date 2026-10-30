@@ -116,6 +116,7 @@ module g6lc_rename
 );
 
   localparam int unsigned NH    = (NR_HARTS < 1) ? 1 : NR_HARTS;
+  localparam int unsigned HID_W = (NH <= 1) ? 1 : $clog2(NH);
   localparam int unsigned FPN   = (FPRF_ENTRIES < 1) ? 1 : FPRF_ENTRIES;
   localparam int unsigned LVL_W = $clog2(CKPT_DEPTH+1);
   // r43-T T1(b): resolve stage count; the review mutant restores the
@@ -180,7 +181,7 @@ module g6lc_rename
       if (flush_hart_i[h]) kill_hart[h] = 1'b1;
   end
   function automatic logic lane_dies(input ooo_ren_lane_t l);
-    return l.v && (kill_all || kill_hart[l.hart]);
+    return l.v && (kill_all || kill_hart[HID_W'(l.hart)]);
   endfunction
 
   // Effective lanes for publish/prev0: drop lanes dying at this edge, and
@@ -290,7 +291,7 @@ module g6lc_rename
   logic [NR_PORTS-1:0]      pub_fown_v;
   logic [NR_PORTS-1:0][7:0] pub_fown_idx;
   logic [NR_PORTS-1:0]      pub_ck_v;
-  logic [NR_PORTS-1:0][5:0] pub_ck_slot;
+  logic [NR_PORTS-1:0][7:0] pub_ck_slot;
   logic [NR_PORTS-1:0][1:0] pub_ck_h;
   logic [NR_PORTS-1:0][31:0][PRF_W-1:0]  pub_ck_map;
   logic [NR_PORTS-1:0][31:0][FPRF_W-1:0] pub_ck_fmap;
@@ -501,7 +502,7 @@ module g6lc_rename
           rs2_ready_o[p] <= s2_eff[p].rs2_rdy;
           rs3_ready_o[p] <= s2_eff[p].rs3_rdy;
           ckpt_id_o[p] <= s2_eff[p].do_ckpt
-                          ? LVL_W'(s2_eff[p].ckpt_slot[LVL_W-1:0])
+                          ? LVL_W'(s2_eff[p].ckpt_slot)
                           : '1;
         end
       end else begin

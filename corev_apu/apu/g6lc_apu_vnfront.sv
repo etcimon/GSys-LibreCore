@@ -1612,16 +1612,38 @@ module g6lc_apu_vnfront
                         end
                       end
                     end
-                    exec_w_q[wp*32 +: $bits(APU_VN_IMGPROPS)]
-                        <= APU_VN_IMGPROPS;
+                    // VkImageFormatProperties word order matches
+                    // APU_VN_IMGPROPS (2D).  1D height and depth are
+                    // 1.  3D is 256^3, one array layer, mip cap of a
+                    // 256 edge (floor(log2)+1 = 9).  sampleCounts
+                    // stays 1 and maxResourceSize stays 32 MiB.
+                    begin
+                      automatic logic [31:0] mw, mh, md, mm, ml;
+                      mw = 32'd4096; mh = 32'd4096; md = 32'd1;
+                      mm = 32'd13;   ml = 32'd256;
+                      if (op_q.imm[1] == 32'd0) begin
+                        mh = 32'd1; md = 32'd1;
+                      end else if (op_q.imm[1] == 32'd2) begin
+                        mw = 32'd256; mh = 32'd256; md = 32'd256;
+                        mm = 32'd9;   ml = 32'd1;
+                      end
+                      exec_w_q[(wp + 0)*32 +: 32] <= mw;
+                      exec_w_q[(wp + 1)*32 +: 32] <= mh;
+                      exec_w_q[(wp + 2)*32 +: 32] <= md;
+                      exec_w_q[(wp + 3)*32 +: 32] <= mm;
+                      exec_w_q[(wp + 4)*32 +: 32] <= ml;
+                      exec_w_q[(wp + 5)*32 +: 32] <= 32'd1;
+                      exec_w_q[(wp + 6)*32 +: 32] <= 32'h0200_0000;
+                      exec_w_q[(wp + 7)*32 +: 32] <= 32'h0;
+                    end
                     // refuse formats outside the profile table, and any
                     // {type, tiling, usage, flags} we do not implement:
-                    // type must be 2D, tiling OPTIMAL or LINEAR, no
-                    // create flags, usage within the format's
-                    // feature-derived mask (APU_VN_FMT_USAGE).
+                    // type is 1D, 2D, or 3D (§9a), tiling OPTIMAL or
+                    // LINEAR, no create flags, usage within the
+                    // format's feature-derived mask (APU_VN_FMT_USAGE).
                     if (APU_VN_FMT3[3*int'(op_q.imm[0][7:0]) + 1] ==
                         32'h0 ||
-                        op_q.imm[1] != 32'd1 ||
+                        op_q.imm[1] > 32'd2 ||
                         op_q.imm[2] > 32'd1 ||
                         op_q.imm[4] != 32'h0 ||
                         (op_q.imm[3] &
@@ -2160,7 +2182,15 @@ module g6lc_apu_vnfront
                                  32'(dsum_q << 5)}
                               : act_q.obj_kind ==
                                 6'(APU_VN_KIND_VK_IMAGE)
-                              ? 64'(op_q.imm[7]) * 64'(imw_lay_q)
+                              // 3D stores depth as the layer count
+                              // (aux), and one layer_bytes is one
+                              // slice.  The bound size has to be
+                              // depth*layer_bytes or a full-volume
+                              // clear walks off the mapping.  1D/2D
+                              // use arrayLayers.
+                              ? 64'(op_q.imm[1] == 32'd2
+                                    ? op_q.imm[5] : op_q.imm[7]) *
+                                64'(imw_lay_q)
                               : ds < 0 ? 64'h0 : op_q.q[ds],
                          // §12.3 3d-d: a type-1 (lazy host-visible)
                          // entry is born aux[63:32]=UNBACKED — no

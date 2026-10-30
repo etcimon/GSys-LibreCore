@@ -668,7 +668,7 @@ module g6lc_core
   logic [G6LCCfg.NrIssuePorts-1:0] csr_disp_valid_id_ex;
   logic [G6LCCfg.NrIssuePorts-1:0][G6LCCfg.TRANS_ID_BITS-1:0] csr_disp_tid_id_ex;
   logic [G6LCCfg.NrIssuePorts-1:0][11:0] csr_disp_addr_id_ex;
-  logic [1:0] csr_credit_ex_id;
+  logic [g6lc_ooo_pkg::ooo_csr_credit_bits(G6LCCfg)-1:0] csr_credit_ex_id;
   logic [G6LCCfg.TRANS_ID_BITS-1:0] flu_trans_id_ex_id;
   logic flu_valid_ex_id;
   logic [G6LCCfg.XLEN-1:0] flu_result_ex_id;

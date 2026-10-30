@@ -102,7 +102,7 @@ module issue_stage
     input logic csr_ready_i,
     // hyp8 r33: CSR address-table free-entry credit — the OoO dispatch
     // group gate; the dispatched CSR table strobes back to EX_STAGE.
-    input  logic [1:0] csr_credit_i,
+    input  logic [g6lc_ooo_pkg::ooo_csr_credit_bits(G6LCCfg)-1:0] csr_credit_i,
     output logic [G6LCCfg.NrIssuePorts-1:0] csr_disp_valid_o,
     output logic [G6LCCfg.NrIssuePorts-1:0][G6LCCfg.TRANS_ID_BITS-1:0] csr_disp_tid_o,
     output logic [G6LCCfg.NrIssuePorts-1:0][11:0] csr_disp_addr_o,

@@ -129,7 +129,7 @@ module ex_stage
     input  logic [G6LCCfg.NrIssuePorts-1:0] csr_disp_valid_i,
     input  logic [G6LCCfg.NrIssuePorts-1:0][G6LCCfg.TRANS_ID_BITS-1:0] csr_disp_tid_i,
     input  logic [G6LCCfg.NrIssuePorts-1:0][11:0] csr_disp_addr_i,
-    output logic [1:0] csr_credit_o,
+    output logic [g6lc_ooo_pkg::ooo_csr_credit_bits(G6LCCfg)-1:0] csr_credit_o,
     // CSR address to write - COMMIT_STAGE
     output logic [11:0] csr_addr_o,
     // CSR commit - COMMIT_STAGE

@@ -336,25 +336,22 @@ module g6lc_lsq #(
       .ld_alloc_oh_o   (ld_alloc_oh)
   );
 
-  // Occupancy flags depend only on registered state — the emit's
-  // combinational-loop argument is kept verbatim; hyp8 additionally
-  // counts the staged event records conservatively into lsq_busy_o.
-  always_comb begin
-    ld_full_o = 1'b1;
-    st_full_o = 1'b1;
-    ld_free_o = '0;
-    st_free_o = '0;
-    for (int unsigned i = 0; i < LD_ENTRIES; i++)
-      if (!ld_q[i].valid) begin
-        ld_full_o = 1'b0;
-        ld_free_o = ld_free_o + 1'b1;
-      end
-    for (int unsigned i = 0; i < ST_ENTRIES; i++)
-      if (!st_q[i].valid) begin
-        st_full_o = 1'b0;
-        st_free_o = st_free_o + 1'b1;
-      end
+  // Credits are a pure projection of registered slots, never pending events.
+  // Case equality preserves the old if (!valid) treatment of X/Z as occupied.
+  localparam int unsigned LD_FREE_W = $clog2(LD_ENTRIES + 1);
+  localparam int unsigned ST_FREE_W = $clog2(ST_ENTRIES + 1);
+  logic [LD_ENTRIES-1:0] ld_free_mask;
+  logic [ST_ENTRIES-1:0] st_free_mask;
+  for (genvar i = 0; i < LD_ENTRIES; i++) begin : gen_ld_credit
+    assign ld_free_mask[i] = (ld_q[i].valid === 1'b0);
   end
+  for (genvar i = 0; i < ST_ENTRIES; i++) begin : gen_st_credit
+    assign st_free_mask[i] = (st_q[i].valid === 1'b0);
+  end
+  assign ld_free_o = LD_FREE_W'($countones(ld_free_mask));
+  assign st_free_o = ST_FREE_W'($countones(st_free_mask));
+  assign ld_full_o = !(|ld_free_mask);
+  assign st_full_o = !(|st_free_mask);
 
   // Occupancy status, from registered state only (emit block kept).
   // hyp8: lsq_busy_o also covers the staged records — an in-flight
@@ -615,10 +612,10 @@ module g6lc_lsq #(
       for (genvar c = 0; c < VIO_LEAF; c++) begin : gen_vio_age_c
         logic [31:0] rid, cid;
         assign rid = (r < VIO_BANK)
-            ? 32'((r < LD_ENTRIES) ? ld_q[r].id : '0)
+            ? ((r < LD_ENTRIES) ? 32'(ld_q[r].id) : 32'b0)
             : 32'(vv_id_d[u][r-VIO_BANK]);
         assign cid = (c < VIO_BANK)
-            ? 32'((c < LD_ENTRIES) ? ld_q[c].id : '0)
+            ? ((c < LD_ENTRIES) ? 32'(ld_q[c].id) : 32'b0)
             : 32'(vv_id_d[u][c-VIO_BANK]);
         assign vio_age_d[u][r][c] = g6lc_ooo_pkg::ooo_age_older(
             IDW, rid, cid, 32'(commit_ptr_i));

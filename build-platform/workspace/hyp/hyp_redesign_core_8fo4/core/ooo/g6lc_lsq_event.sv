@@ -333,13 +333,13 @@ module g6lc_lsq_event #(
   always_comb begin : p_t1_evc_ref
     t1_ref_count = '0;
     for (int unsigned u = 0; u < NR_UPDATE; u++)
-      t1_ref_count = t1_ref_count + ev_addr_valid_o[u] + ev_data_valid_o[u];
+      t1_ref_count = t1_ref_count + CNTW'(ev_addr_valid_o[u]) + CNTW'(ev_data_valid_o[u]);
     for (int unsigned w = 0; w < G6LCCfg.NrWbPorts; w++)
-      t1_ref_count = t1_ref_count + ev_complete_valid_o[w];
+      t1_ref_count = t1_ref_count + CNTW'(ev_complete_valid_o[w]);
     for (int unsigned c = 0; c < G6LCCfg.NrCommitPorts; c++)
-      t1_ref_count = t1_ref_count + (ev_commit_st_o[c] | ev_commit_ld_o[c]);
-    t1_ref_count = t1_ref_count + ev_query_valid_o
-                 + (|ev_phys_valid_o) + (|ev_mod_valid_o);
+      t1_ref_count = t1_ref_count + CNTW'(1'(ev_commit_st_o[c] | ev_commit_ld_o[c]));
+    t1_ref_count = t1_ref_count + CNTW'(ev_query_valid_o)
+                 + CNTW'(|ev_phys_valid_o) + CNTW'(|ev_mod_valid_o);
   end
   int unsigned t1_evc_n = 0;
   always_ff @(posedge clk_i) begin : p_t1_evc_eq

@@ -175,6 +175,20 @@ package g6lc_ooo_pkg;
     return 2 + m + int'(h.WbCaptureStages);
   endfunction
 
+  // Dispatch consumes a complete group, so an empty CSR table must be
+  // able to reserve every lane. Preserve the legacy two-entry OoO minimum.
+  function automatic int unsigned ooo_csr_slots(input config_pkg::g6lc_cfg_t cfg);
+    if (!cfg.OoOEn) return 1;
+    return (cfg.NrIssuePorts > 2) ? cfg.NrIssuePorts : 2;
+  endfunction
+
+  function automatic int unsigned ooo_csr_credit_bits(
+      input config_pkg::g6lc_cfg_t cfg);
+    int unsigned slots;
+    slots = ooo_csr_slots(cfg);
+    return (slots <= 2) ? 2 : $clog2(slots + 1);
+  endfunction
+
   // Replay broadcast record (kill-by-tid re-arm, analysis/g6lc_iq.md): the
   // LSU-side producer lands later (dispatch ties it low for now); the iq
   // ports carry the two fields directly.
@@ -202,7 +216,7 @@ package g6lc_ooo_pkg;
     logic        do_alloc, do_falloc;
     logic [7:0]  prd, fprd;
     logic        do_ckpt;
-    logic [5:0]  ckpt_slot;
+    logic [7:0]  ckpt_slot;
   } ooo_ren_lane_t;
 
 endpackage

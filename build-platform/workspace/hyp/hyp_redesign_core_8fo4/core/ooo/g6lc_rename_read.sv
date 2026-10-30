@@ -255,9 +255,9 @@ module g6lc_rename_read
       lane_o[gp].f_rs3     = is_fpr_rs3_i[gp];
 
       // -- raw map reads (x0 fixed at physical 0; FP f0 is ordinary) ------
-      lane_o[gp].prs1 = 8'((rs1_i[gp] == 5'd0) ? '0 : map_q_i[hart_i[gp]][rs1_i[gp]]);
-      lane_o[gp].prs2 = 8'((rs2_i[gp] == 5'd0) ? '0 : map_q_i[hart_i[gp]][rs2_i[gp]]);
-      lane_o[gp].old  = 8'((rd_i[gp]  == 5'd0) ? '0 : map_q_i[hart_i[gp]][rd_i[gp]]);
+      lane_o[gp].prs1 = (rs1_i[gp] == 5'd0) ? 8'd0 : 8'(map_q_i[hart_i[gp]][rs1_i[gp]]);
+      lane_o[gp].prs2 = (rs2_i[gp] == 5'd0) ? 8'd0 : 8'(map_q_i[hart_i[gp]][rs2_i[gp]]);
+      lane_o[gp].old  = (rd_i[gp]  == 5'd0) ? 8'd0 : 8'(map_q_i[hart_i[gp]][rd_i[gp]]);
       lane_o[gp].rs1_rdy = (rs1_i[gp] == 5'd0) ||
                            !busy_q_i[PRF_W'(lane_o[gp].prs1[PRF_W-1:0])];
       lane_o[gp].rs2_rdy = (rs2_i[gp] == 5'd0) ||
@@ -315,14 +315,14 @@ module g6lc_rename_read
           (SUM_W'(ckpt_cnt_q_i[hart_i[gp]]) + SUM_W'(sb_cnt[gp])
              < SUM_W'(CKPT_PER_HART))) begin
         lane_o[gp].do_ckpt   = 1'b1;
-        lane_o[gp].ckpt_slot = 6'(ckpt_slot_n(int'(hart_i[gp]), ck_sum));
+        lane_o[gp].ckpt_slot = 8'(ckpt_slot_n(int'(hart_i[gp]), ck_sum));
       end
     end
 //pragma translate_off
     always_comb begin : p_ckpt_eq
       if (lane_o[gp].do_ckpt &&
           (lane_o[gp].ckpt_slot !==
-           6'(ckpt_slot(int'(hart_i[gp]),
+           8'(ckpt_slot(int'(hart_i[gp]),
               int'(32'(ckpt_head_q_i[hart_i[gp]]) +
               32'(ckpt_cnt_q_i[hart_i[gp]]) + 32'(sb_cnt[gp])))))) begin
         $error("ckpt_slot_n != ckpt_slot gp=%0d", gp);

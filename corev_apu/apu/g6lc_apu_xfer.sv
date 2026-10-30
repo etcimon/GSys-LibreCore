@@ -1356,22 +1356,51 @@ module g6lc_apu_xfer
                 slc = rg_q[7];
               end
             end
+            // VK_REMAINING_MIP_LEVELS / VK_REMAINING_ARRAY_LAYERS arrive
+            // as all-ones.  Resolve them before the bounds check.  The
+            // mip cursor is 4 bits and compares against the raw count,
+            // so an unresolved ~0 never reaches XDone and never stops
+            // issuing the range.  A 3D image's array extent is 1; its
+            // depth is spliced onto layerCount only for the Vulkan
+            // {base 0, count 1} range that means "every slice".
+            if (is_clr) begin
+              if (rg_q[2] == 32'hFFFF_FFFF)
+                rg_q[2] <= rg_q[1] >= 32'(xf_q.img0.mips) ? 32'h0
+                           : 32'(xf_q.img0.mips) - rg_q[1];
+              if (rg_q[4] == 32'hFFFF_FFFF)
+                rg_q[4] <= xf_q.img0.itype == 2'd2
+                           ? (rg_q[3] == 32'h0 ? 32'd1 : 32'h0)
+                           : (rg_q[3] >= 32'(xf_q.img0.layers) ? 32'h0
+                              : 32'(xf_q.img0.layers) - rg_q[3]);
+            end
             if (is_clr && xf_q.img0.itype == 2'd2 &&
-                rg_q[3] == 32'h0 && rg_q[4] == 32'd1) begin
+                rg_q[3] == 32'h0 &&
+                (rg_q[4] == 32'd1 || rg_q[4] == 32'hFFFF_FFFF)) begin
               rg_q[4] <= {22'h0, xf_q.img0.layers};
             end
             v_ok = 1'b0;
             rl = 32'h0; ih = 32'h0;
             wm = 16'h0;  hm = 16'h0;
             if (is_clr) begin
-              // {aspect, baseMip, levelCount, baseLayer, layerCount}
+              // {aspect, baseMip, levelCount, baseLayer, layerCount}.
+              // The REMAINING rewrite above is nonblocking, so this
+              // check still sees the wire values.  all-ones is in
+              // range only when the base lies inside the image; the
+              // clamped count is what the mip cursor walks.
               v_ok = rg_q[0] == 32'd1 &&
-                     rg_q[2] >= 32'd1 &&
-                     rg_q[1] + rg_q[2] <= 32'(xf_q.img0.mips) &&
-                     rg_q[4] >= 32'd1 &&
+                     (rg_q[2] == 32'hFFFF_FFFF
+                        ? rg_q[1] < 32'(xf_q.img0.mips)
+                        : (rg_q[2] >= 32'd1 &&
+                           rg_q[1] + rg_q[2] <= 32'(xf_q.img0.mips))) &&
                      (xf_q.img0.itype == 2'd2
-                        ? (rg_q[3] == 32'h0 && rg_q[4] == 32'd1)
-                        : (rg_q[3] + rg_q[4] <= 32'(xf_q.img0.layers)));
+                        ? (rg_q[3] == 32'h0 &&
+                           (rg_q[4] == 32'd1 ||
+                            rg_q[4] == 32'hFFFF_FFFF))
+                        : (rg_q[4] == 32'hFFFF_FFFF
+                             ? rg_q[3] < 32'(xf_q.img0.layers)
+                             : (rg_q[4] >= 32'd1 &&
+                                rg_q[3] + rg_q[4] <=
+                                  32'(xf_q.img0.layers))));
             end else if (is_i2i) begin
               // {srcSub, srcOff, dstSub, dstOff, extent}
               wm = f_mdim(xf_q.img0.w, 5'(rg_q[1][4:0]));
@@ -1529,8 +1558,30 @@ module g6lc_apu_xfer
             state_q  <= XImgMip;
           end
 
-          // CLEAR range entry: re-walk for baseMip + c_mip
+          // CLEAR range entry: re-walk for baseMip + c_mip.
+          // Pass B re-reads the payload, so the XImgChk rewrite of
+          // VK_REMAINING_* and the 3D depth splice is gone.  Resolve
+          // both again here.  The mip cursor compares against rg_q[2]
+          // only after this walk, so the nonblocking update is visible
+          // at the loop bound.  A raw ~0 never reaches XDone.
           XClrMip: begin
+            automatic logic [31:0] lc, nl;
+            lc = rg_q[2];
+            nl = rg_q[4];
+            if (lc == 32'hFFFF_FFFF)
+              lc = rg_q[1] >= 32'(xf_q.img0.mips) ? 32'h0
+                   : 32'(xf_q.img0.mips) - rg_q[1];
+            if (nl == 32'hFFFF_FFFF)
+              nl = xf_q.img0.itype == 2'd2
+                   ? (rg_q[3] == 32'h0 ? 32'd1 : 32'h0)
+                   : (rg_q[3] >= 32'(xf_q.img0.layers) ? 32'h0
+                      : 32'(xf_q.img0.layers) - rg_q[3]);
+            // {base 0, count 1} on a 3D image covers every slice.
+            if (xf_q.img0.itype == 2'd2 && rg_q[3] == 32'h0 &&
+                nl == 32'd1)
+              nl = {22'h0, xf_q.img0.layers};
+            rg_q[2] <= lc;
+            rg_q[4] <= nl;
             im_m_q   <= '0;
             im_acc_q <= '0;
             im_dst_q <= 1'b0;

@@ -407,10 +407,11 @@ package build_config_pkg;
     cfg.SmtDrainedHandoff = G6LCCfg.SmtDrainedHandoff;
     cfg.SmtDrainForceCycles = G6LCCfg.SmtDrainForceCycles;
     // U5 geometry defaults when enabled and left zero.
-    // Scale ROB/IQ/LSQ with issue width so 4-issue is not starved by 2-issue depths.
+    // Scale ROB/IQ/load-LSQ with issue width; store credits follow reservation depth.
     if (G6LCCfg.OoOEn) begin
       automatic int unsigned base_rob = G6LCCfg.NrScoreboardEntries;
       automatic int unsigned wide_rob = cfg.NrIssuePorts * 16;
+      automatic int unsigned spec_store_n;
       if (wide_rob > base_rob) base_rob = wide_rob;
       cfg.RobEntries = (G6LCCfg.RobEntries == 0) ? base_rob : G6LCCfg.RobEntries;
       cfg.PrfEntries = (G6LCCfg.PrfEntries == 0)
@@ -426,10 +427,11 @@ package build_config_pkg;
                                       ? G6LCCfg.NrLoadBufEntries
                                       : cfg.NrIssuePorts * 4)
                                : G6LCCfg.LsqLoadEntries;
+      spec_store_n = !cfg.DeepSpecEn ? 4 :
+                     (cfg.MaxOutstandingStores <= 4) ? 4 :
+                     (cfg.MaxOutstandingStores <= 8) ? 8 : 16;
       cfg.LsqStoreEntries = (G6LCCfg.LsqStoreEntries == 0)
-                                ? (G6LCCfg.MaxOutstandingStores > cfg.NrIssuePorts * 4
-                                       ? G6LCCfg.MaxOutstandingStores
-                                       : cfg.NrIssuePorts * 4)
+                                ? spec_store_n
                                 : G6LCCfg.LsqStoreEntries;
       cfg.OoORetireWidth = (G6LCCfg.OoORetireWidth == 0) ? cfg.NrCommitPorts
                                                          : G6LCCfg.OoORetireWidth;

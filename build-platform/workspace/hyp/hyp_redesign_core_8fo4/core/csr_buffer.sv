@@ -58,7 +58,7 @@ module csr_buffer
     input  logic [G6LCCfg.NrIssuePorts-1:0][G6LCCfg.TRANS_ID_BITS-1:0] disp_tid_i,
     input  logic [G6LCCfg.NrIssuePorts-1:0][11:0] disp_addr_i,
     // OoO: free entries after the sweeps, read by the dispatch group gate.
-    output logic [1:0] csr_credit_o,
+    output logic [g6lc_ooo_pkg::ooo_csr_credit_bits(G6LCCfg)-1:0] csr_credit_o,
     // FU data needed to execute instruction - ISSUE_STAGE
     input fu_data_t fu_data_i,
     // CSR FU is ready - ISSUE_STAGE
@@ -75,10 +75,10 @@ module csr_buffer
     output logic [11:0] csr_addr_o
 );
 
-  // In-order keeps the single-entry buffer bit-identically. OoO can issue a
-  // second CSR while an older one awaits commit, so the table is two entries
-  // and the commit selects its address by trans_id.
-  localparam int unsigned DEPTH = G6LCCfg.OoOEn ? 2 : 1;
+  // An atomic dispatch group must fit when the table is empty. In-order
+  // retains one entry; one-/two-issue OoO retains its two-entry table.
+  localparam int unsigned DEPTH = g6lc_ooo_pkg::ooo_csr_slots(G6LCCfg);
+  localparam int unsigned CREDIT_W = g6lc_ooo_pkg::ooo_csr_credit_bits(G6LCCfg);
 
   typedef struct packed {
     logic [11:0] csr_address;
@@ -138,13 +138,12 @@ module csr_buffer
     end
     int unsigned free_count;
     always_comb begin
-      // Credit is the popcount of the swept free vector (DEPTH=2: a
-      // single two-bit add).
+      // Credit is the popcount of the swept free vector.
       free_count = 0;
       for (int unsigned i = 0; i < DEPTH; i++)
         free_count += 32'(free_v[i]);
     end
-    assign csr_credit_o = 2'(free_count);
+    assign csr_credit_o = CREDIT_W'(free_count);
     // Already-allocated: the presented CSR always owns an entry.
     assign csr_ready_o = 1'b1;
 
@@ -280,8 +279,8 @@ module csr_buffer
       for (int unsigned p = 0; p < NP; p++) begin
         rem   = free_v & ~alloc_used;
         below = rem << 1;
-        below |= below << 1;
-        below |= below << 2;
+        for (int unsigned step = 1; step < DEPTH; step <<= 1)
+          below |= below << step;
         if (alloc_ok[p]) alloc_take[p] = rem & ~below;
         alloc_used |= alloc_take[p];
       end
@@ -382,7 +381,7 @@ module csr_buffer
         t1_csra_n <= t1_csra_n + 1;
 `ifndef G6LC_MUT_T1_CSRALLOC
         g6lc_t1_csra_eq: assert (tab_d === ref_tab &&
-                                 csr_credit_o === 2'(ref_free))
+                                 csr_credit_o === CREDIT_W'(ref_free))
           else $error("csr_buffer: equiv alloc");
 `endif
       end
