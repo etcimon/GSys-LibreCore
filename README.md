@@ -331,6 +331,343 @@ word), not GPT-2 inference. So the ~50× is measured cycle residency on the SoC
 model, the 48× is a fabric-gated nameplate analysis, and neither is measured
 MAC/s or model inference throughput.
 
+### VA-Turbo recipe namespace — banks, k-groups and the error framework
+
+`va_turbo_select` (`corev_apu/ai_island/include/g6lc_ai_policy_pkg.sv`) decodes a
+request into a bounded execution plan over a 5-bit namespace
+`{bank[1:0], subcode[2:0]}` — 32 IDs in four 8-entry banks. Two frameworks
+explain every ID: the **cycle model** `cycles ≈ steps + β(fmt)·read_beats + 11`
+(`steps = m·n·⌈k_bytes/lanes⌉`; β = 1.14 FP32 / 1.28 FP16 / 1.56 INT8 / 2.13
+INT4 — residency is worth *more* after narrowing, so the stack is mildly
+super-multiplicative), which fixes which work term a family can move; and the
+**bound kind** each recipe declares, because relative and absolute error are not
+interchangeable.
+
+| Family (IDs) | `steps` | `beats` | Retirement |
+|---|:-:|:-:|:-:|
+| narrowing (1/3/17, 4–7, 18–20, 29) | yes | yes | – |
+| residency (16, 17) | – | yes | – |
+| zero-skip (2) | yes | – | – |
+| grouping (9–15) | – | – | yes — **blocked: one C write port** |
+| approx arithmetic (21/25/27/28/30/31) | – | – | – (needs an RTL consumer that does not exist) |
+
+**Bank A — representation (0–7):** how data is stored. **Bank B — concurrency
+& placement (8–15):** how work is grouped; all EXACT, all measured at zero
+speedup today because `steps` floors at `m·n` through the single C port.
+**Bank C — reuse & predictive compression (16–23):** what is held and the
+parametrised codecs — shape data once at load, then let the residency key make
+every later job a hit. **Bank D — approximate arithmetic (24–31):** what the
+MAC itself computes.
+
+| ID | Bank | Recipe | Mechanism & required evidence | Bound |
+|--:|---|---|---|---|
+| 0 | A | Native fallback | No transformation; never asserts `apply` | EXACT |
+| 1 | A | Lossless repack | Proven exact narrowing — elements round-trip into a narrower container; integer target = 0 ppm, float target pays 1 ppm regroup | EXACT |
+| 2 | A | Zero-skip | Skips MAC steps on **proven** integer-zero products (`exact_zero_proven`); float zero-skip forbidden (0×inf/NaN ≠ 0) | EXACT |
+| 3 | A | Lossless repack | Twin of 1 | EXACT |
+| 4 | A | FP32→FP16 codec | Fixed target; FP32 source + `range_safe` | REL 977 ppm |
+| 5 | A | FP32→BF16 codec | Fixed target | REL 7,828 ppm |
+| 6 | A | FP32→scaled-INT8 codec | Needs `scale_valid`; error is absolute per element, hence FULL | FULL, 127 lv (~7,892 ppm) |
+| 7 | A | FP32→FP8 E4M3 codec | Needs `scale_valid` — 8 bits cannot cover range unscaled | REL 128,907 ppm |
+| 8 | B | Baseline control | `fallback_only` | EXACT |
+| 9 | B | 2 outputs share A | Column pair, `groups_log2`=1; needs independent banks + free accumulators; pair inherits `reuse_b` | EXACT |
+| 10 | B | 4 outputs share A | `groups_log2`=2; refused rather than silently downgraded | EXACT |
+| 11 | B | Pack independent jobs | `separate_jobs`; `ready_jobs` + independence proof | EXACT |
+| 12 | B | 2-job pack | `separate_jobs`, `group_limit`=2 | EXACT |
+| 13 | B | Occupancy grouping | Rows for TALL/`n=1`, else columns; emits `tail_outputs` | EXACT |
+| 14 | B | Read-order reorder | `order_only`, `groups_log2`=0; needs ≥2 bank groups | EXACT |
+| 15 | B | Job pack (max) | `separate_jobs`, `group_limit`=`max_groups` | EXACT |
+| 16 | C | **Resident A/B** | `reuse_a`/`reuse_b` skip the operand stream on a key hit `(ptr, shape, ldb, fmt, epoch)` — the only measured node and only harness consumer | EXACT |
+| 17 | C | Narrow + resident B | Lossless narrowing composed with `reuse_b` — the pattern `va_turbo_compose` generalised; needs `reuse_b_valid` | EXACT (≤1 ppm regroup) |
+| 18 | C | Caller codec | `approx_param[1:0]`: 0 FP16 / 1 BF16 / 2 INT8 / 3 **FP8 E5M2** (code 3 made E5M2 reachable — its 265,625 ppm bound existed with no path to it); needs `reuse_a_valid` — convert once at load, reuse at target | REL/FULL by param |
+| 19 | C | Predictive quant | INT8 quantise *without* narrowing — lowers entropy in place for a later compression stage | FULL, 127 lv |
+| 20 | C | Narrowing INT8 | Quantise + shrink; needs `approx_param_valid` | FULL, 127 lv |
+| 21 | C | Truncated mantissa | `approx_param` = retained bits; trunc ladder `1e6(2u−u²)` | REL trunc |
+| 22 | C | Prefetch plan | `control_only` — scheduling advice, zero arithmetic change; still needs a fresh window | EXACT |
+| 23 | C | Context separation | `control_only` — isolates execution contexts | EXACT |
+| 24 | D | Baseline control | `fallback_only` | EXACT |
+| 25 | D | Truncated products | Trunc-mantissa, parametrised bits | REL trunc |
+| 26 | D | **Invalid** | No established bound derivation; `eps = 20'hfffff` — a refusal sentinel, never a number | NONE |
+| 27 | D | Mitchell product | `(1+ma)(1+mb) ≈ 1+ma+mb` drops the `ma·mb` term; reports the *uncorrected* ¼ supremum (not the textbook 11.1% log-domain figure) | REL 250,000 ppm |
+| 28 | D | Mitchell variant | Metadata identical to 27; correction unspecified → deliberately **not emulated** | REL 250,000 ppm |
+| 29 | D | INT4 codec | 7-level quantise + narrow; needs `approx_param_valid`; predicted top of the stack | FULL, 7 lv (147,961 ppm) |
+| 30 | D | Truncated products | Trunc-mantissa | REL trunc |
+| 31 | D | Truncated products | Trunc-mantissa | REL trunc |
+
+**Bound kinds:** EXACT (reorganises work, arithmetic untouched, error
+identically zero) · REL (per-product relative) · FULL (integer quantisation —
+per-element error is absolute; a quantised small element can be perturbed 100%,
+so no relative bound exists) · NONE (refusal). **Admission is dual-gated:** both
+the analytic bound and the caller's measured ppm must fit the geometric level
+ladder (`100 ppm × 2^level`, saturating at 100%); `κ = sum|p|/|sum p|` absorbs
+cancellation, is data-dependent, is a *required* input, and `κ < 1` fails
+closed. A measured bound that fits its level is only as good as its sample —
+GPT-2 selection therefore measures error on a calibration passage and
+re-measures on a disjoint held-out passage. Recipes whose corrections can only
+*reduce* error (21/25/27/28/30/31) report the uncorrected supremum.
+
+**The evidence window is the per-node reset:** `REG_OFF_VA_TURBO_WINDOW`
+(`0x0F14`) arms the caller's claim that level, recipe and epoch still match the
+evidence; a write to any of those registers clears it, and the host
+`EvidenceWindow` additionally tracks tensor identity, numeric format and
+approval profile — coordinates that are *not* in the register map. **Composition
+(`va_turbo_compose`)** unions orthogonal fields, refuses conflicts (two
+conversion targets, two group geometries), adds per-product error terms (an
+exact stage contributes 0, so lossless stacking is free and stacking can never
+launder error), re-gates the budget from the *request* rather than inheriting an
+input plan's level, and recomputes the window from the endpoint — `mac_step` is
+a property of the final format, so summing stage windows would charge a window
+that never existed. `va_turbo_compose(a,a) = a` is an exact law.
+
+**Three things called "grouping" that are different:** (1) *k-group
+quantisation* — the GPT-2 recipe quantises weights per (row, K-group-128) and
+dequantises each island K block before the fp32 sum; the group is the *scale
+granularity* along the reduction axis and costs no extra device work because the
+K-split already exists (1,350 blocks in the 256-token pass). (2) *va_panels /
+named-panel schedule* — the catalog `512×512×k`, `512×256×k`, `1024×128×k`
+(`k ≤ 512`) cut with fewest descriptors → most exact panels → wider N; the
+768-column layer lands on one 512 + one 256 panel, which is what the two-slot
+resident-B directory alternates hits on. (3) *flat panel mapping* — rows stored
+at a per-job `2^pitch` turn the K bound into a byte capacity, so a `256×1024`
+INT8 panel is one job and one resident key instead of an accumulate-chained
+pair.
+
+**The ai-tensor parameterisations that implement it.** `AiTensorLinear`
+(`ai-tensor/python/ai_tensor/torch_backend.py`) exposes `quant` — the host-side
+recipe knob the GPT-2 selection ran over:
+
+| `quant` | Parameterisation | Storage | Island execution |
+|---|---|---|---|
+| `none` | Layer's own float dtype, as the device grant admits | fp32/bf16/fp16 | native exact |
+| `int8-dynamic` | Symmetric INT8: weights quantised per *(channel, K-group)* once at construction; activations quantised per *(row, K-group)* at call time; scale = group abs-max (clamped 1e-12) / 127 | 1 B/elem + f32 scales `[rows, groups]` | exact i32 accumulation on the island per K group; host dequantises each block with `a_scale × w_scale` and sums in fp32 |
+| `fp8-e4m3` / `fp8-e5m2` | Same grouping; scale maps the group max onto the format's largest finite value; codes are RNE + saturating | 1 B/elem | island multiplies the raw FP8 pairs and accumulates f32 per K group; host applies the two group scales |
+| `bf16` / `fp16` | Weights cast once, activations cast per call — a *precision* recipe, no scales | 2 B/elem | island BF16/FP16 multiply with ordered FP32 accumulation, K-chained through accmode 01 |
+
+`group_k` (default 128) is capped to the layer's `k_block` — the island K block
+itself: on flat-panel parts `caps.max_k(m, n, elem_bytes)` (byte-capacity banks),
+on legacy parts `AccTileK`. The group *is* the K-split boundary, so finer scales
+cost no extra device work — that is the "1,350 blocks cost nothing" claim in the
+GPT-2 pass. Grouped layers therefore issue **one island job per K group**;
+ungrouped float jobs instead take the largest K the banks admit for that `m`
+(decode `m=1` is bound by the B bank alone) and chain through accmode 01, whose
+seeded reduction is bit-identical to one long ordered reduction. An island
+refusal falls back to `nn.functional.linear` and is recorded in `stats` —
+offload is opportunistic, never silent.
+
+**What the GPT-2 example actually uses:** `quant="int8-dynamic", group_k=128`
+on every transformer block (24/24 offloaded at live AccTile geometry on
+`software-reference-v2`), with `lm_head` kept **FP16** — the tied head is both
+the most sensitive layer and 47% of the weight bytes, and quantising it failed
+top-1 at every tested group size (INT8 g128 → 0.855, g64 → 0.847), while
+per-row/per-channel W8A8 without grouping failed outright (+56% perplexity,
+top-1 0.553). The selected recipe — INT8 K-group-128 blocks + FP16 `lm_head` —
+is what yields 0.369× FP32 weight bytes at perplexity −0.1%/−0.3% and top-1
+0.973/0.9745. The Diffusers path selects `int8-dynamic` g64 or `bf16` for UNet
+by the same mechanism.
+
+**Execution reality:** only IDs **0 and 16** run on hardware, and 16 only on
+`AiCfgVaTurboTest` — production `g6lc_ai_island_top` ties runtime reuse off
+until a descriptor/MMIO ownership ABI exists. Every approximate ID is
+`emulated-only`, `apply` stays false until a measured error bound exists, and
+`VaTurboEn = 0` in the live package. The measured stack composes 0 → 16 →
+1/3 → 4/5/6/20 → 29: FP32 669 → +residency 523 → BF16-lossless 349 →
+INT8-lossless 189 → **INT8 + residency 139 cycles = 4.813×**, with
+INT4 + residency ~75 cycles (~8.9×) predicted only. See
+[`architecture/ai-matrix/va-turbo.md`](architecture/ai-matrix/va-turbo.md) §8–§9
+for the derivation tables and [`log-2026-09.md`](architecture/ai-matrix/log-2026-09.md)
+for the receipts.
+
+**Read of the whole namespace.** `va_turbo_select` routes every ID through one
+of eight class gates (`g6lc_ai_policy_pkg.sv:709`), each gate carrying its own
+predicate — so a recipe can never acquire evidence it did not ask for:
+
+| Class gate | IDs | Gate predicate |
+|---|---|---|
+| `fallback_only` | 0, 8, 24 | none — always selectable, never applies |
+| `lossless` | 1, 3, 17 | proven exact-narrow target; integer target = 0 ppm, float accumulator adds the 1 ppm regroup site |
+| `zero_skip` | 2 | integer format + `exact_zero_proven`; float formats refused |
+| `conversion` | 4–7, 18–20, 29 | FP32 source + `range_safe`; FP8 targets need `scale_valid`; 18 needs `reuse_a_valid`; 20/29 need `approx_param_valid` |
+| `grouping` | 9–15 | `regular_layout`; `separate_jobs` needs `independent_jobs`; `order_only` needs ≥2 bank groups; group size bounded by `max_groups`/`group_limit`/`free_accumulators`/`bank_groups` and the `min_group_bytes`/`row_bytes` floors |
+| `reuse_only` | 16 | `reuse_a_valid` or `reuse_b_valid` |
+| `control_only` | 22, 23 | no arithmetic resource — still requires a fresh window |
+| `approx_products` | 21, 25–28, 30, 31 | needs a compiled-consumer bit + approval-profile bit + armed window; none exist |
+
+**How codecs, subgroups and recipes are founded on the evidence principle:**
+every mechanism exists to make error a *per-node* claim that resets on a
+context change, and to refuse rather than assume when evidence is absent —
+
+| Mechanism | Principle it enforces |
+|---|---|
+| Bound kind per ID | Error is per-node: EXACT / REL / FULL are not interchangeable (a quantised small element can be perturbed 100%, so integer recipes take absolute FULL bounds — treating them as REL would badly understate integer error) |
+| eps ladder | Supremum, not expectation: correction terms that can only *reduce* error are excluded, so the bound never encodes an unmeasured improvement |
+| Required evidence | Fail-closed admission: missing `scale_valid` / `range_safe` / `approx_param` / `κ<1` → refuse, never assume; `20'hfffff` is a sentinel, not a number |
+| `fmt` in the residency key | A codec **changes the node**: narrowing rewrites `numfmt`, so the residency key misses by construction — the valid pattern is convert-once-at-load then reuse-many, which is exactly what recipe 18's `reuse_a_valid` gate encodes |
+| Work-term ownership | A recipe can only save the term it touches: narrowing → `steps`+`beats`, residency → `beats`, grouping → retirement (blocked), approx arithmetic → nothing measurable without a datapath consumer |
+| supported vs eligible vs apply | `supported` = a selection predicate exists; `eligible` = metadata/resource predicates pass; `apply` additionally needs `VaTurboEn` + subcode/benefit/codec/float gates + matrix plane + queue, runtime enable and level >0, a compiled-consumer bit, an approval-profile bit, and the armed window — listing ≠ arming |
+
+The **heuristic sub-bank** follows the same principle at the data level: it is
+*generated from measurement*, not authored — each candidate `(precision,
+groups)` entry carries its own measured p95 tile error, entries outside the
+budget and precision classes the accuracy study found dominated (BF16 at 10× the
+FP16 error at identical `k_bytes`, FP8 E4M3/E5M2 at 3.3×/6.5× the INT8 error,
+INT4 at ~25% tile error, both approximate-multiplier topologies that buy no
+concurrency) are refused, and a short bank is **reported short** rather than
+padded — padding to 8 or 32 with unmeasured topologies would be the "stub that
+looks like a capability" failure mode the principle exists to prevent. Legitimate
+growth paths are `3 precisions × 4 tile-k classes = 12` entries and lane
+provisions at 32/64 lanes, each needing the accuracy harness re-run per tile-k.
+Three of eight requested entries are admitted today: FP32 (exact), FP16 (0.0296%
+measured error), INT8 (1.4892%).
+
+**The geometric budget ladder.** `va_turbo_budget_ppm` doubles per level from
+100 ppm — level *L* admits `100 × 2^L` ppm, saturating at 1,000,000 ppm (100%).
+Level 0 is the native/exact plane. Worked bounds: FP16 at κ=1 (977 ppm) fits
+level 5 and fails level 1; the documented INT8 tile error of 18,527 ppm fails
+level 8 (12,800) and fits level 9 (25,600). A level above 0 additionally
+requires a *measured* ppm — the analytic bound cannot see the data, and a
+measured bound is only as good as its sample — so admission is always
+dual-gated, never one-or-other. `va_turbo_compose_ppm` =
+`(eps_ppm × κ_q8 + 255) >> 8` fails closed on `κ < 1` or a composed bound above
+100%. `REG_OFF_VA_TURBO_LEVEL` (`0x0F04`) stores the request;
+`PMU_OFF_VA_TURBO_LEVEL` (`0x0F08`) copies the *applied* level when the job
+completes — which today is always 0, because `apply` never asserts.
+
+**Per-node evidence, and where tensors enter.** The "node" is the tuple
+`(level, recipe, epoch, tensor identity, format, approval profile)`; five
+registers hold its claim — `REUSE_EPOCH` `0x0F00`, `VA_TURBO_LEVEL` `0x0F04` +
+PMU `0x0F08`, `VA_TURBO_RECIPE` `0x0F0C` + PMU `0x0F10`, `VA_TURBO_WINDOW`
+`0x0F14` + PMU `0x0F18`. A write to level, recipe or epoch clears the window
+claim (on the virtual card, even a rewrite of the same value); the PMU copies
+are taken at job completion, so a later write cannot rewrite a finished job's
+evidence. Tensor interplay happens at exactly four seams:
+
+| Seam | Tensor dependency |
+|---|---|
+| Residency key | Per-operand `(ptr, shape, ldb, fmt, epoch)` — the B key `ptr_b, n, k, ldb, fmt, epoch` omits `m` (a weight panel survives across decode tokens), the A key `ptr_a, m, k, lda, fmt, epoch` omits `n` (an activation tile survives across output columns). Overlap, a GEMM error or a C-store error drops residency; a completion-beat error does not. `fmt` is in the key, so a conversion recipe misses by construction — convert-once-then-reuse |
+| Epoch invalidation | `ReuseLease::invalidate` advances `0x0F00` after a writer touches A or B — hardware does not snoop the writer. New epoch misses, same epoch hits; a regressed epoch misses with one slot but still hits with `ReuseBSlots ≥ 2` while that panel remains resident |
+| κ and flatness | `κ = sum|p|/|sum p|` is computed from the *actual* operand tensors — it is the measure of cancellation and cannot be defaulted; `flat_q8` parameterises the FULL quantisation bound by the tensor's observed flatness, and `kappa_window_q8` carries the accumulation-window term when `window_matched` |
+| Measured ppm | Per-tensor sample, not a property of the recipe: GPT-2 bounds are measured on a calibration passage and re-measured on a disjoint held-out passage; the 18,527 ppm INT8 figure is bound to that tile and data |
+
+Tensor identity is deliberately *not* in the register map — the host
+`EvidenceWindow` records it alongside format and approval profile and clears its
+own claim when any changes; the hardware trust boundary remains the conjunction
+of the five `apply` predicates, none of which currently exist in a production
+consumer.
+
+### The ai-tensor seams that make it executable (SI Tensor)
+
+Every host-side customization is a *mirror* of a hardware contract — host pitch
+= RTL pitch, host reuse flags = RTL key fields, host group boundary = RTL K
+block, host caps = published CAP words — so the optimizations hold because the
+host reads `Caps` and computes the same answer the sequencer will, never an
+approximation of it.
+
+| Seam | Customization | What it unlocks | Evaluation |
+|---|---|---|---|
+| Capability geometry | `Caps.bank_{a,b}_bytes` → `flat_panels`; `pitch_bytes` = `next_pow2(⌈row_bytes/lanes⌉)`; `fits`/`max_k` | Byte-capacity K bound: a `256×1024` INT8 panel is **one job + one resident key** instead of an accumulate-chained pair; `max_k` makes decode `m=1` bound by the B bank alone — the honest asymmetry | Load-bearing: flat panels are what make residency survive the K-split at all; host fit uses the same shift-addressed formula as `gemm_seq`, so a prediction can't disagree with admission |
+| Named-panel schedule | `va_panels(macs)` catalog `512×512×k / 512×256×k / 1024×128×k`; `choose_va_blocking` = fewest descriptors → most exact panels → wider N; `_adjacent_reuse` derives `reuse_a`/`reuse_b` from tile indices | The 768-column layer deterministically lands on 512+256 — the alternation `ReuseBSlots=2` exploits; hits predicted from schedule *shape*, same key fields computed positionally | Correct by construction, and gated: `exact_reuse_for_call` sets flags only when the tiling shows an adjacent tile can skip — a K-split correctly reads both operands because consecutive K blocks differ in `ptr_b` |
+| `AiTensorLinear` | `group_k = min(group_k, k_block)`; weights quantise per *(channel, K-group)* once at construction, activations per *(row, K-group)* at call; i32 accumulates **on the island**, only `a_scale × w_scale` dequant on host | The scale group **is** the K block, so finer scales cost zero extra device work (the 1,350-block pass adds no jobs); the right static/dynamic asymmetry; no new ISA needed | Weights-static/activation-dynamic is the correct split; K-group is what made INT8 reach top-1 where per-row/per-channel W8A8 failed |
+| Dual-path `_island_matmul` | Ungrouped floats chain K blocks through `flags.accmode=01` (`c_init` seeds each reduction from previous C); grouped jobs run one job per group + host fp32 sum | Long-K is **bit-identical** to one ordered reduction, no host re-summation; `Caps.accumulate` gate refuses `c_init` unless `CAP_ACCMODE` grants it | Same fail-closed principle as the recipe namespace — never silently ignored |
+| Calibrated cost model | `IslandModel` from measured AI_JOB records (8 B/cycle, 1.005 cy/beat, 512 lanes, ~70 fixed); `archetype` keys on workload class A1 decode / A2 prefill / A3 conv / A4 K-chain, never a model name; `RECIPES` = measured-best per class | Offload/host and recipe-per-layer decisions from the CAP window; A1→INT8 g128+FP16 head, A3→INT8 g64 (g128 measurably failed 30.7 vs 35.0 dB PSNR); `recipe_for` refuses ungranted formats | Derived, never overrides a measured record, never a TOPS claim |
+| Emulation/quality harness | `va_turbo.py`/`pipeline.py` carry `steps + β·beats + 11` with β validated out-of-sample on the lane axis (16-point spread = 0) plus `MEASURED_DECODE*` n-sweeps; `va_turbo_net.py` runs a real transformer stack (LN/softmax/GELU/residual stay FP32); `policy.py` `reuse.bind` emulates the key/`last_read` semantics across soft island, QEMU, virt card, TCP agent | Recipes are measurable *before they exist*; per-tile error compounding through a real architecture is answered; the same schedule yields the same hit/miss verdict on every backend | Honest caveat retained: random-weight nets measure *propagation*, not trained-model accuracy — GPT-2 perplexity is the only real-checkpoint evidence |
+
+The six seams in detail:
+
+1. **Capability geometry (`device.py` `Caps`).** `flat_panels` is true only when
+   the island publishes both `CAP_OFF_BANK_A_BYTES` and `CAP_OFF_BANK_B_BYTES` —
+   a part publishing 0 keeps the legacy `k ≤ AccTileK` box, honestly. On
+   flat-panel parts, `pitch_bytes` reproduces the sequencer's row addressing:
+   `next_pow2(⌈row_bytes/lanes⌉)` lane-words per row, so bank addresses are a
+   shift (the RTL asserts `PeLanes` power-of-two for exactly this). `fits` boxes
+   a job by `n·pitch ≤ bank_b` and `m·pitch ≤ bank_a` with `k ≤ 0xFFFF`;
+   `max_k` inverts it — the largest pitch that fits *both* banks — so the host
+   computes the same admission answer `ST_CHK`/`cap_ok_c` will. That is what
+   turns a `256×1024` INT8 weight panel into **one job and one resident key**
+   instead of an accmode-chained pair that alternates `ptr_b` and can never hit.
+
+2. **Named-panel schedule (`device.py` `va_panels`/`choose_va_blocking`/
+   `_adjacent_reuse`).** The panel catalog is geometric, not learned: at 512 MAC
+   issue it is `512×512×k`, `512×256×k`, `1024×128×k` (half- and quarter-N
+   variants of the full tile). Selection ranks candidates by **fewest
+   descriptors, then most exact panels, then wider N**. Reuse is then *derived
+   positionally*: for adjacent tiles `(prev, tile)`, `reuse_b` iff the previous
+   tile shares `j0/t0/tn/tk` (same B address, shape, leading dimension — `m`
+   deliberately absent, as the RTL key does), `reuse_a` iff it shares
+   `i0/t0/tm/tk`. `tile_can_reuse`/`exact_reuse_for_call` and the directed
+   `plan_gemm_s8_va_turbo_test` enable the flags **only** when this analysis
+   finds an adjacent skip — so a K-split correctly reads both operands (the two
+   K blocks have different `ptr_b`), matching the measured K-split residency
+   miss. The flags are never optimistic.
+
+3. **`AiTensorLinear` (`torch_backend.py`).** The `quant` modes implement the
+   narrow codecs entirely host-side: `_quantize_groups` computes
+   `scale = group abs-max / qmax` per *(row, K-group)* — INT8 `qmax=127` with
+   round-clamp; FP8 via `encode_fp8` RNE-saturating — returning
+   `codes[rows,K]` plus `scales[rows,groups]`. The invariant that makes it
+   free is `group_k = min(group_k, k_block)`: the scale group boundary **is**
+   the island K block, so each group is one ordinary island job — the finer
+   scales cost zero device work beyond the K-split that already exists. The
+   static/dynamic split is the right one: weights quantise once per *(channel,
+   K-group)* at construction (resident-panel candidates), activations quantise
+   per *(row, K-group)* at call time. i32 accumulation stays **on the island**;
+   only the `a_scale × w_scale` dequant and fp32 group sum run on host — no new
+   instruction was needed.
+
+4. **Dual-path `_island_matmul` + accmode 01 (`torch_backend.py`,
+   `device.py` `gemm_native`).** Ungrouped float jobs take `k_block =
+   max_k(m, n, elem_bytes)` — the largest K the banks admit *for that m* — and
+   chain blocks with `flags.accmode=01`: the device seeds each block's ordered
+   reduction from the previous C, so a K-chained product is **bit-identical** to
+   one long ordered reduction (`+review_flat`: equals the `k/2+k/2` accumulate
+   pair bit for bit) with no host-side float re-summation. Grouped jobs instead
+   run one job per K group and sum in fp32 on host — the honest trade, since
+   quantisation breaks bit-exactness anyway. `gemm_native(c_init=)` is refused
+   unless `Caps.accumulate` (`CAP_ACCMODE` bit 0) grants it — the request is
+   never silently dropped to plain mode.
+
+5. **Calibrated cost model (`cost_model.py`).** `IslandModel` holds measured
+   constants only — 8 B/cycle port, 1.005 cycles/beat, 512 lanes, ~70-cycle job
+   overhead — calibrated on the live `g6lc64_ai` SoC bench records, and
+   `from_caps` derives the same shape from `dram_gbps`/`clock`/`macs_cycle` for
+   other SKUs. `gemm_cycles` decomposes a job into `la`/`lb` (operand loads,
+   zeroed on residency), `mac` (`m·n·⌈k·eb/lanes⌉`), and the exposed
+   `store_tail` after the overlapped trail store. `archetype` maps the shape to
+   a class — A1 decode (`m≤4`, bytes-bound), A2 prefill (MAC-bound), A3 conv
+   (K-group sensitive), A4 K-chain — and `RECIPES`/`recipe_for` hand back the
+   **measured-best** recipe per class (A1 INT8 g128+FP16 head; A3 INT8 g64 or
+   BF16 when granted), refusing formats the caps don't grant. It decides
+   *offload vs host* and *which recipe* — it never overrides a measured record
+   and never turns a projection into a TOPS claim.
+
+6. **Emulation/quality harness (`va_turbo.py`, `pipeline.py`,
+   `va_turbo_net.py`, `policy.py`).** `pipeline.py` implements the cycle model
+   as functions — `steps_for`, `beats_for`, `model_cycles` — where
+   `beta = 1 + 9/row_bytes` is *exact* on all 49 measured points (7 formats × 4
+   lane counts × 3 k values, residency matrix, decode shape), and carries the
+   measured decode n-sweeps showing the residency ratio converge to its closed-
+   form ceiling (FP32 resident-B: 1.859×→2.000× against the 2.141× ceiling).
+   `va_turbo.py` emulates each recipe's *arithmetic* on host tensors to score
+   quality against the FP32 reference — predicting what a consumer would be
+   worth. `va_turbo_net.py` answers the compounding question: runs the whole
+   transformer graph twice (recipe vs `native-fp32` emulation, with
+   LN/softmax/GELU/residuals kept FP32 as the real island/host split) and
+   measures output divergence — honestly flagged as *propagation through a real
+   architecture* on random weights, not trained-model accuracy.
+   `policy.py` `OperandReuse`/`reuse.bind` emulates the residency key and
+   `last_read` verdicts, and is shared verbatim by the host simulator, soft
+   island, QEMU, virtual card and TCP card agent — which is why one schedule
+   produces one hit/miss verdict everywhere.
+
+The deepest enabling decision is **fallback discipline everywhere**: an island
+`_refusal` falls back to `nn.functional.linear`, a missing cap refuses the call,
+an unfit recipe stays unlisted, an unarmed window stays unarmed — so the
+aggressive paths degrade to exact, never to wrong. The standing limits stay in
+force: all approximate recipes are `emulated-only` (`apply=false`, production
+reuse tied off pending an ownership ABI); residency does not survive a K-split
+on the single-slot key (order K-outer/N-panel-inner, or use flat panels);
+derived cycle numbers below a measured SoC point at that geometry remain
+projections.
+
 `IslandFpEn` is **on** for `g6lc64_ai` since 2026-09-30 (the core-side T0 tile stays INT8);
 `PolicyCodecEn`/`PolicyBenefitEn` and `VaTurboEn` remain off in production. Open on the
 ladder: the V1 SoC measurement, full-geometry synthesis of a cluster SKU, cross-job B
