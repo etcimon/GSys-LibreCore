@@ -125,6 +125,7 @@ module g6lc_rvfi_probes
     instr.lsu_ctrl_op = lsu_ctrl_i.operation;
     instr.lsu_ctrl_be = lsu_ctrl_i.be;
     instr.lsu_ctrl_trans_id = lsu_ctrl_i.trans_id;
+    instr.lsu_ctrl_valid = lsu_ctrl_i.valid;
 
     instr.wbdata = wbdata_i;
     instr.mem_paddr = mem_paddr_i;

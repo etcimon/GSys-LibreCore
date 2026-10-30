@@ -1163,12 +1163,20 @@ always_comb begin
   assign wdata = instr.wdata;
 
   assign lsu_addr = instr.lsu_ctrl_vaddr;
-  assign lsu_rmask = instr.lsu_ctrl_fu == LOAD ? instr.lsu_ctrl_be : '0;
+  // r100: the masks are qualified by the request's own valid. The hyp8
+  // lsu_bypass presents a registered head that keeps a popped request's
+  // fu/be/trans_id with valid=0; unqualified, a stale STORE head was
+  // re-captured onto that tid every idle cycle, and once the tid was
+  // reallocated the new (non-store) instruction retired with wmask=ff
+  // (hyp8-osbi-scalar-r99: lu_paddr_captured on commit port 1 at cycle
+  // 24288, the first ALU op to reuse the last _bss_zero store's tid).
+  assign lsu_rmask = (instr.lsu_ctrl_valid && instr.lsu_ctrl_fu == LOAD)
+      ? instr.lsu_ctrl_be : '0;
   // A load-reserved is dispatched down the STORE path like every other AMO, but
   // it only reads memory. Reporting a write mask for it makes the tracer emit a
   // memory write the architecture never performs, which diverges from any
   // reference model on the first LR.
-  assign lsu_wmask = (instr.lsu_ctrl_fu == STORE &&
+  assign lsu_wmask = (instr.lsu_ctrl_valid && instr.lsu_ctrl_fu == STORE &&
                       !(G6LCCfg.RVA && instr.lsu_ctrl_op inside {AMO_LRW, AMO_LRD}))
       ? instr.lsu_ctrl_be : '0;
   assign lsu_addr_trans_id = instr.lsu_ctrl_trans_id;

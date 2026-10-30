@@ -131,6 +131,10 @@
   g6lc_core_pkg::fu_t lsu_ctrl_fu; \
   logic [(Cfg.XLEN/8)-1:0] lsu_ctrl_be; \
   logic [Cfg.TRANS_ID_BITS-1:0] lsu_ctrl_trans_id; \
+  /* r100: the bypass head is registered and keeps a popped request's fu/be/ */\
+  /* tid with valid=0; the masks must be qualified or a stale STORE head is  */\
+  /* re-captured onto whatever instruction next reuses that tid.            */\
+  logic lsu_ctrl_valid; \
   logic [Cfg.NrWbPorts-1:0][Cfg.XLEN-1:0] wbdata; \
   logic [Cfg.NrCommitPorts-1:0] commit_ack; \
   logic [Cfg.PLEN-1:0] mem_paddr; \
