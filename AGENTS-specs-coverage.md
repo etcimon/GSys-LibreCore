@@ -17,6 +17,11 @@ headline view: it deliberately carries **no file references and no line numbers*
 
 ## Hypothetical core timing refactor — targeted boundary evidence only
 
+The r98 implementation/test-map additions provide focused LSQ occupancy and
+PMP write-bank evidence. They do not upgrade architectural PMP, full CSR
+ownership, memory-model, Linux boot or physical timing coverage. Existing
+chapter statuses remain unchanged; MSHR timing experimentation is rejected.
+
 The hypothetical redesign has additional directed coverage for load
 publication identity, partial-byte forwarding and snapshot retention,
 LSQ winner/event alignment at small queue geometries, and held

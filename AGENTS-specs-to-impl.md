@@ -16,6 +16,15 @@ matching row here so the spec→code answer stays one hop away.
 
 ---
 
+## Hyp8 r98 — bounded PMP and occupancy implementation
+
+Hyp-only `core/csr_regfile.sv` under the redesign tree now uses constant-entry
+PMP write decode/lock predicates (`#pmp`); entry63 has no TOR neighbor. Existing
+RMW, owner, WARL/read-only and apply boundaries are preserved. Hyp LSQ credits
+count only registered free entries (`#memorymodel`, precise retirement).
+Source/limitations: `build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/worklog.md`.
+Production feature status and device-tree capabilities do not change.
+
 ## AI queue-validation repair — no-DMA spine gate (2026-09-28)
 
 The custom island contract requires qid validation before any queue-context lookup.

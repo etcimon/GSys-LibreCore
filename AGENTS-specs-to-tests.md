@@ -17,6 +17,18 @@ matching row here so "which spec chapter is this test protecting?" stays answera
 
 ---
 
+## Hyp8 r98 — focused occupancy and PMP-write checks
+
+`tb_g6lc_hyp8_control.sv` plus isolated `run_hyp8_memory.py` leaves cover
+registered LSQ credits and the extracted PMP write bank (`#memorymodel`,
+`#pmp`). PMP tests sweep RV32/RV64, addresses, VS mapping, enable and locks;
+they do not qualify complete CSR owner/permission behavior. The MSHR miter in
+`verif/tb/l2/tb_g6lc_l2_units.sv` preserves FIFO/pop/attach/completion checks;
+its timing-negative candidate is archived and original RTL restored.
+Two restored `hyp8_h33_st_fwd.S`/`hyp8_h34_shift_dep.S` inputs preserve prior
+store-forwarding and dependency smoke coverage. Receipts and open integration
+limits: `build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/worklog.md`.
+
 ## Hyp8 r44 timing-boundary checks — targeted evidence
 
 These checks exercise the hypothetical redesign, not the production-core

@@ -3,6 +3,58 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## r98 - Population-count measurement (implemented and tested)
+
+- [x] Verify delay-v50: `$countones` on a known-width operand uses a balanced
+  binary reduction, reusing the existing width-scaled adder costs. A one-bit
+  operand is wiring; non-power-of-two geometry pads only with constant zeros.
+  Charge nested calls in series and independent arms in parallel. Resolve
+  guards through the same evaluator; unresolved operand width uses32 and
+  sets width_defaulted. No cost-table/process retuning.
+- [x] Qualify host before/after reports with the rebuilt instrument. The
+  delay-v49 LSQ candidate assigned only1 FO4 to the entire population count;
+  its module maximum is rejected as reduction evidence.
+  Package tests275 pass/1 ignored; independence checker still flags existing
+  host-name literals. Do not describe that checker as passing.
+- [ ] Preserve packed-struct field widths and constant-entry identity when
+  composing generated-array updates. The host MSHR trial merges distinct
+  entries and defaults field widths; it is rejected as timing evidence.
+- [ ] Extend scoped intrinsic geometry into function-body/spine planning.
+  Context-free expression/spine estimates retain their coarse class bill;
+  only ordinary node/guard attribution has the new scope resolver. Also
+  preserve operand resize casts before accepting cast-argument geometry.
+  Do not treat projected intrinsic cuts as calibrated pipeline closure.
+
+## r96 - Register, generate and guard qualification (open)
+
+- [ ] r97 extension: charge case selectors and retain their dependencies when
+  every arm assigns a literal Boolean. The FLU trial's opcode case rows had
+  zero cost despite a live selector. Add a standalone decoder fixture.
+- [ ] Preserve input-origin classification through opaque membership
+  expressions. The explicit FLU opcode predicate now appears in the cone,
+  but its input-derived chain is labelled reg-to-out/reg-to-reg. Do not use
+  these labels as proof of register boundaries. Host r97 explicitly binds
+  RES_WIN=10, TID width=5 and four WB ports; initial width-defaulted reports
+  are exploratory, not timing credit. No package code/calibration changed.
+
+Observed with the pinned delay-v49 instrument; no package implementation change
+or timing credit in this pass. Host evidence:
+`../build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/`.
+
+- [ ] Preserve indexed register boundaries through FFL/FFLARNC macros. Bound
+  FP32/FP64 FMA paths connect `mid_pipe_sum_q[0]` to the read of element 3
+  across three real registers. Start with a package-local zero/three-stage
+  fixture; do not accept the resulting 133.26/142.72 aggregates as delay.
+- [ ] Prune disabled generate scopes: explicit `PF_TAG=0` still leaves
+  `gen_pf` writes in the tag-array maximum. Add a standalone generate fixture.
+- [ ] Qualify compatible guards before composing dependencies. The cache
+  example connects an S_IDLE assignment to an S_BYPASS_B-only consumer;
+  invalidation also exposes reset/NBA aggregation. Preserve assignment kinds.
+- [ ] Bind child dimensions independently and report unresolved widths.
+  The old FMA product had width=1/defaulted; explicit format constants resolve
+  it to 48/106 bits. Banked rename needs FP storage and checkpoint dimensions,
+  not just the core's partial parameter map. Keep fixtures project-independent.
+
 ## Cross-module stitch connectivity — analysis finding, implementation pending
 
 - [x] Audit `lower.rs::stitch_cross_module_paths`: representative module paths

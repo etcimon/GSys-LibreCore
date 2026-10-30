@@ -1,5 +1,50 @@
 # AGENTS workflow todo / pending-log
 
+Hyp8 r98: retained LSQ credits 36.80→33.20 and PMP write decode 59.47→52.60 FO4
+under matched delay-v50 structural screens. Corrected population-count geometry;
+no latency/clock/state addition. MSHR trial rejected/archived, original restored.
+Focused checks and source/licensing audit pass with documented fixture warnings.
+Isolated scalar build and seven smokes pass with r90 cycle counts after repairing
+the MC flist's missing g6lc_lu_result entry. Aggregate remains unqualified:
+lint warnings persist and the eight-wide MC profile violates store reservation
+capacity (32 LSQ versus 8 store slots) and truncates checkpoint identity.
+Runner now rejects RTL `$error` diagnostics despite a zero compiler exit.
+No shared sync, boot/STA or eight-FO4 closure claim.
+Evidence: `build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/worklog.md`.
+CSR/boot and the broader r96 closure queue remain paused/open respectively;
+MC geometry and rename-record tasks are recorded in the r98 worklog.
+
+Hyp8 r97: retained latency-neutral FLU reservation rewrite. Constant-offset
+masks and parallel earlier-offer conflicts replace the greedy working-window
+recurrence; persistent reservations still consume final accepts only.
+Dimension-bound delay-v49 screens (20 ps/FO4, budget 8) report 67.45 -> 34.50
+FO4 for two ports and 106.45 -> 34.50 for an eight-port leaf scaling binding.
+Initial 25.80 reports are rejected (width/default and decoder-dependency gaps);
+path-class/guard limitations remain, so these are not qualified stage delays.
+Original and candidate pass the same eight-case strict FLU bench; real IRO
+caller simulation passes 99 checks with retained surrounding diagnostics.
+Aggregate gate fails on production-path Hyp8 config and local Make routing;
+its remote wrapper also unexpectedly synchronized the shared source checkout.
+Stop using that route for Hyp; future gates require isolated source closures.
+No full-system boot, physical timing or 8-FO4 closure claim.
+Evidence: `build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r97/worklog.md`.
+Next: bind LSQ credit dimensions and implement the count reduction; continue
+PMP/MSHR tasks and analyzer qualification. CSR/boot work remains paused.
+
+Hyp8 r96 (strategy analysis complete; RTL tasks pending): the user paused the
+boot/CSR campaign for a worst-path strategy pass. Eleven source-pinned
+sv-timing reports retain delay-v49/20 ps per FO4/8-FO4 budget with zero skipped
+files. Thirty-one module cards and six measurement tasks refine the existing
+223-module queue. Caller binding exposed FMA register-boundary overreach,
+disabled prefetch-tag paths, and missing rename bank/FP/checkpoint dimensions;
+the raw maxima are not an active-clock ranking. First prospective RTL batch:
+FLU admission, PMP decode, LSQ credit reductions, and MSHR per-entry updates.
+No RTL changed in r96. R95 CSR leaf/baseline/negative-control evidence is
+retained; full caller elaboration and firmware validation remain paused.
+Plan: `build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/strategy-plan.md`.
+Tasks: `build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md`
+and `analysis/r96/tasks.json` under that same Hyp core tree.
+
 Hyp8 r94: accepted static CLMUL rows (200.10 -> 14.40 FO4), parallel
 write-tracker age selection (119.90 -> 27.90 in L2/L3), and grouped floating
 exponent minima in the existing S1 window (62.55 -> 38.75 at 512 lanes).
@@ -16085,3 +16130,5 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
 - [r29] Controller ghost-flush gate: stale dead-slot resolve (valid=0 but is_mispredict=1 still standing after the r28b sb_live fix) reached the controller UNGATED -> bare flush_if -> FTQ flush+push(npc_q=next_block) destroyed the 0x8000099c redirect head one cycle after apply (witness r11 wedge ~c965.2k; li a0,0x53 dropped). Fix: resolved_branch_i.valid gate at controller.sv:242 (+G6LC_MUT_CTRL_STALE_RESOLVE review mutant). New ctrl leaf PASS checked=6; mutant -> CTRL_STALE_RESOLVE_NO_FLUSH as required. r29 closure diff vs r28b = controller.sv + g6lc_iq_arb.sv (external whitespace-only churn). Build+smokes+witness r12 pending.
 
 - [r30] load_unit ex_pub kill-cycle identity: a killed SEND_TAG request's OWN dummy rvalid now publishes the exception ((ldbuf_last_id_q==rresp_idx)||!kill_req_w; an external rewrite had reverted it to `!=` — re-applied and closure-verified). Memory leaf section F +11 -> HYP8_MEMORY_PASS checked=99 (r30b); mutant `!=` -> LU_MIS_EX_PUBLISH FAIL (r30mut5). r30 closure diff vs r29 = load_unit.sv (fix) + external iq_arb/iq_bank/lsq_verdict (rename_recover churned and returned to r29 content). Lint scalar rc=0 (343/87/3), smt2 rc=0 (353/97/3); model 07a54529. Smokes 3/3 real tohost (h34@682 h33@889 bcancel@475). Witness r13: 2,306,327 retires past the r12 assert (c1,168,793), zero %Error; NEW wedge — fetch+retire both stop at 0x8000ea9a, next insn csrrw mtvec @0x8000ea9e never fetched (frontend starvation boundary in sbi_hart_init).
+
+- Hyp8 r99 MC contract closeout (2026-10-29): resolved the r98 unqualified MC gate without waivers — zero-default LSQ store credits now follow the derived speculative-store depth (MC 16; explicit oversize still `$error`), and the rename checkpoint record/publish/recovery seam carries the full 128-entry slot (`CKPT128_PASS last=127`). Final isolated aggregate `hyp8-r99-aggregate-c2` has scalar/SMT2/MC lint rc=0, `%Error=0`, `%Warning-USERERROR=0`, `%Warning-SELRANGE=0`; dispatch leaf PASS 125; scalar smokes 7/7. Evidence: `build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r99/worklog.md`. Open: remaining ordinary lint warnings (602/623/688 by scalar/SMT2/MC), MC simulation, Linux/OpenSBI boot and physical timing.
