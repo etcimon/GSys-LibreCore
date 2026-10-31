@@ -718,6 +718,15 @@ module sb_lifecycle
   int unsigned smt_flow_snapshots = 0;
   int unsigned smt_flow_generation[G6LCCfg.NR_SB_ENTRIES];
   initial smt_flow_enabled = $test$plusargs("smt_flow_trace");
+  // r100: +trace_from/+trace_to window the prints (default unbounded); the
+  // generation/idle bookkeeping keeps running outside the window so ids
+  // stay consistent with an unwindowed run.
+  int unsigned smt_flow_lo = 0, smt_flow_hi = 32'hffffffff;
+  bit smt_flow_win;
+  initial begin
+    void'($value$plusargs("trace_from=%d", smt_flow_lo));
+    void'($value$plusargs("trace_to=%d", smt_flow_hi));
+  end
 
   always @(posedge clk_i) begin
     if (!rst_ni) begin
@@ -727,9 +736,10 @@ module sb_lifecycle
       foreach (smt_flow_generation[s]) smt_flow_generation[s] = 0;
     end else if (smt_flow_enabled) begin
       smt_flow_cycle++;
+      smt_flow_win = (smt_flow_cycle >= smt_flow_lo) && (smt_flow_cycle <= smt_flow_hi);
       smt_flow_idle = (|commit_ack_i || flush_i) ? 0 : smt_flow_idle + 1;
       for (int p = 0; p < G6LCCfg.NrCommitPorts; p++)
-        if (commit_ack_i[p])
+        if (smt_flow_win && commit_ack_i[p])
           $display("[smt-flow] retire cycle=%0d port=%0d id=%0d gen=%0d hart=%0d pc=%h rd=%0d result=%h valid=%b drop=%b ex=%b replay=%b scope=%m",
                    smt_flow_cycle, p, commit_sel_slot_i[p], smt_flow_generation[commit_sel_slot_i[p]],
                    mem_q[commit_sel_slot_i[p]].sbe.hart_id, mem_q[commit_sel_slot_i[p]].sbe.pc,
@@ -738,7 +748,7 @@ module sb_lifecycle
                    mem_q[commit_sel_slot_i[p]].cancelled, mem_q[commit_sel_slot_i[p]].sbe.ex.valid,
                    mem_q[commit_sel_slot_i[p]].replay);
       for (int p = 0; p < G6LCCfg.NrWbPorts; p++)
-        if (wt_valid_i[p])
+        if (smt_flow_win && wt_valid_i[p])
           $display("[smt-flow] wb cycle=%0d port=%0d id=%0d gen=%0d hart=%0d pc=%h issued=%b cancelled=%b data=%h ex=%b scope=%m",
                    smt_flow_cycle, p, trans_id_i[p], smt_flow_generation[trans_id_i[p]],
                    mem_q[trans_id_i[p]].sbe.hart_id, mem_q[trans_id_i[p]].sbe.pc,
@@ -746,17 +756,18 @@ module sb_lifecycle
       for (int p = 0; p < G6LCCfg.NrIssuePorts; p++)
         if (decoded_instr_valid_i[p] && decoded_instr_ack_o[p] && !flush_unissued_instr_i) begin
           smt_flow_generation[issue_pointer[p]]++;
+          if (smt_flow_win)
           $display("[smt-flow] alloc cycle=%0d port=%0d id=%0d gen=%0d hart=%0d pc=%h insn=%h fu=%0d op=%0d rd=%0d rs1=%0d rs2=%0d scope=%m",
                    smt_flow_cycle, p, issue_pointer[p], smt_flow_generation[issue_pointer[p]],
                    decoded_instr_i[p].hart_id, decoded_instr_i[p].pc, orig_instr_i[p],
                    decoded_instr_i[p].fu, decoded_instr_i[p].op, decoded_instr_i[p].rd,
                    decoded_instr_i[p].rs1, decoded_instr_i[p].rs2);
         end
-      if (flush_i || flush_unissued_instr_i || resolved_branch_i.valid)
+      if (smt_flow_win && (flush_i || flush_unissued_instr_i || resolved_branch_i.valid))
         $display("[smt-flow] control cycle=%0d flush=%b flush_unissued=%b resolve=%b mispredict=%b target=%h",
                  smt_flow_cycle, flush_i, flush_unissued_instr_i, resolved_branch_i.valid,
                  resolved_branch_i.is_mispredict, resolved_branch_i.target_address);
-      if (smt_flow_idle != 0 && smt_flow_idle % 1024 == 0 && smt_flow_snapshots < 4) begin
+      if (smt_flow_win && smt_flow_idle != 0 && smt_flow_idle % 1024 == 0 && smt_flow_snapshots < 4) begin
         smt_flow_snapshots++;
         $display("[smt-flow] stalled cycle=%0d idle=%0d issue_ptr=%0d commit_ptr=%0d full=%b decoded=%b ack=%b",
                  smt_flow_cycle, smt_flow_idle, issue_pointer_q, commit_pointer_q[0],

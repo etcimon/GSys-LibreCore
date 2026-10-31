@@ -2386,9 +2386,12 @@ module wt_dcache_wbuffer
   bit smt_wt_trace, smt_wt_watch;
   logic [G6LCCfg.PLEN-1:0] smt_wt_address;
   int unsigned smt_wt_cycle = 0;
+  int unsigned smt_wt_lo = 0, smt_wt_hi = 32'hffffffff;  // r100: +trace_from/+trace_to
   initial begin
     smt_wt_watch = $value$plusargs("smt_mem_watch=%h", smt_wt_address);
     smt_wt_trace = $test$plusargs("smt_flow_trace") || smt_wt_watch;
+    void'($value$plusargs("trace_from=%d", smt_wt_lo));
+    void'($value$plusargs("trace_to=%d", smt_wt_hi));
     assert (G6LCCfg.WtDcacheFixupVoidKeepEn == 1'b0)
       else $error("wt_dcache_wbuffer VoidKeepEn is a literal 0");
   end
@@ -2396,6 +2399,7 @@ module wt_dcache_wbuffer
     if (!rst_ni) smt_wt_cycle = 0;
     else if (smt_wt_trace) begin
       smt_wt_cycle++;
+      if (smt_wt_cycle >= smt_wt_lo && smt_wt_cycle <= smt_wt_hi) begin
       if (miss_req_o && miss_ack_i && (!smt_wt_watch ||
           (miss_paddr_o >> G6LCCfg.XLEN_ALIGN_BYTES) == (smt_wt_address >> G6LCCfg.XLEN_ALIGN_BYTES)))
         $display("[smt-flow] wt_tx cycle=%0d id=%0d pa=%h data=%h be=%h nc=%b",
@@ -2438,6 +2442,7 @@ module wt_dcache_wbuffer
         $display("[smt-flow] wt_evict cycle=%0d id=%0d txv=%b snapv=%b empty=%b push=%b drop=%b",
                  smt_wt_cycle, rtrn_id, rtrn_tx.vld, rtrn_snap_v_q, rtrn_empty,
                  leg_push_q, drop_q);
+      end
     end
   end
 

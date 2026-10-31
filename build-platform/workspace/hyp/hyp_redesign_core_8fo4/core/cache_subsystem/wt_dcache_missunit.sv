@@ -1036,14 +1036,18 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
   logic [G6LCCfg.PLEN-1:0] smt_mu_address;
   int unsigned smt_mu_cycle = 0;
   logic [G6LCCfg.DCACHE_MAX_TX-1:0] smt_txv_q = '0;
+  int unsigned smt_mu_lo = 0, smt_mu_hi = 32'hffffffff;  // r100: +trace_from/+trace_to
   initial begin
     smt_mu_watch = $value$plusargs("smt_mem_watch=%h", smt_mu_address);
     smt_mu_trace = $test$plusargs("smt_flow_trace") || smt_mu_watch;
+    void'($value$plusargs("trace_from=%d", smt_mu_lo));
+    void'($value$plusargs("trace_to=%d", smt_mu_hi));
   end
   always @(posedge clk_i) begin
     if (!rst_ni) smt_mu_cycle = 0;
     else if (smt_mu_trace) begin
       smt_mu_cycle++;
+      if (smt_mu_cycle >= smt_mu_lo && smt_mu_cycle <= smt_mu_hi) begin
       if (G6LCCfg.RVA && mem_req_valid_c && (mem_req_c.rtype == DCACHE_ATOMIC_REQ) && (!smt_mu_watch ||
           (amo_req_i.operand_a[G6LCCfg.PLEN-1:3] == smt_mu_address[G6LCCfg.PLEN-1:3])))
         $display("[smt-flow] wt_amo_req cycle=%0d op=%0d pa=%h data=%h size=%0d ack=%b state=%0d",
@@ -1084,6 +1088,7 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
             $display("[smt-flow] wt_txv cycle=%0d slot=%0d vld=%b pa=%h",
                      smt_mu_cycle, t, tx_vld_i[t], tx_paddr_i[t]);
         smt_txv_q <= tx_vld_i;
+      end
       end
     end
   end

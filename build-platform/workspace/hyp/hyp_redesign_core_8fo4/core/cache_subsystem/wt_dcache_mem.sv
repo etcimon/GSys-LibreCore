@@ -898,14 +898,18 @@ assign wbuffer_all[k] = wbuffer_data_i[k];
   bit smt_mem_trace, smt_mem_watch;
   logic [G6LCCfg.PLEN-1:0] smt_mem_address;
   int unsigned smt_mem_cycle = 0;
+  int unsigned smt_mem_lo = 0, smt_mem_hi = 32'hffffffff;  // r100: +trace_from/+trace_to
   initial begin
     smt_mem_watch = $value$plusargs("smt_mem_watch=%h", smt_mem_address);
     smt_mem_trace = $test$plusargs("smt_flow_trace") || smt_mem_watch;
+    void'($value$plusargs("trace_from=%d", smt_mem_lo));
+    void'($value$plusargs("trace_to=%d", smt_mem_hi));
   end
   always @(posedge clk_i) begin
     if (!rst_ni) smt_mem_cycle = 0;
     else if (smt_mem_trace) begin
       smt_mem_cycle++;
+      if (smt_mem_cycle >= smt_mem_lo && smt_mem_cycle <= smt_mem_hi) begin
       if ((cmp_en_q || wr_cl_vld_i) && (!smt_mem_watch ||
           (wbuffer_cmp_addr >> G6LCCfg.XLEN_ALIGN_BYTES) == (smt_mem_address >> G6LCCfg.XLEN_ALIGN_BYTES)))
         $display("[smt-flow] wt_lookup cycle=%0d port=%0d pa=%h hit=%h raw=%h forward=%h be=%h result=%h refill=%b",
@@ -919,6 +923,7 @@ assign wbuffer_all[k] = wbuffer_data_i[k];
           vld_addr == smt_mem_address[G6LCCfg.DCACHE_INDEX_WIDTH-1:G6LCCfg.DCACHE_OFFSET_WIDTH]))
         $display("[smt-flow] wt_inval cycle=%0d idx=%h ways=%h valid=%h explicit=%b ack=%b",
                  smt_mem_cycle, vld_addr, vld_req, vld_wdata, inv_req_i, inv_ack_o);
+      end
     end
   end
 

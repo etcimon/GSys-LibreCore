@@ -558,7 +558,11 @@ assign ldbuf_full = &ldbuf_valid_q;
       // publish itself carries no pop, keeping the publish gate out of
       // the ldbuf_valid_d register cone). Under G6LC_MUT_LSU_EXPEND
       // the FIFO never fills so pend_pop is unreachable.
-      if (pend_pop && (|(ldbuf_valid_q & pend_q[0].slot_oh))) begin
+      // r100 (issue 4): the tombstone may only land on the record's own
+      // instruction — a slot freed and re-allocated since the push holds a
+      // different tid and must stay live.
+      if (pend_pop && (|(ldbuf_valid_q & pend_q[0].slot_oh)) &&
+          (ldbuf_q[pend_q[0].slot].trans_id == pend_q[0].tid)) begin
         rkill_q <= rkill_q | pend_q[0].slot_oh;
       end
       // hyp8 H5: per-slot age since the D$ request grant (miss replay)
@@ -609,8 +613,17 @@ assign ldbuf_full = &ldbuf_valid_q;
 `ifdef G6LC_MUT_LSU_EXPEND
   assign ex_pend_set = 1'b0;
 `else
+  // r100 (issue 4): under LoadExPubStages==1 a same-cycle ex_pub publishes
+  // AND pops the slot this edge; the record must not be pushed as well.
+  // It was ("dead-on-arrival": its ex_pend_q bit is cleared by the pop),
+  // but the dead-head drop two cycles later still tombstoned the SLOT
+  // (`rkill_q |= slot_oh` when ldbuf_valid_q) — and the slot had already
+  // been re-allocated to a live load, which then drained on rkill without
+  // ever publishing (hyp8-osbi-scalar-r102 @32,048,298: slot 5, tid 10,
+  // misaligned_entry_excepts; a lost completion for an aligned load would
+  // have been silent). Under ==2 ex_pub is the push itself (unchanged).
   assign ex_pend_set = (state_q[LU_B_SEND_TAG] && ex_i.valid && !ex_ptw_i &&
-                        ex_pend_slot_live) ||
+                        ex_pend_slot_live && !(!LU_EXPEND && ex_pub)) ||
                        (LU_EXPEND && ex_pub);
 `endif
 
@@ -1753,6 +1766,17 @@ assign ldbuf_full = &ldbuf_valid_q;
            ((req_port_o.kill_req && ldbuf_last_id_q == ldbuf_id_t'(gi)) ||
             rkill_q[gi] || ex_pend_q[gi])) ||
           mis_done_q[gi] ||
+          // r100 (issue 4, hyp8-osbi-scalar-r103d2 @32,048,297): the
+          // ABORT_TRANSACTION path — granted, DTLB miss, kill_abort — can
+          // see the killed tag's 1-cycle-hit response in the kill cycle
+          // itself; the L3 capture marks the slot rkill and it drains the
+          // next cycle, one cycle BEFORE the WAIT_TRANSLATION head arm
+          // re-presents ex_i and publishes the misaligned exception. The
+          // request is still at the bypass head, so the completion is owed
+          // by the FSM-head arm, not by the slot: a drain with the head
+          // still owning this tid is precise.
+          (rkill_q[gi] && valid_i && !pop_ld_o &&
+           (lsu_ctrl_i.trans_id == ldbuf_q[gi].trans_id)) ||
           (ldbuf_flushed_q[gi] ||
            cancelled_mask_i[ldbuf_q[gi].trans_id] || flush_i))
     else $error("misaligned load buffer slot %0d popped without its exception (state_q=%b kill=%b valid_o=%b ex_o=%b ex_o.cause=%h tid_o=%0d slot_tid=%0d rkill=%b done=%b flushed=%b canc=%b flush=%b pend=%b rvalid=%b rid=%0d last=%0d)",

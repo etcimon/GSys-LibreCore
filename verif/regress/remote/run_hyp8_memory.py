@@ -61,8 +61,8 @@ LEAFS = {
         'sources': COMMON + [
             'g6lc_ooo_pkg.sv', 'g6lc_prf.sv', 'stb_insert.sv', 'stb_fwd.sv',
             'store_buffer.sv', 'stb_commit.sv', 'stb_drain.sv',
-            'cf_math_pkg.sv', 'g6lc_hyp_lzc.sv', 'load_unit.sv',
-            'tb_g6lc_hyp8_memory.sv',
+            'cf_math_pkg.sv', 'g6lc_hyp_lzc.sv', 'g6lc_lu_result.sv',
+            'load_unit.sv', 'tb_g6lc_hyp8_memory.sv',
         ],
         'includes': [],
         'top': 'tb_g6lc_hyp8_memory',

@@ -2158,18 +2158,31 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
   //pragma translate_off
   bit smt_issue_trace;
   int unsigned smt_issue_idle = 0;
-  initial smt_issue_trace = $test$plusargs("smt_flow_trace");
+  // r100: +trace_from/+trace_to window (default unbounded), same cycle base
+  // as sb_lifecycle's smt_flow_cycle (both count edges after reset).
+  int unsigned smt_issue_cycle = 0;
+  int unsigned smt_issue_lo = 0, smt_issue_hi = 32'hffffffff;
+  bit smt_issue_win;
+  initial begin
+    smt_issue_trace = $test$plusargs("smt_flow_trace");
+    void'($value$plusargs("trace_from=%d", smt_issue_lo));
+    void'($value$plusargs("trace_to=%d", smt_issue_hi));
+  end
   always @(posedge clk_i) begin
-    if (!rst_ni) smt_issue_idle = 0;
-    else if (smt_issue_trace) begin
+    if (!rst_ni) begin
+      smt_issue_idle = 0;
+      smt_issue_cycle = 0;
+    end else if (smt_issue_trace) begin
+      smt_issue_cycle++;
+      smt_issue_win = (smt_issue_cycle >= smt_issue_lo) && (smt_issue_cycle <= smt_issue_hi);
       for (int p = 0; p < G6LCCfg.NrIssuePorts; p++)
-        if (issue_instr_valid_i[p] && issue_ack_o[p] && !flush_i)
+        if (smt_issue_win && issue_instr_valid_i[p] && issue_ack_o[p] && !flush_i)
           $display("[smt-flow] operands time=%0t port=%0d id=%0d hart=%0d pc=%h fu=%0d a=%h b=%h imm=%h forward=%b%b",
                    $time, p, issue_instr_i[p].trans_id, issue_instr_i[p].hart_id,
                    issue_instr_i[p].pc, issue_instr_i[p].fu, fu_data_n[p].operand_a,
                    fu_data_n[p].operand_b, fu_data_n[p].imm, forward_rs1[p], forward_rs2[p]);
       smt_issue_idle = (issue_instr_valid_i[0] && !issue_ack_o[0]) ? smt_issue_idle + 1 : 0;
-      if (smt_issue_idle != 0 && smt_issue_idle <= 4096 && smt_issue_idle % 1024 == 0) begin
+      if (smt_issue_win && smt_issue_idle != 0 && smt_issue_idle <= 4096 && smt_issue_idle % 1024 == 0) begin
         $display("[smt-flow] issue_stall time=%0t idle=%0d stall_i=%b valid=%b ack=%b busy=%b raw=%b rs1=%b rs2=%b rs3=%b flu_ready=%b lsu_ready=%b mult=%b casq=%b lrsc=%b live=%b",
                  $time, smt_issue_idle, stall_i, issue_instr_valid_i, issue_ack_o,
                  fu_busy, stall_raw, stall_rs1, stall_rs2, stall_rs3, flu_ready_i,
