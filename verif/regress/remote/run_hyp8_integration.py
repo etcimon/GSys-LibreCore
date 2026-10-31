@@ -63,6 +63,10 @@ TESTS = [
     # class; distinct fail codes name the owning path.
     ('hyp8_f14_store_offset', 'verif/tests/custom/hyp8_f14_store_offset.S',
      '80001000'),
+    # r100 issue 6: sub-word store/load shapes around byte 7 of an aligned
+    # dword (Linux 6.6.93 on r107: `earlyco=sbi`, kallsyms names cut at 7).
+    ('hyp8_h35_subword', 'verif/tests/custom/hyp8_h35_subword.S',
+     '80001000'),
 ]
 LINK_LD = 'verif/tests/custom/common/link_verilator.ld'
 GCC_FLAGS = ['-march=rv64imafdc_zicsr_zifencei', '-mabi=lp64d',
