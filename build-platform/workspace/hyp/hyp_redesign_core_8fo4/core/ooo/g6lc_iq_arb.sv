@@ -441,11 +441,23 @@ module g6lc_iq_arb
   // r47: per-port accumulated kill verdict for the tournament output
   // (kill_h C+1, mask_any = live|mask_q for the current and previous
   // cycles, carried while the same record is re-selected).
+  // r100 (issue 5, hyp8-osbi-scalar-r106b @42,044,921): the carry is
+  // keyed on the whole record (bank, entry, tid), not the tid alone. With
+  // no eligible candidate the tournament output is the all-zero record,
+  // whose tid field is 0; it was staged into win_s and kill_h[0][0] (the
+  // C+1 verdict of bank 0 slot 0's previous, cancelled occupant) marked
+  // it killed. The next cycle the live tid 0 won port 0 and the tid-only
+  // carry re-armed on the phantom every cycle: win_s_v stayed 0 with
+  // win_v=1, take_kill=0, res_block=0 and the commit head never issued
+  // (Linux at percpu init, 2000-cycle hang dump). The record below is
+  // additionally only recorded for a real winner (win_kill_regs).
   for (genvar p = 0; p < NPORTS; p++) begin : gen_wkn
     assign win_kill_next[p] = kill_h[win[p].bank][win[p].ci] |
                               mask_any[win[p].tid] |
                               (win_s_kill[p] && win_v[p] &&
-                               (win[p].tid == win_s[p].tid));
+                               (win[p].tid   == win_s[p].tid) &&
+                               (win[p].bank  == win_s[p].bank) &&
+                               (win[p].entry == win_s[p].entry));
   end
 
   // hyp8: the serial best-scan fold is replaced by per-port compare
@@ -720,7 +732,9 @@ module g6lc_iq_arb
         if (pres_q[p].v) begin
           win_s_kill[p] <= 1'b0;
         end else begin
-          win_s_kill[p] <= win_kill_next[p];
+          // r100 (issue 5): a kill verdict exists only for a real winner;
+          // the no-winner zero record must not carry one.
+          win_s_kill[p] <= win_v[p] && win_kill_next[p];
         end
       end
     end

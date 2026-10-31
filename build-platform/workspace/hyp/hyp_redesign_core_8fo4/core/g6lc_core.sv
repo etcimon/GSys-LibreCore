@@ -2733,6 +2733,47 @@ assign irq_active = irq_i[smt_active_hart];
                issue_stage_i.gen_full_ooo.i_ooo_dispatch.iqi_valid, issue_stage_i.gen_full_ooo.i_ooo_dispatch.iq_issue_ack,
                issue_stage_i.gen_full_ooo.i_ooo_dispatch.st_unresolved_mask, issue_stage_i.gen_full_ooo.i_ooo_dispatch.st_live_mask,
                |issue_stage_i.gen_full_ooo.i_ooo_dispatch.md_stall_v, issue_stage_i.gen_full_ooo.i_ooo_dispatch.stl_stall);
+      // r100 (issue 5): the arbiter / reservation-window state behind a
+      // ready-but-never-granted head (hyp8-osbi-scalar-r105 @42,044,921).
+      $display("[hang] IQ arb: win_v=%b win_s_v=%b win_s_kill=%b take_ok=%b res_block=%b gate_ok=%b take_kill=%b take_grant=%b | flu_in=%h flu_wb=%h fpu_wb=%h div_live=%b mult_rdy=%b fpu_rdy=%b csr_rdy=%b lsu_rdy=%b | cand_v_q=%h | staged iss_v=%b iqi_take=%b fpblk=%b",
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.win_v,
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.win_s_v,
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.win_s_kill,
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.take_ok,
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.res_block,
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.gate_ok,
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.take_kill,
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.take_grant,
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.flu_in_q,
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.flu_wb_q,
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.fpu_wb_q,
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.div_live_q,
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.mult_ready_i,
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.fpu_ready_i,
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.csr_ready_i,
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.lsu_ready_i,
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.cand_v_q,
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.iss_v_q,
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.iqi_take,
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.fp_blocked);
+      for (int p = 0; p < issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.NPORTS; p++)
+        $display("[hang] IQ arb port%0d: win tid=%0d bank=%0d ent=%0d flu_in=%b wb_port=%0d wb_off=%0d gate=%b div=%b port0=%b | win_s tid=%0d bank=%0d | win_q v=%b tid=%0d | pres_q v=%b tid=%0d",
+                 p,
+                 issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.win[p].tid,
+                 issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.win[p].bank,
+                 issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.win[p].entry,
+                 issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.win[p].flu_in,
+                 issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.win[p].wb_port,
+                 issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.win[p].wb_off,
+                 issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.win[p].gate,
+                 issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.win[p].div,
+                 issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.win[p].port0,
+                 issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.win_s[p].tid,
+                 issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.win_s[p].bank,
+                 issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.win_q[p].v,
+                 issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.win_q[p].tid,
+                 issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.pres_q[p].v,
+                 issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_arb.pres_q[p].tid);
       for (int i = 0; i < issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.ST_ENTRIES; i++)
         if (issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.st_q[i].valid)
           $display("[hang] LSQ st[%0d] id=%0d addr_v=%b data_v=%b addr=%h", i,
