@@ -262,6 +262,7 @@ path = [
   "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/g6lc_bp_top.sv",
   "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/g6lc_fdip.sv",
   "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/g6lc_fe_btb_check.sv",
+  "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/g6lc_fe_frontier.sv",
   "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/g6lc_fe_nextline.sv",
   "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/g6lc_fe_override.sv",
   "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/g6lc_fe_redirect.sv",

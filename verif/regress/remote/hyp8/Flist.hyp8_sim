@@ -243,6 +243,7 @@ ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/fetch_
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/g6lc_fe_redirect.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/g6lc_fe_nextline.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/g6lc_fe_btb_check.sv
+${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/g6lc_fe_frontier.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/g6lc_fe_override.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/ras.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/fetch_B/instr_realign.sv

@@ -3005,13 +3005,27 @@ module tb_g6lc_hyp8_linecheck;
       .push_line_target_i (line_target),
       .btb_update_i       (btb_update),
       .ras_predict_i      (ras_predict),
-      .resume_pc_i        (resume_pc),
+      .resume_pc_i        (frontier_mode ? frontier_next : resume_pc),
       .ov1_valid_o        (ov1_valid),
       .ov1_pc_o           (ov1_pc),
       .train_valid_o      (otr_v),
       .train_pc_o         (otr_pc),
       .train_taken_o      (otr_taken),
       .train_target_o     (otr_target));
+
+  // The real g6lc_fe_frontier under test: consumed CF slots leave their
+  // queue-predicted target, NoCF slots advance by instruction length.
+  logic frontier_mode;
+  logic [C.VLEN-1:0] frontier_base, frontier_target, frontier_next;
+  logic [C.INSTR_PER_FETCH-1:0] frontier_consumed;
+  logic [C.INSTR_PER_FETCH-1:0][C.VLEN-1:0] frontier_addr;
+  logic [C.INSTR_PER_FETCH-1:0][31:0] frontier_instr;
+  cf_t [C.INSTR_PER_FETCH-1:0] frontier_cf;
+  g6lc_fe_frontier #(.G6LCCfg(C)) i_frontier (
+    .resume_pc_i(frontier_base), .consumed_i(frontier_consumed),
+    .addr_i(frontier_addr), .instr_i(frontier_instr),
+    .cf_type_i(frontier_cf), .predict_address_i(frontier_target),
+    .resume_pc_o(frontier_next));
 
   task automatic tick();
     #1; clk = 1; #2; clk = 0; #2;
@@ -3066,6 +3080,45 @@ module tb_g6lc_hyp8_linecheck;
     train_valid = 1'b0;
   endtask
 
+  // Drive the real g6lc_fe_frontier with a consumed CF slot: the predicted
+  // successor must be the stored target, and must survive while nothing else
+  // is consumed. NoCF tails then advance by their own instruction length.
+  task automatic frontier_cf_case(input cf_t kind, input logic [31:0] insn,
+                                   input string tag);
+    frontier_mode = 1'b0;
+    ras_predict = '0;
+    train(64'h10050, 1'b1, 64'h1004c, 1'b1);
+    reseed(64'h10048);
+    step(1);
+    check(line_taken, {tag, "_GUESS"});
+    frontier_base = 64'hffffffff8011edd8;
+    frontier_consumed = '0;
+    frontier_addr = '0;
+    frontier_instr = '0;
+    frontier_cf = '0;
+    frontier_consumed[0] = 1'b1;
+    frontier_addr[0] = 64'hffffffff8011edd8;
+    frontier_instr[0] = insn;
+    frontier_cf[0] = kind;
+    frontier_target = 64'hffffffff8011ed20;
+    frontier_mode = 1'b1;
+    step(1, 1'b0);
+    check(ov1_valid && ov1_pc == 64'hffffffff8011ed20, {tag, "_OV1_TARGET"});
+    // Accepted branch has left the input bundle; saved successor still
+    // owns the prediction-only restart until another instruction arrives.
+    frontier_base = frontier_next;
+    frontier_consumed = '0;
+    tick();
+    check(frontier_next == 64'hffffffff8011ed20, {tag, "_HOLD"});
+    frontier_consumed[0] = 1'b1;
+    frontier_addr[0] = 64'hffffffff8011ed20;
+    frontier_instr[0] = 32'h00100013;
+    frontier_cf[0] = NoCF;
+    tick();
+    check(frontier_next == 64'hffffffff8011ed24, {tag, "_TARGET_ADVANCE"});
+    frontier_mode = 1'b0;
+  endtask
+
   initial begin
     flush = 0; red_valid = 0; red_step = 0; hold = 0; advance = 0;
     hold_pc = '0; red_pc = '0; boot_addr = 64'h10000;
@@ -3073,6 +3126,9 @@ module tb_g6lc_hyp8_linecheck;
     train_pc = '0; train_target = '0;
     push_valid = 0; push_vaddr = '0; resume_pc = '0;
     btb_update = '0; ras_predict = '0;
+    frontier_mode = 1'b0; frontier_base = '0; frontier_target = '0;
+    frontier_consumed = '0; frontier_addr = '0; frontier_instr = '0;
+    frontier_cf = '0;
     repeat (4) tick();
     rst_n = 1;
     repeat (2) tick();
@@ -3215,6 +3271,56 @@ module tb_g6lc_hyp8_linecheck;
     step(1, 1'b0);                            // push 0x10050, new frontier
     check(ov1_valid && ov1_pc == 64'h10058, "LINECHECK_OV1_NEW_STATE");
     resume_pc = '0;
+
+    // ---- G: the g6lc_fe_frontier predicted-successor cases -------------
+    if (C.INSTR_PER_FETCH < 3)
+      $fatal(1, "frontier leaf needs INSTR_PER_FETCH>=3 (got %0d)",
+             C.INSTR_PER_FETCH);
+    frontier_cf_case(Branch, 32'hf5b7d4e3, "G_BRANCH");
+    frontier_cf_case(Jump,   32'h0000a859, "G_JUMP");
+    frontier_cf_case(JumpR,  32'h000080e7, "G_JUMPR");
+    frontier_cf_case(Return, 32'h00008082, "G_RETURN");
+
+    // Explicit combinational frontier checks on i_frontier alone.
+    frontier_mode = 1'b1;
+    frontier_base = 64'h10000; frontier_target = 64'h20000;
+    frontier_consumed = '0; frontier_addr = '0; frontier_instr = '0;
+    frontier_cf = '{default: Branch};
+    tick(); check(frontier_next == 64'h10000, "FZ_NONE_HOLD");
+
+    frontier_consumed = '0; frontier_consumed[0] = 1'b1;
+    frontier_addr[0] = 64'h10002; frontier_instr[0] = 32'h00100013;
+    frontier_cf[0] = NoCF;
+    tick(); check(frontier_next == 64'h10006, "FZ_RVI_NO_CF");
+
+    frontier_consumed = '0; frontier_consumed[0] = 1'b1;
+    frontier_addr[0] = 64'h10002; frontier_instr[0] = 32'h00000001;
+    frontier_cf[0] = NoCF;
+    tick(); check(frontier_next == 64'h10004, "FZ_RVC_NO_CF");
+
+    frontier_consumed = '0; frontier_consumed[0] = 1'b1;
+    frontier_addr[0] = 64'h10004; frontier_instr[0] = 32'hf5b7d4e3;
+    frontier_cf[0] = NoCF;   // branch-encoding insn but slot marked NoCF
+    tick(); check(frontier_next == 64'h10008, "FZ_BRANCH_AS_NO_CF");
+
+    frontier_consumed = '0;
+    frontier_consumed[0] = 1'b1; frontier_consumed[1] = 1'b1;
+    frontier_addr[0] = 64'h10002; frontier_instr[0] = 32'h00000001;
+    frontier_cf[0] = NoCF;
+    frontier_addr[1] = 64'h10004; frontier_instr[1] = 32'hf5b7d4e3;
+    frontier_cf[1] = Branch;
+    frontier_target = 64'h10080;
+    tick(); check(frontier_next == 64'h10080, "FZ_TAIL_PRED");
+
+    frontier_consumed = '0;
+    frontier_consumed[1] = 1'b1; frontier_consumed[2] = 1'b0;
+    frontier_addr[1] = 64'h10004; frontier_instr[1] = 32'h00100013;
+    frontier_cf[1] = NoCF;
+    frontier_addr[2] = 64'h10008; frontier_instr[2] = 32'h0000a859;
+    frontier_cf[2] = Jump;
+    frontier_target = 64'h20000;
+    tick(); check(frontier_next == 64'h10008, "FZ_SLOT2_NO_OVERRUN");
+    frontier_mode = 1'b0;
 
     $display("HYP8_LINECHECK_PASS checked=%0d", checked);
     $finish;

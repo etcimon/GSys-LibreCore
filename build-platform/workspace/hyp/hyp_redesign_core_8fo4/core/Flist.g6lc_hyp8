@@ -226,6 +226,7 @@ ${HYP_CORE_DIR}/core/fetch_B/g6lc_fetch_pkg.sv
 ${HYP_CORE_DIR}/core/frontend/g6lc_fe_redirect.sv
 ${HYP_CORE_DIR}/core/frontend/g6lc_fe_nextline.sv
 ${HYP_CORE_DIR}/core/frontend/g6lc_fe_btb_check.sv
+${HYP_CORE_DIR}/core/frontend/g6lc_fe_frontier.sv
 ${HYP_CORE_DIR}/core/frontend/g6lc_fe_override.sv
 ${HYP_CORE_DIR}/core/cache_subsystem/g6lc_way_predictor.sv
 ${HYP_CORE_DIR}/core/cache_subsystem/g6lc_rrip_repl.sv

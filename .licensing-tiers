@@ -319,6 +319,7 @@ R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/g6lc_bp_ta
 R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/g6lc_bp_top.sv
 R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/g6lc_fdip.sv
 R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/g6lc_fe_btb_check.sv
+R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/g6lc_fe_frontier.sv
 R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/g6lc_fe_nextline.sv
 R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/g6lc_fe_override.sv
 R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/g6lc_fe_redirect.sv
