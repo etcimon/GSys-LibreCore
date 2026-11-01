@@ -16132,3 +16132,12 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
 - [r30] load_unit ex_pub kill-cycle identity: a killed SEND_TAG request's OWN dummy rvalid now publishes the exception ((ldbuf_last_id_q==rresp_idx)||!kill_req_w; an external rewrite had reverted it to `!=` — re-applied and closure-verified). Memory leaf section F +11 -> HYP8_MEMORY_PASS checked=99 (r30b); mutant `!=` -> LU_MIS_EX_PUBLISH FAIL (r30mut5). r30 closure diff vs r29 = load_unit.sv (fix) + external iq_arb/iq_bank/lsq_verdict (rename_recover churned and returned to r29 content). Lint scalar rc=0 (343/87/3), smt2 rc=0 (353/97/3); model 07a54529. Smokes 3/3 real tohost (h34@682 h33@889 bcancel@475). Witness r13: 2,306,327 retires past the r12 assert (c1,168,793), zero %Error; NEW wedge — fetch+retire both stop at 0x8000ea9a, next insn csrrw mtvec @0x8000ea9e never fetched (frontend starvation boundary in sbi_hart_init).
 
 - Hyp8 r99 MC contract closeout (2026-10-29): resolved the r98 unqualified MC gate without waivers — zero-default LSQ store credits now follow the derived speculative-store depth (MC 16; explicit oversize still `$error`), and the rename checkpoint record/publish/recovery seam carries the full 128-entry slot (`CKPT128_PASS last=127`). Final isolated aggregate `hyp8-r99-aggregate-c2` has scalar/SMT2/MC lint rc=0, `%Error=0`, `%Warning-USERERROR=0`, `%Warning-SELRANGE=0`; dispatch leaf PASS 125; scalar smokes 7/7. Evidence: `build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r99/worklog.md`. Open: remaining ordinary lint warnings (602/623/688 by scalar/SMT2/MC), MC simulation, Linux/OpenSBI boot and physical timing.
+
+- Hyp8 r112: Zbb zero-count defect corrected and remote leaf/11-smoke
+  qualification passed. The earlier issue-6 retired-load replay attribution
+  is withdrawn; H36/H37 pass on the affected baseline. Track corrected
+  OpenSBI/Linux witness separately through `G6LC_LINUX_INIT_UP` and
+  `G6LC_LINUX_SHELL`; full OpenWRT/procd is outside the frozen payload.
+  The local canonical verification gate remains blocked by missing managed
+  Verilator; synthesis/physical timing remain open. Evidence:
+  `build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r100/worklog.md`.

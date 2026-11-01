@@ -16,6 +16,16 @@ matching row here so the spec→code answer stays one hop away.
 
 ---
 
+## Hyp8 r112 — Zbb zero-count correction
+
+`#insns-clz` and `#insns-ctz` require XLEN for an all-zero source.
+`build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/hyp_cells/g6lc_hyp_lzc.sv`
+now handles WIDTH=2 directly, preventing the recursive empty-count
+overflow that made the hyp8 ALU return 63 instead of 64. Standalone
+WIDTH=1 behavior and existing configuration gates are preserved.
+Evidence and limits: `analysis/r100/worklog.md` under that redesign tree.
+No ISA/DTS capability or production chapter status changes.
+
 ## Hyp8 r98 — bounded PMP and occupancy implementation
 
 Hyp-only `core/csr_regfile.sv` under the redesign tree now uses constant-entry

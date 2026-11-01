@@ -17,6 +17,19 @@ matching row here so "which spec chapter is this test protecting?" stays answera
 
 ---
 
+## Hyp8 r112 — Zbb zero and boundary operands
+
+`verif/tests/custom/hyp8_h38_zbb_zero.S`, registered in the isolated
+integration runner, checks CLZ/CTZ zero, CTZW/CLZW controls, and the
+`orc.b/not/ctz` string boundary at seven/eight bytes (`#insns-clz`,
+`#insns-ctz`, `#insns-clzw`, `#insns-ctzw`). The existing
+`tb_g6lc_hyp8_alu` adds result-owner checks, one-hot sweeps and a
+bit-position oracle for generic LZC widths 1–9/32/64 in both modes.
+Remote r112 passes 19,508 leaf checks and 11 whole-core smokes.
+H36/H37 are general ordering regressions and pass on the faulty baseline;
+they do not establish a replay cause for issue 6. Full boot and physical
+sign-off remain separate gates. See the redesign `analysis/r100/worklog.md`.
+
 ## Hyp8 r98 — focused occupancy and PMP-write checks
 
 `tb_g6lc_hyp8_control.sv` plus isolated `run_hyp8_memory.py` leaves cover

@@ -17,6 +17,11 @@ headline view: it deliberately carries **no file references and no line numbers*
 
 ## Hypothetical core timing refactor — targeted boundary evidence only
 
+The r112 Zbb zero-count correction has directed architectural and generic
+cell coverage on the hypothetical core. It does not promote the chapter's
+existing limited-test status, production qualification, Linux boot or
+physical timing status.
+
 The r98 implementation/test-map additions provide focused LSQ occupancy and
 PMP write-bank evidence. They do not upgrade architectural PMP, full CSR
 ownership, memory-model, Linux boot or physical timing coverage. Existing

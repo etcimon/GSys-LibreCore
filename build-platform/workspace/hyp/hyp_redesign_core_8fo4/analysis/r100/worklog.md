@@ -120,3 +120,102 @@ All sims: remote testharness, pinned `verilator-causal` 5.008 (bin `3e622e33…`
 Issues 1, 2 and 4 are trace/assertion-side; issue 3 is an RTL translation
 hazard in the fetch interface. No boot claim beyond the UART milestones
 listed above is made by this worklog.
+
+Issue 5 was corrected in `492c9959c`: the IQ arbiter's sticky-kill
+carry matched an unowned zero record by TID alone. The r107 witness
+passed the previous 42,042,920-cycle stopping point. r107 then reached
+memory initialization but panicked creating the `kmalloc-1k` slab; r109
+reproduced the 156-line UART failure using the qualified PGO compiler.
+Neither run reached userspace.
+
+## Issue 6 — Zbb zero-count correction (r112)
+
+The prior issue-6 claim that a load retired and replayed after retirement
+was not established by the byte-loop trace. Its proposed LSQ fix is
+withdrawn. Extra result records in that trace remain unclassified. H36
+and H37 pass on the affected baseline and provide ordering regression
+coverage, not a reproduction of this kernel failure.
+
+The decisive evidence is in the later, runtime-patched Zbb `strlen`.
+Frozen r107 RVFI line 20,332,120 records `ctz t1,t1` (`0x60131313`, PC
+`0xffffffff80657f68`) returning 63 after the preceding `not t1,t1` at
+`0xffffffff80657f64` writes zero. Seven further sampled calls agree.
+RISC-V Zbb requires `ctz(0) == XLEN`, which is 64 on this model. The
+old assumption that the firmware's `acdfim` string excluded execution of
+Zbb instructions was incorrect; the retired instruction encodings show
+the kernel using its Zbb alternative.
+
+The hyp8 LZC cell recursively split WIDTH=2 into WIDTH=1 leaves. A
+standalone WIDTH=1 cell reports count 1 when empty; adding that to the
+half-width in the pair's one-bit count overflowed to zero. The WIDTH=64
+tree consequently returned 62 while empty, and the ALU incremented it to
+63. Dividing by eight made `strlen` return seven for a nonzero full word.
+The r112 correction terminates recursion at WIDTH=2 with the direct
+leading/trailing-bit predicate and an independent empty reduction. It
+preserves the standalone WIDTH=1 interface and the larger balanced tree.
+
+| Remote qualification | Observed result |
+|---|---|
+| `hyp8-r112-aggregate-c1` | Build complete; model SHA256 `29752206111032213223befaec07ccc116b96c91cbe9aadee4546863e7aca286`; scalar/SMT2/MC lint errors and USERERRORs zero; warning totals 602/623/688 |
+| `hyp8-r112-aluleaf-c3` | `HYP8_ALU_PASS checked=19508`; CLZ/CTZ zero, one-hot and all-ones; CTZW/CLZW controls; generic cell widths 1–9/32/64 and both directions |
+| `hyp8-r112-smokes-c1` | 11/11 pass; cycles 685/1011/492/2364/2199/1231/671/3038/9095/5959/883 |
+| `hyp8-r112-h38-baseline-c1` | Old r111 model `d80efeb5e80414b1049ef9e0ffd673e83528b440646226c625a3d3137386de97` on the same H38 ELF `d1280ed9f6dba83f8c4d8f2e849cb26ddb1691a0e25121e4497fc8a2124e5132`: **FAILED** exit 128 after 444 cycles, RVFI `end_of_test` `mem_wdata=0x101` (FAIL 1) — the unfixed cell reproduces the defect on the frozen smoke |
+| `hyp8-r112-memleaf-c1` | `HYP8_MEMORY_PASS checked=160` |
+| H38 executable | SHA256 `d1280ed9f6dba83f8c4d8f2e849cb26ddb1691a0e25121e4497fc8a2124e5132`; raw Zbb instruction encodings exercise zero counts and `orc.b/not/ctz` string boundaries |
+
+The first two r112 ALU-leaf attempts failed because of testbench syntax
+and an incorrectly specified high-half operand; they are not failing
+baseline RTL evidence. The corrected-model results above stand on c3.
+
+
+
+Correction confirmed on the actual kernel Zbb `strlen`: `tmp/r107_zbb_zero.py`
+run against the r112 RVFI shows the first eight zero-input `ctz` samples —
+trace lines 20,332,120 / 20,338,506 / 20,816,798 / 20,820,200 / 20,846,374 /
+20,849,750 / 20,852,498 / 20,853,976 — all returning `0x40` (64). The first is
+the SAME line 20,332,120 and PC `0xffffffff80657f68` that returned `0x3f` (63)
+in the frozen r107 model; the preceding `not t1,t1` at `0xffffffff80657f64`
+writes `x6=0` in both. The `g6lc_hyp_lzc` WIDTH=2 base case now yields the
+architectural `ctz(0)==XLEN` on the kernel's live `strlen` path.
+
+Timing/configuration review: this is a combinational base-case
+correction; the direct pair avoids the overflowing leaf addition; no
+measured FO4 or silicon timing claim follows. Existing RVB gating, ISA
+discovery and DTS are unchanged. Tests check architectural count values
+and result-owner identity. The canonical local `verify --lint --sim
+--synth` invocation could not start because managed Verilator was
+missing; the remote qualification above does not replace synthesis or
+physical sign-off. The Linux witness must still demonstrate whether this
+correction clears the percpu/kmalloc failure and reaches the payload's
+userspace markers.
+
+
+### r112 witness terminal outcome (hyp8-osbi-scalar-r112)
+
+The corrected model's Linux witness was stopped at 68,138,680 cycles after:
+`Kernel panic - not syncing: Creation of kmalloc slab kmalloc-2k
+size=2048 failed. Reason -22`. Full kallsyms names are now correct
+(`dump_backtrace`, `create_kmalloc_caches`, `new_kmalloc_cache`,
+`create_boot_cache`, `kmem_cache_init`, `mm_core_init`, `start_kernel` —
+no 7-character truncation), and the `ctz` zero-count is fixed on the live
+`strlen` path — so the arithmetic/string defect is resolved. The allocator
+still fails: `percpu: allocation failed` precedes a `kmalloc-2k` panic one
+allocation-size later than r107's `kmalloc-1k` panic. Issue 6's string/
+arithmetic symptom is closed by r112; the boot does NOT reach userspace —
+the remaining percpu/kmalloc failure (cause unclassified) remains open. r112 fixed the
+confirmed Zbb zero-count defect; it did not close the boot.
+
+
+### Next discriminator — r112diag (hyp8-osbi-scalar-r112diag)
+
+Observed at the r112 `pcpu_alloc` slot-iteration exit (RVFI line 24,818,860
+onward): `LW a5,0(a5)` at `0xffffffff8011edd4` returns 16; `C.ADDIW s11,1`
+at `0xffffffff8011edd6` returns 6; `BGE a5,s11,0xffffffff8011ed20` at
+`0xffffffff8011edd8` records cycle 51,446,577 followed by a FALLTHROUGH at
+`0xffffffff8011eddc` in the same cycle. Architecturally `16>=6` must take
+the back-branch to slot 6, not attempt a new chunk. Wrong operands, branch
+resolution/prediction, or a downstream redirect are all unproven. No
+allocator-bitmap path executes in this failing call. This is recorded as a
+next discriminator, not a causal conclusion. The windowed
+`smt-flow`/`win`/`disp`/`commit` trace (`trace_from/to=51,443,000–51,448,000`)
+is scheduled to resolve operand provenance and the redirect.
