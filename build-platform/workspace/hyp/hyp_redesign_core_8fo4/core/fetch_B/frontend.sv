@@ -1518,14 +1518,18 @@ module frontend
   // frontier instead (the queue flush or the record's own ordering makes
   // any pre-redirect tail unreachable for the new stream). meta_d_q.hart is
   // the window hart the queue push used; the chk-block hart tracked it.
-  always_comb begin
-    resume_push_next = resume_pc_q[meta_d_q.hart];
-    for (int unsigned i = 0; i < NrInstr; i++) begin
-      if (instr_queue_consumed[i])
-        resume_push_next = s_addr[i] +
-            g6lc_fetch_pkg::pc_ilen(G6LCCfg, s_instr[i][15:0]);
-    end
-  end
+  // The accepted stream's successor: a consumed CF slot leaves its
+  // queue-predicted target (the metadata survives a prediction-only
+  // override), a NoCF slot advances by its own instruction length.
+  g6lc_fe_frontier #(.G6LCCfg(G6LCCfg)) i_fe_frontier (
+      .resume_pc_i       (resume_pc_q[meta_d_q.hart]),
+      .consumed_i        (instr_queue_consumed),
+      .addr_i            (s_addr),
+      .instr_i           (s_instr),
+      .cf_type_i         (iq_cf_type),
+      .predict_address_i (iq_predict_address),
+      .resume_pc_o       (resume_push_next)
+  );
   // resume_d includes this cycle's push so the frontier is always one
   // stream position past every instruction that will ever be delivered.
   assign resume_d = (|instr_queue_consumed) ? resume_push_next
