@@ -26,6 +26,11 @@ module g6lc_hyp_lzc #(
   if (WIDTH == 1) begin : gen_degenerate
     assign cnt_o   = !in_i[0];
     assign empty_o = !in_i[0];
+  end else if (WIDTH == 2) begin : gen_pair
+    // Empty two-bit vectors encode WIDTH-1. Recursing to WIDTH=1
+    // would add 1+1 in a one-bit count and wrap to zero.
+    assign cnt_o   = MODE ? CNT_WIDTH'(!in_i[1]) : CNT_WIDTH'(!in_i[0]);
+    assign empty_o = ~(|in_i);
   end else begin : gen_tree
     // reverse once at this level for leading-zero mode, then count trailing
     logic [WIDTH-1:0] in;
