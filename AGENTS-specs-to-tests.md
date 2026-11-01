@@ -17,6 +17,21 @@ matching row here so "which spec chapter is this test protecting?" stays answera
 
 ---
 
+## Hyp8 r113 — accepted control-flow successor under override
+
+`tb_g6lc_hyp8_linecheck` in `verif/tb/core/tb_g6lc_hyp8_control.sv`
+connects the production frontier calculation to the real OV1 checker.
+Branch, Jump, JumpR and Return retain their predicted successor; additional
+cases cover empty consumption, 16/32-bit NoCF instructions, a branch
+predicted not taken, accepted-tail priority and ignored unconsumed slots.
+`hyp8-r113-linecheck-c2` passes 75 checks.
+`G6LC_MUT_FE_FRONTIER_FALLTHROUGH` restores the prior calculation and fails
+`G_BRANCH_OV1_TARGET`, producing the same erroneous `0xffffffff8011eddc`
+restart as the kernel diagnostic. Aggregate scalar/SMT2/MC lint has no
+errors or USERERRORs, and all 11 whole-core smokes pass.
+This is targeted control-transfer evidence (`#_conditional_branches`,
+`#_unconditional_jumps`); the corrected Linux witness remains a separate gate.
+
 ## Hyp8 r112 — Zbb zero and boundary operands
 
 `verif/tests/custom/hyp8_h38_zbb_zero.S`, registered in the isolated

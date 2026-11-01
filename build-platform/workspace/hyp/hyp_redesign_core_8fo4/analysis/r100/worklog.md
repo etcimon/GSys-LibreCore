@@ -219,3 +219,48 @@ allocator-bitmap path executes in this failing call. This is recorded as a
 next discriminator, not a causal conclusion. The windowed
 `smt-flow`/`win`/`disp`/`commit` trace (`trace_from/to=51,443,000–51,448,000`)
 is scheduled to resolve operand provenance and the redirect.
+
+
+## r113 — front-end predicted-successor frontier correction
+
+Diagnosed from the r112diag windowed trace: `BGE a5,s11` at
+`0xffffffff8011edd8` was accepted with `cf=Branch` and a queued predicted
+target `0xffffffff8011ed20`, but a prediction-only OV1 restart re-seeded
+the frontier to the sequential `0xffffffff8011eddc` — the front-end's
+successor unconditionally computed `last_consumed_addr + pc_ilen`,
+discarding the CF metadata that survives the override. Root is the
+accepted-stream successor, not the branch comparator or the allocator.
+
+Fix: `core/frontend/g6lc_fe_frontier.sv` (new) extracts the frontier —
+a consumed CF slot leaves the queue's `predict_address_i`, a NoCF slot
+advances `addr + pc_ilen`, unconsumed slots cannot move the frontier.
+`frontend.sv` instantiates it in place of the inline add; resume_d mux,
+resume_pc_q and all redirect priority/state are unchanged.
+
+| r113 gate | result |
+|---|---|
+| `hyp8-r113-linecheck-c2` | `HYP8_LINECHECK_PASS checked=75` — the real frontier DUT under 4 CF-type cases + 6 combinational seam cases |
+| `hyp8-r113-linecheck-negative-c1` | `G6LC_MUT_FE_FRONTIER_FALLTHROUGH` → `CHKFAIL G_BRANCH_OV1_TARGET` `ov1pc=ffffffff8011eddc` — the mutation reproduces the defect, isolating the seam |
+| `hyp8-r113-aggregate-c1` | `build_complete`, model SHA256 `a4c092e9ddea2c29781bade49b9b8df16cf1e4e8529af9983fd4dc47d003d2d5`, lints 0 err, warnings 602/623/688 |
+| `hyp8-r113-smokes-c1` | 11/11 pass, cycles identical |
+
+No new ISA/config/CSR/state/clock; a per-slot target mux added on an
+existing combinational cone, no timing sign-off claim. Boot remains open;
+this corrects the confirmed front-end successor defect. The full diff was
+reviewed and committed: RTL `a5fc9e4e6`, verification/flists/licensing
+`f943858cf`. The corrected witness is `hyp8-osbi-scalar-r113`, with the
+same frozen firmware and a 300M-cycle budget; userspace still requires
+both `G6LC_LINUX_INIT_UP` and `G6LC_LINUX_SHELL`.
+
+Diagnostic receipt: `hyp8-osbi-scalar-r112diag` completed at its
+51,450,000-cycle budget with no fatal error. The last observed retirement
+was at 51,449,979. Its local `output/run-hyp8.log` contains the decisive
+records: line 840952 has OV1 (`src=9`) restarting at `0xffffffff8011eddc`;
+841729 has BGE tid22 operands `a=16`, `b=6`, forwarding disabled;
+841756 has the correct taken resolution to `0xffffffff8011ed20` with no
+mispredict; 841761–841762 commit that branch and its fall-through load
+without a drop or replay. `[win]` cycle counters and the RVFI cycle stamp
+use different offsets; the latter records the branch at 51,446,577.
+These observations reject the arithmetic/operand and load-replay
+explanations for this event. They do not certify unrelated allocator
+or memory-order paths.

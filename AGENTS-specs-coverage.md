@@ -17,6 +17,11 @@ headline view: it deliberately carries **no file references and no line numbers*
 
 ## Hypothetical core timing refactor — targeted boundary evidence only
 
+The r113 frontend restart correction adds directed control-transfer
+coverage with a failing prior-behavior mutation and passing whole-core
+smokes. It does not change production chapter statuses or establish
+complete Linux boot, synthesis or physical timing qualification.
+
 The r112 Zbb zero-count correction has directed architectural and generic
 cell coverage on the hypothetical core. It does not promote the chapter's
 existing limited-test status, production qualification, Linux boot or

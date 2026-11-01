@@ -16141,3 +16141,13 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   The local canonical verification gate remains blocked by missing managed
   Verilator; synthesis/physical timing remain open. Evidence:
   `build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r100/worklog.md`.
+
+- Hyp8 r113: the residual r112 allocator failure was localized to an
+  OV1 frontend restart at a queued taken branch's fall-through. The branch
+  operands and taken resolution were correct. The accepted-stream
+  successor now retains the queued prediction; leaf PASS 75, prior-behavior
+  mutation fails `G_BRANCH_OV1_TARGET`, scalar/SMT2/MC lint has zero errors
+  and unchanged warning totals, and 11/11 whole-core smokes pass.
+  RTL `a5fc9e4e6`, verification/flists/licensing `f943858cf`.
+  Continue `hyp8-osbi-scalar-r113` to `G6LC_LINUX_INIT_UP` and
+  `G6LC_LINUX_SHELL`, or diagnose its next concrete terminal failure.

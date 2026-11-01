@@ -1,5 +1,18 @@
 # hyp8 implementation log — memory/PRF ownership repair
 
+Current boot continuation (r113): the r112 LZC correction fixes the live
+kernel's zero-count/string defect, but r112 still panicked at `kmalloc-2k`.
+The r112diag window establishes a different mechanism: the BGE at
+`0xffffffff8011edd8` receives 16 and 6 and resolves taken to
+`0xffffffff8011ed20`, while an earlier OV1 restart used its sequential
+successor `0xffffffff8011eddc`. The queue retained taken metadata, so the
+branch emitted no recovery. The frontend's restart frontier now follows
+the prediction of the last consumed CF slot. RTL `a5fc9e4e6` and
+verification `f943858cf`: linecheck PASS 75, prior-behavior mutation fails
+at the expected wrong restart, aggregate lint unchanged, 11/11 smokes
+pass. Corrected Linux witness `hyp8-osbi-scalar-r113` remains open.
+Detailed identities, trace loci and limits: `analysis/r100/worklog.md`.
+
 This log records the first coordinated implementation batch from the
 caller-aware retirement plan: preserving accepted operation ownership under
 staging across the physical register file, the speculative store buffer, and

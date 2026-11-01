@@ -16,6 +16,21 @@ matching row here so the spec→code answer stays one hop away.
 
 ---
 
+## Hyp8 r113 — prediction-only restart preserves control flow
+
+The control-transfer contract (`#_conditional_branches`,
+`#_unconditional_jumps`) requires the executed stream to follow the resolved
+successor. Under the hyp8 frontend, an accepted instruction keeps its
+prediction metadata across a prediction-only override.
+`core/frontend/g6lc_fe_frontier.sv` in the redesign tree now computes that
+accepted stream's successor: the queued predicted target for a consumed
+CF slot, or PC plus instruction length for NoCF. The instance in
+`core/fetch_B/frontend.sv` feeds the existing hart-banked restart state.
+r112diag showed an otherwise correctly predicted and resolved taken BGE
+followed by fall-through instructions after OV1 used the old sequential
+frontier. r113 corrects that frontier; no new ISA or DTS capability is added.
+Evidence and remaining boot/timing gates: the redesign `analysis/r100/worklog.md`.
+
 ## Hyp8 r112 — Zbb zero-count correction
 
 `#insns-clz` and `#insns-ctz` require XLEN for an all-zero source.
