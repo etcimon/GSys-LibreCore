@@ -3586,8 +3586,80 @@ module tb_g6lc_hyp8_alu;
     tick(); tick(); tick();
   endtask
 
+  // Bit-count op at c0, bubbles at c1/c2: the count publishes at A3 with
+  // the packet's own tid. Catches the WIDTH2 lzc base-case wrap (empty
+  // 2-bit vector counted 0 instead of WIDTH-1, walking up to 63 instead of 64).
+  task automatic bitcount_case(input fu_op op, input logic [63:0] a,
+                               input logic [63:0] expected, input string tag);
+    drive(op, a, '0, 8, 1'b1);
+    tick();
+    drive(ADD, '0, '0, 0, 1'b0);
+    tick(); tick();
+    check(result == expected, tag);
+    check(s3a3 && rtid == TID'(8), {tag, "_OWNER"});
+    tick(); tick(); tick();
+  endtask
+
+  // ---- g6lc_hyp_lzc width sweep (generic cell, not the ALU path) --------
+  // One shared input feeds every width/MODE instance; the reference is a
+  // bit-position loop, deliberately NOT the same recursive-tree algorithm.
+  logic [63:0] lzc_input;
+  logic [8:0]  lzc_cnt   [1:64][1:0];
+  logic        lzc_empty [1:64][1:0];
+
+  for (genvar w = 1; w <= 64; w++) begin : g_lzc_w
+    if (w <= 9 || w == 32 || w == 64) begin : g_lzc
+      localparam int W = w;
+      localparam int CW = cf_math_pkg::idx_width(W);
+      logic [W-1:0]  win;
+      logic [CW-1:0] cnt_m0, cnt_m1;
+      logic          emp_m0, emp_m1;
+      assign win = lzc_input[W-1:0];
+      g6lc_hyp_lzc #(.WIDTH(W), .MODE(1'b0)) i_lzc_m0 (
+        .in_i(win), .cnt_o(cnt_m0), .empty_o(emp_m0));
+      g6lc_hyp_lzc #(.WIDTH(W), .MODE(1'b1)) i_lzc_m1 (
+        .in_i(win), .cnt_o(cnt_m1), .empty_o(emp_m1));
+      always_comb begin
+        lzc_cnt[w][0]   = 9'(cnt_m0); lzc_empty[w][0] = emp_m0;
+        lzc_cnt[w][1]   = 9'(cnt_m1); lzc_empty[w][1] = emp_m1;
+      end
+    end else begin : g_lzc_skip
+      always_comb begin
+        lzc_cnt[w][0] = '0; lzc_empty[w][0] = 1'b0;
+        lzc_cnt[w][1] = '0; lzc_empty[w][1] = 1'b0;
+      end
+    end
+  end
+
+  // Reference: for an empty vector the vendor/hyp lzc reports WIDTH-1
+  // (WIDTH==1 degenerate returns 1). For a non-empty vector the trailing/
+  // leading-zero count is the number of zeros before the first set bit.
+  function automatic int ref_lzc(input int w, input int mode, input logic [63:0] v);
+    int cnt;
+    if ((v & ((64'(1) << w) - 64'(1))) == '0) return (w == 1) ? 1 : w - 1;
+    cnt = 0;
+    if (mode == 0) begin
+      for (int i = 0; i < w; i++) begin
+        if (v[i]) return cnt; cnt = cnt + 1;
+      end
+    end else begin
+      for (int i = w-1; i >= 0; i--) begin
+        if (v[i]) return cnt; cnt = cnt + 1;
+      end
+    end
+    return cnt;
+  endfunction
+
+  task automatic lzc_check(input int w, input int mode, input logic [63:0] v,
+                           input string tag);
+    int exp; lzc_input = v; #1;
+    exp = ref_lzc(w, mode, v);
+    check(lzc_cnt[w][mode] == 9'(exp), {tag, "_CNT"});
+    check(lzc_empty[w][mode] == ((v & ((64'(1) << w) - 64'(1))) == '0), {tag, "_EMP"});
+  endtask
+
   initial begin
-    rst_n = 0; rv = 1'b0; fud = '0;
+    rst_n = 0; rv = 1'b0; fud = '0; lzc_input = '0;
     repeat (4) tick();
     rst_n = 1;
     repeat (2) tick();
@@ -3618,6 +3690,40 @@ module tb_g6lc_hyp8_alu;
 
     // ---- flush-equivalent: owner=0 full-class packet then valid ADD ---
     invalid_pred(SLL, 64'd3, 64'd4, "FLSH_SLL");
+
+    // ---- bit-count ops (Zbb CLZ/CTZ + the g6lc_hyp_lzc WIDTH2 base) -----
+    check(C.RVB && C.IS_XLEN64, "CFG_RVB64");
+
+    bitcount_case(CTZ, 64'h0000_0000_0000_0000, 64'd64, "BC_CTZ0");
+    bitcount_case(CLZ, 64'h0000_0000_0000_0000, 64'd64, "BC_CLZ0");
+    bitcount_case(CTZ, 64'hffff_ffff_ffff_ffff, 64'd0,  "BC_CTZ_ALL1");
+    bitcount_case(CLZ, 64'hffff_ffff_ffff_ffff, 64'd0,  "BC_CLZ_ALL1");
+    bitcount_case(CTZW,64'h0000_0000_0000_0000, 64'd32, "BC_CTZW0");
+    bitcount_case(CLZW,64'h0000_0000_0000_0000, 64'd32, "BC_CLZW0");
+    bitcount_case(CTZW,64'hffff_ffff_0000_0000, 64'd32, "BC_CTZW_HI");
+    bitcount_case(CLZW,64'hffff_ffff_0000_0000, 64'd32, "BC_CLZW_HI");
+    for (int i = 0; i < 64; i++) begin
+      bitcount_case(CTZ, 64'h1 << i, 64'(i),       {"BC_CTZ_1H",   i});
+      bitcount_case(CLZ, 64'h1 << i, 64'(63) - 64'(i), {"BC_CLZ_1H", i});
+      if (i < 32) begin
+        bitcount_case(CTZW, 64'h1 << i, 64'(i),    {"BC_CTZW_1H",  i});
+        bitcount_case(CLZW, 64'h1 << i, 64'(31) - 64'(i), {"BC_CLZW_1H", i});
+      end
+    end
+
+    // ---- generic lzc cell sweep (widths 1..9, 32, 64 x MODE 0/1) --------
+    for (int w = 1; w <= 64; w++) begin
+      if (!(w <= 9 || w == 32 || w == 64)) continue;
+      for (int m = 0; m < 2; m++) begin
+        lzc_check(w, m, '0, {"LZ", w, "_M", m, "_Z"});
+        lzc_check(w, m, 64'hffff_ffff_ffff_ffff, {"LZ", w, "_M", m, "_A1"});
+        for (int b = 0; b < w; b++)
+          lzc_check(w, m, 64'h1 << b, {"LZ", w, "_M", m, "_1H", b});
+        if (w <= 9)
+          for (int v = 0; v < 512; v++)
+            lzc_check(w, m, 64'(v) & ((64'(1) << w) - 64'(1)), {"LZ", w, "_M", m, "_X", v});
+      end
+    end
 
     $display("HYP8_ALU_PASS checked=%0d", checked);
     $finish;

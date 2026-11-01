@@ -72,6 +72,17 @@ TESTS = [
     # dword (Linux 6.6.93 on r107: `earlyco=sbi`, kallsyms names cut at 7).
     ('hyp8_h35_subword', 'verif/tests/custom/hyp8_h35_subword.S',
      '80001000'),
+    # General regression for the memory-replay hypothesis investigated
+    # during issue 6; passed on the affected baseline.
+    ('hyp8_h36_strlen_replay', 'verif/tests/custom/hyp8_h36_strlen_replay.S',
+     '80001000'),
+    # r100 issue 6: older store with a late (load-produced) address writes
+    # byte 7 under a younger byte-walk strlen -- the memory-order replay
+    # must precede any younger retire.
+    ('hyp8_h37_ldst_viol_strlen',
+     'verif/tests/custom/hyp8_h37_ldst_viol_strlen.S', '80001000'),
+    ('hyp8_h38_zbb_zero',
+     'verif/tests/custom/hyp8_h38_zbb_zero.S', '80001000'),
 ]
 LINK_LD = 'verif/tests/custom/common/link_verilator.ld'
 GCC_FLAGS = ['-march=rv64imafdc_zicsr_zifencei', '-mabi=lp64d',
