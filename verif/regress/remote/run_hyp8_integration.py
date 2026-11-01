@@ -25,7 +25,12 @@ import subprocess
 
 RUNTIME = Path('/opt/testharness/runs/review-private-runtime-20260915/runtime')
 RUNTIME_DIGEST = 'dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166'
-VERILATOR = '/opt/testharness/src/verilator-causal/bin/verilator'
+# HYP8_VERILATOR_DIR: alternative verilator prefix (e.g. the PGO build of the
+# tools/verilator fork from install-verilator-g6lc.sh VLT_PGO=1). The binary
+# identity is recorded either way (verilatorBinSha256), so a switch is a new
+# instrument on record, never a silent flag.
+VERILATOR_DIR = os.environ.get('HYP8_VERILATOR_DIR', '/opt/testharness/src/verilator-causal')
+VERILATOR = f'{VERILATOR_DIR}/bin/verilator'
 SPIKE = '/opt/testharness/toolchains/spike'
 RISCV = '/opt/testharness/toolchains/xpack-riscv-none-elf-gcc-14.2.0-3'
 
@@ -223,7 +228,7 @@ def main():
                          SOFT_LADDER_BUILD_JOBS=os.environ.get('HYP8_BUILD_JOBS', '2'),
                          SOFT_LADDER_VERILATOR_THREADS='1',
                          VERILATOR_FLAVOUR='pinned',
-                         VERILATOR_INSTALL_DIR='/opt/testharness/src/verilator-causal',
+                         VERILATOR_INSTALL_DIR=VERILATOR_DIR,
                          VERILATOR_ROOT=str(RUNTIME),
                          SPIKE_INSTALL_DIR=SPIKE,
                          RISCV=RISCV)
