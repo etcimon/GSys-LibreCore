@@ -92,6 +92,9 @@ module perf_counters
     // T9h/M5: L2 stream/stride prefetcher pulses (g6lc_l2_top).
     input logic l2_pf_issue_i,
     input logic l2_pf_useful_i,
+    // Hub snoop-filter effectiveness (PMU group-2 indices 11/12)
+    input logic coh_sf_filtered_i,
+    input logic coh_sf_broadcast_i,
     // Group 3: FSE speculation recovery (tie 0 when unused)
     input logic spec_cancel_i,
     input logic smt_drain_force_i,     // N1c bounded-drain force pulse
@@ -330,6 +333,11 @@ module perf_counters
       // T9h/M5: L2 prefetcher issue/usefulness (g6lc_l2_top PF_EN).
       event_group[h][3'd2][5'd9]  = l2_pf_issue_i && act;   // L2 PF fill issued
       event_group[h][3'd2][5'd10] = l2_pf_useful_i && act;  // demand hit on PF line
+      // Coherence snoop-filter effectiveness (g6lc_coherence_hub), one event
+      // per invalidating write: 11 = filter spared at least one other core,
+      // 12 = write had to invalidate every other core (broadcast).
+      event_group[h][3'd2][5'd11] = coh_sf_filtered_i && act;
+      event_group[h][3'd2][5'd12] = coh_sf_broadcast_i && act;
 
       // Group 3: FSE / deep speculation recovery (mhpmevent[7:5]==3)
       event_group[h][3'd3][5'd0] = resolved_branch_i.valid && resolved_branch_i.is_mispredict && brh;

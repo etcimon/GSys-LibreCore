@@ -251,6 +251,8 @@ package cva6_config_pkg;
       CoreSleepGate: bit'(0),
       // 4-core coherent cluster
       NrCores: unsigned'(4),
+      // Exempt from build_config's OoO multi-core -> COH_OOO derivation:
+      // HPDCACHE_WT L1 is outside the COH_OOO envelope (check_cfg requires WT).
       CohPolicy: config_pkg::COH_FILTERED,
       SnoopFilterEn: bit'(1),
       SnoopFilterEntries: unsigned'(0),  // auto → 64×NrCores

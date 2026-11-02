@@ -116,6 +116,9 @@ module ariane import ariane_pkg::*; #(
   // T9h/M5: L2 prefetcher issue/usefulness pulses (indices 9/10)
   input  logic                         l2_pf_issue_i,
   input  logic                         l2_pf_useful_i,
+  // Hub snoop-filter effectiveness (PMU group-2 indices 11/12)
+  input  logic                         coh_sf_filtered_i,
+  input  logic                         coh_sf_broadcast_i,
   // Xg6lcai island sideband: ai.enq kick + ai.poll completion (tie 0 / open if no island)
   output logic                         ai_sb_enq_valid_o,
   input  logic                         ai_sb_enq_ready_i,
@@ -221,7 +224,7 @@ module ariane import ariane_pkg::*; #(
       .l2_pwhold_i          ( l2_pwhold_i               ),
       .l3_pwhold_i          ( l3_pwhold_i               ),
       .l2_pf_issue_i        ( l2_pf_issue_i             ),
-      .l2_pf_useful_i       ( l2_pf_useful_i            )
+      .l2_pf_useful_i       ( l2_pf_useful_i            ), .coh_sf_filtered_i       ( coh_sf_filtered_i            ), .coh_sf_broadcast_i       ( coh_sf_broadcast_i            )
     );
 
     if (CVA6Cfg.CvxifEn) begin: gen_cvxif
@@ -455,7 +458,7 @@ module ariane import ariane_pkg::*; #(
       .l2_pwhold_i          ( l2_pwhold_i               ),
       .l3_pwhold_i          ( l3_pwhold_i               ),
       .l2_pf_issue_i        ( l2_pf_issue_i             ),
-      .l2_pf_useful_i       ( l2_pf_useful_i            )
+      .l2_pf_useful_i       ( l2_pf_useful_i            ), .coh_sf_filtered_i       ( coh_sf_filtered_i            ), .coh_sf_broadcast_i       ( coh_sf_broadcast_i            )
     );
 
     g6lc_ara_attach #(

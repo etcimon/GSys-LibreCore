@@ -273,7 +273,7 @@ package cva6_config_pkg;
       // depth 8 the bench fills all 8 slots.
       L2MshrDepth: unsigned'(8),
       L2DataBanks: unsigned'(4),
-      L2RoundRobinEn: bit'(0),
+      L2RoundRobinEn: bit'(1),  // LLC (L2 + L3) round-robin victim: WT data traffic is cacheable here (WtAxiAllocEn)
       // U6.1 SMT2
       NrHarts: unsigned'(2),
       SmtPolicy: config_pkg::SMT_HYBRID,

@@ -32,6 +32,9 @@ module tb_g6lc_snoop_filter;
   always #5 clk = ~clk;
 
   logic alloc_valid = 1'b0, lookup_valid = 1'b0;
+  // Delivered-invalidation clears (the hub drives these from the handshake).
+  logic [NR_CORES-1:0] inv_clear_valid = '0, inv_clear_all = '0;
+  logic [NR_CORES-1:0][ADDR_WIDTH-1:0] inv_clear_addr = '0;
   logic [ADDR_WIDTH-1:0] alloc_addr = '0, lookup_addr = '0;
   logic [CID_W-1:0] alloc_core = '0;
   logic [NR_CORES-1:0] present;
@@ -52,6 +55,8 @@ module tb_g6lc_snoop_filter;
       .clk_i(clk), .rst_ni(rst_n),
       .alloc_valid_i(alloc_valid), .alloc_addr_i(alloc_addr), .alloc_core_i(alloc_core),
       .clear_valid_i(1'b0), .clear_addr_i('0), .clear_core_i('0), .clear_all_i(1'b0),
+      .inv_clear_valid_i(inv_clear_valid), .inv_clear_all_i(inv_clear_all),
+      .inv_clear_addr_i(inv_clear_addr),
       .lookup_valid_i(lookup_valid), .lookup_addr_i(lookup_addr),
       .present_o(present), .lookup_hit_o(lookup_hit), .overapprox_o(overapprox)
   );
@@ -61,6 +66,40 @@ module tb_g6lc_snoop_filter;
     held[addr / LINE_BYTES][core] = 1'b1;
     @(negedge clk);
     alloc_valid = 1'b0;
+  endtask
+
+  // A delivered invalidation: the core drops the line (all of them for an
+  // all_ways one), in the model and on the DUT's clear port. With
+  // `with_fetch` the same core refetches the line in the same cycle.
+  task automatic deliver(input int unsigned core, input longint unsigned addr,
+                         input bit all = 1'b0, input bit with_fetch = 1'b0);
+    inv_clear_valid[core] = 1'b1; inv_clear_all[core] = all; inv_clear_addr[core] = addr;
+    if (all) begin
+      foreach (held[l]) held[l][core] = 1'b0;
+    end else begin
+      held[addr / LINE_BYTES][core] = 1'b0;
+    end
+    if (with_fetch) begin
+      alloc_valid = 1'b1; alloc_addr = addr; alloc_core = CID_W'(core);
+      held[addr / LINE_BYTES][core] = 1'b1;
+    end
+    @(negedge clk);
+    inv_clear_valid = '0; inv_clear_all = '0; alloc_valid = 1'b0;
+  endtask
+
+  // Precision: after the clears, a write by `writer` must target exactly
+  // `expect_targets` (the bench knows nobody else holds the line).
+  task automatic check_precise(input int unsigned writer, input longint unsigned addr,
+                               input logic [NR_CORES-1:0] expect_targets);
+    lookup_valid = 1'b1; lookup_addr = addr;
+    #1;
+    if ((present & ~(NR_CORES'(1) << writer)) !== expect_targets) begin
+      errors = errors + 1;
+      $display("SF_IMPRECISE addr=%h writer=%0d targets=%b expected=%b",
+               addr, writer, present & ~(NR_CORES'(1) << writer), expect_targets);
+    end
+    @(negedge clk);
+    lookup_valid = 1'b0;
   endtask
 
   // A write to `addr` must snoop every core that holds the line, except the
@@ -129,6 +168,42 @@ module tb_g6lc_snoop_filter;
         end
         @(negedge clk);
         lookup_valid = 1'b0;
+      end
+      // Delivered invalidation removes the sharer: precision recovers.
+      3: begin
+        fetch(0, 64'h2000);
+        fetch(1, 64'h2000);
+        deliver(0, 64'h2000);
+        check_write(1, 64'h2000);
+        check_precise(1, 64'h2000, '0);
+      end
+      // Same-cycle clear and refetch by the same core: the refetch wins.
+      4: begin
+        fetch(0, 64'h3000);
+        fetch(1, 64'h3000);
+        deliver(0, 64'h3000, 1'b0, 1'b1);
+        check_write(1, 64'h3000);
+      end
+      // A displaced index whose sharers were all cleared must stay
+      // displaced-safe: the forgotten line L comes back from one core but
+      // another core still holds it.
+      5: begin
+        fetch(0, 64'h5000);
+        fetch(1, 64'h5000);                  // L held by 0 and 1
+        fetch(1, 64'h5000 + SET_STRIDE);     // M displaces L's entry
+        deliver(1, 64'h5000 + SET_STRIDE);   // M's only sharer leaves
+        fetch(1, 64'h5000);                  // L re-installed from core 1
+        check_write(1, 64'h5000);            // core 0 still holds L
+      end
+      // An all_ways invalidation clears the core from every entry.
+      6: begin
+        fetch(0, 64'h6000);
+        fetch(0, 64'h6040);
+        fetch(1, 64'h6000);
+        deliver(0, 64'h0, 1'b1);
+        check_write(1, 64'h6000);
+        check_precise(1, 64'h6000, '0);
+        check_precise(1, 64'h6040, '0);
       end
       default: $fatal(1, "SF_SCENARIO");
     endcase

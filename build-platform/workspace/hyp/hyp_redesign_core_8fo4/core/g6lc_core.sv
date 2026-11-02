@@ -494,7 +494,10 @@ module g6lc_core
     input  logic        l3_pwhold_i,
     // T9h/M5: L2 prefetcher pulses (group-2 indices 9 / 10)
     input  logic        l2_pf_issue_i,
-    input  logic        l2_pf_useful_i
+    input  logic        l2_pf_useful_i,
+    // Hub snoop-filter effectiveness (PMU group-2 indices 11/12)
+    input  logic        coh_sf_filtered_i,
+    input  logic        coh_sf_broadcast_i
 );
 
   // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
@@ -3922,7 +3925,7 @@ assign irq_active = irq_i[smt_active_hart];
         .l2_pwhold_i        (l2_pwhold_i),
         .l3_pwhold_i        (l3_pwhold_i),
         .l2_pf_issue_i      (l2_pf_issue_i),
-        .l2_pf_useful_i     (l2_pf_useful_i),
+        .l2_pf_useful_i     (l2_pf_useful_i), .coh_sf_filtered_i     (coh_sf_filtered_i), .coh_sf_broadcast_i     (coh_sf_broadcast_i),
         .spec_cancel_i      (spec_cancel),
         .smt_drain_force_i  (smt_drain_force),
         .smt_drain_force_wfi_i (smt_drain_force_wfi),

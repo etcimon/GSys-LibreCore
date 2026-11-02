@@ -273,6 +273,34 @@ AI island / ai-matrix FO4 program (2026-10-26/27, hyp tree of record `build-plat
 | Host / verify | [`AGENTS-build-platform.md`](AGENTS-build-platform.md) · [`AGENTS-build.md`](AGENTS-build.md) · [`build-platform/AGENTS.md`](build-platform/AGENTS.md) | CLI, residual soaks, probe→verify |
 | Philosophy / SoC envelope | [`AGENTS-coding-philosophy.md`](AGENTS-coding-philosophy.md) · [`AGENTS-configuration.md`](AGENTS-configuration.md) · [`agents/guides/AGENTS-soc-readiness.md`](agents/guides/AGENTS-soc-readiness.md) | Timing, verify-in-lockstep, target SoC |
 
+## hyp8_mc COH_OOO closure: snoop-filter precision, MT/PGO Verilator (2026-11-02)
+
+- [x] `build_config` derives COH_OOO for OoO multi-core WT clusters (both trees);
+      `g6lc64_ooo_server` (HPDCACHE_WT) is the documented exemption; check_cfg swept over
+      36 packages (cv64a60ax fails on a pre-existing missing `RVZiCbom` field).
+- [x] Snoop filter clears presence on delivered invalidations; tagged filter AND signature
+      under COH_OOO; `coh_sf_hit/overapprox` redefined per invalidating write; PMU group 2
+      [11]/[12]. Evidence: `architecture/multi-core/README.md` "Snoop-filter precision".
+- [ ] Staged: `CohEvictNotifyEn` WT-L1 eviction sideband (cfg bit derived 0 today).
+- [x] LLC replacement: `L2RoundRobinEn` now also drives the L3 (`g6lc_l3_top.RR_EN`),
+      L3 legality in check_cfg, default-on in every `L2En && WtAxiAllocEn` package
+      (both trees); L2 config test asserts the rule. Leaf L3 geometry 2,656 -> 17,673 hits.
+- [ ] Core-level RR qualification on the newly-on packages (smt2 soak at
+      `SOFT_LADDER_VERILATOR_THREADS=1`, ooo_int2 MC minis, hyp8_mc build) and the
+      area delta (one `WAY_W`-wide `tc_sram` per L2/L3 set array).
+- [ ] Synthesis area/timing of the tagged filter under COH_OOO (hyp 8-FO4 screen of the
+      per-core clear compare; pipeline the clear one cycle if over budget — still sound).
+- [ ] Pre-existing: `tb_g6lc_coherence_l2` scenario 6 fails `COH_L2_CMO_BCAST c0=4 c1=4`
+      identically on HEAD (CMO broadcast delivered/counted 4x per core) — triage the CMO
+      engine vs the bench's count.
+- [ ] hyp8 harness: split-loops `.vlt` (hyp renames) + `--stats` on the fork; PGO training
+      now an MT `g6lc64_hyp8_mc` verilation. The PGO prefix `verilator-v5.008-g6lc-pgo`
+      (fork f7fa715, header `e900ec45…`) is not in the runners' qualified tables yet.
+- [ ] hyp-tree-specific split_var candidates (renamed/new modules: `g6lc_iq_bank`, LSQ
+      leaves) from `--report-unoptflat` on the MC model (`vlt_autosplit.py`).
+- [ ] MC still raises the r98 `$error`s (LSQ store entries vs `ooo_spec_store_depth`;
+      rename checkpoint truncation); system-level MC evidence stays verilate-only.
+
 ## A139 module-driven pipeline design pass (2026-10-18)
 
 Design record: [`architecture/RTL-PIPELINE-PLANS.md`](architecture/RTL-PIPELINE-PLANS.md).

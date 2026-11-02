@@ -1807,6 +1807,73 @@ usefully re-reproduced the original `SF_SHARER_LOST must=01 targets=00 hit=1 ove
 signature, but it was not the comparison I had asked for. A baseline has to come from the
 local repository and be copied over, not from the remote's own history.
 
+## Snoop-filter precision: clear on delivered invalidation, COH_OOO intersection (2026-11-02)
+
+**Policy rule.** `build_config` derives `CohPolicy = COH_OOO` for every out-of-order
+multi-core WT cluster (`OoOEn && NrCores > 1 && DCacheType == WT`), whatever the package
+says; `check_cfg` still enforces the rest of the envelope (L2, equal I/D lines). Documented
+exemption: `g6lc64_ooo_server` (HPDCACHE_WT L1, outside the envelope) keeps COH_FILTERED.
+`g6lc64_hyp8_mc` now states COH_OOO explicitly.
+
+**Limitations validated before the change** (`verif/tb/uncore/tb_g6lc_sf_precision.sv`:
+real hub, 4 random cores, independent L1 model; `wasted` = invalidations delivered to a core
+that did not hold the line, per write):
+
+| profile | before: wasted/write | before: broadcast % | before: `coh_sf_hit_o` |
+|---|---:|---:|---|
+| COH_OOO, 256 entries, 64 lines (cold) | 0.51 -> 0.62 (drifting) | 100 (hard-wired) | never |
+| COH_OOO, 64 entries, 112 lines | 1.46 | 100 | never |
+| FILTERED, 64 entries | 2.43 | n/a (outputs counted every cycle) | per lookup, not per write |
+
+1. Precision only got worse: the legacy filter installs "everyone" over a displaced index
+   and never shrinks; the OoO signature only ever set bits; the hub tied `clear_valid_i` off.
+2. No measurement: under COH_OOO the hub hard-wired `sf_hit = 0`, `sf_over = aw_fire`; the
+   legacy outputs pulsed per cycle (`overapprox_o` defaults to 1 with no lookup). Both were
+   left unconnected in `g6lc_cluster`.
+
+**Fix (both trees, `g6lc_snoop_filter` + `g6lc_coherence_hub`).**
+- *Clear on delivered invalidation.* The hub drives per-core clear ports from the handshake
+  `inv_core_o[c].valid && inv_core_ready_i[c] && dcache` (`all_ways` clears the core from every
+  entry). Sound: the core no longer holds the line once it applies the invalidation, and
+  `inv_fill_hold` keeps the delivery back while that core's fill of the line is in flight.
+  Same-cycle refetch wins (clear is applied before alloc). An entry emptied by clears stays
+  valid with an empty set, so an index that has displaced lines stays "displaced-safe"; the
+  legacy single clear port used to invalidate an emptied entry, which would have let a
+  forgotten line come back precise — fixed in the same edit.
+- *COH_OOO intersection.* The tagged filter is enabled under COH_OOO too; its lookup is taken
+  with the signature lookup at `sig_start` and registered, and
+  `sf_present = signature & tagged`. Both are supersets of the holders, so the intersection
+  is; ARs are blocked between `sig_start` and the write's `aw_fire` and clears only shrink.
+- *Observability.* `coh_sf_hit_o` = invalidating write whose targets exclude at least one
+  other core; `coh_sf_overapprox_o` = invalidating write that targeted every other core.
+  Wired cluster -> core -> `perf_counters`: **PMU group 2 index 11 (filtered) / 12
+  (broadcast)**, `mhpmevent[7:5]=2`, counted in every core's PMU like `l2_miss`.
+
+**After** (same benches, production and hyp identical):
+
+| profile | wasted/write | broadcast % | stale sharers |
+|---|---:|---:|---:|
+| COH_OOO, 256 entries (cold) | 0.10–0.13 | 1–2 | 0 |
+| COH_OOO, 64 entries | 0.78 -> 0.95 | 13–23 | 0 |
+| FILTERED, 64 entries | 1.56–1.70 | 53–59 | 0 |
+| FILTERED, 256 entries (cold) | 0.08 | 0 | 0 |
+
+Controls: `+oracle_negative` (one delivered invalidation not applied in the model) -> SF_STALE;
+RTL mutation "clear at enqueue, ignoring the fill hold and handshake" -> SF_STALE under the
+stress profile (`INV_STALL_PCT=85 SHARED_LINES=2 SHARED_PCT=90`); the correct RTL passes it.
+`tb_g6lc_snoop_filter` gains scenarios 3–6 (clear, same-cycle refetch, emptied displaced
+index, all_ways).
+
+**What remains (precision, not correctness).** Silent WT-L1 evictions are still invisible, so
+read-shared lines displaced from the tagged filter stay "everyone" until their next write.
+Staged follow-up: `cva6_cfg_t.CohEvictNotifyEn` (derived 0, legality in `check_cfg`): a
+per-core victim (line, core) sideband from the WT miss unit into the same hub clear ports,
+cleared only when no AR of that line from that core is live in the OT table; DFT/RVFI/PMU
+obligations as for any new sideband. Back-invalidation on displacement remains the
+alternative; it needs the write's B to wait for the displaced sharers too.
+Area: the tagged filter is now also present under COH_OOO (NE × (tag + NC) flops, flop array
+kept by decision); record synthesis numbers before tape-out planning.
+
 ## OpenSBI/SMT2 soak: historical comparison, attribution superseded
 
 **2026-09-18 evidence correction (H3/H4, T9):** the observations below remain recorded,

@@ -179,7 +179,7 @@ module g6lc_snoop_filter_lint_top
       .clear_valid_i (clear_valid),
       .clear_addr_i  (clear_addr),
       .clear_core_i  (clear_core),
-      .clear_all_i   (clear_all),
+      .clear_all_i   (clear_all), .inv_clear_valid_i('0), .inv_clear_all_i('0), .inv_clear_addr_i('0),
       .lookup_valid_i(lookup_valid),
       .lookup_addr_i (lookup_addr),
       .present_o     (present),

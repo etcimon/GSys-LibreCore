@@ -121,6 +121,34 @@ as separate lanes. `L2TB_MODE=units` (proxy
 conflict on the leaves; serialized-top zero counts remain not passes.
 See the cache architecture record for exact proof scope and hashes.
 
+### Snoop-filter precision + PMU group 2 [11]/[12] (2026-11-02)
+
+OoO multi-core WT clusters always run COH_OOO (derived in `build_config`; the
+HPDCACHE_WT `g6lc64_ooo_server` is the documented exemption). The hub clears a
+core's presence when it hands that core an invalidation, and under COH_OOO
+intersects the signature with the tagged filter. `coh_sf_hit_o` /
+`coh_sf_overapprox_o` are per invalidating write and feed **PMU group 2 index 11
+(filtered) and 12 (broadcast)** in every core. Evidence and before/after numbers:
+`architecture/multi-core/README.md` "Snoop-filter precision". Leaf note from
+the same sweep: at the hyp8_mc L2 geometry, `RR_EN=0` (way-0 victim) gives
+1,370 hits vs 8,330 with `RR_EN=1` on the same 31.7k-read stream.
+
+**LLC round-robin is now default-on where it can matter (2026-11-02).**
+`L2RoundRobinEn` drives both the L2 and (new) the L3 `RR_EN` in `g6lc_cluster`;
+`check_cfg` adds the L3 legality (power-of-two ways >= 2). It is set to 1 in
+every package with `L2En && WtAxiAllocEn` (the WT L1 emits allocating
+attributes, so data traffic reaches the LLC): `g6lc64_smt2{,_ai,_l3,_ooo_int,
+_ooo_int_ai}`, `g6lc64_ooo_int2{,_l3,_l3_ai}`, `g6lc64_hyp8_mc` and the
+`G6LC_HYP8_L3` arm of `g6lc64_hyp8`. Packages without allocating WT traffic
+(stream8, server_math, ooo_server{,1}, ai: HPDCACHE execute-region loads and
+non-allocating WT) keep 0 — the metadata RAM would see no data traffic. The
+L2 config test now asserts that rule instead of "always off". The earlier
+"keep RR off" rested on a zero core delta measured with uncacheable traffic
+and on an SMT2 livelock later retracted as a Verilator vthreads artifact; the
+cacheable `e8k` run measured −12.9 % cycles / −29 % L2 misses. Leaf at the L3
+geometry (1 MiB/16 w, both trees): 2,656 → 17,673 hits, victim mask 0001 →
+ffff, golden data/tag oracle clean.
+
 ### Invalidation admission follow-up (2026-09-16)
 
 The live invalidation leaf now accepts only when every target has room or a

@@ -119,6 +119,8 @@ module g6lc_cluster
   logic l3_hit_w, l3_miss_w, l3_bypass_w, l3_evict_v;
   // T9b posted-write hold-cycle probes → PMU group 2, indices 7 (L2) / 8 (L3).
   logic l2_pwhold_w, l3_pwhold_w;
+  // Hub snoop-filter effectiveness pulses -> PMU group 2 indices 11/12.
+  logic coh_sf_filt_w, coh_sf_bcast_w;
   // T9h/M5: L2 prefetcher pulses (PMU group-2 9/10).
   logic l2_pf_iss_w, l2_pf_use_w;
   logic [AXI_ADDR_WIDTH-1:0] l3_evict_a;
@@ -372,7 +374,7 @@ module g6lc_cluster
         .l2_pwhold_i      (l2_pwhold_w),
         .l3_pwhold_i      (l3_pwhold_w),
         .l2_pf_issue_i    (l2_pf_iss_w),
-        .l2_pf_useful_i   (l2_pf_use_w),
+        .l2_pf_useful_i   (l2_pf_use_w), .coh_sf_filtered_i   (coh_sf_filt_w), .coh_sf_broadcast_i   (coh_sf_bcast_w),
         .ai_sb_enq_valid_o(core_sb_enq[c]),
         // Every core reaches the island through the round-robin sideband
         // arbiter below (one kick accepted per cycle; a core holds its kick
@@ -491,6 +493,8 @@ module g6lc_cluster
     assign hub_mem_req      = guarded_req[0];
     assign guarded_resp[0]  = hub_mem_resp;
     assign inv_hub       = '{default: '0};
+    assign coh_sf_filt_w  = 1'b0;
+    assign coh_sf_bcast_w = 1'b0;
   end else begin : gen_hub
     g6lc_coherence_hub #(
         .NR_CORES             (NC),
@@ -524,8 +528,8 @@ module g6lc_cluster
         .lr_addr_i        ('0),
         .lr_core_i        ('0),
         .coh_inv_fire_o   (),
-        .coh_sf_hit_o     (),
-        .coh_sf_overapprox_o(),
+        .coh_sf_hit_o     (coh_sf_filt_w),
+        .coh_sf_overapprox_o(coh_sf_bcast_w),
         .coh_arb_starve_o (),
         .coh_split_conflict_o(),
         .coh_sc_noresv_o  (),
@@ -629,6 +633,8 @@ module g6lc_cluster
   if (G6LCCfg.L3En) begin : gen_l3
     g6lc_l3_top #(
         .Enable         (1'b1),
+        // L2RoundRobinEn selects the LLC victim policy for L2 and L3 alike.
+        .RR_EN          (G6LCCfg.L2RoundRobinEn),
         .FAIR_WRITES    (G6LCCfg.OoOEn),
         .BYTE_SIZE      (G6LCCfg.L3ByteSize != 0 ? G6LCCfg.L3ByteSize : 32'd2097152),
         .SET_ASSOC      (G6LCCfg.L3SetAssoc != 0 ? G6LCCfg.L3SetAssoc : 32'd16),

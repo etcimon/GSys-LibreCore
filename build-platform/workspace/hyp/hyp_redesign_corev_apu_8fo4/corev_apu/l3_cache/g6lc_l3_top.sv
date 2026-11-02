@@ -10,6 +10,10 @@ module g6lc_l3_top
 #(
     parameter bit          Enable      = 1'b1,
     parameter bit          FAIR_WRITES = 1'b0,
+    // Per-set round-robin victim (see g6lc_l2_top RR_EN). Without it an
+    // all-valid set always evicts way 0, so ways 1..N-1 keep their first
+    // fills until invalidated.
+    parameter bit          RR_EN       = 1'b0,
     parameter bit          TAG_SRAM    = 1'b0,
     // Write-update: forwarded cacheable writes merge into resident lines
     // instead of purging them (see g6lc_l2_top WRITE_UPDATE / l2 README).
@@ -90,6 +94,7 @@ module g6lc_l3_top
 
   g6lc_l2_top #(
       .Enable         (Enable),
+      .RR_EN          (RR_EN),
       .FAIR_WRITES    (FAIR_WRITES),
       .TAG_SRAM       (TAG_SRAM),
       .WRITE_UPDATE   (WRITE_UPDATE),

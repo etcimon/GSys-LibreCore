@@ -945,6 +945,10 @@ package config_pkg;
     bit          L2WriteUpdateEn;
     bit          L2CmoEn;
     bit          L2PostedWriteEn;
+    // Staged: WT-L1 eviction notify that clears hub snoop-filter presence.
+    // Derived 0 by build_config until the cache_subsystem sideband lands
+    // (architecture/multi-core/README.md, snoop-filter precision).
+    bit          CohEvictNotifyEn;
     int unsigned L2WriteTrackDepth;
     int unsigned L2ReadTrackDepth;
     bit          L2PrefetchEn;
@@ -1180,6 +1184,10 @@ package config_pkg;
     assert (!Cfg.L2RoundRobinEn || Cfg.L2En);
     assert (!Cfg.L2RoundRobinEn || Cfg.L2SetAssoc >= 2);
     assert (!Cfg.L2RoundRobinEn || (2 ** $clog2(Cfg.L2SetAssoc) == Cfg.L2SetAssoc));
+    // The same knob drives the L3 instance (g6lc_cluster); 0 selects the
+    // cluster default geometry (16 ways).
+    assert (!Cfg.L2RoundRobinEn || !Cfg.L3En || Cfg.L3SetAssoc == 0 ||
+            (Cfg.L3SetAssoc >= 2 && 2 ** $clog2(Cfg.L3SetAssoc) == Cfg.L3SetAssoc));
     // L2 line width: 0 → inferred 512 (64 B / Zic64b), explicit 512, or match L1
     // DCACHE_LINE_WIDTH. L1 may be 128b (16 B) while L2 is 64 B — that is legal.
     assert (!(Cfg.L2En && Cfg.L2LineWidth != 0 && Cfg.L2LineWidth != 512 &&
@@ -1336,6 +1344,11 @@ package config_pkg;
     // T9b posted writes need the L2 engine; tracker depths are small powers
     // of two (the compare cones stay 4-entry by default, ~1 FO4 each).
     assert (!(Cfg.L2PostedWriteEn && !Cfg.L2En));
+    // Eviction-notify presence clear needs a hub with a tagged filter
+    // behind WT L1s (the only L1 that evicts clean lines silently).
+    assert (!Cfg.CohEvictNotifyEn ||
+            (Cfg.NrCores > 1 && Cfg.SnoopFilterEn && Cfg.DCacheType == WT &&
+             Cfg.CohPolicy inside {COH_FILTERED, COH_OOO}));
     assert (Cfg.L2WriteTrackDepth == 0 ||
             (Cfg.L2WriteTrackDepth inside {2, 4, 8}));
     assert (Cfg.L2ReadTrackDepth == 0 ||

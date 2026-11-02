@@ -29,6 +29,10 @@ FLIST_MC = 'verif/regress/remote/hyp8/Flist.hyp8_mc_sim'
 EXTRA_FILES = [
     'verilator_config.vlt',
     'verif/regress/remote/hyp8/hyp8-build-harness.sh',
+    # split_var controls the harness rewrites for the hyp module names, and
+    # the fork installer whose PGO round trains on this closure
+    'build-platform/scripts/verilator-split-loops.vlt',
+    'build-platform/scripts/install-verilator-g6lc.sh',
     'verif/regress/remote/hyp8/hyp8_tb.cpp',
     'verif/regress/remote/hyp8/build_boot_firmware.py',
     'verif/regress/remote/hyp8/capture_cfg.py',

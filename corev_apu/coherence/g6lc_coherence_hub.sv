@@ -919,9 +919,17 @@ module g6lc_coherence_hub
     // ================================================================
     logic [NC-1:0] sf_present, legacy_sf_present;
     logic          sf_hit, sf_over, legacy_sf_hit, legacy_sf_over;
-    assign sf_present = OOO_SF ? (sig_result_valid ? sig_present : sig_present_q) : legacy_sf_present;
-    assign sf_hit = OOO_SF ? 1'b0 : legacy_sf_hit;
-    assign sf_over = OOO_SF ? aw_fire : legacy_sf_over;
+    // COH_OOO: the signature and the tagged filter are both sound supersets
+    // of a line's holders, so their intersection is one too. The tagged
+    // lookup is taken together with the signature lookup at sig_start and
+    // registered: between sig_start and the write's aw_fire no AR is granted
+    // (coh_block_ar) and delivered invalidations only remove sharers, so the
+    // registered set stays a superset. Only the tagged filter can shrink (it
+    // clears a core on each delivered invalidation), which is what keeps a
+    // long-running store-heavy system from drifting toward broadcast.
+    logic [NC-1:0] tag_present_q;
+    assign sf_present = OOO_SF ? ((sig_result_valid ? sig_present : sig_present_q) & tag_present_q)
+                               : legacy_sf_present;
 
     if (OOO_SF) begin : gen_ooo_coherence
       g6lc_ooo_snoop_filter #(
@@ -942,6 +950,7 @@ module g6lc_coherence_hub
           sig_done_q <= 1'b0;
           sig_owner_q <= '0;
           sig_present_q <= '1;
+          tag_present_q <= '1;
         end else begin
           if (sig_start) begin
             sig_pending_q <= 1'b1;
@@ -952,6 +961,7 @@ module g6lc_coherence_hub
             sig_done_q <= 1'b1;
             sig_present_q <= sig_present;
           end
+          if (sig_start) tag_present_q <= legacy_sf_present;
           if (aw_fire) begin
             sig_pending_q <= 1'b0;
             sig_done_q <= 1'b0;
@@ -972,9 +982,18 @@ module g6lc_coherence_hub
       assign sig_done_q = 1'b0;
       assign sig_owner_q = '0;
       assign sig_present_q = '1;
+      assign tag_present_q = '1;
     end
     logic [AXI_ADDR_WIDTH-1:0] sf_lu_addr, sf_al_addr;
     logic [CID_W-1:0]          sf_al_core;
+    // Presence clear source: the delivered (handshaken) D$ invalidations.
+    logic [NC-1:0]                     inv_clr_v, inv_clr_all;
+    logic [NC-1:0][AXI_ADDR_WIDTH-1:0] inv_clr_addr;
+    for (genvar c = 0; c < NC; c++) begin : gen_inv_clear
+      assign inv_clr_v[c]    = inv_core_o[c].valid && inv_core_ready_i[c] && inv_core_o[c].dcache;
+      assign inv_clr_all[c]  = inv_core_o[c].all_ways;
+      assign inv_clr_addr[c] = AXI_ADDR_WIDTH'(coh_line_base(inv_core_o[c].line_addr, LINE_BYTES));
+    end
 
     assign sf_lu_addr = core_req_i[aw_winner].aw.addr;
     assign sf_al_addr = ar_fire ? core_req_i[ar_winner].ar.addr
@@ -982,7 +1001,7 @@ module g6lc_coherence_hub
     assign sf_al_core = ar_fire ? ar_winner : aw_winner;
 
     g6lc_snoop_filter #(
-        .Enable     (SNOOP_FILTER_EN && (POLICY == COH_FILTERED)),
+        .Enable     (SNOOP_FILTER_EN && (POLICY inside {COH_FILTERED, COH_OOO})),
         .NR_CORES   (NC),
         .NR_ENTRIES (SNOOP_FILTER_ENTRIES),
         .LINE_BYTES (LINE_BYTES),
@@ -997,7 +1016,10 @@ module g6lc_coherence_hub
         .clear_addr_i  ('0),
         .clear_core_i  ('0),
         .clear_all_i   (1'b0),
-        .lookup_valid_i(aw_fire),
+        .inv_clear_valid_i(inv_clr_v),
+        .inv_clear_all_i  (inv_clr_all),
+        .inv_clear_addr_i (inv_clr_addr),
+        .lookup_valid_i(OOO_SF ? sig_start : aw_fire),
         .lookup_addr_i (sf_lu_addr),
         .present_o     (legacy_sf_present),
         .lookup_hit_o  (legacy_sf_hit),
@@ -1099,6 +1121,15 @@ module g6lc_coherence_hub
         inv_new_target    = inv_new_target | lr_kill_cores;
       end
     end
+
+    // Filter effectiveness, one event per invalidating write: hit = the
+    // filter spared at least one non-writer core, overapprox = the write had
+    // to target every other core. Same definition for FILTERED and OOO; a
+    // BROADCAST hub reports every invalidating write as overapprox.
+    logic [NC-1:0] inv_others;
+    assign inv_others = ~({{NC-1{1'b0}}, 1'b1} << aw_winner);
+    assign sf_hit  = aw_fire && aw_may_invalidate && (inv_wr_target != inv_others);
+    assign sf_over = aw_fire && aw_may_invalidate && (inv_wr_target == inv_others);
 
     // Retention of an accepted write's invalidation obligation.
     // Previously the request was presented combinationally in the same cycle the

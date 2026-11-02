@@ -28,8 +28,12 @@
 #   L2TB_WRITE_UPDATE=1     enable the resident-line write merge (T8f);
 #     0 must fold to the invalidate-only netlist.
 #   L2TB_POSTED_WRITES=1    enable posted writes + bypass-read tracking (T9b).
+#   L2TB_RTL=<repo-rel dir> tree holding l2_cache/ (default corev_apu; the hyp8
+#     redesign is build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+L2TB_RTL="${L2TB_RTL:-corev_apu}"
+[[ "$L2TB_RTL" =~ ^[A-Za-z0-9_./-]+$ && "$L2TB_RTL" != *..* ]] || { echo "[l2-tb] bad L2TB_RTL" >&2; exit 2; }
 LIVE_ROOT="$ROOT"
 OUT_BASE="${L2TB_OUT:-/tmp/g6lc-l2-tb}"
 mkdir -p "$OUT_BASE"
@@ -61,13 +65,13 @@ if "$VERILATOR" -Wno-WIDTHEXPAND --version >/dev/null 2>&1; then warning_args+=(
 sources=(
   "$ROOT/vendor/pulp-platform/axi/src/axi_pkg.sv"
   "$ROOT/vendor/pulp-platform/tech_cells_generic/src/rtl/tc_sram.sv"
-  "$ROOT/corev_apu/l2_cache/g6lc_l2_pkg.sv"
-  "$ROOT/corev_apu/l2_cache/g6lc_l2_tag.sv"
-  "$ROOT/corev_apu/l2_cache/g6lc_l2_data.sv"
-  "$ROOT/corev_apu/l2_cache/g6lc_l2_mshr.sv"
-  "$ROOT/corev_apu/l2_cache/g6lc_l2_wtrk.sv"
-  "$ROOT/corev_apu/l2_cache/g6lc_l2_pf.sv"
-  "$ROOT/corev_apu/l2_cache/g6lc_l2_top.sv"
+  "$ROOT/$L2TB_RTL/l2_cache/g6lc_l2_pkg.sv"
+  "$ROOT/$L2TB_RTL/l2_cache/g6lc_l2_tag.sv"
+  "$ROOT/$L2TB_RTL/l2_cache/g6lc_l2_data.sv"
+  "$ROOT/$L2TB_RTL/l2_cache/g6lc_l2_mshr.sv"
+  "$ROOT/$L2TB_RTL/l2_cache/g6lc_l2_wtrk.sv"
+  "$ROOT/$L2TB_RTL/l2_cache/g6lc_l2_pf.sv"
+  "$ROOT/$L2TB_RTL/l2_cache/g6lc_l2_top.sv"
   "$ROOT/verif/tb/l2/tb_g6lc_l2.sv"
 )
 target="${TARGET_CFG:-g6lc64_smt2}"
@@ -294,8 +298,8 @@ if [[ "${L2TB_MODE:-sim}" == units ]]; then
     -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM \
     "$ROOT/verif/tb/l2/tb_g6lc_l2.vlt" \
     "$ROOT/vendor/pulp-platform/tech_cells_generic/src/rtl/tc_sram.sv" \
-    "$ROOT/corev_apu/l2_cache/g6lc_l2_data.sv" \
-    "$ROOT/corev_apu/l2_cache/g6lc_l2_mshr.sv" \
+    "$ROOT/$L2TB_RTL/l2_cache/g6lc_l2_data.sv" \
+    "$ROOT/$L2TB_RTL/l2_cache/g6lc_l2_mshr.sv" \
     "$ROOT/verif/tb/l2/tb_g6lc_l2_units.sv" \
     --top-module tb_g6lc_l2_units \
     -Mdir "$OUT" -o tb_g6lc_l2_units 2>&1 | tee "$OUT/build.log"
@@ -318,7 +322,7 @@ if [[ "${L2TB_MODE:-sim}" == pf ]]; then
   # candidate slips into the reserve window (L2PF_RESERVE).
   case "${L2TB_PF_MUT:-}" in
     noreserve)
-      top_mut="$ROOT/corev_apu/l2_cache/g6lc_l2_top.sv"
+      top_mut="$ROOT/$L2TB_RTL/l2_cache/g6lc_l2_top.sv"
       grep -qF "(mshr_count < (MSHR_W + 1)'(MSHR_DEPTH - PF_MSHR_RESERVE))" "$top_mut" ||
         { echo "[l2-tb] PF_MUT site changed" >&2; exit 2; }
       sed -i "s|(MSHR_W + 1)'(MSHR_DEPTH - PF_MSHR_RESERVE)|(MSHR_W + 1)'(MSHR_DEPTH)|" "$top_mut"
@@ -326,7 +330,7 @@ if [[ "${L2TB_MODE:-sim}" == pf ]]; then
     earlyarm)
       # N3: drop the two-confirmation confidence rule — arms on the first
       # confirmed delta; the A1/A4 L2PF_EARLY_CAND checks must fire.
-      pf_mut="$ROOT/corev_apu/l2_cache/g6lc_l2_pf.sv"
+      pf_mut="$ROOT/$L2TB_RTL/l2_cache/g6lc_l2_pf.sv"
       grep -qF "st_q[train_hit_idx].conf >= 2'd1" "$pf_mut" ||
         { echo "[l2-tb] PF_MUT site changed" >&2; exit 2; }
       sed -i "s|st_q\[train_hit_idx\].conf >= 2'd1|train_hit|" "$pf_mut"
@@ -334,7 +338,7 @@ if [[ "${L2TB_MODE:-sim}" == pf ]]; then
     noquiet)
       # N3: remove the quiet window entirely (refill + withhold) — the A1
       # L2PF_QUIET_BREAK check must fire.
-      pf_mut="$ROOT/corev_apu/l2_cache/g6lc_l2_pf.sv"
+      pf_mut="$ROOT/$L2TB_RTL/l2_cache/g6lc_l2_pf.sv"
       grep -qF "(quiet_d == '0)" "$pf_mut" && grep -qF "(quiet_q == '0)" "$pf_mut" ||
         { echo "[l2-tb] PF_MUT site changed" >&2; exit 2; }
       sed -i "s|&& (quiet_d == '0)||; s|&& (quiet_q == '0)||" "$pf_mut"
@@ -342,7 +346,7 @@ if [[ "${L2TB_MODE:-sim}" == pf ]]; then
     maxcap)
       # N3: arm the full PF_DISTANCE burst again — the per-arm candidate
       # cap is gone; an A1/A4 L2PF_EXTRA_CAND check must fire.
-      pf_mut="$ROOT/corev_apu/l2_cache/g6lc_l2_pf.sv"
+      pf_mut="$ROOT/$L2TB_RTL/l2_cache/g6lc_l2_pf.sv"
       grep -qF "PW'(PEND_CAP)" "$pf_mut" ||
         { echo "[l2-tb] PF_MUT site changed" >&2; exit 2; }
       sed -i "s|PW'(PEND_CAP)|PW'(PF_DISTANCE)|" "$pf_mut"

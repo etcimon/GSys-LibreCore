@@ -59,7 +59,7 @@ module g6lc_ara_lint_top
       .l3_miss_i        (1'b0),
       .pf_issue_i       (1'b0),
       .pf_train_i       (1'b0),
-    .l2_pf_issue_i(1'b0), .l2_pf_useful_i(1'b0),
+    .l2_pf_issue_i(1'b0), .l2_pf_useful_i(1'b0), .coh_sf_filtered_i(1'b0), .coh_sf_broadcast_i(1'b0),
       .l2_pwhold_i      (1'b0),
       .l3_pwhold_i      (1'b0),
       .ai_sb_enq_valid_o      (),

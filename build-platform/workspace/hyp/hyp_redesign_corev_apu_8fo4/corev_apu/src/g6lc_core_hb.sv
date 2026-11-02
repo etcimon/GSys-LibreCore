@@ -60,6 +60,9 @@ module g6lc_core_hb
   input  logic                         l3_pwhold_i,
   input  logic                         l2_pf_issue_i,
   input  logic                         l2_pf_useful_i,
+  // Hub snoop-filter effectiveness (PMU group-2 indices 11/12)
+  input  logic                         coh_sf_filtered_i,
+  input  logic                         coh_sf_broadcast_i,
   output logic                         ai_sb_enq_valid_o,
   input  logic                         ai_sb_enq_ready_i,
   input  logic [31:0]                  ai_sb_enq_ticket_i,
@@ -116,7 +119,7 @@ module g6lc_core_hb
       .l2_pwhold_i,
       .l3_pwhold_i,
       .l2_pf_issue_i,
-      .l2_pf_useful_i,
+      .l2_pf_useful_i, .coh_sf_filtered_i, .coh_sf_broadcast_i,
       .ai_sb_enq_valid_o,
       .ai_sb_enq_ready_i,
       .ai_sb_enq_ticket_i,

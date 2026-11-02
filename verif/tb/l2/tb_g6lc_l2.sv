@@ -1501,7 +1501,11 @@ module tb_g6lc_l2_config;
     config_pkg::cva6_cfg_t changed;
     config_pkg::cva6_user_cfg_t user_cfg;
     int bad_cfg;
-    if (Cfg.L2RoundRobinEn || cva6_config_pkg::cva6_cfg.L2RoundRobinEn)
+    // Production rule: the LLC round-robin victim is on exactly where the L2
+    // sees cacheable WT data traffic (L2En && WtAxiAllocEn); elsewhere the
+    // L2 only serves bypass/I$ traffic and the metadata RAM buys nothing.
+    if (Cfg.L2RoundRobinEn != (Cfg.L2En && Cfg.WtAxiAllocEn) ||
+        Cfg.L2RoundRobinEn != cva6_config_pkg::cva6_cfg.L2RoundRobinEn)
       $fatal(1, "production replacement default changed");
     user_cfg = cva6_config_pkg::cva6_cfg;
     user_cfg.L2En = 1; user_cfg.L2RoundRobinEn = 1;

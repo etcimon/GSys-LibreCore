@@ -33,6 +33,20 @@ build and regression flow from a single top-level `.config.ts`.
 
 ## Verilator of record (since 2026-10-13): the g6lc fork, split-loops `.vlt`, multi-threaded
 
+- **hyp8 harness (2026-11-02).** `verif/regress/remote/hyp8/hyp8-build-harness.sh` now resolves
+  the fork prefix like the soft-ladder harness (explicit `VLT_HOME` with a `verilator_bin`, else
+  `workspace/tooling/verilator-g6lc`, `VERILATOR_INSTALL_DIR`, the builder prefix with `runtime/`)
+  and, on the fork, applies `build-platform/scripts/verilator-split-loops.vlt` rewritten for the
+  hyp module names (`cva6`→`g6lc_core`, `cva6_hpdcache_*`→`g6lc_hpdcache_*`) plus `--stats`, so a
+  `--threads N` build gets unroll-before-split with real `split_var` targets (the fork runs
+  `V3Unroll` before `V3SplitVar` unconditionally). Knobs: `HYP8_BUILD_SPLIT_VLT=0|1`,
+  `HYP8_BUILD_VERILATE_ONLY=1`. `run_vlt_pgo.py VLT_PGO_MODE=verilate` prints the census.
+- **PGO of the compiler binary** (`install-verilator-g6lc.sh VLT_PGO=1`): pass 1 installs into
+  `$PREFIX.pgo-train` (with its own `runtime/`), trains on an MT `g6lc64_hyp8_mc` verilation
+  through the hyp8 harness (`VLT_PGO_TRAIN_TARGET`, `VLT_PGO_TRAIN_THREADS`), drops configure's
+  conftest profiles (they made pass-2 configure fail `-Werror=coverage-mismatch`), then pass 2
+  installs into `$PREFIX`. Remote launcher: `run_vlt_pgo.py` (detached; poll `install.log`).
+
 - **Default flavour `g6lc`** (`toolchain.verilatorFlavour` in `.config.ts`, env
   `SOFT_LADDER_VERILATOR_FLAVOUR`, installer `VERILATOR_FLAVOUR`): the LibreCore fork pinned
   as the submodule `tools/verilator` (v5.008 + the compiler work recorded in

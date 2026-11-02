@@ -367,7 +367,16 @@ package build_config_pkg;
       cfg.NrCores = config_pkg::G6LC_MAX_CORES;
     else
       cfg.NrCores = G6LCCfg.NrCores;
-    cfg.CohPolicy = G6LCCfg.CohPolicy;
+    // An out-of-order multi-core cluster always runs the OoO coherence
+    // protocol: the package value is overridden whenever the hub exists
+    // (NrCores > 1) behind OoO cores with the WT L1 the protocol is defined
+    // for. check_cfg still enforces the rest of the COH_OOO envelope (L2En,
+    // equal I/D line widths), so an OoO multi-core package outside it fails
+    // elaboration instead of silently running FILTERED. Documented exemption:
+    // HPDCACHE_WT L1s are not in the COH_OOO envelope and keep their package
+    // policy. Single-core keeps its value (no hub).
+    cfg.CohPolicy = (G6LCCfg.OoOEn && cfg.NrCores > 1 && G6LCCfg.DCacheType == config_pkg::WT)
+                        ? config_pkg::COH_OOO : G6LCCfg.CohPolicy;
     cfg.SnoopFilterEn = G6LCCfg.SnoopFilterEn;
     cfg.SnoopFilterEntries = G6LCCfg.SnoopFilterEntries;
     // Multi-core defaults when depths left zero.
@@ -513,6 +522,7 @@ package build_config_pkg;
     // T9b posted writes: 0 means "auto" (4-entry trackers), matching the
     // other geometry fields' convention.
     cfg.L2PostedWriteEn = G6LCCfg.L2PostedWriteEn;
+    cfg.CohEvictNotifyEn = 1'b0;  // staged: no L1 eviction sideband yet
     cfg.L2WriteTrackDepth =
         (G6LCCfg.L2WriteTrackDepth != 0) ? G6LCCfg.L2WriteTrackDepth : 4;
     cfg.L2ReadTrackDepth =

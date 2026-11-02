@@ -243,14 +243,14 @@ L2En: bit'(1),  // hyp8-mc: always on (4-core shared L2/L3)
       L2LineWidth: unsigned'(512),
       L2MshrDepth: unsigned'(2),
       L2DataBanks: unsigned'(4),
-      L2RoundRobinEn: bit'(0),
+      L2RoundRobinEn: bit'(1),  // LLC (L2 + L3) round-robin victim: WT data traffic is cacheable here (WtAxiAllocEn)
       NrHarts: unsigned'(G6LCConfigNrHarts),
       SmtPolicy: config_pkg::SMT_HYBRID,
       SmtFetchQuantum: unsigned'(4),
       SmtStarveLimit: unsigned'(16),
       CoreSleepGate: bit'(0),
       NrCores: unsigned'(4),  // hyp8-mc
-      CohPolicy: config_pkg::COH_FILTERED,
+      CohPolicy: config_pkg::COH_OOO,  // hyp8-mc: OoO multi-core WT (also derived by build_config)
       SnoopFilterEn: bit'(1),  // hyp8-mc: hub snoop filter on
       SnoopFilterEntries: unsigned'(0),  // auto -> 64xNrCores
       CohInvalDepth: unsigned'(4),

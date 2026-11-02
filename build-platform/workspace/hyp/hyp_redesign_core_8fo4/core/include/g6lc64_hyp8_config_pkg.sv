@@ -246,7 +246,7 @@ package g6lc_config_pkg;
       L2LineWidth: unsigned'(512),
       L2MshrDepth: unsigned'(2),
       L2DataBanks: unsigned'(4),
-      L2RoundRobinEn: bit'(0),
+      L2RoundRobinEn: bit'(1),  // LLC (L2 + L3) round-robin victim: WT data traffic is cacheable here (WtAxiAllocEn)
 `else
       L2En: bit'(0),
       L2ByteSize: unsigned'(0),

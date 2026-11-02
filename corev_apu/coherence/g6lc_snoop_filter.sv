@@ -31,6 +31,15 @@ module g6lc_snoop_filter
     input  logic [ADDR_WIDTH-1:0]      clear_addr_i,
     input  logic [$clog2(NR_CORES > 1 ? NR_CORES : 2)-1:0] clear_core_i,
     input  logic                       clear_all_i,  // full SF wipe (global fence)
+    // Delivered invalidations (hub -> core c handshake). The entry for the
+    // line loses core c; inv_clear_all_i[c] (an all_ways D$ invalidation)
+    // removes core c from every entry. Sound: a core handed an invalidation
+    // of a line no longer holds it once it applies it, and the hub holds the
+    // delivery back while a fill of that line for that core is in flight
+    // (inv_fill_hold), so the fill is invalidated after it lands.
+    input  logic [NR_CORES-1:0]                 inv_clear_valid_i,
+    input  logic [NR_CORES-1:0]                 inv_clear_all_i,
+    input  logic [NR_CORES-1:0][ADDR_WIDTH-1:0] inv_clear_addr_i,
     // Lookup: which cores might hold this line?
     input  logic                       lookup_valid_i,
     input  logic [ADDR_WIDTH-1:0]      lookup_addr_i,
@@ -100,10 +109,6 @@ module g6lc_snoop_filter
     // is sound); that needs an invalidation source in the hub and is recorded as
     // follow-up rather than bundled here.
     logic [NC-1:0] install_present;
-    always_comb begin
-      install_present = '0;
-      if (mem_q[al_idx].valid) install_present = {NC{1'b1}};
-    end
 
     assign lu_idx = idx_of(lookup_addr_i);
     assign lu_tag = tag_of(lookup_addr_i);
@@ -124,18 +129,37 @@ module g6lc_snoop_filter
       end
     end
 
+    // An entry whose sharers have all been cleared stays VALID with an empty
+    // set: its index may still have forgotten displaced lines, and only a
+    // valid entry makes a later install of a different tag report everyone.
+    // (Invalidating it, as the single clear port used to, would let such a
+    // line come back as precise.)
     always_comb begin
       mem_d = mem_q;
+      install_present = '0;
 
       if (clear_all_i) begin
         for (int unsigned i = 0; i < NE; i++) mem_d[i].valid = 1'b0;
       end else begin
+        // Delivered invalidations first, so a same-cycle allocation by the
+        // same core (a refetch of the line) wins and its bit survives.
+        for (int unsigned c = 0; c < NC; c++) begin
+          if (inv_clear_valid_i[c]) begin
+            if (inv_clear_all_i[c]) begin
+              for (int unsigned i = 0; i < NE; i++) mem_d[i].present[c] = 1'b0;
+            end else if (mem_q[idx_of(inv_clear_addr_i[c])].valid &&
+                         mem_q[idx_of(inv_clear_addr_i[c])].tag == tag_of(inv_clear_addr_i[c])) begin
+              mem_d[idx_of(inv_clear_addr_i[c])].present[c] = 1'b0;
+            end
+          end
+        end
         // Alloc / update presence
         if (alloc_valid_i) begin
-          if (mem_q[al_idx].valid && mem_q[al_idx].tag == al_tag) begin
+          if (mem_d[al_idx].valid && mem_d[al_idx].tag == al_tag) begin
             mem_d[al_idx].present[alloc_core_i] = 1'b1;
           end else begin
             // Install (replace on conflict — over-approx until refilled)
+            if (mem_d[al_idx].valid) install_present = {NC{1'b1}};
             mem_d[al_idx].valid                 = 1'b1;
             mem_d[al_idx].tag                   = al_tag;
             mem_d[al_idx].present               = install_present;
@@ -144,9 +168,8 @@ module g6lc_snoop_filter
         end
         // Clear one core's presence
         if (clear_valid_i) begin
-          if (mem_q[cl_idx].valid && mem_q[cl_idx].tag == cl_tag) begin
+          if (mem_d[cl_idx].valid && mem_d[cl_idx].tag == cl_tag) begin
             mem_d[cl_idx].present[clear_core_i] = 1'b0;
-            if (mem_d[cl_idx].present == '0) mem_d[cl_idx].valid = 1'b0;
           end
         end
       end
