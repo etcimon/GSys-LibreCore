@@ -777,7 +777,10 @@ module g6lc_core
   // --------------
   // ID <-> COMMIT
   // --------------
-  scoreboard_entry_t [G6LCCfg.NrCommitPorts-1:0] commit_instr_id_commit;
+  // public_flat_rd: the hyp8 harness (hyp8_tb.cpp) reads the committing
+  // instructions for its commit trace; keeps the signal (and its name)
+  // through Verilator optimisation. Simulation-only metacomment.
+  scoreboard_entry_t [G6LCCfg.NrCommitPorts-1:0] commit_instr_id_commit /*verilator public_flat_rd*/;
   logic [G6LCCfg.NrCommitPorts-1:0] commit_drop_id_commit;
   logic [G6LCCfg.NrCommitPorts-1:0] commit_replay_id_commit;
   logic [G6LCCfg.NrCommitPorts-1:0] commit_ack_commit_id;
@@ -5106,6 +5109,10 @@ assign irq_active = irq_i[smt_active_hart];
   // the [smt-flow] alloc/retire lines. Covers the whole commit -> bank-eret
   // -> controller-flush -> redirect / peer-restart -> fetch-frontier chain
   // plus every scoreboard slot carrying the suspect PC.
+// G6LC_SIM_NO_HIER_TRACE (opt-in, set by hyp8-build-harness.sh for split-loops
+// builds): compiles out this cross-module debug trace. Its dot references
+// stop Verilator split_var on the referenced variables. Sim-only.
+`ifndef G6LC_SIM_NO_HIER_TRACE
   if (G6LCCfg.NrHarts > 1 && !G6LCCfg.SmtDrainedHandoff) begin : gen_smt_dup_trace
     bit smt_dup_trace;
     int unsigned dup_lo, dup_hi;
@@ -5247,6 +5254,7 @@ assign irq_active = irq_i[smt_active_hart];
       end
     end
   end
+`endif  // G6LC_SIM_NO_HIER_TRACE
 `endif
 
   // T16 diagnostic probe (+ld_trace): where does the 4th consumed L1-missing
@@ -5382,6 +5390,10 @@ assign irq_active = irq_i[smt_active_hart];
       end
     end
   end
+// G6LC_SIM_NO_HIER_TRACE (opt-in, set by hyp8-build-harness.sh for split-loops
+// builds): compiles out this cross-module debug trace. Its dot references
+// stop Verilator split_var on the referenced variables. Sim-only.
+`ifndef G6LC_SIM_NO_HIER_TRACE
   if (G6LCCfg.DCacheType == config_pkg::HPDCACHE_WT ||
       G6LCCfg.DCacheType == config_pkg::HPDCACHE_WB ||
       G6LCCfg.DCacheType == config_pkg::HPDCACHE_WT_WB) begin : gen_ld_trace_hpd
@@ -5495,6 +5507,7 @@ assign irq_active = irq_i[smt_active_hart];
       end
     end
   end
+`endif  // G6LC_SIM_NO_HIER_TRACE
 
   // T20 diagnostic probe (+hpd_trace): HPDCACHE replay-table anatomy behind
   // the core-0 wedge of ooocoh-t19-server-osbi-48M (`rtab v=1111 full=1` with
@@ -5534,6 +5547,10 @@ assign irq_active = irq_i[smt_active_hart];
     if (!rst_ni) hpd_cycle = 0;
     else hpd_cycle = hpd_cycle + 1;
   end
+// G6LC_SIM_NO_HIER_TRACE (opt-in, set by hyp8-build-harness.sh for split-loops
+// builds): compiles out this cross-module debug trace. Its dot references
+// stop Verilator split_var on the referenced variables. Sim-only.
+`ifndef G6LC_SIM_NO_HIER_TRACE
   if (G6LCCfg.DCacheType == config_pkg::HPDCACHE_WT ||
       G6LCCfg.DCacheType == config_pkg::HPDCACHE_WB ||
       G6LCCfg.DCacheType == config_pkg::HPDCACHE_WT_WB) begin : gen_hpd_trace
@@ -5844,6 +5861,7 @@ assign irq_active = irq_i[smt_active_hart];
 `undef HPDT_LDA
 `undef HPDT_LDU
   end
+`endif  // G6LC_SIM_NO_HIER_TRACE
 
   // T20 diagnostic probe (+win_trace): the whole fetch-window lifecycle around
   // a mispredict, for the hart-5 wrong-path commit of ooocoh-t19-server-osbi-48M
@@ -5926,6 +5944,10 @@ assign irq_active = irq_i[smt_active_hart];
     end
   end
 `ifdef G6LC_FETCH_B
+// G6LC_SIM_NO_HIER_TRACE (opt-in, set by hyp8-build-harness.sh for split-loops
+// builds): compiles out this cross-module debug trace. Its dot references
+// stop Verilator split_var on the referenced variables. Sim-only.
+`ifndef G6LC_SIM_NO_HIER_TRACE
   if (G6LCCfg.FtqDepth != 0) begin : gen_win_trace
     localparam int unsigned WIN_NH = (G6LCCfg.NrHarts < 1) ? 1 : G6LCCfg.NrHarts;
     logic win_on, win_cf_hold_q;
@@ -6317,6 +6339,7 @@ assign irq_active = irq_i[smt_active_hart];
       end
     end
   end
+`endif  // G6LC_SIM_NO_HIER_TRACE
 `endif
 
   initial begin

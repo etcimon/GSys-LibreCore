@@ -24,6 +24,8 @@
 # cva6_hpdcache_* -> g6lc_hpdcache_*); --stats records the split census.
 #   HYP8_BUILD_SPLIT_VLT=0|1      default 1 on the g6lc flavour, 0 on pinned
 #   HYP8_BUILD_VERILATE_ONLY=1    stop after verilation (PGO training workload)
+#   HYP8_BUILD_HIER_TRACE=0|1     split builds define G6LC_SIM_NO_HIER_TRACE
+#                                 (cross-module debug traces out) unless 1
 
 set -euo pipefail
 
@@ -202,6 +204,14 @@ if [[ "$SPLIT_VLT_ON" == "1" ]]; then
       -e 's/-module "cva6_hpdcache_wrapper"/-module "g6lc_hpdcache_wrapper"/' \
       "$SPLIT_VLT_SRC" > "$SPLIT_VLT"
   SPLIT_ARGS=("$SPLIT_VLT" --stats)
+  # Cross-module debug traces (+smt_dup_trace, +ld_trace HPD lines, +hpd_trace,
+  # +win_trace, the HPDCACHE phantom/zombie witness) read variables by hierarchical path,
+  # which makes V3SplitVar refuse them. Split builds compile those traces out
+  # unless HYP8_BUILD_HIER_TRACE=1 keeps them.
+  if [[ "${HYP8_BUILD_HIER_TRACE:-0}" != "1" ]]; then
+    SPLIT_ARGS+=(+define+G6LC_SIM_NO_HIER_TRACE)
+    log "hierarchical debug traces: compiled out (HYP8_BUILD_HIER_TRACE=1 keeps them)"
+  fi
   log "split-loops .vlt: on ($(grep -c '^split_var' "$SPLIT_VLT") split_var entries, hyp module names) -> $SPLIT_VLT"
 else
   log "split-loops .vlt: off"

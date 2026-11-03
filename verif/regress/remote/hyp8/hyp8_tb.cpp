@@ -989,7 +989,10 @@ done_processing:
           // padded slice from lo then hits bp.predict_address (shared
           // address-FIFO head, e.g. 0x80012888) before sbe.pc (0x80012990).
           // Derive sbe_w from mem_q: 32 × {issued,cancelled,replay,is_rd_fpr_flag,sbe} (hyp NR_SB_ENTRIES=32; sb_mem_t: 4 flag bits).
-          const auto &ci = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(__Vcellinp__i_g6lc_rvfi_probes__commit_instr_i);
+          // The module-level signal, not the rvfi_probes cell-input copy
+          // (__Vcellinp__…): whether that copy exists depends on inlining
+          // (it does not on the 4-core, --threads 4 hyp8_mc model).
+          const auto &ci = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(commit_instr_id_commit);
           const auto &mq_w = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
               issue_stage_i__DOT__i_scoreboard__DOT__i_sb_lifecycle__DOT__mem_q);
           int mwords_w = (int)(sizeof(mq_w) / sizeof(mq_w[0]));

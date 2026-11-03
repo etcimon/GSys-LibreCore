@@ -296,6 +296,34 @@ AI island / ai-matrix FO4 program (2026-10-26/27, hyp tree of record `build-plat
 - [ ] hyp8 harness: split-loops `.vlt` (hyp renames) + `--stats` on the fork; PGO training
       now an MT `g6lc64_hyp8_mc` verilation. The PGO prefix `verilator-v5.008-g6lc-pgo`
       (fork f7fa715, header `e900ec45…`) is not in the runners' qualified tables yet.
+- [ ] **Fork regression, blocks PGO measurement and f7fa715 on hyp8_mc:** the
+      `tools/verilator` pin `f7fa715` crashes verilating `g6lc64_hyp8_mc` with
+      `V3DfgPeephole.cpp:761 OOPS` (full-width `DfgSel` with lsb != 0) at
+      `hyp .../core/ooo/g6lc_rename_recover.sv:362` (`t1_wr_s`, a generate-filled
+      packed vector). Same crash in the non-PGO instrumented pass-1 build (training) and
+      the PGO build; the qualified prefix `706fb1cd7` verilates the same tree (rc=0,
+      6,052 s wall / 6,018 s user, 59 GiB max RSS, A/B tag `hyp8-pgo-ab-base`). So it is a
+      fork regression in `706fb1cd7..f7fa715` (17 commits; DFG-touching suspect
+      `589bb8c7c` "merge adjacent constant part-select drivers"), not PGO. The PGO
+      run had already spent 6,292 s when it reached the crash, so there is no
+      end-to-end PGO number.
+      **Root cause found and fixed in the fork (local commit `1856fe1b1`, not pushed):**
+      `SplitPackedVarVisitor` visited AstSel/AstVarRef pointers collected before the
+      unpacked split; `RefsInModule::stillLinked()` followed `backp()` through freed
+      nodes (use-after-free). Standalone `g6lc_rename_recover` at the hyp8_mc geometry:
+      unfixed binaries spend 80+ min in SplitVar then OOPS/SIGSEGV; the fixed binary
+      verilates it in 130 s (rc=0, same 7 refusals). Second defect in the same repro:
+      `V3Begin::renameAndStaticsRecurse` recursed per sibling and overflowed an 8 MiB
+      stack (the harness hides it with `ulimit -s unlimited`); now a loop.
+      Remaining: push the fork, move the `tools/verilator` pin, rebuild the PGO prefix
+      from the fixed source, rerun the hyp8_mc A/B (`hyp8-pgo-ab-base` 6,052 s is the
+      qualified-prefix baseline), then qualify.
+- [x] hyp8 split builds fence cross-module debug traces (`G6LC_SIM_NO_HIER_TRACE`,
+      set by `hyp8-build-harness.sh` unless `HYP8_BUILD_HIER_TRACE=1`): +smt_dup_trace,
+      +ld_trace HPD lines, +hpd_trace, +win_trace, and the HPDCACHE phantom/zombie witness.
+      Before the +hpd_trace fence, refusals went 14 -> 12; the remaining dot-reference
+      refusals were all in +hpd_trace, which is now fenced too (expect 6: 2 dynamic-index
+      `csr_*_b`, 4 one-bit `rr_arb_tree` nodes).
 - [ ] hyp-tree-specific split_var candidates (renamed/new modules: `g6lc_iq_bank`, LSQ
       leaves) from `--report-unoptflat` on the MC model (`vlt_autosplit.py`).
 - [ ] MC still raises the r98 `$error`s (LSQ store entries vs `ooo_spec_store_depth`;

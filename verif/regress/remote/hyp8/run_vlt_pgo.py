@@ -23,6 +23,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import resource
 import subprocess
 import time
 
@@ -41,15 +42,20 @@ def verilate(root, out):
                SOFT_LADDER_VERILATOR_THREADS=os.environ.get('HYP8_THREADS', '4'),
                SOFT_LADDER_VERLIB=str(mdir), HYP8_BUILD_VERILATE_ONLY='1')
     t0 = time.time()
+    ru0 = resource.getrusage(resource.RUSAGE_CHILDREN)
     with (out / 'harness.log').open('w') as fh:
         rc = subprocess.run(['bash', 'verif/regress/remote/hyp8/hyp8-build-harness.sh', 'hyp8'],
                             cwd=str(root), env=env, stdout=fh, stderr=subprocess.STDOUT).returncode
+    ru1 = resource.getrusage(resource.RUSAGE_CHILDREN)
+    cpu = {'userSeconds': round(ru1.ru_utime - ru0.ru_utime, 1),
+           'sysSeconds': round(ru1.ru_stime - ru0.ru_stime, 1),
+           'maxRssMiB': round(ru1.ru_maxrss / 1024, 1)}
     stats = mdir / 'Vg6lc_testharness__stats.txt'
     keep = ('SplitVar', 'Unroll', 'MTask', 'Threads', 'Optimizations, Split', 'Scheduling')
     census = [l.rstrip() for l in stats.read_text(errors='replace').splitlines()
               if any(k in l for k in keep)] if stats.is_file() else []
     build_log = (mdir / 'build.log').read_text(errors='replace') if (mdir / 'build.log').is_file() else ''
-    record = {'rc': rc, 'seconds': round(time.time() - t0, 1), 'vltHome': home,
+    record = {'rc': rc, 'seconds': round(time.time() - t0, 1), **cpu, 'vltHome': home,
               'verilatorBinSha256': digest(f'{home}/bin/verilator_bin'),
               'target': env['SOFT_LADDER_BUILD_TARGET'],
               'threads': env['SOFT_LADDER_VERILATOR_THREADS'],
@@ -61,6 +67,36 @@ def verilate(root, out):
     print((out / 'harness.log').read_text(errors='replace')[-4000:])
     print('HYP8_MT_VERILATE ' + json.dumps(record))
     return rc
+
+
+def build(root, out):
+    """VLT_PGO_MODE=build: full harness build (verilate + C++), detached.
+    Poll TH_OUT_DIR/build.log and TH_OUT_DIR/exit-code; the model lands in
+    TH_OUT_DIR/mdir/Variane_testharness."""
+    home = os.environ.get('VLT_HOME', '/opt/testharness/toolchains/verilator-v5.008-g6lc')
+    vroot = f'{home}/runtime' if Path(f'{home}/runtime').is_dir() else f'{home}/share/verilator'
+    env = dict(os.environ, CVA6_REPO_DIR=str(root), VERILATOR_FLAVOUR='g6lc',
+               VLT_HOME=home, VERILATOR_ROOT=vroot,
+               SOFT_LADDER_BUILD_TARGET=os.environ.get('HYP8_TARGET', 'g6lc64_hyp8_mc'),
+               SOFT_LADDER_VERILATOR_THREADS=os.environ.get('HYP8_THREADS', '4'),
+               SOFT_LADDER_BUILD_JOBS=os.environ.get('JOBS', '4'),
+               SOFT_LADDER_VERLIB=str(out / 'mdir'),
+               SPIKE_INSTALL_DIR=os.environ.get('SPIKE_INSTALL_DIR', '/opt/testharness/toolchains/spike'),
+               RISCV=os.environ.get('RISCV', '/opt/testharness/toolchains/xpack-riscv-none-elf-gcc-14.2.0-3'))
+    log, rc_file = out / 'build.log', out / 'exit-code'
+    cmd = ['bash', '-c', f'bash verif/regress/remote/hyp8/hyp8-build-harness.sh hyp8 > {log} 2>&1; echo $? > {rc_file}']
+    proc = subprocess.Popen(cmd, env=env, cwd=str(root), stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            start_new_session=True)
+    record = {'pid': proc.pid, 'mode': 'build', 'vltHome': home,
+              'verilatorBinSha256': digest(f'{home}/bin/verilator_bin'),
+              'target': env['SOFT_LADDER_BUILD_TARGET'],
+              'threads': env['SOFT_LADDER_VERILATOR_THREADS'],
+              'jobs': env['SOFT_LADDER_BUILD_JOBS'], 'closure': str(root),
+              'log': str(log), 'exitCodeFile': str(rc_file)}
+    (out / 'launch.json').write_text(json.dumps(record, indent=2))
+    print('HYP8_BUILD_LAUNCHED ' + json.dumps(record))
+    return 0
 
 
 def main():
@@ -76,6 +112,8 @@ def main():
 
     if os.environ.get('VLT_PGO_MODE') == 'verilate':
         return verilate(root, out)
+    if os.environ.get('VLT_PGO_MODE') == 'build':
+        return build(root, out)
 
     src = os.environ.get('VLT_SRC', '/opt/testharness/src/verilator-g6lc-pgo-src')
     prefix = os.environ.get('VLT_PREFIX',

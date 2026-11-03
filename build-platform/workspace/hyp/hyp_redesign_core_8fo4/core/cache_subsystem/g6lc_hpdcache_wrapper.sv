@@ -415,6 +415,10 @@ module g6lc_hpdcache_wrapper
   //  }}}
 
   //pragma translate_off
+// G6LC_SIM_NO_HIER_TRACE (opt-in, set by hyp8-build-harness.sh for split-loops
+// builds): compiles out this cross-module debug trace. Its dot references
+// stop Verilator split_var on the referenced variables. Sim-only.
+`ifndef G6LC_SIM_NO_HIER_TRACE
   // T19 witness (defect 2): the core arbiter grants a requester whose valid
   // is low — a PHANTOM request. hpdcache_fxarb latches its grant while the
   // pipeline is not ready (wait_q/gnt_q) and keeps presenting that port
@@ -478,6 +482,7 @@ module g6lc_hpdcache_wrapper
   final begin
     $display("[hpd-zombie] final zombie_dir_writes=%0d", hpd_zombie_cnt);
   end
+`endif  // G6LC_SIM_NO_HIER_TRACE
   //pragma translate_on
 
 endmodule : g6lc_hpdcache_wrapper
