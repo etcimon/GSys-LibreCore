@@ -1060,10 +1060,9 @@ module ariane_testharness #(
     .ch_w_beats_o ( dram_ch_w_beats )
   );
 
-  // Remote v5.008 cannot look up CVA6Cfg.DcacheLineWidth (struct member
-  // missing on the elaborated parameter). Use the target package constants.
-  localparam int unsigned L1D_LINE_B = cva6_config_pkg::CVA6ConfigDcacheLineWidth / 8;
-  localparam int unsigned L1I_LINE_B = cva6_config_pkg::CVA6ConfigIcacheLineWidth / 8;
+  // Cache geometry comes from the built configuration passed to this harness.
+  localparam int unsigned L1D_LINE_B = CVA6Cfg.DCACHE_LINE_WIDTH / 8;
+  localparam int unsigned L1I_LINE_B = CVA6Cfg.ICACHE_LINE_WIDTH / 8;
   localparam int unsigned L2_LINE_B  = unsigned'(64);
 
   // pragma translate_off

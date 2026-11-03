@@ -48,7 +48,6 @@ package cva6_config_pkg;
   localparam CVA6ConfigDcacheFlushOnFenceI = 1'b0;
   localparam CVA6ConfigDcacheInvalidateOnFlush = 1'b0;
 
-  localparam CVA6ConfigDcacheIdWidth = 1;
   // Stream ST→LD CRT (mc_stream_plane / fill≥160B) needs more in-flight store TXes
   // than the legacy embedded default (MemTidWidth=2 → only 4 TX slots). 4 → 16 TX.
   localparam CVA6ConfigMemTidWidth = 4;
@@ -64,6 +63,9 @@ package cva6_config_pkg;
   localparam CVA6ConfigNrStorePipeRegs = 0;
   // Match denser load verify after stream fill (was 2 — too tight under CRT).
   localparam CVA6ConfigNrLoadBufEntries = 8;
+  // Every live load-buffer slot must have a distinct cache request ID.
+  localparam CVA6ConfigDcacheIdWidth = (CVA6ConfigNrLoadBufEntries > 1)
+      ? $clog2(CVA6ConfigNrLoadBufEntries) : 1;
 
   localparam CVA6ConfigRASDepth = 2;
   localparam CVA6ConfigBTBEntries = 32;
