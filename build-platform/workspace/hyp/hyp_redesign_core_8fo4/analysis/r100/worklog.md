@@ -570,3 +570,24 @@ its complete RVFI stamp was **33836506**, and the UART had reached
 reported kernel error. PID 2644580 and its detached observer 2677910
 continue under the original 1B-cycle budget. Its live traces were
 neither compressed nor removed.
+
+### r114 progress and trace-off speed check
+
+At **2026-11-03 13:11:54 UTC** the r114 observer reported RVFI cycle
+**108950333**. The UART was still at the `Memory: 235848K/262144K
+available` line, the point where r113 began its long slab-freelist
+randomization interval. No userspace marker or kernel error was present.
+Measured r114 progress is roughly 2.2-2.6 thousand cycles per second, so
+its 1B-cycle budget corresponds to several days of wall time.
+
+`hyp8-osbi-scalar-r115` tested whether trace output was the limiter: the
+same r114 model and firmware with `+rvfi_notrace +core_notrace`. Its
+stall census matched r114 exactly at 2M and 4M cycles (deterministic
+replay), but it advanced 4M to 6M cycles in 901 s while r114 advanced
+114M to 116M in the same interval. Disabling trace writes gave no
+measurable speedup, so the duplicate run and its observer were stopped;
+the reason is recorded in its `output/STOPPED.txt`. Faster turnaround
+would need a different model build (for example without `-DVL_DEBUG` or
+the always-on equivalence checkers), which would be a new, separately
+identified model rather than this witness. r114 (PID 2644580, observer
+2677910) continues unchanged.
