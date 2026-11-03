@@ -760,15 +760,11 @@ xrun-check-benchmarks:
 
 xrun-ci: xrun-asm-tests xrun-amo-tests xrun-mul-tests xrun-fp-tests xrun-benchmarks
 
-# testharness C++: LibreCore soak-exit fork for g6lc* targets.
-# Override: make verilate TB_CPP=corev_apu/tb/ariane_tb.cpp
-ifeq ($(origin TB_CPP), undefined)
-  ifneq ($(findstring g6lc,$(target)),)
-    TB_CPP := corev_apu/tb/g6lc_tb.cpp
-  else
-    TB_CPP := corev_apu/tb/ariane_tb.cpp
-  endif
-endif
+# The shared SoC testharness uses i_dram_backend for every core target.
+# This harness follows that memory hierarchy and gates scalar/SMT probes
+# using the target-derived G6LC_TB_BANKED configuration above.
+# Override for a specialized backend: TB_CPP=corev_apu/tb/ariane_tb.cpp
+TB_CPP ?= corev_apu/tb/g6lc_tb.cpp
 
 # verilator-specific
 #
