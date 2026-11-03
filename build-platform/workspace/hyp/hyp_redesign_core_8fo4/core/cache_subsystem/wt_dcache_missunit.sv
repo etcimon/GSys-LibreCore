@@ -513,12 +513,11 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
     assign amoResult_LE = (amo_req_i.size == 2'b10) ? amoResult_32bitLE : amo_raw_q;
 
     // hyp8: registered formation step. The byte-order / sign-extend network is
-    // a wide cone hanging off the return packet; it is captured every cycle
-    // (free-running) and the AMO FSM presents the ack one state later in
-    // AMO_RESULT, where the registered value is selected. The same-cycle
-    // consumer inside p_rtrn_logic (AMO_SC pass/fail at the ATOMIC_ACK edge)
-    // keeps the live formation `amo_result_form` — the verdict cycle is
-    // unchanged, only the response presentation moves +1.
+    // a wide cone hanging off the return packet; the raw return word is
+    // captured at ATOMIC_ACK, the result is formed on the next edge, and the
+    // client response and SC retry verdict both read the registered value in
+    // AMO_RESULT two cycles after the return. A verdict taken at the ACK edge
+    // reads an older beat, not this response.
     logic [63:0] amo_result_form;
     logic [63:0] amo_result_q;
     assign amo_result_form = mbe_i ? amoResult_BE : amoResult_LE;
@@ -547,7 +546,8 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
     // r74 (caller purpose): amo_resp_o.ack is asserted only in AMO_RESULT
     // (registered formation) and AMO_CAS_ST_WAIT (cas_old_q); the consumer
     // samples result with ack, so the live formation never has to reach the
-    // output. The live cone stays on the internal SC verdict only.
+    // output. The SC retry verdict reads the same registered value in
+    // AMO_RESULT — no consumer reads the live formation.
     assign amo_resp_o.result = (state_q inside {AMO_CAS_ST, AMO_CAS_ST_WAIT})
                                    ? cas_old_q
                                    : amo_result_q;
@@ -595,6 +595,13 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
   ///////////////////////////////////////////////////////
 
   logic sc_fail, sc_pass, sc_backoff_over;
+  logic sc_result_valid;
+  // The retry policy consumes the same owned, registered SC result as the
+  // client. At ATOMIC_ACK the result register still belongs to an older beat.
+  assign sc_result_valid = G6LCCfg.RVA && (state_q == AMO_RESULT)
+                          && (amo_req_i.amo_op == AMO_SC);
+  assign sc_fail = sc_result_valid && (amo_resp_o.result != '0);
+  assign sc_pass = sc_result_valid && (amo_resp_o.result == '0);
   g6lc_hyp_exp_backoff #(
       .Seed  (3),
       .MaxExp(16)
@@ -641,8 +648,6 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
     cas_st_ack      = 1'b0;
     inv_vld         = 1'b0;
     inv_vld_all     = 1'b0;
-    sc_fail         = 1'b0;
-    sc_pass         = 1'b0;
     miss_rtrn_vld_o = '0;
     if (mem_rtrn_vld_i) begin
       unique case (mem_rtrn_i.rtype)
@@ -668,15 +673,6 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
           if (G6LCCfg.RVA) begin
             if (amo_req_q) begin
               amo_ack = 1'b1;
-              // need to set SC backoff counter if
-              // this op failed
-              if (amo_req_i.amo_op == AMO_SC) begin
-                if (amo_resp_o.result > 0) begin
-                  sc_fail = 1'b1;
-                end else begin
-                  sc_pass = 1'b1;
-                end
-              end
             end
           end
         end
@@ -915,9 +911,9 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
         if (G6LCCfg.RVA) begin
           amo_sel = 1'b1;
           if (amo_ack) begin
-            // hyp8: the result formation registers at this edge; the ack is
-            // presented in AMO_RESULT (+1 cycle). AMO depth-1 is preserved —
-            // the unit accepts no new AMO until IDLE.
+            // Capture the raw return at this edge, form it in
+            // AMO_RESULT_FORM, then present the owned result and retry
+            // verdict in AMO_RESULT. AMO depth-1 is preserved.
             state_d        = AMO_RESULT_FORM;
           end
         end
