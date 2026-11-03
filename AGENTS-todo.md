@@ -16347,8 +16347,13 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   mutation fails `G_BRANCH_OV1_TARGET`, scalar/SMT2/MC lint has zero errors
   and unchanged warning totals, and 11/11 whole-core smokes pass.
   RTL `a5fc9e4e6`, verification/flists/licensing `f943858cf`.
-  Continue `hyp8-osbi-scalar-r113` to `G6LC_LINUX_INIT_UP` and
-  `G6LC_LINUX_SHELL`, or diagnose its next concrete terminal failure.
+  `hyp8-osbi-scalar-r113` ended at its 300M-cycle limit (last RVFI
+  299999987), after the mount-cache tables but without either userspace
+  marker. Observer exit 4: incomplete, not a boot pass. Its two closed
+  traces are preserved as verified `.zst` archives; receipt
+  `remote-runs/hyp8-osbi-scalar-r113/output/compression-r113-final.json`
+  records the 15,301,837,868-byte logical storage reduction.
+  Continue the corrected r114 witness below.
 
 - Hyp8 r114: SC backoff read the previous formed result at the incoming
   memory-ACK edge. The verdict now follows the owned registered result in
@@ -16363,6 +16368,9 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   advancing at cycle 285042210 and r114 at 16784637, with neither marker.
   The model-log tails show no fatal assertion. Preserve the final UART
   and verdict; an ended process without both markers is not a boot pass.
+  Latest r114 observation: 2026-11-03 04:41:41 UTC, RVFI 33836506,
+  `Initmem setup node 0`, no markers or reported kernel error. PID
+  2644580 and remote observer 2677910 remain active under the 1B budget.
 
 - Canonical verification follow-up: harness selection fixed (`774f9cc6f`);
   the cv64 depth-8 load buffer now has a derived 3-bit cache ID; the shared

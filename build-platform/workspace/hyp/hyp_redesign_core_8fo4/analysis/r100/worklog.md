@@ -527,3 +527,46 @@ Reviewed commits: config/SV testbench `54528988c`, C++ diagnostic
 The licensing pass retained the upstream Solderpad/Apache notices and
 vendor headers verbatim; new workspace helper scripts carry the MIT
 header and Etienne Cimon attribution. No upstream file was relicensed.
+
+## r113 final outcome; r114 continues
+
+r113 consumed its full **300,000,000-cycle budget**. The final RVFI
+cycle stamp is **299999987**, and its observer exited **4**. The kernel
+advanced to the mount-cache and mountpoint-cache hash tables, with no
+kernel panic/Oops or fatal model assertion observed, but neither
+userspace marker appeared. Its outcome is **incomplete**.
+
+The harness's terminal line says
+`*** SUCCESS *** (tohost = 0) after 300000000 cycles [cycle budget reached: no tohost verdict]`.
+This reports completion of a bounded capture, not guest success or a
+Linux boot pass. The marker-based observer correctly kept those outcomes
+separate. No new RTL defect is established by this budget exhaustion,
+and the older model was not relaunched.
+
+After producer PID 2588789 had exited, the two r113 traces were archived
+with the lead-authored `r113-archive-traces.py`. Each archive's complete
+decode matched the source byte count and SHA256, with decoder exit 0
+and unchanged source fingerprints. Originals were retained until the
+receipt was reviewed; removal then required that exact receipt hash,
+unchanged source fingerprints and unchanged archive metadata.
+
+| Closed trace | Original bytes | Archive bytes |
+|---|---:|---:|
+| `trace_hart_0.dasm` | 5913670144 | 326313722 |
+| `trace_rvfi_hart_00.dasm` | 10744446039 | 1029964593 |
+
+The `.zst` archives contain **16,658,116,183** original bytes in
+**1,356,278,315** archive bytes, a logical storage reduction of
+**15,301,837,868 bytes**. The updated receipt, including per-file hashes,
+the reviewed receipt hash and removal flags, is
+`remote-runs/hyp8-osbi-scalar-r113/output/compression-r113-final.json`.
+The archives, final UART, model log, observer records and model remain
+preserved. Read archived traces through `zstd -dc`; do not repeat the
+derivation merely to reformat these recorded results.
+
+The corrected r114 witness remains active. At **2026-11-03 04:41:41 UTC**,
+its complete RVFI stamp was **33836506**, and the UART had reached
+`Initmem setup node 0`. Both userspace markers were absent, with no
+reported kernel error. PID 2644580 and its detached observer 2677910
+continue under the original 1B-cycle budget. Its live traces were
+neither compressed nor removed.
