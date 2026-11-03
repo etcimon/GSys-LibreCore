@@ -16179,3 +16179,17 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   RTL `a5fc9e4e6`, verification/flists/licensing `f943858cf`.
   Continue `hyp8-osbi-scalar-r113` to `G6LC_LINUX_INIT_UP` and
   `G6LC_LINUX_SHELL`, or diagnose its next concrete terminal failure.
+
+- Hyp8 r114: SC backoff read the previous formed result at the incoming
+  memory-ACK edge. The verdict now follows the owned registered result in
+  `AMO_RESULT`. Frozen r113 baseline fails `SC_D_SUCCESS_MASK`; corrected
+  focused leaf passes 44 checks, full D-cache leaf 334, and all 11 smokes
+  pass. Lint warning totals remain 602/623/688 with zero errors.
+  r113 has completed SLUB and progressed through IRQ/clock/console setup;
+  its LR stalls at cycle 245151461 were transient and motivated the
+  separate backoff investigation. Continue the corrected r114 model to
+  both userspace markers. Canonical repository verification has an open
+  ISS-step failure on `smoke-cv64a6`; synthesis/physical timing remain open.
+  Commits: RTL `a9c90bece`, tests/runner `5f6e3740b`. The canonical failure
+  is a C++ harness/model hierarchy mismatch in `ariane_tb.cpp`, not a
+  reported architectural mismatch from the remote hyp8 smokes.

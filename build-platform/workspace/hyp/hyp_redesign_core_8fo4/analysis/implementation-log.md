@@ -1,5 +1,13 @@
 # hyp8 implementation log — memory/PRF ownership repair
 
+Latest continuation (r114): SC retry backoff now consumes the owned
+registered result in AMO_RESULT (`a9c90bece`, tests `5f6e3740b`).
+The frozen baseline fails the new SC-success mask check; corrected remote
+leaves pass 44 focused / 334 D-cache checks and all 11 smokes pass.
+r113 has completed SLUB and reached IRQ/clock/console setup; the corrected
+r114 witness is running separately. Userspace and the canonical harness
+compatibility gate remain open. Details: `analysis/r100/worklog.md`.
+
 Current boot continuation (r113): the r112 LZC correction fixes the live
 kernel's zero-count/string defect, but r112 still panicked at `kmalloc-2k`.
 The r112diag window establishes a different mechanism: the BGE at

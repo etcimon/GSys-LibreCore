@@ -264,3 +264,101 @@ use different offsets; the latter records the branch at 51,446,577.
 These observations reject the arithmetic/operand and load-replay
 explanations for this event. They do not certify unrelated allocator
 or memory-order paths.
+
+### r113 boot progress beyond allocator creation
+
+The corrected frontier follows the allocator BGE to `0xffffffff8011ed20`
+instead of the erroneous fall-through. The witness passes the former
+percpu/kmalloc panic point and prints `SLUB: HWalign=64, Order=0-3,
+MinObjects=0, CPUs=1, Nodes=1` by RVFI cycle 247079205. By approximately
+262M cycles it has printed RCU setup, interrupt-controller setup,
+clocksource setup, console handover, delay calibration and `pid_max`.
+Neither userspace marker has been observed at that checkpoint.
+
+The long interval after `Memory:` was traced to
+`init_freelist_randomization` / `cache_random_seq_create`, whose
+Fisher–Yates loop calls `get_random_u32_below`. Successive cache pointers
+and decreasing shuffle counters establish progress at the sampled points.
+For example, a 512-entry sequence begins at 208312985, followed by distinct
+128- and 16-entry caches at 236827607 and 243915140. Cycle advancement
+alone is not evidence against a livelock.
+
+The 87 `[hang]` lines are three 29-line dumps at cycles 245151461,
+245152461 and 245153461. They show an LR.W at `0xffffffff8065f9ca`
+(`_raw_spin_trylock`) waiting with the D-cache miss unit in `AMO`, empty
+write buffer and no live MSHR. Later retirement and console progress show
+that this stall recovered. The source's LR retry-backoff gate motivated
+the investigation below; these dumps do not directly capture its counter
+or SC verdict. Local bounded artifacts are under
+`remote-runs/hyp8-osbi-scalar-r113/output/`; the full trace remains remote.
+
+## r114 — SC retry verdict aligned with the staged response
+
+`wt_dcache_missunit.sv` classified SC success/failure on
+`DCACHE_ATOMIC_ACK`, but read `amo_resp_o.result`, selected from
+`amo_result_q`. The incoming raw word is captured at that edge, formed
+at the next edge, then presented in `AMO_RESULT`. Thus the old verdict
+could consume older or invalid-bus data. The code's comment claiming a
+live SC verdict did not match its implementation.
+
+The correction qualifies `sc_fail` / `sc_pass` with `AMO_RESULT` and the
+held SC operation, so the retry policy observes the same owned result as
+the client. A non-SC atomic cannot change the retry exponent. This moves
+internal verdict timing to the existing completion stage and leaves
+architectural AMO latency unchanged.
+
+The directed test drives arbitrary payloads before and after the valid
+atomic reply. On frozen r113, a successful SC.D returns zero correctly
+but grows the retry mask: `SC_D_SUCCESS_MASK` fails at simulation time
+2656 (bench cycle 265). This establishes a backoff bookkeeping defect;
+it does not establish that every Linux stall or boot delay has that cause.
+
+| r114 gate | Result |
+|---|---|
+| `hyp8-r114-sc-baseline-c1` | Frozen r113 module plus new bench: successful compile, correct returned SC result, then `FAIL SC_D_SUCCESS_MASK` |
+| `hyp8-r114-sc-fixed-c1` | `HYP8_SC_BACKOFF_PASS checked=44` |
+| `hyp8-r114-dcache-c1` | `HYP8_DCACHE_PASS checked=334 dchx=2 stores=88` |
+| `hyp8-r114-aggregate-c1` | `build_complete`; scalar/SMT2/MC lint has zero errors/USERERRORs and warning totals 602/623/688 |
+| `hyp8-r114-smokes-c1` | All 11 pass, cycle counts unchanged |
+
+The isolated source starts from r113's verified manifest and overlays only
+the D-cache bench and miss-unit RTL. Concurrent worktree changes are not
+part of that model. Model SHA256:
+`18278962b6c0523cedf2cc6e9f7c0cb08fff1ad1f5e1ed25ab82c554345d2f97`.
+The recorded compiler is Verilator 5.008, `v5.008-19-gf7fa71520`,
+binary SHA256
+`d27a5af858d652e2202f1719d1ff909933f952aa451705ad61094493b9b15281`,
+selected through `/opt/testharness/toolchains/verilator-v5.008-g6lc-pgo`.
+This is a different compiler binary from the earlier `6b7cd2ad…` build;
+the recorded identity, rather than the prefix name, defines this run.
+The corresponding `/opt/testharness/src/verilator-g6lc-pgo-src/make.log`
+records `-fprofile-use -fprofile-correction` and its `pgo-profile` directory;
+`config.log` and `install.log` provide the build/install provenance.
+The leaf runner now supports the same `HYP8_VERILATOR_DIR` override as
+the aggregate runner and records its driver and compiler hashes.
+
+Timing/review: retry classification reads registered data and the matching
+state/operation, removing incoming return-valid from that decision.
+No new state, clock, reset, latch, SRAM, ISA capability, config field or
+PMU event is introduced; existing RVA gating and widths apply. No physical
+timing improvement or sign-off is claimed. The canonical
+`./build.sh verify --lint --sim --synth` invocation reached the upstream
+`smoke-cv64a6` suite and failed its ISS step on `I-ADD-01`. Its
+`make veri-testharness` build cannot compile `corev_apu/tb/ariane_tb.cpp`
+against the generated model: the referenced SRAM, SMT and banked-register
+hierarchy members are absent. The compiler log is
+`verif/sim/out_2026-11-02/veri-testharness_sim/rv32i-I-ADD-01.cv64a6_imafdc_sv39.log.iss`.
+The invocation ended, and its orphaned Spike process was stopped.
+That gate is not a pass; the harness/model compatibility issue remains open.
+
+The corrected Linux witness is a separate required gate and must reach
+both `G6LC_LINUX_INIT_UP` and `G6LC_LINUX_SHELL`. The frozen payload
+contains a BusyBox `/init`, not a procd/OpenWrt root filesystem.
+Reviewed commits: RTL `a9c90bece`, tests/runner `5f6e3740b`.
+`hyp8-osbi-scalar-r114` launched as PID 2644580 with the model above,
+unchanged firmware SHA256
+`ac36f37942ad52ae7f59c23cfaa3afbe2d1d4bc168cdbb74771ee5eda23b2fe1`,
+and a 1,000,000,000-cycle budget. r113 continues separately to its
+300M-cycle limit or a terminal boot outcome. Comment-only cleanup after
+qualification corrected the AMO_WAIT explanation and test labels; the
+compiled model retains the qualified functional source.

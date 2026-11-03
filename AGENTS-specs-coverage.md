@@ -17,6 +17,11 @@ headline view: it deliberately carries **no file references and no line numbers*
 
 ## Hypothetical core timing refactor — targeted boundary evidence only
 
+The r114 tests establish SC retry-state ownership across the staged memory
+response, including a failing frozen baseline. They do not promote overall
+A-extension compliance, constrained LR/SC forward-progress guarantees,
+Linux boot, synthesis or physical timing status.
+
 The r113 frontend restart correction adds directed control-transfer
 coverage with a failing prior-behavior mutation and passing whole-core
 smokes. It does not change production chapter statuses or establish

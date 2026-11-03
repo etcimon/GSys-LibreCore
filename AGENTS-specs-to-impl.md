@@ -16,6 +16,20 @@ matching row here so the spec→code answer stays one hop away.
 
 ---
 
+## Hyp8 r114 — SC retry verdict owns the returned result
+
+The hyp8 `core/cache_subsystem/wt_dcache_missunit.sv` now updates LR/SC
+backoff from the registered SC result in `AMO_RESULT`, where the client
+also receives its completion. The former `DCACHE_ATOMIC_ACK` classification
+read that register two stages before the current reply reached it.
+A successful SC could therefore increase the retry exponent using older
+nonzero data, and a failed SC could clear it using older zero data.
+The existing RVA gate, request ownership, architectural completion latency
+and backoff policy remain in place; no ISA/DTS capability or state is added.
+This is response ownership for the A-extension retry mechanism, not a
+change to the architectural SC success/failure result.
+Evidence and qualification limits: the redesign `analysis/r100/worklog.md`.
+
 ## Hyp8 r113 — prediction-only restart preserves control flow
 
 The control-transfer contract (`#_conditional_branches`,

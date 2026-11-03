@@ -17,6 +17,20 @@ matching row here so "which spec chapter is this test protecting?" stays answera
 
 ---
 
+## Hyp8 r114 — SC backoff response ownership
+
+The existing D-cache bench adds controlled atomic replies with unrelated
+payloads before and after the valid response. Ten cases cover SC.D and
+both word halves of SC.W, success clearing the retry state, failure
+increasing it, and LR/AMO.ADD replies leaving the SC exponent unchanged.
+The `sc-backoff` selection in `run_hyp8_memory.py` runs these cases alone.
+On the frozen r113 RTL, the returned SC result passes but
+`SC_D_SUCCESS_MASK` fails; corrected r114 passes 44 focused checks and
+334 full D-cache checks. All 11 whole-core smokes pass, and aggregate
+scalar/SMT2/MC lint retains its prior warning totals with zero errors.
+The canonical repository verification invocation has an ISS-step failure
+on the upstream `smoke-cv64a6` target; full qualification remains open.
+
 ## Hyp8 r113 — accepted control-flow successor under override
 
 `tb_g6lc_hyp8_linecheck` in `verif/tb/core/tb_g6lc_hyp8_control.sv`
