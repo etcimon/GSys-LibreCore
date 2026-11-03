@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 Etienne Cimon
 # SPDX-License-Identifier: MIT
-"""hyp8 leaf runner: HYP8_LEAF=memory|csr|csr-credit|issue|dispatch|realign|queue|alu
-selects the boundary
-under test while sharing one closure/upload/runtime mechanism.
+"""hyp8 leaf runner: HYP8_LEAF=memory|csr|csr-credit|issue|dispatch|realign|queue|alu|
+sc-backoff selects the boundary under test while sharing one
+closure/upload/runtime mechanism. HYP8_VERILATOR_DIR optionally selects an
+alternate compiler prefix; driver and binary hashes remain recorded.
 
   memory  g6lc_prf read-enable hold + write select, stb_insert pending
           reservation, stb_fwd payload snapshot / committed-pending.
@@ -274,6 +275,21 @@ LEAFS = {
         'verilate_timeout': 1800,
         'make_timeout': 1800,
     },
+    # SC backoff-ownership leaf (r114): only the sc_backoff_cases section of
+    # the dcache bench runs — controlled ATOMIC_ACK replies whose data is
+    # poisoned right after acceptance prove the SC verdict owns the
+    # registered result, not a later/stale return bus.
+    'sc-backoff': {
+        'flist': 'core/Flist.g6lc_hyp8',
+        'bench': 'verif/tb/core/tb_g6lc_hyp8_control.sv',
+        'extra_defines': ['G6LC_HYP8_DCACHE_LEAF', 'G6LC_HYP8_SC_BACKOFF_ONLY'],
+        'stub': 'verif/tb/apu/g6lc_dram_peek64_stub.cpp',
+        'top': 'tb_g6lc_hyp8_dcache',
+        'model': 'hyp8_sc_backoff',
+        'token': 'HYP8_SC_BACKOFF_PASS',
+        'verilate_timeout': 1800,
+        'make_timeout': 1800,
+    },
     # D$ store->load forwarding leaf: the actual wt_dcache (read ctrls,
     # tag/data mem, wbuffer, missunit) behind a single-outstanding memory
     # model; drives the h33 pattern (forward at request distances 0..4,
@@ -490,8 +506,10 @@ def main():
     # binary is pinned by absolute path like VERILATOR_ROOT itself. Both the
     # perl driver and the actual verilator_bin object are hashed into the
     # results so the toolchain identity is evidence, not just a path.
-    verilator_drv = Path('/opt/testharness/src/verilator-causal/bin/verilator')
-    verilator_bin = Path('/opt/testharness/src/verilator-causal/bin/verilator_bin')
+    verilator_dir = Path(os.environ.get(
+        'HYP8_VERILATOR_DIR', '/opt/testharness/src/verilator-causal'))
+    verilator_drv = verilator_dir / 'bin/verilator'
+    verilator_bin = verilator_dir / 'bin/verilator_bin'
     assert verilator_drv.is_file(), 'managed verilator missing'
     assert verilator_bin.is_file(), 'managed verilator_bin missing'
     env = dict(os.environ, VERILATOR_ROOT=str(runtime),

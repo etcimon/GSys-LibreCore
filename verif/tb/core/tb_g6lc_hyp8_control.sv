@@ -4319,7 +4319,9 @@ module tb_g6lc_hyp8_dcache;
   dcache_rtrn_t mem_rtrn_ff = '0;
   always_comb begin
     mem_rtrn_vld = man_vld || (mem_rtrn_vld_ff && !man_mode);
-    mem_rtrn     = man_vld ? man_rtrn : mem_rtrn_ff;
+    // Manual payload is meaningful only with man_vld; poison it between
+    // replies to verify consumers retain the accepted response's data.
+    mem_rtrn     = (man_mode || man_vld) ? man_rtrn : mem_rtrn_ff;
   end
   bit [7:0]     shadow[longint unsigned];
   localparam int LINE_B = C.DCACHE_LINE_WIDTH / 8;
@@ -5072,10 +5074,92 @@ module tb_g6lc_hyp8_dcache;
     return u;
   endfunction
 
+  // Inject one atomic request and one controlled memory reply whose data is
+  // poisoned immediately after acceptance. The SC verdict must own the
+  // returned result, not whatever the return bus carries later.
+  task automatic atomic_reply(input amo_t op, input logic [1:0] size,
+      input logic [63:0] pa, input logic [63:0] poison,
+      input logic [63:0] reply, input logic [63:0] expected,
+      input logic [15:0] expected_mask, input string tag);
+    int n;
+    logic [C.MEM_TID_WIDTH-1:0] tid;
+    man_mode = 1'b1;
+    man_vld = 1'b0;
+    man_rtrn = '0;
+    for (int w = 0; w < C.DCACHE_LINE_WIDTH/64; w++)
+      man_rtrn.data[w*64 +: 64] = poison;
+    repeat (3) tick();
+    amo_req = '0;
+    amo_req.req = 1'b1;
+    amo_req.amo_op = op;
+    amo_req.size = size;
+    amo_req.operand_a = pa;
+    amo_req.operand_b = 64'h1234;
+    for (n = 0; n < 1000 && !(mem_ack && mem_d.rtype == DCACHE_ATOMIC_REQ); n++)
+      tick();
+    check(n < 1000, {tag, "_MEM_ACCEPT"});
+    tid = mem_d.tid;
+    tick(); // DUT consumes the registered memory grant.
+    man_rtrn = '0;
+    man_rtrn.rtype = DCACHE_ATOMIC_ACK;
+    man_rtrn.tid = tid;
+    for (int w = 0; w < C.DCACHE_LINE_WIDTH/64; w++)
+      man_rtrn.data[w*64 +: 64] = reply;
+    man_vld = 1'b1;
+    tick(); // Valid memory reply; its result must own the later verdict.
+    man_vld = 1'b0;
+    for (int w = 0; w < C.DCACHE_LINE_WIDTH/64; w++)
+      man_rtrn.data[w*64 +: 64] = ~reply;
+    for (n = 0; n < 20 && !amo_resp.ack; n++) tick();
+    check(amo_resp.ack, {tag, "_CORE_ACK"});
+    check(amo_resp.result === expected, {tag, "_RESULT"});
+    tick(); // Client accepts the response; the retry policy sees that SC.
+    amo_req = '0;
+    check(dut.i_wt_dcache_missunit.i_exp_backoff.mask_q == expected_mask,
+          {tag, "_MASK"});
+    if (expected_mask == 0)
+      check(dut.i_wt_dcache_missunit.i_exp_backoff.cnt_q == 0,
+            {tag, "_CLEARED"});
+    repeat (3) tick();
+  endtask
+
+  task automatic sc_backoff_cases();
+    // The old verdict reads the nonzero prior/invalid bus and treats this
+    // successful SC as a failure. This must be the baseline discriminator.
+    atomic_reply(AMO_SC, 2'b11, 64'h80000100, '1, 64'h0, 64'h0,
+                 16'h0, "SC_D_SUCCESS");
+    atomic_reply(AMO_SC, 2'b10, 64'h80000100, '0,
+                 64'hffffffff00000001, 64'h1, 16'h1, "SC_W_FAIL_LOW");
+    // Non-SC replies must not update the SC retry exponent.
+    atomic_reply(AMO_LR, 2'b11, 64'h80000100, '0,
+                 64'h55, 64'h55, 16'h1, "LR_NO_VERDICT");
+    atomic_reply(AMO_ADD, 2'b11, 64'h80000100, '1,
+                 64'h0, 64'h0, 16'h1, "ADD_NO_VERDICT");
+    atomic_reply(AMO_SC, 2'b10, 64'h80000104, '0,
+                 64'h00000001ffffffff, 64'h1, 16'h3, "SC_W_FAIL_HIGH");
+    atomic_reply(AMO_SC, 2'b10, 64'h80000100, '1,
+                 64'hffffffff00000000, 64'h0, 16'h0, "SC_W_SUCCESS_LOW");
+    atomic_reply(AMO_SC, 2'b10, 64'h80000104, '0,
+                 64'h00000001ffffffff, 64'h1, 16'h1, "SC_W_FAIL_HIGH_AGAIN");
+    atomic_reply(AMO_SC, 2'b10, 64'h80000104, '1,
+                 64'h00000000ffffffff, 64'h0, 16'h0, "SC_W_SUCCESS_HIGH");
+    atomic_reply(AMO_SC, 2'b11, 64'h80000100, '0,
+                 64'h1, 64'h1, 16'h1, "SC_D_FAIL");
+    atomic_reply(AMO_SC, 2'b11, 64'h80000100, '1,
+                 64'h0, 64'h0, 16'h0, "SC_D_SUCCESS_RETRY");
+    man_vld = 1'b0;
+    man_mode = 1'b0;
+  endtask
+
   initial begin
     repeat (4) tick();
     rst_n = 1'b1;
     repeat (4) tick();
+`ifdef G6LC_HYP8_SC_BACKOFF_ONLY
+    sc_backoff_cases();
+    $display("HYP8_SC_BACKOFF_PASS checked=%0d", checked);
+    $finish;
+`endif
 
     // ---- A: same-word store->load forward at distances 0..4 (h33 sc1) ---
     for (int d = 0; d <= 4; d++) begin
@@ -5707,6 +5791,10 @@ module tb_g6lc_hyp8_dcache;
     // Plain build: J0 is the only J store (r41 single send).
     check(st_count == 33 + 5 * win_n, "ST_COUNT");
 `endif
+
+    // ---- L: SC backoff ownership — the retry exponent tracks the owned
+    // registered result, never a later/stale return bus.
+    sc_backoff_cases();
 
     $display("HYP8_DCACHE_PASS checked=%0d dchx=%0d stores=%0d",
              checked, DCHX, st_count);
