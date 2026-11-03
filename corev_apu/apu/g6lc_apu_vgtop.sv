@@ -687,47 +687,17 @@ module g6lc_apu_vgtop
     // depth derives from the worst-case outstanding set — MaxWaves
     // shader waves + 1 raster + 1 xfer + 1 external — plus one slot of
     // slack so head != tail still distinguishes a full queue.
+    // At most MaxWaves+3 completions can be in flight (g6lc_apu_doneq
+    // asserts the occupancy bound).
     localparam int unsigned Dqn = 1 << $clog2(MaxWaves + 4);
-    localparam int unsigned DqW = $clog2(Dqn);
-    apu_sh_done_t          dq_q   [Dqn];
-    logic [DqW-1:0]        dq_head_q, dq_tail_q;
-    wire                   dq_p_sh = sh_done && !gfx_done;
-    wire                   dq_p_xf = xf_done;
-    wire                   dq_p_rs = rs_done;
-    wire                   dq_p_ex = work_done_i;
-    wire [DqW-1:0]         dq_nsh = DqW'(dq_p_sh);
-    wire [DqW-1:0]         dq_nxf = DqW'(dq_p_xf);
-    wire [DqW-1:0]         dq_nrs = DqW'(dq_p_rs);
-    wire [DqW:0]           dq_push_n = {1'b0, dq_p_sh} + {1'b0, dq_p_xf} +
-                                       {1'b0, dq_p_rs} + {1'b0, dq_p_ex};
-    wire                   dq_pop = dq_head_q != dq_tail_q;
-    wire [DqW-1:0]         dq_occ = dq_tail_q - dq_head_q;
-    assign ex_done_v  = dq_pop;
-    assign ex_done_pl = dq_q[dq_head_q];
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) begin
-        dq_head_q <= '0;
-        dq_tail_q <= '0;
-      end else begin
-        if (dq_p_sh) dq_q[dq_tail_q] <= sh_done_pl;
-        if (dq_p_xf) dq_q[dq_tail_q + dq_nsh] <= xf_done_pl;
-        if (dq_p_rs) dq_q[dq_tail_q + dq_nsh + dq_nxf] <= rs_done_pl;
-        if (dq_p_ex) dq_q[dq_tail_q + dq_nsh + dq_nxf + dq_nrs]
-                       <= work_done_pl_i;
-        dq_tail_q <= dq_tail_q + dq_push_n[DqW-1:0];
-        dq_head_q <= dq_head_q + DqW'(dq_pop);
-      end
-    end
-    // pragma translate_off
-    // Occupancy bound: at most MaxWaves+3 completions can ever be in
-    // flight, so pushes may never take the queue to Dqn — occupancy
-    // equal to the depth would alias head == tail back to empty and
-    // silently drop a completion.
-    assert property (@(posedge clk_i) disable iff (!rst_ni)
-        ({1'b0, dq_occ} + dq_push_n - {{DqW{1'b0}}, dq_pop})
-        <= (DqW+1)'(Dqn - 1))
-      else $fatal(1, "g6lc_apu_vgtop: done-queue overflow");
-    // pragma translate_on
+    logic [2:0] dq_push_n;
+    g6lc_apu_doneq #(.Depth(Dqn), .pl_t(apu_sh_done_t)) i_doneq (
+      .clk_i, .rst_ni,
+      .push_i ({work_done_i, rs_done, xf_done, sh_done && !gfx_done}),
+      .pl_i   ({work_done_pl_i, rs_done_pl, xf_done_pl, sh_done_pl}),
+      .pop_o  (ex_done_v),
+      .pl_o   (ex_done_pl),
+      .push_n_o(dq_push_n));
 `ifdef G6LC_APU_DBG_LOST
     // debug probe: every done-queue push/pop with its payload —
     // catches lost or phantom completions (temporary bring-up aid)

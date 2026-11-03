@@ -128,7 +128,7 @@ python3 $G --compute-session ue_cpos_allocmany_1 bufcopy_1 \
     --variant allocmany --objslots 16384
 python3 $G --compute-session ue_cpos_cbpoolreset_1 bufcopy_1 \
     --variant cbpoolreset
-# ExecuteCommandStreams cursor: ONE record, streamCount=9 (over the
+# ExecuteCommandStreams cursor: ONE record, streamCount=8 (the profile bound, over the
 # retired Streams/TBUF caps) — per-stream reply positions
 python3 $G --compute-session ue_cpos_xstreams_1 bufcopy_1 \
     --variant xstreams

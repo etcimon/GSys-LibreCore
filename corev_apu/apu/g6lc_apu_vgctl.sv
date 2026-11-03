@@ -498,7 +498,7 @@ module g6lc_apu_vgctl
                               : reap_opsel_q == 2'd2
                                 ? {16'h0, reap_size_q[47:32]}
                                 : reap_ppipe_q
-                                  ? (reap_aux_q[6] ? 32'd48 : 32'd2)
+                                  ? (reap_aux_q[6] ? 32'd57 : 32'd2)
                                   : {16'h0, reap_aux_q[47:32]},
                        default: '0};
     // §5a G3b-iii: cmdrec RESET on the tombstoned buffer's descriptor —

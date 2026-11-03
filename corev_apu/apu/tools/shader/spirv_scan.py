@@ -1228,11 +1228,15 @@ class Scanner:
             lines.append('F %d 0 %08x' %
                          (fid, w32((len(f['params']) << 28) |
                                    (pbase << 16) | f['off'])))
+            # param row {value rows[RI+3:RI], rf index[RI-1:0]},
+            # RI = log2(SHADER_REGS) — shmod dw_pt_w_q / shwave W_FN3
+            ri = SHADER_REGS.bit_length() - 1
             for p, (pid, pt) in enumerate(f['params']):
                 lines.append('Q %d 0 %08x' %
                              (pbase + p,
-                              w32((self.reg_rows(pt) << 8) |
-                                  (self.regmap[pid][1] & 0xFF))))
+                              w32((self.reg_rows(pt) << ri) |
+                                  (self.regmap[pid][1] &
+                                   (SHADER_REGS - 1)))))
         for i in range(len(self.init)):
             for j, v in enumerate(self.init_words(i)):
                 lines.append('I %d %d %08x' % (i, j, v))

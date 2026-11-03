@@ -1414,6 +1414,14 @@ VK_ERR_FRAG = 0xFFFFFFF4   # VK_ERROR_FRAGMENTED_POOL (G3b-iii)
 VK_ERR_LOST = 0xFFFFFFFC
 VK_ERR_FEATURE = 0xFFFFFFF8
 VK_ERR_UNKNOWN = 0xFFFFFFF3
+VK_ERR_FEATURE_NOT_PRESENT = 0xFFFFFFF8     # -8
+# graphics-pipeline ObjPay state block (vnfront gp_pay_w w0..w56)
+GP_PAY_WORDS = 57
+# vertex-attribute formats vnfront f_vattr_ok / rast gather accept
+VATTR_OK = frozenset((9, 10, 13, 14, 16, 17, 20, 21, 23, 24, 27, 28,
+                      37, 38, 41, 42, 70, 71, 74, 75, 76, 77, 78, 81,
+                      82, 83, 84, 85, 88, 89, 90, 91, 92, 95, 96, 97,
+                      98) + tuple(range(99, 110)))
 VK_ERR_EXT_HANDLE = 0xC4641CBD   # VK_ERROR_INVALID_EXTERNAL_HANDLE
 VK_ERR_FMTNS = 0xFFFFFFF5        # VK_ERROR_FORMAT_NOT_SUPPORTED
 VK_EVENT_SET, VK_EVENT_RESET = 3, 4      # G3b-iii event replies
@@ -1442,7 +1450,10 @@ SESSION_EXP_N = 386
 SESSION_MAX_REP = 352
 
 # §7b geometry (defaults; --paywords overrides the ObjPay size)
-PAY_WORDS = 16384
+# ObjPay arena words = the RTL default PayMemBytes (16 MiB) / 4 —
+# vgtop/vgsys/sys elaborate 16 MiB; a smaller mirror predicted FULL for
+# recmany/allocmany where the device succeeds (payfull passes its own)
+PAY_WORDS = 16 * 1024 * 1024 // 4
 PAY_CHUNK = 64
 PAY_STAGE = 32768
 APU_VN_FAULT_PAYLOAD = 9
@@ -2331,15 +2342,15 @@ class FrontModel:
         atrs = []
         for _i in range(na):
             loc, b, fmt, off = nx(), nx(), nx(), nx()
-            if loc > 7 or b > 15 or off > 2047 or fmt not in (
-                    37, 100, 103, 106, 109):
+            if loc > 7 or b > 15 or off > 2047 or fmt not in VATTR_OK:
                 return fail()
             atrs.append((loc, b, fmt, off))
         if nx() == 0:                        # pInputAssemblyState
             return fail()
         topo = nx()
-        if topo not in (3, 4, 5):            # LIST/STRIP/FAN
+        if topo > 5:                         # POINT..TRIANGLE_FAN
             return fail()
+        rst = 1 if nx() else 0               # primitiveRestartEnable
         # static viewport/scissor: pViewportState pres, viewportCount,
         # pViewports ARRAY count (0 when NULL — dynamic state), the
         # six VkViewport floats, scissorCount, pScissors ARRAY count,
@@ -2368,27 +2379,52 @@ class FrontModel:
                 scw = [nx() for _ in range(4)]
         if nx() == 0:                        # pRasterizationState
             return fail()
+        dcl = 1 if nx() else 0               # depthClampEnable
+        rsd = 1 if nx() else 0               # rasterizerDiscardEnable
+        poly = nx()                          # VkPolygonMode FILL/LINE/POINT
+        if poly > 2:
+            return fail()
         cull = nx()
         if cull > 3:
             return fail()
         ff = nx()
         if ff > 1:
             return fail()
-        # G2a: optional depth/stencil state
-        dte = dwr = dcmp = 0
+        dbe = 1 if nx() else 0               # depthBiasEnable
+        dbc, dbk, dbs = nx(), nx(), nx()     # constant, clamp, slope
+        # optional depth/stencil state; absent -> every field 0
+        dte = dwr = dcmp = dbn = sten = 0
+        sfo = [0, 0, 0, 0]                   # front fail/pass/dfail/cmp
+        sbo = [0, 0, 0, 0]
+        sfm = [0, 0, 0]                      # front cmpMask/wrMask/ref
+        sbm = [0, 0, 0]
+        dbmin = dbmax = 0
         if nx() != 0:                        # pDepthStencilState pres
             dte = 1 if nx() else 0
             dwr = 1 if nx() else 0
             dcmp = nx()
             if dcmp > 7:
                 return fail()
-            if nx() != 0:                    # stencilTestEnable — v1
-                return fail()
-        # G2a: optional colour-blend state (up to 4 attachments)
+            dbn = 1 if nx() else 0           # depthBoundsTestEnable
+            sten = 1 if nx() else 0          # stencilTestEnable
+            for ops, masks in ((sfo, sfm), (sbo, sbm)):
+                for k in range(4):
+                    ops[k] = nx()
+                    if ops[k] > 7:
+                        return fail()
+                for k in range(3):
+                    masks[k] = nx() & 0xFF
+            dbmin, dbmax = nx(), nx()
+        # optional colour-blend state (up to 4 attachments)
         blends = []
         bconst = [0, 0, 0, 0]
         natt = 0
+        loe = lop = 0
         if nx() != 0:                        # pColorBlendState pres
+            loe = 1 if nx() else 0           # logicOpEnable
+            lop = nx()                       # logicOp CLEAR..SET
+            if lop > 15:
+                return fail()
             natt = nx()
             if natt > 4:
                 return fail()
@@ -2454,13 +2490,13 @@ class FrontModel:
             for rh in reversed(refs):
                 self.unpin(rh)
             return fail()
-        pbase = self.pay_alloc(48)
+        pbase = self.pay_alloc(GP_PAY_WORDS)
         st, h, s = (0, 0, 0)
         if pbase is not None:
             st, h, s = self.alloc(idv, KIND['VkPipeline'], par)
         if pbase is None or st != 'OK':
             if pbase is not None:
-                self.pay_free(pbase, 48)
+                self.pay_free(pbase, GP_PAY_WORDS)
             for rh in reversed(refs):
                 self.unpin(rh)
             return fail()
@@ -2468,7 +2504,7 @@ class FrontModel:
         # staged keep word is the raw VkFrontFace enum (CCW=0, CW=1)
         words = [((fsm & 0xFF) << 24) | ((topo & 0xFF) << 16) |
                  ((na & 0xF) << 12) | ((nb & 0x1F) << 7) |
-                 (fdep << 5) | (flate << 4) |
+                 (rst << 6) | (fdep << 5) | (flate << 4) |
                  ((cull & 3) << 2) | (((ff & 1) ^ 1) << 1) | 1]
         for i in range(16):
             if i < nb:
@@ -2484,12 +2520,15 @@ class FrontModel:
                              (fmt << 12) | (off & 0xFFF))
             else:
                 words.append(0)
-        # w25: {sc_static[17], vp_static[16], natt[14:12], sten[8]=0,
-        #       dcmp[6:4], bcdyn[2], dwr[1], dte[0]}
-        words.append(((spa and not scdyn) << 17) |
-                     ((vpa and not vpdyn) << 16) |
-                     ((natt & 7) << 12) | ((dcmp & 7) << 4) |
-                     (bcdyn << 2) | (dwr << 1) | dte)
+        # w25 (vnfront gp_pay_w): {lop[22:19], loe[18], sc_static[17],
+        #   vp_static[16], dcl[15], natt[14:12], rsd[11], poly[10:9],
+        #   sten[8], dbe[7], dcmp[6:4], dbn[3], bcdyn[2], dwr[1], dte[0]}
+        words.append(((lop & 0xF) << 19) | (loe << 18) |
+                     ((spa and not scdyn) << 17) |
+                     ((vpa and not vpdyn) << 16) | (dcl << 15) |
+                     ((natt & 7) << 12) | (rsd << 11) | ((poly & 3) << 9) |
+                     (sten << 8) | (dbe << 7) | ((dcmp & 7) << 4) |
+                     (dbn << 3) | (bcdyn << 2) | (dwr << 1) | dte)
         for i in range(4):
             # absent state defaults to {en=0, mask=0xF} like the RTL
             words.append(blends[i] if i < natt else 0x78000000)
@@ -2501,6 +2540,17 @@ class FrontModel:
         # from them after an eviction
         words += [mh[0] & 0xFFFFFFFF, mc[0],
                   mh[1] & 0xFFFFFFFF, mc[1]]
+        # w48..56: depth bias {const, clamp, slope}, stencil front
+        # {ref,wr,cmp masks} + {cmp,pass,dfail,fail ops}, back pair,
+        # depth bounds {min, max}
+        def ops_w(o):
+            return (o[3] << 9) | (o[1] << 6) | (o[2] << 3) | o[0]
+
+        def msk_w(m):
+            return (m[2] << 16) | (m[1] << 8) | m[0]
+        words += [dbc, dbk, dbs, msk_w(sfm), ops_w(sfo),
+                  msk_w(sbm), ops_w(sbo), dbmin, dbmax]
+        assert len(words) == GP_PAY_WORDS
         for i, w in enumerate(words):
             self.pay[pbase + i] = w
             out['payw'].append((pbase + i, w))
@@ -3410,7 +3460,7 @@ class FrontModel:
                         self.pay_free(((ze['aux'] >> 48) & 0xFFFF) << 6,
                                       (ze['aux'] >> 32) & 0xFFFF)
                         self.sh_code.pop(mh, None)
-                self.pay_free(pblk, 48 if gfx else 2)
+                self.pay_free(pblk, GP_PAY_WORDS if gfx else 2)
             elif e['kind'] == KIND['VkDeviceMemory']:
                 # §12.3 C: an unbacked extent frees nothing
                 if (e['aux'] >> 32) & 0xFFFFFFFF != UNBACKED:
@@ -4342,10 +4392,49 @@ class FrontModel:
                         pay = rec['pay']
                         spec = pay[5 * ei + 2] if 5 * ei + 2 < len(pay) \
                             else 1
+                        lw = 5 * ei + 3          # layout id lo word
                         if spec:
-                            out['result'] = VK_ERR_UNKNOWN
-                            out['null_mask'].add(ei)
-                            continue
+                            # COMPUTE-H1 mirror of vnfront StPipeH4/Sp*:
+                            # count <= 32; sizes 1/2/4 (8 ->
+                            # FEATURE_NOT_PRESENT); size_t hi words 0;
+                            # dataSize <= 64.  Element 0 only, like the
+                            # RTL's staged cursor.
+                            cur = 5 * ei + 3
+
+                            def w(k):
+                                return pay[k] & 0xFFFFFFFF \
+                                    if k < len(pay) else 0
+                            nmap = w(cur)
+                            cur += 1
+                            bad = res = None
+                            if ei != 0 or nmap > 32:
+                                bad = VK_ERR_UNKNOWN
+                            for _m in range(nmap if bad is None else 0):
+                                sz, szh = w(cur + 2), w(cur + 3)
+                                cur += 4
+                                if sz == 8:
+                                    bad = VK_ERR_FEATURE_NOT_PRESENT
+                                    break
+                                if sz not in (1, 2, 4) or szh:
+                                    bad = VK_ERR_UNKNOWN
+                                    break
+                            if bad is None:
+                                ds, dsh = w(cur), w(cur + 1)
+                                cur += 2
+                                if ds > 64 or dsh:
+                                    bad = VK_ERR_UNKNOWN
+                                cur += (ds + 3) // 4
+                            if bad is not None:
+                                out['result'] = bad
+                                out['null_mask'].add(ei)
+                                continue
+                            if nmap:
+                                # live constants: the RTL parks a spec
+                                # list and keys residency on it — not
+                                # modelled until a vector needs it
+                                raise NotImplementedError(
+                                    'golden: non-empty specialization')
+                            lw = cur
                         mid = pay[5 * ei] | (pay[5 * ei + 1] << 32)
                         mst, ms, me = self.resolve(
                             mid, KIND['VkShaderModule'])
@@ -4359,7 +4448,9 @@ class FrontModel:
                             out['result'] = VK_ERR_UNKNOWN
                             out['null_mask'].add(ei)
                             continue
-                        lid = pay[5 * ei + 3] | (pay[5 * ei + 4] << 32)
+                        lid = ((pay[lw] if lw < len(pay) else 0) |
+                               ((pay[lw + 1] if lw + 1 < len(pay) else 0)
+                                << 32))
                         lst, ls, le = self.resolve(
                             lid, KIND['VkPipelineLayout'])
                         pbase = self.pay_alloc(2) if lst == 'OK' \
@@ -7532,12 +7623,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 im = b['img']
                 vkfmt = d2vk[im['fmt']]
                 if variant == 'badfmt' and i == first_img_i:
-                    # §12.3 5b: D24_UNORM_S8_UINT is outside the format
-                    # table -> vkCreateImage answers
+                    # §12.3 5b: BC1_RGB_UNORM_BLOCK is outside the
+                    # format table -> vkCreateImage answers
                     # FORMAT_NOT_SUPPORTED; the dead handle cascades
-                    # -> DEVICE_LOST at dispatch.  (D32_SFLOAT used to
-                    # fill this role; G2a made it a real depth format.)
-                    vkfmt = 129
+                    # -> DEVICE_LOST at dispatch.  (D32_SFLOAT, then
+                    # D24_UNORM_S8_UINT filled this role until G2a and
+                    # the D24S8 stencil work made them real formats.)
+                    vkfmt = 131
                 usage = (0x3 | (0x4 if b['kind'] in (1, 2) else 0)
                          | (0x8 if b['kind'] == 3 else 0))
                 imgs[i] = 0x5100_0000_1000 + i * 0x1000_0001
@@ -8052,9 +8144,17 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                              module=sm_h[pi],
                              pName='main',
                              pSpecializationInfo=(
+                                 # an 8-byte constant: the device has
+                                 # no 64-bit spec constants ->
+                                 # VK_ERROR_FEATURE_NOT_PRESENT (an
+                                 # empty spec info is legal and would
+                                 # create the pipeline)
                                  st('VkSpecializationInfo',
-                                    mapEntryCount=0, pMapEntries=[],
-                                    dataSize=0, pData=[])
+                                    mapEntryCount=1, pMapEntries=[
+                                        st('VkSpecializationMapEntry',
+                                           constantID=0, offset=0,
+                                           size=8)],
+                                    dataSize=8, pData=bytes(8))
                                  if variant == 'spec' else None)),
                     layout=V['pl'], basePipelineHandle=0,
                     basePipelineIndex=0)],
@@ -9359,18 +9459,20 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 # pReplyPositions lands every stream's reply at its
                 # own reply-window offset so per-stream positions
                 # are exercised.
-                XS_N = 9
+                # = the profile bound (VkCommandStreamDescriptionMESA /
+                # size_t = 8): 9 decodes as APU_VN_FAULT_BOUND -> ring FATAL
+                XS_N = 8
                 xs_ev = [V['fen'] + 0x2400_0000 + i
                          for i in range(XS_N)]
                 seg_xs = [('vkCreateEvent', dict(
                     device=V['dev'],
                     pCreateInfo=st('VkEventCreateInfo', flags=0),
                     pEvent=xs_ev[i])) for i in range(XS_N)]
-                note("B' xstreams: create 9 events")
+                note("B' xstreams: create 8 events")
                 run_batches(compile_cmds(seg_xs))
                 check_live()
                 note("B' xstreams: ExecuteCommandStreams "
-                     "streamCount=9")
+                     "streamCount=8")
                 # dedicated ≥128 KiB reply blob so the LAST stream's
                 # reply position lands at 0x10004 — rep_pos_q must
                 # carry a byte offset wider than 16 bits

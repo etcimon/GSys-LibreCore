@@ -27,7 +27,8 @@ Sub-commands
   harvest  rebuild one results JSON per retained run from the .qpa logs
            already on disk (remote-runs/apu-leaf-*/output/guest, incl.
            shard-*/, and .cache/apu-guest/out-*), stamped with the run's
-           own end time so "newest run wins" orders runs, not parses
+           own launch time so "newest run wins" orders source snapshots,
+           not parses or finish times
 
   render   merge results JSONs (newest run wins per test name) and write
            the markdown ledger: per group pass / not-supported /
@@ -425,10 +426,17 @@ def cmd_harvest(a):
         guest = os.path.join(a.remote_runs, d, 'output', 'guest')
         if not d.startswith('apu-leaf-') or not os.path.isdir(guest):
             continue
-        end = os.path.join(a.remote_runs, d, 'end.txt')
-        try:
-            epoch = int(open(end).read().strip())
-        except (OSError, ValueError):
+        # order runs by launch: the source snapshot is fixed when a leaf
+        # starts, so a long run on older source that ends later must not
+        # supersede a later-launched run on newer source
+        epoch = None
+        for stamp in ('start.txt', 'end.txt'):
+            try:
+                epoch = int(open(os.path.join(a.remote_runs, d, stamp)).read().strip())
+                break
+            except (OSError, ValueError):
+                pass
+        if epoch is None:
             epoch = int(os.path.getmtime(guest))
         caselist = ''
         host = os.path.join(a.remote_runs, d, 'remote-host.json')

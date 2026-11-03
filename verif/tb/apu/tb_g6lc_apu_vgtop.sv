@@ -328,6 +328,16 @@ module tb_g6lc_apu_vgtop
   // jitter session; +cpl_tmo=N shortens it for directed wedge runs
   int unsigned cpl_tmo = 20_000_000;
   initial void'($value$plusargs("cpl_tmo=%d", cpl_tmo));
+  // real multi-engine collisions: cycles where >=2 engine completions
+  // push the done queue together (sh/xf/rs/external)
+  int unsigned col_multi = 0, col_multi_pops = 0, col_pushes = 0;
+  always @(posedge clk) begin
+    if (rst_ni) begin
+      if (i_dut.gen_on.dq_push_n >= 2) col_multi++;
+      col_pushes += 32'(i_dut.gen_on.dq_push_n);
+      if (i_dut.gen_on.ex_done_v) col_multi_pops++;
+    end
+  end
   always @(posedge clk) begin
     if (w_hold && i_dut.gen_on.xf_done)
       col_win <= 4'd8;
@@ -793,15 +803,23 @@ module tb_g6lc_apu_vgtop
     // checked by the last CK_LIVE; ObjPay chunks must all be freed too
     check(i_dut.gen_on.i_pay.gen_on.used_q === 0,
           "objpay chunks drained");
-    // ue_donecol_1: the held EXECUTE_COMMANDS completion collided with
-    // the CopyBuffer's xf_done — the queue must have delivered BOTH to
-    // cmdexec (two serialized pops; outst drained, fence signaled via
-    // the tape's own EK_FENCE checks)
+    // every completion pushed must have been popped exactly once
+    check(col_pushes == col_multi_pops,
+          $sformatf("done queue: %0d pushes vs %0d pops", col_pushes,
+                    col_multi_pops));
+    $display("DONEQ %s pushes=%0d multi=%0d", vname, col_pushes, col_multi);
+    // ue_donecol_1 originally held a generic EXECUTE_COMMANDS completion
+    // against the CopyBuffer's xf_done.  Since G3b-iii cmdexec runs
+    // secondaries itself, so no compute session reaches the generic
+    // port and no engine pair collides naturally; the directed
+    // multi-source collision moved to tb_g6lc_apu_doneq (all four
+    // sources in one cycle + random stream, mutant-checked).  Here the
+    // session keeps its end-to-end drain obligations.
     if (vname == "ue_donecol_1") begin
-      check(col_armed, "donecol: EXECUTE_COMMANDS record never issued");
-      check(col_pops == 2,
-            $sformatf("donecol: %0d done-queue pops, expected 2",
-                      col_pops));
+      if (col_armed)
+        check(col_pops == 2,
+              $sformatf("donecol: %0d done-queue pops, expected 2",
+                        col_pops));
       check(i_dut.gen_on.i_exec.gen_on.outst_q == 8'h0,
             "donecol: cmdexec outst_q not drained");
     end

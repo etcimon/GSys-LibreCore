@@ -103,6 +103,7 @@ if has unit; then
   run_suite xfer     env APU_XFER_OUT="$OUT/xfer"       "$TB/run-apu-xfer.sh"
   run_suite rast     env APU_RAST_OUT="$OUT/rast"       "$TB/run-apu-rast.sh"
   run_suite gcs      env APU_GCS_OUT="$OUT/gcs"         "$TB/run-apu-gcs.sh"
+  run_suite doneq    env APU_DONEQ_OUT="$OUT/doneq"     "$TB/run-apu-doneq.sh"
   run_suite vndec    env APU_VNDEC_OUT="$OUT/vndec"     "$TB/run-apu-vndec.sh"
   run_suite vnrep    env APU_VNREP_OUT="$OUT/vnrep"     "$TB/run-apu-vnrep.sh"
   run_suite vnpump   env APU_VNPUMP_OUT="$OUT/vnpump"   "$TB/run-apu-vnpump.sh"
@@ -234,6 +235,12 @@ for line in (out / 'results.tsv').read_text().splitlines():
         if any(not arm_ok(p) for p in logs):
             need = 'the venus arm' if len(arms) == 1 else 'both guest arms'
             status, reason = 'incomplete', f'{need} need a GUEST-PASS line'
+    elif name in ('dmprog', 'shwave-sfu'):
+        # generator freshness checks: one checked artefact per PASS line
+        fresh = re.findall(r'^PASS \S.*: fresh\b', text, re.M)
+        checks = len(fresh)
+        if not checks:
+            status, reason = 'incomplete', 'missing freshness verdict'
     elif name == 'profile':
         if not isinstance(audit, dict) or audit.get('status') != 'pass' or checks <= 0:
             status, reason = 'incomplete', 'missing profile audit verdict'

@@ -614,16 +614,16 @@ module tb_g6lc_apu_shcore;
       // park bufcopy_1's image at ObjPay chunk 4 (word base 256)
       park("bufcopy_1", 4, nw);
       // cold miss -> FILL (pinned) -> resident; LOOKUP hits the slot
-      sm_op('{op: APU_SH_SM_LOOKUP, pin: 1'b0, slot: '0,
+      sm_op('{spec: '0, op: APU_SH_SM_LOOKUP, pin: 1'b0, slot: '0,
              handle: 32'h0001_0042, chunk: '0, words: '0}, spl);
       cmp("rs.miss",      {31'h0, spl.ok}, 0);
-      sm_op('{op: APU_SH_SM_FILL, pin: 1'b1, slot: '0,
+      sm_op('{spec: '0, op: APU_SH_SM_FILL, pin: 1'b1, slot: '0,
              handle: 32'h0001_0042, chunk: 16'd4,
              words: nw[15:0]}, spl);
       cmp("rs.fill.ok",   {31'h0, spl.ok}, 1);
       cmp("rs.fill.busy", {31'h0, spl.busy}, 0);
       sl42 = spl.slot;
-      sm_op('{op: APU_SH_SM_LOOKUP, pin: 1'b0, slot: '0,
+      sm_op('{spec: '0, op: APU_SH_SM_LOOKUP, pin: 1'b0, slot: '0,
              handle: 32'h0001_0042, chunk: '0, words: '0}, spl);
       cmp("rs.hit",       {31'h0, spl.ok}, 1);
       cmp("rs.hit.slot",  {29'h0, spl.slot}, {29'h0, sl42});
@@ -634,43 +634,43 @@ module tb_g6lc_apu_shcore;
       // (slot sl42 stays pinned) — a ninth FILL must evict the OLDEST
       // unpinned resident, not the pinned one
       for (int m = 1; m < 8; m++)
-        sm_op('{op: APU_SH_SM_FILL, pin: 1'b0, slot: '0,
+        sm_op('{spec: '0, op: APU_SH_SM_FILL, pin: 1'b0, slot: '0,
                handle: 32'h0001_0100 + 32'(m), chunk: 16'd4,
                words: nw[15:0]}, spl);
-      sm_op('{op: APU_SH_SM_FILL, pin: 1'b0, slot: '0,
+      sm_op('{spec: '0, op: APU_SH_SM_FILL, pin: 1'b0, slot: '0,
              handle: 32'h0001_0108, chunk: 16'd4,
              words: nw[15:0]}, spl);
       cmp("rs.evict.ok",  {31'h0, spl.ok}, 1);
       slev = spl.slot;
       // the pinned handle survived the eviction
-      sm_op('{op: APU_SH_SM_LOOKUP, pin: 1'b0, slot: '0,
+      sm_op('{spec: '0, op: APU_SH_SM_LOOKUP, pin: 1'b0, slot: '0,
              handle: 32'h0001_0042, chunk: '0, words: '0}, spl);
       cmp("rs.pinkeep",   {31'h0, spl.ok}, 1);
       // module 1 (oldest unpinned) was evicted
-      sm_op('{op: APU_SH_SM_LOOKUP, pin: 1'b0, slot: '0,
+      sm_op('{spec: '0, op: APU_SH_SM_LOOKUP, pin: 1'b0, slot: '0,
              handle: 32'h0001_0101, chunk: '0, words: '0}, spl);
       cmp("rs.evicted",   {31'h0, spl.ok}, 0);
 
       // all-pinned BUSY: pin every resident slot once (LOOKUP pin=1
       // on each surviving handle), then FILL must report busy
-      sm_op('{op: APU_SH_SM_LOOKUP, pin: 1'b1, slot: '0,
+      sm_op('{spec: '0, op: APU_SH_SM_LOOKUP, pin: 1'b1, slot: '0,
              handle: 32'h0001_0042, chunk: '0, words: '0}, spl);
       for (int m = 2; m < 8; m++)
-        sm_op('{op: APU_SH_SM_LOOKUP, pin: 1'b1, slot: '0,
+        sm_op('{spec: '0, op: APU_SH_SM_LOOKUP, pin: 1'b1, slot: '0,
                handle: 32'h0001_0100 + 32'(m), chunk: '0,
                words: '0}, spl);
-      sm_op('{op: APU_SH_SM_LOOKUP, pin: 1'b1, slot: '0,
+      sm_op('{spec: '0, op: APU_SH_SM_LOOKUP, pin: 1'b1, slot: '0,
              handle: 32'h0001_0108, chunk: '0, words: '0}, spl);
-      sm_op('{op: APU_SH_SM_FILL, pin: 1'b0, slot: '0,
+      sm_op('{spec: '0, op: APU_SH_SM_FILL, pin: 1'b0, slot: '0,
              handle: 32'h0001_0200, chunk: 16'd4,
              words: nw[15:0]}, spl);
       cmp("rs.busy",      {31'h0, spl.busy}, 1);
       cmp("rs.busy.ok",   {31'h0, spl.ok}, 0);
       // unpin one slot (module 0x108's) — the retry succeeds there
-      sm_op('{op: APU_SH_SM_UNPIN, pin: 1'b0, slot: slev,
+      sm_op('{spec: '0, op: APU_SH_SM_UNPIN, pin: 1'b0, slot: slev,
              handle: '0, chunk: '0, words: '0}, spl);
       cmp("rs.unpin",     {31'h0, spl.ok}, 1);
-      sm_op('{op: APU_SH_SM_FILL, pin: 1'b0, slot: '0,
+      sm_op('{spec: '0, op: APU_SH_SM_FILL, pin: 1'b0, slot: '0,
              handle: 32'h0001_0200, chunk: 16'd4,
              words: nw[15:0]}, spl);
       cmp("rs.fill2.ok",  {31'h0, spl.ok}, 1);
@@ -679,7 +679,7 @@ module tb_g6lc_apu_shcore;
       // faulting module: bad image -> fill completes !ok with the
       // scanner's fault and leaves no residency
       park("bufcopy_bad_0", 5, nw);
-      sm_op('{op: APU_SH_SM_FILL, pin: 1'b0, slot: '0,
+      sm_op('{spec: '0, op: APU_SH_SM_FILL, pin: 1'b0, slot: '0,
              handle: 32'h0001_0300, chunk: 16'd5,
              words: nw[15:0]}, spl);
       cmp("rs.ffill.ok",  {31'h0, spl.ok}, 0);
@@ -688,24 +688,24 @@ module tb_g6lc_apu_shcore;
       if (spl.fault.code === 8'h0) begin
         fails++; $display("FAIL rs.ffill.fault code=0");
       end
-      sm_op('{op: APU_SH_SM_LOOKUP, pin: 1'b0, slot: '0,
+      sm_op('{spec: '0, op: APU_SH_SM_LOOKUP, pin: 1'b0, slot: '0,
              handle: 32'h0001_0300, chunk: '0, words: '0}, spl);
       cmp("rs.ffill.miss",{31'h0, spl.ok}, 0);
 
       // INVAL drops residency; UNPIN on an unpinned slot refuses
-      sm_op('{op: APU_SH_SM_INVAL, pin: 1'b0, slot: '0,
+      sm_op('{spec: '0, op: APU_SH_SM_INVAL, pin: 1'b0, slot: '0,
              handle: 32'h0001_0042, chunk: '0, words: '0}, spl);
       cmp("rs.inval",     {31'h0, spl.ok}, 1);
-      sm_op('{op: APU_SH_SM_LOOKUP, pin: 1'b0, slot: '0,
+      sm_op('{spec: '0, op: APU_SH_SM_LOOKUP, pin: 1'b0, slot: '0,
              handle: 32'h0001_0042, chunk: '0, words: '0}, spl);
       cmp("rs.inval.miss",{31'h0, spl.ok}, 0);
-      sm_op('{op: APU_SH_SM_LOOKUP, pin: 1'b0, slot: '0,
+      sm_op('{spec: '0, op: APU_SH_SM_LOOKUP, pin: 1'b0, slot: '0,
              handle: 32'h0001_0102, chunk: '0, words: '0}, spl);
       slev = spl.slot;
-      sm_op('{op: APU_SH_SM_UNPIN, pin: 1'b0, slot: slev,
+      sm_op('{spec: '0, op: APU_SH_SM_UNPIN, pin: 1'b0, slot: slev,
              handle: '0, chunk: '0, words: '0}, spl);
       cmp("rs.unpin.ok",  {31'h0, spl.ok}, 1);
-      sm_op('{op: APU_SH_SM_UNPIN, pin: 1'b0, slot: slev,
+      sm_op('{spec: '0, op: APU_SH_SM_UNPIN, pin: 1'b0, slot: slev,
              handle: '0, chunk: '0, words: '0}, spl);
       cmp("rs.unpin.ufl", {31'h0, spl.ok}, 0);
     end

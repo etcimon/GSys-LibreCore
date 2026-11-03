@@ -28,9 +28,21 @@ class ApuRegressionGateTests(unittest.TestCase):
         self.runner = self.tb / 'run-apu-regress.sh'
         self.out = self.root / 'out'
         self.names = ('objtab', 'vgpages', 'vgctl', 'vnfront', 'cmdexec', 'xfer',
-                      'rast', 'gcs', 'vndec', 'vnrep', 'vnpump', 'shmod',
+                      'rast', 'gcs', 'doneq', 'vndec', 'vnrep', 'vnpump', 'shmod',
                       'shwave', 'shcore')
         self.stubs('PASS tb_stub cases=1 checks=2 cycles=3')
+        shader = self.root / 'corev_apu/apu/tools/shader'
+        shader.mkdir(parents=True)
+        for gen, art in (('gen_dmprog.py', 'g6lc_apu_dmprog.svh'),
+                         ('gen_sfu_tables.py', 'g6lc_apu_sfu_pkg.sv')):
+            (shader / gen).write_text(f'print("PASS {art}: fresh")\n')
+
+    def test_freshness_check_without_verdict_is_incomplete(self):
+        (self.root / 'corev_apu/apu/tools/shader/gen_dmprog.py').write_text(
+            'print("tables written")\n')
+        result = self.run_gate('--stages', 'unit')
+        self.assertEqual(result.returncode, 4, result.stdout)
+        self.assertIn('missing freshness verdict', result.stdout)
 
     def stubs(self, output, command=''):
         for name in self.names:
@@ -97,10 +109,12 @@ class ApuRegressionGateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         report = json.loads((self.out / 'summary.json').read_text())
         self.assertEqual(report['stages'], ['unit'])
-        self.assertEqual(len(report['results']), len(self.names))
+        # the stubbed suites plus the dmprog / shwave-sfu freshness checks
+        self.assertEqual(len(report['results']), len(self.names) + 2)
         self.assertEqual(report['status'], 'pass')
         self.assertFalse(report['qualification'])
-        self.assertTrue(all(row['checks'] == 2 for row in report['results']))
+        self.assertTrue(all(row['checks'] == (1 if row['name'] in ('dmprog', 'shwave-sfu')
+                                              else 2) for row in report['results']))
         self.assertTrue(all(len(row['logSha256']) == 64 for row in report['results']))
         self.assertEqual(report['sourceSha256Before'], report['sourceSha256After'])
 
@@ -140,7 +154,7 @@ class ApuRegressionGateTests(unittest.TestCase):
 
     def test_failed_profile_retains_checked_rules_and_findings(self):
         path = self.root / 'corev_apu/apu/tools/gen_vn_tables.py'
-        path.parent.mkdir(parents=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
         report = {'status': 'fail', 'checkedRules': 2, 'findings': [{'rule': 'limit'}]}
         path.write_text(f'import json\nprint(json.dumps({report!r}))\nraise SystemExit(1)\n')
         result = self.run_gate('--stages', 'profile')

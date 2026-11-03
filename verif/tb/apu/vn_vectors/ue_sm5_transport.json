@@ -104,6 +104,7 @@
   "ring0 vkExecuteCommandStreamsMESA head=4736",
   "ring1 vkWaitRingSeqnoMESA head=24",
   "ring1 FATAL head=24",
+  "XSDBG stream0 inner fatal",
   "ring1 FATAL head=0"
  ],
  "tape_words": 4761,

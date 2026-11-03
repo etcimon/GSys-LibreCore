@@ -37,7 +37,7 @@ module tb_g6lc_apu_shmod;
   logic [9:0]   decor_id;  logic [63:0]  decor_data;
   logic [9:0]   var_id;    logic [63:0]  var_data;
   logic [9:0]   rm_id;     logic [31:0]  rm_data;
-  logic [9:0]   init_id;   logic [63:0]  init_data;
+  logic [9:0]   init_id;   logic [79:0]  init_data;
   logic [9:0]   blk_id;    logic [31:0]  blk_data;
   logic [9:0]   phi_id;    logic [159:0] phi_data;
   logic [9:0]   func_id;   logic [31:0]  func_data;
@@ -170,7 +170,9 @@ module tb_g6lc_apu_shmod;
       "B": v = blk_data;
       "P": v = phi_data[32*j +: 32];
       "M": v = memb_data[32*j +: 32];
-      "I": v = init_data[32*j +: 32];
+      // init row: w0/w1 as stored; w2 = binding[15:8] ([79:72], the
+      // byte shwave reads) — spirv_scan init_words w2 layout
+      "I": v = (j == 2) ? {24'h0, init_data[79:72]} : init_data[32*j +: 32];
       "F": v = func_data;
       "Q": v = {16'h0, parm_data};
       default: v = entry_data[32*j +: 32];
@@ -349,10 +351,10 @@ module tb_g6lc_apu_shmod;
     minst(15, 4); mw(5); mw(5); mw(0);
     cases++; run_synth("twoentry", APU_SH_FAULT_TWO_ENTRY, 15);
 
-    // LocalSize 16*8*1 = 128 > 64
+    // LocalSize 16*16*1 = 256 > 128 (maxComputeWorkGroupInvocations)
     mheader(32); minst(17, 2); mw(1); minst(14, 3); mw(0); mw(1);
     minst(15, 4); mw(5); mw(4); mw(0);
-    minst(16, 6); mw(4); mw(17); mw(16); mw(8); mw(1);
+    minst(16, 6); mw(4); mw(17); mw(16); mw(16); mw(1);
     cases++; run_synth("biglocal", APU_SH_FAULT_LOCALSIZE, 16);
 
     // > ShaderRegs registers: 260 OpVariable in the function

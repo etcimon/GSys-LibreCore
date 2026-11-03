@@ -4843,6 +4843,16 @@ module g6lc_apu_shwave
             st_q <= W_AL0W;
           end
           W_AL0W: begin
+// pragma translate_off
+`ifndef SYNTHESIS
+            if ($test$plusargs("dbg_al"))
+              $display("[DBG] al0w set=%0d bd=%04x idx=%0d c1=%08x c2=%08x c3=%08x",
+                       va_q[0][0][1][19:12],
+                       {va_q[0][0][3][31:24], va_q[0][0][1][27:20]},
+                       va_q[0][0][2][15:0], va_q[0][0][1], va_q[0][0][2],
+                       va_q[0][0][3]);
+`endif
+// pragma translate_on
             // sample ty_elem NOW — the W_DS* record fetch parks
             // type_id_o on row 0, so the table data is gone by the
             // time the detour returns

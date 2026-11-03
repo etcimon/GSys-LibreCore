@@ -5490,6 +5490,16 @@ module g6lc_apu_vnfront
               // writes every component
               gp_blend_q <= '{4{32'h7800_0000}};
               gp_bconst_q <= '0;
+              // fields of the optional pDepthStencilState /
+              // pColorBlendState are not staged when the struct is
+              // absent: clear them so a pipeline never inherits the
+              // previous pipeline's depth-bounds/stencil/logic-op state
+              gp_dbn_q <= 1'b0; gp_dbmin_q <= '0; gp_dbmax_q <= '0;
+              gp_loe_q <= 1'b0; gp_lop_q <= '0;
+              gp_sff_q <= '0; gp_sfp_q <= '0; gp_sfd_q <= '0; gp_sfc_q <= '0;
+              gp_sbf_q <= '0; gp_sbp_q <= '0; gp_sbd_q <= '0; gp_sbc_q <= '0;
+              gp_sfm_q <= '0; gp_sfw_q <= '0; gp_sfr_q <= '0;
+              gp_sbm_q <= '0; gp_sbw_q <= '0; gp_sbr_q <= '0;
               state_q  <= StGpRd;
             end else begin
               stg_i_q   <= StgBits'({2'b0, blob_i_q} * 3'd5);
@@ -6016,9 +6026,11 @@ module g6lc_apu_vnfront
               state_q <= StPipeFail;
             end else begin
               pl_layh_q <= ot_cpl_i.handle;
-              // 48-word ObjPay state block for the draw assembly —
-              // w44..47 carry the per-stage module {handle,park}
-              opr_q    <= '{op: APU_OBJPAY_OP_ALLOC, words: 32'd48,
+              // 57-word ObjPay state block for the draw assembly —
+              // w44..47 carry the per-stage module {handle,park},
+              // w48..56 depth bias / stencil / depth bounds (StGpPayWd
+              // writes and cmdexec reads all 57)
+              opr_q    <= '{op: APU_OBJPAY_OP_ALLOC, words: 32'd57,
                            default: '0};
               op_ret_q <= StGpAlcC;
               state_q  <= StOpReq;
@@ -6074,7 +6086,7 @@ module g6lc_apu_vnfront
               // unwind at StGpUnr
               opr_q    <= '{op: APU_OBJPAY_OP_FREE,
                            addr: op_base_q,
-                           words: 32'd48, default: '0};
+                           words: 32'd57, default: '0};
               op_ret_q <= StGpUnr;
               state_q  <= StOpReq;
             end else begin
@@ -6159,13 +6171,14 @@ module g6lc_apu_vnfront
             end
           end
           StPipeSpId: begin
-            pl_sid_q[pl_si_q] <= stg_word_q;
+            // pl_si_q < pl_sn_q <= 32 (StPipeH4): a 5-bit index
+            pl_sid_q[pl_si_q[4:0]] <= stg_word_q;
             stg_i_q   <= stg_i_q + 1'b1;
             stg_ret_q <= StPipeSpOff;
             state_q   <= StStgRd;
           end
           StPipeSpOff: begin
-            pl_soff_q[pl_si_q] <= stg_word_q;
+            pl_soff_q[pl_si_q[4:0]] <= stg_word_q;
             stg_i_q   <= stg_i_q + 1'b1;
             stg_ret_q <= StPipeSpSz0;
             state_q   <= StStgRd;
@@ -6179,7 +6192,7 @@ module g6lc_apu_vnfront
               end
               state_q <= StPipeFail;
             end else begin
-              pl_ssz_q[pl_si_q] <= stg_word_q[2:0];
+              pl_ssz_q[pl_si_q[4:0]] <= stg_word_q[2:0];
               stg_i_q   <= stg_i_q + 1'b1;
               stg_ret_q <= StPipeSpSz1;
               state_q   <= StStgRd;
@@ -6217,7 +6230,8 @@ module g6lc_apu_vnfront
             end
           end
           StPipeSpDat: begin
-            pl_data_q[pl_di_q] <= stg_word_q;
+            // pl_di_q < pl_dn_q <= 16 (dataSize <= 64): a 4-bit index
+            pl_data_q[pl_di_q[3:0]] <= stg_word_q;
             if (pl_di_q + 6'd1 == pl_dn_q) begin
               for (int i = 0; i < 32; i++) begin
                 if (i < 32'(pl_sn_q)) begin

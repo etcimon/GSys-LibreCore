@@ -56,6 +56,7 @@ ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vnpump.sv
 // Flist.apu_axi earlier in the including flist
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_xfer.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_rast.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_doneq.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vgtop.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_apmem.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vqwalk.sv

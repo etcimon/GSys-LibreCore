@@ -48,6 +48,19 @@ module tb_g6lc_apu_shwave;
   localparam int unsigned MEMW = 131072;   // 64-bit mem words (1 MiB)
   string  shv;
   string  only;
+  // +only=a,b,c: run just the named cases (comma list; empty = all) —
+  // a pair list reproduces order-dependent state between two cases
+  function automatic bit only_skip(input string nm);
+    int s;
+    if (only == "") return 1'b0;
+    s = 0;
+    for (int i = 0; i <= only.len(); i++)
+      if (i == only.len() || only[i] == ",") begin
+        if (only.substr(s, i - 1) == nm) return 1'b0;
+        s = i + 1;
+      end
+    return 1'b1;
+  endfunction
   bit     dbg_sc, dbg_wd;
   int     checks, cases, fails;
   int     ulp1c, ulp2c, maxulp;            // Gate-2 ULP counters
@@ -1415,7 +1428,7 @@ module tb_g6lc_apu_shwave;
     is_opt = 0; cur_nidx = -1; cur_seed = 0; ou_words = 0;
     for (int i = 0; i < $size(names); i++) begin
       for (int s = 1; s <= 3; s++) begin
-        if (only != "" && names[i] != only) continue;
+        if (only_skip(names[i])) continue;
         cases++;
         cur_nidx = i; cur_seed = s;
         run_vec(names[i],
@@ -1424,7 +1437,7 @@ module tb_g6lc_apu_shwave;
     end
     cur_nidx = -1; cur_seed = 0;
     for (int i = 0; i < $size(names); i++) begin
-      if (only != "" && names[i] != only) continue;
+      if (only_skip(names[i])) continue;
       // atomic_hist has no mut arm: a flipped index op can move one
       // atomic onto another's cell and the result then depends on
       // wave interleave order — not bit-reproducible by construction.
@@ -1442,7 +1455,7 @@ module tb_g6lc_apu_shwave;
       run_vec(names[i], {names[i], "_mut_0"});
     end
     for (int i = 0; i < $size(names); i++) begin
-      if (only != "" && names[i] != only) continue;
+      if (only_skip(names[i])) continue;
       if (names[i] == "ssbo_sarr" || names[i] == "ssbo_cap") continue;
       cases++;
       run_vec(names[i], {names[i], "_bad_0"});
@@ -1451,12 +1464,12 @@ module tb_g6lc_apu_shwave;
     // G1a graphics wave work: vertex/fragment record batches
     // G3a-i runtime-fault arms
     for (int i = 0; i < $size(fault_names); i++) begin
-      if (only != "" && fault_names[i] != only) continue;
+      if (only_skip(fault_names[i])) continue;
       cases++;
       run_vec(fault_names[i], {fault_names[i], "_0"});
     end
     for (int i = 0; i < $size(gfx_names); i++) begin
-      if (only != "" && gfx_names[i] != only) continue;
+      if (only_skip(gfx_names[i])) continue;
       cases++;
       run_vec(gfx_names[i], {gfx_names[i], "_1"});
     end
@@ -1480,7 +1493,7 @@ module tb_g6lc_apu_shwave;
           names[i] == "ssbo_sarr" || names[i] == "ssbo_cap")
         continue;
       for (int s = 1; s <= 3; s++) begin
-        if (only != "" && names[i] != only) continue;
+        if (only_skip(names[i])) continue;
         cases++;
         cur_nidx = i; cur_seed = s;
         run_vec(names[i],

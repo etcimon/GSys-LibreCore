@@ -454,6 +454,22 @@ module g6lc_apu_vnpump
     } state_e;
     state_e state_q;
     state_e tr_ret_q;
+    // pragma translate_off
+`ifndef SYNTHESIS
+    // +pump_fatal_trace: name the state (and decoder fault) that
+    // entered StFatal — a ring FATAL otherwise only shows as status bit1
+    state_e dbg_prev_q;
+    always @(posedge clk_i) begin
+      dbg_prev_q <= state_q;
+      if (state_q == StFatal && dbg_prev_q != StFatal && $test$plusargs("pump_fatal_trace"))
+        $display("[pump_fatal t=%0t] from %s", $time, dbg_prev_q.name());
+      if (state_q == StDecWait && dec_done && $test$plusargs("pump_fatal_trace") &&
+          (dec_op.fault != APU_VN_FAULT_NONE || dec_op.words > 16'(TBUF)))
+        $display("[pump_fatal t=%0t] dec cmd=%0d words=%0d fault=%0d depth=%0d",
+                 $time, dec_op.cmd_type, dec_op.words, dec_op.fault, depth_q);
+    end
+`endif
+    // pragma translate_on
 
     // ---- stream byte addressing --------------------------------------------
     // byte offset of a word index within the current stream
