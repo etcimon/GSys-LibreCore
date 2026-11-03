@@ -117,6 +117,7 @@ static Vg6lc_core_hb___024root* g6lc_core_root(int c) {
 #include <iostream>
 #include <iomanip>
 #include <string>
+#include <sstream>
 #include <getopt.h>
 #include <chrono>
 #include <ctime>
@@ -137,6 +138,22 @@ static Vg6lc_core_hb___024root* g6lc_core_root(int c) {
 // Checkout this awesome project:
 // https://github.com/freechipsproject/rocket-chip/
 
+
+// TvalEn=0 can remove mtval_q from the generated model. Keep diagnostic
+// availability explicit rather than inventing a value for missing storage.
+template <typename Root>
+static auto g6lc_tb_mtval(Root *root, int)
+    -> decltype(root->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mtval_q), std::string{}) {
+  std::ostringstream out;
+  out << "0x" << std::hex
+      << static_cast<uint64_t>(root->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mtval_q));
+  return out.str();
+}
+
+template <typename Root>
+static std::string g6lc_tb_mtval(Root *, long) {
+  return "unavailable";
+}
 
 // This is a 64-bit integer to reduce wrap over issues and
 // allow modulus.  You can also use a double, if you wish.
@@ -1623,7 +1640,7 @@ done_processing:
       auto epc = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(epc_commit_pcgen);
       auto mepc = G6LC_CORE_ROOT(0)->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mepc_q);
       auto mcause = G6LC_CORE_ROOT(0)->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mcause_q);
-      auto mtval = G6LC_CORE_ROOT(0)->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mtval_q);
+      auto mtval = g6lc_tb_mtval(G6LC_CORE_ROOT(0), 0);
       auto wfi = G6LC_CORE_ROOT(0)->G6LC_TB_CSR(G6LC_CVA6_C0, 0, wfi_q);
       auto flush_if = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(flush_ctrl_if);
       auto iq_full = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(i_frontend__DOT__i_instr_queue__DOT__instr_queue_full);
@@ -1680,7 +1697,7 @@ done_processing:
                 << " epc=0x" << (unsigned long long)epc
                 << " mepc=0x" << (unsigned long long)mepc
                 << " mcause=0x" << (unsigned long long)mcause
-                << " mtval=0x" << (unsigned long long)mtval
+                << " mtval=" << mtval
                 << " wfi=" << (unsigned)wfi
                 << " flif=" << (unsigned)flush_if
                 << " iqf=" << (unsigned)iq_full
@@ -1870,12 +1887,18 @@ done_processing:
       const auto &rf1 = G6LC_CORE_ROOT(0)->G6LC_TB_RF(G6LC_CVA6_C0, 1);
 #endif
       auto gpr64 = [](const auto &rf, int n) -> uint64_t {
-        return (uint64_t)rf[2 * n] | ((uint64_t)rf[2 * n + 1] << 32);
+        constexpr size_t words_per_reg = sizeof(rf) / (32 * sizeof(rf[0]));
+        static_assert(words_per_reg == 1 || words_per_reg == 2,
+                      "unsupported register-file probe layout");
+        uint64_t value = static_cast<uint64_t>(rf[words_per_reg * n]);
+        if constexpr (words_per_reg == 2)
+          value |= static_cast<uint64_t>(rf[words_per_reg * n + 1]) << 32;
+        return value;
       };
       uint64_t ra0 = gpr64(rf0, 1), ra1 = G6LC_TB_H1(gpr64(rf1, 1));
       uint64_t sp0 = gpr64(rf0, 2), sp1 = G6LC_TB_H1(gpr64(rf1, 2));
       uint64_t s00 = gpr64(rf0, 8), s01 = G6LC_TB_H1(gpr64(rf1, 8));
-      auto mtval0 = G6LC_CORE_ROOT(0)->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mtval_q);
+      auto mtval0 = g6lc_tb_mtval(G6LC_CORE_ROOT(0), 0);
       uint64_t t00 = gpr64(rf0, 5), t01 = G6LC_TB_H1(gpr64(rf1, 5));
       uint64_t t10 = gpr64(rf0, 6), t11 = G6LC_TB_H1(gpr64(rf1, 6));
       uint64_t t20 = gpr64(rf0, 7), t21 = G6LC_TB_H1(gpr64(rf1, 7));
@@ -1887,7 +1910,7 @@ done_processing:
                 << " act=" << (unsigned)active
                 << " mepc0=0x" << (uint64_t)mepc0
                 << " mcause0=0x" << (uint64_t)mcause0
-                << " mtval0=0x" << (uint64_t)mtval0
+                << " mtval0=" << mtval0
                 << " wfi0=" << (unsigned)wfi0
                 << " mepc1=0x" << (uint64_t)mepc1
                 << " mcause1=0x" << (uint64_t)mcause1
