@@ -16188,8 +16188,29 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   r113 has completed SLUB and progressed through IRQ/clock/console setup;
   its LR stalls at cycle 245151461 were transient and motivated the
   separate backoff investigation. Continue the corrected r114 model to
-  both userspace markers. Canonical repository verification has an open
-  ISS-step failure on `smoke-cv64a6`; synthesis/physical timing remain open.
-  Commits: RTL `a9c90bece`, tests/runner `5f6e3740b`. The canonical failure
-  is a C++ harness/model hierarchy mismatch in `ariane_tb.cpp`, not a
-  reported architectural mismatch from the remote hyp8 smokes.
+  both userspace markers. Commits: RTL `a9c90bece`, tests/runner
+  `5f6e3740b`. Direct remote checks at 2026-11-03 02:09 UTC show r113
+  advancing at cycle 285042210 and r114 at 16784637, with neither marker.
+  The model-log tails show no fatal assertion. Preserve the final UART
+  and verdict; an ended process without both markers is not a boot pass.
+
+- Canonical verification follow-up: harness selection fixed (`774f9cc6f`);
+  the cv64 depth-8 load buffer now has a derived 3-bit cache ID; the shared
+  testbench reads built-config cache geometry; optional `mtval` storage
+  and RV32 register widths are handled in the C++ diagnostic.
+  Seven RV64 comparisons and one RV32 hello comparison (719 matched)
+  passed. The final `verify --lint --sim --synth` gate passed all eight
+  lint/elaboration, simulation and synthesis-smoke steps at 2026-11-03
+  02:47 UTC (durable `r114-canonical-final-20261103T022156Z` artifacts).
+  Hyp8 userspace and physical timing qualification remain open.
+  Spike's missed HTIF completion, YAML-overridden CLI limit and false
+  success on budget exhaustion are corrected in child `74d780f1`
+  (root pin `b2e1ee422`), with positive, guest-failure and budget controls.
+  The old managed install is preserved as `spike-pre-r114-backup`.
+  Reviewed fixes: config/SV testbench `54528988c`, C++ probes `d07d3c632`.
+  Details and exact identities: `analysis/r100/worklog.md`.
+
+- Evidence storage: closed r107/r109/r112/r112diag hart/RVFI traces now
+  reside as verified `.zst` archives. Eight round-trip hash/size receipts
+  record 10,966,140,023 bytes released. Do not delete these archives or
+  active witness data. Update readers to decompress the archived traces.

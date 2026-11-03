@@ -5,8 +5,17 @@ registered result in AMO_RESULT (`a9c90bece`, tests `5f6e3740b`).
 The frozen baseline fails the new SC-success mask check; corrected remote
 leaves pass 44 focused / 334 D-cache checks and all 11 smokes pass.
 r113 has completed SLUB and reached IRQ/clock/console setup; the corrected
-r114 witness is running separately. Userspace and the canonical harness
-compatibility gate remain open. Details: `analysis/r100/worklog.md`.
+r114 witness is running separately. At 2026-11-03 02:09 UTC, the complete
+RVFI cycle stamps were 285042210 (r113) and 16784637 (r114); neither
+userspace marker was present. The canonical harness selection, load-ID
+capacity, configuration lookup and optional-probe errors have corrections.
+Seven RV64 comparisons and the RV32 hello comparison passed. Spike now
+services real HTIF completion and reports exhausted budgets as failure
+(`b2e1ee422`). The final canonical gate passed all eight lint/elaboration,
+simulation and synthesis-smoke steps at 2026-11-03 02:47 UTC. The separate
+hyp8 userspace witness remains open.
+Full identities, negative controls and retention receipts:
+`analysis/r100/worklog.md`.
 
 Current boot continuation (r113): the r112 LZC correction fixes the live
 kernel's zero-count/string defect, but r112 still panicked at `kmalloc-2k`.

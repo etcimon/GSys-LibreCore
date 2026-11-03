@@ -362,3 +362,168 @@ and a 1,000,000,000-cycle budget. r113 continues separately to its
 300M-cycle limit or a terminal boot outcome. Comment-only cleanup after
 qualification corrected the AMO_WAIT explanation and test labels; the
 compiled model retains the qualified functional source.
+
+## r114 continuation: boot monitoring and canonical verification
+
+At **2026-11-03 02:09:36 UTC**, direct remote reads confirmed both owned
+simulation processes and their output directories:
+
+| Witness | PID | Latest complete RVFI cycle | UART milestone |
+|---|---:|---:|---|
+| `hyp8-osbi-scalar-r113` | 2588789 | 285042210 | `pid_max`, after SLUB, IRQ, clock and console setup |
+| `hyp8-osbi-scalar-r114` | 2644580 | 16784637 | OpenSBI banner |
+
+Neither UART contains either userspace marker or a kernel panic/Oops.
+The sampled model-log tails contain no fatal assertion. These are
+progress observations, not completed boot qualifications. r113 retains
+its 300M-cycle budget; the corrected r114 model retains its 1B-cycle budget.
+The firmware, model and PGO Verilator identities above remain unchanged.
+The sampled r113 PCs `0xffffffff802c0a5e` and `0xffffffff802be15a`
+resolve in the payload-matched kernel to `ror32` in `include/linux/bitops.h`
+and `chacha_block_generic` in `lib/crypto/chacha.c`. This locates the
+quiet interval in random-number computation; no new defect is established.
+
+The canonical verification failures exposed additional issues outside
+the frozen hyp8 models:
+
+- **Harness selection:** all core targets now share the SoC's
+  `i_dram_backend` hierarchy, but the Makefile still chose the stale
+  `ariane_tb.cpp` implementation for `cv*` targets. The default now uses
+  `g6lc_tb.cpp`, which already follows that hierarchy and distinguishes
+  scalar/SMT CSR and register banks. Explicit `TB_CPP` overrides remain.
+  Commit: `774f9cc6f`.
+- **Load ID capacity:** `cv64a6_imafdc_sv39` had eight load-buffer entries
+  but one cache request-ID bit. The initial load-unit assertion correctly
+  rejected it. `CVA6ConfigDcacheIdWidth` now derives from the load-buffer
+  depth, giving three bits while retaining eight entries.
+- **Testbench geometry:** the shared harness used optional package-level
+  aliases absent from `cv32a65x`. Its injected parameter is the built
+  `cva6_cfg_t`; the correct members are `DCACHE_LINE_WIDTH` and
+  `ICACHE_LINE_WIDTH`. The former lowercase-member error was not evidence
+  of a Verilator defect.
+- **Optional diagnostics:** `TvalEn=0` removes the internal `mtval_q`
+  storage from the generated RV32 model. The C++ diagnostic now reports
+  unavailable storage explicitly and reads present storage normally.
+  Its register-file dump also derives the number of array words per
+  register, preserving RV64 values and zero-extending RV32 values.
+
+The seven `smoke-cv64a6` comparisons passed after the harness/load-ID
+corrections. With the corrected Spike below, `smoke-cv32a65x` passed its
+single `hello_world` comparison (**719 matched**). The cumulative
+`8 PASSED` report includes the preceding seven RV64 comparisons; it is
+not eight separate RV32 tests. The optional diagnostic formatting was
+compiled for both configurations; runtime dump output was not captured
+in the reported RV32 run. The final canonical
+`./build.sh verify --lint --sim --synth` gate passed **all eight steps**
+at **2026-11-03 02:47:17 UTC**, exit code 0. Both targets passed lint,
+elaboration, their simulation suite and synthesis smoke. The durable log
+and result are
+`build-platform/workspace/build/r114-canonical-final-20261103T022156Z.log`
+and the adjacent `.result.json`. Warning totals were 265/4 for RV64
+lint/elaboration, 61/4 for RV32, and 32/5 for synthesis respectively.
+The final simulations used the promoted fixed Spike.
+
+Two preceding WSL-host attempts returned exit 3 because the configured
+`linux-eda-suite` contains Windows executables. The successful invocation
+used the Windows host context, with simulation delegated to WSL by the
+existing platform adapter. No tool-discovery source change was needed.
+This is the canonical gate's result; it does not replace the separate
+hyp8 Linux witness or establish physical timing closure.
+
+Timing/config review: the load-ID correction adds two internal ID payload
+bits without increasing queue depth or introducing a pipeline stage.
+The testbench reads the same configured cache geometry and changes only
+simulation diagnostics. No ISA capability, address map, DTS value, clock,
+reset, SRAM boundary, DFT path or PMU event is added. Physical timing,
+area and synthesis sign-off are not inferred from these tests.
+
+### Spike: completion and budget ownership
+
+A bounded replay of the canonical RV32 `hello_world` executable showed
+the guest writing **1 to `tohost` at PC `0x80003560`**, then spinning at
+`0x8000356a`. The executable SHA256 is
+`b2bfe13303f8925283894764bc071f44b02d1d396c9378d8c50c203b81cce7c8`;
+the diagnostic trace is `/tmp/r114-spike-rv32.BVS6Dm.log` in WSL.
+The standalone simulation loop advanced processors without resuming the
+HTIF coroutine, while `done()` only read a completion flag. It therefore
+failed to consume a real guest completion. Separately, YAML application
+overrode an explicit CLI step limit, and the exhausted-budget exception
+handler returned success.
+
+The corrected loop resumes HTIF only when a command is pending. It
+retains the direct stepping path for firmware without host commands and
+keeps round-robin hart scheduling. Explicit CLI limits now apply after
+YAML defaults, and budget exhaustion returns **124**, not success.
+Fork commit `79d81357` was transported as the same two-file change to
+the tracked child (`74d780f1`); root gitlink commit: `b2e1ee422`.
+The two parent checkouts had identical Spike source trees
+(`a4ba10a0ccd562d62abe8f9b0e898b0e8cbf1efa`).
+
+Directed results on the isolated `spike-r114-htif` installation:
+
+| Case | Observed exit |
+|---|---:|
+| Frozen RV32 hello, original YAML, CLI 2M steps | 0, real completion |
+| Same executable/YAML, CLI 10 steps | 124, internal budget exhaustion |
+| YAML 10-step limit enabled, CLI 2M steps | 0, CLI override honored |
+| Same 10-step YAML without a CLI limit | 124, YAML default honored |
+| Two-hart readiness handshake, successful guest | 0 |
+| Same handshake with guest exit code 1 | 1 |
+| Frozen old Spike on the successful two-hart fixture | Budget message followed by false exit 0 |
+
+The first attempted multicore fixture, `mc_smt2_boot_release.S`, was
+inapplicable: it lacks the `fromhost` symbol required by HTIF and assumes
+secondary-hart boot-ROM release semantics. Its exhaustion did not prove
+that a larger budget was the solution. The corrected standalone fixture
+is `build-platform/workspace/build/r114-spike-htif-dual.S`; both harts must
+advance before hart 0 can report its result.
+
+The fixed install was copied into the managed `tooling/spike` prefix
+after checking for active users. The old install is retained as
+`tooling/spike-pre-r114-backup`; the isolated prefix remains in place for
+its embedded runtime paths. Frozen identities:
+
+- `bin/spike`: `124a967c520bf244c7aa211d1ea63127e13832cbf927dd1de11fb4b4b25215d5`
+- `lib/libfesvr.so`: `1992ebf39f613597dea1875556ee339d85d7ca976d31c3536adf93c4e5bb5435`
+- `lib/libriscv.so`: `e043b395da623f35222413247339bca848941a43f7d2c2c5c3b21858de3e3449`
+
+### Evidence retention and monitor corrections
+
+Eight closed-run traces (the hart and RVFI traces for r107, r109, r112
+and r112diag) were compressed to `.zst`. Each archive was decoded and
+checked against the original byte count and SHA256 before the original
+was removed. The validated receipts record 11,357,196,006 original bytes
+and 391,055,983 archive bytes, releasing **10,966,140,023 bytes**.
+Receipts were pulled to each corresponding
+`remote-runs/hyp8-osbi-scalar-*/output/compression-r114.json`.
+Future trace readers must decompress the `.zst` files; their content and
+the original line references are unchanged. Active r113/r114 data was
+not compressed or removed.
+
+The old one-off monitor parsed leading privilege numbers as cycle
+counts, could mistake either userspace marker for completion, and masked
+a failed `pgrep` behind `head`. The replacement checker uses complete
+`@cycle` stamps, verifies the PID's output directory, and requires both
+userspace markers. It distinguishes running, completed, ended-without-
+markers, kernel/model errors and transport failures. Source artifacts:
+`build-platform/workspace/build/hyp8-boot-check.py` and
+`hyp8-boot-monitor.sh`. The checker was exercised against both live
+witnesses; the observations in the table above came from it.
+
+The client-side monitor files stopped advancing after their first
+02:16 records. Monitoring was therefore moved onto the remote host
+using the same checker and `hyp8-boot-monitor-remote.sh`, detached with
+`nohup` and redirected standard streams. The observer PIDs are 2677911
+(r113) and 2677910 (r114); the simulation PIDs are unchanged. JSONL and
+stderr are in each witness's `output/`, named
+`hyp8-osbi-scalar-rNNN.monitor.{jsonl,stderr}`. Scripts and observer
+PID/exit files are under `output/boot-monitor-r114/`.
+The first detached records at **2026-11-03 02:51:52 UTC** report
+**289841724** RVFI cycles for r113 and **22112436** for r114, with both
+process identities verified and both userspace markers absent.
+
+Reviewed commits: config/SV testbench `54528988c`, C++ diagnostic
+`d07d3c632`, shared harness selection `774f9cc6f`, Spike pin `b2e1ee422`.
+The licensing pass retained the upstream Solderpad/Apache notices and
+vendor headers verbatim; new workspace helper scripts carry the MIT
+header and Etienne Cimon attribution. No upstream file was relicensed.
