@@ -63,10 +63,17 @@
 // Review checklist: always_ff/always_comb split, async active-low
 // reset, no latches, Enable=0 constant-zero netlist.
 //
-// Known limits: no stencil, no points/lines (triangle topologies
-// only), primitive restart ignored, strips and fans must fit one
+// Known limits: stencil is the D24S8 high byte (front ops only).
+// Point list is one pixel at the vertex.
+// Line list/strip are 1 px Bresenham, flat colour from the first
+// vertex, no line clip or width. Strips and fans must fit one
 // vertex batch, subpass color reference l → attachment l
-// (identity), no MSAA, single viewport, no depth clamp/bias,
+// (identity), no MSAA, single viewport.
+// depthClampEnable clamps window z to the viewport and skips
+// near/far clipping.
+// Constant depth bias is applied (r = 1 for D32, 2^-16 for D16),
+// then slopeFactor times the triangle's max edge |dz|/span, then
+// depthBiasClamp. Lines and points have slope 0.
 // area/edge values are shifted into int32 for the float λ path (the
 // exact inside test stays 64-bit), scissor offsets are unsigned.
 module g6lc_apu_rast
@@ -217,7 +224,16 @@ module g6lc_apu_rast
       S_BATNEXT,
       S_FIN_OK, S_FIN_BAD,
       S_MPW,
-      S_FPS, S_FPW
+      S_FPS, S_FPW,
+      // 1 px line list/strip.  Appended so the clip-state numbers
+      // the unit TB pins (S_OC_G1 .. S_CP_PDN) do not move.
+      S_LN_VF, S_LN_VF2, S_LN_VF3, S_LN_INIT, S_LN_PIX, S_LN_STEP,
+      S_DB0, S_DBCR, S_DB1, S_DB1B, S_DB2,
+      S_DS0, S_DS1, S_DS2, S_DS3, S_DS4, S_DS5, S_DS6,
+      S_ROP_LOP,
+      // Line clip.  Appended so earlier state numbers stay put.
+      S_LC_D0, S_LC_DG, S_LC_DD, S_LC_T0, S_LC_T1, S_LC_TL,
+      S_LC_C0, S_LC_C1, S_LC_C2, S_LC_N
     } st_e;
     st_e st_q;
 
@@ -362,6 +378,55 @@ module g6lc_apu_rast
       return 16'((p + (40'h1 << (sh - 9'd1))) >> sh);
     endfunction
 
+    // fp32 -> UNORM24 (f*16777215).  D24S8 stores this in [23:0].
+    function automatic logic [23:0] f_f32_u24(input logic [31:0] f);
+      logic [47:0] p;
+      logic [8:0]  sh;
+      p  = 48'({1'b1, f[22:0]}) * 48'd16777215;
+      sh = 9'd150 - {1'b0, f[30:23]};
+      if (f[31])              return 24'h000000;
+      if (f[30:23] == 8'h00)  return 24'h000000;
+      if (f[30:23] >= 8'd127) return 24'hFFFFFF;
+      return 24'((p + (48'h1 << (sh - 9'd1))) >> sh);
+    endfunction
+
+    function automatic logic f_scmp(input logic [2:0] op,
+                                    input logic [7:0] s,
+                                    input logic [7:0] rf,
+                                    input logic [7:0] mask);
+      logic [7:0] a, b;
+      a = s & mask;
+      b = rf & mask;
+      unique case (op)
+        3'd0:     f_scmp = 1'b0;
+        3'd1:     f_scmp = a < b;
+        3'd2:     f_scmp = a == b;
+        3'd3:     f_scmp = a <= b;
+        3'd4:     f_scmp = a > b;
+        3'd5:     f_scmp = a != b;
+        3'd6:     f_scmp = a >= b;
+        default:  f_scmp = 1'b1;
+      endcase
+    endfunction
+
+    function automatic logic [7:0] f_sop(input logic [2:0] op,
+                                         input logic [7:0] oldb,
+                                         input logic [7:0] rf,
+                                         input logic [7:0] mask);
+      logic [7:0] n;
+      unique case (op)
+        3'd0:     n = oldb;
+        3'd1:     n = 8'h00;
+        3'd2:     n = rf;
+        3'd3:     n = (oldb == 8'hFF) ? 8'hFF : oldb + 8'd1;
+        3'd4:     n = (oldb == 8'h00) ? 8'h00 : oldb - 8'd1;
+        3'd5:     n = ~oldb;
+        3'd6:     n = oldb + 8'd1;
+        default:  n = oldb - 8'd1;
+      endcase
+      f_sop = (oldb & ~mask) | (n & mask);
+    endfunction
+
     // fp32 -> 12-bit linear index for the sRGB encode LUT
     // (clamp*4095 RNE; APU_SRGB_ENC is contracted to u12)
     function automatic logic [11:0] f_f32_u12(input logic [31:0] f);
@@ -416,7 +481,8 @@ module g6lc_apu_rast
     endfunction
     function automatic logic f_dfmt_ok(input logic [7:0] f);
       return f == 8'(APU_IMG_FMT_D32_SFLOAT) ||
-             f == 8'(APU_IMG_FMT_D16_UNORM);
+             f == 8'(APU_IMG_FMT_D16_UNORM) ||
+             f == 8'(APU_IMG_FMT_D24_UNORM_S8_UINT);
     endfunction
     // sRGB formats share the BGRA/RGBA byte orders
     function automatic logic f_is_srgb(input logic [7:0] f);
@@ -429,13 +495,120 @@ module g6lc_apu_rast
     endfunction
 
     // attribute byte count per accepted format (0 = unsupported)
+    // IEEE binary16 -> binary32.  Subnormals flush to signed zero.
+    function automatic logic [31:0] f_f16_f32(input logic [15:0] h);
+      logic [4:0] e;
+      e = h[14:10];
+      if (e == 5'h00)
+        f_f16_f32 = {h[15], 31'h0};
+      else if (e == 5'h1F)
+        f_f16_f32 = {h[15], 8'hFF, h[9:0], 13'h0};
+      else
+        f_f16_f32 = {h[15], 8'(e) + 8'd112, h[9:0], 13'h0};
+    endfunction
+
+    function automatic logic [31:0] f_sxt8(input logic [7:0] b);
+      f_sxt8 = {{24{b[7]}}, b};
+    endfunction
+    function automatic logic [31:0] f_sxt16(input logic [15:0] h);
+      f_sxt16 = {{16{h[15]}}, h};
+    endfunction
+    // Integer attributes are copied as raw bits.  A missing alpha is
+    // the integer 1, not the float 1.
+    function automatic logic f_is_int(input logic [7:0] f);
+      f_is_int = f == APU_RAST_VF_R32_UINT || f == APU_RAST_VF_R32_SINT ||
+                 f == APU_RAST_VF_RG32_UINT || f == APU_RAST_VF_RG32_SINT ||
+                 f == APU_RAST_VF_RGB32_UINT || f == APU_RAST_VF_RGB32_SINT ||
+                 f == APU_RAST_VF_RGBA32_UINT || f == APU_RAST_VF_RGBA32_SINT;
+    endfunction
+    // 8- and 16-bit vertex integers are raw words.  Missing components
+    // are (0, 0, 0, 1), with the 1 an integer.
+    function automatic logic f_is_i8(input logic [7:0] f);
+      f_is_i8 = f == APU_RAST_VF_R8_UINT || f == APU_RAST_VF_R8_SINT ||
+                f == APU_RAST_VF_RG8_UINT || f == APU_RAST_VF_RG8_SINT ||
+                f == APU_RAST_VF_RGB8_UINT || f == APU_RAST_VF_RGB8_SINT ||
+                f == APU_RAST_VF_RGBA8_UINT || f == APU_RAST_VF_RGBA8_SINT;
+    endfunction
+    function automatic logic f_is_i16(input logic [7:0] f);
+      f_is_i16 = f == APU_RAST_VF_R16_UINT || f == APU_RAST_VF_R16_SINT ||
+                 f == APU_RAST_VF_RG16_UINT || f == APU_RAST_VF_RG16_SINT ||
+                 f == APU_RAST_VF_RGB16_UINT || f == APU_RAST_VF_RGB16_SINT ||
+                 f == APU_RAST_VF_RGBA16_UINT || f == APU_RAST_VF_RGBA16_SINT;
+    endfunction
+    function automatic logic f_is_sint(input logic [7:0] f);
+      f_is_sint = f == APU_RAST_VF_R8_SINT || f == APU_RAST_VF_RG8_SINT ||
+                  f == APU_RAST_VF_RGB8_SINT || f == APU_RAST_VF_RGBA8_SINT ||
+                  f == APU_RAST_VF_R16_SINT || f == APU_RAST_VF_RG16_SINT ||
+                  f == APU_RAST_VF_RGB16_SINT || f == APU_RAST_VF_RGBA16_SINT;
+    endfunction
+    function automatic logic [2:0] f_nc(input logic [7:0] f);
+      if (f == APU_RAST_VF_R8_UINT || f == APU_RAST_VF_R8_SINT ||
+          f == APU_RAST_VF_R16_UINT || f == APU_RAST_VF_R16_SINT)
+        f_nc = 3'd1;
+      else if (f == APU_RAST_VF_RG8_UINT || f == APU_RAST_VF_RG8_SINT ||
+               f == APU_RAST_VF_RG16_UINT || f == APU_RAST_VF_RG16_SINT)
+        f_nc = 3'd2;
+      else if (f == APU_RAST_VF_RGB8_UINT || f == APU_RAST_VF_RGB8_SINT ||
+               f == APU_RAST_VF_RGB16_UINT || f == APU_RAST_VF_RGB16_SINT)
+        f_nc = 3'd3;
+      else
+        f_nc = 3'd4;
+    endfunction
+    function automatic logic [31:0] f_icomp(
+        input logic [191:0] w, input logic [2:0] off,
+        input logic [1:0] comp, input logic wide, input logic sgn,
+        input logic [2:0] nc);
+      logic [15:0] h;
+      logic [7:0]  b;
+      if ({1'b0, comp} >= nc)
+        f_icomp = (comp == 2'd3) ? 32'h1 : 32'h0;
+      else if (wide) begin
+        h = w[8*off + 16*comp +: 16];
+        f_icomp = sgn ? {{16{h[15]}}, h} : {16'h0, h};
+      end else begin
+        b = w[8*off + 8*comp +: 8];
+        f_icomp = sgn ? {{24{b[7]}}, b} : {24'h0, b};
+      end
+    endfunction
+
     function automatic logic [4:0] f_asz(input logic [7:0] f);
       unique case (f)
         APU_RAST_VF_R32_SFLOAT:    f_asz = 5'd4;
         APU_RAST_VF_RG32_SFLOAT:   f_asz = 5'd8;
         APU_RAST_VF_RGB32_SFLOAT:  f_asz = 5'd12;
         APU_RAST_VF_RGBA32_SFLOAT: f_asz = 5'd16;
+        APU_RAST_VF_R8_UNORM:      f_asz = 5'd1;
+        APU_RAST_VF_RG8_UNORM:     f_asz = 5'd2;
+        APU_RAST_VF_RGB8_UNORM:    f_asz = 5'd3;
         APU_RAST_VF_RGBA8_UNORM:   f_asz = 5'd4;
+        APU_RAST_VF_R8_SNORM:      f_asz = 5'd1;
+        APU_RAST_VF_RG8_SNORM:     f_asz = 5'd2;
+        APU_RAST_VF_RGB8_SNORM:    f_asz = 5'd3;
+        APU_RAST_VF_RGBA8_SNORM:   f_asz = 5'd4;
+        APU_RAST_VF_R8_UINT, APU_RAST_VF_R8_SINT: f_asz = 5'd1;
+        APU_RAST_VF_RG8_UINT, APU_RAST_VF_RG8_SINT: f_asz = 5'd2;
+        APU_RAST_VF_RGB8_UINT, APU_RAST_VF_RGB8_SINT: f_asz = 5'd3;
+        APU_RAST_VF_RGBA8_UINT, APU_RAST_VF_RGBA8_SINT: f_asz = 5'd4;
+        APU_RAST_VF_R16_UNORM:     f_asz = 5'd2;
+        APU_RAST_VF_RG16_UNORM:    f_asz = 5'd4;
+        APU_RAST_VF_RGB16_UNORM:   f_asz = 5'd6;
+        APU_RAST_VF_RGBA16_UNORM:  f_asz = 5'd8;
+        APU_RAST_VF_R16_SNORM:     f_asz = 5'd2;
+        APU_RAST_VF_RG16_SNORM:    f_asz = 5'd4;
+        APU_RAST_VF_RGB16_SNORM:   f_asz = 5'd6;
+        APU_RAST_VF_RGBA16_SNORM:  f_asz = 5'd8;
+        APU_RAST_VF_R16_UINT, APU_RAST_VF_R16_SINT: f_asz = 5'd2;
+        APU_RAST_VF_RG16_UINT, APU_RAST_VF_RG16_SINT: f_asz = 5'd4;
+        APU_RAST_VF_RGB16_UINT, APU_RAST_VF_RGB16_SINT: f_asz = 5'd6;
+        APU_RAST_VF_RGBA16_UINT, APU_RAST_VF_RGBA16_SINT: f_asz = 5'd8;
+        APU_RAST_VF_R16_SFLOAT:    f_asz = 5'd2;
+        APU_RAST_VF_RG16_SFLOAT:   f_asz = 5'd4;
+        APU_RAST_VF_RGB16_SFLOAT:  f_asz = 5'd6;
+        APU_RAST_VF_RGBA16_SFLOAT: f_asz = 5'd8;
+        APU_RAST_VF_R32_UINT, APU_RAST_VF_R32_SINT: f_asz = 5'd4;
+        APU_RAST_VF_RG32_UINT, APU_RAST_VF_RG32_SINT: f_asz = 5'd8;
+        APU_RAST_VF_RGB32_UINT, APU_RAST_VF_RGB32_SINT: f_asz = 5'd12;
+        APU_RAST_VF_RGBA32_UINT, APU_RAST_VF_RGBA32_SINT: f_asz = 5'd16;
         default:                   f_asz = 5'd0;
       endcase
     endfunction
@@ -484,12 +657,30 @@ module g6lc_apu_rast
     st_e          gret_q;
     logic [3:0][31:0] conv_q;               // converted attr / frag tmp
     logic [2:0]   c_q;                      // component cursor
+    logic [2:0]   u8n_q;                    // UNORM8/SNORM8 components present
+    logic         snorm_q, u16_q;
     // primitive transform results
     logic [3:0][31:0] pos_q [3];            // raw Position x,y,z,w
     logic [31:0]  vrw_q [3];                // 1/w
     logic [31:0]  vnd_q [3][3];             // ndc x,y,z
     logic [31:0]  vz_q  [3];                // viewport z
     logic signed [31:0] vxi_q [3], vyi_q [3]; // 16.8 screen coords
+    // max |pixel delta| of the three edges, at least 1.  Depth-bias
+    // slope is max |dz| over this span.
+    function automatic logic [15:0] f_uad(input logic signed [31:0] a,
+                                          input logic signed [31:0] b);
+      logic signed [15:0] d;
+      d = 16'(a >>> 8) - 16'(b >>> 8);
+      f_uad = d[15] ? 16'(-d) : 16'(d);
+    endfunction
+    function automatic logic [15:0] f_mx2(input logic [15:0] a,
+                                          input logic [15:0] b);
+      f_mx2 = (a > b) ? a : b;
+    endfunction
+    wire [15:0] span_w = f_mx2(16'd1, f_mx2(
+        f_mx2(f_uad(vxi_q[1], vxi_q[0]), f_uad(vyi_q[1], vyi_q[0])),
+        f_mx2(f_mx2(f_uad(vxi_q[2], vxi_q[0]), f_uad(vyi_q[2], vyi_q[0])),
+              f_mx2(f_uad(vxi_q[2], vxi_q[1]), f_uad(vyi_q[2], vyi_q[1])))));
     // edges: E_k anchored at vertex (k+1)%3, direction to (k+2)%3
     logic signed [31:0] ex_q [3], ey_q [3], edx_q [3], edy_q [3];
     logic [2:0]   tl_q;
@@ -499,6 +690,22 @@ module g6lc_apu_rast
     logic [15:0]  bx0_q, bx1_q, by0_q, by1_q;
     logic [15:0]  sx_q, sy_q;               // scan cursor
     logic [5:0]   p_q;                      // primitive cursor
+    logic [5:0]   base_q;                   // first vertex of this strip/fan
+    logic [62:0]  brk_q;                    // indexed restart sentinel per slot
+    logic         ln_q;                     // fragment return is the line walk
+    logic         poly_ln_q;                // triangle drawn as three edges
+    logic         poly_pt_q;                // triangle drawn as one point per vertex
+    logic [1:0]   le_q;
+    logic         db_late_q;                 // bias updates FragDepth, else fz
+    logic         db_done_q;
+    st_e          db_ret_q;
+    logic [31:0]  db_bias_q, db_cr_q, db_dz_q;
+    logic [7:0]   stn_q;
+    logic [23:0]  std_q;
+    logic         st_hold_q;
+    logic signed [15:0] lx_q, ly_q, lxe_q, lye_q;
+    logic signed [15:0] ldx_q, ldy_q, lxs_q, lys_q;
+    logic signed [16:0] lerr_q;
     logic [5:0]   f_q;                      // queued frags (0..FSB-1)
     logic [6:0]   nf_q;                     // in-flight frag count
     // per-fragment temporaries
@@ -549,6 +756,7 @@ module g6lc_apu_rast
     logic [31:0]  cva_q [4], cvb_q [4];     // a/b varying staging
     logic [31:0]  ctt_q;                    // edge-crossing t
     logic         clip_q;                   // fan-triangulate clip_out
+    logic         lc_out_q;                 // line clip: vertex 0 is outside
     logic [3:0]   cfan_q;                   // fan cursor (tri = 0,ci,ci+1)
     logic [3:0]   cpn_q;                    // final polygon vertex count
     // early-Z / ROP
@@ -598,12 +806,28 @@ module g6lc_apu_rast
     // and swaps slots 1/2 on odd primitives to keep the winding; fan
     // steps 1 anchored at vertex 0.  Clip mode fan-triangulates the
     // clipped polygon: tri (0, cfan, cfan+1) of the clip_out ring.
+    wire line_w  = dr_q.topology == 8'd1 || dr_q.topology == 8'd2;
+    wire point_w = dr_q.topology == 8'd0;
+    wire [2:0] st_cmp_w = front_q ? dr_q.stencil_cmp : dr_q.stencil_cmp_b;
+    wire [2:0] st_fail_w = front_q ? dr_q.stencil_fail : dr_q.stencil_fail_b;
+    wire [2:0] st_pass_w = front_q ? dr_q.stencil_pass : dr_q.stencil_pass_b;
+    wire [2:0] st_dfail_w = front_q ? dr_q.stencil_dfail : dr_q.stencil_dfail_b;
+    wire [7:0] st_ref_w = front_q ? dr_q.stencil_ref : dr_q.stencil_ref_b;
+    wire [7:0] st_cmask_w = front_q ? dr_q.stencil_cmp_mask
+                                    : dr_q.stencil_cmp_mask_b;
+    wire [7:0] st_wmask_w = front_q ? dr_q.stencil_wr_mask
+                                    : dr_q.stencil_wr_mask_b;
+    wire [1:0] l0_w = (poly_ln_q || poly_pt_q) ? le_q : 2'd0;
+    wire [1:0] l1_w = (point_w || poly_pt_q) ? l0_w :
+                      poly_ln_q ? ((le_q == 2'd2) ? 2'd0 : le_q + 2'd1) : 2'd1;
     function automatic logic [5:0] f_pi(input logic [1:0] t);
       if (clip_q)
         f_pi = (t == 2'd0) ? 6'd0 : {2'b0, cfan_q} + 6'(t) - 6'd1;
+      else if (line_w)
+        f_pi = p_q + 6'(t);
       else if (dr_q.topology == 8'd5)
-        f_pi = (t == 2'd0) ? 6'd0 : p_q + 6'(t);
-      else if (dr_q.topology == 8'd4 && p_q[0])
+        f_pi = (t == 2'd0) ? base_q : p_q + 6'(t);
+      else if (dr_q.topology == 8'd4 && (p_q[0] ^ base_q[0]))
         f_pi = p_q + 6'(t == 2'd0 ? 0 : t == 2'd1 ? 2 : 1);
       else
         f_pi = p_q + 6'(t);
@@ -614,8 +838,8 @@ module g6lc_apu_rast
     //   0 near z<0 | 1 far z>w | 2 w<1e-5 | 3 |x|>gw | 4 |y|>gw
     function automatic logic [4:0] f_oc(input logic [3:0][31:0] p,
                                         input logic [31:0] gw);
-      f_oc[0] = f_f32_lt(p[2], 32'h0);
-      f_oc[1] = f_f32_lt(p[3], p[2]);
+      f_oc[0] = !dr_q.depth_clamp && f_f32_lt(p[2], 32'h0);
+      f_oc[1] = !dr_q.depth_clamp && f_f32_lt(p[3], p[2]);
       f_oc[2] = f_f32_lt(p[3], CLIP_EPS);
       f_oc[3] = f_f32_lt(gw, {1'b0, p[0][30:0]});
       f_oc[4] = f_f32_lt(gw, {1'b0, p[1][30:0]});
@@ -636,6 +860,12 @@ module g6lc_apu_rast
       for (int p = 4; p >= 0; p--)
         if (p > int'(c) && m[p]) f_npl = 3'(p);
     endfunction
+    // Lowest set plane.  7 means the mask is empty.
+    function automatic logic [2:0] f_lpl(input logic [4:0] m);
+      f_lpl = 3'd7;
+      for (int p = 4; p >= 0; p--)
+        if (m[p]) f_lpl = 3'(p);
+    endfunction
 
     // prim done: advance the topo cursor, or the clip fan cursor while
     // fan tris of the clipped polygon remain (fan ends the whole prim)
@@ -648,8 +878,10 @@ module g6lc_apu_rast
         end else
           cfan_q <= cfan_q + 4'd1;
       end else begin
-        if (dr_q.topology != 8'd3) p_q <= p_q + 6'd1;
-        else                       p_q <= p_q + 6'd3;
+        // line list pairs step 2; triangle list steps 3; strips step 1
+        if (dr_q.topology == 8'd1)      p_q <= p_q + 6'd2;
+        else if (dr_q.topology == 8'd3) p_q <= p_q + 6'd3;
+        else                            p_q <= p_q + 6'd1;
       end
     endtask
 
@@ -801,17 +1033,63 @@ module g6lc_apu_rast
     wire [31:0] rop_pix = f_is_bgr(dr_q.ca[at_q].fmt)
         ? {rop_b3, rop_b0, rop_b1, rop_b2}
         : {rop_b3, rop_b2, rop_b1, rop_b0};
+    // VkLogicOp on the encoded attachment bytes.  Blend is not used.
+    function automatic logic [7:0] f_lop(input logic [3:0] op,
+                                         input logic [7:0] s,
+                                         input logic [7:0] d);
+      case (op)
+        4'd0:  f_lop = 8'h00;
+        4'd1:  f_lop = s & d;
+        4'd2:  f_lop = s & ~d;
+        4'd3:  f_lop = s;
+        4'd4:  f_lop = ~s & d;
+        4'd5:  f_lop = d;
+        4'd6:  f_lop = s ^ d;
+        4'd7:  f_lop = s | d;
+        4'd8:  f_lop = ~(s | d);
+        4'd9:  f_lop = ~(s ^ d);
+        4'd10: f_lop = ~d;
+        4'd11: f_lop = s | ~d;
+        4'd12: f_lop = ~s;
+        4'd13: f_lop = ~s | d;
+        4'd14: f_lop = ~(s & d);
+        default: f_lop = 8'hFF;
+      endcase
+    endfunction
+    function automatic logic [31:0] f_lop_pix(
+        input logic [7:0] fmt, input logic [3:0] op,
+        input logic [31:0] s0, input logic [31:0] s1,
+        input logic [31:0] s2, input logic [31:0] s3,
+        input logic [31:0] dstw);
+      logic [31:0] src [4];
+      logic [7:0]  sb, db;
+      logic [1:0]  lane;
+      src[0] = s0; src[1] = s1; src[2] = s2; src[3] = s3;
+      f_lop_pix = dstw;
+      for (int c = 0; c < 4; c++) begin
+        lane = f_cbyte(fmt, 2'(c));
+        sb = f_enc8(fmt, 2'(c), src[c]);
+        db = dstw[8*lane +: 8];
+        f_lop_pix[8*lane +: 8] = f_lop(op, sb, db);
+      end
+    endfunction
+    logic [31:0] lop_pix_q;
     // byte strobes for the pixel under the ROP cursor
     wire [7:0] rop_strb = {4'h0, dr_q.blend[at_q].mask}
                           << {fr_px[0], 2'b00};
-    // early-Z clamps the interpolated z into [0,1] for test+write
-    wire [31:0] zc_w = fz_q[31] ? 32'h0
-                       : (f_f32_lt(32'h3F800000, fz_q) ? 32'h3F800000
-                          : fz_q);
-    // late-Z clamps the ROP depth source the same way (G3a-i)
-    wire [31:0] lzc_w = lz_q[31] ? 32'h0
-                        : (f_f32_lt(32'h3F800000, lz_q) ? 32'h3F800000
-                           : lz_q);
+    // Window depth.  Clamp enable uses the viewport range and the
+    // near/far planes are not clip planes.  Otherwise the value is
+    // held to [0,1], which is what the unclamped fixed path writes.
+    function automatic logic [31:0] f_zcl(input logic [31:0] z);
+      logic [31:0] lo, hi;
+      lo = dr_q.depth_clamp ? dr_q.vp.minz : 32'h0;
+      hi = dr_q.depth_clamp ? dr_q.vp.maxz : 32'h3F800000;
+      if (f_f32_lt(z, lo)) f_zcl = lo;
+      else if (f_f32_lt(hi, z)) f_zcl = hi;
+      else f_zcl = z;
+    endfunction
+    wire [31:0] zc_w = f_zcl(fz_q);
+    wire [31:0] lzc_w = f_zcl(lz_q);
     // blend-state field selects for the comp under the blend cursor
     wire [4:0] bsf_w = (c_q[1:0] == 2'd3) ? dr_q.blend[at_q].src_a
                                         : dr_q.blend[at_q].src_c;
@@ -869,7 +1147,10 @@ module g6lc_apu_rast
         tl_q <= '0; area_q <= '0; shf_q <= '0; rcpa_q <= '0;
         vsw_q <= 1'b0;
         bx0_q <= '0; bx1_q <= '0; by0_q <= '0; by1_q <= '0;
-        sx_q <= '0; sy_q <= '0; p_q <= '0; f_q <= '0; nf_q <= '0;
+        sx_q <= '0; sy_q <= '0; p_q <= '0; base_q <= '0;
+        brk_q <= '0; ln_q <= 1'b0; poly_ln_q <= 1'b0; poly_pt_q <= 1'b0;
+        db_done_q <= 1'b0;
+        f_q <= '0; nf_q <= '0;
         rs_q <= '0; fz_q <= '0; lc_q <= '0;
         lz_q <= '0; lzdone_q <= 1'b0; bat_front_q <= 1'b0;
         for (int i = 0; i < FSB; i++) begin
@@ -956,6 +1237,8 @@ module g6lc_apu_rast
                     clr_pix_q <=
                       dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM)
                       ? {2{f_f32_u16(dr_q.clear_color[0])}}
+                      : dr_q.da.fmt == 8'(APU_IMG_FMT_D24_UNORM_S8_UINT)
+                      ? {8'h00, f_f32_u24(dr_q.clear_color[0])}
                       : dr_q.clear_color[0];
                   else
                     clr_pix_q <=
@@ -981,8 +1264,7 @@ module g6lc_apu_rast
                 end
               end
               APU_RAST_OP_DRAW: begin
-                if ((dr_q.topology != 8'd3 && dr_q.topology != 8'd4 &&
-                     dr_q.topology != 8'd5) ||
+                if ((dr_q.topology > 8'd5) ||
                     (dr_q.topology != 8'd3 &&
                      dr_q.vertex_count > 32'(VSB)) ||
                     dr_q.ib_type > 2'd2 ||
@@ -1098,6 +1380,8 @@ module g6lc_apu_rast
               nv_q <= 6'((dr_q.vertex_count - bat_q >= 32'(VSB))
                          ? VSB : dr_q.vertex_count - bat_q);
             j_q <= '0;
+            brk_q <= '0;
+            base_q <= '0;
 // pragma translate_off
 `ifdef G6LC_APU_DBG_LOST
             $display("[DBG] rast batch nv=%0d vb0={b=%08x s=%08x st=%0d} a0={v=%0d b=%0d f=%0d o=%0d} a1={v=%0d b=%0d f=%0d o=%0d} t=%0t",
@@ -1128,15 +1412,31 @@ module g6lc_apu_rast
             end
           end
           S_GA_IBX: begin
-            // index element (zero window when OOB) + vertex_offset
-            if (dr_q.ib_type == 2'd1)
-              ib_i <= dr_q.vertex_offset +
-                      {16'h0, win_q[8*caddr_q[2:0] +: 16]};
-            else
-              ib_i <= dr_q.vertex_offset +
-                      win_q[8*caddr_q[2:0] +: 32];
-            a_q <= '0;
-            st_q <= S_GA_ATTR;
+            // Restart is the raw index, before vertexOffset.  The
+            // slot stays in the batch so later assembly sees the
+            // break, and no attribute fetch uses the sentinel.
+            if (dr_q.restart && dr_q.ib_type != 2'd0 &&
+                ((dr_q.ib_type == 2'd1 &&
+                  win_q[8*caddr_q[2:0] +: 16] == 16'hFFFF) ||
+                 (dr_q.ib_type == 2'd2 &&
+                  win_q[8*caddr_q[2:0] +: 32] == 32'hFFFF_FFFF))) begin
+              brk_q[j_q] <= 1'b1;
+              if (j_q + 6'd1 >= nv_q) st_q <= S_VS_ISS;
+              else begin
+                j_q  <= j_q + 6'd1;
+                st_q <= S_GA_ISET;
+              end
+            end else begin
+              brk_q[j_q] <= 1'b0;
+              if (dr_q.ib_type == 2'd1)
+                ib_i <= dr_q.vertex_offset +
+                        {16'h0, win_q[8*caddr_q[2:0] +: 16]};
+              else
+                ib_i <= dr_q.vertex_offset +
+                        win_q[8*caddr_q[2:0] +: 32];
+              a_q <= '0;
+              st_q <= S_GA_ATTR;
+            end
           end
           // ---- attribute gather -----------------------------------------
           S_GA_ATTR: begin
@@ -1189,10 +1489,76 @@ module g6lc_apu_rast
             end
           end
           S_GA_CVT: begin
-            if (a_fmt == APU_RAST_VF_RGBA8_UNORM) begin
-              conv_q <= '0;
+            if (a_fmt == APU_RAST_VF_R8_UNORM ||
+                a_fmt == APU_RAST_VF_RG8_UNORM ||
+                a_fmt == APU_RAST_VF_RGB8_UNORM ||
+                a_fmt == APU_RAST_VF_RGBA8_UNORM ||
+                a_fmt == APU_RAST_VF_R8_SNORM ||
+                a_fmt == APU_RAST_VF_RG8_SNORM ||
+                a_fmt == APU_RAST_VF_RGB8_SNORM ||
+                a_fmt == APU_RAST_VF_RGBA8_SNORM) begin
+              // missing components are (0, 0, 0, 1)
+              conv_q[0] <= '0; conv_q[1] <= '0; conv_q[2] <= '0;
+              conv_q[3] <= 32'h3F800000;
+              snorm_q <= a_fmt == APU_RAST_VF_R8_SNORM ||
+                         a_fmt == APU_RAST_VF_RG8_SNORM ||
+                         a_fmt == APU_RAST_VF_RGB8_SNORM ||
+                         a_fmt == APU_RAST_VF_RGBA8_SNORM;
+              u16_q <= 1'b0;
+              u8n_q <= (a_fmt == APU_RAST_VF_R8_UNORM ||
+                        a_fmt == APU_RAST_VF_R8_SNORM) ? 3'd1 :
+                       (a_fmt == APU_RAST_VF_RG8_UNORM ||
+                        a_fmt == APU_RAST_VF_RG8_SNORM) ? 3'd2 :
+                       (a_fmt == APU_RAST_VF_RGB8_UNORM ||
+                        a_fmt == APU_RAST_VF_RGB8_SNORM) ? 3'd3 : 3'd4;
               c_q <= '0;
               st_q <= S_GA_U8I;
+            end else if (a_fmt == APU_RAST_VF_R16_UNORM ||
+                         a_fmt == APU_RAST_VF_RG16_UNORM ||
+                         a_fmt == APU_RAST_VF_RGBA16_UNORM ||
+                         a_fmt == APU_RAST_VF_R16_SNORM ||
+                         a_fmt == APU_RAST_VF_RG16_SNORM ||
+                         a_fmt == APU_RAST_VF_RGB16_SNORM ||
+                         a_fmt == APU_RAST_VF_RGBA16_SNORM ||
+                         a_fmt == APU_RAST_VF_RGB16_UNORM) begin
+              conv_q[0] <= '0; conv_q[1] <= '0; conv_q[2] <= '0;
+              conv_q[3] <= 32'h3F800000;
+              snorm_q <= a_fmt == APU_RAST_VF_R16_SNORM ||
+                         a_fmt == APU_RAST_VF_RG16_SNORM ||
+                         a_fmt == APU_RAST_VF_RGB16_SNORM ||
+                         a_fmt == APU_RAST_VF_RGBA16_SNORM;
+              u16_q <= 1'b1;
+              u8n_q <= (a_fmt == APU_RAST_VF_R16_UNORM ||
+                        a_fmt == APU_RAST_VF_R16_SNORM) ? 3'd1 :
+                       (a_fmt == APU_RAST_VF_RG16_UNORM ||
+                        a_fmt == APU_RAST_VF_RG16_SNORM) ? 3'd2 :
+                       (a_fmt == APU_RAST_VF_RGB16_UNORM ||
+                        a_fmt == APU_RAST_VF_RGB16_SNORM) ? 3'd3 : 3'd4;
+              c_q <= '0;
+              st_q <= S_GA_U8I;
+            end else if (a_fmt == APU_RAST_VF_R16_SFLOAT ||
+                         a_fmt == APU_RAST_VF_RG16_SFLOAT ||
+                         a_fmt == APU_RAST_VF_RGB16_SFLOAT ||
+                         a_fmt == APU_RAST_VF_RGBA16_SFLOAT) begin
+              conv_q[0] <= f_f16_f32(win_q[8*caddr_q[2:0] +: 16]);
+              conv_q[1] <= (csz_q >= 5'd4)
+                  ? f_f16_f32(win_q[8*caddr_q[2:0] + 16 +: 16]) : '0;
+              conv_q[2] <= (csz_q >= 5'd6)
+                  ? f_f16_f32(win_q[8*caddr_q[2:0] + 32 +: 16]) : '0;
+              conv_q[3] <= (csz_q >= 5'd8)
+                  ? f_f16_f32(win_q[8*caddr_q[2:0] + 48 +: 16])
+                  : 32'h3F800000;
+              st_q <= S_GA_W0;
+            end else if (f_is_i8(a_fmt) || f_is_i16(a_fmt)) begin
+              conv_q[0] <= f_icomp(win_q, caddr_q[2:0], 2'd0, f_is_i16(a_fmt),
+                                   f_is_sint(a_fmt), f_nc(a_fmt));
+              conv_q[1] <= f_icomp(win_q, caddr_q[2:0], 2'd1, f_is_i16(a_fmt),
+                                   f_is_sint(a_fmt), f_nc(a_fmt));
+              conv_q[2] <= f_icomp(win_q, caddr_q[2:0], 2'd2, f_is_i16(a_fmt),
+                                   f_is_sint(a_fmt), f_nc(a_fmt));
+              conv_q[3] <= f_icomp(win_q, caddr_q[2:0], 2'd3, f_is_i16(a_fmt),
+                                   f_is_sint(a_fmt), f_nc(a_fmt));
+              st_q <= S_GA_W0;
             end else begin
               // f32 formats: unpack; missing comps read (0,0,0,1)
               conv_q[0] <= csz_q >= 5'd4
@@ -1202,26 +1568,38 @@ module g6lc_apu_rast
               conv_q[2] <= csz_q >= 5'd12
                   ? win_q[8*caddr_q[2:0] + 64 +: 32] : '0;
               conv_q[3] <= csz_q >= 5'd16
-                  ? win_q[8*caddr_q[2:0] + 96 +: 32] : 32'h3F800000;
+                  ? win_q[8*caddr_q[2:0] + 96 +: 32]
+                  : (f_is_int(a_fmt) ? 32'h1 : 32'h3F800000);
               st_q <= S_GA_W0;
             end
           end
           S_GA_U8I: begin
-            fp_kind_q <= 2'd2; fp_o_q <= 2'd0; fp_mod_q <= 1'b1; // I2F u32
-            fp_a_q <= {24'h0, win_q[8*caddr_q[2:0] + 8*c_q +: 8]};
+            fp_kind_q <= 2'd2; fp_o_q <= 2'd0;
+            fp_mod_q <= snorm_q ? 1'b0 : 1'b1;
+            fp_a_q <= u16_q
+                ? (snorm_q
+                   ? f_sxt16(win_q[8*caddr_q[2:0] + 16*c_q +: 16])
+                   : {16'h0, win_q[8*caddr_q[2:0] + 16*c_q +: 16]})
+                : snorm_q
+                ? f_sxt8(win_q[8*caddr_q[2:0] + 8*c_q +: 8])
+                : {24'h0, win_q[8*caddr_q[2:0] + 8*c_q +: 8]};
             fp_ret_q <= S_GA_U8M;
             st_q <= S_FPS;
           end
           S_GA_U8M: begin
             fp_kind_q <= 2'd0; fp_o_q <= 2'd2; fp_mod_q <= 1'b0;
             fp_a_q <= fp_res_q;
-            fp_b_q <= 32'h3B808081;               // *1/255
+            fp_b_q <= (u16_q && snorm_q) ? 32'h38000100 :
+                      u16_q ? 32'h38008001 :
+                      snorm_q ? 32'h3C010204 : 32'h3B808081;
             fp_ret_q <= S_GA_U8S;
             st_q <= S_FPS;
           end
           S_GA_U8S: begin
-            conv_q[c_q[1:0]] <= fp_res_q;
-            if (c_q[1:0] == 2'd3) st_q <= S_GA_W0;
+            // SNORM -128 maps to -1.  Values below -1 from rounding do too.
+            conv_q[c_q[1:0]] <= (snorm_q && f_f32_lt(fp_res_q, 32'hBF800000))
+                               ? 32'hBF800000 : fp_res_q;
+            if ({1'b0, c_q} + 4'd1 == {1'b0, u8n_q}) st_q <= S_GA_W0;
             else begin
               c_q <= c_q + 3'd1;
               st_q <= S_GA_U8I;
@@ -1301,8 +1679,12 @@ module g6lc_apu_rast
                 st_q <= S_FIN_BAD;
               end else begin
                 robust_q <= robust_q + shdp_q.robust;
-                p_q <= '0; f_q <= '0;
-                st_q <= S_PR_I0;
+                if (dr_q.rast_discard)
+                  st_q <= S_BATNEXT;
+                else begin
+                  p_q <= '0; base_q <= '0; f_q <= '0;
+                  st_q <= S_PR_I0;
+                end
               end
             end
           // ---- primitive loop ---------------------------------------------
@@ -1310,7 +1692,31 @@ module g6lc_apu_rast
           S_PR_I0: begin
             // clip mode: the fan cursor, not nv_q, bounds the loop —
             // exhaustion was already decided in the prim-done advance
-            if (!clip_q && p_q + 6'd2 >= nv_q) begin
+            // A restart index ends the primitive.  The next index
+            // is the first vertex of a new list element, strip, or
+            // fan, and the strip/fan anchor moves with it.
+            if (!clip_q && dr_q.restart && dr_q.ib_type != 2'd0 &&
+                p_q < nv_q && brk_q[p_q]) begin
+              p_q    <= p_q + 6'd1;
+              base_q <= p_q + 6'd1;
+            end else if (!clip_q && dr_q.restart && dr_q.ib_type != 2'd0 &&
+                !point_w &&
+                (line_w ? p_q + 6'd1 : p_q + 6'd2) < nv_q &&
+                (brk_q[p_q + 6'd1] ||
+                 (!line_w && brk_q[p_q + 6'd2]))) begin
+              if (brk_q[p_q]) begin
+                p_q    <= p_q + 6'd1;
+                base_q <= p_q + 6'd1;
+              end else if (brk_q[p_q + 6'd1]) begin
+                p_q    <= p_q + 6'd2;
+                base_q <= p_q + 6'd2;
+              end else begin
+                p_q    <= p_q + 6'd3;
+                base_q <= p_q + 6'd3;
+              end
+            end else if (!clip_q &&
+                         p_q + (point_w ? 6'd0 : line_w ? 6'd1 : 6'd2)
+                         >= nv_q) begin
               if (f_q != 6'd0) begin
                 nf_q <= {1'b0, f_q}; f_q <= '0;
                 flr_q <= S_BATNEXT;
@@ -1344,7 +1750,8 @@ module g6lc_apu_rast
           S_PR_I2: begin
             pos_q[t_q][2] <= mp_res_q[31:0];
             pos_q[t_q][3] <= mp_res_q[63:32];
-            if (t_q == 2'd2) st_q <= S_PR_W;
+            if (t_q == 2'd2 || (line_w && t_q == 2'd1) ||
+                (point_w && t_q == 2'd0)) st_q <= S_PR_W;
             else begin
               t_q <= t_q + 2'd1;
               st_q <= S_PR_I0B;
@@ -1380,13 +1787,29 @@ module g6lc_apu_rast
           end
           S_OC_G1: begin
             gw_q[0] <= fp_res_q;
-            fp_a_q <= CLIP_GB; fp_b_q <= pos_q[1][3];
-            fp_ret_q <= S_OC_G2; st_q <= S_FPS;
+            // A point has one vertex.  A line has two.  The third
+            // slot is stale and must not enter the outcode.
+            if (point_w) begin
+              oc_q[0] <= f_oc(pos_q[0], fp_res_q);
+              oc_q[1] <= '0;
+              oc_q[2] <= '0;
+              st_q <= S_OC;
+            end else begin
+              fp_a_q <= CLIP_GB; fp_b_q <= pos_q[1][3];
+              fp_ret_q <= S_OC_G2; st_q <= S_FPS;
+            end
           end
           S_OC_G2: begin
             gw_q[1] <= fp_res_q;
-            fp_a_q <= CLIP_GB; fp_b_q <= pos_q[2][3];
-            fp_ret_q <= S_OC_G3; st_q <= S_FPS;
+            if (line_w) begin
+              oc_q[0] <= f_oc(pos_q[0], gw_q[0]);
+              oc_q[1] <= f_oc(pos_q[1], fp_res_q);
+              oc_q[2] <= '0;
+              st_q <= S_OC;
+            end else begin
+              fp_a_q <= CLIP_GB; fp_b_q <= pos_q[2][3];
+              fp_ret_q <= S_OC_G3; st_q <= S_FPS;
+            end
           end
           S_OC_G3: begin
             gw_q[2] <= fp_res_q;
@@ -1396,8 +1819,35 @@ module g6lc_apu_rast
             st_q <= S_OC;
           end
           S_OC: begin
-            // oc_q holds all three outcodes now
-            if (|(oc_q[0] & oc_q[1] & oc_q[2])) begin
+            // Points and lines use only their own vertices.  A line
+            // that straddles a plane is clipped in registers; both
+            // ends behind the same plane are dropped.
+            if (point_w) begin
+              if (|oc_q[0]) begin
+                t_pd();
+                st_q <= S_PR_I0;
+              end else begin
+                fp_kind_q <= 2'd1; fp_o_q <= '0;
+                fp_a_q <= 32'h3F800000; fp_b_q <= pos_q[0][3];
+                fp_ret_q <= S_T0R;
+                st_q <= S_FPS;
+              end
+            end else if (line_w) begin
+              if (|(oc_q[0] & oc_q[1])) begin
+                t_pd();
+                st_q <= S_PR_I0;
+              end else if (!(|oc_q[0] || |oc_q[1])) begin
+                fp_kind_q <= 2'd1; fp_o_q <= '0;
+                fp_a_q <= 32'h3F800000; fp_b_q <= pos_q[0][3];
+                fp_ret_q <= S_T0R;
+                st_q <= S_FPS;
+              end else begin
+                cpm_q <= oc_q[0] | oc_q[1];
+                cpl_q <= f_lpl(oc_q[0] | oc_q[1]);
+                ce_q  <= '0;
+                st_q  <= S_LC_D0;
+              end
+            end else if (|(oc_q[0] & oc_q[1] & oc_q[2])) begin
               // trivially outside a common plane -> drop the prim
               if (dr_q.topology != 8'd3) p_q <= p_q + 6'd1;
               else                       p_q <= p_q + 6'd3;
@@ -1850,10 +2300,29 @@ module g6lc_apu_rast
           end
           S_T0ZF: begin
             vz_q[0] <= fp_res_q;
-            fp_a_q <= '0;
-            fp_b_q <= vnd_q[1][0]; fp_c_q <= 32'h3F800000;
-            fp_kind_q <= 2'd0; fp_o_q <= 2'd1; fp_mod_q <= 1'b0;
-            fp_ret_q <= S_T1SA; st_q <= S_FPS;
+            if (point_w) begin
+              ln_q   <= 1'b1;
+              varm_q <= dr_q.fs_in_mask;
+              if (pos_q[0][3][31]) begin
+                ln_q <= 1'b0;
+                t_pd();
+                st_q <= S_PR_I0;
+              end else if (dr_q.fs_in_mask[0]) begin
+                mp_we_q <= 1'b0;
+                mp_addr_q <= {32'h0, vso_q} +
+                             64'(f_pi(2'd0)) * 64'(VSTR) + 64'd16;
+                mp_data_q <= '0; mp_strb_q <= '0;
+                mp_ret_q <= S_LN_VF2;
+                mp_acked_q <= 1'b0;
+                st_q <= S_MPW;
+              end else
+                st_q <= S_LN_INIT;
+            end else begin
+              fp_a_q <= '0;
+              fp_b_q <= vnd_q[1][0]; fp_c_q <= 32'h3F800000;
+              fp_kind_q <= 2'd0; fp_o_q <= 2'd1; fp_mod_q <= 1'b0;
+              fp_ret_q <= S_T1SA; st_q <= S_FPS;
+            end
           end
           S_T1SA: begin
             fp_a_q <= fp_res_q; fp_b_q <= vphw_q; fp_c_q <= dr_q.vp.x;
@@ -1901,10 +2370,30 @@ module g6lc_apu_rast
           end
           S_T1ZF: begin
             vz_q[1] <= fp_res_q;
-            fp_a_q <= '0;
-            fp_b_q <= vnd_q[2][0]; fp_c_q <= 32'h3F800000;
-            fp_kind_q <= 2'd0; fp_o_q <= 2'd1; fp_mod_q <= 1'b0;
-            fp_ret_q <= S_T2SA; st_q <= S_FPS;
+            if (line_w) begin
+              // no polygon: flat colour from endpoint 0, then Bresenham
+              ln_q    <= 1'b1;
+              varm_q  <= dr_q.fs_in_mask;
+              if (pos_q[0][3][31] || pos_q[1][3][31]) begin
+                ln_q <= 1'b0;
+                t_pd();
+                st_q <= S_PR_I0;
+              end else if (dr_q.fs_in_mask[0]) begin
+                mp_we_q <= 1'b0;
+                mp_addr_q <= {32'h0, vso_q} +
+                             64'(f_pi(2'd0)) * 64'(VSTR) + 64'd16;
+                mp_data_q <= '0; mp_strb_q <= '0;
+                mp_ret_q <= S_LN_VF2;
+                mp_acked_q <= 1'b0;
+                st_q <= S_MPW;
+              end else
+                st_q <= S_LN_INIT;
+            end else begin
+              fp_a_q <= '0;
+              fp_b_q <= vnd_q[2][0]; fp_c_q <= 32'h3F800000;
+              fp_kind_q <= 2'd0; fp_o_q <= 2'd1; fp_mod_q <= 1'b0;
+              fp_ret_q <= S_T2SA; st_q <= S_FPS;
+            end
           end
           S_T2SA: begin
             fp_a_q <= fp_res_q; fp_b_q <= vphw_q; fp_c_q <= dr_q.vp.x;
@@ -1953,7 +2442,31 @@ module g6lc_apu_rast
           S_T2ZF: begin
             vz_q[2] <= fp_res_q;
             area_q <= area_w;
-            st_q <= S_PR_AREA;
+            // Unclipped triangle.  LINE walks the three edges.  POINT
+            // plots one pixel at each vertex.  A clipped polygon stays
+            // on the fill walker.  poly_mode is the raw VkPolygonMode
+            // (FILL 0, LINE 1, POINT 2) as the pipeline stored it.
+            if ((dr_q.poly_mode == 2'd1 || dr_q.poly_mode == 2'd2) &&
+                !line_w && !point_w &&
+                !clip_q && !pos_q[0][3][31] && !pos_q[1][3][31] &&
+                !pos_q[2][3][31]) begin
+              le_q <= 2'd0;
+              poly_ln_q <= (dr_q.poly_mode == 2'd1);
+              poly_pt_q <= (dr_q.poly_mode == 2'd2);
+              ln_q <= 1'b1;
+              varm_q <= dr_q.fs_in_mask;
+              if (dr_q.fs_in_mask[0]) begin
+                mp_we_q <= 1'b0;
+                mp_addr_q <= {32'h0, vso_q} +
+                             64'(f_pi(2'd0)) * 64'(VSTR) + 64'd16;
+                mp_data_q <= '0; mp_strb_q <= '0;
+                mp_ret_q <= S_LN_VF2;
+                mp_acked_q <= 1'b0;
+                st_q <= S_MPW;
+              end else
+                st_q <= S_LN_INIT;
+            end else
+              st_q <= S_PR_AREA;
           end
           // -- area, cull, top-left, bbox, rcp_area --------------------------
           S_PR_AREA: begin
@@ -2247,13 +2760,31 @@ module g6lc_apu_rast
           end
           S_F_PY2: begin
             conv_q[1] <= fp_res_q;               // py+0.5
+            // Depth bounds uses the raster window z, including when
+            // the fragment shader will write FragDepth.  A miss is a
+            // helper: no colour, depth, or stencil update.
+            if (dr_q.depth_bounds_en && dr_q.da_valid && !help_q &&
+                (f_f32_lt(zc_w, dr_q.depth_bounds_min) ||
+                 f_f32_lt(dr_q.depth_bounds_max, zc_w))) begin
+              help_q <= 1'b1;
+              st_q <= S_F_W0;
+            end else begin
             // helpers skip early-Z entirely (G2b); so do draws with
             // no depth attachment; G3a-i fs_late draws defer the test
             // to the ROP (slot-8 FragDepth / discard must be known)
             st_q <= (!dr_q.da_valid || help_q || dr_q.fs_late) ? S_F_W0
+                    : (dr_q.depth_bias_en &&
+                       (dr_q.depth_test || dr_q.depth_write)) ? S_DB0
                     : dr_q.depth_test ? S_DZ_RD
                     : dr_q.depth_write ? S_DZ_WR
                     : S_F_W0;
+            if (dr_q.depth_bias_en && dr_q.da_valid && !help_q &&
+                !dr_q.fs_late &&
+                (dr_q.depth_test || dr_q.depth_write)) begin
+              db_late_q <= 1'b0;
+              db_ret_q  <= dr_q.depth_test ? S_DZ_RD : S_DZ_WR;
+            end
+            end
           end
           // ---- early-Z: read depth, compare, optionally write ----
           S_DZ_RD: begin
@@ -2275,6 +2806,13 @@ module g6lc_apu_rast
               fp_a_q <= {16'h0, mp_res_q[16*px_q[1:0] +: 16]};
               fp_ret_q <= S_DZ_DM;
               st_q <= S_FPS;
+            end else if (dr_q.da.fmt == 8'(APU_IMG_FMT_D24_UNORM_S8_UINT)) begin
+              stn_q <= mp_res_q[32*px_q[0] +: 32][31:24];
+              std_q <= mp_res_q[32*px_q[0] +: 32][23:0];
+              fp_kind_q <= 2'd2; fp_o_q <= 2'd0; fp_mod_q <= 1'b1;
+              fp_a_q <= {8'h0, mp_res_q[32*px_q[0] +: 32][23:0]};
+              fp_ret_q <= S_DZ_DM;
+              st_q <= S_FPS;
             end else begin
               dz_q <= mp_res_q[32*px_q[0] +: 32];
               st_q <= S_DZ_C2;
@@ -2283,27 +2821,50 @@ module g6lc_apu_rast
           S_DZ_DM: begin
             fp_kind_q <= 2'd0; fp_o_q <= 2'd2; fp_mod_q <= 1'b0;
             fp_a_q <= fp_res_q;
-            fp_b_q <= 32'h38008001;              // *1/65535
+            fp_b_q <= (dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM))
+                      ? 32'h38008001 : 32'h33800001;
             fp_ret_q <= S_DZ_C2;
             st_q <= S_FPS;
           end
           S_DZ_C2: begin
-            if (dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM))
+            if (dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM) ||
+                dr_q.da.fmt == 8'(APU_IMG_FMT_D24_UNORM_S8_UINT))
               dz_q <= fp_res_q;
-            // (dz_q holds the decoded texel for D32 already)
-            if (!f_dcmp(dr_q.depth_op, zc_w,
-                        dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM)
-                        ? fp_res_q : dz_q)) begin
-              // depth fail: the lane still joins the FS batch but as
-              // a helper — quad records must stay 4-aligned for the
-              // shader's derivative groups, and helpers never reach
-              // the ROP so nothing is written
+            // stencil on D24S8.  A fail still writes the stencil byte
+            // and does not write colour.  A pass updates the byte and
+            // then takes the normal depth result.
+            if (dr_q.stencil_en &&
+                dr_q.da.fmt == 8'(APU_IMG_FMT_D24_UNORM_S8_UINT) &&
+                !f_scmp(st_cmp_w, stn_q, st_ref_w, st_cmask_w)) begin
+              stn_q <= f_sop(st_fail_w, stn_q, st_ref_w, st_wmask_w);
+              st_hold_q <= 1'b1;
               help_q <= 1'b1;
-              st_q <= S_F_W0;
-            end else if (dr_q.depth_write)
               st_q <= S_DZ_WR;
-            else
-              st_q <= S_F_W0;
+            end else if (dr_q.stencil_en &&
+                dr_q.da.fmt == 8'(APU_IMG_FMT_D24_UNORM_S8_UINT) &&
+                !f_dcmp(dr_q.depth_op, zc_w, fp_res_q)) begin
+              stn_q <= f_sop(st_dfail_w, stn_q, st_ref_w, st_wmask_w);
+              st_hold_q <= 1'b1;
+              help_q <= 1'b1;
+              st_q <= S_DZ_WR;
+            end else begin
+              st_hold_q <= 1'b0;
+              if (dr_q.stencil_en &&
+                  dr_q.da.fmt == 8'(APU_IMG_FMT_D24_UNORM_S8_UINT))
+                stn_q <= f_sop(st_pass_w, stn_q, st_ref_w, st_wmask_w);
+              if (!f_dcmp(dr_q.depth_op, zc_w,
+                          (dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM) ||
+                           dr_q.da.fmt == 8'(APU_IMG_FMT_D24_UNORM_S8_UINT))
+                          ? fp_res_q : dz_q)) begin
+                help_q <= 1'b1;
+                st_q <= S_F_W0;
+              end else if (dr_q.depth_write ||
+                           (dr_q.stencil_en &&
+                            dr_q.da.fmt == 8'(APU_IMG_FMT_D24_UNORM_S8_UINT)))
+                st_q <= S_DZ_WR;
+              else
+                st_q <= S_F_W0;
+            end
           end
           S_DZ_WR: begin
             mp_we_q <= 1'b1;
@@ -2314,7 +2875,10 @@ module g6lc_apu_rast
                                ? 32'd2 : 32'd4)) & ~64'd7);
             mp_data_q <=
               dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM)
-              ? {4{f_f32_u16(zc_w)}} : {2{zc_w}};
+              ? {4{f_f32_u16(zc_w)}}
+              : dr_q.da.fmt == 8'(APU_IMG_FMT_D24_UNORM_S8_UINT)
+              ? {2{stn_q, st_hold_q ? std_q : f_f32_u24(zc_w)}}
+              : {2{zc_w}};
             mp_strb_q <=
               dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM)
               ? 8'h03 << {px_q[1:0], 1'b0}
@@ -2351,14 +2915,26 @@ module g6lc_apu_rast
               // fragment complete: record pixel + helper flag, then
               // the next lane of the 2x2 block (or the next block).
               // f_q is always ≡0 mod 4 at a block boundary, so a
-              // batch-full flush can only split between blocks
+              // batch-full flush can only split between blocks.
+              // A line emits one fragment per pixel and returns to
+              // the Bresenham step instead of the triangle scan.
               fsxy_q[f_q]   <= {py_q, px_q};
               fs_help_q[f_q] <= help_q;
               fsz_q[f_q]    <= fz_q;
               // A1.3: the first fragment of a fresh batch adopts the
               // accepting primitive's facing — a mid-draw flush
               // (facing change) keeps emitting the OLD batch's bit
-              if (f_q == 6'd0) bat_front_q <= front_q;
+              if (f_q == 6'd0) bat_front_q <= ln_q ? 1'b1 : front_q;
+              if (ln_q) begin
+                if ({1'b0, f_q} + 7'd1 == 7'(FSB)) begin
+                  nf_q <= {1'b0, f_q} + 7'd1; f_q <= '0;
+                  flr_q <= S_LN_STEP;
+                  st_q <= S_FLUSH;
+                end else begin
+                  f_q  <= f_q + 6'd1;
+                  st_q <= S_LN_STEP;
+                end
+              end else begin
               lane_q <= lane_q + 2'd1;
               if ({1'b0, f_q} + 7'd1 == 7'(FSB)) begin
                 nf_q <= {1'b0, f_q} + 7'd1; f_q <= '0;
@@ -2369,6 +2945,7 @@ module g6lc_apu_rast
                 f_q <= f_q + 6'd1;
                 if (lane_q == 2'd3) sx_q <= sx_q + 16'd2;
                 st_q <= (lane_q == 2'd3) ? S_SCAN : S_F_LNEXT;
+              end
               end
             end else if (!varm_q[lc_q[2:0]]) begin
               lc_q <= lc_q + 4'd1;
@@ -2429,6 +3006,200 @@ module g6lc_apu_rast
             lc_q <= lc_q + 4'd1;
             st_q <= S_MPW;
           end
+          // ---- 1 px line list / strip (Bresenham) ----------------------
+          S_LN_VF2: begin
+            var_q[0][0][0] <= mp_res_q[31:0];
+            var_q[0][0][1] <= mp_res_q[63:32];
+            mp_we_q <= 1'b0;
+            mp_addr_q <= mp_addr_q + 64'd8;
+            mp_ret_q <= S_LN_VF3;
+            mp_acked_q <= 1'b0;
+            st_q <= S_MPW;
+          end
+          S_LN_VF3: begin
+            var_q[0][0][2] <= mp_res_q[31:0];
+            var_q[0][0][3] <= mp_res_q[63:32];
+            st_q <= S_LN_INIT;
+          end
+          S_LN_INIT: begin
+            lx_q  <= 16'(vxi_q[l0_w] >>> 8);
+            ly_q  <= 16'(vyi_q[l0_w] >>> 8);
+            lxe_q <= 16'(vxi_q[l1_w] >>> 8);
+            lye_q <= 16'(vyi_q[l1_w] >>> 8);
+            ldx_q <= (vxi_q[l0_w] >>> 8) >= (vxi_q[l1_w] >>> 8)
+                     ? 16'((vxi_q[l0_w] >>> 8) - (vxi_q[l1_w] >>> 8))
+                     : 16'((vxi_q[l1_w] >>> 8) - (vxi_q[l0_w] >>> 8));
+            ldy_q <= (vyi_q[l0_w] >>> 8) >= (vyi_q[l1_w] >>> 8)
+                     ? 16'((vyi_q[l0_w] >>> 8) - (vyi_q[l1_w] >>> 8))
+                     : 16'((vyi_q[l1_w] >>> 8) - (vyi_q[l0_w] >>> 8));
+            lxs_q <= ((vxi_q[l0_w] >>> 8) < (vxi_q[l1_w] >>> 8))
+                     ? 16'sd1 : -16'sd1;
+            lys_q <= ((vyi_q[l0_w] >>> 8) < (vyi_q[l1_w] >>> 8))
+                     ? 16'sd1 : -16'sd1;
+            lerr_q <= 17'((vxi_q[l0_w] >>> 8) >= (vxi_q[l1_w] >>> 8)
+                          ? (vxi_q[l0_w] >>> 8) - (vxi_q[l1_w] >>> 8)
+                          : (vxi_q[l1_w] >>> 8) - (vxi_q[l0_w] >>> 8))
+                      - 17'((vyi_q[l0_w] >>> 8) >= (vyi_q[l1_w] >>> 8)
+                            ? (vyi_q[l0_w] >>> 8) - (vyi_q[l1_w] >>> 8)
+                            : (vyi_q[l1_w] >>> 8) - (vyi_q[l0_w] >>> 8));
+            pv_q[0] <= 32'h3F800000;
+            pv_q[1] <= '0;
+            pv_q[2] <= '0;
+            rs_q    <= 32'h3F800000;
+            fz_q    <= poly_pt_q ? vz_q[l0_w] : vz_q[0];
+            help_q  <= 1'b0;
+            st_q    <= S_LN_PIX;
+          end
+          S_LN_PIX: begin
+            if (lx_q < 16'sd0 || ly_q < 16'sd0 ||
+                lx_q < signed'(dr_q.sc_x) || ly_q < signed'(dr_q.sc_y) ||
+                lx_q >= signed'(dr_q.sc_x) + signed'(dr_q.sc_w) ||
+                ly_q >= signed'(dr_q.sc_y) + signed'(dr_q.sc_h))
+              st_q <= S_LN_STEP;
+            else begin
+              px_q  <= 16'(lx_q);
+              py_q  <= 16'(ly_q);
+              lc_q  <= '0;
+              c_q   <= '0;
+              st_q  <= S_F_LSET;
+            end
+          end
+          S_LN_STEP: begin
+            if (lx_q == lxe_q && ly_q == lye_q) begin
+              if ((poly_ln_q || poly_pt_q) && le_q != 2'd2) begin
+                // A polygon point takes that vertex's attributes.
+                // The line edges stay flat from vertex 0.
+                if (poly_pt_q && dr_q.fs_in_mask[0]) begin
+                  mp_we_q <= 1'b0;
+                  mp_addr_q <= {32'h0, vso_q} +
+                               64'(f_pi(le_q + 2'd1)) * 64'(VSTR) + 64'd16;
+                  mp_data_q <= '0; mp_strb_q <= '0;
+                  mp_ret_q <= S_LN_VF2;
+                  mp_acked_q <= 1'b0;
+                  le_q <= le_q + 2'd1;
+                  st_q <= S_MPW;
+                end else begin
+                  le_q <= le_q + 2'd1;
+                  st_q <= S_LN_INIT;
+                end
+              end else begin
+              poly_ln_q <= 1'b0;
+              poly_pt_q <= 1'b0;
+              ln_q <= 1'b0;
+              t_pd();
+              if (f_q != 6'd0) begin
+                nf_q <= {1'b0, f_q}; f_q <= '0;
+                flr_q <= S_PR_I0;
+                st_q <= S_FLUSH;
+              end else
+                st_q <= S_PR_I0;
+              end
+            end else begin
+              if ((32'(lerr_q) <<< 1) > -32'(ldy_q) &&
+                  (32'(lerr_q) <<< 1) < 32'(ldx_q)) begin
+                lerr_q <= lerr_q - 17'(ldy_q) + 17'(ldx_q);
+                lx_q   <= lx_q + lxs_q;
+                ly_q   <= ly_q + lys_q;
+              end else if ((32'(lerr_q) <<< 1) > -32'(ldy_q)) begin
+                lerr_q <= lerr_q - 17'(ldy_q);
+                lx_q   <= lx_q + lxs_q;
+              end else begin
+                lerr_q <= lerr_q + 17'(ldx_q);
+                ly_q   <= ly_q + lys_q;
+              end
+              st_q <= S_LN_PIX;
+            end
+          end
+          // constantFactor * r, plus slopeFactor * max|dz|/span,
+          // then depthBiasClamp, then add to z.
+          S_DB0: begin
+            fp_kind_q <= 2'd0; fp_o_q <= 2'd2; fp_mod_q <= 1'b0;
+            fp_a_q <= dr_q.depth_bias_const;
+            fp_b_q <= (dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM))
+                      ? 32'h37800000 : 32'h3F800000;
+            fp_ret_q <= S_DBCR;
+            st_q <= S_FPS;
+          end
+          S_DBCR: begin
+            db_cr_q <= fp_res_q;
+            if (point_w || line_w || poly_ln_q || poly_pt_q ||
+                dr_q.depth_bias_slope[30:0] == 31'h0)
+              st_q <= S_DB1;
+            else begin
+              fp_b_q <= vz_q[1]; fp_c_q <= vz_q[0];
+              fp_kind_q <= 2'd0; fp_o_q <= 2'd1; fp_mod_q <= 1'b1;
+              fp_ret_q <= S_DS0;
+              st_q <= S_FPS;
+            end
+          end
+          S_DS0: begin
+            db_dz_q <= {1'b0, fp_res_q[30:0]};
+            fp_b_q <= vz_q[2]; fp_c_q <= vz_q[0];
+            fp_kind_q <= 2'd0; fp_o_q <= 2'd1; fp_mod_q <= 1'b1;
+            fp_ret_q <= S_DS1;
+            st_q <= S_FPS;
+          end
+          S_DS1: begin
+            if (f_f32_lt(db_dz_q, {1'b0, fp_res_q[30:0]}))
+              db_dz_q <= {1'b0, fp_res_q[30:0]};
+            fp_b_q <= vz_q[2]; fp_c_q <= vz_q[1];
+            fp_kind_q <= 2'd0; fp_o_q <= 2'd1; fp_mod_q <= 1'b1;
+            fp_ret_q <= S_DS2;
+            st_q <= S_FPS;
+          end
+          S_DS2: begin
+            if (f_f32_lt(db_dz_q, {1'b0, fp_res_q[30:0]}))
+              db_dz_q <= {1'b0, fp_res_q[30:0]};
+            fp_kind_q <= 2'd2; fp_o_q <= 2'd0; fp_mod_q <= 1'b0;
+            fp_a_q <= {16'h0, span_w};
+            fp_ret_q <= S_DS3;
+            st_q <= S_FPS;
+          end
+          S_DS3: begin
+            fp_kind_q <= 2'd1; fp_o_q <= 2'd0; fp_mod_q <= 1'b0;
+            fp_a_q <= db_dz_q; fp_b_q <= fp_res_q;
+            fp_ret_q <= S_DS4;
+            st_q <= S_FPS;
+          end
+          S_DS4: begin
+            fp_kind_q <= 2'd0; fp_o_q <= 2'd2; fp_mod_q <= 1'b0;
+            fp_a_q <= dr_q.depth_bias_slope; fp_b_q <= fp_res_q;
+            fp_ret_q <= S_DS5;
+            st_q <= S_FPS;
+          end
+          S_DS5: begin
+            fp_kind_q <= 2'd0; fp_o_q <= 2'd0; fp_mod_q <= 1'b0;
+            fp_a_q <= 32'h3F800000; fp_b_q <= fp_res_q; fp_c_q <= db_cr_q;
+            fp_ret_q <= S_DB1;
+            st_q <= S_FPS;
+          end
+          S_DB1: begin
+            if (dr_q.depth_bias_clamp[30:0] != 31'h0 &&
+                !dr_q.depth_bias_clamp[31] &&
+                f_f32_lt(dr_q.depth_bias_clamp, fp_res_q))
+              db_bias_q <= dr_q.depth_bias_clamp;
+            else if (dr_q.depth_bias_clamp[31] &&
+                     dr_q.depth_bias_clamp[30:0] != 31'h0 &&
+                     f_f32_lt(fp_res_q, dr_q.depth_bias_clamp))
+              db_bias_q <= dr_q.depth_bias_clamp;
+            else
+              db_bias_q <= fp_res_q;
+            st_q <= S_DB1B;
+          end
+          S_DB1B: begin
+            fp_kind_q <= 2'd0; fp_o_q <= 2'd0; fp_mod_q <= 1'b0;
+            fp_a_q <= 32'h3F800000;
+            fp_b_q <= db_late_q ? lz_q : fz_q;
+            fp_c_q <= db_bias_q;
+            fp_ret_q <= S_DB2;
+            st_q <= S_FPS;
+          end
+          S_DB2: begin
+            if (db_late_q) lz_q <= fp_res_q;
+            else           fz_q <= fp_res_q;
+            db_done_q <= 1'b1;
+            st_q <= db_ret_q;
+          end
           // ---- FS batch flush ----------------------------------------------
           S_FLUSH: begin
 // pragma translate_off
@@ -2479,6 +3250,7 @@ module g6lc_apu_rast
           // FS-out location l -> ca[l]; dst read-back + f32 blend when
           // enabled, per-format encode, colorWriteMask strobes
           S_ROP_R0: begin
+            db_done_q <= 1'b0;
             if (fs_help_q[r_q]) begin
               // helper invocation: it only exists to complete the
               // derivative quad — never let it reach a pixel write
@@ -2533,7 +3305,16 @@ module g6lc_apu_rast
           S_ROP_R2: begin
             src_q[2] <= mp_res_q[31:0];
             src_q[3] <= mp_res_q[63:32];
-            if (!dr_q.blend[at_q].en) begin
+            if (dr_q.logic_op_en) begin
+              mp_we_q <= 1'b0;
+              mp_addr_q <= {32'h0, dr_q.ca[at_q].base} +
+                           64'(fr_py) * 64'(cpitch_w) +
+                           64'((32'(fr_px) * 32'd4) & ~64'd7);
+              mp_data_q <= '0; mp_strb_q <= '0;
+              mp_ret_q <= S_ROP_LOP;
+              mp_acked_q <= 1'b0;
+              st_q <= S_MPW;
+            end else if (!dr_q.blend[at_q].en) begin
               res_q <= {mp_res_q[63:32], mp_res_q[31:0],
                         src_q[1], src_q[0]};
               st_q <= S_ROP_WR;
@@ -2603,6 +3384,12 @@ module g6lc_apu_rast
             st_q <= S_FPS;
           end
           S_ROP_LC: begin
+            if (dr_q.depth_bias_en && !db_done_q) begin
+              db_late_q <= 1'b1;
+              db_ret_q  <= S_ROP_LC;
+              st_q <= S_DB0;
+            end else begin
+            db_done_q <= 1'b0;
             if (dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM))
               dz_q <= fp_res_q;
             if (!f_dcmp(dr_q.depth_op, lzc_w,
@@ -2621,6 +3408,7 @@ module g6lc_apu_rast
             end else begin
               lzdone_q <= 1'b1;
               st_q <= S_ROP_R0;
+            end
             end
           end
           S_ROP_LWR: begin
@@ -2778,12 +3566,18 @@ module g6lc_apu_rast
                       : S_BL_MM;
             end
           end
+          S_ROP_LOP: begin
+            lop_pix_q <= f_lop_pix(dr_q.ca[at_q].fmt, dr_q.logic_op,
+                                   src_q[0], src_q[1], src_q[2], src_q[3],
+                                   mp_res_q[32*fr_px[0] +: 32]);
+            st_q <= S_ROP_WR;
+          end
           S_ROP_WR: begin
             mp_we_q <= 1'b1;
             mp_addr_q <= {32'h0, dr_q.ca[at_q].base} +
                          64'(fr_py) * 64'(cpitch_w) +
                          64'((32'(fr_px) * 32'd4) & ~64'd7);
-            mp_data_q <= {rop_pix, rop_pix};
+            mp_data_q <= {2{dr_q.logic_op_en ? lop_pix_q : rop_pix}};
             mp_strb_q <= rop_strb;
             mp_ret_q <= S_ROP_NX;
             mp_acked_q <= 1'b0;
@@ -2864,6 +3658,121 @@ module g6lc_apu_rast
             end
           end
           // ---- completion --------------------------------------------------
+          // ---- line segment against one frustum plane -----------------
+          // Distances match the triangle clipper.  The outside
+          // endpoint moves onto the plane.  Flat colour stays the
+          // original vertex 0 record.
+          S_LC_D0: begin
+            if (cpl_q == 3'd0) begin
+              cdis_q[ce_q] <= pos_q[ce_q[0]][2];
+              if (ce_q == 4'd0) begin
+                ce_q <= 4'd1;
+                st_q <= S_LC_D0;
+              end else
+                st_q <= S_LC_T0;
+            end else if (cpl_q == 3'd1) begin
+              fp_kind_q <= 2'd0; fp_o_q <= 2'd1; fp_mod_q <= 1'b1;
+              fp_a_q <= '0;
+              fp_b_q <= pos_q[ce_q[0]][3];
+              fp_c_q <= pos_q[ce_q[0]][2];
+              fp_ret_q <= S_LC_DD;
+              st_q <= S_FPS;
+            end else if (cpl_q == 3'd2) begin
+              fp_kind_q <= 2'd0; fp_o_q <= 2'd1; fp_mod_q <= 1'b1;
+              fp_a_q <= '0;
+              fp_b_q <= pos_q[ce_q[0]][3];
+              fp_c_q <= CLIP_EPS;
+              fp_ret_q <= S_LC_DD;
+              st_q <= S_FPS;
+            end else begin
+              fp_kind_q <= 2'd0; fp_o_q <= 2'd2; fp_mod_q <= 1'b0;
+              fp_a_q <= CLIP_GB; fp_b_q <= pos_q[ce_q[0]][3];
+              fp_ret_q <= S_LC_DG;
+              st_q <= S_FPS;
+            end
+          end
+          S_LC_DG: begin
+            fp_kind_q <= 2'd0; fp_o_q <= 2'd1; fp_mod_q <= 1'b1;
+            fp_a_q <= '0;
+            fp_b_q <= fp_res_q;
+            fp_c_q <= {1'b0, pos_q[ce_q[0]][cpl_q == 3'd3 ? 0 : 1][30:0]};
+            fp_ret_q <= S_LC_DD;
+            st_q <= S_FPS;
+          end
+          S_LC_DD: begin
+            cdis_q[ce_q] <= fp_res_q;
+            if (ce_q == 4'd0) begin
+              ce_q <= 4'd1;
+              st_q <= S_LC_D0;
+            end else
+              st_q <= S_LC_T0;
+          end
+          S_LC_T0: begin
+            if (f_f32_lt(cdis_q[0], 32'h0) && f_f32_lt(cdis_q[1], 32'h0)) begin
+              t_pd();
+              st_q <= S_PR_I0;
+            end else if (!f_f32_lt(cdis_q[0], 32'h0) &&
+                         !f_f32_lt(cdis_q[1], 32'h0)) begin
+              st_q <= S_LC_N;
+            end else begin
+              // Index of the outside endpoint.
+              lc_out_q <= !f_f32_lt(cdis_q[0], 32'h0);
+              fp_kind_q <= 2'd0; fp_o_q <= 2'd1; fp_mod_q <= 1'b1;
+              fp_a_q <= '0;
+              fp_b_q <= f_f32_lt(cdis_q[0], 32'h0) ? cdis_q[0] : cdis_q[1];
+              fp_c_q <= f_f32_lt(cdis_q[0], 32'h0) ? cdis_q[1] : cdis_q[0];
+              fp_ret_q <= S_LC_T1;
+              st_q <= S_FPS;
+            end
+          end
+          S_LC_T1: begin
+            fp_kind_q <= 2'd1; fp_o_q <= '0;
+            fp_a_q <= cdis_q[lc_out_q];
+            fp_b_q <= fp_res_q;
+            fp_ret_q <= S_LC_TL;
+            st_q <= S_FPS;
+          end
+          S_LC_TL: begin
+            ctt_q <= fp_res_q;
+            c_q   <= '0;
+            st_q  <= S_LC_C0;
+          end
+          S_LC_C0: begin
+            fp_kind_q <= 2'd0; fp_o_q <= 2'd1; fp_mod_q <= 1'b1;
+            fp_a_q <= '0;
+            fp_b_q <= pos_q[!lc_out_q][c_q[1:0]];
+            fp_c_q <= pos_q[lc_out_q][c_q[1:0]];
+            fp_ret_q <= S_LC_C1;
+            st_q <= S_FPS;
+          end
+          S_LC_C1: begin
+            fp_kind_q <= 2'd0; fp_o_q <= 2'd0; fp_mod_q <= 1'b0;
+            fp_a_q <= ctt_q; fp_b_q <= fp_res_q;
+            fp_c_q <= pos_q[lc_out_q][c_q[1:0]];
+            fp_ret_q <= S_LC_C2;
+            st_q <= S_FPS;
+          end
+          S_LC_C2: begin
+            pos_q[lc_out_q][c_q[1:0]] <= fp_res_q;
+            if (c_q[1:0] == 2'd3) st_q <= S_LC_N;
+            else begin
+              c_q  <= c_q + 3'd1;
+              st_q <= S_LC_C0;
+            end
+          end
+          S_LC_N: begin
+            if (f_lpl(cpm_q & ~(5'b1 << cpl_q)) == 3'd7) begin
+              fp_kind_q <= 2'd1; fp_o_q <= '0;
+              fp_a_q <= 32'h3F800000; fp_b_q <= pos_q[0][3];
+              fp_ret_q <= S_T0R;
+              st_q <= S_FPS;
+            end else begin
+              cpm_q <= cpm_q & ~(5'b1 << cpl_q);
+              cpl_q <= f_lpl(cpm_q & ~(5'b1 << cpl_q));
+              ce_q  <= '0;
+              st_q  <= S_LC_D0;
+            end
+          end
           S_FIN_OK: begin
             done_o <= 1'b1;
             done_pl_o <= '{code: APU_SH_DONE_OK, wave: '0, pc: '0,

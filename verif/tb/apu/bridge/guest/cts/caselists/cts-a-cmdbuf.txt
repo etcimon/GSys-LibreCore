@@ -1,0 +1,6 @@
+dEQP-VK.api.command_buffers.pool_create_null_params
+dEQP-VK.api.command_buffers.pool_create_reset_bit
+dEQP-VK.api.command_buffers.allocate_single_primary
+dEQP-VK.api.command_buffers.allocate_single_secondary
+dEQP-VK.api.command_buffers.record_single_primary
+dEQP-VK.api.command_buffers.execute_small_primary

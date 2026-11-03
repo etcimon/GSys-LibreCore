@@ -1,0 +1,9 @@
+dEQP-VK.api.object_management.single.pipeline_cache
+dEQP-VK.api.object_management.single.pipeline_layout_single
+dEQP-VK.api.object_management.single.descriptor_set_layout_single
+dEQP-VK.api.object_management.single.descriptor_pool_free_descriptor_set
+dEQP-VK.api.object_management.single.fence_signaled
+dEQP-VK.api.object_management.single.query_pool
+dEQP-VK.api.object_management.single.render_pass
+dEQP-VK.api.object_management.single.framebuffer
+dEQP-VK.api.object_management.single.graphics_pipeline

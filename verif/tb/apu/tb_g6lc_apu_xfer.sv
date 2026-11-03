@@ -764,6 +764,26 @@ module tb_g6lc_apu_xfer;
     cmp_range(DSTB, DSTB + BUFZ, "fill WHOLE");
     axi_balance("fill-whole");
 
+    // VK_WHOLE_SIZE over a remainder that is not a multiple of 4: the
+    // spec fills the nearest smaller multiple of 4 and leaves the tail
+    // bytes untouched (CTS fill_buffer_vk_whole_size_N_extra_bytes)
+    for (int extra = 1; extra <= 3; extra++) begin
+      cases++;
+      stage_w[0] = 32'h1FF0; stage_w[1] = 0;
+      stage_w[2] = 32'hFFFF_FFFF; stage_w[3] = 32'hFFFF_FFFF;
+      stage(4, pb);
+      poison(DSTB, BUFZ);
+      for (int i = 32'h1FF0; i < int'(BUFZ) - 4; i++) ewr8(DSTB + i, 8'hD7);
+      issue('{op: APU_XFER_OP_FILL, pay_base: 32'(pb),
+             regions: '0, src_base: '0, src_size: '0,
+             dst_base: DSTB, dst_size: BUFZ - 4 + 32'(extra), img0: '0, img1: '0},
+            32'hD7D7_D7D7, pl);
+      check(pl.code == APU_SH_DONE_OK,
+            $sformatf("fill WHOLE +%0d extra done code", extra));
+      cmp_range(DSTB, DSTB + BUFZ, $sformatf("fill WHOLE +%0d extra", extra));
+      axi_balance($sformatf("fill-whole-extra%0d", extra));
+    end
+
     // misaligned dstOffset -> FAULT, zero bytes written
     cases++;
     stage_w[0] = 32'h42; stage_w[1] = 0;
@@ -808,6 +828,25 @@ module tb_g6lc_apu_xfer;
     check(pl.code == APU_SH_DONE_OK, "update done code");
     cmp_range(DSTB, DSTB + BUFZ, "update");
     axi_balance("update");
+
+    // 4080 bytes spans many 64-word payload chunks.  The sync CTS
+    // update is 16 KiB and the guest hung with no DMA, so a multi-chunk
+    // update has to retire.
+    cases++;
+    stage_w[0] = 32'h0; stage_w[1] = 0;
+    stage_w[2] = 32'd4080; stage_w[3] = 0;
+    for (int i = 0; i < 1020; i++)
+      stage_w[4 + i] = 32'(i) ^ 32'hA5A5_0000;
+    stage(4 + 1020, pb);
+    poison(DSTB, BUFZ);
+    for (int i = 0; i < 4080; i++)
+      ewr8(DSTB + i, 8'(((32'(i >> 2) ^ 32'hA5A5_0000) >> (8 * (i & 3)))));
+    issue('{op: APU_XFER_OP_UPDATE, pay_base: 32'(pb),
+           regions: '0, src_base: '0, src_size: '0,
+           dst_base: DSTB, dst_size: BUFZ, img0: '0, img1: '0}, '0, pl);
+    check(pl.code == APU_SH_DONE_OK, "update 4k done code");
+    cmp_range(DSTB, DSTB + BUFZ, "update 4k");
+    axi_balance("update 4k");
 
     // dataSize % 4 != 0 -> FAULT
     cases++;
@@ -1082,6 +1121,82 @@ module tb_g6lc_apu_xfer;
       check(pl.code == APU_SH_DONE_OK, "b2i 1d done code");
       cmp_range(IMGB, IMGB + 2240, "b2i 1d image");
       axi_balance("b2i 1d");
+    end
+
+    // ============ 3D 32x29x3 R32_UINT, full mip chain =================
+    // Same shape as clear_color_image.3d.*_32x29x3: six mips, a
+    // {base 0, count 1} clear of the whole depth, then one
+    // copy-image-to-buffer region per mip with layerCount 1 and
+    // extent.depth = that mip's depth.  The buffer is tightly packed.
+    begin
+      automatic apu_xfer_img_t im3;
+      automatic logic [31:0] cw [4];
+      automatic logic [31:0] rg [];
+      automatic logic [31:0] rge [];
+      automatic int unsigned lb, boff, bsz, wm, hm, dm;
+      im3 = '{base: IMGB, size: 0, w: 16'd32, h: 16'd29, fmt: 8'd10,
+              mips: 5'd6, layers: 10'd3, itype: 2'd2, layer_bytes: 0};
+      lb = m_mip_off(im3, 6);
+      im3.layer_bytes = lb;
+      im3.size = lb * 3;
+      cases++;
+      // Poison is not the clear byte.  A no-op clear must not compare
+      // equal to the expected image.
+      for (int i = 0; i < int'(im3.size); i++) begin
+        wr8(AB + IMGB + i, 8'h5A);
+        ewr8(IMGB + i, 8'h5A);
+      end
+      cw[0] = 32'hA5A5_A5A5; cw[1] = 0; cw[2] = 0; cw[3] = 0;
+      // threshold mip is 6/2 = 3; the second range is the rest
+      rg  = new[10];
+      rge = new[10];
+      rg[0] = 1; rg[1] = 0; rg[2] = 3; rg[3] = 0; rg[4] = 1;
+      rg[5] = 1; rg[6] = 3; rg[7] = 3; rg[8] = 0; rg[9] = 1;
+      rge[0] = 1; rge[1] = 0; rge[2] = 3; rge[3] = 0; rge[4] = 3;
+      rge[5] = 1; rge[6] = 3; rge[7] = 3; rge[8] = 0; rge[9] = 3;
+      m_apply_clear(im3, cw, 2, rge);
+      run_clear(im3, cw, 2, rg, pl);
+      check(pl.code == APU_SH_DONE_OK, "clear 3d chain done code");
+      cmp_range(IMGB, IMGB + im3.size, "clear 3d chain image");
+      axi_balance("clear 3d chain");
+
+      cases++;
+      rg = new[6 * 14];
+      boff = 0;
+      for (int m = 0; m < 6; m++) begin
+        wm = (32 >> m) == 0 ? 1 : (32 >> m);
+        hm = (29 >> m) == 0 ? 1 : (29 >> m);
+        dm = (3 >> m) == 0 ? 1 : (3 >> m);
+        rg[14*m+0] = boff; rg[14*m+1] = 0;
+        rg[14*m+2] = 0; rg[14*m+3] = 0;
+        rg[14*m+4] = 1; rg[14*m+5] = m;
+        rg[14*m+6] = 0; rg[14*m+7] = 1;
+        rg[14*m+8] = 0; rg[14*m+9] = 0; rg[14*m+10] = 0;
+        rg[14*m+11] = wm; rg[14*m+12] = hm; rg[14*m+13] = dm;
+        boff += wm * hm * dm * 4;
+      end
+      bsz = boff;
+      for (int i = 0; i < int'(bsz); i++) begin
+        wr8(AB + SRCB + i, 8'h5A);
+        ewr8(SRCB + i, 8'h5A);
+      end
+      boff = 0;
+      for (int m = 0; m < 6; m++) begin
+        wm = (32 >> m) == 0 ? 1 : (32 >> m);
+        hm = (29 >> m) == 0 ? 1 : (29 >> m);
+        dm = (3 >> m) == 0 ? 1 : (3 >> m);
+        for (int z = 0; z < dm; z++)
+          for (int y = 0; y < hm; y++)
+            for (int x = 0; x < wm; x++)
+              for (int b = 0; b < 4; b++)
+                ewr8(SRCB + boff + ((z * hm + y) * wm + x) * 4 + b,
+                     8'hA5);
+        boff += wm * hm * dm * 4;
+      end
+      run_i2b(im3, SRCB, bsz, 6, rg, pl);
+      check(pl.code == APU_SH_DONE_OK, "i2b 3d chain done code");
+      cmp_range(SRCB, SRCB + bsz, "i2b 3d chain buffer");
+      axi_balance("i2b 3d chain");
     end
 
     // ============ Enable=0 fixture ========================================

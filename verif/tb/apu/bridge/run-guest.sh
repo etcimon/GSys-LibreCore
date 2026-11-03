@@ -44,6 +44,11 @@ while [ $# -gt 0 ]; do
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
+# Remote leaves set this instead of passing --venus-only through the
+# regression launcher.
+if [ "$VENUS_ONLY" = 0 ] && [ -n "${G6LC_VENUS_ONLY:-}" ]; then
+  VENUS_ONLY=1
+fi
 mkdir -p "$OUT" "$GUEST_CACHE"
 
 provision() {
@@ -137,13 +142,29 @@ fi
 
 # cidata carries the test sources — rebuild when they change (the
 # one-shot provision above would otherwise serve stale binaries).
-if [ -f "$GUEST_CACHE/cidata.img" ] && \
-   find "$GUEST" "$CORPUS" -newer "$GUEST_CACHE/cidata.img" \
-        -print -quit 2>/dev/null | grep -q .; then
-  echo "[guest] cidata payload stale — rebuilding"
-  rm -f "$GUEST_CACHE/cidata.img"
-  xorrisofs -quiet -V CIDATA -r -o "$GUEST_CACHE/cidata.img" \
-    "$GUEST/cloud-init/user-data" "$GUEST/cloud-init/meta-data" \
+build_cidata() {
+  # The builder image does not ship xorrisofs. mke2fs -d writes the same
+  # CIDATA label without a loop mount.
+  local cidata_src
+  if command -v xorrisofs >/dev/null 2>&1; then
+    xorrisofs -quiet -V CIDATA -r -o "$GUEST_CACHE/cidata.img" \
+      "$GUEST/cloud-init/user-data" "$GUEST/cloud-init/meta-data" \
+      "$GUEST/vkcompute.c" "$GUEST/vkdescarr.c" "$GUEST/vkmem.c" \
+      "$GUEST/vkimage.c" "$GUEST/vktri.c" "$GUEST/vkcmp.c" "$GUEST/vkping.c" \
+      "$GUEST/expected.json" \
+      "$CORPUS/bufcopy.spv" "$CORPUS/descarr.spv" "$CORPUS/vkimage.spv" \
+      "$CORPUS/vs_passthru.spv" "$CORPUS/fs_color.spv" \
+      "$CORPUS/vs_pc.spv" "$CORPUS/fs_vcol.spv" "$CORPUS/vs_pos3.spv" \
+      "$CORPUS/vs_inst.spv" "$CORPUS/vs_tex.spv" "$CORPUS/fs_mip.spv" \
+      "$CORPUS/vs_clip.spv" "$CORPUS/vs_uvc.spv" \
+      "$CORPUS/fs_deriv2.spv" \
+      "$CORPUS/fs_scene8.spv" \
+      "$CORPUS/vs_shadowfog.spv" "$CORPUS/fs_shadowfog.spv" \
+      "$CORPUS/vs_texlod.spv"
+    return
+  fi
+  cidata_src="$(mktemp -d)"
+  cp "$GUEST/cloud-init/user-data" "$GUEST/cloud-init/meta-data" \
     "$GUEST/vkcompute.c" "$GUEST/vkdescarr.c" "$GUEST/vkmem.c" \
     "$GUEST/vkimage.c" "$GUEST/vktri.c" "$GUEST/vkcmp.c" "$GUEST/vkping.c" \
     "$GUEST/expected.json" \
@@ -153,14 +174,28 @@ if [ -f "$GUEST_CACHE/cidata.img" ] && \
     "$CORPUS/vs_inst.spv" "$CORPUS/vs_tex.spv" "$CORPUS/fs_mip.spv" \
     "$CORPUS/vs_clip.spv" "$CORPUS/vs_uvc.spv" \
     "$CORPUS/fs_deriv2.spv" \
-        "$CORPUS/fs_scene8.spv" \
-        "$CORPUS/vs_shadowfog.spv" "$CORPUS/fs_shadowfog.spv" \
-        "$CORPUS/vs_texlod.spv"
+    "$CORPUS/fs_scene8.spv" \
+    "$CORPUS/vs_shadowfog.spv" "$CORPUS/fs_shadowfog.spv" \
+    "$CORPUS/vs_texlod.spv" \
+    "$cidata_src/"
+  truncate -s 16M "$GUEST_CACHE/cidata.img"
+  mke2fs -q -t ext4 -L CIDATA -d "$cidata_src" "$GUEST_CACHE/cidata.img"
+  rm -rf "$cidata_src"
+}
+
+if [ -f "$GUEST_CACHE/cidata.img" ] && \
+   find "$GUEST" "$CORPUS" -newer "$GUEST_CACHE/cidata.img" \
+        -print -quit 2>/dev/null | grep -q .; then
+  echo "[guest] cidata payload stale — rebuilding"
+  rm -f "$GUEST_CACHE/cidata.img"
+  build_cidata
 fi
 
 need_build=0
+if [ "$VENUS_ONLY" = 1 ]; then export APU_BRIDGE_VENUS_ONLY=1; fi
 if [ ! -x "$APU_BRIDGE_OUT/obj_venus/apu_bridge" ] || \
-   [ ! -x "$APU_BRIDGE_OUT/obj_venusoff/apu_bridge" ]; then
+   { [ "$VENUS_ONLY" = 0 ] && \
+     [ ! -x "$APU_BRIDGE_OUT/obj_venusoff/apu_bridge" ]; }; then
   need_build=1
 elif find "$ROOT/corev_apu/apu" "$ROOT/corev_apu/include" "$ROOT/verif/tb/apu/bridge" \
         "$ROOT/core/include" \
@@ -190,7 +225,7 @@ fi
 # caselist) to both QEMU arms; the cts stage itself runs on the venus
 # arm only.  Build it once with guest/cts/build-deqp.sh.
 if [ -n "${G6LC_CTS:-}" ]; then
-  CTS_IMG="$ROOT/.cache/cts/ctsdata.img"
+  CTS_IMG="${G6LC_CTSDATA:-${G6LC_CTS_CACHE:-$ROOT/.cache/cts}/ctsdata.img}"
   if [ ! -f "$CTS_IMG" ]; then
     echo "[guest] G6LC_CTS=1 but $CTS_IMG missing — run " \
          "verif/tb/apu/bridge/guest/cts/build-deqp.sh" >&2
@@ -199,11 +234,90 @@ if [ -n "${G6LC_CTS:-}" ]; then
 fi
 
 rc_all=0
+# G6LC_CTS_SHARDS=N: split the caselist over N concurrent guest+bridge
+# pairs (shard i runs lines i, i+N, ...; deqp --deqp-fraction is too
+# coarse: it splits by hierarchy node). Each shard boots the root image
+# snapshot=on and writes a private CTSDATA copy (G6LC_INSTANCE_DIR), so
+# shards share no writable disk, socket or log. The bridge binary is
+# built once above and shared read-only.
+SHARDS="${G6LC_CTS_SHARDS:-1}"
+if ! [[ "$SHARDS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "G6LC_CTS_SHARDS must be a positive integer, got '$SHARDS'" >&2
+  exit 2
+fi
+if [ "$SHARDS" -gt 1 ]; then
+  if [ -z "${G6LC_CTS:-}" ] || [ "$VENUS_ONLY" = 0 ] || \
+     [ -n "${G6LC_CTS_FRACTION:-}" ] || [ -n "${G6LC_CTS_CASE:-}" ]; then
+    echo "G6LC_CTS_SHARDS>1 needs G6LC_CTS=1, the venus-only arm, a" \
+         "caselist and no G6LC_CTS_FRACTION/G6LC_CTS_CASE" >&2
+    exit 2
+  fi
+  # CPU budget: in the deqp phase a shard is one saturated bridge
+  # thread; its 2-vCPU TCG QEMU idles (~5 %) while the bridge emulates
+  # the GPU, bursting to ~2 cores only during boot (staggered below).
+  # Budget 1.5 cores per shard. Count only cores that are idle now, so
+  # other jobs on a shared builder are not starved. A 2 s /proc/stat
+  # sample, not load1: load1 still carries this leaf's own -j$(nproc)
+  # bridge compile for a minute after it ends.
+  cpu_sample() { awk '/^cpu /{print $2+$3+$4+$5+$6+$7+$8+$9, $5+$6}' /proc/stat; }
+  read -r t0 i0 < <(cpu_sample); sleep 2; read -r t1 i1 < <(cpu_sample)
+  busy=$(( ((t1 - t0) - (i1 - i0)) * $(nproc) / ((t1 - t0) > 0 ? (t1 - t0) : 1) ))
+  budget=$(( ($(nproc) - busy - 1) * 2 / 3 ))
+  [ "$budget" -ge 1 ] || budget=1
+  if [ "$SHARDS" -gt "$budget" ] && [ -z "${G6LC_CTS_SHARDS_FORCE:-}" ]; then
+    echo "[guest] G6LC_CTS_SHARDS=$SHARDS exceeds the CPU budget" \
+         "(nproc=$(nproc) busy=$busy); using $budget"
+    SHARDS=$budget
+  fi
+  ncases=$(debugfs -R "cat /${G6LC_CTS_CASELIST:-caselists/cts0-info-smoke.txt}" \
+           "$CTS_IMG" 2>/dev/null | grep -c . || true)
+  if [ "${ncases:-0}" -ge 1 ] && [ "$SHARDS" -gt "$ncases" ]; then
+    echo "[guest] $ncases cases: using $ncases shards"
+    SHARDS=$ncases
+  fi
+fi
+
+if [ "$SHARDS" -gt 1 ]; then
+  echo "[guest] CTS in $SHARDS concurrent shards (caselist lines i mod $SHARDS)"
+  pids=()
+  for ((i = 0; i < SHARDS; i++)); do
+    sd="$OUT/shard-$i"
+    mkdir -p "$sd"
+    sock="$(mktemp -d "${TMPDIR:-/tmp}/g6lc-apu-shard.XXXXXXXX")"
+    G6LC_INSTANCE_DIR="$sd" G6LC_SOCKDIR="$sock" \
+      G6LC_CTS_SHARD="$i,$SHARDS" \
+      python3 "$GUEST/drive_guest.py" --out "$sd" \
+      > "$sd/drive-venus.log" 2>&1 &
+    pids+=("$!")
+    # stagger boots so the TCG boot bursts do not overlap
+    [ "$i" -lt $((SHARDS - 1)) ] && sleep "${G6LC_CTS_SHARD_STAGGER:-20}"
+  done
+  for p in "${pids[@]}"; do wait "$p" || true; done
+  : > "$OUT/drive-venus.log"
+  for ((i = 0; i < SHARDS; i++)); do
+    sd="$OUT/shard-$i"
+    rm -f "$sd/ctsdata.img"   # private copy; results already dumped
+    if grep -qx "GUEST-PASS" "$sd/drive-venus.log"; then v=PASS; else
+      v=FAIL; rc_all=1; fi
+    echo "[guest] shard $i/$SHARDS $v: $(grep -a 'G6LC_CTS_RUN' \
+      "$sd/drive-venus.log" | tail -1)" >> "$OUT/drive-venus.log"
+    grep -aE '^ +(Passed|Failed|Not supported|Warnings|Waived):' \
+      "$sd/drive-venus.log" | sed "s/^/[guest] shard $i /" \
+      >> "$OUT/drive-venus.log" || true
+  done
+  if [ "$rc_all" = 0 ]; then echo "GUEST-PASS"; else echo "GUEST-FAIL"; fi \
+    >> "$OUT/drive-venus.log"
+  cat "$OUT/drive-venus.log"
+else
 # `|| true`: pipefail would otherwise let a failed arm abort the script
 # before the venusoff control arm runs.
 python3 "$GUEST/drive_guest.py" --out "$OUT" 2>&1 | tee "$OUT/drive-venus.log" \
   || true
 grep -q "GUEST-PASS" "$OUT/drive-venus.log" || rc_all=1
+fi
+if [ "$VENUS_ONLY" = 1 ]; then
+  echo venus-only > "$OUT/venus-only"
+fi
 if [ "$VENUS_ONLY" = 0 ]; then
   python3 "$GUEST/drive_guest.py" --out "$OUT" --venusoff \
     2>&1 | tee "$OUT/drive-venusoff.log" || true

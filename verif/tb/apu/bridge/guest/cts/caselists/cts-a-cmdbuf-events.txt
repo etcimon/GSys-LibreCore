@@ -1,0 +1,3 @@
+dEQP-VK.api.command_buffers.pool_reset_release_res
+dEQP-VK.api.command_buffers.execute_large_primary
+dEQP-VK.api.command_buffers.record_many_primary

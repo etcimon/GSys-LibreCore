@@ -1,0 +1,2 @@
+dEQP-VK.binding_model.shader_access.primary_cmd_buf.bind.uniform_buffer.compute.multiple_arbitrary_descriptors.offset_view_zero
+dEQP-VK.binding_model.shader_access.primary_cmd_buf.bind.uniform_buffer.compute.multiple_arbitrary_descriptors.offset_view_nonzero

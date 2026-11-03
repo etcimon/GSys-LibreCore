@@ -427,6 +427,9 @@ SPDX-FileComment = "Records existing hyp8 source declarations and outbound offer
 [[annotations]]
 paths = [
   "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_flu_reserve.sv",
+  "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r97/g6lc_flu_reserve.before.sv",
+  "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/*.sv",
+  "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/*.patch",
   "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/neg/mut_commit_stage_delayed.sv",
   "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/neg/mut_csr_buffer_gated.sv",
   "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/neg/mut_iq_payload_comb.sv"

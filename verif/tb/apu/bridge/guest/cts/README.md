@@ -78,11 +78,87 @@ because the guest reads the list from that image):
   view cases that were open defects (20). Next group after the image
   object contract.
 
+CTS runs verilate the bridge on the remote testharness with the
+optimized Verilator (`verilator-v5.008-g6lc` on `ovh_calltorch`). The
+Ubuntu image and `ctsdata.img` are rsynced into
+`/opt/testharness/cache` and reused. Do not verilate the bridge locally
+for these runs.
+
 ```
-G6LC_CTS=1 G6LC_ONLY=cts \
+G6LC_CTS=1 G6LC_ONLY=cts G6LC_SKIP_APT=1 G6LC_VN_DEBUG=no_abort \
   G6LC_CTS_CASELIST=caselists/cts-a-compute-basic.txt \
-  verif/tb/apu/bridge/run-guest.sh --venus-only
+  verif/tb/apu/bridge/run-guest-remote.sh --detach
 ```
+
+`apu-leaf-collect <tag>` pulls the verdict and every `*.qpa`. The tag
+is the first line the launcher prints. Run the proxy from WSL (or any
+host with `rsync`); native Windows Python has no `rsync`, so collection
+fails there.
+
+Ongoing leaves:
+
+    testharness_proxy.py apu-leaf-progress <tag>...   # live counts (progress only)
+    guest/cts/collect-leaves.sh <tag>...              # collect + ledger as each ends
+
+`collect-leaves.sh` re-runs `cts_ledger.py harvest` and `render` after
+every collection. `harvest` rebuilds one results JSON per retained run
+(`remote-runs/apu-leaf-*`, `.cache/apu-guest/out-*`). It skips
+diagnostic runs (image or shader logging) and records a case cut by the
+driver's CTS budget as Timeout, not Crash.
+
+### Concurrent shards
+
+`G6LC_CTS_SHARDS=N` runs one caselist as N concurrent guest+bridge pairs.
+Shard `i` runs caselist lines `i, i+N, …` (`G6LC_CTS_SHARD=i,N`). The
+slice is written into the shard's private image as
+`caselists/g6lc-shard.txt`. `--deqp-fraction` is not used for shards:
+deqp splits by hierarchy node, so a 21-case list from one group put all
+21 cases in fraction 0. `G6LC_CTS_FRACTION` still passes that flag
+through for full `vk-default` runs. Each shard boots the root image
+`snapshot=on` and writes a private copy of `ctsdata.img`
+(`G6LC_INSTANCE_DIR`), so shards share no writable disk, socket or log.
+N is also clamped to the number of cases.
+The bridge binary is built once and shared. N is clamped to
+`(nproc - busy - 1) * 2 / 3`, where `busy` comes from a 2 s `/proc/stat`
+sample. While deqp runs, a shard is one saturated bridge thread and its
+QEMU sits near 5 %. QEMU uses about 2 cores only while booting, so
+shard starts are staggered by `G6LC_CTS_SHARD_STAGGER` (20 s). Set
+`G6LC_CTS_SHARDS_FORCE=1` to skip the clamp (local runs only; the leaf
+allowlist does not forward it).
+
+Every CTS run, sharded or not, writes its results into a private copy
+of `ctsdata.img`. The copy is deleted after the results are dumped. The
+remote image path is keyed by the local file name. To add caselists
+while a leaf is live, copy the image under a new name (for example
+`ctsdata-b2.img`), `debugfs -w write` the lists into it, and point
+`G6LC_CTSDATA` at it. A push of `ctsdata.img` would replace the file a
+running leaf still reads.
+Results land in `output/guest/shard-<i>/cts-TestResults.qpa`. Pass all of
+them to `cts_ledger.py parse` (`--qpa` repeats). The top-level
+`drive-venus.log` prints one line per shard and ends in `GUEST-PASS`
+only if every shard passed.
+
+Shard only lists where RTL time dominates. A leaf has about 90 s of
+fixed cost (venus bridge build, 28 s guest boot, teardown). SSBO and
+binding lists finish in about 100 s total, so sharding them gains
+little. UBO matrix lists take 1.4–4 h, and those are the lists to
+shard. Venus-only guest leaves no longer build the unused venusoff
+bridge (`APU_BRIDGE_VENUS_ONLY`).
+
+Sharding changes which cases share one deqp-vk process and one device
+session. A device that leaks state between cases can therefore score
+differently sharded than serial. This happened on 2026-11-02, locally,
+with the Oct-29 bridge binary on `cts1-ssbo-std430-basic` (21 cases):
+- Serial, in one process: 18 Pass, 3 Fail (`highp_mat3`, `highp_mat2x3`,
+  `highp_mat4x3`).
+- Two shards: 21/21 Pass.
+
+The same list was 21/21 serial with newer RTL on
+`apu-leaf-20261031T163945-b771df9f11af`. The same class of problem as the
+`cts_b2b_opt_1` pair contamination in the plan. A sharded pass is
+throughput evidence. A group is closed only when one serial-order run of
+the full list also passes. Treat a serial/shard disagreement as a device
+ordering defect, not as noise.
 
 ## Ledger
 

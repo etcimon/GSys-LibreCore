@@ -1,0 +1,9 @@
+dEQP-VK.ubo.single_basic_type.std140.highp.mat2.compute
+dEQP-VK.ubo.single_basic_type.std140.highp.mat2x3.compute
+dEQP-VK.ubo.single_basic_type.std140.highp.mat2x4.compute
+dEQP-VK.ubo.single_basic_type.std140.highp.mat3.compute
+dEQP-VK.ubo.single_basic_type.std140.highp.mat3x2.compute
+dEQP-VK.ubo.single_basic_type.std140.highp.mat3x4.compute
+dEQP-VK.ubo.single_basic_type.std140.highp.mat4.compute
+dEQP-VK.ubo.single_basic_type.std140.highp.mat4x2.compute
+dEQP-VK.ubo.single_basic_type.std140.highp.mat4x3.compute

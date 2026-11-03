@@ -700,12 +700,14 @@ class Remote:
         if proc.returncode != 0:
             die(f"rsync failed (rc={proc.returncode})")
 
-    def push(self, local: Path, remote_path: str) -> None:
+    def push(self, local: Path, remote_path: str, partial: bool = False) -> None:
         ssh_cmd = "ssh " + " ".join(shlex.quote(o) for o in self.base_opts())
         log(f"push {local} ({local.stat().st_size} bytes) -> {self.host}:{remote_path}")
         t0 = time.time()
+        flags = ["-az", "--partial"] if partial else ["-az"]
         subprocess.run(
-            [*RSYNC_BIN, "-az", "-e", ssh_cmd, str(local), f"{self.host}:{remote_path}"],
+            [*RSYNC_BIN, *flags, "-e", ssh_cmd, str(local),
+             f"{self.host}:{remote_path}"],
             check=True,
         )
         log(f"push done in {time.time()-t0:.3f}s")
@@ -723,18 +725,28 @@ class Remote:
         if not optional:
             proc.check_returncode()
 
-    def push_tree(self, root: Path, files_from: Path, remote_dir: str) -> None:
+    def push_tree(self, root: Path, files_from: Path, remote_dir: str,
+                  link_dest: str | None = None) -> None:
         """Push exactly the root-relative paths listed in ``files_from``.
 
         rsync --files-from preserves the directory structure below ``root``,
         so the remote tree is a sparse mirror of the snapshot rather than a
         flat directory. Used by the APU leaf, which must not touch the shared
         synced repo on the builder.
+
+        ``link_dest`` (a previous snapshot on the remote) lets rsync copy
+        files whose size and mtime are unchanged from it on the remote
+        instead of sending them (--copy-dest: an independent copy, never a
+        shared inode, so a later in-tree write cannot alter an earlier
+        snapshot's evidence); the caller still verifies every file by
+        sha256.
         """
         ssh_cmd = "ssh " + " ".join(shlex.quote(o) for o in self.base_opts())
         n_files = sum(1 for ln in files_from.read_text().splitlines() if ln.strip())
-        cmd = [*RSYNC_BIN, "-az", f"--files-from={files_from}",
-               "-e", ssh_cmd, f"{root}/", f"{self.host}:{remote_dir}/"]
+        cmd = [*RSYNC_BIN, "-az", f"--files-from={files_from}"]
+        if link_dest:
+            cmd.append(f"--copy-dest={link_dest}")
+        cmd += ["-e", ssh_cmd, f"{root}/", f"{self.host}:{remote_dir}/"]
         self.vlog("rsync " + " ".join(shlex.quote(c) for c in cmd))
         t0 = time.time()
         proc = subprocess.run(cmd, check=False)
@@ -2110,7 +2122,33 @@ APU_LEAF_GENERATED_INPUT_DIRS = ('verif/tb/apu/sh_vectors',
 # Env vars a leaf run may inject into the detached launcher: guest-stage
 # QEMU plumbing only; anything else is rejected up front so the remote
 # environment stays pinned by env.sh.
-APU_LEAF_ENV_ALLOW = ('G6LC_QEMU', 'G6LC_QLIB', 'TARGET_CFG')
+# Guest/CTS knobs the detached launcher may inherit. G6LC_GUEST_CACHE and
+# G6LC_CTSDATA point at the persistent builder cache so a leaf does not
+# re-download the Ubuntu image or the deqp disk.
+APU_LEAF_ENV_ALLOW = (
+    'G6LC_QEMU', 'G6LC_QLIB', 'TARGET_CFG',
+    'G6LC_GUEST_CACHE', 'G6LC_CTS', 'G6LC_CTS_CACHE', 'G6LC_CTSDATA',
+    'G6LC_CTS_CASELIST', 'G6LC_CTS_CASE', 'G6LC_CTS_TIMEOUT',
+    'G6LC_CTS_LOG_FLUSH', 'G6LC_CTS_SHARDS', 'G6LC_CTS_FRACTION',
+    # diagnostic only: image/shader logs break the CTS run contract
+    'G6LC_CTS_LOG_IMAGES', 'G6LC_CTS_LOG_SHADERS',
+    'G6LC_ONLY', 'G6LC_SKIP_APT', 'G6LC_VN_DEBUG', 'G6LC_GUEST_MEM',
+    'G6LC_VENUS_ONLY',
+)
+
+
+def apu_optimized_verilator(rem: Remote) -> str:
+    """Prefer the g6lc Verilator on the builder. Fall back to the stock pin.
+
+    verilator-v5.008-g6lc is the optimized fork (version string
+    ``5.008 (mod)``). APU bridge and leaf sims use it when the toolchain
+    is installed. The CPU harness ``build`` command stays on the stock pin.
+    """
+    opt = f"{REMOTE_ROOT}/toolchains/verilator-v5.008-g6lc/bin/verilator"
+    stock = f"{REMOTE_ROOT}/toolchains/verilator-{VERILATOR_VERSION}/bin/verilator"
+    if rem.check(f"test -x {shlex.quote(opt)}") == 0:
+        return opt
+    return stock
 
 
 def apu_leaf_env(pairs: list[str]) -> dict[str, str]:
@@ -2217,7 +2255,8 @@ def apu_leaf_verdict(summary: dict | None, local_sha: str,
 
 def apu_leaf_launch_script(source_dir: str, rundir: str, stages: str,
                            suite_timeout: int, tag: str,
-                           env: dict[str, str] | None = None) -> str:
+                           env: dict[str, str] | None = None,
+                           verilator: str | None = None) -> str:
     """Remote bash that detaches the regression launcher via setsid/nohup.
 
     The runner's --out must not pre-exist, so output/ is created by the
@@ -2234,7 +2273,9 @@ def apu_leaf_launch_script(source_dir: str, rundir: str, stages: str,
     so the detached launcher inherits them.  A G6LC_QEMU value also
     prepends its dirname to PATH so sibling tools (qemu-img) resolve.
     """
-    verilator = f"{REMOTE_ROOT}/toolchains/verilator-{VERILATOR_VERSION}/bin/verilator"
+    if not verilator:
+        verilator = (f"{REMOTE_ROOT}/toolchains/verilator-"
+                     f"{VERILATOR_VERSION}/bin/verilator")
     yosys = remote_yosys(REMOTE_ROOT)
     extra_env = ''.join(f"{k}={shlex.quote(v)} "
                         for k, v in (env or {}).items())
@@ -2290,7 +2331,8 @@ def _apu_leaf_collect(rem: Remote, tag: str, dest: Path) -> int:
     for name in ('driver.log', 'rc.txt', 'end.txt', 'start.txt', 'pid.txt'):
         rem.pull(f"{rundir}/{name}", dest, optional=True)
     rem.pull_filtered(f"{rundir}/output/", dest / 'output',
-                      ['*.log', '*.json', '*.tsv', '*.txt', '*.h', '*.sha256'])
+                      ['*.log', '*.json', '*.tsv', '*.txt', '*.h', '*.sha256',
+                       '*.qpa'])
     summary_path = dest / 'output' / 'summary.json'
     summary = None
     if summary_path.is_file():
@@ -2334,6 +2376,39 @@ def _apu_leaf_collect(rem: Remote, tag: str, dest: Path) -> int:
     return {'pass': 0, 'fail': 1, 'incomplete': 4}[status]
 
 
+def _apu_guest_cache_sync(rem: Remote, args) -> None:
+    """Upload the persistent guest and CTS disks when the caller asked.
+
+    rsync skips a file whose size and mtime already match, so the 11 GiB
+    Ubuntu image is sent once. The leaf then points G6LC_GUEST_CACHE and
+    G6LC_CTSDATA at these paths instead of an empty per-run directory.
+    """
+    guest = getattr(args, 'sync_guest', None)
+    cts = getattr(args, 'sync_cts', None)
+    if not guest and not cts:
+        return
+    remote_guest = f"{REMOTE_ROOT}/cache/apu-guest"
+    remote_cts = f"{REMOTE_ROOT}/cache/cts"
+    rem.run(f"mkdir -p {shlex.quote(remote_guest)} {shlex.quote(remote_cts)}")
+    if guest:
+        root = Path(guest)
+        if not root.is_dir():
+            die(f"--sync-guest is not a directory: {root}")
+        for name in (
+                'ubuntu-24.04.5-preinstalled-server-riscv64.img',
+                'vmlinuz', 'cidata.img', '.provisioned'):
+            local = root / name
+            if not local.is_file():
+                log(f"guest cache skip missing {local}")
+                continue
+            rem.push(local, f"{remote_guest}/{name}", partial=True)
+    if cts:
+        image = Path(cts)
+        if not image.is_file():
+            die(f"--sync-cts is not a file: {image}")
+        rem.push(image, f"{remote_cts}/{image.name}", partial=True)
+
+
 def cmd_apu_leaf(rem: Remote, args) -> int:
     root = Path(args.snapshot).resolve()
     stages = apu_leaf_stages(args.stages)
@@ -2358,11 +2433,19 @@ def cmd_apu_leaf(rem: Remote, args) -> int:
             f"mkdir {shlex.quote(rundir)} {shlex.quote(source_dir)}")
     rem.push(dest / 'snapshot-files.txt', f"{rundir}/snapshot-files.txt")
     rem.push(dest / 'snapshot.sha256', f"{rundir}/snapshot.sha256")
-    rem.push_tree(root, dest / 'snapshot-files.txt', source_dir)
+    # newest earlier leaf snapshot as the rsync hard-link basis
+    prev = rem.out(
+        f"ls -1dt {shlex.quote(REMOTE_ROOT)}/runs/apu-leaf-*/source 2>/dev/null "
+        f"| grep -vx {shlex.quote(source_dir)} | head -1").strip()
+    if prev:
+        log(f"snapshot link basis: {prev}")
+    rem.push_tree(root, dest / 'snapshot-files.txt', source_dir,
+                  link_dest=prev or None)
     rem.run(f"cd {shlex.quote(source_dir)} && "
             f"sha256sum --quiet -c {shlex.quote(rundir + '/snapshot.sha256')} && "
             "find . -name '*.sh' -exec chmod u+x {} +")
-    verilator = f"{REMOTE_ROOT}/toolchains/verilator-{VERILATOR_VERSION}/bin/verilator"
+    verilator = apu_optimized_verilator(rem)
+    log(f"APU verilator: {verilator}")
     yosys_g6lc = remote_yosys(REMOTE_ROOT)
     yosys_formal = f"{REMOTE_ROOT}/toolchains/formal/bin/yosys"
     probe = (
@@ -2400,8 +2483,10 @@ def cmd_apu_leaf(rem: Remote, args) -> int:
             remote_host[key.strip()] = value.strip()
     remote_host['leafEnv'] = leaf_env
     (dest / 'remote-host.json').write_text(json.dumps(remote_host, indent=2) + '\n')
+    _apu_guest_cache_sync(rem, args)
     rem.run(apu_leaf_launch_script(source_dir, rundir, ','.join(stages),
-                                   args.suite_timeout, tag, leaf_env),
+                                   args.suite_timeout, tag, leaf_env,
+                                   verilator),
             timeout=120, heartbeat=False)
     log(f"launched {tag} (stages={','.join(stages)}); polling every "
         f"{args.poll_interval}s")
@@ -2441,6 +2526,41 @@ def cmd_apu_leaf_collect(rem: Remote, args) -> int:
             f"{dest / 'source-local.json'}")
     rem.start_master()
     return _apu_leaf_collect(rem, args.tag, dest)
+
+
+def apu_leaf_progress_script(tags: list[str]) -> str:
+    """Remote bash: count flushed QPA records in each live private image.
+
+    debugfs opens the image read-only while the guest holds it mounted, so
+    the counts trail the guest page cache (needs --deqp-log-flush=enable)
+    and are progress only, never evidence. Leaves that finished have
+    deleted their private copies and print nothing.
+    """
+    for tag in tags:
+        if not re.fullmatch(r'apu-leaf-[0-9T]+-[0-9a-f]+', tag):
+            die(f"not an apu-leaf tag: {tag!r}")
+    imgs = ' '.join(f"{REMOTE_ROOT}/runs/{t}/output/guest/ctsdata.img "
+                    f"{REMOTE_ROOT}/runs/{t}/output/guest/shard-*/ctsdata.img"
+                    for t in tags)
+    return (
+        f"for img in {imgs}; do [ -f \"$img\" ] || continue; "
+        "q=$(debugfs -R 'cat /results/TestResults.qpa' \"$img\" 2>/dev/null "
+        "| tr -d '\\000'); "
+        "n() { printf '%s\\n' \"$q\" | grep -c \"$1\"; }; "
+        "echo \"$(echo \"$img\" | sed 's#.*/runs/##; s#/output/guest##; "
+        "s#/ctsdata.img##') begun=$(n beginTestCaseResult) "
+        "pass=$(n 'StatusCode=.Pass') ns=$(n 'StatusCode=.NotSupported') "
+        "fail=$(n 'StatusCode=.Fail') crash=$(n 'StatusCode=.Crash')\"; done; "
+        # an unmatched shard-* glob ends the loop on a failed [ -f ]; the
+        # remote helper drops the output of a non-zero command
+        "true"
+    )
+
+
+def cmd_apu_leaf_progress(rem: Remote, args) -> int:
+    rem.start_master()
+    print(rem.out(apu_leaf_progress_script(args.tags)), end='')
+    return 0
 
 
 def cmd_shell(rem: Remote, args) -> int:
@@ -2862,6 +2982,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--detach", action="store_true",
                     help="launch and return immediately; finish with "
                          "apu-leaf-collect <tag>")
+    sp.add_argument("--sync-guest", default=None, metavar="DIR",
+                    help="rsync the Ubuntu guest image, vmlinuz, cidata and "
+                         "provision stamp from DIR into "
+                         f"{REMOTE_ROOT}/cache/apu-guest before launch")
+    sp.add_argument("--sync-cts", default=None, metavar="IMG",
+                    help="rsync a ctsdata image into "
+                         f"{REMOTE_ROOT}/cache/cts before launch")
     sp.set_defaults(fn=cmd_apu_leaf)
 
     sp = sub.add_parser(
@@ -2870,6 +2997,13 @@ def build_parser() -> argparse.ArgumentParser:
              "the verdict (selected-stage evidence, not device qualification)")
     sp.add_argument("tag", help="apu-leaf-<timestamp>-<rand> run tag")
     sp.set_defaults(fn=cmd_apu_leaf_collect)
+
+    sp = sub.add_parser(
+        "apu-leaf-progress",
+        help="read-only live CTS progress of running apu-leaf runs: per "
+             "private ctsdata image, the flushed TestResults.qpa counts")
+    sp.add_argument("tags", nargs="+", help="apu-leaf run tags")
+    sp.set_defaults(fn=cmd_apu_leaf_progress)
 
     sp = sub.add_parser("shell", help="interactive ssh into the remote root, or run one command")
     sp.add_argument("--allow-overlap", action="store_true",

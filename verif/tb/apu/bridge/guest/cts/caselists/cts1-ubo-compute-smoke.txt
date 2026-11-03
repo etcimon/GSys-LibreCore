@@ -1,0 +1,4 @@
+dEQP-VK.ubo.single_basic_type.std140.highp.float.compute
+dEQP-VK.ubo.single_basic_type.std140.highp.float.compute_comp_access
+dEQP-VK.ubo.single_basic_type.std140.highp.vec4.compute
+dEQP-VK.ubo.single_basic_type.std140.highp.vec4.compute_comp_access

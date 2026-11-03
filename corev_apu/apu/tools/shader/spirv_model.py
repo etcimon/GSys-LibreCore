@@ -75,7 +75,7 @@ SC = spirv_scan.SC
 TK = spirv_scan.TK
 
 # DUT default geometry (g6lc_apu_shwave parameters)
-SCRATCH_WORDS = 256        # ScratchBytes=1024 / 4
+SCRATCH_WORDS = 1024       # ScratchBytes=4096 / 4
 SLAB_WORDS = 4096          # SlabBytes=16384 / 4
 LAN = 8                    # ShaderLanes
 CALLDEPTH = 8              # g6lc_apu_shwave CallDepth (call stack)
@@ -1450,6 +1450,21 @@ class Model:
             return [cw[c * comps:(c + 1) * comps] for c in range(cols)]
         return [list(self.rf[idx + c])[:comps] for c in range(cols)]
 
+    def mat_comp_off(self, ptr, comp, comps):
+        """Byte offset of matrix component `comp` (column-major).
+
+        Mirrors shwave ls_mad.  Pointer word3[15:0] is MatrixStride in
+        bytes.  A uniform/BufferBlock column with no decoration is 16
+        bytes apart (the W_LS0 fallback); stride 0 is tight-packed.
+        """
+        w3 = ptr[3] if len(ptr) > 3 else 0
+        mstr = w3 & 0xFFFF
+        if mstr == 0 and (ptr[1] & 0xF) == SC_UNIFORM:
+            mstr = 16
+        sw = (mstr // 4) if mstr else comps
+        col, cin = divmod(comp, comps)
+        return u32(ptr[0] + (col * sw + cin) * 4)
+
     def matshape(self, tid):
         """(cols, comps) for a MAT type id; (1, comps) otherwise."""
         t = self.sc.types.get(tid, {})
@@ -1755,7 +1770,11 @@ class Model:
             elem = t.get('elem', cty)
             off = u32(off + self.idxval(iid) * st_)
             cty = elem
-        return [off, tag, didx, 0]
+        # W_CHFIN word3: binding[15:8] stays in [31:16]; [15:0] is the
+        # member MatrixStride so a later OpLoad/OpStore (cmstride
+        # cleared) still spaces columns.  Zero when no member set one.
+        whi = (ptr[3] & 0xFFFF0000) if len(ptr) > 3 else 0
+        return [off, tag, didx, whi | (cmstride & 0xFFFF)]
 
     def natural_size(self, tid):
         """W_CHE0: ty_size != 0 ? size : 4 (natural layout)."""
@@ -2225,10 +2244,16 @@ class Model:
                 # image/sampler loads pass the descriptor ref through
                 self.setres(rid, va[0], 4)
                 return pc + wc
+            mcomps = self.matshape(rty)[1] if tk == TK['MAT'] else 1
             wb = [0] * ncomp
             for c in range(ncomp):
-                r = self.lsu(va[0][0], va[0][1], va[0][2], c,
-                             False, 0, 'i')
+                if tk == TK['MAT']:
+                    off = self.mat_comp_off(va[0], c, mcomps)
+                    r = self.lsu(off, va[0][1], va[0][2], 0,
+                                 False, 0, 'i')
+                else:
+                    r = self.lsu(va[0][0], va[0][1], va[0][2], c,
+                                 False, 0, 'i')
                 wb[c] = r if r is not None else 0
             self.setres(rid, wb, ncomp)
             return pc + wc
@@ -2244,13 +2269,22 @@ class Model:
                 return pc + wc
             ncs = self.ncomps(vt[1])          # stored value words
             cls = self.classof(vt[1])
-            if self.sc.types.get(vt[1], {}).get('kind') == TK['MAT']:
+            is_mat = self.sc.types.get(vt[1], {}).get('kind') == \
+                TK['MAT']
+            if is_mat:
                 src = [w for col in self.matv(ops[1]) for w in col]
+                _, mcomps = self.matshape(vt[1])
             else:
                 src = va[1]
+                mcomps = 1
             for c in range(ncs):
-                self.lsu(va[0][0], va[0][1], va[0][2], c,
-                         True, src[c], cls)
+                if is_mat:
+                    off = self.mat_comp_off(va[0], c, mcomps)
+                    self.lsu(off, va[0][1], va[0][2], 0,
+                             True, src[c], cls)
+                else:
+                    self.lsu(va[0][0], va[0][1], va[0][2], c,
+                             True, src[c], cls)
             return pc + wc
         if opc in (65, 66):                   # (InBounds)AccessChain
             wb = self.chain(ops[2], ops[3:]) if len(ops) > 3 \

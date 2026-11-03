@@ -2203,9 +2203,10 @@ module g6lc_apu_cmdexec
               state_q  <= StDsRowRd;
             end else begin
               desc_q.boff[ds_set_q][ds_i_q[3:0]] <=
-                  apu_sh_bindrow_t'{binding: ds_rw0_q[31:24],
+                  apu_sh_bindrow_t'{binding: {op_cpl_i.rdata[31:24],
+                                                      ds_rw0_q[31:24]},
                                     count:   ds_rw0_q[15:0],
-                                    off32:   op_cpl_i.rdata[31:12],
+                                    off32:   {8'h0, op_cpl_i.rdata[23:12]},
                                     dyn:     op_cpl_i.rdata[11],
                                     dynbase: op_cpl_i.rdata[3:0]};
               ds_rh_q <= 1'b0;
@@ -2873,6 +2874,7 @@ module g6lc_apu_cmdexec
                 6'd0: begin
                   rd_q.fs_in_mask <= op_cpl_i.rdata[31:24];
                   rd_q.topology   <= op_cpl_i.rdata[23:16];
+                  rd_q.restart    <= op_cpl_i.rdata[6];
                   rd_q.cull       <= op_cpl_i.rdata[3:2];
                   rd_q.front_ccw  <= op_cpl_i.rdata[1];
                   rd_q.fs_fdepth  <= op_cpl_i.rdata[5];
@@ -2920,6 +2922,14 @@ module g6lc_apu_cmdexec
                   rd_q.depth_test  <= op_cpl_i.rdata[0];
                   rd_q.depth_write <= op_cpl_i.rdata[1];
                   rd_q.depth_op    <= op_cpl_i.rdata[6:4];
+                  rd_q.depth_bias_en <= op_cpl_i.rdata[7];
+                  rd_q.stencil_en    <= op_cpl_i.rdata[8];
+                  rd_q.depth_clamp   <= op_cpl_i.rdata[15];
+                  rd_q.poly_mode     <= op_cpl_i.rdata[10:9];
+                  rd_q.rast_discard  <= op_cpl_i.rdata[11];
+                  rd_q.depth_bounds_en <= op_cpl_i.rdata[3];
+                  rd_q.logic_op_en   <= op_cpl_i.rdata[18];
+                  rd_q.logic_op      <= op_cpl_i.rdata[22:19];
                   dr_bcdyn_q       <= op_cpl_i.rdata[2];
                   dr_vpsta_q       <= op_cpl_i.rdata[16];
                   dr_scsta_q       <= op_cpl_i.rdata[17];
@@ -2939,11 +2949,37 @@ module g6lc_apu_cmdexec
                 6'd34, 6'd35, 6'd36, 6'd37, 6'd38, 6'd39:
                   // w34..39: baked static VkViewport f32[6]
                   dr_vp_q[3'(dr_pi_q - 6'd34)] <= op_cpl_i.rdata;
+                6'd48: rd_q.depth_bias_const <= op_cpl_i.rdata;
+                6'd49: rd_q.depth_bias_clamp <= op_cpl_i.rdata;
+                6'd50: rd_q.depth_bias_slope <= op_cpl_i.rdata;
+                6'd51: begin
+                  rd_q.stencil_cmp_mask <= op_cpl_i.rdata[7:0];
+                  rd_q.stencil_wr_mask  <= op_cpl_i.rdata[15:8];
+                  rd_q.stencil_ref      <= op_cpl_i.rdata[23:16];
+                end
+                6'd52: begin
+                  rd_q.stencil_fail  <= op_cpl_i.rdata[2:0];
+                  rd_q.stencil_dfail <= op_cpl_i.rdata[5:3];
+                  rd_q.stencil_pass  <= op_cpl_i.rdata[8:6];
+                  rd_q.stencil_cmp   <= op_cpl_i.rdata[11:9];
+                end
+                6'd53: begin
+                  rd_q.stencil_cmp_mask_b <= op_cpl_i.rdata[7:0];
+                  rd_q.stencil_wr_mask_b  <= op_cpl_i.rdata[15:8];
+                  rd_q.stencil_ref_b      <= op_cpl_i.rdata[23:16];
+                end
+                6'd54: begin
+                  rd_q.stencil_fail_b  <= op_cpl_i.rdata[2:0];
+                  rd_q.stencil_dfail_b <= op_cpl_i.rdata[5:3];
+                  rd_q.stencil_pass_b  <= op_cpl_i.rdata[8:6];
+                  rd_q.stencil_cmp_b   <= op_cpl_i.rdata[11:9];
+                end
+                6'd55: rd_q.depth_bounds_min <= op_cpl_i.rdata;
+                6'd56: rd_q.depth_bounds_max <= op_cpl_i.rdata;
                 default:
                   // w40..43: baked static VkRect2D i32[4]
                   dr_sc_q[2'(dr_pi_q - 6'd40)] <= op_cpl_i.rdata;
               endcase
-              dr_pi_q <= dr_pi_q + 6'd1;
               if (dr_pi_q == 6'd43) begin
                 if (dr_bcdyn_q) rd_q.blend_const <= bconst_q;
                 // static-state override: the pipeline baked viewport /
@@ -2962,8 +2998,12 @@ module g6lc_apu_cmdexec
                   rd_q.sc_h <= op_cpl_i.rdata[15:0];
                 end
                 dr_bq   <= '0;
+                dr_pi_q <= 6'd48;
+                state_q <= StDrPay;
+              end else if (dr_pi_q == 6'd56) begin
                 state_q <= StDrVbN;
               end else begin
+                dr_pi_q <= dr_pi_q + 6'd1;
                 state_q <= StDrPay;
               end
             end

@@ -1,0 +1,2 @@
+dEQP-VK.ssbo.layout.single_nested_struct.per_block_buffer.std140
+dEQP-VK.ssbo.layout.single_nested_struct.per_block_buffer.std430

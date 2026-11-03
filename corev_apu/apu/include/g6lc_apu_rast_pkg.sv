@@ -12,7 +12,28 @@ package g6lc_apu_rast_pkg;
   // VkFormat ids accepted for vertex attributes (v1); missing components read as (0,0,0,1)
   localparam logic [7:0] APU_RAST_VF_R32_SFLOAT = 8'd100, APU_RAST_VF_RG32_SFLOAT = 8'd103,
                          APU_RAST_VF_RGB32_SFLOAT = 8'd106, APU_RAST_VF_RGBA32_SFLOAT = 8'd109,
-                         APU_RAST_VF_RGBA8_UNORM = 8'd37;
+                         APU_RAST_VF_R8_UNORM = 8'd9, APU_RAST_VF_RG8_UNORM = 8'd16,
+                         APU_RAST_VF_RGB8_UNORM = 8'd23, APU_RAST_VF_RGBA8_UNORM = 8'd37,
+                         APU_RAST_VF_R8_SNORM = 8'd10, APU_RAST_VF_RG8_SNORM = 8'd17,
+                         APU_RAST_VF_RGB8_SNORM = 8'd24, APU_RAST_VF_RGBA8_SNORM = 8'd38,
+                         APU_RAST_VF_R8_UINT = 8'd13, APU_RAST_VF_R8_SINT = 8'd14,
+                         APU_RAST_VF_RG8_UINT = 8'd20, APU_RAST_VF_RG8_SINT = 8'd21,
+                         APU_RAST_VF_RGB8_UINT = 8'd27, APU_RAST_VF_RGB8_SINT = 8'd28,
+                         APU_RAST_VF_RGBA8_UINT = 8'd41, APU_RAST_VF_RGBA8_SINT = 8'd42,
+                         APU_RAST_VF_R16_UNORM = 8'd70, APU_RAST_VF_RG16_UNORM = 8'd77,
+                         APU_RAST_VF_RGB16_UNORM = 8'd84, APU_RAST_VF_RGBA16_UNORM = 8'd91,
+                         APU_RAST_VF_R16_SNORM = 8'd71, APU_RAST_VF_RG16_SNORM = 8'd78,
+                         APU_RAST_VF_RGB16_SNORM = 8'd85, APU_RAST_VF_RGBA16_SNORM = 8'd92,
+                         APU_RAST_VF_R16_UINT = 8'd74, APU_RAST_VF_R16_SINT = 8'd75,
+                         APU_RAST_VF_RG16_UINT = 8'd81, APU_RAST_VF_RG16_SINT = 8'd82,
+                         APU_RAST_VF_RGB16_UINT = 8'd88, APU_RAST_VF_RGB16_SINT = 8'd89,
+                         APU_RAST_VF_RGBA16_UINT = 8'd95, APU_RAST_VF_RGBA16_SINT = 8'd96,
+                         APU_RAST_VF_R32_UINT = 8'd98, APU_RAST_VF_R32_SINT = 8'd99,
+                         APU_RAST_VF_RG32_UINT = 8'd101, APU_RAST_VF_RG32_SINT = 8'd102,
+                         APU_RAST_VF_RGB32_UINT = 8'd104, APU_RAST_VF_RGB32_SINT = 8'd105,
+                         APU_RAST_VF_RGBA32_UINT = 8'd107, APU_RAST_VF_RGBA32_SINT = 8'd108,
+                         APU_RAST_VF_R16_SFLOAT = 8'd76, APU_RAST_VF_RG16_SFLOAT = 8'd83,
+                         APU_RAST_VF_RGB16_SFLOAT = 8'd90, APU_RAST_VF_RGBA16_SFLOAT = 8'd97;
   // VkBlendFactor subset (other factors → UNSUPPORTED) and VkBlendOp
   localparam logic [4:0] APU_RAST_BF_ZERO = 5'd0, APU_RAST_BF_ONE = 5'd1,
                          APU_RAST_BF_SRC_COLOR = 5'd2, APU_RAST_BF_OM_SRC_COLOR = 5'd3,
@@ -48,6 +69,9 @@ package g6lc_apu_rast_pkg;
     logic              fs_late;              // FS writes FragDepth or may kill/demote -> late-Z in the ROP
     logic              fs_fdepth;            // FS declares FragDepth out -> slot8 word0 is the depth source
     logic [7:0]        topology;             // VkPrimitiveTopology: 3 LIST, 4 STRIP, 5 FAN (others → UNSUPPORTED)
+    logic [1:0]        poly_mode;            // VkPolygonMode: 0 fill, 1 line, 2 point
+    logic              rast_discard;         // rasterizerDiscardEnable
+    logic              restart;              // indexed primitiveRestartEnable
     logic [1:0]        cull;                 // VkCullModeFlags bit0 FRONT bit1 BACK
     logic              front_ccw;            // VK_FRONT_FACE_COUNTER_CLOCKWISE
     apu_rast_attr_t [7:0] attr;
@@ -67,6 +91,22 @@ package g6lc_apu_rast_pkg;
     logic [3:0][31:0]  blend_const;          // f32 blendConstants (dynamic or pipeline-static)
     logic              depth_test, depth_write;
     logic [2:0]        depth_op;             // VkCompareOp 0..7
+    logic              depth_clamp;          // clamp window z to the viewport, skip near/far clip
+    logic              stencil_en;
+    logic [2:0]        stencil_cmp;          // front VkCompareOp
+    logic [2:0]        stencil_fail, stencil_pass, stencil_dfail;
+    logic [7:0]        stencil_ref, stencil_cmp_mask, stencil_wr_mask;
+    logic [2:0]        stencil_cmp_b;
+    logic [2:0]        stencil_fail_b, stencil_pass_b, stencil_dfail_b;
+    logic [7:0]        stencil_ref_b, stencil_cmp_mask_b, stencil_wr_mask_b;
+    logic              depth_bias_en;
+    logic              depth_bounds_en;      // depthBoundsTestEnable
+    logic [31:0]       depth_bounds_min, depth_bounds_max;
+    logic              logic_op_en;
+    logic [3:0]        logic_op;             // VkLogicOp 0..15
+    logic [31:0]       depth_bias_const;     // f32 constantFactor
+    logic [31:0]       depth_bias_clamp;     // f32; 0 disables the clamp
+    logic [31:0]       depth_bias_slope;     // f32 slopeFactor (stored)
     logic [31:0]       vertex_count, instance_count, first_vertex, first_instance;  // Draw; DrawIndexed: index_count in vertex_count
     logic [31:0]       first_index; logic signed [31:0] vertex_offset;
     logic [3:0][31:0]  clear_color;          // CLEAR: VkClearColorValue float32[4]; depth clear uses [0]

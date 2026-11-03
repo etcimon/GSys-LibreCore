@@ -1,0 +1,12 @@
+dEQP-VK.ubo.single_basic_type.std140.highp.float.compute
+dEQP-VK.ubo.single_basic_type.std140.highp.int.compute
+dEQP-VK.ubo.single_basic_type.std140.highp.ivec2.compute
+dEQP-VK.ubo.single_basic_type.std140.highp.ivec3.compute
+dEQP-VK.ubo.single_basic_type.std140.highp.ivec4.compute
+dEQP-VK.ubo.single_basic_type.std140.highp.uint.compute
+dEQP-VK.ubo.single_basic_type.std140.highp.uvec2.compute
+dEQP-VK.ubo.single_basic_type.std140.highp.uvec3.compute
+dEQP-VK.ubo.single_basic_type.std140.highp.uvec4.compute
+dEQP-VK.ubo.single_basic_type.std140.highp.vec2.compute
+dEQP-VK.ubo.single_basic_type.std140.highp.vec3.compute
+dEQP-VK.ubo.single_basic_type.std140.highp.vec4.compute

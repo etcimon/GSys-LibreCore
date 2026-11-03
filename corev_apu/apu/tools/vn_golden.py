@@ -1444,7 +1444,7 @@ SESSION_MAX_REP = 352
 # §7b geometry (defaults; --paywords overrides the ObjPay size)
 PAY_WORDS = 16384
 PAY_CHUNK = 64
-PAY_STAGE = 1024
+PAY_STAGE = 32768
 APU_VN_FAULT_PAYLOAD = 9
 # §7b/5a-ii: pipelines keep no ObjPay extent — the staged payload is
 # consumed at creation and the object carries {slot, layout} in aux.
@@ -2060,12 +2060,20 @@ class FrontModel:
             self.pay[d['addr'] + i] = v & 0xFFFFFFFF
 
     def _cb_freechains(self, d):
-        """FREE both chunk chains, head-first (cmdrec fr_head walk)."""
+        """FREE both chunk chains, head-first (cmdrec fr_head walk).
+
+        A fitted payload extent has w0[31] set and its word count at
+        w1.  Standard chunks free CB_CHUNK words."""
         for head in (d['rech'], d['payh']):
             c = head
             while c:
-                nxt = self.pay.get(c, 0)
-                self.pay_free(c, CB_CHUNK)
+                w0 = self.pay.get(c, 0) & 0xFFFFFFFF
+                nxt = w0 & 0x7FFFFFFF
+                if w0 & 0x80000000:
+                    sz = self.pay.get(c + 1, CB_CHUNK) & 0xFFFFFFFF
+                else:
+                    sz = CB_CHUNK
+                self.pay_free(c, sz)
                 c = nxt
         d['rech'] = d['rect'] = d['row'] = 0
         d['payh'] = d['payt'] = d['ptop'] = 0
@@ -2124,19 +2132,36 @@ class FrontModel:
             d['rect'] = nc
             d['row'] = 1
         if nw:
-            if d['payt'] == 0 or d['ptop'] + nw > d['payt'] + CB_CHUNK:
-                pnc = self.pay_alloc(CB_CHUNK)
+            # a standard chunk holds CB_CHUNK-1 data words (w0 is the
+            # link).  A larger payload is one fitted extent: w0[31]
+            # marks it, w1 is the allocated size, data starts at w2.
+            fitted = nw > CB_CHUNK - 1
+            if fitted or d['payt'] == 0 or \
+                    d['ptop'] + nw > d['payt'] + CB_CHUNK:
+                asz = (((nw + 2 + 63) // 64) * 64) if fitted \
+                    else CB_CHUNK
+                pnc = self.pay_alloc(asz)
                 if pnc is None:
                     return 'PAY_FULL'
-                self.pay[pnc] = 0
-                ew_(pnc, 0)
+                if fitted:
+                    self.pay[pnc] = 0x80000000
+                    self.pay[pnc + 1] = asz
+                    ew_(pnc, 0x80000000)
+                    ew_(pnc + 1, asz)
+                    data = pnc + 2
+                else:
+                    self.pay[pnc] = 0
+                    ew_(pnc, 0)
+                    data = pnc + 1
                 if d['payt']:
-                    self.pay[d['payt']] = pnc  # link old tail
-                    ew_(d['payt'], pnc)
+                    old = self.pay.get(d['payt'], 0) & 0xFFFFFFFF
+                    link = (old & 0x80000000) | pnc
+                    self.pay[d['payt']] = link
+                    ew_(d['payt'], link)
                 else:
                     d['payh'] = pnc
                 d['payt'] = pnc
-                d['ptop'] = pnc + 1
+                d['ptop'] = data
             recd['imm'][7] = d['ptop']         # absolute word addr
             for i, w in enumerate(pwords):
                 self.pay[d['ptop'] + i] = w & 0xFFFFFFFF
@@ -2934,15 +2959,14 @@ class FrontModel:
         WHOLE = 0xFFFFFFFFFFFFFFFF
         eff = dsz
         if ct == T['vkCmdFillBuffer'] and dsz == WHOLE:
-            eff = 0 if doff >= de[1] else de[1] - doff
+            # rounded down to a multiple of 4 (nearest smaller multiple)
+            eff = 0 if doff >= de[1] else (de[1] - doff) & ~3
         if doff & 3:
             return True
         if ct == T['vkCmdUpdateBuffer'] and \
                 (dsz & 3 or dsz == 0 or dsz > 65536):
             return True
         if ct == T['vkCmdFillBuffer'] and dsz != WHOLE and dsz & 3:
-            return True
-        if ct == T['vkCmdFillBuffer'] and dsz == WHOLE and eff & 3:
             return True
         if doff > de[1] or eff > de[1] - doff:
             return True
@@ -3663,8 +3687,10 @@ class FrontModel:
                 ew[1] = nx if rec['imm'][0] else 0
                 ew[2:2 + len(payload)] = payload
             elif ek == 'ENUMQF2':
-                ew[0] = 1
-                ew[1] = 1 if rec['imm'][0] else 0
+                # family 0 GRAPHICS|COMPUTE|TRANSFER, family 1
+                # COMPUTE|TRANSFER on the same ring
+                ew[0] = 2
+                ew[1] = 2 if rec['imm'][0] else 0
                 elt = self.m.qf2_elt()
                 ew[2:2 + len(elt)] = elt
             elif ek == 'ENUMQGRP':
@@ -5882,11 +5908,10 @@ def build_session(model, asm, sim, rep_sim, enc, gen, rng,
     cmd('vkDestroyDevice', device=H['dev'])
     cmd('vkDestroyInstance', instance=H['inst'])
 
-    # ------- arm 9: payload staging overflow -> PAYLOAD fault ------------
-    # VkDescriptorSetLayoutBinding is bound-capped at 64 elements, so a
-    # layout alone can stage at most 256 words.  vkUpdateDescriptorSets
-    # stages 5 + 6*descriptorCount words per write (bound: 64 writes x
-    # 64 buffer infos); 3 writes x 64 infos = 1167 words > 1024 staged.
+    # ------- arm 9: descriptor update wider than the old 1024-word ------
+    # stage.  PayStageWords is 32768, so 3 writes x 64 buffer infos
+    # (1167 words) must be accepted and walked, not faulted.  A KEEP
+    # stream past 32768 is still APU_VN_FAULT_PAYLOAD.
     J = {k: newid() for k in ('inst', 'pd', 'dev', 'ds', 'buf')}
     dev_prefix(J)
     cmd('vkUpdateDescriptorSets', device=J['dev'],

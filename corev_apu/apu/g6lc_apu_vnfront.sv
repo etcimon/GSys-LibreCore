@@ -41,8 +41,10 @@
 //   UNSUPPORTED VK_ERROR_FEATURE_NOT_PRESENT, no reply program
 //
 // §7b payload handling (5a-i): the decoder's KEEP stream lands in a
-// staging tc_sram (PayStageWords); overflow reports
-// APU_VN_FAULT_PAYLOAD and kills the command like any decode fault.
+// staging tc_sram (PayStageWords, 32768).  That holds a maximum
+// vkCmdUpdateBuffer (65536 bytes + the 4-word header).  A longer
+// KEEP stream reports APU_VN_FAULT_PAYLOAD and kills the command
+// like any decode fault.
 // After decode:
 //   ALLOC     VkDescriptorSetLayout/VkPipelineLayout allocate an
 //             ObjPay extent first (FULL -> OUT_OF_DEVICE_MEMORY, no
@@ -119,9 +121,11 @@ module g6lc_apu_vnfront
   parameter bit          Enable = 1'b0,
   parameter int unsigned Fences = 16,
   parameter int unsigned CbBufs = 16,
-  // §7b: decoder payload staging (a decode-class PAYLOAD fault when
-  // a single command's KEEP stream exceeds this window)
-  parameter int unsigned PayStageWords = 1024
+  // §7b: decoder payload staging.  32768 words covers
+  // vkCmdUpdateBuffer's spec maximum (65536 bytes) plus its
+  // 4-word header.  A KEEP stream past this window is still a
+  // decode-class PAYLOAD fault.
+  parameter int unsigned PayStageWords = 32768
 ) (
   input  logic               clk_i,
   input  logic               rst_ni,
@@ -445,7 +449,8 @@ module g6lc_apu_vnfront
     logic [15:0]         dsl_i_q;      // binding cursor
     logic [2:0]          dsl_h_q;      // staged word cursor (4/binding)
     logic                dsl_k_q;      // row word cursor (2/row)
-    logic [7:0]          dsl_b_q, dsl_t_q;
+    logic [15:0]         dsl_b_q;
+    logic [7:0]          dsl_t_q;
     logic [15:0]         dsl_c_q;
     logic [19:0]         dsl_off_q;    // running record offset
     logic [15:0]         dsl_dn_q;     // dynamic descriptor count
@@ -483,7 +488,7 @@ module g6lc_apu_vnfront
     // §12.3 F5: binding-row scan subroutine — finds the row whose
     // binding number matches in the layout's objpay table
     logic [15:0]         rw_i_q;       // row cursor
-    logic [7:0]          rw_bind_q;    // wanted binding number
+    logic [15:0]         rw_bind_q;    // wanted binding number
     logic                rw_ok_q;
     logic [19:0]         rw_off_q;     // record offset (32B units)
     logic [15:0]         rw_cnt_q;     // array count
@@ -606,7 +611,7 @@ module g6lc_apu_vnfront
     // (gp_st_q) and the packed 48-word state block lands in ObjPay
     // (layout below at gp_pay_w; w44..47 = per-stage {handle,park}).
     logic                pre_gp_q;    // elements are graphics pipes
-    logic [5:0]          gp_ph_q;     // parse phase
+    logic [6:0]          gp_ph_q;     // parse phase
     logic [7:0]          gp_stg_q;    // staged-word cursor
     logic [63:0]         gp_mod0_q, gp_mod1_q; // VS/FS module ids
     logic                gp_st_q;     // module loop: 0 VS, 1 FS
@@ -620,6 +625,20 @@ module g6lc_apu_vnfront
     logic [3:0]          gp_nattr_q;
     logic [4:0]          gp_i_q;      // binding/attr/attach/dyn cursor
     logic [7:0]          gp_top_q;    // VkPrimitiveTopology
+    logic                gp_re_q;     // primitiveRestartEnable
+    logic                gp_dcl_q;    // depthClampEnable
+    logic [1:0]          gp_poly_q;   // polygonMode, default FILL
+    logic                gp_rsd_q;    // rasterizerDiscardEnable
+    logic                gp_dbn_q;    // depthBoundsTestEnable
+    logic [31:0]         gp_dbmin_q, gp_dbmax_q;
+    logic                gp_loe_q;    // logicOpEnable
+    logic [3:0]          gp_lop_q;    // VkLogicOp
+    logic [2:0]          gp_sff_q, gp_sfp_q, gp_sfd_q, gp_sfc_q;
+    logic [7:0]          gp_sfm_q, gp_sfw_q, gp_sfr_q;
+    logic [2:0]          gp_sbf_q, gp_sbp_q, gp_sbd_q, gp_sbc_q;
+    logic [7:0]          gp_sbm_q, gp_sbw_q, gp_sbr_q;
+    logic                gp_dbe_q;    // depthBiasEnable
+    logic [31:0]         gp_dbc_q, gp_dbk_q, gp_dbs_q;
     logic [1:0]          gp_cull_q;   // VkCullModeFlags
     logic                gp_ff_q;     // VK_FRONT_FACE_COUNTER_CLOCKWISE
     logic [15:0][21:0]   gp_bnd_q;    // {rate[21], valid[20], binding[19:16], stride[15:0]}
@@ -647,9 +666,9 @@ module g6lc_apu_vnfront
     logic [31:0]         auxhi_val_q;  // generic SETAUXHI value
 
     // §5a G3b-iii: widened to 16 bits for chunked submit lists —
-    // blob[].words is 17-bit so words>>1 (u64 elements) fits; the
-    // real bound is the 1024-word staging SRAM (<=511 elements,
-    // overflow faults earlier on the decode path)
+    // blob[].words is 17-bit so words>>1 (u64 elements) fits.
+    // The staging SRAM is PayStageWords; a longer KEEP stream
+    // faults on the decode path before this cursor is used.
     logic [15:0]         blob_i_q;     // current blob element
     logic                brp_i_q;      // BeginRP handle cursor (0 rp, 1 fb)
     logic [15:0]         blob_n_q;     // element count
@@ -898,13 +917,25 @@ module g6lc_apu_vnfront
     // G1c: vertex-attribute formats the raster engine accepts
     // (R32/R32G32/R32G32B32/R32G32B32A32_SFLOAT + R8G8B8A8_UNORM —
     // mirrors g6lc_apu_rast_pkg APU_RAST_VF_*)
+    // Mirrors g6lc_apu_rast f_asz.  A format the gather refuses
+    // stays a pipeline-create failure.
     function automatic logic f_vattr_ok(input logic [31:0] f);
-      return f == 32'd37 || f == 32'd100 || f == 32'd103 ||
-             f == 32'd106 || f == 32'd109;
+      return f == 32'd9  || f == 32'd10 || f == 32'd13 || f == 32'd14 ||
+             f == 32'd16 || f == 32'd17 || f == 32'd20 || f == 32'd21 ||
+             f == 32'd23 || f == 32'd24 || f == 32'd27 || f == 32'd28 ||
+             f == 32'd37 || f == 32'd38 || f == 32'd41 || f == 32'd42 ||
+             f == 32'd70 || f == 32'd71 || f == 32'd74 || f == 32'd75 ||
+             f == 32'd76 || f == 32'd77 || f == 32'd78 || f == 32'd81 ||
+             f == 32'd82 || f == 32'd83 || f == 32'd84 || f == 32'd85 ||
+             f == 32'd88 || f == 32'd89 || f == 32'd90 || f == 32'd91 ||
+             f == 32'd92 || f == 32'd95 || f == 32'd96 || f == 32'd97 ||
+             f == 32'd98 || f == 32'd99 || f == 32'd100 || f == 32'd101 ||
+             f == 32'd102 || f == 32'd103 || f == 32'd104 || f == 32'd105 ||
+             f == 32'd106 || f == 32'd107 || f == 32'd108 || f == 32'd109;
     endfunction
     // G2a: graphics-pipeline ObjPay state word i (44 words):
     //   w0 = {fs_in_mask[31:24], topology[23:16], nattr[15:12],
-    //         nbind[11:7], 1'b0, fs_fdepth[5], fs_late[4],
+    //         nbind[11:7], restart[6], fs_fdepth[5], fs_late[4],
     //         cull[3:2], front_ccw[1], 1'b1}
     //   w1+b = {10'h0, rate[21], valid[20], binding[19:16], stride[15:0]}
     //   w17+a = {valid[31], loc[26:24], binding[23:20], fmt[19:12],
@@ -930,15 +961,16 @@ module g6lc_apu_vnfront
     function automatic logic [31:0] gp_pay_w(input logic [5:0] i);
       if (i == 6'd0)
         return {gp_fsm_q, gp_top_q, gp_nattr_q, gp_nbind_q,
-                1'b0, gp_fdep_q, gp_late_q, gp_cull_q, gp_ff_q, 1'b1};
+                gp_re_q, gp_fdep_q, gp_late_q, gp_cull_q, gp_ff_q, 1'b1};
       if (i < 6'd17)
         return {10'h0, gp_bnd_q[4'(i - 6'd1)]};
       if (i < 6'd25)
         return gp_atr_q[3'(i - 6'd17)];
       if (i == 6'd25)
-        return {14'h0, gp_sca_q && !gp_scdyn_q, gp_vpa_q && !gp_vpdyn_q,
-                1'b0, gp_natt_q, 3'h0, gp_sten_q, 1'b0,
-                gp_dcmp_q, 1'b0, gp_bcdyn_q, gp_dwr_q, gp_dte_q};
+        return {9'h0, gp_lop_q, gp_loe_q,
+                gp_sca_q && !gp_scdyn_q, gp_vpa_q && !gp_vpdyn_q,
+                gp_dcl_q, gp_natt_q, gp_rsd_q, gp_poly_q, gp_sten_q, gp_dbe_q,
+                gp_dcmp_q, gp_dbn_q, gp_bcdyn_q, gp_dwr_q, gp_dte_q};
       if (i < 6'd30)
         return gp_blend_q[2'(i - 6'd26)];
       if (i < 6'd34)
@@ -952,7 +984,19 @@ module g6lc_apu_vnfront
       if (i == 6'd44) return gp_mh0_q;
       if (i == 6'd45) return gp_mc0_q;
       if (i == 6'd46) return gp_mh1_q;
-      return gp_mc1_q;
+      if (i == 6'd47) return gp_mc1_q;
+      if (i == 6'd48) return gp_dbc_q;
+      if (i == 6'd49) return gp_dbk_q;
+      if (i == 6'd50) return gp_dbs_q;
+      if (i == 6'd51) return {8'h0, gp_sfr_q, gp_sfw_q, gp_sfm_q};
+      if (i == 6'd52)
+        return {20'h0, gp_sfc_q, gp_sfp_q, gp_sfd_q, gp_sff_q};
+      if (i == 6'd53) return {8'h0, gp_sbr_q, gp_sbw_q, gp_sbm_q};
+      if (i == 6'd54)
+        return {20'h0, gp_sbc_q, gp_sbp_q, gp_sbd_q, gp_sbf_q};
+      if (i == 6'd55) return gp_dbmin_q;
+      if (i == 6'd56) return gp_dbmax_q;
+      return '0;
     endfunction
     // wire format -> device id, or 8'hFF unsupported
     function automatic logic [7:0] f_img_fmt(input logic [31:0] f);
@@ -1246,7 +1290,13 @@ module g6lc_apu_vnfront
         gp_late_q <= 1'b0; gp_fdep_q <= 1'b0;
         pl_modh_q <= '0; pl_modc_q <= '0; pl_pin_q <= 1'b0;
         gp_nbind_q <= '0; gp_nattr_q <= '0; gp_i_q <= '0;
-        gp_top_q <= '0; gp_cull_q <= '0; gp_ff_q <= 1'b0;
+        gp_top_q <= '0; gp_re_q <= 1'b0; gp_dcl_q <= 1'b0;
+        gp_poly_q <= 2'd0; gp_rsd_q <= 1'b0;   // VK_POLYGON_MODE_FILL
+        gp_dbn_q <= 1'b0; gp_dbmin_q <= '0; gp_dbmax_q <= '0;
+        gp_loe_q <= 1'b0; gp_lop_q <= '0;
+        gp_dbe_q <= 1'b0;
+        gp_dbc_q <= '0; gp_dbk_q <= '0; gp_dbs_q <= '0;
+        gp_cull_q <= '0; gp_ff_q <= 1'b0;
         gp_bnd_q <= '0; gp_atr_q <= '0;
         ret_gp_q <= 1'b0;
         blob_i_q <= '0; blob_n_q <= '0; blob_sel_q <= 1'b0;
@@ -1524,11 +1574,13 @@ module g6lc_apu_vnfront
                     state_q     <= StRep;
                   end
                   ExecEnumQf2: begin
-                    // one queue family: RU32 count + REXBUF element
-                    // {sType, u64 pNext, VkQueueFamilyProperties}
-                    exec_w_q[0*32 +: 32] <= 32'd1;
+                    // two families on one ring: family 0 is
+                    // GRAPHICS|COMPUTE|TRANSFER, family 1 is
+                    // COMPUTE|TRANSFER.  RU32 count + REXBUF elements
+                    // {sType, u64 pNext, VkQueueFamilyProperties}.
+                    exec_w_q[0*32 +: 32] <= 32'd2;
                     exec_w_q[1*32 +: 32] <= op_q.imm[0] != 32'h0
-                        ? 32'd1 : 32'h0;
+                        ? 32'd2 : 32'h0;
                     exec_w_q[2*32 +: $bits(APU_VN_QF2_ELT)]
                         <= APU_VN_QF2_ELT;
                     state_q     <= StRep;
@@ -3151,7 +3203,7 @@ module g6lc_apu_vnfront
                 // a graphics pipeline's second handle follows.
                 ret_gp_q   <= ot_cpl_i.entry.aux[6];
                 ret_payb_q <= 32'(ot_cpl_i.entry.aux[31:16]) << 6;
-                ret_pw_q   <= ot_cpl_i.entry.aux[6] ? 16'd48 : 16'd2;
+                ret_pw_q   <= ot_cpl_i.entry.aux[6] ? 16'd57 : 16'd2;
                 opr_q      <= '{op: APU_OBJPAY_OP_READ,
                                addr: (32'(ot_cpl_i.entry.aux[31:16])
                                       << 6) +
@@ -4037,7 +4089,7 @@ module g6lc_apu_vnfront
           end
           StDslRd: begin
             case (dsl_h_q)
-              3'd0: dsl_b_q <= stg_word_q[7:0];
+              3'd0: dsl_b_q <= stg_word_q[15:0];
               3'd1: dsl_t_q <= stg_word_q[7:0];
               3'd2: dsl_c_q <= stg_word_q[15:0];
               default: ;                    // stageFlags: unused
@@ -4075,8 +4127,8 @@ module g6lc_apu_vnfront
                          addr: op_base_q + 32'd1 +
                                (32'(dsl_i_q) << 1) + 32'(dsl_k_q),
                          wdata: dsl_k_q == 1'b0
-                                ? {dsl_b_q, dsl_t_q, dsl_c_q}
-                                : {dsl_off_q,
+                                ? {dsl_b_q[7:0], dsl_t_q, dsl_c_q}
+                                : {dsl_b_q[15:8], dsl_off_q[11:0],
                                    dsl_t_q == 8'd8 || dsl_t_q == 8'd9,
                                    7'b0, dsl_dn_q[3:0]},
                          default: '0};
@@ -4091,12 +4143,13 @@ module g6lc_apu_vnfront
             end else if (dsl_k_q == 1'b0) begin
               dsl_k_q    <= 1'b1;
               dsl_hash_q <= fnv1a_w(dsl_hash_q,
-                                    {dsl_b_q, dsl_t_q, dsl_c_q});
+                                    {dsl_b_q[7:0], dsl_t_q, dsl_c_q});
               state_q <= StDslWr;
             end else begin
               dsl_hash_q <= fnv1a_w(
                   dsl_hash_q,
-                  {dsl_off_q, dsl_t_q == 8'd8 || dsl_t_q == 8'd9,
+                  {dsl_b_q[15:8], dsl_off_q[11:0],
+                   dsl_t_q == 8'd8 || dsl_t_q == 8'd9,
                    7'b0, dsl_dn_q[3:0]});
               dsl_off_q  <= dsl_off_q + 20'(dsl_c_q);
               dsl_recs_q <= dsl_recs_q + dsl_c_q;
@@ -4397,7 +4450,7 @@ module g6lc_apu_vnfront
             if (op_cpl_i.status != APU_OBJPAY_OK) begin
               rw_ok_q <= 1'b0;
               state_q <= row_ret_q;
-            end else if (op_cpl_i.rdata[31:24] == rw_bind_q) begin
+            end else if (op_cpl_i.rdata[31:24] == rw_bind_q[7:0]) begin
               rw_cnt_q <= op_cpl_i.rdata[15:0];
               rw_typ_q <= op_cpl_i.rdata[23:16];
               opr_q    <= '{op: APU_OBJPAY_OP_READ,
@@ -4412,10 +4465,19 @@ module g6lc_apu_vnfront
             end
           end
           StRowW1C: begin
-            rw_off_q <= op_cpl_i.status == APU_OBJPAY_OK
-                        ? op_cpl_i.rdata[31:12] : 20'h0;
-            rw_ok_q  <= op_cpl_i.status == APU_OBJPAY_OK;
-            state_q  <= row_ret_q;
+            // w1[31:24] is binding[15:8].  A low-byte hit on a
+            // different binding keeps scanning.  off32 is w1[23:12].
+            if (op_cpl_i.status != APU_OBJPAY_OK) begin
+              rw_ok_q <= 1'b0;
+              state_q <= row_ret_q;
+            end else if (op_cpl_i.rdata[31:24] != rw_bind_q[15:8]) begin
+              rw_i_q  <= rw_i_q + 16'd1;
+              state_q <= StRowSc;
+            end else begin
+              rw_off_q <= {8'h0, op_cpl_i.rdata[23:12]};
+              rw_ok_q  <= 1'b1;
+              state_q  <= row_ret_q;
+            end
           end
 
           // ---- §12.3 F5: vkUpdateDescriptorSets staged walk ----------------
@@ -4479,7 +4541,7 @@ module g6lc_apu_vnfront
                          16'(upd_stride(upd_type_q[7:0])));
               state_q <= StUpdWNext;
             end else begin
-              rw_bind_q <= upd_dstb_q[7:0];
+              rw_bind_q <= upd_dstb_q[15:0];
               rw_i_q    <= '0;
               row_ret_q <= StUpdWBad;
               state_q   <= StRowSc;
@@ -4931,7 +4993,7 @@ module g6lc_apu_vnfront
           StUpdCpS: begin
             cp_srcbad_q <= !rsv_ok_q || rsv_dead_q;
             cp_sbase_q  <= rsv_base_q;
-            rw_bind_q   <= cp_sb_q[7:0];
+            rw_bind_q   <= cp_sb_q[15:0];
             rw_i_q      <= '0;
             row_ret_q   <= StUpdCpD;
             state_q     <= StRowSc;
@@ -4957,7 +5019,7 @@ module g6lc_apu_vnfront
             cp_dbase_q <= rsv_base_q;
             cp_dhnd_q  <= rsv_hnd_q;
             cp_dead_q  <= !rsv_ok_q || rsv_dead_q;
-            rw_bind_q  <= cp_db_q[7:0];
+            rw_bind_q  <= cp_db_q[15:0];
             rw_i_q     <= '0;
             row_ret_q  <= StUpdCpGo;
             state_q    <= StRowSc;
@@ -5574,14 +5636,17 @@ module g6lc_apu_vnfront
                 if (stg_word_q == 32'h0) state_q <= StPipeFail;
                 else begin gp_ph_q <= 5'd18; state_q <= StGpRd; end
               end
-              6'd18: begin // topology: TRIANGLE_LIST/STRIP/FAN
-                if (stg_word_q != 32'd3 && stg_word_q != 32'd4 &&
-                    stg_word_q != 32'd5)
+              6'd18: begin // topology: POINT, LINE_LIST/STRIP, TRIANGLE_*
+                if (stg_word_q > 32'd5)
                   state_q <= StPipeFail;
                 else begin
                   gp_top_q <= stg_word_q[7:0];
-                  gp_ph_q  <= 6'd46; state_q <= StGpRd;
+                  gp_ph_q  <= 6'd61; state_q <= StGpRd;
                 end
+              end
+              6'd61: begin // primitiveRestartEnable (VkBool32)
+                gp_re_q  <= (stg_word_q != 32'h0);
+                gp_ph_q  <= 6'd46; state_q <= StGpRd;
               end
               // ---- static viewport/scissor (staged order: state pres,
               // viewportCount, pViewports count, 6 VkViewport words,
@@ -5633,7 +5698,22 @@ module g6lc_apu_vnfront
               end
               5'd19: begin // pRasterizationState presence
                 if (stg_word_q == 32'h0) state_q <= StPipeFail;
-                else begin gp_ph_q <= 5'd20; state_q <= StGpRd; end
+                else begin gp_ph_q <= 7'd68; state_q <= StGpRd; end
+              end
+              7'd68: begin // depthClampEnable
+                gp_dcl_q <= (stg_word_q != 32'h0);
+                gp_ph_q  <= 7'd85; state_q <= StGpRd;
+              end
+              7'd85: begin // rasterizerDiscardEnable
+                gp_rsd_q <= (stg_word_q != 32'h0);
+                gp_ph_q  <= 7'd84; state_q <= StGpRd;
+              end
+              7'd84: begin // VkPolygonMode: FILL=0 LINE=1 POINT=2 (stored raw)
+                if (stg_word_q > 32'd2) state_q <= StPipeFail;
+                else begin
+                  gp_poly_q <= stg_word_q[1:0];
+                  gp_ph_q   <= 5'd20; state_q <= StGpRd;
+                end
               end
               5'd20: begin // cullMode (FRONT|BACK bits only)
                 if (stg_word_q > 32'd3) state_q <= StPipeFail;
@@ -5648,8 +5728,24 @@ module g6lc_apu_vnfront
                   // VkFrontFace is CCW=0/CW=1; the ObjPay bit is the
                   // semantic front_ccw flag (1 = counter-clockwise)
                   gp_ff_q <= !stg_word_q[0];
-                  gp_ph_q <= 6'd22; state_q <= StGpRd;
+                  gp_ph_q <= 7'd64; state_q <= StGpRd;
                 end
+              end
+              7'd64: begin // depthBiasEnable
+                gp_dbe_q <= (stg_word_q != 32'h0);
+                gp_ph_q  <= 7'd65; state_q <= StGpRd;
+              end
+              7'd65: begin // depthBiasConstantFactor
+                gp_dbc_q <= stg_word_q;
+                gp_ph_q  <= 7'd66; state_q <= StGpRd;
+              end
+              7'd66: begin // depthBiasClamp
+                gp_dbk_q <= stg_word_q;
+                gp_ph_q  <= 7'd67; state_q <= StGpRd;
+              end
+              7'd67: begin // depthBiasSlopeFactor
+                gp_dbs_q <= stg_word_q;
+                gp_ph_q  <= 6'd22; state_q <= StGpRd;
               end
               6'd22: begin // pDepthStencilState presence (optional)
                 gp_ph_q <= (stg_word_q == 32'h0) ? 6'd27 : 6'd23;
@@ -5667,16 +5763,67 @@ module g6lc_apu_vnfront
                 if (stg_word_q > 32'd7) state_q <= StPipeFail;
                 else begin
                   gp_dcmp_q <= stg_word_q[2:0];
-                  gp_ph_q   <= 6'd26; state_q <= StGpRd;
+                  gp_ph_q   <= 7'd86; state_q <= StGpRd;
                 end
               end
-              6'd26: begin // stencilTestEnable must be 0 in v1
-                if (stg_word_q != 32'h0) state_q <= StPipeFail;
-                else begin gp_ph_q <= 6'd27; state_q <= StGpRd; end
+              7'd86: begin // depthBoundsTestEnable
+                gp_dbn_q <= (stg_word_q != 32'h0);
+                gp_ph_q  <= 6'd26; state_q <= StGpRd;
+              end
+              6'd26: begin // stencilTestEnable
+                gp_sten_q <= |stg_word_q;
+                gp_ph_q   <= 7'd69; state_q <= StGpRd;
+              end
+              7'd69, 7'd70, 7'd71, 7'd72, 7'd76, 7'd77, 7'd78, 7'd79: begin
+                // stencil ops, front then back: fail, pass, depthFail, compare
+                if (stg_word_q > 32'd7) state_q <= StPipeFail;
+                else begin
+                  if (gp_ph_q == 7'd69) gp_sff_q <= stg_word_q[2:0];
+                  if (gp_ph_q == 7'd70) gp_sfp_q <= stg_word_q[2:0];
+                  if (gp_ph_q == 7'd71) gp_sfd_q <= stg_word_q[2:0];
+                  if (gp_ph_q == 7'd72) gp_sfc_q <= stg_word_q[2:0];
+                  if (gp_ph_q == 7'd76) gp_sbf_q <= stg_word_q[2:0];
+                  if (gp_ph_q == 7'd77) gp_sbp_q <= stg_word_q[2:0];
+                  if (gp_ph_q == 7'd78) gp_sbd_q <= stg_word_q[2:0];
+                  if (gp_ph_q == 7'd79) gp_sbc_q <= stg_word_q[2:0];
+                  gp_ph_q <= (gp_ph_q == 7'd79) ? 7'd80 : gp_ph_q + 7'd1;
+                  state_q <= StGpRd;
+                end
+              end
+              7'd73, 7'd74, 7'd75, 7'd80, 7'd81, 7'd82: begin
+                // compareMask, writeMask, reference
+                if (gp_ph_q == 7'd73) gp_sfm_q <= stg_word_q[7:0];
+                if (gp_ph_q == 7'd74) gp_sfw_q <= stg_word_q[7:0];
+                if (gp_ph_q == 7'd75) gp_sfr_q <= stg_word_q[7:0];
+                if (gp_ph_q == 7'd80) gp_sbm_q <= stg_word_q[7:0];
+                if (gp_ph_q == 7'd81) gp_sbw_q <= stg_word_q[7:0];
+                if (gp_ph_q == 7'd82) gp_sbr_q <= stg_word_q[7:0];
+                gp_ph_q <= (gp_ph_q == 7'd75) ? 7'd76 :
+                           (gp_ph_q == 7'd82) ? 7'd87 : gp_ph_q + 7'd1;
+                state_q <= StGpRd;
+              end
+              7'd87: begin // minDepthBounds
+                gp_dbmin_q <= stg_word_q;
+                gp_ph_q <= 7'd88; state_q <= StGpRd;
+              end
+              7'd88: begin // maxDepthBounds
+                gp_dbmax_q <= stg_word_q;
+                gp_ph_q <= 6'd27; state_q <= StGpRd;
               end
               6'd27: begin // pColorBlendState presence (optional)
-                gp_ph_q <= (stg_word_q == 32'h0) ? 6'd41 : 6'd28;
+                gp_ph_q <= (stg_word_q == 32'h0) ? 6'd41 : 7'd89;
                 state_q <= StGpRd;
+              end
+              7'd89: begin // logicOpEnable
+                gp_loe_q <= (stg_word_q != 32'h0);
+                gp_ph_q  <= 7'd90; state_q <= StGpRd;
+              end
+              7'd90: begin // logicOp (CLEAR..SET)
+                if (stg_word_q > 32'd15) state_q <= StPipeFail;
+                else begin
+                  gp_lop_q <= stg_word_q[3:0];
+                  gp_ph_q  <= 6'd28; state_q <= StGpRd;
+                end
               end
               6'd28: begin // attachmentCount (0..4)
                 if (stg_word_q > 32'd4) begin
@@ -5902,7 +6049,7 @@ module g6lc_apu_vnfront
             state_q  <= StOpReq;
           end
           StGpPayWd: begin
-            if (pay_i_q + 16'd1 >= 16'd48) begin
+            if (pay_i_q + 16'd1 >= 16'd57) begin
               // ObjTab ALLOC the pipeline object (id = this element's
               // out id); aux writes follow on the completion
               otr_q <= '{op: APU_OBJTAB_OP_ALLOC,
@@ -6825,7 +6972,7 @@ module g6lc_apu_vnfront_fixture
 #(parameter bit Enable = 1'b0,
   parameter int unsigned Fences = 16,
   parameter int unsigned CbBufs = 16,
-  parameter int unsigned PayStageWords = 1024) (
+  parameter int unsigned PayStageWords = 32768) (
   input  logic               clk_i,
   input  logic               rst_ni,
   input  logic               testmode_i,

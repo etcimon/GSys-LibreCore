@@ -1,0 +1,6 @@
+dEQP-VK.api.object_management.single.shader_module
+dEQP-VK.api.object_management.single.pipeline_layout_empty
+dEQP-VK.api.object_management.single.descriptor_set_layout_empty
+dEQP-VK.api.object_management.single.sampler
+dEQP-VK.api.object_management.single.descriptor_pool
+dEQP-VK.api.object_management.single.compute_pipeline

@@ -77,8 +77,11 @@ package g6lc_apu_cmdrec_pkg;
   localparam int unsigned APU_CBF_ONE_TIME  = 3;
   localparam int unsigned APU_CBF_SIMULT    = 4;
   localparam int unsigned APU_CBF_RP_CONT   = 5;
-  // record/payload chain geometry (§5a): 1024-word chunks, w0 = next
+  // record/payload chain geometry (§5a): 1024-word chunks, w0 = next.
+  // A payload that does not fit in one chunk is a fitted extent:
+  // w0[31] = 1, w0[30:0] = next, w1 = allocated words, data at w2.
   localparam int unsigned APU_CB_CHUNK_WORDS = 1024;
+  localparam logic [31:0] APU_CB_PAY_LARGE   = 32'h8000_0000;
   localparam int unsigned APU_CB_REC_FIRST   = 16;   // row 1 base
   localparam int unsigned APU_CB_REC_ROWS    = 63;
   localparam int unsigned APU_CBD_WORDS      = 64;

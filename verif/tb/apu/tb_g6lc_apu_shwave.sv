@@ -1360,7 +1360,7 @@ module tb_g6lc_apu_shwave;
   // carry the base offset (flags bit4 header extension)
   string fault_names [3] = '{"fn_deep", "zerodim", "dispbase"};
 
-  string names [59] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
+  string names [61] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
       "builtin_lid", "builtin_lindex", "compare", "composite",
       "intmix", "localsize32", "localsize64", "math450", "oob",
       "pushscale", "vec4arith",
@@ -1392,7 +1392,12 @@ module tb_g6lc_apu_shwave;
       // G3a-ii §7d SFU corpus (class-4 Gate-2 op bounds from
       // g6lc_apu_sfu_pkg)
       "sfu_exp", "sfu_log", "sfu_pow", "sfu_trig", "sfu_atrig",
-      "sfu_hyper"};
+      "sfu_hyper",
+      // ssbo.layout.single_struct_array probe (1x1, std140 block)
+      "ssbo_sarr",
+      // same block with the CTS compare-function shape (296 RF rows,
+      // 58 branch targets). Commit used to fault REGS and BRANCH.
+      "ssbo_cap"};
 
   initial begin
     checks = 0; cases = 0; fails = 0; cyc = 0; dcyc = 0;
@@ -1430,13 +1435,15 @@ module tb_g6lc_apu_shwave;
       // oracle-invisible, and the single oracle-visible site is
       // model-invisible (mut=False in DESC — no _mut_0 emitted).
       if (names[i] == "atomic_hist" || names[i] == "cts_arrlensb" ||
-          names[i] == "cts_wgloop" || names[i] == "cts_shared1")
+          names[i] == "cts_wgloop" || names[i] == "cts_shared1" ||
+          names[i] == "ssbo_sarr" || names[i] == "ssbo_cap")
         continue;
       cases++;
       run_vec(names[i], {names[i], "_mut_0"});
     end
     for (int i = 0; i < $size(names); i++) begin
       if (only != "" && names[i] != only) continue;
+      if (names[i] == "ssbo_sarr" || names[i] == "ssbo_cap") continue;
       cases++;
       run_vec(names[i], {names[i], "_bad_0"});
     end
@@ -1469,7 +1476,8 @@ module tb_g6lc_apu_shwave;
           names[i] == "dynvec" || names[i] == "fn_divret" ||
           names[i] == "cts_arrlensb" || names[i] == "nclamp" ||
           names[i] == "cts_wgloop" || names[i] == "cts_mls64" ||
-          names[i] == "cts_shared1" || names[i] == "cts_sharedg")
+          names[i] == "cts_shared1" || names[i] == "cts_sharedg" ||
+          names[i] == "ssbo_sarr" || names[i] == "ssbo_cap")
         continue;
       for (int s = 1; s <= 3; s++) begin
         if (only != "" && names[i] != only) continue;

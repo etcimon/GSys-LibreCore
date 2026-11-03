@@ -1,0 +1,4 @@
+dEQP-VK.synchronization.op.single_queue.fence.write_fill_buffer_read_copy_buffer.buffer_16384
+dEQP-VK.synchronization.op.single_queue.barrier.write_fill_buffer_read_copy_buffer.buffer_16384
+dEQP-VK.synchronization.op.single_queue.event.write_fill_buffer_read_copy_buffer.buffer_16384
+dEQP-VK.synchronization.op.single_queue.fence.write_copy_image_read_copy_image.image_128x128_r8g8b8a8_unorm

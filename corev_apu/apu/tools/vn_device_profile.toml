@@ -93,11 +93,33 @@ maxImageDimensionCube = 4096
 maxImageArrayLayers = 256
 maxPushConstantsSize = 128
 maxComputeWorkGroupSize = [128, 128, 64]
+# Dispatch stores groupCountX/Y/Z as full U32 immediates and the
+# issue path does not clamp them.  65535 is the Vulkan minimum.
+maxComputeWorkGroupCount = [65535, 65535, 65535]
 maxComputeWorkGroupInvocations = 128
 maxComputeSharedMemorySize = 16384
 minUniformBufferOffsetAlignment = 256
 minStorageBufferOffsetAlignment = 256
 nonCoherentAtomSize = 64
+# Buffer and image rows are 64-byte aligned.  The required range is
+# 1..131072; 0 is not a legal granularity.
+bufferImageGranularity = 64
+# One queue.  Two discrete priorities is the Vulkan minimum; both
+# buckets schedule on that queue.
+discreteQueuePriorities = 2
+# Colour targets are 1x only.  These masks name that sample count.
+# 4x is not implemented and is not included.
+framebufferDepthSampleCounts = 1
+framebufferStencilSampleCounts = 1
+framebufferNoAttachmentsSampleCounts = 1
+sampledImageColorSampleCounts = 1
+sampledImageIntegerSampleCounts = 1
+sampledImageDepthSampleCounts = 1
+sampledImageStencilSampleCounts = 1
+storageImageSampleCounts = 1
+maxSampleMaskWords = 1
+# Matches maxFragmentOutputAttachments / maxColorAttachments.
+maxFragmentCombinedOutputResources = 4
 # G1c/G2a graphics limits: up to 4 colour attachments on a <=4 KiB
 # framebuffer, 8 vertex attributes across 4 bindings, a single
 # dynamic viewport, list/strip/fan triangle topology.
@@ -167,6 +189,15 @@ queueCount = 1
 # No timestamp query execution yet.  0 is the honest value; a non-zero
 # count would require timestampPeriod and pull timestamp CTS into the
 # obligation set.
+timestampValidBits = 0
+minImageTransferGranularity = [1, 1, 1]
+
+[queue_family1]
+# Same ring as family 0.  COMPUTE|TRANSFER without GRAPHICS is the
+# exclusive compute queue CTS getComputeQueue() requires.  Submits
+# share the one engine; this is not a second concurrent executor.
+queueFlags = "COMPUTE|TRANSFER"
+queueCount = 1
 timestampValidBits = 0
 minImageTransferGranularity = [1, 1, 1]
 
@@ -522,7 +553,8 @@ fields = ["uint32", "pRanges.aspectMask", "pRanges.baseMipLevel",
 # module id (2w)}, pVertexInputState presence, bindingCount, per
 # binding {binding, stride, inputRate}, attrCount, per attr
 # {location, binding, format, offset}, pInputAssemblyState presence,
-# topology, pViewportState presence + viewportCount +
+# topology, primitiveRestartEnable, pViewportState presence +
+# viewportCount +
 # pViewports presence + the six VkViewport floats +
 # scissorCount + pScissors presence + the four VkRect2D ints
 # (static viewport/scissor bake into the pipeline ObjPay; absent or
@@ -552,6 +584,7 @@ fields = ["pCreateInfos.stageCount",
           "pCreateInfos.pVertexAttributeDescriptions.offset",
           "pCreateInfos.pInputAssemblyState",
           "pCreateInfos.topology",
+          "pCreateInfos.primitiveRestartEnable",
           "pCreateInfos.pViewportState",
           "pCreateInfos.viewportCount",
           "pCreateInfos.pViewports",
@@ -568,14 +601,40 @@ fields = ["pCreateInfos.stageCount",
           "pCreateInfos.pScissors.extent.width",
           "pCreateInfos.pScissors.extent.height",
           "pCreateInfos.pRasterizationState",
+          "pCreateInfos.depthClampEnable",
+          "pCreateInfos.rasterizerDiscardEnable",
+          "pCreateInfos.polygonMode",
           "pCreateInfos.cullMode",
           "pCreateInfos.frontFace",
+          "pCreateInfos.depthBiasEnable",
+          "pCreateInfos.depthBiasConstantFactor",
+          "pCreateInfos.depthBiasClamp",
+          "pCreateInfos.depthBiasSlopeFactor",
           "pCreateInfos.pDepthStencilState",
           "pCreateInfos.depthTestEnable",
           "pCreateInfos.depthWriteEnable",
           "pCreateInfos.depthCompareOp",
+          "pCreateInfos.depthBoundsTestEnable",
           "pCreateInfos.stencilTestEnable",
+          "pCreateInfos.front.failOp",
+          "pCreateInfos.front.passOp",
+          "pCreateInfos.front.depthFailOp",
+          "pCreateInfos.front.compareOp",
+          "pCreateInfos.front.compareMask",
+          "pCreateInfos.front.writeMask",
+          "pCreateInfos.front.reference",
+          "pCreateInfos.back.failOp",
+          "pCreateInfos.back.passOp",
+          "pCreateInfos.back.depthFailOp",
+          "pCreateInfos.back.compareOp",
+          "pCreateInfos.back.compareMask",
+          "pCreateInfos.back.writeMask",
+          "pCreateInfos.back.reference",
+          "pCreateInfos.minDepthBounds",
+          "pCreateInfos.maxDepthBounds",
           "pCreateInfos.pColorBlendState",
+          "pCreateInfos.logicOpEnable",
+          "pCreateInfos.logicOp",
           "pCreateInfos.attachmentCount",
           "pCreateInfos.pAttachments.blendEnable",
           "pCreateInfos.pAttachments.srcColorBlendFactor",

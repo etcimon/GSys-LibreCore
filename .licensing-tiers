@@ -359,6 +359,11 @@ R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/issue_read_operands
 R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/mult.sv
 R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/multiplier.sv
 R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_flu_reserve.sv
+# Byte-exact r97 preimage retains the RTL source's existing dual license.
+R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r97/g6lc_flu_reserve.before.sv
+# r98 frozen RTL inputs and rejected candidate retain their source offers.
+R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/*.sv
+R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/*.patch
 R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_freelist.sv
 R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_iq.sv
 R   build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_iq_arb.sv

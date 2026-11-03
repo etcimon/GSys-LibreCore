@@ -1721,7 +1721,7 @@ package g6lc_apu_vn_pkg;
     48'h0600000001D5, // PNEXT a=0 b=0x1D5 pNext
     48'h017F00000000, // U32 a=127 b=0x0 flags
     48'h01FF00000000, // U32 a=127 b=0x0 topology KEEP
-    48'h017F00000000, // U32 a=127 b=0x0 primitiveRestartEnable
+    48'h01FF00000000, // U32 a=127 b=0x0 primitiveRestartEnable KEEP
     48'h040700000004, // PTR a=7 b=0x4 pTessellationState
     48'h05000000002D, // STYPE a=0 b=0x2D sType
     48'h0600000001D6, // PNEXT a=0 b=0x1D6 pNext
@@ -1751,15 +1751,15 @@ package g6lc_apu_vn_pkg;
     48'h05000000002F, // STYPE a=0 b=0x2F sType
     48'h0600000001DA, // PNEXT a=0 b=0x1DA pNext
     48'h017F00000000, // U32 a=127 b=0x0 flags
-    48'h017F00000000, // U32 a=127 b=0x0 depthClampEnable
-    48'h017F00000000, // U32 a=127 b=0x0 rasterizerDiscardEnable
-    48'h017F00000000, // U32 a=127 b=0x0 polygonMode
+    48'h01FF00000000, // U32 a=127 b=0x0 depthClampEnable KEEP
+    48'h01FF00000000, // U32 a=255 b=0x0 rasterizerDiscardEnable KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 polygonMode KEEP
     48'h01FF00000000, // U32 a=127 b=0x0 cullMode KEEP
     48'h01FF00000000, // U32 a=127 b=0x0 frontFace KEEP
-    48'h017F00000000, // U32 a=127 b=0x0 depthBiasEnable
-    48'h017F00000000, // U32 a=127 b=0x0 depthBiasConstantFactor
-    48'h017F00000000, // U32 a=127 b=0x0 depthBiasClamp
-    48'h017F00000000, // U32 a=127 b=0x0 depthBiasSlopeFactor
+    48'h01FF00000000, // U32 a=127 b=0x0 depthBiasEnable KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 depthBiasConstantFactor KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 depthBiasClamp KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 depthBiasSlopeFactor KEEP
     48'h017F00000000, // U32 a=127 b=0x0 lineWidth
     48'h040700000009, // PTR a=7 b=0x9 pMultisampleState
     48'h050000000030, // STYPE a=0 b=0x30 sType
@@ -1778,30 +1778,30 @@ package g6lc_apu_vn_pkg;
     48'h01FF00000000, // U32 a=127 b=0x0 depthTestEnable KEEP
     48'h01FF00000000, // U32 a=127 b=0x0 depthWriteEnable KEEP
     48'h01FF00000000, // U32 a=127 b=0x0 depthCompareOp KEEP
-    48'h017F00000000, // U32 a=127 b=0x0 depthBoundsTestEnable
+    48'h01FF00000000, // U32 a=255 b=0x0 depthBoundsTestEnable KEEP
     48'h01FF00000000, // U32 a=127 b=0x0 stencilTestEnable KEEP
-    48'h017F00000000, // U32 a=127 b=0x0 failOp
-    48'h017F00000000, // U32 a=127 b=0x0 passOp
-    48'h017F00000000, // U32 a=127 b=0x0 depthFailOp
-    48'h017F00000000, // U32 a=127 b=0x0 compareOp
-    48'h017F00000000, // U32 a=127 b=0x0 compareMask
-    48'h017F00000000, // U32 a=127 b=0x0 writeMask
-    48'h017F00000000, // U32 a=127 b=0x0 reference
-    48'h017F00000000, // U32 a=127 b=0x0 failOp
-    48'h017F00000000, // U32 a=127 b=0x0 passOp
-    48'h017F00000000, // U32 a=127 b=0x0 depthFailOp
-    48'h017F00000000, // U32 a=127 b=0x0 compareOp
-    48'h017F00000000, // U32 a=127 b=0x0 compareMask
-    48'h017F00000000, // U32 a=127 b=0x0 writeMask
-    48'h017F00000000, // U32 a=127 b=0x0 reference
-    48'h017F00000000, // U32 a=127 b=0x0 minDepthBounds
-    48'h017F00000000, // U32 a=127 b=0x0 maxDepthBounds
+    48'h01FF00000000, // U32 a=127 b=0x0 failOp KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 passOp KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 depthFailOp KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 compareOp KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 compareMask KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 writeMask KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 reference KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 failOp KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 passOp KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 depthFailOp KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 compareOp KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 compareMask KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 writeMask KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 reference KEEP
+    48'h01FF00000000, // U32 a=255 b=0x0 minDepthBounds KEEP
+    48'h01FF00000000, // U32 a=255 b=0x0 maxDepthBounds KEEP
     48'h048700000011, // PTR a=7 b=0x11 pColorBlendState KEEP
     48'h050000000032, // STYPE a=0 b=0x32 sType
     48'h0600000001DD, // PNEXT a=0 b=0x1DD pNext
     48'h017F00000000, // U32 a=127 b=0x0 flags
-    48'h017F00000000, // U32 a=127 b=0x0 logicOpEnable
-    48'h017F00000000, // U32 a=127 b=0x0 logicOp
+    48'h01FF00000000, // U32 a=255 b=0x0 logicOpEnable KEEP
+    48'h01FF00000000, // U32 a=255 b=0x0 logicOp KEEP
     48'h01FF00000000, // U32 a=127 b=0x0 attachmentCount KEEP
     48'h070100000000, // ARRAY a=1 b=0x0 pAttachments
     48'h01FF00000000, // U32 a=127 b=0x0 blendEnable KEEP
@@ -4111,7 +4111,7 @@ package g6lc_apu_vn_pkg;
     32'h00000000, 32'h00001000, 32'h00001000, 32'h00000100,
     32'h00001000, 32'h00000100, 32'h00000000, 32'h01000000,
     32'h01000000, 32'h00000080, 32'h00001000, 32'h00000FA0,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000040, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000004, 32'h00000010, 32'h00000010, 32'h00000010,
     32'h00000010, 32'h00000010, 32'h00000000, 32'h00000010,
     32'h00000010, 32'h00000010, 32'h00000010, 32'h00000010,
@@ -4121,8 +4121,8 @@ package g6lc_apu_vn_pkg;
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000020, 32'h00000004,
-    32'h00000000, 32'h00000000, 32'h00004000, 32'h00000003,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000004, 32'h00004000, 32'h00000003,
+    32'h00000000, 32'h0000FFFF, 32'h0000FFFF, 32'h0000FFFF,
     32'h00000080, 32'h00000003, 32'h00000000, 32'h00000080,
     32'h00000080, 32'h00000040, 32'h00000008, 32'h00000008,
     32'h00000008, 32'hFFFFFFFF, 32'h00000001, 32'h41700000,
@@ -4133,11 +4133,11 @@ package g6lc_apu_vn_pkg;
     32'h00000000, 32'h00000100, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00001000, 32'h00001000,
-    32'h00000001, 32'h00000001, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000004, 32'h00000000, 32'h00000000,
+    32'h00000001, 32'h00000001, 32'h00000001, 32'h00000001,
+    32'h00000001, 32'h00000004, 32'h00000001, 32'h00000001,
+    32'h00000001, 32'h00000001, 32'h00000001, 32'h00000001,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000002, 32'h00000000,
+    32'h00000000, 32'h00000002, 32'h00000002, 32'h00000000,
     32'h3F800000, 32'h3F800000, 32'h00000002, 32'h00000000,
     32'h3F800000, 32'h3F800000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
@@ -4399,10 +4399,12 @@ package g6lc_apu_vn_pkg;
 
   localparam int APU_VN_EXEC_WORDS = 136;
 
-  localparam logic [287:0] APU_VN_QF2_ELT = {
+  localparam logic [575:0] APU_VN_QF2_ELT = {
     32'h00000001, 32'h00000001, 32'h00000001, 32'h00000000,
-    32'h00000001, 32'h00000007, 32'h00000000, 32'h00000000,
-    32'h3B9BB07D
+    32'h00000001, 32'h00000006, 32'h00000000, 32'h00000000,
+    32'h3B9BB07D, 32'h00000001, 32'h00000001, 32'h00000001,
+    32'h00000000, 32'h00000001, 32'h00000007, 32'h00000000,
+    32'h00000000, 32'h3B9BB07D
   };
   localparam logic [2271:0] APU_VN_PDGRP_ELT = {
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
@@ -4710,7 +4712,8 @@ package g6lc_apu_vn_pkg;
   localparam int APU_IMG_FMT_R32G32B32A32_UINT = 11;
   localparam int APU_IMG_FMT_D32_SFLOAT = 12;
   localparam int APU_IMG_FMT_D16_UNORM = 13;
-  localparam int APU_IMG_FMT_COUNT = 14;
+  localparam int APU_IMG_FMT_D24_UNORM_S8_UINT = 14;
+  localparam int APU_IMG_FMT_COUNT = 15;
   localparam int APU_IMG_FMT_NONE = 255;
 
   localparam logic [7:0] APU_VN_IMG_FMT [0:255] = '{
@@ -4746,7 +4749,7 @@ package g6lc_apu_vn_pkg;
     8'hFF, 8'hFF, 8'hFF, 8'hFF,
     8'hFF, 8'hFF, 8'hFF, 8'hFF,
     8'h0D, 8'hFF, 8'h0C, 8'hFF,
-    8'hFF, 8'hFF, 8'hFF, 8'hFF,
+    8'hFF, 8'h0E, 8'hFF, 8'hFF,
     8'hFF, 8'hFF, 8'hFF, 8'hFF,
     8'hFF, 8'hFF, 8'hFF, 8'hFF,
     8'hFF, 8'hFF, 8'hFF, 8'hFF,

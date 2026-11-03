@@ -763,6 +763,58 @@ module tb_g6lc_apu_cmdrec;
       ccnt(gbd, 32'h0000_FFFF);
     end
 
+    // ---- case 15: payload bigger than one 1024-word chunk -------------
+    // 4100 words is the 16 KiB vkCmdUpdateBuffer body (4-word header
+    // + 4096 data words).  It must land in one fitted extent, survive
+    // a following small append, and free the whole extent on reset.
+    cases++;
+    begin
+      automatic logic [31:0] hbd, b0, b1, w0, sz;
+      automatic int unsigned nw;
+      nw = 4100;
+      mk_desc(hbd, 1'b0);
+      cbegin(hbd, '0);
+      capp(hbd, 32'hF100_0001, nw, 32'hA500_0000, APU_CMDREC_OK);
+      capp(hbd, 32'hF100_0002, 4, 32'hA600_0000, APU_CMDREC_OK);
+      cend(hbd);
+      crd(hbd, 0, 32'hF100_0001);
+      b0 = cc.rec.imm[7];
+      check("fitted base", b0 >= 32'd2);
+      tb_op(APU_OBJPAY_OP_READ, b0 - 32'd2, '0, '0);
+      w0 = tc.rdata;
+      check("fitted flag",
+            tc.status == APU_OBJPAY_OK &&
+            (w0 & 32'h8000_0000) == 32'h8000_0000);
+      tb_op(APU_OBJPAY_OP_READ, b0 - 32'd1, '0, '0);
+      sz = tc.rdata;
+      check("fitted size",
+            tc.status == APU_OBJPAY_OK && sz >= 32'(nw) + 32'd2 &&
+            (sz & 32'd63) == 32'd0);
+      tb_op(APU_OBJPAY_OP_READ, b0, '0, '0);
+      check("fitted pay[0]",
+            tc.status == APU_OBJPAY_OK && tc.rdata == 32'hA500_0000);
+      tb_op(APU_OBJPAY_OP_READ, b0 + 32'(nw) - 32'd1, '0, '0);
+      check("fitted pay[last]",
+            tc.status == APU_OBJPAY_OK &&
+            tc.rdata == 32'hA500_0000 + 32'(nw) - 32'd1);
+      // a word past the first 1024 of the extent must be allocated
+      tb_op(APU_OBJPAY_OP_READ, (b0 - 32'd2) + 32'd2048, '0, '0);
+      check("fitted mid allocated", tc.status == APU_OBJPAY_OK);
+      crd(hbd, 1, 32'hF100_0002);
+      b1 = cc.rec.imm[7];
+      tb_op(APU_OBJPAY_OP_READ, b1, '0, '0);
+      check("small after fitted",
+            tc.status == APU_OBJPAY_OK && tc.rdata == 32'hA600_0000);
+      cop(APU_CMDREC_OP_RESET, hbd, '0, '0, '0, 0); cget();
+      check("fitted reset", cc.status == APU_CMDREC_OK);
+      tb_op(APU_OBJPAY_OP_READ, b0 - 32'd2, '0, '0);
+      check("fitted head freed", tc.status == APU_OBJPAY_BOUNDS);
+      tb_op(APU_OBJPAY_OP_READ, (b0 - 32'd2) + 32'd2048, '0, '0);
+      check("fitted tail freed", tc.status == APU_OBJPAY_BOUNDS);
+      tb_op(APU_OBJPAY_OP_READ, b1 - 32'd1, '0, '0);
+      check("small chunk freed", tc.status == APU_OBJPAY_BOUNDS);
+    end
+
     $display("PASS tb_g6lc_apu_cmdrec cases=%0d checks=%0d cycles=%0d",
              cases, checks, cycles);
     if (errors != 0) $fatal(1, "cmdrec %0d errors", errors);

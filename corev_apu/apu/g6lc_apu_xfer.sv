@@ -1023,14 +1023,16 @@ module g6lc_apu_xfer
           XHdrChk: begin
             automatic logic [63:0] eff;
             eff = hsz_q;
+            // VK_WHOLE_SIZE fills the remainder rounded down to a
+            // multiple of 4 (vkCmdFillBuffer: "the nearest smaller
+            // multiple is used"); the tail bytes stay untouched
             if (is_fill && hsz_q == WHOLE)
               eff = hoff_q >= 64'(xf_q.dst_size) ? 64'h0
-                    : 64'(xf_q.dst_size) - hoff_q;
+                    : (64'(xf_q.dst_size) - hoff_q) & ~64'h3;
             if (hoff_q[1:0] != 2'b00 ||              // dstOffset % 4
                 (is_upd && (hsz_q[1:0] != 2'b00 ||   // dataSize % 4
                             hsz_q == 64'h0 || hsz_q > 64'd65536)) ||
                 (is_fill && hsz_q != WHOLE && hsz_q[1:0] != 2'b00) ||
-                (is_fill && hsz_q == WHOLE && eff[1:0] != 2'b00) ||
                 hoff_q > 64'(xf_q.dst_size) ||
                 eff > 64'(xf_q.dst_size) - hoff_q) begin
               xf_fault_q <= 1'b1;
@@ -1548,8 +1550,27 @@ module g6lc_apu_xfer
             end
           end
 
-          // pass B region entry: start the mip-offset walk
+          // pass B region entry: start the mip-offset walk.
+          // The payload re-read restored the Vulkan layerCount, which
+          // is 1 for a 3D image.  Depth lives in off.z/extent.depth.
+          // Splice that onto the layer span again; the seed program
+          // runs after the mip walk, so the update is visible there.
           XImgGo: begin
+            if (is_b2i || is_i2b) begin
+              if (xf_q.img0.itype == 2'd2) begin
+                rg_q[6] <= rg_q[10];
+                rg_q[7] <= rg_q[13];
+              end
+            end else if (is_i2i) begin
+              if (xf_q.img0.itype == 2'd2) begin
+                rg_q[2] <= rg_q[6];
+                rg_q[3] <= rg_q[16];
+              end
+              if (xf_q.img1.itype == 2'd2) begin
+                rg_q[9]  <= rg_q[13];
+                rg_q[10] <= rg_q[16];
+              end
+            end
             im_m_q   <= '0;
             im_acc_q <= '0;
             im_dst_q <= 1'b0;

@@ -24,11 +24,11 @@ MAGIC = 0x07230203
 
 # ---- table geometry (must match g6lc_apu_sh_pkg) ------------------
 SHADER_IDS = 1024
-SHADER_REGS = 256
+SHADER_REGS = 1024
 SHADER_MEMBERS = 256
-SHADER_INIT = 128
+SHADER_INIT = 256
 MDECOR_MAX = 64            # pending member-decor window (RTL)
-BRANCH_MAX = 48            # queued branch targets (existence check)
+BRANCH_MAX = 128           # queued branch targets (existence check)
 OPN_MAX = 32               # operand words staged (RTL OPB)
 TYPE_WORDS = 3
 CONST_WORDS = 16
@@ -1125,10 +1125,11 @@ class Scanner:
         d = self.decor.get(iid)
         if d is None:
             return [0, 0]
-        return [w32(d.get('set', 0) | (d.get('binding', 0) << 8) |
+        bd = d.get('binding', 0) & 0xFFFF
+        return [w32(d.get('set', 0) | ((bd & 0xFF) << 8) |
                     (d.get('builtin', 0xFF) << 16) |
                     (d.get('flags', 0) << 24)),
-                w32(d.get('aux1', 0))]
+                w32(d.get('aux1', 0) | ((bd >> 8) << 8))]
 
     def var_words(self, iid):
         v = self.vars.get(iid)
@@ -1153,7 +1154,8 @@ class Scanner:
         idx, sc, bi, st, bd, off, fl = self.init[i]
         return [w32(idx | (sc << 16) | ((bi & 0xFF) << 20) |
                     ((fl & 0xF) << 28)),
-                w32(st | (bd << 8) | (off << 16))]
+                w32(st | ((bd & 0xFF) << 8) | (off << 16)),
+                w32((bd >> 8) & 0xFF)]
 
     def block_word(self, iid):
         return w32(self.labels.get(iid, 0) | (0x8000 if iid in

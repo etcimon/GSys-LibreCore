@@ -71,16 +71,16 @@ module g6lc_apu_vgtop
   // §12.3 F5: pages below VgGuestPages are the guest-mappable window;
   // [VgGuestPages, VgPages) is the device-private arena
   parameter int unsigned VgGuestPages = APU_VG_GUEST_PAGES,
-  parameter int unsigned ShaderRegs    = 256,
+  parameter int unsigned ShaderRegs    = 1024,
   parameter int unsigned MaxWaves      = 16,
   parameter int unsigned ShaderIds     = 1024,
   parameter int unsigned ShaderSlots   = 8,
-  parameter int unsigned ShaderWords   = 2048,
-  parameter int unsigned ShaderInit    = 128,
+  parameter int unsigned ShaderWords   = 8192,
+  parameter int unsigned ShaderInit    = 256,
   parameter int unsigned ShaderMembers = 256,
-  parameter int unsigned ScratchBytes  = 1024,
+  parameter int unsigned ScratchBytes  = 4096,
   parameter int unsigned SlabBytes     = 16384,
-  parameter int unsigned ShaderBudget  = 32'h0010_0000,
+  parameter int unsigned ShaderBudget  = 32'h0100_0000,
   // §12.3 C/5a: the Xfer engine derives its internal DMA view from this
   parameter g6lc_apu_cfg_pkg::apu_cfg_t ApuCfg = g6lc_apu_cfg_pkg::ApuVenus
 ) (
@@ -1052,16 +1052,16 @@ module g6lc_apu_vgtop_fixture
   parameter int unsigned VgPages      = APU_VG_PAGES,
   parameter int unsigned VgPageBytes  = APU_VG_PAGE_BYTES,
   parameter int unsigned VgGuestPages = APU_VG_GUEST_PAGES,
-  parameter int unsigned ShaderRegs    = 256,
+  parameter int unsigned ShaderRegs    = 1024,
   parameter int unsigned MaxWaves      = 16,
   parameter int unsigned ShaderIds     = 1024,
   parameter int unsigned ShaderSlots   = 8,
-  parameter int unsigned ShaderWords   = 2048,
-  parameter int unsigned ShaderInit    = 128,
+  parameter int unsigned ShaderWords   = 8192,
+  parameter int unsigned ShaderInit    = 256,
   parameter int unsigned ShaderMembers = 256,
-  parameter int unsigned ScratchBytes  = 1024,
+  parameter int unsigned ScratchBytes  = 4096,
   parameter int unsigned SlabBytes     = 16384,
-  parameter int unsigned ShaderBudget  = 32'h0010_0000,
+  parameter int unsigned ShaderBudget  = 32'h0100_0000,
   parameter g6lc_apu_cfg_pkg::apu_cfg_t ApuCfg = g6lc_apu_cfg_pkg::ApuVenus
 ) (
   input  logic            clk_i,

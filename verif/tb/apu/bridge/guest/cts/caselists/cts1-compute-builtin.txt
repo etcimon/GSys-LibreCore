@@ -1,0 +1,11 @@
+dEQP-VK.compute.pipeline.builtin_var.global_invocation_id
+dEQP-VK.compute.pipeline.builtin_var.global_invocation_id_component
+dEQP-VK.compute.pipeline.builtin_var.local_invocation_id
+dEQP-VK.compute.pipeline.builtin_var.local_invocation_id_component
+dEQP-VK.compute.pipeline.builtin_var.local_invocation_index
+dEQP-VK.compute.pipeline.builtin_var.num_work_groups
+dEQP-VK.compute.pipeline.builtin_var.num_work_groups_component
+dEQP-VK.compute.pipeline.builtin_var.work_group_id
+dEQP-VK.compute.pipeline.builtin_var.work_group_id_component
+dEQP-VK.compute.pipeline.builtin_var.work_group_size
+dEQP-VK.compute.pipeline.builtin_var.work_group_size_component

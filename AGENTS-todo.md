@@ -949,6 +949,148 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
   - [ ] CTS-1 (after G3a + G3b), CTS-2 (after G3c + G3d), CTS-3, CTS-4, CTS-5 per the
     ladder; each G/W increment from G3a-ii on names its caselist and reports the ledger
     delta. `vkcmp`/llvmpipe scenes stay as pixel-diff forensics only.
+  - CTS throughput harness (2026-11-02, tier T, no RTL). Measured leaf cost: about 90 s
+    fixed per leaf (bridge build 36–42 s, guest boot 28 s, teardown), plus 5–8 min of
+    launcher overhead (manifest of ~9,900 files, push, image rsync check). The 11 GiB root
+    image re-syncs (166 s) whenever a local rw boot touched it. RTL time is bimodal: SSBO
+    and binding lists take about 100 s total, UBO matrix lists 5,125–14,672 s. The bridge
+    is one single-threaded `-O2` model at 67–73 kHz on a 12-core builder.
+    - [x] `apu-leaf-collect` pulls `*.qpa`. Before this, no CTS result came back with a
+      leaf, and the ledger stopped at `g3bii-cpb-2026-10-18`.
+    - [x] `G6LC_CTS_SHARDS=N`: concurrent guest+bridge pairs, caselist round-robin
+      (`G6LC_CTS_SHARD=i,N`, slice written into the private image), root image
+      `snapshot=on`, private `ctsdata.img` per shard (`G6LC_INSTANCE_DIR`), busy-CPU budget
+      clamp (`/proc/stat`, 3 cores per shard), N <= case count. `--deqp-fraction` is too
+      coarse for shards: it put all 21 cases of a one-group list in fraction 0.
+      `G6LC_CTS_FRACTION` stays as a pass-through. Local functional run (WSL, Oct-29 bridge
+      binary, `cts1-ssbo-std430-basic`, 2 shards): 11 + 10 cases, disjoint and complete,
+      21/21 Pass, merged `GUEST-PASS`, base and ctsdata images unmodified.
+    - [ ] **Ordering signal found by the shard run:** with the same Oct-29 binary, the
+      serial in-process run of that list scored 18/21 (Fail `std430.highp_mat3`,
+      `highp_mat2x3`, `highp_mat4x3`). Sharded, it scored 21/21. Current RTL is 21/21 serial
+      (`apu-leaf-20261031T163945-b771df9f11af`), so this may already be fixed. Still, the
+      ordering dependence is a device-state-leak symptom, like `cts_b2b_opt_1`. Reproduce on
+      current RTL with a serial run of the list in its original order before any group
+      closure that relies on sharded runs.
+    - [x] Venus-only guest leaves skip the unused venusoff bridge build
+      (`APU_BRIDGE_VENUS_ONLY`, `venus-only-build` marker read by the bridge-build verdict).
+    - [ ] Remote A/B on `cts1-ubo-std140-mat-rest` (serial 12,292 s on
+      `apu-leaf-20261031T073505-0f7f82832235`). Two launches were clamped to 1 shard by the
+      budget guard: the builder had 7 of 12 cores busy with other work. The serial leaf
+      `apu-leaf-20261102T190228-0c04acd07eb5` ran on the current tree and hit its 4 h CTS
+      budget under contention: 6 Pass (mat3/mat4/mat2x3/mat2x4/mat3x2/mat3x4, 1,112–4,118 s
+      each), `mat4x2.compute` Timeout (harvested as Timeout, `device_faults=0`). Under
+      newest-wins this supersedes the Oct-31 Pass in the ledger. Rerun the A/B (sharded) on
+      an idle builder, or with a larger CTS budget.
+    - Leaves still running when this session ended; collect with
+      `guest/cts/collect-leaves.sh`: `apu-leaf-20261102T201855-ac4061f670b9` (a-front,
+      4 shards, 6 h budget), `apu-leaf-20261102T203244-4f67912db894` (ssbo-layout, 6 h),
+      `apu-leaf-20261102T212701-7e12fedb1cf7` (b4 raster verification, 3 h; the 4 smoke
+      cases already Pass in its live image), `apu-leaf-20261102T214543-7e6ee27c7595`
+      (unit,top).
+    - [x] Re-collected the 78 detached leaves from WSL (54 PASS / 21 FAIL / 3 INCOMPLETE
+      verdicts). `cts_ledger.py harvest` rebuilds one results JSON per retained run from
+      `remote-runs/apu-leaf-*/output/guest/**/cts-TestResults.qpa` and
+      `.cache/apu-guest/out-*`, stamped with the run's own end time. `.cache/cts/runs/` had
+      been deleted, so the pre-Oct-18 local runs (cts0/g3aii/g3bii tags) are not
+      reproducible inputs any more. Ledger 322 -> 748 cases run.
+    - [x] `apu-leaf-progress <tags>`: read-only live counts from each private ctsdata image
+      (flushed QPA, trails the guest page cache; progress only, never evidence). Launcher:
+      `--copy-dest` against the newest earlier remote snapshot (upload 501 s -> 104 s; the
+      sha256 check still covers every file and refused one file another session edited
+      mid-launch). Every CTS run now writes a private ctsdata copy and boots the root image
+      `snapshot=on`. The remote image path is keyed by the local image name.
+  - CTS-1 batch b2/b3 (2026-11-02, image `ctsdata-b2.img`, lists
+    `cts1-a-front.txt` 1,400 / `cts1-ssbo-layout.txt` 1,660 / `cts0-info-smoke.txt` 308 /
+    `cts-b3-fill.txt` 36 / `cts-b3-smoke.txt` 4):
+    - [x] CTS-0 on the current tree (`apu-leaf-20261102T204338-c2bbd7773c90`): 282 Pass /
+      7 Fail / 19 NS, `device_faults=0`. Still failing: `info.device_properties` (hardware
+      limits: maxTexelBufferElements 0, maxStorageBufferRange 16 MiB, maxPerStageResources and
+      the descriptor-set counts 16, input attachments 0, vertex attributes 8, vertex-out and
+      fragment-in components 32, texel offsets 0, sample counts 1 only),
+      `device_mandatory_features` (multiview), `intentional_alloc_fail` (host leak at index
+      298).
+    - [x] **Regression: `api.smoke.{triangle,asm_triangle,asm_triangle_no_opname,
+      unused_resolve_attachment}` passed on `apu-leaf-20261030T212410-d4c3b2f8f58d` and
+      failed (`Image comparison failed`) on the current tree.** The image-log leaf
+      `apu-leaf-20261102T211055-0cc836bfe8e1` (dev-only, outside the CTS run contract)
+      showed exactly 3 lit pixels, one per vertex: every FILL pipeline rendered as
+      `VK_POLYGON_MODE_POINT`. Root cause in the uncommitted rast delta: `vnfront` stores the
+      raw `VkPolygonMode` (FILL 0, LINE 1, POINT 2), while `rast`, `g6lc_apu_rast_pkg` and
+      `tb_g6lc_apu_rast` used a private POINT 0 / LINE 1 / FILL 2 encoding (and vnfront
+      reset to 2). The TB shared the private encoding, so it could not see the defect. Fix:
+      the Vulkan encoding everywhere (rast, pkg comment, vnfront reset 0, TB draws 0 and
+      case 29 = 2). The TB reproduced the CTS symptom before the fix (case2/3/4 vertex-only
+      pixels) and passes after (39 cases / 15,585 checks, 5.020). CTS verification leaf
+      `apu-leaf-20261102T212701-7e12fedb1cf7` (`cts-b4-raster.txt`: the 4 smoke cases plus
+      8 `memory.pipeline_barrier.host_write_vertex_buffer.*`): `smoke.triangle` and
+      `asm_triangle` Pass in the first progress sample.
+    - [x] `vkCmdFillBuffer(VK_WHOLE_SIZE)` with a remainder that is not a multiple of 4
+      faulted with zero bytes written (CTS `fill_and_update_buffer.*.
+      fill_buffer_vk_whole_size_{1,2,3}_extra_bytes_offset_*`: "found 0xff"). The spec uses
+      the nearest smaller multiple of 4. Fixed in `g6lc_apu_xfer.sv` `XHdrChk` and
+      `vn_golden.py`. `tb_g6lc_apu_xfer` gained the 3 remainder cases: they fail before the
+      fix (FAULT, poison intact) and pass after (268 cases / 1,539 checks, Verilator 5.020).
+      CTS verified on `apu-leaf-20261102T211423-e75b5c97ff79`: the 24 previously failing
+      cases Pass. The 12 `suballocation_transfer_queue` variants are NotSupported (no
+      transfer-only queue family).
+    - [ ] **SSBO row-major matrices in arrays read transposed:** all 36
+      `single_basic_array.{std140,std430}.row_major_*` Fail ("expected mat2(3,-6,2,-8) got
+      mat2(3,2,-6,-8)"); every column-major shape passes. The decoration already
+      reaches the RTL: `spirv_scan.py` `h_72` folds `RowMajor` (dec 4) into the member-row
+      flags byte as bit 4, and shwave reads that byte as `mb_fl` (only bit 6 `MF_DROP` is
+      used). Missing pieces: (1) at the member step (`cmstride_q <= mb_mst`) also latch
+      `cmrow_q <= mb_fl[4]`, cleared where `cmstride_q` is cleared; (2) `W_CHFIN` writes it
+      into pointer word 3 bit 16 (word3 = {binding[15:8] @31:24, free, MatrixStride @15:0});
+      (3) whole-matrix LSU: `ls_mad = row ? comp*msw + col : col*msw + comp`; (4) the
+      access-chain `W_CHX` matrix and vector steps for a row-major parent: the column index
+      steps 4 bytes and the in-column component steps MatrixStride (the `_comp_access` /
+      `_store_cols` variants); (5) mirror in `spirv_model.py` (`cmstride` / word3 / ls_mad)
+      and add `sh_vectors` from it before the RTL. 72 cases in this slice; the same gap
+      covers every `row_major` case of the ssbo/ubo layout groups.
+    - [ ] `memory.pipeline_barrier.host_write_vertex_buffer.*`: 4–5 Fail (`SubmitRenderPass
+      Image comparison failed`), raster path, same suspect as the smoke regression.
+    - [ ] `api.descriptor_set.descriptor_set_layout_binding.layout_binding_order`: Fail
+      "Verifier failed: 513 == 257, at index 0". The shader read the value of another
+      binding: the layout's bindings are created out of numeric order, and a lookup keyed
+      by creation index instead of binding number reproduces this shape. Trace `f_brow` /
+      the descriptor-table row search in cmdexec and shwave.
+    - [ ] `api.driver_properties.conformance_version`: Fail ("Wrong driver conformance
+      version (not known)"). The profile reports no CTS version, which is the truthful
+      value for an unqualified device. Reporting a released CTS version would claim
+      conformance. Keep it as an open defect until a real conformance run; do not fake it.
+    - [ ] SSBO `2_level_array` / `3_level_array` (702 cases): one std140 case ran for
+      more than 60 min at ~29 kHz under builder contention (`apu-leaf-20261102T203244-
+      4f67912db894`, MMIO/IRQ frozen, DMA advancing: one long dispatch, not a hang). This
+      is a throughput blocker (Aggregation D: multi-wave issue, multi-outstanding memory),
+      not a correctness finding. The leaf's 6 h CTS budget cuts the run; the harvest
+      records the cut case as Timeout.
+    - [ ] **Working-tree regression gate is red, independently of the b3/b4 fixes**
+      (`apu-leaf-20261102T214543-7e6ee27c7595`, stages unit,top, pinned 5.008).
+      PASS: objtab, vgpages, vgctl, vnfront, cmdexec, xfer, rast, gcs, dmprog. FAIL:
+      `vnrep` and `vgtop` (same signature: reply idx 80/82/83 got `0x1000`/`0x100`, exp 0;
+      the uncommitted profile now reports these values and `vn_vectors` were not
+      regenerated), `vndec` (rec 1020 header/payload; `vn_pkg` tables changed), `vnpump`
+      (5.008 build stops on 4 warnings), `shmod` (`fn_call` Q words 0x4xx vs 0x1xx), `shcore`
+      (TB assignment pattern vs the changed `g6lc_apu_sh_pkg`, lines 620/626), `shwave`
+      (`cts_b2b_opt_1.robust`, the known ordering-contamination case), `shwave-sfu`
+      (builder has no `numpy` for `gen_sfu_tables.py`). Regenerate the oracles from the
+      current profile/tables (`gen_vn_tables.py`, `vn_golden.py` vectors), update the
+      shcore TB to the new struct, fix the vnpump warnings, install numpy in the builder's
+      python (or vendor the table), then rerun unit,top,soc,bridge,synth before committing
+      the APU delta.
+    - NotSupported in the batch is honest absence: scalarBlockLayout, 8/16-bit storage,
+      maintenance4/5, device_address commands, sparse/protected buffer create flags, the
+      8 MiB private heap ("not enough memory").
+    - [ ] Launcher overhead: reuse the previous remote snapshot and push only changed files
+      (rsync `--link-dest` against the last leaf). Skip the image rsync when the remote
+      sha256 stamp matches. Launch several caselists per leaf (one boot per shard, many lists).
+    - [ ] Bridge model speed (needs an evidence-identity decision, because these change the
+      simulated binary): `-O3`, Verilator `--prof-pgo` / gcc `-fprofile-use` trained on a
+      CTS slice, drop compiled-in `--trace-fst` from non-debug builds, poll the socket every
+      N cycles instead of one `recv` syscall per cycle. Do not use `--x-assign/--x-initial
+      fast` without a same-list A/B, because it can change X resolution. Model `--threads`
+      is unlikely to help a 67 kHz single-island model. Use shards for parallelism.
 
 ## APU stock-runtime reference consolidation (2026-10-01)
 

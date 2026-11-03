@@ -24,9 +24,28 @@ CSR, AMO, and CVXIF candidates require issue port zero under the current IRO int
 
 At the dispatch/IRO recovery seam, `iqi_take` is false on full flush, unissued flush, or cancellation of the candidate. A packet already captured in `iss_*_q` clears only on full flush or cancellation of its own TID, not on every younger-branch unissued flush. Keep externally offered issue-valid suppressed during the unissued-flush cycle, then re-offer surviving held work. IRO's final acknowledgement is zero when `flush_i` suppresses FU valids. In-order lane-prefix acknowledgement applies only when `!G6LCCfg.OoOEn`; independent OoO held lanes must be able to drain when a lower lane is empty. Preserve explicit port-zero restrictions and structural resource conflicts.
 
-While `HypCfg.WbReserve` is enabled, disable secondary-ALU steering in IRO. The current primary completion bookkeeping does not implement the secondary ALU's staggered A3 record protocol. The primary ALU still executes OoO work; this is an explicit resource configuration, not an instruction filter. Its throughput limit is documented rather than represented as six independent WB lanes.
+The current `WbReserve` caller enables secondary-ALU steering when
+`SuperscalarEn && NrALUs >= 2 && NrIssuePorts > 1`. Port zero remains on
+ALU0; a nonzero lane's LAT_ALU_LOW uses ALU2/FPU_WB and does not reserve the
+shared FLU port. Full-latency ALU operations stay on ALU0. This supersedes
+the initial disable-ALU2 proposal and describes the existing IRO implementation;
+r97 preserves that steering rather than introducing a new resource policy.
 
-Completion reservations must originate at actual IRO acceptance, not an earlier IQ offer that may stall. A common package function returns the fixed FLU result distance from the IRO acceptance edge: one IRO output register plus CSR/AES one-edge completion, branch two-edge completion, ALU-low two-edge completion or ALU-full `AluStages`, and the actual multiplier stage count. Thus the reservation offset is `1 + FU_result_cycles`. Derive the reservation width from the maximum supported offset plus one. At each IRO combinational decision, copy the registered window into a working mask, qualify each proposed lane against the appropriate bit and earlier accepted lanes, then shift the resulting mask once at the edge. Exception-only accepted instructions reserve no FU result. Do not clear older reservations on a partial unissued flush; they expire with time. A full flush may conservatively retain those bounded bits.
+Completion reservations must originate at actual IRO acceptance, not an earlier IQ offer that may stall. A common package function returns the fixed FLU result distance from the IRO acceptance edge: one IRO output register plus CSR/AES one-edge completion, branch two-edge completion, ALU-low two-edge completion or ALU-full `AluStages`, and the actual multiplier stage count. Thus the reservation offset is `1 + FU_result_cycles`, including any configured writeback capture stage. Derive the reservation width from the maximum supported offset plus one.
+
+R97 uses constant-offset class masks and parallel earlier-lane conflict
+vectors. Fixed offers compete only for the same available completion slot.
+A divider wins only against an empty registered window and before every
+eligible earlier resource offer. These decisions match the original greedy
+working-window scan; they use tentative offers, not final accepts.
+An offer withdrawn by later caller logic can conservatively exclude a later
+lane for that cycle, but reserves nothing at the edge. Only final accepted
+masks are ORed into the registered calendar before its one-bit shift.
+Exception-only accepted instructions reserve no FU result. Do not clear older
+reservations on a partial unissued flush; they expire with time. The current
+module also conservatively retains those bounded bits on a full flush.
+See `r97/worklog.md` for the equivalence argument, source-pinned checks and
+structural-screening limits.
 
 The variable-latency divider uses an occupied reservation keyed by its accepted TID. Admit it only when the fixed FLU reservation window is empty, then exclude other FLU producers until its actual matching WB, cancellation/reclamation, or full reset ends that ownership. A pre-acceptance high `mult_ready` does not release the reservation. Existing live-slot/WB observations can release it without another guessed latency. FPU output uses its separate FPnew result arbitration; fixed-FP latency speculation remains unsupported until its individual op-group paths have exact publication contracts.
 

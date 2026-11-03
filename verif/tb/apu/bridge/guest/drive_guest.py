@@ -20,6 +20,7 @@
 import argparse
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -43,6 +44,22 @@ KERNEL = f"{CACHE}/vmlinuz"
 SWAP = f"{CACHE}/swap.raw"
 CTS_CACHE = os.environ.get("G6LC_CTS_CACHE", f"{ROOT}/.cache/cts")
 CTSDATA = os.environ.get("G6LC_CTSDATA", f"{CTS_CACHE}/ctsdata.img")
+# G6LC_INSTANCE_DIR: private state for one of several concurrent runs.
+# The root and swap images attach snapshot=on (QEMU temp overlay,
+# discarded at exit) and CTSDATA is copied here, so no two runs share a
+# writable disk.  Unset keeps the persistent rw images (provisioning).
+# CTS runs (G6LC_SKIP_APT images) never need root persistence either:
+# a rw boot of the shared cache image changes its mtime and forces the
+# next leaf to re-sync all 11 GiB.
+INSTANCE = os.environ.get("G6LC_INSTANCE_DIR", "")
+SNAP = ",snapshot=on" if INSTANCE or os.environ.get("G6LC_CTS") else ""
+# G6LC_CTS_FRACTION=I,N: deqp-vk --deqp-fraction (deqp splits by test
+# hierarchy node, so a list from one group can land in one fraction)
+CTS_FRACTION = os.environ.get("G6LC_CTS_FRACTION", "")
+# G6LC_CTS_SHARD=I,N: run caselist lines I, I+N, I+2N, ... The slice is
+# written into the private CTSDATA copy (needs G6LC_INSTANCE_DIR).
+CTS_SHARD = os.environ.get("G6LC_CTS_SHARD", "")
+SHARD_LIST = "caselists/g6lc-shard.txt"
 # Usable guest RAM in MiB.  The machine's low bank always supplies
 # 128 MiB (256 MiB DRAM minus the 128 MiB APU aperture, G3b-i); -m above
 # that adds a second bank at 0xa0000000 and needs the matching DTB (see
@@ -110,6 +127,7 @@ class Serial:
 
 
 def main():
+    global CTSDATA
     ap = argparse.ArgumentParser()
     ap.add_argument("--venusoff", action="store_true")
     ap.add_argument("--timeout", type=int, default=1800)
@@ -133,6 +151,43 @@ def main():
         if not os.path.exists(f):
             print(f"FATAL: {f} missing — run run-guest.sh (provisioning)")
             return 2
+    for name, val in (("G6LC_CTS_FRACTION", CTS_FRACTION),
+                      ("G6LC_CTS_SHARD", CTS_SHARD)):
+        if val and not re.fullmatch(r"\d+,[1-9]\d*", val):
+            print(f"FATAL: {name}={val!r} is not I,N")
+            return 2
+    if CTS_SHARD and not INSTANCE:
+        print("FATAL: G6LC_CTS_SHARD needs G6LC_INSTANCE_DIR (private CTSDATA)")
+        return 2
+    # Every CTS run writes results into a private CTSDATA copy. The
+    # shared cache image may be replaced (rsync rename) or used by
+    # another run while this one is live; the copy is removed once the
+    # results are dumped.
+    private = ""
+    if os.environ.get("G6LC_CTS"):
+        os.makedirs(INSTANCE or args.out, exist_ok=True)
+        private = f"{INSTANCE or args.out}/ctsdata.img"
+        shutil.copyfile(CTSDATA, private)
+        CTSDATA = private
+        if CTS_SHARD:
+            idx, count = (int(x) for x in CTS_SHARD.split(","))
+            src = os.environ.get("G6LC_CTS_CASELIST",
+                                 "caselists/cts0-info-smoke.txt")
+            r = subprocess.run(["debugfs", "-R", f"cat /{src}", CTSDATA],
+                               capture_output=True, text=True)
+            cases = [c for c in r.stdout.splitlines() if c.strip()]
+            if r.returncode != 0 or not cases:
+                print(f"FATAL: cannot read /{src} from {CTSDATA}")
+                return 2
+            sub = f"{INSTANCE}/g6lc-shard.txt"
+            open(sub, "w").write("".join(c + "\n" for c in cases[idx::count]))
+            cmds = f"{INSTANCE}/debugfs-shard.cmd"
+            open(cmds, "w").write(f"rm /{SHARD_LIST}\nwrite {sub} /{SHARD_LIST}\n")
+            subprocess.run(["debugfs", "-w", "-f", cmds, CTSDATA],
+                           capture_output=True, check=True)
+            os.environ["G6LC_CTS_CASELIST"] = SHARD_LIST
+            print(f"[drive] shard {CTS_SHARD}: {len(cases[idx::count])} of "
+                  f"{len(cases)} cases from /{src}", flush=True)
     server_log = open(f"{args.out}/server-run-{mode}.log", "wb")
 
     for p in (SOCK, CONSOLE, MON):
@@ -163,10 +218,15 @@ def main():
         dtb = f"{CACHE}/g6lc-mem{GUEST_MEM_MIB}.dtb"
         stamp = f"{CACHE}/g6lc-mem{GUEST_MEM_MIB}.dts"
         if not os.path.exists(dtb):
-            open(stamp, "w").write(
+            # per-process temp names + rename: concurrent shards may
+            # race to create the shared cached DTB
+            tmp = f".{os.getpid()}.tmp"
+            open(stamp + tmp, "w").write(
                 dts.replace("@DRAM2_SIZE@", f"0x{dram2_bytes:x}"))
             subprocess.run(["dtc", "-I", "dts", "-O", "dtb",
-                            "-o", dtb, stamp], check=True)
+                            "-o", dtb + tmp, stamp + tmp], check=True)
+            os.replace(stamp + tmp, stamp)
+            os.replace(dtb + tmp, dtb)
         dtb_arg = ["-dtb", dtb]
         print(f"[drive] guest RAM {GUEST_MEM_MIB} MiB usable "
               f"(+{dram2_bytes >> 20} MiB bank at 0x{DRAM2_BASE:x})",
@@ -213,7 +273,7 @@ def main():
                     "systemd.mask=logrotate.service "
                     "systemd.mask=sysstat.service "
                     "systemd.mask=wpa_supplicant.service",
-        "-drive", f"file={IMG},format=raw,if=none,id=hd0,cache=unsafe",
+        "-drive", f"file={IMG},format=raw,if=none,id=hd0,cache=unsafe{SNAP}",
         "-device", "virtio-blk-device,drive=hd0",
         "-drive", f"file={CIDATA},format=raw,if=none,id=cd0,readonly=on",
         "-device", "virtio-blk-device,drive=cd0",
@@ -224,7 +284,7 @@ def main():
     if swap_attached:
         qemu_cmd += [
             "-drive", f"file={SWAP},format=raw,if=none,id=sw0,"
-                      "cache=writeback",
+                      f"cache=writeback{SNAP}",
             "-device", "virtio-blk-device,drive=sw0",
         ]
     if os.environ.get("G6LC_CTS"):
@@ -585,6 +645,8 @@ def main():
                 case_arg = (f"--deqp-case='{cts_case}' "
                             if cts_case else
                             f"--deqp-caselist-file={caselist} ")
+                if CTS_FRACTION:
+                    case_arg += f"--deqp-fraction={CTS_FRACTION} "
                 # case count for the marker: read the caselist out of
                 # the image host-side.  The guest may hold it mounted
                 # rw, but the caselist is static content written at
@@ -664,7 +726,11 @@ def main():
                         fail = True
                     else:
                         print(f"G6LC_CTS_RUN cases={ctscases} rc={rc} "
-                              f"device_faults={df}", flush=True)
+                              f"device_faults={df}"
+                              + (f" fraction={CTS_FRACTION}"
+                                 if CTS_FRACTION else "")
+                              + (f" shard={CTS_SHARD}"
+                                 if CTS_SHARD else ""), flush=True)
                         fail |= (rc != 0)
                     con.run(
                         "cd /root; "
@@ -736,6 +802,11 @@ def main():
                 print(f"[drive] cts pull {src}: "
                       f"{'ok' if r.returncode == 0 else r.stderr.strip()}",
                       flush=True)
+        if private:
+            try:
+                os.unlink(private)
+            except OSError:
+                pass
         serial_log.close()
         server_log.close()
         qemu_log.close()

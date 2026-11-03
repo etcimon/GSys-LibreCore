@@ -14,7 +14,8 @@ BR="$ROOT/verif/tb/apu/bridge"
 VERILATOR="${VERILATOR:-verilator}"
 # same pin as run-cva6-venus.sh / run-apu-sys-venus.sh: 5.008
 if [ "$("$VERILATOR" --version 2>/dev/null | cut -d" " -f2)" != "5.008" ]; then
-  for c in /opt/testharness/toolchains/verilator-v5.008/bin/verilator \
+  for c in /opt/testharness/toolchains/verilator-v5.008-g6lc/bin/verilator \
+           /opt/testharness/toolchains/verilator-v5.008/bin/verilator \
            /root/verilator-build/bin/verilator; do
     [ -x "$c" ] && { VERILATOR="$c"; break; }
   done
@@ -59,8 +60,16 @@ build_one() { # name, extra-verilator-args
   echo "$SECONDS" >> "$OUT/times.log"
 }
 
+rm -f "$OUT/venus-only-build"
 build_one venus    -GVenusOff=0
-build_one venusoff -GVenusOff=1
+# APU_BRIDGE_VENUS_ONLY=1: a venus-only guest leaf never starts the
+# venusoff control server; the marker tells the regression verdict.
+if [ -n "${APU_BRIDGE_VENUS_ONLY:-}" ]; then
+  echo "venusoff build not requested (venus-only)"
+  touch "$OUT/venus-only-build"
+else
+  build_one venusoff -GVenusOff=1
+fi
 
 # idle-speed measurement
 BENCH="${BENCH:-500000}"

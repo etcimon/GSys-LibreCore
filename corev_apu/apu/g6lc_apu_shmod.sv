@@ -39,10 +39,12 @@ module g6lc_apu_shmod
   parameter bit          Enable        = 1'b0,
   parameter int unsigned ShaderSlots   = 8,
   parameter int unsigned ShaderIds     = 1024,
-  parameter int unsigned ShaderRegs    = 256,
-  parameter int unsigned ShaderWords   = 2048,
+  parameter int unsigned ShaderRegs    = 1024,
+  // A std140 single_struct_array compute shader is about 2200
+  // SPIR-V words, which wrapped a 2048-word slot.
+  parameter int unsigned ShaderWords   = 8192,
   parameter int unsigned ShaderMembers = 256,
-  parameter int unsigned ShaderInit    = 128,
+  parameter int unsigned ShaderInit    = 256,
   // G3a-i: function table bound (OpFunction bodies beyond the entry)
   // and the param-index table bound per function
   parameter int unsigned MaxFuncs      = 16,
@@ -86,7 +88,7 @@ module g6lc_apu_shmod
   input  logic [9:0]   rm_id_i,
   output logic [31:0]  rm_data_o,
   input  logic [9:0]   init_id_i,
-  output logic [63:0]  init_data_o,
+  output logic [79:0]  init_data_o,
   input  logic [9:0]   blk_id_i,
   output logic [31:0]  blk_data_o,
   input  logic [9:0]   phi_id_i,
@@ -128,7 +130,7 @@ module g6lc_apu_shmod
     localparam int unsigned INW = $clog2(ShaderInit);
     localparam int unsigned OPB = 32;   // operand staging words
     localparam int unsigned MDN = 64;   // pending member-decor window
-    localparam int unsigned BRN = 48;   // queued branch targets
+    localparam int unsigned BRN = 128;  // queued branch targets
     localparam int unsigned CFD = 8;    // commit loop-nesting bound (CfDepth)
     localparam int unsigned PTW = $clog2(MaxFuncs * MaxParams);
     localparam int unsigned CLN = BRN;  // queued call targets
@@ -160,7 +162,7 @@ module g6lc_apu_shmod
     logic [63:0]           mb_wdata, mb_rdata;
     logic                  in_req, in_we;
     logic [INW+SW-1:0]     in_addr;
-    logic [63:0]           in_wdata, in_rdata;
+    logic [79:0]           in_wdata, in_rdata;
     logic                  en_req, en_we;
     logic [SW-1:0]         en_addr;
     logic [127:0]          en_wdata, en_rdata;
@@ -186,7 +188,7 @@ module g6lc_apu_shmod
     logic [31:0] w0_q;
     logic [31:0] ops_q [OPB];
     logic [15:0] opc_q, wc_q;
-    logic [5:0]  ph_q;
+    logic [7:0]  ph_q;
     logic [IW-1:0] clr_q;
     logic [15:0] n_regs_q, n_init_q, n_memb_q, scratch_q, slab_q;
     logic [7:0]  lx_q, ly_q, lz_q;
@@ -207,7 +209,7 @@ module g6lc_apu_shmod
     // (a call's target may be defined later in the module)
     logic [15:0] cl_at_q [CLN];
     logic [9:0]  cl_id_q [CLN];
-    logic [5:0]  cl_n_q;
+    logic [7:0]  cl_n_q;
     logic [15:0] esize_q, stride_q, sz_q, voff_q, nat_off_q;
     logic [511:0] crow_q;
     logic [4:0]   cn_q, cn_i_q;
@@ -228,7 +230,7 @@ module g6lc_apu_shmod
     // forward-branch check queue
     logic [15:0] br_at_q [BRN];
     logic [9:0]  br_tg_q [BRN];
-    logic [5:0]  br_n_q;
+    logic [7:0]  br_n_q;
     // structured-flow commit state (4b): mp_q = previous instruction was
     // OpLoopMerge/OpSelectionMerge; lp_* = open loop {merge,continue} stack
     logic        mp_q;
@@ -643,7 +645,10 @@ module g6lc_apu_shmod
                 1:  de_wdata = {ops_q[2],
                                 de_rdata[31:24] | 8'h02,
                                 drc_nb, de_rdata[15:0]};
-                33: de_wdata = {de_rdata[63:32], de_rdata[31:24],
+                // Binding is 16 bits.  The low byte stays at [15:8];
+                // the high byte rides [47:40], which Set preserves.
+                33: de_wdata = {de_rdata[63:48], ops_q[2][15:8],
+                                de_rdata[39:32], de_rdata[31:24],
                                 drc_nb, ops_q[2][7:0],
                                 de_rdata[7:0]};
                 34: de_wdata = {de_rdata[63:32], de_rdata[31:24],
@@ -890,7 +895,8 @@ module g6lc_apu_shmod
                    va_wdata = {var_w1, var_w0};
                    in_req = 1'b1; in_we = 1'b1;
                    in_addr = {slot_q, n_init_q[INW-1:0]};
-                   in_wdata = {init_w1, init_w0};
+                   // [79:72] is binding[15:8]; the low byte stays in init_w1
+                   in_wdata = {de_rdata[47:40], 8'h0, init_w1, init_w0};
                    rm_req = 1'b1; rm_we = 1'b1;
                    rm_addr = {slot_q, ops_q[1][9:0]};
                    rm_wdata = {2'b00, 4'h0, ops_q[0][9:0], n_regs_q};
@@ -899,12 +905,12 @@ module g6lc_apu_shmod
             endcase
           end
           S_BRC: begin
-            if (ph_q < 6'(br_n_q)) begin
+            if (ph_q < 8'(br_n_q)) begin
               bk_req = 1'b1;
-              bk_addr = {slot_q, br_tg_q[ph_q[5:0]]};
-            end else if (ph_q < 6'(br_n_q) + 6'(cl_n_q)) begin
+              bk_addr = {slot_q, br_tg_q[ph_q]};
+            end else if (ph_q < 8'(br_n_q) + 8'(cl_n_q)) begin
               fu_req = 1'b1;
-              fu_addr = {slot_q, cl_id_q[ph_q - 6'(br_n_q)]};
+              fu_addr = {slot_q, cl_id_q[ph_q - 8'(br_n_q)]};
             end
           end
           S_RES: begin
@@ -961,10 +967,10 @@ module g6lc_apu_shmod
               .NumPorts(1)) i_memb (
       .clk_i, .rst_ni, .req_i(mb_req), .we_i(mb_we), .addr_i(mb_addr),
       .wdata_i(mb_wdata), .be_i(8'hFF), .rdata_o(mb_rdata));
-    tc_sram #(.NumWords(ShaderSlots*ShaderInit), .DataWidth(64),
+    tc_sram #(.NumWords(ShaderSlots*ShaderInit), .DataWidth(80),
               .NumPorts(1)) i_init (
       .clk_i, .rst_ni, .req_i(in_req), .we_i(in_we), .addr_i(in_addr),
-      .wdata_i(in_wdata), .be_i(8'hFF), .rdata_o(in_rdata));
+      .wdata_i(in_wdata), .be_i(10'h3FF), .rdata_o(in_rdata));
     tc_sram #(.NumWords(ShaderSlots*ShaderIds), .DataWidth(160),
               .NumPorts(1)) i_phi (
       .clk_i, .rst_ni, .req_i(ph_req), .we_i(ph_we), .addr_i(ph_addr),
@@ -1030,8 +1036,11 @@ module g6lc_apu_shmod
         end
         em_q <= APU_SH_EM_GLCOMPUTE; sbi_q <= 1'b0;
         in_mask_q <= '0; out_mask_q <= '0; vfl_q <= '0;
-        for (t = 0; t < BRN; t++) begin
+        // Two 64-trips: Verilator will not unroll one 128-trip
+        // non-blocking reset (BLKLOOPINIT). BRN is 128.
+        for (t = 0; t < 64; t++) begin
           br_at_q[t] <= '0; br_tg_q[t] <= '0;
+          br_at_q[64 + t] <= '0; br_tg_q[64 + t] <= '0;
         end
       end else begin
         done_o <= 1'b0;
@@ -1310,7 +1319,7 @@ module g6lc_apu_shmod
                 if (wc_q < 5 || !wc_q[0] || wc_q > 11) begin
                   fl_code_q <= APU_SH_FAULT_BRANCH; fl_opc_q <= opc_q;
                   fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
-                end else if (br_n_q + 6'((wc_q - 3) >> 1) > 6'(BRN)) begin
+                end else if (br_n_q + 6'((wc_q - 3) >> 1) > 8'(BRN)) begin
                   fl_code_q <= APU_SH_FAULT_BRANCH; fl_opc_q <= opc_q;
                   fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
                 end else if (!id_ok1) begin
@@ -1330,7 +1339,7 @@ module g6lc_apu_shmod
                 // OpLoopMerge {merge, continue, ctl}: push the open loop
                 // so merge-less BranchConditional/Switch inside it may
                 // still target its merge/continue blocks (commit rule).
-                if (lp_n_q >= 4'(CFD) || br_n_q + 6'd2 > 6'(BRN)) begin
+                if (lp_n_q >= 4'(CFD) || br_n_q + 6'd2 > 8'(BRN)) begin
                   fl_code_q <= APU_SH_FAULT_BRANCH; fl_opc_q <= opc_q;
                   fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
                 end else begin
@@ -1346,7 +1355,7 @@ module g6lc_apu_shmod
                 end
               end
               247: begin
-                if (br_n_q >= 6'(BRN)) begin
+                if (br_n_q >= 8'(BRN)) begin
                   fl_code_q <= APU_SH_FAULT_BRANCH;
                   fl_opc_q <= opc_q; fl_word_q <= at_q;
                   fail_q <= 1'b1; st_q <= S_DONE;
@@ -1374,7 +1383,7 @@ module g6lc_apu_shmod
                 end
               end
               249: begin
-                if (br_n_q >= 6'(BRN)) begin
+                if (br_n_q >= 8'(BRN)) begin
                   fl_code_q <= APU_SH_FAULT_BRANCH;
                   fl_opc_q <= opc_q; fl_word_q <= at_q;
                   fail_q <= 1'b1; st_q <= S_DONE;
@@ -1397,7 +1406,7 @@ module g6lc_apu_shmod
                     !tg_is_lc(ops_q[2][9:0])) begin
                   fl_code_q <= APU_SH_FAULT_BRANCH; fl_opc_q <= opc_q;
                   fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
-                end else if (br_n_q + 6'd2 > 6'(BRN)) begin
+                end else if (br_n_q + 6'd2 > 8'(BRN)) begin
                   fl_code_q <= APU_SH_FAULT_BRANCH; fl_opc_q <= opc_q;
                   fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
                 end else begin
@@ -1415,7 +1424,7 @@ module g6lc_apu_shmod
                   fl_code_q <= APU_SH_FAULT_BRANCH; fl_opc_q <= opc_q;
                   fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
                 end else if (wc_q < 3 ||
-                    br_n_q + 6'(((wc_q - 3) >> 1) + 1) > 6'(BRN)) begin
+                    br_n_q + 6'(((wc_q - 3) >> 1) + 1) > 8'(BRN)) begin
                   fl_code_q <= APU_SH_FAULT_BRANCH; fl_opc_q <= opc_q;
                   fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
                 end else begin
@@ -1493,7 +1502,7 @@ module g6lc_apu_shmod
                 if (!in_func_q) begin
                   fl_code_q <= APU_SH_FAULT_OPCODE; fl_opc_q <= opc_q;
                   fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
-                end else if (cl_n_q >= 6'(CLN)) begin
+                end else if (cl_n_q >= 8'(CLN)) begin
                   fl_code_q <= APU_SH_FAULT_FUNC; fl_opc_q <= opc_q;
                   fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
                 end else if (!id_ok1 || ops_q[2] >= 32'(ShaderIds)) begin
@@ -2255,7 +2264,10 @@ module g6lc_apu_shmod
                 // wave copies the call args into these registers
                 dw_pt_q <= 1'b1;
                 dw_pt_id_q <= fn_pb_q + PTW'(fn_par_q);
-                dw_pt_w_q <= {4'h0, 4'(res_rows()), 8'(n_regs_q)};
+                // {row count, RF index}. The index is RI bits so a
+                // parameter past row 255 still names its own slot.
+                dw_pt_w_q <= {4'(res_rows()),
+                              $clog2(ShaderRegs)'(n_regs_q)};
                 fn_par_q <= fn_par_q + 5'd1;
                 is_par_q <= 1'b0;
               end
@@ -2274,7 +2286,7 @@ module g6lc_apu_shmod
           // fault APU_SH_FAULT_FUNC)
           S_BRC: begin
             if (ph_q != 0) begin
-              if (ph_q - 1 < 6'(br_n_q)) begin
+              if (ph_q - 1 < 8'(br_n_q)) begin
                 if (!bk_rdata[15]) begin
                   fl_code_q <= APU_SH_FAULT_BRANCH; fl_opc_q <= 249;
                   fl_word_q <= br_at_q[ph_q - 1];
@@ -2283,13 +2295,13 @@ module g6lc_apu_shmod
               end else begin
                 if (fu_rdata[15:0] == 16'h0) begin
                   fl_code_q <= APU_SH_FAULT_FUNC; fl_opc_q <= 57;
-                  fl_word_q <= cl_at_q[ph_q - 1 - 6'(br_n_q)];
+                  fl_word_q <= cl_at_q[ph_q - 1 - 8'(br_n_q)];
                   fail_q <= 1'b1; st_q <= S_DONE;
                 end
               end
             end
             if (st_q != S_DONE) begin
-              if (ph_q == 6'(br_n_q) + 6'(cl_n_q)) st_q <= S_ENT;
+              if (ph_q == 8'(br_n_q) + 8'(cl_n_q)) st_q <= S_ENT;
               else ph_q <= ph_q + 1;
             end
           end
@@ -2338,10 +2350,10 @@ module g6lc_apu_shmod_fixture
   parameter bit          Enable        = 1'b0,
   parameter int unsigned ShaderSlots   = 8,
   parameter int unsigned ShaderIds     = 1024,
-  parameter int unsigned ShaderRegs    = 256,
-  parameter int unsigned ShaderWords   = 2048,
+  parameter int unsigned ShaderRegs    = 1024,
+  parameter int unsigned ShaderWords   = 8192,
   parameter int unsigned ShaderMembers = 256,
-  parameter int unsigned ShaderInit    = 128,
+  parameter int unsigned ShaderInit    = 256,
   // G3a-i: function table bound (OpFunction bodies beyond the entry)
   // and the param-index table bound per function
   parameter int unsigned MaxFuncs      = 16,
@@ -2377,7 +2389,7 @@ module g6lc_apu_shmod_fixture
   input  logic [9:0]   rm_id_i,
   output logic [31:0]  rm_data_o,
   input  logic [9:0]   init_id_i,
-  output logic [63:0]  init_data_o,
+  output logic [79:0]  init_data_o,
   input  logic [9:0]   blk_id_i,
   output logic [31:0]  blk_data_o,
   input  logic [9:0]   phi_id_i,

@@ -1,0 +1,4 @@
+dEQP-VK.api.object_management.single.device_memory_small
+dEQP-VK.api.object_management.single.buffer_uniform_small
+dEQP-VK.api.object_management.single.buffer_storage_small
+dEQP-VK.api.object_management.single.descriptor_set

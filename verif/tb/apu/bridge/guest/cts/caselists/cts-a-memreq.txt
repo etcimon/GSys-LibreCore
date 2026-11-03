@@ -1,0 +1,2 @@
+dEQP-VK.memory.requirements.core.buffer.regular
+dEQP-VK.memory.requirements.memory_property_flags.check_all

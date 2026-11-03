@@ -1,0 +1,4 @@
+dEQP-VK.ssbo.layout.single_struct.per_block_buffer.std140_comp_access
+dEQP-VK.ssbo.layout.single_struct.per_block_buffer.std140_store_cols
+dEQP-VK.ssbo.layout.single_struct.per_block_buffer.std140_comp_access_store_cols
+dEQP-VK.ssbo.layout.single_struct.per_block_buffer.std430

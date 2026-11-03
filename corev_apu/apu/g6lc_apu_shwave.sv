@@ -45,16 +45,20 @@ module g6lc_apu_shwave
   parameter bit          Enable        = 1'b0,
   parameter int unsigned ShaderLanes   = 8,
   parameter int unsigned ShaderVec     = 4,
-  parameter int unsigned ShaderRegs    = 256,
+  parameter int unsigned ShaderRegs    = 1024,
   parameter int unsigned MaxWaves      = 16,
   parameter int unsigned ShaderIds     = 1024,
   parameter int unsigned ShaderSlots   = 8,
-  parameter int unsigned ShaderWords   = 2048,
-  parameter int unsigned ShaderInit    = 128,
+  parameter int unsigned ShaderWords   = 8192,
+  parameter int unsigned ShaderInit    = 256,
   parameter int unsigned ShaderMembers = 256,
-  parameter int unsigned ScratchBytes  = 1024,
+  // Function/Private scratch.  single_struct_array's un-inlined
+  // mat3 compare temps declare 1360 bytes; 1024 dropped them.
+  parameter int unsigned ScratchBytes  = 4096,
   parameter int unsigned SlabBytes     = 16384,
-  parameter int unsigned ShaderBudget  = 32'h0010_0000,
+  // 16M instructions for the whole dispatch.  ubo.*compute is
+  // 100x100 invocations of local size 1; 1M left the tail unwritten.
+  parameter int unsigned ShaderBudget  = 32'h0100_0000,
   parameter int unsigned WaitBound     = 32'd4096,
   parameter int unsigned CfDepth       = 8,
   parameter int unsigned CallDepth     = 8,     // G3a-i call-stack bound
@@ -85,7 +89,7 @@ module g6lc_apu_shwave
   output logic [9:0]   rm_id_o,
   input  logic [31:0]  rm_data_i,
   output logic [9:0]   init_id_o,
-  input  logic [63:0]  init_data_i,
+  input  logic [79:0]  init_data_i,
   output logic [9:0]   blk_id_o,
   input  logic [31:0]  blk_data_i,
   output logic [9:0]   phi_id_o,
@@ -297,7 +301,8 @@ module g6lc_apu_shwave
     // (W_AL0) enter W_DS0 with the key latched here; the subroutine
     // returns to dret_q with ls_bind/ls_bsz/ls_bok filled.
     st_e          dret_q;
-    logic [7:0]   dsc_set_q, dsc_bd_q;
+    logic [7:0]   dsc_set_q;
+    logic [15:0]  dsc_bd_q;
     logic [15:0]  dsc_idx_q;
     apu_sh_bindrow_t dsc_row_q;    // resolved binding row
     logic [63:0]  dsc_addr_q;      // current record beat address
@@ -305,7 +310,7 @@ module g6lc_apu_shwave
     // F5 descriptor cache: key {idx,binding,set}, value {kind,flags,
     // base,size}; invalidated on every dispatch
     logic [APU_DESC_CACHE-1:0]        dc_v_q;
-    logic [APU_DESC_CACHE-1:0][25:0]  dc_key_q;
+    logic [APU_DESC_CACHE-1:0][33:0]  dc_key_q;
     // 5b: cache value = the full 32-byte record (buffers use w0/w1;
     // image records carry geometry/swizzle/sampler in w2..w6)
     logic [APU_DESC_CACHE-1:0][255:0] dc_val_q;
@@ -608,10 +613,14 @@ module g6lc_apu_shwave
     logic [LAN-1:0][31:0]      nc_rc_q;
     // LSU
     logic [3:0]   ls_lane_q;
-    logic [8:0]   ls_comp_q;          // word cursor (scratch words ≤ SCW)
+    // Word cursor for the scratch clear, and the low bits are the
+    // vector component during loads.  Width is clog2(SCW): a 9-bit
+    // cursor wrapped a 3344-byte frame and the clear never finished.
+    logic [((SCW > 1) ? $clog2(SCW) : 1)-1:0] ls_comp_q;
     logic [2:0]   lcc_q;              // comp within column (MAT)
     logic [2:0]   lrc_q;              // column cursor (MAT)
     logic         ls_mat_q;           // matrix-typed access
+    logic [15:0]  ls_mstr_q;          // MatrixStride bytes, 0 = tight
     logic [31:0]  ls_off_q;
     logic [3:0]   ls_sc_q;
     logic [7:0]   ls_bi_q;
@@ -668,7 +677,7 @@ module g6lc_apu_shwave
     wire [7:0]  iw_bi     = init_data_i[27:20];
     wire [3:0]  iw_fl     = init_data_i[31:28];   // APU_SH_VF_*
     wire [7:0]  iw_set    = init_data_i[39:32];
-    wire [7:0]  iw_bd     = init_data_i[47:40];
+    wire [15:0] iw_bd     = {init_data_i[79:72], init_data_i[47:40]};
     wire [15:0] iw_off    = init_data_i[63:48];
     wire [15:0] mb_off    = memb_data_i[15:0];
     wire [15:0] mb_mst    = memb_data_i[31:16];
@@ -878,8 +887,8 @@ module g6lc_apu_shwave
     // ---- §12.3 F5 descriptor resolution helpers ---------------------
     // boff CAM: {set,binding} -> {found, row}; an absent row (count 0)
     // or an out-of-range set is reported as not found
-    function automatic logic [49:0] f_brow(input logic [3:0] s,
-                                           input logic [7:0] bd);
+    function automatic logic [$bits(apu_sh_bindrow_t):0]
+        f_brow(input logic [3:0] s, input logic [15:0] bd);
       f_brow = '0;
       if (s < 4'(APU_DESC_SETS))
         for (int b = 0; b < APU_DESC_BND; b++)
@@ -890,7 +899,7 @@ module g6lc_apu_shwave
     // record cache: {set[1:0],binding,idx} -> {hit, record[255:0]};
     // invalidated at dispatch
     function automatic logic [256:0] f_dhit(input logic [1:0] s,
-                                            input logic [7:0] bd,
+                                            input logic [15:0] bd,
                                             input logic [15:0] i);
       f_dhit = '0;
       for (int c = 0; c < APU_DESC_CACHE; c++)
@@ -2320,9 +2329,15 @@ module g6lc_apu_shwave
     wire [2:0]  ls_ccn = ls_store_q ? ot_comps_q : 3'(f_nc(rcomps_q));
     wire [2:0]  ls_ccl = ls_store_q ? ot_cols_q  : rcols_q;
     // flat word index inside one lane's matrix extent (column-major)
-    // = column * comps-per-column + comp-in-column; ls_comp_q free-runs
-    // in the mat path and must not be used for addressing
+    // = column * comps-per-column + comp-in-column.  Used for a
+    // tightly packed constant matrix.  A memory matrix uses
+    // MatrixStride (bytes) from the pointer when the block member
+    // carried one: std140 columns are 16 bytes apart, not tightly
+    // packed.  ls_comp_q free-runs and must not be used for addressing.
     wire [8:0]  ls_flw = {4'h0, lrc_q} * {6'h0, ls_ccn} + {6'h0, lcc_q};
+    wire [8:0]  ls_msw = (ls_mstr_q != 16'h0) ? {1'b0, ls_mstr_q[15:2]}
+                                              : {6'h0, ls_ccn};
+    wire [8:0]  ls_mad = {4'h0, lrc_q} * ls_msw + {6'h0, lcc_q};
     wire [31:0] ls_wd = !ls_mat_q
                       ? (ls_tsrc_q
                          ? t1_q[ls_lane_q[2:0]][ls_comp_q[1:0]]
@@ -2345,10 +2360,12 @@ module g6lc_apu_shwave
           rf_addr = {wave_q, iw_idx[RI-1:0]};
           for (int l = 0; l < LAN; l++) begin
             rf_wdata[l*128 +: 32]      = {16'h0, iw_off};
-            rf_wdata[l*128 + 32 +: 32] = {iw_fl, iw_bd, iw_set,
+            rf_wdata[l*128 + 32 +: 32] = {iw_fl, iw_bd[7:0], iw_set,
                                           iw_bi, iw_sc};
             rf_wdata[l*128 + 64 +: 32] = '0;
-            rf_wdata[l*128 + 96 +: 32] = '0;
+            // binding[15:8]; MatrixStride later uses [15:0] and
+            // must keep this byte
+            rf_wdata[l*128 + 96 +: 32] = {iw_bd[15:8], 24'h0};
           end
           rf_be = '1;
         end
@@ -2978,7 +2995,8 @@ module g6lc_apu_shwave
           dtm_q[k] <= '0; dres_q[k] <= '0;
         end
         ls_ps_q <= '0; ls_tsrc_q <= '0; ls_wbb_q <= '0;
-        ls_atom_q <= '0; ls_mat_q <= '0; ls_dyn_q <= '0;
+        ls_atom_q <= '0; ls_mat_q <= '0; ls_mstr_q <= '0;
+        ls_dyn_q <= '0;
         wb2_q <= '0; xk_q <= '0;
         done_o <= 1'b0;
       end else begin
@@ -3453,6 +3471,13 @@ module g6lc_apu_shwave
                 // side, per-column rows on the RF side.
                 if (opc_q == 61 && rkind_q == APU_SH_TK_MAT) begin
                   ls_mat_q <= 1'b1;
+                  // pointer word 3 is the member MatrixStride.  A
+                  // std140 uniform block column is 16 bytes apart
+                  // even when that decoration did not stick.
+                  ls_mstr_q <= (va_q[0][0][3][15:0] != 16'h0)
+                               ? va_q[0][0][3][15:0]
+                               : (va_q[0][0][1][3:0] == APU_SH_SC_UNIFORM)
+                                 ? 16'd16 : 16'h0;
                   ncomp_q <= 5'(rcols_q) * {2'b0, rcomps_q};
                 end else if (opc_q == 61 &&
                              (rkind_q == APU_SH_TK_IMG ||
@@ -3466,9 +3491,16 @@ module g6lc_apu_shwave
                   wbm_q <= 4'b1111;
                   st_q <= W_WB;
                 end else if (opc_q == 62 &&
-                             ot_kind_q == APU_SH_TK_MAT)
+                             ot_kind_q == APU_SH_TK_MAT) begin
                   ls_mat_q <= 1'b1;
-                else ls_mat_q <= 1'b0;
+                  ls_mstr_q <= (va_q[0][0][3][15:0] != 16'h0)
+                               ? va_q[0][0][3][15:0]
+                               : (va_q[0][0][1][3:0] == APU_SH_SC_UNIFORM)
+                                 ? 16'd16 : 16'h0;
+                end else begin
+                  ls_mat_q <= 1'b0;
+                  ls_mstr_q <= '0;
+                end
                 if (!(opc_q == 61 &&
                       (rkind_q == APU_SH_TK_IMG ||
                        rkind_q == APU_SH_TK_SAMP ||
@@ -3487,6 +3519,7 @@ module g6lc_apu_shwave
                   // F5: an already-indexed pointer keeps its
                   // descriptor element through a re-chain
                   poff_q[l][2] <= va_q[0][l][2];
+                  poff_q[l][3] <= va_q[0][l][3];
                 end
                 ctag_q <= va_q[0][0][1];
                 cmstride_q <= '0;
@@ -4743,8 +4776,10 @@ module g6lc_apu_shwave
                 end
               end
               4'd6: begin                        // matrix
-                al_st_q <= (cmstride_q != 0) ? cmstride_q
-                                             : 16'(f_nc(ty_comps)) * 4;
+                // std140 uniform columns are 16 bytes apart
+                al_st_q <= (cmstride_q != 16'h0) ? cmstride_q :
+                           (ctag_q[3:0] == APU_SH_SC_UNIFORM) ? 16'd16 :
+                           16'(f_nc(ty_comps)) * 4;
                 cty2_q <= ty_elem; st_q <= W_CHX;
               end
               4'd5: begin                        // vector
@@ -4790,7 +4825,11 @@ module g6lc_apu_shwave
               wb_q[l][0] <= poff_q[l][0];
               wb_q[l][1] <= poff_q[l][1];
               // F5: comp2 carries the descriptor element index
-              wb_q[l][2] <= poff_q[l][2]; wb_q[l][3] <= '0;
+              wb_q[l][2] <= poff_q[l][2];
+              // word 3 carries MatrixStride so the later OpLoad
+              // (a new instruction, cmstride cleared) still spaces
+              // columns.  Zero when the member has no MatrixStride.
+              wb_q[l][3] <= {poff_q[l][3][31:16], cmstride_q};
             end
             wbm_q <= 4'b1111;
             st_q <= W_WB;
@@ -4809,7 +4848,7 @@ module g6lc_apu_shwave
             // time the detour returns
             al_ty_q   <= ty_elem;
             dsc_set_q <= va_q[0][0][1][19:12];
-            dsc_bd_q  <= va_q[0][0][1][27:20];
+            dsc_bd_q  <= {va_q[0][0][3][31:24], va_q[0][0][1][27:20]};
             dsc_idx_q <= va_q[0][0][2][15:0];
             dret_q    <= W_AL2;
             st_q      <= W_DS0;
@@ -4870,7 +4909,7 @@ module g6lc_apu_shwave
             // ls_ps_q (ext pointer stores: Modf/Frexp) puts the pointer
             // word in operand slot 1 instead of 0
             o32 = va_q[ls_ps_q][ls_lane_q[2:0]][0] +
-                  {21'h0, (ls_mat_q ? ls_flw : ls_comp_q), 2'b00};
+                  {21'h0, (ls_mat_q ? ls_mad : ls_comp_q), 2'b00};
             tg  = va_q[ls_ps_q][ls_lane_q[2:0]][1];
             ls_off_q <= o32;
             ls_sc_q  <= tg[3:0];
@@ -4966,7 +5005,8 @@ module g6lc_apu_shwave
               // §12.3 F5: {set,binding,idx} -> binding row -> record
               // fetch -> bounds check at W_LSC
               dsc_set_q <= tg[19:12];
-              dsc_bd_q  <= tg[27:20];
+              dsc_bd_q  <= {va_q[ls_ps_q][ls_lane_q[2:0]][3][31:24],
+                            tg[27:20]};
               dsc_idx_q <= va_q[ls_ps_q][ls_lane_q[2:0]][2][15:0];
               dret_q    <= W_LSC;
               st_q      <= W_DS0;
@@ -4988,11 +5028,14 @@ module g6lc_apu_shwave
           // beats.  All exits write ls_bind/ls_bsz/ls_bok and jump to
           // dret_q.
           W_DS0: begin
-            logic [49:0]  br;
+            // {found, row}.  The row is 57 bits once binding is 16
+            // bits.  A 50-bit temporary drops the found bit, so every
+            // lookup misses and the store is dropped.
+            logic [$bits(apu_sh_bindrow_t):0] br;
             logic [256:0] hit;
             br  = f_brow(4'(dsc_set_q[3:0]), dsc_bd_q);
             hit = f_dhit(dsc_set_q[1:0], dsc_bd_q, dsc_idx_q);
-            if (!br[49] ||
+            if (!br[$bits(apu_sh_bindrow_t)] ||
                 {16'h0, dsc_idx_q} >= {16'h0, br[40:25]}) begin
               // unbound set / no such binding / idx past the array:
               // null descriptor (zero size, invalid)
@@ -5001,14 +5044,14 @@ module g6lc_apu_shwave
               if (tx_full_q) tx_rec_q <= '0;
               st_q <= dret_q;
             end else begin
-              dsc_row_q <= br[48:0];
+              dsc_row_q <= br[56:0];
               if (hit[256]) begin
                 // {kind,flags,base,size} in w0/w1 + dynamic offset
                 dsc_rec_q <= hit[255:0];
                 if (tx_full_q) tx_rec_q <= hit[255:0];
                 ls_bind_q <= hit[31:0] +
                              f_doff(dsc_set_q[1:0],
-                                    apu_sh_bindrow_t'(br[48:0]),
+                                    apu_sh_bindrow_t'(br[56:0]),
                                     dsc_idx_q);
                 ls_bsz_q  <= hit[63:32];
                 ls_bok_q  <= hit[72] && f_buf_kind(hit[71:64]);
@@ -5285,7 +5328,7 @@ module g6lc_apu_shwave
               end
             end else begin
               dsc_set_q <= tg[19:12];
-              dsc_bd_q  <= tg[27:20];
+              dsc_bd_q  <= {va_q[0][ls_lane_q[2:0]][3][31:24], tg[27:20]};
               dsc_idx_q <= va_q[0][ls_lane_q[2:0]][2][15:0];
               dret_q    <= W_TX2;
               st_q      <= W_DS0;
@@ -6517,7 +6560,7 @@ module g6lc_apu_shwave
           // ---------------- G3a-i: OpFunctionCall ---------------------
           // The func row packs {nparams[31:28], param-table base
           // [27:16], first-block word offset [15:0]}; param row p at
-          // parm base+p holds {4'h0, value-rows[11:8], rf row[7:0]}.
+          // parm row is {value-rows[RI+3:RI], rf index[RI-1:0]}.
           // Arg rows are copied into the param's registers; pointer
           // params copy verbatim (the pointer word is just data).
           W_FN0: begin                          // func row read issued
@@ -6554,7 +6597,7 @@ module g6lc_apu_shwave
           W_FN4: st_q <= W_FN5;           // arg row read issued (port)
           W_FN5: begin                    // param row written (port)
             fkr_q <= fkr_q + 1;
-            if ({1'b0, fkr_q} + 1 < {1'b0, fpr_q[11:8]})
+            if ({1'b0, fkr_q} + 1 < {1'b0, fpr_q[RI+3:RI]})
               st_q <= W_FN4;
             else begin
               fpk_q <= fpk_q + 1; st_q <= W_FN2;
@@ -7252,16 +7295,18 @@ module g6lc_apu_shwave_fixture
   parameter bit          Enable        = 1'b0,
   parameter int unsigned ShaderLanes   = 8,
   parameter int unsigned ShaderVec     = 4,
-  parameter int unsigned ShaderRegs    = 256,
+  parameter int unsigned ShaderRegs    = 1024,
   parameter int unsigned MaxWaves      = 16,
   parameter int unsigned ShaderIds     = 1024,
   parameter int unsigned ShaderSlots   = 8,
-  parameter int unsigned ShaderWords   = 2048,
-  parameter int unsigned ShaderInit    = 128,
+  parameter int unsigned ShaderWords   = 8192,
+  parameter int unsigned ShaderInit    = 256,
   parameter int unsigned ShaderMembers = 256,
-  parameter int unsigned ScratchBytes  = 1024,
+  parameter int unsigned ScratchBytes  = 4096,
   parameter int unsigned SlabBytes     = 16384,
-  parameter int unsigned ShaderBudget  = 32'h0010_0000,
+  // 16M instructions for the whole dispatch.  ubo.*compute is
+  // 100x100 invocations of local size 1; 1M left the tail unwritten.
+  parameter int unsigned ShaderBudget  = 32'h0100_0000,
   parameter int unsigned WaitBound     = 32'd4096,
   parameter int unsigned CallDepth     = 8
 ) (
@@ -7288,7 +7333,7 @@ module g6lc_apu_shwave_fixture
   output logic [9:0]   rm_id_o,
   input  logic [31:0]  rm_data_i,
   output logic [9:0]   init_id_o,
-  input  logic [63:0]  init_data_i,
+  input  logic [79:0]  init_data_i,
   output logic [9:0]   blk_id_o,
   input  logic [31:0]  blk_data_i,
   output logic [9:0]   phi_id_o,

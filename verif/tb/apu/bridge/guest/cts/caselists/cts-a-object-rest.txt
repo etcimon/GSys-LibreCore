@@ -1,0 +1,3 @@
+dEQP-VK.api.object_management.single.command_pool_transient
+dEQP-VK.api.object_management.single.command_buffer_secondary
+dEQP-VK.api.object_management.single.merged_pipeline_cache

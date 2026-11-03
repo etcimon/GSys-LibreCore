@@ -1,0 +1,2 @@
+dEQP-VK.ssbo.layout.unsized_struct_array.per_block_buffer.std140
+dEQP-VK.ssbo.layout.unsized_struct_array.per_block_buffer.std430

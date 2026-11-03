@@ -1,0 +1,2 @@
+dEQP-VK.api.fill_and_update_buffer.suballocation.fill_buffer_whole
+dEQP-VK.api.fill_and_update_buffer.suballocation.update_buffer_whole

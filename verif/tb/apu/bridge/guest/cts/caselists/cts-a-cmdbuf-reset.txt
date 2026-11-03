@@ -1,0 +1,3 @@
+dEQP-VK.api.command_buffers.pool_reset_no_flags_res
+dEQP-VK.api.command_buffers.pool_reset_reuse
+dEQP-VK.api.command_buffers.reset_implicit

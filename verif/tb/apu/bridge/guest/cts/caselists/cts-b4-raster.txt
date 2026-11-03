@@ -1,0 +1,12 @@
+dEQP-VK.api.smoke.triangle
+dEQP-VK.api.smoke.asm_triangle
+dEQP-VK.api.smoke.asm_triangle_no_opname
+dEQP-VK.api.smoke.unused_resolve_attachment
+dEQP-VK.memory.pipeline_barrier.host_write_vertex_buffer.1024_vertex_buffer_stride_2
+dEQP-VK.memory.pipeline_barrier.host_write_vertex_buffer.1024_vertex_buffer_stride_4
+dEQP-VK.memory.pipeline_barrier.host_write_vertex_buffer.1048576_vertex_buffer_stride_2
+dEQP-VK.memory.pipeline_barrier.host_write_vertex_buffer.1048576_vertex_buffer_stride_4
+dEQP-VK.memory.pipeline_barrier.host_write_vertex_buffer.65536_vertex_buffer_stride_2
+dEQP-VK.memory.pipeline_barrier.host_write_vertex_buffer.65536_vertex_buffer_stride_4
+dEQP-VK.memory.pipeline_barrier.host_write_vertex_buffer.8192_vertex_buffer_stride_2
+dEQP-VK.memory.pipeline_barrier.host_write_vertex_buffer.8192_vertex_buffer_stride_4

@@ -1,0 +1,4 @@
+dEQP-VK.api.smoke.triangle
+dEQP-VK.api.smoke.asm_triangle
+dEQP-VK.api.smoke.asm_triangle_no_opname
+dEQP-VK.api.smoke.unused_resolve_attachment

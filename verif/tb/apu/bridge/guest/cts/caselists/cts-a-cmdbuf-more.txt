@@ -1,0 +1,3 @@
+dEQP-VK.api.command_buffers.pool_create_transient_bit
+dEQP-VK.api.command_buffers.pool_create_non_null_allocator
+dEQP-VK.api.command_buffers.record_single_secondary

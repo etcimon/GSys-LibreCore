@@ -253,6 +253,11 @@ module tb_g6lc_apu_rast;
     return i_mem.apm[apw_i(FB + y*FBP + x*4)];
   endfunction
 
+  // VS-input word.  Vertex 0, byte offset within the 144-byte record.
+  function automatic logic [31:0] vsin(input int off);
+    return i_mem.apm[apw_i(PG_BASE + off)];
+  endfunction
+
   // depth word (D32) at pixel
   function automatic logic [31:0] dbpx(input int x, input int y);
     return i_mem.apm[apw_i(DB + y*FBP + x*4)];
@@ -375,6 +380,7 @@ module tb_g6lc_apu_rast;
     d.vs_slot = 3'd0; d.fs_slot = 3'd1;
     d.fs_in_mask = 8'h01;
     d.topology = 8'd3;
+    d.poly_mode = 2'd0;          // VkPolygonMode FILL (raw, as vnfront stores it)
     d.cull = 2'b10;              // BACK
     // Vulkan face orientation: front under CW frontFace means a
     // POSITIVE framebuffer shoelace (the spec's signed area is the
@@ -395,7 +401,7 @@ module tb_g6lc_apu_rast;
     d.sc_x = 0; d.sc_y = 0; d.sc_w = 16'd32; d.sc_h = 16'd32;
     d.ca[0] = '{base: FB, size: 32'h1000, w: 16'd32, h: 16'd32,
                 fmt: 8'(APU_IMG_FMT_R8G8B8A8_UNORM), mips: 5'd1,
-                layers: 10'd1, layer_bytes: 32'h1000};
+                layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
     d.ca_valid = 4'h1;
     for (int i = 0; i < 4; i++) d.blend[i].mask = 4'hF;
     d.vertex_count = 3; d.instance_count = 1;
@@ -407,7 +413,7 @@ module tb_g6lc_apu_rast;
     d.op = APU_RAST_OP_CLEAR;
     d.ca[0] = '{base: FB, size: 32'h1000, w: 16'd32, h: 16'd32,
                 fmt: 8'(APU_IMG_FMT_R8G8B8A8_UNORM), mips: 5'd1,
-                layers: 10'd1, layer_bytes: 32'h1000};
+                layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
     d.ca_valid = 4'h1;
     return d;
   endfunction
@@ -907,7 +913,7 @@ module tb_g6lc_apu_rast;
     d.op = APU_RAST_OP_CLEAR;
     d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
              fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
-             layers: 10'd1, layer_bytes: 32'h1000};
+             layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
     d.da_valid = 1'b1;
     d.clear_color[0] = 32'h3F800000;
     do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
@@ -923,7 +929,7 @@ module tb_g6lc_apu_rast;
     d = mk_draw();
     d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
              fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
-             layers: 10'd1, layer_bytes: 32'h1000};
+             layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
     d.da_valid = 1'b1;
     d.depth_test = 1'b1; d.depth_write = 1'b1; d.depth_op = 3'd1; // LESS
     do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
@@ -1259,7 +1265,7 @@ module tb_g6lc_apu_rast;
     d.op = APU_RAST_OP_CLEAR;
     d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
              fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
-             layers: 10'd1, layer_bytes: 32'h1000};
+             layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
     d.da_valid = 1'b1;
     d.clear_color[0] = 32'h3F800000;
     do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
@@ -1274,7 +1280,7 @@ module tb_g6lc_apu_rast;
     d = mk_draw();
     d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
              fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
-             layers: 10'd1, layer_bytes: 32'h1000};
+             layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
     d.da_valid = 1'b1;
     d.depth_test = 1'b1; d.depth_write = 1'b1; d.depth_op = 3'd1;
     do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
@@ -1326,7 +1332,7 @@ module tb_g6lc_apu_rast;
     d.op = APU_RAST_OP_CLEAR;
     d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
              fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
-             layers: 10'd1, layer_bytes: 32'h1000};
+             layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
     d.da_valid = 1'b1;
     d.clear_color[0] = 32'h3F800000;
     do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
@@ -1339,7 +1345,7 @@ module tb_g6lc_apu_rast;
     d = mk_draw();
     d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
              fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
-             layers: 10'd1, layer_bytes: 32'h1000};
+             layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
     d.da_valid = 1'b1;
     d.depth_test = 1'b1; d.depth_write = 1'b1; d.depth_op = 3'd1;
     do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
@@ -1503,6 +1509,944 @@ module tb_g6lc_apu_rast;
     if (fs_frontm != 2'b11)
       fail($sformatf("case14 mixed fs_frontm=%b exp 11",
                      fs_frontm));
+
+    // ================= case 15: indexed restart ===================
+    // Triangle list 0,1,2, 0xFFFF, 3,4,5.  Without restart the
+    // sentinel consumes a slot and triangle B is not (3,4,5).
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF400000, 32'hBF400000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(1, 32'hBE800000, 32'hBF400000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(2, 32'hBF400000, 32'hBE800000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(3, 32'h3E800000, 32'hBF400000,
+                32'h00000000, 32'h3F800000, 32'h00000000, 32'h3F800000);
+    put_vert(4, 32'h3F400000, 32'hBF400000,
+                32'h00000000, 32'h3F800000, 32'h00000000, 32'h3F800000);
+    put_vert(5, 32'h3E800000, 32'hBE800000,
+                32'h00000000, 32'h3F800000, 32'h00000000, 32'h3F800000);
+    apwr(32'h20000 + 0, 32'h00010000);
+    apwr(32'h20000 + 4, 32'hFFFF0002);
+    apwr(32'h20000 + 8, 32'h00040003);
+    apwr(32'h20000 + 12, 32'h00000005);
+    d = mk_draw();
+    d.ib_type = 2'd1;
+    d.ib_base = 32'h20000;
+    d.ib_size = 32'd14;
+    d.first_index = 0;
+    d.vertex_offset = 0;
+    d.vertex_count = 7;
+    d.restart = 1'b1;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case15 code=%0d", w_dpl.code));
+    checks++;
+    got = fbpx(6, 6);
+    if (px_bad(got, 32'hFF0000FF, 8))
+      fail($sformatf("case15 A px(6,6)=%08x", got));
+    checks++;
+    got = fbpx(22, 6);
+    if (px_bad(got, 32'hFF00FF00, 8))
+      fail($sformatf("case15 B px(22,6)=%08x", got));
+    checks++;
+    got = fbpx(16, 20);
+    if (got != 32'hFF000000)
+      fail($sformatf("case15 gap px(16,20)=%08x", got));
+
+    // ================= case 16: horizontal line list =============
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    // NDC (-0.75,-0.5) -> (4,8), (-0.25,-0.5) -> (12,8)
+    put_vert(0, 32'hBF400000, 32'hBF000000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(1, 32'hBE800000, 32'hBF000000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    d = mk_draw();
+    d.topology = 8'd1;
+    d.vertex_count = 2;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case16 code=%0d", w_dpl.code));
+    for (int x = 0; x < 32; x++) begin
+      checks++;
+      got = fbpx(x, 8);
+      if (x >= 4 && x <= 12) begin
+        if (px_bad(got, 32'hFF0000FF, 8))
+          fail($sformatf("case16 px(%0d,8)=%08x", x, got));
+      end else if (got != 32'hFF000000)
+        fail($sformatf("case16 out px(%0d,8)=%08x", x, got));
+      checks++;
+      got = fbpx(x, 7);
+      if (got != 32'hFF000000)
+        fail($sformatf("case16 above px(%0d,7)=%08x", x, got));
+    end
+
+    // ================= case 17: point list =======================
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    // NDC (0,0) -> (16,16) red, (0.5,0) -> (24,16) green
+    put_vert(0, 32'h00000000, 32'h00000000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(1, 32'h3F000000, 32'h00000000,
+                32'h00000000, 32'h3F800000, 32'h00000000, 32'h3F800000);
+    d = mk_draw();
+    d.topology = 8'd0;
+    d.vertex_count = 2;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case17 code=%0d", w_dpl.code));
+    checks++;
+    got = fbpx(16, 16);
+    if (px_bad(got, 32'hFF0000FF, 8))
+      fail($sformatf("case17 red px(16,16)=%08x", got));
+    checks++;
+    got = fbpx(24, 16);
+    if (px_bad(got, 32'hFF00FF00, 8))
+      fail($sformatf("case17 green px(24,16)=%08x", got));
+    checks++;
+    got = fbpx(20, 16);
+    if (got != 32'hFF000000)
+      fail($sformatf("case17 gap px(20,16)=%08x", got));
+
+    // ================= case 18: constant depth bias =============
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    d = '0;
+    d.op = APU_RAST_OP_CLEAR;
+    d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
+             fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
+             layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    d.da_valid = 1'b1;
+    d.clear_color[0] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    // z = alpha = 0.5, constant bias +0.25, no clamp -> 0.75
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F000000);
+    put_vert(1, 32'h3F500000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F000000);
+    put_vert(2, 32'hBF600000, 32'h3F500000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F000000);
+    d = mk_draw();
+    d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
+             fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
+             layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    d.da_valid = 1'b1;
+    d.depth_test = 1'b1; d.depth_write = 1'b1; d.depth_op = 3'd1;
+    d.depth_bias_en = 1'b1;
+    d.depth_bias_const = 32'h3E800000; // 0.25
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case18 code=%0d", w_dpl.code));
+    checks++;
+    got = dbpx(4, 4);
+    if (got != 32'h3F400000)
+      fail($sformatf("case18 depth=%08x exp 3f400000", got));
+    // clamp 0.125 with constant 0.25 -> depth 0.625
+    d = '0;
+    d.op = APU_RAST_OP_CLEAR;
+    d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
+             fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
+             layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    d.da_valid = 1'b1;
+    d.clear_color[0] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    d = mk_draw();
+    d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
+             fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
+             layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    d.da_valid = 1'b1;
+    d.depth_test = 1'b1; d.depth_write = 1'b1; d.depth_op = 3'd1;
+    d.depth_bias_en = 1'b1;
+    d.depth_bias_const = 32'h3E800000;
+    d.depth_bias_clamp = 32'h3E000000; // 0.125
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    checks++;
+    got = dbpx(4, 4);
+    if (got != 32'h3F200000)
+      fail($sformatf("case18 clamp depth=%08x exp 3f200000", got));
+
+    // ================= case 19: depth-bias slope =================
+    // screen (2,2,z=0), (18,2,z=1), (2,18,z=0).  Max edge slope
+    // is 1/16.  Pixel (4,4) center barycentric z is 0.15625, plus
+    // the slope is 0.21875.
+    cases++;
+    d = '0;
+    d.op = APU_RAST_OP_CLEAR;
+    d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
+             fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
+             layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    d.da_valid = 1'b1;
+    d.clear_color[0] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000);
+    put_vert(1, 32'h3E000000, 32'hBF600000,
+                32'h00000000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(2, 32'hBF600000, 32'h3E000000,
+                32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000);
+    d = mk_draw();
+    d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
+             fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
+             layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    d.da_valid = 1'b1;
+    d.depth_test = 1'b1; d.depth_write = 1'b1; d.depth_op = 3'd1;
+    d.depth_bias_en = 1'b1;
+    d.depth_bias_slope = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case19 code=%0d", w_dpl.code));
+    checks++;
+    got = dbpx(4, 4);
+    if (got != 32'h3E600000)
+      fail($sformatf("case19 depth=%08x exp 3e600000", got));
+
+    // ================= case 20: depth clamp ======================
+    // Clip z = -1 would be near-clipped.  Clamp keeps the triangle
+    // and writes viewport minDepth.
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    d = '0;
+    d.op = APU_RAST_OP_CLEAR;
+    d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
+             fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
+             layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    d.da_valid = 1'b1;
+    d.clear_color[0] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'hBF800000);
+    put_vert(1, 32'h3F500000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'hBF800000);
+    put_vert(2, 32'hBF600000, 32'h3F500000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'hBF800000);
+    d = mk_draw();
+    d.vp.minz = 32'h3E4CCCCD; // 0.2
+    d.vp.maxz = 32'h3F4CCCCD; // 0.8
+    d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
+             fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
+             layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    d.da_valid = 1'b1;
+    d.depth_test = 1'b1; d.depth_write = 1'b1; d.depth_op = 3'd1;
+    d.depth_clamp = 1'b1;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case20 code=%0d", w_dpl.code));
+    checks++;
+    got = fbpx(4, 4);
+    if (got == 32'hFF000000)
+      fail("case20 triangle was clipped");
+    checks++;
+    got = dbpx(4, 4);
+    if (got != 32'h3E4CCCCD)
+      fail($sformatf("case20 depth=%08x exp minz", got));
+
+    // ================= case 21: D24S8 stencil ====================
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    d = '0;
+    d.op = APU_RAST_OP_CLEAR;
+    d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
+             fmt: 8'(APU_IMG_FMT_D24_UNORM_S8_UINT), mips: 5'd1,
+             layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    d.da_valid = 1'b1;
+    d.clear_color[0] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    checks++;
+    got = dbpx(4, 4);
+    if (got != 32'h00FFFFFF)
+      fail($sformatf("case21 clear=%08x", got));
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F000000);
+    put_vert(1, 32'h3F500000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F000000);
+    put_vert(2, 32'hBF600000, 32'h3F500000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F000000);
+    d = mk_draw();
+    d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
+             fmt: 8'(APU_IMG_FMT_D24_UNORM_S8_UINT), mips: 5'd1,
+             layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    d.da_valid = 1'b1;
+    d.depth_test = 1'b1; d.depth_write = 1'b1; d.depth_op = 3'd1;
+    d.stencil_en = 1'b1;
+    d.stencil_cmp = 3'd7;          // ALWAYS
+    d.stencil_pass = 3'd2;         // REPLACE
+    d.stencil_ref = 8'd1;
+    d.stencil_cmp_mask = 8'hFF;
+    d.stencil_wr_mask = 8'hFF;
+    d.stencil_cmp_b = 3'd7;
+    d.stencil_pass_b = 3'd2;
+    d.stencil_ref_b = 8'd1;
+    d.stencil_cmp_mask_b = 8'hFF;
+    d.stencil_wr_mask_b = 8'hFF;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    checks++;
+    got = fbpx(4, 4);
+    if (got == 32'hFF000000)
+      fail("case21 first draw wrote no colour");
+    // ref 2 does not match the stored 1, so colour and stencil stay
+    d.stencil_cmp = 3'd2;          // EQUAL
+    d.stencil_ref = 8'd2;
+    d.stencil_fail = 3'd0;         // KEEP
+    d.stencil_cmp_b = 3'd2;
+    d.stencil_ref_b = 8'd2;
+    d.stencil_fail_b = 3'd0;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    checks++;
+    if (fbpx(4, 4) != got)
+      fail($sformatf("case21 colour changed %08x -> %08x", got, fbpx(4, 4)));
+    checks++;
+    got = dbpx(4, 4);
+    if (got[31:24] != 8'd1)
+      fail($sformatf("case21 stencil=%02x", got[31:24]));
+
+    // ================= case 22: R8_UNORM colour ==================
+    // One red byte expands to (1, 0, 0, 1).
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000, 0, 0, 0, 0);
+    put_vert(1, 32'h3F500000, 32'hBF600000, 0, 0, 0, 0);
+    put_vert(2, 32'hBF600000, 32'h3F500000, 0, 0, 0, 0);
+    apwr(VB + 0*24 + 8, 32'h000000FF);
+    apwr(VB + 1*24 + 8, 32'h000000FF);
+    apwr(VB + 2*24 + 8, 32'h000000FF);
+    d = mk_draw();
+    d.attr[1].fmt = APU_RAST_VF_R8_UNORM;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case22 code=%0d", w_dpl.code));
+    checks++;
+    got = fbpx(4, 4);
+    if (px_bad(got, 32'hFF0000FF, 8))
+      fail($sformatf("case22 px(4,4)=%08x", got));
+
+    // ================= case 23: RG16_SFLOAT colour ==============
+    // Half 1.0, 0.0 expands to (1, 0, 0, 1).
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000, 0, 0, 0, 0);
+    put_vert(1, 32'h3F500000, 32'hBF600000, 0, 0, 0, 0);
+    put_vert(2, 32'hBF600000, 32'h3F500000, 0, 0, 0, 0);
+    apwr(VB + 0*24 + 8, 32'h00003C00);
+    apwr(VB + 1*24 + 8, 32'h00003C00);
+    apwr(VB + 2*24 + 8, 32'h00003C00);
+    d = mk_draw();
+    d.attr[1].fmt = APU_RAST_VF_RG16_SFLOAT;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case23 code=%0d", w_dpl.code));
+    checks++;
+    got = fbpx(4, 4);
+    if (px_bad(got, 32'hFF0000FF, 8))
+      fail($sformatf("case23 px(4,4)=%08x", got));
+
+    // ================= case 24: R8_SNORM colour =================
+    // Signed byte 127 is +1.  The pixel is red.
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000, 0, 0, 0, 0);
+    put_vert(1, 32'h3F500000, 32'hBF600000, 0, 0, 0, 0);
+    put_vert(2, 32'hBF600000, 32'h3F500000, 0, 0, 0, 0);
+    apwr(VB + 0*24 + 8, 32'h0000007F);
+    apwr(VB + 1*24 + 8, 32'h0000007F);
+    apwr(VB + 2*24 + 8, 32'h0000007F);
+    d = mk_draw();
+    d.attr[1].fmt = APU_RAST_VF_R8_SNORM;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case24 code=%0d", w_dpl.code));
+    checks++;
+    got = fbpx(4, 4);
+    if (px_bad(got, 32'hFF0000FF, 8))
+      fail($sformatf("case24 px(4,4)=%08x", got));
+
+    // ================= case 25: R16_UNORM colour ================
+    // Unsigned 65535 is +1.  The pixel is red.
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000, 0, 0, 0, 0);
+    put_vert(1, 32'h3F500000, 32'hBF600000, 0, 0, 0, 0);
+    put_vert(2, 32'hBF600000, 32'h3F500000, 0, 0, 0, 0);
+    apwr(VB + 0*24 + 8, 32'h0000FFFF);
+    apwr(VB + 1*24 + 8, 32'h0000FFFF);
+    apwr(VB + 2*24 + 8, 32'h0000FFFF);
+    d = mk_draw();
+    d.attr[1].fmt = APU_RAST_VF_R16_UNORM;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case25 code=%0d", w_dpl.code));
+    checks++;
+    got = fbpx(4, 4);
+    if (px_bad(got, 32'hFF0000FF, 8))
+      fail($sformatf("case25 px(4,4)=%08x", got));
+
+    // ================= case 26: R16_SNORM colour ================
+    // Signed 32767 is +1.  The pixel is red.
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000, 0, 0, 0, 0);
+    put_vert(1, 32'h3F500000, 32'hBF600000, 0, 0, 0, 0);
+    put_vert(2, 32'hBF600000, 32'h3F500000, 0, 0, 0, 0);
+    apwr(VB + 0*24 + 8, 32'h00007FFF);
+    apwr(VB + 1*24 + 8, 32'h00007FFF);
+    apwr(VB + 2*24 + 8, 32'h00007FFF);
+    d = mk_draw();
+    d.attr[1].fmt = APU_RAST_VF_R16_SNORM;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case26 code=%0d", w_dpl.code));
+    checks++;
+    got = fbpx(4, 4);
+    if (px_bad(got, 32'hFF0000FF, 8))
+      fail($sformatf("case26 px(4,4)=%08x", got));
+
+    // ================= case 27: RGBA32_UINT colour ==============
+    // The bits of float (1, 0, 0, 1) are copied, not scaled.
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(1, 32'h3F500000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(2, 32'hBF600000, 32'h3F500000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    d = mk_draw();
+    d.attr[1].fmt = APU_RAST_VF_RGBA32_UINT;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case27 code=%0d", w_dpl.code));
+    checks++;
+    got = fbpx(4, 4);
+    if (px_bad(got, 32'hFF0000FF, 8))
+      fail($sformatf("case27 px(4,4)=%08x", got));
+
+    // ================= case 28: polygon mode line ==============
+    // The triangle outline is drawn.  An interior pixel stays clear.
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(1, 32'h3F500000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(2, 32'hBF600000, 32'h3F500000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    d = mk_draw();
+    d.poly_mode = 2'd1;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case28 code=%0d", w_dpl.code));
+    checks++;
+    got = fbpx(10, 2);
+    if (px_bad(got, 32'hFF0000FF, 8))
+      fail($sformatf("case28 edge px(10,2)=%08x", got));
+    checks++;
+    got = fbpx(10, 8);
+    if (got != 32'hFF000000)
+      fail($sformatf("case28 interior px(10,8)=%08x", got));
+
+    // ================= case 29: polygon mode point ============
+    // One pixel at each vertex, in that vertex's colour.  The edge
+    // and the interior stay clear.
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(1, 32'h3F500000, 32'hBF600000,
+                32'h00000000, 32'h3F800000, 32'h00000000, 32'h3F800000);
+    put_vert(2, 32'hBF600000, 32'h3F500000,
+                32'h00000000, 32'h00000000, 32'h3F800000, 32'h3F800000);
+    d = mk_draw();
+    d.poly_mode = 2'd2;          // VkPolygonMode POINT
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case29 code=%0d", w_dpl.code));
+    checks++;
+    got = fbpx(2, 2);
+    if (px_bad(got, 32'hFF0000FF, 8))
+      fail($sformatf("case29 v0 px(2,2)=%08x", got));
+    checks++;
+    got = fbpx(29, 2);
+    if (px_bad(got, 32'hFF00FF00, 8))
+      fail($sformatf("case29 v1 px(29,2)=%08x", got));
+    checks++;
+    got = fbpx(2, 29);
+    if (px_bad(got, 32'hFFFF0000, 8))
+      fail($sformatf("case29 v2 px(2,29)=%08x", got));
+    checks++;
+    got = fbpx(10, 2);
+    if (got != 32'hFF000000)
+      fail($sformatf("case29 edge px(10,2)=%08x", got));
+    checks++;
+    got = fbpx(10, 8);
+    if (got != 32'hFF000000)
+      fail($sformatf("case29 interior px(10,8)=%08x", got));
+
+    // ================= case 31: RGB8_SNORM =======================
+    // 127, 0, 0 expands to (1, 0, 0, 1).
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000, 0, 0, 0, 0);
+    put_vert(1, 32'h3F500000, 32'hBF600000, 0, 0, 0, 0);
+    put_vert(2, 32'hBF600000, 32'h3F500000, 0, 0, 0, 0);
+    apwr(VB + 0*24 + 8, 32'h0000007F);
+    apwr(VB + 1*24 + 8, 32'h0000007F);
+    apwr(VB + 2*24 + 8, 32'h0000007F);
+    d = mk_draw();
+    d.attr[1].fmt = APU_RAST_VF_RGB8_SNORM;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case31 code=%0d", w_dpl.code));
+    checks++;
+    got = fbpx(4, 4);
+    if (px_bad(got, 32'hFF0000FF, 8))
+      fail($sformatf("case31 px(4,4)=%08x", got));
+
+    // ================= case 32: RGB16_UNORM ======================
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000, 0, 0, 0, 0);
+    put_vert(1, 32'h3F500000, 32'hBF600000, 0, 0, 0, 0);
+    put_vert(2, 32'hBF600000, 32'h3F500000, 0, 0, 0, 0);
+    for (int i = 0; i < 3; i++) begin
+      apwr(VB + i*24 + 8, 32'h0000FFFF);
+      apwr(VB + i*24 + 12, 32'h00000000);
+    end
+    d = mk_draw();
+    d.attr[1].fmt = APU_RAST_VF_RGB16_UNORM;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case32 code=%0d", w_dpl.code));
+    checks++;
+    got = fbpx(4, 4);
+    if (px_bad(got, 32'hFF0000FF, 8))
+      fail($sformatf("case32 px(4,4)=%08x", got));
+
+    // ================= case 33: RGB16_SNORM ======================
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000, 0, 0, 0, 0);
+    put_vert(1, 32'h3F500000, 32'hBF600000, 0, 0, 0, 0);
+    put_vert(2, 32'hBF600000, 32'h3F500000, 0, 0, 0, 0);
+    for (int i = 0; i < 3; i++) begin
+      apwr(VB + i*24 + 8, 32'h00007FFF);
+      apwr(VB + i*24 + 12, 32'h00000000);
+    end
+    d = mk_draw();
+    d.attr[1].fmt = APU_RAST_VF_RGB16_SNORM;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case33 code=%0d", w_dpl.code));
+    checks++;
+    got = fbpx(4, 4);
+    if (px_bad(got, 32'hFF0000FF, 8))
+      fail($sformatf("case33 px(4,4)=%08x", got));
+
+    // ================= case 34: RGB16_SFLOAT =====================
+    // Three halves.  The missing alpha is float 1.
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000, 0, 0, 0, 0);
+    put_vert(1, 32'h3F500000, 32'hBF600000, 0, 0, 0, 0);
+    put_vert(2, 32'hBF600000, 32'h3F500000, 0, 0, 0, 0);
+    for (int i = 0; i < 3; i++) begin
+      apwr(VB + i*24 + 8, 32'h00003C00);
+      apwr(VB + i*24 + 12, 32'h00000000);
+    end
+    d = mk_draw();
+    d.attr[1].fmt = APU_RAST_VF_RGB16_SFLOAT;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case34 code=%0d", w_dpl.code));
+    checks++;
+    got = fbpx(4, 4);
+    if (px_bad(got, 32'hFF0000FF, 8))
+      fail($sformatf("case34 px(4,4)=%08x", got));
+
+    // ================= case 35: 8/16-bit integer gather =========
+    // The words land in VS-in as zero- or sign-extended integers.
+    // A missing alpha is the integer 1.
+    cases++;
+    put_vert(0, 32'h00000000, 32'h00000000, 0, 0, 0, 0);
+    apwr(VB + 8, 32'h000000AB);
+    d = mk_draw();
+    d.topology = 8'd0;
+    d.vertex_count = 1;
+    d.attr[1].fmt = APU_RAST_VF_R8_UINT;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case35 u8 code=%0d", w_dpl.code));
+    checks++;
+    if (vsin(16) != 32'h000000AB || vsin(20) != 32'h0 ||
+        vsin(24) != 32'h0 || vsin(28) != 32'h1)
+      fail($sformatf("case35 u8 %08x %08x %08x %08x",
+                     vsin(16), vsin(20), vsin(24), vsin(28)));
+    apwr(VB + 8, 32'h00000080);
+    d.attr[1].fmt = APU_RAST_VF_R8_SINT;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    checks++;
+    if (vsin(16) != 32'hFFFFFF80 || vsin(28) != 32'h1)
+      fail($sformatf("case35 s8 %08x %08x", vsin(16), vsin(28)));
+    apwr(VB + 8, 32'h00EFCDAB);
+    d.attr[1].fmt = APU_RAST_VF_RGB8_UINT;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    checks++;
+    if (vsin(16) != 32'h000000AB || vsin(20) != 32'h000000CD ||
+        vsin(24) != 32'h000000EF || vsin(28) != 32'h1)
+      fail($sformatf("case35 rgb8 %08x %08x %08x %08x",
+                     vsin(16), vsin(20), vsin(24), vsin(28)));
+    apwr(VB + 8, 32'h0002FFFF);
+    apwr(VB + 12, 32'h7FFF8000);
+    d.attr[1].fmt = APU_RAST_VF_RGBA16_SINT;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    checks++;
+    if (vsin(16) != 32'hFFFFFFFF || vsin(20) != 32'h00000002 ||
+        vsin(24) != 32'hFFFF8000 || vsin(28) != 32'h00007FFF)
+      fail($sformatf("case35 rgba16 %08x %08x %08x %08x",
+                     vsin(16), vsin(20), vsin(24), vsin(28)));
+
+    // ================= case 36: rasterizer discard ==============
+    // The vertex shader runs.  The triangle does not touch colour.
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(1, 32'h3F500000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(2, 32'hBF600000, 32'h3F500000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    d = mk_draw();
+    d.rast_discard = 1'b1;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case36 code=%0d", w_dpl.code));
+    checks++;
+    got = fbpx(4, 4);
+    if (got != 32'hFF000000)
+      fail($sformatf("case36 px(4,4)=%08x", got));
+    checks++;
+    if (vsin(0) != 32'hBF600000)
+      fail($sformatf("case36 vs x=%08x", vsin(0)));
+
+    // ================= case 37: logic op ========================
+    // Destination is red.  The source is green.  Logic op replaces
+    // blending and the write mask still applies.
+    cases++;
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h00000000, 32'h3F800000, 32'h00000000, 32'h3F800000);
+    put_vert(1, 32'h3F500000, 32'hBF600000,
+                32'h00000000, 32'h3F800000, 32'h00000000, 32'h3F800000);
+    put_vert(2, 32'hBF600000, 32'h3F500000,
+                32'h00000000, 32'h3F800000, 32'h00000000, 32'h3F800000);
+    d = mk_clear();
+    d.clear_color[0] = 32'h3F800000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    d = mk_draw();
+    d.logic_op_en = 1'b1;
+    d.logic_op = 4'd6;             // XOR
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case37 xor code=%0d", w_dpl.code));
+    checks++;
+    got = fbpx(4, 4);
+    if (got != 32'h0000FFFF)
+      fail($sformatf("case37 xor px=%08x", got));
+    d = mk_clear();
+    d.clear_color[0] = 32'h3F800000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    d = mk_draw();
+    d.logic_op_en = 1'b1;
+    d.logic_op = 4'd1;             // AND
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    checks++;
+    got = fbpx(4, 4);
+    if (got != 32'hFF000000)
+      fail($sformatf("case37 and px=%08x", got));
+    d = mk_clear();
+    d.clear_color[0] = 32'h3F800000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    d = mk_draw();
+    d.logic_op_en = 1'b1;
+    d.logic_op = 4'd5;             // NO_OP
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    checks++;
+    got = fbpx(4, 4);
+    if (got != 32'hFF0000FF)
+      fail($sformatf("case37 nop px=%08x", got));
+    d = mk_clear();
+    d.clear_color[0] = 32'h3F800000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    d = mk_draw();
+    d.logic_op_en = 1'b1;
+    d.logic_op = 4'd3;             // COPY
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    checks++;
+    got = fbpx(4, 4);
+    if (got != 32'hFF00FF00)
+      fail($sformatf("case37 copy px=%08x", got));
+    d = mk_clear();
+    d.clear_color[0] = 32'h3F800000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    d = mk_draw();
+    d.logic_op_en = 1'b1;
+    d.logic_op = 4'd6;
+    d.blend[0].mask = 4'h7;        // RGB, keep alpha
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    checks++;
+    got = fbpx(4, 4);
+    if (got != 32'hFF00FFFF)
+      fail($sformatf("case37 mask px=%08x", got));
+
+    // ================= case 38: depth bounds ====================
+    // Window z is 0.5.  [0.25, 0.75] keeps the pixel.  [0.9, 1]
+    // drops it.  Depth test and write are off.
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F000000);
+    put_vert(1, 32'h3F500000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F000000);
+    put_vert(2, 32'hBF600000, 32'h3F500000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F000000);
+    d = mk_draw();
+    d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
+             fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
+             layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    d.da_valid = 1'b1;
+    d.depth_bounds_en = 1'b1;
+    d.depth_bounds_min = 32'h3E800000;   // 0.25
+    d.depth_bounds_max = 32'h3F400000;   // 0.75
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case38 in code=%0d", w_dpl.code));
+    checks++;
+    got = fbpx(4, 4);
+    // Alpha is the same 0.5 that steers window z.
+    if (got != 32'h800000FF)
+      fail($sformatf("case38 in px=%08x", got));
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    d = mk_draw();
+    d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
+             fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
+             layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    d.da_valid = 1'b1;
+    d.depth_bounds_en = 1'b1;
+    d.depth_bounds_min = 32'h3F666666;   // 0.9
+    d.depth_bounds_max = 32'h3F800000;   // 1.0
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    checks++;
+    got = fbpx(4, 4);
+    if (got != 32'hFF000000)
+      fail($sformatf("case38 out px=%08x", got));
+
+    // ================= case 39: line clip across w = 0 =========
+    // One end is in front of the camera and one is behind.  The
+    // visible end is the origin.  A fully-behind segment draws
+    // nothing.  A point behind the camera draws nothing.
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    // (0,0,0,1) red -> (0,0,0,-1)
+    apwr(VB +  0, 32'h00000000); apwr(VB +  4, 32'h00000000);
+    apwr(VB +  8, 32'h00000000); apwr(VB + 12, 32'h3F800000);
+    apwr(VB + 16, 32'h3F800000); apwr(VB + 20, 32'h00000000);
+    apwr(VB + 24, 32'h00000000); apwr(VB + 28, 32'h3F800000);
+    apwr(VB + 32, 32'h00000000); apwr(VB + 36, 32'h00000000);
+    apwr(VB + 40, 32'h00000000); apwr(VB + 44, 32'hBF800000);
+    apwr(VB + 48, 32'h3F800000); apwr(VB + 52, 32'h00000000);
+    apwr(VB + 56, 32'h00000000); apwr(VB + 60, 32'h3F800000);
+    sh_pos4 = 1'b1;
+    d = mk_draw();
+    d.topology = 8'd1;
+    d.vertex_count = 2;
+    d.attr[0].fmt = APU_RAST_VF_RGBA32_SFLOAT;
+    d.attr[0].offset = 12'd0;
+    d.attr[1].offset = 12'd16;
+    d.vb_stride[0] = 16'd32;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    sh_pos4 = 1'b0;
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case39 code=%0d", w_dpl.code));
+    checks++;
+    got = fbpx(16, 16);
+    if (px_bad(got, 32'hFF0000FF, 8))
+      fail($sformatf("case39 px(16,16)=%08x", got));
+    checks++;
+    got = fbpx(20, 16);
+    if (got != 32'hFF000000)
+      fail($sformatf("case39 px(20,16)=%08x", got));
+    // both ends behind
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    apwr(VB + 12, 32'hBF800000);
+    apwr(VB + 44, 32'hC0000000);
+    sh_pos4 = 1'b1;
+    d = mk_draw();
+    d.topology = 8'd1;
+    d.vertex_count = 2;
+    d.attr[0].fmt = APU_RAST_VF_RGBA32_SFLOAT;
+    d.attr[0].offset = 12'd0;
+    d.attr[1].offset = 12'd16;
+    d.vb_stride[0] = 16'd32;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    sh_pos4 = 1'b0;
+    checks++;
+    got = fbpx(16, 16);
+    if (got != 32'hFF000000)
+      fail($sformatf("case39 behind px=%08x", got));
+    // point behind the camera
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    apwr(VB +  0, 32'h00000000); apwr(VB +  4, 32'h00000000);
+    apwr(VB +  8, 32'h00000000); apwr(VB + 12, 32'hBF800000);
+    apwr(VB + 16, 32'h3F800000); apwr(VB + 20, 32'h00000000);
+    apwr(VB + 24, 32'h00000000); apwr(VB + 28, 32'h3F800000);
+    sh_pos4 = 1'b1;
+    d = mk_draw();
+    d.topology = 8'd0;
+    d.vertex_count = 1;
+    d.attr[0].fmt = APU_RAST_VF_RGBA32_SFLOAT;
+    d.attr[0].offset = 12'd0;
+    d.attr[1].offset = 12'd16;
+    d.vb_stride[0] = 16'd32;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    sh_pos4 = 1'b0;
+    checks++;
+    got = fbpx(16, 16);
+    if (got != 32'hFF000000)
+      fail($sformatf("case39 point px=%08x", got));
 
     // ---- report ---------------------------------------------------------
     if (fails == 0)

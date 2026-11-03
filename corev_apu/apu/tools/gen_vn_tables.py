@@ -1454,13 +1454,29 @@ class Model:
         n = max(64, 2 + 71, 2 + len(self.ext_props_payload()))
         return (n + 7) & ~7
 
+    def qf_props(self, section):
+        """VkQueueFamilyProperties words for one [queue_familyN]."""
+        q = self.profile.get(section, {})
+        qf = self.enum_ints('VkQueueFlagBits')
+        v = 0
+        for t in str(q.get('queueFlags', '')).split('|'):
+            if t:
+                v |= qf['VK_QUEUE_' + t + '_BIT']
+        g = q.get('minImageTransferGranularity', [1, 1, 1])
+        return [v, int(q.get('queueCount', 1)),
+                int(q.get('timestampValidBits', 0)),
+                int(g[0]), int(g[1]), int(g[2])]
+
     def qf2_elt(self):
-        """vkGetPhysicalDeviceQueueFamilyProperties2 reply element:
+        """vkGetPhysicalDeviceQueueFamilyProperties2 reply elements,
+        family 0 then family 1.  Each element is
         {sType, u64 NULL pNext, VkQueueFamilyProperties}."""
         st = self.stype_values[
             self.reg.type_table['VkQueueFamilyProperties2'].s_type]
-        return [st, 0, 0] + self.profile_words(
-            self.reg.type_table['VkQueueFamilyProperties'])
+        out = []
+        for section in ('queue_family0', 'queue_family1'):
+            out += [st, 0, 0] + self.qf_props(section)
+        return out
 
     def pdgrp_elt(self):
         """vkEnumeratePhysicalDeviceGroups reply element for our single

@@ -1,0 +1,2 @@
+dEQP-VK.api.command_buffers.allocate_many_primary
+dEQP-VK.api.command_buffers.allocate_many_secondary

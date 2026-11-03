@@ -29,16 +29,16 @@ module g6lc_apu_shcore
   parameter bit          Enable        = 1'b0,
   parameter int unsigned ShaderLanes   = 8,
   parameter int unsigned ShaderVec     = 4,
-  parameter int unsigned ShaderRegs    = 256,
+  parameter int unsigned ShaderRegs    = 1024,
   parameter int unsigned MaxWaves      = 16,
   parameter int unsigned ShaderIds     = 1024,
   parameter int unsigned ShaderSlots   = 8,
-  parameter int unsigned ShaderWords   = 2048,
-  parameter int unsigned ShaderInit    = 128,
+  parameter int unsigned ShaderWords   = 8192,
+  parameter int unsigned ShaderInit    = 256,
   parameter int unsigned ShaderMembers = 256,
-  parameter int unsigned ScratchBytes  = 1024,
+  parameter int unsigned ScratchBytes  = 4096,
   parameter int unsigned SlabBytes     = 16384,
-  parameter int unsigned ShaderBudget  = 32'h0010_0000
+  parameter int unsigned ShaderBudget  = 32'h0100_0000
 ) (
   input  logic         clk_i,
   input  logic         rst_ni,
@@ -153,7 +153,8 @@ module g6lc_apu_shcore
     logic [15:0]  parm_data;
     logic [95:0]  type_data;
     logic [511:0] const_data;
-    logic [63:0]  memb_data, init_data;
+    logic [63:0]  memb_data;
+    logic [79:0]  init_data;
     logic [31:0]  rm_data, blk_data;
     logic [159:0] phi_data;
     logic [127:0] entry_data;
@@ -633,16 +634,16 @@ module g6lc_apu_shcore_fixture
   parameter bit          Enable        = 1'b0,
   parameter int unsigned ShaderLanes   = 8,
   parameter int unsigned ShaderVec     = 4,
-  parameter int unsigned ShaderRegs    = 256,
+  parameter int unsigned ShaderRegs    = 1024,
   parameter int unsigned MaxWaves      = 16,
   parameter int unsigned ShaderIds     = 1024,
   parameter int unsigned ShaderSlots   = 8,
-  parameter int unsigned ShaderWords   = 2048,
-  parameter int unsigned ShaderInit    = 128,
+  parameter int unsigned ShaderWords   = 8192,
+  parameter int unsigned ShaderInit    = 256,
   parameter int unsigned ShaderMembers = 256,
-  parameter int unsigned ScratchBytes  = 1024,
+  parameter int unsigned ScratchBytes  = 4096,
   parameter int unsigned SlabBytes     = 16384,
-  parameter int unsigned ShaderBudget  = 32'h0010_0000
+  parameter int unsigned ShaderBudget  = 32'h0100_0000
 ) (
   input  logic         clk_i,
   input  logic         rst_ni,

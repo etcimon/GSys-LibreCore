@@ -126,6 +126,11 @@ if has bridge || has guest; then
   export APU_BRIDGE_OUT="$OUT/bridge"
   export G6LC_SOCKDIR
   G6LC_SOCKDIR="$(mktemp -d "${TMPDIR:-/tmp}/g6lc-apu-sock.XXXXXXXX")" || exit 4
+  # the bridge self-test needs the venusoff server; a venus-only guest
+  # leaf does not
+  if ! has bridge && [ -n "${G6LC_VENUS_ONLY:-}" ]; then
+    export APU_BRIDGE_VENUS_ONLY=1
+  fi
   if run_suite bridge-build "$TB/bridge/build-bridge.sh"; then
     if has bridge; then
       run_suite bridge-selftest \
@@ -136,7 +141,13 @@ if has bridge || has guest; then
           --sock "$G6LC_SOCKDIR/selftest.sock" --out "$OUT/bridge"
     fi
     if has guest; then
-      export GUEST_CACHE="$OUT/guest-cache"
+      # A remote leaf sets G6LC_GUEST_CACHE to the builder's persistent
+      # image cache. An unset value keeps the per-run directory.
+      if [ -n "${G6LC_GUEST_CACHE:-}" ]; then
+        export GUEST_CACHE="$G6LC_GUEST_CACHE"
+      else
+        export GUEST_CACHE="$OUT/guest-cache"
+      fi
       run_suite guest "$TB/bridge/run-guest.sh" --out "$OUT/guest"
     fi
   else
@@ -197,17 +208,32 @@ for line in (out / 'results.tsv').read_text().splitlines():
     elif re.search(r'^(?:SYNTH )?(?:SKIPPED|INCOMPLETE|BLOCKED|PREONLY)\b', text, re.M):
         status, reason = 'incomplete', 'selected work did not finish'
     elif name == 'bridge-build':
-        if not all(re.search(r'^BUILD OK \(' + arm + r'\)', text, re.M) for arm in ('venus', 'venusoff')):
-            status, reason = 'incomplete', 'both bridge builds must complete'
+        venus_only = (out / 'bridge' / 'venus-only-build').is_file()
+        arms = ('venus',) if venus_only else ('venus', 'venusoff')
+        if not all(re.search(r'^BUILD OK \(' + arm + r'\)', text, re.M) for arm in arms):
+            status, reason = 'incomplete', ('the venus bridge build must complete' if venus_only
+                                            else 'both bridge builds must complete')
     elif name == 'bridge-selftest':
         match = re.search(r'^\[selftest\] total checks=([1-9]\d*) -> PASS$', text, re.M)
         checks = int(match[1]) if match else 0
         if not checks:
             status, reason = 'incomplete', 'missing checked bridge verdict'
     elif name == 'guest':
-        arms = [out / 'guest' / f'drive-{arm}.log' for arm in ('venus', 'venusoff')]
-        if any(not p.is_file() or p.read_text(errors='replace').strip().splitlines()[-1:] != ['GUEST-PASS'] for p in arms):
-            status, reason = 'incomplete', 'both guest arms need terminal GUEST-PASS'
+        arms = ['venus']
+        if not (out / 'guest' / 'venus-only').is_file():
+            arms.append('venusoff')
+        logs = [out / 'guest' / f'drive-{arm}.log' for arm in arms]
+        # GUEST-PASS is printed when the arm's checks finish.  Later
+        # teardown (result pull, poweroff) appends more lines, so the
+        # marker is not always the last line.
+        def arm_ok(p):
+            if not p.is_file():
+                return False
+            return any(ln.strip() == 'GUEST-PASS'
+                       for ln in p.read_text(errors='replace').splitlines())
+        if any(not arm_ok(p) for p in logs):
+            need = 'the venus arm' if len(arms) == 1 else 'both guest arms'
+            status, reason = 'incomplete', f'{need} need a GUEST-PASS line'
     elif name == 'profile':
         if not isinstance(audit, dict) or audit.get('status') != 'pass' or checks <= 0:
             status, reason = 'incomplete', 'missing profile audit verdict'

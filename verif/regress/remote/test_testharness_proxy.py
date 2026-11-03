@@ -161,6 +161,37 @@ class ApuRegressionGateTests(unittest.TestCase):
         self.assertEqual([row['status'] for row in report['results']],
                          ['fail', 'incomplete', 'incomplete'])
 
+    def _bridge_and_guest_stubs(self):
+        bridge = self.tb / 'bridge'
+        bridge.mkdir()
+        build = bridge / 'build-bridge.sh'
+        build.write_text('#!/bin/sh\nmkdir -p "$APU_BRIDGE_OUT"\n'
+                         'echo "BUILD OK (venus) 1s"\n'
+                         'if [ -n "$APU_BRIDGE_VENUS_ONLY" ]; then\n'
+                         '  touch "$APU_BRIDGE_OUT/venus-only-build"\n'
+                         'else echo "BUILD OK (venusoff) 1s"; fi\n')
+        guest = bridge / 'run-guest.sh'
+        guest.write_text('#!/bin/sh\nmkdir -p "$2"\ntouch "$2/venus-only"\n'
+                         'echo GUEST-PASS > "$2/drive-venus.log"\n')
+        for script in (build, guest):
+            script.chmod(0o755)
+
+    def test_venus_only_guest_leaf_needs_only_the_venus_bridge(self):
+        self._bridge_and_guest_stubs()
+        result = self.run_gate('--stages', 'guest',
+                               extra_env={'G6LC_VENUS_ONLY': '1'})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertTrue((self.out / 'bridge' / 'venus-only-build').is_file())
+
+    def test_venus_only_bridge_is_incomplete_without_the_venus_build(self):
+        self._bridge_and_guest_stubs()
+        build = self.tb / 'bridge' / 'build-bridge.sh'
+        build.write_text(build.read_text().replace('BUILD OK (venus)', 'built'))
+        result = self.run_gate('--stages', 'guest',
+                               extra_env={'G6LC_VENUS_ONLY': '1'})
+        self.assertEqual(result.returncode, 4, result.stdout)
+        self.assertIn('the venus bridge build must complete', result.stdout)
+
     def _list_inventory(self):
         (self.root / 'core').mkdir()
         (self.root / 'core/a.sv').write_text('module a; endmodule\n')
@@ -300,6 +331,9 @@ class ApuLeafTests(unittest.TestCase):
                                 'TARGET_CFG=cfg/x.json']),
             {'G6LC_QEMU': '/opt/q/bin/qemu-system-riscv64',
              'TARGET_CFG': 'cfg/x.json'})
+        self.assertEqual(
+            proxy.apu_leaf_env(['G6LC_CTS_SHARDS=4', 'G6LC_CTS_FRACTION=0,4']),
+            {'G6LC_CTS_SHARDS': '4', 'G6LC_CTS_FRACTION': '0,4'})
         for bad in ('EDITOR=vi', 'PATH=/x', 'G6LC_FAKE=1'):
             with self.subTest(bad=bad):
                 with self.assertRaises(SystemExit):
@@ -356,6 +390,24 @@ class ApuLeafTests(unittest.TestCase):
         self.assertEqual(proxy.apu_leaf_sources(root),
                          ['core/a.sv', 'verif/tb/apu/sh_vectors/x_1.hex',
                           'verif/tb/new.exp', 'verilator_config.vlt'])
+
+    def test_progress_script_reads_private_images_only(self):
+        script = proxy.apu_leaf_progress_script(['apu-leaf-20261102T1-ab12'])
+        self.assertIn('apu-leaf-20261102T1-ab12/output/guest/shard-*/ctsdata.img', script)
+        self.assertIn("debugfs -R 'cat /results/TestResults.qpa'", script)
+        self.assertNotIn('debugfs -w', script)
+        with self.assertRaises(SystemExit):
+            proxy.apu_leaf_progress_script(['../../etc'])
+
+    def test_collect_pulls_cts_qpa_evidence(self):
+        temp = tempfile.TemporaryDirectory(prefix='g6lc-apu-collect-')
+        self.addCleanup(temp.cleanup)
+        dest = Path(temp.name)
+        (dest / 'source-local.json').write_text(json.dumps({'sourceSha256': 'ab'}))
+        rem = Mock()
+        proxy._apu_leaf_collect(rem, 'apu-leaf-z', dest)
+        includes = rem.pull_filtered.call_args.args[2]
+        self.assertIn('*.qpa', includes)
 
 
 class ApuProfileAuditTests(unittest.TestCase):
@@ -1047,6 +1099,23 @@ class ArtifactTransferTests(unittest.TestCase):
         result = subprocess.CompletedProcess(['rsync'], 0)
         with patch.object(proxy.subprocess, 'run', return_value=result):
             self.remote().pull('/run/output/', Mock())
+
+    def test_push_tree_copies_unchanged_files_from_a_basis(self):
+        with tempfile.TemporaryDirectory() as td:
+            listing = Path(td) / 'files.txt'
+            listing.write_text('core/a.sv\n')
+            remote = self.remote()
+            remote.vlog = lambda *_: None
+            ok = subprocess.CompletedProcess(['rsync'], 0)
+            with patch.object(proxy.subprocess, 'run', return_value=ok) as run:
+                remote.push_tree(Path(td), listing, '/r/new/source',
+                                 link_dest='/r/old/source')
+                self.assertIn('--copy-dest=/r/old/source', run.call_args.args[0])
+                self.assertFalse(any(a.startswith('--link-dest')
+                                     for a in run.call_args.args[0]))
+                remote.push_tree(Path(td), listing, '/r/new/source')
+                self.assertFalse(any(a.startswith('--copy-dest')
+                                     for a in run.call_args.args[0]))
 
     def test_py_destination_option(self):
         args = proxy.build_parser().parse_args(['py', 'script.py', '--pull', '--dest', '/artifacts/run/output'])

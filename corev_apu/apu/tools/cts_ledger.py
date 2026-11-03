@@ -24,6 +24,11 @@ Sub-commands
            metadata the caller supplies (run tag, CTS commit, deqp-vk
            sha256, device profile hash, Mesa/kernel versions)
 
+  harvest  rebuild one results JSON per retained run from the .qpa logs
+           already on disk (remote-runs/apu-leaf-*/output/guest, incl.
+           shard-*/, and .cache/apu-guest/out-*), stamped with the run's
+           own end time so "newest run wins" orders runs, not parses
+
   render   merge results JSONs (newest run wins per test name) and write
            the markdown ledger: per group pass / not-supported /
            quality-warning / fail / crash / timeout / other / not-run,
@@ -350,6 +355,113 @@ def cmd_parse(a):
     return 0
 
 
+_FAULTS = re.compile(r'G6LC_CTS_RUN .*?device_faults=(\d+)')
+_RUN_TIMEOUT = re.compile(r'G6LC_CTS_RUN cases=\S+ rc=timeout')
+_DEVNAME = re.compile(r'deviceName\s*=\s*(.+)')
+
+
+def _run_timed_out(log):
+    """True when the guest driver cut the deqp run at its budget."""
+    if not os.path.isfile(log):
+        return False
+    with open(log, errors='replace') as f:
+        return bool(_RUN_TIMEOUT.search(f.read()))
+
+
+def _last_faults(log):
+    """device_faults of the last G6LC_CTS_RUN marker, or None."""
+    if not os.path.isfile(log):
+        return None
+    with open(log, errors='replace') as f:
+        found = _FAULTS.findall(f.read())
+    return int(found[-1]) if found else None
+
+
+def _harvest_run(guest, tag, end_epoch, caselist, lookup, cts_commit):
+    """One run directory -> results dict, or None without cases."""
+    qpas = sorted(os.path.join(dp, f) for dp, _, fs in os.walk(guest)
+                  for f in fs if f == 'cts-TestResults.qpa')
+    recs, logs, faults, devname = [], [], [], ''
+    for q in qpas:
+        rs = parse_qpa(q)
+        if not rs:
+            continue
+        # a run cut at the driver's budget leaves its last case open; that
+        # is a Timeout of the run, not a deqp process crash
+        if rs[-1]['status'] == 'Crash' and _run_timed_out(
+                os.path.join(os.path.dirname(q), 'drive-venus.log')):
+            rs[-1]['status'] = 'Timeout'
+        logs.append({'path': os.path.relpath(q), 'sha256': sha256_file(q),
+                     'cases': len(rs)})
+        for r in rs:
+            r['group'] = group_for(r['name'], lookup)
+            r['log'] = os.path.relpath(q, guest)
+            recs.append(r)
+        d = os.path.dirname(q)
+        faults.append(_last_faults(os.path.join(d, 'drive-venus.log')))
+        vi = os.path.join(d, 'cts-vulkaninfo-summary.txt')
+        if not devname and os.path.isfile(vi):
+            m = _DEVNAME.search(open(vi, errors='replace').read())
+            devname = m.group(1).strip() if m else ''
+    if not recs:
+        return None
+    meta = {'run_tag': tag, 'deqp_sha256': '', 'profile_hash': '',
+            'mesa': '', 'kernel': '', 'device_name': devname,
+            'device_faults': (sum(faults) if None not in faults else -1),
+            'cts_commit': cts_commit,
+            'generated': time.strftime('%Y-%m-%dT%H:%M:%SZ',
+                                       time.gmtime(end_epoch)),
+            'harvested': True}
+    if caselist:
+        meta['caselist'] = {'path': caselist}
+    return {'meta': meta, 'logs': logs, 'results': recs}
+
+
+def cmd_harvest(a):
+    g, lookup = load_groups(a.groups)
+    os.makedirs(a.out_dir, exist_ok=True)
+    runs = []
+    for d in sorted(os.listdir(a.remote_runs)) if os.path.isdir(a.remote_runs) else []:
+        guest = os.path.join(a.remote_runs, d, 'output', 'guest')
+        if not d.startswith('apu-leaf-') or not os.path.isdir(guest):
+            continue
+        end = os.path.join(a.remote_runs, d, 'end.txt')
+        try:
+            epoch = int(open(end).read().strip())
+        except (OSError, ValueError):
+            epoch = int(os.path.getmtime(guest))
+        caselist = ''
+        host = os.path.join(a.remote_runs, d, 'remote-host.json')
+        if os.path.isfile(host):
+            env = json.load(open(host)).get('leafEnv') or {}
+            caselist = env.get('G6LC_CTS_CASELIST') or env.get('G6LC_CTS_CASE', '')
+            # image/shader logging is outside the CTS run contract: a
+            # diagnostic run, never ledger evidence
+            if any(env.get(k, 'disable') != 'disable' for k in
+                   ('G6LC_CTS_LOG_IMAGES', 'G6LC_CTS_LOG_SHADERS')):
+                print('%s skipped: diagnostic (log images/shaders)' % d)
+                continue
+        runs.append((guest, d, epoch, caselist))
+    for d in sorted(os.listdir(a.guest_cache)) if os.path.isdir(a.guest_cache) else []:
+        q = os.path.join(a.guest_cache, d, 'cts-TestResults.qpa')
+        if d.startswith('out-') and os.path.isfile(q):
+            runs.append((os.path.join(a.guest_cache, d), 'local-' + d[4:],
+                         int(os.path.getmtime(q)), ''))
+    written = 0
+    for guest, tag, epoch, caselist in runs:
+        res = _harvest_run(guest, tag, epoch, caselist, lookup, g['cts_commit'])
+        if res is None:
+            continue
+        out = os.path.join(a.out_dir, tag + '.json')
+        with open(out, 'w') as f:
+            json.dump(res, f, indent=1)
+        written += 1
+        print('%s cases=%d faults=%s %s' % (tag, len(res['results']),
+              res['meta']['device_faults'], res['meta']['generated']))
+    print('harvested %d run(s) with cases -> %s' % (written, a.out_dir))
+    return 0
+
+
 def cmd_render(a):
     g, _ = load_groups(a.groups)
     latest = {}            # test name -> (meta.generated, record, run_tag)
@@ -507,6 +619,12 @@ def main(argv=None):
                         'results as pass-with-fault (§7b contract)')
     p.add_argument('--caselist', default='')
     p.set_defaults(fn=cmd_parse)
+    p = sub.add_parser('harvest')
+    p.add_argument('--groups', required=True)
+    p.add_argument('--remote-runs', default='remote-runs')
+    p.add_argument('--guest-cache', default=os.path.join('.cache', 'apu-guest'))
+    p.add_argument('--out-dir', default=os.path.join('.cache', 'cts', 'runs'))
+    p.set_defaults(fn=cmd_harvest)
     p = sub.add_parser('render')
     p.add_argument('--groups', required=True)
     p.add_argument('--results', action='append', required=True)

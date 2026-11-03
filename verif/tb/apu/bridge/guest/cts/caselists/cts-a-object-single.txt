@@ -1,0 +1,4 @@
+dEQP-VK.api.object_management.single.command_pool
+dEQP-VK.api.object_management.single.command_buffer_primary
+dEQP-VK.api.object_management.single.fence
+dEQP-VK.api.object_management.single.event

@@ -7,7 +7,10 @@
 // plus two bump-allocated 1024-word chunk chains — records (w0 = next
 // chunk, rows 1..63, one 16-word record per row) and payloads (w0 =
 // next chunk, words bump-allocated from w1; a record's payload never
-// straddles a chunk).  A record's payload base rides imm[7] as an
+// straddles a chunk).  A payload larger than the 1023 data words of
+// one chunk gets its own fitted extent: w0[31] marks it, w0[30:0] is
+// the next chunk, w1 is the allocated word count, and the data starts
+// at w2.  A record's payload base rides imm[7] as an
 // ABSOLUTE PayMem word address — the executor reads it straight
 // through ObjPay; the old PAYREAD op is retired.
 //
@@ -115,11 +118,13 @@ module g6lc_apu_cmdrec
       StFillDone,
       StEvW,                      // write-back w0..w7 then invalidate
       StBody,                     // per-op body dispatch
-      StFrTop, StFrDo,            // chain-free subroutine
+      StFrTop, StFrDo, StFrBig,   // chain-free subroutine
       StBeginAlloc, StBeginAlloc2, StBeginZ,
       StApRecOk, StApRecZ, StApRecLink, // record-chunk alloc + link
       StAppPay,                   // payload-space check
-      StApPayOk, StApPayZ, StApPayLink, // payload-chunk alloc + link
+      StApPayOk, StApPayZ, StApPayLinkRd, StApPayLink, // payload link
+      StApPayBig, StApPayBigSz, StApPayBigRd, StApPayBigLk,
+      StApPayBigDn,
       StApRecW,                   // write the 16 record words
       StPayW, StPayDone,          // payload stream + finalize
       StPayDrain,                 // rejected append drain
@@ -152,6 +157,8 @@ module g6lc_apu_cmdrec
     state_e             ev_ret_q;
     // ---- chain-free subroutine --------------------------------------
     logic [31:0]        fr_head_q;     // chunk under free
+    logic [31:0]        fr_nxt_q;      // next chunk, latched across the
+                                       // large-chunk size read
     logic               fr_pay_q;      // then free the pay chain too
     state_e             fr_ret_q;
     // ---- record-walk ------------------------------------------------
@@ -244,7 +251,8 @@ module g6lc_apu_cmdrec
         lb_q <= '0; opc_st_q <= APU_OBJPAY_OK; opc_rd_q <= '0;
         ob_q <= '0; ob_ret_q <= StIdle;
         ev_i_q <= '0; ev_ret_q <= StIdle;
-        fr_head_q <= '0; fr_pay_q <= 1'b0; fr_ret_q <= StIdle;
+        fr_head_q <= '0; fr_nxt_q <= '0; fr_pay_q <= 1'b0;
+        fr_ret_q <= StIdle;
         wk_chunk_q <= '0; wk_i_q <= '0; wk_addr_q <= '0;
         pl_cur_q <= '0; pl_own_q <= '0; pl_next_q <= '0;
         rw_i_q <= '0; ps_i_q <= '0; pt_q <= '0;
@@ -505,10 +513,24 @@ module g6lc_apu_cmdrec
           end
         end
         StFrDo: begin
-          // opc_rd_q = next chunk (0 at tail); a corrupt link stops
-          // the walk — the rest of the reset still proceeds
-          fr_head_q <= opc_st_q == APU_OBJPAY_OK ? opc_rd_q : 32'h0;
-          op_go(APU_OBJPAY_OP_FREE, opq_q.addr, 32'(CW), '0, StFrTop);
+          // opc_rd_q = w0.  Bit 31 marks a fitted payload extent whose
+          // size lives at w1; a standard chunk frees CW words.  A
+          // corrupt link stops the walk.
+          if (opc_st_q == APU_OBJPAY_OK &&
+              (opc_rd_q & APU_CB_PAY_LARGE) != 32'h0) begin
+            fr_nxt_q <= opc_rd_q & ~APU_CB_PAY_LARGE;
+            op_go(APU_OBJPAY_OP_READN, opq_q.addr + 32'd1, 32'd1, '0,
+                  StFrBig);
+          end else begin
+            fr_head_q <= opc_st_q == APU_OBJPAY_OK
+                         ? opc_rd_q & ~APU_CB_PAY_LARGE : 32'h0;
+            op_go(APU_OBJPAY_OP_FREE, opq_q.addr, 32'(CW), '0, StFrTop);
+          end
+        end
+        StFrBig: begin
+          fr_head_q <= fr_nxt_q;
+          op_go(APU_OBJPAY_OP_FREE, opq_q.addr - 32'd1, opc_rd_q, '0,
+                StFrTop);
         end
 
         // ================ BEGIN continuations =======================
@@ -618,6 +640,14 @@ module g6lc_apu_cmdrec
             pt_q    <= '0;
             rw_i_q  <= '0;
             state_q <= StApRecW;
+          end else if (32'(req_q.pay_n) > 32'(CW - 1)) begin
+            // one standard chunk holds CW-1 data words.  A larger
+            // payload (vkCmdUpdateBuffer up to 65536 bytes) gets a
+            // fitted extent: 2 header words + the payload, rounded
+            // up to the 64-word ObjPay grain.
+            op_go(APU_OBJPAY_OP_ALLOC, '0,
+                  (32'(req_q.pay_n) + 32'd2 + 32'd63) & ~32'd63,
+                  '0, StApPayBig);
           end else if (d_payt == 32'h0 ||
                        d_ptop + 32'(req_q.pay_n) > d_payt + 32'(CW)) begin
             op_go(APU_OBJPAY_OP_ALLOC, '0, 32'(CW), '0, StApPayOk);
@@ -652,9 +682,62 @@ module g6lc_apu_cmdrec
             rw_i_q  <= '0;
             state_q <= StApRecW;
           end else begin
-            op_go(APU_OBJPAY_OP_WRITE, d_payt, 32'd0, newc_q,
-                  StApPayLink);
+            // preserve w0[31] so a fitted tail still frees its real
+            // size after this link overwrites the next pointer
+            op_go(APU_OBJPAY_OP_READN, d_payt, 32'd1, '0,
+                  StApPayLinkRd);
           end
+        end
+        StApPayLinkRd: begin
+          op_go(APU_OBJPAY_OP_WRITE, d_payt, 32'd0,
+                (opc_rd_q & APU_CB_PAY_LARGE) | newc_q, StApPayLink);
+        end
+        // fitted payload extent: w0 = {large, next=0}, w1 = size,
+        // data at w2.  The following append cannot share it.
+        StApPayBig: begin
+          if (opc_st_q != APU_OBJPAY_OK) begin
+            dead_st_q <= APU_CMDREC_PAY_FULL;
+            ps_i_q    <= '0;
+            cpl_q     <= '{status: APU_CMDREC_PAY_FULL,
+                           count: d_count, pdata: '0, rec: '0};
+            state_q   <= req_q.pay_n == 16'h0 ? StCpl : StPayDrain;
+          end else begin
+            newc_q <= opc_rd_q;
+            op_go(APU_OBJPAY_OP_WRITE, opc_rd_q, 32'd0, APU_CB_PAY_LARGE,
+                  StApPayBigSz);
+          end
+        end
+        StApPayBigSz: begin
+          op_go(APU_OBJPAY_OP_WRITE, newc_q + 32'd1, 32'd0,
+                (32'(req_q.pay_n) + 32'd2 + 32'd63) & ~32'd63,
+                StApPayBigRd);
+        end
+        StApPayBigRd: begin
+          if (d_payt == 32'h0) begin
+            cw_q[ce_q][APU_CBD_PAYH] <= newc_q;
+            cw_q[ce_q][APU_CBD_PAYT] <= newc_q;
+            cw_q[ce_q][APU_CBD_PTOP] <= newc_q + 32'd2;
+            cd_q[ce_q] <= 1'b1;
+            pt_q    <= newc_q + 32'd2;
+            rw_i_q  <= '0;
+            state_q <= StApRecW;
+          end else begin
+            op_go(APU_OBJPAY_OP_READN, d_payt, 32'd1, '0,
+                  StApPayBigLk);
+          end
+        end
+        StApPayBigLk: begin
+          op_go(APU_OBJPAY_OP_WRITE, d_payt, 32'd0,
+                (opc_rd_q & APU_CB_PAY_LARGE) | newc_q, StApPayBigDn);
+        end
+        StApPayBigDn: begin
+          // data starts at w2, not w1 (w1 holds the extent size)
+          cw_q[ce_q][APU_CBD_PAYT] <= newc_q;
+          cw_q[ce_q][APU_CBD_PTOP] <= newc_q + 32'd2;
+          cd_q[ce_q] <= 1'b1;
+          pt_q    <= newc_q + 32'd2;
+          rw_i_q  <= '0;
+          state_q <= StApRecW;
         end
         StApPayLink: begin
           cw_q[ce_q][APU_CBD_PAYT] <= newc_q;

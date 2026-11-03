@@ -216,13 +216,17 @@ package g6lc_apu_sh_pkg;
   localparam int unsigned APU_DESC_POISON = 31;   // set aux poison bit
 
   // binding row — one per descriptor-set-layout binding, stored in the
-  // layout's ObjPay payload as two words (vnfront writes, cmdexec and
-  // vn_golden mirror the packing; the {w0,w1} low 49 bits cast to the
-  // struct below):
-  //   w0 = {binding[31:24], type[23:16], count[15:0]}
-  //   w1 = {off32[31:12], dyn[11], pad[10:4], dynbase[3:0]}
+  // layout's ObjPay payload as two words (vnfront writes, cmdexec
+  // assigns the fields by name).  The struct is 57 bits.  The LSU
+  // CAM result is {found, row}, 58 bits.  Do not truncate it to the
+  // old 50-bit width:
+  //   w0 = {binding[7:0], type[7:0], count[15:0]}
+  //   w1 = {binding[15:8], off32[11:0], dyn, pad[6:0], dynbase[3:0]}
+  // Binding numbers are 16 bits (glslang accepts up to 0xFFFE).
+  // The row count stays APU_DESC_BND.  off32's top bits were unused
+  // (the record offset never exceeds 2047).
   typedef struct packed {
-    logic [7:0]  binding;   // descriptor binding number
+    logic [15:0] binding;   // descriptor binding number
     logic [15:0] count;     // array element count (0 = row absent)
     logic [19:0] off32;     // record offset in the set, 32-byte units
     logic        dyn;       // *_DYNAMIC descriptor type
