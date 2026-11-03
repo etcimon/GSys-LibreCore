@@ -4,6 +4,7 @@
 // test.ts — Run LibreCore regression suite(s) discovered from verif/regress.
 
 import { requireContext, type Command } from "../command.ts";
+import { validateStoramicFlags } from "../../tooling/storamic.ts";
 import { flagBool, flagString } from "../args.ts";
 import {
   broadSuites,
@@ -106,6 +107,7 @@ export const testCommand: Command = {
   needsContext: true,
   async run(args) {
     const ctx = requireContext(args);
+    validateStoramicFlags(ctx.config.soc, args.flags);
     const { logger, config } = ctx;
 
     if (flagBool(args.flags, "list")) {

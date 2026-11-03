@@ -9,6 +9,7 @@ cores and a matrix island sharing one address space. Read `../README.md` (scaffo
 
 | Doc | Role |
 |---|---|
+| [`../storamic/README.md`](../storamic/README.md) | Planned first-party shared-memory/storage backend; capability-gated, no inherited bandwidth claim |
 | [`isa-encoding.md`](isa-encoding.md) | Frozen ISA / CSR / Desc64 contract |
 | [`scaling-100tops.md`](scaling-100tops.md) | I0–I4 sizing; §4.2–4.3 shared `DramChannels` (cores + island); **next: I3 measure → I2 clusters** |
 | [`va-turbo.md`](va-turbo.md) | Exact reuse on `AiCfgVaTurboTest` only. Live `VaTurboEn` stays 0. Not a TOPS step. Completion path: ownership/epoch, then an error bound before any level above 0 |

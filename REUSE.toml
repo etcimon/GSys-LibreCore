@@ -3,6 +3,18 @@ SPDX-PackageName = "GSys LibreCore"
 SPDX-PackageSupplier = "Etienne Cimon <see .active-contributor>"
 SPDX-PackageDownloadLocation = "https://github.com/GlobecSys/librecore"
 
+[[annotations]]
+paths = ["g6lc_storamic/rtl/**", "g6lc_storamic/Flist.*", "corev_apu/storamic/**", "corev_apu/include/g6lc_storamic_soc_cfg_pkg.sv"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Etienne Cimon"
+SPDX-License-Identifier = "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial"
+
+[[annotations]]
+paths = ["g6lc_storamic/architecture/**", "architecture/storamic/**", "architecture/uncore/storamic.md", "verif/tb/storamic/**"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Etienne Cimon"
+SPDX-License-Identifier = "MIT"
+
 # ------------------------------------------------------------------------------
 # Machine-readable provenance for tier R "Case B" files.
 #

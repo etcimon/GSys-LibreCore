@@ -17,8 +17,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { requireContext, type Command } from "../command.ts";
+import { storamicEnv, validateStoramicFlags } from "../../tooling/storamic.ts";
 import { canPromptInteractive } from "../../util/prompt.ts";
-import { resolveRegressEngine, runRegressScript } from "../../platform/shell.ts";
+import { remotePythonArgs, resolveRegressEngine, runRegressScript } from "../../platform/shell.ts";
 import { flagBool, flagString } from "../args.ts";
 import {
   applyAiEnv,
@@ -153,6 +154,7 @@ export const remoteCommand: Command = {
   needsContext: true,
   async run(args) {
     const ctx = requireContext(args);
+    validateStoramicFlags(ctx.config.soc, args.flags);
     const repoRoot = ctx.repoRoot;
 
     let host = flagString(args.flags, "remote-ssh") || DEFAULT_HOST;
@@ -235,6 +237,10 @@ export const remoteCommand: Command = {
       return 2;
     }
     const rest = [...restIn];
+    const memoryEnv = storamicEnv(ctx.config.soc, { ...process.env, ...ai.env });
+    if (memoryEnv.G6LC_STORAMIC_DEFINES && subcommand === "build") {
+      rest.push("--env", `G6LC_STORAMIC_DEFINES=${memoryEnv.G6LC_STORAMIC_DEFINES}`);
+    }
     const jobs = flagString(args.flags, "jobs");
     const vthreads = flagString(args.flags, "vthreads");
     if (ai.active) {
@@ -340,10 +346,11 @@ export const remoteCommand: Command = {
         `remote engine: ${resolveRegressEngine()} (set G6LC_REGRESS_ENGINE=wsl|git-bash to override)`,
       );
     }
-    args.logger.info(`remote: ${host} -> ${wrapper} ${proxyArgs.join(" ")}`);
+    const proxyRunArgs = remotePythonArgs(proxyArgs, subcommand);
+    args.logger.info(`remote: ${host} -> ${wrapper} ${proxyRunArgs.join(" ")}`);
     const result = await runRegressScript(
       wrapper,
-      proxyArgs,
+      proxyRunArgs,
       { env, cwd: repoRoot, stdio: "both", allowFailure: true },
     );
     return result.code;

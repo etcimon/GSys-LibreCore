@@ -26,6 +26,7 @@
 `include "uvm_macros.svh"
 `endif
 
+// Modified by: Etienne Cimon
 module ariane_testharness #(
   parameter config_pkg::cva6_cfg_t CVA6Cfg = build_config_pkg::build_config(cva6_config_pkg::cva6_cfg),
   //
@@ -167,6 +168,7 @@ module ariane_testharness #(
   aiw_resp_t ai_dma_wide_resp;
 `endif
   logic              dram_init_done;
+  logic              dram_service_ready;
   logic [g6lc_ai_island_cfg_pkg::AI_DRAM_MAX_CHANNELS-1:0][31:0]
                      dram_ch_r_beats, dram_ch_w_beats;
   // One island cfg for APB *and* the DRAM slave. Channel/class/shift must
@@ -1023,13 +1025,15 @@ module ariane_testharness #(
       .clk_i       ( clk_i          ),
       .rst_ni      ( ndmreset_n     ),
       .testmode_i  ( test_en        ),
-      .init_done_i ( dram_init_done ),
+      // Service readiness includes error responses; it is not RAM/media init.
+      .init_done_i ( dram_service_ready ),
       .cluster     ( join_cl        ),
       .island      ( join_is        ),
       .master      ( join_mst       )
   );
 `endif
   g6lc_ai_dram_backend #(
+    .StoramicEn     ( CVA6Cfg.StoramicEn                ),
     .DramClass      ( AiIslandCfg.DramClass            ),
     .AXI_ID_WIDTH   ( ariane_axi_soc::IdWidthSlave
 `ifdef G6LC_AI_DRAM_ISLAND_PORT
@@ -1056,6 +1060,7 @@ module ariane_testharness #(
     .slave      ( dram_lat     ),
 `endif
     .init_done_o( dram_init_done ),
+    .service_ready_o( dram_service_ready ),
     .ch_r_beats_o ( dram_ch_r_beats ),
     .ch_w_beats_o ( dram_ch_w_beats )
   );

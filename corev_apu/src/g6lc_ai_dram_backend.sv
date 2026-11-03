@@ -24,6 +24,7 @@ module g6lc_ai_dram_backend
   import g6lc_ai_island_cfg_pkg::*;
 #(
     parameter int unsigned DramClass      = AI_DRAM_SIM_AXI,
+    parameter bit          StoramicEn    = 1'b0,
     parameter int unsigned AXI_ID_WIDTH   = 4,
     parameter int unsigned AXI_ADDR_WIDTH = 64,
     parameter int unsigned AXI_DATA_WIDTH = 64,
@@ -42,12 +43,27 @@ module g6lc_ai_dram_backend
     input  logic testmode_i,
     AXI_BUS.Slave slave,
     output logic init_done_o,
+    output logic service_ready_o,
     // SoC-side occupancy (S5). Island CAP stays aggregate GEMM.
     output logic [AI_DRAM_MAX_CHANNELS-1:0][31:0] ch_r_beats_o,
     output logic [AI_DRAM_MAX_CHANNELS-1:0][31:0] ch_w_beats_o
 );
 
-  if (DramClass == AI_DRAM_SIM_AXI && NrChannels == 1) begin : gen_sim_axi
+  if (!StoramicEn) begin : gen_legacy_service_ready
+    assign service_ready_o = init_done_o;
+  end
+
+  if (StoramicEn) begin : gen_storamic
+    assign ch_r_beats_o = '0;
+    assign ch_w_beats_o = '0;
+    g6lc_storamic_attach #(
+      .Enable(StoramicEn), .DramClass(DramClass), .NrChannels(NrChannels),
+      .IdWidth(AXI_ID_WIDTH), .AddrWidth(AXI_ADDR_WIDTH),
+      .DataWidth(AXI_DATA_WIDTH), .UserWidth(AXI_USER_WIDTH)
+    ) i_storamic (
+      .clk_i, .rst_ni, .testmode_i, .slave, .init_done_o, .service_ready_o
+    );
+  end else if (DramClass == AI_DRAM_SIM_AXI && NrChannels == 1) begin : gen_sim_axi
     assign init_done_o = 1'b1;
 
     logic [AI_DRAM_MAX_CHANNELS-1:0][31:0] ch_r_q, ch_w_q;

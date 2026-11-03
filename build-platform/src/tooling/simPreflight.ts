@@ -7,7 +7,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-import type { PlatformContext } from "../context.ts";
+import { childEnv, type PlatformContext } from "../context.ts";
 import { hasBinary } from "../platform/exec.ts";
 import {
   resolveBashBinary,
@@ -93,21 +93,22 @@ export function assessSimPreflight(ctx: PlatformContext): SimPreflightReport {
     hint: spike ? undefined : "tools install spike  # Linux/WSL",
   });
 
-  const verilator = hasManagedTool(ctx, "verilator");
+  const verilatorPrefix = childEnv(ctx).VERILATOR_INSTALL_DIR!;
+  const verilator = isVerilatorInstalled(join(verilatorPrefix, "bin"));
   items.push({
     id: "verilator",
     ok: verilator,
     required: true,
-    detail: verilator ? "managed or PATH" : "missing",
+    detail: verilator ? verilatorPrefix : `missing at ${verilatorPrefix}`,
     hint: verilator
       ? undefined
       : "tools install sim  |  tools install verilator",
   });
 
-  // The regress flow compiles against VERILATOR_INSTALL_DIR (the managed
-  // prefix); it must be the built, patched tool, not a stock drop-in.
-  if (isVerilatorInstalled(ctx.tools.verilatorBin)) {
-    const st = verilatorPatchStatus(ctx.tools.verilator, ctx.repoRoot);
+  // Check the exact prefix selected for the regression child, including the
+  // OSS CAD fallback. PATH availability cannot validate a different runtime.
+  if (verilator) {
+    const st = verilatorPatchStatus(verilatorPrefix, ctx.repoRoot);
     if (st.patches.length > 0) {
       items.push({
         id: "verilator-patch",

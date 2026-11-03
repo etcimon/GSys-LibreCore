@@ -17,7 +17,52 @@ matching row here so "which spec chapter is this test protecting?" stays answera
 
 ---
 
-## Hyp8 r114 — SC backoff response ownership
+## Storamic M0 — bounded protocol and configuration evidence
+
+The optional `storamic-remote-leaf` build-platform suite invokes
+`verif/tb/storamic/run-remote.sh`, delegating to the existing remote `py` gateway
+with isolated source snapshots and tool/source identities. Stages are protocol,
+config, integration, synth and formal. The standalone source list is first-party;
+the integration fixture alone supplies the inherited external AXI interface.
+
+`tb_g6lc_storamic.sv` covers 1/2/3/4/8 slots, disabled behavior, invalid capability
+and geometry requests, independent AW/W arrival, read/write bursts and IDs,
+backpressure, reset and safe pads. A deliberately failing oracle is required.
+`tb_g6lc_storamic_config.sv` checks default-off/overlay propagation and geometry
+rejection. `tb_g6lc_storamic_model.sv` covers the standalone typed model profile:
+26 cases including top geometry/negatives at 1024-bit/16-bit-ID limits and both
+corruption controls (`storamic-7eea26e38385`); the formal wrapper adds depth-12
+safety plus rw-cover/stale-cover reachability, and component/selected-top
+synthesis reports (`storamic-3c25eee4aaa3`). `tb_g6lc_storamic_soc.sv` covers
+full-payload request comparison,
+varied nonzero payload/attributes, the `BackendAddrWidth` interface-shape
+negative case, the `g6lc_storamic_soc_synth` structural synthesis wrapper, and
+64/512-bit buses, ID widths 5/9,
+DDR/LPDDR/stripe/define/profile/width conflicts at the production backend seam,
+and the real `g6lc_ai_dram_join`/`axi_mux` joined path at both ingress widths —
+including stalled-read reset abort and the former readiness wiring's expected
+timeout. Inherited mux/common_cells sources stay integration-only; the standalone
+closure remains first-party.
+`formal_g6lc_storamic.sv` bounds response-stability/error properties to depth 12.
+
+`remote-runs/storamic-7e0760b67658/output/stage-results.json` retains the earlier
+32-pass/5-fail configuration sweep as historical evidence. The current result is
+`storamic-af46decd087b/output/leaf-result.json` (artifacts under
+`%LOCALAPPDATA%/Temp/cva6-artifacts`): all 37 retained packages compile;
+protocol, config, integration, synthesis and depth-12 formal pass, with source/
+runner/tool identities and hashed non-system C++ dependencies.
+`storamic-001e186eaa74/output/leaf-result.json` passes 10 protocol and 13
+integration cases with expanded dependency capture that also includes system
+headers. Synthesis reports 59 generic
+cells, no latches and no combinational SCC; this is not target mapping, STA,
+area/power qualification or a bandwidth measurement. Host tests live in
+`build-platform/test/storamic.test.ts`.
+
+Repository-wide verification was stopped after its smoke script invoked shared
+cleanup; full compliance/boot/synthesis qualification remains incomplete. No
+QEMU, Linux block/PMEM/DAX or VirtIO conformance or physical-media qualification result is claimed here.
+
+## Hyp8 r114 - SC backoff response ownership
 
 The existing D-cache bench adds controlled atomic replies with unrelated
 payloads before and after the valid response. Ten cases cover SC.D and

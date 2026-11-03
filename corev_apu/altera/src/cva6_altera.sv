@@ -18,6 +18,7 @@
 `include "src/agilex7.svh"
 
 
+// Modified by: Etienne Cimon
 module cva6_altera (
 // WARNING: Do not define input parameters. This causes the FPGA build to fail.
  input wire           pll_ref_clk_p , // 33.333 MHz on Agilex 7
@@ -109,6 +110,10 @@ endfunction
 
 // CVA6 Intel configuration
 localparam config_pkg::cva6_cfg_t CVA6Cfg = build_fpga_config(cva6_config_pkg::cva6_cfg);
+
+if (CVA6Cfg.StoramicEn) begin : gen_storamic_unbound
+  initial $fatal(1, "STORAMIC_BOARD_UNSUPPORTED");
+end
 
 localparam type rvfi_probes_instr_t = `RVFI_PROBES_INSTR_T(CVA6Cfg);
 localparam type rvfi_probes_csr_t = `RVFI_PROBES_CSR_T(CVA6Cfg);

@@ -776,6 +776,7 @@ package config_pkg;
                                       // the L2Pf* geometry fields (default 0)
     // Xg6lcai AI matrix plane (off in every package but g6lc64_ai)
     ai_cfg_t     AiCfg;
+    bit          StoramicEn;
   } cva6_user_cfg_t;
 
   typedef struct packed {
@@ -1047,6 +1048,7 @@ package config_pkg;
     int unsigned X_ISSUE_REGISTER_SPLIT;
 
     ai_cfg_t AiCfg;
+    bit StoramicEn;
 
   } cva6_cfg_t;
 
@@ -1058,6 +1060,11 @@ package config_pkg;
   /// sense for all parameters, here is the place to sanity check them.
   function automatic void check_cfg(cva6_cfg_t Cfg);
     // pragma translate_off
+    assert (!Cfg.StoramicEn ||
+            (Cfg.AxiAddrWidth > 0 && Cfg.AxiIdWidth > 0 &&
+             Cfg.AxiDataWidth >= 8 && Cfg.AxiDataWidth <= 1024 &&
+             (Cfg.AxiDataWidth & (Cfg.AxiDataWidth - 1)) == 0))
+    else $fatal(1, "STORAMIC_CORE_AXI_GEOMETRY");
     assert (Cfg.RASDepth > 0);
     assert (Cfg.BTBEntries == 0 || (2 ** $clog2(Cfg.BTBEntries) == Cfg.BTBEntries));
     assert (Cfg.BHTEntries == 0 || (2 ** $clog2(Cfg.BHTEntries) == Cfg.BHTEntries));

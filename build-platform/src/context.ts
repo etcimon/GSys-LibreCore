@@ -9,6 +9,7 @@
 // verif scripts) at the managed toolchain in workspace/tooling.
 
 import { existsSync } from "node:fs";
+import { storamicEnv } from "./tooling/storamic.ts";
 import { join } from "node:path";
 
 import { loadConfig, type LoadedConfig } from "./config/load.ts";
@@ -151,5 +152,6 @@ export function childEnv(
     TARGET_CFG: config.soc.coreConfig,
     NUM_JOBS: String(recommendedJobs()),
     ...extra,
+    ...storamicEnv(config.soc, { ...process.env, ...extra }),
   };
 }

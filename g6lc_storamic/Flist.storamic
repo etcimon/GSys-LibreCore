@@ -1,0 +1,6 @@
+${CVA6_REPO_DIR}/g6lc_storamic/rtl/include/g6lc_storamic_cfg_pkg.sv
+${CVA6_REPO_DIR}/g6lc_storamic/rtl/include/g6lc_storamic_pkg.sv
+${CVA6_REPO_DIR}/g6lc_storamic/rtl/include/g6lc_storamic_pad_pkg.sv
+${CVA6_REPO_DIR}/g6lc_storamic/rtl/frontend/g6lc_storamic_axi_refuse.sv
+${CVA6_REPO_DIR}/g6lc_storamic/rtl/frontend/g6lc_storamic_axi_memory.sv
+${CVA6_REPO_DIR}/g6lc_storamic/rtl/g6lc_storamic_top.sv

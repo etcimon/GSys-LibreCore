@@ -16,6 +16,21 @@ contract, the pin in `pins.toml` plus the document it names.
 
 **Green command:** `python tools/g6q.py check`
 
+## Storamic consumer work — deferred architecture queue
+
+Priors: `architecture/RTL_FEEDBACK.md` §6 and the existing ingest/IR/emitter
+contracts. This pass records ownership and unresolved requirements only; it
+does not implement a QEMU device, launcher, model field or active contract pin.
+
+- [ ] Bind a published Storamic contract pin before consuming enable, geometry,
+  descriptor/capacity and implemented-capability fields.
+- [ ] Add reader/IR/schema/fixture/name-set checks and explicit unsupported-profile
+  diagnostics together; never use generic host RAM as implicit controller proof.
+- [ ] Own reference models, bridge emission, launch and remote execution within
+  this package, maintaining independent builds and text-out-only QEMU emission.
+- [ ] Qualify a future stock-Linux reference flow separately from RTL-in-the-loop,
+  protected persistence and physical/VirtIO-MMIO transport gates.
+
 `--loader bios` / `gen --emit bios-spec`: OpenSBI next-stage wiring for the independent `g6lc_bios` package. That package is a **rewrite** of TempleOS/ZealOS specs (`g6lc_bios/kernel-spec/`), not a vendor of those trees; ELF from `g6b elf`. Dual-band HolyC: UART0 nographic stdio, UART1 `-serial tcp:127.0.0.1:2222,server,nowait` (`--holyc-port`). QEMU hypothesis only.
 
 ---

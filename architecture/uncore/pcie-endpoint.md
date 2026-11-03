@@ -5,6 +5,12 @@
 **Scaffold only** (see `architecture/uncore/README.md`). Snapshot: `architecture/current-stage.md`.
 
 ## 1. Intent
+
+The [Storamic](../storamic/README.md) roadmap formerly included a separately
+gated CXL Type-3 target, retired by its VirtIO-MMIO transport decision — an
+independent change that does not affect this outline. This PCIe endpoint
+scaffold and the virtual board establish neither that retired target nor any
+other storage-host capability.
 Make LibreCore the **endpoint** of a PCIe link rather than the root — i.e. a plug-in **CPU+AI card**
 enumerated by a host, running its own Linux, reachable over IPv6, and accepting pushed workloads.
 This is the transport half of `architecture/ai-matrix/README.md`.

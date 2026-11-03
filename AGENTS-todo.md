@@ -1,5 +1,91 @@
 # AGENTS workflow todo / pending-log
 
+## Storamic M0 foundation — selected gates pass, aggregate qualification open
+
+Approved first-party standalone memory/storage skeleton under `g6lc_storamic/`,
+native attachment under `corev_apu/storamic/`, and system specification under
+`architecture/storamic/`. Default-off `StoramicEn` preserves the old backend
+hierarchy; explicit primary-memory conflicts are rejected. No RAM capacity,
+PMEM, VirtIO device, block drive or physical pin qualification is advertised. QEMU work
+belongs exclusively to `g6lc_qemu/`; no QEMU model or launcher was added.
+The package's own RTL-feedback/todo files record the pending consumer work.
+
+Next-step task record: [ST-001..ST-041](g6lc_storamic/architecture/implementation-tasks.md).
+Checkpoint status: ST-002 is complete for the retained configuration sweep;
+ST-001A (leaf provenance) and ST-004A (service readiness) are complete. Remaining
+M0 gates — ST-001B isolated aggregate, ST-003 aggregate qualification, and the
+ST-004B/C/D native atomic/preload/board checks — stay open, as does the
+executable model (ST-005 onward). Physical media, block, persistence, active
+links and the VirtIO-MMIO transport tasks follow the recorded dependencies;
+ST-032 re-evaluates each gate. The retired ST-029/ST-030 PCIe/CXL epics are not
+prerequisites; the settled transport is [VirtIO-MMIO](g6lc_storamic/architecture/virtio-mmio.md).
+Design of record: [model-interface](g6lc_storamic/architecture/model-interface.md)
+(a design document, not an implementation or capability grant). This does not
+authorize artifact recovery or shared cleanup.
+
+- [x] Layered specifications, passive/active profile roadmap and Linux transport ADR.
+- [x] First-party AXI/AXI-Lite refusal engine, safe inactive pads and legal profiles.
+- [x] Isolated remote protocol matrix and native adapter conflict/width tests.
+- [x] Remote synthesis and depth-12 response stability/refusal checks.
+- [x] Collect exhaustive config results, review source/tier closure and reconcile traceability.
+- [x] Repair legacy initializers and host TypeScript/selection failures; verify affected cases.
+- [ ] Run aggregate verification safely in isolation; retain native atomic/preload/board gates.
+  Do not rerun the shared cleanup path without approval. Host sim-preflight now
+  validates the actual selected Verilator prefix (incl. OSS CAD fallback) and
+  rejects unpatched runtimes — host-only, `simPreflight.ts` + fixtures; native
+  runtime validation and owned aggregate snapshot remain open.
+- [ ] Resolve the `build-platform/src/config/defaults.ts` license metadata
+  conflict before touching it: the file header reads `LicenseRef-Proprietary`
+  while the last-match tier rule gives T/MIT (E-TIERCONFLICT; existing licenses
+  must be preserved). Its stale `not media or CXL qualification` description is
+  a negative legacy string, not an active goal; the pending replacement is
+  `not media or VirtIO-MMIO qualification` once ownership/policy alignment is
+  resolved. No Storamic work depends on this file.
+- [x] ST-011A native wire/shape slice: parameterized `AddrWidth`, full AW/W/AR
+  payload preservation and `STORAMIC_INTERFACE_SHAPE` in `g6lc_storamic_attach`;
+  opt-in model handshake tracing and native structural-synth wrapper added.
+  `storamic-533be966b6d2`: 14 integration cases (incl. varied payload and the
+  address-shape negative), 10 model cases + negative oracle, M0 synth 59 cells
+  and native wrapper synth 32 cells, zero latches/SCCs. Groundwork only — no
+  memory/ATOP/control-path capability; earlier model failures were a Verilator
+  fork/join lowering artifact, not DUT evidence. `storamic-c2d8ba58ad4b`
+  (limited scope: integration,synth) re-verified the same 14 native cases and
+  both synth checks after the interface-shape guard moved to a portable
+  `ifndef SYNTHESIS` simulation block; model evidence remains `storamic-533be966b6d2`.
+- [x] ST-005/ST-007 standalone profile integration: contract-v2 `profile_t`
+  (off/refuse/model), `StoramicModel` config, top-level external memory seam
+  (`mem_*`/`txn_id_t`/`events_o`), `init_done_o`=bound model readiness, native
+  projection still off/refuse only. `storamic-7eea26e38385` (model: 26 cases +
+  oracle negatives) and `storamic-3c25eee4aaa3` (protocol/config/integration/
+  synth/formal/model-synth/model-formal) pass. Standalone one-region slice
+  delivered; no native/physical/aggregate grant.
+- [ ] Subsequent gates: sequence-space renewal (ST-009/ST-012 design), ST-011B
+  functional attachment and native model exposure, native atomic/preload/
+  board, aggregate isolation.
+- [ ] Subsequent milestones: executable media/discovery, selected Linux block
+  transport (virtio-blk over modern MMIO), protected persistence, active links
+  and the first-party VirtIO-MMIO host stack.
+
+Selected-stage evidence (artifacts under `%LOCALAPPDATA%/Temp/cva6-artifacts`):
+`storamic-af46decd087b/output/leaf-result.json` passes protocol, configuration,
+integration, synthesis and depth-12 formal stages; all 37 retained configuration
+packages compile, including the repaired `cv64a60ax` and four deprecated packages,
+with Storamic off. `storamic-001e186eaa74/output/leaf-result.json` passes 10
+protocol and 13 native integration cases — four real joined-path cases at 64/512
+bits plus the expected timeout on the former readiness wiring. Synthesis remains
+59 generic cells without latches or combinational SCC. The latest run captures runtime records, compiler
+tools, generated inputs and system/C++ dependency hashes including system headers
+per build. Earlier `remote-runs/storamic-df160a9572c7` and
+`remote-runs/storamic-7e0760b67658` tags are historical evidence — including the
+old 32-pass/5-fail sweep — not current failures.
+
+Aggregate `verify --lint --sim --synth` was interrupted after its smoke script
+invoked shared `make clean`, including work outputs and generated boot-ROM files.
+No tracked-file deletions were found; the prior inventory of ignored artifacts is
+unknown. The owned process tree was stopped and nothing was silently restored.
+Full compliance/boot/board elaboration remains unqualified; board refusal guards
+have static host checks only. These limits are not waived by the leaf results.
+
 Hyp8 r98: retained LSQ credits 36.80→33.20 and PMP write decode 59.47→52.60 FO4
 under matched delay-v50 structural screens. Corrected population-count geometry;
 no latency/clock/state addition. MSHR trial rejected/archived, original restored.
@@ -315,9 +401,39 @@ AI island / ai-matrix FO4 program (2026-10-26/27, hyp tree of record `build-plat
       verilates it in 130 s (rc=0, same 7 refusals). Second defect in the same repro:
       `V3Begin::renameAndStaticsRecurse` recursed per sibling and overflowed an 8 MiB
       stack (the harness hides it with `ulimit -s unlimited`); now a loop.
-      Remaining: push the fork, move the `tools/verilator` pin, rebuild the PGO prefix
-      from the fixed source, rerun the hyp8_mc A/B (`hyp8-pgo-ab-base` 6,052 s is the
-      qualified-prefix baseline), then qualify.
+      **Update (2026-11-03): `1856fe1b1` is NOT good on the full model.** Its
+      live-tree packed walk (a) split variables that unresolved dotted references
+      still name (`Can't find definition ... in dotted signal`: `fus_busy`, `info_rdy`,
+      `gen_r2s.rra_h_q`) and (b) left a reference to a deleted, field-split
+      variable (`bank_mask__BRA__191__KET__`, SIGSEGV in V3Const:2649, gdb on
+      `verilator_bin_dbg`). The working tree now holds a different approach
+      (uncommitted in the submodule): the original collected-reference flow, with every
+      collected pointer validated against a live-node set before any dereference
+      (including the comparator), plus refusal of candidates named by any `AstVarXRef`.
+      It no longer crashes on the full model but stays in SplitVar for 3h20m+, so
+      it was stopped. Do not push `1856fe1b1`. Either revert the pin to `706fb1cd7`
+      (qualified; verilates hyp8_mc in about 100 min) or finish the fix with the
+      standalone `g6lc_rename_recover` repro plus a full-model run before moving it. The PGO
+      rebuild from fixed source (`vlt-pgo-9b31ef6-c1`) failed in training for the same
+      reasons. hyp8_mc builds use the qualified prefix meanwhile.
+      Remaining after that: rebuild the PGO prefix, rerun the hyp8_mc A/B
+      (`hyp8-pgo-ab-base` 6,052 s), qualify.
+- [ ] **hyp8_mc first execution: core 0 never commits** (`hyp8-osbi-mc-c3`, 4-thread
+      model `1017227774c3…`, firmware `build-linux-mc`): from cycle 2,000 the I$ sits
+      in MISS/KILL_MISS on the first boot-ROM refill (`vaddr 0x10000`, nc=1,
+      `mem_req=0`, no return). The frontend loops through redirect/hold/epoch flips and
+      `sb_empty=1`. The model ran at about 7 cycles/s (expect thousands). This is the first
+      time a full `g6lc64_hyp8_mc` model has executed (r98 marked the config invalid).
+      **Root cause (single-threaded `hyp8-osbi-mc-t5`, +win_trace):** not threading.
+      SMT anti-starvation livelock. `SmtStarveLimit=16` switches the two harts of a core
+      every ~18 cycles from reset (`[win] KILL fl=1` at c=18, 36, 54, ...). Each switch
+      flushes the resident hart's fetch, including its in-flight boot-ROM refill, and the
+      MC refill path (hub → L2 → L3 → crossbar) is longer than 16 cycles, so neither hart
+      ever receives an instruction. The scalar profile has one hart; the smt2 profile has
+      no L2/L3 and a shorter refill. Fix (both trees, `g6lc_thread_select.sv`): a
+      starve switch waits until the resident hart has fetched once since activation,
+      bounded at 255 cycles so the service floor holds (`unfed_age_q`). Verification
+      build: `hyp8-mc-boot-build-t6` (qualified prefix, threads 1, traces on).
 - [x] hyp8 split builds fence cross-module debug traces (`G6LC_SIM_NO_HIER_TRACE`,
       set by `hyp8-build-harness.sh` unless `HYP8_BUILD_HIER_TRACE=1`): +smt_dup_trace,
       +ld_trace HPD lines, +hpd_trace, +win_trace, and the HPDCACHE phantom/zombie witness.
@@ -1048,8 +1164,31 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
       `_store_cols` variants); (5) mirror in `spirv_model.py` (`cmstride` / word3 / ls_mad)
       and add `sh_vectors` from it before the RTL. 72 cases in this slice; the same gap
       covers every `row_major` case of the ssbo/ubo layout groups.
-    - [ ] `memory.pipeline_barrier.host_write_vertex_buffer.*`: 4–5 Fail (`SubmitRenderPass
-      Image comparison failed`), raster path, same suspect as the smoke regression.
+    - [ ] Rerun of all 150 a-front defects on the fixed tree
+      (`apu-leaf-20261103T053405-bb64708071fb`, 6 shards): 150/150 still Fail, so none
+      were caused by the polygon-mode bug. Open clusters: `binding_model.descriptor_copy`
+      74 (compute "Data validation failed", graphics "Result image validation failed"),
+      `memory.pipeline_barrier` 43 (below), `memory.binding` 30 (`vkCreateImage` ->
+      `FORMAT_NOT_SUPPORTED` on 8x33/257x33 images that the profile's format properties
+      claim; plus `buffer_1048577`), `api.descriptor_set` 2, `conformance_version` 1.
+    - [ ] `memory.pipeline_barrier.*` (~50 cases) still fails on the polygon-fixed tree
+      (rerun `apu-leaf-20261103T053405-bb64708071fb`). Image-log diagnosis
+      `apu-leaf-20261103T062143-0e96c775ce0b` (dev-only) separates two mechanisms:
+      (1) `host_write_vertex_buffer.1024_vertex_buffer_stride_2`: the 256x256 result is
+      entirely black; all 512 expected points are missing (65,024 matching pixels are
+      background). A point-list draw from a 2-byte-stride vertex buffer rasterizes nothing
+      (the R8G8-class vertex gather or POINT_LIST through the draw path); `tb_g6lc_apu_rast`
+      point cases use 32-bit positions. Add a TB case with the CTS vertex format/stride.
+      (2) `transfer_src_transfer_dst.1024` (`ImageBlitToImage`): 0 of 1,024 texels of the
+      32x32 blit match, the output being 8x4 blocks plus one column of data. Root cause:
+      `vkCmdBlitImage` is decoded and classified WORK in cmdexec (L531), but no
+      `APU_XFER_OP_*` implements it, and the profile advertises no BLIT_SRC/BLIT_DST bits.
+      Blit is a mandatory format feature (e.g. R8G8B8A8_UNORM optimal), so CTS calls it
+      anyway. Needed: an xfer blit op (scaled src/dst regions, NEAREST and LINEAR filters,
+      flips, layers, format conversion within the table), the mandatory BLIT bits in the
+      profile, and a `tb_g6lc_apu_xfer` blit case. The
+      SubmitRenderPass and BufferCopyToImage variants of the other subgroups probably reduce
+      to (1)/(2).
     - [ ] `api.descriptor_set.descriptor_set_layout_binding.layout_binding_order`: Fail
       "Verifier failed: 513 == 257, at index 0". The shader read the value of another
       binding: the layout's bindings are created out of numeric order, and a lookup keyed
@@ -1079,6 +1218,127 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
       shcore TB to the new struct, fix the vnpump warnings, install numpy in the builder's
       python (or vendor the table), then rerun unit,top,soc,bridge,synth before committing
       the APU delta.
+      **Repairs (2026-11-03):** `regen_vectors.sh` refreshed the decoder/reply/transport
+      oracles (reply idx 80/82/83 = profile values 0x1000/0x100/0x40). It also exposed a
+      golden-model drift: `vn_golden._gpipe_build` still parsed the pre-delta staged-word
+      order, so the regenerated graphics sessions predicted `VK_ERROR_UNKNOWN` +
+      `DEVICE_LOST`. Those were rejected. The mirror now follows vnfront's StGp phases
+      (restart, depthClamp, discard, polygonMode, depth bias, stencil/bounds, logic op), the
+      57-word block (w48..56) and `VATTR_OK`; all 6 graphics sessions regenerate
+      byte-identical. RTL found on the way: vnfront did not clear depth-bounds / stencil /
+      logic-op state per pipeline (stale inheritance when pDepthStencilState or
+      pColorBlendState is absent), and it allocated the graphics block as 48 words while
+      writing and reading 57 (safe only through the 64-word chunk). Both are fixed (alloc,
+      failure free and vgctl reap now 57). vnfront's 4 `WIDTHTRUNC` (vnpump build) are
+      index slices with upstream bounds. `tb_g6lc_apu_shcore` sets `spec: '0` in the 20
+      slot-manager requests. `shader_vectors.py` (lavapipe oracle) refreshed 106 `.tab`
+      images, all `.exp` unchanged. The scanner param row now uses the RTL layout
+      `{rows[RI+3:RI], idx[RI-1:0]}`, and the shmod TB reads the 80-bit init row (w2 =
+      binding[15:8]). `biglocal` moved to 16x16 = 256 > 128, the current workgroup limit.
+      Local 5.020: vnrep 595/10,816, vndec 2,554/187,282, shcore 11/2,411, shmod 109/~2.0M,
+      vnfront 179/3,093, vgctl 17/209, `gen_sfu_tables --check` fresh (numpy 1.26.4).
+      `shwave` `cts_b2b_opt_1` bisected (2026-11-03; `+only=` now takes a comma list): alone,
+      or after cts_imgcopy / cts_wgloop / sfu / tex / fn_call, robust=0 (pass). After
+      `ssbo_sarr` or `ssbo_cap` (the new 296-RF-row / 58-branch SSBO probes), robust=14
+      (fail); `cts_b2b_opt_2/3` recover. Something those modules leave behind (shcore
+      residency slot, descriptor / record-extent cache, or the TB memory image) changes the
+      next module's ArrayLength / bounds. This is the same signature as the guest-side
+      `{cts_imgcopy, cts_b2b}` contamination. Next: diff dispatch-start state (`desc_q`,
+      residency entry, record extents) between the two orders with `+dbg_dsc`.
+      numpy is installed on the builder (`python3-numpy` 1.26.4, apt), and `shwave-sfu`
+      passes there.
+      **Gate `apu-leaf-20261103T082832-3e5295054cb0` (5.008, unit,top):** PASS objtab
+      101,566 / vgpages / vgctl / vnfront 3,934 / cmdexec / xfer 1,539 / rast 15,585 / gcs /
+      vndec 187,282 / vnrep 10,816 / vnpump / shmod 1,998,722 / shcore 2,411. The `dmprog`
+      and `shwave-sfu` generators print `PASS ...: fresh` but the summary marks them
+      `incomplete` (no `PASS tb_`/`checks=` verdict). The runner verdict needs a
+      positive-check rule for those two freshness checks. FAIL: `shwave` (`cts_b2b_opt_1`,
+      above), `vgtop` (`donecol` only), and `vgsys` / `sys-venus`, both only on
+      `ue_cpos_recmany_1` (replies at off 0x6240/0x6640 expect `VK_ERROR_UNKNOWN`, then
+      0x6A40/0x6C40 `DEVICE_LOST`; the RTL returns SUCCESS) and `ue_cpos_allocmany_1` (off
+      0x4400 expects -2 `OUT_OF_DEVICE_MEMORY`; the RTL succeeds). Both vectors date from
+      `e1a3e3c4e` (2026-10-28) and regenerate byte-identical, so the golden still predicts
+      those failures. Recording 5,000 event pairs and allocating 10,000 buffers is legal
+      (CTS `record_many_*` / `allocate_many_*` pass on the device), so the golden's
+      capacity model (cmdrec chunk chain / PayMem / ObjTab slots after the uncommitted
+      cmdrec delta) is the likely stale side. Find which golden check rejects the record at
+      0x6240 before regenerating, and do not regenerate blind.
+      **Resolved (2026-11-03):** wrapping the golden's allocator showed `pay_alloc` -> None,
+      then `_cb_append` FULL. The golden ObjPay mirror was 16,384 words (64 KiB) while
+      vgtop/vgsys/sys elaborate PayMemBytes = 16 MiB. `PAY_WORDS` now mirrors 16 MiB / 4.
+      The full `regen_vectors.sh` changed only `recmany` (4 error expectations removed),
+      `allocmany` (612) and `submit101` (190); every other session is byte-identical.
+      The runner verdict now counts `PASS ...: fresh` lines for `dmprog`/`shwave-sfu`. The
+      gate fixture stubs both generators, which fixes the 8 previously failing
+      ApuRegressionGateTests (125 proxy tests: only the 6 unrelated preflight/McCache
+      failures remain). Gate rerun with these fixes: launched from `/tmp/launch-ut4.log`.
+      `cts_b2b_opt_1` follow-up: the predecessor is `cts_b2b_mut_0` in both orders, and
+      no descriptor reads differ in the window. The optimized module has an `OpPhi` (%96)
+      and `OpArrayLength` (%22). Next hypothesis: a register-file row or phi state
+      surviving from `ssbo_cap` (296 RF rows) is read before it is written. Compare the
+      RF/scratch clear on dispatch start.
+      Narrowed further: contaminated, the dispatch spins past 400k cycles in the called
+      function (`+dbg_wd`: st=75 pc=351 cfn=1); clean, it finishes in 25,892 cycles. So the
+      loop bound is wrong, not the data. The descriptor CAM is rebuilt per case
+      (`desc = '0`), and buffer records rewrite beats 0/8/24 (+16 is never written by either
+      case). That leaves module/RF state: the trip count comes from `OpArrayLength` (%22)
+      through phi %96. Check that shmod/shwave reset the per-slot regmap/phi rows and the RF
+      on recommit into the slot `ssbo_cap` used.
+      Ruled out: shmod S_CLR clears every per-slot table (ty/co/de/va/rm/bk/mb/in/ph/fu/pt),
+      and shwave W_SC0 resets csp/dead/clbl/cfn/wsel/pc per wave at each dispatch. The
+      remaining candidate is the register file: it is never cleared between dispatches, so
+      if phi %96 resolves the wrong predecessor on loop entry, it reads the back-edge value
+      %89 from a row `ssbo_cap` (296 rows) left behind. Next: `+dbg_cf` on the opt_1 dispatch
+      in both orders, and compare the phi pick / clbl at the loop header. A correct phi never
+      reads an unwritten row, so the fix belongs in the phi predecessor tracking, not in an
+      RF clear.
+      Further (sim-only `+dbg_al` at W_AL0W, `+dbg_cf`): the ArrayLength operand is
+      identical in both orders (set 0, binding 0x0001, idx 0, c3 = 0), and the
+      control-flow event sequence is identical (8 CF events). The only CF-visible
+      difference is stale `cfln_q[w][0..1]` (frame lane masks, cleared only at reset),
+      which is read only at csp-1 after a push, so it is benign. Still open: the record
+      fetch result and the loop's data loads. Next, `+dbg_dsc` over the whole opt_1
+      dispatch: compare the size the record fetch returns, then the SSBO addresses of the
+      14 robust accesses.
+      **Also landed (2026-11-03):** `g6lc_apu_doneq` (completion queue factored out of
+      vgtop, behaviour-identical) with `tb_g6lc_apu_doneq` (2/3/4-source collisions in one
+      cycle plus a 4,000-cycle seeded stream; 7 cases, 12,107 checks; a collapsed-push
+      mutant fails with 246 errors; yosys check clean). The vgtop `donecol` arm keeps its
+      drain checks, and every vgtop session now asserts pushes == pops on the done queue.
+      `xstreams` was sending 9 streams against the profile bound of 8
+      (`VkCommandStreamDescriptionMESA = 8`), which is APU_VN_FAULT_BOUND -> ring FATAL. It
+      now sends 8 and passes locally in vgsys. vnpump has a sim-only `+pump_fatal_trace`.
+      Remote unit,top on 5.008 (`apu-leaf-20261103T060228-64378cae73cf`): vndec, vnrep,
+      vnpump, shmod, shcore and the earlier passes green. Open: `shwave-sfu` (builder has no
+      numpy; the check is fresh locally), `shwave` `cts_b2b_opt_1` (ordering
+      contamination), and vgtop. With the reply oracles fixed, three vgtop arms that had
+      been hidden behind the reply mismatch now fail:
+      - `ue_cneg_badfmt_1`: the negative relied on `D24_UNORM_S8_UINT` being outside the
+        format table, but the D24S8 stencil work made it real (VK 129 -> device 14), so
+        creation correctly succeeds. Moved to `BC1_RGB_UNORM_BLOCK` (131, still 0xFF) and
+        regenerated.
+      - `ue_cneg_spec_1`: the golden compute path refuses any `pSpecializationInfo`
+        (`vn_golden` ~L4343), but the RTL implements COMPUTE-H1 specialization (vnfront
+        `StPipeSp*`), so the empty spec info now creates a pipeline. Mirror the spec parse
+        in the golden (count <= 32, sizes 1/2/4, 8 -> FEATURE_NOT_PRESENT, data <= 64 B)
+        and turn this arm into a real illegal-spec negative (size 8).
+      - `ue_cneg_spec_1` (fixed 2026-11-03): the golden now mirrors vnfront's StPipeH4/Sp*
+        parse (count <= 32, sizes 1/2/4, size 8 -> `VK_ERROR_FEATURE_NOT_PRESENT`,
+        dataSize <= 64, layout id after the spec block; a non-empty valid spec raises
+        NotImplementedError until a vector needs it). The arm is now a real negative (one
+        8-byte constant) and expects -8. The positive compute sessions regenerate
+        byte-identical.
+      - `ue_donecol_1`: "EXECUTE_COMMANDS record never issued, 0 done-queue pops". The arm's
+        premise is gone: since G3b-iii, cmdexec executes secondaries itself (one-deep
+        stack), so EXECUTE_COMMANDS never reaches the generic work port the TB sink holds.
+        The only records still routed there are the WORK-class commands no engine
+        implements (`BLIT_IMAGE`, `RESOLVE_IMAGE`, `CLEAR_DEPTH_STENCIL_IMAGE`; vgtop
+        `work_is_disp/xfer/draw` miss them). In the integrated device
+        (`g6lc_apu_sys` -> vgsys `WorkSink=0`) that port refuses them with
+        `APU_SH_DONE_UNSUPPORTED` (§7b fault, undefined results), so the CTS blit cases
+        fail through a counted device fault, not a silent success. Rebuild the donecol arm
+        as a collision between two real engine completions (xf_done vs sh_done); the
+        generic-port collision has no producer left in compute sessions.
     - NotSupported in the batch is honest absence: scalarBlockLayout, 8/16-bit storage,
       maintenance4/5, device_address commands, sparse/protected buffer create flags, the
       8 MiB private heap ("not enough memory").

@@ -8,6 +8,7 @@
 // Original Author: Jean-Roch COULON - Thales
 
 
+// Modified by: Etienne Cimon
 package cva6_config_pkg;
 
   localparam CVA6ConfigXlen = 32;
@@ -82,6 +83,7 @@ package cva6_config_pkg;
   localparam CachedAddrBeg = MemBytes >> ($clog2(CVA6ConfigXlen/8));
 
   localparam config_pkg::cva6_user_cfg_t cva6_cfg = '{
+      StoramicEn: bit'(0),
       XLEN: unsigned'(CVA6ConfigXlen),
       FpgaEn: bit'(CVA6ConfigFpgaEn),
       NrCommitPorts: unsigned'(CVA6ConfigNrCommitPorts),

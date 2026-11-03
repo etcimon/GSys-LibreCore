@@ -5,6 +5,10 @@
 **Channel stability (cores + multi-core + island):** [`dram-channel-scaling.md`](dram-channel-scaling.md).
 
 ## 1. Intent
+
+Alternative primary-memory architecture: [Storamic](../storamic/README.md).
+Storamic selection excludes direct DDR4 for the same aperture; it does not replace
+this existing default-off LiteDRAM path or reuse its implementation.
 Give the SoC real off-chip DRAM bandwidth: a DDR3/DDR4/LPDDR4 controller on the AXI memory-side seam,
 replacing the simulation memory / on-chip scratchpad with a path to gigabytes of board DRAM. This is
 **step 1** of the uncore roadmap — nothing else (PCIe, NIC, display) is worth integrating until DRAM

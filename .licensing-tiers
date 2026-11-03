@@ -512,3 +512,9 @@ R   build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island
 # r31-r39: retain existing declarations; align previously unmatched metadata.
 R   build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_pe_dot_pipe.sv
 R   verif/tb/ai_island/tb_g6lc_ai_inval_queue.sv
+R   g6lc_storamic/rtl/**
+R   g6lc_storamic/Flist.*
+T   g6lc_storamic/architecture/**
+R   corev_apu/storamic/**
+R   corev_apu/include/g6lc_storamic_soc_cfg_pkg.sv
+T   verif/tb/storamic/**

@@ -33,6 +33,14 @@ verilator             ?= verilator
 target-options ?=
 # additional defines
 defines        ?=
+ifneq ($(strip $(G6LC_STORAMIC_DEFINES)),)
+override defines := $(defines)$(if $(defines),+)$(G6LC_STORAMIC_DEFINES)
+endif
+ifneq (,$(filter G6LC_STORAMIC,$(subst +, ,$(defines))))
+ifneq (,$(filter G6LC_AI_DRAM_CLASS1 G6LC_AI_DRAM_CHANS_2 G6LC_AI_DRAM_CHANS_4 G6LC_AI_DRAM_CHANS_8 G6LC_AI_DRAM_SIM_CHANS_2 G6LC_AI_DRAM_SIM_CHANS_4 G6LC_AI_DRAM_SIM_CHANS_8 G6LC_AI_DRAM_TIMING,$(subst +, ,$(defines))))
+$(error Storamic is mutually exclusive with explicit direct-memory selections)
+endif
+endif
 # test name for torture runs (binary name)
 test-location  ?= output/test
 # set to either nothing or -log
@@ -217,6 +225,13 @@ src :=  $(if $(spike-tandem),verif/tb/core/uvma_core_cntrl_pkg.sv)              
         corev_apu/l3_cache/g6lc_l3_top.sv                                            \
         corev_apu/src/g6lc_cluster.sv                                                \
         corev_apu/include/g6lc_ai_island_cfg_pkg.sv                                  \
+        g6lc_storamic/rtl/include/g6lc_storamic_cfg_pkg.sv                           \
+        g6lc_storamic/rtl/include/g6lc_storamic_pkg.sv                               \
+        g6lc_storamic/rtl/include/g6lc_storamic_pad_pkg.sv                           \
+        g6lc_storamic/rtl/frontend/g6lc_storamic_axi_refuse.sv                       \
+        g6lc_storamic/rtl/g6lc_storamic_top.sv                                      \
+        corev_apu/include/g6lc_storamic_soc_cfg_pkg.sv                               \
+        corev_apu/storamic/g6lc_storamic_attach.sv                                  \
         corev_apu/src/g6lc_ai_dram_backend.sv                                        \
         corev_apu/src/g6lc_ai_litedram_wrap.sv                                       \
         corev_apu/src/g6lc_ai_dram_channels.sv                                       \

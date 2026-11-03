@@ -1,3 +1,4 @@
+// Modified by: Etienne Cimon
 package build_config_pkg;
 
   // Scale FETCH_WIDTH with issue width: min bits for N×{16,32}-bit instrs, pot.
@@ -148,6 +149,10 @@ package build_config_pkg;
     // leave sizing at 0 and get a legal default. When MatrixEn is 0 the whole
     // group stays zero, which is what every non-AI package elaborates with.
     cfg.AiCfg = CVA6Cfg.AiCfg;
+    cfg.StoramicEn = CVA6Cfg.StoramicEn;
+`ifdef G6LC_STORAMIC
+    cfg.StoramicEn = 1'b1;
+`endif
     // AI overlay (2026-10-01): `+define+G6LC_AI_OVERLAY` gives ANY package the
     // canonical island plane (config_pkg::AiCfgIsland, or the integer strip with
     // +define+G6LC_AI_OVERLAY_INT / on a core without RVF+RVD) and the CVXIF

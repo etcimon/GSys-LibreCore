@@ -29,6 +29,7 @@ controller vs board/analog PHY, and *what* gates it must pass before it is wired
 
 | Outline | Domain | Catalog ids | On-die vs board/PHY |
 |---|---|---|---|
+| [`storamic.md`](storamic.md) | memory/storage | first-party, no vendor controller | Default-off shared-memory foundation; passive sticks first, active serial and VirtIO-MMIO transport later |
 | `ddr4-controller.md` | memory | `litedram` | Controller on-die; DDR PHY = FPGA MIG / ASIC hard macro; DIMM on board |
 | `dram-channel-scaling.md` | memory (I3) | `litedram` × N | **Shared** N-channel stripe on the DRAM slave: core pipelines, L2/L3, `NrCores`, and island DMA. Stability plan for `DramChannels`. |
 | `ethernet-controller.md` | network | `verilog-ethernet`, `liteeth`, `corundum`, `ariane-ethernet` | MAC on-die; PHY = external chip |

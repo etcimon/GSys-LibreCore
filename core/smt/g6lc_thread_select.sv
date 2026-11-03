@@ -111,6 +111,15 @@ module g6lc_thread_select
     // (OpenSBI FDT/strchr never progressed on RTL while Spike was fine).
     logic [4:0] activate_age_q, activate_age_d;
     logic [7:0] stall_age_q, stall_age_d;
+    // Forward progress for the anti-starvation switch: a switch flushes the
+    // resident hart's fetch, including its in-flight I$ refill. When the refill
+    // takes longer than SmtStarveLimit (any multi-level hierarchy: hub, L2, L3,
+    // crossbar) two harts that keep starving each other never receive an
+    // instruction (g6lc64_hyp8_mc: KILL every 18 cycles from reset, boot ROM
+    // never fetched). A starve switch therefore waits until the resident hart
+    // has fetched once since it was activated, bounded at 255 cycles so the
+    // peer's service floor still holds.
+    logic [7:0] unfed_age_q;
     logic [5:0] uniss_pend_q, uniss_pend_d;
     logic       t0_extra_q, t0_extra_d;
     localparam logic [4:0] MISS_SWITCH_BLACKOUT = 5'd16;
@@ -290,7 +299,8 @@ module g6lc_thread_select
             do_switch   = 1'b1;
             reason_miss = 1'b1;
             next_peer   = peer_clean;
-          end else if (found_starve) begin
+          end else if (found_starve &&
+                       (unfed_age_q == 8'd0 || unfed_age_q == 8'hff)) begin
             do_switch     = 1'b1;
             reason_starve = 1'b1;
             next_peer     = peer_starve;
@@ -480,6 +490,15 @@ module g6lc_thread_select
     // Delayed switch pulse: fires when active_q already equals the incoming hart.
     logic t0_bank_q;
     logic reason_miss_q, reason_quantum_q, reason_starve_q;
+
+    // unfed_age_q: cycles since activation without a fetch (0 = has fetched).
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) unfed_age_q <= 8'd1;
+      else if (hold_i) unfed_age_q <= unfed_age_q;
+      else if (do_switch) unfed_age_q <= 8'd1;
+      else if (fetch_fire_i) unfed_age_q <= 8'd0;
+      else if (unfed_age_q != 8'd0 && unfed_age_q != 8'hff) unfed_age_q <= unfed_age_q + 8'd1;
+    end
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin

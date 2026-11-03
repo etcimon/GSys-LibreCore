@@ -210,6 +210,7 @@ package cva6_config_pkg;
       CvxifEn: bit'(CVA6ConfigCvxifEn),
       CoproType: config_pkg::COPRO_G6LC_AI,
       AiCfg: ai_cfg,
+      StoramicEn: bit'(0),
       RVZiCond: bit'(CVA6ConfigRVZiCond),
       RVZiCbom: bit'(1),
       RVZiCboz: bit'(1),

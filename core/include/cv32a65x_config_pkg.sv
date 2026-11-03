@@ -7,6 +7,7 @@
 //
 // Original Author: Jean-Roch COULON - Thales
 
+// Modified by: Etienne Cimon
 package cva6_config_pkg;
 
   localparam CVA6ConfigXlen = 32;
@@ -53,6 +54,7 @@ package cva6_config_pkg;
       CvxifEn: bit'(1),
       CoproType: config_pkg::COPRO_EXAMPLE,
       AiCfg: config_pkg::AiCfgOff,
+      StoramicEn: bit'(0),
       RVZiCond: bit'(0),
       RVZiCbom: bit'(0),
       RVZiCboz: bit'(0),

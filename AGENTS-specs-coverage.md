@@ -15,7 +15,30 @@ headline view: it deliberately carries **no file references and no line numbers*
 
 ---
 
-## Hypothetical core timing refactor — targeted boundary evidence only
+## Storamic memory/storage — foundation only
+
+Payload/verification groundwork lands in this batch: the native adapter carries
+full AW/W/AR payloads (ST-011A), the model bench gained opt-in handshake
+tracing and independent concurrent-handshake counts, and the native fixture
+gained the structural synthesis wrapper. The standalone contract-v2 typed model
+profile is now implemented with 26 model cases, both negative oracles,
+component/selected-top synthesis and depth-12 safety plus reachability; native
+projection remains off/refuse only. No capability grant follows; all
+limitations below stand.
+
+The default-off configuration and refusal frontend have directed protocol,
+native-adapter and bounded safety evidence. Structural synthesis is latch-free
+and combinational-loop-free for the tested leaf. The exhaustive configuration
+sweep now passes all 37 retained packages. Joined native readiness and error
+paths are covered, including the expected timeout on the former readiness
+wiring. Aggregate verification is incomplete.
+
+No ISA chapter is promoted by this work. Functional RAM/flash, physical discovery,
+ECC/BIST, persistent recovery, Linux block/PMEM/DAX and VirtIO-MMIO device support remain unimplemented
+or unqualified. Device readiness, throughput, physical timing and compliance are
+not inferred from error-response tests.
+
+## Hypothetical core timing refactor - targeted boundary evidence only
 
 The r114 tests establish SC retry-state ownership across the staged memory
 response, including a failing frozen baseline. They do not promote overall

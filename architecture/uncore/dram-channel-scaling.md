@@ -1,4 +1,8 @@
-# DRAM channel scaling — SoC-wide bandwidth and stability
+# DRAM channel scaling - SoC-wide bandwidth and stability
+
+Alternative backend: [Storamic](../storamic/README.md), with independent stick
+geometry and explicit burst fragmentation. Its capacities/rates are not inferred
+from the existing DRAM channel count or class nameplate.
 
 **Status:** plan of record (I3) · **Live:** class 0 N=1, 64-bit fabric, 16 GB/s nameplate (8 bytes/cycle) ·
 **Measured, still fabric-bound:** class-1 LiteDRAM N=1/2/4/8 · **Not live:** 400 GB/s,

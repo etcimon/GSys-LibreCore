@@ -1213,6 +1213,7 @@ export function classifyManualOutRtl(dir: string): ManualOutRtl | null {
     const present = OUT_RTL_TREES.filter((tree) => existsSync(join(dir, tree)));
     if (present.length === 0) return null;
     const emitName = present.find((tree) => tree.startsWith("hyp_redesign_")) ?? present[0];
+    if (emitName === undefined) return null;
     const emitDir = join(dir, emitName);
     return { emitDir, svCount: countSvFiles(emitDir, 2000) };
   }

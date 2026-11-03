@@ -15,6 +15,7 @@
 //             4 = incomplete (a stage was skipped and did not run).
 
 import { requireContext, type Command } from "../command.ts";
+import { validateStoramicFlags } from "../../tooling/storamic.ts";
 import { flagBool, flagString } from "../args.ts";
 import {
   edaPaths,
@@ -157,6 +158,7 @@ export const verifyCommand: Command = {
   needsContext: true,
   async run(args) {
     const ctx = requireContext(args);
+    validateStoramicFlags(ctx.config.soc, args.flags);
     const { logger, config } = ctx;
     const qualificationName = flagString(args.flags, "qualification");
     let qualification: QualificationSelection[] | undefined;

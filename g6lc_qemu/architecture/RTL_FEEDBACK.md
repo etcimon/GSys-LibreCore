@@ -316,3 +316,38 @@ A change set is ready when:
 The name-set test is the one most often skipped and the most valuable: a capability or field the
 design adds and this package ignores becomes a guest-visible zero, and zero is usually a legal value,
 so nothing looks wrong anywhere.
+
+## 6. Storamic consumer boundary — pending, no active contract pin
+
+The host design now has a default-off Storamic refusal foundation. Its published
+enable/geometry names include `StoramicEn` and `MaxSticks`; implemented media
+capabilities remain empty. A Storamic contract pin, executable-media ABI, register
+map, interrupt assignment and validated capacity/discovery schema are unresolved.
+No pin, model field, emitter or launcher is implemented by this documentation pass.
+
+This package is the sole owner of any future Storamic QEMU generation, reference
+device, RTL bridge emission, launch configuration and remote QEMU execution.
+Consumers delegate those operations here. Simulator-side peers may live in their
+RTL test project; they must not become a second QEMU launcher.
+
+Required consumer increment, after the design publishes a pinnable contract:
+
+- Read enable, elaboration geometry and implemented capabilities through explicit
+  design inputs; add the IR/schema/fixture/name-set checks together. Missing
+  fields remain unresolved, not invented zeros or assumed capacities.
+- Explicitly diagnose unsupported selected profiles. Current generic RAM-backed
+  model runs must not be represented as tests of the Storamic controller.
+- Keep reference-model and RTL-in-the-loop modes distinguishable. Accesses used
+  for controller validation must reach the simulator-side bridge; a host-RAM
+  aperture must not silently bypass it.
+- Keep block exposure distinct from memory devices. The transport is resolved
+  by `g6lc_storamic/architecture/virtio-mmio.md`: modern VirtIO-MMIO per-device
+  apertures — one virtio-blk per flash-bearing stick, optional virtio-mem/pmem.
+  Qualified PMEM semantics and the QEMU MMIO memory-device gap (pinned QEMU
+  v10.0.0 lacks virtio-mem/pmem MMIO) remain design-side gates owned here.
+- Derive constants from the ingested contract, keep fixtures-only package success,
+  and preserve text-out-only QEMU emission. No host source/header/library becomes
+  a crate dependency.
+
+QEMU outcomes remain hypotheses/checkpoints, not RTL verification, physical link
+timing, bandwidth measurements or VirtIO/transport compliance evidence.

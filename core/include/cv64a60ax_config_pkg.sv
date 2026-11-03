@@ -15,6 +15,7 @@
 // Description: CVA6 configuration package using the HPDcache as cache subsystem
 
 
+// Modified by: Etienne Cimon
 package cva6_config_pkg;
 
   localparam CVA6ConfigXlen = 64;
@@ -83,7 +84,11 @@ localparam config_pkg::cva6_user_cfg_t cva6_cfg = '{
    CvxifEn: bit'(1),
    CoproType: config_pkg::COPRO_EXAMPLE,
    AiCfg: config_pkg::AiCfgOff,
+   StoramicEn: bit'(0),
    RVZiCond: bit'(1),
+   RVZiCbom: bit'(0),
+   RVZiCboz: bit'(0),
+   RVZiCbop: bit'(0),
    RVZicntr: bit'(1),
    RVZihpm: bit'(1),
    NrScoreboardEntries: unsigned'(8),

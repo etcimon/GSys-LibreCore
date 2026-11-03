@@ -10,6 +10,7 @@ import {
   detectFalsePassSignals,
   enrichGitBashEnv,
   gitRootFromBashPath,
+  remotePythonArgs,
   resolveBashBinary,
   resolveRegressEngine,
   windowsPathToPosix,
@@ -103,4 +104,14 @@ test("LineBufferedEcho flushes complete lines and trailing partial", () => {
   expect(got.join("")).toBe("hello\nworld\n");
   echo.flush();
   expect(got.join("")).toBe("hello\nworld\nno-nl-yet\n");
+});
+
+test("remote Python WSL paths preserve payload and other engines", () => {
+  const args = ["py", "E:\\cva6\\verif\\leaf.py", "--data", "E:/cva6/a.sv", "--dest=C:\\tmp\\result space", "--env", 'INPUTS={"path":"C:\\\\literal"}', "../relative.py", "/opt/remote", "--data=E:\\cva6\\b.sv"];
+  expect(remotePythonArgs(args, "py", "win32", "wsl")).toEqual([
+    "py", "/mnt/e/cva6/verif/leaf.py", "--data", "/mnt/e/cva6/a.sv", "--dest=/mnt/c/tmp/result space", "--env", args[6]!, "../relative.py", "/opt/remote", "--data=/mnt/e/cva6/b.sv",
+  ]);
+  expect(remotePythonArgs(args, "py", "linux", "bash")).toEqual(args);
+  expect(remotePythonArgs(args, "py", "win32", "bash")).toEqual(args);
+  expect(remotePythonArgs(args, "shell", "win32", "wsl")).toEqual(args);
 });

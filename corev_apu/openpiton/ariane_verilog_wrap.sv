@@ -12,6 +12,7 @@
 // Date: 19.03.2017
 // Description: Ariane Top-level wrapper to break out SV structs to logic vectors.
 
+// Modified by: Etienne Cimon
 module ariane_verilog_wrap
     import ariane_pkg::*;
     import config_pkg::*;
@@ -116,6 +117,7 @@ module ariane_verilog_wrap
  );
 
   localparam cva6_user_cfg_t cva6_user_cfg = '{
+    StoramicEn:             bit'(0),
     XLEN:                   XLEN,
     VLEN:                   VLEN,
     RVA:                    AExtEn,
@@ -257,6 +259,10 @@ module ariane_verilog_wrap
   };
 
   localparam cva6_cfg_t cva6_cfg = build_config_pkg::build_config(cva6_user_cfg);
+
+  if (cva6_cfg.StoramicEn) begin : gen_storamic_unbound
+    initial $fatal(1, "STORAMIC_BOARD_UNSUPPORTED");
+  end
 
 // assign bitvector to packed struct and vice versa
   // L15 (memory side)

@@ -1,0 +1,3 @@
+-f ${CVA6_REPO_DIR}/g6lc_storamic/Flist.storamic
+${CVA6_REPO_DIR}/corev_apu/include/g6lc_storamic_soc_cfg_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/storamic/g6lc_storamic_attach.sv

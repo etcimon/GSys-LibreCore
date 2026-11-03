@@ -100,6 +100,7 @@ XPACK_URL = (
 # Only what verilate actually reads. Keeps the first sync small and every
 # later sync near-instant.
 SYNC_INCLUDE = [
+    "g6lc_storamic/",
     "core/",
     "corev_apu/",
     "common/",
@@ -1026,7 +1027,7 @@ def build_cache_key(root: Path, flavour: str, target: str) -> str:
             h.update(p.read_bytes())
 
     exts = {".sv", ".v", ".vlt", ".svh", ".vh", ".cc", ".cpp", ".h", ".hpp"}
-    patterns = ["core/**", "corev_apu/**", "common/**", "vendor/**", "verif/tb/**",
+    patterns = ["core/**", "corev_apu/**", "g6lc_storamic/**", "common/**", "vendor/**", "verif/tb/**",
                 "verif/regress/remote/hyp8/**",
                 "build-platform/workspace/hyp/**"]
     files = _git_tracked_files(root, patterns)
@@ -1049,6 +1050,7 @@ def build_cache_key(root: Path, flavour: str, target: str) -> str:
             )
         ]
 
+    files.extend((root / "g6lc_storamic").rglob("*.sv"))
     for f in sorted(set(files)):
         if not f.is_file():
             continue
@@ -1079,12 +1081,13 @@ def _manifest_sources(root: Path) -> dict[str, str]:
     RTL/TB sources under the synced trees.
     """
     exts = {".sv", ".v", ".vlt", ".svh", ".vh", ".cc", ".cpp", ".h", ".hpp"}
-    patterns = ["core/**", "corev_apu/**", "common/**", "vendor/**", "verif/tb/**",
+    patterns = ["core/**", "corev_apu/**", "g6lc_storamic/**", "common/**", "vendor/**", "verif/tb/**",
                 "verif/regress/remote/hyp8/**",
                 "build-platform/workspace/hyp/**"]
     # These trees are gitignored, so _git_tracked_files never reports them;
     # they are scanned unconditionally with rglob below.
-    untracked_roots = ["verif/regress/remote/hyp8",
+    untracked_roots = ["g6lc_storamic", "corev_apu/storamic", "verif/tb/storamic",
+                       "verif/regress/remote/hyp8",
                        "build-platform/workspace/hyp"]
     files: set[Path] = set()
     for rel in (
@@ -1185,7 +1188,7 @@ def build_recipe_record(rem: Remote, root: Path, args, verlib: str) -> dict:
         key, _, value = kv.partition("=")
         if key == "SOFT_LADDER_BUILD_VLT_ARGS":
             extra_args = value
-        elif key in ("SOFT_LADDER_ISOLATED", "SOFT_LADDER_OVERLAY"):
+        elif key in ("SOFT_LADDER_ISOLATED", "SOFT_LADDER_OVERLAY", "G6LC_STORAMIC_DEFINES"):
             build_env[key] = value
     version = rem.out(
         f"sed -n 's/^.*verilator: *//p' {shlex.quote(verlib_dir + '/build.log')} | head -1"

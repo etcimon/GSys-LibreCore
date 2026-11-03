@@ -104,6 +104,12 @@ does not apply:
 
 ### 0.3 Cost-driver anti-patterns (never do these)
 
+Verification safety: the default simulation smoke scripts can invoke repository
+`make clean`, including shared `work*` outputs and generated FPGA boot-ROM files.
+Inspect that path and obtain approval before cleanup, or execute the aggregate in
+an isolated checkout/workspace. Isolated remote leaf tests do not justify a full
+verification claim; this warning does not waive the aggregate gates.
+
 Hard-coded constants instead of `CVA6Cfg` (forces full-core re-verify/re-synth); breaking module
 boundaries or coupling pipeline stages (kills timing closure and floorplanning); skipping verification,
 compliance, DFT, or gate-level/power-aware checks (bugs surface post-silicon at maximal cost);

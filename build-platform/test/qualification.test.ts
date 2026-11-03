@@ -253,6 +253,7 @@ test.skipIf(!hasBinary("python3") && !hasBinary("python"))("isolated L2 proxy re
   const python = hasBinary("python3") ? "python3" : "python";
   const script = `
 import hashlib, importlib.util, pathlib, sys, tempfile
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]).resolve().parent))
 spec = importlib.util.spec_from_file_location("th_proxy", sys.argv[1])
 proxy = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(proxy)

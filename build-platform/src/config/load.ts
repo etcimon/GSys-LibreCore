@@ -16,6 +16,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { deepMerge } from "../util/object.ts";
+import { storamicConfigIssues } from "../tooling/storamic.ts";
 import { DEFAULT_CONFIG } from "./defaults.ts";
 import { EVIDENCE_KINDS, type BuildConfigInput, type ResolvedBuildConfig, type QualificationRequirement, type TestSuite } from "./schema.ts";
 
@@ -123,6 +124,7 @@ async function importConfigModule(path: string): Promise<BuildConfigInput> {
 export function validateConfig(config: ResolvedBuildConfig): void {
   const issues: string[] = [];
   const { soc, simulation, tests, vendor } = config;
+  issues.push(...storamicConfigIssues(soc));
 
   const { motherboard } = config;
   const coreLower = soc.coreConfig.toLowerCase();

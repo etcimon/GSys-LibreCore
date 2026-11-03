@@ -110,6 +110,11 @@ export interface SocConfig {
    * DRAM-class define chain (AiIslandLatencyDefault by default).
    */
   aiIslandCfg?: string;
+  storamic?: {
+    enable: boolean;
+    profile: "skeleton";
+    maxSticks: number;
+  };
 }
 
 /** One generated SI package pin (see tooling/aiOverlay.ts). */

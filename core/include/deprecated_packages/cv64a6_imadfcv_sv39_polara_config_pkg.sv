@@ -8,6 +8,7 @@
 // Original Author: Jean-Roch COULON - Thales
 
 
+// Modified by: Etienne Cimon
 package cva6_config_pkg;
 
   localparam CVA6ConfigXlen = 64;
@@ -78,6 +79,24 @@ package cva6_config_pkg;
   localparam CVA6ConfigRvfiTrace = 1;
 
   localparam config_pkg::cva6_user_cfg_t cva6_cfg = '{
+      StoramicEn: bit'(0),
+      BPBaseHash: bit'(0),
+      CoreSleepGate: bit'(0),
+      CohMaxOutstanding: unsigned'(0),
+      SmtDrainForceCycles: unsigned'(256),
+      DeepSpecEn: bit'(0),
+      L2CmoEn: bit'(0),
+      L2PostedWriteEn: bit'(0),
+      L2WriteTrackDepth: unsigned'(4),
+      L2ReadTrackDepth: unsigned'(4),
+      L2PrefetchEn: bit'(0),
+      L2PfStreams: unsigned'(0),
+      L2PfDistance: unsigned'(0),
+      L2PfStrideEn: bit'(0),
+      L2PfMshrReserve: unsigned'(0),
+      L2PfMaxOutstanding: unsigned'(0),
+      L2PfQuiet: unsigned'(0),
+      L3PrefetchEn: bit'(0),
       XLEN: unsigned'(CVA6ConfigXlen),
       VLEN: unsigned'(64),
       FpgaEn: bit'(0),  // for Xilinx and Altera

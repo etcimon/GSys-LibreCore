@@ -45,6 +45,7 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
   },
 
   soc: {
+    storamic: { enable: false, profile: "skeleton", maxSticks: 1 },
     // Aligned with AGENTS-configuration.md §1.1 (router-class target of record).
     // Open-PDK study (sky130/gf180) is for flow bring-up only — see physicalDesign.
     coreConfig: "cv64a6_imafdc_sv39",
@@ -165,6 +166,18 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
     // extra dependency is present. Scripts read their own DV_TARGET default, so
     // dvTarget is only pinned where it documents that same default.
     suites: [
+      {
+        id: "storamic-remote-leaf",
+        description: "First-party Storamic refusal/configuration leaf on an isolated remote snapshot; not media or CXL qualification.",
+        script: "verif/tb/storamic/run-remote.sh",
+        group: "directed",
+        target: "g6lc64_smt2",
+        dvSimulators: "none",
+        tools: [],
+        openSource: true,
+        optional: true,
+        execution: "remote-proxy",
+      },
       {
         id: "apu-profile-audit",
         description: "Bounded static Vulkan capability audit; expected to fail until the experimental APU profile meets the checked requirements. Not RTL or CTS qualification.",

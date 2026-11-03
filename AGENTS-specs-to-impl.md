@@ -16,7 +16,45 @@ matching row here so the spec→code answer stays one hop away.
 
 ---
 
-## Hyp8 r114 — SC retry verdict owns the returned result
+## Storamic M0 — optional memory-backend refusal foundation
+
+This is a SoC memory attachment, not a new instruction or an ISA compliance
+promotion. `core/include/config_pkg.sv` adds default-off `StoramicEn` to user and
+derived configurations and checks enabled AXI geometry. `build_config_pkg.sv`
+propagates the field and explicit overlay; existing configuration literals remain
+off. Primary-memory conflicts belong to `g6lc_storamic_soc_cfg_pkg` and
+`corev_apu/storamic/g6lc_storamic_attach.sv`, not the CPU pipeline. The adapter
+now preserves the full AW/W/AR payload and shapes the native interface — ST-011A
+wire/shape groundwork, still without memory, ATOP or control-path semantics.
+Standalone `g6lc_storamic/` now implements the contract-v2 typed off/refuse/model
+profile: `StoramicModel` binds `g6lc_storamic_axi_memory` through an explicit
+external memory seam in `g6lc_storamic_top` — a one-region verification path,
+not a native or physical-media grant.
+
+`corev_apu/src/g6lc_ai_dram_backend.sv` selects the adapter while preserving its
+old disabled instance hierarchy. The testharness passes the core flag; physical
+board wrappers reject unsupported selection. `g6lc_storamic/rtl/` implements a
+first-party bounded AXI/AXI-Lite refusal engine and inactive pads, with one
+outstanding read and write, retained IDs, declared burst lengths and reset abort.
+No media arrays, discovery engine, block transport, protected persistence,
+VirtIO device or working physical backend is implemented. No ISA string,
+device-tree capacity or new MMIO/IRQ node is advertised.
+
+Request-service readiness is now distinct from media readiness. The native join
+uses `service_ready_o`, allowing an error response without initialized RAM; AI
+media status retains `init_done_o`. Legacy backends keep their original admission
+signal. The change adds only a configuration-constant/reset readiness expression,
+with no new state, clock, CDC, memory, ISA or DTS capacity. Full native atomic,
+preload and board qualification remain open.
+
+Timing review: only bounded counters/ID registers and constant pad outputs are
+added to the selected leaf; no new clock/CDC, SRAM array or pipeline-stage claim.
+The native adapter carries testmode; scan-cell insertion and physical timing
+remain target gates. Normative contracts are under `g6lc_storamic/architecture/`;
+the product/SoC outline is `architecture/storamic/README.md`. All QEMU
+implementation remains exclusively owned by `g6lc_qemu/`.
+
+## Hyp8 r114 - SC retry verdict owns the returned result
 
 The hyp8 `core/cache_subsystem/wt_dcache_missunit.sv` now updates LR/SC
 backoff from the registered SC result in `AMO_RESULT`, where the client

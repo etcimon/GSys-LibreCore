@@ -43,6 +43,7 @@ deliberately **do not restate** the feature guides in `agents/guides/` — they 
 
 | Directory | Growth axis | Nature | Primary guide |
 |---|---|---|---|
+| `storamic/` | First-party modular RAM/flash subsystem, native AXI attachment and CXL 2.0 target | Default-off refusal foundation; no usable media or CXL qualification | `g6lc_storamic/architecture/README.md` + `uncore/storamic.md` |
 | `branch-prediction/` | More / smarter predictors (gshare, TAGE, loop, indirect) | Microarchitectural, in-core | `agents/guides/AGENTS-branch-prediction.md` |
 | `speculative-execution/` | **FSE** deep window + recovery plan (`full-speculation-architecture.md`, `UPDATE-PLAN.md`); `DeepSpecEn` S1 | Microarchitectural, in-core | `agents/guides/AGENTS-speculation.md` |
 | `out-of-order/` | Slice-OoO (MLP) then full rename/ROB/LSQ multi-issue OoO | Microarchitectural, in-core | `agents/guides/AGENTS-speculation.md` + `router-core-upgrade-program.md` |

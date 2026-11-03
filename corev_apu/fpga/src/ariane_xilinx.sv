@@ -14,6 +14,7 @@
 `include "rvfi_types.svh"
 `include "iti_types.svh"
 
+// Modified by: Etienne Cimon
 module ariane_xilinx (
 // WARNING: Do not define input parameters. This causes the FPGA build to fail.
 `ifdef GENESYSII
@@ -210,6 +211,10 @@ endfunction
 
 // CVA6 Xilinx configuration
 localparam config_pkg::cva6_cfg_t CVA6Cfg = build_fpga_config(cva6_config_pkg::cva6_cfg);
+
+if (CVA6Cfg.StoramicEn) begin : gen_storamic_unbound
+  initial $fatal(1, "STORAMIC_BOARD_UNSUPPORTED");
+end
 
 localparam type rvfi_instr_t = `RVFI_INSTR_T(CVA6Cfg);
 //localparam type rvfi_csr_elmt_t = `RVFI_CSR_ELMT_T(CVA6Cfg);
