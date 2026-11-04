@@ -2311,8 +2311,11 @@ module wt_dcache_wbuffer
           (wr_gi && wrv_be[k] && (G6LCCfg.DATA_USER_EN != 0))
               ? wrv_user[k*8+:8] : wbuffer_q[gi].user[k*8+:8];
     end
+    // A merge keeps the live entry's tag-check result, matching hit_oh
+    // below: clearing it let an in-flight TX of the entry ack unchecked, so
+    // its bytes never reached L1 (main tree: ST-011B CPU-only RAW witness).
     assign wbuffer_d[gi].checked =
-        wr_gi ? 1'b0 : valid_all_gone ? 1'b0 : checked_mid;
+        (wr_gi && !wrv_merge) ? 1'b0 : valid_all_gone ? 1'b0 : checked_mid;
     assign wbuffer_d[gi].hit_oh =
         (chk_gi && (|wbuffer_q[gi].valid)) ? rd_hit_oh_q
         : (wr_gi && !wrv_merge) ? '0

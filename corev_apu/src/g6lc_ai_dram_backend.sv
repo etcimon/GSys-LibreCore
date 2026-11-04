@@ -25,6 +25,8 @@ module g6lc_ai_dram_backend
 #(
     parameter int unsigned DramClass      = AI_DRAM_SIM_AXI,
     parameter bit          StoramicEn    = 1'b0,
+    // ST-011B: absolute base of the Storamic model window (DRAM base).
+    parameter logic [63:0] StoramicModelBase = 64'h8000_0000,
     parameter int unsigned AXI_ID_WIDTH   = 4,
     parameter int unsigned AXI_ADDR_WIDTH = 64,
     parameter int unsigned AXI_DATA_WIDTH = 64,
@@ -42,6 +44,9 @@ module g6lc_ai_dram_backend
     input  logic rst_sram_ni,
     input  logic testmode_i,
     AXI_BUS.Slave slave,
+    input g6lc_storamic_pkg::axil_req_t storamic_ctrl_req_i,
+    output g6lc_storamic_pkg::axil_resp_t storamic_ctrl_resp_o,
+    output logic storamic_irq_o,
     output logic init_done_o,
     output logic service_ready_o,
     // SoC-side occupancy (S5). Island CAP stays aggregate GEMM.
@@ -51,17 +56,34 @@ module g6lc_ai_dram_backend
 
   if (!StoramicEn) begin : gen_legacy_service_ready
     assign service_ready_o = init_done_o;
+    assign storamic_ctrl_resp_o = '0;
+    assign storamic_irq_o = 1'b0;
+    // pragma translate_off
+    always @(posedge clk_i) begin
+      if (rst_ni)
+        assert (!(storamic_ctrl_req_i.aw_valid ||
+                  storamic_ctrl_req_i.w_valid ||
+                  storamic_ctrl_req_i.ar_valid))
+          else $fatal(1, "STORAMIC_CTRL_REQ_WHILE_OFF");
+    end
+    // pragma translate_on
   end
 
+  // ST-010C: the native control window AXI-Lite seam + IRQ pass through to
+  // the Storamic attach block when enabled.
   if (StoramicEn) begin : gen_storamic
     assign ch_r_beats_o = '0;
     assign ch_w_beats_o = '0;
     g6lc_storamic_attach #(
       .Enable(StoramicEn), .DramClass(DramClass), .NrChannels(NrChannels),
       .IdWidth(AXI_ID_WIDTH), .AddrWidth(AXI_ADDR_WIDTH),
-      .DataWidth(AXI_DATA_WIDTH), .UserWidth(AXI_USER_WIDTH)
+      .DataWidth(AXI_DATA_WIDTH), .UserWidth(AXI_USER_WIDTH),
+      .ModelBase(StoramicModelBase), .ModelWords(NUM_WORDS)
     ) i_storamic (
-      .clk_i, .rst_ni, .testmode_i, .slave, .init_done_o, .service_ready_o
+      .clk_i, .rst_ni, .testmode_i, .slave,
+      .ctrl_req_i(storamic_ctrl_req_i), .ctrl_resp_o(storamic_ctrl_resp_o),
+      .irq_o(storamic_irq_o),
+      .init_done_o, .service_ready_o
     );
   end else if (DramClass == AI_DRAM_SIM_AXI && NrChannels == 1) begin : gen_sim_axi
     assign init_done_o = 1'b1;
@@ -88,6 +110,23 @@ module g6lc_ai_dram_backend
     logic [AXI_DATA_WIDTH-1:0]    wdata, rdata;
     logic [AXI_USER_WIDTH-1:0]    wuser, ruser;
 
+`ifdef G6LC_SIM_DRAM_DELAY
+    // Verification knob: delay every channel of the simulation DRAM by
+    // G6LC_SIM_DRAM_DELAY cycles (pulp axi_delayer) to expose latency-dependent
+    // behaviour in the cores' memory paths. Off by default.
+    AXI_BUS #(
+        .AXI_ADDR_WIDTH ( AXI_ADDR_WIDTH ), .AXI_DATA_WIDTH ( AXI_DATA_WIDTH ),
+        .AXI_ID_WIDTH   ( AXI_ID_WIDTH   ), .AXI_USER_WIDTH ( AXI_USER_WIDTH )
+    ) delayed ();
+    axi_delayer_intf #(
+        .AXI_ID_WIDTH ( AXI_ID_WIDTH ), .AXI_ADDR_WIDTH ( AXI_ADDR_WIDTH ),
+        .AXI_DATA_WIDTH ( AXI_DATA_WIDTH ), .AXI_USER_WIDTH ( AXI_USER_WIDTH ),
+        .FIXED_DELAY_INPUT ( `G6LC_SIM_DRAM_DELAY ),
+        .FIXED_DELAY_OUTPUT ( `G6LC_SIM_DRAM_DELAY )
+    ) i_sim_dram_delay (
+        .clk_i, .rst_ni, .slv ( slave ), .mst ( delayed )
+    );
+`endif
     axi2mem #(
         .AXI_ID_WIDTH   ( AXI_ID_WIDTH   ),
         .AXI_ADDR_WIDTH ( AXI_ADDR_WIDTH ),
@@ -96,7 +135,11 @@ module g6lc_ai_dram_backend
     ) i_axi2mem (
         .clk_i  ( clk_i      ),
         .rst_ni ( rst_ni     ),
+`ifdef G6LC_SIM_DRAM_DELAY
+        .slave  ( delayed    ),
+`else
         .slave  ( slave      ),
+`endif
         .req_o  ( req        ),
         .we_o   ( we         ),
         .addr_o ( addr       ),

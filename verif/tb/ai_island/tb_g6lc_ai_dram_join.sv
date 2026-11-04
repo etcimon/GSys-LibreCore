@@ -51,6 +51,7 @@ module tb_g6lc_ai_dram_join;
       .AXI_USER_WIDTH(UW), .AXI_USER_EN(0), .NUM_WORDS(NWORDS),
       .NrChannels(2), .ChanShift(6), .MaxAROut(2)
   ) i_mem (
+      .storamic_ctrl_req_i('0),
       .clk_i(clk), .rst_ni(rst_n), .rst_sram_ni(rst_n), .testmode_i(1'b0),
       .slave(mst), .init_done_o(), .ch_r_beats_o(ch_r), .ch_w_beats_o(ch_w)
   );
@@ -69,6 +70,7 @@ module tb_g6lc_ai_dram_join;
       .AXI_USER_WIDTH(UW), .AXI_USER_EN(0), .NUM_WORDS(NWORDS),
       .NrChannels(2), .ChanShift(6), .MaxAROut(2)
   ) i_wide_mem (
+      .storamic_ctrl_req_i('0),
       .clk_i(clk), .rst_ni(rst_n), .rst_sram_ni(rst_n), .testmode_i(1'b0),
       .slave(mstw), .init_done_o(), .ch_r_beats_o(ch_rw), .ch_w_beats_o(ch_ww)
   );
@@ -88,6 +90,7 @@ module tb_g6lc_ai_dram_join;
       .AXI_USER_WIDTH(UW), .AXI_USER_EN(0), .NUM_WORDS(NWORDS),
       .NrChannels(1), .ChanShift(6), .MaxAROut(2)
   ) i_sku_mem (
+      .storamic_ctrl_req_i('0),
       .clk_i(clk), .rst_ni(rst_n), .rst_sram_ni(rst_n), .testmode_i(1'b0),
       .slave(msts), .init_done_o(), .ch_r_beats_o(ch_rs), .ch_w_beats_o(ch_ws)
   );

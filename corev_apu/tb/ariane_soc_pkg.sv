@@ -73,8 +73,19 @@ package ariane_soc;
     EthernetBase = 64'h3000_0000,
     GPIOBase     = 64'h4000_0000,
     DRAMBase     = 64'h8000_0000,
-    HPSBase      = 64'hFF80_0000
+    HPSBase      = 64'hFF80_0000,
+    StoramicBase = 64'h5000_0000
   } soc_bus_start_t;
+
+  localparam logic[63:0] StoramicLength    = 64'h10_0000;
+  localparam logic[63:0] StoramicCtrlLength = 64'h1000;
+  // PLIC source ID; irq_sources index 9 (AI uses 7, APU 8). Virtio-blk
+  // apertures claim 11+ later.
+  localparam int unsigned StoramicIrqSource = 10;
+  // First virtio-blk transport page (StoramicBase + 0x1000) and its PLIC
+  // source ID (irq_sources index 10). ST-037B; DeviceID 0 until media exists.
+  localparam logic[63:0] StoramicVirtioOffset = 64'h1000;
+  localparam int unsigned StoramicVirtioIrqSource = 11;
 
   localparam NrRegion = 1;
   localparam logic [NrRegion-1:0][NB_PERIPHERALS-1:0] ValidRule = {{NrRegion * NB_PERIPHERALS}{1'b1}};

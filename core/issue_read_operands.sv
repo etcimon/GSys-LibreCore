@@ -1321,7 +1321,12 @@ module issue_read_operands
     end
     if (CVA6Cfg.RVA && lr_sc_pair_q) begin
       for (int unsigned p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin
-        if (issue_instr_i[p].fu == STORE && !ariane_pkg::is_amo_sc(issue_instr_i[p].op)) begin
+        // Only plain stores wait for the SC. An AMO (including a further
+        // LR, which reopens the window, and the SC itself) is never held:
+        // with in-order issue `lr.d; lr.d; sc.d` otherwise wedged forever,
+        // because the second LR waited for an SC that is behind it
+        // (verif/tests/custom/hyp8_amo_ready_order.S v3).
+        if (issue_instr_i[p].fu == STORE && !ariane_pkg::is_amo(issue_instr_i[p].op)) begin
           issue_ack_o[p] = 1'b0;
         end
       end
@@ -1369,7 +1374,11 @@ module issue_read_operands
       // issues, so nothing retires behind it. still_issued is cleared when the
       // LR retires or is cancelled, which is precisely when the reservation it
       // was protecting can no longer be completed by a younger SC.
-      if (CVA6Cfg.OoOEn && lr_sc_pair_q && !fwd_i.still_issued[lr_sc_tid_q])
+      // Applied in-order too: `lr; sd; sc` is legal, and with in-order issue
+      // the plain store would otherwise wait forever for the SC behind it
+      // (verif/tests/custom/hyp8_lrsc_store.S). Closing at LR retirement
+      // still holds back stores while the LR is in flight.
+      if (lr_sc_pair_q && !fwd_i.still_issued[lr_sc_tid_q])
         lr_sc_pair_d = 1'b0;
     end
     if (flush_i) lr_sc_pair_d = 1'b0;

@@ -79,7 +79,13 @@ module g6lc_cluster
     input  logic                      ai_dma_inval_valid_i,
     input  logic [AXI_ADDR_WIDTH-1:0] ai_dma_inval_addr_i,
     output logic                      ai_dma_inval_ready_o,
-    output logic                      ai_dma_inval_done_o
+    output logic                      ai_dma_inval_done_o,
+    // ST-037C step 5: Storamic VirtIO DMA write invalidations (64-byte
+    // blocks), same CMO engine, op 0 = inval only.
+    input  logic                      storamic_dma_inval_valid_i,
+    input  logic [AXI_ADDR_WIDTH-1:0] storamic_dma_inval_addr_i,
+    output logic                      storamic_dma_inval_ready_o,
+    output logic                      storamic_dma_inval_done_o
 );
 
   localparam int unsigned NC = (NR_CORES < 1) ? 1 : NR_CORES;
@@ -799,8 +805,12 @@ module g6lc_cluster
   // inv_to_core at lowest priority (hub > inclusive victim > cmo).
   // The engine exists for the cores' CBOs (L2CmoEn) or for the island's DMA
   // invalidations (AiCfg.DmaInvalEn); both share it.
-  localparam bit CMO_EN = CVA6Cfg.L2CmoEn || CVA6Cfg.AiCfg.DmaInvalEn;
-  localparam int unsigned CMO_NW = NC + (CVA6Cfg.AiCfg.DmaInvalEn ? 1 : 0);
+  localparam bit AiInval = CVA6Cfg.AiCfg.DmaInvalEn;
+  localparam bit StoInval = CVA6Cfg.StoramicIoEn;
+  localparam bit CMO_EN = CVA6Cfg.L2CmoEn || AiInval || StoInval;
+  localparam int unsigned CMO_NW = NC + (AiInval ? 1 : 0) + (StoInval ? 1 : 0);
+  // Writer index of the AI DMA port; 0 when absent so no select leaves range.
+  localparam int unsigned AiIdx = AiInval ? NC : 0;
   logic [CMO_NW-1:0]         cmo_w_v, cmo_w_rdy, cmo_w_done;
   logic [1:0]                cmo_w_op   [CMO_NW];
   logic [AXI_ADDR_WIDTH-1:0] cmo_w_addr [CMO_NW];
@@ -812,14 +822,32 @@ module g6lc_cluster
       cmo_req_rdy[c] = cmo_w_rdy[c];
       cmo_done[c]    = cmo_w_done[c];
     end
-    if (CVA6Cfg.AiCfg.DmaInvalEn) begin
-      cmo_w_v[CMO_NW-1]    = ai_dma_inval_valid_i;
-      cmo_w_op[CMO_NW-1]   = 2'd0;                 // inval only
-      cmo_w_addr[CMO_NW-1] = ai_dma_inval_addr_i;
+    if (AiInval) begin
+      cmo_w_v[AiIdx]    = ai_dma_inval_valid_i;
+      cmo_w_op[AiIdx]   = 2'd0;                    // inval only
+      cmo_w_addr[AiIdx] = ai_dma_inval_addr_i;
+    end
+    if (StoInval) begin
+      cmo_w_v[CMO_NW-1]    = storamic_dma_inval_valid_i;   // last writer
+      cmo_w_op[CMO_NW-1]   = 2'd0;                         // inval only
+      cmo_w_addr[CMO_NW-1] = storamic_dma_inval_addr_i;
     end
   end
-  assign ai_dma_inval_ready_o = CVA6Cfg.AiCfg.DmaInvalEn ? cmo_w_rdy[CMO_NW-1]  : 1'b0;
-  assign ai_dma_inval_done_o  = CVA6Cfg.AiCfg.DmaInvalEn ? cmo_w_done[CMO_NW-1] : 1'b0;
+  // Generate-time selection keeps writer indices in range in every build.
+  if (AiInval) begin : gen_ai_inval_port
+    assign ai_dma_inval_ready_o = cmo_w_rdy[AiIdx];
+    assign ai_dma_inval_done_o  = cmo_w_done[AiIdx];
+  end else begin : gen_no_ai_inval_port
+    assign ai_dma_inval_ready_o = 1'b0;
+    assign ai_dma_inval_done_o  = 1'b0;
+  end
+  if (StoInval) begin : gen_sto_inval_port
+    assign storamic_dma_inval_ready_o = cmo_w_rdy[CMO_NW-1];
+    assign storamic_dma_inval_done_o  = cmo_w_done[CMO_NW-1];
+  end else begin : gen_no_sto_inval_port
+    assign storamic_dma_inval_ready_o = 1'b0;
+    assign storamic_dma_inval_done_o  = 1'b0;
+  end
   if (CMO_EN) begin : gen_cmo
     g6lc_l3_inclusive_inv #(
         .InclusiveEn   (1'b1),

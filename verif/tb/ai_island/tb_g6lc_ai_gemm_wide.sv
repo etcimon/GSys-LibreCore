@@ -113,6 +113,7 @@ module tb_g6lc_ai_gemm_wide;
       .AXI_USER_WIDTH(UW), .AXI_USER_EN(0), .NUM_WORDS(NWORDS),
       .NrChannels(1), .ChanShift(6), .MaxAROut(2)
   ) i_mem0 (
+      .storamic_ctrl_req_i('0),
       .clk_i(clk), .rst_ni(rst_n), .rst_sram_ni(rst_n), .testmode_i(1'b0),
       .slave(mst0), .init_done_o(init0), .ch_r_beats_o(ch_r0), .ch_w_beats_o(ch_w0)
   );
@@ -148,6 +149,7 @@ module tb_g6lc_ai_gemm_wide;
       .AXI_USER_WIDTH(UW), .AXI_USER_EN(0), .NUM_WORDS(NWORDS),
       .NrChannels(1), .ChanShift(6), .MaxAROut(2)
   ) i_mem1 (
+      .storamic_ctrl_req_i('0),
       .clk_i(clk), .rst_ni(rst_n), .rst_sram_ni(rst_n), .testmode_i(1'b0),
       .slave(mst1), .init_done_o(init1), .ch_r_beats_o(ch_r1), .ch_w_beats_o(ch_w1)
   );
@@ -183,6 +185,7 @@ module tb_g6lc_ai_gemm_wide;
       .AXI_USER_WIDTH(UW), .AXI_USER_EN(0), .NUM_WORDS(NWORDS / 8),
       .NrChannels(1), .ChanShift(6), .MaxAROut(2)
   ) i_mem2 (
+      .storamic_ctrl_req_i('0),
       .clk_i(clk), .rst_ni(rst_n), .rst_sram_ni(rst_n), .testmode_i(1'b0),
       .slave(mst2), .init_done_o(init2), .ch_r_beats_o(ch_r2), .ch_w_beats_o(ch_w2)
   );

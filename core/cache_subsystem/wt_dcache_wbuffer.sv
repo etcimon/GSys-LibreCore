@@ -1244,7 +1244,20 @@ module wt_dcache_wbuffer
                     (wr_cl_inv_i && (wtag_comp[rtrn_ptr] == wr_cl_idx_i));
 
   assign wr_ptr = (|wbuffer_hit_oh) ? hit_ptr : next_ptr;
-  assign rdy    = (|wbuffer_hit_oh) | (~full);
+  // I/O (non-cacheable) stores are never merged into a live entry: device
+  // registers must see each store as issued, at its own size (ST-037C
+  // step 4: three 32-bit VirtIO register stores left as one 64-bit write).
+  // A second store to the same word waits until the first has drained.
+  logic req_nc;
+  assign req_nc = !config_pkg::is_inside_cacheable_regions(
+      CVA6Cfg,
+      {
+        {64 - CVA6Cfg.DCACHE_TAG_WIDTH - CVA6Cfg.DCACHE_INDEX_WIDTH{1'b0}},
+        req_port_i.address_tag,
+        req_port_i.address_index
+      }
+  );
+  assign rdy    = (|wbuffer_hit_oh) ? !req_nc : (~full);
 
   // next free entry in the buffer
   lzc #(
@@ -1440,7 +1453,13 @@ module wt_dcache_wbuffer
         ni_pending_d[wr_ptr] = is_ni;
         void_keep_d[wr_ptr] = 1'b0;
 
-        wbuffer_d[wr_ptr].checked = 1'b0;
+        // A merge into a live entry for the same word keeps its tag-check
+        // result: the cache line's presence does not change with a store, and
+        // invalidations/refills already clear `checked` (inval_hit). Clearing
+        // it here made an in-flight TX of that entry ack as unchecked, so its
+        // bytes were never written to L1 and the line kept stale data
+        // (ST-037C/ST-011B: Storamic model memory, CPU-only RAW check).
+        if (!(|wbuffer_hit_oh)) wbuffer_d[wr_ptr].checked = 1'b0;
         wbuffer_d[wr_ptr].wtag = {
           req_port_i.address_tag,
           req_port_i.address_index[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.XLEN_ALIGN_BYTES]

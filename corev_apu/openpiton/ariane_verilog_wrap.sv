@@ -260,7 +260,7 @@ module ariane_verilog_wrap
 
   localparam cva6_cfg_t cva6_cfg = build_config_pkg::build_config(cva6_user_cfg);
 
-  if (cva6_cfg.StoramicEn) begin : gen_storamic_unbound
+  if (cva6_cfg.StoramicEn || cva6_cfg.StoramicIoEn) begin : gen_storamic_unbound
     initial $fatal(1, "STORAMIC_BOARD_UNSUPPORTED");
   end
 

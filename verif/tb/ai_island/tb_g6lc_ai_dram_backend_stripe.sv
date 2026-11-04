@@ -48,6 +48,7 @@ module tb_g6lc_ai_dram_backend_stripe
       .NrChannels     ( NCH ),
       .ChanShift      ( AI_DRAM_CHAN_SHIFT_DEFAULT )
   ) i_dut (
+      .storamic_ctrl_req_i('0),
       .clk_i        ( clk ),
       .rst_ni       ( rst_ni ),
       .rst_sram_ni  ( rst_ni ),

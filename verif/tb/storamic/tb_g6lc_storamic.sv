@@ -42,7 +42,7 @@ module tb_g6lc_storamic #(
     .mem_ready_i(1'b1), .mem_req_o(mem_req), .mem_gnt_i(1'b1),
     .mem_we_o(mem_we), .mem_addr_o(mem_addr), .mem_wdata_o(mem_data),
     .mem_be_o(mem_be), .mem_tag_o(mem_tag),
-    .mem_rvalid_i(1'b1), .mem_rdata_i('1), .mem_error_i(1'b0), .mem_tag_i('1),
+    .mem_rvalid_i(1'b1), .mem_rdata_i('1), .mem_error_i(1'b0), .mem_tag_i('1), .irq_o(), .stray_i(1'b0),
     .media_ready_o(media_ready), .pad_o(pads)
   );
   // An apparently ready external binding must never select the model implicitly.
@@ -126,8 +126,9 @@ module tb_g6lc_storamic #(
     repeat (3) tick();
     rst_n = 1'b1;
     tick();
-    assert (ContractVersion == 2 &&
+    assert (ContractVersion == 4 &&
             cfg_legal(StoramicOff) && cfg_legal(StoramicSkeleton) && cfg_legal(StoramicModel) &&
+            cfg_legal(StoramicMapped) &&
             !backend_legal(1'b1, 1'b1) && backend_legal(1'b0, 1'b1))
       else $fatal(1, "STORAMIC_LEGALITY");
     if ($test$plusargs("oracle_negative"))
@@ -148,15 +149,32 @@ module tb_g6lc_storamic #(
         write_burst(16, 8'h01);
       end
     join
+    ctrl_req.ar.addr = 64'h0;
+    ctrl_req.aw.addr = 64'h0;
     ctrl_req.ar_valid = 1'b1;
     ctrl_req.aw_valid = 1'b1;
     tick();
     ctrl_req.ar_valid = 1'b0;
     ctrl_req.aw_valid = 1'b0;
     repeat (3) begin
-      assert (ctrl_resp.r_valid && ctrl_resp.r.resp == RespSlvErr &&
-              ctrl_resp.r.data == 0 && !ctrl_resp.b_valid)
+      // ID is mapped in every profile: OKAY with the magic, not a refusal.
+      assert (ctrl_resp.r_valid && ctrl_resp.r.resp == 2'b00 &&
+              ctrl_resp.r.data == 32'h5354_524D && !ctrl_resp.b_valid)
         else $fatal(1, "STORAMIC_CTRL_READ");
+      tick();
+    end
+    // Retire the held ID response, then an unmapped ctrl read still refuses.
+    ctrl_req.r_ready = 1'b1;
+    tick();
+    ctrl_req.r_ready = 1'b0;
+    ctrl_req.ar.addr = 64'h014;
+    ctrl_req.ar_valid = 1'b1;
+    tick();
+    ctrl_req.ar_valid = 1'b0;
+    repeat (3) begin
+      assert (ctrl_resp.r_valid && ctrl_resp.r.resp == RespSlvErr &&
+              ctrl_resp.r.data == 0)
+        else $fatal(1, "STORAMIC_CTRL_READ_UNMAPPED");
       tick();
     end
     ctrl_req.w_valid = 1'b1;

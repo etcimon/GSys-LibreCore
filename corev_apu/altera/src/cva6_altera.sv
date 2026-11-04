@@ -111,7 +111,7 @@ endfunction
 // CVA6 Intel configuration
 localparam config_pkg::cva6_cfg_t CVA6Cfg = build_fpga_config(cva6_config_pkg::cva6_cfg);
 
-if (CVA6Cfg.StoramicEn) begin : gen_storamic_unbound
+if (CVA6Cfg.StoramicEn || CVA6Cfg.StoramicIoEn) begin : gen_storamic_unbound
   initial $fatal(1, "STORAMIC_BOARD_UNSUPPORTED");
 end
 

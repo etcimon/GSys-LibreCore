@@ -838,6 +838,15 @@ module store_buffer
       be_m          = g1ao_hold_be_q;
       g1ao_hold_hit = 1'b1;
     end
+    // I/O (non-cacheable) loads are never forwarded: a device register's
+    // read value is not the last value written to it, and the load must
+    // reach the device (ST-037C step 4: a VirtIO Status read after a Status
+    // write was answered from the store buffer).
+    if (load_paddr_valid_i && !config_pkg::is_inside_cacheable_regions(
+            CVA6Cfg, 64'(load_paddr_i))) begin
+      data_m = '0;
+      be_m   = '0;
+    end
     st_fwd_data_o  = data_m;
     st_fwd_be_o    = be_m;
     // R3a cont.13: keep STQ forward on; nofwd + store-side sticky still −4,

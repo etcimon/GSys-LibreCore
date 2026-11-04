@@ -1,6 +1,17 @@
 ${CVA6_REPO_DIR}/g6lc_storamic/rtl/include/g6lc_storamic_cfg_pkg.sv
 ${CVA6_REPO_DIR}/g6lc_storamic/rtl/include/g6lc_storamic_pkg.sv
 ${CVA6_REPO_DIR}/g6lc_storamic/rtl/include/g6lc_storamic_pad_pkg.sv
+${CVA6_REPO_DIR}/g6lc_storamic/rtl/fabric/g6lc_storamic_region_pkg.sv
+${CVA6_REPO_DIR}/g6lc_storamic/rtl/discovery/g6lc_storamic_discovery_pkg.sv
 ${CVA6_REPO_DIR}/g6lc_storamic/rtl/frontend/g6lc_storamic_axi_refuse.sv
 ${CVA6_REPO_DIR}/g6lc_storamic/rtl/frontend/g6lc_storamic_axi_memory.sv
+${CVA6_REPO_DIR}/g6lc_storamic/rtl/fabric/g6lc_storamic_slot_mux.sv
+${CVA6_REPO_DIR}/g6lc_storamic/rtl/discovery/g6lc_storamic_sync.sv
+${CVA6_REPO_DIR}/g6lc_storamic/rtl/discovery/g6lc_storamic_discovery.sv
+${CVA6_REPO_DIR}/g6lc_storamic/rtl/discovery/g6lc_storamic_discovery_set.sv
+${CVA6_REPO_DIR}/g6lc_storamic/rtl/frontend/g6lc_storamic_regs.sv
+${CVA6_REPO_DIR}/g6lc_storamic/rtl/host/virtio/g6lc_storamic_virtio_mmio.sv
+${CVA6_REPO_DIR}/g6lc_storamic/rtl/host/virtio/g6lc_storamic_virtio_ring.sv
+${CVA6_REPO_DIR}/g6lc_storamic/rtl/host/virtio/g6lc_storamic_virtio_blk.sv
+${CVA6_REPO_DIR}/g6lc_storamic/rtl/host/virtio/g6lc_storamic_virtio_dev.sv
 ${CVA6_REPO_DIR}/g6lc_storamic/rtl/g6lc_storamic_top.sv

@@ -37,6 +37,10 @@ module ariane_peripherals #(
     // LibreCore APU guest virtio IRQ → PLIC source 9 / irq_sources[8]
     // (tie 0 until testharness instantiates g6lc_apu_th)
     input  logic       apu_irq_i       ,
+    // Storamic control block IRQ → PLIC source 10 / irq_sources[9]
+    input  logic       storamic_irq_i  ,
+    // Storamic virtio-blk transport 0 IRQ → PLIC source 11 / irq_sources[10]
+    input  logic       storamic_virtio_irq_i,
     // UART
     input  logic       rx_i            ,
     output logic       tx_o            ,
@@ -68,8 +72,12 @@ module ariane_peripherals #(
     // Source 8: Xg6lcai island. Source 9: APU guest virtio. Rest unused.
     assign irq_sources[7] = ai_irq_i;
     assign irq_sources[8] = apu_irq_i;
-    if (ariane_soc::NumSources > 9)
-      assign irq_sources[ariane_soc::NumSources-1:9] = '0;
+    // Storamic control block (ST-010C) → PLIC source 10 / irq_sources[9].
+    assign irq_sources[9] = storamic_irq_i;
+    // Storamic virtio-blk transport 0 (ST-037B) → PLIC source 11.
+    assign irq_sources[10] = storamic_virtio_irq_i;
+    if (ariane_soc::NumSources > 11)
+      assign irq_sources[ariane_soc::NumSources-1:11] = '0;
 
     REG_BUS #(
         .ADDR_WIDTH ( 32 ),

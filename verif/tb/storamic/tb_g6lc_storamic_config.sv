@@ -16,6 +16,27 @@ module tb_g6lc_storamic_config #(parameter bit BadGeometry = 1'b0);
 `else
     assert (!Cfg.StoramicEn) else $fatal(1, "STORAMIC_DEFAULT_NOT_PROPAGATED");
 `endif
+    // ST-008C: ProfileMapped contract legality.
+    assert (g6lc_storamic_cfg_pkg::cfg_legal(
+        g6lc_storamic_cfg_pkg::StoramicMapped))
+      else $fatal(1, "STORAMIC_MAPPED_LEGAL");
+    assert (!g6lc_storamic_cfg_pkg::cfg_legal('{
+        Enable: 1'b0, Profile: g6lc_storamic_cfg_pkg::ProfileMapped,
+        MaxSticks: 1, RequestedMediaCaps: '0, ModelBase: '0, ModelBytes: '0}))
+      else $fatal(1, "STORAMIC_MAPPED_DISABLE");
+    assert (!g6lc_storamic_cfg_pkg::cfg_legal('{
+        Enable: 1'b1, Profile: g6lc_storamic_cfg_pkg::ProfileMapped,
+        MaxSticks: 1, RequestedMediaCaps: '0, ModelBase: '0,
+        ModelBytes: 64'd65536}))
+      else $fatal(1, "STORAMIC_MAPPED_MODELBYTES");
+    assert (!g6lc_storamic_cfg_pkg::cfg_legal('{
+        Enable: 1'b1, Profile: g6lc_storamic_cfg_pkg::ProfileMapped,
+        MaxSticks: 0, RequestedMediaCaps: '0, ModelBase: '0, ModelBytes: '0}))
+      else $fatal(1, "STORAMIC_MAPPED_STICKS0");
+    assert (!g6lc_storamic_cfg_pkg::cfg_legal('{
+        Enable: 1'b1, Profile: g6lc_storamic_cfg_pkg::ProfileMapped,
+        MaxSticks: 9, RequestedMediaCaps: '0, ModelBase: '0, ModelBytes: '0}))
+      else $fatal(1, "STORAMIC_MAPPED_STICKS9");
     $display("STORAMIC_CORE_CONFIG_PASS");
     $finish;
   end

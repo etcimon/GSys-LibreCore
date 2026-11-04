@@ -27,11 +27,17 @@ def main():
     stages = args.stages.split(",")
     if len(stages) != len(set(stages)) or not set(stages) <= {
         "protocol", "config", "integration", "model", "synth", "formal",
-        "model-synth", "model-formal",
+        "model-synth", "model-formal", "region", "map", "map-synth",
+        "map-formal", "discovery", "discovery-synth", "discovery-formal",
+        "regs", "regs-synth", "regs-formal", "ctrl", "ctrl-synth",
+        "virtio", "virtio-synth", "virtio-formal",
+        "vring", "vring-synth", "vring-formal", "vblk", "vblk-synth", "vdev", "vdev-synth", "vdma", "vblk-formal",
     }:
         parser.error("invalid or duplicate stages")
     root = Path(__file__).resolve().parents[3]
-    if set(stages) & {"protocol", "config", "integration", "model"}:
+    if set(stages) & {"protocol", "config", "integration", "model", "region",
+                      "map", "discovery", "regs", "ctrl", "virtio",
+                      "vring", "vblk", "vdev", "vdma"}:
         if not (args.runtime_json or args.runtime_record) or not args.runtime_header_sha256:
             print("Incomplete: provide a validated runtime record and --runtime-header-sha256")
             return 4
@@ -55,6 +61,22 @@ def main():
         "verif/tb/storamic/run-remote.sh",
         "verif/regress/remote/testharness_proxy.py",
         "verif/tb/storamic/tb_g6lc_storamic_config.sv",
+        "verif/tb/storamic/tb_g6lc_storamic_region.sv",
+        "verif/tb/storamic/tb_g6lc_storamic_map.sv",
+        "verif/tb/storamic/formal_g6lc_storamic_map.sv",
+        "verif/tb/storamic/tb_g6lc_storamic_discovery.sv",
+        "verif/tb/storamic/formal_g6lc_storamic_discovery.sv",
+        "verif/tb/storamic/tb_g6lc_storamic_regs.sv",
+        "verif/tb/storamic/formal_g6lc_storamic_regs.sv",
+        "verif/tb/storamic/tb_g6lc_storamic_virtio_mmio.sv",
+        "verif/tb/storamic/formal_g6lc_storamic_virtio_mmio.sv",
+        "verif/tb/storamic/tb_g6lc_storamic_virtio_ring.sv",
+        "verif/tb/storamic/formal_g6lc_storamic_virtio_ring.sv",
+        "verif/tb/storamic/tb_g6lc_storamic_virtio_blk.sv",
+        "verif/tb/storamic/tb_g6lc_storamic_virtio_dev.sv",
+        "verif/tb/storamic/tb_g6lc_storamic_dma_axi.sv",
+        "verif/tb/storamic/formal_g6lc_storamic_virtio_blk.sv",
+        "verif/tb/storamic/tb_g6lc_storamic_ctrl_bridge.sv",
         "verif/tb/storamic/tb_g6lc_storamic_soc.sv",
         "verif/tb/storamic/tb_g6lc_storamic_model.sv",
         "verif/tb/storamic/g6lc_storamic_sram_model.sv",
@@ -65,6 +87,12 @@ def main():
         "core/include/build_config_pkg.sv",
         "corev_apu/include/g6lc_storamic_soc_cfg_pkg.sv",
         "corev_apu/storamic/g6lc_storamic_attach.sv",
+        "corev_apu/storamic/g6lc_storamic_ctrl_bridge.sv",
+        "corev_apu/storamic/g6lc_storamic_dma_axi.sv",
+        "corev_apu/storamic/g6lc_storamic_sim_mem.sv",
+        "vendor/pulp-platform/tech_cells_generic/src/rtl/tc_sram.sv",
+        "common/local/util/tc_sram_wrapper.sv",
+        "common/local/util/sram.sv",
         "corev_apu/include/g6lc_ai_island_cfg_pkg.sv",
         "corev_apu/src/g6lc_ai_dram_backend.sv",
         "corev_apu/src/g6lc_ai_dram_join.sv",
@@ -110,15 +138,23 @@ def main():
     if bun is None:
         print("Incomplete: Bun is required for the configured remote gateway")
         return 4
+    # The source manifest travels as an uploaded file, not as --env text: with
+    # the config sweep the inline JSON exceeded the Windows command-line limit
+    # and the launch failed without creating a run.
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    manifest_file = dest.parent / "storamic-run-manifest.json"
+    manifest_file.write_text(json.dumps({
+        "sources": manifest,
+        "source_paths": {
+            path.name: (path.relative_to(root).as_posix() if path.is_relative_to(root)
+                        else "external-input/" + path.name) for path in sources},
+    }, separators=(",", ":")))
     command = [
         bun, str(root / "build-platform/src/cli/index.ts"), "remote",
         "--timeout", "2400", "py", "--", str(runner),
         "--tag", tag, "--pull", "--dest", str(dest),
-        "--env", "STORAMIC_SOURCES=" + json.dumps(manifest, separators=(",", ":")),
-        "--env", "STORAMIC_SOURCE_PATHS=" + json.dumps({
-            path.name: (path.relative_to(root).as_posix() if path.is_relative_to(root)
-                        else "external-input/" + path.name) for path in sources
-        }, separators=(",", ":")),
+        "--data", str(manifest_file),
+        "--env", "STORAMIC_MANIFEST_FILE=" + manifest_file.name,
         "--env", "STORAMIC_RUNNER_SHA=" + runner_sha,
         "--env", "STORAMIC_TARGET_CONFIGS=" + ",".join(configs),
         "--env", "STORAMIC_STAGES=" + args.stages,

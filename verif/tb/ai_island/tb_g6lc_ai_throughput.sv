@@ -77,6 +77,7 @@ module tb_g6lc_ai_throughput;
     .AXI_ID_WIDTH(4), .AXI_ADDR_WIDTH(64), .AXI_DATA_WIDTH(64),
     .AXI_USER_WIDTH(1), .NUM_WORDS(256), .NrChannels(1)
   ) i_model (
+      .storamic_ctrl_req_i('0),
     .clk_i(clk), .rst_ni(rst_n), .rst_sram_ni(rst_n), .testmode_i(1'b0),
     .slave(mem), .init_done_o(model_init),
     .ch_r_beats_o(model_r), .ch_w_beats_o(model_w)

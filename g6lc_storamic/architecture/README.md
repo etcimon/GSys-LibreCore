@@ -17,6 +17,9 @@ owns product topology and SoC integration.
 | [verification](verification.md) | Remote evidence, first-party closure, g6lc_qemu boundary |
 | [implementation tasks](implementation-tasks.md) | Dependency-ordered ST-001..ST-041 backlog, code owners and completion gates |
 | [model interface](model-interface.md) | Executable-model implementation design (not a capability grant) |
+| [region routing](region-routing.md) | ST-008 design; ST-008A/B/C implemented as the standalone mapped profile (leaf evidence only) |
+| [discovery lifecycle](discovery-lifecycle.md) | ST-009 per-slot state machine and synthetic descriptor v1 (design) |
+| [control registers](control-registers.md) | ST-010 AXI-Lite register map, IRQ, drain token and runtime map commit (design) |
 
 Current stage: M0 refusal foundation implemented with selected-stage evidence;
 legacy configuration repairs, the joined service-readiness slice, the standalone

@@ -666,7 +666,9 @@ module tb_g6lc_apu_cva6_venus;
     .ai_isl_retired_valid_i(1'b0), .ai_isl_retired_ticket_i('0),
     .ai_isl_last_ticket_i('0), .ai_isl_last_status_i('0),
     .ai_dma_inval_valid_i(1'b0), .ai_dma_inval_addr_i('0),
-    .ai_dma_inval_ready_o(), .ai_dma_inval_done_o()
+    .ai_dma_inval_ready_o(), .ai_dma_inval_done_o(),
+    .storamic_dma_inval_valid_i(1'b0), .storamic_dma_inval_addr_i('0),
+    .storamic_dma_inval_ready_o(), .storamic_dma_inval_done_o()
   );
 
   // ---- demux ---------------------------------------------------------------

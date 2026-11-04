@@ -1049,6 +1049,9 @@ package config_pkg;
 
     ai_cfg_t AiCfg;
     bit StoramicEn;
+    // ST-037C: IO role (control window + VirtIO-blk peripheral), usable with
+    // any primary DRAM backend. StoramicEn implies this role.
+    bit StoramicIoEn;
 
   } cva6_cfg_t;
 
@@ -1060,11 +1063,13 @@ package config_pkg;
   /// sense for all parameters, here is the place to sanity check them.
   function automatic void check_cfg(cva6_cfg_t Cfg);
     // pragma translate_off
-    assert (!Cfg.StoramicEn ||
+    assert (!(Cfg.StoramicEn || Cfg.StoramicIoEn) ||
             (Cfg.AxiAddrWidth > 0 && Cfg.AxiIdWidth > 0 &&
              Cfg.AxiDataWidth >= 8 && Cfg.AxiDataWidth <= 1024 &&
              (Cfg.AxiDataWidth & (Cfg.AxiDataWidth - 1)) == 0))
     else $fatal(1, "STORAMIC_CORE_AXI_GEOMETRY");
+    assert (!Cfg.StoramicEn || Cfg.StoramicIoEn)
+    else $fatal(1, "STORAMIC_ROLE_NORMALIZE");
     assert (Cfg.RASDepth > 0);
     assert (Cfg.BTBEntries == 0 || (2 ** $clog2(Cfg.BTBEntries) == Cfg.BTBEntries));
     assert (Cfg.BHTEntries == 0 || (2 ** $clog2(Cfg.BHTEntries) == Cfg.BHTEntries));

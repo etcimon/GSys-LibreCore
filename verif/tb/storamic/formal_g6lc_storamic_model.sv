@@ -48,7 +48,7 @@ module formal_g6lc_storamic_model (
   g6lc_storamic_axi_memory #(.RegionBytes(256), .SeqWidth(4)) dut (
     .clk_i, .rst_ni, .testmode_i(1'b0), .req_i, .resp_o(resp),
     .source_i(8'h3a), .reset_generation_i(32'b0),
-    .service_ready_o(), .sequence_exhausted_o(), .faults_o(), .events_o(),
+    .service_ready_o(), .sequence_exhausted_o(), .faults_o(), .events_o(), .inflight_o(),
     .mem_ready_i, .mem_req_o(mem_req), .mem_gnt_i,
     .mem_we_o(mem_we), .mem_addr_o(mem_addr), .mem_wdata_o(mem_wdata),
     .mem_be_o(mem_be), .mem_tag_o(mem_tag),

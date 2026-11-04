@@ -224,6 +224,7 @@ module tb_g6lc_ai_gemm_backend
       .AXI_USER_WIDTH   ( 1 ),
       .NO_SLV_PORTS     ( 2 )
   ) i_mux (
+      .storamic_ctrl_req_i('0),
       .clk_i  ( clk ),
       .rst_ni ( rst_ni ),
       .test_i ( 1'b0 ),
@@ -244,6 +245,7 @@ module tb_g6lc_ai_gemm_backend
       .MaxAROut       ( (DRAM_CLASS == AI_DRAM_SIM_AXI) ? AI_MAX_AR_OUT_LIVE
                                                        : AI_MAX_AR_OUT_DRAM )
   ) i_mem (
+      .storamic_ctrl_req_i('0),
       .clk_i        ( clk ),
       .rst_ni       ( rst_ni ),
       .rst_sram_ni  ( rst_ni ),

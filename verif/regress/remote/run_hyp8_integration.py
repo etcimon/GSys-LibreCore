@@ -83,6 +83,10 @@ TESTS = [
      'verif/tests/custom/hyp8_h37_ldst_viol_strlen.S', '80001000'),
     ('hyp8_h38_zbb_zero',
      'verif/tests/custom/hyp8_h38_zbb_zero.S', '80001000'),
+    # Liveness of a plain store between LR and SC (and LR without SC): the
+    # B1 LR->SC window wedged `lr; sd; sc` under in-order issue.
+    ('hyp8_lrsc_store',
+     'verif/tests/custom/hyp8_lrsc_store.S', '80001000'),
 ]
 LINK_LD = 'verif/tests/custom/common/link_verilator.ld'
 GCC_FLAGS = ['-march=rv64imafdc_zicsr_zifencei', '-mabi=lp64d',

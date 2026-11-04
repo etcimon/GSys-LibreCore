@@ -133,6 +133,11 @@ module ariane_testharness #(
   // Driven from gen_ai_island when MatrixEn; idle otherwise.
   ariane_axi::req_t  ai_dma_req;
   ariane_axi::resp_t ai_dma_resp;
+  // ST-037C: the AI DMA as seen by crossbar port 2. With either Storamic
+  // role (StoramicEn or StoramicIoEn) the Storamic virtio DMA time-shares it
+  // (g6lc_storamic_dma_axi); otherwise it is the AI DMA itself.
+  ariane_axi::req_t  ai_dma_sh_req;
+  ariane_axi::resp_t ai_dma_sh_resp;
 `ifdef G6LC_APU
   ariane_axi::req_t  apu_dma_req;
   ariane_axi::resp_t apu_dma_rsp;
@@ -252,14 +257,14 @@ module ariane_testharness #(
   ) i_apu_tdma (
     .clk_i, .rst_ni(ndmreset_n),
     .a_req_i(apu_dma_req), .a_rsp_o(apu_dma_rsp),
-    .b_req_i(ai_dma_req), .b_rsp_o(ai_dma_resp),
+    .b_req_i(ai_dma_sh_req), .b_rsp_o(ai_dma_sh_resp),
     .mst_req_o(apu_dma_join_req), .mst_rsp_i(apu_dma_join_rsp)
   );
   `AXI_ASSIGN_FROM_REQ(slave[2], apu_dma_join_req)
   `AXI_ASSIGN_TO_RESP(apu_dma_join_rsp, slave[2])
 `else
-  `AXI_ASSIGN_FROM_REQ(slave[2], ai_dma_req)
-  `AXI_ASSIGN_TO_RESP(ai_dma_resp, slave[2])
+  `AXI_ASSIGN_FROM_REQ(slave[2], ai_dma_sh_req)
+  `AXI_ASSIGN_TO_RESP(ai_dma_sh_resp, slave[2])
 `endif
 `endif
 
@@ -274,8 +279,18 @@ module ariane_testharness #(
   localparam int unsigned APU_NB_EXTRA = 0;
   localparam int unsigned APU_NB_RULES_EXTRA = 0;
 `endif
-  localparam int unsigned NB_MST = ariane_soc::NB_PERIPHERALS + APU_NB_EXTRA;
+  // ST-010C/ST-037C native Storamic control window: one extra master port +
+  // rule when either Storamic role (StoramicEn primary, or StoramicIoEn
+  // IO-only) is selected; identical topology otherwise.
+  localparam int unsigned STORAMIC_NB_EXTRA = CVA6Cfg.StoramicIoEn ? 1 : 0;
+  localparam int unsigned STORAMIC_IDX = ariane_soc::NB_PERIPHERALS +
+      APU_NB_EXTRA;
+  localparam int unsigned NB_MST = ariane_soc::NB_PERIPHERALS + APU_NB_EXTRA
+      + STORAMIC_NB_EXTRA;
   localparam int unsigned NB_RULES = NB_MST + APU_NB_RULES_EXTRA;
+  localparam axi_pkg::xbar_rule_64_t storamic_rule = '{
+      idx: STORAMIC_IDX, start_addr: ariane_soc::StoramicBase,
+      end_addr: ariane_soc::StoramicBase + ariane_soc::StoramicLength};
 
   AXI_BUS #(
     .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
@@ -283,6 +298,108 @@ module ariane_testharness #(
     .AXI_ID_WIDTH   ( ariane_axi_soc::IdWidthSlave ),
     .AXI_USER_WIDTH ( AXI_USER_WIDTH               )
   ) master[NB_MST-1:0]();
+
+  // ST-010C: native Storamic control bridge + IRQ, only when enabled.
+  g6lc_storamic_pkg::axil_req_t storamic_ctrl_req;
+  g6lc_storamic_pkg::axil_resp_t storamic_ctrl_resp;
+  logic storamic_irq;
+  g6lc_storamic_pkg::axil_req_t storamic_vctrl_req;
+  g6lc_storamic_pkg::axil_resp_t storamic_vctrl_resp;
+  logic storamic_virtio_irq;
+  // Storamic DMA-write block invalidations -> cluster CMO engine (coherent
+  // VirtIO DMA; see g6lc_storamic_dma_axi InvalEn).
+  logic        storamic_inval_valid, storamic_inval_ready, storamic_inval_done;
+  logic [63:0] storamic_inval_addr;
+  if (CVA6Cfg.StoramicIoEn) begin : gen_storamic_ctrl
+    ariane_axi_soc::req_slv_t  storamic_axi_req;
+    ariane_axi_soc::resp_slv_t storamic_axi_resp;
+    `AXI_ASSIGN_TO_REQ(storamic_axi_req, master[STORAMIC_IDX])
+    `AXI_ASSIGN_FROM_RESP(master[STORAMIC_IDX], storamic_axi_resp)
+    g6lc_storamic_ctrl_bridge #(
+      .AddrWidth(AXI_ADDRESS_WIDTH), .DataWidth(AXI_DATA_WIDTH),
+      .IdWidth(ariane_axi_soc::IdWidthSlave),
+      .UserWidth(AXI_USER_WIDTH), .Base(ariane_soc::StoramicBase),
+      .CtrlPageEn(CVA6Cfg.StoramicEn),
+      .axi_req_t(ariane_axi_soc::req_slv_t),
+      .axi_resp_t(ariane_axi_soc::resp_slv_t)
+    ) i_storamic_bridge (
+      .clk_i, .rst_ni(ndmreset_n),
+      .axi_req_i(storamic_axi_req), .axi_resp_o(storamic_axi_resp),
+      .ctrl_req_o(storamic_ctrl_req),
+      .ctrl_resp_i(storamic_ctrl_resp),
+      .vctrl_req_o(storamic_vctrl_req),
+      .vctrl_resp_i(storamic_vctrl_resp)
+    );
+    // ST-037B/C: the first virtio-blk MMIO transport at StoramicBase+0x1000,
+    // bound (user-approved) to the labelled VOLATILE model store: 64 KiB of
+    // SRAM, 128 sectors, contents lost on power loss, no FLUSH offered. Its
+    // DMA time-shares crossbar port 2 with the AI DMA and is confined to DRAM.
+    logic        vd_req, vd_gnt, vd_we, vd_rvalid, vd_err;
+    logic [63:0] vd_addr, vd_wdata, vd_rdata;
+    logic [7:0]  vd_be;
+    logic        vs_req, vs_gnt, vs_we, vs_rvalid, vs_err;
+    logic [63:0] vs_addr, vs_wdata, vs_rdata;
+    logic [7:0]  vs_be;
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+    localparam bit vd_usable = 1'b0;
+`else
+    localparam bit vd_usable = 1'b1;
+`endif
+    g6lc_storamic_virtio_dev #(.QueueNumMax(128), .MaxSegs(8)) i_storamic_virtio (
+      .clk_i, .rst_ni(ndmreset_n),
+      .ctrl_req_i(storamic_vctrl_req), .ctrl_resp_o(storamic_vctrl_resp),
+      .irq_o(storamic_virtio_irq),
+      .device_usable_i(vd_usable), .capacity_i(64'd128), .capacity_update_i(1'b0),
+      // "G6LC-STORAMIC-MODEL0" (ASCII, byte 0 first): labels the model store.
+      .serial_i(160'h304C_4544_4F4D_2D43_494D_4152_4F54_532D_434C_3647),
+      .store_ready_i(1'b1),
+      .dma_base_i(ariane_soc::DRAMBase), .dma_size_i(ariane_soc::DRAMLength),
+      .dma_req_o(vd_req), .dma_gnt_i(vd_gnt), .dma_we_o(vd_we),
+      .dma_addr_o(vd_addr), .dma_wdata_o(vd_wdata), .dma_be_o(vd_be),
+      .dma_rvalid_i(vd_rvalid), .dma_rdata_i(vd_rdata), .dma_err_i(vd_err),
+      .st_req_o(vs_req), .st_gnt_i(vs_gnt), .st_we_o(vs_we),
+      .st_addr_o(vs_addr), .st_wdata_o(vs_wdata), .st_be_o(vs_be),
+      .st_rvalid_i(vs_rvalid), .st_rdata_i(vs_rdata), .st_err_i(vs_err)
+    );
+    g6lc_storamic_model_store #(.NumWords(8192)) i_storamic_model_store (
+      .clk_i, .rst_ni(ndmreset_n),
+      .st_req_i(vs_req), .st_gnt_o(vs_gnt), .st_we_i(vs_we),
+      .st_addr_i(vs_addr), .st_wdata_i(vs_wdata), .st_be_i(vs_be),
+      .st_rvalid_o(vs_rvalid), .st_rdata_o(vs_rdata), .st_err_o(vs_err)
+    );
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+    // The wide island DMA owns crossbar port 2 in this build: no shared DMA
+    // path exists, so the device is reported unusable (vd_usable = 0).
+    assign vd_gnt = 1'b0; assign vd_rvalid = 1'b0;
+    assign vd_rdata = '0; assign vd_err = 1'b0;
+    assign ai_dma_sh_req = '0;
+    assign storamic_inval_valid = 1'b0; assign storamic_inval_addr = '0;
+`else
+    g6lc_storamic_dma_axi #(
+      .IdWidth(ariane_axi::IdWidth), .DmaId('0), .InvalEn(1'b1),
+      .axi_req_t(ariane_axi::req_t), .axi_resp_t(ariane_axi::resp_t)
+    ) i_storamic_dma (
+      .clk_i, .rst_ni(ndmreset_n),
+      .dma_req_i(vd_req), .dma_gnt_o(vd_gnt), .dma_we_i(vd_we),
+      .dma_addr_i(vd_addr), .dma_wdata_i(vd_wdata), .dma_be_i(vd_be),
+      .dma_rvalid_o(vd_rvalid), .dma_rdata_o(vd_rdata), .dma_err_o(vd_err),
+      .up_req_i(ai_dma_req), .up_resp_o(ai_dma_resp),
+      .mst_req_o(ai_dma_sh_req), .mst_resp_i(ai_dma_sh_resp),
+      .inval_valid_o(storamic_inval_valid), .inval_addr_o(storamic_inval_addr),
+      .inval_ready_i(storamic_inval_ready), .inval_done_i(storamic_inval_done)
+    );
+`endif
+  end else begin : gen_no_storamic_ctrl
+    // The backend answers '0 and drives storamic_irq low when disabled.
+    assign storamic_ctrl_req = '0;
+    assign ai_dma_sh_req = ai_dma_req;
+    assign ai_dma_resp = ai_dma_sh_resp;
+    assign storamic_vctrl_req = '0;
+    assign storamic_vctrl_resp = '0;
+    assign storamic_virtio_irq = 1'b0;
+    assign storamic_inval_valid = 1'b0;
+    assign storamic_inval_addr = '0;
+  end
 
 `ifdef G6LC_APU
   logic apu_ram_fault;
@@ -1034,6 +1151,7 @@ module ariane_testharness #(
 `endif
   g6lc_ai_dram_backend #(
     .StoramicEn     ( CVA6Cfg.StoramicEn                ),
+    .StoramicModelBase( ariane_soc::DRAMBase            ),
     .DramClass      ( AiIslandCfg.DramClass            ),
     .AXI_ID_WIDTH   ( ariane_axi_soc::IdWidthSlave
 `ifdef G6LC_AI_DRAM_ISLAND_PORT
@@ -1050,6 +1168,9 @@ module ariane_testharness #(
     .ChanShift      ( AiIslandCfg.DramChanShift        ),
     .MaxAROut       ( AiIslandCfg.MaxAROut             )
   ) i_dram_backend (
+    .storamic_ctrl_req_i ( storamic_ctrl_req  ),
+    .storamic_ctrl_resp_o( storamic_ctrl_resp ),
+    .storamic_irq_o      ( storamic_irq       ),
     .clk_i      ( clk_i        ),
     .rst_ni     ( ndmreset_n   ),
     .rst_sram_ni( rst_ni       ),
@@ -1103,6 +1224,7 @@ module ariane_testharness #(
   // addr_decode last-match-wins: a full DRAM rule at a higher array index
   // than the RAM rule aliases 0x90000000. Locked by tb_g6lc_apu_th_osbi
   // and software/apu-fw/test/osbi_check.c. Not an OpenSBI firmware boot.
+  if (STORAMIC_NB_EXTRA == 0) begin : gen_map_apu
   assign addr_map = '{
     '{ idx: ariane_soc::Debug,    start_addr: ariane_soc::DebugBase,    end_addr: ariane_soc::DebugBase + ariane_soc::DebugLength       },
     '{ idx: ariane_soc::ROM,      start_addr: ariane_soc::ROMBase,      end_addr: ariane_soc::ROMBase + ariane_soc::ROMLength           },
@@ -1119,7 +1241,27 @@ module ariane_testharness #(
     apu_ram_rule,
     apu_dram_hi_rule
   };
+  end else begin : gen_storamic_map_apu
+    assign addr_map = '{
+      '{ idx: ariane_soc::Debug,    start_addr: ariane_soc::DebugBase,    end_addr: ariane_soc::DebugBase + ariane_soc::DebugLength       },
+      '{ idx: ariane_soc::ROM,      start_addr: ariane_soc::ROMBase,      end_addr: ariane_soc::ROMBase + ariane_soc::ROMLength           },
+      '{ idx: ariane_soc::CLINT,    start_addr: ariane_soc::CLINTBase,    end_addr: ariane_soc::CLINTBase + ariane_soc::CLINTLength       },
+      '{ idx: ariane_soc::PLIC,     start_addr: ariane_soc::PLICBase,     end_addr: ariane_soc::PLICBase + ariane_soc::PLICLength         },
+      '{ idx: ariane_soc::UART,     start_addr: ariane_soc::UARTBase,     end_addr: ariane_soc::UARTBase + ariane_soc::UARTLength         },
+      '{ idx: ariane_soc::Timer,    start_addr: ariane_soc::TimerBase,    end_addr: ariane_soc::TimerBase + ariane_soc::TimerLength       },
+      '{ idx: ariane_soc::SPI,      start_addr: ariane_soc::SPIBase,      end_addr: ariane_soc::SPIBase + ariane_soc::SPILength           },
+      '{ idx: ariane_soc::Ethernet, start_addr: ariane_soc::EthernetBase, end_addr: ariane_soc::EthernetBase + ariane_soc::EthernetLength },
+      '{ idx: ariane_soc::GPIO,     start_addr: ariane_soc::GPIOBase,     end_addr: ariane_soc::GPIOBase + ariane_soc::GPIOLength         },
+      apu_dram_lo_rule,
+      apu_guest_rule,
+      apu_ctrl_rule,
+      apu_ram_rule,
+      apu_dram_hi_rule,
+      storamic_rule
+    };
+  end
 `else
+  if (STORAMIC_NB_EXTRA == 0) begin : gen_map_noapu
   assign addr_map = '{
     '{ idx: ariane_soc::Debug,    start_addr: ariane_soc::DebugBase,    end_addr: ariane_soc::DebugBase + ariane_soc::DebugLength       },
     '{ idx: ariane_soc::ROM,      start_addr: ariane_soc::ROMBase,      end_addr: ariane_soc::ROMBase + ariane_soc::ROMLength           },
@@ -1132,6 +1274,21 @@ module ariane_testharness #(
     '{ idx: ariane_soc::GPIO,     start_addr: ariane_soc::GPIOBase,     end_addr: ariane_soc::GPIOBase + ariane_soc::GPIOLength         },
     '{ idx: ariane_soc::DRAM,     start_addr: ariane_soc::DRAMBase,     end_addr: ariane_soc::DRAMBase + ariane_soc::DRAMLength         }
   };
+  end else begin : gen_storamic_map_noapu
+    assign addr_map = '{
+      '{ idx: ariane_soc::Debug,    start_addr: ariane_soc::DebugBase,    end_addr: ariane_soc::DebugBase + ariane_soc::DebugLength       },
+      '{ idx: ariane_soc::ROM,      start_addr: ariane_soc::ROMBase,      end_addr: ariane_soc::ROMBase + ariane_soc::ROMLength           },
+      '{ idx: ariane_soc::CLINT,    start_addr: ariane_soc::CLINTBase,    end_addr: ariane_soc::CLINTBase + ariane_soc::CLINTLength       },
+      '{ idx: ariane_soc::PLIC,     start_addr: ariane_soc::PLICBase,     end_addr: ariane_soc::PLICBase + ariane_soc::PLICLength         },
+      '{ idx: ariane_soc::UART,     start_addr: ariane_soc::UARTBase,     end_addr: ariane_soc::UARTBase + ariane_soc::UARTLength         },
+      '{ idx: ariane_soc::Timer,    start_addr: ariane_soc::TimerBase,    end_addr: ariane_soc::TimerBase + ariane_soc::TimerLength       },
+      '{ idx: ariane_soc::SPI,      start_addr: ariane_soc::SPIBase,      end_addr: ariane_soc::SPIBase + ariane_soc::SPILength           },
+      '{ idx: ariane_soc::Ethernet, start_addr: ariane_soc::EthernetBase, end_addr: ariane_soc::EthernetBase + ariane_soc::EthernetLength },
+      '{ idx: ariane_soc::GPIO,     start_addr: ariane_soc::GPIOBase,     end_addr: ariane_soc::GPIOBase + ariane_soc::GPIOLength         },
+      '{ idx: ariane_soc::DRAM,     start_addr: ariane_soc::DRAMBase,     end_addr: ariane_soc::DRAMBase + ariane_soc::DRAMLength         },
+      storamic_rule
+    };
+  end
 `endif
 
   // Multi-core + L2 miss-fill needs multi-outstanding on the xbar demux.
@@ -1319,6 +1476,8 @@ module ariane_testharness #(
     .irq_o     ( irqs                         ),
     .ai_irq_i  ( ai_irq                       ),
     .apu_irq_i ( apu_irq                      ),
+    .storamic_irq_i ( storamic_irq            ),
+    .storamic_virtio_irq_i ( storamic_virtio_irq ),
     .rx_i      ( rx                           ),
     .tx_o      ( tx                           ),
     .eth_txck  ( ),
@@ -1442,6 +1601,10 @@ module ariane_testharness #(
     .ai_dma_inval_addr_i    ( ai_dma_inval_addr     ),
     .ai_dma_inval_ready_o   ( ai_dma_inval_ready    ),
     .ai_dma_inval_done_o    ( ai_dma_inval_done     ),
+    .storamic_dma_inval_valid_i ( storamic_inval_valid ),
+    .storamic_dma_inval_addr_i  ( storamic_inval_addr  ),
+    .storamic_dma_inval_ready_o ( storamic_inval_ready ),
+    .storamic_dma_inval_done_o  ( storamic_inval_done  ),
     .ai_isl_retired_ticket_i( ai_isl_retired_ticket ),
     .ai_isl_last_ticket_i   ( ai_isl_last_ticket    ),
     .ai_isl_last_status_i   ( ai_isl_last_status    )

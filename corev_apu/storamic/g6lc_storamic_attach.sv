@@ -8,17 +8,31 @@ module g6lc_storamic_attach #(
   parameter int unsigned IdWidth = 4,
   parameter int unsigned AddrWidth = 64,
   parameter int unsigned DataWidth = 64,
-  parameter int unsigned UserWidth = 1
+  parameter int unsigned UserWidth = 1,
+  // ST-011B: model-profile window (absolute base) and sim-mem depth in words.
+  parameter logic [63:0] ModelBase = 64'h8000_0000,
+  parameter int unsigned ModelWords = 8192
 ) (
   input logic clk_i,
   input logic rst_ni,
   input logic testmode_i,
   AXI_BUS.Slave slave,
+  input g6lc_storamic_pkg::axil_req_t ctrl_req_i,
+  output g6lc_storamic_pkg::axil_resp_t ctrl_resp_o,
+  output logic irq_o,
   output logic init_done_o,
   output logic service_ready_o
 );
   localparam g6lc_storamic_cfg_pkg::storamic_cfg_t Cfg =
-      g6lc_storamic_soc_cfg_pkg::make_cfg(Enable);
+      g6lc_storamic_soc_cfg_pkg::make_cfg(
+          Enable, ModelBase, 64'(ModelWords) * 64'(DataWidth / 8));
+
+  // pragma translate_off
+  if (g6lc_storamic_soc_cfg_pkg::SimModel &&
+      g6lc_storamic_soc_cfg_pkg::Skeleton) begin : gen_profile_conflict
+    initial $fatal(1, "STORAMIC_PROFILE_CONFLICT");
+  end
+  // pragma translate_on
 
   typedef struct packed {
     logic [IdWidth-1:0] id;
@@ -145,15 +159,80 @@ module g6lc_storamic_attach #(
   assign slave.r_user = resp.r.user;
   assign slave.r_valid = resp.r_valid;
 
+  // mem_* command seam: bound to the simulation model memory under the
+  // ST-011B model profile, tied off in every other profile.
+  logic mem_ready, mem_req, mem_gnt, mem_we, mem_rvalid, mem_error;
+  logic [63:0] mem_addr;
+  logic [DataWidth-1:0] mem_wdata, mem_rdata;
+  logic [DataWidth/8-1:0] mem_be;
+  g6lc_storamic_pkg::txn_id_t mem_tag_out, mem_tag_in;
+
+  if (g6lc_storamic_cfg_pkg::cfg_legal(Cfg) &&
+      Cfg.Profile == g6lc_storamic_cfg_pkg::ProfileModel)
+  begin : gen_model_mem
+    g6lc_storamic_sim_mem #(
+      .DataWidth(DataWidth), .NumWords(ModelWords),
+      .ModelBytes(Cfg.ModelBytes)
+    ) i_sim_mem (
+      .clk_i, .rst_ni,
+      .mem_ready_o(mem_ready), .mem_req_i(mem_req), .mem_gnt_o(mem_gnt),
+      .mem_we_i(mem_we), .mem_addr_i(mem_addr), .mem_wdata_i(mem_wdata),
+      .mem_be_i(mem_be), .mem_tag_i(mem_tag_out),
+      .mem_rvalid_o(mem_rvalid), .mem_rdata_o(mem_rdata),
+      .mem_error_o(mem_error), .mem_tag_o(mem_tag_in)
+    );
+  end else begin : gen_no_model_mem
+    assign mem_ready = 1'b0;
+    assign mem_gnt = 1'b0;
+    assign mem_rvalid = 1'b0;
+    assign mem_rdata = '0;
+    assign mem_error = 1'b0;
+    assign mem_tag_in = '0;
+  end
+
   g6lc_storamic_top #(.Cfg(Cfg), .req_t(req_t), .resp_t(resp_t),
                       .DataWidth(DataWidth)) i_storamic (
     .clk_i, .rst_ni, .testmode_i, .req_i(req), .resp_o(resp),
-    .ctrl_req_i('0), .ctrl_resp_o(), .init_done_o, .service_ready_o,
+    .ctrl_req_i, .ctrl_resp_o, .init_done_o, .service_ready_o,
     .media_ready_o(), .pad_o(),
     .source_i('0), .reset_generation_i('0), .model_ready_o(),
     .sequence_exhausted_o(), .faults_o(), .events_o(),
-    .mem_ready_i(1'b0), .mem_req_o(), .mem_gnt_i(1'b0), .mem_we_o(),
-    .mem_addr_o(), .mem_wdata_o(), .mem_be_o(), .mem_tag_o(),
-    .mem_rvalid_i(1'b0), .mem_rdata_i('0), .mem_error_i(1'b0), .mem_tag_i('0)
+    .mem_ready_i(mem_ready), .mem_req_o(mem_req), .mem_gnt_i(mem_gnt),
+    .mem_we_o(mem_we),
+    .mem_addr_o(mem_addr), .mem_wdata_o(mem_wdata), .mem_be_o(mem_be),
+    .mem_tag_o(mem_tag_out), .mem_slot_o(),
+    .mem_rvalid_i(mem_rvalid), .mem_rdata_i(mem_rdata),
+    .mem_error_i(mem_error), .mem_tag_i(mem_tag_in), .irq_o, .stray_i(1'b0)
   );
+
+  // Simulation-only AXI/seam trace, enabled by +g6lc_storamic_mem_trace.
+  // pragma translate_off
+`ifndef SYNTHESIS
+  bit trace_en;
+  initial trace_en = $test$plusargs("g6lc_storamic_mem_trace");
+  always @(posedge clk_i) begin
+    if (trace_en && rst_ni) begin
+      if (req.aw_valid && resp.aw_ready)
+        $display("[sto-axi] t=%0t AW id=%0h a=%h len=%0d size=%0d burst=%0d", $time,
+                 req.aw.id, req.aw.addr, req.aw.len, req.aw.size, req.aw.burst);
+      if (req.w_valid && resp.w_ready)
+        $display("[sto-axi] t=%0t W d=%h strb=%h last=%0d", $time, req.w.data,
+                 req.w.strb, req.w.last);
+      if (resp.b_valid && req.b_ready)
+        $display("[sto-axi] t=%0t B id=%0h resp=%0d", $time, resp.b.id, resp.b.resp);
+      if (req.ar_valid && resp.ar_ready)
+        $display("[sto-axi] t=%0t AR id=%0h a=%h len=%0d size=%0d burst=%0d", $time,
+                 req.ar.id, req.ar.addr, req.ar.len, req.ar.size, req.ar.burst);
+      if (resp.r_valid && req.r_ready)
+        $display("[sto-axi] t=%0t R id=%0h d=%h resp=%0d last=%0d", $time, resp.r.id,
+                 resp.r.data, resp.r.resp, resp.r.last);
+      if (mem_req && mem_gnt)
+        $display("[sto-mem] t=%0t %s a=%h d=%h be=%h", $time, mem_we ? "W" : "R",
+                 mem_addr, mem_wdata, mem_be);
+      if (mem_rvalid)
+        $display("[sto-mem] t=%0t rsp d=%h err=%0d", $time, mem_rdata, mem_error);
+    end
+  end
+`endif
+  // pragma translate_on
 endmodule

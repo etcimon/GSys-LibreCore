@@ -153,6 +153,12 @@ package build_config_pkg;
 `ifdef G6LC_STORAMIC
     cfg.StoramicEn = 1'b1;
 `endif
+    // ST-037C: the primary role implies the IO role; G6LC_STORAMIC_IO selects
+    // the IO role alone (control page is DECERR without the primary role).
+    cfg.StoramicIoEn = cfg.StoramicEn;
+`ifdef G6LC_STORAMIC_IO
+    cfg.StoramicIoEn = 1'b1;
+`endif
     // AI overlay (2026-10-01): `+define+G6LC_AI_OVERLAY` gives ANY package the
     // canonical island plane (config_pkg::AiCfgIsland, or the integer strip with
     // +define+G6LC_AI_OVERLAY_INT / on a core without RVF+RVD) and the CVXIF

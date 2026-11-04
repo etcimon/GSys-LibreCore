@@ -1,0 +1,37 @@
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: MIT
+
+// ST-010C native Storamic control window. No Linux driver exists yet; the
+// base (0x5000_0000), 4 KiB control length and PLIC source 10 must match
+// ariane_soc_pkg.sv. Not included by any default DTS. ST-037C roles: this
+// control node applies only to the primary-memory role (StoramicEn) — in
+// IO-only builds (StoramicIoEn alone) the control page answers DECERR —
+// while the virtio node below applies to either role.
+/ {
+  soc {
+    storamic@50000000 {
+      compatible = "g6lc,storamic-ctrl";
+      reg = <0x0 0x50000000 0x0 0x1000>;
+      interrupt-parent = <&PLIC0>;
+      interrupts = <10>;
+      status = "disabled";
+    };
+    // ST-037B/C first virtio-blk transport (VirtIO 1.4 MMIO, Version 2),
+    // bound to the labelled VOLATILE 64 KiB model store (128 sectors, serial
+    // "G6LC-STORAMIC-MODEL0", no FLUSH). Its DMA shares crossbar port 2 with
+    // the AI DMA and is confined to DRAM. Not usable in builds that define
+    // G6LC_AI_DRAM_ISLAND_PORT (DeviceID 0 there). Opt-in fragment only.
+    // dma-coherent (ST-037C step 5): every device write invalidates its
+    // 64-byte block in L1/L2/L3 before completing, and the write-through L1
+    // puts CPU stores in memory before the doorbell, so the kernel needs no
+    // cache maintenance. Remove it for a write-back L1 configuration.
+    virtio@50001000 {
+      compatible = "virtio,mmio";
+      reg = <0x0 0x50001000 0x0 0x1000>;
+      interrupt-parent = <&PLIC0>;
+      interrupts = <11>;
+      dma-coherent;
+      status = "okay";
+    };
+  };
+};

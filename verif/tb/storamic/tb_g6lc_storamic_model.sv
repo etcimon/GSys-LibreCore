@@ -113,7 +113,7 @@ module tb_g6lc_storamic_model #(
       .media_ready_o(media_ready), .pad_o(pads),
       .source_i(8'h3a), .reset_generation_i(generation),
       .service_ready_o(service_ready), .sequence_exhausted_o(exhausted),
-      .faults_o(faults), .events_o(events),
+      .faults_o(faults), .events_o(events), .irq_o(), .stray_i(1'b0),
       .mem_ready_i(mem_ready), .mem_req_o(mem_req), .mem_gnt_i(mem_gnt),
       .mem_we_o(mem_we), .mem_addr_o(mem_addr), .mem_wdata_o(mem_data),
       .mem_be_o(mem_be), .mem_tag_o(mem_tag),
@@ -140,7 +140,7 @@ module tb_g6lc_storamic_model #(
     .clk_i(clk), .rst_ni(rst_n), .testmode_i(1'b0), .req_i(req), .resp_o(resp),
     .source_i(8'h3a), .reset_generation_i(generation),
     .service_ready_o(service_ready), .sequence_exhausted_o(exhausted),
-    .faults_o(faults), .events_o(events),
+    .faults_o(faults), .events_o(events), .inflight_o(),
     .mem_ready_i(mem_ready), .mem_req_o(mem_req), .mem_gnt_i(mem_gnt),
     .mem_we_o(mem_we), .mem_addr_o(mem_addr), .mem_wdata_o(mem_data),
     .mem_be_o(mem_be), .mem_tag_o(mem_tag),
@@ -202,6 +202,9 @@ module tb_g6lc_storamic_model #(
     int unsigned before_commands;
     if (UseTopProfile) begin
       before_commands = commands;
+      // The register block maps ID/config/status in every profile; an
+      // unmapped control address must still refuse with no data-side effect.
+      top_ctrl_req.ar.addr = 64'h03C;
       top_ctrl_req.ar_valid = 1;
       do @(posedge clk); while (!top_ctrl_resp.ar_ready);
       tick();
@@ -668,5 +671,6 @@ module g6lc_storamic_model_synth (
   input logic mem_error_i,
   input g6lc_storamic_pkg::txn_id_t mem_tag_i
 );
-  g6lc_storamic_top #(.Cfg(g6lc_storamic_cfg_pkg::StoramicModel)) dut (.*);
+  logic [7:0] mem_slot_o;
+  g6lc_storamic_top #(.Cfg(g6lc_storamic_cfg_pkg::StoramicModel)) dut (.*, .irq_o(), .stray_i(1'b0));
 endmodule

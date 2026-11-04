@@ -15,7 +15,8 @@ Checkpoint status: ST-002 is complete for the retained configuration sweep;
 ST-001A (leaf provenance) and ST-004A (service readiness) are complete. Remaining
 M0 gates — ST-001B isolated aggregate, ST-003 aggregate qualification, and the
 ST-004B/C/D native atomic/preload/board checks — stay open, as does the
-executable model (ST-005 onward). Physical media, block, persistence, active
+native model exposure and ST-008 onward. The standalone ST-005–ST-007 slice
+has selected-stage evidence; it does not close those gates. Physical media, block, persistence, active
 links and the VirtIO-MMIO transport tasks follow the recorded dependencies;
 ST-032 re-evaluates each gate. The retired ST-029/ST-030 PCIe/CXL epics are not
 prerequisites; the settled transport is [VirtIO-MMIO](g6lc_storamic/architecture/virtio-mmio.md).
@@ -65,6 +66,71 @@ authorize artifact recovery or shared cleanup.
 - [ ] Subsequent milestones: executable media/discovery, selected Linux block
   transport (virtio-blk over modern MMIO), protected persistence, active links
   and the first-party VirtIO-MMIO host stack.
+- [x] ST-034–ST-037C VirtIO-blk over native MMIO (2026-11-04): transport,
+  split ring, block backend (bounded formal `storamic-2c518918edf5`), native
+  page `0x5000_1000`/PLIC 11, DMA on crossbar port 2, labelled volatile model
+  store, `StoramicIoEn` peripheral role (`G6LC_STORAMIC_IO`). CPU-driven
+  bare-metal test on the full harness passes with its negative oracle
+  (`storamic-native-virtio-09b`); full Storamic sim `storamic-be8f643dc369`,
+  synth+formal `storamic-fac26aab948c`. Model store only — no durability.
+- [ ] **Core (LSU owners), blocks Linux MMIO drivers:** on `cv64a6_imafdc_sv39`
+  adjacent 32-bit MMIO stores were coalesced into one 64-bit write and a load
+  right after a store to the same register was answered without reaching the
+  device (store→load forward not gated by region; no non-idempotent PMA region
+  in the config). Evidence and mechanism notes: ST-037C step 4 in
+  `g6lc_storamic/architecture/implementation-tasks.md`.
+- [x] **DMA coherence for ST-038:** Storamic DMA writes now invalidate the
+  written block through the cluster CMO engine before completing (ST-037C
+  step 5; IO-role plain-load test passes).
+- [x] **Core WT D-cache:** a store merging into a write-buffer entry with an
+  in-flight TX cleared `checked`, so the TX's bytes were never written to L1.
+  Fixed in `wt_dcache_wbuffer.sv` (merge keeps the tag-check result); primary
+  role and directed core tests pass (`storamic-native-primary-fix-02`,
+  `core-directed-fix-01`, `core-directed-delay-01`).
+- [x] `hyp8_amo_ready_order` wedge on in-order `cv64a6_imafdc_sv39` (v3
+  `lr.d; lr.d; sc.d`): the B1 LR→SC window in `issue_read_operands.sv`
+  refused every non-SC STORE-unit op, including the second LR, which waits
+  for an SC behind it. Only plain (non-AMO) stores are held now. Applied to
+  `core/` and to the hyp tree (`hyp_redesign_core_8fo4/core/issue_read_operands.sv`).
+  All 12 directed `verif/tests/custom/*.S` pass on the main tree
+  (`core-directed-fix-02`).
+- [x] WT D-cache merge/`checked` fix ported to the hyp tree
+  (`hyp_redesign_core_8fo4/.../wt_dcache_wbuffer.sv`: a merge keeps
+  `checked`, as it already kept `hit_oh`).
+- [x] In-order `lr; sd; sc` wedge (new directed test
+  `verif/tests/custom/hyp8_lrsc_store.S`, failing before the fix): the B1
+  window is now closed at LR retirement in every mode, not only under OoO.
+  Both trees. The main tree passes 13/13 directed tests
+  (`core-directed-fix-03`).
+- [x] hyp8 (hyp tree, both fixes plus the wbuffer port):
+  `hyp8-integration-amo-02` lints clean for scalar and SMT2 and builds;
+  `hyp8-smokes-amo-02` passes 12/12, including `hyp8_amo_ready_order` and
+  `hyp8_lrsc_store`. The test list is in `run_hyp8_integration.py`.
+- [ ] Repository-wide gate on the issue-stage fix (gate v5 predates it), and
+  the hyp8_mc / OpenSBI boot checks.
+- [x] I/O access shape on the main tree (ST-037C step 4 findings):
+  `store_buffer.sv` no longer forwards a store to a load whose physical
+  address is outside the cacheable regions, and `wt_dcache_wbuffer.sv` no
+  longer merges a non-cacheable store into a live entry; a second store to
+  the same word waits until the first drains. The VirtIO test now uses
+  Linux-shaped readl/writel fences, plus unfenced back-to-back stores to one
+  word (`-DSTORAMIC_MMIO_FULL_FENCE` restores the old fences).
+- [ ] Port the I/O forward/merge gates to the hyp tree. Its store buffer
+  (`fwd_hold` pipeline) and wbuffer (W1/W3 pipeline) are structured
+  differently, so this is not a copy; it needs a hyp8 timing check.
+- [ ] Gate v4: fetch formal `g6lc_fetch_realign`/`g6lc_fetch_iq` solver
+  failures and the cv32a65x Spike `hello_world` timeout (ISS only) remain.
+- [x] Primary-memory role runs programs with `G6LC_STORAMIC+G6LC_STORAMIC_MODEL`
+  (simulation model memory, `storamic-native-primary-01`); ST-011B step 1.
+- [ ] ST-011B/ST-012 remainder: OpenSBI/Linux boot on the primary role, CPU/DMA
+  ownership and atomics qualification, production memory binding, board
+  wrappers.
+- [ ] Remote host: run directories older than 2026-11-02 were deleted on
+  2026-11-04 at the user's request; the patched runtime was recreated
+  (`verif/regress/remote/rebuild_private_runtime.py`). Still missing for other
+  flows: `linux-payload-l1s2`, `apu-qemu-stream8-20261011T054522`,
+  `pmp-transition-split-20260919`, `fo4-a142-mul8`, `hyp8-h33-stq-diag-r1`,
+  `prof-profvlt-server`.
 
 Selected-stage evidence (artifacts under `%LOCALAPPDATA%/Temp/cva6-artifacts`):
 `storamic-af46decd087b/output/leaf-result.json` passes protocol, configuration,
@@ -401,21 +467,36 @@ AI island / ai-matrix FO4 program (2026-10-26/27, hyp tree of record `build-plat
       verilates it in 130 s (rc=0, same 7 refusals). Second defect in the same repro:
       `V3Begin::renameAndStaticsRecurse` recursed per sibling and overflowed an 8 MiB
       stack (the harness hides it with `ulimit -s unlimited`); now a loop.
-      **Update (2026-11-03): `1856fe1b1` is NOT good on the full model.** Its
-      live-tree packed walk (a) split variables that unresolved dotted references
-      still name (`Can't find definition ... in dotted signal`: `fus_busy`, `info_rdy`,
-      `gen_r2s.rra_h_q`) and (b) left a reference to a deleted, field-split
-      variable (`bank_mask__BRA__191__KET__`, SIGSEGV in V3Const:2649, gdb on
-      `verilator_bin_dbg`). The working tree now holds a different approach
-      (uncommitted in the submodule): the original collected-reference flow, with every
-      collected pointer validated against a live-node set before any dereference
-      (including the comparator), plus refusal of candidates named by any `AstVarXRef`.
-      It no longer crashes on the full model but stays in SplitVar for 3h20m+, so
-      it was stopped. Do not push `1856fe1b1`. Either revert the pin to `706fb1cd7`
-      (qualified; verilates hyp8_mc in about 100 min) or finish the fix with the
-      standalone `g6lc_rename_recover` repro plus a full-model run before moving it. The PGO
-      rebuild from fixed source (`vlt-pgo-9b31ef6-c1`) failed in training for the same
-      reasons. hyp8_mc builds use the qualified prefix meanwhile.
+      **Update (2026-11-04): `1856fe1b1` alone is still not good on the full
+      model.** Its live-tree packed walk (a) split variables that unresolved
+      dotted references still name (`Can't find definition ... in dotted signal`:
+      `fus_busy`, `info_rdy`, `gen_r2s.rra_h_q`) and (b) left a reference to a
+      deleted, field-split variable (`bank_mask__BRA__191__KET__`, SIGSEGV in
+      V3Const:2649, gdb on `verilator_bin_dbg`). The submodule pin is now
+      `8c69f297a` (superproject commit `11d6db2c9`): packed splitting no longer
+      dereferences the stale collected `AstSel`/`AstVarRef` pointers; it first
+      marks every variable reached through a resolved cross-module `AstVarRef`
+      (containing-module comparison) or an `AstVarXRef` name, disables
+      `attrSplitVar` for those variables, then walks each module's live tree.
+      Local debug and isolated optimized builds succeed. Minimal checks:
+      same-module packed splitting still reports `SplitVar, Split packed
+      variables 1`; a hierarchical `u_leaf.big` reference warns and refuses
+      `big` instead of deleting it. The optimized `8c69f297a` compiler built at
+      `build-platform/workspace/build/vlt-8c69f/src/bin/verilator_bin`
+      (sha256 `e697619fb05b…`) completed a reduced `g6lc_rename_recover`
+      reproducer in 44 s (PRF/FPRF=64, CKPT=16, explicit packed split_vars plus
+      `n_ret`), reporting `SplitVar, Split packed variables 3`,
+      `SplitVar, Split unpacked arrays 1`, `SplitVar, auto field variables 5`;
+      the two dynamic-index `arch_ref`/`farch_ref` requests were refused as
+      expected. An older installed binary produced no splits on that input, so
+      it is not a regression oracle. The full hyp8_mc-geometry standalone run
+      stayed inside `SplitPackedVarVisitor` for ~28 minutes and was stopped as
+      inconclusive (not a pass/fail verdict); the prior WSL-killed debug run is
+      likewise inconclusive. Do not push `1856fe1b1` alone; the current pin is
+      `8c69f297a` but the standalone/full-model result still needs a
+      source-pinned verdict before being treated as stable. The PGO rebuild
+      remains pending. hyp8_mc builds still use the qualified `706fb1cd7`
+      prefix meanwhile.
       Remaining after that: rebuild the PGO prefix, rerun the hyp8_mc A/B
       (`hyp8-pgo-ab-base` 6,052 s), qualify.
 - [ ] **hyp8_mc first execution: core 0 never commits** (`hyp8-osbi-mc-c3`, 4-thread
@@ -424,16 +505,47 @@ AI island / ai-matrix FO4 program (2026-10-26/27, hyp tree of record `build-plat
       `mem_req=0`, no return). The frontend loops through redirect/hold/epoch flips and
       `sb_empty=1`. The model ran at about 7 cycles/s (expect thousands). This is the first
       time a full `g6lc64_hyp8_mc` model has executed (r98 marked the config invalid).
-      **Root cause (single-threaded `hyp8-osbi-mc-t5`, +win_trace):** not threading.
-      SMT anti-starvation livelock. `SmtStarveLimit=16` switches the two harts of a core
-      every ~18 cycles from reset (`[win] KILL fl=1` at c=18, 36, 54, ...). Each switch
-      flushes the resident hart's fetch, including its in-flight boot-ROM refill, and the
-      MC refill path (hub → L2 → L3 → crossbar) is longer than 16 cycles, so neither hart
-      ever receives an instruction. The scalar profile has one hart; the smt2 profile has
-      no L2/L3 and a shorter refill. Fix (both trees, `g6lc_thread_select.sv`): a
-      starve switch waits until the resident hart has fetched once since activation,
-      bounded at 255 cycles so the service floor holds (`unfed_age_q`). Verification
-      build: `hyp8-mc-boot-build-t6` (qualified prefix, threads 1, traces on).
+      **Root cause (bounded traces, not a remote long-run guess):** the memory
+      path is alive. `+soc_trace` showed the hub/L2/L3 path tracking the
+      non-cacheable boot-ROM ARs and ROM RVALID/RREADY returning to hart 0. The
+      failure is the SMT anti-starvation switch policy: `+smt_sched_trace` showed
+      every switch with `reason=0001` (starve) shortly after a response, so the
+      peer switch killed the resident hart's fetched stream before issue. Fetch
+      completion (`unfed_age_q`) was therefore too weak. Fix (both trees,
+      `g6lc_thread_select.sv`): starve preemption now requires an issue from the
+      resident hart (`issue_fire_i`, the decoded-instruction admission ack
+      into the issue stage/scoreboard path for the active stream, clears
+      `unissued_age_q` to 0 even when `hold_i` is suppressing switches), while
+      the 255-cycle saturation preserves the peer's bounded service floor.
+      Permanent coverage is `tb_g6lc_review_smt_issuegate` in both review
+      benches, built/run by `verif/regress/remote/run_smt_drain_review.py`;
+      it checks no pre-issue switch, the post-issue starve switch (including
+      an issue that lands during `hold_i`), and the 255-cycle bounded floor.
+      Local `G6LC_FETCH_B` runs pass the source and
+      hyp issue-gate benches, all source/hyp drain geometries including the
+      HYBRID q128 leg, all four source/hyp drain-force scenarios, and a
+      slang/Yosys synthesis leaf (0 problems, 0 SCCs, no latches). The
+      runner's existing controls still fail as intended locally: the injected
+      drain fault hits `SMT_DRAIN_EARLY`, and `G6LC_MUT_DRAIN_NOFORCE` hits
+      `SMT_DFORCE_TIMEOUT`. The bounded composed-stack check
+      `build-platform/workspace/build/hyp-cache-cohooo/nc_refill.sh` also passed
+      all four attribute/scenario legs, so the remaining blocker is downstream
+      of the hub/L2/L3 non-cacheable refill path. Bounded first-commit
+      witnesses now pass on both source families. The main-tree
+      `g6lc64_smt2` `tb_g6lc_apu_cva6_fetch` model was rebuilt from current
+      source and passed `checks=5 cycles=279` (I$ size-3 INCR len-1 plus a
+      real RVFI commit at `0x90000000`). The hyp-tree bench
+      `build-platform/workspace/build/hyp-fetch-witness/tb_g6lc_hyp_fetch.sv`
+      instantiates `g6lc_hart` under `+define+G6LC_HYP8_SMT2` from
+      `Flist.hyp8_sim`, links only local no-op stubs for unused testharness
+      DPI imports, and passed `checks=6 cycles=307` on the edited hyp
+      `g6lc_thread_select.sv` (the sixth check is explicit
+      `decoded_instr_ack`). Its `+smt_sched_trace` shows the resident hart
+      issuing before the bounded starvation switch, then committing at
+      `0x90000000`. These are first-issue/commit evidence, not hyp8_mc: no
+      four-core cluster, coherent L2/L3, OpenSBI or Linux path was exercised.
+      A Linux boot remains blocked until a current hyp8_mc core-0 commit
+      witness passes.
 - [x] hyp8 split builds fence cross-module debug traces (`G6LC_SIM_NO_HIER_TRACE`,
       set by `hyp8-build-harness.sh` unless `HYP8_BUILD_HIER_TRACE=1`): +smt_dup_trace,
       +ld_trace HPD lines, +hpd_trace, +win_trace, and the HPDCACHE phantom/zombie witness.
@@ -1171,6 +1283,382 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
       `memory.pipeline_barrier` 43 (below), `memory.binding` 30 (`vkCreateImage` ->
       `FORMAT_NOT_SUPPORTED` on 8x33/257x33 images that the profile's format properties
       claim; plus `buffer_1048577`), `api.descriptor_set` 2, `conformance_version` 1.
+    - [ ] `memory.binding.*image*` (26 cases): root cause found. The test creates
+      `VK_FORMAT_R8G8B8A8_UINT` (41), LINEAR, TRANSFER_SRC|DST, without querying
+      support, and the device image-format table has no entry for it (`img_fmts.VK2D[41]
+      = 0xFF`; 15 of 16 device ids are used). So `vkCreateImage` correctly returns
+      FORMAT_NOT_SUPPORTED. The format is mandatory (optimal-tiling sampled, storage,
+      colour attachment and transfer), so the fix is a real format, not an error-code
+      change: give device id 15 (4 bpp, integer class) to R8G8B8A8_UINT across
+      `gen_vn_tables` (APU_VN_IMG_FMT/IMG_BPP/ATTR), `img_fmts`, the xfer copy path (a raw
+      4-byte copy, as RGBA8_UNORM), the sampler/texel integer fetch and the profile
+      `formats` row. Add an xfer TB case and vn vectors. Optimal and linear tiling share
+      the linear device layout. The `buffer_1048577` cases are a separate check.
+    - [x] **Root cause found and fixed (2026-11-03): list draws over 63 vertices.**
+      `g6lc_apu_rast` batched vertex shading only for TRIANGLE_LIST. Every other
+      topology with `vertex_count > VSB` (63) was refused `APU_SH_DONE_UNSUPPORTED`
+      within 3 cycles. CTS `memory.pipeline_barrier.*` draws 512..524288 points, so its
+      images were entirely black. `+eng_trace` in vgtop shows the draw finishing with
+      code=2 at t+3. POINT_LIST and LINE_LIST now batch like TRIANGLE_LIST
+      (`topo_list_w`; batch 63 points, 62 line-list vertices). Strips and fans keep the
+      single-batch limit, because they carry vertices across primitives. Evidence:
+      `tb_g6lc_apu_rast` case 41 (130 points and 130 line-list vertices across three
+      batches, sampled at every batch boundary), and the new vgtop session
+      `ue_gpos_ptsrg8x_1` (512 RG8_UNORM points, CTS shaders), which was refused before
+      the fix and now passes all 4,096 pixels. Unchanged: `ue_gpos_tri_1`, `ue_gpos_ptsrg8_1`,
+      rast 41/15,597. The golden point sessions size the vertex buffer to their data;
+      with 72 B the RTL correctly robust-zero-fetched every vertex past byte 72. vgtop
+      gained sim-only `+eng_trace` and `+max_errors=N`. The CTS rerun of
+      `memory.pipeline_barrier.*` is next.
+      vnfront no-vertex-input fix, CTS `apu-leaf-20261103T225132-ec6822efda8b` (18 cases):
+      Pass `host_write_index_buffer.{1024,8192,65536}` and `host_write_uniform_buffer.1024`;
+      3 Timeout (`host_write_storage_buffer.1024`, `host_write_uniform_buffer.{8192,65536}`,
+      long per-case simulation); 11 not run inside the 6 h budget. Ledger 1098 Pass / 230
+      defects. Gate `apu-leaf-20261103T220348-77e12b783786` (pinned 5.008): **19/20**,
+      only `shwave` (`cts_b2b_opt_1`) open. vgsys/sys-venus pass 40 sessions, 11 negative
+      arms and the small-geometry arms (`neg_worksink0` blit arm).
+      Collected (`apu-leaf-20261103T221033-3f5ad7e8f451`, rast batching fix, 35 cases):
+      4 Pass, 31 Fail. The passes are `transfer_dst_vertex_buffer.{1024,8192,65536}_stride_2`
+      and `8192_stride_4`; ledger 1090 -> 1094 Pass. Still failing: index/storage/uniform
+      subgroups (vnfront no-vertex-input fix in `apu-leaf-20261103T225132-ec6822efda8b`),
+      `transfer_src_transfer_dst` (no blit engine), `transfer_dst_image_sampled` /
+      `transfer_dst_storage_image` / `all_device` (still unclassified).
+      First CTS evidence (`apu-leaf-20261103T221033-3f5ad7e8f451`, mid-run):
+      `transfer_dst_vertex_buffer.1024_vertex_buffer_stride_2` **Pass**, the first pass in
+      this family. The index, storage and uniform subgroups still render black. Their VS
+      uses `gl_VertexIndex` and has **no vertex input**, and vnfront refused
+      `vertexBindingDescriptionCount == 0` / `vertexAttributeDescriptionCount == 0`
+      (phases 8/12) at pipeline create. Venus creates pipelines asynchronously, so
+      that showed up only as nothing drawn. **Fixed:** both counts accept 0 and skip
+      straight to the next staged word (attr count / pIA presence), mirrored in
+      `vn_golden._gpipe_build`. New session `ue_gpos_ptsvidx_1` (CTS VS verbatim, 0
+      bindings / 0 attributes, 256 points over five 63-vertex batches) passes 4,096/4,096
+      pixels with code 0. ptsrg8x and tri are unchanged.
+    - [x] `memory.binding` CTS rerun with R8G8B8A8_UINT (`apu-leaf-20261104T061246-e848427dd7e5`):
+      **26/30 Pass**; the ledger moved 1098 -> 1124 Pass and 230 -> 204 defects. Still open:
+      the 4 `*.buffer_1048577` cases (regular.{suballocated,dedicated,overallocated},
+      aliasing.suballocated), an odd-size buffer just over 1 MiB. Next, classify against
+      `maxMemoryAllocationSize` / ObjPay or aperture page rounding.
+      Ruled out (local, 2026-11-04): capacity. APU_SHM_BYTES = 128 MiB, heaps 8/64 MiB,
+      maxMemoryAllocationSize 32 MiB, and the cmdexec xfer operand extents
+      (`xs = min(res.size, mem.size - bind_off)`, `apu_xfer_work_t.src/dst_size`) are all
+      32/64-bit, so 1,048,577 B fits everywhere. Small odd-size copies pass in the xfer
+      TB random COPY cases. Remaining suspects are the copy chunking at a 1 MiB+1 extent
+      (`coff_q + csz_q < sz_q` with a 1-byte final chunk past a large boundary) and
+      vgpages first-fit with a non-page-multiple size. Next: an xfer TB case copying
+      BUFZ-sized odd extents across the chunk limit (raise BUFZ, or use a 2-region copy
+      ending 1 byte past a 4 KiB boundary), with no remote run.
+      **Device side cleared (2026-11-04):** the new golden session `ue_cpos_xfer_big_1`
+      (`--variant xfer_big`) creates two 1,048,577 B transfer buffers bound to their own
+      memory blobs and records ONE whole-buffer vkCmdCopyBuffer. It stages a distinctive
+      tail, the 8 words ending at byte 0x100000 plus the final odd byte, and checks the
+      destination aperture after the fence. Local vgtop PASS 49/1,645: the copy took
+      ~655k cycles with code 0. So the 4 CTS `buffer_1048577` failures are **not in
+      the APU RTL**. The suspects move to the guest/bridge: the Venus blob size or
+      mapping of host-visible allocations > 1 MiB in the QEMU bridge or the guest
+      kernel, or the CTS readback path. Next: a dev-only CTS leaf with `G6LC_VN_DEBUG`
+      host-side logging of blob create/map sizes for that case.
+      Done (local): the xfer TB `copyodd` directed case (one region, BUFZ-1 = 8,191 B,
+      1-byte last chunk, guard byte checked) passes, so the copy engine is not the
+      cause (xfer 269/1,544). What remains is size-specific to more than 1 MiB:
+      host map/unmap of a > 1 MiB blob, the vgpages run for 257 pages, or the guest-side
+      staging. Next: a vgsys/golden session with a 1 MiB + 1 buffer (mapped write ->
+      copy -> mapped read) to localize it without a CTS run.
+    - [ ] **T3 R8G8B8A8_UINT shader arms (2026-11-04, RTL + model, not yet advertised).**
+      - shwave texel decode has an explicit `8'd15` arm (4 x u8 -> u32); before, id 15
+        fell into the `default` RGBA32_UINT arm and decoded 16 bytes.
+      - The store encode packs one byte per channel when isint && bpp 4 && nch 4; the
+        32-bit-per-channel integer path previously wrote 16 bytes over a 4-byte texel.
+      - Both are mirrored in `spirv_model.py` (`tx` decode `fmt == 15`, `tx_store`).
+      **Storage image done (2026-11-04):** the new sh corpus `imgcopy_rgba8ui`
+      (`corpus/imgcopy_rgba8ui.comp` + `_opt.spv`) does an rgba8ui imageLoad packed
+      into an SSBO, then an imageStore of v+1 with the image checked as an output.
+      shwave passes 11 cases / 981 checks / 0 ULP: 3 seeds, mut, bad and 3 opt. The
+      profile now advertises STORAGE_IMAGE for R8G8B8A8_UINT. `shader_vectors.IMG_VKFMT`
+      was extended to 16 ids (D32 126, D16 124, D24S8 129, R8G8B8A8_UINT 41), and the
+      shwave TB `names` array grew 61 -> 62. Direct runs need
+      `+shv=<repo>/verif/tb/apu/sh_vectors`; without it every case fails `.ok`.
+      `barrier_prefix_mut_0.out.bin` changes on every shader_vectors regen
+      (nondeterministic oracle on a mutant); restore it.
+      **Sampled image done:** the sh corpus `texfetch_rgba8ui` (usampler2D texelFetch,
+      4x2 image, `_opt`) passes; the shwave subset is 27 cases / 1,571 checks / 0 ULP.
+      The profile now advertises SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|DST for
+      R8G8B8A8_UINT, without FILTER_LINEAR (integer formats are nearest-only), and
+      regen_vectors is unchanged. Shwave TB `names` is now 63.
+      **Colour attachment done; T3 complete.** rast `f_enc8` keeps each channel's low
+      byte for R8G8B8A8_UINT (clear uint32 and draw output: no fp conversion),
+      `f_cfmt_ok` accepts it, and blendEnable on an integer attachment is refused
+      UNSUPPORTED in draw validation. rast case 42 covers the three paths: the clear
+      maps 0x133 -> 0x33, a point lands its raw low bytes, and the refused blend
+      writes nothing. rast now passes 42/15,602. Pitfall: the rast TB stub VS routes colour
+      alpha into Position.z, so colour words above 1.0f depth-clip; the case uses
+      0x3F7FFFnn. The profile advertises
+      SAMPLED|STORAGE|TRANSFER_SRC|DST|COLOR_ATTACHMENT, with no BLEND and no FILTER_LINEAR.
+      The audit's 4 findings are the pre-existing CTS-0 limits, and regen_vectors is unchanged.
+      Still open:
+      (a) (done: SAMPLED_IMAGE);
+      (b) (done: STORAGE_IMAGE);
+      (c) COLOR_ATTACHMENT needs a ROP integer path: `f_cfmt_ok` at
+          `g6lc_apu_rast.sv:476` accepts only the 8-bit UNORM/sRGB formats, and the
+          ROP encode is fp -> UNORM with blend. A UINT target takes the raw low byte of
+          each integer output, with blending illegal (Vulkan forbids blend on integer
+          formats).
+    - [ ] **CTS sampling methodology (2026-11-04).** Plan:
+      `C:\Users\etcim\.devin\plans\plan-238c1f8407ad4c21.md`. Landed so far:
+      - `cts_ledger.py sample`: a seeded, stratified, breadth-first 1% sample of the
+        whole must-pass, `caselists/sample-v1/` (32,706 cases, 1.007%, all.txt
+        sha `3cf133fb…`). It covers 95.8% of depth-3 families and 58% at depth 4.
+      - `sample-report` writes `architecture/uncore/apu-cts-sample.md`
+        (per-group Wilson CI plus pre-filter split).
+      - Harvest guard: a shard needs the post-run `G6LC_CTS_RUN` marker. This dropped
+        3 stale-QPA leaves (2 Oct-30, plus `…T135031`) and the 2 false `image_clearing`
+        defects; the ledger is 1124 Pass / 204 defects.
+      - `cts_prefilter.py` (T0 scan/check/wave). Self-check on the 2,084 non-NS run
+        cases: precision 0.80, recall 0.72.
+      - `shader_feed.py` (T1: native deqp-vk + lavapipe + spirv_scan). Its first
+        result: buffer_device_address and descriptor_buffer modules commit-fault, as
+        truthful refusals.
+      - First T4 wave: `sample-v1-wave1.txt` (96 predicted plus 5 control) on
+        `apu-leaf-20261104T164402-a314d6a17105`.
+    - [ ] **T1 shader feed on the CTS-1 sample (6,329 cases, minutes on native lavapipe):**
+      277 ok, 4,487 no-shader, 29 ignored-decor (RowMajor), and 1,536 commit-fault.
+      Most faults are truthful refusals: buffer_device_address and descriptor_buffer
+      CAP/DECOR, device_group, multi_queue, i8/i16 storage. **Candidate real gaps to
+      check against the device profile next:**
+      - `compute.pipeline.builtin_var.num_work_groups`: CONST fault on OpSpecConstant
+        (opcode 50), 18 cases;
+      - `binding_model.shader_access.*combined_image_sampler_mutable*`: TYPE fault on
+        opcode 25 (OpTypeSampledImage), 19 cases;
+      - `ssbo.corner_case.long_shader_*`: BOUND, a shader size limit, 8 cases;
+      - `compute.pipeline.basic.image_atomic_op_local_size_8`: STORAGE on opcode 32;
+      - `compute.pipeline.basic.undefined_values`: OPCODE 400.
+      Output: `caselists/sample-v1/shader-feed-cts1.json`, folded into `prefilter.json`
+      as `shader-refused`.
+    - [ ] **descriptor_copy reclassified (2026-11-04).** The new golden `dcopy` sessions
+      (writes into staging twins, then per-element pDescriptorCopies, including array
+      offsets) PASS in vgtop on bufcopy, descarr and multiset. The RTL copy path works
+      for buffer descriptors. The CTS failures split as:
+      - 52 graphics cases, "Result image validation failed": descriptors consumed
+        by VS/FS. This is a graphics-stage descriptor defect, not copies;
+      - 19 texel-buffer cases (pTexelBufferView not staged; certain-fail);
+      - 3 `misc.copy_immutable_sampler_*` (image compare);
+      - compute image-type arrays (`combined_image_sampler_array*`,
+        `storage_image_array*`, `sampled_image_array0`, `sampler_array0`).
+      Next: a graphics session where the FS reads a UBO/SSBO via a descriptor set (the
+      CTS shape), and image-descriptor array copies in a compute dcopy variant on an
+      image vector.
+      **Done: `ue_gpos_fsubo_1`** (`--graphics-session`, variant `fsubo`). The DSL
+      declares UBO binding 0 for stage FS; the set is bound at pipelineBindPoint=0; the
+      FS (`corpus/fs_ubo.frag`) outputs the UBO colour (0,1,0,1). vgtop PASS
+      27/17,083 (a teardown destroy of pool/DSL/UBO was needed for the ObjPay drain
+      check). So a basic graphics-stage descriptor read WORKS in RTL. The 52
+      `descriptor_copy.graphics` failures need the CTS specifics: arrays, multiple
+      bindings, dynamic offsets, VS-stage reads, and the copy itself feeding a graphics
+      draw. Next T3 shape: the fsubo variant with the UBO arriving by
+      pDescriptorCopies plus a 2-element array.
+    - [x] **Row-major matrices IMPLEMENTED (2026-11-04), model then RTL.**
+      - spirv_model: the access chain reads member flag 0x10 and carries pointer
+        word3 bit16 (row-major matrix) / bit17 (column vector, components
+        MatrixStride apart). A MAT index adds c*4; a VEC index on a column adds
+        r*stride; `mat_comp_off` puts (c,r) at r*stride + c*4.
+      - shwave mirrors it: `crm_q`/`cvs_q` in W_CHT1/W_CHM1/W_CHFIN, and
+        `ls_rm_q`/`ls_vs_q` select `ls_mad` row-major or `ls_vsi` strided addressing.
+      - New sh corpus `ssbo_rowmajor` (std430 row_major mat3x2[2]: whole, column and
+        element loads; whole, column and element stores). The model is bit-identical
+        to lavapipe on all 48 output words.
+      - shwave full suite: 479 cases / 86,691 checks / 0 failures.
+      - The prefilter row-major rule turned itself off. Confirmation leaf: the 72 CTS
+        row_major cases (`cts-b11-rowmajor.txt`).
+    - [x] **SSBO/UBO row-major matrices (CTS `single_basic_array` row-major x72):
+      mechanism located (2026-11-04).** spirv_scan already records member
+      decorations as `1 << (dec % 8)`, so RowMajor (dec 4) is **bit 4 of the member-row
+      flags[7:0]** that shmod stores and shwave reads (member row
+      `{ty, flags, mstride, off}`, shwave L684; `mb_mst` -> `cmstride_q` L4810). No
+      consumer reads that bit, so row-major members use column-major addressing,
+      which matches the observed transposed read-back (column-major passes). Plan,
+      model first (spirv_model) then RTL, with an sh corpus `ssbo_rowmajor`
+      (std430, `layout(row_major) mat3x2 m[2]`: whole-matrix, column and element
+      loads and stores):
+      (1) access chain through a RowMajor matrix member: column index c adds c*4,
+          not c*S, and the pointer carries "component stride = S"
+          (word3[15:0] = S plus a row-major bit in word3[31:16]);
+      (2) a column-vector OpLoad/OpStore through such a pointer spaces components
+          by S, not 4;
+      (3) a whole-matrix OpLoad/OpStore: column c base off + c*4, components +r*S;
+      (4) a scalar element chain (column vector -> component r) adds r*S.
+      ColMajor (bit 5) and undecorated keep today's path.
+    - [x] **`cts_b2b_opt_1` FIXED (2026-11-04): an inactive-lane revival in the
+      reconvergence engine.** `cts_b2b_opt.spv` is `LocalSize 1 1 1`, so only lane 0
+      is live, yet lanes 1-7 executed the loop body. In the branch arm of `cf_eng`
+      (OpBranch/OpBranchConditional/OpSwitch) the innermost-first parking scan ran for
+      **every** lane. An inactive lane's `ctg_w` came from its condition register,
+      which this dispatch never wrote; after `ssbo_cap` (8 live lanes) it held a true
+      value. The scan matched that target against the LOOP entry's continue label and
+      set the lane in `cf_nx` (the continue rejoin mask). At the continue label
+      `cf_nact |= cf_nx` revived lanes 1-7. In the clean order the stale registers
+      were 0 (false -> merge label -> no rejoin), which is why the failure depended
+      on order. The same scan could also scrub a legitimately parked inactive lane
+      out of deeper entries' resume/pending. Fix: the scan is gated on `act_w[l]`
+      (`g6lc_apu_shwave.sv`, cf_eng branch arm). Evidence: `+only=ssbo_cap,cts_b2b`
+      passes 14/6,457, and the **full shwave suite passes: 471 cases / 86,032 checks /
+      0 failures**, the first fully green shwave run. The guest-side CTS contamination
+      after the big SSBO probes was this same mechanism. Diagnostics kept: `+dbg_rob`
+      (W_LSC/W_SSB1 robust sites) and `build-apu-shwave.sh`.
+    - [x] **`cts_b2b_opt_1` narrowed (2026-11-04, `+dbg_rob` in shwave W_LSC/W_SSB1).**
+      After `ssbo_cap`, the 14 robust hits are all W_LSC resource-bound refusals.
+      Lanes 1-7 load and store at `off=0x6f00` against `bsz=0x400` (bok=1), while
+      lane 0 is in range; in the clean order the same case has none. So lanes 1-7
+      compute their SSBO index from a value that still holds `ssbo_cap` data. That
+      points to a **register read before write in lanes 1-7**: the RF is not cleared
+      per dispatch (only scratch is, in the dispatch-start `ls_comp` loop), and the
+      model behaves as if it were zero. Ruled out: `cprev_q` (cleared per dispatch at
+      L3116), `cfln_q` (the push writes `act_w` in full at L6648), OpUndef (none in
+      cts_b2b_opt.spv; its one phi is `%96 = OpPhi %uint_0 %5, %89 %63`). Next: in
+      `+dbg_rob` mode, print the W_RW0 writeback lane mask for the SSA ids that feed
+      the access chain (%89 and the index chain) and find the id whose lanes 1-7
+      are never written in this dispatch. Then fix the writer: likely a write mask
+      built from lane 0 only (scalar-uniform path), not an RF clear.
+    - [x] **Generator drift resolved (2026-11-04).** The only functional drift was the
+      D24S8 id. The six `a=255`/`a=127` KEEP differences are comment-only: the ROM words
+      are identical, because the decoder tests `rom_a[6:0] != 7'h7F` for U32. The fix
+      is a `wired = 1` profile key: an entry earns a device id without advertising
+      features. D24_UNORM_S8_UINT is declared after D16 so it keeps id 14, with bpp 4 /
+      comps 1 (the hand-edited package had bpp 0). Regenerating now reproduces the
+      committed package except BPP[14] 0 -> 4 and the comments. `R8G8B8A8_UINT` is
+      appended as device id 15, **transfer-only** (TRANSFER_SRC|DST; sampled/storage/
+      attachment stay unadvertised until shwave/ROP gain an 8-bit-integer arm). The
+      full `regen_vectors.sh` is byte-identical. vndec 2,554/187,282, vnrep 595/10,816 and
+      vnfront 179/3,093 pass. The profile audit's 4 findings are the pre-existing CTS-0
+      limits (same as HEAD). The `memory.binding` CTS rerun and the gate are launched
+      from `/tmp/launch-b9.log` / `/tmp/launch-ut11.log`.
+    - [ ] **Generator drift: `g6lc_apu_vn_pkg.sv` cannot be regenerated (2026-11-04).**
+      Running `gen_vn_tables.py` on the current profile changes the committed package:
+      it **drops `APU_IMG_FMT_D24_UNORM_S8_UINT = 14`** (the profile has
+      `D24_UNORM_S8_UINT = { f = "" }`, so the generator assigns it no id, while the
+      committed package and the D24S8 raster/stencil path rely on id 14 and VK129->14),
+      it flips the KEEP slot flags `a=255` -> `a=127` on rasterizerDiscardEnable,
+      depthBoundsTestEnable, min/maxDepthBounds, logicOpEnable and logicOp, and it changes
+      the IMG_ATTR/BPP rows. The committed package was evidently hand-edited (or produced
+      by an uncommitted generator revision) during the raster delta. Reverted. Nothing
+      regenerated. Fix first: bring the generator/profile to the committed package (D24S8
+      `f` = its real attachment/transfer features, the `a=255` discard-validated KEEP
+      rule), and add a gate check that regenerates and diffs the package so drift fails
+      the unit stage. Only then append new formats (R8G8B8A8_UINT below).
+    - [ ] `memory.binding.*image*` (30 cases, `VK_ERROR_FORMAT_NOT_SUPPORTED`): the test
+      creates 2D `R8G8B8A8_UINT` (VK 41), LINEAR tiling, TRANSFER_SRC|DST, and VK 41 maps
+      to 0xFF in the 15-entry device image table (`img_fmts.VK2D`, `APU_VN_IMG_FMT`).
+      R8G8B8A8_UINT is a mandatory format (optimal: SAMPLED_IMAGE, STORAGE_IMAGE,
+      COLOR_ATTACHMENT, TRANSFER), so the gap is a missing format, not a decode bug.
+      Add it as device id 15 (BPP 4, integer class like R32_UINT), across the
+      gen_vn_tables image-format table and profile `formats`, the xfer copy/clear
+      encode, shwave texel fetch/store (uint), rast colour encode and the format query.
+      Then decide LINEAR-tiling support explicitly (report it only if the copy paths are
+      linear-correct).
+    - [ ] **T1 blit design (2026-11-04).** Four coordinated changes:
+      1. **Decode keep-list** (`vn_device_profile.toml` keep lists + `gen_vn_tables.py`):
+         vkCmdBlitImage pRegions fields are currently decoded but not KEEP (the
+         `U32 a=127` entries at `g6lc_apu_vn_pkg.sv` ~L2399 carry no KEEP). KEEP
+         regionCount and per region srcSubresource{aspect,mip,base,count},
+         srcOffsets[2]{x,y,z}, dstSubresource{4}, dstOffsets[2]{x,y,z} (20 words) plus
+         `filter`, so the record payload carries them like vkCmdCopyImage's 17.
+      2. **cmdexec** (`g6lc_apu_cmdexec.sv` L467-L486, L575-L578): treat BLIT_IMAGE like
+         COPY_IMAGE for operand resolution (`xf_op_img`, `xf_img_sel`, `xf_two_ops`) and
+         map it to a new `APU_XFER_OP_BLIT = 3'd7` (the last free code in the 3-bit
+         `apu_xfer_op_e`).
+      3. **xfer** (`g6lc_apu_xfer.sv`): BLIT streams 20 words per region (L959,
+         `rg_n_q`), then a conversion step rewrites `rg_q` into the I2I 17-word layout:
+         srcOffset = srcOffsets[0], extent = srcOffsets[1] - srcOffsets[0], dstOffset =
+         dstOffsets[0]. It then falls into the existing I2I path (XImgChk bounds before
+         any write). Unscaled blits only, matching CTS `transfer_src_transfer_dst`
+         (same size, same format): a scaled or flipped region (dst extent != src extent,
+         or offsets[1] < offsets[0]), or a format mismatch, returns DONE_UNSUPPORTED
+         with no write, honestly refused rather than half-implemented. NEAREST/LINEAR are
+         equal for an unscaled blit.
+      4. **Tests/model/profile**: `tb_g6lc_apu_xfer` cases (unscaled blit equals I2I;
+         scaled and flipped refused with zero writes); `vn_golden` mirror; then BLIT_SRC|
+         BLIT_DST stay unadvertised until scaled NEAREST exists (the CTS case uses
+         blit without checking the feature bit, as it is mandatory for RGBA8).
+      Follow-up: scaled NEAREST (a per-texel source index walk), then LINEAR on
+      the float formats.
+      **Progress:** step 1 is done. `[keep.vkCmdBlitImage]` in the profile stages 20 words
+      per region (srcOffsets/dstOffsets as 2-element arrays). Regenerated: 149 commands,
+      0 unfit; the package and `g6lc_apu_vn_tables.md` were updated by the generator.
+      Pending: regenerate `ue_ws0_texfetch_1` (its blit record now carries a staged
+      payload), cmdexec routing (step 2), the xfer BLIT op (step 3), and tests (step 4).
+      Step 2 done: `ue_ws0_texfetch_1` is regenerated. cmdexec `xf_i2i_rec` resolves
+      blit operands like CopyImage (img0/img1) and issues `APU_XFER_OP_BLIT = 3'd7`
+      (cmdexec_pkg). vgtop `work_is_xfer` now includes BLIT_IMAGE. The xfer currently
+      refuses OP_BLIT outright (FAULT, no write); this is a placeholder for step 3.
+      Local xfer 269/1,544 and cmdexec 12/60 pass. **Consequence to resolve:** vgsys
+      `neg_worksink0` expects blit as an *unrouted* WORK record (WorkSink=0 refusal).
+      With blit routed to xfer it faults on the xfer path instead, so the arm needs
+      another unrouted command (RESOLVE_IMAGE or CLEAR_DEPTH_STENCIL_IMAGE) or a
+      re-baselined expectation. Rerun vgsys locally before the next gate.
+      Resolved: the worksink arm now records `vkCmdResolveImage` (still unrouted);
+      `ue_ws0_texfetch_1` regenerated; local vgsys `neg_worksink0` PASS 77/3,156.
+      Step 3 done in RTL: xfer OP_BLIT loads 20 region words (`rg_q` widened to 20)
+      and `XBlitCvt` rewrites an unscaled, unflipped region into the I2I layout, then
+      continues as I2I (`xf_q.op <= I2I`, existing XImgChk pass-A bounds). It refuses
+      (FAULT, no write) when regions != 1, img0.fmt != img1.fmt, any extent is
+      empty/negative, or the src/dst extents differ. Local xfer 269/1,544 still passes.
+      Note: no unit TB drives OP_I2I (`tb_g6lc_apu_xfer` covers COPY/FILL/UPDATE).
+      Image ops are covered through vgtop/vgsys golden sessions (`ue_cpos_tex*`,
+      `xfer_img_oob`), so step 4 is a golden session variant (`--variant blit` on
+      texfetch_1: CopyImage-equivalent unscaled blit, checked on readback, plus a
+      scaled-blit negative expecting the §7b fault) rather than a unit driver.
+      **T1 blit working (local, 2026-11-04).** Positive `ue_cpos_blit_id_1` (an unscaled
+      1x1 self-blit after the upload): xfer `code=0`, vgtop PASS 40/1,362. Negative
+      `ue_cneg_blit_scaled_1`: `code=1`, PASS 40/850. Four further defects were needed
+      to get there:
+      - cmdexec read regions from imm[1] instead of imm[2];
+      - cmdexec `work_is_xfer` omitted BLIT;
+      - the vnfront record-time payload staging list omitted BLIT (`pay=0`, img1
+        unresolved);
+      - pass B re-read region 0 in the 20-word blit layout and treated it as I2I. The
+        new `blit_q` routes every re-read back through XBlitCvt.
+      Sim-only diagnostics added: `+dbg_blit` (xfer) and `xf_done code=` in the vgtop
+      `+eng_trace`.
+      **Sensitivity gap closed:** the vgtop TB counts non-OK xfer completions
+      (`XF_FAULTS n`, always printed). `+xf_ok` turns any of them into an error, and
+      `run-apu-vgtop.sh` passes `+xf_ok` to every `ue_cpos_*` session. Locally all 54
+      positive vgtop sessions show XF_FAULTS 0. `ue_cneg_blit_scaled_1 +xf_ok` FAILS as
+      intended (negatives run without it). Blit/xfer_big sessions are in both the
+      vgtop and vgsys lists. (The first gate with this, `apu-leaf-20261104T130718`,
+      failed the vgtop *build*: `APU_SH_DONE_OK` was unqualified in the TB, which is
+      now fixed as `g6lc_apu_sh_pkg::`.)
+      **Sensitivity gap (historical):** before these fixes the positive session PASSED while
+      the blit record returned FAULT (`code=1`), and later work (the dispatch) still
+      issued. A positive vgtop session does not fail on an xfer FAULT unless the
+      golden predicts it. Add a vgtop TB check that every `xf_done code != 0` is
+      matched by a golden-predicted DEVICE_LOST.
+      Negative arm done: `--variant blit_scaled` (a 2x self-blit on texfetch_1, in the
+      `lost` list) produces `ue_cneg_blit_scaled_1`. Local vgtop PASS 40/850: refused,
+      DEVICE_LOST, nothing written. ue_cpos_texfetch_1 and ue_cneg_xfer_img_oob_1 are
+      unchanged. Next: a positive unscaled blit (a second image or disjoint regions) and
+      adding both to the vgtop/vgsys lists and regen_vectors.sh.
+      Golden mirror done: the `vkCmdBlitImage` refusal check sits before the CopyImage
+      block, and BLIT is in both xfer type lists; it compiles, and `ue_ws0_texfetch_1`
+      regenerates unchanged (its resolve record is unaffected). Remaining for step 4: a
+      positive `--variant blit` session (an image -> image unscaled blit plus readback)
+      and a scaled negative, then local vgtop runs of both.
+      Golden hook for step 4: the xfer refusal mirror is the `ct == T['vkCmdCopyImage']`
+      block in `vn_golden.py` (~L2949, 17 words per region) plus the xfer type lists at
+      ~L3386 and ~L4994. Add `vkCmdBlitImage` there: 20 words per region; refuse when
+      regions != 1, formats differ, an extent is empty or flipped, or src != dst extent;
+      otherwise validate and apply it as the equivalent CopyImage region.
+      **Step 4 next:** an xfer TB blit driver (stage 20 words, issue OP_BLIT) with cases
+      for an unscaled blit equal to I2I, plus scaled, flipped and 2-region refused with
+      zero writes; then the `vn_golden` mirror.
+    - [ ] Point-draw follow-up (2026-11-03): the RTL renders the CTS shape correctly in
+      isolation. Evidence: `tb_g6lc_apu_rast` case 40 (RG8_UNORM stride 2, POINT_LIST,
+      colour on binding 1) passes, and the new end-to-end vgtop/vgsys session
+      `ue_gpos_ptsrg8_1` passes all 4,096 pixels (`vs_cts_pbvb` + `fs_white`, the CTS
+      shaders verbatim with gl_PointSize and no varyings; 27 points on 64x64). So the
+      all-black CTS result is not the raster, gather or shader path at small scale. Left to
+      separate: the CTS scale (256x256 target, 512+ points per draw), and the
+      host-write -> barrier -> draw visibility of the vertex buffer (the case's real
+      subject). Next: grow `ptsrg8` to 256x256 with 512 points; if that passes, trace the
+      CTS buffer's memory type and the map/flush path in a dev-only leaf.
     - [ ] `memory.pipeline_barrier.*` (~50 cases) still fails on the polygon-fixed tree
       (rerun `apu-leaf-20261103T053405-bb64708071fb`). Image-log diagnosis
       `apu-leaf-20261103T062143-0e96c775ce0b` (dev-only) separates two mechanisms:

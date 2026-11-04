@@ -140,12 +140,17 @@ permitted RAM/IOVA domain, including ring/status writes and integer overflow;
 exclude controller MMIO and unrelated masters' memory.
 
 Keep the existing default-off `StoramicEn` primary-memory selection and its
-direct DDR/LPDDR/simulation-memory conflicts. A **proposed, not yet implemented**
-`StoramicIoEn` enables the peripheral/storage role independently, so a flash-only
-stick can coexist with another primary RAM backend. Normalize both roles to one
-controller/slot-owner instance; enabling both must not instantiate duplicate
-controllers or drive the pads twice. Each new field requires CVA6Cfg propagation,
-legality checks, host schema/default-off tests and SoC/DTS alignment.
+direct DDR/LPDDR/simulation-memory conflicts. `StoramicIoEn` (implemented in
+ST-037C) enables the peripheral/storage role independently, so a flash-only
+stick can coexist with another primary RAM backend. It is a derived field of
+`cva6_cfg_t` (not `cva6_user_cfg_t`): `build_config_pkg` sets it from
+`StoramicEn` or from the `G6LC_STORAMIC_IO` define, and `check_cfg` asserts
+`StoramicEn ⇒ StoramicIoEn` plus the AXI geometry under either role. In
+IO-only builds the harness still routes the native window and instantiates
+the virtio transport, but the control bridge (`CtrlPageEn=0`) answers page 0
+with DECERR and the backend's control request stays idle. Board wrappers
+refuse either role. Each role requires CVA6Cfg propagation, legality checks,
+host schema/default-off tests and SoC/DTS alignment.
 
 MMIO has no generic device discovery. Publish `compatible = "virtio,mmio"` with
 the actual aperture and interrupt only when that device is usable. Reserve
@@ -260,8 +265,295 @@ stub, simulator model or passing subset alone.
 
 No new MMIO address, IRQ, capacity, feature bit or boot support is granted by
 this decision. The current M0 safe pads and error responses remain unchanged.
-The unselected executable frontend is under test: `storamic-96013e94fdae`
-failed a write-response oracle check; it is not a passing model milestone.
+The executable frontend failure recorded earlier (`storamic-96013e94fdae`) was a
+bench timing artifact. Later profile runs, starting with
+`storamic-7eea26e38385`, superseded it; see the task ledger.
+
+## First standalone device profile (ST-033A, pinned)
+
+This section pins the transport and register profile that ST-034 implements.
+The role and native configuration fields (`StoramicIoEn`, aperture, IRQ, DTS)
+are ST-033B and ST-037. Until then they remain proposals.
+
+**Register window.** One 4-KiB window per device, little-endian. The offsets
+are taken from the 1.4 CS01 MMIO transport section:
+
+| Offset | Register | Access | Profile behaviour |
+| --- | --- | --- | --- |
+| 0x000 | MagicValue | R | `0x74726976` |
+| 0x004 | Version | R | 2 |
+| 0x008 | DeviceID | R | 2 (block) when the device is usable, otherwise 0 |
+| 0x00C | VendorID | R | parameter `VendorId`; the value is an open ask (no copied ID) |
+| 0x010 | DeviceFeatures | R | bank selected by DeviceFeaturesSel; bank 1 bit 0 = VIRTIO_F_VERSION_1 (32); every other bit 0 |
+| 0x014 | DeviceFeaturesSel | W | banks > 1 read as 0 |
+| 0x020 | DriverFeatures | W | banks 0 and 1 stored; writes to other banks are ignored |
+| 0x024 | DriverFeaturesSel | W | |
+| 0x030 | QueueSel | W | |
+| 0x034 | QueueNumMax | R | 128 for queue 0, 0 for other queues |
+| 0x038 | QueueNum | W | |
+| 0x044 | QueueReady | RW | |
+| 0x050 | QueueNotify | W | |
+| 0x060 | InterruptStatus | R | bit 0 used buffer, bit 1 configuration change |
+| 0x064 | InterruptACK | W | |
+| 0x070 | Status | RW | |
+| 0x080/0x084 | QueueDescLow/High | W | |
+| 0x090/0x094 | QueueDriverLow/High | W | |
+| 0x0A0/0x0A4 | QueueDeviceLow/High | W | |
+| 0x0AC | SHMSel | W | no shared-memory regions: SHMLen reads all ones (as the spec requires for a missing region) and SHMBase reads 0 |
+| 0x0B0–0x0BC | SHMLen/SHMBase | R | as above |
+| 0x0C0 | QueueReset | RW | not offered (VIRTIO_F_RING_RESET off): reads 0, writes ignored |
+| 0x0FC | ConfigGeneration | R | |
+| 0x100+ | block configuration | R | `capacity` (le64, 512-byte sectors) at 0x100; other fields read 0 because their features are off |
+
+**Offered features.** VIRTIO_F_VERSION_1 only. The following are not offered:
+ACCESS_PLATFORM (no platform addressing contract), RING_PACKED, IN_ORDER,
+ORDER_PLATFORM, NOTIFICATION_DATA, NOTIF_CONFIG_DATA, RING_RESET, ADMIN_VQ,
+INDIRECT_DESC and EVENT_IDX. No block features are offered either: FLUSH needs
+a real stable-storage boundary, and SIZE_MAX, SEG_MAX, GEOMETRY, RO, BLK_SIZE,
+TOPOLOGY, CONFIG_WCE, MQ, DISCARD, WRITE_ZEROES, LIFETIME, SECURE_ERASE and
+ZONED have no owners yet. Linux then treats the volatile model as write-through
+without a cache flush. That is acceptable only because the labelled model is
+not persistent.
+
+**Access rules.**
+- Registers 0x000–0x0FF accept aligned 32-bit accesses. Any other access, and
+  any access to an offset not listed, returns SLVERR without side effects.
+- Device configuration (0x100 up to the end of the block configuration
+  structure) can be read at any byte address. The response is the aligned
+  32-bit word, so the CPU can extract a byte or halfword. Configuration writes
+  are ignored with OKAY, because no writable field is negotiated.
+
+**Status and negotiation.**
+- Status bits are ACKNOWLEDGE 1, DRIVER 2, DRIVER_OK 4, FEATURES_OK 8,
+  DEVICE_NEEDS_RESET 64 and FAILED 128. Driver writes store bits 1, 2, 4, 8
+  and 128. DEVICE_NEEDS_RESET is set only by the device.
+- A write that sets FEATURES_OK takes effect only if both conditions hold:
+  1. the negotiated features are a subset of the device features;
+  2. VERSION_1 is included.
+  Otherwise FEATURES_OK reads back clear and the device can never reach
+  DRIVER_OK.
+- DRIVER_OK is accepted only after FEATURES_OK.
+- Writing Status = 0 starts a device reset:
+  - Status keeps reading its previous value until `dma_idle_i` reports that the
+    ring engine has quiesced.
+  - The device then clears every transport register and queue state, and
+    advances an internal **reset epoch** that ST-035 tags DMA with.
+  - Status reads 0 once the reset is complete.
+  - Reset does not undo committed media writes.
+
+**Queue setup.** The queue registers of the selected queue can be written only
+while QueueReady = 0. Writes while ready, or to a queue other than 0, are
+ignored with OKAY.
+- Writing QueueReady = 1 succeeds only if all of these hold:
+  1. Status has FEATURES_OK and not DRIVER_OK;
+  2. QueueNum is a power of two from 1 to QueueNumMax;
+  3. the descriptor table is 16-byte aligned, the driver (available) area is
+     2-byte aligned and the device (used) area is 4-byte aligned;
+  4. none of the three areas wraps past 2^64 for that QueueNum.
+
+  Otherwise QueueReady stays 0.
+- A QueueNotify for queue 0 is forwarded to the ring engine as one pulse only
+  when DRIVER_OK is set, QueueReady = 1 and DEVICE_NEEDS_RESET is clear.
+  Any other QueueNotify is ignored: no work is fetched early.
+
+**Interrupts and configuration.**
+- The device interrupt is the level OR of the InterruptStatus bits.
+- InterruptACK clears the bits that are written. An event in the same cycle
+  wins.
+- A capacity change from the media side updates the configuration snapshot,
+  increments ConfigGeneration and sets InterruptStatus bit 1.
+- A device fault from the ring engine sets DEVICE_NEEDS_RESET and bit 1.
+
+**Limits.** One device per window, one queue, at most one request in flight
+(ST-035), and queue maximum 128. Everything else stays unadvertised until it
+has its own tests. Passing ST-034 register tests is not VirtIO conformance or
+OASIS certification.
+
+### ST-034 implementation notes
+
+Decisions the pinned profile left open, settled in
+`g6lc_storamic_virtio_mmio.sv`:
+
+- The device configuration window is the 96-byte `virtio_blk_config`
+  (0x100–0x15F), byte-readable; 0x160–0xFFF is SLVERR.
+- Reads of write-only registers return SLVERR (as do writes to read-only
+  registers); QueueReset reads 0 and ignores writes.
+- DriverFeatures banks 0 and 1 are stored; writes are frozen once FEATURES_OK
+  is set, and banks above 1 are ignored.
+- While a Status=0 reset is pending, every register write except another 0
+  is ignored with OKAY; Status keeps reading its previous value until
+  `dma_idle_i` completes the reset.
+
+## Split-ring engine contract (ST-035, pinned)
+
+`g6lc_storamic/rtl/host/virtio/g6lc_storamic_virtio_ring.sv` serves queue 0
+of one ST-034 transport. It walks split-virtqueue chains and hands each
+validated request to a backend. It owns no media semantics; virtio-blk
+decoding is ST-036.
+
+**Inputs from ST-034:** `queue_ready`, `queue_num`, `queue_desc`,
+`queue_driver`, `queue_device`, `driver_ok`, `notify` (pulse),
+`reset_pending`, `reset_epoch`. **Outputs to ST-034:** `dma_idle`,
+`used_event` (pulse) and `ring_fault` (pulse).
+
+**DMA seam.** The engine has its own single-beat 64-bit request port:
+- `dma_req_o`, `dma_we_o`, `dma_addr_o` (64-bit, 8-byte aligned),
+  `dma_wdata_o`, `dma_be_o`, handshaking with `dma_gnt_i`;
+- responses on `dma_rvalid_i`, `dma_rdata_i` and `dma_err_i`;
+- at most one request outstanding.
+
+Adapting this port to an AXI master, and sharing it with the backend, belongs
+to the device wrapper (ST-036/ST-037). Little-endian sub-word fields are
+extracted from the aligned beat. 16-bit ring fields are written with byte
+enables, never with a read-modify-write of driver-owned bytes.
+
+**DMA window.** The integration supplies `dma_base_i`/`dma_size_i`.
+- Every engine access must lie entirely inside the window. The check uses
+  65-bit arithmetic and covers the descriptor table, available ring, used ring
+  and each segment handed to the backend.
+- A violation raises `ring_fault` (the transport sets DEVICE_NEEDS_RESET) and
+  the engine issues no further DMA until reset.
+
+**Processing, one request in flight:**
+1. **Wake-up.** Idle until `notify` or a remembered pending notify. Work
+   starts only while `driver_ok && queue_ready && !reset_pending`.
+2. **Find work.** Read `avail.idx` at `driver+2`. If it equals the internal
+   `last_avail`, go idle. Otherwise read the head index at
+   `driver + 4 + 2*(last_avail mod N)`.
+3. **Walk the chain.** For each descriptor, read 16 bytes at `desc + 16*i`
+   (two beats) and check:
+   - `i < N`, and at most N descriptors are visited (cycle bound);
+   - INDIRECT (4) is not set, since it is not negotiated;
+   - every device-readable descriptor precedes every device-writable one;
+   - `len != 0`;
+   - the buffer lies inside the window.
+
+   A chain may have at most `MaxSegs` descriptors (parameter, default 8).
+   Without SEG_MAX, Linux virtio-blk uses at most 3 per request.
+4. **Fault on any violation.** A violation, or a chain longer than `MaxSegs`,
+   raises `ring_fault` with no used entry. The profile has no safe place to
+   report a malformed chain, so it never fabricates a completion.
+5. **Hand off.** Pass the segment table (`addr`, `len` and `write` for each
+   segment, plus `head`) to the backend with `req_valid`/`req_ready`. The
+   backend answers `rsp_valid` with `written_len`, the bytes it wrote into
+   device-writable buffers. The engine issues no DMA while the backend owns
+   the request.
+6. **Publish completion, in this order:**
+   1. Write the used element `{id = head (le32), len = written_len (le32)}` at
+      `device + 4 + 8*(used_idx mod N)` and wait for its response.
+   2. Then write `used.idx = used_idx + 1` (le16) at `device + 2` and wait for
+      its response.
+   3. Then pulse `used_event`.
+
+   Then increment `last_avail` and `used_idx` modulo 2^16 and go back to step 2.
+   Re-reading `avail.idx` there catches requests posted without another
+   notify.
+7. **Interrupt policy.** Without EVENT_IDX the engine always raises
+   `used_event`. Ignoring `VIRTQ_AVAIL_F_NO_INTERRUPT` is permitted (it is a
+   SHOULD), and Linux tolerates the extra interrupt. `used.flags` is never
+   written, so it stays 0 and the driver keeps notifying.
+8. **Reset.** On `reset_pending` the engine issues no new DMA, completes and
+   discards the outstanding response, abandons any backend request, and then
+   asserts `dma_idle`. Indices return to zero when the transport completes the
+   reset and advances `reset_epoch`. A response arriving under an old epoch is
+   dropped.
+
+**Formal obligations:**
+- no DMA outside the window;
+- no new DMA without `driver_ok && queue_ready && !reset_pending`;
+- at most one outstanding request;
+- the `used.idx` write is issued only after the used-element response;
+- `used_event` occurs only after the `used.idx` response;
+- the walk count never exceeds N;
+- `dma_idle` implies nothing is outstanding.
+
+Covers:
+- one request completed with `used_event`;
+- a fault on a cyclic chain;
+- a reset during a walk.
+
+**Limits.** One queue, one request in flight, no INDIRECT, EVENT_IDX, packed
+ring or IN_ORDER, and no notification suppression. Linux compatibility is
+asserted only by the ST-038 RTL-in-the-loop gate.
+
+## virtio-blk backend contract (ST-036, pinned)
+
+`g6lc_storamic/rtl/host/virtio/g6lc_storamic_virtio_blk.sv` executes one
+request handed over by the ST-035 engine (segment table plus `head`) and
+answers with `written_len`, or with `fault` when no safe status location
+exists.
+
+**Ports:**
+- its own single-beat DMA port, with the same shape as ST-035's and checked
+  against the same window;
+- a block-store seam, the same shape as the frontend `mem_*` seam: 64-bit
+  words at byte offset `sector*512 + 8*k`, with request/grant/we/be and
+  rvalid/rdata/error;
+- `capacity_i` in 512-byte sectors;
+- `serial_i[159:0]`, the 20-byte ID string, supplied by the integration from
+  the stick's validated identity and never fabricated;
+- `store_ready_i`.
+
+**Request layout:**
+- Segment 0 must be device-readable and at least 16 bytes long. It holds the
+  header: `type` (le32), `reserved` and `sector` (le64), at any byte
+  alignment.
+- The last segment must be device-writable and at least 1 byte long. Its
+  first byte is the status.
+- If either rule fails, the backend raises `fault`: there is no safe status
+  location, so the engine faults the device and fabricates nothing.
+- The segments in between carry the data.
+
+**Commands:**
+
+| `type` | Name | Data segments | Action | `written_len` |
+| --- | --- | --- | --- | --- |
+| 0 | IN | device-writable | read the store into the buffers | data bytes + 1 |
+| 1 | OUT | device-readable | write the buffers into the store | 1 |
+| 8 | GET_ID | one writable segment of at least 20 bytes | write `serial_i` | 20 + 1 |
+| other (including FLUSH = 4, which is not offered) | — | — | status UNSUPP (2) | 1 |
+
+**IOERR (status 1), with no store side effect,** when any of these holds:
+- a data direction mismatch;
+- total data length not a multiple of 512;
+- a data segment address not 8-byte aligned (a profile limit; the Linux block
+  layer aligns data buffers to at least 512 bytes);
+- `sector + len/512 > capacity_i` (65-bit arithmetic);
+- `store_ready_i` is low;
+- a data segment is empty, or does not lie entirely inside the DMA window
+  (the ring engine already refuses these; the backend checks again);
+- the store reports an error.
+
+**DMA coherence (native binding).** A device write completes only after the
+64-byte block holding it has been invalidated in every L1 (and L2/L3 tags)
+through the cluster CMO engine, so the driver may read device-written memory
+with ordinary loads once it observes the completion. Device reads are not
+snooped: the driver's stores must already be in memory, which the
+write-through L1 provides; a write-back L1 configuration would also need a
+clean before each device read.
+
+The DMA window end is clipped at 2^64 and beat addresses are formed in 65
+bits, so no accepted beat wraps to a low address. A GET_ID buffer must hold
+its three 8-byte beats inside the window, or the status is IOERR.
+
+All checks complete before the first store write, so a refused OUT never
+modifies the store. A store error during a transfer still yields IOERR. The
+bytes already written are not rolled back; this is recorded for durability.
+
+**Ordering.** Data DMA and store writes complete before the status byte is
+written. The status byte is written with a single byte enable, and its write
+response arrives before `rsp_valid`.
+
+**Persistence.** The first binding is a volatile, labelled model store.
+- An OUT completion means the data is in the volatile store, not on durable
+  media.
+- FLUSH stays unoffered until a qualified persistent store exists (ST-019/20).
+
+**Formal obligations:**
+- no store write for a refused request;
+- the status write happens after every data write;
+- `rsp_valid` comes after the status write response;
+- no DMA outside the window.
 
 ## Sources
 

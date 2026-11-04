@@ -27,6 +27,7 @@ module tb_g6lc_ai_dram_class2;
     .AXI_ID_WIDTH(IW), .AXI_ADDR_WIDTH(AW), .AXI_DATA_WIDTH(DW),
     .AXI_USER_WIDTH(UW), .NUM_WORDS(1024), .NrChannels(1)
   ) i_backend (
+      .storamic_ctrl_req_i('0),
     .clk_i(clk), .rst_ni(rst_n), .rst_sram_ni(rst_n), .testmode_i(1'b0),
     .slave(mem), .init_done_o(init_done),
     .ch_r_beats_o(ch_r), .ch_w_beats_o(ch_w)

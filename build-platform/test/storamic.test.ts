@@ -48,12 +48,23 @@ test("direct-memory flags and environment cannot silently override Storamic", ()
 test("standalone Storamic source list names only first-party RTL", () => {
   const root = resolve(import.meta.dir, "../..");
   const rows = readFileSync(resolve(root, "g6lc_storamic/Flist.storamic"), "utf8").trim().split(/\r?\n/);
-  expect(rows.length).toBe(6);
+  expect(rows.length).toBe(17);
   for (const row of rows) {
     expect(row.startsWith("${CVA6_REPO_DIR}/g6lc_storamic/rtl/")).toBe(true);
     const text = readFileSync(resolve(root, row.replace("${CVA6_REPO_DIR}/", "")), "utf8");
     expect(text).not.toMatch(/`include|vendor\/|axi_pkg::|common_cells/);
   }
+});
+
+test("Storamic source order declares packages first and matches the testharness Makefile", () => {
+  const root = resolve(import.meta.dir, "../..");
+  const flist = readFileSync(resolve(root, "g6lc_storamic/Flist.storamic"), "utf8")
+    .trim().split(/\r?\n/).map((row) => row.replace("${CVA6_REPO_DIR}/", ""));
+  const makefile = [...readFileSync(resolve(root, "Makefile"), "utf8")
+    .matchAll(/^\s*(g6lc_storamic\/rtl\/\S+\.sv)/gm)].map((m) => m[1]);
+  expect(makefile).toEqual(flist);
+  const firstModule = flist.findIndex((row) => !row.endsWith("_pkg.sv"));
+  expect(flist.slice(firstModule).some((row) => row.endsWith("_pkg.sv"))).toBe(false);
 });
 
 test("board wrappers cannot silently ignore a Storamic selection", () => {
@@ -64,6 +75,23 @@ test("board wrappers cannot silently ignore a Storamic selection", () => {
     "corev_apu/openpiton/ariane_verilog_wrap.sv",
   ]) {
     const text = readFileSync(resolve(root, file), "utf8");
-    expect(text).toMatch(/if \((CVA6Cfg|cva6_cfg)\.StoramicEn\) begin : gen_storamic_unbound\s+initial \$fatal\(1, "STORAMIC_BOARD_UNSUPPORTED"\)/);
+    expect(text).toMatch(/if \((CVA6Cfg|cva6_cfg)\.StoramicEn \|\| \1\.StoramicIoEn\) begin : gen_storamic_unbound\s+initial \$fatal\(1, "STORAMIC_BOARD_UNSUPPORTED"\)/);
   }
+});
+
+test("Makefile rejects illegal G6LC_STORAMIC_MODEL combinations (ST-011B)", () => {
+  const root = resolve(import.meta.dir, "../..");
+  const text = readFileSync(resolve(root, "Makefile"), "utf8");
+  // MODEL without the primary role is an error.
+  expect(text).toMatch(
+    /filter G6LC_STORAMIC_MODEL,[\s\S]*?ifeq \(\,\$\(filter G6LC_STORAMIC,[\s\S]*?\$\(error G6LC_STORAMIC_MODEL requires G6LC_STORAMIC\)/,
+  );
+  // MODEL conflicts with the skeleton (refuse) profile.
+  expect(text).toMatch(
+    /filter G6LC_STORAMIC_SKELETON,[\s\S]*?\$\(error G6LC_STORAMIC_MODEL conflicts with G6LC_STORAMIC_SKELETON\)/,
+  );
+  // The testbench binding define is passed when MODEL is selected.
+  expect(text).toMatch(
+    /\$\(if \$\(findstring G6LC_STORAMIC_MODEL,\$\(defines\)\), -DG6LC_STORAMIC_MODEL_TB,\)/,
+  );
 });

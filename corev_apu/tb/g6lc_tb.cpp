@@ -298,6 +298,11 @@ static const char *verilog_plusargs[] = {
     // translate_off): one AI_JOB line per completed descriptor, harvested by
     // verif/regress/ai-matrix-veri.sh AI_MATRIX_BENCH=1.
     "ai_pmu_trace",
+    // Storamic VirtIO-MMIO register trace (g6lc_storamic_virtio_mmio.sv,
+    // translate_off), used by verif/tb/storamic/run_native_virtio.py.
+    "g6lc_virtio_mmio_trace",
+    // Storamic primary-role AXI/seam trace (g6lc_storamic_attach.sv).
+    "g6lc_storamic_mem_trace",
     nullptr};
 
 // +mem_poke entries, applied inside the sim loop once main_time reaches cycle.
@@ -655,12 +660,23 @@ done_processing:
   // in ariane_tb.cpp.
 #if (VERILATOR_VERSION_INTEGER >= 5000000)
   // Verilator v5: Use rootp pointer and .data() accessor.
+#ifdef G6LC_STORAMIC_MODEL_TB
+  // ST-011B: with G6LC_STORAMIC+G6LC_STORAMIC_MODEL the DRAM slave is the
+  // Storamic attach's model-profile frontend backed by g6lc_storamic_sim_mem
+  // (same pulp sram as gen_sim_axi). There is no user array in this binding.
+#define MEM top->rootp->ariane_testharness__DOT__i_dram_backend__DOT__gen_storamic__DOT__i_storamic__DOT__gen_model_mem__DOT__i_sim_mem__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__i_tc_sram_wrapper__DOT__i_tc_sram__DOT__sram.m_storage
+#else
 #define MEM top->rootp->ariane_testharness__DOT__i_dram_backend__DOT__gen_sim_axi__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__i_tc_sram_wrapper__DOT__i_tc_sram__DOT__sram.m_storage
 #define MEM_USER top->rootp->ariane_testharness__DOT__i_dram_backend__DOT__gen_sim_axi__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__gen_mem_user__DOT__i_tc_sram_wrapper_user__DOT__i_tc_sram__DOT__sram.m_storage
+#endif
 #else
   // Verilator v4
+#ifdef G6LC_STORAMIC_MODEL_TB
+#define MEM top->ariane_testharness__DOT__i_dram_backend__DOT__gen_storamic__DOT__i_storamic__DOT__gen_model_mem__DOT__i_sim_mem__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__i_tc_sram_wrapper__DOT__i_tc_sram__DOT__sram
+#else
 #define MEM top->ariane_testharness__DOT__i_dram_backend__DOT__gen_sim_axi__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__i_tc_sram_wrapper__DOT__i_tc_sram__DOT__sram
 #define MEM_USER top->ariane_testharness__DOT__i_dram_backend__DOT__gen_sim_axi__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__gen_mem_user__DOT__i_tc_sram_wrapper_user__DOT__i_tc_sram__DOT__sram
+#endif
 #endif
   long long addr;
   long long len;
@@ -673,7 +689,9 @@ done_processing:
   //    0x80000000 inside a LOAD that begins at 0x7ffff000). fesvr only accepts
   //    exact PHDR addresses for read_section_void — read whole section then copy.
   const uint64_t dram_base = 0x80000000ULL;
+#ifndef G6LC_STORAMIC_MODEL_TB
   const uint64_t dram_user = 0x84000000ULL;
+#endif
   // T29/T30: the preload window is the whole DRAM model (NUM_WORDS = 2**25 x 8 B =
   // 256 MiB, ariane_soc::DRAMLength), not the historical 16 MiB. A Linux
   // fw_payload (OpenSBI + a 20 MB Image + an initrd at +64 MB) is one PHDR at
@@ -734,6 +752,7 @@ done_processing:
         }
       }
     }
+#ifndef G6LC_STORAMIC_MODEL_TB
     if (addr == (long long)dram_user) {
       try {
         read_section_void(addr, (void *)MEM_USER, mem_size);
@@ -741,6 +760,7 @@ done_processing:
         std::cerr << "No user memory instantiated ...\n";
       }
     }
+#endif
   }
 
   // Publish the preloaded DRAM image to the I1-at-supply oracle. Done after all

@@ -41,6 +41,16 @@ ifneq (,$(filter G6LC_AI_DRAM_CLASS1 G6LC_AI_DRAM_CHANS_2 G6LC_AI_DRAM_CHANS_4 G
 $(error Storamic is mutually exclusive with explicit direct-memory selections)
 endif
 endif
+# ST-011B: the simulation model memory only exists with the primary role,
+# and conflicts with the skeleton (refuse) profile.
+ifneq (,$(filter G6LC_STORAMIC_MODEL,$(subst +, ,$(defines))))
+ifeq (,$(filter G6LC_STORAMIC,$(subst +, ,$(defines))))
+$(error G6LC_STORAMIC_MODEL requires G6LC_STORAMIC)
+endif
+ifneq (,$(filter G6LC_STORAMIC_SKELETON,$(subst +, ,$(defines))))
+$(error G6LC_STORAMIC_MODEL conflicts with G6LC_STORAMIC_SKELETON)
+endif
+endif
 # test name for torture runs (binary name)
 test-location  ?= output/test
 # set to either nothing or -log
@@ -228,10 +238,26 @@ src :=  $(if $(spike-tandem),verif/tb/core/uvma_core_cntrl_pkg.sv)              
         g6lc_storamic/rtl/include/g6lc_storamic_cfg_pkg.sv                           \
         g6lc_storamic/rtl/include/g6lc_storamic_pkg.sv                               \
         g6lc_storamic/rtl/include/g6lc_storamic_pad_pkg.sv                           \
+        g6lc_storamic/rtl/fabric/g6lc_storamic_region_pkg.sv                         \
+        g6lc_storamic/rtl/discovery/g6lc_storamic_discovery_pkg.sv                   \
         g6lc_storamic/rtl/frontend/g6lc_storamic_axi_refuse.sv                       \
+        g6lc_storamic/rtl/frontend/g6lc_storamic_axi_memory.sv                       \
+        g6lc_storamic/rtl/fabric/g6lc_storamic_slot_mux.sv                           \
+        g6lc_storamic/rtl/discovery/g6lc_storamic_sync.sv                            \
+        g6lc_storamic/rtl/discovery/g6lc_storamic_discovery.sv                       \
+        g6lc_storamic/rtl/discovery/g6lc_storamic_discovery_set.sv                   \
+        g6lc_storamic/rtl/frontend/g6lc_storamic_regs.sv                             \
+        g6lc_storamic/rtl/host/virtio/g6lc_storamic_virtio_mmio.sv                   \
+        g6lc_storamic/rtl/host/virtio/g6lc_storamic_virtio_ring.sv                   \
+        g6lc_storamic/rtl/host/virtio/g6lc_storamic_virtio_blk.sv                    \
+        g6lc_storamic/rtl/host/virtio/g6lc_storamic_virtio_dev.sv                    \
         g6lc_storamic/rtl/g6lc_storamic_top.sv                                      \
         corev_apu/include/g6lc_storamic_soc_cfg_pkg.sv                               \
         corev_apu/storamic/g6lc_storamic_attach.sv                                  \
+        corev_apu/storamic/g6lc_storamic_ctrl_bridge.sv                             \
+        corev_apu/storamic/g6lc_storamic_dma_axi.sv                                 \
+        corev_apu/storamic/g6lc_storamic_model_store.sv                             \
+        corev_apu/storamic/g6lc_storamic_sim_mem.sv                                 \
         corev_apu/src/g6lc_ai_dram_backend.sv                                        \
         corev_apu/src/g6lc_ai_litedram_wrap.sv                                       \
         corev_apu/src/g6lc_ai_dram_channels.sv                                       \
@@ -825,7 +851,7 @@ verilate_command := $(verilator) --no-timing verilator_config.vlt $(verilator_as
                     $(if $(TRACE_COMPACT), --trace-fst $(VL_INC_DIR)/verilated_fst_c.cpp)                        \
                     $(if $(TRACE_FAST), --trace $(VL_INC_DIR)/verilated_vcd_c.cpp)                               \
                     -LDFLAGS "-L$(RISCV)/lib -L$(SPIKE_INSTALL_DIR)/lib -Wl,-rpath,$(RISCV)/lib -Wl,-rpath,$(SPIKE_INSTALL_DIR)/lib -lfesvr -lriscv -ldisasm -lyaml-cpp $(if $(PROFILE), -g -pg,) -lpthread $(if $(TRACE_COMPACT), -lz,)" \
-                    -CFLAGS "$(CFLAGS)$(if $(PROFILE), -g -pg,) -DVL_DEBUG -I$(SPIKE_INSTALL_DIR)$(if $(or $(findstring G6LC_HAVE_LITEDRAM,$(defines)),$(findstring G6LC_AI_DRAM_CLASS1,$(defines)),$(findstring G6LC_AI_DRAM_CHANS_2,$(defines)),$(findstring G6LC_AI_DRAM_CHANS_4,$(defines)),$(findstring G6LC_AI_DRAM_CHANS_8,$(defines))), -DG6LC_HAVE_LITEDRAM,)$(if $(findstring G6LC_AI_DRAM_SIM_CHANS_2,$(defines)), -DG6LC_AI_DRAM_SIM_CHANS_2,)$(if $(findstring G6LC_AI_DRAM_SIM_CHANS_4,$(defines)), -DG6LC_AI_DRAM_SIM_CHANS_4,)$(if $(findstring G6LC_AI_DRAM_SIM_CHANS_8,$(defines)), -DG6LC_AI_DRAM_SIM_CHANS_8,)$(if $(findstring G6LC_AI_DRAM_WIDE_CH,$(defines)), -DG6LC_AI_DRAM_WIDE_CH,)$(if $(findstring G6LC_CORE_HB,$(defines)), -DG6LC_CORE_HB -I$(ver-library)/Vg6lc_core_hb,)" \
+                    -CFLAGS "$(CFLAGS)$(if $(PROFILE), -g -pg,) -DVL_DEBUG -I$(SPIKE_INSTALL_DIR)$(if $(or $(findstring G6LC_HAVE_LITEDRAM,$(defines)),$(findstring G6LC_AI_DRAM_CLASS1,$(defines)),$(findstring G6LC_AI_DRAM_CHANS_2,$(defines)),$(findstring G6LC_AI_DRAM_CHANS_4,$(defines)),$(findstring G6LC_AI_DRAM_CHANS_8,$(defines))), -DG6LC_HAVE_LITEDRAM,)$(if $(findstring G6LC_AI_DRAM_SIM_CHANS_2,$(defines)), -DG6LC_AI_DRAM_SIM_CHANS_2,)$(if $(findstring G6LC_AI_DRAM_SIM_CHANS_4,$(defines)), -DG6LC_AI_DRAM_SIM_CHANS_4,)$(if $(findstring G6LC_AI_DRAM_SIM_CHANS_8,$(defines)), -DG6LC_AI_DRAM_SIM_CHANS_8,)$(if $(findstring G6LC_AI_DRAM_WIDE_CH,$(defines)), -DG6LC_AI_DRAM_WIDE_CH,)$(if $(findstring G6LC_STORAMIC_MODEL,$(defines)), -DG6LC_STORAMIC_MODEL_TB,)$(if $(findstring G6LC_CORE_HB,$(defines)), -DG6LC_CORE_HB -I$(ver-library)/Vg6lc_core_hb,)" \
                     $(if $(SPIKE_TANDEM), +define+SPIKE_TANDEM, )                                                \
                     --cc --vpi                                                                                   \
                     $(if $(findstring G6LC_CORE_HB,$(defines)), --hierarchical,)                                 \

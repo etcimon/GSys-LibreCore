@@ -14,6 +14,14 @@ package g6lc_storamic_soc_cfg_pkg;
 `else
       1'b0;
 `endif
+  // ST-011B: simulation model memory backing for the primary-memory role
+  // (only meaningful together with G6LC_STORAMIC; the Makefile enforces it).
+  localparam bit SimModel =
+`ifdef G6LC_STORAMIC_MODEL
+      1'b1;
+`else
+      1'b0;
+`endif
   localparam bit DirectBackendSelected = 1'b0
 `ifdef G6LC_AI_DRAM_CLASS1
       || 1'b1
@@ -41,10 +49,14 @@ package g6lc_storamic_soc_cfg_pkg;
 `endif
       ;
 
-  function automatic g6lc_storamic_cfg_pkg::storamic_cfg_t make_cfg(bit enable);
+  function automatic g6lc_storamic_cfg_pkg::storamic_cfg_t make_cfg(bit enable,
+      logic [63:0] model_base = '0, logic [63:0] model_bytes = '0);
     return '{Enable: enable,
-      Profile: enable && Skeleton ? g6lc_storamic_cfg_pkg::ProfileRefuse :
+      Profile: enable && SimModel ? g6lc_storamic_cfg_pkg::ProfileModel :
+               enable && Skeleton ? g6lc_storamic_cfg_pkg::ProfileRefuse :
                                     g6lc_storamic_cfg_pkg::ProfileOff,
-      MaxSticks: MaxSticks, RequestedMediaCaps: '0, ModelBase: '0, ModelBytes: '0};
+      MaxSticks: MaxSticks, RequestedMediaCaps: '0,
+      ModelBase: SimModel ? model_base : '0,
+      ModelBytes: SimModel ? model_bytes : '0};
   endfunction
 endpackage

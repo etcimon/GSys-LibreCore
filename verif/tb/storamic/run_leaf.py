@@ -126,7 +126,8 @@ def main():
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     data = Path(os.environ["TH_DATA_DIR"])
     out = Path(os.environ["TH_OUT_DIR"])
-    expected = json.loads(os.environ["STORAMIC_SOURCES"])
+    run_manifest = json.loads((data / os.environ["STORAMIC_MANIFEST_FILE"]).read_text())
+    expected = run_manifest["sources"]
     actual = {name: sha(data / name) for name in expected}
     if actual != expected or sha(Path(__file__)) != os.environ["STORAMIC_RUNNER_SHA"]:
         raise RuntimeError("STORAMIC_SOURCE_IDENTITY")
@@ -140,7 +141,7 @@ def main():
         "version": subprocess.check_output([str(verilator), "--version"], text=True).strip(),
         "verilator_bin_sha256": sha(verilator.with_name("verilator_bin")),
         "qualification": False,
-        "source_paths": json.loads(os.environ["STORAMIC_SOURCE_PATHS"]),
+        "source_paths": run_manifest["source_paths"],
         "stages": stages,
         "resources": {
             "compiler_jobs": 1, "model_threads": 1,
@@ -152,14 +153,18 @@ def main():
         },
     }
     builds = []
-    if set(stages) & {"protocol", "config", "integration", "model"}:
+    if set(stages) & {"protocol", "config", "integration", "model", "region",
+                      "map", "discovery", "regs", "ctrl", "virtio",
+                      "vring", "vblk", "vdev", "vdma"}:
         manifest["runtime"] = runtime_identity(out)
         manifest["compiler"] = compiler_identity()
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
     source_names = [
         "g6lc_storamic_cfg_pkg.sv", "g6lc_storamic_pkg.sv",
         "g6lc_storamic_pad_pkg.sv", "g6lc_storamic_axi_refuse.sv",
-        "g6lc_storamic_axi_memory.sv", "g6lc_storamic_top.sv", "tb_g6lc_storamic.sv",
+        "g6lc_storamic_region_pkg.sv",
+        "g6lc_storamic_axi_memory.sv", "g6lc_storamic_regs.sv",
+        "g6lc_storamic_top.sv", "tb_g6lc_storamic.sv",
     ]
     sources = [str(data / name) for name in source_names]
     outcomes = []
@@ -210,7 +215,7 @@ def main():
                 "--top-module", "tb_g6lc_storamic_config",
                 *[str(data / name) for name in [
                     "config_pkg.sv", config, "build_config_pkg.sv",
-                    "tb_g6lc_storamic_config.sv",
+                    "g6lc_storamic_cfg_pkg.sv", "tb_g6lc_storamic_config.sv",
                 ]],
             ]
             with (out / f"config-{config}.log").open("w") as log:
@@ -230,7 +235,7 @@ def main():
                 "--Mdir", str(out / f"config-{name}"), "-o", "config-test", *defines,
                 *[str(data / p) for p in [
                     "config_pkg.sv", "g6lc64_smt2_config_pkg.sv", "build_config_pkg.sv",
-                    "tb_g6lc_storamic_config.sv",
+                    "g6lc_storamic_cfg_pkg.sv", "tb_g6lc_storamic_config.sv",
                 ]],
             ]
             builds.append(build_model(command, out / f"config-{name}",
@@ -243,6 +248,351 @@ def main():
                 run.returncode == 0 and "STORAMIC_CORE_CONFIG_PASS" in run.stdout)
             if not matched:
                 raise RuntimeError(f"configuration propagation failed: {name}")
+    if "region" in stages:
+        command = [
+            str(verilator), "--binary", "--timing", "--assert", "-j", "1",
+            "--threads", "1", "-Wno-fatal", "-Werror-LATCH", "-Werror-UNOPTFLAT",
+            "--top-module", "tb_g6lc_storamic_region",
+            "--Mdir", str(out / "region"), "-o", "region-test",
+            *[str(data / p) for p in [
+                "g6lc_storamic_cfg_pkg.sv", "g6lc_storamic_region_pkg.sv",
+                "tb_g6lc_storamic_region.sv",
+            ]],
+        ]
+        builds.append(build_model(command, out / "region",
+                                  out / "region-build.log", manifest))
+        run = subprocess.run([str(out / "region/region-test")],
+                             capture_output=True, text=True, timeout=30)
+        text = run.stdout + run.stderr
+        (out / "region-sim.log").write_text(text)
+        if run.returncode != 0 or "STORAMIC_REGION_PASS" not in text:
+            raise RuntimeError(f"region: unexpected verdict: {text[-4000:]}")
+        negative = subprocess.run(
+            [str(out / "region/region-test"), "+oracle_negative"],
+            capture_output=True, text=True, timeout=30)
+        text = negative.stdout + negative.stderr
+        (out / "region-oracle-negative.log").write_text(text)
+        if negative.returncode == 0 or "STORAMIC_REGION_ORACLE_NEGATIVE" not in text:
+            raise RuntimeError("region negative oracle failed to reject")
+        outcomes.append({"region": "bench", "pass": True,
+                         "negative_oracle": True})
+    if "map" in stages:
+        for name, flags in [
+            ("map-one", ["-GSlots=1"]), ("map-two", ["-GSlots=2"]),
+            ("map-three", ["-GSlots=3"]), ("map-four", ["-GSlots=4"]),
+            ("map-eight", ["-GSlots=8"]),
+            ("map-one-wide", ["-GSlots=1", "-GDataWidth=512"]),
+            ("map-three-wide", ["-GSlots=3", "-GDataWidth=512"]),
+            ("map-eight-wide", ["-GSlots=8", "-GDataWidth=512"]),
+            ("map-rt", ["-GSlots=3", "-GBootMapEn=0"]),
+        ]:
+            command = [
+                str(verilator), "--binary", "--timing", "--assert", "-j", "1",
+                "--threads", "1", "-Wno-fatal", "-Werror-LATCH",
+                "-Werror-UNOPTFLAT", "--top-module", "tb_g6lc_storamic_map",
+                "--Mdir", str(out / name), "-o", "map-test", *flags,
+                *[str(data / p) for p in [
+                    "g6lc_storamic_cfg_pkg.sv", "g6lc_storamic_pkg.sv",
+                    "g6lc_storamic_pad_pkg.sv", "g6lc_storamic_axi_refuse.sv",
+                    "g6lc_storamic_region_pkg.sv", "g6lc_storamic_axi_memory.sv",
+                    "g6lc_storamic_slot_mux.sv", "g6lc_storamic_regs.sv", "g6lc_storamic_top.sv",
+                    "g6lc_storamic_sram_model.sv",
+                    "tb_g6lc_storamic_map.sv",
+                ]],
+            ]
+            builds.append(build_model(command, out / name,
+                                      out / f"{name}-build.log", manifest))
+            run = subprocess.run([str(out / f"{name}/map-test")],
+                                 capture_output=True, text=True, timeout=60)
+            text = run.stdout + run.stderr
+            (out / f"{name}-sim.log").write_text(text)
+            if run.returncode != 0 or "STORAMIC_MAP_PASS" not in text:
+                raise RuntimeError(f"{name}: unexpected verdict: {text[-4000:]}")
+            outcomes.append({"map": name, "pass": True})
+        # Illegal map (backing alias via -DSTORAMIC_MAP_ILLEGAL) must hit the
+        # frontend's elaboration-time geometry fatal, not simulate at all.
+        command = [
+            str(verilator), "--binary", "--timing", "--assert", "-j", "1",
+            "--threads", "1", "-Wno-fatal", "-Werror-LATCH",
+            "-Werror-UNOPTFLAT", "--top-module", "tb_g6lc_storamic_map",
+            "--Mdir", str(out / "map-illegal"), "-o", "map-test",
+            "-DSTORAMIC_MAP_ILLEGAL",
+            *[str(data / p) for p in [
+                "g6lc_storamic_cfg_pkg.sv", "g6lc_storamic_pkg.sv",
+                "g6lc_storamic_pad_pkg.sv", "g6lc_storamic_axi_refuse.sv",
+                "g6lc_storamic_region_pkg.sv", "g6lc_storamic_axi_memory.sv",
+                "g6lc_storamic_slot_mux.sv", "g6lc_storamic_regs.sv", "g6lc_storamic_top.sv",
+                "g6lc_storamic_sram_model.sv",
+                "tb_g6lc_storamic_map.sv",
+            ]],
+        ]
+        builds.append(build_model(command, out / "map-illegal",
+                                  out / "map-illegal-build.log", manifest))
+        run = subprocess.run([str(out / "map-illegal/map-test")],
+                             capture_output=True, text=True, timeout=60)
+        text = run.stdout + run.stderr
+        (out / "map-illegal-sim.log").write_text(text)
+        if run.returncode == 0 or "STORAMIC_MODEL_CONFIG_ILLEGAL" not in text:
+            raise RuntimeError(f"map-illegal: unexpected verdict: {text[-2000:]}")
+        outcomes.append({"map": "map-illegal", "expect_illegal": True})
+        negative = subprocess.run(
+            [str(out / "map-two/map-test"), "+oracle_negative"],
+            capture_output=True, text=True, timeout=60)
+        text = negative.stdout + negative.stderr
+        (out / "map-oracle-negative.log").write_text(text)
+        if negative.returncode == 0 or "STORAMIC_MAP_ORACLE_NEGATIVE" not in text:
+            raise RuntimeError("map negative oracle failed to reject")
+        outcomes.append({"map_negative_oracle": True})
+    if "discovery" in stages:
+        command = [
+            str(verilator), "--binary", "--timing", "--assert",
+            "-j", "1", "--threads", "1", "-Wno-fatal",
+            "-Werror-LATCH", "-Werror-UNOPTFLAT",
+            "--top-module", "tb_g6lc_storamic_discovery",
+            "--Mdir", str(out / "discovery"), "-o", "discovery-test",
+            *[str(data / p) for p in [
+                "g6lc_storamic_cfg_pkg.sv", "g6lc_storamic_pkg.sv",
+                "g6lc_storamic_region_pkg.sv",
+                "g6lc_storamic_discovery_pkg.sv", "g6lc_storamic_sync.sv",
+                "g6lc_storamic_discovery.sv", "g6lc_storamic_discovery_set.sv",
+                "tb_g6lc_storamic_discovery.sv",
+            ]],
+        ]
+        builds.append(build_model(command, out / "discovery",
+                                  out / "discovery-build.log", manifest))
+        run = subprocess.run([str(out / "discovery/discovery-test")],
+                             capture_output=True, text=True, timeout=120)
+        text = run.stdout + run.stderr
+        (out / "discovery-sim.log").write_text(text)
+        if run.returncode != 0 or "STORAMIC_DISCOVERY_PASS" not in text:
+            raise RuntimeError(f"discovery: unexpected verdict: {text[-4000:]}")
+        outcomes.append({"discovery": "tb", "pass": True})
+        negative = subprocess.run(
+            [str(out / "discovery/discovery-test"), "+oracle_negative"],
+            capture_output=True, text=True, timeout=60)
+        text = negative.stdout + negative.stderr
+        (out / "discovery-oracle-negative.log").write_text(text)
+        if (negative.returncode == 0 or
+                "STORAMIC_DISCOVERY_ORACLE_NEGATIVE" not in text):
+            raise RuntimeError("discovery negative oracle failed to reject")
+        outcomes.append({"discovery_negative_oracle": True})
+    if "regs" in stages:
+        command = [
+            str(verilator), "--binary", "--timing", "--assert",
+            "-j", "1", "--threads", "1", "-Wno-fatal",
+            "-Werror-LATCH", "-Werror-UNOPTFLAT",
+            "--top-module", "tb_g6lc_storamic_regs",
+            "--Mdir", str(out / "regs"), "-o", "regs-test",
+            *[str(data / p) for p in [
+                "g6lc_storamic_cfg_pkg.sv", "g6lc_storamic_pkg.sv",
+                "g6lc_storamic_pad_pkg.sv", "g6lc_storamic_region_pkg.sv",
+                "g6lc_storamic_axi_refuse.sv", "g6lc_storamic_axi_memory.sv",
+                "g6lc_storamic_regs.sv", "g6lc_storamic_top.sv",
+                "tb_g6lc_storamic_regs.sv",
+            ]],
+        ]
+        builds.append(build_model(command, out / "regs",
+                                  out / "regs-build.log", manifest))
+        run = subprocess.run([str(out / "regs/regs-test")],
+                             capture_output=True, text=True, timeout=120)
+        text = run.stdout + run.stderr
+        (out / "regs-sim.log").write_text(text)
+        if run.returncode != 0 or "STORAMIC_REGS_PASS" not in text:
+            raise RuntimeError(f"regs: unexpected verdict: {text[-4000:]}")
+        outcomes.append({"regs": "tb", "pass": True})
+        negative = subprocess.run(
+            [str(out / "regs/regs-test"), "+oracle_negative"],
+            capture_output=True, text=True, timeout=60)
+        text = negative.stdout + negative.stderr
+        (out / "regs-oracle-negative.log").write_text(text)
+        if (negative.returncode == 0 or
+                "STORAMIC_REGS_ORACLE_NEGATIVE" not in text):
+            raise RuntimeError("regs negative oracle failed to reject")
+        outcomes.append({"regs_negative_oracle": True})
+    if "virtio" in stages:
+        command = [
+            str(verilator), "--binary", "--timing", "--assert",
+            "-j", "1", "--threads", "1", "-Wno-fatal",
+            "-Werror-LATCH", "-Werror-UNOPTFLAT",
+            "--top-module", "tb_g6lc_storamic_virtio_mmio",
+            "--Mdir", str(out / "virtio"), "-o", "virtio-test",
+            *[str(data / p) for p in [
+                "g6lc_storamic_cfg_pkg.sv", "g6lc_storamic_pkg.sv",
+                "g6lc_storamic_region_pkg.sv",
+                "g6lc_storamic_virtio_mmio.sv",
+                "tb_g6lc_storamic_virtio_mmio.sv",
+            ]],
+        ]
+        builds.append(build_model(command, out / "virtio",
+                                  out / "virtio-build.log", manifest))
+        run = subprocess.run([str(out / "virtio/virtio-test")],
+                             capture_output=True, text=True, timeout=180)
+        text = run.stdout + run.stderr
+        (out / "virtio-sim.log").write_text(text)
+        if run.returncode != 0 or "VIRTIO_PASS" not in text:
+            raise RuntimeError(f"virtio: unexpected verdict: {text[-4000:]}")
+        outcomes.append({"virtio": "tb", "pass": True})
+        negative = subprocess.run(
+            [str(out / "virtio/virtio-test"), "+oracle_negative"],
+            capture_output=True, text=True, timeout=60)
+        text = negative.stdout + negative.stderr
+        (out / "virtio-oracle-negative.log").write_text(text)
+        if "VIRTIO_PASS" in text or negative.returncode == 0:
+            raise RuntimeError("virtio: negative oracle accepted")
+        outcomes.append({"virtio_negative_oracle": True})
+    if "vring" in stages:
+        command = [
+            str(verilator), "--binary", "--timing", "--assert",
+            "-j", "1", "--threads", "1", "-Wno-fatal",
+            "-Werror-LATCH", "-Werror-UNOPTFLAT",
+            "--top-module", "tb_g6lc_storamic_virtio_ring",
+            "--Mdir", str(out / "vring"), "-o", "vring-test",
+            *[str(data / p) for p in [
+                "g6lc_storamic_virtio_ring.sv", "tb_g6lc_storamic_virtio_ring.sv",
+            ]],
+        ]
+        builds.append(build_model(command, out / "vring",
+                                  out / "vring-build.log", manifest))
+        run = subprocess.run([str(out / "vring/vring-test")],
+                             capture_output=True, text=True, timeout=300)
+        text = run.stdout + run.stderr
+        (out / "vring-sim.log").write_text(text)
+        if run.returncode != 0 or "VRING_PASS" not in text:
+            raise RuntimeError(f"vring: unexpected verdict: {text[-4000:]}")
+        outcomes.append({"vring": "tb", "pass": True})
+        negative = subprocess.run(
+            [str(out / "vring/vring-test"), "+oracle_negative"],
+            capture_output=True, text=True, timeout=120)
+        text = negative.stdout + negative.stderr
+        (out / "vring-oracle-negative.log").write_text(text)
+        if "VRING_PASS" in text or negative.returncode == 0:
+            raise RuntimeError("vring: negative oracle accepted")
+        outcomes.append({"vring_negative_oracle": True})
+    if "vblk" in stages:
+        command = [
+            str(verilator), "--binary", "--timing", "--assert",
+            "-j", "1", "--threads", "1", "-Wno-fatal",
+            "-Werror-LATCH", "-Werror-UNOPTFLAT",
+            "--top-module", "tb_g6lc_storamic_virtio_blk",
+            "--Mdir", str(out / "vblk"), "-o", "vblk-test",
+            *[str(data / p) for p in [
+                "g6lc_storamic_virtio_blk.sv", "tb_g6lc_storamic_virtio_blk.sv",
+            ]],
+        ]
+        builds.append(build_model(command, out / "vblk",
+                                  out / "vblk-build.log", manifest))
+        run = subprocess.run([str(out / "vblk/vblk-test")],
+                             capture_output=True, text=True, timeout=300)
+        text = run.stdout + run.stderr
+        (out / "vblk-sim.log").write_text(text)
+        if run.returncode != 0 or "VBLK_PASS" not in text:
+            raise RuntimeError(f"vblk: unexpected verdict: {text[-4000:]}")
+        outcomes.append({"vblk": "tb", "pass": True})
+        negative = subprocess.run(
+            [str(out / "vblk/vblk-test"), "+oracle_negative"],
+            capture_output=True, text=True, timeout=120)
+        text = negative.stdout + negative.stderr
+        (out / "vblk-oracle-negative.log").write_text(text)
+        if "VBLK_PASS" in text or negative.returncode == 0:
+            raise RuntimeError("vblk: negative oracle accepted")
+        outcomes.append({"vblk_negative_oracle": True})
+    if "vdev" in stages:
+        command = [
+            str(verilator), "--binary", "--timing", "--assert",
+            "-j", "1", "--threads", "1", "-Wno-fatal",
+            "-Werror-LATCH", "-Werror-UNOPTFLAT",
+            "--top-module", "tb_g6lc_storamic_virtio_dev",
+            "--Mdir", str(out / "vdev"), "-o", "vdev-test",
+            *[str(data / p) for p in [
+                "g6lc_storamic_cfg_pkg.sv", "g6lc_storamic_pkg.sv",
+                "g6lc_storamic_virtio_mmio.sv", "g6lc_storamic_virtio_ring.sv",
+                "g6lc_storamic_virtio_blk.sv", "g6lc_storamic_virtio_dev.sv",
+                "tb_g6lc_storamic_virtio_dev.sv",
+            ]],
+        ]
+        builds.append(build_model(command, out / "vdev",
+                                  out / "vdev-build.log", manifest))
+        run = subprocess.run([str(out / "vdev/vdev-test")],
+                             capture_output=True, text=True, timeout=600)
+        text = run.stdout + run.stderr
+        (out / "vdev-sim.log").write_text(text)
+        if run.returncode != 0 or "VDEV_PASS" not in text:
+            raise RuntimeError(f"vdev: unexpected verdict: {text[-4000:]}")
+        outcomes.append({"vdev": "tb", "pass": True})
+        negative = subprocess.run(
+            [str(out / "vdev/vdev-test"), "+oracle_negative"],
+            capture_output=True, text=True, timeout=300)
+        text = negative.stdout + negative.stderr
+        (out / "vdev-oracle-negative.log").write_text(text)
+        if "VDEV_PASS" in text or negative.returncode == 0:
+            raise RuntimeError("vdev: negative oracle accepted")
+        outcomes.append({"vdev_negative_oracle": True})
+    if "vdma" in stages:
+        # vdma-inval: InvalEn=1, every Storamic write invalidates its block
+        # through the cluster CMO port before completing.
+        for name, flags in [("vdma", []), ("vdma-inval", ["-GInvalEn=1"])]:
+            command = [
+                str(verilator), "--binary", "--timing", "--assert",
+                "-j", "1", "--threads", "1", "-Wno-fatal",
+                "-Werror-LATCH", "-Werror-UNOPTFLAT", *flags,
+                "--top-module", "tb_g6lc_storamic_dma_axi",
+                "--Mdir", str(out / name), "-o", "vdma-test",
+                *[str(data / p) for p in [
+                    "g6lc_storamic_dma_axi.sv", "tb_g6lc_storamic_dma_axi.sv",
+                ]],
+            ]
+            builds.append(build_model(command, out / name,
+                                      out / f"{name}-build.log", manifest))
+            run = subprocess.run([str(out / name / "vdma-test")],
+                                 capture_output=True, text=True, timeout=300)
+            text = run.stdout + run.stderr
+            (out / f"{name}-sim.log").write_text(text)
+            if run.returncode != 0 or "VDMA_PASS" not in text:
+                raise RuntimeError(f"{name}: unexpected verdict: {text[-4000:]}")
+            outcomes.append({"vdma": name, "pass": True})
+            negative = subprocess.run(
+                [str(out / name / "vdma-test"), "+oracle_negative"],
+                capture_output=True, text=True, timeout=120)
+            text = negative.stdout + negative.stderr
+            (out / f"{name}-oracle-negative.log").write_text(text)
+            if "VDMA_PASS" in text or negative.returncode == 0:
+                raise RuntimeError(f"{name}: negative oracle accepted")
+            outcomes.append({"vdma_negative_oracle": name})
+    if "ctrl" in stages:
+        # ctrl-stall holds the AXI-Lite W channel off after each AW so the
+        # bridge must track the two handshakes independently.
+        for name, flags in [("ctrl", []), ("ctrl-stall", ["-GStallW=1"]),
+                            ("ctrl-ioonly", ["-GCtrlPageEn=0"])]:
+            command = [
+                str(verilator), "--binary", "--timing", "--assert",
+                "-j", "1", "--threads", "1", "-Wno-fatal",
+                "-Werror-LATCH", "-Werror-UNOPTFLAT",
+                "--top-module", "tb_g6lc_storamic_ctrl_bridge",
+                "--Mdir", str(out / name), "-o", "ctrl-test", *flags,
+                *[str(data / p) for p in [
+                    "g6lc_storamic_cfg_pkg.sv", "g6lc_storamic_pkg.sv",
+                    "g6lc_storamic_region_pkg.sv", "g6lc_storamic_regs.sv",
+                    "g6lc_storamic_virtio_mmio.sv",
+                    "g6lc_storamic_ctrl_bridge.sv",
+                    "tb_g6lc_storamic_ctrl_bridge.sv",
+                ]],
+            ]
+            builds.append(build_model(command, out / name,
+                                      out / f"{name}-build.log", manifest))
+            run = subprocess.run([str(out / f"{name}/ctrl-test")],
+                                 capture_output=True, text=True, timeout=120)
+            text = run.stdout + run.stderr
+            (out / f"{name}-sim.log").write_text(text)
+            if run.returncode != 0 or "STORAMIC_CTRL_PASS" not in text:
+                raise RuntimeError(f"{name}: unexpected verdict: {text[-4000:]}")
+            outcomes.append({"ctrl": name, "pass": True})
+        negative = subprocess.run(
+            [str(out / "ctrl/ctrl-test"), "+oracle_negative"],
+            capture_output=True, text=True, timeout=60)
+        text = negative.stdout + negative.stderr
+        (out / "ctrl-oracle-negative.log").write_text(text)
+        if "STORAMIC_CTRL_PASS" in text or negative.returncode == 0:
+            raise RuntimeError("ctrl: negative oracle accepted")
     if "model" in stages:
         model_inputs = [
             *source_names[:-1],
@@ -324,6 +674,8 @@ def main():
             "spill_register_flushable.sv", "spill_register.sv",
             "axi_id_prepend.sv", "axi_mux.sv", *source_names[:-1],
             "g6lc_storamic_soc_cfg_pkg.sv", "g6lc_storamic_attach.sv",
+            "g6lc_storamic_sim_mem.sv", "tc_sram.sv",
+            "tc_sram_wrapper.sv", "sram.sv",
             "g6lc_ai_island_cfg_pkg.sv", "g6lc_ai_dram_backend.sv",
             "g6lc_ai_dram_join.sv",
             "tb_g6lc_storamic_soc.sv",
@@ -346,6 +698,9 @@ def main():
             ("width", ["-DG6LC_STORAMIC_SKELETON", "-GDataWidth=24"], "STORAMIC_WIDTH_ILLEGAL"),
             ("address-shape", ["-DG6LC_STORAMIC_SKELETON", "-GBackendAddrWidth=32"],
              "STORAMIC_INTERFACE_SHAPE"),
+            ("model", ["-DG6LC_STORAMIC_MODEL", "-GModel=1"], None),
+            ("model-conflict", ["-DG6LC_STORAMIC_MODEL", "-DG6LC_STORAMIC_SKELETON",
+                                "-GModel=1"], "STORAMIC_PROFILE_CONFLICT"),
         ]
         for name, flags, error in cases:
             model = out / f"soc-{name}"
@@ -366,14 +721,29 @@ def main():
             if not matched:
                 raise RuntimeError(f"unexpected integration verdict: {name}")
             outcomes.append({"integration": name, "expected_error": error, "pass": True})
-    if set(stages) & {"synth", "formal", "model-synth", "model-formal"}:
+        # ST-011B model negative oracle: corrupting one expected byte must fail.
+        negative = subprocess.run(
+            [str(out / "soc-model/soc-test"), "+oracle_negative"],
+            capture_output=True, text=True, timeout=30)
+        text = negative.stdout + negative.stderr
+        (out / "soc-model-oracle-negative.log").write_text(text)
+        if "STORAMIC_SOC_PASS" in text or negative.returncode == 0:
+            raise RuntimeError("integration model: negative oracle accepted")
+    if set(stages) & {"synth", "formal", "model-synth", "model-formal", "map-synth",
+                      "map-formal", "discovery-synth", "discovery-formal",
+                      "regs-synth", "regs-formal", "ctrl-synth",
+                      "virtio-synth", "virtio-formal", "vring-synth",
+                      "vring-formal", "vblk-synth", "vdev-synth",
+                      "vblk-formal"}:
         sys.path.insert(0, str(data))
         from yosys_bin import yosys_bin
         yosys = Path(yosys_bin())
         manifest["yosys"] = str(yosys)
         manifest["yosys_sha256"] = sha(yosys)
         (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
-        memory_sources = [data / "g6lc_storamic_pkg.sv",
+        memory_sources = [data / "g6lc_storamic_cfg_pkg.sv",
+                          data / "g6lc_storamic_pkg.sv",
+                          data / "g6lc_storamic_region_pkg.sv",
                           data / "g6lc_storamic_axi_memory.sv"]
         if "model-synth" in stages:
             model_synthesis = [
@@ -398,6 +768,362 @@ def main():
                     raise RuntimeError(f"empty synthesized model or latch: {top}")
                 outcomes.append({"model_synth": top, "cells": len(memory_cells),
                                  "latches": 0, "scc": 0})
+        if "map-synth" in stages:
+            map_sources = [data / name for name in [
+                "g6lc_storamic_cfg_pkg.sv", "g6lc_storamic_pkg.sv",
+                "g6lc_storamic_pad_pkg.sv", "g6lc_storamic_axi_refuse.sv",
+                "g6lc_storamic_region_pkg.sv", "g6lc_storamic_axi_memory.sv",
+                "g6lc_storamic_slot_mux.sv", "g6lc_storamic_regs.sv", "g6lc_storamic_top.sv",
+                "tb_g6lc_storamic_map.sv",
+            ]]
+            script = out / "map-synth.ys"
+            script.write_text(
+                "read_slang --std 1800-2017 --top g6lc_storamic_map_synth " +
+                "-DSYNTHESIS " + " ".join(map(str, map_sources)) +
+                "\nhierarchy -check\nproc\nflatten\nopt\ncheck -assert\nscc -expect 0\nstat\n" +
+                f"write_json {out}/map-synth.json\n")
+            with (out / "map-synth.log").open("w") as log:
+                subprocess.run([str(yosys), "-s", str(script)], stdout=log,
+                               stderr=subprocess.STDOUT, check=True, timeout=300)
+            map_cells = json.loads((out / "map-synth.json").read_text())[
+                "modules"]["g6lc_storamic_map_synth"]["cells"]
+            if not map_cells or any("latch" in cell["type"].lower()
+                                    for cell in map_cells.values()):
+                raise RuntimeError("empty synthesized map frontend or latch")
+            outcomes.append({"map_synth": "g6lc_storamic_map_synth",
+                             "cells": len(map_cells), "latches": 0, "scc": 0})
+        if "discovery-synth" in stages:
+            disc_sources = [data / name for name in [
+                "g6lc_storamic_cfg_pkg.sv", "g6lc_storamic_pkg.sv",
+                "g6lc_storamic_region_pkg.sv", "g6lc_storamic_discovery_pkg.sv",
+                "g6lc_storamic_sync.sv", "g6lc_storamic_discovery.sv",
+                "g6lc_storamic_discovery_set.sv", "tb_g6lc_storamic_discovery.sv",
+            ]]
+            script = out / "discovery-synth.ys"
+            script.write_text(
+                "read_slang --std 1800-2017 --top g6lc_storamic_discovery_synth " +
+                "-DSYNTHESIS " + " ".join(map(str, disc_sources)) +
+                "\nhierarchy -check\nproc\nflatten\nopt\ncheck -assert\nscc -expect 0\nstat\n" +
+                f"write_json {out}/discovery-synth.json\n")
+            with (out / "discovery-synth.log").open("w") as log:
+                subprocess.run([str(yosys), "-s", str(script)], stdout=log,
+                               stderr=subprocess.STDOUT, check=True, timeout=300)
+            cells = json.loads((out / "discovery-synth.json").read_text())[
+                "modules"]["g6lc_storamic_discovery_synth"]["cells"]
+            if not cells or any("latch" in cell["type"].lower()
+                                for cell in cells.values()):
+                raise RuntimeError("empty synthesized discovery set or latch")
+            outcomes.append({"discovery_synth_cells": len(cells),
+                             "latches": 0, "scc": 0})
+        if "regs-synth" in stages:
+            regs_sources = [data / name for name in [
+                "g6lc_storamic_cfg_pkg.sv", "g6lc_storamic_pkg.sv",
+                "g6lc_storamic_region_pkg.sv", "g6lc_storamic_regs.sv",
+                "tb_g6lc_storamic_regs.sv",
+            ]]
+            script = out / "regs-synth.ys"
+            script.write_text(
+                "read_slang --std 1800-2017 --top g6lc_storamic_regs_synth " +
+                "-DSYNTHESIS " + " ".join(map(str, regs_sources)) +
+                "\nhierarchy -check\nproc\nflatten\nopt\ncheck -assert\nscc -expect 0\nstat\n" +
+                f"write_json {out}/regs-synth.json\n")
+            with (out / "regs-synth.log").open("w") as log:
+                subprocess.run([str(yosys), "-s", str(script)], stdout=log,
+                               stderr=subprocess.STDOUT, check=True, timeout=300)
+            cells = json.loads((out / "regs-synth.json").read_text())[
+                "modules"]["g6lc_storamic_regs_synth"]["cells"]
+            if not cells or any("latch" in cell["type"].lower()
+                                for cell in cells.values()):
+                raise RuntimeError("empty synthesized regs or latch")
+            outcomes.append({"regs_synth_cells": len(cells),
+                             "latches": 0, "scc": 0})
+        if "ctrl-synth" in stages:
+            ctrl_sources = [data / name for name in [
+                "g6lc_storamic_cfg_pkg.sv", "g6lc_storamic_pkg.sv",
+                "g6lc_storamic_region_pkg.sv", "g6lc_storamic_regs.sv",
+                "g6lc_storamic_ctrl_bridge.sv", "tb_g6lc_storamic_ctrl_bridge.sv",
+            ]]
+            script = out / "ctrl-synth.ys"
+            script.write_text(
+                "read_slang --std 1800-2017 --top g6lc_storamic_ctrl_bridge_synth " +
+                "-DSYNTHESIS " + " ".join(map(str, ctrl_sources)) +
+                "\nhierarchy -check\nproc\nflatten\nopt\ncheck -assert\nscc -expect 0\nstat\n" +
+                f"write_json {out}/ctrl-synth.json\n")
+            with (out / "ctrl-synth.log").open("w") as log:
+                subprocess.run([str(yosys), "-s", str(script)], stdout=log,
+                               stderr=subprocess.STDOUT, check=True, timeout=300)
+            cells = json.loads((out / "ctrl-synth.json").read_text())[
+                "modules"]["g6lc_storamic_ctrl_bridge_synth"]["cells"]
+            if not cells or any("latch" in cell["type"].lower()
+                                for cell in cells.values()):
+                raise RuntimeError("empty synthesized bridge or latch")
+            outcomes.append({"ctrl_synth_cells": len(cells),
+                             "latches": 0, "scc": 0})
+            # ST-037C: the CtrlPageEn=0 (IO-only) variant must also synth
+            # clean — no latches, no combinational loops.
+            io_script = out / "ctrl-synth-io.ys"
+            io_script.write_text(
+                "read_slang --std 1800-2017 "
+                "--top g6lc_storamic_ctrl_bridge_io_synth " +
+                "-DSYNTHESIS " + " ".join(map(str, ctrl_sources)) +
+                "\nhierarchy -check\nproc\nflatten\nopt\ncheck -assert\n"
+                "scc -expect 0\nstat\n" +
+                f"write_json {out}/ctrl-synth-io.json\n")
+            with (out / "ctrl-synth-io.log").open("w") as log:
+                subprocess.run([str(yosys), "-s", str(io_script)], stdout=log,
+                               stderr=subprocess.STDOUT, check=True,
+                               timeout=300)
+            io_cells = json.loads((out / "ctrl-synth-io.json").read_text())[
+                "modules"]["g6lc_storamic_ctrl_bridge_io_synth"]["cells"]
+            if not io_cells or any("latch" in cell["type"].lower()
+                                   for cell in io_cells.values()):
+                raise RuntimeError("empty synthesized io bridge or latch")
+            outcomes.append({"ctrl_io_synth_cells": len(io_cells),
+                             "latches": 0, "scc": 0})
+        if "vdev-synth" in stages:
+            vd_sources = [data / name for name in [
+                "g6lc_storamic_cfg_pkg.sv", "g6lc_storamic_pkg.sv",
+                "g6lc_storamic_virtio_mmio.sv", "g6lc_storamic_virtio_ring.sv",
+                "g6lc_storamic_virtio_blk.sv", "g6lc_storamic_virtio_dev.sv",
+                "tb_g6lc_storamic_virtio_dev.sv",
+            ]]
+            script = out / "vdev-synth.ys"
+            script.write_text(
+                "read_slang --std 1800-2017 --top g6lc_storamic_virtio_dev_synth " +
+                "-DSYNTHESIS " + " ".join(map(str, vd_sources)) +
+                "\nhierarchy -check\nproc\nflatten\nopt\ncheck -assert\nscc -expect 0\nstat\n" +
+                f"write_json {out}/vdev-synth.json\n")
+            with (out / "vdev-synth.log").open("w") as log:
+                subprocess.run([str(yosys), "-s", str(script)], stdout=log,
+                               stderr=subprocess.STDOUT, check=True, timeout=600)
+            cells = json.loads((out / "vdev-synth.json").read_text())[
+                "modules"]["g6lc_storamic_virtio_dev_synth"]["cells"]
+            if not cells or any("latch" in cell["type"].lower()
+                                for cell in cells.values()):
+                raise RuntimeError("empty synthesized device or latch")
+            outcomes.append({"vdev_synth_cells": len(cells), "latches": 0, "scc": 0})
+        if "vblk-formal" in stages:
+            vb_inputs = [data / "g6lc_storamic_virtio_blk.sv",
+                         data / "formal_g6lc_storamic_virtio_blk.sv"]
+            vb_prefix = (
+                "read_slang --std 1800-2017 --top formal_g6lc_storamic_virtio_blk " +
+                "-DFORMAL " + " ".join(map(str, vb_inputs)) +
+                "\nprep -top formal_g6lc_storamic_virtio_blk\nasync2sync\n" +
+                "chformal -lower\nflatten\nopt -full\ndffunmap\nopt_clean -purge\n")
+            for name, goal, depth in [
+                ("safety", "-prove-asserts -verify -show-public", 12),
+                ("status-cover", "-prove cover_status_o 0 -falsify", 14),
+                ("rsp-cover", "-prove cover_rsp_o 0 -falsify", 16),
+            ]:
+                script = out / f"vblk-formal-{name}.ys"
+                script.write_text(
+                    vb_prefix +
+                    f"sat -seq {depth} -set-init-zero -set-assumes -set-at 1 rst_ni 0 " + goal +
+                    f" -show-ports -dump_vcd {out}/vblk-formal-{name}.vcd\n")
+                with (out / f"vblk-formal-{name}.log").open("w") as log:
+                    subprocess.run([str(yosys), "-s", str(script)], stdout=log,
+                                   stderr=subprocess.STDOUT, check=True, timeout=1800)
+                outcomes.append({"vblk_formal": name, "depth": depth, "pass": True})
+        if "vblk-synth" in stages:
+            vb_sources = [data / "g6lc_storamic_virtio_blk.sv",
+                          data / "tb_g6lc_storamic_virtio_blk.sv"]
+            script = out / "vblk-synth.ys"
+            script.write_text(
+                "read_slang --std 1800-2017 --top g6lc_storamic_virtio_blk_synth " +
+                "-DSYNTHESIS " + " ".join(map(str, vb_sources)) +
+                "\nhierarchy -check\nproc\nflatten\nopt\ncheck -assert\nscc -expect 0\nstat\n" +
+                f"write_json {out}/vblk-synth.json\n")
+            with (out / "vblk-synth.log").open("w") as log:
+                subprocess.run([str(yosys), "-s", str(script)], stdout=log,
+                               stderr=subprocess.STDOUT, check=True, timeout=300)
+            cells = json.loads((out / "vblk-synth.json").read_text())[
+                "modules"]["g6lc_storamic_virtio_blk_synth"]["cells"]
+            if not cells or any("latch" in cell["type"].lower()
+                                for cell in cells.values()):
+                raise RuntimeError("empty synthesized blk or latch")
+            outcomes.append({"vblk_synth_cells": len(cells), "latches": 0, "scc": 0})
+        if "vring-synth" in stages:
+            vr_sources = [data / "g6lc_storamic_virtio_ring.sv",
+                          data / "tb_g6lc_storamic_virtio_ring.sv"]
+            script = out / "vring-synth.ys"
+            script.write_text(
+                "read_slang --std 1800-2017 --top g6lc_storamic_virtio_ring_synth " +
+                "-DSYNTHESIS " + " ".join(map(str, vr_sources)) +
+                "\nhierarchy -check\nproc\nflatten\nopt\ncheck -assert\nscc -expect 0\nstat\n" +
+                f"write_json {out}/vring-synth.json\n")
+            with (out / "vring-synth.log").open("w") as log:
+                subprocess.run([str(yosys), "-s", str(script)], stdout=log,
+                               stderr=subprocess.STDOUT, check=True, timeout=300)
+            cells = json.loads((out / "vring-synth.json").read_text())[
+                "modules"]["g6lc_storamic_virtio_ring_synth"]["cells"]
+            if not cells or any("latch" in cell["type"].lower()
+                                for cell in cells.values()):
+                raise RuntimeError("empty synthesized ring or latch")
+            outcomes.append({"vring_synth_cells": len(cells), "latches": 0, "scc": 0})
+        if "vring-formal" in stages:
+            vr_inputs = [data / "g6lc_storamic_virtio_ring.sv",
+                         data / "formal_g6lc_storamic_virtio_ring.sv"]
+            vr_prefix = (
+                "read_slang --std 1800-2017 --top formal_g6lc_storamic_virtio_ring " +
+                "-DFORMAL " + " ".join(map(str, vr_inputs)) +
+                "\nprep -top formal_g6lc_storamic_virtio_ring\nasync2sync\n" +
+                "chformal -lower\nflatten\nopt -full\ndffunmap\nopt_clean -purge\n")
+            for name, goal, depth in [
+                ("safety", "-prove-asserts -verify -show-public", 12),
+                ("done-cover", "-prove cover_done_o 0 -falsify", 22),
+                ("fault-cover", "-prove cover_fault_o 0 -falsify", 12),
+                ("resetwalk-cover", "-prove cover_reset_walk_o 0 -falsify", 12),
+            ]:
+                script = out / f"vring-formal-{name}.ys"
+                script.write_text(
+                    vr_prefix +
+                    f"sat -seq {depth} -set-init-zero -set-assumes -set-at 1 rst_ni 0 " + goal +
+                    f" -show-ports -dump_vcd {out}/vring-formal-{name}.vcd\n")
+                with (out / f"vring-formal-{name}.log").open("w") as log:
+                    subprocess.run([str(yosys), "-s", str(script)], stdout=log,
+                                   stderr=subprocess.STDOUT, check=True, timeout=1200)
+                outcomes.append({"vring_formal": name, "depth": depth, "pass": True})
+        if "virtio-synth" in stages:
+            virtio_sources = [data / name for name in [
+                "g6lc_storamic_cfg_pkg.sv", "g6lc_storamic_pkg.sv",
+                "g6lc_storamic_region_pkg.sv",
+                "g6lc_storamic_virtio_mmio.sv",
+                "tb_g6lc_storamic_virtio_mmio.sv",
+            ]]
+            script = out / "virtio-synth.ys"
+            script.write_text(
+                "read_slang --std 1800-2017 --top g6lc_storamic_virtio_mmio_synth " +
+                "-DSYNTHESIS " + " ".join(map(str, virtio_sources)) +
+                "\nhierarchy -check\nproc\nflatten\nopt\ncheck -assert\nscc -expect 0\nstat\n" +
+                f"write_json {out}/virtio-synth.json\n")
+            with (out / "virtio-synth.log").open("w") as log:
+                subprocess.run([str(yosys), "-s", str(script)], stdout=log,
+                               stderr=subprocess.STDOUT, check=True, timeout=300)
+            cells = json.loads((out / "virtio-synth.json").read_text())[
+                "modules"]["g6lc_storamic_virtio_mmio_synth"]["cells"]
+            if not cells or any("latch" in cell["type"].lower()
+                                for cell in cells.values()):
+                raise RuntimeError("empty synthesized virtio or latch")
+            outcomes.append({"virtio_synth_cells": len(cells),
+                             "latches": 0, "scc": 0})
+        if "virtio-formal" in stages:
+            vformal_inputs = [data / name for name in [
+                "g6lc_storamic_cfg_pkg.sv", "g6lc_storamic_pkg.sv",
+                "g6lc_storamic_region_pkg.sv",
+                "g6lc_storamic_virtio_mmio.sv",
+                "formal_g6lc_storamic_virtio_mmio.sv",
+            ]]
+            vprefix = (
+                "read_slang --std 1800-2017 --top formal_g6lc_storamic_virtio_mmio " +
+                "-DFORMAL " + " ".join(map(str, vformal_inputs)) +
+                "\nprep -top formal_g6lc_storamic_virtio_mmio\nasync2sync\n" +
+                "chformal -lower\nflatten\nopt -full\ndffunmap\nopt_clean -purge\n")
+            for name, goal, depth in [
+                ("safety", "-prove-asserts -verify -show-public", 12),
+                ("dok-cover", "-prove cover_dok_o 0 -falsify", 20),
+                ("notify-cover", "-prove cover_notify_o 0 -falsify", 24),
+                ("reset-cover", "-prove cover_reset_o 0 -falsify", 20),
+            ]:
+                script = out / f"virtio-formal-{name}.ys"
+                script.write_text(
+                    vprefix +
+                    f"sat -seq {depth} -set-init-zero -set-assumes -set-at 1 rst_ni 0 " + goal +
+                    f" -show-ports -dump_vcd {out}/virtio-formal-{name}.vcd\n")
+
+                with (out / f"virtio-formal-{name}.log").open("w") as log:
+                    subprocess.run([str(yosys), "-s", str(script)], stdout=log,
+                                   stderr=subprocess.STDOUT, check=True, timeout=900)
+                outcomes.append({"virtio_formal": name, "depth": depth,
+                                 "pass": True})
+        if "map-formal" in stages:
+            map_formal_inputs = [data / name for name in [
+                "g6lc_storamic_cfg_pkg.sv", "g6lc_storamic_pkg.sv",
+                "g6lc_storamic_pad_pkg.sv", "g6lc_storamic_axi_refuse.sv",
+                "g6lc_storamic_region_pkg.sv", "g6lc_storamic_axi_memory.sv",
+                "g6lc_storamic_regs.sv",
+                "g6lc_storamic_top.sv", "formal_g6lc_storamic_map.sv",
+            ]]
+            map_formal_prefix = (
+                "read_slang --std 1800-2017 --top formal_g6lc_storamic_map " +
+                "-DFORMAL " + " ".join(map(str, map_formal_inputs)) +
+                "\nprep -top formal_g6lc_storamic_map\nasync2sync\nchformal -lower\nflatten\n" +
+                "opt -full\ndffunmap\nopt_clean -purge\n")
+            map_formal_checks = [
+                ("safety", "-prove-asserts -verify"),
+                ("w0-cover", "-prove cover_w0_o 0 -falsify"),
+                ("r1-cover", "-prove cover_r1_o 0 -falsify"),
+                ("awref-cover", "-prove cover_awref_o 0 -falsify"),
+                ("arref-cover", "-prove cover_arref_o 0 -falsify"),
+            ]
+            for name, goal in map_formal_checks:
+                script = out / f"map-formal-{name}.ys"
+                script.write_text(
+                    map_formal_prefix +
+                    "sat -seq 12 -set-init-zero -set-assumes -set-at 1 rst_ni 0 " + goal +
+                    f" -show-ports -dump_vcd {out}/map-formal-{name}.vcd\n")
+                with (out / f"map-formal-{name}.log").open("w") as log:
+                    subprocess.run([str(yosys), "-s", str(script)], stdout=log,
+                                   stderr=subprocess.STDOUT, check=True, timeout=600)
+                outcomes.append({"map_formal": name, "depth": 12, "pass": True})
+        if "discovery-formal" in stages:
+            disc_formal_inputs = [data / name for name in [
+                "g6lc_storamic_cfg_pkg.sv", "g6lc_storamic_pkg.sv",
+                "g6lc_storamic_region_pkg.sv", "g6lc_storamic_discovery_pkg.sv",
+                "g6lc_storamic_sync.sv", "g6lc_storamic_discovery.sv",
+                "formal_g6lc_storamic_discovery.sv",
+            ]]
+            disc_prefix = (
+                "read_slang --std 1800-2017 --top formal_g6lc_storamic_discovery " +
+                "-DFORMAL " + " ".join(map(str, disc_formal_inputs)) +
+                "\nprep -top formal_g6lc_storamic_discovery\nasync2sync\n" +
+                "chformal -lower\nflatten\nopt -full\ndffunmap\nopt_clean -purge\n")
+            for name, goal in [
+                ("safety", "-prove-asserts -verify"),
+                ("ready-cover", "-prove cover_ready_o 0 -falsify"),
+                ("cksum-cover", "-prove cover_cksum_o 0 -falsify"),
+                ("quiesced-cover", "-prove cover_quiesced_o 0 -falsify"),
+            ]:
+                script = out / f"discovery-formal-{name}.ys"
+                script.write_text(
+                    disc_prefix +
+                    "sat -seq 32 -set-init-zero -set-assumes -set-at 1 rst_ni 0 " + goal +
+                    f" -show-ports -dump_vcd {out}/discovery-formal-{name}.vcd\n")
+                with (out / f"discovery-formal-{name}.log").open("w") as log:
+                    subprocess.run([str(yosys), "-s", str(script)], stdout=log,
+                                   stderr=subprocess.STDOUT, check=True, timeout=600)
+                outcomes.append({"discovery_formal": name, "depth": 32,
+                                 "pass": True})
+        if "regs-formal" in stages:
+            regs_formal_inputs = [data / name for name in [
+                "g6lc_storamic_cfg_pkg.sv", "g6lc_storamic_pkg.sv",
+                "g6lc_storamic_region_pkg.sv", "g6lc_storamic_regs.sv",
+                "formal_g6lc_storamic_regs.sv",
+            ]]
+            regs_prefix = (
+                "read_slang --std 1800-2017 --top formal_g6lc_storamic_regs " +
+                "-DFORMAL " + " ".join(map(str, regs_formal_inputs)) +
+                "\nprep -top formal_g6lc_storamic_regs\nasync2sync\n" +
+                "chformal -lower\nflatten\nopt -full\ndffunmap\nopt_clean -purge\n")
+            # A successful runtime commit needs two staged writes, the commit
+            # write and the sequential validator, so its witness needs depth 16.
+            for name, goal, depth in [
+                ("safety", "-prove-asserts -verify", 12),
+                ("slverr-cover", "-prove cover_slverr_o 0 -falsify", 12),
+                ("irqen-cover", "-prove cover_irqen_o 0 -falsify", 12),
+                ("drain-cover", "-prove cover_drain_o 0 -falsify", 12),
+                ("commitok-cover", "-prove cover_commit_ok_o 0 -falsify", 16),
+                ("commitfail-cover", "-prove cover_commit_fail_o 0 -falsify", 12),
+            ]:
+                script = out / f"regs-formal-{name}.ys"
+                script.write_text(
+                    regs_prefix +
+                    f"sat -seq {depth} -set-init-zero -set-assumes -set-at 1 rst_ni 0 " + goal +
+                    f" -show-ports -dump_vcd {out}/regs-formal-{name}.vcd\n")
+                with (out / f"regs-formal-{name}.log").open("w") as log:
+                    subprocess.run([str(yosys), "-s", str(script)], stdout=log,
+                                   stderr=subprocess.STDOUT, check=True, timeout=900)
+                outcomes.append({"regs_formal": name, "depth": depth,
+                                 "pass": True})
         if "model-formal" in stages:
             formal_inputs = [*memory_sources, data / "formal_g6lc_storamic_model.sv"]
             formal_prefix = (
@@ -416,7 +1142,7 @@ def main():
                 script = out / f"model-formal-{name}.ys"
                 script.write_text(
                     formal_prefix +
-                    "sat -seq 12 -set-init-zero -set-at 1 rst_ni 0 " + goal +
+                    "sat -seq 12 -set-init-zero -set-assumes -set-at 1 rst_ni 0 " + goal +
                     f" -show-ports -dump_vcd {out}/model-formal-{name}.vcd\n")
                 with (out / f"model-formal-{name}.log").open("w") as log:
                     subprocess.run([str(yosys), "-s", str(script)], stdout=log,
@@ -440,8 +1166,9 @@ def main():
                 "axi_pkg.sv", "axi_intf.sv", "g6lc_ai_island_cfg_pkg.sv",
                 "g6lc_storamic_cfg_pkg.sv", "g6lc_storamic_pkg.sv",
                 "g6lc_storamic_pad_pkg.sv", "g6lc_storamic_soc_cfg_pkg.sv",
-                "g6lc_storamic_axi_refuse.sv", "g6lc_storamic_axi_memory.sv",
-                "g6lc_storamic_top.sv",
+                "g6lc_storamic_axi_refuse.sv", "g6lc_storamic_region_pkg.sv",
+                "g6lc_storamic_axi_memory.sv",
+                "g6lc_storamic_regs.sv", "g6lc_storamic_top.sv",
                 "g6lc_storamic_attach.sv", "tb_g6lc_storamic_soc.sv",
             ]]
             native_script = out / "native-synth.ys"
@@ -460,6 +1187,28 @@ def main():
                                        for cell in native_cells.values()):
                 raise RuntimeError("empty synthesized native frontend or latch")
             outcomes.append({"native_synth_cells": len(native_cells), "latches": 0, "scc": 0})
+            # ST-011B: the sim model memory binding synthesizes clean.
+            mem_sources = [data / name for name in [
+                "g6lc_storamic_cfg_pkg.sv", "g6lc_storamic_pkg.sv",
+                "g6lc_storamic_sim_mem.sv", "tc_sram.sv",
+                "tc_sram_wrapper.sv", "sram.sv",
+            ]]
+            mem_script = out / "sim-mem-synth.ys"
+            mem_script.write_text(
+                "read_slang --std 1800-2017 --top g6lc_storamic_sim_mem " +
+                "-DSYNTHESIS " + " ".join(map(str, mem_sources)) +
+                "\nhierarchy -check\nproc\nflatten\nopt\ncheck -assert\nscc -expect 0\nstat\n" +
+                f"write_json {out}/sim-mem-synth.json\n")
+            with (out / "sim-mem-synth.log").open("w") as log:
+                subprocess.run([str(yosys), "-s", str(mem_script)], stdout=log,
+                               stderr=subprocess.STDOUT, check=True, timeout=180)
+            mem_cells = json.loads((out / "sim-mem-synth.json").read_text())[
+                "modules"]["g6lc_storamic_sim_mem"]["cells"]
+            if not mem_cells or any("latch" in cell["type"].lower()
+                                    for cell in mem_cells.values()):
+                raise RuntimeError("empty synthesized sim_mem or latch")
+            outcomes.append({"sim_mem_synth_cells": len(mem_cells),
+                             "latches": 0, "scc": 0})
         if "formal" in stages:
             script = out / "formal.ys"
             formal_sources = [data / "g6lc_storamic_pkg.sv",
@@ -470,7 +1219,7 @@ def main():
                 " ".join(map(str, formal_sources)) +
                 "\nprep -top formal_g6lc_storamic\nasync2sync\nchformal -lower\nflatten\n" +
                 "opt -full\ndffunmap\nopt_clean -purge\n" +
-                "sat -seq 12 -set-init-zero -set-at 1 rst_ni 0 -prove-asserts -verify\n")
+                "sat -seq 12 -set-init-zero -set-assumes -set-at 1 rst_ni 0 -prove-asserts -verify\n")
             with (out / "formal.log").open("w") as log:
                 subprocess.run([str(yosys), "-s", str(script)], stdout=log,
                                stderr=subprocess.STDOUT, check=True, timeout=180)
@@ -499,6 +1248,14 @@ def main():
     print("STORAMIC_REMOTE_SELECTED_STAGES_PASS")
 
 
+def _manifest_sources():
+    try:
+        return json.loads((Path(os.environ["TH_DATA_DIR"]) /
+                           os.environ["STORAMIC_MANIFEST_FILE"]).read_text())["sources"]
+    except Exception:
+        return {}
+
+
 if __name__ == "__main__":
     try:
         main()
@@ -508,7 +1265,7 @@ if __name__ == "__main__":
             status = "incomplete"
         Path(os.environ["TH_OUT_DIR"], "leaf-result.json").write_text(json.dumps({
             "status": status, "error": str(error),
-            "sources": json.loads(os.environ.get("STORAMIC_SOURCES", "{}")),
+            "sources": _manifest_sources(),
             "stages": os.environ.get("STORAMIC_STAGES", "").split(","),
             "qualification": False,
         }, indent=2))
