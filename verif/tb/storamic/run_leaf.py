@@ -155,7 +155,7 @@ def main():
     builds = []
     if set(stages) & {"protocol", "config", "integration", "model", "region",
                       "map", "discovery", "regs", "ctrl", "virtio",
-                      "vring", "vblk", "vdev", "vdma"}:
+                      "vring", "vblk", "vdev", "vdma", "dstore"}:
         manifest["runtime"] = runtime_identity(out)
         manifest["compiler"] = compiler_identity()
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
@@ -527,6 +527,29 @@ def main():
         if "VDEV_PASS" in text or negative.returncode == 0:
             raise RuntimeError("vdev: negative oracle accepted")
         outcomes.append({"vdev_negative_oracle": True})
+    if "dstore" in stages:
+        command = [
+            str(verilator), "--binary", "--timing", "--assert",
+            "-j", "1", "--threads", "1", "-Wno-fatal",
+            "-Werror-LATCH", "-Werror-UNOPTFLAT",
+            "--top-module", "tb_g6lc_storamic_durable_store",
+            "--Mdir", str(out / "dstore"), "-o", "dstore-test",
+            *[str(data / p) for p in [
+                "g6lc_storamic_pkg.sv", "tc_sram.sv",
+                "tc_sram_wrapper.sv", "sram.sv",
+                "g6lc_storamic_durable_store.sv", "g6lc_storamic_sim_mem.sv",
+                "tb_g6lc_storamic_durable_store.sv",
+            ]],
+        ]
+        builds.append(build_model(command, out / "dstore",
+                                  out / "dstore-build.log", manifest))
+        run = subprocess.run([str(out / "dstore/dstore-test")],
+                             capture_output=True, text=True, timeout=120)
+        text = run.stdout + run.stderr
+        (out / "dstore-sim.log").write_text(text)
+        if run.returncode != 0 or "DSTORE_PASS" not in text:
+            raise RuntimeError(f"dstore: unexpected verdict: {text[-4000:]}")
+        outcomes.append({"dstore": "tb", "pass": True})
     if "vdma" in stages:
         # vdma-inval: InvalEn=1, every Storamic write invalidates its block
         # through the cluster CMO port before completing.
@@ -734,7 +757,7 @@ def main():
                       "regs-synth", "regs-formal", "ctrl-synth",
                       "virtio-synth", "virtio-formal", "vring-synth",
                       "vring-formal", "vblk-synth", "vdev-synth",
-                      "vblk-formal"}:
+                      "vblk-formal", "vblk-flush-formal"}:
         sys.path.insert(0, str(data))
         from yosys_bin import yosys_bin
         yosys = Path(yosys_bin())
@@ -911,7 +934,7 @@ def main():
                 "\nprep -top formal_g6lc_storamic_virtio_blk\nasync2sync\n" +
                 "chformal -lower\nflatten\nopt -full\ndffunmap\nopt_clean -purge\n")
             for name, goal, depth in [
-                ("safety", "-prove-asserts -verify -show-public", 12),
+                ("safety", "-prove-asserts -verify -show-public", 14),
                 ("status-cover", "-prove cover_status_o 0 -falsify", 14),
                 ("rsp-cover", "-prove cover_rsp_o 0 -falsify", 16),
             ]:
@@ -924,6 +947,29 @@ def main():
                     subprocess.run([str(yosys), "-s", str(script)], stdout=log,
                                    stderr=subprocess.STDOUT, check=True, timeout=1800)
                 outcomes.append({"vblk_formal": name, "depth": depth, "pass": True})
+        if "vblk-flush-formal" in stages:
+            # ST-037D: same wrapper with FlushEn=1; free flush ack/err
+            # environment under the assume (response only while requested).
+            vf_prefix = (
+                "read_slang --std 1800-2017 --top "
+                "formal_g6lc_storamic_virtio_blk_flush -DFORMAL " +
+                " ".join(map(str, vb_inputs)) +
+                "\nprep -top formal_g6lc_storamic_virtio_blk_flush\n" +
+                "async2sync\nchformal -lower\nflatten\nopt -full\n" +
+                "dffunmap\nopt_clean -purge\n")
+            for name, goal, depth in [
+                ("safety", "-prove-asserts -verify -show-public", 14),
+                ("flush-cover", "-prove cover_flush_o 0 -falsify", 16),
+            ]:
+                script = out / f"vblk-flush-formal-{name}.ys"
+                script.write_text(
+                    vf_prefix +
+                    f"sat -seq {depth} -set-init-zero -set-assumes -set-at 1 rst_ni 0 " + goal +
+                    f" -show-ports -dump_vcd {out}/vblk-flush-formal-{name}.vcd\n")
+                with (out / f"vblk-flush-formal-{name}.log").open("w") as log:
+                    subprocess.run([str(yosys), "-s", str(script)], stdout=log,
+                                   stderr=subprocess.STDOUT, check=True, timeout=1800)
+                outcomes.append({"vblk_flush_formal": name, "depth": depth, "pass": True})
         if "vblk-synth" in stages:
             vb_sources = [data / "g6lc_storamic_virtio_blk.sv",
                           data / "tb_g6lc_storamic_virtio_blk.sv"]

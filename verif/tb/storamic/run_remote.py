@@ -31,13 +31,14 @@ def main():
         "map-formal", "discovery", "discovery-synth", "discovery-formal",
         "regs", "regs-synth", "regs-formal", "ctrl", "ctrl-synth",
         "virtio", "virtio-synth", "virtio-formal",
-        "vring", "vring-synth", "vring-formal", "vblk", "vblk-synth", "vdev", "vdev-synth", "vdma", "vblk-formal",
+        "vring", "vring-synth", "vring-formal", "vblk", "vblk-synth", "vdev", "vdev-synth", "vdma", "vblk-formal", "vblk-flush-formal",
+        "dstore",
     }:
         parser.error("invalid or duplicate stages")
     root = Path(__file__).resolve().parents[3]
     if set(stages) & {"protocol", "config", "integration", "model", "region",
                       "map", "discovery", "regs", "ctrl", "virtio",
-                      "vring", "vblk", "vdev", "vdma"}:
+                      "vring", "vblk", "vdev", "vdma", "dstore"}:
         if not (args.runtime_json or args.runtime_record) or not args.runtime_header_sha256:
             print("Incomplete: provide a validated runtime record and --runtime-header-sha256")
             return 4
@@ -79,6 +80,7 @@ def main():
         "verif/tb/storamic/tb_g6lc_storamic_ctrl_bridge.sv",
         "verif/tb/storamic/tb_g6lc_storamic_soc.sv",
         "verif/tb/storamic/tb_g6lc_storamic_model.sv",
+        "verif/tb/storamic/tb_g6lc_storamic_durable_store.sv",
         "verif/tb/storamic/g6lc_storamic_sram_model.sv",
         "verif/tb/storamic/formal_g6lc_storamic.sv",
         "verif/tb/storamic/formal_g6lc_storamic_model.sv",
@@ -89,6 +91,9 @@ def main():
         "corev_apu/storamic/g6lc_storamic_attach.sv",
         "corev_apu/storamic/g6lc_storamic_ctrl_bridge.sv",
         "corev_apu/storamic/g6lc_storamic_dma_axi.sv",
+        "corev_apu/storamic/g6lc_storamic_durable_store.sv",
+        "corev_apu/storamic/g6lc_storamic_model_store.sv",
+        "corev_apu/storamic/g6lc_storamic_model_stick.sv",
         "corev_apu/storamic/g6lc_storamic_sim_mem.sv",
         "vendor/pulp-platform/tech_cells_generic/src/rtl/tc_sram.sv",
         "common/local/util/tc_sram_wrapper.sv",

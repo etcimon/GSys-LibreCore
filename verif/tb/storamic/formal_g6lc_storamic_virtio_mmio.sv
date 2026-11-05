@@ -31,7 +31,7 @@ module formal_g6lc_storamic_virtio_mmio (
     .VendorId(32'h0), .QueueNumMax(8)
   ) dut (
     .clk_i, .rst_ni, .ctrl_req_i, .ctrl_resp_o,
-    .device_usable_i, .capacity_i, .capacity_update_i, .dma_idle_i,
+    .device_usable_i, .capacity_i, .capacity_update_i, .flush_cap_i(1'b0), .dma_idle_i,
     .used_event_i, .ring_fault_i,
     .notify_o(notify), .irq_o(irq), .driver_ok_o(dok),
     .features_ok_o(fok), .driver_features_o(dfeat),

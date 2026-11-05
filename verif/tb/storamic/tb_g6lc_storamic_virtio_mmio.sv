@@ -26,7 +26,7 @@ module tb_g6lc_storamic_virtio_mmio;
   ) dut (
     .clk_i(clk), .rst_ni(rst_n), .ctrl_req_i(req), .ctrl_resp_o(resp),
     .device_usable_i(usable), .capacity_i(cap_in),
-    .capacity_update_i(cap_ev), .dma_idle_i(dma_idle),
+    .capacity_update_i(cap_ev), .flush_cap_i(1'b0), .dma_idle_i(dma_idle),
     .used_event_i(used_ev), .ring_fault_i(fault_ev),
     .notify_o(notify), .irq_o(irq), .driver_ok_o(dok),
     .features_ok_o(fok), .driver_features_o(dfeat),
@@ -434,7 +434,7 @@ module g6lc_storamic_virtio_mmio_synth (
     .VendorId(32'h5354_524D), .QueueNumMax(128)
   ) dut (
     .clk_i, .rst_ni, .ctrl_req_i, .ctrl_resp_o,
-    .device_usable_i, .capacity_i, .capacity_update_i, .dma_idle_i,
+    .device_usable_i, .capacity_i, .capacity_update_i, .flush_cap_i(1'b0), .dma_idle_i,
     .used_event_i, .ring_fault_i, .notify_o, .irq_o, .driver_ok_o,
     .features_ok_o, .driver_features_o(), .reset_epoch_o(),
     .queue_ready_o, .queue_num_o(), .queue_desc_o(), .queue_driver_o(),

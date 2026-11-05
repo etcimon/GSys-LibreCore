@@ -39,7 +39,8 @@ module tb_g6lc_storamic_virtio_dev;
     .dma_rdata_i(drdata), .dma_err_i(derr),
     .st_req_o(sreq), .st_gnt_i(sgnt), .st_we_o(swe), .st_addr_o(saddr),
     .st_wdata_o(swdata), .st_be_o(sbe), .st_rvalid_i(srv), .st_rdata_i(srdata),
-    .st_err_i(1'b0)
+    .st_err_i(1'b0),
+    .st_durable_i(1'b0), .st_flush_req_o(), .st_flush_ack_i(1'b0), .st_flush_err_i(1'b0)
   );
 
   // ---- guest RAM and store models ----
@@ -304,7 +305,11 @@ module g6lc_storamic_virtio_dev_synth (
   output logic [7:0] st_be_o,
   input logic st_rvalid_i,
   input logic [63:0] st_rdata_i,
-  input logic st_err_i
+  input logic st_err_i,
+  input logic st_durable_i,
+  output logic st_flush_req_o,
+  input logic st_flush_ack_i,
+  input logic st_flush_err_i
 );
   g6lc_storamic_virtio_dev #(.QueueNumMax(128), .MaxSegs(8)) i_dev (.*);
 endmodule

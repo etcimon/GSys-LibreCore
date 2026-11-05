@@ -4192,6 +4192,62 @@ module tb_g6lc_review_smt_drain;
   end
 endmodule
 
+module tb_g6lc_review_smt_issuegate;
+  function automatic config_pkg::cva6_cfg_t configuration();
+    config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
+    c.VLEN=64; c.XLEN=64;
+    c.NrHarts=2;
+    c.SmtPolicy=config_pkg::SMT_HYBRID;
+    c.SmtFetchQuantum=32; c.SmtStarveLimit=4;
+    c.SmtDrainedHandoff=1'b1;
+    return c;
+  endfunction
+  localparam config_pkg::cva6_cfg_t C=configuration();
+  logic clk=0, rst_n=0, fetch=1, issue=0, hold=0, switched, quiesce, starve, issue_switched=0;
+  logic [1:0] ready='1;
+  logic active;
+  g6lc_thread_select #(.CVA6Cfg(C)) dut (
+    .clk_i(clk), .rst_ni(rst_n), .fetch_fire_i(fetch), .issue_fire_i(issue), .flush_i(1'b0),
+    .hold_i(hold), .drain_ready_i(1'b1), .commit_i(1'b0), .drain_killable_i(1'b1),
+    .head_wfi_i(1'b0), .head_plain_i(1'b1), .head_pc_i('0),
+    .drain_force_o(), .drain_force_wfi_o(), .drain_force_abs_o(), .drain_forced_o(), .drain_force_pc_o(),
+    .quiesce_o(quiesce), .id_uniss_i(1'b0),
+    .iq_valid_i(1'b0), .t0_imm_i(1'b0), .trap_hold_i(1'b0), .hart_ready_i(ready),
+    .hart_dmiss_i('0), .hart_imiss_i('0), .hart_block_i('0), .active_hart_o(active),
+    .switch_o(switched), .t0_extra_o(), .switch_on_miss_o(), .switch_on_quantum_o(),
+    .switch_on_starve_o(starve), .pause_hint_i('0)
+  );
+  task automatic tick;
+    #2; clk=1; #2; clk=0; #2;
+  endtask
+  initial begin
+    tick(); rst_n=1;
+    repeat (24) begin
+      tick();
+      if (switched || active || quiesce) $fatal(1,"SMT_ISSUE_GATE_EARLY");
+    end
+    hold=1; issue=1; tick(); issue=0; hold=0;
+    repeat (8) begin
+      tick();
+      if (switched) begin
+        if (!active || !starve) $fatal(1,"SMT_ISSUE_GATE_REASON");
+        issue_switched=1;
+        fetch=0;
+      end
+    end
+    if (!issue_switched) $fatal(1,"SMT_ISSUE_GATE_TIMEOUT");
+    for (int i = 0; i < 270; i++) begin
+      tick();
+      if (switched) begin
+        if (i < 240 || active || !starve) $fatal(1,"SMT_ISSUE_GATE_BOUND");
+        $display("RTL_REVIEW_PASS smt_issuegate");
+        $finish;
+      end
+    end
+    $fatal(1,"SMT_ISSUE_GATE_BOUND_TIMEOUT");
+  end
+endmodule
+
 // N1c bounded drain (T10f). A drain that makes no commit progress for
 // SmtDrainForceCycles cycles is forced (scenario 0), a WFI head forces
 // immediately (scenario 1), and a non-killable head defers the force until

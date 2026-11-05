@@ -70,7 +70,7 @@ module tb_g6lc_storamic_ctrl_bridge #(
   // Page 1: a real virtio-blk transport (DeviceID 0, as natively bound).
   g6lc_storamic_virtio_mmio #(.QueueNumMax(128)) vmmio (
     .clk_i(clk), .rst_ni(rst_n), .ctrl_req_i(vreq), .ctrl_resp_o(vresp),
-    .device_usable_i(1'b0), .capacity_i('0), .capacity_update_i(1'b0),
+    .device_usable_i(1'b0), .capacity_i('0), .capacity_update_i(1'b0), .flush_cap_i(1'b0),
     .dma_idle_i(1'b1), .used_event_i(1'b0), .ring_fault_i(1'b0),
     .notify_o(), .irq_o(), .driver_ok_o(), .features_ok_o(),
     .driver_features_o(), .reset_epoch_o(), .queue_ready_o(), .queue_num_o(),

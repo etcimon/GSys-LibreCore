@@ -107,6 +107,32 @@ def main():
             if not matched:
                 raise RuntimeError(str(results[-1]) + text)
     if not fault:
+        top_i = 'tb_g6lc_review_smt_issuegate'
+        work = out / 'issuegate'
+        work.mkdir()
+        commands = [
+            ['verilator', '--cc', '--main', '--exe', '--timing', '--assert', '--threads', '1',
+             '-Wno-fatal', '-Werror-LATCH', '-Werror-UNOPTFLAT', '+define+G6LC_FETCH_B',
+             '-I' + str(source), '--top-module', top_i,
+             '--Mdir', str(work), '-o', 'issuegate',
+             *[str(source / n) for n in names if n.endswith('.sv')]],
+            ['make', '-C', str(work), '-f', f'V{top_i}.mk', '-j4', 'VERILATOR_ROOT=' + runtime]]
+        for index, command in enumerate(commands):
+            with (work / f'ibuild{index}.log').open('w') as log:
+                rc = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=180).returncode
+            if rc:
+                raise RuntimeError(f'issuegate build failed: {work}')
+        log_path = work / 'issuegate.log'
+        with log_path.open('w') as log:
+            rc = subprocess.run([str(work / 'issuegate')], stdout=log, stderr=subprocess.STDOUT,
+                                timeout=15).returncode
+        text = log_path.read_text()
+        matched = rc == 0 and 'RTL_REVIEW_PASS smt_issuegate' in text
+        results.append({'kind': 'issuegate', 'harts': 2, 'rc': rc, 'matched': matched})
+        (out / 'results.json').write_text(json.dumps(results, indent=2))
+        if not matched:
+            raise RuntimeError(str(results[-1]) + text)
+    if not fault:
         wrapper = source / 'smt_drain_synth.sv'
         wrapper.write_text('''module smt_drain_synth(
   input logic clk_i, rst_ni, fetch_fire_i, issue_fire_i, flush_i, hold_i,

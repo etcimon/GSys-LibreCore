@@ -29,6 +29,11 @@ module tb_g6lc_storamic_virtio_blk;
   logic sready = 1, sreq, sgnt = 0, swe, srv = 0, serr = 0;
   logic [63:0] saddr, swdata, srdata = '0;
   logic [7:0] sbe;
+  // ST-037D flush seam model: acknowledges a held request after 3 cycles,
+  // as an error when fl_fail is set; counts requests and writes seen first.
+  logic fl_en = 0, fl_req, fl_ack = 0, fl_err = 0;
+  bit fl_fail = 0;
+  int fl_count = 0, fl_wait = 0, fl_writes_before = -1;
   logic [159:0] serial = 160'h3433_3231_5F43_494D_4152_4F54_535F_4336_4C47_3647;
 
   g6lc_storamic_virtio_blk #(.MaxSegs(MaxSegs)) dut (
@@ -43,7 +48,9 @@ module tb_g6lc_storamic_virtio_blk;
     .store_ready_i(sready), .capacity_i(CapSectors), .serial_i(serial),
     .st_req_o(sreq), .st_gnt_i(sgnt), .st_we_o(swe), .st_addr_o(saddr),
     .st_wdata_o(swdata), .st_be_o(sbe), .st_rvalid_i(srv), .st_rdata_i(srdata),
-    .st_err_i(serr)
+    .st_err_i(serr),
+    .flush_en_i(fl_en), .st_flush_req_o(fl_req), .st_flush_ack_i(fl_ack),
+    .st_flush_err_i(fl_err)
   );
 
   logic [7:0] ram [logic [63:0]];
@@ -114,6 +121,16 @@ module tb_g6lc_storamic_virtio_blk;
       store_beats++;
     end
     if (srv) begin srv <= 1'b0; serr <= 1'b0; sbusy <= 1'b0; end
+  end
+
+  always @(posedge clk) begin
+    fl_ack <= 1'b0; fl_err <= 1'b0;
+    if (rst_n && fl_req && !fl_ack && !fl_err) begin
+      if (fl_wait == 0) begin fl_count++; fl_writes_before = store_writes; end
+      if (fl_wait == 3) begin
+        fl_ack <= !fl_fail; fl_err <= fl_fail; fl_wait <= 0;
+      end else fl_wait <= fl_wait + 1;
+    end
   end
 
   int checks = 0;
@@ -202,6 +219,25 @@ module tb_g6lc_storamic_virtio_blk;
       seg(0, Hdr, 16, 0); seg(1, St, 1, 1);
       run(2);
       ok(!got_fault && got_len == 1 && ram[St] == 8'd2 && store_writes == w0, "unsupp");
+    end
+
+    section("flush");
+    begin
+      int w0;
+      fl_en = 1; w0 = store_writes;
+      header(Hdr, 32'd4, 64'd0);
+      seg(0, Hdr, 16, 0); seg(1, St, 1, 1);
+      ram[St] = 8'hEE;
+      run(2);
+      ok(!got_fault && got_len == 1 && ram[St] == 8'd0, "flush-ok");
+      ok(fl_count == 1 && fl_writes_before == w0, "flush-once-after-writes");
+      fl_fail = 1; ram[St] = 8'hEE;
+      run(2);
+      ok(!got_fault && ram[St] == 8'd1 && fl_count == 2, "flush-error-ioerr");
+      fl_fail = 0; fl_en = 0;
+      run(2);
+      ok(ram[St] == 8'd2 && fl_count == 2, "flush-unnegotiated-unsupp");
+      ok(store_writes == w0, "flush-no-store-write");
     end
 
     section("ioerr");
@@ -306,7 +342,11 @@ module g6lc_storamic_virtio_blk_synth (
   output logic [7:0] st_be_o,
   input logic st_rvalid_i,
   input logic [63:0] st_rdata_i,
-  input logic st_err_i
+  input logic st_err_i,
+  input logic flush_en_i,
+  output logic st_flush_req_o,
+  input logic st_flush_ack_i,
+  input logic st_flush_err_i
 );
   g6lc_storamic_virtio_blk #(.MaxSegs(8)) i_blk (.*);
 endmodule

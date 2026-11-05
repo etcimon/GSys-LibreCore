@@ -3,7 +3,8 @@
 
 // ST-037C: bare-metal VirtIO-MMIO virtio-blk test on ariane_testharness with
 // the Storamic peripheral role (G6LC_STORAMIC_IO). Drives the device at 0x5000_1000 end to
-// end against the labelled VOLATILE model store (128 sectors, no FLUSH).
+// end against the model stick's flash chip: the commit-boundary durable
+// store (128 sectors, FLUSH negotiated and exercised).
 //
 // The device DMA is not coherent with the D-cache. This target's D-cache is
 // write-through (CPU stores reach DRAM before the doorbell `fence` retires),
@@ -21,6 +22,8 @@
 
 #define CTRL_BASE  0x50000000UL
 #define MMIO_BASE  0x50001000UL
+#define PWR_CUT    (CTRL_BASE + 0x3000)   // sim-only immediate power cut
+#define PWR_CUT_DRAIN (CTRL_BASE + 0x3008) // arm: cut inside next flush drain
 #define PLIC_BASE  0x0C000000UL
 #define PLIC_PRIO(s) (PLIC_BASE + 4 * (s))
 #define PLIC_PEND  (PLIC_BASE + 0x1000)
@@ -80,6 +83,7 @@ static inline void WR32(unsigned long a, unsigned int v) {
 
 #define T_IN    0
 #define T_OUT   1
+#define T_FLUSH 4
 #define T_GETID 8
 
 #define D_NEXT  1
@@ -92,7 +96,8 @@ enum {
   FAIL_RESET, FAIL_FEATURES, FAIL_FOK, FAIL_QUEUE, FAIL_DOK,
   FAIL_OUT, FAIL_IRQ_ISTAT, FAIL_IRQ_PLIC, FAIL_IRQ_ACK,
   FAIL_IN, FAIL_IN_DATA, FAIL_GETID, FAIL_IOERR, FAIL_AFTER_IOERR,
-  FAIL_REINIT, FAIL_REINIT_IO, FAIL_TIMEOUT, FAIL_CPU_RAW
+  FAIL_REINIT, FAIL_REINIT_IO, FAIL_TIMEOUT, FAIL_CPU_RAW, FAIL_FLUSH,
+  FAIL_DURABLE
 };
 
 struct vq_desc { unsigned long long addr; unsigned int len;
@@ -138,9 +143,10 @@ static int dev_init(void) {
   if (RD32(R_STATUS) != 0) return FAIL_RESET;
   WR32(R_STATUS, ST_ACK);
   WR32(R_STATUS, ST_ACK | ST_DRV);
+  if ((RD32(R_FEATURES) & (1u << 9)) == 0) return FAIL_FEATURES; // bank 0 FLUSH
   WR32(R_FEATSEL, 1);
   if ((RD32(R_FEATURES) & 1) == 0) return FAIL_FEATURES;   // VERSION_1
-  WR32(R_DRVSEL, 0); WR32(R_DRVFEAT, 0);
+  WR32(R_DRVSEL, 0); WR32(R_DRVFEAT, 1u << 9);             // negotiate FLUSH
   // Back-to-back stores to the two halves of one 8-byte word with no fence
   // in between: they must reach the device as two 32-bit writes, in order.
   *(volatile unsigned int *)R_DRVSEL = 1;
@@ -206,6 +212,62 @@ static int blk_req(int type, unsigned long long sector,
   return dram_rd32(stat_buf) & 0xFF;
 }
 
+// Post a two-descriptor FLUSH (header + status, no data segments).
+// Returns the status byte or -1 like blk_req.
+static int blk_flush(void) {
+  unsigned int *h = (unsigned int *)req_hdr;
+  int i;
+  h[0] = T_FLUSH; h[1] = 0;
+  *(unsigned long long *)(h + 2) = 0;
+  vdesc[0].addr = ptr(req_hdr); vdesc[0].len = 16;
+  vdesc[0].flags = D_NEXT; vdesc[0].next = 1;
+  vdesc[1].addr = ptr(stat_buf); vdesc[1].len = 1;
+  vdesc[1].flags = D_WRITE; vdesc[1].next = 0;
+  stat_buf[0] = 0xFF;
+  vavail.ring[avail_i % QN] = 0;
+  fence();
+  vavail.idx = ++avail_i;
+  fence();
+  WR32(R_QNOTIFY, 0);
+  for (i = 0; i < 200000 && (RD32(R_ISTAT) & 1) == 0; i++) ;
+  if ((RD32(R_ISTAT) & 1) == 0) return -1;
+  if ((dram_rd32(&vused) >> 16) != (unsigned short)(used_i + 1)) return -1;
+  if (dram_rd32(&vused.ring[used_i % QN].id) != 0) return -1;
+  last_len = dram_rd32(&vused.ring[used_i % QN].len);
+  used_i++;
+  return dram_rd32(stat_buf) & 0xFF;
+}
+
+#ifdef STORAMIC_COMMIT_SLOW
+// Flush whose drain is cut mid-commit: notify, cut power while the drain
+// runs (CommitCycles > 1), then poll like blk_flush. The journaled head
+// entry must replay and the held request must still complete OK.
+static int blk_flush_cut(void) {
+  unsigned int *h = (unsigned int *)req_hdr;
+  int i;
+  h[0] = T_FLUSH; h[1] = 0;
+  *(unsigned long long *)(h + 2) = 0;
+  vdesc[0].addr = ptr(req_hdr); vdesc[0].len = 16;
+  vdesc[0].flags = D_NEXT; vdesc[0].next = 1;
+  vdesc[1].addr = ptr(stat_buf); vdesc[1].len = 1;
+  vdesc[1].flags = D_WRITE; vdesc[1].next = 0;
+  stat_buf[0] = 0xFF;
+  vavail.ring[avail_i % QN] = 0;
+  fence();
+  vavail.idx = ++avail_i;
+  fence();
+  WR32(R_QNOTIFY, 0);
+  WR32(PWR_CUT_DRAIN, 1);      // armed: cut lands inside the drain
+  for (i = 0; i < 200000 && (RD32(R_ISTAT) & 1) == 0; i++) ;
+  if ((RD32(R_ISTAT) & 1) == 0) return -1;
+  if ((dram_rd32(&vused) >> 16) != (unsigned short)(used_i + 1)) return -1;
+  if (dram_rd32(&vused.ring[used_i % QN].id) != 0) return -1;
+  last_len = dram_rd32(&vused.ring[used_i % QN].len);
+  used_i++;
+  return dram_rd32(stat_buf) & 0xFF;
+}
+#endif
+
 static void irq_ack(void) { WR32(R_IACK, RD32(R_ISTAT)); }
 
 // Compare device-written memory against an expected buffer, word by word
@@ -263,6 +325,92 @@ int main(void) {
   if ((RD32(PLIC_PEND) & (1u << PLIC_SRC)) == 0) return FAIL_IRQ_PLIC;
   irq_ack();
   if ((RD32(R_ISTAT) & 1) != 0) return FAIL_IRQ_ACK;
+
+  // e2. FLUSH: negotiated; must return OK, committing the sector-5 write.
+  rc = blk_flush();
+  if (rc < 0) return FAIL_TIMEOUT;
+  irq_ack();
+  if (rc != 0) return FAIL_FLUSH;
+
+  // e3. Durability boundary (8-entry write-back staging): commit A to
+  //     sector 10 and flush; write B without flushing, so the first 56
+  //     words of B commit by spilling and the last 8 words stay staged.
+  //     A power cut then must drop only the staged tail — the read shows
+  //     B for 448 bytes and A for the last 64.
+  {
+    static unsigned char a_buf[512] __attribute__((aligned(64)));
+    for (i = 0; i < 512; i++) a_buf[i] = out_buf[i] = (unsigned char)(0xA5 ^ i);
+    rc = blk_req(T_OUT, 10, out_buf, 512);
+    if (rc < 0) return FAIL_TIMEOUT;
+    irq_ack();
+    if (rc != 0) return FAIL_OUT;
+    rc = blk_flush();
+    if (rc < 0) return FAIL_TIMEOUT;
+    irq_ack();
+    if (rc != 0) return FAIL_FLUSH;
+    for (i = 0; i < 512; i++) out_buf[i] = (unsigned char)(0x3C ^ (i * 3));
+    rc = blk_req(T_OUT, 10, out_buf, 512);
+    if (rc < 0) return FAIL_TIMEOUT;
+    irq_ack();
+    if (rc != 0) return FAIL_OUT;
+    WR32(PWR_CUT, 1);                        // drops the staged tail of B
+    for (i = 0; i < 512; i++) in_buf[i] = 0;
+    rc = blk_req(T_IN, 10, in_buf, 512);
+    if (rc < 0) return FAIL_TIMEOUT;
+    irq_ack();
+    if (rc != 0) return FAIL_IN;
+    if (!dev_eq(in_buf, out_buf, 448) || !dev_eq(in_buf + 448, a_buf + 448, 64))
+      return FAIL_DURABLE;
+    // The store recovers: a later write still stages and commits.
+    for (i = 0; i < 512; i++) out_buf[i] = (unsigned char)(0x77 ^ (i >> 1));
+    rc = blk_req(T_OUT, 11, out_buf, 512);
+    if (rc < 0) return FAIL_TIMEOUT;
+    irq_ack();
+    if (rc != 0) return FAIL_OUT;
+    rc = blk_flush();
+    if (rc < 0) return FAIL_TIMEOUT;
+    irq_ack();
+    if (rc != 0) return FAIL_FLUSH;
+    rc = blk_req(T_IN, 11, in_buf, 512);
+    if (rc < 0) return FAIL_TIMEOUT;
+    irq_ack();
+    if (rc != 0 || !dev_eq(in_buf, out_buf, 512)) return FAIL_DURABLE;
+#ifdef STORAMIC_COMMIT_SLOW
+    // e4. Mid-commit power cut: A committed to sector 12, B staged without
+    //     flush, then a flush is cut mid-drain. The head entry (word 56)
+    //     was journaled, so it survives; words 57-63 were still staged and
+    //     drop. Expected: B for 456 bytes, A for the last 56.
+    {
+      for (i = 0; i < 512; i++) a_buf[i] = out_buf[i] = (unsigned char)(0x11 ^ i);
+      rc = blk_req(T_OUT, 12, out_buf, 512);
+      if (rc < 0) return FAIL_TIMEOUT;
+      irq_ack();
+      if (rc != 0) return FAIL_OUT;
+      rc = blk_flush();
+      if (rc < 0) return FAIL_TIMEOUT;
+      irq_ack();
+      if (rc != 0) return FAIL_FLUSH;
+      for (i = 0; i < 512; i++) out_buf[i] = (unsigned char)(0x6B ^ (i * 5));
+      rc = blk_req(T_OUT, 12, out_buf, 512);
+      if (rc < 0) return FAIL_TIMEOUT;
+      irq_ack();
+      if (rc != 0) return FAIL_OUT;
+      rc = blk_flush_cut();
+      if (rc < 0) return FAIL_TIMEOUT;
+      irq_ack();
+      if (rc != 0) return FAIL_FLUSH;
+      for (i = 0; i < 512; i++) in_buf[i] = 0;
+      rc = blk_req(T_IN, 12, in_buf, 512);
+      if (rc < 0) return FAIL_TIMEOUT;
+      irq_ack();
+      if (rc != 0) return FAIL_IN;
+      if (!dev_eq(in_buf, out_buf, 456) || !dev_eq(in_buf + 456, a_buf + 456, 56))
+        return FAIL_DURABLE;
+    }
+#endif
+    // Restore the sector-5 pattern that step f compares against.
+    for (i = 0; i < 1024; i++) out_buf[i] = (unsigned char)((i * 7 + 3) ^ (i >> 8));
+  }
 
   // f. IN the same two sectors into a separate buffer; compare every byte.
   for (i = 0; i < 1024; i++) in_buf[i] = 0;

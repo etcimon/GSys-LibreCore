@@ -83,6 +83,8 @@ def main():
     # The harness invalidates CPU caches for Storamic DMA writes (InvalEn), so
     # the test reads device-written memory with plain loads.
     cflags = ["-DSTORAMIC_COHERENT_DMA"] + (["-DSTORAMIC_PRIMARY"] if primary else [])
+    if "G6LC_STORAMIC_FLASH_COMMIT" in native_defines:
+        cflags.append("-DSTORAMIC_COMMIT_SLOW")
     rep["test_cflags"] = cflags
     for name, extra in (("pos", []), ("neg", ["-DORACLE_NEGATIVE"])):
         elf = work / f"storamic_virtio_blk_{name}.elf"
