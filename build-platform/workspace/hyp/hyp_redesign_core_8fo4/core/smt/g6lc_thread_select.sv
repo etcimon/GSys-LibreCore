@@ -113,14 +113,13 @@ module g6lc_thread_select
     logic [4:0] activate_age_q, activate_age_d;
     logic [7:0] stall_age_q, stall_age_d;
     // Forward progress for the anti-starvation switch: a switch flushes the
-    // resident hart's fetch, including its in-flight I$ refill. When the refill
-    // takes longer than SmtStarveLimit (any multi-level hierarchy: hub, L2, L3,
-    // crossbar) two harts that keep starving each other never receive an
-    // instruction (g6lc64_hyp8_mc: KILL every 18 cycles from reset, boot ROM
-    // never fetched). A starve switch therefore waits until the resident hart
-    // has fetched once since it was activated, bounded at 255 cycles so the
-    // peer's service floor still holds.
-    logic [7:0] unfed_age_q;
+    // resident hart's pre-dispatch stream. A completed I$ refill alone is not
+    // enough: the peer can starve-switch immediately after the fill and kill it
+    // before issue (g6lc64_hyp8_mc boot ROM: starve switches every ~41 cycles,
+    // zero retirements). A starve switch therefore waits until the resident
+    // hart has issued once since it was activated, bounded at 255 cycles so
+    // the peer's service floor still holds.
+    logic [7:0] unissued_age_q;
     logic [5:0] uniss_pend_q, uniss_pend_d;
     logic       t0_extra_q, t0_extra_d;
     localparam logic [4:0] MISS_SWITCH_BLACKOUT = 5'd16;
@@ -328,7 +327,7 @@ module g6lc_thread_select
             rm_pol = 1'b1;
             nxt_pol   = peer_clean;
           end else if (found_starve &&
-                       (unfed_age_q == 8'd0 || unfed_age_q == 8'hff)) begin
+                       (unissued_age_q == 8'd0 || unissued_age_q == 8'hff)) begin
             do_pol     = 1'b1;
             rs_pol = 1'b1;
             nxt_pol     = peer_starve;
@@ -545,13 +544,13 @@ module g6lc_thread_select
     logic t0_bank_q;
     logic reason_miss_q, reason_quantum_q, reason_starve_q;
 
-    // unfed_age_q: cycles since activation without a fetch (0 = has fetched).
+    // unissued_age_q: cycles since activation without an issue (0 = issued).
     always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) unfed_age_q <= 8'd1;
-      else if (hold_i) unfed_age_q <= unfed_age_q;
-      else if (do_switch) unfed_age_q <= 8'd1;
-      else if (fetch_fire_i) unfed_age_q <= 8'd0;
-      else if (unfed_age_q != 8'd0 && unfed_age_q != 8'hff) unfed_age_q <= unfed_age_q + 8'd1;
+      if (!rst_ni) unissued_age_q <= 8'd1;
+      else if (do_switch) unissued_age_q <= 8'd1;
+      else if (issue_fire_i) unissued_age_q <= 8'd0;
+      else if (hold_i) unissued_age_q <= unissued_age_q;
+      else if (unissued_age_q != 8'd0 && unissued_age_q != 8'hff) unissued_age_q <= unissued_age_q + 8'd1;
     end
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -642,10 +641,6 @@ module g6lc_thread_select
     assign drain_forced_o      = 1'b0;
     assign drain_force_pc_o    = '0;
 `endif
-
-    // issue_fire reserved for future issue-quantum policy
-    logic _unused_issue;
-    assign _unused_issue = issue_fire_i;
 
     //pragma translate_off
 `ifdef G6LC_FETCH_B
