@@ -658,6 +658,21 @@ module tb_g6lc_apu_xfer;
     cmp_range(SRCB, SRCB + 1024, "copy1k src");
     axi_balance("copy1k");
 
+    // ============ directed: whole-buffer odd extent ====================
+    // dEQP-VK.memory.binding.*.buffer_1048577 shape: ONE region copying
+    // an entire buffer whose size is 1 mod 4 — every chunk and 4 KiB
+    // page boundary is crossed and the last chunk is a single byte
+    cases++;
+    poison(SRCB, BUFZ); poison(DSTB, BUFZ);
+    fill_src(SRCB, BUFZ - 1, 5);
+    so = new[1]; do_ = new[1]; sz = new[1];
+    so[0] = 0; do_[0] = 0; sz[0] = 64'(BUFZ - 1);
+    for (int i = 0; i < int'(BUFZ) - 1; i++) ewr8(DSTB + i, erd8(SRCB + i));
+    run_copy(1, so, do_, sz, 0, pl);
+    check(pl.code == APU_SH_DONE_OK, "copyodd done code");
+    cmp_range(DSTB, DSTB + BUFZ, "copyodd dst (incl. last-byte guard)");
+    axi_balance("copyodd");
+
     // ============ randomized COPY =====================================
     for (int c = 0; c < int'(ncases); c++) begin
       automatic int unsigned nreg;

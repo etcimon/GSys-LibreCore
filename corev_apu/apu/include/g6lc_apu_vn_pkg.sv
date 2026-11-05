@@ -1752,7 +1752,7 @@ package g6lc_apu_vn_pkg;
     48'h0600000001DA, // PNEXT a=0 b=0x1DA pNext
     48'h017F00000000, // U32 a=127 b=0x0 flags
     48'h01FF00000000, // U32 a=127 b=0x0 depthClampEnable KEEP
-    48'h01FF00000000, // U32 a=255 b=0x0 rasterizerDiscardEnable KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 rasterizerDiscardEnable KEEP
     48'h01FF00000000, // U32 a=127 b=0x0 polygonMode KEEP
     48'h01FF00000000, // U32 a=127 b=0x0 cullMode KEEP
     48'h01FF00000000, // U32 a=127 b=0x0 frontFace KEEP
@@ -1778,7 +1778,7 @@ package g6lc_apu_vn_pkg;
     48'h01FF00000000, // U32 a=127 b=0x0 depthTestEnable KEEP
     48'h01FF00000000, // U32 a=127 b=0x0 depthWriteEnable KEEP
     48'h01FF00000000, // U32 a=127 b=0x0 depthCompareOp KEEP
-    48'h01FF00000000, // U32 a=255 b=0x0 depthBoundsTestEnable KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 depthBoundsTestEnable KEEP
     48'h01FF00000000, // U32 a=127 b=0x0 stencilTestEnable KEEP
     48'h01FF00000000, // U32 a=127 b=0x0 failOp KEEP
     48'h01FF00000000, // U32 a=127 b=0x0 passOp KEEP
@@ -1794,14 +1794,14 @@ package g6lc_apu_vn_pkg;
     48'h01FF00000000, // U32 a=127 b=0x0 compareMask KEEP
     48'h01FF00000000, // U32 a=127 b=0x0 writeMask KEEP
     48'h01FF00000000, // U32 a=127 b=0x0 reference KEEP
-    48'h01FF00000000, // U32 a=255 b=0x0 minDepthBounds KEEP
-    48'h01FF00000000, // U32 a=255 b=0x0 maxDepthBounds KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 minDepthBounds KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 maxDepthBounds KEEP
     48'h048700000011, // PTR a=7 b=0x11 pColorBlendState KEEP
     48'h050000000032, // STYPE a=0 b=0x32 sType
     48'h0600000001DD, // PNEXT a=0 b=0x1DD pNext
     48'h017F00000000, // U32 a=127 b=0x0 flags
-    48'h01FF00000000, // U32 a=255 b=0x0 logicOpEnable KEEP
-    48'h01FF00000000, // U32 a=255 b=0x0 logicOp KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 logicOpEnable KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 logicOp KEEP
     48'h01FF00000000, // U32 a=127 b=0x0 attachmentCount KEEP
     48'h070100000000, // ARRAY a=1 b=0x0 pAttachments
     48'h01FF00000000, // U32 a=127 b=0x0 blendEnable KEEP
@@ -2396,23 +2396,23 @@ package g6lc_apu_vn_pkg;
     48'h010100000000, // U32 a=1 b=0x0 dstImageLayout
     48'h010200000000, // U32 a=2 b=0x0 regionCount
     48'h070000000000, // ARRAY a=0 b=0x0 pRegions
-    48'h017F00000000, // U32 a=127 b=0x0 aspectMask
-    48'h017F00000000, // U32 a=127 b=0x0 mipLevel
-    48'h017F00000000, // U32 a=127 b=0x0 baseArrayLayer
-    48'h017F00000000, // U32 a=127 b=0x0 layerCount
+    48'h01FF00000000, // U32 a=127 b=0x0 aspectMask KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 mipLevel KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 baseArrayLayer KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 layerCount KEEP
     48'h070100000007, // ARRAY a=1 b=0x7 srcOffsets
-    48'h017F00000000, // U32 a=127 b=0x0 x
-    48'h017F00000000, // U32 a=127 b=0x0 y
-    48'h017F00000000, // U32 a=127 b=0x0 z
+    48'h01FF00000000, // U32 a=127 b=0x0 x KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 y KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 z KEEP
     48'h080000000000, // ENDARR a=0 b=0x0 
-    48'h017F00000000, // U32 a=127 b=0x0 aspectMask
-    48'h017F00000000, // U32 a=127 b=0x0 mipLevel
-    48'h017F00000000, // U32 a=127 b=0x0 baseArrayLayer
-    48'h017F00000000, // U32 a=127 b=0x0 layerCount
+    48'h01FF00000000, // U32 a=127 b=0x0 aspectMask KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 mipLevel KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 baseArrayLayer KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 layerCount KEEP
     48'h070100000007, // ARRAY a=1 b=0x7 dstOffsets
-    48'h017F00000000, // U32 a=127 b=0x0 x
-    48'h017F00000000, // U32 a=127 b=0x0 y
-    48'h017F00000000, // U32 a=127 b=0x0 z
+    48'h01FF00000000, // U32 a=127 b=0x0 x KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 y KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 z KEEP
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h010300000000, // U32 a=3 b=0x0 filter
@@ -4466,8 +4466,8 @@ package g6lc_apu_vn_pkg;
     32'h00000000, 32'h00000000, 32'h00000000, 32'h0000D183,
     32'h0000D183, 32'h00000040, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h0000C083,
+    32'h0000C083, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h0000D181, 32'h0000D181, 32'h00000000,
     32'h0000D183, 32'h0000D183, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
@@ -4642,7 +4642,7 @@ package g6lc_apu_vn_pkg;
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h0000001F, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000017,
+    32'h00000000, 32'h0000001F, 32'h00000000, 32'h00000017,
     32'h0000001F, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000017, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
@@ -4713,7 +4713,8 @@ package g6lc_apu_vn_pkg;
   localparam int APU_IMG_FMT_D32_SFLOAT = 12;
   localparam int APU_IMG_FMT_D16_UNORM = 13;
   localparam int APU_IMG_FMT_D24_UNORM_S8_UINT = 14;
-  localparam int APU_IMG_FMT_COUNT = 15;
+  localparam int APU_IMG_FMT_R8G8B8A8_UINT = 15;
+  localparam int APU_IMG_FMT_COUNT = 16;
   localparam int APU_IMG_FMT_NONE = 255;
 
   localparam logic [7:0] APU_VN_IMG_FMT [0:255] = '{
@@ -4727,7 +4728,7 @@ package g6lc_apu_vn_pkg;
     8'hFF, 8'hFF, 8'hFF, 8'hFF,
     8'hFF, 8'hFF, 8'hFF, 8'hFF,
     8'hFF, 8'h02, 8'hFF, 8'hFF,
-    8'hFF, 8'hFF, 8'hFF, 8'h03,
+    8'hFF, 8'h0F, 8'hFF, 8'h03,
     8'h04, 8'hFF, 8'hFF, 8'hFF,
     8'hFF, 8'hFF, 8'h05, 8'hFF,
     8'hFF, 8'hFF, 8'hFF, 8'hFF,
@@ -4787,14 +4788,14 @@ package g6lc_apu_vn_pkg;
     8'h01, 8'h02, 8'h04, 8'h04,
     8'h04, 8'h04, 8'h08, 8'h04,
     8'h08, 8'h10, 8'h04, 8'h10,
-    8'h04, 8'h02, 8'h00, 8'h00
+    8'h04, 8'h02, 8'h04, 8'h04
   };
 
   localparam logic [7:0] APU_VN_IMG_ATTR [0:15] = '{
     8'h00, 8'h01, 8'h03, 8'h83,
     8'h43, 8'hC3, 8'h23, 8'h10,
     8'h11, 8'h13, 8'h08, 8'h0B,
-    8'h10, 8'h00, 8'h00, 8'h00
+    8'h10, 8'h00, 8'h00, 8'h0B
   };
 
   localparam int APU_VN_STYPE_VK_BIND_BUFFER_MEMORY_DEVICE_GROUP_INFO = 1000060013;

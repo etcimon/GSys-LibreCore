@@ -1373,7 +1373,7 @@ module tb_g6lc_apu_shwave;
   // carry the base offset (flags bit4 header extension)
   string fault_names [3] = '{"fn_deep", "zerodim", "dispbase"};
 
-  string names [61] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
+  string names [64] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
       "builtin_lid", "builtin_lindex", "compare", "composite",
       "intmix", "localsize32", "localsize64", "math450", "oob",
       "pushscale", "vec4arith",
@@ -1389,6 +1389,10 @@ module tb_g6lc_apu_shwave;
       "cts_wgloop",
       // copy_image_to_ssbo_large probe: r32ui imageLoad -> SSBO
       "cts_imgcopy",
+      // T3: rgba8ui (device fmt 15) imageLoad + imageStore
+      "imgcopy_rgba8ui", "texfetch_rgba8ui",
+      // row-major SSBO matrices (load/column/element/store)
+      "ssbo_rowmajor",
       // copy_ssbo_* probe: NumWorkGroups*WorkGroupSize + ArrayLength
       "cts_b2b",
       // max_local_size/shared_var probes: 64-inv 8-wave geometry,

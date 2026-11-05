@@ -1,0 +1,8 @@
+dEQP-VK.shader_object.pipeline_interaction.max_pipeline
+dEQP-VK.shader_object.pipeline_interaction.render_pass_pipeline_shader_object_after_begin
+dEQP-VK.shader_object.pipeline_interaction.shader_object_compute_pipeline
+dEQP-VK.shader_object.pipeline_interaction.shader_object_max_pipeline_shader_object
+dEQP-VK.shader_object.pipeline_interaction.shader_object_min_pipeline
+dEQP-VK.shader_object.pipeline_interaction.vert_frag
+dEQP-VK.shader_object.pipeline_interaction.vert_tess
+dEQP-VK.shader_object.pipeline_interaction.vert_tess_geom

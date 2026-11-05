@@ -1,0 +1,8 @@
+dEQP-VK.image.extended_usage_bit.attachment_read.r16_unorm
+dEQP-VK.image.extended_usage_bit.attachment_read.r16g16_uscaled
+dEQP-VK.image.extended_usage_bit.attachment_write.r8_uint
+dEQP-VK.image.extended_usage_bit.attachment_write.r8g8b8a8_unorm
+dEQP-VK.image.extended_usage_bit.texture_read.r16g16_sscaled
+dEQP-VK.image.extended_usage_bit.texture_read.r8_snorm
+dEQP-VK.image.extended_usage_bit.texture_write.r8_uscaled
+dEQP-VK.image.extended_usage_bit.texture_write.r8g8_unorm

@@ -1373,10 +1373,10 @@ module tb_g6lc_apu_sys_venus;
     virtio_probe(0, 1'b1);
     ws0_lost = 1'b0;
     pubs0 = pubs;
-    // worksink variant: the submit's CB records a vkCmdDispatchIndirect
+    // worksink variant: the submit's CB records a vkCmdResolveImage
     // — a non-dispatch CLS_WORK record the WorkSink=0 backend refuses.
-    $readmemh("vn_vectors/ue_ws0_bufcopy_1.hex", tape, 0);
-    $readmemh("vn_vectors/ue_ws0_bufcopy_1.exp", expm, 0);
+    $readmemh("vn_vectors/ue_ws0_texfetch_1.hex", tape, 0);
+    $readmemh("vn_vectors/ue_ws0_texfetch_1.exp", expm, 0);
     tp = 0; ep = 0;
     play_tape();
     repeat (200) @(posedge clk);

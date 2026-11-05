@@ -1,0 +1,15 @@
+#version 450
+// SPDX-License-Identifier: MIT
+// T3: R8G8B8A8_UINT (device format 15) through a combined image sampler.
+// Lane i texelFetches texel (i % 4, i / 4) of a 4x2 rgba8ui image and
+// packs the four 8-bit integer channels into one SSBO word: the
+// SAMPLED_IMAGE path of the fmt-15 decode arm (no filtering: integer
+// formats are NEAREST-only and texelFetch takes no sampler state).
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0) uniform usampler2D t;
+layout(set = 0, binding = 1) buffer Out { uint o[]; };
+void main() {
+    uint i = gl_LocalInvocationID.x;
+    uvec4 v = texelFetch(t, ivec2(int(i % 4u), int(i / 4u)), 0);
+    o[i] = v.x | (v.y << 8) | (v.z << 16) | (v.w << 24);
+}

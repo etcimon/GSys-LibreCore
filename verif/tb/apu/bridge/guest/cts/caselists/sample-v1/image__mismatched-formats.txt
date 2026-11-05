@@ -1,0 +1,8 @@
+dEQP-VK.image.mismatched_formats.image_read.a2r10g10b10_uint_pack32_with_rgba8ui
+dEQP-VK.image.mismatched_formats.image_read.r16g16b16a16_sint_with_rgba16i
+dEQP-VK.image.mismatched_formats.image_read.r16g16b16a16_unorm_with_rgba16
+dEQP-VK.image.mismatched_formats.image_write.a2b10g10r10_unorm_pack32_with_rgb10a2
+dEQP-VK.image.mismatched_formats.image_write.a8b8g8r8_uscaled_pack32_with_rgba8ui
+dEQP-VK.image.mismatched_formats.image_write.r32g32b32a32_sfloat_with_rgba32f
+dEQP-VK.image.mismatched_formats.sparse_image_read.a2r10g10b10_uint_pack32_with_rgba8ui
+dEQP-VK.image.mismatched_formats.sparse_image_read.r8g8b8a8_sscaled_with_rgba8i

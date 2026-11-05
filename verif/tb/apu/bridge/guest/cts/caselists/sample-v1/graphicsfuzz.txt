@@ -1,0 +1,8 @@
+dEQP-VK.graphicsfuzz.cov-array-cast-bool-float-div-by-zero-no-effect
+dEQP-VK.graphicsfuzz.cov-condition-bitfield-extract-integer
+dEQP-VK.graphicsfuzz.cov-copy-output-color-swizzle-array-indexing
+dEQP-VK.graphicsfuzz.cov-global-loop-bound-true-logical-or
+dEQP-VK.graphicsfuzz.cov-global-loop-counter-accumulate-integer-condition-large-array-elements
+dEQP-VK.graphicsfuzz.cov-inst-combine-compares-isnan
+dEQP-VK.graphicsfuzz.cov-nested-loops-return-inside-while-never-executed
+dEQP-VK.graphicsfuzz.spv-stable-collatz-O-mutate-composite-construct-extract

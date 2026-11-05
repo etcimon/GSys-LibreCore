@@ -1,0 +1,8 @@
+dEQP-VK.shader_object.binary.device_features.comp.unlinked.2
+dEQP-VK.shader_object.binary.device_features.frag.unlinked.8
+dEQP-VK.shader_object.binary.device_features.tesc.linked.27
+dEQP-VK.shader_object.binary.device_features.tese.unlinked.31
+dEQP-VK.shader_object.binary.device_features.vert.linked.22
+dEQP-VK.shader_object.binary.incompatible.frag.garbage_second_half
+dEQP-VK.shader_object.binary.query.tesc.linked.shader_from_binary
+dEQP-VK.shader_object.binary.query.vert.unlinked.new_device

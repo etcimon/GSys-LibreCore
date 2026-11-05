@@ -1485,13 +1485,13 @@ module tb_g6lc_apu_vgsys
   task automatic neg_worksink0();
     int unsigned pubs0;
     pubs0 = u_count;
-    // worksink variant: the submit's CB records a vkCmdDispatchIndirect
+    // worksink variant: the submit's CB records a vkCmdResolveImage
     // — a non-dispatch CLS_WORK record the WorkSink=0 backend refuses.
     // §7b exception contract: an engine-completion fault (UNSUPPORTED)
     // is execution-time — the submission completes, the fence signals
     // (not lost), and the sticky fault register records the event.
-    $readmemh("vn_vectors/ue_ws0_bufcopy_1.hex", tape, 0);
-    $readmemh("vn_vectors/ue_ws0_bufcopy_1.exp", expm, 0);
+    $readmemh("vn_vectors/ue_ws0_texfetch_1.hex", tape, 0);
+    $readmemh("vn_vectors/ue_ws0_texfetch_1.exp", expm, 0);
     tp = 0; ep = 0;
     play_tape();
     repeat (200) @(posedge clk);

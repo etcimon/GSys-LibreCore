@@ -1,0 +1,8 @@
+dEQP-VK.tensor.array_access.r8_sint_linear_shape_13_17_19_23_array_write_array_size_2
+dEQP-VK.tensor.basic_access.r64_sint_optimal_shape_13_17_19_23
+dEQP-VK.tensor.basic_access.r8_uint_linear_shape_13_17_19_23_shader_read_forced_staging
+dEQP-VK.tensor.boolean.r8_bool_linear_shape_71693_operator_xor_apply_0
+dEQP-VK.tensor.copies.r16_uint_linear_shape_37_43_47_strides_5186_120_2_to_r16_sint_linear_shape_37_43_47
+dEQP-VK.tensor.creation_and_requirements.optimal_r16_sint
+dEQP-VK.tensor.dimension_query.r16_sint_linear_shape_4_2_1
+dEQP-VK.tensor.graphics_pipeline.600x600

@@ -1,0 +1,8 @@
+dEQP-VK.geometry.basic.side_effect_with_degenerate
+dEQP-VK.geometry.builtin_variable.in_block.primitive_id
+dEQP-VK.geometry.emit.line_strip_emit_2_end_1
+dEQP-VK.geometry.input.basic_primitive.line_strip_adjacency
+dEQP-VK.geometry.instanced.draw_2_instances_1_geometry_invocations
+dEQP-VK.geometry.layered.2d_array.12_36_6.fragment_layer
+dEQP-VK.geometry.layered.3d.12_36_6.secondary_cmd_buffer
+dEQP-VK.geometry.varying.vertex_no_op_geometry_out_1

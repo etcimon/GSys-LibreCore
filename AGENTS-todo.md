@@ -79,6 +79,16 @@ authorize artifact recovery or shared cleanup.
   device (store→load forward not gated by region; no non-idempotent PMA region
   in the config). Evidence and mechanism notes: ST-037C step 4 in
   `g6lc_storamic/architecture/implementation-tasks.md`.
+- [x] **ST-037D flush + stick composition (2026-11-04):** the model stick
+  (`corev_apu/storamic/g6lc_storamic_model_stick.sv`) now carries the flash
+  chip as a commit-boundary durable store (`g6lc_storamic_durable_store.sv`:
+  write-back staging, flush drains to tc_sram, spill-on-full). The device
+  offers VIRTIO_BLK_F_FLUSH (bank-0 bit 9) and the bare-metal test
+  negotiates and issues T_FLUSH end-to-end. Sequence renewal implemented in
+  `g6lc_storamic_axi_memory.sv`: on `allocated == SeqLimit && !inflight`,
+  the seq space resets under a new `txn_id_t.epoch` (8-bit) — stale tags
+  can't alias; epoch saturation is a fail-stop, never a wrap. RAM untouched.
+  Decision register: `g6lc_storamic/architecture/decisions.md`.
 - [x] **DMA coherence for ST-038:** Storamic DMA writes now invalidate the
   written block through the cluster CMO engine before completing (ST-037C
   step 5; IO-role plain-load test passes).
@@ -115,9 +125,19 @@ authorize artifact recovery or shared cleanup.
   the same word waits until the first drains. The VirtIO test now uses
   Linux-shaped readl/writel fences, plus unfenced back-to-back stores to one
   word (`-DSTORAMIC_MMIO_FULL_FENCE` restores the old fences).
-- [ ] Port the I/O forward/merge gates to the hyp tree. Its store buffer
-  (`fwd_hold` pipeline) and wbuffer (W1/W3 pipeline) are structured
-  differently, so this is not a copy; it needs a hyp8 timing check.
+- [~] Port the I/O forward/merge gates to the hyp tree:
+  - `stb_fwd.sv`: the non-cacheable flag is computed beside the F1 match
+    cone into `f1_io_q`/`f2_io_q`, and it only masks the F3 response
+    (`rsp_be_o`, `rsp_possible_o`).
+  - `wt_dcache_wbuffer.sv`: `req_nc` is registered as `w1_nc_q` on the
+    pipelined path and used live on the plain path. A live-entry or
+    pending-W3 hit on an I/O store stalls (`rdy`) instead of merging.
+  - `store_buffer.sv` `gen_fwd_live` (non-pipelined) gets the same gate as
+    the main tree.
+  - Evidence with all three edits: `hyp8-integration-io-02` (scalar and SMT2
+    lint with zero errors, build complete) and `hyp8-smokes-io-02` 12/12
+    pass. `-io-01` covered the first two edits.
+  - Still open: the 8-FO4 timing check of both cones (sv-timing).
 - [ ] Gate v4: fetch formal `g6lc_fetch_realign`/`g6lc_fetch_iq` solver
   failures and the cv32a65x Spike `hello_world` timeout (ISS only) remain.
 - [x] Primary-memory role runs programs with `G6LC_STORAMIC+G6LC_STORAMIC_MODEL`

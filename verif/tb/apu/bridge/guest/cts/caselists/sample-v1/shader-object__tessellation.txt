@@ -1,0 +1,8 @@
+dEQP-VK.shader_object.tessellation.glsl.orientation_cw
+dEQP-VK.shader_object.tessellation.glsl.patch_vertices_4
+dEQP-VK.shader_object.tessellation.glsl.primitive_triangles
+dEQP-VK.shader_object.tessellation.glsl.spacing_equal
+dEQP-VK.shader_object.tessellation.hlsl.orientation_cw
+dEQP-VK.shader_object.tessellation.hlsl.patch_vertices_4
+dEQP-VK.shader_object.tessellation.hlsl.primitive_triangles_rebind
+dEQP-VK.shader_object.tessellation.hlsl.spacing_fractional_odd_rebind

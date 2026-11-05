@@ -129,6 +129,17 @@ module tb_g6lc_apu_rast;
   int unsigned sh_i;
   int unsigned sh_n;
   logic        sh_pos4 = 1'b0;   // 1: VS Position := loc0 verbatim
+  // case 41 sampled point indices: first, row end, both sides of each
+  // 63-vertex batch boundary, last (third batch)
+  localparam int PT41 [8] = '{0, 31, 62, 63, 64, 125, 126, 129};
+  // real -> binary32 bits (Verilator has no shortreal); exact for the
+  // dyadic values the TB uses (truncates extra mantissa bits)
+  function automatic logic [31:0] f2s(input real r);
+    logic [63:0] d;
+    d = $realtobits(r);
+    if (d[62:0] == '0) return {d[63], 31'h0};
+    return {d[63], 8'(int'(d[62:52]) - 1023 + 127), d[51:29]};
+  endfunction
   int          sh_f8 = 0;        // FS stub slot-8 mode: 0=none,
                                  // 1=checkerboard discard, 2=FragDepth
   logic [31:0] sh_f8z = '0;      // FragDepth value for mode 2
@@ -2447,6 +2458,165 @@ module tb_g6lc_apu_rast;
     got = fbpx(16, 16);
     if (got != 32'hFF000000)
       fail($sformatf("case39 point px=%08x", got));
+
+    // ================= case 40: RG8_UNORM points, stride 2 ======
+    // CTS memory.pipeline_barrier.*_vertex_buffer_stride_2 shape:
+    // POINT_LIST, position = RG8_UNORM at stride 2 (two bytes per
+    // vertex, so vertices share a 32-bit word), colour on binding 1.
+    // UNORM 136/255 -> NDC 0.5333 -> fb 24.53 (pixel 24);
+    // 200/255 -> 0.7843 -> fb 28.55 (pixel 28): both near a pixel
+    // centre, so rounding conventions agree on the covered pixel.
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    // word = {v1.y, v1.x, v0.y, v0.x}: v0 = (136,136), v1 = (200,136)
+    apwr(VB + 0, {8'd136, 8'd200, 8'd136, 8'd136});
+    // binding 1, stride 16: v0 red, v1 green
+    apwr(VB + 32'h800 +  0, 32'h3F800000); apwr(VB + 32'h800 +  4, 32'h0);
+    apwr(VB + 32'h800 +  8, 32'h0);        apwr(VB + 32'h800 + 12, 32'h3F800000);
+    apwr(VB + 32'h800 + 16, 32'h0);        apwr(VB + 32'h800 + 20, 32'h3F800000);
+    apwr(VB + 32'h800 + 24, 32'h0);        apwr(VB + 32'h800 + 28, 32'h3F800000);
+    d = mk_draw();
+    d.topology = 8'd0;
+    d.vertex_count = 2;
+    d.attr[0].fmt = APU_RAST_VF_RG8_UNORM;
+    d.attr[0].offset = 12'd0;
+    d.attr[1].binding = 2'd1;
+    d.attr[1].offset = 12'd0;
+    d.vb_stride[0] = 16'd2;
+    d.vb_base[1] = VB + 32'h800; d.vb_size[1] = 32'h1000;
+    d.vb_stride[1] = 16'd16;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case40 code=%0d", w_dpl.code));
+    checks++;
+    got = fbpx(24, 24);
+    if (px_bad(got, 32'hFF0000FF, 8))
+      fail($sformatf("case40 v0 px(24,24)=%08x", got));
+    checks++;
+    got = fbpx(28, 24);
+    if (px_bad(got, 32'hFF00FF00, 8))
+      fail($sformatf("case40 v1 px(28,24)=%08x", got));
+    checks++;
+    got = fbpx(26, 24);
+    if (got != 32'hFF000000)
+      fail($sformatf("case40 gap px(26,24)=%08x", got));
+
+    // ================= case 41: list draws > one vertex batch =====
+    // POINT_LIST 130 vertices (63+63+4) and LINE_LIST 130 (62+62+6):
+    // list topologies batch; before, any non-TRIANGLE_LIST draw over
+    // 63 vertices was refused UNSUPPORTED (CTS pipeline_barrier draws
+    // 512..524288 points).  Vertex i sits at pixel (i % 32, i / 32 * 2)
+    // for points; every point must land, including the last batch.
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    for (int i = 0; i < 130; i++) begin
+      // NDC = (px + 0.5) / 16 - 1 for a 32-px target
+      real nx, ny;
+      nx = (real'(i % 32) + 0.5) / 16.0 - 1.0;
+      ny = (real'((i / 32) * 2) + 0.5) / 16.0 - 1.0;
+      put_vert(i, f2s(nx), f2s(ny),
+               32'h3F800000, 32'h3F800000, 32'h3F800000, 32'h3F800000);
+    end
+    d = mk_draw();
+    d.topology = 8'd0;
+    d.vertex_count = 130;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case41 points code=%0d", w_dpl.code));
+    foreach (PT41[k]) begin
+      checks++;
+      got = fbpx(PT41[k] % 32, (PT41[k] / 32) * 2);
+      if (px_bad(got, 32'hFFFFFFFF, 8))
+        fail($sformatf("case41 point %0d px=%08x", PT41[k], got));
+    end
+    // line list: same vertices, pairs (2k, 2k+1) — horizontal 1-px
+    // segments; 130 vertices = 65 lines across three batches
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    d = mk_draw();
+    d.topology = 8'd1;
+    d.vertex_count = 130;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case41 lines code=%0d", w_dpl.code));
+    // the last line (vertices 128,129) lies in the third batch
+    checks++;
+    got = fbpx(0, 8);
+    if (px_bad(got, 32'hFFFFFFFF, 8))
+      fail($sformatf("case41 last line px(0,8)=%08x", got));
+
+    // ================= case 42: R8G8B8A8_UINT colour attachment (T3) =====
+    // (a) a clear with VkClearColorValue.uint32 keeps each channel's low
+    //     8 bits (0x133 -> 0x33) — no fp conversion;
+    // (b) a point draw: the integer output bits land as their low bytes.
+    //     The colour words are normal floats (0x3F8000nn) so the stub
+    //     pipeline's x1.0 varying path is exact; only the low byte counts;
+    // (c) blendEnable on an integer attachment is refused UNSUPPORTED
+    //     before any write (pixel keeps the (b) value).
+    cases++;
+    d = mk_clear();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R8G8B8A8_UINT);
+    d.clear_color[0] = 32'h00000011;
+    d.clear_color[1] = 32'h00000022;
+    d.clear_color[2] = 32'h00000133;
+    d.clear_color[3] = 32'h00000044;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case42 uint clear code=%0d", w_dpl.code));
+    checks++;
+    got = fbpx(7, 9);
+    if (got !== 32'h44332211)
+      fail($sformatf("case42 uint clear px=%08x exp 44332211", got));
+    // channel words 0x3F7FFFnn: low byte nn, and as floats just below
+    // 1.0 — the stub VS routes colour alpha into Position.z, so a word
+    // above 1.0 would depth-clip the point (z outside [0,1])
+    put_vert(0, f2s((3.0 + 0.5) / 16.0 - 1.0), f2s((5.0 + 0.5) / 16.0 - 1.0),
+             32'h3F7FFFA1, 32'h3F7FFFB2, 32'h3F7FFFC3, 32'h3F7FFFD4);
+    d = mk_draw();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R8G8B8A8_UINT);
+    d.topology = 8'd0;
+    d.vertex_count = 1;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case42 uint draw code=%0d", w_dpl.code));
+    checks++;
+    got = fbpx(3, 5);
+    if (got !== 32'hD4C3B2A1)
+      fail($sformatf("case42 uint point px=%08x exp d4c3b2a1", got));
+    checks++;
+    got = fbpx(7, 9);
+    if (got !== 32'h44332211)
+      fail($sformatf("case42 uint neighbour px=%08x exp 44332211", got));
+    put_vert(0, f2s((3.0 + 0.5) / 16.0 - 1.0), f2s((5.0 + 0.5) / 16.0 - 1.0),
+             32'h3F7FFF01, 32'h3F7FFF01, 32'h3F7FFF01, 32'h3F7FFF01);
+    d = mk_draw();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R8G8B8A8_UINT);
+    d.topology = 8'd0;
+    d.vertex_count = 1;
+    d.blend[0].en = 1'b1;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    checks++;
+    if (w_dpl.code != APU_SH_DONE_UNSUPPORTED)
+      fail($sformatf("case42 uint+blend code=%0d exp UNSUPPORTED",
+                     w_dpl.code));
+    checks++;
+    got = fbpx(3, 5);
+    if (got !== 32'hD4C3B2A1)
+      fail($sformatf("case42 refused blend wrote px=%08x", got));
 
     // ---- report ---------------------------------------------------------
     if (fails == 0)

@@ -1,0 +1,8 @@
+dEQP-VK.pipeline.no_queues.pipeline_binary.ahit
+dEQP-VK.pipeline.no_queues.pipeline_binary.mesh
+dEQP-VK.pipeline.no_queues.pipeline_binary.vertex
+dEQP-VK.pipeline.no_queues.pipeline_cache.callable
+dEQP-VK.pipeline.no_queues.pipeline_cache.chit
+dEQP-VK.pipeline.no_queues.pipeline_cache.raygen
+dEQP-VK.pipeline.no_queues.shader_binary.tessctrl
+dEQP-VK.pipeline.no_queues.shader_binary.vertex

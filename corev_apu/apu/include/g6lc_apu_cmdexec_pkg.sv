@@ -84,7 +84,10 @@ package g6lc_apu_cmdexec_pkg;
     APU_XFER_OP_B2I    = 3'd3,
     APU_XFER_OP_I2B    = 3'd4,
     APU_XFER_OP_I2I    = 3'd5,
-    APU_XFER_OP_CLEARI = 3'd6
+    APU_XFER_OP_CLEARI = 3'd6,
+    // T1: vkCmdBlitImage — 20-word VkImageBlit regions; an unscaled,
+    // unflipped region runs as I2I, anything else is refused
+    APU_XFER_OP_BLIT   = 3'd7
   } apu_xfer_op_e;
 
   // §12.3 C/5b: resolved image operand — the image object's layout

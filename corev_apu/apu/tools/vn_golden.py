@@ -2328,7 +2328,7 @@ class FrontModel:
         if nx() == 0:                        # pVertexInputState
             return fail()
         nb = nx()
-        if nb == 0 or nb > 16:
+        if nb > 16:                          # 0 legal: builtin-only VS
             return fail()
         bnds = []
         for _i in range(nb):
@@ -2337,7 +2337,7 @@ class FrontModel:
                 return fail()
             bnds.append((b, stw, rate))
         na = nx()
-        if na == 0 or na > 8:
+        if na > 8:                           # 0 legal: no attribute gather
             return fail()
         atrs = []
         for _i in range(na):
@@ -2946,6 +2946,22 @@ class FrontModel:
                         rl >= ew and ih >= eh and need <= buf[1]):
                     return True
             return False
+        if ct == T.get('vkCmdBlitImage', -1):
+            # T1 mirror of xfer XBlitCvt: one unscaled, unflipped region of
+            # equal formats runs as CopyImage; anything else is refused
+            s0 = self._xfer_img_extent(r['handle'][0], r['kind'][0])
+            d0 = self._xfer_img_extent(r['handle'][1], r['kind'][1])
+            if s0 is None or d0 is None or (r['imm'][2] & 0xFFFF) != 1:
+                return True
+            if s0.get('fmt') != d0.get('fmt'):
+                return True
+            sv = [a32(k) for k in range(20)]
+
+            def sx(v):
+                return v - (1 << 32) if v & 0x8000_0000 else v
+            ext = [sx(sv[7 + k]) - sx(sv[4 + k]) for k in range(3)]
+            dex = [sx(sv[17 + k]) - sx(sv[14 + k]) for k in range(3)]
+            return any(e <= 0 for e in ext) or ext != dex
         if ct == T['vkCmdCopyImage']:
             s0 = self._xfer_img_extent(r['handle'][0], r['kind'][0])
             d0 = self._xfer_img_extent(r['handle'][1], r['kind'][1])
@@ -3387,6 +3403,7 @@ class FrontModel:
                         T['vkCmdCopyBufferToImage'],
                         T['vkCmdCopyImageToBuffer'],
                         T['vkCmdCopyImage'],
+                        T.get('vkCmdBlitImage', -1),
                         T['vkCmdClearColorImage']):
                 # §12.3 C/5a + C/5b: Xfer operand validation runs in
                 # the engine — unbound/OOB/overlap/misalignment refuse
@@ -4992,6 +5009,7 @@ class FrontModel:
                                 session['T']['vkCmdCopyBufferToImage'],
                                 session['T']['vkCmdCopyImageToBuffer'],
                                 session['T']['vkCmdCopyImage'],
+                                session['T'].get('vkCmdBlitImage', -1),
                                 session['T']['vkCmdClearColorImage']):
                         # §12.3 C/5a + C/5b + G1c/G2a: xfer and
                         # dynamic-state operand payloads stream
@@ -7584,6 +7602,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         for i in range(img_foot(clr_b) // 4)]
 
         # §12.3 C/5a xfer staging image: 128 B of distinctive data
+        BIG_XFER_SZ = 0x100001      # T4: dEQP buffer_1048577 size
+        BIG_TAIL_W = [(0x5A00_0000 + 0x1111 * i) & 0xFFFFFFFF for i in range(8)]
         XFER_STAGE_W = [(0xA500_0000 + i) & 0xFFFFFFFF
                         for i in range(32)]
         XFER_FILL_W = 0xDEAD_BEEF
@@ -7910,11 +7930,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     device=V['dev'],
                     pCreateInfo=st('VkEventCreateInfo', flags=0),
                     pEvent=rm_ev[i])) for i in range(4)]
-        if variant == 'xfer_copy':
+        if variant in ('xfer_copy', 'xfer_big'):
             # §12.3 C/5a: staging src buffer, fill target, readback —
-            # pure transfer operands (not descriptor-bound)
-            for j, (usg, sz) in enumerate([(0x3, 128), (0x2, 128),
-                                           (0x2, 128)]):
+            # pure transfer operands (not descriptor-bound).  xfer_big
+            # (T4) adds two 1 MiB + 1 buffers: the CTS
+            # memory.binding.*.buffer_1048577 whole-buffer copy shape
+            xsz = [(0x3, 128), (0x2, 128), (0x2, 128)]
+            if variant == 'xfer_big':
+                xsz += [(0x3, BIG_XFER_SZ), (0x3, BIG_XFER_SZ)]
+            for j, (usg, sz) in enumerate(xsz):
                 bufs.append(0x5000_0000_1000 + (n_bind + j) *
                             0x1000_0001)
                 mems.append(0x6000_0000_1000 + (n_bind + j) *
@@ -8316,16 +8340,24 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     apw(blob_base[n_bind],
                         [0, 0, 0, 0, vec['gx'], vec['gy'],
                          vec['gz'], 0])
-            if variant == 'xfer_copy':
-                # memory-backed blobs for the three transfer-only
-                # buffers; the guest stages the copy source contents
-                for j in range(3):
+            if variant in ('xfer_copy', 'xfer_big'):
+                # memory-backed blobs for the transfer-only buffers;
+                # the guest stages the copy source contents
+                for j in range(5 if variant == 'xfer_big' else 3):
                     base_b = create_blob_mem(RES_BLOB0 + n_bind + j,
-                                             128, mems[n_bind + j])
+                                             BIG_XFER_SZ if j >= 3 else 128,
+                                             mems[n_bind + j])
                     assert base_b is not None, 'xfer blob refused'
                     base_b = map_blob(RES_BLOB0 + n_bind + j)
                     blob_base.append(base_b)
                 apw(blob_base[n_bind], XFER_STAGE_W)
+                if variant == 'xfer_big':
+                    # T4: distinctive tail of the 1 MiB + 1 source: the 8
+                    # words ending at byte 0x100000, plus the final odd
+                    # byte (0x100000) in the low lane of the next word
+                    apw(blob_base[n_bind + 3] + BIG_XFER_SZ - 33,
+                        BIG_TAIL_W)
+                    apw(blob_base[n_bind + 3] + BIG_XFER_SZ - 1, [0xEE])
             if variant == 'badmem':
                 create_blob_mem(199, 4096, 0xDEADBEEF)
 
@@ -8341,16 +8373,24 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                            and s == setnos[0] else srows[s]):
                     psums[rw['kind']] = psums.get(rw['kind'], 0) + \
                         rw['count']
+            # dcopy: one staging set per real set (same layout) receives
+            # the writes; pDescriptorCopies then moves every element
+            # into the real sets — the pool holds both
+            is_dcopy = variant == 'dcopy'
             for k in sorted(psums):
                 psizes.append(st('VkDescriptorPoolSize', type=k,
-                                 descriptorCount=psums[k]))
+                                 descriptorCount=psums[k] *
+                                 (2 if is_dcopy else 1)))
             extra = 1 if variant == 'poolfull' else 0
+            stg_sets = [V['ds'] + 8 + k for k in range(nsets)] \
+                if is_dcopy else []
             alloc_lays = [(V['dsl'] + 4
                            if variant in ('layoutmix', 'dslcompat')
                            and k == 0 else dsls[k])
                           for k in range(nsets)] + \
-                         [dsls[0]] * extra
-            alloc_sets = dsets + [V['ds'] + 7] * extra
+                         [dsls[0]] * extra + \
+                         (dsls[:nsets] if is_dcopy else [])
+            alloc_sets = dsets + [V['ds'] + 7] * extra + stg_sets
             # update writes: one VkWriteDescriptorSet per bind element —
             # or, in multiwr, the Mesa shape: one write per (set,binding)
             # whose descriptorCount spans the array, exercising the
@@ -8425,11 +8465,27 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                and i == 0 else b['size']))]
                         if 'img' not in b else [])
                     for i, b in enumerate(vec['binds'])]
+            upd_c = []
+            if is_dcopy:
+                # write into the staging twin, then copy element-wise
+                # (src and dst array elements = the bind's idx, so array
+                # binds exercise non-zero element offsets)
+                for w, b in zip(upd_w, vec['binds']):
+                    k = setnos.index(b['set'])
+                    w['dstSet'] = stg_sets[k]
+                    upd_c.append(st('VkCopyDescriptorSet',
+                                    srcSet=stg_sets[k],
+                                    srcBinding=b['binding'],
+                                    srcArrayElement=b['idx'],
+                                    dstSet=dsets[k],
+                                    dstBinding=b['binding'],
+                                    dstArrayElement=b['idx'],
+                                    descriptorCount=1))
             seg_a2 = [
                 ('vkCreateDescriptorPool', dict(
                     device=V['dev'],
                     pCreateInfo=st('VkDescriptorPoolCreateInfo',
-                                   maxSets=nsets,
+                                   maxSets=nsets * (2 if is_dcopy else 1),
                                    poolSizeCount=len(psizes),
                                    pPoolSizes=psizes),
                     pDescriptorPool=V['dp'])),
@@ -8443,7 +8499,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 ('vkUpdateDescriptorSets', dict(
                     device=V['dev'], descriptorWriteCount=len(upd_w),
                     pDescriptorWrites=upd_w,
-                    descriptorCopyCount=0, pDescriptorCopies=[])),
+                    descriptorCopyCount=len(upd_c),
+                    pDescriptorCopies=upd_c)),
                 ('vkCreateCommandPool', dict(
                     device=V['dev'],
                     pCreateInfo=st('VkCommandPoolCreateInfo',
@@ -8537,6 +8594,26 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     reg0['ext'] = (reg0['ext'][0] + 1, reg0['ext'][1],
                                    reg0['ext'][2])
                     regs[0] = reg0
+                if variant == 'blit_scaled' and i == first_img_i:
+                    # T1 negative: a 2x scaled blit — the xfer runs only
+                    # unscaled blits and refuses this one before any
+                    # write -> DEVICE_LOST
+                    bl = dict(aspectMask=1, mipLevel=0, baseArrayLayer=0,
+                              layerCount=1)
+                    seg_a2.append(('vkCmdBlitImage', dict(
+                        commandBuffer=V['cb'], srcImage=imgs[i],
+                        srcImageLayout=6, dstImage=imgs[i],
+                        dstImageLayout=7, regionCount=1,
+                        pRegions=[st('VkImageBlit',
+                            srcSubresource=st('VkImageSubresourceLayers',
+                                              **bl),
+                            srcOffsets=[st('VkOffset3D', x=0, y=0, z=0),
+                                        st('VkOffset3D', x=1, y=1, z=1)],
+                            dstSubresource=st('VkImageSubresourceLayers',
+                                              **bl),
+                            dstOffsets=[st('VkOffset3D', x=0, y=0, z=0),
+                                        st('VkOffset3D', x=2, y=2, z=1)])],
+                        filter=0)))
                 seg_a2.append(('vkCmdCopyBufferToImage', dict(
                     commandBuffer=V['cb'],
                     srcBuffer=bufs[stage_i[i]], dstImage=imgs[i],
@@ -8558,6 +8635,25 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                                 height=r['ext'][1],
                                                 depth=r['ext'][2]))
                               for r in regs])))
+            if variant == 'blit_id' and first_img_i is not None:
+                # T1 positive: an unscaled 1x1 self-blit after the upload
+                # runs as I2I and rewrites the texel with itself — the
+                # dispatch output equals texfetch_1, and the record must
+                # complete (no DEVICE_LOST)
+                bl = dict(aspectMask=1, mipLevel=0, baseArrayLayer=0,
+                          layerCount=1)
+                seg_a2.append(('vkCmdBlitImage', dict(
+                    commandBuffer=V['cb'], srcImage=imgs[first_img_i],
+                    srcImageLayout=6, dstImage=imgs[first_img_i],
+                    dstImageLayout=7, regionCount=1,
+                    pRegions=[st('VkImageBlit',
+                        srcSubresource=st('VkImageSubresourceLayers', **bl),
+                        srcOffsets=[st('VkOffset3D', x=0, y=0, z=0),
+                                    st('VkOffset3D', x=1, y=1, z=1)],
+                        dstSubresource=st('VkImageSubresourceLayers', **bl),
+                        dstOffsets=[st('VkOffset3D', x=0, y=0, z=0),
+                                    st('VkOffset3D', x=1, y=1, z=1)])],
+                    filter=0)))
             if clr_b is not None:
                 # §12.3 C/5b-r2: B2I upload (one region per mip,layer,
                 # pitch rows) -> CLEAR the variant's subresource
@@ -8650,7 +8746,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # feeds the shader's input buffer (barrier orders it), the
             # update patches it; the negatives append a refusing copy
             # after the dispatch instead
-            if variant == 'xfer_copy':
+            if variant == 'xfer_big':
+                # T4: ONE region copying the whole 1 MiB + 1 buffer
+                seg_a2.append(('vkCmdCopyBuffer', dict(
+                    commandBuffer=V['cb'],
+                    srcBuffer=bufs[n_bind + 3], dstBuffer=bufs[n_bind + 4],
+                    regionCount=1,
+                    pRegions=[st('VkBufferCopy', srcOffset=0, dstOffset=0,
+                                 size=BIG_XFER_SZ)])))
+            if variant in ('xfer_copy', 'xfer_big'):
                 seg_a2.append(('vkCmdCopyBuffer', dict(
                     commandBuffer=V['cb'],
                     srcBuffer=bufs[n_bind], dstBuffer=bufs[0],
@@ -8682,11 +8786,30 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     dstOffset=0, size=0xFFFFFFFFFFFFFFFF,
                     data=RB_FILL_W)))
             if variant == 'worksink':
-                # non-dispatch work record: the record issues on the
-                # cmdexec work port — a WorkSink=0 backend answers it
-                # UNSUPPORTED one cycle later -> DEVICE_LOST
-                seg_a2.append(('vkCmdDispatchIndirect', dict(
-                    commandBuffer=V['cb'], buffer=bufs[0], offset=0)))
+                # WORK-class record no engine owns: it issues on the
+                # cmdexec generic work port and a WorkSink=0 backend
+                # answers it UNSUPPORTED one cycle later.  (This arm used
+                # vkCmdDispatchIndirect until G3b-iii routed it to the
+                # shader engine.)  vkCmdBlitImage LOOKUPs its images at
+                # record time, so the arm needs an image session.
+                assert first_img_i >= 0, 'worksink needs an image bind'
+                ws_im = imgs[first_img_i]
+                ws_lay = dict(aspectMask=1, mipLevel=0, baseArrayLayer=0,
+                              layerCount=1)
+                # (vkCmdBlitImage filled this role until T1 routed blit to
+                # the xfer engine; vkCmdResolveImage is still unrouted)
+                seg_a2.append(('vkCmdResolveImage', dict(
+                    commandBuffer=V['cb'], srcImage=ws_im,
+                    srcImageLayout=6, dstImage=ws_im, dstImageLayout=7,
+                    regionCount=1, pRegions=[st('VkImageResolve',
+                        srcSubresource=st('VkImageSubresourceLayers',
+                                          **ws_lay),
+                        srcOffset=st('VkOffset3D', x=0, y=0, z=0),
+                        dstSubresource=st('VkImageSubresourceLayers',
+                                          **ws_lay),
+                        dstOffset=st('VkOffset3D', x=0, y=0, z=0),
+                        extent=st('VkExtent3D', width=1, height=1,
+                                  depth=1))])))
             elif variant == 'modres':
                 # G3b-ii: dispatch all 12 pipelines in order, twice —
                 # pass 1 fills the 8 residency slots then evicts for
@@ -8884,7 +9007,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                                 height=r['ext'][1],
                                                 depth=r['ext'][2]))
                               for r in regs])))
-            if variant == 'xfer_copy':
+            if variant in ('xfer_copy', 'xfer_big'):
                 # post-dispatch: fill a third buffer to its end, then
                 # copy the shader's output into the readback buffer
                 seg_a2.append(('vkCmdFillBuffer', dict(
@@ -9112,7 +9235,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                'xfer_oob', 'xfer_overlap', 'unbacked',
                                'badfmt', 'viewoob', 'kindmix',
                                'xfer_img_oob', 'unnorm', 'clear_oob',
-                               'bind_full')
+                               'bind_full', 'blit_scaled')
             if not lost:
                 # §12.3 F5: the descriptor record-store image — every
                 # record word (zeroed or {base,size,kind,flags}) must
@@ -9131,12 +9254,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         rec(EK_APRCHK, sbase + 4 * j, w, w, 0)
                     note("B' gates: %d descriptor record words"
                          % (sbyt // 4))
-                if variant in ('xfer_copy', 'xfer_update'):
+                if variant in ('xfer_copy', 'xfer_update', 'xfer_big'):
                     # §12.3 C/5a: the copy/update ran before the
                     # dispatch (barrier ordering) — the shader's
                     # expected output is the spirv_model run on the
                     # *modified* input image
-                    if variant == 'xfer_copy':
+                    if variant in ('xfer_copy', 'xfer_big'):
                         inb = splice_bytes(vec['inits'][0], 12,
                                            XFER_STAGE_W, 4, 32)
                         inb = splice_bytes(inb, 76,
@@ -9171,13 +9294,19 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                             rec(EK_APRCHK, base_b + 4 * j,
                                 couts[k][j], couts[k][j],
                                 1 if ccls[k][j] == 'f' else 0)
-                    if variant == 'xfer_copy':
+                    if variant in ('xfer_copy', 'xfer_big'):
                         # proof the copy landed: the input buffer's
                         # aperture image itself
                         base_b = blob_base[0]
                         W(TP_CHECK, CK_APR, len(inb), base_b)
                         for j, w in enumerate(inb):
                             rec(EK_APRCHK, base_b + 4 * j, w, w, 0)
+                        if variant == 'xfer_big':
+                            # T4: the whole-buffer copy reached the tail
+                            bb = blob_base[n_bind + 4] + BIG_XFER_SZ - 33
+                            W(TP_CHECK, CK_APR, 9, bb)
+                            for j, w in enumerate(BIG_TAIL_W + [0xEE]):
+                                rec(EK_APRCHK, bb + 4 * j, w, w, 0)
                         # fill target: 128 B of the pattern word
                         base_b = blob_base[n_bind + 1]
                         W(TP_CHECK, CK_APR, 32, base_b)
@@ -10221,18 +10350,35 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # makeGraphicsPipeline shape: populated viewports vector, no
         # VK_DYNAMIC_STATE_* entries)
         is_statvp = 'statvp' in gfx
+        # ptsrg8: dEQP-VK.memory.pipeline_barrier.*_vertex_buffer_stride_2
+        # shape — RG8_UNORM position at stride 2, POINT_LIST, the CTS
+        # shaders verbatim (gl_PointSize = 1, no varyings, constant-white
+        # FS with no inputs)
+        # ptsvidx: the index/storage/uniform-buffer render shape — NO
+        # vertex input state entries (0 bindings, 0 attributes); the VS
+        # derives the point from gl_VertexIndex
+        is_vidx = 'ptsvidx' in gfx
+        is_pts = 'ptsrg8' in gfx or is_vidx
         # vs_pos3/fs_vcol forward the vertex alpha into FS out; the
         # passthru/flat pair forces a=1 and cannot see a blend
         vs_spv = [w[0] for w in struct.iter_unpack(
-            '<I', (spvd / ('vs_pos3.spv' if is_blend or is_wide
+            '<I', (spvd / ('vs_cts_vidx.spv' if is_vidx else
+                          'vs_cts_pbvb.spv' if is_pts else
+                          'vs_pos3.spv' if is_blend or is_wide
                           else 'vs_passthru.spv')).read_bytes())]
+        # fsubo: the FS reads its colour from a UBO bound at the GRAPHICS
+        # bind point (CTS binding_model.*.graphics shape)
+        is_fsubo = 'fsubo' in gfx
         fs_spv = [w[0] for w in struct.iter_unpack(
-            '<I', (spvd / ('fs_vcol.spv' if is_blend or is_wide
+            '<I', (spvd / ('fs_ubo.spv' if is_fsubo else
+                          'fs_white.spv' if is_pts else
+                          'fs_vcol.spv' if is_blend or is_wide
                           else 'fs_flat.spv')).read_bytes())]
         X = {k: 0x4000_0000_1000 + i * 0x1000_0001 for i, k in enumerate(
             ('inst', 'pd', 'dev', 'queue', 'imem', 'img', 'view', 'rp',
              'fb', 'sm_vs', 'sm_fs', 'pl', 'gp', 'vmem', 'vb', 'vb2',
-             'rmem', 'rb', 'cp', 'cb', 'fen', 'ib2'))}
+             'rmem', 'rb', 'cp', 'cb', 'fen', 'ib2',
+             'ubo', 'dsl', 'dp', 'ds'))}
         RES_BLOB0 = 200
 
         CW = CH = 64                     # color attachment extent
@@ -10274,6 +10420,53 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         else:
             tri_w = (51 | (102 << 8) | (153 << 16) | (255 << 24))
             clr_w = 0xFF00_0000          # clear (0,0,0,1) RGBA8
+        PTS_N = 0
+        if is_pts:
+            # byte pairs (x, y): one point per vertex; the vertex shader
+            # maps v/255 -> 1.998 v/255 - 0.999 and a 1-px point covers
+            # the pixel whose centre lies in [fb - .5, fb + .5), i.e.
+            # floor(fb).  Values keep fb >= 0.1 px from a pixel edge so
+            # the oracle is rounding-convention independent.
+            def fbpix(v):
+                fb = ((1.998 * v / 255.0 - 0.999) + 1.0) * 0.5 * CW
+                # clearance from a pixel edge; vidx's fixed grid keeps
+                # >= 0.02 px, still 5x the raster's 1/256-px precision
+                assert abs(fb - round(fb)) >= (0.01 if is_vidx else 0.1), v
+                return int(fb // 1)
+            def edge_ok(c):
+                fb = ((1.998 * c / 255.0 - 0.999) + 1.0) * 0.5 * CW
+                return abs(fb - round(fb)) >= 0.1
+            PTS = []
+            if is_vidx:
+                # pos = (i % 256, i / 256) / 255: 256 vertices = one row
+                # (y fb 0.032 -> pixel row 0), all x edge-safe
+                PTS = [(i % 256, i // 256) for i in range(256)]
+            elif 'ptsrg8x' in gfx:
+                # CTS per-draw vertex count: 512 points (1024-byte buffer
+                # at stride 2), seeded LCG positions; overlaps are fine
+                # — the oracle is the union of covered pixels
+                s = 0x1234
+                while len(PTS) < 512:
+                    s = (s * 1103515245 + 12345) & 0x7FFFFFFF
+                    v, u = (s >> 8) & 0xFF, (s >> 16) & 0xFF
+                    if edge_ok(v) and edge_ok(u):
+                        PTS.append((v, u))
+            else:
+                for v in range(3, 256, 9):
+                    u = (v * 7 + 11) % 256
+                    if edge_ok(v) and edge_ok(u):
+                        PTS.append((v, u))
+            PTS_N = len(PTS)
+            # vidx: the points come from gl_VertexIndex — the RG8 bytes
+            # below only fill the (unused, still bound) vertex buffer
+            pb = bytes(b & 0xFF for p in PTS for b in p)
+            pb += bytes((-len(pb)) % 4)
+            vb_words = [w[0] for w in struct.iter_unpack('<I', pb)]
+            cov = {(fbpix(x), fbpix(y)) for x, y in PTS}
+            tri_w = 0xFFFF_FFFF                       # white RGBA8
+            note('ptsrg8: %d points, %d px covered' % (PTS_N, len(cov)))
+        if is_fsubo:
+            tri_w = 0xFF00FF00            # UBO colour (0,1,0,1) as RGBA8
         exp_img = [tri_w if (w % CW, w // CW) in cov else clr_w
                    for w in range(CW * CH)]
         # evidence: ascii-art coverage map + a few sampled rows go to
@@ -10392,10 +10585,21 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                codeSize=len(fs_spv) * 4,
                                pCode=fs_spv),
                 pShaderModule=X['sm_fs'])),
+        ] + ([
+            ('vkCreateDescriptorSetLayout', dict(
+                device=X['dev'],
+                pCreateInfo=st('VkDescriptorSetLayoutCreateInfo',
+                    flags=0, bindingCount=1,
+                    pBindings=[st('VkDescriptorSetLayoutBinding',
+                        binding=0, descriptorType=6, descriptorCount=1,
+                        stageFlags=0x10, pImmutableSamplers=[])]),
+                pSetLayout=X['dsl'])),
+        ] if is_fsubo else []) + [
             ('vkCreatePipelineLayout', dict(
                 device=X['dev'],
                 pCreateInfo=st('VkPipelineLayoutCreateInfo',
-                    flags=0, setLayoutCount=0, pSetLayouts=[],
+                    flags=0, setLayoutCount=1 if is_fsubo else 0,
+                    pSetLayouts=[X['dsl']] if is_fsubo else [],
                     pushConstantRangeCount=0, pPushConstantRanges=[]),
                 pPipelineLayout=X['pl'])),
             ('vkCreateGraphicsPipelines', dict(
@@ -10413,16 +10617,22 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         'VkPipelineVertexInputStateCreateInfo',
                         flags=0,
                         vertexBindingDescriptionCount=5 if is_wide
-                        else 1,
+                        else 0 if is_vidx else 1,
                         pVertexBindingDescriptions=(
                             [st('VkVertexInputBindingDescription',
                                 binding=b, stride=(8 if b < 4 else 16),
                                 inputRate=0) for b in range(5)]
                             if is_wide else
+                            [] if is_vidx else
                             [st('VkVertexInputBindingDescription',
-                                binding=0, stride=24, inputRate=0)]),
-                        vertexAttributeDescriptionCount=2,
-                        pVertexAttributeDescriptions=[
+                                binding=0, stride=2 if is_pts else 24,
+                                inputRate=0)]),
+                        vertexAttributeDescriptionCount=(
+                            0 if is_vidx else 1 if is_pts else 2),
+                        pVertexAttributeDescriptions=[] if is_vidx else [
+                            st('VkVertexInputAttributeDescription',
+                               location=0, binding=0, format=16,
+                               offset=0)] if is_pts else [
                             st('VkVertexInputAttributeDescription',
                                location=0, binding=0, format=103,
                                offset=0),
@@ -10433,7 +10643,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                offset=0 if is_wide else 8)]),
                     pInputAssemblyState=st(
                         'VkPipelineInputAssemblyStateCreateInfo',
-                        flags=0, topology=3, primitiveRestartEnable=0),
+                        flags=0, topology=0 if is_pts else 3,
+                        primitiveRestartEnable=0),
                     pTessellationState=None,
                     pViewportState=(
                         st('VkPipelineViewportStateCreateInfo',
@@ -10457,7 +10668,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         'VkPipelineRasterizationStateCreateInfo',
                         flags=0, depthClampEnable=0,
                         rasterizerDiscardEnable=0, polygonMode=0,
-                        cullMode=2, frontFace=0, depthBiasEnable=0,
+                        cullMode=0 if is_pts else 2, frontFace=0,
+                        depthBiasEnable=0,
                         depthBiasConstantFactor=f32b(0.0),
                         depthBiasClamp=f32b(0.0),
                         depthBiasSlopeFactor=f32b(0.0),
@@ -10489,7 +10701,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 pPipelines=[X['gp']])),
             ('vkCreateBuffer', dict(
                 device=X['dev'],
-                pCreateInfo=st('VkBufferCreateInfo', size=72,
+                # 72 B = the 3-vertex triangle sessions; the point
+                # sessions size the buffer to their vertex data (an
+                # undersized buffer is a robust zero-fetch, not a draw)
+                pCreateInfo=st('VkBufferCreateInfo',
+                               size=max(72, 4 * len(vb_words)) if is_pts
+                               else 72,
                                usage=0x80, sharingMode=0,
                                queueFamilyIndexCount=0,
                                pQueueFamilyIndices=[]),
@@ -10557,6 +10774,46 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     device=X['dev'], buffer=X['ib2'], memory=X['vmem'],
                     memoryOffset=0xC00)),
             ]
+        if is_fsubo:
+            # the UBO lives in vmem at 0xE00 (16 B colour); pool, set and
+            # the buffer write follow the buffer's bind
+            seg_a1 += [
+                ('vkCreateBuffer', dict(
+                    device=X['dev'],
+                    pCreateInfo=st('VkBufferCreateInfo', size=16,
+                                   usage=0x10, sharingMode=0,
+                                   queueFamilyIndexCount=0,
+                                   pQueueFamilyIndices=[]),
+                    pBuffer=X['ubo'])),
+                ('vkBindBufferMemory', dict(
+                    device=X['dev'], buffer=X['ubo'], memory=X['vmem'],
+                    memoryOffset=0xE00)),
+                ('vkCreateDescriptorPool', dict(
+                    device=X['dev'],
+                    pCreateInfo=st('VkDescriptorPoolCreateInfo',
+                                   maxSets=1, poolSizeCount=1,
+                                   pPoolSizes=[st('VkDescriptorPoolSize',
+                                                  type=6,
+                                                  descriptorCount=1)]),
+                    pDescriptorPool=X['dp'])),
+                ('vkAllocateDescriptorSets', dict(
+                    device=X['dev'],
+                    pAllocateInfo=st('VkDescriptorSetAllocateInfo',
+                                     descriptorPool=X['dp'],
+                                     descriptorSetCount=1,
+                                     pSetLayouts=[X['dsl']]),
+                    pDescriptorSets=[X['ds']])),
+                ('vkUpdateDescriptorSets', dict(
+                    device=X['dev'], descriptorWriteCount=1,
+                    pDescriptorWrites=[st('VkWriteDescriptorSet',
+                        dstSet=X['ds'], dstBinding=0, dstArrayElement=0,
+                        descriptorCount=1, descriptorType=6,
+                        pImageInfo=[], pTexelBufferView=[],
+                        pBufferInfo=[st('VkDescriptorBufferInfo',
+                                        buffer=X['ubo'], offset=0,
+                                        range=16)])],
+                    descriptorCopyCount=0, pDescriptorCopies=[])),
+            ]
         run_batches(compile_cmds(seg_a1))
 
         # vmem blob contents: vb words at 0, vb2 at 0x800 (wide); the
@@ -10572,6 +10829,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             if is_drawindx:
                 vmem_words += [0] * (0x308 - len(vmem_words)) + \
                     [0x0001_0000, 0x0000_0002]
+        if is_fsubo:
+            vmem_words += [0] * (0x380 - len(vmem_words)) + \
+                [f32b(0.0), f32b(1.0), f32b(0.0), f32b(1.0)]
         # blob+map the three memories; guest posts the vertex data at
         # the vb's mapped offset (vbwide: vb2 words at vmem+0x800)
         for rid, mem, init in (
@@ -10609,6 +10869,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             ('vkCmdBindPipeline', dict(
                 commandBuffer=X['cb'], pipelineBindPoint=0,
                 pipeline=X['gp'])),
+        ] + ([
+            ('vkCmdBindDescriptorSets', dict(
+                commandBuffer=X['cb'], pipelineBindPoint=0,
+                layout=X['pl'], firstSet=0, descriptorSetCount=1,
+                pDescriptorSets=[X['ds']], dynamicOffsetCount=0,
+                pDynamicOffsets=[])),
+        ] if is_fsubo else []) + [
             ('vkCmdBindVertexBuffers', dict(
                 commandBuffer=X['cb'], firstBinding=0,
                 bindingCount=5 if is_wide else 1,
@@ -10642,7 +10909,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                  commandBuffer=X['cb'], buffer=X['ib2'], offset=4,
                  drawCount=1, stride=20))] if is_drawindx else
              [('vkCmdDraw', dict(
-                 commandBuffer=X['cb'], vertexCount=3, instanceCount=1,
+                 commandBuffer=X['cb'],
+                 vertexCount=PTS_N if is_pts else 3, instanceCount=1,
                  firstVertex=0, firstInstance=0))])[0],
             ('vkCmdEndRenderPass', dict(commandBuffer=X['cb'])),
             ('vkCmdPipelineBarrier', dict(
@@ -10715,6 +10983,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             ('vkDestroyBuffer', dict(device=X['dev'], buffer=X['rb'])),
             ('vkFreeMemory', dict(device=X['dev'], memory=X['rmem'])),
             ('vkDestroyBuffer', dict(device=X['dev'], buffer=X['vb'])),
+        ] + ([
+            ('vkDestroyDescriptorPool', dict(device=X['dev'],
+                                             descriptorPool=X['dp'])),
+            ('vkDestroyDescriptorSetLayout', dict(
+                device=X['dev'], descriptorSetLayout=X['dsl'])),
+            ('vkDestroyBuffer', dict(device=X['dev'], buffer=X['ubo'])),
+        ] if is_fsubo else []) + [
             ('vkFreeMemory', dict(device=X['dev'], memory=X['vmem'])),
             ('vkDestroyPipeline', dict(device=X['dev'],
                                        pipeline=X['gp'])),

@@ -1,0 +1,2 @@
+dEQP-VK.memory.pipeline_barrier.host_write_vertex_buffer.1024_vertex_buffer_stride_2
+dEQP-VK.memory.pipeline_barrier.transfer_src_transfer_dst.1024

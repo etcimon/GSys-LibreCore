@@ -177,7 +177,8 @@ def img_init(spec, seed):
 
 
 # VkFormat enum for each device format id (img_fmts.VK2D inverted).
-IMG_VKFMT = (9, 16, 37, 43, 44, 50, 97, 100, 103, 109, 98, 107)
+IMG_VKFMT = (9, 16, 37, 43, 44, 50, 97, 100, 103, 109, 98, 107,
+             126, 124, 129, 41)
 
 
 def _lin(a, b, n=32):
@@ -429,6 +430,24 @@ DESC = {
                          bindings=[
         img_bind(0, 1, dict(w=2, h=4, fmt=10), kind=3),
         (0, 0, 8, 1, 7 << 16)]),
+    # T3: rgba8ui (device format 15) storage image — imageLoad packs the
+    # 4 x u8 channels into the SSBO, imageStore writes v+1 back (the
+    # out=1 image is checked too, so the 1-byte/channel encode is seen)
+    'imgcopy_rgba8ui': dict(groups=(1, 1, 1), fmt='z', push=0,
+                         bindings=[
+        img_bind(0, 1, dict(w=2, h=4, fmt=15), kind=3, out=1),
+        (0, 0, 8, 1, 7 << 16)]),
+    # row-major matrices in an SSBO array (CTS single_basic_array
+    # row_major_*): std430 row_major mat3x2 m[2] = 2 x 32 B (2 rows of
+    # vec3 at MatrixStride 16); out = 32 floats + row_major mat3x2 w[2]
+    'ssbo_rowmajor': dict(groups=(1, 1, 1), fmt='f', push=0,
+                         bindings=[(0, 0, 16, 0), (0, 1, 48, 1)]),
+    # T3: rgba8ui (device format 15) through a combined image sampler —
+    # texelFetch packs the 4 x u8 channels (SAMPLED_IMAGE evidence)
+    'texfetch_rgba8ui': dict(groups=(1, 1, 1), fmt='z', push=0, cf=False,
+                         bindings=[
+        img_bind(0, 0, dict(w=4, h=2, fmt=15), kind=1),
+        (0, 1, 8, 1, 7 << 16)]),
     # cts_b2b = copy_ssbo_* (BufferToBufferInvertTest, SSBO->SSBO):
     # gl_NumWorkGroups*gl_WorkGroupSize sizing, OpArrayLength on the
     # output runtime array, per-lane ~copy of 256 words.

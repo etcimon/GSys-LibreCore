@@ -1,0 +1,34 @@
+#version 450
+// SPDX-License-Identifier: MIT
+// Row-major matrices in an SSBO array (CTS ssbo.layout.single_basic_array
+// row_major_* shape): whole-matrix load, column (m[c]) and element
+// (m[c][r]) access, and a whole-matrix + column store back.  std430
+// row_major mat3x2: 3 columns of vec2 laid out as 2 rows of 3 floats
+// (MatrixStride 12 -> 16 with vec3 row alignment in std430 is 16).
+layout(local_size_x = 1) in;
+layout(std430, set = 0, binding = 0) buffer In {
+    layout(row_major) mat3x2 m[2];
+} src;
+layout(std430, set = 0, binding = 1) buffer Out {
+    float o[32];
+    layout(row_major) mat3x2 w[2];
+} dst;
+void main() {
+    mat3x2 a = src.m[0];
+    mat3x2 b = src.m[1];
+    // whole-matrix values, column-major order
+    for (int c = 0; c < 3; c++)
+        for (int r = 0; r < 2; r++)
+            dst.o[c * 2 + r] = a[c][r];
+    // column access through the pointer and element access
+    vec2 col1 = src.m[1][1];
+    dst.o[6] = col1.x;
+    dst.o[7] = col1.y;
+    dst.o[8] = src.m[1][2][1];
+    dst.o[9] = src.m[0][0][1];
+    // stores: whole matrix, then one column, then one element
+    dst.w[0] = b;
+    dst.w[1] = a;
+    dst.w[1][2] = vec2(src.m[0][0][0], src.m[1][0][0]);
+    dst.w[1][0][1] = 7.0;
+}

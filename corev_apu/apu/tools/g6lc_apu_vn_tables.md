@@ -294,7 +294,7 @@ KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words 
 
 ### vkCreateGraphicsPipelines (type 65)
 
-- per `pCreateInfos` element (element count = `createInfoCount`): `pCreateInfos.stageCount` u32, `pCreateInfos.pVertexInputState` presence (1 word), `pCreateInfos.vertexBindingDescriptionCount` u32, `pCreateInfos.vertexAttributeDescriptionCount` u32, `pCreateInfos.pInputAssemblyState` presence (1 word), `pCreateInfos.topology` u32, `pCreateInfos.pViewportState` presence (1 word), `pCreateInfos.viewportCount` u32, `pCreateInfos.pViewports` element count (1 word), `pCreateInfos.scissorCount` u32, `pCreateInfos.pScissors` element count (1 word), `pCreateInfos.pRasterizationState` presence (1 word), `pCreateInfos.cullMode` u32, `pCreateInfos.frontFace` u32, `pCreateInfos.pDepthStencilState` presence (1 word), `pCreateInfos.depthTestEnable` u32, `pCreateInfos.depthWriteEnable` u32, `pCreateInfos.depthCompareOp` u32, `pCreateInfos.stencilTestEnable` u32, `pCreateInfos.pColorBlendState` presence (1 word), `pCreateInfos.attachmentCount` u32, `pCreateInfos.blendConstants` data words, `pCreateInfos.pDynamicState` presence (1 word), `pCreateInfos.dynamicStateCount` u32, `pCreateInfos.pDynamicStates` data words, `pCreateInfos.layout` handle id (2 words)
+- per `pCreateInfos` element (element count = `createInfoCount`): `pCreateInfos.stageCount` u32, `pCreateInfos.pVertexInputState` presence (1 word), `pCreateInfos.vertexBindingDescriptionCount` u32, `pCreateInfos.vertexAttributeDescriptionCount` u32, `pCreateInfos.pInputAssemblyState` presence (1 word), `pCreateInfos.topology` u32, `pCreateInfos.primitiveRestartEnable` u32, `pCreateInfos.pViewportState` presence (1 word), `pCreateInfos.viewportCount` u32, `pCreateInfos.pViewports` element count (1 word), `pCreateInfos.scissorCount` u32, `pCreateInfos.pScissors` element count (1 word), `pCreateInfos.pRasterizationState` presence (1 word), `pCreateInfos.depthClampEnable` u32, `pCreateInfos.rasterizerDiscardEnable` u32, `pCreateInfos.polygonMode` u32, `pCreateInfos.cullMode` u32, `pCreateInfos.frontFace` u32, `pCreateInfos.depthBiasEnable` u32, `pCreateInfos.depthBiasConstantFactor` u32, `pCreateInfos.depthBiasClamp` u32, `pCreateInfos.depthBiasSlopeFactor` u32, `pCreateInfos.pDepthStencilState` presence (1 word), `pCreateInfos.depthTestEnable` u32, `pCreateInfos.depthWriteEnable` u32, `pCreateInfos.depthCompareOp` u32, `pCreateInfos.depthBoundsTestEnable` u32, `pCreateInfos.stencilTestEnable` u32, `pCreateInfos.front.failOp` u32, `pCreateInfos.front.passOp` u32, `pCreateInfos.front.depthFailOp` u32, `pCreateInfos.front.compareOp` u32, `pCreateInfos.front.compareMask` u32, `pCreateInfos.front.writeMask` u32, `pCreateInfos.front.reference` u32, `pCreateInfos.back.failOp` u32, `pCreateInfos.back.passOp` u32, `pCreateInfos.back.depthFailOp` u32, `pCreateInfos.back.compareOp` u32, `pCreateInfos.back.compareMask` u32, `pCreateInfos.back.writeMask` u32, `pCreateInfos.back.reference` u32, `pCreateInfos.minDepthBounds` u32, `pCreateInfos.maxDepthBounds` u32, `pCreateInfos.pColorBlendState` presence (1 word), `pCreateInfos.logicOpEnable` u32, `pCreateInfos.logicOp` u32, `pCreateInfos.attachmentCount` u32, `pCreateInfos.blendConstants` data words, `pCreateInfos.pDynamicState` presence (1 word), `pCreateInfos.dynamicStateCount` u32, `pCreateInfos.pDynamicStates` data words, `pCreateInfos.layout` handle id (2 words)
 - per `pCreateInfos.pStages` element (element count = `stageCount`): `pCreateInfos.pStages.stage` u32, `pCreateInfos.pStages.module` handle id (2 words)
 - per `pCreateInfos.pVertexBindingDescriptions` element (element count = `vertexBindingDescriptionCount`): `pCreateInfos.pVertexBindingDescriptions.binding` u32, `pCreateInfos.pVertexBindingDescriptions.stride` u32, `pCreateInfos.pVertexBindingDescriptions.inputRate` u32
 - per `pCreateInfos.pVertexAttributeDescriptions` element (element count = `vertexAttributeDescriptionCount`): `pCreateInfos.pVertexAttributeDescriptions.location` u32, `pCreateInfos.pVertexAttributeDescriptions.binding` u32, `pCreateInfos.pVertexAttributeDescriptions.format` u32, `pCreateInfos.pVertexAttributeDescriptions.offset` u32
@@ -388,6 +388,12 @@ KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words 
 ### vkCmdCopyImageToBuffer (type 116)
 
 - per `pRegions` element (element count = `regionCount`): `pRegions.bufferOffset` u64 (2 words), `pRegions.bufferRowLength` u32, `pRegions.bufferImageHeight` u32, `pRegions.imageSubresource.aspectMask` u32, `pRegions.imageSubresource.mipLevel` u32, `pRegions.imageSubresource.baseArrayLayer` u32, `pRegions.imageSubresource.layerCount` u32, `pRegions.imageOffset.x` u32, `pRegions.imageOffset.y` u32, `pRegions.imageOffset.z` u32, `pRegions.imageExtent.width` u32, `pRegions.imageExtent.height` u32, `pRegions.imageExtent.depth` u32
+
+### vkCmdBlitImage (type 114)
+
+- per `pRegions` element (element count = `regionCount`): `pRegions.srcSubresource.aspectMask` u32, `pRegions.srcSubresource.mipLevel` u32, `pRegions.srcSubresource.baseArrayLayer` u32, `pRegions.srcSubresource.layerCount` u32, `pRegions.dstSubresource.aspectMask` u32, `pRegions.dstSubresource.mipLevel` u32, `pRegions.dstSubresource.baseArrayLayer` u32, `pRegions.dstSubresource.layerCount` u32
+- per `pRegions.srcOffsets` element (element count = `2 elements`): `pRegions.srcOffsets.x` u32, `pRegions.srcOffsets.y` u32, `pRegions.srcOffsets.z` u32
+- per `pRegions.dstOffsets` element (element count = `2 elements`): `pRegions.dstOffsets.x` u32, `pRegions.dstOffsets.y` u32, `pRegions.dstOffsets.z` u32
 
 ### vkCmdFillBuffer (type 118)
 
@@ -1393,7 +1399,7 @@ KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words 
 | PNEXT | 0 | 0x1D5 | pNext |
 | U32 | 127 | 0x0 | flags |
 | U32 | 127 | 0x0 | topology **KEEP** |
-| U32 | 127 | 0x0 | primitiveRestartEnable |
+| U32 | 127 | 0x0 | primitiveRestartEnable **KEEP** |
 | PTR | 7 | 0x4 | pTessellationState |
 | STYPE | 0 | 0x2D | sType |
 | PNEXT | 0 | 0x1D6 | pNext |
@@ -1423,15 +1429,15 @@ KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words 
 | STYPE | 0 | 0x2F | sType |
 | PNEXT | 0 | 0x1DA | pNext |
 | U32 | 127 | 0x0 | flags |
-| U32 | 127 | 0x0 | depthClampEnable |
-| U32 | 127 | 0x0 | rasterizerDiscardEnable |
-| U32 | 127 | 0x0 | polygonMode |
+| U32 | 127 | 0x0 | depthClampEnable **KEEP** |
+| U32 | 127 | 0x0 | rasterizerDiscardEnable **KEEP** |
+| U32 | 127 | 0x0 | polygonMode **KEEP** |
 | U32 | 127 | 0x0 | cullMode **KEEP** |
 | U32 | 127 | 0x0 | frontFace **KEEP** |
-| U32 | 127 | 0x0 | depthBiasEnable |
-| U32 | 127 | 0x0 | depthBiasConstantFactor |
-| U32 | 127 | 0x0 | depthBiasClamp |
-| U32 | 127 | 0x0 | depthBiasSlopeFactor |
+| U32 | 127 | 0x0 | depthBiasEnable **KEEP** |
+| U32 | 127 | 0x0 | depthBiasConstantFactor **KEEP** |
+| U32 | 127 | 0x0 | depthBiasClamp **KEEP** |
+| U32 | 127 | 0x0 | depthBiasSlopeFactor **KEEP** |
 | U32 | 127 | 0x0 | lineWidth |
 | PTR | 7 | 0x9 | pMultisampleState |
 | STYPE | 0 | 0x30 | sType |
@@ -1450,30 +1456,30 @@ KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words 
 | U32 | 127 | 0x0 | depthTestEnable **KEEP** |
 | U32 | 127 | 0x0 | depthWriteEnable **KEEP** |
 | U32 | 127 | 0x0 | depthCompareOp **KEEP** |
-| U32 | 127 | 0x0 | depthBoundsTestEnable |
+| U32 | 127 | 0x0 | depthBoundsTestEnable **KEEP** |
 | U32 | 127 | 0x0 | stencilTestEnable **KEEP** |
-| U32 | 127 | 0x0 | failOp |
-| U32 | 127 | 0x0 | passOp |
-| U32 | 127 | 0x0 | depthFailOp |
-| U32 | 127 | 0x0 | compareOp |
-| U32 | 127 | 0x0 | compareMask |
-| U32 | 127 | 0x0 | writeMask |
-| U32 | 127 | 0x0 | reference |
-| U32 | 127 | 0x0 | failOp |
-| U32 | 127 | 0x0 | passOp |
-| U32 | 127 | 0x0 | depthFailOp |
-| U32 | 127 | 0x0 | compareOp |
-| U32 | 127 | 0x0 | compareMask |
-| U32 | 127 | 0x0 | writeMask |
-| U32 | 127 | 0x0 | reference |
-| U32 | 127 | 0x0 | minDepthBounds |
-| U32 | 127 | 0x0 | maxDepthBounds |
+| U32 | 127 | 0x0 | failOp **KEEP** |
+| U32 | 127 | 0x0 | passOp **KEEP** |
+| U32 | 127 | 0x0 | depthFailOp **KEEP** |
+| U32 | 127 | 0x0 | compareOp **KEEP** |
+| U32 | 127 | 0x0 | compareMask **KEEP** |
+| U32 | 127 | 0x0 | writeMask **KEEP** |
+| U32 | 127 | 0x0 | reference **KEEP** |
+| U32 | 127 | 0x0 | failOp **KEEP** |
+| U32 | 127 | 0x0 | passOp **KEEP** |
+| U32 | 127 | 0x0 | depthFailOp **KEEP** |
+| U32 | 127 | 0x0 | compareOp **KEEP** |
+| U32 | 127 | 0x0 | compareMask **KEEP** |
+| U32 | 127 | 0x0 | writeMask **KEEP** |
+| U32 | 127 | 0x0 | reference **KEEP** |
+| U32 | 127 | 0x0 | minDepthBounds **KEEP** |
+| U32 | 127 | 0x0 | maxDepthBounds **KEEP** |
 | PTR | 7 | 0x11 | pColorBlendState **KEEP** |
 | STYPE | 0 | 0x32 | sType |
 | PNEXT | 0 | 0x1DD | pNext |
 | U32 | 127 | 0x0 | flags |
-| U32 | 127 | 0x0 | logicOpEnable |
-| U32 | 127 | 0x0 | logicOp |
+| U32 | 127 | 0x0 | logicOpEnable **KEEP** |
+| U32 | 127 | 0x0 | logicOp **KEEP** |
 | U32 | 127 | 0x0 | attachmentCount **KEEP** |
 | ARRAY | 1 | 0x0 | pAttachments |
 | U32 | 127 | 0x0 | blendEnable **KEEP** |
@@ -2298,23 +2304,23 @@ KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words 
 | U32 | 1 | 0x0 | dstImageLayout |
 | U32 | 2 | 0x0 | regionCount |
 | ARRAY | 0 | 0x0 | pRegions |
-| U32 | 127 | 0x0 | aspectMask |
-| U32 | 127 | 0x0 | mipLevel |
-| U32 | 127 | 0x0 | baseArrayLayer |
-| U32 | 127 | 0x0 | layerCount |
+| U32 | 127 | 0x0 | aspectMask **KEEP** |
+| U32 | 127 | 0x0 | mipLevel **KEEP** |
+| U32 | 127 | 0x0 | baseArrayLayer **KEEP** |
+| U32 | 127 | 0x0 | layerCount **KEEP** |
 | ARRAY | 1 | 0x7 | srcOffsets |
-| U32 | 127 | 0x0 | x |
-| U32 | 127 | 0x0 | y |
-| U32 | 127 | 0x0 | z |
+| U32 | 127 | 0x0 | x **KEEP** |
+| U32 | 127 | 0x0 | y **KEEP** |
+| U32 | 127 | 0x0 | z **KEEP** |
 | ENDARR | 0 | 0x0 |  |
-| U32 | 127 | 0x0 | aspectMask |
-| U32 | 127 | 0x0 | mipLevel |
-| U32 | 127 | 0x0 | baseArrayLayer |
-| U32 | 127 | 0x0 | layerCount |
+| U32 | 127 | 0x0 | aspectMask **KEEP** |
+| U32 | 127 | 0x0 | mipLevel **KEEP** |
+| U32 | 127 | 0x0 | baseArrayLayer **KEEP** |
+| U32 | 127 | 0x0 | layerCount **KEEP** |
 | ARRAY | 1 | 0x7 | dstOffsets |
-| U32 | 127 | 0x0 | x |
-| U32 | 127 | 0x0 | y |
-| U32 | 127 | 0x0 | z |
+| U32 | 127 | 0x0 | x **KEEP** |
+| U32 | 127 | 0x0 | y **KEEP** |
+| U32 | 127 | 0x0 | z **KEEP** |
 | ENDARR | 0 | 0x0 |  |
 | ENDARR | 0 | 0x0 |  |
 | U32 | 3 | 0x0 | filter |

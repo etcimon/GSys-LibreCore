@@ -252,6 +252,205 @@ def cmd_tree(a):
     return 0
 
 
+def _diverse(keys, k, rng):
+    """Pick k of `keys` (dEQP name components) maximizing coverage of
+    their '_'-separated parameter tokens (formats, sizes, stages, …):
+    one seeded shuffle, a first pass taking every key that adds an
+    unseen token, then a fill in shuffled order.  O(len(keys))."""
+    order = list(keys)
+    rng.shuffle(order)
+    seen, out, rest = set(), [], []
+    for key in order:
+        toks = set(key.split('_'))
+        if len(out) < k and not toks <= seen:
+            out.append(key)
+            seen |= toks
+        else:
+            rest.append(key)
+    out += rest[:k - len(out)]
+    return out
+
+
+def _strat_pick(names, budget, depth, rng):
+    """Breadth-first stratified pick of `budget` names from `names`
+    (tuples of dEQP components sharing components [:depth]).  Every child
+    of a prefix-tree node gets a case before any child gets two; when the
+    budget is below the child count, children are chosen for parameter-
+    token diversity.  Leftover budget is spread by child size (largest
+    remainder) so big families are sampled deeper."""
+    if budget <= 0:
+        return []
+    if budget >= len(names):
+        return list(names)
+    kids = {}
+    for n in names:
+        kids.setdefault(n[depth] if len(n) > depth else '', []).append(n)
+    if len(kids) == 1:
+        (only,) = kids.values()
+        if all(len(n) > depth + 1 for n in only):
+            return _strat_pick(only, budget, depth + 1, rng)
+    keys = sorted(kids)
+    if budget < len(keys):
+        chosen = _diverse(keys, budget, rng)
+        alloc = {key: 1 for key in chosen}
+    else:
+        alloc = {key: 1 for key in keys}
+        spare = budget - len(keys)
+        total = sum(len(kids[key]) - 1 for key in keys)
+        if spare and total:
+            share = {key: spare * (len(kids[key]) - 1) / total for key in keys}
+            for key in keys:
+                alloc[key] += int(share[key])
+            left = spare - sum(int(share[key]) for key in keys)
+            for key in sorted(keys, key=lambda x: (int(share[x]) - share[x], x)):
+                if left <= 0:
+                    break
+                alloc[key] += 1
+                left -= 1
+    out = []
+    for key, b in alloc.items():
+        grp = kids[key]
+        if b >= len(grp):
+            out += grp
+        elif all(len(n) <= depth + 1 for n in grp):
+            by = {n[-1]: n for n in grp}
+            out += [by[k] for k in _diverse(sorted(by), b, rng)]
+        else:
+            out += _strat_pick(grp, b, depth + 1, rng)
+    return out
+
+
+def cmd_sample(a):
+    """Seeded, stratified ~budget sample of the WHOLE must-pass list
+    (one caselist per group + all.txt + manifest).  Per group:
+    max(min_per_group, budget*count) cases capped at budget_cap*count and
+    at the group size, picked breadth-first down the dEQP prefix tree.
+    Deterministic for (CTS commit, seed, budget, floors); never a
+    conformance claim — closure still needs the full group list."""
+    import random
+    base, files = read_index(a.cts)
+    commit = cts_commit(a.cts)
+    os.makedirs(a.out_dir, exist_ok=True)
+    manifest = {'cts_commit': commit,
+                'index_sha256': sha256_file(os.path.join(base, INDEX)),
+                'seed': a.seed, 'budget': a.budget,
+                'min_per_group': a.min_per_group, 'cap': a.cap,
+                'groups': {}}
+    allp = os.path.join(a.out_dir, 'all.txt')
+    tot_n = tot_s = 0
+    with open(allp, 'w') as allf:
+        for rel in files:
+            grp = group_of_file(rel)
+            with open(os.path.join(base, rel)) as f:
+                names = [ln.strip() for ln in f
+                         if ln.strip() and not ln.startswith('#')]
+            want = max(a.min_per_group, int(round(a.budget * len(names))))
+            want = min(want, len(names),
+                       max(a.min_per_group, int(a.cap * len(names))))
+            # per-group seed: adding/removing another group never
+            # perturbs this one's pick
+            rng = random.Random('%s:%d:%s' % (commit, a.seed, grp))
+            parts = [tuple(n.split('.')) for n in names]
+            pick = set(_strat_pick(parts, want, 1, rng))
+            sel = [n for n, p in zip(names, parts) if p in pick]
+            gp = os.path.join(a.out_dir, grp.replace('/', '__') + '.txt')
+            with open(gp, 'w') as gf:
+                gf.writelines(n + '\n' for n in sel)
+            allf.writelines(n + '\n' for n in sel)
+            manifest['groups'][grp] = {
+                'count': len(names), 'sampled': len(sel),
+                'file': os.path.basename(gp), 'sha256': sha256_file(gp)}
+            tot_n += len(names)
+            tot_s += len(sel)
+    manifest['total'] = tot_n
+    manifest['sampled'] = tot_s
+    manifest['all_sha256'] = sha256_file(allp)
+    with open(os.path.join(a.out_dir, 'manifest.json'), 'w') as f:
+        json.dump(manifest, f, indent=1, sort_keys=True)
+    print('sampled %d of %d (%.3f%%) across %d groups -> %s (all.txt %s)'
+          % (tot_s, tot_n, 100.0 * tot_s / max(tot_n, 1), len(files),
+             a.out_dir, manifest['all_sha256'][:16]))
+    return 0
+
+
+def _wilson(k, n, z=1.96):
+    """95% Wilson score interval for k successes in n trials."""
+    if n == 0:
+        return 0.0, 1.0
+    p = k / n
+    d = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / d
+    h = z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5) / d
+    return max(0.0, c - h), min(1.0, c + h)
+
+
+def cmd_sample_report(a):
+    """Per-group view of a pinned sample: how much of it has run, the
+    acceptable (Pass/NotSupported) share with a 95% Wilson interval, and
+    the pre-filter's verdict split.  The interval estimates the group's
+    acceptable rate ONLY as far as the sample is representative — it is
+    an engineering signal, never closure (closure = the full group)."""
+    man = json.load(open(os.path.join(a.sample_dir, 'manifest.json')))
+    pre = {}
+    pf = os.path.join(a.sample_dir, 'prefilter.json')
+    if os.path.isfile(pf):
+        pre = json.load(open(pf)).get('cases', {})
+    latest = {}
+    for p in a.results:
+        r = json.load(open(p))
+        gen = r.get('meta', {}).get('generated', '')
+        for rec in r.get('results', []):
+            nm = rec['name']
+            if nm not in latest or latest[nm][0] < gen:
+                latest[nm] = (gen, rec['status'])
+    rows, tot = [], collections_counter()
+    for grp, g in sorted(man['groups'].items()):
+        names = [l.strip() for l in open(os.path.join(a.sample_dir, g['file']))
+                 if l.strip()]
+        run = [latest[n][1] for n in names if n in latest]
+        ok = sum(s in ACCEPT for s in run)
+        lo, hi = _wilson(ok, len(run))
+        pv = collections_counter(pre.get(n, {}).get('verdict', '?')
+                                 for n in names)
+        rows.append('| `%s` | %d | %d | %d | %d | %s | %d | %d | %d | %d |'
+                    % (grp, g['count'], len(names), len(run), ok,
+                       ('%.0f–%.0f%%' % (100 * lo, 100 * hi)) if run else '—',
+                       pv['certain-fail'], pv['untested'], pv['ns-expected'],
+                       pv['predicted-pass']))
+        tot.update(count=g['count'], sampled=len(names), run=len(run), ok=ok,
+                   cf=pv['certain-fail'], un=pv['untested'],
+                   ns=pv['ns-expected'], pp=pv['predicted-pass'])
+    lo, hi = _wilson(tot['ok'], tot['run'])
+    head = ['# APU Vulkan CTS sample view (generated)', '',
+            'GENERATED by `corev_apu/apu/tools/cts_ledger.py sample-report` '
+            '— do not edit. Sample `%s` seed %d, budget %.3f, CTS `%s`, '
+            'all.txt sha256 `%s`. Acceptable = Pass or NotSupported among '
+            'sampled cases that have run (newest run per name); the interval '
+            'is a 95%% Wilson score interval and is an engineering signal '
+            'only — a group closes on its full must-pass list.'
+            % (os.path.basename(os.path.normpath(a.sample_dir)), man['seed'],
+               man['budget'], man['cts_commit'][:12], man['all_sha256'][:16]),
+            '',
+            '| group | must-pass | sampled | run | acceptable | 95% CI | '
+            'pre:certain-fail | pre:untested | pre:ns-expected | '
+            'pre:predicted-pass |',
+            '|---|---:|---:|---:|---:|---|---:|---:|---:|---:|']
+    rows.append('| **total** | %d | %d | %d | %d | %s | %d | %d | %d | %d |'
+                % (tot['count'], tot['sampled'], tot['run'], tot['ok'],
+                   ('%.0f–%.0f%%' % (100 * lo, 100 * hi)) if tot['run'] else '—',
+                   tot['cf'], tot['un'], tot['ns'], tot['pp']))
+    with open(a.out, 'w') as f:
+        f.write('\n'.join(head + rows) + '\n')
+    print('sample view: %d sampled, %d run, %d acceptable -> %s'
+          % (tot['sampled'], tot['run'], tot['ok'], a.out))
+    return 0
+
+
+def collections_counter(it=()):
+    import collections
+    return collections.Counter(it)
+
+
 _BEGIN = re.compile(r'^#beginTestCaseResult (\S+)')
 _RESULT = re.compile(r'<Result StatusCode="([A-Za-z]+)"')
 _TERMINATE = re.compile(r'^#terminateTestCaseResult (\S+)')
@@ -369,6 +568,12 @@ def _run_timed_out(log):
         return bool(_RUN_TIMEOUT.search(f.read()))
 
 
+def _ran_deqp(log):
+    """True when the guest driver reached the post-run marker."""
+    with open(log, errors='replace') as f:
+        return 'G6LC_CTS_RUN ' in f.read()
+
+
 def _last_faults(log):
     """device_faults of the last G6LC_CTS_RUN marker, or None."""
     if not os.path.isfile(log):
@@ -384,6 +589,16 @@ def _harvest_run(guest, tag, end_epoch, caselist, lookup, cts_commit):
                   for f in fs if f == 'cts-TestResults.qpa')
     recs, logs, faults, devname = [], [], [], ''
     for q in qpas:
+        # the driver pulls /results/TestResults.qpa from the CTS data
+        # image even when the guest never booted (console socket never
+        # appeared): that file is the image's previous run.  Only a
+        # shard whose drive log carries the post-run G6LC_CTS_RUN marker
+        # ran deqp in THIS leaf.
+        drv = os.path.join(os.path.dirname(q), 'drive-venus.log')
+        if os.path.isfile(drv) and not _ran_deqp(drv):
+            print('%s: %s skipped: no G6LC_CTS_RUN marker (guest did not '
+                  'run deqp; stale image QPA)' % (tag, os.path.relpath(q, guest)))
+            continue
         rs = parse_qpa(q)
         if not rs:
             continue
@@ -458,9 +673,16 @@ def cmd_harvest(a):
     written = 0
     for guest, tag, epoch, caselist in runs:
         res = _harvest_run(guest, tag, epoch, caselist, lookup, g['cts_commit'])
-        if res is None:
-            continue
         out = os.path.join(a.out_dir, tag + '.json')
+        if res is None:
+            # a previous harvest (before the stale-QPA guard) may have
+            # written this run: its generated JSON must not keep feeding
+            # the ledger
+            if os.path.isfile(out):
+                os.remove(out)
+                print('%s: dropped previously harvested results (no valid '
+                      'shard)' % tag)
+            continue
         with open(out, 'w') as f:
             json.dump(res, f, indent=1)
         written += 1
@@ -611,6 +833,25 @@ def main(argv=None):
     p.add_argument('--min-cases', type=int, default=0)
     p.add_argument('--out', default='')
     p.set_defaults(fn=cmd_tree)
+    p = sub.add_parser('sample',
+                       help='seeded stratified sample of the whole '
+                            'must-pass (per-group caselists + manifest)')
+    p.add_argument('--cts', required=True)
+    p.add_argument('--seed', type=int, default=1)
+    p.add_argument('--budget', type=float, default=0.01)
+    p.add_argument('--min-per-group', type=int, default=8)
+    p.add_argument('--cap', type=float, default=0.05,
+                   help='per-group ceiling as a fraction of the group '
+                        '(floors win for tiny groups)')
+    p.add_argument('--out-dir', required=True)
+    p.set_defaults(fn=cmd_sample)
+    p = sub.add_parser('sample-report',
+                       help='per-group view of a pinned sample with Wilson '
+                            'intervals and pre-filter verdicts')
+    p.add_argument('--sample-dir', required=True)
+    p.add_argument('--results', action='append', required=True)
+    p.add_argument('--out', required=True)
+    p.set_defaults(fn=cmd_sample_report)
     p = sub.add_parser('parse')
     p.add_argument('--groups', required=True)
     p.add_argument('--qpa', action='append', required=True)

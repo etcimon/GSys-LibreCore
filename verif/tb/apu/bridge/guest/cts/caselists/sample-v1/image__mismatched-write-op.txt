@@ -1,0 +1,8 @@
+dEQP-VK.image.mismatched_write_op.mismatched_signedness_and_type.r16_from_r8
+dEQP-VK.image.mismatched_write_op.mismatched_signedness_and_type.rg16_from_r8
+dEQP-VK.image.mismatched_write_op.mismatched_signedness_and_type.rg16i_from_r32i
+dEQP-VK.image.mismatched_write_op.mismatched_signedness_and_type.rg16ui_from_rgb10a2ui
+dEQP-VK.image.mismatched_write_op.mismatched_signedness_and_type.rg32ui_from_rg8ui
+dEQP-VK.image.mismatched_write_op.mismatched_vector_sizes.r16ui_from_vec4
+dEQP-VK.image.mismatched_write_op.mismatched_vector_sizes.rgb10a2_from_vec4
+dEQP-VK.image.mismatched_write_op.mismatched_vector_sizes.rgba16snorm_from_vec4

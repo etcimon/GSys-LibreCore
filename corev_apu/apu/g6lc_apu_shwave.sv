@@ -621,6 +621,12 @@ module g6lc_apu_shwave
     logic [2:0]   lrc_q;              // column cursor (MAT)
     logic         ls_mat_q;           // matrix-typed access
     logic [15:0]  ls_mstr_q;          // MatrixStride bytes, 0 = tight
+    // row-major (member flag bit 4 = 1 << (RowMajor % 8)), mirrored from
+    // spirv_model: pointer word3 bit16 = row-major matrix, bit17 = column
+    // vector of one (components MatrixStride apart).  crm/cvs track the
+    // access-chain walk; ls_rm/ls_vs select the LSU addressing.
+    logic         crm_q, cvs_q;
+    logic         ls_rm_q, ls_vs_q;
     logic [31:0]  ls_off_q;
     logic [3:0]   ls_sc_q;
     logic [7:0]   ls_bi_q;
@@ -2337,7 +2343,12 @@ module g6lc_apu_shwave
     wire [8:0]  ls_flw = {4'h0, lrc_q} * {6'h0, ls_ccn} + {6'h0, lcc_q};
     wire [8:0]  ls_msw = (ls_mstr_q != 16'h0) ? {1'b0, ls_mstr_q[15:2]}
                                               : {6'h0, ls_ccn};
-    wire [8:0]  ls_mad = {4'h0, lrc_q} * ls_msw + {6'h0, lcc_q};
+    wire [8:0]  ls_mad = ls_rm_q
+                       // row-major: element (col, row) at row*stride + col
+                       ? {6'h0, lcc_q} * ls_msw + {6'h0, lrc_q}
+                       : {4'h0, lrc_q} * ls_msw + {6'h0, lcc_q};
+    // strided column vector of a row-major matrix: comp c at c*stride
+    wire [8:0]  ls_vsi = 9'(ls_comp_q) * {1'b0, ls_mstr_q[15:2]};
     wire [31:0] ls_wd = !ls_mat_q
                       ? (ls_tsrc_q
                          ? t1_q[ls_lane_q[2:0]][ls_comp_q[1:0]]
@@ -2773,10 +2784,17 @@ module g6lc_apu_shwave
             // merge waits there (still in that loop's resume); a lane
             // branching to a loop's continue parks in cont_mask — both
             // are scrubbed from the deeper entries' resume/pending.
+            // Only ACTIVE lanes branch: an inactive lane's ctg_w comes
+            // from its (stale, never-written-this-dispatch) condition
+            // register, and letting it into cf_nx revived it at the
+            // continue label (cts_b2b_opt_1 after ssbo_cap: lanes 1..7
+            // of a LocalSize-1 dispatch ran the loop body) — nor may it
+            // scrub the deeper entries' resume/pending of a lane that is
+            // legitimately parked elsewhere.
             for (int l = 0; l < LAN; l++) begin
               hit = 1'b0;
               for (int e = CFD-1; e >= 0; e--) begin
-                if (!hit && e < cf_nn && cf_nk[e] == 2'd1) begin
+                if (act_w[l] && !hit && e < cf_nn && cf_nk[e] == 2'd1) begin
                   if (ctg_w[l] == cf_nm[e] ||
                       ctg_w[l] == cf_nc[e]) begin
                     hit = 1'b1;
@@ -2996,6 +3014,7 @@ module g6lc_apu_shwave
         end
         ls_ps_q <= '0; ls_tsrc_q <= '0; ls_wbb_q <= '0;
         ls_atom_q <= '0; ls_mat_q <= '0; ls_mstr_q <= '0;
+        ls_rm_q <= 1'b0; ls_vs_q <= 1'b0; crm_q <= 1'b0; cvs_q <= 1'b0;
         ls_dyn_q <= '0;
         wb2_q <= '0; xk_q <= '0;
         done_o <= 1'b0;
@@ -3469,6 +3488,8 @@ module g6lc_apu_shwave
                 // matrix results/operands walk columns as RF rows
                 // (§7c): flat word stream over cols*comps on the bus
                 // side, per-column rows on the RF side.
+                ls_rm_q <= va_q[0][0][3][16];
+                ls_vs_q <= 1'b0;
                 if (opc_q == 61 && rkind_q == APU_SH_TK_MAT) begin
                   ls_mat_q <= 1'b1;
                   // pointer word 3 is the member MatrixStride.  A
@@ -3499,7 +3520,10 @@ module g6lc_apu_shwave
                                  ? 16'd16 : 16'h0;
                 end else begin
                   ls_mat_q <= 1'b0;
-                  ls_mstr_q <= '0;
+                  // a row-major column vector spaces its components by
+                  // the MatrixStride the pointer carries
+                  ls_vs_q  <= va_q[0][0][3][17] && va_q[0][0][3][15:0] != 0;
+                  ls_mstr_q <= va_q[0][0][3][17] ? va_q[0][0][3][15:0] : '0;
                 end
                 if (!(opc_q == 61 &&
                       (rkind_q == APU_SH_TK_IMG ||
@@ -3522,7 +3546,12 @@ module g6lc_apu_shwave
                   poff_q[l][3] <= va_q[0][l][3];
                 end
                 ctag_q <= va_q[0][0][1];
-                cmstride_q <= '0;
+                // re-chaining a row-major matrix / column pointer keeps
+                // its layout state and stride
+                crm_q <= va_q[0][0][3][16];
+                cvs_q <= va_q[0][0][3][17];
+                cmstride_q <= (va_q[0][0][3][16] || va_q[0][0][3][17])
+                              ? va_q[0][0][3][15:0] : '0;
                 if (wc_q > 4) begin
                   res_id_q <= ops_q[3][9:0]; st_q <= W_IR0;
                 end else begin
@@ -4776,17 +4805,27 @@ module g6lc_apu_shwave
                 end
               end
               4'd6: begin                        // matrix
-                // std140 uniform columns are 16 bytes apart
-                al_st_q <= (cmstride_q != 16'h0) ? cmstride_q :
-                           (ctag_q[3:0] == APU_SH_SC_UNIFORM) ? 16'd16 :
-                           16'(f_nc(ty_comps)) * 4;
+                if (crm_q) begin
+                  // row-major: column c starts c*4 into each row; the
+                  // selected column's components are stride apart
+                  al_st_q <= 16'd4;
+                  crm_q <= 1'b0; cvs_q <= 1'b1;
+                end else
+                  // std140 uniform columns are 16 bytes apart
+                  al_st_q <= (cmstride_q != 16'h0) ? cmstride_q :
+                             (ctag_q[3:0] == APU_SH_SC_UNIFORM) ? 16'd16 :
+                             16'(f_nc(ty_comps)) * 4;
                 cty2_q <= ty_elem; st_q <= W_CHX;
               end
               4'd5: begin                        // vector
-                al_st_q <= 16'd4; cty2_q <= ty_elem; st_q <= W_CHX;
+                al_st_q <= (cvs_q && cmstride_q != 16'h0) ? cmstride_q
+                                                          : 16'd4;
+                cvs_q <= 1'b0;
+                cty2_q <= ty_elem; st_q <= W_CHX;
               end
               default: begin                     // scalar/end of chain
                 al_st_q <= 16'd4; cty2_q <= cty_q; st_q <= W_CHX;
+                crm_q <= 1'b0; cvs_q <= 1'b0;
               end
             endcase
           end
@@ -4801,6 +4840,8 @@ module g6lc_apu_shwave
                 poff_q[l][1][31:28] <= APU_SH_VF_DROP;
             end
             cmstride_q <= mb_mst;
+            crm_q <= mb_fl[4];                 // RowMajor member
+            cvs_q <= 1'b0;
             cty_q <= mb_ty;
             if (ck_q + 1 >= wc_q - 4) st_q <= W_CHFIN;
             else begin ck_q <= ck_q + 1;
@@ -4829,7 +4870,10 @@ module g6lc_apu_shwave
               // word 3 carries MatrixStride so the later OpLoad
               // (a new instruction, cmstride cleared) still spaces
               // columns.  Zero when the member has no MatrixStride.
-              wb_q[l][3] <= {poff_q[l][3][31:16], cmstride_q};
+              // [31:24] binding hi, [17] row-major column vector, [16]
+              // row-major matrix, [15:0] MatrixStride
+              wb_q[l][3] <= {poff_q[l][3][31:24], 6'h0, cvs_q, crm_q,
+                             cmstride_q};
             end
             wbm_q <= 4'b1111;
             st_q <= W_WB;
@@ -4919,7 +4963,8 @@ module g6lc_apu_shwave
             // ls_ps_q (ext pointer stores: Modf/Frexp) puts the pointer
             // word in operand slot 1 instead of 0
             o32 = va_q[ls_ps_q][ls_lane_q[2:0]][0] +
-                  {21'h0, (ls_mat_q ? ls_mad : ls_comp_q), 2'b00};
+                  {21'h0, (ls_mat_q ? ls_mad :
+                           ls_vs_q ? ls_vsi : 9'(ls_comp_q)), 2'b00};
             tg  = va_q[ls_ps_q][ls_lane_q[2:0]][1];
             ls_off_q <= o32;
             ls_sc_q  <= tg[3:0];
@@ -6090,6 +6135,10 @@ module g6lc_apu_shwave
                 tx_fc_q[0] <= tdw[31:0];
                 tx_fc_q[3] <= 32'd1;
               end
+              8'd15: begin                       // R8G8B8A8_UINT (T3)
+                for (int c = 0; c < 4; c++)
+                  tx_fc_q[c] <= {24'h0, by[c]};
+              end
               default: begin                     // R32G32B32A32_UINT
                 for (int c = 0; c < 4; c++)
                   tx_fc_q[c] <= tdw[32 * c +: 32];
@@ -6295,7 +6344,12 @@ module g6lc_apu_shwave
                         ? ((8'hFF >> (4'd8 - {1'b0, tx_bpp_q[2:0]})) <<
                            tx_ta_q[2:0])
                         : 8'hFF;
-            if (tx_isint_q || (tx_isflt_q && !tx_isf16_q)) begin
+            if (tx_isint_q && tx_bpp_q == 5'd4 && tx_nch_q == 4'd4) begin
+              // T3 R8G8B8A8_UINT: one byte per channel (low 8 bits)
+              for (int c = 0; c < 4; c++)
+                tx_stb_q[8 * c +: 8] <= va_q[2][ls_lane_q[2:0]][c][7:0];
+              st_q <= W_TXW0;
+            end else if (tx_isint_q || (tx_isflt_q && !tx_isf16_q)) begin
               for (int c = 0; c < 4; c++)
                 if (4'(c) < tx_nch_q)
                   tx_stb_q[32 * c +: 32] <=
@@ -6464,6 +6518,13 @@ module g6lc_apu_shwave
           W_LSC: begin
             if (!ls_bok_q || {32'h0, ls_off_q} + 4 > {32'h0, ls_bsz_q})
             begin
+              // pragma translate_off
+`ifndef SYNTHESIS
+              if ($test$plusargs("dbg_rob"))
+                $display("[rob] LSC lane=%0d bok=%b off=%0h bsz=%0h st=%b",
+                         ls_lane_q, ls_bok_q, ls_off_q, ls_bsz_q, ls_store_q);
+`endif
+              // pragma translate_on
               robust_q <= robust_q + 1;
               if (!ls_store_q)
                 wb_q[ls_lane_q[2:0]][ls_wc] <= '0;
@@ -6509,6 +6570,14 @@ module g6lc_apu_shwave
             end else begin
               if ((ls_off_q >> 2) >= SCW ||
                   ls_off_q >= {16'h0, escratch_q}) begin
+                // pragma translate_off
+`ifndef SYNTHESIS
+                if ($test$plusargs("dbg_rob"))
+                  $display("[rob] SSB lane=%0d sc=%0d off=%0h escr=%0h st=%b",
+                           ls_lane_q, ls_sc_q, ls_off_q, escratch_q,
+                           ls_store_q);
+`endif
+                // pragma translate_on
                 robust_q <= robust_q + 1;
                 if (!ls_store_q)
                   wb_q[ls_lane_q[2:0]][ls_wc] <= '0;

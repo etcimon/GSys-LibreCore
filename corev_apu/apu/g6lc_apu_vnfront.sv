@@ -3701,6 +3701,9 @@ module g6lc_apu_vnfront
                       APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_EXT ||
                       op_q.cmd_type ==
                       APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT ||
+                      // T1: 20 VkImageBlit words per region
+                      op_q.cmd_type ==
+                      APU_VN_TYPE_VK_CMD_BLIT_IMAGE_EXT ||
                       op_q.cmd_type ==
                       APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT ||
                       // G1c: dynamic-state + render-pass keeps stream
@@ -5566,13 +5569,15 @@ module g6lc_apu_vnfront
                 if (stg_word_q == 32'h0) state_q <= StPipeFail;
                 else begin gp_ph_q <= 5'd8; state_q <= StGpRd; end
               end
-              5'd8: begin  // vertexBindingDescriptionCount (1..16)
-                if (stg_word_q == 32'h0 || stg_word_q > 32'd16)
+              5'd8: begin  // vertexBindingDescriptionCount (0..16)
+                // 0 is legal (a gl_VertexIndex-only VS): the ARRAY
+                // stages no elements, the next word is the attr count
+                if (stg_word_q > 32'd16)
                   state_q <= StPipeFail;
                 else begin
                   gp_nbind_q <= 5'(stg_word_q);
                   gp_i_q     <= '0;
-                  gp_ph_q    <= 5'd9;
+                  gp_ph_q    <= (stg_word_q == 32'h0) ? 5'd12 : 5'd9;
                   state_q    <= StGpRd;
                 end
               end
@@ -5599,13 +5604,15 @@ module g6lc_apu_vnfront
                   state_q <= StGpRd;
                 end
               end
-              5'd12: begin // vertexAttributeDescriptionCount (1..8)
-                if (stg_word_q == 32'h0 || stg_word_q > 32'd8)
+              5'd12: begin // vertexAttributeDescriptionCount (0..8)
+                // 0 is legal: no attribute gather, the VS sees only
+                // builtins (gl_VertexIndex / gl_InstanceIndex)
+                if (stg_word_q > 32'd8)
                   state_q <= StPipeFail;
                 else begin
                   gp_nattr_q <= stg_word_q[3:0];
                   gp_i_q     <= '0;
-                  gp_ph_q    <= 5'd13;
+                  gp_ph_q    <= (stg_word_q == 32'h0) ? 5'd17 : 5'd13;
                   state_q    <= StGpRd;
                 end
               end

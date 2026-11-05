@@ -1,0 +1,8 @@
+dEQP-VK.image_processing.api.properties
+dEQP-VK.image_processing.compute.block_matching.sad.self.diff
+dEQP-VK.image_processing.compute.block_matching.ssd.self.diff_random
+dEQP-VK.image_processing.graphics.fast_lib.block_matching.sad.basic.r8g8b8_unorm_diff_random_constdiff
+dEQP-VK.image_processing.graphics.monolithic.block_matching.sad.layouts.general_params1_a2b10g10r10_unorm_pack32
+dEQP-VK.image_processing.graphics.monolithic.block_matching.sad.reduction_modes.weighted_average_params2_r8_unorm
+dEQP-VK.image_processing.graphics.monolithic.block_matching.ssd.reduction_modes.min_params0_r8_unorm
+dEQP-VK.image_processing.graphics.shader_objects.block_matching.sad.basic.a2b10g10r10_unorm_pack32_same_random

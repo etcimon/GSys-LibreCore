@@ -1,0 +1,8 @@
+dEQP-VK.image.extend_operands_spirv1p4.a2b10g10r10_uint_pack32.write.matched_sign.normal_precision
+dEQP-VK.image.extend_operands_spirv1p4.r16g16_sint.write.matched_sign.normal_precision
+dEQP-VK.image.extend_operands_spirv1p4.r16g16b16a16_uint.write.matched_sign.normal_precision
+dEQP-VK.image.extend_operands_spirv1p4.r32_sint.write.matched_sign.normal_precision
+dEQP-VK.image.extend_operands_spirv1p4.r32g32_uint.write.matched_sign.normal_precision
+dEQP-VK.image.extend_operands_spirv1p4.r32g32b32a32_uint.read.matched_sign.normal_precision
+dEQP-VK.image.extend_operands_spirv1p4.r8_sint.write.matched_sign.normal_precision
+dEQP-VK.image.extend_operands_spirv1p4.r8g8_sint.write.matched_sign.normal_precision

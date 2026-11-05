@@ -82,8 +82,9 @@ ue_cpos_clear_srgb_1 ue_cpos_clear_rgba16f_1 \
 ue_cneg_clear_oob_1 ue_cpos_ctxkill_reuse_1 \
 ue_cpos_rb_mapafter_1 ue_cpos_ubo_bindfirst_1 \
 ue_cpos_evict_1 ue_cpos_reloc_hold_1 \
-ue_cneg_evict_full_1 ue_cneg_bind_full_1 ue_cneg_stale_mem_1 \
-ue_gpos_tri_1 ue_gpos_vbwide_1 ue_gpos_statvp_1 ue_gpos_blend_1 \
+ue_cneg_evict_full_1 ue_cneg_bind_full_1 ue_cneg_stale_mem_1 ue_cneg_blit_scaled_1 ue_cpos_blit_id_1 ue_cpos_xfer_big_1 \
+ue_cpos_dcopy_bufcopy_1 ue_cpos_dcopy_descarr_1 ue_cpos_dcopy_multiset_1 \
+ue_gpos_tri_1 ue_gpos_vbwide_1 ue_gpos_statvp_1 ue_gpos_blend_1 ue_gpos_ptsrg8_1 ue_gpos_ptsrg8x_1 ue_gpos_ptsvidx_1 ue_gpos_fsubo_1 \
 ue_cpos_maxconc_1 ue_cpos_defer2_1 \
 ue_cpos_modres_1 ue_cpos_rerec_1 \
 ue_cpos_zerodisp_1 ue_cpos_shared1_1 ue_cpos_atomic1_1 \

@@ -1,0 +1,8 @@
+dEQP-VK.multiview.clear_attachments.no_queries.1_2_4_8
+dEQP-VK.multiview.depth_without_fragment_shader.no_queries.3_6_12_9_6_12_9_3_6_12_9_3
+dEQP-VK.multiview.draw_indirect_indexed.no_queries.15
+dEQP-VK.multiview.input_attachments_geometry.no_queries.5_10_5_10
+dEQP-VK.multiview.nested_cmd_buffer.no_queries.max_multi_view_view_count
+dEQP-VK.multiview.non_precise_queries_with_availability.cmd_copy_query_pool_results.1_2_4_8
+dEQP-VK.multiview.queries.cmd_copy_query_pool_results.15
+dEQP-VK.multiview.stencil.no_queries.3_6_12_9_6_12_9_3_6_12_9_3

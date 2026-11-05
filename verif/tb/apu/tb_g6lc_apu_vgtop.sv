@@ -328,6 +328,41 @@ module tb_g6lc_apu_vgtop
   // jitter session; +cpl_tmo=N shortens it for directed wedge runs
   int unsigned cpl_tmo = 20_000_000;
   initial void'($value$plusargs("cpl_tmo=%d", cpl_tmo));
+  // +eng_trace: engine issue/completion timeline (draw/clear on rast,
+  // copies on xfer) — orders a readback against the raster work
+  bit eng_trace;
+  initial eng_trace = $test$plusargs("eng_trace");
+  // +max_errors=N: raise the abort threshold to see a whole image diff
+  int unsigned max_errors = 40;
+  initial void'($value$plusargs("max_errors=%d", max_errors));
+  // +xf_ok: a positive session — every xfer completion must be OK.  The
+  // golden only predicts lost submissions, so a FAULT the oracle did not
+  // foresee (e.g. a refused blit) could otherwise pass silently; the
+  // count is always reported (XF_FAULTS) for the run script to gate on.
+  bit xf_ok;
+  initial xf_ok = $test$plusargs("xf_ok");
+  int unsigned xf_faults = 0;
+  always @(posedge clk)
+    if (rst_ni && i_dut.gen_on.xf_done &&
+        i_dut.gen_on.xf_done_pl.code != g6lc_apu_sh_pkg::APU_SH_DONE_OK)
+      xf_faults <= xf_faults + 1;
+  always @(posedge clk)
+    if (eng_trace && rst_ni) begin
+      if (i_dut.gen_on.ex_work_v && i_dut.gen_on.ex_work_rdy)
+        $display("[eng t=%0d] issue ctype=%0d draw=%b xfer=%b disp=%b",
+                 cycles, i_dut.gen_on.work_o.ctype,
+                 i_dut.gen_on.work_is_draw, i_dut.gen_on.work_is_xfer,
+                 i_dut.gen_on.work_is_disp);
+      if (i_dut.gen_on.rs_done)
+        $display("[eng t=%0d] rs_done op=%0d vc=%0d ic=%0d code=%0d",
+                 cycles, i_dut.gen_on.i_rast.gen_on.dr_q.op,
+                 i_dut.gen_on.i_rast.gen_on.dr_q.vertex_count,
+                 i_dut.gen_on.i_rast.gen_on.dr_q.instance_count,
+                 i_dut.gen_on.rs_done_pl.code);
+      if (i_dut.gen_on.xf_done)
+        $display("[eng t=%0d] xf_done code=%0d", cycles,
+                 i_dut.gen_on.xf_done_pl.code);
+    end
   // real multi-engine collisions: cycles where >=2 engine completions
   // push the done queue together (sh/xf/rs/external)
   int unsigned col_multi = 0, col_multi_pops = 0, col_pushes = 0;
@@ -451,7 +486,7 @@ module tb_g6lc_apu_vgtop
     if (!ok) begin
       errors++;
       $display("FAIL %s (t=%0d)", msg, cycles);
-      if (errors > 40) $fatal(1, "too many errors");
+      if (errors > max_errors) $fatal(1, "too many errors");
     end
   endtask
 
@@ -823,6 +858,11 @@ module tb_g6lc_apu_vgtop
       check(i_dut.gen_on.i_exec.gen_on.outst_q == 8'h0,
             "donecol: cmdexec outst_q not drained");
     end
+    $display("XF_FAULTS %0d", xf_faults);
+    if (xf_ok)
+      check(xf_faults == 0,
+            $sformatf("+xf_ok: %0d xfer completion(s) returned non-OK",
+                      xf_faults));
     if (errors == 0) begin
       if (g1_n != 0)
         $display("PASS-COMPUTE g1=%0d g2=%0d ulp1=%0d ulp2=%0d maxulp=%0d cycles=%0d",

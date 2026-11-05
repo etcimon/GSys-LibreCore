@@ -1,0 +1,8 @@
+dEQP-VK.shader_object.link.linked_linked_linked_linked_linked.one_linked_unlinked.default
+dEQP-VK.shader_object.link.linked_linked_linked_linked_unlinked.all.default
+dEQP-VK.shader_object.link.linked_linked_unlinked_unused_unlinked.all.random_order
+dEQP-VK.shader_object.link.mesh_unlinked_linked_linked.default
+dEQP-VK.shader_object.link.next_stage.identically_defined_layouts
+dEQP-VK.shader_object.link.unlinked_linked_linked_linked_linked.separate.separate_link
+dEQP-VK.shader_object.link.unlinked_linked_linked_linked_unlinked.all.separate_link
+dEQP-VK.shader_object.link.unlinked_unlinked_unlinked_unused_unlinked.one_linked_unlinked.random_order

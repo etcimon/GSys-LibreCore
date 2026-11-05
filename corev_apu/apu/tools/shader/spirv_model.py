@@ -788,6 +788,8 @@ class Model:
         elif fmt == 10:                           # R32_UINT
             fc[0] = by[0] | by[1] << 8 | by[2] << 16 | by[3] << 24
             fc[3] = 1
+        elif fmt == 15:                           # R8G8B8A8_UINT (T3)
+            fc = [by[c] for c in range(4)]
         else:                                     # R32G32B32A32_UINT
             fc = [(by[4 * c] | by[4 * c + 1] << 8 |
                    by[4 * c + 2] << 16 | by[4 * c + 3] << 24)
@@ -1262,6 +1264,10 @@ class Model:
         lavapipe's quantize may differ one code from the RTL's
         fixed-point encode)."""
         cls = 'f' if isflt else ('i' if isint else 'p')
+        if isint and bpp == 4 and nch == 4:       # R8G8B8A8_UINT (T3)
+            for c in range(4):
+                self.bwrite8(ta + c, val[c] & 0xFF, cls)
+            return
         if isint or (isflt and not isf16):
             for i in range(bpp):
                 self.bwrite8(ta + i,
@@ -1461,9 +1467,20 @@ class Model:
         mstr = w3 & 0xFFFF
         if mstr == 0 and (ptr[1] & 0xF) == SC_UNIFORM:
             mstr = 16
-        sw = (mstr // 4) if mstr else comps
         col, cin = divmod(comp, comps)
+        if w3 & 0x10000:
+            # row-major: element (col, row) at row*MatrixStride + col*4
+            return u32(ptr[0] + cin * (mstr if mstr else 4 * comps) + col * 4)
+        sw = (mstr // 4) if mstr else comps
         return u32(ptr[0] + (col * sw + cin) * 4)
+
+    def vec_comp_off(self, ptr, comp):
+        """Byte offset of vector component `comp`: 4-byte packed, or
+        MatrixStride apart for a row-major matrix column (word3 bit17)."""
+        w3 = ptr[3] if len(ptr) > 3 else 0
+        if w3 & 0x20000 and (w3 & 0xFFFF):
+            return u32(ptr[0] + comp * (w3 & 0xFFFF))
+        return None
 
     def matshape(self, tid):
         """(cols, comps) for a MAT type id; (1, comps) otherwise."""
@@ -1730,6 +1747,15 @@ class Model:
         cty = self.sc.types.get(self.regt(base), {})
         cty = cty.get('elem', 0)               # pointee type
         cmstride = 0
+        # row-major (member flag 0x10 = 1 << (RowMajor % 8)): rm = the
+        # pointer designates a row-major MATRIX; vs = a column VECTOR of
+        # one, whose components are MatrixStride apart.  Carried in
+        # pointer word3 bits 16 (rm) / 17 (vs) beside [15:0] = stride.
+        w3in = ptr[3] if len(ptr) > 3 else 0
+        rm = bool(w3in & 0x10000)
+        vs = bool(w3in & 0x20000)
+        if rm or vs:
+            cmstride = w3in & 0xFFFF
         first = True
         for iid in ids:
             t = self.sc.types.get(cty)
@@ -1754,6 +1780,8 @@ class Model:
                     off = u32(off + m['offset'])
                     cmstride = m['mstride']
                     cty = m['type']
+                    rm = bool(m['flags'] & 0x10)
+                    vs = False
                     if m['flags'] & 0x40:      # MF_DROP (W_CHM1)
                         tag = (tag & 0x0FFFFFFF) | (VF_DROP << 28)
                 continue
@@ -1762,19 +1790,31 @@ class Model:
                     self.natural_size(t['elem'])
             elif k == TK['MAT']:
                 et = self.sc.types.get(t['elem'], {'comps': 1})
-                st_ = cmstride if cmstride else 4 * et['comps']
+                if rm:
+                    # row-major: column c starts c*4 into the row
+                    st_ = 4
+                    rm, vs = False, True
+                else:
+                    st_ = cmstride if cmstride else 4 * et['comps']
             elif k == TK['VEC']:
-                st_ = 4
+                # a row-major column's components are MatrixStride apart
+                st_ = cmstride if (vs and cmstride) else 4
+                vs = False
             else:
                 st_ = 4
+                rm = vs = False
+            if k in (TK['ARRAY'], TK['RARRAY']):
+                pass                 # array of row-major matrices keeps rm
             elem = t.get('elem', cty)
             off = u32(off + self.idxval(iid) * st_)
             cty = elem
-        # W_CHFIN word3: binding[15:8] stays in [31:16]; [15:0] is the
-        # member MatrixStride so a later OpLoad/OpStore (cmstride
-        # cleared) still spaces columns.  Zero when no member set one.
-        whi = (ptr[3] & 0xFFFF0000) if len(ptr) > 3 else 0
-        return [off, tag, didx, whi | (cmstride & 0xFFFF)]
+        # W_CHFIN word3: binding[15:8] stays in [31:24]; bit17 = vs, bit16
+        # = rm; [15:0] is the member MatrixStride so a later OpLoad/OpStore
+        # (cmstride cleared) still spaces columns.  Zero when no member set
+        # one.
+        whi = (ptr[3] & 0xFF000000) if len(ptr) > 3 else 0
+        return [off, tag, didx, whi | (0x10000 if rm else 0) |
+                (0x20000 if vs else 0) | (cmstride & 0xFFFF)]
 
     def natural_size(self, tid):
         """W_CHE0: ty_size != 0 ? size : 4 (natural layout)."""
@@ -2247,9 +2287,13 @@ class Model:
             mcomps = self.matshape(rty)[1] if tk == TK['MAT'] else 1
             wb = [0] * ncomp
             for c in range(ncomp):
+                vo = None if tk == TK['MAT'] else self.vec_comp_off(va[0], c)
                 if tk == TK['MAT']:
                     off = self.mat_comp_off(va[0], c, mcomps)
                     r = self.lsu(off, va[0][1], va[0][2], 0,
+                                 False, 0, 'i')
+                elif vo is not None:
+                    r = self.lsu(vo, va[0][1], va[0][2], 0,
                                  False, 0, 'i')
                 else:
                     r = self.lsu(va[0][0], va[0][1], va[0][2], c,
@@ -2278,10 +2322,13 @@ class Model:
                 src = va[1]
                 mcomps = 1
             for c in range(ncs):
+                vo = None if is_mat else self.vec_comp_off(va[0], c)
                 if is_mat:
                     off = self.mat_comp_off(va[0], c, mcomps)
                     self.lsu(off, va[0][1], va[0][2], 0,
                              True, src[c], cls)
+                elif vo is not None:
+                    self.lsu(vo, va[0][1], va[0][2], 0, True, src[c], cls)
                 else:
                     self.lsu(va[0][0], va[0][1], va[0][2], c,
                              True, src[c], cls)

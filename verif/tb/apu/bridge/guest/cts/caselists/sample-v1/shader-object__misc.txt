@@ -1,0 +1,8 @@
+dEQP-VK.shader_object.misc.off.on.after.non_null.32.set
+dEQP-VK.shader_object.misc.on.off.before.non_null.32.set
+dEQP-VK.shader_object.misc.push_const.63_64
+dEQP-VK.shader_object.misc.state.pipeline.vert_tess_geom_frag.geometry_streams.disabled
+dEQP-VK.shader_object.misc.state.shaders.vert_tess_geom_frag.lines.default_topology_triangles
+dEQP-VK.shader_object.misc.tess_patch_non_match.standard
+dEQP-VK.shader_object.misc.tessellation_modes.two.even
+dEQP-VK.shader_object.misc.unused_variable.unlinked.output.tese

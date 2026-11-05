@@ -1,0 +1,8 @@
+dEQP-VK.image.device_scope_access.comp_comp.1d.r16g16_unorm_linear
+dEQP-VK.image.device_scope_access.comp_comp.1d.r8_unorm_linear
+dEQP-VK.image.device_scope_access.comp_comp.2d.r16_snorm
+dEQP-VK.image.device_scope_access.comp_comp.2d.r8_sint
+dEQP-VK.image.device_scope_access.comp_comp.3d.r16g16b16a16_sint_linear
+dEQP-VK.image.device_scope_access.comp_draw.1d.r16_sfloat
+dEQP-VK.image.device_scope_access.comp_draw.1d.r16g16_sfloat
+dEQP-VK.image.device_scope_access.comp_draw.2d.r32g32b32a32_uint_linear

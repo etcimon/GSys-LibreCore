@@ -236,11 +236,23 @@ R32G32B32A32_SFLOAT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_D
 R32_UINT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 4, comps = 1, uint = 1 }
 R32G32B32A32_UINT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 16, uint = 1 }
 # depth formats: D32/D16 attach (G2a) and sample (G3a-ii PCF: dref
-# sampling + LINEAR compare in the shwave texture pipe); D24 stays
-# unwired
+# sampling + LINEAR compare in the shwave texture pipe)
 D32_SFLOAT = { f = "DEPTH_STENCIL_ATTACHMENT|SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|TRANSFER_SRC|TRANSFER_DST", bpp = 4, comps = 1, flt = 1 }
-D24_UNORM_S8_UINT = { f = "" }
 D16_UNORM = { f = "DEPTH_STENCIL_ATTACHMENT|SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|TRANSFER_SRC|TRANSFER_DST", bpp = 2, comps = 1 }
+# wired: the raster depth/stencil path consumes device id 14 (D24 in
+# [23:0], stencil in [31:24]), but stencil is front-face only, so no
+# format feature is advertised.  Declared after D16 so the id stays 14.
+D24_UNORM_S8_UINT = { f = "", wired = 1, bpp = 4, comps = 1 }
+# device id 15 (appended: existing ids stay put).  TRANSFER: the xfer
+# copy/fill paths are byte-exact for any 4-byte texel (memory.binding.*).
+# STORAGE_IMAGE (T3): shwave decodes 4 x u8 and stores one byte per
+# channel — sh corpus imgcopy_rgba8ui (load + store, opt/mut arms).
+# SAMPLED_IMAGE (T3): usampler2D texelFetch — sh corpus texfetch_rgba8ui
+# (integer formats are NEAREST-only: no SAMPLED_IMAGE_FILTER_LINEAR).
+# COLOR_ATTACHMENT (T3): the ROP keeps each integer channel's low byte
+# (clear + draw), blend on it is refused UNSUPPORTED — rast case 42.
+# No COLOR_ATTACHMENT_BLEND: integer formats never blend.
+R8G8B8A8_UINT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST|COLOR_ATTACHMENT", bpp = 4, uint = 1 }
 
 [device_extensions]
 # vkEnumerateDeviceExtensionProperties elements.  In the Venus model the
@@ -533,6 +545,24 @@ fields = ["pRegions.srcSubresource.aspectMask",
           "pRegions.dstOffset.x", "pRegions.dstOffset.y",
           "pRegions.dstOffset.z", "pRegions.extent.width",
           "pRegions.extent.height", "pRegions.extent.depth"]
+
+[keep.vkCmdBlitImage]
+# per pRegions element {srcSubresource 4w, srcOffsets[2] 6w,
+# dstSubresource 4w, dstOffsets[2] 6w} = 20 words; regionCount, the
+# layouts and filter stay in rec.imm[].  The xfer BLIT op rewrites an
+# unscaled region into the CopyImage 17-word layout (T1).
+fields = ["pRegions.srcSubresource.aspectMask",
+          "pRegions.srcSubresource.mipLevel",
+          "pRegions.srcSubresource.baseArrayLayer",
+          "pRegions.srcSubresource.layerCount",
+          "pRegions.srcOffsets.x", "pRegions.srcOffsets.y",
+          "pRegions.srcOffsets.z",
+          "pRegions.dstSubresource.aspectMask",
+          "pRegions.dstSubresource.mipLevel",
+          "pRegions.dstSubresource.baseArrayLayer",
+          "pRegions.dstSubresource.layerCount",
+          "pRegions.dstOffsets.x", "pRegions.dstOffsets.y",
+          "pRegions.dstOffsets.z"]
 
 [keep.vkCmdClearColorImage]
 # {pColor 4w (the union's selected uint32 arm), per pRanges element

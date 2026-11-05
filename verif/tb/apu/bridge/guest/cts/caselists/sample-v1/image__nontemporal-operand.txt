@@ -1,0 +1,8 @@
+dEQP-VK.image.nontemporal_operand.r16_sint
+dEQP-VK.image.nontemporal_operand.r16g16_sint
+dEQP-VK.image.nontemporal_operand.r16g16b16a16_sint
+dEQP-VK.image.nontemporal_operand.r32_sint
+dEQP-VK.image.nontemporal_operand.r32g32_uint
+dEQP-VK.image.nontemporal_operand.r64_sint
+dEQP-VK.image.nontemporal_operand.r8g8_uint
+dEQP-VK.image.nontemporal_operand.r8g8b8a8_uint

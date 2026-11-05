@@ -1,0 +1,11 @@
+dEQP-VK.tessellation.fractional_spacing.hlsl_even
+dEQP-VK.tessellation.geometry_interaction.point_size.vertex_set_evaluation_set
+dEQP-VK.tessellation.limits.max_tessellation_control_per_vertex_output_components
+dEQP-VK.tessellation.matrix_multiplication.tesc_1
+dEQP-VK.tessellation.misc_draw.switch_out_vertices_3_to_4_shader_objects
+dEQP-VK.tessellation.primitive_discard.isolines_fractional_odd_spacing_cw_point_mode
+dEQP-VK.tessellation.shader_input_output.cross_invocation_per_vertex_uint
+dEQP-VK.tessellation.tess_io.level_io.tcs_writes0_inner_1
+dEQP-VK.tessellation.tesscoord.quads_fractional_even_spacing
+dEQP-VK.tessellation.user_defined_io.per_vertex_block.vertex_io_array_size_shader_builtin.triangles
+dEQP-VK.tessellation.winding.default_domain.hlsl_quads_cw

@@ -1,0 +1,8 @@
+dEQP-VK.image.load_store_multisample.2d.r32_sfloat.samples_32
+dEQP-VK.image.load_store_multisample.2d.r32g32b32a32_uint.samples_2
+dEQP-VK.image.load_store_multisample.2d.r8g8b8a8_sint.samples_32
+dEQP-VK.image.load_store_multisample.2d_array.r16g16b16a16_sfloat.samples_4
+dEQP-VK.image.load_store_multisample.2d_array.r32_sfloat.samples_2
+dEQP-VK.image.load_store_multisample.2d_array.r32g32b32a32_uint.samples_4
+dEQP-VK.image.load_store_multisample.2d_array.r8g8b8a8_sint_single_layer.samples_16
+dEQP-VK.image.load_store_multisample.2d_array.r8g8b8a8_snorm_single_layer.samples_16

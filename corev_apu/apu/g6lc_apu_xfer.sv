@@ -177,6 +177,7 @@ module g6lc_apu_xfer
       XRun,                          // stream fragments
       // §12.3 C/5b: image-class records
       XImgRd,                        // stream region words into rg_q
+      XBlitCvt,                      // T1: VkImageBlit -> I2I region words
       XImgChk,                       // pass A: region bounds
       XImgChkN,                      // pass A: need <= operand size
       XCalc,                         // shared-multiplier micro-step
@@ -223,7 +224,11 @@ module g6lc_apu_xfer
     // ---- §12.3 C/5b: image-class record state -----------------------
     // region/range words staged whole: 14w (B2I/I2B), 17w (I2I),
     // 5w (CLEAR range, after the 4 colour words)
-    logic [31:0]    rg_q [18];
+    // 18 region words for I2I/B2I; a VkImageBlit region stages 20 (T1)
+    logic [31:0]    rg_q [20];
+    // T1: the record arrived as BLIT (now running as I2I) — every region
+    // re-read (pass B) goes back through XBlitCvt
+    logic           blit_q;
     logic [4:0]     rw_i_q, rg_n_q;
     xf_state_e      rg_ret_q;
     logic [15:0]    ri_q;              // region index
@@ -833,6 +838,7 @@ module g6lc_apu_xfer
         fn_q       <= '0;
         rw_i_q     <= '0;
         rg_n_q     <= '0;
+        blit_q     <= 1'b0;
         rg_ret_q   <= XIdle;
         ri_q       <= '0;
         im_acc_q   <= '0;
@@ -916,6 +922,7 @@ module g6lc_apu_xfer
         unique case (state_q)
           XIdle: begin
             xf_fault_q <= 1'b0;
+            blit_q     <= 1'b0;
             if (work_valid_i && work_ready_o) begin
               xf_q   <= xf_i;
               fill_q <= work_i.rec.imm[0];
@@ -960,6 +967,32 @@ module g6lc_apu_xfer
                                                           : 5'd14;
                   pay_adr_q <= xf_i.pay_base;
                   rg_ret_q  <= XImgChk;
+                  state_q   <= XImgRd;
+                end
+              end else if (xf_i.op == APU_XFER_OP_BLIT) begin
+                // pragma translate_off
+`ifndef SYNTHESIS
+                if ($test$plusargs("dbg_blit"))
+                  $display("[xfer] BLIT regions=%0d fmt0=%0d fmt1=%0d pay=%0h",
+                           xf_i.regions, xf_i.img0.fmt, xf_i.img1.fmt,
+                           xf_i.pay_base);
+`endif
+                // pragma translate_on
+                // T1: one unscaled, unflipped, same-format region runs as
+                // I2I after XBlitCvt rewrites the 20 VkImageBlit words;
+                // anything else is refused (FAULT, nothing written)
+                if (xf_i.regions != 16'd1 ||
+                    xf_i.img0.fmt != xf_i.img1.fmt) begin
+                  xf_fault_q <= 1'b1;
+                  state_q    <= XDone;
+                end else begin
+                  blit_q    <= 1'b1;
+                  pass_b_q  <= 1'b0;
+                  ri_q      <= '0;
+                  rw_i_q    <= '0;
+                  rg_n_q    <= 5'd20;
+                  pay_adr_q <= xf_i.pay_base;
+                  rg_ret_q  <= XBlitCvt;
                   state_q   <= XImgRd;
                 end
               end else if (xf_i.op == APU_XFER_OP_CLEARI) begin
@@ -1323,6 +1356,44 @@ module g6lc_apu_xfer
             end
           end
 
+          // T1: rewrite one VkImageBlit region {srcSub 0..3, srcOffsets
+          // 4..9, dstSub 10..13, dstOffsets 14..19} into the I2I layout
+          // {srcSub 0..3, srcOffset 4..6, dstSub 7..10, dstOffset 11..13,
+          // extent 14..16}.  Only an unscaled, unflipped region is a copy
+          // (filter irrelevant); scaled/flipped/empty is refused unwritten.
+          XBlitCvt: begin
+            automatic logic [31:0] ex, ey, ez;
+            // pragma translate_off
+`ifndef SYNTHESIS
+            if ($test$plusargs("dbg_blit")) begin
+              $write("[xfer] BLIT rg:");
+              for (int k = 0; k < 20; k++) $write(" %0h", rg_q[k]);
+              $write("\n");
+            end
+`endif
+            // pragma translate_on
+            ex = rg_q[7] - rg_q[4];
+            ey = rg_q[8] - rg_q[5];
+            ez = rg_q[9] - rg_q[6];
+            if ($signed(rg_q[7]) <= $signed(rg_q[4]) ||
+                $signed(rg_q[8]) <= $signed(rg_q[5]) ||
+                $signed(rg_q[9]) <= $signed(rg_q[6]) ||
+                rg_q[17] - rg_q[14] != ex ||
+                rg_q[18] - rg_q[15] != ey ||
+                rg_q[19] - rg_q[16] != ez) begin
+              xf_fault_q <= 1'b1;
+              state_q    <= XDone;
+            end else begin
+              rg_q[7]  <= rg_q[10]; rg_q[8]  <= rg_q[11];
+              rg_q[9]  <= rg_q[12]; rg_q[10] <= rg_q[13];
+              rg_q[11] <= rg_q[14]; rg_q[12] <= rg_q[15];
+              rg_q[13] <= rg_q[16];
+              rg_q[14] <= ex; rg_q[15] <= ey; rg_q[16] <= ez;
+              // from here the record is an ordinary one-region CopyImage
+              xf_q.op <= APU_XFER_OP_I2I;
+              state_q <= pass_b_q ? XImgGo : XImgChk;
+            end
+          end
           // pass A: every region's bounds before a single write
           XImgChk: begin
             automatic logic        v_ok;
@@ -1476,7 +1547,7 @@ module g6lc_apu_xfer
               c_mip_q   <= '0;
               pay_adr_q <= is_clr ? xf_q.pay_base + 16'd4
                                   : xf_q.pay_base;
-              rg_ret_q  <= is_clr ? XClrMip : XImgGo;
+              rg_ret_q  <= is_clr ? XClrMip : blit_q ? XBlitCvt : XImgGo;
               state_q   <= XImgRd;
             end else begin
               ri_q   <= ri_q + 16'd1;

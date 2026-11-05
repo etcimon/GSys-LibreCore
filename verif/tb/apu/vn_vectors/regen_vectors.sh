@@ -39,6 +39,14 @@ done
 # positive variants on bufcopy_1
 python3 $G --compute-session ue_cpos_multiwr_1  bufcopy_1 --variant multiwr
 python3 $G --compute-session ue_cpos_xfer_copy_1 bufcopy_1 --variant xfer_copy
+# vkUpdateDescriptorSets COPIES (dcopy): writes land in staging twins and
+# pDescriptorCopies moves every element into the real sets — the first
+# vectors with descriptorCopyCount > 0 (array binds -> non-zero offsets)
+python3 $G --compute-session ue_cpos_dcopy_bufcopy_1 bufcopy_1 --variant dcopy
+python3 $G --compute-session ue_cpos_dcopy_descarr_1 descarr_1 --variant dcopy
+python3 $G --compute-session ue_cpos_dcopy_multiset_1 multiset_1 --variant dcopy
+# T4: one-region whole-buffer copy of 1 MiB + 1 bytes (dEQP buffer_1048577)
+python3 $G --compute-session ue_cpos_xfer_big_1 bufcopy_1 --variant xfer_big
 python3 $G --compute-session ue_cpos_xfer_update_1 bufcopy_1 --variant xfer_update
 # §12.3 D/C new positives
 python3 $G --compute-session ue_cpos_dslcompat_1 bufcopy_1 --variant dslcompat
@@ -53,7 +61,7 @@ for var in modgone lostbuf spec baddesc nopipe pgfull badmem bindoob \
   python3 $G --compute-session ue_cneg_${var}_1 bufcopy_1 --variant $var
 done
 
-python3 $G --compute-session ue_ws0_bufcopy_1 bufcopy_1 --variant worksink
+python3 $G --compute-session ue_ws0_texfetch_1 texfetch_1 --variant worksink
 
 # §12.3 C/5b image sessions + negatives (descriptor records change)
 for v in texfetch_1 texfetch_2 texfetch_3 \
@@ -79,6 +87,9 @@ for v in clear_rgba8 clear_r32f clear_r32u clear_srgb clear_rgba16f; do
   python3 $G --compute-session ue_cpos_${v}_1 bufcopy_1 --variant $v
 done
 python3 $G --compute-session ue_cneg_clear_oob_1 bufcopy_1 --variant clear_oob
+# T1: a scaled blit is refused before any write (unscaled blits run as I2I)
+python3 $G --compute-session ue_cneg_blit_scaled_1 texfetch_1 --variant blit_scaled
+python3 $G --compute-session ue_cpos_blit_id_1 texfetch_1 --variant blit_id
 python3 $G --compute-session ue_cpos_ctxkill_reuse_1 bufcopy_1 \
     --variant ctxkill_reuse
 
@@ -148,6 +159,17 @@ python3 $G --graphics-session ue_gpos_statvp_1  1
 python3 $G --graphics-session ue_gpos_drawind_1  1
 python3 $G --graphics-session ue_gpos_drawindx_1 1
 python3 $G --graphics-session ue_gpos_blend_1    1
+# dEQP-VK.memory.pipeline_barrier vertex-buffer shape: RG8_UNORM stride 2,
+# POINT_LIST, CTS shaders verbatim (no varyings, constant-white FS)
+python3 $G --graphics-session ue_gpos_ptsrg8_1  1
+# same, 512 points (the CTS per-draw count): POINT_LIST over 63-vertex
+# batches — before list batching the raster refused it UNSUPPORTED
+python3 $G --graphics-session ue_gpos_ptsrg8x_1 1
+# no vertex input state (0 bindings, 0 attributes), gl_VertexIndex VS —
+# before the vnfront fix the pipeline create was refused
+python3 $G --graphics-session ue_gpos_ptsvidx_1 1
+# graphics bind point descriptor read: FS colour from a UBO (set 0)
+python3 $G --graphics-session ue_gpos_fsubo_1 1
 
 # deferred-work and capacity arms
 python3 $G --compute-session ue_cpos_defer2_1  bufcopy_1 --variant defer2

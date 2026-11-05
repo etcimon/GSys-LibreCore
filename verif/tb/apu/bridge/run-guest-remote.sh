@@ -29,9 +29,12 @@ REMOTE_CTS=/opt/testharness/cache/cts/$(basename "$CTS_IMG")
 # The builder's packaged g6lc-qemu has no stream8 machine. The Oct 11
 # stream8 binary boots with a silent UART. This is the local v10.0.0-dirty
 # binary that boots the stock image, copied to the builder cache.
-# Firmware blobs stay with the Oct 11 build (opensbi fw_dynamic).
+# Firmware blobs (opensbi fw_dynamic etc.) live beside it in the cache:
+# the Oct 11 run directory that originally held them was cleaned off the
+# builder (2026-11-04: every shard died "Unable to find the RISC-V BIOS").
+# They were re-seeded from the builder's g6lc_qemu build qemu-bundle.
 QEMU=/opt/testharness/cache/qemu-stream8/qemu-system-riscv64
-QLIB=/opt/testharness/runs/apu-qemu-stream8-20261011T054522/build/qemu/qemu-bundle/usr/local/share/qemu
+QLIB=/opt/testharness/cache/qemu-stream8/share/qemu
 
 args=(
   apu-leaf "$ROOT"

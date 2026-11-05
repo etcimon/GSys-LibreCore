@@ -456,6 +456,8 @@ module g6lc_apu_cmdexec
                         rec_q.ctype ==
                         32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT) ||
                         rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_BLIT_IMAGE_EXT) ||
+                        rec_q.ctype ==
                         32'(APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT);
     // operand handles pack the non-commandBuffer lookup slots
     // sequentially: {srcBuffer,dstImage}, {srcImage,dstBuffer},
@@ -464,11 +466,15 @@ module g6lc_apu_cmdexec
     // operand n is an image for every image-class type except the
     // B2I buffer (op 0) and the I2B buffer (op 1); the BeginRP
     // attachment resolve (xf_for_q == IMG) is always an image
+    // T1: vkCmdBlitImage resolves its two image operands like
+    // vkCmdCopyImage (src -> img0, dst -> img1) and issues APU_XFER_OP_BLIT
+    wire xf_i2i_rec = rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT) ||
+                      rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_BLIT_IMAGE_EXT);
     wire xf_op_img =
         xf_for_q == 2'd3 ||
         (xf_for_q == 2'd0 &&
          ((rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT)) ||
-          (rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT)) ||
+          xf_i2i_rec ||
           (rec_q.ctype ==
               32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT)
            && xf_opnd_q == 2'd1) ||
@@ -476,9 +482,7 @@ module g6lc_apu_cmdexec
               32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_EXT)
            && xf_opnd_q == 2'd0)));
     // image-desc slot: I2I's second operand lands in img1
-    wire xf_img_sel = rec_q.ctype ==
-                      32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT) &&
-                      xf_opnd_q == 2'd1;
+    wire xf_img_sel = xf_i2i_rec && xf_opnd_q == 2'd1;
     // two-operand records revisit the walk once (record mode only)
     wire xf_two_ops = xf_for_q == 2'd0 && rec_q.ctype ==
                       32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT) ||
@@ -486,8 +490,7 @@ module g6lc_apu_cmdexec
                       32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT) ||
                       rec_q.ctype ==
                       32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_EXT) ||
-                      rec_q.ctype ==
-                      32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT);
+                      xf_i2i_rec;
 
     // ---- record classification --------------------------------------
     function automatic apu_cmdexec_cls_e rec_cls(logic [31:0] t);
@@ -575,7 +578,9 @@ module g6lc_apu_cmdexec
                         32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_EXT)
                         ? APU_XFER_OP_I2B :
                     rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT)
-                        ? APU_XFER_OP_I2I : APU_XFER_OP_CLEARI,
+                        ? APU_XFER_OP_I2I :
+                    rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_BLIT_IMAGE_EXT)
+                        ? APU_XFER_OP_BLIT : APU_XFER_OP_CLEARI,
                    // §5a G3b-iii: payloads are PayMem-resident — the
                    // absolute word address stamped into imm[7] at
                    // record time; the engine streams it over its own
@@ -584,8 +589,9 @@ module g6lc_apu_cmdexec
                    // region/range count rides imm[2] (CopyImage),
                    // imm[1] (B2I/I2B/CLEAR behind imageLayout) or
                    // imm[0] (CopyBuffer)
-                   regions:  rec_q.ctype ==
-                             32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT)
+                   // CopyImage and BlitImage: regionCount in imm[2],
+                   // behind both image layouts
+                   regions:  xf_i2i_rec
                              ? rec_q.imm[2][15:0]
                              : rec_q.ctype ==
                                32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT) ||

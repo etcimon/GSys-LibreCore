@@ -477,7 +477,9 @@ module g6lc_apu_rast
       return f == 8'(APU_IMG_FMT_R8G8B8A8_UNORM) ||
              f == 8'(APU_IMG_FMT_B8G8R8A8_UNORM) ||
              f == 8'(APU_IMG_FMT_R8G8B8A8_SRGB)  ||
-             f == 8'(APU_IMG_FMT_B8G8R8A8_SRGB);
+             f == 8'(APU_IMG_FMT_B8G8R8A8_SRGB)  ||
+             // T3: integer RGBA8 (f_enc8 keeps the low byte, no blend)
+             f == 8'(APU_IMG_FMT_R8G8B8A8_UINT);
     endfunction
     function automatic logic f_dfmt_ok(input logic [7:0] f);
       return f == 8'(APU_IMG_FMT_D32_SFLOAT) ||
@@ -808,6 +810,13 @@ module g6lc_apu_rast
     // clipped polygon: tri (0, cfan, cfan+1) of the clip_out ring.
     wire line_w  = dr_q.topology == 8'd1 || dr_q.topology == 8'd2;
     wire point_w = dr_q.topology == 8'd0;
+    // POINT_LIST / LINE_LIST / TRIANGLE_LIST: no vertex carries across
+    // primitives, so a draw may span several vertex batches
+    wire topo_list_w = dr_q.topology == 8'd0 || dr_q.topology == 8'd1 ||
+                       dr_q.topology == 8'd3;
+    // batch size: a primitive multiple (VSB = 63 is a multiple of 1 and
+    // 3; a line list uses the even 62)
+    wire [5:0] batch_v_w = (dr_q.topology == 8'd1) ? 6'(VSB & ~1) : 6'(VSB);
     wire [2:0] st_cmp_w = front_q ? dr_q.stencil_cmp : dr_q.stencil_cmp_b;
     wire [2:0] st_fail_w = front_q ? dr_q.stencil_fail : dr_q.stencil_fail_b;
     wire [2:0] st_pass_w = front_q ? dr_q.stencil_pass : dr_q.stencil_pass_b;
@@ -1013,6 +1022,12 @@ module g6lc_apu_rast
     function automatic logic [7:0] f_enc8(input logic [7:0] fmt,
                                           input logic [1:0] c,
                                           input logic [31:0] f);
+      // T3 R8G8B8A8_UINT: the value is an integer (shader uvec4 output
+      // or VkClearColorValue.uint32) — the attachment keeps its low 8
+      // bits; no fp conversion, and no blend (integer formats carry no
+      // COLOR_ATTACHMENT_BLEND, so blendEnable is invalid usage)
+      if (fmt == 8'(APU_IMG_FMT_R8G8B8A8_UINT))
+        return f[7:0];
       if (f_is_srgb(fmt) && c != 2'd3)
         return APU_SRGB_ENC[f_f32_u12(f)];
       return f_f32_u8(f);
@@ -1264,8 +1279,10 @@ module g6lc_apu_rast
                 end
               end
               APU_RAST_OP_DRAW: begin
+                // list topologies batch (S_DR_BATCH); strips and fans
+                // carry vertices across primitives and stay one batch
                 if ((dr_q.topology > 8'd5) ||
-                    (dr_q.topology != 8'd3 &&
+                    (!topo_list_w &&
                      dr_q.vertex_count > 32'(VSB)) ||
                     dr_q.ib_type > 2'd2 ||
                     (dr_q.ib_type != 2'd0 && dr_q.ib_size == 32'd0) ||
@@ -1275,6 +1292,16 @@ module g6lc_apu_rast
                     (dr_q.ca_valid[2] && !f_cfmt_ok(dr_q.ca[2].fmt)) ||
                     (dr_q.ca_valid[3] && !f_cfmt_ok(dr_q.ca[3].fmt)) ||
                     (dr_q.da_valid && !f_dfmt_ok(dr_q.da.fmt)) ||
+                    // T3: blending an integer attachment is invalid
+                    // usage — refuse rather than blend raw bits as fp
+                    (dr_q.ca_valid[0] && dr_q.blend[0].en &&
+                     dr_q.ca[0].fmt == 8'(APU_IMG_FMT_R8G8B8A8_UINT)) ||
+                    (dr_q.ca_valid[1] && dr_q.blend[1].en &&
+                     dr_q.ca[1].fmt == 8'(APU_IMG_FMT_R8G8B8A8_UINT)) ||
+                    (dr_q.ca_valid[2] && dr_q.blend[2].en &&
+                     dr_q.ca[2].fmt == 8'(APU_IMG_FMT_R8G8B8A8_UINT)) ||
+                    (dr_q.ca_valid[3] && dr_q.blend[3].en &&
+                     dr_q.ca[3].fmt == 8'(APU_IMG_FMT_R8G8B8A8_UINT)) ||
                     (dr_q.ca_valid[0] && dr_q.blend[0].en &&
                      (dr_q.blend[0].src_c > 5'd14 ||
                       dr_q.blend[0].dst_c > 5'd14 ||
@@ -1373,12 +1400,15 @@ module g6lc_apu_rast
           end
           // ---- batch / gather ------------------------------------------
           S_DR_BATCH: begin
-            if (dr_q.topology != 8'd3)
+            if (!topo_list_w)
               // strips and fans stay in one vertex batch (≤63)
               nv_q <= 6'(dr_q.vertex_count[5:0]);
             else
-              nv_q <= 6'((dr_q.vertex_count - bat_q >= 32'(VSB))
-                         ? VSB : dr_q.vertex_count - bat_q);
+              // point/line/triangle lists: independent primitives, so
+              // batch boundaries fall on a primitive multiple (BatchV:
+              // 63 points/triangles, 62 line-list vertices)
+              nv_q <= 6'((dr_q.vertex_count - bat_q >= 32'(batch_v_w))
+                         ? batch_v_w : dr_q.vertex_count - bat_q);
             j_q <= '0;
             brk_q <= '0;
             base_q <= '0;

@@ -1,0 +1,8 @@
+dEQP-VK.shader_object.create.all_with_mesh.fail
+dEQP-VK.shader_object.create.frag.succeed
+dEQP-VK.shader_object.create.geom.fail
+dEQP-VK.shader_object.create.multiple.all
+dEQP-VK.shader_object.create.task.succeed
+dEQP-VK.shader_object.create.tesc.fail
+dEQP-VK.shader_object.create.tese.fail
+dEQP-VK.shader_object.create.vert.fail

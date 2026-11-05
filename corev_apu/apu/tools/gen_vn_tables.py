@@ -1523,16 +1523,20 @@ class Model:
 
     def img_fmt_tables(self):
         """§12.3 5b device format ids.  -> (names, vk2dfmt[256],
-        bpp[16], attr[16]).  A [formats] entry earns an id only when it
-        advertises features (D32/D24 stay unwired); ids follow
-        declaration order.  attr packs g6lc_apu_sh_pkg APU_IMG_ATTR_*:
+        bpp[16], attr[16]).  A [formats] entry earns an id when it
+        advertises features, or when it is `wired = 1` (an engine
+        consumes the device id but the format properties stay empty —
+        D24S8: front-face-only stencil, so no attachment claim); ids
+        follow declaration order.  attr packs g6lc_apu_sh_pkg
+        APU_IMG_ATTR_*:
         {comps-1[2:0], uint[3], flt[4], half[5], bgr[6], srgb[7]}."""
         fe = self.enum_ints('VkFormat')
         fmt = self.profile.get('formats', {})
         names, vk2dfmt = [], [255] * 256
         bpp, attr = [0] * 16, [0] * 16
         for nm, ent in fmt.items():
-            if not isinstance(ent, dict) or not ent.get('f'):
+            if not isinstance(ent, dict) or not (ent.get('f') or
+                                                 ent.get('wired')):
                 continue
             f = fe.get('VK_FORMAT_' + nm)
             if f is None:

@@ -84,6 +84,8 @@ ue_cneg_texfetch_bad_1 ue_cneg_texlod_lin_bad_1 \
 ue_cneg_imgloadstore_bad_1 ue_cneg_texquery_bad_1 \
 ue_cneg_badfmt_1 ue_cneg_viewoob_1 ue_cneg_kindmix_1 \
 ue_cneg_xfer_img_oob_1 ue_cneg_unnorm_1 \
+ue_cpos_blit_id_1 ue_cneg_blit_scaled_1 ue_cpos_xfer_big_1 \
+ue_cpos_dcopy_bufcopy_1 ue_cpos_dcopy_descarr_1 ue_cpos_dcopy_multiset_1 \
 ue_cpos_clear_rgba8_1 ue_cpos_clear_r32f_1 ue_cpos_clear_r32u_1 \
 ue_cpos_clear_srgb_1 ue_cpos_clear_rgba16f_1 \
 ue_cneg_clear_oob_1 ue_cpos_ctxkill_reuse_1 \
@@ -124,10 +126,14 @@ run_step() {
   : > "$OUT/compute-step$step.log"
   local cfail=0
   for v in $SESSIONS; do
+    # positive sessions: any non-OK xfer completion is a failure (the
+    # golden only predicts lost submissions, see tb +xf_ok)
+    local xok=()
+    case "$v" in ue_cpos_*) xok=(+xf_ok) ;; esac
     set +e
     (cd "$ROOT/verif/tb/apu" && \
      stdbuf -o0 -e0 "$OUT/sim/tb_g6lc_apu_vgtop" +vec="$v" \
-       "${mpa[@]}") \
+       "${mpa[@]}" "${xok[@]}") \
       > "$OUT/compute-s$step-$v.log" 2>&1
     vrc=$?
     set -e
