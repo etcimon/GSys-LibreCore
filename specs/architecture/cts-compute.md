@@ -231,7 +231,12 @@ folded code).  The former
 now specializes, nmap=0 folds defaults, and size=8 still returns
 `VK_ERROR_FEATURE_NOT_PRESENT`.  No golden session yet carries a *valid*
 spec override (the `spec` variant exercises the FNP reject), so the new
-path is verified by contract, not yet by a live vector.  **RTL:**
+path is verified by contract, not yet by a live vector.  A `specok`
+compute-session variant now emits a live 4-byte override (constantID 0
+-> 41): `specialize()` is invoked with the module + `(0, 41)` on both
+the dry and real `FrontModel.step` passes and `apu-vn-specok` generates
+— the directed RTL create-path reproducer (not in `regen_vectors`).
+**RTL:**
 `g6lc_apu_vnfront` `StPipeH4`/`StPipeSp{Id,Off,Sz0,Sz1,Ds0,Ds1,Dat,Wn,
 Wp,End}` fully parse `VkSpecializationInfo` into `pl_{sn,sid,soff,ssz,
 sval}_q`, ObjPay-ALLOC a `{count,{sid,sval}*}` block (`pl_specb_q =
@@ -241,11 +246,10 @@ opcodes 48-52 with `OpSpecConstant` decode + `const_data_o`.  The CTS
 the vnfront spec-block *creation* sequence (StPipeSpAlc..StPipeAuxHiC),
 *not* yet pinned to a sub-state — the existing `G6LC_APU_DBG_LOST`
 watcher (`dbg_{frm,sfrm,ofrm}_q` + `ot/op cpl` status prints) already
-attributes the failing ObjTab/ObjPay op, so a directed spec-constant
-pipeline session or guest run with debug enabled names it.  Owed: a
-golden session carrying a *valid* spec override to exercise the new
-`pipe_spec` path, root-cause + fix the RTL create-path fault, then wire
-spec values to shwave `OpSpecConstant` resolution.
+attributes the failing ObjTab/ObjPay op.  Owed: replay `apu-vn-specok`
+in the vnfront/transport TB under `G6LC_APU_DBG_LOST` to name the
+failing `StPipeSp*`/`StPipe*` sub-state, root-cause + fix the create-path
+fault, then wire spec values to shwave `OpSpecConstant` resolution.
 
 ## Performance / area / scalability
 
