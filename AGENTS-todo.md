@@ -18301,6 +18301,21 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   (Mesa fence-wait `rc=134`) is a **guest-stack fence/doorbell issue,
   not an RTL shader-execution defect**; investigation should move to
   the guest virtio-fence layer, not the draw/shader path.
+- [x] **CLOSED — fragment-stage texture draw (`ue_gpos_ftex_1`):**
+  `vs_tex` uv-passthrough + `fs_tex_implicit` implicit-LOD `texture()`
+  on the same 1x1 `COMBINED_IMAGE_SAMPLER`, `stageFlags=FRAGMENT`.
+  First run failed teardown `objpay chunks drained`.  `+optrace`
+  isolated it to **one unfreed 3-word ObjPay extent** (the descriptor
+  set layout's row table): the `seg_c` destroy gated
+  `vkDestroyDescriptorPool`/`vkDestroyDescriptorSetLayout` on
+  `(is_fsubo or is_vtex)` — never updated to `is_tex` when the
+  generator was generalised, so `ftex` created but never destroyed the
+  DSL.  **Generator fix, not RTL** — `(is_fsubo or is_tex)`.  Verified:
+  `ue_gpos_ftex_1` `g1=4096 g2=4096 ulp=0` `XF_FAULTS 0` deterministic
+  + randomized latency; neighbours `vtex`/`inst`/`tri`/`fsubo`/
+  `fsubocopy` all still PASS.  Wired into `run-apu-vgtop.sh`/
+  `run-apu-vgsys.sh`/`regen_vectors.sh`.  Fragment-stage texture
+  sampling now has directed-RTL coverage alongside vertex-stage.
 - [x] Instanced-draw session coverage (`c84531213`): `ue_gpos_inst_1`
   — `vs_inst` offsets clip-x by `0.4*gl_InstanceIndex-0.6`,
   `instanceCount=4`, `fs_flat` constant colour → union coverage over 4
