@@ -54,6 +54,7 @@ import random
 import struct
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORPUS = os.path.join(HERE, 'corpus')
@@ -63,7 +64,9 @@ ADDR0 = 0x8000
 SENT = [0xFFFFFFFF, 0xFFFFFFFF]
 
 sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.dirname(HERE))   # tools/ — vn_specialization
 import img_fmts  # noqa: E402
+from vn_specialization import specialize  # noqa: E402
 
 # ---- §12.3 C/5b image binds -------------------------------------------
 def img_mdim(v, m):
@@ -655,6 +658,13 @@ DESC = {
                        infn=lambda s, bi, w: sfu_in('sfu_hyper', bi, w),
                        sfuops={1: SFU_OPS['sfu_hyper'] * 32},
                        bindings=[(0, 0, 256, 0), (0, 1, 256, 1)]),
+    # specconst: OpSpecConstant override — .hex keeps the original
+    # SpecConstant module so RTL still exercises the spec-block path;
+    # spec={constantID: value} folds the module for .exp oracle/model/
+    # class (specialize() rewrites OpSpecConstant -> OpConstant).
+    'specconst':   dict(groups=(1, 1, 1), fmt='i', push=0, mut=False,
+                         bindings=[(0, 0, 4, 1)],
+                         spec={0: 41}),
 }
 SEEDS = [1, 2, 3]
 
@@ -868,16 +878,13 @@ def run_oracle(spv_path, desc_json, out_bin):
     return r
 
 
-def emit(name, seed, spv_words, desc, inputs, expect_fault=(0, 0),
-         mutated=False, oracle_out=None, model_cache=None,
-         expect_done=None):
-    """writes <name>_<seed>.{hex,exp,desc.json,init bin files}
-
-    The .exp robust field and the trailing MODEL/CLASS sections come
-    from spirv_model.py run over THIS case's module words (including
-    the mutated module for _mut_0 cases) — Gate 1 is bit-exact for
-    every case that commits."""
-    base = os.path.join(OUT, '%s_%d' % (name, seed))
+def _build_hexw(spv_words, desc, inputs, seed, expect_fault, mutated):
+    """the .hex dispatch-record image: tag header, optional DispatchBase
+    words, module words, 5-word bind entries (+5 image meta words for
+    bit24 aux), push words, dynamic-offset section, per-binding init
+    words, SENT.  `spv_words` is the only caller-variable section — pass
+    the folded module here to model a specialized pipeline while .hex
+    keeps the original OpSpecConstant words."""
     push = desc.get('push', 0)
     bindings = desc['bindings']
     # G3b-iii DispatchBase (desc['base'] = {gbx,gby,gz}): flags bit4
@@ -909,15 +916,38 @@ def emit(name, seed, spv_words, desc, inputs, expect_fault=(0, 0),
     for i in range(len(bindings)):
         hexw += pack_floats(inputs[i], desc['fmt'])
     hexw += SENT
+    return hexw
+
+
+def emit(name, seed, spv_words, desc, inputs, expect_fault=(0, 0),
+         mutated=False, oracle_out=None, model_cache=None,
+         expect_done=None, model_words=None):
+    """writes <name>_<seed>.{hex,exp,desc.json,init bin files}
+
+    The .exp robust field and the trailing MODEL/CLASS sections come
+    from spirv_model.py run over THIS case's module words (including
+    the mutated module for _mut_0 cases) — Gate 1 is bit-exact for
+    every case that commits."""
+    base = os.path.join(OUT, '%s_%d' % (name, seed))
+    push = desc.get('push', 0)
+    bindings = desc['bindings']
+    hexw = _build_hexw(spv_words, desc, inputs, seed,
+                       expect_fault, mutated)
     open(base + '.hex', 'w').write('\n'.join(words_to_hex(hexw)) + '\n')
 
     # model run (skipped for commit-fault modules); model_cache lets
-    # the post-oracle re-emit reuse the result.
+    # the post-oracle re-emit reuse the result.  model_words carries a
+    # specialization-folded module: the .hex keeps the original
+    # OpSpecConstant words (RTL exercises the spec path) while the model
+    # — and the oracle, driven on the folded .spv by the caller — see
+    # the specialized result.
     if model_cache is not None:
         mrob, mwords, cwords, _m = model_cache
     elif not expect_fault[0]:
+        mhexw = hexw if model_words is None else _build_hexw(
+            model_words, desc, inputs, seed, expect_fault, mutated)
         mrob, mwords, cwords, _m = model_run(
-            hexw, bindings, ucls=desc.get('ucls', False),
+            mhexw, bindings, ucls=desc.get('ucls', False),
             sfuops=desc.get('sfuops'))
     else:
         mrob, mwords, cwords, _m = 0, None, None, None
@@ -1467,6 +1497,20 @@ def build_oracle():
     return True
 
 
+def _spec_entries(spec):
+    """desc['spec'] = {constantID: value} -> specialize() entries.
+    An int value becomes a 4-byte little-endian override (a 32-bit spec
+    constant such as `const uint`); a bytes value is used verbatim for
+    1/2/4-byte overrides matching the constant's width."""
+    out = []
+    for cid, val in spec.items():
+        if isinstance(val, (bytes, bytearray)):
+            out.append((cid, bytes(val)))
+        else:
+            out.append((cid, int(val).to_bytes(4, 'little')))
+    return out
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     oracle_ok = build_oracle()
@@ -1475,6 +1519,19 @@ def main():
         desc = DESC[name]
         spv = os.path.join(CORPUS, name + '.spv')
         words = read_spv(spv)
+        # specialization override: .hex keeps the ORIGINAL module so RTL
+        # exercises the spec-block path; .exp oracle/model/class are
+        # generated from the specialize()-folded module.  fspv is the
+        # folded .spv the lavapipe oracle runs.
+        fwords = fspv = None
+        if desc.get('spec'):
+            fwords = specialize(list(words), _spec_entries(desc['spec']))
+            # folded .spv is an oracle input only — keep it in temp so
+            # the sh_vectors dir carries just the committed artifacts.
+            fd, fspv = tempfile.mkstemp(suffix='.spv', prefix=name + '_')
+            os.close(fd)
+            open(fspv, 'wb').write(b''.join(
+                struct.pack('<I', w & 0xFFFFFFFF) for w in fwords))
         # scanner self-check: the corpus must commit
         sc = spirv_scan.Scanner(words)
         try:
@@ -1487,11 +1544,13 @@ def main():
         sc.emit_tab(os.path.join(OUT, name + '.tab'))
         for seed in SEEDS:
             inputs = gen_inputs(desc, seed)
-            base, mc = emit(name, seed, words, desc, inputs)
+            base, mc = emit(name, seed, words, desc, inputs,
+                            model_words=fwords)
             summary.append(base)
             if oracle_ok:
                 out_bin = base + '.out.bin'
-                r = run_oracle(spv, base + '.desc.json', out_bin)
+                r = run_oracle(fspv or spv, base + '.desc.json',
+                               out_bin)
                 if r.returncode != 0:
                     # oracle cannot run this module (e.g. lavapipe
                     # rejects OpVectorExtractDynamic): keep Gate-1
