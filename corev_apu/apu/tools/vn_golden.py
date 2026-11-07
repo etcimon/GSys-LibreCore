@@ -10455,6 +10455,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # 2D_ARRAY view; vcol.z==0 selects layer 0 so the uniform
         # texel keeps tri_w while exercising the arrayed fetch path
         is_ftexa = 'ftexa' in gfx
+        # ftexg: fragment textureGather — fs_tex_gather runs OpImageGather
+        # (comp0->R, comp1->G) plus textureGatherOffset on the same 1x1
+        # CIS; every footprint corner clamps to the one texel so the
+        # output is a fixed function of tri_w, not tri_w itself
+        is_ftexg = 'ftexg' in gfx
         is_tex = is_vtex or is_ftex
         # vs_pos3/fs_vcol forward the vertex alpha into FS out; the
         # passthru/flat pair forces a=1 and cannot see a blend
@@ -10476,6 +10481,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'fs_white.spv' if is_pts else
                           'fs_vcol.spv' if is_blend or is_wide else
                           'fs_tex_array.spv' if is_ftexa else
+                          'fs_tex_gather.spv' if is_ftexg else
                           'fs_tex_bias.spv' if is_ftexb else
                           'fs_tex_implicit.spv' if is_ftex else
                           'fs_kill.spv' if is_kill else
@@ -10598,7 +10604,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # fs_kill discards on ((x>>3)+(y>>3))&1 over FragCoord == the
         # framebuffer pixel (px,py); killed lanes write no colour so
         # they keep clr_w.  FragCoord int coords == (w%CW, w//CW).
-        exp_img = [tri_w if (w % CW, w // CW) in cov and
+        # out_w is the covered-pixel colour: tri_w except gather, whose
+        # OpImageGather result is a fixed function of the texel —
+        # g0=(R,R,R,R)=(200,)*4 via comp0, g1=(G,)*4=(80,)*4 via comp1,
+        # o=vec4(g0.x,g0.w,g1.x,g1.z)=(200,200,80,80) on the 1x1 CIS.
+        out_w = (200 | (200 << 8) | (80 << 16) | (80 << 24)) \
+            if is_ftexg else tri_w
+        exp_img = [out_w if (w % CW, w // CW) in cov and
                    not (is_kill and
                         ((((w % CW) >> 3) + ((w // CW) >> 3)) & 1))
                    else clr_w

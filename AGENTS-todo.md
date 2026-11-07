@@ -18341,6 +18341,13 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   path is exercised end-to-end.  PASS `g1=4096 g2=4096 ulp=0
   XF_FAULTS 0` on both latency profiles; wired into all three lists.
   (Layer-0 fetch only — varying-layer selection still open.)
+- [x] **CLOSED — fragment textureGather (`ue_gpos_ftexg_1`):** `vs_tex` +
+  `fs_tex_gather` — `textureGather` (comp0->R) + `textureGatherOffset`
+  (comp1->G, Offset operand) via `OpImageGather` on the same 1x1 CIS.
+  Every 2x2 footprint corner clamps to the single texel, so `o` is a
+  fixed function of the texel — `out_w=(200,200,80,80)` decoupled from
+  `tri_w=(200,80,160,255)` via a new oracle colour.  PASS `g1=4096
+  g2=4096 ulp=0 XF_FAULTS 0` both latencies; wired into all three lists.
 - [x] Instanced-draw session coverage (`c84531213`): `ue_gpos_inst_1`
   — `vs_inst` offsets clip-x by `0.4*gl_InstanceIndex-0.6`,
   `instanceCount=4`, `fs_flat` constant colour → union coverage over 4

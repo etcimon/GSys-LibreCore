@@ -199,6 +199,11 @@ python3 $G --graphics-session ue_gpos_ftexb_1 1
 # a 2-layer arrayed image + 2D_ARRAY view; vcol.z==0 -> layer 0, the
 # uniform texel keeps tri_w while exercising the arrayed fetch path
 python3 $G --graphics-session ue_gpos_ftexa_1 1
+# fragment textureGather: fs_tex_gather runs OpImageGather (comp0->R,
+# comp1->G) + textureGatherOffset on the same 1x1 CIS; every footprint
+# corner clamps to the one texel so o=(200,200,80,80), decoupled from
+# the texel via out_w
+python3 $G --graphics-session ue_gpos_ftexg_1 1
 
 # deferred-work and capacity arms
 python3 $G --compute-session ue_cpos_defer2_1  bufcopy_1 --variant defer2
