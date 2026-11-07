@@ -18278,7 +18278,18 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   run independently.  Cohort `native-gfxdgather-01` 745 PASS
   (`native-execution.19o2hhcv`, sources_unchanged true).  This completes
   the model's dref opcode matrix (89/90/93/94/97).
-- [ ] PCF/bilinear compare, blend/depth/MRT, helper
+- [x] PCF / bilinear-compare dref: `_dref_setup` gained `linear=True`
+  (VkSampler mag/min LINEAR) so the same `fs_dref_program` explicit-LOD
+  opcode-90 path runs percentage-closer filtering — `tx_finish_pts`
+  compares each footprint texel then applies the bilinear weighting and
+  returns the compare fraction.  `test_fragment_dref_pcf_bilinear_compare`
+  (u=0.25 v=0.375 -> footprint x{1,2} y{1} at exact 50/50, depth_fn
+  x<=1->0.4 fail / x>=2->0.6 pass, ref=0.5 LESS_OR_EQUAL -> taps compare
+  0 and 1 -> scalar 0.5 -> vec4(0.5,..) mid-gray) proves the per-texel
+  compares were weighted rather than a hard 0.0/1.0.  Cohort
+  `native-gfxpcf-01` 746 PASS (`native-execution.ws6ohan9`,
+  sources_unchanged true).
+- [ ] blend/depth/MRT, helper
   lanes, non-triangle topology, end-to-end NoPerspective draw (needs a
   w-varying vertex shader),
   multi-descriptor/multi-stage end-to-end draws and capability/CTS/physical

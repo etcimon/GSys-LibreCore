@@ -288,8 +288,16 @@ corner gi; `_dref_setup` gained `depth_fn(x,y,m)` so
 `depth=0.1*x`, ref=0.25 LESS_OR_EQUAL -> x=2 column fails / x=3 passes
 -> (0,1,1,0) -> RGBA(0,255,255,0)) proves the four compares run
 independently.  This completes the model's dref opcode matrix
-(89/90/93/94/97).  PCF and the blend/depth/MRT writeback axis stay
-queued.
+(89/90/93/94/97).  Percentage-closer filtering is likewise proven:
+`_dref_setup(linear=True)` switches the compare sampler to LINEAR
+mag/min so the same explicit-LOD opcode-90 path runs PCF -
+`tx_finish_pts` compares each footprint texel, then applies the same
+bilinear weighting as colour sampling and returns the compare
+fraction.  `test_fragment_dref_pcf_bilinear_compare` (50/50 footprint
+x{1,2} y{1}, depth_fn x<=1->0.4 fail / x>=2->0.6 pass, ref=0.5
+LESS_OR_EQUAL -> taps compare 0 and 1 -> scalar 0.5 -> vec4(0.5,..)
+mid-gray) proves the per-texel compares were weighted rather than a
+hard 0.0/1.0.  The blend/depth/MRT writeback axis stays queued.
 
 Evidence: `test_vn_graphics_draw_replay` gained nine image draws -
 `test_fragment_sampled_image_fetch_reaches_framebuffer` (constant ivec2
@@ -344,7 +352,11 @@ LOD mip select) and `test_fragment_dref_explicit_projective_sample`
 mip1 -> white) and `test_fragment_dref_gather_compare`
 (OpImageDrefGather opcode 97, 2x2 footprint with per-column depth
 0.1*x, ref=0.25 LESS_OR_EQUAL -> (0,1,1,0) -> RGBA(0,255,255,0), proving
-independent per-texel compares),
+independent per-texel compares) and `test_fragment_dref_pcf_bilinear_compare`
+(_dref_setup linear=True -> LINEAR compare sampler runs PCF through the
+same opcode-90 path, 50/50 footprint x{1,2} y{1} with depth_fn
+x<=1->0.4 fail / x>=2->0.6 pass -> taps compare 0 and 1 -> scalar 0.5 ->
+vec4(0.5,..) mid-gray, proving weighted per-texel compares),
 plus
 `test_fragment_storage_image_write` (a STORAGE_IMAGE kind 3 bound via
 `OpTypeImage(sampled=2)`; `OpImageWrite` stores a constant red texel at the
@@ -363,9 +375,10 @@ nopersp pair proves the NoPerspective decoration->mask capture plus the
 screen-space (non-perspective) interpolation arm, and the dref pair
 plus projective-dref draw prove the depth-format admission, the
 compare-enable sampler path, the vec3-coordinate dref operand path,
-and the opcode-97 per-footprint dref-gather compare path end-to-end.
+the opcode-97 per-footprint dref-gather compare path, and the
+LINEAR-compare PCF weighted-compare path end-to-end.
 Local
-`test_vn_*` sweep ran 760 tests (the graphics/draw modules all green;
+`test_vn_*` sweep ran 761 tests (the graphics/draw modules all green;
 8 unrelated `test_vn_native_bridge`/`test_vn_submit` subprocess
 timeouts under full-suite load that pass in isolation).  Frozen native
 cohorts on ovh_calltorch:
@@ -397,6 +410,7 @@ PASS in 19.0 s (`native-execution.agdmditl`), and `native-gfxdreflod-01`
 743 tests PASS in 19.1 s (`native-execution.djvtokp5`), and
 `native-gfxdrefprojlod-01` 744 tests PASS in 20.2 s
 (`native-execution.l8e9lk2r`), and `native-gfxdgather-01` 745 tests
-PASS in 19.7 s (`native-execution.19o2hhcv`), all
+PASS in 19.7 s (`native-execution.19o2hhcv`), and `native-gfxpcf-01`
+746 tests PASS in 19.6 s (`native-execution.ws6ohan9`), all
 `sources_unchanged: true`.
 Host-native model only - no RTL/CTS/stock/hardware qualification.

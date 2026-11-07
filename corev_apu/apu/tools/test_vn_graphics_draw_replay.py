@@ -508,12 +508,13 @@ class DrawReplayTests(unittest.TestCase):
         return did
 
     def _dref_setup(self, module, depth=0.25, mip_depth=None, mips=1,
-                    compare_op=3, max_lod=0.0, depth_fn=None):
+                    compare_op=3, max_lod=0.0, depth_fn=None, linear=False):
         """Depth-reference (dref) variant of _image_fetch_setup: an 8x4
         D16_UNORM depth image (VkFormat 124 -> device fmt 13) at MEMORY
         offset 4352, a COMBINED_IMAGE_SAMPLER(1) descriptor, and a
         nearest VkSampler with compareEnable=1 and compareOp=compare_op
-        (3=LESS_OR_EQUAL).  mip0 texels carry UNORM16 `depth`; every
+        (3=LESS_OR_EQUAL); `linear=True` switches mag/min to LINEAR so a
+        dref sample runs PCF (per-texel compare, then bilinear weighting).  mip0 texels carry UNORM16 `depth`; every
         mip>=1 carries `mip_depth` (default `depth`) so an explicit-LOD
         dref sample can prove mip select.  `mips` sets mipLevels/levelCount
         and `max_lod` must cover the mip count or the model clamps LOD to
@@ -525,7 +526,8 @@ class DrawReplayTests(unittest.TestCase):
         self.f.command('vkCreateSampler', device=self.w.DEVICE,
             pSampler=self.SAMPLER,
             pCreateInfo=self.w.structure('VkSamplerCreateInfo', pNext=[],
-                flags=0, magFilter=0, minFilter=0, mipmapMode=0,
+                flags=0, magFilter=1 if linear else 0,
+                minFilter=1 if linear else 0, mipmapMode=0,
                 addressModeU=0, addressModeV=0, addressModeW=0,
                 mipLodBias=0, anisotropyEnable=0, maxAnisotropy=0,
                 compareEnable=1, compareOp=compare_op, minLod=0,
@@ -995,6 +997,32 @@ class DrawReplayTests(unittest.TestCase):
             self.e.model, did,
             struct.unpack('<4I', struct.pack('<4f',
                 0.0, 1.0, 1.0, 0.0)))
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), want)
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_fragment_dref_pcf_bilinear_compare(self):
+        # PCF (percentage-closer filtering): a LINEAR compare sampler runs
+        # OpImageSampleDrefExplicitLod (opcode 90) — tx_finish_pts compares
+        # each footprint texel then applies the same bilinear weighting as
+        # colour sampling, returning the compare *fraction*.  u=0.25,v=0.375
+        # on the 8x4 image gives footprint x{1,2} y{1} at exact 50/50 x
+        # weight (same geometry as test_fragment_linear_filter_blend).
+        # depth_fn gives x<=1 -> 0.4 (ref 0.5 fails LESS_OR_EQUAL) and
+        # x>=2 -> 0.6 (passes): the two contributing taps compare 0 and 1,
+        # averaged to scalar 0.5 -> vec4(0.5,..) mid-gray.  A fractional
+        # result proves the compares ran per-texel and were weighted —
+        # nearest would return a hard 0.0/1.0.
+        self._dref_setup(fs_dref_program(u=0.25, v=0.375, ref=0.5, lod=0.0),
+                         depth_fn=lambda x, y, m: 0.4 if x <= 1 else 0.6,
+                         linear=True)
+        self._image_fetch_draw()
+        did = self.e.golden.img_fmt_id(self.e.model, 37)
+        want = self.e.golden.img_clear_texel(
+            self.e.model, did,
+            struct.unpack('<4I', struct.pack('<4f',
+                0.5, 0.5, 0.5, 0.5)))
         for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
             self.assertEqual(self.read_texel(x, y), want)
         self.assertEqual(self.read_texel(7, 3), self.clear_texel())
