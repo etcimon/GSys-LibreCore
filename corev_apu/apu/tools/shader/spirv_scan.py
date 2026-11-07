@@ -69,7 +69,7 @@ SC = dict(UNIFORMCONST=0, INPUT=1, UNIFORM=2, OUTPUT=3, WORKGROUP=4,
           ATOMICCTR=10, IMAGE=11, SBUF=12)
 SC_OK = {SC['INPUT'], SC['OUTPUT'], SC['UNIFORM'], SC['SBUF'],
          SC['PUSHCONST'], SC['WORKGROUP'], SC['PRIVATE'],
-         SC['FUNCTION'], SC['UNIFORMCONST']}
+         SC['FUNCTION'], SC['UNIFORMCONST'], SC['IMAGE']}
 
 # builtins we materialize per lane
 BUILTIN = dict(NumWorkgroups=24, WorkgroupSize=25, WorkgroupId=26,
@@ -168,7 +168,7 @@ OP = dict(
     ImageQuerySizeLod=103, ImageQuerySize=104, ImageQueryLod=105,
     ImageQueryLevels=106,
     Function=54, FunctionParameter=55, FunctionEnd=56,
-    FunctionCall=57, Variable=59, Load=61, Store=62,
+    FunctionCall=57, Variable=59, ImageTexelPointer=60, Load=61, Store=62,
     AccessChain=65, InBoundsAccessChain=66, ArrayLength=68,
     Decorate=71, MemberDecorate=72,
     VectorShuffle=79, CompositeConstruct=80, CompositeExtract=81,
@@ -1139,7 +1139,7 @@ class Scanner:
                # G2b: implicit LOD + quad-derivative result registers
                87, 207, 208, 209, 210, 211, 212, 213, 214, 215,
                # §12.3 C/5b: image ops with a result register
-               86, 88, 95, 98, 100, 103, 104, 106,
+               60, 86, 88, 95, 98, 100, 103, 104, 106,
                # G3a-ii: dref/proj/gather/querylod results
                89, 90, 91, 92, 93, 94, 96, 97, 105,
                # G3a-i: undef/copy, dynamic vector ops, fp/int

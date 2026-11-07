@@ -90,6 +90,7 @@ SC_PRIVATE = SC['PRIVATE']
 SC_FUNCTION = SC['FUNCTION']
 SC_PUSHCONST = SC['PUSHCONST']
 SC_UCONST = SC['UNIFORMCONST']
+SC_IMAGE = SC['IMAGE']
 
 BI_NUMWG = 24
 BI_WGSIZE = 25
@@ -1432,6 +1433,23 @@ class Model:
                 self.scratch[o32 >> 2] = val & 0xFFFFFFFF
                 return None
             return self.scratch[o32 >> 2]
+        if sc == SC_IMAGE:
+            # OpImageTexelPointer resolved to an absolute texel byte
+            # address (RTL: comp0 = absolute, bsz unbounded).  The
+            # tag/didx carry the source image's descriptor identity so
+            # the access is bounded by the image extent like W_TXB.
+            rec = self.img_rec([0, ptr_tag, didx, 0])
+            if rec is None:
+                self.robust += 1
+                return 0 if not is_store else None
+            base, size = rec[0], rec[1]
+            if o32 < base or o32 + 4 > base + size:
+                self.robust += 1
+                return 0 if not is_store else None
+            if is_store:
+                self.mwrite(u32(o32), val, cls)
+                return None
+            return self.mread(u32(o32))
         self.robust += 1
         return 0 if not is_store else None
 
@@ -2283,6 +2301,42 @@ class Model:
         if opc in (87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
                    103, 104, 105, 106):
             return self.img_op(pc, opc, wc, ops, va, rty, rid, ncomp)
+        if opc == 60:                         # OpImageTexelPointer
+            # image operand is a descriptor pointer; the result is a
+            # pointer whose comp0 is the absolute texel byte address
+            # (RTL W_LS0 image branch).  tag/didx carry the image's
+            # descriptor identity so lsu SC_IMAGE bounds by its extent.
+            if self.dead or self.helper():
+                self.setres(rid, [0, 0, 0, 0], 4)
+                return pc + wc
+            rec = self.img_rec(va[0])
+            if rec is None or not (rec[3] & 1) or rec[4] is None:
+                self.robust += 1
+                self.setres(rid, [0, 0, 0, 0], 4)
+                return pc + wc
+            meta = rec[4]
+            if va[2][0] != 0:                # sample must be 0 (no MSAA)
+                self.robust += 1
+                self.setres(rid, [0, 0, 0, 0], 4)
+                return pc + wc
+            iu, iv = s32(va[1][0]), s32(va[1][1])
+            dim = (meta['mdim'] >> 4) & 3
+            ly = (va[1][2] & 0xFFFF) if dim == 1 else 0
+            wk, layb = self.img_walk(meta, 0)
+            mof, pit, w0, h0 = wk[0]
+            if (ly >= meta['layers'] or iu < 0 or iv < 0 or
+                    iu >= w0 or iv >= h0):
+                self.robust += 1
+                self.setres(rid, [0, 0, 0, 0], 4)
+                return pc + wc
+            bpp = img_fmts.BPP[meta['fmt'] & 15]
+            ta = u32(rec[0] + ly * layb + mof + iv * pit + iu * bpp)
+            itag = va[0][1]
+            tag = (((itag >> 12) & 0xFF) << 12) | \
+                  (((itag >> 20) & 0xFF) << 20) | \
+                  (((itag >> 4) & 0xFF) << 4) | SC_IMAGE
+            self.setres(rid, [ta, tag, va[0][2], 0], 4)
+            return pc + wc
         if opc in (207, 208, 209, 210, 211, 212, 213, 214, 215):
             self.setres(rid, self.deriv(pc, opc, ops[2]), ncomp)
             return pc + wc
@@ -2635,7 +2689,7 @@ class Model:
     # 32-bit atomics over StorageBuffer/Workgroup — lane-serial RMW
     ATOMOPS = frozenset((227, 229, 230, 232, 233, 234, 235, 236, 237,
                          238, 239, 240, 241, 242))
-    HAS_RTY = frozenset((1, 12, 57, 61, 65, 66, 68, 77, 78, 79, 80, 81,
+    HAS_RTY = frozenset((1, 12, 57, 60, 61, 65, 66, 68, 77, 78, 79, 80, 81,
                          82, 83, 84, 86, 87, 88, 89, 90, 91, 92, 93, 94,
                          95, 96, 97, 98, 100, 103, 104, 105,
                          106, 109, 110, 111, 112, 124, 126, 127, 128,
@@ -2738,6 +2792,8 @@ class Model:
                         (ops[5] & 1) if wc > 6 else 0)
         if opc == 105:
             return 2
+        if opc == 60:
+            return 3                          # img, coord, sample
         if opc in (61, 65, 66, 68, 81, 83, 84, 109, 110, 111, 112,
                    124, 126, 127, 154, 155, 156, 157, 168, 200, 204,
                    205):

@@ -213,8 +213,16 @@ SEGMENT G3b-ii/compute
                   fails deterministically solo — unexplained
                   ordering/state dependence, flagged for a dedicated pass.
                   3 cases unrecorded due to the abort (above).
-  NEXT ARTIFACT   image texel-pointer + atomics (2 Fails), rerun for
-                  the 3 unrecorded cases.  ~~COMPUTE-H1 spec constants~~
+  NEXT ARTIFACT   ~~image texel-pointer + atomics~~ closed 2026-11-07 —
+                  `imgatom` corpus (r32ui `uimage2D` `imageAtomicAdd`)
+                  + `ue_cpos_imgatom_{1,2,3}` PASS-COMPUTE g1=57 g2=57
+                  ulp=0 under zero-jitter AND randomized memory latency;
+                  scanner admits `SC['IMAGE']`+opcode 60, model resolves
+                  the absolute texel address and routes the atomic RMW
+                  through a new `lsu` `SC_IMAGE` arm bounded by the
+                  image extent; `out=1` image readback verifies
+                  img[0,0]=init+1.  Rerun for the 3 unrecorded cases.
+                  ~~COMPUTE-H1 spec constants~~
                   closed 2026-11-07 (`specconst` corpus +
                   `specconst_{1,2,3}` decoupled vectors +
                   `apu-vn-specok2` override→41 PASS both latencies;
@@ -271,7 +279,17 @@ byte address and does the usual read→`atomic_op`→write at `ta`
 kind); then a storage-image `imageAtomic*` corpus shader (`r32ui`),
 `.exp` oracle+model, and a `ue_cpos_*` session through
 `tb_g6lc_apu_vgtop`.  Evidence boundary unchanged: host-model +
-directed-RTL-sim only.
+directed-RTL-sim only.  **Implemented + verified 2026-11-07:** the
+scanner admits `SC['IMAGE']` into `SC_OK` and opcode 60 into `OP` +
+the `h_result` set; the model's opcode-60 branch resolves `img_rec` +
+`img_walk` to the absolute texel address and `setres`es
+`[ta, tag|SC_IMAGE, didx, 0]` (tag/didx carry the image's descriptor
+identity), and `lsu` gained an `sc == SC_IMAGE` arm that bounds the
+access by the image extent before `mread`/`mwrite`.  `imgatom`
+(`r32ui` `imageAtomicAdd`) passes `ue_cpos_imgatom_{1,2,3}` under both
+latency profiles — the last compute CTS item is closed at the
+model+directed-RTL level (still zero CTS/capset/stock-guest/silicon
+qualification).
 
 Root-cause note (2026-11-07, COMPUTE-H1 / COMPUTE-X2): the spec-constant
 path is decoded end-to-end; the constant *application* is now modelled on

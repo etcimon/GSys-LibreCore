@@ -76,7 +76,8 @@ for v in texfetch_1 texfetch_2 texfetch_3 \
          texlod_mip_1 texlod_mip_2 texlod_mip_3 \
          texquery_1 texquery_2 texquery_3 \
          texsrgb_1 texsrgb_2 texsrgb_3 \
-         imgloadstore_1 imgloadstore_2 imgloadstore_3; do
+         imgloadstore_1 imgloadstore_2 imgloadstore_3 \
+         imgatom_1 imgatom_2 imgatom_3; do
   python3 $G --compute-session ue_cpos_$v $v
 done
 for va in badfmt viewoob kindmix xfer_img_oob unnorm; do

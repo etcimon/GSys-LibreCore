@@ -445,6 +445,14 @@ DESC = {
                          bindings=[
         img_bind(0, 1, dict(w=2, h=4, fmt=15), kind=3, out=1),
         (0, 0, 8, 1, 7 << 16)]),
+    # imgatom = CTS image_atomic_op_local_size_1 idiom: r32ui storage
+    # image + imageAtomicAdd -> OpImageTexelPointer(60) absolute-texel
+    # pointer + OpAtomicIAdd(234) lane-serial RMW.  The out=1 image
+    # readback verifies the atomic write landed (img[0,0] = init+1).
+    'imgatom':      dict(groups=(1, 1, 1), fmt='z', push=0,
+                         bindings=[
+        img_bind(0, 0, dict(w=4, h=2, fmt=10), kind=3, out=1),
+        (0, 1, 1, 1, 7 << 16)]),
     # row-major matrices in an SSBO array (CTS single_basic_array
     # row_major_*): std430 row_major mat3x2 m[2] = 2 x 32 B (2 rows of
     # vec3 at MatrixStride 16); out = 32 floats + row_major mat3x2 w[2]
