@@ -36,8 +36,8 @@ old disabled instance hierarchy. The testharness passes the core flag; physical
 board wrappers reject unsupported selection. `g6lc_storamic/rtl/` implements a
 first-party bounded AXI/AXI-Lite refusal engine and inactive pads, with one
 outstanding read and write, retained IDs, declared burst lengths and reset abort.
-No media arrays, discovery engine, block transport, protected persistence,
-VirtIO device or working physical backend is implemented. No ISA string,
+That M0 refusal profile implements no media arrays, discovery engine, block
+transport, protected persistence, VirtIO device or working physical backend. No ISA string,
 device-tree capacity or new MMIO/IRQ node is advertised.
 
 Request-service readiness is now distinct from media readiness. The native join
@@ -53,6 +53,148 @@ The native adapter carries testmode; scan-cell insertion and physical timing
 remain target gates. Normative contracts are under `g6lc_storamic/architecture/`;
 the product/SoC outline is `architecture/storamic/README.md`. All QEMU
 implementation remains exclusively owned by `g6lc_qemu/`.
+
+## Storamic ST-025 - Model Checkpoint And Inactive Origin Candidate
+
+The later model endpoint composes AXI admission/quiescence, a policy-bound
+AXI-Lite checkpoint service, coordinated RAM preparation, reserved-word-media
+copy/publication and record rediscovery. This portable backend is not a
+qualified physical-media or native protected-persistence implementation.
+The default-off `StoramicCheckpointEn` request explicitly refuses unbound
+native selection rather than substituting volatile RAM.
+
+`g6lc_storamic_origin_supported` in `core/include/config_pkg.sv` restricts
+optional source capture to the primary/I/O, one-hart, non-OoO/non-RVH WT scalar
+profile with no accelerator and `COPRO_NONE`. Effective data privilege is
+captured before LSU queueing and retained through store/WT/AXI descriptors.
+The existing execute-stage debug signal also enters LSU capture; debug-issued
+operations receive unknown origin rather than inheriting machine authority.
+Queued firmware tags survive subsequent debug transitions.
+Raw PROT and a shared cluster prefix alone are not authority.
+`g6lc_storamic_checkpoint_route` captures transaction qualification and retains
+revocation through the bridge; it remains outside native admission.
+
+The default-off `g6lc_storamic_checkpoint_policy` now provides a component
+snapshot/epoch publication mechanism with explicit owner quiescence, sticky
+provider/offer revocation and exhaustion refusal. Service/endpoint ownership
+also includes partial AW/W, held B/R and result consumption. AW captures
+command admission so accepted work and result acknowledgement can drain during
+replacement without admitting a newly issued command. This implements a local
+ownership contract, not qualified native policy/provider binding.
+
+The next C3/C4 observation slice now connects actual RAM inflight and media/
+flush ownership into endpoint `policy_hold_o`. Store `drained_o` requires idle,
+reset released and genuinely empty staging; idle alone intentionally permits
+dirty writes. No shadow dirty bit, automatic flush, new state, permission or
+native capability is added. Existing config/refusal, SRAM and scan boundaries
+are preserved. Ten source-frozen stages and the protocol-valid formal/
+abandoned-flush follow-up pass, with matching post-run source hashes;
+native producer/fabric acknowledgement and synchronization are still external.
+See `g6lc_storamic/architecture/policy-ownership-drain.md`.
+
+VirtIO now has an independent control-seal request/acknowledgement at its
+AXI-Lite boundary. It closes new admission but finishes accepted AW/W halves
+and B/R responses; actual handshake-qualified write execution prevents raw
+unaccepted VALID from changing registers. Existing DMA pause still accepts
+notifications, status reads and reset. Legacy integration explicitly leaves
+control sealing off; this is not native producer/provider binding.
+See `g6lc_storamic/architecture/virtio-control-seal.md`.
+
+The default-off checkpoint-writer model composes the actual VirtIO producer
+and scalar-DMA AXI bridge with the checkpoint endpoint. Writer pause/error
+comes from the engines; upstream pause acknowledgement, provider facts and
+restore-resume safety remain external. Policy hold includes writer job/MMIO
+and DMA phase/upstream debt. Control sealing remains independent. Ten selected
+frozen remote stages pass; this is not native attachment or CPU/cache synchronization.
+See `g6lc_storamic/architecture/checkpoint-writer-model.md`.
+
+The next writer-model C4/C5 slice drives actual VirtIO Status=0 during an
+accepted OUT/save, observes the real producer error and preserves the prior
+checkpoint generation. An explicit restore waits at the actual post-copy
+CSync phase for external permission; guest rings and the reset driver are
+reinitialized before further work. This adds no production RTL workaround,
+native acknowledgement, cache coherence or power-cut claim. See
+`g6lc_storamic/architecture/checkpoint-writer-reset.md`.
+
+Shared Storamic DMA ownership26 fixes the real upstream-W/DMA-AW data
+misassociation: W requires an accepted or visible AW, with signed AW/WLAST
+credit for W completing before its offered AW. Stalled AW/AR remain visible
+across DMA pause, 8-bit address counters backpressure at 255 and inflight/
+grant include all retained owners. No AWREADY-to-WVALID dependency, new
+configuration/permission, address buffer or native activation. Eleven common-
+clock scalar flop bits and registered-credit mux gating add 41 generic cells
+to the active writer model, no new memories/latches/SCCs. See
+`g6lc_storamic/architecture/dma-ownership.md`.
+
+Policy/writer27 composes the existing manager with real writer pause/control-
+seal/endpoint ownership. Opaque policy payload, source authorization and all
+native identity/provider/resume facts remain external; no native activation.
+Invalid model layout/shape/timeout cannot admit policy; disabled manager
+pending/revoked/exhausted are structural zero. Existing events/testmode/SRAM/
+reset seams preserved; generic active3156 (+71), no new memory/domain/stage.
+See `g6lc_storamic/architecture/policy-writer-model.md`.
+
+The fixed AXI 4-KiB page comparison and VirtIO 512-byte sector conversion now
+use explicit slices/zero extension. They preserve the interface units and
+capacity semantics, add no state or clock/reset, and do not authorize native
+selection. The descriptor fixture publishes complete vectors and checks their
+request-time propagation. Register/discovery/bridge repacking experiments are
+not applied: remaining driver loss was traced to compound aliases and stale
+representative caches in `tools/yosys`, not to the CRC algorithm or those SV
+bundles. Minimal fork fixes retain strict optimization and original assertions.
+
+Real policy/descriptor ownership must also cover upstream fabric buffers.
+The route/endpoint holds cannot report accepted requests not yet delivered
+there. Genuine writer pause/drain and cache/reservation/device synchronization,
+physical protection and full system gates remain prerequisites. Implementation
+and acceptance order: `g6lc_storamic/architecture/completion-plan.md`; detailed
+contracts: `docs/03_cva6_design/storamic_transaction_origin.md` and
+`storamic_checkpoint_service.md` in the same directory. No ISA/CSR, DTS or
+Linux persistent-memory capability is advertised by these candidates.
+
+Test-only CPU netlist/interpreter fixtures retain the real CSR/LSU/queues/WT
+cache and configured FPU. The optional default-off integer diagnostic changes
+only the fixture's user configuration; it is not a silicon feature or native
+fallback. `verif/tb/storamic/collect_cpu_execution.py` requires a complete,
+identity-consistent configured-program matrix and full-profile model generation
+receipts. Later interpreter execution does not remove the unresolved strict
+compiler, debug, native ownership or physical qualification gates.
+
+Test-only firmware generation in `verif/tb/storamic/g6lc_cpu_origin_program.py`
+and the host's default-off `ExtraMprv` parameter add MPRV/MPP=U and M phases
+alongside S. The original program is byte-identical; the extended collector
+requires seven writes/six reads, all six cases and matching full-profile CPU
+model origins. No CPU implementation, native binding, timing path, config,
+PMA/PMP rule, DTS or capability changes are made by this coverage extension.
+
+The later M-mode external-debug execution exposes and corrects redirect
+precedence in `core/fetch_B/g6lc_fetch_pkg.sv::arch_src_sel`: the architectural
+debug halt redirect wins the exception indication that accompanies debug
+entry. Non-debug priorities are unchanged. The existing `DebugEn` caller
+qualification, config surface, clocks/resets/state, PMA/PMP, CSR encodings,
+DTS and capabilities are unchanged. This is an existing-feature control-flow
+bug fix, not native Storamic activation or complete debug qualification.
+
+The follow-up S/U debug extension changes verification only. Firmware
+configures test PMP and uses real MRET, debug CSR access and DRET; the host
+checks saved privilege and resumed S/U origins. No production permission,
+RTL/config/state/clock/reset, ISA/CSR/DTS, scan/PMU or timing contract changes.
+CPU model source/wrapper identities and default M ROM bytes remain unchanged.
+
+The queued-debug follow-up also changes verification only. A separate AXI
+host holds AW/W/B while the real CPU takes an external debug request.
+Read-only output aliases observe actual mode transitions; they never drive
+CPU state or serve as native authorization. Source/model identities remain
+unchanged. Observed entry ordering differs between zero/delayed reads, so
+no universal store-drain rule is inferred or implemented.
+
+The independent seven-write debug-return follow-up also changes verification
+only. A debug store after the last load/fence has its B response withheld
+across actual DRET. The bound origin remains unknown while resumed M/S/U
+traffic uses its proper issuing context. It adds no production state,
+configuration, PMA/PMP/CSR/DTS capability, clock/reset, timing/PPA, DFT/PMU
+feature or native provider. Earlier fixtures and CPU source/model identities
+are unchanged; native checkpoint authority remains unbound.
 
 ## Hyp8 r114 - SC retry verdict owns the returned result
 
@@ -1391,3 +1533,392 @@ Evidence: plan T21e (`t21/T21E-REPORT.md`).
 | An acknowledged store whose line is known absent may leave the L1's view (memory holds it; the next access refills) — but only when "absent" is true; and a store's departure must never block the loads that refill the cache. | `core/cache_subsystem/wt_dcache_wbuffer.sv` `fixup_hold` keeps holding unchecked words only: holding a checked miss on a full queue (tried in t55/t57) deadlocked — the held store kept the buffer non-empty while the loads that would refill the queue's lines waited on it. The contract is therefore carried by (A): a checked miss is genuine. `inv_req_o` is restated on registers (`fixup_inv_req_matches_port`). | T48; leaf `tb_g6lc_wt_wbuf_fixup` S7 (a genuine checked miss on a full queue leaves at once, the buffer empties, nothing is written); t59 battery Spike-exact, `l3h59` oracle owed |
 | Every `mul*` writes its destination (Part I `#sec:m-ext`); the FLU writeback port carries one result per cycle, so the multiplier's product must own the cycle `MultStages` after its input. | `core/issue_read_operands.sv` `mult_wb_block`: the MULT issue pulse (`mult_valid_q`) carried `MultStages - 1` more cycles in a shift register; the one-cycle FLU classes (ALU / branch / CSR / AES) are blocked in the colliding decision cycle only (`|mult_valid_q` is the `MultStages == 1` upstream rule; A115/A128/A147 had left it). `core/ex_stage.sv` property `flu_wb_no_collision` (sim-only). | T50 (HEAD `MultStages = 4` boot hang at c = 5.88 M, SB head `issued=1 valid=0`); stage 59 (t54 pre-fix stops at 321 retirements; t59 one-register Spike-exact; t60 = HEAD + fix is the M = 4 verdict) |
 | A program-order memory oracle covers user space: user-half VAs are folded onto physical addresses through the Sv39 tables the kernel wrote. | `verif/regress/rvfi_memcheck.py`: shadow integer register file from the trace's rd writes, `csrrw/s/c satp` tracking, Sv39 walk over the model's own memory for VA < 2^38 (U-mode loads/stores and the kernel's SUM accesses), walk cache dropped on `sfence.vma`/satp; `--merge=<trace>` interleaves a second file by cycle stamp. | T42/T43: the L1 `cat`-crash trace has 0 stored mismatches with user space folded (the crash is not a memory value); the L3 trace yields 20 stored mismatches, the first the T43 AMO pair |
+
+## APU Immutable Samplers (Non-ISA)
+
+`corev_apu/apu/g6lc_apu_vnfront.sv` now retains layout-owned sampler snapshots,
+initializes standalone/combined descriptor records, and preserves destination
+sampler bytes on updates/copies. `vn_device_profile.toml` and `gen_vn_tables.py`
+capture optional immutable arrays; `vn_golden.py` mirrors the state path.
+Existing `VenusEn`/Enable, reset, ObjPay SRAM, object and aperture interfaces
+are retained; no ISA/CSR/DTS/discovery change. Selected RTL evidence and timing,
+DFT, licensing and remaining full-compatibility limits are recorded in
+`architecture/uncore/apu-immutable-implementation.md`; no conformance promotion.
+
+Empty-layout follow-up: `StDslHdrC` initializes existing sizing/dynamic/hash
+registers before either the empty or populated branch. This prevents an empty
+layout inheriting its predecessor's extent. No new state/ISA/DTS/config bit.
+The assertion and exact-pool-capacity fixture are registered; only lint and
+generation, not new RTL execution, are currently validated. Bounded dev-stage
+provisioning/evidence: `architecture/uncore/apu-dev-harness-implementation.md`.
+
+The T2 host model has an explicit guest-DMA policy/facade: deny-all without
+grants, read/write-separated ranges, exact revocation, u64 bounds and complete
+prevalidation before writes. ApertureState/TransportModel opt in via
+dma_policy; legacy golden dictionaries remain trusted and compatible.
+Bridge registration/fault translation and hardware DMA protection are not
+claimed implemented. Compiler-PGO/unroll policy is enforced for APU RTL leaves.
+No ISA, DTS, device-profile or silicon state changes.
+See `architecture/uncore/apu-pgo-dma-increment.md`.
+
+Follow-up (host verification only): `ResourceDma` adds context/resource-owned
+leases, scoped permissions, transactional registration, stale capability
+rejection and context teardown. Blob/control and hardware enforcement wiring
+remain open. Compiler plus simulator PGO are required for remote APU RTL
+leaves, with immutable images and frozen test snapshots independent of live
+development. No functional RTL, ISA/config/DTS, PMU/DFT or spec-index status
+changes. `architecture/uncore/apu-simulator-pgo-implementation.md`.
+
+T2 host follow-up: ResourceState composes global ResourceDma backing with
+independent context access capabilities. Context destroy preserves backing;
+explicit unref revokes every attachment. Host API only, not wire attach
+semantics or asynchronous retirement. No RTL/config/ISA/DTS status changes.
+`architecture/uncore/apu-resource-lifetime-increment.md`.
+
+Native control follow-up: ControlDispatcher maps five lifecycle wire operations
+and replies to ResourceState. ControlQueue authorizes synchronous decoded-buffer
+DMA before dispatch and scatters the response. Host-only; not raw vring/MMIO,
+blob allocation, asynchronous bus handling or full T2 execution. No functional
+RTL, config/ISA/DTS or spec-index status changes.
+`architecture/uncore/apu-native-control-increment.md`.
+
+Native host backend now composes blob-owned aperture state, raw split queues,
+MMIO/IRQ/reset and the existing local bridge IPC. Zero Vulkan capsets are
+advertised; Venus execution and memory-backed aliases remain integration
+gates. Host-only; functional RTL/config/ISA/DTS/spec-index statuses unchanged.
+`architecture/uncore/apu-native-bridge-implementation.md`.
+
+Native linear/memory follow-up: bounded SUBMIT_3D decode/front/reply uses live
+shared/private memory with per-context state; borrowed memory pins/generations
+protect alias relocation, deferred free and teardown. Ring support follows
+the next increment; GPU work/capset admission remain off.
+Host-only; RTL/config/ISA/DTS status unchanged.
+`architecture/uncore/apu-native-linear-implementation.md`.
+
+Native ring follow-up: validated pinned windows, per-ring replies, bounded
+round-robin scheduling, wrapped publication, cooperative waits, IDLE recheck,
+bridge polling and silent context/reset/disconnect retirement. GPU execution
+and capability promotion remain disabled; no RTL/config/ISA/DTS changes.
+`architecture/uncore/apu-native-ring-implementation.md`.
+
+Native continuation follow-up: explicit resumable frames and owned source
+leases support parked linear/nested streams without replay. Deferred control
+replies and used entries permit later control wakeup/cancellation, reauthorize
+DMA before resume and drain on queue/context/device reset. GPU execution and
+capsets remain disabled; no RTL/config/ISA/DTS status changes.
+`architecture/uncore/apu-native-continuation-implementation.md`.
+
+Native dependency follow-up: bounded directed source-before-destination
+completion graphs are validated before child reads; ready children resume
+independently with private reply views and shared task leases/cancellation.
+Host-model scheduling only; GPU execution/capsets and RTL/config/ISA/DTS
+status promotion remain disabled.
+`architecture/uncore/apu-native-dependency-implementation.md`.
+
+Native transfer follow-up: bounded internal fill/update/copy work now executes
+real aperture writes with FIFO/context fairness and executor-owned memory leases.
+Deferred frees and context cancellation drain work pins separately from blobs.
+Wire GPU/CB/shader/feedback and capset admission remain off; no RTL/ISA/DTS
+status promotion. `architecture/uncore/apu-native-transfer-implementation.md`.
+
+Native replay follow-up: executable transfer CBs and one-level secondaries
+snapshot into bounded executor jobs, with generation/descriptor/binding checks
+and CB/pool/buffer/parent leases. Native mutation/free/idle parks until actual
+retirement; empty/one-time states and rollback are explicit. Shader/image,
+semaphores, wire GPU/feedback and capsets remain disabled.
+`architecture/uncore/apu-native-replay-implementation.md`.
+
+Native submit follow-up: explicit transfer-only diagnostic mode validates wire
+submits, pins queues/fences and signals only after executor retirement. Waits
+park with saved deadlines; pending fence mutation blocks. Serial coherent
+memory-only barriers order transfer work; semaphores/images/shaders and stock
+fault-feedback admission remain unsupported. Default GPU refusal/zero capsets
+and RTL/config/ISA/DTS status remain unchanged.
+`architecture/uncore/apu-native-submit-implementation.md`.
+
+Native binary follow-up: plain creation and semaphore generations are validated,
+prior signal tokens reserve after admission, waits consume before execution,
+and completion publishes success/failure after memory retirement. Leases and
+generation registry retire on destroy/reset. Timeline/external and semaphore
+multi-batch profiles reject; no RTL/ISA/DTS, capset or qualification promotion.
+`architecture/uncore/apu-native-binary-semaphore-implementation.md`.
+
+Native timeline host follow-up: in-memory-only decoder extension, typed
+creation, full-width counters, monotonic signals and bounded cooperative host
+waits. Captured generations prevent timeline/fence wait ABA. Pinned RTL decoder
+inputs, discovery/capsets and ISA/config/DTS statuses are unchanged; queued
+timeline submits remain refused.
+`architecture/uncore/apu-native-timeline-host-implementation.md`.
+
+Native timeline queue follow-up: bounded u64 reservations, wait-before-signal
+progress and per-device/family/index lane heads preserve alias FIFO. Internal
+jobs remain context barriers; binary re-signal waits for actual consumption.
+Commit faults retire leases. No extra RTL queue/capset or ISA/config/DTS
+promotion. `architecture/uncore/apu-native-timeline-queue-implementation.md`.
+
+Native image-copy follow-up: actual region records expand to bounded row copies
+with pinned64-byte pitch/mip/layer addressing, logical bounds and image/memory
+generation leases. Pending image mutation waits. Layout/barrier and broader
+image/shader admission remains open; no RTL/ISA/DTS or capability promotion.
+`architecture/uncore/apu-native-image-copy-implementation.md`.
+
+Native coherent image barriers capture bounded payloads/canonical generations
+only in the native profile. Typed zero-byte operations retain backing after
+range/stage/access/layout/ownership validation; coherent linear layouts need no
+physical conversion. The graphics follow-up admits bounded draw stages,
+vertex/index/uniform/shader/color-attachment/indirect accesses, attachment and
+sampled-image layouts with per-profile stage/access compatibility and usage
+gates; depth/stencil, input-attachment and unlisted stages stay refused.
+Per-image layout state is now tracked: create seeds `initialLayout`,
+barriers validate `oldLayout` (UNDEFINED discards) and publish
+`newLayout`, copy/clear commands must match the tracked layout, and
+render passes publish subpass/final layouts at begin/end. This is not a
+subresource-level layout layer or hardware admission.
+`architecture/uncore/apu-native-image-barrier-implementation.md`.
+
+Native command-buffer events replay as ordered executor ops: Set/Reset flip
+the shared ObjTab signaled bit at stream position, Wait stalls subsequent ops
+until every listed event signals (host vkSetEvent releases it). WaitEvents
+retains memory/buffer/image barrier words on the wire record and replays them
+through the shared coherent-barrier path; eventCount==0 barrier-only records
+are admitted. Host event feedback (GetEventStatus/SetEvent/ResetEvent)
+reports VK_ERROR_DEVICE_LOST after context fault via the submissions.lost()
+canonical-context check; no host wait-for-events (absent from the wire
+xmls), WaitEvents2 or capability admission.
+`architecture/uncore/apu-native-event-implementation.md`.
+
+Native timestamp query pools replay as ordered executor ops: create admits
+TIMESTAMP pools only (count<=4096, no statistics flags), reset clears slot
+availability, begin/end/write-timestamp emit honest-zero stamps at stream
+position. vkGetQueryPoolResults reads ordered slot state through the
+native host-query path (64-bit required, WAIT suspends via RingBlocked,
+VK_NOT_READY without WAIT, DEVICE_LOST after context fault, validation/
+feature refusals truthful); vkCmdWriteTimestamp2 shares the stamp path
+(u64 stage, high bits refused) and vkCmdCopyQueryPoolResults emits an
+extent-checked QueryCopy op writing ordered packed records to a pinned
+buffer (64_BIT|AVAILABILITY only). Occlusion pools pair begin/end into
+QueryBegin/QueryEnd ops accumulating generated-fragment counts per
+(pool,index) — exact for the admitted draw subset since the profile has
+no depth test; indexed variants admit index==0 only, pairing is tracked
+per submit batch. Conditional rendering is admitted as ordered
+CondBegin/CondEnd ops gating DrawExec on a per-command 32-bit predicate
+re-read (INVERTED flag, usage-0x200 buffer, no nesting); gated
+vkCmdClearAttachments rows and vkCmdDispatch/DispatchIndirect consult the
+same predicate (per-op cached decision on TransferJob.gates; ShaderRuntime
+latches one read before indirect fetch or shader steps). Pipeline-statistics pools admit
+mask 0x87 (IA vertices/primitives, VS/FS invocations) with per-(pool,
+index) counter accumulators fed by DrawExec stage counters and
+spec-ordered counter-array readback/copy; other statistic bits refuse.
+Device-command DEVICE_LOST depth: ALLOC/BIND/POOL_RESET/CB_* act
+classes report VK_ERR_LOST through the shared lost() check once the
+owning context faults, skipping frontend.step so no stale object
+publishes; RETIRE/RECORD/QUERY/MAP/UPDATE stay live.
+`architecture/uncore/apu-native-query-implementation.md` and
+`architecture/uncore/apu-native-conditional-implementation.md` and
+`architecture/uncore/apu-native-event-implementation.md`.
+
+Native color clears use bounded immutable texel patterns and pinned format/
+pitch/mip/layer rules. Exact host payload-length metadata protects all replay
+reads/suboffsets without changing packed RTL record words. No shader/renderer/
+RTL or capability admission.
+`architecture/uncore/apu-native-image-clear-implementation.md`.
+
+Native internal compute uses bounded reference instruction turns and live
+generation-scoped buffer I/O in the shared executor. Wire shader/pipeline/
+descriptor replay stays refused. RTL unmap needs owner/alias/quiescence and
+failure-safe allocation/copy/publication, not a sentinel-only change.
+`architecture/uncore/apu-native-compute-foundation.md`.
+
+Native buffer descriptor provenance tracks originating resource generations
+beside unchanged packed records. Resolution checks epochs/device/usage/aligned
+logical bounds and returns required references for future replay leases.
+No wire shader or full layout-lifetime/compatibility admission.
+`architecture/uncore/apu-native-buffer-descriptor-implementation.md`.
+
+Native layouts retain rows/signatures by value through descriptor-set lifetime;
+pipeline compatibility includes stages/immutable state/push/context owner.
+Recorded bind/push metadata survives layout destruction. Hardware hashes/ABI
+stay unchanged; full Vulkan/wire shader admission is not established.
+`architecture/uncore/apu-native-layout-lifetime-implementation.md`.
+
+Native compute pipelines validate selected entry/stage and retain canonical
+module/code/layout snapshots; pinned zombie resolution survives ID reuse.
+Wire dispatch/leases and full qualification remain open.
+`architecture/uncore/apu-native-pipeline-implementation.md`.
+
+Internal compute replay binds exact pipeline/set/push state with ordered
+dynamic offsets, before/after-pin guards, secondary state isolation and executor
+retirement. Explicit compute=True only; default/wire shader refusal unchanged.
+`architecture/uncore/apu-native-compute-replay-implementation.md`.
+
+Diagnostic compute wire mode separately gates bounded replay through existing
+queue/fence/binary/timeline retirement. Sticky context GPU loss stops queued
+writes and preserves query/error feedback. No stock or hardware admission.
+`architecture/uncore/apu-native-compute-submit-implementation.md`.
+
+Bounded scalar specialization validates record-local map/data bounds, fixes
+shared scanner defaults and separates immutable specialized code from original
+module provenance. Legacy frontend reuse is allocation-only, not execution.
+`architecture/uncore/apu-native-specialization-implementation.md`.
+
+Native coherent compute barriers retain exact memory/buffer/image payloads and
+resource generations, validate explicit compute scopes and hold logical buffer
+backing through retirement. Missing access metadata fails closed.
+`architecture/uncore/apu-native-compute-barrier-implementation.md`.
+
+Native queue/device idle continuations use owned lane/device scope, preserve
+context-wide internal ordering and reject suspended generation/scope changes.
+Context loss/reset and prefix behavior remain bounded.
+`architecture/uncore/apu-native-idle-scope-implementation.md`.
+
+Native indirect compute validates/leases the logical argument source, reads
+three live counts once at execution and bounds invocations before writes.
+Compute-only indirect scope uses existing executor ordering/fence retirement.
+`architecture/uncore/apu-native-indirect-dispatch-implementation.md`.
+
+Fixed native buffer arrays resolve each element's provenance/dynamic offset,
+retain bounded rows and transactional leases, and prevent readonly descriptor
+stores from borrowing writable alias permissions in the reference LSU.
+`architecture/uncore/apu-native-buffer-array-implementation.md`.
+
+Native scalar specialization operations use one opt-in scanner evaluator for
+defaults/dependencies and immutable folding after overrides. Default hardware
+scanner refusal and original module provenance remain unchanged.
+`architecture/uncore/apu-native-specialization-op-implementation.md`.
+
+Native image operands capture typed generations and immutable sampler values,
+validate bounded owned subviews and packed records, and return required
+references/guards without admitting shader-image work.
+`architecture/uncore/apu-native-image-operand-implementation.md`.
+
+Owned native compute images explicitly admit marked rows, share backing with
+transfer work and retain generation/object leases through faults and retirement.
+Default and transfer-only refusal remain.
+`architecture/uncore/apu-native-compute-image-implementation.md`.
+
+Native shader-image barriers validate compute stage/access/layout/usage while
+retaining recorded generations and backing. Read-only layout admission stays
+compute-only; no per-subresource current-layout tracker or RTL promotion.
+`architecture/uncore/apu-native-shader-image-barrier-implementation.md`.
+
+Native rendering object identity retains render-pass values and canonical
+framebuffer attachment provenance; operand resolution returns references/guards
+without pinning or drawing. No renderer/capability promotion.
+`architecture/uncore/apu-native-rendering-identity-implementation.md`.
+
+Native graphics identity retains VS/FS code/entries and module generations,
+layout/render-pass values, original wire and parked state. Execution admission
+remains separate; compute resolution rejects graphics.
+`architecture/uncore/apu-native-graphics-identity-implementation.md`.
+
+Native graphics fixed state validates original wire before allocation and
+retains typed vertex/cull/mask/dynamic requirements against pinned limits.
+No interface/operand/draw or capability promotion.
+`architecture/uncore/apu-native-graphics-fixed-state-implementation.md`.
+
+Native graphics interfaces validate specialized I/O declarations against
+vertex format classes, consumed varyings and active color locations. Existing
+scan results feed typed snapshots; no full shader/resources or draw promotion.
+`architecture/uncore/apu-native-graphics-interface-implementation.md`.
+
+Native vertex/index bindings retain buffer/memory generation and immutable
+binding provenance. Owned-span resolution returns refs/guards without reads,
+leases or draw admission.
+`architecture/uncore/apu-native-vertex-operand-implementation.md`.
+
+Native dynamic viewport/scissor capture preserves exact validated values and
+recording-epoch identity across later sets/reset. No work/leases/draw admission.
+`architecture/uncore/apu-native-graphics-dynamic-implementation.md`.
+
+Native begin/end-render-pass metadata retains canonical identities, compatible
+framebuffer values, exact clear words and balanced recording scope. Owned
+operands/late guards publish no work or leases.
+`architecture/uncore/apu-native-render-pass-command-implementation.md`.
+
+Native graphics resource requirements validate specialized VS/FS descriptors
+and bounded occupied push words against retained layout values before allocation.
+Exact Block decorations preserve the shared scanner/table ABI. No binding/draw.
+`architecture/uncore/apu-native-graphics-resource-implementation.md`.
+
+Native graphics binding state tracks retained layouts, stage-specific push
+values and dynamic offsets, resolving per-stage descriptor operands with late
+recording/resource/pipeline guards. No queue/draw integration or work leases.
+`architecture/uncore/apu-native-graphics-binding-implementation.md`.
+
+Native graphics draw plans compose per-draw immutable state (pipeline operands,
+render pass, viewport/scissor, vertex/index/indirect spans) without fetch,
+raster, leases or replay; compute-stage push records stay unhandled.
+`architecture/uncore/apu-native-graphics-draw-implementation.md`.
+
+Native render-pass clears execute CLEAR-loadOp and explicit ClearAttachments
+color attachments as ordered pitch-aligned pattern transfers with generation-
+checked operands, render-area clipping and atomic admission; draws/shaders/
+raster and capability gates stay refused.
+`architecture/uncore/apu-native-render-pass-clear-implementation.md`.
+
+Native graphics vertex/index fetch executes as an executor runtime op:
+live aperture reads at execution time, VATTR_OK format decode into 144-byte
+VS-in records with {VertexIndex,InstanceIndex} builtins, robust OOB, indirect
+argument reads, owner leases and fetch_stats retirement. DrawPlan->op
+conversion and vkCmdDraw* replay stay refused until the full stage chain
+exists. `architecture/uncore/apu-native-graphics-fetch-implementation.md`.
+
+Native graphics vertex-shader stage executes bounded VS waves over fetch
+records inside one job: per-batch spirv_model Model instances on the
+flags-bit2 graphics work record, single-step lockstep invocation rounds,
+rendezvous barriers, 144-byte VS-out record collection in order, step/robust
+budgets and shade_stats retirement. Descriptor bindings, raster/FS/writeback
+and vkCmdDraw* submission stay refused.
+`architecture/uncore/apu-native-graphics-shade-implementation.md`.
+
+Native graphics fragment-shade stage executes bounded FS waves over
+caller-supplied FS-in record images: per-batch spirv_model Model instances
+on the flags-bit2 graphics work record (Fragment EM, vbase front bit,
+per-batch helper mask), single-step lockstep rounds, rendezvous barriers,
+ordered 144-byte FS-out color collection, step/robust budgets and
+fshade_stats retirement. FS-in generation (raster), descriptors, ROP/
+writeback and vkCmdDraw* submission stay refused.
+`architecture/uncore/apu-native-graphics-pshade-implementation.md`.
+
+Native graphics raster stage produces FS-in records from VS-out records:
+golden-mirrored 16.8-fixed viewport transform, edge functions, top-left
+rule, cull/front-facing, scissor/viewport-bounded coverage, perspective/
+flat/nopersp varying interpolation, FragCoord records, bounded cooperative
+turns and fragment-budget job faults; raster_stats retirement. FS
+consumption, ROP/writeback and vkCmdDraw* submission stay refused.
+`architecture/uncore/apu-native-graphics-raster-implementation.md`.
+
+Native graphics fragment writeback emits FS-out colors to one attachment:
+FragCoord->pixel decode, bounds drops, location select, img_clear_texel
+format encode, extent-checked owner span, aperture writes, bounded turns,
+writeback_stats. Blend/depth/MRT and vkCmdDraw* submission stay refused.
+`architecture/uncore/apu-native-graphics-writeback-implementation.md`.
+
+Native graphics draw execution chains fetch->vertex shade->raster->
+fragment shade->writeback inside one executor op with eager stage-profile
+probes, immutable intermediate record images, full owner pinning and
+per-stage stats; DrawPlan->DrawExec conversion plus vkCmdDraw*/Indexed/
+Indirect replay dispatch in recording order with render-area-clamped
+scissor, single color output->attachment resolution and atomic refusal.
+Blend/depth/MRT, descriptor-bound draws, helper lanes, non-triangle
+topology and capability gates stay refused; host-model evidence only.
+`architecture/uncore/apu-native-graphics-drawexec-implementation.md`.
+
+vgctl retained-unmap owner-hold + alias accounting (RTL, tier R):
+memory-backed UNMAP_BLOB and MAP_BLOB on a backed memory both probe
+APU_OBJTAB_OP_SCAN_BIND (read-only ctx-list walk, kind=APU_BLOB_SHMEM,
+aux[0] set, aux[63:32]==memory {gen,slot}, bind_offset!=0,
+self-excluded) over ctx 0 then the request ctx; map_unmap_q
+discriminates.  UNMAP: a hit keeps the shared extent (blob alone
+rebinds to 0), a double MISS sets map_hold_q (hold_o submission hold
+shared with the DEVBACKED relocation mechanism) and enters StMapDrain;
+drain quiescence diverts to StUnmapFree, which returns the extent to
+vgpages before StUnmapPriv publishes APU_MEM_UNBACKED.  MAP: a hit at
+the same guest base binds via StMapBind without free/realloc, a hit at
+a different base refuses APU_VG_ERR_PARAM (vn_memory_blobs.map parity),
+a double MISS relocates via FREE+ALLOC_AT. Unbacked/blob-owned unmap
+and blob-owned map paths unchanged; owner-generation acquisition,
+private retained bytes, capacity, DEVBACKED multi-alias re-base,
+VkBuffer/VkImage SETBIND invalidation and remap-move-back remain open.
+Leaf evidence only; no capset/stock claim.
+`architecture/uncore/apu-vgctl-unmap-hold-implementation.md`.

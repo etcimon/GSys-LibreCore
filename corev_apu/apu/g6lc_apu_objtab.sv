@@ -172,6 +172,7 @@ module g6lc_apu_objtab
     logic               keep_v_q, head_set_q;
     logic               scan_kids_q;   // RETIRE_KIDS filter mode
     logic               scan_ovl_q;    // SCAN_OVL read-only mode
+    logic               scan_bind_q;   // SCAN_BIND read-only mode
     logic [15:0]        rtk_slot_q;
     logic               rtk_par_q;
     apu_objent_mem_t    swe_rec_q;
@@ -344,7 +345,7 @@ module g6lc_apu_objtab
         walk_q <= '0; walk_nxt_q <= '0; walk_rec_q <= '0;
         keep_q <= '0; keep_rec_q <= '0; keep_v_q <= 1'b0;
         head_set_q <= 1'b0;
-        scan_kids_q <= 1'b0; scan_ovl_q <= 1'b0;
+        scan_kids_q <= 1'b0; scan_ovl_q <= 1'b0; scan_bind_q <= 1'b0;
         rtk_slot_q <= '0; rtk_par_q <= 1'b0;
         swe_rec_q <= '0; swe_slot_q <= '0; pinned_q <= '0;
         live_q <= '0;
@@ -366,12 +367,19 @@ module g6lc_apu_objtab
             // the ctx-list walk
             scan_kids_q <= 1'b0;
             scan_ovl_q  <= 1'b0;
+            scan_bind_q <= 1'b0;
             pinned_q    <= '0;
             om_call(APU_OMT_FLUSH, '0, '0, '0, '0, StScanRdInit);
           end else if (req_i.op == APU_OBJTAB_OP_SCAN_OVL) begin
             scan_ovl_q <= 1'b1;
             walk_q     <= mem_head_q;
             state_q    <= StScanRd;
+          end else if (req_i.op == APU_OBJTAB_OP_SCAN_BIND) begin
+            // §12.3 C alias unbind: read-only walk of req.ctx's list
+            scan_bind_q <= 1'b1;
+            scan_ovl_q  <= 1'b0;
+            walk_q      <= ctx_head_q[cidx(req_i.ctx)];
+            state_q     <= StScanRd;
           end else if (req_i.op == APU_OBJTAB_OP_RETIRE_KIDS) begin
             if (32'(req_i.id[15:0]) >= 32'(ObjEntries)) begin
               cpl_q   <= '{status: APU_OBJTAB_MISS, handle: '0,
@@ -383,6 +391,7 @@ module g6lc_apu_objtab
               pinned_q    <= '0;
               scan_kids_q <= 1'b1;
               scan_ovl_q  <= 1'b0;
+              scan_bind_q <= 1'b0;
               // the walk covers the parent's ctx list: read the
               // parent for its ctx
               om_call(APU_OMT_ERD, '0, '0, req_i.id[15:0], '0,
@@ -920,6 +929,27 @@ module g6lc_apu_objtab
               walk_q  <= om_rsp_q.rec.kind_next;
               state_q <= StScanRd;
             end
+          end else if (scan_bind_q) begin
+            // read-only alias probe over req.ctx's context list:
+            // first live entry of req.kind whose aux[63:32] names the
+            // target VkDeviceMemory {gen,slot}, still mapped
+            // (bind_offset != 0), excluding the requester slot —
+            // UNMAP_BLOB keeps the shared extent alive while another
+            // mapped alias remains (vn_memory_blobs parity)
+            if (om_rsp_q.rec.live &&
+                om_rsp_q.rec.kind == req_q.kind &&
+                om_rsp_q.rec.aux[0] &&
+                om_rsp_q.rec.aux[63:32] == req_q.offset[31:0] &&
+                om_rsp_q.rec.bind_offset != 64'h0 &&
+                {om_rsp_q.rec.gen, walk_q} != req_q.id[31:0]) begin
+              cpl_q   <= '{status: APU_OBJTAB_OK,
+                           handle: {om_rsp_q.rec.gen, walk_q},
+                           entry: ent_of(om_rsp_q.rec)};
+              state_q <= StCpl;
+            end else begin
+              walk_q  <= om_rsp_q.rec.ctx_next;
+              state_q <= StScanRd;
+            end
           end else if (!om_rsp_q.rec.live ||
               (scan_kids_q &&
                om_rsp_q.rec.parent_slot != rtk_slot_q) ||
@@ -1020,7 +1050,7 @@ module g6lc_apu_objtab
           end
         end
         StScanDone: begin
-          if (scan_ovl_q) begin
+          if (scan_ovl_q || scan_bind_q) begin
             cpl_q   <= '{status: APU_OBJTAB_MISS, handle: '0,
                          entry: '0};
             state_q <= StCpl;

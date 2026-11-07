@@ -2114,13 +2114,19 @@ def cmd_l2_equiv(rem: Remote, args) -> int:
     return 0 if passed else 1
 
 
-APU_LEAF_STAGES = ('unit', 'top', 'soc', 'bridge', 'guest', 'synth', 'profile')
+APU_LEAF_STAGES = ('unit', 'top', 'soc', 'bridge', 'guest', 'synth', 'profile', 'dev')
 # Generated oracle inputs (shader_vectors.py / vn_golden.py outputs) that the
 # testbenches $readmem at runtime. verif/.gitignore ignores *.hex, so these
 # dirs would otherwise never ride along — the suites cannot regenerate them
 # on a bare snapshot.
 APU_LEAF_GENERATED_INPUT_DIRS = ('verif/tb/apu/sh_vectors',
                                  'verif/tb/apu/vn_vectors')
+APU_DEV_COHORTS = {
+    'immutable': ('ue_cpos_imm_texlod_1', 'ue_cpos_imm_copy_1', 'ue_cpos_imm_array_1'),
+    'layout': ('ue_cpos_emptylayout_1', 'ue_cpos_dslcompat_1', 'ue_cneg_layoutmix_1'),
+    'baseline': ('ue_gpos_tri_1', 'ue_gpos_fsubo_1', 'ue_gpos_fsubocopy_1',
+                 'ue_cpos_dcopy_descarr_1'),
+}
 
 # Env vars a leaf run may inject into the detached launcher: guest-stage
 # QEMU plumbing only; anything else is rejected up front so the remote
@@ -2137,6 +2143,9 @@ APU_LEAF_ENV_ALLOW = (
     'G6LC_CTS_LOG_IMAGES', 'G6LC_CTS_LOG_SHADERS',
     'G6LC_ONLY', 'G6LC_SKIP_APT', 'G6LC_VN_DEBUG', 'G6LC_GUEST_MEM',
     'G6LC_VENUS_ONLY',
+    'APU_DEV_COHORT', 'APU_DEV_TEST_TIMEOUT', 'APU_DEV_BUILD_TIMEOUT',
+    'APU_TOOL_SETUP_TIMEOUT', 'APU_AUTO_INSTALL',
+    'APU_SIM_PGO_TIMEOUT', 'APU_SIM_BUILD_TIMEOUT', 'APU_SIM_TRAIN_TIMEOUT',
 )
 
 
@@ -2164,6 +2173,14 @@ def apu_leaf_env(pairs: list[str]) -> dict[str, str]:
         if key not in APU_LEAF_ENV_ALLOW:
             die(f"--env {key} not allowed "
                 f"(choose: {', '.join(APU_LEAF_ENV_ALLOW)})")
+        if key == 'APU_DEV_COHORT' and value not in APU_DEV_COHORTS:
+            die(f"unknown development cohort: {value}", 2)
+        if key == 'APU_AUTO_INSTALL' and value not in ('0', '1'):
+            die("APU_AUTO_INSTALL must be 0 or 1", 2)
+        if key in ('APU_DEV_TEST_TIMEOUT', 'APU_DEV_BUILD_TIMEOUT',
+                   'APU_TOOL_SETUP_TIMEOUT', 'APU_SIM_PGO_TIMEOUT',
+                   'APU_SIM_BUILD_TIMEOUT', 'APU_SIM_TRAIN_TIMEOUT') and not re.fullmatch(r'[1-9][0-9]*', value):
+            die(f"{key} must be positive seconds", 2)
         env[key] = value
     return env
 
@@ -2197,7 +2214,60 @@ def apu_leaf_stages(text: str) -> list[str]:
     return stages
 
 
-def apu_leaf_sources(root: Path) -> list[str]:
+def apu_verilator_sources(root: Path) -> list[str]:
+    """Minimal offline compiler build closure, including dirty source edits."""
+    base = root / 'tools/verilator'
+    for name in ('configure.ac', 'Makefile.in', 'src/Makefile.in',
+                 'include/verilated.h', 'bin/verilator', 'install-sh'):
+        if not (base / name).is_file():
+            die(f"missing repository compiler input: tools/verilator/{name}", 3)
+    files = set()
+    for mode in (('--cached',), ('--others', '--exclude-standard')):
+        result = subprocess.run(
+            ['git', '-C', str(base), 'ls-files', '-z', *mode, '--',
+             'src', 'include', 'bin', 'm4', 'configure.ac', '*.in', 'install-sh',
+             'LICENSE*', 'COPYING*', 'NOTICE*', 'Artistic'],
+            capture_output=True)
+        if result.returncode:
+            die(f"cannot inventory repository compiler: {base}", 3)
+        for name in result.stdout.decode().split('\0'):
+            if mode[0] == '--others' and (
+                    any(part.startswith('.') for part in Path(name).parts) or
+                    Path(name).suffix not in (
+                        '.cpp', '.cc', '.c', '.h', '.in', '.y', '.l', '.pl',
+                        '.py', '.ac', '.m4', '.dat')):
+                continue
+            if name and (base / name).is_file():
+                files.add('tools/verilator/' + name)
+    return sorted(files)
+
+
+def apu_repository_tool_env(sources: dict, rundir: str) -> tuple[dict[str, str], str]:
+    compiler = sorted((name, digest) for name, digest in sources.items()
+                      if name.startswith('tools/verilator/'))
+    if not compiler or any(not digest for _, digest in compiler):
+        die("repository compiler closure is empty/incomplete", 3)
+    identity = hashlib.sha256(
+        json.dumps(compiler, separators=(',', ':')).encode()).hexdigest()
+    recipe_paths = ('apu_vlt_policy.py', 'apu_verilator_pgo.py',
+                    'verilator-pgo-cxx.sh', 'vlt_pgo_train.sv')
+    recipe = [(name, sources.get('verif/tb/apu/' + name)) for name in recipe_paths]
+    if any(not digest for _, digest in recipe):
+        die("PGO build recipe/training inputs missing from snapshot", 3)
+    recipe_sha = hashlib.sha256(
+        json.dumps(recipe, separators=(',', ':')).encode()).hexdigest()
+    home = f"{REMOTE_ROOT}/toolchains/apu-repo-verilator/{identity}/pgo-{recipe_sha}"
+    return {
+        'APU_VERILATOR_HOME': home,
+        'APU_VERILATOR_SOURCE_ID_FILE': f'{rundir}/verilator-source.id',
+        'APU_AUTO_INSTALL': '1',
+        'APU_VERILATOR_PGO': '1',
+        'APU_SIM_PGO': '1',
+        'APU_SIM_PGO_CACHE': f'{REMOTE_ROOT}/cache/apu-sim-pgo',
+    }, identity
+
+
+def apu_leaf_sources(root: Path, include_tools: bool = False) -> list[str]:
     """Tracked + untracked files under the APU manifest surfaces.
 
     The union of ``git ls-files --cached --recurse-submodules`` and
@@ -2229,6 +2299,8 @@ def apu_leaf_sources(root: Path) -> list[str]:
         for rel in proc.stdout.decode(errors='replace').split('\0'):
             if rel and (root / rel).is_file():
                 found.add(Path(rel).as_posix())
+    if include_tools:
+        found.update(apu_verilator_sources(root))
     return sorted(found)
 
 
@@ -2416,12 +2488,34 @@ def cmd_apu_leaf(rem: Remote, args) -> int:
     root = Path(args.snapshot).resolve()
     stages = apu_leaf_stages(args.stages)
     leaf_env = apu_leaf_env(getattr(args, 'env', None) or [])
-    files = apu_leaf_sources(root)
+    repository_tools = any(stage in ('dev', 'unit', 'top', 'soc', 'bridge', 'guest', 'synth')
+                           for stage in stages)
+    if 'dev' in stages:
+        cohort = leaf_env.get('APU_DEV_COHORT', 'immutable')
+        preflight = subprocess.run(
+            [sys.executable, '-B', str(repo_root() / 'verif/tb/apu/apu_dev_preflight.py'),
+             str(root), *APU_DEV_COHORTS[cohort]], capture_output=True, text=True)
+        if preflight.returncode:
+            die(preflight.stderr.strip() or preflight.stdout.strip(), 3)
+    files = apu_leaf_sources(root, include_tools=repository_tools)
     manifest_mod = _apu_source_manifest()
     local = manifest_mod.manifest(root, ','.join(stages), None, files=files)
     tag = f"apu-leaf-{datetime.now().strftime('%Y%m%dT%H%M%S')}-{os.urandom(6).hex()}"
     rundir = f"{REMOTE_ROOT}/runs/{tag}"
     source_dir = f"{rundir}/source"
+    compiler_id = None
+    if repository_tools:
+        tool_env, compiler_id = apu_repository_tool_env(local['sources'], rundir)
+        # Auto-install may be explicitly disabled, but the compiler binding and
+        # identity file cannot be overridden with arbitrary --env values.
+        auto_install = leaf_env.get('APU_AUTO_INSTALL', '1')
+        leaf_env.update(tool_env)
+        leaf_env['APU_AUTO_INSTALL'] = auto_install
+        leaf_env['APU_SIM_SOURCE_ID'] = local['sourceSha256']
+    if 'dev' in stages:
+        leaf_env.setdefault('APU_DEV_COHORT', 'immutable')
+        leaf_env['APU_BUILD_CACHE'] = f"{REMOTE_ROOT}/cache/apu-dev/{local['sourceSha256']}"
+        leaf_env['APU_DEV_LOG_DIR'] = f'{rundir}/output/dev'
     dest = repo_root() / "remote-runs" / tag
     dest.mkdir(parents=True, exist_ok=False)
     (dest / 'snapshot-files.txt').write_text(''.join(f'{p}\n' for p in files))
@@ -2447,7 +2541,12 @@ def cmd_apu_leaf(rem: Remote, args) -> int:
     rem.run(f"cd {shlex.quote(source_dir)} && "
             f"sha256sum --quiet -c {shlex.quote(rundir + '/snapshot.sha256')} && "
             "find . -name '*.sh' -exec chmod u+x {} +")
-    verilator = apu_optimized_verilator(rem)
+    if repository_tools:
+        rem.run(f"printf '%s\\n' {shlex.quote(compiler_id)} > "
+                f"{shlex.quote(rundir + '/verilator-source.id')}")
+        verilator = leaf_env['APU_VERILATOR_HOME'] + '/bin/verilator'
+    else:
+        verilator = apu_optimized_verilator(rem)
     log(f"APU verilator: {verilator}")
     yosys_g6lc = remote_yosys(REMOTE_ROOT)
     yosys_formal = f"{REMOTE_ROOT}/toolchains/formal/bin/yosys"

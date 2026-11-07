@@ -162,6 +162,12 @@ vkCmdBeginQuery
 vkCmdEndQuery
 vkCmdWriteTimestamp
 vkGetQueryPoolResults
+vkCmdWriteTimestamp2
+vkCmdCopyQueryPoolResults
+vkCmdBeginQueryIndexedEXT
+vkCmdEndQueryIndexedEXT
+vkCmdBeginConditionalRenderingEXT
+vkCmdEndConditionalRenderingEXT
 
 # VK_MESA_venus_protocol transport (executed by the pump, not the
 # front-end; APU_VN_ACT_TRANSPORT).  Operand slots are DISCARDed for

@@ -12,6 +12,18 @@ is fetched), `AGENTS-core-platform-vendor-actives.md` (which controllers/PHY exi
 attach), and `architecture/uncore/*` (per-domain RTL outlines). Where it conflicts with `AGENTS.md`
 §0 (the SoC prime directive), §0 wins.
 
+APU descriptor-state follow-up: the immutable-sampler layout/allocation/update/
+copy increment is described in `architecture/uncore/apu-immutable-implementation.md`
+and `docs/03_cva6_design/apu_immutable_samplers.md`. It retains the existing
+Venus enable, reset, SRAM and transaction seams. Selected 5.008 mechanism
+checks are not a full CTS or SoC-readiness promotion; physical, full identity,
+extended lifetime/fault and aggregate gates remain open.
+
+The next empty-layout sizing correction and bounded testharness dev stage
+are recorded in `architecture/uncore/apu-dev-harness-implementation.md`.
+Tool/file checks and mocked harness tests do not stand in for remote RTL,
+formal or physical evidence.
+
 ---
 
 ## 1. What corev_apu is (today)

@@ -8,6 +8,24 @@ generated-decoder methodology and implementation contracts. A fixture result is 
 
 ## Current contract — full-feature continuation (2026-10-10)
 
+Immutable-sampler follow-up: the frontend now retains layout-supplied sampler
+arrays, snapshots packed state into layout-owned ObjPay storage, initializes
+descriptor records and preserves destination sampler bytes on writes/copies.
+Three selected immutable fixtures pass at fixed and randomized memory latency
+on repository-built 5.008. This supersedes historical capture-gap descriptions,
+not the open CTS/complete-layout-identity/qualification gates. Format, evidence
+and SoC notes: `apu-immutable-implementation.md`.
+
+Descriptor-order correction (later functional increment): `vnfront` emits
+layout rows in increasing binding-number order, independent of `pBindings`
+array order. This supersedes the historical F5 binding-list-order description
+below. Dynamic bases and the existing row-content hash follow the canonical
+order. The `dslcompat` permutation control and `layoutmix` count-mismatch
+control pass locally on repository-built 5.008; no CTS, physical or aggregate
+qualification is inferred. Timing, DFT/config notes and open hash/immutable-
+sampler limitations: `apu-cts-development.md`, "RTL Increment: Canonical
+Descriptor Layout Rows".
+
 Reviewed at HEAD `51927af9e` plus the existing dirty 3d-d changes. The generated
 Venus backend is attached: `32668990c`/`7822b1672`; stock-client compute evidence
 landed in `cc4bdca95`, memory-resident descriptors in `1290036ec`, allocator/lifetime

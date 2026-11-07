@@ -148,11 +148,22 @@ def _semaphore(c):
     return None if c.golden_has(r'waitSemaphoreCount=[1-9]') else 'untested'
 
 
+def _immutable_sampler(c):
+    # CTS supplies these at layout creation, not through descriptor writes.
+    # Merely exercising a graphics bind does not cover this lifetime.
+    fields = c.keep.get('vkCreateDescriptorSetLayout', set())
+    return None if 'pBindings.pImmutableSamplers' in fields else 'certain-fail'
+
+
 def _feature(name):
     return lambda c: None if name in c.features else 'ns-expected'
 
 
 RULES = [
+    ('immutable-sampler', r'\.binding_model\..*(sampler_immutable|'
+     r'copy_immutable_sampler)', _immutable_sampler,
+     'immutable sampler handles are dropped at descriptor-set layout '
+     'creation; allocation cannot initialize their descriptor records'),
     # descriptor-binding contexts only: memory.pipeline_barrier's texel
     # variants pass (their texel path is not a descriptor write)
     ('texel-buffer', r'\.(binding_model|descriptor_indexing)\..*'
@@ -327,42 +338,63 @@ def cmd_check(a):
 
 
 def cmd_wave(a):
-    """Next T4 (remote RTL) wave from a scanned sample: up to --max
-    not-yet-run cases predicted acceptable (predicted-pass, ns-expected,
-    risk), round-robin across modules so every module advances, plus a
-    --control fraction of predicted failures (certain-fail/untested) to
-    keep measuring the pre-filter's precision.  Seeded, must-pass order."""
+    """Choose a confirmation cohort and a separately labelled discovery
+    cohort. A module-level risk or shader refusal is not a predicted pass;
+    NS predictions also need execution to establish support-check behavior.
+    Uncertain cases remain eligible for discovery rather than disappearing."""
+    if a.max < 1 or not 0 <= a.control <= 1:
+        raise ValueError('--max must be positive and --control within [0, 1]')
     import random
-    scan = json.load(open(a.scan))['cases']
+    with open(a.scan) as f:
+        scan = json.load(f)['cases']
     done = set()
     for p in a.results or []:
-        for rec in json.load(open(p)).get('results', []):
+        with open(p) as f:
+            records = json.load(f).get('results', [])
+        for rec in records:
             done.add(rec['name'])
     mods = [m for m in (a.modules.split(',') if a.modules else []) if m]
-    good, bad = collections.defaultdict(list), []
+    good = collections.defaultdict(list)
+    discovery = collections.defaultdict(list)
     for n, v in scan.items():
         if n in done or (mods and n.split('.')[1] not in mods):
             continue
-        if v['verdict'] in ('certain-fail', 'untested'):
-            bad.append(n)
-        else:
+        if v['verdict'] == 'predicted-pass':
             good[n.split('.')[1]].append(n)
+        else:
+            discovery[(v['verdict'], n.split('.')[1])].append(n)
     rng = random.Random(a.seed)
-    for k in good:
-        rng.shuffle(good[k])
-    pick, keys = [], sorted(good)
-    while len(pick) < a.max and any(good[k] for k in keys):
-        for k in keys:
-            if good[k] and len(pick) < a.max:
-                pick.append(good[k].pop())
-    nctl = min(len(bad), max(1 if bad else 0, int(round(a.control * len(pick)))))
-    rng.shuffle(bad)
-    ctl = bad[:nctl]
+
+    def draw(buckets, count):
+        keys = sorted(buckets)
+        for key in keys:
+            rng.shuffle(buckets[key])
+        picked = []
+        while len(picked) < count and any(buckets[key] for key in keys):
+            for key in keys:
+                if buckets[key] and len(picked) < count:
+                    picked.append(buckets[key].pop())
+        return picked
+
+    pick = draw(good, a.max)
+    nctl = max(1, int(round(a.control * (len(pick) or a.max)))) \
+        if discovery and a.control else 0
+    ctl = draw(discovery, nctl)
     order = {n: i for i, n in enumerate(scan)}
     sel = sorted(pick + ctl, key=lambda n: order[n])
     with open(a.out, 'w') as f:
         f.writelines(n + '\n' for n in sel)
-    print('wave: %d predicted-acceptable + %d control -> %s'
+    manifest = {
+        'schema': 1, 'scan': a.scan, 'seed': a.seed,
+        'results': a.results or [],
+        'confirmation': pick, 'discovery': ctl,
+        'discovery_verdicts': dict(collections.Counter(
+            scan[n]['verdict'] for n in ctl)),
+        'note': 'Cohorts are diagnostic, not a conformance or random-rate estimate.',
+    }
+    with open(a.out + '.json', 'w') as f:
+        json.dump(manifest, f, indent=1, sort_keys=True)
+    print('wave: %d confirmation + %d discovery -> %s'
           % (len(pick), len(ctl), a.out))
     return 0
 

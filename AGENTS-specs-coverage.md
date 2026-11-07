@@ -26,6 +26,24 @@ component/selected-top synthesis and depth-12 safety plus reachability; native
 projection remains off/refuse only. No capability grant follows; all
 limitations below stand.
 
+Independent configured-CPU instruction evidence now exercises M/S/U and
+MPRV with each supported MPP value S/U/M, including delayed responses and
+rejecting origin checks. M/S/U external-debug entry/CSR/return behavior also
+has scoped instruction evidence and a corrected redirect-priority contract.
+Scoped AW/W/B backpressure tests also distinguish actual pending-entry
+crossings from observed drain order without treating live mode as origin.
+An independent seven-write fixture also observes unknown-origin debug
+responses remaining pending across actual DRET into M/S/U firmware.
+This does not promote privileged-ISA compliance, strict compiler scheduling,
+broader debug, adversarial queued transitions or native memory/storage
+qualification. The chapter statuses remain unchanged.
+
+The standalone policy-publication candidate adds explicit whole-interface
+ownership, immutable pending offers, sticky revocation and nonwrapping epochs.
+Directed and bounded formal fixtures cover the contract; they do not establish
+genuine native ingress/writer/cache/reservation/device acknowledgements. Native
+admission, physical persistence and ISA chapter statuses remain unchanged.
+
 The default-off configuration and refusal frontend have directed protocol,
 native-adapter and bounded safety evidence. Structural synthesis is latch-free
 and combinational-loop-free for the tested leaf. The exhaustive configuration

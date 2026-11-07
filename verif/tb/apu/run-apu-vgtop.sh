@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Copyright 2026 Etienne Cimon
 # SPDX-License-Identifier: MIT
 # Venus transport session test (g6lc_apu_vgtop: vgctl + vnpump +
 # vnfront + objtab + cmdrec + cmdexec) — Verilator sim replaying the
@@ -7,13 +8,10 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 export CVA6_REPO_DIR="$ROOT"
-OUT="${APU_VGTOP_OUT:-/tmp/g6lc-apu-vgtop}"
-VERILATOR="${VERILATOR:-verilator}"
+source "$ROOT/verif/tb/apu/local-verilator.sh"
+OUT="${APU_VGTOP_OUT:-$APU_BUILD_CACHE/vgtop}"
+apu_select_verilator
 YOSYS="${YOSYS:-yosys}"
-if ! command -v "$VERILATOR" >/dev/null 2>&1 && \
-   [ -x /opt/testharness/toolchains/verilator-v5.008/bin/verilator ]; then
-  VERILATOR=/opt/testharness/toolchains/verilator-v5.008/bin/verilator
-fi
 if ! command -v "$YOSYS" >/dev/null 2>&1; then
   if [ -x /opt/testharness/toolchains/yosys-g6lc/bin/yosys ]; then
     YOSYS=/opt/testharness/toolchains/yosys-g6lc/bin/yosys
@@ -24,8 +22,8 @@ fi
 if ! command -v "$YOSYS" >/dev/null 2>&1 && [ -x /usr/local/bin/yosys ]; then
   YOSYS=/usr/local/bin/yosys
 fi
-rm -rf "$OUT"
 mkdir -p "$OUT"
+apu_record_verilator
 # GENUNNAMED does not exist before Verilator 5.016; gate the waiver.
 # apu_exec.vlt waives the vendored FPnew lint noise (ShaderCore is in
 # the flist since §7b/5a-ii).
@@ -35,7 +33,8 @@ vver="$("$VERILATOR" --version | grep -o '[0-9][0-9.]*' | head -1)"
 if awk -v v="$vver" 'BEGIN{split(v,a,"."); exit !(a[1]>5||(a[1]==5&&a[2]>=16))}'; then
   VLTS+=("$ROOT/verif/tb/apu/apu_vn.vlt")
 fi
-if ! "$VERILATOR" --binary --timing --assert -Wall \
+if ! "$VERILATOR" --binary --timing --assert -Wall -j "$APU_BUILD_JOBS" \
+  "${APU_VERILATOR_FLAGS[@]}" \
   -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC \
   -Wno-BLKSEQ \
   -Wno-SYNCASYNCNET -Wno-DECLFILENAME -Wno-PINCONNECTEMPTY \
@@ -76,9 +75,11 @@ ue_cneg_deadpool_1 ue_cneg_poolfull_1 \
 ue_cpos_xfer_copy_1 ue_cpos_xfer_update_1 \
 ue_cneg_xfer_oob_1 ue_cneg_xfer_overlap_1 \
 ue_cpos_poolreset_1 ue_cpos_dslcompat_1 \
+ue_cpos_emptylayout_1 \
 ue_cpos_memsplit_1 ue_cneg_unbacked_1 \
 ue_cpos_texfetch_1 ue_cpos_texfetch_mip_1 ue_cpos_texarr_1 \
 ue_cpos_texlod_lin_1 ue_cpos_texlod_mip_1 ue_cpos_texquery_1 \
+ue_cpos_imm_texlod_1 ue_cpos_imm_copy_1 ue_cpos_imm_array_1 \
 ue_cpos_texsrgb_1 ue_cpos_imgloadstore_1 \
 ue_cneg_texfetch_bad_1 ue_cneg_texlod_lin_bad_1 \
 ue_cneg_imgloadstore_bad_1 ue_cneg_texquery_bad_1 \
@@ -86,6 +87,7 @@ ue_cneg_badfmt_1 ue_cneg_viewoob_1 ue_cneg_kindmix_1 \
 ue_cneg_xfer_img_oob_1 ue_cneg_unnorm_1 \
 ue_cpos_blit_id_1 ue_cneg_blit_scaled_1 ue_cpos_xfer_big_1 \
 ue_cpos_dcopy_bufcopy_1 ue_cpos_dcopy_descarr_1 ue_cpos_dcopy_multiset_1 \
+ue_gpos_fsubo_1 ue_gpos_fsubocopy_1 \
 ue_cpos_clear_rgba8_1 ue_cpos_clear_r32f_1 ue_cpos_clear_r32u_1 \
 ue_cpos_clear_srgb_1 ue_cpos_clear_rgba16f_1 \
 ue_cneg_clear_oob_1 ue_cpos_ctxkill_reuse_1 \

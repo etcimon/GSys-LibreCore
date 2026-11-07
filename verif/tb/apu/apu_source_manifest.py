@@ -27,6 +27,7 @@ SURFACES = ('core', 'corev_apu', 'vendor', 'common', 'config', 'verif/tb',
 # Single-file surfaces live at the repo root (the soc stage needs the
 # repo-root verilator_config.vlt); everything else is walked as a directory.
 FILE_SURFACES = ('verilator_config.vlt',)
+FILE_LIST_EXTRA_SURFACES = ('tools/verilator',)
 EXCLUDED_DIRS = {'.git', '.cache', '__pycache__', 'node_modules', 'obj_dir',
                  'build', 'out'}
 # 'target' is deliberately NOT excluded: the hpdcache target directory is RTL
@@ -38,7 +39,13 @@ EXTENSIONS = {'.sv', '.svh', '.v', '.vh', '.c', '.h', '.cpp', '.cc', '.py', '.sh
 EXTRA_NAMES = {'user-data', 'meta-data'}
 
 CONFIGURATION_KEYS = ('TARGET_CFG', 'VERILATOR', 'VERILATOR_ROOT', 'YOSYS',
-                      'NUM_JOBS', 'APU_REGRESS_TIMEOUT', 'G6LC_QEMU', 'G6LC_QLIB')
+                      'NUM_JOBS', 'APU_REGRESS_TIMEOUT', 'G6LC_QEMU', 'G6LC_QLIB',
+                      'APU_VERILATOR_HOME', 'APU_VERILATOR_SOURCE_ID_FILE',
+                      'APU_DEV_COHORT', 'APU_DEV_TEST_TIMEOUT',
+                      'APU_DEV_BUILD_TIMEOUT', 'APU_TOOL_SETUP_TIMEOUT',
+                      'APU_SIM_PGO', 'APU_REAL_VERILATOR', 'APU_SIM_PGO_TIMEOUT',
+                      'APU_SIM_BUILD_TIMEOUT', 'APU_SIM_TRAIN_TIMEOUT',
+                      'APU_SIM_PGO_CACHE')
 
 
 def _wanted(name: str) -> bool:
@@ -78,7 +85,8 @@ def inventory(root: Path, files: list[str] | None = None) -> dict[str, str | Non
         for entry in files:
             posix = Path(entry).as_posix()
             under = (posix in SURFACES
-                     or any(posix.startswith(s + '/') for s in dir_surfaces))
+                     or any(posix.startswith(s + '/') for s in
+                            (*dir_surfaces, *FILE_LIST_EXTRA_SURFACES)))
             if not under or _excluded(Path(posix)):
                 continue
             p = root / posix

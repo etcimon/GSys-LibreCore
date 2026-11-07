@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Copyright 2026 Etienne Cimon
 # SPDX-License-Identifier: MIT
 # §6c-i Venus system test (g6lc_apu_vgsys: vqwalk + vgtop + apmem on one
 # AXI4 master) — Verilator sim replaying the generated guest-script
@@ -9,13 +10,10 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 export CVA6_REPO_DIR="$ROOT"
-OUT="${APU_VGSYS_OUT:-/tmp/g6lc-apu-vgsys}"
-VERILATOR="${VERILATOR:-verilator}"
+source "$ROOT/verif/tb/apu/local-verilator.sh"
+OUT="${APU_VGSYS_OUT:-$APU_BUILD_CACHE/vgsys}"
+apu_select_verilator
 YOSYS="${YOSYS:-yosys}"
-if ! command -v "$VERILATOR" >/dev/null 2>&1 && \
-   [ -x /opt/testharness/toolchains/verilator-v5.008/bin/verilator ]; then
-  VERILATOR=/opt/testharness/toolchains/verilator-v5.008/bin/verilator
-fi
 if ! command -v "$YOSYS" >/dev/null 2>&1; then
   if [ -x /opt/testharness/toolchains/yosys-g6lc/bin/yosys ]; then
     YOSYS=/opt/testharness/toolchains/yosys-g6lc/bin/yosys
@@ -26,15 +24,16 @@ fi
 if ! command -v "$YOSYS" >/dev/null 2>&1 && [ -x /usr/local/bin/yosys ]; then
   YOSYS=/usr/local/bin/yosys
 fi
-rm -rf "$OUT"
 mkdir -p "$OUT"
+apu_record_verilator
 VLTS=("$ROOT/verif/tb/apu/apu_axi.vlt"
       "$ROOT/verif/tb/apu/apu_exec.vlt")
 vver="$("$VERILATOR" --version | grep -o '[0-9][0-9.]*' | head -1)"
 if awk -v v="$vver" 'BEGIN{split(v,a,"."); exit !(a[1]>5||(a[1]==5&&a[2]>=16))}'; then
   VLTS+=("$ROOT/verif/tb/apu/apu_vn.vlt")
 fi
-if ! "$VERILATOR" --binary --timing --assert -Wall -j "$(nproc)" \
+if ! "$VERILATOR" --binary --timing --assert -Wall -j "$APU_BUILD_JOBS" \
+  "${APU_VERILATOR_FLAGS[@]}" \
   -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC \
   -Wno-BLKSEQ \
   -Wno-SYNCASYNCNET -Wno-DECLFILENAME -Wno-PINCONNECTEMPTY \
@@ -84,7 +83,7 @@ ue_cpos_rb_mapafter_1 ue_cpos_ubo_bindfirst_1 \
 ue_cpos_evict_1 ue_cpos_reloc_hold_1 \
 ue_cneg_evict_full_1 ue_cneg_bind_full_1 ue_cneg_stale_mem_1 ue_cneg_blit_scaled_1 ue_cpos_blit_id_1 ue_cpos_xfer_big_1 \
 ue_cpos_dcopy_bufcopy_1 ue_cpos_dcopy_descarr_1 ue_cpos_dcopy_multiset_1 \
-ue_gpos_tri_1 ue_gpos_vbwide_1 ue_gpos_statvp_1 ue_gpos_blend_1 ue_gpos_ptsrg8_1 ue_gpos_ptsrg8x_1 ue_gpos_ptsvidx_1 ue_gpos_fsubo_1 \
+ue_gpos_tri_1 ue_gpos_vbwide_1 ue_gpos_statvp_1 ue_gpos_blend_1 ue_gpos_ptsrg8_1 ue_gpos_ptsrg8x_1 ue_gpos_ptsvidx_1 ue_gpos_fsubo_1 ue_gpos_fsubocopy_1 \
 ue_cpos_maxconc_1 ue_cpos_defer2_1 \
 ue_cpos_modres_1 ue_cpos_rerec_1 \
 ue_cpos_zerodisp_1 ue_cpos_shared1_1 ue_cpos_atomic1_1 \

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright 2026 Etienne Cimon
 # SPDX-License-Identifier: MIT
 """spirv_model.py — bit-exact reference interpreter for the G6LC
 ShaderCore increment-4b subset (architecture doc §7a/§7c — 4a
@@ -548,7 +549,7 @@ class Model:
     """Executes one dispatch of a scanned 4a-subset module."""
 
     def __init__(self, words, scratch_words=SCRATCH_WORDS,
-                 slab_words=SLAB_WORDS):
+                 slab_words=SLAB_WORDS, memory=None):
         self.w = words
         self.sc_w = scratch_words
         self.slb_w = slab_words
@@ -593,11 +594,12 @@ class Model:
             p += 3
             if s < 4 and o < 16:
                 self.dyn[s][o] = v
-        self.mem = {}                          # word addr -> u32
+        self.mem = {} if memory is None else memory
         for b in self.binds:
             st, bd, sz, ad = b[0], b[1], b[2], b[3]
-            for i in range(sz // 4):
-                self.mem[(ad >> 2) + i] = words[p + i]
+            if memory is None:
+                for i in range(sz // 4):
+                    self.mem[(ad >> 2) + i] = words[p + i]
             p += sz // 4
         # G1a graphics wave work (flags bit2): {stage, count, in_base,
         # out_base, vbase, inst, n_in} + the input-record image; the
@@ -635,7 +637,9 @@ class Model:
                             swz=swz & 0xFFF, smp0=s0, smp1=s1)
             idx = ax & 0xFF
             dyn = (ax >> 8) & 1
-            kind = ((ax >> 16) & 0xFF) or 7
+            kind = (ax >> 16) & 0xFF
+            if not kind and not ax & (1 << 24):
+                kind = 7
             key = (st, bd)
             row = self.drows.get(key)
             if row is None:
@@ -1399,6 +1403,10 @@ class Model:
             if b is None or not b[2] or o32 + 4 > b[1]:
                 self.robust += 1
                 return 0 if not is_store else None
+            # A readonly descriptor cannot borrow write permission from an alias.
+            if is_store and self.drecs[(st, self.drows[(st, bd)]['off32'] + didx)][2] in (6, 8):
+                self.fault = 'DESCKIND'
+                return None
             if is_store:
                 self.mwrite(b[0] + o32, val, cls)
                 return None

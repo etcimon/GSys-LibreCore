@@ -700,27 +700,29 @@ module g6lc_apu_vgtop
       .pop_o  (ex_done_v),
       .pl_o   (ex_done_pl),
       .push_n_o(dq_push_n));
+// pragma translate_off
 `ifdef G6LC_APU_DBG_LOST
     // debug probe: every done-queue push/pop with its payload —
     // catches lost or phantom completions (temporary bring-up aid)
     always_ff @(posedge clk_i) begin
-      if (dq_p_sh)
+      if (rst_ni && sh_done && !gfx_done)
         $display("[DBG] dqv push sh code=%0d wid=%08x t=%0t",
                  sh_done_pl.code, sh_done_pl.work_id, $time);
-      if (dq_p_xf)
+      if (rst_ni && xf_done)
         $display("[DBG] dqv push xf code=%0d t=%0t",
                  xf_done_pl.code, $time);
-      if (dq_p_rs)
+      if (rst_ni && rs_done)
         $display("[DBG] dqv push rs code=%0d wid=%08x t=%0t",
                  rs_done_pl.code, rs_done_pl.work_id, $time);
-      if (dq_p_ex)
+      if (rst_ni && work_done_i)
         $display("[DBG] dqv push ex code=%0d t=%0t",
                  work_done_pl_i.code, $time);
-      if (dq_pop)
+      if (rst_ni && ex_done_v)
         $display("[DBG] dqv pop  code=%0d wid=%08x t=%0t",
                  ex_done_pl.code, ex_done_pl.work_id, $time);
     end
 `endif
+// pragma translate_on
     logic              rs_pg_v, rs_pg_rdy, rs_pg_cpl_rdy;
     apu_vgpages_req_t  rs_pg_req;
     logic              rs_mp_v;

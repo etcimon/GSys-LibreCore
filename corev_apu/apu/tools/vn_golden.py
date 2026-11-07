@@ -32,6 +32,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gen_vn_tables as G   # noqa: E402
+from vn_layout import descriptor_bindings, descriptor_rows, descriptor_row_words  # noqa: E402
+from vn_model import ApertureState, ObjectTable, PAY_CHUNK, PayloadMemory  # noqa: E402
+from vn_image_operands import ImageSource, capture_source, immutable_source  # noqa: E402
 
 import vkxml               # noqa: E402  (added to sys.path by gen_vn_tables)
 import vn_protocol         # noqa: E402
@@ -1454,7 +1457,6 @@ SESSION_MAX_REP = 352
 # vgtop/vgsys/sys elaborate 16 MiB; a smaller mirror predicted FULL for
 # recmany/allocmany where the device succeeds (payfull passes its own)
 PAY_WORDS = 16 * 1024 * 1024 // 4
-PAY_CHUNK = 64
 PAY_STAGE = 32768
 APU_VN_FAULT_PAYLOAD = 9
 # §7b/5a-ii: pipelines keep no ObjPay extent — the staged payload is
@@ -1760,14 +1762,7 @@ def spv_words(name):
     return list(struct.unpack('<%dI' % (len(data) // 4), data))
 
 
-# session module: smallest corpus vector (~2k cycles/dispatch); any
-# 4a-committable module works -- the dispatch is only required to
-# issue, run and complete on the real ShaderCore
-SPV_SESSION = spv_words('bufcopy')
-SPV_SESSION_B = len(SPV_SESSION) * 4
-
-
-class FrontModel:
+class FrontModel(ObjectTable, PayloadMemory):
     """Mirror of g6lc_apu_vnfront's externally visible state."""
 
     SLOTS = 256
@@ -1783,19 +1778,12 @@ class FrontModel:
         self.reset()
 
     def reset(self):
-        self.ent = [None] * self.SLOTS
-        self.gens = [0] * self.SLOTS
-        self.idmap = {}
-        self.live_cnt = 0
-        self.ctx = 0
+        self.reset_objects()
         # ObjTab-V mirror: free slots come from a LIFO stack
         # (objmem POP/PUSH) falling back to a never-used bump cursor;
         # ctxorder tracks each context's live slots oldest->newest so
         # RESET_CTX / RETIRE_KIDS push frees in the RTL's
         # newest-first walk order
-        self.freestk = []
-        self.bump = 0
-        self.ctxorder = {}
         # §5a G3b-iii: command buffers are PayMem-resident — slot ->
         # descriptor shadow; the physical image lives in self.pay
         # (desc words w0..w11, record/payload chunk chains)
@@ -1819,6 +1807,7 @@ class FrontModel:
         # are a residency cache keyed by the module handle — the
         # shadow keeps only the words, keyed by {gen,slot}
         self.sh_code = {}                      # module handle -> pCode
+        self.descriptor_sources = None         # opt-in host-only provenance
         # §7b/5a-ii: aperture pages.  `self.ap` may be bound to a
         # TransportModel so vgctl blobs and device memory share one
         # allocator; standalone runs use this bitmap.
@@ -1830,9 +1819,7 @@ class FrontModel:
         # sparse content image for the .pay expectations.  Chunk 0 is
         # reserved at init so no extent starts at word 0: aux[63:32]/
         # pool-chain parkings use 0 as the "none" sentinel.
-        self.pay_bits = 1
-        self.pay_cur = 0
-        self.pay = {}                          # addr -> word
+        self.reset_payload()
         # G1c: work-port sequence per cbuf slot incl. internal
         # render-pass CLEAR items — filled by _disp_assembly_lost on a
         # live replay
@@ -1844,220 +1831,6 @@ class FrontModel:
         # front writes (word-indexed); the tape mode binds self.ap to
         # the TransportModel and writes land there instead
         self.apm = {}
-
-    # ---- ObjTab -------------------------------------------------------------
-    def resolve(self, idv, kind, allow_zomb=False):
-        """-> (status, slot, entry).  Mirrors res_start: handle form iff
-        id[63:32]==0 and the gen field is nonzero (a live generation is
-        never 0, so a small zero-gen id is a client id and probes the
-        directory like any other id).  G3b-ii: a RETIRE_LAZY zombie
-        (entry alive, directory id tombstoned) resolves only for the
-        PIN/UNPIN ops that own its remaining pins — allow_zomb is the
-        model's zomb_blk bypass."""
-        if idv == 0:
-            return 'MISS', -1, None
-        if idv < (1 << 32) and ((idv >> 16) & 0xFFFF) != 0:
-            slot, gen = idv & 0xFFFF, (idv >> 16) & 0xFFFF
-            if slot >= self.SLOTS:
-                return 'GEN', -1, None
-            e = self.ent[slot]
-            if e is None or e['gen'] != gen:
-                return 'GEN', -1, None
-            if e.get('zomb') and not allow_zomb:
-                return 'GEN', -1, None
-            if kind and e['kind'] != kind:
-                return 'KIND', slot, e
-            return 'OK', slot, e
-        s = self.idmap.get(idv)
-        if s is None:
-            return 'MISS', -1, None
-        e = self.ent[s]
-        if e is None:
-            return 'MISS', -1, None
-        if e.get('zomb') and not allow_zomb:
-            return 'MISS', -1, None
-        if kind and e['kind'] != kind:
-            return 'KIND', s, e
-        return 'OK', s, e
-
-    def alloc(self, idv, kind, parent_h):
-        if idv in self.idmap and self.ent[self.idmap[idv]] is not None:
-            return 'DUP', 0, -1
-        if self.freestk:
-            slot = self.freestk.pop()
-        elif self.bump < self.SLOTS:
-            slot = self.bump
-            self.bump += 1
-        else:
-            return 'FULL', 0, -1
-        par = -1
-        if parent_h:
-            st, ps, _pe = self.resolve(parent_h, 0)
-            if st != 'OK':
-                return 'PARENT_MISS', 0, -1
-            par = ps
-        g = self.gens[slot] + 1
-        if g > 0xFFFF:
-            g = 1
-        self.gens[slot] = g
-        self.ent[slot] = {'id': idv, 'kind': kind, 'gen': g,
-                          'parent': par, 'refcnt': 0, 'pins': 0,
-                          'zomb': 0,
-                          'state': 0, 'aux': 0, 'ctx': self.ctx,
-                          'size': 0, 'bind_mem': -1, 'bind_mgen': 0,
-                          'bind_off': 0}
-        self.idmap[idv] = slot
-        self.live_cnt += 1
-        self.ctxorder.setdefault(self.ctx, []).append(slot)
-        if par >= 0:
-            self.ent[par]['refcnt'] += 1
-        return 'OK', (g << 16) | slot, slot
-
-    def _free_slot(self, s, e):
-        """Retire bookkeeping shared by retire/reset_ctx/retire_kids:
-        unlink the ctx list and push the slot to the free stack."""
-        self.ent[s] = None
-        self.idmap.pop(e['id'], None)
-        self.live_cnt -= 1
-        cl = self.ctxorder.get(e['ctx'])
-        if cl is not None and s in cl:
-            cl.remove(s)
-        self.freestk.append(s)
-
-    def retire(self, idv, kind):
-        st, s, e = self.resolve(idv, kind)
-        if st != 'OK':
-            return st, s
-        if e['pins']:
-            return 'PINNED', s
-        if e['refcnt']:
-            return 'BUSY_CHILDREN', s
-        if e['parent'] >= 0 and self.ent[e['parent']] is not None:
-            self.ent[e['parent']]['refcnt'] -= 1
-        self._free_slot(s, e)
-        return 'OK', s
-
-    def retire_kids(self, h, kind):
-        """§12.3 F5-d: APU_OBJTAB_OP_RETIRE_KIDS mirror — id[15:0] is
-        the parent slot itself (no directory probe); every live entry
-        parented on it dies and the parent's refcount is zeroed
-        wholesale so its own RETIRE cannot BUSY_CHILDREN.
-        -> (status, killed)
-        """
-        s = h & 0xFFFF
-        if s >= self.SLOTS:
-            return 'MISS', 0
-        # RTL walks the parent's ctx list newest->oldest filtering on
-        # parent_slot; a dead parent still kills by its ctx's list
-        pe = self.ent[s]
-        ctxn = pe['ctx'] if pe is not None else self.ctx
-        n = 0
-        for i in list(self.ctxorder.get(ctxn, []))[::-1]:
-            c = self.ent[i]
-            if c is not None and c['parent'] == s:
-                self._free_slot(i, c)
-                n += 1
-        # kids outside the walk (defensive: ctx mismatch)
-        for i, c in enumerate(self.ent):
-            if c is not None and c['parent'] == s:
-                self._free_slot(i, c)
-                n += 1
-        e = self.ent[s]
-        if e is not None:
-            e['refcnt'] = 0
-        return 'OK', n
-
-    def setstate(self, h, mask, value):
-        st, s, e = self.resolve(h, 0)
-        if st != 'OK':
-            return st, s
-        e['state'] = (e['state'] & ~mask) | (value & mask)
-        return 'OK', s
-
-    def setaux(self, h, mask, value):
-        st, s, e = self.resolve(h, 0)
-        if st != 'OK':
-            return st, s
-        e['aux'] = (e['aux'] & ~mask) | (value & mask)
-        return 'OK', s
-
-    # ---- §7b: ObjPay mirror -------------------------------------------------
-    def setauxhi(self, h, value32):
-        """aux[63:32] = {base_chunk[15:0], words[15:0]} (base>>6)."""
-        st, s, e = self.resolve(h, 0)
-        if st != 'OK':
-            return st, s
-        e['aux'] = (e['aux'] & 0xFFFFFFFF) | \
-            ((value32 & 0xFFFFFFFF) << 32)
-        return 'OK', s
-
-    def pay_alloc(self, words):
-        """§5a G3b-iii: next-fit mirror of g6lc_apu_objpay's
-        StBmpCap — the scan starts at the cursor bitmap word, a run
-        may span words via a carried length but never the bitmap end
-        (wrap restarts it), and on a hit the cursor lands on the
-        word containing one-past-extent-end.  -> base or None."""
-        if words == 0:
-            return 0
-        nch = (words + PAY_CHUNK - 1) // PAY_CHUNK
-        bmpw = (self.pay_words // PAY_CHUNK + 63) // 64
-        if nch > self.pay_words // PAY_CHUNK:
-            return None
-        scan, wrap, run, run_s = self.pay_cur, 0, 0, 0
-        while True:
-            bits = (self.pay_bits >> (scan * 64)) & 0xFFFFFFFFFFFFFFFF
-            # lsb_free: free prefix length of this word
-            lsb = 64 if bits == 0 else (bits & -bits).bit_length() - 1
-            riw = 64
-            if nch <= 64:
-                # run_in_word: lowest index with nch consecutive free
-                free = (~bits) & 0xFFFFFFFFFFFFFFFF
-                m = free
-                for i in range(1, 64):
-                    if i < nch:
-                        m &= free >> i
-                riw = (m & -m).bit_length() - 1 if m else 64
-            if run + lsb >= nch:
-                a = run_s if run else scan * 64
-            elif riw != 64:
-                a = scan * 64 + riw
-            else:
-                a = -1
-            if a >= 0:
-                b = a + nch
-                self.pay_bits |= ((1 << nch) - 1) << a
-                self.pay_cur = (b >> 6) % bmpw
-                return a * PAY_CHUNK
-            if wrap == bmpw - 1:
-                return None
-            if bits == 0:
-                if run == 0:
-                    run_s = scan * 64
-                run += 64
-            else:
-                ts = bits.bit_length() - 1        # top_set
-                run = 63 - ts
-                run_s = scan * 64 + ts + 1
-            wrap += 1
-            if scan == bmpw - 1:
-                scan, run, run_s = 0, 0, 0
-            else:
-                scan += 1
-
-    def pay_free(self, base, words):
-        if not words:
-            return
-        a = base // PAY_CHUNK
-        nch = (words + PAY_CHUNK - 1) // PAY_CHUNK
-        self.pay_bits &= ~(((1 << nch) - 1) << a)
-        # §5a G3b-iii: FREE does not move the next-fit cursor
-
-    def pay_free_of(self, e):
-        """Free an entry's aux[63:32] = {base,words} extent."""
-        w = (e['aux'] >> 32) & 0xFFFF
-        b = (e['aux'] >> 48) & 0xFFFF
-        if w:
-            self.pay_free(b << 6, w)
 
     # ---- §5a G3b-iii: command-buffer descriptor helpers -------------
     # The shadow dict keeps the cmdrec-visible fields; _cbd_sync
@@ -2127,6 +1900,8 @@ class FrontModel:
         if not (d['flags'] & (1 << CBF_REC)):
             return 'NOT_RECORDING'
         nw = len(pwords)
+        # Host replay metadata only; sess_rec_words retains the fixed RTL ABI.
+        recd['payload_words'] = nw
         if d['rect'] == 0 or d['row'] > CB_REC_ROWS:
             nc = self.pay_alloc(CB_CHUNK)
             if nc is None:
@@ -2238,7 +2013,8 @@ class FrontModel:
         fault (pipeline create + the module-create FILL both re-run
         the scan)."""
         try:
-            sc = spirv_scan.Scanner(list(self.sh_code.get(hnd, [])))
+            sc = spirv_scan.Scanner(list(self.sh_code.get(hnd, [])),
+                native_spec_ops=self.descriptor_sources is not None)
             sc.scan()
             return sc
         except spirv_scan.Fault:
@@ -2619,6 +2395,8 @@ class FrontModel:
         """Front ap-port write mirror: the aperture word at a byte
         address, plus a .pay tag-3 expectation for the TB."""
         w &= 0xFFFFFFFF
+        if self.descriptor_sources is not None:
+            self.descriptor_sources.pop(addr & ~31, None)
         self.apm[addr >> 2] = w
         if self.ap is not None:
             self.ap.ap[addr >> 2] = w
@@ -2644,6 +2422,9 @@ class FrontModel:
                     pe['kind'] == KIND['VkDescriptorPool'] and
                     pe['gen'] == (ph >> 16) & 0xFFFF and
                     (pe['state'] & 0xFFFF) == (de['state'] & 0xFFFF))
+        snapshot = de.get('native_layout')
+        if snapshot is not None:
+            return dead, snapshot
         lh = (de['aux'] >> 32) & 0xFFFFFFFF
         ls = lh & 0xFFFF
         le = self.ent[ls] if ls < self.SLOTS else None
@@ -2657,24 +2438,30 @@ class FrontModel:
         ObjPay row table (word0 = nbind header)."""
         if le is None:
             return []
+        if 'native_rows' in le:
+            return [dict(row) for row in le['native_rows']]
         base = ((le['aux'] >> 48) & 0xFFFF) << 6
-        nbind = (((le['aux'] >> 32) & 0xFFFF) - 1) >> 1
+        nbind = self.pay.get(base, 0) & 0xFFFF
         rows = []
         for j in range(nbind):
             w0 = self.pay.get(base + 1 + 2 * j, 0)
             w1 = self.pay.get(base + 2 + 2 * j, 0)
-            rows.append({'binding': (w0 >> 24) & 0xFF,
+            rows.append({'binding': ((w0 >> 24) & 0xFF) |
+                                    (((w1 >> 24) & 0xFF) << 8),
                          'type': (w0 >> 16) & 0xFF,
                          'count': w0 & 0xFFFF,
-                         'off': (w1 >> 12) & 0xFFFFF,
+                         'off': (w1 >> 12) & 0xFFF,
                          'dyn': (w1 >> 11) & 1,
-                         'dynbase': w1 & 0xF})
+                         'dynbase': w1 & 0xF,
+                         'immutable': bool(w1 & (1 << 10)),
+                         'sampler_base': self.pay.get(base + 1 + 2 * nbind + j, 0)
+                                         + base if w1 & (1 << 10) else 0})
         return rows
 
     def lay_row(self, le, binding):
         """StRowSc mirror: the row whose binding number matches."""
         for r in self.lay_rows(le):
-            if r['binding'] == (binding & 0xFF):
+            if r['binding'] == (binding & 0xFFFF):
                 return r
         return None
 
@@ -2700,7 +2487,11 @@ class FrontModel:
         this element's info.  Returns the element's poison contribution
         (1 = failed buffer/image-descriptor write)."""
         rec_addr = sbase + ((row['off'] + idx) << 5)
+        immutable = row.get('immutable', False)
+        if immutable and dtype == 0:
+            return 0
         elok = 0
+        source = None
         eb = esz = mh = 0
         iw = [0] * 5
         if self._img_typ(dtype):
@@ -2767,7 +2558,7 @@ class FrontModel:
                                       (va >> 32) & 0xF) << 24) | \
                                 (did << 16) | hm
                             iw[2] = (((va >> 16) & 0xFFF) << 16) | ac
-                            if dtype != 1:
+                            if dtype != 1 or immutable:
                                 elok = 1
                             else:
                                 sst, _ss, se = self.resolve(
@@ -2803,6 +2594,13 @@ class FrontModel:
                         be['bind_mem']
                     eb = (boff + off) & 0xFFFFFFFF
                     esz = rng_eff & 0xFFFFFFFF
+                    source = ((be['gen'] << 16) | bs, mh, boff, bsz,
+                              off, rng_eff, dtype)
+        if self.descriptor_sources is not None and self._img_typ(dtype) and elok:
+            source = capture_source(self, KIND, dtype, vw, smp, pay[stg + 4],
+                self.apr64(rec_addr + 20) if immutable else None)
+            if source is None:
+                elok = 0
         # record = {mem{gen,slot}, size, kind, flags, ...[+28]=off}
         self.apw32(out, rec_addr, mh if elok else 0)
         self.apw32(out, rec_addr + 4, esz if elok else 0)
@@ -2811,12 +2609,15 @@ class FrontModel:
                        (iw[0] & 0xFFFF00FF) | (elok << 8))
             self.apw32(out, rec_addr + 12, iw[1])
             self.apw32(out, rec_addr + 16, iw[2])
-            self.apw32(out, rec_addr + 20, iw[3])
-            self.apw32(out, rec_addr + 24, iw[4])
+            if not immutable:
+                self.apw32(out, rec_addr + 20, iw[3])
+                self.apw32(out, rec_addr + 24, iw[4])
             self.apw32(out, rec_addr + 28, eb if elok else 0)
         else:
             self.apw32(out, rec_addr + 8, (elok << 8) | dtype)
             self.apw32(out, rec_addr + 28, eb if elok else 0)
+        if self.descriptor_sources is not None and source is not None:
+            self.descriptor_sources[rec_addr] = source
         return 1 if (self._buf_typ(dtype) or self._img_typ(dtype)) \
             and not elok else 0
 
@@ -3671,22 +3472,33 @@ class FrontModel:
                         continue      # dst unreachable: touch nothing
                     bad = (sst != 'OK' or sdead or srow is None or
                            drow is None or
+                           self.descriptor_sources is not None and srow['type'] != drow['type'] or
                            sa + cn > srow['count'] or
                            da + cn > drow['count'])
                     if bad:
                         dde['aux'] |= 0x80000000
+                        continue
+                    if drow['immutable'] and drow['type'] == 0:
                         continue
                     so = (se['aux'] & 0x1FFFFFF) << 2
                     do = (dde['aux'] & 0x1FFFFFF) << 2
                     for j in range(cn & 0xFFFF):
                         ra = so + ((srow['off'] + sa + j) << 5)
                         wa = do + ((drow['off'] + da + j) << 5)
+                        source = (self.descriptor_sources.get(ra)
+                                  if self.descriptor_sources is not None else None)
                         for b in range(4):
                             v = self.apr64(ra + b * 8)
-                            self.apw32(out, wa + b * 8,
-                                       v & 0xFFFFFFFF)
-                            self.apw32(out, wa + b * 8 + 4,
-                                       (v >> 32) & 0xFFFFFFFF)
+                            if not (drow['immutable'] and b == 3):
+                                self.apw32(out, wa + b * 8,
+                                           v & 0xFFFFFFFF)
+                            if not (drow['immutable'] and b == 2):
+                                self.apw32(out, wa + b * 8 + 4,
+                                           (v >> 32) & 0xFFFFFFFF)
+                        if source is not None:
+                            if drow['immutable']:
+                                source = immutable_source(source, self.apr64(wa + 20))
+                            self.descriptor_sources[wa] = source
 
         elif cls == 'QUERY':
             ek = self.exec_kind(ct)
@@ -3847,47 +3659,57 @@ class FrontModel:
                     if nbind > 16:
                         out['result'] = VK_ERR_OOM
                     else:
-                        nw = 1 + 2 * nbind
+                        bindings = descriptor_bindings(rec['pay'], nbind)
+                        ns = sum(len(b[4]) for b in bindings) if bindings else 0
+                        nw = 1 + 2 * nbind + (nbind + 2 * ns if ns else 0)
                         pbase = self.pay_alloc(nw)
                         if pbase is None:
                             out['result'] = VK_ERR_OOM
                         else:
                             off = dn = recs = 0
-                            rows = []
-                            bad = False
-                            for j in range(nbind):
-                                b = rec['pay'][4 * j] & 0xFF
-                                ty = rec['pay'][4 * j + 1] & 0xFF
-                                cn = rec['pay'][4 * j + 2] & 0xFFFF
-                                dyn = 1 if ty in (8, 9) else 0
-                                if (dyn and dn + cn > 16) or \
-                                        recs + cn > 2047:
-                                    bad = True
-                                    break
-                                rows.append((b, ty, cn, off, dyn, dn))
+                            rows = descriptor_rows(rec['pay'], nbind)
+                            bad = rows is None
+                            for b, ty, cn, _of, dyn, _dnb in rows or []:
                                 off += cn
                                 recs += cn
                                 if dyn:
                                     dn += cn
-                            w = nbind
+                            w = nbind | ((1 << 31) if ns else 0)
                             self.pay[pbase] = w
                             out['payw'].append((pbase, w))
                             if bad:
                                 self.pay_free(pbase, nw)
                                 out['result'] = VK_ERR_OOM
                             else:
-                                for j, (b, ty, cn, of, dyn, dnb) in \
-                                        enumerate(rows):
-                                    for k, w in enumerate(
-                                            ((b << 24) | (ty << 16) | cn,
-                                             (of << 12) | (dyn << 11) |
-                                             dnb)):
+                                imm_next = 1 + 3 * nbind
+                                hh = 0x811C9DC5
+                                for j, (b, ty, cn, of, dyn, dnb) in enumerate(rows):
+                                    samplers = bindings[j][4]
+                                    if ns:
+                                        a = pbase + 1 + 2 * nbind + j
+                                        self.pay[a] = imm_next if samplers else 0
+                                        out['payw'].append((a, self.pay[a]))
+                                    for sid in samplers:
+                                        ss, _slot, se = self.resolve(sid, KIND['VkSampler'])
+                                        if ss != 'OK':
+                                            bad = True
+                                            break
+                                        for w in le64(se['aux']):
+                                            self.pay[pbase + imm_next] = w
+                                            out['payw'].append((pbase + imm_next, w))
+                                            imm_next += 1
+                                            hh = fnv1a(hh, w)
+                                    if bad:
+                                        break
+                                    for k, w in enumerate(descriptor_row_words(
+                                            (b, ty, cn, of, dyn, dnb), bool(samplers))):
                                         a = pbase + 1 + 2 * j + k
                                         w &= 0xFFFFFFFF
                                         self.pay[a] = w
                                         out['payw'].append((a, w))
-                                st, h, slot = self.alloc(
-                                    rec['q'][new], obj_kind, par)
+                                        hh = fnv1a(hh, w)
+                                st, h, slot = (('MISS', 0, 0) if bad else self.alloc(
+                                    rec['q'][new], obj_kind, par))
                                 if st != 'OK':
                                     self.pay_free(pbase, nw)
                                     out['result'] = self._err(st)
@@ -3901,15 +3723,19 @@ class FrontModel:
                                     # emitted row words then ndyn ->
                                     # state[31:0]; dispatch compares
                                     # content, not object identity
-                                    hh = 0x811C9DC5
-                                    for (b, ty, cn, of, dyn, dnb) in \
-                                            rows:
-                                        hh = fnv1a(hh, (b << 24) |
-                                                   (ty << 16) | cn)
-                                        hh = fnv1a(hh, (of << 12) |
-                                                   (dyn << 11) | dnb)
                                     hh = fnv1a(hh, dn)
                                     self.setstate(h, 0xFFFFFFFF, hh)
+                                    if self.descriptor_sources is not None:
+                                        entry = self.ent[slot]
+                                        entry['native_rows'] = tuple(
+                                            tuple(row.items()) for row in self.lay_rows(entry))
+                                        entry['native_signature'] = (
+                                            rec['imm'][0], tuple(
+                                                (b, ty, cn, stages, tuple(
+                                                    self.resolve(sid, KIND['VkSampler'])[2]['aux']
+                                                    for sid in samplers))
+                                                for b, ty, cn, stages, samplers in bindings))
+                                        entry['native_handle'] = h
                 elif obj_kind == KIND['VkDescriptorPool']:
                     # §12.3 F5: Σ pPoolSizes.descriptorCount records of
                     # backing through vgpages; aux[31:0]=page base,
@@ -4095,6 +3921,7 @@ class FrontModel:
                                   1 <= depth <= 256)
                     nlay = depth if ity == 2 else lays
                     usage = rec['imm'][10]
+                    ilay = rec['imm'][13]
                     if did == 0xFF:
                         out['result'] = VK_ERR_FMTNS
                     elif (not dim_ok or
@@ -4104,7 +3931,8 @@ class FrontModel:
                           usage == 0 or
                           usage & ~0x3F or
                           (usage & 0x10 and did not in (2, 3, 4, 5)) or
-                          (usage & 0x20 and did not in (12, 13))):
+                          (usage & 0x20 and did not in (12, 13)) or
+                          ilay not in (0, 1, 2, 5, 6, 7, 8)):
                         out['result'] = VK_ERR_FEATURE
                     else:
                         lay = img_layer_bytes(self.m, w, hh, did, mips)
@@ -4124,6 +3952,14 @@ class FrontModel:
                             self.setstate(h, 0x1FFFFF,
                                           ((ity & 3) << 19) |
                                           ((lay >> 6) & 0x7FFFF))
+                            # §12.3 image layout tracking: the wire
+                            # initialLayout (imm[13]) seeds the tracked
+                            # layout; explicit barriers validate
+                            # oldLayout against this and publish
+                            # newLayout (per-image granularity —
+                            # subresource layouts are not tracked
+                            # separately)
+                            e['layout'] = ilay
                 elif obj_kind == KIND['VkImageView']:
                     # §12.3 C/5b view create — mirrors StImgVwCk; the
                     # image entry is the second resolve (lu[1]) and is
@@ -4178,6 +4014,8 @@ class FrontModel:
                                           | ((nlay & 0x3FF) << 14)
                                           | ((bl & 0x3FF) << 4)
                                           | (lc & 0xF))
+                            if self.descriptor_sources is not None:
+                                self.ent[slot]['native_view_image'] = ie['gen'] << 16 | is_
                 elif obj_kind == KIND['VkSampler']:
                     # §12.3 C/5b sampler — mirrors StSamCk; the record's
                     # +20..+27 words are parked in aux
@@ -4231,6 +4069,41 @@ class FrontModel:
                                 self.pay[pbase + i] = w
                                 out['payw'].append((pbase + i, w))
                             self.setauxhi(h, ((pbase >> 6) << 16) | nw)
+                elif obj_kind == KIND['VkQueryPool']:
+                    # bounded native profile: OCCLUSION(0),
+                    # PIPELINE_STATISTICS(1) and TIMESTAMP(2) pools
+                    # only - queryCount rides size[], slot state is
+                    # stamped lazily by the ordered query ops;
+                    # occlusion counts generated fragments (no
+                    # depth/stencil test in the profile, so every
+                    # covered sample passes), statistics pools count
+                    # only the draw-stage counters the bounded
+                    # pipeline produces (mask 0x87: input-assembly
+                    # vertices/primitives, vertex/fragment shader
+                    # invocations - geometry/tessellation/clipping/
+                    # compute bits refuse at create) and unknown
+                    # types refuse before the ObjTab alloc
+                    qtype = rec['imm'][1] & 0xFFFFFFFF
+                    qcount = rec['imm'][2] & 0xFFFFFFFF
+                    qstats = rec['imm'][3] & 0xFFFFFFFF
+                    stats_ok = (not qstats & ~0x87 if qtype == 1
+                                else not qstats)
+                    if (rec['imm'][0] or qtype not in (0, 1, 2) or
+                            not stats_ok or qcount > 4096):
+                        out['result'] = VK_ERR_FEATURE_NOT_PRESENT
+                    else:
+                        st, h, slot = self.alloc(rec['q'][new],
+                                                 obj_kind, par)
+                        if st != 'OK':
+                            out['result'] = self._err(st)
+                        else:
+                            e = self.ent[slot]
+                            e['size'] = qcount
+                            e['qslots'] = [None] * qcount
+                            st2, _s2 = self.setaux(h, 0xFFFFFFFF,
+                                                   qtype | (qstats << 8))
+                            if st2 != 'OK':
+                                out['result'] = VK_ERR_UNKNOWN
                 else:
                     st, h, slot = self.alloc(rec['q'][new], obj_kind, par)
                     if st != 'OK':
@@ -4247,6 +4120,8 @@ class FrontModel:
                             self.fence_sig &= ~(1 << fidx)
                             self.fence_lost &= ~(1 << fidx)
                     elif ct == session['T']['vkCreateBuffer']:
+                        if self.descriptor_sources is not None:
+                            self.ent[slot]['native_usage'] = rec['imm'][1]
                         ds = next((i for i in range(8)
                                    if rec['qv'] >> i & 1
                                    and not rec['kind'][i]), -1)
@@ -4364,8 +4239,24 @@ class FrontModel:
                                     ((sbase >> 2) & 0x1FFFFFF))
                         self.setauxhi(h, layh)
                         self.setstate(h, 0xFFFF, pe['state'] & 0xFFFF)
+                        if self.descriptor_sources is not None:
+                            se['native_layout'] = dict(le)
                         for k in range(sbyt >> 2):
                             self.apw32(out, sbase + 4 * k, 0)
+                        for row in self.lay_rows(le):
+                            if not row['immutable']:
+                                continue
+                            for element in range(row['count']):
+                                address = sbase + 32 * (row['off'] + element)
+                                sample = row['sampler_base'] + 2 * element
+                                self.apw32(out, address + 8,
+                                           row['type'] | (0x100 if row['type'] == 0 else 0))
+                                self.apw32(out, address + 12, 0)
+                                self.apw32(out, address + 20, self.pay[sample])
+                                self.apw32(out, address + 24, self.pay[sample + 1])
+                                if self.descriptor_sources is not None and row['type'] == 0:
+                                    self.descriptor_sources[address] = ImageSource(
+                                        0, sampler_aux=self.pay[sample] | self.pay[sample + 1] << 32)
                         pe['aux'] = (pe['aux'] & 0xFFFFFFFF) | \
                             ((((nsets + 1) & 0xFFFFF) << 44) |
                              (((bump if fl_bump
@@ -4920,6 +4811,12 @@ class FrontModel:
                     recd = {'ctype': ct, 'flags': rec['flags'],
                             'handle': rh, 'kind': rk,
                             'imm': list(rec['imm'][:8]), 'spare': 0}
+                    # conditional-rendering offset is a u64 operand
+                    # riding q[2] like the indirect offset — imm[1:3]
+                    # (flags stays imm[0], buffer resolves to handle[0])
+                    if ct == session['T'].get('vkCmdBeginConditionalRenderingEXT', -1):
+                        recd['imm'][1] = rec['q'][2] & 0xFFFFFFFF
+                        recd['imm'][2] = (rec['q'][2] >> 32) & 0xFFFFFFFF
                     # §5a G3b-iii: the indirect operand's byte offset
                     # decodes into q[2] (u64) — the record carries it
                     # in imm[2:3] for the executor's aperture fetch
@@ -4928,6 +4825,20 @@ class FrontModel:
                               session['T']['vkCmdDispatchIndirect']):
                         recd['imm'][2] = rec['q'][2] & 0xFFFFFFFF
                         recd['imm'][3] = (rec['q'][2] >> 32) & 0xFFFFFFFF
+                    # query u64 scalars ride q[] like the indirect offset:
+                    # WriteTimestamp2 stage -> imm[1:3] (query stays
+                    # imm[0]); CopyQueryPoolResults dstOffset/stride ->
+                    # imm[3:7] (firstQuery/queryCount/flags stay
+                    # imm[0:3])
+                    if ct == session['T'].get('vkCmdWriteTimestamp2', -1):
+                        recd['imm'][1] = rec['q'][1] & 0xFFFFFFFF
+                        recd['imm'][2] = (rec['q'][1] >> 32) & 0xFFFFFFFF
+                    elif ct == session['T'].get('vkCmdCopyQueryPoolResults',
+                                                -1):
+                        recd['imm'][3] = rec['q'][3] & 0xFFFFFFFF
+                        recd['imm'][4] = (rec['q'][3] >> 32) & 0xFFFFFFFF
+                        recd['imm'][5] = rec['q'][4] & 0xFFFFFFFF
+                        recd['imm'][6] = (rec['q'][4] >> 32) & 0xFFFFFFFF
                     # §7b: BindDS streams resolved set handles then the
                     # dynamic offsets; PushConstants streams the staged
                     # words verbatim -- both through the payload chain
@@ -4995,6 +4906,13 @@ class FrontModel:
                             pwords.append(
                                 ((be['gen'] << 16) | bs)
                                 if bst == 'OK' else 0)
+                        if ct == session['T'].get('vkCmdWaitEvents'):
+                            # native profile: capture_barrier has already
+                            # canonicalized the retained memory/buffer/
+                            # image barrier words trailing the event ids
+                            pwords += [w & 0xFFFFFFFF for w in
+                                       rec['pay'][2 * (rec['imm'][0]
+                                                      & 0xFFFF):]]
                     elif ct == session['T']['vkCmdPushConstants']:
                         pwords = [w & 0xFFFFFFFF for w in rec['pay']]
                     elif ct in (session['T'].get('vkCmdBeginRenderPass'),
@@ -5003,6 +4921,7 @@ class FrontModel:
                                 session['T'].get('vkCmdSetScissor'),
                                 session['T'].get('vkCmdSetBlendConstants'),
                                 session['T'].get('vkCmdBindIndexBuffer'),
+                                session['T']['vkCmdPipelineBarrier'],
                                 session['T']['vkCmdCopyBuffer'],
                                 session['T']['vkCmdFillBuffer'],
                                 session['T']['vkCmdUpdateBuffer'],
@@ -5343,6 +5262,9 @@ def sess_rec_words(recd):
 def build_session(model, asm, sim, rep_sim, enc, gen, rng,
                   pay_words=PAY_WORDS, kind='main'):
     """-> (steps, instances).  Each step: {name, words, out, reset}."""
+    # Corpus fixtures belong to vector generation, not native model imports.
+    SPV_SESSION = spv_words('bufcopy')
+    SPV_SESSION_B = len(SPV_SESSION) * 4
     m = model
     fm = FrontModel(model, asm, pay_words=pay_words)
     T = {n: i['type_id'] for n, i in m.cmd_info.items()}
@@ -6216,8 +6138,6 @@ def _pkg_kind(name):
             return int(f.split('=')[1].strip().rstrip(','))
     raise AssertionError(tag + ' not in g6lc_apu_vn_pkg.sv')
 
-KIND_VIRTIO_CTX      = _pkg_kind('APU_VIRTIO_CTX')
-KIND_BLOB_SHMEM      = _pkg_kind('APU_BLOB_SHMEM')
 VG_MAP_WC            = 0x03
 VG_CAPSET_VENUS      = 4
 # ring-table geometry must track g6lc_apu_vnpump Rings (default 64)
@@ -6266,8 +6186,6 @@ def _check_uapi():
             'UAPI mismatch: %s header=%#x model=%#x' % (
                 k, vals['VIRTIO_GPU_' + k], v)
 
-
-_check_uapi()
 
 # tape opcodes (.hex): the TB replays this guest script
 TP_END       = 0   # no operands
@@ -6354,7 +6272,7 @@ def vg_hdr(ty, flags=0, fence=0, ctx=0, ring_idx=0):
             ctx, ring_idx]
 
 
-class TransportModel:
+class TransportModel(ApertureState):
     """Device-side model of vgctl + vnpump + aperture + ObjTab extras.
 
     Mirrors the §6b engines: control-queue responses, the aperture page
@@ -6363,17 +6281,12 @@ class TransportModel:
     there); `ap` shadows the device aperture (blobs live there).
     """
 
-    def __init__(self, model, asm, sim, rep_sim):
+    def __init__(self, model, asm, sim, rep_sim, *, dma_policy=None):
+        super().__init__(AP_WORDS * 4, VGP_GUEST_BYTES, AP_PAGE, dma_policy=dma_policy)
         self.m = model
         self.asm = asm
         self.sim = sim
         self.rep_sim = rep_sim
-        # sparse word store: the 32 MiB aperture is far larger than any
-        # session touches (first-fit keeps allocations low)
-        self.ap = collections.defaultdict(int)
-        self.ap_pages = [0] * (AP_WORDS // (AP_PAGE // 4))
-        self.gmem = {}
-        self.blobs = {}                   # res_id -> dict
         self.ctxs = {}                    # ctx_id -> dict
         # ring slots mirror vnpump Rings (default 64): a vector that
         # exceeds the table must see the same CreateRing fault as RTL
@@ -6387,84 +6300,6 @@ class TransportModel:
         self.T = {i['type_id']: n for n, i in model.cmd_info.items()}
         self.ACT = {i['type_id']: i['act']['class']
                     for n, i in model.cmd_info.items()}
-
-    # ---- aperture allocator (first-fit, 4 KiB pages) ---------------------
-    def ap_alloc(self, size, priv=False):
-        pages = (size + AP_PAGE - 1) // AP_PAGE
-        lo = VGP_GUEST_PAGES if priv else 0
-        hi = len(self.ap_pages) if priv else VGP_GUEST_PAGES
-        run = 0
-        for i in range(lo, hi):
-            run = 0 if self.ap_pages[i] else run + 1
-            if run == pages:
-                base = (i - pages + 1) * (AP_PAGE // 4)
-                for j in range(i - pages + 1, i + 1):
-                    self.ap_pages[j] = 1
-                return base
-        return -1
-
-    def ap_free(self, base_w, size):
-        # coverage semantics (matches ALLOC_AT marking): drop every page
-        # the byte range touches
-        lo = (base_w * 4) // AP_PAGE
-        hi = (base_w * 4 + size - 1) // AP_PAGE
-        for j in range(lo, hi + 1):
-            self.ap_pages[j] = 0
-
-    def ap_alloc_at(self, base_b, size):
-        """Kernel-chosen extent (MAP_BLOB): mark every page the byte range
-        covers; -1 on overlap/out-of-window, else the byte base.
-        Bounded by the advertised guest window — the device-private
-        arena above VGP_GUEST_BYTES is never guest-mappable."""
-        if size == 0 or base_b + size > VGP_GUEST_BYTES:
-            return -1
-        lo = base_b // AP_PAGE
-        hi = (base_b + size - 1) // AP_PAGE
-        if any(self.ap_pages[lo:hi + 1]):
-            return -1
-        for j in range(lo, hi + 1):
-            self.ap_pages[j] = 1
-        return base_b
-
-    def ap_alloc_hi(self, size, excl=(0, 0)):
-        """§12.3 3d-d ALLOC_HI — top-down first-fit inside the guest
-        window; candidates overlapping the byte exclusion [excl[0],
-        excl[1]) scan as busy (equal ends = none).  -1 = FULL."""
-        pages = (size + AP_PAGE - 1) // AP_PAGE
-        el, eh = excl
-        for s in range(VGP_GUEST_PAGES - pages, -1, -1):
-            if s * AP_PAGE < eh and el < (s + pages) * AP_PAGE:
-                continue
-            if not any(self.ap_pages[s:s + pages]):
-                for j in range(s, s + pages):
-                    self.ap_pages[j] = 1
-                return s * (AP_PAGE // 4)
-        return -1
-
-    def ap_move(self, src_b, dst_b, size):
-        """§12.3 3d-d word mover — copy `size` bytes of aperture
-        content from byte base src_b to dst_b (page-aligned).  Copies
-        backwards when dst > src, exactly like the RTL mover — an
-        overlapping move never reads a word it already rewrote."""
-        sw, dw = src_b >> 2, dst_b >> 2
-        n = size // 4
-        if dw > sw:
-            for i in range(n - 1, -1, -1):
-                self.ap[dw + i] = self.ap[sw + i]
-        else:
-            for i in range(n):
-                self.ap[dw + i] = self.ap[sw + i]
-        for i in range(n):
-            self.ap.pop(sw + i, None)
-
-    # ---- shared helpers ---------------------------------------------------
-    def blob_of(self, rid):
-        b = self.blobs.get(rid)
-        return b if b is not None and b['mapped'] else None
-
-    def gmem_slice(self, byte_addr, nbytes):
-        return [self.gmem.get((byte_addr >> 2) + i, 0)
-                for i in range(nbytes // 4)]
 
     def reply_put(self, rep):
         """Append a front reply at the reply cursor (word writes)."""
@@ -6909,6 +6744,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
     stand.  carry['gens'] seeds fm.gens on entry and receives them back
     on return; the record {gen,slot} words then match the hardware
     (vgtop/vgsys run each session on a fresh DUT — no carry)."""
+    _check_uapi()
+    KIND_VIRTIO_CTX = _pkg_kind('APU_VIRTIO_CTX')
+    KIND_BLOB_SHMEM = _pkg_kind('APU_BLOB_SHMEM')
+    SPV_SESSION = spv_words('bufcopy')
+    SPV_SESSION_B = len(SPV_SESSION) * 4
     tm = TransportModel(model, asm, sim, rep_sim)
     tm.rep_log = []
     fm = FrontModel(model, asm, slots=obj_slots)
@@ -8081,6 +7921,30 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 srows[b['set']].append(
                     dict(binding=b['binding'], kind=kind,
                          count=b['idx'] + 1))
+        copy_sampler = None
+        if variant == 'immutable_copy':
+            original = next(a for cmd, a in seg_a1 if cmd == 'vkCreateSampler')
+            args = dict(original)
+            info = dict(original['pCreateInfo'])
+            info['addressModeU'] = (info['addressModeU'] + 1) % 3
+            copy_sampler = original['pSampler'] + 0x77
+            args.update(pCreateInfo=info, pSampler=copy_sampler)
+            seg_a1.append(('vkCreateSampler', args))
+        if variant == 'immutable':
+            # An unused standalone sampler array needs no descriptor writes.
+            srows[setnos[0]].append(dict(binding=65535, kind=0, count=2))
+
+        def immutable_samplers(setno, row):
+            if variant not in ('immutable', 'immutable_copy') or row['kind'] not in (0, 1):
+                return []
+            elements = {b['idx']: smps[i] for i, b in enumerate(vec['binds'])
+                        if b['set'] == setno and b['binding'] == row['binding']
+                        and i in smps}
+            if not elements:
+                elements = {0: next(iter(smps.values()))}
+            return [elements.get(i, next(iter(elements.values())))
+                    for i in range(row['count'])]
+
         # G3b-ii modres: 12 identical-content modules (> 8 residency
         # slots) — distinct handles, so the ShaderCore cache must
         # evict/refill across the dispatch sweep
@@ -8114,24 +7978,37 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         binding=r['binding'],
                         descriptorCount=r['count'],
                         descriptorType=r['kind'],
-                        stageFlags=0x20, pImmutableSamplers=[])
+                        stageFlags=0x20, pImmutableSamplers=immutable_samplers(s, r))
                         for r in srows[s]]),
                 pSetLayout=dsls[k])))
+        copy_layouts = [layout + 16 for layout in dsls]
+        if variant == 'immutable_copy':
+            originals = [a for cmd, a in seg_a1 if cmd == 'vkCreateDescriptorSetLayout']
+            for k, original in enumerate(originals):
+                args = dict(original)
+                info = dict(original['pCreateInfo'])
+                info['pBindings'] = [dict(b, pImmutableSamplers=[]) for b in info['pBindings']]
+                args.update(pCreateInfo=info, pSetLayout=copy_layouts[k])
+                seg_a1.append(('vkCreateDescriptorSetLayout', args))
+        if variant == 'emptylayout':
+            seg_a1.append(('vkCreateDescriptorSetLayout', dict(
+                device=V['dev'],
+                pCreateInfo=st('VkDescriptorSetLayoutCreateInfo',
+                               bindingCount=0, pBindings=[]),
+                pSetLayout=V['dsl'] + 32)))
         rows2 = None
         if variant in ('layoutmix', 'dslcompat'):
             # §12.3 F5-d: compatibility is by CONTENT — both variants
             # mint a second layout object and allocate set 0 from it
             # while the pipeline layout declares dsls[0].  dslcompat's
-            # rows are identical -> the content hash matches -> the
-            # dispatch must run.  layoutmix perturbs one row (row
-            # order, or a count bump when there is only one) -> hash
-            # mismatch -> DEVICE_LOST at dispatch.
+            # rows may be permuted -> the canonical hash matches ->
+            # dispatch must run. layoutmix changes a descriptor count
+            # (permuting pBindings is not an incompatibility).
             rows2 = [dict(r) for r in srows[setnos[0]]]
             if variant == 'layoutmix':
-                if len(rows2) > 1:
-                    rows2 = [rows2[-1]] + rows2[:-1]
-                else:
-                    rows2[0]['count'] += 1
+                rows2[0]['count'] += 1
+            elif len(rows2) > 1:
+                rows2 = [rows2[-1]] + rows2[:-1]
             seg_a1.append(('vkCreateDescriptorSetLayout', dict(
                 device=V['dev'],
                 pCreateInfo=st(
@@ -8376,7 +8253,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # dcopy: one staging set per real set (same layout) receives
             # the writes; pDescriptorCopies then moves every element
             # into the real sets — the pool holds both
-            is_dcopy = variant == 'dcopy'
+            is_dcopy = variant in ('dcopy', 'immutable_copy')
             for k in sorted(psums):
                 psizes.append(st('VkDescriptorPoolSize', type=k,
                                  descriptorCount=psums[k] *
@@ -8389,8 +8266,14 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                            and k == 0 else dsls[k])
                           for k in range(nsets)] + \
                          [dsls[0]] * extra + \
-                         (dsls[:nsets] if is_dcopy else [])
+                         ((copy_layouts if variant == 'immutable_copy' else dsls[:nsets])
+                          if is_dcopy else [])
             alloc_sets = dsets + [V['ds'] + 7] * extra + stg_sets
+            if variant == 'emptylayout':
+                # Allocate empty first, then fill an exact-sized pool. Stale
+                # sizing state would consume the real set's record backing.
+                alloc_lays.insert(0, V['dsl'] + 32)
+                alloc_sets.insert(0, V['ds'] + 32)
             # update writes: one VkWriteDescriptorSet per bind element —
             # or, in multiwr, the Mesa shape: one write per (set,binding)
             # whose descriptorCount spans the array, exercising the
@@ -8446,7 +8329,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     # §12.3 C/5b: image binds post
                     # VkDescriptorImageInfo {sampler, view, layout}
                     pImageInfo=[st('VkDescriptorImageInfo',
-                                   sampler=smps.get(i, 0),
+                                   sampler=0 if variant == 'immutable'
+                                   else copy_sampler if variant == 'immutable_copy'
+                                   else smps.get(i, 0),
                                    imageView=views.get(i, 0),
                                    imageLayout=0)]
                                 if 'img' in b else [],
@@ -8465,6 +8350,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                and i == 0 else b['size']))]
                         if 'img' not in b else [])
                     for i, b in enumerate(vec['binds'])]
+            if variant == 'immutable':
+                # A standalone immutable sampler needs no descriptor write.
+                upd_w = [w for w in upd_w if w['descriptorType'] != 0]
             upd_c = []
             if is_dcopy:
                 # write into the staging twin, then copy element-wise
@@ -8485,7 +8373,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 ('vkCreateDescriptorPool', dict(
                     device=V['dev'],
                     pCreateInfo=st('VkDescriptorPoolCreateInfo',
-                                   maxSets=nsets * (2 if is_dcopy else 1),
+                                   maxSets=nsets * (2 if is_dcopy else 1) +
+                                       (1 if variant == 'emptylayout' else 0),
                                    poolSizeCount=len(psizes),
                                    pPoolSizes=psizes),
                     pDescriptorPool=V['dp'])),
@@ -8493,7 +8382,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     device=V['dev'],
                     pAllocateInfo=st('VkDescriptorSetAllocateInfo',
                                      descriptorPool=V['dp'],
-                                     descriptorSetCount=nsets + extra,
+                                     descriptorSetCount=nsets + extra +
+                                         (1 if variant == 'emptylayout' else 0),
                                      pSetLayouts=alloc_lays),
                     pDescriptorSets=alloc_sets)),
                 ('vkUpdateDescriptorSets', dict(
@@ -9052,6 +8942,29 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     device=V['dev'], buffer=bufs[0])))
             note("B' segment A2: descriptors, cmdbuf, dispatch, fence")
             run_batches(compile_cmds(seg_a2))
+            if variant in ('immutable', 'immutable_copy'):
+                for k, setno in enumerate(setnos):
+                    status, _, de = fm.resolve(dsets[k], KIND['VkDescriptorSet'])
+                    assert status == 'OK'
+                    dead, le = fm.dset_dead(de)
+                    assert not dead
+                    for row in fm.lay_rows(le):
+                        if not row['immutable']:
+                            continue
+                        spec = next(r for r in srows[setno] if r['binding'] == row['binding'])
+                        for element, sid in enumerate(immutable_samplers(setno, spec)):
+                            bi = next(i for i, handle in smps.items() if handle == sid)
+                            image = vec['binds'][bi]['img']
+                            address = ((de['aux'] & 0x1FFFFFF) << 2) + \
+                                32 * (row['off'] + element)
+                            W(TP_CHECK, CK_APR, 2, address + 20)
+                            for word in range(2):
+                                expected = image['s%d' % word]
+                                rec(EK_APRCHK, address + 20 + 4 * word,
+                                    expected, expected, 0)
+                            if row['type'] == 0:
+                                W(TP_CHECK, CK_APR, 1, address + 8)
+                                rec(EK_APRCHK, address + 8, 0x100, 0x100, 0)
 
             if variant in ('ubo_bindfirst', 'defer2'):
                 # §12.3 3d-d: the record was minted while the memory
@@ -9869,10 +9782,19 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             for k in range(nsets):
                 seg_c.append(('vkDestroyDescriptorSetLayout', dict(
                     device=V['dev'], descriptorSetLayout=dsls[k])))
+            if variant == 'immutable_copy':
+                for layout in copy_layouts:
+                    seg_c.append(('vkDestroyDescriptorSetLayout', dict(
+                        device=V['dev'], descriptorSetLayout=layout)))
+                seg_c.append(('vkDestroySampler', dict(
+                    device=V['dev'], sampler=copy_sampler)))
             if variant in ('layoutmix', 'dslcompat'):
                 seg_c.append(('vkDestroyDescriptorSetLayout', dict(
                     device=V['dev'],
                     descriptorSetLayout=V['dsl'] + 4)))
+            if variant == 'emptylayout':
+                seg_c.append(('vkDestroyDescriptorSetLayout', dict(
+                    device=V['dev'], descriptorSetLayout=V['dsl'] + 32)))
             if variant == 'modres':
                 # module 5 already RETIRE_LAZY'd above; the rest die
                 # here after their pipelines' UNPINs
@@ -10369,8 +10291,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # fsubo: the FS reads its colour from a UBO bound at the GRAPHICS
         # bind point (CTS binding_model.*.graphics shape)
         is_fsubo = 'fsubo' in gfx
+        is_fsubocopy = 'fsubocopy' in gfx
         fs_spv = [w[0] for w in struct.iter_unpack(
-            '<I', (spvd / ('fs_ubo.spv' if is_fsubo else
+            '<I', (spvd / ('fs_ubo_array.spv' if is_fsubocopy else
+                          'fs_ubo.spv' if is_fsubo else
                           'fs_white.spv' if is_pts else
                           'fs_vcol.spv' if is_blend or is_wide
                           else 'fs_flat.spv')).read_bytes())]
@@ -10378,7 +10302,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             ('inst', 'pd', 'dev', 'queue', 'imem', 'img', 'view', 'rp',
              'fb', 'sm_vs', 'sm_fs', 'pl', 'gp', 'vmem', 'vb', 'vb2',
              'rmem', 'rb', 'cp', 'cb', 'fen', 'ib2',
-             'ubo', 'dsl', 'dp', 'ds'))}
+             'ubo', 'dsl', 'dp', 'ds', 'ds_src'))}
         RES_BLOB0 = 200
 
         CW = CH = 64                     # color attachment extent
@@ -10591,7 +10515,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 pCreateInfo=st('VkDescriptorSetLayoutCreateInfo',
                     flags=0, bindingCount=1,
                     pBindings=[st('VkDescriptorSetLayoutBinding',
-                        binding=0, descriptorType=6, descriptorCount=1,
+                        binding=0, descriptorType=6,
+                        descriptorCount=2 if is_fsubocopy else 1,
                         stageFlags=0x10, pImmutableSamplers=[])]),
                 pSetLayout=X['dsl'])),
         ] if is_fsubo else []) + [
@@ -10780,7 +10705,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             seg_a1 += [
                 ('vkCreateBuffer', dict(
                     device=X['dev'],
-                    pCreateInfo=st('VkBufferCreateInfo', size=16,
+                    pCreateInfo=st('VkBufferCreateInfo',
+                                   size=272 if is_fsubocopy else 16,
                                    usage=0x10, sharingMode=0,
                                    queueFamilyIndexCount=0,
                                    pQueueFamilyIndices=[]),
@@ -10791,18 +10717,22 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 ('vkCreateDescriptorPool', dict(
                     device=X['dev'],
                     pCreateInfo=st('VkDescriptorPoolCreateInfo',
-                                   maxSets=1, poolSizeCount=1,
+                                   maxSets=2 if is_fsubocopy else 1,
+                                   poolSizeCount=1,
                                    pPoolSizes=[st('VkDescriptorPoolSize',
                                                   type=6,
-                                                  descriptorCount=1)]),
+                                                  descriptorCount=4
+                                                  if is_fsubocopy else 1)]),
                     pDescriptorPool=X['dp'])),
                 ('vkAllocateDescriptorSets', dict(
                     device=X['dev'],
                     pAllocateInfo=st('VkDescriptorSetAllocateInfo',
                                      descriptorPool=X['dp'],
-                                     descriptorSetCount=1,
-                                     pSetLayouts=[X['dsl']]),
-                    pDescriptorSets=[X['ds']])),
+                                     descriptorSetCount=2 if is_fsubocopy else 1,
+                                     pSetLayouts=[X['dsl']] *
+                                     (2 if is_fsubocopy else 1)),
+                    pDescriptorSets=[X['ds'], X['ds_src']]
+                    if is_fsubocopy else [X['ds']])),
                 ('vkUpdateDescriptorSets', dict(
                     device=X['dev'], descriptorWriteCount=1,
                     pDescriptorWrites=[st('VkWriteDescriptorSet',
@@ -10814,6 +10744,28 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                         range=16)])],
                     descriptorCopyCount=0, pDescriptorCopies=[])),
             ]
+            if is_fsubocopy:
+                # Both destination elements start red. Only src[0] is
+                # green; copy it to dst[1], which the fragment shader reads.
+                # Missing copies or wrong source/destination indices stay red.
+                seg_a1[-1] = ('vkUpdateDescriptorSets', dict(
+                    device=X['dev'], descriptorWriteCount=2,
+                    pDescriptorWrites=[
+                        st('VkWriteDescriptorSet',
+                           dstSet=dset, dstBinding=0, dstArrayElement=0,
+                           descriptorCount=2, descriptorType=6,
+                           pImageInfo=[], pTexelBufferView=[],
+                           pBufferInfo=[
+                               st('VkDescriptorBufferInfo', buffer=X['ubo'],
+                                  offset=offset, range=16)
+                               for offset in offsets])
+                        for dset, offsets in ((X['ds'], (0, 0)),
+                                              (X['ds_src'], (256, 0)))],
+                    descriptorCopyCount=1,
+                    pDescriptorCopies=[st('VkCopyDescriptorSet',
+                        srcSet=X['ds_src'], srcBinding=0, srcArrayElement=0,
+                        dstSet=X['ds'], dstBinding=0, dstArrayElement=1,
+                        descriptorCount=1)]))
         run_batches(compile_cmds(seg_a1))
 
         # vmem blob contents: vb words at 0, vb2 at 0x800 (wide); the
@@ -10831,6 +10783,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     [0x0001_0000, 0x0000_0002]
         if is_fsubo:
             vmem_words += [0] * (0x380 - len(vmem_words)) + \
+                ([f32b(1.0), f32b(0.0), f32b(0.0), f32b(1.0)] +
+                 [0] * 60   # minUniformBufferOffsetAlignment = 256
+                 if is_fsubocopy else []) + \
                 [f32b(0.0), f32b(1.0), f32b(0.0), f32b(1.0)]
         # blob+map the three memories; guest posts the vertex data at
         # the vb's mapped offset (vbwide: vb2 words at vmem+0x800)
@@ -11626,6 +11581,7 @@ def main():
     ap.add_argument('--count', type=int, default=20)
     args = ap.parse_args()
 
+    _check_uapi()
     profile = tomllib.loads(
         (G.TOOLS / 'vn_device_profile.toml').read_text(encoding='utf-8'))
     model = G.Model(profile)

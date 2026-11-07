@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright 2026 Etienne Cimon
 # SPDX-License-Identifier: MIT
 """Golden model of the g6lc_apu_shmod commit scanner (architecture
 doc 7a).  Parses a SPIR-V module, enforces the increment-4a compute
@@ -272,8 +273,9 @@ class Fault(Exception):
 
 
 class Scanner:
-    def __init__(self, words):
+    def __init__(self, words, *, native_spec_ops=False):
         self.w = words
+        self.native_spec_ops = native_spec_ops
         self.types = {}       # id -> dict
         self.consts = {}      # id -> list of words (<=16)
         self.const_tid = {}
@@ -567,6 +569,8 @@ class Scanner:
 
     def const_words(self, cid, rty, ops, opc, at):
         """evaluate a constant to its component words (<=16)."""
+        if opc in (48, 49, 50, 51):
+            opc -= 7  # Module scans evaluate specialization defaults.
         if opc == OP['ConstantTrue']:
             return [1]
         if opc == OP['ConstantFalse']:
@@ -575,6 +579,8 @@ class Scanner:
             return list(ops)
         if opc == OP['ConstantNull']:
             n = self.const_count(rty)
+            if n > CONST_WORDS:
+                raise Fault(FAULT['CONST'], opc, at)
             return [0] * n
         if opc == OP['ConstantComposite']:
             out = []
@@ -897,7 +903,62 @@ class Scanner:
     h_51 = h_const
 
     def h_52(self, opc, ops, at):       # OpSpecConstantOp
-        raise Fault(FAULT['SPEC'], opc, at)
+        if not self.native_spec_ops or len(ops) < 4:
+            raise Fault(FAULT['SPEC'], opc, at)
+        try:
+            rty, rid, operation, *ids = ops
+            kind = self.types[rty]['kind']
+            values = [self.consts[c] for c in ids]
+            tids = [self.const_tid[c] for c in ids]
+            kinds = [self.types[t]['kind'] for t in tids]
+            if any(len(value) != 1 for value in values):
+                raise ValueError('non-scalar specialization operation')
+            args = [value[0] for value in values]
+            integer, boolean = TK['INT'], TK['BOOL']
+            binary = {128: lambda a, b: a + b, 130: lambda a, b: a - b,
+                      132: lambda a, b: a * b, 197: lambda a, b: a | b,
+                      198: lambda a, b: a ^ b, 199: lambda a, b: a & b}
+            if operation in binary:
+                if tids != [rty, rty] or kind != integer:
+                    raise ValueError('integer specialization types')
+                value = binary[operation](*args)
+            elif operation in (126, 200):
+                if tids != [rty] or kind != integer:
+                    raise ValueError('unary specialization types')
+                value = -args[0] if operation == 126 else ~args[0]
+            elif operation in (194, 195, 196):
+                if (len(args) != 2 or kinds != [integer, integer] or
+                        tids[0] != rty or kind != integer or args[1] >= 32):
+                    raise ValueError('shift specialization types/count')
+                signed = args[0] - (1 << 32) if args[0] & 0x80000000 else args[0]
+                value = (args[0] << args[1] if operation == 196 else
+                         (signed if operation == 195 else args[0]) >> args[1])
+            elif operation in (164, 165, 166, 167, 168):
+                if (kind != boolean or kinds != [boolean] * (1 if operation == 168 else 2)):
+                    raise ValueError('logical specialization types')
+                if operation == 168:
+                    value = not args[0]
+                else:
+                    a, b = args
+                    value = {164: a == b, 165: a != b, 166: bool(a or b),
+                             167: bool(a and b)}[operation]
+            elif operation == 169:
+                if (len(args) != 3 or kinds[0] != boolean or tids[1:] != [rty, rty] or
+                        kind not in (integer, boolean)):
+                    raise ValueError('select specialization types')
+                value = args[1] if args[0] else args[2]
+            elif operation in (170, 171, 176, 178):
+                if (kind != boolean or kinds != [integer, integer] or tids[0] != tids[1]):
+                    raise ValueError('comparison specialization types')
+                a, b = args
+                value = {170: a == b, 171: a != b, 176: a < b, 178: a <= b}[operation]
+            else:
+                raise ValueError('unsupported specialization operation')
+            self.consts[rid] = [int(value) & 0xFFFFFFFF]
+            self.const_tid[rid] = rty
+            self.reg(rid, tag=1, tid=rty, aux=1)
+        except (ValueError, KeyError, TypeError) as error:
+            raise Fault(FAULT['SPEC'], opc, at) from error
 
     def h_11(self, opc, ops, at):       # OpExtInstImport — GLSL.std.450
         name = b''.join(struct.pack('<I', x) for x in ops[1:])

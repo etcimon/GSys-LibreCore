@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Copyright 2026 Etienne Cimon
 # SPDX-License-Identifier: MIT
 # Regenerate the vn_vectors sessions affected by the §12.3 3d-d record
 # change (record +0 = {gen,slot} handle, +28 = resource offset), the
@@ -50,6 +51,10 @@ python3 $G --compute-session ue_cpos_xfer_big_1 bufcopy_1 --variant xfer_big
 python3 $G --compute-session ue_cpos_xfer_update_1 bufcopy_1 --variant xfer_update
 # §12.3 D/C new positives
 python3 $G --compute-session ue_cpos_dslcompat_1 bufcopy_1 --variant dslcompat
+python3 $G --compute-session ue_cpos_emptylayout_1 bufcopy_1 --variant emptylayout
+python3 $G --compute-session ue_cpos_imm_texlod_1 texlod_lin_1 --variant immutable
+python3 $G --compute-session ue_cpos_imm_copy_1 texlod_lin_1 --variant immutable_copy
+python3 $G --compute-session ue_cpos_imm_array_1 texarr_1 --variant immutable
 python3 $G --compute-session ue_cpos_memsplit_1  bufcopy_1 --variant memsplit
 python3 $G --compute-session ue_cpos_poolreset_1 bufcopy_1 --variant poolreset
 
@@ -170,6 +175,8 @@ python3 $G --graphics-session ue_gpos_ptsrg8x_1 1
 python3 $G --graphics-session ue_gpos_ptsvidx_1 1
 # graphics bind point descriptor read: FS colour from a UBO (set 0)
 python3 $G --graphics-session ue_gpos_fsubo_1 1
+# Copy src array element 0 to dst element 1, then read it in the FS.
+python3 $G --graphics-session ue_gpos_fsubocopy_1 1
 
 # deferred-work and capacity arms
 python3 $G --compute-session ue_cpos_defer2_1  bufcopy_1 --variant defer2

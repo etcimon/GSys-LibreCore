@@ -19,6 +19,7 @@
 #          pre-synthesis fallback). Run the entire launcher on an isolated
 #          remote snapshot; the old partial --remote routing is refused.
 #   profile bounded static Vulkan audit (no RTL build; not conformance).
+#   dev    bounded vgtop development cohort; repository-tools auto-provisioning.
 #
 # Suites remain serial; aggregate remote job budgets are owned by the caller.
 # Logs persist under a NEW --out (default .cache/apu-regress/<ts>-<pid>).
@@ -43,7 +44,7 @@ while [ $# -gt 0 ]; do
       echo "BLOCKED: partial remote routing is unsafe; run this entire launcher through the build-platform remote gateway on an isolated source snapshot." >&2
       exit 4;;
     --help)
-      printf '%s\n' 'Usage: run-apu-regress.sh [--stages unit,top,soc,bridge,guest,synth,profile] [--out NEW_DIR]' \
+      printf '%s\n' 'Usage: run-apu-regress.sh [--stages unit,top,soc,bridge,guest,synth,profile,dev] [--out NEW_DIR]' \
         'Run RTL stages through the remote proxy. PASS covers selected stages only, not device qualification.'
       exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
@@ -55,7 +56,7 @@ done
 IFS=, read -r -a selected <<< "$STAGES"
 seen=,
 for stage in "${selected[@]}"; do
-  case "$stage" in unit|top|soc|bridge|guest|synth|profile) ;; *) echo "unknown stage: $stage" >&2; exit 2;; esac
+  case "$stage" in unit|top|soc|bridge|guest|synth|profile|dev) ;; *) echo "unknown stage: $stage" >&2; exit 2;; esac
   [[ "$seen" != *",$stage,"* ]] || { echo "duplicate stage: $stage" >&2; exit 2; }
   seen+="$stage,"
 done
@@ -74,7 +75,16 @@ has() { case ",$STAGES," in *",$1,"*) return 0;; esac; return 1; }
 source_manifest() {
   python3 -B "$TB/apu_source_manifest.py" "$ROOT" "$STAGES"
 }
+if [[ -n "${APU_VERILATOR_SOURCE_ID_FILE:-}" ]]; then
+  source "$TB/local-verilator.sh"
+  if ! apu_ensure_verilator > "$OUT/toolchain-setup.log" 2>&1; then
+    echo "BLOCKED: repository tool setup failed; see $OUT/toolchain-setup.log" >&2
+    exit 3
+  fi
+  apu_record_verilator
+fi
 source_manifest > "$OUT/source-before.json" || exit 4
+export APU_SIM_RECEIPT_DIR="$OUT/simulator-pgo"
 
 run_suite() { # name command...
   local name="$1"; shift
@@ -92,6 +102,9 @@ run_suite() { # name command...
 
 if has profile; then
   run_suite profile python3 -B "$ROOT/corev_apu/apu/tools/gen_vn_tables.py" --audit-profile
+fi
+if has dev; then
+  run_suite dev env APU_DEV_LOG_DIR="$OUT/dev" bash "$TB/run-apu-dev.sh"
 fi
 
 if has unit; then
@@ -176,7 +189,7 @@ fi
 # ----------------------------------------------------------- summary
 source_manifest > "$OUT/source-after.json" || exit 4
 python3 - "$OUT" "$STAGES" <<'PY'
-import hashlib, json, re, sys
+import hashlib, json, os, re, sys
 from pathlib import Path
 out = Path(sys.argv[1])
 before = json.loads((out / 'source-before.json').read_text())
@@ -200,9 +213,11 @@ for line in (out / 'results.tsv').read_text().splitlines():
         except ValueError:
             pass
     status, reason = 'pass', ''
-    if re.search(r'^(?:\[[^\]\n]+\] )?(?:FAIL\b|GUEST-FAIL\b|%Error|SYNTH FAILED|VERILATOR BUILD FAILED)|^RETAINED_MEM_ASSERT FAIL', text, re.M):
+    if re.search(r'^(?:BLOCKED|INCOMPLETE): simulator PGO\b', text, re.M):
+        status, reason = 'incomplete', 'simulator PGO provisioning did not finish'
+    elif re.search(r'^(?:\[[^\]\n]+\] )?(?:FAIL\b|GUEST-FAIL\b|%Error|SYNTH FAILED|VERILATOR BUILD FAILED)|^RETAINED_MEM_ASSERT FAIL', text, re.M):
         status, reason = 'fail', 'failure diagnostic'
-    elif rc in (4, 124, 137):
+    elif rc in (3, 4, 124, 137):
         status, reason = 'incomplete', 'blocked, interrupted or timed out'
     elif rc:
         status, reason = 'fail', f'exit {rc}'
@@ -260,15 +275,39 @@ for line in (out / 'results.tsv').read_text().splitlines():
         results[-1]['profileAudit'] = audit
     print(f'{name:18} {status.upper():10} checks={checks:<8} {reason}')
 drift = before['sourceSha256'] != after['sourceSha256']
+pgo_required = os.environ.get('APU_SIM_PGO') == '1' and bool(
+    set(sys.argv[2].split(',')) & {'dev', 'unit', 'top', 'soc', 'bridge', 'guest', 'synth'})
+pgo_receipts, pgo_errors = [], []
+if pgo_required:
+    paths = sorted((out / 'simulator-pgo').glob('*.json'))
+    if not paths:
+        pgo_errors.append('no profile-use simulator receipt')
+    else:
+        sys.path.insert(0, str(Path(os.environ['CVA6_REPO_DIR']) / 'verif/tb/apu'))
+        try:
+            from apu_sim_pgo import receipt_valid
+            for path in paths:
+                data = json.loads(path.read_text())
+                if (not receipt_valid(data, data['requestSha256']) or
+                        data['request']['sourceSha256'] != before['sourceSha256']):
+                    raise ValueError('stale/corrupt simulator receipt: ' + path.name)
+                pgo_receipts.append({'receipt': str(path.relative_to(out)), 'top': data['top'],
+                                     'binarySha256': data['binarySha256'],
+                                     'profileCount': data['profileCount']})
+        except (ImportError, OSError, KeyError, TypeError, ValueError) as error:
+            pgo_errors.append(str(error))
 status = ('fail' if any(r['status'] == 'fail' for r in results) else
-          'incomplete' if not results or drift or any(r['status'] != 'pass' for r in results) else 'pass')
+          'incomplete' if not results or drift or pgo_errors or any(r['status'] != 'pass' for r in results) else 'pass')
 if drift:
     print('INCOMPLETE: source changed during the run')
+for error in pgo_errors:
+    print('INCOMPLETE: simulator PGO evidence: ' + error)
 report = {'schemaVersion': 1, 'status': status, 'qualification': False,
           'scope': 'selected stages only; not Vulkan conformance, full-SoC or physical qualification',
           'stages': sys.argv[2].split(','), 'results': results,
           'sourceSha256Before': before['sourceSha256'], 'sourceSha256After': after['sourceSha256'],
-          'proxyTag': before['proxyTag']}
+          'proxyTag': before['proxyTag'],
+          'simulatorPgo': {'required': pgo_required, 'receipts': pgo_receipts, 'errors': pgo_errors}}
 (out / 'summary.json').write_text(json.dumps(report, indent=2) + '\n')
 print(f'logs: {out}')
 print(f'APU-REGRESS {status.upper()} (selected stages only: {sys.argv[2]})')

@@ -699,7 +699,8 @@ def words_to_hex(words):
 
 
 def read_spv(path):
-    data = open(path, 'rb').read()
+    with open(path, 'rb') as handle:
+        data = handle.read()
     return list(struct.unpack('<%dI' % (len(data) // 4), data))
 
 

@@ -87,7 +87,17 @@ package g6lc_apu_objtab_pkg;
     // the requester reclaims the entry's external resources (ObjPay
     // extent, ShaderCore residency).  RESET_CTX sweeps zombies like
     // any entry.  refcnt != 0 still completes BUSY_CHILDREN.
-    APU_OBJTAB_OP_RETIRE_LAZY = 4'd14
+    APU_OBJTAB_OP_RETIRE_LAZY = 4'd14,
+    // §12.3 C alias probe: read-only walk of req.ctx's context list
+    // reporting the FIRST live entry of kind == req.kind whose
+    // aux[63:32] equals req.offset[31:0] (the {gen,slot} of a
+    // VkDeviceMemory), whose bind_offset is nonzero (still mapped),
+    // and whose {gen,slot} differs from req.id[31:0] (the requester
+    // exclusion).  OK + {gen,slot} handle + entry on a match; MISS
+    // when the list is exhausted.  One completion, no SWEEP stream —
+    // UNMAP_BLOB uses it to keep a shared memory extent alive while
+    // another mapped alias remains (vn_memory_blobs parity).
+    APU_OBJTAB_OP_SCAN_BIND   = 4'd15
   } apu_objtab_op_e;
 
   typedef enum logic [3:0] {

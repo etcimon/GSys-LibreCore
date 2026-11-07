@@ -79,6 +79,14 @@ Before making an edit the agent MUST verify all three config files exist at the 
 notice retention a **condition** of our license to the upstream work; stripping an "ETH Zurich" or
 "Thales DIS" line is a license breach, not a rebrand.
 
+**Project-owner clarification (explicitly confirmed by the maintainer):** Etienne
+Cimon, identified in `.active-contributor` and `CONTRIBUTORS` as rights holder and
+project originator, does not need a CLA to contribute his own work to himself.
+This exception covers his own contributions only; it neither replaces a
+third-party contributor's CLA nor transfers any upstream rights. Do not fill,
+sign or fabricate a CLA record on his behalf. The other tier, attribution,
+upstream-retention and link-set guards remain unchanged.
+
 ## Codebase license catalog
 
 | License (SPDX) | Source of record | Character | Contributor protection |

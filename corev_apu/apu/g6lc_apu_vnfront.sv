@@ -322,14 +322,20 @@ module g6lc_apu_vnfront
       StDPoolAuxS,
       StDPoolRs, StDPoolRsK, StDPoolRsHi,
       // §12.3 F5: descriptor-set-layout row build in objpay
-      StDslHdrC, StDslRd, StDslWr, StDslWrC, StDslAuxL, StDslHash,
+      StDslHdrC, StDslRd, StDslPick, StDslEmit,
+      StDslWr, StDslWrC, StDslAuxL, StDslHash,
+      StDslPtr, StDslPtrC, StDslSamLo, StDslSamHi, StDslSamC,
+      StDslSamW0C, StDslSamW1C, StDslFail,
       // §12.3 F5: descriptor-set allocation element chain
       StDSetLayLo, StDSetLayHi, StDSetLayId, StDSetLayCpl,
       StDSetPoolC, StDSetObj, StDSetOCpl, StDSetAuxH,
       StDSetEpoch, StDSetZero, StDSetZeroC, StDSetBump, StDSetBumpC,
+      StDiHdr, StDiHdrC, StDiRow, StDiRow0C, StDiRow1C,
+      StDiPtrC, StDiSam0C, StDiSam1C, StDiWrite, StDiWriteC,
+      StDiFail, StDiFailC,
       // §12.3 F5: vkUpdateDescriptorSets — resolve-set and
       // binding-row-scan subroutines, then record writes/copies
-      StRsvLuC, StRsvPoolC, StRsvLayC,
+      StRsvLuC, StRsvPoolC, StRsvLayC, StRsvHdrC,
       StRowSc, StRowW0C, StRowW1C,
       StUpdHdrC, StUpdSetCpl, StUpdWBegin, StUpdWBad, StUpdWNext,
       StUpdInfo, StUpdInfoC, StUpdBufGo, StUpdBufCpl, StUpdMemCpl,
@@ -447,11 +453,21 @@ module g6lc_apu_vnfront
 
     // §12.3 F5: descriptor-set-layout row build (§16 record format)
     logic [15:0]         dsl_i_q;      // binding cursor
-    logic [2:0]          dsl_h_q;      // staged word cursor (4/binding)
+    logic [2:0]          dsl_h_q;      // five-word binding header cursor
     logic                dsl_k_q;      // row word cursor (2/row)
     logic [15:0]         dsl_b_q;
     logic [7:0]          dsl_t_q;
     logic [15:0]         dsl_c_q;
+    // Serial minimum selection avoids a combinational binding sorter.
+    logic [15:0]         dsl_scan_q, dsl_last_q, dsl_pick_b_q;
+    logic [7:0]          dsl_pick_t_q;
+    logic [15:0]         dsl_pick_c_q;
+    logic                dsl_pick_v_q;
+    logic                dsl_hasimm_q, dsl_imm_q, dsl_pick_imm_q;
+    logic [15:0]         dsl_acnt_q, dsl_next_q, dsl_smp_i_q;
+    logic [StgBits-1:0]  dsl_pick_smp_q;
+    logic [31:0]         dsl_smp_lo_q;
+    logic [63:0]         dsl_saux_q;
     logic [19:0]         dsl_off_q;    // running record offset
     logic [15:0]         dsl_dn_q;     // dynamic descriptor count
     logic [15:0]         dsl_recs_q;   // total record count
@@ -466,6 +482,12 @@ module g6lc_apu_vnfront
     logic [15:0]         ent_j_q;      // generic element cursor
     logic [63:0]         ds_layh_q;    // allocated set's layout {gen,slot}
     logic [15:0]         ds_layb_q, ds_layw_q; // layout payload extent
+    logic [31:0]         di_base_q;
+    logic [15:0]         di_n_q, di_i_q, di_count_q, di_elem_q, di_ptr_q;
+    logic [11:0]         di_off_q;
+    logic [7:0]          di_type_q;
+    logic [1:0]          di_beat_q;
+    logic [63:0]         di_sampler_q;
     logic [15:0]         ds_sbyt_q;    // layout set-table byte extent
     logic [15:0]         ds_ndyn_q;    // layout dynamic count
     logic [24:0]         ds_sbase_q;   // set-table base (word index)
@@ -493,6 +515,7 @@ module g6lc_apu_vnfront
     logic [19:0]         rw_off_q;     // record offset (32B units)
     logic [15:0]         rw_cnt_q;     // array count
     logic [7:0]          rw_typ_q;     // descriptor type
+    logic                rw_imm_q, upd_imm_q, cp_imm_q;
 
     // vkUpdateDescriptorSets staged walk
     logic [15:0]         upd_i_q;      // write index
@@ -1222,11 +1245,20 @@ module g6lc_apu_vnfront
         ds_i_q <= '0; dsum_q <= '0;
         dsl_i_q <= '0; dsl_h_q <= '0; dsl_k_q <= 1'b0;
         dsl_b_q <= '0; dsl_t_q <= '0; dsl_c_q <= '0;
+        dsl_scan_q <= '0; dsl_last_q <= '0; dsl_pick_b_q <= '0;
+        dsl_pick_t_q <= '0; dsl_pick_c_q <= '0; dsl_pick_v_q <= 1'b0;
+        dsl_hasimm_q <= 1'b0; dsl_imm_q <= 1'b0; dsl_pick_imm_q <= 1'b0;
+        dsl_acnt_q <= '0; dsl_next_q <= '0; dsl_smp_i_q <= '0;
+        dsl_pick_smp_q <= '0; dsl_smp_lo_q <= '0; dsl_saux_q <= '0;
         dsl_off_q <= '0; dsl_dn_q <= '0; dsl_recs_q <= '0;
         dsl_hash_q <= '0;
         lay_lo_q <= '0;
         ent_j_q <= '0;
         ds_layh_q <= '0; ds_layb_q <= '0; ds_layw_q <= '0;
+        di_base_q <= '0; di_n_q <= '0; di_i_q <= '0;
+        di_count_q <= '0; di_elem_q <= '0; di_ptr_q <= '0;
+        di_off_q <= '0; di_type_q <= '0; di_beat_q <= '0;
+        di_sampler_q <= '0;
         ds_sbyt_q <= '0; ds_ndyn_q <= '0; ds_sbase_q <= '0;
         ds_z_i_q <= '0; ds_z_n_q <= '0; ds_pent_q <= '0;
         ds_err_q <= 1'b0;
@@ -1237,6 +1269,7 @@ module g6lc_apu_vnfront
         rsv_ret_q <= StIdle; row_ret_q <= StIdle;
         rw_i_q <= '0; rw_bind_q <= '0; rw_ok_q <= 1'b0;
         rw_off_q <= '0; rw_cnt_q <= '0; rw_typ_q <= '0;
+        rw_imm_q <= 1'b0; upd_imm_q <= 1'b0; cp_imm_q <= 1'b0;
         upd_i_q <= '0; upd_h_q <= '0;
         upd_dst_q <= '0; upd_buf_q <= '0;
         upd_off_q <= '0; upd_rng_q <= '0;
@@ -1747,9 +1780,18 @@ module g6lc_apu_vnfront
                       state_q  <= StRep;
                     end else begin
                       prepend_n_q <= '0;
-                      op_words_q  <= 16'd1 + 2*16'(op_q.imm[1]);
+                      // Five header words/binding plus two words/sampler.
+                      // With immutable state, append N pointers and snapshots.
+                      dsl_hasimm_q <= op_q.pay_words > 5*op_q.imm[1];
+                      dsl_next_q <= 16'd1 + 3*16'(op_q.imm[1]);
+                      op_words_q <= op_q.pay_words > 5*op_q.imm[1]
+                          ? 16'd1 + 16'(op_q.pay_words) - 2*16'(op_q.imm[1])
+                          : 16'd1 + 2*16'(op_q.imm[1]);
                       opr_q    <= '{op: APU_OBJPAY_OP_ALLOC,
-                                    words: 32'd1 + 2*op_q.imm[1],
+                                    words: op_q.pay_words > 5*op_q.imm[1]
+                                        ? 32'd1 + 32'(op_q.pay_words) -
+                                          2*op_q.imm[1]
+                                        : 32'd1 + 2*op_q.imm[1],
                                     default: '0};
                       op_ret_q <= StPayAlcCpl;
                       state_q  <= StOpReq;
@@ -2134,7 +2176,14 @@ module g6lc_apu_vnfront
                          : crr_q.pay_n != 16'h0 ? StPaySend : StCrCpl;
           StCrCpl: if (cr_cpl_valid_i) state_q <= cr_ret_q;
           StOpReq: if (op_req_ready_i) state_q <= StOpCpl;
-          StOpCpl: if (op_cpl_valid_i) state_q <= op_ret_q;
+          StOpCpl: if (op_cpl_valid_i) begin
+            state_q <= op_ret_q;
+            if (op_cpl_i.status != APU_OBJPAY_OK &&
+                (op_ret_q == StDiHdrC || op_ret_q == StDiRow0C ||
+                 op_ret_q == StDiRow1C || op_ret_q == StDiPtrC ||
+                 op_ret_q == StDiSam0C || op_ret_q == StDiSam1C))
+              state_q <= StDiFail;
+          end
           // one staged payload word -> stg_word_q -> stg_ret_q
           StStgRd:  state_q <= StStgCap;
           StStgCap: begin
@@ -3833,7 +3882,7 @@ module g6lc_apu_vnfront
                 // built from the staged {bind,type,cnt,flags} words
                 opr_q    <= '{op: APU_OBJPAY_OP_WRITE,
                               addr: op_cpl_i.base,
-                              wdata: {16'h0, 16'(op_q.imm[1])},
+                              wdata: {dsl_hasimm_q, 15'h0, 16'(op_q.imm[1])},
                               default: '0};
                 op_ret_q <= StDslHdrC;
                 state_q  <= StOpReq;
@@ -4070,9 +4119,15 @@ module g6lc_apu_vnfront
 
           // ---- §12.3 F5: vkCreateDescriptorSetLayout row build -----------
           // StPayAlcCpl already wrote {pad,nbind}; walk the staged
-          // {binding,type,count,stageFlags} quads and emit two-word
+          // five-word binding headers plus sampler arrays; emit two-word
           // apu_sh_bindrow_t-compatible rows at op_base+1+2j
           StDslHdrC: begin
+            // Empty layouts must not inherit the preceding layout's extent,
+            // dynamic count or compatibility hash.
+            dsl_off_q <= '0;
+            dsl_dn_q <= '0;
+            dsl_recs_q <= '0;
+            dsl_hash_q <= 32'h811C_9DC5;
             if (op_cpl_i.status != APU_OBJPAY_OK) begin
               result_q <= APU_VK_ERROR_OUT_OF_DEVICE_MEMORY;
               state_q  <= StRep;
@@ -4080,11 +4135,10 @@ module g6lc_apu_vnfront
               state_q <= StAllocGo;
             end else begin
               dsl_i_q    <= '0;
+              dsl_scan_q <= '0;
+              dsl_last_q <= '0;
+              dsl_pick_v_q <= 1'b0;
               dsl_h_q    <= '0;
-              dsl_off_q  <= '0;
-              dsl_dn_q   <= '0;
-              dsl_recs_q <= '0;
-              dsl_hash_q <= 32'h811C_9DC5;   // FNV-1a offset basis
               stg_i_q    <= '0;
               stg_ret_q  <= StDslRd;
               state_q    <= StStgRd;
@@ -4095,35 +4149,144 @@ module g6lc_apu_vnfront
               3'd0: dsl_b_q <= stg_word_q[15:0];
               3'd1: dsl_t_q <= stg_word_q[7:0];
               3'd2: dsl_c_q <= stg_word_q[15:0];
+              3'd4: dsl_acnt_q <= stg_word_q[15:0];
               default: ;                    // stageFlags: unused
             endcase
-            if (dsl_h_q != 3'd3) begin
+            stg_i_q <= stg_i_q + 1'b1;
+            if (dsl_h_q != 3'd4) begin
               dsl_h_q   <= dsl_h_q + 3'd1;
-              stg_i_q   <= stg_i_q + 1'b1;
               stg_ret_q <= StDslRd;
               state_q   <= StStgRd;
             end else begin
-              // the whole quad is captured: refuse on the device
-              // limits (>APU_DESC_DYN dynamics, >2047 records), else
-              // emit the two row words
-              automatic logic bad =
-                  ((dsl_t_q == 8'd8 || dsl_t_q == 8'd9) &&
-                   20'(dsl_dn_q) + 20'(dsl_c_q)
-                          > 20'(APU_DESC_DYN)) ||
-                  (20'(dsl_recs_q) + 20'(dsl_c_q) > 20'd2047);
-              if (bad) begin
-                opr_q    <= '{op: APU_OBJPAY_OP_FREE,
-                             addr: op_base_q,
-                             words: {16'h0, op_words_q},
-                             default: '0};
-                op_ret_q <= StRep;
-                result_q <= APU_VK_ERROR_OUT_OF_DEVICE_MEMORY;
-                state_q  <= StOpReq;
-              end else begin
-                dsl_k_q <= 1'b0;
-                state_q <= StDslWr;
+              stg_i_q <= stg_i_q + 1'b1 + StgBits'(stg_word_q << 1);
+              state_q <= StDslPick;
+            end
+          end
+          StDslPick: begin
+            // pBindings order is arbitrary. Emit rows in binding-number
+            // order so dynbase and the content hash have canonical meaning.
+            if ((dsl_i_q == 16'h0 || dsl_b_q > dsl_last_q) &&
+                (!dsl_pick_v_q || dsl_b_q < dsl_pick_b_q)) begin
+              dsl_pick_v_q <= 1'b1;
+              dsl_pick_b_q <= dsl_b_q;
+              dsl_pick_t_q <= dsl_t_q;
+              dsl_pick_c_q <= dsl_c_q;
+              dsl_pick_imm_q <= dsl_acnt_q != 16'h0;
+              dsl_pick_smp_q <= stg_i_q - StgBits'({dsl_acnt_q, 1'b0});
+            end
+            if (dsl_scan_q + 16'd1 >= 16'(op_q.imm[1])) begin
+              state_q <= StDslEmit;
+            end else begin
+              dsl_scan_q <= dsl_scan_q + 16'd1;
+              dsl_h_q    <= '0;
+              stg_ret_q  <= StDslRd;
+              state_q    <= StStgRd;
+            end
+            if (dsl_acnt_q != 16'h0 &&
+                (dsl_acnt_q != dsl_c_q ||
+                 (dsl_t_q != 8'd0 && dsl_t_q != 8'd1)))
+              state_q <= StDslFail;
+          end
+          StDslEmit: begin
+            // Limits apply in emitted order. No next distinct binding
+            // also refuses malformed duplicate-binding layouts.
+            automatic logic bad =
+                !dsl_pick_v_q ||
+                ((dsl_pick_t_q == 8'd8 || dsl_pick_t_q == 8'd9) &&
+                 20'(dsl_dn_q) + 20'(dsl_pick_c_q)
+                        > 20'(APU_DESC_DYN)) ||
+                (20'(dsl_recs_q) + 20'(dsl_pick_c_q) > 20'd2047);
+            if (bad) begin
+              opr_q    <= '{op: APU_OBJPAY_OP_FREE,
+                           addr: op_base_q,
+                           words: {16'h0, op_words_q},
+                           default: '0};
+              op_ret_q <= StRep;
+              result_q <= APU_VK_ERROR_OUT_OF_DEVICE_MEMORY;
+              state_q  <= StOpReq;
+            end else begin
+              dsl_b_q <= dsl_pick_b_q;
+              dsl_t_q <= dsl_pick_t_q;
+              dsl_c_q <= dsl_pick_c_q;
+              dsl_imm_q <= dsl_pick_imm_q;
+              dsl_k_q <= 1'b0;
+              state_q <= dsl_hasimm_q ? StDslPtr : StDslWr;
+            end
+          end
+          StDslPtr: begin
+            opr_q <= '{op: APU_OBJPAY_OP_WRITE,
+                       addr: op_base_q + 32'd1 + 2*op_q.imm[1] + 32'(dsl_i_q),
+                       wdata: dsl_imm_q ? {16'h0, dsl_next_q} : 32'h0,
+                       default: '0};
+            op_ret_q <= StDslPtrC;
+            state_q <= StOpReq;
+          end
+          StDslPtrC: begin
+            if (op_cpl_i.status != APU_OBJPAY_OK) state_q <= StDslFail;
+            else if (!dsl_imm_q) state_q <= StDslWr;
+            else begin
+              dsl_smp_i_q <= '0;
+              stg_i_q <= dsl_pick_smp_q;
+              stg_ret_q <= StDslSamLo;
+              state_q <= StStgRd;
+            end
+          end
+          StDslSamLo: begin
+            dsl_smp_lo_q <= stg_word_q;
+            stg_i_q <= stg_i_q + 1'b1;
+            stg_ret_q <= StDslSamHi;
+            state_q <= StStgRd;
+          end
+          StDslSamHi: begin
+            otr_q <= '{op: APU_OBJTAB_OP_LOOKUP,
+                       id: APU_VN_ID_TAG | {stg_word_q, dsl_smp_lo_q},
+                       kind: 6'(APU_VN_KIND_VK_SAMPLER), ctx: ctx_i,
+                       default: '0};
+            ot_ret_q <= StDslSamC;
+            state_q <= StOtReq;
+          end
+          StDslSamC: begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) state_q <= StDslFail;
+            else begin
+              dsl_saux_q <= ot_cpl_i.entry.aux;
+              opr_q <= '{op: APU_OBJPAY_OP_WRITE,
+                         addr: op_base_q + 32'(dsl_next_q),
+                         wdata: ot_cpl_i.entry.aux[31:0], default: '0};
+              op_ret_q <= StDslSamW0C;
+              state_q <= StOpReq;
+            end
+          end
+          StDslSamW0C: begin
+            if (op_cpl_i.status != APU_OBJPAY_OK) state_q <= StDslFail;
+            else begin
+              dsl_hash_q <= fnv1a_w(dsl_hash_q, dsl_saux_q[31:0]);
+              opr_q <= '{op: APU_OBJPAY_OP_WRITE,
+                         addr: op_base_q + 32'(dsl_next_q) + 32'd1,
+                         wdata: dsl_saux_q[63:32], default: '0};
+              op_ret_q <= StDslSamW1C;
+              state_q <= StOpReq;
+            end
+          end
+          StDslSamW1C: begin
+            if (op_cpl_i.status != APU_OBJPAY_OK) state_q <= StDslFail;
+            else begin
+              dsl_hash_q <= fnv1a_w(dsl_hash_q, dsl_saux_q[63:32]);
+              dsl_next_q <= dsl_next_q + 16'd2;
+              if (dsl_smp_i_q + 16'd1 >= dsl_c_q) state_q <= StDslWr;
+              else begin
+                dsl_smp_i_q <= dsl_smp_i_q + 16'd1;
+                stg_i_q <= stg_i_q + 1'b1;
+                stg_ret_q <= StDslSamLo;
+                state_q <= StStgRd;
               end
             end
+          end
+          StDslFail: begin
+            opr_q <= '{op: APU_OBJPAY_OP_FREE, addr: op_base_q,
+                       words: {16'h0, op_words_q}, default: '0};
+            op_ret_q <= StRep;
+            result_q <= APU_VK_ERROR_UNKNOWN;
+            state_q <= StOpReq;
           end
           StDslWr: begin
             opr_q    <= '{op: APU_OBJPAY_OP_WRITE,
@@ -4133,7 +4296,7 @@ module g6lc_apu_vnfront
                                 ? {dsl_b_q[7:0], dsl_t_q, dsl_c_q}
                                 : {dsl_b_q[15:8], dsl_off_q[11:0],
                                    dsl_t_q == 8'd8 || dsl_t_q == 8'd9,
-                                   7'b0, dsl_dn_q[3:0]},
+                                   dsl_imm_q, 6'b0, dsl_dn_q[3:0]},
                          default: '0};
             op_ret_q <= StDslWrC;
             state_q  <= StOpReq;
@@ -4153,16 +4316,19 @@ module g6lc_apu_vnfront
                   dsl_hash_q,
                   {dsl_b_q[15:8], dsl_off_q[11:0],
                    dsl_t_q == 8'd8 || dsl_t_q == 8'd9,
-                   7'b0, dsl_dn_q[3:0]});
+                   dsl_imm_q, 6'b0, dsl_dn_q[3:0]});
               dsl_off_q  <= dsl_off_q + 20'(dsl_c_q);
               dsl_recs_q <= dsl_recs_q + dsl_c_q;
               if (dyn) dsl_dn_q <= dsl_dn_q + dsl_c_q;
               dsl_i_q <= dsl_i_q + 16'd1;
+              dsl_last_q <= dsl_b_q;
               dsl_h_q <= '0;
               if (dsl_i_q + 16'd1 >= 16'(op_q.imm[1])) begin
                 state_q <= StAllocGo;
               end else begin
-                stg_i_q   <= stg_i_q + 1'b1;   // skip stageFlags
+                dsl_scan_q <= '0;
+                dsl_pick_v_q <= 1'b0;
+                stg_i_q   <= '0;
                 stg_ret_q <= StDslRd;
                 state_q   <= StStgRd;
               end
@@ -4225,6 +4391,8 @@ module g6lc_apu_vnfront
               state_q  <= StBlobRd;
             end else begin
               ds_layh_q <= ot_cpl_i.handle;
+              di_base_q <= 32'(ot_cpl_i.entry.aux[63:48]) << 6;
+              ds_layw_q <= ot_cpl_i.entry.aux[47:32];
               ds_ndyn_q <= ot_cpl_i.entry.aux[31:16];
               ds_sbyt_q <= ot_cpl_i.entry.aux[15:0];
               // pool entry for the capacity / maxSets checks
@@ -4349,12 +4517,130 @@ module g6lc_apu_vnfront
           StDSetZeroC: begin
             ds_z_i_q <= ds_z_i_q + 16'd1;
             if (ds_z_i_q + 16'd1 >= ds_z_n_q) begin
-              state_q <= StDSetBump;
+              state_q <= StDiHdr;
             end else begin
               ap_addr_q <= ap_addr_q + 32'd8;
               ap_ret_q  <= StDSetZeroC;
               state_q   <= StApReq;
             end
+          end
+          StDiHdr: begin
+            opr_q <= '{op: APU_OBJPAY_OP_READ, addr: di_base_q, default: '0};
+            op_ret_q <= StDiHdrC;
+            state_q <= StOpReq;
+          end
+          StDiHdrC: begin
+            if (op_cpl_i.rdata[15:0] > 16'(APU_DESC_BND))
+              state_q <= StDiFail;
+            else if (!op_cpl_i.rdata[31]) state_q <= StDSetBump;
+            else begin
+              di_n_q <= op_cpl_i.rdata[15:0];
+              di_i_q <= '0;
+              state_q <= StDiRow;
+            end
+          end
+          StDiRow: begin
+            if (di_i_q >= di_n_q) state_q <= StDSetBump;
+            else begin
+              opr_q <= '{op: APU_OBJPAY_OP_READ,
+                         addr: di_base_q + 32'd1 + (32'(di_i_q) << 1),
+                         default: '0};
+              op_ret_q <= StDiRow0C;
+              state_q <= StOpReq;
+            end
+          end
+          StDiRow0C: begin
+            di_count_q <= op_cpl_i.rdata[15:0];
+            di_type_q <= op_cpl_i.rdata[23:16];
+            opr_q <= '{op: APU_OBJPAY_OP_READ,
+                       addr: di_base_q + 32'd2 + (32'(di_i_q) << 1),
+                       default: '0};
+            op_ret_q <= StDiRow1C;
+            state_q <= StOpReq;
+          end
+          StDiRow1C: begin
+            di_off_q <= op_cpl_i.rdata[23:12];
+            if (!op_cpl_i.rdata[10] || di_count_q == 16'h0) begin
+              di_i_q <= di_i_q + 16'd1;
+              state_q <= StDiRow;
+            end else begin
+              opr_q <= '{op: APU_OBJPAY_OP_READ,
+                         addr: di_base_q + 32'd1 + (32'(di_n_q) << 1) +
+                               32'(di_i_q), default: '0};
+              op_ret_q <= StDiPtrC;
+              state_q <= StOpReq;
+            end
+          end
+          StDiPtrC: begin
+            di_ptr_q <= op_cpl_i.rdata[15:0];
+            di_elem_q <= '0;
+            opr_q <= '{op: APU_OBJPAY_OP_READ,
+                       addr: di_base_q + op_cpl_i.rdata, default: '0};
+            op_ret_q <= StDiSam0C;
+            state_q <= StOpReq;
+            if (op_cpl_i.rdata < 32'd1 + 3*32'(di_n_q) ||
+                op_cpl_i.rdata + 2*32'(di_count_q) > 32'(ds_layw_q))
+              state_q <= StDiFail;
+          end
+          StDiSam0C: begin
+            di_sampler_q[31:0] <= op_cpl_i.rdata;
+            opr_q <= '{op: APU_OBJPAY_OP_READ,
+                       addr: di_base_q + 32'(di_ptr_q) +
+                             (32'(di_elem_q) << 1) + 32'd1, default: '0};
+            op_ret_q <= StDiSam1C;
+            state_q <= StOpReq;
+          end
+          StDiSam1C: begin
+            di_sampler_q[63:32] <= op_cpl_i.rdata;
+            di_beat_q <= '0;
+            state_q <= StDiWrite;
+          end
+          StDiWrite: begin
+            ap_we_q <= 1'b1;
+            ap_addr_q <= {5'h0, ds_sbase_q, 2'b00} +
+                         ((32'(di_off_q) + 32'(di_elem_q)) << 5) +
+                         (di_beat_q == 2'd0 ? 32'd8 :
+                          di_beat_q == 2'd1 ? 32'd16 : 32'd24);
+            ap_wdata_q <= di_beat_q == 2'd0
+                ? {48'h0, 7'h0, di_type_q == 8'd0, di_type_q}
+                : di_beat_q == 2'd1 ? {di_sampler_q[31:0], 32'h0}
+                : {32'h0, di_sampler_q[63:32]};
+            ap_wstrb_q <= di_beat_q == 2'd0 ? 8'hFF :
+                          di_beat_q == 2'd1 ? 8'hF0 : 8'h0F;
+            ap_ret_q <= StDiWriteC;
+            state_q <= StApReq;
+          end
+          StDiWriteC: begin
+            if (di_beat_q != 2'd2) begin
+              di_beat_q <= di_beat_q + 2'd1;
+              state_q <= StDiWrite;
+            end else if (di_elem_q + 16'd1 >= di_count_q) begin
+              di_i_q <= di_i_q + 16'd1;
+              state_q <= StDiRow;
+            end else begin
+              di_elem_q <= di_elem_q + 16'd1;
+              opr_q <= '{op: APU_OBJPAY_OP_READ,
+                         addr: di_base_q + 32'(di_ptr_q) +
+                               ((32'(di_elem_q) + 32'd1) << 1), default: '0};
+              op_ret_q <= StDiSam0C;
+              state_q <= StOpReq;
+            end
+          end
+          StDiFail: begin
+            // Do not publish a partially initialized descriptor set.
+            otr_q <= '{op: APU_OBJTAB_OP_RETIRE,
+                       id: {32'h0, hnd_pay_q},
+                       kind: 6'(APU_VN_KIND_VK_DESCRIPTOR_SET),
+                       ctx: ctx_i, default: '0};
+            ot_ret_q <= StDiFailC;
+            state_q <= StOtReq;
+          end
+          StDiFailC: begin
+            result_q <= APU_VK_ERROR_UNKNOWN;
+            ds_err_q <= 1'b1;
+            rep_null_mask_q[blob_i_q[4:0]] <= 1'b1;
+            blob_i_q <= blob_i_q + 16'd1;
+            state_q <= StBlobRd;
           end
           // hand {nsets+1, bump+records} to the pool and finish —
           // §5a G3b-iii: a free-list allocation leaves bump parked
@@ -4427,9 +4713,21 @@ module g6lc_apu_vnfront
             rsv_layb_q <= ot_cpl_i.status == APU_OBJTAB_OK
                           ? 32'(ot_cpl_i.entry.aux[63:48]) << 6
                           : 32'h0;
-            rsv_nbnd_q <= ot_cpl_i.status == APU_OBJTAB_OK
-                          ? (ot_cpl_i.entry.aux[47:32] - 16'd1) >> 1
-                          : 16'h0;
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              rsv_nbnd_q <= '0;
+              state_q <= rsv_ret_q;
+            end else begin
+              opr_q <= '{op: APU_OBJPAY_OP_READ,
+                         addr: 32'(ot_cpl_i.entry.aux[63:48]) << 6,
+                         default: '0};
+              op_ret_q <= StRsvHdrC;
+              state_q <= StOpReq;
+            end
+          end
+          StRsvHdrC: begin
+            rsv_nbnd_q <= op_cpl_i.status == APU_OBJPAY_OK
+                         ? op_cpl_i.rdata[15:0] : 16'h0;
+            if (op_cpl_i.status != APU_OBJPAY_OK) rsv_dead_q <= 1'b1;
             state_q <= rsv_ret_q;
           end
 
@@ -4478,6 +4776,7 @@ module g6lc_apu_vnfront
               state_q <= StRowSc;
             end else begin
               rw_off_q <= {8'h0, op_cpl_i.rdata[23:12]};
+              rw_imm_q <= op_cpl_i.rdata[10];
               rw_ok_q  <= 1'b1;
               state_q  <= row_ret_q;
             end
@@ -4551,6 +4850,7 @@ module g6lc_apu_vnfront
             end
           end
           StUpdWBad: begin
+            upd_imm_q <= rw_imm_q;
             // write-level failures poison the set at WNext; the
             // element loop only covers the in-range prefix
             upd_bad_q <= !rw_ok_q || rw_typ_q != upd_type_q[7:0];
@@ -4731,7 +5031,11 @@ module g6lc_apu_vnfront
             upd_rec_q  <= {5'h0, rsv_base_q, 2'b00} +
                           ((32'(rw_off_q) + upd_arr_q +
                             32'(ent_j_q)) << 5);
-            if (upd_type_q[7:0] == 8'd0) begin
+            if (upd_type_q[7:0] == 8'd0 && upd_imm_q) begin
+              // Layout-owned SAMPLER descriptors ignore sampler writes.
+              upd_elok_q <= 1'b1;
+              state_q <= StUpdElemCk;
+            end else if (upd_type_q[7:0] == 8'd0) begin
               // SAMPLER: no image; the record is just the sampler pair
               otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
                            id: APU_VN_ID_TAG | upd_smp_q,
@@ -4831,7 +5135,7 @@ module g6lc_apu_vnfront
               upd_iw_q[2] <= {4'h0, upd_vw_q[27:16],
                               16'(upd_vw_q[55:46])};
             end
-            if (upd_type_q[7:0] == 8'd1) begin
+            if (upd_type_q[7:0] == 8'd1 && !upd_imm_q) begin
               // COMBINED_IMAGE_SAMPLER still needs the sampler pair
               otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
                            id: APU_VN_ID_TAG | upd_smp_q,
@@ -4903,7 +5207,7 @@ module g6lc_apu_vnfront
             ap_we_q    <= 1'b1;
             ap_addr_q  <= upd_rec_q + 32'd16;
             ap_wdata_q <= {upd_iw_q[3], upd_iw_q[2]};
-            ap_wstrb_q <= 8'hFF;
+            ap_wstrb_q <= upd_imm_q ? 8'h0F : 8'hFF;
             ap_ret_q   <= StUpdWr3;
             state_q    <= StApReq;
           end
@@ -4913,7 +5217,7 @@ module g6lc_apu_vnfront
             ap_we_q    <= 1'b1;
             ap_addr_q  <= upd_rec_q + 32'd24;
             ap_wdata_q <= {upd_elok_q ? upd_eb_q : 32'h0, upd_iw_q[4]};
-            ap_wstrb_q <= 8'hFF;
+            ap_wstrb_q <= upd_imm_q ? 8'hF0 : 8'hFF;
             ap_ret_q   <= StUpdElemCk;
             state_q    <= StApReq;
           end
@@ -5033,6 +5337,7 @@ module g6lc_apu_vnfront
                 cp_srcbad_q || !rw_ok_q ||
                 cp_sa_q + cp_n_q > {16'h0, cp_scnt_q} ||
                 cp_da_q + cp_n_q > {16'h0, rw_cnt_q};
+            cp_imm_q <= rw_imm_q;
             cp_doff_q  <= rw_off_q;
             cp_dcnt2_q <= rw_cnt_q;
             if (cp_dead_q) begin
@@ -5047,7 +5352,7 @@ module g6lc_apu_vnfront
                            ctx: ctx_i, default: '0};
               ot_ret_q <= StUpdCpPC;
               state_q  <= StOtReq;
-            end else if (cp_n_q == 32'h0) begin
+            end else if (cp_n_q == 32'h0 || (rw_imm_q && rw_typ_q == 8'd0)) begin
               state_q <= StUpdCpNext;
             end else begin
               ent_j_q   <= '0;
@@ -5070,7 +5375,8 @@ module g6lc_apu_vnfront
                             32'(ent_j_q)) << 5) +
                           {28'h0, cp_b_q} * 32'd8;
             ap_wdata_q <= ap_rd_q;
-            ap_wstrb_q <= 8'hFF;
+            ap_wstrb_q <= cp_imm_q && cp_b_q == 4'd2 ? 8'h0F :
+                          cp_imm_q && cp_b_q == 4'd3 ? 8'hF0 : 8'hFF;
             ap_ret_q   <= StUpdCpBC;
             state_q    <= StApReq;
           end
@@ -6930,6 +7236,23 @@ module g6lc_apu_vnfront
     end
 
 // pragma translate_off
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+        (state_q == StAllocGo &&
+         act_q.obj_kind == 6'(APU_VN_KIND_VK_DESCRIPTOR_SET_LAYOUT) &&
+         op_q.imm[1] == 32'h0)
+        |-> (dsl_off_q == '0 && dsl_dn_q == '0 && dsl_recs_q == '0 &&
+             dsl_hash_q == 32'h811C_9DC5));
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+        (state_q == StDslWr && !dsl_k_q && dsl_i_q != 16'h0)
+        |-> dsl_b_q > dsl_last_q);
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+        state_q == StDslPick |-> dsl_scan_q < 16'(op_q.imm[1]));
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+        state_q == StDslSamC && ot_cpl_i.status == APU_OBJTAB_OK
+        |-> 32'(dsl_next_q) + 32'd1 < 32'(op_words_q));
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+        state_q == StDiWrite
+        |-> ((32'(di_off_q) + 32'(di_elem_q)) << 5) < 32'(ds_sbyt_q));
 `ifdef G6LC_APU_DBG_LOST
     // lifecycle watcher: mutating ObjTab ops + their completions
     // (LOOKUP/READSLOT are hot and already covered by cmdexec prints;

@@ -49,6 +49,12 @@ module tb_g6lc_apu_vgctl;
   // drain_idle_i is the engine quiescence the mover waits on
   logic            hold;
   logic            drain_idle = 1'b1;
+  // hold observability: NBA-only writes - a blocking clear plus an
+  // NBA set on one variable races (same rule as the fence monitor)
+  int unsigned     hold_edges = 0;
+  always @(posedge clk or negedge rst_ni)
+    if (!rst_ni) hold_edges <= 0;
+    else if (hold) hold_edges <= hold_edges + 1;
   int unsigned     ck_count = 0;
   logic [7:0]      ck_seen = '0;
   always @(posedge clk) if (ck_v) begin
@@ -307,6 +313,32 @@ module tb_g6lc_apu_vgctl;
       @(posedge clk);
     end
     cases++;
+  endtask
+
+  // chain accept only: handshake the descriptors and return once the
+  // FSM has latched them - the caller waits done_o itself (used by the
+  // drain-gated unmap case, which must observe the hold mid-chain)
+  task automatic accept_chain(input int unsigned nreq,
+                              input int unsigned nresp_bytes);
+    ch_d[0] = '{addr: GREQ, len: 32'(nreq * 4), write: 1'b0,
+                default: '0};
+    ch_d[1] = '{addr: GRESP, len: 32'(nresp_bytes), write: 1'b1,
+                default: '0};
+    ch_d[2] = '0; ch_d[3] = '0;
+    ch_n = 4'd2;
+    begin
+      int unsigned t = 0;
+      while (!ch_r && t < 2_000_000) begin @(posedge clk); t++; end
+      check(ch_r, "vgctl not idle before chain");
+    end
+    ch_v = 1;
+    begin
+      int unsigned t = 0;
+      @(posedge clk);
+      while (ch_r && t < 1000) begin @(posedge clk); t++; end
+      check(!ch_r, "chain not accepted");
+    end
+    ch_v = 0;
   endtask
 
   task automatic wr(input int unsigned i, input logic [31:0] w);
@@ -698,6 +730,310 @@ module tb_g6lc_apu_vgctl;
         end
         check(i_pay.gen_on.used_q == used0, "B1 objpay drained");
       end
+    end
+
+    // ---- D1: UNMAP_BLOB retained-unmap owner-hold (§12.3 C) --------
+    // A memory-backed blob's UNMAP must not free the VkDeviceMemory
+    // extent while engines could still reference it: the FSM holds new
+    // submissions (hold_o), waits drain_idle_i, frees the extent, then
+    // publishes APU_MEM_UNBACKED.  Covered: hold assertion, drain
+    // gating (chain stalls with engines busy), UNBACKED publish, and a
+    // DEVBACKED memory taking the same held path (not relocation).
+    begin
+      logic [63:0] memid = APU_VN_ID_TAG | 64'hD1;
+      logic [31:0] memh;
+      int unsigned h0;
+
+      // lazy memory object (aux hi = UNBACKED), 8 KiB
+      top(APU_OBJTAB_OP_ALLOC, memid,
+          6'(APU_VN_KIND_VK_DEVICE_MEMORY), 8'd4,
+          {APU_MEM_UNBACKED, 32'h0}, 64'h2000, '0, '0);
+      tget();
+      check(tcc.status == APU_OBJTAB_OK, "D1 mem alloc");
+      memh = tcc.handle;
+
+      // memory-backed blob rid 30 (blob_id = low 32 of client id)
+      wr(0, 32'h010C); wr(4, 4);
+      wr(6, 30); wr(7, APU_VG_BLOB_HOST3D);
+      wr(8, APU_VG_BLOB_MAPPABLE); wr(9, 0);
+      wr(10, 32'hD1); wr(11, 0);
+      wr(12, 32'h1000); wr(13, 0);
+      run_chain(14, 24);
+      exp_resp(APU_VG_RESP_NODATA);
+
+      // map at guest offset 0x4000: ALLOC_AT reserves the extent and
+      // publishes aux hi = 0x4000 on the memory
+      wr(0, 32'h0208); wr(4, 4);
+      wr(6, 30); wr(7, 0); wr(8, 32'h4000); wr(9, 0);
+      run_chain(10, 32);
+      exp_resp(APU_VG_RESP_MAP_INFO);
+
+      top(APU_OBJTAB_OP_LOOKUP, {32'h0, memh},
+          6'(APU_VN_KIND_VK_DEVICE_MEMORY), 8'h0, '0, '0, '0, '0);
+      tget();
+      check(tcc.status == APU_OBJTAB_OK &&
+            tcc.entry.aux[63:32] == 32'h4000,
+            "D1 mem mapped base");
+
+      // ---- D1a: engines idle - unmap completes through the hold ----
+      h0 = hold_edges;
+      wr(0, 32'h0209); wr(6, 30); wr(7, 0); wr(8, 0); wr(9, 0);
+      run_chain(10, 24);
+      exp_resp(APU_VG_RESP_NODATA);
+      check(hold_edges > h0, "D1a unmap hold observed");
+      check(!hold, "D1a hold released");
+      top(APU_OBJTAB_OP_LOOKUP, {32'h0, memh},
+          6'(APU_VN_KIND_VK_DEVICE_MEMORY), 8'h0, '0, '0, '0, '0);
+      tget();
+      check(tcc.status == APU_OBJTAB_OK &&
+            tcc.entry.aux[63:32] == APU_MEM_UNBACKED,
+            "D1a mem unbacked");
+
+      // ---- D1b: busy engines gate the unmap --------------------------
+      // re-map (memory UNBACKED -> plain CAS publish at 0x8000)
+      wr(0, 32'h0208); wr(4, 4);
+      wr(6, 30); wr(7, 0); wr(8, 32'h8000); wr(9, 0);
+      run_chain(10, 32);
+      exp_resp(APU_VG_RESP_MAP_INFO);
+      // mark the extent device-relocatable: unmap must still take the
+      // owner-hold path, never the relocation scan/move
+      top(APU_OBJTAB_OP_SETAUX, {32'h0, memh},
+          6'(APU_VN_KIND_VK_DEVICE_MEMORY), 8'h0,
+          '0, '0, 32'h1, 32'h1);
+      tget();
+      check(tcc.status == APU_OBJTAB_OK, "D1b devbacked mark");
+
+      drain_idle = 1'b0;
+      h0 = hold_edges;
+      wr(0, 32'h0209); wr(6, 30); wr(7, 0); wr(8, 0); wr(9, 0);
+      accept_chain(10, 24);
+      begin
+        int unsigned t = 0;
+        while (!hold && t < 100_000) begin @(posedge clk); t++; end
+        check(hold, "D1b hold raised while engines busy");
+        // the chain must not complete while drain_idle is low
+        repeat (2000) @(posedge clk);
+        check(hold_edges > h0, "D1b hold held during drain stall");
+        check(!dn, "D1b unmap stalled on busy engines");
+        check(hold, "D1b hold still up");
+      end
+      drain_idle = 1'b1;
+      begin
+        int unsigned t = 0;
+        while (!dn && t < 2_000_000) begin @(negedge clk); t++; end
+        check(dn, "D1b unmap done after drain");
+        @(posedge clk);
+      end
+      exp_resp(APU_VG_RESP_NODATA);
+      check(!hold, "D1b hold released after drain");
+      top(APU_OBJTAB_OP_LOOKUP, {32'h0, memh},
+          6'(APU_VN_KIND_VK_DEVICE_MEMORY), 8'h0, '0, '0, '0, '0);
+      tget();
+      check(tcc.status == APU_OBJTAB_OK &&
+            tcc.entry.aux[63:32] == APU_MEM_UNBACKED,
+            "D1b mem unbacked");
+      // DEVBACKED (aux[0]) survives the hi-word publish - a later
+      // MAP_BLOB takes the relocation path, which is truthful
+      check(tcc.entry.aux[0], "D1b devbacked retained");
+
+      // retire the blob and the memory so later sweeps stay clean
+      wr(0, 32'h0102); wr(6, 30); wr(7, 0);
+      run_chain(8, 24);
+      exp_resp(APU_VG_RESP_NODATA);
+    end
+
+    // ---- D2: UNMAP_BLOB alias accounting (§12.3 C) ------------------
+    // Two memory-backed blobs share one VkDeviceMemory extent.  The
+    // first UNMAP must keep the extent alive (the other alias is still
+    // mapped); only the last mapped alias resumes the owner-hold and
+    // publishes APU_MEM_UNBACKED — vn_memory_blobs parity.
+    begin
+      logic [63:0] memid2 = APU_VN_ID_TAG | 64'hD2;
+      logic [31:0] memh2;
+      int unsigned h0;
+
+      // lazy memory object, 8 KiB
+      top(APU_OBJTAB_OP_ALLOC, memid2,
+          6'(APU_VN_KIND_VK_DEVICE_MEMORY), 8'd4,
+          {APU_MEM_UNBACKED, 32'h0}, 64'h2000, '0, '0);
+      tget();
+      check(tcc.status == APU_OBJTAB_OK, "D2 mem alloc");
+      memh2 = tcc.handle;
+
+      // two memory-backed blobs rid 40/41 on the SAME memory
+      wr(0, 32'h010C); wr(4, 4);
+      wr(6, 40); wr(7, APU_VG_BLOB_HOST3D);
+      wr(8, APU_VG_BLOB_MAPPABLE); wr(9, 0);
+      wr(10, 32'hD2); wr(11, 0);
+      wr(12, 32'h1000); wr(13, 0);
+      run_chain(14, 24);
+      exp_resp(APU_VG_RESP_NODATA);
+      wr(0, 32'h010C); wr(4, 4);
+      wr(6, 41); wr(7, APU_VG_BLOB_HOST3D);
+      wr(8, APU_VG_BLOB_MAPPABLE); wr(9, 0);
+      wr(10, 32'hD2); wr(11, 0);
+      wr(12, 32'h1000); wr(13, 0);
+      run_chain(14, 24);
+      exp_resp(APU_VG_RESP_NODATA);
+
+      // map blob 40 at 0x4000 -> memory backed; map blob 41 at the
+      // same offset (re-base keeps 0x4000) so both aliases are mapped
+      wr(0, 32'h0208); wr(4, 4);
+      wr(6, 40); wr(7, 0); wr(8, 32'h4000); wr(9, 0);
+      run_chain(10, 32);
+      exp_resp(APU_VG_RESP_MAP_INFO);
+      wr(0, 32'h0208); wr(4, 4);
+      wr(6, 41); wr(7, 0); wr(8, 32'h4000); wr(9, 0);
+      run_chain(10, 32);
+      exp_resp(APU_VG_RESP_MAP_INFO);
+      top(APU_OBJTAB_OP_LOOKUP, {32'h0, memh2},
+          6'(APU_VN_KIND_VK_DEVICE_MEMORY), 8'h0, '0, '0, '0, '0);
+      tget();
+      check(tcc.status == APU_OBJTAB_OK &&
+            tcc.entry.aux[63:32] == 32'h4000,
+            "D2 mem backed before unmaps");
+
+      // ---- D2a: unmap blob 40 - blob 41 keeps the extent ------------
+      h0 = hold_edges;
+      wr(0, 32'h0209); wr(6, 40); wr(7, 0); wr(8, 0); wr(9, 0);
+      run_chain(10, 24);
+      exp_resp(APU_VG_RESP_NODATA);
+      // the probe found the surviving alias: no owner-hold was needed
+      check(hold_edges == h0, "D2a alias unmap skipped hold");
+      top(APU_OBJTAB_OP_LOOKUP, {32'h0, memh2},
+          6'(APU_VN_KIND_VK_DEVICE_MEMORY), 8'h0, '0, '0, '0, '0);
+      tget();
+      check(tcc.status == APU_OBJTAB_OK &&
+            tcc.entry.aux[63:32] == 32'h4000,
+            "D2a mem still backed while alias mapped");
+      // blob 40 itself is unmapped (blob ids are APU_VG_ID_TAG-tagged)
+      top(APU_OBJTAB_OP_LOOKUP,
+          APU_VG_ID_TAG | 64'd40,
+          6'(APU_VN_KIND_APU_BLOB_SHMEM), 8'h0, '0, '0, '0, '0);
+      tget();
+      check(tcc.status == APU_OBJTAB_OK &&
+            tcc.entry.bind_offset == 64'h0,
+            "D2a unmapped blob lazy");
+
+      // ---- D2b: unmap blob 41 - last alias releases the extent ------
+      wr(0, 32'h0209); wr(6, 41); wr(7, 0); wr(8, 0); wr(9, 0);
+      run_chain(10, 24);
+      exp_resp(APU_VG_RESP_NODATA);
+      top(APU_OBJTAB_OP_LOOKUP, {32'h0, memh2},
+          6'(APU_VN_KIND_VK_DEVICE_MEMORY), 8'h0, '0, '0, '0, '0);
+      tget();
+      check(tcc.status == APU_OBJTAB_OK &&
+            tcc.entry.aux[63:32] == APU_MEM_UNBACKED,
+            "D2b last alias unmaps to UNBACKED");
+
+      // retire both blobs and the memory
+      wr(0, 32'h0102); wr(6, 40); wr(7, 0);
+      run_chain(8, 24);
+      exp_resp(APU_VG_RESP_NODATA);
+      wr(0, 32'h0102); wr(6, 41); wr(7, 0);
+      run_chain(8, 24);
+      exp_resp(APU_VG_RESP_NODATA);
+    end
+
+    // ---- D3: MAP_BLOB same-base alias admission (§12.3 C) ------------
+    // vn_memory_blobs.map: every mapped alias of one owner shares the
+    // same guest base.  A same-base MAP joins the shared window
+    // without touching the extent; a different base while aliases are
+    // mapped refuses; with no surviving aliases the map relocates
+    // (owner.relocate).
+    begin
+      logic [63:0] memid3 = APU_VN_ID_TAG | 64'hD3;
+      logic [31:0] memh3;
+
+      top(APU_OBJTAB_OP_ALLOC, memid3,
+          6'(APU_VN_KIND_VK_DEVICE_MEMORY), 8'd4,
+          {APU_MEM_UNBACKED, 32'h0}, 64'h2000, '0, '0);
+      tget();
+      check(tcc.status == APU_OBJTAB_OK, "D3 mem alloc");
+      memh3 = tcc.handle;
+
+      // three memory-backed blobs rid 50/51/52 on the SAME memory
+      wr(0, 32'h010C); wr(4, 4);
+      wr(6, 50); wr(7, APU_VG_BLOB_HOST3D);
+      wr(8, APU_VG_BLOB_MAPPABLE); wr(9, 0);
+      wr(10, 32'hD3); wr(11, 0);
+      wr(12, 32'h1000); wr(13, 0);
+      run_chain(14, 24);
+      exp_resp(APU_VG_RESP_NODATA);
+      wr(0, 32'h010C); wr(4, 4);
+      wr(6, 51); wr(7, APU_VG_BLOB_HOST3D);
+      wr(8, APU_VG_BLOB_MAPPABLE); wr(9, 0);
+      wr(10, 32'hD3); wr(11, 0);
+      wr(12, 32'h1000); wr(13, 0);
+      run_chain(14, 24);
+      exp_resp(APU_VG_RESP_NODATA);
+      wr(0, 32'h010C); wr(4, 4);
+      wr(6, 52); wr(7, APU_VG_BLOB_HOST3D);
+      wr(8, APU_VG_BLOB_MAPPABLE); wr(9, 0);
+      wr(10, 32'hD3); wr(11, 0);
+      wr(12, 32'h1000); wr(13, 0);
+      run_chain(14, 24);
+      exp_resp(APU_VG_RESP_NODATA);
+
+      // map blob 50 at 0x4000 -> memory backed
+      wr(0, 32'h0208); wr(4, 4);
+      wr(6, 50); wr(7, 0); wr(8, 32'h4000); wr(9, 0);
+      run_chain(10, 32);
+      exp_resp(APU_VG_RESP_MAP_INFO);
+
+      // ---- D3a: blob 51 maps at the SAME base -> admitted ----------
+      // the probe finds blob 50 mapped; same base binds blob 51 into
+      // the shared window without freeing/re-allocating the extent
+      wr(0, 32'h0208); wr(4, 4);
+      wr(6, 51); wr(7, 0); wr(8, 32'h4000); wr(9, 0);
+      run_chain(10, 32);
+      exp_resp(APU_VG_RESP_MAP_INFO);
+      top(APU_OBJTAB_OP_LOOKUP, {32'h0, memh3},
+          6'(APU_VN_KIND_VK_DEVICE_MEMORY), 8'h0, '0, '0, '0, '0);
+      tget();
+      check(tcc.status == APU_OBJTAB_OK &&
+            tcc.entry.aux[63:32] == 32'h4000,
+            "D3a mem base unchanged by same-base alias map");
+
+      // ---- D3b: blob 52 maps at a DIFFERENT base -> refused ---------
+      wr(0, 32'h0208); wr(4, 4);
+      wr(6, 52); wr(7, 0); wr(8, 32'h8000); wr(9, 0);
+      run_chain(10, 32);
+      exp_resp(APU_VG_ERR_PARAM);
+      top(APU_OBJTAB_OP_LOOKUP, {32'h0, memh3},
+          6'(APU_VN_KIND_VK_DEVICE_MEMORY), 8'h0, '0, '0, '0, '0);
+      tget();
+      check(tcc.status == APU_OBJTAB_OK &&
+            tcc.entry.aux[63:32] == 32'h4000,
+            "D3b refused map leaves extent at 0x4000");
+
+      // ---- D3c: last-alias remap relocates (owner.relocate) ---------
+      // unmap blob 51 -> blob 50 is the sole mapped alias; remap it
+      // at 0x8000 -> probe MISS -> free+ALLOC_AT moves the extent
+      wr(0, 32'h0209); wr(6, 51); wr(7, 0); wr(8, 0); wr(9, 0);
+      run_chain(10, 24);
+      exp_resp(APU_VG_RESP_NODATA);
+      wr(0, 32'h0208); wr(4, 4);
+      wr(6, 50); wr(7, 0); wr(8, 32'h8000); wr(9, 0);
+      run_chain(10, 32);
+      exp_resp(APU_VG_RESP_MAP_INFO);
+      top(APU_OBJTAB_OP_LOOKUP, {32'h0, memh3},
+          6'(APU_VN_KIND_VK_DEVICE_MEMORY), 8'h0, '0, '0, '0, '0);
+      tget();
+      check(tcc.status == APU_OBJTAB_OK &&
+            tcc.entry.aux[63:32] == 32'h8000,
+            "D3c sole-alias remap relocates base to 0x8000");
+
+      // retire all three blobs and the memory
+      wr(0, 32'h0102); wr(6, 50); wr(7, 0);
+      run_chain(8, 24);
+      exp_resp(APU_VG_RESP_NODATA);
+      wr(0, 32'h0102); wr(6, 51); wr(7, 0);
+      run_chain(8, 24);
+      exp_resp(APU_VG_RESP_NODATA);
+      wr(0, 32'h0102); wr(6, 52); wr(7, 0);
+      run_chain(8, 24);
+      exp_resp(APU_VG_RESP_NODATA);
     end
 
     // ---- CTX_DESTROY ctx 4 (teardown) -----------------------------------------

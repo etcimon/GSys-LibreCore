@@ -2232,6 +2232,12 @@ module g6lc_apu_cmdexec
                      rec_q.ctype, rd_q.vb_base[0], rd_q.vb_size[0],
                      rd_q.vb_stride[0], rd_q.attr[0].valid,
                      rd_q.vs_slot, rd_q.fs_slot, $time);
+            $display("[DBG] ds0 base=%08x row0={b=%0d n=%0d o=%0d} row1={b=%0d n=%0d o=%0d}",
+                     desc_q.set_base[0],
+                     desc_q.boff[0][0].binding, desc_q.boff[0][0].count,
+                     desc_q.boff[0][0].off32,
+                     desc_q.boff[0][1].binding, desc_q.boff[0][1].count,
+                     desc_q.boff[0][1].off32);
 `endif
 // pragma translate_on
             if (pinq_full && unpq_full) begin

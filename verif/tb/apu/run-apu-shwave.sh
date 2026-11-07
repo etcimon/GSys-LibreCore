@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Copyright 2026 Etienne Cimon
 # SPDX-License-Identifier: MIT
 # ShaderCore wave engine (g6lc_apu_shwave via g6lc_apu_shcore) —
 # corpus dispatch vectors against the lavapipe oracle.
@@ -10,13 +11,10 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 export CVA6_REPO_DIR="$ROOT"
-OUT="${APU_SHWAVE_OUT:-/tmp/g6lc-apu-shwave}"
-VERILATOR="${VERILATOR:-verilator}"
+source "$ROOT/verif/tb/apu/local-verilator.sh"
+OUT="${APU_SHWAVE_OUT:-$APU_BUILD_CACHE/shwave}"
+apu_select_verilator
 YOSYS="${YOSYS:-yosys}"
-if ! command -v "$VERILATOR" >/dev/null 2>&1 && \
-   [ -x /opt/testharness/toolchains/verilator-v5.008/bin/verilator ]; then
-  VERILATOR=/opt/testharness/toolchains/verilator-v5.008/bin/verilator
-fi
 if ! command -v "$YOSYS" >/dev/null 2>&1; then
   if [ -x /opt/testharness/toolchains/yosys-g6lc/bin/yosys ]; then
     YOSYS=/opt/testharness/toolchains/yosys-g6lc/bin/yosys
@@ -27,8 +25,8 @@ fi
 if ! command -v "$YOSYS" >/dev/null 2>&1 && [ -x /usr/local/bin/yosys ]; then
   YOSYS=/usr/local/bin/yosys
 fi
-rm -rf "$OUT"
 mkdir -p "$OUT"
+apu_record_verilator
 VLTS=("$ROOT/verif/tb/apu/apu_axi.vlt"
       "$ROOT/verif/tb/apu/apu_exec.vlt")
 vver="$("$VERILATOR" --version | grep -o '[0-9][0-9.]*' | head -1)"
@@ -36,7 +34,8 @@ vver="$("$VERILATOR" --version | grep -o '[0-9][0-9.]*' | head -1)"
 if awk -v v="$vver" 'BEGIN{split(v,a,"."); exit !(a[1]>5||(a[1]==5&&a[2]>=16))}'; then
   VLTS+=("$ROOT/verif/tb/apu/apu_vn.vlt")
 fi
-if ! "$VERILATOR" --binary --timing --assert -Wall \
+if ! "$VERILATOR" --binary --timing --assert -Wall -j "$APU_BUILD_JOBS" \
+  "${APU_VERILATOR_FLAGS[@]}" \
   -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC \
   -Wno-BLKSEQ -Wno-SYNCASYNCNET -Wno-DECLFILENAME \
   -Wno-PINCONNECTEMPTY \

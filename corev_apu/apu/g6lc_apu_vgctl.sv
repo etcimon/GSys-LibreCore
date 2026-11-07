@@ -207,7 +207,13 @@ module g6lc_apu_vgctl
       StMemReq, StMemCpl, StAuxReq, StAuxCpl, StAuxHiReq, StAuxHiCpl,
       StPgReq, StPgCpl, StXsFire, StXsWait,
       StMapAllocAt, StMapBind, StMapMemReq, StMapMemCpl,
-      StMapAuxReq, StMapAuxCpl, StUnmapPriv,
+      StMapAuxReq, StMapAuxCpl, StUnmapPriv, StUnmapFree,
+      // §12.3 C alias probe: after the memory resolves on the
+      // backed-UNMAP_BLOB path, walk ctx 0 then the request ctx for
+      // another live mapped blob sharing the memory's {gen,slot};
+      // a hit keeps the shared extent (this blob alone rebinds to 0),
+      // a double MISS resumes the owner-hold free path
+      StAliasScan, StAliasScanC,
       // §12.3 3d-d: DEVBACKED relocation — drain, squatter eviction
       // scan, word mover, base publish, flag clear
       StMapDrain, StMapScan, StMapScanC,
@@ -248,6 +254,10 @@ module g6lc_apu_vgctl
     logic [63:0]  map_size_q;
     logic         map_memb_q;    // memory-backed blob (aux[0])
     logic [31:0]  map_memh_q;    // {gen,slot} of the DEVICE_MEMORY
+    // §12.3 C alias probe walk state (backed UNMAP_BLOB)
+    logic [7:0]   alias_ctx_q;   // ctx list currently scanned (0, then rctx)
+    logic         alias_next_q;  // request-ctx pass still pending
+    logic [31:0]  unmap_self_q;  // {gen,slot} of the unmapping blob
     logic [31:0]  auxv_q;        // SETAUXHI value (map offset / priv base)
     logic         map_unmap_q;   // StMapMem* serving UNMAP_BLOB
     logic         mem_fault_q;   // sticky write fault (§6c)
@@ -353,7 +363,8 @@ module g6lc_apu_vgctl
                      state_q == StAuxHiReq ||
                      state_q == StMapMemReq || state_q == StMapAuxReq ||
                      state_q == StMapScan  || state_q == StMapEvPub ||
-                     state_q == StMapDevAux;
+                     state_q == StMapDevAux ||
+                     state_q == StAliasScan;
     assign ot_req_valid_o = ot_fire;
     assign ot_cpl_ready_o = state_q == StOtCpl || state_q == StBindCpl ||
                             state_q == StMemCpl || state_q == StAuxCpl ||
@@ -362,7 +373,8 @@ module g6lc_apu_vgctl
                             state_q == StMapAuxCpl ||
                             state_q == StMapScanC ||
                             state_q == StMapEvPubC ||
-                            state_q == StMapDevAuxC;
+                            state_q == StMapDevAuxC ||
+                            state_q == StAliasScanC;
     always_comb begin
       ot_req_o = apu_objtab_req_t'('0);
       unique case (state_q)
@@ -438,6 +450,15 @@ module g6lc_apu_vgctl
             // relocation done: M now sits at the kernel's offset and is
             // no longer device-relocatable
             mask: 32'h0000_0001, value: 32'h0, default: '0};
+        StAliasScan: ot_req_o = '{op: APU_OBJTAB_OP_SCAN_BIND,
+            // §12.3 C: first live APU_BLOB_SHMEM of alias_ctx_q's
+            // list still mapped onto the memory's {gen,slot},
+            // excluding this unmap's own blob handle
+            id: {32'h0, unmap_self_q},
+            kind: 6'(APU_VN_KIND_APU_BLOB_SHMEM),
+            ctx: alias_ctx_q,
+            offset: {32'h0, map_memh_q},
+            default: '0};
         StOtReq: begin
           unique case (rtype_q)
             APU_VG_CTX_CREATE: ot_req_o = '{op: APU_OBJTAB_OP_ALLOC,
@@ -529,6 +550,8 @@ module g6lc_apu_vgctl
         blob_addr_q <= '0; blob_size_q <= '0; blob_mem_q <= 1'b0;
         map_size_q <= '0; map_memb_q <= 1'b0;
         map_memh_q <= '0;
+        alias_ctx_q <= '0; alias_next_q <= 1'b0;
+        unmap_self_q <= '0;
         auxv_q <= '0; map_unmap_q <= 1'b0;
         mem_fault_q <= 1'b0;
         map_hold_q <= 1'b0; map_dev_q <= 1'b0; map_unb_q <= 1'b0;
@@ -795,8 +818,12 @@ module g6lc_apu_vgctl
 
           // ---- §12.3 3d-d: DEVBACKED relocation ---------------------
           // hold_o is already up: block new submissions until the
-          // engines drain (the kernel waits on the map fence)
-          StMapDrain: if (drain_idle_i) state_q <= StMapScan;
+          // engines drain (the kernel waits on the map fence).  The
+          // retained-unmap owner-hold shares the drain: a backed
+          // UNMAP_BLOB frees its extent only after quiescence and
+          // skips the squatter scan/word-move (no relocation target).
+          StMapDrain: if (drain_idle_i)
+            state_q <= map_unmap_q ? StUnmapFree : StMapScan;
           // squatter sweep: first DEVBACKED DEVICE_MEMORY ≠ M whose
           // extent overlaps the kernel's [K, K+S)
           StMapScan:  if (ot_req_ready_i) state_q <= StMapScanC;
@@ -951,6 +978,34 @@ module g6lc_apu_vgctl
                   map_dev_q  <= 1'b1;
                   map_oldb_q <= ot_cpl_i.entry.aux[63:32];
                   state_q    <= StMapDrain;
+                end else if (map_unmap_q &&
+                             ot_cpl_i.entry.aux[63:32] != APU_MEM_UNBACKED)
+                begin
+                  // §12.3 C alias probe BEFORE the owner-hold: the
+                  // memory's extent is shared by every live blob
+                  // whose aux[63:32] names it — unmapping one alias
+                  // must keep the extent alive while another mapped
+                  // alias remains (vn_memory_blobs parity), and only
+                  // the last mapped alias resumes the retained-unmap
+                  // hold/drain/free/UNBACKED path.  map_oldb_q keeps
+                  // the memory base for that resume.
+                  map_oldb_q  <= ot_cpl_i.entry.aux[63:32];
+                  alias_ctx_q <= 8'h0;
+                  alias_next_q <= 8'(rctx_q) != 8'h0;
+                  state_q     <= StAliasScan;
+                end else if (!map_unmap_q &&
+                             ot_cpl_i.entry.aux[63:32] != APU_MEM_UNBACKED)
+                begin
+                  // §12.3 C map-side alias probe: vn_memory_blobs.map
+                  // requires every mapped alias of one owner to share
+                  // the same guest base — probe for surviving aliases
+                  // BEFORE freeing/re-basing the extent.  map_oldb_q
+                  // keeps the published base for the same-base compare
+                  // and the no-alias relocate resume.
+                  map_oldb_q  <= ot_cpl_i.entry.aux[63:32];
+                  alias_ctx_q <= 8'h0;
+                  alias_next_q <= 8'(rctx_q) != 8'h0;
+                  state_q     <= StAliasScan;
                 end else begin
                   pg_op_q    <= APU_VGPAGES_OP_FREE;
                   pg_base_q  <= ot_cpl_i.entry.aux[63:32];
@@ -1108,6 +1163,61 @@ module g6lc_apu_vgctl
             state_q <= map_memb_q ? StMapAuxReq : StBindReq;
           end
 
+          // ---- UNMAP_BLOB owner-hold: free the drained extent -------
+          // reached only from StMapDrain with map_unmap_q: engines are
+          // idle and submissions held, so the extent latched in
+          // map_oldb_q at StMapMemCpl can return to vgpages before
+          // StUnmapPriv publishes the UNBACKED sentinel
+          StUnmapFree: begin
+            pg_op_q    <= APU_VGPAGES_OP_FREE;
+            pg_base_q  <= map_oldb_q;
+            pg_bytes_q <= map_size_q[31:0];
+            pg_ret_q   <= StUnmapPriv;
+            state_q    <= StPgReq;
+          end
+
+          // ---- blob alias probe (UNMAP_BLOB + MAP_BLOB) -------------
+          // SCAN_BIND reports whether another live mapped blob still
+          // shares this memory's extent.  map_unmap_q discriminates:
+          //   UNMAP hit     -> keep the extent; this blob alone
+          //                   rebinds to 0 (vn_memory_blobs parity)
+          //   MAP hit       -> aliases share one guest base: a matching
+          //                   base binds without touching the extent
+          //                   (StMapBind), a different base refuses —
+          //                   it would strand the mapped aliases'
+          //                   windows (vn_memory_blobs.map ValueError)
+          //   double MISS   -> UNMAP: last mapped alias, resume the
+          //                   retained-unmap owner-hold; MAP: no
+          //                   surviving aliases, owner.relocate — free
+          //                   the old extent and ALLOC_AT the request
+          StAliasScan:  if (ot_req_ready_i) state_q <= StAliasScanC;
+          StAliasScanC: if (ot_cpl_valid_i) begin
+            if (ot_cpl_i.status == APU_OBJTAB_OK) begin
+              if (map_unmap_q) begin
+                state_q <= StBindReq;
+              end else if (64'({req_ram[9], req_ram[8]}) ==
+                           64'(map_oldb_q)) begin
+                state_q <= StMapBind;
+              end else begin
+                resp_ram[0] <= APU_VG_ERR_PARAM;
+                state_q     <= StWrPrep;
+              end
+            end else if (alias_next_q) begin
+              alias_ctx_q  <= 8'(rctx_q);
+              alias_next_q <= 1'b0;
+              state_q      <= StAliasScan;
+            end else if (map_unmap_q) begin
+              map_hold_q <= 1'b1;
+              state_q    <= StMapDrain;
+            end else begin
+              pg_op_q    <= APU_VGPAGES_OP_FREE;
+              pg_base_q  <= map_oldb_q;
+              pg_bytes_q <= map_size_q[31:0];
+              pg_ret_q   <= StMapAllocAt;
+              state_q    <= StPgReq;
+            end
+          end
+
           // ---- blob_id != 0: memory-object resolve -------------------
           StMemReq: if (ot_req_ready_i) state_q <= StMemCpl;
           StMemCpl: begin
@@ -1204,10 +1314,14 @@ module g6lc_apu_vgctl
                       // create (aux[63:32])
                       map_memh_q  <= ot_cpl_i.entry.aux[63:32];
                       map_unmap_q <= 1'b0;
+                      // §12.3 C: this blob's own {gen,slot} — the
+                      // alias probe must not count it as "another"
+                      // mapped alias of the shared extent
+                      unmap_self_q <= ot_cpl_i.handle;
                       if (ot_cpl_i.entry.aux[0]) begin
                         // memory-backed: the pages belong to the
-                        // VkDeviceMemory; resolve it, then free+relocate
-                        // the whole extent it sits on
+                        // VkDeviceMemory; resolve it, then probe
+                        // surviving aliases before any re-base
                         state_q <= StMapMemReq;
                       end else begin
                         // blob-owned: bind_offset==0 means the lazy
@@ -1239,9 +1353,13 @@ module g6lc_apu_vgctl
                     blob_addr_q <= '0;
                     blob_size_q <= ot_cpl_i.entry.size;
                     if (ot_cpl_i.entry.aux[0]) begin
-                      map_memh_q  <= ot_cpl_i.entry.aux[63:32];
-                      map_unmap_q <= 1'b1;
-                      state_q     <= StMapMemReq;
+                      map_memh_q   <= ot_cpl_i.entry.aux[63:32];
+                      map_unmap_q  <= 1'b1;
+                      // §12.3 C: this blob's own {gen,slot} — the
+                      // alias probe must not count it as "another"
+                      // mapped alias of the shared extent
+                      unmap_self_q <= ot_cpl_i.handle;
+                      state_q      <= StMapMemReq;
                     end else begin
                       pg_op_q     <= APU_VGPAGES_OP_FREE;
                       pg_base_q   <= 32'(ot_cpl_i.entry.bind_offset -

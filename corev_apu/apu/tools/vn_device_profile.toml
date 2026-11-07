@@ -387,10 +387,12 @@ default = 1048576
 # "Payload layouts" section of g6lc_apu_vn_tables.md.
 
 [keep.vkCreateDescriptorSetLayout]
-# object payload: {bindingCount, per binding {binding, type, count, flags}}
+# Staged binding: {binding,type,count,flags,immutableCount,sampler[2*count]}.
+# The frontend snapshots immutable sampler state into layout-owned ObjPay.
 # (bindingCount rides the op record; the front prepends it on objpay write)
 fields = ["pBindings.binding", "pBindings.descriptorType",
-          "pBindings.descriptorCount", "pBindings.stageFlags"]
+          "pBindings.descriptorCount", "pBindings.stageFlags",
+          "pBindings.pImmutableSamplers"]
 
 [keep.vkCreatePipelineLayout]
 # {setLayout handles (2w each), per push range {stageFlags, offset, size}}

@@ -16,6 +16,36 @@ import testharness_proxy as proxy
 
 
 class ApuRegressionGateTests(unittest.TestCase):
+    def test_simulator_pgo_required_cannot_pass_without_receipts(self):
+        (self.tb / 'run-apu-dev.sh').write_text(
+            'echo "PASS tb_g6lc_apu_vgtop cases=1 checks=3 cycles=4"\n')
+        result = self.run_gate('--stages', 'dev', extra_env={'APU_SIM_PGO': '1'})
+        self.assertEqual(result.returncode, 4, result.stdout)
+        summary = json.loads((self.out / 'summary.json').read_text())
+        self.assertEqual(summary['status'], 'incomplete')
+        self.assertTrue(summary['simulatorPgo']['required'])
+
+    def test_simulator_pgo_setup_failure_is_not_an_rtl_failure(self):
+        (self.tb / 'run-apu-dev.sh').write_text(
+            'echo "VERILATOR BUILD FAILED"\n'
+            'echo "BLOCKED: simulator PGO: missing tool"\nexit 1\n')
+        result = self.run_gate('--stages', 'dev')
+        self.assertEqual(result.returncode, 4, result.stdout)
+        summary = json.loads((self.out / 'summary.json').read_text())
+        self.assertEqual(summary['status'], 'incomplete')
+
+    def test_development_stage_checked_verdict(self):
+        (self.tb / 'run-apu-dev.sh').write_text(
+            'echo "PASS tb_g6lc_apu_vgtop cases=1 checks=3 cycles=4"\n')
+        result = self.run_gate('--stages', 'dev')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        summary = json.loads((self.out / 'summary.json').read_text())
+        self.assertEqual(summary['status'], 'pass')
+
+    def test_development_missing_tools_is_incomplete(self):
+        (self.tb / 'run-apu-dev.sh').write_text('exit 3\n')
+        self.assertEqual(self.run_gate('--stages', 'dev').returncode, 4)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='g6lc-apu-gate-')
         self.addCleanup(self.temp.cleanup)
@@ -233,6 +263,14 @@ class ApuRegressionGateTests(unittest.TestCase):
 
 
 class ApuSourceManifestTests(unittest.TestCase):
+    def test_explicit_compiler_closure_is_hashed_without_broad_walk(self):
+        name = 'tools/verilator/configure.ac'
+        path = self.root / name
+        path.parent.mkdir(parents=True)
+        path.write_text('compiler fixture')
+        self.assertNotIn(name, self.mod.inventory(self.root))
+        self.assertIn(name, self.mod.inventory(self.root, [name]))
+
     @classmethod
     def setUpClass(cls):
         path = (Path(__file__).resolve().parents[2]
@@ -289,6 +327,39 @@ class ApuSourceManifestTests(unittest.TestCase):
 
 
 class ApuLeafTests(unittest.TestCase):
+    def test_development_stage_and_budget_validation(self):
+        self.assertEqual(proxy.apu_leaf_stages('dev'), ['dev'])
+        self.assertEqual(proxy.apu_leaf_env(['APU_DEV_COHORT=layout',
+                                           'APU_DEV_TEST_TIMEOUT=30']),
+                         {'APU_DEV_COHORT': 'layout', 'APU_DEV_TEST_TIMEOUT': '30'})
+        for bad in ('APU_DEV_COHORT=everything', 'APU_DEV_TEST_TIMEOUT=0',
+                    'APU_TOOL_SETUP_TIMEOUT=-1', 'APU_AUTO_INSTALL=yes',
+                    'APU_VERILATOR_HOME=/untrusted'):
+            with self.subTest(bad=bad), self.assertRaises(SystemExit):
+                proxy.apu_leaf_env([bad])
+
+    def test_repository_tool_cache_uses_compiler_only_identity(self):
+        sources = {'tools/verilator/src/a.cpp': 'a' * 64, 'core/a.sv': 'b' * 64}
+        for name in ('apu_vlt_policy.py', 'apu_verilator_pgo.py',
+                     'verilator-pgo-cxx.sh', 'vlt_pgo_train.sv'):
+            sources['verif/tb/apu/' + name] = 'd' * 64
+        first, key = proxy.apu_repository_tool_env(sources, '/runs/first')
+        sources['core/a.sv'] = 'c' * 64
+        second, other = proxy.apu_repository_tool_env(sources, '/runs/second')
+        self.assertEqual(key, other)
+        self.assertEqual(first['APU_VERILATOR_HOME'], second['APU_VERILATOR_HOME'])
+        self.assertNotEqual(first['APU_VERILATOR_SOURCE_ID_FILE'],
+                            second['APU_VERILATOR_SOURCE_ID_FILE'])
+        self.assertEqual(first['APU_VERILATOR_PGO'], '1')
+        self.assertEqual(first['APU_SIM_PGO'], '1')
+        sources['verif/tb/apu/apu_vlt_policy.py'] = 'e' * 64
+        changed = proxy.apu_repository_tool_env(sources, '/runs/policy')[0]
+        self.assertNotEqual(changed['APU_VERILATOR_HOME'], first['APU_VERILATOR_HOME'])
+        sources['tools/verilator/src/a.cpp'] = 'd' * 64
+        self.assertNotEqual(proxy.apu_repository_tool_env(sources, '/runs/third')[1], key)
+        with self.assertRaises(SystemExit):
+            proxy.apu_repository_tool_env({'core/a.sv': 'b' * 64}, '/runs/empty')
+
     def test_stage_list_rules_match_the_runner(self):
         self.assertEqual(proxy.apu_leaf_stages('unit,top'), ['unit', 'top'])
         for bad in ('', 'unit,', 'unit,typo', 'unit,unit'):

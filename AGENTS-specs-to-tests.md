@@ -62,6 +62,180 @@ Repository-wide verification was stopped after its smoke script invoked shared
 cleanup; full compliance/boot/synthesis qualification remains incomplete. No
 QEMU, Linux block/PMEM/DAX or VirtIO conformance or physical-media qualification result is claimed here.
 
+## Storamic ST-025 - Component Evidence And CPU Boundary
+
+`run_origin.py` freezes source closures and runs profile/shim/queue/WT cache/
+adapter checks. `storamic-profile-10/origin-r2` passes 54 positives and 54
+rejecting oracles, including 12 profile checks. A separately archived
+regression rejects the prior predicate on an unqualified shared accelerator.
+These are local component results, not privileged source/provider admission.
+
+The ownership follow-up tests partial RAM AW, held B/R, block responses, dirty
+staging and real flush release at existing endpoint delays. Two separately
+frozen SV mutants (omitted RAM hold and idle-only drain) fail the intended
+assertions with matching source post hashes; those aborted stages are rejecting
+oracles, not positive passes. A new store-drain formal fixture independently
+tracks accepted writes and successful flushes, with dirty/flush/released covers
+and a rejecting assertion oracle. Its protocol-valid follow-up passes depth-16
+safety/three covers and the depth-8 negative oracle; an intentionally abandoned
+flush is separately checked to retain endpoint ownership after raw media drains.
+The first unconstrained-flush/history failure and its counterexample stay
+archived, not reclassified as passing evidence.
+The ten-stage SV matrix and default-off formal checks do not qualify native
+providers, upstream quiescence, enabled endpoint liveness or physical persistence.
+
+The independent VirtIO control seal passes eight frozen stages in
+`storamic-all-d280ef9520f8`, with matching source post hashes. Eleven formal
+goals pass (four unchanged legacy goals and seven depth-12 seal goals);
+two hardware mutants reject missing control ownership and raw-valid execution.
+All prior DMA pause/notification/reset tests remain intact. The combined-pause
+prototype and its false expanded-contract probe stay failed/archived, not
+reclassified as old DMA bugs. Generic device/transport synthesis reports
+1407/279 cells and zero latches/SCCs. This is component evidence, not native
+binding, whole-system drain or physical/PPA/DFT qualification.
+See `g6lc_storamic/architecture/virtio-control-seal.md`.
+
+Failed-gate follow-up: frozen `storamic-all-4aed2cd2cc55` passes thirteen of the
+fourteen original failed stages. Register safety and four covers pass, but its
+last cover is interrupted by the whole-stage deadline after repeated identical
+preparation; the matrix remains incomplete. The repaired repository Yosys fork
+passes the standard 126-test kernel executable; 95/96 optimization scripts pass,
+with the remaining failure reproduced on the old fork. The original full codec
+assertions pass with full optimization. No proof or synthesis check is waived.
+The shared-preparation runner passes all six original SAT goals in 1001 seconds,
+including commit failure. Its prepared model hash matches after completion;
+unchanged goals/depths and tamper rejection have directed unit tests.
+The subsequent pre-ownership frozen full matrix `storamic-all-5267d4deeb38`
+passes all 56 registered stages with matching source post hashes, including
+all fourteen former failures and both former incomplete stages. Its scope
+remains isolated leaf evidence, not a latest-ownership-SV full sweep or native/
+aggregate/compliance qualification.
+A frozen remote snapshot passes all 111 Python tests with unchanged sources;
+the preceding local disk-full errors remain archived. These are component/tool
+receipts, not aggregate, native, physical, ISA or Linux qualification.
+
+The later `storamic-debug-12/origin-r1` bundle passes 54 positives and 55
+rejecting oracles. Its profile exhausts all 16 privilege/virtual/debug
+combinations (28 total profile checks); shim off/on each pass 37 checks,
+and the real bypass/store queues pass 76 including debug exit/entry after
+allocation. `storamic-cpu-07/elab-r5` checks the new internal debug binding
+through configured off/on CPU hierarchy and rejects the unsupported profile.
+These checks do not execute CPU debug entry or qualify native debug policy.
+
+`run_route.py --crossbar` exercises the actual 3-source/2-target
+decode/demux/ID-counter/mux path ahead of route/service. The protected-target
+lane `storamic-crossbar-09/xbar-r5` passes 669 checks in four authorization/
+request-cut profiles, rejecting oracles and invalid geometry. The second
+target is monitored unselected, not an atomic/unmapped responder qualification.
+Earlier route-only proofs do not prove the crossbar or actual native topology.
+
+`storamic-cpu-07/elab-r4` repeats configured full CPU hierarchy elaboration
+off/on and unsupported-profile rejection. Bare ports do not execute instructions.
+The M/S/U/MPRV program fixture is written but strict RTL compilation remains
+failed on scheduling diagnostics. Two coarse CPU SCCs disappear after mapping
+only those cones; neither this diagnostic nor a timed-out full bit-blast is a
+CPU execution or timing pass. Independent netlist execution work must retain
+the failed configured RTL gate and its separate evidence boundary.
+
+The later `storamic-cpu-interpreter-13/configured-execution-r1` independently
+passes six genuine configured CPU cases: off/on at response delays 0/16, four
+software completions with five writes/four reads each and two rejecting origin
+oracles. The program covers M/S/U and MPRV with MPP=S, retaining the real
+CSR/LSU/queues/WT cache/FPU. The collector verifies source/ROM/model/script/log
+artifacts, matching identities and both full-profile generation receipts;
+startup, integer-only, incomplete and partial inputs reject. Altered RTLIL
+rejects before tool invocation. This is zero-initialized two-state instruction
+evidence, not strict compiler, FPU ISA, debug execution, native, physical or
+Linux qualification. The insufficient 1,000-cycle delayed diagnostic remains
+archived; later delayed configured cases complete within 5,000 cycles.
+
+`storamic-cpu-schedule-14/extended-execution-r1` adds MPRV/MPP=U and M
+to the existing S phase. Its six-case off/on, delay-0/16 matrix passes four
+seven-write/six-read programs and two rejecting origin oracles. Six tests for
+`g6lc_cpu_origin_program.py` verify the original ROM digest, mode/effective
+privilege sequence and readback failure path; nine collector tests retain
+the original gate and reject incomplete or mismatched extended evidence.
+The extended collector verifies both original CPU generation receipts rather
+than treating model reuse as generation. Current default-host execution and
+collection of the original six-case evidence also pass. Strict Verilator
+scheduling remains failed at 11 errors off/12 on in the fresh snapshot-r6
+diagnostic; the narrow CSR experiment has no effect and no production RTL
+change follows from it.
+
+`storamic-cpu-debug-15/debug-execution-r1` collects four configured M-mode
+debug round trips (six writes/four reads, debug three/two, two CSR checks)
+and two rejecting debug-origin oracles, off/on at response delays 0/16.
+`tb_g6lc_storamic_cpu_debug_netlist.sv` and its interpreter host drive actual
+external debug entry, DCSR/DPC instructions and DRET without forcing state.
+`g6lc_cpu_debug_program.py` has six structural tests; the debug collector has
+eleven predicate tests for matrix, counts, artifacts, origin-oracle naming
+and generation-stage/complete-execution separation.
+
+The real CPU baseline fails at the wrong redirect target; the isolated
+priority correction restores execution. `tb_g6lc_debug_redirect_priority.sv`
+proves the corrected Boolean order without input restrictions and rejects
+the former selector. The updated `g6lc_fetch_redirect_props.sv` retains
+non-debug priority, total-order and ownership checks, adds debug precedence
+and reaches all nine covers. Fresh strict scheduling still fails 11/12.
+The interrupted platform lint/synthesis invocation has no final gate result.
+S/U/debug-MPRV, single-step/breakpoint, virtualization/SMT and adversarial
+queued transitions are not qualified by this M-mode-only matrix.
+
+The later `storamic-cpu-debug-privilege-16/collected-s-r1` and
+`collected-u-r1` add S/U external-request debug matrices: eight complete
+programs and four rejecting debug-origin oracles total, the same exact
+six-write/four-read counters, origin off/on and delays 0/16. Genuine PMP/MPP/
+MEPC/MRET setup precedes debug; saved S/U DCSR/DPC and resumed S/U origins
+after DRET are checked. The full configured CPU wrapper is unchanged.
+Short 2,000-cycle delay cases and the S origin-off zero timeout remain archived;
+complete 3,000-cycle delay and 1,000-cycle zero retries replace them.
+Default M ROM identity, new-host M regression and legacy collector pass.
+Ten generator and sixteen debug-collector tests cover actual boot encodings,
+privilege/script binding, runner tampering and legacy defaults; all 41
+Python tests and seven platform checks pass. This does not qualify combined
+debug/MPRV, breakpoint/step, virtualization/SMT or queued-mode transitions.
+
+`storamic-cpu-debug-queue-17/collected-r1` then checks scoped pending-entry
+ordering in 20 cases: 14 complete programs and six named RTL origin oracles.
+M AW/W/B holds cover origin off/on and read delays 0/16; S/U add enabled B
+cases at delay 16. Ten cases enter debug while firmware traffic is pending;
+four zero-delay AW/W cases complete B first. The delayed AW/W cases retain
+the issuing firmware origin across actual debug entry. No universal drain
+requirement or unsupported queue behavior follows from this observation.
+
+`tb_g6lc_storamic_cpu_debug_queue_interpreter.sv` retains the exact original
+program/CSR/data checks and adds 192-cycle holds and AW/W stability checks.
+`g6lc_cpu_debug_queue_trace.py` has seven temporal tests;
+`g6lc_collect_cpu_debug_queue.py` has nine synthetic matrix/identity tests.
+They reject missing events/cases, altered models, hidden forcing commands,
+probe relabeling, partial programs, unrelated assertion failures and absent
+actual crossings. Six enabled-case false live-origin trace oracles reject.
+Fifty-seven Python tests, seven platform checks, typechecking and scoped
+MIT/source identities pass. No production RTL or native authority changes.
+Remaining DRET/debug-MPRV/other-queue/physical/compiler/system gates stay open.
+
+The independent `storamic-cpu-debug-return-18/collected-r1` then checks the
+debug-issued B-response direction across DRET: 12 complete M/S/U programs
+and six named RTL wrong-debug-origin oracles, with origin off/on and read
+delays 0/16. A separate seven-write/four-read host requires debug four/two
+and two CSR checks; six-write evidence cannot count toward it. The added
+debug write follows the final load/fence and its B response is withheld
+for 384 cycles. Every positive executes actual DRET while it remains pending.
+
+`g6lc_cpu_debug_return_trace.py` checks W-before-exit-before-B and resumed
+origin, with five synthetic temporal tests. The return generator has three
+encoding/image tests; the collector has eleven synthetic script/matrix/
+identity tests. They reject old counts/firmware, missing profiles/generation,
+changed models, hidden forcing, unrelated assertions and absent crossings.
+Six enabled false-live-return trace oracles reject debug-origin relabeling.
+Seventy-six Python tests, seven platform checks, typechecking and a scoped
+12-file MIT/source audit pass. No production RTL or native authority changes;
+remaining queue classes/debug-MPRV/compiler/physical/system gates stay open.
+
+No aggregate/compliance, DFT, physical protection, native FLASH_RSP=16,
+CPU/DMA/atomic/Linux or optional DAX/virtio-pmem/virtio-mem qualification is
+inferred from this evidence. The completion plan retains these as open gates.
+
 ## Hyp8 r114 - SC backoff response ownership
 
 The existing D-cache bench adds controlled atomic replies with unrelated
@@ -2889,3 +3063,476 @@ T24), `mini_l2set_stride.S` (the single-hart arm of the same churn; PASS). Drive
 ## T24 store age-order leaf (2026-10-12)
 
 `verif/tb/core/run-iq-store-age.sh` → `tb_g6lc_iq_store_age.sv`: S1 an older not-ready store holds a younger ready store but not a younger ALU op; S2 the older store issues first once its tag arrives, the younger the cycle after; S3 a younger ready load is not held (that is the `st_unresolved` gate). Positive 10 checks, `+oracle_negative` must fail, `+define+G6LC_MUT_ST_NOAGE` must fail `IQ_ST_AGE`. The system-level witness is `mc_l3_evict_inclusion.S -DEVICT_LINES=24` on `g6lc64_ooo_server` (T24).
+
+## APU Descriptor Layout Ordering (Non-ISA)
+
+Binding-order independence and increasing-binding dynamic-offset assignment:
+`test_vn_layout.py` covers permutations, dynamic arrays, high binding bits and
+limits. `ue_cpos_dslcompat_1` now permutes equivalent bindings; the companion
+`ue_cneg_layoutmix_1` changes descriptor count. Repository-built Verilator 5.008
+vgtop passes 877 / 685 checks respectively. New frontend assertions check strict
+emitted order and bounded scans. These are selected mechanism results, not CTS,
+full dynamic-offset RTL coverage, formal proof or aggregate qualification.
+See `architecture/uncore/apu-cts-development.md` for limitations and gate blockers.
+
+## APU Immutable Sampler State (Non-ISA)
+
+Vulkan 1.0 layout-supplied immutable state (retained in 1.4):
+`ue_cpos_imm_texlod_1`, `ue_cpos_imm_copy_1`, `ue_cpos_imm_array_1`
+cover combined descriptors with NULL sampler writes, an unwritten standalone
+sampler array, array elements, and copies from a mutable source with a
+different sampler. Explicit record-word checks precede shader consumption.
+All three pass at fixed and randomized memory latency on repository-built
+5.008 (1,459 / 1,399 / 1,715 checks). `run-apu-dev.sh --immutable [--jitter]`
+selects this small cohort; full vgtop also registers it. Metadata bounds
+assertions are enabled, not formally proved. Full CTS/lifetime/fault-injection
+and aggregate qualification remain open. See
+`architecture/uncore/apu-immutable-implementation.md`.
+
+## APU Empty Layout And Bounded Dev Harness (Non-ISA)
+
+`ue_cpos_emptylayout_1` creates an empty descriptor layout after a nonempty
+one, allocates the empty set first, then fills an exact-capacity pool. It
+detects inherited extent state; a frontend assertion also checks zero
+sizing/dynamic metadata and the initial hash before empty-layout allocation.
+The fixture generates and pinned 5.008 lint passes; new RTL execution and
+formal proof remain pending. No prior probe pass covers this correction.
+
+`apu-leaf --stages dev` uses small immutable/layout/baseline cohorts with
+offline compiler provisioning from checksum-verified tools/verilator sources.
+`run-apu-dev.sh --layout --check` checks presence without setup/build/run.
+19 fake-tool harness tests, 38 scoped proxy/gate/closure tests and 23 model
+tests pass; full proxy run has six unrelated failures recorded separately.
+See `architecture/uncore/apu-dev-harness-implementation.md` for budgets/gates.
+
+PGO/DMA follow-up: 23 scoped harness/policy tests, 31 model tests (including
+eight DMA cases), and 38 proxy/gate tests pass. Pinned 5.008 compile-only stats
+show three unrolled loops in the fixed compiler-training input. Nine sampled
+golden artifacts regenerate byte-identically (emptylayout, immutable copy,
+fragment array-copy). These are not remote RTL/CTS evidence. Compiler PGO
+requires a completed, validated profile-use receipt, never just -O3 or lint
+training. Details: `architecture/uncore/apu-pgo-dma-increment.md`.
+
+### APU Simulator PGO And Owned DMA Tests (Non-ISA)
+
+Simulator PGO is now required, auto-provisioned and separate from compiler
+PGO. Frozen `tb_g6lc_sim_pgo_probe` infrastructure source completes native
+generate/train/use (4 profiles) and independently passes on the profile-use
+image; warm reuse with auto-install disabled takes0.08s. This is not device
+RTL/CTS qualification. Training is not counted as validation.
+
+33 harness/policy,39 model and40 scoped proxy/gate checks pass, including
+launch-only INCOMPLETE, source/receipt checks, setup failure classification,
+missing PGO evidence and eight resource-lease lifecycle/access cases.
+Tests run on frozen source/tooling concurrently with mutable implementation;
+collect must validate completion. No ISA/profile status changes.
+`architecture/uncore/apu-simulator-pgo-implementation.md` defines limits.
+
+T2 lifetime follow-up: eight new host cases cover global backing versus
+context access, shared attachments, context/resource ID reuse, forged tokens,
+permission attenuation and whole-transfer rejection.24 focused DMA/lifetime
+checks run from frozen source with matching before/after hashes; default-PGO
+presence-only preflight passes. No device RTL/CTS or ISA-status promotion.
+`architecture/uncore/apu-resource-lifetime-increment.md`.
+
+Native control follow-up (non-ISA):40 frozen-source DMA/lifetime/control checks
+pass, including16 new protocol and queue cases. They exercise response metadata,
+truncated/unsupported packets, short capacity, context budget, late permission
+failure before mutation, scatter/gather and unref access invalidation.
+Presence-only PGO preflight passes. No RTL/CTS/ISA-status promotion.
+`architecture/uncore/apu-native-control-increment.md`.
+
+Native runnable-backend follow-up (non-ISA):58 isolated tests pass0.868s with
+ResourceWarnings fatal and20 before/after input hashes equal. Includes real
+CLI subprocess plus existing bridge-client MMIO/DMA/IRQ, blob content
+retention, stale/pinned mappings, ring wrap/faults and socket-path safety.
+No Vulkan capset or RTL/CTS qualification is claimed.
+`architecture/uncore/apu-native-bridge-implementation.md`.
+
+Native linear/memory follow-up (non-ISA):73 frozen checks pass2.882s including
+real bridge-client query/reply/allocation and memory-blob lifecycle/context
+reuse. Explicit timeout returns4/INCOMPLETE. Eleven sampled legacy artifacts
+remain byte-identical; no RTL/CTS/compliance status promotion.
+`architecture/uncore/apu-native-linear-implementation.md`.
+
+Native ring follow-up (non-ISA):93 frozen checks pass4.745s with55 unchanged
+input hashes. Includes18 directed ring cases and real IPC polling without
+MMIO, parked-wait context cancellation and reset with live pins. No hardware,
+Vulkan conformance or generated-simulator performance promotion.
+`architecture/uncore/apu-native-ring-implementation.md`.
+
+Native continuation follow-up (non-ISA):109 frozen checks pass6.868s with58
+unchanged input hashes. Thirteen directed cases and three real IPC cases cover
+non-replay, delayed reply/used publication, wakeup, cancellation/reuse, queue/
+device reset, task-local replies, source/read bounds and DMA revocation before
+resumed side effects. Timeout remains4/INCOMPLETE; no RTL/CTS promotion.
+`architecture/uncore/apu-native-continuation-implementation.md`.
+
+Native dependency follow-up (non-ISA):119 frozen checks pass8.762s with60
+unchanged input hashes. Nine directed dependency cases and one actual
+CLI/bridge source-object/destination-query sequence cover ordering,
+pre-read rejection, sibling progress, reply isolation and cancellation.
+No stock-renderer, RTL/CTS or generated-simulator performance promotion.
+`architecture/uncore/apu-native-dependency-implementation.md`.
+
+Native transfer follow-up (non-ISA):133 frozen checks pass7.101s, including14
+new cases for chunk progress, FIFO/fairness, mixed byte/fill budgets, pin rollback,
+bounds/generation/context isolation, deferred free, failure and cancellation.
+Wire-submit refusal remains tested. No RTL/CTS or conformance promotion.
+`architecture/uncore/apu-native-transfer-implementation.md`.
+
+Native replay follow-up (non-ISA):146 frozen checks pass10.797s with64 unchanged
+hashes. Thirteen actual-wire recording/internal-replay cases cover data order,
+snapshots, secondary leases, pending mutations, empty/one-time states, stale
+bindings/descriptors, overlap, budgets, admission rollback and cancellation.
+Wire GPU refusal remains tested; no RTL/CTS or qualification promotion.
+`architecture/uncore/apu-native-replay-implementation.md`.
+
+Native submit follow-up (non-ISA):159 frozen checks pass8.150s,66 hashes
+unchanged. Twelve directed cases plus actual CLI/bridge barrier/fill/submit/
+wait/shared-memory traffic cover real retirement, wait deadlines, empty submit,
+pending mutation, malformed input, fault/cancel and default refusal.
+No stock-software, RTL/CTS or capability promotion.
+`architecture/uncore/apu-native-submit-implementation.md`.
+
+Native binary follow-up (non-ISA):170 frozen checks pass14.423s with68 unchanged
+hashes, including11 actual-wire scheduling/ownership cases. Ordering, aliases,
+reuse, failed admission, timeline refusal, failure propagation and cancellation
+are tested without stock-software/RTL/CTS admission.
+`architecture/uncore/apu-native-binary-semaphore-implementation.md`.
+
+Native timeline host follow-up (non-ISA):182 frozen checks pass12.467s with70
+unchanged hashes. Eleven timeline and one fence-generation case cover u64
+replies, typed/monotonic operations, bounded waits, stale IDs, cancellation,
+legacy wire-ID compatibility and default refusal. No RTL/CTS qualification.
+`architecture/uncore/apu-native-timeline-host-implementation.md`.
+
+Native timeline queue follow-up (non-ISA):197 frozen checks pass14.198s with74
+unchanged hashes. Eleven queue and four receipt cases cover progress, FIFO,
+budgets, failures, cancellation and truthful cleanup/timeout status. No RTL/CTS
+or stock-software qualification.
+`architecture/uncore/apu-native-timeline-queue-implementation.md`.
+
+Native image-copy follow-up (non-ISA):210 frozen checks pass12.023s,76 hashes
+unchanged. Thirteen directed region/lifetime cases cover actual data, padding,
+mips/layers, bounds, overlap, cancellation and submit/fence ordering. These
+isolated copies are not stock Vulkan layout/rendering traces or RTL evidence.
+`architecture/uncore/apu-native-image-copy-implementation.md`.
+
+Native coherent image barriers (non-ISA):220 frozen checks pass13.371s with78
+unchanged hashes. Ten directed cases cover ordering, capture bounds, array
+generations, invalid scopes, zero-byte leases and default profile isolation.
+Graphics-scope follow-up:623 frozen checks pass17.956s (native-gfxbarriers-02,
+native-execution.s26wbxln),137 hashes unchanged; draw-stage/attachment/sampled
+layout cases plus atomic refusals. No stock/hardware/CTS qualification.
+`architecture/uncore/apu-native-image-barrier-implementation.md`.
+
+Native command-buffer events (non-ISA):652 frozen checks pass18.985s
+(native-eventlost-01),sources unchanged; twelve cases cover ordering,
+host release, multi-event waits, retained barrier payloads, atomic
+refusals, dead-handle/pin retirement and DEVICE_LOST propagation to
+vkGetEventStatus with host set/reset leaving state untouched; timeline
+counter/signal/wait host commands also report DEVICE_LOST.
+cases cover ordered signal/wait/reset, host release, multi-event waits,
+retained memory/buffer/image barrier payloads, barrier-only records,
+refusals and pin retirement. No stock/hardware/CTS qualification.
+`architecture/uncore/apu-native-event-implementation.md`.
+
+Native query pools (non-ISA):657 frozen checks pass18.4s
+(native-occquery-01,native-execution.fy3qjkxi,56 modules),sources
+unchanged; twenty-one cases cover ordered reset/stamp/begin/end,
+bounds/flags/stage refusals, statistics/count create refusal, occlusion
+admission with honest fragment counts verified end-to-end against
+drawexec_stats plus host readback, begin/end pairing refusals, indexed
+index==0 admission and nonzero refusal, occlusion copy/readback,
+wrong-type timestamp refusal, pin release, dead-pool rejection, ordered
+readback with/without availability, VK_NOT_READY before drain, WAIT
+suspension, flag/stride/dataSize refusals, DEVICE_LOST after context
+fault, v1/v2 timestamp ordering, out-of-profile stage refusal, ordered
+buffer copy with stride padding/availability, 32-bit packed records,
+copy validation refusals and dead-pool copy rejection. No
+stock/hardware/CTS qualification.
+`architecture/uncore/apu-native-query-implementation.md`.
+
+Native conditional rendering (non-ISA):662 frozen checks pass17.9s
+(native-condrender-01,native-execution.cxlrj2vt),sources unchanged;
+five cases cover nonzero/zero/inverted predicate gating end-to-end,
+per-draw predicate re-read across vkCmdUpdateBuffer, and
+pairing/operand refusals (end-without-begin, nesting, unclosed submit,
+missing usage bit, misaligned/out-of-extent offset). No stock/hardware/CTS
+qualification.
+`architecture/uncore/apu-native-conditional-implementation.md`.
+
+Native conditional gated commands (non-ISA):672 frozen checks pass18.8s
+(native-condgate-01,native-execution.93obyz8i),sources unchanged;
+four cases cover vkCmdDispatch and vkCmdClearAttachments gated by a
+zero predicate (no published work / patterned memory preserved) and a
+nonzero predicate (dispatch writes its SSBO word / clear texel lands).
+Copies/blits/fills/updates stay ungated per the extension.
+No stock/hardware/CTS qualification.
+`architecture/uncore/apu-native-conditional-implementation.md`.
+
+Native query pools extended (non-ISA):668 frozen checks pass17.9s
+(native-statquery-01,native-execution.oyeoyvyu),sources unchanged;
+six cases cover statistics-pool create admission/refusals (mask
+outside 0x87, stats flags on non-statistics pools, unknown types),
+empty-region zero counters, mask-subset single-counter results,
+unavailable-slot VK_NOT_READY with zero-counter payloads,
+counter-array copy with stride padding, wrong-type refusals and an
+end-to-end draw whose published counters match drawexec_stats.
+No stock/hardware/CTS qualification.
+`architecture/uncore/apu-native-query-implementation.md`.
+
+Native device-command DEVICE_LOST (non-ISA):675 frozen checks pass18.8s
+(native-lostdepth-01,native-execution.qdan5ugk),sources unchanged;
+three cases cover vkCreateBuffer/vkAllocateMemory/vkBindBufferMemory/
+vkCreateFence reporting VK_ERROR_DEVICE_LOST with the object absent
+from the frontend table, recovery to VK_OK after the fault clears,
+and vkDestroyBuffer (RETIRE) still executing post-loss. ALLOC/BIND/
+POOL_RESET/CB_* classes are covered; RETIRE/RECORD/QUERY/MAP/UPDATE/
+NOP_OK/TRANSPORT stay live.
+No stock/hardware/CTS qualification.
+`architecture/uncore/apu-native-event-implementation.md`.
+
+Native per-image layout tracking (non-ISA):682 frozen checks pass19.6s
+(native-layouttrack-01,native-execution.rhjh1105),sources unchanged;
+seven cases cover oldLayout mismatch refusal, UNDEFINED discard
+admission, layout persistence across recorded submits, copy/clear
+layout-operand mismatch and create-time initialLayout seeding plus
+out-of-profile refusal, and render-pass initial/subpass/final
+publication with initialLayout mismatch refusal. Copy/clear fixtures
+declare matching initialLayout; barrier/event fixtures chain
+old/new layouts explicitly. Descriptor imageLayout remains
+unconsulted; no stock/hardware/CTS qualification.
+`architecture/uncore/apu-native-image-barrier-implementation.md`.
+
+Native color clears/payload bounds (non-ISA):230 frozen checks pass30.925s,
+79 hashes unchanged. Ten cases cover conversions, padding/mips/layers, small
+chunks, malformed records and unchanged16-word record packing. No RTL/CTS or
+stock renderer qualification.
+`architecture/uncore/apu-native-image-clear-implementation.md`.
+
+Native internal compute (non-ISA):241 frozen checks pass13.845s,81 hashes
+unchanged. Eleven cases cover actual stores/order, budgets/barriers, robust/
+permission failures, leases and callback reset. No wire shader or RTL evidence.
+`architecture/uncore/apu-native-compute-foundation.md`.
+
+Native buffer descriptors (non-ISA):254 frozen checks pass16.214s;83 hashes
+unchanged. Thirteen cases cover compute through descriptors, generations/copy/
+bounds/epochs, tamper/mutation and unchanged record bytes. No RTL/CTS admission.
+`architecture/uncore/apu-native-buffer-descriptor-implementation.md`.
+
+Native layout lifetime (non-ISA):267 frozen checks pass13.820s,85 hashes
+unchanged. Thirteen cases cover reuse/destruction, exact identity, push masks/
+ranges, immutable state, context-owner isolation and bounded specialization
+refusal. No RTL/CTS or stock admission.
+`architecture/uncore/apu-native-layout-lifetime-implementation.md`.
+
+Native pipeline operands:274 frozen checks pass18.256s,87 hashes unchanged.
+Seven entry/stage/generation/destruction/reuse/tamper cases; no RTL/CTS claim.
+`architecture/uncore/apu-native-pipeline-implementation.md`.
+
+Internal compute replay:299 frozen checks pass16.776s,89 hashes unchanged.
+25 cases cover ordering, dynamic/push identity, generations/epochs/poison,
+prefix disturbance, secondary state and cancellation/rollback. No RTL/CTS.
+`architecture/uncore/apu-native-compute-replay-implementation.md`.
+
+Diagnostic compute wire:310 frozen checks pass18.933s,90 hashes unchanged.
+Eleven mode/fence/fault/reset/device/semaphore cases include the real local
+bridge client and shared shader writes. No RTL/CTS/stock qualification.
+`architecture/uncore/apu-native-compute-submit-implementation.md`.
+
+Bounded scalar specialization:325 frozen checks pass16.343s,92 hashes unchanged.
+Fifteen byte/type/budget/default/batch/lifetime/store cases; no RTL/CTS admission.
+`architecture/uncore/apu-native-specialization-implementation.md`.
+
+Native compute barriers:338 frozen checks pass16.120s,93 hashes unchanged.
+Thirteen ordering/scope/range/generation/mixed/device/lease cases; no RTL/CTS.
+`architecture/uncore/apu-native-compute-barrier-implementation.md`.
+
+Native idle scope:348 frozen checks pass15.110s,94 hashes unchanged. Ten
+queue/device/alias/generation/reset/fault/prefix cases; no RTL/CTS admission.
+`architecture/uncore/apu-native-idle-scope-implementation.md`.
+
+Native indirect compute:364 frozen checks pass14.006s,95 hashes unchanged.
+Sixteen live-data/builtin/budget/generation/rollback/fault/cancellation/mode
+cases; no RTL/CTS qualification.
+`architecture/uncore/apu-native-indirect-dispatch-implementation.md`.
+
+Native fixed buffer arrays:374 frozen checks pass17.179s,96 hashes unchanged.
+Ten element/provenance/dynamic/UBO/alias/row/copy/cancel cases; no RTL/CTS claim.
+`architecture/uncore/apu-native-buffer-array-implementation.md`.
+
+Native scalar specialization operations:382 frozen checks pass17.971s,96 hashes
+unchanged. Eight profile/dependency/type/budget/provenance/dispatch cases;
+no RTL/CTS qualification.
+`architecture/uncore/apu-native-specialization-op-implementation.md`.
+
+Native image operands:398 frozen checks pass19.826s,98 hashes unchanged.
+Sixteen generation/ownership/immutable/copy/subview/integrity/lifetime cases;
+shader-image executor refusal remains. No RTL/CTS qualification.
+`architecture/uncore/apu-native-image-operand-implementation.md`.
+
+Native compute images:408 frozen checks pass18.899s,99 hashes unchanged.
+Ten data/sampling/lifetime/rollback/fault/permission/refusal cases; no RTL/CTS.
+`architecture/uncore/apu-native-compute-image-implementation.md`.
+
+Native shader-image barriers:417 frozen checks pass15.207s,100 hashes unchanged.
+Nine ordering/read-only/usage/scope/lifetime/generation/refusal cases; no RTL/CTS.
+`architecture/uncore/apu-native-shader-image-barrier-implementation.md`.
+
+Native rendering identity:432 frozen checks pass14.597s,102 hashes unchanged.
+Fifteen compatibility/provenance/extent/lifetime/refusal cases; no RTL/CTS.
+`architecture/uncore/apu-native-rendering-identity-implementation.md`.
+
+Native graphics identity:442 frozen checks pass37.769s,104 hashes unchanged.
+Ten stage/order/provenance/reuse/tamper/specialization/refusal cases; no RTL/CTS.
+`architecture/uncore/apu-native-graphics-identity-implementation.md`.
+
+Native graphics fixed state:450 frozen checks pass21.578s,106 hashes unchanged.
+Eight typed-state/omitted-feature/vertex-bound/refusal cases; no RTL/CTS.
+`architecture/uncore/apu-native-graphics-fixed-state-implementation.md`.
+
+Native graphics interfaces:462 frozen checks pass36.223s,108 hashes unchanged.
+Twelve declaration/link/class/builtin/alias/refusal cases; no RTL/CTS.
+`architecture/uncore/apu-native-graphics-interface-implementation.md`.
+
+Native vertex/index operands:474 frozen checks pass33.942s,110 hashes unchanged.
+Twelve binding/type/provenance/range/retirement/refusal cases; no RTL/CTS.
+`architecture/uncore/apu-native-vertex-operand-implementation.md`.
+
+Native graphics dynamic state:483 frozen checks pass21.050s,112 hashes unchanged.
+Nine value/bound/count/epoch/immutability/refusal cases; no RTL/CTS.
+`architecture/uncore/apu-native-graphics-dynamic-implementation.md`.
+
+Native render-pass commands:499 frozen checks pass29.179s,114 hashes unchanged.
+Sixteen identity/scope/clear/area/reset/retirement/refusal cases; no RTL/CTS.
+`architecture/uncore/apu-native-render-pass-command-implementation.md`.
+
+Native graphics resource requirements:516 frozen checks pass27.683s,116 hashes
+unchanged. Seventeen type/count/stage/push/alias/specialization/lifetime/refusal
+cases; no RTL/CTS.
+`architecture/uncore/apu-native-graphics-resource-implementation.md`.
+
+Native graphics binding state:536 frozen checks pass31.259s,118 hashes unchanged.
+Twenty ownership/state/disturbance/atomicity/lifetime/record-local/refusal cases;
+no RTL/CTS.
+`architecture/uncore/apu-native-graphics-binding-implementation.md`.
+
+Native graphics draw plans:553 frozen checks pass17.947s,120 hashes unchanged.
+Seventeen composition/refusal/indirect/lifetime/replay cases; no RTL/CTS.
+`architecture/uncore/apu-native-graphics-draw-implementation.md`.
+
+Native render-pass clears:569 frozen checks pass22.433s, all hashes unchanged.
+Sixteen area/padding/format/order/multi-attachment/skip/atomicity/lifetime/
+explicit-rect/clip/refusal cases; no RTL/CTS.
+`architecture/uncore/apu-native-render-pass-clear-implementation.md`.
+
+Native graphics fetch:579 frozen checks pass16.193s on ovh_calltorch
+(native-execution.s1isdnb1), all hashes unchanged. Eleven decode/index/
+instance/indirect/robust/lease/budget/partial/builtin-only cases; no RTL/CTS.
+`architecture/uncore/apu-native-graphics-fetch-implementation.md`.
+
+Native graphics vertex shade:586 frozen checks pass16.092s on ovh_calltorch
+(native-shade-03), all hashes unchanged. Six cases: attribute+VertexIndex
+varying outputs on a self-contained assembled module, indexed builtin feed,
+multi-batch ordering, stage/descriptor refusal, indirect args and lease
+retirement; no RTL/CTS.
+`architecture/uncore/apu-native-graphics-shade-implementation.md`.
+
+Native graphics fragment shade:591 frozen checks pass15.454s on
+ovh_calltorch (native-pshade-01), all hashes unchanged. Five cases: color
+passthrough order, FragCoord builtin + batch split, helper/front admission,
+record/stage/descriptor/oversize refusal; no RTL/CTS.
+`architecture/uncore/apu-native-graphics-pshade-implementation.md`.
+
+Native graphics raster:603 frozen checks pass17.0s on ovh_calltorch
+(native-rastershade-01), all hashes unchanged. Twelve cases: golden-oracle
+coverage equality, perspective interpolation, FragCoord.w, flat copy,
+scissor/cull, degenerate/w<=0, multi-turn progress, fragment-budget fault,
+admission refusals, raster->fragment composite passthrough, mixed-facing
+fault, stage/descriptor refusals; no RTL/CTS.
+`architecture/uncore/apu-native-graphics-raster-implementation.md`.
+
+Native graphics writeback:608 frozen checks pass17.9s on ovh_calltorch
+(native-writeback-01), all hashes unchanged. Five cases: RGBA32F raw
+placement, RGBA8UNORM convert+drops, location select, multi-turn+extent
+refusal, admission refusals; no RTL/CTS.
+`architecture/uncore/apu-native-graphics-writeback-implementation.md`.
+
+Native graphics draw execution+replay:616 frozen checks pass18.032s on
+ovh_calltorch (native-drawreplay-05, cohort native-execution.vah9c9ct),
+sources_unchanged true, all hashes unchanged. Eight new cases across
+test_vn_graphics_drawexec (end-to-end triangle texels, multi-triangle
+stats, admission refusals) and test_vn_graphics_draw_replay (FragCoord
+texels via wire replay, empty scissor, outside-pass refusal, two-draw
+order, descriptor-shader refusal); three stale boundary tests updated to
+assert state-only replay admits an empty job; no RTL/CTS.
+`architecture/uncore/apu-native-graphics-drawexec-implementation.md`.
+
+vgctl retained-unmap owner-hold + alias accounting (RTL,
+ovh_calltorch, Verilator 5.008 apu-repo-verilator PGO, Yosys
+storamic-sigmap-repair-20-r3; targeted runs on snapshot
+apu-leaf-20261106T201151-66f9d3fa1cac after the full-leaf launcher hit
+concurrent-storamic checksum races): VERILATOR BUILD OK; PASS
+tb_g6lc_apu_vgctl cases=41 checks=332 cycles=12847 - D1a hold to
+UNBACKED, D1b drain stall then UNBACKED, D2a unmap-with-surviving-alias
+keeps extent backed with no hold, D2b last-alias unmap publishes
+UNBACKED, D3a same-base alias map admitted, D3b different-base map
+refused ERR_PARAM, D3c sole-alias remap relocates to 0x8000; PASS
+tb_g6lc_apu_objtab cases=16 checks=101566 cycles=6963392;
+VGCTL_SYNTH=1 SYNTH OK Enable=0 and Enable=1 (16426 cells / 2531 ff,
+no latches). Directed leaf only; no CTS/device/physical qualification.
+`architecture/uncore/apu-vgctl-unmap-hold-implementation.md`.
+
+Storamic checkpoint-writer model24: `storamic-all-f8d457c509b4` passes all ten
+selected stages with source-post identity. Six simulation profiles cover
+RSP0/4/16, early-upstream ACK, explicit8192-cycle timeout/lock/drain, and
+disabled denial, each retaining its rejecting oracle. Five depth12 off/illegal
+refusal/cover/oracle goals pass; legacy endpoint/ring obligations remain.
+Active generic synthesis3044 cells/four memories, off/invalid93/no memories,
+all zero latches/SCCs. Both synthetic producer-ACK mutants reject at their
+intended assertions. Compiler and simulator PGO/unroll use tools/verilator;
+formal/synthesis use tools/yosys. Local111 Python,7 platform checks, typecheck,
+configured lint4 steps and98-file audit pass. No aggregate/compliance/native/
+physical/cache-coherence/Linux qualification. See
+`g6lc_storamic/architecture/checkpoint-writer-model.md`.
+
+Storamic writer-reset25: `storamic-all-208113170860` passes eleven selected
+stages, including six unchanged baseline profiles and three real MMIO-reset
+profiles at response delay 0/4/16 (3816/4693/7325 checks). Each retains its
+rejecting oracle. Reset causes CP_PRODUCER_ERROR exactly once, preserves the
+prior checkpoint and cancels status/used publication; restore checks 64 old
+guest words, waits 500 cycles at post-copy CSync for external resume, then
+rebuilds guest/device queues before IN. The independent
+`storamic-all-3eb75e609eb6` repeats reset and unchanged coordinator
+safety/cover/oracle goals at depths 16/20/32/12/16. Both source-post maps and
+108 live source files match. Both dropped-error/forged-resume hardware mutants
+reject. Twelve simulator PGO builds train/rebuild profile-use with verified
+runtime; repository compiler PGO/unroll and Yosys unchanged. Local 112 Python,
+7 platform checks, typecheck, four lint steps and 99-file source/license audit
+pass. No production RTL workaround or native/physical/system qualification.
+See `g6lc_storamic/architecture/checkpoint-writer-reset.md`.
+
+Storamic DMA ownership26: final `storamic-all-ad66348d684f` passes thirteen
+selected stages with matching source-post/live source hashes. Seven new
+profiles cover W-leading/visible-AW ordering, stalled AW/AR, held R, write/
+read credit saturation and AWREADY waiting for WVALID; seven rejecting
+oracles retained. Legacy four-beat upstream/CMO modes and composed checkpoint
+save/restore/reset pass. New single-beat-protocol formal safety/cover/oracle
+depths16/8/8/8/14/12 pass unchanged. Exact final-fixture original-RTL replay
+`storamic-dma-original-78662284` rejects all seven profiles and has a verified
+SAT counterexample. Twenty generated-simulator PGO builds train/rebuild/use
+with verified frozen compiler PGO/unroll/Yosys identities. Local113 Python,
+7 platform, typecheck, lint4 and source/license103 pass. No full-burst formal
+liveness, native/physical/aggregate/compliance/Linux qualification.
+See `g6lc_storamic/architecture/dma-ownership.md`.
+
+Policy/writer27 final518de1685e41: all ten selected stages, five new profiles/
+oracles, five off/illegal formal queries and legacy writer/reset/ownership
+regressions pass. Exact-final-fixture endpoint-hold omission and forged upstream
+ACK mutants reject at intended assertions. All113 packaged code/runner hashes,
+114 current head files and22 simulator PGO/profile-use identities verify.
+Active-loss recovery is explicit common reset/rediscovery, not automatic
+provider revival or full native liveness. Python114/Bun7/typecheck/lint4/
+source-license108 pass. See `g6lc_storamic/architecture/policy-writer-model.md`.

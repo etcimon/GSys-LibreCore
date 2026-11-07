@@ -13,3 +13,4 @@ lint_off -rule WIDTHEXPAND -file "*/vendor/pulp-platform/tech_cells_generic/src/
 lint_off -rule UNSIGNED -file "*/vendor/pulp-platform/tech_cells_generic/src/rtl/tc_sram.sv"
 lint_off -rule COMBDLY -file "*/vendor/pulp-platform/tech_cells_generic/src/rtl/tc_clk.sv"
 lint_off -rule LATCH -file "*/vendor/pulp-platform/tech_cells_generic/src/rtl/tc_clk.sv"
+lint_off -rule UNSIGNED -file "*/corev_apu/apu/g6lc_apu_objmem.sv"

@@ -561,6 +561,17 @@ class Model:
             return
 
         if var.is_dynamic_array() or var.is_blob():
+            if cat == vkxml.VkType.HANDLE and keep and name == 'pImmutableSamplers':
+                # Keep the presence/count as well as each handle. A raw
+                # blob loses the boundary of optional immutable arrays.
+                cnt = self.cnt_slot(scope)
+                self.emit('ARRAY', cnt,
+                          self.arr_meta_idx(self.array_bound(base, name)),
+                          name, keep)
+                self.emit_handle(var, True, False, keep)
+                self.emit('ENDARR')
+                self.cnt_endarr()
+                return
             # array of C strings: outer count + per-element blob
             if cat == vkxml.VkType.DEFAULT and base.name == 'char' and \
                     var.ty.indirection_depth() >= 2:
@@ -1617,7 +1628,7 @@ class Model:
 
     def read_command_set(self, path):
         names = []
-        for line in open(path, encoding='utf-8').read().splitlines():
+        for line in Path(path).read_text(encoding='utf-8').splitlines():
             line = line.strip()
             if not line or line.startswith('#'):
                 continue
