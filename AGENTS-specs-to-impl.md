@@ -54,6 +54,17 @@ remain target gates. Normative contracts are under `g6lc_storamic/architecture/`
 the product/SoC outline is `architecture/storamic/README.md`. All QEMU
 implementation remains exclusively owned by `g6lc_qemu/`.
 
+## Storamic ST-036 - Block Address Validation
+
+`g6lc_storamic_virtio_blk` now validates both the start and exclusive end of
+the sector range before narrowing to its 64-bit byte-addressed store port.
+Oversized sectors and wrapping transfers return IOERR without store access;
+the final legal sector remains usable. Invalid descriptor counts and empty
+status buffers fault before DMA. These checks use the existing admission/
+check states with no new state, interface or pipeline stage. They repair the
+reusable backend contract, not native capacity or physical persistence.
+See `g6lc_storamic/architecture/block-address-validation.md`.
+
 ## Storamic ST-025 - Model Checkpoint And Inactive Origin Candidate
 
 The later model endpoint composes AXI admission/quiescence, a policy-bound
@@ -1959,6 +1970,11 @@ native transport models bind a semaphore handle to a blob `resourceId`
 that must resolve to a live mapped resource, and wait reports pending
 while any ring on that resource holds unconsumed submissions or is fatal
 — fatal on the §6b pump path, `RingBlocked` park on LinearExecution.
-RTL pump still `StFatal`-refuses pending the pump-table/wait-state
-increment; no capset/stock/CTS/physical claim.
+The pump RTL now executes both: `g6lc_apu_vnpump` gained a bounded
+`sem_q` binding table, `ring_t.rid`+`tail` cache, a `StWaitSem` state,
+and an `is_sem`/`srid` park predicate (resource scan hoisted out of the
+`park_take` loop for the synth unroll budget). Remote unit leaf PASS
+308 checks, `SYNTH OK Enable=0`; `Enable=1` blocked by a pre-existing
+`tc_sram` sim-init unroll ceiling (reproduced on HEAD). No capset/stock/
+CTS/physical claim.
 `architecture/uncore/apu-native-semaphore-resource-implementation.md`.

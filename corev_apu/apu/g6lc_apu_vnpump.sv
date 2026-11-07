@@ -230,6 +230,8 @@ module g6lc_apu_vnpump
       logic [63:0] handle;
       logic [7:0]  ctx;
       logic [31:0] head;          // byte seqno consumed by device
+      logic [31:0] tail;          // last polled guest tail (byte seqno)
+      logic [31:0] rid;           // resourceId this ring was created on
       logic [APU_VG_AP_WORD_W-1:0] head_w;        // aperture word addrs
       logic [APU_VG_AP_WORD_W-1:0] tail_w;
       logic [APU_VG_AP_WORD_W-1:0] status_w;
@@ -274,19 +276,92 @@ module g6lc_apu_vnpump
     typedef struct packed {
       logic        live;
       logic        is_vq;         // 1 = WaitVirtqueueSeqno
+      logic        is_sem;        // 1 = WaitSemaphoreResource
       stream_t     st0;
       stream_t     st1;
       logic        depth;
       logic [RIdxW-1:0] wring;    // waited ring slot (is_vq == 0)
+      logic [31:0] srid;          // bound resourceId (is_sem == 1)
       logic [63:0] seqno;
     } park_t;
     park_t park_q [Rings+1];
 
+    // Imported external-semaphore bindings (vkImportSemaphoreResource-
+    // MESA): semaphore handle -> the blob resourceId it was imported
+    // against.  Bounded; the ObjTab resolve already proved the resource
+    // is a live mapped blob, matching the native blob_of check.  A
+    // fresh import with no free slot faults (fail-closed).
+    localparam int unsigned SEM_N = 16;
+    typedef struct packed {
+      logic        valid;
+      logic [63:0] handle;
+      logic [31:0] rid;
+    } sem_t;
+    sem_t sem_q [SEM_N];
+
+    // ---- imported-semaphore bindings ------------------------------------
+    // sem_of: live binding slot for a handle, -1 if never imported.
+    // sem_slot: the handle's slot, else the first free slot, else -1 —
+    // used by import to rebind a live handle or claim a fresh one.
+    function automatic int sem_of(input logic [63:0] h);
+      for (int i = 0; i < SEM_N; i++)
+        if (sem_q[i].valid && sem_q[i].handle == h) return i;
+      return -1;
+    endfunction
+    function automatic int sem_slot(input logic [63:0] h);
+      int f;
+      f = -1;
+      for (int i = 0; i < SEM_N; i++)
+        if (sem_q[i].valid && sem_q[i].handle == h) return i;
+      for (int i = 0; i < SEM_N; i++)
+        if (!sem_q[i].valid && f < 0) f = i;
+      return f;
+    endfunction
+    // rid bound to a handle ('0 when unbound — callers gate on sem_of)
+    function automatic logic [31:0] sem_rid_of(input logic [63:0] h);
+      for (int i = 0; i < SEM_N; i++)
+        if (sem_q[i].valid && sem_q[i].handle == h) return sem_q[i].rid;
+      return '0;
+    endfunction
+    // a live fatal ring on the resource -> the wait is device-lost
+    function automatic logic sem_fatal(input logic [31:0] rid);
+      for (int i = 0; i < Rings; i++)
+        if (ring_q[i].live && ring_q[i].rid == rid && ring_q[i].fatal)
+          return 1'b1;
+      return 1'b0;
+    endfunction
+    // resume/finalize predicate for a parked semaphore wait: ready when
+    // no non-fatal ring on rid still holds unconsumed submissions
+    // (last-polled tail ahead of the consumed head), or a fatal ring
+    // makes the wait moot (the re-run then takes StFatal).  Single
+    // fused scan — park_take evaluates this once per parked entry.
+    function automatic logic sem_wait_ready(input logic [31:0] rid);
+      logic pend, fat;
+      pend = 1'b0; fat = 1'b0;
+      for (int i = 0; i < Rings; i++) begin
+        if (ring_q[i].live && ring_q[i].rid == rid) begin
+          fat  |= ring_q[i].fatal;
+          pend |= !ring_q[i].fatal && (ring_q[i].tail > ring_q[i].head);
+        end
+      end
+      return !pend || fat;
+    endfunction
+
     // resume scan — resumable when the wait condition holds, or
-    // (ring wait) when the waited ring is gone so the fault path runs
+    // (ring wait) when the waited ring is gone so the fault path runs.
+    // is_sem parks only ever occupy the execbuf slot (Rings), so the
+    // resource scan is hoisted out of the per-slot loop — nesting a
+    // Rings-loop inside this Rings-loop would exhaust the synth
+    // unroll budget.
     logic park_take;
     int   park_idx;
     logic park_any;
+    logic sem_rdy;
+    always_comb begin
+      sem_rdy = 1'b0;
+      if (park_q[Rings].live && park_q[Rings].is_sem)
+        sem_rdy = sem_wait_ready(park_q[Rings].srid);
+    end
     always_comb begin
       park_take = 1'b0; park_idx = 0; park_any = 1'b0;
       for (int i = 0; i <= Rings; i++) begin
@@ -294,9 +369,11 @@ module g6lc_apu_vnpump
         if (park_q[i].live &&
             (park_q[i].is_vq
                ? (vq_seqno_q >= park_q[i].seqno)
-               : (!ring_q[park_q[i].wring].live ||
-                  64'({32'h0, ring_q[park_q[i].wring].head}) >=
-                  park_q[i].seqno))) begin
+               : park_q[i].is_sem
+                 ? (i == Rings && sem_rdy)
+                 : (!ring_q[park_q[i].wring].live ||
+                    64'({32'h0, ring_q[park_q[i].wring].head}) >=
+                    park_q[i].seqno))) begin
           park_take = 1'b1;
           park_idx  = i;
         end
@@ -447,7 +524,7 @@ module g6lc_apu_vnpump
       StDecFire, StDecWait, StFrontWait,
       StTrFire, StTrCap, StTrExec, StTrDo,
       StOtReq, StOtCpl, StOtDo, StCreate,
-      StWinNext, StWaitVq, StWaitR,
+      StWinNext, StWaitVq, StWaitR, StWaitSem,
       StXsTuple, StXsRep, StXsOpen,
       StApWr, StHeadWr, StStatWr, StNext, StDecNext, StXsDone,
       StFatal, StFatalWr, StFatalNext, StFatalWr2
@@ -794,6 +871,7 @@ module g6lc_apu_vnpump
         // stream slot is split out to keep the loop at Rings
         for (int i = 0; i < Rings; i++) park_q[i] <= '{default: '0};
         park_q[Rings] <= '{default: '0};
+        for (int i = 0; i < SEM_N; i++) sem_q[i] <= '{default: '0};
         st_q[0] <= '{default: '0}; st_q[1] <= '{default: '0};
         depth_q <= 1'b0; fatal_stream_q <= 1'b0;
         for (int i = 0; i < APU_VG_MAX_DESC; i++)
@@ -979,6 +1057,11 @@ module g6lc_apu_vnpump
           end
           StPollCap: begin
             if (pump_rd_done) begin
+              // cache the observed guest tail: the semaphore-resource
+              // wait's pending predicate (tail > head) is evaluated
+              // combinationally in park_take, so the value must live
+              // in a register refreshed on every successful poll
+              if (!mp_err_i) ring_q[poll_q].tail <= mp_rd32;
               if (mp_err_i) begin
                 // aperture miss on the ring tail: FATAL like a decode
                 // fault, keep polling the rest
@@ -1212,6 +1295,21 @@ module g6lc_apu_vnpump
                 t_val_q <= {tbuf[depth_q][5], tbuf[depth_q][4]};
                 state_q <= StWaitR;
               end
+              32'hF5: begin // vkWaitSemaphoreResourceMESA {sem u64 @ w4-5}
+                t_hnd_q <= {tbuf[depth_q][5], tbuf[depth_q][4]};
+                state_q <= StWaitSem;
+              end
+              32'hF6: begin // vkImportSemaphoreResourceMESA
+                // the semaphore u64 and resourceId u32 close the
+                // record after the pNext chain (len(w)==cmd_words_q):
+                // sem = {w[-2], w[-3]}, resourceId = w[-1].  The tbuf
+                // index is TBUF-wide ($clog2(40)=6), so the 16-bit
+                // word-count arithmetic is narrowed to 6 bits.
+                t_hnd_q <= {tbuf[depth_q][6'(cmd_words_q[depth_q] - 16'd2)],
+                            tbuf[depth_q][6'(cmd_words_q[depth_q] - 16'd3)]};
+                t_rid_q <= tbuf[depth_q][6'(cmd_words_q[depth_q] - 16'd1)];
+                state_q <= StOtReq;
+              end
               default: state_q <= StFatal;
             endcase
           end
@@ -1372,12 +1470,26 @@ module g6lc_apu_vnpump
                                 IdleToMax)
                                ? IdleToMax
                                : tbuf[depth_q][15 + 4 * cmd_cn_q[depth_q]],
-                      idle_cnt: '0, parked: 1'b0};
+                      idle_cnt: '0, parked: 1'b0,
+                      rid: t_rid_q, tail: '0};
                   wr_addr_q <= blob_base_w_q +
                         APU_VG_AP_WORD_W'(tbuf[depth_q][11 + 4 * cmd_cn_q[depth_q]] >> 2) +
                         APU_VG_AP_WORD_W'(tbuf[depth_q][21 + 4 * cmd_cn_q[depth_q]] >> 2);
                   wr_data_q <= APU_VNRING_ALIVE;
                   state_q <= StApWr;
+                end
+              end
+              32'hF6: begin // ImportSemaphoreResource: blob resolved
+                // APU_OBJTAB_OK above already proved the resourceId is
+                // a live mapped blob (the native blob_of check).  A
+                // null semaphore or a full table with no matching
+                // handle faults; a live handle rebinds in place.
+                if (t_hnd_q == 64'h0 || sem_slot(t_hnd_q) < 0)
+                  state_q <= StFatal;
+                else begin
+                  sem_q[sem_slot(t_hnd_q)] <=
+                    '{valid: 1'b1, handle: t_hnd_q, rid: t_rid_q};
+                  state_q <= StNext;
                 end
               end
               default: state_q <= StFatal;
@@ -1434,8 +1546,9 @@ module g6lc_apu_vnpump
               // another stream is what satisfies this wait
               park_q[st_q[0].kind == SK_RING ? int'(st_q[0].ring)
                                              : Rings] <=
-                '{live: 1'b1, is_vq: 1'b1, st0: st_q[0], st1: st_q[1],
-                  depth: depth_q, wring: '0,
+                '{live: 1'b1, is_vq: 1'b1, is_sem: 1'b0,
+                  st0: st_q[0], st1: st_q[1],
+                  depth: depth_q, wring: '0, srid: '0,
                   seqno: {tbuf[depth_q][3], tbuf[depth_q][2]}};
               if (st_q[0].ring_stream)
                 ring_q[st_q[0].ring].parked <= 1'b1;
@@ -1460,10 +1573,11 @@ module g6lc_apu_vnpump
               // future seqno simply parks forever: guest bug)
               park_q[st_q[0].kind == SK_RING ? int'(st_q[0].ring)
                                              : Rings] <=
-                '{live: 1'b1, is_vq: 1'b0, st0: st_q[0], st1: st_q[1],
+                '{live: 1'b1, is_vq: 1'b0, is_sem: 1'b0,
+                  st0: st_q[0], st1: st_q[1],
                   depth: depth_q,
                   wring: RIdxW'(ring_of(t_hnd_q, st_q[depth_q].ctx)),
-                  seqno: t_val_q};
+                  srid: '0, seqno: t_val_q};
               if (st_q[0].ring_stream)
                 ring_q[st_q[0].ring].parked <= 1'b1;
               st_q[0].live <= 1'b0;
@@ -1472,6 +1586,36 @@ module g6lc_apu_vnpump
               poll_q <= '0; gap_q <= '0; gap_cnt_q <= '0;
               state_q <= StPollFire;
             end
+          end
+
+          // ---- semaphore-resource wait (vkWaitSemaphoreResourceMESA) -----
+          // the bound resource must have no live fatal ring (device
+          // lost) and no live ring still holding unconsumed
+          // submissions.  Pending parks the stream exactly like
+          // StWaitR: the same FSM must keep draining rings, so the
+          // wait lifts into park_q and re-runs on resume via StDecFire.
+          StWaitSem: begin
+            if (sem_of(t_hnd_q) < 0) begin
+              // never imported / stale token
+              state_q <= StFatal;
+            end else if (!sem_wait_ready(sem_rid_of(t_hnd_q))) begin
+              park_q[st_q[0].kind == SK_RING ? int'(st_q[0].ring)
+                                             : Rings] <=
+                '{live: 1'b1, is_vq: 1'b0, is_sem: 1'b1,
+                  st0: st_q[0], st1: st_q[1],
+                  depth: depth_q, wring: '0,
+                  srid: sem_rid_of(t_hnd_q), seqno: '0};
+              if (st_q[0].ring_stream)
+                ring_q[st_q[0].ring].parked <= 1'b1;
+              st_q[0].live <= 1'b0;
+              st_q[1].live <= 1'b0;
+              depth_q <= 1'b0;
+              poll_q <= '0; gap_q <= '0; gap_cnt_q <= '0;
+              state_q <= StPollFire;
+            end else if (sem_fatal(sem_rid_of(t_hnd_q)))
+              state_q <= StFatal;
+            else
+              state_q <= StNext;
           end
 
           // ---- aperture write commit / ring head store --------------------------

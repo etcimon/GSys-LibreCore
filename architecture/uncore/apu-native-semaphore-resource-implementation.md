@@ -69,65 +69,87 @@ ring commands already use.
 - Full local `test_vn_*` sweep: only the known Windows `socket.AF_UNIX`
   bridge failures (remote authoritative).
 
-## Pump RTL design (queued increment)
+## Pump RTL execution (implemented)
 
-Concrete mechanism derived from the `g6lc_apu_vnpump.sv` structure for the
-next turn. All pieces reuse existing bounded machinery; nothing unbounded.
+`g6lc_apu_vnpump.sv` now executes both commands. The mechanism mirrors
+the native model and reuses the existing bounded park/resume machinery;
+nothing is unbounded.
 
-- **Ring resource id**: `ring_t` currently stores no resource id — add a
-  `rid` field populated at `vkCreateRingMESA` from `t_rid_q` (already
-  resolved through `StOtReq`/`StOtCpl`/`StOtDo` into
-  `blob_base_w_q`/`blob_size_q`). `DestroyRing` clears `live` so dead
-  rings drop out of the wait scan for free.
-- **Semaphore binding table**: bounded `sem_tab[SEM_N]` of
-  `{valid, handle[63:0], rid[31:0]}` (SEM_N ~8-16, matching ring/handle
-  table scale). Import writes it; a live re-import rebinds; no eviction
-  policy needed at this bound (import of a fresh handle when full faults).
-- **`vkImportSemaphoreResourceMESA` (0xF6)**: stage the sem handle into
-  `t_hnd_q` and the trailing `resourceId` into `t_rid_q`, route through
-  the existing `StOtReq` ObjTab LOOKUP. `StOtCpl` `APU_OBJTAB_OK` already
-  proves the resource is a live mapped blob (the native `blob_of` check);
-  `StOtDo` 0xF6 then stores `{handle, rid}` in `sem_tab` and `StNext`.
-  Null handle or ObjTab miss faults — mirrors native import refusal.
-- **`vkWaitSemaphoreResourceMESA` (0xF5)**: no ObjTab needed. Resolve
-  `t_hnd_q` through `sem_tab` → `rid`; unknown/stale handle faults.
-  Evaluate `sem_pending(rid)` = any `ring_q[i].live && ring_q[i].rid==rid
-  && (ring_q[i].fatal || ring head<tail pending)`. Clear → `StNext`.
-  Pending → park like `StWaitR`: the same FSM must keep draining rings,
-  so lift the stream into `park_q` with a new `is_sem` entry carrying the
-  rid, restore on resume, re-run the wait state.
-- **Park/resume extension**: `park_t` gains `is_sem` + `srid`; the
-  `park_take` scan adds a third predicate — `is_sem` resumes when
-  `!sem_pending(srid)` (bounded loop over `Rings`). `is_vq`/`wring` cases
-  unchanged. On resume the saved `st_q`/`depth_q` restore and the wait
-  state re-evaluates (satisfied → `StNext`, fatal ring seen meanwhile →
-  `StFatal`).
-- **Wire offsets**: confirm against `vn_golden.py::TransportModel.t_cmd`
-  and the generated `g6lc_apu_vn_pkg.sv` decode — import reads sem from
-  the tail u64 and `rid` as the last word; wait reads sem at record
-  words 4-5. Map these onto `tbuf[depth_q][...]` indices exactly as the
-  native model does (do not assume symmetric layout).
-- **Directed tb** (`tb_g6lc_apu_vnpump.sv`): hand-encode 0xF5/0xF6 wire
-  vectors beside the existing CRING* vectors; cover import-ok,
-  import-null-handle, import-bad-rid (ObjTab miss), wait-before-import,
-  wait-on-quiescent-resource, wait-blocked-then-drain, fatal-ring.
-- **Verification gate**: remote `ovh_calltorch` `tb_g6lc_apu_vnpump` +
-  synth leaf before claiming RTL evidence; record PASS/INCOMPLETE
-  honestly (simulator-PGO infra timeouts ≠ implementation failure).
+- **Ring resource id + cached tail**: `ring_t` gained `rid[31:0]` and a
+  `tail[31:0]` cache. `rid` is stored at `vkCreateRingMESA` from the
+  already-ObjTab-resolved `t_rid_q`; `tail` is refreshed in `StPollCap`
+  on every successful guest-tail read (`if (!mp_err_i)
+  ring_q[poll_q].tail <= mp_rd32`). The wait's pending predicate is
+  combinational (`tail > head`), so the last-polled tail must live in a
+  register — a not-yet-polled submission is correctly not yet visible.
+  `DestroyRing` clears `live`, dropping dead rings from the scan.
+- **Semaphore binding table**: bounded `sem_q[SEM_N=16]` of
+  `{valid, handle[63:0], rid[31:0]}`. `sem_of` finds a live binding,
+  `sem_slot` reuses a live handle's slot else claims the first free
+  slot (−1 when full), `sem_rid_of` returns the bound rid. Import of a
+  fresh handle into a full table faults.
+- **`vkImportSemaphoreResourceMESA` (0xF6)**: `StTrExec` reads the sem
+  handle and `resourceId` tail-relative to the decoded record
+  (`sem = {w[-2], w[-3]}`, `rid = w[-1]`, `cmd_words_q` = full record
+  length) and routes through `StOtReq`. `StOtCpl` `APU_OBJTAB_OK` proves
+  the resource is a live mapped blob (the native `blob_of` check);
+  `StOtDo` 0xF6 binds `{handle, rid}` and `StNext`. Null handle or ObjTab
+  miss faults — mirrors native import refusal.
+- **`vkWaitSemaphoreResourceMESA` (0xF5)**: `StTrExec` reads the sem
+  handle at record words 4-5 → `StWaitSem` (no ObjTab needed). Unknown
+  handle faults; `sem_wait_ready(rid)` scans rings for
+  `live && rid==rid && !fatal && tail>head` (pending) plus any fatal —
+  ready when `!pend || fat`. Pending parks the stream into `park_q`
+  with `is_sem=1, srid=rid` (execbuf slot `Rings`, or the ring slot for
+  ring streams) exactly like `StWaitR`, freeing the single FSM to keep
+  draining rings; fatal routes to `StFatal`; drained `StNext`.
+- **Park/resume extension**: `park_t` gained `is_sem` + `srid`; the two
+  existing park literals (`StWaitVq`, `StWaitR`) were updated. The
+  `park_take` scan adds the `is_sem` predicate. Because `is_sem` parks
+  only ever occupy the execbuf slot (`Rings`), the resource scan is
+  **hoisted** into a `sem_rdy` `always_comb` — nesting a `Rings`-loop
+  inside `park_take`'s `Rings`-loop exhausted the Yosys 4000-unroll
+  elaboration budget. On resume the saved `st_q`/`depth_q` restore and
+  the wait re-runs through `StDecFire`→`StWaitSem`, re-validating
+  (satisfied → `StNext`, fatal meanwhile → `StFatal`).
+- **Directed tb** (`tb_g6lc_apu_vnpump.sv`): hand-encoded 0xF5/0xF6 wire
+  vectors (`SEMIMP`, `SEMWAIT`, `SEMWAIT_UNK`, `SEMIMP_NULL`,
+  `SEMIMP_BADRID`) plus `WAITVQ64`/`SUBVQ64` seqno vectors, covering
+  import-ok (+`sem_q` white-box bind check), wait-before-import fault,
+  null-handle fault, bad-rid ObjTab fault, wait-on-quiescent success,
+  **park-then-drain-resume**, and fatal-ring fault. The pending case is
+  built deterministically: ringA is parked on an unsubmitted vqueue
+  seqno (cached `tail>head` while `parked`, FSM free) so the execbuf
+  wait is accepted and parks in `park_q[Rings]`; ringB's `SUBVQ64`
+  auto-drains (ring streams are not gated by `park_q[Rings]`), supplies
+  the seqno, ringA drains, and the wait resumes. White-box probes use
+  `dut.gen_on.*` (the `Enable` generate scope).
+- **Verification** (remote `ovh_calltorch`, unit leaf
+  `apu-leaf-20261107T074634-28482b5ab184`): `PASS
+  tb_g6lc_apu_vnpump cases=102 checks=308` — Verilator 5.008, `-Wall`,
+  width-clean after narrowing the tail-relative `tbuf` indices to the
+  6-bit `TBUF=40` index width. **Synth: `SYNTH OK Enable=0`.**
+  `Enable=1` fails at a **pre-existing** SLANG elaboration-unroll limit
+  (`tc_sram.sv:92` `proc_sram_init`, cumulative >4000) — reproduced
+  identically on the pre-change HEAD source, so it is a tooling/resource
+  ceiling of the full `vnpump_fixture` (front-end+objtab+mp_mem), not
+  introduced by this increment.
 
 ## Boundaries
 
-- The §6b pump RTL (`g6lc_apu_vnpump.sv`) still refuses both commands —
-  its `unique case` dispatch has no 0xF5/0xF6 arm and falls to
-  `StFatal`. That is the honest current state: wire admits, native
-  models, pump refuses pending the RTL increment. A semaphore binding
-  table plus ring-scan wait state in the pump is the queued follow-on.
 - Import does not validate that the VkSemaphore object exists (the
   transport layer does not own front-end objects) and does not bridge
   to generic Vulkan external-fence/semaphore fd paths — the protocol
   defines this as its own resource mechanism.
 - "Pending work" is defined over ring submissions on the bound blob
-  resource only; command-stream executions not tied to a ring are not
-  yet attributed to a semaphore resource.
-- Host-model evidence only. Zero capsets; no stock guest, CTS,
-  physical or silicon claim.
+  resource only, using the last-polled `tail` cache: a submission
+  published but not yet polled is invisible until the next `StPollCap`
+  refresh (bounded staleness, same window the ring scheduler itself
+  sees). Command-stream executions not tied to a ring are not yet
+  attributed to a semaphore resource.
+- The `Enable=1` Yosys screen is blocked by the pre-existing
+  `tc_sram` sim-init unroll ceiling described above; `Enable=0` passes.
+  This is a fixture-level tooling limit to resolve separately (vendor
+  `tc_sram` is tier-U and out of scope here).
+- Remote unit/synth leaf evidence only. Zero capsets; no stock guest,
+  CTS, physical or silicon claim.

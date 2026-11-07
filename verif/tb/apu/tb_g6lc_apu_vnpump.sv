@@ -613,6 +613,37 @@ module tb_g6lc_apu_vnpump
   // BADCMD: unknown command type (decode fault)
   localparam logic [31:0] BADCMD [4] = '{
     32'h0000dead, 32'h00000000, 32'h00000000, 32'h00000000};
+  // SEMIMP: vkImportSemaphoreResourceMESA sem=0x5000 -> resourceId=100
+  //   (RES_RING0 blob); sem u64 + rid u32 close the record
+  localparam logic [31:0] SEMIMP [12] = '{
+    32'h000000f6, 32'h00000000, 32'h20001002, 32'h00004000,
+    32'h00000001, 32'h00000000, 32'h3ba0a604, 32'h00000000,
+    32'h00000000, 32'h00005000, 32'h00000000, 32'h00000064};
+  // SEMWAIT: vkWaitSemaphoreResourceMESA sem=0x5000 (words 4-5)
+  localparam logic [31:0] SEMWAIT [6] = '{
+    32'h000000f5, 32'h00000000, 32'h20001002, 32'h00004000,
+    32'h00005000, 32'h00000000};
+  // SEMWAIT_UNK: wait on sem=0x6000 (never imported -> fault)
+  localparam logic [31:0] SEMWAIT_UNK [6] = '{
+    32'h000000f5, 32'h00000000, 32'h20001002, 32'h00004000,
+    32'h00006000, 32'h00000000};
+  // SEMIMP_NULL: import sem=0 -> fault; SEMIMP_BADRID: rid=999 unmapped
+  localparam logic [31:0] SEMIMP_NULL [12] = '{
+    32'h000000f6, 32'h00000000, 32'h20001002, 32'h00004000,
+    32'h00000001, 32'h00000000, 32'h3ba0a604, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000064};
+  localparam logic [31:0] SEMIMP_BADRID [12] = '{
+    32'h000000f6, 32'h00000000, 32'h20001002, 32'h00004000,
+    32'h00000001, 32'h00000000, 32'h3ba0a604, 32'h00000000,
+    32'h00000000, 32'h00005000, 32'h00000000, 32'h000003e7};
+  // WAITVQ64 seq=0x40 / SUBVQ64 seq=0x40 — park ringA on an
+  // unsubmitted vqueue seqno (its cached tail stays ahead of head
+  // while parked), then supply it from ringB's stream
+  localparam logic [31:0] WAITVQ64 [4] = '{
+    32'h000000fc, 32'h00000000, 32'h00000040, 32'h00000000};
+  localparam logic [31:0] SUBVQ64 [6] = '{
+    32'h000000fb, 32'h00000000, 32'h00000400, 32'h00000000,
+    32'h00000040, 32'h00000000};
 
   logic [31:0] wq [$];
 
@@ -1122,6 +1153,148 @@ module tb_g6lc_apu_vnpump
     cases++;
     check(apm[R1_BASE + 32] == ST_IDLE,
           "T22 IDLE survives heartbeat tick");
+
+    // ---- T23: external semaphore resource import/wait -----------------
+    // vkImportSemaphoreResourceMESA binds a semaphore handle to a blob
+    // resourceId (the ObjTab resolve proves a live mapped blob — the
+    // native blob_of check); vkWaitSemaphoreResourceMESA waits until no
+    // live ring on that resource holds unconsumed work or goes fatal.
+    // SEMIMP binds sem 0x5000 -> rid 100 (RES_RING0, page 0 / R0_BASE);
+    // SEMWAIT waits on 0x5000.  A pending wait parks the execbuf stream
+    // in park_q like a seqno wait while ring work drains.
+
+    // T23a: import binds the handle (ObjTab resolves rid 100)
+    wq = {};
+    for (int i = 0; i < 12; i++) wq.push_back(SEMIMP[i]);
+    xs_go(wq, 1'b0, "T23a import sem->rid100");
+    begin
+      automatic bit bound = 1'b0;
+      for (int i = 0; i < 16; i++)
+        if (dut.gen_on.sem_q[i].valid &&
+            dut.gen_on.sem_q[i].handle == 64'h5000 &&
+            dut.gen_on.sem_q[i].rid == 32'd100) bound = 1'b1;
+      cases++;
+      check(bound, "T23a sem_q bound 0x5000->rid100");
+    end
+
+    // T23b: wait on a never-imported semaphore -> fault
+    wq = {};
+    for (int i = 0; i < 6; i++) wq.push_back(SEMWAIT_UNK[i]);
+    xs_go(wq, 1'b1, "T23b wait unimported sem faults");
+
+    // T23c/d: import null semaphore / unmapped resourceId -> fault
+    wq = {};
+    for (int i = 0; i < 12; i++) wq.push_back(SEMIMP_NULL[i]);
+    xs_go(wq, 1'b1, "T23c import null sem faults");
+    wq = {};
+    for (int i = 0; i < 12; i++) wq.push_back(SEMIMP_BADRID[i]);
+    xs_go(wq, 1'b1, "T23d import unmapped rid faults");
+
+    // T23e: fresh ring on res=100 (ctx6, handle 0x100 — CRING0 geometry)
+    // drained/empty -> the wait succeeds immediately
+    apm[R0_BASE]      = 32'd0;    // head
+    apm[R0_BASE + 16] = 32'd0;    // tail
+    apm[R0_BASE + 32] = 32'd0;    // status
+    wq = {};
+    for (int i = 0; i < 35; i++) wq.push_back(CRING0[i]);
+    xs_goc(wq, 8'd6, 1'b0, "T23e create ring res100 ctx6");
+    cases++;
+    check(ring_active != '0, "T23e ring on rid100 live");
+    wq = {};
+    for (int i = 0; i < 6; i++) wq.push_back(SEMWAIT[i]);
+    xs_go(wq, 1'b0, "T23e wait on drained resource");
+
+    // T23f: pending ring work parks the wait; it resumes once drained.
+    // A live ring only shows tail>head to the wait while PARKED — an
+    // actively-draining ring holds the single FSM so no execbuf is
+    // accepted, and a not-yet-polled tail is not yet in the cache the
+    // wait scans.  Park ringA on an unsubmitted vqueue seqno (its
+    // cached tail stays ahead of head), let the execbuf wait park in
+    // park_q[Rings], then supply the seqno from ringB's stream: ringB
+    // auto-drains (ring streams are not gated by park_q[Rings]), the
+    // vq seqno lands, ringA resumes and drains, and the wait follows.
+    wq = {};
+    for (int i = 0; i < 4; i++) wq.push_back(WAITVQ64[i]);
+    ring_put(R0_BASE + 48, 0, wq, R0_BASE + 16, 16);
+    // ringB (rid102) is the seqno supplier — fresh window, ctx6
+    apm[R1_BASE]      = 32'd0;
+    apm[R1_BASE + 16] = 32'd0;
+    apm[R1_BASE + 32] = 32'd0;
+    wq = {};
+    for (int i = 0; i < 35; i++) wq.push_back(CRING1[i]);
+    xs_goc(wq, 8'd6, 1'b0, "T23f create ringB res102 ctx6");
+    begin
+      automatic int g = -1;
+      automatic int unsigned t;
+      for (int i = 0; i < Rings; i++)
+        if (dut.gen_on.ring_q[i].live && dut.gen_on.ring_q[i].rid == 32'd100)
+          g = i;
+      cases++;
+      check(g >= 0, "T23f rid100 ring slot found");
+      // ringA must park on the vq seqno: head frozen at 0 (the wait
+      // record is not consumed), cached tail ahead at 16
+      t = 0;
+      while (g >= 0 && !dut.gen_on.ring_q[g].parked && t < TMO)
+        begin @(posedge clk); t++; end
+      cases++;
+      check(g >= 0 && t < TMO && dut.gen_on.ring_q[g].head == 32'd0 &&
+            dut.gen_on.ring_q[g].tail == 32'd16,
+            "T23f ringA parked with pending tail");
+      // issue the wait asynchronously
+      for (int i = 0; i < 8; i++) gmem[GXW + i] = 32'h0;
+      for (int i = 0; i < 6; i++) gmem[GXW + 8 + i] = SEMWAIT[i];
+      xs_d[0] = '{addr: GXBUF, len: 32'd56, write: 1'b0, default: '0};
+      xs_d[1] = '0; xs_d[2] = '0; xs_d[3] = '0;
+      xs_n = 4'd1; xs_off = 32'd32;
+      xs_bytes = 32'd24; xs_ctx = 8'd4;
+      begin
+        automatic int unsigned s0 = xs_seen;
+        automatic int unsigned a0 = xs_acc;
+        @(negedge clk);
+        xs_v = 1'b1;
+        t = 0;
+        while (xs_acc == a0 && t < TMO) begin @(posedge clk); t++; end
+        check(t < TMO, "T23f wait stream accepted");
+        @(negedge clk);
+        xs_v = 1'b0;
+        // the wait must park while ringA holds unconsumed work
+        t = 0;
+        while (!(dut.gen_on.park_q[Rings].live &&
+                 dut.gen_on.park_q[Rings].is_sem &&
+                 dut.gen_on.park_q[Rings].srid == 32'd100) && t < TMO)
+          begin @(posedge clk); t++; end
+        cases++;
+        check(t < TMO, "T23f semaphore wait parked on pending work");
+        // supply the vq seqno from ringB -> ringA drains -> wait resumes
+        wq = {};
+        for (int i = 0; i < 6; i++) wq.push_back(SUBVQ64[i]);
+        ring_put(R1_BASE + 48, 0, wq, R1_BASE + 16, 24);
+        t = 0;
+        while (xs_seen == s0 && t < TMO) begin @(posedge clk); t++; end
+        check(t < TMO, "T23f parked wait resolves after drain");
+        check(!xs_fault, "T23f wait stream clean");
+        wait_ap(R0_BASE, 32'd16, "T23f ringA fully drained");
+        check(!dut.gen_on.park_q[Rings].live, "T23f park slot released");
+        t = 0;
+        while (!xs_rdy && t < TMO) begin @(posedge clk); t++; end
+        check(t < TMO, "T23f pump back to idle");
+      end
+    end
+
+    // T23g: a fatal ring on the bound resource fails the wait
+    wq = {};
+    for (int i = 0; i < 4; i++) wq.push_back(BADCMD[i]);
+    ring_put(R0_BASE + 48, 16, wq, R0_BASE + 16, 32);
+    begin
+      automatic int unsigned t = 0;
+      cases++;
+      while ((apm[R0_BASE + 32] & APU_VNRING_FATAL) == 0 && t < TMO)
+        begin @(posedge clk); t++; end
+      check(t < TMO, "T23g ring went FATAL on bad command");
+    end
+    wq = {};
+    for (int i = 0; i < 6; i++) wq.push_back(SEMWAIT[i]);
+    xs_go(wq, 1'b1, "T23g wait on fatal resource faults");
 
     if (errors == 0)
       $display("PASS tb_g6lc_apu_vnpump cases=%0d checks=%0d cycles=%0d",

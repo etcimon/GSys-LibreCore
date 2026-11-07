@@ -62,6 +62,20 @@ Repository-wide verification was stopped after its smoke script invoked shared
 cleanup; full compliance/boot/synthesis qualification remains incomplete. No
 QEMU, Linux block/PMEM/DAX or VirtIO conformance or physical-media qualification result is claimed here.
 
+## Storamic ST-036 - Block Address Boundaries
+
+The existing `vblk` stage includes thirteen additional backend boundary cases:
+high-sector IN/OUT, end-of-byte-space crossing, sector-sum overflow, successful
+last-sector OUT/IN, empty status buffers and invalid segment counts. Independent
+sparse byte memories and command counts check both values and absence of
+unintended side effects. The unchanged cases can replay against the original
+RTL with `+boundary_only=N`; six such cases reject the original implementation.
+The existing `vblk-formal` and `vblk-flush-formal` stages also check full-width
+byte extents and no DMA/store/flush effects for malformed tables. Remote
+positive collection is recorded separately in
+`g6lc_storamic/architecture/block-address-validation.md`; these checks do not
+promote native, Linux, physical persistence or ISA compliance.
+
 ## Storamic ST-025 - Component Evidence And CPU Boundary
 
 `run_origin.py` freezes source closures and runs profile/shim/queue/WT cache/
@@ -3381,8 +3395,20 @@ unmapped resource, null semaphore, pending/drained/fatal ring on the
 bound resource, other-resource ring not blocking) and LinearExecution
 (import+wait completes, never-imported/unmapped StreamFault, pending
 ring parks the task then completes after retire). Decoder admission is
-additive (types 245/246); RTL pump still StFatal-refuses pending the
-pump increment. No stock/hardware/CTS qualification.
+additive (types 245/246); RTL pump StFatal-refused pending the pump
+increment (now implemented — see below). No stock/hardware/CTS
+qualification.
+`architecture/uncore/apu-native-semaphore-resource-implementation.md`.
+
+RTL vnpump semaphore-resource execution (non-ISA):`tb_g6lc_apu_vnpump`
+PASS cases=102 checks=308 on remote `ovh_calltorch` (Verilator 5.008,
+-Wall width-clean); `SYNTH OK Enable=0`. Seven directed cases cover
+import-ok(+sem_q bind), wait-before-import, null-handle, bad-rid
+ObjTab, wait-on-quiescent, deterministic park→drain→resume (seqno-
+parked ringA + auto-draining ringB supplier), and fatal-ring fault.
+`Enable=1` synth blocked by a PRE-EXISTING `tc_sram.sv:92` sim-init
+unroll ceiling (>4000) reproduced on HEAD — fixture tooling limit, not
+this diff. Unit/synth leaf evidence only; no capset/stock/CTS/physical.
 `architecture/uncore/apu-native-semaphore-resource-implementation.md`.
 
 Native color clears/payload bounds (non-ISA):230 frozen checks pass30.925s,

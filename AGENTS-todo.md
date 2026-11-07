@@ -1,5 +1,21 @@
 # AGENTS workflow todo / pending-log
 
+## Storamic current correctness review
+
+- [x] Reassess non-hyp8 source against `completion-plan.md`; distinguish the
+  implemented model/policy/writer path from missing native providers and
+  physical/system qualification. Refresh the stale M0-only architecture summary.
+- [x] ST-036 backend correction: validate descriptor count/status extent and
+  sector-to-byte representability before side effects. Keep the last legal
+  sector usable. Frozen original RTL rejects six final-fixture boundary cases
+  and the safety proof; local repaired simulation passes 1,609 checks.
+- [ ] Collect the final remote block/device/writer/policy matrix and full-extent
+  proof, verify tool/source identities and synthesis, then record the bounded
+  result in `g6lc_storamic/architecture/block-address-validation.md`.
+- [ ] Resume fresh C0/C1 and native topology/provider dependencies from the
+  completion plan; hyp8/compiler progress does not close functional-core
+  qualification. Native checkpoint admission remains disabled.
+
 ## Storamic M0 foundation — selected gates pass, aggregate qualification open
 
 Approved first-party standalone memory/storage skeleton under `g6lc_storamic/`,
@@ -18441,6 +18457,30 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   concrete mechanism now scoped in the arch doc's "Pump RTL design"
   section (ring `rid` field, bounded `sem_tab`, ObjTab-reuse import arm,
   `is_sem` park/resume predicate).
+- [x] RTL vnpump semaphore-resource execution: `g6lc_apu_vnpump.sv`
+  now runs both commands. `ring_t` gained `rid` (stored at
+  CreateRing from ObjTab-resolved `t_rid_q`) + a `tail` cache refreshed
+  in `StPollCap`; bounded `sem_q[SEM_N=16]` `{valid,handle,rid}` table
+  with `sem_of`/`sem_slot`/`sem_rid_of`; `StTrExec` 0xF5→`StWaitSem`
+  (sem @ w4-5) and 0xF6→`StOtReq` (tail-relative sem/rid, 6-bit `TBUF`
+  index narrowing for Verilator width-clean); `StOtDo` 0xF6 binds after
+  `APU_OBJTAB_OK`. `StWaitSem`: unknown handle→`StFatal`, pending
+  non-fatal ring work on the bound rid→park into `park_q` (`is_sem`,
+  `srid`) freeing the FSM to drain, fatal→`StFatal`, drained→`StNext`.
+  `park_t` gained `is_sem`/`srid`; `sem_rdy` hoisted out of `park_take`'s
+  `Rings`-loop (is_sem only ever occupies the execbuf slot) to stay
+  under the Yosys 4000-unroll budget. Directed tb: SEMIMP/SEMWAIT/
+  UNK/NULL/BADRID vectors + WAITVQ64/SUBVQ64; deterministic
+  park-then-drain-resume via a seqno-parked ringA + auto-draining
+  ringB supplier; white-box `dut.gen_on.*` probes. Remote
+  `apu-leaf-20261107T074634-28482b5ab184`: `PASS
+  tb_g6lc_apu_vnpump cases=102 checks=308`, `SYNTH OK Enable=0`.
+  `Enable=1` synth fails at a PRE-EXISTING `tc_sram.sv:92`
+  sim-init unroll ceiling (>4000) — reproduced identically on
+  pre-change HEAD, a fixture-level tooling limit not introduced here.
+  Committed in the APU/Venus lane checkpoint (see git log for the
+  `APU/Venus: RTL vnpump semaphore-resource execution` commit); unit/
+  synth leaf evidence only, zero capsets.
 - [x] apu-leaf unit verdict collected
   (`apu-leaf-20261106T173600-891a56a947e1`, snapshot d0493ae878e8):
   INCOMPLETE — 12 leaves PASS including the changed modules
