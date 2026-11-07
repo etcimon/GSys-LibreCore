@@ -181,6 +181,10 @@ python3 $G --graphics-session ue_gpos_fsubocopy_1 1
 # instanced draw: vs_inst offsets clip-x by 0.4*gl_InstanceIndex-0.6,
 # instanceCount=4 — union coverage over 4 offset triangles, fs_flat
 python3 $G --graphics-session ue_gpos_inst_1 1
+# vertex-stage texture: vs_texlod samples a 1x1 uniform
+# COMBINED_IMAGE_SAMPLER (VERTEX stage) -> constant vcol -> fs_flat;
+# the sampler2d_fixed_vertex shape (device fence hang is guest-side)
+python3 $G --graphics-session ue_gpos_vtex_1 1
 
 # deferred-work and capacity arms
 python3 $G --compute-session ue_cpos_defer2_1  bufcopy_1 --variant defer2

@@ -10436,12 +10436,20 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # the gl_InstanceIndex builtin differs per instance)
         is_inst = 'inst' in gfx
         INST_N = 4
+        # vtex: vertex-stage texture — vs_texlod samples a 1x1 uniform
+        # COMBINED_IMAGE_SAMPLER at set0/binding0 (stageFlags VERTEX)
+        # and emits the constant texel colour as vcol; fs_flat keeps it
+        # -> the dEQP texture().*_vertex / sampler2d_fixed_vertex shape
+        # that never posted its fence on device.  pos passthrough keeps
+        # the base-triangle coverage; only the colour differs.
+        is_vtex = 'vtex' in gfx
         # vs_pos3/fs_vcol forward the vertex alpha into FS out; the
         # passthru/flat pair forces a=1 and cannot see a blend
         vs_spv = [w[0] for w in struct.iter_unpack(
             '<I', (spvd / ('vs_cts_vidx.spv' if is_vidx else
                           'vs_cts_pbvb.spv' if is_pts else
                           'vs_inst.spv' if is_inst else
+                          'vs_texlod.spv' if is_vtex else
                           'vs_pos3.spv' if is_blend or is_wide
                           else 'vs_passthru.spv')).read_bytes())]
         # fsubo: the FS reads its colour from a UBO bound at the GRAPHICS
@@ -10458,7 +10466,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             ('inst', 'pd', 'dev', 'queue', 'imem', 'img', 'view', 'rp',
              'fb', 'sm_vs', 'sm_fs', 'pl', 'gp', 'vmem', 'vb', 'vb2',
              'rmem', 'rb', 'cp', 'cb', 'fen', 'ib2',
-             'ubo', 'dsl', 'dp', 'ds', 'ds_src'))}
+             'ubo', 'dsl', 'dp', 'ds', 'ds_src',
+             'timg', 'tview', 'smp', 'tmem'))}
         RES_BLOB0 = 200
 
         CW = CH = 64                     # color attachment extent
@@ -10479,7 +10488,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         vb_words = []
         vb2_words = []
         for (vx_, vy_, _vz, _vw) in TRI:
-            if is_wide:
+            if is_vtex:
+                # {pos.xy @0, uv.xy @1} stride 16; uv is constant —
+                # the 1x1 texture makes the sampled colour uv-independent
+                vb_words += [f32b(vx_), f32b(vy_),
+                             f32b(0.5), f32b(0.5)]
+            elif is_wide:
                 vb_words += [f32b(vx_), f32b(vy_)]
                 vb2_words += [f32b(c) for c in COL]
             else:
@@ -10508,6 +10522,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # UNORM rounding boundary); R|G<<8|B<<16|A<<24
             tri_w = (204 | (13 << 8) | (13 << 16) | (207 << 24))
             clr_w = 0xFF33_3333
+        elif is_vtex:
+            # 1x1 texture texel RGBA8 = (200,80,160,255); fs_flat emits
+            # (vcol.rgb,1) -> framebuffer (200,80,160,255)
+            tri_w = (200 | (80 << 8) | (160 << 16) | (255 << 24))
+            clr_w = 0xFF00_0000
         else:
             tri_w = (51 | (102 << 8) | (153 << 16) | (255 << 24))
             clr_w = 0xFF00_0000          # clear (0,0,0,1) RGBA8
@@ -10682,16 +10701,20 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 pCreateInfo=st('VkDescriptorSetLayoutCreateInfo',
                     flags=0, bindingCount=1,
                     pBindings=[st('VkDescriptorSetLayoutBinding',
-                        binding=0, descriptorType=6,
+                        binding=0,
+                        descriptorType=1 if is_vtex else 6,
                         descriptorCount=2 if is_fsubocopy else 1,
-                        stageFlags=0x10, pImmutableSamplers=[])]),
+                        stageFlags=0x01 if is_vtex else 0x10,
+                        pImmutableSamplers=[])]),
                 pSetLayout=X['dsl'])),
-        ] if is_fsubo else []) + [
+        ] if (is_fsubo or is_vtex) else []) + [
             ('vkCreatePipelineLayout', dict(
                 device=X['dev'],
                 pCreateInfo=st('VkPipelineLayoutCreateInfo',
-                    flags=0, setLayoutCount=1 if is_fsubo else 0,
-                    pSetLayouts=[X['dsl']] if is_fsubo else [],
+                    flags=0,
+                    setLayoutCount=1 if (is_fsubo or is_vtex) else 0,
+                    pSetLayouts=[X['dsl']] if (is_fsubo or is_vtex)
+                    else [],
                     pushConstantRangeCount=0, pPushConstantRanges=[]),
                 pPipelineLayout=X['pl'])),
             ('vkCreateGraphicsPipelines', dict(
@@ -10717,7 +10740,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                             if is_wide else
                             [] if is_vidx else
                             [st('VkVertexInputBindingDescription',
-                                binding=0, stride=2 if is_pts else 24,
+                                binding=0,
+                                stride=2 if is_pts else
+                                16 if is_vtex else 24,
                                 inputRate=0)]),
                         vertexAttributeDescriptionCount=(
                             0 if is_vidx else 1 if is_pts else 2),
@@ -10731,7 +10756,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                             st('VkVertexInputAttributeDescription',
                                location=1,
                                binding=4 if is_wide else 0,
-                               format=109,
+                               format=103 if is_vtex else 109,
                                offset=0 if is_wide else 8)]),
                     pInputAssemblyState=st(
                         'VkPipelineInputAssemblyStateCreateInfo',
@@ -10933,6 +10958,76 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         srcSet=X['ds_src'], srcBinding=0, srcArrayElement=0,
                         dstSet=X['ds'], dstBinding=0, dstArrayElement=1,
                         descriptorCount=1)]))
+        if is_vtex:
+            # 1x1 RGBA8 sampled texture + NEAREST/CLAMP sampler bound as
+            # COMBINED_IMAGE_SAMPLER at set0/binding0, stageFlags VERTEX.
+            # Texels are pre-filled through the tmem blob (apw below);
+            # the uniform colour makes vcol constant so tri_w holds.
+            seg_a1 += [
+                ('vkAllocateMemory', dict(
+                    device=X['dev'],
+                    pAllocateInfo=st('VkMemoryAllocateInfo',
+                                     allocationSize=0x1000,
+                                     memoryTypeIndex=0, pNext=[]),
+                    pMemory=X['tmem'])),
+                ('vkCreateImage', dict(
+                    device=X['dev'],
+                    pCreateInfo=st('VkImageCreateInfo',
+                        flags=0, imageType=1, format=37,
+                        extent=st('VkExtent3D', width=1, height=1,
+                                  depth=1),
+                        mipLevels=1, arrayLayers=1, samples=1, tiling=0,
+                        usage=0x04, sharingMode=0,
+                        queueFamilyIndexCount=0,
+                        pQueueFamilyIndices=[], initialLayout=0),
+                    pImage=X['timg'])),
+                ('vkBindImageMemory', dict(
+                    device=X['dev'], image=X['timg'], memory=X['tmem'],
+                    memoryOffset=0)),
+                ('vkCreateImageView', dict(
+                    device=X['dev'],
+                    pCreateInfo=st('VkImageViewCreateInfo',
+                        flags=0, image=X['timg'], viewType=1, format=37,
+                        components=st('VkComponentMapping',
+                                      r=0, g=0, b=0, a=0),
+                        subresourceRange=st('VkImageSubresourceRange',
+                            aspectMask=1, baseMipLevel=0, levelCount=1,
+                            baseArrayLayer=0, layerCount=1)),
+                    pView=X['tview'])),
+                ('vkCreateSampler', dict(
+                    device=X['dev'],
+                    pCreateInfo=st('VkSamplerCreateInfo',
+                        flags=0, magFilter=0, minFilter=0, mipmapMode=0,
+                        addressModeU=2, addressModeV=2, addressModeW=2,
+                        mipLodBias=f32b(0.0), anisotropyEnable=0,
+                        maxAnisotropy=0, compareEnable=0, compareOp=0,
+                        minLod=f32b(0.0), maxLod=f32b(0.0),
+                        borderColor=0, unnormalizedCoordinates=0),
+                    pSampler=X['smp'])),
+                ('vkCreateDescriptorPool', dict(
+                    device=X['dev'],
+                    pCreateInfo=st('VkDescriptorPoolCreateInfo',
+                        maxSets=1, poolSizeCount=1,
+                        pPoolSizes=[st('VkDescriptorPoolSize',
+                                       type=1, descriptorCount=1)]),
+                    pDescriptorPool=X['dp'])),
+                ('vkAllocateDescriptorSets', dict(
+                    device=X['dev'],
+                    pAllocateInfo=st('VkDescriptorSetAllocateInfo',
+                        descriptorPool=X['dp'], descriptorSetCount=1,
+                        pSetLayouts=[X['dsl']]),
+                    pDescriptorSets=[X['ds']])),
+                ('vkUpdateDescriptorSets', dict(
+                    device=X['dev'], descriptorWriteCount=1,
+                    pDescriptorWrites=[st('VkWriteDescriptorSet',
+                        dstSet=X['ds'], dstBinding=0, dstArrayElement=0,
+                        descriptorCount=1, descriptorType=1,
+                        pImageInfo=[st('VkDescriptorImageInfo',
+                            sampler=X['smp'], imageView=X['tview'],
+                            imageLayout=0)],
+                        pTexelBufferView=[], pBufferInfo=[])],
+                    descriptorCopyCount=0, pDescriptorCopies=[])),
+            ]
         run_batches(compile_cmds(seg_a1))
 
         # vmem blob contents: vb words at 0, vb2 at 0x800 (wide); the
@@ -10967,6 +11062,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             base_b = map_blob(rid)
             if init is not None:
                 apw(base_b, init)
+        if is_vtex:
+            # 1x1 RGBA8 texel at tmem+0 — the sampled colour (tri_w)
+            base_t = create_blob_mem(RES_BLOB0 + 3, 0x1000, X['tmem'])
+            assert base_t is not None, 'texture memory blob refused'
+            base_t = map_blob(RES_BLOB0 + 3)
+            apw(base_t, [tri_w])
 
         seg_a2 = [
             ('vkBeginCommandBuffer', dict(
@@ -10997,7 +11098,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 layout=X['pl'], firstSet=0, descriptorSetCount=1,
                 pDescriptorSets=[X['ds']], dynamicOffsetCount=0,
                 pDynamicOffsets=[])),
-        ] if is_fsubo else []) + [
+        ] if (is_fsubo or is_vtex) else []) + [
             ('vkCmdBindVertexBuffers', dict(
                 commandBuffer=X['cb'], firstBinding=0,
                 bindingCount=5 if is_wide else 1,
@@ -11111,8 +11212,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                              descriptorPool=X['dp'])),
             ('vkDestroyDescriptorSetLayout', dict(
                 device=X['dev'], descriptorSetLayout=X['dsl'])),
+        ] if (is_fsubo or is_vtex) else []) + ([
             ('vkDestroyBuffer', dict(device=X['dev'], buffer=X['ubo'])),
-        ] if is_fsubo else []) + [
+        ] if is_fsubo else []) + ([
+            ('vkDestroyImageView', dict(device=X['dev'],
+                                        imageView=X['tview'])),
+            ('vkDestroySampler', dict(device=X['dev'], sampler=X['smp'])),
+            ('vkDestroyImage', dict(device=X['dev'], image=X['timg'])),
+            ('vkFreeMemory', dict(device=X['dev'], memory=X['tmem'])),
+        ] if is_vtex else []) + [
             ('vkFreeMemory', dict(device=X['dev'], memory=X['vmem'])),
             ('vkDestroyPipeline', dict(device=X['dev'],
                                        pipeline=X['gp'])),

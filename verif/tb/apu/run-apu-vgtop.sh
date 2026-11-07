@@ -87,7 +87,7 @@ ue_cneg_badfmt_1 ue_cneg_viewoob_1 ue_cneg_kindmix_1 \
 ue_cneg_xfer_img_oob_1 ue_cneg_unnorm_1 \
 ue_cpos_blit_id_1 ue_cneg_blit_scaled_1 ue_cpos_xfer_big_1 \
 ue_cpos_dcopy_bufcopy_1 ue_cpos_dcopy_descarr_1 ue_cpos_dcopy_multiset_1 \
-ue_gpos_fsubo_1 ue_gpos_fsubocopy_1 ue_gpos_inst_1 \
+ue_gpos_fsubo_1 ue_gpos_fsubocopy_1 ue_gpos_inst_1 ue_gpos_vtex_1 \
 ue_cpos_clear_rgba8_1 ue_cpos_clear_r32f_1 ue_cpos_clear_r32u_1 \
 ue_cpos_clear_srgb_1 ue_cpos_clear_rgba16f_1 \
 ue_cneg_clear_oob_1 ue_cpos_ctxkill_reuse_1 \
