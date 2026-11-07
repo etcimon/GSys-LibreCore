@@ -230,6 +230,38 @@ SEGMENT G3b-ii/compute
                   was already advertised (e1a3e3c4e).
 ```
 
+Mechanism note (2026-11-07, image texel-pointer + atomics — the last
+compute CTS item, `image_atomic_op_local_size_{1,8}`): the split is
+RTL-done / tooling-owed.  **RTL already implements it:**
+`g6lc_apu_shwave` decodes opcode 60 (`OpImageTexelPointer`, operands
+img/coord/sample) for storage-image (descriptor kind 3) r32ui/r32i
+atomics only.  **The gate is host tooling, in two layers:**
+(1) `spirv_scan` rejects the module at commit — `SC['IMAGE']` (11) is
+absent from `SC_OK`, so `OpTypePointer Image` (opcode 32) raises
+`FAULT STORAGE` (the exact `COMMIT FAULT STORAGE opcode=32` seen on the
+glslang-compiled CTS idiom), and opcode 60 is not in the `OP` table at
+all (the table jumps `Variable=59`→`Load=61`).  (2) `spirv_model`
+has no opcode-60 handler and its atomic path (`ATOMOPS`, opcode
+227-242) does only linear `self.lsu()` RMW — an image-texel pointer
+needs a parallel image-RMW route.  **The model already has every
+texel-access primitive** the atomic needs: `img_rec(ptr)` resolves the
+descriptor record `{base,size,kind,flags,meta}`, `img_walk(meta,lod)`
+yields per-mip `{mof,pitch,w,h}`, and int-coord ops (fetch 95 / read
+98 / write 99) compute `ta = base + ly*layb + mof + iv*pitch +
+iu*bpp` then `tx_store`/`tx_finish`.  **Implementation path:**
+scanner — admit `SC['IMAGE']` into `SC_OK`, add opcode 60 to `OP` +
+decode `{ptr-result, id, image, coord, sample}` with a texel-pointer
+type row, emit the commit-table entries shmod needs; model — opcode
+60 produces a texel-pointer value carrying `{image-rec, iu, iv, ly,
+lod}` (the pointer word-image needs a richer encoding than the
+`{storage,binding}`/`index` descriptor-pointer form `img_rec`
+currently decodes, or a side-table keyed by result-id), and the
+atomic path detects that encoding to run read→`atomic_op`→`tx_store`
+through the same bounds/format decode as `OpImageWrite`; then a
+storage-image `imageAtomic*` corpus shader (`r32ui`), `.exp`
+oracle+model, and a `ue_cpos_*` session through `tb_g6lc_apu_vgtop`.
+Evidence boundary unchanged: host-model + directed-RTL-sim only.
+
 Root-cause note (2026-11-07, COMPUTE-H1 / COMPUTE-X2): the spec-constant
 path is decoded end-to-end; the constant *application* is now modelled on
 the golden side and remains RTL-side.  **Model/golden:**
