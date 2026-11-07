@@ -18111,13 +18111,18 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   a constant texel at the FragCoord-derived coordinate; aperture bytes under
   the bound image confirm covered texels became red while uncovered kept
   their pattern - first end-to-end exercise of the kind-3 `GfxMemory` write
-  admission.  Remote cohorts `native-gfximg-01` 720 + `native-gfximgpix-01`
-  721 + `native-gfximgstore-01` 722 checks PASS (native-execution.y6y3xap5 /
-  .nssux4bd / .5axy_z9z, sources_unchanged true), local `test_vn_*` 737 PASS.
-  Record: `architecture/uncore/
+  admission.  Vertex-stage image reads proven by
+  `test_vn_graphics_shade.test_image_descriptor_fetch_reaches_position_w`
+  (vs_image_program: OpImageFetch at constant ivec2 folds texel.x into
+  Position.w of every vary record); the VS path needs no separate scan gate
+  since `ShadeRuntime` shares `resolve_bindings`.  Remote cohorts
+  `native-gfximg-01` 720 + `native-gfximgpix-01` 721 + `native-gfximgstore-01`
+  722 + `native-gfxvsimg-01` 723 checks PASS (native-execution.y6y3xap5 /
+  .nssux4bd / .5axy_z9z / .n8_r1ss2, sources_unchanged true), local
+  `test_vn_*` 738 PASS.  Record: `architecture/uncore/
   apu-native-graphics-shade-implementation.md`.
-- [ ] Combined/separate image kinds + sampler-bearing sampling, VS image
-  descriptors, in-model dynamic offsets, blend/depth/MRT, helper
+- [ ] Combined/separate image kinds + sampler-bearing sampling, in-model
+  dynamic offsets, blend/depth/MRT, helper
   lanes, non-triangle topology, flat/nopersp interpolation,
   multi-descriptor/multi-stage end-to-end draws and capability/CTS/physical
   gates before any capset or stock vkCmdDraw* advertisement; host-model

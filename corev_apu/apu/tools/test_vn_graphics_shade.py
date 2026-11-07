@@ -7,6 +7,7 @@ import unittest
 import test_vn_transfers as transfer_fixture
 from vn_compute import ShaderBinding
 from vn_graphics_fetch import ATTR_STRIDE, Fetch
+from vn_image_operands import ImageBinding
 from vn_graphics_shade import Shade
 from vn_transfer_executor import Transfer
 from vn_vertex_operands import BufferOperand
@@ -76,6 +77,74 @@ def vs_program(desc=False, ubo=False):
         emit(61, 6, 35, 39)         # ui  = Load int %39
         emit(111, 3, 36, 35)        # uf  = ConvertSToF ui
     emit(80, 5, 27, 25, 26, 19, 36 if ubo else 20)  # pos4=(x,y,.5,ubo|1)
+    emit(62, 14, 27)                # Store glpos pos4
+    emit(61, 5, 28, 12)             # c   = Load v4f col
+    emit(61, 6, 29, 13)             # vi  = Load int vidx
+    emit(111, 3, 30, 29)            # vf  = ConvertSToF vi
+    emit(81, 3, 31, 28, 0)          # c0
+    emit(81, 3, 32, 28, 1)          # c1
+    emit(81, 3, 33, 28, 2)          # c2
+    emit(80, 5, 34, 31, 32, 33, 30) # vc = (c0,c1,c2,vf)
+    emit(62, 15, 34)                # Store vcol vc
+    emit(253)                       # Return
+    emit(56)                        # FunctionEnd
+    return tuple(words)
+
+
+def vs_image_program(binding=0, coord=(1, 1)):
+    """Vertex module fetching a texel from a SAMPLED_IMAGE (kind 2)
+    UNIFORMCONST descriptor via OpImageFetch at a constant ivec2 and folding
+    the decoded first channel into Position.w so the vertex-stage image read
+    is observable in the vary records (mirrors vs_program's ubo path)."""
+    words = [0x07230203, 0x00010300, 0, 48, 0]
+
+    def emit(opcode, *values):
+        words.extend(((len(values) + 1) << 16 | opcode, *values))
+
+    emit(17, 1)                     # OpCapability Shader
+    emit(14, 0, 1)                  # OpMemoryModel Logical GLSL450
+    emit(15, 0, 22, 0x6E69616D, 0, 11, 12, 13, 14, 15)  # EntryPoint Vertex %22 main
+    emit(71, 11, 30, 0)             # pos   Location 0
+    emit(71, 12, 30, 1)             # col   Location 1
+    emit(71, 15, 30, 0)             # vcol  Location 0
+    emit(71, 13, 11, 42)            # vidx  BuiltIn VertexIndex
+    emit(71, 14, 11, 0)             # glpos BuiltIn Position
+    emit(71, 17, 34, 0)             # img   DescriptorSet 0
+    emit(71, 17, 33, binding)       # img   Binding N
+    emit(19, 1)                     # %1 void
+    emit(33, 2, 1)                  # %2 fnty
+    emit(22, 3, 32)                 # %3 float
+    emit(23, 4, 3, 2)               # %4 v2f
+    emit(23, 5, 3, 4)               # %5 v4f
+    emit(21, 6, 32, 1)              # %6 int
+    emit(23, 40, 6, 2)              # %40 ivec2
+    emit(25, 41, 3, 1, 0, 0, 0, 1, 0)  # %41 image2D sampled (kind 2)
+    emit(32, 7, 1, 4)               # %7  ptr Input v2f
+    emit(32, 8, 1, 5)               # %8  ptr Input v4f
+    emit(32, 9, 1, 6)               # %9  ptr Input int
+    emit(32, 10, 3, 5)              # %10 ptr Output v4f
+    emit(32, 42, 0, 41)             # %42 ptr UniformConstant image
+    emit(59, 7, 11, 1)              # pos
+    emit(59, 8, 12, 1)              # col
+    emit(59, 9, 13, 1)              # vidx
+    emit(59, 10, 14, 3)             # glpos
+    emit(59, 10, 15, 3)             # vcol
+    emit(59, 42, 17, 0)             # img (UniformConstant)
+    emit(43, 3, 18, 0)              # f0
+    emit(43, 3, 19, 0x3F000000)     # f0.5
+    emit(43, 6, 21, 0)              # i0
+    emit(43, 6, 44, coord[0])       # ix
+    emit(43, 6, 45, coord[1])       # iy
+    emit(44, 40, 46, 44, 45)        # %46 = ivec2(ix, iy)
+    emit(54, 1, 22, 0, 2)           # main()
+    emit(248, 23)                   # label
+    emit(61, 4, 24, 11)             # p   = Load v2f pos
+    emit(81, 3, 25, 24, 0)          # x   = p.x
+    emit(81, 3, 26, 24, 1)          # y   = p.y
+    emit(61, 41, 47, 17)            # %47 = Load image %17
+    emit(95, 5, 48, 47, 46)         # %48 = ImageFetch %47 %46 -> v4f
+    emit(81, 3, 49, 48, 0)          # %49 = texel.x
+    emit(80, 5, 27, 25, 26, 19, 49) # pos4=(x,y,.5,texel.x)
     emit(62, 14, 27)                # Store glpos pos4
     emit(61, 5, 28, 12)             # c   = Load v4f col
     emit(61, 6, 29, 13)             # vi  = Load int vidx
@@ -188,6 +257,32 @@ class ShadeTests(unittest.TestCase):
             self.executor.enqueue(self.context, [
                 Shade(self.fetch(count=3), vs_program(ubo=True),
                       bindings=(wrong_set,))])
+
+    def test_image_descriptor_fetch_reaches_position_w(self):
+        # vertex-stage image fetch: a SAMPLED_IMAGE (kind 2) UNIFORMCONST
+        # descriptor is fetched at constant ivec2(1,1); the decoded first
+        # channel lands in Position.w of every vary record.
+        did = self.e.golden.img_fmt_id(self.e.model, 37)
+        pitch = self.e.golden.img_mpitch(self.e.model, 8, did, 0)
+        size = pitch * 4
+        off = 2048
+        # texel (1,1) -> image row 1, col 1: base + pitch + bpp
+        self.aperture.write(self.owner.base + off + pitch + 4,
+                            bytes((200, 30, 60, 255)))
+        binding = ImageBinding(self.owner, off, size, 8, 4, pitch, did, 0,
+                               2, (0, 0), 0, 0, 0)
+        job = self.executor.enqueue(self.context, [
+            Shade(self.fetch(count=3), vs_image_program(coord=(1, 1)),
+                  bindings=(binding,))])
+        runtime = job.runtimes[0]
+        self.drain()
+        self.assertEqual(job.state, 'done')
+        vary = bytes(runtime.vary)
+        self.assertEqual(len(vary), 3 * ATTR_STRIDE)
+        want = f32bits(200.0 / 255.0)
+        for i in range(3):
+            words = struct.unpack_from('<36I', vary, i * ATTR_STRIDE)
+            self.assertIn(want, set(words))
 
     def test_indexed_fetch_feeds_vertex_index_builtin(self):
         # indices {0,1,2} at firstIndex=0 -> VertexIndex = index value

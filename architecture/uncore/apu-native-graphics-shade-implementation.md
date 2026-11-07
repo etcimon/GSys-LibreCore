@@ -120,7 +120,11 @@ admits writes only for storage images (kind 3) alongside SSBO (kind 7).
 Shader-side admission maps `UNIFORMCONST` storage to the bound image
 (set,binding) pairs and `UNIFORM`/`SBUF` to buffer pairs; `UNIFORMCONST`
 reached the fragment stage through `_fragment_scan` and the eager
-`resolve_bindings` probe in `DrawExecRuntime`.
+`resolve_bindings` probe in `DrawExecRuntime`.  The vertex stage needs no
+separate scan gate: `ShadeRuntime` calls the same `resolve_bindings`, so a
+`vs_image_program` module (OpTypeImage sampled=1, OpImageFetch at a constant
+ivec2, texel.x folded into Position.w) proves vertex-stage image reads land
+in the vary records (`test_image_descriptor_fetch_reaches_position_w`).
 
 Evidence: `test_vn_graphics_draw_replay` gained three image draws -
 `test_fragment_sampled_image_fetch_reaches_framebuffer` (constant ivec2
@@ -133,9 +137,10 @@ image are checked - covered texels become red while uncovered keep their
 pattern).  The fetch draws prove each covered framebuffer texel equals its
 own (x,y)-encoded image texel; the store draw proves the previously
 unexercised kind-3 `GfxMemory` write admission end-to-end.  Local
-`test_vn_*` sweep 737 PASS.  Frozen native cohorts on ovh_calltorch:
+`test_vn_*` sweep 738 PASS.  Frozen native cohorts on ovh_calltorch:
 `native-gfximg-01` 720 tests PASS in 20.465 s (`native-execution.y6y3xap5`),
 `native-gfximgpix-01` 721 tests PASS in 20.582 s
-(`native-execution.nssux4bd`), and `native-gfximgstore-01` 722 tests PASS in
-21.914 s (`native-execution.5axy_z9z`), all `sources_unchanged: true`.
-Host-native model only - no RTL/CTS/stock/hardware qualification.
+(`native-execution.nssux4bd`), `native-gfximgstore-01` 722 tests PASS in
+21.914 s (`native-execution.5axy_z9z`), and `native-gfxvsimg-01` 723 tests
+PASS in 20.500 s (`native-execution.n8_r1ss2`), all `sources_unchanged:
+true`.  Host-native model only - no RTL/CTS/stock/hardware qualification.
