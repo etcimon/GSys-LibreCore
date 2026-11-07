@@ -64,7 +64,7 @@ ue_cpos_composite_1 ue_cpos_intmix_1 ue_cpos_localsize32_1 \
 ue_cpos_localsize64_1 ue_cpos_localsize128_1 ue_cpos_math450_1 ue_cpos_math450_2 \
 ue_cpos_math450_3 ue_cpos_oob_1 ue_cpos_pushscale_1 \
 ue_cpos_vec4arith_1 \
-ue_cpos_loopfor_1 ue_cpos_barrier_reduce_1 \
+ue_cpos_loopfor_1 ue_cpos_barrier_reduce_1 ue_cpos_barrier_reduce128_1 \
 ue_cpos_loopfor_opt_1 ue_cpos_barrier_reduce_opt_1 \
 ue_cpos_descarr_1 ue_cpos_multiset_1 ue_cpos_arroob_1 \
 ue_cneg_badmod_1 ue_cneg_modgone_1 ue_cneg_lostbuf_1 \

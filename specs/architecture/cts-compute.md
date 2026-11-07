@@ -213,14 +213,21 @@ SEGMENT G3b-ii/compute
                   fails deterministically solo — unexplained
                   ordering/state dependence, flagged for a dedicated pass.
                   3 cases unrecorded due to the abort (above).
-  NEXT ARTIFACT   image texel-pointer + atomics (2 Fails), COMPUTE-H3
-                  128-inv groups (1 Fail), rerun for the 3 unrecorded
-                  cases.  ~~COMPUTE-H1 spec constants~~ closed 2026-11-07
-                  (`specconst` corpus + `specconst_{1,2,3}` decoupled
-                  vectors + `apu-vn-specok2` override→41 PASS both
-                  latencies; first-class `spec` DESC field in
-                  `shader_vectors.py`); ~~G3b-iii DispatchIndirect~~
-                  implemented — `ue_cpos_dispind_1` PASS-COMPUTE g1=48.
+  NEXT ARTIFACT   image texel-pointer + atomics (2 Fails), rerun for
+                  the 3 unrecorded cases.  ~~COMPUTE-H1 spec constants~~
+                  closed 2026-11-07 (`specconst` corpus +
+                  `specconst_{1,2,3}` decoupled vectors +
+                  `apu-vn-specok2` override→41 PASS both latencies;
+                  first-class `spec` DESC field in `shader_vectors.py`);
+                  ~~G3b-iii DispatchIndirect~~ implemented —
+                  `ue_cpos_dispind_1` PASS-COMPUTE g1=48; ~~COMPUTE-H3
+                  128-inv groups~~ closed 2026-11-07 — `localsize128`
+                  (16 waves × 8 lanes = MaxWaves) + `barrier_reduce128`
+                  (cross-wave `OpControlBarrier` tree-reduce, the
+                  branch_past_barrier/max_local_size shape) both
+                  PASS-COMPUTE under zero-jitter AND randomized
+                  memory latency; `maxComputeWorkGroupInvocations=128`
+                  was already advertised (e1a3e3c4e).
 ```
 
 Root-cause note (2026-11-07, COMPUTE-H1 / COMPUTE-X2): the spec-constant

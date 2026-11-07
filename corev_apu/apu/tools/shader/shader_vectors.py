@@ -486,6 +486,11 @@ DESC = {
                            bindings=[(0, 0, 32, 0), (0, 1, 32, 1)]),
     'barrier_reduce': dict(groups=(1, 1, 1), fmt='i', push=0, cf=True,
                            bindings=[(0, 0, 64, 0), (0, 1, 128, 1)]),
+    # COMPUTE-H3 cross-wave barrier: local_size_x=128 tree-reduces 128
+    # shared words through OpControlBarrier across all 16 waves —
+    # the branch_past_barrier / max_local_size CTS shape.
+    'barrier_reduce128': dict(groups=(1, 1, 1), fmt='i', push=0, cf=True,
+                              bindings=[(0, 0, 128, 0), (0, 1, 256, 1)]),
     'matvec':       dict(groups=(1, 1, 1), fmt='f', push=0, cf=False,
                          bindings=[(0, 0, 128, 0), (0, 1, 128, 1)]),
     'matmat':       dict(groups=(1, 1, 1), fmt='f', push=0, cf=False,
