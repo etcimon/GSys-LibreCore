@@ -262,8 +262,13 @@ compare sampler (compareEnable=1, compareOp=3 LESS_OR_EQUAL);
 f_dcmp(ref16,depth16)=ref<=depth true -> 1.0 -> white) and
 `test_fragment_dref_sample_compare_false` (ref=0.5 -> false -> 0.0 ->
 black) prove the compare discriminates rather than returning a
-constant.  Explicit-LOD/projective/dref-gather forms, PCF, and the
-blend/depth/MRT writeback axis stay queued.
+constant.  The projective dref form (opcode 93) is likewise proven:
+`fs_dref_program(proj=True)` swaps the vec2 coordinate for a vec3
+(u,v,d) the model perspective-divides before the compare, and
+`test_fragment_dref_projective_sample` exercises that vec3-coordinate
+dref operand path end-to-end.  Explicit-LOD (90), explicit-projective
+(94), dref-gather (97), PCF, and the blend/depth/MRT writeback axis
+stay queued.
 
 Evidence: `test_vn_graphics_draw_replay` gained nine image draws -
 `test_fragment_sampled_image_fetch_reaches_framebuffer` (constant ivec2
@@ -307,7 +312,10 @@ w=[1,2,1] NDC-preserved -> persp 11.613 vs nopersp 11.875),
 89 over a D16_UNORM depth image + LESS_OR_EQUAL compare sampler,
 depth=0.25 ref=0.1 -> ref<=depth true -> 1.0 -> white) and
 `test_fragment_dref_sample_compare_false` (same image, ref=0.5 -> false
--> 0.0 -> black, proving the compare discriminates),
+-> 0.0 -> black, proving the compare discriminates) and
+`test_fragment_dref_projective_sample` (OpImageSampleDrefProjImplicitLod
+opcode 93, vec3 coord (0.6,0.7,2.0) perspective-divided before the
+compare -> white),
 plus
 `test_fragment_storage_image_write` (a STORAGE_IMAGE kind 3 bound via
 `OpTypeImage(sampled=2)`; `OpImageWrite` stores a constant red texel at the
@@ -324,9 +332,12 @@ coord.xy/d perspective divide; the flat draw proves the FS-Input
 interpolation qualifier now reaches the raster varying path, and the
 nopersp pair proves the NoPerspective decoration->mask capture plus the
 screen-space (non-perspective) interpolation arm, and the dref pair
-proves the depth-format admission plus the compare-enable sampler path
+plus projective-dref draw prove the depth-format admission, the
+compare-enable sampler path, and the vec3-coordinate dref operand path
 end-to-end.  Local
-`test_vn_*` sweep ran 756 tests, all green.  Frozen native
+`test_vn_*` sweep ran 757 tests (the graphics/draw modules all green;
+8 unrelated `test_vn_native_bridge`/`test_vn_submit` subprocess
+timeouts under full-suite load that pass in isolation).  Frozen native
 cohorts on ovh_calltorch:
 `native-gfximg-01` 720 tests PASS in 20.465 s (`native-execution.y6y3xap5`),
 `native-gfximgpix-01` 721 tests PASS in 20.582 s
@@ -351,6 +362,7 @@ tests PASS in 20.0 s (`native-execution.aaadxsp4`), and
 PASS in 21.6 s (`native-execution.hwuix8zk`), and `native-gfxnopersp-01`
 739 tests PASS in 20.1 s (`native-execution.5ntfmy6r`), and
 `native-gfxdref-01` 741 tests PASS in 20.3 s
-(`native-execution.0pobswnb`), all
+(`native-execution.0pobswnb`), and `native-gfxdrefproj-01` 742 tests
+PASS in 19.0 s (`native-execution.agdmditl`), all
 `sources_unchanged: true`.
 Host-native model only - no RTL/CTS/stock/hardware qualification.

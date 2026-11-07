@@ -18246,8 +18246,13 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   `test_fragment_dref_sample_compare_false` (ref=0.5 -> false -> 0.0 ->
   black) prove the compare discriminates.  Cohort `native-gfxdref-01`
   741 PASS (`native-execution.0pobswnb`, sources_unchanged true).
-- [ ] Remaining dref forms (explicit-LOD opcode 90, projective 93/94,
-  dref-gather 97), PCF/bilinear compare, blend/depth/MRT, helper
+- [x] Depth-reference projective sample (opcode 93): `fs_dref_program
+  (proj=True)` swaps the vec2 coord for a vec3 (u,v,d) the model
+  perspective-divides before the compare; `test_fragment_dref_
+  projective_sample` (u=0.6 v=0.7 d=2.0 ref=0.1 over uniform depth=0.25
+  -> 1.0 -> white) exercises the vec3-coordinate dref operand path e2e.
+- [ ] Remaining dref forms (explicit-LOD opcode 90, dref-gather 97),
+  PCF/bilinear compare, blend/depth/MRT, helper
   lanes, non-triangle topology, end-to-end NoPerspective draw (needs a
   w-varying vertex shader),
   multi-descriptor/multi-stage end-to-end draws and capability/CTS/physical

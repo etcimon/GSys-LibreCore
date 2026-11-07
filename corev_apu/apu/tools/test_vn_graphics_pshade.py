@@ -265,19 +265,23 @@ def fs_sample_program(binding=0, u=0.3125, v=0.375, implicit=False,
     return tuple(words)
 
 
-def fs_dref_program(binding=0, u=0.5, v=0.5, ref=0.5):
+def fs_dref_program(binding=0, u=0.5, v=0.5, ref=0.5, proj=False, d=2.0):
     """Fragment module depth-reference sampling a COMBINED_IMAGE_SAMPLER
-    (kind 1) via OpImageSampleDrefImplicitLod (opcode 89) at a constant
-    normalized vec2 coordinate and scalar float reference, writing the
-    scalar compare fraction broadcast to vec4 color(loc0).  The model's
-    dref operand order is ResultType(float), ResultId, SampledImage,
-    Coordinate(vec2), Dref(float id), [ImageOperands mask].  With wc=6 the
-    mask slot is absent, so nva=3 and the reference lands at va[2]->ref16.
-    The OpTypeImage Depth field is set to 1 (depth image)."""
+    (kind 1) via OpImageSampleDrefImplicitLod (opcode 89) - or, with
+    proj=True, OpImageSampleDrefProjImplicitLod (opcode 93) - at a
+    constant normalized coordinate and scalar float reference, writing
+    the scalar compare fraction broadcast to vec4 color(loc0).  The
+    model's dref operand order is ResultType(float), ResultId,
+    SampledImage, Coordinate, Dref(float id), [ImageOperands mask].  With
+    wc=6 the mask slot is absent, so nva=3 and the reference lands at
+    va[2]->ref16.  proj=True swaps the vec2 coord for a vec3 (u,v,d) the
+    model perspective-divides before the compare.  The OpTypeImage Depth
+    field is set to 1 (depth image)."""
     import struct as _st
     ub = _st.unpack('<I', _st.pack('<f', u))[0]
     vb = _st.unpack('<I', _st.pack('<f', v))[0]
     rb = _st.unpack('<I', _st.pack('<f', ref))[0]
+    db = _st.unpack('<I', _st.pack('<f', d))[0]
     words = [0x07230203, 0x00010300, 0, 48, 0]
 
     def emit(opcode, *values):
@@ -295,6 +299,8 @@ def fs_dref_program(binding=0, u=0.5, v=0.5, ref=0.5):
     emit(22, 3, 32)                 # %3 float
     emit(23, 4, 3, 4)               # %4 v4f
     emit(23, 5, 3, 2)               # %5 v2f
+    if proj:
+        emit(23, 52, 3, 3)          # %52 = v3f (projective coord)
     emit(25, 13, 3, 1, 1, 0, 0, 1, 0)  # %13 image2D DEPTH sampled
     emit(27, 40, 13)                # %40 = OpTypeSampledImage %13 (kind 1)
     emit(32, 14, 0, 40)             # %14 = ptr UniformConstant SIMG
@@ -303,12 +309,16 @@ def fs_dref_program(binding=0, u=0.5, v=0.5, ref=0.5):
     emit(59, 14, 17, 0)             # %17 img (UniformConstant)
     emit(43, 3, 18, ub)             # %18 = float u
     emit(43, 3, 19, vb)             # %19 = float v
-    emit(44, 5, 20, 18, 19)         # %20 = vec2(u, v)
     emit(43, 3, 21, rb)             # %21 = float ref
+    if proj:
+        emit(43, 3, 53, db)         # %53 = float d
+        emit(44, 52, 20, 18, 19, 53)  # %20 = vec3(u, v, d)
+    else:
+        emit(44, 5, 20, 18, 19)     # %20 = vec2(u, v)
     emit(54, 1, 9, 0, 2)            # %9 main()
     emit(248, 22)                   # label
     emit(61, 40, 23, 17)            # %23 = Load SIMG %17
-    emit(89, 3, 24, 23, 20, 21)     # %24 = OpImageSampleDrefImplicitLod %23 %20 %21
+    emit(93 if proj else 89, 3, 24, 23, 20, 21)  # dref sample -> %24 float
     emit(80, 4, 25, 24, 24, 24, 24)  # %25 = vec4(%24, %24, %24, %24)
     emit(62, 8, 25)                 # Store color %25
     emit(253)                       # Return

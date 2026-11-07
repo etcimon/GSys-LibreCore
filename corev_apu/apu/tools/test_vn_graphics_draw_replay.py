@@ -897,6 +897,27 @@ class DrawReplayTests(unittest.TestCase):
         self.assertEqual(self.read_texel(7, 3), self.clear_texel())
         self.assertEqual(self.f.owner.work_refs, 0)
 
+    def test_fragment_dref_projective_sample(self):
+        # OpImageSampleDrefProjImplicitLod (opcode 93): the projective
+        # dref form takes a vec3 coord (u,v,d) the model perspective-
+        # divides (coord.xy /= d) before the depth compare.  Uniform
+        # depth=0.25 + ref=0.1 -> ref<=depth true -> 1.0 -> white; the
+        # uniform depth means the divide is not isolated here (that arm
+        # is proven by test_fragment_projective_sample opcode 91), but
+        # this exercises the vec3-coordinate dref operand path e2e.
+        self._dref_setup(fs_dref_program(u=0.6, v=0.7, ref=0.1,
+                                         proj=True, d=2.0))
+        self._image_fetch_draw()
+        did = self.e.golden.img_fmt_id(self.e.model, 37)
+        want = self.e.golden.img_clear_texel(
+            self.e.model, did,
+            struct.unpack('<4I', struct.pack('<4f',
+                1.0, 1.0, 1.0, 1.0)))
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), want)
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
     def test_fragment_linear_filter_blend(self):
         # bilinear filtering: a LINEAR min/mag VkSampler samples at
         # normalized u=0.25 (su0=floor((0.25*8-0.5)*256)=384 -> iu0=1,
