@@ -269,9 +269,21 @@ block it READs the block's w0 entry-count and `OBJPAY_OP_FREE`s
 pipeline block.  Verified: `+vec=apu-vn-specok` PASS (step-1 and
 randomized-latency step-2, 866 checks) plus 22-session regression
 sample (compute pos/neg, graphics, multiset/descarr/modres/rerec)
-all PASS.  Owed next: wire the parked spec values to shwave
-`OpSpecConstant`/`const_data_o` resolution so the override actually
-reaches shader execution, then CTS verify.  (The CTS `pipefail
+all PASS.  **Spec-value path confirmed already wired (2026-11-07):**
+dispatch reads pipeline w2 into `rs_spec_q` (`g6lc_apu_cmdexec`
+StDsModR2), feeds `spec:` into the shcore module-load request;
+`g6lc_apu_shcore` `f_spec_q`/`F_SP0` reads the parked ObjPay spec block
+into `f_spid_q`/`f_spv_q` -> packed `spec_id_i`/`spec_val_i`/`spec_n_i`;
+`g6lc_apu_shmod` `f_spec` resolves `OpSpecConstant` (opcode 50) against
+those, last-match-wins, literal default on miss.  `specok` exercises
+the spec-block *read* (bufcopy has no `OpSpecConstant`, so values are
+unconsumed).  Remaining proof: a compute-session shvec whose module
+carries `OpSpecConstant` (none of the 484 `sh_vectors` do — opcodes
+48-52 absent) specialized to a known override, replayed through
+`tb_g6lc_apu_vgtop`, asserting the output buffer carries the override
+(e.g. 41) not the literal default.  Owed: author that SPIR-V vector
+(`spirv-as`/`glslangValidator` are on PATH) + golden `.exp`, then CTS
+verify.  (The CTS `pipefail
 spec=1`->`StPipeFail` may be a second, create-side fault in the same
 path; the `G6LC_APU_DBG_LOST` rebuild names its sub-state if a
 guest/directed run still shows it.)  A secondary, narrower leak remains
