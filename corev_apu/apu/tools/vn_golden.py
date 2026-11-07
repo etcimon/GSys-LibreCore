@@ -10447,6 +10447,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # tri_w holds — the sampler2d_fixed_vertex / fragment shapes.
         is_vtex = 'vtex' in gfx
         is_ftex = 'ftex' in gfx
+        # ftexb: fragment textureBias — same 1x1 CIS but the FS applies
+        # an explicit LOD bias (vcol.z==0 -> bias 0), a distinct
+        # OpImageSample* bias path from fs_tex_implicit's plain LOD
+        is_ftexb = 'ftexb' in gfx
         is_tex = is_vtex or is_ftex
         # vs_pos3/fs_vcol forward the vertex alpha into FS out; the
         # passthru/flat pair forces a=1 and cannot see a blend
@@ -10467,6 +10471,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'fs_ubo.spv' if is_fsubo else
                           'fs_white.spv' if is_pts else
                           'fs_vcol.spv' if is_blend or is_wide else
+                          'fs_tex_bias.spv' if is_ftexb else
                           'fs_tex_implicit.spv' if is_ftex else
                           'fs_kill.spv' if is_kill else
                           'fs_flat.spv')).read_bytes())]

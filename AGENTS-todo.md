@@ -18326,6 +18326,14 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   ulp=0 XF_FAULTS 0` deterministic + randomized latency.  Wired into
   all three runner/regen lists.  (`fs_demote` helper-store variant
   still open — needs derivative+varying oracle.)
+- [x] **CLOSED — fragment textureBias (`ue_gpos_ftexb_1`):** `vs_tex` +
+  `fs_tex_bias` `texture(tex,vcol.xy,vcol.z)` explicit-LOD-bias on the
+  same 1x1 `COMBINED_IMAGE_SAMPLER` (`vcol.z==0` -> bias 0 -> constant
+  colour).  Exercises the bias `OpImageSample*` path distinct from
+  `fs_tex_implicit`.  PASS `g1=4096 g2=4096 ulp=0 XF_FAULTS 0` both
+  latencies; wired into all three lists.  Arrayed-image (`fs_tex_array`)
+  and projective (`fs_tex_proj`) texture draws remain open — need
+  `arrayLayers` image/view setup and a non-degenerate projective w.
 - [x] Instanced-draw session coverage (`c84531213`): `ue_gpos_inst_1`
   — `vs_inst` offsets clip-x by `0.4*gl_InstanceIndex-0.6`,
   `instanceCount=4`, `fs_flat` constant colour → union coverage over 4
