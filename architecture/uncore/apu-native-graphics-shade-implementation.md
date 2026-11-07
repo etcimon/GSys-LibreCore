@@ -143,9 +143,18 @@ Sampler address-mode variety is exercised by parameterizing the VkSampler
 `addressModeU/V/W`: `test_fragment_sampler_address_mode_clamp` binds a
 CLAMP_TO_EDGE (mode 2) sampler and samples at normalized u=1.25
 (su0=floor(1.25*8)=10, out of range) so the coordinate clamps to texel x=7
-rather than REPEAT-wrapping to x=2.
+rather than REPEAT-wrapping to x=2.  Filter variety is exercised through a
+`linear` flag on the shared setup that selects LINEAR (1) over NEAREST (0)
+for `magFilter`/`minFilter`: `test_fragment_linear_filter_blend` binds a
+LINEAR combined-image-sampler and samples at normalized u=0.25, where the
+Model's 8.8 fixed-point coordinate `su0=floor((u*w0-0.5)*256)` yields
+iu0=1, fu0=128 - an exact 50/50 horizontal weight - so covered texels
+blend texel(1,1)=(32,64,32,255) and texel(2,1)=(64,64,48,255) to the
+UNORM mean (48/255, 64/255, 40/255, 1.0).  This is the first bilinear
+(non-nearest) filter path exercised end-to-end; trilinear/mipmap and the
+remaining address modes (mirrored-repeat, border) stay queued.
 
-Evidence: `test_vn_graphics_draw_replay` gained eight image draws -
+Evidence: `test_vn_graphics_draw_replay` gained nine image draws -
 `test_fragment_sampled_image_fetch_reaches_framebuffer` (constant ivec2
 coordinate), `test_fragment_per_pixel_image_fetch` (ivec2 derived from
 FragCoord.xy via OpCompositeExtract + OpConvertFToS + OpCompositeConstruct),
@@ -159,7 +168,10 @@ zero derivatives -> base mip -> same texel),
 `test_fragment_separate_sampler_image_sample` (kind2 image + kind0 sampler
 merged by OpSampledImage then explicit-LOD sampled -> texel(2,1)),
 `test_fragment_sampler_address_mode_clamp` (CLAMP_TO_EDGE sampler, u=1.25 ->
-texel(7,1) not wrapped x=2), plus
+texel(7,1) not wrapped x=2),
+`test_fragment_linear_filter_blend` (LINEAR combined sampler, u=0.25 ->
+su0=384, iu0=1, fu0=128 -> 50/50 bilinear blend of texels (1,1)+(2,1) ->
+UNORM mean (48,64,40)), plus
 `test_fragment_storage_image_write` (a STORAGE_IMAGE kind 3 bound via
 `OpTypeImage(sampled=2)`; `OpImageWrite` stores a constant red texel at the
 same FragCoord-derived coordinate, and the aperture bytes under the bound
@@ -167,7 +179,7 @@ image are checked - covered texels become red while uncovered keep their
 pattern).  The fetch draws prove each covered framebuffer texel equals its
 own (x,y)-encoded image texel; the store draw proves the previously
 unexercised kind-3 `GfxMemory` write admission end-to-end.  Local
-`test_vn_*` sweep ran 743 tests, all green.  Frozen native
+`test_vn_*` sweep ran 744 tests, all green.  Frozen native
 cohorts on ovh_calltorch:
 `native-gfximg-01` 720 tests PASS in 20.465 s (`native-execution.y6y3xap5`),
 `native-gfximgpix-01` 721 tests PASS in 20.582 s
@@ -179,6 +191,7 @@ PASS in 20.500 s (`native-execution.n8_r1ss2`), `native-gfxcomb-01`
 (`native-execution.no_22v6j`), `native-gfximplod-01` 726 tests PASS in
 20.888 s (`native-execution.3wzcog89`), `native-gfxsep-01` 727 tests
 PASS in 19.317 s (`native-execution.edz92krq`), and `native-gfxclamp-01`
-728 tests PASS in 20.752 s (`native-execution.3pqmo813`), all
-`sources_unchanged: true`.  Host-native model only - no RTL/CTS/stock/
-hardware qualification.
+728 tests PASS in 20.752 s (`native-execution.3pqmo813`), and
+`native-gfxlinear-01` 729 tests PASS in 20.969 s
+(`native-execution.eey3xhni`), all `sources_unchanged: true`.
+Host-native model only - no RTL/CTS/stock/hardware qualification.

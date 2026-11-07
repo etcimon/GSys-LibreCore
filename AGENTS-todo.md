@@ -18132,18 +18132,23 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   OpSampledImage opcode 86 then OpImageSampleExplicitLod -> texel(2,1)).
   Sampler address-mode variety proven by `test_fragment_sampler_address_mode_
   clamp` (CLAMP_TO_EDGE mode 2 VkSampler; normalized u=1.25 -> su0=10 clamps
-  to texel x=7 instead of REPEAT-wrapping to x=2).  Remote cohorts
+  to texel x=7 instead of REPEAT-wrapping to x=2).  Bilinear filtering proven
+  by `test_fragment_linear_filter_blend` (LINEAR min/mag VkSampler; normalized
+  u=0.25 -> su0=floor((0.25*8-0.5)*256)=384 -> iu0=1,fu0=128 -> exact 50/50
+  blend of texels (1,1)+(2,1) -> UNORM mean (48,64,40); first non-nearest
+  filter path exercised end-to-end).  Remote cohorts
   `native-gfximg-01` 720 + `native-gfximgpix-01` 721 + `native-gfximgstore-01`
   722 + `native-gfxvsimg-01` 723 + `native-gfxcomb-01` 724 +
   `native-gfxsample-01` 725 + `native-gfximplod-01` 726 +
-  `native-gfxsep-01` 727 + `native-gfxclamp-01` 728 checks PASS
+  `native-gfxsep-01` 727 + `native-gfxclamp-01` 728 + `native-gfxlinear-01`
+  729 checks PASS
   (native-execution.y6y3xap5 /
   .nssux4bd / .5axy_z9z / .n8_r1ss2 / .6yodeq0j / .no_22v6j / .3wzcog89 /
-  .edz92krq / .3pqmo813,
+  .edz92krq / .3pqmo813 / .eey3xhni,
   sources_unchanged true), local `test_vn_*` graphics suites green.
   Record: `architecture/uncore/
   apu-native-graphics-shade-implementation.md`.
-- [ ] Linear/mipmap filtering + mirrored/border address modes + gather/
+- [ ] Mipmap/trilinear filtering + mirrored/border address modes + gather/
   proj/dref sample ops,
   in-model
   dynamic offsets, blend/depth/MRT, helper

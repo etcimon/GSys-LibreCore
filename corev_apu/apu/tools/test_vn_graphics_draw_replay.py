@@ -319,21 +319,23 @@ class DrawReplayTests(unittest.TestCase):
         self.assertEqual(self.read_texel(7, 3), self.clear_texel())
         self.assertEqual(self.f.owner.work_refs, 0)
 
-    def _image_fetch_setup(self, module, dtype=2, sampler_addr=0):
+    def _image_fetch_setup(self, module, dtype=2, sampler_addr=0,
+                           linear=False):
         """Shared vkCreateImage/View + image-descriptor-set setup for the
         image draw tests.  The image is an 8x4 R8G8B8A8_UNORM at MEMORY
         offset 4352 with texel(x,y) = (x*32, y*64, (x+y)*16, 255);
         `dtype` selects SAMPLED_IMAGE(2)/STORAGE_IMAGE(3)/
         COMBINED_IMAGE_SAMPLER(1); the combined form also creates a
-        nearest-filter VkSampler bound into VkDescriptorImageInfo.
-        `sampler_addr` sets VkSamplerAddressMode for U/V/W (0 Repeat,
-        2 ClampToEdge) to exercise coordinate wrap/clamp."""
+        VkSampler bound into VkDescriptorImageInfo.  `sampler_addr` sets
+        VkSamplerAddressMode for U/V/W (0 Repeat, 2 ClampToEdge);
+        `linear` selects LINEAR (1) over NEAREST (0) min/mag filters."""
         self.r.layout(((0, dtype, 1, 16),))
         if dtype in (0, 1):
+            filt = 1 if linear else 0
             self.f.command('vkCreateSampler', device=self.w.DEVICE,
                 pSampler=self.SAMPLER,
                 pCreateInfo=self.w.structure('VkSamplerCreateInfo', pNext=[],
-                    flags=0, magFilter=0, minFilter=0, mipmapMode=0,
+                    flags=0, magFilter=filt, minFilter=filt, mipmapMode=0,
                     addressModeU=sampler_addr, addressModeV=sampler_addr,
                     addressModeW=sampler_addr,
                     mipLodBias=0, anisotropyEnable=0, maxAnisotropy=0,
@@ -548,6 +550,25 @@ class DrawReplayTests(unittest.TestCase):
             fs_sample_program(u=1.25, v=0.375), dtype=1, sampler_addr=2)
         self._image_fetch_draw()
         want = self.texel_want(did, 7, 1)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), want)
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_fragment_linear_filter_blend(self):
+        # bilinear filtering: a LINEAR min/mag VkSampler samples at
+        # normalized u=0.25 (su0=floor((0.25*8-0.5)*256)=384 -> iu0=1,
+        # fu0=128 -> exact 50/50 weight) blending texel(1,1)=(32,64,32)
+        # and texel(2,1)=(64,64,48); v=0.375 -> iv0=1,fv0=0 single row.
+        # Expected per-channel = mean of the two texels' UNORM decode.
+        did = self._image_fetch_setup(
+            fs_sample_program(u=0.25, v=0.375), dtype=1, linear=True)
+        self._image_fetch_draw()
+        want = self.e.golden.img_clear_texel(
+            self.e.model, did,
+            struct.unpack('<4I', struct.pack('<4f',
+                (32 + 64) / 2 / 255.0, (64 + 64) / 2 / 255.0,
+                (32 + 48) / 2 / 255.0, 1.0)))
         for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
             self.assertEqual(self.read_texel(x, y), want)
         self.assertEqual(self.read_texel(7, 3), self.clear_texel())
