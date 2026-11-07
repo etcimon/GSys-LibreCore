@@ -241,7 +241,29 @@ nopersp arm directly - clip w=[1,2,1] with NDC preserved by scaling x,y
 by w yields identical coverage/lam but persp=11.613 vs nopersp=11.875 at
 pixel(0,0).  A full end-to-end NoPerspective draw still needs a
 w-varying vertex shader (`vs_program` pins Position.w=1.0 so
-persp==nopersp there).  Depth-reference (dref) sample ops stay queued.
+persp==nopersp there).  Depth-reference sampling is likewise proven for
+the implicit-LOD form: `fs_dref_program` emits
+`OpImageSampleDrefImplicitLod` (opcode 89) with ResultType=float over a
+COMBINED_IMAGE_SAMPLER whose OpTypeImage declares Depth=1; the operand
+order is ResultType, ResultId, SampledImage, vec2 Coordinate, Dref float
+(with no ImageOperands mask, so wc=6 and nva=3 places the reference at
+va[2]->ref16).  The scalar compare fraction is splatted to vec4 color.
+Depth-format admission was relaxed in three bounded places:
+`ImageBinding`/`_image_row` and `image_descriptor` now admit
+D16_UNORM/D32_SFLOAT for sampled/combined kinds 1,2 only (storage kind 3
+and the stencil S8/X8_D/D24 formats stay rejected), and
+`vn_graphics_resources` admits the depth-flagged OpTypeImage
+(sign=depth) for kinds 1,2.  `compareEnable`/`compareOp` were already
+packed into `sampler_aux` bits 20/17-19 (cen/cmo), so no sampler-ABI
+change was needed.  `_dref_setup` binds an 8x4 D16_UNORM depth image
+(VkFormat 124->device fmt 13, aspectMask=2, u16 texels) plus a nearest
+compare sampler (compareEnable=1, compareOp=3 LESS_OR_EQUAL);
+`test_fragment_dref_sample_compare` (depth=0.25, ref=0.1 ->
+f_dcmp(ref16,depth16)=ref<=depth true -> 1.0 -> white) and
+`test_fragment_dref_sample_compare_false` (ref=0.5 -> false -> 0.0 ->
+black) prove the compare discriminates rather than returning a
+constant.  Explicit-LOD/projective/dref-gather forms, PCF, and the
+blend/depth/MRT writeback axis stay queued.
 
 Evidence: `test_vn_graphics_draw_replay` gained nine image draws -
 `test_fragment_sampled_image_fetch_reaches_framebuffer` (constant ivec2
@@ -281,6 +303,11 @@ color.rgb + v0 VertexIndex alpha 0.0, not the smooth blend),
 nopersp_mask bit0) and
 `test_nopersp_varying_uses_screen_space_weights` (raster nopersp arm:
 w=[1,2,1] NDC-preserved -> persp 11.613 vs nopersp 11.875),
+`test_fragment_dref_sample_compare` (OpImageSampleDrefImplicitLod opcode
+89 over a D16_UNORM depth image + LESS_OR_EQUAL compare sampler,
+depth=0.25 ref=0.1 -> ref<=depth true -> 1.0 -> white) and
+`test_fragment_dref_sample_compare_false` (same image, ref=0.5 -> false
+-> 0.0 -> black, proving the compare discriminates),
 plus
 `test_fragment_storage_image_write` (a STORAGE_IMAGE kind 3 bound via
 `OpTypeImage(sampled=2)`; `OpImageWrite` stores a constant red texel at the
@@ -296,8 +323,10 @@ footprint/component operand path; the projective draw proves the
 coord.xy/d perspective divide; the flat draw proves the FS-Input
 interpolation qualifier now reaches the raster varying path, and the
 nopersp pair proves the NoPerspective decoration->mask capture plus the
-screen-space (non-perspective) interpolation arm.  Local
-`test_vn_*` sweep ran 754 tests, all green.  Frozen native
+screen-space (non-perspective) interpolation arm, and the dref pair
+proves the depth-format admission plus the compare-enable sampler path
+end-to-end.  Local
+`test_vn_*` sweep ran 756 tests, all green.  Frozen native
 cohorts on ovh_calltorch:
 `native-gfximg-01` 720 tests PASS in 20.465 s (`native-execution.y6y3xap5`),
 `native-gfximgpix-01` 721 tests PASS in 20.582 s
@@ -320,6 +349,8 @@ tests PASS in 20.0 s (`native-execution.aaadxsp4`), and
 (`native-execution.22fa7i0d`), `native-gfxproj-01` 736 tests PASS in
 21.2 s (`native-execution.tfz4m7nk`), `native-gfxflat-01` 737 tests
 PASS in 21.6 s (`native-execution.hwuix8zk`), and `native-gfxnopersp-01`
-739 tests PASS in 20.1 s (`native-execution.5ntfmy6r`), all
+739 tests PASS in 20.1 s (`native-execution.5ntfmy6r`), and
+`native-gfxdref-01` 741 tests PASS in 20.3 s
+(`native-execution.0pobswnb`), all
 `sources_unchanged: true`.
 Host-native model only - no RTL/CTS/stock/hardware qualification.

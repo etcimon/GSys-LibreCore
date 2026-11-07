@@ -18228,10 +18228,26 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   (`native-execution.5ntfmy6r`, sources_unchanged true).  A full
   end-to-end NoPerspective draw still needs a w-varying vertex shader
   (vs_program pins Position.w=1.0 so persp==nopersp there).
-- [ ] Depth-reference (dref) sample ops (all four VkSamplerAddressMode
-  values + bilinear filter + explicit/implicit LOD + multi-mip select +
-  trilinear + gather + projective already proven),
-  blend/depth/MRT, helper
+- [x] Depth-reference (dref) implicit-LOD sample + depth-format admission:
+  `fs_dref_program` emits OpImageSampleDrefImplicitLod (opcode 89)
+  ResultType=float/ResultId/SampledImage/vec2-coord/Dref-float with no
+  ImageOperands mask (wc=6 -> nva=3, ref at va[2]->ref16); the scalar
+  compare fraction is splatted to vec4 color.  Depth admission relaxed in
+  three bounded places - `ImageBinding`/`_image_row` (vn_compute) and
+  `image_descriptor` (vn_image_operands) now allow D16_UNORM/D32_SFLOAT
+  for sampled/combined kinds 1,2 only (storage kind 3 and stencil
+  S8/X8_D/D24 still rejected), and `vn_graphics_resources` admits the
+  depth-flagged OpTypeImage (sign=depth) for kinds 1,2.  compareEnable/
+  compareOp were already packed into sampler_aux bits 20/17-19 (cen/cmo).
+  `_dref_setup` binds a D16_UNORM (VkFormat 124->fmt 13) 8x4 depth image
+  (aspectMask=2, u16 texels) + compare sampler (compareEnable=1,
+  compareOp=3 LESS_OR_EQUAL).  `test_fragment_dref_sample_compare`
+  (depth=0.25, ref=0.1 -> ref<=depth true -> 1.0 -> white) and
+  `test_fragment_dref_sample_compare_false` (ref=0.5 -> false -> 0.0 ->
+  black) prove the compare discriminates.  Cohort `native-gfxdref-01`
+  741 PASS (`native-execution.0pobswnb`, sources_unchanged true).
+- [ ] Remaining dref forms (explicit-LOD opcode 90, projective 93/94,
+  dref-gather 97), PCF/bilinear compare, blend/depth/MRT, helper
   lanes, non-triangle topology, end-to-end NoPerspective draw (needs a
   w-varying vertex shader),
   multi-descriptor/multi-stage end-to-end draws and capability/CTS/physical

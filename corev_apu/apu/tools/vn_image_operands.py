@@ -146,11 +146,14 @@ def image_descriptor(engine, context_id, descriptor_set, binding, element=0, set
         mips, layers = aux >> 40 & 31, aux >> 45 & 511
         mip, levels, layer, count = va >> 28 & 15, va >> 32 & 15, va >> 36 & 1023, va >> 46 & 1023
         names, _, bpp, _ = engine.model.img_fmt_tables()
+        depth_ok = (fmt < len(names) and source.dtype in (1, 2) and
+                    names[fmt] in ('D16_UNORM', 'D32_SFLOAT'))
         if (source.image_state >> 19 & 3 != 1 or va >> 56 & 7 != 0 or
                 not 1 <= levels <= mips - mip or count != 1 or
                 not 0 < base_w <= 4096 or not 0 < base_h <= 4096 or
                 not 0 < mips <= 13 or mip >= mips or not 0 < layers <= 256 or layer >= layers or
-                fmt >= len(names) or names[fmt].startswith(('D', 'S8', 'X8_D')) or
+                fmt >= len(names) or
+                (names[fmt].startswith(('D', 'S8', 'X8_D')) and not depth_ok) or
                 bpp[fmt] not in (1, 2, 4, 8, 16) or
                 not (aux >> 54) & (8 if source.dtype == 3 else 4) or
                 source.layout not in ((1,) if source.dtype == 3 else (1, 5)) or

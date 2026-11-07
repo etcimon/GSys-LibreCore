@@ -84,7 +84,8 @@ def validate(scans, layout):
                 image = scan.types[shape['elem']] if kind == 1 else shape
                 if kind is None and shape['kind'] == TK['IMG']:
                     kind = 2 if shape['cols'] == 1 else 3
-                if kind is None or kind and (image['comps'] or image['sign']):
+                if kind is None or kind and (image['comps'] or
+                                             image['sign'] and kind == 3):
                     raise ValueError('graphics resource image shape exceeds scalar 2D profile')
             else:
                 if shape['kind'] == TK['ARRAY']:

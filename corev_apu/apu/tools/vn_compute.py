@@ -97,8 +97,12 @@ class ShaderRuntime:
                 raise ValueError('sampler-only binding cannot own image bytes')
         else:
             names, _, bpp, _ = executor.execution.model.img_fmt_tables()
+            depth_ok = (0 <= binding.fmt < len(names) and
+                        binding.kind in (1, 2) and
+                        names[binding.fmt] in ('D16_UNORM', 'D32_SFLOAT'))
             if (not 0 <= binding.fmt < len(names) or
-                    names[binding.fmt].startswith(('D', 'S8', 'X8_D')) or
+                    (names[binding.fmt].startswith(('D', 'S8', 'X8_D'))
+                     and not depth_ok) or
                     bpp[binding.fmt] not in (1, 2, 4, 8, 16) or
                     not 0 < binding.width <= 4096 or not 0 < binding.height <= 4096 or
                     type(binding.mips) is not int or not 1 <= binding.mips <= 13 or
