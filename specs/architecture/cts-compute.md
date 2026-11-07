@@ -70,7 +70,12 @@ LOGIC COMPUTE-L2 · Indirect dispatch reads its arguments from device memory
   MECHANISM   cmdexec: before issuing the work, fetch 3 words through the resolved buffer
               (LOOKUP → bind memory → aperture read) with the submission's ordering (a
               prior copy/shader write to the argument buffer must be complete — the
-              serialized executor guarantees it today); today refused UNSUPPORTED.
+              serialized executor guarantees it today).  Implemented (G3b-iii):
+              cmdexec fetches the 12-byte operand via aligned aperture beats into
+              `rec_q.imm[0..2]`, then issues the same `StDsPipeReq` path as direct
+              dispatch; `shcore` treats `DISPATCH_INDIRECT_EXT` as `is_dispatch`.
+              Proven end-to-end: `ue_cpos_dispind_1` (2× `vkCmdDispatchIndirect`)
+              PASS-COMPUTE g1=48 g2=48 `XF_FAULTS 0` in `tb_g6lc_apu_vgtop`.
   REQUIRES    The fetch happens after the preceding commands' completion (barrier
               semantics, W2.4); robust: offset+12 > buffer size is invalid usage (no
               check needed, but no wild read either — clamp to the buffer).
@@ -208,10 +213,14 @@ SEGMENT G3b-ii/compute
                   fails deterministically solo — unexplained
                   ordering/state dependence, flagged for a dedicated pass.
                   3 cases unrecorded due to the abort (above).
-  NEXT ARTIFACT   COMPUTE-H1 spec constants (gates 27 NS + 3 Fails),
-                  image texel-pointer + atomics (2 Fails), COMPUTE-H3
-                  128-inv groups (1 Fail), G3b-iii DispatchIndirect +
-                  rerun for the 3 unrecorded cases.
+  NEXT ARTIFACT   image texel-pointer + atomics (2 Fails), COMPUTE-H3
+                  128-inv groups (1 Fail), rerun for the 3 unrecorded
+                  cases.  ~~COMPUTE-H1 spec constants~~ closed 2026-11-07
+                  (`specconst` corpus + `specconst_{1,2,3}` decoupled
+                  vectors + `apu-vn-specok2` override→41 PASS both
+                  latencies; first-class `spec` DESC field in
+                  `shader_vectors.py`); ~~G3b-iii DispatchIndirect~~
+                  implemented — `ue_cpos_dispind_1` PASS-COMPUTE g1=48.
 ```
 
 Root-cause note (2026-11-07, COMPUTE-H1 / COMPUTE-X2): the spec-constant
