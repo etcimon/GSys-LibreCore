@@ -18289,6 +18289,18 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   compares were weighted rather than a hard 0.0/1.0.  Cohort
   `native-gfxpcf-01` 746 PASS (`native-execution.ws6ohan9`,
   sources_unchanged true).
+- [x] Vertex-stage texture draw coverage (`ef8ac7b66`): `ue_gpos_vtex_1`
+  — `vs_texlod` samples a 1x1 uniform `COMBINED_IMAGE_SAMPLER` at
+  set0/binding0 (`stageFlags=VERTEX`) via `OpImageSampleExplicitLod`
+  Lod=0 → constant `vcol` → `fs_flat`.  First image/sampler binding in
+  the graphics descriptor path (pool/set/`VkDescriptorImageInfo`,
+  VERTEX-stage DSL row) + pos+uv vertex input.  PASS `g1=4096 g2=4096
+  ulp=0 XF_FAULTS 0` on `vgtop-dbg`, both latency profiles.
+  **Finding:** the vertex-stage texture draw completes correctly in
+  directed RTL — the `texture.*.sampler2d_fixed_vertex` device hang
+  (Mesa fence-wait `rc=134`) is a **guest-stack fence/doorbell issue,
+  not an RTL shader-execution defect**; investigation should move to
+  the guest virtio-fence layer, not the draw/shader path.
 - [x] Instanced-draw session coverage (`c84531213`): `ue_gpos_inst_1`
   — `vs_inst` offsets clip-x by `0.4*gl_InstanceIndex-0.6`,
   `instanceCount=4`, `fs_flat` constant colour → union coverage over 4
