@@ -277,13 +277,32 @@ into `f_spid_q`/`f_spv_q` -> packed `spec_id_i`/`spec_val_i`/`spec_n_i`;
 `g6lc_apu_shmod` `f_spec` resolves `OpSpecConstant` (opcode 50) against
 those, last-match-wins, literal default on miss.  `specok` exercises
 the spec-block *read* (bufcopy has no `OpSpecConstant`, so values are
-unconsumed).  Remaining proof: a compute-session shvec whose module
-carries `OpSpecConstant` (none of the 484 `sh_vectors` do — opcodes
-48-52 absent) specialized to a known override, replayed through
-`tb_g6lc_apu_vgtop`, asserting the output buffer carries the override
-(e.g. 41) not the literal default.  Owed: author that SPIR-V vector
-(`spirv-as`/`glslangValidator` are on PATH) + golden `.exp`, then CTS
-verify.  (The CTS `pipefail
+unconsumed).  **Deeper gap found (2026-11-07):** proving the override
+reaches the *output buffer* is blocked less by RTL than by the
+expected-output infrastructure.  Every oracle/model/class artifact is
+baked at **default** specialization: the lavapipe oracle
+(`vk_compute_oracle.c`) builds its pipeline with no
+`pSpecializationInfo`, `spirv_model` does not fold overrides, and the
+normal-dispatch check (`build_transport` ~L9424) emits
+`o['model']/o['oracle']/o['cls']` straight from the shvec `.exp`.  The
+model-side `pipe_spec[h]` folded module is stored for provenance only —
+compute dispatch is structural and never re-executes it for the output
+gate.  So a correct RTL producing the override (e.g. 41) would
+*mis*-match an `.exp` expecting the default (7).  None of the 484
+`sh_vectors` carry `OpSpecConstant` (opcodes 48-52 absent).
+
+**Concrete path (owed):** author an `OpSpecConstant` compute shvec
+(`spirv-as`/`glslangValidator` on PATH — a minimal
+`layout(constant_id=0) const uint K=7; ob.v=K;` compiles clean with
+`OpDecorate %K SpecId 0`), then generate its `.exp`/`.tab` from the
+**specialized/folded** module (`specialize()` folds `OpSpecConstant`→
+`OpConstant 41`) while keeping `.hex` = the *original* `OpSpecConstant`
+module so RTL still exercises the spec-block path.  That requires
+decoupling `.hex` words from `.exp`-generation words in
+`shader_vectors.py::emit` (it currently feeds one `spv_words` to both)
+— or a dedicated spec-vector emitter.  Then a `specok`-style session
+specializing `constantID=0→41` replayed through `tb_g6lc_apu_vgtop`
+asserts output word = 41, closing COMPUTE-H1 end-to-end.  (The CTS
 spec=1`->`StPipeFail` may be a second, create-side fault in the same
 path; the `G6LC_APU_DBG_LOST` rebuild names its sub-state if a
 guest/directed run still shows it.)  A secondary, narrower leak remains
