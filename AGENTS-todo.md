@@ -18331,9 +18331,16 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   same 1x1 `COMBINED_IMAGE_SAMPLER` (`vcol.z==0` -> bias 0 -> constant
   colour).  Exercises the bias `OpImageSample*` path distinct from
   `fs_tex_implicit`.  PASS `g1=4096 g2=4096 ulp=0 XF_FAULTS 0` both
-  latencies; wired into all three lists.  Arrayed-image (`fs_tex_array`)
-  and projective (`fs_tex_proj`) texture draws remain open — need
-  `arrayLayers` image/view setup and a non-degenerate projective w.
+  latencies; wired into all three lists.  Projective (`fs_tex_proj`)
+  texture draws remain open — needs a non-degenerate projective w.
+- [x] **CLOSED — fragment sampler2DArray (`ue_gpos_ftexa_1`):** `vs_tex` +
+  `fs_tex_array` `texture(tex,vec3(vcol.xy,vcol.z))` on a **2-layer
+  arrayed image** (`arrayLayers=2`) + `2D_ARRAY` view (`viewType=5`,
+  `layerCount=2`) + dual-layer texel.  `vcol.z==0` selects layer 0 so the
+  uniform texel keeps `tri_w`, while the arrayed-view/layer-index fetch
+  path is exercised end-to-end.  PASS `g1=4096 g2=4096 ulp=0
+  XF_FAULTS 0` on both latency profiles; wired into all three lists.
+  (Layer-0 fetch only — varying-layer selection still open.)
 - [x] Instanced-draw session coverage (`c84531213`): `ue_gpos_inst_1`
   — `vs_inst` offsets clip-x by `0.4*gl_InstanceIndex-0.6`,
   `instanceCount=4`, `fs_flat` constant colour → union coverage over 4

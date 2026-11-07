@@ -195,6 +195,10 @@ python3 $G --graphics-session ue_gpos_kill_1 1
 # fragment textureBias: fs_tex_bias applies an explicit LOD bias
 # (vcol.z==0 -> bias 0) on the same 1x1 CIS — the bias texture path
 python3 $G --graphics-session ue_gpos_ftexb_1 1
+# fragment sampler2DArray: fs_tex_array samples vec3(vcol.xy,vcol.z) on
+# a 2-layer arrayed image + 2D_ARRAY view; vcol.z==0 -> layer 0, the
+# uniform texel keeps tri_w while exercising the arrayed fetch path
+python3 $G --graphics-session ue_gpos_ftexa_1 1
 
 # deferred-work and capacity arms
 python3 $G --compute-session ue_cpos_defer2_1  bufcopy_1 --variant defer2

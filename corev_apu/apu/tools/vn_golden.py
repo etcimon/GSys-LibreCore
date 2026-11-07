@@ -10451,6 +10451,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # an explicit LOD bias (vcol.z==0 -> bias 0), a distinct
         # OpImageSample* bias path from fs_tex_implicit's plain LOD
         is_ftexb = 'ftexb' in gfx
+        # ftexa: fragment sampler2DArray — a 2-layer arrayed image +
+        # 2D_ARRAY view; vcol.z==0 selects layer 0 so the uniform
+        # texel keeps tri_w while exercising the arrayed fetch path
+        is_ftexa = 'ftexa' in gfx
         is_tex = is_vtex or is_ftex
         # vs_pos3/fs_vcol forward the vertex alpha into FS out; the
         # passthru/flat pair forces a=1 and cannot see a blend
@@ -10471,6 +10475,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'fs_ubo.spv' if is_fsubo else
                           'fs_white.spv' if is_pts else
                           'fs_vcol.spv' if is_blend or is_wide else
+                          'fs_tex_array.spv' if is_ftexa else
                           'fs_tex_bias.spv' if is_ftexb else
                           'fs_tex_implicit.spv' if is_ftex else
                           'fs_kill.spv' if is_kill else
@@ -10995,7 +11000,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         flags=0, imageType=1, format=37,
                         extent=st('VkExtent3D', width=1, height=1,
                                   depth=1),
-                        mipLevels=1, arrayLayers=1, samples=1, tiling=0,
+                        mipLevels=1, arrayLayers=2 if is_ftexa else 1,
+                        samples=1, tiling=0,
                         usage=0x04, sharingMode=0,
                         queueFamilyIndexCount=0,
                         pQueueFamilyIndices=[], initialLayout=0),
@@ -11006,12 +11012,14 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 ('vkCreateImageView', dict(
                     device=X['dev'],
                     pCreateInfo=st('VkImageViewCreateInfo',
-                        flags=0, image=X['timg'], viewType=1, format=37,
+                        flags=0, image=X['timg'],
+                        viewType=5 if is_ftexa else 1, format=37,
                         components=st('VkComponentMapping',
                                       r=0, g=0, b=0, a=0),
                         subresourceRange=st('VkImageSubresourceRange',
                             aspectMask=1, baseMipLevel=0, levelCount=1,
-                            baseArrayLayer=0, layerCount=1)),
+                            baseArrayLayer=0,
+                            layerCount=2 if is_ftexa else 1)),
                     pView=X['tview'])),
                 ('vkCreateSampler', dict(
                     device=X['dev'],
@@ -11086,7 +11094,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             base_t = create_blob_mem(RES_BLOB0 + 3, 0x1000, X['tmem'])
             assert base_t is not None, 'texture memory blob refused'
             base_t = map_blob(RES_BLOB0 + 3)
-            apw(base_t, [tri_w])
+            # 1x1 RGBA8 texel(s): layer 0 always, plus layer 1 for the
+            # arrayed-image variant (uniform colour keeps tri_w)
+            apw(base_t, [tri_w] * (2 if is_ftexa else 1))
 
         seg_a2 = [
             ('vkBeginCommandBuffer', dict(
