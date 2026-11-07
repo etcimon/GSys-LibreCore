@@ -50,6 +50,7 @@ class DrawExec:
     fmt: int
     vs_push: tuple = ()
     fs_push: tuple = ()
+    vs_bindings: tuple = ()
     batch: int = BATCH_MAX
     flat: int = 0
     nopersp: int = 0
@@ -75,7 +76,7 @@ class DrawExecRuntime:
         # before any work is published (vary/record bytes are placeholders)
         self.shade = ShadeRuntime(executor, context,
                                   Shade(op.fetch, op.vs, op.vs_push,
-                                        op.batch))
+                                        op.batch, op.vs_bindings))
         scan = _fragment_scan(op.fs)
         RasterRuntime(executor, context, Raster(
             b'\0' * (3 * RECORD_STRIDE), op.viewport, op.scissor, 3,

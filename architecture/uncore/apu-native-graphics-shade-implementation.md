@@ -81,3 +81,54 @@ Rasterization, primitive assembly, fragment shading, render-target writes,
 capsets, CTS, RTL and physical qualification all remain open.  This stage
 is reachable only as an executor runtime operation from native tests; no
 wire command produces it yet.
+
+
+## Buffer-descriptor vertex shade (implemented)
+
+ now carries resolved  operands (kind 6 UBO /
+7 SSBO) end-to-end:  ->  ->
+ ->  ->  ->
+.   is a hybrid wave memory: descriptor binding
+ranges route to  (read for kind 6/7, write only for kind 7)
+while vertex inputs, varying outputs and scratch stay in an internal store.
+Descriptor  bases are biased by  (0x10000000) into a high
+word range disjoint from the low record image so the two cannot alias; the
+bias is bounded at admission so biased addresses always fit the 32-bit header
+word.  The Model header emits real binding rows plus per-binding init-word
+placeholders (consumed but not stored because live memory is supplied) so the
+trailing graphics wave section stays aligned.  Shader-side admission now
+permits / storage descriptors and requires each decorated
+(set,binding) to be covered by a provided operand; 
+image/sampler descriptors and fragment-stage bindings remain refused.
+
+Evidence:  grew to 8 tests — a hand-assembled
+UBO-reading vertex module folds a device-memory int into 
+(observed in every vary record), plus unbound/wrong-set refusal.  Full local
+ sweep: 731 tests PASS.  Remote cohort evidence pending; host-native
+model only — no RTL/CTS/stock/hardware qualification.
+
+## Buffer-descriptor vertex shade (implemented)
+
+`Shade.bindings` now carries resolved `ShaderBinding` operands (kind 6 UBO /
+7 SSBO) end-to-end: `GraphicsBindings.resolve` -> `DrawPlan.stage_bindings` ->
+`vn_graphics_draw_replay._push` -> `DrawExec.vs_bindings` -> `Shade` ->
+`ShadeRuntime`.  `GfxMemory` is a hybrid wave memory: descriptor binding
+ranges route to `state.aperture` (read for kind 6/7, write only for kind 7)
+while vertex inputs, varying outputs and scratch stay in an internal store.
+Descriptor `ad` bases are biased by `GFX_DESC_BIAS` (0x10000000) into a high
+word range disjoint from the low record image so the two cannot alias; the
+bias is bounded at admission so biased addresses always fit the 32-bit header
+word.  The Model header emits real binding rows plus per-binding init-word
+placeholders (consumed but not stored because live memory is supplied) so the
+trailing graphics wave section stays aligned.  Shader-side admission now
+permits `UNIFORM`/`SBUF` storage descriptors and requires each decorated
+(set,binding) to be covered by a provided operand; `UNIFORMCONST`
+image/sampler descriptors and fragment-stage bindings remain refused.
+
+Evidence: `test_vn_graphics_shade` grew to 8 tests - a hand-assembled
+UBO-reading vertex module folds a device-memory int into `Position.w`
+(observed in every vary record), plus unbound/wrong-set refusal.  Frozen
+native cohort `native-gfxubo-01` on ovh_calltorch: 716 tests PASS in 19.144 s,
+`sources_unchanged: true`, cohort `native-execution.zolkoufm`; local
+`test_vn_*` sweep 731 PASS.  Host-native model only - no RTL/CTS/stock/
+hardware qualification.

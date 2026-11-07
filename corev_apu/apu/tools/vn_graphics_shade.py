@@ -1,27 +1,86 @@
 #!/usr/bin/env python3
 # Copyright 2026 Etienne Cimon
 # SPDX-License-Identifier: MIT
-"""Bounded vertex-shader stage over fetch records; no raster/FS/descriptor admission."""
+"""Bounded vertex-shader stage over fetch records; no raster/FS admission.
+
+Buffer (UBO/SSBO) descriptor reads are admitted through a hybrid memory that
+routes binding-range accesses to the device aperture while vertex/varying
+records stay in an internal store.  Descriptor `ad` bases are biased into a
+high word range disjoint from the low record image so the two cannot alias;
+image/sampler (UNIFORMCONST) descriptors remain refused."""
 from dataclasses import dataclass
 
 from shader.spirv_model import Model
-from shader.spirv_scan import EM, Scanner
+from shader.spirv_scan import EM, SC, Scanner
+from vn_compute import ShaderBinding
 from vn_graphics_fetch import ATTR_STRIDE, Fetch, FetchRuntime, MAX_RECORDS
 
 VARY_STRIDE = 144           # VS-out records share the 9-slot stride
 BATCH_MAX = 256             # invocations per Model wave batch
 STEP_QUANTUM = 512          # instructions per cooperative advance
 MAX_STEPS = 1 << 20
+GFX_DESC_BIAS = 0x10000000  # byte-address bias keeping descriptor `ad` clear
+                            # of the low record image; bounded at admission so
+                            # biased addresses always fit the 32-bit header.
+
+
+class GfxMemory:
+    """Hybrid shader memory for graphics waves.  Descriptor binding ranges
+    (biased `ad` bases) route to the device aperture; every other word --
+    vertex inputs, varying outputs, scratch -- stays in a bounded internal
+    store so records and descriptor content cannot alias."""
+
+    def __init__(self, executor, context, bindings):
+        self.executor, self.context, self.bindings = executor, context, bindings
+        self.store = {}
+
+    def _access(self, word, write=False):
+        if not self.executor._live(self.context):
+            raise KeyError('shader context was retired')
+        if type(word) is not int or word < 0:
+            raise ValueError('invalid shader word address')
+        address = word * 4
+        for binding in self.bindings:
+            if binding.owner is None:
+                continue
+            base = binding.owner.base + binding.offset
+            lo = GFX_DESC_BIAS + base
+            if lo <= address and address + 4 <= lo + binding.size:
+                if write and binding.kind != 7:
+                    raise KeyError('shader write to read-only descriptor')
+                return self.executor.execution.state.aperture, \
+                    address - GFX_DESC_BIAS
+        return None
+
+    def get(self, word, default=0):
+        access = self._access(word)
+        if access is None:
+            return self.store.get(word, default)
+        memory, address = access
+        return int.from_bytes(memory.read(address, 4), 'little')
+
+    def __getitem__(self, word):
+        return self.get(word)
+
+    def __setitem__(self, word, value):
+        access = self._access(word, True)
+        if access is None:
+            self.store[word] = value & 0xFFFFFFFF
+            return
+        memory, address = access
+        memory.write(address, int(value & 0xFFFFFFFF).to_bytes(4, 'little'))
 
 
 @dataclass(frozen=True)
 class Shade:
     """One draw's vertex-shader stage.  `fetch` is executed first inside the
-    same runtime so records observe earlier queued writes exactly once."""
+    same runtime so records observe earlier queued writes exactly once.
+    `bindings` carries resolved buffer descriptor operands (ShaderBinding)."""
     fetch: Fetch
     code: tuple
     push: tuple = ()
     batch: int = BATCH_MAX
+    bindings: tuple = ()
 
     @property
     def size(self):
@@ -39,7 +98,9 @@ class ShadeRuntime:
                 any(type(w) is not int or not 0 <= w < 1 << 32
                     for w in operation.push) or
                 type(operation.batch) is not int or
-                not 0 < operation.batch <= BATCH_MAX):
+                not 0 < operation.batch <= BATCH_MAX or
+                not isinstance(operation.bindings, tuple) or
+                len(operation.bindings) > 16):
             raise ValueError('vertex shade operation exceeds native profile')
         try:
             scan = Scanner(list(operation.code)).scan()
@@ -47,12 +108,50 @@ class ShadeRuntime:
             raise ValueError('vertex shader scan failed: ' + str(error)) from error
         if scan.em != EM['VERTEX']:
             raise ValueError('vertex shade requires a vertex execution model')
-        for row in scan.decor.values():
-            if row.get('binding') is not None or row.get('set') is not None:
-                raise ValueError('vertex shade descriptor bindings are not admitted')
+        bound = set()
+        for binding in operation.bindings:
+            if (not isinstance(binding, ShaderBinding) or
+                    binding.kind not in (6, 7) or
+                    type(binding.descriptor_set) is not int or
+                    not 0 <= binding.descriptor_set < 4 or
+                    type(binding.binding) is not int or
+                    not 0 <= binding.binding < 256 or
+                    type(binding.offset) is not int or
+                    type(binding.size) is not int or
+                    binding.offset % 4 or binding.size % 4 or
+                    binding.size <= 0 or
+                    type(binding.element) is not int or
+                    not 0 <= binding.element < 16):
+                raise ValueError('unsupported vertex shade binding')
+            key = (binding.descriptor_set, binding.binding, binding.element)
+            if key in bound:
+                raise ValueError('duplicate vertex shade descriptor element')
+            bound.add(key)
+        for vid, row in scan.decor.items():
+            if row.get('binding') is None and row.get('set') is None:
+                continue
+            var = scan.vars.get(vid)
+            storage = var.get('storage') if var else None
+            if storage not in (SC['UNIFORM'], SC['SBUF']):
+                raise ValueError('vertex shade descriptor storage is not admitted')
+            if ((row.get('set'), row.get('binding')) not in
+                    {(b.descriptor_set, b.binding) for b in operation.bindings}):
+                raise ValueError('vertex shade descriptor is not bound')
         self.executor, self.context, self.operation = executor, context, operation
         self.fetch = FetchRuntime(executor, context, operation.fetch)
         self.owners = dict(self.fetch.owners)
+        self.bind_rows = []
+        self.bind_pad = 0
+        for binding in operation.bindings:
+            base = executor._extent(context, binding.owner, binding.offset,
+                                    binding.size)
+            if base + binding.size > (1 << 32) - GFX_DESC_BIAS:
+                raise ValueError('vertex shade descriptor address overflows profile')
+            self.bind_rows.append((binding.descriptor_set, binding.binding,
+                                   binding.size, GFX_DESC_BIAS + base,
+                                   binding.kind << 16 | binding.element))
+            self.bind_pad += binding.size // 4
+            self.owners[id(binding.owner)] = binding.owner
         self.vary = bytearray()
         self.model = self.ivs = None
         self.batch_start = self.cursor = self.steps = self.batches = 0
@@ -78,14 +177,22 @@ class ShadeRuntime:
         # input image at mem word 0; out_base is a byte address so VS-out
         # records land immediately after it.  vbase/inst stay 0; the VS
         # builtin path reads per-record slot 8, which fetch already wrote.
-        words = [len(self.operation.code), 0, len(self.operation.push),
+        # Binding rows sit between the SPIR-V and push sections; the per-
+        # binding init-word slots are emitted as placeholders (consumed but
+        # not stored because a live GfxMemory is supplied) so the trailing
+        # graphics section stays aligned.
+        flat = [word for row in self.bind_rows for word in row]
+        words = [len(self.operation.code), len(self.bind_rows),
+                 len(self.operation.push),
                  1, 1, 1, 4, 0,                 # flags bit2 = graphics wave work
-                 *self.operation.code, *self.operation.push, 0,
+                 *self.operation.code, *flat, *self.operation.push, 0,
+                 *([0] * self.bind_pad),
                  0,                            # stage word = SPIR-V Vertex EM
                  count, 0, out_base, 0, 0, nin,
                  *words_in, 0, 0]
+        memory = GfxMemory(self.executor, self.context, self.operation.bindings)
         try:
-            self.model = Model(words)
+            self.model = Model(words, memory=memory)
         except Exception as error:
             raise ValueError('vertex shader model failed: ' + str(error)) from error
         if self.model.gfx != 1 or self.model.gcnt != count:

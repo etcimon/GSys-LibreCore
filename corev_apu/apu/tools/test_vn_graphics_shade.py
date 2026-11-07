@@ -5,6 +5,7 @@ import struct
 import unittest
 
 import test_vn_transfers as transfer_fixture
+from vn_compute import ShaderBinding
 from vn_graphics_fetch import ATTR_STRIDE, Fetch
 from vn_graphics_shade import Shade
 from vn_transfer_executor import Transfer
@@ -15,13 +16,14 @@ def f32bits(value):
     return struct.unpack('<I', struct.pack('<f', value))[0]
 
 
-def vs_program(desc=False):
+def vs_program(desc=False, ubo=False):
     """Hand-assembled equivalent of corpus/vs_passthru.vert:
     pos=loc0 vec2, col=loc1 vec4 -> Position=vec4(pos.xy,.5,1),
     vcol=loc0 vec4(col.rgb, float(VertexIndex)).  Self-contained so the
     frozen cohort needs no corpus binaries.  desc=True adds an unused
-    DescriptorSet/Binding-decorated UBO to exercise admission refusal."""
-    words = [0x07230203, 0x00010300, 0, 40, 0]
+    DescriptorSet/Binding-decorated UBO; ubo=True additionally loads it into
+    Position.w so descriptor reads are observable in the vary records."""
+    words = [0x07230203, 0x00010300, 0, 48, 0]
 
     def emit(opcode, *values):
         words.extend(((len(values) + 1) << 16 | opcode, *values))
@@ -34,7 +36,7 @@ def vs_program(desc=False):
     emit(71, 15, 30, 0)             # vcol  Location 0
     emit(71, 13, 11, 42)            # vidx  BuiltIn VertexIndex
     emit(71, 14, 11, 0)             # glpos BuiltIn Position
-    if desc:
+    if desc or ubo:
         emit(71, 16, 34, 0)         # ubo   DescriptorSet 0
         emit(71, 16, 33, 0)         # ubo   Binding 0
     emit(19, 1)                     # %void
@@ -47,14 +49,14 @@ def vs_program(desc=False):
     emit(32, 8, 1, 5)               # ptr Input v4f
     emit(32, 9, 1, 6)               # ptr Input int
     emit(32, 10, 3, 5)              # ptr Output v4f
-    if desc:
+    if desc or ubo:
         emit(32, 17, 2, 6)          # ptr Uniform int
     emit(59, 7, 11, 1)              # pos
     emit(59, 8, 12, 1)              # col
     emit(59, 9, 13, 1)              # vidx
     emit(59, 10, 14, 3)             # glpos
     emit(59, 10, 15, 3)             # vcol
-    if desc:
+    if desc or ubo:
         emit(59, 17, 16, 2)         # ubo (Uniform)
     emit(43, 3, 18, 0)              # f0
     emit(43, 3, 19, 0x3F000000)     # f0.5
@@ -65,7 +67,10 @@ def vs_program(desc=False):
     emit(61, 4, 24, 11)             # p   = Load v2f pos
     emit(81, 3, 25, 24, 0)          # x   = p.x
     emit(81, 3, 26, 24, 1)          # y   = p.y
-    emit(80, 5, 27, 25, 26, 19, 20) # pos4 = (x, y, .5, 1)
+    if ubo:
+        emit(61, 6, 35, 16)         # ui  = Load int ubo
+        emit(111, 3, 36, 35)        # uf  = ConvertSToF ui
+    emit(80, 5, 27, 25, 26, 19, 36 if ubo else 20)  # pos4=(x,y,.5,ubo|1)
     emit(62, 14, 27)                # Store glpos pos4
     emit(61, 5, 28, 12)             # c   = Load v4f col
     emit(61, 6, 29, 13)             # vi  = Load int vidx
@@ -150,6 +155,34 @@ class ShadeTests(unittest.TestCase):
             # col.rgb = (0.25, 0.5, 0.75) constant attribute
             self.assertIn(f32bits(0.25), flat)
             self.assertIn(f32bits(0.75), flat)
+
+    def test_ubo_descriptor_read_reaches_position_w(self):
+        ubo = 12345
+        self.aperture.write(self.owner.base + 1024, struct.pack('<i', ubo))
+        binding = ShaderBinding(self.owner, 1024, 4, binding=0,
+                                descriptor_set=0, kind=6, element=0)
+        job = self.executor.enqueue(self.context, [
+            Shade(self.fetch(count=3), vs_program(ubo=True),
+                  bindings=(binding,))])
+        runtime = job.runtimes[0]
+        self.drain()
+        self.assertEqual(job.state, 'done')
+        vary = bytes(runtime.vary)
+        self.assertEqual(len(vary), 3 * ATTR_STRIDE)
+        for i in range(3):
+            words = struct.unpack_from('<36I', vary, i * ATTR_STRIDE)
+            self.assertIn(f32bits(float(ubo)), set(words))
+
+    def test_ubo_descriptor_requires_matching_binding(self):
+        with self.assertRaises(ValueError):
+            self.executor.enqueue(self.context, [
+                Shade(self.fetch(count=3), vs_program(ubo=True))])
+        wrong_set = ShaderBinding(self.owner, 1024, 4, binding=0,
+                                  descriptor_set=1, kind=6, element=0)
+        with self.assertRaises(ValueError):
+            self.executor.enqueue(self.context, [
+                Shade(self.fetch(count=3), vs_program(ubo=True),
+                      bindings=(wrong_set,))])
 
     def test_indexed_fetch_feeds_vertex_index_builtin(self):
         # indices {0,1,2} at firstIndex=0 -> VertexIndex = index value

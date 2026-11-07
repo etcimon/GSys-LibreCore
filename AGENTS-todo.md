@@ -18054,11 +18054,21 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
 - [x] 616 frozen checks pass 18.032s on ovh_calltorch
   (native-drawreplay-05, cohort native-execution.vah9c9ct),
   sources_unchanged true; audit pass.
-- [ ] Blend/depth/MRT, descriptor-bound draws, helper lanes, non-triangle
-  topology, flat/nopersp interpolation and capability/CTS/physical gates
-  before any capset or stock vkCmdDraw* advertisement; host-model
-  evidence only.
-  Record: `architecture/uncore/apu-native-graphics-drawexec-implementation.md`.
+- [x] Vertex-shade buffer descriptors (UBO/SSBO kind 6/7): `Shade.bindings`
+  plumbed `stage_bindings`->`DrawExec.vs_bindings`->`Shade`->`ShadeRuntime`;
+  `GfxMemory` hybrid wave memory routes biased descriptor `ad` ranges to
+  `state.aperture` (kind-7 write) while records stay internal; header emits
+  real binding rows + init placeholders; `UNIFORM`/`SBUF` storage admitted,
+  `UNIFORMCONST`/fragment bindings still refused.  8 shade tests incl. UBO
+  read into `Position.w` + unbound/wrong-set refusal; remote cohort
+  `native-gfxubo-01` 716 checks PASS (native-execution.zolkoufm,
+  sources_unchanged true), local `test_vn_*` 731 PASS.
+  Record: `architecture/uncore/apu-native-graphics-shade-implementation.md`.
+- [ ] Fragment-shade descriptors, image/sampler (`UNIFORMCONST`) binds,
+  in-model dynamic offsets, blend/depth/MRT, helper lanes, non-triangle
+  topology, flat/nopersp interpolation, end-to-end descriptor draw replay
+  and capability/CTS/physical gates before any capset or stock vkCmdDraw*
+  advertisement; host-model evidence only.
 
 ### vgctl Retained-Unmap Owner-Hold (RTL)
 

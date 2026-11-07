@@ -16,12 +16,14 @@ from vn_graphics_fetch import Fetch, FetchVertex
 def _push(stages):
     result = {}
     for stage in stages:
-        if stage.bindings:
-            raise ValueError('graphics draw descriptor bindings are not admitted')
-        result[stage.stage] = stage.push
+        result[stage.stage] = (stage.push, stage.bindings)
     if 1 not in result or 16 not in result:
         raise ValueError('graphics draw stage bindings are incomplete')
-    return result[1], result[16]
+    vs_push, vs_bindings = result[1]
+    fs_push, fs_bindings = result[16]
+    if fs_bindings:
+        raise ValueError('graphics draw fragment descriptor bindings are not admitted')
+    return vs_push, fs_push, vs_bindings
 
 
 def _scissor(plan):
@@ -58,7 +60,7 @@ def operation(engine, context_id, plan, remember, guards):
     """Validate `plan` and return a DrawExec op, or None when the draw's
     effective scissor is empty (no fragments can be produced)."""
     snapshot = plan.pipeline
-    vs_push, fs_push = _push(plan.stage_bindings.stages)
+    vs_push, fs_push, vs_bindings = _push(plan.stage_bindings.stages)
     scissor = _scissor(plan)
     if scissor is None:
         for ref, kind in plan.references:
@@ -88,6 +90,7 @@ def operation(engine, context_id, plan, remember, guards):
                   viewport, scissor, attachment.owner, attachment.offset,
                   attachment.pitch, framebuffer.width, framebuffer.height,
                   attachment.fmt, vs_push=vs_push, fs_push=fs_push,
+                  vs_bindings=vs_bindings,
                   flat=0, nopersp=0, front_ccw=1 - fixed.front_face,
                   cull=fixed.cull, location=location)
     for ref, kind in plan.references:
