@@ -18,6 +18,13 @@ module g6lc_storamic_virtio_dev #(
 ) (
   input logic clk_i,
   input logic rst_ni,
+  input logic quiesce_i,
+  output logic quiesced_o,
+  output logic quiesce_error_o,
+  // Independent policy/control seal; DMA pause still permits MMIO service.
+  input logic ctrl_quiesce_i,
+  output logic ctrl_quiesced_o,
+  output logic inflight_o,
   input g6lc_storamic_pkg::axil_req_t ctrl_req_i,
   output g6lc_storamic_pkg::axil_resp_t ctrl_resp_o,
   output logic irq_o,
@@ -48,7 +55,13 @@ module g6lc_storamic_virtio_dev #(
   output logic [7:0] st_be_o,
   input logic st_rvalid_i,
   input logic [63:0] st_rdata_i,
-  input logic st_err_i
+  input logic st_err_i,
+  // ST-037D FLUSH seam: st_durable_i offers VIRTIO_BLK_F_FLUSH; the backend
+  // raises st_flush_req_o for a negotiated FLUSH and holds it until ack/err.
+  input logic st_durable_i,
+  output logic st_flush_req_o,
+  input logic st_flush_ack_i,
+  input logic st_flush_err_i
 );
   localparam int unsigned SegW = $clog2(MaxSegs + 1);
 
@@ -57,15 +70,23 @@ module g6lc_storamic_virtio_dev #(
   logic [15:0] queue_num;
   logic [63:0] queue_desc, queue_driver, queue_device;
   logic [7:0] reset_epoch;
+  logic features_ok;
+  logic [63:0] driver_features;
   logic ring_idle, blk_idle, port_busy;
+  logic ring_quiesced, ring_job_idle, blk_job_idle, ctrl_inflight;
+  assign quiesced_o = ring_quiesced && blk_job_idle && !port_busy;
+  assign ctrl_quiesced_o = rst_ni && ctrl_quiesce_i && !ctrl_inflight;
+  assign inflight_o = !ring_job_idle || !blk_job_idle || port_busy || ctrl_inflight;
 
   g6lc_storamic_virtio_mmio #(.VendorId(VendorId), .QueueNumMax(QueueNumMax)) i_mmio (
     .clk_i, .rst_ni, .ctrl_req_i, .ctrl_resp_o,
+    .quiesce_i(ctrl_quiesce_i), .inflight_o(ctrl_inflight),
     .device_usable_i, .capacity_i, .capacity_update_i,
+    .flush_cap_i(st_durable_i),
     .dma_idle_i(ring_idle && blk_idle && !port_busy),
     .used_event_i(used_event), .ring_fault_i(ring_fault),
-    .notify_o(notify), .irq_o, .driver_ok_o(driver_ok), .features_ok_o(),
-    .driver_features_o(), .reset_epoch_o(reset_epoch),
+    .notify_o(notify), .irq_o, .driver_ok_o(driver_ok), .features_ok_o(features_ok),
+    .driver_features_o(driver_features), .reset_epoch_o(reset_epoch),
     .queue_ready_o(queue_ready), .queue_num_o(queue_num),
     .queue_desc_o(queue_desc), .queue_driver_o(queue_driver),
     .queue_device_o(queue_device), .reset_pending_o(reset_pending)
@@ -90,8 +111,10 @@ module g6lc_storamic_virtio_dev #(
     .queue_ready_i(queue_ready), .queue_num_i(queue_num),
     .queue_desc_i(queue_desc), .queue_driver_i(queue_driver),
     .queue_device_i(queue_device), .driver_ok_i(driver_ok), .notify_i(notify),
+    .quiesce_i, .quiesced_o(ring_quiesced), .quiesce_error_o,
     .reset_pending_i(reset_pending), .reset_epoch_i(reset_epoch),
-    .dma_idle_o(ring_idle), .used_event_o(used_event), .ring_fault_o(ring_fault),
+    .dma_idle_o(ring_idle), .job_idle_o(ring_job_idle),
+    .used_event_o(used_event), .ring_fault_o(ring_fault),
     .dma_base_i, .dma_size_i,
     .dma_req_o(r_req), .dma_gnt_i(r_gnt), .dma_we_o(r_we), .dma_addr_o(r_addr),
     .dma_wdata_o(r_wdata), .dma_be_o(r_be), .dma_rvalid_i(r_rvalid),
@@ -104,6 +127,7 @@ module g6lc_storamic_virtio_dev #(
 
   g6lc_storamic_virtio_blk #(.MaxSegs(MaxSegs)) i_blk (
     .clk_i, .rst_ni, .reset_pending_i(reset_pending), .idle_o(blk_idle),
+    .job_idle_o(blk_job_idle),
     .req_valid_i(rq_valid), .req_ready_o(rq_ready), .req_nsegs_i(rq_nsegs),
     .req_seg_addr_i(rq_addr), .req_seg_len_i(rq_len), .req_seg_write_i(rq_wr),
     .rsp_valid_o(rs_valid), .rsp_written_len_o(rs_len), .rsp_fault_o(rs_fault),
@@ -113,7 +137,9 @@ module g6lc_storamic_virtio_dev #(
     .dma_rdata_i, .dma_err_i,
     .store_ready_i, .capacity_i, .serial_i,
     .st_req_o, .st_gnt_i, .st_we_o, .st_addr_o, .st_wdata_o, .st_be_o,
-    .st_rvalid_i, .st_rdata_i, .st_err_i
+    .st_rvalid_i, .st_rdata_i, .st_err_i,
+    .flush_en_i(features_ok && driver_features[9] && st_durable_i),
+    .st_flush_req_o, .st_flush_ack_i, .st_flush_err_i
   );
 
   // Shared DMA port: the backend has priority (it only requests while the

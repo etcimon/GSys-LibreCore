@@ -1,8 +1,15 @@
 ${CVA6_REPO_DIR}/g6lc_storamic/rtl/include/g6lc_storamic_cfg_pkg.sv
 ${CVA6_REPO_DIR}/g6lc_storamic/rtl/include/g6lc_storamic_pkg.sv
+${CVA6_REPO_DIR}/g6lc_storamic/rtl/include/g6lc_storamic_checkpoint_pkg.sv
 ${CVA6_REPO_DIR}/g6lc_storamic/rtl/include/g6lc_storamic_pad_pkg.sv
 ${CVA6_REPO_DIR}/g6lc_storamic/rtl/fabric/g6lc_storamic_region_pkg.sv
 ${CVA6_REPO_DIR}/g6lc_storamic/rtl/discovery/g6lc_storamic_discovery_pkg.sv
+${CVA6_REPO_DIR}/g6lc_storamic/rtl/fabric/g6lc_storamic_checkpoint_ctrl.sv
+${CVA6_REPO_DIR}/g6lc_storamic/rtl/fabric/g6lc_storamic_checkpoint_io.sv
+${CVA6_REPO_DIR}/g6lc_storamic/rtl/fabric/g6lc_storamic_checkpoint_media.sv
+${CVA6_REPO_DIR}/g6lc_storamic/rtl/fabric/g6lc_storamic_store_guard.sv
+${CVA6_REPO_DIR}/g6lc_storamic/rtl/fabric/g6lc_storamic_checkpoint_service.sv
+${CVA6_REPO_DIR}/g6lc_storamic/rtl/fabric/g6lc_storamic_checkpoint_policy.sv
 ${CVA6_REPO_DIR}/g6lc_storamic/rtl/frontend/g6lc_storamic_axi_refuse.sv
 ${CVA6_REPO_DIR}/g6lc_storamic/rtl/frontend/g6lc_storamic_axi_memory.sv
 ${CVA6_REPO_DIR}/g6lc_storamic/rtl/fabric/g6lc_storamic_slot_mux.sv

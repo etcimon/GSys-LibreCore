@@ -44,6 +44,7 @@ module wt_dcache_missunit
     input logic [NumPorts-1:0] miss_req_i,
     output logic [NumPorts-1:0] miss_ack_o,
     input logic [NumPorts-1:0] miss_nc_i,
+    input logic [NumPorts-1:0][2:0] miss_prot_i,
     input logic [NumPorts-1:0] miss_we_i,
     input logic [NumPorts-1:0][CVA6Cfg.XLEN-1:0] miss_wdata_i,
     input logic [NumPorts-1:0][CVA6Cfg.DCACHE_USER_WIDTH-1:0] miss_wuser_i,
@@ -165,6 +166,7 @@ module wt_dcache_missunit
   // Uncached CAS store updates DRAM only; drop any stale L1 line so later
   // cached loads see the new value (CRT stack lines are often hot).
   logic        cas_inv;
+  logic [CVA6Cfg.PLEN-1:0] amo_paddr_q;  // latched AMO paddr for line drop
 
   // MSHR for reads
   typedef struct packed {
@@ -436,6 +438,11 @@ module wt_dcache_missunit
   // svt-pipe: cut-ok mem
   assign mem_data_o     = mem_req_c;
   assign mem_data_req_o = mem_req_valid_c;
+  if (CVA6Cfg.StoramicCheckpointEn) begin : gen_data_origin
+    assign mem_req_c.data_prot =
+        (amo_sel || cas_amo_sel || config_pkg::is_inside_cacheable_regions(
+            CVA6Cfg, 64'(tmp_paddr))) ? 3'b000 : miss_prot_i[miss_port_idx];
+  end
 
   // outgoing memory requests (AMOs are always uncached)
   // cas_amo_sel: CAS.D load/store uses AMO address/tid/nc but plain LD/ST rtype
@@ -568,7 +575,7 @@ module wt_dcache_missunit
   assign wr_cl_idx_o =
       (COH_VALIDATE && inv_vld) ? mem_rtrn_i.inv.idx[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH] :
       (flush_en) ? cnt_q :
-      (cas_inv)  ? amo_req_i.operand_a[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH] :
+      (cas_inv)  ? amo_paddr_q[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH] :
       (inv_vld)  ? mem_rtrn_i.inv.idx[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH] :
                    mshr_q.paddr[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH];
 
@@ -727,6 +734,12 @@ module wt_dcache_missunit
             if ((amo_req_i.amo_op != AMO_LR) || sc_backoff_over) begin
               mem_req_valid_c = 1'b1;
               if (mem_data_ack_i) begin
+                // Drop the L1 line at request accept, same as the CAS.D path:
+                // the uncached memory-side RMW does not update D$, and a
+                // cached copy would serve stale data on the very first load
+                // after the AMO retires (a completion-time drop races that
+                // load's tag lookup — observed on the Storamic backend).
+                cas_inv = 1'b1;
                 state_d = AMO_WAIT;
               end
             end
@@ -813,6 +826,7 @@ module wt_dcache_missunit
       mshr_rdrd_collision_q <= '0;
       miss_req_masked_q     <= '0;
       amo_req_q             <= '0;
+      amo_paddr_q           <= '0;
       stores_inflight_q     <= '0;
       cas_old_q             <= '0;
       cas_new_q             <= '0;
@@ -827,6 +841,11 @@ module wt_dcache_missunit
       mshr_rdrd_collision_q <= mshr_rdrd_collision_d;
       miss_req_masked_q     <= miss_req_masked_d;
       amo_req_q             <= amo_req_d;
+      // Latch the AMO paddr at request acceptance so the completion-time
+      // line invalidation (cas_inv) drops the right index even after the
+      // requester released operand_a.
+      if (state_q == IDLE && CVA6Cfg.RVA && amo_req_i.req)
+        amo_paddr_q       <= amo_req_i.operand_a[CVA6Cfg.PLEN-1:0];
       stores_inflight_q     <= stores_inflight_d;
       cas_old_q             <= cas_old_d;
       cas_new_q             <= cas_new_d;

@@ -197,6 +197,7 @@ module cva6
     },
 
     localparam type lsu_ctrl_t = struct packed {
+      logic [2:0]                       data_prot;
       logic                             valid;
       logic [CVA6Cfg.VLEN-1:0]          vaddr;
       logic [31:0]                      tinst;
@@ -263,6 +264,7 @@ module cva6
 
     // D$ data requests
     localparam type dcache_req_i_t = struct packed {
+      logic [2:0]                         data_prot;
       logic [CVA6Cfg.DCACHE_INDEX_WIDTH-1:0] address_index;
       logic [CVA6Cfg.DCACHE_TAG_WIDTH-1:0]   address_tag;
       logic [CVA6Cfg.XLEN-1:0]               data_wdata;
@@ -3449,20 +3451,30 @@ module cva6
   // Acc dispatcher and store buffer share a dcache request port.
   // Store buffer always has priority access over acc dispatcher.
   dcache_req_i_t [NumPorts-1:0] dcache_req_to_cache;
+  dcache_req_i_t [NumPorts-1:0] dcache_req_mux;
   dcache_req_o_t [NumPorts-1:0] dcache_req_from_cache;
 
   // D$ request
   // Since ZCMT is only enabled for embedded class so MMU should be disabled.
   // Cache port 0 is being utilized in implicit read access in ZCMT extension.
   if (CVA6Cfg.RVZCMT & ~(CVA6Cfg.MmuPresent)) begin
-    assign dcache_req_to_cache[0] = dcache_req_ports_id_cache;
+    assign dcache_req_mux[0] = dcache_req_ports_id_cache;
   end else begin
-    assign dcache_req_to_cache[0] = dcache_req_ports_ex_cache[0];
+    assign dcache_req_mux[0] = dcache_req_ports_ex_cache[0];
   end
-  assign dcache_req_to_cache[1] = dcache_req_ports_ex_cache[1];
-  assign dcache_req_to_cache[2] = dcache_req_ports_acc_cache[0];
-  assign dcache_req_to_cache[3] = dcache_req_ports_ex_cache[2].data_req ? dcache_req_ports_ex_cache [2] :
+  assign dcache_req_mux[1] = dcache_req_ports_ex_cache[1];
+  assign dcache_req_mux[2] = dcache_req_ports_acc_cache[0];
+  assign dcache_req_mux[3] = dcache_req_ports_ex_cache[2].data_req ? dcache_req_ports_ex_cache [2] :
                                                                           dcache_req_ports_acc_cache[1];
+  always_comb begin : p_data_origin
+    dcache_req_to_cache = dcache_req_mux;
+    for (int p = 0; p < NumPorts; p++) dcache_req_to_cache[p].data_prot = '0;
+    if (config_pkg::g6lc_storamic_origin_supported(CVA6Cfg)) begin
+      dcache_req_to_cache[1].data_prot = dcache_req_ports_ex_cache[1].data_prot;
+      if (dcache_req_ports_ex_cache[2].data_req)
+        dcache_req_to_cache[3].data_prot = dcache_req_ports_ex_cache[2].data_prot;
+    end
+  end
 
   // D$ response
   // Since ZCMT is only enabled for embedded class so MMU should be disabled.

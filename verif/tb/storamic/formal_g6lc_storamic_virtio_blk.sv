@@ -44,6 +44,7 @@ module formal_g6lc_storamic_virtio_blk #(
   logic flreq;
   g6lc_storamic_virtio_blk #(.MaxSegs(4)) dut (
     .clk_i, .rst_ni, .reset_pending_i, .idle_o(idle),
+    .job_idle_o(),
     .req_valid_i, .req_ready_o(rq_ready), .req_nsegs_i, .req_seg_addr_i,
     .req_seg_len_i, .req_seg_write_i,
     .rsp_valid_o(rs_valid), .rsp_written_len_o(rs_len), .rsp_fault_o(rs_fault),

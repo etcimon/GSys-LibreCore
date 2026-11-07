@@ -91,6 +91,7 @@ module g6lc_storamic_top #(
       .RegionBytes(Cfg.ModelBytes), .req_t(req_t), .resp_t(resp_t)
     ) i_data (
       .clk_i, .rst_ni, .testmode_i, .req_i, .resp_o,
+      .quiesce_i(1'b0), .quiesced_o(),
       .source_i, .reset_generation_i, .service_ready_o,
       .sequence_exhausted_o, .faults_o, .events_o, .inflight_o(inflight),
       .mem_ready_i, .mem_req_o, .mem_gnt_i, .mem_we_o, .mem_addr_o,
@@ -111,6 +112,7 @@ module g6lc_storamic_top #(
       .req_t(req_t), .resp_t(resp_t)
     ) i_data (
       .clk_i, .rst_ni, .testmode_i, .req_i, .resp_o,
+      .quiesce_i(1'b0), .quiesced_o(),
       .source_i, .reset_generation_i, .service_ready_o,
       .sequence_exhausted_o, .faults_o, .events_o, .inflight_o(inflight),
       .mem_ready_i, .mem_req_o, .mem_gnt_i, .mem_we_o, .mem_addr_o,

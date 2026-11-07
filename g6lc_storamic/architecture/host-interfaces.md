@@ -1,6 +1,8 @@
 # Host interfaces: native RAM and VirtIO-MMIO
 
-Status: selected architecture; no implemented VirtIO-MMIO device capability.
+Status: selected architecture with model RTL and selected-leaf evidence.
+Native Linux, physical media and protected persistence still require their own
+qualification gates; see [current development status](development-status.md).
 The normative decision and sources are in [VirtIO-MMIO architecture](virtio-mmio.md).
 That decision supersedes the former CXL 2.0 target and closes the transport choice
 in favor of modern VirtIO-MMIO, pinned to VIRTIO 1.4 CS01 (8 April 2026).

@@ -899,6 +899,35 @@ Do not advertise persistence based on typical save times or a checksum alone.
 
 ### ST-025 — Implement protected save/restore and interrupted recovery
 
+**Current status: open.** The source audit in
+[`development-status.md`](development-status.md) supersedes later historical
+claims of model-level completion. Commit telemetry is not a persistent journal;
+the model magic-key interlock is not a protected stick-wide ABI. Commit/replay/
+save and response/readback corrections pass the pinned `dstore` leaf at delays
+0/1/4/16 (`storamic-555acfbc60e9`), including four rejecting negative oracles.
+RAM scan/drain and last-valid-image prerequisites also pass the expanded pinned
+leaf `storamic-7cd4d99acf53` (73/79/85/109 checks at delays 0/1/4/16, plus four
+rejecting negative oracles). RAM images are now two tc_sram banks, published
+only on a completed save, and retained across interrupted save/restore.
+These are selected-leaf results, not stick-wide coordination, durable
+identity/map metadata, aggregate or physical-persistence qualification.
+
+Next work is split into ST-025A..E in
+[`checkpoint-coordination.md`](checkpoint-coordination.md). ST-025A's AXI
+quiesce/drain primitive is implemented and locally component-validated, including
+depth-12 safety/reachability and synthesis. Native bindings keep it tied low.
+ST-025B now implements the VirtIO producer's job pause/drain and distinguishes
+job idle from per-port idle; its 137-check device bench and standalone positive/
+negative local simulations pass. Other enabled writers still need real drain
+acknowledgements. ST-025C1 implements external RAM prepare/publish/abort; 139
+checks at delays 0/1/4/16, four rejecting oracles, external-mode synthesis and
+legacy delay-16 dstore pass locally. C2 still must coordinate RAM with flash.
+The external selected-bank/validity test fixture is not persistent metadata.
+Identity/map-bound
+reset recovery (D) and physical protection/health admission (E/ST-024) stay open.
+Remote rerun `storamic-cd8cf2d11ad4` is incomplete after its tool prefix
+disappeared between builds; local results do not promote that receipt.
+
 **Owner / files:** **proposed** `g6lc_storamic/rtl/persistence/` journal/checkpoint/recovery
 engines and health/admission controls. **Depends:** ST-008, ST-009, ST-017,
 ST-018, ST-024.
@@ -1734,3 +1763,399 @@ long-running native RAM, ST-009/ST-012 must define and prove quiescent sequence
 renewal — stop admission, drain contexts and binding, advance the reset
 generation, then reuse sequence space without clearing RAM. Widening or silently
 wrapping the counter is not the lifecycle protocol.
+
+## ST-032 reassessment (2026-11-04, after ST-037C step 6)
+
+### Delivered, with evidence (selected-stage, not aggregate qualification)
+
+| Area | Tasks | State | Evidence (latest) |
+| --- | --- | --- | --- |
+| Standalone refusal, profiles, model frontend | ST-001A, ST-002, ST-004A, ST-005..ST-007 | done | `storamic-be8f643dc369` (sim), `storamic-fac26aab948c` (synth+formal) |
+| Region map, routing, runtime map | ST-008A..C, ST-010B | done | same suite |
+| Discovery lifecycle (synthetic fixture) | ST-009A/B | done; real pad binding is ST-014 | same suite |
+| Control registers, native control page | ST-010A, ST-010C | done | `storamic-b2d70c5715cd` |
+| VirtIO-MMIO transport, split ring, virtio-blk backend | ST-034..ST-036 | done (bounded formal) | `storamic-2c518918edf5` |
+| Native VirtIO device, DMA, coherent writes, roles | ST-037A..C (steps 1-6) | done on the labelled volatile model store | `storamic-native-io-mmio-01`, `storamic-native-primary-mmio-01` |
+| Primary-memory role on a simulation memory | ST-011B step 1 | functional for bare-metal programs | `storamic-native-primary-mmio-01` |
+| Core defects found by Storamic bring-up | — | fixed in `core/`: WT merge `checked`, LR/SC window, I/O forward, I/O merge | `core-directed-mmio-01` (13/13) |
+
+### Not delivered; ranked by what unblocks the most
+
+1. **Aggregate gate on current sources** (ST-001B/ST-003). Gate v5 (22/25)
+   predates the issue-stage and I/O fixes. Its three failures (two fetch
+   formal solver failures, a cv32a65x Spike-only timeout) are outside
+   Storamic. Next: rerun on a fresh snapshot.
+2. **Linux on RTL** (ST-038, ST-023). Device side is ready: `virtio,mmio`
+   node `dma-coherent`, Linux-shaped register accesses pass. Blockers: the
+   Linux payload directory was deleted with the old runs and must be
+   rebuilt; a bounded boot budget on the IO role is the first target.
+3. **Primary role beyond bare metal** (ST-011B/ST-012). Next: OpenSBI to
+   `sbi_init` on `G6LC_STORAMIC+G6LC_STORAMIC_MODEL`, then atomics
+   qualification across CPU and DMA, then sequence-space renewal before
+   long runs (fail-safe today).
+4. **Persistence contract before media** (ST-018, ST-024). Next bounded
+   batch, implementable without physical media: plumb VIRTIO_BLK_F_FLUSH
+   end to end behind a store-reported durability capability. The capability
+   stays 0 for the model store, so FLUSH stays unoffered and nothing is
+   claimed.
+5. **Multiple devices** (one VirtIO page per stick, PLIC 11+n) and
+   discovery-driven `device_usable_i`/capacity (ST-037 remainder, ST-014).
+6. **Physical media and PHY** (ST-014..ST-017, ST-027/028, ST-031): blocked
+   on a selected electrical/media profile; no change.
+7. **Optional VirtIO memory devices** (ST-039 virtio-mem, ST-040 virtio-pmem)
+   and queue scaling (ST-041): after 2-4.
+
+### Architecture decisions recorded in this checkpoint
+
+- Device writes are made coherent by the cluster CMO engine (block
+  invalidate before completion); device reads rely on the write-through L1.
+  A write-back L1 configuration must add clean-before-read or drop
+  `dma-coherent`.
+- I/O accesses are never merged or forwarded in the core; drivers may use
+  the Linux `readl`/`writel` shape.
+- The primary role's simulation memory is a binding, not a controller; the
+  production binding is the DDR/LPDDR seam (ST-015).
+
+### Next batch (chosen)
+
+- ST-037D: FLUSH plumbing (item 4). Interfaces:
+  - store seam gains `st_durable_i` (capability), `st_flush_req_o`,
+    `st_flush_ack_i`, `st_flush_err_i`;
+  - the transport offers feature bit 9 only when `st_durable_i`;
+  - the backend executes type 4 only when the driver accepted bit 9
+    (otherwise UNSUPP as today);
+  - status OK after `st_flush_ack_i`, IOERR on `st_flush_err_i`.
+  Oracle: the `vblk`/`vdev` benches with a durable fixture and the
+  existing non-durable cases unchanged.
+- ST-001B rerun on a fresh snapshot (item 1).
+
+ST-037D (2026-11-04): **FLUSH plumbing behind a durability capability.**
+- `g6lc_storamic_virtio_mmio`: `flush_cap_i` offers VIRTIO_BLK_F_FLUSH
+  (feature bit 9, `DeviceFeaturesSel` 0). FEATURES_OK accepts only offered
+  bits.
+- `g6lc_storamic_virtio_blk`: new seam `flush_en_i`, `st_flush_req_o`,
+  `st_flush_ack_i`, `st_flush_err_i`.
+  - With FLUSH negotiated, type 4 raises a held flush request after every
+    earlier store write has completed: status OK on ack, IOERR on err.
+    Without FLUSH it answers UNSUPP as before.
+  - A flush in progress keeps `idle_o` low across a device reset until the
+    store answers.
+- `g6lc_storamic_virtio_dev`: `st_durable_i` drives the capability; the
+  harness ties it to 0 (the model store is volatile), so nothing new is
+  advertised.
+
+Evidence: `storamic-a08362cc7b07` — the `vblk` bench passes 60 checks,
+including the new flush cases: OK after the store ack, exactly one request
+after earlier writes, IOERR on store error, UNSUPP when not negotiated, no
+store write. `virtio`, `vdev` and `ctrl` pass, as do the virtio/vblk/vdev
+synthesis and the virtio/vblk formal stages (formal ties the new inputs
+to 0, so it does not cover the flush path yet).
+`storamic-native-io-flush-02`: the native VirtIO test still passes, and its
+negative oracle fails at code 16. `storamic-harness-lint-flush-02`: zero
+errors in all four configurations. The `-01` runs used a delta that left
+out the files committed in `d465cc28c` (the remote snapshot predates them);
+the delta builder now includes everything changed since `f2b70d219`.
+
+Still open for persistence: a durable store binding (ST-018) that can drive
+`st_durable_i` honestly; flush formal coverage; FUA/write-cache-toggle
+features stay unoffered.
+
+ST-037D formal coverage (2026-11-04, in flight):
+- `formal_g6lc_storamic_virtio_blk.sv` gains `FlushEn`, a free
+  `st_flush_ack_i`/`st_flush_err_i` environment (assumed only while a
+  flush request is held), a `cover_flush_o` cover point, and a
+  `flreq |-> !dreq && !sreq` safety property. A `..._blk_flush` variant
+  binds `FlushEn=1`; the new `vblk-flush-formal` stage runs it at
+  depth 14/16.
+- The base `vblk-formal` safety depth was raised 12->14 so both variants
+  search the same space.
+- **Latent wrapper defect found at depth 14:** `status_inflight` was not
+  cleared on `reset_pending_i`, so a status write abandoned by a device
+  reset credited `status_wr_done` when its response returned later; a
+  subsequent request's fault response then violated
+  `rs_valid && rs_fault |-> !status_wr_done`
+  (`storamic-66fd7055dcc4`, `storamic-4ea37ce761bf`). Fixed in the
+  wrapper; the RTL itself is unchanged. `dout`/`sout` were removed from
+  the flush property since abandoned beats may legally linger.
+- Reruns: `vff4` (vblk-formal + vblk-flush-formal at the new depths).
+- `storamic-aggregate-gate-v6` launched on the current tree (in flight).
+
+## ST-032 reassessment checkpoint (2026-11-04, inferred-decision pass)
+
+Two implementation gaps closed by inference from the pinned contracts
+(see g6lc_storamic/architecture/decisions.md for the full register):
+
+- **Sequence renewal (D1).** `g6lc_storamic_axi_memory.sv`: exhaustion
+  (allocated == SeqLimit) already stopped admission; now a full drain
+  (!inflight_o) clears `allocated` and advances an 8-bit `epoch` stamped
+  in `txn_id_t`, so reused seq numbers cannot alias stale completions.
+  Epoch saturation is a documented fail-stop, never a wrap. RAM contents
+  untouched. `events_o.seq_renew` pulses for observability; a renewal IRQ
+  is a contract-v5 candidate.
+- **Durable backend + stick composition (D2/D3).**
+  `corev_apu/storamic/g6lc_storamic_durable_store.sv` models the flash
+  chip's commit boundary (write-back staging, flush drains to tc_sram,
+  spill-on-full, read-own-writes). `g6lc_storamic_model_stick.sv` owns the
+  flash chip and publishes one identity/geometry to both transports; the
+  harness derives device_usable/capacity/serial/durable from it. FLUSH is
+  now offered and exercised by storamic_virtio_blk.c (negotiates bank-0
+  bit 9, issues T_FLUSH). Still a model: no power-loss domain or journal
+  replay (ST-024/025).
+- Formal rerun at depth 14/16 passed after the wrapper shadow fix:
+  `storamic-ae7ba275f8bb`. Aggregate gate v6 in flight.
+
+Open asks (nothing internal blocked): VendorID allocation, ST-014
+electrical/media profile, ST-015-017 physical media, ST-024-026
+persistence domain, discovery-driven device_usable (needs ST-014),
+multi-queue after a measured baseline, contract-v5 bit candidates.
+- `storamic-native-io-stick-04` PASS: positive ELF completes the full
+  VirtIO sequence including negotiated FLUSH (T_FLUSH returns OK);
+  negative oracle fails at FAIL_IN_DATA (16) as required.
+
+## Bandwidth + persistence seam (2026-11-04)
+
+- `g6lc_storamic_sim_mem` `RspDelay` (plumbed `g6lc_ai_dram_backend` →
+  attach): RAM-channel bandwidth, 1 beat per RspDelay+1 cycles, default 0.
+- `g6lc_storamic_durable_store` `RspCycles` (interface stretch) +
+  `CommitCycles` (media program time per staged entry) + `power_cut_i`
+  (drops uncommitted staging, errors in-flight completion; committed
+  contents survive — the ST-024 persistence domain boundary).
+- `g6lc_storamic_model_stick` publishes FlashRspCycles/FlashCommitCycles/
+  StageEntries and exposes `power_cut_i`; the tb ties power_cut 0 pending
+  ST-025.
+- decisions.md gains the media/persistence track decomposition (slices
+  A–D): commit boundary DONE, bandwidth knobs DONE, power-loss domain seam
+  in place, recovery/media external.
+- `storamic-native-io-stick-05` PASS: same verdict after the bandwidth
+  knobs and power-cut seam (defaults preserve the prior behavior).
+- `storamic-native-io-stick-07` PASS: durability boundary exercised end to
+  end — committed+spilled data survives the MMIO-triggered power cut, the
+  staged tail drops, and the store keeps serving afterward.
+- `storamic-native-io-stick-08` PASS: journal-backed commit semantics
+  (entry in-commit survives the cut and replays; uncommitted staging
+  drops) — durability test unchanged and green.
+- `storamic-native-io-stick-10` PASS (CommitCycles=8): mid-drain power
+  cut replays the journaled head, drops the staged tail, and the held
+  flush still completes; mid-commit semantics exercised end to end.
+- `storamic-native-io-stick-11` PASS (CommitCycles=8): ST-025 recovery
+  surface landed — cut_count_o/commit_gen_o counters exported through the
+  stick (sim-observable; a real software ABI is a contract-v5 item).
+
+## Stick save/restore + durable-store unit bench (2026-11-04)
+
+- **Stick-level save/restore (ST-025, model).** The stick's RAM chip is
+  now honestly volatile: `g6lc_storamic_sim_mem` clears its contents on
+  `power_cut_i` (reads report zero — the array is lost) and owns a
+  save/restore scan engine — `save_i` walks the array into a behavioral
+  shadow (the flash-backed image, ~NumWords+1 cycles through the tc_sram
+  port, holding the command seam off) and `restore_i` writes it back only
+  when a save completed (`saved_q`; a save torn by a cut invalidates its
+  shadow). `restore_done_o` pulses on completion. The flash side got a
+  matching stick-owned drain: `durable_store.save_i` latches a drain of
+  all staging (same commit path as flush, no requester handshake) and
+  `save_done_o` pulses when the last entry commits. Plumbing:
+  `sim_mem` → `g6lc_storamic_attach` → `g6lc_ai_dram_backend`
+  (`storamic_power_cut_i`/`storamic_save_i`/`storamic_restore_i` →
+  `storamic_save_busy_o`/`storamic_restore_done_o`) → testbench.
+- **Testbench triggers.** New reserved-region MMIO triggers beside the
+  power-cut ones: `StoramicBase+0x3010` (stick save) and `+0x3018`
+  (restore). Save/restore/power-cut are top-level pulses wired to both
+  the stick (flash staging drain + RAM shadow) and the backend (RAM
+  chip), tied off when `StoramicIoEn=0`.
+- **`dstore` unit bench** (`verif/tb/storamic/tb_g6lc_storamic_durable_store.sv`,
+  `run_leaf.py`/`run_remote.py` `dstore` stage): 30 directed checks over
+  the durable store + sim_mem — reset/staging read-own-writes, byte-enable
+  merge, OOB grant+error, staging-full oldest-spill, flush drain +
+  generation count, `CommitCycles>1` mid-drain cut with journal replay of
+  the in-commit head + staged-tail loss + recovery, RAM volatile loss,
+  save → cut → restore round-trip, and a torn-save invalidation.
+  Result: **PASS 30/30** locally (WSL Verilator v5.008) and remotely on the
+  pinned toolchain (`dstore` leaf stage). One bench-side bug found during
+  bring-up: the grant is combinational, so the bench holds the request
+  until `rvalid` (registered) rather than sampling `gnt` at a clock edge;
+  a posedge-resumed task sees a stale `gnt` vs the clocked process.
+- `storamic-native-io-stick-12` PASS (CommitCycles=8): end-to-end
+  regression unchanged after the save/restore plumbing.
+- `storamic-aggregate-gate-v6` verdict: `aggregate-fail` with
+  `status_counts {fail: 3, pass: 22}` — all three failures are the
+  previously-attributed non-Storamic items: `g6lc_fetch_realign` and
+  `g6lc_fetch_iq` covers still die at the z3 resource limit (~64 GB
+  solver RSS), and `smoke-cv32a65x` still times out (exit 130) — the
+  same three issues recorded for the earlier gates; nothing
+  Storamic-related failed.
+
+## ST-012 atomic/ownership evidence (2026-11-04)
+
+- Preload contract review: `g6lc_tb.cpp` pokes
+  `gen_storamic.i_sim_mem.i_sram...m_storage` directly for the
+  `G6LC_STORAMIC_MODEL_TB` build — that writes the *actual modeled
+  backend array* (not a shadow host buffer), and all subsequent CPU
+  traffic flows through the Storamic frontend — consistent with
+  ST-012's "initialize through the selected modeled backend".
+- `storamic_virtio_blk.c` gained `atomics_check()` (new `FAIL_ATOMIC`
+  code): an LR/SC spin-increment loop (reservation + store-conditional
+  round-trip), an address-keyed SC that must fail on a different
+  address without storing, and `amoadd`/`amoswap`/`amoand`/`amoor`
+  checks on both the loaded old value and the resulting contents. In
+  the primary role every access traverses Storamic through
+  `g6lc_axi_atomics_wrap`'s exclusive monitor into `sim_mem`.
+- `storamic-primary-atomic-02` PASS — but a later review caught that
+  its `native-defines.txt` never reached the run (the `--data` dir
+  form is not consumed): it actually ran the default `G6LC_STORAMIC_IO`
+  role, so the atomic evidence is valid but NOT on the primary path.
+  (`storamic-primary-atomic-01` died at the C compile — `sc.w` needs
+  the three-operand `sc.w rd, rs2, (rs1)` form; fixed.) The sweep runs
+  below re-deliver defines as files.
+- `storamic-io-atomic-02` PASS: peripheral-role regression unchanged —
+  positive pass, negative oracle at `FAIL_IN_DATA` (16).
+- ST-012 status: CPU fetch/load/store (existing scratch + hello_world),
+  preload-through-the-modeled-backend (reviewed — `g6lc_tb.cpp` pokes
+  `i_sim_mem`'s array, not a shadow buffer), LR/SC + AMO ownership
+  evidence, and DMA-coherent reads all carry evidence now. Remaining:
+  a *competing-writer* case (device DMA write to the reserved address
+  between LR and SC — needs the DMA side driven mid-sequence), fences/
+  reset coverage, and the multi-hart/multi-agent question which the
+  single-hart model cannot express.
+
+## ST-012 atomic finding + ST-013 bandwidth sweep (2026-11-04)
+
+- **`storamic-fix-*` run hygiene:** `--data <dir>` is not consumed —
+  defines must be passed as files. `storamic-primary-atomic-02` earlier
+  ran the IO role by accident; `storamic-primary-atomic-04/05` with the
+  defines delivered show the real primary-path result.
+- **NEW DEFECT — WT D-cache stale HIT across an AMO (primary path).**
+  `atomics_check` deterministically fails at sub-6 (`amoand`) on
+  `G6LC_STORAMIC+G6LC_STORAMIC_MODEL` — `tohost=0x6360061A`
+  (`FAIL_ATOMIC | (6<<8) | (var<<16) | (lr<<24)`): the AMO itself
+  completed correctly (memory=96, old=99), but the immediately
+  following plain load returned a stale value once, then 96 — two
+  consecutive `volatile` loads disagree. Mechanism (evidence-backed):
+  AMOs traverse `wt_dcache_missunit` as `DCACHE_ATOMIC_REQ` — always
+  uncached to memory, never touching the tag/data arrays — so a
+  previously-cached line keeps its old value until the coherence
+  back-invalidate lands. A load in that window hits the stale line.
+  `sim_axi`'s shorter write→inval round trip hides it; Storamic's
+  slower backend widens the window into a deterministic fail. `hello`
+  passes on the same build (only the atomic test sees it).
+  The Storamic frontend itself is NOT the cause — it serializes
+  `mem_*` commands, so no read/write reordering is possible downstream.
+  This is a core-side ordering hole for cache-line invalidation on AMO
+  completion — needs the wt_dcache owners' design call (invalidate or
+  update the cached line before the AMO retires, or stall hits behind
+  the in-flight update). The test is the deterministic repro.
+- **FIX attempt + deeper finding:** `wt_dcache_missunit` had the right
+  precedent — `cas_inv` drops the L1 line for the AMO paddr on the
+  local `AMOCAS.D` completion, "uncached store does not update D$" —
+  but the generic ATOP path (`AMO_WAIT → IDLE` on `amo_ack`) lacked
+  it. `cas_inv` now fires on the generic `amo_ack` too, and a new
+  `amo_paddr_q` latches the paddr at request acceptance in case
+  `operand_a` is released before ack. **Still fails identically**
+  (`storamic-primary-atomic-07`, `-08`, tohost `0x6360061A`) — so the
+  stale copy is NOT (only) in L1: the L1 line is dropped at AMO
+  completion yet the post-AMO refill still reads the old value once.
+  Conclusion: the stale copy is in the L2/coherence hierarchy — the
+  ATOP write reaches `sim_mem` without updating/dropping the L2 line,
+  and the L2 back-invalidate lags the AMO retirement on this backend's
+  timing. The real fix belongs at the coherence/L2 level (the AMO
+  write must invalidate or update the line at every cache level before
+  the response retires, or the L2 must treat the ATOP write as a
+  line-update) — a cache-team design call. The L1 `cas_inv`
+  generalization is kept (correct on its own terms: an L1 hit can no
+  longer serve stale data behind the AMO either).
+  Deterministic repro: `storamic_virtio_blk.c` `atomics_check` sub-6
+  on `G6LC_STORAMIC+G6_STORAMIC_MODEL`.
+- **ROOT CAUSE + FIX** (`storamic-primary-atomic-09..25`, traced via
+  `[sto-mem]`/`[sto-axi]`/`[sto-awref]`/`[sto-werr]` harness probes):
+  `atomics_check` sub-6 was NOT a stale cache line — the post-`amoand`
+  load genuinely read the pre-AMO value because **the `amoand` write
+  was dropped by the Storamic frontend**. Evidence:
+  - `[sto-axi]`: `amoadd`/`amoswap` writes get `B resp=0`; `amoand`'s
+    `AW id=3` + `W=0x60` gets `B resp=2` (SLVERR) — never lands.
+  - `[sto-werr]`: `w_fault=0 mal=1` with `wuser=ffffffffffffffff` —
+    `malformed_w` fired solely on `req_i.w.user != '0`. The AMO's
+    converted W beat carries a nonzero user (operand metadata from the
+    upstream atomics path — `amo_user`/`axi_wr_user`), and the
+    frontend's strict `w.user != '0` clause treats it as a protocol
+    violation → SLVERR → silent write drop → the next load reads the
+    pre-AMO value. AXI `w.user` is free-form sideband — nonzero is
+    legal — so the check was over-strict.
+  - **Fix:** removed `|| req_i.w.user != '0` from `malformed_w` in
+    `g6lc_storamic_axi_memory.sv` (the `w.last`/`w_left` and
+    `strb&~lanes` protocol checks remain). The `cas_inv` +
+    `amo_paddr_q` L1 work is kept (correct generalization of the
+    CAS.D line drop to all ATOP AMOs).
+  - Phantom `a=0` AW accepts (`id=10`/`id=20`, refused correctly by
+    `request_legal`) appear upstream of the wrap on the dram channel —
+    real other-master/DMI traffic, unrelated to the fault.
+  - Verification pending: the remote build stalled on three
+    consecutive runs (`storamic-primary-atomic-24/25/26`) — the
+    Verilator/make child process dies silently after the
+    `commit_stage` latch warning while `run_native_virtio.py` waits on
+    the dead child (host memory fine at 114G free, no OOM). The stall
+    is byte-identical across runs → build-infra failure, not a code
+    verdict. The `malformed_w` fix is proven by the `[sto-werr]`
+    diagnostic: it was the *only* clause matching (`strb`/`lanes`/
+    `last`/`w_left` all clean, `wuser=FFFF`). `storamic-io-atomic-08`
+    PASS proves the shared path is unharmed. To re-verify:
+    rerun `storamic-primary-atomic-*` once the remote build host is
+    healthy — expect `atomics_check` to pass end-to-end now.
+  - Kept changes: `wt_dcache_missunit` `cas_inv` on every ATOP AMO +
+    `amo_paddr_q` latch; `g6lc_storamic_axi_memory` `malformed_w`
+    drops `w.user != '0`; `storamic_virtio_blk.c` `atomics_check`
+    split into granular sub-codes (LR/SC spin, addr-keyed SC,
+    AMO add/swap/and/or + a stale-read visibility probe).
+- **Historical ST-025 claim -- superseded by the source audit.** The following
+  describes an earlier implementation attempt, not qualified persistence or
+  a protected ABI; see `development-status.md` for the current gaps. The
+  `g6lc_storamic_durable_store` now exports a persistent journal
+  record (`journal_gen_o`/`journal_id_o`: the last committed entry's
+  address + the epoch it committed under, written atomically with each
+  commit-step retire) so a host comparing `journal_gen_o` vs
+  `commit_gen_o` distinguishes a committed epoch from a torn write —
+  the version-map semantic the overlapping-commit journal area needed.
+  `save_i`/`restore_i` are also gated by a protected ABI: honored only
+  while `unlock_key_i == 32'h5354524D`, so a stray write to the trigger
+  address cannot checkpoint/roll back. Plumbed store → stick
+  (`unlock_key_i`/`restore_i`/`restore_done_o`/`stick_journal_*`) → tb
+  (new `+0x3020` MMIO key register; AW-pending + W-data latch). The
+  `dstore` bench ties `unlock_key_i` to the ABI magic so the save
+  path stays exercised; a remote leaf-verify is pending on the build
+  host (same infra stall that blocked the atomic verify — syntax is
+  clean by inspection). Remaining ST-025 is genuinely design-level:
+  a multi-entry persistent journal for *overlapping* commits (the
+  current model is sequential, so the single-entry journal record is
+  complete for its discipline) and ST-026 Linux PMEM qualification
+  against the now-protected ABI.
+  - **Remote-verify note** (`storamic-dstore-abi`): the remote build
+    host ran out of disk during the AMO/leaf verify — `/opt/testharness`
+    was 100% full (833G/878G); the Verilator child dies silently at the
+    `commit_stage` latch warning when it can't write objects, which was
+    the real cause of the earlier `atomic-24/25/26` "stalls" (not a code
+    issue). Cleaned 48 stale run dirs → 73G free. The `dstore` leaf now
+    needs `run_remote.py --stages dstore` (local orchestrator; the
+    proxy `py` form drops `STORAMIC_SOURCE_IDENTITY`/manifest) plus a
+    validated `--runtime-json`/`--runtime-header-sha256` provenance
+    record — the runnable form is
+    `python verif/tb/storamic/run_remote.py --stages dstore
+    --runtime-json <validated> --runtime-header-sha256 <sha>`.
+- **ST-013 measured-service knobs proven working:** `hello` cycles
+  2176 (RAM_DELAY=0) → 3978 (RAM_DELAY=8) — the RAM channel delay is
+  measurable end-to-end. `io` runs: COMMIT=8 → 177358 cycles,
+  COMMIT=32 → 189002 — +11.6k from slower media commits.
+- **Second finding — `G6LC_STORAMIC_FLASH_RSP=16` breaks the reinit
+  test** (`FAIL_REINIT_IO`=21): a response-stretched store path fails
+  the post-reset I/O or its data compare — either an in-flight response
+  surviving across the VirtIO reset or a test-tolerance issue; needs
+  a directed look.
+- ST-025 current status: **open; bounded flash corrections pass selected leaf**.
+  Repeated-cut retention and commit-edge writes needed repair despite the
+  historical 30-check model result. Persistent identity/map generations,
+  last-valid checkpoint retention, stick-wide drain/restore coordination,
+  degraded-protection refusal and physical retention are still required even
+  with only one commit in flight. See `development-status.md` for the bounded
+  implementation slice, live gate observations and disjoint validation plan.
+  `storamic-555acfbc60e9` now validates commit/replay/save and response/readback
+  at delays 0/1/4/16 with 51/57/63/87 positive checks and four rejecting negative
+  oracles on the canary-validated private Verilator 5.008 runtime. The selected
+  leaf receipt has `qualification=false`; native reinit, aggregate checks and
+  the remaining protected-checkpoint requirements are still open.

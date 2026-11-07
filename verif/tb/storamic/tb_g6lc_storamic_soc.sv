@@ -13,6 +13,7 @@ module tb_g6lc_storamic_soc #(
   parameter bit Joined = 1'b0,
   parameter bit Source = 1'b0,
   parameter bit LegacyGate = 1'b0,
+  parameter bit CheckpointRequested = 1'b0,
   // ST-011B: with G6LC_STORAMIC_MODEL the attach serves the DRAM slave from
   // the sim model memory instead of refusing.
   parameter bit Model = 1'b0,
@@ -86,6 +87,7 @@ module tb_g6lc_storamic_soc #(
 
   g6lc_ai_dram_backend #(
     .StoramicEn(1'b1), .DramClass(DramClass), .NrChannels(NrChannels),
+    .StoramicCheckpointEn(CheckpointRequested),
     .AXI_ADDR_WIDTH(BackendAddrWidth),
     .AXI_ID_WIDTH(IdWidth + (Joined ? 1 : 0)),
     .AXI_DATA_WIDTH(DataWidth), .AXI_USER_WIDTH(2),
@@ -337,7 +339,9 @@ module tb_g6lc_storamic_soc #(
 endmodule
 
 // Structural wrapper for synthesis of the native adapter and refusal profile.
-module g6lc_storamic_soc_synth (
+module g6lc_storamic_soc_synth #(
+  parameter bit CheckpointRequested = 1'b0
+) (
   input logic clk_i, rst_ni, testmode_i,
   input g6lc_storamic_pkg::axi_req_t req_i,
   output g6lc_storamic_pkg::axi_resp_t resp_o,
@@ -369,6 +373,7 @@ module g6lc_storamic_soc_synth (
   `AXI_ASSIGN_FROM_REQ(bus, native_req)
   `AXI_ASSIGN_TO_RESP(resp_o, bus)
   g6lc_storamic_attach #(.Enable(1'b1), .AddrWidth(64), .IdWidth(8),
+                        .CheckpointRequested(CheckpointRequested),
                         .DataWidth(64), .UserWidth(1)) dut (
     .clk_i, .rst_ni, .testmode_i, .slave(bus), .ctrl_req_i('0),
     .ctrl_resp_o(), .irq_o(), .init_done_o, .service_ready_o

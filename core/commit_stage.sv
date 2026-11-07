@@ -217,6 +217,11 @@ module commit_stage
   // write register file or commit instruction in LSU or CSR Buffer
   always_comb begin : commit
     // default assignments
+    wdata_o = '0;
+    we_gpr_o = '0;
+    commit_macro_ack = '0;
+    p1_cross = 1'b0;
+    port0_privileged = 1'b0;
     commit_ack_o[0] = 1'b0;
     commit_macro_ack[0] = 1'b0;
 
@@ -651,4 +656,3 @@ module commit_stage
 
 
 endmodule
-

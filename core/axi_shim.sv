@@ -37,6 +37,7 @@ module axi_shim #(
     input logic [2:0] rd_size_i,
     input  logic [CVA6Cfg.AxiIdWidth-1:0]   rd_id_i,   // use same ID for reads, or make sure you only have one outstanding read tx
     input logic rd_lock_i,
+    input logic [2:0] rd_prot_i,
     // read response (we have to unconditionally sink the response)
     input logic rd_rdy_i,
     output logic rd_last_o,
@@ -57,6 +58,7 @@ module axi_shim #(
     input logic [CVA6Cfg.AxiIdWidth-1:0] wr_id_i,
     input logic wr_lock_i,
     input logic [5:0] wr_atop_i,
+    input logic [2:0] wr_prot_i,
     // write response
     input logic wr_rdy_i,
     output logic wr_valid_o,
@@ -117,7 +119,7 @@ module axi_shim #(
   assign axi_req_o.aw.size = wr_size_i;
   assign axi_req_o.aw.len = wr_blen_i;
   assign axi_req_o.aw.id = wr_id_i;
-  assign axi_req_o.aw.prot = 3'b0;
+  assign axi_req_o.aw.prot = CVA6Cfg.StoramicCheckpointEn ? wr_prot_i : 3'b000;
   assign axi_req_o.aw.region = 4'b0;
   assign axi_req_o.aw.lock = wr_lock_i;
   assign axi_req_o.aw.cache = axi_pkg::CACHE_MODIFIABLE;
@@ -280,7 +282,7 @@ module axi_shim #(
   assign axi_req_o.ar.size   = rd_size_i;
   assign axi_req_o.ar.len    = rd_blen_i;
   assign axi_req_o.ar.id     = rd_id_i;
-  assign axi_req_o.ar.prot   = 3'b0;
+  assign axi_req_o.ar.prot   = CVA6Cfg.StoramicCheckpointEn ? rd_prot_i : 3'b000;
   assign axi_req_o.ar.region = 4'b0;
   assign axi_req_o.ar.lock   = rd_lock_i;
   assign axi_req_o.ar.cache  = axi_pkg::CACHE_MODIFIABLE;

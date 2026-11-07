@@ -141,6 +141,7 @@ module tb_g6lc_storamic_model #(
     .source_i(8'h3a), .reset_generation_i(generation),
     .service_ready_o(service_ready), .sequence_exhausted_o(exhausted),
     .faults_o(faults), .events_o(events), .inflight_o(),
+    .quiesce_i(1'b0), .quiesced_o(),
     .mem_ready_i(mem_ready), .mem_req_o(mem_req), .mem_gnt_i(mem_gnt),
     .mem_we_o(mem_we), .mem_addr_o(mem_addr), .mem_wdata_o(mem_data),
     .mem_be_o(mem_be), .mem_tag_o(mem_tag),
@@ -158,8 +159,12 @@ module tb_g6lc_storamic_model #(
     .addr_i(mem_addr), .data_i(mem_data), .be_i(mem_be), .tag_i(mem_tag),
     .rvalid_o(model_rvalid), .data_o(model_data), .error_o(model_error), .tag_o(model_tag)
   );
+  logic [7:0] last_epoch = '0;
   always @(posedge clk)
-    if (rst_n && mem_req && mem_gnt) commands <= commands + 1;
+    if (rst_n && mem_req && mem_gnt) begin
+      commands <= commands + 1;
+      last_epoch <= mem_tag.epoch;
+    end
 
   // Coverage and diagnostics use public signals for either implementation path.
   always @(posedge clk) begin
@@ -365,7 +370,7 @@ module tb_g6lc_storamic_model #(
       input byte seed, input logic [Bytes-1:0] keep = '1,
       input logic [1:0] response = 0, input int committed = -1,
       input int bad_last = -1, input int bad_strobe = -1,
-      input bit bad_user = 0, input bit early = 0, input bit lock = 0);
+      input bit w_user = 0, input bit early = 0, input bit lock = 0);
     b_t saved;
     longint unsigned a, word;
     logic [Bytes-1:0] mask;
@@ -375,7 +380,7 @@ module tb_g6lc_storamic_model #(
       req.w.data = pattern(seed, 0);
       req.w.strb = byte_mask(address, size) & keep;
       req.w.last = beats == 1;
-      req.w.user = bad_user;
+      req.w.user = w_user;
       req.w_valid = 1;
       repeat (3) begin
         tick();
@@ -390,7 +395,7 @@ module tb_g6lc_storamic_model #(
       req.w.strb = byte_mask(a, size) & keep;
       if (beat == bad_strobe) req.w.strb[(int'(a % Bytes) + 1) % Bytes] = 1;
       req.w.last = (beat == beats - 1) ^ (beat == bad_last);
-      req.w.user = bad_user;
+      req.w.user = w_user;
       req.w_valid = 1;
       do @(posedge clk); while (!resp.w_ready);
       tick();
@@ -398,9 +403,9 @@ module tb_g6lc_storamic_model #(
     end
     while (!resp.b_valid) tick();
     assert (resp.b.id == IdWidth'('h155) && resp.b.user == 1 && resp.b.resp == response)
-      else $fatal(1, "STORAMIC_MODEL_WRITE_RESPONSE addr=%h beats=%0d size=%0d burst=%b seed=%h expected=%b got=%b id=%h user=%b faults=%b early=%b bad_last=%0d bad_strobe=%0d bad_user=%b",
+      else $fatal(1, "STORAMIC_MODEL_WRITE_RESPONSE addr=%h beats=%0d size=%0d burst=%b seed=%h expected=%b got=%b id=%h user=%b faults=%b early=%b bad_last=%0d bad_strobe=%0d w_user=%b",
                   address, beats, size, burst, seed, response, resp.b.resp,
-                  resp.b.id, resp.b.user, faults, early, bad_last, bad_strobe, bad_user);
+                  resp.b.id, resp.b.user, faults, early, bad_last, bad_strobe, w_user);
     saved = resp.b;
     repeat (3) begin
       tick();
@@ -446,13 +451,19 @@ module tb_g6lc_storamic_model #(
       assert (commands == before_commands && !exhausted)
         else $fatal(1, "STORAMIC_SEQUENCE_PARTIAL_RESERVATION");
       write_burst(BaseAddr, 2, 0, 1, 'h43);
-      read_burst(BaseAddr, 2, 0, 1);
+      send_ar(BaseAddr, 2, 0, 1);
+      while (!resp.r_valid) tick();
       assert (exhausted) else $fatal(1, "STORAMIC_SEQUENCE_NOT_EXHAUSTED");
       before_commands = commands;
-      read_burst(BaseAddr, 1, 0, 1, 2'b10);
+      // Keep the accepted read live: exhaustion must refuse new writes before
+      // drain, whereas the existing frontend renews its epoch once fully idle.
       write_burst(BaseAddr, 1, 0, 1, 'hff, '1, 2'b10);
       assert (commands == before_commands && faults[2])
         else $fatal(1, "STORAMIC_SEQUENCE_REUSED");
+      recv_read(BaseAddr, 2, 0, 1);
+      assert (last_epoch == 0) else $fatal(1, "STORAMIC_SEQUENCE_EARLY_RENEWAL");
+      read_burst(BaseAddr, 2, 0, 1);
+      assert (last_epoch == 1) else $fatal(1, "STORAMIC_SEQUENCE_RENEWAL");
       reset_front();
       read_burst(BaseAddr, 2, 0, 1);
       $display("STORAMIC_MODEL_SEQUENCE_PASS");
@@ -529,7 +540,9 @@ module tb_g6lc_storamic_model #(
     // Malformed W beats do not erase previously completed beats.
     write_burst(BaseAddr + 'ha00, 4, 0, 1, 'h33, '1, 2'b10, 0, 0);
     write_burst(BaseAddr + 'ha20, 4, 0, 1, 'h44, '1, 2'b10, 3, 3);
-    write_burst(BaseAddr + 'ha40, 4, 0, 1, 'h55, '1, 2'b10, 0, -1, -1, 1);
+    // WUSER is free-form sideband, not a malformed-write discriminator.
+    write_burst(BaseAddr + 'ha40, 4, 0, 1, 'h55, '1, 0, -1, -1, -1, 1);
+    read_burst(BaseAddr + 'ha40, 4, 0, 1);
     if (Bytes > 1)
       write_burst(BaseAddr + 'ha60, 4, 0, 1, 'h66, '1, 2'b10, 1, -1, 1);
     inject_error = 1;

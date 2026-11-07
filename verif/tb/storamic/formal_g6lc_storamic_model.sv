@@ -5,6 +5,7 @@
 module formal_g6lc_storamic_model (
   input logic clk_i,
   input logic rst_ni,
+  input logic quiesce_i,
   input g6lc_storamic_pkg::axi_req_t req_i,
   input logic mem_ready_i,
   input logic mem_gnt_i,
@@ -38,6 +39,7 @@ module formal_g6lc_storamic_model (
   logic seen_read_response, seen_write_response;
   logic stale_waiting, seen_stale_recovery;
   logic w_had_command, r_had_command;
+  logic quiesced, inflight;
 
   // Reachability goals are checked separately from safety assertions. They
   // prevent an idle/error-only execution from standing in for exercised paths.
@@ -47,8 +49,10 @@ module formal_g6lc_storamic_model (
 
   g6lc_storamic_axi_memory #(.RegionBytes(256), .SeqWidth(4)) dut (
     .clk_i, .rst_ni, .testmode_i(1'b0), .req_i, .resp_o(resp),
+    .quiesce_i, .quiesced_o(quiesced),
     .source_i(8'h3a), .reset_generation_i(32'b0),
-    .service_ready_o(), .sequence_exhausted_o(), .faults_o(), .events_o(), .inflight_o(),
+    .service_ready_o(), .sequence_exhausted_o(), .faults_o(), .events_o(),
+    .inflight_o(inflight),
     .mem_ready_i, .mem_req_o(mem_req), .mem_gnt_i,
     .mem_we_o(mem_we), .mem_addr_o(mem_addr), .mem_wdata_o(mem_wdata),
     .mem_be_o(mem_be), .mem_tag_o(mem_tag),
@@ -93,6 +97,11 @@ module formal_g6lc_storamic_model (
       w_had_command <= 0;
       r_had_command <= 0;
     end else begin
+      if (quiesce_i) assert (!resp.aw_ready && !resp.ar_ready);
+      if (quiesced) begin
+        assert (!inflight && !mem_req && !resp.b_valid && !resp.r_valid);
+        assert (!w_pending && r_left == 0 && !memory_live);
+      end
       if (past_valid) begin
         if (previous_resp.r_valid && !previous_req.r_ready) begin
           assert (resp.r_valid);

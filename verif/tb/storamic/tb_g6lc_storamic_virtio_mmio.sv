@@ -25,6 +25,7 @@ module tb_g6lc_storamic_virtio_mmio;
     .VendorId(32'hDEAD_BEEF), .QueueNumMax(128)
   ) dut (
     .clk_i(clk), .rst_ni(rst_n), .ctrl_req_i(req), .ctrl_resp_o(resp),
+    .quiesce_i(1'b0), .inflight_o(),
     .device_usable_i(usable), .capacity_i(cap_in),
     .capacity_update_i(cap_ev), .flush_cap_i(1'b0), .dma_idle_i(dma_idle),
     .used_event_i(used_ev), .ring_fault_i(fault_ev),
@@ -415,6 +416,8 @@ endmodule
 module g6lc_storamic_virtio_mmio_synth (
   input logic clk_i,
   input logic rst_ni,
+  input logic quiesce_i,
+  output logic inflight_o,
   input g6lc_storamic_pkg::axil_req_t ctrl_req_i,
   output g6lc_storamic_pkg::axil_resp_t ctrl_resp_o,
   input logic device_usable_i,
@@ -434,6 +437,7 @@ module g6lc_storamic_virtio_mmio_synth (
     .VendorId(32'h5354_524D), .QueueNumMax(128)
   ) dut (
     .clk_i, .rst_ni, .ctrl_req_i, .ctrl_resp_o,
+    .quiesce_i, .inflight_o,
     .device_usable_i, .capacity_i, .capacity_update_i, .flush_cap_i(1'b0), .dma_idle_i,
     .used_event_i, .ring_fault_i, .notify_o, .irq_o, .driver_ok_o,
     .features_ok_o, .driver_features_o(), .reset_epoch_o(),

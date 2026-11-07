@@ -1,0 +1,8 @@
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: MIT
+`verilator_config
+// These are acyclic per-element trees/records, not scalar feedback paths.
+split_var -module "lzc" -var "*sel_nodes"
+split_var -module "lzc" -var "*index_nodes"
+split_var -module "wt_dcache_mem" -var "*node"
+split_var -module "wt_dcache_missunit" -var "mem_req_c"

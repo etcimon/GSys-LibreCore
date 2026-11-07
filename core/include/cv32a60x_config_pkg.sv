@@ -55,6 +55,7 @@ package cva6_config_pkg;
       CoproType: config_pkg::COPRO_EXAMPLE,
       AiCfg: config_pkg::AiCfgOff,
       StoramicEn: bit'(0),
+      StoramicCheckpointEn: bit'(0),
       RVZiCond: bit'(0),
       RVZiCbom: bit'(0),
       RVZiCboz: bit'(0),

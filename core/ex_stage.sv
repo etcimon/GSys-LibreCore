@@ -709,6 +709,7 @@ module ex_stage
   ) lsu_i (
       .clk_i,
       .rst_ni,
+      .debug_mode_i,
       .phys_valid_o, .phys_addr_o, .phys_id_o, .phys_hart_o, .phys_size_o,
       .lu_replay_o, .lu_replay_id_o,
       .flush_i,

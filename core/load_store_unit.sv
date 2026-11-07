@@ -36,6 +36,7 @@ module load_store_unit
     input logic clk_i,
     // Asynchronous reset active low - SUBSYSTEM
     input logic rst_ni,
+    input logic debug_mode_i,
     output logic [1:0] phys_valid_o,
     output logic [1:0][CVA6Cfg.PLEN-1:0] phys_addr_o,
     output logic [1:0][CVA6Cfg.TRANS_ID_BITS-1:0] phys_id_o,
@@ -995,30 +996,46 @@ module load_store_unit
   // ------------------
   // new data arrives here
   lsu_ctrl_t lsu_req_i;
+  lsu_ctrl_t lsu_req_payload;
 
-  assign lsu_req_i = {
-    lsu_valid_i,
-    vaddr_i,
-    tinst_i,
-    hs_ld_st_inst,
-    hlvx_inst,
-    overflow,
-    g_overflow,
-    fu_data_i.operand_b,
+  assign lsu_req_payload = '{
+    valid: lsu_valid_i,
+    vaddr: vaddr_i,
+    tinst: tinst_i,
+    hs_ld_st_inst: hs_ld_st_inst,
+    hlvx_inst: hlvx_inst,
+    overflow: overflow,
+    g_overflow: g_overflow,
+    data: fu_data_i.operand_b,
     // Zacas: expected value travels as operand_c (imm must stay 0 for addr = rs1)
-    (CVA6Cfg.RVZacas && ariane_pkg::is_amo_cas(fu_data_i.operation)) ? fu_data_i.operand_c
+    data_cmp: (CVA6Cfg.RVZacas && ariane_pkg::is_amo_cas(fu_data_i.operation)) ? fu_data_i.operand_c
                                                                       : '0,
     // AMOCAS.Q high halves
-    (CVA6Cfg.RVZacas && fu_data_i.operation == ariane_pkg::AMO_CASQ) ? fu_data_i.operand_b_hi : '0,
-    (CVA6Cfg.RVZacas && fu_data_i.operation == ariane_pkg::AMO_CASQ) ? fu_data_i.operand_c_hi : '0,
-    be_i,
-    fu_data_i.fu,
-    fu_data_i.operation,
-    fu_data_i.trans_id,
-    fu_data_i.hart,
-    speculative_load_i,
-    1'b0
+    data_hi: (CVA6Cfg.RVZacas && fu_data_i.operation == ariane_pkg::AMO_CASQ) ? fu_data_i.operand_b_hi : '0,
+    data_cmp_hi: (CVA6Cfg.RVZacas && fu_data_i.operation == ariane_pkg::AMO_CASQ) ? fu_data_i.operand_c_hi : '0,
+    be: be_i,
+    fu: fu_data_i.fu,
+    operation: fu_data_i.operation,
+    trans_id: fu_data_i.trans_id,
+    hart: fu_data_i.hart,
+    is_speculative_load: speculative_load_i,
+    is_speculative_load_miss: 1'b0,
+    default: '0
   };
+
+  if (config_pkg::g6lc_storamic_origin_supported(CVA6Cfg)) begin : gen_data_origin
+    // Capture effective privilege with the descriptor before the bypass queue.
+    // Debug issue, AMO/CBO and virtualized/unsupported paths stay untrusted.
+    always_comb begin
+      lsu_req_i = lsu_req_payload;
+      lsu_req_i.data_prot = '0;
+      if (fu_data_i.operation inside {LB, LBU, LH, LHU, LW, LWU, LD, SB, SH, SW, SD})
+        lsu_req_i.data_prot = config_pkg::g6lc_storamic_data_prot(
+            ld_st_priv_lvl_i, ld_st_v_i, debug_mode_i);
+    end
+  end else begin : gen_no_data_origin
+    assign lsu_req_i = lsu_req_payload;
+  end
 
   lsu_bypass #(
       .CVA6Cfg(CVA6Cfg),

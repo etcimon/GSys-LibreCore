@@ -29,9 +29,14 @@ module g6lc_storamic_virtio_ring #(
   input logic [63:0] queue_device_i,
   input logic driver_ok_i,
   input logic notify_i,
+  // Pause new chains, not a chain already being fetched or handed off.
+  input logic quiesce_i,
+  output logic quiesced_o,
+  output logic quiesce_error_o,
   input logic reset_pending_i,
   input logic [7:0] reset_epoch_i,
   output logic dma_idle_o,
+  output logic job_idle_o,
   output logic used_event_o,
   output logic ring_fault_o,
   // DMA window
@@ -129,6 +134,11 @@ module g6lc_storamic_virtio_ring #(
   assign dma_wdata_o = wdata_q;
   assign dma_be_o = be_q;
   assign dma_idle_o = !pend_q && !out_q;
+  assign job_idle_o = rst_ni && state_q == SIdle && dma_idle_o;
+  assign quiesce_error_o = quiesce_i &&
+                          (state_q == SDead || reset_pending_i || reset_epoch_i != epoch_q);
+  assign quiesced_o = rst_ni && quiesce_i && state_q == SIdle &&
+                      dma_idle_o && !quiesce_error_o;
   assign used_event_o = used_event_q;
   assign ring_fault_o = fault_q;
   assign req_valid_o = (state_q == SHandoff) && !reset_pending_i;
@@ -175,7 +185,7 @@ module g6lc_storamic_virtio_ring #(
       end else begin
         unique case (state_q)
           SIdle: begin
-            if (active && (notify_pend_q || notify_i) && !out_q) begin
+            if (active && !quiesce_i && (notify_pend_q || notify_i) && !out_q) begin
               notify_pend_q <= 1'b0;
               if (!in_window(avail_idx_a & ~64'h7, 65'd8, dma_base_i, win_end)) begin
                 fault_q <= 1'b1; state_q <= SDead;
@@ -189,6 +199,11 @@ module g6lc_storamic_virtio_ring #(
           SAvailIdx: if (rsp_beat) begin
             if (dma_err_i) begin
               fault_q <= 1'b1; state_q <= SDead;
+            end else if (quiesce_i) begin
+              // The poll is not an accepted descriptor chain. Remember it
+              // so resume catches work even without another QueueNotify.
+              notify_pend_q <= 1'b1;
+              state_q <= SIdle;
             end else if (field16(dma_rdata_i, shift_q) == last_avail_q) begin
               state_q <= SIdle;
             end else if (!in_window(avail_ring_a & ~64'h7, 65'd8, dma_base_i, win_end)) begin
@@ -299,10 +314,15 @@ module g6lc_storamic_virtio_ring #(
               last_avail_q <= last_avail_q + 16'd1;
               used_idx_q <= used_idx_q + 16'd1;
               we_q <= 1'b0; be_q <= '0; wdata_q <= '0;
-              // Re-read avail.idx: catches requests posted without a notify.
-              pend_q <= 1'b1; addr_q <= avail_idx_a & ~64'h7;
-              shift_q <= avail_idx_a[2:1];
-              state_q <= SAvailIdx;
+              if (quiesce_i) begin
+                notify_pend_q <= 1'b1;
+                state_q <= SIdle;
+              end else begin
+                // Re-read avail.idx: catches requests posted without a notify.
+                pend_q <= 1'b1; addr_q <= avail_idx_a & ~64'h7;
+                shift_q <= avail_idx_a[2:1];
+                state_q <= SAvailIdx;
+              end
             end
           end
           SDead: ;

@@ -6,14 +6,15 @@
 //
 // The Storamic virtio engines issue one 8-byte beat at a time. A beat is
 // granted only when the upstream master is quiescent: new upstream AW/AR are
-// held off (valid masked, ready low) and every upstream write (AW..B) and read
+// held off unless already presented/stalled, and every upstream write (AW..B) and read
 // (AR..last R) already accepted must complete first. The beat then runs as a
 // single-beat INCR transaction with a fixed ID inside the upstream ID space;
 // reuse is safe because the two masters never have transactions in flight at
-// the same time. Upstream W beats and responses pass through untouched.
+// the same time. Upstream W is admitted only against an accepted or currently
+// presented AW. Accepted bursts and responses still drain.
 //
-// Timing: one registered phase FSM and two outstanding counters; the upstream
-// pass-through is a combinational mux on the valid/ready path only.
+// Timing: one phase FSM, three credit counters and stalled-address ownership;
+// the upstream pass-through adds registered-credit gating to the valid/ready mux.
 //
 // Coherence (InvalEn): after a Storamic write's B response the adapter asks
 // the cluster CMO engine to invalidate the 64-byte block holding the address
@@ -31,6 +32,7 @@ module g6lc_storamic_dma_axi #(
 ) (
   input logic clk_i,
   input logic rst_ni,
+  output logic inflight_o,
   // Storamic single-beat seam (from g6lc_storamic_virtio_dev)
   input logic dma_req_i,
   output logic dma_gnt_o,
@@ -61,28 +63,48 @@ module g6lc_storamic_dma_axi #(
   logic [7:0] be_q;
   logic err_q;
   logic [7:0] wr_out_q, rd_out_q;   // upstream transactions in flight
+  logic signed [8:0] wr_data_q;   // accepted AW minus WLAST, possibly -1 for offered AW
+  logic aw_stalled_q, ar_stalled_q;
+  assign inflight_o = rst_ni && (ph_q != PUp || wr_out_q != 0 || rd_out_q != 0 ||
+                               wr_data_q != 0 || aw_stalled_q || ar_stalled_q);
 
   logic up_owns;
   assign up_owns = (ph_q == PUp) || (ph_q == PDrain);
   logic hold_new;                   // block new upstream AW/AR
   assign hold_new = (ph_q != PUp) || dma_req_i;
+  logic allow_aw, allow_ar, allow_w;
+  assign allow_aw = up_owns && (!hold_new || aw_stalled_q) && !(&wr_out_q);
+  assign allow_ar = up_owns && (!hold_new || ar_stalled_q) && !(&rd_out_q);
+  // Depend on offered AWVALID, never AWREADY: slaves may wait for WVALID
+  // before accepting AW. A WLAST ahead of its offered AW consumes that offer.
+  assign allow_w = wr_data_q > 0 ||
+                   (wr_data_q == 0 && allow_aw && up_req_i.aw_valid);
 
   // Upstream outstanding tracking (only while upstream owns the port).
-  logic up_aw_hs, up_ar_hs, up_b_hs, up_rl_hs;
+  logic up_aw_hs, up_ar_hs, up_b_hs, up_rl_hs, up_wl_hs;
   assign up_aw_hs = up_owns && mst_req_o.aw_valid && mst_resp_i.aw_ready;
   assign up_ar_hs = up_owns && mst_req_o.ar_valid && mst_resp_i.ar_ready;
   assign up_b_hs = up_owns && mst_resp_i.b_valid && up_req_i.b_ready;
   assign up_rl_hs = up_owns && mst_resp_i.r_valid && mst_resp_i.r.last && up_req_i.r_ready;
+  assign up_wl_hs = up_owns && mst_req_o.w_valid && mst_resp_i.w_ready && mst_req_o.w.last;
 
   always_comb begin
     mst_req_o = up_req_i;
     up_resp_o = mst_resp_i;
     if (up_owns) begin
-      if (hold_new) begin
+      // A stalled VALID is already visible downstream and cannot be withdrawn.
+      // Saturated credits backpressure new addresses instead of wrapping to idle.
+      if (!allow_aw) begin
         mst_req_o.aw_valid = 1'b0;
-        mst_req_o.ar_valid = 1'b0;
         up_resp_o.aw_ready = 1'b0;
+      end
+      if (!allow_ar) begin
+        mst_req_o.ar_valid = 1'b0;
         up_resp_o.ar_ready = 1'b0;
+      end
+      if (!allow_w) begin
+        mst_req_o.w_valid = 1'b0;
+        up_resp_o.w_ready = 1'b0;
       end
     end else begin
       // Storamic owns the port: the upstream sees no handshakes at all.
@@ -111,7 +133,8 @@ module g6lc_storamic_dma_axi #(
     end
   end
 
-  assign dma_gnt_o = (ph_q == PDrain) && dma_req_i && wr_out_q == 0 && rd_out_q == 0;
+  assign dma_gnt_o = (ph_q == PDrain) && dma_req_i && wr_out_q == 0 && rd_out_q == 0 &&
+                     wr_data_q == 0 && !aw_stalled_q && !ar_stalled_q;
   assign dma_rvalid_o = (ph_q == PDone);
   assign dma_rdata_o = rdata_q;
   assign dma_err_o = err_q;
@@ -122,10 +145,14 @@ module g6lc_storamic_dma_axi #(
     if (!rst_ni) begin
       ph_q <= PUp; aw_done_q <= 1'b0; w_done_q <= 1'b0; we_q <= 1'b0;
       addr_q <= '0; wdata_q <= '0; rdata_q <= '0; be_q <= '0; err_q <= 1'b0;
-      wr_out_q <= '0; rd_out_q <= '0;
+      wr_out_q <= '0; rd_out_q <= '0; wr_data_q <= '0;
+      aw_stalled_q <= 0; ar_stalled_q <= 0;
     end else begin
       wr_out_q <= wr_out_q + 8'(up_aw_hs) - 8'(up_b_hs);
       rd_out_q <= rd_out_q + 8'(up_ar_hs) - 8'(up_rl_hs);
+      wr_data_q <= wr_data_q + 9'(up_aw_hs) - 9'(up_wl_hs);
+      aw_stalled_q <= up_owns && mst_req_o.aw_valid && !mst_resp_i.aw_ready;
+      ar_stalled_q <= up_owns && mst_req_o.ar_valid && !mst_resp_i.ar_ready;
       unique case (ph_q)
         PUp: if (dma_req_i) ph_q <= PDrain;
         PDrain: begin

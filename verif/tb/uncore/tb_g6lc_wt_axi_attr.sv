@@ -10,12 +10,15 @@ module tb_g6lc_wt_axi_attr;
   import ariane_pkg::*;
   import wt_cache_pkg::*;
   parameter bit ALLOC = 0;
+  parameter bit ORIGIN = 0;
   // Copy the pushed package config and toggle the single new field, then run
   // the same build_config every production module sees.
   function automatic config_pkg::cva6_cfg_t attr_cfg(input bit alloc);
     config_pkg::cva6_user_cfg_t u;
     u = cva6_config_pkg::cva6_cfg;
     u.WtAxiAllocEn = alloc;
+    u.StoramicEn = ORIGIN;
+    u.StoramicCheckpointEn = ORIGIN;
     return build_config_pkg::build_config(u);
   endfunction
   localparam config_pkg::cva6_cfg_t CVA6Cfg = attr_cfg(ALLOC);
@@ -57,6 +60,7 @@ module tb_g6lc_wt_axi_attr;
   int scenario, cycle = 0;
   int ar_seen = 0, aw_seen = 0;
   logic [3:0] ar_cache, aw_cache;
+  logic [2:0] ar_prot, aw_prot, expected_prot = '0;
   logic [7:0] ar_len;
   logic [2:0] ar_size;
   logic ar_lock, aw_lock;
@@ -108,6 +112,7 @@ module tb_g6lc_wt_axi_attr;
         aw_seen++;
         aw_cache = areq.aw.cache; aw_lock = areq.aw.lock;
         aw_atop = areq.aw.atop; aw_addr = areq.aw.addr;
+        aw_prot = areq.aw.prot;
         bq[(bq_h+bq_n)%8] <= '{id:areq.aw.id, resp:axi_pkg::RESP_OKAY};
         bq_n <= bq_n + 1;
         if (areq.aw.atop[axi_pkg::ATOP_R_RESP]) begin
@@ -119,6 +124,7 @@ module tb_g6lc_wt_axi_attr;
       if (areq.ar_valid && arsp.ar_ready) begin
         ar_seen++;
         ar_cache = areq.ar.cache; ar_len = areq.ar.len;
+        ar_prot = areq.ar.prot;
         ar_size = areq.ar.size; ar_lock = areq.ar.lock; ar_addr = areq.ar.addr;
         rq[rtail%8] <= '{id:areq.ar.id, data:mem_word(areq.ar.addr),
           resp:areq.ar.lock ? axi_pkg::RESP_EXOKAY : axi_pkg::RESP_OKAY};
@@ -148,6 +154,8 @@ module tb_g6lc_wt_axi_attr;
     if (ar_seen != 1) $fatal(1, "%s AR_TIMEOUT seen=%0d", tag, ar_seen);
     if (ar_cache != expected_cache(alloc))
       $fatal(1, "%s ar.cache=%h exp=%h", tag, ar_cache, expected_cache(alloc));
+    if (ar_prot != (expected_prot ^ ($test$plusargs("oracle_origin") ? 3'b001 : 3'b000)))
+      $fatal(1, "WT_ORIGIN_AR actual=%b expected=%b", ar_prot, expected_prot);
     if (blen >= 0 && ar_len != blen[7:0])
       $fatal(1, "%s ar.len=%0d exp=%0d", tag, ar_len, blen);
     if (size >= 0 && ar_size != size[2:0])
@@ -160,6 +168,8 @@ module tb_g6lc_wt_axi_attr;
     if (aw_seen != 1) $fatal(1, "%s AW_TIMEOUT seen=%0d", tag, aw_seen);
     if (aw_cache != expected_cache(alloc))
       $fatal(1, "%s aw.cache=%h exp=%h", tag, aw_cache, expected_cache(alloc));
+    if (aw_prot != (expected_prot ^ ($test$plusargs("oracle_origin") ? 3'b001 : 3'b000)))
+      $fatal(1, "WT_ORIGIN_AW actual=%b expected=%b", aw_prot, expected_prot);
     aw_seen = 0;
   endtask
 
@@ -176,10 +186,12 @@ module tb_g6lc_wt_axi_attr;
 
   task automatic send_dreq(input wt_cache_pkg::dcache_out_t rtype, input bit nc,
                            input addr_t addr, input logic [2:0] size,
-                           input ariane_pkg::amo_t op = AMO_NONE);
+                           input ariane_pkg::amo_t op = AMO_NONE,
+                           input logic [2:0] prot = 3'b001);
     dreq = '0;
     dreq.rtype = rtype; dreq.amo_op = op; dreq.paddr = paddr_t'(addr);
     dreq.size = size; dreq.data = 64'hdead_beef_c0ff_ee11; dreq.nc = nc; dreq.tid = '0;
+    dreq.data_prot = prot; dreq.user = '1;
     dreq_vld = 1;
     for (int n = 0; n < 200; n++) begin
       #1;
@@ -238,6 +250,20 @@ module tb_g6lc_wt_axi_attr;
       8: begin
         send_dreq(DCACHE_ATOMIC_REQ, 1'b1, P, 3'b011, AMO_SC); wait_aw("WT_ATTR_SC", 0);
         if (!aw_lock) $fatal(1, "WT_ATTR_SC lock=%b", aw_lock);
+      end
+      // Only ordinary PMA-I/O descriptors retain a source domain.
+      9, 10: begin
+        for (int p = 0; p < 8; p++) begin
+          expected_prot = ORIGIN ? 3'(p) : 3'b000;
+          send_dreq(scenario == 9 ? DCACHE_LOAD_REQ : DCACHE_STORE_REQ,
+                    1'b1, 64'h1000_0000, 3'b010, AMO_NONE, 3'(p));
+          if (scenario == 9) wait_ar("WT_ORIGIN_IO_READ", 0);
+          else wait_aw("WT_ORIGIN_IO_WRITE", 0);
+        end
+      end
+      11: begin
+        send_dreq(DCACHE_ATOMIC_REQ, 1'b1, 64'h1000_0000, 3'b011, AMO_ADD);
+        wait_aw("WT_ORIGIN_IO_AMO_UNKNOWN", 0);
       end
       default: $fatal(1, "WT_ATTR_SCENARIO");
     endcase

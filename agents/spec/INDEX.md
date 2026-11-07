@@ -20,6 +20,15 @@ Index of `specs/riscv-spec.html` at `X.y` granularity. Each row is (or will beco
     directed multicore + `mc-spo-soak`. AMOCAS.Q + Spike cosim open. Sub-file:
     `riscv-spec-I-5.9-zacas.html`.
 - **Anchor** is the fragment in `specs/riscv-spec.html#<anchor>`; **Src** is the source line.
+- The standalone Storamic policy-publication/ownership candidate changes no ISA
+  chapter status. Its component contracts and unbound native-provider gates are
+  tracked in `../../AGENTS-specs-to-impl.md` and the checkpoint-service guide.
+  Fixed-unit backend slicing, descriptor-fixture propagation and EDA mapping
+  repairs likewise change no ISA chapter status or native persistence claim.
+  The model ownership/drain observations also add no instruction, CSR, DTS or
+  native capability; see `../../g6lc_storamic/architecture/policy-ownership-drain.md`.
+  Independent VirtIO control sealing also changes no ISA chapter or Linux
+  capability; see `../../g6lc_storamic/architecture/virtio-control-seal.md`.
 
 ---
 
@@ -213,3 +222,9 @@ To add a sub-file: create `riscv-spec-<Vol>-<X.y>-<slug>.html` following the con
 `../../AGENTS.md` section 7, then flip its **Status** here to `done`. Do not restructure this index;
 append rows only. Priority order tracks the four domains: RAM/CACHE (3.x/4.x/PMA/PMP/Sv), then SPEC
 (RVWMO/atomics/fences), then BP (CFI/CTR), then Profiles, then the low-priority arithmetic chapters.
+
+| Storamic writer/checkpoint model24 | `../../g6lc_storamic/architecture/checkpoint-writer-model.md` | Model/component implemented; ten selected stages and rejecting ACK mutants validated; native/aggregate/physical gates open |
+| Storamic writer reset/recovery25 | `../../g6lc_storamic/architecture/checkpoint-writer-reset.md` | Real reset/error, prior-image restore and post-copy resume hold validated in model; native/physical/device power-cut gates open |
+| Storamic shared DMA ownership26 | `../../g6lc_storamic/architecture/dma-ownership.md` | Unowned W, stalled AW/AR and credit-wrap defects fixed with rejecting original RTL; selected proof/integration pass, native/system gates open |
+| Storamic policy/writer27 | `../../g6lc_storamic/architecture/policy-writer-model.md` | Real writer/owner/seal binding and explicit reset rediscovery validated in model; native provider/topology/cache/fabric gates open |
+| Storamic native provider inventory | `../../g6lc_storamic/architecture/native-provider-inventory.md` | Bounded source inventory only; disconnected native ownership and missing authority/synchronization explicitly open |

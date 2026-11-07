@@ -3,6 +3,7 @@
 
 module g6lc_storamic_attach #(
   parameter bit Enable = 1'b0,
+  parameter bit CheckpointRequested = 1'b0,
   parameter int unsigned DramClass = 0,
   parameter int unsigned NrChannels = 1,
   parameter int unsigned IdWidth = 4,
@@ -11,7 +12,10 @@ module g6lc_storamic_attach #(
   parameter int unsigned UserWidth = 1,
   // ST-011B: model-profile window (absolute base) and sim-mem depth in words.
   parameter logic [63:0] ModelBase = 64'h8000_0000,
-  parameter int unsigned ModelWords = 8192
+  parameter int unsigned ModelWords = 8192,
+  // RAM-chip bandwidth: response stretch of the model RAM (1 beat per
+  // RspDelay+1 cycles). 0 keeps the one-cycle model.
+  parameter int unsigned RamRspDelay = 0
 ) (
   input logic clk_i,
   input logic rst_ni,
@@ -21,13 +25,25 @@ module g6lc_storamic_attach #(
   output g6lc_storamic_pkg::axil_resp_t ctrl_resp_o,
   output logic irq_o,
   output logic init_done_o,
-  output logic service_ready_o
+  output logic service_ready_o,
+  // ST-025 stick-level RAM save/restore on the model profile's sim_mem.
+  input logic power_cut_i,
+  input logic save_i,
+  input logic restore_i,
+  output logic save_busy_o,
+  output logic restore_done_o
 );
   localparam g6lc_storamic_cfg_pkg::storamic_cfg_t Cfg =
+      CheckpointRequested ? g6lc_storamic_cfg_pkg::StoramicOff :
       g6lc_storamic_soc_cfg_pkg::make_cfg(
           Enable, ModelBase, 64'(ModelWords) * 64'(DataWidth / 8));
 
   // pragma translate_off
+  if (CheckpointRequested) begin : gen_checkpoint_binding_required
+    // No native privilege/descriptor/coherence providers are bound yet. Do not
+    // silently service a requested checkpoint profile as legacy volatile RAM.
+    initial $fatal(1, "STORAMIC_CHECKPOINT_NATIVE_BINDING_REQUIRED");
+  end
   if (g6lc_storamic_soc_cfg_pkg::SimModel &&
       g6lc_storamic_soc_cfg_pkg::Skeleton) begin : gen_profile_conflict
     initial $fatal(1, "STORAMIC_PROFILE_CONFLICT");
@@ -172,8 +188,13 @@ module g6lc_storamic_attach #(
   begin : gen_model_mem
     g6lc_storamic_sim_mem #(
       .DataWidth(DataWidth), .NumWords(ModelWords),
-      .ModelBytes(Cfg.ModelBytes)
+      .ModelBytes(Cfg.ModelBytes), .RspDelay(RamRspDelay)
     ) i_sim_mem (
+      .power_cut_i, .save_i, .restore_i,
+      .checkpoint_valid_i(1'b0), .checkpoint_bank_i(1'b0),
+      .checkpoint_commit_i(1'b0), .checkpoint_abort_i(1'b0), .maintenance_i(1'b0),
+      .checkpoint_prepared_o(), .checkpoint_prepared_bank_o(),
+      .save_busy_o, .restore_done_o,
       .clk_i, .rst_ni,
       .mem_ready_o(mem_ready), .mem_req_i(mem_req), .mem_gnt_o(mem_gnt),
       .mem_we_i(mem_we), .mem_addr_i(mem_addr), .mem_wdata_i(mem_wdata),
@@ -188,6 +209,8 @@ module g6lc_storamic_attach #(
     assign mem_rdata = '0;
     assign mem_error = 1'b0;
     assign mem_tag_in = '0;
+    assign save_busy_o = 1'b0;
+    assign restore_done_o = 1'b0;
   end
 
   g6lc_storamic_top #(.Cfg(Cfg), .req_t(req_t), .resp_t(resp_t),

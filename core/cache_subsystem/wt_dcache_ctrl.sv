@@ -1,3 +1,4 @@
+// Modified by: Etienne Cimon (2026) - optional transaction-origin transport.
 // Copyright 2018 ETH Zurich and University of Bologna.
 // Copyright and related rights are licensed under the Solderpad Hardware
 // License, Version 0.51 (the "License"); you may not use this file except in
@@ -38,6 +39,7 @@ module wt_dcache_ctrl
     output logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] miss_vld_bits_o,  // valid bits at the missed index
     output logic [CVA6Cfg.PLEN-1:0] miss_paddr_o,
     output logic miss_nc_o,  // request to I/O space
+    output logic [2:0] miss_prot_o,
     output logic [2:0] miss_size_o,  // 00: 1byte, 01: 2byte, 10: 4byte, 11: 8byte, 111: cacheline
     output logic [CVA6Cfg.MEM_TID_WIDTH-1:0] miss_id_o,  // set to constant ID
     input logic miss_replay_i,  // request collided with pending miss - have to replay the request
@@ -79,6 +81,18 @@ module wt_dcache_ctrl
   logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] vld_data_d, vld_data_q;
   logic save_tag, rd_req_d, rd_req_q, rd_ack_d, rd_ack_q;
   logic [1:0] data_size_d, data_size_q;
+  if (CVA6Cfg.StoramicCheckpointEn) begin : gen_data_origin
+    logic [2:0] prot_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) prot_q <= '0;
+      else if (req_port_o.data_gnt) prot_q <= req_port_i.data_prot;
+    end
+    // Only explicitly uncacheable PMA traffic has an unmerged origin.
+    assign miss_prot_o = config_pkg::is_inside_cacheable_regions(
+        CVA6Cfg, 64'(miss_paddr_o)) ? 3'b000 : prot_q;
+  end else begin : gen_no_data_origin
+    assign miss_prot_o = '0;
+  end
 
   ///////////////////////////////////////////////////////
   // misc

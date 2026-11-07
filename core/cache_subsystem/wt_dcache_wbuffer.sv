@@ -90,6 +90,7 @@ module wt_dcache_wbuffer
     output logic [CVA6Cfg.DCACHE_USER_WIDTH-1:0] miss_wuser_o,
     output logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] miss_vld_bits_o,  // unused here (set to 0)
     output logic miss_nc_o,  // request to I/O space
+    output logic [2:0] miss_prot_o,
     output logic [2:0] miss_size_o,  //
     output logic [CVA6Cfg.MEM_TID_WIDTH-1:0]          miss_id_o,       // ID of this transaction (wbuffer uses all IDs from 0 to DCACHE_MAX_TX-1)
     // write responses from memory
@@ -894,6 +895,7 @@ module wt_dcache_wbuffer
   ///////////////////////////////////////////////////////
   logic [CVA6Cfg.DCACHE_TAG_WIDTH-1:0] miss_tag;
   logic is_nc_miss;
+  logic req_nc;
   logic is_ni;
   assign miss_tag = miss_paddr_o[CVA6Cfg.DCACHE_INDEX_WIDTH+:CVA6Cfg.DCACHE_TAG_WIDTH];
   assign is_nc_miss = !config_pkg::is_inside_cacheable_regions(
@@ -905,6 +907,17 @@ module wt_dcache_wbuffer
       }
   );
   assign miss_nc_o = !cache_en_i || is_nc_miss;
+  if (CVA6Cfg.StoramicCheckpointEn) begin : gen_data_origin
+    logic [CVA6Cfg.WtDcacheWbufDepth-1:0][2:0] prot_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) prot_q <= '0;
+      else if (req_port_i.data_req && req_port_o.data_gnt)
+        prot_q[wr_ptr] <= req_nc ? req_port_i.data_prot : 3'b000;
+    end
+    assign miss_prot_o = is_nc_miss ? prot_q[dirty_ptr] : 3'b000;
+  end else begin : gen_no_data_origin
+    assign miss_prot_o = '0;
+  end
   // Non-idempotent if request goes to NI region
   assign is_ni = config_pkg::is_inside_nonidempotent_regions(
       CVA6Cfg,
@@ -1248,7 +1261,6 @@ module wt_dcache_wbuffer
   // registers must see each store as issued, at its own size (ST-037C
   // step 4: three 32-bit VirtIO register stores left as one 64-bit write).
   // A second store to the same word waits until the first has drained.
-  logic req_nc;
   assign req_nc = !config_pkg::is_inside_cacheable_regions(
       CVA6Cfg,
       {

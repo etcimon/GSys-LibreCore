@@ -12,6 +12,33 @@ import sys
 import uuid
 
 
+SIMULATION_STAGES = frozenset({
+    "protocol", "config", "integration", "model", "region", "map", "discovery",
+    "regs", "ctrl", "virtio", "vring", "vblk", "vdev", "vdma", "dstore",
+    "checkpoint-ram", "checkpoint-ctrl", "checkpoint-record", "checkpoint-model",
+    "checkpoint-service", "checkpoint-endpoint", "checkpoint-policy", "quiesce",
+    "checkpoint-writer", "checkpoint-writer-reset", "vdma-ownership", "policy-writer",
+    "commit-defaults",
+})
+ALLOWED_STAGES = SIMULATION_STAGES | frozenset({
+    "synth", "formal", "model-synth", "model-formal", "map-synth", "map-formal",
+    "discovery-synth", "discovery-formal", "regs-synth", "regs-formal", "ctrl-synth",
+    "virtio-synth", "virtio-formal", "vring-synth", "vring-formal", "vblk-synth",
+    "vdev-synth", "vblk-formal", "vblk-flush-formal", "checkpoint-synth",
+    "checkpoint-formal", "checkpoint-record-synth", "checkpoint-record-formal",
+    "checkpoint-codec-formal", "checkpoint-io-formal", "checkpoint-model-synth",
+    "checkpoint-service-synth", "checkpoint-service-formal", "checkpoint-endpoint-synth",
+    "checkpoint-endpoint-formal", "quiesce-formal",
+    "checkpoint-policy-synth", "checkpoint-policy-formal",
+    "checkpoint-writer-synth",
+    "checkpoint-writer-formal",
+    "vdma-ownership-formal",
+    "policy-writer-synth",
+    "policy-writer-formal",
+    "commit-defaults-formal", "commit-defaults-synth",
+})
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--stages", default="protocol,config,integration,synth,formal")
@@ -23,25 +50,27 @@ def main():
     parser.add_argument("--runtime-header-sha256",
                         default=os.environ.get("STORAMIC_RUNTIME_HEADER_SHA256"))
     parser.add_argument("--output-root", type=Path)
+    parser.add_argument("--prepare-only", action="store_true",
+                        help="Write source manifest and launch plan locally; never contact the host")
     args = parser.parse_args()
     stages = args.stages.split(",")
-    if len(stages) != len(set(stages)) or not set(stages) <= {
-        "protocol", "config", "integration", "model", "synth", "formal",
-        "model-synth", "model-formal", "region", "map", "map-synth",
-        "map-formal", "discovery", "discovery-synth", "discovery-formal",
-        "regs", "regs-synth", "regs-formal", "ctrl", "ctrl-synth",
-        "virtio", "virtio-synth", "virtio-formal",
-        "vring", "vring-synth", "vring-formal", "vblk", "vblk-synth", "vdev", "vdev-synth", "vdma", "vblk-formal", "vblk-flush-formal",
-        "dstore",
-    }:
+    if len(stages) != len(set(stages)) or not set(stages) <= ALLOWED_STAGES:
         parser.error("invalid or duplicate stages")
     root = Path(__file__).resolve().parents[3]
-    if set(stages) & {"protocol", "config", "integration", "model", "region",
-                      "map", "discovery", "regs", "ctrl", "virtio",
-                      "vring", "vblk", "vdev", "vdma", "dstore"}:
-        if not (args.runtime_json or args.runtime_record) or not args.runtime_header_sha256:
-            print("Incomplete: provide a validated runtime record and --runtime-header-sha256")
-            return 4
+    needs_runtime = bool(set(stages) & SIMULATION_STAGES)
+    blockers = []
+    if needs_runtime:
+        if not (args.runtime_json or args.runtime_record):
+            blockers.append("provide --runtime-json or --runtime-record")
+        if not args.runtime_header_sha256:
+            blockers.append("provide --runtime-header-sha256")
+    if args.runtime_header_sha256 and (
+            len(args.runtime_header_sha256) != 64 or
+            any(c not in "0123456789abcdef" for c in args.runtime_header_sha256)):
+        parser.error("--runtime-header-sha256 must be a lowercase SHA-256 digest")
+    if blockers and not args.prepare_only:
+        print("Incomplete: " + "; ".join(blockers))
+        return 4
     sys.path.insert(0, str(root / "verif/regress/remote"))
     import testharness_proxy as gateway
     flist = root / "g6lc_storamic/Flist.storamic"
@@ -71,19 +100,44 @@ def main():
         "verif/tb/storamic/formal_g6lc_storamic_regs.sv",
         "verif/tb/storamic/tb_g6lc_storamic_virtio_mmio.sv",
         "verif/tb/storamic/formal_g6lc_storamic_virtio_mmio.sv",
+        "verif/tb/storamic/formal_g6lc_storamic_virtio_pause.sv",
         "verif/tb/storamic/tb_g6lc_storamic_virtio_ring.sv",
         "verif/tb/storamic/formal_g6lc_storamic_virtio_ring.sv",
         "verif/tb/storamic/tb_g6lc_storamic_virtio_blk.sv",
         "verif/tb/storamic/tb_g6lc_storamic_virtio_dev.sv",
         "verif/tb/storamic/tb_g6lc_storamic_dma_axi.sv",
+        "verif/tb/storamic/tb_g6lc_storamic_dma_ownership.sv",
+        "verif/tb/storamic/formal_g6lc_storamic_dma_ownership.sv",
         "verif/tb/storamic/formal_g6lc_storamic_virtio_blk.sv",
         "verif/tb/storamic/tb_g6lc_storamic_ctrl_bridge.sv",
         "verif/tb/storamic/tb_g6lc_storamic_soc.sv",
         "verif/tb/storamic/tb_g6lc_storamic_model.sv",
+        "verif/tb/storamic/tb_g6lc_storamic_quiesce.sv",
         "verif/tb/storamic/tb_g6lc_storamic_durable_store.sv",
+        "verif/tb/storamic/tb_g6lc_storamic_checkpoint_ram.sv",
+        "verif/tb/storamic/tb_g6lc_storamic_checkpoint_ctrl.sv",
+        "verif/tb/storamic/formal_g6lc_storamic_checkpoint_ctrl.sv",
+        "verif/tb/storamic/tb_g6lc_storamic_checkpoint_codec.sv",
+        "verif/tb/storamic/tb_g6lc_storamic_checkpoint_media.sv",
+        "verif/tb/storamic/tb_g6lc_storamic_checkpoint_model.sv",
+        "verif/tb/storamic/tb_g6lc_storamic_checkpoint_service.sv",
+        "verif/tb/storamic/formal_g6lc_storamic_checkpoint_service.sv",
+        "verif/tb/storamic/tb_g6lc_storamic_checkpoint_policy.sv",
+        "verif/tb/storamic/formal_g6lc_storamic_checkpoint_policy.sv",
+        "verif/tb/storamic/tb_g6lc_storamic_checkpoint_endpoint.sv",
+        "verif/tb/storamic/tb_g6lc_storamic_checkpoint_writer.sv",
+        "verif/tb/storamic/tb_g6lc_storamic_policy_writer.sv",
+        "verif/tb/storamic/formal_g6lc_storamic_policy_writer.sv",
+        "verif/tb/storamic/formal_g6lc_storamic_checkpoint_writer.sv",
+        "verif/tb/storamic/formal_g6lc_storamic_checkpoint_endpoint.sv",
+        "verif/tb/storamic/formal_g6lc_storamic_store_drain.sv",
+        "verif/tb/storamic/tb_g6lc_storamic_store_guard.sv",
+        "verif/tb/storamic/formal_g6lc_storamic_checkpoint_codec.sv",
+        "verif/tb/storamic/formal_g6lc_storamic_checkpoint_io.sv",
         "verif/tb/storamic/g6lc_storamic_sram_model.sv",
         "verif/tb/storamic/formal_g6lc_storamic.sv",
         "verif/tb/storamic/formal_g6lc_storamic_model.sv",
+        "verif/tb/storamic/formal_g6lc_storamic_quiesce.sv",
         "verif/regress/remote/yosys_bin.py",
         "core/include/config_pkg.sv",
         "core/include/build_config_pkg.sv",
@@ -95,6 +149,10 @@ def main():
         "corev_apu/storamic/g6lc_storamic_model_store.sv",
         "corev_apu/storamic/g6lc_storamic_model_stick.sv",
         "corev_apu/storamic/g6lc_storamic_sim_mem.sv",
+        "corev_apu/storamic/g6lc_storamic_checkpoint_model.sv",
+        "corev_apu/storamic/g6lc_storamic_checkpoint_endpoint.sv",
+        "corev_apu/storamic/g6lc_storamic_checkpoint_writer_model.sv",
+        "corev_apu/storamic/g6lc_storamic_policy_writer_model.sv",
         "vendor/pulp-platform/tech_cells_generic/src/rtl/tc_sram.sv",
         "common/local/util/tc_sram_wrapper.sv",
         "common/local/util/sram.sv",
@@ -115,6 +173,17 @@ def main():
         "vendor/pulp-platform/common_cells/src/spill_register.sv",
         "vendor/pulp-platform/common_cells/src/spill_register_flushable.sv",
     ]]
+    if set(stages) & {"commit-defaults", "commit-defaults-formal", "commit-defaults-synth"}:
+        # Explicit RV64GC reference fixture, not a production target selection.
+        sources += [root / path for path in [
+            "core/include/cv64a6_imafdc_sv39_config_pkg.sv",
+            "core/include/riscv_pkg.sv", "core/include/ariane_pkg.sv",
+            "core/commit_stage.sv",
+            "verif/tb/storamic/g6lc_commit_defaults_fixture.sv",
+            "verif/tb/storamic/tb_g6lc_commit_defaults.sv",
+            "verif/tb/storamic/formal_g6lc_commit_defaults.sv",
+            "verif/tb/storamic/run_commit_defaults.py",
+        ]]
     if args.runtime_record:
         record = args.runtime_record.resolve()
         if record.name != "runtime.json":
@@ -126,11 +195,16 @@ def main():
         text=True).splitlines()
     for rel in tracked:
         path = root / rel
-        if "config" in stages and path.is_file() and "cva6_user_cfg_t cva6_cfg" in path.read_text():
+        if "config" in stages and path.is_file() and "cva6_user_cfg_t cva6_cfg" in path.read_text(encoding="utf-8"):
             configs.append(path.name)
-            sources.append(path)
+            if path not in sources:
+                sources.append(path)
     if len({path.name for path in sources}) != len(sources):
         raise RuntimeError("duplicate source basename")
+    missing = [str(path) for path in sources if not path.is_file()]
+    if missing:
+        print("Incomplete: missing local source inputs:\n" + "\n".join(missing))
+        return 4
     manifest = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
                 for path in sources}
     tag = "storamic-" + uuid.uuid4().hex[:12]
@@ -149,6 +223,7 @@ def main():
     dest.parent.mkdir(parents=True, exist_ok=True)
     manifest_file = dest.parent / "storamic-run-manifest.json"
     manifest_file.write_text(json.dumps({
+        "stages": stages,
         "sources": manifest,
         "source_paths": {
             path.name: (path.relative_to(root).as_posix() if path.is_relative_to(root)
@@ -172,6 +247,22 @@ def main():
         command += ["--env", "STORAMIC_RUNTIME_JSON=" + args.runtime_json]
     if args.runtime_header_sha256:
         command += ["--env", "STORAMIC_RUNTIME_HEADER_SHA256=" + args.runtime_header_sha256]
+    plan = {
+        "status": "prepared", "qualification": False,
+        "tag": tag, "stages": stages, "blockers": blockers,
+        "runner_sha256": runner_sha,
+        "manifest_sha256": hashlib.sha256(manifest_file.read_bytes()).hexdigest(),
+        "manifest": str(manifest_file), "output": str(dest),
+        "command": command,
+        "runtime_validation": "performed by the remote leaf, not by preparation",
+    }
+    plan_file = dest.parent / "launch-plan.json"
+    plan_file.write_text(json.dumps(plan, indent=2))
+    if args.prepare_only:
+        print(f"Prepared locally (no remote launch): {plan_file}")
+        if blockers:
+            print("Launch blocked: " + "; ".join(blockers))
+        return 0
     rc = subprocess.call(command, cwd=root)
     result = dest / "leaf-result.json"
     if not result.exists():

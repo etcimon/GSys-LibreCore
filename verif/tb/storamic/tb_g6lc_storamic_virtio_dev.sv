@@ -20,17 +20,23 @@ module tb_g6lc_storamic_virtio_dev;
   g6lc_storamic_pkg::axil_req_t req;
   g6lc_storamic_pkg::axil_resp_t resp;
   logic irq;
+  logic quiesce = 0, quiesced, quiesce_error;
+  logic ctrl_quiesce = 0, ctrl_quiesced;
   logic cap_ev = 0;
   logic [159:0] serial = 160'h3433_3231_5F43_494D_4152_4F54_535F_4336_4C47_3647;
   logic dreq, dgnt = 0, dwe, drv = 0, derr = 0;
   logic [63:0] daddr, dwdata, drdata = '0;
   logic [7:0] dbe;
+  logic grant_dma = 1, grant_store = 1;
   logic sreq, sgnt = 0, swe, srv = 0;
   logic [63:0] saddr, swdata, srdata = '0;
   logic [7:0] sbe;
 
   g6lc_storamic_virtio_dev #(.QueueNumMax(16), .MaxSegs(4)) dut (
     .clk_i(clk), .rst_ni(rst_n), .ctrl_req_i(req), .ctrl_resp_o(resp), .irq_o(irq),
+    .quiesce_i(quiesce), .quiesced_o(quiesced), .quiesce_error_o(quiesce_error),
+    .ctrl_quiesce_i(ctrl_quiesce), .ctrl_quiesced_o(ctrl_quiesced),
+    .inflight_o(),
     .device_usable_i(1'b1), .capacity_i(CapSectors), .capacity_update_i(cap_ev),
     .serial_i(serial), .store_ready_i(1'b1),
     .dma_base_i(WinBase), .dma_size_i(WinSize),
@@ -61,8 +67,8 @@ module tb_g6lc_storamic_virtio_dev;
   logic [63:0] dbaddr, sbaddr;
   int dlat, slat;
   always @(negedge clk) begin
-    dgnt <= ($urandom % 100) < 70;
-    sgnt <= ($urandom % 100) < 70;
+    dgnt <= grant_dma && ($urandom % 100) < 70;
+    sgnt <= grant_store && ($urandom % 100) < 70;
     if (dbusy && !drv) begin
       if (dlat > 0) dlat <= dlat - 1;
       else begin drv <= 1'b1; drdata <= dbwe ? 64'h0 : ram64(dbaddr); end
@@ -132,6 +138,56 @@ module tb_g6lc_storamic_virtio_dev;
   task automatic section(input string n);
     $display("VDEV_SECTION %s", n); $fflush();
   endtask
+  task automatic mmio_pause_cases;
+    int a0, w0;
+    for (int order = 0; order < 3; order++) begin
+      a0 = acc[0]; w0 = acc[1];
+      req.aw.addr = 'h014; req.w.data = 1; req.w.strb = '1;
+      req.aw_valid = order != 1; req.w_valid = order != 0;
+      tick();
+      ok((order == 1 || acc[0] == a0 + 1) &&
+         (order == 0 || acc[1] == w0 + 1), "mmio-first-half-accepted");
+      req.aw_valid = 0; req.w_valid = 0; ctrl_quiesce = 1; tick();
+      ok(!ctrl_quiesced && !quiesce_error, "mmio-owned-before-pause-ack");
+      if (order != 2) begin
+        req.aw_valid = order == 1; req.w_valid = order == 0;
+        do tick(); while (acc[0] != a0 + 1 || acc[1] != w0 + 1);
+        req.aw_valid = 0; req.w_valid = 0;
+      end
+      while (!resp.b_valid) tick();
+      repeat (3) begin
+        ok(!ctrl_quiesced && resp.b_valid && resp.b.resp == 0,
+           "held-mmio-B-prevents-pause-ack"); tick();
+      end
+      req.b_ready = 1; tick(); req.b_ready = 0; tick();
+      ok(ctrl_quiesced && !quiesce_error, "retired-mmio-write-allows-pause");
+      ctrl_quiesce = 0; tick();
+    end
+    req.ar.addr = 'h000; req.ar_valid = 1; tick(); req.ar_valid = 0;
+    while (!resp.r_valid) tick();
+    ctrl_quiesce = 1;
+    repeat (3) begin
+      tick(); ok(!ctrl_quiesced && resp.r_valid && resp.r.data == 32'h74726976,
+                 "held-mmio-R-prevents-pause-ack");
+    end
+    req.r_ready = 1; tick(); req.r_ready = 0; tick();
+    ok(ctrl_quiesced && !quiesce_error, "retired-mmio-read-allows-pause");
+    a0 = acc[0]; w0 = acc[1];
+    req.aw.addr = 'h014; req.w.data = 0; req.w.strb = '1;
+    req.aw_valid = 1; req.w_valid = 1; req.ar.addr = 'h000; req.ar_valid = 1;
+    repeat (3) begin
+      tick(); ok(ctrl_quiesced && !resp.aw_ready && !resp.w_ready && !resp.ar_ready &&
+                 !resp.b_valid && !resp.r_valid && acc[0] == a0 && acc[1] == w0,
+                 "paused-mmio-refuses-new-admission");
+    end
+    ctrl_quiesce = 0;
+    do tick(); while (acc[0] == a0 || acc[1] == w0);
+    req.aw_valid = 0; req.w_valid = 0; req.ar_valid = 0;
+    while (!resp.b_valid || !resp.r_valid) tick();
+    ok(resp.b.resp == 0 && resp.r.data == 32'h74726976, "mmio-resumes-held-offers");
+    req.b_ready = 1; req.r_ready = 1; tick();
+    req.b_ready = 0; req.r_ready = 0; tick();
+  endtask
   task automatic put16(input logic [63:0] a, input logic [15:0] v);
     ram[a] = v[7:0]; ram[a + 1] = v[15:8];
   endtask
@@ -182,13 +238,11 @@ module tb_g6lc_storamic_virtio_dev;
     rd(12'h070, d); ok(d == 32'hF, "driver-ok");
   endtask
 
-  // Post a 3-descriptor request using descriptors 0..2 and wait for it.
-  task automatic blk_req(input logic [31:0] typ, input logic [63:0] sector,
+  // Post a 3-descriptor request using descriptors 0..2.
+  task automatic post_req(input logic [31:0] typ, input logic [63:0] sector,
                          input logic [63:0] data, input logic [31:0] dlen,
-                         input bit dwrite, output logic [7:0] status,
-                         output logic [31:0] ulen);
+                         input bit dwrite);
     logic [63:0] hdr, st;
-    int g;
     hdr = 64'h8000_5000; st = 64'h8000_5100;
     put32(hdr, typ); put32(hdr + 4, 0); put64(hdr + 8, sector);
     ram[st] = 8'hEE;
@@ -205,6 +259,10 @@ module tb_g6lc_storamic_virtio_dev;
     avail_idx++;
     put16(Avail + 2, avail_idx);
     wr(12'h050, 32'h0);                       // QueueNotify
+  endtask
+
+  task automatic finish_req(output logic [7:0] status, output logic [31:0] ulen);
+    int g;
     g = 0;
     while (!irq) begin tick(); if (++g > 20000) $fatal(1, "VDEV_TIMEOUT irq"); end
     rd(12'h060, d); ok(d[0], "irq-used");
@@ -214,16 +272,47 @@ module tb_g6lc_storamic_virtio_dev;
     ok(get32(Used + 4 + 8 * (used_seen % 8)) == 0, "used-id");
     ulen = get32(Used + 8 + 8 * (used_seen % 8));
     used_seen++;
-    status = ram[st];
+    status = ram[64'h8000_5100];
+  endtask
+
+  task automatic blk_req(input logic [31:0] typ, input logic [63:0] sector,
+                         input logic [63:0] data, input logic [31:0] dlen,
+                         input bit dwrite, output logic [7:0] status,
+                         output logic [31:0] ulen);
+    post_req(typ, sector, data, dlen, dwrite);
+    finish_req(status, ulen);
+  endtask
+
+  task automatic wait_quiesced;
+    int g;
+    g = 0;
+    while (!quiesced) begin
+      tick();
+      if (++g > 20000) $fatal(1, "VDEV_TIMEOUT quiesce");
+    end
+    ok(!quiesce_error, "quiesce-without-error");
   endtask
 
   logic [7:0] status;
   logic [31:0] ulen;
+  logic pause_error_seen = 0;
+  always @(posedge clk) begin
+    if (rst_n && quiesce && quiesce_error) pause_error_seen <= 1;
+    if (rst_n && quiesced)
+      assert (quiesce && !quiesce_error && !dreq && !sreq && !dbusy && !sbusy)
+        else $fatal(1, "VDEV_EARLY_QUIESCE");
+  end
+
   initial begin
+    int before_dma;
+    logic [7:0] epoch_before;
+    logic [63:0] held_saddr, held_swdata;
     req = '0;
     if ($test$plusargs("oracle_negative")) corrupt = 1;
     repeat (3) tick(); rst_n = 1; repeat (2) tick();
 
+    section("mmio-pause-ownership");
+    mmio_pause_cases();
     section("init");
     driver_init();
 
@@ -253,8 +342,78 @@ module tb_g6lc_storamic_virtio_dev;
     blk_req(32'd1, CapSectors - 1, 64'h8000_8000, 1024, 0, status, ulen);
     ok(status == 1, "ioerr-past-capacity");
 
+    section("pause-accepted-out");
+    epoch_before = dut.reset_epoch;
+    grant_store = 0; tick();
+    post_req(32'd1, 64'd10, 64'h8000_8000, 512, 0);
+    while (!sreq) tick();
+    quiesce = 1;
+    held_saddr = saddr; held_swdata = swdata;
+    repeat (8) begin
+      tick();
+      ok(!quiesced && !quiesce_error && sreq && swe &&
+         saddr == held_saddr && swdata == held_swdata,
+         "pause-retains-ungranted-store-offer");
+    end
+    grant_store = 1;
+    finish_req(status, ulen);
+    wait_quiesced();
+    ok(status == 0 && ulen == 1, "accepted-out-completes-before-pause");
+    for (int i = 0; i < 512; i++)
+      if (store[10 * 512 + i] !== 8'(i * 13 + 1)) ok(0, "paused-out-store-byte");
+
+    section("notify-while-paused");
+    before_dma = dma_beats;
+    post_req(32'd8, 64'd0, 64'h8000_E100, 20, 1);
+    repeat (12) tick();
+    ok(quiesced && !quiesce_error && dma_beats == before_dma &&
+       get16(Used + 2) == used_seen && ram[64'h8000_5100] == 8'hEE,
+       "paused-notify-does-not-start-chain");
+    quiesce = 0;
+    finish_req(status, ulen);
+    ok(status == 0 && ulen == 21, "resume-without-another-notify");
+    for (int i = 0; i < 20; i++)
+      ok(ram[64'h8000_E100 + i] == serial[8*i +: 8], "resumed-getid-byte");
+
+    section("pause-ungranted-avail-poll");
+    quiesce = 1; wait_quiesced();
+    grant_dma = 0; tick();
+    post_req(32'd8, 64'd0, 64'h8000_E200, 20, 1);
+    before_dma = dma_beats;
+    quiesce = 0;
+    while (!dreq) tick();
+    ok(daddr == Avail, "paused-poll-address");
+    quiesce = 1;
+    repeat (5) begin
+      tick();
+      ok(dreq && !dwe && daddr == Avail && !quiesced,
+         "pause-does-not-withdraw-existing-dma-offer");
+    end
+    grant_dma = 1;
+    wait_quiesced();
+    ok(dma_beats == before_dma + 1 && get16(Used + 2) == used_seen &&
+       ram[64'h8000_5100] == 8'hEE, "avail-poll-is-not-an-accepted-chain");
+    quiesce = 0;
+    finish_req(status, ulen);
+    ok(status == 0 && ulen == 21, "poll-resumes-queued-chain");
+
+    section("pause-at-backend-handoff");
+    post_req(32'd8, 64'd0, 64'h8000_E300, 20, 1);
+    while (!dut.rq_valid) tick();
+    quiesce = 1;
+    #1;
+    ok(dut.ring_idle && dut.blk_idle && !dut.port_busy && !quiesced,
+       "port-idle-bubble-is-not-job-quiescence");
+    finish_req(status, ulen);
+    wait_quiesced();
+    rd(12'h070, d);
+    ok(status == 0 && ulen == 21 && d == 32'hF && dut.reset_epoch == epoch_before,
+       "pause-does-not-reset-device-or-queue-epoch");
+
     section("reset-and-reinit");
     wr(12'h070, 32'h0);
+    ok(pause_error_seen, "reset-during-pause-reports-error");
+    quiesce = 0; tick();
     driver_init();
     blk_req(32'd0, 64'd5, 64'h8000_D000, 512, 1, status, ulen);
     ok(status == 0 && ram[64'h8000_D000 + 7] == 8'(7 * 13 + 1), "after-reset-io");
@@ -281,6 +440,11 @@ endmodule
 // Synthesis wrapper (top level).
 module g6lc_storamic_virtio_dev_synth (
   input logic clk_i, rst_ni,
+  input logic quiesce_i,
+  output logic quiesced_o, quiesce_error_o,
+  input logic ctrl_quiesce_i,
+  output logic ctrl_quiesced_o,
+  output logic inflight_o,
   input g6lc_storamic_pkg::axil_req_t ctrl_req_i,
   output g6lc_storamic_pkg::axil_resp_t ctrl_resp_o,
   output logic irq_o,

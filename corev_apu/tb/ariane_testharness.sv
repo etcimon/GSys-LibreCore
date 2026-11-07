@@ -310,6 +310,9 @@ module ariane_testharness #(
   // VirtIO DMA; see g6lc_storamic_dma_axi InvalEn).
   logic        storamic_inval_valid, storamic_inval_ready, storamic_inval_done;
   logic [63:0] storamic_inval_addr;
+  // ST-025 stick-level save/restore/power-cut pulses (driven inside
+  // gen_storamic_ctrl; tied off when StoramicIoEn is off).
+  logic        storamic_power_cut, storamic_save, storamic_restore;
   if (CVA6Cfg.StoramicIoEn) begin : gen_storamic_ctrl
     ariane_axi_soc::req_slv_t  storamic_axi_req;
     ariane_axi_soc::resp_slv_t storamic_axi_resp;
@@ -340,6 +343,78 @@ module ariane_testharness #(
     logic        vs_req, vs_gnt, vs_we, vs_rvalid, vs_err;
     logic [63:0] vs_addr, vs_wdata, vs_rdata;
     logic [7:0]  vs_be;
+    logic        vs_flush_req, vs_flush_ack, vs_flush_err;
+    // ST-025 groundwork: a sim-only power-cut trigger. An MMIO write to
+    // StoramicBase+0x3000 (inside the reserved DECERR region) pulses
+    // power_cut on the stick's flash chip for a few cycles, dropping
+    // uncommitted staging synchronously with the test.
+    logic [3:0]  storamic_power_cut_q;
+    logic        storamic_cut_arm_q;
+    logic [3:0]  storamic_cut_delay_q;
+    logic        storamic_save_q, storamic_restore_q;
+    logic [31:0] storamic_unlock_key_q;
+    logic        storamic_key_pend_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        storamic_power_cut_q <= '0;
+        storamic_cut_arm_q <= 1'b0;
+        storamic_cut_delay_q <= '0;
+        storamic_save_q <= 1'b0;
+        storamic_restore_q <= 1'b0;
+        storamic_unlock_key_q <= '0;
+        storamic_key_pend_q <= 1'b0;
+      end else begin
+        // Drive the top-level pulse wires (assigned to wires below).
+        storamic_power_cut <= storamic_power_cut_q != '0;
+        storamic_save <= storamic_save_q;
+        storamic_restore <= storamic_restore_q;
+        storamic_save_q <= storamic_axi_req.aw_valid &&
+            storamic_axi_resp.aw_ready &&
+            storamic_axi_req.aw.addr == ariane_soc::StoramicBase + 64'h3010;
+        storamic_restore_q <= storamic_axi_req.aw_valid &&
+            storamic_axi_resp.aw_ready &&
+            storamic_axi_req.aw.addr == ariane_soc::StoramicBase + 64'h3018;
+        // +0x3020: protected-ABI unlock key. AW and W handshake
+        // independently, so mark the write on AW-accept and latch the
+        // key on the matching W beat.
+        if (storamic_axi_req.aw_valid && storamic_axi_resp.aw_ready &&
+            storamic_axi_req.aw.addr == ariane_soc::StoramicBase + 64'h3020)
+          storamic_key_pend_q <= 1'b1;
+        if (storamic_key_pend_q &&
+            storamic_axi_req.w_valid && storamic_axi_resp.w_ready) begin
+          storamic_key_pend_q <= 1'b0;
+          storamic_unlock_key_q <= storamic_axi_req.w.data[31:0];
+        end
+        // +0x3000: immediate pulse (drops uncommitted staging).
+        if (storamic_axi_req.aw_valid && storamic_axi_resp.aw_ready &&
+            storamic_axi_req.aw.addr == ariane_soc::StoramicBase + 64'h3000)
+          storamic_power_cut_q <= 4'hF;
+        else if (storamic_power_cut_q != '0)
+          storamic_power_cut_q <= storamic_power_cut_q - 1'b1;
+        // +0x3008: arm for a mid-drain cut — fires ~3 cycles after the next
+        // store flush request so the pulse lands inside the first entry's
+        // commit (journal-replay path).
+        if (storamic_axi_req.aw_valid && storamic_axi_resp.aw_ready &&
+            storamic_axi_req.aw.addr == ariane_soc::StoramicBase + 64'h3008)
+          storamic_cut_arm_q <= 1'b1;
+        else if (storamic_cut_arm_q && vs_flush_req &&
+                 storamic_cut_delay_q == '0) begin
+          storamic_cut_arm_q <= 1'b0;
+          storamic_cut_delay_q <= 4'd3;
+        end else if (storamic_cut_delay_q != '0) begin
+          storamic_cut_delay_q <= storamic_cut_delay_q - 1'b1;
+          if (storamic_cut_delay_q == 4'd1) storamic_power_cut_q <= 4'hF;
+        end
+      end
+    end
+    // One model stick carries the flash chip below; its RAM chip is the
+    // sim_mem inside the Storamic attach (mem_* seam). Capacity, serial,
+    // durability and presence all publish from the stick.
+    logic        stick_present, stick_durable;
+    logic [31:0] stick_cut_count, stick_commit_gen; // ST-025 recovery surface
+    logic [31:0] stick_identity;
+    logic [63:0] stick_ram_bytes, stick_flash_bytes, stick_flash_sectors;
+    logic [159:0] stick_serial;
 `ifdef G6LC_AI_DRAM_ISLAND_PORT
     localparam bit vd_usable = 1'b0;
 `else
@@ -347,25 +422,58 @@ module ariane_testharness #(
 `endif
     g6lc_storamic_virtio_dev #(.QueueNumMax(128), .MaxSegs(8)) i_storamic_virtio (
       .clk_i, .rst_ni(ndmreset_n),
+      .quiesce_i(1'b0), .quiesced_o(), .quiesce_error_o(),
+      .ctrl_quiesce_i(1'b0), .ctrl_quiesced_o(),
+      .inflight_o(),
       .ctrl_req_i(storamic_vctrl_req), .ctrl_resp_o(storamic_vctrl_resp),
       .irq_o(storamic_virtio_irq),
-      .device_usable_i(vd_usable), .capacity_i(64'd128), .capacity_update_i(1'b0),
-      // "G6LC-STORAMIC-MODEL0" (ASCII, byte 0 first): labels the model store.
-      .serial_i(160'h304C_4544_4F4D_2D43_494D_4152_4F54_532D_434C_3647),
-      .store_ready_i(1'b1),
+      .device_usable_i(vd_usable && stick_present),
+      .capacity_i(stick_flash_sectors), .capacity_update_i(1'b0),
+      .serial_i(stick_serial),
+      .store_ready_i(stick_present),
       .dma_base_i(ariane_soc::DRAMBase), .dma_size_i(ariane_soc::DRAMLength),
       .dma_req_o(vd_req), .dma_gnt_i(vd_gnt), .dma_we_o(vd_we),
       .dma_addr_o(vd_addr), .dma_wdata_o(vd_wdata), .dma_be_o(vd_be),
       .dma_rvalid_i(vd_rvalid), .dma_rdata_i(vd_rdata), .dma_err_i(vd_err),
       .st_req_o(vs_req), .st_gnt_i(vs_gnt), .st_we_o(vs_we),
       .st_addr_o(vs_addr), .st_wdata_o(vs_wdata), .st_be_o(vs_be),
-      .st_rvalid_i(vs_rvalid), .st_rdata_i(vs_rdata), .st_err_i(vs_err)
+      .st_rvalid_i(vs_rvalid), .st_rdata_i(vs_rdata), .st_err_i(vs_err),
+      // ST-037D: the stick's flash chip is the commit-boundary durable
+      // store, so FLUSH is offered and honored.
+      .st_durable_i(stick_durable), .st_flush_req_o(vs_flush_req),
+      .st_flush_ack_i(vs_flush_ack), .st_flush_err_i(vs_flush_err)
     );
-    g6lc_storamic_model_store #(.NumWords(8192)) i_storamic_model_store (
+    g6lc_storamic_model_stick #(
+      .RamWords(NUM_WORDS * AXI_DATA_WIDTH / AI_DRAM_CH_W), .FlashWords(8192)
+`ifdef G6LC_STORAMIC_FLASH_RSP
+      , .FlashRspCycles(`G6LC_STORAMIC_FLASH_RSP)
+`endif
+`ifdef G6LC_STORAMIC_FLASH_COMMIT
+      , .FlashCommitCycles(`G6LC_STORAMIC_FLASH_COMMIT)
+`endif
+    ) i_storamic_stick (
       .clk_i, .rst_ni(ndmreset_n),
+      // ST-025: MMIO-triggered power cut drops uncommitted staging only.
+      .power_cut_i(storamic_power_cut_q != '0),
+      .save_i(storamic_save_q), .save_done_o(),
       .st_req_i(vs_req), .st_gnt_o(vs_gnt), .st_we_i(vs_we),
       .st_addr_i(vs_addr), .st_wdata_i(vs_wdata), .st_be_i(vs_be),
-      .st_rvalid_o(vs_rvalid), .st_rdata_o(vs_rdata), .st_err_o(vs_err)
+      .st_rvalid_o(vs_rvalid), .st_rdata_o(vs_rdata), .st_err_o(vs_err),
+      .st_flush_req_i(vs_flush_req), .st_flush_ack_o(vs_flush_ack),
+      .st_flush_err_o(vs_flush_err),
+      // ST-025 protected save/restore ABI + journal record.
+      .unlock_key_i(storamic_unlock_key_q),
+      .restore_i(storamic_restore), .restore_done_o(),
+      .stick_journal_gen_o(), .stick_journal_id_o(),
+      .stick_present_o(stick_present), .stick_identity_o(stick_identity),
+      .stick_ram_bytes_o(stick_ram_bytes),
+      .stick_flash_bytes_o(stick_flash_bytes),
+      .stick_flash_sectors_o(stick_flash_sectors),
+      .stick_durable_o(stick_durable),
+      .stick_store_idle_o(),
+      .stick_cut_count_o(stick_cut_count),
+      .stick_commit_gen_o(stick_commit_gen),
+      .stick_serial_o(stick_serial)
     );
 `ifdef G6LC_AI_DRAM_ISLAND_PORT
     // The wide island DMA owns crossbar port 2 in this build: no shared DMA
@@ -380,6 +488,7 @@ module ariane_testharness #(
       .axi_req_t(ariane_axi::req_t), .axi_resp_t(ariane_axi::resp_t)
     ) i_storamic_dma (
       .clk_i, .rst_ni(ndmreset_n),
+      .inflight_o(),
       .dma_req_i(vd_req), .dma_gnt_o(vd_gnt), .dma_we_i(vd_we),
       .dma_addr_i(vd_addr), .dma_wdata_i(vd_wdata), .dma_be_i(vd_be),
       .dma_rvalid_o(vd_rvalid), .dma_rdata_o(vd_rdata), .dma_err_o(vd_err),
@@ -392,6 +501,9 @@ module ariane_testharness #(
   end else begin : gen_no_storamic_ctrl
     // The backend answers '0 and drives storamic_irq low when disabled.
     assign storamic_ctrl_req = '0;
+    assign storamic_power_cut = 1'b0;
+    assign storamic_save = 1'b0;
+    assign storamic_restore = 1'b0;
     assign ai_dma_sh_req = ai_dma_req;
     assign ai_dma_resp = ai_dma_sh_resp;
     assign storamic_vctrl_req = '0;
@@ -1151,6 +1263,7 @@ module ariane_testharness #(
 `endif
   g6lc_ai_dram_backend #(
     .StoramicEn     ( CVA6Cfg.StoramicEn                ),
+    .StoramicCheckpointEn( CVA6Cfg.StoramicCheckpointEn  ),
     .StoramicModelBase( ariane_soc::DRAMBase            ),
     .DramClass      ( AiIslandCfg.DramClass            ),
     .AXI_ID_WIDTH   ( ariane_axi_soc::IdWidthSlave
@@ -1164,6 +1277,13 @@ module ariane_testharness #(
     .AXI_USER_EN    ( AXI_USER_EN                      ),
     // Same byte capacity at any channel width.
     .NUM_WORDS      ( NUM_WORDS * AXI_DATA_WIDTH / AI_DRAM_CH_W ),
+    // RAM-chip bandwidth for the Storamic primary role (0 = 1-cycle model;
+    // sweepable via +define+G6LC_STORAMIC_RAM_DELAY for ST-013).
+`ifdef G6LC_STORAMIC_RAM_DELAY
+    .StoramicRamRspDelay( `G6LC_STORAMIC_RAM_DELAY                ),
+`else
+    .StoramicRamRspDelay( 0                                        ),
+`endif
     .NrChannels     ( AiIslandCfg.DramChannels         ),
     .ChanShift      ( AiIslandCfg.DramChanShift        ),
     .MaxAROut       ( AiIslandCfg.MaxAROut             )
@@ -1182,6 +1302,11 @@ module ariane_testharness #(
 `endif
     .init_done_o( dram_init_done ),
     .service_ready_o( dram_service_ready ),
+    .storamic_power_cut_i ( storamic_power_cut ),
+    .storamic_save_i      ( storamic_save      ),
+    .storamic_restore_i   ( storamic_restore   ),
+    .storamic_save_busy_o (                   ),
+    .storamic_restore_done_o(                 ),
     .ch_r_beats_o ( dram_ch_r_beats ),
     .ch_w_beats_o ( dram_ch_w_beats )
   );

@@ -1,0 +1,6 @@
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: MIT
+`verilator_config
+// Per-element LZC trees are acyclic; retain scalar dependency diagnostics.
+split_var -module "lzc" -var "*sel_nodes"
+split_var -module "lzc" -var "*index_nodes"

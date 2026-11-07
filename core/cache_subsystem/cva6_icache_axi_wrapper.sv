@@ -1,3 +1,4 @@
+// Modified by: Etienne Cimon (2026) - explicit untrusted instruction origin.
 // Copyright 2018 ETH Zurich and University of Bologna.
 // Copyright and related rights are licensed under the Solderpad Hardware
 // License, Version 0.51 (the "License"); you may not use this file except in
@@ -153,6 +154,7 @@ module cva6_icache_axi_wrapper
       .rd_id_i    (axi_rd_id_in),
       .rd_rdy_i   (axi_rd_rdy),
       .rd_lock_i  (axi_rd_lock),
+      .rd_prot_i  (3'b000),
       .rd_last_o  (axi_rd_last),
       .rd_valid_o (axi_rd_valid),
       .rd_data_o  (axi_rd_data),
@@ -170,6 +172,7 @@ module cva6_icache_axi_wrapper
       .wr_id_i    ('0),
       .wr_lock_i  ('0),
       .wr_atop_i  ('0),
+      .wr_prot_i  (3'b000),
       .wr_rdy_i   ('0),
       .wr_valid_o (),
       .wr_id_o    (),

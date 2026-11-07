@@ -17,11 +17,16 @@ module g6lc_storamic_virtio_mmio #(
 ) (
   input logic clk_i,
   input logic rst_ni,
+  input logic quiesce_i,
+  output logic inflight_o,
   input g6lc_storamic_pkg::axil_req_t ctrl_req_i,
   output g6lc_storamic_pkg::axil_resp_t ctrl_resp_o,
   input logic device_usable_i,
   input logic [63:0] capacity_i,
   input logic capacity_update_i,
+  // ST-037D: the store reports durable completion, so VIRTIO_BLK_F_FLUSH
+  // (feature bit 9) may be offered. 0 for the volatile model store.
+  input logic flush_cap_i,
   input logic dma_idle_i,
   input logic used_event_i,
   input logic ring_fault_i,
@@ -97,7 +102,8 @@ module g6lc_storamic_virtio_mmio #(
         12'h004: rd_data = 32'd2;
         12'h008: rd_data = {31'h0, device_usable_i, 1'b0};
         12'h00C: rd_data = VendorId;
-        12'h010: rd_data = (feat_sel_q == 32'd1) ? 32'h1 : 32'h0;
+        12'h010: rd_data = (feat_sel_q == 32'd1) ? 32'h1 :
+                           (feat_sel_q == 32'd0) ? {22'h0, flush_cap_i, 9'h0} : 32'h0;
         12'h034: rd_data = (qsel_q == 32'd0) ? 32'(QueueNumMax) : 32'h0;
         12'h044: rd_data = {31'h0, (qsel_q == 32'd0) && qready_q};
         12'h060: rd_data = {30'h0, irqst_q};
@@ -126,8 +132,8 @@ module g6lc_storamic_virtio_mmio #(
   assign wr_data = w_v_q ? w_data_q : ctrl_req_i.w.data;
   assign wr_strb = w_v_q ? w_strb_q : ctrl_req_i.w.strb;
   logic wr_go;
-  assign wr_go = (aw_v_q || ctrl_req_i.aw_valid) &&
-                 (w_v_q || ctrl_req_i.w_valid);
+  assign wr_go = (aw_v_q || (ctrl_req_i.aw_valid && ctrl_resp_o.aw_ready)) &&
+                 (w_v_q || (ctrl_req_i.w_valid && ctrl_resp_o.w_ready));
   logic [11:0] aw_a;
   assign aw_a = aw_v_q ? aw_addr_q : ctrl_req_i.aw.addr[11:0];
 
@@ -150,7 +156,9 @@ module g6lc_storamic_virtio_mmio #(
   logic fok_ok, dok_ok, qnum_ok, align_ok, extent_ok;
   logic [64:0] d_end, a_end, u_end;
   assign nstatus = wr_data[7:0] & StatusWritable;
-  assign fok_ok = (({drv_feat1_q, drv_feat0_q} & ~64'h1_0000_0000) == 0) &&
+  // Only offered features may be accepted: VERSION_1, and FLUSH when offered.
+  assign fok_ok = (({drv_feat1_q, drv_feat0_q} &
+                    ~(64'h1_0000_0000 | (flush_cap_i ? 64'h200 : 64'h0))) == 0) &&
                   drv_feat1_q[0];
   assign dok_ok = status_q[3];
   assign qnum_ok = qnum_q >= 1 && qnum_q <= 16'(QueueNumMax) &&
@@ -199,10 +207,10 @@ module g6lc_storamic_virtio_mmio #(
         qready_q <= 0; irqst_q <= '0; epoch_q <= epoch_q + 1;
       end
       // Channel accepts.
-      if (ctrl_req_i.aw_valid && !aw_v_q && !b_v_q) begin
+      if (ctrl_req_i.aw_valid && ctrl_resp_o.aw_ready) begin
         aw_v_q <= 1'b1; aw_addr_q <= ctrl_req_i.aw.addr[11:0];
       end
-      if (ctrl_req_i.w_valid && !w_v_q && !b_v_q) begin
+      if (ctrl_req_i.w_valid && ctrl_resp_o.w_ready) begin
         w_v_q <= 1'b1;
         w_data_q <= ctrl_req_i.w.data; w_strb_q <= ctrl_req_i.w.strb;
       end
@@ -248,7 +256,7 @@ module g6lc_storamic_virtio_mmio #(
         end
       end
       if (b_v_q && ctrl_req_i.b_ready) b_v_q <= 1'b0;
-      if (ctrl_req_i.ar_valid && !r_v_q) begin
+      if (ctrl_req_i.ar_valid && ctrl_resp_o.ar_ready) begin
         r_v_q <= 1'b1; ar_addr_q <= ctrl_req_i.ar.addr[11:0];
         r_data_q <= rd_data; r_resp_q <= rd_err ? 2'b10 : 2'b00;
       end
@@ -256,11 +264,13 @@ module g6lc_storamic_virtio_mmio #(
     end
   end
 
-  assign ctrl_resp_o.aw_ready = !aw_v_q && !b_v_q;
-  assign ctrl_resp_o.w_ready = !w_v_q && !b_v_q;
+  // Pause new transactions, not the missing half of an accepted write.
+  assign ctrl_resp_o.aw_ready = !aw_v_q && !b_v_q && (!quiesce_i || w_v_q);
+  assign ctrl_resp_o.w_ready = !w_v_q && !b_v_q && (!quiesce_i || aw_v_q);
+  assign inflight_o = aw_v_q || w_v_q || b_v_q || r_v_q || reset_pend_q;
   assign ctrl_resp_o.b_valid = b_v_q;
   assign ctrl_resp_o.b.resp = b_resp_q;
-  assign ctrl_resp_o.ar_ready = !r_v_q;
+  assign ctrl_resp_o.ar_ready = !r_v_q && !quiesce_i;
   assign ctrl_resp_o.r_valid = r_v_q;
   assign ctrl_resp_o.r.data = r_data_q;
   assign ctrl_resp_o.r.resp = r_resp_q;
@@ -275,7 +285,7 @@ module g6lc_storamic_virtio_mmio #(
       if (wr_go && !b_v_q)
         $display("[virtio-mmio] t=%0t W a=%03h d=%08h strb=%h err=%0d rpend=%0d status=%02h",
                  $time, aw_a, wr_data, wr_strb, wr_err, reset_pend_q, status_q);
-      if (ctrl_req_i.ar_valid && !r_v_q)
+      if (ctrl_req_i.ar_valid && ctrl_resp_o.ar_ready)
         $display("[virtio-mmio] t=%0t R a=%03h d=%08h err=%0d status=%02h",
                  $time, ctrl_req_i.ar.addr[11:0], rd_data, rd_err, status_q);
       if (reset_pend_q && dma_idle_i)

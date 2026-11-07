@@ -25,6 +25,8 @@ module g6lc_ai_dram_backend
 #(
     parameter int unsigned DramClass      = AI_DRAM_SIM_AXI,
     parameter bit          StoramicEn    = 1'b0,
+    parameter bit          StoramicCheckpointEn = 1'b0,
+    parameter int unsigned StoramicRamRspDelay = 0,
     // ST-011B: absolute base of the Storamic model window (DRAM base).
     parameter logic [63:0] StoramicModelBase = 64'h8000_0000,
     parameter int unsigned AXI_ID_WIDTH   = 4,
@@ -49,15 +51,23 @@ module g6lc_ai_dram_backend
     output logic storamic_irq_o,
     output logic init_done_o,
     output logic service_ready_o,
+    // ST-025 stick-level RAM save/restore on the model sim_mem.
+    input  logic storamic_power_cut_i,
+    input  logic storamic_save_i,
+    input  logic storamic_restore_i,
+    output logic storamic_save_busy_o,
+    output logic storamic_restore_done_o,
     // SoC-side occupancy (S5). Island CAP stays aggregate GEMM.
     output logic [AI_DRAM_MAX_CHANNELS-1:0][31:0] ch_r_beats_o,
     output logic [AI_DRAM_MAX_CHANNELS-1:0][31:0] ch_w_beats_o
 );
 
-  if (!StoramicEn) begin : gen_legacy_service_ready
+  if (!(StoramicEn || StoramicCheckpointEn)) begin : gen_legacy_service_ready
     assign service_ready_o = init_done_o;
     assign storamic_ctrl_resp_o = '0;
     assign storamic_irq_o = 1'b0;
+    assign storamic_save_busy_o = 1'b0;
+    assign storamic_restore_done_o = 1'b0;
     // pragma translate_off
     always @(posedge clk_i) begin
       if (rst_ni)
@@ -71,19 +81,25 @@ module g6lc_ai_dram_backend
 
   // ST-010C: the native control window AXI-Lite seam + IRQ pass through to
   // the Storamic attach block when enabled.
-  if (StoramicEn) begin : gen_storamic
+  if (StoramicEn || StoramicCheckpointEn) begin : gen_storamic
     assign ch_r_beats_o = '0;
     assign ch_w_beats_o = '0;
     g6lc_storamic_attach #(
-      .Enable(StoramicEn), .DramClass(DramClass), .NrChannels(NrChannels),
+      .Enable(StoramicEn || StoramicCheckpointEn), .CheckpointRequested(StoramicCheckpointEn),
+      .DramClass(DramClass), .NrChannels(NrChannels),
       .IdWidth(AXI_ID_WIDTH), .AddrWidth(AXI_ADDR_WIDTH),
       .DataWidth(AXI_DATA_WIDTH), .UserWidth(AXI_USER_WIDTH),
-      .ModelBase(StoramicModelBase), .ModelWords(NUM_WORDS)
+      .ModelBase(StoramicModelBase), .ModelWords(NUM_WORDS),
+      .RamRspDelay(StoramicRamRspDelay)
     ) i_storamic (
       .clk_i, .rst_ni, .testmode_i, .slave,
       .ctrl_req_i(storamic_ctrl_req_i), .ctrl_resp_o(storamic_ctrl_resp_o),
       .irq_o(storamic_irq_o),
-      .init_done_o, .service_ready_o
+      .init_done_o, .service_ready_o,
+      .power_cut_i(storamic_power_cut_i), .save_i(storamic_save_i),
+      .restore_i(storamic_restore_i),
+      .save_busy_o(storamic_save_busy_o),
+      .restore_done_o(storamic_restore_done_o)
     );
   end else if (DramClass == AI_DRAM_SIM_AXI && NrChannels == 1) begin : gen_sim_axi
     assign init_done_o = 1'b1;

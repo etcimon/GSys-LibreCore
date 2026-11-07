@@ -29,6 +29,9 @@ module g6lc_storamic_axi_memory #(
   input logic clk_i,
   input logic rst_ni,
   input logic testmode_i,
+  // Seal new address admission only; accepted W/B/R work must still drain.
+  input logic quiesce_i,
+  output logic quiesced_o,
   input req_t req_i,
   output resp_t resp_o,
   input logic [7:0] source_i,
@@ -150,7 +153,7 @@ module g6lc_storamic_axi_memory #(
     // MapEn=1 delegates coverage to the sequential walker; the flat window
     // bounds apply only in the unchanged MapEn=0 profile. The AXI encoding,
     // size, lock, WRAP, 4-KiB and 65-bit overflow rules are identical either way.
-    return !last_byte[64] && (first_byte >> 12) == (last_byte >> 12) &&
+    return !last_byte[64] && first_byte[64:12] == last_byte[64:12] &&
         (MapEn || (first_byte >= {1'b0, BaseAddr} && last_byte < RegionEnd));
   endfunction
 
@@ -223,6 +226,7 @@ module g6lc_storamic_axi_memory #(
     logic [Bytes-1:0] m_mask;
     txn_id_t m_tag;
     logic [32:0] allocated;
+    logic [7:0] epoch;
     logic [2:0] faults;
     logic [7:0] w_walk_i, r_walk_i;
     logic [64:0] w_cursor, r_cursor, w_last, r_last;
@@ -239,6 +243,7 @@ module g6lc_storamic_axi_memory #(
   assign faults_o = q.faults;
   assign mem_req_o = service_ready_o && q.mem_state == MGrant;
   assign inflight_o = q.w_active || q.r_active || q.mem_state != MIdle;
+  assign quiesced_o = rst_ni && quiesce_i && !inflight_o;
   assign mem_we_o = q.m_write;
   assign mem_addr_o = q.m_addr;
   assign mem_wdata_o = q.m_data;
@@ -255,8 +260,11 @@ module g6lc_storamic_axi_memory #(
     read_inflight = q.mem_state != MIdle && !q.m_write;
     write_inflight = q.mem_state != MIdle && q.m_write;
     write_lanes = lanes(q.w_addr, q.w_size);
+    // w.user is free-form sideband in AXI — nonzero is legal (the AMO path
+    // carries operand metadata there). Only beat-count and lane-mask are
+    // protocol violations.
     malformed_w = req_i.w.last != (q.w_left == 0) ||
-        (req_i.w.strb & ~write_lanes) != 0 || req_i.w.user != '0;
+        (req_i.w.strb & ~write_lanes) != 0;
     aw_ok = mem_ready_i && request_legal(req_i.aw.addr, req_i.aw.len,
         req_i.aw.size, req_i.aw.burst, req_i.aw.lock);
     ar_ok = mem_ready_i && request_legal(req_i.ar.addr, req_i.ar.len,
@@ -264,9 +272,21 @@ module g6lc_storamic_axi_memory #(
     want_read = q.r_active && !q.r_valid && !q.r_fault && !q.r_walk && mem_ready_i;
     want_write = q.w_buf && !q.w_fault && !q.w_walk && mem_ready_i;
     if (service_ready_o) begin
-      resp_o.aw_ready = !q.w_active;
+      // Fail-safe sequence renewal: exhaustion stops admission (refusals
+      // above), then once every accepted transaction has drained the space
+      // is reused under a new epoch. Memory contents are untouched, so RAM
+      // survives renewal. Epoch saturation is a documented permanent
+      // fail-stop, never a silent wrap. Requests accepted this same cycle
+      // are first-epoch transactions of the new space: they take seq 0 and
+      // their tags are issued later, inside the renewed epoch.
+      if (q.allocated == SeqLimit && !inflight_o && q.epoch != '1) begin
+        d.allocated = '0;
+        d.epoch = q.epoch + 1'b1;
+        events_o.seq_renew = 1'b1;
+      end
+      resp_o.aw_ready = !q.w_active && !quiesce_i;
       resp_o.w_ready = q.w_active && !q.w_done && !q.w_buf && !q.w_walk;
-      resp_o.ar_ready = !q.r_active;
+      resp_o.ar_ready = !q.r_active && !quiesce_i;
       resp_o.b_valid = q.b_valid;
       resp_o.b.id = q.w_id;
       resp_o.b.user = q.w_user;
@@ -316,6 +336,12 @@ module g6lc_storamic_axi_memory #(
             events_o.seq_refuse[1] = 1'b1;
             d.faults[2] = 1'b1;
           end
+          // pragma translate_off
+          $display("[sto-awref] t=%0t aw_ok=%b legal=%b a=%h id=%h lock=%h len=%h size=%h burst=%h user=%h", $time,
+                   aw_ok, request_legal(req_i.aw.addr, req_i.aw.len, req_i.aw.size, req_i.aw.burst, req_i.aw.lock),
+                   req_i.aw.addr, req_i.aw.id, req_i.aw.lock,
+                   req_i.aw.len, req_i.aw.size, req_i.aw.burst, req_i.aw.user);
+          // pragma translate_on
         end
       end
       if (events_o.ar_accept) begin
@@ -376,6 +402,11 @@ module g6lc_storamic_axi_memory #(
             d.b_valid = 1'b1;
             d.b_error = 1'b1;
           end
+          // pragma translate_off
+          $display("[sto-werr] t=%0t w_fault=%b mal=%b last=%b w_left=%0d strb=%h lanes=%h wuser=%h waddr=%h wsize=%h wid=%h", $time,
+                   q.w_fault, malformed_w, req_i.w.last, q.w_left, req_i.w.strb, write_lanes,
+                   req_i.w.user, q.w_addr, q.w_size, q.w_id);
+          // pragma translate_on
         end else if (req_i.w.strb == '0) begin
           if (q.w_left == 0) begin
             d.b_valid = 1'b1;
@@ -388,7 +419,7 @@ module g6lc_storamic_axi_memory #(
           d.w_word = (q.w_addr & ~64'(Bytes - 1)) - (MapEn ? 64'd0 : BaseAddr);
           d.w_data = req_i.w.data;
           d.w_mask = req_i.w.strb;
-          d.w_tag = '{reset_generation: q.w_generation,
+          d.w_tag = '{reset_generation: q.w_generation, epoch: q.epoch,
               seq: q.w_seq + 32'(q.w_beat), axi_id: 16'(q.w_id),
               source: q.w_source, beat: q.w_beat};
         end
@@ -476,7 +507,7 @@ module g6lc_storamic_axi_memory #(
           if (!MapEn) d.m_addr = (q.r_addr & ~64'(Bytes - 1)) - BaseAddr;
           d.m_data = '0;
           d.m_mask = lanes(q.r_addr, q.r_size);
-          d.m_tag = '{reset_generation: q.r_generation,
+          d.m_tag = '{reset_generation: q.r_generation, epoch: q.epoch,
               seq: q.r_seq + 32'(q.r_beat), axi_id: 16'(q.r_id),
               source: q.r_source, beat: q.r_beat};
         end

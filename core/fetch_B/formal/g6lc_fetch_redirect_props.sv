@@ -77,14 +77,15 @@ module g6lc_fetch_redirect_props (
 
   always_ff @(posedge clk_i) begin
     if (rst_ni) begin
-      if (ex) assert (sel == SRC_EX);
-      if (!ex && eret) assert (sel == SRC_ERET);
-      if (!ex && !eret && commit) assert (sel == SRC_COMMIT);
-      // T6b-2a: peer restart ranks just below commit, above debug/restore.
-      if (!ex && !eret && !commit && peer) assert (sel == SRC_PEER);
-      if (!ex && !eret && !commit && !peer && debug_en) assert (sel == SRC_DEBUG);
-      // I4y: an SMT restore never outranks an exception entry.
-      if (ex && restore) assert (sel == SRC_EX);
+      // Debug entry is itself an exception, so its halt redirect wins.
+      if (debug_en) assert (sel == SRC_DEBUG);
+      if (!debug_en && ex) assert (sel == SRC_EX);
+      if (!debug_en && !ex && eret) assert (sel == SRC_ERET);
+      if (!debug_en && !ex && !eret && commit) assert (sel == SRC_COMMIT);
+      // T6b-2a: otherwise peer restart ranks below commit, above restore.
+      if (!debug_en && !ex && !eret && !commit && peer) assert (sel == SRC_PEER);
+      // I4y: an SMT restore never outranks a non-debug exception entry.
+      if (!debug_en && ex && restore) assert (sel == SRC_EX);
       // en.restore const-fold is honoured.
       if (!en_restore) assert (sel != SRC_RESTORE);
       // Idle iff no source asserts, restore counted only when enabled.
@@ -111,6 +112,7 @@ module g6lc_fetch_redirect_props (
       cover (sel == SRC_RESTORE);
       cover (sel == SRC_MISP);
       cover (sel == SRC_PEER);
+      cover (debug_en && ex && sel == SRC_DEBUG);
     end
   end
 `endif

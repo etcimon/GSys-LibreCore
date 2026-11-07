@@ -41,7 +41,8 @@ module tb_g6lc_storamic_virtio_ring;
     .queue_ready_i(qready), .queue_num_i(qnum), .queue_desc_i(qdesc),
     .queue_driver_i(qdrv), .queue_device_i(qdev), .driver_ok_i(dok),
     .notify_i(notify), .reset_pending_i(rpend), .reset_epoch_i(epoch),
-    .dma_idle_o(idle), .used_event_o(used_ev), .ring_fault_o(fault),
+    .quiesce_i(1'b0), .quiesced_o(), .quiesce_error_o(),
+    .dma_idle_o(idle), .job_idle_o(), .used_event_o(used_ev), .ring_fault_o(fault),
     .dma_base_i(WinBase), .dma_size_i(WinSize),
     .dma_req_o(dreq), .dma_gnt_i(dgnt), .dma_we_o(dwe), .dma_addr_o(daddr),
     .dma_wdata_o(dwdata), .dma_be_o(dbe), .dma_rvalid_i(drv),
@@ -440,6 +441,8 @@ endmodule
 
 // Synthesis wrapper (top level).
 module g6lc_storamic_virtio_ring_synth (
+  input logic quiesce_i,
+  output logic quiesced_o, quiesce_error_o,
   input logic clk_i,
   input logic rst_ni,
   input logic queue_ready_i,
@@ -452,6 +455,7 @@ module g6lc_storamic_virtio_ring_synth (
   input logic reset_pending_i,
   input logic [7:0] reset_epoch_i,
   output logic dma_idle_o,
+  output logic job_idle_o,
   output logic used_event_o,
   output logic ring_fault_o,
   input logic [63:0] dma_base_i,

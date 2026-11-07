@@ -1,16 +1,32 @@
 // Copyright 2026 Etienne Cimon
 // SPDX-License-Identifier: MIT
 
-module tb_g6lc_storamic_config #(parameter bit BadGeometry = 1'b0);
+module tb_g6lc_storamic_config #(
+  parameter bit BadGeometry = 1'b0,
+  parameter bit BadCheckpoint = 1'b0
+);
   localparam config_pkg::cva6_cfg_t Cfg =
       build_config_pkg::build_config(cva6_config_pkg::cva6_cfg);
   initial begin
     config_pkg::cva6_cfg_t checked_cfg;
+    config_pkg::cva6_user_cfg_t requested_cfg;
     checked_cfg = Cfg;
     if (BadGeometry) checked_cfg.AxiIdWidth = 0;
+    if (BadCheckpoint) begin
+      checked_cfg.StoramicEn = 0; checked_cfg.StoramicIoEn = 0;
+      checked_cfg.StoramicCheckpointEn = 1;
+    end
     config_pkg::check_cfg(checked_cfg);
     assert (!cva6_config_pkg::cva6_cfg.StoramicEn)
       else $fatal(1, "STORAMIC_TARGET_NOT_DEFAULT_OFF");
+    assert (!cva6_config_pkg::cva6_cfg.StoramicCheckpointEn && !Cfg.StoramicCheckpointEn)
+      else $fatal(1, "STORAMIC_CHECKPOINT_TARGET_NOT_DEFAULT_OFF");
+    requested_cfg = cva6_config_pkg::cva6_cfg;
+    requested_cfg.StoramicEn = 1; requested_cfg.StoramicCheckpointEn = 1;
+    checked_cfg = build_config_pkg::build_config(requested_cfg);
+    assert (checked_cfg.StoramicCheckpointEn && checked_cfg.StoramicEn && checked_cfg.StoramicIoEn)
+      else $fatal(1, "STORAMIC_CHECKPOINT_REQUEST_NOT_PROPAGATED");
+    config_pkg::check_cfg(checked_cfg);
 `ifdef G6LC_STORAMIC
     assert (Cfg.StoramicEn) else $fatal(1, "STORAMIC_OVERLAY_NOT_PROPAGATED");
 `else

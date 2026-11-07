@@ -777,6 +777,8 @@ package config_pkg;
     // Xg6lcai AI matrix plane (off in every package but g6lc64_ai)
     ai_cfg_t     AiCfg;
     bit          StoramicEn;
+    // Requested protected profile; native integration must fail closed until bound.
+    bit          StoramicCheckpointEn;
   } cva6_user_cfg_t;
 
   typedef struct packed {
@@ -1049,6 +1051,7 @@ package config_pkg;
 
     ai_cfg_t AiCfg;
     bit StoramicEn;
+    bit StoramicCheckpointEn;
     // ST-037C: IO role (control window + VirtIO-blk peripheral), usable with
     // any primary DRAM backend. StoramicEn implies this role.
     bit StoramicIoEn;
@@ -1061,6 +1064,23 @@ package config_pkg;
 
   /// Utility function being called to check parameters. Not all values make
   /// sense for all parameters, here is the place to sanity check them.
+  // Internal data-origin encoding. 000 is unknown/legacy, never M authority.
+  function automatic bit g6lc_storamic_origin_supported(cva6_cfg_t Cfg);
+    return Cfg.StoramicEn && Cfg.StoramicIoEn && Cfg.StoramicCheckpointEn && Cfg.NrHarts == 1 &&
+        !Cfg.OoOEn && !Cfg.RVH && Cfg.DCacheType == WT &&
+        !Cfg.EnableAccelerator && Cfg.CoproType == COPRO_NONE;
+  endfunction
+
+  function automatic logic [2:0] g6lc_storamic_data_prot(
+      logic [1:0] effective_privilege, logic virtualized, logic debug_mode);
+    case ({debug_mode, virtualized, effective_privilege})
+      4'b0011: return 3'b001;  // privileged, secure, data
+      4'b0001: return 3'b011;  // privileged, nonsecure, data
+      4'b0000: return 3'b010;  // unprivileged, nonsecure, data
+      default: return 3'b000;
+    endcase
+  endfunction
+
   function automatic void check_cfg(cva6_cfg_t Cfg);
     // pragma translate_off
     assert (!(Cfg.StoramicEn || Cfg.StoramicIoEn) ||
@@ -1070,6 +1090,8 @@ package config_pkg;
     else $fatal(1, "STORAMIC_CORE_AXI_GEOMETRY");
     assert (!Cfg.StoramicEn || Cfg.StoramicIoEn)
     else $fatal(1, "STORAMIC_ROLE_NORMALIZE");
+    assert (!Cfg.StoramicCheckpointEn || (Cfg.StoramicEn && Cfg.StoramicIoEn))
+    else $fatal(1, "STORAMIC_CHECKPOINT_PRIMARY_REQUIRED");
     assert (Cfg.RASDepth > 0);
     assert (Cfg.BTBEntries == 0 || (2 ** $clog2(Cfg.BTBEntries) == Cfg.BTBEntries));
     assert (Cfg.BHTEntries == 0 || (2 ** $clog2(Cfg.BHTEntries) == Cfg.BHTEntries));

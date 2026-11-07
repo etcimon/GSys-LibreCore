@@ -94,6 +94,7 @@ module store_buffer
     input logic [CVA6Cfg.XLEN-1:0] data_i,  // data which is placed in the queue
     input logic [(CVA6Cfg.XLEN/8)-1:0] be_i,  // byte enable in
     input logic [1:0] data_size_i,  // type of request we are making (e.g.: bytes to write)
+    input logic [2:0] data_prot_i,
     input cbo_t cbo_op_i,  // type of cache block operation
 
     // D$ interface
@@ -487,6 +488,29 @@ module store_buffer
                                                                                     CVA6Cfg.DCACHE_INDEX_WIDTH];
   assign req_port_o.data_wdata = commit_queue_q[commit_read_pointer_q].data;
   assign req_port_o.data_wuser = '0;
+  if (CVA6Cfg.StoramicCheckpointEn) begin : gen_data_origin
+    // Narrow control tags share the payload's allocation, head and commit events.
+    logic [DEPTH_SPEC-1:0][2:0] spec_prot_q;
+    logic [DEPTH_COMMIT-1:0][2:0] commit_prot_q;
+    logic [2:0] head_prot;
+    always_comb begin
+      head_prot = '0;
+      for (int i = 0; i < DEPTH_SPEC; i++)
+        if (spec_head_oh[i]) head_prot |= spec_prot_q[i];
+    end
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        spec_prot_q <= '0;
+        commit_prot_q <= '0;
+      end else begin
+        if (valid_i && !cancelled_mask_i[trans_id_i])
+          for (int i = 0; i < DEPTH_SPEC; i++)
+            if (spec_ins_oh[i]) spec_prot_q[i] <= data_prot_i;
+        if (commit_i) commit_prot_q[commit_write_pointer_q] <= head_prot;
+      end
+    end
+    assign req_port_o.data_prot = commit_prot_q[commit_read_pointer_q];
+  end
   assign req_port_o.data_be = commit_queue_q[commit_read_pointer_q].be;
   assign req_port_o.data_size = commit_queue_q[commit_read_pointer_q].data_size;
 

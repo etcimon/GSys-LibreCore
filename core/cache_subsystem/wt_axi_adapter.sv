@@ -113,6 +113,19 @@ module wt_axi_adapter
   logic axi_wr_valid, axi_rd_valid, axi_rd_rdy, axi_wr_rdy;
   logic axi_rd_lock, axi_wr_lock, axi_rd_exokay, axi_wr_exokay, wr_exokay;
   logic [CVA6Cfg.AxiAddrWidth-1:0] axi_rd_addr, axi_wr_addr;
+  logic [2:0] axi_rd_prot, axi_wr_prot;
+  if (CVA6Cfg.StoramicCheckpointEn) begin : gen_data_origin
+    logic unmerged_data;
+    assign unmerged_data = dcache_data.nc && !config_pkg::is_inside_cacheable_regions(
+        CVA6Cfg, 64'(dcache_data.paddr));
+    assign axi_rd_prot = arb_idx && unmerged_data &&
+        dcache_data.rtype == wt_cache_pkg::DCACHE_LOAD_REQ ? dcache_data.data_prot : 3'b000;
+    assign axi_wr_prot = unmerged_data &&
+        dcache_data.rtype == wt_cache_pkg::DCACHE_STORE_REQ ? dcache_data.data_prot : 3'b000;
+  end else begin : gen_no_data_origin
+    assign axi_rd_prot = '0;
+    assign axi_wr_prot = '0;
+  end
   logic [AxiBlenWidth-1:0] axi_rd_blen, axi_wr_blen;
   logic [2:0] axi_rd_size, axi_wr_size;
   logic [CVA6Cfg.AxiIdWidth-1:0]
@@ -145,6 +158,18 @@ module wt_axi_adapter
   };
 
   assign arb_gnt = axi_rd_gnt | axi_wr_gnt;
+
+  // Grant-dependent invalidation must not feed the request-generation process.
+  always_comb begin
+    invalidate = 1'b0;
+    if (|arb_req) begin
+      if (arb_idx == 0) begin
+        invalidate = 1'b0;
+      end else if (CVA6Cfg.RVA && dcache_data.rtype == wt_cache_pkg::DCACHE_ATOMIC_REQ) begin
+        invalidate = arb_gnt;
+      end
+    end
+  end
 
   rr_arb_tree #(
       .NumIn    (2),
@@ -212,10 +237,6 @@ module wt_axi_adapter
       end
     end
 
-    // signal that an invalidation message
-    // needs to be generated
-    invalidate = 1'b0;
-
     // decode message type
     if (|arb_req) begin
       if (arb_idx == 0) begin
@@ -255,7 +276,6 @@ module wt_axi_adapter
               // since we only keep one read tx in flight, and since
               // the dcache drains all writes/reads before executing
               // an atomic, this is safe.
-              invalidate = arb_gnt;
               axi_wr_req = 1'b1;
               axi_wr_be  = '0;
               unique case (dcache_data.size[1:0])
@@ -856,6 +876,7 @@ module wt_axi_adapter
       .rd_id_i    (axi_rd_id_in),
       .rd_rdy_i   (axi_rd_rdy),
       .rd_lock_i  (axi_rd_lock),
+      .rd_prot_i  (axi_rd_prot),
       .rd_last_o  (axi_rd_last),
       .rd_valid_o (axi_rd_valid),
       .rd_data_o  (axi_rd_data),
@@ -873,6 +894,7 @@ module wt_axi_adapter
       .wr_id_i    (axi_wr_id_in),
       .wr_lock_i  (axi_wr_lock),
       .wr_atop_i  (axi_wr_atop),
+      .wr_prot_i  (axi_wr_prot),
       .wr_rdy_i   (axi_wr_rdy),
       .wr_valid_o (axi_wr_valid),
       .wr_id_o    (axi_wr_id_out),

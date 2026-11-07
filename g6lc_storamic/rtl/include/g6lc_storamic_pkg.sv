@@ -101,8 +101,13 @@ package g6lc_storamic_pkg;
   } axil_resp_t;
 
   // Opaque identity echoed by the memory binding; no active-link replay grant.
+  // `epoch` separates the finite `seq` spaces of successive fail-safe
+  // renewals: after sequence exhaustion the frontend drains, advances the
+  // epoch and reuses seq from zero, so a completion from an older epoch can
+  // never alias a live tag.
   typedef struct packed {
     logic [31:0] reset_generation;
+    logic [7:0] epoch;
     logic [31:0] seq;
     logic [15:0] axi_id;
     logic [7:0] source;
@@ -117,6 +122,15 @@ package g6lc_storamic_pkg;
     logic b_error, r_error, w_protocol_error;
     logic mem_read, mem_write, mem_error, stale_completion;
     logic [1:0] seq_refuse; // [1] AW, [0] AR; both may refuse in one cycle.
+    logic seq_renew; // fail-safe renewal: space drained and reused under a new epoch.
     logic [7:0] mem_bytes;  // successful memory-completion bytes only.
   } model_events_t;
+
+  // Maintenance-control results, not a software register ABI.
+  typedef enum logic [3:0] {
+    CP_OK, CP_DENIED, CP_NOT_READY, CP_RECOVERY_REQUIRED,
+    CP_NO_CHECKPOINT, CP_GENERATION_EXHAUSTED, CP_CONTEXT_CHANGED,
+    CP_PRODUCER_ERROR, CP_MEDIA_ERROR, CP_TIMEOUT, CP_POWER_CUT,
+    CP_PROTOCOL_ERROR
+  } checkpoint_result_e;
 endpackage

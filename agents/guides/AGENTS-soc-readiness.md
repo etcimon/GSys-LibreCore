@@ -253,3 +253,36 @@ software, and verification partners can integrate without rediscovery.
 - All memory via `tc_sram`, all gating via `tc_clk_gating`; `test_en_i`/`testmode_i` preserved.
 - Compliance regression green; new directed tests + a PMU event + RVFI visibility present.
 - `.dts` ↔ config ↔ spec remain aligned; new instructions gated by a discoverable capability bit.
+
+Storamic writer-model example: actual VirtIO job/error and DMA observations may
+be composed with a checkpoint endpoint, but external CPU/cache/fabric/provider
+and resume acknowledgements must not be synthesized from local idle wires.
+Keep DMA pause distinct from the MMIO control seal; let accepted jobs finish
+before the real store flush. See
+`../../g6lc_storamic/architecture/checkpoint-writer-model.md` for selected
+proof/simulation/synthesis evidence and all still-open native/silicon gates.
+
+The reset/error follow-up explicitly exercises cancellation through real MMIO,
+requires one error without false checkpoint completion, and rebuilds guest/
+device queue state after restore. Test resume refusal at CSync after copy
+completion, not only during an inherently busy copy. Keep external providers
+external; successful uncached-model tests do not supply cache/coherence or
+physical qualification. See
+`../../g6lc_storamic/architecture/checkpoint-writer-reset.md`.
+
+The DMA ownership example adds another integration obligation: an AXI
+arbitration change cannot abandon stalled VALID offers or reassign tagless W
+to a new master's AW. Track accepted/visible address ownership and capacity,
+and test slaves with independent AW/W acceptance and legal VALID-dependent
+READY. The correction adds eleven scalar common-clock flop bits and 41 generic
+active-model cells, no array/domain/stage; strict synthesis reports zero
+latches/SCCs. It does not close physical timing/power or scan/ATPG. See
+`../../g6lc_storamic/architecture/dma-ownership.md`.
+
+Policy/writer27 supplies model orchestration, not native providers. The
+existing manager's state and writer share clock/reset/test seams; the wrapper
+adds no bespoke state/domain/stage. Generic active cost is +71 cells, no
+additional memories, zero latch/SCC. Inactive status and illegal-model
+admission are explicitly refused. Full timing/power/scan/aggregate and native
+identity/cache/fabric obligations remain open. See
+`../../g6lc_storamic/architecture/policy-writer-model.md`.

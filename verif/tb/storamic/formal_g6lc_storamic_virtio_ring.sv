@@ -18,6 +18,7 @@ module formal_g6lc_storamic_virtio_ring (
   input logic [63:0] queue_device_i,
   input logic driver_ok_i,
   input logic notify_i,
+  input logic quiesce_i,
   input logic reset_pending_i,
   input logic [7:0] reset_epoch_i,
   input logic [63:0] dma_base_i,
@@ -35,7 +36,8 @@ module formal_g6lc_storamic_virtio_ring (
   output logic cover_reset_walk_o
 );
   localparam int unsigned MaxSegs = 2;
-  logic idle, used_ev, fault, dreq, dwe, bvalid;
+  logic idle, job_idle, used_ev, fault, dreq, dwe, bvalid;
+  logic quiesced, quiesce_error, backend_owned;
   logic [63:0] daddr, dwdata;
   logic [7:0] dbe;
 
@@ -43,7 +45,8 @@ module formal_g6lc_storamic_virtio_ring (
     .clk_i, .rst_ni, .queue_ready_i, .queue_num_i, .queue_desc_i,
     .queue_driver_i, .queue_device_i, .driver_ok_i, .notify_i,
     .reset_pending_i, .reset_epoch_i,
-    .dma_idle_o(idle), .used_event_o(used_ev), .ring_fault_o(fault),
+    .quiesce_i, .quiesced_o(quiesced), .quiesce_error_o(quiesce_error),
+    .dma_idle_o(idle), .job_idle_o(job_idle), .used_event_o(used_ev), .ring_fault_o(fault),
     .dma_base_i, .dma_size_i,
     .dma_req_o(dreq), .dma_gnt_i, .dma_we_o(dwe), .dma_addr_o(daddr),
     .dma_wdata_o(dwdata), .dma_be_o(dbe), .dma_rvalid_i, .dma_rdata_i,
@@ -52,6 +55,11 @@ module formal_g6lc_storamic_virtio_ring (
     .req_seg_addr_o(), .req_seg_len_o(), .req_seg_write_o(),
     .rsp_valid_i, .rsp_written_len_i, .rsp_fault_i
   );
+  always_comb if (rst_ni) begin
+    if (job_idle) assert(idle && !bvalid);
+    if (quiesced) assert(job_idle);
+    if (bvalid) assert(!job_idle);
+  end
 
   // Outstanding-beat tracker (independent of the DUT).
   logic outst, outst_we;
@@ -60,7 +68,11 @@ module formal_g6lc_storamic_virtio_ring (
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       outst <= 1'b0; outst_we <= 1'b0; outst_addr <= '0; outst_be <= '0;
+      backend_owned <= 1'b0;
     end else begin
+      if (reset_pending_i) backend_owned <= 1'b0;
+      else if (bvalid && req_ready_i) backend_owned <= 1'b1;
+      else if (rsp_valid_i) backend_owned <= 1'b0;
       if (dreq && dma_gnt_i) begin
         outst <= 1'b1; outst_we <= dwe; outst_addr <= daddr; outst_be <= dbe;
       end else if (dma_rvalid_i) outst <= 1'b0;
@@ -140,6 +152,10 @@ module formal_g6lc_storamic_virtio_ring (
         assert (elem_done);
       assert (dut.count_q <= 16'd4);
       if (idle) assert (!dreq && !outst);
+      if (quiesced) begin
+        assert (quiesce_i && !quiesce_error);
+        assert (idle && !dreq && !bvalid && !backend_owned);
+      end
       if (dut.state_q == 4'd10) assert (!dreq);  // SDead issues nothing
     end
   end

@@ -38,6 +38,7 @@ module tb_g6lc_storamic_virtio_blk;
 
   g6lc_storamic_virtio_blk #(.MaxSegs(MaxSegs)) dut (
     .clk_i(clk), .rst_ni(rst_n), .reset_pending_i(rpend), .idle_o(idle),
+    .job_idle_o(),
     .req_valid_i(rq_valid), .req_ready_o(rq_ready), .req_nsegs_i(rq_nsegs),
     .req_seg_addr_i(rq_addr), .req_seg_len_i(rq_len), .req_seg_write_i(rq_wr),
     .rsp_valid_o(rs_valid), .rsp_written_len_o(rs_len), .rsp_fault_o(rs_fault),
@@ -172,8 +173,18 @@ module tb_g6lc_storamic_virtio_blk;
   endtask
   task automatic seg(input int i, input logic [63:0] a, input logic [31:0] l,
                      input bit w);
-    rq_addr[i] = a; rq_len[i] = l; rq_wr[i] = w;
+    logic [MaxSegs-1:0][63:0] next_addr;
+    logic [MaxSegs-1:0][31:0] next_len;
+    logic [MaxSegs-1:0] next_wr;
+    // Publish the complete descriptor vectors, including their derived signals.
+    next_addr = rq_addr; next_len = rq_len; next_wr = rq_wr;
+    next_addr[i] = a; next_len[i] = l; next_wr[i] = w;
+    rq_addr = next_addr; rq_len = next_len; rq_wr = next_wr;
   endtask
+
+  always @(posedge clk) if (rst_n && rq_valid && rq_ready)
+    assert (dut.hdr_a0 == {1'b0, rq_addr[0] & ~64'h7})
+      else $fatal(1, "VBLK_DESCRIPTOR_ADDRESS_PROPAGATION");
 
   localparam logic [63:0] Hdr = 64'h8000_1000, D0 = 64'h8000_2000,
                           D1 = 64'h8000_3000, St = 64'h8000_4000;
@@ -312,6 +323,7 @@ endmodule
 
 // Synthesis wrapper (top level).
 module g6lc_storamic_virtio_blk_synth (
+  output logic job_idle_o,
   input logic clk_i, rst_ni, reset_pending_i,
   output logic idle_o,
   input logic req_valid_i,

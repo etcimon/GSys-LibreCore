@@ -317,6 +317,9 @@ module load_unit
   assign tinst_o = CVA6Cfg.RVH ? lsu_ctrl_i.tinst : '0;
   // this is a read-only interface so set the write enable to 0
   assign req_port_o.data_we = 1'b0;
+  if (CVA6Cfg.StoramicCheckpointEn) begin : gen_data_origin
+    assign req_port_o.data_prot = lsu_ctrl_i.data_prot;
+  end
   assign req_port_o.data_wdata = '0;
   assign req_port_o.cbo_op = ariane_pkg::CBO_NONE;
   // compose the load buffer write data, control is handled in the FSM

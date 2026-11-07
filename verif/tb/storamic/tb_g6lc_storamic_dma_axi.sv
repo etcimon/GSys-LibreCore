@@ -51,6 +51,7 @@ module tb_g6lc_storamic_dma_axi #(parameter bit InvalEn = 1'b0);
   g6lc_storamic_dma_axi #(.IdWidth(IdW), .DmaId(4'h5), .InvalEn(InvalEn),
                           .axi_req_t(req_t), .axi_resp_t(resp_t)) dut (
     .clk_i(clk), .rst_ni(rst_n),
+    .inflight_o(),
     .dma_req_i(sreq), .dma_gnt_o(sgnt), .dma_we_i(swe), .dma_addr_i(saddr),
     .dma_wdata_i(swdata), .dma_be_i(sbe), .dma_rvalid_o(srv),
     .dma_rdata_o(srdata), .dma_err_o(serr),

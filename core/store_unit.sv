@@ -199,6 +199,16 @@ module store_unit
   logic                   st_is_quad_q;
   logic [(CVA6Cfg.XLEN/8)-1:0] st_be_n, st_be_q;
   logic [1:0] st_data_size_n, st_data_size_q;
+  logic [2:0] st_data_prot;
+  if (CVA6Cfg.StoramicCheckpointEn) begin : gen_data_origin
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) st_data_prot <= '0;
+      else if (valid_i && (state_q == IDLE || st_valid))
+        st_data_prot <= lsu_ctrl_i.data_prot;
+    end
+  end else begin : gen_no_data_origin
+    assign st_data_prot = '0;
+  end
   amo_t amo_op_d, amo_op_q;
   cbo_t cbo_op_d, cbo_op_q;
 
@@ -533,6 +543,7 @@ module store_unit
       .trans_id_i           (trans_id_q),
       .rvfi_mem_paddr_o     (rvfi_mem_paddr_o),
       .data_i               (st_data_q),
+      .data_prot_i          (st_data_prot),
       .cbo_op_i             (cbo_op_q),
       .be_i                 (st_be_q),
       .data_size_i          (st_data_size_q),

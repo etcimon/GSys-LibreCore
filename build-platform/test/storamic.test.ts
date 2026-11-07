@@ -48,7 +48,8 @@ test("direct-memory flags and environment cannot silently override Storamic", ()
 test("standalone Storamic source list names only first-party RTL", () => {
   const root = resolve(import.meta.dir, "../..");
   const rows = readFileSync(resolve(root, "g6lc_storamic/Flist.storamic"), "utf8").trim().split(/\r?\n/);
-  expect(rows.length).toBe(17);
+  expect(rows.length).toBe(24);
+  expect(new Set(rows).size).toBe(rows.length);
   for (const row of rows) {
     expect(row.startsWith("${CVA6_REPO_DIR}/g6lc_storamic/rtl/")).toBe(true);
     const text = readFileSync(resolve(root, row.replace("${CVA6_REPO_DIR}/", "")), "utf8");

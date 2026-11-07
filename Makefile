@@ -237,9 +237,16 @@ src :=  $(if $(spike-tandem),verif/tb/core/uvma_core_cntrl_pkg.sv)              
         corev_apu/include/g6lc_ai_island_cfg_pkg.sv                                  \
         g6lc_storamic/rtl/include/g6lc_storamic_cfg_pkg.sv                           \
         g6lc_storamic/rtl/include/g6lc_storamic_pkg.sv                               \
+        g6lc_storamic/rtl/include/g6lc_storamic_checkpoint_pkg.sv                    \
         g6lc_storamic/rtl/include/g6lc_storamic_pad_pkg.sv                           \
         g6lc_storamic/rtl/fabric/g6lc_storamic_region_pkg.sv                         \
         g6lc_storamic/rtl/discovery/g6lc_storamic_discovery_pkg.sv                   \
+        g6lc_storamic/rtl/fabric/g6lc_storamic_checkpoint_ctrl.sv                    \
+        g6lc_storamic/rtl/fabric/g6lc_storamic_checkpoint_io.sv                      \
+        g6lc_storamic/rtl/fabric/g6lc_storamic_checkpoint_media.sv                   \
+        g6lc_storamic/rtl/fabric/g6lc_storamic_store_guard.sv                        \
+        g6lc_storamic/rtl/fabric/g6lc_storamic_checkpoint_service.sv                 \
+        g6lc_storamic/rtl/fabric/g6lc_storamic_checkpoint_policy.sv                  \
         g6lc_storamic/rtl/frontend/g6lc_storamic_axi_refuse.sv                       \
         g6lc_storamic/rtl/frontend/g6lc_storamic_axi_memory.sv                       \
         g6lc_storamic/rtl/fabric/g6lc_storamic_slot_mux.sv                           \
@@ -256,7 +263,9 @@ src :=  $(if $(spike-tandem),verif/tb/core/uvma_core_cntrl_pkg.sv)              
         corev_apu/storamic/g6lc_storamic_attach.sv                                  \
         corev_apu/storamic/g6lc_storamic_ctrl_bridge.sv                             \
         corev_apu/storamic/g6lc_storamic_dma_axi.sv                                 \
+        corev_apu/storamic/g6lc_storamic_durable_store.sv                           \
         corev_apu/storamic/g6lc_storamic_model_store.sv                             \
+        corev_apu/storamic/g6lc_storamic_model_stick.sv                             \
         corev_apu/storamic/g6lc_storamic_sim_mem.sv                                 \
         corev_apu/src/g6lc_ai_dram_backend.sv                                        \
         corev_apu/src/g6lc_ai_litedram_wrap.sv                                       \

@@ -85,6 +85,7 @@ localparam config_pkg::cva6_user_cfg_t cva6_cfg = '{
    CoproType: config_pkg::COPRO_EXAMPLE,
    AiCfg: config_pkg::AiCfgOff,
    StoramicEn: bit'(0),
+   StoramicCheckpointEn: bit'(0),
    RVZiCond: bit'(1),
    RVZiCbom: bit'(0),
    RVZiCboz: bit'(0),

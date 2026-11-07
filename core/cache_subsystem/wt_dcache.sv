@@ -124,6 +124,7 @@ module wt_dcache
   logic     [                      NumPorts-1:0]                                  miss_req;
   logic     [                      NumPorts-1:0]                                  miss_ack;
   logic     [                      NumPorts-1:0]                                  miss_nc;
+  logic     [                      NumPorts-1:0][                            2:0] miss_prot;
   logic     [                      NumPorts-1:0]                                  miss_we;
   logic     [                      NumPorts-1:0][               CVA6Cfg.XLEN-1:0] miss_wdata;
   logic     [                      NumPorts-1:0][  CVA6Cfg.DCACHE_USER_WIDTH-1:0] miss_wuser;
@@ -185,6 +186,7 @@ module wt_dcache
       .miss_req_i     (miss_req),
       .miss_ack_o     (miss_ack),
       .miss_nc_i      (miss_nc),
+      .miss_prot_i    (miss_prot),
       .miss_we_i      (miss_we),
       .miss_wdata_i   (miss_wdata),
       .miss_wuser_i   (miss_wuser),
@@ -251,6 +253,7 @@ module wt_dcache
           .miss_vld_bits_o(miss_vld_bits_o[k]),
           .miss_paddr_o   (miss_paddr[k]),
           .miss_nc_o      (miss_nc[k]),
+          .miss_prot_o    (miss_prot[k]),
           .miss_size_o    (miss_size[k]),
           .miss_id_o      (miss_id[k]),
           .miss_replay_i  (miss_replay[k]),
@@ -280,6 +283,7 @@ module wt_dcache
       assign miss_vld_bits_o[k] = {{CVA6Cfg.DCACHE_SET_ASSOC} {1'b0}};
       assign miss_paddr[k] = {{CVA6Cfg.PLEN} {1'b0}};
       assign miss_nc[k] = 1'b0;
+      assign miss_prot[k] = '0;
       assign miss_size[k] = 3'b0;
       assign miss_id[k] = {{CVA6Cfg.MEM_TID_WIDTH} {1'b0}};
       assign rd_tag[k] = {{CVA6Cfg.DCACHE_TAG_WIDTH} {1'b0}};
@@ -433,6 +437,7 @@ module wt_dcache
       .miss_nc_o      (miss_nc[NumPorts-1]),
       .miss_size_o    (miss_size[NumPorts-1]),
       .miss_id_o      (miss_id[NumPorts-1]),
+      .miss_prot_o    (miss_prot[NumPorts-1]),
       .miss_rtrn_vld_i(miss_rtrn_vld[NumPorts-1]),
       .miss_rtrn_id_i (miss_rtrn_id),
       // cache read interface

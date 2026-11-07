@@ -22,6 +22,7 @@ module g6lc_storamic_virtio_blk #(
   input logic clk_i,
   input logic rst_ni,
   input logic reset_pending_i,
+  output logic job_idle_o,
   output logic idle_o,
   // request from the ring engine
   input logic req_valid_i,
@@ -57,7 +58,14 @@ module g6lc_storamic_virtio_blk #(
   output logic [7:0] st_be_o,
   input logic st_rvalid_i,
   input logic [63:0] st_rdata_i,
-  input logic st_err_i
+  input logic st_err_i,
+  // ST-037D FLUSH: flush_en_i is the negotiated VIRTIO_BLK_F_FLUSH (offered
+  // only by a durable store). The request is held until ack or err; every
+  // earlier store write of this backend has completed before it is raised.
+  input logic flush_en_i,
+  output logic st_flush_req_o,
+  input logic st_flush_ack_i,
+  input logic st_flush_err_i
 );
   if (MaxSegs < 2) begin : gen_param_guard
     // pragma translate_off
@@ -66,11 +74,11 @@ module g6lc_storamic_virtio_blk #(
   end
 
   localparam logic [7:0] StOk = 8'd0, StIoErr = 8'd1, StUnsupp = 8'd2;
-  localparam logic [31:0] TIn = 32'd0, TOut = 32'd1, TGetId = 32'd8;
+  localparam logic [31:0] TIn = 32'd0, TOut = 32'd1, TFlush = 32'd4, TGetId = 32'd8;
 
   typedef enum logic [3:0] {
     SIdle, SHdr, SParse, SCheck, SInRd, SInWr, SOutRd, SOutWr, SId, SStatus, SRsp,
-    SFault, SDrain
+    SFault, SDrain, SFlush
   } state_t;
 
   state_t state_q;
@@ -93,8 +101,11 @@ module g6lc_storamic_virtio_blk #(
   logic [63:0] daddr_q, dwdata_q, saddr_st_q, swdata_q;
   logic [7:0] dbe_q;
   logic rsp_q, rsp_fault_q;
+  logic flush_q;                 // flush request outstanding at the store
 
-  assign idle_o = !dpend_q && !dout_q && !spend_q && !sout_q;
+  assign idle_o = !dpend_q && !dout_q && !spend_q && !sout_q && !flush_q;
+  assign job_idle_o = rst_ni && state_q == SIdle && idle_o && !rsp_q;
+  assign st_flush_req_o = flush_q;
   // A beat abandoned by reset may still be outstanding: accept the next
   // request only once both ports are quiet (found by vblk-formal).
   assign req_ready_o = (state_q == SIdle) && !reset_pending_i && idle_o;
@@ -155,7 +166,7 @@ module g6lc_storamic_virtio_blk #(
       end
     end
     ok_len = data_total[8:0] == 9'd0 && data_total < 40'hFFFF_FFFF;
-    end_sector = {1'b0, sector_q} + 65'(data_total >> 9);
+    end_sector = {1'b0, sector_q} + {34'd0, data_total[39:9]};
   end
   logic id_ok;
   assign id_ok = last == 2 && swr_q[1] && slen_q[1] >= 32'd20 && saddr_q[1][2:0] == 0 &&
@@ -175,7 +186,11 @@ module g6lc_storamic_virtio_blk #(
       spend_q <= 1'b0; sout_q <= 1'b0; swe_q <= 1'b0; saddr_st_q <= '0;
       swdata_q <= '0;
       rsp_q <= 1'b0; rsp_fault_q <= 1'b0;
+      flush_q <= 1'b0;
     end else begin
+      // A flush already presented is completed by the store even across a
+      // device reset (idle_o waits for it); only SFlush uses the verdict.
+      if (flush_q && (st_flush_ack_i || st_flush_err_i)) flush_q <= 1'b0;
       rsp_q <= 1'b0;
       rsp_fault_q <= 1'b0;
       if (dpend_q && dma_gnt_i) begin dpend_q <= 1'b0; dout_q <= 1'b1; end
@@ -257,6 +272,9 @@ module g6lc_storamic_virtio_blk #(
                 daddr_q <= saddr_q[1]; dwdata_q <= serial_i[63:0];
                 state_q <= SId;
               end
+            end else if (type_q == TFlush && flush_en_i) begin
+              flush_q <= 1'b1;
+              state_q <= SFlush;
             end else status_q <= StUnsupp;
           end
           SInRd: if (srsp) begin
@@ -332,6 +350,10 @@ module g6lc_storamic_virtio_blk #(
             else begin
               rsp_q <= 1'b1; state_q <= SIdle;
             end
+          end
+          SFlush: if (flush_q && (st_flush_ack_i || st_flush_err_i)) begin
+            status_q <= st_flush_err_i ? StIoErr : StOk;
+            state_q <= SStatus;
           end
           SFault: if (!dout_q && !sout_q && !dpend_q && !spend_q) begin
             rsp_q <= 1'b1; rsp_fault_q <= 1'b1; state_q <= SIdle;

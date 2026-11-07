@@ -97,7 +97,7 @@ enum {
   FAIL_OUT, FAIL_IRQ_ISTAT, FAIL_IRQ_PLIC, FAIL_IRQ_ACK,
   FAIL_IN, FAIL_IN_DATA, FAIL_GETID, FAIL_IOERR, FAIL_AFTER_IOERR,
   FAIL_REINIT, FAIL_REINIT_IO, FAIL_TIMEOUT, FAIL_CPU_RAW, FAIL_FLUSH,
-  FAIL_DURABLE
+  FAIL_DURABLE, FAIL_ATOMIC
 };
 
 struct vq_desc { unsigned long long addr; unsigned int len;
@@ -119,6 +119,73 @@ static unsigned short avail_i, used_i;
 static unsigned int last_len;
 
 static inline void fence(void) { __asm__ volatile ("fence" ::: "memory"); }
+
+// ST-012: LR/SC + AMO ownership evidence on the primary memory path (in the
+// primary role every access traverses Storamic into sim_mem; the exclusive
+// monitor in g6lc_axi_atomics_wrap is what these instructions exercise).
+static volatile unsigned int atomic_var __attribute__((aligned(64)));
+static volatile unsigned int atomic_other __attribute__((aligned(64)));
+static int atomics_check(void) {
+  unsigned long lr, ok;
+  atomic_var = 0; atomic_other = 0;
+  // LR/SC spin-increment: reservation + store-conditional round-trip.
+  for (int i = 0; i < 8; i++) {
+    int spins = 0;
+    do {
+      __asm__ volatile("lr.w %0, (%1)" : "=r"(lr) : "r"(&atomic_var) : "memory");
+      lr++;
+      __asm__ volatile("sc.w %0, %1, (%2)" : "=r"(ok) : "r"(lr),
+                       "r"(&atomic_var) : "memory");
+    } while (ok && ++spins < 64);
+    if (ok) return FAIL_ATOMIC | (1 << 8);   // SC never succeeded
+  }
+  if (atomic_var != 8) return FAIL_ATOMIC | (2 << 8) |
+                              (atomic_var << 16);
+  // Address-keyed reservation: an SC to a different address must fail
+  // (sc.w returns nonzero on failure) and must not store.
+  __asm__ volatile("lr.w %0, (%1)" : "=r"(lr) : "r"(&atomic_var) : "memory");
+  __asm__ volatile("sc.w %0, %1, (%2)" : "=r"(ok) : "r"(0x77ul),
+                       "r"(&atomic_other) : "memory");
+  if (!ok || atomic_other != 0) return FAIL_ATOMIC | (3 << 8) |
+                              (ok << 16) | (atomic_other << 24);
+  // AMOs: add / swap / and / or, checking both the loaded old value and the
+  // resulting memory contents.
+  __asm__ volatile("amoadd.w %0, %2, (%1)" : "=r"(lr) : "r"(&atomic_var),
+                   "r"(4u) : "memory");
+  if (atomic_var != 12 || lr != 8) return FAIL_ATOMIC | (4 << 8) |
+                              (lr << 16) | (atomic_var << 24);
+  __asm__ volatile("amoswap.w %0, %2, (%1)" : "=r"(lr) : "r"(&atomic_var),
+                   "r"(99u) : "memory");
+  if (atomic_var != 99 || lr != 12) return FAIL_ATOMIC | (5 << 8);
+  __asm__ volatile("amoand.w %0, %2, (%1)" : "=r"(lr) : "r"(&atomic_var),
+                   "r"(0xF0u) : "memory");
+  __asm__ volatile("nop\nnop\nnop\nnop\nnop\nnop\nnop\nnop" ::: "memory");
+  {
+    unsigned int chk_var = atomic_var;
+    if (chk_var != 96)
+      return FAIL_ATOMIC | (6 << 8) | ((chk_var & 0xFF) << 16) |
+             (((chk_var >> 8) & 0xFF) << 24);
+    if (lr != 99)
+      return FAIL_ATOMIC | (9 << 8) | ((((unsigned long)lr) & 0xFF) << 16) |
+             ((((unsigned long)(lr >> 8)) & 0xFF) << 24);
+  }
+  __asm__ volatile("amoor.w %0, %2, (%1)" : "=r"(lr) : "r"(&atomic_var),
+                   "r"(5u) : "memory");
+  if (atomic_var != 101 || lr != 96) return FAIL_ATOMIC | (7 << 8);
+  // Store-visibility lag probe (found via sub-6): an AMO writes 1 each
+  // iteration; the immediately following load must always see the new
+  // value. Report the first iteration where a stale read appears.
+  atomic_var = 0;
+  for (int i = 0; i < 32; i++) {
+    unsigned int seen;
+    __asm__ volatile("amoadd.w zero, %1, (%0)" :: "r"(&atomic_var), "r"(1u)
+                     : "memory");
+    seen = atomic_var;                    // volatile load right after the AMO
+    if (seen != (unsigned int)(i + 1))
+      return FAIL_ATOMIC | (8 << 8) | ((i & 0xF) << 16) | (seen << 20);
+  }
+  return 0;
+}
 // Read a device-written DRAM word. With STORAMIC_COHERENT_DMA the harness
 // invalidates the CPU caches for every device write, so a plain load must see
 // the device data; otherwise amoor.w reads at memory past a stale line.
@@ -304,6 +371,9 @@ int main(void) {
       if (*(volatile unsigned int *)(scratch + i) != 0)
         return FAIL_CPU_RAW | (i << 8) | ((sum & 1) << 31);
   }
+  // a3. ST-012: LR/SC and AMOs on DRAM — in the primary role these traverse
+  //     the Storamic path through the exclusive monitor.
+  if ((rc = atomics_check()) != 0) return rc;
   // b. VirtIO identity and capacity (le64 sectors at config offset 0).
   if (RD32(R_MAGIC) != 0x74726976) return FAIL_MAGIC;
   if (RD32(R_VERSION) != 2) return FAIL_VERSION;

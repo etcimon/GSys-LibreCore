@@ -80,6 +80,7 @@ package cva6_config_pkg;
 
   localparam config_pkg::cva6_user_cfg_t cva6_cfg = '{
       StoramicEn: bit'(0),
+      StoramicCheckpointEn: bit'(0),
       BPBaseHash: bit'(0),
       CoreSleepGate: bit'(0),
       CohMaxOutstanding: unsigned'(0),

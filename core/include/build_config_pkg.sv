@@ -150,6 +150,7 @@ package build_config_pkg;
     // group stays zero, which is what every non-AI package elaborates with.
     cfg.AiCfg = CVA6Cfg.AiCfg;
     cfg.StoramicEn = CVA6Cfg.StoramicEn;
+    cfg.StoramicCheckpointEn = CVA6Cfg.StoramicCheckpointEn;
 `ifdef G6LC_STORAMIC
     cfg.StoramicEn = 1'b1;
 `endif
