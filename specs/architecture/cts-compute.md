@@ -214,6 +214,31 @@ SEGMENT G3b-ii/compute
                   rerun for the 3 unrecorded cases.
 ```
 
+Root-cause note (2026-11-07, COMPUTE-H1 / COMPUTE-X2): the spec-constant
+path is decoded end-to-end but the constant *application* is unimplemented
+on both sides of the spec-of-record boundary.  **Model/golden:**
+`vn_specialization.specialize()` folds scalar/default-composite spec
+constants and replays correctly (`vn_native_pipelines`/`vn_graphics_
+pipelines` call it at pipeline create; `test_wire_submit_executes_
+specialized_pipeline` green), and `vn_golden` validates the wire
+`VkSpecializationInfo` structure (count<=32, sizes 1/2/4, 8->FEATURE_NOT_
+PRESENT, dataSize<=64) — but at `vn_golden.py` ~4407 it raises
+`NotImplementedError('golden: non-empty specialization')` for nmap>0, so
+no golden vector can express a *live* constant override yet.  **RTL:**
+`g6lc_apu_vnfront` `StPipeH4`/`StPipeSp{Id,Off,Sz0,Sz1,Ds0,Ds1,Dat,Wn,
+Wp,End}` fully parse `VkSpecializationInfo` into `pl_{sn,sid,soff,ssz,
+sval}_q`, ObjPay-ALLOC a `{count,{sid,sval}*}` block (`pl_specb_q =
+base|0x8000_0000` into pipeline ObjPay w2), and `g6lc_apu_shmod` admits
+opcodes 48-52 with `OpSpecConstant` decode + `const_data_o`.  The CTS
+`pipefail spec=1`->`StPipeFail`->null-pipeline is therefore localized to
+the vnfront spec-block *creation* sequence (StPipeSpAlc..StPipeAuxHiC),
+*not* yet pinned to a sub-state — the existing `G6LC_APU_DBG_LOST`
+watcher (`dbg_{frm,sfrm,ofrm}_q` + `ot/op cpl` status prints) already
+attributes the failing ObjTab/ObjPay op, so a directed spec-constant
+pipeline session or guest run with debug enabled names it.  Owed: model
+the constant override in vn_golden, root-cause + fix the create-path
+fault, then wire spec values to shwave `OpSpecConstant` resolution.
+
 ## Performance / area / scalability
 
 Compute is the roofline baseline (W1.5/W1.6): instructions per cycle per wave, LSU
