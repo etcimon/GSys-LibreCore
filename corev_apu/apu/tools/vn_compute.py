@@ -101,15 +101,19 @@ class ShaderRuntime:
                     names[binding.fmt].startswith(('D', 'S8', 'X8_D')) or
                     bpp[binding.fmt] not in (1, 2, 4, 8, 16) or
                     not 0 < binding.width <= 4096 or not 0 < binding.height <= 4096 or
+                    type(binding.mips) is not int or not 1 <= binding.mips <= 13 or
                     binding.offset % 4 or
                     binding.pitch != executor.execution.golden.img_mpitch(
                         executor.execution.model, binding.width, binding.fmt, 0) or
-                    binding.size != binding.pitch * binding.height):
+                    binding.size != executor.execution.golden.img_layer_bytes(
+                        executor.execution.model, binding.width, binding.height,
+                        binding.fmt, binding.mips)):
                 raise ValueError('image binding format/footprint exceeds native compute profile')
             base = executor._extent(context, binding.owner, binding.offset, binding.size)
         return (binding.descriptor_set, binding.binding, binding.size, base,
                 binding.kind << 16 | 1 << 24, binding.width | binding.height << 16,
-                binding.fmt | 1 << 8 | 1 << 16, binding.swizzle, *binding.sampler)
+                binding.fmt | binding.mips << 8 | 1 << 16, binding.swizzle,
+                *binding.sampler)
 
     def __init__(self, executor, context, operation):
         if (not isinstance(operation.code, tuple) or not 5 <= len(operation.code) <= 4096 or

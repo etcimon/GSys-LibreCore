@@ -76,6 +76,7 @@ class ImageBinding:
     binding: int
     descriptor_set: int
     element: int
+    mips: int = 1
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,7 @@ def image_descriptor(engine, context_id, descriptor_set, binding, element=0, set
             raise ValueError('image descriptor immutable sampler differs from layout')
     owner = None
     offset = size = width = height = pitch = fmt = swizzle = 0
+    levels = 1
     expected = [0, 0, 0x100 | source.dtype, 0, 0,
                 source.sampler_aux & 0xFFFFFFFF, source.sampler_aux >> 32, 0]
     if source.dtype:
@@ -144,7 +146,8 @@ def image_descriptor(engine, context_id, descriptor_set, binding, element=0, set
         mips, layers = aux >> 40 & 31, aux >> 45 & 511
         mip, levels, layer, count = va >> 28 & 15, va >> 32 & 15, va >> 36 & 1023, va >> 46 & 1023
         names, _, bpp, _ = engine.model.img_fmt_tables()
-        if (source.image_state >> 19 & 3 != 1 or va >> 56 & 7 != 0 or levels != 1 or count != 1 or
+        if (source.image_state >> 19 & 3 != 1 or va >> 56 & 7 != 0 or
+                not 1 <= levels <= mips - mip or count != 1 or
                 not 0 < base_w <= 4096 or not 0 < base_h <= 4096 or
                 not 0 < mips <= 13 or mip >= mips or not 0 < layers <= 256 or layer >= layers or
                 fmt >= len(names) or names[fmt].startswith(('D', 'S8', 'X8_D')) or
@@ -158,7 +161,8 @@ def image_descriptor(engine, context_id, descriptor_set, binding, element=0, set
                          max(1, base_h >> level) for level in range(mip))
         width, height = max(1, base_w >> mip), max(1, base_h >> mip)
         pitch = engine.golden.img_mpitch(engine.model, base_w, fmt, mip)
-        offset, size = source.binding + layer * layer_bytes + mip_offset, pitch * height
+        offset = source.binding + layer * layer_bytes + mip_offset
+        size = engine.golden.img_layer_bytes(engine.model, width, height, fmt, levels)
         swizzle = va >> 16 & 0xFFF
         if (source.image_size != layer_bytes * layers or
                 source.image_state & 0x7FFFF != layer_bytes >> 6 or
@@ -198,4 +202,4 @@ def image_descriptor(engine, context_id, descriptor_set, binding, element=0, set
     validate()
     return ImageOperand(ImageBinding(owner, offset, size, width, height, pitch, fmt, swizzle,
         source.dtype, (source.sampler_aux & 0xFFFFFFFF, source.sampler_aux >> 32),
-        binding, set_index, element), tuple(references), validate)
+        binding, set_index, element, mips=levels), tuple(references), validate)

@@ -170,8 +170,30 @@ Model's 8.8 fixed-point coordinate `su0=floor((u*w0-0.5)*256)` yields
 iu0=1, fu0=128 - an exact 50/50 horizontal weight - so covered texels
 blend texel(1,1)=(32,64,32,255) and texel(2,1)=(64,64,48,255) to the
 UNORM mean (48/255, 64/255, 40/255, 1.0).  This is the first bilinear
-(non-nearest) filter path exercised end-to-end; trilinear/mipmap and the
-remaining address modes (mirrored-repeat, border) stay queued.
+(non-nearest) filter path exercised end-to-end.
+
+Multi-level (mipmap) images are admitted through a descriptor-binding ABI
+extension: `ImageBinding` gained a `mips` field (view levelCount, default
+1) that `image_descriptor` populates after relaxing the single-level
+`levels == 1` bound to `1 <= levels <= mips - baseMip`, computing `size`
+as the full accessible mip-chain footprint (`img_layer_bytes` over every
+level) while `offset` stays the base-mip byte offset.  `ShaderRuntime.
+_image_row` validates `1 <= mips <= 16`, checks the binding covers the
+whole chain, and encodes the level count into the packed format word
+(`mdim = mips` in bits 8..11) so the Model's already-mip-aware `img_walk`
+sees `lvl = mdim & 0xF` levels.  `fs_sample_program(lod=...)` emits an
+explicit LOD operand and `_image_fetch_setup(mips=..., max_lod=...)`
+builds a `VkImage`/`VkImageView` with `mipLevels = levelCount = mips`,
+fills mip0 with the (x,y) pattern and every mip>=1 solid green, and sets
+`VkSamplerCreateInfo.maxLod` high enough that the Model's `le` clamp
+(`min(max(le,min44),max44)`) does not pin LOD to mip0.
+`test_fragment_mipmap_explicit_lod` binds a 2-level COMBINED_IMAGE_SAMPLER
+(dtype 1) and samples at u=v=0.5, LOD=1.0, nearest filter: the Model
+selects mip1 (`m0 = (le+8)>>4 = 1`, `m0 = min(m0, lvl-1)`) and returns the
+solid-green texel rather than the mip0 (x,y) pattern - proving the mip
+count now reaches the sampled-image meta end-to-end.  Trilinear (LOD
+fractional blend across two mips) and gather/projective/depth-reference
+ops stay queued.
 
 Evidence: `test_vn_graphics_draw_replay` gained nine image draws -
 `test_fragment_sampled_image_fetch_reaches_framebuffer` (constant ivec2
@@ -194,15 +216,20 @@ u=1.25 -> su0=10 -> mirror to texel(5,1)),
 FLOAT_OPAQUE_WHITE borderColor=4, u=1.25 -> border (255,255,255,255)),
 `test_fragment_linear_filter_blend` (LINEAR combined sampler, u=0.25 ->
 su0=384, iu0=1, fu0=128 -> 50/50 bilinear blend of texels (1,1)+(2,1) ->
-UNORM mean (48,64,40)), plus
+UNORM mean (48,64,40)),
+`test_fragment_mipmap_explicit_lod` (2-level COMBINED_IMAGE_SAMPLER,
+u=v=0.5 LOD=1.0 nearest -> mip1 solid green, not the mip0 (x,y) pattern),
+plus
 `test_fragment_storage_image_write` (a STORAGE_IMAGE kind 3 bound via
 `OpTypeImage(sampled=2)`; `OpImageWrite` stores a constant red texel at the
 same FragCoord-derived coordinate, and the aperture bytes under the bound
 image are checked - covered texels become red while uncovered keep their
 pattern).  The fetch draws prove each covered framebuffer texel equals its
 own (x,y)-encoded image texel; the store draw proves the previously
-unexercised kind-3 `GfxMemory` write admission end-to-end.  Local
-`test_vn_*` sweep ran 746 tests, all green.  Frozen native
+unexercised kind-3 `GfxMemory` write admission end-to-end; the mipmap draw
+proves the descriptor ABI now carries a multi-level mip count into the
+sampled-image meta.  Local `test_vn_*` sweep ran 748 tests, all green.
+Frozen native
 cohorts on ovh_calltorch:
 `native-gfximg-01` 720 tests PASS in 20.465 s (`native-execution.y6y3xap5`),
 `native-gfximgpix-01` 721 tests PASS in 20.582 s
@@ -217,5 +244,7 @@ PASS in 19.317 s (`native-execution.edz92krq`), and `native-gfxclamp-01`
 728 tests PASS in 20.752 s (`native-execution.3pqmo813`), and
 `native-gfxlinear-01` 729 tests PASS in 20.969 s
 (`native-execution.eey3xhni`), and `native-gfxaddr-01` 731 tests PASS in
-18.759 s (`native-execution.amvegsm4`), all `sources_unchanged: true`.
+18.759 s (`native-execution.amvegsm4`), and `native-gfxdyn-01` 732 tests
+PASS (`native-execution._di52ww_`), and `native-gfxmip-01` 733 tests PASS
+in 21.0 s (`native-execution.hwg4luup`), all `sources_unchanged: true`.
 Host-native model only - no RTL/CTS/stock/hardware qualification.

@@ -18161,10 +18161,23 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   pDynamicOffsets=[256] -> UBO read lands on buffer+256=0.75 not buffer+0
   decoy=0.25), cohort `native-gfxdyn-01` 732 PASS
   (`native-execution._di52ww_`, sources_unchanged true).
-- [ ] Mipmap/trilinear filtering + gather/proj/dref sample ops (all four
-  VkSamplerAddressMode values + bilinear filter already proven; mipmap needs
-  a descriptor-binding ABI extension - ImageBinding mip count + mdim encode +
-  multi-level view admission),
+- [x] Mipmap descriptor-binding ABI + explicit-LOD mip select:
+  `ImageBinding.mips` (view levelCount, default 1) populated by
+  `image_descriptor` after relaxing `levels==1` to
+  `1 <= levels <= mips - baseMip` with `size` = full mip-chain footprint
+  (`img_layer_bytes`); `ShaderRuntime._image_row` validates `1 <= mips <=
+  16`, checks chain coverage, and encodes `mdim = mips` so the Model's
+  mip-aware `img_walk` sees `lvl = mdim & 0xF`.  `_image_fetch_setup`
+  gained `mips`/`max_lod` params (multi-level VkImage/View, mip0 pattern
+  + mip>=1 solid green, `VkSamplerCreateInfo.maxLod` raised so the `le`
+  clamp does not pin LOD to mip0); `fs_sample_program` gained a `lod`
+  operand.  `test_fragment_mipmap_explicit_lod` (2-level
+  COMBINED_IMAGE_SAMPLER, u=v=0.5 LOD=1.0 nearest -> mip1 green not mip0
+  pattern), cohort `native-gfxmip-01` 733 PASS
+  (`native-execution.hwg4luup`, sources_unchanged true).
+- [ ] Trilinear (fractional LOD blend across two mips) + gather/proj/dref
+  sample ops (all four VkSamplerAddressMode values + bilinear filter +
+  explicit/implicit LOD + multi-mip select already proven),
   blend/depth/MRT, helper
   lanes, non-triangle topology, flat/nopersp interpolation,
   multi-descriptor/multi-stage end-to-end draws and capability/CTS/physical

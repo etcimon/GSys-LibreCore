@@ -386,7 +386,8 @@ class DrawReplayTests(unittest.TestCase):
         self.assertEqual(self.f.owner.work_refs, 0)
 
     def _image_fetch_setup(self, module, dtype=2, sampler_addr=0,
-                           linear=False, border_color=0):
+                           linear=False, border_color=0, mips=1,
+                           max_lod=0.0):
         """Shared vkCreateImage/View + image-descriptor-set setup for the
         image draw tests.  The image is an 8x4 R8G8B8A8_UNORM at MEMORY
         offset 4352 with texel(x,y) = (x*32, y*64, (x+y)*16, 255);
@@ -396,7 +397,12 @@ class DrawReplayTests(unittest.TestCase):
         VkSamplerAddressMode for U/V/W (0 Repeat, 1 MirroredRepeat, 2
         ClampToEdge, 3 ClampToBorder); `linear` selects LINEAR (1) over
         NEAREST (0) min/mag filters; `border_color` sets VkBorderColor
-        (4 FLOAT_OPAQUE_WHITE) for CLAMP_TO_BORDER substitution."""
+        (4 FLOAT_OPAQUE_WHITE) for CLAMP_TO_BORDER substitution; `mips`
+        sets VkImageCreateInfo.mipLevels and the view levelCount - mip0
+        keeps the (x,y) texel pattern while mips>=1 are filled solid
+        green (0,255,0,255) so an explicit-LOD sample proves mip select;
+        `max_lod` sets VkSamplerCreateInfo.maxLod (must cover the mip
+        count or the model clamps LOD to mip0)."""
         self.r.layout(((0, dtype, 1, 16),))
         if dtype in (0, 1):
             filt = 1 if linear else 0
@@ -407,7 +413,8 @@ class DrawReplayTests(unittest.TestCase):
                     addressModeU=sampler_addr, addressModeV=sampler_addr,
                     addressModeW=sampler_addr,
                     mipLodBias=0, anisotropyEnable=0, maxAnisotropy=0,
-                    compareEnable=0, compareOp=7, minLod=0, maxLod=0,
+                    compareEnable=0, compareOp=7, minLod=0,
+                    maxLod=struct.unpack('<I', struct.pack('<f', max_lod))[0],
                     borderColor=border_color, unnormalizedCoordinates=0))
         self.f.command('vkDestroyShaderModule', device=self.w.DEVICE,
                        shaderModule=self.FS2)
@@ -416,7 +423,7 @@ class DrawReplayTests(unittest.TestCase):
         self.f.command('vkCreateImage', device=self.w.DEVICE, pImage=self.IMAGE,
             pCreateInfo=s('VkImageCreateInfo', pNext=[], flags=0, imageType=1,
                 format=37, extent=s('VkExtent3D', width=8, height=4, depth=1),
-                mipLevels=1, arrayLayers=1, samples=1, tiling=0, usage=15,
+                mipLevels=mips, arrayLayers=1, samples=1, tiling=0, usage=15,
                 sharingMode=0, queueFamilyIndexCount=0, pQueueFamilyIndices=[],
                 initialLayout=1))
         self.f.command('vkBindImageMemory', device=self.w.DEVICE, image=self.IMAGE,
@@ -426,7 +433,7 @@ class DrawReplayTests(unittest.TestCase):
                 image=self.IMAGE, viewType=1, format=37,
                 components=s('VkComponentMapping', r=0, g=0, b=0, a=0),
                 subresourceRange=s('VkImageSubresourceRange', aspectMask=1,
-                    baseMipLevel=0, levelCount=1, baseArrayLayer=0,
+                    baseMipLevel=0, levelCount=mips, baseArrayLayer=0,
                     layerCount=1)))
         self.f.command('vkCreateDescriptorPool', device=self.w.DEVICE,
             pDescriptorPool=self.POOL,
@@ -448,12 +455,20 @@ class DrawReplayTests(unittest.TestCase):
                     imageView=0 if dtype == 0 else self.VIEW,
                     imageLayout=1)], pBufferInfo=[])])
         did = self.e.golden.img_fmt_id(self.e.model, 37)
-        pitch = self.e.golden.img_mpitch(self.e.model, 8, did, 0)
         base = self.f.owner.base + 4352
-        for y in range(4):
-            for x in range(8):
-                texel = bytes((x * 32, y * 64, (x + y) * 16, 255))
-                self.f.state.aperture.write(base + y * pitch + x * 4, texel)
+        for m in range(mips):
+            wm = self.e.golden.img_mdim(8, m)
+            hm = self.e.golden.img_mdim(4, m)
+            pitch = self.e.golden.img_mpitch(self.e.model, 8, did, m)
+            moff = self.e.golden.img_mip_off(self.e.model, 8, 4, did, m)
+            for y in range(hm):
+                for x in range(wm):
+                    if m == 0:
+                        texel = bytes((x * 32, y * 64, (x + y) * 16, 255))
+                    else:
+                        texel = bytes((0, 255, 0, 255))
+                    self.f.state.aperture.write(
+                        base + moff + y * pitch + x * 4, texel)
         return did
 
     def _separate_sampler_setup(self, module):
@@ -651,6 +666,26 @@ class DrawReplayTests(unittest.TestCase):
         want = self.e.golden.img_clear_texel(
             self.e.model, did,
             struct.unpack('<4I', struct.pack('<4f', 1.0, 1.0, 1.0, 1.0)))
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), want)
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_fragment_mipmap_explicit_lod(self):
+        # mipmap selection: a 2-mip 8x4 image (mip0 = (x,y) pattern,
+        # mip1 = solid green 0,255,0,255) sampled by
+        # OpImageSampleExplicitLod.  lod=1.0 -> le=16 -> m0=(16+8)>>4=1
+        # selects mip1 under NEAREST_MIPMAP_NEAREST, so covered texels are
+        # green - a value no mip0 texel can produce (max G=192).  This
+        # exercises the multi-level view admission + ImageBinding.mips ->
+        # mdim binding-row encode added for mipmapped descriptors.
+        did = self._image_fetch_setup(
+            fs_sample_program(u=0.5, v=0.5, lod=1.0), dtype=1, mips=2,
+            max_lod=2.0)
+        self._image_fetch_draw()
+        want = self.e.golden.img_clear_texel(
+            self.e.model, did,
+            struct.unpack('<4I', struct.pack('<4f', 0.0, 1.0, 0.0, 1.0)))
         for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
             self.assertEqual(self.read_texel(x, y), want)
         self.assertEqual(self.read_texel(7, 3), self.clear_texel())
