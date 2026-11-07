@@ -205,6 +205,52 @@ def fs_image_store_program(binding=0, coord=(1, 1), per_pixel=False):
     return tuple(words)
 
 
+def fs_sample_program(binding=0, u=0.3125, v=0.375):
+    """Fragment module sampling a COMBINED_IMAGE_SAMPLER (kind 1) via
+    OpImageSampleExplicitLod at a constant normalized vec2 coordinate with
+    LOD 0, writing the result to color(loc0).  With a nearest sampler this
+    resolves to a single texel, so the filtered-sampling path is observable
+    without mip/filter ambiguity.  `u`,`v` are normalized [0,1] coords."""
+    import struct as _st
+    ub = _st.unpack('<I', _st.pack('<f', u))[0]
+    vb = _st.unpack('<I', _st.pack('<f', v))[0]
+    words = [0x07230203, 0x00010300, 0, 48, 0]
+
+    def emit(opcode, *values):
+        words.extend(((len(values) + 1) << 16 | opcode, *values))
+
+    emit(17, 1)                     # OpCapability Shader
+    emit(14, 0, 1)                  # OpMemoryModel Logical GLSL450
+    emit(15, 4, 9, 0x6E69616D, 0, 8)  # EntryPoint Fragment %9 main, iface=[color]
+    emit(16, 9, 7)                  # OriginUpperLeft
+    emit(71, 8, 30, 0)              # color Location 0
+    emit(71, 17, 34, 0)             # img   DescriptorSet 0
+    emit(71, 17, 33, binding)       # img   Binding N
+    emit(19, 1)                     # %1 void
+    emit(33, 2, 1)                  # %2 fnty
+    emit(22, 3, 32)                 # %3 float
+    emit(23, 4, 3, 4)               # %4 v4f
+    emit(23, 5, 3, 2)               # %5 v2f
+    emit(25, 13, 3, 1, 0, 0, 0, 1, 0)  # %13 image2D sampled
+    emit(27, 40, 13)                # %40 = OpTypeSampledImage %13 (kind 1)
+    emit(32, 14, 0, 40)             # %14 = ptr UniformConstant SIMG
+    emit(32, 15, 3, 4)              # %15 = ptr Output v4f
+    emit(59, 15, 8, 3)              # %8  color output
+    emit(59, 14, 17, 0)             # %17 img (UniformConstant)
+    emit(43, 3, 18, ub)             # %18 = float u
+    emit(43, 3, 19, vb)             # %19 = float v
+    emit(44, 5, 20, 18, 19)         # %20 = vec2(u, v)
+    emit(43, 3, 21, 0)              # %21 = float 0.0 (LOD)
+    emit(54, 1, 9, 0, 2)            # %9 main()
+    emit(248, 22)                   # label
+    emit(61, 40, 23, 17)            # %23 = Load SIMG %17
+    emit(88, 4, 24, 23, 20, 2, 21)  # %24 = ImageSampleExplicitLod %23 %20 Lod %21
+    emit(62, 8, 24)                 # Store color %24
+    emit(253)                       # Return
+    emit(56)                        # FunctionEnd
+    return tuple(words)
+
+
 class FragmentShadeTests(unittest.TestCase):
     def setUp(self):
         self.f = transfer_fixture.TransferTests()

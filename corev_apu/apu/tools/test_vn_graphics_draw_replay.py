@@ -7,7 +7,7 @@ import unittest
 import test_vn_graphics_resources as resource_fixture
 import vn_golden
 from test_vn_graphics_pshade import (fs_image_program, fs_image_store_program,
-                                     fs_program)
+                                     fs_program, fs_sample_program)
 from test_vn_graphics_shade import vs_program
 from vn_native_execution import StreamFault
 
@@ -429,6 +429,20 @@ class DrawReplayTests(unittest.TestCase):
         self._image_fetch_draw()
         for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
             self.assertEqual(self.read_texel(x, y), self.texel_want(did, x, y))
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_fragment_explicit_lod_sample(self):
+        # sampler-bearing filtered sampling: the FS declares
+        # OpTypeSampledImage and OpImageSampleExplicitLod samples the
+        # COMBINED_IMAGE_SAMPLER descriptor at normalized coord (0.3125,
+        # 0.375) = texel (2,1) centre with LOD 0 under a nearest sampler.
+        # Every covered framebuffer texel must equal that single texel.
+        did = self._image_fetch_setup(fs_sample_program(), dtype=1)
+        self._image_fetch_draw()
+        want = self.texel_want(did, 2, 1)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), want)
         self.assertEqual(self.read_texel(7, 3), self.clear_texel())
         self.assertEqual(self.f.owner.work_refs, 0)
 

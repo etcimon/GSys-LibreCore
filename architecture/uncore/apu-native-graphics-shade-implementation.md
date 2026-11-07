@@ -129,15 +129,22 @@ The combined-image-sampler kind is admitted through the same path:
 `vn_graphics_resources` maps `TK['SIMG']` (OpTypeSampledImage) to kind 1, and
 `fs_image_program(combined=True)` declares the combined type so a
 COMBINED_IMAGE_SAMPLER descriptor carrying a real VkSampler reaches
-`OpImageFetch` (which ignores sampler state) end-to-end.
+`OpImageFetch` (which ignores sampler state) end-to-end.  Sampler-bearing
+filtered sampling is likewise admitted: `fs_sample_program` emits
+`OpImageSampleExplicitLod` (opcode 88, Lod image-operand mask) over the same
+kind-1 descriptor, and the Model decodes the VkSampler aux carried in the
+binding meta words (smpw0/smpw1) to resolve normalized coordinates through
+the shared tx/filter path.
 
-Evidence: `test_vn_graphics_draw_replay` gained four image draws -
+Evidence: `test_vn_graphics_draw_replay` gained five image draws -
 `test_fragment_sampled_image_fetch_reaches_framebuffer` (constant ivec2
 coordinate), `test_fragment_per_pixel_image_fetch` (ivec2 derived from
 FragCoord.xy via OpCompositeExtract + OpConvertFToS + OpCompositeConstruct),
 and `test_fragment_combined_image_sampler_fetch` (OpTypeSampledImage kind 1
 with a VkSampler-bound COMBINED_IMAGE_SAMPLER descriptor producing the same
-per-pixel texels as the kind-2 fetch), plus
+per-pixel texels as the kind-2 fetch), `test_fragment_explicit_lod_sample`
+(OpImageSampleExplicitLod at normalized coord (0.3125,0.375)=texel(2,1)
+centre, LOD 0, nearest VkSampler -> uniform covered texels), plus
 `test_fragment_storage_image_write` (a STORAGE_IMAGE kind 3 bound via
 `OpTypeImage(sampled=2)`; `OpImageWrite` stores a constant red texel at the
 same FragCoord-derived coordinate, and the aperture bytes under the bound
@@ -145,12 +152,16 @@ image are checked - covered texels become red while uncovered keep their
 pattern).  The fetch draws prove each covered framebuffer texel equals its
 own (x,y)-encoded image texel; the store draw proves the previously
 unexercised kind-3 `GfxMemory` write admission end-to-end.  Local
-`test_vn_*` sweep 739 PASS.  Frozen native cohorts on ovh_calltorch:
+`test_vn_*` sweep ran 740 tests with all graphics suites green; two
+unrelated `test_vn_native_bridge` CLI-close timing flakes appeared once
+(the file passes standalone and in the remote cohort).  Frozen native
+cohorts on ovh_calltorch:
 `native-gfximg-01` 720 tests PASS in 20.465 s (`native-execution.y6y3xap5`),
 `native-gfximgpix-01` 721 tests PASS in 20.582 s
 (`native-execution.nssux4bd`), `native-gfximgstore-01` 722 tests PASS in
 21.914 s (`native-execution.5axy_z9z`), `native-gfxvsimg-01` 723 tests
-PASS in 20.500 s (`native-execution.n8_r1ss2`), and `native-gfxcomb-01`
-724 tests PASS in 20.725 s (`native-execution.6yodeq0j`), all
-`sources_unchanged: true`.  Host-native model only - no RTL/CTS/stock/
-hardware qualification.
+PASS in 20.500 s (`native-execution.n8_r1ss2`), `native-gfxcomb-01`
+724 tests PASS in 20.725 s (`native-execution.6yodeq0j`), and
+`native-gfxsample-01` 725 tests PASS in 21.016 s
+(`native-execution.no_22v6j`), all `sources_unchanged: true`.
+Host-native model only - no RTL/CTS/stock/hardware qualification.

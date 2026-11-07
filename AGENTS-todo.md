@@ -18119,14 +18119,20 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   kind 1 proven by `test_fragment_combined_image_sampler_fetch`
   (fs_image_program combined=True declares OpTypeSampledImage; a real
   vkCreateSampler-bound COMBINED_IMAGE_SAMPLER descriptor feeds OpImageFetch,
-  which ignores sampler state).  Remote cohorts `native-gfximg-01` 720 +
-  `native-gfximgpix-01` 721 + `native-gfximgstore-01` 722 + `native-gfxvsimg-01`
-  723 + `native-gfxcomb-01` 724 checks PASS (native-execution.y6y3xap5 /
-  .nssux4bd / .5axy_z9z / .n8_r1ss2 / .6yodeq0j, sources_unchanged true),
-  local `test_vn_*` 739 PASS.  Record: `architecture/uncore/
+  which ignores sampler state).  Sampler-bearing filtered sampling proven by
+  `test_fragment_explicit_lod_sample` (fs_sample_program emits
+  OpImageSampleExplicitLod opcode 88 with Lod mask over the same kind-1
+  descriptor; normalized coord (0.3125,0.375)=texel(2,1) centre at LOD 0
+  under a nearest VkSampler yields uniform covered texels).  Remote cohorts
+  `native-gfximg-01` 720 + `native-gfximgpix-01` 721 + `native-gfximgstore-01`
+  722 + `native-gfxvsimg-01` 723 + `native-gfxcomb-01` 724 +
+  `native-gfxsample-01` 725 checks PASS (native-execution.y6y3xap5 /
+  .nssux4bd / .5axy_z9z / .n8_r1ss2 / .6yodeq0j / .no_22v6j,
+  sources_unchanged true), local `test_vn_*` graphics suites green.
+  Record: `architecture/uncore/
   apu-native-graphics-shade-implementation.md`.
-- [ ] Separate sampler+image pairing, sampler-bearing filtered sampling
-  (OpImageSample* normalized coords/mip/wrap), in-model
+- [ ] Implicit-LOD + separate sampler/image pairing + non-nearest filter/
+  mip/wrap variety, in-model
   dynamic offsets, blend/depth/MRT, helper
   lanes, non-triangle topology, flat/nopersp interpolation,
   multi-descriptor/multi-stage end-to-end draws and capability/CTS/physical
