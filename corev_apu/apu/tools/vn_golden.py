@@ -8192,7 +8192,19 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                            constantID=0, offset=0,
                                            size=8)],
                                     dataSize=8, pData=bytes(8))
-                                 if variant == 'spec' else None)),
+                                 if variant == 'spec' else
+                                 # specok: a live 4-byte override — the
+                                 # spec-of-record exercises the
+                                 # StPipeSp* ObjPay spec-block create
+                                 # path and pipe_spec provenance
+                                 st('VkSpecializationInfo',
+                                    mapEntryCount=1, pMapEntries=[
+                                        st('VkSpecializationMapEntry',
+                                           constantID=0, offset=0,
+                                           size=4)],
+                                    dataSize=4,
+                                    pData=(41).to_bytes(4, 'little'))
+                                 if variant == 'specok' else None)),
                     layout=V['pl'], basePipelineHandle=0,
                     basePipelineIndex=0)],
                 pPipelines=[pipe_h[pi]])))
@@ -11703,7 +11715,8 @@ def main():
                     help='G1c graphics-session transport stream '
                          '(ue_gpos_tri_1: first end-to-end triangle)')
     ap.add_argument('--variant', default='',
-                    help='compute-session negative arm: spec, modgone, '
+                    help='compute-session negative arm: spec, specok, '
+                         'modgone, '
                          'lostbuf, baddesc, nopipe, pgfull, badmem, '
                          'bindoob, descoob, updoob, layoutmix, '
                          'deadpool, poolfull, worksink, multiwr, '
