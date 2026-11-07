@@ -3,17 +3,18 @@
 # SPDX-License-Identifier: MIT
 """Bounded vertex-shader stage over fetch records; no raster/FS admission.
 
-Buffer (UBO/SSBO) descriptor reads are admitted through a hybrid memory that
-routes binding-range accesses to the device aperture while vertex/varying
-records stay in an internal store.  Descriptor `ad` bases are biased into a
-high word range disjoint from the low record image so the two cannot alias;
-image/sampler (UNIFORMCONST) descriptors remain refused."""
+Buffer (UBO/SSBO) and image/sampler (UNIFORMCONST) descriptor reads are
+admitted through a hybrid memory that routes binding-range accesses to the
+device aperture while vertex/varying records stay in an internal store.
+Descriptor `ad` bases are biased into a high word range disjoint from the
+low record image so the two cannot alias."""
 from dataclasses import dataclass
 
 from shader.spirv_model import Model
 from shader.spirv_scan import EM, SC, Scanner
-from vn_compute import ShaderBinding
+from vn_compute import ShaderBinding, ShaderRuntime
 from vn_graphics_fetch import ATTR_STRIDE, Fetch, FetchRuntime, MAX_RECORDS
+from vn_image_operands import ImageBinding
 
 VARY_STRIDE = 144           # VS-out records share the 9-slot stride
 BATCH_MAX = 256             # invocations per Model wave batch
@@ -46,7 +47,8 @@ class GfxMemory:
             base = binding.owner.base + binding.offset
             lo = GFX_DESC_BIAS + base
             if lo <= address and address + 4 <= lo + binding.size:
-                if write and binding.kind != 7:
+                # writable descriptor kinds: SSBO (7) and storage image (3)
+                if write and binding.kind not in (3, 7):
                     raise KeyError('shader write to read-only descriptor')
                 return self.executor.execution.state.aperture, \
                     address - GFX_DESC_BIAS
@@ -88,44 +90,78 @@ class Shade:
             MAX_RECORDS * VARY_STRIDE
 
 
+GFX_PAD_MAX = 1 << 18        # total init-placeholder words across bindings;
+                            # bounds the graphics header against large image
+                            # footprints (native model stays bounded).
+
+
 def resolve_bindings(executor, context, bindings, scan, stage):
-    """Validate buffer-descriptor operands against a shader scan and build
-    the Model binding rows.  Returns (rows, init_pad_words, owners) where
-    rows are the flattened (set,binding,size,biased_ad,aux) entries, init_pad
-    is the per-binding placeholder-word count the header must carry, and
-    owners maps binding-owner ids for lease pinning.  `stage` is the
-    lowercase stage name used in refusal messages."""
-    bound = set()
+    """Validate descriptor operands against a shader scan and build the
+    Model binding rows.  `ShaderBinding` operands carry buffer descriptors
+    (kind 6/7) and `ImageBinding` operands carry image/sampler descriptors
+    (kind 0-3, UNIFORMCONST).  Returns (rows, init_pad_words, owners) where
+    rows are the flattened per-binding word tuples (5 words for buffers,
+    10 for images), init_pad is the per-binding placeholder-word count the
+    header must carry, and owners maps binding-owner ids for lease pinning.
+    `stage` is the lowercase stage name used in refusal messages."""
+    bound, image_pairs, buffer_pairs = set(), set(), set()
     for binding in bindings:
-        if (not isinstance(binding, ShaderBinding) or
-                binding.kind not in (6, 7) or
-                type(binding.descriptor_set) is not int or
-                not 0 <= binding.descriptor_set < 4 or
-                type(binding.binding) is not int or
-                not 0 <= binding.binding < 256 or
-                type(binding.offset) is not int or
-                type(binding.size) is not int or
-                binding.offset % 4 or binding.size % 4 or
-                binding.size <= 0 or
-                type(binding.element) is not int or
-                not 0 <= binding.element < 16):
+        image = isinstance(binding, ImageBinding)
+        if image:
+            ok = (type(binding.descriptor_set) is int and
+                  0 <= binding.descriptor_set < 4 and
+                  type(binding.binding) is int and
+                  0 <= binding.binding < 256 and
+                  binding.element == 0)
+        else:
+            ok = (isinstance(binding, ShaderBinding) and
+                  binding.kind in (6, 7) and
+                  type(binding.descriptor_set) is int and
+                  0 <= binding.descriptor_set < 4 and
+                  type(binding.binding) is int and
+                  0 <= binding.binding < 256 and
+                  type(binding.offset) is int and
+                  type(binding.size) is int and
+                  binding.offset % 4 == 0 and binding.size % 4 == 0 and
+                  binding.size > 0 and
+                  type(binding.element) is int and
+                  0 <= binding.element < 16)
+        if not ok:
             raise ValueError('unsupported ' + stage + ' shade binding')
         key = (binding.descriptor_set, binding.binding, binding.element)
         if key in bound:
             raise ValueError('duplicate ' + stage + ' shade descriptor element')
         bound.add(key)
-    provided = {(b.descriptor_set, b.binding) for b in bindings}
+        (image_pairs if image else buffer_pairs).add(
+            (binding.descriptor_set, binding.binding))
     for vid, row in scan.decor.items():
         if row.get('binding') is None and row.get('set') is None:
             continue
         var = scan.vars.get(vid)
         storage = var.get('storage') if var else None
-        if storage not in (SC['UNIFORM'], SC['SBUF']):
+        pair = (row.get('set'), row.get('binding'))
+        if storage == SC['UNIFORMCONST']:
+            if pair not in image_pairs:
+                raise ValueError(stage + ' shade image descriptor is not bound')
+        elif storage in (SC['UNIFORM'], SC['SBUF']):
+            if pair not in buffer_pairs:
+                raise ValueError(stage + ' shade descriptor is not bound')
+        else:
             raise ValueError(stage + ' shade descriptor storage is not admitted')
-        if (row.get('set'), row.get('binding')) not in provided:
-            raise ValueError(stage + ' shade descriptor is not bound')
     rows, pad, owners = [], 0, {}
     for binding in bindings:
+        if isinstance(binding, ImageBinding):
+            row = list(ShaderRuntime._image_row(executor, context, binding))
+            if binding.owner is not None:
+                base, size = row[3], row[2]
+                if base + size > (1 << 32) - GFX_DESC_BIAS:
+                    raise ValueError(
+                        stage + ' shade descriptor address overflows profile')
+                row[3] = GFX_DESC_BIAS + base
+                owners[id(binding.owner)] = binding.owner
+            rows.append(tuple(row))
+            pad += row[2] // 4
+            continue
         base = executor._extent(context, binding.owner, binding.offset,
                                 binding.size)
         if base + binding.size > (1 << 32) - GFX_DESC_BIAS:
@@ -134,6 +170,8 @@ def resolve_bindings(executor, context, bindings, scan, stage):
                      GFX_DESC_BIAS + base, binding.kind << 16 | binding.element))
         pad += binding.size // 4
         owners[id(binding.owner)] = binding.owner
+    if pad > GFX_PAD_MAX:
+        raise MemoryError(stage + ' shade descriptor init budget exhausted')
     return rows, pad, owners
 
 

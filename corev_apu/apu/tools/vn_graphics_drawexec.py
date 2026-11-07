@@ -31,7 +31,7 @@ def _fragment_scan(code):
             continue
         var = scan.vars.get(vid)
         storage = var.get('storage') if var else None
-        if storage not in (SC['UNIFORM'], SC['SBUF']):
+        if storage not in (SC['UNIFORM'], SC['SBUF'], SC['UNIFORMCONST']):
             raise ValueError('draw descriptor storage is not admitted')
     return scan
 

@@ -6,14 +6,14 @@ import unittest
 
 import test_vn_graphics_resources as resource_fixture
 import vn_golden
-from test_vn_graphics_pshade import fs_program
+from test_vn_graphics_pshade import fs_image_program, fs_program
 from test_vn_graphics_shade import vs_program
 from vn_native_execution import StreamFault
 
 
 class DrawReplayTests(unittest.TestCase):
     VB, VS2, FS2, PIPE2 = (0x790000001000 + i for i in range(4))
-    POOL, DSET, UBO = (0x7A0000001000 + i for i in range(3))
+    POOL, DSET, UBO, IMAGE, VIEW = (0x7A0000001000 + i for i in range(5))
 
     def setUp(self):
         self.r = resource_fixture.ResourceTests()
@@ -232,6 +232,85 @@ class DrawReplayTests(unittest.TestCase):
         want = self.e.golden.img_clear_texel(
             self.e.model, did,
             struct.unpack('<4I', struct.pack('<4f', ubo, ubo, ubo, ubo)))
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), want)
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_fragment_sampled_image_fetch_reaches_framebuffer(self):
+        # end-to-end: vkCmdBindDescriptorSets -> vkCmdDraw -> DrawExec ->
+        # FragmentShade fetches a SAMPLED_IMAGE (UNIFORMCONST, kind 2)
+        # texel and writes it to color.  Texels are laid out as
+        # (x*32, y*64, (x+y)*16, 255) so the fetched coordinate is
+        # identifiable in the framebuffer.
+        cx, cy = 3, 2
+        self.r.layout(((0, 2, 1, 16),))
+        self.f.command('vkDestroyShaderModule', device=self.w.DEVICE,
+                       shaderModule=self.FS2)
+        self.module(self.FS2, fs_image_program(binding=0, coord=(cx, cy)))
+        s = self.w.structure
+        self.f.command('vkCreateImage', device=self.w.DEVICE, pImage=self.IMAGE,
+            pCreateInfo=s('VkImageCreateInfo', pNext=[], flags=0, imageType=1,
+                format=37, extent=s('VkExtent3D', width=8, height=4, depth=1),
+                mipLevels=1, arrayLayers=1, samples=1, tiling=0, usage=15,
+                sharingMode=0, queueFamilyIndexCount=0, pQueueFamilyIndices=[],
+                initialLayout=1))
+        self.f.command('vkBindImageMemory', device=self.w.DEVICE, image=self.IMAGE,
+                       memory=self.w.MEMORY, memoryOffset=4352)
+        self.f.command('vkCreateImageView', device=self.w.DEVICE, pView=self.VIEW,
+            pCreateInfo=s('VkImageViewCreateInfo', pNext=[], flags=0,
+                image=self.IMAGE, viewType=1, format=37,
+                components=s('VkComponentMapping', r=0, g=0, b=0, a=0),
+                subresourceRange=s('VkImageSubresourceRange', aspectMask=1,
+                    baseMipLevel=0, levelCount=1, baseArrayLayer=0, layerCount=1)))
+        self.f.command('vkCreateDescriptorPool', device=self.w.DEVICE,
+            pDescriptorPool=self.POOL,
+            pCreateInfo=s('VkDescriptorPoolCreateInfo', pNext=[], flags=1,
+                maxSets=1, poolSizeCount=1,
+                pPoolSizes=[s('VkDescriptorPoolSize', type=2,
+                              descriptorCount=1)]))
+        self.f.command('vkAllocateDescriptorSets', device=self.w.DEVICE,
+            pDescriptorSets=[self.DSET], pAllocateInfo=s(
+                'VkDescriptorSetAllocateInfo', pNext=[], descriptorPool=self.POOL,
+                descriptorSetCount=1, pSetLayouts=[self.r.DSL]))
+        self.f.command('vkUpdateDescriptorSets', device=self.w.DEVICE,
+            descriptorWriteCount=1, descriptorCopyCount=0, pDescriptorCopies=[],
+            pDescriptorWrites=[s('VkWriteDescriptorSet', pNext=[], dstSet=self.DSET,
+                dstBinding=0, dstArrayElement=0, descriptorCount=1,
+                descriptorType=2, pTexelBufferView=[],
+                pImageInfo=[s('VkDescriptorImageInfo', sampler=0,
+                    imageView=self.VIEW, imageLayout=1)], pBufferInfo=[])])
+        # R8G8B8A8_UNORM texels: pitch = (8*4+63)&~63 = 64 bytes/row.
+        did = self.e.golden.img_fmt_id(self.e.model, 37)
+        pitch = self.e.golden.img_mpitch(self.e.model, 8, did, 0)
+        base = self.f.owner.base + 4352
+        for y in range(4):
+            for x in range(8):
+                texel = bytes((x * 32, y * 64, (x + y) * 16, 255))
+                self.f.state.aperture.write(
+                    base + y * pitch + x * 4, texel)
+        self.upload(self.ndc_triangle())
+        self.pipeline()
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.f.command('vkCmdBindDescriptorSets', commandBuffer=self.f.CB,
+            pipelineBindPoint=0, layout=self.g.PL, firstSet=0,
+            descriptorSetCount=1, pDescriptorSets=[self.DSET],
+            dynamicOffsetCount=0, pDynamicOffsets=[])
+        self.draw()
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        job = self.f.enqueue()
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        tx, ty = cx * 32, cy * 64
+        tb = (cx + cy) * 16
+        want = self.e.golden.img_clear_texel(
+            self.e.model, did,
+            struct.unpack('<4I', struct.pack('<4f',
+                tx / 255.0, ty / 255.0, tb / 255.0, 1.0)))
         for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
             self.assertEqual(self.read_texel(x, y), want)
         self.assertEqual(self.read_texel(7, 3), self.clear_texel())

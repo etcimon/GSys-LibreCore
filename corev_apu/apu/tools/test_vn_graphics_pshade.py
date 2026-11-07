@@ -86,6 +86,48 @@ def fs_program(kind='color', desc=False, ubo=False):
     return tuple(words)
 
 
+def fs_image_program(binding=0, coord=(1, 1)):
+    """Fragment module fetching one texel from a SAMPLED_IMAGE (kind 2)
+    UNIFORMCONST descriptor and writing it to color(loc0).  A constant fetch
+    coordinate keeps the first image path deterministic; per-pixel fetch
+    coordinates are a follow-up."""
+    words = [0x07230203, 0x00010300, 0, 48, 0]
+
+    def emit(opcode, *values):
+        words.extend(((len(values) + 1) << 16 | opcode, *values))
+
+    entry, lbl = 9, 10
+    emit(17, 1)                     # OpCapability Shader
+    emit(14, 0, 1)                  # OpMemoryModel Logical GLSL450
+    emit(15, 4, entry, 0x6E69616D, 0, 8)      # EntryPoint Fragment main [color]
+    emit(16, entry, 7)              # OriginUpperLeft
+    emit(71, 8, 30, 0)              # color Location 0
+    emit(71, 17, 34, 0)             # img   DescriptorSet 0
+    emit(71, 17, 33, binding)       # img   Binding N
+    emit(19, 1)                     # %void
+    emit(33, 2, 1)                  # %fnty
+    emit(22, 3, 32)                 # %float
+    emit(23, 4, 3, 4)               # %v4f
+    emit(21, 11, 32, 1)             # %int
+    emit(23, 12, 11, 2)             # %ivec2
+    emit(25, 13, 3, 1, 0, 0, 0, 1, 0)  # %image2D sampled
+    emit(32, 14, 0, 13)             # ptr UniformConstant image
+    emit(32, 15, 3, 4)              # ptr Output v4f
+    emit(59, 15, 8, 3)              # color output
+    emit(59, 14, 17, 0)             # img (UniformConstant)
+    emit(43, 11, 18, coord[0])      # int x
+    emit(43, 11, 19, coord[1])      # int y
+    emit(44, 12, 20, 18, 19)        # ivec2 coord
+    emit(54, 1, entry, 0, 2)        # main()
+    emit(248, lbl)                  # label
+    emit(61, 13, 21, 17)            # %21 = Load image %17
+    emit(95, 4, 22, 21, 20)         # %22 = ImageFetch %21 %20
+    emit(62, 8, 22)                 # Store color %22
+    emit(253)                       # Return
+    emit(56)                        # FunctionEnd
+    return tuple(words)
+
+
 class FragmentShadeTests(unittest.TestCase):
     def setUp(self):
         self.f = transfer_fixture.TransferTests()

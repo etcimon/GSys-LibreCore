@@ -85,30 +85,6 @@ wire command produces it yet.
 
 ## Buffer-descriptor vertex shade (implemented)
 
- now carries resolved  operands (kind 6 UBO /
-7 SSBO) end-to-end:  ->  ->
- ->  ->  ->
-.   is a hybrid wave memory: descriptor binding
-ranges route to  (read for kind 6/7, write only for kind 7)
-while vertex inputs, varying outputs and scratch stay in an internal store.
-Descriptor  bases are biased by  (0x10000000) into a high
-word range disjoint from the low record image so the two cannot alias; the
-bias is bounded at admission so biased addresses always fit the 32-bit header
-word.  The Model header emits real binding rows plus per-binding init-word
-placeholders (consumed but not stored because live memory is supplied) so the
-trailing graphics wave section stays aligned.  Shader-side admission now
-permits / storage descriptors and requires each decorated
-(set,binding) to be covered by a provided operand; 
-image/sampler descriptors and fragment-stage bindings remain refused.
-
-Evidence:  grew to 8 tests — a hand-assembled
-UBO-reading vertex module folds a device-memory int into 
-(observed in every vary record), plus unbound/wrong-set refusal.  Full local
- sweep: 731 tests PASS.  Remote cohort evidence pending; host-native
-model only — no RTL/CTS/stock/hardware qualification.
-
-## Buffer-descriptor vertex shade (implemented)
-
 `Shade.bindings` now carries resolved `ShaderBinding` operands (kind 6 UBO /
 7 SSBO) end-to-end: `GraphicsBindings.resolve` -> `DrawPlan.stage_bindings` ->
 `vn_graphics_draw_replay._push` -> `DrawExec.vs_bindings` -> `Shade` ->
@@ -122,8 +98,7 @@ word.  The Model header emits real binding rows plus per-binding init-word
 placeholders (consumed but not stored because live memory is supplied) so the
 trailing graphics wave section stays aligned.  Shader-side admission now
 permits `UNIFORM`/`SBUF` storage descriptors and requires each decorated
-(set,binding) to be covered by a provided operand; `UNIFORMCONST`
-image/sampler descriptors and fragment-stage bindings remain refused.
+(set,binding) to be covered by a provided operand.
 
 Evidence: `test_vn_graphics_shade` grew to 8 tests - a hand-assembled
 UBO-reading vertex module folds a device-memory int into `Position.w`
@@ -131,4 +106,29 @@ UBO-reading vertex module folds a device-memory int into `Position.w`
 native cohort `native-gfxubo-01` on ovh_calltorch: 716 tests PASS in 19.144 s,
 `sources_unchanged: true`, cohort `native-execution.zolkoufm`; local
 `test_vn_*` sweep 731 PASS.  Host-native model only - no RTL/CTS/stock/
+hardware qualification.
+
+## Image/sampler descriptor shade (implemented)
+
+`resolve_bindings` now accepts `ImageBinding` operands alongside
+`ShaderBinding`: kind 0-3 UNIFORMCONST image/sampler descriptors produce the
+Model's 10-word binding rows (5-word base entry with the `1<<24` image flag
+plus 5 meta words) via `ShaderRuntime._image_row`, which reuses the compute
+path's format/footprint/sampler validation.  Image `ad` bases get the same
+`GFX_DESC_BIAS` treatment; `GfxMemory` routes image reads to the aperture and
+admits writes only for storage images (kind 3) alongside SSBO (kind 7).
+Shader-side admission maps `UNIFORMCONST` storage to the bound image
+(set,binding) pairs and `UNIFORM`/`SBUF` to buffer pairs; `UNIFORMCONST`
+reached the fragment stage through `_fragment_scan` and the eager
+`resolve_bindings` probe in `DrawExecRuntime`.
+
+Evidence: `test_vn_graphics_draw_replay` gained
+`test_fragment_sampled_image_fetch_reaches_framebuffer` - a real
+`vkCmdBindDescriptorSets` -> `vkCmdDraw` -> `DrawExec` -> `FragmentShade`
+draw where a SAMPLED_IMAGE (kind 2) `OpImageFetch` at a constant ivec2
+coordinate reads a bound R8G8B8A8_UNORM texel and writes it to color; the
+fetched (x,y)-encoded texel value is observed on covered framebuffer texels.
+Local `test_vn_*` sweep 735 PASS.  Frozen native cohort `native-gfximg-01` on
+ovh_calltorch: 720 tests PASS in 20.465 s, `sources_unchanged: true`, cohort
+`native-execution.y6y3xap5`.  Host-native model only - no RTL/CTS/stock/
 hardware qualification.

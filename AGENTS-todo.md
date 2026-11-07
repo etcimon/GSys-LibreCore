@@ -18092,11 +18092,27 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   `native-gfxdrawubo-01` 719 checks PASS (native-execution.88gdzair,
   sources_unchanged true), local `test_vn_*` 734 PASS.
   Record: `architecture/uncore/apu-native-graphics-draw-implementation.md`.
-- [ ] Image/sampler (`UNIFORMCONST`) binds, in-model dynamic offsets,
-  blend/depth/MRT, helper lanes, non-triangle topology, flat/nopersp
-  interpolation, multi-descriptor/multi-stage end-to-end draws and
-  capability/CTS/physical gates before any capset or stock vkCmdDraw*
-  advertisement; host-model evidence only.
+- [x] Image/sampler (`UNIFORMCONST`) binds for graphics stages (native):
+  `resolve_bindings` accepts `ImageBinding` operands (kind 0-3) and emits the
+  Model's 10-word image binding rows via `ShaderRuntime._image_row`
+  (compute-path format/footprint/sampler validation reused); image `ad`
+  bases take `GFX_DESC_BIAS`, `GfxMemory` routes image reads to the aperture
+  and admits writes only for storage image (kind 3) + SSBO (kind 7);
+  `_fragment_scan` admits `UNIFORMCONST` with eager `resolve_bindings`
+  operand-type enforcement.  `test_fragment_sampled_image_fetch_
+  reaches_framebuffer` drives a real vkCmdBindDescriptorSets -> vkCmdDraw ->
+  DrawExec -> FragmentShade draw where a SAMPLED_IMAGE (kind 2)
+  OpImageFetch reads a bound R8G8B8A8_UNORM texel to color on covered
+  framebuffer texels.  Remote cohort `native-gfximg-01` 720 checks PASS
+  (native-execution.y6y3xap5, sources_unchanged true), local `test_vn_*`
+  735 PASS.  Record: `architecture/uncore/apu-native-graphics-shade-
+  implementation.md`.
+- [ ] In-model dynamic offsets, blend/depth/MRT, helper lanes,
+  non-triangle topology, flat/nopersp interpolation, combined/separate/
+  storage image kinds + per-pixel fetch coords + sampler-bearing kinds,
+  multi-descriptor/multi-stage end-to-end draws and capability/CTS/physical
+  gates before any capset or stock vkCmdDraw* advertisement; host-model
+  evidence only.
 
 ### vgctl Retained-Unmap Owner-Hold (RTL)
 
