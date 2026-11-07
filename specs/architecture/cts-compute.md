@@ -248,19 +248,30 @@ texel-access primitive** the atomic needs: `img_rec(ptr)` resolves the
 descriptor record `{base,size,kind,flags,meta}`, `img_walk(meta,lod)`
 yields per-mip `{mof,pitch,w,h}`, and int-coord ops (fetch 95 / read
 98 / write 99) compute `ta = base + ly*layb + mof + iv*pitch +
-iu*bpp` then `tx_store`/`tx_finish`.  **Implementation path:**
+iu*bpp` then `tx_store`/`tx_finish`.  **RTL design detail (verified in
+`g6lc_apu_shwave` W_LS0):** `OpImageTexelPointer` does NOT produce a
+rich pointer — it **precomputes the absolute texel byte address** into
+the pointer's comp0 (`ls_off_q <= o32`, `ls_bsz_q <= 32'hFFFF_FFFF`
+unbounded), so the atomic's lane-serial RMW runs through the normal
+LSU at a plain address under `sc == APU_SH_SC_IMAGE`.  glslang emits
+`OpTypePointer Image %uint` (SC 11) + `OpImageTexelPointer`(60)
+`{result-type, id, image, coord-vec, sample}` + `OpAtomicIAdd`(234)
+`{result-type, id, ptr, val, scope, semantics}`.  **Implementation
+path (revised — simpler than a rich pointer encoding):**
 scanner — admit `SC['IMAGE']` into `SC_OK`, add opcode 60 to `OP` +
-decode `{ptr-result, id, image, coord, sample}` with a texel-pointer
-type row, emit the commit-table entries shmod needs; model — opcode
-60 produces a texel-pointer value carrying `{image-rec, iu, iv, ly,
-lod}` (the pointer word-image needs a richer encoding than the
-`{storage,binding}`/`index` descriptor-pointer form `img_rec`
-currently decodes, or a side-table keyed by result-id), and the
-atomic path detects that encoding to run read→`atomic_op`→`tx_store`
-through the same bounds/format decode as `OpImageWrite`; then a
-storage-image `imageAtomic*` corpus shader (`r32ui`), `.exp`
-oracle+model, and a `ue_cpos_*` session through `tb_g6lc_apu_vgtop`.
-Evidence boundary unchanged: host-model + directed-RTL-sim only.
+decode the 5-operand form with a texel-pointer type row
+(`OpTypePointer` storage=IMAGE is otherwise identical to the existing
+pointer row), emit the commit-table entries shmod needs; model —
+opcode 60 resolves the image operand via `img_rec`, folds
+`{iu,iv,ly,lod}` through `img_walk` to the same `ta` formula, and
+`setres` a 3-word pointer `[ta, tag|SC_IMAGE, 0]`; the atomic/`lsu`
+path gains an `sc == SC_IMAGE` arm that treats `ptr[0]` as an absolute
+byte address and does the usual read→`atomic_op`→write at `ta`
+(r32ui/r32i only — one word per texel, matching the RTL's supported
+kind); then a storage-image `imageAtomic*` corpus shader (`r32ui`),
+`.exp` oracle+model, and a `ue_cpos_*` session through
+`tb_g6lc_apu_vgtop`.  Evidence boundary unchanged: host-model +
+directed-RTL-sim only.
 
 Root-cause note (2026-11-07, COMPUTE-H1 / COMPUTE-X2): the spec-constant
 path is decoded end-to-end; the constant *application* is now modelled on
