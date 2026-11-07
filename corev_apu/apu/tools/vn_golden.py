@@ -10525,6 +10525,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # S_LN_* Bresenham via the le_q edge cursor (v0->v1->v2->v0);
         # runs before S_PR_AREA so no face culling applies
         is_polyln = 'polyln' in gfx
+        # polypnt: POLYGON_MODE_POINT — one degenerate point->itself
+        # Bresenham per vertex (l0_w==l1_w) plus the per-vertex FS-input
+        # re-fetch; coverage is the 3 vertex pixels
+        is_polypnt = 'polypnt' in gfx
         is_tex = is_vtex or is_ftex
         # vs_pos3/fs_vcol forward the vertex alpha into FS out; the
         # passthru/flat pair forces a=1 and cannot see a blend
@@ -10536,6 +10540,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'vs_tex.spv' if is_ftex else
                           'vs_pos3.spv' if is_blend or is_wide or is_kill
                           or is_line or is_lstrip or is_polyln
+                          or is_polypnt
                           else 'vs_passthru.spv')).read_bytes())]
         # fsubo: the FS reads its colour from a UBO bound at the GRAPHICS
         # bind point (CTS binding_model.*.graphics shape)
@@ -10546,7 +10551,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'fs_ubo.spv' if is_fsubo else
                           'fs_white.spv' if is_pts else
                           'fs_vcol.spv' if is_blend or is_wide or is_line
-                          or is_lstrip or is_polyln
+                          or is_lstrip or is_polyln or is_polypnt
                           else
                           'fs_tex_array.spv' if is_ftexa else
                           'fs_tex_gather.spv' if is_ftexg else
@@ -10643,6 +10648,14 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             for _i in range(3):
                 cov |= gfx_line_coverage(
                     [TRI[_i], TRI[(_i + 1) % 3]], VP, SC, CW, CH)
+        elif is_polypnt:
+            # POLYGON_MODE_POINT: l0_w==l1_w so each vertex is a
+            # degenerate point->itself Bresenham = its single pixel;
+            # union the three vertex pixels
+            cov = set()
+            for _i in range(3):
+                cov |= gfx_line_coverage(
+                    [TRI[_i], TRI[_i]], VP, SC, CW, CH)
         else:
             cov = gfx_tri_coverage(TRI, VP, SC, CW, CH,
                                    front_ccw=1, cull=2)
@@ -10928,7 +10941,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         'VkPipelineRasterizationStateCreateInfo',
                         flags=0, depthClampEnable=0,
                         rasterizerDiscardEnable=0,
-                        polygonMode=1 if is_polyln else 0,
+                        polygonMode=2 if is_polypnt else
+                        1 if is_polyln else 0,
                         cullMode=0 if is_pts else 2, frontFace=0,
                         depthBiasEnable=0,
                         depthBiasConstantFactor=f32b(0.0),

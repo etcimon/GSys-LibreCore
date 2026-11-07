@@ -216,6 +216,10 @@ python3 $G --graphics-session ue_gpos_lstrip_1 1
 # edge cursor walks the perimeter v0->v1->v2->v0 as three Bresenhams
 # (runs before S_PR_AREA so no face culling); oracle unions the edges
 python3 $G --graphics-session ue_gpos_polyln_1 1
+# polygon-mode point: polygonMode=2; l0_w==l1_w so each vertex is a
+# degenerate point->itself Bresenham = its pixel, plus the per-vertex
+# FS-input re-fetch; oracle unions the three vertex pixels
+python3 $G --graphics-session ue_gpos_polypnt_1 1
 
 # deferred-work and capacity arms
 python3 $G --compute-session ue_cpos_defer2_1  bufcopy_1 --variant defer2
