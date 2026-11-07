@@ -18136,20 +18136,26 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   by `test_fragment_linear_filter_blend` (LINEAR min/mag VkSampler; normalized
   u=0.25 -> su0=floor((0.25*8-0.5)*256)=384 -> iu0=1,fu0=128 -> exact 50/50
   blend of texels (1,1)+(2,1) -> UNORM mean (48,64,40); first non-nearest
-  filter path exercised end-to-end).  Remote cohorts
+  filter path exercised end-to-end).  Full four-mode address coverage proven:
+  MIRRORED_REPEAT by `test_fragment_sampler_address_mode_mirrored` (mode 1,
+  u=1.25 -> su0=10 -> 10%16=10 mirror -> x=5) and CLAMP_TO_BORDER by
+  `test_fragment_sampler_address_mode_border` (mode 3 + FLOAT_OPAQUE_WHITE
+  borderColor=4 -> u=1.25 substitutes border (255,255,255,255)); with
+  REPEAT x=2 and CLAMP_TO_EDGE x=7 all four VkSamplerAddressMode values are
+  now exercised.  Remote cohorts
   `native-gfximg-01` 720 + `native-gfximgpix-01` 721 + `native-gfximgstore-01`
   722 + `native-gfxvsimg-01` 723 + `native-gfxcomb-01` 724 +
   `native-gfxsample-01` 725 + `native-gfximplod-01` 726 +
   `native-gfxsep-01` 727 + `native-gfxclamp-01` 728 + `native-gfxlinear-01`
-  729 checks PASS
+  729 + `native-gfxaddr-01` 731 checks PASS
   (native-execution.y6y3xap5 /
   .nssux4bd / .5axy_z9z / .n8_r1ss2 / .6yodeq0j / .no_22v6j / .3wzcog89 /
-  .edz92krq / .3pqmo813 / .eey3xhni,
+  .edz92krq / .3pqmo813 / .eey3xhni / .amvegsm4,
   sources_unchanged true), local `test_vn_*` graphics suites green.
   Record: `architecture/uncore/
   apu-native-graphics-shade-implementation.md`.
-- [ ] Mipmap/trilinear filtering + mirrored/border address modes + gather/
-  proj/dref sample ops,
+- [ ] Mipmap/trilinear filtering + gather/proj/dref sample ops (all four
+  VkSamplerAddressMode values + bilinear filter already proven),
   in-model
   dynamic offsets, blend/depth/MRT, helper
   lanes, non-triangle topology, flat/nopersp interpolation,

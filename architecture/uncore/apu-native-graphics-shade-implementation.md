@@ -143,7 +143,14 @@ Sampler address-mode variety is exercised by parameterizing the VkSampler
 `addressModeU/V/W`: `test_fragment_sampler_address_mode_clamp` binds a
 CLAMP_TO_EDGE (mode 2) sampler and samples at normalized u=1.25
 (su0=floor(1.25*8)=10, out of range) so the coordinate clamps to texel x=7
-rather than REPEAT-wrapping to x=2.  Filter variety is exercised through a
+rather than REPEAT-wrapping to x=2.  The full four-mode set is now proven
+on the same out-of-range coordinate: REPEAT (mode 0) wraps su0=10 to x=2,
+MIRRORED_REPEAT (mode 1) folds 10 % (2*8)=10 then mirrors to
+2*8-1-10 = x=5 (`test_fragment_sampler_address_mode_mirrored`), and
+CLAMP_TO_BORDER (mode 3) substitutes the sampler border colour
+(`test_fragment_sampler_address_mode_border`, FLOAT_OPAQUE_WHITE
+borderColor=4 -> all channels 1.0 -> covered texels (255,255,255,255)).
+Filter variety is exercised through a
 `linear` flag on the shared setup that selects LINEAR (1) over NEAREST (0)
 for `magFilter`/`minFilter`: `test_fragment_linear_filter_blend` binds a
 LINEAR combined-image-sampler and samples at normalized u=0.25, where the
@@ -169,6 +176,10 @@ zero derivatives -> base mip -> same texel),
 merged by OpSampledImage then explicit-LOD sampled -> texel(2,1)),
 `test_fragment_sampler_address_mode_clamp` (CLAMP_TO_EDGE sampler, u=1.25 ->
 texel(7,1) not wrapped x=2),
+`test_fragment_sampler_address_mode_mirrored` (MIRRORED_REPEAT sampler,
+u=1.25 -> su0=10 -> mirror to texel(5,1)),
+`test_fragment_sampler_address_mode_border` (CLAMP_TO_BORDER sampler +
+FLOAT_OPAQUE_WHITE borderColor=4, u=1.25 -> border (255,255,255,255)),
 `test_fragment_linear_filter_blend` (LINEAR combined sampler, u=0.25 ->
 su0=384, iu0=1, fu0=128 -> 50/50 bilinear blend of texels (1,1)+(2,1) ->
 UNORM mean (48,64,40)), plus
@@ -179,7 +190,7 @@ image are checked - covered texels become red while uncovered keep their
 pattern).  The fetch draws prove each covered framebuffer texel equals its
 own (x,y)-encoded image texel; the store draw proves the previously
 unexercised kind-3 `GfxMemory` write admission end-to-end.  Local
-`test_vn_*` sweep ran 744 tests, all green.  Frozen native
+`test_vn_*` sweep ran 746 tests, all green.  Frozen native
 cohorts on ovh_calltorch:
 `native-gfximg-01` 720 tests PASS in 20.465 s (`native-execution.y6y3xap5`),
 `native-gfximgpix-01` 721 tests PASS in 20.582 s
@@ -193,5 +204,6 @@ PASS in 20.500 s (`native-execution.n8_r1ss2`), `native-gfxcomb-01`
 PASS in 19.317 s (`native-execution.edz92krq`), and `native-gfxclamp-01`
 728 tests PASS in 20.752 s (`native-execution.3pqmo813`), and
 `native-gfxlinear-01` 729 tests PASS in 20.969 s
-(`native-execution.eey3xhni`), all `sources_unchanged: true`.
+(`native-execution.eey3xhni`), and `native-gfxaddr-01` 731 tests PASS in
+18.759 s (`native-execution.amvegsm4`), all `sources_unchanged: true`.
 Host-native model only - no RTL/CTS/stock/hardware qualification.

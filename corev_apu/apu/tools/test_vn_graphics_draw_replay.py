@@ -320,15 +320,17 @@ class DrawReplayTests(unittest.TestCase):
         self.assertEqual(self.f.owner.work_refs, 0)
 
     def _image_fetch_setup(self, module, dtype=2, sampler_addr=0,
-                           linear=False):
+                           linear=False, border_color=0):
         """Shared vkCreateImage/View + image-descriptor-set setup for the
         image draw tests.  The image is an 8x4 R8G8B8A8_UNORM at MEMORY
         offset 4352 with texel(x,y) = (x*32, y*64, (x+y)*16, 255);
         `dtype` selects SAMPLED_IMAGE(2)/STORAGE_IMAGE(3)/
         COMBINED_IMAGE_SAMPLER(1); the combined form also creates a
         VkSampler bound into VkDescriptorImageInfo.  `sampler_addr` sets
-        VkSamplerAddressMode for U/V/W (0 Repeat, 2 ClampToEdge);
-        `linear` selects LINEAR (1) over NEAREST (0) min/mag filters."""
+        VkSamplerAddressMode for U/V/W (0 Repeat, 1 MirroredRepeat, 2
+        ClampToEdge, 3 ClampToBorder); `linear` selects LINEAR (1) over
+        NEAREST (0) min/mag filters; `border_color` sets VkBorderColor
+        (4 FLOAT_OPAQUE_WHITE) for CLAMP_TO_BORDER substitution."""
         self.r.layout(((0, dtype, 1, 16),))
         if dtype in (0, 1):
             filt = 1 if linear else 0
@@ -340,7 +342,7 @@ class DrawReplayTests(unittest.TestCase):
                     addressModeW=sampler_addr,
                     mipLodBias=0, anisotropyEnable=0, maxAnisotropy=0,
                     compareEnable=0, compareOp=7, minLod=0, maxLod=0,
-                    borderColor=0, unnormalizedCoordinates=0))
+                    borderColor=border_color, unnormalizedCoordinates=0))
         self.f.command('vkDestroyShaderModule', device=self.w.DEVICE,
                        shaderModule=self.FS2)
         self.module(self.FS2, module)
@@ -550,6 +552,38 @@ class DrawReplayTests(unittest.TestCase):
             fs_sample_program(u=1.25, v=0.375), dtype=1, sampler_addr=2)
         self._image_fetch_draw()
         want = self.texel_want(did, 7, 1)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), want)
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_fragment_sampler_address_mode_mirrored(self):
+        # sampler address-mode variety: the same u=1.25 (su0=10) under a
+        # MIRRORED_REPEAT (mode 1) VkSampler folds 10 % (2*8)=10, then since
+        # 10 >= 8 mirrors to 2*8-1-10 = 5 -> texel x=5, distinct from
+        # REPEAT x=2 and CLAMP_TO_EDGE x=7.  v=0.375 -> y=1 in range.
+        did = self._image_fetch_setup(
+            fs_sample_program(u=1.25, v=0.375), dtype=1, sampler_addr=1)
+        self._image_fetch_draw()
+        want = self.texel_want(did, 5, 1)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), want)
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_fragment_sampler_address_mode_border(self):
+        # sampler address-mode variety: the same u=1.25 (su0=10, out of
+        # range) under a CLAMP_TO_BORDER (mode 3) VkSampler substitutes the
+        # sampler border colour rather than wrapping/clamping/mirroring.
+        # FLOAT_OPAQUE_WHITE (borderColor=4) -> all channels 1.0 -> the
+        # covered texels decode to (255,255,255,255).
+        did = self._image_fetch_setup(
+            fs_sample_program(u=1.25, v=0.375), dtype=1, sampler_addr=3,
+            border_color=4)
+        self._image_fetch_draw()
+        want = self.e.golden.img_clear_texel(
+            self.e.model, did,
+            struct.unpack('<4I', struct.pack('<4f', 1.0, 1.0, 1.0, 1.0)))
         for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
             self.assertEqual(self.read_texel(x, y), want)
         self.assertEqual(self.read_texel(7, 3), self.clear_texel())
