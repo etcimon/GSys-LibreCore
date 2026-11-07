@@ -277,7 +277,18 @@ explicit-projective form (opcode 94) is likewise proven: the proj+lod
 param combo of `fs_dref_program` emits
 OpImageSampleDrefProjExplicitLod, and `test_fragment_dref_explicit_
 projective_sample` exercises the vec3+Lod dref operand path end-to-end.
-Dref-gather (97), PCF, and the blend/depth/MRT writeback axis stay
+The gather form (opcode 97) is likewise proven:
+`fs_dref_gather_program` emits `OpImageDrefGather` - ResultType vec4 over
+the same kind-1 depth descriptor, with the Dref float where gather's
+Component operand would sit (ops[4], no Component) and ImageOperands
+mask=0x2 + Lod=0.0 selecting mip0 deterministically.  Each result
+component gi is the compare fraction of the footprint texel at SPIR-V
+corner gi; `_dref_setup` gained `depth_fn(x,y,m)` so
+`test_fragment_dref_gather_compare` (footprint x{2,3} with
+`depth=0.1*x`, ref=0.25 LESS_OR_EQUAL -> x=2 column fails / x=3 passes
+-> (0,1,1,0) -> RGBA(0,255,255,0)) proves the four compares run
+independently.  This completes the model's dref opcode matrix
+(89/90/93/94/97).  PCF and the blend/depth/MRT writeback axis stay
 queued.
 
 Evidence: `test_vn_graphics_draw_replay` gained nine image draws -
@@ -330,7 +341,10 @@ compare -> white) and `test_fragment_dref_explicit_lod_sample`
 image mip0=0.25/mip1=0.6, ref=0.5 -> mip1 -> white, proving explicit
 LOD mip select) and `test_fragment_dref_explicit_projective_sample`
 (OpImageSampleDrefProjExplicitLod opcode 94, vec3 coord + LOD=1.0 ->
-mip1 -> white),
+mip1 -> white) and `test_fragment_dref_gather_compare`
+(OpImageDrefGather opcode 97, 2x2 footprint with per-column depth
+0.1*x, ref=0.25 LESS_OR_EQUAL -> (0,1,1,0) -> RGBA(0,255,255,0), proving
+independent per-texel compares),
 plus
 `test_fragment_storage_image_write` (a STORAGE_IMAGE kind 3 bound via
 `OpTypeImage(sampled=2)`; `OpImageWrite` stores a constant red texel at the
@@ -348,9 +362,10 @@ interpolation qualifier now reaches the raster varying path, and the
 nopersp pair proves the NoPerspective decoration->mask capture plus the
 screen-space (non-perspective) interpolation arm, and the dref pair
 plus projective-dref draw prove the depth-format admission, the
-compare-enable sampler path, and the vec3-coordinate dref operand path
-end-to-end.  Local
-`test_vn_*` sweep ran 759 tests (the graphics/draw modules all green;
+compare-enable sampler path, the vec3-coordinate dref operand path,
+and the opcode-97 per-footprint dref-gather compare path end-to-end.
+Local
+`test_vn_*` sweep ran 760 tests (the graphics/draw modules all green;
 8 unrelated `test_vn_native_bridge`/`test_vn_submit` subprocess
 timeouts under full-suite load that pass in isolation).  Frozen native
 cohorts on ovh_calltorch:
@@ -381,6 +396,7 @@ PASS in 21.6 s (`native-execution.hwuix8zk`), and `native-gfxnopersp-01`
 PASS in 19.0 s (`native-execution.agdmditl`), and `native-gfxdreflod-01`
 743 tests PASS in 19.1 s (`native-execution.djvtokp5`), and
 `native-gfxdrefprojlod-01` 744 tests PASS in 20.2 s
-(`native-execution.l8e9lk2r`), all
+(`native-execution.l8e9lk2r`), and `native-gfxdgather-01` 745 tests
+PASS in 19.7 s (`native-execution.19o2hhcv`), all
 `sources_unchanged: true`.
 Host-native model only - no RTL/CTS/stock/hardware qualification.

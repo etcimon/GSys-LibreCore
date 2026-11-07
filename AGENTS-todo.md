@@ -18265,8 +18265,20 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   projective_sample` (vec3 coord (0.6,0.7,2.0) + LOD=1.0 over the same
   2-level depth image -> mip1 -> white) exercises the vec3+Lod dref
   operand path e2e.
-- [ ] Remaining dref form (dref-gather opcode 97), PCF/bilinear
-  compare, blend/depth/MRT, helper
+- [x] Depth-reference gather (opcode 97): `fs_dref_gather_program` emits
+  OpImageDrefGather - ResultType vec4/ResultId/SampledImage/vec2-coord/
+  Dref-float/ImageOperands mask=0x2 + Lod=0.0 id (no Component operand;
+  dref sits where gather's Component would, ops[4]).  The explicit Lod
+  bit selects mip0 deterministically (implicit lambda on a constant
+  coordinate is degenerate).  `_dref_setup` gained `depth_fn(x,y,m)` for
+  per-texel depth.  `test_fragment_dref_gather_compare` (u=0.35 v=0.4 ->
+  footprint x{2,3} y{1,2}, depth=0.1*x, ref=0.25 LESS_OR_EQUAL -> x=2
+  column fails / x=3 passes -> SPIR-V corner order (i0j1,i1j1,i1j0,i0j0)
+  = (0,1,1,0) -> RGBA(0,255,255,0)) proves the four footprint compares
+  run independently.  Cohort `native-gfxdgather-01` 745 PASS
+  (`native-execution.19o2hhcv`, sources_unchanged true).  This completes
+  the model's dref opcode matrix (89/90/93/94/97).
+- [ ] PCF/bilinear compare, blend/depth/MRT, helper
   lanes, non-triangle topology, end-to-end NoPerspective draw (needs a
   w-varying vertex shader),
   multi-descriptor/multi-stage end-to-end draws and capability/CTS/physical

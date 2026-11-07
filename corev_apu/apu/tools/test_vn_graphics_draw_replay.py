@@ -6,7 +6,8 @@ import unittest
 
 import test_vn_graphics_resources as resource_fixture
 import vn_golden
-from test_vn_graphics_pshade import (fs_dref_program, fs_gather_program,
+from test_vn_graphics_pshade import (fs_dref_gather_program, fs_dref_program,
+                                     fs_gather_program,
                                      fs_image_program, fs_image_store_program,
                                      fs_program, fs_proj_sample_program,
                                      fs_sample_program, fs_separate_sample_program)
@@ -507,7 +508,7 @@ class DrawReplayTests(unittest.TestCase):
         return did
 
     def _dref_setup(self, module, depth=0.25, mip_depth=None, mips=1,
-                    compare_op=3, max_lod=0.0):
+                    compare_op=3, max_lod=0.0, depth_fn=None):
         """Depth-reference (dref) variant of _image_fetch_setup: an 8x4
         D16_UNORM depth image (VkFormat 124 -> device fmt 13) at MEMORY
         offset 4352, a COMBINED_IMAGE_SAMPLER(1) descriptor, and a
@@ -516,8 +517,10 @@ class DrawReplayTests(unittest.TestCase):
         mip>=1 carries `mip_depth` (default `depth`) so an explicit-LOD
         dref sample can prove mip select.  `mips` sets mipLevels/levelCount
         and `max_lod` must cover the mip count or the model clamps LOD to
-        mip0.  The depth view uses aspectMask=2 (DEPTH); texels are 2-byte
-        u16, pitch = img_mpitch(model,8,13,m)."""
+        mip0.  `depth_fn(x,y,m)` overrides the uniform depth per texel
+        (used by dref-gather to give the 2x2 footprint mixed compare
+        results).  The depth view uses aspectMask=2 (DEPTH); texels are
+        2-byte u16, pitch = img_mpitch(model,8,13,m)."""
         self.r.layout(((0, 1, 1, 16),))
         self.f.command('vkCreateSampler', device=self.w.DEVICE,
             pSampler=self.SAMPLER,
@@ -573,9 +576,10 @@ class DrawReplayTests(unittest.TestCase):
             pitch = self.e.golden.img_mpitch(self.e.model, 8, did, m)
             moff = self.e.golden.img_mip_off(self.e.model, 8, 4, did, m)
             d = depth if m == 0 else (depth if mip_depth is None else mip_depth)
-            d16 = struct.pack('<H', int(round(d * 65535)))
             for y in range(hm):
                 for x in range(wm):
+                    dv = d if depth_fn is None else depth_fn(x, y, m)
+                    d16 = struct.pack('<H', int(round(dv * 65535)))
                     self.f.state.aperture.write(
                         base + moff + y * pitch + x * 2, d16)
         return did
@@ -968,6 +972,29 @@ class DrawReplayTests(unittest.TestCase):
             self.e.model, did,
             struct.unpack('<4I', struct.pack('<4f',
                 1.0, 1.0, 1.0, 1.0)))
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), want)
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_fragment_dref_gather_compare(self):
+        # OpImageDrefGather (opcode 97): the 2x2 gather footprint feeds a
+        # per-texel depth compare (no Component operand - the Dref float
+        # sits where gather's Component would).  u=0.35,v=0.4 on the 8x4
+        # image selects footprint texels x{2,3} y{1,2}; depth_fn=0.1*x
+        # gives x=2 -> 0.2 and x=3 -> 0.3.  ref=0.25 under LESS_OR_EQUAL
+        # (ref <= depth): the x=2 column fails, x=3 passes.  In SPIR-V
+        # corner order the result vec4 is (i0j1,i1j1,i1j0,i0j0) =
+        # (x2,x3,x3,x2) -> (0,1,1,0) -> RGBA(0,255,255,0), proving the
+        # four compares ran independently rather than a uniform result.
+        self._dref_setup(fs_dref_gather_program(u=0.35, v=0.4, ref=0.25),
+                         depth_fn=lambda x, y, m: 0.1 * x)
+        self._image_fetch_draw()
+        did = self.e.golden.img_fmt_id(self.e.model, 37)
+        want = self.e.golden.img_clear_texel(
+            self.e.model, did,
+            struct.unpack('<4I', struct.pack('<4f',
+                0.0, 1.0, 1.0, 0.0)))
         for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
             self.assertEqual(self.read_texel(x, y), want)
         self.assertEqual(self.read_texel(7, 3), self.clear_texel())

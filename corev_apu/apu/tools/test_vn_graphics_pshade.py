@@ -388,6 +388,61 @@ def fs_gather_program(binding=0, u=0.35, v=0.4, comp=0):
     return tuple(words)
 
 
+def fs_dref_gather_program(binding=0, u=0.35, v=0.4, ref=0.5):
+    """Fragment module depth-reference gathering a COMBINED_IMAGE_SAMPLER
+    (kind 1) via OpImageDrefGather (opcode 97) at a constant normalized
+    vec2 coordinate and scalar float reference, writing the vec4 of
+    per-footprint-texel compare results to color(loc0).  Unlike opcode
+    96 there is no Component operand: the operand order is ResultType
+    (vec4), ResultId, SampledImage, Coordinate, Dref(float id),
+    ImageOperands mask, [Lod id].  mask=0x2 sets the Lod bit so the
+    trailing Lod=0.0 id selects mip0 deterministically (an implicit-LOD
+    gather would derive lambda from fragment derivatives, which are zero
+    on a constant coordinate).  Each result component gi is the compare
+    fraction of the footprint texel at SPIR-V corner gi, landing directly
+    in the RGBA framebuffer channels.  The OpTypeImage Depth field is 1."""
+    import struct as _st
+    ub = _st.unpack('<I', _st.pack('<f', u))[0]
+    vb = _st.unpack('<I', _st.pack('<f', v))[0]
+    rb = _st.unpack('<I', _st.pack('<f', ref))[0]
+    words = [0x07230203, 0x00010300, 0, 48, 0]
+
+    def emit(opcode, *values):
+        words.extend(((len(values) + 1) << 16 | opcode, *values))
+
+    emit(17, 1)                     # OpCapability Shader
+    emit(14, 0, 1)                  # OpMemoryModel Logical GLSL450
+    emit(15, 4, 9, 0x6E69616D, 0, 8)  # EntryPoint Fragment %9 main, iface=[color]
+    emit(16, 9, 7)                  # OriginUpperLeft
+    emit(71, 8, 30, 0)              # color Location 0
+    emit(71, 17, 34, 0)             # img   DescriptorSet 0
+    emit(71, 17, 33, binding)       # img   Binding N
+    emit(19, 1)                     # %1 void
+    emit(33, 2, 1)                  # %2 fnty
+    emit(22, 3, 32)                 # %3 float
+    emit(23, 4, 3, 4)               # %4 v4f
+    emit(23, 5, 3, 2)               # %5 v2f
+    emit(25, 13, 3, 1, 1, 0, 0, 1, 0)  # %13 image2D DEPTH sampled
+    emit(27, 40, 13)                # %40 = OpTypeSampledImage %13 (kind 1)
+    emit(32, 14, 0, 40)             # %14 = ptr UniformConstant SIMG
+    emit(32, 15, 3, 4)              # %15 = ptr Output v4f
+    emit(59, 15, 8, 3)              # %8  color output
+    emit(59, 14, 17, 0)             # %17 img (UniformConstant)
+    emit(43, 3, 18, ub)             # %18 = float u
+    emit(43, 3, 19, vb)             # %19 = float v
+    emit(43, 3, 21, rb)             # %21 = float ref
+    emit(43, 3, 54, 0)              # %54 = float 0.0 (Lod -> mip0)
+    emit(44, 5, 20, 18, 19)         # %20 = vec2(u, v)
+    emit(54, 1, 9, 0, 2)            # %9 main()
+    emit(248, 22)                   # label
+    emit(61, 40, 23, 17)            # %23 = Load SIMG %17
+    emit(97, 4, 24, 23, 20, 21, 2, 54)  # %24 = OpImageDrefGather %23 %20 ref lod0
+    emit(62, 8, 24)                 # Store color %24 (already vec4)
+    emit(253)                       # Return
+    emit(56)                        # FunctionEnd
+    return tuple(words)
+
+
 def fs_proj_sample_program(binding=0, u=0.6, v=0.7, d=2.0):
     """Fragment module projective-sampling a COMBINED_IMAGE_SAMPLER (kind 1)
     via OpImageSampleProjImplicitLod (opcode 91) at a constant vec3
