@@ -18366,6 +18366,14 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   bent "(10,10)->(50,30)->(10,50)" footprint verifies vertex reuse at
   the shared joint.  PASS `g1=4096 g2=4096 ulp=0 XF_FAULTS 0` both
   latencies; wired into all three lists.
+- [x] **CLOSED — polygon-mode line (`ue_gpos_polyln_1`):** standard
+  `TRIANGLE_LIST` triangle with `polygonMode=1`
+  (`VK_POLYGON_MODE_LINE`).  The `le_q` edge cursor walks the perimeter
+  `v0->v1->v2->v0`, each edge an independent `S_LN_*` Bresenham; the
+  path runs before `S_PR_AREA` so no face culling applies.  Oracle
+  unions `gfx_line_coverage` over the three clip-space edges — the
+  triangle outline (96 px).  PASS `g1=4096 g2=4096 ulp=0 XF_FAULTS 0`
+  both latencies; wired into all three lists.
 - [x] Instanced-draw session coverage (`c84531213`): `ue_gpos_inst_1`
   — `vs_inst` offsets clip-x by `0.4*gl_InstanceIndex-0.6`,
   `instanceCount=4`, `fs_flat` constant colour → union coverage over 4
@@ -18375,9 +18383,9 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   `vgtop-dbg`, both latency profiles.  Directed-RTL session evidence
   only — distinct from the native-model gaps below.
 - [ ] blend/depth/MRT, helper
-  lanes, remaining non-triangle topology (polygon line / point modes —
-  line-list + line-strip done), end-to-end NoPerspective draw (needs a
-  w-varying vertex shader),
+  lanes, remaining non-triangle topology (polygon point mode —
+  line-list/strip + polygon-line done), end-to-end NoPerspective draw
+  (needs a w-varying vertex shader),
   multi-descriptor/multi-stage end-to-end draws and capability/CTS/physical
   gates before any capset or stock vkCmdDraw* advertisement; host-model
   evidence only.

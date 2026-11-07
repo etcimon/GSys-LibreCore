@@ -10521,6 +10521,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # lstrip: LINE_STRIP — p_q advances by 1 so a 3-vertex strip chains
         # two Bresenham segments (v0->v1 then v1->v2); same flat colour
         is_lstrip = 'lstrip' in gfx
+        # polyln: POLYGON_MODE_LINE — the triangle's 3 edges walk the
+        # S_LN_* Bresenham via the le_q edge cursor (v0->v1->v2->v0);
+        # runs before S_PR_AREA so no face culling applies
+        is_polyln = 'polyln' in gfx
         is_tex = is_vtex or is_ftex
         # vs_pos3/fs_vcol forward the vertex alpha into FS out; the
         # passthru/flat pair forces a=1 and cannot see a blend
@@ -10531,7 +10535,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'vs_texlod.spv' if is_vtex else
                           'vs_tex.spv' if is_ftex else
                           'vs_pos3.spv' if is_blend or is_wide or is_kill
-                          or is_line or is_lstrip
+                          or is_line or is_lstrip or is_polyln
                           else 'vs_passthru.spv')).read_bytes())]
         # fsubo: the FS reads its colour from a UBO bound at the GRAPHICS
         # bind point (CTS binding_model.*.graphics shape)
@@ -10542,7 +10546,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'fs_ubo.spv' if is_fsubo else
                           'fs_white.spv' if is_pts else
                           'fs_vcol.spv' if is_blend or is_wide or is_line
-                          or is_lstrip
+                          or is_lstrip or is_polyln
                           else
                           'fs_tex_array.spv' if is_ftexa else
                           'fs_tex_gather.spv' if is_ftexg else
@@ -10631,6 +10635,14 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             for _i in range(len(L_CLIP) - 1):
                 cov |= gfx_line_coverage(
                     [L_CLIP[_i], L_CLIP[_i + 1]], VP, SC, CW, CH)
+        elif is_polyln:
+            # POLYGON_MODE_LINE: the le_q edge cursor walks the triangle
+            # perimeter v0->v1->v2->v0, each edge an independent S_LN_*
+            # Bresenham; union the three edge footprints
+            cov = set()
+            for _i in range(3):
+                cov |= gfx_line_coverage(
+                    [TRI[_i], TRI[(_i + 1) % 3]], VP, SC, CW, CH)
         else:
             cov = gfx_tri_coverage(TRI, VP, SC, CW, CH,
                                    front_ccw=1, cull=2)
@@ -10915,7 +10927,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     pRasterizationState=st(
                         'VkPipelineRasterizationStateCreateInfo',
                         flags=0, depthClampEnable=0,
-                        rasterizerDiscardEnable=0, polygonMode=0,
+                        rasterizerDiscardEnable=0,
+                        polygonMode=1 if is_polyln else 0,
                         cullMode=0 if is_pts else 2, frontFace=0,
                         depthBiasEnable=0,
                         depthBiasConstantFactor=f32b(0.0),

@@ -212,6 +212,10 @@ python3 $G --graphics-session ue_gpos_line_1 1
 # rasterizer chains two Bresenhams (v0->v1, v1->v2); oracle unions the
 # per-segment footprints
 python3 $G --graphics-session ue_gpos_lstrip_1 1
+# polygon-mode line: polygonMode=1 on the standard triangle; the le_q
+# edge cursor walks the perimeter v0->v1->v2->v0 as three Bresenhams
+# (runs before S_PR_AREA so no face culling); oracle unions the edges
+python3 $G --graphics-session ue_gpos_polyln_1 1
 
 # deferred-work and capacity arms
 python3 $G --compute-session ue_cpos_defer2_1  bufcopy_1 --variant defer2
