@@ -10518,6 +10518,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # line: LINE_LIST topology — 2 vertices, 1px Bresenham walk with
         # flat colour from vertex 0 (the g6lc_apu_rast S_LN_* path)
         is_line = 'line' in gfx
+        # lstrip: LINE_STRIP — p_q advances by 1 so a 3-vertex strip chains
+        # two Bresenham segments (v0->v1 then v1->v2); same flat colour
+        is_lstrip = 'lstrip' in gfx
         is_tex = is_vtex or is_ftex
         # vs_pos3/fs_vcol forward the vertex alpha into FS out; the
         # passthru/flat pair forces a=1 and cannot see a blend
@@ -10528,7 +10531,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'vs_texlod.spv' if is_vtex else
                           'vs_tex.spv' if is_ftex else
                           'vs_pos3.spv' if is_blend or is_wide or is_kill
-                          or is_line
+                          or is_line or is_lstrip
                           else 'vs_passthru.spv')).read_bytes())]
         # fsubo: the FS reads its colour from a UBO bound at the GRAPHICS
         # bind point (CTS binding_model.*.graphics shape)
@@ -10539,6 +10542,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'fs_ubo.spv' if is_fsubo else
                           'fs_white.spv' if is_pts else
                           'fs_vcol.spv' if is_blend or is_wide or is_line
+                          or is_lstrip
                           else
                           'fs_tex_array.spv' if is_ftexa else
                           'fs_tex_gather.spv' if is_ftexg else
@@ -10571,13 +10575,16 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # binding 4 (stride 16); bindings 1..3 are bound but unused
         vb_words = []
         vb2_words = []
-        if is_line:
-            # LINE_LIST: 2 vertices {pos.xy@0, col@8} stride 24.  The
-            # endpoints are picked in framebuffer-pixel space so the
-            # rasterizer's vxi>>>8 lands on clean integer pixels for the
-            # Bresenham oracle; fb pixel px centre = px+0.5 maps to
-            # clip = (px+0.5)/32 - 1 under VP=(0,0,64,64).
-            L_PIX = [(10, 10), (50, 30)]
+        if is_line or is_lstrip:
+            # LINE_LIST (2 verts) / LINE_STRIP (3 verts) {pos.xy@0,
+            # col@8} stride 24.  The endpoints are picked in
+            # framebuffer-pixel space so the rasterizer's vxi>>>8 lands on
+            # clean integer pixels for the Bresenham oracle; fb pixel px
+            # centre = px+0.5 maps to clip = (px+0.5)/32 - 1 under
+            # VP=(0,0,64,64).  The strip bends at the shared vertex so
+            # the two chained segments are distinguishable.
+            L_PIX = ([(10, 10), (50, 30)] if is_line else
+                     [(10, 10), (50, 30), (10, 50)])
             L_CLIP = []
             for (px_, py_) in L_PIX:
                 cx = (px_ + 0.5) / 32.0 - 1.0
@@ -10616,6 +10623,14 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # LINE_LIST Bresenham over the two clip endpoints (flat
             # colour from vertex 0 -> fs_vcol constant)
             cov = gfx_line_coverage(L_CLIP, VP, SC, CW, CH)
+        elif is_lstrip:
+            # LINE_STRIP: p_q steps by 1, so the 3 vertices chain two
+            # independent Bresenhams (v0->v1, v1->v2); union their
+            # footprints (flat colour per segment start -> fs_vcol)
+            cov = set()
+            for _i in range(len(L_CLIP) - 1):
+                cov |= gfx_line_coverage(
+                    [L_CLIP[_i], L_CLIP[_i + 1]], VP, SC, CW, CH)
         else:
             cov = gfx_tri_coverage(TRI, VP, SC, CW, CH,
                                    front_ccw=1, cull=2)
@@ -10876,7 +10891,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     pInputAssemblyState=st(
                         'VkPipelineInputAssemblyStateCreateInfo',
                         flags=0, topology=0 if is_pts else
-                        1 if is_line else 3,
+                        1 if is_line else 2 if is_lstrip else 3,
                         primitiveRestartEnable=0),
                     pTessellationState=None,
                     pViewportState=(
