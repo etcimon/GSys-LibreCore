@@ -7,7 +7,8 @@ import unittest
 import test_vn_graphics_resources as resource_fixture
 import vn_golden
 from test_vn_graphics_pshade import (fs_image_program, fs_image_store_program,
-                                     fs_program, fs_sample_program)
+                                     fs_program, fs_sample_program,
+                                     fs_separate_sample_program)
 from test_vn_graphics_shade import vs_program
 from vn_native_execution import StreamFault
 
@@ -381,6 +382,69 @@ class DrawReplayTests(unittest.TestCase):
                 self.f.state.aperture.write(base + y * pitch + x * 4, texel)
         return did
 
+    def _separate_sampler_setup(self, module):
+        """Separate SAMPLED_IMAGE(binding0, kind2) + SAMPLER(binding1, kind0)
+        descriptor pair for the OpSampledImage merge path, plus the same
+        8x4 R8G8B8A8_UNORM image and texel pattern as _image_fetch_setup."""
+        self.r.layout(((0, 2, 1, 16), (1, 0, 1, 16)))
+        self.f.command('vkCreateSampler', device=self.w.DEVICE,
+            pSampler=self.SAMPLER,
+            pCreateInfo=self.w.structure('VkSamplerCreateInfo', pNext=[],
+                flags=0, magFilter=0, minFilter=0, mipmapMode=0,
+                addressModeU=0, addressModeV=0, addressModeW=0,
+                mipLodBias=0, anisotropyEnable=0, maxAnisotropy=0,
+                compareEnable=0, compareOp=7, minLod=0, maxLod=0,
+                borderColor=0, unnormalizedCoordinates=0))
+        self.f.command('vkDestroyShaderModule', device=self.w.DEVICE,
+                       shaderModule=self.FS2)
+        self.module(self.FS2, module)
+        s = self.w.structure
+        self.f.command('vkCreateImage', device=self.w.DEVICE, pImage=self.IMAGE,
+            pCreateInfo=s('VkImageCreateInfo', pNext=[], flags=0, imageType=1,
+                format=37, extent=s('VkExtent3D', width=8, height=4, depth=1),
+                mipLevels=1, arrayLayers=1, samples=1, tiling=0, usage=15,
+                sharingMode=0, queueFamilyIndexCount=0, pQueueFamilyIndices=[],
+                initialLayout=1))
+        self.f.command('vkBindImageMemory', device=self.w.DEVICE, image=self.IMAGE,
+                       memory=self.w.MEMORY, memoryOffset=4352)
+        self.f.command('vkCreateImageView', device=self.w.DEVICE, pView=self.VIEW,
+            pCreateInfo=s('VkImageViewCreateInfo', pNext=[], flags=0,
+                image=self.IMAGE, viewType=1, format=37,
+                components=s('VkComponentMapping', r=0, g=0, b=0, a=0),
+                subresourceRange=s('VkImageSubresourceRange', aspectMask=1,
+                    baseMipLevel=0, levelCount=1, baseArrayLayer=0, layerCount=1)))
+        self.f.command('vkCreateDescriptorPool', device=self.w.DEVICE,
+            pDescriptorPool=self.POOL,
+            pCreateInfo=s('VkDescriptorPoolCreateInfo', pNext=[], flags=1,
+                maxSets=1, poolSizeCount=2,
+                pPoolSizes=[s('VkDescriptorPoolSize', type=2, descriptorCount=1),
+                            s('VkDescriptorPoolSize', type=0, descriptorCount=1)]))
+        self.f.command('vkAllocateDescriptorSets', device=self.w.DEVICE,
+            pDescriptorSets=[self.DSET], pAllocateInfo=s(
+                'VkDescriptorSetAllocateInfo', pNext=[], descriptorPool=self.POOL,
+                descriptorSetCount=1, pSetLayouts=[self.r.DSL]))
+        self.f.command('vkUpdateDescriptorSets', device=self.w.DEVICE,
+            descriptorWriteCount=2, descriptorCopyCount=0, pDescriptorCopies=[],
+            pDescriptorWrites=[
+                s('VkWriteDescriptorSet', pNext=[], dstSet=self.DSET,
+                    dstBinding=0, dstArrayElement=0, descriptorCount=1,
+                    descriptorType=2, pTexelBufferView=[],
+                    pImageInfo=[s('VkDescriptorImageInfo', sampler=0,
+                        imageView=self.VIEW, imageLayout=1)], pBufferInfo=[]),
+                s('VkWriteDescriptorSet', pNext=[], dstSet=self.DSET,
+                    dstBinding=1, dstArrayElement=0, descriptorCount=1,
+                    descriptorType=0, pTexelBufferView=[],
+                    pImageInfo=[s('VkDescriptorImageInfo', sampler=self.SAMPLER,
+                        imageView=0, imageLayout=1)], pBufferInfo=[])])
+        did = self.e.golden.img_fmt_id(self.e.model, 37)
+        pitch = self.e.golden.img_mpitch(self.e.model, 8, did, 0)
+        base = self.f.owner.base + 4352
+        for y in range(4):
+            for x in range(8):
+                texel = bytes((x * 32, y * 64, (x + y) * 16, 255))
+                self.f.state.aperture.write(base + y * pitch + x * 4, texel)
+        return did
+
     def _image_fetch_draw(self):
         self.upload(self.ndc_triangle())
         self.pipeline()
@@ -452,6 +516,19 @@ class DrawReplayTests(unittest.TestCase):
         # so the base mip resolves - same texel(2,1) result as explicit LOD 0.
         did = self._image_fetch_setup(
             fs_sample_program(implicit=True), dtype=1)
+        self._image_fetch_draw()
+        want = self.texel_want(did, 2, 1)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), want)
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_fragment_separate_sampler_image_sample(self):
+        # separate sampler+image pairing: a SAMPLED_IMAGE (kind2, binding0)
+        # and a SAMPLER (kind0, binding1) are merged by OpSampledImage and
+        # sampled via OpImageSampleExplicitLod at normalized coord
+        # (0.3125,0.375)=texel(2,1) centre under a nearest VkSampler.
+        did = self._separate_sampler_setup(fs_separate_sample_program())
         self._image_fetch_draw()
         want = self.texel_want(did, 2, 1)
         for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):

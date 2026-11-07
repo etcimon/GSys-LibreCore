@@ -134,9 +134,13 @@ filtered sampling is likewise admitted: `fs_sample_program` emits
 `OpImageSampleExplicitLod` (opcode 88, Lod image-operand mask) over the same
 kind-1 descriptor, and the Model decodes the VkSampler aux carried in the
 binding meta words (smpw0/smpw1) to resolve normalized coordinates through
-the shared tx/filter path.
+the shared tx/filter path.  Separate sampler+image pairing uses two
+descriptors: `fs_separate_sample_program` binds a SAMPLED_IMAGE (kind 2)
+and a SAMPLER (kind 0) and merges them at runtime with `OpSampledImage`
+(opcode 86), which the Model resolves by fetching the sampler record
+separately from the image record before `OpImageSampleExplicitLod`.
 
-Evidence: `test_vn_graphics_draw_replay` gained five image draws -
+Evidence: `test_vn_graphics_draw_replay` gained seven image draws -
 `test_fragment_sampled_image_fetch_reaches_framebuffer` (constant ivec2
 coordinate), `test_fragment_per_pixel_image_fetch` (ivec2 derived from
 FragCoord.xy via OpCompositeExtract + OpConvertFToS + OpCompositeConstruct),
@@ -144,7 +148,11 @@ and `test_fragment_combined_image_sampler_fetch` (OpTypeSampledImage kind 1
 with a VkSampler-bound COMBINED_IMAGE_SAMPLER descriptor producing the same
 per-pixel texels as the kind-2 fetch), `test_fragment_explicit_lod_sample`
 (OpImageSampleExplicitLod at normalized coord (0.3125,0.375)=texel(2,1)
-centre, LOD 0, nearest VkSampler -> uniform covered texels), plus
+centre, LOD 0, nearest VkSampler -> uniform covered texels),
+`test_fragment_implicit_lod_sample` (OpImageSampleImplicitLod opcode 87,
+zero derivatives -> base mip -> same texel),
+`test_fragment_separate_sampler_image_sample` (kind2 image + kind0 sampler
+merged by OpSampledImage then explicit-LOD sampled -> texel(2,1)), plus
 `test_fragment_storage_image_write` (a STORAGE_IMAGE kind 3 bound via
 `OpTypeImage(sampled=2)`; `OpImageWrite` stores a constant red texel at the
 same FragCoord-derived coordinate, and the aperture bytes under the bound
@@ -152,16 +160,16 @@ image are checked - covered texels become red while uncovered keep their
 pattern).  The fetch draws prove each covered framebuffer texel equals its
 own (x,y)-encoded image texel; the store draw proves the previously
 unexercised kind-3 `GfxMemory` write admission end-to-end.  Local
-`test_vn_*` sweep ran 740 tests with all graphics suites green; two
-unrelated `test_vn_native_bridge` CLI-close timing flakes appeared once
-(the file passes standalone and in the remote cohort).  Frozen native
+`test_vn_*` sweep ran 742 tests, all green.  Frozen native
 cohorts on ovh_calltorch:
 `native-gfximg-01` 720 tests PASS in 20.465 s (`native-execution.y6y3xap5`),
 `native-gfximgpix-01` 721 tests PASS in 20.582 s
 (`native-execution.nssux4bd`), `native-gfximgstore-01` 722 tests PASS in
 21.914 s (`native-execution.5axy_z9z`), `native-gfxvsimg-01` 723 tests
 PASS in 20.500 s (`native-execution.n8_r1ss2`), `native-gfxcomb-01`
-724 tests PASS in 20.725 s (`native-execution.6yodeq0j`), and
+724 tests PASS in 20.725 s (`native-execution.6yodeq0j`),
 `native-gfxsample-01` 725 tests PASS in 21.016 s
-(`native-execution.no_22v6j`), all `sources_unchanged: true`.
-Host-native model only - no RTL/CTS/stock/hardware qualification.
+(`native-execution.no_22v6j`), `native-gfximplod-01` 726 tests PASS in
+20.888 s (`native-execution.3wzcog89`), and `native-gfxsep-01` 727 tests
+PASS in 19.317 s (`native-execution.edz92krq`), all `sources_unchanged:
+true`.  Host-native model only - no RTL/CTS/stock/hardware qualification.

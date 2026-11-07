@@ -18126,16 +18126,22 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   under a nearest VkSampler yields uniform covered texels).  Implicit-LOD
   sampling proven by `test_fragment_implicit_lod_sample`
   (OpImageSampleImplicitLod opcode 87; constant coord -> zero derivatives ->
-  base mip -> same texel(2,1) result).  Remote cohorts `native-gfximg-01` 720 + `native-gfximgpix-01` 721 + `native-gfximgstore-01`
+  base mip -> same texel(2,1) result).  Separate sampler+image pairing proven
+  by `test_fragment_separate_sampler_image_sample` (fs_separate_sample_program:
+  SAMPLED_IMAGE kind2 binding0 + SAMPLER kind0 binding1 merged by
+  OpSampledImage opcode 86 then OpImageSampleExplicitLod -> texel(2,1)).
+  Remote cohorts `native-gfximg-01` 720 + `native-gfximgpix-01` 721 + `native-gfximgstore-01`
   722 + `native-gfxvsimg-01` 723 + `native-gfxcomb-01` 724 +
-  `native-gfxsample-01` 725 + `native-gfximplod-01` 726 checks PASS
+  `native-gfxsample-01` 725 + `native-gfximplod-01` 726 +
+  `native-gfxsep-01` 727 checks PASS
   (native-execution.y6y3xap5 /
-  .nssux4bd / .5axy_z9z / .n8_r1ss2 / .6yodeq0j / .no_22v6j / .3wzcog89,
+  .nssux4bd / .5axy_z9z / .n8_r1ss2 / .6yodeq0j / .no_22v6j / .3wzcog89 /
+  .edz92krq,
   sources_unchanged true), local `test_vn_*` graphics suites green.
   Record: `architecture/uncore/
   apu-native-graphics-shade-implementation.md`.
-- [ ] Implicit-LOD + separate sampler/image pairing + non-nearest filter/
-  mip/wrap variety, in-model
+- [ ] Non-nearest filter/mip/wrap variety + gather/proj/dref sample ops,
+  in-model
   dynamic offsets, blend/depth/MRT, helper
   lanes, non-triangle topology, flat/nopersp interpolation,
   multi-descriptor/multi-stage end-to-end draws and capability/CTS/physical
