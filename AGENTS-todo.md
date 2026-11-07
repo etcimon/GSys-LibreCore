@@ -18218,14 +18218,21 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   colors; every covered fragment = v0 color.rgb + v0 VertexIndex alpha
   0.0, vs the smooth three-vertex blend), cohort `native-gfxflat-01`
   737 PASS (`native-execution.hwuix8zk`, sources_unchanged true).
-  NoPerspective is plumbed identically but unexercised: `vs_program`
-  pins Position.w=1.0 so perspective-correct == nopersp; a w-varying VS
-  is needed to observe it.
+- [x] NoPerspective varying interpolation: `fs_program(nopersp=True)`
+  emits `OpDecorate vcol NoPerspective`; `test_nopersp_decoration_
+  reaches_scan_mask` proves the decoration surfaces as `nopersp_mask`
+  bit0, and `test_nopersp_varying_uses_screen_space_weights` proves the
+  raster nopersp arm - clip w=[1,2,1] with NDC preserved by scaling
+  x,y by w gives identical coverage/lam but persp=11.613 vs
+  nopersp=11.875 at pixel(0,0).  Cohort `native-gfxnopersp-01` 739 PASS
+  (`native-execution.5ntfmy6r`, sources_unchanged true).  A full
+  end-to-end NoPerspective draw still needs a w-varying vertex shader
+  (vs_program pins Position.w=1.0 so persp==nopersp there).
 - [ ] Depth-reference (dref) sample ops (all four VkSamplerAddressMode
   values + bilinear filter + explicit/implicit LOD + multi-mip select +
   trilinear + gather + projective already proven),
   blend/depth/MRT, helper
-  lanes, non-triangle topology, NoPerspective exercise (needs a
+  lanes, non-triangle topology, end-to-end NoPerspective draw (needs a
   w-varying vertex shader),
   multi-descriptor/multi-stage end-to-end draws and capability/CTS/physical
   gates before any capset or stock vkCmdDraw* advertisement; host-model

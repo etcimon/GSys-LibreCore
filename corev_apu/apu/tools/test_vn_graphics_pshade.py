@@ -15,7 +15,8 @@ def f32bits(value):
     return struct.unpack('<I', struct.pack('<f', value))[0]
 
 
-def fs_program(kind='color', desc=False, ubo=False, flat=False):
+def fs_program(kind='color', desc=False, ubo=False, flat=False,
+               nopersp=False):
     """Hand-assembled fragment modules (self-contained; the frozen cohort
     ships sources only):
     - 'color': color(loc0) = vcol(loc0) passthrough.
@@ -23,7 +24,8 @@ def fs_program(kind='color', desc=False, ubo=False, flat=False):
     desc=True adds an unused DescriptorSet/Binding UBO for refusal tests;
     ubo=True loads that float into every color channel so descriptor reads
     are observable in the color records; flat=True decorates the vcol input
-    Flat so raster uses the provoking vertex's value (no interpolation)."""
+    Flat so raster uses the provoking vertex's value (no interpolation);
+    nopersp=True decorates it NoPerspective so raster skips the w divide."""
     words = [0x07230203, 0x00010300, 0, 40, 0]
 
     def emit(opcode, *values):
@@ -38,6 +40,8 @@ def fs_program(kind='color', desc=False, ubo=False, flat=False):
         emit(71, 7, 30, 0)                           # vcol  Location 0
         if flat:
             emit(71, 7, 14)                          # vcol  Flat
+        if nopersp:
+            emit(71, 7, 13)                          # vcol  NoPerspective
         emit(71, 8, 30, 0)                           # color Location 0
     else:
         entry, lbl, c, v = 11, 12, 13, 16

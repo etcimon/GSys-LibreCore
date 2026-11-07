@@ -6,6 +6,7 @@ import unittest
 
 import test_vn_transfers as transfer_fixture
 import vn_golden
+from shader.spirv_scan import Scanner
 from test_vn_graphics_pshade import fs_program
 from vn_graphics_fetch import ATTR_STRIDE
 from vn_graphics_raster import (MAX_FRAGMENTS, Raster, RasterRuntime,
@@ -132,6 +133,45 @@ class RasterTests(unittest.TestCase):
         for i in range(0, len(records), ATTR_STRIDE):
             self.assertEqual(struct.unpack_from('<4I', records, i + 16),
                              marker)
+
+    def test_nopersp_varying_uses_screen_space_weights(self):
+        # clip w varies per vertex while NDC is preserved by scaling x,y
+        # by w, so coverage and screen-space lam match the w=1 triangle
+        # but perspective-correct != nopersp interpolation.  Vertex NDC is
+        # (-1,-1),(1,-1),(-1,1) -> clip records (-1,-1,0,1),(2,-2,0,2),
+        # (-1,1,0,1) give w=[1,2,1].  pixel(0,0) lam=(0.875,0.0625,0.0625)
+        # and vcol.x=(10,20,30):
+        #   persp  = (0.875*10/1 + 0.0625*20/2 + 0.0625*30/1)
+        #            / (0.875/1 + 0.0625/2 + 0.0625/1) = 11.25/0.96875
+        #   nopersp= 0.875*10 + 0.0625*20 + 0.0625*30 = 11.875
+        verts = [((-1.0, -1.0, 0.0, 1.0), (10.0, 0.0, 0.0, 1.0)),
+                 ((2.0, -2.0, 0.0, 2.0), (20.0, 0.0, 0.0, 1.0)),
+                 ((-1.0, 1.0, 0.0, 1.0), (30.0, 0.0, 0.0, 1.0))]
+
+        def channel_at_pixel(nopersp):
+            job, runtime = self.execute(self.raster(verts, nopersp=nopersp))
+            records = bytes(runtime.records)
+            self.assertTrue(records)
+            for i in range(0, len(records), ATTR_STRIDE):
+                x, y = struct.unpack_from('<2f', records, i)
+                if (int(x - 0.5), int(y - 0.5)) == (0, 0):
+                    return struct.unpack_from('<f', records, i + 16)[0]
+            self.fail('pixel (0,0) not covered')
+
+        persp = channel_at_pixel(0)
+        nop = channel_at_pixel(1)
+        self.assertAlmostEqual(persp, 11.25 / 0.96875, places=4)
+        self.assertAlmostEqual(nop, 11.875, places=4)
+        self.assertNotAlmostEqual(persp, nop, places=3)
+
+    def test_nopersp_decoration_reaches_scan_mask(self):
+        # the NoPerspective decoration on the vcol (loc0) input must surface
+        # as nopersp_mask bit0 so GraphicsPipeline/DrawExec can forward it
+        scan = Scanner(list(fs_program('color', nopersp=True))).scan()
+        self.assertEqual(scan.nopersp_mask, 1)
+        self.assertEqual(scan.flat_mask, 0)
+        scan = Scanner(list(fs_program('color'))).scan()
+        self.assertEqual(scan.nopersp_mask, 0)
 
     def test_scissor_and_cull_bound_coverage(self):
         verts = [((-1.0, -1.0, 0.0, 1.0), None),
