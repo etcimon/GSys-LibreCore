@@ -18064,10 +18064,22 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   `native-gfxubo-01` 716 checks PASS (native-execution.zolkoufm,
   sources_unchanged true), local `test_vn_*` 731 PASS.
   Record: `architecture/uncore/apu-native-graphics-shade-implementation.md`.
-- [ ] Fragment-shade descriptors, image/sampler (`UNIFORMCONST`) binds,
-  in-model dynamic offsets, blend/depth/MRT, helper lanes, non-triangle
-  topology, flat/nopersp interpolation, end-to-end descriptor draw replay
-  and capability/CTS/physical gates before any capset or stock vkCmdDraw*
+- [x] Fragment-shade buffer descriptors (UBO/SSBO kind 6/7): shared
+  `resolve_bindings` helper factored out of `ShadeRuntime` and reused by
+  `FragmentShadeRuntime`; `FragmentShade.bindings` + `DrawExec.fs_bindings`
+  + `draw_replay` FS operand carry; `_fragment_scan` admits `UNIFORM`/`SBUF`
+  storage while `UNIFORMCONST`/image/sampler stays refused; eager FS binding
+  probe added to `DrawExecRuntime.__init__` so coverage validates at
+  admission (matching the vertex stage) before work is published.  7 pshade
+  tests incl. UBO float read broadcast into all color channels + unbound
+  refusal; remote cohort `native-gfxfs-01` 718 checks PASS
+  (native-execution.id2_ytbr, sources_unchanged true), local `test_vn_*`
+  733 PASS.  Record:
+  `architecture/uncore/apu-native-graphics-pshade-implementation.md`.
+- [ ] Image/sampler (`UNIFORMCONST`) binds, in-model dynamic offsets,
+  blend/depth/MRT, helper lanes, non-triangle topology, flat/nopersp
+  interpolation, end-to-end descriptor draw replay and
+  capability/CTS/physical gates before any capset or stock vkCmdDraw*
   advertisement; host-model evidence only.
 
 ### vgctl Retained-Unmap Owner-Hold (RTL)

@@ -21,9 +21,7 @@ def _push(stages):
         raise ValueError('graphics draw stage bindings are incomplete')
     vs_push, vs_bindings = result[1]
     fs_push, fs_bindings = result[16]
-    if fs_bindings:
-        raise ValueError('graphics draw fragment descriptor bindings are not admitted')
-    return vs_push, fs_push, vs_bindings
+    return vs_push, fs_push, vs_bindings, fs_bindings
 
 
 def _scissor(plan):
@@ -60,7 +58,8 @@ def operation(engine, context_id, plan, remember, guards):
     """Validate `plan` and return a DrawExec op, or None when the draw's
     effective scissor is empty (no fragments can be produced)."""
     snapshot = plan.pipeline
-    vs_push, fs_push, vs_bindings = _push(plan.stage_bindings.stages)
+    vs_push, fs_push, vs_bindings, fs_bindings = _push(
+        plan.stage_bindings.stages)
     scissor = _scissor(plan)
     if scissor is None:
         for ref, kind in plan.references:
@@ -90,7 +89,7 @@ def operation(engine, context_id, plan, remember, guards):
                   viewport, scissor, attachment.owner, attachment.offset,
                   attachment.pitch, framebuffer.width, framebuffer.height,
                   attachment.fmt, vs_push=vs_push, fs_push=fs_push,
-                  vs_bindings=vs_bindings,
+                  vs_bindings=vs_bindings, fs_bindings=fs_bindings,
                   flat=0, nopersp=0, front_ccw=1 - fixed.front_face,
                   cull=fixed.cull, location=location)
     for ref, kind in plan.references:

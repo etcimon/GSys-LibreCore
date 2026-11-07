@@ -6,6 +6,7 @@ import unittest
 
 import test_vn_transfers as transfer_fixture
 from test_vn_graphics_shade import vs_program
+from vn_compute import ShaderBinding
 from vn_graphics_fetch import ATTR_STRIDE
 from vn_graphics_pshade import FragmentShade
 
@@ -14,12 +15,14 @@ def f32bits(value):
     return struct.unpack('<I', struct.pack('<f', value))[0]
 
 
-def fs_program(kind='color', desc=False):
+def fs_program(kind='color', desc=False, ubo=False):
     """Hand-assembled fragment modules (self-contained; the frozen cohort
     ships sources only):
     - 'color': color(loc0) = vcol(loc0) passthrough.
     - 'fc':    color(loc0) = vec4(FragCoord.x, FragCoord.y, 0, 1).
-    desc=True adds an unused DescriptorSet/Binding UBO for refusal tests."""
+    desc=True adds an unused DescriptorSet/Binding UBO for refusal tests;
+    ubo=True loads that float into every color channel so descriptor reads
+    are observable in the color records."""
     words = [0x07230203, 0x00010300, 0, 40, 0]
 
     def emit(opcode, *values):
@@ -39,7 +42,7 @@ def fs_program(kind='color', desc=False):
         emit(16, entry, 7)                           # OriginUpperLeft
         emit(71, 7, 11, 15)                          # fc    BuiltIn FragCoord
         emit(71, 8, 30, 0)                           # color Location 0
-    if desc:
+    if desc or ubo:
         emit(71, 14, 34, 0)                          # ubo   DescriptorSet 0
         emit(71, 14, 33, 0)                          # ubo   Binding 0
     emit(19, 1)                     # %void
@@ -48,11 +51,11 @@ def fs_program(kind='color', desc=False):
     emit(23, 4, 3, 4)               # %v4f
     emit(32, 5, 1, 4)               # ptr Input v4f
     emit(32, 6, 3, 4)               # ptr Output v4f
-    if desc:
-        emit(32, 15, 2, 3)          # ptr Uniform v4f
+    if desc or ubo:
+        emit(32, 15, 2, 3)          # ptr Uniform float
     emit(59, 5, 7, 1)               # vcol/fc input
     emit(59, 6, 8, 3)               # color output
-    if desc:
+    if desc or ubo:
         emit(59, 15, 14, 2)         # ubo (Uniform)
     if kind != 'color':
         emit(43, 3, 9, 0)           # f0
@@ -60,7 +63,11 @@ def fs_program(kind='color', desc=False):
     emit(54, 1, entry, 0, 2)        # main()
     emit(248, lbl)                  # label
     emit(61, 4, c, 7)               # c = Load v4f input
-    if kind == 'color':
+    if ubo:
+        emit(61, 3, 20, 14)         # uf  = Load float ubo
+        emit(80, 4, 21, 20, 20, 20, 20)  # vec4(uf,uf,uf,uf)
+        emit(62, 8, 21)             # Store color
+    elif kind == 'color':
         emit(62, 8, c)              # Store color c
     else:
         emit(81, 3, 14, c, 0)       # x = c.x
@@ -144,6 +151,29 @@ class FragmentShadeTests(unittest.TestCase):
         self.drain()
         self.assertEqual(job.state, 'done')
         self.assertEqual(job.fshade_stats[0]['records'], 4)
+
+    def test_ubo_descriptor_read_reaches_color(self):
+        ubo = 54321
+        self.f.state.aperture.write(self.owner.base + 1024,
+                                    struct.pack('<f', float(ubo)))
+        binding = ShaderBinding(self.owner, 1024, 4, binding=0,
+                                descriptor_set=0, kind=6, element=0)
+        job = self.executor.enqueue(self.context, [
+            FragmentShade(self.records(4), fs_program('color', ubo=True),
+                          bindings=(binding,))])
+        runtime = job.runtimes[0]
+        self.drain()
+        self.assertEqual(job.state, 'done')
+        color = bytes(runtime.color)
+        self.assertEqual(len(color), 4 * ATTR_STRIDE)
+        for i in range(4):
+            words = struct.unpack_from('<4I', color, i * ATTR_STRIDE)
+            self.assertEqual(words, (f32bits(float(ubo)),) * 4)
+
+    def test_ubo_descriptor_requires_matching_binding(self):
+        with self.assertRaises(ValueError):
+            self.executor.enqueue(self.context, [
+                FragmentShade(self.records(4), fs_program('color', ubo=True))])
 
     def test_record_shape_and_stage_are_validated(self):
         code = fs_program('color')

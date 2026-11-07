@@ -2,16 +2,17 @@
 # Copyright 2026 Etienne Cimon
 # SPDX-License-Identifier: MIT
 """Full native draw chain: fetch -> vertex shade -> raster -> fragment shade
--> writeback inside one executor operation; no descriptors/blend/depth."""
+-> writeback inside one executor operation; buffer (UBO/SSBO) descriptors are
+admitted per stage, image/sampler binds, blend, and depth stay refused."""
 import struct
 from dataclasses import dataclass
 
-from shader.spirv_scan import EM, Scanner
+from shader.spirv_scan import EM, SC, Scanner
 from vn_graphics_fetch import Fetch, ATTR_STRIDE
 from vn_graphics_pshade import BATCH_MAX, FragmentShade, FragmentShadeRuntime
 from vn_graphics_raster import (MAX_FRAGMENTS, Raster, RasterRuntime,
                                  RECORD_STRIDE)
-from vn_graphics_shade import Shade, ShadeRuntime
+from vn_graphics_shade import Shade, ShadeRuntime, resolve_bindings
 from vn_graphics_writeback import Writeback, WritebackRuntime
 
 
@@ -25,9 +26,13 @@ def _fragment_scan(code):
         raise ValueError('draw fragment scan failed: ' + str(error)) from error
     if scan.em != EM['FRAGMENT']:
         raise ValueError('draw execution requires a fragment execution model')
-    for row in scan.decor.values():
-        if row.get('binding') is not None or row.get('set') is not None:
-            raise ValueError('draw descriptor bindings are not admitted')
+    for vid, row in scan.decor.items():
+        if row.get('binding') is None and row.get('set') is None:
+            continue
+        var = scan.vars.get(vid)
+        storage = var.get('storage') if var else None
+        if storage not in (SC['UNIFORM'], SC['SBUF']):
+            raise ValueError('draw descriptor storage is not admitted')
     return scan
 
 
@@ -51,6 +56,7 @@ class DrawExec:
     vs_push: tuple = ()
     fs_push: tuple = ()
     vs_bindings: tuple = ()
+    fs_bindings: tuple = ()
     batch: int = BATCH_MAX
     flat: int = 0
     nopersp: int = 0
@@ -78,6 +84,10 @@ class DrawExecRuntime:
                                   Shade(op.fetch, op.vs, op.vs_push,
                                         op.batch, op.vs_bindings))
         scan = _fragment_scan(op.fs)
+        # eager binding probe: fragment descriptor operands must validate at
+        # admission (coverage + storage), matching the vertex stage, before
+        # any fetch/shade/raster work is published
+        resolve_bindings(executor, context, op.fs_bindings, scan, 'fragment')
         RasterRuntime(executor, context, Raster(
             b'\0' * (3 * RECORD_STRIDE), op.viewport, op.scissor, 3,
             op.flat, op.nopersp, op.front_ccw, op.cull))
@@ -128,7 +138,8 @@ class DrawExecRuntime:
                                            FragmentShade(
                                                bytes(self.raster.records),
                                                op.fs, op.fs_push,
-                                               op.batch, 0, front))
+                                               op.batch, 0, front,
+                                               op.fs_bindings))
             return True
         if not self.fs.done:
             return True

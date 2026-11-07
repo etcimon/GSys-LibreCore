@@ -39,9 +39,14 @@ the fragment execution model:
 - SPIR-V magic/bounded word count, push-word count/range, `batch` bound,
   `helpers` range, `front` in {0,1}.
 - `spirv_scan.Scanner` must accept the module and report execution model
-  Fragment; any `DescriptorSet`/`Binding` decoration is refused —
-  descriptor resources (textures/samplers/UBOs) are not yet admitted for
-  graphics shading.
+  Fragment.  `DescriptorSet`/`Binding` decorations are admitted only for
+  buffer storage classes (`UNIFORM`/`SBUF`): each decorated
+  `(set,binding)` must be covered by a provided `ShaderBinding` operand,
+  validated by the shared `resolve_bindings` helper (kind 6/7, set<4,
+  binding<256, element<16, 4-byte aligned positive size, no duplicate
+  elements, biased address must fit the 32-bit header word).  Image,
+  sampler and `UNIFORMCONST` storage stays refused; an unbound decorated
+  descriptor is refused.
 - Per-batch `Model` construction validated (`gfx == GFX_FS`,
   `gcnt == batch count`); failures become job faults.
 
@@ -63,24 +68,31 @@ the fragment execution model:
   per cooperative turn; `BATCH_MAX = 256`.
 - Model `robust` accesses counted per batch into `fshade_stats`; faults
   (`m.fault`), model construction failures and budget exhaustion fault the
-  job; FS input is immutable caller bytes so the runtime holds no memory
-  owners (`owners = {}`).
+  job.  FS-in records are immutable caller bytes, so only bound descriptor
+  owners are leased (`owners` from `resolve_bindings`); descriptor content
+  is read live from `state.aperture` through `GfxMemory`.
 
 ## Evidence
 
-- `test_vn_graphics_pshade.py` (5 tests): color passthrough record order,
-  FragCoord builtin + multi-batch ordering, helper/front admission, record
-  shape/stage/descriptor/oversize refusal.  Modules are hand-assembled in
-  the test (no corpus binaries — the frozen cohort ships sources only).
+- `test_vn_graphics_pshade.py` (7 tests): color passthrough record order,
+  FragCoord builtin + multi-batch ordering, helper/front admission, a
+  positive UBO-descriptor read broadcast into every color channel, an
+  unbound-descriptor refusal, record shape/stage/descriptor/oversize
+  refusal.  Modules are hand-assembled in the test (no corpus binaries —
+  the frozen cohort ships sources only).
 - Frozen native cohort `native-pshade-01`: 591 tests PASS in 15.454 s,
   `sources_unchanged: true`; `PASS: host-native-model; no RTL/CTS
   qualification`.
+- Fragment buffer-descriptor increment, frozen cohort `native-gfxfs-01`:
+  718 tests PASS in 21.556 s, `sources_unchanged: true`;
+  `PASS: host-native-model; no RTL/CTS qualification`.
 
 ## Not claimed
 
-Rasterization/primitive assembly, FS-in record generation, descriptor
-bindings for graphics stages, ROP/blend/writeback to attachments,
-`DrawPlan` -> operation conversion, `vkCmdDraw*` replay, synchronization,
-capsets, CTS, RTL and physical qualification all remain open.  This stage
+Rasterization/primitive assembly, FS-in record generation, image/sampler
+(`UNIFORMCONST`) descriptor binds, in-model dynamic offsets, ROP/blend/
+writeback to attachments, `DrawPlan` -> operation conversion beyond the
+buffer-descriptor path, synchronization, capsets, CTS, RTL and physical
+qualification all remain open.  This stage
 is reachable only as an executor runtime operation from native tests; no
 wire command produces it yet.

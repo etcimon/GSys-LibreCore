@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from shader.spirv_model import Model
 from shader.spirv_scan import EM, Scanner
 from vn_graphics_fetch import ATTR_STRIDE, MAX_RECORDS
-from vn_graphics_shade import BATCH_MAX, STEP_QUANTUM, MAX_STEPS
+from vn_graphics_shade import (BATCH_MAX, GfxMemory, STEP_QUANTUM, MAX_STEPS,
+                              resolve_bindings)
 
 RECORD_STRIDE = ATTR_STRIDE       # FS-in/out records share the 144-byte stride
 MAX_INPUT = MAX_RECORDS * RECORD_STRIDE
@@ -29,6 +30,7 @@ class FragmentShade:
     batch: int = BATCH_MAX
     helpers: int = 0
     front: int = 0
+    bindings: tuple = ()
 
     @property
     def size(self):
@@ -53,7 +55,9 @@ class FragmentShadeRuntime:
                 not 0 < operation.batch <= BATCH_MAX or
                 type(operation.helpers) is not int or
                 not 0 <= operation.helpers < 1 << 64 or
-                operation.front not in (0, 1)):
+                operation.front not in (0, 1) or
+                not isinstance(operation.bindings, tuple) or
+                len(operation.bindings) > 16):
             raise ValueError('fragment shade operation exceeds native profile')
         try:
             scan = Scanner(list(operation.code)).scan()
@@ -61,12 +65,12 @@ class FragmentShadeRuntime:
             raise ValueError('fragment shader scan failed: ' + str(error)) from error
         if scan.em != EM['FRAGMENT']:
             raise ValueError('fragment shade requires a fragment execution model')
-        for row in scan.decor.values():
-            if row.get('binding') is not None or row.get('set') is not None:
-                raise ValueError('fragment shade descriptor bindings are not admitted')
+        bind_rows, bind_pad, bound_owners = resolve_bindings(
+            executor, context, operation.bindings, scan, 'fragment')
         self.executor, self.context, self.operation = executor, context, operation
-        # FS-in records are immutable caller bytes: no memory owners/leases.
-        self.owners = {}
+        # FS-in records are immutable caller bytes: only descriptor owners lease.
+        self.owners = dict(bound_owners)
+        self.bind_rows, self.bind_pad = bind_rows, bind_pad
         self.total = len(operation.records) // RECORD_STRIDE
         self.color = bytearray()
         self.model = self.ivs = None
@@ -92,14 +96,20 @@ class FragmentShadeRuntime:
         ghelp = (self.operation.helpers >> start) & 0xFFFFFFFFFFFFFFFF
         # {stage,count,in_base,out_base,vbase,inst,nin}: stage=Fragment EM;
         # vbase bit0 carries front-facing; helper mask follows the inputs.
-        words = [len(self.operation.code), 0, len(self.operation.push),
+        # Binding rows sit between SPIR-V and push; per-binding init-word
+        # placeholders keep the graphics section aligned under live memory.
+        flat = [word for row in self.bind_rows for word in row]
+        words = [len(self.operation.code), len(self.bind_rows),
+                 len(self.operation.push),
                  1, 1, 1, 4, 0,                 # flags bit2 = graphics wave work
-                 *self.operation.code, *self.operation.push, 0,
+                 *self.operation.code, *flat, *self.operation.push, 0,
+                 *([0] * self.bind_pad),
                  4,                            # stage word = SPIR-V Fragment EM
                  count, 0, out_base, self.operation.front, 0, nin,
                  *words_in, ghelp & 0xFFFFFFFF, ghelp >> 32]
+        memory = GfxMemory(self.executor, self.context, self.operation.bindings)
         try:
-            self.model = Model(words)
+            self.model = Model(words, memory=memory)
         except Exception as error:
             raise ValueError('fragment shader model failed: ' + str(error)) from error
         if self.model.gfx != 2 or self.model.gcnt != count:

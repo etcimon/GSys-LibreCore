@@ -88,6 +88,55 @@ class Shade:
             MAX_RECORDS * VARY_STRIDE
 
 
+def resolve_bindings(executor, context, bindings, scan, stage):
+    """Validate buffer-descriptor operands against a shader scan and build
+    the Model binding rows.  Returns (rows, init_pad_words, owners) where
+    rows are the flattened (set,binding,size,biased_ad,aux) entries, init_pad
+    is the per-binding placeholder-word count the header must carry, and
+    owners maps binding-owner ids for lease pinning.  `stage` is the
+    lowercase stage name used in refusal messages."""
+    bound = set()
+    for binding in bindings:
+        if (not isinstance(binding, ShaderBinding) or
+                binding.kind not in (6, 7) or
+                type(binding.descriptor_set) is not int or
+                not 0 <= binding.descriptor_set < 4 or
+                type(binding.binding) is not int or
+                not 0 <= binding.binding < 256 or
+                type(binding.offset) is not int or
+                type(binding.size) is not int or
+                binding.offset % 4 or binding.size % 4 or
+                binding.size <= 0 or
+                type(binding.element) is not int or
+                not 0 <= binding.element < 16):
+            raise ValueError('unsupported ' + stage + ' shade binding')
+        key = (binding.descriptor_set, binding.binding, binding.element)
+        if key in bound:
+            raise ValueError('duplicate ' + stage + ' shade descriptor element')
+        bound.add(key)
+    provided = {(b.descriptor_set, b.binding) for b in bindings}
+    for vid, row in scan.decor.items():
+        if row.get('binding') is None and row.get('set') is None:
+            continue
+        var = scan.vars.get(vid)
+        storage = var.get('storage') if var else None
+        if storage not in (SC['UNIFORM'], SC['SBUF']):
+            raise ValueError(stage + ' shade descriptor storage is not admitted')
+        if (row.get('set'), row.get('binding')) not in provided:
+            raise ValueError(stage + ' shade descriptor is not bound')
+    rows, pad, owners = [], 0, {}
+    for binding in bindings:
+        base = executor._extent(context, binding.owner, binding.offset,
+                                binding.size)
+        if base + binding.size > (1 << 32) - GFX_DESC_BIAS:
+            raise ValueError(stage + ' shade descriptor address overflows profile')
+        rows.append((binding.descriptor_set, binding.binding, binding.size,
+                     GFX_DESC_BIAS + base, binding.kind << 16 | binding.element))
+        pad += binding.size // 4
+        owners[id(binding.owner)] = binding.owner
+    return rows, pad, owners
+
+
 class ShadeRuntime:
     def __init__(self, executor, context, operation):
         if (not isinstance(operation, Shade) or
@@ -108,50 +157,13 @@ class ShadeRuntime:
             raise ValueError('vertex shader scan failed: ' + str(error)) from error
         if scan.em != EM['VERTEX']:
             raise ValueError('vertex shade requires a vertex execution model')
-        bound = set()
-        for binding in operation.bindings:
-            if (not isinstance(binding, ShaderBinding) or
-                    binding.kind not in (6, 7) or
-                    type(binding.descriptor_set) is not int or
-                    not 0 <= binding.descriptor_set < 4 or
-                    type(binding.binding) is not int or
-                    not 0 <= binding.binding < 256 or
-                    type(binding.offset) is not int or
-                    type(binding.size) is not int or
-                    binding.offset % 4 or binding.size % 4 or
-                    binding.size <= 0 or
-                    type(binding.element) is not int or
-                    not 0 <= binding.element < 16):
-                raise ValueError('unsupported vertex shade binding')
-            key = (binding.descriptor_set, binding.binding, binding.element)
-            if key in bound:
-                raise ValueError('duplicate vertex shade descriptor element')
-            bound.add(key)
-        for vid, row in scan.decor.items():
-            if row.get('binding') is None and row.get('set') is None:
-                continue
-            var = scan.vars.get(vid)
-            storage = var.get('storage') if var else None
-            if storage not in (SC['UNIFORM'], SC['SBUF']):
-                raise ValueError('vertex shade descriptor storage is not admitted')
-            if ((row.get('set'), row.get('binding')) not in
-                    {(b.descriptor_set, b.binding) for b in operation.bindings}):
-                raise ValueError('vertex shade descriptor is not bound')
+        bind_rows, bind_pad, bound_owners = resolve_bindings(
+            executor, context, operation.bindings, scan, 'vertex')
         self.executor, self.context, self.operation = executor, context, operation
         self.fetch = FetchRuntime(executor, context, operation.fetch)
         self.owners = dict(self.fetch.owners)
-        self.bind_rows = []
-        self.bind_pad = 0
-        for binding in operation.bindings:
-            base = executor._extent(context, binding.owner, binding.offset,
-                                    binding.size)
-            if base + binding.size > (1 << 32) - GFX_DESC_BIAS:
-                raise ValueError('vertex shade descriptor address overflows profile')
-            self.bind_rows.append((binding.descriptor_set, binding.binding,
-                                   binding.size, GFX_DESC_BIAS + base,
-                                   binding.kind << 16 | binding.element))
-            self.bind_pad += binding.size // 4
-            self.owners[id(binding.owner)] = binding.owner
+        self.owners.update(bound_owners)
+        self.bind_rows, self.bind_pad = bind_rows, bind_pad
         self.vary = bytearray()
         self.model = self.ivs = None
         self.batch_start = self.cursor = self.steps = self.batches = 0
