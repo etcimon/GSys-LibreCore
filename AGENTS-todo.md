@@ -18439,6 +18439,26 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   `ue_gpos_fncall_1` regress clean.  Directed-RTL session evidence only —
   EQUAL/NOTEQUAL/LEQUAL/GEQUAL/ALWAYS/NEVER boundary cases, depthClamp,
   depth-bounds and early/late-Z ordering remain open.
+- [x] **CLOSED — per-pixel varying interpolation (`ue_gpos_grad_1`):**
+  first bit-exact smooth-varying gradient through the real transport
+  path — the unlock for all interpolated shading (fs_color/fs_mip/
+  fs_scene8/fs_shadowfog/fs_tex_*).  `is_grad` keeps the standard
+  stride-24 `{pos.xy@0, col.rgba@8}` layout but gives each TRI vertex a
+  DISTINCT colour (primaries + alpha 1.0/0.5/0.25), `vs_pos3`+`fs_vcol`,
+  colour-only (no depth).  The oracle `gfx_grad_pixels` replicates the
+  `g6lc_apu_rast` fpnew sequence **bit-exactly**: f32 viewport -> F2I
+  RNE 16.8, 64-bit edges + top-left, then per fragment
+  `edge>>>shf ->I2F-> *rcpa(1/area) -> *vrw(1/w) -> ADD(pv0+pv1) ->
+  ADD(+pv2) -> DIV(1/sum)=rs`, per component `MUL(pv0*V0) ->
+  FMADD(pv1*V1) -> FMADD(pv2*V2) -> MUL(*rs)`, `f_f32_u8` per channel
+  packed R|G<<8|B<<16|A<<24.  The area<0 slot-1/2 vertex swap is applied
+  to positions AND colours (RTL varying prefetch reads the mirrored
+  record so `var_q[k]` tracks post-swap vertex k).  PASS `g1=4096
+  g2=4096 ulp=0 XF_FAULTS 0` on **vgtop and vgsys** — all 512 covered
+  pixels bit-exact; `ue_gpos_tri_1`/`depth_1`/`dtest`/`dtoff` hex
+  byte-identical (is_grad fully gated).  w=1 so perspective collapses
+  to affine; non-unit-w perspective-correct interpolation, noperspective
+  and flat varyings remain open.
 - [x] Instanced-draw session coverage (`c84531213`): `ue_gpos_inst_1`
   — `vs_inst` offsets clip-x by `0.4*gl_InstanceIndex-0.6`,
   `instanceCount=4`, `fs_flat` constant colour → union coverage over 4

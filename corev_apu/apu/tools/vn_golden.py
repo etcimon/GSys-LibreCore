@@ -6848,6 +6848,116 @@ def gfx_line_coverage(verts, vp, sc, cw, ch):
     return cov
 
 
+def _f32bits(f):
+    """python float (already f32-valued) -> its IEEE754 binary32 bits."""
+    return struct.unpack('<I', struct.pack('<f', f))[0]
+
+
+def gfx_grad_pixels(verts, cols, vp, sc, cw, ch, front_ccw, cull):
+    """Bit-exact per-pixel smooth-varying interpolation oracle for one
+    TRIANGLE_LIST primitive — mirrors the g6lc_apu_rast fpnew sequence:
+    f32 viewport transform -> F2I RNE 16.8 screen coords, 64-bit edge
+    functions + top-left rule, then per covered fragment
+      e_k>>>shf ->I2F-> *rcpa(=1/area) -> *vrw(=1/w) ->
+      ADD(pv0+pv1) -> ADD(+pv2) -> DIV(1/sum)=rs
+    and per colour component
+      MUL(pv0*V0) -> FMADD(pv1*V1,+) -> FMADD(pv2*V2,+) -> MUL(*rs)
+    finally f_f32_u8 per channel packed R|G<<8|B<<16|A<<24.
+
+    verts = [(x,y,z,w)]*3 clip space; cols = [(r,g,b,a)]*3 vertex
+    colours in DRAW order — the oracle applies the rasterizer's
+    area<0 slot-1/2 swap to positions AND colours together (the RTL
+    varying prefetch reads the mirrored vertex record, so var_q[k]
+    tracks the post-swap vertex).  vp/sc/cw/ch/front_ccw/cull as
+    gfx_tri_coverage.  -> {(px,py): packed RGBA8 word}."""
+    vphw = _f32(_f32(vp[2]) * 0.5)
+    vphh = _f32(_f32(vp[3]) * 0.5)
+    fma = getattr(math, 'fma', lambda a, b, c: a * b + c)
+    vx, vy, ws = [], [], []
+    for (x, y, _z, w) in verts:
+        rcp = _f32(1.0 / _f32(w))
+        nx = _f32(_f32(x) * rcp)
+        ny = _f32(_f32(y) * rcp)
+        sx = _f32(fma(_f32(nx + 1.0), vphw, _f32(vp[0])))
+        sy = _f32(fma(_f32(ny + 1.0), vphh, _f32(vp[1])))
+        vx.append(_f2i_rne(_f32(sx * 256.0)))
+        vy.append(_f2i_rne(_f32(sy * 256.0)))
+        ws.append(_f32(w))
+    cols = [tuple(c) for c in cols]
+    area = ((vx[1] - vx[0]) * (vy[2] - vy[0])
+            - (vx[2] - vx[0]) * (vy[1] - vy[0]))
+    if area == 0:
+        return {}
+    front = (area < 0) == front_ccw
+    if (front and cull & 1) or (not front and cull & 2):
+        return {}
+    if area < 0:
+        vx[1], vx[2] = vx[2], vx[1]
+        vy[1], vy[2] = vy[2], vy[1]
+        ws[1], ws[2] = ws[2], ws[1]
+        cols[1], cols[2] = cols[2], cols[1]
+        area = -area
+    # post-swap edges: edge k anchored at v[k+1] toward v[k+2]
+    ex, ey, edx, edy, tl = [], [], [], [], []
+    for k in range(3):
+        a, b = (k + 1) % 3, (k + 2) % 3
+        ex.append(vx[a]); ey.append(vy[a])
+        edx.append(vx[b] - vx[a]); edy.append(vy[b] - vy[a])
+        tl.append(vy[a] > vy[b] or (vy[a] == vy[b] and vx[a] < vx[b]))
+    # shf normalises area_q to ~28 bits; rcpa = DIV(1.0, I2F(area>>shf))
+    bl = area.bit_length()
+    shf = (bl - 1) - 28 if bl - 1 > 28 else 0
+    area_f = _f32(float((area >> shf) & 0xFFFFFFFF))
+    rcpa = _f32(1.0 / area_f)
+    # vrw_k = DIV(1.0, w_k); w=1.0 -> exact 1.0 for vs_pos3
+    vrw = [_f32(1.0 / w) for w in ws]
+
+    def edge_f32(e):
+        # 32'(e>>>shf) then signed I2F RNE -> f32 value
+        v = (e >> shf) & 0xFFFFFFFF
+        if v & 0x80000000:
+            v -= 0x100000000
+        return _f32(float(v))
+
+    out = {}
+    scx, scy, scw, sch = sc
+    for py in range(ch):
+        if py < scy or py >= scy + sch:
+            continue
+        cpy = py * 256 + 128
+        for px in range(cw):
+            if px < scx or px >= scx + scw:
+                continue
+            cpx = px * 256 + 128
+            es = []
+            inside = True
+            for k in range(3):
+                e = edx[k] * (cpy - ey[k]) - edy[k] * (cpx - ex[k])
+                if e < 0 or (e == 0 and not tl[k]):
+                    inside = False
+                    break
+                es.append(e)
+            if not inside:
+                continue
+            # lam_k = edge_f32 * rcpa ; pv_k = lam_k * vrw_k
+            lam = [edge_f32(es[k]) for k in range(3)]
+            pv = [_f32(lam[k] * rcpa) for k in range(3)]
+            pv = [_f32(pv[k] * vrw[k]) for k in range(3)]
+            s01 = _f32(pv[0] + pv[1])      # ADD b+c
+            s012 = _f32(s01 + pv[2])       # ADD b+c
+            rs = _f32(1.0 / s012)          # DIV 1/sum
+            word = 0
+            for c in range(4):
+                v0 = cols[0][c]; v1 = cols[1][c]; v2 = cols[2][c]
+                t0 = _f32(pv[0] * v0)                    # MUL
+                t1 = _f32(fma(pv[1], v1, t0))            # FMADD
+                t2 = _f32(fma(pv[2], v2, t1))            # FMADD
+                vc = _f32(t2 * rs)                       # MUL
+                word |= cl_f32_u8(_f32bits(vc)) << (8 * c)
+            out[(px, py)] = word
+    return out
+
+
 def load_shvec(name):
     """Parse sh_vectors/<name>.{hex,exp} into a compute-session vec.
 
@@ -10492,6 +10602,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # shade) + inout param (dark) + early return (early); constant
         # vcol -> deterministic colour, no discard
         is_fncall = 'fncall' in gfx
+        # grad: per-vertex DISTINCT colours -> smooth-varying
+        # interpolation oracle; bit-exact fpnew replication (16.8 edges
+        # -> I2F -> *rcpa -> *vrw -> ADD-sum -> DIV-rs, then per-comp
+        # MUL/FMADD/FMADD/MUL -> f_f32_u8).  Colour-only, no depth.
+        is_grad = 'grad' in gfx
         # depth: D32_SFLOAT depth attachment + depthWriteEnable — the
         # vec2 pos format leaves vs_pos3's pos.z=0 so gl_Position.z=0 is
         # a constant depth; write-only (depthTestEnable=0) validates the
@@ -10589,7 +10704,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'vs_texlod.spv' if is_vtex else
                           'vs_tex.spv' if is_ftex else
                           'vs_pos3.spv' if is_blend or is_wide or is_kill
-                          or is_killfn or is_fncall or is_depth
+                          or is_killfn or is_fncall or is_depth or is_grad
                           or is_line or is_lstrip or is_polyln
                           or is_polypnt
                           else 'vs_passthru.spv')).read_bytes())]
@@ -10603,7 +10718,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'fs_white.spv' if is_pts else
                           'fs_vcol.spv' if is_blend or is_wide or is_line
                           or is_lstrip or is_polyln or is_polypnt
-                          or is_depth
+                          or is_depth or is_grad
                           else
                           'fs_tex_array.spv' if is_ftexa else
                           'fs_tex_gather.spv' if is_ftexg else
@@ -10633,6 +10748,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # first end-to-end pColorBlendState coverage (ue_gpos_tri_1
         # sends pColorBlendState=None).
         COL = (1.0, 0.0, 0.0, 0.75) if is_blend else (0.2, 0.4, 0.6, 1.0)
+        # grad: per-vertex distinct colours (draw order) — primaries +
+        # distinct alpha so the smooth vcol varying exercises all four
+        # interpolated channels; the oracle permutes these with the
+        # rasterizer's area<0 vertex swap.
+        GRAD_COLS = [(1.0, 0.0, 0.0, 1.0),
+                     (0.0, 1.0, 0.0, 0.5),
+                     (0.0, 0.0, 1.0, 0.25)]
         # vertex stride 24: {RG32 pos @0, RGBA32 col @8}
         # vbwide: same attributes split across two buffers — binding 0
         # is positions only (stride 8) and the colour attribute rides
@@ -10671,6 +10793,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 L_CLIP.append((cx, cy, 0.0, 1.0))
                 vb_words += [f32b(cx), f32b(cy)]
                 vb_words += [f32b(c) for c in COL]
+        elif is_grad:
+            # {pos.xy@0, col.rgba@8} stride 24 — same layout as the
+            # standard tri but each vertex carries a DISTINCT colour so
+            # the smooth vcol varying interpolates a real gradient.
+            for (_vx, _vy, _vz, _vw), _gc in zip(TRI, GRAD_COLS):
+                vb_words += [f32b(_vx), f32b(_vy)]
+                vb_words += [f32b(c) for c in _gc]
         else:
             for (vx_, vy_, _vz, _vw) in TRI:
                 if is_tex:
@@ -10817,12 +10946,19 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # kill masks: fs_kill drops the FragCoord 8x8 checkerboard;
         # fs_kill_fn drops odd-x lanes (int(FragCoord.x)&1==1 -> killer).
         # Both map int(FragCoord) == the framebuffer pixel (px,py).
-        exp_img = [out_w if (w % CW, w // CW) in cov and
-                   not ((is_kill and
-                         ((((w % CW) >> 3) + ((w // CW) >> 3)) & 1)) or
-                        (is_killfn and ((w % CW) & 1)))
-                   else clr_w
-                   for w in range(CW * CH)]
+        if is_grad:
+            # smooth-varying interpolation: per-pixel bit-exact fpnew
+            # oracle (edge->I2F->*rcpa->*vrw->ADD->DIV->MUL/FMADD->u8)
+            _gp = gfx_grad_pixels(TRI, GRAD_COLS, VP, SC, CW, CH, 1, 2)
+            exp_img = [_gp.get((w % CW, w // CW), clr_w)
+                       for w in range(CW * CH)]
+        else:
+            exp_img = [out_w if (w % CW, w // CW) in cov and
+                       not ((is_kill and
+                             ((((w % CW) >> 3) + ((w // CW) >> 3)) & 1)) or
+                            (is_killfn and ((w % CW) & 1)))
+                       else clr_w
+                       for w in range(CW * CH)]
         # depth oracle: dpair covered px store the winning tri's depth —
         # near 0.25 = 0x3E800000 (dp_red_wins) or far 0.75 = 0x3F400000.
         # Uncovered keeps the dp_clear value: 1.0f = 0x3F800000 for the
