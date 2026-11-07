@@ -325,14 +325,32 @@ ObjPay spec block → `rs_spec_q` → shcore `F_SP0` → shmod `f_spec` →
 constant 41 → SSBO write → checked output.
 
 **Still owed (not qualification):** real CTS `compute.pipeline.specialization.*`
-runs, the create-failure-path spec-extent leak (`StPipeFail` does not
-free a post-`StPipeSpAlc` spec block — fault-injection-only, narrower
-than the fixed retire leak), and `specconst` is a special override
-vector (kept out of `shader_vectors.py` `DESC` so standard regeneration
-does not bake a default `.exp`); a first-class `spec` field in `DESC`
-is the clean follow-up.  Evidence remains host-native model + directed
-Verilator sim — **no capsets, CTS, stock-Mesa, physical, or silicon
-qualification**.
+runs, and a first-class `spec` field in `shader_vectors.py` `DESC` so
+`specconst` regenerates reproducibly (it is currently a special
+override vector kept out of `DESC` so standard regeneration does not
+bake a default `.exp`).  `specconst` also lacks a `.tab` (shmod-unit
+table image); only needed if the shmod TB is extended to drive the
+spec ports.
+
+**Create-failure unwind gap (documented, fault-injection-only):** the
+success create+retire path is clean, but *post-allocation* create
+faults unwind incompletely — a coherent redesign, not a one-line leak.
+After `StPipeSpAlc` commits the spec extent (`pl_specb_q`,
+`1+2·pl_sn_q` words), later faults strand resources: `StPipeAlcP`
+(ObjPay ALLOC) fail → `StPipeFail` frees nothing ObjPay-side;
+`StPipeAuxC` (ObjTab ALLOC) fail → `StPipeFaux` frees the 3-word
+pipeline block but not the spec extent; `StPipeAuxCpl` (SETAUX) fail →
+`StPipeFail` frees neither block nor the ObjTab object; and the
+aux-high SETAUX completion `StAuxHiCpl` routes straight to `StRep`,
+bypassing `StPipeFail` and stranding spec extent + pipeline block +
+ObjTab object + module pins together.  Reachable only on ObjPay/ObjTab
+exhaustion or SETAUX failure — never in normal CTS — and bounded (small
+extents, table-sized objects).  Fix needs a unified per-element
+cleanup (free spec-if-owned → free pipeline block → destroy ObjTab
+object → unpin modules) gated by an ownership flag cleared at
+`StPipeAuxHiC`; tracked as a dedicated task.  Evidence remains
+host-native model + directed Verilator sim — **no capsets, CTS,
+stock-Mesa, physical, or silicon qualification**.
 
 ## Performance / area / scalability
 
