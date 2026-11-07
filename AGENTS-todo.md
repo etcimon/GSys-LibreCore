@@ -18187,9 +18187,16 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   texel(3,1) + solid mip1 50/50 -> (48,128,32,255)), cohort
   `native-gfxtrilin-01` 734 PASS (`native-execution.aaadxsp4`,
   sources_unchanged true).
-- [ ] Gather/proj/dref sample ops (all four VkSamplerAddressMode values
+- [x] OpImageGather (opcode 96) footprint/component sample: `fs_gather_
+  program` emits the model's gather operand order (ResultType, ResultId,
+  SampledImage, Coordinate, Component id `&3`, mask 0); the vec4 result
+  is the `comp` channel of each 2x2 footprint texel -> RGBA.
+  `test_fragment_image_gather` (comp=0 R-channel, u=0.35 v=0.4 ->
+  footprint x{2,3},y{1,2} -> (64,96,96,64)), cohort `native-gfxgather-01`
+  735 PASS (`native-execution.22fa7i0d`, sources_unchanged true).
+- [ ] Proj/dref sample ops (all four VkSamplerAddressMode values
   + bilinear filter + explicit/implicit LOD + multi-mip select +
-  trilinear already proven),
+  trilinear + gather already proven),
   blend/depth/MRT, helper
   lanes, non-triangle topology, flat/nopersp interpolation,
   multi-descriptor/multi-stage end-to-end draws and capability/CTS/physical

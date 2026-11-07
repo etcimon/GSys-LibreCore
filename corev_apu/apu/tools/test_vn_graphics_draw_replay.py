@@ -6,8 +6,9 @@ import unittest
 
 import test_vn_graphics_resources as resource_fixture
 import vn_golden
-from test_vn_graphics_pshade import (fs_image_program, fs_image_store_program,
-                                     fs_program, fs_sample_program,
+from test_vn_graphics_pshade import (fs_gather_program, fs_image_program,
+                                     fs_image_store_program, fs_program,
+                                     fs_sample_program,
                                      fs_separate_sample_program)
 from test_vn_graphics_shade import vs_program
 from vn_native_execution import StreamFault
@@ -717,6 +718,27 @@ class DrawReplayTests(unittest.TestCase):
             struct.unpack('<4I', struct.pack('<4f',
                 (96 + 0) / 2 / 255.0, (64 + 192) / 2 / 255.0,
                 (64 + 0) / 2 / 255.0, 1.0)))
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), want)
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_fragment_image_gather(self):
+        # OpImageGather (opcode 96): a combined-image-sampler gathers the
+        # 2x2 texel footprint around a normalized coord and returns a vec4
+        # whose component gi is the `comp` channel of footprint texel gi
+        # (SPIR-V order (i0,j1),(i1,j1),(i1,j0),(i0,j0)).  At u=0.35,
+        # v=0.4 the 8.8 coord gives iu0=2, iv0=1 -> footprint x{2,3},
+        # y{1,2}; comp=0 selects the R channel (x*32): texels (2,2)=64,
+        # (3,2)=96, (3,1)=96, (2,1)=64 -> framebuffer RGBA (64,96,96,64).
+        # No filtering - each result component is one raw texel channel.
+        did = self._image_fetch_setup(
+            fs_gather_program(u=0.35, v=0.4, comp=0), dtype=1)
+        self._image_fetch_draw()
+        want = self.e.golden.img_clear_texel(
+            self.e.model, did,
+            struct.unpack('<4I', struct.pack('<4f',
+                64 / 255.0, 96 / 255.0, 96 / 255.0, 64 / 255.0)))
         for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
             self.assertEqual(self.read_texel(x, y), want)
         self.assertEqual(self.read_texel(7, 3), self.clear_texel())
