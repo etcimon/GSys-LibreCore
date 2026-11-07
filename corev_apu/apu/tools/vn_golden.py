@@ -2091,6 +2091,12 @@ class FrontModel(ObjectTable, PayloadMemory):
         {layout gen,slot} in the hi word.  -> True on success; on
         failure the first error is latched into out['result']."""
         def fail():
+            if os.environ.get('VN_GP_DBG'):
+                print('GP_FAIL paylen=%d cur=%d result=%X' %
+                      (len(pay), cur[0], VK_ERR_UNKNOWN), file=sys.stderr)
+                print('  pay=%s' % ' '.join(
+                    '%d:%08x' % (i, x & 0xFFFFFFFF)
+                    for i, x in enumerate(pay)), file=sys.stderr)
             out['result'] = VK_ERR_UNKNOWN
             return False
         cur = [0]
@@ -3139,6 +3145,11 @@ class FrontModel(ObjectTable, PayloadMemory):
                         return True
             elif ct in (T.get('vkCmdBeginRenderPass', -1),
                         T.get('vkCmdBeginRenderPass2', -1)):
+                if os.environ.get('VN_BR_DBG'):
+                    print('BR_PAY=%s' % ' '.join(
+                        '%d:%08x' % (i, w & 0xFFFFFFFF)
+                        for i, w in enumerate(rec['pay'])),
+                        file=sys.stderr)
                 # G1c/G2a: the StBrp* chain — rp/fb record handles ->
                 # rp ObjPay parse (attachment table + subpass refs) ->
                 # per-attachment fb view id -> view -> image -> bound
@@ -4125,6 +4136,12 @@ class FrontModel(ObjectTable, PayloadMemory):
                     # G1c: payload objects — the staged keep words copy
                     # verbatim to ObjPay; aux[63:48]=base,
                     # aux[47:32]=words (the is_pay_kind retire frees it)
+                    if os.environ.get('VN_RP_DBG') and \
+                            obj_kind == KIND['VkRenderPass']:
+                        print('RP_PAY=%s' % ' '.join(
+                            '%d:%08x' % (i, w & 0xFFFFFFFF)
+                            for i, w in enumerate(rec['pay'])),
+                            file=sys.stderr)
                     nw = len(rec['pay'])
                     pbase = self.pay_alloc(nw)
                     if pbase is None:
@@ -10475,6 +10492,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # shade) + inout param (dark) + early return (early); constant
         # vcol -> deterministic colour, no discard
         is_fncall = 'fncall' in gfx
+        # depth: D32_SFLOAT depth attachment + depthWriteEnable — the
+        # vec2 pos format leaves vs_pos3's pos.z=0 so gl_Position.z=0 is
+        # a constant depth; write-only (depthTestEnable=0) validates the
+        # attachment/readback path before any compare is added
+        is_depth = 'depth' in gfx
         # G3b-iii F8: drawind/drawindx issue the same triangle through
         # DrawIndirect/DrawIndexedIndirect — the operand sits at a
         # 4-mod-8 byte offset inside a dedicated INDIRECT buffer to
@@ -10548,7 +10570,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'vs_texlod.spv' if is_vtex else
                           'vs_tex.spv' if is_ftex else
                           'vs_pos3.spv' if is_blend or is_wide or is_kill
-                          or is_killfn or is_fncall
+                          or is_killfn or is_fncall or is_depth
                           or is_line or is_lstrip or is_polyln
                           or is_polypnt
                           else 'vs_passthru.spv')).read_bytes())]
@@ -10562,6 +10584,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'fs_white.spv' if is_pts else
                           'fs_vcol.spv' if is_blend or is_wide or is_line
                           or is_lstrip or is_polyln or is_polypnt
+                          or is_depth
                           else
                           'fs_tex_array.spv' if is_ftexa else
                           'fs_tex_gather.spv' if is_ftexg else
@@ -10576,7 +10599,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
              'fb', 'sm_vs', 'sm_fs', 'pl', 'gp', 'vmem', 'vb', 'vb2',
              'rmem', 'rb', 'cp', 'cb', 'fen', 'ib2',
              'ubo', 'dsl', 'dp', 'ds', 'ds_src',
-             'timg', 'tview', 'smp', 'tmem'))}
+             'timg', 'tview', 'smp', 'tmem',
+             'dimg', 'dview', 'dmem', 'rb2', 'rb2mem'))}
         RES_BLOB0 = 200
 
         CW = CH = 64                     # color attachment extent
@@ -10759,6 +10783,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         (is_killfn and ((w % CW) & 1)))
                    else clr_w
                    for w in range(CW * CH)]
+        # depth-write oracle: every covered pixel stores the constant
+        # vertex depth (vs_pos3 pos.z=0 -> NDC z=0 -> depth 0.0 =
+        # 0x00000000 for D32_SFLOAT); uncovered pixels keep the clear
+        # value 0.5 = 0x3F000000.  depthTestEnable=0 so no compare.
+        exp_depth = ([0x00000000 if (w % CW, w // CW) in cov
+                      else 0x3F000000 for w in range(CW * CH)]
+                     if is_depth else None)
         # evidence: ascii-art coverage map + a few sampled rows go to
         # the gen log (and doc['steps'])
         art = []
@@ -10834,15 +10865,69 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                         levelCount=1, baseArrayLayer=0,
                                         layerCount=1)),
                 pView=X['view'])),
+        ] + ([
+            ('vkAllocateMemory', dict(
+                device=X['dev'],
+                pAllocateInfo=st('VkMemoryAllocateInfo',
+                                 allocationSize=0x4000,
+                                 memoryTypeIndex=0, pNext=[]),
+                pMemory=X['dmem'])),
+            ('vkCreateImage', dict(
+                device=X['dev'],
+                pCreateInfo=st('VkImageCreateInfo',
+                    flags=0, imageType=1, format=126,
+                    extent=st('VkExtent3D', width=CW, height=CH,
+                              depth=1),
+                    mipLevels=1, arrayLayers=1, samples=1, tiling=0,
+                    usage=0x21, sharingMode=0, queueFamilyIndexCount=0,
+                    pQueueFamilyIndices=[], initialLayout=0),
+                pImage=X['dimg'])),
+            ('vkBindImageMemory', dict(
+                device=X['dev'], image=X['dimg'], memory=X['dmem'],
+                memoryOffset=0)),
+            ('vkCreateImageView', dict(
+                device=X['dev'],
+                pCreateInfo=st('VkImageViewCreateInfo',
+                    flags=0, image=X['dimg'], viewType=1, format=126,
+                    components=st('VkComponentMapping',
+                                  r=0, g=0, b=0, a=0),
+                    subresourceRange=st('VkImageSubresourceRange',
+                                        aspectMask=2, baseMipLevel=0,
+                                        levelCount=1, baseArrayLayer=0,
+                                        layerCount=1)),
+                pView=X['dview'])),
+            ('vkAllocateMemory', dict(
+                device=X['dev'],
+                pAllocateInfo=st('VkMemoryAllocateInfo',
+                                 allocationSize=0x4000,
+                                 memoryTypeIndex=1, pNext=[]),
+                pMemory=X['rb2mem'])),
+            ('vkCreateBuffer', dict(
+                device=X['dev'],
+                pCreateInfo=st('VkBufferCreateInfo', size=0x4000,
+                               usage=0x2, sharingMode=0,
+                               queueFamilyIndexCount=0,
+                               pQueueFamilyIndices=[]),
+                pBuffer=X['rb2'])),
+            ('vkBindBufferMemory', dict(
+                device=X['dev'], buffer=X['rb2'], memory=X['rb2mem'],
+                memoryOffset=0)),
+        ] if is_depth else []) + [
             ('vkCreateRenderPass', dict(
                 device=X['dev'],
                 pCreateInfo=st('VkRenderPassCreateInfo',
-                    flags=0, attachmentCount=1,
+                    flags=0, attachmentCount=2 if is_depth else 1,
                     pAttachments=[st('VkAttachmentDescription',
                         flags=0, format=37, samples=1,
                         loadOp=1, storeOp=0,
                         stencilLoadOp=2, stencilStoreOp=2,
-                        initialLayout=0, finalLayout=5)],
+                        initialLayout=0, finalLayout=5)] + ([
+                        st('VkAttachmentDescription',
+                        flags=0, format=126, samples=1,
+                        loadOp=1, storeOp=0,
+                        stencilLoadOp=2, stencilStoreOp=2,
+                        initialLayout=0, finalLayout=5)]
+                        if is_depth else []),
                     subpassCount=1,
                     pSubpasses=[st('VkSubpassDescription',
                         flags=0, pipelineBindPoint=0,
@@ -10851,7 +10936,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         pColorAttachments=[st('VkAttachmentReference',
                                               attachment=0, layout=5)],
                         pResolveAttachments=[],
-                        pDepthStencilAttachment=None,
+                        pDepthStencilAttachment=(
+                            st('VkAttachmentReference',
+                               attachment=1, layout=5)
+                            if is_depth else None),
                         preserveAttachmentCount=0,
                         pPreserveAttachments=[])],
                     dependencyCount=0, pDependencies=[]),
@@ -10859,8 +10947,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             ('vkCreateFramebuffer', dict(
                 device=X['dev'],
                 pCreateInfo=st('VkFramebufferCreateInfo',
-                    flags=0, renderPass=X['rp'], attachmentCount=1,
-                    pAttachments=[X['view']],
+                    flags=0, renderPass=X['rp'],
+                    attachmentCount=2 if is_depth else 1,
+                    pAttachments=[X['view']] + ([X['dview']]
+                                                if is_depth else []),
                     width=CW, height=CH, layers=1),
                 pFramebuffer=X['fb'])),
             ('vkCreateShaderModule', dict(
@@ -10974,7 +11064,23 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         depthBiasClamp=f32b(0.0),
                         depthBiasSlopeFactor=f32b(0.0),
                         lineWidth=f32b(1.0)),
-                    pMultisampleState=None, pDepthStencilState=None,
+                    pMultisampleState=None,
+                    pDepthStencilState=(
+                        st('VkPipelineDepthStencilStateCreateInfo',
+                           depthTestEnable=0, depthWriteEnable=1,
+                           depthCompareOp=0, depthBoundsTestEnable=0,
+                           stencilTestEnable=0,
+                           front=st('VkStencilOpState', failOp=0,
+                                    passOp=0, depthFailOp=0,
+                                    compareOp=7, compareMask=0,
+                                    writeMask=0, reference=0),
+                           back=st('VkStencilOpState', failOp=0,
+                                   passOp=0, depthFailOp=0,
+                                   compareOp=7, compareMask=0,
+                                   writeMask=0, reference=0),
+                           minDepthBounds=f32b(0.0),
+                           maxDepthBounds=f32b(1.0))
+                        if is_depth else None),
                     pColorBlendState=(
                         st('VkPipelineColorBlendStateCreateInfo',
                            flags=0, logicOpEnable=0, logicOp=0,
@@ -11248,6 +11354,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             base_b = map_blob(rid)
             if init is not None:
                 apw(base_b, init)
+        if is_depth:
+            # depth image memory + depth readback buffer memory
+            for rid, mem in ((RES_BLOB0 + 4, X['dmem']),
+                             (RES_BLOB0 + 5, X['rb2mem'])):
+                base_d = create_blob_mem(rid, 0x4000, mem)
+                assert base_d is not None, 'depth memory blob refused'
+                map_blob(rid)
         if is_tex:
             # 1x1 RGBA8 texel at tmem+0 — the sampled colour (tri_w)
             base_t = create_blob_mem(RES_BLOB0 + 3, 0x1000, X['tmem'])
@@ -11269,13 +11382,20 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     renderArea=st('VkRect2D',
                         offset=st('VkOffset2D', x=0, y=0),
                         extent=st('VkExtent2D', width=CW, height=CH)),
-                    clearValueCount=1,
+                    clearValueCount=2 if is_depth else 1,
                     pClearValues=[st('VkClearValue',
                         color=st('VkClearColorValue',
                                  uint32=[f32b(0.2) if is_blend else 0,
                                          f32b(0.2) if is_blend else 0,
                                          f32b(0.2) if is_blend else 0,
-                                         f32b(1.0)]))]),
+                                         f32b(1.0)]))] + ([
+                        # the wire union has no depthStencil arm — cmdexec
+                        # reads clearv_q[att*4] as the depth value, so the
+                        # 0.5f bits ride the colour uint32[0] slot
+                        st('VkClearValue',
+                           color=st('VkClearColorValue',
+                                    uint32=[f32b(0.5), 0, 0, 0]))]
+                        if is_depth else [])),
                 contents=0)),
             ('vkCmdBindPipeline', dict(
                 commandBuffer=X['cb'], pipelineBindPoint=0,
@@ -11355,6 +11475,38 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     imageOffset=st('VkOffset3D', x=0, y=0, z=0),
                     imageExtent=st('VkExtent3D', width=CW, height=CH,
                                    depth=1))])),
+        ] + ([
+            ('vkCmdPipelineBarrier', dict(
+                commandBuffer=X['cb'],
+                srcStageMask=0x400, dstStageMask=0x1000,
+                dependencyFlags=0,
+                memoryBarrierCount=0, pMemoryBarriers=[],
+                bufferMemoryBarrierCount=0, pBufferMemoryBarriers=[],
+                imageMemoryBarrierCount=1,
+                pImageMemoryBarriers=[st('VkImageMemoryBarrier',
+                    srcAccessMask=0x400, dstAccessMask=0x1000,
+                    oldLayout=5, newLayout=5,
+                    srcQueueFamilyIndex=0xFFFFFFFF,
+                    dstQueueFamilyIndex=0xFFFFFFFF,
+                    image=X['dimg'],
+                    subresourceRange=st('VkImageSubresourceRange',
+                                        aspectMask=2, baseMipLevel=0,
+                                        levelCount=1, baseArrayLayer=0,
+                                        layerCount=1))])),
+            ('vkCmdCopyImageToBuffer', dict(
+                commandBuffer=X['cb'],
+                srcImage=X['dimg'], srcImageLayout=5,
+                dstBuffer=X['rb2'], regionCount=1,
+                pRegions=[st('VkBufferImageCopy',
+                    bufferOffset=0, bufferRowLength=0,
+                    bufferImageHeight=0,
+                    imageSubresource=st('VkImageSubresourceLayers',
+                                        aspectMask=2, mipLevel=0,
+                                        baseArrayLayer=0, layerCount=1),
+                    imageOffset=st('VkOffset3D', x=0, y=0, z=0),
+                    imageExtent=st('VkExtent3D', width=CW, height=CH,
+                                   depth=1))])),
+        ] if is_depth else []) + [
             ('vkEndCommandBuffer', dict(commandBuffer=X['cb'])),
         ]
         note("B'' segment A2: record BeginRP/draw/EndRP/barrier/I2B")
@@ -11389,6 +11541,17 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             rec(EK_APRCHK, rb_off + 4 * j, exp_img[j], exp_img[j], 0)
         note('readback gate: %d words, %d tri px (0x%08x), %d clear'
              % (CW * CH, len(cov), tri_w, CW * CH - len(cov)))
+        if is_depth:
+            # depth readback gate: rb2 holds the D32_SFLOAT depth
+            # attachment copied with aspectMask=2
+            rst2_, _rs2, rbe2 = fm.resolve(X['rb2'], KIND['VkBuffer'])
+            rb2_off = tm.blobs[RES_BLOB0 + 5]['base_w'] << 2
+            W(TP_CHECK, CK_APR, CW * CH, rb2_off)
+            for j in range(CW * CH):
+                rec(EK_APRCHK, rb2_off + 4 * j,
+                    exp_depth[j], exp_depth[j], 0)
+            note('depth readback gate: %d words, %d cov px'
+                 % (CW * CH, len(cov)))
 
         seg_c = [
             ('vkDestroyFence', dict(device=X['dev'], fence=X['fen'])),
@@ -11426,6 +11589,14 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                         imageView=X['view'])),
             ('vkDestroyImage', dict(device=X['dev'], image=X['img'])),
             ('vkFreeMemory', dict(device=X['dev'], memory=X['imem'])),
+        ] + ([
+            ('vkDestroyBuffer', dict(device=X['dev'], buffer=X['rb2'])),
+            ('vkFreeMemory', dict(device=X['dev'], memory=X['rb2mem'])),
+            ('vkDestroyImageView', dict(device=X['dev'],
+                                        imageView=X['dview'])),
+            ('vkDestroyImage', dict(device=X['dev'], image=X['dimg'])),
+            ('vkFreeMemory', dict(device=X['dev'], memory=X['dmem'])),
+        ] if is_depth else []) + [
             ('vkDestroyCommandPool', dict(device=X['dev'],
                                           commandPool=X['cp'])),
             ('vkDestroyDevice', dict(device=X['dev'])),

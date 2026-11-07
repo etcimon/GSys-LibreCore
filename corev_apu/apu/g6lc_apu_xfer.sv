@@ -1500,11 +1500,14 @@ module g6lc_apu_xfer
               // B2I/I2B: {bufOff u64, rowLen, imgH, aspect, mip,
               // baseLayer, layerCount, off.xyz, ext.whd}.  3D uses
               // off.z/extent.depth as the layer span (sbl/slc).
+              // aspect is a validation tag only — the image operand is
+              // single-plane, so colour (1) and depth (2) selects both
+              // resolve to img0.base; stencil-only (4) stays refused.
               wm = f_mdim(xf_q.img0.w, 5'(rg_q[5][4:0]));
               hm = f_mdim(xf_q.img0.h, 5'(rg_q[5][4:0]));
               rl = crl;
               ih = cih;
-              v_ok = rg_q[4] == 32'd1 &&
+              v_ok = (rg_q[4] == 32'd1 || rg_q[4] == 32'd2) &&
                      rg_q[5] < 32'(xf_q.img0.mips) &&
                      slc >= 32'd1 &&
                      sbl + slc <= 32'(xf_q.img0.layers) &&

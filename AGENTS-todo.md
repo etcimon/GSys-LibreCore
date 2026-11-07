@@ -18398,6 +18398,26 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   Oracle unions the three vertex pixels (3 px).  Completes the
   polygonMode frontier (FILL/LINE/POINT).  PASS `g1=4096 g2=4096 ulp=0
   XF_FAULTS 0` both latencies; wired into all three lists.
+- [x] **CLOSED — depth attachment write (`ue_gpos_depth_1`):** first
+  end-to-end depth path.  `vs_pos3`+`fs_vcol` triangle over a **D32_SFLOAT
+  depth attachment** (`format=126`, `aspectMask=2`) alongside the colour
+  attachment: `dmem`/`dimg`/`dview` + `rb2`/`rb2mem` readback, render-pass
+  `pDepthStencilAttachment` (single-subpass `dref=1`), framebuffer 2nd
+  attachment, pipeline `pDepthStencilState` (`depthTestEnable=0`,
+  `depthWriteEnable=1`, explicit valid `VkStencilOpState` front/back —
+  the auto-filled random stencil ops were the earlier `VK_ERROR_UNKNOWN`),
+  `clearValueCount=2`.  Two plumbing gaps closed: (a) the `VkClearValue`
+  wire union has no `depthStencil` arm (`UNION_DEFAULT_TAGS=0` -> always
+  `color`), so the depth clear rides `color.uint32[0]` = `clearv_q[att*4]`;
+  (b) **RTL** `g6lc_apu_xfer` B2I/I2B validation required `aspect==1`
+  (colour-only) — widened to accept `aspect∈{1,2}` since the image operand
+  is single-plane (aspect is a validation tag, not a plane select).
+  Clear 0.5f everywhere; covered px store vertex depth 0.0 — covered!=clear
+  proves the write, not init-0.  PASS `g1=8192 g2=8192 ulp=0
+  XF_FAULTS 0`; `ue_gpos_fncall_1`/`ue_cpos_dcopy_bufcopy_1`/
+  `ue_cpos_clear_rgba8_1` regress clean.  Depth *test* (compare ops,
+  non-zero vertex z, two overlapping prims) remains open — needs a vec3-pos
+  vertex format.
 - [x] Instanced-draw session coverage (`c84531213`): `ue_gpos_inst_1`
   — `vs_inst` offsets clip-x by `0.4*gl_InstanceIndex-0.6`,
   `instanceCount=4`, `fs_flat` constant colour → union coverage over 4
