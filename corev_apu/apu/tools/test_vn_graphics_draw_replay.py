@@ -316,6 +316,92 @@ class DrawReplayTests(unittest.TestCase):
         self.assertEqual(self.read_texel(7, 3), self.clear_texel())
         self.assertEqual(self.f.owner.work_refs, 0)
 
+    def _image_fetch_setup(self, module):
+        """Shared vkCreateImage/View + SAMPLED_IMAGE descriptor-set setup for
+        the image-fetch draw tests.  The image is an 8x4 R8G8B8A8_UNORM at
+        MEMORY offset 4352 with texel(x,y) = (x*32, y*64, (x+y)*16, 255)."""
+        self.r.layout(((0, 2, 1, 16),))
+        self.f.command('vkDestroyShaderModule', device=self.w.DEVICE,
+                       shaderModule=self.FS2)
+        self.module(self.FS2, module)
+        s = self.w.structure
+        self.f.command('vkCreateImage', device=self.w.DEVICE, pImage=self.IMAGE,
+            pCreateInfo=s('VkImageCreateInfo', pNext=[], flags=0, imageType=1,
+                format=37, extent=s('VkExtent3D', width=8, height=4, depth=1),
+                mipLevels=1, arrayLayers=1, samples=1, tiling=0, usage=15,
+                sharingMode=0, queueFamilyIndexCount=0, pQueueFamilyIndices=[],
+                initialLayout=1))
+        self.f.command('vkBindImageMemory', device=self.w.DEVICE, image=self.IMAGE,
+                       memory=self.w.MEMORY, memoryOffset=4352)
+        self.f.command('vkCreateImageView', device=self.w.DEVICE, pView=self.VIEW,
+            pCreateInfo=s('VkImageViewCreateInfo', pNext=[], flags=0,
+                image=self.IMAGE, viewType=1, format=37,
+                components=s('VkComponentMapping', r=0, g=0, b=0, a=0),
+                subresourceRange=s('VkImageSubresourceRange', aspectMask=1,
+                    baseMipLevel=0, levelCount=1, baseArrayLayer=0, layerCount=1)))
+        self.f.command('vkCreateDescriptorPool', device=self.w.DEVICE,
+            pDescriptorPool=self.POOL,
+            pCreateInfo=s('VkDescriptorPoolCreateInfo', pNext=[], flags=1,
+                maxSets=1, poolSizeCount=1,
+                pPoolSizes=[s('VkDescriptorPoolSize', type=2,
+                              descriptorCount=1)]))
+        self.f.command('vkAllocateDescriptorSets', device=self.w.DEVICE,
+            pDescriptorSets=[self.DSET], pAllocateInfo=s(
+                'VkDescriptorSetAllocateInfo', pNext=[], descriptorPool=self.POOL,
+                descriptorSetCount=1, pSetLayouts=[self.r.DSL]))
+        self.f.command('vkUpdateDescriptorSets', device=self.w.DEVICE,
+            descriptorWriteCount=1, descriptorCopyCount=0, pDescriptorCopies=[],
+            pDescriptorWrites=[s('VkWriteDescriptorSet', pNext=[], dstSet=self.DSET,
+                dstBinding=0, dstArrayElement=0, descriptorCount=1,
+                descriptorType=2, pTexelBufferView=[],
+                pImageInfo=[s('VkDescriptorImageInfo', sampler=0,
+                    imageView=self.VIEW, imageLayout=1)], pBufferInfo=[])])
+        did = self.e.golden.img_fmt_id(self.e.model, 37)
+        pitch = self.e.golden.img_mpitch(self.e.model, 8, did, 0)
+        base = self.f.owner.base + 4352
+        for y in range(4):
+            for x in range(8):
+                texel = bytes((x * 32, y * 64, (x + y) * 16, 255))
+                self.f.state.aperture.write(base + y * pitch + x * 4, texel)
+        return did
+
+    def _image_fetch_draw(self):
+        self.upload(self.ndc_triangle())
+        self.pipeline()
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.f.command('vkCmdBindDescriptorSets', commandBuffer=self.f.CB,
+            pipelineBindPoint=0, layout=self.g.PL, firstSet=0,
+            descriptorSetCount=1, pDescriptorSets=[self.DSET],
+            dynamicOffsetCount=0, pDynamicOffsets=[])
+        self.draw()
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        job = self.f.enqueue()
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        return job
+
+    def texel_want(self, did, x, y):
+        return self.e.golden.img_clear_texel(
+            self.e.model, did,
+            struct.unpack('<4I', struct.pack('<4f',
+                (x * 32) / 255.0, (y * 64) / 255.0, ((x + y) * 16) / 255.0,
+                1.0)))
+
+    def test_fragment_per_pixel_image_fetch(self):
+        # per-fragment texturing: the FS derives ivec2(FragCoord.xy) and
+        # fetches texel(x,y); every covered framebuffer texel must equal
+        # its own (x,y)-encoded image texel.
+        did = self._image_fetch_setup(fs_image_program(per_pixel=True))
+        self._image_fetch_draw()
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), self.texel_want(did, x, y))
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
     def test_two_draws_write_in_record_order(self):
         # draw1 covers the left half, draw2 (firstVertex=3) the right;
         # executor ops run sequentially so record order is preserved

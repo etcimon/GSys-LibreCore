@@ -18103,13 +18103,16 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   reaches_framebuffer` drives a real vkCmdBindDescriptorSets -> vkCmdDraw ->
   DrawExec -> FragmentShade draw where a SAMPLED_IMAGE (kind 2)
   OpImageFetch reads a bound R8G8B8A8_UNORM texel to color on covered
-  framebuffer texels.  Remote cohort `native-gfximg-01` 720 checks PASS
-  (native-execution.y6y3xap5, sources_unchanged true), local `test_vn_*`
-  735 PASS.  Record: `architecture/uncore/apu-native-graphics-shade-
-  implementation.md`.
-- [ ] In-model dynamic offsets, blend/depth/MRT, helper lanes,
-  non-triangle topology, flat/nopersp interpolation, combined/separate/
-  storage image kinds + per-pixel fetch coords + sampler-bearing kinds,
+  framebuffer texels.  Per-pixel extension `test_fragment_per_pixel_image_
+  fetch` derives ivec2(FragCoord.xy) via OpCompositeExtract/OpConvertFToS/
+  OpCompositeConstruct so each covered texel equals its own (x,y)-encoded
+  image texel.  Remote cohorts `native-gfximg-01` 720 + `native-gfximgpix-01`
+  721 checks PASS (native-execution.y6y3xap5 / .nssux4bd, sources_unchanged
+  true), local `test_vn_*` 736 PASS.  Record: `architecture/uncore/
+  apu-native-graphics-shade-implementation.md`.
+- [ ] Combined/separate/storage image kinds + sampler-bearing sampling, VS
+  image descriptors, in-model dynamic offsets, blend/depth/MRT, helper
+  lanes, non-triangle topology, flat/nopersp interpolation,
   multi-descriptor/multi-stage end-to-end draws and capability/CTS/physical
   gates before any capset or stock vkCmdDraw* advertisement; host-model
   evidence only.

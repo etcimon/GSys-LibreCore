@@ -122,13 +122,16 @@ Shader-side admission maps `UNIFORMCONST` storage to the bound image
 reached the fragment stage through `_fragment_scan` and the eager
 `resolve_bindings` probe in `DrawExecRuntime`.
 
-Evidence: `test_vn_graphics_draw_replay` gained
-`test_fragment_sampled_image_fetch_reaches_framebuffer` - a real
-`vkCmdBindDescriptorSets` -> `vkCmdDraw` -> `DrawExec` -> `FragmentShade`
-draw where a SAMPLED_IMAGE (kind 2) `OpImageFetch` at a constant ivec2
-coordinate reads a bound R8G8B8A8_UNORM texel and writes it to color; the
-fetched (x,y)-encoded texel value is observed on covered framebuffer texels.
-Local `test_vn_*` sweep 735 PASS.  Frozen native cohort `native-gfximg-01` on
-ovh_calltorch: 720 tests PASS in 20.465 s, `sources_unchanged: true`, cohort
-`native-execution.y6y3xap5`.  Host-native model only - no RTL/CTS/stock/
-hardware qualification.
+Evidence: `test_vn_graphics_draw_replay` gained two image-fetch draws -
+`test_fragment_sampled_image_fetch_reaches_framebuffer` (constant ivec2
+coordinate) and `test_fragment_per_pixel_image_fetch` (ivec2 derived from
+FragCoord.xy via OpCompositeExtract + OpConvertFToS + OpCompositeConstruct).
+Both drive a real `vkCmdBindDescriptorSets` -> `vkCmdDraw` -> `DrawExec` ->
+`FragmentShade` draw where a SAMPLED_IMAGE (kind 2) `OpImageFetch` reads a
+bound R8G8B8A8_UNORM texel to color; the per-pixel variant proves each
+covered framebuffer texel equals its own (x,y)-encoded image texel.  Local
+`test_vn_*` sweep 736 PASS.  Frozen native cohorts on ovh_calltorch:
+`native-gfximg-01` 720 tests PASS in 20.465 s (`native-execution.y6y3xap5`)
+and `native-gfximgpix-01` 721 tests PASS in 20.582 s
+(`native-execution.nssux4bd`), both `sources_unchanged: true`.  Host-native
+model only - no RTL/CTS/stock/hardware qualification.
