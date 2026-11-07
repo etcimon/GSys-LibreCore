@@ -295,9 +295,11 @@ gate.  So a correct RTL producing the override (e.g. 41) would
 (`spirv-as`/`glslangValidator` on PATH — a minimal
 `layout(constant_id=0) const uint K=7; ob.v=K;` compiles clean with
 `OpDecorate %K SpecId 0`), then generate its `.exp`/`.tab` from the
-**specialized/folded** module (`specialize()` folds `OpSpecConstant`→
-`OpConstant 41`) while keeping `.hex` = the *original* `OpSpecConstant`
-module so RTL still exercises the spec-block path.  That requires
+**specialized/folded** module while keeping `.hex` = the *original*
+`OpSpecConstant` words so RTL still exercises the spec-block path.
+`specialize()` is already verified on this real module: default scan
+yields const id 12 = `[7]`, folding `(0→41)` yields `[41]` and rewrites
+opcode 50 `OpSpecConstant`→opcode 43 `OpConstant`.  That requires
 decoupling `.hex` words from `.exp`-generation words in
 `shader_vectors.py::emit` (it currently feeds one `spv_words` to both)
 — or a dedicated spec-vector emitter.  Then a `specok`-style session
