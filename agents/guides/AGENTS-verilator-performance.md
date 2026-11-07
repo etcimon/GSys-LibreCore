@@ -1589,3 +1589,267 @@ have Verilator's shift-and-mask shape, so unlike §10.3 the ISA floor is not a l
 here; `install-formal.sh` / `install-yosys-g6lc.sh` keep the compiler's default ISA,
 and the `stateops` kernels run at 16 bytes (SSE2) in those builds.
 
+## APU Compiler/Simulator PGO And Bounded Unroll
+
+APU RTL leaves now provision the `tools/verilator` fork through
+`verif/tb/apu/local-verilator.sh`, requiring a validated compiler-PGO receipt.
+Compiler and generated-simulator PGO are both ON by default and forced for
+remote RTL leaves. Their receipts are separate: the toolchain record requests
+simulator PGO; a validated `simulator-pgo.json` proves completed profile-use.
+No simulation throughput improvement is inferred without an A/B measurement.
+
+`apu_verilator_pgo.py` uses a private out-of-tree GCC generate/train/use build.
+Both passes use identical object paths, ccache is disabled, and profile-use
+forces recompilation without cleaning a shared source tree. The fixed small
+SV training input exercises full C++ generation with threads 1 and 2; each
+training call is capped at 60s. Required core gcov profiles, positive unroll
+counters, source/recipe hashes and the actual final binary hash are recorded.
+Profile-use failure or receipt mismatch blocks execution; there is no release
+fallback. Cold setup has its own default 1200s cap, not a promised test duration.
+
+Actual model commands carry `--unroll-count 256 --unroll-stmts 131072 --stats`.
+The fork's late environment overrides are pinned to those same limits and
+narrow rolling is disabled, so ambient experiments cannot undo the policy.
+The standalone fixture measured three unrolled loops on pinned 5.008.
+This verifies that mechanism, not every design loop or cycle accuracy.
+
+The compiler cache keys compiler sources and PGO recipe/training inputs, not
+every functional RTL edit. Native SIMD ISA flags are not added. Explicit local
+`APU_VERILATOR_PGO=0` selects the old plain cache and is unverified; testharness
+RTL leaves force PGO internally. Status and actual cold-build evidence:
+`architecture/uncore/apu-pgo-dma-increment.md`.
+
+`apu_sim_pgo.py` additionally auto-builds generated C++ with GCC instrumentation,
+runs bounded mechanism training, then forces a profile-use rebuild in identical
+object paths. It overrides both CXX and LINK: the compiler's configured runtime
+makefile must not inject compiler-training profiles into simulator compilation.
+Unroll policy and stats are appended for legacy model builders too.
+
+Source/compiler/recipe/flags/vector identities key private attempts. Accepted
+images are immutable; dev validation binds the absolute image from its per-run
+receipt. Setup1800s, native phase600s, training60s and validation60s are separate
+limits. Missing/stale receipts block; `--check` remains presence-only.
+
+Development edits the mutable tree while detached tests consume frozen source
+and tooling. Training/launch are not a PASS or counted CTS coverage. The bridge
+workload is idle-only, not representative of guest shader speed. New generic
+pipeline evidence is a real standalone infrastructure probe, not device RTL.
+Current policy/workloads and limits:
+`architecture/uncore/apu-simulator-pgo-implementation.md`.
+
+T2 resource lifetime checks are separate host-model tests, not PGO training
+or RTL evidence. Run the DMA/lifetime cohort from copied, hashed Python
+inputs while implementation continues in the live tree; no compiler rebuild
+is needed. Global backing versus context access and open dispatch gates:
+`architecture/uncore/apu-resource-lifetime-increment.md`.
+
+The native control/queue follow-up adds16 short host cases to that frozen
+cohort (40 total). These validate lifecycle wire dispatch and preauthorized
+scatter/gather, not generated simulator performance or RTL qualification.
+`architecture/uncore/apu-native-control-increment.md`.
+
+The runnable native control backend passes58 frozen-source checks, including
+the real local IPC process with the existing RTL bridge client. This is host
+control-path evidence, not a simulator throughput or Vulkan qualification
+claim; compiler-PGO recipes remain unchanged.
+`architecture/uncore/apu-native-bridge-implementation.md`.
+
+For bounded native decoder/memory work use apu_native_verify.py: presence-only
+--check, frozen source/assets,60-second cohort limit, owned process-group
+termination and INCOMPLETE on timeout. Current73 tests pass2.882s; this is not
+a simulator throughput measurement or a substitute for PGO-enabled RTL gates.
+`architecture/uncore/apu-native-linear-implementation.md`.
+
+Native ring scheduling now shares command/execution-byte and snapshot-read
+budgets; waits yield and context retirement prevents stale publication.
+The frozen native cohort passes93 checks in4.745s. No Verilator build was
+needed for this host-only increment; default compiler/simulator PGO remains
+mandatory for actual RTL lanes.
+`architecture/uncore/apu-native-ring-implementation.md`.
+
+Native continuation tests freeze inputs while implementation proceeds in the
+live tree. Linear/nested waits park; per-poll execution/read budgets and queue
+reauthorization bound resumed work. Use the same native verifier and keep
+host-model durations separate from generated-simulator throughput/PGO evidence.
+`architecture/uncore/apu-native-continuation-implementation.md`.
+
+Native dependency scheduling uses the same bounded frozen lane:119 checks
+pass8.762s with60 unchanged hashes. DAG validation precedes child reads;
+blocked siblings retain positions/replies while other ready children run.
+This is host-model evidence, not simulator throughput or PGO training.
+`architecture/uncore/apu-native-dependency-implementation.md`.
+
+The native transfer foundation runs133 frozen checks in7.101s. Chunk/queue/
+byte budgets and work leases bound execution independently of live development.
+No compiler build/training is needed for this host cohort. Do not infer RTL
+throughput, PGO speedup or GPU admission from host byte-copy results.
+`architecture/uncore/apu-native-transfer-implementation.md`.
+
+Transfer-only CB/secondary replay uses the same frozen lane:146 checks pass
+10.797s,64 hashes unchanged. Planning and execution have separate record,
+snapshot, operation and byte limits; ownership guards park rather than spin.
+No RTL/compiler build or PGO training is implied by host-model results.
+`architecture/uncore/apu-native-replay-implementation.md`.
+
+Explicit transfer-submit diagnostics use the frozen host lane:159 checks pass
+8.150s,66 hashes unchanged, including real CLI/bridge retirement and memory I/O.
+Do not interpret these durations as RTL throughput or PGO speedup. The default
+endpoint still refuses GPU submit; zero capsets and RTL PGO requirements remain.
+`architecture/uncore/apu-native-submit-implementation.md`.
+
+Native binary token scheduling adds11 directed cases:170 frozen checks pass
+14.423s with68 unchanged hashes. Job preparation and token retention use the
+existing bounded queue/operation lane. No RTL/compiler build, PGO speedup or
+Vulkan admission is inferred.
+`architecture/uncore/apu-native-binary-semaphore-implementation.md`.
+
+Timeline host APIs add12 directed regressions:182 frozen checks pass12.467s,
+70 hashes unchanged. Waits save deadlines/generations and cooperate with poll.
+This host-only decoder lane neither regenerates RTL nor measures simulator PGO;
+queue timeline scheduling remains a separate implementation gate.
+`architecture/uncore/apu-native-timeline-host-implementation.md`.
+
+Timeline queue progress uses bounded lane-head selection:197 frozen checks pass
+14.198s,74 hashes unchanged. Context byte/turn limits and internal FIFO remain;
+no new physical queue or simulator throughput is inferred. Clean receipts reject
+unraisable/resource warnings, and timeout stays INCOMPLETE/exit4.
+`architecture/uncore/apu-native-timeline-queue-implementation.md`.
+
+Native image rows share the existing bounded operation/byte lane:210 frozen
+checks pass12.023s,76 hashes unchanged. Pitch/mip/layer copy evidence does not
+establish image-layout, renderer, RTL throughput or PGO qualification.
+`architecture/uncore/apu-native-image-copy-implementation.md`.
+
+Native coherent image barriers share operation/lease budgets:220 frozen checks
+pass13.371s,78 hashes unchanged. Native capture does not regenerate RTL tables;
+coherent host ordering is not a hardware cache/timing/PGO qualification.
+`architecture/uncore/apu-native-image-barrier-implementation.md`.
+
+Native clear patterns avoid whole-image host expansion:230 frozen checks pass
+30.925s,79 hashes unchanged. Per-record payload bounds and partial-texel chunks
+are host semantics, not RTL/PGO throughput or stock-renderer qualification.
+`architecture/uncore/apu-native-image-clear-implementation.md`.
+
+Native compute uses32-instruction turns and bounded live I/O:241 frozen checks
+pass13.845s,81 hashes unchanged. Wire shaders remain refused; no simulator/PGO
+speedup or qualification is inferred. RTL unmap transaction remains open.
+`architecture/uncore/apu-native-compute-foundation.md`.
+
+Native buffer provenance/resolution:254 frozen checks pass16.214s,83 hashes
+unchanged. Record-word reconciliation is bounded; caller leases/wire shader
+admission remain separate. No RTL/PGO throughput or qualification promotion.
+`architecture/uncore/apu-native-buffer-descriptor-implementation.md`.
+
+Native layout identity/lifetime:267 frozen checks pass13.820s,85 hashes unchanged.
+Bounded snapshots isolate reused IDs and stream views; no hardware hash/record
+change or RTL/PGO throughput/qualification claim.
+`architecture/uncore/apu-native-layout-lifetime-implementation.md`.
+
+Native pipeline operands:274 frozen checks18.256s,87 hashes unchanged.
+No wire dispatch, hardware table or RTL/PGO qualification promotion.
+`architecture/uncore/apu-native-pipeline-implementation.md`.
+
+Internal compute replay:299 frozen checks16.776s,89 hashes unchanged. Explicit
+compute=True bounds dispatches, descriptor reads and instructions; native-only,
+no hardware table, PGO throughput or qualification promotion.
+`architecture/uncore/apu-native-compute-replay-implementation.md`.
+
+Diagnostic compute wire:310 frozen checks18.933s,90 hashes unchanged; real
+bridge-client shared writes/fences pass. No RTL/PGO or stock software promotion.
+`architecture/uncore/apu-native-compute-submit-implementation.md`.
+
+Scalar specialization:325 frozen checks16.343s,92 hashes unchanged;32 map
+entries/64 data bytes/4096 code words bound native compilation. Scanner constant
+allocation is bounded before materialization. No RTL/PGO qualification claim.
+`architecture/uncore/apu-native-specialization-implementation.md`.
+
+Native compute barriers:338 frozen checks16.120s,93 hashes unchanged. At most
+16 mixed rows use the existing I/O/operation budgets; no RTL/PGO promotion.
+`architecture/uncore/apu-native-compute-barrier-implementation.md`.
+
+Native idle scope:348 frozen checks15.110s,94 hashes unchanged. Queue/device
+waits preserve bounded polling and internal FIFO; no RTL/PGO promotion.
+`architecture/uncore/apu-native-idle-scope-implementation.md`.
+
+Native indirect compute:364 frozen checks14.006s,95 hashes unchanged.
+One12-byte snapshot per dispatch, bounded64-per-axis/256-total invocations;
+no RTL/PGO throughput or qualification claim.
+`architecture/uncore/apu-native-indirect-dispatch-implementation.md`.
+
+Native fixed buffer arrays:374 frozen checks17.179s,96 hashes unchanged.
+Bounded sorted rows and per-element guards retain executor budgets; no RTL/PGO
+throughput or qualification promotion.
+`architecture/uncore/apu-native-buffer-array-implementation.md`.
+
+Native specialization operations:382 frozen checks17.971s,96 hashes unchanged.
+Scalar dependency folding stays within module/ID/constant budgets; default
+hardware scanner refusal and separate RTL/PGO gates remain.
+`architecture/uncore/apu-native-specialization-op-implementation.md`.
+
+Native image operands:398 frozen checks19.826s,98 hashes unchanged. Resolution
+does not pin or execute; bounded owned subviews precede image shader admission.
+No RTL/PGO throughput or qualification promotion.
+`architecture/uncore/apu-native-image-operand-implementation.md`.
+
+Native compute images:408 frozen checks18.899s,99 hashes unchanged. Shared
+transfer/image I/O retains poll/instruction/binding bounds; no RTL/PGO promotion.
+`architecture/uncore/apu-native-compute-image-implementation.md`.
+
+Native shader-image barriers:417 frozen checks15.207s,100 hashes unchanged.
+Operation/record bounds and backing leases remain; no RTL/PGO promotion.
+`architecture/uncore/apu-native-shader-image-barrier-implementation.md`.
+
+Native rendering identity:432 frozen checks14.597s,102 hashes unchanged.
+Four-attachment bounds retain logical allocation extents, not rounded padding;
+no draw, RTL/PGO throughput or qualification promotion.
+`architecture/uncore/apu-native-rendering-identity-implementation.md`.
+
+Native graphics identity:442 frozen checks37.769s,104 hashes unchanged.
+Stage specialization remains module/ID bounded; no draw, RTL/PGO throughput
+or qualification promotion.
+`architecture/uncore/apu-native-graphics-identity-implementation.md`.
+
+Native graphics fixed state:450 frozen checks21.578s,106 hashes unchanged.
+Pinned stride/row bounds refuse truncation before allocation; no draw, RTL/PGO
+throughput or qualification promotion.
+`architecture/uncore/apu-native-graphics-fixed-state-implementation.md`.
+
+Native graphics interfaces:462 frozen checks36.223s,108 hashes unchanged.
+Declaration/link bounds reuse specialized scans; no draw, RTL/PGO throughput
+or qualification promotion.
+`architecture/uncore/apu-native-graphics-interface-implementation.md`.
+
+Native vertex/index operands:474 frozen checks33.942s,110 hashes unchanged.
+Full-width offsets/counts and logical spans refuse truncation; no draw, RTL/PGO
+throughput or qualification promotion.
+`architecture/uncore/apu-native-vertex-operand-implementation.md`.
+
+Native dynamic viewport/scissor:483 frozen checks21.050s,112 hashes unchanged.
+Bounded finite payloads and recording epochs add no draw/RTL/PGO throughput or
+qualification claim.
+`architecture/uncore/apu-native-graphics-dynamic-implementation.md`.
+
+Native render-pass commands:499 frozen checks29.179s,114 hashes unchanged.
+Scope/area/clear and epoch guards add no draw/RTL/PGO throughput or qualification
+claim; full-wire validation preserves omitted contents.
+`architecture/uncore/apu-native-render-pass-command-implementation.md`.
+
+Native graphics resource requirements:516 frozen checks27.683s,116 hashes
+unchanged. Exact decorations and bounded per-stage requirements do not promote
+binding/execution, RTL/PGO throughput or qualification.
+`architecture/uncore/apu-native-graphics-resource-implementation.md`.
+
+Native graphics binding state:536 frozen checks31.259s,118 hashes unchanged.
+Record-local bounded state/operand resolution adds no execution/RTL/PGO
+throughput or qualification claim.
+`architecture/uncore/apu-native-graphics-binding-implementation.md`.
+
+Native graphics draw plans:553 frozen checks17.947s,120 hashes unchanged.
+Nonexecuting per-draw composition adds no execution/RTL/PGO throughput or
+qualification claim.
+`architecture/uncore/apu-native-graphics-draw-implementation.md`.
+
+Native render-pass clears:569 frozen checks22.433s, all hashes unchanged.
+Bounded attachment-clear writes add no draw/shader/RTL/PGO throughput or
+qualification claim.
+`architecture/uncore/apu-native-render-pass-clear-implementation.md`.

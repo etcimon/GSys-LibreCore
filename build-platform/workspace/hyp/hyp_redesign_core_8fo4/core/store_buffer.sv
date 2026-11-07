@@ -1025,6 +1025,12 @@ module store_buffer
           be_m          = g1ao_hold_be_q;
           g1ao_hold_hit = 1'b1;
         end
+        // I/O loads are never forwarded (main tree store_buffer.sv).
+        if (load_paddr_valid_i && !config_pkg::is_inside_cacheable_regions(
+                G6LCCfg, 64'(load_paddr_i))) begin
+          data_m = '0;
+          be_m   = '0;
+        end
         st_fwd_data_o  = data_m;
         st_fwd_be_o    = be_m;
         // R3a cont.13: keep STQ forward on; nofwd + store-side sticky still −4,

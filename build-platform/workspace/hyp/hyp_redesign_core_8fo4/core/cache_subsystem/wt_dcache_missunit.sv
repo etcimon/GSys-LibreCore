@@ -174,6 +174,7 @@ module wt_dcache_missunit
   // Uncached CAS store updates DRAM only; drop any stale L1 line so later
   // cached loads see the new value (CRT stack lines are often hot).
   logic        cas_inv;
+  logic [G6LCCfg.PLEN-1:0] amo_paddr_q;  // latched AMO paddr for line drop
 
   // MSHR for reads
   typedef struct packed {
@@ -710,7 +711,7 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
   assign wr_cl_idx_o =
       (COH_VALIDATE && inv_vld) ? mem_rtrn_i.inv.idx[G6LCCfg.DCACHE_INDEX_WIDTH-1:G6LCCfg.DCACHE_OFFSET_WIDTH] :
       (flush_en) ? cnt_q :
-      (cas_inv)  ? amo_req_i.operand_a[G6LCCfg.DCACHE_INDEX_WIDTH-1:G6LCCfg.DCACHE_OFFSET_WIDTH] :
+      (cas_inv)  ? amo_paddr_q[G6LCCfg.DCACHE_INDEX_WIDTH-1:G6LCCfg.DCACHE_OFFSET_WIDTH] :
       (inv_vld)  ? mem_rtrn_i.inv.idx[G6LCCfg.DCACHE_INDEX_WIDTH-1:G6LCCfg.DCACHE_OFFSET_WIDTH] :
                    mshr_q.paddr[G6LCCfg.DCACHE_INDEX_WIDTH-1:G6LCCfg.DCACHE_OFFSET_WIDTH];
 
@@ -899,6 +900,12 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
             if ((amo_req_i.amo_op != AMO_LR) || sc_backoff_over) begin
               mem_req_valid_c = 1'b1;
               if (mem_data_ack_i) begin
+                // Drop the L1 line at request accept, same as the CAS.D path:
+                // the uncached memory-side RMW does not update D$, and a
+                // cached copy would serve stale data on the very first load
+                // after the AMO retires (a completion-time drop races that
+                // load's tag lookup).
+                cas_inv = 1'b1;
                 state_d = AMO_WAIT;
               end
             end
@@ -1001,6 +1008,7 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
       mshr_rdrd_collision_q <= '0;
       miss_req_masked_q     <= '0;
       amo_req_q             <= '0;
+      amo_paddr_q           <= '0;
       stores_inflight_q     <= '0;
       cas_old_q             <= '0;
       cas_new_q             <= '0;
@@ -1015,6 +1023,11 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
       mshr_rdrd_collision_q <= mshr_rdrd_collision_d;
       miss_req_masked_q     <= miss_req_masked_d;
       amo_req_q             <= amo_req_d;
+      // Latch the AMO paddr at request acceptance so the completion-time
+      // line invalidation (cas_inv) drops the right index even after the
+      // requester released operand_a.
+      if (state_q == IDLE && G6LCCfg.RVA && amo_req_i.req)
+        amo_paddr_q       <= amo_req_i.operand_a[G6LCCfg.PLEN-1:0];
       stores_inflight_q     <= stores_inflight_d;
       cas_old_q             <= cas_old_d;
       cas_new_q             <= cas_new_d;

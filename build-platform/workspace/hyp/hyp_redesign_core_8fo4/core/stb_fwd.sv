@@ -119,6 +119,10 @@ module stb_fwd
   logic [DEPTH_SPEC-1:0][DEPTH_SPEC-1:0] f1_older_q;
   logic [$clog2(DEPTH_COMMIT)-1:0] f1_cmt_rd_ptr_q;
   logic                            f1_v_q;
+  // I/O loads are never forwarded (main tree: store_buffer.sv, ST-037C
+  // step 4). The region compare runs beside the F1 match cone into its own
+  // flop and only masks the F3 response, so no match path lengthens.
+  logic                            f1_io_q, f2_io_q;
   logic [G6LCCfg.PLEN-1:0]         f1_pa_q;
   logic [TAG_W-1:0]                f1_tag_q;
 
@@ -233,7 +237,7 @@ module stb_fwd
 
   always_ff @(posedge clk_i or negedge rst_ni) begin : p_f1
     if (!rst_ni) begin
-      f1_v_q <= 1'b0;
+      f1_v_q <= 1'b0; f1_io_q <= 1'b0;
       f1_spec_cand_q <= '0; f1_spec_cboz_q <= '0;
       f1_cmt_cand_q  <= '0; f1_cmt_cboz_q  <= '0;
       f1_ins_cand_q  <= '0; f1_ins_cboz_q  <= '0; f1_ins_data_q <= '0;
@@ -246,6 +250,8 @@ module stb_fwd
     end else begin
       f1_v_q <= req_valid_i;
       if (req_valid_i) begin
+        f1_io_q  <= !config_pkg::is_inside_cacheable_regions(
+                        G6LCCfg, 64'(req_pa_i));
         f1_pa_q  <= req_pa_i;
         f1_tag_q <= req_tag_i;
         f1_older_q     <= spec_older_i;
@@ -353,7 +359,7 @@ module stb_fwd
 
   always_ff @(posedge clk_i or negedge rst_ni) begin : p_f2
     if (!rst_ni) begin
-      f2_v_q <= 1'b0;
+      f2_v_q <= 1'b0; f2_io_q <= 1'b0;
       f2_spec_cboz_q <= '0;
       f2_ins_data_q <= '0;
       f2_spec_data_q <= '0; f2_cmt_data_q <= '0;
@@ -363,6 +369,7 @@ module stb_fwd
       f2_v_q <= 1'b0;
     end else begin
       f2_v_q <= f1_v_q;
+      f2_io_q <= f1_io_q;
       f2_tag_q <= f1_tag_q;
       f2_ins_data_q <= f1_ins_data_q;
       f2_spec_cboz_q <= f1_spec_cboz_q;
@@ -454,8 +461,8 @@ module stb_fwd
     end else begin
       rsp_valid_o    <= f2_v_q;
       rsp_tag_o      <= f2_tag_q;
-      rsp_be_o       <= f2_cover_q;
-      rsp_possible_o <= f2_v_q && (|f2_cover_q);
+      rsp_be_o       <= f2_io_q ? '0 : f2_cover_q;
+      rsp_possible_o <= f2_v_q && !f2_io_q && (|f2_cover_q);
       // a cbo.zero spec winner contributes '0 (its data field is the
       // zero payload by construction); mask them for clarity
       for (int unsigned b = 0; b < NB; b++)

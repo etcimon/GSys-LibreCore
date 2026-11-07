@@ -213,8 +213,8 @@ package g6lc_fetch_pkg;
   // only) — below COMMIT, above debug/restore/mispredict.
   localparam logic [3:0] SRC_PEER    = 4'd7;
 
-  // I8: exception > eret > pc-commit > peer restart > debug > SMT restore >
-  // resolve. Restore must not outrank trap (post-pre-ladder I4y).
+  // Debug entry also raises an exception; its halt PC must win that overlap.
+  // Otherwise retain exception > eret > pc-commit > peer > restore > resolve.
   // en_restore const-folds; peer is constant-0 on drained configurations.
   function automatic logic [3:0] arch_src_sel(
       input logic en_restore,
@@ -226,11 +226,11 @@ package g6lc_fetch_pkg;
       input logic eret,
       input logic misp
   );
-    if (ex) arch_src_sel = SRC_EX;
+    if (debug_en) arch_src_sel = SRC_DEBUG;
+    else if (ex) arch_src_sel = SRC_EX;
     else if (eret) arch_src_sel = SRC_ERET;
     else if (commit) arch_src_sel = SRC_COMMIT;
     else if (peer) arch_src_sel = SRC_PEER;
-    else if (debug_en) arch_src_sel = SRC_DEBUG;
     else if (en_restore && restore) arch_src_sel = SRC_RESTORE;
     else if (misp) arch_src_sel = SRC_MISP;
     else arch_src_sel = SRC_NONE;

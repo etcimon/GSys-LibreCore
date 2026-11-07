@@ -1948,6 +1948,17 @@ module wt_dcache_wbuffer
   // as the W3 descriptor above and applied one cycle later.
   // The e_* signals are the effective request view each stage consumes.
 
+  // I/O (non-cacheable) store request: never merged into a live entry
+  // (main tree wt_dcache_wbuffer.sv, ST-037C step 4).
+  logic req_nc;
+  assign req_nc = !config_pkg::is_inside_cacheable_regions(
+      G6LCCfg,
+      {
+        {64 - G6LCCfg.DCACHE_TAG_WIDTH - G6LCCfg.DCACHE_INDEX_WIDTH{1'b0}},
+        req_port_i.address_tag,
+        req_port_i.address_index
+      }
+  );
   generate
     if (HypCfg.WbufPipelined) begin : gen_w1w2
       logic                          w1_vld_q, w1_is_ni_q, w1_accepted_q;
@@ -1960,6 +1971,8 @@ module wt_dcache_wbuffer
       logic [$clog2(G6LCCfg.WtDcacheWbufDepth)-1:0] w1_hit_ptr_q, w1_next_ptr_q;
       logic                          w1_full_q;
       logic                          w1_w3hit_q;
+      // req_nc registered at W1: beside, not behind, the hit compare.
+      logic                          w1_nc_q;
       logic                          gnt_q;
 
       always_ff @(posedge clk_i or negedge rst_ni) begin : p_w1
@@ -1977,6 +1990,7 @@ module wt_dcache_wbuffer
           w1_next_ptr_q <= '0;
           w1_full_q     <= 1'b0;
           w1_w3hit_q    <= 1'b0;
+          w1_nc_q       <= 1'b0;
           gnt_q         <= 1'b0;
         end else begin
           // Write-once per granted request. The producer observes the
@@ -2003,6 +2017,7 @@ module wt_dcache_wbuffer
           w1_next_ptr_q <= next_ptr;
           w1_full_q     <= full;
           w1_w3hit_q    <= w3_tag_match;
+          w1_nc_q       <= req_nc;
           w1_accepted_q <= e_accept;
           gnt_q         <= e_accept;
         end
@@ -2030,7 +2045,9 @@ module wt_dcache_wbuffer
       assign wr_ptr   = (|w1_hit_oh_q) ? w1_hit_ptr_q
                                        : (w1_w3hit_eff ? w3_ptr_q
                                                        : w1_next_ptr_q);
-      assign rdy      = (|w1_hit_oh_q) | w1_w3hit_eff | (~w1_full_q);
+      // I/O stores never merge (into a live entry or the pending W3 slot);
+      // a same-word I/O store waits for the first to drain.
+      assign rdy      = ((|w1_hit_oh_q) | w1_w3hit_eff) ? !w1_nc_q : (~w1_full_q);
       assign e_accept = e_req && rdy && !ni_conflict;
       assign e_hit_any = (|w1_hit_oh_q) | w1_w3hit_eff;
       assign req_port_o.data_gnt = gnt_q;
@@ -2043,7 +2060,7 @@ module wt_dcache_wbuffer
       assign e_wuser  = req_port_i.data_wuser;
       assign e_is_ni  = is_ni;
       assign wr_ptr   = (|wbuffer_hit_oh) ? hit_ptr : next_ptr;
-      assign rdy      = (|wbuffer_hit_oh) | (~full);
+      assign rdy      = (|wbuffer_hit_oh) ? !req_nc : (~full);
       assign e_accept = e_req && rdy && !ni_conflict;
       assign e_hit_any = |wbuffer_hit_oh;
       assign req_port_o.data_gnt = e_accept;

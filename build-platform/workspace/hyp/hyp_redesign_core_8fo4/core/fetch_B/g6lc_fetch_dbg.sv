@@ -256,7 +256,8 @@ module g6lc_fetch_dbg
       $error("g6lc_fetch_dbg: accept without win_tag match");
     if (rst_ni && kill_s1_i && !(is_mispredict_i || flush_i || replay_i))
       $error("g6lc_fetch_dbg: kill_s1 outside misp|flush|replay");
-    if (rst_ni && En.redirect && ex_valid_i && smt_restore_i && snap.arch_src != SRC_EX)
+    if (rst_ni && En.redirect && ex_valid_i && smt_restore_i &&
+        snap.arch_src != ((G6LCCfg.DebugEn && set_debug_pc_i) ? SRC_DEBUG : SRC_EX))
       $error("g6lc_fetch_dbg: restore outranked exception");
     if (rst_ni && snap.leftover_drop && snap.leftover)
       $error("g6lc_fetch_dbg: leftover drop and complete in one cycle");
