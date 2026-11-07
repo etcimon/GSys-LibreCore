@@ -18259,8 +18259,14 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   explicit_lod_sample` (LOD=1.0 -> mip1 depth 0.6, ref 0.5 -> ref<=depth
   true -> white; mip0 would give black) proves explicit LOD drives mip
   selection in the dref path.
-- [ ] Remaining dref forms (explicit-projective opcode 94, dref-gather
-  97), PCF/bilinear compare, blend/depth/MRT, helper
+- [x] Depth-reference explicit-projective sample (opcode 94): the
+  proj+lod param combo of `fs_dref_program` emits
+  OpImageSampleDrefProjExplicitLod; `test_fragment_dref_explicit_
+  projective_sample` (vec3 coord (0.6,0.7,2.0) + LOD=1.0 over the same
+  2-level depth image -> mip1 -> white) exercises the vec3+Lod dref
+  operand path e2e.
+- [ ] Remaining dref form (dref-gather opcode 97), PCF/bilinear
+  compare, blend/depth/MRT, helper
   lanes, non-triangle topology, end-to-end NoPerspective draw (needs a
   w-varying vertex shader),
   multi-descriptor/multi-stage end-to-end draws and capability/CTS/physical

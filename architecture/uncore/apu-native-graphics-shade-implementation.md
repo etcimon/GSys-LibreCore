@@ -272,9 +272,13 @@ ImageOperands mask=0x2 (the Lod bit the model requires or it faults
 IMGOPMASK) plus a Lod id, and `_dref_setup` gained multi-mip depth
 (mip0=0.25, mip1=0.6) so `test_fragment_dref_explicit_lod_sample`
 (LOD=1.0 -> mip1 -> ref<=0.6 true -> white; mip0 would give black)
-proves explicit LOD drives mip selection in the dref path.
-Explicit-projective (94), dref-gather (97), PCF, and the
-blend/depth/MRT writeback axis stay queued.
+proves explicit LOD drives mip selection in the dref path.  The
+explicit-projective form (opcode 94) is likewise proven: the proj+lod
+param combo of `fs_dref_program` emits
+OpImageSampleDrefProjExplicitLod, and `test_fragment_dref_explicit_
+projective_sample` exercises the vec3+Lod dref operand path end-to-end.
+Dref-gather (97), PCF, and the blend/depth/MRT writeback axis stay
+queued.
 
 Evidence: `test_vn_graphics_draw_replay` gained nine image draws -
 `test_fragment_sampled_image_fetch_reaches_framebuffer` (constant ivec2
@@ -324,7 +328,9 @@ opcode 93, vec3 coord (0.6,0.7,2.0) perspective-divided before the
 compare -> white) and `test_fragment_dref_explicit_lod_sample`
 (OpImageSampleDrefExplicitLod opcode 90, LOD=1.0 over a 2-level depth
 image mip0=0.25/mip1=0.6, ref=0.5 -> mip1 -> white, proving explicit
-LOD mip select),
+LOD mip select) and `test_fragment_dref_explicit_projective_sample`
+(OpImageSampleDrefProjExplicitLod opcode 94, vec3 coord + LOD=1.0 ->
+mip1 -> white),
 plus
 `test_fragment_storage_image_write` (a STORAGE_IMAGE kind 3 bound via
 `OpTypeImage(sampled=2)`; `OpImageWrite` stores a constant red texel at the
@@ -344,7 +350,7 @@ screen-space (non-perspective) interpolation arm, and the dref pair
 plus projective-dref draw prove the depth-format admission, the
 compare-enable sampler path, and the vec3-coordinate dref operand path
 end-to-end.  Local
-`test_vn_*` sweep ran 758 tests (the graphics/draw modules all green;
+`test_vn_*` sweep ran 759 tests (the graphics/draw modules all green;
 8 unrelated `test_vn_native_bridge`/`test_vn_submit` subprocess
 timeouts under full-suite load that pass in isolation).  Frozen native
 cohorts on ovh_calltorch:
@@ -373,6 +379,8 @@ PASS in 21.6 s (`native-execution.hwuix8zk`), and `native-gfxnopersp-01`
 `native-gfxdref-01` 741 tests PASS in 20.3 s
 (`native-execution.0pobswnb`), and `native-gfxdrefproj-01` 742 tests
 PASS in 19.0 s (`native-execution.agdmditl`), and `native-gfxdreflod-01`
-743 tests PASS in 19.1 s (`native-execution.djvtokp5`), all
+743 tests PASS in 19.1 s (`native-execution.djvtokp5`), and
+`native-gfxdrefprojlod-01` 744 tests PASS in 20.2 s
+(`native-execution.l8e9lk2r`), all
 `sources_unchanged: true`.
 Host-native model only - no RTL/CTS/stock/hardware qualification.
