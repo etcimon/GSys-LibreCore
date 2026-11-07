@@ -325,12 +325,12 @@ ObjPay spec block → `rs_spec_q` → shcore `F_SP0` → shmod `f_spec` →
 constant 41 → SSBO write → checked output.
 
 **Still owed (not qualification):** real CTS `compute.pipeline.specialization.*`
-runs, and a first-class `spec` field in `shader_vectors.py` `DESC` so
-`specconst` regenerates reproducibly (it is currently a special
-override vector kept out of `DESC` so standard regeneration does not
-bake a default `.exp`).  `specconst` also lacks a `.tab` (shmod-unit
-table image); only needed if the shmod TB is extended to drive the
-spec ports.
+runs.  The `spec` field is now first-class in `shader_vectors.py` `DESC`
+(`spec={constantID: value}` → `specialize()` fold for `.exp`, original
+`OpSpecConstant` words kept in `.hex`), so `specconst_{1,2,3}` regenerate
+reproducibly through the standard generator — `specconst.tab` (shmod
+scanner table) is emitted too.  `specconst` sets `mut=False` (mutation
+is meaningless on an override vector).
 
 **Create-failure unwind gap (documented, fault-injection-only):** the
 success create+retire path is clean, but *post-allocation* create
