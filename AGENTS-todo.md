@@ -18316,6 +18316,16 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   `fsubocopy` all still PASS.  Wired into `run-apu-vgtop.sh`/
   `run-apu-vgsys.sh`/`regen_vectors.sh`.  Fragment-stage texture
   sampling now has directed-RTL coverage alongside vertex-stage.
+- [x] **CLOSED — fragment discard / helper-lane draw (`ue_gpos_kill_1`):**
+  `vs_pos3` (constant `vcol=col`) + `fs_kill` `discard` on a
+  `FragCoord` `((x>>3)+(y>>3))&1` 8x8 checkerboard — the first
+  draw-level **helper-lane/discard** coverage (was zero).  RTL
+  `fsxy`/`py_q` maps directly onto the packed framebuffer row, so
+  `int(FragCoord)` == the oracle's `(w%CW, w//CW)` — no y-flip;
+  `exp_img` masks killed lanes to `clr_w`.  PASS `g1=4096 g2=4096
+  ulp=0 XF_FAULTS 0` deterministic + randomized latency.  Wired into
+  all three runner/regen lists.  (`fs_demote` helper-store variant
+  still open — needs derivative+varying oracle.)
 - [x] Instanced-draw session coverage (`c84531213`): `ue_gpos_inst_1`
   — `vs_inst` offsets clip-x by `0.4*gl_InstanceIndex-0.6`,
   `instanceCount=4`, `fs_flat` constant colour → union coverage over 4

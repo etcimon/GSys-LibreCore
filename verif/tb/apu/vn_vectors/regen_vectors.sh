@@ -189,6 +189,9 @@ python3 $G --graphics-session ue_gpos_vtex_1 1
 # same 1x1 COMBINED_IMAGE_SAMPLER (FRAGMENT stage, implicit LOD) ->
 # constant colour; exercises the FS texture/sampler descriptor path
 python3 $G --graphics-session ue_gpos_ftex_1 1
+# fragment discard/helper lane: fs_kill drops a FragCoord 8x8
+# checkerboard; vs_pos3 keeps vcol constant so tri_w holds on survivors
+python3 $G --graphics-session ue_gpos_kill_1 1
 
 # deferred-work and capacity arms
 python3 $G --compute-session ue_cpos_defer2_1  bufcopy_1 --variant defer2

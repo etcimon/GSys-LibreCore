@@ -10408,6 +10408,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         spvd = G.TOOLS / 'shader' / 'corpus'
         is_blend = 'blend' in gfx
         is_wide = 'vbwide' in gfx
+        # kill: fs_kill discards on a FragCoord 8x8 checkerboard — the
+        # helper-lane path; vs_pos3 keeps vcol constant so tri_w holds
+        is_kill = 'kill' in gfx
         # G3b-iii F8: drawind/drawindx issue the same triangle through
         # DrawIndirect/DrawIndexedIndirect — the operand sits at a
         # 4-mod-8 byte offset inside a dedicated INDIRECT buffer to
@@ -10453,7 +10456,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'vs_inst.spv' if is_inst else
                           'vs_texlod.spv' if is_vtex else
                           'vs_tex.spv' if is_ftex else
-                          'vs_pos3.spv' if is_blend or is_wide
+                          'vs_pos3.spv' if is_blend or is_wide or is_kill
                           else 'vs_passthru.spv')).read_bytes())]
         # fsubo: the FS reads its colour from a UBO bound at the GRAPHICS
         # bind point (CTS binding_model.*.graphics shape)
@@ -10465,6 +10468,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'fs_white.spv' if is_pts else
                           'fs_vcol.spv' if is_blend or is_wide else
                           'fs_tex_implicit.spv' if is_ftex else
+                          'fs_kill.spv' if is_kill else
                           'fs_flat.spv')).read_bytes())]
         X = {k: 0x4000_0000_1000 + i * 0x1000_0001 for i, k in enumerate(
             ('inst', 'pd', 'dev', 'queue', 'imem', 'img', 'view', 'rp',
@@ -10581,7 +10585,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             note('ptsrg8: %d points, %d px covered' % (PTS_N, len(cov)))
         if is_fsubo:
             tri_w = 0xFF00FF00            # UBO colour (0,1,0,1) as RGBA8
-        exp_img = [tri_w if (w % CW, w // CW) in cov else clr_w
+        # fs_kill discards on ((x>>3)+(y>>3))&1 over FragCoord == the
+        # framebuffer pixel (px,py); killed lanes write no colour so
+        # they keep clr_w.  FragCoord int coords == (w%CW, w//CW).
+        exp_img = [tri_w if (w % CW, w // CW) in cov and
+                   not (is_kill and
+                        ((((w % CW) >> 3) + ((w // CW) >> 3)) & 1))
+                   else clr_w
                    for w in range(CW * CH)]
         # evidence: ascii-art coverage map + a few sampled rows go to
         # the gen log (and doc['steps'])
