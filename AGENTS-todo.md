@@ -18106,12 +18106,18 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   framebuffer texels.  Per-pixel extension `test_fragment_per_pixel_image_
   fetch` derives ivec2(FragCoord.xy) via OpCompositeExtract/OpConvertFToS/
   OpCompositeConstruct so each covered texel equals its own (x,y)-encoded
-  image texel.  Remote cohorts `native-gfximg-01` 720 + `native-gfximgpix-01`
-  721 checks PASS (native-execution.y6y3xap5 / .nssux4bd, sources_unchanged
-  true), local `test_vn_*` 736 PASS.  Record: `architecture/uncore/
+  image texel.  Storage-image write `test_fragment_storage_image_write`
+  binds a STORAGE_IMAGE (kind 3, `OpTypeImage(sampled=2)`) and `OpImageWrite`s
+  a constant texel at the FragCoord-derived coordinate; aperture bytes under
+  the bound image confirm covered texels became red while uncovered kept
+  their pattern - first end-to-end exercise of the kind-3 `GfxMemory` write
+  admission.  Remote cohorts `native-gfximg-01` 720 + `native-gfximgpix-01`
+  721 + `native-gfximgstore-01` 722 checks PASS (native-execution.y6y3xap5 /
+  .nssux4bd / .5axy_z9z, sources_unchanged true), local `test_vn_*` 737 PASS.
+  Record: `architecture/uncore/
   apu-native-graphics-shade-implementation.md`.
-- [ ] Combined/separate/storage image kinds + sampler-bearing sampling, VS
-  image descriptors, in-model dynamic offsets, blend/depth/MRT, helper
+- [ ] Combined/separate image kinds + sampler-bearing sampling, VS image
+  descriptors, in-model dynamic offsets, blend/depth/MRT, helper
   lanes, non-triangle topology, flat/nopersp interpolation,
   multi-descriptor/multi-stage end-to-end draws and capability/CTS/physical
   gates before any capset or stock vkCmdDraw* advertisement; host-model

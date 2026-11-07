@@ -122,16 +122,20 @@ Shader-side admission maps `UNIFORMCONST` storage to the bound image
 reached the fragment stage through `_fragment_scan` and the eager
 `resolve_bindings` probe in `DrawExecRuntime`.
 
-Evidence: `test_vn_graphics_draw_replay` gained two image-fetch draws -
+Evidence: `test_vn_graphics_draw_replay` gained three image draws -
 `test_fragment_sampled_image_fetch_reaches_framebuffer` (constant ivec2
-coordinate) and `test_fragment_per_pixel_image_fetch` (ivec2 derived from
-FragCoord.xy via OpCompositeExtract + OpConvertFToS + OpCompositeConstruct).
-Both drive a real `vkCmdBindDescriptorSets` -> `vkCmdDraw` -> `DrawExec` ->
-`FragmentShade` draw where a SAMPLED_IMAGE (kind 2) `OpImageFetch` reads a
-bound R8G8B8A8_UNORM texel to color; the per-pixel variant proves each
-covered framebuffer texel equals its own (x,y)-encoded image texel.  Local
-`test_vn_*` sweep 736 PASS.  Frozen native cohorts on ovh_calltorch:
-`native-gfximg-01` 720 tests PASS in 20.465 s (`native-execution.y6y3xap5`)
-and `native-gfximgpix-01` 721 tests PASS in 20.582 s
-(`native-execution.nssux4bd`), both `sources_unchanged: true`.  Host-native
-model only - no RTL/CTS/stock/hardware qualification.
+coordinate), `test_fragment_per_pixel_image_fetch` (ivec2 derived from
+FragCoord.xy via OpCompositeExtract + OpConvertFToS + OpCompositeConstruct),
+and `test_fragment_storage_image_write` (a STORAGE_IMAGE kind 3 bound via
+`OpTypeImage(sampled=2)`; `OpImageWrite` stores a constant red texel at the
+same FragCoord-derived coordinate, and the aperture bytes under the bound
+image are checked - covered texels become red while uncovered keep their
+pattern).  The fetch draws prove each covered framebuffer texel equals its
+own (x,y)-encoded image texel; the store draw proves the previously
+unexercised kind-3 `GfxMemory` write admission end-to-end.  Local
+`test_vn_*` sweep 737 PASS.  Frozen native cohorts on ovh_calltorch:
+`native-gfximg-01` 720 tests PASS in 20.465 s (`native-execution.y6y3xap5`),
+`native-gfximgpix-01` 721 tests PASS in 20.582 s
+(`native-execution.nssux4bd`), and `native-gfximgstore-01` 722 tests PASS in
+21.914 s (`native-execution.5axy_z9z`), all `sources_unchanged: true`.
+Host-native model only - no RTL/CTS/stock/hardware qualification.

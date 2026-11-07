@@ -6,7 +6,8 @@ import unittest
 
 import test_vn_graphics_resources as resource_fixture
 import vn_golden
-from test_vn_graphics_pshade import fs_image_program, fs_program
+from test_vn_graphics_pshade import (fs_image_program, fs_image_store_program,
+                                     fs_program)
 from test_vn_graphics_shade import vs_program
 from vn_native_execution import StreamFault
 
@@ -316,11 +317,12 @@ class DrawReplayTests(unittest.TestCase):
         self.assertEqual(self.read_texel(7, 3), self.clear_texel())
         self.assertEqual(self.f.owner.work_refs, 0)
 
-    def _image_fetch_setup(self, module):
-        """Shared vkCreateImage/View + SAMPLED_IMAGE descriptor-set setup for
-        the image-fetch draw tests.  The image is an 8x4 R8G8B8A8_UNORM at
-        MEMORY offset 4352 with texel(x,y) = (x*32, y*64, (x+y)*16, 255)."""
-        self.r.layout(((0, 2, 1, 16),))
+    def _image_fetch_setup(self, module, dtype=2):
+        """Shared vkCreateImage/View + image-descriptor-set setup for the
+        image draw tests.  The image is an 8x4 R8G8B8A8_UNORM at MEMORY
+        offset 4352 with texel(x,y) = (x*32, y*64, (x+y)*16, 255);
+        `dtype` selects SAMPLED_IMAGE(2)/STORAGE_IMAGE(3)."""
+        self.r.layout(((0, dtype, 1, 16),))
         self.f.command('vkDestroyShaderModule', device=self.w.DEVICE,
                        shaderModule=self.FS2)
         self.module(self.FS2, module)
@@ -343,7 +345,7 @@ class DrawReplayTests(unittest.TestCase):
             pDescriptorPool=self.POOL,
             pCreateInfo=s('VkDescriptorPoolCreateInfo', pNext=[], flags=1,
                 maxSets=1, poolSizeCount=1,
-                pPoolSizes=[s('VkDescriptorPoolSize', type=2,
+                pPoolSizes=[s('VkDescriptorPoolSize', type=dtype,
                               descriptorCount=1)]))
         self.f.command('vkAllocateDescriptorSets', device=self.w.DEVICE,
             pDescriptorSets=[self.DSET], pAllocateInfo=s(
@@ -353,7 +355,7 @@ class DrawReplayTests(unittest.TestCase):
             descriptorWriteCount=1, descriptorCopyCount=0, pDescriptorCopies=[],
             pDescriptorWrites=[s('VkWriteDescriptorSet', pNext=[], dstSet=self.DSET,
                 dstBinding=0, dstArrayElement=0, descriptorCount=1,
-                descriptorType=2, pTexelBufferView=[],
+                descriptorType=dtype, pTexelBufferView=[],
                 pImageInfo=[s('VkDescriptorImageInfo', sampler=0,
                     imageView=self.VIEW, imageLayout=1)], pBufferInfo=[])])
         did = self.e.golden.img_fmt_id(self.e.model, 37)
@@ -400,6 +402,30 @@ class DrawReplayTests(unittest.TestCase):
         for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
             self.assertEqual(self.read_texel(x, y), self.texel_want(did, x, y))
         self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_fragment_storage_image_write(self):
+        # storage-image write path: the FS derives ivec2(FragCoord.xy) and
+        # OpImageWrites a constant red texel into a STORAGE_IMAGE (kind 3);
+        # covered image texels must become red while uncovered keep their
+        # pattern bytes.  Proves the GfxMemory kind-3 write admission.
+        self._image_fetch_setup(fs_image_store_program(per_pixel=True), dtype=3)
+        self._image_fetch_draw()
+        did = self.e.golden.img_fmt_id(self.e.model, 37)
+        pitch = self.e.golden.img_mpitch(self.e.model, 8, did, 0)
+        base = self.f.owner.base + 4352
+        red = bytes((255, 0, 0, 255))
+        for y in range(4):
+            for x in range(8):
+                got = self.f.state.aperture.read(
+                    base + y * pitch + x * 4, 4)
+                if (x, y) in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+                    self.assertEqual(got, red,
+                                     'covered texel (%d,%d) not written' % (x, y))
+                elif (x, y) == (7, 3):
+                    self.assertEqual(
+                        got, bytes((7 * 32, 3 * 64, (7 + 3) * 16, 255)),
+                        'uncovered texel (7,3) was clobbered')
         self.assertEqual(self.f.owner.work_refs, 0)
 
     def test_two_draws_write_in_record_order(self):
