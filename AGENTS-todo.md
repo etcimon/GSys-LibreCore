@@ -18154,10 +18154,18 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   sources_unchanged true), local `test_vn_*` graphics suites green.
   Record: `architecture/uncore/
   apu-native-graphics-shade-implementation.md`.
+- [x] In-model dynamic offsets for graphics descriptor rows: `pDynamicOffsets`
+  -> `buffer_descriptor(dynamic_offset=...)` bakes `binding_offset +
+  descriptor.offset + dynamic_offset` into the ShaderBinding base;
+  `test_fragment_dynamic_ubo_offset_draw` (UNIFORM_BUFFER_DYNAMIC type 8,
+  pDynamicOffsets=[256] -> UBO read lands on buffer+256=0.75 not buffer+0
+  decoy=0.25), cohort `native-gfxdyn-01` 732 PASS
+  (`native-execution._di52ww_`, sources_unchanged true).
 - [ ] Mipmap/trilinear filtering + gather/proj/dref sample ops (all four
-  VkSamplerAddressMode values + bilinear filter already proven),
-  in-model
-  dynamic offsets, blend/depth/MRT, helper
+  VkSamplerAddressMode values + bilinear filter already proven; mipmap needs
+  a descriptor-binding ABI extension - ImageBinding mip count + mdim encode +
+  multi-level view admission),
+  blend/depth/MRT, helper
   lanes, non-triangle topology, flat/nopersp interpolation,
   multi-descriptor/multi-stage end-to-end draws and capability/CTS/physical
   gates before any capset or stock vkCmdDraw* advertisement; host-model

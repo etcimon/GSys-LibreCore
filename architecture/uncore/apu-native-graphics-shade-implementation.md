@@ -108,6 +108,18 @@ native cohort `native-gfxubo-01` on ovh_calltorch: 716 tests PASS in 19.144 s,
 `test_vn_*` sweep 731 PASS.  Host-native model only - no RTL/CTS/stock/
 hardware qualification.
 
+Dynamic descriptor offsets are likewise exercised end-to-end:
+`vkCmdBindDescriptorSets` `pDynamicOffsets` flow through
+`GraphicsBindings.resolve` -> `buffer_descriptor(dynamic_offset=...)`, which
+bakes `binding_offset + descriptor.offset + dynamic_offset` into the
+`ShaderBinding` base at resolve time (honouring
+`minUniformBufferOffsetAlignment`=256 and the dynamic layout ordinal).
+`test_fragment_dynamic_ubo_offset_draw` binds a UNIFORM_BUFFER_DYNAMIC
+(type 8) descriptor with `pDynamicOffsets=[256]` so the fragment UBO read
+lands on the float at buffer+256 (0.75) rather than the decoy at buffer+0
+(0.25); frozen cohort `native-gfxdyn-01`: 732 tests PASS in 21.554 s
+(`native-execution._di52ww_`), `sources_unchanged: true`.
+
 ## Image/sampler descriptor shade (implemented)
 
 `resolve_bindings` now accepts `ImageBinding` operands alongside

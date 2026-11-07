@@ -240,6 +240,72 @@ class DrawReplayTests(unittest.TestCase):
         self.assertEqual(self.read_texel(7, 3), self.clear_texel())
         self.assertEqual(self.f.owner.work_refs, 0)
 
+    def test_fragment_dynamic_ubo_offset_draw(self):
+        # end-to-end dynamic offset: a UNIFORM_BUFFER_DYNAMIC (type 8)
+        # descriptor bound with pDynamicOffsets=[256] shifts the shader's
+        # UBO read base by 256 bytes (minUniformBufferOffsetAlignment), so
+        # it loads the float at buffer+256 (0.75) rather than buffer+0
+        # (0.25).  The dynamic path bakes binding_offset + descriptor.offset
+        # + dynamic_offset into the ShaderBinding base at resolve time.
+        self.r.layout(((0, 8, 1, 16),))
+        self.f.command('vkDestroyShaderModule', device=self.w.DEVICE,
+                       shaderModule=self.FS2)
+        self.module(self.FS2, fs_program('color', ubo=True))
+        self.f.command('vkCreateBuffer', device=self.w.DEVICE, pBuffer=self.UBO,
+            pCreateInfo=self.w.structure('VkBufferCreateInfo', pNext=[], flags=0,
+                size=512, usage=0x10, sharingMode=0, queueFamilyIndexCount=0,
+                pQueueFamilyIndices=[]))
+        self.f.command('vkBindBufferMemory', device=self.w.DEVICE, buffer=self.UBO,
+                       memory=self.w.MEMORY, memoryOffset=2048)
+        self.f.command('vkCreateDescriptorPool', device=self.w.DEVICE,
+            pDescriptorPool=self.POOL,
+            pCreateInfo=self.w.structure('VkDescriptorPoolCreateInfo', pNext=[],
+                flags=1, maxSets=1, poolSizeCount=1, pPoolSizes=[
+                    self.w.structure('VkDescriptorPoolSize', type=8,
+                                     descriptorCount=1)]))
+        self.f.command('vkAllocateDescriptorSets', device=self.w.DEVICE,
+            pDescriptorSets=[self.DSET], pAllocateInfo=self.w.structure(
+                'VkDescriptorSetAllocateInfo', pNext=[],
+                descriptorPool=self.POOL, descriptorSetCount=1,
+                pSetLayouts=[self.r.DSL]))
+        self.f.command('vkUpdateDescriptorSets', device=self.w.DEVICE,
+            descriptorWriteCount=1, descriptorCopyCount=0, pDescriptorCopies=[],
+            pDescriptorWrites=[self.w.structure('VkWriteDescriptorSet', pNext=[],
+                dstSet=self.DSET, dstBinding=0, dstArrayElement=0,
+                descriptorCount=1, descriptorType=8, pTexelBufferView=[],
+                pImageInfo=[], pBufferInfo=[self.w.structure(
+                    'VkDescriptorBufferInfo', buffer=self.UBO, offset=0,
+                    range=4)])])
+        self.upload(self.ndc_triangle())
+        # decoy at the un-offset base (2048) and the dynamic target at +256
+        self.f.state.aperture.write(self.f.owner.base + 2048,
+                                    struct.pack('<f', 0.25))
+        self.f.state.aperture.write(self.f.owner.base + 2048 + 256,
+                                    struct.pack('<f', 0.75))
+        self.pipeline()
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.f.command('vkCmdBindDescriptorSets', commandBuffer=self.f.CB,
+            pipelineBindPoint=0, layout=self.g.PL, firstSet=0,
+            descriptorSetCount=1, pDescriptorSets=[self.DSET],
+            dynamicOffsetCount=1, pDynamicOffsets=[256])
+        self.draw()
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        job = self.f.enqueue()
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        did = self.e.golden.img_fmt_id(self.e.model, 37)
+        want = self.e.golden.img_clear_texel(
+            self.e.model, did,
+            struct.unpack('<4I', struct.pack('<4f', 0.75, 0.75, 0.75, 0.75)))
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), want)
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
     def test_fragment_sampled_image_fetch_reaches_framebuffer(self):
         # end-to-end: vkCmdBindDescriptorSets -> vkCmdDraw -> DrawExec ->
         # FragmentShade fetches a SAMPLED_IMAGE (UNIFORMCONST, kind 2)
@@ -360,7 +426,8 @@ class DrawReplayTests(unittest.TestCase):
                 image=self.IMAGE, viewType=1, format=37,
                 components=s('VkComponentMapping', r=0, g=0, b=0, a=0),
                 subresourceRange=s('VkImageSubresourceRange', aspectMask=1,
-                    baseMipLevel=0, levelCount=1, baseArrayLayer=0, layerCount=1)))
+                    baseMipLevel=0, levelCount=1, baseArrayLayer=0,
+                    layerCount=1)))
         self.f.command('vkCreateDescriptorPool', device=self.w.DEVICE,
             pDescriptorPool=self.POOL,
             pCreateInfo=s('VkDescriptorPoolCreateInfo', pNext=[], flags=1,
