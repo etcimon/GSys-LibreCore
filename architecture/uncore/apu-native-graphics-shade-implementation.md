@@ -214,7 +214,16 @@ directly in the RGBA framebuffer channels.  `test_fragment_image_gather`
 samples at u=0.35, v=0.4 (8.8 coord -> iu0=2, iv0=1 -> footprint
 x{2,3},y{1,2}) with comp=0 (R = x*32): texels (2,2)=64, (3,2)=96,
 (3,1)=96, (2,1)=64 -> framebuffer (64,96,96,64), no filtering.
-Projective and depth-reference sample ops stay queued.
+Projective sampling is likewise proven: `fs_proj_sample_program` emits
+`OpImageSampleProjImplicitLod` (opcode 91) over a vec3 coordinate
+`(u,v,d)`; the model's projective forms divide `coord.xy` by the last
+component before sampling (operand order ResultType, ResultId,
+SampledImage, Coordinate, ImageOperands mask - absent here so the
+implicit-LOD path runs with wc=5).  `test_fragment_projective_sample`
+uses u=0.6, v=0.7, d=2.0 -> divided coord (0.3,0.35) -> nearest mip0
+texel(2,1)=(64,64,48,255); the undivided (0.6,0.7) would hit texel(4,2)
+=(128,128,96,255), so the observed value proves the perspective divide
+ran.  Depth-reference (dref) sample ops stay queued.
 
 Evidence: `test_vn_graphics_draw_replay` gained nine image draws -
 `test_fragment_sampled_image_fetch_reaches_framebuffer` (constant ivec2
@@ -244,6 +253,9 @@ u=v=0.5 LOD=1.0 nearest -> mip1 solid green, not the mip0 (x,y) pattern),
 v=0.375 LOD=0.5 -> mip0 texel(3,1) + solid mip1 50/50 -> (48,128,32,255)),
 `test_fragment_image_gather` (OpImageGather opcode 96, comp=0 R-channel,
 u=0.35 v=0.4 -> footprint x{2,3},y{1,2} -> RGBA (64,96,96,64)),
+`test_fragment_projective_sample` (OpImageSampleProjImplicitLod opcode
+91, vec3 coord (0.6,0.7,2.0) -> divided (0.3,0.35) -> texel(2,1)
+(64,64,48,255)),
 plus
 `test_fragment_storage_image_write` (a STORAGE_IMAGE kind 3 bound via
 `OpTypeImage(sampled=2)`; `OpImageWrite` stores a constant red texel at the
@@ -255,7 +267,8 @@ unexercised kind-3 `GfxMemory` write admission end-to-end; the mipmap draw
 proves the descriptor ABI now carries a multi-level mip count into the
 sampled-image meta; the trilinear draw proves the fractional-LOD
 two-mip accumulate + fw blend arm; the gather draw proves the opcode-96
-footprint/component operand path.  Local `test_vn_*` sweep ran 750
+footprint/component operand path; the projective draw proves the
+coord.xy/d perspective divide.  Local `test_vn_*` sweep ran 751
 tests, all green.  Frozen native
 cohorts on ovh_calltorch:
 `native-gfximg-01` 720 tests PASS in 20.465 s (`native-execution.y6y3xap5`),
@@ -276,5 +289,6 @@ PASS (`native-execution._di52ww_`), and `native-gfxmip-01` 733 tests PASS
 in 21.0 s (`native-execution.hwg4luup`), and `native-gfxtrilin-01` 734
 tests PASS in 20.0 s (`native-execution.aaadxsp4`), and
 `native-gfxgather-01` 735 tests PASS in 21.4 s
-(`native-execution.22fa7i0d`), all `sources_unchanged: true`.
+(`native-execution.22fa7i0d`), and `native-gfxproj-01` 736 tests PASS in
+21.2 s (`native-execution.tfz4m7nk`), all `sources_unchanged: true`.
 Host-native model only - no RTL/CTS/stock/hardware qualification.

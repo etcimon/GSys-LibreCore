@@ -17,6 +17,15 @@
   scenarios/five negative checks and live-port synthesis pass. The strict
   captured CPU profile drops from 28 to 27 errors off/on. See
   `g6lc_storamic/architecture/cpu-load-translation.md`; no native gate is closed.
+- [x] Fix remote EDA dry-run classification: planned lint/formal/synthesis
+  return explicit skips rather than fabricated missing-result failures. The
+  original code rejects the new regression; actual-run checks stay intact.
+- [ ] Follow CPU32's source-frozen representation probe: 27 → 21 → 12 → 10
+  off/on reports, with seven real-loop canaries retained. Qualify any promoted
+  control/compiler changes and resolve the remaining scalar/process cones.
+- [ ] Establish a source-isolated aggregate route; the inspected generic remote
+  flow syncs a shared checkout, omits strict slang elaboration and cannot
+  substitute for native qualification. Local simulation preflight is not ready.
 - [ ] Resume fresh C0/C1 and native topology/provider dependencies from the
   completion plan; hyp8/compiler progress does not close functional-core
   qualification. Native checkpoint admission remains disabled.
@@ -18194,9 +18203,15 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   `test_fragment_image_gather` (comp=0 R-channel, u=0.35 v=0.4 ->
   footprint x{2,3},y{1,2} -> (64,96,96,64)), cohort `native-gfxgather-01`
   735 PASS (`native-execution.22fa7i0d`, sources_unchanged true).
-- [ ] Proj/dref sample ops (all four VkSamplerAddressMode values
-  + bilinear filter + explicit/implicit LOD + multi-mip select +
-  trilinear + gather already proven),
+- [x] OpImageSampleProjImplicitLod (opcode 91) projective sampling:
+  `fs_proj_sample_program` emits a vec3 coord (u,v,d); the model divides
+  coord.xy by d before sampling.  `test_fragment_projective_sample`
+  (u=0.6 v=0.7 d=2.0 -> divided (0.3,0.35) -> texel(2,1) (64,64,48,255),
+  distinct from undivided texel(4,2)), cohort `native-gfxproj-01` 736
+  PASS (`native-execution.tfz4m7nk`, sources_unchanged true).
+- [ ] Depth-reference (dref) sample ops (all four VkSamplerAddressMode
+  values + bilinear filter + explicit/implicit LOD + multi-mip select +
+  trilinear + gather + projective already proven),
   blend/depth/MRT, helper
   lanes, non-triangle topology, flat/nopersp interpolation,
   multi-descriptor/multi-stage end-to-end draws and capability/CTS/physical
