@@ -192,6 +192,10 @@ python3 $G --graphics-session ue_gpos_ftex_1 1
 # fragment discard/helper lane: fs_kill drops a FragCoord 8x8
 # checkerboard; vs_pos3 keeps vcol constant so tri_w holds on survivors
 python3 $G --graphics-session ue_gpos_kill_1 1
+# divergent function-call discard: fs_kill_fn sends odd-x lanes into a
+# killer() that discards while even-x lanes take other()=vcol*2 then
+# +0.25 blue; survivors clamp to (102,204,255,255), mask = x parity
+python3 $G --graphics-session ue_gpos_killfn_1 1
 # fragment textureBias: fs_tex_bias applies an explicit LOD bias
 # (vcol.z==0 -> bias 0) on the same 1x1 CIS — the bias texture path
 python3 $G --graphics-session ue_gpos_ftexb_1 1

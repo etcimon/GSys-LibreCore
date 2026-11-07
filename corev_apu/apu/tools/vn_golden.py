@@ -10465,7 +10465,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         is_wide = 'vbwide' in gfx
         # kill: fs_kill discards on a FragCoord 8x8 checkerboard — the
         # helper-lane path; vs_pos3 keeps vcol constant so tri_w holds
-        is_kill = 'kill' in gfx
+        # killfn: fs_kill_fn is the divergent function-call variant —
+        # odd-x lanes die inside killer(), even-x survive via other()
+        # (vcol*2) then +0.25 blue; checked before is_kill since
+        # 'killfn' also contains 'kill'
+        is_killfn = 'killfn' in gfx
+        is_kill = 'kill' in gfx and not is_killfn
         # G3b-iii F8: drawind/drawindx issue the same triangle through
         # DrawIndirect/DrawIndexedIndirect — the operand sits at a
         # 4-mod-8 byte offset inside a dedicated INDIRECT buffer to
@@ -10539,6 +10544,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'vs_texlod.spv' if is_vtex else
                           'vs_tex.spv' if is_ftex else
                           'vs_pos3.spv' if is_blend or is_wide or is_kill
+                          or is_killfn
                           or is_line or is_lstrip or is_polyln
                           or is_polypnt
                           else 'vs_passthru.spv')).read_bytes())]
@@ -10557,6 +10563,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'fs_tex_gather.spv' if is_ftexg else
                           'fs_tex_bias.spv' if is_ftexb else
                           'fs_tex_implicit.spv' if is_ftex else
+                          'fs_kill_fn.spv' if is_killfn else
                           'fs_kill.spv' if is_kill else
                           'fs_flat.spv')).read_bytes())]
         X = {k: 0x4000_0000_1000 + i * 0x1000_0001 for i, k in enumerate(
@@ -10727,11 +10734,20 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # OpImageGather result is a fixed function of the texel —
         # g0=(R,R,R,R)=(200,)*4 via comp0, g1=(G,)*4=(80,)*4 via comp1,
         # o=vec4(g0.x,g0.w,g1.x,g1.z)=(200,200,80,80) on the 1x1 CIS.
+        # killfn survivors: other()=vcol*2=(0.4,0.8,1.2,2.0) then
+        # +vec4(0,0,0.25,0)=(0.4,0.8,1.45,2.0), clamped to UNORM ->
+        # (102,204,255,255) = R|G<<8|B<<16|A<<24.
         out_w = (200 | (200 << 8) | (80 << 16) | (80 << 24)) \
-            if is_ftexg else tri_w
+            if is_ftexg else \
+            (0x66 | (0xCC << 8) | (0xFF << 16) | (0xFF << 24)) \
+            if is_killfn else tri_w
+        # kill masks: fs_kill drops the FragCoord 8x8 checkerboard;
+        # fs_kill_fn drops odd-x lanes (int(FragCoord.x)&1==1 -> killer).
+        # Both map int(FragCoord) == the framebuffer pixel (px,py).
         exp_img = [out_w if (w % CW, w // CW) in cov and
-                   not (is_kill and
-                        ((((w % CW) >> 3) + ((w // CW) >> 3)) & 1))
+                   not ((is_kill and
+                         ((((w % CW) >> 3) + ((w // CW) >> 3)) & 1)) or
+                        (is_killfn and ((w % CW) & 1)))
                    else clr_w
                    for w in range(CW * CH)]
         # evidence: ascii-art coverage map + a few sampled rows go to

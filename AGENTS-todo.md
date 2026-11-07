@@ -18326,6 +18326,15 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   ulp=0 XF_FAULTS 0` deterministic + randomized latency.  Wired into
   all three runner/regen lists.  (`fs_demote` helper-store variant
   still open — needs derivative+varying oracle.)
+- [x] **CLOSED — divergent function-call discard (`ue_gpos_killfn_1`):**
+  `vs_pos3` + `fs_kill_fn` — odd-`x` lanes call `killer()` (`discard`)
+  while even-`x` lanes take `other()`=`vcol*2`, then `+vec4(0,0,0.25,0)`.
+  Survivors clamp to `(102,204,255,255)` (`0xFFFFCC66`), mask =
+  `FragCoord.x` parity (distinct from `fs_kill`'s 8x8 checkerboard).
+  Exercises the divergent call/merge + callee-frame-pop path with
+  parked lanes.  `is_kill` re-scoped to exclude `killfn` ('kill' is a
+  substring).  PASS `g1=4096 g2=4096 ulp=0 XF_FAULTS 0` both latencies;
+  wired into all three lists.
 - [x] **CLOSED — fragment textureBias (`ue_gpos_ftexb_1`):** `vs_tex` +
   `fs_tex_bias` `texture(tex,vcol.xy,vcol.z)` explicit-LOD-bias on the
   same 1x1 `COMBINED_IMAGE_SAMPLER` (`vcol.z==0` -> bias 0 -> constant
