@@ -196,6 +196,10 @@ python3 $G --graphics-session ue_gpos_kill_1 1
 # killer() that discards while even-x lanes take other()=vcol*2 then
 # +0.25 blue; survivors clamp to (102,204,255,255), mask = x parity
 python3 $G --graphics-session ue_gpos_killfn_1 1
+# non-divergent function calls: fs_fncall runs a depth-3 chain
+# (l2->l3->shade) + inout param (dark) + early return on constant vcol
+# -> deterministic (20,78,173,255); no discard
+python3 $G --graphics-session ue_gpos_fncall_1 1
 # fragment textureBias: fs_tex_bias applies an explicit LOD bias
 # (vcol.z==0 -> bias 0) on the same 1x1 CIS — the bias texture path
 python3 $G --graphics-session ue_gpos_ftexb_1 1

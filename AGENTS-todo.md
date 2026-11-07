@@ -18335,6 +18335,14 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   parked lanes.  `is_kill` re-scoped to exclude `killfn` ('kill' is a
   substring).  PASS `g1=4096 g2=4096 ulp=0 XF_FAULTS 0` both latencies;
   wired into all three lists.
+- [x] **CLOSED — non-divergent function calls (`ue_gpos_fncall_1`):**
+  `vs_pos3` + `fs_fncall` — depth-3 chain `l2->l3->shade` + `inout`
+  param `dark(c,0.5)` + `early()` branch on constant `vcol`.  f32 trace
+  -> `(0.08,0.305,0.68,1.51)` -> UNORM `(20,78,173,255)`=`0xFFAD4E14`.
+  Exercises call/return value machinery + inout pointer param +
+  early-return merge (no discard — distinct from killfn).  PASS
+  `g1=4096 g2=4096 ulp=0 XF_FAULTS 0` both latencies; wired into all
+  three lists.
 - [x] **CLOSED — fragment textureBias (`ue_gpos_ftexb_1`):** `vs_tex` +
   `fs_tex_bias` `texture(tex,vcol.xy,vcol.z)` explicit-LOD-bias on the
   same 1x1 `COMBINED_IMAGE_SAMPLER` (`vcol.z==0` -> bias 0 -> constant
