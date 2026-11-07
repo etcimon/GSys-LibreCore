@@ -1788,7 +1788,12 @@ scanner refusal and original module provenance remain unchanged.
 
 Native image operands capture typed generations and immutable sampler values,
 validate bounded owned subviews and packed records, and return required
-references/guards without admitting shader-image work.
+references/guards without admitting shader-image work. Descriptor
+`VkDescriptorImageInfo.imageLayout` is now consulted at operand admission:
+it must equal the image's tracked layout at that stream position (the
+ordered replay walk publishes barrier layouts as it goes), in both the
+compute-dispatch and graphics-binding resolvers; per-subresource descriptor
+layouts remain unmodelled.
 `architecture/uncore/apu-native-image-operand-implementation.md`.
 
 Owned native compute images explicitly admit marked rows, share backing with
@@ -1834,6 +1839,29 @@ Native begin/end-render-pass metadata retains canonical identities, compatible
 framebuffer values, exact clear words and balanced recording scope. Owned
 operands/late guards publish no work or leases.
 `architecture/uncore/apu-native-render-pass-command-implementation.md`.
+
+Native render-pass creation admits bounded multi-subpass descriptions and
+validated VkSubpassDependency records (indices/EXTERNAL, stage/access masks,
+BY_REGION flag) retained on the RenderPass snapshot; per-subpass input,
+resolve, depth/stencil and preserve members stay refused. The native replay
+path executes all subpasses: vkCmdNextSubpass is captured as a NextPass
+recording (index+1 < subpass_count), per-subpass boundary layout transitions
+publish last-referenced/initial layouts two-phase, ClearAttachments and
+draw-state consumers index the active subpass, and pipelines admit
+VkGraphicsPipelineCreateInfo.subpass in 0..subpass_count-1 with draws
+requiring pipeline.subpass == active subpass. The wire path now walks the
+same per-subpass ObjPay blocks: vn_golden parses subpassCount 1..4 with an
+S==1-identical single-subpass path and a depth-free exact-consumption
+multi-subpass walk plus rp_on/sp_act/sp_n tracking (NextSubpass bound);
+RTL StBrpPayCpl fills a bounded sp_ncl/sp_cref/sp_dref table, snapshots
+ca_q/da_q per active subpass and re-snapshots on vkCmdNextSubpass.
+Pipeline-subpass admission is wired end-to-end: pCreateInfos.subpass is
+the last graphics-pipeline keep word, vnfront bounds it to 0..3 and parks
+it in pipeline aux[9:8], g6lc_apu_vgp decode admits subpass[31:2]==0, and
+cmdexec StDsPipeCpl requires aux[9:8] == snap_q.subpass for every draw
+record (direct + indirect; the Python mirror compares sp_act against
+aux[9:8] identically). `architecture/uncore/apu-native-subpass-
+dependency-implementation.md`.
 
 Native graphics resource requirements validate specialized VS/FS descriptors
 and bounded occupied push words against retained layout values before allocation.
@@ -1922,3 +1950,15 @@ private retained bytes, capacity, DEVBACKED multi-alias re-base,
 VkBuffer/VkImage SETBIND invalidation and remap-move-back remain open.
 Leaf evidence only; no capset/stock claim.
 `architecture/uncore/apu-vgctl-unmap-hold-implementation.md`.
+
+Native external semaphore resource binding: `vkImportSemaphoreResourceMESA`
+and `vkWaitSemaphoreResourceMESA` are admitted TRANSPORT-class wire
+commands (decoder tables regenerated additively; transport HANDLE operands
+emit discarded U64 since HANDLE ops have no slot-discard encoding). Both
+native transport models bind a semaphore handle to a blob `resourceId`
+that must resolve to a live mapped resource, and wait reports pending
+while any ring on that resource holds unconsumed submissions or is fatal
+— fatal on the §6b pump path, `RingBlocked` park on LinearExecution.
+RTL pump still `StFatal`-refuses pending the pump-table/wait-state
+increment; no capset/stock/CTS/physical claim.
+`architecture/uncore/apu-native-semaphore-resource-implementation.md`.

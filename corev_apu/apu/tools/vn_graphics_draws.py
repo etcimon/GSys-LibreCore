@@ -7,7 +7,7 @@ from vn_graphics_bindings import GraphicsBindings
 from vn_graphics_dynamic import DynamicCommand, Recording, validate as dynamic_values
 from vn_graphics_dynamic import validate_recording
 from vn_native_rendering import framebuffer_operand
-from vn_render_pass_commands import BeginPass, EndPass
+from vn_render_pass_commands import BeginPass, EndPass, NextPass
 from vn_vertex_operands import BufferBindings, BufferSource, operand as buffer_span
 
 
@@ -31,6 +31,7 @@ class DrawPlan(Recording):
     pipeline: object
     stage_bindings: object
     pass_state: object
+    subpass: int
     attachments: tuple
     framebuffer: object
     viewport: tuple
@@ -55,6 +56,7 @@ class GraphicsDraws:
         self.viewport = self.scissor = None
         self.vertices, self.index_source = {}, None
         self.pass_state = None
+        self.subpass = 0
         self.plans = []
         self.position = 0
 
@@ -81,6 +83,9 @@ class GraphicsDraws:
             return True
         if name == 'vkCmdEndRenderPass':
             self._end(record)
+            return True
+        if name == 'vkCmdNextSubpass':
+            self._next(record)
             return True
         if name in self.DRAWS:
             self._draw(name, record)
@@ -123,12 +128,22 @@ class GraphicsDraws:
         if self.pass_state is not None:
             raise ValueError('graphics draw render pass is nested')
         self.pass_state = snapshot
+        self.subpass = 0
+
+    def _next(self, record):
+        snapshot = record.get('native_render_pass')
+        if (not isinstance(snapshot, NextPass) or self.pass_state is None or
+                snapshot.begin is not self.pass_state or
+                snapshot.subpass != self.subpass + 1):
+            raise ValueError('graphics draw next subpass does not match active pass')
+        self.subpass = snapshot.subpass
 
     def _end(self, record):
         snapshot = record.get('native_render_pass')
         if not isinstance(snapshot, EndPass) or snapshot.begin is not self.pass_state:
             raise ValueError('graphics draw render-pass end does not match begin')
         self.pass_state = None
+        self.subpass = 0
 
     def _indirect(self, name, record):
         size = 20 if 'Indexed' in name else 16
@@ -181,6 +196,8 @@ class GraphicsDraws:
         snapshot = operands.pipeline
         if not snapshot.render_pass.compatible(self.pass_state.render_pass_state):
             raise ValueError('graphics draw pipeline/render pass is incompatible')
+        if snapshot.subpass != self.subpass:
+            raise ValueError('graphics draw pipeline subpass differs from active subpass')
         indexed = 'Indexed' in name
         indirect = 'Indirect' in name
         strides = {binding: (stride, rate) for binding, stride, rate in snapshot.fixed.bindings}
@@ -230,6 +247,6 @@ class GraphicsDraws:
         validate()
         self.plans.append(DrawPlan(recording.context, recording.device,
             recording.command_buffer, recording.recording, len(self.plans), name,
-            values, args, snapshot, operands, self.pass_state, framebuffer.attachments,
-            framebuffer, self.viewport, self.scissor, tuple(vertices), indices,
-            tuple(dict.fromkeys(references)), validate))
+            values, args, snapshot, operands, self.pass_state, self.subpass,
+            framebuffer.attachments, framebuffer, self.viewport, self.scissor,
+            tuple(vertices), indices, tuple(dict.fromkeys(references)), validate))

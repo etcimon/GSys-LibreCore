@@ -58,7 +58,7 @@ class BindingTests(unittest.TestCase):
                 imageType=1, format=37, extent=self.w.structure(
                     'VkExtent3D', width=8, height=4, depth=1), mipLevels=1,
                 arrayLayers=1, samples=1, tiling=0, usage=15, sharingMode=0,
-                queueFamilyIndexCount=0, pQueueFamilyIndices=[], initialLayout=0))
+                queueFamilyIndexCount=0, pQueueFamilyIndices=[], initialLayout=1))
         self.f.command('vkBindImageMemory', device=self.w.DEVICE, image=self.IMAGE,
                        memory=self.w.MEMORY, memoryOffset=4096)
         self.f.command('vkCreateImageView', device=self.w.DEVICE, pView=self.VIEW,

@@ -597,7 +597,10 @@ fields = ["uint32", "pRanges.aspectMask", "pRanges.baseMipLevel",
 # attachment + the 4-word blendConstants blob, pDynamicState
 # presence + dynamicStateCount + the dynamicStates blob, then the
 # layout id (2w) — layout follows the state structs in the
-# create-info wire order.  Pointee members drop the pointer hop from
+# create-info wire order — then subpass (the declared subpass index
+# parks in the pipeline object's aux[9:8] and is matched against the
+# active render-pass subpass at draw assembly).  Pointee members drop
+# the pointer hop from
 # the path (pVertexInputState/pInputAssemblyState/pViewportState/
 # pViewports/pScissors/pRasterizationState/
 # pDepthStencilState/pColorBlendState/pDynamicState are transparent).
@@ -680,7 +683,8 @@ fields = ["pCreateInfos.stageCount",
           "pCreateInfos.pDynamicState",
           "pCreateInfos.dynamicStateCount",
           "pCreateInfos.pDynamicStates",
-          "pCreateInfos.layout"]
+          "pCreateInfos.layout",
+          "pCreateInfos.subpass"]
 
 [keep.vkCreateRenderPass]
 # {attachmentCount, per attachment {format, loadOp, storeOp},

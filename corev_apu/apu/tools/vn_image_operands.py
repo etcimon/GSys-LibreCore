@@ -150,7 +150,8 @@ def image_descriptor(engine, context_id, descriptor_set, binding, element=0, set
                 fmt >= len(names) or names[fmt].startswith(('D', 'S8', 'X8_D')) or
                 bpp[fmt] not in (1, 2, 4, 8, 16) or
                 not (aux >> 54) & (8 if source.dtype == 3 else 4) or
-                source.layout not in ((1,) if source.dtype == 3 else (1, 5))):
+                source.layout not in ((1,) if source.dtype == 3 else (1, 5)) or
+                image.get('layout', 0) != source.layout):
             raise ValueError('image descriptor type/format/view/layout exceeds native profile')
         layer_bytes = engine.golden.img_layer_bytes(engine.model, base_w, base_h, fmt, mips)
         mip_offset = sum(engine.golden.img_mpitch(engine.model, base_w, fmt, level) *

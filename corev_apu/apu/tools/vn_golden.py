@@ -2234,6 +2234,9 @@ class FrontModel(ObjectTable, PayloadMemory):
                 elif w == 1:
                     scdyn = 1
         lid = nx() | (nx() << 32)            # pipeline layout id
+        sp = nx()                            # declared subpass (0..3)
+        if sp > 3:
+            return fail()
         # G3b-ii StGpModL/C: VS then FS — ObjTab LOOKUP the module,
         # FILL residency (the commit scan re-runs on the parked
         # pCode), then ObjTab PIN for the pipeline's lifetime
@@ -2330,9 +2333,13 @@ class FrontModel(ObjectTable, PayloadMemory):
         for i, w in enumerate(words):
             self.pay[pbase + i] = w
             out['payw'].append((pbase + i, w))
-        # aux[31:0] = {block chunk[15:0], 9'h0, gfx=1[6], 6'h0}
+        # aux[31:0] = {ObjPay block chunk[15:0], 6'h0, subpass[1:0]@9:8,
+        #              1'h0, gfx=1[6], 6'h0} — mirrors vnfront's
+        # auxlo_val_q; cmdexec matches aux[9:8] against the active
+        # subpass at draw assembly (StDsPipeCpl)
         self.setaux(h, 0xFFFF_FFFF,
-                    (((pbase >> 6) & 0xFFFF) << 16) | 0x40)
+                    (((pbase >> 6) & 0xFFFF) << 16) | ((sp & 3) << 8) |
+                    0x40)
         self.setauxhi(h, (le['gen'] << 16) | ls)
         return True
 
@@ -2865,6 +2872,9 @@ class FrontModel(ObjectTable, PayloadMemory):
             vbs = resume['vbs']
             ib = resume['ib']
             ca_ok = resume['ca_ok']
+            sp_act = resume['sp_act']
+            sp_n = resume['sp_n']
+            rp_on = resume['rp_on']
             wk = resume['wk']
             seq = resume['seq']
             ri0 = resume['ri']
@@ -2876,6 +2886,12 @@ class FrontModel(ObjectTable, PayloadMemory):
             vbs = [0] * 16
             ib = 0
             ca_ok = False
+            # bounded multi-subpass mirror of cmdexec's snap_q: the
+            # active subpass index, the pass's subpassCount, and the
+            # in-pass flag vkCmdNextSubpass validates against
+            sp_act = 0
+            sp_n = 0
+            rp_on = False
             # G1c: work-port sequence incl. internal render-pass
             # CLEAR items (BeginRP loadOp CLEAR emits a
             # CLEAR_ATTACHMENTS work before any following record
@@ -2989,7 +3005,8 @@ class FrontModel(ObjectTable, PayloadMemory):
                     return [need, dict(
                         seq=seq, ri=ri, bound=bound,
                         dset=list(dset), vbs=list(vbs), ib=ib,
-                        ca_ok=ca_ok, wk=wk)]
+                        ca_ok=ca_ok, sp_act=sp_act, sp_n=sp_n,
+                        rp_on=rp_on, wk=wk)]
             elif ct in (T['vkCmdDispatch'],
                         T.get('vkCmdDispatchBase', -1),
                         T.get('vkCmdDispatchIndirect', -1),
@@ -3010,7 +3027,7 @@ class FrontModel(ObjectTable, PayloadMemory):
                 # G1c: a draw also wants an active color attachment —
                 # either missing loses the submission like the
                 # no-pipeline dispatch (§5a G3b-iii: indirect draws
-                # take the same guard before the operand fetch)
+                # take the same guard before the operand fetch).
                 if bound == 0 or (draw and not ca_ok):
                     return True
                 if ind_noop:
@@ -3034,6 +3051,11 @@ class FrontModel(ObjectTable, PayloadMemory):
                 # G1c: a draw bound to a compute pipeline loses the
                 # submission (aux[6] marks a graphics pipeline)
                 if draw and not (pe['aux'] >> 6) & 1:
+                    return True
+                # pipeline-subpass admission (StDsPipeCpl mirror):
+                # the pipeline's declared subpass parks in aux[9:8]
+                # and must equal the render pass's active subpass
+                if draw and sp_act != ((pe['aux'] >> 8) & 3):
                     return True
                 pls = (pe['aux'] >> 32) & 0xFFFF
                 plg = (pe['aux'] >> 48) & 0xFFFF
@@ -3116,6 +3138,9 @@ class FrontModel(ObjectTable, PayloadMemory):
                 # memory.  A null handle (record-time miss) or any
                 # dead operand loses the submission.
                 ca_ok = False
+                rp_on = False
+                sp_act = 0
+                sp_n = 0
                 if not r['handle'][0] or not r['handle'][1]:
                     return True
                 st, _s, rpe = self.resolve(
@@ -3127,7 +3152,8 @@ class FrontModel(ObjectTable, PayloadMemory):
                 if st != 'OK':
                     return True
                 # rp ObjPay: {A, {fmt,loadOp,storeOp}*A, subpassCount,
-                # C, cref*C, [dref]}
+                # per subpass {C, cref*C, [dref]}} — the keep-fields emit
+                # one block per VkSubpassDescription in struct order.
                 rp_pay = ((rpe['aux'] >> 48) & 0xFFFF) << 6
                 rp_w = (rpe['aux'] >> 32) & 0xFFFF
                 na_ = self.pay.get(rp_pay, 0)
@@ -3135,20 +3161,49 @@ class FrontModel(ObjectTable, PayloadMemory):
                     return True
                 lds = [self.pay.get(rp_pay + 2 + 3 * k, 0)
                        for k in range(na_)]
-                if self.pay.get(rp_pay + 1 + 3 * na_, 0) != 1:
+                ns = self.pay.get(rp_pay + 1 + 3 * na_, 0)
+                if ns == 0 or ns > 4:
                     return True
-                nc = self.pay.get(rp_pay + 2 + 3 * na_, 0)
-                if nc > 4:
-                    return True
-                crefs = [self.pay.get(rp_pay + 3 + 3 * na_ + j, 0)
-                         for j in range(nc)]
-                dref = self.pay.get(rp_pay + 3 + 3 * na_ + nc, 0) \
-                    if rp_w > 3 + 3 * na_ + nc else 0xFFFFFFFF
-                for cv in crefs:
-                    if cv != 0xFFFFFFFF and cv >= na_:
+                pos = rp_pay + 2 + 3 * na_
+                crefs, dref = [], 0xFFFFFFFF
+                if ns == 1:
+                    nc = self.pay.get(pos, 0)
+                    if nc > 4:
                         return True
-                if dref != 0xFFFFFFFF and dref >= na_:
-                    return True
+                    crefs = [self.pay.get(pos + 1 + j, 0)
+                             for j in range(nc)]
+                    pos += 1 + nc
+                    if rp_w > pos - rp_pay:
+                        dref = self.pay.get(pos, 0)
+                        pos += 1
+                    for cv in crefs:
+                        if cv != 0xFFFFFFFF and cv >= na_:
+                            return True
+                    if dref != 0xFFFFFFFF and dref >= na_:
+                        return True
+                else:
+                    # multi-subpass blocks are {C_i, cref_i*C_i} only —
+                    # a depth reference would append an ambiguous word per
+                    # subpass, so the bounded profile requires exact
+                    # consumption of the payload (depth-free).  Draws
+                    # are subpass-0-only until pipeline-subpass
+                    # admission lands, so ca_ok keys on the FIRST
+                    # block's refs — the same row cmdexec snapshots
+                    # into ca_q/da_q for subpass 0
+                    for si in range(ns):
+                        nc = self.pay.get(pos, 0)
+                        if nc > 4:
+                            return True
+                        refs = [self.pay.get(pos + 1 + j, 0)
+                                for j in range(nc)]
+                        for cv in refs:
+                            if cv != 0xFFFFFFFF and cv >= na_:
+                                return True
+                        if si == 0:
+                            crefs = refs
+                        pos += 1 + nc
+                    if pos - rp_pay != rp_w:
+                        return True
                 # resolve every attachment's view -> image -> memory
                 fb_pay = ((fbe['aux'] >> 48) & 0xFFFF) << 6
                 for k in range(na_):
@@ -3174,6 +3229,9 @@ class FrontModel(ObjectTable, PayloadMemory):
                         return True
                 ca_ok = any(cv != 0xFFFFFFFF for cv in crefs) or \
                     dref != 0xFFFFFFFF
+                rp_on = True
+                sp_act = 0
+                sp_n = ns
                 # per-attachment loadOp CLEAR -> one internal raster
                 # clear work item each, in attachment order
                 for k in range(na_):
@@ -3185,9 +3243,15 @@ class FrontModel(ObjectTable, PayloadMemory):
                     self._rast_scr = True
                     self.pg_alloc(65536, priv=True)
             elif ct in (T.get('vkCmdEndRenderPass', -1),
-                        T.get('vkCmdEndRenderPass2', -1),
-                        T.get('vkCmdNextSubpass', -1)):
-                pass    # state only — no operand resolution
+                        T.get('vkCmdEndRenderPass2', -1)):
+                rp_on = False      # state only — no operand resolution
+            elif ct == T.get('vkCmdNextSubpass', -1):
+                # mirror cmdexec's bounded advance: only inside an
+                # active pass with a following subpass — the snapshot
+                # itself is replay-side state, not assembly work
+                if not rp_on or sp_act + 1 >= sp_n:
+                    return True
+                sp_act += 1
             elif ct == T.get('vkCmdBindVertexBuffers', -1):
                 # G1c: payload = [bindingCount resolved handles]
                 # [bindingCount u64 offsets] at imm[7] — §5a G3b-iii:
@@ -6296,6 +6360,7 @@ class TransportModel(ApertureState):
         self.rep_log = []                 # (ap_byte_off, words) per reply
         self.exec_log = []                # (name, out) per replying cmd
         self.vq_seqno = 0
+        self.sem_res = {}                 # semaphore handle -> resourceId
         self.stream_err = 0               # execbuf stream error flag
         self.T = {i['type_id']: n for n, i in model.cmd_info.items()}
         self.ACT = {i['type_id']: i['act']['class']
@@ -6528,6 +6593,29 @@ class TransportModel(ApertureState):
             slot = self.ring_of.get((ctx, handle))
             if slot is None or self.rings[slot]['head'] < sq:
                 return True
+        elif name == 'vkImportSemaphoreResourceMESA':
+            # 0:type 1:flags 2-3:device 4-5:presence64 6:sType
+            # 7..: pNext chain headers+bodies, then the struct's own
+            # members — semaphore u64 and resourceId u32 always close
+            # the command (they follow the chain in wire order).
+            sem, rid = u64(len(w) - 3), w[-1]
+            if sem == 0 or self.blob_of(rid) is None:
+                return True
+            self.sem_res[sem] = rid
+        elif name == 'vkWaitSemaphoreResourceMESA':
+            # 0:type 1:flags 2-3:device 4-5:semaphore
+            rid = self.sem_res.get(u64(4))
+            if rid is None:
+                return True                # never imported / stale token
+            # pending work through the bound resource: any live ring
+            # created on this blob resource still holding unconsumed
+            # submissions ([head,tail) non-empty) or already fatal.
+            for r in self.rings:
+                if r is None or r['rid'] != rid:
+                    continue
+                tail = self.ap[r['tail_base_w']] & 0xFFFFFFFF
+                if r['fatal'] or tail > r['head']:
+                    return True            # would block / device lost
         else:
             return True                # unhandled transport command
         return False

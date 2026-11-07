@@ -31,14 +31,36 @@ Storage descriptors require GENERAL; sampled descriptors allow GENERAL or
 SHADER_READ_ONLY. Image footprint, pitch, format, usage and owned allocation
 must agree. Depth, wider views and other unsupported shapes fail closed.
 
+## Descriptor Image Layout
+
+`VkDescriptorImageInfo.imageLayout` is captured at update time and must equal
+the image's tracked layout when the operand is admitted — the same point-in-time
+rule copies and clears already enforce. Replay walks records in stream order and
+image barriers publish layout during that walk, so a dispatch or draw sees the
+layout established by every preceding barrier in the submission, not the
+end-of-stream value; a later transition legitimately changes the image again and
+is not re-validated against earlier operands. A descriptor written for one
+layout and used while the image sits in another refuses before any lease or
+work item is published, in both the compute-dispatch and graphics-binding
+resolver paths. Per-subresource descriptor layouts remain unmodelled with the
+rest of the per-image granularity.
+
 ## Evidence
 
-398 frozen checks pass19.826s from
-`~/.cache/librecore/apu/native-execution.3u4m0xvv`;98 hashes unchanged and live
-inputs match. Sixteen new cases cover owned resolution without pins, sampled/
-combined/storage kinds, generation reuse, immutable sampler/layout reuse and
-updates, immutable copies, source-set free, subviews, layout/range metadata,
-rebinding, packed bytes, mid-read mutation, pool reset and executor refusal.
+684 frozen checks pass18.4s from remote cohort
+`native-desclayout-01` (`native-execution.ckilliqi`, ovh_calltorch,
+`sources_unchanged: true`). New cases cover declared-vs-tracked layout
+mismatch refusal at operand admission, recreation under the matching
+layout, and an end-to-end compute dispatch that refuses while the image
+is still UNDEFINED and succeeds only after the preceding barrier
+publishes the declared layout. The earlier operand cohort recorded
+398 frozen checks in 19.8s
+(`~/.cache/librecore/apu/native-execution.3u4m0xvv`, 98 hashes unchanged);
+its sixteen cases covered owned resolution without pins, sampled/
+combined/storage kinds, generation reuse, immutable sampler/layout reuse
+and updates, immutable copies, source-set free, subviews, layout/range
+metadata, rebinding, packed bytes, mid-read mutation, pool reset and
+executor refusal.
 
 Five-source MIT tier/header/syntax/whitespace audit passes; new sources ASCII.
 Native presence files=96 and default-PGO DEV PREFLIGHT OK perform no installation/

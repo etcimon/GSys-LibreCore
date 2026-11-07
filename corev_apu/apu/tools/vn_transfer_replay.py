@@ -144,7 +144,8 @@ class TransferReplay:
                         append(op)
                 if handled and name not in ('vkCmdBeginRenderPass',
                                             'vkCmdEndRenderPass',
-                                            'vkCmdClearAttachments'):
+                                            'vkCmdClearAttachments',
+                                            'vkCmdNextSubpass'):
                     continue
                 if shader is not None and name in shader.NAMES:
                     shader.replay(name, record)
@@ -158,7 +159,7 @@ class TransferReplay:
                     if shader is not None:
                         shader.reset()
                 elif name in ('vkCmdBeginRenderPass', 'vkCmdEndRenderPass',
-                              'vkCmdClearAttachments'):
+                              'vkCmdClearAttachments', 'vkCmdNextSubpass'):
                     replay_render_pass(engine, context_id, name, record,
                                        remember, append, guards)
                 elif name == 'vkCmdPipelineBarrier':

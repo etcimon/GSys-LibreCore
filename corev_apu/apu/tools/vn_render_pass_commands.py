@@ -20,11 +20,19 @@ class BeginPass(Recording):
 @dataclass(frozen=True)
 class EndPass(Recording):
     begin: BeginPass
+    subpass: int
+
+
+@dataclass(frozen=True)
+class NextPass(Recording):
+    begin: BeginPass
+    subpass: int
 
 
 @dataclass(frozen=True)
 class ClearAttachments(Recording):
     begin: BeginPass
+    subpass: int
     attachments: tuple
     rects: tuple
 
@@ -84,12 +92,14 @@ def _capture_clear(engine, current, words, record):
     active = _active(identity[3])
     if not isinstance(active, BeginPass):
         raise ValueError('clear attachments command has no active render pass')
+    index = _subpass_index(identity[3], active)
     attachments, rects = _clear_packet(engine, words)
     rp = active.render_pass_state
+    colors = rp.subpass_colors(index)
     seen, items = set(), []
     for aspect, target, clear in attachments:
-        if (aspect != 1 or not 0 <= target < len(rp.colors) or
-                rp.colors[target][0] == 0xFFFFFFFF or target in seen):
+        if (aspect != 1 or not 0 <= target < len(colors) or
+                colors[target][0] == 0xFFFFFFFF or target in seen):
             raise ValueError('clear attachments target exceeds color profile')
         seen.add(target)
         items.append((target, clear))
@@ -98,7 +108,18 @@ def _capture_clear(engine, current, words, record):
         if base or layers != 1 or x < 0 or y < 0 or width <= 0 or height <= 0:
             raise ValueError('clear attachments rect/layer exceeds native profile')
         out.append((x, y, width, height))
-    return ClearAttachments(*identity, active, tuple(items), tuple(out))
+    return ClearAttachments(*identity, active, index, tuple(items), tuple(out))
+
+
+def _capture_next(engine, current, words, record):
+    identity = recording_identity(engine, current, record)
+    active = _active(identity[3])
+    if not isinstance(active, BeginPass):
+        raise ValueError('render pass command next subpass has no active pass')
+    index = _subpass_index(identity[3], active)
+    if index + 1 >= active.render_pass_state.subpass_count:
+        raise ValueError('render pass command next subpass exceeds subpass count')
+    return NextPass(*identity, active, index + 1)
 
 
 def _active(records):
@@ -109,6 +130,12 @@ def _active(records):
         if isinstance(state, BeginPass):
             return state
     return None
+
+
+def _subpass_index(records, begin):
+    return sum(1 for record in records
+               if isinstance(record.get('native_render_pass'), NextPass) and
+               record['native_render_pass'].begin is begin)
 
 
 def _packet(engine, words, count):
@@ -138,7 +165,7 @@ def _packet(engine, words, count):
 
 def capture(engine, current, name, words, record):
     if name == 'vkCmdNextSubpass':
-        raise ValueError('render pass command next subpass exceeds single-subpass profile')
+        return _capture_next(engine, current, words, record)
     if name == 'vkCmdClearAttachments':
         return _capture_clear(engine, current, words, record)
     if name not in ('vkCmdBeginRenderPass', 'vkCmdEndRenderPass', 'vkEndCommandBuffer'):
@@ -152,7 +179,7 @@ def capture(engine, current, name, words, record):
     if name == 'vkCmdEndRenderPass':
         if active is None:
             raise ValueError('render pass command end has no begin')
-        return EndPass(*identity, active)
+        return EndPass(*identity, active, _subpass_index(identity[3], active))
     if active is not None:
         raise ValueError('render pass command begin is nested')
     pay = record['pay']

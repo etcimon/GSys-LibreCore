@@ -213,6 +213,165 @@ class RenderingTests(unittest.TestCase):
                          texel * 8)
         self.assertEqual(self.f.owner.work_refs, 0)
 
+    def multi_pass(self, *, subpasses=(((0, 2),), ((0, 2),)), deps=(), handle=None,
+                   inputs=0, att_count=1):
+        subs = [self.w.structure('VkSubpassDescription', flags=0, pipelineBindPoint=0,
+            inputAttachmentCount=inputs, pInputAttachments=[self.w.structure(
+                'VkAttachmentReference', attachment=0, layout=1)] * inputs,
+            colorAttachmentCount=len(refs),
+            pColorAttachments=[self.w.structure('VkAttachmentReference', attachment=a,
+                layout=l) for a, l in refs], pResolveAttachments=[],
+            pDepthStencilAttachment=None, preserveAttachmentCount=0,
+            pPreserveAttachments=[]) for refs in subpasses]
+        handle = handle or self.RP2
+        self.f.command('vkCreateRenderPass', device=self.w.DEVICE,
+            pRenderPass=handle,
+            pCreateInfo=self.w.structure('VkRenderPassCreateInfo', pNext=[], flags=0,
+                attachmentCount=att_count, pAttachments=[self.w.structure('VkAttachmentDescription',
+                    flags=0, format=37, samples=1, loadOp=1, storeOp=0,
+                    stencilLoadOp=2, stencilStoreOp=1, initialLayout=0, finalLayout=1)
+                    for _ in range(att_count)],
+                subpassCount=len(subs), pSubpasses=subs,
+                dependencyCount=len(deps), pDependencies=[self.w.structure(
+                    'VkSubpassDependency', srcSubpass=s, dstSubpass=d, srcStageMask=ss,
+                    dstStageMask=ds, srcAccessMask=sa, dstAccessMask=da,
+                    dependencyFlags=f) for s, d, ss, ds, sa, da, f in deps]))
+        return self.f.entry(handle)['native_rendering']
+
+    def dep(self, s=0, d=1, ss=0x400, ds=0x2000, sa=0x100, da=0x80, f=0):
+        return (s, d, ss, ds, sa, da, f)
+
+    def test_multi_subpass_create_retains_subpasses_and_dependencies(self):
+        rp = self.multi_pass(subpasses=(((0, 2),), ((0, 1),)), deps=[self.dep()])
+        self.assertEqual(len(rp.subpasses), 2)
+        self.assertEqual(rp.subpasses[0], ((0, 2),))
+        self.assertEqual(rp.subpasses[1], ((0, 1),))
+        self.assertEqual(rp.colors, rp.subpasses[0])
+        self.assertEqual(len(rp.dependencies), 1)
+        self.assertEqual(rp.dependencies[0][:2], (0, 1))
+
+    def test_multi_subpass_external_and_self_dependencies_admitted(self):
+        rp = self.multi_pass(deps=[self.dep(s=0xFFFFFFFF, d=0),
+                                   self.dep(s=1, d=1), self.dep(s=0, d=0xFFFFFFFF)])
+        self.assertEqual(len(rp.dependencies), 3)
+
+    def test_dependency_refusals_cover_indices_flags_and_masks(self):
+        for bad in (self.dep(s=2), self.dep(d=2), self.dep(s=0xFFFFFFFF, d=0xFFFFFFFF),
+                    self.dep(f=2), self.dep(ss=0x40000000), self.dep(ds=1 << 30),
+                    self.dep(sa=1 << 30), self.dep(da=1 << 30)):
+            with self.assertRaises(ValueError):
+                self.multi_pass(deps=[bad])
+
+    def test_subpass_and_dependency_count_bounds(self):
+        # 4 subpasses / 8 dependencies are the admitted ceilings
+        rp = self.multi_pass(subpasses=(((0, 2),),) * 4,
+                             deps=[self.dep(s=0, d=1)] * 8)
+        self.assertEqual((len(rp.subpasses), len(rp.dependencies)), (4, 8))
+        with self.assertRaises(ValueError):
+            self.multi_pass(subpasses=(((0, 2),),) * 5)
+
+    def test_dependency_count_over_bound_refused(self):
+        with self.assertRaises(ValueError):
+            self.multi_pass(deps=[self.dep(s=0, d=1)] * 9)
+
+    def test_subpass_restricted_members_still_refused_per_subpass(self):
+        # an attachment shared across subpasses is legal
+        rp = self.multi_pass(subpasses=(((0, 2),), ((0, 2),)))
+        self.assertEqual(rp.subpasses[0], rp.subpasses[1])
+        with self.assertRaises(ValueError):
+            self.multi_pass(inputs=1)
+
+    def test_subpass_duplicate_color_ref_refused(self):
+        with self.assertRaises(ValueError):
+            self.multi_pass(subpasses=(((0, 2), (0, 1)),))
+
+    def test_multi_subpass_begin_next_end_executes(self):
+        self.multi_pass(subpasses=(((0, 2),), ((0, 1),)), att_count=1)
+        self.framebuffer(self.FB2, render_pass=self.RP2)
+        self.f.begin()
+        self.f.command('vkCmdBeginRenderPass', commandBuffer=self.f.CB, contents=0,
+            pRenderPassBegin=self.w.structure('VkRenderPassBeginInfo', pNext=[],
+                renderPass=self.RP2, framebuffer=self.FB2, renderArea=self.w.structure(
+                    'VkRect2D', offset=self.w.structure('VkOffset2D', x=0, y=0),
+                    extent=self.w.structure('VkExtent2D', width=8, height=4)),
+                clearValueCount=1, pClearValues=[self.w.structure('VkClearValue',
+                    color=self.w.structure('VkClearColorValue', uint32=[0, 0, 0, 0]))]))
+        self.f.command('vkCmdNextSubpass', commandBuffer=self.f.CB, contents=0)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        image = self.f.entry(self.IMAGE)
+        self.assertEqual(image.get('layout', 0), 0)
+        self.e.replay.enqueue(1, [self.f.CB])
+        self.f.drain()
+        # finalLayout=1 published after the end transition
+        self.assertEqual(image.get('layout', 0), 1)
+        did = self.e.golden.img_fmt_id(self.e.model, 37)
+        texel = self.e.golden.img_clear_texel(self.e.model, did, (0, 0, 0, 0))
+        self.assertEqual(self.f.state.aperture.read(self.f.owner.base + 4096, 32),
+                         texel * 8)
+
+    def test_multi_subpass_end_without_next_subpass_keeps_initial_layout(self):
+        # ending after subpass 0 skips later subpasses: an attachment only
+        # referenced by subpass 1 must still hold initialLayout at end and
+        # publish finalLayout, not be validated against subpass 1's layout
+        self.multi_pass(subpasses=(((0, 2),), ((0, 1),)), att_count=1)
+        self.framebuffer(self.FB2, render_pass=self.RP2)
+        self.f.begin()
+        self.f.command('vkCmdBeginRenderPass', commandBuffer=self.f.CB, contents=0,
+            pRenderPassBegin=self.w.structure('VkRenderPassBeginInfo', pNext=[],
+                renderPass=self.RP2, framebuffer=self.FB2, renderArea=self.w.structure(
+                    'VkRect2D', offset=self.w.structure('VkOffset2D', x=0, y=0),
+                    extent=self.w.structure('VkExtent2D', width=8, height=4)),
+                clearValueCount=1, pClearValues=[self.w.structure('VkClearValue',
+                    color=self.w.structure('VkClearColorValue', uint32=[0, 0, 0, 0]))]))
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        image = self.f.entry(self.IMAGE)
+        self.e.replay.enqueue(1, [self.f.CB])
+        self.f.drain()
+        # subpass 1 was never entered, so end-validation checks the
+        # subpass-0 layout (2), not subpass-1's (1); finalLayout=1 publishes
+        self.assertEqual(image.get('layout', 0), 1)
+
+    def test_multi_subpass_next_subpass_count_and_scope_refusals(self):
+        for mode in ('no_pass', 'past_last'):
+            with self.subTest(mode=mode):
+                case = RenderingTests()
+                case.setUp()
+                case.multi_pass(subpasses=(((0, 2),), ((0, 1),)), att_count=1)
+                case.framebuffer(case.FB2, render_pass=case.RP2)
+                case.f.begin()
+                if mode == 'past_last':
+                    case.f.command('vkCmdBeginRenderPass', commandBuffer=case.f.CB,
+                        contents=0,
+                        pRenderPassBegin=case.w.structure('VkRenderPassBeginInfo',
+                            pNext=[], renderPass=case.RP2, framebuffer=case.FB2,
+                            renderArea=case.w.structure('VkRect2D',
+                                offset=case.w.structure('VkOffset2D', x=0, y=0),
+                                extent=case.w.structure('VkExtent2D', width=8, height=4)),
+                            clearValueCount=1, pClearValues=[case.w.structure(
+                                'VkClearValue', color=case.w.structure(
+                                    'VkClearColorValue', uint32=[0, 0, 0, 0]))]))
+                    case.f.command('vkCmdNextSubpass', commandBuffer=case.f.CB,
+                                   contents=0)
+                with self.assertRaises(StreamFault):
+                    case.f.command('vkCmdNextSubpass', commandBuffer=case.f.CB,
+                                   contents=0)
+
+    def test_single_subpass_next_subpass_refuses_at_capture(self):
+        case = RenderingTests()
+        case.setUp()
+        case.f.begin()
+        case.f.command('vkCmdBeginRenderPass', commandBuffer=case.f.CB, contents=0,
+            pRenderPassBegin=case.w.structure('VkRenderPassBeginInfo', pNext=[],
+                renderPass=case.RP, framebuffer=case.FB, renderArea=case.w.structure(
+                    'VkRect2D', offset=case.w.structure('VkOffset2D', x=0, y=0),
+                    extent=case.w.structure('VkExtent2D', width=8, height=4)),
+                clearValueCount=1, pClearValues=[case.w.structure('VkClearValue',
+                    color=case.w.structure('VkClearColorValue', uint32=[0, 0, 0, 0]))]))
+        with self.assertRaises(StreamFault):
+            case.f.command('vkCmdNextSubpass', commandBuffer=case.f.CB, contents=0)
+
 
 if __name__ == '__main__':
     unittest.main()

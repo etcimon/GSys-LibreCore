@@ -26,7 +26,7 @@ class DrawTests(unittest.TestCase):
                            memory=self.w.MEMORY, memoryOffset=offset)
         self.f.begin()
 
-    def pipeline_attrs(self, *, render_pass=None, attributes=((0, 0, 109, 0),),
+    def pipeline_attrs(self, *, render_pass=None, subpass=0, attributes=((0, 0, 109, 0),),
                        bindings=((0, 16, 0),), handle=None):
         s = self.w.structure
         self.f.command('vkCreateGraphicsPipelines', device=self.w.DEVICE, pipelineCache=0,
@@ -64,13 +64,13 @@ class DrawTests(unittest.TestCase):
                         colorWriteMask=15)], blendConstants=[0, 0, 0, 0]),
                 pDynamicState=s('VkPipelineDynamicStateCreateInfo', pNext=[], flags=0,
                     dynamicStateCount=2, pDynamicStates=[0, 1]),
-                layout=self.g.PL, renderPass=render_pass or self.g.r.RP, subpass=0,
+                layout=self.g.PL, renderPass=render_pass or self.g.r.RP, subpass=subpass,
                 basePipelineHandle=0, basePipelineIndex=-1)])
 
-    def begin_pass(self, rp=None):
+    def begin_pass(self, rp=None, fb=None):
         self.f.command('vkCmdBeginRenderPass', commandBuffer=self.f.CB, contents=0,
             pRenderPassBegin=self.w.structure('VkRenderPassBeginInfo', pNext=[],
-                renderPass=rp or self.g.r.RP, framebuffer=self.g.r.FB,
+                renderPass=rp or self.g.r.RP, framebuffer=fb or self.g.r.FB,
                 renderArea=self.w.structure('VkRect2D',
                     offset=self.w.structure('VkOffset2D', x=0, y=0),
                     extent=self.w.structure('VkExtent2D', width=8, height=4)),
@@ -355,6 +355,46 @@ class DrawTests(unittest.TestCase):
         stats = job.drawexec_stats[job.operation - 1]
         self.assertEqual((stats['triangles'], stats['records']), (1, 0))
         self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_multi_subpass_draw_indexes_active_subpass(self):
+        # two subpasses share attachment 0; the pipeline targets subpass 1
+        # and the draw is recorded after vkCmdNextSubpass
+        self.g.r.multi_pass(subpasses=(((0, 2),), ((0, 1),)), att_count=1)
+        self.g.r.framebuffer(self.g.r.FB2, render_pass=self.g.r.RP2)
+        self.pipeline_attrs(render_pass=self.g.r.RP2, subpass=1, handle=self.PIPE2)
+        self.begin_pass(rp=self.g.r.RP2, fb=self.g.r.FB2)
+        self.f.command('vkCmdNextSubpass', commandBuffer=self.f.CB, contents=0)
+        self.viewport()
+        self.scissor()
+        self.bind_pipeline(self.PIPE2)
+        self.bind_vb()
+        self.draw('vkCmdDraw', vertexCount=3, instanceCount=1,
+                  firstVertex=0, firstInstance=0)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        plan = self.state().plans[0]
+        self.assertEqual(plan.subpass, 1)
+        plan.validate()
+
+    def test_multi_subpass_pipeline_subpass_mismatch_is_refused(self):
+        # a subpass-0 pipeline cannot draw inside subpass 1
+        case = DrawTests()
+        case.setUp()
+        case.g.r.multi_pass(subpasses=(((0, 2),), ((0, 1),)), att_count=1)
+        case.g.r.framebuffer(case.g.r.FB2, render_pass=case.g.r.RP2)
+        case.pipeline_attrs(render_pass=case.g.r.RP2, subpass=0, handle=case.PIPE2)
+        case.begin_pass(rp=case.g.r.RP2, fb=case.g.r.FB2)
+        case.f.command('vkCmdNextSubpass', commandBuffer=case.f.CB, contents=0)
+        case.viewport()
+        case.scissor()
+        case.bind_pipeline(case.PIPE2)
+        case.bind_vb()
+        case.draw('vkCmdDraw', vertexCount=3, instanceCount=1,
+                  firstVertex=0, firstInstance=0)
+        case.f.command('vkCmdEndRenderPass', commandBuffer=case.f.CB)
+        case.f.end()
+        with self.assertRaisesRegex(ValueError, 'subpass'):
+            case.state()
 
     def test_records_must_be_consumed_in_order(self):
         self.prepared()

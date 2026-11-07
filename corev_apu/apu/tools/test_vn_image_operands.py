@@ -25,13 +25,14 @@ class ImageOperandTests(unittest.TestCase):
         self.sampler()
         self.sets()
 
-    def image(self, *, mips=1, layers=1):
+    def image(self, *, mips=1, layers=1, initial=1):
         self.f.command('vkCreateImage', device=self.w.DEVICE, pImage=self.IMAGE,
             pCreateInfo=self.w.structure('VkImageCreateInfo', pNext=[], flags=0,
                 imageType=1, format=37, extent=self.w.structure(
                     'VkExtent3D', width=8, height=4, depth=1),
                 mipLevels=mips, arrayLayers=layers, samples=1, tiling=0, usage=15,
-                sharingMode=0, queueFamilyIndexCount=0, pQueueFamilyIndices=[], initialLayout=0))
+                sharingMode=0, queueFamilyIndexCount=0, pQueueFamilyIndices=[],
+                initialLayout=initial))
         self.f.command('vkBindImageMemory', device=self.w.DEVICE, image=self.IMAGE,
                        memory=self.w.MEMORY, memoryOffset=4096)
 
@@ -107,12 +108,28 @@ class ImageOperandTests(unittest.TestCase):
         self.assertFalse(any(entry['pins'] for entry in self.f.front.ent if entry))
 
     def test_sampled_image_shader_read_layout_and_combined_sampler(self):
+        self.f.command('vkDestroyImageView', device=self.w.DEVICE, imageView=self.VIEW)
+        self.f.command('vkDestroyImage', device=self.w.DEVICE, image=self.IMAGE)
+        self.image(initial=5)
+        self.view()
         for dtype in (2, 1):
             self.sets(dtype)
             self.write(layout=5)
             operand = self.operand()
             self.assertEqual(operand.binding.kind, dtype)
             self.assertEqual(len(operand.references), 7 if dtype == 1 else 6)
+
+    def test_descriptor_layout_must_match_tracked_image_layout(self):
+        self.sets(1)
+        self.write(layout=5)
+        with self.assertRaises(ValueError):
+            self.operand()
+        self.f.command('vkDestroyImageView', device=self.w.DEVICE, imageView=self.VIEW)
+        self.f.command('vkDestroyImage', device=self.w.DEVICE, image=self.IMAGE)
+        self.image(initial=5)
+        self.view()
+        self.write(layout=5)
+        self.assertEqual(self.operand().binding.kind, 1)
 
     def test_view_reuse_does_not_redirect_descriptor(self):
         self.write()

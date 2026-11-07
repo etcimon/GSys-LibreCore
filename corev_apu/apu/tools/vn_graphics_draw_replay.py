@@ -40,7 +40,7 @@ def _scissor(plan):
 def _color_target(plan):
     """Exactly one active color output, written to its framebuffer
     attachment; FS must declare exactly that output location."""
-    colors = plan.pass_state.render_pass_state.colors
+    colors = plan.pass_state.render_pass_state.subpass_colors(plan.subpass)
     active = [(loc, ref[0]) for loc, ref in enumerate(colors)
               if ref[0] != 0xFFFFFFFF]
     if len(active) != 1:

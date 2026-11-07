@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 """Bounded render-pass attachment clears; no draw or shader execution."""
 from vn_transfer_executor import Transfer
-from vn_render_pass_commands import BeginPass, ClearAttachments, EndPass, operand
+from vn_render_pass_commands import BeginPass, ClearAttachments, EndPass, NextPass, operand
 
 
 def _operand(engine, context_id, begin, remember, guards):
@@ -29,19 +29,36 @@ def _emit(engine, attachment, region, clear, gated=False):
                        size, data=texel, conditional=gated)
 
 
-def _layouts(engine, context_id, fb, rp, remember, begin):
+def _subpass_refs(rp, upto):
+    return rp.subpasses[:upto] if rp.subpasses else (rp.colors,)[:upto]
+
+
+def _last_subpass_layout(rp, attachment, upto=None):
+    layout = None
+    for subpass in (_subpass_refs(rp, upto) if upto is not None
+                    else (rp.subpasses or (rp.colors,))):
+        for index, candidate in subpass:
+            if index == attachment:
+                layout = candidate
+    return layout
+
+
+def _layouts(engine, context_id, fb, rp, remember, begin, final=0):
     # §12.3 render-pass layout transitions: at begin every attachment
     # must sit in initialLayout (UNDEFINED discards from any state) and
-    # color-referenced attachments move to their subpass layout; at end
-    # attachments must still hold that layout and publish finalLayout.
-    # Validation resolves all entries before any publish so a duplicated
-    # attachment cannot validate against its own update.
+    # attachments referenced by the first subpass move to that subpass's
+    # layout; at end attachments must still hold the layout of the last
+    # subpass actually entered that referenced them (unentered trailing
+    # subpasses never transition) and publish finalLayout.  Validation
+    # resolves all entries before any publish so a duplicated attachment
+    # cannot validate against its own update.
     resolved = []
     for i, attachment in enumerate(fb.attachments):
-        initial, final = rp.attachments[i][6], rp.attachments[i][7]
-        sub = next((layout for index, layout in rp.colors if index == i), None)
+        initial, final_layout = rp.attachments[i][6], rp.attachments[i][7]
+        sub = (_last_subpass_layout(rp, i, 1) if begin
+               else _last_subpass_layout(rp, i, final + 1))
         _, entry = remember(attachment.image, engine.golden.KIND['VkImage'])
-        resolved.append((entry, initial, final, sub))
+        resolved.append((entry, initial, final_layout, sub))
     if begin:
         for entry, initial, _final, _sub in resolved:
             if initial != 0 and entry.get('layout', 0) != initial:
@@ -58,6 +75,32 @@ def _layouts(engine, context_id, fb, rp, remember, begin):
         elif initial != 0 and current != initial:
             raise ValueError('render pass attachment changed during the pass')
         entry['layout'] = final
+
+
+def _enter_subpass(engine, fb, rp, index, remember):
+    # subpass boundary: each attachment referenced by the entered subpass
+    # transitions from the layout of the subpass that last referenced it
+    # (or initialLayout when first referenced here; UNDEFINED discards)
+    # to this subpass's layout.  Unreferenced attachments keep their
+    # layout until a later subpass or the final transition.
+    wanted = {ref[0]: ref[1] for ref in rp.subpass_colors(index)}
+    resolved = []
+    for i, attachment in enumerate(fb.attachments):
+        if i not in wanted:
+            continue
+        initial = rp.attachments[i][6]
+        previous = _last_subpass_layout(rp, i, index)
+        _, entry = remember(attachment.image, engine.golden.KIND['VkImage'])
+        resolved.append((entry, initial, previous, wanted[i]))
+    for entry, initial, previous, _new in resolved:
+        current = entry.get('layout', 0)
+        if previous is not None:
+            if current != previous:
+                raise ValueError('render pass attachment layout mismatch at subpass boundary')
+        elif initial != 0 and current != initial:
+            raise ValueError('render pass attachment is not in initialLayout')
+    for entry, _initial, _previous, new in resolved:
+        entry['layout'] = new
 
 
 def _begin_pass(engine, context_id, state, remember, append, guards):
@@ -78,7 +121,7 @@ def _begin_pass(engine, context_id, state, remember, append, guards):
 
 def _clear_attachments(engine, context_id, state, remember, append, guards):
     result = _operand(engine, context_id, state.begin, remember, guards)
-    colors = state.begin.render_pass_state.colors
+    colors = state.begin.render_pass_state.subpass_colors(state.subpass)
     ax, ay, aw, ah = state.begin.area
     for target, clear in state.attachments:
         attachment_index = colors[target][0]
@@ -98,12 +141,19 @@ def _clear_attachments(engine, context_id, state, remember, append, guards):
 
 def replay(engine, context_id, name, record, remember, append, guards):
     state = record.get('native_render_pass')
+    if name == 'vkCmdNextSubpass':
+        if not isinstance(state, NextPass):
+            raise ValueError('render pass replay next subpass has no native identity')
+        result = _operand(engine, context_id, state.begin, remember, guards)
+        _enter_subpass(engine, result.framebuffer,
+                       state.begin.render_pass_state, state.subpass, remember)
+        return
     if name == 'vkCmdEndRenderPass':
         if not isinstance(state, EndPass):
             raise ValueError('render pass replay end has no begin identity')
         begin = state.begin
         _layouts(engine, context_id, begin.framebuffer_state,
-                 begin.render_pass_state, remember, False)
+                 begin.render_pass_state, remember, False, state.subpass)
         return
     if name == 'vkCmdClearAttachments':
         if not isinstance(state, ClearAttachments):

@@ -424,15 +424,23 @@ module g6lc_apu_cmdexec
     logic [31:0]         brp_rpay_q;      // render-pass ObjPay base
     logic [15:0]         brp_rpw_q;       // render-pass ObjPay word count
     logic [31:0]         brp_fpay_q;      // framebuffer ObjPay base
-    logic [4:0]          brp_pi_q;        // rp ObjPay word cursor
+    logic [5:0]          brp_pi_q;        // rp ObjPay word cursor
     logic [2:0]          brp_ph_q;        // rp parse phase
     logic [2:0]          brp_att_q;       // attachmentCount (1..5)
-    logic [2:0]          brp_ncl_q;       // subpass colorAttachmentCount
+    logic [2:0]          brp_nsp_q;       // subpassCount (1..4)
+    logic [1:0]          brp_sp_q;        // subpass parse cursor
     logic [2:0]          brp_ak_q;        // attachment resolve/clear idx
     logic [1:0]          brp_ai_q;        // per-attachment word cursor
     logic [1:0]          brp_cj_q;        // subpass color-ref cursor
-    logic [3:0][3:0]     brp_cref_q;      // subpass colour refs (att idx, F=unused)
-    logic [3:0]          brp_dref_q;      // depth ref (F = none)
+    // bounded multi-subpass table: per-subpass {colorAttachmentCount,
+    // colour refs, depth ref}; the active subpass's row is snapshotted
+    // into ca_q/da_q at BeginRenderPass and re-snapshotted on
+    // vkCmdNextSubpass.  S>1 payloads are depth-free (an extra depth
+    // word per subpass would be ambiguous with the next block's
+    // colorAttachmentCount), so sp_dref_q stays 4'hF for i>0.
+    logic [3:0][2:0]     sp_ncl_q;        // per-subpass colorAttachmentCount
+    logic [3:0][3:0][3:0] sp_cref_q;      // per-subpass colour refs
+    logic [3:0][3:0]     sp_dref_q;       // per-subpass depth ref (F=none)
     logic [63:0]         brp_viewid_q;    // framebuffer view id in flight
     logic [15:0]         brp_islot_q;     // view's image slot
     // pay-walk selector (exactly one): push merge, bind-sets stream,
@@ -897,8 +905,8 @@ module g6lc_apu_cmdexec
         StBrpPayReq: begin
           // G2a: rp ObjPay word brp_pi_q — the phase machine in
           // StBrpPayCpl walks {attachmentCount, {format,loadOp,
-          // storeOp}×A, subpassCount, colorAttachmentCount,
-          // colour refs×C, depth ref}
+          // storeOp}×A, subpassCount, per subpass {colorAttachmentCount,
+          // colour refs×C, [depth ref on the last block only]}}
           op_req_valid_o = 1'b1;
           op_req_o       = '{op: APU_OBJPAY_OP_READ,
                              addr: brp_rpay_q + 32'(brp_pi_q),
@@ -1088,9 +1096,10 @@ module g6lc_apu_cmdexec
         rd_gpay_q   <= '0;
         brp_rpay_q  <= '0; brp_rpw_q <= '0; brp_fpay_q <= '0;
         brp_pi_q    <= '0; brp_ph_q <= '0;
-        brp_att_q   <= '0; brp_ncl_q <= '0; brp_ak_q <= '0;
+        brp_att_q   <= '0; brp_nsp_q <= '0; brp_sp_q <= '0;
+        brp_ak_q    <= '0;
         brp_ai_q    <= '0; brp_cj_q <= '0;
-        brp_cref_q  <= '0; brp_dref_q <= 4'hF;
+        sp_ncl_q    <= '0; sp_cref_q <= '0; sp_dref_q <= '1;
         brp_viewid_q <= '0; brp_islot_q <= '0;
         pay_vb_q    <= 1'b0; pay_vp_q <= 1'b0;
         pay_sc_q    <= 1'b0; pay_clr_q <= 1'b0;
@@ -1563,8 +1572,49 @@ module g6lc_apu_cmdexec
                                  7'(rec_q.imm[4] > 32'd5
                                     ? 32'd20 : rec_q.imm[4] << 2);
                   end
-                  APU_VN_TYPE_VK_CMD_NEXT_SUBPASS_EXT:
-                    snap_q.subpass <= snap_q.subpass + 4'd1;
+                  APU_VN_TYPE_VK_CMD_NEXT_SUBPASS_EXT: begin
+                    // bounded multi-subpass: advance only inside an
+                    // active pass with a following subpass, then
+                    // re-snapshot ca/da from the parsed per-subpass
+                    // table.  Draws then match the bound pipeline's
+                    // declared subpass (aux[9:8]) against this index
+                    // at StDsPipeCpl — a mismatch loses the submission.
+                    if (!snap_q.rp_active ||
+                        snap_q.subpass + 4'd1 >= {1'b0, brp_nsp_q}) begin
+                      lost_q <= 1'b1;
+                    end else begin
+                      ca_q       <= '0;
+                      ca_valid_q <= '0;
+                      da_q       <= '0;
+                      da_valid_q <= 1'b0;
+                      for (int l = 0; l < 4; l++)
+                        if (3'(l) <
+                            sp_ncl_q[snap_q.subpass[1:0] + 2'd1] &&
+                            sp_cref_q[snap_q.subpass[1:0] + 2'd1][l]
+                                != 4'hF) begin
+                          if (sp_cref_q[snap_q.subpass[1:0] + 2'd1][l]
+                              < 4'(brp_att_q)) begin
+                            ca_q[l] <= att_img_q[
+                                sp_cref_q[snap_q.subpass[1:0] + 2'd1][l]];
+                            ca_valid_q[l] <= 1'b1;
+                          end else begin
+                            lost_q <= 1'b1;
+                          end
+                        end
+                      if (sp_dref_q[snap_q.subpass[1:0] + 2'd1]
+                          != 4'hF) begin
+                        if (sp_dref_q[snap_q.subpass[1:0] + 2'd1]
+                            < 4'(brp_att_q)) begin
+                          da_q <= att_img_q[
+                              sp_dref_q[snap_q.subpass[1:0] + 2'd1]];
+                          da_valid_q <= 1'b1;
+                        end else begin
+                          lost_q <= 1'b1;
+                        end
+                      end
+                      snap_q.subpass <= snap_q.subpass + 4'd1;
+                    end
+                  end
                   APU_VN_TYPE_VK_CMD_END_RENDER_PASS_EXT,
                   APU_VN_TYPE_VK_CMD_END_RENDER_PASS_2_EXT:
                     snap_q.rp_active <= 1'b0;
@@ -1687,10 +1737,10 @@ module g6lc_apu_cmdexec
                   end
                 end else if (rec_is_draw) begin
                   // G1c/G2a: draw needs a bound graphics pipeline (the
-                  // aux[6] check lands at StDsPipeCpl) and at least one
-                  // active attachment (colour or depth) — either
-                  // missing loses the submission like the no-pipeline
-                  // dispatch
+                  // aux[6] check lands at StDsPipeCpl), at least one
+                  // active attachment (colour or depth), and a pipeline
+                  // whose declared subpass (aux[9:8]) matches the
+                  // active subpass — also checked at StDsPipeCpl
                   if (snap_q.pipeline == 32'h0 ||
                       (ca_valid_q == 4'h0 && !da_valid_q)) begin
                     lost_q  <= 1'b1;
@@ -1786,6 +1836,14 @@ module g6lc_apu_cmdexec
             end else if (rec_is_draw && !ot_cpl_i.entry.aux[6]) begin
               // G1c: a draw bound to a compute pipeline loses the
               // submission (aux[6] marks a graphics pipeline)
+              lost_q  <= 1'b1;
+              state_q <= StUnpReq;
+            end else if (rec_is_draw &&
+                         snap_q.subpass != {2'b0, ot_cpl_i.entry.aux[9:8]}) begin
+              // pipeline-subpass admission: the pipeline's declared
+              // subpass (aux[9:8], staged by vnfront from the keep
+              // word) must equal the render pass's active subpass —
+              // a mismatch loses the submission like a dead pipeline
               lost_q  <= 1'b1;
               state_q <= StUnpReq;
             end else begin
@@ -2656,6 +2714,11 @@ module g6lc_apu_cmdexec
               brp_rpw_q  <= ot_cpl_i.entry.aux[47:32];
               brp_pi_q   <= '0;
               brp_ph_q   <= '0;
+              brp_nsp_q  <= '0;
+              brp_sp_q   <= '0;
+              sp_ncl_q   <= '0;
+              sp_cref_q  <= '0;
+              sp_dref_q  <= '1;
               state_q    <= StBrpPayReq;
             end
           end
@@ -2665,7 +2728,7 @@ module g6lc_apu_cmdexec
               lost_q  <= 1'b1;
               state_q <= StUnpReq;
             end else begin
-              brp_pi_q <= brp_pi_q + 5'd1;
+              brp_pi_q <= brp_pi_q + 6'd1;
               state_q  <= StBrpPayReq;
               unique case (brp_ph_q)
                 3'd0: begin
@@ -2699,59 +2762,96 @@ module g6lc_apu_cmdexec
                   end
                 end
                 3'd2: begin
-                  // subpassCount — v1 draws use subpass 0 only
-                  if (op_cpl_i.rdata != 32'd1) begin
+                  // subpassCount — bounded profile admits 1..4; each
+                  // subpass then contributes one {C, refs*C} block
+                  if (op_cpl_i.rdata == 32'd0 ||
+                      op_cpl_i.rdata > 32'd4) begin
                     lost_q  <= 1'b1;
                     state_q <= StUnpReq;
                   end else begin
-                    brp_ph_q <= 3'd3;
+                    brp_nsp_q <= 3'(op_cpl_i.rdata);
+                    brp_sp_q  <= '0;
+                    brp_ph_q  <= 3'd3;
                   end
                 end
                 3'd3: begin
-                  // subpass colorAttachmentCount (0..4)
+                  // subpass[brp_sp_q] colorAttachmentCount (0..4)
                   if (op_cpl_i.rdata > 32'd4) begin
                     lost_q  <= 1'b1;
                     state_q <= StUnpReq;
                   end else begin
-                    brp_ncl_q <= 3'(op_cpl_i.rdata);
+                    sp_ncl_q[brp_sp_q] <= 3'(op_cpl_i.rdata);
                     if (op_cpl_i.rdata == 32'd0) begin
-                      // no colour refs — straight to the depth check
-                      if (32'(brp_pi_q + 5'd1) < {16'h0, brp_rpw_q})
-                        brp_ph_q <= 3'd5;
-                      else begin
-                        brp_dref_q <= 4'hF;
-                        brp_ak_q   <= '0;
-                        state_q    <= StBrpFbReq;
+                      // no colour refs — straight to the block tail
+                      if (brp_nsp_q == 3'd1) begin
+                        if (32'(brp_pi_q + 6'd1) < {16'h0, brp_rpw_q})
+                          brp_ph_q <= 3'd5;
+                        else begin
+                          brp_ak_q <= '0;
+                          state_q  <= StBrpFbReq;
+                        end
+                      end else if ({1'b0, brp_sp_q} + 3'd1 <
+                                   {1'b0, brp_nsp_q}) begin
+                        brp_sp_q <= brp_sp_q + 2'd1;
+                        brp_ph_q <= 3'd3;
+                      end else if (32'(brp_pi_q + 6'd1) ==
+                                   {16'h0, brp_rpw_q}) begin
+                        brp_ak_q <= '0;
+                        state_q  <= StBrpFbReq;
+                      end else begin
+                        lost_q  <= 1'b1;
+                        state_q <= StUnpReq;
                       end
                     end else begin
+                      brp_cj_q <= '0;
                       brp_ph_q <= 3'd4;
                     end
                   end
                 end
                 3'd4: begin
                   // pColorAttachments[j].attachment (F = UNUSED)
-                  brp_cref_q[brp_cj_q[1:0]] <=
+                  sp_cref_q[brp_sp_q][brp_cj_q] <=
                       op_cpl_i.rdata == 32'hFFFF_FFFF
                       ? 4'hF : op_cpl_i.rdata[3:0];
-                  if (brp_cj_q + 2'd1 >= {1'b0, brp_ncl_q}) begin
-                    if (32'(brp_pi_q + 5'd1) < {16'h0, brp_rpw_q}) begin
-                      brp_ph_q <= 3'd5;
+                  if ({2'b0, brp_cj_q} + 3'd1 >=
+                      {1'b0, sp_ncl_q[brp_sp_q]}) begin
+                    if (brp_nsp_q == 3'd1) begin
+                      if (32'(brp_pi_q + 6'd1) < {16'h0, brp_rpw_q}) begin
+                        brp_ph_q <= 3'd5;
+                      end else begin
+                        brp_ak_q <= '0;
+                        state_q  <= StBrpFbReq;
+                      end
+                    end else if ({1'b0, brp_sp_q} + 3'd1 <
+                                 {1'b0, brp_nsp_q}) begin
+                      brp_sp_q <= brp_sp_q + 2'd1;
+                      brp_cj_q <= '0;
+                      brp_ph_q <= 3'd3;
+                    end else if (32'(brp_pi_q + 6'd1) ==
+                                 {16'h0, brp_rpw_q}) begin
+                      brp_ak_q <= '0;
+                      state_q  <= StBrpFbReq;
                     end else begin
-                      brp_dref_q <= 4'hF;
-                      brp_ak_q   <= '0;
-                      state_q    <= StBrpFbReq;
+                      lost_q  <= 1'b1;
+                      state_q <= StUnpReq;
                     end
                   end else begin
                     brp_cj_q <= brp_cj_q + 2'd1;
                   end
                 end
-                default: begin
-                  // pDepthStencilAttachment.attachment (F = UNUSED);
-                  // the next word (if any) is unused preserve data
-                  brp_dref_q <= op_cpl_i.rdata == 32'hFFFF_FFFF
-                                ? 4'hF : op_cpl_i.rdata[3:0];
+                3'd5: begin
+                  // pDepthStencilAttachment.attachment (F = UNUSED) —
+                  // reachable only for subpassCount == 1; multi-subpass
+                  // payloads are depth-free by the exact-consumption
+                  // bound, and any trailing preserve words are ignored
+                  sp_dref_q[brp_sp_q] <= op_cpl_i.rdata == 32'hFFFF_FFFF
+                                        ? 4'hF : op_cpl_i.rdata[3:0];
                   brp_ak_q   <= '0;
                   state_q    <= StBrpFbReq;
+                end
+                default: begin
+                  lost_q  <= 1'b1;
+                  state_q <= StUnpReq;
                 end
               endcase
             end
@@ -2826,17 +2926,19 @@ module g6lc_apu_cmdexec
               da_q       <= '0;
               da_valid_q <= 1'b0;
               for (int l = 0; l < 4; l++)
-                if (3'(l) < brp_ncl_q && brp_cref_q[l] != 4'hF) begin
-                  if (brp_cref_q[l] < 4'(brp_att_q)) begin
-                    ca_q[l]       <= att_img_q[brp_cref_q[l]];
+                if (3'(l) < sp_ncl_q[snap_q.subpass[1:0]] &&
+                    sp_cref_q[snap_q.subpass[1:0]][l] != 4'hF) begin
+                  if (sp_cref_q[snap_q.subpass[1:0]][l] <
+                      4'(brp_att_q)) begin
+                    ca_q[l] <= att_img_q[sp_cref_q[snap_q.subpass[1:0]][l]];
                     ca_valid_q[l] <= 1'b1;
                   end else begin
                     lost_q <= 1'b1;
                   end
                 end
-              if (brp_dref_q != 4'hF) begin
-                if (brp_dref_q < 4'(brp_att_q)) begin
-                  da_q       <= att_img_q[brp_dref_q];
+              if (sp_dref_q[snap_q.subpass[1:0]] != 4'hF) begin
+                if (sp_dref_q[snap_q.subpass[1:0]] < 4'(brp_att_q)) begin
+                  da_q       <= att_img_q[sp_dref_q[snap_q.subpass[1:0]]];
                   da_valid_q <= 1'b1;
                 end else begin
                   lost_q <= 1'b1;
@@ -2854,7 +2956,8 @@ module g6lc_apu_cmdexec
               rd_q.da          <= '0;
               rd_q.da_valid    <= 1'b0;
               rd_q.clear_color <= '0;
-              if ({1'b0, brp_dref_q} == {1'b0, brp_ak_q}) begin
+              if ({1'b0, sp_dref_q[snap_q.subpass[1:0]]} ==
+                  {1'b0, brp_ak_q}) begin
                 rd_q.da             <= att_img_q[brp_ak_q];
                 rd_q.da_valid       <= 1'b1;
                 rd_q.clear_color[0] <= clearv_q[{brp_ak_q, 2'b00}];

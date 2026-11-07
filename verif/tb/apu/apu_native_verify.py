@@ -39,7 +39,8 @@ MODULES = ('test_vn_dma', 'test_vn_dma_resources', 'test_vn_resource_lifetime',
            'test_vn_graphics_shade', 'test_vn_graphics_pshade',
            'test_vn_graphics_raster', 'test_vn_graphics_writeback',
            'test_vn_graphics_drawexec', 'test_vn_graphics_draw_replay',
-           'test_vn_graphics_barriers', 'test_vn_events', 'test_vn_queries')
+           'test_vn_graphics_barriers', 'test_vn_events', 'test_vn_queries',
+           'test_vn_semaphore_resource')
 NATIVE = ('vn_native_execution.py', 'vn_borrowed_memory.py', 'vn_memory_blobs.py',
           'vn_native_device.py', 'vn_native_bridge.py', 'native_test_wire.py',
           'vn_rings.py', 'vn_ring_scheduler.py', 'vn_stream_task.py', 'vn_deferred.py',

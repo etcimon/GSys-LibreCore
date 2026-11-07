@@ -271,6 +271,33 @@ class LinearExecution:
             if current.reply is None or position % 4 or position > current.reply[2]:
                 raise StreamFault('invalid reply position')
             current.reply = (*current.reply[:3], position)
+        elif name == 'vkImportSemaphoreResourceMESA':
+            # 0:type 1:flags 2-3:device 4-5:presence64 6:sType
+            # 7..: pNext chain, then semaphore u64 + resourceId u32
+            # always close the command (they follow the chain on wire).
+            sem, rid = u64(len(words) - 3), words[-1]
+            if sem == 0:
+                raise StreamFault('null semaphore resource import')
+            try:
+                self.blobs.mapping(rid)
+            except (KeyError, ValueError) as error:
+                raise StreamFault(
+                    'semaphore resource is absent or unmapped') from error
+            self.rings.sem_res[sem] = rid
+        elif name == 'vkWaitSemaphoreResourceMESA':
+            # 0:type 1:flags 2-3:device 4-5:semaphore
+            rid = self.rings.sem_res.get(u64(4))
+            if rid is None:
+                raise StreamFault('semaphore resource was never imported')
+            # pending work through the bound resource: any live ring
+            # created on this blob resource still holding unconsumed
+            # submissions ([head,tail) non-empty) or already fatal.
+            for ring in self.rings.rings.values():
+                if ring.mapping.resource != rid:
+                    continue
+                if (ring.fatal or
+                        self.rings.read32(ring, ring.tail_offset) > ring.head):
+                    raise RingBlocked()
         elif name in ('vkCreateRingMESA', 'vkDestroyRingMESA', 'vkNotifyRingMESA',
                       'vkWriteRingExtraMESA', 'vkWaitRingSeqnoMESA',
                       'vkSubmitVirtqueueSeqnoMESA', 'vkWaitVirtqueueSeqnoMESA'):

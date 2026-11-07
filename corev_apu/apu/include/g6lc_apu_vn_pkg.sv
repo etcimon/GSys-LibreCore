@@ -166,6 +166,8 @@ package g6lc_apu_vn_pkg;
   localparam int APU_VN_TYPE_VK_SUBMIT_VIRTQUEUE_SEQNO_MESA_EXT = 251;
   localparam int APU_VN_TYPE_VK_WAIT_VIRTQUEUE_SEQNO_MESA_EXT = 252;
   localparam int APU_VN_TYPE_VK_WAIT_RING_SEQNO_MESA_EXT = 253;
+  localparam int APU_VN_TYPE_VK_IMPORT_SEMAPHORE_RESOURCE_MESA_EXT = 246;
+  localparam int APU_VN_TYPE_VK_WAIT_SEMAPHORE_RESOURCE_MESA_EXT = 245;
 
   typedef enum logic [7:0] {
     APU_VN_KIND_NONE = 0,
@@ -262,7 +264,7 @@ package g6lc_apu_vn_pkg;
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'h0977, 16'h097F, 16'hFFFF, 16'hFFFF,
-    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
+    16'hFFFF, 16'h09C6, 16'h09BF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h09B7,
     16'h09BA, 16'h09BC, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
@@ -287,7 +289,7 @@ package g6lc_apu_vn_pkg;
     16'hFFFF, 16'hFFFF, 16'hFFFF
   };
 
-  localparam int APU_VN_DEC_ROM_WORDS = 2495;
+  localparam int APU_VN_DEC_ROM_WORDS = 2505;
   localparam logic [47:0] APU_VN_DEC_ROM [0:APU_VN_DEC_ROM_WORDS-1] = '{
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h0F0000000000, // RET a=0 b=0x0 
@@ -1830,7 +1832,7 @@ package g6lc_apu_vn_pkg;
     48'h098000000003, // BLOB a=0 b=0x3 pDynamicStates KEEP
     48'h03BB0000000F, // HANDLE a=59 b=0xF layout:OPTIONAL KEEP
     48'h033B00000012, // HANDLE a=59 b=0x12 renderPass:OPTIONAL
-    48'h017F00000000, // U32 a=127 b=0x0 subpass
+    48'h01FF00000000, // U32 a=127 b=0x0 subpass KEEP
     48'h033B00000011, // HANDLE a=59 b=0x11 basePipelineHandle:OPTIONAL
     48'h017F00000000, // U32 a=127 b=0x0 basePipelineIndex
     48'h080000000000, // ENDARR a=0 b=0x0 
@@ -2783,6 +2785,16 @@ package g6lc_apu_vn_pkg;
     48'h0E0000000000, // END a=0 b=0x0 
     48'h027F00000000, // U64 a=127 b=0x0 ring
     48'h027F00000000, // U64 a=127 b=0x0 seqno
+    48'h0E0000000000, // END a=0 b=0x0 
+    48'h027F00000000, // U64 a=127 b=0x0 device:LOOKUP
+    48'h047F00000004, // PTR a=127 b=0x4 pImportSemaphoreResourceInfo
+    48'h050000000050, // STYPE a=0 b=0x50 sType
+    48'h060000000209, // PNEXT a=0 b=0x209 pNext
+    48'h027F00000000, // U64 a=127 b=0x0 semaphore:LOOKUP
+    48'h017F00000000, // U32 a=127 b=0x0 resourceId
+    48'h0E0000000000, // END a=0 b=0x0 
+    48'h027F00000000, // U64 a=127 b=0x0 device:LOOKUP
+    48'h027F00000000, // U64 a=127 b=0x0 semaphore:LOOKUP
     48'h0E0000000000 // END a=0 b=0x0 
   };
 
@@ -3569,7 +3581,7 @@ package g6lc_apu_vn_pkg;
     48'h0B0000000000 // REND a=0 b=0x0 
   };
 
-  localparam int APU_VN_CHAIN_WORDS = 521;
+  localparam int APU_VN_CHAIN_WORDS = 522;
   localparam logic [47:0] APU_VN_CHAIN [0:APU_VN_CHAIN_WORDS-1] = '{
     48'h0, // terminator
     48'h0, // terminator
@@ -4091,10 +4103,11 @@ package g6lc_apu_vn_pkg;
     48'h02FD3BA0A603, // sType=1000384003 mpc=765
     48'h0, // terminator
     48'h02EA3BA0A603, // sType=1000384003 mpc=746
+    48'h0, // terminator
     48'h0 // terminator
   };
 
-  localparam int APU_VN_CONST_WORDS = 80;
+  localparam int APU_VN_CONST_WORDS = 81;
   localparam logic [31:0] APU_VN_CONST [0:APU_VN_CONST_WORDS-1] = '{
     32'h00000001, 32'h00000000, 32'h3B9BDB70, 32'h3B9BB079,
     32'h3B9BB078, 32'h3B9BB07E, 32'h3B9BB07D, 32'h3B9BB07A,
@@ -4115,7 +4128,8 @@ package g6lc_apu_vn_pkg;
     32'h00000028, 32'h0000002A, 32'h00000029, 32'h0000002B,
     32'h3B9C73CD, 32'h3B9C73CE, 32'h0000002E, 32'h0000002C,
     32'h0000002D, 32'h00000008, 32'h00000009, 32'h0000000A,
-    32'h0000000B, 32'h3B9C066A, 32'h3BA0A600, 32'h3BA0A601
+    32'h0000000B, 32'h3B9C066A, 32'h3BA0A600, 32'h3BA0A601,
+    32'h3BA0A604
   };
 
   localparam int APU_VN_ARRMETA_WORDS = 8;
@@ -5303,8 +5317,8 @@ package g6lc_apu_vn_pkg;
     24'h000000, // unsupported
     24'h000000, // unsupported
     24'h000000, // unsupported
-    24'h000000, // unsupported
-    24'h000000, // unsupported
+    25'h0F03F00, // TRANSPORT kind=0 pq=7 cq=7 f=00
+    25'h0F03F00, // TRANSPORT kind=0 pq=7 cq=7 f=00
     24'h000000, // unsupported
     24'h000000, // unsupported
     24'h000000, // unsupported

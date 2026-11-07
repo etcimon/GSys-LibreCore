@@ -178,10 +178,16 @@ class PassTests(unittest.TestCase):
         with self.assertRaisesRegex(KeyError, 'recording epoch'):
             operand(self.e, 1, source)
 
-    def test_next_subpass_is_outside_single_subpass_profile(self):
+    def test_next_subpass_requires_active_multi_subpass_scope(self):
+        # single-subpass pass: the only legal transition target does not exist
         self.begin()
         with self.assertRaisesRegex(StreamFault, 'render pass command next subpass'):
             self.f.command('vkCmdNextSubpass', commandBuffer=self.f.CB, contents=0)
+        # no active pass at all
+        case = PassTests()
+        case.setUp()
+        with self.assertRaisesRegex(StreamFault, 'render pass command next subpass'):
+            case.f.command('vkCmdNextSubpass', commandBuffer=case.f.CB, contents=0)
 
     def test_context_retirement_invalidates_late_guard(self):
         resolved = operand(self.e, 1, self.begin())

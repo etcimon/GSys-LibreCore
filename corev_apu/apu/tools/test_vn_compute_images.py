@@ -185,6 +185,15 @@ class ComputeImageTests(unittest.TestCase):
         self.f.service.execute(1, wire_fixture.submit_packet(self.w, [self.f.CB]))
         return next(iter(self.e.submissions.pending.values()))
 
+    def test_dispatch_descriptor_layout_requires_prior_transition(self):
+        self.f.begin()
+        self.r.bind()
+        self.r.dispatch()
+        self.f.end()
+        with self.assertRaises(ValueError):
+            self.submit()
+        self.r.no_work()
+
     def test_storage_write_read_and_transfer_readback_use_real_backing(self):
         self.record(readback=True)
         job = self.submit()

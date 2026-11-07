@@ -18328,6 +18328,119 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   checks PASS; 682 remote checks PASS (`native-layouttrack-01`,
   `native-execution.rhjh1105`, sources_unchanged true).
   Record: `architecture/uncore/apu-native-image-barrier-implementation.md`.
+- [x] Descriptor imageLayout consultation: `image_descriptor()`
+  (shared by compute dispatch and graphics binding resolvers) now
+  requires `VkDescriptorImageInfo.imageLayout` to equal the image's
+  tracked layout at the operand's stream position — the ordered
+  replay walk publishes barrier layouts as it walks, so the check
+  sees the layout established by preceding barriers, not the
+  end-of-stream value (a later transition is not re-validated
+  against earlier operands). Mismatch refuses before any lease or
+  work item; per-subresource descriptor layouts stay unmodelled.
+  Fixtures declare `initialLayout` matching the descriptor layout
+  or recreate under the needed layout; two new cases cover operand
+  mismatch/recreation and an end-to-end dispatch refusing while
+  UNDEFINED. 684 remote checks PASS (`native-desclayout-01`,
+  `native-execution.ckilliqi`, sources_unchanged true).
+  Record: `architecture/uncore/apu-native-image-operand-implementation.md`.
+- [x] Subpass-dependency foundation: `vkCreateRenderPass` admission now
+  accepts bounded multi-subpass passes (`subpassCount` 1..4,
+  `dependencyCount` 0..8). Per-subpass restricted members (input,
+  resolve, depth/stencil, preserve) stay refused inside every subpass;
+  per-subpass color refs are sliced from the concatenated
+  `attachment`/`layout` lists with the same index/duplicate/layout
+  checks, now per subpass (an attachment may appear in several
+  subpasses). `VkSubpassDependency` is retained and validated:
+  subpass indices or `VK_SUBPASS_EXTERNAL` (not both external), stage
+  masks inside the graphics bound mirrored from
+  `vn_image_barriers.scope()`, access masks inside the coherent bound,
+  `dependencyFlags` admits only BY_REGION. `RenderPass` gains
+  `subpasses`/`dependencies`; `colors` keeps subpass-0 refs so
+  compatibility, clear resolution, layout replay and draw consumers are
+  unchanged. Execution stays single-subpass: `vkCmdBeginRenderPass` on
+  a multi-subpass pass refuses cleanly at capture (before recording —
+  no DEVICE_LOST trap), `vkCmdNextSubpass` stays refused, and the
+  ObjPay/RTL `StBrpPayCpl`/Python mirror/replay still model one subpass
+  (the execution follow-up must move ObjPay format + RTL FSM + mirror +
+  replay + directed tb together). 692 remote checks PASS
+  (`native-subpass-02`, `native-execution.zt52wyeq`,
+  sources_unchanged true); local `test_vn_native_rendering` 23+7 pass.
+  Record:
+  `architecture/uncore/apu-native-subpass-dependency-implementation.md`.
+- [x] Multi-subpass NATIVE execution: `vkCmdBeginRenderPass` admits
+  multi-subpass passes; `vkCmdNextSubpass` is captured as a `NextPass`
+  recording (`index+1 < subpass_count`, out-of-range/no-pass refuse at
+  capture). `RenderPass` gains `subpass_count`/`subpass_colors`.
+  `vn_render_pass_replay` publishes subpass-0 layouts at Begin, runs
+  `_enter_subpass` boundary transitions (last-referenced layout or
+  initialLayout, UNDEFINED discards, two-phase publish), and validates
+  End against the last referencing subpass *actually entered*
+  (`EndPass.subpass` — trailing unentered subpasses never transition).
+  `ClearAttachments` and draw-state consumers index the active subpass;
+  `DrawPlan.subpass` tracks it through `GraphicsDraws._next`; pipelines
+  admit `VkGraphicsPipelineCreateInfo.subpass` in `0..subpass_count-1`
+  and validate fixed-state/interfaces against that subpass's refs;
+  draws require `pipeline.subpass == active subpass`. No ObjPay format
+  change (per-subpass `{C,refs}` blocks were already emitted; depth-free
+  bound keeps them unambiguous). 697 remote checks PASS
+  (`native-subpass-exec-02`, `native-execution.nfbjcmrg`,
+  sources_unchanged true). Record:
+  `architecture/uncore/apu-native-subpass-dependency-implementation.md`.
+- [x] Multi-subpass WIRE path: `vn_golden._disp_assembly_lost` ObjPay
+  per-subpass `{C_i,refs_i}` block walk (S==1 keeps the exact old
+  parse; S>1 depth-free + exact-consumption bound) + RTL
+  `g6lc_apu_cmdexec` `StBrpPayCpl` bounded `sp_ncl_q/sp_cref_q/
+  sp_dref_q` subpass table (pi widened to 6b for the 37-word max
+  payload) + `vkCmdNextSubpass` bound-checked re-snapshot of
+  ca_q/da_q + draws beyond subpass 0 refused until pipeline-subpass
+  admission lands. Directed tb `PASS cases=13 checks=74` (multi-
+  subpass parse, ca w64->w32 re-snapshot, past-last + subpass-1 draw
+  losses) + `SYNTH OK Enable=0/1` (114671 cells / 20647 ff, no
+  latches) on the remote harness; native cohort `native-subpass-
+  wire-01` 697 checks PASS (`native-execution.f6k_hvns`,
+  sources_unchanged true). Wire-path Python coverage added:
+  `test_vn_graphics_draw_replay.py` three cases (Begin/Next/End on a
+  real 2-subpass pass drains done; past-last NextSubpass StreamFault
+  at record; subpass-1 draw refuses at enqueue) — cohort
+  `native-subpass-wirecov-01` 700 checks PASS
+  (`native-execution.47rnt9_i`). Remaining boundary: pipeline
+  `subpass` admission/matching (vgp `subpass==0` gate + draw-time
+  check).
+- [x] Pipeline-subpass admission on the wire path: `pCreateInfos.
+  subpass` is the last `vkCreateGraphicsPipelines` keep word (profile
+  regen = one ROM entry); vnfront phase `7'd91` bounds it to 0..3 and
+  parks it in pipeline `aux[9:8]` (`{chunk,6'h0,subpass,1'h0,gfx,
+  6'h0}` — no ObjPay offset moved); `g6lc_apu_vgp` decode relaxes to
+  `subpass[31:2]==0`; cmdexec drops the blanket `subpass!=0` draw
+  guards and `StDsPipeCpl` requires `aux[9:8] == snap_q.subpass` for
+  all draw records (direct + indirect, compute exempt). Python mirror:
+  `_gpipe_build` consumes/packs identically, `_disp_assembly_lost`
+  compares `sp_act` vs `aux[9:8]` after pipeline resolve. Directed tb
+  adds a subpass-1 pipeline (matching draw completes, subpass-0
+  mismatch loses). Remote leaf `apu-leaf-20261107T062540-af420eedd4e7`:
+  `PASS tb_g6lc_apu_vnfront cases=47 checks=563` +
+  `PASS tb_g6lc_apu_cmdexec cases=14 checks=80`; xfer/shwave
+  INCOMPLETE on simulator-PGO infra timeouts (unrelated); synth
+  verdict pending collect. Native cohort `native-pipesub-01` 702
+  checks PASS (`native-execution.ncg5bl_7`, sources_unchanged true).
+- [x] External semaphore resource binding (native): `vkImportSemaphore-
+  ResourceMESA`/`vkWaitSemaphoreResourceMESA` admitted TRANSPORT
+  (`vn_command_set.txt` + `act_class`; pkg.sv regen additive — types
+  245/246, all prior decodes bit-identical). `emit_handle` transport
+  rule: HANDLE ops on slot-discarded commands emit discarded U64 (no
+  q-slot store exists for HANDLE; first standard-handle transport
+  operands). `t_cmd` binds semaphore->resourceId against live mapped
+  blobs and waits on pending ring work through that resource;
+  `LinearExecution._transport`/`RingStore.sem_res` mirrors it with
+  `RingBlocked` park semantics. 12 directed tests; remote cohort
+  `native-semres-02` 714 checks PASS (`native-execution.dddc4uyh`,
+  sources_unchanged true). Committed `869492841` (37 files, +2013/-180 —
+  also carries the multi-subpass native+wire execution, descriptor
+  imageLayout tracked-layout validation, and pipeline-subpass
+  admission). RTL pump still `StFatal`-refuses both — queued follow-on,
+  concrete mechanism now scoped in the arch doc's "Pump RTL design"
+  section (ring `rid` field, bounded `sem_tab`, ObjTab-reuse import arm,
+  `is_sem` park/resume predicate).
 - [x] apu-leaf unit verdict collected
   (`apu-leaf-20261106T173600-891a56a947e1`, snapshot d0493ae878e8):
   INCOMPLETE — 12 leaves PASS including the changed modules

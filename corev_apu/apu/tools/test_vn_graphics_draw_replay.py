@@ -8,6 +8,7 @@ import test_vn_graphics_resources as resource_fixture
 import vn_golden
 from test_vn_graphics_pshade import fs_program
 from test_vn_graphics_shade import vs_program
+from vn_native_execution import StreamFault
 
 
 class DrawReplayTests(unittest.TestCase):
@@ -33,7 +34,7 @@ class DrawReplayTests(unittest.TestCase):
             pCreateInfo=self.w.structure('VkShaderModuleCreateInfo', pNext=[],
                 flags=0, codeSize=len(code) * 4, pCode=list(code)))
 
-    def pipeline(self):
+    def pipeline(self, rp=None, subpass=0):
         s = self.w.structure
         self.f.command('vkCreateGraphicsPipelines', device=self.w.DEVICE,
             pipelineCache=0, createInfoCount=1, pPipelines=[self.PIPE2],
@@ -82,8 +83,8 @@ class DrawReplayTests(unittest.TestCase):
                         colorWriteMask=15)], blendConstants=[0, 0, 0, 0]),
                 pDynamicState=s('VkPipelineDynamicStateCreateInfo', pNext=[],
                     flags=0, dynamicStateCount=2, pDynamicStates=[0, 1]),
-                layout=self.g.PL, renderPass=self.g.r.RP, subpass=0,
-                basePipelineHandle=0, basePipelineIndex=-1)])
+                layout=self.g.PL, renderPass=rp or self.g.r.RP,
+                subpass=subpass, basePipelineHandle=0, basePipelineIndex=-1)])
 
     def begin_pass(self):
         self.f.command('vkCmdBeginRenderPass', commandBuffer=self.f.CB,
@@ -481,6 +482,104 @@ class DrawReplayTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.f.enqueue()
             self.assertFalse(self.e.transfers.active)
+
+    def begin_pass2(self):
+        self.f.command('vkCmdBeginRenderPass', commandBuffer=self.f.CB,
+            contents=0, pRenderPassBegin=self.w.structure('VkRenderPassBeginInfo',
+                pNext=[], renderPass=self.g.r.RP2, framebuffer=self.g.r.FB2,
+                renderArea=self.w.structure('VkRect2D',
+                    offset=self.w.structure('VkOffset2D', x=0, y=0),
+                    extent=self.w.structure('VkExtent2D', width=8, height=4)),
+                clearValueCount=1, pClearValues=[self.w.structure('VkClearValue',
+                    color=self.w.structure('VkClearColorValue',
+                        uint32=[0, 0, 0, 0x3F800000]))]))
+
+    def multi_pass_fixture(self):
+        # two subpasses over the same attachment: layout 2 then layout 1
+        self.g.r.multi_pass(subpasses=(((0, 2),), ((0, 1),)))
+        self.g.r.framebuffer(handle=self.g.r.FB2, render_pass=self.g.r.RP2)
+
+    def test_multi_subpass_begin_next_end_replays_on_wire_path(self):
+        # the wire ObjPay carries both {C,refs} blocks; assembly walks
+        # them, NextSubpass re-snapshots the active subpass, and replay
+        # publishes the per-subpass boundary layouts
+        self.multi_pass_fixture()
+        self.begin_pass2()
+        self.f.command('vkCmdNextSubpass', commandBuffer=self.f.CB)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        job = self.f.enqueue()
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertFalse(self.f.front.fence_lost)
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_multi_subpass_next_past_last_loses_submission(self):
+        # the record-time capture refuses advancing past the last
+        # subpass, faulting the stream before the buffer can seal
+        self.multi_pass_fixture()
+        self.begin_pass2()
+        self.f.command('vkCmdNextSubpass', commandBuffer=self.f.CB)
+        with self.assertRaises(StreamFault):
+            self.f.command('vkCmdNextSubpass', commandBuffer=self.f.CB)
+
+    def test_multi_subpass_draw_in_later_subpass_replays_on_wire(self):
+        # a pipeline declared for subpass 1 (kept on the wire, parked
+        # in aux[9:8]) draws after vkCmdNextSubpass: the assembly
+        # matches the pipeline subpass against the active subpass and
+        # the draw replays into the subpass-1 attachment layout
+        self.multi_pass_fixture()
+        self.upload(self.ndc_triangle())
+        self.pipeline(rp=self.g.r.RP2, subpass=1)
+        self.begin_pass2()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.f.command('vkCmdNextSubpass', commandBuffer=self.f.CB)
+        self.draw()
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        job = self.f.enqueue()
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertFalse(self.f.front.fence_lost)
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_multi_subpass_subpass0_pipeline_draw_refuses_on_wire(self):
+        # a subpass-0 pipeline inside subpass 1 loses the submission at
+        # enqueue: aux[9:8]=0 != active subpass 1 (StDsPipeCpl mirror)
+        self.multi_pass_fixture()
+        self.pipeline(rp=self.g.r.RP2, subpass=0)
+        self.begin_pass2()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.f.command('vkCmdNextSubpass', commandBuffer=self.f.CB)
+        self.draw()
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        with self.assertRaises(ValueError):
+            self.f.enqueue()
+        self.assertFalse(self.e.transfers.active)
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_multi_subpass_late_pipeline_draw_in_subpass0_refuses(self):
+        # a subpass-1 pipeline inside subpass 0 loses symmetrically:
+        # the declared subpass must equal the active subpass, not just
+        # be in range
+        self.multi_pass_fixture()
+        self.pipeline(rp=self.g.r.RP2, subpass=1)
+        self.begin_pass2()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.draw()
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        with self.assertRaises(ValueError):
+            self.f.enqueue()
+        self.assertFalse(self.e.transfers.active)
+        self.assertEqual(self.f.owner.work_refs, 0)
 
     def test_draw_outside_render_pass_refuses_atomically(self):
         self.upload(self.ndc_triangle())

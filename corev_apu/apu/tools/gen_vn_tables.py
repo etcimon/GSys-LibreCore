@@ -536,10 +536,19 @@ class Model:
         elif var.is_optional() or self.keep_cur in self.opt_paths:
             role = 'OPTIONAL'
         slot = self.q_slot(scope)
-        self.emit('HANDLE', (slot << 3) | ROLES[role],
-                  self.kind(base.name), '%s:%s' % (var.name, role), keep)
-        if not scope:
-            self.q_info.append((slot, var.name, role))
+        # TRANSPORT commands discard q slots (the pump re-parses the raw
+        # argument words itself).  A HANDLE op always stores into a q
+        # slot in the decoder — there is no discard encoding for it —
+        # so emit a discarded U64 instead: same two-word consumption,
+        # no slot write, no HANDLE_ZERO check (the transport layer does
+        # its own operand validation).
+        if slot == DISCARD:
+            self.emit('U64', DISCARD, 0, '%s:%s' % (var.name, role), keep)
+        else:
+            self.emit('HANDLE', (slot << 3) | ROLES[role],
+                      self.kind(base.name), '%s:%s' % (var.name, role), keep)
+            if not scope:
+                self.q_info.append((slot, var.name, role))
         return slot
 
     def emit_member(self, parent, var, scope, partial):
@@ -956,7 +965,9 @@ class Model:
                     'vkCreateRingMESA', 'vkDestroyRingMESA',
                     'vkNotifyRingMESA', 'vkWriteRingExtraMESA',
                     'vkSubmitVirtqueueSeqnoMESA',
-                    'vkWaitVirtqueueSeqnoMESA', 'vkWaitRingSeqnoMESA'):
+                    'vkWaitVirtqueueSeqnoMESA', 'vkWaitRingSeqnoMESA',
+                    'vkImportSemaphoreResourceMESA',
+                    'vkWaitSemaphoreResourceMESA'):
             return 'TRANSPORT'
         if name.startswith('vkCmd'):
             return 'RECORD'
@@ -2305,9 +2316,10 @@ def emit_srgb(tab):
         A('    %s%s' % (row, ',' if i + 32 < 4096 else ''))
     A('  };')
     A('endpackage')
-    (REPO / 'corev_apu' / 'apu' / 'include' /
-     'g6lc_apu_srgb_pkg.sv').write_text('\n'.join(sv) + '\n',
-                                       encoding='utf-8')
+    with (REPO / 'corev_apu' / 'apu' / 'include' /
+          'g6lc_apu_srgb_pkg.sv').open('w', encoding='utf-8',
+                                      newline='') as f:
+        f.write('\n'.join(sv) + '\n')
     py = []
     P = py.append
     P('#!/usr/bin/env python3')
@@ -2355,8 +2367,9 @@ def emit_srgb(tab):
     P('    """G2a: 12-bit linear (1/4095) -> 8-bit sRGB via the same')
     P('    APU_SRGB_ENC table the rasterizer indexes."""')
     P('    return ENC12[u & 0xFFF]')
-    (TOOLS / 'shader' / 'srgb_lut.py').write_text('\n'.join(py) + '\n',
-                                                encoding='utf-8')
+    with (TOOLS / 'shader' / 'srgb_lut.py').open(
+            'w', encoding='utf-8', newline='') as f:
+        f.write('\n'.join(py) + '\n')
 
 
 def emit_imgfmts(model):
@@ -2388,8 +2401,9 @@ def emit_imgfmts(model):
     P('BPP = %r' % (tuple(bpp),))
     P('')
     P('ATTR = %r' % (tuple(attr),))
-    (TOOLS / 'shader' / 'img_fmts.py').write_text('\n'.join(py) + '\n',
-                                                 encoding='utf-8')
+    with (TOOLS / 'shader' / 'img_fmts.py').open(
+            'w', encoding='utf-8', newline='') as f:
+        f.write('\n'.join(py) + '\n')
 
 
 def audit_profile(profile):
@@ -2496,9 +2510,14 @@ def main():
     # (chain tbl indices were stored as list indices; recompute word offsets)
     sv = emit_sv(model, asm, profile)
     out = REPO / 'corev_apu' / 'apu' / 'include' / 'g6lc_apu_vn_pkg.sv'
-    out.write_text(sv, encoding='utf-8')
+    # newline='' keeps LF on every host: the generated file is compared
+    # byte-for-byte against the remote harness checkout.
+    with out.open('w', encoding='utf-8', newline='') as f:
+        f.write(sv)
     md = emit_md(model, asm, unfit)
-    (TOOLS / 'g6lc_apu_vn_tables.md').write_text(md, encoding='utf-8')
+    with (TOOLS / 'g6lc_apu_vn_tables.md').open(
+            'w', encoding='utf-8', newline='') as f:
+        f.write(md)
     print('commands: %d, unfit: %d' % (len(model.cmd_progs), len(unfit)))
     for n, why in unfit.items():
         print('  UNFIT %s: %s' % (n, why))

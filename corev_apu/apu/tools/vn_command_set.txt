@@ -183,3 +183,5 @@ vkGetMemoryResourcePropertiesMESA
 vkSubmitVirtqueueSeqnoMESA
 vkWaitVirtqueueSeqnoMESA
 vkWaitRingSeqnoMESA
+vkImportSemaphoreResourceMESA
+vkWaitSemaphoreResourceMESA

@@ -45,6 +45,7 @@ class RingStore:
         self.execution, self.blobs = execution, execution.blobs
         self.max_rings, self.clock = max_rings, clock
         self.rings = {}
+        self.sem_res = {}               # semaphore handle -> resourceId
         self.cursor = 0
 
     def _key(self, ring):

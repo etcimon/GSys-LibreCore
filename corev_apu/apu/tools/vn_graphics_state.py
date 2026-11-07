@@ -14,7 +14,7 @@ class GraphicsState:
     dynamic: tuple
 
 
-def validate(engine, fields, blobs, render_pass):
+def validate(engine, fields, blobs, render_pass, subpass=0):
     def one(name):
         values = fields.get(name, ())
         if len(values) != 1:
@@ -44,7 +44,8 @@ def validate(engine, fields, blobs, render_pass):
     cull, front = one('cullMode'), one('frontFace')
     if cull not in (0, 1, 2, 3) or front not in (0, 1) or not 0 <= one('logicOp') <= 15:
         raise ValueError('graphics fixed raster enums exceed profile')
-    count = len(render_pass.colors)
+    colors = render_pass.subpass_colors(subpass)
+    count = len(colors)
     if not 0 < count <= 4 or one('attachmentCount') != count or one('pAttachments') != count:
         raise ValueError('graphics fixed color state differs from subpass')
     for name, limit in (('blendEnable', 0), ('srcColorBlendFactor', 14),

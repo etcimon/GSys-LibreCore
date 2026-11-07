@@ -517,11 +517,12 @@ module tb_g6lc_apu_cmdexec;
 
   logic [31:0] cb_h, pipe_h, dset_h, buf0_h, buf1_h;
   logic [31:0] lay_h, gpipe_h, rp_h, fb_h, view_h, img_h;
+  logic [31:0] img2_h, view2_h, rp2_h, fb2_h, gpipe1_h;
   logic [15:0] seq0;
   // §5a G3b-iii: cmdrec buffer identifiers are PayMem descriptor
   // block addresses (allocated by vnfront in the real system — the
   // TB plays that role at chunks 20..31)
-  logic [31:0] cbd [12];
+  logic [31:0] cbd [20];
 
   task automatic submit(input logic [4:0] f, input int nb,
                         input logic [31:0] r0, input logic [31:0] h0,
@@ -598,7 +599,7 @@ module tb_g6lc_apu_cmdexec;
     check("alloc cb", cb_h !== '0);
 
     // §5a G3b-iii: 64-word zeroed descriptor block per buffer
-    for (int i = 0; i < 12; i++) begin
+    for (int i = 0; i < 20; i++) begin
       cbd[i] = 32'(20 + i) << 6;
       for (int w = 0; w < 64; w++)
         paymem[cbd[i] + 32'(w)] = 32'h0;
@@ -959,7 +960,233 @@ module tb_g6lc_apu_cmdexec;
       cases++;
     end
 
-    // ---- case 12: watchdog expiry = true device loss ----------------------
+    // ---- case 12: multi-subpass render pass --------------------------
+    // rp2 ObjPay carries subpassCount=2 with depth-free {C,refs}
+    // blocks: subpass0 -> att0 (img 64x64), subpass1 -> att1 (img2
+    // 32x32).  Begin snapshots ca[0]=att0's image; NEXT_SUBPASS
+    // re-snapshots ca[0]=att1's image; the pass completes cleanly.
+    // A NEXT_SUBPASS past the last subpass and a draw inside subpass 1
+    // both lose the submission (pipeline-subpass admission is not
+    // wired yet, so draws are subpass-0 only).
+    tb_drv = 1'b1;
+    ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0011,
+          APU_VN_KIND_VK_IMAGE, .size(64'd4096));
+    img2_h = ot_cpl.handle;
+    ot_op(APU_OBJTAB_OP_SETAUX, 64'h1000_0000_0000_0011,
+          APU_VN_KIND_VK_IMAGE,
+          .mask(32'hFFFF_FFFF), .value(32'h0020_0020));   // {h,w}=32
+    ot_op(APU_OBJTAB_OP_SETBIND, 64'h1000_0000_0000_0011,
+          APU_VN_KIND_VK_IMAGE,
+          .mem_id(64'h1000_0000_0000_0006));
+    ot_op(APU_OBJTAB_OP_ALLOC, 64'h0000_0003_0000_0071,
+          APU_VN_KIND_VK_IMAGE_VIEW);
+    view2_h = ot_cpl.handle;
+    ot_op(APU_OBJTAB_OP_SETAUX, 64'h0000_0003_0000_0071,
+          APU_VN_KIND_VK_IMAGE_VIEW,
+          .mask(32'h0000_FFFF), .value({16'h0, img2_h[15:0]}));
+    ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0040,
+          APU_VN_KIND_VK_RENDER_PASS);
+    rp2_h = ot_cpl.handle;
+    ot_op(APU_OBJTAB_OP_SETAUXHI, 64'h1000_0000_0000_0040,
+          APU_VN_KIND_VK_RENDER_PASS,
+          .mask(32'hFFFF_FFFF), .value({16'd54, 16'd12}));
+    // rp2 block @54: attCount=2, two {fmt,loadOp=LOAD,storeOp} rows,
+    // subpassCount=2, {C=1,ref->0},{C=1,ref->1} — 12 words, depth-free
+    paymem[(54 << 6) + 0] = 32'd2;
+    paymem[(54 << 6) + 1] = 32'h0;
+    paymem[(54 << 6) + 2] = 32'h0;
+    paymem[(54 << 6) + 3] = 32'h0;
+    paymem[(54 << 6) + 4] = 32'h0;
+    paymem[(54 << 6) + 5] = 32'h0;
+    paymem[(54 << 6) + 6] = 32'h0;
+    paymem[(54 << 6) + 7] = 32'd2;
+    paymem[(54 << 6) + 8] = 32'd1;
+    paymem[(54 << 6) + 9] = 32'd0;
+    paymem[(54 << 6) +10] = 32'd1;
+    paymem[(54 << 6) +11] = 32'd1;
+    ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0041,
+          APU_VN_KIND_VK_FRAMEBUFFER);
+    fb2_h = ot_cpl.handle;
+    ot_op(APU_OBJTAB_OP_SETAUXHI, 64'h1000_0000_0000_0041,
+          APU_VN_KIND_VK_FRAMEBUFFER,
+          .mask(32'hFFFF_FFFF), .value({16'd55, 16'd10}));
+    // fb2 block @55: {rp id 2w, count=2, view0 2w, view1 2w, w,h,l}
+    paymem[(55 << 6) + 0] = 32'h0000_0040;
+    paymem[(55 << 6) + 1] = 32'h1000_0000;
+    paymem[(55 << 6) + 2] = 32'd2;
+    paymem[(55 << 6) + 3] = 32'h0000_0030;
+    paymem[(55 << 6) + 4] = 32'h0000_0002;
+    paymem[(55 << 6) + 5] = 32'h0000_0071;
+    paymem[(55 << 6) + 6] = 32'h0000_0003;
+    paymem[(55 << 6) + 7] = 32'd64;
+    paymem[(55 << 6) + 8] = 32'd64;
+    paymem[(55 << 6) + 9] = 32'd1;
+    // S_A: Begin+End only — subpass 0 snapshot binds att0's image
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[12], 0, '0);
+    begin
+      apu_cmdrec_rec_t rr = mkrec(
+          APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_EXT, rp2_h,
+          APU_VN_KIND_VK_RENDER_PASS, 0);
+      rr.handle[1] = fb2_h; rr.kind[1] = APU_VN_KIND_VK_FRAMEBUFFER;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[12], 0, rr, 16'd1);
+    end
+    cr_op(APU_CMDREC_OP_APPEND, cbd[12], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_END_RENDER_PASS_EXT, 0, 0, 0));
+    cr_op(APU_CMDREC_OP_END, cbd[12], 0, '0);
+    tb_drv = 1'b0;
+    begin
+      submit(5'd11, 1, cbd[12], cb_h, 32'h0, 32'h0);
+      wait_fence(11, 8000);
+      check("mspa no lost", flost[11] === 1'b0);
+      check("mspa subpass0", i_dut.gen_on.snap_q.subpass === 4'd0);
+      check("mspa ca w64", i_dut.gen_on.ca_q[0].w === 16'd64);
+      check("mspa ca valid", i_dut.gen_on.ca_valid_q[0] === 1'b1);
+    end
+    // S_B: Begin+NextSubpass+End — the snapshot re-binds att1's image
+    tb_drv = 1'b1;
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[13], 0, '0);
+    begin
+      apu_cmdrec_rec_t rr = mkrec(
+          APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_EXT, rp2_h,
+          APU_VN_KIND_VK_RENDER_PASS, 0);
+      rr.handle[1] = fb2_h; rr.kind[1] = APU_VN_KIND_VK_FRAMEBUFFER;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[13], 0, rr, 16'd1);
+    end
+    cr_op(APU_CMDREC_OP_APPEND, cbd[13], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_NEXT_SUBPASS_EXT, 0, 0, 0));
+    cr_op(APU_CMDREC_OP_APPEND, cbd[13], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_END_RENDER_PASS_EXT, 0, 0, 0));
+    cr_op(APU_CMDREC_OP_END, cbd[13], 0, '0);
+    tb_drv = 1'b0;
+    begin
+      submit(5'd12, 1, cbd[13], cb_h, 32'h0, 32'h0);
+      wait_fence(12, 8000);
+      check("mspb no lost", flost[12] === 1'b0);
+      check("mspb subpass1", i_dut.gen_on.snap_q.subpass === 4'd1);
+      check("mspb ca w32", i_dut.gen_on.ca_q[0].w === 16'd32);
+      check("mspb ca valid", i_dut.gen_on.ca_valid_q[0] === 1'b1);
+    end
+    // S_C: a second NEXT_SUBPASS is past the last subpass -> lost
+    tb_drv = 1'b1;
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[14], 0, '0);
+    begin
+      apu_cmdrec_rec_t rr = mkrec(
+          APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_EXT, rp2_h,
+          APU_VN_KIND_VK_RENDER_PASS, 0);
+      rr.handle[1] = fb2_h; rr.kind[1] = APU_VN_KIND_VK_FRAMEBUFFER;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[14], 0, rr, 16'd1);
+    end
+    cr_op(APU_CMDREC_OP_APPEND, cbd[14], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_NEXT_SUBPASS_EXT, 0, 0, 0));
+    cr_op(APU_CMDREC_OP_APPEND, cbd[14], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_NEXT_SUBPASS_EXT, 0, 0, 0));
+    cr_op(APU_CMDREC_OP_APPEND, cbd[14], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_END_RENDER_PASS_EXT, 0, 0, 0));
+    cr_op(APU_CMDREC_OP_END, cbd[14], 0, '0);
+    tb_drv = 1'b0;
+    begin
+      submit(5'd13, 1, cbd[14], cb_h, 32'h0, 32'h0);
+      wait_fence(13, 8000);
+      check("mspc fence lost", flost[13] === 1'b1);
+    end
+    // S_D: a draw inside subpass 1 loses — gpipe_h declares subpass 0
+    // (aux[9:8]=0) and StDsPipeCpl requires it to equal the active
+    // subpass, so the mismatch loses the submission
+    tb_drv = 1'b1;
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[15], 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, cbd[15], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_BIND_PIPELINE_EXT, gpipe_h,
+                APU_VN_KIND_VK_PIPELINE, 0));
+    begin
+      apu_cmdrec_rec_t rr = mkrec(
+          APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_EXT, rp2_h,
+          APU_VN_KIND_VK_RENDER_PASS, 0);
+      rr.handle[1] = fb2_h; rr.kind[1] = APU_VN_KIND_VK_FRAMEBUFFER;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[15], 0, rr, 16'd1);
+    end
+    cr_op(APU_CMDREC_OP_APPEND, cbd[15], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_NEXT_SUBPASS_EXT, 0, 0, 0));
+    cr_op(APU_CMDREC_OP_APPEND, cbd[15], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_DRAW_EXT, 0, 0, 32'd3));
+    cr_op(APU_CMDREC_OP_APPEND, cbd[15], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_END_RENDER_PASS_EXT, 0, 0, 0));
+    cr_op(APU_CMDREC_OP_END, cbd[15], 0, '0);
+    tb_drv = 1'b0;
+    begin
+      submit(5'd14, 1, cbd[15], cb_h, 32'h0, 32'h0);
+      wait_fence(14, 8000);
+      check("mspd fence lost", flost[14] === 1'b1);
+      cases++;
+    end
+    // S_E/S_F: pipeline-subpass admission — gpipe1_h shares gpipe_h's
+    // ObjPay block (chunk 52, same module words) but declares
+    // subpass 1 in aux[9:8].  A draw in subpass 1 matches and runs;
+    // the same pipeline in subpass 0 mismatches and loses.
+    tb_drv = 1'b1;
+    ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0036,
+          APU_VN_KIND_VK_PIPELINE);
+    gpipe1_h = ot_cpl.handle;
+    ot_op(APU_OBJTAB_OP_SETAUXHI, 64'h1000_0000_0000_0036,
+          APU_VN_KIND_VK_PIPELINE,
+          .mask(32'hFFFF_FFFF), .value(lay_h));
+    ot_op(APU_OBJTAB_OP_SETAUX, 64'h1000_0000_0000_0036,
+          APU_VN_KIND_VK_PIPELINE,
+          .mask(32'hFFFF_FFFF),
+          .value({16'd52, 6'h0, 2'd1, 1'h0, 1'b1, 6'h0}));
+    // S_E: Begin+Bind(gpipe1)+NextSubpass+Draw+End — subpass 1 ==
+    // aux[9:8] so the draw assembles and the submission completes
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[16], 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_BIND_PIPELINE_EXT, gpipe1_h,
+                APU_VN_KIND_VK_PIPELINE, 0));
+    begin
+      apu_cmdrec_rec_t rr = mkrec(
+          APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_EXT, rp2_h,
+          APU_VN_KIND_VK_RENDER_PASS, 0);
+      rr.handle[1] = fb2_h; rr.kind[1] = APU_VN_KIND_VK_FRAMEBUFFER;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0, rr, 16'd1);
+    end
+    cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_NEXT_SUBPASS_EXT, 0, 0, 0));
+    cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_DRAW_EXT, 0, 0, 32'd3));
+    cr_op(APU_CMDREC_OP_APPEND, cbd[16], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_END_RENDER_PASS_EXT, 0, 0, 0));
+    cr_op(APU_CMDREC_OP_END, cbd[16], 0, '0);
+    // S_F: same pipeline in subpass 0 — aux[9:8]=1 != snap 0 -> lost
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[17], 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, cbd[17], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_BIND_PIPELINE_EXT, gpipe1_h,
+                APU_VN_KIND_VK_PIPELINE, 0));
+    begin
+      apu_cmdrec_rec_t rr = mkrec(
+          APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_EXT, rp2_h,
+          APU_VN_KIND_VK_RENDER_PASS, 0);
+      rr.handle[1] = fb2_h; rr.kind[1] = APU_VN_KIND_VK_FRAMEBUFFER;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[17], 0, rr, 16'd1);
+    end
+    cr_op(APU_CMDREC_OP_APPEND, cbd[17], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_DRAW_EXT, 0, 0, 32'd3));
+    cr_op(APU_CMDREC_OP_APPEND, cbd[17], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_END_RENDER_PASS_EXT, 0, 0, 0));
+    cr_op(APU_CMDREC_OP_END, cbd[17], 0, '0);
+    tb_drv = 1'b0;
+    begin
+      submit(5'd15, 1, cbd[16], cb_h, 32'h0, 32'h0);
+      wait_fence(15, 8000);
+      check("mspe no lost", flost[15] === 1'b0);
+      check("mspe subpass1", i_dut.gen_on.snap_q.subpass === 4'd1);
+      check("mspe ca w32", i_dut.gen_on.ca_q[0].w === 16'd32);
+      // fence 15 is sticky: clear it before the mismatch submission
+      // reuses the slot so wait_fence observes the new signal
+      @(negedge clk); fclr[15] = 1'b1; @(negedge clk); fclr[15] = 1'b0;
+      submit(5'd15, 1, cbd[17], cb_h, 32'h0, 32'h0);
+      wait_fence(15, 8000);
+      check("mspf fence lost", flost[15] === 1'b1);
+      cases++;
+    end
+
+    // ---- case 13: watchdog expiry = true device loss ----------------------
     // The engine never returns: pend_hold starves the done model, the
     // work-budget watchdog expires, the submission retires lost,
     // devlost pulses (vnpump marks the ctx's rings FATAL), dead stays

@@ -3302,9 +3302,88 @@ layout-operand mismatch and create-time initialLayout seeding plus
 out-of-profile refusal, and render-pass initial/subpass/final
 publication with initialLayout mismatch refusal. Copy/clear fixtures
 declare matching initialLayout; barrier/event fixtures chain
-old/new layouts explicitly. Descriptor imageLayout remains
-unconsulted; no stock/hardware/CTS qualification.
+old/new layouts explicitly. No stock/hardware/CTS qualification.
 `architecture/uncore/apu-native-image-barrier-implementation.md`.
+
+Native descriptor imageLayout consultation (non-ISA):684 frozen checks
+pass18.4s (native-desclayout-01,native-execution.ckilliqi),sources
+unchanged; two cases cover declared-vs-tracked layout mismatch refusal
+at operand admission plus recreation under the matching layout, and an
+end-to-end compute dispatch that refuses while the image is UNDEFINED
+and succeeds only after the preceding barrier publishes the declared
+layout. Descriptor imageLayout must now equal the tracked image layout
+at the operand's stream position; no stock/hardware/CTS qualification.
+`architecture/uncore/apu-native-image-operand-implementation.md`.
+
+Native subpass-dependency foundation (non-ISA):692 frozen checks
+pass18.6s (native-subpass-02,native-execution.zt52wyeq),sources
+unchanged; eight cases cover multi-subpass render-pass retention with
+per-subpass color refs, external/self VkSubpassDependency admission,
+index/flag/stage/access-mask refusals, subpass/dependency count bounds
+(4/8 admitted, 5/9 refused), per-subpass restricted-member and
+duplicate-ref refusals, and clean vkCmdBeginRenderPass refusal on a
+multi-subpass pass before recording.
+
+Native multi-subpass execution (non-ISA):697 frozen checks pass18.6s
+(native-subpass-exec-02,native-execution.nfbjcmrg),sources unchanged;
+new cases cover Begin/NextSubpass/End execution with finalLayout
+publication and clear writeback, NextSubpass scope/count refusals
+(no active pass, past-last subpass, single-subpass pass),
+draw-state subpass indexing (subpass-1 pipeline draws after
+vkCmdNextSubpass; subpass-0 pipeline refused inside subpass 1), and
+Begin-to-End without NextSubpass keeping end-validation inside the
+entered subpass set.
+
+Multi-subpass wire path (non-ISA): RTL `PASS tb_g6lc_apu_cmdexec
+cases=13 checks=74` on the remote harness — directed cases cover the
+2-subpass ObjPay walk, Begin subpass-0 snapshot (ca w=64),
+NextSubpass re-snapshot to subpass-1's attachment (ca w=32),
+past-last NEXT_SUBPASS loss, and subpass-1 draw refusal; single-
+subpass case unchanged. `SYNTH OK Enable=0/1` (114671 cells /
+20647 ff, no latches). Native cohort `native-subpass-wire-01`:
+697 checks pass18.6s (native-execution.f6k_hvns), sources
+unchanged — host-model regression only; no dedicated Python
+wire-submission ns>1 fixture yet, and pipeline-subpass admission
+(vgp subpass==0 gate + draw-time match) remains open so real
+multi-subpass draws are refused; no stock/hardware/CTS
+qualification. `architecture/uncore/apu-native-subpass-dependency-implementation.md`.
+
+Multi-subpass wire-path coverage (non-ISA):700 frozen checks pass
+18.7s (native-subpass-wirecov-01,native-execution.47rnt9_i),
+sources unchanged; three wire-recorded cases in
+test_vn_graphics_draw_replay cover Begin/NextSubpass/End on a real
+two-subpass pass (drains done), past-last NextSubpass StreamFault
+at record time, and a subpass-1 draw with a subpass-0 pipeline
+refused at enqueue; local suite 702 passed with only known
+Windows-socket bridge failures. No stock/hardware/CTS
+qualification.
+
+Pipeline-subpass admission on the wire path (non-ISA):702 frozen
+checks pass18.2s (native-pipesub-01,native-execution.ncg5bl_7),
+sources unchanged; three cases in test_vn_graphics_draw_replay
+cover a subpass-1 pipeline drawing after vkCmdNextSubpass (drains
+done — keep word -> aux[9:8] -> assembly match -> replay), a
+subpass-0 pipeline refused inside subpass 1, and a subpass-1
+pipeline refused inside subpass 0, all at enqueue. Remote leaf
+apu-leaf-20261107T062540-af420eedd4e7: PASS tb_g6lc_apu_vnfront
+cases=47 checks=563 and PASS tb_g6lc_apu_cmdexec cases=14
+checks=80 (subpass-1 pipeline draws clean in subpass 1, subpass-0
+mismatch loses); xfer/shwave INCOMPLETE on simulator-PGO infra
+timeouts unrelated to the diff; synth verdict pending collect. No
+stock/hardware/CTS qualification.
+`architecture/uncore/apu-native-subpass-dependency-implementation.md`.
+
+External semaphore resource binding (non-ISA):714 frozen checks pass
+18.2s (native-semres-02,native-execution.dddc4uyh),sources unchanged;
+twelve cases in test_vn_semaphore_resource cover both transport models —
+§6b pump t_cmd (import+wait success, wait-without-import, unknown/
+unmapped resource, null semaphore, pending/drained/fatal ring on the
+bound resource, other-resource ring not blocking) and LinearExecution
+(import+wait completes, never-imported/unmapped StreamFault, pending
+ring parks the task then completes after retire). Decoder admission is
+additive (types 245/246); RTL pump still StFatal-refuses pending the
+pump increment. No stock/hardware/CTS qualification.
+`architecture/uncore/apu-native-semaphore-resource-implementation.md`.
 
 Native color clears/payload bounds (non-ISA):230 frozen checks pass30.925s,
 79 hashes unchanged. Ten cases cover conversions, padding/mips/layers, small

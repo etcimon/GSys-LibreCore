@@ -97,7 +97,7 @@ def _collect(scan):
     return inputs, outputs, builtins
 
 
-def validate(vertex, fragment, fixed, render_pass):
+def validate(vertex, fragment, fixed, render_pass, subpass=0):
     vin, vout, vbi = _collect(vertex)
     fin, fout, fbi = _collect(fragment)
     if (SC['OUTPUT'], BI_GFX['POSITION']) not in vbi:
@@ -109,8 +109,9 @@ def validate(vertex, fragment, fixed, render_pass):
     for location, shape in fin.items():
         if vout.get(location) != shape:
             raise ValueError('graphics interface vertex/fragment varying mismatch')
+    colors = render_pass.subpass_colors(subpass)
     for location in fout:
-        if location >= len(render_pass.colors) or render_pass.colors[location][0] == 0xFFFFFFFF:
+        if location >= len(colors) or colors[location][0] == 0xFFFFFFFF:
             raise ValueError('graphics interface fragment color exceeds active subpass')
     return GraphicsInterface(tuple(sorted(vin.items())), tuple(sorted(fin.items())),
                              tuple(sorted(fout.items())), tuple(sorted(vbi.items())),

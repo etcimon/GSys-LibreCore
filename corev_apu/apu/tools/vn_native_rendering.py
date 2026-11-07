@@ -10,6 +10,21 @@ class RenderPass:
     device: int
     attachments: tuple
     colors: tuple
+    # subpass-0 color refs live in `colors` (the only executable profile);
+    # `subpasses` retains every subpass's refs and `dependencies` the
+    # validated VkSubpassDependency records for the execution follow-up
+    subpasses: tuple = ()
+    dependencies: tuple = ()
+
+    @property
+    def subpass_count(self):
+        return len(self.subpasses or (self.colors,))
+
+    def subpass_colors(self, index):
+        refs = self.subpasses or (self.colors,)
+        if not 0 <= index < len(refs):
+            raise ValueError('render pass subpass index exceeds profile')
+        return refs[index]
 
     def compatible(self, other):
         if (not isinstance(other, RenderPass) or self.context is not other.context or
@@ -88,16 +103,63 @@ def capture(engine, current, name, words, record):
 
     device, _ = resolve(one('device'), 'VkDevice')
     if name == 'vkCreateRenderPass':
-        count, colors = one('attachmentCount'), one('colorAttachmentCount')
-        if (not 0 < count <= 4 or not 0 <= colors <= 4 or
-                one('pAttachments') != count or one('subpassCount') != 1 or
-                one('pSubpasses') != 1 or one('pipelineBindPoint') or
-                one('inputAttachmentCount') or one('pInputAttachments') or
-                one('pResolveAttachments') or one('pDepthStencilAttachment') or
-                one('preserveAttachmentCount') or one('pPreserveAttachments') or
-                one('dependencyCount') or one('pDependencies') or
-                one('pColorAttachments') != colors):
-            raise ValueError('render pass counts/subpass exceed color identity profile')
+        count = one('attachmentCount')
+        nsub, ndep = one('subpassCount'), one('dependencyCount')
+        if (not 0 < count <= 4 or not 1 <= nsub <= 4 or ndep > 8 or
+                one('pAttachments') != count or one('pSubpasses') != nsub or
+                one('pDependencies') != ndep):
+            raise ValueError('render pass counts/subpass/dependencies exceed profile')
+
+        def per(key, total):
+            values = fields.get(key, ())
+            if len(values) != total:
+                raise ValueError('render pass fields are incomplete: ' + key)
+            return values
+
+        # every per-subpass scalar/array field appears once per element;
+        # input/resolve/depth/preserve stay refused inside each subpass
+        if (any(per('pipelineBindPoint', nsub)) or
+                any(per('inputAttachmentCount', nsub)) or
+                any(per('pInputAttachments', nsub)) or
+                any(per('pResolveAttachments', nsub)) or
+                any(per('pDepthStencilAttachment', nsub)) or
+                any(per('preserveAttachmentCount', nsub)) or
+                any(per('pPreserveAttachments', nsub))):
+            raise ValueError('render pass subpass inputs/resolve/depth/preserve exceed profile')
+        color_counts = per('colorAttachmentCount', nsub)
+        if (any(c > 4 for c in color_counts) or
+                list(per('pColorAttachments', nsub)) != list(color_counts)):
+            raise ValueError('render pass color attachment counts exceed profile')
+        att_list, lay_list = fields.get('attachment', ()), fields.get('layout', ())
+        if (len(att_list) != len(lay_list) or len(att_list) != sum(color_counts)):
+            raise ValueError('render pass color references are incomplete')
+        subpasses, pos = [], 0
+        for c in color_counts:
+            refs = tuple(zip(att_list[pos:pos + c], lay_list[pos:pos + c]))
+            pos += c
+            used = [index for index, _ in refs if index != 0xFFFFFFFF]
+            if (len(set(used)) != len(used) or any(index >= count for index in used) or
+                    any(layout not in (1, 2) for index, layout in refs
+                        if index != 0xFFFFFFFF)):
+                raise ValueError('render pass color references exceed profile')
+            subpasses.append(refs)
+        dependencies = ()
+        if ndep:
+            dep_names = ('srcSubpass', 'dstSubpass', 'srcStageMask', 'dstStageMask',
+                         'srcAccessMask', 'dstAccessMask', 'dependencyFlags')
+            columns = [per(key, ndep) for key in dep_names]
+            # stage/access bounds mirror vn_image_barriers.scope()'s
+            # graphics profile; BY_REGION (bit0) is the only legal flag
+            stages_bound, accesses_bound = 0x17001 | 0x78E, 0x1F98F
+            external = 0xFFFFFFFF
+            dependencies = tuple(zip(*columns))
+            for s, d, ss, ds, sa, da, fl in dependencies:
+                if ((s != external and s >= nsub) or
+                        (d != external and d >= nsub) or
+                        (s == external and d == external) or fl & ~1 or
+                        ss & ~stages_bound or ds & ~stages_bound or
+                        sa & ~accesses_bound or da & ~accesses_bound):
+                    raise ValueError('render pass dependency exceeds profile')
         names = ('format', 'samples', 'loadOp', 'storeOp', 'stencilLoadOp',
                  'stencilStoreOp', 'initialLayout', 'finalLayout')
         if any(len(fields.get(key, ())) != count for key in names):
@@ -109,14 +171,8 @@ def capture(engine, current, name, words, record):
                     sload not in (0, 1, 2) or sstore not in (0, 1) or
                     initial not in (0, 1, 2, 5, 6, 7, 8) or final not in (1, 2, 5, 6, 7)):
                 raise ValueError('render pass attachment format/ops/layout exceed profile')
-        if any(len(fields.get(key, ())) != colors for key in ('attachment', 'layout')):
-            raise ValueError('render pass color references are incomplete')
-        refs = tuple(zip(fields.get('attachment', ()), fields.get('layout', ())))
-        used = [index for index, _ in refs if index != 0xFFFFFFFF]
-        if (len(set(used)) != len(used) or any(index >= count for index in used) or
-                any(layout not in (1, 2) for index, layout in refs if index != 0xFFFFFFFF)):
-            raise ValueError('render pass color references exceed profile')
-        return RenderPass(context, device, attachments, refs)
+        return RenderPass(context, device, attachments, subpasses[0],
+                          tuple(subpasses), dependencies)
     _, entry = resolve(one('renderPass'), 'VkRenderPass')
     render_pass = entry.get('native_rendering')
     if (not isinstance(render_pass, RenderPass) or render_pass.context is not context or

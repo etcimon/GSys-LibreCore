@@ -647,6 +647,7 @@ module g6lc_apu_vnfront
     logic [4:0]          gp_nbind_q;
     logic [3:0]          gp_nattr_q;
     logic [4:0]          gp_i_q;      // binding/attr/attach/dyn cursor
+    logic [1:0]          gp_sp_q;     // VkGraphicsPipelineCreateInfo.subpass
     logic [7:0]          gp_top_q;    // VkPrimitiveTopology
     logic                gp_re_q;     // primitiveRestartEnable
     logic                gp_dcl_q;    // depthClampEnable
@@ -1323,6 +1324,7 @@ module g6lc_apu_vnfront
         gp_late_q <= 1'b0; gp_fdep_q <= 1'b0;
         pl_modh_q <= '0; pl_modc_q <= '0; pl_pin_q <= 1'b0;
         gp_nbind_q <= '0; gp_nattr_q <= '0; gp_i_q <= '0;
+        gp_sp_q <= '0;
         gp_top_q <= '0; gp_re_q <= 1'b0; gp_dcl_q <= 1'b0;
         gp_poly_q <= 2'd0; gp_rsd_q <= 1'b0;   // VK_POLYGON_MODE_FILL
         gp_dbn_q <= 1'b0; gp_dbmin_q <= '0; gp_dbmax_q <= '0;
@@ -6245,14 +6247,23 @@ module g6lc_apu_vnfront
                 pl_layid_q[31:0] <= stg_word_q;
                 gp_ph_q <= 6'd45; state_q <= StGpRd;
               end
-              default: begin // 6'd45: layout id hi -> resolve VS module
+              default: begin // 6'd45: layout id hi -> subpass keep word
                 pl_layid_q[63:32] <= stg_word_q;
-                otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
-                             id: APU_VN_ID_TAG | gp_mod0_q,
-                             kind: 6'(APU_VN_KIND_VK_SHADER_MODULE),
-                             ctx: ctx_i, default: '0};
-                ot_ret_q <= StGpModC;
-                state_q  <= StOtReq;
+                gp_ph_q <= 7'd91; state_q <= StGpRd;
+              end
+              7'd91: begin // subpass (0..3): parked in aux[9:8], bounds
+                          // the declared subpass the draw assembly
+                          // matches against snap_q.subpass
+                if (stg_word_q > 32'd3) state_q <= StPipeFail;
+                else begin
+                  gp_sp_q <= stg_word_q[1:0];
+                  otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
+                               id: APU_VN_ID_TAG | gp_mod0_q,
+                               kind: 6'(APU_VN_KIND_VK_SHADER_MODULE),
+                               ctx: ctx_i, default: '0};
+                  ot_ret_q <= StGpModC;
+                  state_q  <= StOtReq;
+                end
               end
             endcase
           end
@@ -6404,11 +6415,11 @@ module g6lc_apu_vnfront
               state_q  <= StOpReq;
             end else begin
               hnd_pay_q    <= ot_cpl_i.handle;
-              // aux[31:0] = {ObjPay block chunk[15:0], 9'h0,
-              //              gfx=1[6], 6'h0} — the stage module
+              // aux[31:0] = {ObjPay block chunk[15:0], 6'h0, subpass[1:0],
+              //              1'h0, gfx=1[6], 6'h0} — the stage module
               // {handle,park} pairs live in block words 44..47
-              auxlo_val_q  <= {16'(op_base_q[31:6]), 9'h0, 1'b1,
-                               6'h0};
+              auxlo_val_q  <= {16'(op_base_q[31:6]), 6'h0, gp_sp_q,
+                               1'h0, 1'b1, 6'h0};
               auxlo_mask_q <= 32'hFFFF_FFFF;
               auxlo_ret_q  <= StGpAuxH;
               state_q      <= StAuxLo;

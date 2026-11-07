@@ -26,6 +26,7 @@ class GraphicsPipeline:
     layout_handle: int
     layout: object
     render_pass: RenderPass
+    subpass: int
     vertex: ShaderStage
     fragment: ShaderStage
     wire: tuple
@@ -80,7 +81,7 @@ def capture(engine, current, name, words, record):
             any(len(fields.get(key, ())) != 2 for key in ('module', 'pName')) or
             len(specs) != 2 or pending is not None or
             any(fields.get('flags', ())) or any(fields.get('pNext', ())) or
-            fields.get('subpass') != [0] or fields.get('pipelineCache') != [0] or
+            fields.get('pipelineCache') != [0] or
             fields.get('basePipelineHandle') != [0] or
             fields.get('basePipelineIndex') not in ([0], [0xFFFFFFFF]) or
             fields.get('pAllocator') != [0]):
@@ -107,6 +108,9 @@ def capture(engine, current, name, words, record):
             not isinstance(render_pass, RenderPass) or render_pass.context is not owner or
             render_pass.device != device):
         raise ValueError('graphics layout/render-pass identity crosses devices')
+    pipeline_subpass = one('subpass')
+    if not 0 <= pipeline_subpass < render_pass.subpass_count:
+        raise ValueError('graphics pipeline subpass exceeds render pass profile')
     stages, scans, allocation = {}, {}, [2]
     for i, stage in enumerate(fields['stage']):
         module, entry = resolve(fields['module'][i], 'VkShaderModule')
@@ -138,11 +142,13 @@ def capture(engine, current, name, words, record):
     if length != 2:
         raise ValueError('graphics pipeline output count exceeds profile')
     identifier = words[base] | words[base + 1] << 32
-    fixed = validate_state(engine, state_fields, blobs, render_pass)
-    interfaces = validate_interfaces(scans[1], scans[0x10], fixed, render_pass)
+    fixed = validate_state(engine, state_fields, blobs, render_pass, pipeline_subpass)
+    interfaces = validate_interfaces(scans[1], scans[0x10], fixed, render_pass,
+                                     pipeline_subpass)
     resources = validate_resources(scans, layout)
     snapshot = GraphicsPipeline(owner, device, layout_handle, layout, render_pass,
-                                stages[1], stages[0x10], tuple(words), fixed, interfaces, resources)
+                                pipeline_subpass, stages[1], stages[0x10], tuple(words),
+                                fixed, interfaces, resources)
     return (identifier,), (snapshot,), tuple(allocation)
 
 

@@ -72,7 +72,12 @@ module g6lc_apu_vgp
                        (shader[63:32] == 32'd0) && (shader[31:0] != 32'd0) &&
                        (layout[63:32] == 32'd0) && (layout[31:0] != 32'd0) &&
                        (rpass[63:32] == 32'd0) && (rpass[31:0] != 32'd0) &&
-                       (subpass == 32'd0) && (allocp == 64'd0) &&
+                       // bounded profile: subpass index 0..3 (the
+                       // render pass admits subpassCount 1..4); the
+                       // declared value parks in the pipeline aux
+                       // and is matched against the active subpass
+                       // at draw assembly
+                       (subpass[31:2] == 30'h0) && (allocp == 64'd0) &&
                        (guest[63:32] == 32'd0) && (guest[31:0] != 32'd0);
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
