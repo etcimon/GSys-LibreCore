@@ -191,9 +191,19 @@ fills mip0 with the (x,y) pattern and every mip>=1 solid green, and sets
 (dtype 1) and samples at u=v=0.5, LOD=1.0, nearest filter: the Model
 selects mip1 (`m0 = (le+8)>>4 = 1`, `m0 = min(m0, lvl-1)`) and returns the
 solid-green texel rather than the mip0 (x,y) pattern - proving the mip
-count now reaches the sampled-image meta end-to-end.  Trilinear (LOD
-fractional blend across two mips) and gather/projective/depth-reference
-ops stay queued.
+count now reaches the sampled-image meta end-to-end.
+
+Trilinear (fractional-LOD blend across two mips) rides the same ABI:
+`_image_fetch_setup` gained `mip_linear` (VkSamplerMipmapMode.LINEAR)
+and `mip_color` (the RGBA fill for every mip>=1) parameters.
+`test_fragment_trilinear_filter_blend` binds a LINEAR min/mag + LINEAR
+mipmap sampler over a 2-level image and samples at u=0.4375, v=0.375,
+LOD=0.5: mip0 lands on a single texel (fu0=fv0=0 -> texel(3,1)=(96,64,64,
+255)) while mip1's solid (0,192,0,255) fill collapses its bilinear
+footprint to that colour, and `le=8 -> m0=0,m1=1,fw=128` yields an exact
+50/50 mip blend -> (48,128,32,255), all integers so the 16-bit
+fixed-point accumulate + UNORM8 round-trip is exact.  Gather,
+projective and depth-reference sample ops stay queued.
 
 Evidence: `test_vn_graphics_draw_replay` gained nine image draws -
 `test_fragment_sampled_image_fetch_reaches_framebuffer` (constant ivec2
@@ -219,6 +229,8 @@ su0=384, iu0=1, fu0=128 -> 50/50 bilinear blend of texels (1,1)+(2,1) ->
 UNORM mean (48,64,40)),
 `test_fragment_mipmap_explicit_lod` (2-level COMBINED_IMAGE_SAMPLER,
 u=v=0.5 LOD=1.0 nearest -> mip1 solid green, not the mip0 (x,y) pattern),
+`test_fragment_trilinear_filter_blend` (LINEAR mipmap sampler, u=0.4375
+v=0.375 LOD=0.5 -> mip0 texel(3,1) + solid mip1 50/50 -> (48,128,32,255)),
 plus
 `test_fragment_storage_image_write` (a STORAGE_IMAGE kind 3 bound via
 `OpTypeImage(sampled=2)`; `OpImageWrite` stores a constant red texel at the
@@ -228,8 +240,9 @@ pattern).  The fetch draws prove each covered framebuffer texel equals its
 own (x,y)-encoded image texel; the store draw proves the previously
 unexercised kind-3 `GfxMemory` write admission end-to-end; the mipmap draw
 proves the descriptor ABI now carries a multi-level mip count into the
-sampled-image meta.  Local `test_vn_*` sweep ran 748 tests, all green.
-Frozen native
+sampled-image meta; the trilinear draw proves the fractional-LOD
+two-mip accumulate + fw blend arm.  Local `test_vn_*` sweep ran 749
+tests, all green.  Frozen native
 cohorts on ovh_calltorch:
 `native-gfximg-01` 720 tests PASS in 20.465 s (`native-execution.y6y3xap5`),
 `native-gfximgpix-01` 721 tests PASS in 20.582 s
@@ -246,5 +259,7 @@ PASS in 19.317 s (`native-execution.edz92krq`), and `native-gfxclamp-01`
 (`native-execution.eey3xhni`), and `native-gfxaddr-01` 731 tests PASS in
 18.759 s (`native-execution.amvegsm4`), and `native-gfxdyn-01` 732 tests
 PASS (`native-execution._di52ww_`), and `native-gfxmip-01` 733 tests PASS
-in 21.0 s (`native-execution.hwg4luup`), all `sources_unchanged: true`.
+in 21.0 s (`native-execution.hwg4luup`), and `native-gfxtrilin-01` 734
+tests PASS in 20.0 s (`native-execution.aaadxsp4`), all
+`sources_unchanged: true`.
 Host-native model only - no RTL/CTS/stock/hardware qualification.

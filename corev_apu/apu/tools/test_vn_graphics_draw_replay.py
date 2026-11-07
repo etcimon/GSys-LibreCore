@@ -387,7 +387,8 @@ class DrawReplayTests(unittest.TestCase):
 
     def _image_fetch_setup(self, module, dtype=2, sampler_addr=0,
                            linear=False, border_color=0, mips=1,
-                           max_lod=0.0):
+                           max_lod=0.0, mip_linear=False,
+                           mip_color=(0, 255, 0, 255)):
         """Shared vkCreateImage/View + image-descriptor-set setup for the
         image draw tests.  The image is an 8x4 R8G8B8A8_UNORM at MEMORY
         offset 4352 with texel(x,y) = (x*32, y*64, (x+y)*16, 255);
@@ -402,14 +403,17 @@ class DrawReplayTests(unittest.TestCase):
         keeps the (x,y) texel pattern while mips>=1 are filled solid
         green (0,255,0,255) so an explicit-LOD sample proves mip select;
         `max_lod` sets VkSamplerCreateInfo.maxLod (must cover the mip
-        count or the model clamps LOD to mip0)."""
+        count or the model clamps LOD to mip0); `mip_linear` selects
+        VkSamplerMipmapMode.LINEAR (trilinear) over NEAREST; `mip_color`
+        is the RGBA tuple filled into every mip>=1."""
         self.r.layout(((0, dtype, 1, 16),))
         if dtype in (0, 1):
             filt = 1 if linear else 0
             self.f.command('vkCreateSampler', device=self.w.DEVICE,
                 pSampler=self.SAMPLER,
                 pCreateInfo=self.w.structure('VkSamplerCreateInfo', pNext=[],
-                    flags=0, magFilter=filt, minFilter=filt, mipmapMode=0,
+                    flags=0, magFilter=filt, minFilter=filt,
+                    mipmapMode=1 if mip_linear else 0,
                     addressModeU=sampler_addr, addressModeV=sampler_addr,
                     addressModeW=sampler_addr,
                     mipLodBias=0, anisotropyEnable=0, maxAnisotropy=0,
@@ -466,7 +470,7 @@ class DrawReplayTests(unittest.TestCase):
                     if m == 0:
                         texel = bytes((x * 32, y * 64, (x + y) * 16, 255))
                     else:
-                        texel = bytes((0, 255, 0, 255))
+                        texel = bytes(mip_color)
                     self.f.state.aperture.write(
                         base + moff + y * pitch + x * 4, texel)
         return did
@@ -686,6 +690,33 @@ class DrawReplayTests(unittest.TestCase):
         want = self.e.golden.img_clear_texel(
             self.e.model, did,
             struct.unpack('<4I', struct.pack('<4f', 0.0, 1.0, 0.0, 1.0)))
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), want)
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_fragment_trilinear_filter_blend(self):
+        # trilinear filtering: a LINEAR min/mag + LINEAR mipmap VkSampler
+        # samples at u=0.4375, v=0.375, lod=0.5.  mip0 (8x4) lands on a
+        # single texel - su0=floor(0.4375*8*256-128)=768 -> iu0=3,fu0=0;
+        # sv0=floor(0.375*4*256-128)=256 -> iv0=1,fv0=0 - texel(3,1)=
+        # (96,64,64,255).  mip1 (4x2) is a solid (0,192,0,255) fill so its
+        # bilinear footprint collapses to that colour regardless of the
+        # (different-dimension) fractional coords.  lod=0.5 -> le=8 ->
+        # mipmapMode LINEAR gives m0=0,m1=1,fw=(8&0xF)<<4=128 -> exact
+        # 50/50 mip blend -> per-channel mean (48,128,32,255), all
+        # integers so the 16-bit fixed-point + UNORM8 round-trip is
+        # exact.  Exercises the tril (m0!=m1) accumulate + fw blend arm.
+        did = self._image_fetch_setup(
+            fs_sample_program(u=0.4375, v=0.375, lod=0.5), dtype=1,
+            linear=True, mip_linear=True, mips=2, max_lod=2.0,
+            mip_color=(0, 192, 0, 255))
+        self._image_fetch_draw()
+        want = self.e.golden.img_clear_texel(
+            self.e.model, did,
+            struct.unpack('<4I', struct.pack('<4f',
+                (96 + 0) / 2 / 255.0, (64 + 192) / 2 / 255.0,
+                (64 + 0) / 2 / 255.0, 1.0)))
         for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
             self.assertEqual(self.read_texel(x, y), want)
         self.assertEqual(self.read_texel(7, 3), self.clear_texel())

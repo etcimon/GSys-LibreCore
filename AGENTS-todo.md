@@ -9,9 +9,14 @@
   sector-to-byte representability before side effects. Keep the last legal
   sector usable. Frozen original RTL rejects six final-fixture boundary cases
   and the safety proof; local repaired simulation passes 1,609 checks.
-- [ ] Collect the final remote block/device/writer/policy matrix and full-extent
-  proof, verify tool/source identities and synthesis, then record the bounded
-  result in `g6lc_storamic/architecture/block-address-validation.md`.
+- [x] Close the selected six-stage backend/device profile and full-extent
+  proof with source/model/PGO identities and original-RTL rejection; keep the
+  omitted stages explicit. See `g6lc_storamic/architecture/block-address-validation.md`.
+- [x] CPU31 load translation: control projection equivalent, actual PA/hazard
+  feedback regression and original-RTL rejection, four PGO profiles, 31 positive
+  scenarios/five negative checks and live-port synthesis pass. The strict
+  captured CPU profile drops from 28 to 27 errors off/on. See
+  `g6lc_storamic/architecture/cpu-load-translation.md`; no native gate is closed.
 - [ ] Resume fresh C0/C1 and native topology/provider dependencies from the
   completion plan; hyp8/compiler progress does not close functional-core
   qualification. Native checkpoint admission remains disabled.
@@ -18175,9 +18180,16 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   COMBINED_IMAGE_SAMPLER, u=v=0.5 LOD=1.0 nearest -> mip1 green not mip0
   pattern), cohort `native-gfxmip-01` 733 PASS
   (`native-execution.hwg4luup`, sources_unchanged true).
-- [ ] Trilinear (fractional LOD blend across two mips) + gather/proj/dref
-  sample ops (all four VkSamplerAddressMode values + bilinear filter +
-  explicit/implicit LOD + multi-mip select already proven),
+- [x] Trilinear (fractional-LOD blend across two mips):
+  `_image_fetch_setup` gained `mip_linear` (VkSamplerMipmapMode.LINEAR)
+  + `mip_color` (mip>=1 fill) params; `test_fragment_trilinear_filter_
+  blend` (LINEAR mipmap sampler, u=0.4375 v=0.375 LOD=0.5 -> mip0
+  texel(3,1) + solid mip1 50/50 -> (48,128,32,255)), cohort
+  `native-gfxtrilin-01` 734 PASS (`native-execution.aaadxsp4`,
+  sources_unchanged true).
+- [ ] Gather/proj/dref sample ops (all four VkSamplerAddressMode values
+  + bilinear filter + explicit/implicit LOD + multi-mip select +
+  trilinear already proven),
   blend/depth/MRT, helper
   lanes, non-triangle topology, flat/nopersp interpolation,
   multi-descriptor/multi-stage end-to-end draws and capability/CTS/physical
