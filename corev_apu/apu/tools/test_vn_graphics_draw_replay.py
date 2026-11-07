@@ -13,6 +13,7 @@ from vn_native_execution import StreamFault
 
 class DrawReplayTests(unittest.TestCase):
     VB, VS2, FS2, PIPE2 = (0x790000001000 + i for i in range(4))
+    POOL, DSET, UBO = (0x7A0000001000 + i for i in range(3))
 
     def setUp(self):
         self.r = resource_fixture.ResourceTests()
@@ -171,6 +172,68 @@ class DrawReplayTests(unittest.TestCase):
         for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
             self.assertEqual(self.read_texel(x, y), self.fc_texel(x, y))
         # far corner is outside the triangle: keeps the pass clear value
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_fragment_ubo_descriptor_reaches_framebuffer(self):
+        # end-to-end: vkCmdBindDescriptorSets -> vkCmdDraw -> DrawExec ->
+        # FragmentShade reads the bound UBO and broadcasts it to color.
+        ubo = 0.5
+        # descriptor set layout: set0/binding0 UNIFORM_BUFFER, fragment stage
+        self.r.layout(((0, 6, 1, 16),))
+        self.f.command('vkDestroyShaderModule', device=self.w.DEVICE,
+                       shaderModule=self.FS2)
+        self.module(self.FS2, fs_program('color', ubo=True))
+        # uniform buffer with UNIFORM_BUFFER usage at MEMORY offset 2048
+        self.f.command('vkCreateBuffer', device=self.w.DEVICE, pBuffer=self.UBO,
+            pCreateInfo=self.w.structure('VkBufferCreateInfo', pNext=[], flags=0,
+                size=256, usage=0x10, sharingMode=0, queueFamilyIndexCount=0,
+                pQueueFamilyIndices=[]))
+        self.f.command('vkBindBufferMemory', device=self.w.DEVICE, buffer=self.UBO,
+                       memory=self.w.MEMORY, memoryOffset=2048)
+        self.f.command('vkCreateDescriptorPool', device=self.w.DEVICE,
+            pDescriptorPool=self.POOL,
+            pCreateInfo=self.w.structure('VkDescriptorPoolCreateInfo', pNext=[],
+                flags=1, maxSets=1, poolSizeCount=1, pPoolSizes=[
+                    self.w.structure('VkDescriptorPoolSize', type=6,
+                                     descriptorCount=1)]))
+        self.f.command('vkAllocateDescriptorSets', device=self.w.DEVICE,
+            pDescriptorSets=[self.DSET], pAllocateInfo=self.w.structure(
+                'VkDescriptorSetAllocateInfo', pNext=[],
+                descriptorPool=self.POOL, descriptorSetCount=1,
+                pSetLayouts=[self.r.DSL]))
+        self.f.command('vkUpdateDescriptorSets', device=self.w.DEVICE,
+            descriptorWriteCount=1, descriptorCopyCount=0, pDescriptorCopies=[],
+            pDescriptorWrites=[self.w.structure('VkWriteDescriptorSet', pNext=[],
+                dstSet=self.DSET, dstBinding=0, dstArrayElement=0,
+                descriptorCount=1, descriptorType=6, pTexelBufferView=[],
+                pImageInfo=[], pBufferInfo=[self.w.structure(
+                    'VkDescriptorBufferInfo', buffer=self.UBO, offset=0,
+                    range=4)])])
+        self.upload(self.ndc_triangle())
+        self.f.state.aperture.write(self.f.owner.base + 2048,
+                                    struct.pack('<f', ubo))
+        self.pipeline()
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.f.command('vkCmdBindDescriptorSets', commandBuffer=self.f.CB,
+            pipelineBindPoint=0, layout=self.g.PL, firstSet=0,
+            descriptorSetCount=1, pDescriptorSets=[self.DSET],
+            dynamicOffsetCount=0, pDynamicOffsets=[])
+        self.draw()
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        job = self.f.enqueue()
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        did = self.e.golden.img_fmt_id(self.e.model, 37)
+        want = self.e.golden.img_clear_texel(
+            self.e.model, did,
+            struct.unpack('<4I', struct.pack('<4f', ubo, ubo, ubo, ubo)))
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), want)
         self.assertEqual(self.read_texel(7, 3), self.clear_texel())
         self.assertEqual(self.f.owner.work_refs, 0)
 

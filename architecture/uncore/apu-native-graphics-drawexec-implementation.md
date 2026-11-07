@@ -2,7 +2,8 @@
 
 Status: implemented, host-native-model evidence only.  No blending,
 depth/stencil, logic-op, multi-attachment, helper-lane, non-triangle
-topology or descriptor-binding draw is claimed or enabled.  Zero capsets
+topology, image/sampler or dynamic-offset draw is claimed or enabled;
+buffer (UBO/SSBO) descriptor binds are admitted per stage.  Zero capsets
 remain advertised; `vkCmdDraw*` admission is bounded to the profile below
 and remains subject to the independent capability/CTS gates.
 
@@ -20,8 +21,15 @@ Two layers complete the first executable graphics path:
   (`fetch_stats`, `shade_stats`, `raster_stats`, `fshade_stats`,
   `writeback_stats`, `drawexec_stats`).
   - Eager admission probes instantiate each stage profile before any work
-    is published; descriptor-using shaders are refused at scan
-    (`OpDecorate` Binding/DescriptorSet rows on interface variables).
+    is published.  Buffer descriptors (`UNIFORM`/`SBUF` storage) are
+    admitted per stage through the shared `resolve_bindings` helper:
+    `DrawExec.vs_bindings`/`fs_bindings` carry the resolved `ShaderBinding`
+    operands into `Shade`/`FragmentShade`, which emit real Model binding
+    rows under the `GFX_DESC_BIAS`/`GfxMemory` aperture model.  Image,
+    sampler and `UNIFORMCONST` storage stays refused at scan; an unbound
+    decorated descriptor refuses at admission (the FS binding coverage is
+    probed eagerly in `DrawExecRuntime.__init__`, matching the vertex
+    stage).
   - Intermediate record images (varyings, FS-in records, FS-out colors)
     are immutable byte snapshots handed between stages; no stage reads
     another stage's live state.
@@ -39,7 +47,9 @@ Two layers complete the first executable graphics path:
   converts one `DrawPlan` into a `DrawExec` (or `None` for an empty
   effective scissor):
   - `_push` requires complete vertex(1)/fragment(16) stage bindings and
-    refuses any stage carrying descriptor bindings.
+    carries each stage's resolved buffer-descriptor operands
+    (`vs_bindings`/`fs_bindings`) into the `DrawExec`; image/sampler and
+    `UNIFORMCONST` bindings remain refused upstream at scan/admission.
   - `_scissor` intersects the recorded scissor with the render-pass area;
     an empty intersection yields no operation but still remembers all
     plan references and registers `plan.validate` as an admission guard.
@@ -75,17 +85,21 @@ partial commit.
   executor path.
 - Draws outside an active render pass, with incompatible pipeline/pass
   state, stale generations, missing stage bindings, multi-output FS, or
-  descriptor requirements refuse before any operation is published.
+  unbound/unsupported descriptor requirements refuse before any operation
+  is published.
 
 ## Evidence
 
 - `test_vn_graphics_drawexec.py` (3 tests): end-to-end triangle writes
   exact attachment texels, multi-triangle ordering and per-stage stats,
   admission refusals.
-- `test_vn_graphics_draw_replay.py` (5 tests): FragCoord-derived texels
-  through the wire/replay path, empty effective scissor, draw outside
-  render pass refusal, two-draw record order, descriptor-requiring
-  shader refusal.
+- `test_vn_graphics_draw_replay.py`: FragCoord-derived texels through the
+  wire/replay path, empty effective scissor, draw outside render pass
+  refusal, two-draw record order, descriptor-requiring shader refusal, and
+  an end-to-end fragment-UBO draw (`vkCmdBindDescriptorSets` -> `vkCmdDraw`
+  -> framebuffer texel equals the bound UBO value on covered pixels).
+  Test-shader UBOs use Block-decorated struct form so they satisfy
+  `vn_graphics_resources.validate`.
 - Stale boundary tests updated (`test_vn_vertex_operands`,
   `test_vn_graphics_dynamic`, `test_vn_graphics_bindings`): state-only
   command buffers now admit an empty replay job instead of raising
@@ -94,12 +108,18 @@ partial commit.
   `native-execution.vah9c9ct`): 616 tests PASS in 18.032 s on
   `ovh_calltorch`, `sources_unchanged: true`;
   `PASS: host-native-model; no RTL/CTS qualification`.
+- Buffer-descriptor draw increments, frozen cohort `native-gfxdrawubo-01`
+  (cohort `native-execution.88gdzair`): 719 tests PASS in 21.162 s on
+  `ovh_calltorch`, `sources_unchanged: true`;
+  `PASS: host-native-model; no RTL/CTS qualification`.
 
 ## Not claimed
 
 Blending, depth/stencil, logic ops, MRT/multi-attachment, helper lanes,
 non-triangle topology, flat/nopersp/centroid interpolation (scanner-
-rejected), descriptor bindings in draws, push-constant sharing across
+rejected), image/sampler (`UNIFORMCONST`) descriptor binds, in-model
+dynamic offsets, multi-descriptor/multi-stage end-to-end draws,
+push-constant sharing across
 stages beyond the per-stage words, ordering guarantees versus other
 attachments or concurrent work, RTL/CTS/physical qualification, and any
 capability advertisement.  `vkCmdDraw*` replay is admitted only inside

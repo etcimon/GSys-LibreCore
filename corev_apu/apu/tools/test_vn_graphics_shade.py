@@ -39,6 +39,8 @@ def vs_program(desc=False, ubo=False):
     if desc or ubo:
         emit(71, 16, 34, 0)         # ubo   DescriptorSet 0
         emit(71, 16, 33, 0)         # ubo   Binding 0
+        emit(71, 37, 2)             # %37    Block
+        emit(72, 37, 0, 35, 0)      # %37.0  Offset 0
     emit(19, 1)                     # %void
     emit(33, 2, 1)                  # %fnty = fn(void)
     emit(22, 3, 32)                 # %float
@@ -50,7 +52,9 @@ def vs_program(desc=False, ubo=False):
     emit(32, 9, 1, 6)               # ptr Input int
     emit(32, 10, 3, 5)              # ptr Output v4f
     if desc or ubo:
-        emit(32, 17, 2, 6)          # ptr Uniform int
+        emit(30, 37, 6)             # %37 = struct{int}
+        emit(32, 38, 2, 6)          # %38 = ptr Uniform int
+        emit(32, 17, 2, 37)         # %17 = ptr Uniform %37
     emit(59, 7, 11, 1)              # pos
     emit(59, 8, 12, 1)              # col
     emit(59, 9, 13, 1)              # vidx
@@ -68,7 +72,8 @@ def vs_program(desc=False, ubo=False):
     emit(81, 3, 25, 24, 0)          # x   = p.x
     emit(81, 3, 26, 24, 1)          # y   = p.y
     if ubo:
-        emit(61, 6, 35, 16)         # ui  = Load int ubo
+        emit(65, 38, 39, 16, 21)    # %39 = AccessChain %38 %16 %21 -> member
+        emit(61, 6, 35, 39)         # ui  = Load int %39
         emit(111, 3, 36, 35)        # uf  = ConvertSToF ui
     emit(80, 5, 27, 25, 26, 19, 36 if ubo else 20)  # pos4=(x,y,.5,ubo|1)
     emit(62, 14, 27)                # Store glpos pos4

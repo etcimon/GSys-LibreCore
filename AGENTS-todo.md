@@ -18076,9 +18076,25 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   (native-execution.id2_ytbr, sources_unchanged true), local `test_vn_*`
   733 PASS.  Record:
   `architecture/uncore/apu-native-graphics-pshade-implementation.md`.
+- [x] End-to-end descriptor-bound draw (native): `test_fragment_ubo_
+  descriptor_reaches_framebuffer` drives the real command path —
+  vkCreateDescriptorSetLayout/PipelineLayout(with DSL) -> vkCreateDescriptor
+  Pool/Allocate/Update(buffer) -> vkCmdBindPipeline/VertexBuffers/
+  BindDescriptorSets -> vkCmdDraw -> DrawState._draw -> GraphicsBindings.
+  resolve -> buffer_descriptor -> ShaderBinding -> DrawPlan.stage_bindings ->
+  draw_replay -> DrawExec.fs_bindings -> FragmentShade -> GfxMemory aperture
+  read -> color broadcast -> writeback -> framebuffer texel equals the UBO
+  value on covered pixels, clear value off-triangle.  Test-shader UBOs in
+  `vs_program`/`fs_program` converted to Block-decorated struct form (the
+  pipeline resource validator requires STRUCT+Block, not bare scalars) so
+  they satisfy `vn_graphics_resources.validate`; OpAccessChain member reads
+  verified at both shade-runtime and pipeline levels.  Remote cohort
+  `native-gfxdrawubo-01` 719 checks PASS (native-execution.88gdzair,
+  sources_unchanged true), local `test_vn_*` 734 PASS.
+  Record: `architecture/uncore/apu-native-graphics-draw-implementation.md`.
 - [ ] Image/sampler (`UNIFORMCONST`) binds, in-model dynamic offsets,
   blend/depth/MRT, helper lanes, non-triangle topology, flat/nopersp
-  interpolation, end-to-end descriptor draw replay and
+  interpolation, multi-descriptor/multi-stage end-to-end draws and
   capability/CTS/physical gates before any capset or stock vkCmdDraw*
   advertisement; host-model evidence only.
 

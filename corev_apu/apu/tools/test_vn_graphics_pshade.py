@@ -45,6 +45,8 @@ def fs_program(kind='color', desc=False, ubo=False):
     if desc or ubo:
         emit(71, 14, 34, 0)                          # ubo   DescriptorSet 0
         emit(71, 14, 33, 0)                          # ubo   Binding 0
+        emit(71, 22, 2)                              # %22    Block
+        emit(72, 22, 0, 35, 0)                       # %22.0  Offset 0
     emit(19, 1)                     # %void
     emit(33, 2, 1)                  # %fnty
     emit(22, 3, 32)                 # %float
@@ -52,7 +54,11 @@ def fs_program(kind='color', desc=False, ubo=False):
     emit(32, 5, 1, 4)               # ptr Input v4f
     emit(32, 6, 3, 4)               # ptr Output v4f
     if desc or ubo:
-        emit(32, 15, 2, 3)          # ptr Uniform float
+        emit(30, 22, 3)             # %22 = struct{float}
+        emit(21, 24, 32, 1)         # %24 = int
+        emit(32, 23, 2, 3)          # %23 = ptr Uniform float
+        emit(32, 15, 2, 22)         # %15 = ptr Uniform %22
+        emit(43, 24, 25, 0)         # %25 = int 0 (access-chain index)
     emit(59, 5, 7, 1)               # vcol/fc input
     emit(59, 6, 8, 3)               # color output
     if desc or ubo:
@@ -64,7 +70,8 @@ def fs_program(kind='color', desc=False, ubo=False):
     emit(248, lbl)                  # label
     emit(61, 4, c, 7)               # c = Load v4f input
     if ubo:
-        emit(61, 3, 20, 14)         # uf  = Load float ubo
+        emit(65, 23, 26, 14, 25)    # %26 = AccessChain %23 %14 %25 -> member
+        emit(61, 3, 20, 26)         # uf  = Load float %26
         emit(80, 4, 21, 20, 20, 20, 20)  # vec4(uf,uf,uf,uf)
         emit(62, 8, 21)             # Store color
     elif kind == 'color':
