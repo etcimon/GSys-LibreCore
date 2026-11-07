@@ -291,27 +291,48 @@ gate.  So a correct RTL producing the override (e.g. 41) would
 *mis*-match an `.exp` expecting the default (7).  None of the 484
 `sh_vectors` carry `OpSpecConstant` (opcodes 48-52 absent).
 
-**Concrete path (owed):** author an `OpSpecConstant` compute shvec
-(`spirv-as`/`glslangValidator` on PATH — a minimal
-`layout(constant_id=0) const uint K=7; ob.v=K;` compiles clean with
-`OpDecorate %K SpecId 0`), then generate its `.exp`/`.tab` from the
-**specialized/folded** module while keeping `.hex` = the *original*
-`OpSpecConstant` words so RTL still exercises the spec-block path.
-`specialize()` is already verified on this real module: default scan
-yields const id 12 = `[7]`, folding `(0→41)` yields `[41]` and rewrites
-opcode 50 `OpSpecConstant`→opcode 43 `OpConstant`.  That requires
-decoupling `.hex` words from `.exp`-generation words in
-`shader_vectors.py::emit` (it currently feeds one `spv_words` to both)
-— or a dedicated spec-vector emitter.  Then a `specok`-style session
-specializing `constantID=0→41` replayed through `tb_g6lc_apu_vgtop`
-asserts output word = 41, closing COMPUTE-H1 end-to-end.  (The CTS
-spec=1`->`StPipeFail` may be a second, create-side fault in the same
-path; the `G6LC_APU_DBG_LOST` rebuild names its sub-state if a
-guest/directed run still shows it.)  A secondary, narrower leak remains
-on the *create-failure* path: `StPipeFail` unwinds module pins but does
-not free a spec extent allocated before a later create step faults —
-reachable only on post-`StPipeSpAlc` resource faults, not normal CTS;
-tracked as follow-up.
+**RESOLVED end-to-end (2026-11-07, directed RTL sim):** the
+specialization-constant path is now proven from `OpSpecConstant` to the
+output buffer.  `corpus/specconst.{comp,spv}` is a minimal compute
+shader — `layout(constant_id=0) const uint K=7;` storing `K` to all
+four words of one SSBO (explicit stores, so every output word carries
+the constant).  `specialize()` folds `(0→41)`, rewriting opcode 50
+`OpSpecConstant`→opcode 43 `OpConstant`.
+
+The shvec `sh_vectors/specconst_1` is **decoupled** exactly as required:
+`.hex` keeps the *original* `OpSpecConstant` words (so RTL still
+exercises the spec-block path) while `.exp` oracle/model/class are
+generated from the *folded* module (=41).  This was achieved **without
+modifying `shader_vectors.py::emit`** — `emit()` already accepts
+`oracle_out`/`model_cache` overrides, so a driver runs `model_run()` on
+a folded `hexw` and the lavapipe oracle on a folded `.spv`, then
+re-emits with the original words.  Both oracle (lavapipe) and
+`spirv_model` independently produce `[41,41,41,41]` (class `i`,
+bit-exact).
+
+Session vector `vn_vectors/apu-vn-specok2` (`--compute-session …
+specconst_1 --variant specok`) creates the pipeline with
+`pSpecializationInfo` `constantID=0→41`, binds, dispatches, and checks
+4 output words.  `tb_g6lc_apu_vgtop +vec=apu-vn-specok2`:
+`PASS-COMPUTE g1=12 g2=12 ulp1=0 ulp2=0`, `XF_FAULTS 0`, under **both**
+the zero-jitter reference and the randomized memory-latency step
+(`+mp_lat_min=1 +mp_lat_max=20 +mp_ready_pct=60`).  An 11-session
+regression (specok, specok2, `ue_cneg_spec_1` reject, bufcopy/bufscale/
+loopfor/barrier/arrlen/vec4arith compute, `ue_gpos_fsubo_1` graphics,
+`ue_cneg_baddesc_1`) is all PASS.  This closes the COMPUTE-H1
+spec-constant mechanism at the directed-sim level: `OpSpecConstant` →
+ObjPay spec block → `rs_spec_q` → shcore `F_SP0` → shmod `f_spec` →
+constant 41 → SSBO write → checked output.
+
+**Still owed (not qualification):** real CTS `compute.pipeline.specialization.*`
+runs, the create-failure-path spec-extent leak (`StPipeFail` does not
+free a post-`StPipeSpAlc` spec block — fault-injection-only, narrower
+than the fixed retire leak), and `specconst` is a special override
+vector (kept out of `shader_vectors.py` `DESC` so standard regeneration
+does not bake a default `.exp`); a first-class `spec` field in `DESC`
+is the clean follow-up.  Evidence remains host-native model + directed
+Verilator sim — **no capsets, CTS, stock-Mesa, physical, or silicon
+qualification**.
 
 ## Performance / area / scalability
 
