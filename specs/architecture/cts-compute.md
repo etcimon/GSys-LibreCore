@@ -246,28 +246,39 @@ opcodes 48-52 with `OpSpecConstant` decode + `const_data_o`.  The CTS
 the vnfront spec-block *creation* sequence (StPipeSpAlc..StPipeAuxHiC),
 *not* yet pinned to a sub-state — the existing `G6LC_APU_DBG_LOST`
 watcher (`dbg_{frm,sfrm,ofrm}_q` + `ot/op cpl` status prints) already
-attributes the failing ObjTab/ObjPay op.  **Reproduced (2026-11-07):**
-the `specok` compute-session vector `apu-vn-specok` fails
-`tb_g6lc_apu_vgtop` (`+vec=apu-vn-specok`) with a single error —
+attributes the failing ObjTab/ObjPay op.  **Reproduced + fixed
+(2026-11-07):** the `specok` compute-session vector `apu-vn-specok`
+failed `tb_g6lc_apu_vgtop` (`+vec=apu-vn-specok`) with a single error —
 `FAIL objpay chunks drained` — and *no* record mismatch or dispatch
-fault, so the spec pipeline **creates successfully** in RTL.  Root
-cause is therefore not the create decode but the **retire path**:
-create makes two ObjPay allocations — the spec block (`1+2*sn` words at
-`spec_base`, key `pl_specb_q = base|0x8000_0000` parked in pipeline
-ObjPay w2) and the 3-word pipeline block (`{mhnd,mpark,specb}` at
-`pipe_base`, parked in aux).  Pipeline retire (`StRetPBR`→`StRetPipeC`
-→`StRetUnp`→`StRetPNext`→`StRetPFree`) reads only the module handle(s)
-and frees `ret_payb_q` (the pipeline block); **nothing reads w2/`specb`
-or frees the spec block**, so its chunk leaks and the end-of-test arena
-drain check fails.  `ue_cneg_spec_1` escapes because size=8 faults at
-`StPipeSpSz0` *before* `StPipeSpAlc` ever allocates the block.  Owed:
-free the spec block at pipeline retire — read w2 (`specb`, bit31 =
-present), then `OBJPAY_OP_FREE` `spec_base` for `1+2*count` words
-(count = spec block w0) — then re-run `+vec=apu-vn-specok` green, and
-wire spec values to shwave `OpSpecConstant` resolution.  (The CTS
-`pipefail spec=1`->`StPipeFail` may be a second, create-side fault in
-the same path; the `G6LC_APU_DBG_LOST` rebuild names its sub-state if a
-guest/directed run still shows it after the leak fix.)
+fault, so the spec pipeline **created successfully** in RTL.  Root
+cause was the **retire path**, not create: create makes two ObjPay
+allocations — the spec block (`1+2*sn` words at `spec_base`, key
+`pl_specb_q = base|0x8000_0000` parked in pipeline ObjPay w2) and the
+3-word pipeline block (`{mhnd,mpark,specb}` at `pipe_base`, parked in
+aux).  Pipeline retire (`StRetPBR`→`StRetPipeC`→`StRetUnp`→`StRetPNext`
+→`StRetPFree`) read only the module handle(s) and freed `ret_payb_q`
+(the pipeline block); nothing read w2/`specb` or freed the spec block,
+so its chunk leaked.  `ue_cneg_spec_1` escaped because size=8 faults at
+`StPipeSpSz0` *before* `StPipeSpAlc` ever allocates the block.
+
+**Fix (vnfront retire):** the compute retire now reads pipeline w2
+(`StRetPBR`→`StRetPSW` captures `ret_specb_q`), and `StRetPNext` routes
+through `StRetPSChk`/`StRetPSRd` — when w2 bit31 marks a parked spec
+block it READs the block's w0 entry-count and `OBJPAY_OP_FREE`s
+`spec_base` for `1+2*count` words before `StRetPFree` releases the
+pipeline block.  Verified: `+vec=apu-vn-specok` PASS (step-1 and
+randomized-latency step-2, 866 checks) plus 22-session regression
+sample (compute pos/neg, graphics, multiset/descarr/modres/rerec)
+all PASS.  Owed next: wire the parked spec values to shwave
+`OpSpecConstant`/`const_data_o` resolution so the override actually
+reaches shader execution, then CTS verify.  (The CTS `pipefail
+spec=1`->`StPipeFail` may be a second, create-side fault in the same
+path; the `G6LC_APU_DBG_LOST` rebuild names its sub-state if a
+guest/directed run still shows it.)  A secondary, narrower leak remains
+on the *create-failure* path: `StPipeFail` unwinds module pins but does
+not free a spec extent allocated before a later create step faults —
+reachable only on post-`StPipeSpAlc` resource faults, not normal CTS;
+tracked as follow-up.
 
 ## Performance / area / scalability
 

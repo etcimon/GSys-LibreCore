@@ -366,9 +366,9 @@ module g6lc_apu_vnfront
       // UNPIN chain (ZDONE frees the module extent + INVALs shcore
       // residency), graphics-block module-handle reads
       StRetLazyC, StRetModI,
-      StRetPBR, StRetPBR2, StRetPipeC,
+      StRetPBR, StRetPBR2, StRetPSW, StRetPipeC,
       StRetUnp, StRetUnpC, StRetUnpF, StRetUnpI,
-      StRetPNext, StRetPFree,
+      StRetPNext, StRetPSChk, StRetPSRd, StRetPFree,
       // G1c: graphics-pipeline element — staged keep-word parse in
       // vk.xml decode order (StGpRd/StGpCap walk a phase counter),
       // the VS/FS module FILL + ObjTab-PIN loop, then the 48-word
@@ -599,6 +599,9 @@ module g6lc_apu_vnfront
     // the pipeline's ObjPay block (base + word count)
     logic [31:0]         ret_mh_q, ret_mh1_q;
     logic [31:0]         ret_payb_q;
+    // compute pipeline retire: word[2] spec-block key (spec_base|
+    // 0x8000_0000, 0 when unspecialized) captured for the extent free
+    logic [31:0]         ret_specb_q;
     // G3b-iii: the command pool's {gen,slot} handle, saved when its
     // DESTROY_POOL walk starts — StPoolDes's RETIRE_KIDS needs the
     // parent slot long after the LOOKUP completion has drained
@@ -1300,7 +1303,8 @@ module g6lc_apu_vnfront
         sm_rslot_q <= '0; sm_entry_q <= '0;
         shw_i_q <= '0; shw_n_q <= '0;
         ret_mh_q <= '0; ret_mh1_q <= '0;
-        ret_payb_q <= '0; ret_pw_q <= '0; unp_ret_q <= StIdle;
+        ret_payb_q <= '0; ret_pw_q <= '0; ret_specb_q <= '0;
+        unp_ret_q <= StIdle;
         ret_poolh_q <= '0;
         pg_op_q <= APU_VGPAGES_OP_ALLOC;
         pg_base_q <= '0; pg_bytes_q <= '0;
@@ -6860,12 +6864,13 @@ module g6lc_apu_vnfront
               op_ret_q <= StRetPBR2;
               state_q  <= StOpReq;
             end else begin
-              otr_q    <= '{op: APU_OBJTAB_OP_RETIRE,
-                           id: APU_VN_ID_TAG | op_q.q[
-                               role_slot(op_q, APU_VN_ROLE_RETIRE)],
-                           kind: act_q.obj_kind, default: '0};
-              ot_ret_q <= StRetPipeC;
-              state_q  <= StOtReq;
+              // compute pipeline: word[2] carries the spec-block key
+              // (spec_base|0x8000_0000, 0 when unspecialized); read it
+              // so retire can free the separate spec extent
+              opr_q    <= '{op: APU_OBJPAY_OP_READ,
+                           addr: ret_payb_q + 32'd2, default: '0};
+              op_ret_q <= StRetPSW;
+              state_q  <= StOpReq;
             end
           end
           StRetPBR2: begin
@@ -6876,6 +6881,17 @@ module g6lc_apu_vnfront
                           kind: act_q.obj_kind, default: '0};
             ot_ret_q  <= StRetPipeC;
             state_q   <= StOtReq;
+          end
+          // compute pipeline retire: word[2] spec-block key captured
+          // (0 = unspecialized); now retire the pipeline object
+          StRetPSW: begin
+            ret_specb_q <= op_cpl_i.rdata;
+            otr_q    <= '{op: APU_OBJTAB_OP_RETIRE,
+                         id: APU_VN_ID_TAG | op_q.q[
+                             role_slot(op_q, APU_VN_ROLE_RETIRE)],
+                         kind: act_q.obj_kind, default: '0};
+            ot_ret_q <= StRetPipeC;
+            state_q  <= StOtReq;
           end
           // pipeline object dead: release the module pin(s); a ZDONE
           // cpl means the module was a zombie — free its parked
@@ -6943,8 +6959,32 @@ module g6lc_apu_vnfront
               unp_ret_q <= StRetPFree;
               state_q   <= StRetUnp;
             end else begin
+              state_q <= StRetPSChk;
+            end
+          end
+          // compute pipeline: free the specialization extent before
+          // the pipeline block.  word[2] bit31 marks a parked spec
+          // block; its word[0] holds the entry count, so the free
+          // covers 1+2*count words
+          StRetPSChk: begin
+            if (ret_specb_q[31]) begin
+              opr_q    <= '{op: APU_OBJPAY_OP_READ,
+                             addr: ret_specb_q & 32'h7FFF_FFFF,
+                             default: '0};
+              op_ret_q <= StRetPSRd;
+              state_q  <= StOpReq;
+            end else begin
               state_q <= StRetPFree;
             end
+          end
+          StRetPSRd: begin
+            opr_q    <= '{op: APU_OBJPAY_OP_FREE,
+                           addr: ret_specb_q & 32'h7FFF_FFFF,
+                           words: 32'd1 + {25'h0, op_cpl_i.rdata[5:0],
+                                          1'b0},
+                           default: '0};
+            op_ret_q <= StRetPFree;
+            state_q  <= StOpReq;
           end
           // module pins released: free the pipeline's ObjPay block
           StRetPFree: begin
