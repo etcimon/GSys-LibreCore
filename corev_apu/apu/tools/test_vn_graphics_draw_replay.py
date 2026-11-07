@@ -446,6 +446,19 @@ class DrawReplayTests(unittest.TestCase):
         self.assertEqual(self.read_texel(7, 3), self.clear_texel())
         self.assertEqual(self.f.owner.work_refs, 0)
 
+    def test_fragment_implicit_lod_sample(self):
+        # implicit-LOD sampling: OpImageSampleImplicitLod derives LOD from
+        # coordinate derivatives; the constant coord gives zero derivatives
+        # so the base mip resolves - same texel(2,1) result as explicit LOD 0.
+        did = self._image_fetch_setup(
+            fs_sample_program(implicit=True), dtype=1)
+        self._image_fetch_draw()
+        want = self.texel_want(did, 2, 1)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), want)
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
     def test_fragment_storage_image_write(self):
         # storage-image write path: the FS derives ivec2(FragCoord.xy) and
         # OpImageWrites a constant red texel into a STORAGE_IMAGE (kind 3);

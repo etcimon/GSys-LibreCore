@@ -18123,11 +18123,14 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   `test_fragment_explicit_lod_sample` (fs_sample_program emits
   OpImageSampleExplicitLod opcode 88 with Lod mask over the same kind-1
   descriptor; normalized coord (0.3125,0.375)=texel(2,1) centre at LOD 0
-  under a nearest VkSampler yields uniform covered texels).  Remote cohorts
-  `native-gfximg-01` 720 + `native-gfximgpix-01` 721 + `native-gfximgstore-01`
+  under a nearest VkSampler yields uniform covered texels).  Implicit-LOD
+  sampling proven by `test_fragment_implicit_lod_sample`
+  (OpImageSampleImplicitLod opcode 87; constant coord -> zero derivatives ->
+  base mip -> same texel(2,1) result).  Remote cohorts `native-gfximg-01` 720 + `native-gfximgpix-01` 721 + `native-gfximgstore-01`
   722 + `native-gfxvsimg-01` 723 + `native-gfxcomb-01` 724 +
-  `native-gfxsample-01` 725 checks PASS (native-execution.y6y3xap5 /
-  .nssux4bd / .5axy_z9z / .n8_r1ss2 / .6yodeq0j / .no_22v6j,
+  `native-gfxsample-01` 725 + `native-gfximplod-01` 726 checks PASS
+  (native-execution.y6y3xap5 /
+  .nssux4bd / .5axy_z9z / .n8_r1ss2 / .6yodeq0j / .no_22v6j / .3wzcog89,
   sources_unchanged true), local `test_vn_*` graphics suites green.
   Record: `architecture/uncore/
   apu-native-graphics-shade-implementation.md`.
