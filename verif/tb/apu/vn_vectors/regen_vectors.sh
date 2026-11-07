@@ -178,6 +178,9 @@ python3 $G --graphics-session ue_gpos_ptsvidx_1 1
 python3 $G --graphics-session ue_gpos_fsubo_1 1
 # Copy src array element 0 to dst element 1, then read it in the FS.
 python3 $G --graphics-session ue_gpos_fsubocopy_1 1
+# instanced draw: vs_inst offsets clip-x by 0.4*gl_InstanceIndex-0.6,
+# instanceCount=4 — union coverage over 4 offset triangles, fs_flat
+python3 $G --graphics-session ue_gpos_inst_1 1
 
 # deferred-work and capacity arms
 python3 $G --compute-session ue_cpos_defer2_1  bufcopy_1 --variant defer2

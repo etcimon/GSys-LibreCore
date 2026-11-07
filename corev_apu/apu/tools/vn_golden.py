@@ -10429,11 +10429,19 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # derives the point from gl_VertexIndex
         is_vidx = 'ptsvidx' in gfx
         is_pts = 'ptsrg8' in gfx or is_vidx
+        # inst: instanced draw — vs_inst offsets clip-x by
+        # 0.4*gl_InstanceIndex-0.6 per instance; fs_flat keeps one
+        # colour so expected coverage is the union over INST_N
+        # instances (vertex-rate pos/col attributes are reused; only
+        # the gl_InstanceIndex builtin differs per instance)
+        is_inst = 'inst' in gfx
+        INST_N = 4
         # vs_pos3/fs_vcol forward the vertex alpha into FS out; the
         # passthru/flat pair forces a=1 and cannot see a blend
         vs_spv = [w[0] for w in struct.iter_unpack(
             '<I', (spvd / ('vs_cts_vidx.spv' if is_vidx else
                           'vs_cts_pbvb.spv' if is_pts else
+                          'vs_inst.spv' if is_inst else
                           'vs_pos3.spv' if is_blend or is_wide
                           else 'vs_passthru.spv')).read_bytes())]
         # fsubo: the FS reads its colour from a UBO bound at the GRAPHICS
@@ -10481,8 +10489,19 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         SC = (0, 0, 64, 64)
         # frontFace = CCW(0) -> the ObjPay word carries front_ccw = 1;
         # cull BACK (2).  Only coverage matters — the FS colour is flat
-        cov = gfx_tri_coverage(TRI, VP, SC, CW, CH,
-                               front_ccw=1, cull=2)
+        if is_inst:
+            # union of the INST_N instance triangles; vs_inst shifts
+            # clip-x by 0.4*i-0.6 for gl_InstanceIndex i (firstInstance
+            # =0), leaving y/z/w untouched
+            cov = set()
+            for _ii in range(INST_N):
+                _dx = 0.4 * _ii - 0.6
+                cov |= gfx_tri_coverage(
+                    [(x + _dx, y, z, w) for (x, y, z, w) in TRI],
+                    VP, SC, CW, CH, front_ccw=1, cull=2)
+        else:
+            cov = gfx_tri_coverage(TRI, VP, SC, CW, CH,
+                                   front_ccw=1, cull=2)
         if is_blend:
             # clear (0.2,0.2,0.2,1); out = src*0.75 + dst*0.25 ->
             # r=0.8->204, g=b=0.05->13, a=0.8125->207 (all off the
@@ -11013,7 +11032,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                  drawCount=1, stride=20))] if is_drawindx else
              [('vkCmdDraw', dict(
                  commandBuffer=X['cb'],
-                 vertexCount=PTS_N if is_pts else 3, instanceCount=1,
+                 vertexCount=PTS_N if is_pts else 3,
+                 instanceCount=INST_N if is_inst else 1,
                  firstVertex=0, firstInstance=0))])[0],
             ('vkCmdEndRenderPass', dict(commandBuffer=X['cb'])),
             ('vkCmdPipelineBarrier', dict(
