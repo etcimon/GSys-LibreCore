@@ -265,23 +265,28 @@ def fs_sample_program(binding=0, u=0.3125, v=0.375, implicit=False,
     return tuple(words)
 
 
-def fs_dref_program(binding=0, u=0.5, v=0.5, ref=0.5, proj=False, d=2.0):
+def fs_dref_program(binding=0, u=0.5, v=0.5, ref=0.5, proj=False, d=2.0,
+                    lod=None):
     """Fragment module depth-reference sampling a COMBINED_IMAGE_SAMPLER
     (kind 1) via OpImageSampleDrefImplicitLod (opcode 89) - or, with
-    proj=True, OpImageSampleDrefProjImplicitLod (opcode 93) - at a
-    constant normalized coordinate and scalar float reference, writing
-    the scalar compare fraction broadcast to vec4 color(loc0).  The
-    model's dref operand order is ResultType(float), ResultId,
-    SampledImage, Coordinate, Dref(float id), [ImageOperands mask].  With
-    wc=6 the mask slot is absent, so nva=3 and the reference lands at
-    va[2]->ref16.  proj=True swaps the vec2 coord for a vec3 (u,v,d) the
-    model perspective-divides before the compare.  The OpTypeImage Depth
-    field is set to 1 (depth image)."""
+    proj=True, OpImageSampleDrefProjImplicitLod (opcode 93), or, with
+    lod set, the explicit-LOD forms OpImageSampleDrefExplicitLod (90) /
+    OpImageSampleDrefProjExplicitLod (94) - at a constant normalized
+    coordinate and scalar float reference, writing the scalar compare
+    fraction broadcast to vec4 color(loc0).  The model's dref operand
+    order is ResultType(float), ResultId, SampledImage, Coordinate,
+    Dref(float id), [ImageOperands mask], [Lod id].  With wc=6 the mask
+    slot is absent, so nva=3 and the reference lands at va[2]->ref16;
+    explicit forms carry mask=0 then the Lod id at ops[6].  proj=True
+    swaps the vec2 coord for a vec3 (u,v,d) the model perspective-divides
+    before the compare.  The OpTypeImage Depth field is set to 1 (depth
+    image)."""
     import struct as _st
     ub = _st.unpack('<I', _st.pack('<f', u))[0]
     vb = _st.unpack('<I', _st.pack('<f', v))[0]
     rb = _st.unpack('<I', _st.pack('<f', ref))[0]
     db = _st.unpack('<I', _st.pack('<f', d))[0]
+    lb = _st.unpack('<I', _st.pack('<f', lod if lod is not None else 0.0))[0]
     words = [0x07230203, 0x00010300, 0, 48, 0]
 
     def emit(opcode, *values):
@@ -315,10 +320,17 @@ def fs_dref_program(binding=0, u=0.5, v=0.5, ref=0.5, proj=False, d=2.0):
         emit(44, 52, 20, 18, 19, 53)  # %20 = vec3(u, v, d)
     else:
         emit(44, 5, 20, 18, 19)     # %20 = vec2(u, v)
+    if lod is not None:
+        emit(43, 3, 54, lb)         # %54 = float lod
     emit(54, 1, 9, 0, 2)            # %9 main()
     emit(248, 22)                   # label
     emit(61, 40, 23, 17)            # %23 = Load SIMG %17
-    emit(93 if proj else 89, 3, 24, 23, 20, 21)  # dref sample -> %24 float
+    if lod is not None:
+        # explicit forms require the ImageOperands Lod bit (0x2) set or
+        # the model faults IMGOPMASK; ConstOffset (0x8) is also admitted
+        emit((94 if proj else 90), 3, 24, 23, 20, 21, 2, 54)  # explicit dref
+    else:
+        emit(93 if proj else 89, 3, 24, 23, 20, 21)  # implicit dref -> %24
     emit(80, 4, 25, 24, 24, 24, 24)  # %25 = vec4(%24, %24, %24, %24)
     emit(62, 8, 25)                 # Store color %25
     emit(253)                       # Return

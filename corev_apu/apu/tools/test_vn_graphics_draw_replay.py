@@ -506,14 +506,18 @@ class DrawReplayTests(unittest.TestCase):
                         base + moff + y * pitch + x * 4, texel)
         return did
 
-    def _dref_setup(self, module, depth=0.25, compare_op=3):
+    def _dref_setup(self, module, depth=0.25, mip_depth=None, mips=1,
+                    compare_op=3, max_lod=0.0):
         """Depth-reference (dref) variant of _image_fetch_setup: an 8x4
         D16_UNORM depth image (VkFormat 124 -> device fmt 13) at MEMORY
-        offset 4352, every texel filled with the same UNORM16 depth
-        `depth`, a COMBINED_IMAGE_SAMPLER(1) descriptor, and a nearest
-        VkSampler with compareEnable=1 and compareOp=compare_op
-        (3=LESS_OR_EQUAL).  The depth view uses aspectMask=2 (DEPTH) and
-        texels are 2-byte u16, so pitch = img_mpitch(model,8,13,0)."""
+        offset 4352, a COMBINED_IMAGE_SAMPLER(1) descriptor, and a
+        nearest VkSampler with compareEnable=1 and compareOp=compare_op
+        (3=LESS_OR_EQUAL).  mip0 texels carry UNORM16 `depth`; every
+        mip>=1 carries `mip_depth` (default `depth`) so an explicit-LOD
+        dref sample can prove mip select.  `mips` sets mipLevels/levelCount
+        and `max_lod` must cover the mip count or the model clamps LOD to
+        mip0.  The depth view uses aspectMask=2 (DEPTH); texels are 2-byte
+        u16, pitch = img_mpitch(model,8,13,m)."""
         self.r.layout(((0, 1, 1, 16),))
         self.f.command('vkCreateSampler', device=self.w.DEVICE,
             pSampler=self.SAMPLER,
@@ -521,7 +525,8 @@ class DrawReplayTests(unittest.TestCase):
                 flags=0, magFilter=0, minFilter=0, mipmapMode=0,
                 addressModeU=0, addressModeV=0, addressModeW=0,
                 mipLodBias=0, anisotropyEnable=0, maxAnisotropy=0,
-                compareEnable=1, compareOp=compare_op, minLod=0, maxLod=0,
+                compareEnable=1, compareOp=compare_op, minLod=0,
+                maxLod=struct.unpack('<I', struct.pack('<f', max_lod))[0],
                 borderColor=0, unnormalizedCoordinates=0))
         self.f.command('vkDestroyShaderModule', device=self.w.DEVICE,
                        shaderModule=self.FS2)
@@ -530,7 +535,7 @@ class DrawReplayTests(unittest.TestCase):
         self.f.command('vkCreateImage', device=self.w.DEVICE, pImage=self.IMAGE,
             pCreateInfo=s('VkImageCreateInfo', pNext=[], flags=0, imageType=1,
                 format=124, extent=s('VkExtent3D', width=8, height=4, depth=1),
-                mipLevels=1, arrayLayers=1, samples=1, tiling=0, usage=15,
+                mipLevels=mips, arrayLayers=1, samples=1, tiling=0, usage=15,
                 sharingMode=0, queueFamilyIndexCount=0, pQueueFamilyIndices=[],
                 initialLayout=1))
         self.f.command('vkBindImageMemory', device=self.w.DEVICE, image=self.IMAGE,
@@ -540,7 +545,8 @@ class DrawReplayTests(unittest.TestCase):
                 image=self.IMAGE, viewType=1, format=124,
                 components=s('VkComponentMapping', r=0, g=0, b=0, a=0),
                 subresourceRange=s('VkImageSubresourceRange', aspectMask=2,
-                    baseMipLevel=0, levelCount=1, baseArrayLayer=0, layerCount=1)))
+                    baseMipLevel=0, levelCount=mips, baseArrayLayer=0,
+                    layerCount=1)))
         self.f.command('vkCreateDescriptorPool', device=self.w.DEVICE,
             pDescriptorPool=self.POOL,
             pCreateInfo=s('VkDescriptorPoolCreateInfo', pNext=[], flags=1,
@@ -560,13 +566,18 @@ class DrawReplayTests(unittest.TestCase):
                     sampler=self.SAMPLER, imageView=self.VIEW,
                     imageLayout=1)], pBufferInfo=[])])
         did = self.e.golden.img_fmt_id(self.e.model, 124)
-        pitch = self.e.golden.img_mpitch(self.e.model, 8, did, 0)
         base = self.f.owner.base + 4352
-        d16 = struct.pack('<H', int(round(depth * 65535)))
-        for y in range(4):
-            for x in range(8):
-                self.f.state.aperture.write(
-                    base + y * pitch + x * 2, d16)
+        for m in range(mips):
+            wm = self.e.golden.img_mdim(8, m)
+            hm = self.e.golden.img_mdim(4, m)
+            pitch = self.e.golden.img_mpitch(self.e.model, 8, did, m)
+            moff = self.e.golden.img_mip_off(self.e.model, 8, 4, did, m)
+            d = depth if m == 0 else (depth if mip_depth is None else mip_depth)
+            d16 = struct.pack('<H', int(round(d * 65535)))
+            for y in range(hm):
+                for x in range(wm):
+                    self.f.state.aperture.write(
+                        base + moff + y * pitch + x * 2, d16)
         return did
 
     def _separate_sampler_setup(self, module):
@@ -907,6 +918,27 @@ class DrawReplayTests(unittest.TestCase):
         # this exercises the vec3-coordinate dref operand path e2e.
         self._dref_setup(fs_dref_program(u=0.6, v=0.7, ref=0.1,
                                          proj=True, d=2.0))
+        self._image_fetch_draw()
+        did = self.e.golden.img_fmt_id(self.e.model, 37)
+        want = self.e.golden.img_clear_texel(
+            self.e.model, did,
+            struct.unpack('<4I', struct.pack('<4f',
+                1.0, 1.0, 1.0, 1.0)))
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), want)
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_fragment_dref_explicit_lod_sample(self):
+        # OpImageSampleDrefExplicitLod (opcode 90): a 2-level D16_UNORM
+        # depth image, mip0 depth=0.25 and mip1 depth=0.6, sampled at
+        # explicit LOD=1.0 under a LESS_OR_EQUAL compare with ref=0.5.
+        # LOD 1 selects mip1 -> ref(0.5) <= depth(0.6) true -> 1.0 ->
+        # white; mip0 would give ref <= 0.25 false -> black, so the white
+        # result proves the explicit LOD drove mip selection in the dref
+        # path (maxLod=1.0 keeps the sampler from clamping to mip0).
+        self._dref_setup(fs_dref_program(u=0.5, v=0.5, ref=0.5, lod=1.0),
+                         depth=0.25, mip_depth=0.6, mips=2, max_lod=1.0)
         self._image_fetch_draw()
         did = self.e.golden.img_fmt_id(self.e.model, 37)
         want = self.e.golden.img_clear_texel(

@@ -266,9 +266,15 @@ constant.  The projective dref form (opcode 93) is likewise proven:
 `fs_dref_program(proj=True)` swaps the vec2 coordinate for a vec3
 (u,v,d) the model perspective-divides before the compare, and
 `test_fragment_dref_projective_sample` exercises that vec3-coordinate
-dref operand path end-to-end.  Explicit-LOD (90), explicit-projective
-(94), dref-gather (97), PCF, and the blend/depth/MRT writeback axis
-stay queued.
+dref operand path end-to-end.  The explicit-LOD form (opcode 90) is
+likewise proven: `fs_dref_program(lod=N)` emits the explicit form with
+ImageOperands mask=0x2 (the Lod bit the model requires or it faults
+IMGOPMASK) plus a Lod id, and `_dref_setup` gained multi-mip depth
+(mip0=0.25, mip1=0.6) so `test_fragment_dref_explicit_lod_sample`
+(LOD=1.0 -> mip1 -> ref<=0.6 true -> white; mip0 would give black)
+proves explicit LOD drives mip selection in the dref path.
+Explicit-projective (94), dref-gather (97), PCF, and the
+blend/depth/MRT writeback axis stay queued.
 
 Evidence: `test_vn_graphics_draw_replay` gained nine image draws -
 `test_fragment_sampled_image_fetch_reaches_framebuffer` (constant ivec2
@@ -315,7 +321,10 @@ depth=0.25 ref=0.1 -> ref<=depth true -> 1.0 -> white) and
 -> 0.0 -> black, proving the compare discriminates) and
 `test_fragment_dref_projective_sample` (OpImageSampleDrefProjImplicitLod
 opcode 93, vec3 coord (0.6,0.7,2.0) perspective-divided before the
-compare -> white),
+compare -> white) and `test_fragment_dref_explicit_lod_sample`
+(OpImageSampleDrefExplicitLod opcode 90, LOD=1.0 over a 2-level depth
+image mip0=0.25/mip1=0.6, ref=0.5 -> mip1 -> white, proving explicit
+LOD mip select),
 plus
 `test_fragment_storage_image_write` (a STORAGE_IMAGE kind 3 bound via
 `OpTypeImage(sampled=2)`; `OpImageWrite` stores a constant red texel at the
@@ -335,7 +344,7 @@ screen-space (non-perspective) interpolation arm, and the dref pair
 plus projective-dref draw prove the depth-format admission, the
 compare-enable sampler path, and the vec3-coordinate dref operand path
 end-to-end.  Local
-`test_vn_*` sweep ran 757 tests (the graphics/draw modules all green;
+`test_vn_*` sweep ran 758 tests (the graphics/draw modules all green;
 8 unrelated `test_vn_native_bridge`/`test_vn_submit` subprocess
 timeouts under full-suite load that pass in isolation).  Frozen native
 cohorts on ovh_calltorch:
@@ -363,6 +372,7 @@ PASS in 21.6 s (`native-execution.hwuix8zk`), and `native-gfxnopersp-01`
 739 tests PASS in 20.1 s (`native-execution.5ntfmy6r`), and
 `native-gfxdref-01` 741 tests PASS in 20.3 s
 (`native-execution.0pobswnb`), and `native-gfxdrefproj-01` 742 tests
-PASS in 19.0 s (`native-execution.agdmditl`), all
+PASS in 19.0 s (`native-execution.agdmditl`), and `native-gfxdreflod-01`
+743 tests PASS in 19.1 s (`native-execution.djvtokp5`), all
 `sources_unchanged: true`.
 Host-native model only - no RTL/CTS/stock/hardware qualification.

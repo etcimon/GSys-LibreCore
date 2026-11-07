@@ -18251,8 +18251,16 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   perspective-divides before the compare; `test_fragment_dref_
   projective_sample` (u=0.6 v=0.7 d=2.0 ref=0.1 over uniform depth=0.25
   -> 1.0 -> white) exercises the vec3-coordinate dref operand path e2e.
-- [ ] Remaining dref forms (explicit-LOD opcode 90, dref-gather 97),
-  PCF/bilinear compare, blend/depth/MRT, helper
+- [x] Depth-reference explicit-LOD sample (opcode 90): `fs_dref_program
+  (lod=N)` emits the explicit form with ImageOperands mask=0x2 (the Lod
+  bit the model requires or it faults IMGOPMASK) + a Lod id at ops[6];
+  `_dref_setup` gained mips/mip_depth/max_lod so a 2-level D16_UNORM
+  image carries depth 0.25 (mip0) vs 0.6 (mip1).  `test_fragment_dref_
+  explicit_lod_sample` (LOD=1.0 -> mip1 depth 0.6, ref 0.5 -> ref<=depth
+  true -> white; mip0 would give black) proves explicit LOD drives mip
+  selection in the dref path.
+- [ ] Remaining dref forms (explicit-projective opcode 94, dref-gather
+  97), PCF/bilinear compare, blend/depth/MRT, helper
   lanes, non-triangle topology, end-to-end NoPerspective draw (needs a
   w-varying vertex shader),
   multi-descriptor/multi-stage end-to-end draws and capability/CTS/physical
