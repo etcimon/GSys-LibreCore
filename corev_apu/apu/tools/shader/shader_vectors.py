@@ -387,6 +387,11 @@ DESC = {
                          bindings=[(0, 0, 64, 0), (0, 1, 64, 1)]),
     'localsize64':  dict(groups=(1, 1, 1), fmt='i', push=0,
                          bindings=[(0, 0, 64, 0), (0, 1, 64, 1)]),
+    # COMPUTE-H3: local_size_x=128 = 16 waves x 8 lanes — the Vulkan
+    # 1.0 minimum maxComputeWorkGroupInvocations; exercises the full
+    # MaxWaves=16 residency plus per-lane GlobalInvocationID fan-out.
+    'localsize128': dict(groups=(1, 1, 1), fmt='i', push=0,
+                         bindings=[(0, 0, 128, 0), (0, 1, 128, 1)]),
     # CTS probe corpus (compute.pipeline.basic): the exact guest
     # shaders.  cts_atomic1 = empty_workgroup's atomicAdd block.
     # cts_shared1 = shared_var_single_invocation (SPIR-V 1.0: SSBO

@@ -54,7 +54,7 @@ ue_cpos_arrlen_1 ue_cpos_bufcopy_1 ue_cpos_bufscale_1 \
 ue_cpos_builtin_gid_1 ue_cpos_builtin_lid_1 \
 ue_cpos_builtin_lindex_1 ue_cpos_compare_1 \
 ue_cpos_composite_1 ue_cpos_intmix_1 ue_cpos_localsize32_1 \
-ue_cpos_localsize64_1 ue_cpos_math450_1 ue_cpos_math450_2 \
+ue_cpos_localsize64_1 ue_cpos_localsize128_1 ue_cpos_math450_1 ue_cpos_math450_2 \
 ue_cpos_math450_3 ue_cpos_oob_1 ue_cpos_pushscale_1 \
 ue_cpos_vec4arith_1 \
 ue_cpos_loopfor_1 ue_cpos_barrier_reduce_1 \
