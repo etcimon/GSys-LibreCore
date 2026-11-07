@@ -223,7 +223,19 @@ implicit-LOD path runs with wc=5).  `test_fragment_projective_sample`
 uses u=0.6, v=0.7, d=2.0 -> divided coord (0.3,0.35) -> nearest mip0
 texel(2,1)=(64,64,48,255); the undivided (0.6,0.7) would hit texel(4,2)
 =(128,128,96,255), so the observed value proves the perspective divide
-ran.  Depth-reference (dref) sample ops stay queued.
+ran.  Interpolation qualifiers now reach the raster stage:
+`spirv_scan` admits the `Flat`/`NoPerspective` decorations (previously
+`FAULT['DECOR']`), records them per fragment-Input variable, and exposes
+`flat_mask`/`nopersp_mask`; `GraphicsPipeline` snapshots carry the masks
+and `DrawExec` forwards them to `Raster`, which already implemented the
+provoking-vertex copy and the perspective-off arm.
+`test_fragment_flat_varying_uses_provoking_vertex` draws a triangle with
+distinct per-vertex colors under a `Flat`-decorated vcol input: every
+covered fragment carries v0's color.rgb and v0's VertexIndex alpha (0.0)
+rather than the smooth three-vertex blend.  `NoPerspective` is plumbed
+identically but stays unexercised because `vs_program` pins
+Position.w=1.0 (perspective-correct == nopersp); observing it needs a
+w-varying vertex shader.  Depth-reference (dref) sample ops stay queued.
 
 Evidence: `test_vn_graphics_draw_replay` gained nine image draws -
 `test_fragment_sampled_image_fetch_reaches_framebuffer` (constant ivec2
@@ -256,6 +268,9 @@ u=0.35 v=0.4 -> footprint x{2,3},y{1,2} -> RGBA (64,96,96,64)),
 `test_fragment_projective_sample` (OpImageSampleProjImplicitLod opcode
 91, vec3 coord (0.6,0.7,2.0) -> divided (0.3,0.35) -> texel(2,1)
 (64,64,48,255)),
+`test_fragment_flat_varying_uses_provoking_vertex` (Flat-decorated vcol
+input over a distinct-color triangle -> every covered fragment = v0's
+color.rgb + v0 VertexIndex alpha 0.0, not the smooth blend),
 plus
 `test_fragment_storage_image_write` (a STORAGE_IMAGE kind 3 bound via
 `OpTypeImage(sampled=2)`; `OpImageWrite` stores a constant red texel at the
@@ -268,8 +283,9 @@ proves the descriptor ABI now carries a multi-level mip count into the
 sampled-image meta; the trilinear draw proves the fractional-LOD
 two-mip accumulate + fw blend arm; the gather draw proves the opcode-96
 footprint/component operand path; the projective draw proves the
-coord.xy/d perspective divide.  Local `test_vn_*` sweep ran 751
-tests, all green.  Frozen native
+coord.xy/d perspective divide; the flat draw proves the FS-Input
+interpolation qualifier now reaches the raster varying path.  Local
+`test_vn_*` sweep ran 752 tests, all green.  Frozen native
 cohorts on ovh_calltorch:
 `native-gfximg-01` 720 tests PASS in 20.465 s (`native-execution.y6y3xap5`),
 `native-gfximgpix-01` 721 tests PASS in 20.582 s
@@ -289,6 +305,8 @@ PASS (`native-execution._di52ww_`), and `native-gfxmip-01` 733 tests PASS
 in 21.0 s (`native-execution.hwg4luup`), and `native-gfxtrilin-01` 734
 tests PASS in 20.0 s (`native-execution.aaadxsp4`), and
 `native-gfxgather-01` 735 tests PASS in 21.4 s
-(`native-execution.22fa7i0d`), and `native-gfxproj-01` 736 tests PASS in
-21.2 s (`native-execution.tfz4m7nk`), all `sources_unchanged: true`.
+(`native-execution.22fa7i0d`), `native-gfxproj-01` 736 tests PASS in
+21.2 s (`native-execution.tfz4m7nk`), and `native-gfxflat-01` 737 tests
+PASS in 21.6 s (`native-execution.hwuix8zk`), all `sources_unchanged:
+true`.
 Host-native model only - no RTL/CTS/stock/hardware qualification.

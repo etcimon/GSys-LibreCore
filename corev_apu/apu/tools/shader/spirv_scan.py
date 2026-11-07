@@ -127,7 +127,8 @@ DEC_ID_OK = {DEC['RelaxedPrecision'], DEC['Block'], DEC['BufferBlock'],
              DEC['Aliased'], DEC['Volatile'], DEC['Coherent'],
              DEC['NonWritable'], DEC['NonReadable'],
              DEC['Binding'], DEC['DescriptorSet'], DEC['NoContraction'],
-             DEC['SpecId'], DEC['Uniform'], DEC['Location']}
+             DEC['SpecId'], DEC['Uniform'], DEC['Location'],
+             DEC['NoPerspective'], DEC['Flat']}
 DEC_MBR_OK = {DEC['RelaxedPrecision'], DEC['RowMajor'], DEC['ColMajor'],
               DEC['MatrixStride'], DEC['Offset'], DEC['Volatile'],
               DEC['Coherent'], DEC['NonWritable'],
@@ -296,6 +297,8 @@ class Scanner:
         self.em = EM['GLCOMPUTE']  # execution model (h_15 overrides)
         self.in_mask = 0           # Location'd Input variables (bit/loc)
         self.out_mask = 0          # Location'd Output variables
+        self.flat_mask = 0         # FS Input varyings marked Flat (bit/loc)
+        self.nopersp_mask = 0      # FS Input varyings marked NoPerspective
         self.localsize = (0, 0, 0)
         self.scratch = 0
         self.slab = 0
@@ -691,6 +694,10 @@ class Scanner:
                         off = 16 * (1 + loc)
                         rec = True
                         self.in_mask |= 1 << loc
+                        if d.get('flat'):
+                            self.flat_mask |= 1 << loc
+                        if d.get('nopersp'):
+                            self.nopersp_mask |= 1 << loc
                 else:                            # FS Output
                     if bi is not None:
                         # G3a-i: FragDepth lands in record slot 8
@@ -841,6 +848,10 @@ class Scanner:
             d['location'] = ops[2]
             d['aux1'] = ops[2]          # decor word1 carries the value
             d['flags'] = d.get('flags', 0) | DF_LOC
+        elif dec == DEC['NoPerspective']:
+            d['nopersp'] = 1
+        elif dec == DEC['Flat']:
+            d['flat'] = 1
         else:
             d['flags'] = d.get('flags', 0) | (1 << (dec % 8))
 

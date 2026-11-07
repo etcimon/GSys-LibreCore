@@ -138,6 +138,13 @@ class DrawReplayTests(unittest.TestCase):
                 ((1.0, -1.0), (0.25, 0.5, 0.75, 1.0)),
                 ((-1.0, 1.0), (0.25, 0.5, 0.75, 1.0))]
 
+    def color_triangle(self):
+        # distinct per-vertex colors so flat vs smooth interpolation differ:
+        # v0 red, v1 green, v2 blue (provoking vertex is v0)
+        return [((-1.0, -1.0), (1.0, 0.0, 0.0, 1.0)),
+                ((1.0, -1.0), (0.0, 1.0, 0.0, 1.0)),
+                ((-1.0, 1.0), (0.0, 0.0, 1.0, 1.0))]
+
     def prepared(self, **draw_kw):
         self.pipeline()
         self.begin_pass()
@@ -303,6 +310,29 @@ class DrawReplayTests(unittest.TestCase):
             self.e.model, did,
             struct.unpack('<4I', struct.pack('<4f', 0.75, 0.75, 0.75, 0.75)))
         for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), want)
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_fragment_flat_varying_uses_provoking_vertex(self):
+        # FS vcol input decorated Flat: the raster stage copies the
+        # provoking (first) vertex's varying verbatim instead of
+        # perspective-correct interpolation, so every covered fragment
+        # carries v0's color.rgb and v0's VertexIndex alpha (0.0) rather
+        # than the smooth three-vertex blend.
+        self.f.command('vkDestroyShaderModule', device=self.w.DEVICE,
+                       shaderModule=self.FS2)
+        self.module(self.FS2, fs_program('color', flat=True))
+        self.upload(self.color_triangle())
+        self.prepared()
+        job = self.f.enqueue()
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        did = self.e.golden.img_fmt_id(self.e.model, 37)
+        want = self.e.golden.img_clear_texel(
+            self.e.model, did,
+            struct.unpack('<4I', struct.pack('<4f', 1.0, 0.0, 0.0, 0.0)))
+        for x, y in ((1, 1), (4, 1), (2, 0)):
             self.assertEqual(self.read_texel(x, y), want)
         self.assertEqual(self.read_texel(7, 3), self.clear_texel())
         self.assertEqual(self.f.owner.work_refs, 0)

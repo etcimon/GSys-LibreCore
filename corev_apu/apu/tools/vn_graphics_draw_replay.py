@@ -90,7 +90,8 @@ def operation(engine, context_id, plan, remember, guards):
                   attachment.pitch, framebuffer.width, framebuffer.height,
                   attachment.fmt, vs_push=vs_push, fs_push=fs_push,
                   vs_bindings=vs_bindings, fs_bindings=fs_bindings,
-                  flat=0, nopersp=0, front_ccw=1 - fixed.front_face,
+                  flat=snapshot.flat, nopersp=snapshot.nopersp,
+                  front_ccw=1 - fixed.front_face,
                   cull=fixed.cull, location=location)
     for ref, kind in plan.references:
         remember(ref, kind)

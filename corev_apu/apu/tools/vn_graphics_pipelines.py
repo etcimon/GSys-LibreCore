@@ -34,6 +34,8 @@ class GraphicsPipeline:
     interfaces: object
     resources: tuple
     state: tuple = ()
+    flat: int = 0
+    nopersp: int = 0
 
 
 def capture(engine, current, name, words, record):
@@ -148,7 +150,9 @@ def capture(engine, current, name, words, record):
     resources = validate_resources(scans, layout)
     snapshot = GraphicsPipeline(owner, device, layout_handle, layout, render_pass,
                                 pipeline_subpass, stages[1], stages[0x10], tuple(words),
-                                fixed, interfaces, resources)
+                                fixed, interfaces, resources,
+                                flat=scans[0x10].flat_mask,
+                                nopersp=scans[0x10].nopersp_mask)
     return (identifier,), (snapshot,), tuple(allocation)
 
 

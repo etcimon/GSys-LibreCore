@@ -18209,11 +18209,24 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   (u=0.6 v=0.7 d=2.0 -> divided (0.3,0.35) -> texel(2,1) (64,64,48,255),
   distinct from undivided texel(4,2)), cohort `native-gfxproj-01` 736
   PASS (`native-execution.tfz4m7nk`, sources_unchanged true).
+- [x] Flat varying interpolation: `spirv_scan` now admits the `Flat`/
+  `NoPerspective` decorations (previously FAULT['DECOR']), captures them
+  per FS-Input variable, and accumulates `flat_mask`/`nopersp_mask`;
+  `GraphicsPipeline` carries them and `DrawExec` forwards to `Raster`
+  (which already implemented provoking-vertex copy + perspective-off).
+  `test_fragment_flat_varying_uses_provoking_vertex` (distinct per-vertex
+  colors; every covered fragment = v0 color.rgb + v0 VertexIndex alpha
+  0.0, vs the smooth three-vertex blend), cohort `native-gfxflat-01`
+  737 PASS (`native-execution.hwuix8zk`, sources_unchanged true).
+  NoPerspective is plumbed identically but unexercised: `vs_program`
+  pins Position.w=1.0 so perspective-correct == nopersp; a w-varying VS
+  is needed to observe it.
 - [ ] Depth-reference (dref) sample ops (all four VkSamplerAddressMode
   values + bilinear filter + explicit/implicit LOD + multi-mip select +
   trilinear + gather + projective already proven),
   blend/depth/MRT, helper
-  lanes, non-triangle topology, flat/nopersp interpolation,
+  lanes, non-triangle topology, NoPerspective exercise (needs a
+  w-varying vertex shader),
   multi-descriptor/multi-stage end-to-end draws and capability/CTS/physical
   gates before any capset or stock vkCmdDraw* advertisement; host-model
   evidence only.
