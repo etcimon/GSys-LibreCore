@@ -215,16 +215,23 @@ SEGMENT G3b-ii/compute
 ```
 
 Root-cause note (2026-11-07, COMPUTE-H1 / COMPUTE-X2): the spec-constant
-path is decoded end-to-end but the constant *application* is unimplemented
-on both sides of the spec-of-record boundary.  **Model/golden:**
+path is decoded end-to-end; the constant *application* is now modelled on
+the golden side and remains RTL-side.  **Model/golden:**
 `vn_specialization.specialize()` folds scalar/default-composite spec
 constants and replays correctly (`vn_native_pipelines`/`vn_graphics_
 pipelines` call it at pipeline create; `test_wire_submit_executes_
-specialized_pipeline` green), and `vn_golden` validates the wire
-`VkSpecializationInfo` structure (count<=32, sizes 1/2/4, 8->FEATURE_NOT_
-PRESENT, dataSize<=64) — but at `vn_golden.py` ~4407 it raises
-`NotImplementedError('golden: non-empty specialization')` for nmap>0, so
-no golden vector can express a *live* constant override yet.  **RTL:**
+specialized_pipeline` green).  `vn_golden` now mirrors the RTL
+`StPipeSp*` wire decode — it parses the staged `{constantID,offset,
+size}` map entries + `dataSize` blob into `(constantID, value-bytes)`
+exactly as `read_specialization` does, applies `specialize()` to the
+pinned module words, and parks the folded module on `pipe_spec[h]` for
+provenance (compute dispatch is structural; `vn_native_*` executes the
+folded code).  The former
+`NotImplementedError('golden: non-empty specialization')` is gone: nmap>0
+now specializes, nmap=0 folds defaults, and size=8 still returns
+`VK_ERROR_FEATURE_NOT_PRESENT`.  No golden session yet carries a *valid*
+spec override (the `spec` variant exercises the FNP reject), so the new
+path is verified by contract, not yet by a live vector.  **RTL:**
 `g6lc_apu_vnfront` `StPipeH4`/`StPipeSp{Id,Off,Sz0,Sz1,Ds0,Ds1,Dat,Wn,
 Wp,End}` fully parse `VkSpecializationInfo` into `pl_{sn,sid,soff,ssz,
 sval}_q`, ObjPay-ALLOC a `{count,{sid,sval}*}` block (`pl_specb_q =
@@ -235,9 +242,10 @@ the vnfront spec-block *creation* sequence (StPipeSpAlc..StPipeAuxHiC),
 *not* yet pinned to a sub-state — the existing `G6LC_APU_DBG_LOST`
 watcher (`dbg_{frm,sfrm,ofrm}_q` + `ot/op cpl` status prints) already
 attributes the failing ObjTab/ObjPay op, so a directed spec-constant
-pipeline session or guest run with debug enabled names it.  Owed: model
-the constant override in vn_golden, root-cause + fix the create-path
-fault, then wire spec values to shwave `OpSpecConstant` resolution.
+pipeline session or guest run with debug enabled names it.  Owed: a
+golden session carrying a *valid* spec override to exercise the new
+`pipe_spec` path, root-cause + fix the RTL create-path fault, then wire
+spec values to shwave `OpSpecConstant` resolution.
 
 ## Performance / area / scalability
 

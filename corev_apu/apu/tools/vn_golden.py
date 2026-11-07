@@ -35,6 +35,7 @@ import gen_vn_tables as G   # noqa: E402
 from vn_layout import descriptor_bindings, descriptor_rows, descriptor_row_words  # noqa: E402
 from vn_model import ApertureState, ObjectTable, PAY_CHUNK, PayloadMemory  # noqa: E402
 from vn_image_operands import ImageSource, capture_source, immutable_source  # noqa: E402
+from vn_specialization import specialize  # noqa: E402
 
 import vkxml               # noqa: E402  (added to sys.path by gen_vn_tables)
 import vn_protocol         # noqa: E402
@@ -1807,6 +1808,12 @@ class FrontModel(ObjectTable, PayloadMemory):
         # are a residency cache keyed by the module handle — the
         # shadow keeps only the words, keyed by {gen,slot}
         self.sh_code = {}                      # module handle -> pCode
+        # COMPUTE-H1: pipeline handle -> specialized SPIR-V words.  The
+        # RTL parks a {count,{constantID,value}*} ObjPay spec block and
+        # points pipeline word[2] at it (pl_specb_q); the golden keeps the
+        # folded module here instead — specialize() already validated the
+        # SpecId/scalar profile, so this is the pipeline's effective code.
+        self.pipe_spec = {}                    # pipeline handle -> words
         self.descriptor_sources = None         # opt-in host-only provenance
         # §7b/5a-ii: aperture pages.  `self.ap` may be bound to a
         # TransportModel so vgctl blobs and device memory share one
@@ -3343,6 +3350,7 @@ class FrontModel(ObjectTable, PayloadMemory):
                                       (ze['aux'] >> 32) & 0xFFFF)
                         self.sh_code.pop(mh, None)
                 self.pay_free(pblk, GP_PAY_WORDS if gfx else 2)
+                self.pipe_spec.pop((e['gen'] << 16) | s, None)
             elif e['kind'] == KIND['VkDeviceMemory']:
                 # §12.3 C: an unbacked extent frees nothing
                 if (e['aux'] >> 32) & 0xFFFFFFFF != UNBACKED:
@@ -4365,12 +4373,20 @@ class FrontModel(ObjectTable, PayloadMemory):
                         spec = pay[5 * ei + 2] if 5 * ei + 2 < len(pay) \
                             else 1
                         lw = 5 * ei + 3          # layout id lo word
+                        spec_entries = None
+                        spec_code = None
                         if spec:
                             # COMPUTE-H1 mirror of vnfront StPipeH4/Sp*:
-                            # count <= 32; sizes 1/2/4 (8 ->
-                            # FEATURE_NOT_PRESENT); size_t hi words 0;
-                            # dataSize <= 64.  Element 0 only, like the
-                            # RTL's staged cursor.
+                            # count <= 32; entry {constantID, offset,
+                            # size} with size 1/2/4 (8 ->
+                            # FEATURE_NOT_PRESENT) and the size_t hi word
+                            # 0; then dataSize <= 64, the data blob, and
+                            # the layout id.  Element 0 only, like the
+                            # RTL's staged cursor.  `offset` is a byte
+                            # offset into the blob; specialize() wants
+                            # (constantID, value-bytes) so the bytes are
+                            # sliced here exactly as read_specialization
+                            # does on the native wire form.
                             cur = 5 * ei + 3
 
                             def w(k):
@@ -4379,9 +4395,11 @@ class FrontModel(ObjectTable, PayloadMemory):
                             nmap = w(cur)
                             cur += 1
                             bad = res = None
+                            raw_entries = []
                             if ei != 0 or nmap > 32:
                                 bad = VK_ERR_UNKNOWN
                             for _m in range(nmap if bad is None else 0):
+                                cid, off = w(cur), w(cur + 1)
                                 sz, szh = w(cur + 2), w(cur + 3)
                                 cur += 4
                                 if sz == 8:
@@ -4390,22 +4408,31 @@ class FrontModel(ObjectTable, PayloadMemory):
                                 if sz not in (1, 2, 4) or szh:
                                     bad = VK_ERR_UNKNOWN
                                     break
+                                raw_entries.append((cid, off, sz))
                             if bad is None:
                                 ds, dsh = w(cur), w(cur + 1)
+                                dcur = cur + 2
                                 cur += 2
                                 if ds > 64 or dsh:
                                     bad = VK_ERR_UNKNOWN
-                                cur += (ds + 3) // 4
+                                else:
+                                    blob = b''.join(
+                                        w(dcur + j).to_bytes(4,
+                                                             'little')
+                                        for j in range(
+                                            (ds + 3) // 4))[:ds]
+                                    cur += (ds + 3) // 4
+                                    spec_entries = []
+                                    for cid, off, sz in raw_entries:
+                                        if off > ds or sz > ds - off:
+                                            bad = VK_ERR_UNKNOWN
+                                            break
+                                        spec_entries.append(
+                                            (cid, blob[off:off + sz]))
                             if bad is not None:
                                 out['result'] = bad
                                 out['null_mask'].add(ei)
                                 continue
-                            if nmap:
-                                # live constants: the RTL parks a spec
-                                # list and keys residency on it — not
-                                # modelled until a vector needs it
-                                raise NotImplementedError(
-                                    'golden: non-empty specialization')
                             lw = cur
                         mid = pay[5 * ei] | (pay[5 * ei + 1] << 32)
                         mst, ms, me = self.resolve(
@@ -4420,6 +4447,24 @@ class FrontModel(ObjectTable, PayloadMemory):
                             out['result'] = VK_ERR_UNKNOWN
                             out['null_mask'].add(ei)
                             continue
+                        if spec_entries is not None:
+                            # fold SpecConstant/SpecConstantOp against the
+                            # staged overrides — the pipeline's effective
+                            # module is the specialized words, kept on
+                            # pipe_spec for provenance (compute dispatch is
+                            # structural; vn_native_* executes the folded
+                            # code).  A profile violation fails create.
+                            mcw = self.sh_code.get(mhnd)
+                            if mcw is not None:
+                                try:
+                                    spec_code = specialize(
+                                        list(mcw), spec_entries)
+                                except (ValueError, IndexError,
+                                        KeyError):
+                                    self.unpin(mhnd)
+                                    out['result'] = VK_ERR_UNKNOWN
+                                    out['null_mask'].add(ei)
+                                    continue
                         lid = ((pay[lw] if lw < len(pay) else 0) |
                                ((pay[lw + 1] if lw + 1 < len(pay) else 0)
                                 << 32))
@@ -4444,6 +4489,8 @@ class FrontModel(ObjectTable, PayloadMemory):
                         self.setaux(h, 0xFFFF_FFFF,
                                     ((pbase >> 6) & 0xFFFF) << 16)
                         self.setauxhi(h, (le['gen'] << 16) | ls)
+                        if spec_code is not None:
+                            self.pipe_spec[h] = spec_code
                 else:
                     for idv in blob_ids(slot):
                         # §5a G3b-iii: a command buffer is ObjTab entry
@@ -4690,6 +4737,7 @@ class FrontModel(ObjectTable, PayloadMemory):
                                 (ze['aux'] >> 32) & 0xFFFF)
                             self.sh_code.pop(mh, None)
                     self.pay_free(pblk, pbw)
+                    self.pipe_spec.pop((e['gen'] << 16) | s, None)
                 elif obj_kind == KIND['VkDeviceMemory']:
                     # §12.3 C: an unbacked memory frees nothing
                     if (aux_full >> 32) & 0xFFFFFFFF != UNBACKED:
