@@ -319,20 +319,23 @@ class DrawReplayTests(unittest.TestCase):
         self.assertEqual(self.read_texel(7, 3), self.clear_texel())
         self.assertEqual(self.f.owner.work_refs, 0)
 
-    def _image_fetch_setup(self, module, dtype=2):
+    def _image_fetch_setup(self, module, dtype=2, sampler_addr=0):
         """Shared vkCreateImage/View + image-descriptor-set setup for the
         image draw tests.  The image is an 8x4 R8G8B8A8_UNORM at MEMORY
         offset 4352 with texel(x,y) = (x*32, y*64, (x+y)*16, 255);
         `dtype` selects SAMPLED_IMAGE(2)/STORAGE_IMAGE(3)/
         COMBINED_IMAGE_SAMPLER(1); the combined form also creates a
-        nearest-filter VkSampler bound into VkDescriptorImageInfo."""
+        nearest-filter VkSampler bound into VkDescriptorImageInfo.
+        `sampler_addr` sets VkSamplerAddressMode for U/V/W (0 Repeat,
+        2 ClampToEdge) to exercise coordinate wrap/clamp."""
         self.r.layout(((0, dtype, 1, 16),))
         if dtype in (0, 1):
             self.f.command('vkCreateSampler', device=self.w.DEVICE,
                 pSampler=self.SAMPLER,
                 pCreateInfo=self.w.structure('VkSamplerCreateInfo', pNext=[],
                     flags=0, magFilter=0, minFilter=0, mipmapMode=0,
-                    addressModeU=0, addressModeV=0, addressModeW=0,
+                    addressModeU=sampler_addr, addressModeV=sampler_addr,
+                    addressModeW=sampler_addr,
                     mipLodBias=0, anisotropyEnable=0, maxAnisotropy=0,
                     compareEnable=0, compareOp=7, minLod=0, maxLod=0,
                     borderColor=0, unnormalizedCoordinates=0))
@@ -531,6 +534,20 @@ class DrawReplayTests(unittest.TestCase):
         did = self._separate_sampler_setup(fs_separate_sample_program())
         self._image_fetch_draw()
         want = self.texel_want(did, 2, 1)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), want)
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_fragment_sampler_address_mode_clamp(self):
+        # sampler address-mode variety: OpImageSampleExplicitLod at
+        # normalized u=1.25 (su0=floor(1.25*8)=10, out of range) under a
+        # CLAMP_TO_EDGE (mode 2) VkSampler clamps to texel x=7, whereas the
+        # default REPEAT sampler would wrap to x=2.  v=0.375 -> y=1 in range.
+        did = self._image_fetch_setup(
+            fs_sample_program(u=1.25, v=0.375), dtype=1, sampler_addr=2)
+        self._image_fetch_draw()
+        want = self.texel_want(did, 7, 1)
         for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
             self.assertEqual(self.read_texel(x, y), want)
         self.assertEqual(self.read_texel(7, 3), self.clear_texel())

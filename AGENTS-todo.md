@@ -18130,17 +18130,21 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   by `test_fragment_separate_sampler_image_sample` (fs_separate_sample_program:
   SAMPLED_IMAGE kind2 binding0 + SAMPLER kind0 binding1 merged by
   OpSampledImage opcode 86 then OpImageSampleExplicitLod -> texel(2,1)).
-  Remote cohorts `native-gfximg-01` 720 + `native-gfximgpix-01` 721 + `native-gfximgstore-01`
+  Sampler address-mode variety proven by `test_fragment_sampler_address_mode_
+  clamp` (CLAMP_TO_EDGE mode 2 VkSampler; normalized u=1.25 -> su0=10 clamps
+  to texel x=7 instead of REPEAT-wrapping to x=2).  Remote cohorts
+  `native-gfximg-01` 720 + `native-gfximgpix-01` 721 + `native-gfximgstore-01`
   722 + `native-gfxvsimg-01` 723 + `native-gfxcomb-01` 724 +
   `native-gfxsample-01` 725 + `native-gfximplod-01` 726 +
-  `native-gfxsep-01` 727 checks PASS
+  `native-gfxsep-01` 727 + `native-gfxclamp-01` 728 checks PASS
   (native-execution.y6y3xap5 /
   .nssux4bd / .5axy_z9z / .n8_r1ss2 / .6yodeq0j / .no_22v6j / .3wzcog89 /
-  .edz92krq,
+  .edz92krq / .3pqmo813,
   sources_unchanged true), local `test_vn_*` graphics suites green.
   Record: `architecture/uncore/
   apu-native-graphics-shade-implementation.md`.
-- [ ] Non-nearest filter/mip/wrap variety + gather/proj/dref sample ops,
+- [ ] Linear/mipmap filtering + mirrored/border address modes + gather/
+  proj/dref sample ops,
   in-model
   dynamic offsets, blend/depth/MRT, helper
   lanes, non-triangle topology, flat/nopersp interpolation,
