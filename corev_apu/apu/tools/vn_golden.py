@@ -10496,7 +10496,17 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # vec2 pos format leaves vs_pos3's pos.z=0 so gl_Position.z=0 is
         # a constant depth; write-only (depthTestEnable=0) validates the
         # attachment/readback path before any compare is added
-        is_depth = 'depth' in gfx
+        # dtest: depth attachment + depthTestEnable=1 (LESS) over a
+        # vec3-pos attribute — two overlapping triangles at different
+        # vertex z give real Z-compare coverage (near wins, far rejected)
+        is_dtest = 'dtest' in gfx
+        is_dtoff = 'dtoff' in gfx
+        # is_dpair: the two-triangle vec3-pos depth session (near z=0.25
+        # red verts 0-2, far z=0.75 blue verts 3-5, shared TRI xy).  The
+        # pair shares all vertex/format/draw plumbing; only the depth
+        # test-enable and the winner oracle differ.
+        is_dpair = is_dtest or is_dtoff
+        is_depth = is_dpair or 'depth' in gfx
         # G3b-iii F8: drawind/drawindx issue the same triangle through
         # DrawIndirect/DrawIndexedIndirect — the operand sits at a
         # 4-mod-8 byte offset inside a dedicated INDIRECT buffer to
@@ -10620,7 +10630,21 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # binding 4 (stride 16); bindings 1..3 are bound but unused
         vb_words = []
         vb2_words = []
-        if is_line or is_lstrip:
+        if is_dpair:
+            # vec3-pos stride 32 {pos.xyz@0, pad@12, col.rgba@16}: two
+            # triangles share the TRI xy footprint — near (z=0.25, red)
+            # is verts 0-2, far (z=0.75, blue) is verts 3-5; with LESS
+            # the near tri wins, with the test off the far tri (drawn
+            # last) overwrites it — the A/B that proves the compare
+            NEAR_C = (1.0, 0.0, 0.0, 1.0)
+            FAR_C = (0.0, 0.0, 1.0, 1.0)
+            for (_vx, _vy, _vz0, _vw) in TRI:
+                vb_words += [f32b(_vx), f32b(_vy), f32b(0.25), 0] + \
+                    [f32b(c) for c in NEAR_C]
+            for (_vx, _vy, _vz0, _vw) in TRI:
+                vb_words += [f32b(_vx), f32b(_vy), f32b(0.75), 0] + \
+                    [f32b(c) for c in FAR_C]
+        elif is_line or is_lstrip:
             # LINE_LIST (2 verts) / LINE_STRIP (3 verts) {pos.xy@0,
             # col@8} stride 24.  The endpoints are picked in
             # framebuffer-pixel space so the rasterizer's vxi>>>8 lands on
@@ -10769,7 +10793,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # fncall: l2->l3->shade chain + dark(inout,0.5) + early() on
         # constant vcol=(0.2,0.4,0.6,1.0) -> (0.08,0.305,0.68,1.51) ->
         # UNORM (20,78,173,255) = 0xFFAD4E14.
-        out_w = (200 | (200 << 8) | (80 << 16) | (80 << 24)) \
+        # dtest: near tri (z=0.25, red) wins the LESS compare ->
+        # 0xFF0000FF.  dtoff (control, test disabled): the far tri
+        # (z=0.75, blue) is drawn last and overwrites -> 0xFFFF0000.
+        out_w = 0xFF0000FF if is_dtest else \
+            0xFFFF0000 if is_dtoff else \
+            (200 | (200 << 8) | (80 << 16) | (80 << 24)) \
             if is_ftexg else \
             (0x66 | (0xCC << 8) | (0xFF << 16) | (0xFF << 24)) \
             if is_killfn else \
@@ -10783,11 +10812,18 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         (is_killfn and ((w % CW) & 1)))
                    else clr_w
                    for w in range(CW * CH)]
-        # depth-write oracle: every covered pixel stores the constant
-        # vertex depth (vs_pos3 pos.z=0 -> NDC z=0 -> depth 0.0 =
-        # 0x00000000 for D32_SFLOAT); uncovered pixels keep the clear
-        # value 0.5 = 0x3F000000.  depthTestEnable=0 so no compare.
-        exp_depth = ([0x00000000 if (w % CW, w // CW) in cov
+        # depth oracle: dtest covered px store the near-tri depth
+        # (pos.z=0.25 -> window depth 0.25 = 0x3E800000); dtoff stores
+        # the far-tri depth (0.75 = 0x3F400000) since it overwrites.
+        # Both keep the 1.0f clear elsewhere; write-only is_depth
+        # stores 0.0 covered / 0.5f clear.
+        exp_depth = ([0x3E800000 if (w % CW, w // CW) in cov
+                      else 0x3F800000 for w in range(CW * CH)]
+                     if is_dtest else
+                     [0x3F400000 if (w % CW, w // CW) in cov
+                      else 0x3F800000 for w in range(CW * CH)]
+                     if is_dtoff else
+                     [0x00000000 if (w % CW, w // CW) in cov
                       else 0x3F000000 for w in range(CW * CH)]
                      if is_depth else None)
         # evidence: ascii-art coverage map + a few sampled rows go to
@@ -11012,7 +11048,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                             [st('VkVertexInputBindingDescription',
                                 binding=0,
                                 stride=2 if is_pts else
-                                16 if is_tex else 24,
+                                16 if is_tex else
+                                32 if is_dpair else 24,
                                 inputRate=0)]),
                         vertexAttributeDescriptionCount=(
                             0 if is_vidx else 1 if is_pts else 2),
@@ -11021,13 +11058,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                location=0, binding=0, format=16,
                                offset=0)] if is_pts else [
                             st('VkVertexInputAttributeDescription',
-                               location=0, binding=0, format=103,
+                               location=0, binding=0,
+                               format=106 if is_dpair else 103,
                                offset=0),
                             st('VkVertexInputAttributeDescription',
                                location=1,
                                binding=4 if is_wide else 0,
                                format=103 if is_tex else 109,
-                               offset=0 if is_wide else 8)]),
+                               offset=0 if is_wide else
+                               16 if is_dpair else 8)]),
                     pInputAssemblyState=st(
                         'VkPipelineInputAssemblyStateCreateInfo',
                         flags=0, topology=0 if is_pts else
@@ -11067,8 +11106,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     pMultisampleState=None,
                     pDepthStencilState=(
                         st('VkPipelineDepthStencilStateCreateInfo',
-                           depthTestEnable=0, depthWriteEnable=1,
-                           depthCompareOp=0, depthBoundsTestEnable=0,
+                           depthTestEnable=1 if is_dtest else 0,
+                           depthWriteEnable=1,
+                           depthCompareOp=1 if is_dtest else 0,
+                           depthBoundsTestEnable=0,
                            stencilTestEnable=0,
                            front=st('VkStencilOpState', failOp=0,
                                     passOp=0, depthFailOp=0,
@@ -11111,8 +11152,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 # sessions size the buffer to their vertex data (an
                 # undersized buffer is a robust zero-fetch, not a draw)
                 pCreateInfo=st('VkBufferCreateInfo',
-                               size=max(72, 4 * len(vb_words)) if is_pts
-                               else 72,
+                               size=max(72, 4 * len(vb_words))
+                               if is_pts or is_dpair else 72,
                                usage=0x80, sharingMode=0,
                                queueFamilyIndexCount=0,
                                pQueueFamilyIndices=[]),
@@ -11391,10 +11432,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                          f32b(1.0)]))] + ([
                         # the wire union has no depthStencil arm — cmdexec
                         # reads clearv_q[att*4] as the depth value, so the
-                        # 0.5f bits ride the colour uint32[0] slot
+                        # bits ride the colour uint32[0] slot (0.5f write,
+                        # 1.0f dtest far-plane)
                         st('VkClearValue',
                            color=st('VkClearColorValue',
-                                    uint32=[f32b(0.5), 0, 0, 0]))]
+                                    uint32=[f32b(1.0 if is_dpair else 0.5),
+                                            0, 0, 0]))]
                         if is_depth else [])),
                 contents=0)),
             ('vkCmdBindPipeline', dict(
@@ -11441,7 +11484,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                  drawCount=1, stride=20))] if is_drawindx else
              [('vkCmdDraw', dict(
                  commandBuffer=X['cb'],
-                 vertexCount=PTS_N if is_pts else 2 if is_line else 3,
+                 vertexCount=6 if is_dpair else
+                 PTS_N if is_pts else 2 if is_line else 3,
                  instanceCount=INST_N if is_inst else 1,
                  firstVertex=0, firstInstance=0))])[0],
             ('vkCmdEndRenderPass', dict(commandBuffer=X['cb'])),

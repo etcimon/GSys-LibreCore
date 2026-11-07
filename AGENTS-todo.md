@@ -18415,9 +18415,33 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   Clear 0.5f everywhere; covered px store vertex depth 0.0 — covered!=clear
   proves the write, not init-0.  PASS `g1=8192 g2=8192 ulp=0
   XF_FAULTS 0`; `ue_gpos_fncall_1`/`ue_cpos_dcopy_bufcopy_1`/
-  `ue_cpos_clear_rgba8_1` regress clean.  Depth *test* (compare ops,
-  non-zero vertex z, two overlapping prims) remains open — needs a vec3-pos
-  vertex format.
+  `ue_cpos_clear_rgba8_1` regress clean.  Depth *test* landed next — see
+  the `ue_gpos_dtest_1`/`ue_gpos_dtoff_1` entry below.
+- [x] **CLOSED — depth test (`ue_gpos_dtest_1` + `ue_gpos_dtoff_1` A/B):**
+  first real Z-compare.  `is_dpair` reuses the `ue_gpos_depth_1` depth
+  plumbing but switches the vertex input to **vec3 pos** — binding stride
+  32 `{pos.xyz@0, pad@12, col.rgba@16}`, pos format `106`
+  (`R32G32B32_SFLOAT`, already in `VATTR_OK`), `vs_pos3` forwards
+  `gl_Position.z=pos.z` (no shader recompile).  Six verts = two triangles
+  sharing the `TRI` xy footprint: near `z=0.25` red (verts 0-2), far
+  `z=0.75` blue (verts 3-5), `vertexCount=6`, `vb` sized `4*len(vb_words)`
+  (192 B — the fixed 72 B would have silently truncated the far tri).
+  Pipeline `depthTestEnable=1`/`depthWriteEnable=1`/`depthCompareOp=LESS`;
+  depth clear `1.0f` (rides `color.uint32[0]` as before).  Oracles:
+  covered px -> near red `0xFF0000FF` + depth `0.25f` `0x3E800000`;
+  uncovered -> black clear + `1.0f` `0x3F800000`.
+  **`ue_gpos_dtoff_1` is the control** — identical stream with
+  `depthTestEnable=0`, expecting the far tri (drawn last) to win ->
+  blue `0xFFFF0000` + depth `0.75f` `0x3F400000`.  The A/B is the proof:
+  dtoff passing shows both tris genuinely rasterize (verts 3-5 fetch and
+  shade correctly); dtest passing with near-wins shows the compare is
+  what rejects the far tri — not an absent primitive.  PASS both
+  `g1=8192 g2=8192 ulp=0 XF_FAULTS 0` on **vgtop and vgsys**;
+  `ue_gpos_depth_1` hex byte-identical after the `is_dpair` refactor
+  (non-pair sessions generate unchanged), `ue_gpos_fncall_1` regress
+  clean.  Directed-RTL session evidence only — compare-op coverage is
+  LESS only; GREATER/EQUAL/NOTEQUAL, depthClamp, depth-bounds and
+  early/late-Z ordering remain open.
 - [x] Instanced-draw session coverage (`c84531213`): `ue_gpos_inst_1`
   — `vs_inst` offsets clip-x by `0.4*gl_InstanceIndex-0.6`,
   `instanceCount=4`, `fs_flat` constant colour → union coverage over 4
