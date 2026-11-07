@@ -18115,13 +18115,18 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   `test_vn_graphics_shade.test_image_descriptor_fetch_reaches_position_w`
   (vs_image_program: OpImageFetch at constant ivec2 folds texel.x into
   Position.w of every vary record); the VS path needs no separate scan gate
-  since `ShadeRuntime` shares `resolve_bindings`.  Remote cohorts
-  `native-gfximg-01` 720 + `native-gfximgpix-01` 721 + `native-gfximgstore-01`
-  722 + `native-gfxvsimg-01` 723 checks PASS (native-execution.y6y3xap5 /
-  .nssux4bd / .5axy_z9z / .n8_r1ss2, sources_unchanged true), local
-  `test_vn_*` 738 PASS.  Record: `architecture/uncore/
+  since `ShadeRuntime` shares `resolve_bindings`.  Combined-image-sampler
+  kind 1 proven by `test_fragment_combined_image_sampler_fetch`
+  (fs_image_program combined=True declares OpTypeSampledImage; a real
+  vkCreateSampler-bound COMBINED_IMAGE_SAMPLER descriptor feeds OpImageFetch,
+  which ignores sampler state).  Remote cohorts `native-gfximg-01` 720 +
+  `native-gfximgpix-01` 721 + `native-gfximgstore-01` 722 + `native-gfxvsimg-01`
+  723 + `native-gfxcomb-01` 724 checks PASS (native-execution.y6y3xap5 /
+  .nssux4bd / .5axy_z9z / .n8_r1ss2 / .6yodeq0j, sources_unchanged true),
+  local `test_vn_*` 739 PASS.  Record: `architecture/uncore/
   apu-native-graphics-shade-implementation.md`.
-- [ ] Combined/separate image kinds + sampler-bearing sampling, in-model
+- [ ] Separate sampler+image pairing, sampler-bearing filtered sampling
+  (OpImageSample* normalized coords/mip/wrap), in-model
   dynamic offsets, blend/depth/MRT, helper
   lanes, non-triangle topology, flat/nopersp interpolation,
   multi-descriptor/multi-stage end-to-end draws and capability/CTS/physical
@@ -18860,3 +18865,28 @@ Selected endpoint/native-off/default-RAM synthesis and inactive/illegal-layout
 formal checks pass; native request refusal has zero model memories. Aggregate
 dry-run still executes none of its 25 steps. No remote runs are launched,
 canceled or cleaned by this session.
+
+### ST-036 backend correctness and short verification — review30
+
+- [x] Reject sector-to-byte alias/wrap and malformed descriptor admission before
+  side effects; retain successful IN/OUT at the final legal sector.
+- [x] Close the complete block/device selected profile:
+  `storamic-all-920564dbf1c0`, six stages in about 130 seconds with two workers.
+  Both formal modes preserve twelve original obligations and four assumptions.
+  Twenty proved inductive invariants establish the unrestricted window rule;
+  other safety/cover bounds stay 14/14/16/16. Budgets, full inventory, model
+  identity and prerequisite checks fail closed.
+- [x] Exact-final-fixture original replay `storamic-boundary-original-bbf6f81d`
+  rejects six named reproductions and the proof flow; failed induction blocks
+  its dependent consequence. Both positive simulator PGO builds and all119
+  packaged source identities verify. Earlier timeouts remain incomplete.
+- [x] Replace mixed-edge response drivers in the block fixture with one owner;
+  preserve 1,609 checks and both backend/device corruption oracles. Refresh
+  only the generator-derived provenance hashes in three AI config packages.
+- [ ] Native completion remains separate: C0 still has 28 unwaived scheduling
+  errors per origin mode; C1 queue/debug cases, source identity, real
+  policy/protection providers, drain and cache/fabric resume ownership remain.
+  The selected profile omits 62 other registered stages and does not qualify
+  physical media, aggregate/compliance or Linux. Native admission stays disabled.
+
+Receipt: `build-platform/workspace/build/storamic-review-30/FINAL-SV-30.md`.

@@ -86,12 +86,14 @@ def fs_program(kind='color', desc=False, ubo=False):
     return tuple(words)
 
 
-def fs_image_program(binding=0, coord=(1, 1), per_pixel=False):
-    """Fragment module fetching a texel from a SAMPLED_IMAGE (kind 2)
-    UNIFORMCONST descriptor and writing it to color(loc0).  `per_pixel`
-    derives the ivec2 fetch coordinate from FragCoord.xy (pixel-center
-    floats truncated to the fragment index); otherwise `coord` is a
-    constant ivec2."""
+def fs_image_program(binding=0, coord=(1, 1), per_pixel=False, combined=False):
+    """Fragment module fetching a texel from a SAMPLED_IMAGE (kind 2) or,
+    with combined=True, a COMBINED_IMAGE_SAMPLER (kind 1) UNIFORMCONST
+    descriptor, writing it to color(loc0).  `per_pixel` derives the ivec2
+    fetch coordinate from FragCoord.xy (pixel-center floats truncated to
+    the fragment index); otherwise `coord` is a constant ivec2.  OpImageFetch
+    ignores the sampler state, so the combined form exercises kind-1
+    descriptor admission without filtered sampling."""
     words = [0x07230203, 0x00010300, 0, 48, 0]
 
     def emit(opcode, *values):
@@ -113,7 +115,9 @@ def fs_image_program(binding=0, coord=(1, 1), per_pixel=False):
     emit(21, 11, 32, 1)             # %int
     emit(23, 12, 11, 2)             # %ivec2
     emit(25, 13, 3, 1, 0, 0, 0, 1, 0)  # %image2D sampled
-    emit(32, 14, 0, 13)             # ptr UniformConstant image
+    if combined:
+        emit(27, 40, 13)            # %40 = OpTypeSampledImage %13 (kind 1)
+    emit(32, 14, 0, 40 if combined else 13)  # ptr UniformConstant image
     emit(32, 15, 1, 4)              # ptr Input v4f
     emit(32, 16, 3, 4)              # ptr Output v4f
     emit(59, 15, 7, 1)              # fc input
@@ -128,7 +132,7 @@ def fs_image_program(binding=0, coord=(1, 1), per_pixel=False):
         emit(110, 11, 21, 19)       # %21 = int(fc.x)
         emit(110, 11, 22, 20)       # %22 = int(fc.y)
         emit(80, 12, 23, 21, 22)    # %23 = ivec2(x, y)
-        emit(61, 13, 24, 17)        # %24 = Load image %17
+        emit(61, 40 if combined else 13, 24, 17)  # %24 = Load image %17
         emit(95, 4, 25, 24, 23)     # %25 = ImageFetch %24 %23
         emit(62, 8, 25)             # Store color %25
     else:
@@ -137,7 +141,7 @@ def fs_image_program(binding=0, coord=(1, 1), per_pixel=False):
         emit(44, 12, 20, 18, 19)    # ivec2 coord
         emit(54, 1, entry, 0, 2)    # main()
         emit(248, lbl)              # label
-        emit(61, 13, 21, 17)        # %21 = Load image %17
+        emit(61, 40 if combined else 13, 21, 17)  # %21 = Load image %17
         emit(95, 4, 22, 21, 20)     # %22 = ImageFetch %21 %20
         emit(62, 8, 22)             # Store color %22
     emit(253)                       # Return

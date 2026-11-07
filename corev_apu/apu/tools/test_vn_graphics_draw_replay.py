@@ -15,6 +15,7 @@ from vn_native_execution import StreamFault
 class DrawReplayTests(unittest.TestCase):
     VB, VS2, FS2, PIPE2 = (0x790000001000 + i for i in range(4))
     POOL, DSET, UBO, IMAGE, VIEW = (0x7A0000001000 + i for i in range(5))
+    SAMPLER = 0x7A0000002000
 
     def setUp(self):
         self.r = resource_fixture.ResourceTests()
@@ -321,8 +322,19 @@ class DrawReplayTests(unittest.TestCase):
         """Shared vkCreateImage/View + image-descriptor-set setup for the
         image draw tests.  The image is an 8x4 R8G8B8A8_UNORM at MEMORY
         offset 4352 with texel(x,y) = (x*32, y*64, (x+y)*16, 255);
-        `dtype` selects SAMPLED_IMAGE(2)/STORAGE_IMAGE(3)."""
+        `dtype` selects SAMPLED_IMAGE(2)/STORAGE_IMAGE(3)/
+        COMBINED_IMAGE_SAMPLER(1); the combined form also creates a
+        nearest-filter VkSampler bound into VkDescriptorImageInfo."""
         self.r.layout(((0, dtype, 1, 16),))
+        if dtype in (0, 1):
+            self.f.command('vkCreateSampler', device=self.w.DEVICE,
+                pSampler=self.SAMPLER,
+                pCreateInfo=self.w.structure('VkSamplerCreateInfo', pNext=[],
+                    flags=0, magFilter=0, minFilter=0, mipmapMode=0,
+                    addressModeU=0, addressModeV=0, addressModeW=0,
+                    mipLodBias=0, anisotropyEnable=0, maxAnisotropy=0,
+                    compareEnable=0, compareOp=7, minLod=0, maxLod=0,
+                    borderColor=0, unnormalizedCoordinates=0))
         self.f.command('vkDestroyShaderModule', device=self.w.DEVICE,
                        shaderModule=self.FS2)
         self.module(self.FS2, module)
@@ -356,8 +368,10 @@ class DrawReplayTests(unittest.TestCase):
             pDescriptorWrites=[s('VkWriteDescriptorSet', pNext=[], dstSet=self.DSET,
                 dstBinding=0, dstArrayElement=0, descriptorCount=1,
                 descriptorType=dtype, pTexelBufferView=[],
-                pImageInfo=[s('VkDescriptorImageInfo', sampler=0,
-                    imageView=self.VIEW, imageLayout=1)], pBufferInfo=[])])
+                pImageInfo=[s('VkDescriptorImageInfo',
+                    sampler=self.SAMPLER if dtype in (0, 1) else 0,
+                    imageView=0 if dtype == 0 else self.VIEW,
+                    imageLayout=1)], pBufferInfo=[])])
         did = self.e.golden.img_fmt_id(self.e.model, 37)
         pitch = self.e.golden.img_mpitch(self.e.model, 8, did, 0)
         base = self.f.owner.base + 4352
@@ -398,6 +412,20 @@ class DrawReplayTests(unittest.TestCase):
         # fetches texel(x,y); every covered framebuffer texel must equal
         # its own (x,y)-encoded image texel.
         did = self._image_fetch_setup(fs_image_program(per_pixel=True))
+        self._image_fetch_draw()
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), self.texel_want(did, x, y))
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_fragment_combined_image_sampler_fetch(self):
+        # combined-image-sampler (kind 1): the FS declares OpTypeSampledImage
+        # and OpImageFetch reads the bound image through a COMBINED_IMAGE_
+        # SAMPLER descriptor carrying a VkSampler.  Fetch ignores sampler
+        # state, so each covered texel must equal its (x,y)-encoded image
+        # texel exactly as the kind-2 sampled-image draw did.
+        did = self._image_fetch_setup(
+            fs_image_program(per_pixel=True, combined=True), dtype=1)
         self._image_fetch_draw()
         for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
             self.assertEqual(self.read_texel(x, y), self.texel_want(did, x, y))

@@ -125,22 +125,32 @@ separate scan gate: `ShadeRuntime` calls the same `resolve_bindings`, so a
 `vs_image_program` module (OpTypeImage sampled=1, OpImageFetch at a constant
 ivec2, texel.x folded into Position.w) proves vertex-stage image reads land
 in the vary records (`test_image_descriptor_fetch_reaches_position_w`).
+The combined-image-sampler kind is admitted through the same path:
+`vn_graphics_resources` maps `TK['SIMG']` (OpTypeSampledImage) to kind 1, and
+`fs_image_program(combined=True)` declares the combined type so a
+COMBINED_IMAGE_SAMPLER descriptor carrying a real VkSampler reaches
+`OpImageFetch` (which ignores sampler state) end-to-end.
 
-Evidence: `test_vn_graphics_draw_replay` gained three image draws -
+Evidence: `test_vn_graphics_draw_replay` gained four image draws -
 `test_fragment_sampled_image_fetch_reaches_framebuffer` (constant ivec2
 coordinate), `test_fragment_per_pixel_image_fetch` (ivec2 derived from
 FragCoord.xy via OpCompositeExtract + OpConvertFToS + OpCompositeConstruct),
-and `test_fragment_storage_image_write` (a STORAGE_IMAGE kind 3 bound via
+and `test_fragment_combined_image_sampler_fetch` (OpTypeSampledImage kind 1
+with a VkSampler-bound COMBINED_IMAGE_SAMPLER descriptor producing the same
+per-pixel texels as the kind-2 fetch), plus
+`test_fragment_storage_image_write` (a STORAGE_IMAGE kind 3 bound via
 `OpTypeImage(sampled=2)`; `OpImageWrite` stores a constant red texel at the
 same FragCoord-derived coordinate, and the aperture bytes under the bound
 image are checked - covered texels become red while uncovered keep their
 pattern).  The fetch draws prove each covered framebuffer texel equals its
 own (x,y)-encoded image texel; the store draw proves the previously
 unexercised kind-3 `GfxMemory` write admission end-to-end.  Local
-`test_vn_*` sweep 738 PASS.  Frozen native cohorts on ovh_calltorch:
+`test_vn_*` sweep 739 PASS.  Frozen native cohorts on ovh_calltorch:
 `native-gfximg-01` 720 tests PASS in 20.465 s (`native-execution.y6y3xap5`),
 `native-gfximgpix-01` 721 tests PASS in 20.582 s
 (`native-execution.nssux4bd`), `native-gfximgstore-01` 722 tests PASS in
-21.914 s (`native-execution.5axy_z9z`), and `native-gfxvsimg-01` 723 tests
-PASS in 20.500 s (`native-execution.n8_r1ss2`), all `sources_unchanged:
-true`.  Host-native model only - no RTL/CTS/stock/hardware qualification.
+21.914 s (`native-execution.5axy_z9z`), `native-gfxvsimg-01` 723 tests
+PASS in 20.500 s (`native-execution.n8_r1ss2`), and `native-gfxcomb-01`
+724 tests PASS in 20.725 s (`native-execution.6yodeq0j`), all
+`sources_unchanged: true`.  Host-native model only - no RTL/CTS/stock/
+hardware qualification.
