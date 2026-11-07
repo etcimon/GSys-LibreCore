@@ -18289,6 +18289,14 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   compares were weighted rather than a hard 0.0/1.0.  Cohort
   `native-gfxpcf-01` 746 PASS (`native-execution.ws6ohan9`,
   sources_unchanged true).
+- [x] Instanced-draw session coverage (`c84531213`): `ue_gpos_inst_1`
+  — `vs_inst` offsets clip-x by `0.4*gl_InstanceIndex-0.6`,
+  `instanceCount=4`, `fs_flat` constant colour → union coverage over 4
+  offset triangles.  Exercises `g6lc_apu_rast` `instance_count`/
+  `first_instance` batching + the `gl_InstanceIndex` builtin
+  end-to-end.  PASS `g1=4096 g2=4096 ulp=0 XF_FAULTS 0` on
+  `vgtop-dbg`, both latency profiles.  Directed-RTL session evidence
+  only — distinct from the native-model gaps below.
 - [ ] blend/depth/MRT, helper
   lanes, non-triangle topology, end-to-end NoPerspective draw (needs a
   w-varying vertex shader),
