@@ -6776,6 +6776,61 @@ def gfx_tri_coverage(verts, vp, sc, cw, ch, front_ccw, cull):
     return cov
 
 
+def gfx_line_coverage(verts, vp, sc, cw, ch):
+    """G1c reference rasterizer for one LINE_LIST segment — mirrors the
+    g6lc_apu_rast S_LN_* integer path: the same f32 viewport transform +
+    F2I RNE to 16.8 fixed, then vxi>>>8 to integer pixels and the
+    lerr = ldx - ldy Bresenham (diagonal/x/y step branches), inclusive
+    of both endpoints, scissor-clipped like S_LN_PIX.
+
+    verts = [(x,y,z,w)]*2 in clip space; vp/sc as gfx_tri_coverage.
+    -> set of covered (px, py)."""
+    vphw = _f32(_f32(vp[2]) * 0.5)
+    vphh = _f32(_f32(vp[3]) * 0.5)
+    fma = getattr(math, 'fma', lambda a, b, c: a * b + c)
+
+    def to_pix(v):
+        x, y, _z, w = v
+        rcp = _f32(1.0 / _f32(w))
+        nx = _f32(_f32(x) * rcp)
+        ny = _f32(_f32(y) * rcp)
+        sx = _f32(fma(_f32(nx + 1.0), vphw, _f32(vp[0])))
+        sy = _f32(fma(_f32(ny + 1.0), vphh, _f32(vp[1])))
+        vxi = _f2i_rne(_f32(sx * 256.0))
+        vyi = _f2i_rne(_f32(sy * 256.0))
+        return (vxi >> 8, vyi >> 8)
+
+    (x0, y0), (x1, y1) = to_pix(verts[0]), to_pix(verts[1])
+    ldx = abs(x0 - x1)
+    ldy = abs(y0 - y1)
+    xs = 1 if x0 < x1 else -1
+    ys = 1 if y0 < y1 else -1
+    lerr = ldx - ldy
+    lx, ly = x0, y0
+    scx, scy, scw, sch = sc
+    cov = set()
+    while True:
+        # S_LN_PIX: emit when inside the scissor window
+        if not (lx < 0 or ly < 0 or lx < scx or ly < scy or
+                lx >= scx + scw or ly >= scy + sch):
+            cov.add((lx, ly))
+        # S_LN_STEP: terminate on the far endpoint, else Bresenham step
+        if lx == x1 and ly == y1:
+            break
+        e2 = 2 * lerr
+        if e2 > -ldy and e2 < ldx:
+            lerr += ldx - ldy
+            lx += xs
+            ly += ys
+        elif e2 > -ldy:
+            lerr -= ldy
+            lx += xs
+        else:
+            lerr += ldx
+            ly += ys
+    return cov
+
+
 def load_shvec(name):
     """Parse sh_vectors/<name>.{hex,exp} into a compute-session vec.
 
@@ -10460,6 +10515,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # CIS; every footprint corner clamps to the one texel so the
         # output is a fixed function of tri_w, not tri_w itself
         is_ftexg = 'ftexg' in gfx
+        # line: LINE_LIST topology — 2 vertices, 1px Bresenham walk with
+        # flat colour from vertex 0 (the g6lc_apu_rast S_LN_* path)
+        is_line = 'line' in gfx
         is_tex = is_vtex or is_ftex
         # vs_pos3/fs_vcol forward the vertex alpha into FS out; the
         # passthru/flat pair forces a=1 and cannot see a blend
@@ -10470,6 +10528,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'vs_texlod.spv' if is_vtex else
                           'vs_tex.spv' if is_ftex else
                           'vs_pos3.spv' if is_blend or is_wide or is_kill
+                          or is_line
                           else 'vs_passthru.spv')).read_bytes())]
         # fsubo: the FS reads its colour from a UBO bound at the GRAPHICS
         # bind point (CTS binding_model.*.graphics shape)
@@ -10479,7 +10538,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             '<I', (spvd / ('fs_ubo_array.spv' if is_fsubocopy else
                           'fs_ubo.spv' if is_fsubo else
                           'fs_white.spv' if is_pts else
-                          'fs_vcol.spv' if is_blend or is_wide else
+                          'fs_vcol.spv' if is_blend or is_wide or is_line
+                          else
                           'fs_tex_array.spv' if is_ftexa else
                           'fs_tex_gather.spv' if is_ftexg else
                           'fs_tex_bias.spv' if is_ftexb else
@@ -10511,18 +10571,33 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # binding 4 (stride 16); bindings 1..3 are bound but unused
         vb_words = []
         vb2_words = []
-        for (vx_, vy_, _vz, _vw) in TRI:
-            if is_tex:
-                # {pos.xy @0, uv.xy @1} stride 16; uv is constant —
-                # the 1x1 texture makes the sampled colour uv-independent
-                vb_words += [f32b(vx_), f32b(vy_),
-                             f32b(0.5), f32b(0.5)]
-            elif is_wide:
-                vb_words += [f32b(vx_), f32b(vy_)]
-                vb2_words += [f32b(c) for c in COL]
-            else:
-                vb_words += [f32b(vx_), f32b(vy_)]
+        if is_line:
+            # LINE_LIST: 2 vertices {pos.xy@0, col@8} stride 24.  The
+            # endpoints are picked in framebuffer-pixel space so the
+            # rasterizer's vxi>>>8 lands on clean integer pixels for the
+            # Bresenham oracle; fb pixel px centre = px+0.5 maps to
+            # clip = (px+0.5)/32 - 1 under VP=(0,0,64,64).
+            L_PIX = [(10, 10), (50, 30)]
+            L_CLIP = []
+            for (px_, py_) in L_PIX:
+                cx = (px_ + 0.5) / 32.0 - 1.0
+                cy = (py_ + 0.5) / 32.0 - 1.0
+                L_CLIP.append((cx, cy, 0.0, 1.0))
+                vb_words += [f32b(cx), f32b(cy)]
                 vb_words += [f32b(c) for c in COL]
+        else:
+            for (vx_, vy_, _vz, _vw) in TRI:
+                if is_tex:
+                    # {pos.xy @0, uv.xy @1} stride 16; uv is constant —
+                    # the 1x1 texture makes the sampled colour uv-independent
+                    vb_words += [f32b(vx_), f32b(vy_),
+                                 f32b(0.5), f32b(0.5)]
+                elif is_wide:
+                    vb_words += [f32b(vx_), f32b(vy_)]
+                    vb2_words += [f32b(c) for c in COL]
+                else:
+                    vb_words += [f32b(vx_), f32b(vy_)]
+                    vb_words += [f32b(c) for c in COL]
         VP = (0.0, 0.0, 64.0, 64.0, 0.0, 1.0)
         SC = (0, 0, 64, 64)
         # frontFace = CCW(0) -> the ObjPay word carries front_ccw = 1;
@@ -10537,6 +10612,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 cov |= gfx_tri_coverage(
                     [(x + _dx, y, z, w) for (x, y, z, w) in TRI],
                     VP, SC, CW, CH, front_ccw=1, cull=2)
+        elif is_line:
+            # LINE_LIST Bresenham over the two clip endpoints (flat
+            # colour from vertex 0 -> fs_vcol constant)
+            cov = gfx_line_coverage(L_CLIP, VP, SC, CW, CH)
         else:
             cov = gfx_tri_coverage(TRI, VP, SC, CW, CH,
                                    front_ccw=1, cull=2)
@@ -10796,7 +10875,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                offset=0 if is_wide else 8)]),
                     pInputAssemblyState=st(
                         'VkPipelineInputAssemblyStateCreateInfo',
-                        flags=0, topology=0 if is_pts else 3,
+                        flags=0, topology=0 if is_pts else
+                        1 if is_line else 3,
                         primitiveRestartEnable=0),
                     pTessellationState=None,
                     pViewportState=(
@@ -11174,7 +11254,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                  drawCount=1, stride=20))] if is_drawindx else
              [('vkCmdDraw', dict(
                  commandBuffer=X['cb'],
-                 vertexCount=PTS_N if is_pts else 3,
+                 vertexCount=PTS_N if is_pts else 2 if is_line else 3,
                  instanceCount=INST_N if is_inst else 1,
                  firstVertex=0, firstInstance=0))])[0],
             ('vkCmdEndRenderPass', dict(commandBuffer=X['cb'])),

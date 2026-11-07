@@ -204,6 +204,10 @@ python3 $G --graphics-session ue_gpos_ftexa_1 1
 # corner clamps to the one texel so o=(200,200,80,80), decoupled from
 # the texel via out_w
 python3 $G --graphics-session ue_gpos_ftexg_1 1
+# line-list draw: topology=1, vertexCount=2; gfx_line_coverage mirrors the
+# RTL S_LN_* integer Bresenham (vxi>>>8 pixel coords, lerr=ldx-ldy) so the
+# 1-px line footprint is bit-exact; fs_vcol keeps flat vertex-0 colour
+python3 $G --graphics-session ue_gpos_line_1 1
 
 # deferred-work and capacity arms
 python3 $G --compute-session ue_cpos_defer2_1  bufcopy_1 --variant defer2
