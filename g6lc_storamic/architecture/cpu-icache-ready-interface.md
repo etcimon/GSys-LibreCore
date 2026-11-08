@@ -82,6 +82,62 @@ interface split can remove. Resolution is therefore one of:
 Option 3 is the only *local* RTL experiment left; options 1-2 are
 decision/design work, not a quick edit.
 
+## Precise comb-loop trace (signal level)
+
+The UNOPTFLAT cycle is the **kill/valid handshake**, *not* the
+`no-cut`-protected address recurrence. Both `dreq_o.valid`/`data` and
+`dreq_ready_o` in `g6lc_icache` are `always_comb`
+(`p_fsm`/`p_response_valid`), and the frontend consumes them
+combinationally:
+
+```
+icache_dreq_i.valid            (comb; g6lc_icache p_response_valid,
+                                gated by request.kill_s1/kill_s2)
+  → icache_take                 (comb; frontend.sv:1126
+                                `(icache_dreq_i.valid | lbuf_inject)`)
+  → instr_realigner.valid_i     (frontend.sv:315)
+  → instruction_valid_raw/_     (comb decode)
+  → predict_address / bp_valid  (comb; frontend.sv:404-505)
+  → bp_fire                     (comb; frontend.sv:504)
+  → kill_s2 = kill_s1 | bp_fire (comb; frontend.sv:966)
+  → icache_dreq_o.kill_s1/kill_s2  (frontend.sv:967-968 — fed back INTO
+                                the request)
+  → g6lc_icache.dreq_i.kill_*   → p_fsm/p_response_valid (comb)
+  → dreq_o.valid / dreq_ready_o → icache_dreq_i.valid   [cycle closes]
+```
+
+This is a genuine zero-delay combinational cycle through the response
+handshake — separate from `npc_q→predictor→seq_base→npc_d`, which is
+register-broken by `npc_q` and `no-cut`-protected.
+
+The icache side has already been iteratively de-looped (`I4xj` cut
+`cl_hit→ready`; comments at `g6lc_icache.sv:198-245,396` document the
+`vaddr_d→cl_index→cl_hit→dreq_ready_o` fight). The remaining loop is the
+**frontend kill/bp feedback edge** — the next layer out.
+
+## Break-edge candidates (ranked by blast radius)
+
+1. **Register `icache_dreq_i.valid` → `icache_resp_valid_q`** feeding
+   `icache_take`/realigner. Cleanest single cut, +1 cycle response
+   latency. *Risk*: `dreq_o.valid` must be level-held (not a same-cycle
+   pulse) until taken or the delayed capture misses it; and the
+   `want_*`/`kill_drop` ownership block (`frontend.sv:998-1050`) matches
+   on comb `icache_dreq_i.valid|token|vaddr` — it must move to the
+   registered view consistently or token/hart/window ownership desyncs.
+2. **Register `bp_fire`/`kill_s2` before `icache_dreq_o.kill_*`** — cuts
+   the feedback edge but delays in-flight cancellation by a cycle;
+   interacts with FTQ `cf_hold_q` (frontend.sv:832-845) and `want_*`
+   re-arm under `kill_s2` (frontend.sv:1013).
+3. **Register inside `g6lc_icache`** (`dreq_o.valid`/`data`/`ready`) —
+   uniform +1-cycle I$ latency for *all* clients; largest functional
+   blast radius, least attractive.
+
+None is a blind edit: each changes fetch/kill timing and must be checked
+against `icache_take`, FTQ `cf_hold_q`, `redirect_*`, `leftover_*`, and
+the `want_*` ownership FSM, then re-run the forked diagnostic plus a
+fetch-directed sim. Recommend option 1 with the `want_*` block migrated
+to the registered view as the first experiment.
+
 ## What was changed (for the record)
 
 `ready` moved out of `icache_drsp_t` onto a dedicated scalar
