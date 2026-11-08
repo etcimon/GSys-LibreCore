@@ -18473,6 +18473,27 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   pixels bit-exact; `ue_gpos_grad_1` hex byte-identical (refactor gated).
   Unlocks the FS-arithmetic frontier (fs_mip/fs_scene8/fs_shadowfog use
   the same oracle pattern: interp vcol -> FS expr -> unorm8).
+- [x] **CLOSED — quad-lane derivatives (`ue_gpos_deriv_1`):** first
+  end-to-end `dFdx`/`dFdy`/`fwidth` (coarse + fine) through the transport
+  path — `fs_deriv.spv` emits `o=(dFdx(vcol.r),dFdy(vcol.g),
+  fwidth(vcol.b), dFdxFine(vcol.a)+dPdyCoarse(vcol.a)+fwidthFine(vcol.a))`.
+  `is_deriv` uses a FULLSCREEN triangle (`DERIV_POS` clip coords covering
+  fb [0,64]^2, CW winding -> negative shoelace -> front-facing under
+  cull=BACK) so every 2x2 quad is complete (no helper-lane ambiguity)
+  and the affine w=1 slopes are exact constants; `DERIV_COLS` amplifies
+  the gradient ~48x so per-pixel slopes land mid-UNORM (8 distinct
+  outputs, all four channels nonzero).  Oracle `gfx_deriv_pixels` reuses
+  `gfx_grad_pixels` for the interpolated f32 vcol map then applies the
+  RTL quad semantics: quad lanes 0=TL,1=TR,2=BL,3=BR with
+  lane=(py&1)*2+(px&1), base=(px&~1,py&~1); coarse/non-suffix ops
+  broadcast the lane-0 pair (dx=vTR-vTL, dy=vBL-vTL) while fine ops take
+  the per-lane row/col pair (dxFine top vTR-vTL / bottom vBR-vBL;
+  dyFine left vBL-vTL / right vBR-vTR); fwidth=|dx|+|dy|; all subs f32.
+  PASS `g1=4096 g2=4096 ulp=0 XF_FAULTS 0` on **vgtop and vgsys** — all
+  pixels bit-exact; `grad`/`fcolor`/`tri` hex byte-identical.  Also
+  validates the quad-lane derivative chain shared with implicit-LOD
+  texturing (fs_mip/fs_tex_*).  fs_deriv2/fs_demote_deriv (multi-input /
+  demote) and projected/shadow/explicit-LOD texture remain open.
 - [x] Instanced-draw session coverage (`c84531213`): `ue_gpos_inst_1`
   — `vs_inst` offsets clip-x by `0.4*gl_InstanceIndex-0.6`,
   `instanceCount=4`, `fs_flat` constant colour → union coverage over 4

@@ -6968,6 +6968,58 @@ def _u8pack(v4):
     return w
 
 
+def gfx_deriv_pixels(verts, cols, vp, sc, cw, ch, front_ccw, cull):
+    """fs_deriv oracle: quad-lane derivatives of the smooth vcol
+    varying.  vc = gfx_grad_pixels gives the interpolated f32 vcol at
+    every covered pixel; each 2x2 quad is lanes
+    0=TL,1=TR,2=BL,3=BR with lane=(py&1)*2+(px&1), base=(px&~1,py&~1).
+    Coarse/non-suffix ops broadcast the lane-0 pair (dx=vTR-vTL,
+    dy=vBL-vTL); fine ops take the per-lane row/col pair
+    (dxFine: top row vTR-vTL / bottom vBR-vBL; dyFine: left col
+    vBL-vTL / right vBR-vTR).  All subtractions are f32.  fs_deriv:
+      o.r=dFdx(vcol.r)coarse  o.g=dFdy(vcol.g)coarse
+      o.b=fwidth(vcol.b)coarse=|dx|+|dy|
+      o.a=dFdxFine(vcol.a)+dPdyCoarse(vcol.a)+fwidthFine(vcol.a)
+    -> {(px,py): packed RGBA8 word}."""
+    vc = gfx_grad_pixels(verts, cols, vp, sc, cw, ch, front_ccw, cull)
+    out = {}
+    for (px, py), v in vc.items():
+        qx, qy = px & ~1, py & ~1
+        vTL = vc[(qx, qy)];     vTR = vc[(qx + 1, qy)]
+        vBL = vc[(qx, qy + 1)]; vBR = vc[(qx + 1, qy + 1)]
+
+        def dxC(c):   # coarse dPdx: vTR - vTL (all lanes)
+            return _f32(vTR[c] - vTL[c])
+
+        def dyC(c):   # coarse dPdy: vBL - vTL (all lanes)
+            return _f32(vBL[c] - vTL[c])
+
+        def dxF(c):   # fine dPdxFine: own-row x-slope
+            return (_f32(vTR[c] - vTL[c]) if (py & 1) == 0
+                    else _f32(vBR[c] - vBL[c]))
+
+        def dyF(c):   # fine dPdyFine: own-col y-slope
+            return (_f32(vBL[c] - vTL[c]) if (px & 1) == 0
+                    else _f32(vBR[c] - vTR[c]))
+
+        def fwC(c):   # coarse fwidth = |dxC|+|dyC|
+            return _f32(abs(dxC(c)) + abs(dyC(c)))
+
+        def fwF(c):   # fine fwidth = |dxF|+|dyF|
+            return _f32(abs(dxF(c)) + abs(dyF(c)))
+
+        a_c = vc[(px, py)][3]
+        _ = a_c  # vcol.a read per-lane via dxF/dyF on comp 3
+        o_r = dxC(0)
+        o_g = dyC(1)
+        o_b = fwC(2)
+        # o.a = (dFdxFine + dPdyCoarse) + fwidthFine  (OpFAdd order)
+        _dxf = dxF(3); _dyc = dyC(3)
+        o_a = _f32(_f32(_dxf + _dyc) + fwF(3))
+        out[(px, py)] = _u8pack((o_r, o_g, o_b, o_a))
+    return out
+
+
 def load_shvec(name):
     """Parse sh_vectors/<name>.{hex,exp} into a compute-session vec.
 
@@ -10622,6 +10674,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # exercises interpolated varyings AND per-pixel FS arithmetic
         is_fcolor = 'fcolor' in gfx
         is_gradlike = is_grad or is_fcolor
+        # deriv: fs_deriv exercises the quad-lane derivative chain
+        # (OpDPdx/DPdy/Fwidth coarse + DPdxFine/DPdyCoarse/FwidthFine)
+        # on the smooth vcol varying — needs a FULLSCREEN triangle so
+        # every 2x2 quad is complete (no helper-lane ambiguity) and the
+        # affine (w=1) slopes are exact constants.
+        is_deriv = 'gpos_deriv_1' in gfx
+        is_gradlike = is_gradlike or is_deriv
         # depth: D32_SFLOAT depth attachment + depthWriteEnable — the
         # vec2 pos format leaves vs_pos3's pos.z=0 so gl_Position.z=0 is
         # a constant depth; write-only (depthTestEnable=0) validates the
@@ -10731,6 +10790,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             '<I', (spvd / ('fs_ubo_array.spv' if is_fsubocopy else
                           'fs_ubo.spv' if is_fsubo else
                           'fs_white.spv' if is_pts else
+                          'fs_deriv.spv' if is_deriv else
                           'fs_color.spv' if is_fcolor else
                           'fs_vcol.spv' if is_blend or is_wide or is_line
                           or is_lstrip or is_polyln or is_polypnt
@@ -10771,6 +10831,21 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         GRAD_COLS = [(1.0, 0.0, 0.0, 1.0),
                      (0.0, 1.0, 0.0, 0.5),
                      (0.0, 0.0, 1.0, 0.25)]
+        # deriv: fullscreen triangle in clip coords — hypotenuse x+y=3
+        # keeps the whole [-1,1]^2 viewport interior (corner (1,1) sums
+        # to 2 < 3) so every 2x2 quad is complete; fb extent reaches
+        # clip 4 -> 160, well inside the 16.8 edge range.  CW winding
+        # (negative fb shoelace) keeps it front-facing under cull=BACK.
+        DERIV_POS = [(-1.0, -1.0, 0.5, 1.0),
+                     (-1.0, 4.0, 0.5, 1.0),
+                     (4.0, -1.0, 0.5, 1.0)]
+        # deriv colours amplified ~48x so the per-pixel derivative slopes
+        # (~0.3) land mid-UNORM instead of quantising to a constant —
+        # keeps all four derivative ops bit-sensitive.  Post-swap fb
+        # corners: (0,0)->GC0 low, (160,0)->GC2 r+b, (0,160)->GC1 r+g+a.
+        DERIV_COLS = [(0.0, 0.0, 0.0, 0.0),
+                      (48.0, 48.0, 0.0, 48.0),
+                      (48.0, 0.0, 48.0, 0.0)]
         # vertex stride 24: {RG32 pos @0, RGBA32 col @8}
         # vbwide: same attributes split across two buffers — binding 0
         # is positions only (stride 8) and the colour attribute rides
@@ -10813,7 +10888,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # {pos.xy@0, col.rgba@8} stride 24 — same layout as the
             # standard tri but each vertex carries a DISTINCT colour so
             # the smooth vcol varying interpolates a real gradient.
-            for (_vx, _vy, _vz, _vw), _gc in zip(TRI, GRAD_COLS):
+            # deriv swaps TRI for a fullscreen triangle (clip coords
+            # covering fb [0,64]^2) so all 2x2 quads are complete.
+            _gpos = (DERIV_POS if is_deriv else TRI)
+            _gcols = (DERIV_COLS if is_deriv else GRAD_COLS)
+            for (_vx, _vy, _vz, _vw), _gc in zip(_gpos, _gcols):
                 vb_words += [f32b(_vx), f32b(_vy)]
                 vb_words += [f32b(c) for c in _gc]
         else:
@@ -10872,8 +10951,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 cov |= gfx_line_coverage(
                     [TRI[_i], TRI[_i]], VP, SC, CW, CH)
         else:
-            cov = gfx_tri_coverage(TRI, VP, SC, CW, CH,
-                                   front_ccw=1, cull=2)
+            cov = gfx_tri_coverage(DERIV_POS if is_deriv else TRI,
+                                   VP, SC, CW, CH, front_ccw=1, cull=2)
         if is_blend:
             # clear (0.2,0.2,0.2,1); out = src*0.75 + dst*0.25 ->
             # r=0.8->204, g=b=0.05->13, a=0.8125->207 (all off the
@@ -10962,7 +11041,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # kill masks: fs_kill drops the FragCoord 8x8 checkerboard;
         # fs_kill_fn drops odd-x lanes (int(FragCoord.x)&1==1 -> killer).
         # Both map int(FragCoord) == the framebuffer pixel (px,py).
-        if is_grad or is_fcolor:
+        if is_deriv:
+            # quad-lane derivative oracle over the fullscreen gradient:
+            # per-pixel bit-exact vcol neighbours -> dFdx/dFdy/fwidth
+            # (coarse + fine) -> fs_deriv expression -> packed word.
+            _gp = gfx_deriv_pixels(DERIV_POS, DERIV_COLS, VP, SC, CW, CH,
+                                   1, 2)
+            exp_img = [_gp.get((w % CW, w // CW), clr_w)
+                       for w in range(CW * CH)]
+        elif is_grad or is_fcolor:
             # smooth-varying interpolation: per-pixel bit-exact fpnew
             # oracle -> interpolated f32 vcol vec4; pack per the FS.
             _gp = gfx_grad_pixels(TRI, GRAD_COLS, VP, SC, CW, CH, 1, 2)
