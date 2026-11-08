@@ -18867,15 +18867,27 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   before the `wu*wv` accumulate — decode-before-filter ordering.  Same
   fmt=43 image/view.  Verified PASS bit-exact (ulp=0) vgtop (17123) +
   vgsys (17291); `.exp` differs from `ftexl`/`ftexs`; `ftexl`/`ftexs`
-  regen byte-identical (decode gated on is_ftexls).  Remaining W_TX*:
-  LOD/mip walk (`fs_mip`), projective
-  (`fs_tex_proj`),
-  explicit-LOD (`fs_tex_qlod`), shadow/compare (`fs_tex_shadow`),
-  gather-offset, sRGB, non-UNORM8 fmts; `fs_tex_proj`/`fs_tex_qlod`/
-  `fs_tex_shadow` need a VS emitting nonzero `vcol.z/w` (vs_tex sets
-  z=0 — blocked on shader tooling); `fs_tex_qlod` uses only `vcol.xy`
-  so it IS reachable but needs quad-derivative + SFU-log2 port.
-  **LINEAR+REPEAT (`ftexw`) attempted, NOT landed** — the common
+  regen byte-identical (decode gated on is_ftexls).  **RTL capability
+  map (2026-11-08)**: `g6lc_apu_shwave` W_TX* already implements the
+  FULL set — G2b implicit-LOD quad-lane derivative chain producing λ
+  (`dla/dlb/dva` remap), mip walk `tx_mt{,1}_q`/`tx_mof{0,1}_q` +
+  `tx_acc1_q[4]` second level (trilinear), `tx_lode_q` q4.4-clamped LOD,
+  `tx_qraw_q` QueryLod, gather list (≤8 pts), dref/proj/`tx_qlod_q`
+  sub-ops, sRGB LUT, all wrap modes + border.  So every remaining item
+  below is **oracle modelling**, not an RTL gap.  Remaining oracle:
+  **(i) LOD/mip** — `fs_mip` (`uv.x=gl_FragCoord.x²/128`, `uv.y=vcol.y`)
+  is the only implicit-LOD FS whose uv varies per-pixel -> nonzero λ;
+  needs quad-derivative d(uv)/dx,dy -> λ -> m0/m1 select -> trilinear
+  accumulate (reuse ftexl weights per mip + `tx_acc1` blend) — largest
+  remaining build; **(ii) gather** — `fs_tex_gather`
+  (`textureGather`/`textureGatherOffset`, component 0/1, 1-mip -> LOD0,
+  4-texel footprint, no interp) — moderate; **(iii) QueryLod** —
+  `fs_tex_qlod` (vcol.xy only, needs quad-deriv + SFU log2, no fetch);
+  **(iv) proj/shadow/dref** — `fs_tex_proj`/`fs_tex_shadow` need nonzero
+  `vcol.z/w` (vs_tex sets z=0 — blocked on VS tooling); **(v)
+  non-UNORM8** — fp16 (`R16G16B16A16_SFLOAT` id6)/int formats need new
+  decode helpers + texel layout; `fs_tex_bias`/`fs_tex_array` degenerate
+  (vcol.z=0).  **LINEAR+REPEAT (`ftexw`) attempted, NOT landed** — the common
   tiling config; oracle = ftexl bilinear with corner indices `%`-wrapped
   instead of clamped.  FAILS bit-exact: 18 off-by-one LSB errors with
   uv spanning [-0.4,1.4]; restricting uv to positive-only [0.3,1.4]
