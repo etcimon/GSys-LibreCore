@@ -18851,7 +18851,17 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   all texture sessions regen byte-identical.  NOTE: the *integer-format*
   border arm (`tx_isint_q`, `tx_bcol_q>=4`/`==3` -> `32'd1`) is a separate
   decode for int textures — untested, needs int-texture border sessions.
-  Remaining W_TX*: LOD/mip walk (`fs_mip`), projective (`fs_tex_proj`),
+  **sRGB decode — DONE** (`ue_gpos_ftexs_1`; `is_ftexs`, NEAREST +
+  RGBA8_SRGB vkfmt=43 -> device id 3 `R8G8B8A8_SRGB`, ATTR srgb bit +
+  CLAMP_TO_EDGE): same 4x4 CIS + default uv; W_TXD decodes RGB through
+  `APU_SRGB_TO_LIN` (alpha stays UNORM), W_TXG0/G1 normalises each u16
+  channel `*1/65535` (`0x37800080`) to fp32, UNORM8 store `cl_f32_u8`
+  re-quantises — RGB is NOT byte-identity.  Oracle mirrors via
+  `srgb_lut.TO_LIN16` + `_f32(lin16*K)` + `cl_f32_u8(_f32bits)`.  Verified
+  PASS bit-exact (ulp=0) vgtop (17123) + vgsys (17291); `.exp` differs
+  from `ftexn` (non-degenerate); all texture sessions regen byte-
+  identical.  Remaining W_TX*: LOD/mip walk (`fs_mip`), projective
+  (`fs_tex_proj`),
   explicit-LOD (`fs_tex_qlod`), shadow/compare (`fs_tex_shadow`),
   gather-offset, sRGB, non-UNORM8 fmts; `fs_tex_proj`/`fs_tex_qlod`/
   `fs_tex_shadow` need a VS emitting nonzero `vcol.z/w` (vs_tex sets

@@ -11002,10 +11002,14 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # flag -> f_bord16 border colour instead of a texel fetch.
         # borderColor=5 (INT_OPAQUE_WHITE) -> all-0xFFFF = opaque white.
         is_ftexc = 'ftexc' in gfx
+        # ftexs: NEAREST + RGBA8_SRGB + CLAMP_TO_EDGE — exercises the W_TXD
+        # sRGB decode LUT (RGB only; alpha stays UNORM) -> u16 linear ->
+        # *1/65535 fp32 -> UNORM8 store.
+        is_ftexs = 'ftexs' in gfx
         # is_ftexm gates the shared multi-texel texture setup (extent,
         # per-vertex uv, texel payload) for NEAREST/LINEAR/REPEAT/MIRROR.
         is_ftexm = (is_ftexn or is_ftexl or is_ftexr or is_ftexmir
-                    or is_ftexc)
+                    or is_ftexc or is_ftexs)
         # CLAMP_TO_BORDER borderColor selector (raw VkBorderColor 0..5):
         # ftexc=5 INT_OPAQUE_WHITE, ftexc2=2 FLOAT_OPAQUE_WHITE (probes the
         # f_bord16 decode), ftexcb=1 FLOAT_OPAQUE_BLACK, ftexct=0
@@ -11710,6 +11714,41 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     exp_img.append(_bord)
                 else:
                     exp_img.append(TEX_TEXELS[_iv * TEX_W + _iu])
+        elif is_ftexs:
+            # NEAREST + RGBA8_SRGB + CLAMP_TO_EDGE: same floor(u*w)
+            # integer coord + clamp as ftexn.  W_TXD decodes RGB through
+            # the sRGB LUT (TO_LIN16 -> u16 linear) and leaves alpha
+            # UNORM; W_TXG0/G1 then normalises each u16 channel
+            # *1/65535 (0x37800080) to fp32 and the UNORM8 store
+            # (cl_f32_u8) re-quantises.  RGB is NOT byte-identity — the
+            # sRGB->linear->UNORM8 roundtrip reshapes the codes.
+            _uv4 = [(u, v, 0.0, 1.0) for (u, v) in TEX_UV]
+            _gp = gfx_grad_pixels(TRI, _uv4, VP, SC, CW, CH, 1, 2)
+            _K = _f32(struct.unpack('<f', struct.pack('<I', 0x37800080))[0])
+            def _s8(b):                    # sRGB byte -> UNORM8 out
+                return cl_f32_u8(_f32bits(
+                    _f32(float(srgb_lut.TO_LIN16[b & 0xFF]) * _K)))
+            def _n8(b):                    # UNORM byte -> UNORM8 out
+                return cl_f32_u8(_f32bits(
+                    _f32(float((b & 0xFF) * 0x101) * _K)))
+            exp_img = []
+            for w in range(CW * CH):
+                _px, _py = w % CW, w // CW
+                _v = _gp.get((_px, _py))
+                if _v is None:
+                    exp_img.append(clr_w)
+                    continue
+                _iu = int(_f32(_v[0] * TEX_W))
+                _iv = int(_f32(_v[1] * TEX_H))
+                _iu = 0 if _iu < 0 else (TEX_W - 1 if _iu >= TEX_W
+                                         else _iu)
+                _iv = 0 if _iv < 0 else (TEX_H - 1 if _iv >= TEX_H
+                                         else _iv)
+                _tw = TEX_TEXELS[_iv * TEX_W + _iu]
+                exp_img.append((_s8(_tw & 0xFF) |
+                                (_s8((_tw >> 8) & 0xFF) << 8) |
+                                (_s8((_tw >> 16) & 0xFF) << 16) |
+                                (_n8((_tw >> 24) & 0xFF) << 24)))
         else:
             exp_img = [out_w if (w % CW, w // CW) in cov and
                        not ((is_kill and
@@ -12240,7 +12279,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 ('vkCreateImage', dict(
                     device=X['dev'],
                     pCreateInfo=st('VkImageCreateInfo',
-                        flags=0, imageType=1, format=37,
+                        flags=0, imageType=1,
+                        format=43 if is_ftexs else 37,
                         extent=st('VkExtent3D', width=TEX_W, height=TEX_H,
                                   depth=1),
                         mipLevels=1, arrayLayers=2 if is_ftexa else 1,
@@ -12256,7 +12296,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     device=X['dev'],
                     pCreateInfo=st('VkImageViewCreateInfo',
                         flags=0, image=X['timg'],
-                        viewType=5 if is_ftexa else 1, format=37,
+                        viewType=5 if is_ftexa else 1,
+                        format=43 if is_ftexs else 37,
                         components=st('VkComponentMapping',
                                       r=0, g=0, b=0, a=0),
                         subresourceRange=st('VkImageSubresourceRange',
