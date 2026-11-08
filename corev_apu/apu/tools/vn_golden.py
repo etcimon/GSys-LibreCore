@@ -10888,8 +10888,14 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # dtest-like LESS pair so the biased depth readback (z+0.25)
         # proves the bias reached the depth buffer.
         is_dbias   = 'dbias' in gfx
+        # dw0: depthWriteEnable=0 over the dtest LESS pair — the depth
+        # test still gates fragments (both tris pass vs the 1.0 clear
+        # since the buffer is never written) but no depth is committed,
+        # so the last-drawn far(blue) tri wins colour and the depth
+        # attachment keeps dp_clear everywhere.
+        is_dw0     = 'dw0' in gfx
         is_dpair   = ((_dp_key is not None) or is_dbnd or is_dbndoff
-                      or is_dbias)
+                      or is_dbias or is_dw0)
         is_depth   = is_dpair or 'depth' in gfx
         is_dne     = _dp_key == 'dne'       # NOTEQUAL-on rejects all
         is_dnever  = _dp_key == 'dnever'    # NEVER-on rejects all
@@ -10907,6 +10913,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
              dp_far_first, dp_red_wins) = (0, 1.0, 0.25, 0.75, False,
                                            is_dbnd)
             dp_test_on = False
+        elif is_dw0:
+            # LESS-on, near-first: depth write off -> far(blue) wins the
+            # colour (last drawn, no depth rejection) -> red_wins=False.
+            (dp_op, dp_clear, dp_z_near, dp_z_far,
+             dp_far_first, dp_red_wins) = (1, 1.0, 0.25, 0.75, False,
+                                           False)
+            dp_test_on = True
         else:
             (dp_op, dp_clear, dp_z_near, dp_z_far,
              dp_far_first, dp_red_wins, dp_test_on) = (0,) * 7
@@ -11524,7 +11537,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # frag depth = z + 0.25f (exact in f32 and any fixed width)
             _dp_win = _f32(_f32(_dp_win) + _f32(0.25))
         _dp_rejall = is_dne or is_dnever
-        exp_depth = ([(f32b(_dp_win) if (w % CW, w // CW) in cov
+        exp_depth = ([f32b(dp_clear) for _ in range(CW * CH)]
+                     if is_dw0 else
+                     [(f32b(_dp_win) if (w % CW, w // CW) in cov
                        else f32b(dp_clear))
                       for w in range(CW * CH)]
                      if is_dpair and not _dp_rejall else
@@ -11828,7 +11843,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     pDepthStencilState=(
                         st('VkPipelineDepthStencilStateCreateInfo',
                            depthTestEnable=1 if dp_test_on else 0,
-                           depthWriteEnable=1,
+                           depthWriteEnable=0 if is_dw0 else 1,
                            depthCompareOp=dp_op,
                            depthBoundsTestEnable=1 if is_dbnd else 0,
                            stencilTestEnable=0,

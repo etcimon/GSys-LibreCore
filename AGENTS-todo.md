@@ -18739,6 +18739,19 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   binaries; `.exp` differs from `bopadd` in 2048 bytes (non-degenerate)
   and `bopadd` regenerates byte-identical (cwm_mask=0xF default).
   Wider masks / mask+logicOp / non-UNORM8 remain open.
+  **depthWriteEnable coverage — DONE** (`ue_gpos_dw0_1`): first
+  `depthWriteEnable=0` session over the dtest LESS dpair — the depth
+  test still gates fragments (both tris pass vs the 1.0 clear since the
+  buffer is never written) but no depth commits, so the last-drawn
+  far(blue) tri wins colour (`red_wins=False`) and the D32 depth
+  attachment keeps `dp_clear` everywhere.  `is_dw0` reuses the dpair
+  geometry/params + `exp_depth` all-clear branch; emission
+  `depthWriteEnable=0 if is_dw0 else 1`.  Verified PASS bit-exact
+  (ulp=0, g1=g2=8192 incl. the depth readback gate) on existing
+  `tb_g6lc_apu_vgtop` + `tb_g6lc_apu_vgsys` — no rebuild; `.exp`
+  differs from `dtest` in 5120 bytes and `dtest` regenerates
+  byte-identical.  depthWriteEnable=0 without a depth test, and
+  depth-test-off+write-on corners, remain open.
   **(5) SPIR-V toolchain** — no `spirv-as`/glslang, blocks MRT/
   noperspective/custom shaders.  Then CTS-1→CTS-2 caselists through
   the guest harness.  All directed-RTL session evidence only — no
