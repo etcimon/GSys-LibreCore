@@ -18630,7 +18630,8 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   identical).  PASS `g1=8192 g2=8192 ulp=0 XF_FAULTS 0` on **vgtop
   (cycles=823336) and vgsys (cycles=1161034)**.  depthClamp, stencil
   remain open.
-- [x] **CLOSED — logicOp (`ue_gpos_lopx_1`/`lopor_1`/`lopset_1`):**
+- [x] **CLOSED — logicOp (`ue_gpos_lopx_1`/`lopor_1`/`lopset_1`/
+  `lopand_1`/`lopinvert_1`):**
   first `logicOpEnable` — `VkLogicOp` on the R8G8B8A8_UNORM attachment.
   `is_lop`/`lop_op` reuse the `is_blend` shape (vs_pos3+fs_vcol,
   constant COL src, standard TRI coverage) but emit `pColorBlendState`
@@ -18642,13 +18643,16 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   `logic_op_en` (rast.sv:3610); `blend[i].en` only gates UINT-blend
   legality, not the write.  src COL=(1,.5,.25,.75)->(255,128,64,191),
   clear dst=(.2,.4,.6,1)->(51,102,153,255).  Verified ops: **XOR(6)** ->
-  `0x40D9E6CC`, **OR(7)** -> `0xFFD9E6FF`, **SET(15)** -> `0xFFFFFFFF`;
-  oracle computes via a 16-case `_lop` table + `cl_f32_u8` (mirrors
-  `f_lop` CLEAR..SET exactly).  All three PASS `g1=4096 g2=4096 ulp=0
-  XF_FAULTS 0` on **vgtop (cycles=622978) and vgsys (cycles=931753)**;
-  `blend`/`dtest`/`tri`/`ftex` byte-identical.  Remaining 13 ops
-  (AND/NOR/EQUIV/INVERT/...) are table-ready but unverified; logicOp +
-  blend-factor combos and non-UNORM8 formats remain open.
+  `0x40D9E6CC`, **OR(7)** -> `0xFFD9E6FF`, **SET(15)** -> `0xFFFFFFFF`,
+  **AND(1)** -> `0xBF000033`, **INVERT(10)** -> `0x006699CC` (pure
+  dst-inversion, ignores src); oracle computes via a 16-case `_lop`
+  table + `cl_f32_u8` (mirrors `f_lop` CLEAR..SET exactly).  All five
+  PASS `g1=4096 g2=4096 ulp=0 XF_FAULTS 0` on **vgtop (cycles=622978)
+  and vgsys (cycles=931753)**; `blend`/`dtest`/`tri`/`ftex` byte-
+  identical.  Remaining 11 ops (AND_REVERSE/COPY/AND_INVERTED/NO_OP/
+  NOR/EQUIVALENT/OR_REVERSE/INVERTED/OR_INVERTED/NAND/CLEAR) are
+  table-ready but unverified; logicOp + blend-factor combos and
+  non-UNORM8 formats remain open.
 - [x] Instanced-draw session coverage (`c84531213`): `ue_gpos_inst_1`
   — `vs_inst` offsets clip-x by `0.4*gl_InstanceIndex-0.6`,
   `instanceCount=4`, `fs_flat` constant colour → union coverage over 4
