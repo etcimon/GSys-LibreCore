@@ -18595,6 +18595,27 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   PASS both `g1=4096 g2=4096 ulp=0 XF_FAULTS 0` on **vgtop
   (cycles~557-614k) and vgsys (cycles~857-919k)**; `tri_1` byte-
   identical.  Multi-viewport/scissor arrays remain open.
+- [x] **CLOSED — rasterizerDiscard (`ue_gpos_rdiscard_1`):** first
+  `rasterizerDiscardEnable=1` — every primitive discarded before
+  rasterization -> framebuffer keeps clear colour everywhere (cov is
+  computed but unused by the oracle).  `is_rdiscard` sets the flag in
+  `VkPipelineRasterizationStateCreateInfo` and adds an all-`clr_w`
+  exp_img branch.  PASS `g1=4096 g2=4096 ulp=0 XF_FAULTS 0` on
+  **vgtop (cycles=479177) and vgsys (cycles=770240)** — notably fewer
+  cycles than a rendering session, consistent with early discard.
+- [x] **CLOSED — depth-bounds test (`ue_gpos_dbnd_1`/`dbndoff_1`):**
+  first `depthBoundsTestEnable` — reuses the dpair two-tri vec3-pos
+  geometry (near `z=0.25` red, far `z=0.75` blue) but with
+  `depthTestEnable=0` so the `[min,max]` window alone decides.
+  `dbnd` bounds `[0.0,0.5]` keeps near (0.25 in range) and discards
+  far (0.75 out) -> red wins + depth `0.25f`; `dbndoff` disables the
+  test -> far(last) wins blue + `0.75f`.  `is_dbnd`/`is_dbndoff` fold
+  into `is_dpair` (shared vertex/cov/depth-readback plumbing) with
+  manual `dp_*` params; `depthBoundsTestEnable`/`maxDepthBounds` now
+  parameterized (non-dbnd sessions byte-identical).  PASS both
+  `g1=8192 g2=8192 ulp=0 XF_FAULTS 0` on **vgtop (cycles~806-816k)
+  and vgsys (cycles~1142-1156k)**.  depthClamp, stencil, depthBias
+  remain open.
 - [x] Instanced-draw session coverage (`c84531213`): `ue_gpos_inst_1`
   — `vs_inst` offsets clip-x by `0.4*gl_InstanceIndex-0.6`,
   `instanceCount=4`, `fs_flat` constant colour → union coverage over 4

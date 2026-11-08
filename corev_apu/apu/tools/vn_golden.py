@@ -10812,14 +10812,27 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # ('deq' is a prefix of 'deqoff', 'dnever' of 'dneveroff', and
         # 'dne' would otherwise match every 'dnever*' session).
         _dp_key = max((k for k in _DPQ if k in gfx), key=len, default=None)
-        is_dpair  = _dp_key is not None
-        is_depth  = is_dpair or 'depth' in gfx
-        is_dne    = _dp_key == 'dne'       # NOTEQUAL-on rejects all
-        is_dnever = _dp_key == 'dnever'    # NEVER-on rejects all
-        if is_dpair:
+        # depthBounds pair: same two-tri vec3-pos geometry as dpair but
+        # depthTestEnable=0 + depthBoundsTestEnable=1 — the [min,max]
+        # window (not a compare op) decides which tri survives.  dbnd
+        # bounds=[0,0.5] keeps near(z=0.25,red) and discards far
+        # (z=0.75,blue) -> red; dbndoff disables the test -> far(last)
+        # wins blue.  'dbnd' is a prefix of 'dbndoff' -> guard.
+        is_dbndoff = 'dbndoff' in gfx
+        is_dbnd    = 'dbnd' in gfx and not is_dbndoff
+        is_dpair   = (_dp_key is not None) or is_dbnd or is_dbndoff
+        is_depth   = is_dpair or 'depth' in gfx
+        is_dne     = _dp_key == 'dne'       # NOTEQUAL-on rejects all
+        is_dnever  = _dp_key == 'dnever'    # NEVER-on rejects all
+        if _dp_key is not None:
             (dp_op, dp_clear, dp_z_near, dp_z_far,
              dp_far_first, dp_red_wins) = _DPQ[_dp_key]
             dp_test_on = not _dp_key.endswith('off')
+        elif is_dbnd or is_dbndoff:
+            (dp_op, dp_clear, dp_z_near, dp_z_far,
+             dp_far_first, dp_red_wins) = (0, 1.0, 0.25, 0.75, False,
+                                           is_dbnd)
+            dp_test_on = False
         else:
             (dp_op, dp_clear, dp_z_near, dp_z_far,
              dp_far_first, dp_red_wins, dp_test_on) = (0,) * 7
@@ -11077,6 +11090,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # offset fields are exercised too -> x[24,48) y[16,48).
         is_sci  = 'scis' in gfx and 'scio' not in gfx
         is_scio = 'scio' in gfx
+        # rdiscard: rasterizerDiscardEnable=1 discards every primitive
+        # before rasterization -> framebuffer keeps the clear colour
+        # everywhere (cov is computed but unused by the oracle).
+        is_rdiscard = 'rdiscard' in gfx
         SC = ((0, 0, 32, 64) if is_sci else
               (24, 16, 24, 32) if is_scio else (0, 0, 64, 64))
         # frontFace = CCW(0) -> the ObjPay word carries front_ccw = 1;
@@ -11267,6 +11284,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # NOTEQUAL/NEVER test-on rejects every fragment (NOTEQUAL:
             # both tris sit at z==clear; NEVER: unconditional) ->
             # framebuffer keeps the clear colour everywhere.
+            exp_img = [clr_w for _ in range(CW * CH)]
+        elif is_rdiscard:
+            # rasterizerDiscardEnable discards every primitive before
+            # rasterization -> no fragments -> clear colour everywhere.
             exp_img = [clr_w for _ in range(CW * CH)]
         else:
             exp_img = [out_w if (w % CW, w // CW) in cov and
@@ -11571,7 +11592,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     pRasterizationState=st(
                         'VkPipelineRasterizationStateCreateInfo',
                         flags=0, depthClampEnable=0,
-                        rasterizerDiscardEnable=0,
+                        rasterizerDiscardEnable=1 if is_rdiscard else 0,
                         polygonMode=2 if is_polypnt else
                         1 if is_polyln else 0,
                         cullMode=0 if is_pts else 2, frontFace=0,
@@ -11586,7 +11607,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                            depthTestEnable=1 if dp_test_on else 0,
                            depthWriteEnable=1,
                            depthCompareOp=dp_op,
-                           depthBoundsTestEnable=0,
+                           depthBoundsTestEnable=1 if is_dbnd else 0,
                            stencilTestEnable=0,
                            front=st('VkStencilOpState', failOp=0,
                                     passOp=0, depthFailOp=0,
@@ -11597,7 +11618,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                    compareOp=7, compareMask=0,
                                    writeMask=0, reference=0),
                            minDepthBounds=f32b(0.0),
-                           maxDepthBounds=f32b(1.0))
+                           maxDepthBounds=f32b(0.5 if is_dbnd else 1.0))
                         if is_depth else None),
                     pColorBlendState=(
                         st('VkPipelineColorBlendStateCreateInfo',
