@@ -18884,8 +18884,16 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   ax=(v[li|1].u-v[li&~1].u)*w0, bx=(v[li|1].v-v[li&~1].v)*h0,
   ay=(v[li|2].u-v[li&~2].u)*w0, by=(v[li|2].v-v[li&~2].v)*h0 (fp32
   fmul/fsub/ffma), dx2=ax²+bx², dy2=ay²+by², rho2=max, λ=0.5*log2(rho2)
-  via `sfu_tables.sfu_eval(30,...)` — needs pixel->quad-lane map + the
-  dvals/qpull quad gather; (b) `le=floor(λ*16)` q4.4 (RDN), mipmapMode
+  via `sfu_tables.sfu_eval(30,...)`.  **Quad->pixel map CONFIRMED**
+  (`g6lc_apu_rast.sv` ~725-760,950): quads are EVEN-ALIGNED 2x2 blocks
+  at (sx_q,sy_q); lane l -> pixel (sx_q + l[0], sy_q + l[1]) so
+  lane j=(px&1)+2*(py&1), quad base (px&~1,py&~1); lane0=(sx,sy)
+  lane1=(sx+1,sy) lane2=(sx,sy+1) lane3=(sx+1,sy+1).  Uncovered lanes
+  of a hit block emit HELPER invocations -> they run the FS and feed
+  derivatives but don't write; oracle needs their uv too — uv.x =
+  FragCoord.x²/128 (defined for any px) and uv.y = vcol.y barycentric
+  EXTRAPOLATED to the helper position (compute, don't look up in
+  gfx_grad_pixels which is covered-only); (b) `le=floor(λ*16)` q4.4 (RDN), mipmapMode
   LINEAR -> m0=le>>4, m1=m0+1, fw=le&0xF; (c) `img_walk` mip layout —
   level dims halve each mip (wd>>1,hd>>1, min1), pitch=align(wd*bpp,64),
   byte offset accumulates pit*hd per level; image needs mipLevels>=2
