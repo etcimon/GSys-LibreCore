@@ -40,9 +40,9 @@ package g6lc_apu_rast_pkg;
                          APU_RAST_BF_DST_COLOR = 5'd4, APU_RAST_BF_OM_DST_COLOR = 5'd5,
                          APU_RAST_BF_SRC_ALPHA = 5'd6, APU_RAST_BF_OM_SRC_ALPHA = 5'd7,
                          APU_RAST_BF_DST_ALPHA = 5'd8, APU_RAST_BF_OM_DST_ALPHA = 5'd9,
-                         APU_RAST_BF_CONST_COLOR = 5'd10, APU_RAST_BF_OM_CONST_COLOR = 5'd11,
-                         APU_RAST_BF_CONST_ALPHA = 5'd12, APU_RAST_BF_OM_CONST_ALPHA = 5'd13,
-                         APU_RAST_BF_SRC_ALPHA_SAT = 5'd14;
+                         APU_RAST_BF_SRC_ALPHA_SAT = 5'd10,
+                         APU_RAST_BF_CONST_COLOR = 5'd11, APU_RAST_BF_OM_CONST_COLOR = 5'd12,
+                         APU_RAST_BF_CONST_ALPHA = 5'd13, APU_RAST_BF_OM_CONST_ALPHA = 5'd14;
   localparam logic [2:0] APU_RAST_BO_ADD = 3'd0, APU_RAST_BO_SUBTRACT = 3'd1,
                          APU_RAST_BO_REVERSE_SUBTRACT = 3'd2, APU_RAST_BO_MIN = 3'd3,
                          APU_RAST_BO_MAX = 3'd4;
