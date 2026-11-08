@@ -18712,7 +18712,19 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   reads `_BLC[c]`/`[3]` for CONSTANT_*.  Verified: all 10 prior bfac
   sessions regen byte-identical under WSL python3.12; the 3 new
   sessions' covered pixels hand-checked bit-exact on all four
-  channels; vectors regenerated + wired into run-apu-vgtop/vgsys;
+  channels; vectors regenerated + wired into run-apu-vgtop/vgsys.
+  **RTL bug found + fixed by the new vectors** (`d933e75bd`):
+  `vnfront` stores raw VkBlendFactor (0-14) into `gp_blend_q ->
+  dr_q` unremapped, but `APU_RAST_BF_*` numbered CONSTANT_*=10-13 and
+  SRC_ALPHA_SATURATE=14 — factors 0-9 coincide (why existing bfac
+  sessions passed) while 10-14 decoded wrong.  Reordered the enum to
+  match VkBlendFactor exactly ("VkBlendFactor subset" comment now
+  holds); `f_fbase`/`f_fminus`/`bsf_w`/`bdf_w` use named constants so
+  they follow automatically.  End-to-end: rebuilt `tb_g6lc_apu_vgtop`
+  (`vlt-8c69f`) and ran `ue_gpos_bfacsat_1`/`bfaccc_1`/`bfac1mcc_1` —
+  all PASS bit-exact (ulp=0, 17016 checks each); `bfacdst`/`bfacal`/
+  `bfzero`/`bopadd` still PASS (factors 0-9 unchanged, blend-op path
+  unaffected).  (`67f8310f2` oracle+vectors, `d933e75bd` enum fix)
   **(5) SPIR-V toolchain** — no `spirv-as`/glslang, blocks MRT/
   noperspective/custom shaders.  Then CTS-1→CTS-2 caselists through
   the guest harness.  All directed-RTL session evidence only — no
