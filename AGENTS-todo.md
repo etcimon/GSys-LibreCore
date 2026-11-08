@@ -18529,6 +18529,22 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   `grad`/`dtest` hex byte-identical.  Validates the demote->helper->
   quad-derivative path end-to-end; texture-sampling + SSBO-atomic
   (atomic_frag) oracles remain the open graphics frontier.
+- [x] **CLOSED — non-unit-w perspective-correct interpolation
+  (`ue_gpos_persp_1`):** first real perspective path — `vs_clip.vert`
+  emits `gl_Position=(pos.x,pos.y,0.5*pos.z+0.5,-pos.z)` so clip
+  `w=-pos.z` is {1.0,0.8,0.6} per vertex (1/w {1.0,1.25,1.67}), making
+  `vrw=1/w`, `pv=lam*rcpa*vrw`, `rs=1/sum(pv)` genuinely non-affine.
+  vec3-pos stride-32 layout `{pos.xyz@0 fmt106,pad@12,col@16 fmt109}`
+  (is_dpair-style); `PERSP_POS` keeps w>0 and the w-divided ndc triangle
+  front-facing with 943px coverage.  `gfx_grad_pixels` already models
+  the full w path bit-exactly (x/w,y/w screen divide + per-vertex
+  vrw); oracle passes `PERSP_CLIP`=(x,y,0.5z+0.5,-z).  Sensitivity
+  proven: perspective vs affine differ ~0.03-0.04 (~3-10 UNORM steps)
+  at sample pixels, so a PASS cannot be an affine false-pass.  PASS
+  `g1=4096 g2=4096 ulp=0 XF_FAULTS 0` on **vgtop (cycles=750853) and
+  vgsys (cycles=1072529)** — all pixels bit-exact; `demdrv`/`deriv2`/
+  `dtest`/`grad` hex byte-identical.  This is the last interpolation
+  mode gap — texture-sampling + SSBO-atomic oracles remain open.
 - [x] Instanced-draw session coverage (`c84531213`): `ue_gpos_inst_1`
   — `vs_inst` offsets clip-x by `0.4*gl_InstanceIndex-0.6`,
   `instanceCount=4`, `fs_flat` constant colour → union coverage over 4

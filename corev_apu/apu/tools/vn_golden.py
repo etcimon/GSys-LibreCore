@@ -10762,6 +10762,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # pos+col layout (is_gradlike) with vs_pos3/vcol.
         is_demdrv = 'gpos_demdrv_1' in gfx
         is_gradlike = is_gradlike or is_demdrv
+        # persp: vs_clip emits gl_Position=(pos.x,pos.y,0.5*pos.z+0.5,
+        # -pos.z) so clip w=-pos.z VARIES per vertex -> real
+        # perspective-correct varying interpolation (vrw=1/w, pv=lam*
+        # rcpa*vrw, rs=1/sum).  vec3-pos stride-32 layout like is_dpair;
+        # gfx_grad_pixels already models the w path bit-exactly.  Own
+        # vertex/oracle branches (not is_gradlike's vec2-pos layout).
+        is_persp = 'gpos_persp_1' in gfx
         # depth: D32_SFLOAT depth attachment + depthWriteEnable — the
         # vec2 pos format leaves vs_pos3's pos.z=0 so gl_Position.z=0 is
         # a constant depth; write-only (depthTestEnable=0) validates the
@@ -10863,6 +10870,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           or is_line or is_lstrip or is_polyln
                           or is_polypnt
                           else 'vs_uvc.spv' if is_deriv2
+                          else 'vs_clip.spv' if is_persp
                           else 'vs_passthru.spv')).read_bytes())]
         # fsubo: the FS reads its colour from a UBO bound at the GRAPHICS
         # bind point (CTS binding_model.*.graphics shape)
@@ -10876,8 +10884,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'fs_deriv2.spv' if is_deriv2 else
                           'fs_demote_deriv.spv' if is_demdrv else
                           'fs_color.spv' if is_fcolor else
-                          'fs_vcol.spv' if is_blend or is_wide or is_line
-                          or is_lstrip or is_polyln or is_polypnt
+                          'fs_vcol.spv' if is_persp or is_blend or is_wide
+                          or is_line or is_lstrip or is_polyln or is_polypnt
                           or is_depth or is_gradlike
                           else
                           'fs_tex_array.spv' if is_ftexa else
@@ -10940,6 +10948,17 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         DERIV2_C  = [(0.0, 0.0, 0.0, 0.0),
                      (8.0, 4.0, 0.0, 8.0),
                      (0.0, 0.0, 8.0, 0.0)]
+        # persp: vec3 pos attribute; vs_clip maps it to clip
+        # (x, y, 0.5*z+0.5, -z) so w=-z is {1.0,0.6,0.8} — non-constant
+        # -> perspective-correct interpolation (1/w {1.0,1.67,1.25}).
+        # pos.z stays negative so w>0 (no mirrored divide); the divided
+        # ndc triangle keeps good coverage.  GRAD_COLS reused for the
+        # smooth vcol signal.
+        PERSP_POS = [(-0.5, -0.5, -1.0),
+                     (-0.5,  0.6, -0.8),
+                     ( 0.6, -0.5, -0.6)]
+        PERSP_CLIP = [(x, y, 0.5 * z + 0.5, -z)
+                      for (x, y, z) in PERSP_POS]
         # vertex stride 24: {RG32 pos @0, RGBA32 col @8}
         # vbwide: same attributes split across two buffers — binding 0
         # is positions only (stride 8) and the colour attribute rides
@@ -10961,6 +10980,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 for (_vx, _vy, _vz0, _vw) in TRI:
                     vb_words += [f32b(_vx), f32b(_vy), f32b(_dz), 0] + \
                         [f32b(c) for c in _dc]
+        elif is_persp:
+            # vec3-pos stride 32 {pos.xyz@0, pad@12, col.rgba@16}: vs_clip
+            # turns pos into clip (x,y,0.5z+0.5,-z) so w varies per
+            # vertex -> perspective-correct interpolation.
+            for (_px_, _py_, _pz_), _pc in zip(PERSP_POS, GRAD_COLS):
+                vb_words += [f32b(_px_), f32b(_py_), f32b(_pz_), 0] + \
+                    [f32b(c) for c in _pc]
         elif is_line or is_lstrip:
             # LINE_LIST (2 verts) / LINE_STRIP (3 verts) {pos.xy@0,
             # col@8} stride 24.  The endpoints are picked in
@@ -11054,9 +11080,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 cov |= gfx_line_coverage(
                     [TRI[_i], TRI[_i]], VP, SC, CW, CH)
         else:
-            cov = gfx_tri_coverage(DERIV_POS if is_deriv or is_deriv2
-                                   or is_demdrv else TRI,
-                                   VP, SC, CW, CH, front_ccw=1, cull=2)
+            cov = gfx_tri_coverage(
+                PERSP_CLIP if is_persp else
+                DERIV_POS if is_deriv or is_deriv2 or is_demdrv else TRI,
+                VP, SC, CW, CH, front_ccw=1, cull=2)
         if is_blend:
             # clear (0.2,0.2,0.2,1); out = src*0.75 + dst*0.25 ->
             # r=0.8->204, g=b=0.05->13, a=0.8125->207 (all off the
@@ -11168,6 +11195,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             _gp = gfx_demdrv_pixels(DERIV_POS, DERIV_COLS, VP, SC, CW, CH,
                                     1, 2)
             exp_img = [_gp.get((w % CW, w // CW), clr_w)
+                       for w in range(CW * CH)]
+        elif is_persp:
+            # perspective-correct interpolation: vs_clip gives clip w=-z
+            # varying per vertex; gfx_grad_pixels does the full
+            # x/w,y/w divide + vrw=1/w + pv=lam*rcpa*vrw + rs=1/sum.
+            _gp = gfx_grad_pixels(PERSP_CLIP, GRAD_COLS, VP, SC, CW, CH,
+                                  1, 2)
+            exp_img = [_u8pack(_gp[(w % CW, w // CW)])
+                       if (w % CW, w // CW) in _gp else clr_w
                        for w in range(CW * CH)]
         elif is_grad or is_fcolor:
             # smooth-varying interpolation: per-pixel bit-exact fpnew
@@ -11430,7 +11466,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                 binding=0,
                                 stride=2 if is_pts else
                                 16 if is_tex else
-                                32 if is_dpair or is_deriv2 else 24,
+                                32 if is_dpair or is_deriv2
+                                or is_persp else 24,
                                 inputRate=0)]),
                         vertexAttributeDescriptionCount=(
                             0 if is_vidx else 1 if is_pts else
@@ -11450,14 +11487,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                offset=16)] if is_deriv2 else [
                             st('VkVertexInputAttributeDescription',
                                location=0, binding=0,
-                               format=106 if is_dpair else 103,
+                               format=106 if is_dpair or is_persp
+                               else 103,
                                offset=0),
                             st('VkVertexInputAttributeDescription',
                                location=1,
                                binding=4 if is_wide else 0,
                                format=103 if is_tex else 109,
                                offset=0 if is_wide else
-                               16 if is_dpair else 8)]),
+                               16 if is_dpair or is_persp else 8)]),
                     pInputAssemblyState=st(
                         'VkPipelineInputAssemblyStateCreateInfo',
                         flags=0, topology=0 if is_pts else
@@ -11545,7 +11583,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 pCreateInfo=st('VkBufferCreateInfo',
                                size=max(72, 4 * len(vb_words))
                                if is_pts or is_dpair or is_deriv2
-                               else 72,
+                               or is_persp else 72,
                                usage=0x80, sharingMode=0,
                                queueFamilyIndexCount=0,
                                pQueueFamilyIndices=[]),
