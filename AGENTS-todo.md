@@ -18494,6 +18494,24 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   validates the quad-lane derivative chain shared with implicit-LOD
   texturing (fs_mip/fs_tex_*).  fs_deriv2/fs_demote_deriv (multi-input /
   demote) and projected/shadow/explicit-LOD texture remain open.
+- [x] **CLOSED — two-varying coarse derivatives (`ue_gpos_deriv2_1`):**
+  first multi-varying derivative session — `vs_uvc.vert` feeds TWO
+  smooth varyings (`vuv` vec2 @loc0 from the uv attribute, `vc` vec4
+  @loc1 from the c attribute) into `fs_deriv2.spv`, which uses only the
+  non-suffixed COARSE ops: `o=(fwidth(vuv.x)*8, fwidth(vuv.y)*8,
+  dFdx(vc.r)*4+0.5, 1)`.  New stride-32 three-attribute vertex layout
+  `{pos.xy@0 fmt103, uv.xy@8 fmt103, c.rgba@16 fmt109}` (loc 0/1/2) +
+  `vertexAttributeDescriptionCount=3`; fullscreen `DERIV_POS` keeps all
+  quads complete; `DERIV2_UV` spans 0..2 in both components and
+  `DERIV2_C` amplifies c.r 0..8 for mid-UNORM slopes.  Oracle
+  `gfx_deriv2_pixels` interpolates BOTH varyings via `gfx_grad_pixels`
+  (same verts -> same pv/rs -> consistent per-pixel neighbours), then
+  applies coarse `dxC=vTR-vTL`/`dyC=vBL-vTL` and the exact f32
+  FMul/FAdd order.  PASS `g1=4096 g2=4096 ulp=0 XF_FAULTS 0` on
+  **vgtop (cycles=1967619) and vgsys (cycles=2390155)** — all pixels
+  bit-exact; `deriv`/`grad`/`dtest` hex byte-identical.  Extends the
+  derivative frontier to multi-varying + vec2-varying + FS-scalar
+  amplification; fs_demote_deriv and texture-sampling oracles remain.
 - [x] Instanced-draw session coverage (`c84531213`): `ue_gpos_inst_1`
   — `vs_inst` offsets clip-x by `0.4*gl_InstanceIndex-0.6`,
   `instanceCount=4`, `fs_flat` constant colour → union coverage over 4

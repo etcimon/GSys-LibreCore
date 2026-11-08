@@ -7020,6 +7020,43 @@ def gfx_deriv_pixels(verts, cols, vp, sc, cw, ch, front_ccw, cull):
     return out
 
 
+def gfx_deriv2_pixels(verts, uvs, cols4, vp, sc, cw, ch, front_ccw, cull):
+    """fs_deriv2 oracle: COARSE quad-lane derivatives over TWO smooth
+    varyings fed by vs_uvc — vuv (vec2, the uv attribute) and vc
+    (vec4, the c attribute).  gfx_grad_pixels interpolates each with
+    the same barycentric weights (same verts -> same pv/rs), so two
+    calls agree per-pixel.  fs_deriv2 uses only the non-suffixed
+    coarse ops:
+      fwidth(vuv) -> vec2(|dxC(u)|+|dyC(u)|, |dxC(v)|+|dyC(v)|) * 8 -> o.rg
+      dFdx(vc.r)  -> dxC(vc.r) * 4 + 0.5                          -> o.b
+      o.a = 1.0
+    dxC(comp) = vTR-vTL, dyC(comp) = vBL-vTL (f32).  uv is padded to
+    (u,v,0,0) so comp0=vuv.x, comp1=vuv.y; vc comp0 = vc.r.
+    -> {(px,py): packed RGBA8 word}."""
+    uv4 = [(u, v, 0.0, 0.0) for (u, v) in uvs]
+    vu = gfx_grad_pixels(verts, uv4, vp, sc, cw, ch, front_ccw, cull)
+    vc = gfx_grad_pixels(verts, cols4, vp, sc, cw, ch, front_ccw, cull)
+    out = {}
+    for (px, py) in vu:
+        qx, qy = px & ~1, py & ~1
+        uTL = vu[(qx, qy)];     uTR = vu[(qx + 1, qy)]
+        uBL = vu[(qx, qy + 1)]; uBR = vu[(qx + 1, qy + 1)]
+        cTL = vc[(qx, qy)];     cTR = vc[(qx + 1, qy)]
+        cBL = vc[(qx, qy + 1)]; cBR = vc[(qx + 1, qy + 1)]
+
+        def _fw(mapT, mapB, comp):
+            dx = _f32(mapT[1][comp] - mapT[0][comp])   # TR - TL
+            dy = _f32(mapB[0][comp] - mapT[0][comp])   # BL - TL
+            return _f32(abs(dx) + abs(dy))
+
+        o_r = _f32(_fw((uTL, uTR), (uBL, uBR), 0) * 8.0)
+        o_g = _f32(_fw((uTL, uTR), (uBL, uBR), 1) * 8.0)
+        _dxr = _f32(cTR[0] - cTL[0])                  # dFdx(vc.r) coarse
+        o_b = _f32(_f32(_dxr * 4.0) + 0.5)
+        out[(px, py)] = _u8pack((o_r, o_g, o_b, 1.0))
+    return out
+
+
 def load_shvec(name):
     """Parse sh_vectors/<name>.{hex,exp} into a compute-session vec.
 
@@ -10681,6 +10718,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # affine (w=1) slopes are exact constants.
         is_deriv = 'gpos_deriv_1' in gfx
         is_gradlike = is_gradlike or is_deriv
+        # deriv2: fs_deriv2 takes TWO varyings (vuv vec2 @loc0 from the
+        # uv attribute, vc vec4 @loc1 from c) via vs_uvc — three vertex
+        # attributes {pos@0,uv@8,c@16} stride 32 — and uses only the
+        # COARSE derivative ops (fwidth, dFdx).  Same fullscreen-tri
+        # complete-quad requirement as is_deriv; handled by its own
+        # vertex/oracle branches (not is_gradlike's 2-attr layout).
+        is_deriv2 = 'gpos_deriv2_1' in gfx
         # depth: D32_SFLOAT depth attachment + depthWriteEnable — the
         # vec2 pos format leaves vs_pos3's pos.z=0 so gl_Position.z=0 is
         # a constant depth; write-only (depthTestEnable=0) validates the
@@ -10781,6 +10825,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           or is_killfn or is_fncall or is_depth or is_gradlike
                           or is_line or is_lstrip or is_polyln
                           or is_polypnt
+                          else 'vs_uvc.spv' if is_deriv2
                           else 'vs_passthru.spv')).read_bytes())]
         # fsubo: the FS reads its colour from a UBO bound at the GRAPHICS
         # bind point (CTS binding_model.*.graphics shape)
@@ -10791,6 +10836,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'fs_ubo.spv' if is_fsubo else
                           'fs_white.spv' if is_pts else
                           'fs_deriv.spv' if is_deriv else
+                          'fs_deriv2.spv' if is_deriv2 else
                           'fs_color.spv' if is_fcolor else
                           'fs_vcol.spv' if is_blend or is_wide or is_line
                           or is_lstrip or is_polyln or is_polypnt
@@ -10846,6 +10892,16 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         DERIV_COLS = [(0.0, 0.0, 0.0, 0.0),
                       (48.0, 48.0, 0.0, 48.0),
                       (48.0, 0.0, 48.0, 0.0)]
+        # deriv2: TWO varyings over the same fullscreen tri.  vuv (vec2)
+        # comes from the uv attribute and feeds fwidth(vuv)*8 -> o.rg;
+        # vc (vec4) comes from the c attribute and feeds
+        # dFdx(vc.r)*4+0.5 -> o.b.  uv spans 0..2 in both components so
+        # both fwidth channels carry a real gradient; c.r spans 0..8 so
+        # the coarse dFdx lands mid-UNORM.  o.a is constant 1.0.
+        DERIV2_UV = [(0.0, 0.0), (2.0, 0.0), (0.0, 2.0)]
+        DERIV2_C  = [(0.0, 0.0, 0.0, 0.0),
+                     (8.0, 4.0, 0.0, 8.0),
+                     (0.0, 0.0, 8.0, 0.0)]
         # vertex stride 24: {RG32 pos @0, RGBA32 col @8}
         # vbwide: same attributes split across two buffers — binding 0
         # is positions only (stride 8) and the colour attribute rides
@@ -10895,6 +10951,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             for (_vx, _vy, _vz, _vw), _gc in zip(_gpos, _gcols):
                 vb_words += [f32b(_vx), f32b(_vy)]
                 vb_words += [f32b(c) for c in _gc]
+        elif is_deriv2:
+            # {pos.xy@0, uv.xy@8, c.rgba@16} stride 32 — three attributes
+            # over the fullscreen tri; pos.xy is clip-space, uv feeds
+            # vuv and c feeds vc (both smooth varyings).
+            for (_vx, _vy, _vz, _vw), (_uu, _vv), _cc in zip(
+                    DERIV_POS, DERIV2_UV, DERIV2_C):
+                vb_words += [f32b(_vx), f32b(_vy),
+                             f32b(_uu), f32b(_vv)]
+                vb_words += [f32b(c) for c in _cc]
         else:
             for (vx_, vy_, _vz, _vw) in TRI:
                 if is_tex:
@@ -10951,8 +11016,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 cov |= gfx_line_coverage(
                     [TRI[_i], TRI[_i]], VP, SC, CW, CH)
         else:
-            cov = gfx_tri_coverage(DERIV_POS if is_deriv else TRI,
-                                   VP, SC, CW, CH, front_ccw=1, cull=2)
+            cov = gfx_tri_coverage(DERIV_POS if is_deriv or is_deriv2
+                                   else TRI, VP, SC, CW, CH,
+                                   front_ccw=1, cull=2)
         if is_blend:
             # clear (0.2,0.2,0.2,1); out = src*0.75 + dst*0.25 ->
             # r=0.8->204, g=b=0.05->13, a=0.8125->207 (all off the
@@ -11047,6 +11113,14 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # (coarse + fine) -> fs_deriv expression -> packed word.
             _gp = gfx_deriv_pixels(DERIV_POS, DERIV_COLS, VP, SC, CW, CH,
                                    1, 2)
+            exp_img = [_gp.get((w % CW, w // CW), clr_w)
+                       for w in range(CW * CH)]
+        elif is_deriv2:
+            # two-varying coarse-derivative oracle: vuv (uv attr) and vc
+            # (c attr) interpolated over the fullscreen tri, then
+            # fwidth(vuv)*8 / dFdx(vc.r)*4+0.5 -> packed word.
+            _gp = gfx_deriv2_pixels(DERIV_POS, DERIV2_UV, DERIV2_C,
+                                     VP, SC, CW, CH, 1, 2)
             exp_img = [_gp.get((w % CW, w // CW), clr_w)
                        for w in range(CW * CH)]
         elif is_grad or is_fcolor:
@@ -11310,14 +11384,24 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                 binding=0,
                                 stride=2 if is_pts else
                                 16 if is_tex else
-                                32 if is_dpair else 24,
+                                32 if is_dpair or is_deriv2 else 24,
                                 inputRate=0)]),
                         vertexAttributeDescriptionCount=(
-                            0 if is_vidx else 1 if is_pts else 2),
+                            0 if is_vidx else 1 if is_pts else
+                            3 if is_deriv2 else 2),
                         pVertexAttributeDescriptions=[] if is_vidx else [
                             st('VkVertexInputAttributeDescription',
                                location=0, binding=0, format=16,
                                offset=0)] if is_pts else [
+                            st('VkVertexInputAttributeDescription',
+                               location=0, binding=0, format=103,
+                               offset=0),
+                            st('VkVertexInputAttributeDescription',
+                               location=1, binding=0, format=103,
+                               offset=8),
+                            st('VkVertexInputAttributeDescription',
+                               location=2, binding=0, format=109,
+                               offset=16)] if is_deriv2 else [
                             st('VkVertexInputAttributeDescription',
                                location=0, binding=0,
                                format=106 if is_dpair else 103,
@@ -11414,7 +11498,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 # undersized buffer is a robust zero-fetch, not a draw)
                 pCreateInfo=st('VkBufferCreateInfo',
                                size=max(72, 4 * len(vb_words))
-                               if is_pts or is_dpair else 72,
+                               if is_pts or is_dpair or is_deriv2
+                               else 72,
                                usage=0x80, sharingMode=0,
                                queueFamilyIndexCount=0,
                                pQueueFamilyIndices=[]),
