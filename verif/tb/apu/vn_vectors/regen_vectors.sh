@@ -226,6 +226,10 @@ python3 $G --graphics-session ue_gpos_ftexl_1 1
 # beyond [0,1] so floor(u*w) lands outside [0,w); integer coord wraps
 # mod w (f_twrap REPEAT arm) instead of CLAMP_TO_EDGE
 python3 $G --graphics-session ue_gpos_ftexr_1 1
+# fragment NEAREST multi-texel + MIRRORED_REPEAT wrap: same 4x4 CIS +
+# wide uv, addressMode=1 exercises the f_twrap m=1 mirror-fold arm
+# (mm=i|-i-1, r=mm%(2n), reflect r>=n -> 2n-1-r)
+python3 $G --graphics-session ue_gpos_ftexmir_1 1
 # line-list draw: topology=1, vertexCount=2; gfx_line_coverage mirrors the
 # RTL S_LN_* integer Bresenham (vxi>>>8 pixel coords, lerr=ldx-ldy) so the
 # 1-px line footprint is bit-exact; fs_vcol keeps flat vertex-0 colour

@@ -18821,13 +18821,19 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   floor) + Python `%` matching the hardware two's-complement wrap.
   Verified PASS bit-exact (ulp=0) vgtop (17122 checks) + vgsys
   (17291 checks); `.exp` differs from `ftexn` (non-degenerate);
-  `ftexn`/`ftexl`/`ftex` regen byte-identical.  Remaining W_TX*:
-  LOD/mip walk (`fs_mip`), projective (`fs_tex_proj`), explicit-LOD
-  (`fs_tex_qlod`), shadow/compare (`fs_tex_shadow`), MIRRORED wrap,
-  gather-offset, sRGB, non-UNORM8 fmts; `fs_tex_proj`/`fs_tex_qlod`/
-  `fs_tex_shadow` need a VS emitting nonzero `vcol.z/w` (vs_tex sets
-  z=0 — blocked on shader tooling); `fs_tex_qlod` uses only `vcol.xy`
-  so it IS reachable but needs quad-derivative + SFU-log2 port.
+  `ftexn`/`ftexl`/`ftex` regen byte-identical.  ~~MIRRORED wrap~~
+  **DONE** (`ue_gpos_ftexmir_1`; `is_ftexmir`, NEAREST+MIRRORED_REPEAT):
+  same 4x4 CIS + wide uv, addressMode=1 exercises the `f_twrap` m=1
+  mirror-fold arm (`mm=i|-i-1`, `r=mm%(2n)`, reflect `r>=n`->`2n-1-r`).
+  Verified PASS bit-exact (ulp=0) vgtop (17122) + vgsys (17291);
+  `.exp` differs from `ftexr`/`ftexn` (non-degenerate); all texture
+  sessions regen byte-identical.  Remaining W_TX*: LOD/mip walk
+  (`fs_mip`), projective (`fs_tex_proj`), explicit-LOD (`fs_tex_qlod`),
+  shadow/compare (`fs_tex_shadow`), CLAMP_TO_BORDER, gather-offset,
+  sRGB, non-UNORM8 fmts; `fs_tex_proj`/`fs_tex_qlod`/`fs_tex_shadow`
+  need a VS emitting nonzero `vcol.z/w` (vs_tex sets z=0 — blocked on
+  shader tooling); `fs_tex_qlod` uses only `vcol.xy` so it IS reachable
+  but needs quad-derivative + SFU-log2 port.
   **LINEAR+REPEAT (`ftexw`) attempted, NOT landed** — the common
   tiling config; oracle = ftexl bilinear with corner indices `%`-wrapped
   instead of clamped.  FAILS bit-exact: 18 off-by-one LSB errors with
@@ -18837,12 +18843,17 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   fraction precision diff remains even for positive coords.  The 8.8
   coord `floor(u*w*256-128)` is 64x more sensitive than NEAREST's
   `floor(u*w)`, so sub-ULP differences in the interpolated `vcol.xy`
-  (or the exact f32 `ffma(u,w0<<8,cst)` vs `_f32(u*w*256-128)` rounding)
-  flip `su0`/`fu` at texel-boundary pixels.  Root-cause needed: verify
-  `_v[0]` from `gfx_grad_pixels` is the exact f32 the RTL's `va[1]`
-  carries for out-of-range uv, and whether RTL extracts the LINEAR
-  index/fraction from the signed 8.8 coord identically to spirv_model's
-  `su0>>8`/`su0&0xFF`.  **(c) MRT** — RTL `ca[3:0]`/`blend[3:0]` supports 4
+  flip `su0`/`fu` at texel-boundary pixels.  **RTL datapath traced
+  (`g6lc_apu_shwave.sv` W_TXC3..W_TXR1) — oracle is structurally
+  CORRECT**: `su0=F2I_RDN(fma(u,w0<<8,-128))`; index `su0>>>8`+frac
+  `su0[7:0]` coincide with `>>8`/`&0xFF` for n=4 (2^24==0 mod4) even
+  for negative su0; per-corner `f_twrap` REPEAT matches `%`; corner
+  order/weights `wu*wv`, `{by,by}`=byte*0x101 decode, exact 40-bit
+  `gw*ch` accumulate, `(acc+0x8000)>>16` saturate->`rrm*2^-16/65535`
+  all identical.  Residual is therefore a sub-ULP `vcol.xy` value
+  difference (gfx_grad_pixels vs RTL `va_q[1]` for out-of-range uv) —
+  needs waveform-level su0/fu dump per failing pixel, not an oracle
+  restructure.  **(c) MRT** — RTL `ca[3:0]`/`blend[3:0]` supports 4
   colour attachments; oracle render pass emits only 1 (+depth).
   **(d) MSAA / occlusion+timestamp queries / secondary CBs+subpasses
   / logicOp+blend / non-UNORM8 logicOp** — all feature-level.
