@@ -10783,6 +10783,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # gfx_grad_pixels already models the w path bit-exactly.  Own
         # vertex/oracle branches (not is_gradlike's vec2-pos layout).
         is_persp = 'gpos_persp_1' in gfx
+        # depthClamp: vs_clip pos.z=-0.2 -> clip (x,y,0.4,0.2), ndc z=2.0
+        # beyond far.  depthClampEnable=1 (dclamp) skips near/far clip so
+        # the triangle rasterizes; =0 (dclampoff) clips it -> empty fb.
+        is_dclampoff = 'gpos_dclampoff' in gfx
+        is_dclamplike = is_dclampoff or 'gpos_dclamp' in gfx
+        is_dclamp = is_dclamplike and not is_dclampoff
         # depth: D32_SFLOAT depth attachment + depthWriteEnable — the
         # vec2 pos format leaves vs_pos3's pos.z=0 so gl_Position.z=0 is
         # a constant depth; write-only (depthTestEnable=0) validates the
@@ -10939,7 +10945,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           or is_line or is_lstrip or is_polyln
                           or is_polypnt
                           else 'vs_uvc.spv' if is_deriv2
-                          else 'vs_clip.spv' if is_persp
+                          else 'vs_clip.spv' if is_persp or is_dclamplike
                           else 'vs_passthru.spv')).read_bytes())]
         # fsubo: the FS reads its colour from a UBO bound at the GRAPHICS
         # bind point (CTS binding_model.*.graphics shape)
@@ -10953,7 +10959,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'fs_deriv2.spv' if is_deriv2 else
                           'fs_demote_deriv.spv' if is_demdrv else
                           'fs_color.spv' if is_fcolor else
-                          'fs_vcol.spv' if is_persp or is_blend or is_lop
+                          'fs_vcol.spv' if is_persp or is_dclamplike
+                          or is_blend or is_lop
                           or is_wide
                           or is_line or is_lstrip or is_polyln or is_polypnt
                           or is_depth or is_gradlike
@@ -11032,6 +11039,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                      ( 0.6, -0.5, -0.6)]
         PERSP_CLIP = [(x, y, 0.5 * z + 0.5, -z)
                       for (x, y, z) in PERSP_POS]
+        # depthClamp geometry: pos.z=-0.2 -> clip (x,y,0.4,0.2), ndc z=2
+        # (beyond far).  pos.xy in [-0.16,0.16] -> ndc +-0.8 coverage.
+        DCLAMP_POS = [(-0.16, -0.16, -0.2),
+                      (-0.16,  0.16, -0.2),
+                      ( 0.16, -0.16, -0.2)]
+        DCLAMP_CLIP = [(x, y, 0.5 * z + 0.5, -z)
+                       for (x, y, z) in DCLAMP_POS]
         # vertex stride 24: {RG32 pos @0, RGBA32 col @8}
         # vbwide: same attributes split across two buffers — binding 0
         # is positions only (stride 8) and the colour attribute rides
@@ -11062,6 +11076,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             for (_px_, _py_, _pz_), _pc in zip(PERSP_POS, GRAD_COLS):
                 vb_words += [f32b(_px_), f32b(_py_), f32b(_pz_), 0] + \
                     [f32b(c) for c in _pc]
+        elif is_dclamplike:
+            # vec3-pos stride 32 {pos.xyz@0, pad@12, col.rgba@16}: vs_clip
+            # clip=(x,y,0.4,0.2) -> ndc z=2 beyond far; constant COL keeps
+            # the covered colour flat for the clip-vs-clamp A/B.
+            for _p in DCLAMP_POS:
+                vb_words += [f32b(_p[0]), f32b(_p[1]), f32b(_p[2]), 0] + \
+                    [f32b(c) for c in COL]
         elif is_line or is_lstrip:
             # LINE_LIST (2 verts) / LINE_STRIP (3 verts) {pos.xy@0,
             # col@8} stride 24.  The endpoints are picked in
@@ -11168,6 +11189,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     [TRI[_i], TRI[_i]], VP, SC, CW, CH)
         else:
             cov = gfx_tri_coverage(
+                DCLAMP_CLIP if is_dclamplike else
                 PERSP_CLIP if is_persp else
                 DERIV_POS if is_deriv or is_deriv2 or is_demdrv else TRI,
                 VP, SC, CW, CH, front_ccw=1, cull=2)
@@ -11336,6 +11358,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         elif is_rdiscard:
             # rasterizerDiscardEnable discards every primitive before
             # rasterization -> no fragments -> clear colour everywhere.
+            exp_img = [clr_w for _ in range(CW * CH)]
+        elif is_dclampoff:
+            # depthClampEnable=0: the z>w triangle is near/far-clipped
+            # -> no fragments -> clear colour everywhere.  (is_dclamp
+            # falls through to the cov->out_w base branch: unclipped.)
             exp_img = [clr_w for _ in range(CW * CH)]
         else:
             exp_img = [out_w if (w % CW, w // CW) in cov and
@@ -11588,7 +11615,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                 stride=2 if is_pts else
                                 16 if is_tex else
                                 32 if is_dpair or is_deriv2
-                                or is_persp else 24,
+                                or is_persp or is_dclamplike else 24,
                                 inputRate=0)]),
                         vertexAttributeDescriptionCount=(
                             0 if is_vidx else 1 if is_pts else
@@ -11609,14 +11636,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                             st('VkVertexInputAttributeDescription',
                                location=0, binding=0,
                                format=106 if is_dpair or is_persp
-                               else 103,
+                               or is_dclamplike else 103,
                                offset=0),
                             st('VkVertexInputAttributeDescription',
                                location=1,
                                binding=4 if is_wide else 0,
                                format=103 if is_tex else 109,
                                offset=0 if is_wide else
-                               16 if is_dpair or is_persp else 8)]),
+                               16 if is_dpair or is_persp
+                               or is_dclamplike else 8)]),
                     pInputAssemblyState=st(
                         'VkPipelineInputAssemblyStateCreateInfo',
                         flags=0, topology=0 if is_pts else
@@ -11643,7 +11671,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         if is_statvp else None),
                     pRasterizationState=st(
                         'VkPipelineRasterizationStateCreateInfo',
-                        flags=0, depthClampEnable=0,
+                        flags=0, depthClampEnable=1 if is_dclamp else 0,
                         rasterizerDiscardEnable=1 if is_rdiscard else 0,
                         polygonMode=2 if is_polypnt else
                         1 if is_polyln else 0,
@@ -11707,7 +11735,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 pCreateInfo=st('VkBufferCreateInfo',
                                size=max(72, 4 * len(vb_words))
                                if is_pts or is_dpair or is_deriv2
-                               or is_persp else 72,
+                               or is_persp or is_dclamplike else 72,
                                usage=0x80, sharingMode=0,
                                queueFamilyIndexCount=0,
                                pQueueFamilyIndices=[]),

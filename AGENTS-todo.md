@@ -18668,17 +18668,19 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   the tractable `ue_gpos` pipeline-state space is now saturated
   (depth write + all 8 VkCompareOp + bounds + bias; scissor;
   rasterizerDiscard; blend; **full 16-op VkLogicOp table**;
-  smooth/perspective/derivative/demote interpolation; primitives,
-  instancing, UBO, indexed/indirect — all bit-exact vgtop+vgsys).
+  **depthClamp** (`dclamp`/`dclampoff`: vs_clip pos.z=-0.2 -> clip
+  z=0.4>w=0.2, ndc z=2 beyond far; clamp=1 rasterizes, clamp=0
+  near/far-clips -> empty); smooth/perspective/derivative/demote
+  interpolation; primitives, instancing, UBO, indexed/indirect — all
+  bit-exact vgtop+vgsys).
   Remaining, in dependency order: **(1) `W_TX*` texture oracle** —
   highest-leverage; unblocks `fs_mip`/`fs_scene8`/`fs_shadowfog`/
   `fs_tex_*` + G3d sampler generality; needs framebuffer-level
   coord→8.8→LOD→texel→filter→decode + `img_mpitch` layer/mip layout
   (adapt `spirv_model.py` texture path, currently wave-context-bound);
-  **(2) stencil** — needs a stencil attachment + op oracle;
-  **(3) depthClamp** — needs clip-space polygon model + a z-controlling
-  shader (`vs_clip` yields `z>w` for pos.z∈(-1/3,0) but needs custom
-  vertex data); **(4) MSAA, occlusion/timestamp queries, secondary
+  **(3) stencil** — needs a stencil attachment + op oracle;
+  ~~depthClamp~~ DONE (`dclamp`/`dclampoff` above);
+  **(4) MSAA, occlusion/timestamp queries, secondary
   CBs/subpasses, logicOp+blend combos, non-UNORM8 logicOp**;
   **(5) SPIR-V toolchain** — no `spirv-as`/glslang, blocks MRT/
   noperspective/custom shaders.  Then CTS-1→CTS-2 caselists through
