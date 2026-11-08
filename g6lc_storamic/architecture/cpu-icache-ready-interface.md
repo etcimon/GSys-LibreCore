@@ -1,9 +1,73 @@
 # CPU I-cache `ready` interface split (C0 next step)
 
-Status: **specified, not implemented.** This is the concrete next C0 code
-update identified by the CPU46 `split_var` diagnostic
-(`storamic-cpu46core-f62bf710`). It requires the remote strict-Verilator
-diagnostic loop to confirm; do not promote on local evidence alone.
+Status: **implemented and locally verified clean, but the hypothesis is
+DISPROVEN — it does not reduce UNOPTFLAT.** Kept as a clean,
+behaviour-preserving repackaging; do not cite it as a C0 fix.
+
+## Empirical result (forked Verilator 5.008 `vlt-8c69f`, `tb_g6lc_storamic_cpu_origin`,
+## `both-fields.vlt` / `both-fp.vlt`, `OriginEnabled=0`, `IntegerDiagnostic=0`)
+
+| diagnostic | CPU46 baseline | post-change | delta |
+|---|---|---|---|
+| fields (`both-origin0-fields`) | 9 identities | 9 identities | `dreq_o[366]`→`dreq_o[365]` only |
+| fp (`both-origin0-fp`) | 24 identities | 20 identities | −4, all unrelated D-cache/FP arbiter cones |
+
+The `ready` field was the `icache_drsp_t` MSB (bit 366). Removing it made
+`valid` the new MSB (bit 365), and **the same cone is still reported on
+`dreq_o[365]`** — Verilator flags whichever packed-struct bit sits in the
+cycle, not specifically `ready`. The four "removed" FP identities
+(`i_arbiter.req_nodes`, `i_rr_arb_tree.gnt_nodes`, `wbuffer_hit_oh`,
+`i_dirty_rr.index_nodes`) are D-cache/FP arbiter cones untouched by this
+change — almost certainly tool/environment ordering variance, not a real
+effect (fields, the direct measure, is unchanged at 9).
+
+## Why it did not work — the real cone
+
+Verilator's example path shows the cycle is a **mega-cone**, not a
+ready-loop:
+
+```
+commit_stage / csr_regfile.update_access_exception / trap_to_priv_lvl
+  → cva6.trap_vector_base_commit_pcgen
+  → frontend.arch_pc / fetch_address / icache_dreq_o      (fetch request)
+  → g6lc_icache.dreq_o                                     (response)
+  → frontend.kill_drop / icache_take / instruction_valid
+    / predict_address / bp_fire / kill_s2                  (frontend kill+predict)
+  → back to icache_dreq_o / commit path                    (cycle closes)
+```
+
+`flush_ctrl_id`, `update_access_exception`, and `dreq_o[365]` are all nodes
+in this one large combinational cycle spanning commit→CSR→frontend→icache.
+`ready` was never the load-bearing edge. To actually break the reported
+UNOPTFLAT, a *different* edge must be cut — e.g. registering `kill_s2`,
+`bp_fire`, `icache_take`, `predict_address`, or the icache response
+handshake — which is a behavioural/timing change, not repackaging.
+
+## What was changed (for the record)
+
+`ready` moved out of `icache_drsp_t` onto a dedicated scalar
+`icache_ready_*`/`dreq_ready_o` path: `core/cva6.sv` (struct + net +
+wiring), `g6lc_icache.sv`, `cva6_icache_axi_wrapper.sv`,
+`std`/`wt`/`cva6_hpdcache` cache subsystems, all four `frontend.sv`
+variants, and `fetch_B/g6lc_fetch_dbg.sv` (upward-referenced
+`icache_dreq_i.ready` → `icache_ready_i`). The formal `fetch_B` copies are
+self-contained (`idrsp_t` keeps its own `ready`) and were not touched.
+
+Verified: `slang --single-unit` elaborates `cv64a6_imafdc_sv39` and
+`cv32a65x` cleanly; `verilator --lint-only` reports zero non-UNOPTFLAT
+errors; the forked-Verilator diagnostic reproduces the baseline identity
+set (modulo the `dreq_o` renumber).
+
+## Original rationale (superseded — kept for context)
+
+Strict full-core UNOPTFLAT diagnostics sit at 9 field / 24 FP identities
+(both `OriginEnabled` modes). The CPU46 `split_var` sweep proved
+packed-var splitting cannot remove them. The four remaining field
+identities route through one frontend `kill_s2`/`bp_fire` cone. Gate-level
+analysis found 0 real combinational SCCs, so these are Verilator
+*representation* artifacts. The hypothesis was that packing `ready` with
+the fetch payload made Verilator merge cones into a false loop; the
+experiment above shows the cone is the payload/kill/predict path instead.
 
 ## Why this change
 
