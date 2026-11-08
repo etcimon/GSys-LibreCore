@@ -18827,13 +18827,28 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   mirror-fold arm (`mm=i|-i-1`, `r=mm%(2n)`, reflect `r>=n`->`2n-1-r`).
   Verified PASS bit-exact (ulp=0) vgtop (17122) + vgsys (17291);
   `.exp` differs from `ftexr`/`ftexn` (non-degenerate); all texture
-  sessions regen byte-identical.  Remaining W_TX*: LOD/mip walk
-  (`fs_mip`), projective (`fs_tex_proj`), explicit-LOD (`fs_tex_qlod`),
-  shadow/compare (`fs_tex_shadow`), CLAMP_TO_BORDER, gather-offset,
-  sRGB, non-UNORM8 fmts; `fs_tex_proj`/`fs_tex_qlod`/`fs_tex_shadow`
-  need a VS emitting nonzero `vcol.z/w` (vs_tex sets z=0 — blocked on
-  shader tooling); `fs_tex_qlod` uses only `vcol.xy` so it IS reachable
-  but needs quad-derivative + SFU-log2 port.
+  sessions regen byte-identical.  ~~CLAMP_TO_BORDER~~ **DONE**
+  (`ue_gpos_ftexc_1`; `is_ftexc`, NEAREST+CLAMP_TO_BORDER): same 4x4
+  CIS + wide uv; coords outside `[0,dim)` raise the `f_twrap` m=3
+  border flag -> `f_bord16(borderColor)` substitutes border colour for
+  the texel.  `borderColor=5` (INT_OPAQUE_WHITE) -> all-0xFFFF u16 ->
+  opaque-white border `0xFFFFFFFF`.  Verified PASS bit-exact (ulp=0)
+  vgtop (17122) + vgsys (17291); `.exp` differs from all wrap peers;
+  all texture sessions regen byte-identical.  **NOTE — borderColor
+  decode discrepancy (suspected latent RTL bug, like the blend-factor
+  enum)**: `borderColor` is stored raw (`vnfront` `sam_w0_q[16:14]` =
+  `imm[14]`, validated <=5, NOT remapped) but `f_bord16`/`f_bord32`
+  decode a custom code — b=4/5->white, b=2/3->alpha-only, else->0 —
+  which agrees with VkBorderColor ONLY for b=0 (TRANSPARENT_BLACK) and
+  b=5 (OPAQUE_WHITE); b=1..4 diverge (e.g. FLOAT_OPAQUE_WHITE=2 yields
+  opaque-black-alpha, INT_OPAQUE_BLACK=4 yields white).  ftexc uses
+  b=5 which is spec-correct; the 1..4 range needs a directed probe.
+  Remaining W_TX*: LOD/mip walk (`fs_mip`), projective (`fs_tex_proj`),
+  explicit-LOD (`fs_tex_qlod`), shadow/compare (`fs_tex_shadow`),
+  gather-offset, sRGB, non-UNORM8 fmts; `fs_tex_proj`/`fs_tex_qlod`/
+  `fs_tex_shadow` need a VS emitting nonzero `vcol.z/w` (vs_tex sets
+  z=0 — blocked on shader tooling); `fs_tex_qlod` uses only `vcol.xy`
+  so it IS reachable but needs quad-derivative + SFU-log2 port.
   **LINEAR+REPEAT (`ftexw`) attempted, NOT landed** — the common
   tiling config; oracle = ftexl bilinear with corner indices `%`-wrapped
   instead of clamped.  FAILS bit-exact: 18 off-by-one LSB errors with

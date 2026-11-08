@@ -10997,9 +10997,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # CIS + wide uv as ftexr but addressMode=1 exercises the f_twrap
         # m=1 mirror-fold arm (mm=i|-i-1, r=mm%(2n), reflect r>=n).
         is_ftexmir = 'ftexmir' in gfx
+        # ftexc: NEAREST multi-texel + CLAMP_TO_BORDER — same 4x4 CIS +
+        # wide uv; coords outside [0,dim) raise the f_twrap m=3 border
+        # flag -> f_bord16 border colour instead of a texel fetch.
+        # borderColor=5 (INT_OPAQUE_WHITE) -> all-0xFFFF = opaque white.
+        is_ftexc = 'ftexc' in gfx
         # is_ftexm gates the shared multi-texel texture setup (extent,
         # per-vertex uv, texel payload) for NEAREST/LINEAR/REPEAT/MIRROR.
-        is_ftexm = is_ftexn or is_ftexl or is_ftexr or is_ftexmir
+        is_ftexm = (is_ftexn or is_ftexl or is_ftexr or is_ftexmir
+                    or is_ftexc)
         # line: LINE_LIST topology — 2 vertices, 1px Bresenham walk with
         # flat colour from vertex 0 (the g6lc_apu_rast S_LN_* path)
         is_line = 'line' in gfx
@@ -11215,7 +11221,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # uv avoids the 0.25/0.5/0.75 cell boundaries at the verts.
             TEX_W = TEX_H = 4 if is_ftexm else 1
             TEX_UV = ([(-0.4, -0.4), (1.4, 0.6), (0.6, 1.4)]
-                      if (is_ftexr or is_ftexmir) else
+                      if (is_ftexr or is_ftexmir or is_ftexc) else
                       [(0.125, 0.125), (0.5, 0.875), (0.875, 0.125)]
                       if is_ftexm else [(0.5, 0.5)] * 3)
             TEX_TEXELS = [((x * 60) | ((y * 60) << 8) | (128 << 16) |
@@ -11670,6 +11676,27 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 _iv = math.floor(_f32(_v[1] * TEX_H))
                 exp_img.append(TEX_TEXELS[_mir(_iv, TEX_H) * TEX_W
                                           + _mir(_iu, TEX_W)])
+        elif is_ftexc:
+            # NEAREST + CLAMP_TO_BORDER (W_TX* f_twrap m=3): same
+            # floor(u*w) integer coord; a coord outside [0,dim) sets the
+            # border flag -> W_TXD substitutes f_bord16(borderColor)
+            # instead of fetching a texel.  borderColor=5 -> all-0xFFFF
+            # u16 -> rrm=0xFFFF -> wb=1.0 -> UNORM8 0xFF per channel.
+            _uv4 = [(u, v, 0.0, 1.0) for (u, v) in TEX_UV]
+            _gp = gfx_grad_pixels(TRI, _uv4, VP, SC, CW, CH, 1, 2)
+            exp_img = []
+            for w in range(CW * CH):
+                _px, _py = w % CW, w // CW
+                _v = _gp.get((_px, _py))
+                if _v is None:
+                    exp_img.append(clr_w)
+                    continue
+                _iu = math.floor(_f32(_v[0] * TEX_W))
+                _iv = math.floor(_f32(_v[1] * TEX_H))
+                if _iu < 0 or _iu >= TEX_W or _iv < 0 or _iv >= TEX_H:
+                    exp_img.append(0xFFFFFFFF)   # opaque-white border
+                else:
+                    exp_img.append(TEX_TEXELS[_iv * TEX_W + _iu])
         else:
             exp_img = [out_w if (w % CW, w // CW) in cov and
                        not ((is_kill and
@@ -12230,15 +12257,18 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         flags=0,
                         magFilter=1 if is_ftexl else 0,
                         minFilter=1 if is_ftexl else 0, mipmapMode=0,
-                        addressModeU=(1 if is_ftexmir
+                        addressModeU=(3 if is_ftexc
+                                      else 1 if is_ftexmir
                                       else 0 if is_ftexr else 2),
-                        addressModeV=(1 if is_ftexmir
+                        addressModeV=(3 if is_ftexc
+                                      else 1 if is_ftexmir
                                       else 0 if is_ftexr else 2),
                         addressModeW=2,
                         mipLodBias=f32b(0.0), anisotropyEnable=0,
                         maxAnisotropy=0, compareEnable=0, compareOp=0,
                         minLod=f32b(0.0), maxLod=f32b(0.0),
-                        borderColor=0, unnormalizedCoordinates=0),
+                        borderColor=5 if is_ftexc else 0,
+                        unnormalizedCoordinates=0),
                     pSampler=X['smp'])),
                 ('vkCreateDescriptorPool', dict(
                     device=X['dev'],
