@@ -1,5 +1,144 @@
 # Storamic development and qualification lanes
 
+Latest C0 follow-up (CPU47): the documented interface-level next step was
+implemented and *disproven*, then the residual was fully characterised.
+- **I-cache `ready` split.** `ready` moved out of `icache_drsp_t` onto a
+  scalar `icache_ready_*`/`dreq_ready_o` path across `cva6.sv`,
+  `g6lc_icache`, the AXI wrapper, all three cache subsystems and every
+  frontend variant. Both `verify --lint` targets elaborate cleanly, and
+  the exact CPU46 strict diagnostic was reproduced locally with the
+  forked `g6lc-fork-native` Verilator (`vlt-8c69f`, WSL) over the same
+  242-file closure. Result: **zero delta** — `both-origin0-fields` stays
+  at 9 identities, `dreq_o[366]`→`[365]` is only the struct renumber.
+  Full write-up: `cpu-icache-ready-interface.md`.
+- **`kill_s2` accept-guard cut.** The cone dump showed
+  `dreq_ready_o`'s READ hit-accept guard reading `dreq_i.kill_s2`
+  (`bp_fire`-carrying). Removing `~kill_s2` (keeping `~kill_s1`, the
+  I4xj pattern) gave **zero delta** and was reverted.
+- **Diagnosis.** All nine remaining identities are `svt-pipe`
+  `no-cut`/`cycle`/`require-contract`-annotated deliberate same-cycle
+  recurrences: the fetch/commit/CSR megaphase (`dreq_o`, `flush_ctrl_id`,
+  `update_access_exception` via frontend `kill`/`bp_fire`/`predict`) and
+  the D-cache request-port loop (`load_unit`→`lsu`→`cva6`→`ex_stage`,
+  A128; `wt_dcache_mem` `rd_data_o`/`rd_hit_oh_o`). No unintentional
+  residue remains to cut. C0 resolution is the **svt-plan predictor/
+  load-unit re-architecture** (A124/A128/A139) — a coordinated multi-
+  module redesign — not a module-local edit; per status policy no
+  diagnostic is waived.
+
+Latest C0 follow-up (CPU45–46): two structural edits, both behaviour-preserving.
+- **Scoreboard.** `issue_pointer[i]` is now `issue_pointer_q + i`, replacing a
+  chained self-read of one packed var. A cone-scoped SAT proof
+  (`sb_issue_ptr_equiv.sv`, P 1–4 × B 1–6) proves all 24 cases, and the
+  off-by-one mutant fails all 24 (`storamic-cpu46-f3e8943f`). Full-module
+  equivalence exceeded its 7,500 s budget. Synthesis shows 0 SCCs and 0
+  latches.
+- **I-cache.** `flush_d`, `areq_o.fetch_req` and `dreq_o.valid` (new
+  `p_response_valid`) are computed outside `p_fsm`, which reads `kill_s2`.
+  Full-module equivalence passes for imafdc, NonIdemPotence and WayPred
+  (imafdch). Three mutants are caught in every config. Synthesis shows 0
+  SCCs and 0 latches (`storamic-cpu45-97fb4382`).
+- **Diagnostics.** Strict full-core diagnostics go from 6→4 (fields) and
+  23→21 (FP), both origins, with no additions. Only `issue_pointer` and
+  `adapter_icache_data_ack` are removed (`storamic-cpu45core-bfa95a0d`).
+- **Regressions.** cpu-origin, fetch-queue, sbcommit and fp-lifetime pass.
+
+Remaining four identities: `flush_ctrl_id`, `update_access_exception` and
+I-cache `dreq_o[366]` (`ready`) all route through the frontend kill_s2/bp_fire
+loop, and the fourth is load_unit `req_port_o` through the D-cache port arrays.
+Diagnostic `split_var` on every I-cache response alias is inert. Splitting the
+D-cache port arrays exposes finer var-level identities (4→9), so it is not a
+fix. The gate-level full-core check still has 0 SCCs, so these are
+representation artifacts. Removing them needs an interface-level change, such
+as carrying I-cache `ready` outside the response struct, and a design decision
+(`storamic-cpu46core-f62bf710`).
+
+Latest C0 follow-up (CPU40–43): a bit-level gate-netlist SCC check ran on the
+full CPU wrapper (`g6lc_cpu40_top`, OriginEnabled=1, owned Yosys/slang,
+`proc; flatten; techmap; scc`, no abc, 5.85M gate cells, ~36 min, ~10 GB).
+The live tree had 65 real combinational SCCs (`storamic-cpu40-ccc97174`).
+All of them were in `csr_regfile.sv` `csr_update`: the never-defaulted `mask`
+temporary (64 bits) and the static block-local `DirVecOnly` (MTVEC), both held
+by the always_comb. CPU41 defaults `mask = '0` and makes `DirVecOnly`
+`automatic`. This is behaviour-preserving because every read follows a write in
+the same arm. The full-core netlist then has 0 SCCs and 0 latches
+(`storamic-cpu41-9d4ea06e`). All 57,397 `$_ALDFF_PN_` are `rst_ni` async-reset
+flops, and only the I-cache `vaddr_q` has a non-constant (boot address) reset.
+
+The check found no gate-level SCC in the scoreboard, commit, load-unit,
+frontend/I-cache or adapter regions. The six remaining UNOPTFLAT identities are
+therefore Verilator representation artifacts, not real feedback. This corrects
+the earlier CPU39b reading of the I-cache/frontend path as a genuine cycle.
+Strict CPU diagnostics are unchanged at 6/23 in both origins, including
+`update_access_exception`, and all 9 real-loop canaries still fail
+(`storamic-cpu41core-b4246064`).
+
+The cpu-origin bench required `aw/ar.cache == 0`. The core intentionally emits
+`axi_pkg::CACHE_MODIFIABLE` (`wt_axi_adapter.sv`, `axi_shim.sv`), so this bench
+could never pass, including at committed HEAD (`storamic-cpu42-2454a09b`). The
+bench now expects `CACHE_MODIFIABLE` and prints the fields on failure. Both
+origins pass (`CPU_ORIGIN_PASS`, 5 writes/4 reads, delay 0 and 16), and the
+aw-prot negatives still reject. Results are bit-identical on pristine HEAD and
+the live tree (`storamic-cpu43-333f05a1`).
+
+Two remote stages are now registered (CPU44):
+- `cpu-origin` (`run_cpu_origin.py`): runs both origins with delays 0/16 plus
+  an aw-prot negative. Positive cases need exactly one PASS with 5 writes and
+  4 reads. It passed as `storamic-8b77a9525b3e` in 94 s.
+- `csr-scc` (`run_csr_scc.py`): a synthesis-only gate-level check of
+  `csr_regfile` that needs 0 SCCs and 0 latches. A copy with the fix textually
+  reverted must show SCCs (130 found). It passed as `storamic-958e2705836e` in
+  118 s.
+
+Latest C0 follow-up (CPU38): `wt_dcache_missunit` aligns `mem_req_c.paddr`
+with a separate `mem_req_size` net instead of reading back `mem_req_c.size`
+from the same packed packet. Full-module combinational equivalence passes for
+imafdc (RVA+Zacas), imafdch and a derived `StoramicCheckpointEn=1` config; a
+paddr mutant is caught in all three. Synthesis 11,575 cells before and after,
+zero latches/SCCs. Strict CPU diagnostics in both origins: 7→6 (diagnostic
+representation) and 24→23 (FP controls), removing only `mem_req_c`. Six cones
+remain. Remote runs `storamic-cpu38-e9ef7236`, `storamic-cpu38core-add2ce84`.
+
+Latest C0 follow-up (CPU37): `core/cva6_mmu/cva6_ptw.sv` computes
+`shared_tlb_update_valid`/`is_napot_64k` in a separate `ptw_leaf_update`
+process from shared leaf predicates. With `UseSharedTlb=0` the shared TLB
+returns `update.valid` as `shared_tlb_hit_d`, which the walker reads only in
+IDLE; the single walker process made that a false loop. Full-module
+combinational equivalence against the frozen original (registers matched as
+cut points) is proved for imafdc, imafdch (H on) and stream8 (RVH+Svnapot);
+four mutants are each caught. Strict `cva6_mmu` lint names the loop on the
+original and is clean on the candidate; synthesis is 7,499→7,497 cells with
+zero latches/SCCs. Strict CPU diagnostics in both origins: 8→7 (diagnostic
+representation) and 25→24 (FP controls), removing exactly `shared_tlb_hit_d`
+with nothing added. No PTW-level simulation exists; the evidence is formal
+equivalence plus lint/synthesis. Seven cones remain; native admission remains
+disabled. All runs are remote (`storamic-cpu37-ecd824fd`,
+`storamic-cpu37core-01db33b0`, under `build-platform/workspace/build/storamic-cpu-37/`).
+The `fetch-queue`/`fetch-queue-synth` leaf stages are now registered and pass
+remotely (`storamic-e7ccb487a7dc`, `storamic-5fbcd93abe66`).
+
+Latest C0 follow-up (CPU36): instruction-queue address admission now reads the
+selected slot's control-flow type directly instead of the checkpoint-carrying
+FIFO payload, which is allocated from `consumed_o`. Proof across six queue
+geometries passes with every predicate mutant rejected. The actual queue passes
+five geometries with checkpoint feedback, and its checkpoint and PC oracles
+reject. Synthesis gives 56,651 cells before and after, with identical flops and
+zero latches/SCCs. A freshly built PGO compiler from the current
+`tools/verilator` (`bc8d406c3`) gives strict CPU diagnostics in both origin
+modes: 10→8 with the diagnostic representation and 27→25 with FP controls
+only. `ckpt_slot_v` and `push_cf` are removed, with no new reports. Full C0
+remains open: 8 cross-module cones are left, and native admission remains
+disabled. Evidence: `build-platform/workspace/build/storamic-cpu-36/` and
+`storamic-tools-35/`.
+
+Latest C0 follow-up: the independent load translation process passes control
+equivalence and the two registered actual-module stages on promoted sources.
+The captured strict off/on CPU diagnostics drop from 28 to 27, with no new
+named error. The selected profile runs in about 53 seconds; native admission
+and full C0 qualification remain open. See
+[cpu-load-translation.md](cpu-load-translation.md) for source/runtime identities,
+31 scenarios, five negative checks and the synthesis/timing limits.
+
 ## Evidence boundary
 
 This source audit supersedes earlier claims that ST-025 was complete at model
@@ -16,7 +155,33 @@ controls, not physical bandwidth guarantees. Keep these interfaces stable while
 repairing their lifetime and recovery semantics; do not add another transport
 to work around backend bugs.
 
-## Current status
+## Current review
+
+Use [completion-plan.md](completion-plan.md) for the current dependency order.
+The later endpoint, real VirtIO writer/DMA composition, independent MMIO seal,
+policy replacement and reset/rediscovery evidence supersede the historical
+record-engine checkpoint below. They validate model ownership; they do not
+supply native descriptor/identity/protection providers or CPU/cache/fabric
+synchronization.
+
+The source review also found that a passing small-capacity block model had not
+covered the full backend address contract. IN/OUT truncated high sector bits
+before issuing byte-addressed storage commands. A large capacity could admit
+aliased or wrapping accesses; an empty status descriptor and one oversized
+segment-count encoding could also cause side effects. The bounded correction
+and its original-RTL rejecting checks are recorded in
+[block-address-validation.md](block-address-validation.md).
+
+The final block/device profile now passes six selected remote stages in about
+130 seconds, with 119 matching packaged source hashes and two verified simulator
+PGO builds. Both formal modes close every original obligation: the window is
+proved by twenty independently established inductive invariants and a pointwise
+consequence; the other assertions and concrete covers retain their old bounds.
+Original RTL still rejects in six named reproductions and the final proof flow.
+The 62 omitted stages are explicit. This closes the bounded backend repair and
+verification bottleneck, not the native or physical completion gates.
+
+## Earlier record-engine checkpoint
 
 The ST-025D reserved-media implementation is now under immutable local
 validation. See `checkpoint-record-model.md`: actual alternating flash copies,
@@ -27,7 +192,7 @@ approach at component scope. No native binding or persistence capability has
 been enabled. Current launch plan: `storamic-489af3c88a3e`; local artifacts:
 `build-platform/workspace/build/storamic-checkpoint-record-01/`.
 The aggregate dry-run plans 25 steps and executes none; it is not a gate pass.
-The current local run is still in progress, including the latest C2 idle-context
+At that checkpoint the local run was still in progress, including the C2 idle-context
 loss fix and maintenance-drain/C1/dstore regressions. Earlier receipts do not
 qualify source changes made after their snapshots.
 
