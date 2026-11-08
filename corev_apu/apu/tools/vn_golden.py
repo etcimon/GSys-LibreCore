@@ -10742,6 +10742,16 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 bop_op = _op
                 break
         is_bop = bop_op is not None
+        # blendFactor: is_bfac + bfac_(sf,df) select the VkBlendFactor pair
+        # (op stays ADD).  Exercises f_fbase operand selection — DST_COLOR
+        # uses the dequantized dst_q in the multiply, SRC_COLOR the src.
+        bfac = None
+        for _tok, _sf, _df in (('bfacdst', 4, 1), ('bfacsrc', 2, 1),
+                               ('bfacdc', 4, 4), ('bfacsc', 2, 2)):
+            if _tok in gfx:
+                bfac = (_sf, _df)
+                break
+        is_bfac = bfac is not None
         is_wide = 'vbwide' in gfx
         # kill: fs_kill discards on a FragCoord 8x8 checkerboard — the
         # helper-lane path; vs_pos3 keeps vcol constant so tri_w holds
@@ -10950,7 +10960,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'vs_texlod.spv' if is_vtex else
                           'vs_tex.spv' if is_ftex else
                           'vs_pos3.spv' if is_blend or is_lop or is_bop
-                          or is_wide
+                          or is_bfac or is_wide
                           or is_kill
                           or is_killfn or is_fncall or is_depth or is_gradlike
                           or is_line or is_lstrip or is_polyln
@@ -10971,7 +10981,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'fs_demote_deriv.spv' if is_demdrv else
                           'fs_color.spv' if is_fcolor else
                           'fs_vcol.spv' if is_persp or is_dclamplike
-                          or is_blend or is_lop or is_bop
+                          or is_blend or is_lop or is_bop or is_bfac
                           or is_wide
                           or is_line or is_lstrip or is_polyln or is_polypnt
                           or is_depth or is_gradlike
@@ -11007,7 +11017,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # so the XOR against the clear dst exercises every channel
         COL = (1.0, 0.5, 0.25, 0.75) if is_lop else \
             (1.0, 0.0, 0.0, 0.75) if is_blend else \
-            (0.5, 0.25, 0.75, 0.625) if is_bop else (0.2, 0.4, 0.6, 1.0)
+            (0.5, 0.25, 0.75, 0.625) if is_bop or is_bfac else \
+            (0.2, 0.4, 0.6, 1.0)
         # grad: per-vertex distinct colours (draw order) — primaries +
         # distinct alpha so the smooth vcol varying exercises all four
         # interpolated channels; the oracle permutes these with the
@@ -11229,11 +11240,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                      (_rb[3] << 24))
             clr_w = (_db[0] | (_db[1] << 8) | (_db[2] << 16) |
                      (_db[3] << 24))
-        elif is_bop:
-            # blendOp ONE/ONE: per-pixel src = interpolated vcol (modelled
-            # bit-exact by gfx_grad_pixels in the exp_img branch below);
-            # dst = clear(0.25,0.5,0.125,0.375).  Only clr_w is needed
-            # here — the covered word is computed per-pixel.
+        elif is_bop or is_bfac:
+            # blendOp/blendFactor: dst operand = UNORM8 roundtrip of the
+            # clear (u8 then f32(u8)*K, K=0x3B808081).  Only clr_w is
+            # needed here — the covered word is per-pixel in exp_img.
             _cb = [cl_f32_u8(f32b(c)) for c in (0.25, 0.5, 0.125, 0.375)]
             clr_w = (_cb[0] | (_cb[1] << 8) | (_cb[2] << 16) |
                      (_cb[3] << 24))
@@ -11380,6 +11390,49 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 else:
                     _rb = [cl_f32_u8(f32b(_bopv(_v[c], _df[c])))
                            for c in range(4)]
+                    exp_img.append(_rb[0] | (_rb[1] << 8) |
+                                   (_rb[2] << 16) | (_rb[3] << 24))
+        elif is_bfac:
+            # blendFactor ADD: sf/df operand values via f_fbase mirror
+            # (src/dst colour/alpha per component, constants unused),
+            # bm1=src*sf, bm2=dst*df (MUL), result=bm1+bm2.  dst is the
+            # UNORM8 roundtrip; src is bit-exact interpolated vcol.
+            _dst = (0.25, 0.5, 0.125, 0.375)
+            _K255 = struct.unpack('<f', struct.pack('<I', 0x3B808081))[0]
+            _df = [_f32(cl_f32_u8(f32b(_dst[c])) * _K255)
+                   for c in range(4)]
+            _gp = gfx_grad_pixels(TRI, [COL] * 3, VP, SC, CW, CH, 1, 2)
+            _sf, _dfa = bfac
+            def _fbv(f, c, sv, dv):
+                if f == 0:
+                    b = 0.0
+                elif f == 1:
+                    b = 1.0
+                elif f in (2, 3):
+                    b = sv[c]
+                elif f in (4, 5):
+                    b = dv[c]
+                elif f in (6, 7):
+                    b = sv[3]
+                elif f in (8, 9):
+                    b = dv[3]
+                else:
+                    b = 1.0 if c == 3 else min(sv[3], _f32(1.0 - dv[3]))
+                return _f32(1.0 - b) if f in (3, 5, 7, 9, 12, 14) else b
+            exp_img = []
+            for w in range(CW * CH):
+                _px, _py = w % CW, w // CW
+                _v = _gp.get((_px, _py))
+                if _v is None:
+                    exp_img.append(clr_w)
+                else:
+                    _rb = []
+                    for c in range(4):
+                        _sfv = _fbv(_sf, c, _v, _df)
+                        _dfv = _fbv(_dfa, c, _v, _df)
+                        _bm1 = _f32(_v[c] * _sfv)
+                        _bm2 = _f32(_df[c] * _dfv)
+                        _rb.append(cl_f32_u8(f32b(_f32(_bm1 + _bm2))))
                     exp_img.append(_rb[0] | (_rb[1] << 8) |
                                    (_rb[2] << 16) | (_rb[3] << 24))
         elif is_grad or is_fcolor:
@@ -11760,15 +11813,20 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                            pAttachments=[st(
                                'VkPipelineColorBlendAttachmentState',
                                blendEnable=1,
-                               srcColorBlendFactor=1 if is_bop else 6,
-                               dstColorBlendFactor=1 if is_bop else 7,
+                               srcColorBlendFactor=(bfac[0] if is_bfac
+                                                    else 1 if is_bop else 6),
+                               dstColorBlendFactor=(bfac[1] if is_bfac
+                                                    else 1 if is_bop else 7),
                                colorBlendOp=bop_op if is_bop else 0,
-                               srcAlphaBlendFactor=1 if is_bop else 6,
-                               dstAlphaBlendFactor=1 if is_bop else 7,
+                               srcAlphaBlendFactor=(bfac[0] if is_bfac
+                                                    else 1 if is_bop else 6),
+                               dstAlphaBlendFactor=(bfac[1] if is_bfac
+                                                    else 1 if is_bop else 7),
                                alphaBlendOp=bop_op if is_bop else 0,
                                colorWriteMask=0xF)],
                            blendConstants=[0, 0, 0, 0])
-                        if is_blend or is_lop or is_bop else None),
+                        if is_blend or is_lop or is_bop or is_bfac
+                        else None),
                     pDynamicState=(
                         None if is_statvp else
                         st('VkPipelineDynamicStateCreateInfo',
@@ -12062,7 +12120,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                          ((0.2, 0.4, 0.6, 1.0)
                                           if is_lop else
                                           (0.25, 0.5, 0.125, 0.375)
-                                          if is_bop else
+                                          if is_bop or is_bfac else
                                           (0.2, 0.2, 0.2, 1.0)
                                           if is_blend else
                                           (0.0, 0.0, 0.0, 1.0))]))] + ([
