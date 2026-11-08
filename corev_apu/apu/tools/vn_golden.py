@@ -10748,7 +10748,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         bfac = None
         for _tok, _sf, _df in (('bfacdst', 4, 1), ('bfacsrc', 2, 1),
                                ('bfacdc', 4, 4), ('bfacsc', 2, 2),
-                               ('bfomsc', 3, 1), ('bfacal', 6, 8)):
+                               ('bfomsc', 3, 1), ('bfacal', 6, 8),
+                               ('bfomdc', 5, 1), ('bfomsa', 7, 1),
+                               ('bfomda', 9, 1)):
             if _tok in gfx:
                 bfac = (_sf, _df)
                 break

@@ -18674,9 +18674,9 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   `boprsub`/`bopmin`/`bopmax`, ONE/ONE factors; oracle models the
   UNORM8 dst roundtrip `f32(u8)*0x3B808081` + fpnew MUL/ADD/SUB/MM
   sequence + bit-exact `gfx_grad_pixels` vcol); **blendFactor
-  operand-selection** (`bfacdst`/`bfacsrc`/`bfacdc`/`bfacsc`/
-  `bfomsc`/`bfacal` — SRC_COLOR/DST_COLOR/SRC_ALPHA/DST_ALPHA/ONE/
-  ONE_MINUS_SRC_COLOR factor codes through `f_fbase`+`f_fminus`,
+  operand-selection** (9 sessions `bfacdst`/`bfacsrc`/`bfacdc`/`bfacsc`/
+  `bfomsc`/`bfacal`/`bfomdc`/`bfomsa`/`bfomda` — SRC/DST color+alpha,
+  ONE, and ONE_MINUS on all four bases through `f_fbase`+`f_fminus`,
   dst still UNORM8 roundtrip); smooth/perspective/
   derivative/demote interpolation; primitives, instancing, UBO,
   indexed/indirect — all bit-exact vgtop+vgsys).
@@ -18689,7 +18689,8 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   ~~depthClamp~~ DONE (`dclamp`/`dclampoff` above);
   **(4) MSAA, occlusion/timestamp queries, secondary
   CBs/subpasses, logicOp+blend combos, non-UNORM8 logicOp,
-  blend-factor constants/saturate/remaining one-minus arms**;
+  blend-factor ZERO/SRC_ALPHA_SATURATE/CONSTANT_* arms (saturate +
+  constants need RTL re-check — early oracle attempts diverged)**;
   **(5) SPIR-V toolchain** — no `spirv-as`/glslang, blocks MRT/
   noperspective/custom shaders.  Then CTS-1→CTS-2 caselists through
   the guest harness.  All directed-RTL session evidence only — no
