@@ -18827,7 +18827,22 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   gather-offset, sRGB, non-UNORM8 fmts; `fs_tex_proj`/`fs_tex_qlod`/
   `fs_tex_shadow` need a VS emitting nonzero `vcol.z/w` (vs_tex sets
   z=0 — blocked on shader tooling); `fs_tex_qlod` uses only `vcol.xy`
-  so it IS reachable but needs quad-derivative + SFU-log2 port.  **(c) MRT** — RTL `ca[3:0]`/`blend[3:0]` supports 4
+  so it IS reachable but needs quad-derivative + SFU-log2 port.
+  **LINEAR+REPEAT (`ftexw`) attempted, NOT landed** — the common
+  tiling config; oracle = ftexl bilinear with corner indices `%`-wrapped
+  instead of clamped.  FAILS bit-exact: 18 off-by-one LSB errors with
+  uv spanning [-0.4,1.4]; restricting uv to positive-only [0.3,1.4]
+  dropped it to 2 — negative `su0` (u<0.125 hits the -128 texel-center
+  offset -> su0<0) is the main trigger, but a residual 1-LSB coord/
+  fraction precision diff remains even for positive coords.  The 8.8
+  coord `floor(u*w*256-128)` is 64x more sensitive than NEAREST's
+  `floor(u*w)`, so sub-ULP differences in the interpolated `vcol.xy`
+  (or the exact f32 `ffma(u,w0<<8,cst)` vs `_f32(u*w*256-128)` rounding)
+  flip `su0`/`fu` at texel-boundary pixels.  Root-cause needed: verify
+  `_v[0]` from `gfx_grad_pixels` is the exact f32 the RTL's `va[1]`
+  carries for out-of-range uv, and whether RTL extracts the LINEAR
+  index/fraction from the signed 8.8 coord identically to spirv_model's
+  `su0>>8`/`su0&0xFF`.  **(c) MRT** — RTL `ca[3:0]`/`blend[3:0]` supports 4
   colour attachments; oracle render pass emits only 1 (+depth).
   **(d) MSAA / occlusion+timestamp queries / secondary CBs+subpasses
   / logicOp+blend / non-UNORM8 logicOp** — all feature-level.
