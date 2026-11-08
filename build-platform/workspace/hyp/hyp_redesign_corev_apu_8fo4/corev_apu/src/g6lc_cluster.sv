@@ -500,7 +500,9 @@ module g6lc_cluster
         .NR_CORES             (NC),
         // T9a: package-configured outstanding-transaction credit limit
         // (0 → default 4; legality range enforced by check_cfg)
-        .MAX_OUTSTANDING      (G6LCCfg.CohMaxOutstanding != 0 ? G6LCCfg.CohMaxOutstanding : 4),
+        // 0 is the unset package value: 2 slots per core, at least 4, at most 14.
+        .MAX_OUTSTANDING      (G6LCCfg.CohMaxOutstanding != 0 ? G6LCCfg.CohMaxOutstanding :
+                               ((NC * 2 < 4) ? 4 : ((NC * 2 > 14) ? 14 : NC * 2))),
         .SNOOP_FILTER_EN      (G6LCCfg.SnoopFilterEn),
         .SNOOP_FILTER_ENTRIES (G6LCCfg.SnoopFilterEntries != 0 ? G6LCCfg.SnoopFilterEntries
                                                                : COH_DEFAULT_SF_ENTRIES),

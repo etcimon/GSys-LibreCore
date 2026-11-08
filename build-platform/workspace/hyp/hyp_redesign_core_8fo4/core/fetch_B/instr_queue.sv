@@ -716,10 +716,14 @@ module instr_queue
     );
   end
 
+  // Address admission consumes the selected CF directly. The checkpoint
+  // payload in instr_data_in is allocated from consumed_o, so it must not
+  // feed this admission path. NoCF is the zero encoding, so the gathered
+  // `taken` equals `instr_data_in[f].cf != NoCF`.
   always_comb begin : gen_push_address
     push_address = 1'b0;
     for (int unsigned f = 0; f < NrFifo; f++) begin
-      push_address |= push_instr[f] & (instr_data_in[f].cf != g6lc_core_pkg::NoCF);
+      push_address |= push_instr[f] & (fsel_none[f] ? taken[0] : |(taken & fsel_oh[f]));
     end
   end
 

@@ -97,6 +97,23 @@ module g6lc_ai_dram_backend
     end
     //pragma translate_on
 
+`ifdef G6LC_SIM_DRAM_DELAY
+    // Verification knob: delay every channel of the simulation DRAM by
+    // G6LC_SIM_DRAM_DELAY cycles (pulp axi_delayer) to expose latency-dependent
+    // behaviour in the cores' memory paths. Off by default.
+    AXI_BUS #(
+        .AXI_ADDR_WIDTH ( AXI_ADDR_WIDTH ), .AXI_DATA_WIDTH ( AXI_DATA_WIDTH ),
+        .AXI_ID_WIDTH   ( AXI_ID_WIDTH   ), .AXI_USER_WIDTH ( AXI_USER_WIDTH )
+    ) delayed ();
+    axi_delayer_intf #(
+        .AXI_ID_WIDTH ( AXI_ID_WIDTH ), .AXI_ADDR_WIDTH ( AXI_ADDR_WIDTH ),
+        .AXI_DATA_WIDTH ( AXI_DATA_WIDTH ), .AXI_USER_WIDTH ( AXI_USER_WIDTH ),
+        .FIXED_DELAY_INPUT ( `G6LC_SIM_DRAM_DELAY ),
+        .FIXED_DELAY_OUTPUT ( `G6LC_SIM_DRAM_DELAY )
+    ) i_sim_dram_delay (
+        .clk_i, .rst_ni, .slv ( slave ), .mst ( delayed )
+    );
+`endif
     axi2mem #(
         .AXI_ID_WIDTH   ( AXI_ID_WIDTH   ),
         .AXI_ADDR_WIDTH ( AXI_ADDR_WIDTH ),
@@ -105,7 +122,11 @@ module g6lc_ai_dram_backend
     ) i_axi2mem (
         .clk_i  ( clk_i      ),
         .rst_ni ( rst_ni     ),
+`ifdef G6LC_SIM_DRAM_DELAY
+        .slave  ( delayed    ),
+`else
         .slave  ( slave      ),
+`endif
         .req_o  ( req        ),
         .we_o   ( we         ),
         .addr_o ( addr       ),

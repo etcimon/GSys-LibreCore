@@ -581,15 +581,19 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
                                ? cas_new_q
                                : (G6LCCfg.RVA && amo_sel) ? amo_data : miss_wdata_i[miss_port_idx];
   assign mem_req_c.user = (G6LCCfg.RVA && amo_sel) ? amo_user : miss_wuser_i[miss_port_idx];
-  assign mem_req_c.size   = (G6LCCfg.RVA && (amo_sel || cas_amo_sel)) ? {1'b0, amo_req_i.size}
+  // The size is a separate net so paddr alignment does not read back a field
+  // of mem_req_c (a self-referential packet the scheduler cannot order).
+  logic [2:0] mem_req_size;
+  assign mem_req_size     = (G6LCCfg.RVA && (amo_sel || cas_amo_sel)) ? {1'b0, amo_req_i.size}
                                                                          : miss_size_i[miss_port_idx];
+  assign mem_req_c.size   = mem_req_size;
   // Plain load/store for local CAS.D — no AXI ATOP
   assign mem_req_c.amo_op = (G6LCCfg.RVA && amo_sel && !cas_amo_sel) ? amo_req_i.amo_op : AMO_NONE;
 
   assign tmp_paddr         = (G6LCCfg.RVA && (amo_sel || cas_amo_sel))
                                  ? amo_req_i.operand_a[G6LCCfg.PLEN-1:0]
                                  : miss_paddr_i[miss_port_idx];
-  assign mem_req_c.paddr = paddrSizeAlign(tmp_paddr, mem_req_c.size);
+  assign mem_req_c.paddr = paddrSizeAlign(tmp_paddr, mem_req_size);
 
   ///////////////////////////////////////////////////////
   // back-off mechanism for LR/SC completion guarantee

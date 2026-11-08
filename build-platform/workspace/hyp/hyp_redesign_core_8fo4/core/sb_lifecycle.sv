@@ -225,9 +225,10 @@ module sb_lifecycle
 
   logic [G6LCCfg.TRANS_ID_BITS-1:0] reclaim_n;
 
-  assign issue_pointer[0] = issue_pointer_q;
-  for (genvar i = 0; i < G6LCCfg.NrIssuePorts; i++) begin
-    assign issue_pointer[i+1] = issue_pointer[i] + 'd1;
+  // Each slot is an offset of the register rather than of its neighbour, so
+  // the vector never reads itself (same value modulo the ring size).
+  for (genvar i = 0; i <= G6LCCfg.NrIssuePorts; i++) begin
+    assign issue_pointer[i] = issue_pointer_q + G6LCCfg.TRANS_ID_BITS'(i);
   end
 
   // an instruction is ready for issue if we have place in the issue FIFO

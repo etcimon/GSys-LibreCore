@@ -705,8 +705,6 @@ module g6lc_ptw
     ptw_error_at_g_st_o     = 1'b0;
     ptw_err_at_g_int_st_o   = 1'b0;
     ptw_access_exception_o  = 1'b0;
-    shared_tlb_update_valid = 1'b0;
-    is_napot_64k            = 1'b0;
     is_instr_ptw_n          = is_instr_ptw_q;
     ptw_lvl_n               = ptw_lvl_q;
     ptw_pptr_n              = ptw_pptr_q;
@@ -840,11 +838,9 @@ module g6lc_ptw
             // r48: legacy verdict merged from gen_legacy_dec.
             state_d                 = g6lc_ptw_state_e'(leg_state_d);
             global_mapping_n        = leg_global_mapping_n;
-            is_napot_64k            = leg_is_napot_64k;
             ptw_stage_d             = g6lc_ptw_stage_e'(leg_ptw_stage_d);
             ptw_lvl_n               = leg_ptw_lvl_n;
             ptw_pptr_n              = leg_ptw_pptr_n;
-            shared_tlb_update_valid = leg_tlb_update_valid;
             if (G6LCCfg.RVH) begin
               gpaddr_n    = leg_gpaddr_n;
               gptw_pptr_n = leg_gptw_pptr_n;
@@ -866,7 +862,6 @@ module g6lc_ptw
           state_d = LATENCY;
           if (dec_q.is_leaf) begin
             if (G6LCCfg.SvnapotEn && dec_q.napot_n) begin
-              is_napot_64k = dec_q.napot64k;
               if (dec_q.napot_fault) state_d = PROPAGATE_ERROR;
             end
             if (G6LCCfg.RVH) begin
@@ -893,14 +888,12 @@ module g6lc_ptw
               if (dec_q.perm_i_fault) begin
                 state_d = PROPAGATE_ERROR;
                 if (G6LCCfg.RVH) ptw_stage_d = ptw_stage_q;
-              end else if (dec_q.itlb_upd_ok)
-                shared_tlb_update_valid = 1'b1;
+              end
             end else begin
               // ------------
               // Update DTLB
               // ------------
-              if (dec_q.dtlb_upd_ok) shared_tlb_update_valid = 1'b1;
-              else begin
+              if (!dec_q.dtlb_upd_ok) begin
                 state_d = PROPAGATE_ERROR;
                 if (G6LCCfg.RVH) ptw_stage_d = ptw_stage_q;
               end
@@ -909,7 +902,6 @@ module g6lc_ptw
             if (dec_q.misaligned) begin
               state_d = PROPAGATE_ERROR;
               if (G6LCCfg.RVH) ptw_stage_d = ptw_stage_q;
-              shared_tlb_update_valid = 1'b0;
             end
             if (G6LCCfg.RVH && dec_q.rvh_ppn_err) begin
               state_d = PROPAGATE_ERROR;
@@ -947,7 +939,6 @@ module g6lc_ptw
         // perspective — allow_access reads ptw_pptr_q, stable since
         // WAIT_GRANT, so the live read is exact here.
         if (!allow_access) begin
-          shared_tlb_update_valid = 1'b0;
           // we have to return the failed address in bad_addr
           ptw_pptr_n = ptw_pptr_q;
           if (G6LCCfg.RVH) ptw_stage_d = ptw_stage_q;
@@ -993,6 +984,39 @@ module g6lc_ptw
       else if (state_q != WAIT_GRANT) state_d = LATENCY;
 
       kill_req_n = (state_q == WAIT_GRANT);
+    end
+  end
+
+  // Leaf-PTE TLB classification, split from the walker above so
+  // shared_tlb_update_valid/is_napot_64k no longer share the process that
+  // consumes shared_tlb_hit_i in IDLE. The predicates are the same ones the
+  // in-FSM assignments used: the legacy arm merges leg_* at
+  // (PTE_LOOKUP && data_rvalid_q); the PDEC arm replays the PTE_DECODE
+  // verdict on the registered dec_q bundle, including the misaligned-page
+  // and PMP allow_access clears. Values are identical cycle-for-cycle.
+  always_comb begin : ptw_leaf_update
+    shared_tlb_update_valid = 1'b0;
+    is_napot_64k            = 1'b0;
+    if (!PDEC) begin
+      if (state_q == PTE_LOOKUP && data_rvalid_q) begin
+        shared_tlb_update_valid = leg_tlb_update_valid;
+        is_napot_64k            = leg_is_napot_64k;
+      end
+    end else begin
+      if (state_q == PTE_DECODE) begin
+        if (!dec_q.invalid && dec_q.is_leaf) begin
+          if (G6LCCfg.SvnapotEn && dec_q.napot_n)
+            is_napot_64k = dec_q.napot64k;
+          if (is_instr_ptw_q) begin
+            if (!dec_q.perm_i_fault && dec_q.itlb_upd_ok)
+              shared_tlb_update_valid = 1'b1;
+          end else begin
+            if (dec_q.dtlb_upd_ok) shared_tlb_update_valid = 1'b1;
+          end
+          if (dec_q.misaligned) shared_tlb_update_valid = 1'b0;
+        end
+        if (!allow_access) shared_tlb_update_valid = 1'b0;
+      end
     end
   end
 

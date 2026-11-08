@@ -2753,7 +2753,7 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
         end
         // mask the register so that unsupported interrupts can never be set
         riscv::CSR_MTVEC: begin
-          logic DirVecOnly;
+          automatic logic DirVecOnly;
           DirVecOnly = G6LCCfg.DirectVecOnly ? 1'b0 : csr_wdata[0];
           mtvec_w = {csr_wdata[G6LCCfg.XLEN-1:2], 1'b0, DirVecOnly};
           // we are in vector mode, this implementation requires the additional

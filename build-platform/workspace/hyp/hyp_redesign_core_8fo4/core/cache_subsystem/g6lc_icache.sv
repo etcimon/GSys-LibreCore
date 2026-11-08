@@ -429,13 +429,10 @@ assign cl_tag_d  = (areq_i.fetch_valid) ? areq_i.fetch_paddr[G6LCCfg.ICACHE_TAG_
     cache_rden = 1'b0;
     cache_wren = 1'b0;
     inv_en = 1'b0;
-    flush_d = flush_q | flush_i;  // register incoming flush
     force_all_ways_d = 1'b0;
 
     // interfaces
     dreq_o.ready = 1'b0;
-    areq_o.fetch_req = 1'b0;
-    dreq_o.valid = 1'b0;
     // mem_data_req_o is the continuous assign below.
     // performance counter
     miss_o = 1'b0;
@@ -460,7 +457,6 @@ assign cl_tag_d  = (areq_i.fetch_valid) ? areq_i.fetch_paddr[G6LCCfg.ICACHE_TAG_
         flush_en = 1'b1;
         if (flush_done) begin
           state_d = IDLE;
-          flush_d = 1'b0;
           // if the cache was not enabled set this
           cache_en_d = en_i;
         end
@@ -497,7 +493,6 @@ assign cl_tag_d  = (areq_i.fetch_valid) ? areq_i.fetch_paddr[G6LCCfg.ICACHE_TAG_
       // reuse the miss mechanism to handle
       // the request
       READ: begin
-        areq_o.fetch_req = '1;
         // only enable tag comparison if cache is enabled
         cmp_en_d    = cache_en_q;
         // readout speculatively
@@ -554,10 +549,8 @@ assign cl_tag_d  = (areq_i.fetch_valid) ? areq_i.fetch_paddr[G6LCCfg.ICACHE_TAG_
       // later — the W1 request/response overlap accept lives here now, so a
       // hit can still admit the next lookup in the response cycle.
       READ_V: begin
-        areq_o.fetch_req = '1;
         cmp_en_d         = cache_en_q;
         cache_rden       = cache_en_q;
-        dreq_o.valid     = ~dreq_i.kill_s1;  // don't output on flush/misp/replay
         state_d          = IDLE;
 
         // W1: request/response overlap. A hit-response cycle may also
@@ -591,9 +584,6 @@ assign cl_tag_d  = (areq_i.fetch_valid) ? areq_i.fetch_paddr[G6LCCfg.ICACHE_TAG_
           // a combinational loop through the frontend branch predictor.
           // bp_pend_q / same_win already drops fall-through returns after a
           // taken branch. Cancel only on architectural kills (flush/misp/replay).
-          if (!(dreq_i.kill_s1 || flush_d)) begin
-            dreq_o.valid = 1'b1;
-          end
           // T17: install the line even when the requester killed the stream
           // (mispredict, SMT hart switch). The refill is current memory for a
           // cacheable address, so keeping it is always safe; dropping it let
@@ -612,7 +602,6 @@ assign cl_tag_d  = (areq_i.fetch_valid) ? areq_i.fetch_paddr[G6LCCfg.ICACHE_TAG_
       // wait until paddr is valid, and go
       // back to idle
       KILL_ATRANS: begin
-        areq_o.fetch_req = '1;
         if (areq_i.fetch_valid) begin
           state_d = IDLE;
         end
@@ -636,6 +625,37 @@ assign cl_tag_d  = (areq_i.fetch_valid) ? areq_i.fetch_paddr[G6LCCfg.ICACHE_TAG_
         state_d = FLUSH;
       end
     endcase  // state_q
+  end
+
+  // Pending flush, the frontend fetch request and the cache response
+  // valid are computed outside p_fsm: the FSM reads dreq_i.kill_s2
+  // (bp_fire) for request acceptance, and keeping these cones out of that
+  // process stops the response path from depending on the branch predictor
+  // it feeds. Values are identical to the in-FSM assignments they replace:
+  // flush_d is only cleared by a completed FLUSH, fetch_req is asserted in
+  // READ/READ_V/KILL_ATRANS, and valid follows the READ_V hit and MISS
+  // refill rules.
+  assign flush_d = (flush_q | flush_i) & ~((state_q == FLUSH) & flush_done);
+
+  // READ / READ_V / KILL_ATRANS hold the frontend fetch request (hyp8 adds
+  // READ_V, the registered hit-response state, on top of main's READ set).
+  assign areq_o.fetch_req = (state_q == READ) || (state_q == READ_V) ||
+                            (state_q == KILL_ATRANS);
+
+  always_comb begin : p_response_valid
+    dreq_o.valid = 1'b0;
+    if (state_q == READ_V) begin
+      // don't output on flush/misp/replay
+      dreq_o.valid = ~dreq_i.kill_s1;
+    end else if (state_q == MISS) begin
+      // I4xj: do not gate refill return on bp_fire (kill_s2); that creates
+      // a combinational loop through the frontend branch predictor.
+      // bp_pend_q / same_win already drops fall-through returns after a
+      // taken branch. Cancel only on architectural kills (flush/misp/replay).
+      if (mem_rtrn_vld_i && mem_rtrn_i.rtype == ICACHE_IFILL_ACK &&
+          !(dreq_i.kill_s1 || flush_d))
+        dreq_o.valid = 1'b1;
+    end
   end
 
   ///////////////////////////////////////////////////////
