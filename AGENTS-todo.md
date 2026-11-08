@@ -18664,12 +18664,26 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   end-to-end.  PASS `g1=4096 g2=4096 ulp=0 XF_FAULTS 0` on
   `vgtop-dbg`, both latency profiles.  Directed-RTL session evidence
   only — distinct from the native-model gaps below.
-- [ ] blend/depth/MRT, helper
-  lanes, end-to-end NoPerspective draw (needs a w-varying vertex
-  shader),
-  multi-descriptor/multi-stage end-to-end draws and capability/CTS/physical
-  gates before any capset or stock vkCmdDraw* advertisement; host-model
-  evidence only.
+- [ ] Graphics vector frontier — evaluated next steps (2026-11-07):
+  the tractable `ue_gpos` pipeline-state space is now saturated
+  (depth write + all 8 VkCompareOp + bounds + bias; scissor;
+  rasterizerDiscard; blend; **full 16-op VkLogicOp table**;
+  smooth/perspective/derivative/demote interpolation; primitives,
+  instancing, UBO, indexed/indirect — all bit-exact vgtop+vgsys).
+  Remaining, in dependency order: **(1) `W_TX*` texture oracle** —
+  highest-leverage; unblocks `fs_mip`/`fs_scene8`/`fs_shadowfog`/
+  `fs_tex_*` + G3d sampler generality; needs framebuffer-level
+  coord→8.8→LOD→texel→filter→decode + `img_mpitch` layer/mip layout
+  (adapt `spirv_model.py` texture path, currently wave-context-bound);
+  **(2) stencil** — needs a stencil attachment + op oracle;
+  **(3) depthClamp** — needs clip-space polygon model + a z-controlling
+  shader (`vs_clip` yields `z>w` for pos.z∈(-1/3,0) but needs custom
+  vertex data); **(4) MSAA, occlusion/timestamp queries, secondary
+  CBs/subpasses, logicOp+blend combos, non-UNORM8 logicOp**;
+  **(5) SPIR-V toolchain** — no `spirv-as`/glslang, blocks MRT/
+  noperspective/custom shaders.  Then CTS-1→CTS-2 caselists through
+  the guest harness.  All directed-RTL session evidence only — no
+  stock-guest/Mesa/CTS/capset/physical claims.
 
 ### vgctl Retained-Unmap Owner-Hold (RTL)
 
