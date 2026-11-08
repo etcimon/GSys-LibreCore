@@ -10718,9 +10718,20 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
 
         spvd = G.TOOLS / 'shader' / 'corpus'
         is_blend = 'blend' in gfx
-        # lopx: logicOpEnable + VkLogicOp XOR(6) — per-channel bitwise op
-        # on the UNORM8-encoded src vs dst, replacing the blend result
-        is_lopx = 'lopx' in gfx
+        # logicOp: is_lop + lop_op select the VkLogicOp code.  'lopx' is
+        # the committed XOR(6) short token; the lop<l> table covers the
+        # rest (longest-suffix match avoids 'lopor' eating 'loporinv').
+        lop_op = None
+        for _tok, _op in (('lopset', 15), ('lopnand', 14), ('loporinv', 13),
+                          ('lopinv2', 12), ('loporrev', 11), ('lopinvert', 10),
+                          ('lopequiv', 9), ('lopnor', 8), ('lopor', 7),
+                          ('lopxor', 6), ('lopx', 6), ('lopnoop', 5),
+                          ('lopandinv', 4), ('lopcopy', 3), ('lopandrev', 2),
+                          ('lopand', 1), ('lopclear', 0)):
+            if _tok in gfx:
+                lop_op = _op
+                break
+        is_lop = lop_op is not None
         is_wide = 'vbwide' in gfx
         # kill: fs_kill discards on a FragCoord 8x8 checkerboard — the
         # helper-lane path; vs_pos3 keeps vcol constant so tri_w holds
@@ -10922,7 +10933,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'vs_inst.spv' if is_inst else
                           'vs_texlod.spv' if is_vtex else
                           'vs_tex.spv' if is_ftex else
-                          'vs_pos3.spv' if is_blend or is_lopx or is_wide
+                          'vs_pos3.spv' if is_blend or is_lop or is_wide
                           or is_kill
                           or is_killfn or is_fncall or is_depth or is_gradlike
                           or is_line or is_lstrip or is_polyln
@@ -10942,7 +10953,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'fs_deriv2.spv' if is_deriv2 else
                           'fs_demote_deriv.spv' if is_demdrv else
                           'fs_color.spv' if is_fcolor else
-                          'fs_vcol.spv' if is_persp or is_blend or is_lopx
+                          'fs_vcol.spv' if is_persp or is_blend or is_lop
                           or is_wide
                           or is_line or is_lstrip or is_polyln or is_polypnt
                           or is_depth or is_gradlike
@@ -10976,7 +10987,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # sends pColorBlendState=None).
         # lopx src colour: (1.0,0.5,0.25,0.75) -> distinct UNORM8 bytes
         # so the XOR against the clear dst exercises every channel
-        COL = (1.0, 0.5, 0.25, 0.75) if is_lopx else \
+        COL = (1.0, 0.5, 0.25, 0.75) if is_lop else \
             (1.0, 0.0, 0.0, 0.75) if is_blend else (0.2, 0.4, 0.6, 1.0)
         # grad: per-vertex distinct colours (draw order) — primaries +
         # distinct alpha so the smooth vcol varying exercises all four
@@ -11166,13 +11177,20 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # UNORM rounding boundary); R|G<<8|B<<16|A<<24
             tri_w = (204 | (13 << 8) | (13 << 16) | (207 << 24))
             clr_w = 0xFF33_3333
-        elif is_lopx:
-            # logicOp XOR(6): per-channel s^d on the UNORM8 encodings of
-            # the constant src COL=(1,.5,.25,.75) and the clear dst
-            # (0.2,0.4,0.6,1.0); uncovered px keep the clear word.
+        elif is_lop:
+            # logicOp: per-channel f_lop(lop_op, src, dst) on the UNORM8
+            # encodings of the constant src COL and the clear dst
+            # (0.2,0.4,0.6,1.0); uncovered px keep the clear word.  The
+            # 16-case table mirrors rast.sv f_lop (VkLogicOp CLEAR..SET).
+            def _lop(s, d):
+                return ((0x00, s & d, s & (~d & 0xFF), s, (~s & 0xFF) & d,
+                         d, s ^ d, s | d, (~(s | d)) & 0xFF,
+                         (~(s ^ d)) & 0xFF, (~d) & 0xFF, s | (~d & 0xFF),
+                         (~s) & 0xFF, ((~s) & 0xFF) | d,
+                         (~(s & d)) & 0xFF, 0xFF)[lop_op])
             _sb = [cl_f32_u8(f32b(c)) for c in COL]
             _db = [cl_f32_u8(f32b(c)) for c in (0.2, 0.4, 0.6, 1.0)]
-            _rb = [_sb[i] ^ _db[i] for i in range(4)]
+            _rb = [_lop(_sb[i], _db[i]) for i in range(4)]
             tri_w = (_rb[0] | (_rb[1] << 8) | (_rb[2] << 16) |
                      (_rb[3] << 24))
             clr_w = (_db[0] | (_db[1] << 8) | (_db[2] << 16) |
@@ -11658,8 +11676,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     pColorBlendState=(
                         st('VkPipelineColorBlendStateCreateInfo',
                            flags=0,
-                           logicOpEnable=1 if is_lopx else 0,
-                           logicOp=6 if is_lopx else 0,   # XOR
+                           logicOpEnable=1 if is_lop else 0,
+                           logicOp=lop_op if is_lop else 0,
                            attachmentCount=1,
                            pAttachments=[st(
                                'VkPipelineColorBlendAttachmentState',
@@ -11672,7 +11690,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                alphaBlendOp=0,
                                colorWriteMask=0xF)],
                            blendConstants=[0, 0, 0, 0])
-                        if is_blend or is_lopx else None),
+                        if is_blend or is_lop else None),
                     pDynamicState=(
                         None if is_statvp else
                         st('VkPipelineDynamicStateCreateInfo',
@@ -11964,7 +11982,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         color=st('VkClearColorValue',
                                  uint32=[f32b(c) for c in
                                          ((0.2, 0.4, 0.6, 1.0)
-                                          if is_lopx else
+                                          if is_lop else
                                           (0.2, 0.2, 0.2, 1.0)
                                           if is_blend else
                                           (0.0, 0.0, 0.0, 1.0))]))] + ([

@@ -18630,21 +18630,25 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   identical).  PASS `g1=8192 g2=8192 ulp=0 XF_FAULTS 0` on **vgtop
   (cycles=823336) and vgsys (cycles=1161034)**.  depthClamp, stencil
   remain open.
-- [x] **CLOSED — logicOp (`ue_gpos_lopx_1`):** first `logicOpEnable` —
-  `VkLogicOp` XOR(6) on the R8G8B8A8_UNORM attachment.  `is_lopx` reuses
-  the `is_blend` shape (vs_pos3+fs_vcol, constant COL src, standard TRI
-  coverage) but emits `pColorBlendState` with `logicOpEnable=1,
-  logicOp=6` instead of blend factors.  RTL `f_lop_pix` applies the
-  15-entry `VkLogicOp` table per UNORM8 byte (`f_enc8`->`cl_f32_u8`)
-  between the encoded src and dst, selected over `rop_pix` by
-  `logic_op_en` (rast.sv:3610).  src COL=(1,.5,.25,.75)->bytes
-  (255,128,64,191), clear dst=(.2,.4,.6,1)->(51,102,153,255); XOR ->
-  covered px `0x40D9E6CC`, uncovered `0xFF996633`.  Oracle computes the
-  word via `cl_f32_u8`+`^` (not hardcoded) so the encode path is
-  exercised.  PASS `g1=4096 g2=4096 ulp=0 XF_FAULTS 0` on **vgtop
-  (cycles=622978) and vgsys (cycles=931753)**; `blend`/`dtest`/`tri`/
-  `ftex` byte-identical.  Remaining logicOp codes (AND/OR/NOR/...),
-  logicOp+blend-factor combos, and non-XOR ops remain open.
+- [x] **CLOSED — logicOp (`ue_gpos_lopx_1`/`lopor_1`/`lopset_1`):**
+  first `logicOpEnable` — `VkLogicOp` on the R8G8B8A8_UNORM attachment.
+  `is_lop`/`lop_op` reuse the `is_blend` shape (vs_pos3+fs_vcol,
+  constant COL src, standard TRI coverage) but emit `pColorBlendState`
+  with `logicOpEnable=1, logicOp=<code>`; a `lop<tok>` table maps the
+  session token to all 16 `VkLogicOp` codes (longest-suffix match, so
+  `loporinv`/`loporrev` don't collide with `lopor`).  RTL `f_lop_pix`
+  applies the 15-entry `f_lop` table per UNORM8 byte (`f_enc8`->
+  `cl_f32_u8`) between encoded src and dst, selected over `rop_pix` by
+  `logic_op_en` (rast.sv:3610); `blend[i].en` only gates UINT-blend
+  legality, not the write.  src COL=(1,.5,.25,.75)->(255,128,64,191),
+  clear dst=(.2,.4,.6,1)->(51,102,153,255).  Verified ops: **XOR(6)** ->
+  `0x40D9E6CC`, **OR(7)** -> `0xFFD9E6FF`, **SET(15)** -> `0xFFFFFFFF`;
+  oracle computes via a 16-case `_lop` table + `cl_f32_u8` (mirrors
+  `f_lop` CLEAR..SET exactly).  All three PASS `g1=4096 g2=4096 ulp=0
+  XF_FAULTS 0` on **vgtop (cycles=622978) and vgsys (cycles=931753)**;
+  `blend`/`dtest`/`tri`/`ftex` byte-identical.  Remaining 13 ops
+  (AND/NOR/EQUIV/INVERT/...) are table-ready but unverified; logicOp +
+  blend-factor combos and non-UNORM8 formats remain open.
 - [x] Instanced-draw session coverage (`c84531213`): `ue_gpos_inst_1`
   — `vs_inst` offsets clip-x by `0.4*gl_InstanceIndex-0.6`,
   `instanceCount=4`, `fs_flat` constant colour → union coverage over 4
