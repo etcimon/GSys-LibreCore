@@ -18752,6 +18752,17 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   differs from `dtest` in 5120 bytes and `dtest` regenerates
   byte-identical.  depthWriteEnable=0 without a depth test, and
   depth-test-off+write-on corners, remain open.
+  **blendEnable coverage — DONE** (`ue_gpos_bloff_1`): first
+  `blendEnable=0` session — pColorBlendState still emitted (state
+  transports, factors/op moot) but blending bypassed via
+  `blend[at].en=0`, so the covered pixel is the src vcol packed UNORM8
+  rather than src OP dst.  `is_bloff` reuses the is_bop base
+  (`is_bop=True`, ONE/ONE factors); oracle is_bop branch emits
+  `cl_f32_u8(f32b(_v[c]))` src passthrough instead of `_bopv`; emission
+  `blendEnable=0 if is_bloff else 1`.  Verified PASS bit-exact (ulp=0)
+  on existing `tb_g6lc_apu_vgtop` + `tb_g6lc_apu_vgsys` — no rebuild;
+  `.exp` differs from `bopadd` in 5120 bytes and `bopadd` regenerates
+  byte-identical.  blendEnable=0 + colourWriteMask combos remain open.
   **(5) SPIR-V toolchain** — no `spirv-as`/glslang, blocks MRT/
   noperspective/custom shaders.  Then CTS-1→CTS-2 caselists through
   the guest harness.  All directed-RTL session evidence only — no

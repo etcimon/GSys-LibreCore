@@ -10770,8 +10770,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # R=1,G=2,B=4,A=8).  cwm sessions reuse the is_bop ONE/ONE ADD base so
         # pColorBlendState is emitted; masked channels keep the dst/clear byte.
         is_cwm = 'cwm' in gfx
+        # bloff: blendEnable=0 on the is_bop base — pColorBlendState is
+        # still emitted (state transports) but blending is bypassed, so
+        # the covered pixel is the src vcol packed UNORM8, not src OP dst.
+        is_bloff = 'bloff' in gfx
         cwm_mask = 0x7 if is_cwm else 0xF
-        if is_cwm:
+        if is_cwm or is_bloff:
             is_bop = True
             if bop_op is None:
                 bop_op = 0
@@ -11424,8 +11428,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 if _v is None:
                     exp_img.append(clr_w)
                 else:
-                    _rb = [cl_f32_u8(f32b(_bopv(_v[c], _df[c])))
-                           for c in range(4)]
+                    _rb = ([cl_f32_u8(f32b(_v[c])) for c in range(4)]
+                           if is_bloff else
+                           [cl_f32_u8(f32b(_bopv(_v[c], _df[c])))
+                            for c in range(4)])
                     if is_cwm:
                         # colourWriteMask: channels whose mask bit is clear
                         # keep the dst (clear) byte instead of the blend.
@@ -11866,7 +11872,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                            attachmentCount=1,
                            pAttachments=[st(
                                'VkPipelineColorBlendAttachmentState',
-                               blendEnable=1,
+                               blendEnable=0 if is_bloff else 1,
                                srcColorBlendFactor=(bfac[0] if is_bfac
                                                     else 1 if is_bop else 6),
                                dstColorBlendFactor=(bfac[1] if is_bfac
