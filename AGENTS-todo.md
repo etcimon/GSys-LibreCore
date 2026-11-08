@@ -18879,7 +18879,20 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   is the only implicit-LOD FS whose uv varies per-pixel -> nonzero λ;
   needs quad-derivative d(uv)/dx,dy -> λ -> m0/m1 select -> trilinear
   accumulate (reuse ftexl weights per mip + `tx_acc1` blend) — largest
-  remaining build; **(ii) gather — DONE** (`ue_gpos_ftex_gath_1`;
+  remaining build.  **Recipe (de-risked 2026-11-08)**: (a) λ per
+  `spirv_model.ilod_v` — for each 2x2 quad lane li=l&3, neighbour diffs
+  ax=(v[li|1].u-v[li&~1].u)*w0, bx=(v[li|1].v-v[li&~1].v)*h0,
+  ay=(v[li|2].u-v[li&~2].u)*w0, by=(v[li|2].v-v[li&~2].v)*h0 (fp32
+  fmul/fsub/ffma), dx2=ax²+bx², dy2=ay²+by², rho2=max, λ=0.5*log2(rho2)
+  via `sfu_tables.sfu_eval(30,...)` — needs pixel->quad-lane map + the
+  dvals/qpull quad gather; (b) `le=floor(λ*16)` q4.4 (RDN), mipmapMode
+  LINEAR -> m0=le>>4, m1=m0+1, fw=le&0xF; (c) `img_walk` mip layout —
+  level dims halve each mip (wd>>1,hd>>1, min1), pitch=align(wd*bpp,64),
+  byte offset accumulates pit*hd per level; image needs mipLevels>=2
+  (4x4->2x2->1x1) with all levels uploaded; (d) trilinear = ftexl
+  bilinear per mip then blend the two mip results by fw/16.  Biggest
+  sub-risk: exact quad-lane->pixel mapping + fp32/SFU bit-exactness;
+  **(ii) gather — DONE** (`ue_gpos_ftex_gath_1`;
   `is_ftexgath`, session token `ftex_gath` — the underscore keeps
   `ftexg` single-texel gather from matching): reuses `fs_tex_gather.spv`
   (OpImageGather comp0 no-offset + OpImageGather ConstOffset(1,0) comp1).
