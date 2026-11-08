@@ -10750,7 +10750,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                ('bfacdc', 4, 4), ('bfacsc', 2, 2),
                                ('bfomsc', 3, 1), ('bfacal', 6, 8),
                                ('bfomdc', 5, 1), ('bfomsa', 7, 1),
-                               ('bfomda', 9, 1)):
+                               ('bfomda', 9, 1), ('bfzero', 0, 1)):
             if _tok in gfx:
                 bfac = (_sf, _df)
                 break
