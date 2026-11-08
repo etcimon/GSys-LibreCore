@@ -18834,15 +18834,23 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   the texel.  `borderColor=5` (INT_OPAQUE_WHITE) -> all-0xFFFF u16 ->
   opaque-white border `0xFFFFFFFF`.  Verified PASS bit-exact (ulp=0)
   vgtop (17122) + vgsys (17291); `.exp` differs from all wrap peers;
-  all texture sessions regen byte-identical.  **NOTE — borderColor
-  decode discrepancy (suspected latent RTL bug, like the blend-factor
-  enum)**: `borderColor` is stored raw (`vnfront` `sam_w0_q[16:14]` =
-  `imm[14]`, validated <=5, NOT remapped) but `f_bord16`/`f_bord32`
-  decode a custom code — b=4/5->white, b=2/3->alpha-only, else->0 —
-  which agrees with VkBorderColor ONLY for b=0 (TRANSPARENT_BLACK) and
-  b=5 (OPAQUE_WHITE); b=1..4 diverge (e.g. FLOAT_OPAQUE_WHITE=2 yields
-  opaque-black-alpha, INT_OPAQUE_BLACK=4 yields white).  ftexc uses
-  b=5 which is spec-correct; the 1..4 range needs a directed probe.
+  all texture sessions regen byte-identical.  **borderColor decode bug
+  FOUND + FIXED (2026-11-08)**: `borderColor` is stored raw
+  (`vnfront` `sam_w0_q[16:14]` = `imm[14]`, validated <=5, NOT remapped)
+  = the VkBorderColor enum, but `f_bord16`/`f_bord32` decoded a
+  permuted code — b=4/5->white, b=2/3->alpha-only, else->0 — wrong for
+  b=1..4 (e.g. FLOAT_OPAQUE_WHITE=2 yielded opaque-black-alpha,
+  INT_OPAQUE_BLACK=4 yielded white).  Reproduced empirically:
+  `ue_gpos_ftexc2_1` (borderColor=2) returned `ff000000` where spec
+  expects `ffffffff`.  **Fix**: `f_bord16`/`f_bord32` now decode the
+  raw VkBorderColor directly — {0,3}->transparent, {1,4}->opaque black
+  (RGB 0, A max), {2,5}->opaque white (FLOAT_* and INT_* share numerals
+  once normalised).  Verified bit-exact (ulp=0) on all three distinct
+  border colours: `ftexc`(5 white) + `ftexc2`(2 white) + `ftexcb`(1
+  black) + `ftexct`(0 transparent) — vgtop (17123) + vgsys (17291);
+  all texture sessions regen byte-identical.  NOTE: the *integer-format*
+  border arm (`tx_isint_q`, `tx_bcol_q>=4`/`==3` -> `32'd1`) is a separate
+  decode for int textures — untested, needs int-texture border sessions.
   Remaining W_TX*: LOD/mip walk (`fs_mip`), projective (`fs_tex_proj`),
   explicit-LOD (`fs_tex_qlod`), shadow/compare (`fs_tex_shadow`),
   gather-offset, sRGB, non-UNORM8 fmts; `fs_tex_proj`/`fs_tex_qlod`/

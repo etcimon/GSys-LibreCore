@@ -11006,6 +11006,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # per-vertex uv, texel payload) for NEAREST/LINEAR/REPEAT/MIRROR.
         is_ftexm = (is_ftexn or is_ftexl or is_ftexr or is_ftexmir
                     or is_ftexc)
+        # CLAMP_TO_BORDER borderColor selector (raw VkBorderColor 0..5):
+        # ftexc=5 INT_OPAQUE_WHITE, ftexc2=2 FLOAT_OPAQUE_WHITE (probes the
+        # f_bord16 decode), ftexcb=1 FLOAT_OPAQUE_BLACK, ftexct=0
+        # FLOAT_TRANSPARENT_BLACK.  Oracle maps {2,5}->white, {1,4}->black,
+        # {0,3}->transparent.
+        ftex_bc = ((2 if 'ftexc2' in gfx else
+                    1 if 'ftexcb' in gfx else
+                    0 if 'ftexct' in gfx else 5)
+                   if is_ftexc else 0)
         # line: LINE_LIST topology — 2 vertices, 1px Bresenham walk with
         # flat colour from vertex 0 (the g6lc_apu_rast S_LN_* path)
         is_line = 'line' in gfx
@@ -11680,10 +11689,14 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # NEAREST + CLAMP_TO_BORDER (W_TX* f_twrap m=3): same
             # floor(u*w) integer coord; a coord outside [0,dim) sets the
             # border flag -> W_TXD substitutes f_bord16(borderColor)
-            # instead of fetching a texel.  borderColor=5 -> all-0xFFFF
-            # u16 -> rrm=0xFFFF -> wb=1.0 -> UNORM8 0xFF per channel.
+            # instead of fetching a texel.  borderColor is the raw
+            # VkBorderColor; oracle maps {2,5}->opaque white, {1,4}->opaque
+            # black, {0,3}->transparent.
             _uv4 = [(u, v, 0.0, 1.0) for (u, v) in TEX_UV]
             _gp = gfx_grad_pixels(TRI, _uv4, VP, SC, CW, CH, 1, 2)
+            _bord = (0xFFFFFFFF if ftex_bc in (2, 5)
+                     else 0xFF000000 if ftex_bc in (1, 4)
+                     else 0x00000000)
             exp_img = []
             for w in range(CW * CH):
                 _px, _py = w % CW, w // CW
@@ -11694,7 +11707,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 _iu = math.floor(_f32(_v[0] * TEX_W))
                 _iv = math.floor(_f32(_v[1] * TEX_H))
                 if _iu < 0 or _iu >= TEX_W or _iv < 0 or _iv >= TEX_H:
-                    exp_img.append(0xFFFFFFFF)   # opaque-white border
+                    exp_img.append(_bord)
                 else:
                     exp_img.append(TEX_TEXELS[_iv * TEX_W + _iu])
         else:
@@ -12267,7 +12280,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         mipLodBias=f32b(0.0), anisotropyEnable=0,
                         maxAnisotropy=0, compareEnable=0, compareOp=0,
                         minLod=f32b(0.0), maxLod=f32b(0.0),
-                        borderColor=5 if is_ftexc else 0,
+                        borderColor=ftex_bc,
                         unnormalizedCoordinates=0),
                     pSampler=X['smp'])),
                 ('vkCreateDescriptorPool', dict(

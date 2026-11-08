@@ -232,8 +232,13 @@ python3 $G --graphics-session ue_gpos_ftexr_1 1
 python3 $G --graphics-session ue_gpos_ftexmir_1 1
 # fragment NEAREST multi-texel + CLAMP_TO_BORDER: same 4x4 CIS + wide
 # uv; coords outside [0,dim) raise the f_twrap m=3 border flag ->
-# f_bord16(borderColor=5=INT_OPAQUE_WHITE) opaque-white border
+# f_bord16(borderColor) border substitute.  ftexc=5 white, ftexc2=2 white
+# (regression for the raw-VkBorderColor decode), ftexcb=1 black,
+# ftexct=0 transparent — together they pin f_bord16/32 for {0,1,2,5}.
 python3 $G --graphics-session ue_gpos_ftexc_1 1
+python3 $G --graphics-session ue_gpos_ftexc2_1 1
+python3 $G --graphics-session ue_gpos_ftexcb_1 1
+python3 $G --graphics-session ue_gpos_ftexct_1 1
 # line-list draw: topology=1, vertexCount=2; gfx_line_coverage mirrors the
 # RTL S_LN_* integer Bresenham (vxi>>>8 pixel coords, lerr=ldx-ldy) so the
 # 1-px line footprint is bit-exact; fs_vcol keeps flat vertex-0 colour
