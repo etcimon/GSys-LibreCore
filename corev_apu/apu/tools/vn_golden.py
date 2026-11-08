@@ -10732,6 +10732,16 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 lop_op = _op
                 break
         is_lop = lop_op is not None
+        # blendOp: is_bop + bop_op select the VkBlendOp.  ONE/ONE factors
+        # make result = clamp(src OP dst) on every channel; constant COL
+        # src + clear dst give each op a distinct UNORM8 word.
+        bop_op = None
+        for _tok, _op in (('boprsub', 2), ('bopsub', 1), ('bopadd', 0),
+                          ('bopmin', 3), ('bopmax', 4)):
+            if _tok in gfx:
+                bop_op = _op
+                break
+        is_bop = bop_op is not None
         is_wide = 'vbwide' in gfx
         # kill: fs_kill discards on a FragCoord 8x8 checkerboard — the
         # helper-lane path; vs_pos3 keeps vcol constant so tri_w holds
@@ -10939,7 +10949,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'vs_inst.spv' if is_inst else
                           'vs_texlod.spv' if is_vtex else
                           'vs_tex.spv' if is_ftex else
-                          'vs_pos3.spv' if is_blend or is_lop or is_wide
+                          'vs_pos3.spv' if is_blend or is_lop or is_bop
+                          or is_wide
                           or is_kill
                           or is_killfn or is_fncall or is_depth or is_gradlike
                           or is_line or is_lstrip or is_polyln
@@ -10960,7 +10971,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'fs_demote_deriv.spv' if is_demdrv else
                           'fs_color.spv' if is_fcolor else
                           'fs_vcol.spv' if is_persp or is_dclamplike
-                          or is_blend or is_lop
+                          or is_blend or is_lop or is_bop
                           or is_wide
                           or is_line or is_lstrip or is_polyln or is_polypnt
                           or is_depth or is_gradlike
@@ -10995,7 +11006,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # lopx src colour: (1.0,0.5,0.25,0.75) -> distinct UNORM8 bytes
         # so the XOR against the clear dst exercises every channel
         COL = (1.0, 0.5, 0.25, 0.75) if is_lop else \
-            (1.0, 0.0, 0.0, 0.75) if is_blend else (0.2, 0.4, 0.6, 1.0)
+            (1.0, 0.0, 0.0, 0.75) if is_blend else \
+            (0.5, 0.25, 0.75, 0.625) if is_bop else (0.2, 0.4, 0.6, 1.0)
         # grad: per-vertex distinct colours (draw order) — primaries +
         # distinct alpha so the smooth vcol varying exercises all four
         # interpolated channels; the oracle permutes these with the
@@ -11217,6 +11229,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                      (_rb[3] << 24))
             clr_w = (_db[0] | (_db[1] << 8) | (_db[2] << 16) |
                      (_db[3] << 24))
+        elif is_bop:
+            # blendOp ONE/ONE: per-pixel src = interpolated vcol (modelled
+            # bit-exact by gfx_grad_pixels in the exp_img branch below);
+            # dst = clear(0.25,0.5,0.125,0.375).  Only clr_w is needed
+            # here — the covered word is computed per-pixel.
+            _cb = [cl_f32_u8(f32b(c)) for c in (0.25, 0.5, 0.125, 0.375)]
+            clr_w = (_cb[0] | (_cb[1] << 8) | (_cb[2] << 16) |
+                     (_cb[3] << 24))
+            tri_w = clr_w
         elif is_tex:
             # 1x1 texture texel RGBA8 = (200,80,160,255); the FS emits
             # the sampled colour -> framebuffer (200,80,160,255)
@@ -11332,6 +11353,35 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             exp_img = [_u8pack(_gp[(w % CW, w // CW)])
                        if (w % CW, w // CW) in _gp else clr_w
                        for w in range(CW * CH)]
+        elif is_bop:
+            # blendOp ONE/ONE per pixel.  dst operand = the UNORM8
+            # roundtrip: clear quantized to u8 then dequantized as
+            # f32(u8)*K, K=0x3B808081 (~1/255) — NOT the f32 clear.
+            # src = bit-exact interpolated vcol (gfx_grad_pixels).  RTL
+            # sequence: bm1=src*1.0, bm2=dst*1.0, then ADD(b+c)/SUB(b-c)
+            # /RSUB(d-s); MIN/MAX (op>=3) skip factors, f32 compare.
+            _dst = (0.25, 0.5, 0.125, 0.375)
+            _K255 = struct.unpack('<f', struct.pack('<I', 0x3B808081))[0]
+            _df = [_f32(cl_f32_u8(f32b(_dst[c])) * _K255)
+                   for c in range(4)]
+            _gp = gfx_grad_pixels(TRI, [COL] * 3, VP, SC, CW, CH, 1, 2)
+            def _bopv(s, d):
+                return (_f32(s + d) if bop_op == 0 else
+                        _f32(s - d) if bop_op == 1 else
+                        _f32(d - s) if bop_op == 2 else
+                        (s if s < d else d) if bop_op == 3 else
+                        (s if d < s else d))
+            exp_img = []
+            for w in range(CW * CH):
+                _px, _py = w % CW, w // CW
+                _v = _gp.get((_px, _py))
+                if _v is None:
+                    exp_img.append(clr_w)
+                else:
+                    _rb = [cl_f32_u8(f32b(_bopv(_v[c], _df[c])))
+                           for c in range(4)]
+                    exp_img.append(_rb[0] | (_rb[1] << 8) |
+                                   (_rb[2] << 16) | (_rb[3] << 24))
         elif is_grad or is_fcolor:
             # smooth-varying interpolation: per-pixel bit-exact fpnew
             # oracle -> interpolated f32 vcol vec4; pack per the FS.
@@ -11710,15 +11760,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                            pAttachments=[st(
                                'VkPipelineColorBlendAttachmentState',
                                blendEnable=1,
-                               srcColorBlendFactor=6,   # SRC_ALPHA
-                               dstColorBlendFactor=7,   # ONE_MINUS_SRC_ALPHA
-                               colorBlendOp=0,          # ADD
-                               srcAlphaBlendFactor=6,
-                               dstAlphaBlendFactor=7,
-                               alphaBlendOp=0,
+                               srcColorBlendFactor=1 if is_bop else 6,
+                               dstColorBlendFactor=1 if is_bop else 7,
+                               colorBlendOp=bop_op if is_bop else 0,
+                               srcAlphaBlendFactor=1 if is_bop else 6,
+                               dstAlphaBlendFactor=1 if is_bop else 7,
+                               alphaBlendOp=bop_op if is_bop else 0,
                                colorWriteMask=0xF)],
                            blendConstants=[0, 0, 0, 0])
-                        if is_blend or is_lop else None),
+                        if is_blend or is_lop or is_bop else None),
                     pDynamicState=(
                         None if is_statvp else
                         st('VkPipelineDynamicStateCreateInfo',
@@ -12011,6 +12061,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                  uint32=[f32b(c) for c in
                                          ((0.2, 0.4, 0.6, 1.0)
                                           if is_lop else
+                                          (0.25, 0.5, 0.125, 0.375)
+                                          if is_bop else
                                           (0.2, 0.2, 0.2, 1.0)
                                           if is_blend else
                                           (0.0, 0.0, 0.0, 1.0))]))] + ([

@@ -18670,9 +18670,12 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   rasterizerDiscard; blend; **full 16-op VkLogicOp table**;
   **depthClamp** (`dclamp`/`dclampoff`: vs_clip pos.z=-0.2 -> clip
   z=0.4>w=0.2, ndc z=2 beyond far; clamp=1 rasterizes, clamp=0
-  near/far-clips -> empty); smooth/perspective/derivative/demote
-  interpolation; primitives, instancing, UBO, indexed/indirect — all
-  bit-exact vgtop+vgsys).
+  near/far-clips -> empty); **full VkBlendOp table** (`bopadd`/`bopsub`/
+  `boprsub`/`bopmin`/`bopmax`, ONE/ONE factors; oracle models the
+  UNORM8 dst roundtrip `f32(u8)*0x3B808081` + fpnew MUL/ADD/SUB/MM
+  sequence + bit-exact `gfx_grad_pixels` vcol); smooth/perspective/
+  derivative/demote interpolation; primitives, instancing, UBO,
+  indexed/indirect — all bit-exact vgtop+vgsys).
   Remaining, in dependency order: **(1) `W_TX*` texture oracle** —
   highest-leverage; unblocks `fs_mip`/`fs_scene8`/`fs_shadowfog`/
   `fs_tex_*` + G3d sampler generality; needs framebuffer-level
