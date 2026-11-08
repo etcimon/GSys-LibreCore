@@ -10976,6 +10976,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # CIS; every footprint corner clamps to the one texel so the
         # output is a fixed function of tri_w, not tri_w itself
         is_ftexg = 'ftexg' in gfx
+        # ftexn: fragment NEAREST multi-texel — first real W_TX* sample:
+        # a 4x4 RGBA8 image + per-vertex uv spanning [0,1] so the smooth
+        # vcol.xy varying selects different texels per covered pixel;
+        # oracle interpolates uv bit-exact (gfx_grad_pixels) then applies
+        # the NEAREST coord transform floor(u*w)/floor(v*h)+CLAMP_TO_EDGE
+        # and the RGBA8 UNORM decode (byte*0x101 -> f32 -> u8 identity).
+        is_ftexn = 'ftexn' in gfx
         # line: LINE_LIST topology — 2 vertices, 1px Bresenham walk with
         # flat colour from vertex 0 (the g6lc_apu_rast S_LN_* path)
         is_line = 'line' in gfx
@@ -11184,12 +11191,25 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                              f32b(_uu), f32b(_vv)]
                 vb_words += [f32b(c) for c in _cc]
         else:
-            for (vx_, vy_, _vz, _vw) in TRI:
+            # ftexn texture table: 4x4 RGBA8, texel(x,y) packed
+            # R|G<<8|B<<16|A<<24 encodes (x*60, y*60, 128, 255) so the
+            # sampled image is a recognisable texel grid; per-vertex uv
+            # spans [0,1] so vcol.xy interpolates across all 16 texels.
+            # uv avoids the 0.25/0.5/0.75 cell boundaries at the verts.
+            TEX_W = TEX_H = 4 if is_ftexn else 1
+            TEX_UV = [(0.125, 0.125), (0.5, 0.875), (0.875, 0.125)] \
+                if is_ftexn else [(0.5, 0.5)] * 3
+            TEX_TEXELS = [((x * 60) | ((y * 60) << 8) | (128 << 16) |
+                           (255 << 24))
+                          for y in range(TEX_H) for x in range(TEX_W)] \
+                if is_ftexn else []
+            for _vi, (vx_, vy_, _vz, _vw) in enumerate(TRI):
                 if is_tex:
                     # {pos.xy @0, uv.xy @1} stride 16; uv is constant —
                     # the 1x1 texture makes the sampled colour uv-independent
                     vb_words += [f32b(vx_), f32b(vy_),
-                                 f32b(0.5), f32b(0.5)]
+                                 f32b(TEX_UV[_vi][0]),
+                                 f32b(TEX_UV[_vi][1])]
                 elif is_wide:
                     vb_words += [f32b(vx_), f32b(vy_)]
                     vb2_words += [f32b(c) for c in COL]
@@ -11525,6 +11545,29 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # -> no fragments -> clear colour everywhere.  (is_dclamp
             # falls through to the cov->out_w base branch: unclipped.)
             exp_img = [clr_w for _ in range(CW * CH)]
+        elif is_ftexn:
+            # NEAREST multi-texel: interpolate vcol.xy (=uv attr, w=1 so
+            # the perspective divisor is exact) bit-exact per covered px,
+            # then the W_TX* NEAREST transform — floor(u*w)/floor(v*h)
+            # in f32 (f2i RDN) + CLAMP_TO_EDGE to [0,dim-1] — fetches one
+            # RGBA8 texel; UNORM8 writeback is the identity so the packed
+            # word is the texel bytes verbatim.
+            _uv4 = [(u, v, 0.0, 1.0) for (u, v) in TEX_UV]
+            _gp = gfx_grad_pixels(TRI, _uv4, VP, SC, CW, CH, 1, 2)
+            exp_img = []
+            for w in range(CW * CH):
+                _px, _py = w % CW, w // CW
+                _v = _gp.get((_px, _py))
+                if _v is None:
+                    exp_img.append(clr_w)
+                    continue
+                _iu = int(_f32(_v[0] * TEX_W))
+                _iv = int(_f32(_v[1] * TEX_H))
+                _iu = 0 if _iu < 0 else (TEX_W - 1 if _iu >= TEX_W
+                                         else _iu)
+                _iv = 0 if _iv < 0 else (TEX_H - 1 if _iv >= TEX_H
+                                         else _iv)
+                exp_img.append(TEX_TEXELS[_iv * TEX_W + _iu])
         else:
             exp_img = [out_w if (w % CW, w // CW) in cov and
                        not ((is_kill and
@@ -12056,7 +12099,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     device=X['dev'],
                     pCreateInfo=st('VkImageCreateInfo',
                         flags=0, imageType=1, format=37,
-                        extent=st('VkExtent3D', width=1, height=1,
+                        extent=st('VkExtent3D', width=TEX_W, height=TEX_H,
                                   depth=1),
                         mipLevels=1, arrayLayers=2 if is_ftexa else 1,
                         samples=1, tiling=0,
@@ -12161,7 +12204,20 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             base_t = map_blob(RES_BLOB0 + 3)
             # 1x1 RGBA8 texel(s): layer 0 always, plus layer 1 for the
             # arrayed-image variant (uniform colour keeps tri_w)
-            apw(base_t, [tri_w] * (2 if is_ftexa else 1))
+            if is_ftexn:
+                # W_TXM pitch = align(w*bpp,64) = 64B = 16 words/row for
+                # the 4x4 RGBA8 image; texel(x,y) lands at word y*16+x
+                # with the rest of each row zero-padded.
+                _pit_w = ((TEX_W * 4 + 63) & ~63) // 4
+                _timg = []
+                for _y in range(TEX_H):
+                    _row = [0] * _pit_w
+                    for _x in range(TEX_W):
+                        _row[_x] = TEX_TEXELS[_y * TEX_W + _x]
+                    _timg += _row
+                apw(base_t, _timg)
+            else:
+                apw(base_t, [tri_w] * (2 if is_ftexa else 1))
 
         seg_a2 = [
             ('vkBeginCommandBuffer', dict(

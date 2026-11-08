@@ -212,6 +212,11 @@ python3 $G --graphics-session ue_gpos_ftexa_1 1
 # corner clamps to the one texel so o=(200,200,80,80), decoupled from
 # the texel via out_w
 python3 $G --graphics-session ue_gpos_ftexg_1 1
+# fragment NEAREST multi-texel: first real W_TX* sample — 4x4 RGBA8 image
+# (64B pitch) + per-vertex uv spanning [0,1]; oracle interpolates vcol.xy
+# bit-exact then floor(u*w)/floor(v*h)+CLAMP_TO_EDGE selects one texel per
+# covered px; RGBA8 UNORM writeback is the identity so px = texel bytes
+python3 $G --graphics-session ue_gpos_ftexn_1 1
 # line-list draw: topology=1, vertexCount=2; gfx_line_coverage mirrors the
 # RTL S_LN_* integer Bresenham (vxi>>>8 pixel coords, lerr=ldx-ldy) so the
 # 1-px line footprint is bit-exact; fs_vcol keeps flat vertex-0 colour

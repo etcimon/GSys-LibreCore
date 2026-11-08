@@ -18767,6 +18767,51 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   noperspective/custom shaders.  Then CTS-1→CTS-2 caselists through
   the guest harness.  All directed-RTL session evidence only — no
   stock-guest/Mesa/CTS/capset/physical claims.
+  **Coverage audit + next-increment entry points (2026-11-08):**
+  the tractable single-field `ue_gpos` pipeline-state space is
+  confirmed saturated — covered: blendEnable, all VkBlendFactor
+  (incl. SATURATE/CONSTANT via blendConstants), all VkBlendOp, all
+  16 VkLogicOp, colourWriteMask, depthTest/Write/CompareOp(8)/
+  bounds/clamp/bias, polygonMode (fill/line/point + strip/line-loop),
+  cullMode/frontFace, rasterizerDiscard, scissor, smooth/persp/
+  derivative/demote interp, primitives/instancing/UBO, indexed +
+  indirect draws (`is_drawind`/`is_drawindx`), ftex NEAREST 1x1.
+  Every remaining item is a feature-level multi-session build:
+  **(a) stencil** — RTL is COMPLETE (`f_scmp`/`f_sop` on D24S8
+  `{stn[31:24],depth_unorm24[23:0]}` per-32b word, front/back select
+  via `front_q`, fail/dfail/pass ops + cmp/wr masks + ref all
+  transported cmdexec<->dr_q); missing = D24S8 format plumbing
+  (dimg fmt 126->129, dview/render-pass aspect, clear stencil),
+  `stencilTestEnable=1` + front/back `VkStencilOpState` emission,
+  op oracle, and **copy-engine aspect=4 (STENCIL) readback —
+  UNCONFIRMED**: `g6lc_apu_vic`/`vbl`/`vbt` decode-gate
+  `asp==APU_CCI_ASPECT(=1 COLOR)` yet depth readback aspectMask=2
+  passes, so depth uses an unresolved path; stencil aspect=4 support
+  must be confirmed before the oracle can verify (design oracle
+  order-independent: uniform compareOp+op -> deterministic per-px
+  stencil, avoids raster-order sim).  **(b) texture oracle** — entry point is `corev_apu/apu/tools/shader/
+  spirv_model.py` W_TX* (~3069-line interpreter: W_TXM mip walk, W_TXD
+  texel decode, W_TXJ proj, wrap `f_twrap`, LOD `ilod_v`+bias+clamp,
+  NEAREST/LINEAR weights, sRGB LUT, compare).  ~~NEAREST multi-texel~~
+  **DONE** (`ue_gpos_ftexn_1`): first real W_TX* sample — 4x4 RGBA8
+  image (`extent`/`TEX_W`/`TEX_H`), 64B-aligned row pitch
+  (`pit=align(w*bpp,64)`=16 words/row, texel(x,y)@word y*16+x),
+  per-vertex `uv` @loc1 spanning [0,1] (`TEX_UV`, was constant 0.5),
+  oracle interpolates `vcol.xy` bit-exact via `gfx_grad_pixels` (w=1
+  -> linear) then the NEAREST transform `floor(u*w)/floor(v*h)` (f32
+  `_f32` product = hardware `ffma`+f2i-RDN) + CLAMP_TO_EDGE; RGBA8
+  UNORM decode `byte*0x101->f32->u8` is the identity so px=texel
+  bytes.  Verified PASS bit-exact (ulp=0) vgtop (17122 checks) +
+  vgsys (17291 checks); `.exp` shows 13 distinct texel words over the
+  512 covered px (non-degenerate); `ftex`/`ftexb`/`ftexa`/`ftexg`/
+  `vtex` all regen byte-identical.  Remaining W_TX*: LINEAR 4-tap
+  weights, LOD/mip walk (`fs_mip`), projective (`fs_tex_proj`),
+  explicit-LOD (`fs_tex_qlod`), shadow/compare (`fs_tex_shadow`),
+  gather-offset, sRGB, non-UNORM8 fmts; unused `fs_tex_proj`/
+  `fs_tex_qlod`/`fs_tex_shadow` shaders already in corpus.  **(c) MRT** — RTL `ca[3:0]`/`blend[3:0]` supports 4
+  colour attachments; oracle render pass emits only 1 (+depth).
+  **(d) MSAA / occlusion+timestamp queries / secondary CBs+subpasses
+  / logicOp+blend / non-UNORM8 logicOp** — all feature-level.
 
 ### vgctl Retained-Unmap Owner-Hold (RTL)
 
