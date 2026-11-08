@@ -1602,6 +1602,18 @@ def cl_f32_l16(f):
     return ((p + term) >> sh) & 0xFFFF
 
 
+def f16pack(v):
+    """python float -> fp16 bits ('e' half, round-to-nearest)."""
+    return struct.unpack('<H', struct.pack('<e', v))[0]
+
+
+def f16u8(h):
+    """fp16 bits -> UNORM8: exact fp16->fp32 widen then f_f32_u8."""
+    fv = struct.unpack('<e', struct.pack('<H', h & 0xFFFF))[0]
+    fb = struct.unpack('<I', struct.pack('<f', fv))[0]
+    return cl_f32_u8(fb)
+
+
 def cl_f32_f16(f):
     """fp32 bits -> fp16 bits, RNE, saturate to inf (f_f32_f16)."""
     s = (f >> 31) & 1
@@ -11016,10 +11028,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # (i0,j1),(i1,j1),(i1,j0),(i0,j0) order, unfiltered, CLAMP_TO_EDGE.
         # The underscore keeps 'ftexg' (single-texel gather) from matching.
         is_ftexgath = 'ftex_gath' in gfx
+        # ftexh: fragment NEAREST + RGBA16F (R16G16B16A16_SFLOAT, device
+        # id 6 / vkfmt 97 / BPP8) — first non-UNORM8 sampled format; each
+        # texel is 4x fp16 = 8B (2 u32 words), decode fp16->fp32->UNORM8.
+        is_ftexh = 'ftexh' in gfx
         # is_ftexm gates the shared multi-texel texture setup (extent,
-        # per-vertex uv, texel payload) for NEAREST/LINEAR/REPEAT/MIRROR/GATHER.
+        # per-vertex uv, texel payload) for NEAREST/LINEAR/REPEAT/MIRROR/
+        # GATHER/F16.
         is_ftexm = (is_ftexn or is_ftexl or is_ftexr or is_ftexmir
-                    or is_ftexc or is_ftexs or is_ftexgath)
+                    or is_ftexc or is_ftexs or is_ftexgath or is_ftexh)
         # CLAMP_TO_BORDER borderColor selector (raw VkBorderColor 0..5):
         # ftexc=5 INT_OPAQUE_WHITE, ftexc2=2 FLOAT_OPAQUE_WHITE (probes the
         # f_bord16 decode), ftexcb=1 FLOAT_OPAQUE_BLACK, ftexct=0
@@ -11252,6 +11269,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                            (255 << 24))
                           for y in range(TEX_H) for x in range(TEX_W)] \
                 if is_ftexm else []
+            # ftexh: RGBA16F texels — 4 fp16 channels = 8B = two u32
+            # words (w0=R|G<<16, w1=B|A<<16).  Quarter/half fp16 values
+            # are exact; R,G vary per-texel, B=0.5 A=1.0 const.
+            TEX16 = [((f16pack(x * 0.25) | (f16pack(y * 0.25) << 16)),
+                      (f16pack(0.5) | (f16pack(1.0) << 16)))
+                     for y in range(TEX_H) for x in range(TEX_W)] \
+                if is_ftexh else []
             for _vi, (vx_, vy_, _vz, _vw) in enumerate(TRI):
                 if is_tex:
                     # {pos.xy @0, uv.xy @1} stride 16; uv is constant —
@@ -11795,6 +11819,32 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                (_g(_iu, _iv, 0) << 8) |
                                (_g(_iu + 1, _iv + 1, 1) << 16) |
                                (_g(_iu + 2, _iv, 1) << 24))
+        elif is_ftexh:
+            # NEAREST + RGBA16F (W_TX* fp16 arm): same floor(u*w) integer
+            # coord + CLAMP_TO_EDGE as ftexs.  Each texel is 4 fp16
+            # channels (8B); W_TXD widens fp16->fp32 exactly
+            # (f_f16_f32), then the UNORM8 store runs f_f32_u8.  Oracle:
+            # fp16 bits -> exact fp32 -> cl_f32_u8 per channel.
+            _uv4 = [(u, v, 0.0, 1.0) for (u, v) in TEX_UV]
+            _gp = gfx_grad_pixels(TRI, _uv4, VP, SC, CW, CH, 1, 2)
+            exp_img = []
+            for w in range(CW * CH):
+                _px, _py = w % CW, w // CW
+                _v = _gp.get((_px, _py))
+                if _v is None:
+                    exp_img.append(clr_w)
+                    continue
+                _iu = int(_f32(_v[0] * TEX_W))
+                _iv = int(_f32(_v[1] * TEX_H))
+                _iu = 0 if _iu < 0 else (TEX_W - 1 if _iu >= TEX_W
+                                         else _iu)
+                _iv = 0 if _iv < 0 else (TEX_H - 1 if _iv >= TEX_H
+                                         else _iv)
+                _w0, _w1 = TEX16[_iv * TEX_W + _iu]
+                exp_img.append(f16u8(_w0 & 0xFFFF) |
+                               (f16u8((_w0 >> 16) & 0xFFFF) << 8) |
+                               (f16u8(_w1 & 0xFFFF) << 16) |
+                               (f16u8((_w1 >> 16) & 0xFFFF) << 24))
         else:
             exp_img = [out_w if (w % CW, w // CW) in cov and
                        not ((is_kill and
@@ -12326,7 +12376,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     device=X['dev'],
                     pCreateInfo=st('VkImageCreateInfo',
                         flags=0, imageType=1,
-                        format=43 if (is_ftexs or is_ftexls) else 37,
+                        format=(97 if is_ftexh else
+                                43 if (is_ftexs or is_ftexls) else 37),
                         extent=st('VkExtent3D', width=TEX_W, height=TEX_H,
                                   depth=1),
                         mipLevels=1, arrayLayers=2 if is_ftexa else 1,
@@ -12343,7 +12394,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     pCreateInfo=st('VkImageViewCreateInfo',
                         flags=0, image=X['timg'],
                         viewType=5 if is_ftexa else 1,
-                        format=43 if (is_ftexs or is_ftexls) else 37,
+                        format=(97 if is_ftexh else
+                                43 if (is_ftexs or is_ftexls) else 37),
                         components=st('VkComponentMapping',
                                       r=0, g=0, b=0, a=0),
                         subresourceRange=st('VkImageSubresourceRange',
@@ -12443,15 +12495,21 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # 1x1 RGBA8 texel(s): layer 0 always, plus layer 1 for the
             # arrayed-image variant (uniform colour keeps tri_w)
             if is_ftexm:
-                # W_TXM pitch = align(w*bpp,64) = 64B = 16 words/row for
-                # the 4x4 RGBA8 image; texel(x,y) lands at word y*16+x
-                # with the rest of each row zero-padded.
-                _pit_w = ((TEX_W * 4 + 63) & ~63) // 4
+                # W_TXM pitch = align(w*bpp,64); RGBA8 = 4bpp -> 64B = 16
+                # words/row, texel(x,y) at word y*16+x; RGBA16F = 8bpp ->
+                # texel is 2 words at y*16+2x (rest of row zero-padded).
+                _bpp = 8 if is_ftexh else 4
+                _pit_w = ((TEX_W * _bpp + 63) & ~63) // 4
                 _timg = []
                 for _y in range(TEX_H):
                     _row = [0] * _pit_w
                     for _x in range(TEX_W):
-                        _row[_x] = TEX_TEXELS[_y * TEX_W + _x]
+                        if is_ftexh:
+                            _w0, _w1 = TEX16[_y * TEX_W + _x]
+                            _row[2 * _x] = _w0
+                            _row[2 * _x + 1] = _w1
+                        else:
+                            _row[_x] = TEX_TEXELS[_y * TEX_W + _x]
                     _timg += _row
                 apw(base_t, _timg)
             else:

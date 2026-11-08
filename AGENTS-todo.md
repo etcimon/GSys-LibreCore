@@ -18897,17 +18897,15 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   `vcol.z/w` (vs_tex sets z=0 — blocked on VS tooling); **(v)
   non-UNORM8** — fp16 (`R16G16B16A16_SFLOAT` id6)/int formats need new
   decode helpers + texel layout; `fs_tex_bias`/`fs_tex_array` degenerate
-  (vcol.z=0).  **fp16 recipe (de-risked 2026-11-08)**: device id 6,
-  vkfmt 97 (`VK_FORMAT_R16G16B16A16_SFLOAT`, VK2D[97]=6), BPP=8,
-  ATTR=35 (flt+half bits).  Texel = 4×fp16 = 8B = 2 u32 words; upload
-  pitch `align(w*8,64)`B (the `_pit_w` formula keys off bpp — extend
-  TEX_TEXELS to word-pairs or add a byte payload).  RTL decode confirmed
-  present: `tx_isf16_q` + `f_f16_f32` (exact fp16->fp32 widen) in
-  `g6lc_apu_shwave.sv` ~1038.  Oracle: fp16->fp32 per channel ->
-  `cl_f32_u8` UNORM8 store (reuse `_f32bits`/`cl_f32_u8`); pick in-range
-  fp16 values (0.25/0.5/0.75) surviving the fp32->u8 roundtrip.  int
-  formats (R8G8B8A8_UINT id15 / R32_UINT id10) need the `tx_isint_q`
-  border arm too — separate path.  **LINEAR+REPEAT (`ftexw`) attempted, NOT landed** — the common
+  (vcol.z=0).  **fp16 — DONE** (`ue_gpos_ftexh_1`; `is_ftexh`, NEAREST +
+  R16G16B16A16_SFLOAT): device id 6 / vkfmt 97 / BPP8 / ATTR35;
+  8B texels as u32 word-pairs (w0=R|G<<16, w1=B|A<<16), pitch
+  align(w*8,64); oracle `f16pack`/`f16u8` (fp16->exact fp32->cl_f32_u8).
+  **PASS bit-exact** `ulp=0` vgtop (17122) + vgsys (17291); non-degenerate;
+  all ftex sessions regen byte-identical.  RTL `f_f16_f32`/`tx_isf16_q`
+  confirmed correct.  int formats (R8G8B8A8_UINT id15 / R32_UINT id10)
+  need the `tx_isint_q` border arm + a usampler/int-result shader —
+  separate path, tooling-blocked like proj/shadow.  **LINEAR+REPEAT (`ftexw`) attempted, NOT landed** — the common
   tiling config; oracle = ftexl bilinear with corner indices `%`-wrapped
   instead of clamped.  FAILS bit-exact: 18 off-by-one LSB errors with
   uv spanning [-0.4,1.4]; restricting uv to positive-only [0.3,1.4]

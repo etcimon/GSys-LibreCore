@@ -253,6 +253,10 @@ python3 $G --graphics-session ue_gpos_ftexls_1 1
 # raw texel channel bytes (UNORM identity); 'ftex_gath' underscore keeps
 # 'ftexg' (single-texel gather) from matching
 python3 $G --graphics-session ue_gpos_ftex_gath_1 1
+# fragment NEAREST + RGBA16F (R16G16B16A16_SFLOAT): first non-UNORM8
+# sampled format — 8B fp16 texels (2 u32 words, pitch align(w*8,64)),
+# W_TXD widens fp16->fp32 exactly (f_f16_f32) then f_f32_u8 store
+python3 $G --graphics-session ue_gpos_ftexh_1 1
 # line-list draw: topology=1, vertexCount=2; gfx_line_coverage mirrors the
 # RTL S_LN_* integer Bresenham (vxi>>>8 pixel coords, lerr=ldx-ldy) so the
 # 1-px line footprint is bit-exact; fs_vcol keeps flat vertex-0 colour
