@@ -217,6 +217,11 @@ python3 $G --graphics-session ue_gpos_ftexg_1 1
 # bit-exact then floor(u*w)/floor(v*h)+CLAMP_TO_EDGE selects one texel per
 # covered px; RGBA8 UNORM writeback is the identity so px = texel bytes
 python3 $G --graphics-session ue_gpos_ftexn_1 1
+# fragment LINEAR multi-texel: same 4x4 CIS + uv field, sampler runs
+# bilinear — 8.8 coords floor(u*w*256-128) -> texel+frac, four CLAMP
+# corners weighted wu*wv (sum 65536) accumulate gw*ch (ch=byte*0x101),
+# rr=(acc+0x8000)>>16 -> wb=rr*0x37800080 -> UNORM8
+python3 $G --graphics-session ue_gpos_ftexl_1 1
 # line-list draw: topology=1, vertexCount=2; gfx_line_coverage mirrors the
 # RTL S_LN_* integer Bresenham (vxi>>>8 pixel coords, lerr=ldx-ldy) so the
 # 1-px line footprint is bit-exact; fs_vcol keeps flat vertex-0 colour

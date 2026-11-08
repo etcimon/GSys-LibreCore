@@ -18804,11 +18804,20 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   bytes.  Verified PASS bit-exact (ulp=0) vgtop (17122 checks) +
   vgsys (17291 checks); `.exp` shows 13 distinct texel words over the
   512 covered px (non-degenerate); `ftex`/`ftexb`/`ftexa`/`ftexg`/
-  `vtex` all regen byte-identical.  Remaining W_TX*: LINEAR 4-tap
-  weights, LOD/mip walk (`fs_mip`), projective (`fs_tex_proj`),
-  explicit-LOD (`fs_tex_qlod`), shadow/compare (`fs_tex_shadow`),
-  gather-offset, sRGB, non-UNORM8 fmts; unused `fs_tex_proj`/
-  `fs_tex_qlod`/`fs_tex_shadow` shaders already in corpus.  **(c) MRT** — RTL `ca[3:0]`/`blend[3:0]` supports 4
+  `vtex` all regen byte-identical.  ~~LINEAR~~ **DONE**
+  (`ue_gpos_ftexl_1`; `is_ftexm`=ftexn|ftexl shares the multi-texel
+  setup): sampler `mag/minFilter=1`, oracle runs the W_TX* bilinear
+  path — 8.8 coord `floor(u*w*256-128)` -> texel idx `su>>8` + frac
+  `su&0xFF`, four CLAMP_TO_EDGE corners weighted `wu*wv` (Σ=65536)
+  accumulate `gw*ch` (ch=byte*0x101 u16), `rr=(acc+0x8000)>>16`,
+  `wb=rr*0x37800080` f32 -> `_u8pack`.  Verified PASS bit-exact
+  (ulp=0) vgtop (17122 checks) + vgsys (17291 checks); `.exp` shows
+  513 distinct blended words over the 512 covered px; `ftexn`/`ftex`/
+  `ftexg` regen byte-identical.  Remaining W_TX*: LOD/mip walk
+  (`fs_mip`), projective (`fs_tex_proj`), explicit-LOD (`fs_tex_qlod`),
+  shadow/compare (`fs_tex_shadow`), gather-offset, sRGB, non-UNORM8
+  fmts; unused `fs_tex_proj`/`fs_tex_qlod`/`fs_tex_shadow` shaders
+  already in corpus.  **(c) MRT** — RTL `ca[3:0]`/`blend[3:0]` supports 4
   colour attachments; oracle render pass emits only 1 (+depth).
   **(d) MSAA / occlusion+timestamp queries / secondary CBs+subpasses
   / logicOp+blend / non-UNORM8 logicOp** — all feature-level.

@@ -10983,6 +10983,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # the NEAREST coord transform floor(u*w)/floor(v*h)+CLAMP_TO_EDGE
         # and the RGBA8 UNORM decode (byte*0x101 -> f32 -> u8 identity).
         is_ftexn = 'ftexn' in gfx
+        # ftexl: fragment LINEAR multi-texel — same 4x4 CIS + uv field but
+        # the sampler runs bilinear: 8.8 coords floor(u*w*256-128) pick a
+        # texel + 8-bit fraction, four CLAMP-wrapped corners weighted
+        # wu*wv (sum 65536) accumulate gw*ch (ch=byte*0x101 u16) then
+        # rr=(acc+0x8000)>>16 -> wb=rr*K(0x37800080) -> UNORM8.
+        is_ftexl = 'ftexl' in gfx
+        # is_ftexm gates the shared multi-texel texture setup (extent,
+        # per-vertex uv, texel payload) for both NEAREST and LINEAR.
+        is_ftexm = is_ftexn or is_ftexl
         # line: LINE_LIST topology — 2 vertices, 1px Bresenham walk with
         # flat colour from vertex 0 (the g6lc_apu_rast S_LN_* path)
         is_line = 'line' in gfx
@@ -11196,13 +11205,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # sampled image is a recognisable texel grid; per-vertex uv
             # spans [0,1] so vcol.xy interpolates across all 16 texels.
             # uv avoids the 0.25/0.5/0.75 cell boundaries at the verts.
-            TEX_W = TEX_H = 4 if is_ftexn else 1
+            TEX_W = TEX_H = 4 if is_ftexm else 1
             TEX_UV = [(0.125, 0.125), (0.5, 0.875), (0.875, 0.125)] \
-                if is_ftexn else [(0.5, 0.5)] * 3
+                if is_ftexm else [(0.5, 0.5)] * 3
             TEX_TEXELS = [((x * 60) | ((y * 60) << 8) | (128 << 16) |
                            (255 << 24))
                           for y in range(TEX_H) for x in range(TEX_W)] \
-                if is_ftexn else []
+                if is_ftexm else []
             for _vi, (vx_, vy_, _vz, _vw) in enumerate(TRI):
                 if is_tex:
                     # {pos.xy @0, uv.xy @1} stride 16; uv is constant —
@@ -11568,6 +11577,48 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 _iv = 0 if _iv < 0 else (TEX_H - 1 if _iv >= TEX_H
                                          else _iv)
                 exp_img.append(TEX_TEXELS[_iv * TEX_W + _iu])
+        elif is_ftexl:
+            # LINEAR bilinear (W_TX*): 8.8 coord su=floor(u*w*256-128)
+            # gives texel index su>>8 + 8-bit fraction su&0xFF; four
+            # CLAMP_TO_EDGE corners weighted wu*wv (sum 65536) each add
+            # gw*ch (ch=texel byte*0x101 u16) to acc; rr=(acc+0x8000)>>16
+            # normalises to u16, wb=rr*0x37800080 f32 -> UNORM8.  Mirrors
+            # spirv_model img_op lin path + tx_finish_pts UNORM arm.
+            _K = struct.unpack('<f', struct.pack('<I', 0x37800080))[0]
+            _uv4 = [(u, v, 0.0, 1.0) for (u, v) in TEX_UV]
+            _gp = gfx_grad_pixels(TRI, _uv4, VP, SC, CW, CH, 1, 2)
+            exp_img = []
+            for w in range(CW * CH):
+                _px, _py = w % CW, w // CW
+                _v = _gp.get((_px, _py))
+                if _v is None:
+                    exp_img.append(clr_w)
+                    continue
+                _su = int(math.floor(_f32(_v[0] * TEX_W * 256 - 128)))
+                _sv = int(math.floor(_f32(_v[1] * TEX_H * 256 - 128)))
+                _iu, _fu = _su >> 8, _su & 0xFF
+                _iv, _fv = _sv >> 8, _sv & 0xFF
+                _acc = [0, 0, 0, 0]
+                for _du, _dv, _wu, _wv in (
+                        (_iu, _iv, 256 - _fu, 256 - _fv),
+                        (_iu + 1, _iv, _fu, 256 - _fv),
+                        (_iu, _iv + 1, 256 - _fu, _fv),
+                        (_iu + 1, _iv + 1, _fu, _fv)):
+                    _cu = 0 if _du < 0 else (TEX_W - 1 if _du >= TEX_W
+                                             else _du)
+                    _cv = 0 if _dv < 0 else (TEX_H - 1 if _dv >= TEX_H
+                                             else _dv)
+                    _tw = TEX_TEXELS[_cv * TEX_W + _cu]
+                    _gw = _wu * _wv
+                    for _c in range(4):
+                        _acc[_c] += _gw * (((_tw >> (8 * _c)) & 0xFF)
+                                           * 0x101)
+                _wb = []
+                for _c in range(4):
+                    _rr = (0xFFFF if _acc[_c] + 0x8000 >= 0x100000000
+                           else (_acc[_c] + 0x8000) >> 16)
+                    _wb.append(_f32(float(_rr) * _K))
+                exp_img.append(_u8pack(_wb))
         else:
             exp_img = [out_w if (w % CW, w // CW) in cov and
                        not ((is_kill and
@@ -12125,7 +12176,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 ('vkCreateSampler', dict(
                     device=X['dev'],
                     pCreateInfo=st('VkSamplerCreateInfo',
-                        flags=0, magFilter=0, minFilter=0, mipmapMode=0,
+                        flags=0,
+                        magFilter=1 if is_ftexl else 0,
+                        minFilter=1 if is_ftexl else 0, mipmapMode=0,
                         addressModeU=2, addressModeV=2, addressModeW=2,
                         mipLodBias=f32b(0.0), anisotropyEnable=0,
                         maxAnisotropy=0, compareEnable=0, compareOp=0,
@@ -12204,7 +12257,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             base_t = map_blob(RES_BLOB0 + 3)
             # 1x1 RGBA8 texel(s): layer 0 always, plus layer 1 for the
             # arrayed-image variant (uniform colour keeps tri_w)
-            if is_ftexn:
+            if is_ftexm:
                 # W_TXM pitch = align(w*bpp,64) = 64B = 16 words/row for
                 # the 4x4 RGBA8 image; texel(x,y) lands at word y*16+x
                 # with the rest of each row zero-padded.
