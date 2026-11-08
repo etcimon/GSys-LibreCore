@@ -6869,7 +6869,9 @@ def gfx_grad_pixels(verts, cols, vp, sc, cw, ch, front_ccw, cull):
     area<0 slot-1/2 swap to positions AND colours together (the RTL
     varying prefetch reads the mirrored vertex record, so var_q[k]
     tracks the post-swap vertex).  vp/sc/cw/ch/front_ccw/cull as
-    gfx_tri_coverage.  -> {(px,py): packed RGBA8 word}."""
+    gfx_tri_coverage.  -> {(px,py): (r,g,b,a) f32 vec4} — the
+    interpolated FS-input varying, pre-writeback (pack via _u8pack or
+    feed an FS expression first)."""
     vphw = _f32(_f32(vp[2]) * 0.5)
     vphh = _f32(_f32(vp[3]) * 0.5)
     fma = getattr(math, 'fma', lambda a, b, c: a * b + c)
@@ -6883,7 +6885,7 @@ def gfx_grad_pixels(verts, cols, vp, sc, cw, ch, front_ccw, cull):
         vx.append(_f2i_rne(_f32(sx * 256.0)))
         vy.append(_f2i_rne(_f32(sy * 256.0)))
         ws.append(_f32(w))
-    cols = [tuple(c) for c in cols]
+    cols = [(r,g,b,a) for (r,g,b,a) in cols]
     area = ((vx[1] - vx[0]) * (vy[2] - vy[0])
             - (vx[2] - vx[0]) * (vy[1] - vy[0]))
     if area == 0:
@@ -6946,16 +6948,24 @@ def gfx_grad_pixels(verts, cols, vp, sc, cw, ch, front_ccw, cull):
             s01 = _f32(pv[0] + pv[1])      # ADD b+c
             s012 = _f32(s01 + pv[2])       # ADD b+c
             rs = _f32(1.0 / s012)          # DIV 1/sum
-            word = 0
+            vec = []
             for c in range(4):
                 v0 = cols[0][c]; v1 = cols[1][c]; v2 = cols[2][c]
                 t0 = _f32(pv[0] * v0)                    # MUL
                 t1 = _f32(fma(pv[1], v1, t0))            # FMADD
                 t2 = _f32(fma(pv[2], v2, t1))            # FMADD
-                vc = _f32(t2 * rs)                       # MUL
-                word |= cl_f32_u8(_f32bits(vc)) << (8 * c)
-            out[(px, py)] = word
+                vec.append(_f32(t2 * rs))                # MUL
+            out[(px, py)] = tuple(vec)
     return out
+
+
+def _u8pack(v4):
+    """(r,g,b,a) f32 vec4 -> packed RGBA8 word R|G<<8|B<<16|A<<24 via
+    f_f32_u8 per channel (the ROP writeback conversion)."""
+    w = 0
+    for c in range(4):
+        w |= cl_f32_u8(_f32bits(v4[c])) << (8 * c)
+    return w
 
 
 def load_shvec(name):
@@ -10607,6 +10617,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # -> I2F -> *rcpa -> *vrw -> ADD-sum -> DIV-rs, then per-comp
         # MUL/FMADD/FMADD/MUL -> f_f32_u8).  Colour-only, no depth.
         is_grad = 'grad' in gfx
+        # fcolor: same gradient vertex data but fs_color adds the
+        # per-fragment FS expression vcol*0.5 + FragCoord.x*0.001 —
+        # exercises interpolated varyings AND per-pixel FS arithmetic
+        is_fcolor = 'fcolor' in gfx
+        is_gradlike = is_grad or is_fcolor
         # depth: D32_SFLOAT depth attachment + depthWriteEnable — the
         # vec2 pos format leaves vs_pos3's pos.z=0 so gl_Position.z=0 is
         # a constant depth; write-only (depthTestEnable=0) validates the
@@ -10704,7 +10719,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'vs_texlod.spv' if is_vtex else
                           'vs_tex.spv' if is_ftex else
                           'vs_pos3.spv' if is_blend or is_wide or is_kill
-                          or is_killfn or is_fncall or is_depth or is_grad
+                          or is_killfn or is_fncall or is_depth or is_gradlike
                           or is_line or is_lstrip or is_polyln
                           or is_polypnt
                           else 'vs_passthru.spv')).read_bytes())]
@@ -10716,9 +10731,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             '<I', (spvd / ('fs_ubo_array.spv' if is_fsubocopy else
                           'fs_ubo.spv' if is_fsubo else
                           'fs_white.spv' if is_pts else
+                          'fs_color.spv' if is_fcolor else
                           'fs_vcol.spv' if is_blend or is_wide or is_line
                           or is_lstrip or is_polyln or is_polypnt
-                          or is_depth or is_grad
+                          or is_depth or is_gradlike
                           else
                           'fs_tex_array.spv' if is_ftexa else
                           'fs_tex_gather.spv' if is_ftexg else
@@ -10793,7 +10809,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 L_CLIP.append((cx, cy, 0.0, 1.0))
                 vb_words += [f32b(cx), f32b(cy)]
                 vb_words += [f32b(c) for c in COL]
-        elif is_grad:
+        elif is_gradlike:
             # {pos.xy@0, col.rgba@8} stride 24 — same layout as the
             # standard tri but each vertex carries a DISTINCT colour so
             # the smooth vcol varying interpolates a real gradient.
@@ -10946,12 +10962,24 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # kill masks: fs_kill drops the FragCoord 8x8 checkerboard;
         # fs_kill_fn drops odd-x lanes (int(FragCoord.x)&1==1 -> killer).
         # Both map int(FragCoord) == the framebuffer pixel (px,py).
-        if is_grad:
+        if is_grad or is_fcolor:
             # smooth-varying interpolation: per-pixel bit-exact fpnew
-            # oracle (edge->I2F->*rcpa->*vrw->ADD->DIV->MUL/FMADD->u8)
+            # oracle -> interpolated f32 vcol vec4; pack per the FS.
             _gp = gfx_grad_pixels(TRI, GRAD_COLS, VP, SC, CW, CH, 1, 2)
-            exp_img = [_gp.get((w % CW, w // CW), clr_w)
-                       for w in range(CW * CH)]
+            exp_img = []
+            for w in range(CW * CH):
+                _px, _py = w % CW, w // CW
+                _v = _gp.get((_px, _py))
+                if _v is None:
+                    exp_img.append(clr_w)
+                elif is_fcolor:
+                    # fs_color: o = vcol*0.5 + splat(FragCoord.x*0.001);
+                    # fragx = px+0.5.  VectorTimesScalar/FMUL/FAdd f32.
+                    _fx = _f32((_px + 0.5) * _f32(0.001))
+                    exp_img.append(_u8pack(tuple(
+                        _f32(_f32(_v[c] * 0.5) + _fx) for c in range(4))))
+                else:
+                    exp_img.append(_u8pack(_v))
         else:
             exp_img = [out_w if (w % CW, w // CW) in cov and
                        not ((is_kill and

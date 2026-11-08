@@ -18459,6 +18459,20 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   byte-identical (is_grad fully gated).  w=1 so perspective collapses
   to affine; non-unit-w perspective-correct interpolation, noperspective
   and flat varyings remain open.
+- [x] **CLOSED — per-fragment FS arithmetic (`ue_gpos_fcolor_1`):**
+  first per-pixel fragment-shader computation through the transport
+  path — `fs_color.spv` computes `o = vcol*0.5 + splat(FragCoord.x*
+  0.001)` (`OpVectorTimesScalar` vcol·0.5 + `OpFMul` fragx·0.001 →
+  `OpCompositeConstruct` splat + `OpFAdd`, all f32).  `is_fcolor`
+  reuses the `is_grad` gradient vertex data (`is_gradlike`) and
+  `gfx_grad_pixels` now returns the interpolated f32 vcol vec4 (packed
+  per-FS via `_u8pack`/`cl_f32_u8`); the oracle applies the FS expression
+  `_f32(_f32(vcol*0.5) + _f32((px+0.5)*0.001))` per component then
+  unorm8-packs.  fragx = px+0.5 (framebuffer pixel centre).  PASS `g1=4096
+  g2=4096 ulp=0 XF_FAULTS 0` on **vgtop and vgsys** — all 512 covered
+  pixels bit-exact; `ue_gpos_grad_1` hex byte-identical (refactor gated).
+  Unlocks the FS-arithmetic frontier (fs_mip/fs_scene8/fs_shadowfog use
+  the same oracle pattern: interp vcol -> FS expr -> unorm8).
 - [x] Instanced-draw session coverage (`c84531213`): `ue_gpos_inst_1`
   — `vs_inst` offsets clip-x by `0.4*gl_InstanceIndex-0.6`,
   `instanceCount=4`, `fs_flat` constant colour → union coverage over 4
