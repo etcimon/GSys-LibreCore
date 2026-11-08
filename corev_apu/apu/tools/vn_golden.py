@@ -10747,7 +10747,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # uses the dequantized dst_q in the multiply, SRC_COLOR the src.
         bfac = None
         for _tok, _sf, _df in (('bfacdst', 4, 1), ('bfacsrc', 2, 1),
-                               ('bfacdc', 4, 4), ('bfacsc', 2, 2)):
+                               ('bfacdc', 4, 4), ('bfacsc', 2, 2),
+                               ('bfomsc', 3, 1), ('bfacal', 6, 8)):
             if _tok in gfx:
                 bfac = (_sf, _df)
                 break
