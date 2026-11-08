@@ -18681,11 +18681,18 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   dst still UNORM8 roundtrip); smooth/perspective/
   derivative/demote interpolation; primitives, instancing, UBO,
   indexed/indirect — all bit-exact vgtop+vgsys).
-  Remaining, in dependency order: **(1) `W_TX*` texture oracle** —
-  highest-leverage; unblocks `fs_mip`/`fs_scene8`/`fs_shadowfog`/
-  `fs_tex_*` + G3d sampler generality; needs framebuffer-level
-  coord→8.8→LOD→texel→filter→decode + `img_mpitch` layer/mip layout
-  (adapt `spirv_model.py` texture path, currently wave-context-bound);
+  Remaining, in dependency order: **(1) `W_TX*` shwave texture oracle**
+  — highest-leverage for the NATIVE vn_golden graphics sessions; note
+  the separate **vgpu (Venus/virgl) texture path is already verified**
+  (`g6lc_apu_vgpu_*`, `tb_g6lc_apu_vgpu_tbn` clamp/linear texel fetch,
+  15 cases/57 checks bit-exact) — so this gap is specifically the
+  fragment-shader multi-texel sample in `ue_gpos_ftex*`/`fs_mip`/
+  `fs_scene8`/`fs_shadowfog`, not guest texture coverage.  Needs the
+  shwave ~30-state W_TX* pipeline (8.8 coords → LOD walk → texel cache
+  → NEAREST/LINEAR 8-bit-frac weights → decode → sRGB LUT → compare)
+  ported into `vn_golden.py` `is_tex` (currently constant `tri_w` for
+  the 1×1 texel); `spirv_model.py` has the semantics but is
+  wave-context-bound — a multi-session build;
   **(3) stencil** — needs a stencil attachment + op oracle;
   ~~depthClamp~~ DONE (`dclamp`/`dclampoff` above);
   **(4) MSAA, occlusion/timestamp queries, secondary
