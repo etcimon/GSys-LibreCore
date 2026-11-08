@@ -18582,6 +18582,19 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   vgsys (cycles=1072529)** — all pixels bit-exact; `demdrv`/`deriv2`/
   `dtest`/`grad` hex byte-identical.  This is the last interpolation
   mode gap — texture-sampling + SSBO-atomic oracles remain open.
+- [x] **CLOSED — scissor test (`ue_gpos_scis_1` + `ue_gpos_scio_1`):**
+  first `VkRect2D` coverage — `is_sci`/`is_scio` set `SC` to a
+  sub-rectangle and `vkCmdSetScissor` now emits `SC` (was hardcoded
+  full-fb `(0,0,CW,CH)`; non-scissor sessions byte-identical).  `scis`
+  = offset `(0,0)` extent `(32,64)` left-half clip cutting TRI's right
+  vertex; `scio` = offset `(24,16)` extent `(24,32)` so the
+  `VkOffset2D` fields are exercised too -> `x[24,48) y[16,48)`.  The
+  oracle `gfx_tri_coverage` already honours `sc` (skips px/py outside
+  `[scx,scx+scw)x[scy,scy+sch)`), so coverage is the triangle
+  intersected with the window — standard TRI+`fs_vcol` flat colour.
+  PASS both `g1=4096 g2=4096 ulp=0 XF_FAULTS 0` on **vgtop
+  (cycles~557-614k) and vgsys (cycles~857-919k)**; `tri_1` byte-
+  identical.  Multi-viewport/scissor arrays remain open.
 - [x] Instanced-draw session coverage (`c84531213`): `ue_gpos_inst_1`
   — `vs_inst` offsets clip-x by `0.4*gl_InstanceIndex-0.6`,
   `instanceCount=4`, `fs_flat` constant colour → union coverage over 4

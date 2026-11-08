@@ -11070,7 +11070,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     vb_words += [f32b(vx_), f32b(vy_)]
                     vb_words += [f32b(c) for c in COL]
         VP = (0.0, 0.0, 64.0, 64.0, 0.0, 1.0)
-        SC = (0, 0, 64, 64)
+        # scis/scio: sub-rectangle scissor clips TRI — gfx_tri_coverage
+        # already honours sc, and vkCmdSetScissor below emits the same
+        # rect.  scis clips on extent alone (offset 0,0 -> left half);
+        # scio uses a non-zero VkOffset2D (24,16) + extent (24,32) so the
+        # offset fields are exercised too -> x[24,48) y[16,48).
+        is_sci  = 'scis' in gfx and 'scio' not in gfx
+        is_scio = 'scio' in gfx
+        SC = ((0, 0, 32, 64) if is_sci else
+              (24, 16, 24, 32) if is_scio else (0, 0, 64, 64))
         # frontFace = CCW(0) -> the ObjPay word carries front_ccw = 1;
         # cull BACK (2).  Only coverage matters — the FS colour is flat
         if is_inst:
@@ -11938,8 +11946,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             ('vkCmdSetScissor', dict(
                 commandBuffer=X['cb'], firstScissor=0, scissorCount=1,
                 pScissors=[st('VkRect2D',
-                    offset=st('VkOffset2D', x=0, y=0),
-                    extent=st('VkExtent2D', width=CW, height=CH))])),
+                    offset=st('VkOffset2D', x=SC[0], y=SC[1]),
+                    extent=st('VkExtent2D',
+                              width=SC[2], height=SC[3]))])),
         ]) + ([] if not is_drawindx else [
             # drawindx binds the u16 {0,1,2} list inside ib2 before
             # the indexed indirect record
