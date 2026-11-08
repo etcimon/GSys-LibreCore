@@ -10989,9 +10989,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # wu*wv (sum 65536) accumulate gw*ch (ch=byte*0x101 u16) then
         # rr=(acc+0x8000)>>16 -> wb=rr*K(0x37800080) -> UNORM8.
         is_ftexl = 'ftexl' in gfx
+        # ftexr: NEAREST multi-texel with REPEAT wrap — same 4x4 CIS but
+        # uv spans beyond [0,1] so floor(u*w) lands outside [0,w) and the
+        # integer coord wraps mod w (f_twrap REPEAT arm, m=0).
+        is_ftexr = 'ftexr' in gfx
         # is_ftexm gates the shared multi-texel texture setup (extent,
-        # per-vertex uv, texel payload) for both NEAREST and LINEAR.
-        is_ftexm = is_ftexn or is_ftexl
+        # per-vertex uv, texel payload) for NEAREST/LINEAR/REPEAT.
+        is_ftexm = is_ftexn or is_ftexl or is_ftexr
         # line: LINE_LIST topology — 2 vertices, 1px Bresenham walk with
         # flat colour from vertex 0 (the g6lc_apu_rast S_LN_* path)
         is_line = 'line' in gfx
@@ -11206,8 +11210,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # spans [0,1] so vcol.xy interpolates across all 16 texels.
             # uv avoids the 0.25/0.5/0.75 cell boundaries at the verts.
             TEX_W = TEX_H = 4 if is_ftexm else 1
-            TEX_UV = [(0.125, 0.125), (0.5, 0.875), (0.875, 0.125)] \
-                if is_ftexm else [(0.5, 0.5)] * 3
+            TEX_UV = ([(-0.4, -0.4), (1.4, 0.6), (0.6, 1.4)]
+                      if is_ftexr else
+                      [(0.125, 0.125), (0.5, 0.875), (0.875, 0.125)]
+                      if is_ftexm else [(0.5, 0.5)] * 3)
             TEX_TEXELS = [((x * 60) | ((y * 60) << 8) | (128 << 16) |
                            (255 << 24))
                           for y in range(TEX_H) for x in range(TEX_W)] \
@@ -11619,6 +11625,25 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                            else (_acc[_c] + 0x8000) >> 16)
                     _wb.append(_f32(float(_rr) * _K))
                 exp_img.append(_u8pack(_wb))
+        elif is_ftexr:
+            # NEAREST + REPEAT (W_TX* f_twrap m=0): same floor(u*w)
+            # integer coord as ftexn but the coord wraps mod dim instead
+            # of clamping.  uv spans beyond [0,1] so coords go negative
+            # and >= dim; Python % matches the hardware i%n two's-
+            # complement wrap for negative i.
+            _uv4 = [(u, v, 0.0, 1.0) for (u, v) in TEX_UV]
+            _gp = gfx_grad_pixels(TRI, _uv4, VP, SC, CW, CH, 1, 2)
+            exp_img = []
+            for w in range(CW * CH):
+                _px, _py = w % CW, w // CW
+                _v = _gp.get((_px, _py))
+                if _v is None:
+                    exp_img.append(clr_w)
+                    continue
+                _iu = math.floor(_f32(_v[0] * TEX_W))
+                _iv = math.floor(_f32(_v[1] * TEX_H))
+                exp_img.append(TEX_TEXELS[(_iv % TEX_H) * TEX_W
+                                          + (_iu % TEX_W)])
         else:
             exp_img = [out_w if (w % CW, w // CW) in cov and
                        not ((is_kill and
@@ -12179,7 +12204,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         flags=0,
                         magFilter=1 if is_ftexl else 0,
                         minFilter=1 if is_ftexl else 0, mipmapMode=0,
-                        addressModeU=2, addressModeV=2, addressModeW=2,
+                        addressModeU=0 if is_ftexr else 2,
+                        addressModeV=0 if is_ftexr else 2,
+                        addressModeW=2,
                         mipLodBias=f32b(0.0), anisotropyEnable=0,
                         maxAnisotropy=0, compareEnable=0, compareOp=0,
                         minLod=f32b(0.0), maxLod=f32b(0.0),

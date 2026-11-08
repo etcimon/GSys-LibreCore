@@ -222,6 +222,10 @@ python3 $G --graphics-session ue_gpos_ftexn_1 1
 # corners weighted wu*wv (sum 65536) accumulate gw*ch (ch=byte*0x101),
 # rr=(acc+0x8000)>>16 -> wb=rr*0x37800080 -> UNORM8
 python3 $G --graphics-session ue_gpos_ftexl_1 1
+# fragment NEAREST multi-texel + REPEAT wrap: same 4x4 CIS, uv spans
+# beyond [0,1] so floor(u*w) lands outside [0,w); integer coord wraps
+# mod w (f_twrap REPEAT arm) instead of CLAMP_TO_EDGE
+python3 $G --graphics-session ue_gpos_ftexr_1 1
 # line-list draw: topology=1, vertexCount=2; gfx_line_coverage mirrors the
 # RTL S_LN_* integer Bresenham (vxi>>>8 pixel coords, lerr=ldx-ldy) so the
 # 1-px line footprint is bit-exact; fs_vcol keeps flat vertex-0 colour

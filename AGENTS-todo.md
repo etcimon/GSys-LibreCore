@@ -18813,11 +18813,21 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   `wb=rr*0x37800080` f32 -> `_u8pack`.  Verified PASS bit-exact
   (ulp=0) vgtop (17122 checks) + vgsys (17291 checks); `.exp` shows
   513 distinct blended words over the 512 covered px; `ftexn`/`ftex`/
-  `ftexg` regen byte-identical.  Remaining W_TX*: LOD/mip walk
-  (`fs_mip`), projective (`fs_tex_proj`), explicit-LOD (`fs_tex_qlod`),
-  shadow/compare (`fs_tex_shadow`), gather-offset, sRGB, non-UNORM8
-  fmts; unused `fs_tex_proj`/`fs_tex_qlod`/`fs_tex_shadow` shaders
-  already in corpus.  **(c) MRT** — RTL `ca[3:0]`/`blend[3:0]` supports 4
+  `ftexg` regen byte-identical.  ~~REPEAT wrap~~ **DONE**
+  (`ue_gpos_ftexr_1`; `is_ftexr`, NEAREST+REPEAT): same 4x4 CIS but
+  uv spans beyond [0,1] so `floor(u*w)` lands outside `[0,w)`; the
+  integer coord wraps `i%n` (f_twrap m=0) instead of CLAMP_TO_EDGE.
+  Oracle uses `math.floor` (not `int` — negative coords need true
+  floor) + Python `%` matching the hardware two's-complement wrap.
+  Verified PASS bit-exact (ulp=0) vgtop (17122 checks) + vgsys
+  (17291 checks); `.exp` differs from `ftexn` (non-degenerate);
+  `ftexn`/`ftexl`/`ftex` regen byte-identical.  Remaining W_TX*:
+  LOD/mip walk (`fs_mip`), projective (`fs_tex_proj`), explicit-LOD
+  (`fs_tex_qlod`), shadow/compare (`fs_tex_shadow`), MIRRORED wrap,
+  gather-offset, sRGB, non-UNORM8 fmts; `fs_tex_proj`/`fs_tex_qlod`/
+  `fs_tex_shadow` need a VS emitting nonzero `vcol.z/w` (vs_tex sets
+  z=0 — blocked on shader tooling); `fs_tex_qlod` uses only `vcol.xy`
+  so it IS reachable but needs quad-derivative + SFU-log2 port.  **(c) MRT** — RTL `ca[3:0]`/`blend[3:0]` supports 4
   colour attachments; oracle render pass emits only 1 (+depth).
   **(d) MSAA / occlusion+timestamp queries / secondary CBs+subpasses
   / logicOp+blend / non-UNORM8 logicOp** — all feature-level.
