@@ -10765,6 +10765,16 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 break
         is_bfac = bfac is not None
         is_bfac_const = is_bfac and any(f in (11, 12, 13, 14) for f in bfac)
+        # colourWriteMask: is_cwm + cwm_mask select the VkColorComponentFlags
+        # write mask on the blend attachment (bit c gates channel c:
+        # R=1,G=2,B=4,A=8).  cwm sessions reuse the is_bop ONE/ONE ADD base so
+        # pColorBlendState is emitted; masked channels keep the dst/clear byte.
+        is_cwm = 'cwm' in gfx
+        cwm_mask = 0x7 if is_cwm else 0xF
+        if is_cwm:
+            is_bop = True
+            if bop_op is None:
+                bop_op = 0
         is_wide = 'vbwide' in gfx
         # kill: fs_kill discards on a FragCoord 8x8 checkerboard — the
         # helper-lane path; vs_pos3 keeps vcol constant so tri_w holds
@@ -11403,6 +11413,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 else:
                     _rb = [cl_f32_u8(f32b(_bopv(_v[c], _df[c])))
                            for c in range(4)]
+                    if is_cwm:
+                        # colourWriteMask: channels whose mask bit is clear
+                        # keep the dst (clear) byte instead of the blend.
+                        _rb = [_rb[c] if (cwm_mask >> c) & 1
+                               else (clr_w >> (8 * c)) & 0xFF
+                               for c in range(4)]
                     exp_img.append(_rb[0] | (_rb[1] << 8) |
                                    (_rb[2] << 16) | (_rb[3] << 24))
         elif is_bfac:
@@ -11846,7 +11862,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                dstAlphaBlendFactor=(bfac[3] if is_bfac
                                                     else 1 if is_bop else 7),
                                alphaBlendOp=bop_op if is_bop else 0,
-                               colorWriteMask=0xF)],
+                               colorWriteMask=cwm_mask)],
                            blendConstants=([f32b(_BLC[c]) for c in range(4)]
                                            if is_bfac_const
                                            else [0, 0, 0, 0]))

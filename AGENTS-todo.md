@@ -18728,6 +18728,17 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   re-ran the 3 new sessions + `bfacdst`/`bfacal` — all PASS bit-exact
   (17173 checks each).  (`67f8310f2` oracle+vectors, `d933e75bd` enum
   fix)
+  **colourWriteMask coverage — DONE** (`ue_gpos_cwm_1`): first
+  `VkColorComponentFlags` write-mask session — `is_cwm`/`cwm_mask`
+  emit `colorWriteMask=0x7` (R|G|B, alpha masked) on the is_bop
+  ONE/ONE ADD base; oracle keeps the dst/clear byte on masked-out
+  channels (`mask` bit c gates channel c).  RTL already applies the
+  mask via `rop_strb={4'h0,blend[at].mask}` write strobe, so this is
+  oracle+vector only — **no rebuild**.  Verified PASS bit-exact
+  (ulp=0) on existing `tb_g6lc_apu_vgtop` + `tb_g6lc_apu_vgsys`
+  binaries; `.exp` differs from `bopadd` in 2048 bytes (non-degenerate)
+  and `bopadd` regenerates byte-identical (cwm_mask=0xF default).
+  Wider masks / mask+logicOp / non-UNORM8 remain open.
   **(5) SPIR-V toolchain** — no `spirv-as`/glslang, blocks MRT/
   noperspective/custom shaders.  Then CTS-1→CTS-2 caselists through
   the guest harness.  All directed-RTL session evidence only — no
