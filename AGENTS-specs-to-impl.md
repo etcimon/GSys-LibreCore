@@ -65,6 +65,16 @@ check states with no new state, interface or pipeline stage. They repair the
 reusable backend contract, not native capacity or physical persistence.
 See `g6lc_storamic/architecture/block-address-validation.md`.
 
+## Storamic C0 - Independent Load Translation
+
+`core/load_unit.sv` computes translation admission outside the request/forward
+FSM, preserving its existing `CVA6Cfg` conditions and cancellation priority.
+Store hazards consume the load PA but do not decide whether it translates.
+The control projection proves the original/candidate outputs and next state
+equivalent. No ISA, privilege, address-map, latency, clock/reset or state
+contract changes. See `g6lc_storamic/architecture/cpu-load-translation.md`.
+This removes one simulator scheduling dependency; strict full C0 remains open.
+
 ## Storamic ST-025 - Model Checkpoint And Inactive Origin Candidate
 
 The later model endpoint composes AXI admission/quiescence, a policy-bound
@@ -1132,6 +1142,35 @@ split-target completion bug. `accepted_target` now completes on the consumed
 instruction PC rather than its response window. Final RVI and mixed C/I
 reference traces pass at the stated integer diagnostic scope; this is not
 natural-firmware or complete SMT qualification.
+
+### IQ address admission scheduling follow-up (Storamic C0, CPU36)
+
+`core/fetch_B/instr_queue.sv` `gen_push_address` now computes target-FIFO
+admission from the selected slot's `cf_type_i` with the same slot selector as
+`gen_fifo_input`. The checkpoint fields of `instr_data_in` come from
+`consumed_o`, so they no longer appear in the admission scheduling cone. The
+result is unchanged and adds no state, latency, ports, configuration, ISA or
+DTS change. Generic synthesis cell and flop counts are identical. Tests:
+`AGENTS-specs-to-tests.md` fetch-queue rows.
+
+### PTW leaf-update scheduling follow-up (Storamic C0, CPU37)
+
+`core/cva6_mmu/cva6_ptw.sv` adds continuous leaf predicates (`pte_invalid`,
+`leaf_itlb_fault`/`_final`, `leaf_dtlb_ok`/`_final`, copied from the former
+inline conditions) and a separate `always_comb ptw_leaf_update` that alone
+drives `shared_tlb_update_valid` and `is_napot_64k`. The walker no longer
+writes them, so the TLB update cannot depend on `shared_tlb_hit_i`. Full-module
+combinational equivalence with the original passes in three configurations.
+No state, latency, port, configuration, ISA or DTS change; 7,499→7,497 generic
+cells. Evidence: `g6lc_storamic/architecture/development-status.md` (CPU37).
+
+### Miss-unit request packet follow-up (Storamic C0, CPU38)
+
+`core/cache_subsystem/wt_dcache_missunit.sv` drives `mem_req_c.size` from a
+new `mem_req_size` net and aligns `mem_req_c.paddr` with that net, so the
+packet no longer reads one of its own fields. Logic is unchanged (full-module
+equivalence, identical 11,575 generic cells); no port, latency, configuration,
+ISA or DTS change. Evidence: `development-status.md` (CPU38).
 
 ### Circular IQ implementation follow-up (2026-09-16)
 

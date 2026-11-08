@@ -11,7 +11,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs, type FlagValue } from "../src/cli/args.ts";
 import { gateVerdict, verifyCommand } from "../src/cli/commands/verify.ts";
-import type { PlatformContext } from "../src/context.ts";
+import { createContext, type PlatformContext } from "../src/context.ts";
+import { edaPaths, lintTargetsRemote, runFormalTasks, synthTargetsRemote } from "../src/tooling/eda.ts";
 import { Logger } from "../src/util/log.ts";
 import { hasBinary } from "../src/platform/exec.ts";
 
@@ -94,6 +95,38 @@ test("a skipped stage cannot report a passed gate", () => {
   expect(dry.code).toBe(0);
   expect(dry.message).toContain("not a gate result");
   expect(gateVerdict([step("pass")], { ...opts, qualified: true }).message).toContain("qualified");
+});
+
+test("remote dry runs plan stages without fabricating missing-result failures", async () => {
+  const ctx = await createContext({
+    cwd: join(import.meta.dir, "../.."), dryRun: true,
+    logLevel: "silent", ensureWorkspaceDirs: true,
+  });
+  ctx.config = structuredClone(DEFAULT_CONFIG);
+  // Exercise command planning without requiring WSL on a Windows test host.
+  // dryRun prevents every transport/tool execution.
+  ctx.host = { ...ctx.host, os: "linux" };
+  ctx.config.verify.formal = { ...ctx.config.verify.formal, remote: true };
+  ctx.config.verify.formalTasks = [DEFAULT_CONFIG.verify.formalTasks[0]!];
+  const owned = mkdtempSync(join(ctx.paths.root, "verify-remote-plan-"));
+  ctx.paths = { ...ctx.paths, build: owned };
+  try {
+    const paths = edaPaths(ctx);
+    const targets = ["cv64a6_imafdc_sv39"];
+    const outcomes = [
+      ...await lintTargetsRemote(ctx, paths, targets),
+      ...await synthTargetsRemote(ctx, paths, targets),
+      ...await runFormalTasks(ctx, paths, ctx.config.verify.formalTasks),
+    ];
+    expect(outcomes).toHaveLength(3);
+    expect(outcomes.map((o) => o.stage)).toEqual(["lint", "synth", "formal"]);
+    expect(outcomes.every((o) => o.status === "skip" && o.detail === "dry-run")).toBe(true);
+    const verdict = gateVerdict(outcomes, { dryRun: true, allowSkips: false, qualified: false });
+    expect(verdict.code).toBe(0);
+    expect(verdict.message).toContain("not a gate result");
+  } finally {
+    rmSync(owned, { recursive: true, force: true });
+  }
 });
 
 test("qualification refuses unsafe CLI combinations before tool provisioning", async () => {

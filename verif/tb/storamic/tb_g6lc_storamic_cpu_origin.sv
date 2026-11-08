@@ -108,8 +108,9 @@ module tb_g6lc_storamic_cpu_origin;
           $fatal(1, "CPU_ORIGIN_FAIL aw-prot addr=%h got=%h expected=%h",
                  req.aw.addr, req.aw.prot, expected_prot(req.aw.addr));
         assert(req.aw.len == 0 && req.aw.size == 2 && !req.aw.lock &&
-               req.aw.atop == 0 && req.aw.cache == 0) else
-          $fatal(1, "CPU_ORIGIN_FAIL probe-write-shape");
+               req.aw.atop == 0 && req.aw.cache == axi_pkg::CACHE_MODIFIABLE) else
+          $fatal(1, "CPU_ORIGIN_FAIL probe-write-shape addr=%h len=%0d size=%0d lock=%0d atop=%h cache=%h",
+                 req.aw.addr, req.aw.len, req.aw.size, req.aw.lock, req.aw.atop, req.aw.cache);
         write_checks <= write_checks + 1;
       end
     end
@@ -143,8 +144,9 @@ module tb_g6lc_storamic_cpu_origin;
       if (is_probe(req.ar.addr)) begin
         assert(req.ar.prot == expected_prot(req.ar.addr)) else
           $fatal(1, "CPU_ORIGIN_FAIL ar-prot");
-        assert(req.ar.cache == 0 && !req.ar.lock && req.ar.len == 0) else
-          $fatal(1, "CPU_ORIGIN_FAIL probe-read-shape");
+        assert(req.ar.cache == axi_pkg::CACHE_MODIFIABLE && !req.ar.lock && req.ar.len == 0) else
+          $fatal(1, "CPU_ORIGIN_FAIL probe-read-shape addr=%h len=%0d lock=%0d cache=%h",
+                 req.ar.addr, req.ar.len, req.ar.lock, req.ar.cache);
         read_checks <= read_checks + 1;
       end
     end

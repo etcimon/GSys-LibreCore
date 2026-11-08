@@ -562,10 +562,17 @@ module instr_queue
     );
   end
 
+  // Address admission consumes the selected CF directly. Checkpoint payload
+  // is allocated from consumed_o, so it must not feed this admission path.
   always_comb begin : gen_push_address
     push_address = 1'b0;
     for (int unsigned f = 0; f < NrFifo; f++) begin
-      push_address |= push_instr[f] & (instr_data_in[f].cf != ariane_pkg::NoCF);
+      fifo_idx_t s;
+      s = '0;
+      for (int unsigned i = 0; i < NrFifo; i++) begin
+        if (valid[i] && slot_fifo[i] == fifo_idx_t'(f)) s = fifo_idx_t'(i);
+      end
+      push_address |= push_instr[f] & (cf_type_i[s] != ariane_pkg::NoCF);
     end
   end
 

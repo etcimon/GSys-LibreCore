@@ -62,6 +62,35 @@ Repository-wide verification was stopped after its smoke script invoked shared
 cleanup; full compliance/boot/synthesis qualification remains incomplete. No
 QEMU, Linux block/PMEM/DAX or VirtIO conformance or physical-media qualification result is claimed here.
 
+## Storamic C0 - Load Translation Scheduling
+
+The `load-translation`/`load-translation-synth` stages use
+`tb_g6lc_review_load_cancel` in `verif/tb/core/tb_g6lc_rtl_review.sv`, including
+new scenario 100 with real PA/hazard feedback. Four profiles run 31 scenarios
+and four rejecting oracles; the exact LZC representation rule also rejects a
+real-loop canary. Live-port synthesis has no latches/SCCs. Run
+`storamic-all-ea64371c9fed` passes in about 53 seconds with source/model/PGO
+identities. Independent original-RTL rejection and the control projection are
+recorded in `g6lc_storamic/architecture/cpu-load-translation.md`.
+No ISA chapter, full scheduling or native qualification status is promoted.
+
+## Storamic C0 - Instruction Queue Admission
+
+The registered `fetch-queue`/`fetch-queue-synth` stages
+(`verif/tb/storamic/run_fetch_queue.py`) use `tb_g6lc_fetch_queue` with
+`CHECKPOINT_FEEDBACK=1` over five geometries (S4/I2/H2/C1, S2/I1/H1/C1,
+S2/I1/H1/C0, S2/I2/H2/C0, S8/I2/H2/C1). Each PGO model must pass the accepted-
+stream scoreboard with nonzero checkpoints and reject `+checkpoint_negative`,
+`+oracle_negative` and, for two harts, `+iq_oldest_neg`. Two real-loop canaries
+reject through the `fire_prefix`/`fetch_entry_valid_o` split controls, and a
+textual revert of the promoted admission to `instr_data_in[f].cf` must re-trip
+`UNOPTFLAT`. Live-port synthesis of production `instr_queue` has 56,651
+generic cells, zero latches and zero SCCs. Runs `storamic-e7ccb487a7dc`
+(21/21 outcomes, ~13 min) and `storamic-5fbcd93abe66` (~12 min) pass with
+`instr_queue.sv` sha `e2529c2e…f8ce` and compiler `ed686e68…`, using owned
+tools passed through `run_remote.py --verilator/--yosys/--solver-bin`.
+Leaf evidence only; full C0 and native qualification remain open.
+
 ## Storamic ST-036 - Block Address Boundaries
 
 The existing `vblk` stage includes thirteen additional backend boundary cases:
@@ -2133,6 +2162,7 @@ Final re-gate: `review-l2-rr-regate-v3` 60 cache records with synthesis and
 | Contract | Test / execution | Scope and result |
 |---|---|---|
 | Accepted instruction order, bytes, hart and predicted target | `verif/tb/core/tb_g6lc_fetch_queue.sv`; proxy `py verif/regress/remote/run_fetch_queue.py` with explicit source files | Independent accepted-stream scoreboard. Before: sparse input skips an older entry at t=35 for 4/8 slots, dual issue. After compaction: 2-slot/I1/H1, 4-slot/I2/H2 and 8-slot/I2/H2 PASS, including stalls, flushes, backward packet PCs and CF target accounting. Leaf diagnostic, not two-active-core execution. |
+| Address admission independent of checkpoint payload (C0) | `tb_g6lc_fetch_queue.sv` `-GCHECKPOINT_FEEDBACK=1`, `+checkpoint_negative`; isolated `build-platform/workspace/build/storamic-cpu-36/verify.py` | Checkpoint index allocated from `consumed_o` and checked at retirement. Original rejects strict UNOPTFLAT. Candidate passes 2/I1/H1 (RVC on/off), 2/I2/H2, 4/I2/H2, 8/I2/H2 with PGO models; checkpoint and PC oracles reject. Six-geometry formal projection is equivalent and mutants reject. Synthesis has 56,651 cells unchanged, with 0 latches/SCCs. Full-core diagnostics drop by 2 in both origins. Selected evidence, not C0 qualification. |
 | Implementation cost / synthesizability | Proxy `py verif/regress/remote/run_fetch_queue_synth.py` with the same copied sources | Four-slot/I2/H2 live-port generic fixture, exceptions tied off. 25,618→22,354 cells; sequential count unchanged; no latches/check errors. Not physical area, full-core synthesis or STA. |
 | Live fetch assertions and non-vacuity | `g6lc_fetch_{iq,realign}.sby` now have separate `bmc` and `cover` tasks; proxy `py verif/regress/remote/run_fetch_formal.py` | Fixed impossible NH=2 bound and made free stimulus explicit top-level ports. Covers/assertions must pass independently; prior vacuous PASS withdrawn. IQ raw-opcode non-interference and reduced formal envelopes remain review gates, not program-order proof. |
 | SMT2 checked-work witness | Proxy `py verif/regress/remote/run_checked_work_review.py`, model path+SHA and compiler prefix explicit | Rebuild source, record ELF/recipe/disassembly, verify zero compressed opcodes in norvc cases, VT1/model-bound cookie verdicts. With queue compaction alone, RVC N1 PASS and norvc N1 FAIL. After same-cycle expected-PC repair, both N1 variants PASS (131,072 / 137,216 cycles); both N2 still no verdict by 500k. `mini_fetch_target_prefix.S` is a short warmed same-window jump control, not a replacement for the full regression. No dual-active SMT2 qualification. |
@@ -3641,3 +3671,26 @@ ACK mutants reject at intended assertions. All113 packaged code/runner hashes,
 Active-loss recovery is explicit common reset/rediscovery, not automatic
 provider revival or full native liveness. Python114/Bun7/typecheck/lint4/
 source-license108 pass. See `g6lc_storamic/architecture/policy-writer-model.md`.
+
+Storamic block-address/short-proof review30: frozen `storamic-all-920564dbf1c0`
+passes six selected backend/device simulation/formal/synthesis stages in about
+130 seconds with two workers. `tb_g6lc_storamic_virtio_blk.sv` retains 1,609
+checks, thirteen full-width address/table boundary cases, last-legal-sector
+read/write and its corruption oracle; RAM/store response ownership is now on
+one edge. Device integration passes 163 checks and its oracle. Both synth
+profiles have zero latches/SCCs (701/1,432 generic cells).
+`formal_g6lc_storamic_virtio_blk.sv` keeps all twelve original obligations and
+four assumptions: twenty asserted metadata/ownership invariants prove the
+unrestricted DMA-window property by reset base, one-step induction and a
+pointwise consequence. The other assertions retain depth14 and concrete
+status/response/FLUSH covers retain 14/16/16. `run_leaf.py` inventories groups,
+checks model identity, enforces 30-second query/180-second stage budgets and
+blocks dependent assumptions after failed proofs. Its existing runner test
+file checks inventory loss, duplicate markers, tampering, timeouts, dependency
+failure and concrete covers. All120 Storamic Python tests pass.
+Original replay `storamic-boundary-original-bbf6f81d` rejects cases1/2/3/4/8/13,
+fails induction/concrete safety, and correctly does not execute the dependent
+consequence. All119 packaged source hashes and two simulator PGO/profile-use
+identities verify; 62 omitted stages remain listed. Earlier timed-out proofs
+stay incomplete. No ISA chapter, native, physical or Linux gate is promoted.
+See `g6lc_storamic/architecture/block-address-validation.md`.

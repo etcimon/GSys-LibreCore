@@ -10,6 +10,9 @@ module tb_g6lc_storamic_virtio_blk;
   localparam logic [63:0] WinBase = 64'h8000_0000;
   localparam logic [63:0] WinSize = 64'h0010_0000;
   localparam logic [63:0] CapSectors = 64'd64;
+  // Sparse memory also exercises the last representable byte address. The
+  // production model is small; the backend's public capacity seam is 64 bits.
+  logic [63:0] capacity = CapSectors;
 
   logic clk = 1'b0, rst_n = 1'b0;
   always #5 clk = ~clk;
@@ -46,7 +49,7 @@ module tb_g6lc_storamic_virtio_blk;
     .dma_req_o(dreq), .dma_gnt_i(dgnt), .dma_we_o(dwe), .dma_addr_o(daddr),
     .dma_wdata_o(dwdata), .dma_be_o(dbe), .dma_rvalid_i(drv),
     .dma_rdata_i(drdata), .dma_err_i(derr),
-    .store_ready_i(sready), .capacity_i(CapSectors), .serial_i(serial),
+    .store_ready_i(sready), .capacity_i(capacity), .serial_i(serial),
     .st_req_o(sreq), .st_gnt_i(sgnt), .st_we_o(swe), .st_addr_o(saddr),
     .st_wdata_o(swdata), .st_be_o(sbe), .st_rvalid_i(srv), .st_rdata_i(srdata),
     .st_err_i(serr),
@@ -60,6 +63,7 @@ module tb_g6lc_storamic_virtio_blk;
   int store_writes = 0, win_viol = 0, store_viol = 0;
   int store_err_at = -1;      // fail the Nth store beat (counted from 0)
   int store_beats = 0;
+  int dma_beats = 0;
 
   function automatic logic [63:0] ram64(input logic [63:0] a);
     logic [63:0] v;
@@ -79,13 +83,17 @@ module tb_g6lc_storamic_virtio_blk;
   always @(negedge clk) begin
     dgnt <= ($urandom % 100) < 60;
     sgnt <= ($urandom % 100) < 60;
+  end
+  // Each response and latency counter has one clocked owner. Registered
+  // response data/error remain stable for the edge at which the DUT consumes
+  // rvalid; this also exercises a full-cycle response latency.
+  always @(posedge clk) begin
     if (dbusy && !drv) begin
       if (dlat > 0) dlat <= dlat - 1;
       else begin drv <= 1'b1; drdata <= dbwe ? 64'h0 : ram64(dbaddr); end
     end
-  end
-  always @(posedge clk) begin
     if (rst_n && dreq && dgnt && !dbusy) begin
+      dma_beats++;
       dbusy <= 1'b1; dbwe <= dwe; dbaddr <= daddr; dlat <= $urandom % 3;
       if (daddr[2:0] != 0 || daddr < WinBase || daddr + 8 > WinBase + WinSize)
         win_viol++;
@@ -101,7 +109,7 @@ module tb_g6lc_storamic_virtio_blk;
   logic [63:0] sbaddr;
   int slat;
   logic sfail;
-  always @(negedge clk) begin
+  always @(posedge clk) begin
     if (sbusy && !srv) begin
       if (slat > 0) slat <= slat - 1;
       else begin
@@ -109,12 +117,10 @@ module tb_g6lc_storamic_virtio_blk;
         srdata <= sbwe ? 64'h0 : store64(sbaddr);
       end
     end
-  end
-  always @(posedge clk) begin
     if (rst_n && sreq && sgnt && !sbusy) begin
       sbusy <= 1'b1; sbwe <= swe; sbaddr <= saddr; slat <= $urandom % 3;
       sfail <= (store_beats == store_err_at);
-      if (saddr[2:0] != 0 || saddr + 8 > CapSectors * 512) store_viol++;
+      if (saddr[2:0] != 0 || (saddr >> 9) >= capacity) store_viol++;
       if (swe && store_beats != store_err_at) begin
         store_writes++;
         for (int i = 0; i < 8; i++) store[saddr + i] = swdata[8*i +: 8];
@@ -189,9 +195,75 @@ module tb_g6lc_storamic_virtio_blk;
   localparam logic [63:0] Hdr = 64'h8000_1000, D0 = 64'h8000_2000,
                           D1 = 64'h8000_3000, St = 64'h8000_4000;
 
+  task automatic boundary_case(input int which);
+    localparam logic [63:0] SectorLimit = 64'h0080_0000_0000_0000; // 2^64 / 512
+    int before_store, before_dma, n;
+    bit structural, accepted, reading;
+    logic [63:0] sector;
+    logic [31:0] length;
+    section($sformatf("boundary-%0d", which));
+    before_store = store_beats;
+    before_dma = dma_beats;
+    structural = which >= 8;
+    accepted = which == 6 || which == 7;
+    reading = which == 3 || which == 4 || which == 7;
+    sector = (which == 2 || which == 4 || accepted) ? SectorLimit - 1 : SectorLimit;
+    length = (which == 2 || which == 4 || which == 5) ? 32'd1024 : 32'd512;
+    capacity = 64'hFFFF_FFFF_FFFF_FFFF;
+    if (which == 5) sector = 64'hFFFF_FFFF_FFFF_FFFF;
+    if (accepted) capacity = SectorLimit;
+    if (structural) begin capacity = CapSectors; sector = 0; end
+    header(Hdr, reading ? 32'd0 : 32'd1, sector);
+    for (int i = 0; i < 1024; i++)
+      ram[D0 + 64'(i)] = reading ? 8'hEE : 8'(i * 13 + 9);
+    if (accepted && reading)
+      for (int i = 0; i < 512; i++)
+        store[64'hFFFF_FFFF_FFFF_FE00 + 64'(i)] = 8'(i * 13 + 9);
+    seg(0, Hdr, 16, 0); seg(1, D0, length, reading); seg(2, St, 1, 1);
+    seg(3, St + 8, 1, 1);
+    ram[St] = 8'hEE;
+    n = 3;
+    if (which == 8) seg(2, St, 0, 1);
+    case (which)
+      9: n = 0;
+      10: n = 1;
+      11: n = 5;
+      12: n = 6;
+      13: n = 7;
+      default: ;
+    endcase
+    run(n);
+    if (structural) begin
+      ok(got_fault && dma_beats == before_dma && store_beats == before_store &&
+         ram[St] == 8'hEE, $sformatf("boundary-%0d-no-structural-side-effect", which));
+    end else if (accepted) begin
+      ok(!got_fault && ram[St] == 0 && got_len == (reading ? 513 : 1) &&
+         store_beats == before_store + 64, $sformatf("boundary-%0d-last-sector", which));
+      for (int i = 0; i < 512; i++) begin
+        ok(store[64'hFFFF_FFFF_FFFF_FE00 + 64'(i)] == 8'(i * 13 + 9),
+           $sformatf("boundary-%0d-stored-byte-%0d", which, i));
+        if (reading) ok(ram[D0 + 64'(i)] == 8'(i * 13 + 9),
+                        $sformatf("boundary-%0d-read-byte-%0d", which, i));
+      end
+    end else begin
+      ok(!got_fault && ram[St] == 1 && got_len == 1 && store_beats == before_store,
+         $sformatf("boundary-%0d-reject-without-store-access", which));
+    end
+    capacity = CapSectors;
+  endtask
+
+  int boundary_only = 0;
   initial begin
     if ($test$plusargs("oracle_negative")) corrupt = 1;
     repeat (3) tick(); rst_n = 1; repeat (2) tick();
+
+    // Select a single rejecting case to replay against frozen original RTL.
+    if ($value$plusargs("boundary_only=%d", boundary_only)) begin
+      boundary_case(boundary_only);
+      $display("VBLK_BOUNDARY_PASS case=%0d", boundary_only);
+      $finish;
+    end else begin
+    for (int c = 1; c <= 13; c++) boundary_case(c);
 
     section("out");
     for (int i = 0; i < 1024; i++) ram[(i < 512 ? D0 : D1 - 512) + i] = 8'(i * 7 + 3);
@@ -313,6 +385,7 @@ module tb_g6lc_storamic_virtio_blk;
     ok(win_viol == 0 && store_viol == 0, "no-window-or-store-violations");
     $display("VBLK_PASS checks=%0d store_writes=%0d", checks, store_writes);
     $finish;
+    end
   end
 
   initial begin

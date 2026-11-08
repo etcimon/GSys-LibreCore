@@ -21,13 +21,17 @@ def fail(program, address):
     program.emit(0x0000006f)
 
 
-def build_debug_program(entry_privilege=3):
+def build_debug_program(entry_privilege=3, mprv=0):
+    """mprv: 0 none; 1 M firmware runs MPRV=1/MPP=U, dcsr.mprven=0;
+    2 as 1 with the debugger setting dcsr.mprven=1 before its accesses."""
     if entry_privilege not in (0, 1, 3):
         raise ValueError("debug entry privilege must be U, S or M")
+    if mprv not in (0, 1, 2) or (mprv and entry_privilege != 3):
+        raise ValueError("MPRV variants require machine-mode entry")
     normal, debug = _Program(), _Program()
     normal.address(28, 0x300)
     normal.csr(0x305, 28)
-    if entry_privilege != 3:
+    if entry_privilege != 3 or mprv:
         normal.addi(28, 0, -1)
         normal.emit((2 << 20) | (28 << 15) | (5 << 12) | (28 << 7) | 0x13)
         normal.csr(0x3b0, 28)  # All-address NAPOT region, RWX for S/U.
@@ -35,6 +39,8 @@ def build_debug_program(entry_privilege=3):
         normal.csr(0x3a0, 28)
     normal.address(10, 0x100)
     normal.emit(0x500002b7)
+    if mprv:
+        normal.mstatus(0x20000)  # MPRV=1, MPP=U; execution remains M.
     if entry_privilege != 3:
         normal.address(28, 0x180)
         normal.csr(0x341, 28)
@@ -61,6 +67,8 @@ def build_debug_program(entry_privilege=3):
     debug.emit(0x0400006f)  # Configured halt entry -> handler at 0x840.
     fail(debug, 0x808)     # Configured debug exception vector.
     debug.cursor = 0x840 // 4
+    if mprv == 2:
+        debug.emit((0x7b0 << 20) | (0x10 << 15) | (6 << 12) | 0x73)  # CSRRSI DCSR.mprven.
     debug.emit((0x7b0 << 20) | (2 << 12) | (28 << 7) | 0x73)  # CSRR DCSR.
     debug.addi(6, 28, 0)
     debug.store(8)
@@ -86,12 +94,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-root", required=True, type=Path)
     parser.add_argument("--entry-privilege", type=int, choices=(0, 1, 3), default=3)
+    parser.add_argument("--mprv", type=int, choices=(0, 1, 2), default=0)
     args = parser.parse_args()
+    if args.mprv and args.entry_privilege != 3:
+        parser.error("--mprv requires --entry-privilege 3")
     out = args.output_root.resolve()
     repo = Path(__file__).resolve().parents[3]
     if not out.is_relative_to(repo / "build-platform/workspace"):
         parser.error("output must be contained in build-platform/workspace")
-    normal, debug = build_debug_program(args.entry_privilege)
+    normal, debug = build_debug_program(args.entry_privilege, args.mprv)
     out.mkdir(exist_ok=False)
     (out / "program.hex").write_bytes(normal)
     (out / "debug.hex").write_bytes(debug)
@@ -103,7 +114,7 @@ def main():
         "encoder_sha256": hashlib.sha256(Path(__file__).with_name("g6lc_cpu_origin_program.py").read_bytes()).hexdigest(),
         "expected_writes": 6, "expected_reads": 4, "debug_writes": 3, "debug_reads": 2,
         "halt_address": 0x800, "exception_address": 0x808, "resume_address": 0x80000100,
-        "entry_privilege": args.entry_privilege,
+        "entry_privilege": args.entry_privilege, "mprv": args.mprv,
     }
     (out / "result.json").write_text(json.dumps(report, indent=2))
 

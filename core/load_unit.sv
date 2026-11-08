@@ -402,12 +402,33 @@ module load_unit
   // ---------------
   // Load Control
   // ---------------
+  logic accept_req;
+  assign accept_req = valid_i && (!ldbuf_full || (LDBUF_FALLTHROUGH && ldbuf_r));
+
+  // Translation admission does not depend on the store hazard/forward verdict.
+  // Keep it outside the request FSM: that verdict consumes this load's PA.
+  // Preserve the existing cancellation priority and WAIT_GNT/WAIT_TRANSLATION
+  // behavior, including cycles with no new accepted load.
+  always_comb begin : translation_control
+    translation_req_o = 1'b0;
+    case (state_q)
+      IDLE, SEND_TAG:
+        if (accept_req)
+          translation_req_o = !CVA6Cfg.SpeculativeSb || dtlb_hit_i ||
+                              !lsu_ctrl_i.is_speculative_load;
+      WAIT_GNT: translation_req_o = 1'b1;
+      WAIT_TRANSLATION:
+        if (CVA6Cfg.MmuPresent || CVA6Cfg.NonIdemPotenceEn)
+          translation_req_o = 1'b1;
+      default: ;
+    endcase
+    if (cancelled_request) translation_req_o = 1'b0;
+  end
+
   always_comb begin : load_control
-    automatic logic accept_req;
 
     // default assignments
     state_d              = state_q;
-    translation_req_o    = 1'b0;
     req_port_o.data_req  = 1'b0;
     // tag control
     req_port_o.kill_req  = 1'b0;
@@ -421,14 +442,12 @@ module load_unit
     // In IDLE and SEND_TAG states, this unit can accept a new load request
     // when the load buffer is not full or if there is a response and the
     // load buffer is in fall-through mode
-    accept_req           = (valid_i && (!ldbuf_full || (LDBUF_FALLTHROUGH && ldbuf_r)));
 
     case (state_q)
       IDLE: begin
         if (accept_req) begin
           // start the translation process even though we do not know if the addresses match this should ease timing
           // don't start the translation for speculative loads that miss on tlb
-          translation_req_o = (!CVA6Cfg.SpeculativeSb || dtlb_hit_i || !lsu_ctrl_i.is_speculative_load);
           // check if load is speculative and non idempotent, if it is then stall and wait for branch result
           if (!CVA6Cfg.SpeculativeSb || !lsu_ctrl_i.is_speculative_load || (dtlb_hit_i && !paddr_ni)) begin
             // R3a: if STQ can fully satisfy this load, complete from forward
@@ -530,7 +549,6 @@ module load_unit
 
       WAIT_GNT: begin
         // keep the translation request up
-        translation_req_o   = 1'b1;
         // keep the request up
         req_port_o.data_req = 1'b1;
         // we finally got a data grant
@@ -560,7 +578,6 @@ module load_unit
         if (accept_req) begin
           // start the translation process even though we do not know if the addresses match this should ease timing
           // don't start the translation for speculative loads that miss on tlb
-          translation_req_o = (!CVA6Cfg.SpeculativeSb || dtlb_hit_i || !lsu_ctrl_i.is_speculative_load);
           // check if load is speculative and non idempotent, if it is then stall and wait for branch result
           if (!CVA6Cfg.SpeculativeSb || !lsu_ctrl_i.is_speculative_load || (dtlb_hit_i && !paddr_ni)) begin
             // check if the page offset matches with a store, if it does stall and wait
@@ -653,7 +670,6 @@ module load_unit
           // the write buffer is empty, so let's go and re-do the translation.
           state_d = WAIT_TRANSLATION;
         end else if(state_q == WAIT_TRANSLATION && (CVA6Cfg.MmuPresent || CVA6Cfg.NonIdemPotenceEn)) begin
-          translation_req_o = 1'b1;
           // we've got a hit and we can continue with the request process
           if (dtlb_hit_i) state_d = WAIT_GNT;
 
@@ -672,7 +688,6 @@ module load_unit
 
     if (cancelled_request) begin
       req_port_o.data_req = 1'b0;
-      translation_req_o = 1'b0;
       st_fwd_done = 1'b0;
       pop_ld_o = 1'b1;
       state_d = IDLE;

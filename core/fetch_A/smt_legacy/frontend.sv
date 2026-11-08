@@ -70,6 +70,8 @@ module frontend
     output icache_dreq_t icache_dreq_o,
     // Handshake between CACHE and FRONTEND (fetch) - CACHES
     input icache_drsp_t icache_dreq_i,
+    // Request-acceptance capacity, out of band from the packed response word.
+    input logic icache_ready_i,
     // Handshake's data between fetch and decode - ID_STAGE
     output fetch_entry_t [CVA6Cfg.NrIssuePorts-1:0] fetch_entry_o,
     // Handshake's valid between fetch and decode - ID_STAGE
@@ -2506,7 +2508,7 @@ module frontend
 
   if (CVA6Cfg.FtqDepth == 0) begin : gen_no_ftq
     assign icache_dreq_o.req = instr_queue_ready & ~halt_frontend_i;
-    assign if_ready = icache_dreq_i.ready & instr_queue_ready & ~halt_frontend_i;
+    assign if_ready = icache_ready_i & instr_queue_ready & ~halt_frontend_i;
     assign ftq_full = 1'b0;
     assign ftq_empty = 1'b1;
     assign ftq_head_valid = 1'b0;
@@ -2572,7 +2574,7 @@ module frontend
     // suppress demand so s1 never accepts a stale head (mini_jumps).
     assign demand_req = ftq_head_valid & instr_queue_ready & ~halt_frontend_i & ~lbuf_hit
                         & ~bp_valid & ~is_mispredict & ~flush_i;
-    assign demand_fire = demand_req & icache_dreq_i.ready;
+    assign demand_fire = demand_req & icache_ready_i;
 
     // Force-reseed FTQ on:
     //  - AMO/CSR set_pc+flush_if → commit+4 (NPC may have run ahead during AMO)
@@ -2641,7 +2643,7 @@ module frontend
           .peek_valid_i    (ftq_peek_valid),
           .peek_vaddr_i    (ftq_peek_vaddr),
           .demand_active_i (demand_req),
-          .icache_ready_i  (icache_dreq_i.ready),
+          .icache_ready_i  (icache_ready_i),
           .pf_req_o        (pf_req),
           .pf_vaddr_o      (pf_vaddr),
           .pf_drop_pma_o   ()

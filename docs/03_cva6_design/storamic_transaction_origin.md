@@ -7,6 +7,17 @@ an unbound checkpoint request.
 
 ## Source And Lifetime
 
+The functional load-unit C0 refactor separates translation admission from
+store-hazard/request arbitration, preserving all control outputs and next-state
+behavior. A translated load retains its PA while waiting on a store; another
+owner's PPN must not replace it while translation is idle. Actual-module
+regressions cover this feedback, miss/hit capture, forwarding and cancellation.
+There is no new state, clock/reset, memory, origin encoding or pipeline latency.
+Generic synthesis retains 139 FF cells in the four-slot reference profile;
+the two-cell reduction is not physical PPA evidence. The captured full-CPU
+scheduling count improves from 28 to 27 off/on, so C0 and native admission remain
+open. See [the focused evidence note](../../g6lc_storamic/architecture/cpu-load-translation.md).
+
 `g6lc_storamic_origin_supported` restricts capture to requested Storamic primary
 and I/O roles, one hart, non-OoO, non-virtualized WT operation, no accelerator
 and `COPRO_NONE`. An empty CVXIF interface is not itself an enabled writer.

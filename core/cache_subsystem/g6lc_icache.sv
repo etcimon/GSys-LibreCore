@@ -67,6 +67,9 @@ module g6lc_icache
     // data requests
     input  icache_dreq_t dreq_i,
     output icache_drsp_t dreq_o,
+    // Request-acceptance capacity, carried out of band from the packed
+    // response word (see icache_drsp_t in cva6.sv).
+    output logic        dreq_ready_o,
     // refill port
     input  logic         mem_rtrn_vld_i,
     input  icache_rtrn_t mem_rtrn_i,
@@ -192,12 +195,12 @@ module g6lc_icache
 
   // latch this in case we have to stall later on
   // make sure this is 32bit aligned
-  assign vaddr_d = (dreq_o.ready & dreq_i.req) ? dreq_i.vaddr : vaddr_q;
+  assign vaddr_d = (dreq_ready_o & dreq_i.req) ? dreq_i.vaddr : vaddr_q;
   // I4xi: use the latched request address (vaddr_q) for tag compare, MMU/PMP
   // request, and I$ response vaddr. vaddr_d is the next address before it has
   // been registered; using it for compare/ready created a Verilator
   // active-region convergence loop:
-  //   vaddr_d -> cl_index -> cl_hit -> dreq_o.ready -> vaddr_d -> ...
+  //   vaddr_d -> cl_index -> cl_hit -> dreq_ready_o -> vaddr_d -> ...
   // This makes the I$ a two-cycle hit (request in IDLE, hit in READ).
   assign areq_o.fetch_vaddr = (vaddr_q >> CVA6Cfg.FETCH_ALIGN_BITS) << CVA6Cfg.FETCH_ALIGN_BITS;
 
@@ -216,9 +219,9 @@ module g6lc_icache
   //
   // Using vaddr_d here does NOT reinstate the convergence loop that I4xi was
   // added to break. That loop was
-  //     vaddr_d -> cl_index -> cl_hit -> dreq_o.ready -> vaddr_d
-  // and I4xj already cut its `cl_hit -> ready` edge by removing `dreq_o.ready`
-  // from the READ hit branch; in IDLE `dreq_o.ready` is an unconditional 1'b1
+  //     vaddr_d -> cl_index -> cl_hit -> dreq_ready_o -> vaddr_d
+  // and I4xj already cut its `cl_hit -> ready` edge by removing `dreq_ready_o`
+  // from the READ hit branch; in IDLE `dreq_ready_o` is an unconditional 1'b1
   // that does not depend on cl_hit. With that edge gone the index no longer
   // participates in any cycle, so the correct address can be used again.
   // `cl_offset_d` (the word-within-line select) already keys off `dreq_i.vaddr`,
@@ -230,7 +233,7 @@ module g6lc_icache
 
   if (CVA6Cfg.NOCType == config_pkg::NOC_TYPE_AXI4_ATOP) begin : gen_axi_offset
     // if we generate a noncacheable access, the word will be at offset 0 or 4 in the cl coming from memory
-    assign cl_offset_d = ( dreq_o.ready & dreq_i.req)      ? ICACHE_OFFSET_WIDTH'((dreq_i.vaddr >> CVA6Cfg.FETCH_ALIGN_BITS) << CVA6Cfg.FETCH_ALIGN_BITS) :
+    assign cl_offset_d = ( dreq_ready_o & dreq_i.req)      ? ICACHE_OFFSET_WIDTH'((dreq_i.vaddr >> CVA6Cfg.FETCH_ALIGN_BITS) << CVA6Cfg.FETCH_ALIGN_BITS) :
                          ( paddr_is_nc  & mem_data_req_o ) ? {{ICACHE_OFFSET_WIDTH-3{1'b0}}, cl_offset_q[2], 2'b0} : // needed since we transfer 32bit over a 64bit AXI bus in this case
         cl_offset_q;
     // request word address instead of cl address in case of NC access
@@ -239,7 +242,7 @@ module g6lc_icache
   end else begin : gen_piton_offset
     // icache fills are either cachelines or 4byte fills, depending on whether they go to the Piton I/O space or not.
     // since the piton cache system replicates the data, we can always index the full CL
-    assign cl_offset_d = (dreq_o.ready & dreq_i.req) ? {dreq_i.vaddr >> 2, 2'b0} : cl_offset_q;
+    assign cl_offset_d = (dreq_ready_o & dreq_i.req) ? {dreq_i.vaddr >> 2, 2'b0} : cl_offset_q;
 
     // request word address instead of cl address in case of NC access
     assign mem_data_o.paddr = (paddr_is_nc) ? {cl_tag_d, vaddr_q[CVA6Cfg.ICACHE_INDEX_WIDTH-1:2], 2'b0} :                                         // align to 32bit
@@ -264,7 +267,7 @@ module g6lc_icache
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       token_q <= '0;
-    end else if (dreq_o.ready & dreq_i.req) begin
+    end else if (dreq_ready_o & dreq_i.req) begin
       token_q <= dreq_i.token;
     end
   end
@@ -289,13 +292,10 @@ module g6lc_icache
     cache_rden = 1'b0;
     cache_wren = 1'b0;
     inv_en = 1'b0;
-    flush_d = flush_q | flush_i;  // register incoming flush
     force_all_ways_d = 1'b0;
 
     // interfaces
-    dreq_o.ready = 1'b0;
-    areq_o.fetch_req = 1'b0;
-    dreq_o.valid = 1'b0;
+    dreq_ready_o = 1'b0;
     mem_data_req_o = 1'b0;
     // performance counter
     miss_o = 1'b0;
@@ -316,7 +316,6 @@ module g6lc_icache
         flush_en = 1'b1;
         if (flush_done) begin
           state_d = IDLE;
-          flush_d = 1'b0;
           // if the cache was not enabled set this
           cache_en_d = en_i;
         end
@@ -334,7 +333,7 @@ module g6lc_icache
         end else begin
           // mem requests are for sure invals here
           if (!mem_rtrn_vld_i) begin
-            dreq_o.ready = 1'b1;
+            dreq_ready_o = 1'b1;
             // we have a new request
             if (dreq_i.req) begin
               cache_rden = 1'b1;
@@ -353,7 +352,6 @@ module g6lc_icache
       // reuse the miss mechanism to handle
       // the request
       READ: begin
-        areq_o.fetch_req = '1;
         // only enable tag comparison if cache is enabled
         cmp_en_d    = cache_en_q;
         // readout speculatively
@@ -374,7 +372,6 @@ module g6lc_icache
               cmp_en_d         = 1'b1;
               state_d          = READ;
             end else begin
-              dreq_o.valid = ~dreq_i.kill_s1;  // don't output on flush/misp/replay; keep bp_fire response for the branch window
               state_d      = IDLE;
               force_all_ways_d = 1'b0;
 
@@ -396,7 +393,7 @@ module g6lc_icache
               // paths were already cut to `vaddr_q`/`cl_index_q`, so a
               // hit-qualified `ready` cannot loop back into itself. Do NOT
               // widen this to an unconditional `ready` (miss/deferred accept)
-              // or drive `cl_index` off anything that reads `dreq_o.ready`
+              // or drive `cl_index` off anything that reads `dreq_ready_o`
               // combinationally -- that is what recreates the feedback.
               //
               // Killed streams are not accepted: on kill_s1/kill_s2 the
@@ -404,7 +401,7 @@ module g6lc_icache
               // the requester re-offers in IDLE next cycle. Miss, flush,
               // inval and translation-wait paths stay serialized as before.
               if (~dreq_i.kill_s1 & ~dreq_i.kill_s2) begin
-                dreq_o.ready = 1'b1;
+                dreq_ready_o = 1'b1;
                 if (dreq_i.req) begin
                   state_d = READ;
                 end
@@ -438,13 +435,6 @@ module g6lc_icache
         // so we do not have to check for invals here
         if (mem_rtrn_vld_i && mem_rtrn_i.rtype == ICACHE_IFILL_ACK) begin
           state_d = IDLE;
-          // I4xj: do not gate refill return on bp_fire (kill_s2); that creates
-          // a combinational loop through the frontend branch predictor.
-          // bp_pend_q / same_win already drops fall-through returns after a
-          // taken branch. Cancel only on architectural kills (flush/misp/replay).
-          if (!(dreq_i.kill_s1 || flush_d)) begin
-            dreq_o.valid = 1'b1;
-          end
           // T17: install the line even when the requester killed the stream
           // (mispredict, SMT hart switch). The refill is current memory for a
           // cacheable address, so keeping it is always safe; dropping it let
@@ -463,7 +453,6 @@ module g6lc_icache
       // wait until paddr is valid, and go
       // back to idle
       KILL_ATRANS: begin
-        areq_o.fetch_req = '1;
         if (areq_i.fetch_valid) begin
           state_d = IDLE;
         end
@@ -487,6 +476,39 @@ module g6lc_icache
         state_d = FLUSH;
       end
     endcase  // state_q
+  end
+
+  // Pending flush, translation request and response valid are computed apart
+  // from p_fsm. p_fsm reads kill_s2 (bp_fire) for request acceptance; keeping
+  // these cones out of that process stops the response path from appearing
+  // to depend on the branch predictor it feeds. Values are unchanged:
+  // flush_d is only cleared by a completed FLUSH, fetch_req is asserted in
+  // READ/KILL_ATRANS, and valid follows the READ hit and MISS refill rules.
+  assign flush_d = (flush_q | flush_i) & ~((state_q == FLUSH) & flush_done);
+  assign areq_o.fetch_req = (state_q == READ) || (state_q == KILL_ATRANS);
+
+  always_comb begin : p_response_valid
+    dreq_o.valid = 1'b0;
+    unique case (state_q)
+      READ: begin
+        // don't output on flush/misp/replay; keep bp_fire response for the branch window
+        if (areq_i.fetch_valid && (!dreq_i.spec || ((CVA6Cfg.NonIdemPotenceEn && !addr_ni) ||
+                                                     (!CVA6Cfg.NonIdemPotenceEn))) &&
+            !flush_d && ((|cl_hit && cache_en_q) || areq_i.fetch_exception.valid) && !inv_q &&
+            !(CVA6Cfg.WayPredEn && CVA6Cfg.ICACHE_SET_ASSOC > 1 && |cl_hit &&
+              !way_pred_match && !force_all_ways_q && !areq_i.fetch_exception.valid))
+          dreq_o.valid = ~dreq_i.kill_s1;
+      end
+      MISS: begin
+        // I4xj: do not gate refill return on bp_fire (kill_s2); that creates
+        // a combinational loop through the frontend branch predictor.
+        // bp_pend_q / same_win already drops fall-through returns after a
+        // taken branch. Cancel only on architectural kills (flush/misp/replay).
+        if (mem_rtrn_vld_i && mem_rtrn_i.rtype == ICACHE_IFILL_ACK && !(dreq_i.kill_s1 || flush_d))
+          dreq_o.valid = 1'b1;
+      end
+      default: ;
+    endcase
   end
 
   ///////////////////////////////////////////////////////
@@ -538,7 +560,7 @@ module g6lc_icache
   logic                           way_pred_use;
   assign cl_index_q = vaddr_q[CVA6Cfg.ICACHE_INDEX_WIDTH-1:ICACHE_OFFSET_WIDTH];
   assign way_pred_use = CVA6Cfg.WayPredEn && (CVA6Cfg.ICACHE_SET_ASSOC > 1)
-      && !force_all_ways_q && !(dreq_o.ready & dreq_i.req);
+      && !force_all_ways_q && !(dreq_ready_o & dreq_i.req);
 
   if (CVA6Cfg.WayPredEn && CVA6Cfg.ICACHE_SET_ASSOC > 1) begin : gen_way_pred
     localparam int unsigned WP_ENTRIES =

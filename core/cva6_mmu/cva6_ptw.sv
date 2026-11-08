@@ -145,6 +145,13 @@ module cva6_ptw
 
   logic [CVA6Cfg.PtLevels-2:0] misaligned_page;
   logic shared_tlb_update_valid;
+  // Leaf-PTE classification predicates, split out of the walker below so the
+  // TLB update does not combinationally depend on the shared-TLB hit.
+  logic pte_invalid;
+  logic leaf_itlb_fault;
+  logic leaf_itlb_final;
+  logic leaf_dtlb_ok;
+  logic leaf_dtlb_final;
   logic [HYP_EXT:0][CVA6Cfg.PtLevels-2:0] ptw_lvl_n, ptw_lvl_q;
 
   // define 3 PTW stages to be used in sv39x4. sv32 and sv39 are always in S_STAGE
@@ -299,6 +306,27 @@ module cva6_ptw
 
 
 
+  // Leaf-PTE classification, split out of the walker so the TLB update does
+  // not combinationally depend on the shared-TLB hit. Expressions are the
+  // exact conditions formerly evaluated inside always_comb ptw.
+  assign pte_invalid = !pte.v || (!pte.r && pte.w) ||
+      (|pte.reserved && CVA6Cfg.IS_XLEN64) ||
+      (!CVA6Cfg.SvpbmtEn && |pte.pbmt && CVA6Cfg.IS_XLEN64) ||
+      (CVA6Cfg.SvpbmtEn && (pte.pbmt == 2'b11) && CVA6Cfg.IS_XLEN64) ||
+      (!CVA6Cfg.SvnapotEn && pte.n) ||
+      (CVA6Cfg.SvnapotEn && !(pte.r || pte.x) && pte.n);
+  assign leaf_itlb_fault = (!pte.x && (!CVA6Cfg.RVH || ptw_stage_q != G_INTERMED_STAGE)) || !pte.a
+      || (CVA6Cfg.RVH && ptw_stage_q == G_INTERMED_STAGE && !pte.r);
+  assign leaf_itlb_final = (CVA6Cfg.RVH && ((ptw_stage_q == G_FINAL_STAGE) || !enable_g_translation_i)) || !CVA6Cfg.RVH;
+  assign leaf_dtlb_ok =
+      (pte.a && ((pte.r && !hlvx_inst_i) || (pte.x && (mxr_i || hlvx_inst_i || (ptw_stage_q == S_STAGE && vmxr_i && ld_st_v_i && CVA6Cfg.RVH)))))
+      // Request is a store: perform some additional checks
+      // If the request was a store and the page is not write-able, raise an error
+      // the same applies if the dirty flag is not set
+      // g-intermediate nodes however never need write-permission
+      && (!lsu_is_store_i || (pte.w && pte.d) || (ptw_stage_q == G_INTERMED_STAGE && CVA6Cfg.RVH));
+  assign leaf_dtlb_final = (CVA6Cfg.RVH && ((ptw_stage_q == G_FINAL_STAGE) || !en_ld_st_g_translation_i)) || !CVA6Cfg.RVH;
+
   //-------------------
   // Page table walker
   //-------------------
@@ -336,8 +364,6 @@ module cva6_ptw
     ptw_error_at_g_st_o     = 1'b0;
     ptw_err_at_g_int_st_o   = 1'b0;
     ptw_access_exception_o  = 1'b0;
-    shared_tlb_update_valid = 1'b0;
-    is_napot_64k            = 1'b0;
     is_instr_ptw_n          = is_instr_ptw_q;
     ptw_lvl_n               = ptw_lvl_q;
     ptw_pptr_n              = ptw_pptr_q;
@@ -465,12 +491,7 @@ module cva6_ptw
           // Reserved-field check: bits 60:54 must be 0; PBMT[62:61] allowed only with SvpbmtEn
           // and menvcfg.PBMTE (PBMTE not threaded here — accept non-zero PBMT when SvpbmtEn);
           // N bit handled by SvnapotEn.
-          if (!pte.v || (!pte.r && pte.w) ||
-              (|pte.reserved && CVA6Cfg.IS_XLEN64) ||
-              (!CVA6Cfg.SvpbmtEn && |pte.pbmt && CVA6Cfg.IS_XLEN64) ||
-              (CVA6Cfg.SvpbmtEn && (pte.pbmt == 2'b11) && CVA6Cfg.IS_XLEN64) ||
-              (!CVA6Cfg.SvnapotEn && pte.n) ||
-              (CVA6Cfg.SvnapotEn && !(pte.r || pte.x) && pte.n))
+          if (pte_invalid)
             state_d = PROPAGATE_ERROR;
           // -----------
           // Valid PTE
@@ -482,7 +503,7 @@ module cva6_ptw
               // A 64KiB NAPOT page is identified by the N-bit being set and PPN[3:0] encoding '1000'
               if (CVA6Cfg.SvnapotEn && pte.n) begin
                 // Svnapot: Check if the leaf PTE represents a 64KiB NAPOT page
-                is_napot_64k = (pte.ppn[3:0] == 4'b1000) && (ptw_lvl_q[0] == 2);
+                // (is_napot_64k is computed in ptw_leaf_update)
                 // Svnapot: Any other encoding with the N-bit set is a reserved format and must cause a page fault
                 // Additionally, fault if N is set on a megapage or gigapage
                 if (!is_napot_64k) begin
@@ -527,12 +548,10 @@ module cva6_ptw
                 // If page is not executable, we can directly raise an error. This
                 // doesn't put a useless entry into the TLB. The same idea applies
                 // to the access flag since we let the access flag be managed by SW.
-                if ((!pte.x && (!CVA6Cfg.RVH || ptw_stage_q != G_INTERMED_STAGE)) || !pte.a
-                    || (CVA6Cfg.RVH && ptw_stage_q == G_INTERMED_STAGE && !pte.r)) begin
+                if (leaf_itlb_fault) begin
                   state_d = PROPAGATE_ERROR;
                   if (CVA6Cfg.RVH) ptw_stage_d = ptw_stage_q;
-                end else if ((CVA6Cfg.RVH && ((ptw_stage_q == G_FINAL_STAGE) || !enable_g_translation_i)) || !CVA6Cfg.RVH)
-                  shared_tlb_update_valid = 1'b1;
+                end
 
               end else begin
                 // ------------
@@ -543,17 +562,7 @@ module cva6_ptw
                 // If page is not readable (there are no write-only pages)
                 // we can directly raise an error. This doesn't put a useless
                 // entry into the TLB.
-                if (
-                  (pte.a && ((pte.r && !hlvx_inst_i) || (pte.x && (mxr_i || hlvx_inst_i || (ptw_stage_q == S_STAGE && vmxr_i && ld_st_v_i && CVA6Cfg.RVH)))))
-                    // Request is a store: perform some additional checks
-                    // If the request was a store and the page is not write-able, raise an error
-                    // the same applies if the dirty flag is not set
-                    // g-intermediate nodes however never need write-permission
-                    && (!lsu_is_store_i || (pte.w && pte.d) || (ptw_stage_q == G_INTERMED_STAGE && CVA6Cfg.RVH))
-                ) begin
-                  if ((CVA6Cfg.RVH && ((ptw_stage_q == G_FINAL_STAGE) || !en_ld_st_g_translation_i)) || !CVA6Cfg.RVH)
-                    shared_tlb_update_valid = 1'b1;
-                end else begin
+                if (!leaf_dtlb_ok) begin
                   state_d = PROPAGATE_ERROR;
                   if (CVA6Cfg.RVH) ptw_stage_d = ptw_stage_q;
                 end
@@ -563,7 +572,6 @@ module cva6_ptw
               if (|misaligned_page) begin
                 state_d = PROPAGATE_ERROR;
                 if (CVA6Cfg.RVH) ptw_stage_d = ptw_stage_q;
-                shared_tlb_update_valid = 1'b0;
               end
 
               // check if 63:41 are all zeros
@@ -639,7 +647,6 @@ module cva6_ptw
 
           // check if this access was actually allowed from a PMP perspective
           if (!allow_access) begin
-            shared_tlb_update_valid = 1'b0;
             // we have to return the failed address in bad_addr
             ptw_pptr_n = ptw_pptr_q;
             if (CVA6Cfg.RVH) ptw_stage_d = ptw_stage_q;
@@ -686,6 +693,25 @@ module cva6_ptw
       else if (state_q != WAIT_GRANT) state_d = LATENCY;
 
       kill_req_n = (state_q == WAIT_GRANT);
+    end
+  end
+
+  // TLB update leaf classification, split from the walker above so
+  // shared_tlb_update_valid/is_napot_64k do not combinationally depend on
+  // shared_tlb_hit_i (which the walker still consumes in IDLE). Values are
+  // identical to the in-block assignments they replace.
+  always_comb begin : ptw_leaf_update
+    shared_tlb_update_valid = 1'b0;
+    is_napot_64k            = 1'b0;
+    if (state_q == PTE_LOOKUP && data_rvalid_q) begin
+      if (!pte_invalid && (pte.r || pte.x)) begin
+        if (CVA6Cfg.SvnapotEn && pte.n)
+          is_napot_64k = (pte.ppn[3:0] == 4'b1000) && (ptw_lvl_q[0] == 2);
+        if (is_instr_ptw_q) shared_tlb_update_valid = !leaf_itlb_fault && leaf_itlb_final;
+        else                shared_tlb_update_valid = leaf_dtlb_ok && leaf_dtlb_final;
+        if (|misaligned_page) shared_tlb_update_valid = 1'b0;
+      end
+      if (!allow_access) shared_tlb_update_valid = 1'b0;
     end
   end
 

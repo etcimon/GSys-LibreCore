@@ -5,7 +5,9 @@ module g6lc_storamic_cpu_debug_interpreter #(
   parameter int ResponseDelay = 0,
   parameter bit Negative = 0,
   parameter bit RequestEnabled = 1,
-  parameter int EntryPrivilege = 3
+  parameter int EntryPrivilege = 3,
+  // 0 none; 1 M firmware with MPRV=1/MPP=U; 2 as 1 plus dcsr.mprven=1 in debug.
+  parameter int Mprv = 0
 ) (
   input logic clk, rst_n,
   output logic done, failed, debug_origin_failed, debug_seen,
@@ -28,6 +30,7 @@ module g6lc_storamic_cpu_debug_interpreter #(
   logic [31:0] wait_cycles;
   initial begin
     assert (EntryPrivilege inside {0, 1, 3});
+    assert (Mprv inside {0, 1, 2} && (Mprv == 0 || EntryPrivilege == 3));
     $readmemh("program.hex", rom);
     $readmemh("debug.hex", debug_rom);
   end
@@ -59,7 +62,10 @@ module g6lc_storamic_cpu_debug_interpreter #(
   endfunction
   function automatic logic [2:0] expected_prot(input logic [63:0] a);
     if (Negative && a == Probe + 8) return 3'b001;
+    // Debug-issued accesses stay unknown whatever MPRV/mprven make the
+    // effective privilege; firmware under MPRV carries MPP=U.
     if (!OriginEnabled || is_debug_data(a)) return 3'b000;
+    if (Mprv != 0) return 3'b010;
     case (EntryPrivilege)
       0: return 3'b010;
       1: return 3'b011;
@@ -152,7 +158,8 @@ module g6lc_storamic_cpu_debug_interpreter #(
         bv <= 1;
         if (!wl || !is_probe(write_addr) || write_addr == Probe + 36 || ws != 8'h0f) failed <= 1;
         if (write_addr == Probe + 8) begin
-          if ((wd[31:0] & 32'h1c3) == (32'hc0 | 32'(EntryPrivilege))) csr_checks <= csr_checks + 1;
+          if ((wd[31:0] & 32'h1c3) == (32'hc0 | 32'(EntryPrivilege)) && wd[4] == (Mprv == 2))
+            csr_checks <= csr_checks + 1;
           else failed <= 1;
         end
         if (write_addr == Probe + 24) begin

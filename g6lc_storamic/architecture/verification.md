@@ -1,5 +1,40 @@
 # Verification and promotion
 
+## CPU Load Translation C0 Follow-up
+
+The registered `load-translation` and `load-translation-synth` stages exercise
+the actual functional load unit/bypass. Run `storamic-remote-leaf` with
+`STORAMIC_STAGES=load-translation,load-translation-synth` and the existing
+validated runtime inputs. The simulation stage includes four PGO profiles,
+31 scenarios, four rejecting simulation oracles and a real-loop lint canary.
+Synthesis uses live ports and can run without a C++ runtime.
+
+Run `storamic-all-ea64371c9fed` passes both stages in about 53 seconds with
+119 matching source hashes, four verified model identities and zero
+latches/SCCs. The host suite passes 122 tests. The full-CPU comparison remains
+diagnostic: 28 → 27 unwaived errors off/on in the captured compiler/FP
+representation profile. The other 68 registered stages are omitted.
+See [cpu-load-translation.md](cpu-load-translation.md) for the independent
+control proof, original-RTL rejection and remaining qualification gates.
+
+The registered `fetch-queue` and `fetch-queue-synth` stages exercise the
+promoted CPU36 instruction-queue admission (five checkpoint-feedback PGO
+geometries, three or four rejecting oracles each, two real-loop canaries and
+an admission-revert mutation that must re-trip `UNOPTFLAT`; live-port
+synthesis with zero latches/SCCs). Runs `storamic-e7ccb487a7dc` and
+`storamic-5fbcd93abe66` pass. The default `/opt/testharness/toolchains`
+Verilator/Yosys were absent at that time, so both runs used the owned
+current-revision tools via `run_remote.py --verilator/--yosys/--solver-bin`;
+the defaults are unchanged when those options are omitted.
+
+The subsequent CPU32 representation probe narrows 27 baseline reports to 10
+in each origin mode, preserving seven real-loop rejections. These controls
+remain diagnostic, not a promoted simulation/compiler profile. Aggregate
+planning now emits dry-run skips rather than fabricated missing-result failures;
+actual aggregate execution and strict/native qualification remain open.
+
+## General Evidence Boundary
+
 Foundation is not device qualification. All results name the source/configuration,
 fixtures, tool versions/binary hashes, seed, stage and oracle. Preserve unrelated
 worktree changes and record the exact snapshot instead of assuming HEAD identity.
@@ -33,6 +68,25 @@ Return pass/fail/incomplete distinctly. Missing summaries, timeouts and identity
 mismatches cannot become success. Selected-stage leaf evidence is not a strict
 whole-system qualification. Use remote lint/elaboration, directed simulation,
 bounded properties and synthesis smoke; a PHY black box is not physical proof.
+
+## Block proof budget and completeness
+
+The `vblk-formal` and `vblk-flush-formal` stages prepare each model once and
+inventory all twelve original assertions plus twenty supporting invariants.
+The DMA-window obligation uses a reset base, unrestricted one-step induction,
+then a pointwise consequence from the proven invariants. Failed predecessors
+block that consequence. The other eleven assertions retain concrete depth 14;
+status/response/FLUSH covers retain depths 14/16/16 on the full concrete model.
+No new environmental assumptions or smaller proof bounds are substituted.
+
+Each query is capped at 30 seconds and each formal stage at 180 seconds,
+including preparation. Per-query coverage, source locations, dependency status
+and prepared-model hashes are retained on failure or timeout. The selected
+block/device profile names `vblk,vblk-formal,vblk-flush-formal,vblk-synth,vdev,vdev-synth`;
+the review30 two-worker matrix completed it in about 130 seconds. Its 62
+omitted registered stages remain explicit. See
+[block-address-validation.md](block-address-validation.md) for the proof argument,
+original-RTL rejection and limits of the collected evidence.
 
 ## g6lc_qemu only
 

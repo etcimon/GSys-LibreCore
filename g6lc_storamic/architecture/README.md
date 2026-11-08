@@ -16,17 +16,22 @@ owns product topology and SoC integration.
 | [general-purpose review](general-purpose-review.md) | Ten-caveat architecture audit; proposals, not accepted features |
 | [verification](verification.md) | Remote evidence, first-party closure, g6lc_qemu boundary |
 | [implementation tasks](implementation-tasks.md) | Dependency-ordered ST-001..ST-041 backlog, code owners and completion gates |
+| [completion plan](completion-plan.md) | Current native CPU, ownership, physical and system qualification dependencies |
+| [development status](development-status.md) | Component evidence and historical failure analysis |
+| [block address validation](block-address-validation.md) | Sector-to-byte overflow and descriptor-table admission review |
 | [model interface](model-interface.md) | Executable-model implementation design (not a capability grant) |
 | [region routing](region-routing.md) | ST-008 design; ST-008A/B/C implemented as the standalone mapped profile (leaf evidence only) |
 | [discovery lifecycle](discovery-lifecycle.md) | ST-009 per-slot state machine and synthetic descriptor v1 (design) |
 | [control registers](control-registers.md) | ST-010 AXI-Lite register map, IRQ, drain token and runtime map commit (design) |
 
-Current stage: M0 refusal foundation implemented with selected-stage evidence;
-legacy configuration repairs, the joined service-readiness slice, the standalone
-executable-model component and the typed top profile are verified by scoped leaf
-runs (`storamic-7eea26e38385`, `storamic-3c25eee4aaa3`). Native model exposure,
-aggregate and physical qualification gates remain open. Descriptions
-of media, VirtIO and serial-link engines are requirements, not implementations.
+Current implementation extends beyond the M0 refusal foundation: mapped AXI
+model memory, discovery/control, modern VirtIO-MMIO/split-ring/block engines,
+SRAM-backed RAM/flash models, reserved-media checkpoint recovery, and the
+policy/real-writer model composition exist with scoped component evidence.
+The completion plan records the CPU execution and ownership checks separately
+from strict scheduling and native integration. Native checkpoint admission
+still refuses unbound providers. Physical RAM/flash PHYs, ECC/FTL, protection
+hardware, active-stick links and full Linux/system qualification remain open.
 
 ## Separation of concerns
 

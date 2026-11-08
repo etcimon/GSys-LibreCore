@@ -50,6 +50,8 @@ module wt_cache_subsystem
     // data requests
     input icache_dreq_t icache_dreq_i,  // to/from frontend
     output icache_drsp_t icache_dreq_o,
+    // Request-acceptance capacity out of band from the packed response word.
+    output logic        icache_ready_o,
     // D$
     // Cache management
     input logic dcache_enable_i,  // from CSR
@@ -151,6 +153,7 @@ module wt_cache_subsystem
       .areq_o        (icache_areq_o),
       .dreq_i        (icache_dreq_i),
       .dreq_o        (icache_dreq_o),
+      .dreq_ready_o  (icache_ready_o),
       .mem_rtrn_vld_i(adapter_icache_rtrn_vld),
       .mem_rtrn_i    (adapter_icache),
       .mem_data_req_o(icache_adapter_data_req),

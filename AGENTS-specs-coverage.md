@@ -17,6 +17,22 @@ headline view: it deliberately carries **no file references and no line numbers*
 
 ## Storamic memory/storage — foundation only
 
+The independent load-translation process has equivalent control behavior and
+selected actual-module simulation/synthesis evidence, including original-RTL
+rejection and a real-loop canary. It removes one captured scheduling dependency;
+27 strict off/on diagnostics remain. This promotes no ISA chapter or native
+memory/storage qualification status.
+
+The block backend's sector-to-byte and malformed-descriptor corrections pass
+six selected remote simulation/formal/synthesis stages, including both rejecting
+simulation oracles and exact-fixture original-RTL rejection. The unrestricted
+DMA-window property is now inductive; all other original assertion/cover bounds
+remain intact. Missing obligations, unproved prerequisites, identity changes
+and timeouts prevent a complete gate. The other 62 registered stages are
+explicitly omitted from this profile. This improves component address integrity
+without changing any ISA chapter status, native admission, physical-media or
+Linux qualification.
+
 Payload/verification groundwork lands in this batch: the native adapter carries
 full AW/W/AR payloads (ST-011A), the model bench gained opt-in handshake
 tracing and independent concurrent-handshake counts, and the native fixture
@@ -796,3 +812,14 @@ Not implemented (and therefore untested by design): Ztso, CFI, Packed SIMD, vect
 L2/L3/multi-core hub as config-gated SoC work. See `AGENTS-specs-to-impl.md` for authoritative
 RTL status; sub-files `agents/spec/riscv-spec-I-5.9-zacas.html` and
 `agents/spec/riscv-spec-I-9-vector.html`; `architecture/` for promotion paths.
+
+Fetch-queue checkpoint feedback (Storamic C0, CPU36): `tb_g6lc_fetch_queue.sv`
+`CHECKPOINT_FEEDBACK=1` now covers checkpoint payload ordering with `consumed_o`-derived
+allocation, plus a rejecting `+checkpoint_negative` oracle, in five geometries. This is selected
+leaf evidence; full C0 scheduling qualification is still open.
+
+PTW leaf update (Storamic C0, CPU37): full-module combinational equivalence of
+`cva6_ptw` (imafdc, imafdch, stream8) with four caught mutants, plus strict
+`cva6_mmu` lint and synthesis. No PTW simulation bench exists.
+Miss-unit request packet (CPU38): full-module equivalence of `wt_dcache_missunit`
+in three configs with a caught paddr mutant; 6 C0 cones remain.

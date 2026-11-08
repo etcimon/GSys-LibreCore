@@ -98,6 +98,8 @@ module frontend
     output icache_dreq_t icache_dreq_o,
     // Handshake between CACHE and FRONTEND (fetch) - CACHES
     input icache_drsp_t icache_dreq_i,
+    // Request-acceptance capacity, out of band from the packed response word.
+    input logic icache_ready_i,
     // Handshake's data between fetch and decode - ID_STAGE
     output fetch_entry_t [CVA6Cfg.NrIssuePorts-1:0] fetch_entry_o,
     // Handshake's valid between fetch and decode - ID_STAGE
@@ -806,7 +808,7 @@ module frontend
 
   if (!FtqEn) begin : gen_no_ftq
     assign icache_dreq_o.req = instr_queue_ready & ~halt_frontend_i;
-    assign if_ready = icache_dreq_i.ready & instr_queue_ready & ~halt_frontend_i;
+    assign if_ready = icache_ready_i & instr_queue_ready & ~halt_frontend_i;
     assign ftq_full = 1'b0;
     assign ftq_head_valid = 1'b0;
     assign ftq_head_vaddr = '0;
@@ -858,7 +860,7 @@ module frontend
     // reseed is registered, so the same-cycle head is still the pre-flush one.
     assign demand_req = ftq_head_valid & instr_queue_ready & ~halt_frontend_i & ~lbuf_hit
                         & ~bp_fire & ~arch_reseed & ~flush_i & ~replay_q;
-    assign demand_fire = demand_req & icache_dreq_i.ready;
+    assign demand_fire = demand_req & icache_ready_i;
     // Pop only when the I$ accepts a demand request that is not being killed: a
     // pop under kill_s2 drops the redirect target and discards the miss return.
     // A loop-buffer inject also consumes a fetch block.
@@ -905,7 +907,7 @@ module frontend
           .peek_valid_i   (ftq_peek_valid),
           .peek_vaddr_i   (ftq_peek_vaddr),
           .demand_active_i(demand_req),
-          .icache_ready_i (icache_dreq_i.ready),
+          .icache_ready_i (icache_ready_i),
           .pf_req_o       (pf_req),
           .pf_vaddr_o     (pf_vaddr),
           .pf_drop_pma_o  ()
@@ -996,7 +998,7 @@ module frontend
   logic       want_valid_q, want_pf_q, icache_accept, kill_drop;
   logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] want_hart_q;
   logic [CVA6Cfg.VLEN-1:0] want_addr_q;
-  assign icache_accept = icache_dreq_o.req & icache_dreq_i.ready;
+  assign icache_accept = icache_dreq_o.req & icache_ready_i;
   assign icache_dreq_o.token = req_token_q;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin

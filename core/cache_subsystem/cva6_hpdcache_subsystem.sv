@@ -74,6 +74,8 @@ module cva6_hpdcache_subsystem
     input icache_dreq_t icache_dreq_i,
     // Output data translation request - FRONTEND
     output icache_drsp_t icache_dreq_o,
+    // Request-acceptance capacity out of band from the packed response word.
+    output logic        icache_ready_o,
     //   }}}
 
     //  D$
@@ -176,6 +178,7 @@ module cva6_hpdcache_subsystem
       .areq_o        (icache_areq_o),
       .dreq_i        (icache_dreq_i),
       .dreq_o        (icache_dreq_o),
+      .dreq_ready_o  (icache_ready_o),
       .mem_rtrn_vld_i(icache_miss_resp_valid),
       .mem_rtrn_i    (icache_miss_resp),
       .mem_data_req_o(icache_miss_valid),

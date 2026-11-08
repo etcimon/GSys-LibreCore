@@ -5,6 +5,8 @@ import ast
 import hashlib
 import json
 from pathlib import Path
+import re
+import subprocess
 import tempfile
 import time
 from types import SimpleNamespace
@@ -12,6 +14,140 @@ import unittest
 
 
 class IndependentFormalStageTests(unittest.TestCase):
+    def run_block_stage(self, mode="pass"):
+        runner = Path(__file__).with_name("run_leaf.py")
+        tree = ast.parse(runner.read_text())
+        helpers = [n for n in tree.body if isinstance(n, ast.FunctionDef)
+                   and n.name in {"run_block_formal", "block_formal_groups"}]
+        workspace = runner.resolve().parents[3] / "build-platform/workspace"
+        with tempfile.TemporaryDirectory(prefix="storamic-block-stage-", dir=workspace) as temp:
+            out = Path(temp)
+            scripts, budgets, outcomes, manifest = [], [], [], {}
+            clock = [0.0]
+            top, tag = "formal_block", "vblk-formal"
+            prepared = out / f"{tag}-prepared.il"
+            fixture = out / "formal_g6lc_storamic_virtio_blk.sv"
+            fixture.write_text(runner.with_name(fixture.name).read_text())
+            locations = [i for i, line in enumerate(fixture.read_text().splitlines(), 1)
+                         if re.search(r"\bassert\s*\(", line)]
+            self.assertEqual(len(locations), 32)
+            assertions = {f"$assert{i}": {"type": "$assert",
+                                        "attributes": {"src": f"{fixture.name}:{line}.1-{line}.80"}}
+                          for i, line in enumerate(locations)}
+            if mode == "duplicate-marker":
+                fixture.write_text(fixture.read_text() + "\n// STORAMIC_WINDOW_LEMMAS_BEGIN\n")
+            assumptions = {f"$assume{i}": {"type": "$assume", "attributes": {}} for i in range(4)}
+
+            def run(command, **kwargs):
+                script = Path(command[-1]).read_text()
+                scripts.append(script)
+                budgets.append(kwargs["timeout"])
+                if "write_rtlil" in script:
+                    prepared.write_text("frozen block model")
+                    cells = {**assertions, **assumptions}
+                    if mode == "missing-assertion":
+                        del cells["$assert31"]
+                    (out / f"{tag}-prepared.json").write_text(json.dumps(
+                        {"modules": {top: {"cells": cells}}}))
+                    return
+                if mode == "budget":
+                    clock[0] += 91
+                if mode == "tamper":
+                    prepared.write_text("changed block model")
+                if mode in {"timeout", "mixed"} and len(scripts) == 2:
+                    raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+                if mode in {"failure", "mixed"} and len(scripts) == 3:
+                    raise subprocess.CalledProcessError(1, command)
+                if mode == "other-failure" and len(scripts) == 5:
+                    raise subprocess.CalledProcessError(1, command)
+
+            environment = {
+                "Path": Path, "json": json, "re": re, "time": SimpleNamespace(monotonic=lambda: clock[0]),
+                "subprocess": SimpleNamespace(run=run, TimeoutExpired=subprocess.TimeoutExpired,
+                                               CalledProcessError=subprocess.CalledProcessError,
+                                               STDOUT=subprocess.STDOUT),
+                "sha": lambda p: hashlib.sha256(p.read_bytes()).hexdigest(),
+            }
+            exec(compile(ast.Module(body=helpers, type_ignores=[]), str(runner), "exec"), environment)
+            error = None
+            try:
+                environment["run_block_formal"](
+                    "read_slang original_inputs\n", top, tag,
+                    [("status-cover", "cover_status_o", 14), ("rsp-cover", "cover_rsp_o", 16)],
+                    out, Path("/pinned/yosys"), manifest, outcomes, fixture)
+            except (RuntimeError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as caught:
+                error = caught
+            coverage = out / f"{tag}-coverage.json"
+            return scripts, budgets, outcomes, json.loads(coverage.read_text()) if coverage.exists() else {}, error
+
+    def test_block_prepares_once_and_preserves_every_assertion_and_concrete_cover(self):
+        scripts, budgets, outcomes, coverage, error = self.run_block_stage()
+        self.assertIsNone(error)
+        self.assertEqual(len(scripts), 7)
+        self.assertEqual(sum("read_slang" in script for script in scripts), 1)
+        groups = coverage["groups"]
+        self.assertEqual(groups["LEMMAS"], [f"$assert{i}" for i in range(20)])
+        self.assertEqual(groups["RANGE"], ["$assert22"])
+        for script, keep in ((scripts[1], groups["LEMMAS"]), (scripts[2], groups["LEMMAS"]),
+                             (scripts[4], groups["OTHER"])):
+            removed = script.split("delete ", 1)[1].splitlines()[0].split()
+            self.assertEqual(set(removed), {f"formal_block/$assert{i}" for i in range(32)
+                                            if f"$assert{i}" not in keep})
+            self.assertNotIn("assert2assume", script)
+            self.assertNotIn("cutpoint", script)
+            self.assertIn("select -assert-count 4 t:$assume", script)
+            self.assertIn("-prove-asserts -verify", script)
+        self.assertIn("-seq 1 -set-init-zero -set-assumes -set-at 1 rst_ni 0", scripts[1])
+        self.assertIn("-tempinduct-inductonly -maxsteps 1", scripts[2])
+        self.assertNotIn("-set-init", scripts[2])
+        self.assertNotIn("-set-at", scripts[2])
+        self.assertIn("chformal -assert2assume", scripts[3])
+        self.assertIn("cutpoint t:$dff", scripts[3])
+        self.assertIn("select -assert-count 24 t:$assume", scripts[3])
+        self.assertIn("sat -set-assumes -prove-asserts -verify", scripts[3])
+        self.assertEqual(coverage["queries"][2]["requires"], ["window-base", "window-induction"])
+        self.assertIn("-seq 14 -set-init-zero -set-assumes -set-at 1 rst_ni 0", scripts[4])
+        for script, signal, depth in zip(scripts[5:], ("cover_status_o", "cover_rsp_o"), (14, 16)):
+            self.assertNotIn("delete ", script)
+            self.assertNotIn("cutpoint", script)
+            self.assertNotIn("assert2assume", script)
+            self.assertIn(f"-seq {depth}", script)
+            self.assertIn(f"-prove {signal} 0 -falsify", script)
+        self.assertEqual(budgets, [60] + [30] * 6)
+        self.assertEqual(coverage["status"], "pass")
+        self.assertTrue(coverage["coverage_complete"])
+        self.assertEqual(len(outcomes), 3)
+
+    def test_block_missing_obligation_and_model_tampering_cannot_pass(self):
+        for mode, marker in (("missing-assertion", "INVENTORY"), ("duplicate-marker", "INVENTORY"),
+                             ("tamper", "IDENTITY")):
+            with self.subTest(mode=mode):
+                _, _, outcomes, coverage, error = self.run_block_stage(mode)
+                self.assertIsInstance(error, RuntimeError)
+                self.assertIn(marker, str(error))
+                self.assertEqual(outcomes, [])
+                self.assertNotEqual(coverage.get("status"), "pass")
+
+    def test_block_partial_results_and_budget_exhaustion_remain_explicit(self):
+        for mode, status in (("timeout", "incomplete"), ("budget", "incomplete"),
+                             ("failure", "fail"), ("mixed", "fail"), ("other-failure", "fail")):
+            with self.subTest(mode=mode):
+                scripts, _, outcomes, coverage, error = self.run_block_stage(mode)
+                self.assertIsNotNone(error)
+                self.assertEqual(outcomes, [])
+                self.assertEqual(coverage["status"], status)
+                self.assertEqual(len(coverage["queries"]), 6)
+                if mode != "other-failure":
+                    self.assertFalse(coverage["coverage_complete"])
+                else:
+                    self.assertTrue(coverage["coverage_complete"])
+                if mode in {"timeout", "failure", "mixed"}:
+                    self.assertTrue(coverage["queries"][2]["not_run"])
+                    self.assertFalse(any("assert2assume" in script for script in scripts))
+                if mode == "budget":
+                    self.assertEqual(len(scripts), 3)
+                    self.assertEqual(sum(q["status"] == "incomplete" for q in coverage["queries"]), 4)
+
     def run_register_formal(self, tamper=False):
         runner = Path(__file__).with_name("run_leaf.py")
         tree = ast.parse(runner.read_text())
@@ -108,7 +244,9 @@ class IndependentFormalStageTests(unittest.TestCase):
                              ast.unparse(node.test) == repr(stage) + " in stages")
                 setup = []
                 for node in block.body:
-                    if isinstance(node, ast.For):
+                    if (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                            and isinstance(node.value.func, ast.Name)
+                            and node.value.func.id == "run_block_formal"):
                         break
                     setup.append(node)
                 environment = {"data": Path("/frozen"), "stages": [stage]}
@@ -230,6 +368,27 @@ class IndependentFormalStageTests(unittest.TestCase):
                     self.assertIn("g6lc_storamic_checkpoint_writer_model.sv", case[3])
                     self.assertIn("g6lc_storamic_dma_axi.sv", case[3])
                     self.assertEqual(case[-1], "CHECKPOINT_WRITER_FAIL negative-oracle")
+
+
+    def test_cpu_origin_and_csr_scc_dispatch_to_their_stage_modules(self):
+        runner = Path(__file__).with_name("run_leaf.py")
+        tree = ast.parse(runner.read_text())
+        main = next(node for node in tree.body
+                    if isinstance(node, ast.FunctionDef) and node.name == "main")
+        dispatch = {}
+        for node in ast.walk(main):
+            if isinstance(node, ast.If) and isinstance(node.test, ast.BinOp):
+                text = ast.unparse(node.test)
+                if text in {"set(stages) & {'cpu-origin'}",
+                            "set(stages) & {'cpu-debug'}",
+                            "set(stages) & {'csr-scc'}"}:
+                    dispatch[text] = ast.unparse(node)
+        self.assertEqual(set(dispatch), {"set(stages) & {'cpu-origin'}",
+                                         "set(stages) & {'cpu-debug'}",
+                                         "set(stages) & {'csr-scc'}"})
+        self.assertIn("run_cpu_origin", dispatch["set(stages) & {'cpu-origin'}"])
+        self.assertIn("run_cpu_debug", dispatch["set(stages) & {'cpu-debug'}"])
+        self.assertIn("run_csr_scc", dispatch["set(stages) & {'csr-scc'}"])
 
 
 if __name__ == "__main__":

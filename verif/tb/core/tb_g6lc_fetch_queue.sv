@@ -7,6 +7,7 @@ module tb_g6lc_fetch_queue;
   parameter int unsigned ISSUE = 2;
   parameter int unsigned HARTS = 2;
   parameter bit RVC = 1;
+  parameter bit CHECKPOINT_FEEDBACK = 0;
   localparam int unsigned HW = HARTS > 1 ? $clog2(HARTS) : 1;
 
   function automatic config_pkg::cva6_cfg_t cfg();
@@ -68,6 +69,23 @@ module tb_g6lc_fetch_queue;
   int unsigned read_serial = 0, write_serial = 0, long_accepted = 0;
   bit negative;
   logic [31:0] rng = 32'h6c630123;
+  logic [SLOTS-1:0] ckpt_valid;
+  logic [SLOTS-1:0][7:0] ckpt_index;
+  int unsigned checkpoints_retired = 0;
+  bit checkpoint_negative;
+
+  // Model checkpoint allocation from the accepted CF slots, as in the
+  // frontend. Admission must not consume the resulting checkpoint payload.
+  always_comb begin
+    ckpt_valid = '0;
+    ckpt_index = '0;
+    for (int s = 0; s < SLOTS; s++) begin
+      if (CHECKPOINT_FEEDBACK && consumed[s] && cf[s] != NoCF) begin
+        ckpt_valid[s] = 1'b1;
+        ckpt_index[s] = 8'(serial + s);
+      end
+    end
+  end
 
   instr_queue #(.CVA6Cfg(cfg()), .fetch_entry_t(entry_t)) dut (
     .clk_i(clk), .rst_ni(rst_n), .flush_i(flush), .hart_i(hart),
@@ -75,7 +93,7 @@ module tb_g6lc_fetch_queue;
     .ready_o(ready), .consumed_o(consumed), .exception_i(exception),
     .exception_addr_i(exception_addr), .exception_gpaddr_i('0), .exception_tinst_i('0),
     .exception_gva_i(1'b0), .predict_address_i(prediction), .cf_type_i(cf),
-    .ckpt_v_i('0), .ckpt_idx_i('0), .is_call_i('0), .is_return_i('0),
+    .ckpt_v_i(ckpt_valid), .ckpt_idx_i(ckpt_index), .is_call_i('0), .is_return_i('0),
     .replay_o(replay), .replay_addr_o(replay_addr),
     .fetch_entry_o(entry), .fetch_entry_valid_o(entry_valid), .fetch_entry_ready_i(entry_ready),
     .queue_oldest_valid_o(q_oldest_valid), .queue_oldest_pc_o(q_oldest_pc)
@@ -169,6 +187,15 @@ module tb_g6lc_fetch_queue;
             if (expected.size() == 0) $fatal(1, "queue fabricated entry");
             want = expected.pop_front();
             got = entry[p];
+            if (checkpoint_negative && want.branch_predict.ckpt_v) begin
+              got.branch_predict.ckpt_idx ^= 8'd1;
+              checkpoint_negative = 0;
+            end
+            if (got.branch_predict.ckpt_v !== want.branch_predict.ckpt_v ||
+                (want.branch_predict.ckpt_v &&
+                 got.branch_predict.ckpt_idx !== want.branch_predict.ckpt_idx))
+              $fatal(1, "FETCH_QUEUE_CHECKPOINT_MISMATCH retired=%0d port=%0d", retired, p);
+            if (want.branch_predict.ckpt_v) checkpoints_retired++;
             if (negative) begin
               got.address ^= 64'd2;
               negative = 0;
@@ -198,6 +225,9 @@ module tb_g6lc_fetch_queue;
             want.ex.tval = exception_addr;
             want.branch_predict.cf = cf[s];
             want.branch_predict.predict_address = prediction;
+            want.branch_predict.ckpt_v = CHECKPOINT_FEEDBACK && cf[s] != NoCF;
+            if (want.branch_predict.ckpt_v)
+              want.branch_predict.ckpt_idx = 8'(serial + s);
             expected.push_back(want);
             accepted++;
             write_serial++;
@@ -216,6 +246,7 @@ module tb_g6lc_fetch_queue;
 
   initial begin
     negative = $test$plusargs("oracle_negative");
+    checkpoint_negative = $test$plusargs("checkpoint_negative");
     step('0, '0);
     rst_n = 1;
     step(SLOTS'(2), '0);
@@ -309,12 +340,15 @@ module tb_g6lc_fetch_queue;
         $fatal(1, "IQ_OLDEST_H1_FULL head=%h want=%h", q_oldest_pc[1], base2 + 4);
       step('0, '0, 1);
     end
+    if (checkpoint_negative)
+      $fatal(1, "FETCH_QUEUE_CHECKPOINT_ORACLE_NOT_REACHED");
     if (expected.size() != 0 || accepted != retired + discarded ||
+        (CHECKPOINT_FEEDBACK && checkpoints_retired == 0) ||
         long_accepted <= 65536 || (SLOTS > 1 && (sparse == 0 || partial == 0)) ||
         stalled == 0 || flushed == 0 || target_full == 0 || faults == 0 || concurrent == 0 ||
         branches == 0 || (ISSUE > 1 && dual == 0))
       $fatal(1, "incomplete coverage/conservation accepted=%0d retired=%0d discarded=%0d remaining=%0d", accepted, retired, discarded, expected.size());
-    $display("FETCH_QUEUE_PASS accepted=%0d retired=%0d discarded=%0d sparse=%0d stalled=%0d flush=%0d dual=%0d branches=%0d partial=%0d target_full=%0d faults=%0d concurrent=%0d long_accepted=%0d", accepted, retired, discarded, sparse, stalled, flushed, dual, branches, partial, target_full, faults, concurrent, long_accepted);
+    $display("FETCH_QUEUE_PASS accepted=%0d retired=%0d discarded=%0d sparse=%0d stalled=%0d flush=%0d dual=%0d branches=%0d partial=%0d target_full=%0d faults=%0d concurrent=%0d long_accepted=%0d checkpoints=%0d", accepted, retired, discarded, sparse, stalled, flushed, dual, branches, partial, target_full, faults, concurrent, long_accepted, checkpoints_retired);
     $finish;
   end
 endmodule

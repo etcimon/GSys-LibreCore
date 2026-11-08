@@ -62,6 +62,44 @@ class DebugProgramTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(debug).hexdigest(),
                          "fc1e97cf711201b745acaf121f54cd16375fd7d7957d851e7ec6681659ffec30")
 
+    def test_mprv_zero_images_match_head_for_every_privilege(self):
+        # Verified byte-identical against `git show HEAD:` generated images.
+        expected = {
+            0: ("2f3cb8aea1bed8725a93252ef32199dec13f6f3ce9f9b2cac22de23384b6aace",
+                "45ceb22379e7d2919ee9b09dd7b5f0ae3d2a5a3a3e12b071a4800e9cae071d22"),
+            1: ("755ca9cedef7b2af561bcf5b60a0d8175cf24f294045a9fddda36e08db475074",
+                "4fe49b4a880697d6b66f4f1e25c5c7cb7520cc00f4274ce8cdaabade05f5a587"),
+            3: ("b725b9899f46cc4e219da7b271fa4e89a0cb958f10a3226d480b6bde49e67b52",
+                "fc1e97cf711201b745acaf121f54cd16375fd7d7957d851e7ec6681659ffec30"),
+        }
+        for privilege, (normal_sha, debug_sha) in expected.items():
+            with self.subTest(privilege=privilege):
+                normal, debug = build_debug_program(privilege, 0)
+                self.assertEqual(hashlib.sha256(normal).hexdigest(), normal_sha)
+                self.assertEqual(hashlib.sha256(debug).hexdigest(), debug_sha)
+
+    def test_mprv_variants_emit_mstatus_and_debugger_dcsr_write(self):
+        normal, debug = ([int(w, 16) for w in image.splitlines()]
+                         for image in build_debug_program(3, 1))
+        self.assertIn(0x20e37, normal)   # LUI x28, 0x20 -> 0x20000
+        self.assertIn(0xe0e13, normal)   # ADDI x28, x28, 0
+        mstatus_writes = [w for w in normal
+                          if w & 127 == 0x73 and (w >> 20) == 0x300]
+        self.assertEqual(len(mstatus_writes), 1)
+        self.assertNotIn(0x7b086073, debug)  # CSRRSI DCSR.mprven is mprv=2 only
+        _, debug2 = ([int(w, 16) for w in image.splitlines()]
+                     for image in build_debug_program(3, 2))
+        self.assertIn(0x7b086073, debug2)    # CSRRSI dcsr, x16 (mprven=bit4)
+        self.assertEqual(hashlib.sha256(
+            build_debug_program(3, 1)[1]).hexdigest(),
+            hashlib.sha256(build_debug_program(3, 0)[1]).hexdigest())
+
+    def test_mprv_validation(self):
+        for privilege, mprv in ((3, 3), (3, -1), (0, 1), (1, 2), (2, 0)):
+            with self.subTest(privilege=privilege, mprv=mprv):
+                with self.assertRaises(ValueError):
+                    build_debug_program(privilege, mprv)
+
     def test_invalid_privilege_rejected(self):
         with self.assertRaisesRegex(ValueError, "privilege"):
             build_debug_program(2)

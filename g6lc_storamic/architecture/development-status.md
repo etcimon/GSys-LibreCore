@@ -1,5 +1,19 @@
 # Storamic development and qualification lanes
 
+Latest C1 follow-up (CPU47): the new `cpu-debug` stage (`run_cpu_debug.py`)
+runs real external-debug entry, CSR checks and DRET through the CPU.
+- **Positives (20):** entry U/S/M, plus M with MPRV=1/MPP=U and
+  `dcsr.mprven` 0 or 1, each at both origin settings and response delays 0
+  and 16.
+- **Negatives (5):** two bench negatives, plus three runs of an LSU mutant
+  that ignores debug mode. All five reject with `debug-origin-failed`.
+- **Result:** passes in 358 s (`storamic-34a969bd68a9`); the mprv=0 images are
+  byte-identical to HEAD.
+- **Bench patch:** the interpreter does not forward `OriginEnabled` to the CPU
+  wrapper (`tb_g6lc_storamic_cpu_debug_interpreter.sv:95`), so the stage
+  applies a recorded patch to the remote tree. The older Yosys two-step flow
+  passed the parameter separately.
+
 Latest C0 follow-up (CPU47): the documented interface-level next step was
 implemented and *disproven*, then the residual was fully characterised.
 - **I-cache `ready` split.** `ready` moved out of `icache_drsp_t` onto a

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import resource
 import shlex
 import shutil
@@ -260,6 +261,154 @@ def run_smt(prefix, top, tag, depth, out, yosys, manifest, induction=False, cove
                               env=env, timeout=300)
 
 
+def block_formal_groups(assertions, fixture):
+    """Resolve reviewed proof regions against the actual elaborated inventory."""
+    lines = [line.strip() for line in fixture.read_text().splitlines()]
+    ranges = {}
+    for group in ("LEMMAS", "RANGE"):
+        bounds = []
+        for end in ("BEGIN", "END"):
+            marker = f"// STORAMIC_WINDOW_{group}_{end}"
+            if lines.count(marker) != 1:
+                raise RuntimeError("STORAMIC_BLOCK_FORMAL_INVENTORY_MARKER")
+            bounds.append(lines.index(marker) + 1)
+        if bounds[0] >= bounds[1]:
+            raise RuntimeError("STORAMIC_BLOCK_FORMAL_INVENTORY_ORDER")
+        ranges[group] = bounds
+    groups = {"LEMMAS": [], "RANGE": [], "OTHER": []}
+    for name, source in assertions.items():
+        match = re.search(re.escape(fixture.name) + r":(\d+)\.", source)
+        if not match:
+            raise RuntimeError("STORAMIC_BLOCK_FORMAL_INVENTORY_SOURCE")
+        line = int(match.group(1))
+        group = next((key for key, (first, last) in ranges.items() if first < line < last), "OTHER")
+        groups[group].append(name)
+    if [len(groups[key]) for key in ("LEMMAS", "RANGE", "OTHER")] != [20, 1, 11]:
+        raise RuntimeError("STORAMIC_BLOCK_FORMAL_INVENTORY")
+    return groups
+
+
+def run_block_formal(prefix, top, tag, covers, out, yosys, manifest, outcomes, fixture):
+    """Prove the window invariant compositionally; retain every other obligation.
+
+    The twenty lemmas need both a reset base and unrestricted one-step induction.
+    Only then may the pointwise consequence assume them. Cutting register outputs
+    there admits arbitrary states, so proving the consequence covers every reachable
+    state. All remaining assertions and all covers use the original concrete model.
+    """
+    start = time.monotonic()
+    prepared = out / f"{tag}-prepared.il"
+    inventory = out / f"{tag}-prepared.json"
+    prepare = out / f"{tag}-prepare.ys"
+    prepare.write_text(prefix + f"write_rtlil {prepared}\nwrite_json {inventory}\n")
+    with (out / f"{tag}-prepare.log").open("w") as log:
+        subprocess.run([str(yosys), "-s", str(prepare)], stdout=log,
+                       stderr=subprocess.STDOUT, check=True, timeout=60)
+    model = json.loads(inventory.read_text())["modules"][top]
+    assertions = {name: cell["attributes"].get("src", "")
+                  for name, cell in model["cells"].items() if cell["type"] == "$assert"}
+    assumptions = [name for name, cell in model["cells"].items() if cell["type"] == "$assume"]
+    groups = block_formal_groups(assertions, fixture)
+    if len(assumptions) != 4:
+        raise RuntimeError("STORAMIC_BLOCK_FORMAL_INVENTORY")
+    digest = sha(prepared)
+    record = {
+        "status": "incomplete", "prepared_sha256": digest,
+        "assertions": assertions, "assumptions": assumptions,
+        "groups": groups, "fixture_sha256": sha(fixture),
+        "window_proof": "reset base + one-step induction + pointwise consequence",
+        "depth": 14, "query_budget_seconds": 30, "total_budget_seconds": 180,
+        "queries": [], "covers": covers, "qualification": False,
+    }
+    record_path = out / f"{tag}-coverage.json"
+    manifest.setdefault("block_formal_prepared", {})[tag] = {
+        "sha256": digest, "inventory_sha256": sha(inventory),
+        "coverage": str(record_path),
+    }
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    errors = []
+
+    def query(name, script, obligations, requires=()):
+        if sha(prepared) != digest:
+            raise RuntimeError("STORAMIC_BLOCK_FORMAL_MODEL_IDENTITY")
+        budget = min(30, 180 - (time.monotonic() - start))
+        began = time.monotonic()
+        result = {"name": name, "obligations": obligations, "status": "incomplete",
+                  "requires": list(requires)}
+        passed = {q["name"] for q in record["queries"] if q["status"] == "pass"}
+        if not set(requires) <= passed:
+            result.update(reason="unproved prerequisite", seconds=0, not_run=True)
+            record["queries"].append(result)
+            record_path.write_text(json.dumps(record, indent=2))
+            return
+        path = out / f"{tag}-{name}.ys"
+        dependency = f"# Requires successful queries on model {digest}: {', '.join(requires)}\n"
+        path.write_text(dependency + f"read_rtlil {prepared}\n" + script)
+        try:
+            if budget <= 0:
+                raise subprocess.TimeoutExpired([str(yosys), str(path)], 180)
+            with (out / f"{tag}-{name}.log").open("w") as log:
+                subprocess.run([str(yosys), "-s", str(path)], stdout=log,
+                               stderr=subprocess.STDOUT, check=True, timeout=budget)
+            result["status"] = "pass"
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as error:
+            result["status"] = "incomplete" if isinstance(error, subprocess.TimeoutExpired) else "fail"
+            result["error"] = str(error)
+            errors.append(error)
+        result["seconds"] = time.monotonic() - began
+        record["queries"].append(result)
+        record_path.write_text(json.dumps(record, indent=2))
+
+    record_path.write_text(json.dumps(record, indent=2))
+    def select_assertions(keep):
+        remove = " ".join(top + "/" + name for name in assertions if name not in keep)
+        return (f"delete {remove}\ndelete o:*\nopt_clean -purge\n"
+                f"select -assert-count {len(keep)} t:$assert\n"
+                "select -assert-count 4 t:$assume\nselect *\n")
+
+    lemma_prefix = select_assertions(groups["LEMMAS"])
+    query("window-base", lemma_prefix +
+          "sat -seq 1 -set-init-zero -set-assumes -set-at 1 rst_ni 0 "
+          f"-prove-asserts -verify -dump_vcd {out}/{tag}-window-base.vcd\n", groups["LEMMAS"])
+    # No initial-state or reset restriction is permitted in this induction step.
+    query("window-induction", lemma_prefix +
+          "sat -seq 1 -tempinduct-inductonly -maxsteps 1 -set-assumes "
+          f"-prove-asserts -verify -show-public -dump_vcd {out}/{tag}-window-induction.vcd\n",
+          groups["LEMMAS"])
+    remove = " ".join(top + "/" + name for name in groups["OTHER"])
+    lemmas = " ".join(top + "/" + name for name in groups["LEMMAS"])
+    query("window-consequence", f"delete {remove}\nchformal -assert2assume {lemmas}\n"
+          "delete o:*\nopt_clean -purge\nselect -assert-min 1 t:$dff\n"
+          "cutpoint t:$dff\nselect *\nopt_clean -purge\ncheck -assert\n"
+          "select -assert-none t:$dff\nselect -assert-count 1 t:$assert\n"
+          "select -assert-count 24 t:$assume\nselect *\n"
+          f"sat -set-assumes -prove-asserts -verify -show-public -dump_vcd {out}/{tag}-window.vcd\n",
+          groups["RANGE"], requires=("window-base", "window-induction"))
+    query("safety", select_assertions(groups["OTHER"]) +
+          "sat -seq 14 -set-init-zero -set-assumes -set-at 1 rst_ni 0 "
+          f"-prove-asserts -verify -show-ports -dump_vcd {out}/{tag}-safety.vcd\n", groups["OTHER"])
+    for name, signal, depth in covers:
+        query(name, "select -assert-count 32 t:$assert\nselect -assert-count 4 t:$assume\nselect *\n"
+              f"sat -seq {depth} -set-init-zero -set-assumes -set-at 1 rst_ni 0 "
+              f"-prove {signal} 0 -falsify -show-ports "
+              f"-dump_vcd {out}/{tag}-{name}.vcd\n", [signal])
+    if sha(prepared) != digest:
+        raise RuntimeError("STORAMIC_BLOCK_FORMAL_MODEL_IDENTITY")
+    failed = next((e for e in errors if isinstance(e, subprocess.CalledProcessError)), None)
+    record["coverage_complete"] = all(q["status"] != "incomplete" for q in record["queries"])
+    record["status"] = "fail" if failed else "incomplete" if not record["coverage_complete"] else "pass"
+    record["seconds"] = time.monotonic() - start
+    record_path.write_text(json.dumps(record, indent=2))
+    if errors:
+        # A known failed query must remain visible even when another times out.
+        raise failed or errors[0]
+    if not record["coverage_complete"]:
+        raise RuntimeError("STORAMIC_BLOCK_FORMAL_MISSING_QUERY")
+    key = "vblk_formal" if tag == "vblk-formal" else "vblk_flush_formal"
+    outcomes.append({key: "safety", "depth": 14, "pass": True})
+    outcomes.extend({key: name, "depth": depth, "pass": True} for name, _, depth in covers)
+
+
 def main():
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     data = Path(os.environ["TH_DATA_DIR"])
@@ -316,6 +465,21 @@ def main():
     if set(stages) & {"commit-defaults", "commit-defaults-formal", "commit-defaults-synth"}:
         from run_commit_defaults import run as run_commit_defaults
         run_commit_defaults(data, out, stages, manifest, builds, outcomes, verilator, build_model)
+    if set(stages) & {"load-translation", "load-translation-synth"}:
+        from run_load_translation import run as run_load_translation
+        run_load_translation(data, out, stages, manifest, builds, outcomes, verilator, build_model)
+    if set(stages) & {"fetch-queue", "fetch-queue-synth"}:
+        from run_fetch_queue import run as run_fetch_queue
+        run_fetch_queue(data, out, stages, manifest, builds, outcomes, verilator, build_model)
+    if set(stages) & {"cpu-origin"}:
+        from run_cpu_origin import run as run_cpu_origin
+        run_cpu_origin(data, out, stages, manifest, builds, outcomes, verilator, build_model)
+    if set(stages) & {"cpu-debug"}:
+        from run_cpu_debug import run as run_cpu_debug
+        run_cpu_debug(data, out, stages, manifest, builds, outcomes, verilator, build_model)
+    if set(stages) & {"csr-scc"}:
+        from run_csr_scc import run as run_csr_scc
+        run_csr_scc(data, out, stages, manifest, builds, outcomes, verilator, build_model)
     config_failures = []
     profiles = [
         ("one", ["-GMaxSticks=1"], None),
@@ -1405,20 +1569,11 @@ def main():
                 "-DFORMAL " + " ".join(map(str, vb_inputs)) +
                 "\nprep -top formal_g6lc_storamic_virtio_blk\nasync2sync\n" +
                 "chformal -lower\nflatten\nopt -full\ndffunmap\nopt_clean -purge\n")
-            for name, goal, depth in [
-                ("safety", "-prove-asserts -verify -show-public", 14),
-                ("status-cover", "-prove cover_status_o 0 -falsify", 14),
-                ("rsp-cover", "-prove cover_rsp_o 0 -falsify", 16),
-            ]:
-                script = out / f"vblk-formal-{name}.ys"
-                script.write_text(
-                    vb_prefix +
-                    f"sat -seq {depth} -set-init-zero -set-assumes -set-at 1 rst_ni 0 " + goal +
-                    f" -show-ports -dump_vcd {out}/vblk-formal-{name}.vcd\n")
-                with (out / f"vblk-formal-{name}.log").open("w") as log:
-                    subprocess.run([str(yosys), "-s", str(script)], stdout=log,
-                                   stderr=subprocess.STDOUT, check=True, timeout=1800)
-                outcomes.append({"vblk_formal": name, "depth": depth, "pass": True})
+            run_block_formal(vb_prefix, "formal_g6lc_storamic_virtio_blk", "vblk-formal",
+                             [("status-cover", "cover_status_o", 14),
+                              ("rsp-cover", "cover_rsp_o", 16)],
+                             out, yosys, manifest, outcomes,
+                             data / "formal_g6lc_storamic_virtio_blk.sv")
         if "vblk-flush-formal" in stages:
             # ST-037D: same wrapper with FlushEn=1; free flush ack/err
             # environment under the assume (response only while requested).
@@ -1432,19 +1587,10 @@ def main():
                 "\nprep -top formal_g6lc_storamic_virtio_blk_flush\n" +
                 "async2sync\nchformal -lower\nflatten\nopt -full\n" +
                 "dffunmap\nopt_clean -purge\n")
-            for name, goal, depth in [
-                ("safety", "-prove-asserts -verify -show-public", 14),
-                ("flush-cover", "-prove cover_flush_o 0 -falsify", 16),
-            ]:
-                script = out / f"vblk-flush-formal-{name}.ys"
-                script.write_text(
-                    vf_prefix +
-                    f"sat -seq {depth} -set-init-zero -set-assumes -set-at 1 rst_ni 0 " + goal +
-                    f" -show-ports -dump_vcd {out}/vblk-flush-formal-{name}.vcd\n")
-                with (out / f"vblk-flush-formal-{name}.log").open("w") as log:
-                    subprocess.run([str(yosys), "-s", str(script)], stdout=log,
-                                   stderr=subprocess.STDOUT, check=True, timeout=1800)
-                outcomes.append({"vblk_flush_formal": name, "depth": depth, "pass": True})
+            run_block_formal(vf_prefix, "formal_g6lc_storamic_virtio_blk_flush",
+                             "vblk-flush-formal", [("flush-cover", "cover_flush_o", 16)],
+                             out, yosys, manifest, outcomes,
+                             data / "formal_g6lc_storamic_virtio_blk.sv")
         if "vblk-synth" in stages:
             vb_sources = [data / "g6lc_storamic_virtio_blk.sv",
                           data / "tb_g6lc_storamic_virtio_blk.sv"]
@@ -2195,6 +2341,7 @@ def main():
                 sha(verilator.with_name("verilator_bin")) != manifest["verilator_bin_sha256"])) or
             ("yosys" in manifest and sha(Path(manifest["yosys"])) != manifest["yosys_sha256"])):
         raise RuntimeError("STORAMIC_TOOL_IDENTITY_CHANGED")
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
     (out / "stage-results.json").write_text(json.dumps(outcomes, indent=2))
     if not outcomes:
         raise RuntimeError("STORAMIC_NO_SELECTED_STAGES_EXECUTED")

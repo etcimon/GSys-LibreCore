@@ -557,7 +557,7 @@ bind frontend g6lc_fetch_dbg #(
     .ex_valid_i         (ex_valid_i),
     .eret_i             (eret_i),
     .icache_req_i       (icache_dreq_o.req),
-    .icache_rdy_i       (icache_dreq_i.ready),
+    .icache_rdy_i       (icache_ready_i),
     .icache_rsp_i       (icache_dreq_i.valid),
     .icache_take_i      (icache_take),
     .iq_ready_i         (instr_queue_ready),

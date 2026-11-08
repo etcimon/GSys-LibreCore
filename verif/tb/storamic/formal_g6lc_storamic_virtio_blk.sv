@@ -63,11 +63,13 @@ module formal_g6lc_storamic_virtio_blk #(
   logic [63:0] base_p, size_p;
   logic status_wr_done;   // the status byte write of the current request returned
   logic status_inflight;
+  logic invalid_table;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       dout <= 1'b0; sout <= 1'b0; init_p <= 1'b0; rpend_p <= 1'b0;
       base_p <= '0; size_p <= '0; status_wr_done <= 1'b0; status_inflight <= 1'b0;
       fl_seen <= 1'b0;
+      invalid_table <= 1'b0;
     end else begin
       init_p <= 1'b1; rpend_p <= reset_pending_i;
       base_p <= dma_base_i; size_p <= dma_size_i;
@@ -86,24 +88,85 @@ module formal_g6lc_storamic_virtio_blk #(
       else if (st_rvalid_i) sout <= 1'b0;
       if (dma_rvalid_i && dout && status_inflight && !dma_err_i) status_wr_done <= 1'b1;
       if (rs_valid || reset_pending_i) status_wr_done <= 1'b0;
+      if (rs_valid || reset_pending_i) invalid_table <= 1'b0;
+      if (req_valid_i && rq_ready) begin
+        invalid_table <= req_nsegs_i < 2 || req_nsegs_i > 4;
+        if (req_nsegs_i >= 2 && req_nsegs_i <= 4)
+          invalid_table <= req_seg_len_i[req_nsegs_i - 1'b1] == 0;
+      end
     end
   end
 
   logic [64:0] wend;
   assign wend = {1'b0, dma_base_i} + {1'b0, dma_size_i};
+  logic [64:0] lemma_end, lemma_header, lemma_status;
+  assign lemma_end = wend[64] ? {1'b1, 64'd0} : wend;
+  assign lemma_header = {1'b0, dut.saddr_q[0][63:3], 3'b000};
+  assign lemma_status = {1'b0, dut.saddr_q[dut.last][63:3], 3'b000};
   always_comb begin
     if (rst_ni) begin
       if (dma_rvalid_i) assume (dout);
       if (st_rvalid_i) assume (sout);
       if (st_flush_ack_i || st_flush_err_i) assume (flreq);
       if (init_p) assume (dma_base_i == base_p && dma_size_i == size_p);
+      // Prove these invariants from reset and by unrestricted one-step
+      // induction BEFORE using them in the pointwise window proof. They are
+      // assertions here, not additional environmental assumptions. State
+      // numbers follow the backend enum; a changed encoding must re-prove them.
+      // STORAMIC_WINDOW_LEMMAS_BEGIN
+      assert (!(dut.dpend_q && dut.dout_q));
+      assert (!(dut.spend_q && dut.sout_q));
+      if (dut.dpend_q)
+        assert (dut.state_q inside {4'd1, 4'd5, 4'd6, 4'd8, 4'd10});
+      if (dut.dout_q)
+        assert (dut.state_q inside {4'd0, 4'd1, 4'd5, 4'd6, 4'd8, 4'd10});
+      if (dut.spend_q)
+        assert (dut.state_q inside {4'd4, 4'd7});
+      if (dut.sout_q)
+        assert (dut.state_q inside {4'd0, 4'd4, 4'd7});
+      if (!(dut.state_q inside {4'd0, 4'd11, 4'd12})) begin
+        assert (dut.nsegs_q >= 2 && dut.nsegs_q <= 4);
+        assert (lemma_header >= {1'b0, dma_base_i} &&
+                lemma_header + (65'(dut.hbeats_q) << 3) <= lemma_end);
+        assert (lemma_status >= {1'b0, dma_base_i} && lemma_status + 65'd8 <= lemma_end);
+      end
+      if (dut.state_q == 4'd1) begin
+        assert (dut.hbeats_q == ((dut.saddr_q[0][2:0] == 0) ? 2'd2 : 2'd3));
+        assert (dut.hbeat_q < dut.hbeats_q);
+        assert ({1'b0, daddr} == lemma_header + (65'(dut.hbeat_q) << 3));
+      end
+      if (dut.state_q inside {4'd4, 4'd5, 4'd6, 4'd7}) begin
+        assert (dut.win_ok && dut.align_ok);
+        assert (dut.seg_q >= 1 && dut.seg_q < dut.last);
+        assert (dut.off_q < dut.slen_q[dut.seg_q] && dut.off_q[2:0] == 0);
+      end
+      if (dut.state_q inside {4'd5, 4'd6})
+        assert ({1'b0, daddr} == {1'b0, dut.saddr_q[dut.seg_q]} + 65'(dut.off_q));
+      if (dut.state_q == 4'd8) begin
+        assert (dut.id_ok);
+        assert (dut.off_q <= 16 && dut.off_q[2:0] == 0);
+        assert ({1'b0, daddr} == {1'b0, dut.saddr_q[1]} + 65'(dut.off_q));
+      end
+      if (dut.state_q == 4'd10) assert ({1'b0, daddr} == lemma_status);
+      // STORAMIC_WINDOW_LEMMAS_END
       // ---- safety ----
       if (dreq) begin
         assert (!dout);
         assert (daddr[2:0] == 3'b000);
+        // STORAMIC_WINDOW_RANGE_BEGIN
         assert ({1'b0, daddr} >= {1'b0, dma_base_i} && {1'b0, daddr} + 65'd8 <= wend);
+        // STORAMIC_WINDOW_RANGE_END
       end
-      if (sreq) assert (!sout);
+      if (sreq) begin
+        assert (!sout);
+        // Observe the decoded header, but check the byte range independently
+        // in 73 bits: a truncated sector or wrapped later beat lies outside it.
+        assert ({9'd0, saddr} >= {dut.sector_q, 9'd0});
+        assert ({9'd0, saddr} + 73'd8 <=
+                {dut.sector_q, 9'd0} + 73'(dut.total_q));
+        assert ({dut.sector_q, 9'd0} + 73'(dut.total_q) <= (73'd1 << 64));
+      end
+      if (invalid_table) assert (!dreq && !sreq && !flreq);
       // No new DMA or store beat may be requested while a flush is
       // outstanding (accept is blocked by idle_o and SFlush issues none).
       // dout/sout from a beat abandoned across reset_pending can legally

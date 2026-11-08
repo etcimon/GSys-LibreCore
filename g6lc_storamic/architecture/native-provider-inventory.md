@@ -50,13 +50,15 @@ W until AW is accepted. Thus W-before-AW is not an additional uncounted route
 owner. Its post-crossbar master prefix still cannot identify every physical
 source hidden behind joins or establish hart/debug authority on its own.
 
-## Next Implementable Composition
+## Implemented Model Composition And Remaining Native Work
 
-Bind the existing policy manager to the real model writer's pause, separate
-control seal and complete endpoint/DMA ownership. Keep upstream presence,
-upstream queue hold/pause, route/maintenance ownership, provider readiness,
-authorization and resume safety external. Retain old epoch/payload while
-accepted jobs, store flush, command result and control responses drain.
+The policy/writer composition now binds the real model writer's pause, separate
+control seal and endpoint/DMA ownership. It retains the old epoch/payload while
+accepted jobs, store flush, command results and control responses drain.
+Upstream presence, queue hold/pause, route/maintenance ownership, provider
+readiness, authorization and resume safety remain external. Provider-loss
+recovery requires explicit common reset/rediscovery; see
+[policy-writer-model.md](policy-writer-model.md).
 
 This narrows C3/C4 orchestration without claiming native facts. An opaque
 policy payload is not a native descriptor or authorization provider. Pending
@@ -68,3 +70,8 @@ Next native work still requires branch-specific source identity/queue drains,
 qualified platform fact capture and full CPU/cache/reservation/device resume.
 C0/C1 strict scheduling/remaining instruction cases, C2 full topology, C3-C6,
 physical P0/P1, aggregate/compliance/DFT/PPA V0 and Linux L0/L1 remain open.
+
+The review30 recheck still finds quiesce/control-quiesce tied low and ownership
+observations unconnected in the native harness, with the native-binding refusal
+retained in the attach module. The completed block proof optimization supplies
+no missing provider or synchronization owner.

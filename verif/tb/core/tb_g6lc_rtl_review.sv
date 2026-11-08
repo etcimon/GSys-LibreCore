@@ -213,6 +213,9 @@ module tb_g6lc_review_load_cancel;
   // NI=1 declares the fixture's (zero) physical page non-idempotent so the
   // commit-head gate of a device load can be exercised.
   parameter bit NI=0;
+  // Close the same PA -> store-hazard -> load-control observation path as
+  // the native LSU. Translation admission must remain independent of it.
+  parameter bit TRANSLATION_FEEDBACK=0;
   function automatic config_pkg::cva6_cfg_t configuration();
     config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
     c.XLEN=64; c.VLEN=64; c.PLEN=56; c.PPNW=44; c.IS_XLEN64=1; c.XLEN_ALIGN_BYTES=3;
@@ -252,6 +255,11 @@ module tb_g6lc_review_load_cancel;
   logic [2:0] tid;
   logic [63:0] result;
   logic [55:0] translated_pa=56'h80001000,phys_addr;
+  logic [43:0] dtlb_ppn='0;
+  logic [55:0] load_key;
+  logic load_key_valid,translation_req,hazard;
+  assign hazard = match_page ||
+      (TRANSLATION_FEEDBACK && load_key_valid && load_key == translated_pa);
   logic phys_valid,phys_hart;
   logic [2:0] phys_id;
   logic [1:0] phys_size;
@@ -277,10 +285,10 @@ module tb_g6lc_review_load_cancel;
     .clk_i(clk),.rst_ni(rst_n),.flush_i(flush),.cancelled_mask_i(cancel),
     .valid_i(head.valid),.lsu_ctrl_i(head),.pop_ld_o(pop),.valid_o(wb),
     .trans_id_o(tid),.result_o(result),.ex_o(ex),.mbe_i(1'b0),
-    .translation_req_o(),.vaddr_o(),.tinst_o(),.hs_ld_st_inst_o(),.hlvx_inst_o(),
-    .paddr_i(translated_pa),.ex_i(ex_in),.ex_ptw_i(ex_ptw),.dtlb_hit_i(dtlb_hit),.dtlb_ppn_i('0),
-    .page_offset_o(),.load_paddr_o(),.load_paddr_valid_o(),.load_trans_id_o(),.load_hart_o(),
-    .page_offset_matches_i(match_page),.page_offset_spec_only_i(1'b0),.lu_replay_o(),.lu_replay_id_o(),.store_buffer_empty_i(1'b0),.no_st_pending_i(nsp),
+    .translation_req_o(translation_req),.vaddr_o(),.tinst_o(),.hs_ld_st_inst_o(),.hlvx_inst_o(),
+    .paddr_i(translated_pa),.ex_i(ex_in),.ex_ptw_i(ex_ptw),.dtlb_hit_i(dtlb_hit),.dtlb_ppn_i(dtlb_ppn),
+    .page_offset_o(),.load_paddr_o(load_key),.load_paddr_valid_o(load_key_valid),.load_trans_id_o(),.load_hart_o(),
+    .page_offset_matches_i(hazard),.page_offset_spec_only_i(1'b0),.lu_replay_o(),.lu_replay_id_o(),.store_buffer_empty_i(1'b0),.no_st_pending_i(nsp),
     .st_fwd_valid_i(fwd_valid),.st_fwd_data_i(64'h12345666),.st_fwd_be_i(8'hff),
     .commit_tran_id_i('0),.req_port_i(resp),.req_port_o(req),
     .dcache_wbuffer_not_ni_i(1'b1),.dcache_wbuffer_empty_i(1'b0)
@@ -585,6 +593,43 @@ module tb_g6lc_review_load_cancel;
         if(!wb || tid!=3'd3 || result!=64'h12345666 || !pop)
           $fatal(1,"LOAD_FWD_COMPLETE wb=%b tid=%0d data=%h pop=%b",wb,tid,result,pop);
         tick();fwd_valid=0;match_page=0;
+      end
+      100:begin
+        if(!TRANSLATION_FEEDBACK || !MMU || !OOO || COH)
+          $fatal(1,"LOAD_TRANSLATION_PROFILE");
+        // A translated PA creates the hazard in the same cycle. Translation
+        // must proceed; the D$ request waits. No artificial state injection.
+        dtlb_ppn=44'h12345;translated_pa=56'h12345000;
+        offer(3,LD);#2;
+        if(!translation_req || !load_key_valid || load_key!=translated_pa ||
+           !hazard || req.data_req || pop)
+          $fatal(1,"LOAD_TRANSLATION_HAZARD");
+        tick();quiet();
+        // While waiting for the store, the shared translation port may carry
+        // another owner's PPN. The load keeps its own captured PA.
+        dtlb_ppn=44'habcde;#2;
+        if(translation_req || load_key!=56'h12345000 || !hazard || req.data_req)
+          $fatal(1,"LOAD_TRANSLATION_HELD_PA");
+        fwd_valid=1;#2;
+        if(!wb || !pop || tid!=3 || result!=(64'h12345666 ^ 64'(negative)) ||
+           req.data_req || translation_req)
+          $fatal(1,"LOAD_TRANSLATION_FORWARD");
+        tick();fwd_valid=0;
+        // An ungranted load continues translating. A miss cannot replace its
+        // PA; a later hit can, even before the cache grants the request.
+        dtlb_ppn=44'h23456;offer(4,LD);#2;
+        if(!translation_req || !req.data_req || pop || load_key!=56'h23456000)
+          $fatal(1,"LOAD_TRANSLATION_WAIT_GNT_SETUP");
+        tick();quiet();dtlb_hit=0;dtlb_ppn=44'h34567;#2;
+        if(!translation_req || load_key!=56'h23456000)
+          $fatal(1,"LOAD_TRANSLATION_MISS_CAPTURE");
+        tick();dtlb_hit=1;#2;
+        if(!translation_req || load_key!=56'h34567000)
+          $fatal(1,"LOAD_TRANSLATION_HIT_CAPTURE");
+        tick();cancel[4]=1;dtlb_ppn=44'h45678;#2;
+        if(translation_req || req.data_req || !pop || load_key!=56'h34567000)
+          $fatal(1,"LOAD_TRANSLATION_CANCEL_CAPTURE");
+        tick();cancel='0;dtlb_ppn='0;translated_pa=56'h80001000;
       end
       default:$fatal(1,"LOAD_CANCEL_SCENARIO");
     endcase

@@ -84,7 +84,10 @@ module cva6
       logic [CVA6Cfg.VLEN-1:0] vaddr;    // 1st cycle: 12 bit index is taken for lookup
     },
     localparam type icache_drsp_t = struct packed {
-      logic                                ready;  // icache is ready
+      // `ready` is carried on the dedicated `icache_ready_*` scalar, not in
+      // this packed response word: packing the branch-acceptance capacity
+      // signal with the fetch payload made Verilator merge their cones into
+      // a false UNOPTFLAT loop (see g6lc_storamic cpu-icache-ready-interface).
       logic                                valid;  // signals a valid read
       logic [CVA6Cfg.FETCH_WIDTH-1:0]      data;   // 2+ cycle out: tag
       logic [CVA6Cfg.FETCH_USER_WIDTH-1:0] user;   // User bits
@@ -938,6 +941,9 @@ module cva6
   icache_arsp_t icache_areq_cache_ex;
   icache_dreq_t icache_dreq_if_cache;
   icache_drsp_t icache_dreq_cache_if;
+  // Dedicated scalar carrying the icache request-acceptance capacity out of
+  // band from the packed response word (see icache_drsp_t above).
+  logic        icache_ready_cache_if;
 
   amo_req_t amo_req;
   amo_resp_t amo_resp;
@@ -1176,6 +1182,7 @@ module cva6
       .smt_trap_hold_o    (smt_trap_hold),
       .icache_dreq_o      (icache_dreq_if_cache),
       .icache_dreq_i      (icache_dreq_cache_if),
+      .icache_ready_i     (icache_ready_cache_if),
       .fetch_entry_o      (fetch_entry_if_id),
       .fetch_entry_valid_o(fetch_valid_if_id),
       .fetch_entry_ready_i(fetch_ready_id_if)
@@ -3525,6 +3532,7 @@ module cva6
         .icache_areq_o     (icache_areq_cache_ex),
         .icache_dreq_i     (icache_dreq_if_cache),
         .icache_dreq_o     (icache_dreq_cache_if),
+        .icache_ready_o    (icache_ready_cache_if),
         // D$
         .dcache_enable_i   (dcache_en_csr_nbdcache),
         .dcache_flush_i    (dcache_flush_ctrl_cache),
@@ -3598,6 +3606,7 @@ module cva6
         .icache_areq_o (icache_areq_cache_ex),
         .icache_dreq_i (icache_dreq_if_cache),
         .icache_dreq_o (icache_dreq_cache_if),
+        .icache_ready_o (icache_ready_cache_if),
 
         .dcache_enable_i   (dcache_en_csr_nbdcache),
         .dcache_flush_i    (dcache_flush_ctrl_cache),
@@ -3676,6 +3685,7 @@ module cva6
         .icache_areq_o     (icache_areq_cache_ex),
         .icache_dreq_i     (icache_dreq_if_cache),
         .icache_dreq_o     (icache_dreq_cache_if),
+        .icache_ready_o    (icache_ready_cache_if),
         // D$
         .dcache_enable_i   (dcache_en_csr_nbdcache),
         .dcache_flush_i    (dcache_flush_ctrl_cache),
@@ -4088,7 +4098,7 @@ module cva6
                    fetch_valid_if_id[p], fetch_entry_if_id[p].hart_id,
                    fetch_entry_if_id[p].address);
       end
-      if (icache_dreq_if_cache.req && icache_dreq_cache_if.ready)
+      if (icache_dreq_if_cache.req && icache_ready_cache_if)
         $display("[smt-probe] req t=%0t va=%h tok=%0d k1=%b k2=%b act=%0d",
                  $time, icache_dreq_if_cache.vaddr, icache_dreq_if_cache.token,
                  icache_dreq_if_cache.kill_s1, icache_dreq_if_cache.kill_s2,
@@ -4600,7 +4610,7 @@ module cva6
                  i_frontend.arch_pc, i_frontend.fetch_address,
                  i_frontend.seq_base, i_frontend.if_ready,
                  icache_dreq_if_cache.req, icache_dreq_if_cache.vaddr,
-                 icache_dreq_cache_if.ready, icache_dreq_cache_if.valid,
+                 icache_ready_cache_if, icache_dreq_cache_if.valid,
                  icache_dreq_cache_if.vaddr, i_frontend.icache_take,
                  i_frontend.kill_s2, i_frontend.icache_valid_q,
                  i_frontend.icache_vaddr_q,
@@ -5366,7 +5376,7 @@ module cva6
                    issue_stage_i.i_scoreboard.commit_pointer_q[0]);
         end
         // ---- I$ request accepted
-        if (icache_dreq_if_cache.req && icache_dreq_cache_if.ready)
+        if (icache_dreq_if_cache.req && icache_ready_cache_if)
           $display("[win] c=%0d h=%0d REQ va=%h tok=%0d demand=%0d pf=%0d spec=%0d k1=%0d k2=%0d ftq_head=%h hv=%0d npc_q=%h",
                    win_cycle, win_ghart, icache_dreq_if_cache.vaddr, icache_dreq_if_cache.token,
                    i_frontend.demand_req, i_frontend.pf_req, icache_dreq_if_cache.spec,

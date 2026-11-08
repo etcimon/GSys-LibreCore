@@ -42,6 +42,8 @@ module cva6_icache_axi_wrapper
     // data requests
     input icache_dreq_t dreq_i,
     output icache_drsp_t dreq_o,
+    // Request-acceptance capacity out of band from the packed response word.
+    output logic        dreq_ready_o,
     // AXI refill port
     output axi_req_t axi_req_o,
     input axi_rsp_t axi_resp_i
@@ -128,6 +130,7 @@ module cva6_icache_axi_wrapper
       .areq_o        (areq_o),
       .dreq_i        (dreq_i),
       .dreq_o        (dreq_o),
+      .dreq_ready_o  (dreq_ready_o),
       .mem_rtrn_vld_i(icache_mem_rtrn_vld),
       .mem_rtrn_i    (icache_mem_rtrn),
       .mem_data_req_o(icache_mem_data_req),

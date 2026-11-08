@@ -79,9 +79,10 @@ engineering work packages below or authorize native activation.
   with the actual internal debug binding; it does not execute debug entry/exit.
 - The standalone/testharness source lists now agree at 23 entries, with
   checkpoint dependencies registered and packages before modules. Seven
-  Storamic platform checks and typechecking pass. The wider platform unit run
-  has 291 passes, one skip and one unrelated AI-overlay package/DTS failure;
-  this is not an all-green platform result.
+  Storamic platform checks and typechecking pass. The earlier wider platform
+  failure was stale generated source-hash comments in three AI packages.
+  Backend review30 refreshes those comments to the canonical generator output;
+  configuration values, DTS and existing upstream notices are unchanged.
 
 ## Execution Status At Planning Cutoff
 
@@ -90,12 +91,12 @@ under `build-platform/workspace/build/`. A running command is not a verdict.
 
 | Work | Current Status | Next Closure Action |
 | --- | --- | --- |
-| C0 | Open. CPU28 on the pinned repository fork exposes commit assignment incompleteness and packed-FP representation limits. Commit29 fixes the four latch errors with selected typed simulation/formal/synthesis regressions. The isolated FP/defaults probe still reports 28 unwaived scheduling errors in each origin mode. Older local-tool 11/12 counts remain historical, not directly comparable. | Separate actual feedback from aggregate/compiler artifacts without warning suppression or FP disabling; preserve current source/tool identities and rejecting regressions. No native qualification follows from the component defaults fix. |
-| C1 | Original/extended interpreter matrices, M/S/U external-debug round trips, scoped AW/W/B pending-entry checks and debug-issued B responses across DRET pass. MPRV covers supported MPP values S/U/M, but not combined debug/MPRV. | Complete remaining queue classes/directions, debug/MPRV and other debug mechanisms/privilege corners; retain independent C0. |
+| C0 | Open. Commit29 fixes the four retirement latch errors. CPU31 separates independent load translation from hazard arbitration with control equivalence and actual-module regressions: 28 → 27 unwaived scheduling errors per origin mode, no new named error. CPU36 makes IQ address admission independent of the checkpoint payload; with the current-source compiler this goes 27 → 25 (FP controls) and 10 → 8 (diagnostic representation), both origins, with nothing new. CPU37 splits the PTW leaf TLB-update process from the walker (full-module combinational equivalence in three configs): 25 → 24 and 8 → 7, removing only `shared_tlb_hit_d`. CPU38 removes the missunit `mem_req_c` packet self-reference (full-module equivalence in three configs): 24 → 23 and 7 → 6. A CPU40/41 full-core bit-level SCC check found 65 real combinational SCCs, all in `csr_regfile` `csr_update` (undefaulted `mask`, static `DirVecOnly`). After the fix it finds 0 SCCs and 0 latches, so the six remaining UNOPTFLAT identities are Verilator representation artifacts. CPU43 corrects the cpu-origin bench's AXI cache expectation to `CACHE_MODIFIABLE`, and it now passes in both origins. CPU44 registers the `cpu-origin` and `csr-scc` stages. CPU45/46 make two edits: the scoreboard issue pointer becomes a direct offset (cone SAT proof 24/24, mutant rejected), and I-cache `flush_d`, `fetch_req` and response valid move out of the kill_s2-reading FSM (full-module equivalence, three configs). Diagnostics go 6 → 4 (fields) and 23 → 21 (FP). The four left are the frontend kill_s2 loop through I-cache `ready` and the D-cache port arrays; `split_var` does not remove them. The two registered load stages and the two registered fetch-queue stages pass on promoted sources. Older local-tool 11/12 counts remain historical, not directly comparable. | Resolve the remaining dependencies and qualify the current compiler without warning suppression or FP disabling; retain source/tool identities and rejecting regressions. See [cpu-load-translation.md](cpu-load-translation.md). No native qualification follows from these component fixes. |
+| C1 | Original/extended interpreter matrices, M/S/U external-debug round trips, scoped AW/W/B pending-entry checks and debug-issued B responses across DRET pass. MPRV covers supported MPP values S/U/M. CPU47 adds the registered `cpu-debug` stage (`storamic-34a969bd68a9`, 25/25), which covers combined debug/MPRV. M firmware runs with MPRV=1/MPP=U and carries U origin (010). The debugger runs with `dcsr.mprven` = 0 and = 1. Its accesses stay unknown (000) in both cases. An LSU mutant that ignores debug mode is rejected in all three MPRV variants. | Complete remaining queue classes/directions, debug/MPRV and other debug mechanisms/privilege corners; retain independent C0. |
 | C2 | Direct/mux/protected-target crossbar component receipts pass; actual native-top authority binding remains open. | Freeze native topology, widths, source identities and adapter ownership. |
 | C3-C6 | Model components exist; real policy/descriptor/writer/synchronization bindings are incomplete. Native refusal remains in place. | Supply and qualify the platform owners, then compose them; do not substitute fixture acknowledgements. |
 | P0-P1 | Physical media/protection qualification is open. | Establish actual media/PHY/technology contracts and measured fault/energy evidence. |
-| V0 | Local nonsimulation invocations were interrupted, with partial formal evidence only. Full aggregate/compliance and approved remote binding remain open. | Complete fresh per-stage gates, then run the approved isolated simulation/remote gates. |
+| V0 | Prior local invocations have partial formal evidence only. CPU31's aggregate planning check now reports dry-run skips correctly; it executes nothing. The inspected remote routes sync shared sources and omit strict slang elaboration; local simulation preflight reports required runtime patches missing. Full aggregate/compliance remains open. | Establish source-isolated aggregate execution with qualified tools; retain the selected-stage receipts separately. |
 | L0-L1 | Not qualified. L1 is optional and independent. | Finish lower system gates before advertising Linux persistent-memory capabilities. |
 
 The local invocations `storamic-profile-10/verify-nonsim-r1` (configured
@@ -204,6 +205,34 @@ approved tool/runtime inputs are available. Scope closure is evidence-based.
 3. Qualify the complete C6 composition before any native admission change.
    Obtain the missing physical/runtime inputs and explicit remote/network or
    cleanup approvals for P0/P1/V0. Proceed to Linux only after those gates.
+
+## Backend Correctness Reassessment
+
+The source audit found that the small-capacity block fixtures did not cover
+the full sector-to-byte conversion contract. The ST-036 backend now checks
+representability of both the start and exclusive end before narrowing the
+sector address, and refuses malformed descriptor tables before DMA. The
+final legal byte range remains usable. See
+[block-address-validation.md](block-address-validation.md) for reproducing
+original-RTL failures, the bounded fix and current verification status.
+
+The final six-stage block/device profile passes in about 130 seconds with
+matching source/model/tool identities and both simulator PGO builds verified.
+Both formal modes now establish the unrestricted DMA-window property by
+induction and a pointwise consequence, while retaining all other depth-14
+assertions and concrete cover bounds. All 62 omitted registered stages are
+listed, and the original RTL still fails the exact final fixtures. This closes
+the short-profile backend gate; it does not replace an aggregate sweep.
+
+This concrete data-integrity repair takes precedence over speculative
+throughput refactors. It adds no state or service latency and does not close
+C0/C1, native providers or the physical gates. The newer Verilator submodule
+and hyp8 lint evidence are also distinct from a fresh strict functional-core
+C0 run; do not substitute one source closure or warning policy for the other.
+The review30 functional-core diagnostic reports 28 unwaived `UNOPTFLAT`
+errors per origin mode; CPU31's proved translation split reduces that captured
+profile to 27. Next work remains C0/C1 and the native source,
+policy/protection, drain and resume owners in the dependency table.
 
 ## Policy Ownership Must Cover The Whole Path
 

@@ -1410,6 +1410,8 @@ module csr_regfile
     tdata2_we              = 1'b0;
     tdata3_we              = 1'b0;
 
+    mask                   = '0;
+
     // check for correct access rights and that we are writing
     if (csr_we) begin
       unique case (conv_csr_addr.address)
@@ -2028,7 +2030,7 @@ module csr_regfile
         end
 
         riscv::CSR_MTVEC: begin
-          logic DirVecOnly;
+          automatic logic DirVecOnly;
           DirVecOnly = CVA6Cfg.DirectVecOnly ? 1'b0 : csr_wdata[0];
           mtvec_d = {csr_wdata[CVA6Cfg.XLEN-1:2], 1'b0, DirVecOnly};
           // we are in vector mode, this implementation requires the additional

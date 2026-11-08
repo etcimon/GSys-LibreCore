@@ -2818,6 +2818,14 @@ def cmd_py(rem: Remote, args) -> int:
     rundir = f"{REMOTE_ROOT}/runs/{tag}"
 
     data_files = [Path(d).resolve() for d in (args.data or [])]
+    for list_path in (args.data_list or []):
+        listing = Path(list_path).resolve()
+        if not listing.is_file():
+            die(f"no such data list: {listing}")
+        for line in listing.read_text().splitlines():
+            entry = line.strip()
+            if entry and not entry.startswith("#"):
+                data_files.append(Path(entry).resolve())
     for d in data_files:
         if not d.exists():
             die(f"no such data path: {d}")
@@ -3022,6 +3030,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="number of worker threads for the remote pool (default 1)")
     sp.add_argument("--data", action="append", default=[],
                     help="data file or directory to upload (repeatable)")
+    sp.add_argument("--data-list", action="append", default=[],
+                    help="file listing data paths, one per line (repeatable); "
+                         "for closures too large for the command line")
     sp.add_argument("--env", action="append", default=[],
                     help="KEY=VALUE env var for the scripts (repeatable)")
     sp.add_argument("--pull", action="store_true",

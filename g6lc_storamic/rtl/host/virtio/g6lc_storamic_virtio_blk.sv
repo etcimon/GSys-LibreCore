@@ -75,6 +75,9 @@ module g6lc_storamic_virtio_blk #(
 
   localparam logic [7:0] StOk = 8'd0, StIoErr = 8'd1, StUnsupp = 8'd2;
   localparam logic [31:0] TIn = 32'd0, TOut = 32'd1, TFlush = 32'd4, TGetId = 32'd8;
+  // Exclusive sector limit of the 64-bit byte-addressed store port. An end
+  // exactly at 2^55 sectors is legal; no actual beat may wrap through zero.
+  localparam logic [64:0] StoreSectorLimit = 65'd1 << 55;
 
   typedef enum logic [3:0] {
     SIdle, SHdr, SParse, SCheck, SInRd, SInWr, SOutRd, SOutWr, SId, SStatus, SRsp,
@@ -207,8 +210,14 @@ module g6lc_storamic_virtio_blk #(
           SIdle: if (req_valid_i && req_ready_o) begin
             nsegs_q <= req_nsegs_i; saddr_q <= req_seg_addr_i;
             slen_q <= req_seg_len_i; swr_q <= req_seg_write_i;
-            if (req_nsegs_i < 2 || req_seg_write_i[0] || req_seg_len_i[0] < 32'd16 ||
+            // Validate the table count before indexing its last descriptor.
+            // The ring normally enforces this too, but this backend is also a
+            // standalone public seam and must never issue on malformed input.
+            if (req_nsegs_i < 2 || int'(req_nsegs_i) > MaxSegs) begin
+              state_q <= SFault;
+            end else if (req_seg_write_i[0] || req_seg_len_i[0] < 32'd16 ||
                 !req_seg_write_i[req_nsegs_i - 1'b1] ||
+                req_seg_len_i[req_nsegs_i - 1'b1] == 0 ||
                 !beat_ok(hdr_a0, dma_base_i, win_end) ||
                 !beat_ok(hdr_a0 + 65'd16, dma_base_i, win_end) &&
                     req_seg_addr_i[0][2:0] != 0 ||
@@ -246,7 +255,8 @@ module g6lc_storamic_virtio_blk #(
             state_q <= SStatus;
             if (type_q == TIn || type_q == TOut) begin
               if (!dir_ok || !align_ok || !ok_len || !win_ok || !store_ready_i ||
-                  end_sector > {1'b0, capacity_i}) begin
+                  end_sector > {1'b0, capacity_i} ||
+                  sector_q[63:55] != 0 || end_sector > StoreSectorLimit) begin
                 status_q <= StIoErr;
               end else if (data_total == 0) begin
                 status_q <= StOk;

@@ -50,6 +50,8 @@ module std_cache_subsystem
     // data requests
     input icache_dreq_t icache_dreq_i,  // to/from frontend
     output icache_drsp_t icache_dreq_o,
+    // Request-acceptance capacity out of band from the packed response word.
+    output logic        icache_ready_o,
     // AMOs
     input amo_req_t amo_req_i,
     output amo_resp_t amo_resp_o,
@@ -99,6 +101,7 @@ module std_cache_subsystem
       .areq_o    (icache_areq_o),
       .dreq_i    (icache_dreq_i),
       .dreq_o    (icache_dreq_o),
+      .dreq_ready_o(icache_ready_o),
       .axi_req_o (axi_req_icache),
       .axi_resp_i(axi_resp_icache)
   );

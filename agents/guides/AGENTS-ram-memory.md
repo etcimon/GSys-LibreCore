@@ -292,3 +292,29 @@ traffic; require actual job pause AND separate control seal. Do not turn local
 idle into upstream ACK or auto-flush dirty data on replacement. Provider loss
 can retain a real DMA owner; explicit reset/rediscovery is distinct from
 automatic revival. See `../../g6lc_storamic/architecture/policy-writer-model.md`.
+
+The ST-036 block seam has 64-bit sector and capacity fields but a 64-bit byte
+address. Validate the full sector range before multiplying by 512/narrowing:
+capacity alone cannot prevent aliasing with oversized inputs. Keep the final
+legal sector accepted, and reject invalid table counts or empty status buffers
+before DMA. The existing block fixture and formal wrapper now exercise this
+boundary; native/physical qualification stays separate. See
+`../../g6lc_storamic/architecture/block-address-validation.md`.
+
+For a short complete block proof, establish the twenty metadata/ownership
+invariants from reset and by unrestricted one-step induction before assuming
+them in the window consequence. Keep the other eleven original assertions at
+depth14 and run covers on the concrete model. Query/stage budgets are 30/180
+seconds; missing inventory, tampering, timeouts and failed prerequisites cannot
+become a pass. The six-stage remote profile completes in about 130 seconds
+with two workers and verified source/model/PGO identities. Its 62 omitted stages
+and the remaining native/physical gates stay explicit.
+
+Load translation must not depend on a store-hazard verdict computed from the
+same load's PA. Keep translation admission separate from request/forward
+arbitration while preserving cancellation, miss/hit and grant timing. The C0
+load-unit split is control-equivalent and has an actual PA/hazard feedback
+test, original-RTL rejection and a negative real-loop canary. Generic synthesis
+retains the FF count and removes two cells; no STA or service-latency improvement
+is inferred. Full CPU scheduling still has 27 captured off/on diagnostics.
+See `../../g6lc_storamic/architecture/cpu-load-translation.md`.

@@ -1140,6 +1140,11 @@ export async function synthTargetsRemote(
     sync: true,
   });
   if (res.error) return fail(res.error);
+  if (ctx.dryRun) {
+    return targets.map((target) => ({
+      stage: "synth", target, status: "skip", detail: "dry-run", durationMs: elapsed(started),
+    }));
+  }
   if (/RESULT_TOOLCHAIN fail yosys/.test(res.text)) return fail("no yosys on the remote builder");
   if (/RESULT_TOOLCHAIN fail read_slang/.test(res.text)) {
     return fail("remote yosys has no integrated read_slang (needs >= v0.67; run tools install formal there)");
@@ -1240,6 +1245,11 @@ export async function lintTargetsRemote(
     sync: true,
   });
   if (res.error) return fail(res.error);
+  if (ctx.dryRun) {
+    return targets.map((target) => ({
+      stage: "lint", target, status: "skip", detail: "dry-run", durationMs: elapsed(started),
+    }));
+  }
   if (/RESULT_TOOLCHAIN fail verilator/.test(res.text)) {
     return fail("no verilator on the remote builder (expected the managed toolchain or PATH)");
   }
@@ -1443,6 +1453,11 @@ async function runFormalTasksRemote(
         logger: ctx.logger,
       });
 
+  if (ctx.dryRun) {
+    return specs.map((spec) => ({
+      stage: "formal", target: spec.rel, status: "skip", detail: "dry-run", durationMs: elapsed(started),
+    }));
+  }
   const out = `${res.stdout}\n${res.stderr}`;
   if (/RESULT_TOOLCHAIN fail/.test(out)) {
     return fail("remote toolchain provisioning failed (needs cmake>=3.28, ninja, g++>=11)");
