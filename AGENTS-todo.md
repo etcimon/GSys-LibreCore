@@ -18437,8 +18437,25 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   XF_FAULTS 0` on **vgtop and vgsys**; `ue_gpos_depth_1`/`dtest`/`dtoff`
   hex byte-identical after the `is_dpair`/`dp_*` parametrization,
   `ue_gpos_fncall_1` regress clean.  Directed-RTL session evidence only —
-  EQUAL/NOTEQUAL/LEQUAL/GEQUAL/ALWAYS/NEVER boundary cases, depthClamp,
-  depth-bounds and early/late-Z ordering remain open.
+  LEQUAL/GEQUAL/ALWAYS/NEVER boundary cases, depthClamp, depth-bounds
+  and early/late-Z ordering remain open.
+- [x] **CLOSED — EQUAL/NOTEQUAL depth boundary (`ue_gpos_deq_1`/
+  `deqoff_1` + `ue_gpos_dne_1`/`dneoff_1` A/B pairs):** completes the
+  meaningful compare-op set.  `dp_*` parametrization extended with
+  per-pair vertex depths `dp_z_near`/`dp_z_far` and `f32b()`-computed
+  oracle depth bits (replaces the hardcoded 0x3E80/0x3F40 constants —
+  byte-identical for existing sessions).  **EQUAL** (`op=2`, clear
+  `0.5f`): near `z=0.5` sits AT the clear depth -> passes, far `z=0.75`
+  fails -> red wins (`0xFF0000FF`+`0.5f`); `deqoff` control -> far wins
+  blue+`0.75f`.  **NOTEQUAL** (`op=5`, clear `0.5f`): BOTH tris at
+  `z=0.5`==clear -> every fragment fails `frag!=buffer` -> all rejected
+  -> empty colour (`clr_w` everywhere) + clear depth `0.5f`; `dneoff`
+  control -> far wins blue+`0.5f`.  deq/dne are substrings of their
+  `*_off` twins so the on-flags carry an `and not <off>` guard.  PASS
+  all four `g1=8192 g2=8192 ulp=0 XF_FAULTS 0` on **vgtop
+  (cycles~812-816k) and vgsys (cycles~1135-1156k)**; `dtest`/`dtoff`/
+  `dgreat`/`dgtoff`/`depth_1` hex byte-identical.  LEQUAL/GEQUAL/
+  ALWAYS/NEVER, depthClamp, depth-bounds, early/late-Z remain open.
 - [x] **CLOSED — per-pixel varying interpolation (`ue_gpos_grad_1`):**
   first bit-exact smooth-varying gradient through the real transport
   path — the unlock for all interpolated shading (fs_color/fs_mip/
