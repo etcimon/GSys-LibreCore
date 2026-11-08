@@ -11011,10 +11011,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # wu*wv weight accumulate, alpha stays UNORM.  'ftexls' contains
         # 'ftexl' (LINEAR) but NOT 'ftexs', so is_ftexl drives the branch.
         is_ftexls = 'ftexls' in gfx
+        # ftex_gath: OpImageGather (96) component 0 + OpImageGather with
+        # ConstOffset (1,0) component 1 — the four footprint texels in
+        # (i0,j1),(i1,j1),(i1,j0),(i0,j0) order, unfiltered, CLAMP_TO_EDGE.
+        # The underscore keeps 'ftexg' (single-texel gather) from matching.
+        is_ftexgath = 'ftex_gath' in gfx
         # is_ftexm gates the shared multi-texel texture setup (extent,
-        # per-vertex uv, texel payload) for NEAREST/LINEAR/REPEAT/MIRROR.
+        # per-vertex uv, texel payload) for NEAREST/LINEAR/REPEAT/MIRROR/GATHER.
         is_ftexm = (is_ftexn or is_ftexl or is_ftexr or is_ftexmir
-                    or is_ftexc or is_ftexs)
+                    or is_ftexc or is_ftexs or is_ftexgath)
         # CLAMP_TO_BORDER borderColor selector (raw VkBorderColor 0..5):
         # ftexc=5 INT_OPAQUE_WHITE, ftexc2=2 FLOAT_OPAQUE_WHITE (probes the
         # f_bord16 decode), ftexcb=1 FLOAT_OPAQUE_BLACK, ftexct=0
@@ -11075,7 +11080,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           or is_depth or is_gradlike
                           else
                           'fs_tex_array.spv' if is_ftexa else
-                          'fs_tex_gather.spv' if is_ftexg else
+                          'fs_tex_gather.spv' if (is_ftexg or is_ftexgath)
+                          else
                           'fs_tex_bias.spv' if is_ftexb else
                           'fs_tex_implicit.spv' if is_ftex else
                           'fs_kill_fn.spv' if is_killfn else
@@ -11758,6 +11764,37 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                 (_s8((_tw >> 8) & 0xFF) << 8) |
                                 (_s8((_tw >> 16) & 0xFF) << 16) |
                                 (_n8((_tw >> 24) & 0xFF) << 24)))
+        elif is_ftexgath:
+            # OpImageGather + ConstOffset footprint (W_TX* gather arm):
+            # 8.8 coord su=floor(u*w*256-128) identical to LINEAR; the
+            # multi-texel uv keeps su,sv >= 0 so su>>8 == su>>>8.  The
+            # four footprint texels (i0,j1),(i1,j1),(i1,j0),(i0,j0) are
+            # CLAMP_TO_EDGE-wrapped and UNFILTERED; component picks one
+            # channel (comp0->R byte0, comp1->G byte1) and the UNORM8
+            # store is byte-identity.  g0 comp0 no offset:
+            #   o.x=pt0.R=(iu,iv+1), o.y=pt3.R=(iu,iv).
+            # g1 comp1 + ConstOffset(1,0) -> base iu+1, iv:
+            #   o.z=pt0'.G=(iu+1,iv+1), o.w=pt2'.G=(iu+2,iv).
+            _uv4 = [(u, v, 0.0, 1.0) for (u, v) in TEX_UV]
+            _gp = gfx_grad_pixels(TRI, _uv4, VP, SC, CW, CH, 1, 2)
+            def _g(i, j, c):        # gather channel c of clamped texel
+                _ci = 0 if i < 0 else (TEX_W - 1 if i >= TEX_W else i)
+                _cj = 0 if j < 0 else (TEX_H - 1 if j >= TEX_H else j)
+                return (TEX_TEXELS[_cj * TEX_W + _ci] >> (8 * c)) & 0xFF
+            exp_img = []
+            for w in range(CW * CH):
+                _px, _py = w % CW, w // CW
+                _v = _gp.get((_px, _py))
+                if _v is None:
+                    exp_img.append(clr_w)
+                    continue
+                _su = int(math.floor(_f32(_v[0] * TEX_W * 256 - 128)))
+                _sv = int(math.floor(_f32(_v[1] * TEX_H * 256 - 128)))
+                _iu, _iv = _su >> 8, _sv >> 8
+                exp_img.append(_g(_iu, _iv + 1, 0) |
+                               (_g(_iu, _iv, 0) << 8) |
+                               (_g(_iu + 1, _iv + 1, 1) << 16) |
+                               (_g(_iu + 2, _iv, 1) << 24))
         else:
             exp_img = [out_w if (w % CW, w // CW) in cov and
                        not ((is_kill and

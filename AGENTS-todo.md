@@ -18879,9 +18879,19 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   is the only implicit-LOD FS whose uv varies per-pixel -> nonzero λ;
   needs quad-derivative d(uv)/dx,dy -> λ -> m0/m1 select -> trilinear
   accumulate (reuse ftexl weights per mip + `tx_acc1` blend) — largest
-  remaining build; **(ii) gather** — `fs_tex_gather`
-  (`textureGather`/`textureGatherOffset`, component 0/1, 1-mip -> LOD0,
-  4-texel footprint, no interp) — moderate; **(iii) QueryLod** —
+  remaining build; **(ii) gather — DONE** (`ue_gpos_ftex_gath_1`;
+  `is_ftexgath`, session token `ftex_gath` — the underscore keeps
+  `ftexg` single-texel gather from matching): reuses `fs_tex_gather.spv`
+  (OpImageGather comp0 no-offset + OpImageGather ConstOffset(1,0) comp1).
+  8.8 coord identical to LINEAR (`floor(u*w*256-128)`); multi-texel uv
+  keeps su,sv>=0 so `su>>8`==`su>>>8`.  Footprint (i0,j1),(i1,j1),(i1,j0),
+  (i0,j0) CLAMP_TO_EDGE unfiltered; comp picks one channel byte
+  (swz_sel identity -> ch[c]); UNORM8 store byte-identity.  o=
+  vec4(g0.x,g0.w,g1.x,g1.z) -> R=(iu,iv+1).R, G=(iu,iv).R, B=(iu+1,iv+1).G,
+  A=(iu+2,iv).G.  **PASS bit-exact** `ulp=0` vgtop (17122) + vgsys
+  (17291); non-degenerate; all ftex sessions regen byte-identical;
+  operand order confirmed by SPIR-V disasm (comp=ops[4]->const,
+  ConstOffset vec=ops[6]->const ivec2); **(iii) QueryLod** —
   `fs_tex_qlod` (vcol.xy only, needs quad-deriv + SFU log2, no fetch);
   **(iv) proj/shadow/dref** — `fs_tex_proj`/`fs_tex_shadow` need nonzero
   `vcol.z/w` (vs_tex sets z=0 — blocked on VS tooling); **(v)

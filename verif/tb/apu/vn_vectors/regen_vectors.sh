@@ -247,6 +247,12 @@ python3 $G --graphics-session ue_gpos_ftexs_1 1
 # bilinear corner decodes sRGB->linear (RGB via TO_LIN16, alpha UNORM)
 # before the wu*wv accumulate; 'ftexls' has 'ftexl' (LINEAR) not 'ftexs'
 python3 $G --graphics-session ue_gpos_ftexls_1 1
+# fragment gather: OpImageGather comp0 (no offset) + OpImageGather
+# ConstOffset(1,0) comp1 — 4-texel footprint (i0,j1),(i1,j1),(i1,j0),
+# (i0,j0) CLAMP_TO_EDGE unfiltered; o=vec4(g0.x,g0.w,g1.x,g1.z) picks
+# raw texel channel bytes (UNORM identity); 'ftex_gath' underscore keeps
+# 'ftexg' (single-texel gather) from matching
+python3 $G --graphics-session ue_gpos_ftex_gath_1 1
 # line-list draw: topology=1, vertexCount=2; gfx_line_coverage mirrors the
 # RTL S_LN_* integer Bresenham (vxi>>>8 pixel coords, lerr=ldx-ldy) so the
 # 1-px line footprint is bit-exact; fs_vcol keeps flat vertex-0 colour
