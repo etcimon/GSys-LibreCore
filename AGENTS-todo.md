@@ -18512,6 +18512,23 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   bit-exact; `deriv`/`grad`/`dtest` hex byte-identical.  Extends the
   derivative frontier to multi-varying + vec2-varying + FS-scalar
   amplification; fs_demote_deriv and texture-sampling oracles remain.
+- [x] **CLOSED — demote + helper-lane derivatives (`ue_gpos_demdrv_1`):**
+  first helper-invocation derivative session — `fs_demote_deriv.spv`
+  demotes odd-x lanes (`int(FragCoord.x)&1==1`) to helpers that emit no
+  colour but STILL feed quad derivatives (Vulkan helper rules keep
+  Function/Private storage live), then computes
+  `v=((fragx*0.5)+(fragy*0.25))+vcol.b` through a Function-storage local
+  and emits `(dFdxFine(v), v, vcol.g, 1)`.  Reuses the fullscreen
+  `DERIV_POS`+`DERIV_COLS` is_gradlike layout (vs_pos3/vcol, stride 24).
+  Oracle `gfx_demdrv_pixels` interpolates vcol via `gfx_grad_pixels`,
+  computes `v` for EVERY covered pixel (helpers included) as the exact
+  f32 FMul/FAdd chain, then emits only even-x survivors with
+  `dFdxFine(v)=v[px+1]-v[px]`; odd-x fall back to clr_w.  PASS
+  `g1=4096 g2=4096 ulp=0 XF_FAULTS 0` on **vgtop (cycles=2119106) and
+  vgsys (cycles=2573154)** — all pixels bit-exact; `deriv2`/`deriv`/
+  `grad`/`dtest` hex byte-identical.  Validates the demote->helper->
+  quad-derivative path end-to-end; texture-sampling + SSBO-atomic
+  (atomic_frag) oracles remain the open graphics frontier.
 - [x] Instanced-draw session coverage (`c84531213`): `ue_gpos_inst_1`
   — `vs_inst` offsets clip-x by `0.4*gl_InstanceIndex-0.6`,
   `instanceCount=4`, `fs_flat` constant colour → union coverage over 4

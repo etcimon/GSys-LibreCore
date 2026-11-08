@@ -7057,6 +7057,36 @@ def gfx_deriv2_pixels(verts, uvs, cols4, vp, sc, cw, ch, front_ccw, cull):
     return out
 
 
+def gfx_demdrv_pixels(verts, cols, vp, sc, cw, ch, front_ccw, cull):
+    """fs_demote_deriv oracle: odd-x lanes demote to helpers (no write)
+    but still feed quad derivatives; even-x lanes survive and emit
+    (dFdxFine(v), v, vcol.g, 1).  v = ((fragx*0.5)+(fragy*0.25))+vcol.b
+    evaluated as the exact f32 FMul/FAdd chain (fragx=px+0.5,
+    fragy=py+0.5).  dFdxFine for an even-x lane is the x-pair
+    v[px+1]-v[px] (lane|1 - lane&~1) — the demoted odd-x neighbour's v
+    still counts, so v is computed for EVERY covered pixel first.
+    Only even-x (px&1==0) pixels appear in the result; odd-x fall back
+    to clr_w.  -> {(px,py): packed RGBA8 word}."""
+    vc = gfx_grad_pixels(verts, cols, vp, sc, cw, ch, front_ccw, cull)
+    vmap = {}
+    for (px, py), col in vc.items():
+        fx = _f32(px + 0.5)
+        fy = _f32(py + 0.5)
+        _t = _f32(_f32(fx * 0.5) + _f32(fy * 0.25))
+        vmap[(px, py)] = _f32(_t + col[2])          # + vcol.b
+    out = {}
+    for (px, py), v in vmap.items():
+        if (px & 1):
+            continue                                # demoted helper
+        _nx = vmap.get((px + 1, py))
+        if _nx is None:
+            continue
+        _dxf = _f32(_nx - v)                        # dFdxFine x-pair
+        _col = vc[(px, py)]
+        out[(px, py)] = _u8pack((_dxf, v, _col[1], 1.0))
+    return out
+
+
 def load_shvec(name):
     """Parse sh_vectors/<name>.{hex,exp} into a compute-session vec.
 
@@ -10725,6 +10755,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # complete-quad requirement as is_deriv; handled by its own
         # vertex/oracle branches (not is_gradlike's 2-attr layout).
         is_deriv2 = 'gpos_deriv2_1' in gfx
+        # demdrv: fs_demote_deriv demotes odd-x lanes to helpers (they
+        # still feed quad derivatives) then computes v=fragx*0.5+
+        # fragy*0.25+vcol.b through a Function-storage local and emits
+        # (dFdxFine(v), v, vcol.g, 1).  Reuses the fullscreen
+        # pos+col layout (is_gradlike) with vs_pos3/vcol.
+        is_demdrv = 'gpos_demdrv_1' in gfx
+        is_gradlike = is_gradlike or is_demdrv
         # depth: D32_SFLOAT depth attachment + depthWriteEnable — the
         # vec2 pos format leaves vs_pos3's pos.z=0 so gl_Position.z=0 is
         # a constant depth; write-only (depthTestEnable=0) validates the
@@ -10837,6 +10874,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'fs_white.spv' if is_pts else
                           'fs_deriv.spv' if is_deriv else
                           'fs_deriv2.spv' if is_deriv2 else
+                          'fs_demote_deriv.spv' if is_demdrv else
                           'fs_color.spv' if is_fcolor else
                           'fs_vcol.spv' if is_blend or is_wide or is_line
                           or is_lstrip or is_polyln or is_polypnt
@@ -10946,8 +10984,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # the smooth vcol varying interpolates a real gradient.
             # deriv swaps TRI for a fullscreen triangle (clip coords
             # covering fb [0,64]^2) so all 2x2 quads are complete.
-            _gpos = (DERIV_POS if is_deriv else TRI)
-            _gcols = (DERIV_COLS if is_deriv else GRAD_COLS)
+            _gpos = (DERIV_POS if is_deriv or is_demdrv else TRI)
+            _gcols = (DERIV_COLS if is_deriv or is_demdrv else GRAD_COLS)
             for (_vx, _vy, _vz, _vw), _gc in zip(_gpos, _gcols):
                 vb_words += [f32b(_vx), f32b(_vy)]
                 vb_words += [f32b(c) for c in _gc]
@@ -11017,8 +11055,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     [TRI[_i], TRI[_i]], VP, SC, CW, CH)
         else:
             cov = gfx_tri_coverage(DERIV_POS if is_deriv or is_deriv2
-                                   else TRI, VP, SC, CW, CH,
-                                   front_ccw=1, cull=2)
+                                   or is_demdrv else TRI,
+                                   VP, SC, CW, CH, front_ccw=1, cull=2)
         if is_blend:
             # clear (0.2,0.2,0.2,1); out = src*0.75 + dst*0.25 ->
             # r=0.8->204, g=b=0.05->13, a=0.8125->207 (all off the
@@ -11121,6 +11159,14 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # fwidth(vuv)*8 / dFdx(vc.r)*4+0.5 -> packed word.
             _gp = gfx_deriv2_pixels(DERIV_POS, DERIV2_UV, DERIV2_C,
                                      VP, SC, CW, CH, 1, 2)
+            exp_img = [_gp.get((w % CW, w // CW), clr_w)
+                       for w in range(CW * CH)]
+        elif is_demdrv:
+            # demote-derivative oracle: odd-x lanes are helpers (no
+            # write -> clr_w) but feed dFdxFine; even-x lanes emit
+            # (dFdxFine(v), v, vcol.g, 1).
+            _gp = gfx_demdrv_pixels(DERIV_POS, DERIV_COLS, VP, SC, CW, CH,
+                                    1, 2)
             exp_img = [_gp.get((w % CW, w // CW), clr_w)
                        for w in range(CW * CH)]
         elif is_grad or is_fcolor:
