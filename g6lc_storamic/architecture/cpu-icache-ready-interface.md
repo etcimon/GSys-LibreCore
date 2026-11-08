@@ -115,28 +115,80 @@ The icache side has already been iteratively de-looped (`I4xj` cut
 `vaddr_d→cl_index→cl_hit→dreq_ready_o` fight). The remaining loop is the
 **frontend kill/bp feedback edge** — the next layer out.
 
+## Correction — the `bp_fire`/`kill_s2` edge is already cut (I4xj)
+
+`g6lc_icache.sv:502-509` shows the response-valid no longer depends on
+`kill_s2`/`bp_fire`:
+
+```
+// I4xj: do not gate refill return on bp_fire (kill_s2); that creates
+// a combinational loop through the frontend branch predictor.
+// bp_pend_q / same_win already drops fall-through returns after a
+// taken branch. Cancel only on architectural kills (flush/misp/replay).
+if (mem_rtrn_vld_i && ... && !(dreq_i.kill_s1 || flush_d))
+  dreq_o.valid = 1'b1;
+```
+
+READ-state `dreq_o.valid = ~dreq_i.kill_s1` (line 500) likewise uses
+`kill_s1` only. Since `kill_s1 = kill_s1(is_mispredict, flush_i,
+replay_q)` is register-broken from the response, **`dreq_o.valid` does
+not comb-depend on `bp_fire`/`kill_s2` anymore.** The frontend-side
+`icache_take→…→bp_fire→kill_s2→icache_dreq_o.kill_*` path traced above
+is therefore *not* the live cycle for the `dreq_o.valid` identity.
+
+The flagged `dreq_o[365]` (= `valid`, new MSB) must loop through the
+icache **internal** comb cone instead — the same cone the authors have
+been iteratively cutting:
+
+- `vaddr_d = (dreq_ready_o & dreq_i.req) ? dreq_i.vaddr : vaddr_q`
+  (`g6lc_icache.sv:198`) — comb next-address
+- `cl_index/cl_hit` tag compare → `dreq_ready_o` (accept) and
+  `dreq_o.valid`/`data` qualify
+- documented prior cuts: `I4xj` (`cl_hit→ready`), `U3` (WayPred
+  registered `cl_index_q` to kill a `way_pred→match→ready→vaddr_d`
+  DIDNOTCONVERGE, lines 551-563)
+
+So the remaining identity is the **next layer of the same
+request→`vaddr_d`/`cl_hit`/`ready`→response handshake**, where the
+frontend's request `vaddr`/`req`/`kill_s1` (or the response `data`)
+feeds back into `vaddr_d`/`cl_index`/`cl_hit`. This is the established
+I4x/I4xj/U3 iterative de-looping methodology — one carefully-reasoned
+edge at a time with formal/sim check — not a single interface fix.
+
 ## Break-edge candidates (ranked by blast radius)
 
-1. **Register `icache_dreq_i.valid` → `icache_resp_valid_q`** feeding
-   `icache_take`/realigner. Cleanest single cut, +1 cycle response
-   latency. *Risk*: `dreq_o.valid` must be level-held (not a same-cycle
-   pulse) until taken or the delayed capture misses it; and the
-   `want_*`/`kill_drop` ownership block (`frontend.sv:998-1050`) matches
-   on comb `icache_dreq_i.valid|token|vaddr` — it must move to the
-   registered view consistently or token/hart/window ownership desyncs.
-2. **Register `bp_fire`/`kill_s2` before `icache_dreq_o.kill_*`** — cuts
-   the feedback edge but delays in-flight cancellation by a cycle;
-   interacts with FTQ `cf_hold_q` (frontend.sv:832-845) and `want_*`
-   re-arm under `kill_s2` (frontend.sv:1013).
-3. **Register inside `g6lc_icache`** (`dreq_o.valid`/`data`/`ready`) —
-   uniform +1-cycle I$ latency for *all* clients; largest functional
-   blast radius, least attractive.
+Revised candidates now that the `bp_fire`/`kill_s2` edge is known-cut —
+the work is **icache-internal de-looping**, matching the I4x/I4xj/U3
+methodology (register the earliest safe point in the comb cone, prove
+with the forked diagnostic + fetch sim):
 
-None is a blind edit: each changes fetch/kill timing and must be checked
-against `icache_take`, FTQ `cf_hold_q`, `redirect_*`, `leftover_*`, and
-the `want_*` ownership FSM, then re-run the forked diagnostic plus a
-fetch-directed sim. Recommend option 1 with the `want_*` block migrated
-to the registered view as the first experiment.
+1. **Register `vaddr_d → vaddr_q` boundary for the accept path** — the
+   `dreq_ready_o & dreq_i.req` term in `vaddr_d`/`cl_offset_d` is the
+   documented comb recurrence (`g6lc_icache.sv:198,236,245`). Check
+   whether the *response* side (`cl_hit→dreq_o.valid/data`) can be made
+   depend only on `vaddr_q`/`cl_index_q` (already registered for WayPred)
+   rather than `vaddr_d`, so the response stops comb-depending on the
+   same-cycle accept.
+2. **Qualify `dreq_o.valid`/`data` off `cl_hit_q`-style registered hit**
+   — mirror the `U3` move that registered `cl_index_q` for WayPred
+   (lines 551-563): if hit-detect for the *response* uses a registered
+   index/tag comparison, the `cl_hit→valid` edge becomes
+   register-broken. Must preserve same-cycle hit latency or accept the
+   documented bubble.
+3. **Confirm the exact live edge first** — run the forked diagnostic and
+   read Verilator's full example path for `dreq_o[365]`/`dreq_o[364]`
+   (valid/data) to see *which* cone member (`vaddr_d`, `cl_hit`,
+   `dreq_ready_o`, `state_q`, `kill_s1`) actually closes the cycle before
+   choosing 1 vs 2. The `__Vdfg`/cone dump in the local
+   `dbg_fields0_wsl.log` already has the path; it was truncated in this
+   analysis and should be re-extracted.
+
+None is a blind edit: each is inside the most-de-looped block in the
+core and must preserve fetch correctness (hit latency, kill/replay,
+WayPred, flush). Recommend step 3 — extract the precise closing edge
+from the forked cone dump — then implement the matching register, verify
+UNOPTFLAT count drops on `tb_g6lc_storamic_cpu_origin` (both
+`OriginEnabled`), and run a fetch-directed sim before keeping.
 
 ## What was changed (for the record)
 
