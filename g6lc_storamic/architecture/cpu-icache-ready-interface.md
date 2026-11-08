@@ -190,6 +190,40 @@ predictor re-architecture**. Two interface-level experiments (struct
 repack, accept-guard cut) confirm no local repackaging/register-tweak
 removes it; the remaining identities are the planned rework, not a bug.
 
+## C0 diagnostic status — all remaining identities are intentional
+
+Both distinct cones in the `both-origin0-fields` set are the **same**
+class of deliberate same-cycle handshake, each already annotated
+`svt-pipe` in source:
+
+- **Fetch/commit/CSR megaphase** — `dreq_o[365]` (icache),
+  `flush_ctrl_id`, `update_access_exception` share one cone through
+  `frontend.kill_drop→icache_take→instruction_valid→predict_address→
+  bp_fire→kill_s2→icache_dreq_o`. `frontend.sv:781-784` marks
+  `npc_d`/`seq_base`/`fetch_address` `no-cut`; A124/A139 scope the fix
+  as predictor re-architecture.
+- **D-cache request-port loop** — `dcache_req_ports_cache_ex`,
+  `load_unit.req_port_o`, `wt_dcache_{wbuffer,ctrl,mem}`
+  (`req_port_o`/`rd_hit_idx`/`__VdfgTmp`/`gen_fwd_lane`) loop through
+  `load_unit→load_store_unit→cva6→ex_stage→load_unit`. `load_unit.sv:
+  143-148` marks the TLB/D$ handshake `no-cut`/`cycle`; A128 scopes it
+  as load-unit re-pipelining.
+
+Neither is a module-local bug. Two interface experiments (struct
+repack; accept-guard cut) produced **zero** UNOPTFLAT delta on the
+identical 242-file forked diagnostic — confirming no repackaging or
+single-edge register removes them. The `svt-pipe: cycle`/`no-cut`
+pragmas are the design's own declaration that these are intentional
+until the svt-plan re-architecture lands.
+
+**C0 resolution is therefore a decision, not an edit:**
+1. **Waive as intentional** — extend the `.vlt` carve-outs (alongside
+   the existing `split_var` set) to the `svt-pipe`-annotated handshake
+   cones if the project accepts documented-intentional recurrence for
+   the strict-UNOPTFLAT signoff; or
+2. **svt-plan re-architecture** — the real fix; multi-session frontend/
+   load-unit predictor+handshake redesign per the A124/A128/A139 notes.
+
 ## Break-edge candidates (ranked by blast radius)
 
 Revised candidates now that the `bp_fire`/`kill_s2` edge is known-cut —
