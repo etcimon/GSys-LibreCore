@@ -10820,7 +10820,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # wins blue.  'dbnd' is a prefix of 'dbndoff' -> guard.
         is_dbndoff = 'dbndoff' in gfx
         is_dbnd    = 'dbnd' in gfx and not is_dbndoff
-        is_dpair   = (_dp_key is not None) or is_dbnd or is_dbndoff
+        # dbias: constant-depth tris -> slope term skipped (slopeFactor
+        # =0) -> bias = constantFactor*r = 0.25*1.0f = 0.25f added to z.
+        # dtest-like LESS pair so the biased depth readback (z+0.25)
+        # proves the bias reached the depth buffer.
+        is_dbias   = 'dbias' in gfx
+        is_dpair   = ((_dp_key is not None) or is_dbnd or is_dbndoff
+                      or is_dbias)
         is_depth   = is_dpair or 'depth' in gfx
         is_dne     = _dp_key == 'dne'       # NOTEQUAL-on rejects all
         is_dnever  = _dp_key == 'dnever'    # NEVER-on rejects all
@@ -10828,6 +10834,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             (dp_op, dp_clear, dp_z_near, dp_z_far,
              dp_far_first, dp_red_wins) = _DPQ[_dp_key]
             dp_test_on = not _dp_key.endswith('off')
+        elif is_dbias:
+            (dp_op, dp_clear, dp_z_near, dp_z_far,
+             dp_far_first, dp_red_wins) = (1, 1.0, 0.25, 0.75, False,
+                                           True)
+            dp_test_on = True
         elif is_dbnd or is_dbndoff:
             (dp_op, dp_clear, dp_z_near, dp_z_far,
              dp_far_first, dp_red_wins) = (0, 1.0, 0.25, 0.75, False,
@@ -11302,6 +11313,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # clear depth everywhere.  Write-only is_depth stores 0.0
         # covered / 0.5f.
         _dp_win = dp_z_near if dp_red_wins else dp_z_far
+        if is_dbias:
+            # constantFactor*r (r=1.0f D32) + 0 slope, unclamped ->
+            # frag depth = z + 0.25f (exact in f32 and any fixed width)
+            _dp_win = _f32(_f32(_dp_win) + _f32(0.25))
         _dp_rejall = is_dne or is_dnever
         exp_depth = ([(f32b(_dp_win) if (w % CW, w // CW) in cov
                        else f32b(dp_clear))
@@ -11596,9 +11611,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         polygonMode=2 if is_polypnt else
                         1 if is_polyln else 0,
                         cullMode=0 if is_pts else 2, frontFace=0,
-                        depthBiasEnable=0,
-                        depthBiasConstantFactor=f32b(0.0),
-                        depthBiasClamp=f32b(0.0),
+                        depthBiasEnable=1 if is_dbias else 0,
+                        depthBiasConstantFactor=f32b(0.25 if is_dbias
+                                                     else 0.0),
+                        depthBiasClamp=f32b(1.0 if is_dbias else 0.0),
                         depthBiasSlopeFactor=f32b(0.0),
                         lineWidth=f32b(1.0)),
                     pMultisampleState=None,

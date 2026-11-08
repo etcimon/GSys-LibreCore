@@ -18616,6 +18616,20 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   `g1=8192 g2=8192 ulp=0 XF_FAULTS 0` on **vgtop (cycles~806-816k)
   and vgsys (cycles~1142-1156k)**.  depthClamp, stencil, depthBias
   remain open.
+- [x] **CLOSED — depth bias (`ue_gpos_dbias_1`):** first
+  `depthBiasEnable` — dtest-like LESS pair (near `z=0.25` red, far
+  `z=0.75` blue, near-first) with `depthBiasConstantFactor=0.25`,
+  `slopeFactor=0`, `clamp=1.0`.  Constant-depth tris skip the slope
+  term (`depth_bias_slope==0` -> `S_DB1`), so bias = `constFactor*r`
+  = `0.25*1.0f` = `0.25f` added to z — exact in f32 and any fixed
+  width.  Biased depths near `0.5`/far `1.0`; near still passes LESS
+  vs clear `1.0` -> red wins, depth readback `0.5f` (vs `0.25f`
+  unbiased) proves the bias reached the buffer.  `is_dbias` folds
+  into `is_dpair` with manual `dp_*` params + a `z+0.25f` oracle
+  offset; bias fields parameterized (non-dbias sessions byte-
+  identical).  PASS `g1=8192 g2=8192 ulp=0 XF_FAULTS 0` on **vgtop
+  (cycles=823336) and vgsys (cycles=1161034)**.  depthClamp, stencil
+  remain open.
 - [x] Instanced-draw session coverage (`c84531213`): `ue_gpos_inst_1`
   — `vs_inst` offsets clip-x by `0.4*gl_InstanceIndex-0.6`,
   `instanceCount=4`, `fs_flat` constant colour → union coverage over 4
