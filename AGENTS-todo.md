@@ -18724,7 +18724,10 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   (`vlt-8c69f`) and ran `ue_gpos_bfacsat_1`/`bfaccc_1`/`bfac1mcc_1` —
   all PASS bit-exact (ulp=0, 17016 checks each); `bfacdst`/`bfacal`/
   `bfzero`/`bopadd` still PASS (factors 0-9 unchanged, blend-op path
-  unaffected).  (`67f8310f2` oracle+vectors, `d933e75bd` enum fix)
+  unaffected).  Rebuilt `tb_g6lc_apu_vgsys` (vqwalk+vgtop+apmem) and
+  re-ran the 3 new sessions + `bfacdst`/`bfacal` — all PASS bit-exact
+  (17173 checks each).  (`67f8310f2` oracle+vectors, `d933e75bd` enum
+  fix)
   **(5) SPIR-V toolchain** — no `spirv-as`/glslang, blocks MRT/
   noperspective/custom shaders.  Then CTS-1→CTS-2 caselists through
   the guest harness.  All directed-RTL session evidence only — no
