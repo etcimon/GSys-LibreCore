@@ -155,6 +155,41 @@ feeds back into `vaddr_d`/`cl_index`/`cl_hit`. This is the established
 I4x/I4xj/U3 iterative de-looping methodology — one carefully-reasoned
 edge at a time with formal/sim check — not a single interface fix.
 
+## Second experiment — `kill_s2` accept-guard removal (also negative)
+
+Extracted the exact closing edge from the CPU46 `icache-origin0-fields`
+cone dump, then tried the I4xj-consistent fix: `dreq_ready_o`'s READ
+hit-accept guard (`g6lc_icache.sv`, was `~kill_s1 & ~kill_s2`) read
+`dreq_i.kill_s2`, and `kill_s2 = kill_s1 | bp_fire` comb-depends on the
+response. Removed `~dreq_i.kill_s2` (kept `~kill_s1`), re-ran the forked
+diagnostic on the identical 242-file closure.
+
+**Result: zero change.** `both-origin0-fields` stayed at 9 identities,
+byte-identical set except the ready-split renumber `dreq_o[366]→[365]`.
+The `dreq_o.valid` cone closes through `g6lc_icache.sv` `p_response_valid`
+(the `~kill_s1 & (cl_hit|exception) & …` condition), *not* through the
+ready-accept `kill_s2` edge that was cut. Reverted — it added accept-
+behaviour risk with no diagnostic benefit.
+
+## Why `dreq_o[365]`(=valid) is flagged despite a clean cone
+
+`dreq_o.valid`'s condition reads only registered-state cones
+(`cl_hit`←registered SRAM tag/vld + `cl_tag_d`←`areq_i`←`vaddr_q`;
+`way_pred_match`/`force_all_ways_q`/`inv_q`/`cache_en_q`/`flush_d` all
+registered; `~dreq_i.kill_s1` register-broken). It does **not** comb-read
+`dreq_i.req`/`vaddr`/`kill_s2`. Yet Verilator reports it in a cycle.
+
+Conclusion: `dreq_o[365]` is a **representative bit of the shared
+`dreq_o`/`dreq_ready_o` combinational blob**, not a literally-cyclic
+`valid`. The true cycle is the **frontend↔icache handshake megaphase** —
+`dreq_ready_o`/`icache_ready_i`/`if_ready`/`demand_fire`/`icache_accept`
+plus the `kill_s2`/`bp_fire`/`predict_address`/`fetch_address` predict
+loop — which `frontend.sv`'s `svt-pipe: no-cut` pragmas and the A124/A139
+notes already mark as deliberately unpipelined pending the **svt-plan
+predictor re-architecture**. Two interface-level experiments (struct
+repack, accept-guard cut) confirm no local repackaging/register-tweak
+removes it; the remaining identities are the planned rework, not a bug.
+
 ## Break-edge candidates (ranked by blast radius)
 
 Revised candidates now that the `bp_fire`/`kill_s2` edge is known-cut —
