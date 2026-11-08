@@ -18674,9 +18674,12 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   `boprsub`/`bopmin`/`bopmax`, ONE/ONE factors; oracle models the
   UNORM8 dst roundtrip `f32(u8)*0x3B808081` + fpnew MUL/ADD/SUB/MM
   sequence + bit-exact `gfx_grad_pixels` vcol); **blendFactor
-  operand-selection** (10 sessions `bfacdst`/`bfacsrc`/`bfacdc`/`bfacsc`/
-  `bfomsc`/`bfacal`/`bfomdc`/`bfomsa`/`bfomda`/`bfzero` — SRC/DST
-  color+alpha, ZERO, ONE, and ONE_MINUS on all four bases through
+  operand-selection** (13 sessions `bfacdst`/`bfacsrc`/`bfacdc`/`bfacsc`/
+  `bfomsc`/`bfacal`/`bfomdc`/`bfomsa`/`bfomda`/`bfzero` +
+  `bfacsat`/`bfaccc`/`bfac1mcc` — SRC/DST
+  colour+alpha, ZERO, ONE, and ONE_MINUS on all four bases, plus
+  SRC_ALPHA_SATURATE (colour-only) and CONSTANT_COLOR/ALPHA + 1M_
+  through emitted `blendConstants`, all via
   `f_fbase`+`f_fminus`,
   dst still UNORM8 roundtrip); smooth/perspective/
   derivative/demote interpolation; primitives, instancing, UBO,
@@ -18696,17 +18699,20 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   **(3) stencil** — needs a stencil attachment + op oracle;
   ~~depthClamp~~ DONE (`dclamp`/`dclampoff` above);
   **(4) MSAA, occlusion/timestamp queries, secondary
-  CBs/subpasses, logicOp+blend combos, non-UNORM8 logicOp,
-  blend-factor SRC_ALPHA_SATURATE/CONSTANT_* arms.  SATURATE note:
-  `SRC_ALPHA_SATURATE`(10) is COLOR-only in Vulkan — an earlier
-  `bfasat` attempt wrongly set it on srcAlphaBlendFactor too (illegal;
-  RTL `f_fbase` default arm reads `src_q[3]`/`omd3_q` per component,
-  alpha c==3 -> 1.0).  Fix = emit SATURATE on the color fields but a
-  valid factor (e.g. ONE) on the alpha fields, and model the alpha
-  channel with that factor, not saturate.  CONSTANT_* need
-  `blendConstants` as f32 bit-patterns (serializer is u32) + the
-  per-component `blend_const[c]`/`[3]` mapping re-checked — early
-  attempts diverged)**;
+  CBs/subpasses, logicOp+blend combos, non-UNORM8 logicOp**;
+  ~~blend-factor SRC_ALPHA_SATURATE/CONSTANT_* arms~~ **DONE** —
+  `bfac` now carries independent colour+alpha factor pairs
+  (`bfac_(sf_c,df_c,sf_a,df_a)`); `bfacsat` puts SATURATE(10) on the
+  colour fields and SRC_ALPHA/1M_SRC_ALPHA on alpha (SATURATE is
+  colour-only — an earlier `bfasat` attempt wrongly set it on
+  srcAlphaBlendFactor too); `bfaccc`/`bfac1mcc` put
+  CONSTANT_COLOR/ALPHA + 1M_ with `blendConstants=_BLC`
+  (0.875/0.625/0.375/0.125, f32 k/8) emitted as `f32b()` bit-words;
+  oracle `_fbv` selects the colour vs alpha factor per channel and
+  reads `_BLC[c]`/`[3]` for CONSTANT_*.  Verified: all 10 prior bfac
+  sessions regen byte-identical under WSL python3.12; the 3 new
+  sessions' covered pixels hand-checked bit-exact on all four
+  channels; vectors regenerated + wired into run-apu-vgtop/vgsys;
   **(5) SPIR-V toolchain** — no `spirv-as`/glslang, blocks MRT/
   noperspective/custom shaders.  Then CTS-1→CTS-2 caselists through
   the guest harness.  All directed-RTL session evidence only — no

@@ -10742,19 +10742,29 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 bop_op = _op
                 break
         is_bop = bop_op is not None
-        # blendFactor: is_bfac + bfac_(sf,df) select the VkBlendFactor pair
-        # (op stays ADD).  Exercises f_fbase operand selection — DST_COLOR
-        # uses the dequantized dst_q in the multiply, SRC_COLOR the src.
+        # blendFactor: is_bfac + bfac_(sf_c,df_c,sf_a,df_a) select the
+        # VkBlendFactor colour and alpha pairs independently (op stays
+        # ADD).  Colour and alpha factors are separate VkBlendFactor
+        # fields: SRC_ALPHA_SATURATE(10) is colour-only and the
+        # CONSTANT_*(11-14) factors read blendConstants, so a single
+        # shared (sf,df) pair cannot express them.  Existing tokens keep
+        # sf_a=sf_c / df_a=df_c; _BLC feeds both the emitted
+        # blendConstants[4] words and the oracle's constant operands.
+        _BLC = (0.875, 0.625, 0.375, 0.125)   # f32-exact k/8, distinct from COL/_dst
         bfac = None
-        for _tok, _sf, _df in (('bfacdst', 4, 1), ('bfacsrc', 2, 1),
-                               ('bfacdc', 4, 4), ('bfacsc', 2, 2),
-                               ('bfomsc', 3, 1), ('bfacal', 6, 8),
-                               ('bfomdc', 5, 1), ('bfomsa', 7, 1),
-                               ('bfomda', 9, 1), ('bfzero', 0, 1)):
+        for _tok, _sfc, _dfc, _sfa, _dfa in (
+                ('bfacdst', 4, 1, 4, 1), ('bfacsrc', 2, 1, 2, 1),
+                ('bfacdc', 4, 4, 4, 4), ('bfacsc', 2, 2, 2, 2),
+                ('bfomsc', 3, 1, 3, 1), ('bfacal', 6, 8, 6, 8),
+                ('bfomdc', 5, 1, 5, 1), ('bfomsa', 7, 1, 7, 1),
+                ('bfomda', 9, 1, 9, 1), ('bfzero', 0, 1, 0, 1),
+                ('bfacsat', 10, 1, 6, 7), ('bfaccc', 11, 1, 13, 1),
+                ('bfac1mcc', 12, 1, 14, 1)):
             if _tok in gfx:
-                bfac = (_sf, _df)
+                bfac = (_sfc, _dfc, _sfa, _dfa)
                 break
         is_bfac = bfac is not None
+        is_bfac_const = is_bfac and any(f in (11, 12, 13, 14) for f in bfac)
         is_wide = 'vbwide' in gfx
         # kill: fs_kill discards on a FragCoord 8x8 checkerboard — the
         # helper-lane path; vs_pos3 keeps vcol constant so tri_w holds
@@ -11405,7 +11415,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             _df = [_f32(cl_f32_u8(f32b(_dst[c])) * _K255)
                    for c in range(4)]
             _gp = gfx_grad_pixels(TRI, [COL] * 3, VP, SC, CW, CH, 1, 2)
-            _sf, _dfa = bfac
+            _sfc, _dfc, _sfa, _dfa = bfac
             def _fbv(f, c, sv, dv):
                 if f == 0:
                     b = 0.0
@@ -11419,8 +11429,14 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     b = sv[3]
                 elif f in (8, 9):
                     b = dv[3]
-                else:
+                elif f == 10:
+                    # SRC_ALPHA_SATURATE: colour channels only —
+                    # min(src_alpha, 1 - dst_alpha); never an alpha factor.
                     b = 1.0 if c == 3 else min(sv[3], _f32(1.0 - dv[3]))
+                else:
+                    # f in 11..14: CONSTANT_COLOR/A and 1M_ variants read
+                    # blendConstants[c] (c==3 -> the alpha constant).
+                    b = _f32(_BLC[c])
                 return _f32(1.0 - b) if f in (3, 5, 7, 9, 12, 14) else b
             exp_img = []
             for w in range(CW * CH):
@@ -11431,8 +11447,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 else:
                     _rb = []
                     for c in range(4):
+                        # channels 0..2 blend with the colour factors,
+                        # channel 3 (alpha) with the alpha factors.
+                        _sf = _sfc if c < 3 else _sfa
+                        _dfac = _dfc if c < 3 else _dfa
                         _sfv = _fbv(_sf, c, _v, _df)
-                        _dfv = _fbv(_dfa, c, _v, _df)
+                        _dfv = _fbv(_dfac, c, _v, _df)
                         _bm1 = _f32(_v[c] * _sfv)
                         _bm2 = _f32(_df[c] * _dfv)
                         _rb.append(cl_f32_u8(f32b(_f32(_bm1 + _bm2))))
@@ -11821,13 +11841,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                dstColorBlendFactor=(bfac[1] if is_bfac
                                                     else 1 if is_bop else 7),
                                colorBlendOp=bop_op if is_bop else 0,
-                               srcAlphaBlendFactor=(bfac[0] if is_bfac
+                               srcAlphaBlendFactor=(bfac[2] if is_bfac
                                                     else 1 if is_bop else 6),
-                               dstAlphaBlendFactor=(bfac[1] if is_bfac
+                               dstAlphaBlendFactor=(bfac[3] if is_bfac
                                                     else 1 if is_bop else 7),
                                alphaBlendOp=bop_op if is_bop else 0,
                                colorWriteMask=0xF)],
-                           blendConstants=[0, 0, 0, 0])
+                           blendConstants=([f32b(_BLC[c]) for c in range(4)]
+                                           if is_bfac_const
+                                           else [0, 0, 0, 0]))
                         if is_blend or is_lop or is_bop or is_bfac
                         else None),
                     pDynamicState=(
