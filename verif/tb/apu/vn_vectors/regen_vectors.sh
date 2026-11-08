@@ -243,6 +243,10 @@ python3 $G --graphics-session ue_gpos_ftexct_1 1
 # but format=43 (vkfmt->device id 3, ATTR srgb); W_TXD decodes RGB via
 # APU_SRGB_TO_LIN, alpha stays UNORM, W_TXG0/G1 *1/65535 -> UNORM8 store
 python3 $G --graphics-session ue_gpos_ftexs_1 1
+# fragment LINEAR + RGBA8_SRGB: the common real-world sRGB config — each
+# bilinear corner decodes sRGB->linear (RGB via TO_LIN16, alpha UNORM)
+# before the wu*wv accumulate; 'ftexls' has 'ftexl' (LINEAR) not 'ftexs'
+python3 $G --graphics-session ue_gpos_ftexls_1 1
 # line-list draw: topology=1, vertexCount=2; gfx_line_coverage mirrors the
 # RTL S_LN_* integer Bresenham (vxi>>>8 pixel coords, lerr=ldx-ldy) so the
 # 1-px line footprint is bit-exact; fs_vcol keeps flat vertex-0 colour

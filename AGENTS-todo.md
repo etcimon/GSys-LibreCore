@@ -18860,7 +18860,15 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   `srgb_lut.TO_LIN16` + `_f32(lin16*K)` + `cl_f32_u8(_f32bits)`.  Verified
   PASS bit-exact (ulp=0) vgtop (17123) + vgsys (17291); `.exp` differs
   from `ftexn` (non-degenerate); all texture sessions regen byte-
-  identical.  Remaining W_TX*: LOD/mip walk (`fs_mip`), projective
+  identical.  **sRGB+LINEAR — DONE** (`ue_gpos_ftexls_1`; `is_ftexls`,
+  the common real-world sRGB config): 'ftexls' contains 'ftexl' (LINEAR)
+  not 'ftexs', so the is_ftexl bilinear branch fires with per-corner
+  sRGB->linear decode (`TO_LIN16` for RGB c<3, `*0x101` for alpha)
+  before the `wu*wv` accumulate — decode-before-filter ordering.  Same
+  fmt=43 image/view.  Verified PASS bit-exact (ulp=0) vgtop (17123) +
+  vgsys (17291); `.exp` differs from `ftexl`/`ftexs`; `ftexl`/`ftexs`
+  regen byte-identical (decode gated on is_ftexls).  Remaining W_TX*:
+  LOD/mip walk (`fs_mip`), projective
   (`fs_tex_proj`),
   explicit-LOD (`fs_tex_qlod`), shadow/compare (`fs_tex_shadow`),
   gather-offset, sRGB, non-UNORM8 fmts; `fs_tex_proj`/`fs_tex_qlod`/

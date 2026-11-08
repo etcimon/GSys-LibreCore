@@ -11006,6 +11006,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # sRGB decode LUT (RGB only; alpha stays UNORM) -> u16 linear ->
         # *1/65535 fp32 -> UNORM8 store.
         is_ftexs = 'ftexs' in gfx
+        # ftexls: LINEAR + RGBA8_SRGB — the common real-world sRGB config;
+        # each bilinear corner decodes sRGB->linear (RGB) before the
+        # wu*wv weight accumulate, alpha stays UNORM.  'ftexls' contains
+        # 'ftexl' (LINEAR) but NOT 'ftexs', so is_ftexl drives the branch.
+        is_ftexls = 'ftexls' in gfx
         # is_ftexm gates the shared multi-texel texture setup (extent,
         # per-vertex uv, texel payload) for NEAREST/LINEAR/REPEAT/MIRROR.
         is_ftexm = (is_ftexn or is_ftexl or is_ftexr or is_ftexmir
@@ -11640,8 +11645,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     _tw = TEX_TEXELS[_cv * TEX_W + _cu]
                     _gw = _wu * _wv
                     for _c in range(4):
-                        _acc[_c] += _gw * (((_tw >> (8 * _c)) & 0xFF)
-                                           * 0x101)
+                        _tb = (_tw >> (8 * _c)) & 0xFF
+                        # sRGB (ftexls): RGB decode via TO_LIN16 before the
+                        # weight accumulate; alpha stays UNORM *0x101.
+                        _ch = (srgb_lut.TO_LIN16[_tb] if (_c < 3 and is_ftexls)
+                               else _tb * 0x101)
+                        _acc[_c] += _gw * _ch
                 _wb = []
                 for _c in range(4):
                     _rr = (0xFFFF if _acc[_c] + 0x8000 >= 0x100000000
@@ -12280,7 +12289,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     device=X['dev'],
                     pCreateInfo=st('VkImageCreateInfo',
                         flags=0, imageType=1,
-                        format=43 if is_ftexs else 37,
+                        format=43 if (is_ftexs or is_ftexls) else 37,
                         extent=st('VkExtent3D', width=TEX_W, height=TEX_H,
                                   depth=1),
                         mipLevels=1, arrayLayers=2 if is_ftexa else 1,
@@ -12297,7 +12306,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     pCreateInfo=st('VkImageViewCreateInfo',
                         flags=0, image=X['timg'],
                         viewType=5 if is_ftexa else 1,
-                        format=43 if is_ftexs else 37,
+                        format=43 if (is_ftexs or is_ftexls) else 37,
                         components=st('VkComponentMapping',
                                       r=0, g=0, b=0, a=0),
                         subresourceRange=st('VkImageSubresourceRange',
