@@ -18697,8 +18697,16 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   ~~depthClamp~~ DONE (`dclamp`/`dclampoff` above);
   **(4) MSAA, occlusion/timestamp queries, secondary
   CBs/subpasses, logicOp+blend combos, non-UNORM8 logicOp,
-  blend-factor SRC_ALPHA_SATURATE/CONSTANT_* arms (saturate +
-  constants need RTL re-check — early oracle attempts diverged)**;
+  blend-factor SRC_ALPHA_SATURATE/CONSTANT_* arms.  SATURATE note:
+  `SRC_ALPHA_SATURATE`(10) is COLOR-only in Vulkan — an earlier
+  `bfasat` attempt wrongly set it on srcAlphaBlendFactor too (illegal;
+  RTL `f_fbase` default arm reads `src_q[3]`/`omd3_q` per component,
+  alpha c==3 -> 1.0).  Fix = emit SATURATE on the color fields but a
+  valid factor (e.g. ONE) on the alpha fields, and model the alpha
+  channel with that factor, not saturate.  CONSTANT_* need
+  `blendConstants` as f32 bit-patterns (serializer is u32) + the
+  per-component `blend_const[c]`/`[3]` mapping re-checked — early
+  attempts diverged)**;
   **(5) SPIR-V toolchain** — no `spirv-as`/glslang, blocks MRT/
   noperspective/custom shaders.  Then CTS-1→CTS-2 caselists through
   the guest harness.  All directed-RTL session evidence only — no
