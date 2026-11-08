@@ -43,6 +43,45 @@ UNOPTFLAT, a *different* edge must be cut — e.g. registering `kill_s2`,
 `bp_fire`, `icache_take`, `predict_address`, or the icache response
 handshake — which is a behavioural/timing change, not repackaging.
 
+## The recurrence is intentional — frontend design contract
+
+`core/fetch_B/frontend.sv` already documents this loop as a **deliberate**
+un-pipelined fetch recurrence, not an accident:
+
+- `svt-pipe: no-cut on=npc_d / seq_base / fetch_address`
+  (`frontend.sv:781-784`) — pragmas *forbid* cutting exactly the
+  `npc_q → predictor → seq_base → npc_d` recurrence that feeds
+  `fetch_address`/`icache_dreq_o`.
+- `frontend.sv:776-780` (Re-pipelining contract, sv-timing A124):
+  "a register anywhere in it changes the redirect latency of every
+  prediction, i.e. the predictor architecture (next-line prediction with
+  late correction), **not a module-local stage**."
+- `frontend.sv:754-775` (`svt-plan` A139 block): the planned reshaping is
+  "early next-block prediction … compute direct targets and full provider
+  selection as a late correction" — a coordinated FTQ/realigner/queue/
+  predictor/controller change, explicitly noting "a data register alone
+  cannot implement recovery."
+
+Consequence for C0: the `kill_s2`/`bp_fire`/`icache_dreq` identities are the
+**fetch next-PC/handshake recurrence the design already scoped for the
+svt-plan predictor re-architecture**. They are not a module-local bug an
+interface split can remove. Resolution is therefore one of:
+
+1. **Waive as intentional** — treat the fetch-loop identities like the
+   existing `both-fields.vlt`/`both-fp.vlt` `split_var` carve-outs, if the
+   project accepts documented-intentional recurrence for signoff; or
+2. **svt-plan re-architecture** — the real fix, a multi-session predictor/
+   frontend redesign (next-line prediction + late correction), gated on its
+   own timing/verification plan; or
+3. **Module-local handshake register** — register *only* the icache
+   `valid`/`ready` handshake (not `npc_d`/`seq_base`/`fetch_address`, which
+   the `no-cut` pragmas protect) so `kill_s2`/`bp_fire` see a registered
+   response. This adds one fetch bubble on the response path and must be
+   checked against `icache_take`/FTQ `cf_hold_q` timing before adoption.
+
+Option 3 is the only *local* RTL experiment left; options 1-2 are
+decision/design work, not a quick edit.
+
 ## What was changed (for the record)
 
 `ready` moved out of `icache_drsp_t` onto a dedicated scalar
