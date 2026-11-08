@@ -10780,38 +10780,49 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # (z=0.75,blue); GREATER draws far first so the larger depth is
         # committed before the near tri tests it.  Each *_off twin is the
         # test-disabled control proving both tris rasterize.
-        is_dtest  = 'dtest' in gfx    # LESS, near-first, near wins
-        is_dtoff  = 'dtoff' in gfx    # LESS control, near-first, far wins
-        is_dgreat = 'dgreat' in gfx   # GREATER, far-first, far wins
-        is_dgtoff = 'dgtoff' in gfx   # GREATER control, far-first, near wins
-        # EQUAL/NOTEQUAL boundary ops.  deq/dne are substrings of their
-        # *_off twins so the "on" flags exclude the control token.
-        # EQUAL: near z=0.5 sits AT the 0.5 clear -> passes, far z=0.75
-        # fails -> red wins (control: far wins).  NOTEQUAL: BOTH tris at
-        # z=0.5=clear -> every fragment equals the buffer -> all reject
-        # -> empty image/depth (control: far wins).
-        is_deqoff = 'deqoff' in gfx
-        is_deq    = 'deq' in gfx and not is_deqoff
-        is_dneoff = 'dneoff' in gfx
-        is_dne    = 'dne' in gfx and not is_dneoff
-        is_dpair  = (is_dtest or is_dtoff or is_dgreat or is_dgtoff
-                     or is_deq or is_deqoff or is_dne or is_dneoff)
+        # Per-session compare parameters: (op, clear, z_near, z_far,
+        # far_first, red_wins).  z_near/z_far are the red/blue vertex
+        # depths; far_first draws the far(blue) tri before near(red);
+        # red_wins picks the covered-pixel colour/depth oracle.  Each
+        # *_off twin shares its on-twin's geometry and differs only in
+        # depthTestEnable + which tri wins (last-drawn overwrites).
+        # LESS/GREATER are the strict inequalities; EQUAL/NOTEQUAL the
+        # strict equalities; LEQUAL/GEQUAL put a frag AT the clear depth
+        # (the inclusive boundary the strict ops reject); ALWAYS/NEVER
+        # exercise the two decode extremes.  op is the VkCompareOp code.
+        _DPQ = {
+            'dneveroff': (0, 1.0, 0.25, 0.75, False, False),
+            'dalwoff':   (7, 1.0, 0.25, 0.75, False, False),
+            'dleqoff':   (3, 0.5, 0.5,  0.75, False, False),
+            'dgeqoff':   (6, 0.5, 0.25, 0.5,  True,  True),
+            'dgtoff':    (0, 0.0, 0.25, 0.75, True,  True),
+            'dgreat':    (4, 0.0, 0.25, 0.75, True,  False),
+            'deqoff':    (2, 0.5, 0.5,  0.75, False, False),
+            'dneoff':    (5, 0.5, 0.5,  0.5,  False, False),
+            'dnever':    (0, 1.0, 0.25, 0.75, False, False),
+            'dtest':     (1, 1.0, 0.25, 0.75, False, True),
+            'dtoff':     (0, 1.0, 0.25, 0.75, False, False),
+            'dgeq':      (6, 0.5, 0.25, 0.5,  True,  False),
+            'dleq':      (3, 0.5, 0.5,  0.75, False, True),
+            'dalw':      (7, 1.0, 0.25, 0.75, False, False),
+            'deq':       (2, 0.5, 0.5,  0.75, False, True),
+            'dne':       (5, 0.5, 0.5,  0.5,  False, False),
+        }
+        # longest token wins so '*off' controls beat their on-prefixes
+        # ('deq' is a prefix of 'deqoff', 'dnever' of 'dneveroff', and
+        # 'dne' would otherwise match every 'dnever*' session).
+        _dp_key = max((k for k in _DPQ if k in gfx), key=len, default=None)
+        is_dpair  = _dp_key is not None
         is_depth  = is_dpair or 'depth' in gfx
-        # derived pair parameters: GREATER needs a 0.0 clear (far 0.75>0
-        # passes) and far-first order; LESS keeps the 1.0 far plane.
-        # EQUAL/NOTEQUAL clear at 0.5 with near z=0.5 (the clear depth).
-        _is_eqn = is_deq or is_deqoff or is_dne or is_dneoff
-        dp_far_first = is_dgreat or is_dgtoff
-        dp_test_on   = is_dtest or is_dgreat or is_deq or is_dne
-        dp_op        = (4 if is_dgreat else 1 if is_dtest else
-                        2 if is_deq or is_deqoff else
-                        5 if is_dne or is_dneoff else 0)
-        dp_clear     = (0.5 if _is_eqn else
-                        0.0 if dp_far_first else 1.0)
-        dp_red_wins  = (is_dtest or is_dgtoff or is_deq)  # covered = red
-        dp_z_near    = 0.5 if _is_eqn else 0.25
-        dp_z_far     = (0.5 if is_dne or is_dneoff else
-                        0.75 if _is_eqn else 0.75)
+        is_dne    = _dp_key == 'dne'       # NOTEQUAL-on rejects all
+        is_dnever = _dp_key == 'dnever'    # NEVER-on rejects all
+        if is_dpair:
+            (dp_op, dp_clear, dp_z_near, dp_z_far,
+             dp_far_first, dp_red_wins) = _DPQ[_dp_key]
+            dp_test_on = not _dp_key.endswith('off')
+        else:
+            (dp_op, dp_clear, dp_z_near, dp_z_far,
+             dp_far_first, dp_red_wins, dp_test_on) = (0,) * 7
         # G3b-iii F8: drawind/drawindx issue the same triangle through
         # DrawIndirect/DrawIndexedIndirect — the operand sits at a
         # 4-mod-8 byte offset inside a dedicated INDIRECT buffer to
@@ -11244,10 +11255,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         _f32(_f32(_v[c] * 0.5) + _fx) for c in range(4))))
                 else:
                     exp_img.append(_u8pack(_v))
-        elif is_dne:
-            # NOTEQUAL test-on: both tris sit at z=0.5 == the 0.5 clear
-            # depth, so EVERY fragment fails frag!=buffer -> all rejected
-            # -> framebuffer keeps the clear colour everywhere.
+        elif is_dne or is_dnever:
+            # NOTEQUAL/NEVER test-on rejects every fragment (NOTEQUAL:
+            # both tris sit at z==clear; NEVER: unconditional) ->
+            # framebuffer keeps the clear colour everywhere.
             exp_img = [clr_w for _ in range(CW * CH)]
         else:
             exp_img = [out_w if (w % CW, w // CW) in cov and
@@ -11257,17 +11268,18 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                        else clr_w
                        for w in range(CW * CH)]
         # depth oracle: dpair covered px store the winning tri's depth —
-        # near/far z (0.25/0.75 for LESS/GREATER, 0.5/0.75 EQUAL,
-        # 0.5/0.5 NOTEQUAL-control).  Uncovered keeps the dp_clear value.
-        # is_dne (NOTEQUAL-on) rejects every fragment -> clear depth
-        # everywhere.  Write-only is_depth stores 0.0 covered / 0.5f.
+        # the session's z_near/z_far.  Uncovered keeps the dp_clear value.
+        # is_dne/is_dnever (NOTEQUAL/NEVER-on) reject every fragment ->
+        # clear depth everywhere.  Write-only is_depth stores 0.0
+        # covered / 0.5f.
         _dp_win = dp_z_near if dp_red_wins else dp_z_far
+        _dp_rejall = is_dne or is_dnever
         exp_depth = ([(f32b(_dp_win) if (w % CW, w // CW) in cov
                        else f32b(dp_clear))
                       for w in range(CW * CH)]
-                     if is_dpair and not is_dne else
+                     if is_dpair and not _dp_rejall else
                      [f32b(dp_clear) for _ in range(CW * CH)]
-                     if is_dne else
+                     if _dp_rejall else
                      [0x00000000 if (w % CW, w // CW) in cov
                       else 0x3F000000 for w in range(CW * CH)]
                      if is_depth else None)

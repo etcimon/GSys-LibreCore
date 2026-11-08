@@ -18456,6 +18456,26 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   (cycles~812-816k) and vgsys (cycles~1135-1156k)**; `dtest`/`dtoff`/
   `dgreat`/`dgtoff`/`depth_1` hex byte-identical.  LEQUAL/GEQUAL/
   ALWAYS/NEVER, depthClamp, depth-bounds, early/late-Z remain open.
+- [x] **CLOSED — full VkCompareOp decode table (`ue_gpos_dleq_1`/
+  `dleqoff_1` + `dgeq_1`/`dgeqoff_1` + `dalw_1`/`dalwoff_1` +
+  `dnever_1`/`dneveroff_1` A/B pairs):** completes ALL eight compare
+  ops.  The `dp_*` boolean derivation was replaced by an explicit
+  `_DPQ` per-session table `(op, clear, z_near, z_far, far_first,
+  red_wins)` resolved by longest-token match (so `*off` controls beat
+  their on-prefixes and `dnever` doesn't collide with `dne`); the
+  eight pre-existing sessions regenerate byte-identical (incl. the
+  `dtoff`/`dgtoff` `op=0` quirk).  **LEQUAL** (`op=3`, clear `0.5f`):
+  red `z=0.5` sits AT clear -> `frag<=buffer` passes (LESS would
+  reject), blue `z=0.75` fails -> red wins; `dleqoff` -> blue.  **GEQUAL**
+  (`op=6`, clear `0.5f`, far-first): blue `z=0.5` AT clear passes,
+  red `z=0.25` fails -> blue wins; `dgeqoff` -> red.  **ALWAYS**
+  (`op=7`): every fragment passes -> last-drawn blue wins (on and off
+  agree — still a valid decode check since a mis-decode to NEVER/LESS
+  flips the image).  **NEVER** (`op=0`): unconditional reject -> empty
+  colour + clear depth; `dneveroff` -> blue.  PASS all eight
+  `g1=8192 g2=8192 ulp=0 XF_FAULTS 0` on **vgtop (cycles~802-822k)
+  and vgsys (cycles~1135-1164k)**; all prior dpair/depth vectors
+  byte-identical.  depthClamp, depth-bounds, early/late-Z remain open.
 - [x] **CLOSED — per-pixel varying interpolation (`ue_gpos_grad_1`):**
   first bit-exact smooth-varying gradient through the real transport
   path — the unlock for all interpolated shading (fs_color/fs_mip/
