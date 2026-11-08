@@ -10718,6 +10718,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
 
         spvd = G.TOOLS / 'shader' / 'corpus'
         is_blend = 'blend' in gfx
+        # lopx: logicOpEnable + VkLogicOp XOR(6) — per-channel bitwise op
+        # on the UNORM8-encoded src vs dst, replacing the blend result
+        is_lopx = 'lopx' in gfx
         is_wide = 'vbwide' in gfx
         # kill: fs_kill discards on a FragCoord 8x8 checkerboard — the
         # helper-lane path; vs_pos3 keeps vcol constant so tri_w holds
@@ -10919,7 +10922,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'vs_inst.spv' if is_inst else
                           'vs_texlod.spv' if is_vtex else
                           'vs_tex.spv' if is_ftex else
-                          'vs_pos3.spv' if is_blend or is_wide or is_kill
+                          'vs_pos3.spv' if is_blend or is_lopx or is_wide
+                          or is_kill
                           or is_killfn or is_fncall or is_depth or is_gradlike
                           or is_line or is_lstrip or is_polyln
                           or is_polypnt
@@ -10938,7 +10942,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'fs_deriv2.spv' if is_deriv2 else
                           'fs_demote_deriv.spv' if is_demdrv else
                           'fs_color.spv' if is_fcolor else
-                          'fs_vcol.spv' if is_persp or is_blend or is_wide
+                          'fs_vcol.spv' if is_persp or is_blend or is_lopx
+                          or is_wide
                           or is_line or is_lstrip or is_polyln or is_polypnt
                           or is_depth or is_gradlike
                           else
@@ -10969,7 +10974,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # with SRC_ALPHA/ONE_MINUS_SRC_ALPHA on every channel — the
         # first end-to-end pColorBlendState coverage (ue_gpos_tri_1
         # sends pColorBlendState=None).
-        COL = (1.0, 0.0, 0.0, 0.75) if is_blend else (0.2, 0.4, 0.6, 1.0)
+        # lopx src colour: (1.0,0.5,0.25,0.75) -> distinct UNORM8 bytes
+        # so the XOR against the clear dst exercises every channel
+        COL = (1.0, 0.5, 0.25, 0.75) if is_lopx else \
+            (1.0, 0.0, 0.0, 0.75) if is_blend else (0.2, 0.4, 0.6, 1.0)
         # grad: per-vertex distinct colours (draw order) — primaries +
         # distinct alpha so the smooth vcol varying exercises all four
         # interpolated channels; the oracle permutes these with the
@@ -11158,6 +11166,17 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # UNORM rounding boundary); R|G<<8|B<<16|A<<24
             tri_w = (204 | (13 << 8) | (13 << 16) | (207 << 24))
             clr_w = 0xFF33_3333
+        elif is_lopx:
+            # logicOp XOR(6): per-channel s^d on the UNORM8 encodings of
+            # the constant src COL=(1,.5,.25,.75) and the clear dst
+            # (0.2,0.4,0.6,1.0); uncovered px keep the clear word.
+            _sb = [cl_f32_u8(f32b(c)) for c in COL]
+            _db = [cl_f32_u8(f32b(c)) for c in (0.2, 0.4, 0.6, 1.0)]
+            _rb = [_sb[i] ^ _db[i] for i in range(4)]
+            tri_w = (_rb[0] | (_rb[1] << 8) | (_rb[2] << 16) |
+                     (_rb[3] << 24))
+            clr_w = (_db[0] | (_db[1] << 8) | (_db[2] << 16) |
+                     (_db[3] << 24))
         elif is_tex:
             # 1x1 texture texel RGBA8 = (200,80,160,255); the FS emits
             # the sampled colour -> framebuffer (200,80,160,255)
@@ -11638,7 +11657,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         if is_depth else None),
                     pColorBlendState=(
                         st('VkPipelineColorBlendStateCreateInfo',
-                           flags=0, logicOpEnable=0, logicOp=0,
+                           flags=0,
+                           logicOpEnable=1 if is_lopx else 0,
+                           logicOp=6 if is_lopx else 0,   # XOR
                            attachmentCount=1,
                            pAttachments=[st(
                                'VkPipelineColorBlendAttachmentState',
@@ -11651,7 +11672,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                alphaBlendOp=0,
                                colorWriteMask=0xF)],
                            blendConstants=[0, 0, 0, 0])
-                        if is_blend else None),
+                        if is_blend or is_lopx else None),
                     pDynamicState=(
                         None if is_statvp else
                         st('VkPipelineDynamicStateCreateInfo',
@@ -11941,10 +11962,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     clearValueCount=2 if is_depth else 1,
                     pClearValues=[st('VkClearValue',
                         color=st('VkClearColorValue',
-                                 uint32=[f32b(0.2) if is_blend else 0,
-                                         f32b(0.2) if is_blend else 0,
-                                         f32b(0.2) if is_blend else 0,
-                                         f32b(1.0)]))] + ([
+                                 uint32=[f32b(c) for c in
+                                         ((0.2, 0.4, 0.6, 1.0)
+                                          if is_lopx else
+                                          (0.2, 0.2, 0.2, 1.0)
+                                          if is_blend else
+                                          (0.0, 0.0, 0.0, 1.0))]))] + ([
                         # the wire union has no depthStencil arm — cmdexec
                         # reads clearv_q[att*4] as the depth value, so the
                         # bits ride the colour uint32[0] slot (0.5f write,
