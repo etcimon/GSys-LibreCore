@@ -23,8 +23,14 @@ import re
 import shutil
 import subprocess
 
-RUNTIME = Path('/opt/testharness/runs/review-private-runtime-20260915/runtime')
-RUNTIME_DIGEST = 'dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166'
+# HYP8_RUNTIME_DIR / HYP8_RUNTIME_DIGEST: VERILATOR_ROOT for lint and build.
+# Default the pinned private runtime; a tools/verilator fork prefix supplies
+# its own runtime/ (fork headers + verilator_bin, install-verilator-g6lc.sh),
+# whose verilated_funcs.h digest must then be named explicitly.
+RUNTIME = Path(os.environ.get(
+    'HYP8_RUNTIME_DIR', '/opt/testharness/runs/review-private-runtime-20260915/runtime'))
+RUNTIME_DIGEST = os.environ.get(
+    'HYP8_RUNTIME_DIGEST', 'dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166')
 # HYP8_VERILATOR_DIR: alternative verilator prefix (e.g. the PGO build of the
 # tools/verilator fork from install-verilator-g6lc.sh VLT_PGO=1). The binary
 # identity is recorded either way (verilatorBinSha256), so a switch is a new
@@ -174,6 +180,12 @@ def main():
     if verilator_obj.is_file():
         results['verilatorBinSha256'] = digest(verilator_obj)
     results['verilatorDriverSha256'] = digest(Path(VERILATOR))
+    # The perl driver execs $VERILATOR_ROOT/bin/verilator_bin when present:
+    # record that binary too, so the executed instrument is never ambiguous.
+    rt_bin = RUNTIME / 'bin/verilator_bin'
+    if rt_bin.is_file():
+        results['runtimeBinSha256'] = digest(rt_bin)
+    results['runtimeVerilatedFuncsSha256'] = digest(RUNTIME / 'include/verilated_funcs.h')
     env = dict(os.environ, CVA6_REPO_DIR=str(src),
                VERILATOR_ROOT=str(RUNTIME),
                VPATH=f'{RUNTIME}/include:{src}',
@@ -241,8 +253,9 @@ def main():
                          SOFT_LADDER_BUILD_TARGET=os.environ.get('HYP8_BUILD_TARGET', 'g6lc64_hyp8'),
                          SOFT_LADDER_VERLIB=str(out / 'model'),
                          SOFT_LADDER_BUILD_JOBS=os.environ.get('HYP8_BUILD_JOBS', '2'),
-                         SOFT_LADDER_VERILATOR_THREADS='1',
-                         VERILATOR_FLAVOUR='pinned',
+                         SOFT_LADDER_VERILATOR_THREADS=os.environ.get('HYP8_VERILATOR_THREADS', '1'),
+                         VERILATOR_FLAVOUR=os.environ.get('HYP8_VERILATOR_FLAVOUR', 'pinned'),
+                         VLT_HOME=VERILATOR_DIR,
                          VERILATOR_INSTALL_DIR=VERILATOR_DIR,
                          VERILATOR_ROOT=str(RUNTIME),
                          SPIKE_INSTALL_DIR=SPIKE,
@@ -254,8 +267,10 @@ def main():
                  'CVA6_REPO_DIR', 'SOFT_LADDER_BUILD_TARGET',
                  'SOFT_LADDER_VERLIB', 'SOFT_LADDER_BUILD_JOBS',
                  'SOFT_LADDER_VERILATOR_THREADS', 'VERILATOR_FLAVOUR',
-                 'VERILATOR_INSTALL_DIR', 'VERILATOR_ROOT',
-                 'SPIKE_INSTALL_DIR', 'RISCV')}}, indent=2))
+                 'VERILATOR_INSTALL_DIR', 'VERILATOR_ROOT', 'VLT_HOME',
+                 'SPIKE_INSTALL_DIR', 'RISCV')} | {
+                 k: v for k, v in build_env.items() if k.startswith('HYP8_BUILD_')}},
+            indent=2))
         # HYP8_BUILD_TIMEOUT: the 8-hart mc2 model needs >7200 s at -j2 (r69:
         # the runner timed out while the orphaned make kept compiling).
         rc = run(cmd, out / 'build-harness.log', env=build_env, cwd=src,
@@ -278,6 +293,8 @@ def main():
             if (out / 'model' / 'build.log').is_file() else {},
             'harnessLog': 'build-harness.log',
             'buildLog': 'model/build.log',
+            # simulation PGO evidence: profiles applied by phase 2 (0 = none)
+            'simPgoProfiles': len(list((out / 'model' / 'pgo').rglob('*.gcda'))),
         }
         results['status'] = 'build_complete' if (rc == 0 and model.is_file()) \
             else 'build_failed'

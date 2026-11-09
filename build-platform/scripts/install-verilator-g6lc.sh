@@ -35,13 +35,18 @@ echo "[vlt-g6lc] source $(git rev-parse --short HEAD) $(git log -1 --format=%s |
 # .gcda profiles; pass 2 rebuilds with -fprofile-use into $PREFIX. The
 # default training is a multi-threaded verilation of the hyp8 testharness
 # through hyp8-build-harness.sh (VLT_PGO_TRAIN_TARGET, default
-# g6lc64_hyp8_mc: 4 cores x 2 harts, 8 issue ports, L2/L3): --threads
+# g6lc64_hyp8, the scalar Linux-witness model): --threads
 # VLT_PGO_TRAIN_THREADS (4), the split-loops .vlt, --unroll-count 256
 # --unroll-stmts 131072, verilate only. That exercises unroll-before-split,
 # V3SplitVar, ordering and the MTask partitioner, which a --lint-only run
-# (the previous default) never reaches. The resulting verilator_bin is
-# identity-recorded by the runners (verilatorBinSha256), so a PGO build is
-# a new instrument, not a flag.
+# (the previous default) never reaches. The MC target was the default until
+# 2026-11-08; under the instrumented binary its verilation never finished
+# (3 h 16 min and 7 h 32 min at ~13.7 GB RSS, both killed), so
+# VLT_PGO_TRAIN_TIMEOUT (default 5400 s) now bounds the training run. gcov
+# writes .gcda only on a normal exit, so a timed-out training leaves no
+# profile and pass 2 aborts below rather than shipping an unprofiled build. The
+# resulting verilator_bin is identity-recorded by the runners
+# (verilatorBinSha256), so a PGO build is a new instrument, not a flag.
 PGO="${VLT_PGO:-0}"
 PGO_DIR="${VLT_PGO_DIR:-$SRC/pgo-profile}"
 PGO_OPT="${VLT_PGO_OPT:--O3 -march=native}"
@@ -68,9 +73,10 @@ if [[ "$PGO" == "1" ]]; then
   else
     ( cd "$REPO" && CVA6_REPO_DIR="$REPO" VERILATOR_FLAVOUR=g6lc VLT_HOME="$TRAIN_PREFIX" \
         VERILATOR_ROOT="$TRAIN_PREFIX/runtime" \
-        SOFT_LADDER_BUILD_TARGET="${VLT_PGO_TRAIN_TARGET:-g6lc64_hyp8_mc}" \
+        SOFT_LADDER_BUILD_TARGET="${VLT_PGO_TRAIN_TARGET:-g6lc64_hyp8}" \
         SOFT_LADDER_VERILATOR_THREADS="${VLT_PGO_TRAIN_THREADS:-4}" \
         SOFT_LADDER_VERLIB="$PGO_DIR/train-mdir" HYP8_BUILD_SPLIT_VLT=1 HYP8_BUILD_VERILATE_ONLY=1 \
+        timeout --signal=TERM --kill-after=60 "${VLT_PGO_TRAIN_TIMEOUT:-5400}" \
         bash verif/regress/remote/hyp8/hyp8-build-harness.sh hyp8 > "$PGO_DIR/train.log" 2>&1 ) \
       || echo "[vlt-g6lc] training verilation returned nonzero (profiles are still usable); see $PGO_DIR/train.log"
   fi

@@ -26,6 +26,20 @@
 #   HYP8_BUILD_VERILATE_ONLY=1    stop after verilation (PGO training workload)
 #   HYP8_BUILD_HIER_TRACE=0|1     split builds define G6LC_SIM_NO_HIER_TRACE
 #                                 (cross-module debug traces out) unless 1
+#
+# Generated C++ (same recipe as soft-ladder-build-harness.sh, guide §4b.1):
+#   HYP8_BUILD_OPT=-O2            OPT_FAST/OPT_GLOBAL (verilated.mk default -Os)
+#   HYP8_BUILD_OPT_SLOW=-O1       OPT_SLOW (__Syms/init: not hot, -O2 costs hours)
+#   HYP8_BUILD_MARCH=<isa>|none   default x86-64-v3 on an AVX2+BMI2 host
+#   HYP8_BUILD_PGO=0|1            simulation PGO, default 1: instrumented build ->
+#                                 training runs -> -fprofile-use rebuild of the
+#                                 same generated sources (layout only; the RVFI
+#                                 stream is unchanged)
+#   HYP8_BUILD_PGO_TRAIN="elf[@tohost] ..."  training workloads; default the
+#                                 in-repo ooo_fp_ooo.S probe compiled here. A
+#                                 firmware entry (fw_payload.elf@0x80041730)
+#                                 profiles the OpenSBI/Linux boot path itself.
+#   HYP8_BUILD_PGO_CYCLES=2000000 cycle cap of each training run
 
 set -euo pipefail
 
@@ -217,6 +231,32 @@ else
   log "split-loops .vlt: off"
 fi
 
+# --- generated C++: optimisation level, host ISA, simulation PGO -------------
+BUILD_OPT="${HYP8_BUILD_OPT:--O2}"
+BUILD_OPT_SLOW="${HYP8_BUILD_OPT_SLOW:--O1}"
+if [[ -z "${HYP8_BUILD_MARCH:-}" ]]; then
+  if [[ "$VLT_FLAVOUR" == g6lc && "$(uname -m)" == x86_64 ]] \
+     && grep -qw avx2 /proc/cpuinfo 2>/dev/null && grep -qw bmi2 /proc/cpuinfo 2>/dev/null; then
+    BUILD_MARCH="x86-64-v3"
+  else
+    BUILD_MARCH="none"
+  fi
+else
+  BUILD_MARCH="$HYP8_BUILD_MARCH"
+fi
+[[ "$BUILD_MARCH" == "none" ]] || BUILD_CXXFLAGS="$BUILD_CXXFLAGS -march=$BUILD_MARCH"
+PGO="${HYP8_BUILD_PGO:-1}"
+[[ "${HYP8_BUILD_VERILATE_ONLY:-0}" == "1" ]] && PGO=0
+PGO_DIR="$VERLIB_DIR/pgo"
+BASE_CXXFLAGS="$BUILD_CXXFLAGS"; BASE_LDFLAGS="$BUILD_LDFLAGS"
+PGO_GEN="-fprofile-generate=$PGO_DIR -fprofile-update=atomic"
+if [[ "$PGO" == "1" ]]; then
+  rm -rf "$PGO_DIR"; mkdir -p "$PGO_DIR"
+  BUILD_CXXFLAGS="$BUILD_CXXFLAGS $PGO_GEN"
+  BUILD_LDFLAGS="$BUILD_LDFLAGS -fprofile-generate=$PGO_DIR"
+fi
+log "C++ opt: fast/global $BUILD_OPT slow $BUILD_OPT_SLOW march=$BUILD_MARCH pgo=$PGO"
+
 BUILD_LOG="${SOFT_LADDER_BUILD_LOG:-$VERLIB_DIR/build.log}"
 rm -f "$BUILD_LOG"
 log "building; full log -> $BUILD_LOG"
@@ -243,7 +283,7 @@ set +e
   --converge-limit 100000 \
   --x-assign 0 \
   --x-initial 0 --x-initial-edge \
-  -LDFLAGS "-L$RISCV/lib -L$SPIKE_INSTALL_DIR/lib -Wl,-rpath,$RISCV/lib -Wl,-rpath,$SPIKE_INSTALL_DIR/lib -lfesvr -lriscv -ldisasm -lyaml-cpp -lpthread" \
+  -LDFLAGS "-L$RISCV/lib -L$SPIKE_INSTALL_DIR/lib -Wl,-rpath,$RISCV/lib -Wl,-rpath,$SPIKE_INSTALL_DIR/lib -lfesvr -lriscv -ldisasm -lyaml-cpp -lpthread $BUILD_LDFLAGS" \
   -CFLAGS "-DVL_DEBUG -I$SPIKE_INSTALL_DIR -I$SPIKE_INSTALL_DIR/include -I$ROOT/corev_apu/tb -I$ROOT/corev_apu/tb/dpi $TARGET_CFLAGS $BUILD_CXXFLAGS" \
   --cc --vpi \
   --threads-dpi none \
@@ -277,9 +317,10 @@ if [[ "${HYP8_BUILD_VERILATE_ONLY:-0}" == "1" ]]; then
   exit 0
 fi
 
+MK_OPT=("OPT_FAST=$BUILD_OPT" "OPT_SLOW=$BUILD_OPT_SLOW" "OPT_GLOBAL=$BUILD_OPT")
 set +e
 make -C "$VERLIB_DIR" -j"$JOBS" -f Vg6lc_testharness.mk \
-  CXX="$CXX" CC="$CC" LINK="$CXX" \
+  CXX="$CXX" CC="$CC" LINK="$CXX" "${MK_OPT[@]}" \
   >>"$BUILD_LOG" 2>&1
 rc=$?
 set -e
@@ -290,6 +331,60 @@ if [[ $rc -ne 0 || ! -x "$VERLIB_DIR/Variane_testharness" ]]; then
   exit 1
 fi
 
+if [[ "$PGO" == "1" ]]; then
+  # --- simulation PGO: train the instrumented model, rebuild with the profile
+  TRAIN_DIR="$VERLIB_DIR/pgo-train"; mkdir -p "$TRAIN_DIR"
+  TRAIN_LIST="${HYP8_BUILD_PGO_TRAIN:-}"
+  if [[ -z "$TRAIN_LIST" ]]; then
+    GCC="$RISCV/bin/riscv-none-elf-gcc"; COMMON="$ROOT/verif/tests/custom/common"
+    if "$GCC" -march=rv64imafdc_zicsr_zifencei -mabi=lp64d -static -mcmodel=medany -fvisibility=hidden \
+         -nostdlib -nostartfiles -I"$ROOT/verif/tests/custom/env" -I"$COMMON" -T "$COMMON/link_verilator.ld" \
+         "$ROOT/verif/tests/custom/ooo/ooo_fp_ooo.S" "$COMMON/syscalls.c" "$COMMON/crt.S" \
+         -o "$TRAIN_DIR/train.elf" > "$TRAIN_DIR/gcc.log" 2>&1; then
+      TRAIN_LIST="$TRAIN_DIR/train.elf"
+    else
+      log "PGO: default training ELF did not compile (see $TRAIN_DIR/gcc.log)"
+    fi
+  fi
+  TRAIN_CYC="${HYP8_BUILD_PGO_CYCLES:-2000000}"
+  n=0
+  for entry in $TRAIN_LIST; do
+    elf="${entry%@*}"; tohost=""
+    [[ "$entry" == *@* ]] && tohost="${entry##*@}"
+    [[ -f "$elf" ]] || { log "PGO: training ELF missing: $elf"; continue; }
+    [[ -n "$tohost" ]] || tohost=$("$RISCV/bin/riscv-none-elf-nm" "$elf" 2>/dev/null | awk '$3=="tohost"{print "0x"$1}' | head -1)
+    n=$((n + 1))
+    log "PGO training $n: $elf (tohost ${tohost:-none}, cap $TRAIN_CYC cycles)"
+    ( cd "$TRAIN_DIR" && "$VERLIB_DIR/Variane_testharness" +debug_disable +max-cycles=$TRAIN_CYC \
+        +time_out=$TRAIN_CYC ${tohost:++tohost_addr=$tohost} "$elf" > "train$n.log" 2>&1 ) || true
+  done
+  nprof=$(find "$PGO_DIR" -name '*.gcda' 2>/dev/null | wc -l)
+  log "PGO profiles: $nprof .gcda from $n training run(s)"
+  if [[ "$nprof" -eq 0 ]]; then
+    log "PGO FAIL: no profile was written; refusing to label an unprofiled model as PGO"
+    exit 1
+  fi
+  PGO_USE="-fprofile-use=$PGO_DIR -fprofile-correction -fprofile-partial-training -Wno-missing-profile -Wno-coverage-mismatch"
+  log "PGO phase 2: $BUILD_OPT $PGO_USE"
+  # The .mk carries the phase-1 flags: strip the instrumentation there.
+  sed -i "s# $PGO_GEN##g; s# -fprofile-generate=$PGO_DIR##g" "$VERLIB_DIR/Vg6lc_testharness.mk"
+  cp -a "$VERLIB_DIR/Variane_testharness" "$TRAIN_DIR/Variane_testharness.instrumented"
+  rm -f "$VERLIB_DIR"/*.o "$VERLIB_DIR"/*.a "$VERLIB_DIR/Variane_testharness"
+  set +e
+  make -C "$VERLIB_DIR" -j"$JOBS" -f Vg6lc_testharness.mk CXX="$CXX" CC="$CC" LINK="$CXX" \
+    "OPT_FAST=$BUILD_OPT $PGO_USE" "OPT_SLOW=$BUILD_OPT_SLOW $PGO_USE" "OPT_GLOBAL=$BUILD_OPT $PGO_USE" \
+    > "$VERLIB_DIR/pgo-phase2.log" 2>&1
+  rc=$?
+  set -e
+  if [[ $rc -ne 0 || ! -x "$VERLIB_DIR/Variane_testharness" ]]; then
+    log "PGO phase 2 FAIL rc=$rc — last 40 lines of $VERLIB_DIR/pgo-phase2.log"
+    tail -n 40 "$VERLIB_DIR/pgo-phase2.log"
+    exit 1
+  fi
+  grep -q -- "-fprofile-generate" "$VERLIB_DIR/Vg6lc_testharness.mk" && { log "PGO FAIL: instrumentation left in the .mk"; exit 1; }
+  log "PGO phase 2 OK ($nprof profiles applied)"
+fi
+
 warnings=$(grep -cE "%Warning" "$BUILD_LOG" 2>/dev/null || true)
 errors=$(grep -cE "%Error" "$BUILD_LOG" 2>/dev/null || true)
-log "BUILD OK: $VERLIB_DIR/Variane_testharness (warnings=$warnings errors=$errors)"
+log "BUILD OK: $VERLIB_DIR/Variane_testharness (warnings=$warnings errors=$errors pgo=$PGO opt=$BUILD_OPT march=$BUILD_MARCH threads=$VTHREADS)"

@@ -38,6 +38,12 @@ EXTRA_FILES = [
     'verif/regress/remote/hyp8/capture_cfg.py',
     'verif/regress/remote/hyp8/check_boot_dts.py',
     'verif/tests/custom/common/link_verilator.ld',
+    # default simulation-PGO training program of hyp8-build-harness.sh
+    'verif/tests/custom/ooo/ooo_fp_ooo.S',
+    'verif/tests/custom/common/crt.S',
+    'verif/tests/custom/common/syscalls.c',
+    'verif/tests/custom/common/util.h',
+    'verif/tests/custom/env/encoding.h',
     'verif/tb/apu/g6lc_dram_peek64_stub.cpp',
     'corev_apu/tb/g6lc_tb_trace.h',
     'corev_apu/tb/g6lc_tb_dram_latency.sv',
