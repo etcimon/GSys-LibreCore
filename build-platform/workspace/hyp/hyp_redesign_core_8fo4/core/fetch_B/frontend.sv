@@ -213,6 +213,9 @@ module frontend
   logic rl_serving_unaligned, rl_carry_done, rl_bank_valid;
   logic [G6LCCfg.VLEN-1:0] rl_bank_pc;
   logic s_live, carry_restore;
+  // r120 stream-continuity guard (declared here, driven beside the frontier)
+  logic [NrInstr-1:0] iq_valid_cont;
+  logic seq_gap;
   // override #1 train taps
   logic ov1_train_valid, ov1_train_taken;
   logic [G6LCCfg.VLEN-1:0] ov1_train_pc, ov1_train_target;
@@ -317,7 +320,10 @@ module frontend
       .resolved_branch_i,
       .replay_i      (replay_q),
       .replay_addr_i (replay_addr_q),
-      .ov1_valid_i   (ov1_valid),
+      // a refused discontinuous window squelches to the same queue frontier
+      // override #1 restarts at (resume_d == resume_pc_q when nothing was
+      // consumed), so the two share the record
+      .ov1_valid_i   (ov1_valid | seq_gap),
       .ov1_pc_i      (ov1_pc),
       .ov2_valid_i   (ov2_valid),
       .ov2_pc_i      (ov2_pc),
@@ -1535,16 +1541,93 @@ module frontend
   assign resume_d = (|instr_queue_consumed) ? resume_push_next
                                             : resume_pc_q[meta_d_q.hart];
 
+  // Frontier validity: unknown out of reset and after a flush that carries no
+  // record; known again at the next redirect record or the first accepted
+  // window, which then defines it.
+  logic [G6LCCfg.NrHarts-1:0] resume_v_q;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       resume_pc_q <= '0;
+      resume_v_q  <= '0;
     end else begin
-      if (red_valid)
+      if (red_valid) begin
         resume_pc_q[smt_hart_i] <= red_pc;
-      else if (|instr_queue_consumed)
+        resume_v_q[smt_hart_i]  <= 1'b1;
+      end else if (|instr_queue_consumed) begin
         resume_pc_q[meta_d_q.hart] <= resume_push_next;
+        resume_v_q[meta_d_q.hart]  <= 1'b1;
+      end else if (flush_i) begin
+        resume_v_q <= '0;
+      end
     end
   end
+
+  // r120 stream-continuity guard. Queue-accepted parcels are irrevocable, so
+  // every accepted window must continue the accepted stream: its first live
+  // slot must be the hart's frontier. A predictor guess can steer fetch to a
+  // block the stream never reaches (r116: the untagged line table aliased a
+  // ret block onto a no-CF callee block, the RAS top agreed so override #1
+  // stood down, and override #2 only adjudicates windows with a taken CF), and
+  // no CF in the accepted stream would ever expose it at execute. Such a
+  // window is refused whole and the override-#1 record restarts fetch at the
+  // frontier; the epoch kill drops the windows behind it. The guard refuses
+  // only a window with NO live slot at the frontier (a window disjoint from
+  // the stream): the prefix filter deliberately keeps a direct jal/call slot
+  // below the expected address (slot_keep_link), so "first slot == frontier"
+  // would refuse a presentation the queue has always accepted. Per-slot
+  // compares feed one OR tree beside the existing valid path.
+  // A completing window (s_serving_unaligned) presents at slot 0 the
+  // instruction whose first half ended the previous block. A replay record
+  // re-keys the frontier to the refused block address, which is that
+  // instruction's second half, and the carry restore hands the first half
+  // back, so slot 0 also continues a frontier two bytes past its start
+  // (r120bdiag: front=0x800125d0, slot0=0x800125ce).
+  logic [NrInstr-1:0] iq_at_front;
+  for (genvar i = 0; i < NrInstr; i++) begin : gen_seq_front
+    if (i == 0) begin : gen_slot0
+      assign iq_at_front[0] = (s_addr[0] == resume_pc_q[meta_d_q.hart])
+          || (s_serving_unaligned
+              && (s_addr[0] + G6LCCfg.VLEN'(2) == resume_pc_q[meta_d_q.hart]));
+    end else begin : gen_slot
+      assign iq_at_front[i] = (s_addr[i] == resume_pc_q[meta_d_q.hart]);
+    end
+  end
+  assign seq_gap = (|iq_valid) && resume_v_q[meta_d_q.hart]
+                   && !(|(iq_valid & iq_at_front));
+  assign iq_valid_cont = seq_gap ? '0 : iq_valid;
+
+//pragma translate_off
+  // A refusal restarts at the frontier, which must itself start a window the
+  // refetch accepts. Repeated refusals at one frontier are a livelock.
+  int unsigned seq_gap_n, seq_gap_rep, seq_gap_lim;
+  logic [G6LCCfg.VLEN-1:0] seq_gap_pc_q;
+  logic seq_gap_tr;
+  initial begin
+    seq_gap_n = 0; seq_gap_rep = 0; seq_gap_pc_q = '0;
+    seq_gap_tr = $test$plusargs("seq_gap_trace");
+    seq_gap_lim = 200;
+    void'($value$plusargs("seq_gap_limit=%d", seq_gap_lim));
+  end
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && seq_gap && seq_gap_tr && seq_gap_n < seq_gap_lim)
+      $display("[seq-gap] t=%0t front=%h v=%b addr=%h,%h,%h,%h unal=%b carry=%b red=%b src=%0d redpc=%h cons_prev=%b ep=%0d sep=%0d",
+               $time, resume_pc_q[meta_d_q.hart], iq_valid,
+               s_addr[0], s_addr[(NrInstr > 1) ? 1 : 0], s_addr[(NrInstr > 2) ? 2 : 0],
+               s_addr[(NrInstr > 3) ? 3 : 0], s_serving_unaligned, s_carry_done,
+               red_valid, red_src, red_pc, |instr_queue_consumed, fe_epoch, ov_spec_epoch);
+    if (rst_ni && seq_gap) begin
+      seq_gap_n    <= seq_gap_n + 1;
+      seq_gap_rep  <= (seq_gap_pc_q == resume_pc_q[meta_d_q.hart]) ? seq_gap_rep + 1 : 0;
+      seq_gap_pc_q <= resume_pc_q[meta_d_q.hart];
+      assert (seq_gap_rep < 64)
+        else $error("frontend: stream-continuity refusals repeat at frontier %h", seq_gap_pc_q);
+    end else if (rst_ni && |instr_queue_consumed) begin
+      seq_gap_rep <= 0;
+    end
+  end
+  final if ($test$plusargs("equiv_report"))
+    $display("[equiv] frontend seq_gap refusals=%0d", seq_gap_n);
+//pragma translate_on
 
   // ==================================================================
   // instr_queue — elastic epoch-aware per-lane FIFOs + prefix fire
@@ -1580,7 +1663,7 @@ module frontend
       .ckpt_idx_i         (ckpt_slot_idx),
       .is_call_i          (iq_is_call),
       .is_return_i        (iq_is_return),
-      .valid_i            (iq_valid),              // from the verdict stage
+      .valid_i            (iq_valid_cont),         // from the verdict stage, continuity-guarded
       .leftover_complete_i(s_serving_unaligned),
       .consumed_o         (instr_queue_consumed),
       .ready_o            (instr_queue_ready),

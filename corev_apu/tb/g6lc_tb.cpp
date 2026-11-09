@@ -201,6 +201,8 @@ static const char *verilog_plusargs[] = {
     // above: an unlisted plusarg is handed to HTIF, rejected, and the run dies
     // before the probe arms.
     "fetch_win_trace",
+    // Stream-continuity refusal probe (core/fetch_B/frontend.sv).
+    "seq_gap_trace", "seq_gap_limit",
     // Kill-persistence check (core/fetch_B/frontend.sv): reports a response
     // accepted for a fetch whose request was already killed. Same allowlist
     // rule as above.
