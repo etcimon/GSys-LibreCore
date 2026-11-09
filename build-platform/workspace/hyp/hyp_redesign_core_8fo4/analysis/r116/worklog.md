@@ -97,3 +97,101 @@ about 13 hours, and r113's 300M-cycle point about 4 hours.
   and `G6LC_LINUX_SHELL` are both required.
 - The r115 FO4 batch is validated here only by lint, 12 smokes and the
   boot witness; structural FO4 is not physical timing closure.
+
+## 7. r116 terminal failure: accepted-stream discontinuity (issue 9)
+
+r116 passed every earlier frontier (SLUB at ~248M, mount-cache at ~286M,
+both in under 4 h) and then oopsed at RVFI cycle 313455038:
+`Unable to handle kernel paging request at virtual address ffffffff81313318`,
+`epc == ra == ffffffff81313318`, cause 0xc, PID 1 (`swapper/0`), followed by
+`Kernel panic - not syncing: Fatal exception`.
+
+**Mechanism (RVFI, deterministic).** The function at `0xffffffff80043902`
+(frame `bb60..bbb0`) calls `0x8003dfd6` (`jal` at `0x80043a90`). The callee
+retired `addi sp,sp,-48` (sp `bb30`), its saves and `c.lw a5,72(s1)` at
+`0x8003dfee`, and then the next retired instruction was **`0x80043a8c`** — the
+caller's pre-call `mv a1,s1`, not the callee's `c.bnez` at `0x8003dff0`. No
+return, branch or trap separates them. The caller re-executed the call, a
+second `addi sp,-48` gave sp `bb00`, and the first frame was never popped.
+Back in the caller, its epilogue ran with sp `0x30` too low: `ld ra,72(sp)`
+read `bb78`, which the caller's own prologue had filled with
+`sd s5,24(sp)` = `&__per_cpu_offset` (`0xffffffff81313318`), and `ret` jumped
+into non-executable data.
+
+**Frontend trace (r118diag, same model, windowed printers).** Block
+`0x8003dfe8` (`mv`, `beq`, `c.lw`: no taken CF) carried a **taken next-line
+guess to `0x80043a8c`**. The untagged line table aliases on the low address
+bits, and block `0x800407e8`, whose `ret` really does return to
+`0x80043a8c`, shares the entry. Override #1 stood down because the guess
+equalled the RAS top (`ras_agree`), which it treats as a correctly learned
+return, although this block contains no return. Override #2 adjudicates only
+windows that contain a predicted-taken CF (`bp_fire_live && !guess_ok`). The
+instruction queue therefore accepted block `0x80043a8c` as the successor of
+`0x8003dfee`, with no CF in the accepted stream that could expose the jump at
+execute. Fetch timeline: `npc=0x80043a8c` follows `0x8003dfd8` at cycle
+307975548; an ov1 restart at 549 recovered once; the second time (557)
+there was no override, and `0x80043a8c` was taken at 579 with the frontier
+at `0x8003dff0`.
+
+**Discriminator.** `hyp8-osbi-scalar-r119head` (model
+`74df0a97…`, the closure with the six r115 FO4 files restored to HEAD, same
+toolchain and firmware) reproduced the identical oops (same epc, ra and
+register file). The defect predates the r115 batch; the batch is not
+implicated.
+
+**Correction (`fetch_B/frontend.sv`).** Queue-accepted parcels are
+irrevocable, so the frontend now enforces the invariant the r113 frontier
+already tracks: a live window is accepted only if one of its live slots
+starts at the hart's frontier (`resume_pc_q`). A window disjoint from the
+stream is refused whole, and the override-#1 record (shared, same restart pc)
+squelches to the frontier; the epoch kill drops younger windows. The check
+is "any live slot at the frontier", not "first slot", because the prefix
+filter intentionally keeps a direct jal/call below the expected address
+(`slot_keep_link`). A frontier-valid bit keeps the guard off out of reset and
+after a record-less flush, until a record or the first accepted window
+defines it. A sim-only assertion flags 64 consecutive refusals at one
+frontier (livelock), and `+equiv_report` prints the refusal count.
+
+Timing: one VLEN equality per slot against a register, OR-reduced beside
+the existing queue valid path; the refusal joins the existing ov1 record
+(no new stage, state beyond one valid bit per hart, or clock/reset). Not
+ISA-visible; no DTS/config change.
+
+**Qualification so far.** Local lint clean (7 known `sb_head` CMPCONST
+warnings). `hyp8-r120-aggregate-t4` (model `014e3810…`, sim-PGO 230
+profiles, includes the r115 batch): scalar/SMT2 lint rc 0, 0 `%Error`,
+609/630 warnings. `hyp8-r120-smokes-t4`: 12/12 pass with identical cycle
+counts, `seq_gap refusals=0` on every smoke. Boot witness
+`hyp8-osbi-scalar-r120` is running.
+
+## 8. Guard qualification: r120 false positive, r121 past the oops, new wedge
+
+**r120 (first guard form) wedged at RVFI 499,770** (OpenSBI, IPC 0.066).
+A short diag replay (`hyp8-osbi-scalar-r120cdiag`, `+seq_gap_trace`) showed a
+single refusal: frontier `0x800125d0`, completing window
+(`s_serving_unaligned=1`) with slot 0 at `0x800125ce`. A replay record
+re-keys the frontier to the refused block address, i.e. the second half of
+the straddling instruction whose first half the carry restore hands back.
+Slot 0 of a completing window now also continues a frontier two bytes past
+its start. The diag replay of the corrected form (`r120ddiag`) ran 22M
+cycles with zero refusals and an unchanged retirement census.
+
+**r121 (model `07a4dd5d…`, sim-PGO 228 profiles, r115 batch + guard).**
+Lint 609/630 warnings, 0 `%Error`; smokes 12/12 with identical cycle counts
+and zero refusals. The witness reproduced the r114 census at 2M cycles and
+refused 12 windows over the run. At 311,926,541 it refused exactly the r116
+failure (frontier `0x8003dff0`, window `0x80043a8c`). Linux continued past
+the old oops point for the first time: secondary-CPU bring-up, clocksource,
+futex hash, netlink, DMA pools, PTP, EDAC, `vgaarb`, and `clocksource:
+Switched to clocksource riscv_clocksource` (UART `[3.112507]`).
+
+**New terminal state.** Retirement stopped at RVFI cycle **441,938,308**
+(`c.bnez` at `0xffffffff8063e21c`; the next record, `jal` at
+`0x8063e204`, never retires). There was no `%Error` and no repeated-refusal
+assertion. The census retirement and empty-cycle counters froze, and no
+`[hang]` dump fired for this stall. The only `[hang]` dumps are from a
+transient 4,000-cycle stall at 396.95M that recovered. The run was stopped
+at ~504M cycles and committed as `6a5d55603` (frontend guard). Deterministic
+replay `hyp8-osbi-scalar-r122diag` (same model, frontend, commit and refusal
+traces windowed on 441,937,800–441,942,000) is running to classify it. This
+is a new frontier, not a userspace result; both markers are still required.
