@@ -169,6 +169,6 @@
 	ignore = dirty
 [submodule "specs/VK-GL-CTS"]
 	path = specs/VK-GL-CTS
-	url = https://github.com/KhronosGroup/VK-GL-CTS.git
+	url = https://github.com/etcimon/VK-GL-CTS.git
 	update = none
 	shallow = true
