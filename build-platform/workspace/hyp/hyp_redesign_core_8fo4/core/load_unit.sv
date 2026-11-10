@@ -926,6 +926,25 @@ assign ldbuf_full = &ldbuf_valid_q;
     else if (!state_q[LU_B_WAIT_PAGE_OFFSET] || flush_i) wpo_cnt_q <= '0;
     else if (wpo_cnt_q != 8'hFF) wpo_cnt_q <= wpo_cnt_q + 8'd1;
   end
+  // r124: r71 made the commit head non-speculative, but a YOUNGER flagged
+  // load that misses the DTLB still ping-pongs IDLE<->WAIT_SPEC_LOAD while
+  // the older commit-head load waits behind it in the bypass FIFO: it never
+  // reaches commit time, so it never yields (r121/r123diag @441,938,308:
+  // tid 30 presented with dtlb_hit=0, treq=0; head tid 18 queued). After
+  // WSL_REPLAY_AFTER cycles in that loop the load is handed back exactly
+  // like the T33 page-offset case: popped, replayed, refetched at commit.
+  localparam int unsigned WSL_REPLAY_AFTER = 32;
+  logic [7:0] wsl_cnt_q;
+  logic       wsl_replay_fire;
+  assign wsl_replay_fire = G6LCCfg.OoOEn && G6LCCfg.SpeculativeSb &&
+                           (wsl_cnt_q >= 8'(WSL_REPLAY_AFTER));
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) wsl_cnt_q <= '0;
+    else if (flush_i || pop_ld_o || !(state_q[LU_B_IDLE] || state_q[LU_B_WAIT_SPEC_LOAD]))
+      wsl_cnt_q <= '0;
+    else if (state_q[LU_B_WAIT_SPEC_LOAD] && wsl_cnt_q != 8'hFF)
+      wsl_cnt_q <= wsl_cnt_q + 8'd1;
+  end
   logic cancelled_request, cancel_hit;
   assign cancel_hit = lsu_ctrl_i.is_speculative_load_miss
                    | cancelled_mask_i[lsu_ctrl_i.trans_id];
@@ -1115,6 +1134,13 @@ assign ldbuf_full = &ldbuf_valid_q;
             state_d  = LU_S_IDLE;
             pop_ld_o = 1'b1;
           end
+          // r124: still flagged after WSL_REPLAY_AFTER cycles -- yield to the
+          // older loads behind it (see wsl_cnt_q)
+        end else if (wsl_replay_fire && spec_ld && !dtlb_hit_i &&
+                     !req_port_i.data_rvalid) begin
+          state_d     = LU_S_IDLE;
+          pop_ld_o    = 1'b1;
+          lu_replay_o = 1'b1;
           // if we have a correct prediction this is now a regular load
         end else begin
           state_d = LU_S_IDLE;
@@ -2197,6 +2223,11 @@ assign ldbuf_full = &ldbuf_valid_q;
             rf_state_d  = 4'(LU_B_IDLE);
             rf_pop_ld_o = 1'b1;
           end
+        end else if (wsl_replay_fire && spec_ld && !dtlb_hit_i &&
+                     !req_port_i.data_rvalid) begin
+          rf_state_d     = 4'(LU_B_IDLE);
+          rf_pop_ld_o    = 1'b1;
+          rf_lu_replay_o = 1'b1;
           // if we have a correct prediction this is now a regular load
         end else begin
           rf_state_d = 4'(LU_B_IDLE);
