@@ -411,7 +411,7 @@ jobs:
           python-version: "3.12"
 
       - name: Python deps
-        run: python -m pip install --quiet Mako
+        run: python -m pip install --quiet Mako numpy
 
       - if: env.COVERAGE != 'quick'
         uses: ./.github/actions/pinned-verilator

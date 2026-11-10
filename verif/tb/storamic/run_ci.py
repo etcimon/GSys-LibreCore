@@ -155,6 +155,12 @@ def main():
     if args.coverage not in LEVELS:
         parser.error(f"unknown coverage level: {args.coverage}")
     tier = LEVELS.index(args.coverage)
+    # The Verilator wrapper execs $VERILATOR_ROOT/{bin/,}verilator_bin when it
+    # is set; a configure --prefix install keeps verilator_bin in <prefix>/bin.
+    vroot = os.environ.get("VERILATOR_ROOT")
+    if vroot and not any(Path(vroot, *p, "verilator_bin").is_file()
+                         for p in ((), ("bin",))):
+        del os.environ["VERILATOR_ROOT"]
     verilator = shutil.which(os.environ.get("VERILATOR", "verilator"))
     if tier >= 1 and not verilator:
         print(f"BLOCKED: coverage '{args.coverage}' needs Verilator (tools install verilator)")

@@ -40,8 +40,20 @@ STANDARD_SUITES="${APU_CI_STANDARD_SUITES:-doneq gcs vndec vnrep cmdexec vgctl s
 FULL_SUITES="${APU_CI_FULL_SUITES:-objtab xfer vgpages vnpump rast vnfront shwave shcore}"
 
 command -v python3 >/dev/null 2>&1 || { echo "BLOCKED: python3 missing" >&2; exit 3; }
-python3 -c 'import mako' 2>/dev/null || {
-  echo "BLOCKED: the Venus model needs Mako (python3 -m pip install Mako)" >&2; exit 3; }
+python3 -c 'import mako, numpy' 2>/dev/null || {
+  echo "BLOCKED: the Venus model needs Mako + numpy (python3 -m pip install Mako numpy)" >&2; exit 3; }
+# The Verilator wrapper execs $VERILATOR_ROOT/{bin/,}verilator_bin when it is
+# set; a configure --prefix install keeps verilator_bin in <prefix>/bin.
+if [ -n "${VERILATOR_ROOT:-}" ] && [ ! -x "$VERILATOR_ROOT/verilator_bin" ] && \
+   [ ! -x "$VERILATOR_ROOT/bin/verilator_bin" ]; then
+  unset VERILATOR_ROOT
+fi
+# The native-bridge model tests read the generated (gitignored) Venus map.
+if [ ! -f "$ROOT/software/apu-venus-probe/venus_map.h" ]; then
+  make -s -C "$ROOT/software/apu-venus-probe" venus_map.h \
+    TARGET_CFG="${APU_CI_TARGET_CFG:-g6lc64_stream8}" > /dev/null || {
+    echo "BLOCKED: could not generate software/apu-venus-probe/venus_map.h" >&2; exit 3; }
+fi
 if [ "$TIER" -ge 1 ]; then
   VERILATOR="${VERILATOR:-verilator}"
   command -v "$VERILATOR" >/dev/null 2>&1 || {
