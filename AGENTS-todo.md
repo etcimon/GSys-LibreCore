@@ -2552,6 +2552,20 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
       awaiting verdict. If copy is byte-exact in `tb_g6lc_apu_xfer`,
       next probe is the `g_oob`/`gbase`/`gsize` aperture-vs-absolute
       units on the 1024B stride-2 buffer.
+      **COPY + g_oob EXONERATED:** `tb_g6lc_apu_xfer` runs >=200
+      randomized COPY cases (1-4 regions, 4KiB crossings, same-buffer,
+      random heads/tails) with byte-exact `cmp_range` — copy payload
+      is correct. `g_oob` bounds verified: stride-2 last vertex
+      `1022+2=1024` exactly fits `vb_size=1024`, not OOB. ⇒ remaining
+      suspects: (a) **vertex shader `vertex-buffer.vert`** — a real
+      GLSL-compiled shader the APU sh engine must execute (vgtop
+      vectors use APU's own known-good shaders, NOT this one); R8G8→
+      vec2 unpack + position transform could hit a sh-engine bug;
+      (b) **render-target/readback** — R8G8B8A8_UNORM color attach +
+      host compare path. Next: disassemble `vertex-buffer.vert`
+      SPIR-V→APU-sh ISA to check for an unsupported/mis-executed op,
+      or build a vgtop vector replaying the EXACT CTS vertex data +
+      shader + POINT_LIST config.
     - [ ] `api.descriptor_set.descriptor_set_layout_binding.layout_binding_order`: Fail
       "Verifier failed: 513 == 257, at index 0". The shader read the value of another
       binding: the layout's bindings are created out of numeric order, and a lookup keyed
