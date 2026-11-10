@@ -20,6 +20,14 @@
   `--reply-vectors ue_sm5_reply 1`. vnfront (all arms) and vnrep pass on the
   pinned v5.008. Regenerating needs the uapi `virtio_gpu.h` from
   `g6lc_qemu/linux-dist/ubuntu/kernel` (not in CI; vectors stay committed).
+- [x] gen-sfu host reproducibility: LAPACK `lstsq`, numpy SIMD ufuncs,
+  glibc libm and ndarray `**int` each moved emitted f32 coefficients by
+  tens of ulps across hosts on this ill-conditioned Vandermonde fit.
+  Replaced with deterministic Gram-Schmidt (math.fsum), pure-Python
+  Taylor/argument-reduction transcendentals and fixed-order monomial
+  powers; `--check` now prints the drift diff. GitHub run 42878124082
+  green on all 9 lanes (platform x2, rtl-lint, sv-timing, bios, qemu,
+  ai-tensor, apu standard, storamic standard).
 - [ ] `shwave` RTL bench needs a writable `~/.cache/librecore` (simulator PGO
   receipt cache); blocked under WSL here, expected fine on CI runners. Watch
   the `full` dispatch run.
