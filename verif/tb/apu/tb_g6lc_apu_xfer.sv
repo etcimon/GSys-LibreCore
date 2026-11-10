@@ -426,6 +426,32 @@ module tb_g6lc_apu_xfer;
                     bad < 0 ? 8'h0 : rd8(AB + 64'(bad))));
   endtask
 
+  // write a deterministic texel pattern into every texel byte of an image
+  // (all layers/mips) in BOTH the aperture and the epm shadow; pitch
+  // padding is left at whatever poison set.
+  task automatic fill_img(input apu_xfer_img_t im, input int unsigned sd);
+    int bpp;
+    bpp = APU_VN_IMG_BPP[im.fmt[3:0]];
+    for (int l = 0; l < int'(im.layers); l++)
+      for (int m = 0; m < int'(im.mips); m++) begin
+        int wm, hm, pit, moff;
+        wm   = (im.w >> m) == 0 ? 1 : (im.w >> m);
+        hm   = (im.h >> m) == 0 ? 1 : (im.h >> m);
+        pit  = m_pitch(im, m);
+        moff = m_mip_off(im, m);
+        for (int y = 0; y < hm; y++)
+          for (int x = 0; x < wm; x++)
+            for (int b = 0; b < bpp; b++) begin
+              automatic logic [7:0] v =
+                8'((sd*31 + x*7 + y*13 + m*17 + l*29 + b*3) & 8'hff);
+              wr8(AB + 64'(im.base + l*im.layer_bytes + moff +
+                           y*pit + x*bpp + b), v);
+              ewr8(im.base + l*im.layer_bytes + moff +
+                   y*pit + x*bpp + b, v);
+            end
+      end
+  endtask
+
   // ---- COPY driver ------------------------------------------------------------
   task automatic run_copy(input int unsigned nreg,
                           input logic [63:0] soff [], doff [], sz [],
@@ -623,6 +649,99 @@ module tb_g6lc_apu_xfer;
            src_base: '0, src_size: '0,
            dst_base: bb[31:0], dst_size: bs[31:0], img0: im, img1: '0},
           '0, pl);
+  endtask
+
+  // ---- I2I / BLIT -------------------------------------------------------------
+  // element-wise image->image copy on the epm shadow.  I2I region = 17 words
+  // {srcSub{asp,mip,bsl,bsc}, srcOff{x,y,z}, dstSub{asp,mip,bdl,bdc},
+  //  dstOff{x,y,z}, ext{x,y,z}}; dst[dstOff+i] = src[srcOff+i].
+  task automatic m_apply_i2i(input apu_xfer_img_t s, input apu_xfer_img_t d,
+                             input int unsigned nr, input logic [31:0] rg []);
+    int bpp;
+    bpp = APU_VN_IMG_BPP[s.fmt[3:0]];
+    for (int r = 0; r < int'(nr); r++) begin
+      int sm, dm, sbl, sbc, dbl, dbc, sx, sy, dx, dy, ex, ey;
+      int spit, dpit, smoff, dmoff;
+      sm   = rg[17*r+1];  dm   = rg[17*r+8];
+      sbl  = rg[17*r+2];  sbc  = rg[17*r+3];
+      dbl  = rg[17*r+9];  dbc  = rg[17*r+10];
+      sx   = rg[17*r+4];  sy   = rg[17*r+5];
+      dx   = rg[17*r+11]; dy   = rg[17*r+12];
+      ex   = rg[17*r+14]; ey   = rg[17*r+15];
+      spit = m_pitch(s, sm); smoff = m_mip_off(s, sm);
+      dpit = m_pitch(d, dm); dmoff = m_mip_off(d, dm);
+      for (int l = 0; l < sbc; l++)
+        for (int y = 0; y < ey; y++)
+          for (int x = 0; x < ex; x++)
+            for (int b = 0; b < bpp; b++)
+              ewr8(d.base + (dbl+l)*d.layer_bytes + dmoff +
+                   (dy+y)*dpit + (dx+x)*bpp + b,
+                   erd8(s.base + (sbl+l)*s.layer_bytes + smoff +
+                        (sy+y)*spit + (sx+x)*bpp + b));
+    end
+  endtask
+
+  task automatic run_i2i(input apu_xfer_img_t s, input apu_xfer_img_t d,
+                         input int unsigned nr, input logic [31:0] rg [],
+                         output apu_sh_done_t pl);
+    for (int r = 0; r < int'(nr); r++)
+      for (int w = 0; w < 17; w++) stage_w[17*r + w] = rg[17*r + w];
+    stage(17*int'(nr), pb);
+    issue('{op: APU_XFER_OP_I2I, pay_base: 32'(pb),
+           regions: 16'(nr),
+           src_base: '0, src_size: '0,
+           dst_base: '0, dst_size: '0, img0: s, img1: d}, '0, pl);
+  endtask
+
+  // VkImageBlit region = 20 words {srcSub{4}, srcOff0{3}, srcOff1{3},
+  // dstSub{4}, dstOff0{3}, dstOff1{3}}.  NEAREST: unscaled (src ext ==
+  // dst ext) is the I2I copy; scaled maps each dst texel to
+  // src[srcOff0 + (d-dstOff0)*srcExt/dstExt] (floor).
+  task automatic m_apply_blit(input apu_xfer_img_t s, input apu_xfer_img_t d,
+                              input int unsigned nr, input logic [31:0] rg []);
+    int bpp;
+    bpp = APU_VN_IMG_BPP[s.fmt[3:0]];
+    for (int r = 0; r < int'(nr); r++) begin
+      int sm, dm, sbl, sbc, dbl, dbc;
+      int sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1;
+      int sex, sey, dex, dey, spit, dpit, smoff, dmoff;
+      sm   = rg[20*r+1];  dm   = rg[20*r+11];
+      sbl  = rg[20*r+2];  sbc  = rg[20*r+3];
+      dbl  = rg[20*r+12]; dbc  = rg[20*r+13];
+      sx0  = rg[20*r+4];  sy0  = rg[20*r+5];
+      sx1  = rg[20*r+7];  sy1  = rg[20*r+8];
+      dx0  = rg[20*r+14]; dy0  = rg[20*r+15];
+      dx1  = rg[20*r+17]; dy1  = rg[20*r+18];
+      sex  = sx1 - sx0;  sey  = sy1 - sy0;
+      dex  = dx1 - dx0;  dey  = dy1 - dy0;
+      spit = m_pitch(s, sm); smoff = m_mip_off(s, sm);
+      dpit = m_pitch(d, dm); dmoff = m_mip_off(d, dm);
+      for (int l = 0; l < sbc; l++)
+        for (int yy = 0; yy < dey; yy++)
+          for (int xx = 0; xx < dex; xx++) begin
+            int mx, my;
+            // NEAREST source texel for dst (dx0+xx, dy0+yy)
+            mx = sx0 + ((xx * sex) / dex);
+            my = sy0 + ((yy * sey) / dey);
+            for (int b = 0; b < bpp; b++)
+              ewr8(d.base + (dbl+l)*d.layer_bytes + dmoff +
+                   (dy0+yy)*dpit + (dx0+xx)*bpp + b,
+                   erd8(s.base + (sbl+l)*s.layer_bytes + smoff +
+                        my*spit + mx*bpp + b));
+          end
+    end
+  endtask
+
+  task automatic run_blit(input apu_xfer_img_t s, input apu_xfer_img_t d,
+                          input int unsigned nr, input logic [31:0] rg [],
+                          output apu_sh_done_t pl);
+    for (int r = 0; r < int'(nr); r++)
+      for (int w = 0; w < 20; w++) stage_w[20*r + w] = rg[20*r + w];
+    stage(20*int'(nr), pb);
+    issue('{op: APU_XFER_OP_BLIT, pay_base: 32'(pb),
+           regions: 16'(nr),
+           src_base: '0, src_size: '0,
+           dst_base: '0, dst_size: '0, img0: s, img1: d}, '0, pl);
   endtask
 
   // ---- main sequence -----------------------------------------------------------
@@ -957,6 +1076,122 @@ module tb_g6lc_apu_xfer;
       check(pl.code == APU_SH_DONE_OK, "i2b done code");
       cmp_range(DSTB, DSTB + 960, "i2b buffer");
       axi_balance("i2b");
+    end
+
+    // ============ I2I / BLIT image->image ================================
+    // IS8: src 8x8 RGBA8 mips1 lay1 (pitch64 -> layer_bytes 512)
+    // ID8: dst 8x8 same geometry at IMGB+0x1000
+    // ID16: dst 16x16 at IMGB+0x2000 (pitch64 -> layer_bytes 1024)
+    begin
+      automatic apu_xfer_img_t is8, id8, id16, is5, id10;
+      automatic logic [31:0] rg [];
+      is8  = '{base: IMGB,         size: 512,  w: 8,  h: 8,  fmt: 8'd2,
+               mips: 5'd1, layers: 10'd1, itype: 2'd1, layer_bytes: 32'd512};
+      id8  = '{base: IMGB + 32'h1000, size: 512,  w: 8,  h: 8,  fmt: 8'd2,
+               mips: 5'd1, layers: 10'd1, itype: 2'd1, layer_bytes: 32'd512};
+      id16 = '{base: IMGB + 32'h2000, size: 1024, w: 16, h: 16, fmt: 8'd2,
+               mips: 5'd1, layers: 10'd1, itype: 2'd1, layer_bytes: 32'd1024};
+      // odd-width pair for the 2x path's 4-byte tail fragment: src 5x4
+      // (pitch64, 20 B used/row -> 8,8,4 B read beats) -> dst 10x8
+      is5  = '{base: IMGB + 32'h3000, size: 256, w: 5,  h: 4,  fmt: 8'd2,
+               mips: 5'd1, layers: 10'd1, itype: 2'd1, layer_bytes: 32'd256};
+      id10 = '{base: IMGB + 32'h4000, size: 512, w: 10, h: 8,  fmt: 8'd2,
+               mips: 5'd1, layers: 10'd1, itype: 2'd1, layer_bytes: 32'd512};
+
+      // ---- I2I full 8x8 copy -------------------------------------------
+      cases++;
+      rg = new[17];
+      rg[0]=1; rg[1]=0; rg[2]=0; rg[3]=1;          // srcSub asp/mip/base/lay
+      rg[4]=0; rg[5]=0; rg[6]=0;                  // srcOff 0,0,0
+      rg[7]=1; rg[8]=0; rg[9]=0; rg[10]=1;         // dstSub
+      rg[11]=0; rg[12]=0; rg[13]=0;               // dstOff 0,0,0
+      rg[14]=8; rg[15]=8; rg[16]=1;               // extent 8,8,1
+      poison(is8.base, 512); poison(id8.base, 512);
+      fill_img(is8, 7);
+      run_i2i(is8, id8, 1, rg, pl);
+      check(pl.code == APU_SH_DONE_OK, "i2i done code");
+      m_apply_i2i(is8, id8, 1, rg);
+      cmp_range(id8.base, id8.base + 512, "i2i dst");
+      cmp_range(is8.base, is8.base + 512, "i2i src");
+      axi_balance("i2i");
+
+      // ---- I2I sub-rect 4x4 src(1,1)->dst(2,2) --------------------------
+      cases++;
+      rg[4]=1; rg[5]=1;                            // srcOff 1,1,0
+      rg[11]=2; rg[12]=2;                          // dstOff 2,2,0
+      rg[14]=4; rg[15]=4;                          // extent 4,4,1
+      poison(id8.base, 512);
+      fill_img(is8, 11);
+      // dst outside the 4x4 window stays poison: reset shadow to poison
+      // for the whole dst then apply only the window (m_apply handles it)
+      for (int i = 0; i < 512; i++) ewr8(id8.base + i, 8'hA5);
+      run_i2i(is8, id8, 1, rg, pl);
+      check(pl.code == APU_SH_DONE_OK, "i2i sub done code");
+      m_apply_i2i(is8, id8, 1, rg);
+      cmp_range(id8.base, id8.base + 512, "i2i sub dst");
+      axi_balance("i2i_sub");
+
+      // ---- BLIT unscaled 8x8->8x8 (XBlitCvt -> I2I) ----------------------
+      cases++;
+      rg = new[20];
+      rg[0]=1; rg[1]=0; rg[2]=0; rg[3]=1;          // srcSub
+      rg[4]=0; rg[5]=0; rg[6]=0;                  // srcOff0 0,0,0
+      rg[7]=8; rg[8]=8; rg[9]=1;                  // srcOff1 8,8,1
+      rg[10]=1; rg[11]=0; rg[12]=0; rg[13]=1;      // dstSub
+      rg[14]=0; rg[15]=0; rg[16]=0;               // dstOff0 0,0,0
+      rg[17]=8; rg[18]=8; rg[19]=1;               // dstOff1 8,8,1
+      poison(id8.base, 512);
+      fill_img(is8, 23);
+      for (int i = 0; i < 512; i++) ewr8(id8.base + i, 8'hA5);
+      run_blit(is8, id8, 1, rg, pl);
+      check(pl.code == APU_SH_DONE_OK, "blit unscaled done code");
+      m_apply_blit(is8, id8, 1, rg);
+      cmp_range(id8.base, id8.base + 512, "blit unscaled dst");
+      axi_balance("blit_unscaled");
+
+      // ---- BLIT scaled 8x8->16x16 NEAREST (dedicated 2x path) ---------
+      // exact-2x, bpp==4, zero offsets, mip0/layer0: each src texel -> a
+      // {texel,texel} dst frag, each src row emitted on two dst rows.
+      cases++;
+      rg[17]=16; rg[18]=16;                       // dstOff1 16,16,1 (2x)
+      poison(id16.base, 1024);
+      fill_img(is8, 31);
+      for (int i = 0; i < 1024; i++) ewr8(id16.base + i, 8'hA5);
+      run_blit(is8, id16, 1, rg, pl);
+      check(pl.code == APU_SH_DONE_OK, "blit scaled done code");
+      m_apply_blit(is8, id16, 1, rg);
+      cmp_range(id16.base, id16.base + 1024, "blit scaled dst");
+      cmp_range(is8.base, is8.base + 512, "blit scaled src");
+      axi_balance("blit_scaled");
+
+      // ---- BLIT scaled 5x4->10x8 NEAREST: odd width -> 4B tail frag ----
+      cases++;
+      rg = new[20];
+      rg[0]=1; rg[1]=0; rg[2]=0; rg[3]=1;          // srcSub
+      rg[4]=0; rg[5]=0; rg[6]=0;                  // srcOff0 0,0,0
+      rg[7]=5; rg[8]=4; rg[9]=1;                  // srcOff1 5,4,1
+      rg[10]=1; rg[11]=0; rg[12]=0; rg[13]=1;      // dstSub
+      rg[14]=0; rg[15]=0; rg[16]=0;               // dstOff0 0,0,0
+      rg[17]=10; rg[18]=8; rg[19]=1;              // dstOff1 10,8,1 (2x)
+      poison(is5.base, 256); poison(id10.base, 512);
+      fill_img(is5, 41);
+      run_blit(is5, id10, 1, rg, pl);
+      check(pl.code == APU_SH_DONE_OK, "blit scaled odd done code");
+      m_apply_blit(is5, id10, 1, rg);
+      cmp_range(id10.base, id10.base + 512, "blit scaled odd dst");
+      cmp_range(is5.base, is5.base + 256, "blit scaled odd src");
+      axi_balance("blit_scaled_odd");
+
+      // ---- BLIT 8x8->12x12 (non-2x): still refused, no write -----------
+      cases++;
+      rg[17]=12; rg[18]=12;                       // dstOff1 12,12,1
+      poison(id16.base, 1024);
+      for (int i = 0; i < 1024; i++) ewr8(id16.base + i, 8'hA5);
+      run_blit(is8, id16, 1, rg, pl);
+      check(pl.code == APU_SH_DONE_FAULT,
+            "blit non2x FAULT (gate holds)");
+      cmp_range(id16.base, id16.base + 1024, "blit non2x dst untouched");
+      axi_balance("blit_non2x");
     end
 
     // ============ CLEAR: five format classes ===============================

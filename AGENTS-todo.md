@@ -1317,15 +1317,91 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
       mat2(3,2,-6,-8)"); every column-major shape passes. The decoration already
       reaches the RTL: `spirv_scan.py` `h_72` folds `RowMajor` (dec 4) into the member-row
       flags byte as bit 4, and shwave reads that byte as `mb_fl` (only bit 6 `MF_DROP` is
-      used). Missing pieces: (1) at the member step (`cmstride_q <= mb_mst`) also latch
-      `cmrow_q <= mb_fl[4]`, cleared where `cmstride_q` is cleared; (2) `W_CHFIN` writes it
-      into pointer word 3 bit 16 (word3 = {binding[15:8] @31:24, free, MatrixStride @15:0});
-      (3) whole-matrix LSU: `ls_mad = row ? comp*msw + col : col*msw + comp`; (4) the
-      access-chain `W_CHX` matrix and vector steps for a row-major parent: the column index
-      steps 4 bytes and the in-column component steps MatrixStride (the `_comp_access` /
-      `_store_cols` variants); (5) mirror in `spirv_model.py` (`cmstride` / word3 / ls_mad)
-      and add `sh_vectors` from it before the RTL. 72 cases in this slice; the same gap
-      covers every `row_major` case of the ssbo/ubo layout groups.
+      used). **Both sides implemented AND RTL-verified 2026-11-09:**
+      - *Model:* `spirv_model.mat_comp_off`/`vec_comp_off` implement row-major
+        (pointer word3 bit16/bit17, `row*MatrixStride + col*4`); `ssbo_rowmajor_1`
+        model output is **bit-exact vs the lavapipe oracle** (0 diffs at the
+        binding-1 offset; `.out.bin` packs binding0's 16 words first).
+      - *RTL:* commit `4e2ed7a60` landed the shwave row-major path —
+        `crm_q`/`cvs_q` access-chain walk + `ls_rm_q`/`ls_vs_q` LSU select
+        (`ls_mad` row-major `col*msw+row`, `ls_vsi` strided column vector),
+        `W_CHFIN` writes `cmstride_q` to pointer word3, member step latches
+        `crm_q <= mb_fl[4]`. This defect note **predates that commit** — the
+        CTS `row_major_*` Fail rows are stale pending a CTS rerun.
+      - *RTL verification (remote `shwave-fix`):* `+only=ssbo_rowmajor` →
+        seeds 1/2/3 ULP max=0, `opt_1/2/3` OU mism=0, `mut_0` robust —
+        **bit-exact through real RTL**. Only the CTS rerun remains to clear
+        the stale `row_major_*` ledger rows.
+      - *Vectors:* `ssbo_rowmajor_{1,2,3,opt_*,mut_0,bad_0}` committed and in the
+        shwave set.
+      72 cases in this slice; the same gap covers every `row_major` case of the
+      ssbo/ubo layout groups.
+    - [x] **`OpAtomicCompareExchange` operand-position RTL defect — found,
+      fixed, RTL-verified (2026-11-09):** the shwave `f_opid` operand decoder
+      read CAS (`opcode 230`) value/comparator at `oq[5]`/`oq[6]` — the
+      simple-atomic slots — but the SPIR-V grammar gives CAS an extra
+      comparator operand, so `Value`/`Comparator` sit at `ops[6]`/`ops[7]`
+      (matching `spirv_model.opid` and the lavapipe oracle). RTL therefore
+      compared `old` against the *data* value and wrote a scope constant, so
+      `atomicCompSwap` never incremented — `atomic_cas_*` failed by exactly
+      the 8-lane count (`got=…76d` vs `orc=…775`). Fix: dedicated `o==230`
+      branch in `f_opid` returning `oq[6]`/`oq[7]` for k=1/k=2 (only CAS has
+      the extended layout; 227–229/232–242 keep `oq[5]`). **Verified:** remote
+      `shwave-fix` `+only=atomic_cas,ssbo_rowmajor` → `PASS cases=16 checks=1025`
+      (`atomic_cas` cycles 3341→7303 as the CAS loop now retries correctly);
+      full 414-case suite shows **zero CAS/row-major regressions** — the only
+      remaining fails are `texlod_lin_{,opt_}_2` (texture-LOD linear returns 0
+      vs 1.0f), confirmed **pre-existing** on the unfixed binary (unrelated
+      RTL texture-LOD gap, separate work item). Build note: the 193 MB
+      `__0.cpp` TU is pathological for GCC `-Os` (>54 min, 0-byte `.s`); an
+      `-O0` compile (~22 min) produced a valid `.o` — used for both the
+      baseline and fix builds.
+    - [x] **`texlod_lin_{,opt_}_2` — RTL border-colour decode defect, FIXED
+      + VERIFIED (2026-11-09):** `OpImageSampleExplicitLod`
+      LINEAR at lod=0 with fractional coords near the edge returns `0`
+      where model+lavapipe give `1.0f`. Root cause: seed 2 is the only
+      `CLAMP_TO_BORDER` (`smpav=3`) case with `smpbc=4`
+      (`FLOAT_OPAQUE_WHITE`); `g6lc_apu_shwave` `f_bord16`/`f_bord32`
+      decoded `VkBorderColor` with a **wrong enum order** — it mapped
+      `{2,5}`→white, `{1,4}`→black, `{0,3}`→transparent, but the real
+      Vulkan enum is `{4,5}`→white, `{2,3}`→black, `{0,1}`→transparent.
+      So `bc=4` returned opaque-black(0) instead of white(1.0). The
+      graphics oracle `vn_golden._bord`/`ftex_bc` shared the same wrong
+      numbering, so `ftexc*` border tests passed consistently-wrong while
+      the compute path (`spirv_model.bord32`, lavapipe-verified) exposed
+      it. Fix (coordinated, keeps every test's intended colour): RTL
+      `f_bord16`/`f_bord32` → real enum; `vn_golden._bord` + `ftex_bc`
+      (`ftexc2` 2→4, `ftexcb` 1→2) → real enum; `ftexc*` `.hex` borderColor
+      field regenerated (`.exp` byte-identical — same visual result).
+      Verified `f_bord16/32` == `spirv_model.bord16/32` for all enum
+      0..7 × comp 0..3 (0 mismatches); int-border path already correct.
+      `test_vn_native_layouts` (13) + `test_vn_graphics_draw_replay` (95)
+      green. Reproduced identically pre-CAS-fix (unrelated to `f_opid`).
+      **Verified remote (2026-11-09):** rebuilt `tb_g6lc_apu_shwave` at
+      `-O0` (the `OPT_FAST/OPT_GLOBAL/OPT_SLOW=-O0` make override bypasses
+      the pathological `-Os` `__0.cpp`); focused `+only=texlod_lin,
+      texlod_lin_opt` → `PASS cases=11 checks=461` with `texlod_lin_2`/
+      `texlod_lin_opt_2` now ULP max=0; full suite 314+ cases **0 FAIL**
+      (was 24 fails confined to these two seeds pre-fix). **Verified
+      graphics path (2026-11-09, local WSL `vgtop` rebuild):** rebuilt
+      `tb_g6lc_apu_vgtop` from current RTL (border fix included,
+      `-Wno-UNSIGNED` for the pre-existing shwave:2465 lint); all four
+      border vectors PASS bit-exact (`maxulp=0`, 28 cases / 17,122
+      checks each): `ue_gpos_ftexcb_1` (borderColor=1), `ftexc_1`
+      (=5), `ftexc2_1` (=2), `ftexct_1`. **Full `ftex*` regression:
+      all 26 graphics-path texture vectors PASS bit-exact** (vgtop,
+      current RTL). **`vgsys` border regression (2026-11-09, DONE):**
+      rebuilt `tb_g6lc_apu_vgsys` on current RTL; all four `ftexc*`
+      vectors PASS bit-exact (`maxulp=0`, 28 cases / 17,291 checks
+      each): `ftexc_1`, `ftexc2_1`, `ftexcb_1`, `ftexct_1`. Build notes:
+      repo Verilator toolchain was stale (`tools/verilator` `source.id`
+      changed → rebuilt non-PGO via `APU_VERILATOR_PGO=0`); the CAS fix
+      (+3 lines at shwave ~828) shifted the pre-existing `UNSIGNED`
+      lint site 2462→2465, so `apu_exec.vlt` waiver updated
+      `-lines 2462` → `-lines 2465-2466` (covers unroll-index-zero
+      variant). Built with `APU_SIM_PGO=0` (direct `--binary`; the
+      sim-PGO multi-phase wrapper stalled after `generate`). Border
+      fix now verified on BOTH graphics testbenches (vgtop + vgsys).
     - [ ] Rerun of all 150 a-front defects on the fixed tree
       (`apu-leaf-20261103T053405-bb64708071fb`, 6 shards): 150/150 still Fail, so none
       were caused by the polygon-mode bug. Open clusters: `binding_model.descriptor_copy`
@@ -1333,17 +1409,160 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
       `memory.pipeline_barrier` 43 (below), `memory.binding` 30 (`vkCreateImage` ->
       `FORMAT_NOT_SUPPORTED` on 8x33/257x33 images that the profile's format properties
       claim; plus `buffer_1048577`), `api.descriptor_set` 2, `conformance_version` 1.
-    - [ ] `memory.binding.*image*` (26 cases): root cause found. The test creates
-      `VK_FORMAT_R8G8B8A8_UINT` (41), LINEAR, TRANSFER_SRC|DST, without querying
-      support, and the device image-format table has no entry for it (`img_fmts.VK2D[41]
-      = 0xFF`; 15 of 16 device ids are used). So `vkCreateImage` correctly returns
-      FORMAT_NOT_SUPPORTED. The format is mandatory (optimal-tiling sampled, storage,
-      colour attachment and transfer), so the fix is a real format, not an error-code
-      change: give device id 15 (4 bpp, integer class) to R8G8B8A8_UINT across
-      `gen_vn_tables` (APU_VN_IMG_FMT/IMG_BPP/ATTR), `img_fmts`, the xfer copy path (a raw
-      4-byte copy, as RGBA8_UNORM), the sampler/texel integer fetch and the profile
-      `formats` row. Add an xfer TB case and vn vectors. Optimal and linear tiling share
-      the linear device layout. The `buffer_1048577` cases are a separate check.
+      NOTE: `memory.binding` is now fully green (30/30, see below) and
+      `api.descriptor_set` re-validated on the live leaf
+      `apu-leaf-20261109T202136-65b0857fc65f` (deqp-vk 1.4.6.2, caselist
+      `cts-apidesc.txt`): **4 Pass / 1 NotSupported / 1 Fail** —
+      `descriptor_set_layout_lifetime.{graphics,compute}` Pass (the two
+      previously-open lifetime cases are RESOLVED), `empty_set.normal` Pass,
+      `layout_binding_order` Pass (re-confirms the stale-build resolution),
+      `empty_set.push_descriptor` NotSupported (`VK_KHR_push_descriptor`
+      genuinely absent — honest), `descriptor_set_layout_binding.
+      update_subsequent_binding` **Fail** (bare `Fail`, no verifier detail).
+      ROOT CAUSE CONFIRMED 2026-11-09 — missing spec-mandated **Consecutive
+      Binding Updates** (VkWriteDescriptorSet / vkUpdateDescriptorSets §):
+      "If dstBinding has fewer than descriptorCount array elements remaining
+      from dstArrayElement, the remainder updates the subsequent binding
+      dstBinding+1 at array element 0 (skipping count==0 bindings,
+      recursively); consecutive bindings must have identical
+      VkDescriptorType/stageFlags/bindingFlags/immutable-samplers."
+      TEST MECHANISM (vktApiDescriptorSetTests.cpp
+      `descriptorSetLayoutBindingOrderingTest`): layout binding0=UBO×2,
+      binding1=UBO×1, binding2=SSBO×1; ONE write dstBinding=0 elem=0
+      count=3 UNIFORM_BUFFER must spill elem[2] into binding1[0]; compute
+      shader reads uniformbufferarray[0],[1] + uniformbuffer2, expects 5,5,5.
+      CURRENT BEHAVIOR: vn_golden.py write path (~line 3557) sees
+      `darr+dcnt > row['count']` → poisons set, writes only the in-range
+      prefix, DROPS the remainder — binding1[0] never written → shader reads
+      undefined → resultPtr[2]!=5 → Fail. Same drop-excess in vnfront.sv
+      StUpd* staged walk (~line 4791+, StUpdWBegin/StUpdInfo/StUpdElemCk).
+      IMPLEMENTATION SURFACE: (1) vn_golden.py `_upd_*` write loop — walk
+      bindings forward on overflow; (2) vnfront.sv StUpd* state machine —
+      advance to next compatible binding row when current fills; (3) the
+      compatibility check needs stageFlags/bindingFlags/immutable-sampler
+      identity which `lay_rows` does NOT currently decode (ObjPay w0/w1 has
+      binding/type/count/off/dyn/dynbase/immutable/sampler_base only — may
+      need ObjPay format + gen_vn_tables extension). BLOCKER for full
+      fidelity: stageFlags/bindingFlags not in row decode; type-match-only
+      spillover covers the CTS case but is not fully spec-faithful. Likely
+      related to `binding_model.descriptor_copy` cluster.
+      GOLDEN MODEL FIXED + VERIFIED 2026-11-09: vn_golden.py vkUpdateDescriptorSets
+      WRITE path now walks rows forward on overflow (binding-sorted order,
+      skips count==0, type-match gate, consumes leftover staged words) —
+      replaces the old poison+drop. New regression test
+      `test_vn_descriptor_operands.py::
+      test_update_spills_descriptor_count_into_subsequent_binding` reproduces
+      the CTS sequence (binding0×2 + binding1×1, write count=3 → elem2 lands
+      binding1[0]); FAILS on pre-fix code (`stale or poisoned` KeyError),
+      PASSES after. Descriptor/layout/bindings/arrays suites all green.
+      RTL SPILLOVER IMPLEMENTED 2026-11-09 (vnfront.sv, verilator
+      --lint-only CLEAN through Flist.apu_vnfront): new per-binding array
+      cursor `arr_i_q[31:0]` (= upd_arr_q+ent_j_q for first binding, reset
+      to 0 on spill) replaces `upd_arr_q+ent_j_q` at all 3 record-address
+      sites + the StUpdInfo bound; `rw_seq_q` makes StRowSc take the row at
+      rw_i_q unconditionally (W0C/W1C bypass binding compare); StUpdInfo
+      spills via `rw_i_q+1`→StRowSc→new `StUpdSpillC` (type-compat gate,
+      poison+consume-left on incompatible/missing row, arr_i_q<=0 continue);
+      StUpdWBad now poisons only missing/incompatible row or
+      dstArrayElement-OOB (`rw_cnt_q!=0 && upd_arr_q>=rw_cnt_q`) — the
+      old `arr+dcnt>cnt` upfront poison removed (overflow is legal spill).
+      rw_seq_q self-cleans in StUpdSpillC so the shared StRowSc copy path
+      (StUpdCpS/StUpdCpDSet) is unaffected; non-overflow writes are
+      bit-identical (arr_i_q == upd_arr_q+ent_j_q). Traced: CTS seq
+      (b0×2+b1×1, count=3) → b0[0],b0[1],b1[0] exactly per spec. VERIFY on
+      leaf apu-leaf-20261109T212439-b0fc668af01a (cts-apidesc.txt).
+      `conformance_version` stays intentionally unqualified.
+      HARNESS NOTE — guest QEMU env: `G6LC_QEMU` must be the
+      qemu-system-riscv64 BINARY (its dirname is prepended to PATH so
+      qemu-img resolves; proxy testharness_proxy.py:2357-2359), NOT a
+      directory; pair with `G6LC_QLIB=<...>/qemu-bundle/usr/local/share/
+      qemu`. Working values: G6LC_QEMU=/opt/testharness/g6lc-qemu/build/
+      qemu/qemu-system-riscv64, G6LC_QLIB=/opt/testharness/g6lc-qemu/
+      build/qemu/qemu-bundle/usr/local/share/qemu. Passing a directory
+      gives `PermissionError [Errno 13]` in drive_guest.py. qemu-img only
+      needed during provision() (skipped on cached guest).
+    - [ ] D24S8 feature-advertising CTS validation — leaf
+      `apu-leaf-20261109T225333-f3df0abe8881` ran `cts-d24s8.txt`
+      (injected into remote ctsdata.img via debugfs; the image predated
+      the caselist — first relaunch `cf7205ae1223` failed "Failed to
+      open case list file", fixed by debugfs -w write of both
+      cts-d24s8.txt @inode1943 and cts-desccopy.txt @inode1944).
+      RESULT 2026-11-09: leaf PASS (bridge+selftest 2651+guest clean,
+      no crashes) but ALL 17 cases = **NotSupported**, NOT exercised:
+      blockers are (a) missing device extensions VK_KHR_copy_commands2,
+      VK_KHR_format_feature_flags2, VK_KHR_maintenance5,
+      VK_KHR_maintenance10, VK_KHR_create_renderpass2,
+      VK_KHR_copy_memory_indirect; (b) D24S8_UNORM_S8_UINT format
+      features not advertised for the tested usages ("Format not
+      supported" vktApiCopyImageToImageTests.cpp:567 /
+      vktApiImageClearingTests.cpp:823 / vktApiUseAfterCopyTests.cpp:372);
+      (c) MSAA stencil sample count unsupported
+      (vktApiCopyDepthStencilMSAATests.cpp:1035). So the D24S8 stencil
+      RTL path is NOT yet CTS-validated — it needs the device profile
+      to advertise those extensions + the D24S8 format usage/feature
+      bits before deqp will run the cases. Earlier leaf
+      `apu-leaf-20261109T205729-9802904a1f88` failed on a
+      harness-env mistake — `G6LC_CTSDATA` is consumed VERBATIM as the
+      ctsdata.img path (run-guest.sh:228), so pass the `.img` file or use
+      `G6LC_CTS_CACHE=<dir>` which appends `/ctsdata.img`. ALSO OBSERVED:
+      `bridge-selftest` FAIL `ue_sm5_transport CK_REPLY @0x1c70
+      got=0x2000000 exp=0x800000` on that leaf. bridge_selftest replays
+      STATIC `.exp` golden records (bridge_selftest.py:232), NOT live
+      vn_golden — so this is an RTL-vs-recorded-golden divergence
+      INDEPENDENT of the vn_golden.py spillover edit (0x2000000 vs 0x800000
+      = a reply bitmask/flags difference). Suspects: real RTL bug in the
+      uncommitted tree, a stale `.exp` after intentional RTL change, or
+      flake. The tape DOES run a full descriptor lifecycle
+      (CreateSetLayout/Pool/Alloc/Update/Bind/Free) so it may also be a
+      genuine descriptor-path divergence. If it reproduces deterministically
+      on the relaunch it is a real golden-vs-RTL inconsistency to isolate —
+      and once RTL spillover lands, re-check whether this tape's
+      vkUpdateDescriptorSets overflows a binding (would then be the SAME
+      root cause as update_subsequent_binding).
+      RESOLVED 2026-11-09 — STALE `.exp`, not an RTL bug: regen
+      ue_sm5_transport with current vn_golden gives exp word 0x2000000 at
+      the CK_REPLY offset, EXACTLY what RTL produced (`got=0x2000000`).
+      The on-disk `.exp` (0x800000) predated uncommitted golden drift.
+      VN_SPILL_DEBUG trace confirms ue_sm5_transport does NOT exercise
+      spillover (no overflow write) → its .exp change is unrelated prior
+      drift; regen'd ue_sm5_transport + ue_probe_bufcopy_1 .exp via
+      --probe-sessions. New leaf selftest verifies the fix. ALSO: leaf
+      205729 guest stage failed on wrong G6LC_QEMU (directory not binary)
+      — D24S8 guest CTS still pending; relaunch with correct QEMU env.
+      SELFTEST VERIFIED PASS 2026-11-09 on leaf
+      apu-leaf-20261109T212439-b0fc668af01a: `[selftest] total checks=2651
+      -> PASS` — ue_sm5_transport 1793 checks + ue_probe_bufcopy_1 822
+      checks + venusoff 19 all green WITH the spillover RTL + regen'd
+      .exp. Confirms (a) CK_REPLY was stale-.exp, (b) spillover RTL
+      regresses nothing on non-overflow vectors. Guest CTS
+      (cts-apidesc.txt) running for update_subsequent_binding verdict.
+      CTS VERIFIED PASS 2026-11-09 on leaf
+      apu-leaf-20261109T221342-2058f1c9ec83 (G6LC_ONLY=cts, correct
+      G6LC_QEMU binary + QLIB): api.descriptor_set = 5 Pass + 1
+      NotSupported. `update_subsequent_binding` **Pass** — the RTL
+      spillover (arr_i_q + rw_seq_q next-row scan + StUpdSpillC) is
+      CTS-verified against real deqp-vk. `layout_binding_order` now
+      **Pass** (was "Verifier failed: 513 == 257" — plausibly resolved
+      by the spillover path fix: the shared StUpd*/StRowSc row-scan
+      previously poisoned overflowing writes; needs no further action
+      unless it regresses). `empty_set.push_descriptor` NotSupported =
+      legit VK_KHR_push_descriptor feature gate, not a bug. bridge-
+      selftest 2651 PASS + guest PASS on the same leaf.
+    - [x] `memory.binding.*image*` (26 cases) — **RESOLVED + VERIFIED
+      2026-11-09.** Root cause was `VK_FORMAT_R8G8B8A8_UINT` (VkFormat 41)
+      having no device image-format id (`img_fmts.VK2D[41]=0xFF`), so
+      `vkCreateImage` correctly returned FORMAT_NOT_SUPPORTED. The format
+      is mandatory, so the fix was a real format: `R8G8B8A8_UINT` was
+      added to the profile `[formats]` row (`uint=1, bpp=4`,
+      SAMPLED|STORAGE|TRANSFER|COLOR_ATTACHMENT) and picked up by
+      `gen_vn_tables` `img_fmt_tables()` as **device id 15** (4 bpp,
+      integer class; ATTR=0x0B = 4 comps + uint). It shares the linear
+      device layout with RGBA8_UNORM for raw 4-byte transfer copies.
+      Full `cts-b9-memory-binding.txt` (30 cases: 26 image + 4 buffer)
+      run on live leaf `apu-leaf-20261109T165054-1b9aa19b36d4`:
+      **Passed 30/30, Failed 0/30** — the whole memory.binding suite is
+      green (image FORMAT_NOT_SUPPORTED cluster + buffer_1048577 heap
+      fix both confirmed together).
     - [x] **Root cause found and fixed (2026-11-03): list draws over 63 vertices.**
       `g6lc_apu_rast` batched vertex shading only for TRIANGLE_LIST. Every other
       topology with `vertex_count > VSB` (63) was refused `APU_SH_DONE_UNSUPPORTED`
@@ -1414,6 +1633,78 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
       host map/unmap of a > 1 MiB blob, the vgpages run for 257 pages, or the guest-side
       staging. Next: a vgsys/golden session with a 1 MiB + 1 buffer (mapped write ->
       copy -> mapped read) to localize it without a CTS run.
+      **LIVE-LEAF CONFIRMED + BISECTED (2026-11-09):** remote CTS leaf is now fully
+      operational (see layout_binding_order note). `regular.suballocated.
+      buffer_1048577` **FAILS on the current build** (deqp-vk 1.4.6.2, 41 s,
+      `<Result StatusCode="Fail">`) — a REAL defect, not a stale build. Wrote guest
+      reproducer `verif/tb/apu/bridge/guest/vkmembig.c` (wired into cidata +
+      drive_guest `G6LC_ONLY=vkmembig`): host-write -> vkCmdCopyBuffer -> host-read
+      swept over {33..8 MiB}. **host-vis->host-vis round-trip PASSES at every size
+      incl. 1 MiB+1** — so the simple aperture copy is clean. Memory layout: type0
+      heap0 = DEVICE_LOCAL (private arena), type1 heap1 = HOST_VISIBLE|COHERENT|
+      CACHED. CTS src/dst use MemoryHostVisible (type1) but bound targets use
+      deCtz32(memoryTypeBits) -> **type0 device-local**, so CTS does
+      host-vis -> dev-local -> host-vis two-hop. Added `roundtrip2` (3 buffers,
+      cross-domain) + `roundtrip3` (CTS-faithful: 10 dev-local targets,
+      bindBufferMemory2, separate submits per direction) to vkmembig.
+      **ROOT CAUSE = device-local heap too small (NOT a copy bug):**
+      `vkmembig` `roundtrip2` (host-vis->dev-local->host-vis, combined CB)
+      **PASSED at 1048577** — cross-domain copy is correct. But
+      `roundtrip3` (CTS-faithful: 10 device-local targets, bindBufferMemory2)
+      died at `vkAllocateMemory -> -2 VK_ERROR_OUT_OF_DEVICE_MEMORY`.
+      heap0 (type0, DEVICE_LOCAL private arena) = **8 MiB**
+      (`heap0_size=0x800000` in vn_device_profile.toml) < 10 x ~1 MiB+1
+      CTS device-local allocs (~10.5 MiB). Only `buffer_1048577` (the
+      largest size) overflows; smaller sizes fit. **FIX implemented:**
+      grew the ALLOC_PRIV arena 8 -> 32 MiB by repartitioning the 128 MiB
+      SHM DRAM carve — managed window 72 -> 96 MiB, objmem/PayMem static
+      carve moved up to the new 96 MiB boundary (objmem+pay uses only
+      ~21 MiB of its former 56 MiB allotment, so ~35 MiB slack donated).
+      Guest window unchanged at 64 MiB (SHM_LEN / QEMU / FDT untouched —
+      APU_SHM_BYTES still 128 MiB). Files: g6lc_apu_vg_pkg.sv
+      (MANAGED_BYTES 0x0480->0x0600_0000, PAGES 18432->24576),
+      g6lc_apu_pkg.sv (SHM_MANAGED_BYTES mirror), g6lc_apu_objtab_pkg.sv
+      (OBJMEM_OFF 0x0480->0x0600_0000), vn_device_profile.toml
+      (heap0_size 0x800000->0x2000000), vn_golden.py (VGP_PAGES 24576),
+      regenerated g6lc_apu_vn_pkg.sv + vn_tables.md. All 881 vn Python
+      tests PASS; testbenches use pkg constants (auto-update). NOTE:
+      regenerated package also picks up pending D24S8/format deltas
+      (0x4200/0x21 words) that were stale vs the working profile.
+      Also seen: large copies print `MESA-VIRTIO stuck in fence wait`
+      and can hit `ring fatal error`/`dead=1` (cmdexec watchdog
+      wd_fire, 2^30 stall cycles). NOTE: non-CTS guest runs need
+      `G6LC_GUEST_MEM=2048` — default 224 MiB OOMs the virtio_gpu probe.
+      **WATCHDOG INVESTIGATED + RESOLVED-AS-PERF (2026-11-09):** re-ran
+      `vkmembig` on the fixed 32 MiB build
+      (`apu-leaf-20261109T172157-f66570cb00fa`). Result: `xdom_cts`
+      (CTS-faithful 10 dev-local targets) **PASS**; all host-vis copies
+      **PASS through 2 MiB**; bridge reports **`dead=0`, no DEVICE_LOST**.
+      The stall is NOT a device hang — it is DEVBACKED `MAP_BLOB`
+      relocation cost: each device-local buffer map word-moves the whole
+      blob through the serial `StMvRd`/`StMvWr` mover (~1.5-3 cycles/byte,
+      ~1.5-3.2 M cycles per ~1 MiB blob; cumulative 46 M+ cycles this run).
+      vkmembig's extreme pattern (10 dev-local allocs x relocation + 4 MiB
+      copies back-to-back) exceeds the drive_guest program timeout ->
+      `poweroff -f`, a wall-clock limit not a device fault. The earlier
+      `dead=1` was the pre-fix 8 MiB heap-exhaustion cascade. NOT a
+      conformance blocker (CTS max copy 1 MiB+1 passes; memory.binding
+      30/30). FOLLOW-UP (perf, not correctness): the serial word-mover is
+      the bottleneck for large DEVBACKED relocations — a burst/DMA-
+      assisted mover would cut large-blob map latency for real workloads
+      that allocate many big device-local buffers.
+      **VERIFIED FIX (2026-11-09):** the 4 `buffer_1048577` cases now
+      **PASS on the live remote CTS leaf**
+      (`apu-leaf-20261109T162346-37e30ef14a02`, deqp-vk 1.4.6.2, `Passed:
+      4/4`, QPA `StatusCode="Pass"` for all): regular.{suballocated,
+      dedicated, overallocated} + aliasing.suballocated. Ran via a focused
+      caselist `caselists/cts-membuf.txt` injected into ctsdata.img with
+      `G6LC_CTS_CASELIST`. The earlier single-case `regular.suballocated`
+      run (`apu-leaf-20261109T160814-0cebe5914a39`) also PASSED `1/1`. The
+      8->32 MiB private-arena repartition resolved the
+      VK_ERROR_OUT_OF_DEVICE_MEMORY root cause; the copy path itself was
+      already cleared by roundtrip2/roundtrip3. The remaining
+      `memory.binding.*image*` (26) cases are a separate
+      `VK_ERROR_FORMAT_NOT_SUPPORTED` thread.
     - [ ] **T3 R8G8B8A8_UINT shader arms (2026-11-04, RTL + model, not yet advertised).**
       - shwave texel decode has an explicit `8'd15` arm (4 x u8 -> u32); before, id 15
         fell into the `default` RGBA32_UINT arm and decoded 16 bytes.
@@ -1474,14 +1765,37 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
       277 ok, 4,487 no-shader, 29 ignored-decor (RowMajor), and 1,536 commit-fault.
       Most faults are truthful refusals: buffer_device_address and descriptor_buffer
       CAP/DECOR, device_group, multi_queue, i8/i16 storage. **Candidate real gaps to
-      check against the device profile next:**
-      - `compute.pipeline.builtin_var.num_work_groups`: CONST fault on OpSpecConstant
-        (opcode 50), 18 cases;
+      check against the device profile next** (re-verified against current
+      `spirv_scan.py` + `vn_specialization.specialize()` on 2026-11-09 — the JSON
+      predates the spec-constant work in `c9d5b584d`, so several entries are stale):
+      - `compute.pipeline.builtin_var.num_work_groups` **RESOLVED**: the CONST
+        opcode=50 group is spec-constant remap (`opc-=7`) — 15/18 cases now scan
+        OK incl. `num_work_groups`, `num_work_groups_component`,
+        `local_invocation_index`, and most `zero_initialize_workgroup_memory`.
+        The 3 `max_workgroup_memory.*` survivors use `OpSpecConstantComposite` +
+        `CompositeExtract`/`IMul` spec-ops over a 16 KiB workgroup array; the
+        spec-op chain needed a new `CompositeExtract`(81) arm in `h_52`
+        (added + regression-tested — extracts/folds verified), after which they
+        reach the **intentional** `CONST` refusal: `OpConstantNull` of a
+        >16-word type exceeds the const-table bound (`test_vn_specialization`
+        pins that refusal).  Truthful BOUND-class limit, not a decode bug.
       - `binding_model.shader_access.*combined_image_sampler_mutable*`: TYPE fault on
-        opcode 25 (OpTypeSampledImage), 19 cases;
-      - `ssbo.corner_case.long_shader_*`: BOUND, a shader size limit, 8 cases;
-      - `compute.pipeline.basic.image_atomic_op_local_size_8`: STORAGE on opcode 32;
-      - `compute.pipeline.basic.undefined_values`: OPCODE 400.
+        opcode 25 (OpTypeSampledImage) — re-verified: **truthful refusal**, the modules
+        declare `OpTypeImage … 3D/Cube/arrayed/MS` dims the profile admits only as 2D
+        (`dim==1`, `arr<=1`, `ms==0`); not a decode bug.  Covering them is a real
+        non-2D-image feature, not a scan fix.
+      - `ssbo.corner_case.long_shader_*`: BOUND, a shader size limit, 8 cases — **not yet re-verified** (bound is intentional);
+      - `compute.pipeline.basic.image_atomic_op_local_size_8`: STORAGE on opcode 32 —
+        **RESOLVED**: both cases now scan OK through `specialize()` (2D R32ui storage
+        image atomic admitted);
+      - `compute.pipeline.basic.undefined_values`: OPCODE 400 — **still faults**
+        (edge opcode, 1 case);
+      - also re-scanned: `STORAGE opcode=59` (7, mutable-descriptor/storage limits —
+        still fault), `BRANCH opcode=249` (1, still faults), `BOUND opcode=0` (40,
+        shader-size — intentional).  Net: the JSON's commit-fault census **overstates**
+        current refusals — the spec-constant/storage work closed the CONST-50 and
+        STORAGE-32 clusters; what remains is dominated by truthful capability bounds
+        (CAP/DECOR, non-2D images, descriptor-buffer, shader-size).
       Output: `caselists/sample-v1/shader-feed-cts1.json`, folded into `prefilter.json`
       as `shader-refused`.
     - [ ] **descriptor_copy reclassified (2026-11-04).** The new golden `dcopy` sessions
@@ -1506,6 +1820,21 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
       bindings, dynamic offsets, VS-stage reads, and the copy itself feeding a graphics
       draw. Next T3 shape: the fsubo variant with the UBO arriving by
       pDescriptorCopies plus a 2-element array.
+      **LIVE CTS 2026-11-09** leaf `apu-leaf-20261109T232733-b031a5a3c261`
+      (cts-desccopy.txt, 74 cases, G6LC_CTS_SHARDS auto-capped to 2 by
+      host CPU budget — NOTE: sharding requires G6LC_VENUS_ONLY=1 +
+      G6LC_CTS=1 + caselist + no FRACTION/CASE; first attempt
+      `0fdf74b78a0b` failed "SHARDS>1 needs venus-only arm"). shard-0
+      of its 37-case slice: **18 Pass / 19 Fail** — signature matches
+      the reclassified split exactly: texel-buffer
+      (`uniform/storage_texel_buffer_*`), image/sampler arrays
+      (`combined_image_sampler_array*`, `storage_image_array*`,
+      `sampled_image_0`, `sampler_array0`, `mix_*`), and
+      `copy_immutable_sampler_*`; plain buffer copies pass. shard-1
+      still running at collect time. Confirms the copy path is correct
+      for buffer descriptors and the failures are the known
+      non-buffer/array/graphics-stage gaps, NOT a spillover regression
+      (bridge-selftest 2651 PASS on the same leaf).
     - [x] **Row-major matrices IMPLEMENTED (2026-11-04), model then RTL.**
       - spirv_model: the access chain reads member flag 0x10 and carries pointer
         word3 bit16 (row-major matrix) / bit17 (column vector, components
@@ -1581,19 +1910,31 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
       vnfront 179/3,093 pass. The profile audit's 4 findings are the pre-existing CTS-0
       limits (same as HEAD). The `memory.binding` CTS rerun and the gate are launched
       from `/tmp/launch-b9.log` / `/tmp/launch-ut11.log`.
-    - [ ] **Generator drift: `g6lc_apu_vn_pkg.sv` cannot be regenerated (2026-11-04).**
-      Running `gen_vn_tables.py` on the current profile changes the committed package:
-      it **drops `APU_IMG_FMT_D24_UNORM_S8_UINT = 14`** (the profile has
-      `D24_UNORM_S8_UINT = { f = "" }`, so the generator assigns it no id, while the
-      committed package and the D24S8 raster/stencil path rely on id 14 and VK129->14),
-      it flips the KEEP slot flags `a=255` -> `a=127` on rasterizerDiscardEnable,
-      depthBoundsTestEnable, min/maxDepthBounds, logicOpEnable and logicOp, and it changes
-      the IMG_ATTR/BPP rows. The committed package was evidently hand-edited (or produced
-      by an uncommitted generator revision) during the raster delta. Reverted. Nothing
-      regenerated. Fix first: bring the generator/profile to the committed package (D24S8
-      `f` = its real attachment/transfer features, the `a=255` discard-validated KEEP
-      rule), and add a gate check that regenerates and diffs the package so drift fails
-      the unit stage. Only then append new formats (R8G8B8A8_UINT below).
+    - [x] **Generator drift RESOLVED (2026-11-09):** re-ran `gen_vn_tables.py`
+      against the (already-updated) `vn_device_profile.toml`. The prior
+      session's profile fix — `D24_UNORM_S8_UINT` `f=""`→
+      `"DEPTH_STENCIL_ATTACHMENT|TRANSFER_SRC"` (stencilTestEnable +
+      VkStencilOpState transport cmdexec w51-54 + f_scmp/f_sop verified by
+      `ue_gpos_stencil*`) — had already collapsed the original drift
+      (D24S8 id-drop, KEEP `a=255`→`a=127` flips, IMG_ATTR/BPP rows). The
+      only remaining package delta vs HEAD is **6 words, all D24S8
+      (VK_FORMAT 129)**: `APU_VN_FMT3[387,388]` (linear+optimal) =
+      `0x4200` (DEPTH_STENCIL_ATTACHMENT|TRANSFER_SRC feature bits,
+      buffer col 0) and `APU_VN_FMT_USAGE[129]` = `0x21`
+      (TRANSFER_SRC|DEPTH_STENCIL_ATTACHMENT usage). `g6lc_apu_vn_tables.md`
+      regenerates byte-identical; generation is **idempotent** (two runs →
+      same output). Kept the regenerated `g6lc_apu_vn_pkg.sv` — it is the
+      correct, profile-consistent output. **Note:** this now *advertises*
+      D24S8 depth-stencil-attachment + transfer-src in
+      vkGetPhysicalDeviceFormatProperties, so CTS will exercise D24S8
+      attachment/stencil cases it previously skipped — the honest
+      capability per the verified stencil path, but CTS-validated only on
+      the next remote leaf (dial `f` back to `""` if D24S8 cases regress).
+      Original entry: `g6lc_apu_vn_pkg.sv` could not be regenerated —
+      dropped `APU_IMG_FMT_D24_UNORM_S8_UINT = 14`, flipped KEEP slot
+      flags `a=255`→`a=127` on rasterizerDiscardEnable/depthBounds/
+      logicOp, changed IMG_ATTR/BPP rows; committed package was
+      hand-edited during the raster delta.
     - [ ] `memory.binding.*image*` (30 cases, `VK_ERROR_FORMAT_NOT_SUPPORTED`): the test
       creates 2D `R8G8B8A8_UINT` (VK 41), LINEAR tiling, TRANSFER_SRC|DST, and VK 41 maps
       to 0xFF in the 15-entry device image table (`img_fmts.VK2D`, `APU_VN_IMG_FMT`).
@@ -1704,19 +2045,44 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
       colour on binding 1) passes, and the new end-to-end vgtop/vgsys session
       `ue_gpos_ptsrg8_1` passes all 4,096 pixels (`vs_cts_pbvb` + `fs_white`, the CTS
       shaders verbatim with gl_PointSize and no varyings; 27 points on 64x64). So the
-      all-black CTS result is not the raster, gather or shader path at small scale. Left to
-      separate: the CTS scale (256x256 target, 512+ points per draw), and the
-      host-write -> barrier -> draw visibility of the vertex buffer (the case's real
-      subject). Next: grow `ptsrg8` to 256x256 with 512 points; if that passes, trace the
-      CTS buffer's memory type and the map/flush path in a dev-only leaf.
+      all-black CTS result is not the raster, gather or shader path at small scale.
+      RESOLVED on the live leaf (`apu-leaf-20261109T184947-489ef7c2144e`): the
+      host-write -> barrier -> draw path is proven end-to-end —
+      `host_write_vertex_buffer.1024_vertex_buffer_stride_{2,4}` and
+      `transfer_dst_vertex_buffer.1024_vertex_buffer_stride_2` all PASS (the CTS
+      VB memory type / map / flush path is correct). Only the structurally
+      different `all_device` variant still fails (see the pipeline_barrier entry
+      below); it exercises secondary command buffers + storage images, not the
+      vertex gather. ptsrg8x already covers the 512-point multi-batch case.
     - [ ] `memory.pipeline_barrier.*` (~50 cases) still fails on the polygon-fixed tree
       (rerun `apu-leaf-20261103T053405-bb64708071fb`). Image-log diagnosis
       `apu-leaf-20261103T062143-0e96c775ce0b` (dev-only) separates two mechanisms:
-      (1) `host_write_vertex_buffer.1024_vertex_buffer_stride_2`: the 256x256 result is
-      entirely black; all 512 expected points are missing (65,024 matching pixels are
-      background). A point-list draw from a 2-byte-stride vertex buffer rasterizes nothing
-      (the R8G8-class vertex gather or POINT_LIST through the draw path); `tb_g6lc_apu_rast`
-      point cases use 32-bit positions. Add a TB case with the CTS vertex format/stride.
+      (1) `host_write_vertex_buffer.1024_vertex_buffer_stride_2`: **NOW PASSES on the
+      current build** (`apu-leaf-20261109T184947-489ef7c2144e`, deqp-vk 1.4.6.2,
+      `StatusCode="Pass"`). The earlier all-black result was on the pre-batching/
+      pre-polygon-fix tree; the POINT_LIST>63 batching + RG8 vertex gather work
+      resolved it. NOTE: these cases are THROUGHPUT-bound (~15-20 min each on the
+      simulated APU — repeated `stuck in fence wait` iters cycling 1024->4096 but
+      completing, not deadlocked), so the full 35-case b7 caselist is impractical
+      (~12 h). `host_write_index_buffer.1024` also PASS (host-write->barrier->
+      consumer proven).
+      Focused 4-case vertex-buffer leaf `apu-leaf-20261109T184947-489ef7c2144e`
+      (deqp-vk 1.4.6.2, `cts-pb-vb1024.txt`) is now authoritative — **3 Pass / 1 Fail**:
+      `host_write_vertex_buffer.1024_vertex_buffer_stride_{2,4}` **Pass**,
+      `transfer_dst_vertex_buffer.1024_vertex_buffer_stride_2` **Pass**,
+      `all_device.1024_vertex_buffer_stride_2` **Fail**
+      (`4:BufferCopyToImage Image comparison failed`, MemoryType1 iteration 4,
+      `device_faults=0`, no DEVICE_LOST — a real correctness failure, not a hang).
+      DEQP source (`vktMemoryPipelineBarrierTests.cpp`) clarifies: `all_device` =
+      `all & ~(HOST_READ|HOST_WRITE)` — a RANDOMIZED all-usage stress test that
+      emits a seeded op sequence across every buffer/image/attachment usage
+      (fills, copies, blits, render passes) via `createCommands`, not a vertex
+      test. So the vertex gather + draw + host-write/transfer-dst write +
+      barrier path is CONFIRMED correct; the `all_device` failure is a broad
+      pipeline-integration defect in whichever random op the (memoryType=1,
+      iteration=4) seed emitted — needs op-sequence reproduction/logging to
+      isolate, not vertex-gather work. Real GPUs (i.MX8M) also fail all_device at
+      large sizes, so it is a legitimately hard conformance case.
       (2) `transfer_src_transfer_dst.1024` (`ImageBlitToImage`): 0 of 1,024 texels of the
       32x32 blit match, the output being 8x4 blocks plus one column of data. Root cause:
       `vkCmdBlitImage` is decoded and classified WORK in cmdexec (L531), but no
@@ -1727,11 +2093,606 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
       profile, and a `tb_g6lc_apu_xfer` blit case. The
       SubmitRenderPass and BufferCopyToImage variants of the other subgroups probably reduce
       to (1)/(2).
+      **Image-dump diagnosis `apu-leaf-20261110T000206-a384d39a72c2` (deqp
+      `--deqp-log-images=enable`, single case `all_device.1024_vertex_buffer_stride_2`):**
+      QPA now embeds Result/Reference/ErrorMask PNGs. `MemoryType0Verify2`
+      `4:BufferCopyToImage` + `5:BufferCopyToImage` fail `max diff=(237,234,249,254)`.
+      Pixel analysis: **Result is random-looking garbage; Reference is a clean
+      2-px-paired gradient.** Random content ⇒ the checked image region was NOT
+      overwritten by this B2I — it retains stale content from a prior random-fill
+      op. Two candidate mechanisms, both in the xfer/barrier domain:
+      (a) the `vkCmdCopyBufferToImage` was **validation-faulted and silently
+      dropped** (`XImgChk` `v_ok`→`xf_fault_q`→`XDone`, no DEVICE_LOST) leaving the
+      prior random fill intact; B2I `v_ok` requires `aspect∈{1,2}`, `mip<mips`,
+      `baseLayer+count<=layers`, non-3D `off.z==0&&ext.depth==1`, `bufOff[63:32]==0`,
+      `off+ext<=dim`, `rowLength>=w`, `imageHeight>=h`. A too-strict check on the
+      seed's random `{rowLength,imageHeight,mip,layer,offset}` tuple would drop it.
+      (b) a **barrier/ordering race** — the B2I ran before the buffer/image-fill op
+      it depends on completed (all_device is a seeded all-usage stress; the directed
+      host_write/transfer_dst cases pass but don't cover every srcStage×dstStage×
+      usageMask pair). Stdout-capture leaf `apu-leaf-20261110T004011-acaf6be668e5`
+      (drive_guest.py now also pulls `/results/deqp-stdout.txt` → `cts-deqp-stdout.txt`)
+      will yield the exact op sequence to discriminate (a) vs (b).
+      **Stdout leaf RESULT `acaf6be668e5` (deqp-stdout.txt now pulled — drive_guest.py
+      patch works):** stdout has only the summary + `MESA-VIRTIO stuck in fence wait`
+      iters; CTS does NOT log the random op sequence. QPA full scan: failures =
+      `4:BufferCopyToImage`×2, `5:BufferCopyToImage`×1, `12:ImageCopyToImage`×1 across
+      MemoryType0/1 verify iters — i.e. **transfer-copy VERIFY ops**, not one op type.
+      QPA params: `Buffer size: 1024`, `Max RGBA8 image size: (16,16)` (=1024B) →
+      trivial 1:1 tight-packed copies that directed tests already pass. **Conclusion:**
+      the B2I/I2I copy engines are almost certainly faithful; the wrong content is
+      produced UPSTREAM by whichever random op (clear/fill/copy/compute/render)
+      wrote the source buffer/image — the transfer verify merely exposes it.
+      `device_faults=0`, barrier is a full `outst_q==0` drain (ordering-safe), no
+      separate cache layer ⇒ coherence unlikely. **Isolating the culprit op needs
+      the seeded op sequence** — CTS `vktMemoryPipelineBarrierTests.cpp` generates
+      it internally and does not expose it; options: (a) build deqp-vk with op
+      logging, (b) reproduce the seed's op list in a golden session / custom
+      reproducer, (c) bisect by disabling op classes via a CTS patch. This is a
+      legitimately hard randomized conformance case (real GPUs also fail it).
+      **REPRODUCTION RECIPE (CTS source is local at `specs/VK-GL-CTS`):**
+      `vktMemoryPipelineBarrierTests.cpp` — op sequence is fully deterministic.
+      `MemoryTestInstance` iterates `memoryTypeNdx` (0..memoryTypeCount-1) ×
+      `m_iteration` (0..4, `m_iterationCount=5`); per (iter,type) it calls
+      `createCommands(commands, seed=deUint32Hash(iter*memoryTypeCount+typeNdx),
+      memory, testConfig, m_opCount)`. `createCommands` (~L9266) drives a `State`
+      machine with `de::Random state.rng` + `nextOpRng(seed^12930809)` choosing ops
+      via `getAvailableOps`/`applyOp`/`createCmdCommands`/`createHostCommand`.
+      `BufferCopyToImage::submit` (~L2760) issues a TRIVIAL copy — `bufferOffset=0`,
+      `rowLength=0`,`imageHeight=0` (tight), `aspect=COLOR`, `mip=0`,`layer=0`,
+      `layerCount=1`, `offset={0,0,0}`, `extent={w,h,1}` into a single-mip 2D
+      R8G8B8A8 image sized `findImageSizeWxHx4(bufferSize)` — so the xfer B2I path
+      is exonerated for this shape. `verify` (~L2780) does I2B readback → host map →
+      compares vs `ReferenceMemory` (CPU model of expected bytes). **⇒ the bad
+      bytes are produced UPSTREAM** (a fill/copy/compute/render op wrote the source
+      buffer wrong) or the I2B readback path is broken — NOT the B2I. To isolate:
+      port `de::Random` (deRandom.hpp) + `State`/`getAvailableOps`/`applyOp`/
+      `createCmdCommands` to Python, replay the failing (iter,typeIdx) seed, dump
+      the ordered op list, and find which op last wrote the buffer before the
+      failing B2I — OR build deqp-vk with per-command param logging
+      (`logPrepare`/`logSubmit`/`logExecute` already exist per CmdCommand).
+      **FSM PORT WRITTEN (2026-11-10): `verif/tb/apu/cts_barrier_repro.py`** — a
+      faithful Python reproduction of the op-SEQUENCE generator (no Vulkan needed).
+      Ported: `de::Random` (xorshift128, getUint32/getFloat/getBool/getInt/choose
+      reservoir-sampling — **byte-exact vs deRandom.c selfTest vectors**),
+      `deUint32Hash`, all enums (Usage/Op/Stage/Access/PipelineStage),
+      `usageToStageFlags`/`usageToAccessFlags`/`layoutSupportedByUsage`/
+      `getNumberOfSupportedLayouts`/`getRandomNextLayout`/`supportsDevice*Writes`/
+      `removeIllegalAccessFlags`, full `CacheState` (isValid/perform/barrier/
+      imageLayoutBarrier/getFullBarrier/isClean/waitForIdle/submitCommandBuffer),
+      `State`, `getAvailableOps` (all 4 stages), `applyOp`, and the 4 generation
+      loops with exact `opNdx` by-ref/overshoot semantics (BEGIN/RENDERPASS_BEGIN/
+      SECONDARY_BEGIN are "free" — first nested op reuses the slot). Command
+      factories (`createCmdCommand`/`createHostCommand`/`createRenderPassCommand`)
+      are **correctly omitted**: they take `const State&` and draw from an RNG
+      *clone*, so they cannot affect op selection or `state.rng`. **Validation:**
+      cross-checked `createCmdCommand`'s per-op rng draws vs `applyOp`'s — they
+      match exactly for every op (this is the `state.rng==rng` DE_ASSERT invariant),
+      confirming `state.rng` evolves identically to real deqp. `gen_tree()` rebuilds
+      the `m_commands` hierarchy (intro PipelineBarrier=idx0 per primary buffer) so
+      `N:OpName` verify indices can be matched. Runs clean across all 10
+      (memtype×iter) seeds; opNdx overshoots to 51-52 exactly as C++ does.
+      **Caveat:** QPA verify shows only `N:SubmitCommandBuffer` sections (host cmds
+      are invisible); my cmdbuf top-indices 2,7,9 match QPA's for type0:iter2 but I
+      emit two extra trailing buffers (10,11) — likely a residual op-selection
+      divergence OR suppressed empty-buffer sections; NOT yet confirmed faithful
+      vs a real op log. Next: (a) build deqp-vk with a `fprintf` in `createCommands`
+      to dump the true op list for diffing, or (b) port the command factories +
+      `ReferenceMemory` data model to simulate actual bytes and find the culprit
+      producer. Seed per (iter,type): `2830980989 ^ deUint32Hash(iter*2+typeNdx)`
+      (memoryTypeCount=2 on the Venus guest; type0 props=1 non-coherent,
+      type1 props=15 coherent). Failing verify ops: type0:iter2 cmdbuf[9] subs
+      4,5=BufferCopyToImage; type1:iter0 cmdbuf[16]→secondary[1] sub12=
+      ImageCopyToImage.
+      **NATIVE dEQP BUILD + LAVAPIPE ORACLE (2026-11-10):** configured
+      `deqp-vk` (`vulkan_headless`, Ninja, GCC13, `/tmp/deqpbuild`) from the
+      local `specs/VK-GL-CTS` tree and instrumented
+      `vktMemoryPipelineBarrierTests.cpp` with `g6lc_logOpPick` — emits
+      `OPPICK-SEED <seed>` at `createCommands` entry and
+      `OPPICK <top|cmd|rp|sec> stage=N chosen=N avail=[ops]` at every
+      `nextOpRng.choose` site (the 4 generation loops). `lavapipe`/`llvmpipe`
+      is installed (`lvp_icd.json`, Vulkan 1.4.318) and is already this
+      project's CPU oracle. **Seed collision (key diagnostic):** lavapipe
+      exposes memoryTypeCount=1 (props 0xf → host_coherent=TRUE), so its seeds
+      are `2830980989^deUint32Hash(iter*1+0)=hash(iter)`. That makes
+      **lavapipe iter1 = QEMU mt1:iter0 EXACTLY** (both hash(1)→seed
+      `0x8f2f7be0`, both host_coherent=TRUE → identical op sequence) — the very
+      sequence that produced the `12:ImageCopyToImage` failure. lavapipe iter4
+      = seed `0x64f46521` (QEMU mt0:iter2) but host_coherent differs
+      (lavapipe TRUE vs QEMU mt0 FALSE). **Plan:** run `all_device` on lavapipe
+      → (a) validates the Python FSM by diffing OPPICK streams
+      (`verif/tb/apu/cts_oppick_diff.py`, Python `gen_tree_seed` now emits the
+      same OPPICK format), (b) if lavapipe PASSES iter1 our stack has a real
+      producer bug and the op log + validated FSM pinpoint the culprit op;
+      (c) if lavapipe also FAILS iter1 the sequence itself is suspect (CTS/
+      universal-driver issue), re-scoping the bug hunt. Python OPPICK emitter +
+      `gen_tree_seed(seed,...)` added to `cts_barrier_repro.py`.
+      **FSM VALIDATED BYTE-EXACT + ROOT CAUSE NARROWED (2026-11-10):** built
+      `deqp-vk` (`/tmp/deqpbuild`, Ninja/GCC13) with `g6lc_logOpPick`+`GNLL`
+      instrumentation and ran `all_device.1024_vertex_buffer_stride_2` on
+      **lavapipe → PASS**. Diffed C++ OPPICK vs `cts_barrier_repro.py` for all 5
+      lavapipe seeds: **0 diffs** (stage/op/avail/imgLay/imgDef/memDef/TW/TR all
+      identical, 56-59 picks each). Two FSM bugs fixed to get here:
+      (1) `USAGE_ALL_DEVICE` was `0xfffc` but the test's `usages[]` array has only
+      12 entries (excludes INDIRECT/COLOR_ATT/INPUT_ATT/DEPTH_STENCIL_ATT) → real
+      value `0x1bfc`, which drops `getNumberOfSupportedLayouts` 7→**4** (C++ GNLL
+      `sup=4` confirmed); (2) transfer-layout constants are `TRANSFER_SRC=6,
+      TRANSFER_DST=7, PREINITIALIZED=8`, not `1000338000+`. **lavapipe PASS on
+      the exact QEMU-failing seed ⇒ genuine device bug, not a CTS quirk.**
+      Validated tree reproduces the QPA index exactly: `ImageCopyToImage` =
+      `top[16]→secondary[1]→sub[12]` = `16:SubmitCommandBuffer→1:ExecuteSecondary
+      CommandBuffer→12:ImageCopyToImage`. Producer chain: the ONLY image writes
+      in the whole seed are two `OP_IMAGE_BLIT_FROM_IMAGE` (`vkCmdBlitImage`,
+      which our xfer runs as `APU_XFER_OP_BLIT`→`XBlitCvt`→`I2I`); sub[5] blit is
+      the last write before sub[12] copy, subs[6-11] are only barriers/transitions.
+      QPA images decoded: Result=random noise, Reference=structured pattern,
+      ErrorMask=all-red (every pixel wrong). `ImageBlitFromImage::verify` only
+      *updates* the reference model (never reads device data); `ImageCopyToImage
+      ::verify` is the first readback+compare ⇒ bug is in the blit/copy **write**
+      path OR an intervening barrier/layout-transition losing the data, NOT the
+      FSM. Next: determine whether `vkCmdBlitImage`/`vkCmdCopyImage`/B2I produces
+      correct texels on-device, vs a layout-transition/barrier dropping writes.
+      **ROOT CAUSE CONFIRMED 2026-11-10 — scaled `vkCmdBlitImage` refused.** Both
+      failing seeds traced to `OP_IMAGE_BLIT_FROM_IMAGE` = `BLIT_SCALE_20` (2x
+      NEAREST upscale, src=dst/2). `cts_barrier_repro.py` `BLITLOG` (captures the
+      factory `getBool()` scale draw in `applyOp`): mt1:it0 blits `[T,F]` — the
+      producing blit at `t16/1/5` is `True`=SCALE_20 feeding `ImageCopyToImage`
+      `t16/1/12`; mt0:it2 sole blit `True`=SCALE_20 feeding both `ImageCopyTo
+      Buffer` verifies at cmdbuf[9] subs[4,5]. `g6lc_apu_xfer.sv` `XBlitCvt`
+      (L1375-1395) faults on `dst_extent != src_extent` (scaled/flipped/empty)
+      with **no write** — the documented T1-blit deferral ("scaled NEAREST =
+      per-texel source index walk", ledger ~L1972). Image keeps uninitialized
+      memory → copy/readback verify reads garbage → all-red ErrorMask. NOT a
+      barrier/cache/readback bug: the only image writes are the two blits, and
+      lavapipe passes the identical sequence. **Fix = implement scaled NEAREST
+      blit in xfer** (see T1-blit design L1948+); unblocks `all_device` AND the
+      `transfer_src_transfer_dst` scaled-blit cases. Verified: BLIT filter is
+      always `VK_FILTER_NEAREST`, single region, mip0/layer0, offset {0,0,0},
+      format R8G8B8A8 — narrow scope.
+      **Impl sketch (for the scaled-NEAREST follow-up):** `XBlitCvt` currently
+      rewrites the 20-word VkImageBlit region into the 17-word I2I layout which
+      carries a SINGLE extent — it cannot express src_extent != dst_extent.
+      Options: (a) keep a second extent in the spare rg_q words and add a
+      `CP_I2I`-variant microprogram + a fragment-expand stage (each src texel →
+      N dst texels) — general but large; (b) since CTS only ever emits exact
+      integer 2x NEAREST (BLIT_SCALE_20 = src exactly dst/2, offsets {0,0,0},
+      mip0/layer0, R8G8B8A8), a dedicated 2x path: detect
+      `dst_extent == 2*src_extent` both axes, expand each src texel into a 2x2
+      dst block, double each src row into two dst rows. The row loop
+      (`XImgNxt`) and ladders (`s/d_rstep`,`s/d_ladj`) assume src_row↔dst_row
+      1:1 and shared `r_sz_q` — both must be split (src row bytes vs dst row
+      bytes differ by 2x). Do NOT regress the verified unscaled path: gate the
+      new path on the scaled-detect, leave XBlitCvt's 1:1 rewrite untouched.
+      Verify: `tb_g6lc_apu_xfer` scaled-blit case + `ue_cneg_blit_scaled_1`
+      flip to a positive + `all_device`/`transfer_src_transfer_dst` CTS.
+      **Concrete datapath insight (2026-11-10):** the engine is a *synchronized
+      1:1 byte-stream copier* — `XReq` issues read(`so_q+coff_q`) and
+      write(`do_q+coff_q`) with SHARED `coff_q`/`csz_q`, and `XImgNxt` steps
+      `so_q`/`do_q` by paired rstep/ladj ladders. Scaled blit therefore needs
+      (a) decoupled src/dst byte cursors and (b) a fragment *expander* between
+      `rd_data` and `push_frag`. For the CTS case (bpp=4 RGBA8, exact 2x) the
+      mapping is clean: a src fragment (8 B = 2 texels) → 2 dst fragments, each
+      `{texel||texel}` (one src texel duplicated into one 8-byte dst frag); a
+      dst row of `dst_w` texels = `dst_w` frags vs src row `src_w`/2 frags.
+      Vertical: iterate dst rows, `src_row = dst_row>>1`, re-reading each src
+      row for its two dst rows (no row buffer). `rg_q[17..19]` are FREE after
+      the XBlitCvt rewrite → store dstOffsets[1] there to recover dst extent.
+      MUST verify fragment `data` byte-order (right-justified, which end is
+      texel0) and `keep`/`offset`/`last` chunk-relative semantics before
+      coding the expander; misalignment when bpp∤8 or row-start∉8B-aligned
+      needs a fallback (fault honestly, don't corrupt). Local verify loop:
+      `verif/tb/apu/run-apu-xfer.sh` (Verilator 5.020, self-contained
+      `Flist.apu_xfer`) — add a `run_blit`/`run_i2i` TB driver (none exists;
+      only COPY/FILL/UPDATE/CLEAR/B2I/I2B are driven today).
+      **TB ORACLE BUILT + VERIFIED (2026-11-10):** `tb_g6lc_apu_xfer.sv` now has
+      `run_i2i` (17-word), `run_blit` (20-word VkImageBlit), `fill_img`,
+      `m_apply_i2i`, `m_apply_blit` (NEAREST `mx=sx0+(xx*sex)/dex`,
+      `my=sy0+(yy*sey)/dey` — for exact-2x reduces to `sx0+(xx>>1)`,
+      `sy0+(yy>>1)`), plus `m_pitch`/`m_mip_off` image-geometry helpers.
+      Cases added: I2I full 8x8, I2I sub-rect 4x4@(1,1)->(2,2), BLIT unscaled
+      8x8->8x8 (=I2I via XBlitCvt), BLIT scaled 8x8->16x16 expects
+      `APU_SH_DONE_FAULT` + dst untouched (honest current refusal). **PASS
+      cases=273 checks=1565 errors=0.** `run-apu-xfer.sh` is the fast local
+      loop (no remote needed).
+      **EXECUTABLE IMPL SPEC (datapath fully analyzed 2026-11-10):**
+      *Scope gate (in `XBlitCvt`, ~L1378):* currently faults when
+      `dst_extent != src_extent`. Add BEFORE that fault: accept iff
+      `regions==1 && img0.fmt==img1.fmt && APU_VN_IMG_BPP[fmt]==4 &&
+      (rg_q[17]-rg_q[14])==2*(rg_q[7]-rg_q[4]) && (rg_q[18]-rg_q[15])==
+      2*(rg_q[8]-rg_q[5]) && rg_q[19]-rg_q[16]==1 && offsets increasing &&
+      rg_q[1]==0 && rg_q[8]==0 (mip0 both; layer via layer_bytes)`. Else keep
+      faulting. On accept set `sblit_q<=1`, keep `xf_q.op=I2I` (so is_i2i/
+      is_rd/is_img plumbing + rd/wr aperture maps stay correct), do NOT run
+      the rg_q->17w rewrite, and divert to a new `XSbSetup` state (skip
+      XImgChk/XImgNxt/microprogram entirely — single pass, no dual-pass).
+      *Row algorithm (per dst row yy=0..dey-1, dey=rg_q[18]-rg_q[15]=2*sey):*
+      `sy=yy>>1`. Read src row `sy` = `img0.base+(sbl+l)*img0.layer_bytes+
+      sy0*spit+sx0*bpp` for `srclen=ex*bpp` bytes; write dst row `yy` =
+      `img1.base+(dbl+l)*img1.layer_bytes+dy0*dpit+dx0*bpp` for
+      `dstlen=2*ex*bpp` bytes. Re-reads each src row for its two dst rows
+      (2x read amp, NO row buffer needed). `ex=rg_q[7]-rg_q[4]`, `sx0=rg_q[4]`,
+      `sy0=rg_q[5]`, `dx0=rg_q[14]`, `dy0=rg_q[15]`, `spit=f_mpitch(img0.w,
+      fmt,0)`, `dpit=f_mpitch(img1.w,fmt,0)`; layer loop l=0..slc-1 adds
+      `layer_bytes` to both bases.
+      *Fragment transform (VERIFIED vs `g6lc_apu_dma_read.sv`):* read DMA
+      emits 8-byte beats (keep=8'hff) + ≤8B tail, all texel-aligned for
+      bpp=4. Each src frag holds 1-2 texels: texel_k = `frag.data[k*32+:32]`
+      (byte0=data[7:0]). Emit one dst frag per texel:
+      `push={data:{texel,texel}, keep:8'hff, offset:sb_wpos, last:(sb_wpos+8
+      ==dstlen)}` where `sb_wpos` counts dst row bytes 0,8,16,...  (ex dst
+      frags/row; src ex*bpp/8 frags → ex dst frags). Byte order: replicate
+      the 32-bit texel into BOTH halves of the 64-bit `data`.
+      *Decoupling (the hard part):* `rd_req`/`wr_req` currently share
+      `coff_q`/`csz_q`. For sblit override: `rd_req.bytes=sb_srclen_q`,
+      `wr_req.bytes=sb_dstlen_q`, offsets = `sb_srow_q`/`sb_drow_q` with
+      `coff_q=0`. Track `sb_wpos_q` (dst bytes) for frag.offset+last; read
+      drains via `rd_cpl`, write via `wr_cpl`, row done when
+      `rd_settled&&wr_settled&&!sb_have_q&&fn_q==0`. Expander: latch one
+      `rd_data` into `sb_frag_q` when `!sb_have_q`, emit its 1-2 dst frags
+      over next cycles (`rd_dr = sblit_q ? !sb_have_q : (fifo_space||
+      discard)`), then accept next.
+      *Row/layer advance (`XSbNxt`):* `sb_drow_q+=sb_dpit_q`;
+      `if(sb_yy_q[0]){sb_sy_q++;sb_srow_q+=sb_spit_q}` (src row = yy>>1
+      changes after odd yy); `sb_yy_q++`; on `sb_yy_q>=sb_drows_q` advance
+      layer (`sb_slay_q+=img0.layer_bytes`, `sb_dlay_q+=img1.layer_bytes`,
+      reset yy=0, recompute row-0 bases) else `sb_lidx_q>=sb_lcnt_q`→`XDone`.
+      *Setup multiplies:* `sy0*spit`,`dy0*dpit`,`(sbl+l)*layer_bytes`,
+      `sx0*bpp`,`dx0*bpp` are 32x32-class → MUST go through the shared
+      multiplier `XCalc` (covf_q→fault on >32b), NOT plain `*`. CTS has all
+      offsets=0/layer=0 so products=0, but general case needs the checked
+      path. `f_mpitch` itself does a small w*bpp mul already used
+      combinationally in XImgMip — acceptable for pitch only.
+      *Registers to add (~20):* `sblit_q, sb_srclen_q, sb_dstlen_q,
+      sb_drows_q, sb_lcnt_q, sb_lidx_q, sb_yy_q, sb_spit_q, sb_dpit_q,
+      sb_srow_q, sb_drow_q, sb_wpos_q, sb_slay_q, sb_dlay_q, sb_sx0_q,
+      sb_dx0_q, sb_sy0_q, sb_dy0_q, sb_frag_q, sb_ntex_q, sb_k_q, sb_have_q`.
+      *States to add:* `XSbSetup` (compute pitches/lens/bases via XCalc),
+      `XSbLay` (per-layer row-0 base), reuse `XReq`/`XRun` with sblit
+      branches, `XSbNxt` (row/layer advance). ~300-400 lines total.
+      *Risk containment:* `sblit_q` gates EVERY new branch; verified ops see
+      it 0 → zero regression. Ensure all paths reach XDone/XIdle (bounded
+      row/layer loops) so a bug can't hang subsequent records.
+      *Verify order:* build `run-apu-xfer.sh` (unscaled I2I/BLIT must stay
+      PASS), then the scaled 8x8->16x16 TB case flips FAULT→OK with
+      `m_apply_blit` golden, then `XFER_SYNTH=1`, then vgtop
+      `ue_cneg_blit_scaled_1`→positive + `all_device`/`transfer_src_
+      transfer_dst` CTS. NOT YET IMPLEMENTED — spec only, TB oracle ready.
+      **IMPLEMENTED + LOCALLY VERIFIED (2026-11-10):** dedicated gated
+      scaled-NEAREST path landed in `g6lc_apu_xfer.sv`. `XBlitCvt` `s_ok`
+      gate (narrower than spec — CTS-exact): `regions==1 && dex==2*ex &&
+      dey==2*ey && ez==dez==1 && srcOffsets[0]==dstOffsets[0]=={0,0,0} &&
+      both subresources {aspect=1(COLOR),mip=0,base=0,layers=1} &&
+      cbpp==4 && img1 bpp==4 && img0.fmt==img1.fmt && extents<=mip0 dims &&
+      ex*4,dex*4<=ChunkMax(1MiB)`. Honors the two-pass sweep: pass A
+      (`pass_b_q=0`) validates via `s_ok` then transitions to pass B exactly
+      like `XImgChkN` (re-fetch region 0); pass B arms `sblit_q` + `XSbRow`.
+      Mechanism: `sblit_q` gates every new branch (zero regression on
+      verified ops). `rd_req.bytes=sb_srclen_q`, `wr_req.bytes=sb_dstlen_q`,
+      `coff_q=0`, `so_q/do_q`=row bases (image-internal; DMA map adds
+      `img{i}.base`). Expander latches one `rd_data` frag into `sb_frag_q`
+      when `!sb_have_q` (rd_dr=`!sb_have_q||discard`), emits one dst frag
+      per src texel `{texel||texel}` keep=ff, `offset=frag.offset*2+k*8`
+      (request-relative → correct under any DMA split, NO `sb_wpos_q`
+      needed), `last=offset+8==dstlen`. Texel-align guard faults on
+      `frag.offset[1:0]!=0 || popcount(keep)%4!=0 || <4 valid B`. `XSbNxt`
+      advances dst row every row + src row every odd `yy` (src_row=yy>>1),
+      65-bit overflow→fault; `regions==1` so `XSbNxt→XDone` after dey rows.
+      Op stays `I2I` (is_rd/is_img/maps intact); the 17w rg_q rewrite is
+      bypassed for scaled. **TB: PASS cases=275 checks=1577 errors=0** —
+      new cases: 8x8→16x16 (byte-exact vs `m_apply_blit`), odd-width
+      5x4→10x8 (4B tail frag, ntex=1), 8x8→12x12 non-2x still FAULTS
+      (gate holds). **SYNTH OK Enable=0/1, no latches, 0 problems.**
+      **VGTOP (full Venus→cmdexec→xfer stack, Verilator 5.008-PGO):**
+      `ue_cpos_blit_id_1` (unscaled self-blit) PASS `XF_FAULTS 0`
+      checks=1363 — zero regression; `ue_cneg_blit_scaled_1` (2x self-blit,
+      was negative/fault) now PASS `XF_FAULTS 0` checks=850 — the scaled
+      blit completes `APU_SH_DONE_OK` through the real descriptor path
+      instead of faulting (its `.exp` predates the fix; the vector is
+      negative-only so it does not byte-verify output — byte-exactness is
+      proven by the `tb_g6lc_apu_xfer` golden model). **CTS (remote QEMU
+      guest, deqp-vk):** bridge rebuilt with PGO Verilator (the stock
+      `/root/verilator-build` 5.008 is inconsistent — `verilator_bin`
+      Nov-7 generates `VlTriggerVec::wordAny` but its Jul-31 headers lack
+      it; PGO 5.008-21 is self-consistent). Guest image re-provisioned
+      from `ovh_calltorch` cache to `/root/apu-guest` (E: is 100% full).
+      Running `caselists/cts-blit-scaled.txt` = 4 `all_device` +
+      3 `transfer_src_transfer_dst` vertex-buffer cases.
+      **CTS RESULTS (Venus device-id=1 confirmed, Mesa Venus ICD 25.2.8):**
+      `transfer_src_transfer_dst.1024` PASS, `.8192` PASS (each after a
+      slow `MESA-VIRTIO stuck in fence wait` — the known ~20kHz-APU
+      slowness, todo #13, not a hang). `.65536` ran ~55min then
+      **STALLED**: server log + all APU counters frozen, engines idle
+      (`xf=0`, `vhold/drain/mhold`), bridge spinning — a buffer-transfer
+      barrier case with `sblit_q=0` (scaled-blit path inactive, so NOT a
+      scaled-blit regression; `.1024`/`.8192` of the same test passed).
+      Classified as a separate large-transfer stall, preserved partial
+      qpa, stopped cleanly. **Re-run scoped to the 4 `all_device` cases**
+      (`caselists/cts-alldevice.txt`) which are the scaled-blit-critical
+      set — RUNNING, `all_device.1024_vertex_buffer_stride_2` in progress,
+      APU healthy (`faults=0`, DMA growing). Verdicts pending.
+      **all_device RESULT — graphics-stage fence gap, NOT a blit bug:**
+      deqp ran `all_device.1024_vertex_buffer_stride_2` through **6+ full
+      submit/execute/verify iterations** (MemoryType0 iters 0-4 +
+      MemoryType1 iter 0, all shader compiles OK, `device_faults=0`),
+      then **aborted (rc=134)** in `vkWaitForFences` — Mesa-VIRTIO fence
+      watchdog hit iter 16384. Final bridge `[dbg]`: `eng={xf=0 sh=0
+      rs=1}`, `rings live=0`, **`otl=1` outstanding op + `otq=04`**, APU
+      still completing work (`irq` 185→201, `mmio_w`+27, continuous
+      `DEVBACKED MAP_BLOB relocation`, `faults=0`). **The xfer engine is
+      IDLE with zero blit/xfer activity — the scaled-blit FSM is NOT
+      stuck.** The clean differentiator: `transfer_src_transfer_dst`
+      (**pure `vkCmdCopyBuffer`, no shader stages**) PASSED at .1024/.8192,
+      while EVERY `all_device.vertex_buffer_stride_*` (**vertex+fragment
+      pipeline, access-bitmask 7164 = bits {2-9,11,12}**) fence-aborts —
+      isolating a **graphics-stage completion-fence posting gap**, the
+      SAME documented class as `texture.*.sampler2d_fixed_vertex` "vertex-
+      stage op never posts its fence → Mesa aborts in fence wait rc=134"
+      (ledger ~L989, not yet root-caused to a unit). Likely a vertex- or
+      fragment-stage descriptor-read op whose done is never posted to
+      objtab/`otl`. Pre-existing, unrelated to the gated scaled-blit
+      path. **Scaled blit remains locally verified** (TB byte-exact +
+      vgtop `ue_cneg_blit_scaled_1` PASS); CTS end-to-end for the
+      pipeline_barrier family is blocked by this graphics-fence bug —
+      now the critical-path CTS blocker (also explains the
+      `transfer_src_transfer_dst.65536` stall IF that case secretly
+      reaches a graphics op, else a sibling large-submission gap).
+      **ROOT-CAUSE CORRECTED (2026-11-10) — NOT an RTL bug, a Mesa
+      fence-wait TIMEOUT:** `drive_guest.py:648-651` documents it —
+      "stock Mesa aborts a fence wait after ~2^14 relax iters; a 512^2
+      image dispatch is still retiring when that trips at this sim
+      rate." The abort fired at exactly iter **16384 = 2^14**. Deeper
+      `[dbg]` evidence exonerates the raster engine: `rast st` sampled
+      `S_FS_WAIT`(0x90)↔`S_FPS`(0xad) with `cur={sx,sy}` scan coords
+      ADVANCING (26,18)→(68,40)→(164,64)→(242,92)→(192,128)→(208,174)
+      and `fp_ret_q`/`mp_ret_q` in fragment-shading return states —
+      i.e. the draw is **legitimately fragment-shading and progressing**,
+      just slower than Mesa's ~2^14-poll watchdog. `irq` still climbing
+      (185→201) = other submissions completing; `ue_gpos_drawind_1`
+      vgtop PASSES (raster path sound). **Escape hatch already built:**
+      `G6LC_VN_DEBUG=no_abort` → `VN_DEBUG=no_abort` prepended to
+      deqp-vk (drive_guest.py:695) disables the abort so slow work
+      retires. Next: re-run `all_device.*` + `transfer_src_transfer_dst`
+      with `G6LC_VN_DEBUG=no_abort` for real Pass/Fail verdicts (slow;
+      `G6LC_CTS_TIMEOUT` default 14400s). If a case STILL hangs with
+      no_abort, THEN it's a genuine infinite-loop bug — the no_abort
+      run is the decisive slow-vs-hung discriminator.
     - [ ] `api.descriptor_set.descriptor_set_layout_binding.layout_binding_order`: Fail
       "Verifier failed: 513 == 257, at index 0". The shader read the value of another
       binding: the layout's bindings are created out of numeric order, and a lookup keyed
       by creation index instead of binding number reproduces this shape. Trace `f_brow` /
       the descriptor-table row search in cmdexec and shwave.
+      **Traced 2026-11-09 (cmdexec+shwave path RULED OUT):** `shwave f_brow`
+      (g6lc_apu_shwave.sv:899) is *correct* — it scans `desc_i.boff[set][*]` for
+      `.binding == bd`, so declared-position indexing is fine. `boff` rows are written
+      in `cmdexec.sv` `StDsRowRdC` (~2269) indexed by `ds_i_q` (declared order);
+      `.binding` = `{rdata[31:24], rw0[31:24]}` verified byte-exact against the ObjPay
+      record format in `vn_golden.lay_rows` (w0={bindlo,type,count},
+      w1={bindhi,off32[23:12],dyn[11],imm[10],dynbase[3:0]}). `ds_nb_q`/`ds_i_q`
+      row-walk and `resolve_bindings` (vn_graphics_shade.py:98) both carry correct
+      binding numbers. **Remaining suspects:** `off32`/`count`/`dynbase` are assigned
+      when `vnfront.sv` serializes the DSL ObjPay rows (~1780, VK_DESCRIPTOR_SET_LAYOUT
+      alloc + the row-fill state that follows) — if offsets assume sorted binding
+      order, unsorted layouts misplace descriptor data; OR the descriptor-SET write
+      path (`vkUpdateDescriptorSets`/allocate) keys storage by declared position while
+      reads key by binding number. **Write path also RULED OUT:** `vnfront StRowSc`
+      (~4743) scans the same ObjPay rows matching the full 16-bit binding
+      (`w0[31:24]==bind[7:0]` then `w1[31:24]==bind[15:8]`), returning `off32=w1[23:12]`,
+      `cnt=w0[15:0]`, `typ=w0[23:16]` — byte-identical fields to `vn_golden.lay_rows`.
+      **The "creation-index vs binding-number" hypothesis is DISPROVEN:** read
+      (`f_brow`), write (`StRowSc`), the `vnfront` selection-sort (`StDslPick`/`Emit`,
+      which canonicalizes pBindings into binding-number order), and the Python oracle
+      all resolve by binding number through one consistent record. Remaining
+      possibilities narrow to: (a) a sorter edge case on a specific binding-number
+      multiset (duplicates are rejected at StDslEmit ~4199, but verify no skip);
+      (b) `dstArrayElement`/dynamic-offset interplay with sorted `off32`;
+      (c) the bug is NOT in descriptor resolution at all — the CTS case exercises
+      more than layout creation (pool alloc, pipeline layout, or the shader's actual
+      access pattern).
+      **CONCRETE REPRO FOUND (Amber `layout_binding_order.amber`):** compute shader
+      reads `block0/1/2` at bindings 0/1/2 (UNIFORM) + `result` storage at binding 3.
+      The BIND writes are deliberately out of order: `binding2←buf0@off0`,
+      `binding0←buf1@off1024`, `binding1←buf2@off2048`, `binding3←result`. Buffers are
+      `bufN[i]=i+N`. Expected `res0=data0`(binding0→buf1 item256)=**257**; CTS reports
+      **got 513 = buf1[512]** → binding0 read buf1 at byte offset **2048** (binding1's
+      offset) instead of 1024. So a descriptor OFFSET (or dynamic-offset slot via
+      `dynbase`/`dyn_off`) resolves to the WRONG binding when `vkUpdateDescriptorSets`
+      writes arrive out of binding order — NOT the layout sort (bindings 0-3 already
+      sorted; sort is a no-op here). **Mechanism narrowed:** `dynbase` is assigned in
+      DSL emit order as `dsl_dn_q[3:0]` (vnfront ~4325) with `dsl_dn_q += count` per
+      `dyn` binding — i.e. dynamic-uniform offset slots are laid down in SORTED
+      binding order. The three `uniform_dynamic` bindings here get dynbase 0/1/2.
+      `513=buf1@2048` ⇒ binding0's effective offset took binding1's value, so the
+      dynamic-offset word stream (emitted at `vkCmdBindDescriptorSets` in BIND order,
+      vnfront ~3698/5429 `{set,ndyn}` pairs + verbatim dyn-offset words) is being
+      indexed by the wrong key — either dynbase (sorted) vs the order the host pushed
+      offsets, or dstArrayElement/element stride. **Full dyn_off path mapped:**
+      vnfront BindDS emits `{set-handle,ndyn}` pairs then verbatim dyn-offset words
+      (~3698 compute / ~5429 graphics); cmdexec walks that stream (`pay_dnb_q` ndyn
+      per set ~1396) and stores `desc_q.dyn_off[set] <= snap_q.dyn[set]` (~2205);
+      shwave resolves `di = row.dynbase + element`, `dyn_off[s][di]` (~926-928).
+      dynbase slots are assigned in DSL SORTED emit order (`dsl_dn_q[3:0]` ~4325).
+      Check whether the bind-stream dyn-offset words are stored into `dyn_off`
+      sequentially (bind order) while `dynbase` indexes them in sorted-binding
+      order — a mismatch there is the bug. **Model↔RTL verified consistent:**
+      `spirv_model` assigns `dynbase=dord[st]` accumulated per `dyn` binding
+      (~648/652) and reads `dyn[s][min(dynbase+idx,15)]` (~704) — identical
+      `dynbase+element` indexing to shwave ~926. So the divergence is NOT internal:
+      it is the ORDER the host/test supplies `pDynamicOffsets` (spec = binding-number
+      order) vs. the order vnfront streams them verbatim, OR the descriptor
+      `VkDescriptorBufferInfo.offset` written by `vkUpdateDescriptorSets` landing on
+      the wrong record (b0's record holding b1's offset 2048 → buf1@2048=513). For
+      `uniform_dynamic` the effective offset = descriptor.offset + dyn_off[slot];
+      got=513=buf1@2048 ⇒ b0 effective=2048 ⇒ either desc.offset=2048 (write-path
+      slot bug) or desc.offset=1024 + dyn_off=1024 (dyn slot holds b1's value).
+      Discriminate by dumping the recorded cmd stream: the 4 update writes' offsets
+      per dstBinding AND the bind call's pDynamicOffsets order/values.
+      **Descriptor-offset write path RULED OUT (vnfront ~4938-5005):** each update
+      resolves `dstBinding`→`rw_off_q`(off32)→record slot
+      `set_base+(off32+dstArrayElement+ent_j)*32` and stores
+      `upd_eb_q = buffer.bind_offset + VkDescriptorBufferInfo.offset` — per-binding
+      correct regardless of write order. So b0's record correctly holds buf1+1024.
+      **CORRECTED mechanism (Amber #945):** for `uniform_dynamic` the `OFFSET` keyword
+      sets the DYNAMIC offset (`pDynamicOffsets`), NOT `VkDescriptorBufferInfo.offset`
+      — so descriptor.offset=0 and binding0's dyn offset should be 1024. Got 513 =
+      buf1@2048 ⇒ b0's `dyn_off` slot returns **2048 = binding1's dynamic offset**.
+      This is a pure dyn_off INDEXING permutation bug (b0 reads b1's slot), not a
+      value/double-count fault. Vulkan spec orders `pDynamicOffsets` by binding
+      number then array element; the BIND writes here arrive out of order
+      ([b2,b0,b1,b3]). Suspect: dyn_off slots are filled in pBindings-DECLARED or
+      BIND order while `dynbase` (DSL sorted emit, `dsl_dn_q`) indexes them in
+      binding-NUMBER order — for out-of-order bindings these diverge by a rotation.
+      Discriminate by dumping `dyn_off[set][0..2]` + each binding's `dynbase`: the two
+      candidate triggers are now sharp — (a) `dynbase[b0]` off-by-one (=1, reads b1's
+      slot) if a phantom/extra dynamic descriptor is counted before b0 in `dsl_dn_q`,
+      or (b) `dyn_off[]` slots filled in pBindings-DECLARED/BIND order
+      ([b2,b0,b1]=[0,1024,2048]) while `dynbase` indexes binding-NUMBER order
+      ({b0:0,b1:1,b2:2}); either yields b0→2048. **Every dyn_off component VERIFIED
+      correct statically:** `f_doff` (shwave ~921) computes `di=dynbase+element`
+      saturating at APU_DESC_DYN; `dsc_idx_q` = element from access word2[15:0]
+      (~4914/5073); `dynbase`=DSL sorted-emit `dsl_dn_q[3:0]` (~4325) is
+      binding-number order; cmdexec distributes bind-stream dyn words to
+      `dyn[set][bk]` preserving order (~1409-1432). No static bug found — the
+      divergence is EMPIRICAL: actual `dynbase[]`/`dyn_off[]`/`ndyn`/`pDynamicOffsets`
+      must differ from assumption (suspect `ndyn` count including/excluding a
+      binding, or pBindings declared order ≠ binding-number order feeding dynbase).
+      MUST reproduce on the graphics path and dump {dynbase[], dyn_off[], ndyn,
+      pDynamicOffsets[]} per binding to see the real permutation.
+      **Oracle path VERIFIED correct:** `vn_graphics_bindings._bind` (~99-105)
+      consumes dyn words in binding-NUMBER order via `sorted(lay_rows,
+      key=binding)` then `resolve()` (~157-164) applies `dynamic[element]` per
+      binding — so the Python oracle cannot reproduce this RTL bug; a Python
+      test only re-confirms spec behaviour. `vn_layout.descriptor_bindings`
+      (line 24) sorts `pBindings` by binding number before `dynbase`/`off`
+      accumulate, matching vnfront's sorted emit. **Coverage gap confirmed:**
+      `test_vn_graphics_bindings.py` exercises dynamic offsets only for a SINGLE
+      binding's array elements (`test_dynamic_offsets_apply_per_array_element`,
+      dstBinding=0, offsets=(256,512)); no test/session/vector uses multiple
+      out-of-order dynamic bindings, so the dyn_off permutation is untested
+      end-to-end. `resource_program` supports max 2 bindings
+      (`binding`+`second_binding`), enough for a minimal repro but no
+      hand-authored vector path exists (sessions are seed-generated via
+      `--session NAME SEED`). Net: bug is RTL-empirical in an untested path;
+      needs remote graphics build + injected out-of-order uniform_dynamic case
+      + value dump. Do NOT speculatively patch dynbase/dyn_off ordering — all
+      static components verified self-consistent.
+      **RESOLVED-AS-NOT-RTL (2026-11-09):** the requested injected case was
+      built and run. Added `uniform_dynamic` (kind 8) support end-to-end —
+      `vk_compute_oracle.c` `btype()` (dyn+uniform-family→UNIFORM_BUFFER_DYNAMIC)
+      and 4 `vn_golden` `descriptorType` sites honour stored kind 8/9 — then
+      authored `dynordu`/`dynordc` corpus + DESC. `dynordc` is a **byte-exact
+      CTS repro**: uniform_dynamic bindings 0/1/2 + storage binding 3, BIND
+      order `[2,0,1,3]`, `pDynamicOffsets=[1024,2048,0]` (Amber binding-number
+      order), buffer series `i/i+1/i+2`, expecting `257/514/0`. Result: **PASS
+      bit-exact** through full vgtop (`vnfront→cmdexec→shwave`), all seeds;
+      `dynord`/`dynordu`/`multiset` also PASS. **Mesa confirmed verbatim:**
+      `vn_CmdBindDescriptorSets` = `VN_CMD_ENQUEUE(...,pDynamicOffsets)`
+      serializes `dynamicOffsetCount` uint32s in app order (no reorder); Amber
+      `pipeline.cc` sorts descriptors by binding number → `pDynamicOffsets`=
+      `[1024,2048,0]`. So spec input ⇒ device outputs `257` (proven). The
+      recorded `513` cannot originate in current device RTL — it is the
+      **deployed Mesa Venus emission** (a version/patch difference) or a
+      wire-stream detail only a real capture shows. Next step is a captured
+      Venus `vkCmdBindDescriptorSets` stream (remote CTS leaf + `G6LC_VN_DEBUG`)
+      or a `vn_mesa_diff` crafted out-of-order case — NOT another RTL patch.
+      **UNIFORM_DYNAMIC REPRO BUILT + VERIFIED (this pass) — RTL ordering RULED
+      OUT for BOTH dynamic types.** The CTS test is a *compute* shader
+      (`SHADER compute`/`PIPELINE compute` in the .amber), so the `ue_cpos_*`
+      compute vector path is the correct analogue (the earlier "graphics path"
+      note was a mis-assumption). To express `uniform_dynamic` (kind 8) — which
+      every prior vector forced to `STORAGE_BUFFER_DYNAMIC` (kind 9) — three
+      coordinated changes were made, all backward-compatible:
+      (a) `vk_compute_oracle.c`: new `btype()` maps `dyn`+uniform-family kind
+      (6/8)→`UNIFORM_BUFFER_DYNAMIC`, all other dyn→`STORAGE_BUFFER_DYNAMIC`
+      (unchanged), non-dyn→kind; applied at the 3 descriptorType sites.
+      (b) `vn_golden.py`: the 4 buffer `descriptorType` emit sites (layout srow
+      ~8580, grouped write ~8977, per-bind write ~9003, ctx5 re-arm ~10759) now
+      honour a stored kind of 8 or 9 for dyn binds instead of always forcing 9 —
+      keeps layout row and write type consistent (a kind-8 layout with a kind-9
+      write would itself be an inconsistency). Non-dyn path unchanged (still 7).
+      (c) new corpus `dynordu.comp` (three `readonly uniform` blocks at bindings
+      0/1/2 = Uniform storage class + storage output at binding 3) + DESC entry
+      with `bindings` declared out of order `[2,0,1,3]` and aux kind=8.
+      Result: `dynordu_{1,2,3}` sh_vectors emitted with `kind:8,dyn:1` in
+      .desc.json; vn vectors `ue_cpos_dynordu_{1,2,3}` generated and run through
+      the FULL vgtop RTL (vnfront→cmdexec→shwave). **ALL PASS bit-exact**
+      (`PASS-COMPUTE g1=40 g2=40 ulp=0`), oracle(lavapipe)==model==RTL.
+      `ue_cpos_multiset_1` (existing dyn kind-9) also PASS — no regression.
+      Combined with `dynord` (storage_dynamic kind 9, also PASS), this EMPIRICALLY
+      proves the dyn_off/dynbase ordering mechanism is correct for BOTH
+      `uniform_dynamic` and `storage_dynamic` through the production compute
+      path. **The RTL descriptor-ordering hypothesis is now eliminated.**
+      Remaining explanation is HOST-SIDE: the CTS runs on *Mesa Venus*, but the
+      vector oracle runs *lavapipe*; both interpret any flat `pDynamicOffsets`
+      array in binding-number order identically, so a lavapipe-oracle vector
+      cannot reproduce a Mesa-Venus-specific emission. `513=buf1@2048` most
+      plausibly means Mesa Venus either (i) mis-associates dynamic offsets to
+      bindings when BIND/write order ≠ binding-number order, or (ii) double-
+      provisions the offset (`VkDescriptorBufferInfo.offset` AND
+      `pDynamicOffsets` both nonzero → static+dynamic=2048). NEXT STEP: capture
+      the real Mesa Venus command stream for this test — the
+      `vkCmdBindDescriptorSets.pDynamicOffsets` order/values and the
+      `vkUpdateDescriptorSets` `VkDescriptorBufferInfo.offset` per dstBinding —
+      or instrument remote CTS. This is a host-driver (Mesa Venus) defect
+      candidate, not device RTL; do NOT patch dynbase/dyn_off.
+      **BYTE-EXACT CTS REPRO ALSO PASSES (`dynordc`) — case closed on RTL.**
+      Amber source confirms spec-correct host behaviour: `parser.cc:1471-1491`
+      maps BIND `OFFSET`→`dynamic_offsets[]` (=pDynamicOffsets) and optional
+      `DESCRIPTOR_OFFSET`→`VkDescriptorBufferInfo.offset` (defaults 0);
+      `pipeline.cc:648-668` sorts descriptors by binding number before
+      flattening `dynamic_offsets`, so pDynamicOffsets=[1024,2048,0] in
+      binding-number order. Built `dynordc` replicating the .amber exactly —
+      uniform_dynamic kind 8, dyn_off=[1024,2048,0], buffer series bufN[i]=i+N
+      (infn=bi+j over bind-list order [b2,b0,b1]), size 4096 B, BIND order
+      [2,0,1,3], expecting o=[257,514,0]. `ue_cpos_dynordc_1` PASS bit-exact
+      through vgtop. **The device produces the spec-correct result for the
+      literal CTS inputs — the 513 failure is definitively NOT device RTL.**
+      The defect lives in the Mesa Venus host path between Amber's correct
+      vkCmdBindDescriptorSets and the wire: either Venus re-orders/miscounts
+      pDynamicOffsets when emitting VkBindDescriptorSetsInfo, or its deferred
+      descriptor-set state diverges from the layout's binding-number dynbase.
+      Definitive next step is a captured Venus wire stream (or vn_mesa_diff on
+      a crafted out-of-order vkCmdBindDescriptorSets) — a host-side fix, not RTL.
+      **WIRE-CAPTURE PATH STAGED (2026-11-09):** the decisive experiment needs no
+      RTL change — run the single case on CURRENT build via the remote leaf and
+      read the result: PASS(257) ⇒ the old 513 was a stale device build
+      (resolved); FAIL(513) ⇒ live Mesa emission bug, then instrument. Bootlin
+      riscv64 toolchain (sha256-verified) staged at
+      `.cache/cts/toolchain/bootlin-2024.05-1` (symlink → /root/.cache/cts-toolchain);
+      `build-deqp.sh --skip-native` running → `.cache/cts/ctsdata.img` (the ONLY
+      remaining blocker; `--sync-guest` skips the absent local Ubuntu image —
+      remote uses its own cache). Case name verified:
+      `api.descriptor_set.descriptor_set_layout_binding.layout_binding_order`.
+      Leaf cmd: `G6LC_CTS=1 G6LC_ONLY=cts G6LC_CTS_CASE=<name> G6LC_VN_DEBUG=<lvl>
+      bash verif/tb/apu/bridge/run-guest-remote.sh`. NOTE: local WSL has only 8
+      CPUs — deqp-vk cross-build is ~1.5 h; ninja-incremental so it resumes.
+      **INFRA PROVISIONED + LIVE RUN (2026-11-09):** `ctsdata.img` built
+      (400 MiB, CTSDATA, riscv64 deqp-vk + caselists + amber verified). Remote
+      guest env was empty — rebuilt it: `g6q_remote.py` sync+configure+ninja
+      produced `qemu-system-riscv64` (QEMU 10.0.0, `g6lc-g6lc64_stream8`
+      machine present) at `/opt/testharness/g6lc-qemu/build/qemu/`; populated
+      `/opt/testharness/cache/qemu-stream8/` (binary+qemu-img+share/qemu symlinks
+      → qemu-bundle). Provisioned Ubuntu image on remote
+      (`ubuntu-24.04.5-preinstalled-server-riscv64.img` 11.8 GiB raw + vmlinuz
+      7.0.0-31 + cidata + `.provisioned`, sha256-verified). FIRST leaf failed:
+      QEMU lacked slirp (`-netdev user` not compiled) → guest never booted.
+      Installed `libslirp-dev` 4.7.0 on remote, re-configured (`slirp support:
+      YES`), rebuilt (bundle bin is a symlink → auto-updated). SECOND leaf now
+      BOOTING the guest — serial shows cloud-init finishing + apt over slirp
+      NAT, login reached, drive_guest driving console. Awaiting deqp result.
+      **RESOLVED — PASS on live remote leaf (2026-11-09):** leaf
+      `apu-leaf-20261109T131909-576c2556ae30` (APU-REGRESS PASS, guest 245 s)
+      booted the provisioned guest, installed `mesa-vulkan-drivers`
+      25.2.8 + `vulkan-tools`, ran deqp-vk vulkan-cts-1.4.6.2 against
+      `Virtio-GPU Venus (LibreCore APU (unqualified))` and returned
+      `<Result StatusCode="Pass">Pass</Result>` for
+      `dEQP-VK.api.descriptor_set.descriptor_set_layout_binding.
+      layout_binding_order` (QPA at
+      `remote-runs/apu-leaf-20261109T131909-576c2556ae30/output/guest/
+      cts-TestResults.qpa`). The spec input yields the correct 257/514/0 —
+      **the historical 513 was a stale device build, not a live defect.**
+      No RTL or Mesa change needed. The remote CTS leaf is now fully
+      operational (QEMU+slirp, Ubuntu image, ctsdata all provisioned),
+      unlocking live CTS validation for the remaining clusters.
     - [ ] `api.driver_properties.conformance_version`: Fail ("Wrong driver conformance
       version (not known)"). The profile reports no CTS version, which is the truthful
       value for an unqualified device. Reporting a released CTS version would claim
@@ -18684,22 +19645,41 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   dst still UNORM8 roundtrip); smooth/perspective/
   derivative/demote interpolation; primitives, instancing, UBO,
   indexed/indirect — all bit-exact vgtop+vgsys).
-  Remaining, in dependency order: **(1) `W_TX*` shwave texture oracle**
-  — highest-leverage for the NATIVE vn_golden graphics sessions; note
-  the separate **vgpu (Venus/virgl) texture path is already verified**
-  (`g6lc_apu_vgpu_*`, `tb_g6lc_apu_vgpu_tbn` clamp/linear texel fetch,
-  15 cases/57 checks bit-exact) — so this gap is specifically the
-  fragment-shader multi-texel sample in `ue_gpos_ftex*`/`fs_mip`/
-  `fs_scene8`/`fs_shadowfog`, not guest texture coverage.  Needs the
-  shwave ~30-state W_TX* pipeline (8.8 coords → LOD walk → texel cache
-  → NEAREST/LINEAR 8-bit-frac weights → decode → sRGB LUT → compare)
-  ported into `vn_golden.py` `is_tex` (currently constant `tri_w` for
-  the 1×1 texel); `spirv_model.py` has the semantics but is
-  wave-context-bound — a multi-session build;
-  **(3) stencil** — needs a stencil attachment + op oracle;
+  Remaining, in dependency order: ~~**(1) `W_TX*` shwave texture
+  oracle**~~ **DONE (native vn_golden side)** — the shared multi-texel
+  setup `is_ftexm` (vn_golden.py ~11468) now covers the full W_TX*
+  surface across ~20 committed sessions, all bit-exact through
+  vgtop+vgsys: NEAREST (`ftexn`), LINEAR bilinear (`ftexl`), REPEAT/
+  MIRRORED_REPEAT/CLAMP_TO_BORDER/CLAMP wraps (`ftexr`/`ftexmir`/`ftexc`/
+  `ftexc2`/`ftexcb`/`ftexct` incl. the `f_bord16`/`f_bord32` border decode),
+  sRGB (`ftexs`/`ftexls`), textureGather (`ftex_gath`), fp16 (`ftexh`),
+  MIPLOD trilinear + IMPLICIT/EXPLICIT/QUERY LOD (`ftexlod`/`ftexi`/
+  `ftexq`), projective (`ftexpj`/`ftexpi`), texelFetch (`ftexfetch`),
+  textureBias (`ftexbias`), u32/rgba32 (`ftex_u32`/`ftex_rgba32`),
+  arrays (`ftex_ary`), and the depth-reference family (`ftex_dref`/
+  `dri`/`dpi`/`dg`/`dpe`).  Commits `b63b34678`..`6f4bbb94a`.  The
+  separate **vgpu (Venus/virgl) texture path** was already verified
+  (`g6lc_apu_vgpu_*`, `tb_g6lc_apu_vgpu_tbn`, 15 cases/57 checks).  Any
+  residual is only exotic fetch modes not yet sessionized, not the
+  core multi-texel pipeline;
+  ~~**(3) stencil**~~ **DONE** — D24S8 packed {stencil,depth} plane,
+  `pDepthStencilState` front/back `VkStencilOpState`, and all six op
+  variants verified bit-exact through vgtop+vgsys:
+  `ue_gpos_stencil{,_df,_f,_inv,_clr,_msk}_1` (failOp=REPLACE, passOp=
+  REPLACE/INVERT/INCR_SAT, depthFailOp=REPLACE under depthCompareOp=NEVER,
+  compareOp=EQUAL ref, writeMask=0xF0 nibble gating, NONZERO stencil clear
+  via the depth attachment's `VkClearValue` colour slot).  Wired into
+  `run-apu-vgtop.sh`/`run-apu-vgsys.sh`;
   ~~depthClamp~~ DONE (`dclamp`/`dclampoff` above);
-  **(4) MSAA, occlusion/timestamp queries, secondary
-  CBs/subpasses, logicOp+blend combos, non-UNORM8 logicOp**;
+  ~~**(4) secondary CBs/subpasses, logicOp, blend**~~ **DONE** —
+  `ue_gpos_secnd_1` (GRAPHICS secondary CB via one-deep cmdexec stack),
+  `ue_gpos_msub_1` (multi-subpass render pass), the full 16-op VkLogicOp
+  table (`ue_gpos_lop{set,and,or,xor,andinv,nor,nand,andrev,eqv,inv,noop,
+  orinv,copy,inv2,orrev,clear}_1`), and blend ops+factors (`bop*`/`bfac*`).
+  **Genuinely still open:** MSAA (no `*msaa*` sessions), occlusion/
+  timestamp queries (only `texquery` texture-query exists — different
+  mechanism), non-UNORM8 logicOp (lop* sessions are UNORM8-only), and
+  item (1) above;
   ~~blend-factor SRC_ALPHA_SATURATE/CONSTANT_* arms~~ **DONE** —
   `bfac` now carries independent colour+alpha factor pairs
   (`bfac_(sf_c,df_c,sf_a,df_a)`); `bfacsat` puts SATURATE(10) on the
@@ -18784,12 +19764,18 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   (dimg fmt 126->129, dview/render-pass aspect, clear stencil),
   `stencilTestEnable=1` + front/back `VkStencilOpState` emission,
   op oracle, and **copy-engine aspect=4 (STENCIL) readback —
-  UNCONFIRMED**: `g6lc_apu_vic`/`vbl`/`vbt` decode-gate
-  `asp==APU_CCI_ASPECT(=1 COLOR)` yet depth readback aspectMask=2
-  passes, so depth uses an unresolved path; stencil aspect=4 support
-  must be confirmed before the oracle can verify (design oracle
-  order-independent: uniform compareOp+op -> deterministic per-px
-  stencil, avoids raster-order sim).  **(b) texture oracle** — entry point is `corev_apu/apu/tools/shader/
+  CONFIRMED REFUSED (2026-11-08)**: `g6lc_apu_xfer.sv:1510` B2I/I2B
+  region gate `v_ok=(rg_q[4]==1||rg_q[4]==2)` rejects aspect=4 ->
+  `xf_fault_q` (aspect is a validation tag; colour+depth both resolve
+  to `img0.base` single-plane).  `rg_q[4]` is layerCount in the I2I
+  path (~1463) so the refusal is specific to buffer<->image copies;
+  the `vic`/`vbl`/`vbt` vkCmdCopyImage* decode-gates separately pin
+  `asp==APU_CCI_ASPECT(=1 COLOR)`.  Implementation needs D24S8
+  `{stn[31:24],depth[23:0]}` packed-texel byte extraction (stencil =
+  high byte) in the copy datapath, not just the validation gate —
+  a real RTL feature build.  Design oracle order-independent:
+  uniform compareOp+op -> deterministic per-px stencil, avoids
+  raster-order sim.  **(b) texture oracle** — entry point is `corev_apu/apu/tools/shader/
   spirv_model.py` W_TX* (~3069-line interpreter: W_TXM mip walk, W_TXD
   texel decode, W_TXJ proj, wrap `f_twrap`, LOD `ilod_v`+bias+clamp,
   NEAREST/LINEAR weights, sRGB LUT, compare).  ~~NEAREST multi-texel~~
@@ -18875,11 +19861,13 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   `tx_qraw_q` QueryLod, gather list (≤8 pts), dref/proj/`tx_qlod_q`
   sub-ops, sRGB LUT, all wrap modes + border.  So every remaining item
   below is **oracle modelling**, not an RTL gap.  Remaining oracle:
-  **(i) LOD/mip** — `fs_mip` (`uv.x=gl_FragCoord.x²/128`, `uv.y=vcol.y`)
-  is the only implicit-LOD FS whose uv varies per-pixel -> nonzero λ;
-  needs quad-derivative d(uv)/dx,dy -> λ -> m0/m1 select -> trilinear
-  accumulate (reuse ftexl weights per mip + `tx_acc1` blend) — largest
-  remaining build.  **Recipe (de-risked 2026-11-08)**: (a) λ per
+  **(i) LOD/mip — DONE, verified bit-exact (2026-11-08)** — implicit-LOD
+  `ue_gpos_ftexi_1` (`is_ftexi`, token `ftexi`; `fs_mip.spv` =
+  `texture()` -> `OpImageSampleImplicitLod`, uv.x=`gl_FragCoord.x²/128`,
+  uv.y=`vcol.y`) plus explicit-LOD `ue_gpos_ftex_lod_1` (iv-b below).
+  Quad finite-difference λ -> mip-select -> trilinear now PASS `ulp=0`
+  vgtop (17122) + vgsys (17291), non-degenerate, all ftex sessions regen
+  byte-identical.  **Recipe (de-risked 2026-11-08)**: (a) λ per
   `spirv_model.ilod_v` — for each 2x2 quad lane li=l&3, neighbour diffs
   ax=(v[li|1].u-v[li&~1].u)*w0, bx=(v[li|1].v-v[li&~1].v)*h0,
   ay=(v[li|2].u-v[li&~2].u)*w0, by=(v[li|2].v-v[li&~2].v)*h0 (fp32
@@ -18899,8 +19887,20 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   byte offset accumulates pit*hd per level; image needs mipLevels>=2
   (4x4->2x2->1x1) with all levels uploaded; (d) trilinear = ftexl
   bilinear per mip then blend the two mip results by fw/16.  Biggest
-  sub-risk: exact quad-lane->pixel mapping + fp32/SFU bit-exactness;
-  **(ii) gather — DONE** (`ue_gpos_ftex_gath_1`;
+  sub-risk: exact quad-lane->pixel mapping + fp32/SFU bit-exactness —
+  **both resolved bit-exact**.  **ftexi implementation**: new
+  `gfx_interp_map` evaluates the perspective-correct smooth varying at
+  ARBITRARY pixel positions (same fpnew edge/rcpa/vrw/rs sequence as
+  `gfx_grad_pixels`, minus the coverage early-out) so helper-lane uv is
+  extrapolated exactly; per-lane coord = (FragCoord.x²/128 via
+  fmul/fdiv bit-domain, vcol.y interp bits); the whole λ->le->mip->
+  trilinear chain is ported through `spirv_model` bit-domain primitives
+  (`fadd/fsub/fmul/fdiv/ffma/f2i(RDN)/i2f/fp_minmax/sfu_eval(30)`),
+  REPEAT wrap `du%wm`, `_mtel` per-mip texels, `cl_f32_u8(fmul(i2f(rr),
+  0x37800080))` finish — every fp32 rounding matches RTL.  Mip provably
+  varies mip0->mip2 across the screen (uv.x=FragCoord.x²/128 ramps
+  d(uvx)/dx ~0.008->0.99); even the left-edge negative-su REPEAT wrap
+  matches.  **(ii) gather — DONE** (`ue_gpos_ftex_gath_1`;
   `is_ftexgath`, session token `ftex_gath` — the underscore keeps
   `ftexg` single-texel gather from matching): reuses `fs_tex_gather.spv`
   (OpImageGather comp0 no-offset + OpImageGather ConstOffset(1,0) comp1).
@@ -18912,10 +19912,243 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   A=(iu+2,iv).G.  **PASS bit-exact** `ulp=0` vgtop (17122) + vgsys
   (17291); non-degenerate; all ftex sessions regen byte-identical;
   operand order confirmed by SPIR-V disasm (comp=ops[4]->const,
-  ConstOffset vec=ops[6]->const ivec2); **(iii) QueryLod** —
-  `fs_tex_qlod` (vcol.xy only, needs quad-deriv + SFU log2, no fetch);
-  **(iv) proj/shadow/dref** — `fs_tex_proj`/`fs_tex_shadow` need nonzero
-  `vcol.z/w` (vs_tex sets z=0 — blocked on VS tooling); **(v)
+  ConstOffset vec=ops[6]->const ivec2); **(iii) QueryLod — DONE,
+  verified bit-exact (2026-11-08)**: `ue_gpos_ftexq_1` (`is_ftexq`,
+  token `ftexq`) runs `fs_tex_qlod.spv` -> `OpImageQueryLod(105)` on
+  `vcol.xy`.  Reuses the ftexi `gfx_interp_map`+quad-derivative+SFU
+  log2 chain but coord = vcol.xy smooth interp (components 0,1 — no
+  FragCoord) and NO fetch: `le=floor(lam*16)` clamped [0,64],
+  `lec=min(le,(lvl-1)*16)=min(le,32)` on the 3-mip image,
+  `wb0=lec*2^-4` (clamped), `wb1=lam` (raw); FS emits
+  `vec4(l.x*0.25, l.y*0.125+0.5,0,1)` via FMul/FAdd (no fma).  λ is
+  near-uniform (affine uv, w=1 verts) but nonzero — clamped λ=0 while
+  raw λ stays negative, exercising both the le-clamp and the
+  unclamped-report path; G channel carries the λ signal (17 distinct
+  exp bytes).  **PASS `ulp=0`** vgtop (17122) + vgsys (17291);
+  non-degenerate; all ftex sessions regen byte-identical;
+  **(iv) proj/shadow/dref — TOOLCHAIN NOW AVAILABLE (2026-11-08)**:
+  `spirv-as`/`spirv-dis` (SPIRV-Tools v2025.1) + `glslangValidator`
+  15.1.0 are on WSL `/usr/bin`; `glslangValidator -V` reproduces the
+  committed `.spv` **byte-identical** (verified vs_tex.vert).  So new
+  VS/FS can be compiled — the old "VS tooling blocked" note is stale.
+  Remaining work is oracle+ plumbing, not tooling: `fs_tex_proj` needs
+  `vcol.z`=projection divisor (`textureProj(vec3(vcol.xy,vcol.z))` ->
+  coord.xy/z); `fs_tex_shadow` needs `vcol.z`=dref + `vcol.w`=divisor +
+  a D16_UNORM depth map + compare sampler (4 dref ops).  **ENABLER
+  LANDED (2026-11-08)**: `vs_texzw.vert`/`.spv` emits
+  `vcol=(uv, 0.4+1.4*uv.x, 0.3+1.0*uv.y)` — nonzero varying z (proj
+  divisor ~[0.55,1.65], ~3x) and w (layer/dref selector ~[0.4,1.2],
+  rounds {0,1} on a 2-layer array).  **(iv-a) PROJ EXPLICIT-LOD —
+  DONE, verified bit-exact**: `ue_gpos_ftexpj_1` (`is_ftexpj`, token
+  `ftexpj`; `fs_texprojl.spv` = `textureProjLod(tex,vec3(vcol.xy,
+  vcol.z),0.0)` -> `OpImageSampleProjExplicitLod(92)`).  W_TXJ divides
+  coord.xy/z wave-wide (`fdiv` per component) then explicit lod0 ->
+  mip0 LINEAR bilinear at the DIVIDED coord, REPEAT wrap; explicit lod
+  -> NO quad derivatives so only covered pixels (`gfx_grad_pixels`)
+  matter — the per-vertex z/w are rebuilt in the oracle with the same
+  FMul/FAdd fp32 sequence.  **PASS `ulp=0`** vgtop (17122) + vgsys
+  (17291); non-degenerate; all committed ftex sessions regen
+  byte-identical.  Remaining proj/shadow: projective-dref + gather-dref
+  variants (`fs_tex_shadow` covers all 4 opcodes; all dref + the Bias
+  operand are landed as (iv-d)..(iv-k));
+  **(iv-c) PROJ IMPLICIT-LOD — DONE,
+  verified bit-exact**: `ue_gpos_ftexpi_1` (`is_ftexpi`, token `ftexpi`;
+  `fs_texproji.spv` = `textureProj(tex,vec3(vcol.xy,vcol.z))` ->
+  `OpImageSampleProjImplicitLod(91)`).  W_TXJ divides coord.xy/z
+  wave-wide THEN quad finite-differences the DIVIDED coord -> lambda
+  -> le -> m0/m1/fw -> per-mip 8.8 bilinear + u16 trilinear, REPEAT,
+  3-mip image — the hardest coord path (divide + derivative + lod +
+  trilinear), reusing the ftexi chain with per-lane
+  `(fdiv(u,z),fdiv(v,z))` coords.  **PASS `ulp=0`** vgtop (17122) +
+  vgsys (17291); non-degenerate; committed ftex sessions regen
+  byte-identical; **(iv-d) 2D-ARRAY non-degenerate — DONE, verified
+  bit-exact**: `ue_gpos_ftex_ary_1` (`is_ftexary`, token `ftex_ary` —
+  underscore keeps `ftexa` from matching).  `corpus/fs_tex_ary.frag` =
+  `textureLod(tex,vec3(vcol.xy,vcol.w),0.0)` -> `OpImageSampleExplicitLod
+  (88)` coord=(u,v,w): W_TXJ layer=RNE(coord.z)=RNE(vcol.w) in {0,1} ->
+  mip0 LINEAR bilinear inside that layer, CLAMP_TO_EDGE.  Plumbing:
+  `arrayLayers`/`viewType=5`/`layerCount` 1->2, 2 DISTINCT `_atel`
+  layers (pitch 16w, 64w/layer, layer L at L*64+y*16+x) vs the
+  committed degenerate `ftexa`'s `[tri_w]*2`, `vs_texzw` vcol.w=0.3+uv.y
+  selector with custom TEX_UV uv.y in [0,0.45] -> w in [0.3,0.75]
+  straddling the 0.5 RNE boundary so BOTH layers are sampled, mag/
+  minFilter LINEAR, oracle does RNE layer-select + bit-domain 8.8
+  bilinear with CLAMP corner indexing (v=0 verts give iv=-1 -> row 0).
+  **PASS `ulp=0`** vgtop (17122) + vgsys (17291); non-degenerate
+  (516 distinct output words, hash 989bd052); all committed ftex
+  sessions regen byte-identical; **(iv-e) DREF explicit-lod — DONE,
+  verified bit-exact**: `ue_gpos_ftex_dref_1` (`is_ftexdref`, token
+  `ftex_dref`).  `corpus/fs_texshl.frag` = `textureLod(tex,vec3(vcol.xy,
+  vcol.z),0)` on `sampler2DShadow` -> `OpImageSampleDrefExplicitLod(90)`:
+  ref16=round(clamp01(dref)*65535) u16, lod=0 -> mip0 LINEAR PCF —
+  per-corner `f_dcmp(ref16,depth16,LESS_OR_EQUAL)` -> fc=1.0/0.0
+  weighted gw/65536 -> compare fraction r; out=(r,r*0.5,1-r,1).
+  `vs_texsh.vert` supplies vcol.z=dref=(0.15+0.6u)+0.15v sweeping
+  [0.24,0.81]; 4x4 D16_UNORM map (vkfmt124/device fmt13/bpp2) with a
+  monotonic u16 gradient so the compare boundary cuts across ->
+  intermediate PCF fractions.  Plumbing: `compareEnable=1`/`compareOp=3`
+  sampler, mag/minFilter LINEAR, **aspectMask=DEPTH_BIT(2)** on the
+  image view (COLOR_BIT made the fetch read 0 -> all-fail), D16 u16
+  packed 2/word upload (pitch16w, word=y*16+x//2, lane x%2), oracle
+  does f01->ref16->per-corner f_dcmp->gw*256*i2f*2^-24 ffma accumulate
+  -> r -> (r,r*0.5,1-r) fp32 -> cl_f32_u8.  **PASS `ulp=0`** vgtop
+  (17122) + vgsys (17291); non-degenerate (493 distinct words, hash
+  f94a32bd); all committed ftex sessions regen byte-identical.  First
+  depth-compare/PCF coverage on the rasterized path (the shwave suite
+  already covers the opcodes via fs_tex_shadow_1 compute vectors);
+  **(iv-f) DREF implicit-lod — DONE, verified bit-exact (2026-11-08)**:
+  `ue_gpos_ftex_dri_1` (`is_ftexdri`, token `ftex_dri`).  Refactored the
+  dref plumbing into a shared `is_ftexd = is_ftexdref or is_ftexdri`
+  flag (format=124, aspectMask=DEPTH_BIT, compareEnable=1/compareOp=3
+  sampler, LINEAR filters, D16 u16 upload, covered-pixel PCF oracle);
+  only the FS opcode + flag def stay distinct.  `corpus/fs_texshi.frag`
+  = `texture(sampler2DShadow, vec3(vcol.xy,vcol.z))` ->
+  `OpImageSampleDrefImplicitLod(89)` via `fs_texshi.spv`; `vs_texsh`
+  reused for the dref sweep.  On the single-mip D16 map the implicit
+  lambda clamps to mip0, so it shares the explicit covered-pixel PCF
+  oracle — the opcode still runs its quad-derivative lambda in RTL,
+  which is what this proves.  **PASS `ulp=0`** vgtop (17122) + vgsys
+  (17291); non-degenerate (689 distinct words, hash 1fa59a4d);
+  ftex_dref/ftexi/ftex_lod regen byte-identical after the is_ftexd
+  refactor.  Remaining dref variants: projective (`OpImageSampleDref
+  {Proj}{Implicit,Explicit}Lod`, needs vs_texsh w=divisor) + gather
+  (`OpImageDrefGather`, opcode 97) — both reuse the is_ftexd plumbing;
+  **(iv-g) DREF proj-implicit-lod — DONE, verified bit-exact
+  (2026-11-08)**: `ue_gpos_ftex_dpi_1` (`is_ftexdpi`, token `ftex_dpi`).
+  `corpus/fs_texshpi.frag` = `textureProj(sampler2DShadow, vec4(vcol.xy,
+  vcol.z, vcol.w))` -> `OpImageSampleProjDrefImplicitLod(93)` (grammar:
+  Coordinate=vec4(u,v,q,q) + separate Dref scalar).  W_TXJ divides
+  coord.xy by vcol.w wave-wide -> quad finite-differences of the
+  DIVIDED coord -> lambda -> le -> mip0 (single-mip D16 clamps) ->
+  LINEAR PCF at the divided texcoord, REPEAT wrap.  NEW `vs_texshw.vert`
+  emits vcol=(uv, dref=0.15+0.6u+0.15v, divisor=0.65+0.55u+0.30v ~
+  [0.76,1.39]) so coord.xy/q is a real 2-D transform; oracle rebuilds
+  per-vertex dref (_dr) + divisor (_dq) with the exact FMul/FAdd fp32
+  order, interpolates via _gp, then fdiv(u,q)/fdiv(v,q) bit-domain ->
+  8.8 coord -> REPEAT mod-4 corners -> per-corner f_dcmp -> gw*256*i2f
+  *2^-24 ffma accumulate -> r -> (r,r*0.5,1-r,1).  `is_ftexd` extended
+  to `or is_ftexdpi` for shared D16+compare plumbing; addressModeU/V
+  gained `or is_ftexdpi` -> REPEAT.  **PASS `ulp=0`** vgtop (17122) +
+  vgsys (17291); non-degenerate (742 distinct words, hash 90d7ae2f);
+  ftex_dref/ftex_dri/ftexi/ftexpi regen byte-identical.  Remaining
+  dref: explicit-proj (`OpImageSampleProjDrefExplicitLod` 94, needs a
+  Lod operand) + gather (`OpImageDrefGather` 97);
+  **(iv-h) DREF GATHER — DONE, verified bit-exact (2026-11-08)**:
+  `ue_gpos_ftex_dg_1` (`is_ftexdg`, token `ftex_dg`).  `corpus/
+  fs_texshg.frag` = `textureGather(sampler2DShadow, vec2(vcol.xy),
+  vcol.z)` -> `OpImageDrefGather(97)` (grammar: Coordinate=vec2 +
+  separate Dref scalar; the 3-arg shadow-gather overload, NOT the
+  vec3-coord textureGather which glslang rejects).  Gathers the 2x2
+  footprint around the mip0 texel (CLAMP_TO_EDGE, integer texel
+  iu0=su0>>8 no fractional filter), each of the 4 points runs
+  f_dcmp(ref16,depth16,LESS_OR_EQUAL) -> wb[gi]=1.0/0.0 with NO
+  filtering; single-mip D16 -> mip0 so implicit lambda is moot.
+  Result order (i0,j1),(i1,j1),(i1,j0),(i0,j0) -> FS out=(g.x,
+  g.y*0.5, 1-g.z, g.w).  Shares is_ftexd D16+compare+CLAMP plumbing +
+  vs_texsh; only fs_texshg.spv + oracle differ (integer footprint,
+  not bilinear PCF).  **PASS `ulp=0`** vgtop (17122) + vgsys (17291);
+  non-degenerate (707 distinct words, hash 375e8970); ftex_dref/
+  ftex_dri/ftex_dpi/ftexi regen byte-identical.  **(iv-i) DREF
+  proj-explicit-lod — DONE, verified bit-exact (2026-11-08)**:
+  `ue_gpos_ftex_dpe_1` (`is_ftexdpe`, token `ftex_dpe`).
+  `corpus/fs_texshpe.frag` = `textureProjLod(sampler2DShadow, vec4
+  (vcol.xy,vcol.z,vcol.w),0.0)` -> `OpImageSampleProjDrefExplicitLod
+  (94)` (`Lod %float_0`).  Identical divided-coord mip0 PCF to ftex_dpi
+  (single-mip D16 -> lod0 -> mip0) but the Lod-operand path (explicit,
+  no derivatives); shares vs_texshw + is_ftexd plumbing + REPEAT wrap;
+  oracle merged into the `is_ftexdpi or is_ftexdpe` branch.  **PASS
+  `ulp=0`** vgtop (17122) + vgsys (17291); non-degenerate (706
+  distinct words, hash 7b2ecefa); all dref siblings regen
+  byte-identical.  **(iv-j) OpImageFetch + R8G8B8A8_UINT — DONE,
+  verified bit-exact (2026-11-08)**: `ue_gpos_ftexfetch_1`
+  (`is_ftexfetch`, token `ftexfetch`).  `corpus/fs_texfetch.frag` =
+  `texelFetch(usampler2D, ivec2(gl_FragCoord.xy)&3, 0)` ->
+  `OpImageFetch(95)` (`Lod %int_0`): integer texel coord (px&3,py&3),
+  NO normalized uv / NO filtering / NO wrap — bounds check only
+  (always in-range for the tiled coord).  Decode fc=[b0..b3] raw
+  uint8 -> uvec4; FS does vec4(t)/255 -> per-channel
+  fdiv(i2f(u),255.0)->u8.  vkfmt41 -> device fmt15
+  (R8G8B8A8_UINT), bpp=4 same 16-word pitch as UNORM; `_utel` gives
+  4 distinct uint8/texel; default vs_tex (coord is gl_FragCoord
+  builtin, not a varying); coverage via gfx_tri_coverage (no
+  interpolation needed).  **PASS `ulp=0`** vgtop (17122) + vgsys
+  (17291); non-degenerate (689 distinct words, hash b5b3017f); 10
+  sibling sessions regen byte-identical.  **SAMPLED-IMAGE OPCODE
+  MATRIX COMPLETE** — every W_TX* opcode 87-97 + 105 now has a
+  verified rasterized session: implicit(87 ftexi)/explicit(88
+  ftex_lod)/dref-impl(89 ftex_dri)/dref-expl(90 ftex_dref)/proj-
+  impl(91 ftexpi)/proj-expl(92 ftexpj)/proj-dref-impl(93 ftex_dpi)/
+  proj-dref-expl(94 ftex_dpe)/**fetch(95 ftexfetch)**/gather(96
+  ftex_gath)/dref-gather(97 ftex_dg)/querylod(105 ftexq); **(iv-k)
+  BIAS operand — DONE, verified bit-exact (2026-11-08)**:
+  `ue_gpos_ftex_bias_1` (`is_ftexbias`, token `ftex_bias` — the
+  underscore keeps degenerate `ftexb`/'ftexb' substring from matching).
+  `corpus/fs_tex_bias.frag` = `texture(tex,vcol.xy,vcol.z)` ->
+  `OpImageSampleImplicitLod(87) Bias %vcol.z`.  coord=vcol.xy smooth
+  interp -> ilod_v quad finite-differences -> lambda; the SPIR-V Bias
+  image operand (mask bit0, operand slot k=2 for op87) does
+  `lod_in=fadd(lambda,bias)` in fp32 BEFORE the q4.4 `le` quantize ->
+  m0/m1/fw -> trilinear over the shared 3-mip 4x4->2x2->1x1 image.
+  New `vs_texbias.vert` emits vcol=(uv, (0.6-uv.y)*4, 1.0): bias
+  sweeps ~[-1.2,+1.2] across the tri (uv.y in [0.3,0.9]) crossing the
+  mip0/mip1/mip2 le boundaries -> real per-pixel mip selection driven
+  by bias.  Oracle clones ftexi but coord=interp(vcol.xy) (both u,v
+  from varyings, NOT fragcoord) and adds `_lam=fadd(_lam,_ib_b)`; the
+  per-vertex bias is rebuilt fp32 (FSub 0.6-v, FMul *4) before
+  gfx_interp_map interpolates vcol.z.  Shares is_ftexi 3-mip
+  mipLevels/levelCount/magFilter/minFilter/mipmapMode=LINEAR/
+  addressMode=REPEAT/maxLod=4.0/_mtel upload plumbing.  **PASS
+  `ulp=0`** vgtop (17122) + vgsys (17291); non-degenerate (503 distinct
+  hex words, hash 95536c77); 4 mip siblings (ftexi/ftex_lod/ftexq/
+  ftexpi) regen byte-identical.  **(iv-l) R32_UINT FETCH — DONE,
+  verified bit-exact (2026-11-08)**: `ue_gpos_ftex_u32_1`
+  (`is_ftexu32`, token `ftex_u32` — avoids 'ftexfetch'/'ftexr'/'ftexb'
+  substring collisions).  `corpus/fs_texfetch32.frag` =
+  `texelFetch(usampler2D, ivec2(gl_FragCoord.xy)&3, 0)` ->
+  `OpImageFetch(95)` -> uvec4(u32,0,0,1); tx_decode fmt10 packs the
+  whole u32 into fc[0] (fc[3]=1, G=B=0), single-channel int ATTR=8.
+  FS spreads the u32's 4 bytes into RGBA/255 (BitwiseAnd/ShiftRight/
+  ConvertUToF/FDiv per byte) so every fetched bit is observable.
+  vkfmt98 -> device fmt10, BPP=4 -> identical 16-word pitch upload as
+  R8G8B8A8_UINT; `_u32tel` gives 4 distinct bytes/texel; default
+  vs_tex + gfx_tri_coverage (coord is gl_FragCoord).  **PASS `ulp=0`**
+  vgtop (17122) + vgsys (17291); non-degenerate (516 distinct hex
+  words, hash 9ade7ec8); ftexfetch/ftex/ftexn regen byte-identical.
+  **(iv-m) R32G32B32A32_UINT FETCH — DONE, verified bit-exact
+  (2026-11-08)**: `ue_gpos_ftex_rgba32_1` (`is_ftexrgba32`, token
+  `ftex_rgba32`).  `corpus/fs_tex_rgba32.frag` =
+  `texelFetch(usampler2D,...)` -> `OpImageFetch(95)` -> uvec4 of four
+  uint32 channels, each `float(t)/4294967296.0` (2^32, exact fp32) ->
+  RGBA.  tx_decode fmt11 packs 4 u32 channels `by[4c..4c+3]` LE ->
+  channel separation + little-endian u32 assembly observable; bpp=16
+  -> 4 words/texel at `_row[4*x+c]` (R,G,B,A) on the 16-word pitch.
+  vkfmt107 -> device fmt11, ATTR=11 4-comp uint — the LAST
+  integer-format decode arm.  `_rgba32tel` gives 4 distinct u32
+  channels/texel with distinct high bytes (what /2^32 surfaces as u8)
+  + varied low bytes.  **PASS `ulp=0`** vgtop (17122) + vgsys (17291);
+  non-degenerate (556 distinct hex words, hash 6ac16f97);
+  ftex_u32/ftexfetch/ftex regen byte-identical.
+  **(iv-b) EXPLICIT-LOD mip/trilinear — DONE, verified bit-exact
+  (2026-11-08)**: `ue_gpos_ftex_lod_1` (`is_ftexlod`, token `ftex_lod`
+  — underscore keeps `ftexl` LINEAR from matching).  `textureLod`
+  gives a known lod -> deterministic m0/m1/fw, bypassing the
+  implicit-LOD derivative build.  `corpus/fs_texlod.frag` =
+  `textureLod(tex,vcol.xy,1.5)` -> `OpImageSampleExplicitLod ...
+  Lod %float_1_5` (fs_texlod.spv via glslangValidator).  lod=1.5 ->
+  le=24 q4.4 -> m0=1,m1=2,fw=(24&15)<<4=128 -> trilinear mip1(2x2)+
+  mip2(1x1).  Plumbing landed: `mipLevels`/`levelCount` 1->3, 3-mip
+  upload at img_walk offsets (mip0 4x4=64w, mip1 2x2=32w, mip2 1x1=16w,
+  pitch 16w each), `minFilter`/`mipmapMode` LINEAR, `fs_texlod.spv`,
+  per-mip `_mtel` texels + trilinear oracle (per-mip 8.8 bilinear into
+  acc/acc1 then `rr=(rr0*(256-fw)+rr1*fw+128)>>8` -> *1/65535).  Custom
+  TEX_UV keeps u,v>=0.3 so mip1's 2x2 coord `floor(u*512-128)` stays
+  >=0 (avoids the negative-su >>8/>>>8 wall).  **GOTCHA that bit us:**
+  the graphics sampler hardcoded `minLod=maxLod=0`, which clamps
+  `le->0` and collapses every sample to mip0 — `maxLod` must admit the
+  lod (set 4.0 for ftexlod).  **PASS bit-exact** `ulp=0` vgtop (17122)
+  + vgsys (17291); non-degenerate; all ftex sessions regen
+  byte-identical.  Covers W_TX* mip walk + trilinear WITHOUT quad
+  derivatives — de-risks the later implicit-LOD fs_mip work;
   non-UNORM8** — fp16 (`R16G16B16A16_SFLOAT` id6)/int formats need new
   decode helpers + texel layout; `fs_tex_bias`/`fs_tex_array` degenerate
   (vcol.z=0).  **fp16 — DONE** (`ue_gpos_ftexh_1`; `is_ftexh`, NEAREST +
@@ -18945,10 +20178,983 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   all identical.  Residual is therefore a sub-ULP `vcol.xy` value
   difference (gfx_grad_pixels vs RTL `va_q[1]` for out-of-range uv) —
   needs waveform-level su0/fu dump per failing pixel, not an oracle
-  restructure.  **(c) MRT** — RTL `ca[3:0]`/`blend[3:0]` supports 4
-  colour attachments; oracle render pass emits only 1 (+depth).
+  restructure.  **LINEAR+CLAMP_TO_BORDER (`ftex_lb`) attempted, NOT
+  landed (2026-11-08)** — mechanism verified correct end-to-end
+  (`f_twrap` m=3 border cond `i<0||i>=n`, border u16=0xFFFF=f_bord16,
+  corner weights `wu*wv`, `(acc+0x8000)>>16` normalize, I2F*1/65535 all
+  match the oracle), but FAILS bit-exact at 2 pixels off-by-one on a
+  positive-only 0.6..1.4 uv — the SAME sub-ULP 8.8-coordinate fp32
+  precision wall as ftexw (ffma lowered to mul+add, shwave ~3355), now
+  visible because border-vs-texel corners differ in colour.  **Both
+  LINEAR wrap/border variants are gated on nailing the exact RTL
+  `su0/sv0` fixed-point coordinate sequence — needs waveform-level
+  `su0`/`fu`/`fv` dump, not more oracle guessing.**  **(c) MRT — DONE**
+  (`ue_gpos_mrt_1`, 2 colour attachments, `ulp=0` both levels — see
+  (iv-o)); remaining MRT frontier = 3-4 attachments + per-attachment
+  blend/logicOp + MRT+depth.
   **(d) MSAA / occlusion+timestamp queries / secondary CBs+subpasses
   / logicOp+blend / non-UNORM8 logicOp** — all feature-level.
+  **(iv-n) TEXTURE/SAMPLING MATRIX — SATURATED (2026-11-08)**: every
+  `W_TX*` sampled-image opcode now has a verified rasterized session —
+  `87` impl · `88` expl · `89` dref-impl · `90` dref-expl · `91`
+  proj-impl · `92` proj-expl · `93` proj-dref-impl · `94`
+  proj-dref-expl · `95` fetch · `96` gather · `97` dref-gather ·
+  `105` querylod — plus the Bias operand, all wrap modes
+  (REPEAT/CLAMP/CLAMP_TO_BORDER/MIRRORED), sRGB, fp16
+  (`R16G16B16A16_SFLOAT`), arrayed (`is_ftexary`), and **all three
+  integer formats** (`R8G8B8A8_UINT` id15 / `R32_UINT` id10 /
+  `R32G32B32A32_UINT` id11 — every `tx_isint`/`tx_decode` int arm).
+  23 verified texture paths, all `ulp=0` at vgtop+vgsys; every
+  `is_ftex*` flag has a dedicated oracle elif (the degenerate
+  `ftexa`/`ftexb`/`ftexg`/`ftexls` committed tests share default
+  paths intentionally).  The earlier "int formats tooling-blocked /
+  non-UNORM8 open" tail is CLOSED — all landed since.  **Texture
+  subsystem is functionally complete at opcode+format level.**
+  **Remaining texture frontier is qualitative, not coverage:**
+  LINEAR-precision wall (`ftexw`/`ftex_lb`, sub-ULP `su0`/`fu`/`fv`
+  fp32 divergence — needs waveform dump, not new coverage) and C0
+  storamic (blocked on `svt-plan` rearchitecture, documented).
+  **(iv-o) MRT — DONE, verified bit-exact (2026-11-08)**:
+  `ue_gpos_mrt_1` (`is_mrt`, token `mrt`).  **First multi-colour-
+  attachment graphics session** — closes item (c).  RTL was already
+  READY (`g6lc_apu_rast.sv` `at_q[1:0]` cursor, `dr_q.ca[at_q]`/
+  `dr_q.blend[at_q]` per-attachment, "FS-out location l -> ca[l]";
+  `g6lc_apu_cmdexec.sv` resolves 1..5 attachments); the gap was ONLY
+  `vn_golden.py` emitting 1 colour attachment.  `corpus/fs_mrt.frag`
+  emits `location0->ca[0]` (o0 = the fs_color gradient `vcol*0.5 +
+  FragCoord.x*0.001`, att0 reuses the is_fcolor oracle bit-exactly)
+  and `location1->ca[1]` (o1 = `vec4(c.b,c.g,c.r,c.a)` R<->B swap — a
+  pure channel permutation so the per-channel UNORM8 encode commutes
+  and att1's packed word is a byte-permute of att0's; clr_w
+  0xFF000000 is a fixed point).  Plumbing: `is_mrt` joins `is_gradlike`
+  (vs_pos3/vcol + GRAD_COLS vertex layout, identical coverage to
+  is_fcolor); X keys `img2`/`view2`/`imem2`/`rb3`/`rb3mem` APPENDED to
+  the handle tuple (existing indices/handles unchanged -> all sibling
+  vectors byte-identical); img2 format37/usage0x11/aspectMask1 +
+  imem2 0x10000 (memoryType 0) + rb3/rb3mem 0x4000 (type 1) at
+  RES_BLOB0+6/+7; render pass `attachmentCount`/`colorAttachmentCount`
+  generalized to `n_col=(2 if is_mrt else 1)` colour attachments
+  (depth index shifts to n_col — is_mrt/is_depth never co-occur);
+  framebuffer +view2; `clearValueCount`/`pClearValues` +1 colour clear
+  (same 0,0,0,1); second barrier+`vkCmdCopyImageToBuffer` img2->rb3;
+  `exp_img2` byte-permute oracle; second EK_APRCHK gate; teardown.
+  `pColorBlendState=None` (blend disabled -> raw FS output both att).
+  **Per-attachment CLEAR is DISTINCT**: att0 clears (0,0,0,1)->
+  0xFF000000, att1 clears (0,0,1,1)->0xFFFF0000 — uncovered att1 px
+  take the att1 clear, NOT clr_w — so cmdexec's `clearv_q[att*4]`
+  per-attachment clear indexing is observable (identical clears would
+  leave it dark).  exp_img2 is coverage-aware (`_v is None` -> att1
+  clear, else permute) built inline in the is_grad oracle loop.
+  **PASS `ulp=0` BOTH levels first run** — vgtop `g1=8192 g2=8192
+  ulp1=0 ulp2=0 maxulp=0 cases=31 checks=33519`; vgsys `g1=8192 g2=8192
+  ulp=0 cases=31 checks=33706`.  Non-degenerate: att0 515 / att1 521
+  distinct words, 528 covered px differ (permuted gradient) -> genuine
+  per-attachment ROP routing.  tri_1/blend_1/ftex_rgba32_1/ftex_bias_1
+  regen **byte-identical**.  Wired: both run scripts + regen_vectors.
+  **(iv-p) MRT per-attachment BLEND — DONE, verified bit-exact
+  (2026-11-08)**: `ue_gpos_mrtb_1` (`is_mrtblend`, token `mrtb` —
+  `mrt` gives is_mrt, `blend` is NOT a substring so is_blend stays
+  False).  **First session exercising `dr_q.blend[at_q]` PER-
+  ATTACHMENT independence** — the last dark corner of the MRT ROP path.
+  `VkPipelineColorBlendStateCreateInfo` emits `attachmentCount=2`:
+  att0 `blendEnable=0` (raw o0 gradient, unchanged), att1
+  `blendEnable=1` SRC_ALPHA(6)/1-SRC_ALPHA(7) ADD vs its OWN (0,0,1,1)
+  clear.  Oracle: att0 = `_u8pack(_cv)` (raw fs_color/o0, identical to
+  is_mrt); att1 = per-pixel blend of `o1=permute(_cv)` fp32 against the
+  att1-clear dst dequantized via the UNORM8 `u8*K255` (`K255=0x3B808081`)
+  roundtrip — mirrors the proven `is_bfac` `bm1=src*sf, bm2=dst*df,
+  ADD->cl_f32_u8` op order with src=permute(_cv), src_alpha=_cv[3],
+  factors 6/7.  Uncovered att1 px still take the 0xFFFF0000 clear.
+  **PASS `ulp=0` BOTH levels first run** — vgtop `g1=8192 g2=8192
+  ulp1=0 ulp2=0 cases=31 checks=33519 cycles=826953`; vgsys `g1=8192
+  g2=8192 ulp=0 cases=31 checks=33706 cycles=1157907`.  Non-degenerate:
+  att0 317 / att1 515 distinct words, 1358 px differ (blended vs raw) ->
+  genuine per-attachment blend.  11-session byte-identity sweep
+  (blend/bopadd/bopsub/bfacsc/cwm/lopand/lopcopy/fcolor/grad/mrt/tri)
+  ALL identical — the `pAttachments` 1-vs-2 restructure is clean.
+  (`ue_gpos_bfacc_1` flagged DIFF is a PHANTOM: `bfacc` is not a token —
+  real bfac sessions are `bfaccc`/`bfacsat`/etc.; it regenerates a
+  fallback triangle and is untracked/unwired.)  Wired: both run scripts
+  + regen_vectors.  **(iv-q) MRT x3 — DONE, verified bit-exact
+  (2026-11-08)**: `ue_gpos_mrt3_1` (`is_mrt3`, token `mrt3` — `mrt`
+  substring keeps is_mrt so att0+att1 plumbing runs; `mrtb`/`blend` not
+  substrings so no blend path).  **First THREE-colour-attachment
+  session** — exercises `at_q=2` (3rd ROP iteration), `ca[2]`,
+  `blend[2]`, and `clearv_q[8..11]` (att2 clear slot).  New
+  `corpus/fs_mrt3.frag` emits locations 0/1/2 (`spirv-dis` confirms
+  `OpDecorate %o2 Location 2`): o0=gradient, o1=R/B swap [b2,b1,b0,b3],
+  o2=RGB left-rotation (c.g,c.b,c.r,c.a) -> [b1,b2,b0,b3] — a THIRD
+  distinct byte-permutation so all attachments independently
+  observable.  Plumbing: `n_col = 3 if is_mrt3 else (2 if is_mrt else
+  1)` generalises every attachmentCount/colorAttachmentCount/clear
+  count/depth-index site; X keys `img3`/`view3`/`imem3`/`rb4`/`rb4mem`
+  appended after rb3mem; att2 resources mirror att1 (format37/usage
+  0x11/aspectMask1, imem3 0x10000, rb4mem 0x4000) at RES_BLOB0+10/+11
+  (clear of +8/+9 ms/dl, +16/+17/+24 spec); renderpass/framebuffer/
+  clears +att2 (clear (0,1,0,1)->0xFF00FF00, third distinct clearv);
+  img3->rb4 barrier+copy+EK_APRCHK gate+teardown; `exp_img3` oracle =
+  [b1,b2,b0,b3] rotation for covered / 0xFF00FF00 uncovered.  **PASS
+  `ulp=0` BOTH levels first run** — vgtop `g1=12288 g2=12288 ulp=0
+  cases=35 checks=50007 cycles=858520`; vgsys `g1=12288 g2=12288 ulp=0
+  cases=35 checks=50218 cycles=1208389` (12288 = 3x4096 readback
+  words).  Non-degenerate: all three clears 0xFF000000/0xFFFF0000/
+  0xFF00FF00 each x7168 + three distinct permutations.  10-session
+  byte-identity sweep (mrt/mrtb/fcolor/grad/tri/blend/bfacsc/lopand/
+  bopadd/cwm) ALL identical.  Wired: both run scripts + regen_vectors.
+  **MRT frontier remaining**: 4 attachments (ca[3] last slot),
+  per-attachment logicOp combos, MRT+depth.
+  **(iv-r) MRT x4 — DONE, verified bit-exact (2026-11-08)**:
+  `ue_gpos_mrt4_1` (`is_mrt4`, token `mrt4`).  **First FOUR-colour-
+  attachment session — completes the full `ca[3:0]`/`at_q[1:0]` cursor
+  range.**  `is_mrt4` implies `is_mrt3` (`is_mrt3 = 'mrt3' in gfx or
+  is_mrt4`) so att0+att1+att2 plumbing runs; `is_mrt4` adds att3
+  (img4/view4/imem4/rb5/rb5mem at RES_BLOB0+12/+13).  New
+  `corpus/fs_mrt4.frag` emits locations 0-3 (`spirv-dis` confirms
+  `OpDecorate %o3 Location 3`): o0=gradient, o1=R/B swap [b2,b1,b0,b3],
+  o2=RGB rotation [b1,b2,b0,b3], o3=FULL reversal (c.a,c.b,c.g,c.r) ->
+  [b3,b2,b1,b0] — four distinct byte-permutations.  att3 clear
+  (1,1,0,1)->0xFF00FFFF (fourth distinct clearv_q[12..15]).  **The
+  `at_q=3` terminal cursor is the new coverage**: `S_ROP_NX` checks
+  `at_q==3` AFTER writing, so with `ca_valid[3]=1` att3 is PROCESSED
+  (writes ca[3]) then the fragment terminates — vs mrt3 where att3 is
+  skipped (`ca_valid[3]=0`) then terminates.  `n_col=4` generalises
+  every count/index site.  **PASS `ulp=0` BOTH levels first run** —
+  vgtop `g1=16384 g2=16384 ulp=0 cases=39 checks=66495 cycles=951689`;
+  vgsys `g1=16384 g2=16384 ulp=0 cases=39 checks=66730 cycles=1323429`
+  (16384 = 4x4096 readback words).  Non-degenerate: all four clears
+  0xFF000000/0xFFFF0000/0xFF00FF00/0xFF00FFFF each x7168 + four
+  distinct permutations.  11-session byte-identity sweep (mrt/mrtb/
+  mrt3/fcolor/grad/tri/blend/bfacsc/lopand/bopadd/cwm) ALL identical.
+  Wired: both run scripts + regen_vectors.  **Attachment-count axis
+  SATURATED** (2/3/4 all verified); remaining MRT frontier =
+  per-attachment logicOp combos + MRT+depth.
+  **(iv-s) MRT+DEPTH — DONE, verified bit-exact (2026-11-08)**:
+  `ue_gpos_mrt4depth_1` — **the MAXIMUM attachment configuration**:
+  `is_mrt4` (4 colour) + `is_depth` (write-only D32_SFLOAT,
+  `depthTestEnable=0`, `depthWriteEnable=1`, vs_pos3 pos.z=0 ->
+  constant depth 0.0) compose with **ZERO new vn_golden code** — the
+  `mrt4`/`depth` tokens independently set `is_mrt4`/`is_depth`, and the
+  renderpass/framebuffer/clears/copy/gate plumbing already positions
+  the depth attachment at index `n_col=4` (5 total attachments = the
+  cmdexec 4-colour+1-depth maximum).  **5 readback gates bit-exact**:
+  att0-3 colour (permutations + distinct clears 0xFF000000/0xFFFF0000/
+  0xFF00FF00/0xFF00FFFF) + depth (0.0 covered / 0x3F000000=0.5f clear).
+  Color oracle unchanged (is_mrt branch -> geometric coverage; write-
+  only depth does not gate fragments).  **PASS `ulp=0` BOTH levels
+  first run** — vgtop `g1=20480 g2=20480 ulp=0 cases=43 checks=82983
+  cycles=994552`; vgsys `g1=20480 g2=20480 ulp=0 cases=43 checks=83242
+  cycles=1382128` (20480 = 5x4096).  Non-degenerate: all four colour
+  clears + depth clear each x7168.  No vn_golden edit -> zero
+  regression surface.  Wired: both run scripts + regen_vectors.
+  **MRT frontier now: per-attachment logicOp combos only** (logicOp is
+  pipeline-global but reads ca[at_q] dst per-attachment; non-UNORM8
+  logicOp is a separate (d) item).
+
+  **(iv-t) MRT + logicOp — DONE, verified bit-exact (2026-11-08)**:
+  `ue_gpos_mrtlop_1` (`is_mrtlop`, token `mrtlop`).  **First session
+  exercising per-attachment logicOp dst reads across the MRT loop.**
+  Token `mrtlop` keeps `is_mrt` (2 colour attachments) but contains NO
+  `lop_*` token so `is_lop`/`lop_op` stay unset — `logicOp` is enabled
+  explicitly as `VkLogicOp::XOR`(6) with `logicOpEnable=1`.  logicOp is
+  pipeline-GLOBAL (`logic_op_en` in dr_q) yet the ROP reads
+  `dr_q.ca[at_q]` dst PER-ATTACHMENT, so each attachment's permuted FS
+  src XORs its OWN clear: att0 `src=[b0,b1,b2,b3]` XOR `dst=clear0
+  [0,0,0,255]` -> `[b0,b1,b2,~b3]`; att1 `src=permute [b2,b1,b0,b3]` XOR
+  `dst=clear1 [0,0,255,255]` -> `[b2,b1,~b0,~b3]`.  Different dst clears
+  -> observably different covered words, proving the per-attachment dst
+  read is real (not a shared/global dst).  pColorBlendState emits
+  `attachmentCount=n_col=2` blendEnable=0 entries (logicOp replaces
+  blend).  **PASS `ulp=0` BOTH levels first run** — vgtop `g1=8192
+  g2=8192 ulp=0 cases=31 checks=33519 cycles=770121`; vgsys `g1=8192
+  g2=8192 ulp=0 cases=31 checks=33706 cycles=1102099`.  Non-degenerate:
+  both clears x7168 + covered att0/att1 differ in R/B bytes.  Byte-
+  identity: full-corpus regen clean for tracked graphics sessions
+  (fcolor/grad/tri/blend all clean; MRT family untracked per no-commit).
+  Wired: both run scripts + regen_vectors.  **MRT frontier now
+  SATURATED**: routing + per-att clear + per-att blend + 2/3/4 counts +
+  depth + per-att logicOp all verified `ulp=0`.  Remaining (d): MSAA,
+  occlusion/timestamp queries, secondary CBs/subpasses, non-UNORM8
+  logicOp.
+
+  **(iv-u) MRT x4 + logicOp — DONE, verified bit-exact (2026-11-08)**:
+  `ue_gpos_mrt4lop_1` — **logicOp dst reads across the FULL `at_q=0..3`
+  cursor.**  `is_mrtlop` broadened from `'mrtlop' in gfx` to
+  `is_mrt and 'lop' in gfx and lop_op is None`, so `mrt{,3,4}lop`
+  composes with `is_mrt`/`is_mrt3`/`is_mrt4` (2/3/4 colour
+  attachments).  `mrt4lop` -> `is_mrt4` (n_col=4) + `is_mrtlop`: fs_mrt4
+  4-output gradient/permutations, logicOp XOR(6) `logicOpEnable=1`,
+  `attachmentCount=4` blendEnable=0.  Oracle wraps EVERY attachment's
+  permuted src in `_lopw(perm, own_clear)`: att0 `[b0,b1,b2,~b3]`,
+  att1 `[b2,b1,~b0,~b3]`, att2 `[b1,~b2,b0,~b3]`, att3 `[~b3,~b2,b1,~b0]`
+  vs clears `[0,0,0,255]`/`[0,0,255,255]`/`[0,255,0,255]`/`[255,255,0,255]`
+  — four DISTINCT dst clears prove four independent `ca[at_q]` dst
+  reads.
+  att2/att3 perm->lop restructure is byte-identical for non-lop sessions.
+  **PASS `ulp=0` BOTH levels first run** — vgtop `g1=16384 g2=16384
+  ulp=0 cases=39 checks=66495 cycles=960357`; vgsys `g1=16384 g2=16384
+  ulp=0 cases=39 checks=66730 cycles=1336396` (16384=4x4096).
+  Non-degenerate: all four clears x7168.  Byte-identity: 15-session
+  regen sweep (mrt/mrtb/mrt3/mrt4/mrt4depth/mrtlop/fcolor/grad/tri/
+  blend/lopand/lopx/bopadd/bfacsc/cwm) ALL identical.  Wired: both run
+  scripts + regen_vectors.  **logicOp x MRT matrix SATURATED**: `mrtlop`
+  (2-att), `mrt3lop` (3-att, `g1=12288`=3x4096 ulp=0 both levels,
+  cycles vgtop 865032 / vgsys 1218127) and `mrt4lop` (4-att) all verified
+  — per-attachment `ca[at_q]` dst reads proven at every count.
+
+  **(iv-v) D24S8 stencil — DONE, verified bit-exact (2026-11-08)**:
+  `ue_gpos_stencil_1` (`is_stencil`, token `stencil`) — **first real
+  depth-stencil attachment with live stencil ops.**  D24_UNORM_S8_UINT
+  (vkfmt 129, device did 14) now advertises `DEPTH_STENCIL_ATTACHMENT`
+  in `vn_device_profile.toml`; the raster already implemented
+  `f_scmp`/`f_sop` front+back stencil state (ObjPay w51-54), so this was
+  a plumbing + oracle build, not new raster logic.  Pipeline forces
+  `depthTestEnable=1, depthCompareOp=ALWAYS, depthWriteEnable=1` so every
+  covered fragment reaches `S_DZ_RD->C2`, plus `stencilTestEnable=1` with
+  front==back `VkStencilOpState{compareOp=ALWAYS, passOp=REPLACE,
+  failOp=depthFailOp=KEEP, compareMask=writeMask=0xFF, ref=0x5A}`.
+  Two vnfront gates opened for did 14 (vkCreateImage DSA-usage check +
+  image-view aspect==2), mirrored in the vn_golden FrontModel
+  (`usage&0x20` did-set and `asp_ok` ifmt-set now `{12,13,14}`).  The
+  packed `{stencil[31:24], depth_unorm24[23:0]}` word is read back via
+  the single-plane `aspectMask=2` copy (aspect is a validation tag;
+  colour+depth both resolve `img0.base`) — **no aspect=4 stencil-only
+  path needed**.  Oracle `cl_f32_u24` matches RTL `f_f32_u24`
+  (mantissa*16777215, round-nearest): covered frag depth 0.0 ->
+  `0x5A000000`, cleared depth 0.5 -> `0x00800000`.  **PASS ulp=0** both
+  levels — vgtop g1=8192 checks=33519 cycles=676309; vgsys g1=8192
+  checks=33706 cycles=998979.  Non-degenerate: `5A000000` x1024 covered
+  vs `00800000` x7168 cleared.  `is_ds = is_depth or is_stencil` keeps
+  every `is_depth` value identical for non-stencil sessions (no existing
+  token contains `stencil`); tracked tri/blend regen byte-identical,
+  mrt4depth re-verified ulp=0.  Wired into both run scripts + regen +
+  this entry.  **All three S_DZ_C2 stencil branches verified ulp=0**:
+  `ue_gpos_stencil_df_1` (`is_stdf`, token `stencil_df`) drives
+  depthFailOp=REPLACE(ref 0xA5) via depthCompareOp=NEVER (stencil compare
+  ALWAYS passes, depth always fails) -> covered `0xA5800000`, colour
+  all-cleared (help_q), stored depth kept (st_hold_q); vgtop g1=8192
+  cycles=668117 / vgsys cycles=987715.  `ue_gpos_stencil_f_1` (`is_stf`,
+  token `stencil_f`) drives failOp=REPLACE(ref 0xC3) via compareOp=EQUAL
+  vs cleared 0 (stencil-fail short-circuits before depth) -> covered
+  `0xC3800000`, colour all-cleared; same cycle counts.  pass+depthFail+
+  stencil-fail all proven bit-exact.  `ue_gpos_stencil_inv_1`
+  (`is_stinv`, token `stencil_inv`) drives passOp=INVERT — f_sop `~oldb`
+  on cleared 0 -> `0xFF` under the normal pass branch -> covered
+  `0xFF000000` / cleared `0x00800000` (ulp=0 both) — proves f_sop's
+  arithmetic (non-REPLACE) path.  **Nonzero stencil clear now DONE**
+  (2026-11-08): `ue_gpos_stencil_clr_1` (`is_stclr`, token
+  `stencil_clr`) clears stencil via `VkClearValue.color.uint32[1]=0x33`
+  -> cmdexec loads `clearv_q[att*4+1]` into `rd_q.clear_color[1]` ->
+  rast D24S8 clear packs `{clear_color[1][7:0], f_f32_u24(depth)}` (was
+  hardcoded `8'h00`).  compareOp=EQUAL ref=0x33 passes -> passOp=INCR_SAT
+  `0x33->0x34` -> covered `0x34000000` / uncovered `0x33800000` (ulp=0
+  both).  Verified non-invasive: all four prior stencil sessions +
+  `mrt4depth`/`depth` re-PASS ulp=0 (existing sessions send uint32[1]=0
+  -> clear_color[1]=0 -> byte-identical).  **writeMask!=0xFF now DONE**
+  (2026-11-08): `ue_gpos_stencil_msk_1` (`is_stmsk`, token
+  `stencil_msk`) drives passOp=REPLACE ref=0xFF under writeMask=0xF0
+  (compareMask stays 0xFF) -> f_sop `(oldb&~mask)|(n&mask)` on cleared 0
+  writes only the high nibble -> covered `0xF0000000` / uncovered
+  `0x00800000` (ulp=0 both) — a 0xFF mask would give 0xFF, so the gating
+  is proven.  Remaining stencil frontier: INCR/DECR/ZERO op variants
+  (trivial f_sop case arms — REPLACE/INVERT/INCR_SAT already proven) and
+  the back-face winding path (front==back here).
+
+  **(iv-w) GRAPHICS SECONDARY COMMAND BUFFER — DONE, verified bit-exact
+  (2026-11-08)**: `ue_gpos_secnd_1` (`is_secnd`, token `secnd`) — **first
+  graphics draw inside a SECONDARY command buffer.**  Prior secondary-CB
+  coverage was compute-only (`ue_cpos_exec2nd_1` dispatch); this exercises
+  the cmdexec one-deep secondary stack on CLS_WORK *draw* records.  cb2
+  (X['cb2'], appended to the handle tuple) is allocated level=1 and
+  recorded FIRST with `VkCommandBufferInheritanceInfo{renderPass,subpass=0,
+  framebuffer}` holding every draw-state record — BindPipeline,
+  BindVertexBuffers, SetViewport/SetScissor, Draw — while the primary cb
+  runs BeginRenderPass -> `vkCmdExecuteCommands([cb2])` -> EndRenderPass.
+  `vn_golden.py` refactored the flat seg_a2 into `pre_recs` (BeginCB+
+  BeginRP) + `draw_recs` (parameterised by `cbdraw = cb2 if is_secnd else
+  cb`) + `post_recs` (EndRP+barriers/copies+EndCB); non-secnd assembly is
+  `pre+draw+post` = the original order (byte-identical).  The FrontModel
+  `expand()` already splices secondary records generically so graphics
+  draws process identically; cmdexec's `{cbd,cursor,count}` suspend/pop
+  carries the primary's active render-pass attachments (ca_q/da_q) into
+  the spliced draw.  **PASS `ulp=0` BOTH levels first run** — vgtop
+  `g1=4096 g2=4096 ulp=0 cases=27 checks=17051 cycles=643515`; vgsys
+  `g1=4096 g2=4096 ulp=0 cases=27 checks=17214 cycles=952175` (4096 = 1
+  colour attachment).  Regression: full 65-session graphics regen sweep
+  clean; is_ds vectors legitimately shifted (stale vectors absorbing the
+  earlier is_ds/stencil plumbing — regenerated, depth_1/dbias_1/
+  mrt4depth_1/dtest_1 all re-PASS ulp=0); tri/mrt4/ftexn byte-identical.
+  Wired: both run scripts + regen_vectors.  Remaining (d): MSAA,
+  occlusion/timestamp queries, non-UNORM8 logicOp.
+  **logicOp+blend precedence confirmed already covered** — every is_lop
+  session emits blendEnable=1 + logicOpEnable=1 and the logicOp result
+  wins (blend ignored), matching Vk spec.
+
+  **(iv-x) MULTI-SUBPASS GRAPHICS — DONE, verified bit-exact
+  (2026-11-08)**: `ue_gpos_msub_1` (`is_ms`, token `msub`) — **first
+  graphics draw inside subpass>0.**  cmdexec already implemented the full
+  mechanism (`sp_ncl_q`/`sp_cref_q`/`sp_dref_q` per-subpass table ≤4,
+  `ca_q`/`da_q` re-snapshot on `vkCmdNextSubpass` ~1575-1615, pipeline-
+  subpass admission `sp_act==pipeline aux[9:8]` ~1742); the model mirrors
+  it (`sp_act`/`sp_n`, NextSubpass advance ~3295, draw admission ~3100).
+  Only golden emission was missing.  `is_ms` (excludes ds/mrt/secnd) emits
+  a colour-only renderpass `subpassCount=2` with two identical
+  VkSubpassDescription on attachment 0, creates the graphics pipeline for
+  `subpass=1`, and sequences BeginRenderPass -> `vkCmdNextSubpass` ->
+  draw-state -> Draw -> EndRenderPass (single pipeline — all draws land in
+  subpass 1; subpass-0 draws are covered by every other session).  **PASS
+  `ulp=0` BOTH levels first run** — vgtop `g1=4096 checks=17016
+  cycles=635414`; vgsys `g1=4096 checks=17173 cycles=943473`.  Non-degenerate:
+  subpassCount=1 would fault NextSubpass (`sp_act+1>=sp_n`); pipeline
+  subpass=0 would reject the subpass-1 draw -> colour mismatch.  Regression:
+  all is_ms edits gated on the flag (False for existing sessions); tri
+  regenerated + re-PASS ulp=0.  Wired: both run scripts + regen_vectors.
+  Remaining (d): MSAA, occlusion/timestamp queries (need rasterizer
+  sample-count + writeback — largest), non-UNORM8 logicOp (integer-output
+  FS + format-37 decoupling), two-pipeline both-subpass draws.
+
+- [x] Native late-z depth writeback stage (foundation): `Writeback.depth`
+  optional `(owner, offset, pitch, compare_op, write_enable)` tuple
+  describing a float32 depth attachment sharing the colour
+  width/height; `_depth_pass` implements all eight VkCompareOp arms
+  (0 NEVER..7 ALWAYS).  Each covered fragment's window-space `z_win`
+  (raster record offset 8, already packed by `vn_graphics_raster`) is
+  compared against the stored float32 depth read through the same
+  extent-checked `_extent`/aperture path; a failing compare drops BOTH
+  the colour and depth writes, a passing compare writes colour
+  unconditionally and depth only when `write_enable` (read-only depth
+  test supported).  `DrawExec.depth` forwards verbatim to both the eager
+  `WritebackRuntime` admission probe and the real `_chain()` writeback;
+  the depth owner is pinned into `DrawExecRuntime.owners` for lifetime
+  tracking.  Admission refuses malformed tuples (non-5-tuple, bad
+  offset/pitch/compare/write, pitch < width*4, forged owner) before any
+  work publishes; `depth=None` keeps the colour-only profile
+  byte-identical.  Tests: `test_vn_graphics_writeback` gains
+  `test_depth_compare_gates_and_writes` (mixed LESS pass/fail — fail
+  drops colour+depth, pass writes z_win), `test_depth_write_disabled_
+  is_read_only` (compare gates colour, stored depth kept) and
+  `test_depth_admission_refusals` (8 bad tuples); `test_vn_graphics_
+  drawexec.test_depth_test_gates_writes` drives fetch->shade->raster->
+  fshade->writeback end-to-end (vs emits Position.z=.5 -> z_win=0.5;
+  stored 0.0 fails / stored 1.0 passes, covered texels take colour +
+  depth=0.5, work_refs returns 0).
+- [x] **Native depth now reachable on the real vkCmdDraw path** — the
+  stage mechanism above is wired through the full command chain and
+  verified end-to-end (770 `test_vn_*` PASS, +5 draw_replay tests):
+  - `vn_native_rendering.RenderPass` admits `pDepthStencilAttachment`
+    per subpass (`RenderPass.depths` stores the `(attachment, layout)`
+    ref; depth-ref layout in {1..5}); the flat decoder `attachment`/
+    `layout` lists interleave colour then depth refs per subpass,
+    demuxed by each subpass's colour count + `pDepthStencilAttachment`
+    presence.  Depth-referenced attachments must carry the float32
+    depth format (VkFormat 126 -> device fmt 12, D32_SFLOAT); an
+    attachment may not serve as both colour and depth target.
+  - framebuffer validation is now role-aware: a colour slot requires
+    device fmt in {2,3,4,5} + colour-usage bit 0x10, a depth slot
+    requires device fmt 12 + depth-stencil-usage bit 0x20
+    (`framebuffer_operand` resolves the depth view owner/offset/pitch
+    alongside colour).
+  - `vn_graphics_state.validate` admits `pDepthStencilState` presence
+    and captures `GraphicsState.depth = (depthTestEnable,
+    depthWriteEnable, depthCompareOp)`; it refuses
+    `depthBoundsTestEnable`/`stencilTestEnable` and any out-of-range
+    compare op, so stencil and depth-bounds stay unsupported.
+  - `vn_graphics_draw_replay.operation()` resolves the active subpass's
+    depth ref through `plan.attachments` into the
+    `(owner, offset, pitch, compare_op, write_enable)` tuple and passes
+    it to `DrawExec(depth=...)` only when the pipeline enables the test
+    AND the subpass declares a depth attachment.
+  - `test_vn_graphics_draw_replay` gains four e2e tests over a real
+    `vkCmdBeginRenderPass`(colour+D32) -> `vkCmdDraw` ->
+    `vkCmdEndRenderPass`: `test_depth_test_writes_color_and_depth`
+    (seed 1.0, LESS -> covered texels colour + depth=0.5, uncovered
+    keep 1.0), `test_depth_fail_drops_color_and_depth` (seed 0.0 -> all
+    fail, nothing written), `test_depth_write_disabled_is_read_only`
+    (writeEnable=0 -> colour written, stored depth kept) and
+    `test_depth_clear_initializes_attachment` (depth loadOp=CLEAR ->
+    BeginRenderPass writes the clear float across the attachment;
+    GREATER compare then stores z_win on covered texels only).
+  - **Depth clear needed no new code:** the wire `VkClearValue` union
+    has no depthStencil arm, so a depth attachment's clear rides the
+    colour `uint32[0]` slot as float32 bits; `img_clear_texel` on the
+    float32 depth format consumes `cw[0]` verbatim and `_begin_pass`
+    already emits a clear `Transfer` for every loadOp==1 attachment —
+    verified by probe (4 depth pattern ops write the clear float) and
+    the e2e test above.  `test_depth_stencil_clear_variant_is_refused`
+    still holds: a non-zero VkClearValue tag is rejected, only the
+    colour arm is admitted.
+  - **Occlusion queries count post-depth fragments:** the executor's
+    occlusion accumulation previously added `raster.fragments`
+    (pre-test records) for every draw; `vn_transfer_executor` now
+    substitutes the writeback `written` count when the DrawExec carries
+    a depth attachment, so samples failing the compare no longer
+    inflate the query.  `test_occlusion_query_counts_post_depth_
+    fragments` clears depth to 0.0 (all z_win=0.5 fail LESS) and
+    asserts the query publishes 0 while `fragments`>0 proves the draw
+    was non-degenerate.  Depth-free occlusion is unchanged.
+  **Remaining depth boundary:** D16/D24S8 and stencil test/write,
+  early-z and MSAA are still refused; the bounded profile is D32_SFLOAT
+  late-z with depth test/write, bounds, bias and clamp.
+
+- [x] Native bounded blend end-to-end (UNORM8 RGBA single output): the
+  pipeline's `pColorBlendState` attachment is now retained instead of
+  refused.  `vn_graphics_state.validate()` admits `blendEnable` (limit
+  raised 0->1) and captures `GraphicsState.blend =
+  (srcColorFactor, dstColorFactor, colorOp, srcAlphaFactor,
+  dstAlphaFactor, alphaOp, writeMask, k0, k1, k2, k3)` only when the
+  subpass has exactly one colour output; the four `blendConstants` are
+  read from `blobs['blendConstants']` as raw fp32 bit words (the
+  `fields['blendConstants']==[4]` entry is only the count marker).
+  Enabled blend on a multi-attachment subpass and `logicOpEnable` stay
+  refused.
+- [x] Blend math mirrors the RTL oracle bit-for-bit: `Writeback.blend`
+  (new trailing field, `None` keeps the unblended path byte-identical)
+  is forwarded `GraphicsState -> draw_replay.operation() -> DrawExec ->
+  Writeback`.  `_blend_write` reads the stored dst texel, dequantizes
+  each UNORM8 byte as `u8*K255` (`K255=0x3B808081`), evaluates the raw
+  VkBlendFactor codes 0..14 per channel (colour factors on channels
+  0..2, alpha factors on channel 3, `konst[c]` for CONSTANT_*,
+  SRC_ALPHA_SATURATE = min(srcA,1-dstA) on colour / 1.0 on alpha),
+  applies the VkBlendOp 0..4 on the fp32 products, and keeps the dst
+  byte on writeMask-clear channels.  Admission is bounded to the plain
+  UNORM8 four-component outputs — device fmt 2 (RGBA) and fmt 4 (BGRA,
+  `cmap=[2,1,0,3]` byte permutation mirroring `img_clear_texel`'s `cj`
+  selection); sRGB/raw/other formats refuse.  Depth still gates first —
+  a failing late-z compare drops the blended write entirely.
+- [x] Verified: 4 new `test_vn_graphics_writeback` blend tests (SRC_ALPHA
+  over seeded dst -> oracle `[164,50,25,128]`, cleared-black alpha-over
+  `[128,0,0,128]`, writeMask keeps dst alpha, 8 admission refusals +
+  non-fmt2 refusal) and 4 new `test_vn_graphics_draw_replay` e2e tests
+  over real `vkCmdBeginRenderPass`->`vkCmdDraw`->`vkCmdEndRenderPass`
+  (ONE/ONE-ADD, CONSTANT_COLOR/1M_CONSTANT_COLOR via real
+  `blendConstants`, depth+blend compose, depth-fail drops blend) plus 2
+  BGRA tests (writeback `test_blend_bgra_permutation` and e2e
+  `test_blend_bgra_writes_permuted_texels` over a real format-44 pass) —
+  780 `test_vn_*` PASS (one unrelated flaky native-CLI bridge test
+  `test_opt_in_cli...` passes in isolation; connection-reset under load).
+- [x] Standalone colourWriteMask (blendEnable=0): `Writeback.write_mask`
+  (new trailing field, default 15 = unmasked fast path) is fed
+  `GraphicsState.color_masks[0]` -> `DrawExec.write_mask` -> `Writeback`.
+  When no blend is present and the mask is non-15, `_mask_merge` reads the
+  stored dst texel and keeps the dst byte at each clear mask bit's `cmap`
+  position (BGRA-aware), matching the RTL `is_bloff`+`is_cwm` oracle arm.
+  Bounded to the same device fmt 2 / fmt 4 UNORM8 outputs as blend —
+  writeMask<15 on any other format refuses at admission (previously the
+  mask was silently ignored).  Verified: 3 `test_vn_graphics_writeback`
+  unit tests (RGBA mask=7 keeps dst alpha, BGRA mask=7 keeps dst byte 3,
+  fmt-15 refusal + mask=15 admission) and e2e
+  `test_write_mask_gates_unblended_channels` over real `vkCmdDraw` —
+  784 `test_vn_*` PASS.
+- [x] Native bounded logicOp end-to-end (UNORM8 RGBA/BGRA single output):
+  `logicOpEnable` is admitted (removed from the required-zero map) and
+  `GraphicsState.logic_op` retains the VkLogicOp code 0..14 only when
+  `blendEnable=0` on every attachment — the logicOp-replaces-blend
+  precedence combo and out-of-table codes (>14) refuse.  `Writeback.
+  logic_op` is forwarded `GraphicsState -> draw_replay -> DrawExec ->
+  Writeback`; `_logic_write` applies the per-channel `f_lop` byte table
+  (the 16-case CLEAR..SET mirror of RTL rast.sv) on the UNORM8 src/dst
+  encodings via `cmap` (BGRA-aware), composing with `write_mask` on clear
+  bits.  Bounded to device fmt 2 / fmt 4 like blend/mask.  Verified: 3
+  `test_vn_graphics_writeback` unit tests (XOR `[55,100,50,0]`, AND
+  `[200,0,0,255]`, writeMask composition + fmt-15 refusal), state
+  retention test, and e2e `test_logicop_xor_writes_framebuffer` over real
+  `vkCmdDraw` — 789 `test_vn_*` PASS.
+- [x] Native bounded `rasterizerDiscardEnable` end-to-end: the flag is
+  admitted (removed from the required-zero map) and `GraphicsState.
+  discard` retains it (0/1 only).  `DrawExec.discard` forwards it to the
+  `Raster` stage; `RasterRuntime.advance()` counts each primitive but
+  skips cull/emit when `discard=1`, so zero fragment records reach
+  writeback and the attachment keeps its clear value — matching the RTL
+  `rdiscard` oracle ("discards every primitive before rasterization").
+  Vertex fetch and vertex shading still run upstream, per spec.  Verified:
+  state retention test, `test_rasterizer_discard_emits_no_records` (triangles
+  counted, records=0), `discard=2` admission refusal, and e2e
+  `test_rasterizer_discard_keeps_framebuffer_clear` over real `vkCmdDraw`
+  (every texel keeps the clear) — 792 `test_vn_*` PASS.
+- [x] Native bounded `depthBoundsTestEnable` end-to-end: the flag is
+  admitted and `GraphicsState.bounds` retains the (minDepthBounds,
+  maxDepthBounds) fp32 window.  `DrawExec.bounds` forwards it to
+  `Writeback`, whose `advance()` drops any covered fragment whose
+  window-space `z_win` falls outside `[min,max]` before colour/depth
+  write — independent of the depth compare, composing with it when both
+  are enabled.  The depth-attachment path is also corrected: depth write
+  no longer requires `depthTestEnable=1` (a lone `depthWriteEnable`
+  commits with compare=ALWAYS), matching the oracle `dbnd` vector
+  (`depthTestEnable=0 + depthWriteEnable=1 + depthBoundsTestEnable=1`).
+  Verified: 3 `test_vn_graphics_writeback` unit tests (window reject,
+  bounds+depth compose, admission refusals), state retention, and e2e
+  `test_depth_bounds_{rejects_out_of_window,admits_and_writes_depth}`
+  over real `vkCmdDraw` — 797 `test_vn_*` PASS.
+- [x] Native bounded `depthBiasEnable` end-to-end: the flag is admitted
+  and `GraphicsState.depth_bias` retains the (constantFactor, clamp,
+  slopeFactor) fp32 triple.  `DrawExec.depth_bias` forwards it to
+  `Raster`, which computes the bias once per triangle in `_begin_emit`
+  and folds it into every fragment's window `z_win` — mirroring the RTL
+  `g6lc_apu_rast` sequence: `constantFactor*r` (r=1.0 for the D32 depth
+  format), plus `slopeFactor*max|dz|/span` where `span` is the largest
+  edge pixel delta (>=1), then the signed `depthBiasClamp`.  Because the
+  biased `z_win` feeds the fragment record, the existing depth-bounds
+  window, late-z compare and depth write all consume the biased depth
+  transparently — matching the oracle `dbias` vector
+  (`constantFactor=0.25 -> z+0.25`).  Verified: state retention test, 3
+  `test_vn_graphics_raster` tests (constant shift, per-triangle-constant
+  slope delta = slope*max|dz|/span, admission refusals), and e2e
+  `test_depth_bias_{shifts_stored_depth,flips_compare_result}` over real
+  `vkCmdDraw` — 803 `test_vn_*` PASS.
+- [x] Native bounded `depthClampEnable` end-to-end: the flag is admitted
+  (removed from the required-zero map) and `GraphicsState.depth_clamp`
+  retains it (0/1 only).  `DrawExec.depth_clamp` forwards it to `Raster`,
+  which applies the depth-range rule to each fragment's geometric
+  `z_win` before depth bias: `depth_clamp=0` drops fragments whose
+  window depth falls outside the viewport `[minDepth,maxDepth]` range —
+  the fragment-level approximation of near/far polygon clipping that
+  yields the `dclampoff` oracle's empty framebuffer — while
+  `depth_clamp=1` skips the clip and clamps `z_win` into range.  This
+  also makes the previously-forced `depthClampEnable=0` path conformant:
+  out-of-range depth is now actually clipped rather than silently
+  rasterized.  Verified: state retention test, 3 `test_vn_graphics_raster`
+  tests (clip drops all records for z_ndc=2.0, clamp keeps records with
+  z_win=1.0, admission refusal), and e2e
+  `test_depth_clamp_{off_clips_out_of_range_geometry,on_rasterizes_and_
+  clamps_depth}` over real `vkCmdDraw` using a `vs_program(z=2.0)` vertex
+  shader — 809 `test_vn_*` PASS.
+- [x] Native bounded `polygonMode` end-to-end (LINE + POINT): the flag is
+  admitted (removed from the required-zero map) and `GraphicsState.
+  poly_mode` retains VkPolygonMode 0..2.  `DrawExec.poly_mode` forwards
+  it to `Raster`, which keeps triangle fetch/grouping but replaces the
+  fill scanline with per-edge coverage when `poly_mode != 0`:
+  `poly_mode=1` (LINE) walks the three edges v0->v1->v2->v0 as
+  independent integer Bresenhams (`_bresenham`, mirroring RTL S_LN_* /
+  `gfx_line_coverage`), and `poly_mode=2` (POINT) emits each vertex's
+  single pixel.  `_poly_items` precomputes the emit list (px,py,a,b,t)
+  filtered to the coverable domain and `_poly_pixel` builds each
+  fragment record interpolating the two edge endpoints with weights
+  (1-t,t) — POINT degenerates to a=b,t=0 yielding the vertex's own
+  attributes; flat varyings copy the segment-start vertex (the oracle's
+  flat-per-segment colour).  Depth, clamp and bias mirror the fill path.
+  Verified: state retention (LINE/POINT admitted, =3 refused), 3
+  `test_vn_graphics_raster` tests (LINE/POINT coverage matches
+  `gfx_line_coverage` oracle exactly, admission refusal), and e2e
+  `test_polygon_mode_{line_writes_edge_coverage,point_writes_vertex_
+  pixels}` over real `vkCmdDraw` — 816 `test_vn_*` PASS.
+- [x] Native bounded `LINE_LIST` topology end-to-end: `topology` is
+  admitted and `GraphicsState.topology` retains the VkPrimitiveTopology
+  code (LINE_LIST here; LINE_STRIP/POINT_LIST in the follow-on entry;
+  TRIANGLE_STRIP/FAN stay refused).  `DrawExec.topology` forwards it to
+  `Raster`,
+  which now groups vertex records by a verts-per-primitive stride
+  (`vpp` = 2 for lines, 3 for triangles) validated as
+  `count % vpp == 0 and count >= vpp` — an odd LINE_LIST count refuses
+  atomically.  `_line` performs the same clip/w-guard and screen
+  transform as `_tri` but over two records, skips face culling (line
+  primitives are never culled), and rejects zero-length segments as
+  degenerate.  `_begin_emit` branches on topology: LINE_LIST emits the
+  single segment v0->v1 as one integer Bresenham filtered to the
+  coverable domain (reusing `_bresenham`/`_line_t`), carrying `vpp=2` so
+  `_poly_pixel` reads the two vertex records at the segment base and
+  interpolates attributes along the segment (flat varyings take the
+  segment-start vertex, the provoking vertex).  `_depth_bias` is
+  generalized to N vertices (identical result for triangles).  polygonMode
+  does not apply to line primitives.  Verified: state retention
+  (topology=1 admitted, 0/2/4/5 refused), 2 `test_vn_graphics_raster`
+  tests (two-segment coverage matches `gfx_line_coverage` oracle exactly,
+  odd-count/degenerate/out-of-profile refusals), and e2e
+  `test_line_list_topology_writes_segment_coverage` over real `vkCmdDraw`
+  — 820 `test_vn_*` PASS.
+- [x] Native bounded `LINE_STRIP` + `POINT_LIST` topology end-to-end:
+  `topology` admission widens to {0 POINT_LIST, 1 LINE_LIST, 2 LINE_STRIP,
+  3 TRIANGLE_LIST}; only TRIANGLE_STRIP/FAN (4/5) stay refused.
+  `GraphicsState.topology` retains the code.  `Raster` now computes a
+  per-topology record-addressing stride `vpp` (1 for point/strip, 2 for
+  line-list, 3 for triangle) and a primitive count `nprim`
+  (count for points, count-1 for the strip's shared-vertex chain,
+  count//vpp for the lists) with per-topology alignment validation —
+  LINE_LIST still requires an even count, LINE_STRIP admits any count>=1
+  (a single vertex yields zero segments), POINT_LIST any count>=1.
+  `_line` reads its two records at `t*vpp` so LINE_STRIP segment t
+  consumes records t,t+1 and segment t+1 reuses t+1 as its start — the
+  strip's shared vertex.  `_point` performs the single-record transform
+  for POINT_LIST.  `_begin_emit` branches topology==0 to a one-pixel
+  emit item (a=b=0,t=0 so `_poly_pixel` yields the vertex's own
+  attributes) and topology in (1,2) to the shared Bresenham segment path;
+  polygonMode still does not apply to non-polygon primitives.  The
+  eager DrawExec probe picks a topology-aligned count.  Verified: state
+  retention (0/2 admitted, 4/5 refused), 3 `test_vn_graphics_raster`
+  tests (strip chained coverage + point per-vertex coverage match the
+  `gfx_line_coverage` oracle, admission/degenerate cases), and e2e
+  `test_line_strip_topology_writes_chained_coverage` +
+  `test_point_list_topology_writes_vertex_pixels` over real `vkCmdDraw`
+  — 827 `test_vn_*` PASS.
+- [x] Native bounded **MRT (multi-target render)** end-to-end: the draw
+  profile now admits up to four active subpass colour outputs.  State
+  already validated `attachmentCount<=4` with per-attachment blend/mask
+  fields; `_color_targets` in `vn_graphics_draw_replay` returns every
+  active `(location, attachment)` pair (FS outputs must match the active
+  set exactly), attachment 0 rides the existing DrawExec fields and the
+  rest become `DrawExec.extra_targets` as `Writeback.extras`-shaped
+  `(owner, offset, pitch, fmt, location, write_mask)` tuples.  The key
+  design point: `Writeback` was extended with an `extras` list and now
+  builds `self.targets` (primary + extras) so **all attachments are
+  written atomically per fragment under ONE shared late-z depth test,
+  bounds window and logicOp** — a second sequential writeback pass would
+  re-test against depth the first pass already updated, so per-target
+  stages are incorrect for depth-tested draws.  Per-attachment blend and
+  pipeline-global logicOp both apply per-target src/dst (see the MRT
+  blend/logicOp entry below); per-attachment colourWriteMask gates each
+  target.  `DrawExecRuntime` keeps a single
+  `self.wb` (the executor/occlusion accounting is unchanged); eager
+  probes validate every extra target before publish and all owners are
+  pinned.  Verified: `test_mrt_two_attachments_write_both_targets` (2
+  attachments, distinct per-location FS outputs, per-attachment clears,
+  uncovered keeps each clear) + `test_mrt_depth_gates_all_targets_atomically`
+  (shared late-z gates both targets, depth written once) — 828
+  `test_vn_*` PASS.
+- [ ] **Blend/logicOp boundary:** bounded to the single UNORM8 RGBA/BGRA
+  (device fmt 2 / fmt 4) colour output.  Blend covers all 15
+  VkBlendFactor codes, 5 VkBlendOp arms, writeMask and blendConstants;
+  standalone colourWriteMask (blendEnable=0) and logicOp (blendEnable=0)
+  gate/replace the same UNORM8 outputs.  BGRA verified end-to-end.
+  Still refused: sRGB/UNORM16+/float blend/logicOp/writeMask formats (no
+  RTL oracle — the ROP oracles are UNORM8-byte only), multi-attachment
+  (MRT) blend (logicOp is now admitted per-attachment under MRT), the
+  logicOp+blendEnable precedence combo, and integer-format logicOp
+  semantics (the oracle models UNORM8 bytes).
+- [x] Native bounded **per-attachment MRT blend + logicOp** end-to-end:
+  `VkPipelineColorBlendAttachmentState` is per-attachment, so the state now
+  retains `blend` (primary 11-tuple) plus `blend_extra` (attachments
+  1..N-1, each None or the same 11-tuple) instead of refusing
+  multi-attachment blendEnable.  `Writeback` gained `blend_extra` + a
+  `_parse_blend` helper; each MRT target carries its own blend state and
+  `_blend_write` is parameterized per-target (blend + cmap), so every
+  attachment blends against its OWN stored dst under the shared late-z/
+  bounds/logicOp gate.  Pipeline-global logicOp already applied per-target
+  via `_logic_write`; now test-verified for MRT.  Verified:
+  `test_mrt_per_attachment_blend` (att0 unblended, att1 ONE/ONE ADD vs its
+  own clear — G channel proves dst contributed) and
+  `test_mrt_logicop_applies_per_attachment` (XOR vs each attachment's own
+  clear) over real `vkCmdDraw`; 834 `test_vn_*` PASS.
+  Still refused: blend/logicOp on non-UNORM8 formats, logicOp+blendEnable
+  precedence combo, integer-format logicOp.
+- [x] Native bounded **stencil (D24S8)** end-to-end: `stencilTestEnable`
+  admitted with the front/back `VkStencilOpState` fields (failOp, passOp,
+  depthFailOp, compareOp, compareMask, writeMask, reference) retained as a
+  per-face tuple.  The depth-stencil attachment now admits device fmt 14
+  (D24_UNORM_S8_UINT, packed `{stencil[31:24], depth_unorm24[23:0]}`)
+  alongside fmt 12 (D32_SFLOAT).  `Writeback` gained `depth_fmt`/`stencil`:
+  on fmt 14 the packed word is read once, the masked stencil compare runs
+  before the depth test, and failOp / depthFailOp / passOp commit the
+  updated stencil byte while a stencil- or depth-fail discards colour and
+  depth (the matching op still updates stencil); pass writes colour plus
+  depth only when depthWriteEnable.  Depth on fmt 14 compares/stores
+  unorm24 via `cl_f32_u24`; `img_clear_texel` packs the {stencil,depth}
+  clear word.  Front/back face is selected from the resolved front-facing.
+  Verified: `test_stencil_pass_replace_writes_stencil_and_depth`,
+  `test_stencil_fail_applies_failop_and_discards`,
+  `test_stencil_depth_fail_applies_depthfailop`, plus the op-variant
+  vectors `test_stencil_invert_op` (INVERT ~0->0xFF),
+  `test_stencil_incr_sat_nonzero_clear` (0x33 INCR_SAT->0x34) and
+  `test_stencil_write_mask_gates_result` (REPLACE under writeMask 0xF0
+  ->0xF0) — all over real `vkCmdDraw`; 837 `test_vn_*` PASS.
+  Still refused: D32S8/fmt-13 stencil variants, stencil without a
+  depth-stencil attachment, mixed front/back facing within one draw.
+- [x] Native bounded **fragment discard (fs_late kill)** end-to-end:
+  `OpKill`/`OpTerminateInvocation`/`OpDemoteToHelperInvocation` were
+  already admitted by the SPIR-V scanner (`has_kill` -> `fs_late`) and the
+  model already marked each killed lane `dead`/`killed` and wrote the
+  FS-out slot-8 flags word (byte 132, bit0 = discarded) for every lane —
+  but the writeback stage never read it, so killed fragments still wrote
+  colour/depth.  `Writeback.advance` now checks `colors[i+132] & 1` ahead
+  of the bounds/depth gates and drops the fragment entirely (no colour on
+  any MRT target, no depth, no stencil).  Non-`fs_late` modules leave the
+  word zeroed so the flag is only honoured where a kill can occur.
+  Verified: `test_fs_kill_flag_discards_color_and_depth` (Writeback unit —
+  flagged lane leaves colour AND depth untouched while live lanes write)
+  and `test_fs_kill_discards_fragments_per_pixel` (e2e `fs_kill_program`
+  OpKills FragCoord.x<4.0 over a fullscreen triangle: columns 0-3 keep the
+  clear, columns 4-7 take the green write); 839 `test_vn_*` PASS.
+  Still refused: nothing new — rasterizerDiscardEnable and the
+  helper-invocation raster lanes remain as before.
+- [x] Native bounded **fragment quad derivatives** end-to-end: the SPIR-V
+  scanner now flags `has_deriv` for the OpDPdx/DPdy/Fwidth{,Fine,Coarse}
+  family (207-215).  When set, `FragmentShadeRuntime` reorders the FS-in
+  records via `_quad_order` into 2x2 screen-quad lane order
+  (TL,TR,BL,BR per four consecutive records) so the model's
+  `{4k..4k+3}` quad-lane grouping resolves against true screen
+  neighbours; uncovered quad pixels are filled with helper records
+  carrying an off-screen FragCoord (-1e6) plus a covered neighbour's
+  varyings, which the writeback bounds gate drops (no helpers bitmask or
+  model/writeback change needed).  Quad groups never straddle batch/wave
+  boundaries because every emitted group is a complete four records and
+  both the 256-record batch and 8-lane wave are multiples of four.
+  `vn_graphics_drawexec` now feeds writeback the fragment stage's
+  (possibly reordered) `operation.records` so each FS-out colour stays
+  paired with its own input FragCoord.  Verified:
+  `test_quad_order_groups_quads_and_synthesises_helpers` (unit — quad
+  grouping, off-screen helper synthesis, duplicate-FragCoord fallback)
+  and `test_fs_derivatives_read_quad_neighbours` (e2e `fs_deriv_program`
+  outputs dFdx/dFdy/fwidth/dFdxFine over a fullscreen triangle; expected
+  values from `gfx_grad_pixels` + the coarse TR-TL / BL-TL / |dx|+|dy| /
+  per-row fine lane differences); 841 `test_vn_*` PASS.
+  Still refused: partial-quad helper *values* follow the covered-neighbour
+  approximation (real HW helper derivative inputs are undefined; the
+  oracle only exercises complete quads), and the corpus `fs_deriv.spv` /
+  `fs_deriv2.spv` / `fs_demote_deriv.spv` vectors are not yet wired as
+  native e2e (they need their own vertex-format/shader plumbing).
+- [x] Native bounded **TRIANGLE_STRIP + TRIANGLE_FAN** topology
+  end-to-end: `inputAssembly.topology` admission widens to the full
+  bounded set {0..5}; only out-of-profile (>5) and `primitiveRestartEnable`
+  stay refused.  `Raster` gains `_vert_offsets(t)`, a per-primitive map
+  from vertex slot to byte offset into `op.vary`, mirroring the
+  `g6lc_apu_rast` `f_pi` topology decode exactly: TRIANGLE_LIST packs
+  records 3t..3t+2, TRIANGLE_STRIP slides one vertex per primitive and
+  swaps slots 1/2 on odd prims to hold one winding, TRIANGLE_FAN anchors
+  slot 0 at vertex 0 and slides the (t+1,t+2) pair.  `_tri`, `_pixel`
+  and `_poly_pixel` now read vertex records through `ctx['voffs']` rather
+  than the old contiguous `t*3*RECORD_STRIDE` assumption, so strip/fan
+  reuse the identical coverage, top-left rule, cull, interpolation,
+  polygonMode, depth-bias and fragment-budget machinery as
+  TRIANGLE_LIST.  `nprim`/`aligned` admit count>=3 (count-2 primitives);
+  the eager DrawExec probe count stays 3 (valid for all triangle
+  topologies).  New oracle helpers `gfx_strip_coverage` /
+  `gfx_fan_coverage` decompose the sliding window into per-primitive
+  `gfx_tri_coverage` calls under the same winding-corrected vertex order.
+  Verified: `test_triangle_strip_topology_matches_golden_oracle`,
+  `test_triangle_fan_topology_matches_golden_oracle` and
+  `test_triangle_strip_polygon_mode_line_matches_oracle` (raster unit),
+  plus `test_triangle_strip_topology_writes_sliding_coverage`,
+  `test_triangle_fan_topology_writes_anchored_coverage` and
+  `test_triangle_strip_winding_swap_holds_under_cull` (e2e `vkCmdDraw`;
+  the cull=BACK case proves the odd-primitive slot swap keeps winding
+  consistent — an unswapped order would alternate facing and cull half
+  the strip); 847 `test_vn_*` PASS.  Still refused:
+  `primitiveRestartEnable` (needs restart-index plumbing through fetch +
+  a strip/fan restart oracle vector), and PATCH_LIST/geometry topologies.
+- [x] Native bounded **indexed draws (`vkCmdDrawIndexed`) e2e coverage**:
+  indexed vertex fetch was implemented and unit-tested at the
+  fetch/draws level but had no framebuffer-level replay test.  Added an
+  `IB` index buffer (usage=0x40, offset 512 after the 512-byte VB) to the
+  draw-replay fixture plus `upload_indices`/`indexed_prepared`/
+  `indexed_coverage` helpers.  `test_draw_indexed_uint16_reorders_vertices`
+  draws two triangles over four uploaded vertices via indices
+  [0,1,2,1,3,2] (v1 reused, v3 selected) and
+  `test_draw_indexed_uint32_selects_subset` draws tri(v2,v0,v3) via
+  uint32 indices [2,0,3] skipping decoy v1, and
+  `test_draw_indexed_vertex_offset_selects_shifted_vertices` applies
+  vertexOffset=1 so indices [0,1,2] resolve to vertex records 1,2,3 —
+  all discriminating: an index-ignoring or offset-dropping replay cannot
+  reproduce the oracle coverage.  Expected coverage maps each (offset)
+  index to its clip position and unions `gfx_tri_coverage` per triple;
+  850 `test_vn_*` PASS.
+- [x] Native bounded **indirect draws (`vkCmdDrawIndirect`/
+  `vkCmdDrawIndexedIndirect`) e2e coverage**: indirect argument reads
+  were implemented and plan-tested (`is_drawind`/`is_drawindx`) but had
+  no framebuffer-level replay test.  Added an `XB` indirect-args buffer
+  (usage=0x100 INDIRECT_BUFFER, offset 1024) to the draw-replay fixture
+  plus `upload_indirect`/`indirect_coverage` helpers.
+  `test_draw_indirect_reads_args_from_buffer` issues a 16-byte
+  DrawIndirectCommand `{vertexCount=3, firstVertex=1}` selecting verts
+  1,2,3 (vs the firstVertex=0 default) and
+  `test_draw_indexed_indirect_reads_args_from_buffer` issues a 20-byte
+  DrawIndexedIndirectCommand `{indexCount=3, vertexOffset=1}` over
+  indices [0,1,2] resolving to vertex records 1,2,3 — both proving the
+  indirect args reach fetch through the real command path.  864
+  `test_vn_*` PASS.
+- [x] Native bounded **primitiveRestartEnable** (indexed draws): the
+  last refused input-assembly feature, now implemented end-to-end and
+  oracle-verified.  `pInputAssemblyState.primitiveRestartEnable` admits
+  {0,1} into `GraphicsState.restart` (out-of-range still refuses);
+  `Fetch` gains a `restart` operand and, for indexed draws only,
+  detects the index-width sentinel (0xFFFF/0xFFFFFFFF) on the RAW index
+  before `vertexOffset`, recording each sentinel's record index in
+  `FetchRuntime.breaks` while still emitting a placeholder record so
+  record indices stay aligned with the VS vary stream.  `DrawExec`
+  forwards `fetch.breaks` as the Raster `restarts` operand; the raster
+  builds an explicit per-primitive vertex-record table
+  (`_build_prims`/`_run_prims`) that splits the stream on break indices
+  into runs and groups each run per topology — identical to the
+  contiguous map within a run, with the accumulator resetting at every
+  break so no primitive straddles a restart and incomplete run tails are
+  dropped (Vulkan restart semantics).  `_vert_offsets` sources offsets
+  from the table when present and `_line`/`_point` now read through it
+  (identical offsets on the contiguous path).  New oracle
+  `gfx_restart_coverage` decomposes a sentinel-marked stream into runs
+  and unions per-topology coverage.  Verified: 5 raster unit tests
+  (list/strip/fan/line restart + incomplete-tail drop), 3 fetch unit
+  tests (u16/u32 sentinel, vertexOffset ordering, restart-disabled), 1
+  state retention test, and 2 e2e `vkCmdDrawIndexed` tests — a
+  TRIANGLE_LIST draw whose indexCount=7 is not a multiple of 3 (only
+  break-aware assembly admits it) and a TRIANGLE_STRIP window-reset
+  case — all matching `gfx_restart_coverage`.  862 `test_vn_*` PASS,
+  zero regressions.  Honest boundary: indexed draws only (non-indexed
+  ignore the flag per Vulkan); instancing+restart composes (breaks are
+  per-record across all instances) but has no dedicated e2e; no RTL/CTS
+  qualification is implied.
+- [x] **Instancing per-instance primitive grouping — fixed.** `Fetch`
+  emits `count*instances` records (instance-major) and the raster
+  previously treated them as ONE contiguous primitive stream, so
+  TRIANGLE_STRIP/TRIANGLE_FAN/LINE_STRIP sliding windows crossed instance
+  boundaries (e.g. strip prim (i0v2,i0v3,i1v0)) and a per-instance count
+  not divisible by the vertices-per-primitive straddled on list topologies.
+  Reachable via `_bind_args` (`instances>0`) but latent — every e2e used
+  `instanceCount=1`.  Fix mirrors primitive-restart: a new
+  `Raster.instance_stride` operand (drawexec passes `fetch.args[0]`, the
+  per-instance vertex count, resolved for indirect draws) splits the record
+  stream into per-instance runs inside `_build_prims` — records are RETAINED
+  (unlike restart sentinels which are dropped), grouping resets at each
+  boundary, and the topology-aligned check now applies per instance
+  (`count % instance_stride == 0` plus per-run alignment) rather than to
+  the concatenated total, so a malformed per-instance count refuses instead
+  of silently emitting cross-instance primitives.  Verified by 3 raster
+  unit tests (instanced strip reset, instanced TRIANGLE_LIST grouping,
+  misaligned-per-instance refusal) and 2 `vkCmdDraw` e2e tests driving a
+  new hand-assembled `vs_inst_program` (BuiltIn InstanceIndex offsets
+  Position.x per instance — the corpus `vs_inst.spv` is refused by
+  interface admission for its extra `gl_PerVertex` builtins) with
+  `instanceCount=4` list and `instanceCount=2` strip coverage matched
+  against per-instance `gfx_*_coverage` unions.  Also verified e2e:
+  `firstInstance` shifts the InstanceIndex builtin (`inst_index =
+  first_instance + instance`), and the instancing+restart composition —
+  `vkCmdDrawIndexed` + `primitiveRestartEnable` + `instanceCount=2` replays
+  the same sentinel-delimited index stream per instance, each run
+  independently break-split with no cross-instance primitive.  Per-instance
+  (rate-1) *attribute* fetch is now verified end-to-end too: `pipeline(rate1)`
+  declares a second `inputRate=1` vertex binding (binding1, stride=4,
+  `R32_SFLOAT` at Location 2) bound to a new `VB2` buffer, and a hand-
+  assembled `vs_rate_program` adds that per-instance float to `Position.x`.
+  Two `vkCmdDraw` e2e tests (`test_rate1_attribute_offsets_each_instance`,
+  `test_rate1_attribute_first_instance_selects_offset`) match
+  `gfx_tri_coverage` unions — the latter also proves `firstInstance` shifts
+  the rate-1 fetch index (`inst_index = first_instance + instance`) — plus
+  `test_rate1_attribute_with_indexed_draw` proving the rate-1 `inst_index`
+  addressing composes with `vkCmdDrawIndexed` index reorder.  874
+  `test_vn_*` PASS.  Single-instance draws keep the contiguous path
+  (`instance_stride=0`).  No RTL/CTS/hardware qualification is implied.
+
+  Compute-dispatch coverage was extended the same way (host-native
+  `vn_compute`/`ShaderRuntime`, still not RTL/CTS): corpus
+  `builtin_{gid,lindex,lid}` now prove `GlobalInvocationId`,
+  `LocalInvocationId.{x,y}`, `WorkgroupId.{x,y}`, `NumWorkgroups` and
+  `LocalInvocationIndex` decompose correctly across the bounded
+  ≤256-invocation single-chunk dispatch (`flags=0`, `wb=0`); corpus
+  `barrier_reduce` proves the Workgroup slab is shared across all 64
+  lanes and `barrier()` rendezvous actually synchronizes the tree
+  reduction; corpus `atomic_hist` proves SSBO `atomicAdd`/`atomicMax`/
+  `atomicOr` with data-dependent indices, a Workgroup shared-memory
+  atomic counter, and `barrier()` ordering — `test_atomic_histogram_
+  shared_counter_and_barriers` locks dst `[8,8,8,8]`/`[28..31]`/`112`/`0`.
+  879 `test_vn_*` PASS.
+
+  **Fixed — `OpAtomicCompareExchange` operand decode (opcode 230).**
+  Corpus `atomic_cas` (an `atomicCompSwap` do-while CAS-retry loop plus
+  per-lane `atomicExchange`/`atomicMin`/`atomicAnd`/`atomicXor`)
+  reported `done`/`robust=0` yet left `dst[0]` at its preload image.
+  Instrumented `atomic_op` showed every CAS compared `old != cmpv` and
+  never wrote: `opid` read `(ops[2], ops[5], ops[6])` for
+  `(ptr, Value, Comparator)`, but the SPIR-V grammar puts an
+  `Equal`+`Unequal` semantics pair before `Value, Comparator`, so the
+  real operands are **after** that semantics pair.  `opid` was hardened
+  to `(ops[2], ops[6], ops[7])` — `ops[6]`=Value, `ops[7]`=Comparator at
+  **fixed forward positions** per the grammar (`…, Value, Comparator`
+  then optional trailing Memory-Operands bitmask), so the decode is also
+  correct for CAS shaders that carry memory operands (Volatile/Coherent
+  etc.) where trailing-index reads would shift.  Verified: `vn_compute`
+  `atomic_cas` now yields `dst[0]=8` (one successful CAS bump per lane)
+  and `model_run` yields `init+8`, **bit-exact vs a fresh lavapipe
+  oracle run** on all 48 dst words.  New
+  `test_atomic_compare_exchange_retry_loop_counts_lanes` locks it.
+  880 `test_vn_*` PASS.
+
+  **Vector regen owed — done.**  A full-corpus replay sweep (every
+  committed `sh_vectors/*.hex` re-run through the current `spirv_model`,
+  diffed against each `.exp` MODEL *and* ORACLE section) showed the
+  committed `atomic_cas_{1,2,3}`/`atomic_cas_mut_0` vectors were
+  **stale**: generated while the decode bug was live, their ORACLE
+  section had folded buggy-model words (`dst[0]=init`, not `init+8`).
+  Regenerated just those cases via the faithful `main()` flow (seeds +
+  mut + bad arms, real lavapipe oracle): `.exp` now carries
+  ORACLE=MODEL=`init+8`, `git diff` is exactly the `dst[0]` word in both
+  sections.  Sweep triage: the only other diffs were harness artifacts
+  (`fn_deep_0` expect-done=2 preload-default vs `model_run` zero-default;
+  `specconst_*` needs the `specialize()`-folded module rebuild, not a
+  word splice — both confirmed matching when run correctly).  426/501
+  cases match outright; remainder are `nomodel` (no oracle/model
+  section) or the explained artifacts.  Note: `shader_vectors.py`'s
+  "oracle beyond Gate-2" diagnostic uses `o2 is not owords` (identity)
+  where `oracle_image` always returns a fresh list — cosmetic, prints
+  even on clean oracle runs; output is unaffected.
+
+  **RTL Gate evidence — `tb_g6lc_apu_vgtop` bit-exact sessions.**  The
+  cached Verilator-5.008-mod sim binary (built 2026-11-08; the only newer
+  RTL file is a comment-only `g6lc_apu_rast_pkg.sv` docstring, so it is
+  functionally current) was run directly against the guest-script tapes —
+  vectors are runtime inputs, so no rebuild was needed.  **31 sessions
+  all PASS `maxulp=0`** (math450 at the expected SFU 1-ULP bound):
+  compute `builtin_{gid,lid,lindex}`, `barrier_reduce`, `bufcopy`,
+  `imgatom`, `atomic1`, `descarr`, `arrlen`, `bufscale`, `compare`,
+  `composite`, `intmix`, `localsize{32,128}`, `math450`, `oob`,
+  `pushscale`, `vec4arith`, `loopfor`, `multiset`, `imgloadstore`,
+  `texfetch`; graphics `fsubo`, `depth`, `dtest`, `bopadd`, `ftex`,
+  `mrt`, `line`, `stencil` (4096–8192-word golden compares, 17k–33k
+  checks each).  This is real Venus-transport + ShaderCore RTL evidence
+  for the same bounded features the Python models specify — the first
+  RTL-side confirmation that compute invocation-ID builtins,
+  shared-memory/barrier reduction, SSBO+image atomics and the graphics
+  raster/blend/depth/texture paths are bit-exact, complementing (not
+  replacing) the shwave/shcore vector gates and CTS/device leaves.
+
+  The higher-level `tb_g6lc_apu_vgsys` (vqwalk + vgtop + apmem over one
+  AXI4 master, **real split virtqueues**) was also run: `ue_sm5_transport`
+  plus `atomic1`, `shared1`, `ctsb2b` (CTS buffer-to-buffer), `dispbase`,
+  `drawind` (indirect draw), `events`, and a second batch —
+  `localsize{64,128}`, `barrier_reduce{,128,_opt}`, `texfetch`,
+  `imgatom`, `arrlen1`, `multiset`, `zerodisp`, `dcopy_bufcopy`,
+  `inst` (instancing), `mrt4`, `depth` — all `PASS`/`PASS-COMPUTE
+  maxulp=0`.  **48 vgsys + 31 vgtop sessions bit-exact** across both
+  benches; this is end-to-end Venus system evidence, still bounded to
+  the generated session tapes (not full CTS conformance).
+
+  `tb_g6lc_apu_shmod` (commit scanner / golden-table / fault matrix)
+  also PASSed locally: `cases=109 checks=1998722 cycles=4250885` — the
+  `atomic_cas` module and the whole corpus commit path are validated
+  through real RTL.
+
+  `tb_g6lc_apu_shwave` (the wave-engine vector gate that replays
+  `sh_vectors/*.hex`/`.exp` directly, incl. `atomic_cas`) is
+  **build-resource-limited on the local 15 GiB WSL host**: the pinned
+  repo Verilator emits a single ~148 MB `___024root__DepSet` TU
+  (dominated by the TB's own 1 MiB memory model + checker, not DUT
+  geometry — a reduced-geometry `g6lc_apu_shcore` parameter override
+  did not shrink it).  `-Os`+PGO and `-O1` cc1plus runs exceeded ~30 min
+  with zero emitted assembly; `-O0` ballooned past 12 GiB and was
+  OOM-killed.  This is a compile-time wall, not a functional failure —
+  the same `g6lc_apu_shcore`/shwave RTL is already exercised bit-exact
+  through the vgtop/vgsys sessions above.
+
+  The designed route — remote `testharness_proxy.py apu-leaf
+  --stages unit` — was launched on `ovh_calltorch` (tag
+  `apu-leaf-20261109T031055-51edb02677ad`), pushing the dirty worktree
+  (CAS fix + regenerated `atomic_cas` vectors included via SHA256
+  manifest) and building/running the full unit stage incl. `shwave`
+  there.  Verdict pending collection via `apu-leaf-collect`.
+
+  **Vector-freshness audit + spec-op composite extract (same session).**
+  Re-ran all 434 committed compute `sh_vectors/*.hex` through the current
+  `spirv_model` and diffed against each `.exp` MODEL section + robust field:
+  **zero stale** (the only flags were the `specconst_*` folded-module arms and
+  the `fn_deep_0` runtime-fault arm — both audit artifacts, verified clean).
+  So the remote `shwave` Gate-1/Gate-2 runs against fresh expectations.
+  Separately, re-scanned the `shader-feed-cts1.json` "commit-fault" census
+  against current `spirv_scan`+`vn_specialization.specialize()` (the JSON
+  predates `c9d5b584d`): the CONST-50 cluster is **15/18 fixed**
+  (spec-const remap) and STORAGE-32 (`image_atomic_op_local_size_8`) is
+  **fixed**; TYPE-25 is a truthful non-2D-image bound; what remains is
+  dominated by intentional capability limits.  While checking the
+  `max_workgroup_memory` survivors I found `h_52` lacked
+  `CompositeExtract`(81) — added `_spec_comp_off` + the op-81 arm so
+  `OpSpecConstantOp CompositeExtract` folds composite constituents (verified:
+  `[2,3,5]` extracts → `2,3,5`, `IMul`→`6`, `IAdd`→`11`), with a regression
+  test in `test_vn_specialization.py` (23 PASS, 880 `test_vn_*` PASS).  The
+  oversized-`ConstantNull` refusal was left intact — it is a deliberate
+  16-word const-table bound pinned by `test_specialized_null_array_*`.
 
 ### vgctl Retained-Unmap Owner-Hold (RTL)
 

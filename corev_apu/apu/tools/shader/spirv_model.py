@@ -2186,8 +2186,11 @@ class Model:
                 return ops[4 + k] if 4 + k < len(ops) else 0
             if opc == 228:                    # AtomicStore: ptr, val
                 return (ops[0], ops[3])[k]
-            if opc == 230:                    # CAS: ptr, val, cmp
-                return (ops[2], ops[5], ops[6])[k]
+            if opc == 230:                    # CAS: ptr, Value, Comparator
+                # grammar order is ptr,scope,equal,unequal,Value,Comparator
+                # then optional trailing Memory-Operands bitmask — Value and
+                # Comparator sit at fixed positions [6]/[7] regardless.
+                return (ops[2], ops[6], ops[7])[k]
             if opc in self.ATOMOPS:           # ptr, [val]
                 return ops[2] if k == 0 else ops[5]
             return ops[2 + k] if 2 + k < len(ops) else 0

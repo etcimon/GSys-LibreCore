@@ -92,6 +92,13 @@ class Fetch:
     vertices: tuple
     direct: object
     indirect: object
+    # primitiveRestartEnable: 1 lets an indexed draw break the primitive
+    # stream on the index-width sentinel read from the raw index (before
+    # vertexOffset).  The runtime records each sentinel's record index in
+    # `breaks` so the raster can assemble primitives break-aware; the
+    # sentinel slot still emits a (skipped) vertex record.  Non-indexed
+    # draws ignore it.
+    restart: int = 0
 
     @property
     def size(self):
@@ -153,6 +160,13 @@ class FetchRuntime:
         self.records = None
         self.total = self._cursor = 0
         self.done = False
+        # primitive-restart bookkeeping: only indexed draws honour the
+        # flag; the sentinel is the all-ones value of the index width and
+        # is matched on the raw index before vertexOffset is applied.
+        self.restart = bool(operation.restart) and operation.indexed
+        self.sentinel = (0xFFFF if self.indices and self.indices[2] == 2
+                         else 0xFFFFFFFF) if self.indices else 0
+        self.breaks = set()
         if self.args is not None:
             self._bind_args(self.args)
 
@@ -225,7 +239,15 @@ class FetchRuntime:
         count, instances, first, vertex_offset, first_instance = self._args_now()
         instance, i = divmod(rec, count)
         if self.operation.indexed:
-            vertex_index = self._index(i) + vertex_offset
+            raw = self._index(i)
+            if self.restart and raw == self.sentinel:
+                # restart sentinel: this record is a break, not a vertex.
+                # vertex_index is a harmless in-range value; the raster
+                # drops the record via the breaks set regardless.
+                self.breaks.add(rec)
+                vertex_index = 0
+            else:
+                vertex_index = raw + vertex_offset
         else:
             vertex_index = first + i
         inst_index = first_instance + instance

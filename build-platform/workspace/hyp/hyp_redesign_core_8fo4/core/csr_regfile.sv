@@ -3692,7 +3692,6 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
       if (G6LCCfg.SDTRIG && debug_from_trigger) begin
         dcsr_d.prv = priv_lvl_o;
         dcsr_d.v = (!G6LCCfg.RVH) ? 1'b0 : v_q;
-        dpc_d = {{G6LCCfg.XLEN - G6LCCfg.VLEN{pc_i[G6LCCfg.VLEN-1]}}, pc_i};
         debug_mode_d = 1'b1;
         set_debug_pc_o = 1'b1;
         dcsr_d.cause = g6lc_core_pkg::CauseTrigger;
@@ -3725,8 +3724,6 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
           end
           default: ;
         endcase
-        // save PC of next this instruction e.g.: the next one to be executed
-        dpc_d = {{G6LCCfg.XLEN - G6LCCfg.VLEN{pc_i[G6LCCfg.VLEN-1]}}, pc_i};
         dcsr_d.cause = g6lc_core_pkg::CauseBreakpoint;
       end
 
@@ -3734,14 +3731,22 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
       if (ex_i.valid && cz_dbg) begin
         dcsr_d.prv = priv_lvl_o;
         dcsr_d.v = (!G6LCCfg.RVH) ? 1'b0 : v_q;
-        // save the PC
-        dpc_d = {{G6LCCfg.XLEN - G6LCCfg.VLEN{pc_i[G6LCCfg.VLEN-1]}}, pc_i};
         // enter debug mode
         debug_mode_d = 1'b1;
         // jump to the base address
         set_debug_pc_o = 1'b1;
         // save the cause as external debug request
         dcsr_d.cause = g6lc_core_pkg::CauseRequest;
+      end
+
+      // r115-E115-S1: the trigger/breakpoint/debug-request arms all saved
+      // the same sign-extended pc_i — coalesce their dpc_d write into one
+      // guarded assign ahead of the single-step arm (which still wins as
+      // last writer). Side-effect fields above are unchanged per arm.
+      if ((G6LCCfg.SDTRIG && debug_from_trigger) ||
+          (ex_i.valid && cz_brk) || (ex_i.valid && cz_dbg)) begin
+        // save PC of next this instruction e.g.: the next one to be executed
+        dpc_d = {{G6LCCfg.XLEN - G6LCCfg.VLEN{pc_i[G6LCCfg.VLEN-1]}}, pc_i};
       end
 
       // single step enable and we just retired an instruction
@@ -5533,7 +5538,6 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
       if (G6LCCfg.SDTRIG && debug_from_trigger) begin
         rf_dcsr_d.prv = rf_priv_lvl_o;
         rf_dcsr_d.v = (!G6LCCfg.RVH) ? 1'b0 : v_q;
-        rf_dpc_d = {{G6LCCfg.XLEN - G6LCCfg.VLEN{pc_i[G6LCCfg.VLEN-1]}}, pc_i};
         rf_debug_mode_d = 1'b1;
         rf_set_debug_pc_o = 1'b1;
         rf_dcsr_d.cause = g6lc_core_pkg::CauseTrigger;
@@ -5564,8 +5568,6 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
           end
           default: ;
         endcase
-        // save PC of next this instruction e.g.: the next one to be executed
-        rf_dpc_d = {{G6LCCfg.XLEN - G6LCCfg.VLEN{pc_i[G6LCCfg.VLEN-1]}}, pc_i};
         rf_dcsr_d.cause = g6lc_core_pkg::CauseBreakpoint;
       end
 
@@ -5573,14 +5575,21 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
       if (ex_i.valid && ex_i.cause == riscv::DEBUG_REQUEST) begin
         rf_dcsr_d.prv = rf_priv_lvl_o;
         rf_dcsr_d.v = (!G6LCCfg.RVH) ? 1'b0 : v_q;
-        // save the PC
-        rf_dpc_d = {{G6LCCfg.XLEN - G6LCCfg.VLEN{pc_i[G6LCCfg.VLEN-1]}}, pc_i};
         // enter debug mode
         rf_debug_mode_d = 1'b1;
         // jump to the base address
         rf_set_debug_pc_o = 1'b1;
         // save the cause as external debug request
         rf_dcsr_d.cause = g6lc_core_pkg::CauseRequest;
+      end
+
+      // r115-E115-S1: mirror of the csr_update coalescing — the three
+      // trap-entry arms save the same sign-extended pc_i; one guarded
+      // assign ahead of the single-step arm keeps last-writer order.
+      if ((G6LCCfg.SDTRIG && debug_from_trigger) ||
+          (ex_i.valid && ex_i.cause == riscv::BREAKPOINT) ||
+          (ex_i.valid && ex_i.cause == riscv::DEBUG_REQUEST)) begin
+        rf_dpc_d = {{G6LCCfg.XLEN - G6LCCfg.VLEN{pc_i[G6LCCfg.VLEN-1]}}, pc_i};
       end
 
       // single step enable and we just retired an instruction

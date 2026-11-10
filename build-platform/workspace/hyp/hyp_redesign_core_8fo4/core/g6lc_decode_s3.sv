@@ -146,7 +146,7 @@ module g6lc_decode_s3
   logic ill_cf_c, v_cf_c, ill_cz_c, v_cz_c;
   logic priv_ms_rd0;
   logic fix_add;
-  logic illA, virA, illB, virB, illC, virC, illD, virD;
+  logic illA, virA, illD, virD;
 
 
   always_comb begin : legality
@@ -258,20 +258,30 @@ module g6lc_decode_s3
     illA = illegal_i | ill_rs1rd | ill_sret_u | ill_sret_tsr | ill_mret |
            ill_dret | ill_wfi_tw | ill_wfi_u;
     virA = v_rs1rd | v_sret_u | v_sret_tsr | v_wfi_vtw | v_wfi_u;
-    // --- SFENCE.VMA: priv write replaces, then tvm arm sets ---
-    illB = (c_sf && !(G6LCCfg.RVH && v_i))
-           ? ~(G6LCCfg.RVS && priv_ms_rd0) : illA;
-    virB = (c_sf && G6LCCfg.RVH && v_i)
-           ? (priv_lvl_i != riscv::PRIV_LVL_S) : virA;
-    illB = illB | ill_sf_tvm;
-    virB = virB | v_sf_tvm;
-    // --- HFENCE.VVMA ---
-    illC = (c_hvv && !v_i) ? !priv_ms_rd0 : illB;
-    virC = (c_hvv && v_i) ? 1'b1 : virB;
-    // --- HFENCE.GVMA + tvm ---
-    illD = (c_hgv && !v_i) ? !priv_ms_rd0 : illC;
-    virD = (c_hgv && v_i) ? 1'b1 : virC;
-    illD = illD | ill_hgv_tvm;
+    // r115-E115-C: the SFENCE.VMA / HFENCE.VVMA / HFENCE.GVMA arms are
+    // opcode-disjoint (dec_i.op is single-valued, c_sf/c_hvv/c_hgv can
+    // never co-fire), so the emit's serial override chain collapses to a
+    // single priority select: at most one arm writes, its value replaces
+    // the accumulated set, then the arm-local tvm intercepts OR in (each
+    // already implies its own hit condition). Same last-writer result.
+    begin : p_fence_override
+      logic sf_hit, hvv_hit, hgv_hit;
+      logic sf_vhit, hvv_vhit, hgv_vhit;
+      sf_hit   = c_sf  && !(G6LCCfg.RVH && v_i);
+      hvv_hit  = c_hvv && !v_i;
+      hgv_hit  = c_hgv && !v_i;
+      sf_vhit  = c_sf  && G6LCCfg.RVH && v_i;
+      hvv_vhit = c_hvv && v_i;
+      hgv_vhit = c_hgv && v_i;
+      illD = (sf_hit | hvv_hit | hgv_hit)
+             ? (sf_hit ? ~(G6LCCfg.RVS && priv_ms_rd0) : !priv_ms_rd0)
+             : illA;
+      illD = illD | ill_sf_tvm | ill_hgv_tvm;
+      virD = (sf_vhit | hvv_vhit | hgv_vhit)
+             ? (sf_vhit ? (priv_lvl_i != riscv::PRIV_LVL_S) : 1'b1)
+             : virA;
+      virD = virD | v_sf_tvm;
+    end
   end
 
   always_comb begin : legality_out

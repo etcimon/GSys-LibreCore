@@ -1,6 +1,31 @@
 # hyp8 implementation log — memory/PRF ownership repair
 
-Latest continuation (r114): SC retry backoff now consumes the owned
+Remote infrastructure note (r115): the `ovh_calltorch` testharness was
+found wiped (toolchains/runs/src/repo all absent; the r114 scalar
+witness pid 2644580 is dead — its run dir and model are gone). Full
+reprovision via `testharness_proxy.py` from WSL is in flight: stock
+verilator v5.008 + xpack gcc 14.2.0-3 + spike restored, pinned private
+runtime rebuilt (canary-verified), fork source staged at
+`src/verilator-g6lc` (gitlink `bc8d406c3`), and a `VLT_PGO=1` fork build
+(unroll-256/131072 + split-loops training on hyp8_mc) is running to
+`toolchains/verilator-v5.008-g6lc`. Details:
+`analysis/r115/worklog.md` §6. The r114 witness must be relaunched
+after the toolchain gate; prior remote evidence is archived, not live.
+
+Latest continuation (r115): analysis-and-tasking pass only — no RTL changed.
+`analysis/r115/worklog.md` + `execution-path-tasks.json` re-baseline every
+module touched since the r96 board freeze (io/amo batch `7d7d7dc5a`,
+r113 frontend restart `a5fc9e4e6`, r112 LZC leaf, r95 CSR leaf, r100–r114
+LSU/D$/RVFI work), iterate each across callers and retirement path classes,
+and issue 31 per-path task cards (E115-C/I/R/L/F/D/M/S/P/A/N) inheriting the
+r96 module strategies plus the six M96 measurement gates. Local lint on HEAD
+`7d7d7dc5a` (verilator-v5.008, `lint_hyp8_core_local.sh`, top `g6lc_core`):
+clean of fatal classes, 0 warnings. Boot track unchanged: r114 scalar
+witness open, port-amo-fetch lint blocked on missing remote runtime file
+(infrastructure, not RTL), canonical-budget MC/SMT2 witness still owed —
+the t6 short runs are harness smoke, not a boot verdict.
+
+Previous continuation (r114): SC retry backoff now consumes the owned
 registered result in AMO_RESULT (`a9c90bece`, tests `5f6e3740b`).
 The frozen baseline fails the new SC-success mask check; corrected remote
 leaves pass 44 focused / 334 D-cache checks and all 11 smokes pass.

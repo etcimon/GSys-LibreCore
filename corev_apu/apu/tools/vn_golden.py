@@ -1474,9 +1474,11 @@ AUXRET_KINDS = ('VkShaderModule', 'VkPipeline', 'VkDeviceMemory',
                 'VkDescriptorPool')
 SH_SLOTS = 8
 # aperture allocator geometry == APU_VG_PAGES / APU_VG_PAGE_BYTES
-# (g6lc_apu_vg_pkg.sv): 18432 x 4 KiB pages over the 72 MiB managed
-# window — the guest kernel packs MAP_BLOB offsets at 4 KiB density
-VGP_PAGES = 18432
+# (g6lc_apu_vg_pkg.sv): 24576 x 4 KiB pages over the 96 MiB managed
+# window — the guest kernel packs MAP_BLOB offsets at 4 KiB density.
+# 2026-11-09: private arena 8 -> 32 MiB (managed 72 -> 96 MiB) for
+# CTS memory.binding device-local allocations; objmem moves up.
+VGP_PAGES = 24576
 VGP_PAGE = 4096
 # §12.3 F5: APU_VG_GUEST_BYTES — guest-mappable span (SHM_LEN); the
 # pages above it are the device-private arena (ALLOC_PRIV) the kernel's
@@ -1589,6 +1591,23 @@ def cl_f32_u8(f):
     return (p + term) >> sh
 
 
+def cl_f32_u24(f):
+    """fp32 bits -> UNORM24 (f_f32_u24); the D24S8 depth lane [23:0].
+    Mirrors rast f_f32_u24: mantissa*16777215, exp-biased shift 150-e,
+    sign/zero->0, e>=127->max.  Depth domain is [0,1] so no 48-bit wrap."""
+    if f & 0x80000000:
+        return 0
+    e = (f >> 23) & 0xFF
+    if e == 0:
+        return 0
+    if e >= 127:
+        return 0xFFFFFF
+    p = ((1 << 23) | (f & 0x7FFFFF)) * 16777215
+    sh = 150 - e
+    term = (1 << (sh - 1)) if 0 < sh - 1 < 48 else 0
+    return ((p + term) >> sh) & 0xFFFFFF
+
+
 def cl_f32_l16(f):
     """fp32 bits -> linear 16 (f_f32_l16); feeds the sRGB search."""
     if f & 0x80000000:
@@ -1644,6 +1663,14 @@ def img_clear_texel(model, did, cw):
     f32->f16, sRGB -> LUT encode (colour comps only), else UNORM8;
     BGRA swaps components 0/2."""
     _n, _v2d, bpp, attr = model.img_fmt_tables()
+    # device fmt 14 = D24S8 depth-stencil: the packed word is
+    # {stencil[31:24], depth_unorm24[23:0]} — the stencil byte rides the
+    # clear colour uint32[1] slot's low byte and the depth is the float32
+    # in uint32[0] converted to unorm24 (f_f32_u24), not a per-component
+    # UNORM8 encode.
+    if (did & 15) == 14:
+        return (((cw[1] if len(cw) > 1 else 0) & 0xFF) << 24 |
+                cl_f32_u24(cw[0])).to_bytes(4, 'little')
     at = attr[did & 15]
     nc = (at & 7) + 1
     cb = bpp[did & 15] * 8 // nc
@@ -3523,26 +3550,51 @@ class FrontModel(ObjectTable, PayloadMemory):
                         # pool/layout dead: consume infos, touch nothing
                         stg += (dcnt & 0xFFFF) * stride
                         continue
-                    row = self.lay_row(le, dstb)
-                    if row is None or row['type'] != dtype:
+                    rows = self.lay_rows(le)
+                    ridx = next((i for i, r in enumerate(rows)
+                                 if r['binding'] == (dstb & 0xFFFF)), None)
+                    # §VkWriteDescriptorSet Consecutive Binding Updates:
+                    # dstBinding's remaining array elements are filled first;
+                    # the remainder spills into subsequent bindings (binding
+                    # order, skipping count==0) that share the descriptor
+                    # type.  lay_rows decodes type/count/off but not
+                    # stageFlags/bindingFlags/immutable-sampler identity, so
+                    # the compatibility gate here is type equality only.
+                    if ridx is None or rows[ridx]['type'] != dtype:
                         pois = 1
                         stg += (dcnt & 0xFFFF) * stride
-                    elif darr + (dcnt & 0xFFFF) > row['count']:
-                        pois = 1
-                        # in-range prefix still lands
-                        upto = max(0, row['count'] - darr)
-                        for j in range(min(dcnt & 0xFFFF, upto)):
-                            pois |= self._upd_elem(
-                                out, stg, sbase, row, darr + j,
-                                dtype, pay)
-                            stg += stride
-                        stg += ((dcnt & 0xFFFF) - upto) * stride
                     else:
-                        for j in range(dcnt & 0xFFFF):
-                            pois |= self._upd_elem(
-                                out, stg, sbase, row, darr + j,
-                                dtype, pay)
-                            stg += stride
+                        remaining = dcnt & 0xFFFF
+                        arr = darr & 0xFFFF
+                        cur = ridx
+                        while remaining:
+                            if cur >= len(rows):
+                                pois = 1
+                                break
+                            row = rows[cur]
+                            room = row['count'] - arr
+                            if room <= 0:
+                                if cur == ridx and row['count'] and arr:
+                                    # dstArrayElement beyond dstBinding's
+                                    # array — invalid write, not spillover
+                                    pois = 1
+                                    break
+                                cur += 1
+                                arr = 0
+                                continue
+                            if row['type'] != dtype:
+                                pois = 1
+                                break
+                            take = min(remaining, room)
+                            for _ in range(take):
+                                pois |= self._upd_elem(
+                                    out, stg, sbase, row, arr, dtype, pay)
+                                stg += stride
+                                arr += 1
+                            remaining -= take
+                            cur += 1
+                            arr = 0
+                        stg += remaining * stride
                     if pois:
                         de['aux'] |= 0x80000000
                 for _ci in range(rec['imm'][1] & 0xFFFF):
@@ -4026,7 +4078,10 @@ class FrontModel(ObjectTable, PayloadMemory):
                           usage == 0 or
                           usage & ~0x3F or
                           (usage & 0x10 and did not in (2, 3, 4, 5)) or
-                          (usage & 0x20 and did not in (12, 13)) or
+                          # G6LC stencil: did 14 = D24_UNORM_S8_UINT joins
+                          # the depth formats for DSA usage (front+back
+                          # stencil ops transport; packed {stn,depth}).
+                          (usage & 0x20 and did not in (12, 13, 14)) or
                           ilay not in (0, 1, 2, 5, 6, 7, 8)):
                         out['result'] = VK_ERR_FEATURE
                     else:
@@ -4075,7 +4130,9 @@ class FrontModel(ObjectTable, PayloadMemory):
                     if ac == 0xFFFFFFFF:
                         ac = (1 if ity == 2 else ilays) - bl
                     ifmt = (ie['aux'] >> 32) & 0xFF
-                    asp_ok = (rec['imm'][7] == 2) if ifmt in (12, 13) \
+                    # G6LC stencil: did 14 (D24S8) is a depth format — its
+                    # packed {stencil,depth} plane uses the DEPTH aspect.
+                    asp_ok = (rec['imm'][7] == 2) if ifmt in (12, 13, 14) \
                         else (rec['imm'][7] == 1)
                     fmt_ok = img_fmt_id(self.m, rec['imm'][2] & 0xFF) \
                         == ifmt
@@ -6805,6 +6862,34 @@ def gfx_tri_coverage(verts, vp, sc, cw, ch, front_ccw, cull):
     return cov
 
 
+def gfx_strip_coverage(verts, vp, sc, cw, ch, front_ccw, cull):
+    """TRIANGLE_STRIP coverage: decompose the sliding vertex window into
+    per-primitive triangles and union gfx_tri_coverage.  Even primitives
+    keep order (v_t, v_t+1, v_t+2); odd primitives swap slots 1/2
+    (v_t, v_t+2, v_t+1) so every triangle shares one winding — mirrors
+    g6lc_apu_rast f_pi's strip arm.  Shared edges are owned by exactly
+    one triangle under the top-left rule, so the union is disjoint."""
+    cov = set()
+    for t in range(len(verts) - 2):
+        if t & 1:
+            tri = (verts[t], verts[t + 2], verts[t + 1])
+        else:
+            tri = (verts[t], verts[t + 1], verts[t + 2])
+        cov |= gfx_tri_coverage(tri, vp, sc, cw, ch, front_ccw, cull)
+    return cov
+
+
+def gfx_fan_coverage(verts, vp, sc, cw, ch, front_ccw, cull):
+    """TRIANGLE_FAN coverage: every triangle anchors slot 0 at vertex 0
+    and slides the (t+1, t+2) pair — (v0, v_t+1, v_t+2) — mirroring
+    g6lc_apu_rast f_pi's fan arm."""
+    cov = set()
+    for t in range(len(verts) - 2):
+        cov |= gfx_tri_coverage((verts[0], verts[t + 1], verts[t + 2]),
+                                vp, sc, cw, ch, front_ccw, cull)
+    return cov
+
+
 def gfx_line_coverage(verts, vp, sc, cw, ch):
     """G1c reference rasterizer for one LINE_LIST segment — mirrors the
     g6lc_apu_rast S_LN_* integer path: the same f32 viewport transform +
@@ -6857,6 +6942,71 @@ def gfx_line_coverage(verts, vp, sc, cw, ch):
         else:
             lerr += ldx
             ly += ys
+    return cov
+
+
+def gfx_restart_coverage(stream, topo, vp, sc, cw, ch, front_ccw, cull):
+    """Primitive-restart coverage oracle: `stream` is the per-index-slot
+    vertex list in draw order with None marking each restart sentinel
+    (the fetch stage emits a placeholder record there that the raster
+    skips).  The stream is split into sentinel-free runs and each run is
+    assembled into primitives independently — no primitive straddles a
+    break — then coverage is unioned per topology, mirroring the raster's
+    break-aware prim_records table.  Incomplete trailing groups within a
+    run are dropped (Vulkan restart semantics).
+
+    topo uses the raster codes 0..5; vp/sc/cw/ch/front_ccw/cull match the
+    per-topology oracles.  -> set of covered (px, py)."""
+    runs, cur = [], []
+    for v in stream:
+        if v is None:
+            if cur:
+                runs.append(cur)
+                cur = []
+        else:
+            cur.append(v)
+    if cur:
+        runs.append(cur)
+    cov = set()
+    for run in runs:
+        n = len(run)
+        if topo == 0:
+            # POINT_LIST: one fragment per vertex at its screen pixel
+            vphw = _f32(_f32(vp[2]) * 0.5)
+            vphh = _f32(_f32(vp[3]) * 0.5)
+            fma = getattr(math, 'fma', lambda a, b, c: a * b + c)
+            x_lo = max(sc[0], int(math.floor(vp[0])))
+            x_hi = min(sc[0] + sc[2], int(math.ceil(vp[0] + vp[2])))
+            y_lo = max(sc[1], int(math.floor(vp[1])))
+            y_hi = min(sc[1] + sc[3], int(math.ceil(vp[1] + vp[3])))
+            for (x, y, _z, w) in run:
+                rcp = _f32(1.0 / _f32(w))
+                nx = _f32(_f32(x) * rcp)
+                ny = _f32(_f32(y) * rcp)
+                sx = _f32(fma(_f32(nx + 1.0), vphw, _f32(vp[0])))
+                sy = _f32(fma(_f32(ny + 1.0), vphh, _f32(vp[1])))
+                px, py = (_f2i_rne(_f32(sx * 256.0)) >> 8,
+                          _f2i_rne(_f32(sy * 256.0)) >> 8)
+                if x_lo <= px < x_hi and y_lo <= py < y_hi:
+                    cov.add((px, py))
+        elif topo == 1:
+            for k in range(0, n - 1, 2):
+                cov |= gfx_line_coverage((run[k], run[k + 1]),
+                                         vp, sc, cw, ch)
+        elif topo == 2:
+            for k in range(n - 1):
+                cov |= gfx_line_coverage((run[k], run[k + 1]),
+                                         vp, sc, cw, ch)
+        elif topo == 3:
+            for k in range(0, n - 2, 3):
+                cov |= gfx_tri_coverage((run[k], run[k + 1], run[k + 2]),
+                                        vp, sc, cw, ch, front_ccw, cull)
+        elif topo == 4:
+            cov |= gfx_strip_coverage(run, vp, sc, cw, ch,
+                                      front_ccw, cull)
+        else:  # topo == 5
+            cov |= gfx_fan_coverage(run, vp, sc, cw, ch,
+                                    front_ccw, cull)
     return cov
 
 
@@ -6971,6 +7121,79 @@ def gfx_grad_pixels(verts, cols, vp, sc, cw, ch, front_ccw, cull):
     return out
 
 
+def gfx_interp_map(verts, cols, vp, sc, positions):
+    """Perspective-correct smooth-varying interpolation at ARBITRARY
+    pixel positions — the helper-lane counterpart of gfx_grad_pixels.
+    Same fpnew sequence (viewport transform -> 16.8 screen coords ->
+    edge fns -> rcpa -> vrw -> pv -> rs -> weighted sum) but evaluates
+    each requested (px,py) WITHOUT the coverage early-out, so positions
+    outside the triangle return the extrapolated value a helper
+    invocation would compute for quad derivatives.  Returns
+    {(px,py): (r,g,b,a) f32 vec4}."""
+    vphw = _f32(_f32(vp[2]) * 0.5)
+    vphh = _f32(_f32(vp[3]) * 0.5)
+    fma = getattr(math, 'fma', lambda a, b, c: a * b + c)
+    vx, vy, ws = [], [], []
+    for (x, y, _z, w) in verts:
+        rcp = _f32(1.0 / _f32(w))
+        nx = _f32(_f32(x) * rcp)
+        ny = _f32(_f32(y) * rcp)
+        sx = _f32(fma(_f32(nx + 1.0), vphw, _f32(vp[0])))
+        sy = _f32(fma(_f32(ny + 1.0), vphh, _f32(vp[1])))
+        vx.append(_f2i_rne(_f32(sx * 256.0)))
+        vy.append(_f2i_rne(_f32(sy * 256.0)))
+        ws.append(_f32(w))
+    cols = [(r, g, b, a) for (r, g, b, a) in cols]
+    area = ((vx[1] - vx[0]) * (vy[2] - vy[0])
+            - (vx[2] - vx[0]) * (vy[1] - vy[0]))
+    if area == 0:
+        return {}
+    if area < 0:
+        vx[1], vx[2] = vx[2], vx[1]
+        vy[1], vy[2] = vy[2], vy[1]
+        ws[1], ws[2] = ws[2], ws[1]
+        cols[1], cols[2] = cols[2], cols[1]
+        area = -area
+    ex, ey, edx, edy = [], [], [], []
+    for k in range(3):
+        a, b = (k + 1) % 3, (k + 2) % 3
+        ex.append(vx[a]); ey.append(vy[a])
+        edx.append(vx[b] - vx[a]); edy.append(vy[b] - vy[a])
+    bl = area.bit_length()
+    shf = (bl - 1) - 28 if bl - 1 > 28 else 0
+    area_f = _f32(float((area >> shf) & 0xFFFFFFFF))
+    rcpa = _f32(1.0 / area_f)
+    vrw = [_f32(1.0 / w) for w in ws]
+
+    def edge_f32(e):
+        v = (e >> shf) & 0xFFFFFFFF
+        if v & 0x80000000:
+            v -= 0x100000000
+        return _f32(float(v))
+
+    out = {}
+    for (px, py) in positions:
+        cpx = px * 256 + 128
+        cpy = py * 256 + 128
+        es = [edx[k] * (cpy - ey[k]) - edy[k] * (cpx - ex[k])
+              for k in range(3)]
+        lam = [edge_f32(es[k]) for k in range(3)]
+        pv = [_f32(lam[k] * rcpa) for k in range(3)]
+        pv = [_f32(pv[k] * vrw[k]) for k in range(3)]
+        s01 = _f32(pv[0] + pv[1])
+        s012 = _f32(s01 + pv[2])
+        rs = _f32(1.0 / s012)
+        vec = []
+        for c in range(4):
+            v0 = cols[0][c]; v1 = cols[1][c]; v2 = cols[2][c]
+            t0 = _f32(pv[0] * v0)
+            t1 = _f32(fma(pv[1], v1, t0))
+            t2 = _f32(fma(pv[2], v2, t1))
+            vec.append(_f32(t2 * rs))
+        out[(px, py)] = tuple(vec)
+    return out
+
+
 def _u8pack(v4):
     """(r,g,b,a) f32 vec4 -> packed RGBA8 word R|G<<8|B<<16|A<<24 via
     f_f32_u8 per channel (the ROP writeback conversion)."""
@@ -6978,6 +7201,16 @@ def _u8pack(v4):
     for c in range(4):
         w |= cl_f32_u8(_f32bits(v4[c])) << (8 * c)
     return w
+
+
+def _lopw(w, cb):
+    """VkLogicOp XOR (op 6) per packed byte: result[c] = byte_c(w) ^ cb[c]
+    where cb[c] is the attachment's OWN clear UNORM8 byte for channel c.
+    Mirrors f_lop_pix's per-component s^d on the encoded dst byte."""
+    r = 0
+    for c in range(4):
+        r |= (((w >> (8 * c)) & 0xFF) ^ cb[c]) << (8 * c)
+    return r
 
 
 def gfx_deriv_pixels(verts, cols, vp, sc, cw, ch, front_ccw, cull):
@@ -8371,7 +8604,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         for i, b in enumerate(vec['binds']):
             kind = (1 if (variant == 'baddesc' and i == 0)
                     else b.get('kind', 0) if 'img' in b
-                    else 9 if b.get('dyn') else 7)
+                    else ((b.get('kind', 0) if b.get('kind', 0) in (8, 9)
+                           else 9) if b.get('dyn') else 7))
             for rw in srows[b['set']]:
                 if rw['binding'] == b['binding']:
                     rw['count'] = max(rw['count'], b['idx'] + 1)
@@ -8766,7 +9000,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         descriptorType=(
                             _mem[0][1].get('kind', 0)
                             if 'img' in _mem[0][1]
-                            else 9 if _mem[0][1].get('dyn') else 7),
+                            else ((_mem[0][1].get('kind', 0)
+                                   if _mem[0][1].get('kind', 0) in (8, 9)
+                                   else 9) if _mem[0][1].get('dyn') else 7)),
                         pImageInfo=[st(
                             'VkDescriptorImageInfo',
                             sampler=smps.get(_i, 0),
@@ -8790,7 +9026,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     # buffer descriptor — the type mismatch poisons
                     # the set (§12.1 F5) -> DEVICE_LOST at dispatch
                     descriptorType=(b.get('kind', 0) if 'img' in b
-                                    else 9 if b.get('dyn') else 7)
+                                    else ((b.get('kind', 0)
+                                           if b.get('kind', 0) in (8, 9)
+                                           else 9) if b.get('dyn') else 7))
                     if not (variant == 'kindmix'
                             and i == first_img_i and 'img' in b)
                     # kindmix: the write posts a different image kind
@@ -10544,7 +10782,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 dstSet=dsets5[setnos.index(b['set'])],
                 dstBinding=b['binding'], dstArrayElement=b['idx'],
                 descriptorCount=1,
-                descriptorType=9 if b.get('dyn') else 7,
+                descriptorType=((b.get('kind', 0)
+                                 if b.get('kind', 0) in (8, 9) else 9)
+                                if b.get('dyn') else 7),
                 pImageInfo=[], pTexelBufferView=[],
                 pBufferInfo=[st('VkDescriptorBufferInfo',
                                 buffer=bufs5[i], offset=0,
@@ -10813,7 +11053,42 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # per-fragment FS expression vcol*0.5 + FragCoord.x*0.001 —
         # exercises interpolated varyings AND per-pixel FS arithmetic
         is_fcolor = 'fcolor' in gfx
-        is_gradlike = is_grad or is_fcolor
+        # mrt: TWO colour attachments (G3a-iv-n).  fs_mrt emits
+        # location0->ca[0] (o0 = the fs_color gradient, att0 reuses the
+        # is_fcolor oracle) and location1->ca[1] (o1 = R/B swap of o0 —
+        # a pure channel permutation so the per-channel UNORM8 encode
+        # commutes and att1's word is a byte-permute of att0's).  Reuses
+        # the is_gradlike pos+col vertex layout (vs_pos3/vcol, GRAD_COLS)
+        # so att0's coverage/interp is bit-identical to is_fcolor.
+        is_mrt = 'mrt' in gfx and not is_fcolor
+        # mrtb: MRT + per-attachment BLEND on attachment 1 only — the
+        # first dr_q.blend[at_q] per-attachment independence coverage
+        # (is_mrt uses pColorBlendState=None -> blend off both att).
+        # Token 'mrtb' keeps is_mrt ('mrt' substring) while 'blend' is
+        # NOT a substring -> is_blend stays False (no FS/oracle clash).
+        # att0 blendEnable=0 (raw o0), att1 blendEnable=1 SRC_ALPHA/
+        # ONE_MINUS_SRC_ALPHA colour + alpha (is_blend's factor set).
+        is_mrtblend = 'mrtb' in gfx
+        # mrt3/mrt4: THREE/FOUR colour attachments — 'mrt3'/'mrt4' keep
+        # is_mrt ('mrt' substring) so att0+att1 plumbing runs unchanged;
+        # is_mrt3 adds att2 (img3/view3/imem3/rb4, FS-out loc2 -> ca[2],
+        # clearv_q[8..11]), is_mrt4 adds att3 (img4/view4/imem4/rb5, loc3
+        # -> ca[3], clearv_q[12..15]) and exercises at_q=3, the LAST
+        # cursor value (S_ROP_NX terminates the fragment after att3).
+        # is_mrt4 implies is_mrt3 so the att2 plumbing runs for both;
+        # n_col generalises the 1/2/3/4-attachment count.
+        is_mrt4 = 'mrt4' in gfx
+        is_mrt3 = ('mrt3' in gfx) or is_mrt4
+        n_col = 4 if is_mrt4 else (3 if is_mrt3 else (2 if is_mrt else 1))
+        # mrtlop: MRT + logicOp (VkLogicOp XOR) on EVERY colour attachment.
+        # 'mrt{,3,4}lop' keeps is_mrt/is_mrt3/is_mrt4 (2/3/4 att) but each
+        # contains NO lop_* token so is_lop/lop_op stay unset — logicOp is
+        # enabled explicitly below with a fixed XOR.  logicOp is pipeline-
+        # GLOBAL (logic_op_en) but the ROP reads dr_q.ca[at_q] dst PER-
+        # ATTACHMENT, so each att's permuted src is XORed against its OWN
+        # clear — proving per-attachment dst reads across at_q=0..n_col-1.
+        is_mrtlop = is_mrt and ('lop' in gfx) and (lop_op is None)
+        is_gradlike = is_grad or is_fcolor or is_mrt
         # deriv: fs_deriv exercises the quad-lane derivative chain
         # (OpDPdx/DPdy/Fwidth coarse + DPdxFine/DPdyCoarse/FwidthFine)
         # on the smooth vcol varying — needs a FULLSCREEN triangle so
@@ -10913,6 +11188,78 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         is_dpair   = ((_dp_key is not None) or is_dbnd or is_dbndoff
                       or is_dbias or is_dw0)
         is_depth   = is_dpair or 'depth' in gfx
+        # stencil: a D24S8 depth-stencil attachment with stencilTestEnable
+        # + front/back VkStencilOpState.  The raster runs the S_DZ_RD->C2
+        # path (depth_test must be 1) and writes the packed
+        # {stencil[31:24], depth_unorm24[23:0]} word.  is_ds marks "a
+        # depth-or-depth-stencil attachment is present" for the shared
+        # attachment plumbing (dimg/dview/renderpass/framebuffer/copy).
+        is_stencil = 'stencil' in gfx
+        # stencil_df: depthFailOp variant — depthCompareOp=NEVER makes every
+        # covered fragment fail depth while stencil compareOp=ALWAYS passes,
+        # so the S_DZ_C2 depthFail branch (not the pass branch) fires.
+        is_stdf   = 'stencil_df' in gfx
+        # stencil_f: failOp variant — stencil compareOp=EQUAL(ref 0xC3) vs
+        # the cleared stencil 0 fails, so the S_DZ_C2 stencil-fail branch
+        # fires failOp=REPLACE before depth is even evaluated.
+        is_stf    = 'stencil_f' in gfx
+        # stencil_inv: passOp=INVERT arithmetic variant — ~oldb on the
+        # cleared stencil 0 -> 0xFF, proving f_sop's non-REPLACE op path
+        # under the normal depth-ALWAYS pass branch.
+        is_stinv  = 'stencil_inv' in gfx
+        # stencil_clr: NONZERO stencil clear — the depth attachment's
+        # VkClearValue colour uint32[1] slot carries the stencil byte
+        # (0x33) which cmdexec loads into clear_color[1] and the D24S8
+        # CLEAR packs as {stencil,depth}.  compareOp=EQUAL ref=0x33 then
+        # proves the cleared value landed; passOp=INCR_SAT turns 0x33->0x34.
+        is_stclr  = 'stencil_clr' in gfx
+        # stencil_msk: writeMask variant — passOp=REPLACE ref=0xFF under
+        # writeMask=0xF0 (compareMask stays 0xFF) so f_sop's
+        # (oldb & ~mask)|(n & mask) writes only the high nibble: cleared 0
+        # -> 0xF0, proving the writeMask gating (0xFF mask would give 0xFF).
+        is_stmsk  = 'stencil_msk' in gfx
+        # stencil op fields for pDepthStencilState — every one reduces to
+        # the original zeros / compareOp=ALWAYS / reference=0 when no
+        # stencil variant is active (byte-identical for existing sessions).
+        _stf_fail  = 1 if is_stclr else (2 if is_stf else 0)          # ZERO/REPLACE
+        _stf_pass  = (3 if is_stclr else                                # INCR_SAT
+                      (5 if is_stinv else                               # INVERT
+                       (2 if (is_stencil and not is_stdf and not is_stf
+                              and not is_stinv and not is_stclr)
+                        else 0)))                                      # REPLACE/KEEP
+        _stf_dfail = 2 if is_stdf else 0                               # REPLACE/KEEP
+        _stf_cmp   = 2 if (is_stf or is_stclr) else 7                  # EQUAL/ALWAYS
+        _stf_ref   = (0x33 if is_stclr else
+                      (0xC3 if is_stf else
+                       (0xA5 if is_stdf else
+                        (0xFF if is_stmsk else
+                         (0x5A if is_stencil else 0)))))
+        # compareMask/writeMask are independent VkStencilOpState fields;
+        # only is_stmsk narrows writeMask (compareMask stays full-byte).
+        _stf_cmask = 0xFF if is_stencil else 0
+        _stf_wmask = (0xF0 if is_stmsk else _stf_cmask)
+        is_ds      = is_depth or is_stencil
+        # secnd: GRAPHICS secondary command buffer — the draw-state
+        # records (BindPipeline/binds/Viewport/Scissor/Draw) are recorded
+        # into cb2 (level=SECONDARY, inheritanceInfo={renderPass,
+        # subpass=0, framebuffer}) and the primary runs BeginRenderPass
+        # -> vkCmdExecuteCommands([cb2]) -> EndRenderPass.  Exercises the
+        # cmdexec one-deep secondary stack on CLS_WORK draw records with
+        # the primary's active render-pass attachments (ca_q/da_q).
+        is_secnd   = 'secnd' in gfx
+        # msub: MULTI-SUBPASS render pass — subpassCount=2 with two
+        # identical colour-only VkSubpassDescription (both ref attachment
+        # 0).  The graphics pipeline is created for subpass=1 and the
+        # primary runs BeginRenderPass -> vkCmdNextSubpass (advances the
+        # active subpass 0->1, re-snapshotting ca_q/da_q from the
+        # sp_cref_q/sp_dref_q row) -> draw-state -> Draw -> EndRenderPass.
+        # Exercises cmdexec's bounded multi-subpass table + NextSubpass
+        # re-snapshot + pipeline-subpass admission (sp_act==pipeline
+        # aux[9:8]) for a draw in subpass>0.  Single pipeline: all draws
+        # land in subpass 1 (subpass-0 draws are already covered by every
+        # other session).
+        is_ms      = 'msub' in gfx and not is_ds and not is_mrt \
+            and not is_secnd
         is_dne     = _dp_key == 'dne'       # NOTEQUAL-on rejects all
         is_dnever  = _dp_key == 'dnever'    # NEVER-on rejects all
         if _dp_key is not None:
@@ -11032,18 +11379,142 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # id 6 / vkfmt 97 / BPP8) — first non-UNORM8 sampled format; each
         # texel is 4x fp16 = 8B (2 u32 words), decode fp16->fp32->UNORM8.
         is_ftexh = 'ftexh' in gfx
+        # ftex_lod: fragment explicit-LOD trilinear — textureLod lod=1.5
+        # -> le=24 q4.4 -> m0=1,m1=2,fw=128 (0.5 blend) over a 3-mip
+        # 4x4->2x2->1x1 RGBA8 image.  Exercises the W_TX* mip walk +
+        # per-mip bilinear + u16 trilinear blend WITHOUT quad derivatives
+        # (the underscore keeps 'ftexl' LINEAR from matching).
+        is_ftexlod = 'ftex_lod' in gfx
+        # ftexi: fragment IMPLICIT-LOD mip/trilinear — fs_mip runs
+        # texture() -> OpImageSampleImplicitLod.  uv=(FragCoord.x^2/128,
+        # vcol.y): quad finite-difference derivatives -> rho2 -> SFU
+        # log2 -> lambda -> per-pixel le -> m0/m1/fw -> trilinear over
+        # the same 3-mip image.  REPEAT wrap (uv.x spans ~[0,32]).
+        is_ftexi = 'ftexi' in gfx
+        # ftex_bias: fragment IMPLICIT-LOD + Bias image operand —
+        # fs_tex_bias runs texture(tex,vcol.xy,vcol.z) ->
+        # OpImageSampleImplicitLod(87) Bias %vcol.z.  coord=vcol.xy
+        # (pure smooth interp like ftexq) and the bias=vcol.z sweeps
+        # ~[-1.5,+1.5] via vs_texbias so lambda+bias crosses the
+        # mip0/mip1/mip2 select boundaries -> real per-pixel mip
+        # variation driven by the Bias operand.  Shares the is_ftexi
+        # 3-mip LINEAR trilinear plumbing; only coord source, the
+        # lod_in=fadd(lam,bias) term, and the FS/VS differ.  The
+        # 'ftex_bias' token keeps is_ftexb (degenerate 1x1 CIS) from
+        # matching ('ftexb' is not a substring).
+        is_ftexbias = 'ftex_bias' in gfx
+        # ftexq: fragment textureQueryLod — fs_tex_qlod runs
+        # OpImageQueryLod(105): SAME quad-derivative lambda as ftexi but
+        # coord = vcol.xy (pure smooth interp, no FragCoord) and the
+        # result is {clamped lambda, raw lambda} -> vec4(l.x*0.25,
+        # l.y*0.125+0.5,0,1), NO texel fetch.  Reuses the 3-mip image so
+        # lec=min(le,(lvl-1)*16) has a real clamp range.
+        is_ftexq = 'ftexq' in gfx
+        # ftexpj: fragment projective EXPLICIT-lod — fs_texprojl runs
+        # OpImageSampleProjExplicitLod(92) coord=(vcol.xy,vcol.z): W_TXJ
+        # divides xy/z wave-wide then lod=0 -> mip0 LINEAR bilinear at
+        # the DIVIDED coord, REPEAT wrap.  vs_texzw supplies a nonzero
+        # varying vcol.z divisor.  Explicit lod -> NO quad derivatives,
+        # so only covered pixels matter (unlike ftexi/ftexq).
+        is_ftexpj = 'ftexpj' in gfx
+        # ftexpi: fragment projective IMPLICIT-lod — fs_texproji runs
+        # OpImageSampleProjImplicitLod(91) coord=(vcol.xy,vcol.z): W_TXJ
+        # divides xy/z wave-wide THEN quad finite-differences the
+        # DIVIDED coord -> lambda -> mip -> trilinear.  Combines the
+        # ftexpj divide with the ftexi derivative/mip machinery; the
+        # 3-mip REPEAT image + vs_texzw divisor are shared.
+        is_ftexpi = 'ftexpi' in gfx
+        # ftex_ary: fragment 2D-ARRAY explicit-lod — fs_tex_ary runs
+        # OpImageSampleExplicitLod(88) coord=vec3(vcol.xy,vcol.w): W_TXJ
+        # picks layer=RNE(coord.z)=RNE(vcol.w) in {0,1}, then lod=0 ->
+        # mip0 LINEAR bilinear inside that layer.  vs_texzw supplies a
+        # nonzero varying vcol.w layer selector; the 2 layers carry
+        # DISTINCT texels so layer-select is observable (unlike the
+        # committed degenerate ftexa which samples [tri_w]*2 layer0).
+        # Explicit lod -> NO quad derivatives.
+        is_ftexary = 'ftex_ary' in gfx
+        # ftex_dref: fragment explicit-lod DEPTH-REFERENCE — fs_texshl
+        # runs OpImageSampleDrefExplicitLod(90) coord=vec3(vcol.xy,
+        # vcol.z): W_TXJ picks layer n/a (2D), quantizes dref->ref16
+        # (D16_UNORM u16 domain), then lod=0 -> mip0 LINEAR PCF —
+        # per-corner f_dcmp(ref16,depth16,LESS_OR_EQUAL) weighted into
+        # a compare fraction.  vs_texsh supplies vcol.z=dref sweeping
+        # [0.24,0.81]; the image is a 4x4 D16_UNORM depth map with
+        # DISTINCT u16 texels.  Explicit lod -> NO quad derivatives.
+        is_ftexdref = 'ftex_dref' in gfx
+        # ftex_dri: fragment IMPLICIT-lod depth-reference — fs_texshi
+        # runs OpImageSampleDrefImplicitLod(89) coord=vec3(vcol.xy,
+        # vcol.z): quad finite-differences of coord.xy -> lambda -> le
+        # -> mip (single-mip D16 clamps to 0) -> PCF compare.  Shares
+        # the D16 image + compare sampler + vs_texsh dref varying with
+        # ftex_dref via is_ftexd; the covered-pixel PCF output is
+        # identical (single mip -> mip0) but the implicit opcode +
+        # derivative path is exercised.
+        is_ftexdri = 'ftex_dri' in gfx
+        # ftex_dpi: fragment PROJ-implicit-lod depth-reference —
+        # fs_texshpi runs OpImageSampleProjDrefImplicitLod(93):
+        # W_TXJ divides coord.xy by vcol.w wave-wide, then quad
+        # finite-differences of the DIVIDED coord -> lambda -> le ->
+        # mip (single-mip D16 clamps to 0) -> PCF compare at the
+        # divided texcoord.  Shares the is_ftexd D16+compare plumbing
+        # but uses vs_texshw (nonzero vcol.w divisor) + fs_texshpi;
+        # REPEAT wrap so divided coords >1 still hit real texels.
+        is_ftexdpi = 'ftex_dpi' in gfx
+        # ftex_dg: fragment DEPTH-REFERENCE GATHER — fs_texshg runs
+        # OpImageDrefGather(97): gathers the 2x2 footprint around the
+        # coord (CLAMP_TO_EDGE), each texel -> f_dcmp(ref16,depth16,
+        # LESS_OR_EQUAL) -> wb[gi]=1.0/0.0 (NO filtering).  Shares the
+        # is_ftexd D16+compare plumbing + vs_texsh dref varying; only
+        # the FS opcode + oracle differ (integer footprint, not the
+        # bilinear PCF).
+        is_ftexdg = 'ftex_dg' in gfx
+        # ftex_dpe: fragment PROJ-explicit-lod depth-reference —
+        # fs_texshpe runs OpImageSampleProjDrefExplicitLod(94)
+        # (textureProjLod ... Lod 0.0): identical divided-coord mip0
+        # PCF to ftex_dpi but the Lod operand path (no derivatives).
+        is_ftexdpe = 'ftex_dpe' in gfx
+        is_ftexd = (is_ftexdref or is_ftexdri or is_ftexdpi or is_ftexdg
+                    or is_ftexdpe)
+        # ftexfetch: fragment OpImageFetch(95) — fs_texfetch runs
+        # texelFetch(usampler2D, ivec2(gl_FragCoord.xy)&3, 0): integer
+        # texel coord (NO normalized uv, NO filtering, NO wrap — bounds
+        # check only) on a 4x4 R8G8B8A8_UINT map (vkfmt41/device fmt15,
+        # 4xu8/texel).  Returns uvec4 raw uint8 -> vec4/255 output.
+        # Reuses default vs_tex (coord is gl_FragCoord, not a varying)
+        # + is_ftexm 4x4 extent; only format/upload/FS/oracle differ.
+        is_ftexfetch = 'ftexfetch' in gfx
+        # ftex_u32: fragment OpImageFetch(95) on R32_UINT — fs_texfetch32
+        # runs texelFetch(usampler2D, ivec2(gl_FragCoord.xy)&3, 0) ->
+        # uvec4(u32,0,0,1); the u32's 4 bytes spread into RGBA/255.
+        # Single-channel uint32 (device fmt10, vkfmt98, ATTR=8 int 1-comp)
+        # vs ftexfetch's 4xu8 — a different tx_decode arm (fmt10 packs
+        # the whole u32 into fc[0], fc[3]=1).  Same BPP=4 16-word pitch
+        # layout; 'ftex_u32' token avoids 'ftexfetch'/'ftexr'/'ftexb'
+        # substring collisions.
+        is_ftexu32 = 'ftex_u32' in gfx
+        # ftex_rgba32: fragment OpImageFetch(95) on R32G32B32A32_UINT —
+        # fs_tex_rgba32 runs texelFetch(usampler2D,...) -> uvec4 of four
+        # uint32 channels, each normalized /2^32 -> RGBA.  bpp=16 ->
+        # 4 words/texel (vs ftex_u32's 1), the last int-format decode
+        # arm (fmt11, ATTR=11 4-comp uint).  'ftex_rgba32' token avoids
+        # all substring collisions.
+        is_ftexrgba32 = 'ftex_rgba32' in gfx
         # is_ftexm gates the shared multi-texel texture setup (extent,
         # per-vertex uv, texel payload) for NEAREST/LINEAR/REPEAT/MIRROR/
-        # GATHER/F16.
+        # GATHER/F16/MIPLOD/IMPLICIT-LOD/QUERYLOD/FETCH.
         is_ftexm = (is_ftexn or is_ftexl or is_ftexr or is_ftexmir
-                    or is_ftexc or is_ftexs or is_ftexgath or is_ftexh)
-        # CLAMP_TO_BORDER borderColor selector (raw VkBorderColor 0..5):
-        # ftexc=5 INT_OPAQUE_WHITE, ftexc2=2 FLOAT_OPAQUE_WHITE (probes the
-        # f_bord16 decode), ftexcb=1 FLOAT_OPAQUE_BLACK, ftexct=0
-        # FLOAT_TRANSPARENT_BLACK.  Oracle maps {2,5}->white, {1,4}->black,
-        # {0,3}->transparent.
-        ftex_bc = ((2 if 'ftexc2' in gfx else
-                    1 if 'ftexcb' in gfx else
+                    or is_ftexc or is_ftexs or is_ftexgath or is_ftexh
+                    or is_ftexlod or is_ftexi or is_ftexq or is_ftexpj
+                    or is_ftexfetch or is_ftexbias or is_ftexu32
+                    or is_ftexrgba32
+                    or is_ftexpi or is_ftexary or is_ftexd)
+        # CLAMP_TO_BORDER borderColor selector (raw VkBorderColor):
+        # ftexc=5 INT_OPAQUE_WHITE, ftexc2=4 FLOAT_OPAQUE_WHITE (probes the
+        # f_bord16 decode), ftexcb=2 FLOAT_OPAQUE_BLACK, ftexct=0
+        # FLOAT_TRANSPARENT_BLACK.  Oracle maps {4,5}->white, {2,3}->black,
+        # {0,1}->transparent (the real Vulkan enum order).
+        ftex_bc = ((4 if 'ftexc2' in gfx else
+                    2 if 'ftexcb' in gfx else
                     0 if 'ftexct' in gfx else 5)
                    if is_ftexc else 0)
         # line: LINE_LIST topology — 2 vertices, 1px Bresenham walk with
@@ -11068,11 +11539,17 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'vs_cts_pbvb.spv' if is_pts else
                           'vs_inst.spv' if is_inst else
                           'vs_texlod.spv' if is_vtex else
-                          'vs_tex.spv' if is_ftex else
+                          'vs_texshw.spv' if (is_ftexdpi or is_ftexdpe)
+                          else 'vs_texsh.spv' if is_ftexd else
+                          'vs_texbias.spv' if is_ftexbias else
+                          'vs_texzw.spv' if (is_ftexpj or is_ftexpi
+                                             or is_ftexary)
+                          else 'vs_tex.spv' if is_ftex else
                           'vs_pos3.spv' if is_blend or is_lop or is_bop
                           or is_bfac or is_wide
                           or is_kill
                           or is_killfn or is_fncall or is_depth or is_gradlike
+                          or is_stencil
                           or is_line or is_lstrip or is_polyln
                           or is_polypnt
                           else 'vs_uvc.spv' if is_deriv2
@@ -11089,17 +11566,35 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'fs_deriv.spv' if is_deriv else
                           'fs_deriv2.spv' if is_deriv2 else
                           'fs_demote_deriv.spv' if is_demdrv else
+                          'fs_mrt4.spv' if is_mrt4 else
+                          'fs_mrt3.spv' if is_mrt3 else
+                          'fs_mrt.spv' if is_mrt else
                           'fs_color.spv' if is_fcolor else
                           'fs_vcol.spv' if is_persp or is_dclamplike
                           or is_blend or is_lop or is_bop or is_bfac
                           or is_wide
                           or is_line or is_lstrip or is_polyln or is_polypnt
-                          or is_depth or is_gradlike
+                          or is_depth or is_gradlike or is_stencil
                           else
+                          'fs_tex_ary.spv' if is_ftexary else
+                          'fs_texshpi.spv' if is_ftexdpi else
+                          'fs_texshpe.spv' if is_ftexdpe else
+                          'fs_texshg.spv' if is_ftexdg else
+                          'fs_texshl.spv' if is_ftexdref else
+                          'fs_texshi.spv' if is_ftexdri else
                           'fs_tex_array.spv' if is_ftexa else
                           'fs_tex_gather.spv' if (is_ftexg or is_ftexgath)
                           else
-                          'fs_tex_bias.spv' if is_ftexb else
+                          'fs_tex_bias.spv' if (is_ftexb or is_ftexbias)
+                          else
+                          'fs_texlod.spv' if is_ftexlod else
+                          'fs_mip.spv' if is_ftexi else
+                          'fs_tex_qlod.spv' if is_ftexq else
+                          'fs_texprojl.spv' if is_ftexpj else
+                          'fs_texproji.spv' if is_ftexpi else
+                          'fs_texfetch.spv' if is_ftexfetch else
+                          'fs_texfetch32.spv' if is_ftexu32 else
+                          'fs_tex_rgba32.spv' if is_ftexrgba32 else
                           'fs_tex_implicit.spv' if is_ftex else
                           'fs_kill_fn.spv' if is_killfn else
                           'fs_kill.spv' if is_kill else
@@ -11111,7 +11606,18 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
              'rmem', 'rb', 'cp', 'cb', 'fen', 'ib2',
              'ubo', 'dsl', 'dp', 'ds', 'ds_src',
              'timg', 'tview', 'smp', 'tmem',
-             'dimg', 'dview', 'dmem', 'rb2', 'rb2mem'))}
+             'dimg', 'dview', 'dmem', 'rb2', 'rb2mem',
+             # mrt second colour attachment (appended last so the
+             # index-derived handles of every existing key are unchanged)
+             'img2', 'view2', 'imem2', 'rb3', 'rb3mem',
+             # mrt3 third colour attachment (appended after rb3mem so
+             # every existing key's index-derived handle is unchanged)
+             'img3', 'view3', 'imem3', 'rb4', 'rb4mem',
+             # mrt4 fourth colour attachment (appended last)
+             'img4', 'view4', 'imem4', 'rb5', 'rb5mem',
+             # secnd secondary command buffer (appended last so every
+             # existing key's index-derived handle is unchanged)
+             'cb2'))}
         RES_BLOB0 = 200
 
         CW = CH = 64                     # color attachment extent
@@ -11263,6 +11769,25 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             TEX_W = TEX_H = 4 if is_ftexm else 1
             TEX_UV = ([(-0.4, -0.4), (1.4, 0.6), (0.6, 1.4)]
                       if (is_ftexr or is_ftexmir or is_ftexc) else
+                      # ftex_lod: keep interpolated u,v >= ~0.3 so the
+                      # 2x2 mip1 8.8 coord floor(u*512-128) stays >=0,
+                      # avoiding the negative-su >>8/>>>8 divergence that
+                      # gates ftexw/ftex_lb; mip2 is 1x1 (always clamps).
+                      [(0.3, 0.3), (0.75, 0.9), (0.9, 0.45)]
+                      if is_ftexlod else
+                      # ftex_ary: vcol.w=0.3+uv.y is the array layer
+                      # selector; uv.y in [0,0.45] -> w in [0.3,0.75]
+                      # straddles the 0.5 RNE boundary near mid-triangle
+                      # so BOTH layers get real coverage.
+                      [(0.2, 0.0), (0.5, 0.45), (0.8, 0.0)]
+                      if is_ftexary else
+                      # ftex_bias: coord=vcol.xy=uv spans [0.3,0.9] (all
+                      # >=0.3 keeps the 2x2/1x1 mip su>=0, avoiding the
+                      # negative-su wall) so quad derivatives give a
+                      # nonzero base lambda; uv.y in [0.3,0.9] ->
+                      # bias=(0.6-uv.y)*4 in [-1.2,+1.2] crosses zero.
+                      [(0.3, 0.3), (0.9, 0.7), (0.7, 0.9)]
+                      if is_ftexbias else
                       [(0.125, 0.125), (0.5, 0.875), (0.875, 0.125)]
                       if is_ftexm else [(0.5, 0.5)] * 3)
             TEX_TEXELS = [((x * 60) | ((y * 60) << 8) | (128 << 16) |
@@ -11276,6 +11801,67 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                       (f16pack(0.5) | (f16pack(1.0) << 16)))
                      for y in range(TEX_H) for x in range(TEX_W)] \
                 if is_ftexh else []
+            # ftex_lod: 3-mip RGBA8 chain 4x4->2x2->1x1.  _mtel(m,x,y)
+            # packs a distinct word per (mip,texel) — B channel steps by
+            # mip so the trilinear m0/m1/fw blend is observable.  All
+            # levels share pitch=16 words (align(dim*4,64)=64B).
+            def _mtel(m, x, y):
+                return ((x * 0x40 + m * 0x30) & 0xFF |
+                        ((y * 0x40 + m * 0x50) & 0xFF) << 8 |
+                        ((m * 0x60 + (x + y) * 0x10) & 0xFF) << 16 |
+                        0xFF000000)
+            MIP_DIM = [max(1, TEX_W >> m) for m in range(3)] \
+                if (is_ftexlod or is_ftexi or is_ftexq or is_ftexpi
+                    or is_ftexbias) \
+                else []
+            # ftex_ary: 2-layer array texel — DISTINCT per (layer,x,y)
+            # so the RNE layer select is observable (unlike ftexa's
+            # uniform [tri_w]*2).  byte0=R steps by x+layer, byte1=G by
+            # y+layer, byte2=B by (x+y)+layer; byte3=A=0xFF (UNORM8).
+            def _atel(_l, _x, _y):
+                return (((_x * 0x55 + _l * 0x80) & 0xFF) |
+                        ((_y * 0x66 + _l * 0x40) & 0xFF) << 8 |
+                        (((_x + _y) * 0x44 + _l * 0x20) & 0xFF) << 16 |
+                        0xFF000000)
+            # ftex_dref: D16_UNORM depth texel — u16 normalized depth,
+            # monotonic x/y gradient so the LESS_OR_EQUAL compare
+            # boundary cuts across the map (PCF fraction varies).
+            def _dtel(_x, _y):
+                return (3000 + _x * 13000 + _y * 7000) & 0xFFFF
+            # ftexfetch: R8G8B8A8_UINT texel — 4 raw uint8 channels,
+            # each a distinct function of (x,y) so the fetched uvec4
+            # identifies the exact texel address (no *0x101 unorm).
+            def _utel(_x, _y):
+                return (((_x * 0x3C + _y * 0x05) & 0xFF) |
+                        (((_y * 0x3C + _x * 0x07) & 0xFF) << 8) |
+                        (((_x * 0x11 + _y * 0x17) & 0xFF) << 16) |
+                        (((0xF0 - _x * 0x14 - _y * 0x0C) & 0xFF) << 24))
+            # ftex_u32: R32_UINT texel — ONE uint32 per texel (bpp=4,
+            # 1 word).  The 4 bytes are distinct functions of (x,y) so
+            # the fetched u32's every byte is observable after the FS
+            # spreads them into RGBA.
+            def _u32tel(_x, _y):
+                return (((_x * 0x9E + _y * 0x11) & 0xFF) |
+                        (((_y * 0x5B + _x * 0x07) & 0xFF) << 8) |
+                        (((_x * 0x3D + _y * 0x29) & 0xFF) << 16) |
+                        (((0x80 + _x * 0x1F + _y * 0x0D) & 0xFF) << 24))
+            # ftex_rgba32: R32G32B32A32_UINT texel — 4 u32 channel words
+            # (bpp=16, 4 words/texel).  Each channel's u32 has a distinct
+            # high byte (the part the /2^32 normalize surfaces as u8)
+            # plus varied low bytes, so channel separation, the
+            # little-endian u32 assembly, and per-texel fetch are all
+            # observable.
+            def _rgba32tel(_x, _y):
+                def _ch(_s):
+                    return (((_x * (0x9E + _s * 0x11) +
+                              _y * (0x13 + _s * 0x07)) & 0xFF) |
+                            (((_y * (0x5B + _s * 0x0D) +
+                               _x * (0x07 + _s * 0x03)) & 0xFF) << 8) |
+                            (((_x * (0x3D + _s * 0x17) +
+                               _y * (0x29 + _s * 0x05)) & 0xFF) << 16) |
+                            (((0x80 + _x * (0x1F + _s * 0x09) +
+                               _y * (0x0D + _s * 0x03)) & 0xFF) << 24))
+                return (_ch(0), _ch(1), _ch(2), _ch(3))
             for _vi, (vx_, vy_, _vz, _vw) in enumerate(TRI):
                 if is_tex:
                     # {pos.xy @0, uv.xy @1} stride 16; uv is constant —
@@ -11463,6 +12049,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # kill masks: fs_kill drops the FragCoord 8x8 checkerboard;
         # fs_kill_fn drops odd-x lanes (int(FragCoord.x)&1==1 -> killer).
         # Both map int(FragCoord) == the framebuffer pixel (px,py).
+        exp_img2 = []                     # mrt attachment-1 expected image
+        exp_img3 = []                     # mrt3 attachment-2 expected image
+        exp_img4 = []                     # mrt4 attachment-3 expected image
         if is_deriv:
             # quad-lane derivative oracle over the fullscreen gradient:
             # per-pixel bit-exact vcol neighbours -> dFdx/dFdy/fwidth
@@ -11586,22 +12175,132 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         _rb.append(cl_f32_u8(f32b(_f32(_bm1 + _bm2))))
                     exp_img.append(_rb[0] | (_rb[1] << 8) |
                                    (_rb[2] << 16) | (_rb[3] << 24))
-        elif is_grad or is_fcolor:
+        elif is_grad or is_fcolor or is_mrt:
             # smooth-varying interpolation: per-pixel bit-exact fpnew
             # oracle -> interpolated f32 vcol vec4; pack per the FS.
             _gp = gfx_grad_pixels(TRI, GRAD_COLS, VP, SC, CW, CH, 1, 2)
             exp_img = []
+            if is_mrtblend:
+                # att1 blend dst = its OWN clear (0,0,1,1) -> UNORM8
+                # (0,0,255,255) -> dequantized f32 via the u8*K255
+                # roundtrip (K255=0x3B808081 ~1/255), same as is_bfac.
+                _K255 = struct.unpack('<f', struct.pack('<I', 0x3B808081))[0]
+                _df1 = [_f32(cl_f32_u8(f32b(0.0 if c < 2 else 1.0))
+                            * _K255) for c in range(4)]
             for w in range(CW * CH):
                 _px, _py = w % CW, w // CW
                 _v = _gp.get((_px, _py))
                 if _v is None:
                     exp_img.append(clr_w)
-                elif is_fcolor:
-                    # fs_color: o = vcol*0.5 + splat(FragCoord.x*0.001);
-                    # fragx = px+0.5.  VectorTimesScalar/FMUL/FAdd f32.
+                    if is_mrt:
+                        # att1 has its OWN clear (0,0,1,1)->0xFFFF0000 —
+                        # uncovered att1 px take it, NOT the att0 clr_w.
+                        # Verifies cmdexec's per-attachment clearv_q[att*4]
+                        # indexing (identical clears would leave it dark).
+                        exp_img2.append(0xFFFF0000)
+                        if is_mrt3:
+                            # att2 has its OWN clear (0,1,0,1)->0xFF00FF00.
+                            exp_img3.append(0xFF00FF00)
+                            if is_mrt4:
+                                # att3 has its OWN clear (1,1,0,1)
+                                # ->0xFF00FFFF.
+                                exp_img4.append(0xFF00FFFF)
+                elif is_fcolor or is_mrt:
+                    # fs_color/fs_mrt o0: o = vcol*0.5 + splat(
+                    # FragCoord.x*0.001); fragx = px+0.5.  VectorTimesScalar
+                    # /FMUL/FAdd f32.  (fs_mrt o0 is the identical expr.)
                     _fx = _f32((_px + 0.5) * _f32(0.001))
-                    exp_img.append(_u8pack(tuple(
-                        _f32(_f32(_v[c] * 0.5) + _fx) for c in range(4))))
+                    _cv = tuple(_f32(_f32(_v[c] * 0.5) + _fx)
+                                for c in range(4))
+                    _w0 = _u8pack(_cv)
+                    if is_mrtlop:
+                        # logicOp XOR (VkLogicOp 6) on EVERY attachment:
+                        # per-channel s^d on the UNORM8 src bytes vs the
+                        # attachment's OWN clear dst.  att0 src=_w0 bytes,
+                        # dst=att0 clear (0,0,0,1)->[0,0,0,255].
+                        _b0 = [_w0 & 0xFF, (_w0 >> 8) & 0xFF,
+                               (_w0 >> 16) & 0xFF, (_w0 >> 24) & 0xFF]
+                        _d0 = [0, 0, 0, 255]
+                        _r0 = [_b0[c] ^ _d0[c] for c in range(4)]
+                        exp_img.append(_r0[0] | (_r0[1] << 8)
+                                       | (_r0[2] << 16)
+                                       | (_r0[3] << 24))
+                    else:
+                        exp_img.append(_w0)
+                    if is_mrt:
+                        if is_mrtblend:
+                            # att1: o1 = vec4(c.b,c.g,c.r,c.a) = permute
+                            # of the fp32 _cv, then per-attachment BLEND
+                            # SRC_ALPHA(6)/1-SRC_ALPHA(7) ADD vs the att1
+                            # clear dst _df1 — dr_q.blend[1] path.
+                            # bm1=src*sf, bm2=dst*df, ADD -> u8 (is_bfac
+                            # order).  src_alpha = o1.w = _cv[3].
+                            _o1 = (_cv[2], _cv[1], _cv[0], _cv[3])
+                            _sa = _o1[3]
+                            _dfac = _f32(1.0 - _sa)
+                            _rb = []
+                            for c in range(4):
+                                _bm1 = _f32(_o1[c] * _sa)
+                                _bm2 = _f32(_df1[c] * _dfac)
+                                _rb.append(cl_f32_u8(f32b(_f32(_bm1 + _bm2))))
+                            exp_img2.append(_rb[0] | (_rb[1] << 8)
+                                            | (_rb[2] << 16)
+                                            | (_rb[3] << 24))
+                        elif is_mrtlop:
+                            # att1: o1 permute bytes [b2,b1,b0,b3] then
+                            # logicOp XOR vs att1's OWN clear dst
+                            # (0,0,1,1)->[0,0,255,255]: per-channel s^d.
+                            #   R: b2^0=b2  G: b1^0=b1
+                            #   B: b0^255=~b0  A: b3^255=~b3
+                            _p1 = [((_w0 >> 16) & 0xFF),
+                                   ((_w0 >> 8) & 0xFF),
+                                   (_w0 & 0xFF),
+                                   ((_w0 >> 24) & 0xFF)]
+                            _d1 = [0, 0, 255, 255]
+                            _r1 = [_p1[c] ^ _d1[c] for c in range(4)]
+                            exp_img2.append(_r1[0] | (_r1[1] << 8)
+                                            | (_r1[2] << 16)
+                                            | (_r1[3] << 24))
+                        else:
+                            # fs_mrt o1 = vec4(c.b,c.g,c.r,c.a): pure R<->B
+                            # channel permutation in fp32 BEFORE the
+                            # per-channel UNORM8 encode -> commutes ->
+                            # att1's covered word is att0's R/B swapped.
+                            exp_img2.append(
+                                (((_w0 >> 16) & 0xFF)
+                                 | (((_w0 >> 8) & 0xFF) << 8)
+                                 | ((_w0 & 0xFF) << 16)
+                                 | (_w0 & 0xFF000000)))
+                        if is_mrt3:
+                            # fs_mrt3 o2 = vec4(c.g,c.b,c.r,c.a): RGB
+                            # left-rotation -> bytes [G,B,R,A]=[b1,b2,b0,b3],
+                            # a DIFFERENT permutation than o1's [b2,b1,b0,b3]
+                            # so att2 is independently observable.
+                            _pw2 = (((_w0 >> 8) & 0xFF)
+                                    | (((_w0 >> 16) & 0xFF) << 8)
+                                    | ((_w0 & 0xFF) << 16)
+                                    | (_w0 & 0xFF000000))
+                            if is_mrtlop:
+                                # att2 logicOp XOR vs its OWN clear
+                                # (0,1,0,1)->u8 [0,255,0,255]: per-byte s^d.
+                                _cb2 = [0, 255, 0, 255]
+                                _pw2 = (_lopw(_pw2, _cb2))
+                            exp_img3.append(_pw2)
+                            if is_mrt4:
+                                # fs_mrt4 o3 = vec4(c.a,c.b,c.g,c.r): FULL
+                                # channel reversal -> bytes [A,B,G,R]=
+                                # [b3,b2,b1,b0], the most distinct
+                                # permutation so att3 is observable.
+                                _pw3 = (((_w0 >> 24) & 0xFF)
+                                        | (((_w0 >> 16) & 0xFF) << 8)
+                                        | (((_w0 >> 8) & 0xFF) << 16)
+                                        | ((_w0 & 0xFF) << 24))
+                                if is_mrtlop:
+                                    # att3 logicOp XOR vs its OWN clear
+                                    # (1,1,0,1)->u8 [255,255,0,255].
+                                    _cb3 = [255, 255, 0, 255]
+                                    _pw3 = (_lopw(_pw3, _cb3))
+                                exp_img4.append(_pw3)
                 else:
                     exp_img.append(_u8pack(_v))
         elif is_dne or is_dnever:
@@ -11733,12 +12432,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # floor(u*w) integer coord; a coord outside [0,dim) sets the
             # border flag -> W_TXD substitutes f_bord16(borderColor)
             # instead of fetching a texel.  borderColor is the raw
-            # VkBorderColor; oracle maps {2,5}->opaque white, {1,4}->opaque
-            # black, {0,3}->transparent.
+            # VkBorderColor; oracle maps {4,5}->opaque white, {2,3}->opaque
+            # black, {0,1}->transparent (the real Vulkan enum order).
             _uv4 = [(u, v, 0.0, 1.0) for (u, v) in TEX_UV]
             _gp = gfx_grad_pixels(TRI, _uv4, VP, SC, CW, CH, 1, 2)
-            _bord = (0xFFFFFFFF if ftex_bc in (2, 5)
-                     else 0xFF000000 if ftex_bc in (1, 4)
+            _bord = (0xFFFFFFFF if ftex_bc in (4, 5)
+                     else 0xFF000000 if ftex_bc in (2, 3)
                      else 0x00000000)
             exp_img = []
             for w in range(CW * CH):
@@ -11845,9 +12544,850 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                (f16u8((_w0 >> 16) & 0xFFFF) << 8) |
                                (f16u8(_w1 & 0xFFFF) << 16) |
                                (f16u8((_w1 >> 16) & 0xFFFF) << 24))
+        elif is_ftexlod:
+            # explicit textureLod lod=1.5 -> le=24 q4.4; mipmapMode LINEAR
+            # -> m0=1 (2x2), m1=2 (1x1), fw=(24&15)<<4=128.  Each mip runs
+            # the LINEAR 8.8 coord floor(u*dim*256-128) + CLAMP_TO_EDGE
+            # bilinear into acc (m0) / acc1 (m1); rr=(acc+0x8000)>>16 per
+            # mip then rr=(rr0*(256-fw)+rr1*fw+128)>>8 -> *1/65535 ->
+            # UNORM8.  Mirrors spirv_model img_op + tx_finish_pts.
+            _K = struct.unpack('<f', struct.pack('<I', 0x37800080))[0]
+            _fw = (24 & 0xF) << 4
+            _uv4 = [(u, v, 0.0, 1.0) for (u, v) in TEX_UV]
+            _gp = gfx_grad_pixels(TRI, _uv4, VP, SC, CW, CH, 1, 2)
+            _mips = [(1, 2, 2), (2, 1, 1)]      # (level, w, h): m0=1,m1=2
+            exp_img = []
+            for w in range(CW * CH):
+                _px, _py = w % CW, w // CW
+                _v = _gp.get((_px, _py))
+                if _v is None:
+                    exp_img.append(clr_w)
+                    continue
+                _acc = [[0] * 4, [0] * 4]
+                for _mi, (_ml, _wm, _hm) in enumerate(_mips):
+                    _su = int(math.floor(_f32(_v[0] * _wm * 256 - 128)))
+                    _sv = int(math.floor(_f32(_v[1] * _hm * 256 - 128)))
+                    _iu, _fu = _su >> 8, _su & 0xFF
+                    _iv, _fv = _sv >> 8, _sv & 0xFF
+                    for _du, _dv, _wu, _wv in (
+                            (_iu, _iv, 256 - _fu, 256 - _fv),
+                            (_iu + 1, _iv, _fu, 256 - _fv),
+                            (_iu, _iv + 1, 256 - _fu, _fv),
+                            (_iu + 1, _iv + 1, _fu, _fv)):
+                        _cu = 0 if _du < 0 else (_wm - 1 if _du >= _wm
+                                                 else _du)
+                        _cv = 0 if _dv < 0 else (_hm - 1 if _dv >= _hm
+                                                 else _dv)
+                        _tw = _mtel(_ml, _cu, _cv)
+                        _gw = _wu * _wv
+                        for _c in range(4):
+                            _acc[_mi][_c] += _gw * \
+                                ((_tw >> (8 * _c)) & 0xFF) * 0x101
+                _wb = []
+                for _c in range(4):
+                    _r0 = (0xFFFF if _acc[0][_c] + 0x8000 >= 0x100000000
+                           else (_acc[0][_c] + 0x8000) >> 16)
+                    _r1 = (0xFFFF if _acc[1][_c] + 0x8000 >= 0x100000000
+                           else (_acc[1][_c] + 0x8000) >> 16)
+                    _rr = (_r0 * (256 - _fw) + _r1 * _fw + 128) >> 8
+                    _wb.append(_f32(float(_rr) * _K))
+                exp_img.append(_u8pack(_wb))
+        elif is_ftexi:
+            # fs_mip implicit-LOD: uv=(FragCoord.x^2/128, vcol.y) ->
+            # OpImageSampleImplicitLod.  ilod_v quad finite-differences
+            # the coord across the 2x2 lane group -> rho2 -> SFU log2 ->
+            # lam; then le=floor(lam*16) -> m0/m1/fw -> per-mip 8.8
+            # bilinear + u16 trilinear, REPEAT wrap.  Built in the
+            # spirv_model bit-domain (fadd/fsub/fmul/fdiv/ffma/f2i/i2f/
+            # fp_minmax/sfu_eval) so every fp32 rounding matches RTL.
+            _sm = spirv_model
+            _uv4 = [(u, v, 0.0, 1.0) for (u, v) in TEX_UV]
+            _gp = gfx_grad_pixels(TRI, _uv4, VP, SC, CW, CH, 1, 2)
+            # every lane position of every active (>=1 covered) quad —
+            # covered lanes render, uncovered lanes are helper invocations
+            # that still supply derivative coords.
+            _pos = set()
+            for (_px, _py) in _gp:
+                _qx, _qy = _px & ~1, _py & ~1
+                for _k in range(4):
+                    _pos.add((_qx + (_k & 1), _qy + (_k >> 1)))
+            _interp = gfx_interp_map(TRI, _uv4, VP, SC, _pos)
+            # fragcoord.x^2/128 per pixel-x (FragCoord.x = px+0.5 exact)
+            _fcu = [0] * CW
+            for _x in range(CW):
+                _fxb = _sm.f2b(_x + 0.5)
+                _fcu[_x] = _sm.fdiv(_sm.fmul(_fxb, _fxb), _sm.f2b(128.0))
+            # vcol.y interp bits per needed position
+            _ivb = {p: _sm.f2b(_interp[p][1]) for p in _pos}
+            _wf = _sm.i2f(4, True)              # mip0 w=h=4 -> 4.0
+            _hf = _sm.i2f(4, True)
+            _cst = 0xC3000000                    # -128.0 (linear 8.8)
+            _K16 = 0x37800080                    # 1/65535 (UNORM finish)
+            exp_img = []
+            for w in range(CW * CH):
+                _px, _py = w % CW, w // CW
+                if (_px, _py) not in _gp:
+                    exp_img.append(clr_w)
+                    continue
+                # quad base + this pixel's lane position
+                _qx, _qy = _px & ~1, _py & ~1
+                _li = (_px & 1) + 2 * (_py & 1)
+                # 4 lane coords: (uvx,uvy) fp32 bits; lane k -> pixel
+                # (qx+(k&1), qy+(k>>1))
+                _vc = []
+                for _k in range(4):
+                    _lx = _qx + (_k & 1)
+                    _ly = _qy + (_k >> 1)
+                    _vc.append((_fcu[_lx], _ivb[(_lx, _ly)]))
+                # ilod_v: x-pair li|1/li&~1, y-pair li|2/li&~2
+                _ax = _sm.fmul(_sm.fsub(_vc[_li | 1][0],
+                                        _vc[_li & ~1][0]), _wf)
+                _bx = _sm.fmul(_sm.fsub(_vc[_li | 1][1],
+                                        _vc[_li & ~1][1]), _hf)
+                _ay = _sm.fmul(_sm.fsub(_vc[_li | 2][0],
+                                        _vc[_li & ~2][0]), _wf)
+                _by = _sm.fmul(_sm.fsub(_vc[_li | 2][1],
+                                        _vc[_li & ~2][1]), _hf)
+                _dx2 = _sm.ffma(_bx, _bx, _sm.fmul(_ax, _ax))
+                _dy2 = _sm.ffma(_by, _by, _sm.fmul(_ay, _ay))
+                _rho2 = _sm.fp_minmax(_dx2, _dy2, True)
+                _lg = _sm.sfu_tables.sfu_eval(30,
+                                              [[_rho2, 0, 0, 0]])[0]
+                _lam = _sm.fmul(_lg, 0x3F000000)     # *0.5
+                # le = floor(lam*16) clamped [0,64]; mip LINEAR select
+                _le = _sm.s32(_sm.f2i(_sm.ffma(_lam, 0x41800000, 0),
+                                      False, 'RDN'))
+                _le = min(max(_le, 0), 64)
+                _m0 = min(_le >> 4, 2)
+                _m1 = min(_m0 + 1, 2)
+                _fw = (_le & 0xF) << 4
+                _tril = _m1 != _m0
+                # this pixel's sample coord (u=fragcoord^2/128, v=vcol.y)
+                _ub = _fcu[_px]
+                _vb = _ivb[(_px, _py)]
+                _acc = [[0] * 4, [0] * 4]
+                for _slot, _m in (((0, _m0), (1, _m1)) if _tril
+                                  else ((0, _m0),)):
+                    _wm = MIP_DIM[_m]
+                    _hm = MIP_DIM[_m]
+                    _su = _sm.s32(_sm.f2i(
+                        _sm.ffma(_ub, _sm.i2f(_wm << 8, True), _cst),
+                        False, 'RDN'))
+                    _sv = _sm.s32(_sm.f2i(
+                        _sm.ffma(_vb, _sm.i2f(_hm << 8, True), _cst),
+                        False, 'RDN'))
+                    _iu, _fu = _su >> 8, _su & 0xFF
+                    _iv, _fv = _sv >> 8, _sv & 0xFF
+                    for _du, _dv, _wu, _wv in (
+                            (_iu, _iv, 256 - _fu, 256 - _fv),
+                            (_iu + 1, _iv, _fu, 256 - _fv),
+                            (_iu, _iv + 1, 256 - _fu, _fv),
+                            (_iu + 1, _iv + 1, _fu, _fv)):
+                        _cu = _du % _wm          # REPEAT (m=0)
+                        _cv = _dv % _hm
+                        _tw = _mtel(_m, _cu, _cv)
+                        _gw = _wu * _wv
+                        for _c in range(4):
+                            _acc[_slot][_c] += _gw * \
+                                ((_tw >> (8 * _c)) & 0xFF) * 0x101
+                _wb = 0
+                for _c in range(4):
+                    _r0 = (0xFFFF if _acc[0][_c] + 0x8000 >= 0x100000000
+                           else (_acc[0][_c] + 0x8000) >> 16)
+                    if _tril:
+                        _r1 = (0xFFFF if _acc[1][_c] + 0x8000
+                               >= 0x100000000
+                               else (_acc[1][_c] + 0x8000) >> 16)
+                        _rr = (_r0 * (256 - _fw) + _r1 * _fw + 128) >> 8
+                    else:
+                        _rr = _r0
+                    _wbb = _sm.fmul(_sm.i2f(_rr, True), _K16)
+                    _wb |= cl_f32_u8(_wbb) << (8 * _c)
+                exp_img.append(_wb)
+        elif is_ftexbias:
+            # fs_tex_bias OpImageSampleImplicitLod(87) Bias %vcol.z:
+            # coord=vcol.xy (SAME smooth-interp coord family as ftexq,
+            # NOT fragcoord) -> ilod_v quad finite-differences -> lambda;
+            # then lod_in=fadd(lambda, bias) where bias=vcol.z is the
+            # per-pixel interpolated (0.6-uv.y)*4 -> le -> mip ->
+            # trilinear over the shared 3-mip image.  The per-vertex
+            # bias is rebuilt in fp32 (FSub 0.6-uv.y, FMul *4.0) BEFORE
+            # gfx_interp_map interpolates vcol.z — matching the VS.
+            _sm = spirv_model
+            def _bz(_v):
+                return _sm.b2f(_sm.fmul(_sm.fsub(_sm.f2b(0.6),
+                                                 _sm.f2b(_v)),
+                                        _sm.f2b(4.0)))
+            _uv4 = [(u, v, _bz(v), 1.0) for (u, v) in TEX_UV]
+            _gp = gfx_grad_pixels(TRI, _uv4, VP, SC, CW, CH, 1, 2)
+            _pos = set()
+            for (_px, _py) in _gp:
+                _qx, _qy = _px & ~1, _py & ~1
+                for _k in range(4):
+                    _pos.add((_qx + (_k & 1), _qy + (_k >> 1)))
+            _interp = gfx_interp_map(TRI, _uv4, VP, SC, _pos)
+            # interpolated (u,v,bias) fp32 bits per needed position
+            _iu_b = {p: _sm.f2b(_interp[p][0]) for p in _pos}
+            _iv_b = {p: _sm.f2b(_interp[p][1]) for p in _pos}
+            _ib_b = {p: _sm.f2b(_interp[p][2]) for p in _pos}
+            _wf = _sm.i2f(4, True)              # mip0 w=h=4 -> 4.0
+            _hf = _sm.i2f(4, True)
+            _cst = 0xC3000000                    # -128.0 (linear 8.8)
+            _K16 = 0x37800080                    # 1/65535 (UNORM finish)
+            exp_img = []
+            for w in range(CW * CH):
+                _px, _py = w % CW, w // CW
+                if (_px, _py) not in _gp:
+                    exp_img.append(clr_w)
+                    continue
+                _qx, _qy = _px & ~1, _py & ~1
+                _li = (_px & 1) + 2 * (_py & 1)
+                # 4 lane coords: (u,v) fp32 bits from the smooth
+                # vcol.xy interp; lane k -> pixel (qx+(k&1),qy+(k>>1))
+                _vc = []
+                for _k in range(4):
+                    _lx = _qx + (_k & 1)
+                    _ly = _qy + (_k >> 1)
+                    _vc.append((_iu_b[(_lx, _ly)], _iv_b[(_lx, _ly)]))
+                # ilod_v: x-pair li|1/li&~1, y-pair li|2/li&~2
+                _ax = _sm.fmul(_sm.fsub(_vc[_li | 1][0],
+                                        _vc[_li & ~1][0]), _wf)
+                _bx = _sm.fmul(_sm.fsub(_vc[_li | 1][1],
+                                        _vc[_li & ~1][1]), _hf)
+                _ay = _sm.fmul(_sm.fsub(_vc[_li | 2][0],
+                                        _vc[_li & ~2][0]), _wf)
+                _by = _sm.fmul(_sm.fsub(_vc[_li | 2][1],
+                                        _vc[_li & ~2][1]), _hf)
+                _dx2 = _sm.ffma(_bx, _bx, _sm.fmul(_ax, _ax))
+                _dy2 = _sm.ffma(_by, _by, _sm.fmul(_ay, _ay))
+                _rho2 = _sm.fp_minmax(_dx2, _dy2, True)
+                _lg = _sm.sfu_tables.sfu_eval(30,
+                                              [[_rho2, 0, 0, 0]])[0]
+                _lam = _sm.fmul(_lg, 0x3F000000)     # *0.5
+                # Bias operand: lod_in = fadd(lambda, bias) BEFORE the
+                # q4.4 quantize (model order lambda+bias -> le).
+                _lam = _sm.fadd(_lam, _ib_b[(_px, _py)])
+                _le = _sm.s32(_sm.f2i(_sm.ffma(_lam, 0x41800000, 0),
+                                      False, 'RDN'))
+                _le = min(max(_le, 0), 64)
+                _m0 = min(_le >> 4, 2)
+                _m1 = min(_m0 + 1, 2)
+                _fw = (_le & 0xF) << 4
+                _tril = _m1 != _m0
+                # this pixel's sample coord = interp vcol.xy
+                _ub = _iu_b[(_px, _py)]
+                _vb = _iv_b[(_px, _py)]
+                _acc = [[0] * 4, [0] * 4]
+                for _slot, _m in (((0, _m0), (1, _m1)) if _tril
+                                  else ((0, _m0),)):
+                    _wm = MIP_DIM[_m]
+                    _hm = MIP_DIM[_m]
+                    _su = _sm.s32(_sm.f2i(
+                        _sm.ffma(_ub, _sm.i2f(_wm << 8, True), _cst),
+                        False, 'RDN'))
+                    _sv = _sm.s32(_sm.f2i(
+                        _sm.ffma(_vb, _sm.i2f(_hm << 8, True), _cst),
+                        False, 'RDN'))
+                    _iu, _fu = _su >> 8, _su & 0xFF
+                    _iv, _fv = _sv >> 8, _sv & 0xFF
+                    for _du, _dv, _wu, _wv in (
+                            (_iu, _iv, 256 - _fu, 256 - _fv),
+                            (_iu + 1, _iv, _fu, 256 - _fv),
+                            (_iu, _iv + 1, 256 - _fu, _fv),
+                            (_iu + 1, _iv + 1, _fu, _fv)):
+                        _cu = _du % _wm          # REPEAT (m=0)
+                        _cv = _dv % _hm
+                        _tw = _mtel(_m, _cu, _cv)
+                        _gw = _wu * _wv
+                        for _c in range(4):
+                            _acc[_slot][_c] += _gw * \
+                                ((_tw >> (8 * _c)) & 0xFF) * 0x101
+                _wb = 0
+                for _c in range(4):
+                    _r0 = (0xFFFF if _acc[0][_c] + 0x8000 >= 0x100000000
+                           else (_acc[0][_c] + 0x8000) >> 16)
+                    if _tril:
+                        _r1 = (0xFFFF if _acc[1][_c] + 0x8000
+                               >= 0x100000000
+                               else (_acc[1][_c] + 0x8000) >> 16)
+                        _rr = (_r0 * (256 - _fw) + _r1 * _fw + 128) >> 8
+                    else:
+                        _rr = _r0
+                    _wbb = _sm.fmul(_sm.i2f(_rr, True), _K16)
+                    _wb |= cl_f32_u8(_wbb) << (8 * _c)
+                exp_img.append(_wb)
+        elif is_ftexq:
+            # fs_tex_qlod OpImageQueryLod(105): SAME ilod_v quad-
+            # derivative lambda as ftexi but the coord is vcol.xy — the
+            # smooth varying's (u,v) components 0,1 interp'd at each
+            # lane (NO FragCoord term) — and NO texel fetch: the result
+            # is {clamped lambda, raw lambda}:  le=floor(lam*16) clamped
+            # [0,64]; lec=min(le,(lvl-1)*16)=min(le,32) for the 3-mip
+            # image; wb0=fmul(i2f(lec),0x3D800000)=lec*2^-4 (clamped
+            # lambda), wb1=lam (raw).  FS then emits
+            # o=vec4(l.x*0.25, l.y*0.125+0.5, 0, 1) -> UNORM8.
+            _sm = spirv_model
+            _uv4 = [(u, v, 0.0, 1.0) for (u, v) in TEX_UV]
+            _gp = gfx_grad_pixels(TRI, _uv4, VP, SC, CW, CH, 1, 2)
+            _pos = set()
+            for (_px, _py) in _gp:
+                _qx, _qy = _px & ~1, _py & ~1
+                for _k in range(4):
+                    _pos.add((_qx + (_k & 1), _qy + (_k >> 1)))
+            _interp = gfx_interp_map(TRI, _uv4, VP, SC, _pos)
+            # per-lane coord = (vcol.x, vcol.y) interp -> fp32 bits
+            _ic = {p: (_sm.f2b(_interp[p][0]), _sm.f2b(_interp[p][1]))
+                   for p in _pos}
+            _wf = _sm.i2f(4, True)              # mip0 w=h=4 -> 4.0
+            _hf = _sm.i2f(4, True)
+            exp_img = []
+            for w in range(CW * CH):
+                _px, _py = w % CW, w // CW
+                if (_px, _py) not in _gp:
+                    exp_img.append(clr_w)
+                    continue
+                _qx, _qy = _px & ~1, _py & ~1
+                _li = (_px & 1) + 2 * (_py & 1)
+                _vc = []
+                for _k in range(4):
+                    _lx = _qx + (_k & 1)
+                    _ly = _qy + (_k >> 1)
+                    _vc.append(_ic[(_lx, _ly)])
+                # ilod_v: x-pair li|1/li&~1, y-pair li|2/li&~2
+                _ax = _sm.fmul(_sm.fsub(_vc[_li | 1][0],
+                                        _vc[_li & ~1][0]), _wf)
+                _bx = _sm.fmul(_sm.fsub(_vc[_li | 1][1],
+                                        _vc[_li & ~1][1]), _hf)
+                _ay = _sm.fmul(_sm.fsub(_vc[_li | 2][0],
+                                        _vc[_li & ~2][0]), _wf)
+                _by = _sm.fmul(_sm.fsub(_vc[_li | 2][1],
+                                        _vc[_li & ~2][1]), _hf)
+                _dx2 = _sm.ffma(_bx, _bx, _sm.fmul(_ax, _ax))
+                _dy2 = _sm.ffma(_by, _by, _sm.fmul(_ay, _ay))
+                _rho2 = _sm.fp_minmax(_dx2, _dy2, True)
+                _lg = _sm.sfu_tables.sfu_eval(30,
+                                              [[_rho2, 0, 0, 0]])[0]
+                _lam = _sm.fmul(_lg, 0x3F000000)     # raw lambda
+                # le=floor(lam*16) clamped [0,64]; lec=min(le,32)
+                _le = _sm.s32(_sm.f2i(_sm.ffma(_lam, 0x41800000, 0),
+                                      False, 'RDN'))
+                _le = min(max(_le, 0), 64)
+                _lec = min(_le, 32)
+                _wb0 = _sm.fmul(_sm.i2f(_lec, True), 0x3D800000)
+                # FS output: R=l.x*0.25, G=l.y*0.125+0.5, B=0, A=1
+                _r = cl_f32_u8(_sm.fmul(_wb0, 0x3E800000))
+                _g = cl_f32_u8(_sm.fadd(_sm.fmul(_lam, 0x3E000000),
+                                        0x3F000000))
+                exp_img.append(_r | (_g << 8) | (0xFF << 24))
+        elif is_ftexpj:
+            # fs_texprojl OpImageSampleProjExplicitLod lod=0: coord =
+            # (vcol.xy, vcol.z) -> W_TXJ divides xy/z wave-wide ->
+            # explicit lod0 -> mip0 LINEAR bilinear at the DIVIDED
+            # coord, REPEAT wrap.  Explicit lod -> NO quad derivatives,
+            # so only covered pixels (gfx_grad_pixels) are needed —
+            # helper lanes do not run.  vcol = (u, v, 0.4+1.4u,
+            # 0.3+1.0v) per vs_texzw; the per-vertex z/w are rebuilt
+            # with the same FMul/FAdd fp32 sequence.
+            _sm = spirv_model
+            def _zw(_u, _v):
+                _zu = _sm.b2f(_sm.fadd(_sm.f2b(0.4),
+                                       _sm.fmul(_sm.f2b(1.4),
+                                                _sm.f2b(_u))))
+                _wv = _sm.b2f(_sm.fadd(_sm.f2b(0.3),
+                                       _sm.fmul(_sm.f2b(1.0),
+                                                _sm.f2b(_v))))
+                return _zu, _wv
+            _uv4 = [(u, v, *_zw(u, v)) for (u, v) in TEX_UV]
+            _gp = gfx_grad_pixels(TRI, _uv4, VP, SC, CW, CH, 1, 2)
+            _cst = 0xC3000000                    # -128.0 (linear 8.8)
+            _K16 = 0x37800080                    # 1/65535 (UNORM finish)
+            _w8 = _sm.i2f(4 << 8, True)          # mip0 w=h=4 -> 1024.0
+            exp_img = []
+            for w in range(CW * CH):
+                _px, _py = w % CW, w // CW
+                if (_px, _py) not in _gp:
+                    exp_img.append(clr_w)
+                    continue
+                _u, _v, _z, _w2 = _gp[(_px, _py)]
+                _du = _sm.fdiv(_sm.f2b(_u), _sm.f2b(_z))
+                _dv = _sm.fdiv(_sm.f2b(_v), _sm.f2b(_z))
+                # mip0 4x4: 8.8 coord floor(d*w*256-128)
+                _su = _sm.s32(_sm.f2i(
+                    _sm.ffma(_du, _w8, _cst), False, 'RDN'))
+                _sv = _sm.s32(_sm.f2i(
+                    _sm.ffma(_dv, _w8, _cst), False, 'RDN'))
+                _iu, _fu = _su >> 8, _su & 0xFF
+                _iv, _fv = _sv >> 8, _sv & 0xFF
+                _acc = [0, 0, 0, 0]
+                for _e0, _e1, _wu, _wv in (
+                        (_iu, _iv, 256 - _fu, 256 - _fv),
+                        (_iu + 1, _iv, _fu, 256 - _fv),
+                        (_iu, _iv + 1, 256 - _fu, _fv),
+                        (_iu + 1, _iv + 1, _fu, _fv)):
+                    _cu = _e0 % 4               # REPEAT mod w=4
+                    _cv = _e1 % 4
+                    _tw = TEX_TEXELS[_cv * TEX_W + _cu]
+                    _gw = _wu * _wv
+                    for _c in range(4):
+                        _acc[_c] += _gw * \
+                            ((_tw >> (8 * _c)) & 0xFF) * 0x101
+                _wb = 0
+                for _c in range(4):
+                    _rr = (0xFFFF if _acc[_c] + 0x8000 >= 0x100000000
+                           else (_acc[_c] + 0x8000) >> 16)
+                    _wbb = _sm.fmul(_sm.i2f(_rr, True), _K16)
+                    _wb |= cl_f32_u8(_wbb) << (8 * _c)
+                exp_img.append(_wb)
+        elif is_ftexary:
+            # fs_tex_ary OpImageSampleExplicitLod lod=0: coord =
+            # vec3(vcol.xy, vcol.w) -> W_TXJ layer=RNE(coord.z)=RNE(vcol.w)
+            # in {0,1}, then mip0 LINEAR bilinear at coord.xy=vcol.xy
+            # inside that layer, CLAMP_TO_EDGE wrap.  Explicit lod -> NO
+            # quad derivatives -> covered pixels only.  vcol =
+            # (u, v, 0.4+1.4u, 0.3+1.0v) per vs_texzw; _gp gives the
+            # interpolated (u,v,z,w); layer uses the w component, the
+            # bilinear coord uses xy directly (NO projective divide).
+            _sm = spirv_model
+            def _zw(_u, _v):
+                _zu = _sm.b2f(_sm.fadd(_sm.f2b(0.4),
+                                       _sm.fmul(_sm.f2b(1.4),
+                                                _sm.f2b(_u))))
+                _wv = _sm.b2f(_sm.fadd(_sm.f2b(0.3),
+                                       _sm.fmul(_sm.f2b(1.0),
+                                                _sm.f2b(_v))))
+                return _zu, _wv
+            _uv4 = [(u, v, *_zw(u, v)) for (u, v) in TEX_UV]
+            _gp = gfx_grad_pixels(TRI, _uv4, VP, SC, CW, CH, 1, 2)
+            _cst = 0xC3000000                    # -128.0 (linear 8.8)
+            _K16 = 0x37800080                    # 1/65535 (UNORM finish)
+            _w8 = _sm.i2f(4 << 8, True)          # mip0 w=h=4 -> 1024.0
+            exp_img = []
+            for w in range(CW * CH):
+                _px, _py = w % CW, w // CW
+                if (_px, _py) not in _gp:
+                    exp_img.append(clr_w)
+                    continue
+                _u, _v, _z, _lw = _gp[(_px, _py)]
+                _ly = _sm.s32(_sm.f2i(_sm.f2b(_lw),
+                                     False, 'RNE')) & 0xFFFF
+                # coord.xy = vcol.xy directly; mip0 4x4: 8.8 coord
+                # floor(d*w*256-128) via the bit-domain ffma chain.
+                _su = _sm.s32(_sm.f2i(
+                    _sm.ffma(_sm.f2b(_u), _w8, _cst), False, 'RDN'))
+                _sv = _sm.s32(_sm.f2i(
+                    _sm.ffma(_sm.f2b(_v), _w8, _cst), False, 'RDN'))
+                _iu, _fu = _su >> 8, _su & 0xFF
+                _iv, _fv = _sv >> 8, _sv & 0xFF
+                _acc = [0, 0, 0, 0]
+                for _e0, _e1, _wu, _wv in (
+                        (_iu, _iv, 256 - _fu, 256 - _fv),
+                        (_iu + 1, _iv, _fu, 256 - _fv),
+                        (_iu, _iv + 1, 256 - _fu, _fv),
+                        (_iu + 1, _iv + 1, _fu, _fv)):
+                    # CLAMP_TO_EDGE (sampler default m=2): corner index
+                    # clamps to [0,dim) — v=0 verts give iv=-1 -> row 0.
+                    _cu = 0 if _e0 < 0 else (TEX_W - 1 if _e0 >= TEX_W
+                                             else _e0)
+                    _cv = 0 if _e1 < 0 else (TEX_H - 1 if _e1 >= TEX_H
+                                             else _e1)
+                    _tw = _atel(_ly, _cu, _cv)
+                    _gw = _wu * _wv
+                    for _c in range(4):
+                        _acc[_c] += _gw * \
+                            ((_tw >> (8 * _c)) & 0xFF) * 0x101
+                _wb = 0
+                for _c in range(4):
+                    _rr = (0xFFFF if _acc[_c] + 0x8000 >= 0x100000000
+                           else (_acc[_c] + 0x8000) >> 16)
+                    _wbb = _sm.fmul(_sm.i2f(_rr, True), _K16)
+                    _wb |= cl_f32_u8(_wbb) << (8 * _c)
+                exp_img.append(_wb)
+        elif is_ftexdpi or is_ftexdpe:
+            # fs_texshpi/fs_texshpe OpImageSampleProjDref{Implicit,
+            # Explicit}Lod(93/94): Coordinate=vec4(u,v,q,q), Dref=dref
+            # -> W_TXJ divides coord.xy by q=vcol.w wave-wide -> (for
+            # the implicit form) quad finite-differences of the DIVIDED
+            # coord -> lambda -> le -> mip; single-mip D16 clamps to 0
+            # for BOTH forms -> mip0 LINEAR PCF at the divided coord,
+            # REPEAT wrap.  Covered pixels only (_gp); helper lanes
+            # feed derivatives but emit nothing and lambda is moot on a
+            # single-mip map.  vcol=(u,v,dref,q); per-vertex dref/q are
+            # rebuilt with the same FMul/FAdd fp32 sequence as the VS.
+            _sm = spirv_model
+            def _dr(_u, _v):
+                _a = _sm.fadd(_sm.f2b(0.15),
+                              _sm.fmul(_sm.f2b(0.6), _sm.f2b(_u)))
+                _b = _sm.fmul(_sm.f2b(0.15), _sm.f2b(_v))
+                return _sm.b2f(_sm.fadd(_a, _b))
+            def _dq(_u, _v):
+                _a = _sm.fadd(_sm.f2b(0.65),
+                              _sm.fmul(_sm.f2b(0.55), _sm.f2b(_u)))
+                _b = _sm.fmul(_sm.f2b(0.30), _sm.f2b(_v))
+                return _sm.b2f(_sm.fadd(_a, _b))
+            _uv4 = [(u, v, _dr(u, v), _dq(u, v)) for (u, v) in TEX_UV]
+            _gp = gfx_grad_pixels(TRI, _uv4, VP, SC, CW, CH, 1, 2)
+            _cst = 0xC3000000                    # -128.0 (linear 8.8)
+            _w8 = _sm.i2f(4 << 8, True)          # mip0 w=h=4 -> 1024.0
+            _K24 = 0x33800000                    # 2^-24 dref weight scale
+            _ONE = 0x3F800000                    # 1.0f
+            _HALF = _sm.f2b(0.5)
+            exp_img = []
+            for w in range(CW * CH):
+                _px, _py = w % CW, w // CW
+                if (_px, _py) not in _gp:
+                    exp_img.append(clr_w)
+                    continue
+                _u, _v, _dref, _q = _gp[(_px, _py)]
+                # W_TXJ: coord.xy /= q (vcol.w) in fp32, wave-wide.
+                _du = _sm.fdiv(_sm.f2b(_u), _sm.f2b(_q))
+                _dv = _sm.fdiv(_sm.f2b(_v), _sm.f2b(_q))
+                _su = _sm.s32(_sm.f2i(
+                    _sm.ffma(_du, _w8, _cst), False, 'RDN'))
+                _sv = _sm.s32(_sm.f2i(
+                    _sm.ffma(_dv, _w8, _cst), False, 'RDN'))
+                _iu, _fu = _su >> 8, _su & 0xFF
+                _iv, _fv = _sv >> 8, _sv & 0xFF
+                # ref16 = round(clamp01(dref)*65535) & 0xFFFF (D16 u16)
+                _ref16 = _sm.s32(_sm.f2i(
+                    _sm.fmul(_sm.f01(_sm.f2b(_dref)), 0x477FFF00),
+                    False, 'RNE')) & 0xFFFF
+                _facc = 0                          # fp32 bits acc
+                for _e0, _e1, _wu, _wv in (
+                        (_iu, _iv, 256 - _fu, 256 - _fv),
+                        (_iu + 1, _iv, _fu, 256 - _fv),
+                        (_iu, _iv + 1, 256 - _fu, _fv),
+                        (_iu + 1, _iv + 1, _fu, _fv)):
+                    _cu = _e0 % 4               # REPEAT mod w=4
+                    _cv = _e1 % 4
+                    _cm = _sm.f_dcmp(_ref16, _dtel(_cu, _cv), 3)
+                    _fc = _ONE if _cm else 0
+                    _wi = _wu * _wv * 256
+                    _wf = _sm.fmul(_sm.i2f(_wi, True), _K24)
+                    _facc = _sm.ffma(_wf, _fc, _facc)
+                _rb = _facc
+                _gb = _sm.fmul(_rb, _HALF)
+                _bb = _sm.fsub(_ONE, _rb)
+                _wb = 0
+                for _cb, _sh in ((_rb, 0), (_gb, 8), (_bb, 16),
+                                 (_ONE, 24)):
+                    _wb |= cl_f32_u8(_cb) << _sh
+                exp_img.append(_wb)
+        elif is_ftexdg:
+            # fs_texshg OpImageDrefGather(97): coord=vec2(vcol.xy),
+            # dref=vcol.z -> gathers the 2x2 footprint around the mip0
+            # texel (CLAMP_TO_EDGE), each of the 4 points runs
+            # f_dcmp(ref16, depth16, LESS_OR_EQUAL) -> wb[gi]=1.0/0.0
+            # with NO filtering.  Single-mip D16 -> mip0; implicit
+            # lambda moot.  Result order (i0,j1),(i1,j1),(i1,j0),(i0,j0)
+            # -> FS out=(g.x, g.y*0.5, 1-g.z, g.w).  Covered pixels
+            # only (_gp); vs_texsh supplies vcol=(u,v,dref,1.0).
+            _sm = spirv_model
+            def _dr(_u, _v):
+                _a = _sm.fadd(_sm.f2b(0.15),
+                              _sm.fmul(_sm.f2b(0.6), _sm.f2b(_u)))
+                _b = _sm.fmul(_sm.f2b(0.15), _sm.f2b(_v))
+                return _sm.b2f(_sm.fadd(_a, _b))
+            _uv4 = [(u, v, _dr(u, v), 1.0) for (u, v) in TEX_UV]
+            _gp = gfx_grad_pixels(TRI, _uv4, VP, SC, CW, CH, 1, 2)
+            _cst = 0xC3000000                    # -128.0 (linear 8.8)
+            _w8 = _sm.i2f(4 << 8, True)          # mip0 w=h=4 -> 1024.0
+            _ONE = 0x3F800000                    # 1.0f
+            _HALF = _sm.f2b(0.5)
+            def _cl(_i):
+                return 0 if _i < 0 else (TEX_W - 1 if _i >= TEX_W else _i)
+            exp_img = []
+            for w in range(CW * CH):
+                _px, _py = w % CW, w // CW
+                if (_px, _py) not in _gp:
+                    exp_img.append(clr_w)
+                    continue
+                _u, _v, _dref, _wv = _gp[(_px, _py)]
+                _su = _sm.s32(_sm.f2i(
+                    _sm.ffma(_sm.f2b(_u), _w8, _cst), False, 'RDN'))
+                _sv = _sm.s32(_sm.f2i(
+                    _sm.ffma(_sm.f2b(_v), _w8, _cst), False, 'RDN'))
+                _iu, _iv = _su >> 8, _sv >> 8
+                # CLAMP_TO_EDGE footprint texels (iu,iu+1)x(iv,iv+1)
+                _u0, _u1 = _cl(_iu), _cl(_iu + 1)
+                _v0, _v1 = _cl(_iv), _cl(_iv + 1)
+                # ref16 = round(clamp01(dref)*65535) & 0xFFFF (D16 u16)
+                _ref16 = _sm.s32(_sm.f2i(
+                    _sm.fmul(_sm.f01(_sm.f2b(_dref)), 0x477FFF00),
+                    False, 'RNE')) & 0xFFFF
+                # pts order -> result components: wb[gi]=1.0/0.0
+                _c = [(_ONE if _sm.f_dcmp(_ref16, _dtel(cu, cv), 3)
+                       else 0)
+                      for (cu, cv) in ((_u0, _v1), (_u1, _v1),
+                                       (_u1, _v0), (_u0, _v0))]
+                _rb = _c[0]
+                _gb = _sm.fmul(_c[1], _HALF)     # g.y * 0.5
+                _bb = _sm.fsub(_ONE, _c[2])      # 1 - g.z
+                _ab = _c[3]
+                _wb = 0
+                for _cb, _sh in ((_rb, 0), (_gb, 8), (_bb, 16),
+                                 (_ab, 24)):
+                    _wb |= cl_f32_u8(_cb) << _sh
+                exp_img.append(_wb)
+        elif is_ftexd:
+            # fs_texshl/fs_texshi OpImageSampleDref{Explicit,Implicit}Lod:
+            # coord = vec3(vcol.xy, vcol.z) -> dref=vcol.z quantized to
+            # ref16 (D16_UNORM u16 domain) -> mip0 LINEAR PCF: each of
+            # the 4 bilinear corners runs f_dcmp(ref16, depth16,
+            # LESS_OR_EQUAL=3) -> fc=1.0/0.0, weighted by gw/65536 into
+            # a compare fraction r; out=(r, r*0.5, 1-r, 1).  Single-mip
+            # D16 -> implicit lambda clamps to mip0, so explicit and
+            # implicit produce the SAME covered-pixel PCF (the implicit
+            # opcode still runs its quad-derivative lambda in RTL).
+            # Covered pixels only via _gp.  vcol = (u, v, dref, 1.0)
+            # per vs_texsh; _gp gives the interpolated tuple.
+            _sm = spirv_model
+            def _dr(_u, _v):
+                # VS: vcol.z = (0.15 + 0.6*u) + 0.15*v, fp32 chain.
+                _a = _sm.fadd(_sm.f2b(0.15),
+                              _sm.fmul(_sm.f2b(0.6), _sm.f2b(_u)))
+                _b = _sm.fmul(_sm.f2b(0.15), _sm.f2b(_v))
+                return _sm.b2f(_sm.fadd(_a, _b))
+            _uv4 = [(u, v, _dr(u, v), 1.0) for (u, v) in TEX_UV]
+            _gp = gfx_grad_pixels(TRI, _uv4, VP, SC, CW, CH, 1, 2)
+            _cst = 0xC3000000                    # -128.0 (linear 8.8)
+            _w8 = _sm.i2f(4 << 8, True)          # mip0 w=h=4 -> 1024.0
+            _K24 = 0x33800000                    # 2^-24 dref weight scale
+            _ONE = 0x3F800000                    # 1.0f
+            _HALF = _sm.f2b(0.5)
+            exp_img = []
+            for w in range(CW * CH):
+                _px, _py = w % CW, w // CW
+                if (_px, _py) not in _gp:
+                    exp_img.append(clr_w)
+                    continue
+                _u, _v, _dref, _wv = _gp[(_px, _py)]
+                # ref16 = round(clamp01(dref)*65535) & 0xFFFF (D16 u16)
+                _ref16 = _sm.s32(_sm.f2i(
+                    _sm.fmul(_sm.f01(_sm.f2b(_dref)), 0x477FFF00),
+                    False, 'RNE')) & 0xFFFF
+                _su = _sm.s32(_sm.f2i(
+                    _sm.ffma(_sm.f2b(_u), _w8, _cst), False, 'RDN'))
+                _sv = _sm.s32(_sm.f2i(
+                    _sm.ffma(_sm.f2b(_v), _w8, _cst), False, 'RDN'))
+                _iu, _fu = _su >> 8, _su & 0xFF
+                _iv, _fv = _sv >> 8, _sv & 0xFF
+                _facc = 0                          # fp32 bits acc
+                for _e0, _e1, _wu, _wv in (
+                        (_iu, _iv, 256 - _fu, 256 - _fv),
+                        (_iu + 1, _iv, _fu, 256 - _fv),
+                        (_iu, _iv + 1, 256 - _fu, _fv),
+                        (_iu + 1, _iv + 1, _fu, _fv)):
+                    # CLAMP_TO_EDGE corner index -> [0,dim)
+                    _cu = 0 if _e0 < 0 else (TEX_W - 1 if _e0 >= TEX_W
+                                             else _e0)
+                    _cv = 0 if _e1 < 0 else (TEX_H - 1 if _e1 >= TEX_H
+                                             else _e1)
+                    # f_dcmp(ref16, depth16, LESS_OR_EQUAL=3): ref<=dep
+                    _cm = _sm.f_dcmp(_ref16, _dtel(_cu, _cv), 3)
+                    _fc = _ONE if _cm else 0
+                    # wi = gw*(256-fw), fw=0 single-mip -> gw*256;
+                    # wf = i2f(wi)*2^-24 normalises corner weight /65536
+                    _wi = _wu * _wv * 256
+                    _wf = _sm.fmul(_sm.i2f(_wi, True), _K24)
+                    _facc = _sm.ffma(_wf, _fc, _facc)
+                # r = facc (fp32 fraction 0..1); out=(r,r*0.5,1-r,1)
+                _rb = _facc
+                _gb = _sm.fmul(_rb, _HALF)
+                _bb = _sm.fsub(_ONE, _rb)
+                _wb = 0
+                for _cb, _sh in ((_rb, 0), (_gb, 8), (_bb, 16),
+                                 (_ONE, 24)):
+                    _wb |= cl_f32_u8(_cb) << _sh
+                exp_img.append(_wb)
+        elif is_ftexfetch:
+            # fs_texfetch OpImageFetch(95): coord=ivec2(gl_FragCoord.xy)
+            # &3 -> integer texel (px&3,py&3) on the 4x4
+            # R8G8B8A8_UINT map, lod=0, NO filtering/wrap — bounds check
+            # only (always in-range for the tiled coord).  Decode
+            # fc=[b0,b1,b2,b3] raw uint8 -> uvec4; FS does vec4(t)/255
+            # -> per-channel fdiv(i2f(u),255.0)->u8.  Coverage is the
+            # triangle footprint (gl_FragCoord builtin, not a varying).
+            _sm = spirv_model
+            _cov = gfx_tri_coverage(TRI, VP, SC, CW, CH,
+                                    front_ccw=1, cull=2)
+            _I255 = _sm.f2b(255.0)
+            exp_img = []
+            for w in range(CW * CH):
+                _px, _py = w % CW, w // CW
+                if (_px, _py) not in _cov:
+                    exp_img.append(clr_w)
+                    continue
+                _tw = _utel(_px & 3, _py & 3)
+                _wb = 0
+                for _c in range(4):
+                    _u = (_tw >> (8 * _c)) & 0xFF
+                    _fc = _sm.fdiv(_sm.i2f(_u, True), _I255)
+                    _wb |= cl_f32_u8(_fc) << (8 * _c)
+                exp_img.append(_wb)
+        elif is_ftexu32:
+            # fs_texfetch32 OpImageFetch(95) on R32_UINT: coord=
+            # ivec2(gl_FragCoord.xy)&3 -> integer texel (px&3,py&3),
+            # lod=0, NO filtering/wrap.  tx_decode fmt10 packs the u32
+            # into fc[0] (fc[3]=1) -> uvec4(u32,0,0,1); FS spreads the
+            # u32's 4 bytes into RGBA/255 -> per-channel
+            # fdiv(i2f(byte),255)->u8.  Byte c of _u32tel -> channel c.
+            _sm = spirv_model
+            _cov = gfx_tri_coverage(TRI, VP, SC, CW, CH,
+                                    front_ccw=1, cull=2)
+            _I255 = _sm.f2b(255.0)
+            exp_img = []
+            for w in range(CW * CH):
+                _px, _py = w % CW, w // CW
+                if (_px, _py) not in _cov:
+                    exp_img.append(clr_w)
+                    continue
+                _tw = _u32tel(_px & 3, _py & 3)
+                _wb = 0
+                for _c in range(4):
+                    _u = (_tw >> (8 * _c)) & 0xFF
+                    _fc = _sm.fdiv(_sm.i2f(_u, True), _I255)
+                    _wb |= cl_f32_u8(_fc) << (8 * _c)
+                exp_img.append(_wb)
+        elif is_ftexrgba32:
+            # fs_tex_rgba32 OpImageFetch(95) on R32G32B32A32_UINT:
+            # coord=ivec2(gl_FragCoord.xy)&3 -> integer texel, lod=0,
+            # NO filtering/wrap.  tx_decode fmt11 packs 4 u32 channels
+            # (by[4c..4c+3] LE) -> uvec4(r,g,b,a); FS does
+            # vec4(float(t)/2^32) -> per-channel fdiv(i2f(u32),2^32)
+            # ->u8.  _rgba32tel returns the 4 channel u32 words.
+            _sm = spirv_model
+            _cov = gfx_tri_coverage(TRI, VP, SC, CW, CH,
+                                    front_ccw=1, cull=2)
+            _I32 = _sm.f2b(4294967296.0)        # 2^32 (exact fp32)
+            exp_img = []
+            for w in range(CW * CH):
+                _px, _py = w % CW, w // CW
+                if (_px, _py) not in _cov:
+                    exp_img.append(clr_w)
+                    continue
+                _tw = _rgba32tel(_px & 3, _py & 3)
+                _wb = 0
+                for _c in range(4):
+                    _fc = _sm.fdiv(_sm.i2f(_tw[_c], True), _I32)
+                    _wb |= cl_f32_u8(_fc) << (8 * _c)
+                exp_img.append(_wb)
+        elif is_ftexpi:
+            # fs_texproji OpImageSampleProjImplicitLod: coord =
+            # (vcol.xy, vcol.z) -> W_TXJ divides xy/z wave-wide ->
+            # quad finite-differences the DIVIDED coord -> lambda ->
+            # le -> m0/m1/fw -> per-mip 8.8 bilinear + u16 trilinear,
+            # REPEAT wrap over the 3-mip image.  Identical tail to
+            # ftexi; only the coord source differs — each lane's coord
+            # is (fdiv(u,z), fdiv(v,z)) of the interpolated vcol.
+            _sm = spirv_model
+            def _zw(_u, _v):
+                _zu = _sm.b2f(_sm.fadd(_sm.f2b(0.4),
+                                       _sm.fmul(_sm.f2b(1.4),
+                                                _sm.f2b(_u))))
+                _wv = _sm.b2f(_sm.fadd(_sm.f2b(0.3),
+                                       _sm.fmul(_sm.f2b(1.0),
+                                                _sm.f2b(_v))))
+                return _zu, _wv
+            _uv4 = [(u, v, *_zw(u, v)) for (u, v) in TEX_UV]
+            _gp = gfx_grad_pixels(TRI, _uv4, VP, SC, CW, CH, 1, 2)
+            _pos = set()
+            for (_px, _py) in _gp:
+                _qx, _qy = _px & ~1, _py & ~1
+                for _k in range(4):
+                    _pos.add((_qx + (_k & 1), _qy + (_k >> 1)))
+            _interp = gfx_interp_map(TRI, _uv4, VP, SC, _pos)
+            # per-lane DIVIDED coord bits: (fdiv(u,z), fdiv(v,z))
+            _dc = {}
+            for _p in _pos:
+                _u, _v, _z, _w2 = _interp[_p]
+                _dc[_p] = (_sm.fdiv(_sm.f2b(_u), _sm.f2b(_z)),
+                           _sm.fdiv(_sm.f2b(_v), _sm.f2b(_z)))
+            _wf = _sm.i2f(4, True)              # mip0 w=h=4 -> 4.0
+            _hf = _sm.i2f(4, True)
+            _cst = 0xC3000000                    # -128.0 (linear 8.8)
+            _K16 = 0x37800080                    # 1/65535 (UNORM finish)
+            exp_img = []
+            for w in range(CW * CH):
+                _px, _py = w % CW, w // CW
+                if (_px, _py) not in _gp:
+                    exp_img.append(clr_w)
+                    continue
+                _qx, _qy = _px & ~1, _py & ~1
+                _li = (_px & 1) + 2 * (_py & 1)
+                _vc = []
+                for _k in range(4):
+                    _lx = _qx + (_k & 1)
+                    _ly = _qy + (_k >> 1)
+                    _vc.append(_dc[(_lx, _ly)])
+                _ax = _sm.fmul(_sm.fsub(_vc[_li | 1][0],
+                                        _vc[_li & ~1][0]), _wf)
+                _bx = _sm.fmul(_sm.fsub(_vc[_li | 1][1],
+                                        _vc[_li & ~1][1]), _hf)
+                _ay = _sm.fmul(_sm.fsub(_vc[_li | 2][0],
+                                        _vc[_li & ~2][0]), _wf)
+                _by = _sm.fmul(_sm.fsub(_vc[_li | 2][1],
+                                        _vc[_li & ~2][1]), _hf)
+                _dx2 = _sm.ffma(_bx, _bx, _sm.fmul(_ax, _ax))
+                _dy2 = _sm.ffma(_by, _by, _sm.fmul(_ay, _ay))
+                _rho2 = _sm.fp_minmax(_dx2, _dy2, True)
+                _lg = _sm.sfu_tables.sfu_eval(30,
+                                              [[_rho2, 0, 0, 0]])[0]
+                _lam = _sm.fmul(_lg, 0x3F000000)
+                _le = _sm.s32(_sm.f2i(_sm.ffma(_lam, 0x41800000, 0),
+                                      False, 'RDN'))
+                _le = min(max(_le, 0), 64)
+                _m0 = min(_le >> 4, 2)
+                _m1 = min(_m0 + 1, 2)
+                _fw = (_le & 0xF) << 4
+                _tril = _m1 != _m0
+                _ub, _vb = _dc[(_px, _py)]
+                _acc = [[0] * 4, [0] * 4]
+                for _slot, _m in (((0, _m0), (1, _m1)) if _tril
+                                  else ((0, _m0),)):
+                    _wm = MIP_DIM[_m]
+                    _hm = MIP_DIM[_m]
+                    _su = _sm.s32(_sm.f2i(
+                        _sm.ffma(_ub, _sm.i2f(_wm << 8, True), _cst),
+                        False, 'RDN'))
+                    _sv = _sm.s32(_sm.f2i(
+                        _sm.ffma(_vb, _sm.i2f(_hm << 8, True), _cst),
+                        False, 'RDN'))
+                    _iu, _fu = _su >> 8, _su & 0xFF
+                    _iv, _fv = _sv >> 8, _sv & 0xFF
+                    for _e0, _e1, _wu, _wv in (
+                            (_iu, _iv, 256 - _fu, 256 - _fv),
+                            (_iu + 1, _iv, _fu, 256 - _fv),
+                            (_iu, _iv + 1, 256 - _fu, _fv),
+                            (_iu + 1, _iv + 1, _fu, _fv)):
+                        _cu = _e0 % _wm          # REPEAT (m=0)
+                        _cv = _e1 % _hm
+                        _tw = _mtel(_m, _cu, _cv)
+                        _gw = _wu * _wv
+                        for _c in range(4):
+                            _acc[_slot][_c] += _gw * \
+                                ((_tw >> (8 * _c)) & 0xFF) * 0x101
+                _wb = 0
+                for _c in range(4):
+                    _r0 = (0xFFFF if _acc[0][_c] + 0x8000 >= 0x100000000
+                           else (_acc[0][_c] + 0x8000) >> 16)
+                    if _tril:
+                        _r1 = (0xFFFF if _acc[1][_c] + 0x8000
+                               >= 0x100000000
+                               else (_acc[1][_c] + 0x8000) >> 16)
+                        _rr = (_r0 * (256 - _fw) + _r1 * _fw + 128) >> 8
+                    else:
+                        _rr = _r0
+                    _wbb = _sm.fmul(_sm.i2f(_rr, True), _K16)
+                    _wb |= cl_f32_u8(_wbb) << (8 * _c)
+                exp_img.append(_wb)
         else:
+            # is_stdf/is_stf: a depth-NEVER or stencil-compare fail sets
+            # help_q -> the fragment is discarded before the colour write
+            # (the matching stencil op still updates the stencil byte) ->
+            # the whole colour attachment stays at clr_w.
             exp_img = [out_w if (w % CW, w // CW) in cov and
-                       not ((is_kill and
+                       not (is_stdf or is_stf or
+                            (is_kill and
                              ((((w % CW) >> 3) + ((w // CW) >> 3)) & 1)) or
                             (is_killfn and ((w % CW) & 1)))
                        else clr_w
@@ -11874,6 +13414,61 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                      [0x00000000 if (w % CW, w // CW) in cov
                       else 0x3F000000 for w in range(CW * CH)]
                      if is_depth else None)
+        # stencil oracle: the D24S8 readback (depth aspect, single plane)
+        # returns the packed {stencil[31:24], depth_unorm24[23:0]} word.
+        # This session uses compareOp=ALWAYS + passOp=REPLACE(ref=0x5A) so
+        # every covered fragment takes the pass branch -> stencil=0x5A and
+        # depth=f_f32_u24(zc_w)=u24(0.0)=0; uncovered keeps the CLEAR
+        # {stencil=0, depth=u24(0.5)=0x800000}.  -> 0x5A000000 / 0x00800000.
+        exp_ds = None
+        if is_stencil:
+            # _stn_clr = the stencil byte the CLEAR leaves in uncovered
+            # pixels (0 for every session but is_stclr, which clears 0x33).
+            _stn_clr = 0x33 if is_stclr else 0
+            if is_stdf:
+                # depthFailOp=REPLACE(ref 0xA5) under depthCompareOp=NEVER:
+                # stencil compare ALWAYS passes, depth always fails -> the
+                # S_DZ_C2 depthFail branch writes ref to stencil; depth is
+                # never written so it stays at the CLEAR u24(0.5)=0x800000
+                # for BOTH covered and uncovered pixels.
+                _stn_cov = 0xA5
+                _d_cov = cl_f32_u24(f32b(0.5))   # depth stays at CLEAR
+                _d_clr = cl_f32_u24(f32b(0.5))
+            elif is_stf:
+                # failOp=REPLACE(ref 0xC3): stencil compareOp=EQUAL vs the
+                # cleared 0 fails -> S_DZ_C2 stencil-fail branch writes ref
+                # and short-circuits before depth -> depth stays CLEAR too.
+                _stn_cov = 0xC3
+                _d_cov = cl_f32_u24(f32b(0.5))   # depth stays at CLEAR
+                _d_clr = cl_f32_u24(f32b(0.5))
+            elif is_stinv:
+                # passOp=INVERT: f_sop ~oldb on the cleared stencil 0 ->
+                # 0xFF; normal pass branch also writes frag depth 0.0.
+                _stn_cov = 0xFF
+                _d_cov = cl_f32_u24(f32b(0.0))   # covered frag depth 0.0
+                _d_clr = cl_f32_u24(f32b(0.5))   # CLEAR depth 0.5 -> u24
+            elif is_stclr:
+                # NONZERO clear 0x33 + compareOp=EQUAL ref 0x33 passes ->
+                # passOp=INCR_SAT turns 0x33->0x34; depth-ALWAYS writes
+                # frag depth 0.0.  Uncovered keeps {0x33, u24(0.5)}.
+                _stn_cov = 0x34
+                _d_cov = cl_f32_u24(f32b(0.0))   # covered frag depth 0.0
+                _d_clr = cl_f32_u24(f32b(0.5))   # CLEAR depth 0.5 -> u24
+            elif is_stmsk:
+                # writeMask=0xF0, compareMask=0xFF, passOp=REPLACE ref=0xFF:
+                # f_sop (oldb&~mask)|(n&mask) on cleared 0 -> only the high
+                # nibble takes ref -> 0xF0 (a 0xFF mask would give 0xFF).
+                _stn_cov = 0xF0
+                _d_cov = cl_f32_u24(f32b(0.0))   # covered frag depth 0.0
+                _d_clr = cl_f32_u24(f32b(0.5))   # CLEAR depth 0.5 -> u24
+            else:
+                _stn_cov = 0x5A
+                _d_cov = cl_f32_u24(f32b(0.0))   # covered frag depth 0.0
+                _d_clr = cl_f32_u24(f32b(0.5))   # CLEAR depth 0.5 -> u24
+            exp_ds = [((_stn_cov << 24) | _d_cov)
+                      if (w % CW, w // CW) in cov
+                      else ((_stn_clr << 24) | _d_clr)
+                      for w in range(CW * CH)]
         # evidence: ascii-art coverage map + a few sampled rows go to
         # the gen log (and doc['steps'])
         art = []
@@ -11959,7 +13554,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             ('vkCreateImage', dict(
                 device=X['dev'],
                 pCreateInfo=st('VkImageCreateInfo',
-                    flags=0, imageType=1, format=126,
+                    flags=0, imageType=1,
+                    format=(129 if is_stencil else 126),
                     extent=st('VkExtent3D', width=CW, height=CH,
                               depth=1),
                     mipLevels=1, arrayLayers=1, samples=1, tiling=0,
@@ -11972,7 +13568,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             ('vkCreateImageView', dict(
                 device=X['dev'],
                 pCreateInfo=st('VkImageViewCreateInfo',
-                    flags=0, image=X['dimg'], viewType=1, format=126,
+                    flags=0, image=X['dimg'], viewType=1,
+                    format=(129 if is_stencil else 126),
                     components=st('VkComponentMapping',
                                   r=0, g=0, b=0, a=0),
                     subresourceRange=st('VkImageSubresourceRange',
@@ -11996,45 +13593,257 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             ('vkBindBufferMemory', dict(
                 device=X['dev'], buffer=X['rb2'], memory=X['rb2mem'],
                 memoryOffset=0)),
-        ] if is_depth else []) + [
+        ] if is_ds else []) + ([
+            # mrt second colour attachment: img2/view2/imem2 mirror the
+            # primary colour image (format 37 RGBA8, usage 0x11,
+            # aspectMask=1 colour) and rb3/rb3mem mirror the readback
+            # buffer.  imem2 is 0x10000 like imem (device image memory
+            # is generously sized); rb3mem is 0x4000 like rmem/rb2mem.
+            ('vkAllocateMemory', dict(
+                device=X['dev'],
+                pAllocateInfo=st('VkMemoryAllocateInfo',
+                                 allocationSize=0x10000,
+                                 memoryTypeIndex=0, pNext=[]),
+                pMemory=X['imem2'])),
+            ('vkCreateImage', dict(
+                device=X['dev'],
+                pCreateInfo=st('VkImageCreateInfo',
+                    flags=0, imageType=1, format=37,
+                    extent=st('VkExtent3D', width=CW, height=CH,
+                              depth=1),
+                    mipLevels=1, arrayLayers=1, samples=1, tiling=0,
+                    usage=0x11, sharingMode=0, queueFamilyIndexCount=0,
+                    pQueueFamilyIndices=[], initialLayout=0),
+                pImage=X['img2'])),
+            ('vkBindImageMemory', dict(
+                device=X['dev'], image=X['img2'], memory=X['imem2'],
+                memoryOffset=0)),
+            ('vkCreateImageView', dict(
+                device=X['dev'],
+                pCreateInfo=st('VkImageViewCreateInfo',
+                    flags=0, image=X['img2'], viewType=1, format=37,
+                    components=st('VkComponentMapping',
+                                  r=0, g=0, b=0, a=0),
+                    subresourceRange=st('VkImageSubresourceRange',
+                                        aspectMask=1, baseMipLevel=0,
+                                        levelCount=1, baseArrayLayer=0,
+                                        layerCount=1)),
+                pView=X['view2'])),
+            ('vkAllocateMemory', dict(
+                device=X['dev'],
+                pAllocateInfo=st('VkMemoryAllocateInfo',
+                                 allocationSize=0x4000,
+                                 memoryTypeIndex=1, pNext=[]),
+                pMemory=X['rb3mem'])),
+            ('vkCreateBuffer', dict(
+                device=X['dev'],
+                pCreateInfo=st('VkBufferCreateInfo', size=0x4000,
+                               usage=0x2, sharingMode=0,
+                               queueFamilyIndexCount=0,
+                               pQueueFamilyIndices=[]),
+                pBuffer=X['rb3'])),
+            ('vkBindBufferMemory', dict(
+                device=X['dev'], buffer=X['rb3'], memory=X['rb3mem'],
+                memoryOffset=0)),
+        ] if is_mrt else []) + ([
+            # mrt3 third colour attachment: img3/view3/imem3 mirror img2
+            # (format 37 RGBA8, usage 0x11, aspectMask=1) and rb4/rb4mem
+            # mirror rb3.  RES_BLOB0 +10/+11 (imem3/rb4mem) — +8/+9 are
+            # the general-path ms/dl reservations, +16/+17/+24 special.
+            ('vkAllocateMemory', dict(
+                device=X['dev'],
+                pAllocateInfo=st('VkMemoryAllocateInfo',
+                                 allocationSize=0x10000,
+                                 memoryTypeIndex=0, pNext=[]),
+                pMemory=X['imem3'])),
+            ('vkCreateImage', dict(
+                device=X['dev'],
+                pCreateInfo=st('VkImageCreateInfo',
+                    flags=0, imageType=1, format=37,
+                    extent=st('VkExtent3D', width=CW, height=CH,
+                              depth=1),
+                    mipLevels=1, arrayLayers=1, samples=1, tiling=0,
+                    usage=0x11, sharingMode=0, queueFamilyIndexCount=0,
+                    pQueueFamilyIndices=[], initialLayout=0),
+                pImage=X['img3'])),
+            ('vkBindImageMemory', dict(
+                device=X['dev'], image=X['img3'], memory=X['imem3'],
+                memoryOffset=0)),
+            ('vkCreateImageView', dict(
+                device=X['dev'],
+                pCreateInfo=st('VkImageViewCreateInfo',
+                    flags=0, image=X['img3'], viewType=1, format=37,
+                    components=st('VkComponentMapping',
+                                  r=0, g=0, b=0, a=0),
+                    subresourceRange=st('VkImageSubresourceRange',
+                                        aspectMask=1, baseMipLevel=0,
+                                        levelCount=1, baseArrayLayer=0,
+                                        layerCount=1)),
+                pView=X['view3'])),
+            ('vkAllocateMemory', dict(
+                device=X['dev'],
+                pAllocateInfo=st('VkMemoryAllocateInfo',
+                                 allocationSize=0x4000,
+                                 memoryTypeIndex=1, pNext=[]),
+                pMemory=X['rb4mem'])),
+            ('vkCreateBuffer', dict(
+                device=X['dev'],
+                pCreateInfo=st('VkBufferCreateInfo', size=0x4000,
+                               usage=0x2, sharingMode=0,
+                               queueFamilyIndexCount=0,
+                               pQueueFamilyIndices=[]),
+                pBuffer=X['rb4'])),
+            ('vkBindBufferMemory', dict(
+                device=X['dev'], buffer=X['rb4'], memory=X['rb4mem'],
+                memoryOffset=0)),
+        ] if is_mrt3 else []) + ([
+            # mrt4 fourth colour attachment: img4/view4/imem4 mirror img3
+            # and rb5/rb5mem mirror rb4.  RES_BLOB0 +12/+13 (imem4/rb5mem)
+            # — last free pair before the +16/+17/+24 special slots.
+            ('vkAllocateMemory', dict(
+                device=X['dev'],
+                pAllocateInfo=st('VkMemoryAllocateInfo',
+                                 allocationSize=0x10000,
+                                 memoryTypeIndex=0, pNext=[]),
+                pMemory=X['imem4'])),
+            ('vkCreateImage', dict(
+                device=X['dev'],
+                pCreateInfo=st('VkImageCreateInfo',
+                    flags=0, imageType=1, format=37,
+                    extent=st('VkExtent3D', width=CW, height=CH,
+                              depth=1),
+                    mipLevels=1, arrayLayers=1, samples=1, tiling=0,
+                    usage=0x11, sharingMode=0, queueFamilyIndexCount=0,
+                    pQueueFamilyIndices=[], initialLayout=0),
+                pImage=X['img4'])),
+            ('vkBindImageMemory', dict(
+                device=X['dev'], image=X['img4'], memory=X['imem4'],
+                memoryOffset=0)),
+            ('vkCreateImageView', dict(
+                device=X['dev'],
+                pCreateInfo=st('VkImageViewCreateInfo',
+                    flags=0, image=X['img4'], viewType=1, format=37,
+                    components=st('VkComponentMapping',
+                                  r=0, g=0, b=0, a=0),
+                    subresourceRange=st('VkImageSubresourceRange',
+                                        aspectMask=1, baseMipLevel=0,
+                                        levelCount=1, baseArrayLayer=0,
+                                        layerCount=1)),
+                pView=X['view4'])),
+            ('vkAllocateMemory', dict(
+                device=X['dev'],
+                pAllocateInfo=st('VkMemoryAllocateInfo',
+                                 allocationSize=0x4000,
+                                 memoryTypeIndex=1, pNext=[]),
+                pMemory=X['rb5mem'])),
+            ('vkCreateBuffer', dict(
+                device=X['dev'],
+                pCreateInfo=st('VkBufferCreateInfo', size=0x4000,
+                               usage=0x2, sharingMode=0,
+                               queueFamilyIndexCount=0,
+                               pQueueFamilyIndices=[]),
+                pBuffer=X['rb5'])),
+            ('vkBindBufferMemory', dict(
+                device=X['dev'], buffer=X['rb5'], memory=X['rb5mem'],
+                memoryOffset=0)),
+        ] if is_mrt4 else []) + [
             ('vkCreateRenderPass', dict(
                 device=X['dev'],
                 pCreateInfo=st('VkRenderPassCreateInfo',
-                    flags=0, attachmentCount=2 if is_depth else 1,
+                    flags=0,
+                    attachmentCount=(n_col
+                                     + (1 if is_ds else 0)),
                     pAttachments=[st('VkAttachmentDescription',
                         flags=0, format=37, samples=1,
                         loadOp=1, storeOp=0,
                         stencilLoadOp=2, stencilStoreOp=2,
                         initialLayout=0, finalLayout=5)] + ([
                         st('VkAttachmentDescription',
-                        flags=0, format=126, samples=1,
+                        flags=0, format=37, samples=1,
                         loadOp=1, storeOp=0,
                         stencilLoadOp=2, stencilStoreOp=2,
                         initialLayout=0, finalLayout=5)]
-                        if is_depth else []),
-                    subpassCount=1,
+                        if is_mrt else []) + ([
+                        st('VkAttachmentDescription',
+                        flags=0, format=37, samples=1,
+                        loadOp=1, storeOp=0,
+                        stencilLoadOp=2, stencilStoreOp=2,
+                        initialLayout=0, finalLayout=5)]
+                        if is_mrt3 else []) + ([
+                        st('VkAttachmentDescription',
+                        flags=0, format=37, samples=1,
+                        loadOp=1, storeOp=0,
+                        stencilLoadOp=2, stencilStoreOp=2,
+                        initialLayout=0, finalLayout=5)]
+                        if is_mrt4 else []) + ([
+                        # depth (126) or depth-stencil D24S8 (129): the
+                        # stencil load/store ops are only meaningful on the
+                        # packed format — CLEAR the stencil plane and STORE
+                        # it so the S_DZ_C2 pass/fail/dfail update commits.
+                        st('VkAttachmentDescription',
+                        flags=0, format=(129 if is_stencil else 126),
+                        samples=1,
+                        loadOp=1, storeOp=0,
+                        stencilLoadOp=(1 if is_stencil else 2),
+                        stencilStoreOp=(1 if is_stencil else 2),
+                        initialLayout=0, finalLayout=5)]
+                        if is_ds else []),
+                    subpassCount=(2 if is_ms else 1),
                     pSubpasses=[st('VkSubpassDescription',
                         flags=0, pipelineBindPoint=0,
                         inputAttachmentCount=0, pInputAttachments=[],
-                        colorAttachmentCount=1,
+                        colorAttachmentCount=n_col,
                         pColorAttachments=[st('VkAttachmentReference',
-                                              attachment=0, layout=5)],
+                                              attachment=0, layout=5)] + ([
+                            st('VkAttachmentReference',
+                               attachment=1, layout=5)]
+                            if is_mrt else []) + ([
+                            st('VkAttachmentReference',
+                               attachment=2, layout=5)]
+                            if is_mrt3 else []) + ([
+                            st('VkAttachmentReference',
+                               attachment=3, layout=5)]
+                            if is_mrt4 else []),
                         pResolveAttachments=[],
                         pDepthStencilAttachment=(
                             st('VkAttachmentReference',
-                               attachment=1, layout=5)
-                            if is_depth else None),
+                               attachment=n_col,
+                               layout=5)
+                            if is_ds else None),
                         preserveAttachmentCount=0,
-                        pPreserveAttachments=[])],
+                        pPreserveAttachments=[])] + ([
+                        # msub second subpass — identical colour-only
+                        # description (is_ms excludes ds/mrt so the refs
+                        # are just attachment 0); both subpasses target
+                        # the same colour attachment so the draw in
+                        # subpass 1 composites onto the subpass-0 clear.
+                        st('VkSubpassDescription',
+                           flags=0, pipelineBindPoint=0,
+                           inputAttachmentCount=0, pInputAttachments=[],
+                           colorAttachmentCount=n_col,
+                           pColorAttachments=[st('VkAttachmentReference',
+                                                 attachment=0, layout=5)],
+                           pResolveAttachments=[],
+                           pDepthStencilAttachment=None,
+                           preserveAttachmentCount=0,
+                           pPreserveAttachments=[])]
+                        if is_ms else []),
                     dependencyCount=0, pDependencies=[]),
                 pRenderPass=X['rp'])),
             ('vkCreateFramebuffer', dict(
                 device=X['dev'],
                 pCreateInfo=st('VkFramebufferCreateInfo',
                     flags=0, renderPass=X['rp'],
-                    attachmentCount=2 if is_depth else 1,
-                    pAttachments=[X['view']] + ([X['dview']]
-                                                if is_depth else []),
+                    attachmentCount=(n_col
+                                     + (1 if is_ds else 0)),
+                    pAttachments=[X['view']] + ([X['view2']]
+                                                if is_mrt else []) + (
+                                                [X['view3']]
+                                                if is_mrt3 else []) + (
+                                                [X['view4']]
+                                                if is_mrt4 else []) + (
+                                                [X['dview']]
+                                                if is_ds else []),
                     width=CW, height=CH, layers=1),
                 pFramebuffer=X['fb'])),
             ('vkCreateShaderModule', dict(
@@ -12166,31 +13975,79 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         depthBiasSlopeFactor=f32b(0.0),
                         lineWidth=f32b(1.0)),
                     pMultisampleState=None,
+                    # stencil op select across the session variants — every
+                    # field reduces to the original zeros / compareOp=ALWAYS /
+                    # reference=0 for non-stencil sessions (byte-identical).
+                    # _stf* locals are bound beside the is_st* flags above.
                     pDepthStencilState=(
+                        # stencil needs the S_DZ_RD->C2 path, which only
+                        # runs when depth_test is on — force it plus an
+                        # ALWAYS depth compare so every covered fragment
+                        # reaches the stencil pass branch.  front==back so
+                        # the result is winding-independent.
                         st('VkPipelineDepthStencilStateCreateInfo',
-                           depthTestEnable=1 if dp_test_on else 0,
+                           depthTestEnable=(1 if (is_stencil or dp_test_on)
+                                            else 0),
                            depthWriteEnable=0 if is_dw0 else 1,
-                           depthCompareOp=dp_op,
+                           depthCompareOp=(0 if is_stdf else
+                                          (7 if is_stencil else dp_op)),
                            depthBoundsTestEnable=1 if is_dbnd else 0,
-                           stencilTestEnable=0,
-                           front=st('VkStencilOpState', failOp=0,
-                                    passOp=0, depthFailOp=0,
-                                    compareOp=7, compareMask=0,
-                                    writeMask=0, reference=0),
-                           back=st('VkStencilOpState', failOp=0,
-                                   passOp=0, depthFailOp=0,
-                                   compareOp=7, compareMask=0,
-                                   writeMask=0, reference=0),
+                           stencilTestEnable=1 if is_stencil else 0,
+                           front=st('VkStencilOpState',
+                                    failOp=_stf_fail, passOp=_stf_pass,
+                                    depthFailOp=_stf_dfail,
+                                    compareOp=_stf_cmp,
+                                    compareMask=_stf_cmask,
+                                    writeMask=_stf_wmask,
+                                    reference=_stf_ref),
+                           back=st('VkStencilOpState',
+                                   failOp=_stf_fail, passOp=_stf_pass,
+                                   depthFailOp=_stf_dfail,
+                                   compareOp=_stf_cmp,
+                                   compareMask=_stf_cmask,
+                                   writeMask=_stf_wmask,
+                                   reference=_stf_ref),
                            minDepthBounds=f32b(0.0),
                            maxDepthBounds=f32b(0.5 if is_dbnd else 1.0))
-                        if is_depth else None),
+                        if is_ds else None),
                     pColorBlendState=(
                         st('VkPipelineColorBlendStateCreateInfo',
                            flags=0,
-                           logicOpEnable=1 if is_lop else 0,
-                           logicOp=lop_op if is_lop else 0,
-                           attachmentCount=1,
-                           pAttachments=[st(
+                           logicOpEnable=(1 if (is_lop or is_mrtlop)
+                                          else 0),
+                           logicOp=(lop_op if is_lop else
+                                    6 if is_mrtlop else 0),
+                           attachmentCount=(n_col if is_mrtlop else
+                                            (2 if is_mrtblend else 1)),
+                           pAttachments=(
+                               # mrtlop: logicOp XOR on EVERY attachment —
+                               # blendEnable=0 (logicOp replaces blend);
+                               # n_col identical entries.
+                               [st('VkPipelineColorBlendAttachmentState',
+                                   blendEnable=0, srcColorBlendFactor=1,
+                                   dstColorBlendFactor=0,
+                                   colorBlendOp=0, srcAlphaBlendFactor=1,
+                                   dstAlphaBlendFactor=0, alphaBlendOp=0,
+                                   colorWriteMask=cwm_mask)
+                                for _ in range(n_col)]
+                               if is_mrtlop else
+                               # mrtb: att0 blend DISABLED (raw o0), att1
+                               # blend ENABLED SRC_ALPHA/1-SRC_ALPHA —
+                               # proves dr_q.blend[at_q] is per-attachment.
+                               [st('VkPipelineColorBlendAttachmentState',
+                                   blendEnable=0, srcColorBlendFactor=1,
+                                   dstColorBlendFactor=0,
+                                   colorBlendOp=0, srcAlphaBlendFactor=1,
+                                   dstAlphaBlendFactor=0, alphaBlendOp=0,
+                                   colorWriteMask=cwm_mask),
+                                st('VkPipelineColorBlendAttachmentState',
+                                   blendEnable=1, srcColorBlendFactor=6,
+                                   dstColorBlendFactor=7,
+                                   colorBlendOp=0, srcAlphaBlendFactor=6,
+                                   dstAlphaBlendFactor=7, alphaBlendOp=0,
+                                   colorWriteMask=cwm_mask)]
+                               if is_mrtblend else
+                               [st(
                                'VkPipelineColorBlendAttachmentState',
                                blendEnable=0 if is_bloff else 1,
                                srcColorBlendFactor=(bfac[0] if is_bfac
@@ -12203,18 +14060,20 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                dstAlphaBlendFactor=(bfac[3] if is_bfac
                                                     else 1 if is_bop else 7),
                                alphaBlendOp=bop_op if is_bop else 0,
-                               colorWriteMask=cwm_mask)],
+                               colorWriteMask=cwm_mask)]),
                            blendConstants=([f32b(_BLC[c]) for c in range(4)]
                                            if is_bfac_const
                                            else [0, 0, 0, 0]))
                         if is_blend or is_lop or is_bop or is_bfac
+                        or is_mrtblend or is_mrtlop
                         else None),
                     pDynamicState=(
                         None if is_statvp else
                         st('VkPipelineDynamicStateCreateInfo',
                            flags=0, dynamicStateCount=2,
                            pDynamicStates=[0, 1])),
-                    layout=X['pl'], renderPass=X['rp'], subpass=0,
+                    layout=X['pl'], renderPass=X['rp'],
+                    subpass=(1 if is_ms else 0),
                     basePipelineHandle=0, basePipelineIndex=0)],
                 pPipelines=[X['gp']])),
             ('vkCreateBuffer', dict(
@@ -12254,6 +14113,17 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                  commandPool=X['cp'], level=0,
                                  commandBufferCount=1),
                 pCommandBuffers=[X['cb']])),
+        ] + ([
+            # secnd: the SECONDARY command buffer — level=1, recorded
+            # with inheritanceInfo in seg_a2 and executed via
+            # vkCmdExecuteCommands.
+            ('vkAllocateCommandBuffers', dict(
+                device=X['dev'],
+                pAllocateInfo=st('VkCommandBufferAllocateInfo',
+                                 commandPool=X['cp'], level=1,
+                                 commandBufferCount=1),
+                pCommandBuffers=[X['cb2']])),
+        ] if is_secnd else []) + [
             ('vkCreateFence', dict(
                 device=X['dev'],
                 pCreateInfo=st('VkFenceCreateInfo', flags=0),
@@ -12376,11 +14246,19 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     device=X['dev'],
                     pCreateInfo=st('VkImageCreateInfo',
                         flags=0, imageType=1,
-                        format=(97 if is_ftexh else
-                                43 if (is_ftexs or is_ftexls) else 37),
+                        format=(124 if is_ftexd else
+                                97 if is_ftexh else
+                                43 if (is_ftexs or is_ftexls) else
+                                98 if is_ftexu32 else
+                                107 if is_ftexrgba32 else
+                                41 if is_ftexfetch else 37),
                         extent=st('VkExtent3D', width=TEX_W, height=TEX_H,
                                   depth=1),
-                        mipLevels=1, arrayLayers=2 if is_ftexa else 1,
+                        mipLevels=(3 if (is_ftexlod or is_ftexi or is_ftexq
+                                         or is_ftexpi or is_ftexbias)
+                                   else 1),
+                        arrayLayers=2 if (is_ftexa or is_ftexary)
+                                      else 1,
                         samples=1, tiling=0,
                         usage=0x04, sharingMode=0,
                         queueFamilyIndexCount=0,
@@ -12393,32 +14271,79 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     device=X['dev'],
                     pCreateInfo=st('VkImageViewCreateInfo',
                         flags=0, image=X['timg'],
-                        viewType=5 if is_ftexa else 1,
-                        format=(97 if is_ftexh else
-                                43 if (is_ftexs or is_ftexls) else 37),
+                        viewType=5 if (is_ftexa or is_ftexary) else 1,
+                        format=(124 if is_ftexd else
+                                97 if is_ftexh else
+                                43 if (is_ftexs or is_ftexls) else
+                                98 if is_ftexu32 else
+                                107 if is_ftexrgba32 else
+                                41 if is_ftexfetch else 37),
                         components=st('VkComponentMapping',
                                       r=0, g=0, b=0, a=0),
                         subresourceRange=st('VkImageSubresourceRange',
-                            aspectMask=1, baseMipLevel=0, levelCount=1,
+                            # ftex_dref: D16_UNORM is a depth aspect —
+                            # DEPTH_BIT(2), not COLOR_BIT(1), or the view
+                            # is invalid and the fetch reads 0.
+                            aspectMask=2 if is_ftexd else 1,
+                            baseMipLevel=0,
+                            levelCount=(3 if (is_ftexlod or is_ftexi
+                                              or is_ftexq or is_ftexpi
+                                              or is_ftexbias)
+                                        else 1),
                             baseArrayLayer=0,
-                            layerCount=2 if is_ftexa else 1)),
+                            layerCount=2 if (is_ftexa or is_ftexary)
+                                            else 1)),
                     pView=X['tview'])),
                 ('vkCreateSampler', dict(
                     device=X['dev'],
                     pCreateInfo=st('VkSamplerCreateInfo',
                         flags=0,
-                        magFilter=1 if is_ftexl else 0,
-                        minFilter=1 if is_ftexl else 0, mipmapMode=0,
+                        magFilter=1 if (is_ftexl or is_ftexlod or is_ftexi
+                                        or is_ftexpj or is_ftexpi
+                                        or is_ftexary or is_ftexd
+                                        or is_ftexbias)
+                                      else 0,
+                        minFilter=1 if (is_ftexl or is_ftexlod or is_ftexi
+                                        or is_ftexpj or is_ftexpi
+                                        or is_ftexary or is_ftexd
+                                        or is_ftexbias)
+                                      else 0,
+                        # ftex_lod/ftexi/ftexpi/ftex_bias need
+                        # mipmapMode=LINEAR so the lod picks m0,m1 with an
+                        # fw trilinear blend.
+                        mipmapMode=1 if (is_ftexlod or is_ftexi
+                                         or is_ftexpi or is_ftexbias)
+                                     else 0,
                         addressModeU=(3 if is_ftexc
                                       else 1 if is_ftexmir
-                                      else 0 if is_ftexr else 2),
+                                      else 0 if (is_ftexr or is_ftexi
+                                                 or is_ftexpj or is_ftexpi
+                                                 or is_ftexdpi
+                                                 or is_ftexdpe
+                                                 or is_ftexbias)
+                                      else 2),
                         addressModeV=(3 if is_ftexc
                                       else 1 if is_ftexmir
-                                      else 0 if is_ftexr else 2),
+                                      else 0 if (is_ftexr or is_ftexi
+                                                 or is_ftexpj or is_ftexpi
+                                                 or is_ftexdpi
+                                                 or is_ftexdpe
+                                                 or is_ftexbias)
+                                      else 2),
                         addressModeW=2,
                         mipLodBias=f32b(0.0), anisotropyEnable=0,
-                        maxAnisotropy=0, compareEnable=0, compareOp=0,
-                        minLod=f32b(0.0), maxLod=f32b(0.0),
+                        maxAnisotropy=0,
+                        # ftex_dref: compareEnable + LESS_OR_EQUAL(3) so
+                        # W_TX* runs the per-corner f_dcmp PCF path.
+                        compareEnable=1 if is_ftexd else 0,
+                        compareOp=3 if is_ftexd else 0,
+                        # mip sessions: maxLod must admit the lod (le>0);
+                        # maxLod=0 would clamp le->0 and collapse to mip0.
+                        minLod=f32b(0.0),
+                        maxLod=f32b(4.0 if (is_ftexlod or is_ftexi
+                                           or is_ftexq or is_ftexpi
+                                           or is_ftexbias)
+                                    else 0.0),
                         borderColor=ftex_bc,
                         unnormalizedCoordinates=0),
                     pSampler=X['smp'])),
@@ -12480,12 +14405,36 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             base_b = map_blob(rid)
             if init is not None:
                 apw(base_b, init)
-        if is_depth:
-            # depth image memory + depth readback buffer memory
+        if is_ds:
+            # depth/depth-stencil image memory + readback buffer memory
             for rid, mem in ((RES_BLOB0 + 4, X['dmem']),
                              (RES_BLOB0 + 5, X['rb2mem'])):
                 base_d = create_blob_mem(rid, 0x4000, mem)
                 assert base_d is not None, 'depth memory blob refused'
+                map_blob(rid)
+        if is_mrt:
+            # mrt attachment-1 image memory (0x10000 like imem) +
+            # readback buffer memory (0x4000 like rmem/rb2mem)
+            for rid, mem, sz in ((RES_BLOB0 + 6, X['imem2'], 0x10000),
+                                 (RES_BLOB0 + 7, X['rb3mem'], 0x4000)):
+                base_m = create_blob_mem(rid, sz, mem)
+                assert base_m is not None, 'mrt memory blob refused'
+                map_blob(rid)
+        if is_mrt3:
+            # mrt3 attachment-2 image memory + readback buffer memory at
+            # RES_BLOB0 +10/+11 (clear of +8/+9 ms/dl, +16/+17/+24 spec).
+            for rid, mem, sz in ((RES_BLOB0 + 10, X['imem3'], 0x10000),
+                                 (RES_BLOB0 + 11, X['rb4mem'], 0x4000)):
+                base_m3 = create_blob_mem(rid, sz, mem)
+                assert base_m3 is not None, 'mrt3 memory blob refused'
+                map_blob(rid)
+        if is_mrt4:
+            # mrt4 attachment-3 image memory + readback buffer memory at
+            # RES_BLOB0 +12/+13.
+            for rid, mem, sz in ((RES_BLOB0 + 12, X['imem4'], 0x10000),
+                                 (RES_BLOB0 + 13, X['rb5mem'], 0x4000)):
+                base_m4 = create_blob_mem(rid, sz, mem)
+                assert base_m4 is not None, 'mrt4 memory blob refused'
                 map_blob(rid)
         if is_tex:
             # 1x1 RGBA8 texel at tmem+0 — the sampled colour (tri_w)
@@ -12494,7 +14443,87 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             base_t = map_blob(RES_BLOB0 + 3)
             # 1x1 RGBA8 texel(s): layer 0 always, plus layer 1 for the
             # arrayed-image variant (uniform colour keeps tri_w)
-            if is_ftexm:
+            if (is_ftexlod or is_ftexi or is_ftexq or is_ftexpi
+                    or is_ftexbias):
+                # 3-mip RGBA8 chain: every level pitch=16 words
+                # (align(dim*4,64)=64B); mip m occupies dim_m*16 words at
+                # the cumulative img_walk offset (mip0 64w, mip1 32w,
+                # mip2 16w).  mip0 content is never sampled at lod=1.5 but
+                # reserves its footprint so mip1/mip2 land correctly.
+                _timg = []
+                for _m in range(3):
+                    _dm = MIP_DIM[_m]
+                    for _y in range(_dm):
+                        _row = [0] * 16
+                        for _x in range(_dm):
+                            _row[_x] = _mtel(_m, _x, _y)
+                        _timg += _row
+                apw(base_t, _timg)
+            elif is_ftexary:
+                # 2-layer 4x4 RGBA8 array: pitch=align(4*4,64)=16 words,
+                # 4 rows -> 64 words/layer; layer L texel(x,y) at word
+                # L*64 + y*16 + x.  DISTINCT _atel content per layer.
+                _timg = []
+                for _l in range(2):
+                    for _y in range(TEX_H):
+                        _row = [0] * 16
+                        for _x in range(TEX_W):
+                            _row[_x] = _atel(_l, _x, _y)
+                        _timg += _row
+                apw(base_t, _timg)
+            elif is_ftexd:
+                # 4x4 D16_UNORM depth map: bpp=2 -> pitch=align(4*2,64)
+                # =64B=16 words; texel(x,y) u16 at byte y*64+x*2 -> word
+                # y*16+x//2, u16 lane (x%2).  word0=texel0|texel1<<16,
+                # word1=texel2|texel3<<16, rest of the 16w row zero.
+                _timg = []
+                for _y in range(TEX_H):
+                    _row = [0] * 16
+                    for _x in range(TEX_W):
+                        _row[_x // 2] |= _dtel(_x, _y) << (16 * (_x & 1))
+                    _timg += _row
+                apw(base_t, _timg)
+            elif is_ftexfetch:
+                # 4x4 R8G8B8A8_UINT: bpp=4 -> pitch=align(4*4,64)=64B=
+                # 16 words/row, texel(x,y) at word y*16+x — identical
+                # layout to RGBA8_UNORM, only the decode differs (raw
+                # uint8, no *0x101).  _utel gives 4 distinct uint8/texel.
+                _timg = []
+                for _y in range(TEX_H):
+                    _row = [0] * 16
+                    for _x in range(TEX_W):
+                        _row[_x] = _utel(_x, _y)
+                    _timg += _row
+                apw(base_t, _timg)
+            elif is_ftexu32:
+                # 4x4 R32_UINT: bpp=4 -> pitch=align(4*4,64)=64B=16
+                # words/row, texel(x,y) u32 at word y*16+x — identical
+                # layout to R8G8B8A8_UINT (both 4B/texel), only the
+                # decode differs (fmt10 packs the whole u32 into fc[0]).
+                _timg = []
+                for _y in range(TEX_H):
+                    _row = [0] * 16
+                    for _x in range(TEX_W):
+                        _row[_x] = _u32tel(_x, _y)
+                    _timg += _row
+                apw(base_t, _timg)
+            elif is_ftexrgba32:
+                # 4x4 R32G32B32A32_UINT: bpp=16 -> pitch=align(4*16,64)
+                # =64B=16 words/row; texel(x,y) = 4 u32 channel words at
+                # _row[4*x + c] (R,G,B,A).  _rgba32tel gives 4 distinct
+                # u32 channels/texel.
+                _timg = []
+                for _y in range(TEX_H):
+                    _row = [0] * 16
+                    for _x in range(TEX_W):
+                        _r, _g, _b, _a = _rgba32tel(_x, _y)
+                        _row[4 * _x] = _r
+                        _row[4 * _x + 1] = _g
+                        _row[4 * _x + 2] = _b
+                        _row[4 * _x + 3] = _a
+                    _timg += _row
+                apw(base_t, _timg)
+            elif is_ftexm:
                 # W_TXM pitch = align(w*bpp,64); RGBA8 = 4bpp -> 64B = 16
                 # words/row, texel(x,y) at word y*16+x; RGBA16F = 8bpp ->
                 # texel is 2 words at y*16+2x (rest of row zero-padded).
@@ -12515,7 +14544,64 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             else:
                 apw(base_t, [tri_w] * (2 if is_ftexa else 1))
 
-        seg_a2 = [
+        # draw-state records — recorded into cbdraw (the SECONDARY cb2
+        # for is_secnd, else the primary cb).  BeginRenderPass/EndRender
+        # Pass, the readback barriers/copies and Begin/EndCommandBuffer
+        # always stay on the primary cb; only the pipeline/vertex/
+        # viewport/scissor/draw state moves into the secondary.
+        cbdraw = X['cb2'] if is_secnd else X['cb']
+        draw_recs = [
+            ('vkCmdBindPipeline', dict(
+                commandBuffer=cbdraw, pipelineBindPoint=0,
+                pipeline=X['gp'])),
+        ] + ([
+            ('vkCmdBindDescriptorSets', dict(
+                commandBuffer=cbdraw, pipelineBindPoint=0,
+                layout=X['pl'], firstSet=0, descriptorSetCount=1,
+                pDescriptorSets=[X['ds']], dynamicOffsetCount=0,
+                pDynamicOffsets=[])),
+        ] if (is_fsubo or is_tex) else []) + [
+            ('vkCmdBindVertexBuffers', dict(
+                commandBuffer=cbdraw, firstBinding=0,
+                bindingCount=5 if is_wide else 1,
+                pBuffers=([X['vb'], X['vb'], X['vb'], X['vb'], X['vb2']]
+                          if is_wide else [X['vb']]),
+                pOffsets=[0] * 5 if is_wide else [0])),
+        ] + ([] if is_statvp else [
+            # statvp emits no SetViewport/SetScissor — coverage must
+            # come from the pipeline-baked state
+            ('vkCmdSetViewport', dict(
+                commandBuffer=cbdraw, firstViewport=0, viewportCount=1,
+                pViewports=[st('VkViewport', x=f32b(0.0), y=f32b(0.0),
+                               width=f32b(64.0), height=f32b(64.0),
+                               minDepth=f32b(0.0), maxDepth=f32b(1.0))])),
+            ('vkCmdSetScissor', dict(
+                commandBuffer=cbdraw, firstScissor=0, scissorCount=1,
+                pScissors=[st('VkRect2D',
+                    offset=st('VkOffset2D', x=SC[0], y=SC[1]),
+                    extent=st('VkExtent2D',
+                              width=SC[2], height=SC[3]))])),
+        ]) + ([] if not is_drawindx else [
+            # drawindx binds the u16 {0,1,2} list inside ib2 before
+            # the indexed indirect record
+            ('vkCmdBindIndexBuffer', dict(
+                commandBuffer=cbdraw, buffer=X['ib2'],
+                offset=0x20, indexType=0)),
+        ]) + [
+            ([('vkCmdDrawIndirect', dict(
+                commandBuffer=cbdraw, buffer=X['ib2'], offset=4,
+                drawCount=1, stride=16))] if is_drawind else
+             [('vkCmdDrawIndexedIndirect', dict(
+                 commandBuffer=cbdraw, buffer=X['ib2'], offset=4,
+                 drawCount=1, stride=20))] if is_drawindx else
+             [('vkCmdDraw', dict(
+                 commandBuffer=cbdraw,
+                 vertexCount=6 if is_dpair else
+                 PTS_N if is_pts else 2 if is_line else 3,
+                 instanceCount=INST_N if is_inst else 1,
+                 firstVertex=0, firstInstance=0))])[0],
+        ]
+        pre_recs = [
             ('vkBeginCommandBuffer', dict(
                 commandBuffer=X['cb'],
                 pBeginInfo=st('VkCommandBufferBeginInfo', flags=0,
@@ -12527,7 +14613,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     renderArea=st('VkRect2D',
                         offset=st('VkOffset2D', x=0, y=0),
                         extent=st('VkExtent2D', width=CW, height=CH)),
-                    clearValueCount=2 if is_depth else 1,
+                    clearValueCount=(n_col
+                                     + (1 if is_ds else 0)),
                     pClearValues=[st('VkClearValue',
                         color=st('VkClearColorValue',
                                  uint32=[f32b(c) for c in
@@ -12538,66 +14625,52 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                           (0.2, 0.2, 0.2, 1.0)
                                           if is_blend else
                                           (0.0, 0.0, 0.0, 1.0))]))] + ([
+                        # mrt attachment-1 clear: DISTINCT (0,0,1,1) so the
+                        # per-attachment clearv_q[att*4] indexing is
+                        # observable — identical clears would leave the
+                        # att*4 clear path dark.  -> UNORM8 (0,0,255,255)
+                        # = 0xFFFF0000 for uncovered att1 px.
+                        st('VkClearValue',
+                           color=st('VkClearColorValue',
+                                    uint32=[f32b(c) for c in
+                                            (0.0, 0.0, 1.0, 1.0)]))]
+                        if is_mrt else []) + ([
+                        # mrt3 attachment-2 clear: DISTINCT (0,1,0,1) ->
+                        # UNORM8 (0,255,0,255) = 0xFF00FF00 — a third
+                        # distinct clearv_q[att*4] value so att2's
+                        # per-attachment clear indexing is observable.
+                        st('VkClearValue',
+                           color=st('VkClearColorValue',
+                                    uint32=[f32b(c) for c in
+                                            (0.0, 1.0, 0.0, 1.0)]))]
+                        if is_mrt3 else []) + ([
+                        # mrt4 attachment-3 clear: DISTINCT (1,1,0,1) ->
+                        # UNORM8 (255,255,0,255) = 0xFF00FFFF — fourth
+                        # distinct clearv_q[att*4] value.
+                        st('VkClearValue',
+                           color=st('VkClearColorValue',
+                                    uint32=[f32b(c) for c in
+                                            (1.0, 1.0, 0.0, 1.0)]))]
+                        if is_mrt4 else []) + ([
                         # the wire union has no depthStencil arm — cmdexec
                         # reads clearv_q[att*4] as the depth value, so the
                         # bits ride the colour uint32[0] slot (0.5f write,
-                        # 1.0f LESS far-plane / 0.0f GREATER near-plane)
+                        # 1.0f LESS far-plane / 0.0f GREATER near-plane).
+                        # For D24S8 the raster CLEAR packs {stencil,depth}
+                        # — stencil byte = clear_color[1][7:0] (uint32[1]
+                        # slot; 0 for the op sessions, 0x33 for is_stclr).
                         st('VkClearValue',
                            color=st('VkClearColorValue',
                                     uint32=[f32b(dp_clear if is_dpair
                                                  else 0.5),
-                                            0, 0, 0]))]
-                        if is_depth else [])),
+                                            0x33 if is_stclr else 0,
+                                            0, 0]))]
+                        if is_ds else [])),
                 contents=0)),
-            ('vkCmdBindPipeline', dict(
-                commandBuffer=X['cb'], pipelineBindPoint=0,
-                pipeline=X['gp'])),
-        ] + ([
-            ('vkCmdBindDescriptorSets', dict(
-                commandBuffer=X['cb'], pipelineBindPoint=0,
-                layout=X['pl'], firstSet=0, descriptorSetCount=1,
-                pDescriptorSets=[X['ds']], dynamicOffsetCount=0,
-                pDynamicOffsets=[])),
-        ] if (is_fsubo or is_tex) else []) + [
-            ('vkCmdBindVertexBuffers', dict(
-                commandBuffer=X['cb'], firstBinding=0,
-                bindingCount=5 if is_wide else 1,
-                pBuffers=([X['vb'], X['vb'], X['vb'], X['vb'], X['vb2']]
-                          if is_wide else [X['vb']]),
-                pOffsets=[0] * 5 if is_wide else [0])),
-        ] + ([] if is_statvp else [
-            # statvp emits no SetViewport/SetScissor — coverage must
-            # come from the pipeline-baked state
-            ('vkCmdSetViewport', dict(
-                commandBuffer=X['cb'], firstViewport=0, viewportCount=1,
-                pViewports=[st('VkViewport', x=f32b(0.0), y=f32b(0.0),
-                               width=f32b(64.0), height=f32b(64.0),
-                               minDepth=f32b(0.0), maxDepth=f32b(1.0))])),
-            ('vkCmdSetScissor', dict(
-                commandBuffer=X['cb'], firstScissor=0, scissorCount=1,
-                pScissors=[st('VkRect2D',
-                    offset=st('VkOffset2D', x=SC[0], y=SC[1]),
-                    extent=st('VkExtent2D',
-                              width=SC[2], height=SC[3]))])),
-        ]) + ([] if not is_drawindx else [
-            # drawindx binds the u16 {0,1,2} list inside ib2 before
-            # the indexed indirect record
-            ('vkCmdBindIndexBuffer', dict(
-                commandBuffer=X['cb'], buffer=X['ib2'],
-                offset=0x20, indexType=0)),
-        ]) + [
-            ([('vkCmdDrawIndirect', dict(
-                commandBuffer=X['cb'], buffer=X['ib2'], offset=4,
-                drawCount=1, stride=16))] if is_drawind else
-             [('vkCmdDrawIndexedIndirect', dict(
-                 commandBuffer=X['cb'], buffer=X['ib2'], offset=4,
-                 drawCount=1, stride=20))] if is_drawindx else
-             [('vkCmdDraw', dict(
-                 commandBuffer=X['cb'],
-                 vertexCount=6 if is_dpair else
-                 PTS_N if is_pts else 2 if is_line else 3,
-                 instanceCount=INST_N if is_inst else 1,
-                 firstVertex=0, firstInstance=0))])[0],
+        ]
+        # render-pass tail: EndRenderPass + readback barriers/copies +
+        # EndCommandBuffer — always recorded on the primary cb.
+        post_recs = [
             ('vkCmdEndRenderPass', dict(commandBuffer=X['cb'])),
             ('vkCmdPipelineBarrier', dict(
                 commandBuffer=X['cb'],
@@ -12630,6 +14703,105 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     imageExtent=st('VkExtent3D', width=CW, height=CH,
                                    depth=1))])),
         ] + ([
+            # mrt attachment-1 readback: img2 (colour aspectMask=1) -> rb3,
+            # same barrier+copy shape as the primary colour image.
+            ('vkCmdPipelineBarrier', dict(
+                commandBuffer=X['cb'],
+                srcStageMask=0x400, dstStageMask=0x1000,
+                dependencyFlags=0,
+                memoryBarrierCount=0, pMemoryBarriers=[],
+                bufferMemoryBarrierCount=0, pBufferMemoryBarriers=[],
+                imageMemoryBarrierCount=1,
+                pImageMemoryBarriers=[st('VkImageMemoryBarrier',
+                    srcAccessMask=0x400, dstAccessMask=0x1000,
+                    oldLayout=5, newLayout=5,
+                    srcQueueFamilyIndex=0xFFFFFFFF,
+                    dstQueueFamilyIndex=0xFFFFFFFF,
+                    image=X['img2'],
+                    subresourceRange=st('VkImageSubresourceRange',
+                                        aspectMask=1, baseMipLevel=0,
+                                        levelCount=1, baseArrayLayer=0,
+                                        layerCount=1))])),
+            ('vkCmdCopyImageToBuffer', dict(
+                commandBuffer=X['cb'],
+                srcImage=X['img2'], srcImageLayout=5,
+                dstBuffer=X['rb3'], regionCount=1,
+                pRegions=[st('VkBufferImageCopy',
+                    bufferOffset=0, bufferRowLength=0,
+                    bufferImageHeight=0,
+                    imageSubresource=st('VkImageSubresourceLayers',
+                                        aspectMask=1, mipLevel=0,
+                                        baseArrayLayer=0, layerCount=1),
+                    imageOffset=st('VkOffset3D', x=0, y=0, z=0),
+                    imageExtent=st('VkExtent3D', width=CW, height=CH,
+                                   depth=1))])),
+        ] if is_mrt else []) + ([
+            # mrt3 attachment-2 readback: img3 (colour aspectMask=1) -> rb4,
+            # same barrier+copy shape as img2->rb3.
+            ('vkCmdPipelineBarrier', dict(
+                commandBuffer=X['cb'],
+                srcStageMask=0x400, dstStageMask=0x1000,
+                dependencyFlags=0,
+                memoryBarrierCount=0, pMemoryBarriers=[],
+                bufferMemoryBarrierCount=0, pBufferMemoryBarriers=[],
+                imageMemoryBarrierCount=1,
+                pImageMemoryBarriers=[st('VkImageMemoryBarrier',
+                    srcAccessMask=0x400, dstAccessMask=0x1000,
+                    oldLayout=5, newLayout=5,
+                    srcQueueFamilyIndex=0xFFFFFFFF,
+                    dstQueueFamilyIndex=0xFFFFFFFF,
+                    image=X['img3'],
+                    subresourceRange=st('VkImageSubresourceRange',
+                                        aspectMask=1, baseMipLevel=0,
+                                        levelCount=1, baseArrayLayer=0,
+                                        layerCount=1))])),
+            ('vkCmdCopyImageToBuffer', dict(
+                commandBuffer=X['cb'],
+                srcImage=X['img3'], srcImageLayout=5,
+                dstBuffer=X['rb4'], regionCount=1,
+                pRegions=[st('VkBufferImageCopy',
+                    bufferOffset=0, bufferRowLength=0,
+                    bufferImageHeight=0,
+                    imageSubresource=st('VkImageSubresourceLayers',
+                                        aspectMask=1, mipLevel=0,
+                                        baseArrayLayer=0, layerCount=1),
+                    imageOffset=st('VkOffset3D', x=0, y=0, z=0),
+                    imageExtent=st('VkExtent3D', width=CW, height=CH,
+                                   depth=1))])),
+        ] if is_mrt3 else []) + ([
+            # mrt4 attachment-3 readback: img4 (colour aspectMask=1) -> rb5,
+            # same barrier+copy shape as img3->rb4.
+            ('vkCmdPipelineBarrier', dict(
+                commandBuffer=X['cb'],
+                srcStageMask=0x400, dstStageMask=0x1000,
+                dependencyFlags=0,
+                memoryBarrierCount=0, pMemoryBarriers=[],
+                bufferMemoryBarrierCount=0, pBufferMemoryBarriers=[],
+                imageMemoryBarrierCount=1,
+                pImageMemoryBarriers=[st('VkImageMemoryBarrier',
+                    srcAccessMask=0x400, dstAccessMask=0x1000,
+                    oldLayout=5, newLayout=5,
+                    srcQueueFamilyIndex=0xFFFFFFFF,
+                    dstQueueFamilyIndex=0xFFFFFFFF,
+                    image=X['img4'],
+                    subresourceRange=st('VkImageSubresourceRange',
+                                        aspectMask=1, baseMipLevel=0,
+                                        levelCount=1, baseArrayLayer=0,
+                                        layerCount=1))])),
+            ('vkCmdCopyImageToBuffer', dict(
+                commandBuffer=X['cb'],
+                srcImage=X['img4'], srcImageLayout=5,
+                dstBuffer=X['rb5'], regionCount=1,
+                pRegions=[st('VkBufferImageCopy',
+                    bufferOffset=0, bufferRowLength=0,
+                    bufferImageHeight=0,
+                    imageSubresource=st('VkImageSubresourceLayers',
+                                        aspectMask=1, mipLevel=0,
+                                        baseArrayLayer=0, layerCount=1),
+                    imageOffset=st('VkOffset3D', x=0, y=0, z=0),
+                    imageExtent=st('VkExtent3D', width=CW, height=CH,
+                                   depth=1))])),
+        ] if is_mrt4 else []) + ([
             ('vkCmdPipelineBarrier', dict(
                 commandBuffer=X['cb'],
                 srcStageMask=0x400, dstStageMask=0x1000,
@@ -12660,9 +14832,42 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     imageOffset=st('VkOffset3D', x=0, y=0, z=0),
                     imageExtent=st('VkExtent3D', width=CW, height=CH,
                                    depth=1))])),
-        ] if is_depth else []) + [
+        ] if is_ds else []) + [
             ('vkEndCommandBuffer', dict(commandBuffer=X['cb'])),
         ]
+        if is_secnd:
+            # Graphics secondary CB: cb2 is recorded FIRST (level=
+            # SECONDARY, inheritanceInfo binds renderPass+subpass+
+            # framebuffer) holding every draw-state record; the primary
+            # then runs BeginRenderPass -> ExecuteCommands([cb2]) ->
+            # EndRenderPass.  Exercises cmdexec's one-deep secondary
+            # stack on CLS_WORK draw records with the primary's active
+            # render-pass attachments.
+            seg_a2 = ([
+                ('vkBeginCommandBuffer', dict(
+                    commandBuffer=X['cb2'],
+                    pBeginInfo=st('VkCommandBufferBeginInfo', flags=0,
+                        pInheritanceInfo=st(
+                            'VkCommandBufferInheritanceInfo',
+                            renderPass=X['rp'], subpass=0,
+                            framebuffer=X['fb'], occlusionQueryEnable=0,
+                            queryFlags=0, pipelineStatistics=0)))),
+            ] + draw_recs + [
+                ('vkEndCommandBuffer', dict(commandBuffer=X['cb2'])),
+            ] + pre_recs + [
+                ('vkCmdExecuteCommands', dict(
+                    commandBuffer=X['cb'], commandBufferCount=1,
+                    pCommandBuffers=[X['cb2']])),
+            ] + post_recs)
+        else:
+            # msub: NextSubpass sits between BeginRenderPass (end of
+            # pre_recs) and the draw-state records — advances the active
+            # subpass 0->1 so the pipeline(subpass=1) draw is admitted.
+            seg_a2 = (pre_recs +
+                      ([('vkCmdNextSubpass', dict(
+                          commandBuffer=X['cb'], contents=0))]
+                       if is_ms else []) +
+                      draw_recs + post_recs)
         note("B'' segment A2: record BeginRP/draw/EndRP/barrier/I2B")
         run_batches(compile_cmds(seg_a2))
 
@@ -12695,15 +14900,53 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             rec(EK_APRCHK, rb_off + 4 * j, exp_img[j], exp_img[j], 0)
         note('readback gate: %d words, %d tri px (0x%08x), %d clear'
              % (CW * CH, len(cov), tri_w, CW * CH - len(cov)))
-        if is_depth:
-            # depth readback gate: rb2 holds the D32_SFLOAT depth
-            # attachment copied with aspectMask=2
+        if is_mrt:
+            # mrt attachment-1 readback gate: rb3 holds the second colour
+            # attachment (img2, colour aspectMask=1) — exp_img2 is the
+            # R<->B byte-permute of exp_img (fs_mrt o1 = swap(o0)).
+            rst3_, _rs3, rbe3 = fm.resolve(X['rb3'], KIND['VkBuffer'])
+            rb3_off = tm.blobs[RES_BLOB0 + 7]['base_w'] << 2
+            W(TP_CHECK, CK_APR, CW * CH, rb3_off)
+            for j in range(CW * CH):
+                rec(EK_APRCHK, rb3_off + 4 * j,
+                    exp_img2[j], exp_img2[j], 0)
+            note('mrt att1 readback gate: %d words'
+                 % (CW * CH,))
+        if is_mrt3:
+            # mrt3 attachment-2 readback gate: rb4 holds the third colour
+            # attachment (img3, colour aspectMask=1) — exp_img3 is the
+            # [G,B,R,A] rotation byte-permute of exp_img (fs_mrt3 o2).
+            rst4_, _rs4, rbe4 = fm.resolve(X['rb4'], KIND['VkBuffer'])
+            rb4_off = tm.blobs[RES_BLOB0 + 11]['base_w'] << 2
+            W(TP_CHECK, CK_APR, CW * CH, rb4_off)
+            for j in range(CW * CH):
+                rec(EK_APRCHK, rb4_off + 4 * j,
+                    exp_img3[j], exp_img3[j], 0)
+            note('mrt3 att2 readback gate: %d words'
+                 % (CW * CH,))
+        if is_mrt4:
+            # mrt4 attachment-3 readback gate: rb5 holds the fourth colour
+            # attachment (img4, colour aspectMask=1) — exp_img4 is the
+            # [A,B,G,R] full-reversal byte-permute of exp_img (fs_mrt4 o3).
+            rst5_, _rs5, rbe5 = fm.resolve(X['rb5'], KIND['VkBuffer'])
+            rb5_off = tm.blobs[RES_BLOB0 + 13]['base_w'] << 2
+            W(TP_CHECK, CK_APR, CW * CH, rb5_off)
+            for j in range(CW * CH):
+                rec(EK_APRCHK, rb5_off + 4 * j,
+                    exp_img4[j], exp_img4[j], 0)
+            note('mrt4 att3 readback gate: %d words'
+                 % (CW * CH,))
+        if is_ds:
+            # depth/depth-stencil readback gate: rb2 holds the attachment
+            # copied with aspectMask=2 — D32_SFLOAT raw f32 words, or the
+            # packed {stencil,depth_unorm24} word for D24S8
             rst2_, _rs2, rbe2 = fm.resolve(X['rb2'], KIND['VkBuffer'])
             rb2_off = tm.blobs[RES_BLOB0 + 5]['base_w'] << 2
             W(TP_CHECK, CK_APR, CW * CH, rb2_off)
+            _expd = exp_ds if is_stencil else exp_depth
             for j in range(CW * CH):
                 rec(EK_APRCHK, rb2_off + 4 * j,
-                    exp_depth[j], exp_depth[j], 0)
+                    _expd[j], _expd[j], 0)
             note('depth readback gate: %d words, %d cov px'
                  % (CW * CH, len(cov)))
 
@@ -12750,7 +14993,31 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                         imageView=X['dview'])),
             ('vkDestroyImage', dict(device=X['dev'], image=X['dimg'])),
             ('vkFreeMemory', dict(device=X['dev'], memory=X['dmem'])),
-        ] if is_depth else []) + [
+        ] if is_ds else []) + ([
+            # mrt attachment-1 teardown: rb3 buffer+mem, view2, img2+imem2
+            ('vkDestroyBuffer', dict(device=X['dev'], buffer=X['rb3'])),
+            ('vkFreeMemory', dict(device=X['dev'], memory=X['rb3mem'])),
+            ('vkDestroyImageView', dict(device=X['dev'],
+                                        imageView=X['view2'])),
+            ('vkDestroyImage', dict(device=X['dev'], image=X['img2'])),
+            ('vkFreeMemory', dict(device=X['dev'], memory=X['imem2'])),
+        ] if is_mrt else []) + ([
+            # mrt3 attachment-2 teardown: rb4 buffer+mem, view3, img3+imem3
+            ('vkDestroyBuffer', dict(device=X['dev'], buffer=X['rb4'])),
+            ('vkFreeMemory', dict(device=X['dev'], memory=X['rb4mem'])),
+            ('vkDestroyImageView', dict(device=X['dev'],
+                                        imageView=X['view3'])),
+            ('vkDestroyImage', dict(device=X['dev'], image=X['img3'])),
+            ('vkFreeMemory', dict(device=X['dev'], memory=X['imem3'])),
+        ] if is_mrt3 else []) + ([
+            # mrt4 attachment-3 teardown: rb5 buffer+mem, view4, img4+imem4
+            ('vkDestroyBuffer', dict(device=X['dev'], buffer=X['rb5'])),
+            ('vkFreeMemory', dict(device=X['dev'], memory=X['rb5mem'])),
+            ('vkDestroyImageView', dict(device=X['dev'],
+                                        imageView=X['view4'])),
+            ('vkDestroyImage', dict(device=X['dev'], image=X['img4'])),
+            ('vkFreeMemory', dict(device=X['dev'], memory=X['imem4'])),
+        ] if is_mrt4 else []) + [
             ('vkDestroyCommandPool', dict(device=X['dev'],
                                           commandPool=X['cp'])),
             ('vkDestroyDevice', dict(device=X['dev'])),

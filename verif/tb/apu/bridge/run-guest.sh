@@ -90,7 +90,7 @@ provision() {
       echo "[guest] building cidata.iso payload"
       xorrisofs -quiet -V CIDATA -r -o "$GUEST_CACHE/cidata.img" \
         "$GUEST/cloud-init/user-data" "$GUEST/cloud-init/meta-data" \
-        "$GUEST/vkcompute.c" "$GUEST/vkdescarr.c" "$GUEST/vkmem.c" \
+        "$GUEST/vkcompute.c" "$GUEST/vkdescarr.c" "$GUEST/vkmem.c" "$GUEST/vkmembig.c" \
         "$GUEST/vkimage.c" "$GUEST/vktri.c" "$GUEST/vkcmp.c" "$GUEST/vkping.c" \
         "$GUEST/expected.json" \
         "$CORPUS/bufcopy.spv" "$CORPUS/descarr.spv" "$CORPUS/vkimage.spv" \
@@ -109,7 +109,7 @@ provision() {
       echo "[guest] xorrisofs missing — building CIDATA ext image"
       cidata_src="$(mktemp -d)"
       cp "$GUEST/cloud-init/user-data" "$GUEST/cloud-init/meta-data" \
-        "$GUEST/vkcompute.c" "$GUEST/vkdescarr.c" "$GUEST/vkmem.c" \
+        "$GUEST/vkcompute.c" "$GUEST/vkdescarr.c" "$GUEST/vkmem.c" "$GUEST/vkmembig.c" \
         "$GUEST/vkimage.c" "$GUEST/vktri.c" "$GUEST/vkcmp.c" "$GUEST/vkping.c" \
         "$GUEST/expected.json" \
         "$CORPUS/bufcopy.spv" "$CORPUS/descarr.spv" "$CORPUS/vkimage.spv" \
@@ -149,7 +149,7 @@ build_cidata() {
   if command -v xorrisofs >/dev/null 2>&1; then
     xorrisofs -quiet -V CIDATA -r -o "$GUEST_CACHE/cidata.img" \
       "$GUEST/cloud-init/user-data" "$GUEST/cloud-init/meta-data" \
-      "$GUEST/vkcompute.c" "$GUEST/vkdescarr.c" "$GUEST/vkmem.c" \
+      "$GUEST/vkcompute.c" "$GUEST/vkdescarr.c" "$GUEST/vkmem.c" "$GUEST/vkmembig.c" \
       "$GUEST/vkimage.c" "$GUEST/vktri.c" "$GUEST/vkcmp.c" "$GUEST/vkping.c" \
       "$GUEST/expected.json" \
       "$CORPUS/bufcopy.spv" "$CORPUS/descarr.spv" "$CORPUS/vkimage.spv" \
@@ -165,7 +165,7 @@ build_cidata() {
   fi
   cidata_src="$(mktemp -d)"
   cp "$GUEST/cloud-init/user-data" "$GUEST/cloud-init/meta-data" \
-    "$GUEST/vkcompute.c" "$GUEST/vkdescarr.c" "$GUEST/vkmem.c" \
+    "$GUEST/vkcompute.c" "$GUEST/vkdescarr.c" "$GUEST/vkmem.c" "$GUEST/vkmembig.c" \
     "$GUEST/vkimage.c" "$GUEST/vktri.c" "$GUEST/vkcmp.c" "$GUEST/vkping.c" \
     "$GUEST/expected.json" \
     "$CORPUS/bufcopy.spv" "$CORPUS/descarr.spv" "$CORPUS/vkimage.spv" \

@@ -1472,12 +1472,18 @@ assign ldbuf_full = &ldbuf_valid_q;
   // flushed_d reduction: on a valid slot new_hit is unreachable
   // (allocator never writes an occupied slot) and hold is covered by
   // !flushed_q, so only flush_i || old_hit must be checked.
-  assign ex_pub = req_port_i.data_rvalid && ldbuf_valid_q[rresp_idx] &&
-                  !ldbuf_flushed_q[rresp_idx] &&
-                  !flush_i &&
-                  !cancelled_mask_i[ldbuf_q[rresp_idx].trans_id] &&
-                  ((ldbuf_last_id_q == rresp_idx) || !kill_req_w) &&
-                  ex_i.valid && !ex_ptw_i && state_q[LU_B_SEND_TAG];
+  // r115-E115-L1: split the 9-term ex_pub AND into slot-side and
+  // context-side cones so the analyzer prices the two indexed-read and
+  // kill/exception subtrees in parallel instead of one flat compare
+  // node. Pure regrouping of && — identical boolean function.
+  logic ex_slot_ok, ex_ctx_ok;
+  assign ex_slot_ok = req_port_i.data_rvalid && ldbuf_valid_q[rresp_idx] &&
+                      !ldbuf_flushed_q[rresp_idx] &&
+                      !flush_i &&
+                      !cancelled_mask_i[ldbuf_q[rresp_idx].trans_id];
+  assign ex_ctx_ok  = ((ldbuf_last_id_q == rresp_idx) || !kill_req_w) &&
+                      ex_i.valid && !ex_ptw_i && state_q[LU_B_SEND_TAG];
+  assign ex_pub = ex_slot_ok && ex_ctx_ok;
 
   // F15: the three FSM-head completion arms below (translation fault,
   // mispredicted-speculative write-off, STQ-forward completion) override

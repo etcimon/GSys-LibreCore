@@ -1,0 +1,32 @@
+{
+  "core/csr_buffer.sv": {
+    "sha256": "b5e8187ac4a52d72f52c559f6e157f5142ba1f76a6b17e387b0d0530c26caa55",
+    "crlf": 0,
+    "lf": 477
+  },
+  "core/ooo/g6lc_ooo_pkg.sv": {
+    "sha256": "23a7bd2111f9e1441dafe71928a81cc88dbbb5ae2aee79f8ab33eecddd3d73cb",
+    "crlf": 0,
+    "lf": 208
+  },
+  "core/ooo/g6lc_ooo_dispatch.sv": {
+    "sha256": "c3d91a2a3a151e21b565261eb598fb9270f15291004f82dc96cffdfefefd08e6",
+    "crlf": 1770,
+    "lf": 1770
+  },
+  "core/ex_stage.sv": {
+    "sha256": "98d9952aac54e6899628aea5640191fabc89f5dc74cf969842385f906600273f",
+    "crlf": 1460,
+    "lf": 1460
+  },
+  "core/issue_stage.sv": {
+    "sha256": "0ba58497eb8405c66a9642604ba5c7c19235c5384e35d0187bd9259de5520e1b",
+    "crlf": 787,
+    "lf": 787
+  },
+  "core/g6lc_core.sv": {
+    "sha256": "086ef12677aaeca83d6aa127fe5c507d6b5d2be93ffde87313f5271f5a2428a4",
+    "crlf": 6284,
+    "lf": 6284
+  }
+}

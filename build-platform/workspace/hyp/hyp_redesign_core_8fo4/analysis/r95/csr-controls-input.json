@@ -1,0 +1,6 @@
+{
+  "remote_source": "/opt/testharness/runs/hyp8-r95-csr-73e4d2d277-current/data/current",
+  "source_manifest_sha256": "a8d74f78d8d7d33db99512eeeb852b54f8a447613a3fe2d1d887edd362a36e2b",
+  "runner_sha256": "5c23b1ddcbe154c587d73155c0fc78c242bfd7e3e88ff806ba6c66c15964c652",
+  "preimage_sha256": "c8a86767ac9d3324a382ac4cee3e3ba875a4cd0ef42080528e73e8186c4bbe5e"
+}

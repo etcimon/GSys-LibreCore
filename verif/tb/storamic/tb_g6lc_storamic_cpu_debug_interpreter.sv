@@ -7,7 +7,14 @@ module g6lc_storamic_cpu_debug_interpreter #(
   parameter bit RequestEnabled = 1,
   parameter int EntryPrivilege = 3,
   // 0 none; 1 M firmware with MPRV=1/MPP=U; 2 as 1 plus dcsr.mprven=1 in debug.
-  parameter int Mprv = 0
+  parameter int Mprv = 0,
+  // 0 halt (external debug_req only); 1 ebreak; 2 single-step. Nonzero
+  // mechanisms add a firmware target store at Probe+48, a second debug
+  // entry recorded at Probe+56, and a third csr check.
+  parameter int Mechanism = 0,
+  // When set, the Probe+48 firmware store is expected to carry origin 000,
+  // so an origin-enabled run must reject via `failed` (not debug-origin).
+  parameter bit NegativeFirmware = 0
 ) (
   input logic clk, rst_n,
   output logic done, failed, debug_origin_failed, debug_seen,
@@ -15,6 +22,8 @@ module g6lc_storamic_cpu_debug_interpreter #(
   output logic [31:0] cycles
 );
   localparam logic [63:0] Boot = 64'h8000_0000, Probe = 64'h5000_0000;
+  // Second-entry dcsr.cause: ebreak=1, single-step=4 (ariane_pkg).
+  localparam int SecondCause = (Mechanism == 1) ? 1 : 4;
   logic debug_req;
   logic awv, awr, wv, wr, wl, bv, br, arv, arr, rv, rr, rl;
   logic [63:0] awa, wd, ara, rd;
@@ -31,6 +40,8 @@ module g6lc_storamic_cpu_debug_interpreter #(
   initial begin
     assert (EntryPrivilege inside {0, 1, 3});
     assert (Mprv inside {0, 1, 2} && (Mprv == 0 || EntryPrivilege == 3));
+    assert (Mechanism inside {0, 1, 2});
+    assert (Mechanism == 0 || (EntryPrivilege inside {0, 3} && Mprv == 0));
     $readmemh("program.hex", rom);
     $readmemh("debug.hex", debug_rom);
   end
@@ -38,18 +49,33 @@ module g6lc_storamic_cpu_debug_interpreter #(
     return a >= Probe && a < Probe + 64;
   endfunction
   function automatic logic is_debug_data(input logic [63:0] a);
-    return a == Probe + 8 || a == Probe + 16 || a == Probe + 24;
+    return a == Probe + 8 || a == Probe + 16 || a == Probe + 24 ||
+           (Mechanism != 0 && a == Probe + 56);
   endfunction
   function automatic logic [63:0] expected_write(input logic [7:0] index);
-    case (index)
-      0: return Probe;
-      1: return Probe + 8;
-      2: return Probe + 24;
-      3: return Probe + 16;
-      4: return Probe + 32;
-      5: return Probe + 40;
-      default: return Probe + 36;
-    endcase
+    if (Mechanism == 0) begin
+      case (index)
+        0: return Probe;
+        1: return Probe + 8;
+        2: return Probe + 24;
+        3: return Probe + 16;
+        4: return Probe + 32;
+        5: return Probe + 40;
+        default: return Probe + 36;
+      endcase
+    end else begin
+      case (index)
+        0: return Probe;
+        1: return Probe + 8;
+        2: return Probe + 24;
+        3: return Probe + 16;
+        4: return Probe + 48;
+        5: return Probe + 56;
+        6: return Probe + 32;
+        7: return Probe + 40;
+        default: return Probe + 36;
+      endcase
+    end
   endfunction
   function automatic logic [63:0] expected_read(input logic [7:0] index);
     case (index)
@@ -62,6 +88,7 @@ module g6lc_storamic_cpu_debug_interpreter #(
   endfunction
   function automatic logic [2:0] expected_prot(input logic [63:0] a);
     if (Negative && a == Probe + 8) return 3'b001;
+    if (NegativeFirmware && a == Probe + 48) return 3'b000;
     // Debug-issued accesses stay unknown whatever MPRV/mprven make the
     // effective privilege; firmware under MPRV carries MPP=U.
     if (!OriginEnabled || is_debug_data(a)) return 3'b000;
@@ -130,12 +157,22 @@ module g6lc_storamic_cpu_debug_interpreter #(
       if (bv && br) begin
         bv <= 0;
         if (completing) begin
-          if (write_checks == 6 && read_checks == 4 && debug_seen &&
-              debug_writes == 3 && debug_reads == 2 && csr_checks == 2 &&
-              !failed && !debug_origin_failed &&
-              memory[0] == 8'h11 && memory[16] == 8'h66 &&
-              memory[32] == 8'h22 && memory[40] == 8'h55) done <= 1;
-          else failed <= 1;
+          if (Mechanism == 0) begin
+            if (write_checks == 6 && read_checks == 4 && debug_seen &&
+                debug_writes == 3 && debug_reads == 2 && csr_checks == 2 &&
+                !failed && !debug_origin_failed &&
+                memory[0] == 8'h11 && memory[16] == 8'h66 &&
+                memory[32] == 8'h22 && memory[40] == 8'h55) done <= 1;
+            else failed <= 1;
+          end else begin
+            if (write_checks == 8 && read_checks == 4 && debug_seen &&
+                debug_writes == 4 && debug_reads == 2 && csr_checks == 3 &&
+                !failed && !debug_origin_failed &&
+                memory[0] == 8'h11 && memory[16] == 8'h66 &&
+                memory[32] == 8'h22 && memory[40] == 8'h55 &&
+                memory[48] == 8'h33) done <= 1;
+            else failed <= 1;
+          end
           completing <= 0;
         end
       end
@@ -162,6 +199,14 @@ module g6lc_storamic_cpu_debug_interpreter #(
             csr_checks <= csr_checks + 1;
           else failed <= 1;
         end
+        if (Mechanism != 0 && write_addr == Probe + 56) begin
+          if ((wd[31:0] & 32'h1c3) ==
+              ((32'(SecondCause) << 6) | 32'(EntryPrivilege)))
+            csr_checks <= csr_checks + 1;
+          else failed <= 1;
+        end
+        if (Mechanism != 0 && write_addr == Probe + 48 && wd[31:0] != 32'h33)
+          failed <= 1;
         if (write_addr == Probe + 24) begin
           if ((EntryPrivilege == 3 && wd[31:0] >= 32'h8000_0000 && wd[31:0] < 32'h8000_0100) ||
               (EntryPrivilege != 3 && wd[31:0] >= 32'h8000_0180 && wd[31:0] < 32'h8000_0200))

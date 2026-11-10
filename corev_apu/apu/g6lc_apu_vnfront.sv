@@ -337,7 +337,7 @@ module g6lc_apu_vnfront
       // binding-row-scan subroutines, then record writes/copies
       StRsvLuC, StRsvPoolC, StRsvLayC, StRsvHdrC,
       StRowSc, StRowW0C, StRowW1C,
-      StUpdHdrC, StUpdSetCpl, StUpdWBegin, StUpdWBad, StUpdWNext,
+      StUpdHdrC, StUpdSetCpl, StUpdWBegin, StUpdWBad, StUpdSpillC, StUpdWNext,
       StUpdInfo, StUpdInfoC, StUpdBufGo, StUpdBufCpl, StUpdMemCpl,
       StUpdImgRd, StUpdImgGo, StUpdImgVC, StUpdImgIC, StUpdImgMW,
       StUpdImgMC, StUpdImgSC,
@@ -516,6 +516,7 @@ module g6lc_apu_vnfront
     logic [15:0]         rw_cnt_q;     // array count
     logic [7:0]          rw_typ_q;     // descriptor type
     logic                rw_imm_q, upd_imm_q, cp_imm_q;
+    logic                rw_seq_q;     // row scan takes next index (spill)
 
     // vkUpdateDescriptorSets staged walk
     logic [15:0]         upd_i_q;      // write index
@@ -525,6 +526,7 @@ module g6lc_apu_vnfront
     logic [63:0]         upd_off_q, upd_rng_q;
     logic [31:0]         upd_dstb_q, upd_arr_q, upd_dcnt_q,
                          upd_type_q;
+    logic [31:0]         arr_i_q;      // array index within current row
     logic [31:0]         upd_rec_q;    // current record byte address
     logic                upd_bad_q;    // write-level row/type/bounds fail
     logic                upd_pois_q;   // an element needs the poison bit
@@ -1283,6 +1285,7 @@ module g6lc_apu_vnfront
         upd_elok_q <= 1'b0; upd_img_q <= 1'b0; upd_eb_q <= '0;
         upd_esz_q <= '0; upd_smp_q <= '0; upd_vw_q <= '0;
         upd_iw_q <= '0; upd_mh_q <= '0;
+        arr_i_q <= '0; rw_seq_q <= 1'b0;
         ud_mslot_q <= '0; ud_mgen_q <= '0;
         cp_i_q <= '0; cp_src_q <= '0; cp_dsid_q <= '0;
         cp_sb_q <= '0; cp_sa_q <= '0; cp_db_q <= '0;
@@ -4757,7 +4760,8 @@ module g6lc_apu_vnfront
             if (op_cpl_i.status != APU_OBJPAY_OK) begin
               rw_ok_q <= 1'b0;
               state_q <= row_ret_q;
-            end else if (op_cpl_i.rdata[31:24] == rw_bind_q[7:0]) begin
+            end else if (rw_seq_q ||
+                         op_cpl_i.rdata[31:24] == rw_bind_q[7:0]) begin
               rw_cnt_q <= op_cpl_i.rdata[15:0];
               rw_typ_q <= op_cpl_i.rdata[23:16];
               opr_q    <= '{op: APU_OBJPAY_OP_READ,
@@ -4777,7 +4781,8 @@ module g6lc_apu_vnfront
             if (op_cpl_i.status != APU_OBJPAY_OK) begin
               rw_ok_q <= 1'b0;
               state_q <= row_ret_q;
-            end else if (op_cpl_i.rdata[31:24] != rw_bind_q[15:8]) begin
+            end else if (!rw_seq_q &&
+                         op_cpl_i.rdata[31:24] != rw_bind_q[15:8]) begin
               rw_i_q  <= rw_i_q + 16'd1;
               state_q <= StRowSc;
             end else begin
@@ -4851,17 +4856,24 @@ module g6lc_apu_vnfront
             end else begin
               rw_bind_q <= upd_dstb_q[15:0];
               rw_i_q    <= '0;
+              rw_seq_q  <= 1'b0;
               row_ret_q <= StUpdWBad;
               state_q   <= StRowSc;
             end
           end
           StUpdWBad: begin
             upd_imm_q <= rw_imm_q;
-            // write-level failures poison the set at WNext; the
-            // element loop only covers the in-range prefix
+            // write-level failures poison the set at WNext.  A
+            // descriptorCount that overruns the binding is not an
+            // error: Consecutive Binding Updates spill the remainder
+            // into subsequent same-type bindings (StUpdInfo/
+            // StUpdSpillC).  Fatal here are only a missing or
+            // incompatible row, or a dstArrayElement already past the
+            // array end.
             upd_bad_q <= !rw_ok_q || rw_typ_q != upd_type_q[7:0];
             if (!rw_ok_q || rw_typ_q != upd_type_q[7:0] ||
-                upd_arr_q + upd_dcnt_q > {16'h0, rw_cnt_q})
+                (rw_cnt_q != 16'h0 &&
+                 upd_arr_q >= {16'h0, rw_cnt_q}))
               upd_pois_q <= 1'b1;
             if (!rw_ok_q || rw_typ_q != upd_type_q[7:0]) begin
               stg_i_q <= stg_i_q + StgBits'(upd_dcnt_q[15:0] *
@@ -4869,20 +4881,41 @@ module g6lc_apu_vnfront
               state_q <= StUpdWNext;
             end else begin
               ent_j_q <= '0;
+              arr_i_q <= upd_arr_q;
+              state_q <= StUpdInfo;
+            end
+          end
+          StUpdSpillC: begin
+            // the spilled-to row resolved: continue only into a
+            // type-compatible binding; otherwise poison the set and
+            // consume the still-unwritten staged infos
+            rw_seq_q  <= 1'b0;
+            upd_imm_q <= rw_imm_q;
+            if (!rw_ok_q || rw_typ_q != upd_type_q[7:0]) begin
+              automatic logic [31:0] left =
+                  upd_dcnt_q > {16'h0, ent_j_q}
+                  ? upd_dcnt_q - {16'h0, ent_j_q} : 32'h0;
+              upd_pois_q <= 1'b1;
+              stg_i_q <= stg_i_q + StgBits'(left[15:0] *
+                         16'(upd_stride(upd_type_q[7:0])));
+              state_q <= StUpdWNext;
+            end else begin
+              arr_i_q <= '0;
               state_q <= StUpdInfo;
             end
           end
           StUpdInfo: begin
-            if (32'(ent_j_q) >= upd_dcnt_q ||
-                upd_arr_q + 32'(ent_j_q) >= {16'h0, rw_cnt_q}) begin
-              // elements beyond the binding's array bound were already
-              // poisoned at WBad — consume their staged infos in bulk
-              automatic logic [31:0] left =
-                  upd_dcnt_q > {16'h0, ent_j_q}
-                  ? upd_dcnt_q - {16'h0, ent_j_q} : 32'h0;
-              stg_i_q <= stg_i_q + StgBits'(left[15:0] *
-                         16'(upd_stride(upd_type_q[7:0])));
+            if (32'(ent_j_q) >= upd_dcnt_q) begin
               state_q <= StUpdWNext;
+            end else if (arr_i_q >= {16'h0, rw_cnt_q}) begin
+              // the current binding's array is full but elements
+              // remain: Consecutive Binding Updates continue into the
+              // next binding-sorted row (a count==0 row is skipped by
+              // the same check on the following pass)
+              rw_i_q    <= rw_i_q + 16'd1;
+              rw_seq_q  <= 1'b1;
+              row_ret_q <= StUpdSpillC;
+              state_q   <= StRowSc;
             end else if (is_buf_typ(upd_type_q[7:0])) begin
               upd_h_q   <= '0;
               stg_ret_q <= StUpdInfoC;
@@ -4903,8 +4936,7 @@ module g6lc_apu_vnfront
               upd_esz_q  <= '0;
               upd_mh_q   <= '0;
               upd_rec_q  <= {5'h0, rsv_base_q, 2'b00} +
-                            ((32'(rw_off_q) + upd_arr_q +
-                              32'(ent_j_q)) << 5);
+                            ((32'(rw_off_q) + arr_i_q) << 5);
               state_q    <= StUpdWr0;
             end
           end
@@ -4936,8 +4968,7 @@ module g6lc_apu_vnfront
           end
           StUpdBufCpl: begin
             upd_rec_q <= {5'h0, rsv_base_q, 2'b00} +
-                         ((32'(rw_off_q) + upd_arr_q +
-                           32'(ent_j_q)) << 5);
+                         ((32'(rw_off_q) + arr_i_q) << 5);
             if (ot_cpl_i.status != APU_OBJTAB_OK ||
                 ot_cpl_i.entry.bind_mem[15:0] == APU_OBJTAB_SLOT_NONE) begin
               upd_elok_q <= 1'b0;
@@ -5035,8 +5066,7 @@ module g6lc_apu_vnfront
             upd_iw_q   <= '0;
             upd_mh_q   <= '0;
             upd_rec_q  <= {5'h0, rsv_base_q, 2'b00} +
-                          ((32'(rw_off_q) + upd_arr_q +
-                            32'(ent_j_q)) << 5);
+                          ((32'(rw_off_q) + arr_i_q) << 5);
             if (upd_type_q[7:0] == 8'd0 && upd_imm_q) begin
               // Layout-owned SAMPLER descriptors ignore sampler writes.
               upd_elok_q <= 1'b1;
@@ -5243,6 +5273,7 @@ module g6lc_apu_vnfront
 // pragma translate_on
             end
             ent_j_q <= ent_j_q + 16'd1;
+            arr_i_q <= arr_i_q + 32'd1;
             state_q <= StUpdInfo;
           end
           // write end: apply the poison bit, then advance / copies
@@ -7058,7 +7089,12 @@ module g6lc_apu_vnfront
                           f_img_fmt(op_q.imm[2]) !=
                               8'(APU_IMG_FMT_D32_SFLOAT) &&
                           f_img_fmt(op_q.imm[2]) !=
-                              8'(APU_IMG_FMT_D16_UNORM))
+                              8'(APU_IMG_FMT_D16_UNORM) &&
+                          // G6LC stencil: D24S8 is a real depth-stencil
+                          // attachment — the raster stores {stencil[31:24],
+                          // depth_unorm24[23:0]} and runs f_scmp/f_sop.
+                          f_img_fmt(op_q.imm[2]) !=
+                              8'(APU_IMG_FMT_D24_UNORM_S8_UINT))
                         ) begin
               result_q <= APU_VK_ERROR_FEATURE_NOT_PRESENT;
               state_q  <= StRep;
@@ -7131,10 +7167,14 @@ module g6lc_apu_vnfront
                   - op_q.imm[10]
                 : op_q.imm[11];
             // G2a: the view aspect is COLOR on color formats and
-            // DEPTH on the two depth formats
+            // DEPTH on the depth formats.  G6LC stencil: D24S8 joins
+            // them — its packed {stencil,depth} plane is addressed as
+            // the DEPTH aspect (aspect 2), the single-plane copy path
+            // resolves it to img0.base and returns the full word.
             automatic logic        asp_ok =
                 (ent_q.aux[39:32] == 8'(APU_IMG_FMT_D32_SFLOAT) ||
-                 ent_q.aux[39:32] == 8'(APU_IMG_FMT_D16_UNORM))
+                 ent_q.aux[39:32] == 8'(APU_IMG_FMT_D16_UNORM) ||
+                 ent_q.aux[39:32] == 8'(APU_IMG_FMT_D24_UNORM_S8_UINT))
                 ? op_q.imm[7] == 32'd2 : op_q.imm[7] == 32'd1;
             if (vdim == 3'd7 ||
                 !f_view_compat(ent_q.state[20:19], vdim,

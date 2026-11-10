@@ -1,0 +1,9 @@
+{
+  "base": "E:\\cva6\\build-platform\\workspace\\build\\hyp8-r95-csr-73e4d2d277",
+  "current": "E:\\cva6\\build-platform\\workspace\\build\\hyp8-r95-csr-73e4d2d277\\current",
+  "runner": "E:\\cva6\\build-platform\\workspace\\build\\hyp8-r95-csr-73e4d2d277\\scripts\\run_hyp8_memory.py",
+  "tag": "hyp8-r95-csr-73e4d2d277-current",
+  "manifest_sha256": "a8d74f78d8d7d33db99512eeeb852b54f8a447613a3fe2d1d887edd362a36e2b",
+  "runner_sha256": "5c23b1ddcbe154c587d73155c0fc78c242bfd7e3e88ff806ba6c66c15964c652",
+  "scope": "minimal CSR dependencies; fatal WIDTH/WIDTHEXPAND/WIDTHTRUNC"
+}

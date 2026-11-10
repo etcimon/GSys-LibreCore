@@ -406,6 +406,34 @@ class PrepareTests(unittest.TestCase):
                          "tb_g6lc_storamic_cpu_origin.sv", "cva6.sv"):
                 self.assertNotIn(name, manifest["sources"])
 
+    def test_stq_commit_flush_sources_are_leaf_only(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "build-platform/workspace") as tmp:
+            self.assertEqual(self.invoke(
+                Path(tmp), "--prepare-only", "--stages", "stq-commit-flush"), 0)
+            plan = json.loads(next(Path(tmp).glob("*/launch-plan.json")).read_text())
+            manifest = json.loads(Path(plan["manifest"]).read_text())
+            for name in ("store_buffer.sv", "tb_g6lc_stq_commit_flush.sv",
+                         "run_stq_commit_flush.py", "config_pkg.sv",
+                         "g6lc64_ooo_config_pkg.sv", "riscv_pkg.sv",
+                         "ariane_pkg.sv", "g6lc_ooo_pkg.sv"):
+                self.assertIn(name, manifest["sources"])
+            for name in ("cpu_origin_plan.json", "run_cpu_origin.py",
+                         "cva6.sv", "load_store_unit.sv"):
+                self.assertNotIn(name, manifest["sources"])
+
+    def test_cpu_debug_stq_mutant_shares_the_cpu_debug_closure(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "build-platform/workspace") as tmp:
+            self.assertEqual(self.invoke(
+                Path(tmp), "--prepare-only", "--stages",
+                "cpu-debug-stq-mutant"), 0)
+            plan = json.loads(next(Path(tmp).glob("*/launch-plan.json")).read_text())
+            manifest = json.loads(Path(plan["manifest"]).read_text())
+            self.assertEqual(manifest["stages"], ["cpu-debug-stq-mutant"])
+            for name in ("cpu_origin_plan.json", "run_cpu_debug.py",
+                         "tb_g6lc_storamic_cpu_debug.sv",
+                         "g6lc_cpu_debug_program.py", "store_buffer.sv"):
+                self.assertIn(name, manifest["sources"])
+
     def test_csr_scc_mutation_reverts_exactly_the_promoted_fix(self):
         spec = importlib.util.spec_from_file_location(
             "storamic_run_csr_scc", Path(__file__).with_name("run_csr_scc.py"))

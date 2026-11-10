@@ -2961,6 +2961,11 @@ module g6lc_apu_cmdexec
                 rd_q.da             <= att_img_q[brp_ak_q];
                 rd_q.da_valid       <= 1'b1;
                 rd_q.clear_color[0] <= clearv_q[{brp_ak_q, 2'b00}];
+                // D24S8 depth-stencil: the wire union has no
+                // depthStencil arm, so the stencil clear byte rides the
+                // colour uint32[1] slot -> clear_color[1][7:0].  D32/D16
+                // ignore it (their CLEAR branch never reads [1]).
+                rd_q.clear_color[1] <= clearv_q[{brp_ak_q, 2'b00} + 5'd1];
               end else begin
                 rd_q.ca[0]       <= att_img_q[brp_ak_q];
                 rd_q.ca_valid[0] <= 1'b1;

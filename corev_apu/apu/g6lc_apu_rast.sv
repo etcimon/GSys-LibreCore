@@ -1253,7 +1253,11 @@ module g6lc_apu_rast
                       dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM)
                       ? {2{f_f32_u16(dr_q.clear_color[0])}}
                       : dr_q.da.fmt == 8'(APU_IMG_FMT_D24_UNORM_S8_UINT)
-                      ? {8'h00, f_f32_u24(dr_q.clear_color[0])}
+                      // stencil clear byte = clear_color[1][7:0] (the
+                      // VkClearDepthStencilValue.stencil wire slot); D32/
+                      // D16 never reach this branch.
+                      ? {dr_q.clear_color[1][7:0],
+                         f_f32_u24(dr_q.clear_color[0])}
                       : dr_q.clear_color[0];
                   else
                     clr_pix_q <=

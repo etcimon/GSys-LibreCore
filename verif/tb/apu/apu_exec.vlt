@@ -22,5 +22,5 @@ lint_off -rule UNOPTFLAT -file "*/core/cvfpu/src/fpu_div_sqrt_mvp/hdl/control_mv
 lint_off -rule BLKLOOPINIT -file "*/vendor/pulp-platform/tech_cells_generic/src/rtl/tc_sram.sv"
 // Older 5.008 builds unroll index zero before UNSIGNED lint. Both inclusive
 // bounds deliberately include zero; keep these waivers line-specific.
-lint_off -rule UNSIGNED -file "*/corev_apu/apu/g6lc_apu_shwave.sv" -lines 2462
+lint_off -rule UNSIGNED -file "*/corev_apu/apu/g6lc_apu_shwave.sv" -lines 2465-2466
 lint_off -rule UNSIGNED -file "*/corev_apu/apu/g6lc_apu_objmem.sv" -lines 900

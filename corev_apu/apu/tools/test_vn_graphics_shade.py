@@ -17,13 +17,15 @@ def f32bits(value):
     return struct.unpack('<I', struct.pack('<f', value))[0]
 
 
-def vs_program(desc=False, ubo=False):
+def vs_program(desc=False, ubo=False, z=0.5):
     """Hand-assembled equivalent of corpus/vs_passthru.vert:
-    pos=loc0 vec2, col=loc1 vec4 -> Position=vec4(pos.xy,.5,1),
+    pos=loc0 vec2, col=loc1 vec4 -> Position=vec4(pos.xy,z,1),
     vcol=loc0 vec4(col.rgb, float(VertexIndex)).  Self-contained so the
     frozen cohort needs no corpus binaries.  desc=True adds an unused
     DescriptorSet/Binding-decorated UBO; ubo=True additionally loads it into
-    Position.w so descriptor reads are observable in the vary records."""
+    Position.w so descriptor reads are observable in the vary records.
+    z sets the constant Position.z (clip z/w -> NDC depth) so tests can
+    place geometry inside or outside the viewport depth range."""
     words = [0x07230203, 0x00010300, 0, 48, 0]
 
     def emit(opcode, *values):
@@ -64,7 +66,7 @@ def vs_program(desc=False, ubo=False):
     if desc or ubo:
         emit(59, 17, 16, 2)         # ubo (Uniform)
     emit(43, 3, 18, 0)              # f0
-    emit(43, 3, 19, 0x3F000000)     # f0.5
+    emit(43, 3, 19, struct.unpack('<I', struct.pack('<f', z))[0])  # fz
     emit(43, 3, 20, 0x3F800000)     # f1.0
     emit(43, 6, 21, 0)              # i0
     emit(54, 1, 22, 0, 2)           # main()
@@ -86,6 +88,136 @@ def vs_program(desc=False, ubo=False):
     emit(81, 3, 33, 28, 2)          # c2
     emit(80, 5, 34, 31, 32, 33, 30) # vc = (c0,c1,c2,vf)
     emit(62, 15, 34)                # Store vcol vc
+    emit(253)                       # Return
+    emit(56)                        # FunctionEnd
+    return tuple(words)
+
+
+def vs_inst_program(step=0.4):
+    """vs_program variant that offsets Position.x by InstanceIndex*step so
+    instanced draws land in distinct columns.  Self-contained (no corpus
+    binary): the only difference from vs_program is an added BuiltIn
+    InstanceIndex input read through the record slot-8 feed, one int->float
+    convert, one FMul and one FAdd folded into the x component.  step is the
+    per-instance clip-x stride baked as an OpConstant."""
+    words = [0x07230203, 0x00010300, 0, 48, 0]
+
+    def emit(opcode, *values):
+        words.extend(((len(values) + 1) << 16 | opcode, *values))
+
+    emit(17, 1)                     # OpCapability Shader
+    emit(14, 0, 1)                  # OpMemoryModel Logical GLSL450
+    emit(15, 0, 22, 0x6E69616D, 0, 11, 12, 13, 14, 15, 16)  # EntryPoint Vertex
+    emit(71, 11, 30, 0)             # pos   Location 0
+    emit(71, 12, 30, 1)             # col   Location 1
+    emit(71, 15, 30, 0)             # vcol  Location 0
+    emit(71, 13, 11, 42)            # vidx  BuiltIn VertexIndex
+    emit(71, 16, 11, 43)            # iidx  BuiltIn InstanceIndex
+    emit(71, 14, 11, 0)             # glpos BuiltIn Position
+    emit(19, 1)                     # %void
+    emit(33, 2, 1)                  # %fnty = fn(void)
+    emit(22, 3, 32)                 # %float
+    emit(23, 4, 3, 2)               # %v2f
+    emit(23, 5, 3, 4)               # %v4f
+    emit(21, 6, 32, 1)              # %int
+    emit(32, 7, 1, 4)               # ptr Input v2f
+    emit(32, 8, 1, 5)               # ptr Input v4f
+    emit(32, 9, 1, 6)               # ptr Input int
+    emit(32, 10, 3, 5)              # ptr Output v4f
+    emit(59, 7, 11, 1)              # pos
+    emit(59, 8, 12, 1)              # col
+    emit(59, 9, 13, 1)              # vidx
+    emit(59, 9, 16, 1)              # iidx  (same ptr-Input-int type %9)
+    emit(59, 10, 14, 3)             # glpos
+    emit(59, 10, 15, 3)             # vcol
+    emit(43, 3, 18, 0)              # f0
+    emit(43, 3, 19, 0x3F000000)     # f0.5
+    emit(43, 3, 20, 0x3F800000)     # f1.0
+    emit(43, 3, 40, struct.unpack('<I', struct.pack('<f', step))[0])  # fstep
+    emit(43, 6, 21, 0)              # i0
+    emit(54, 1, 22, 0, 2)           # main()
+    emit(248, 23)                   # label
+    emit(61, 4, 24, 11)             # p   = Load v2f pos
+    emit(81, 3, 25, 24, 0)          # x   = p.x
+    emit(81, 3, 26, 24, 1)          # y   = p.y
+    emit(61, 6, 27, 16)             # ii  = Load int iidx
+    emit(111, 3, 28, 27)            # iff = ConvertSToF ii
+    emit(133, 3, 29, 28, 40)        # ioff = iff * fstep   (OpFMul)
+    emit(129, 3, 30, 25, 29)        # x'  = x + ioff        (OpFAdd)
+    emit(80, 5, 31, 30, 26, 19, 20) # pos4 = (x', y, .5, 1)
+    emit(62, 14, 31)                # Store glpos pos4
+    emit(61, 5, 32, 12)             # c   = Load v4f col
+    emit(61, 6, 33, 13)             # vi  = Load int vidx
+    emit(111, 3, 34, 33)            # vf  = ConvertSToF vi
+    emit(81, 3, 35, 32, 0)          # c0
+    emit(81, 3, 36, 32, 1)          # c1
+    emit(81, 3, 37, 32, 2)          # c2
+    emit(80, 5, 38, 35, 36, 37, 34) # vc = (c0,c1,c2,vf)
+    emit(62, 15, 38)                # Store vcol vc
+    emit(253)                       # Return
+    emit(56)                        # FunctionEnd
+    return tuple(words)
+
+
+def vs_rate_program():
+    """vs_program variant that adds a per-instance float attribute (Location
+    2, bound inputRate=1) directly to Position.x — exercises the rate-1 fetch
+    path (inst_index addressing) end-to-end.  Self-contained: identical to
+    vs_program except an added float Input at Location 2 whose loaded value
+    is FAdd'ed into the x component (no InstanceIndex builtin needed — the
+    attribute itself carries the per-instance offset)."""
+    words = [0x07230203, 0x00010300, 0, 48, 0]
+
+    def emit(opcode, *values):
+        words.extend(((len(values) + 1) << 16 | opcode, *values))
+
+    emit(17, 1)                     # OpCapability Shader
+    emit(14, 0, 1)                  # OpMemoryModel Logical GLSL450
+    emit(15, 0, 22, 0x6E69616D, 0, 11, 12, 13, 14, 15, 16)  # EntryPoint Vertex
+    emit(71, 11, 30, 0)             # pos   Location 0
+    emit(71, 12, 30, 1)             # col   Location 1
+    emit(71, 15, 30, 0)             # vcol  Location 0
+    emit(71, 13, 11, 42)            # vidx  BuiltIn VertexIndex
+    emit(71, 16, 30, 2)             # off   Location 2  (float, rate-1 attr)
+    emit(71, 14, 11, 0)             # glpos BuiltIn Position
+    emit(19, 1)                     # %void
+    emit(33, 2, 1)                  # %fnty = fn(void)
+    emit(22, 3, 32)                 # %float
+    emit(23, 4, 3, 2)               # %v2f
+    emit(23, 5, 3, 4)               # %v4f
+    emit(21, 6, 32, 1)              # %int
+    emit(32, 7, 1, 4)               # ptr Input v2f
+    emit(32, 8, 1, 5)               # ptr Input v4f
+    emit(32, 9, 1, 6)               # ptr Input int
+    emit(32, 17, 1, 3)              # ptr Input float
+    emit(32, 10, 3, 5)              # ptr Output v4f
+    emit(59, 7, 11, 1)              # pos
+    emit(59, 8, 12, 1)              # col
+    emit(59, 9, 13, 1)              # vidx
+    emit(59, 17, 16, 1)             # off   (ptr Input float %17)
+    emit(59, 10, 14, 3)             # glpos
+    emit(59, 10, 15, 3)             # vcol
+    emit(43, 3, 18, 0)              # f0
+    emit(43, 3, 19, 0x3F000000)     # f0.5
+    emit(43, 3, 20, 0x3F800000)     # f1.0
+    emit(43, 6, 21, 0)              # i0
+    emit(54, 1, 22, 0, 2)           # main()
+    emit(248, 23)                   # label
+    emit(61, 4, 24, 11)             # p   = Load v2f pos
+    emit(81, 3, 25, 24, 0)          # x   = p.x
+    emit(81, 3, 26, 24, 1)          # y   = p.y
+    emit(61, 3, 27, 16)             # off = Load float off   (OpLoad %3 %27 %16)
+    emit(129, 3, 28, 25, 27)        # x'  = x + off          (OpFAdd)
+    emit(80, 5, 29, 28, 26, 19, 20) # pos4 = (x', y, .5, 1)
+    emit(62, 14, 29)                # Store glpos pos4
+    emit(61, 5, 30, 12)             # c   = Load v4f col
+    emit(61, 6, 31, 13)             # vi  = Load int vidx
+    emit(111, 3, 32, 31)            # vf  = ConvertSToF vi
+    emit(81, 3, 33, 30, 0)          # c0
+    emit(81, 3, 34, 30, 1)          # c1
+    emit(81, 3, 35, 30, 2)          # c2
+    emit(80, 5, 36, 33, 34, 35, 32) # vc = (c0,c1,c2,vf)
+    emit(62, 15, 36)                # Store vcol vc
     emit(253)                       # Return
     emit(56)                        # FunctionEnd
     return tuple(words)

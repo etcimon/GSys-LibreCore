@@ -109,7 +109,7 @@ package g6lc_apu_rast_pkg;
     logic [31:0]       depth_bias_slope;     // f32 slopeFactor (stored)
     logic [31:0]       vertex_count, instance_count, first_vertex, first_instance;  // Draw; DrawIndexed: index_count in vertex_count
     logic [31:0]       first_index; logic signed [31:0] vertex_offset;
-    logic [3:0][31:0]  clear_color;          // CLEAR: VkClearColorValue float32[4]; depth clear uses [0]
+    logic [3:0][31:0]  clear_color;          // CLEAR: VkClearColorValue float32[4]; depth clear uses [0], D24S8 stencil byte uses [1][7:0]
   } apu_rast_draw_t;
   localparam int unsigned APU_RAST_VS_BATCH = 63;   // vertices per VS batch (multiple of 3; a strip/fan longer than this → UNSUPPORTED in v1)
   localparam int unsigned APU_RAST_FS_BATCH = 64;   // fragments per FS wave batch

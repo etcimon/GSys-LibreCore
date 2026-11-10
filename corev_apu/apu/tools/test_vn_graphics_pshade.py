@@ -8,7 +8,7 @@ import test_vn_transfers as transfer_fixture
 from test_vn_graphics_shade import vs_program
 from vn_compute import ShaderBinding
 from vn_graphics_fetch import ATTR_STRIDE
-from vn_graphics_pshade import FragmentShade
+from vn_graphics_pshade import FragmentShade, _quad_order
 
 
 def f32bits(value):
@@ -88,6 +88,143 @@ def fs_program(kind='color', desc=False, ubo=False, flat=False,
         emit(81, 3, 15, c, 1)       # y = c.y
         emit(80, 4, v, 14, 15, 9, 10)  # vec4(x, y, 0, 1)
         emit(62, 8, v)              # Store color v
+    emit(253)                       # Return
+    emit(56)                        # FunctionEnd
+    return tuple(words)
+
+
+def fs_program2():
+    """Two-output fragment module for the bounded MRT profile:
+    color(loc0) = vec4(0.5,0.25,0.75,1) and color(loc1) = vec4(1,0,1,1) —
+    two Location-decorated constant Output v4f so the two attachment
+    readbacks are distinguishable and deterministic (no varying alpha)."""
+    words = [0x07230203, 0x00010300, 0, 40, 0]
+
+    def emit(opcode, *values):
+        words.extend(((len(values) + 1) << 16 | opcode, *values))
+
+    entry, lbl = 9, 10
+    emit(17, 1)                     # OpCapability Shader
+    emit(14, 0, 1)                  # OpMemoryModel Logical GLSL450
+    emit(15, 4, entry, 0x6E69616D, 0, 7, 8, 12)  # EntryPoint Fragment
+    emit(16, entry, 7)              # OriginUpperLeft
+    emit(71, 7, 30, 0)              # vcol   Location 0 (Input, unused)
+    emit(71, 8, 30, 0)              # color0 Location 0 (Output)
+    emit(71, 12, 30, 1)             # color1 Location 1 (Output)
+    emit(19, 1)                     # %void
+    emit(33, 2, 1)                  # %fnty
+    emit(22, 3, 32)                 # %float
+    emit(23, 4, 3, 4)               # %v4f
+    emit(32, 5, 1, 4)               # ptr Input v4f
+    emit(32, 6, 3, 4)               # ptr Output v4f
+    # fp32 constants (declared before OpFunction): loc0 = (0.5,0.25,0.75,1)
+    emit(43, 3, 13, 0x3F000000)     # %13 = 0.5f
+    emit(43, 3, 14, 0x3E800000)     # %14 = 0.25f
+    emit(43, 3, 15, 0x3F400000)     # %15 = 0.75f
+    emit(43, 3, 16, 0x3F800000)     # %16 = 1.0f
+    emit(43, 3, 17, 0)              # %17 = 0.0f
+    emit(59, 5, 7, 1)               # vcol input
+    emit(59, 6, 8, 3)               # color0 output
+    emit(59, 6, 12, 3)              # color1 output
+    emit(54, 1, entry, 0, 2)        # main()
+    emit(248, lbl)                  # label
+    emit(80, 4, 18, 13, 14, 15, 16)  # %18 = vec4(0.5,0.25,0.75,1)
+    emit(62, 8, 18)                 # Store color0
+    emit(80, 4, 19, 16, 17, 16, 16)  # %19 = vec4(1,0,1,1)
+    emit(62, 12, 19)                # Store color1
+    emit(253)                       # Return
+    emit(56)                        # FunctionEnd
+    return tuple(words)
+
+
+def fs_kill_program():
+    """Conditional-discard fragment module for the bounded fs_late kill
+    profile: color(loc0) = vec4(0,1,0,1), but OpKill fires whenever
+    FragCoord.x < 4.0 — the left columns discard, the right write.  The
+    per-record kill flag lands in FS-out slot-8 flags bit0 and the
+    writeback stage skips colour+depth for flagged lanes (oracle
+    is_kill / is_killfn family)."""
+    words = [0x07230203, 0x00010300, 0, 48, 0]
+
+    def emit(opcode, *values):
+        words.extend(((len(values) + 1) << 16 | opcode, *values))
+
+    entry, lbl, kill_lbl, merge_lbl = 9, 10, 20, 21
+    emit(17, 1)                     # OpCapability Shader
+    emit(14, 0, 1)                  # OpMemoryModel Logical GLSL450
+    emit(15, 4, entry, 0x6E69616D, 0, 7, 8)      # EntryPoint Fragment main
+    emit(16, entry, 7)              # OriginUpperLeft
+    emit(71, 7, 11, 15)             # fc    BuiltIn FragCoord
+    emit(71, 8, 30, 0)              # color Location 0
+    emit(19, 1)                     # %1    void
+    emit(33, 2, 1)                  # %2    fnty
+    emit(22, 3, 32)                 # %3    float
+    emit(23, 4, 3, 4)               # %4    v4f
+    emit(20, 22)                    # %22   bool
+    emit(32, 5, 1, 4)               # %5    ptr Input v4f
+    emit(32, 6, 3, 4)               # %6    ptr Output v4f
+    emit(43, 3, 13, 0)              # %13 = 0.0f
+    emit(43, 3, 14, 0x3F800000)     # %14 = 1.0f
+    emit(43, 3, 15, 0x40800000)     # %15 = 4.0f
+    emit(59, 5, 7, 1)               # %7    fc input
+    emit(59, 6, 8, 3)               # %8    color output
+    emit(54, 1, entry, 0, 2)        # main()
+    emit(248, lbl)                  # header label
+    emit(61, 4, 16, 7)              # %16 = Load v4f fc
+    emit(81, 3, 17, 16, 0)          # %17 = fc.x
+    emit(184, 22, 18, 17, 15)       # %18 = fc.x < 4.0  (FOrdLessThan)
+    emit(247, merge_lbl, 0)         # OpSelectionMerge merge
+    emit(250, 18, kill_lbl, merge_lbl)  # BranchConditional cond kill merge
+    emit(248, kill_lbl)             # kill block
+    emit(252)                       # OpKill — discard this fragment
+    emit(248, merge_lbl)            # merge/continue block
+    emit(80, 4, 19, 13, 14, 13, 14)  # %19 = vec4(0,1,0,1)
+    emit(62, 8, 19)                 # Store color
+    emit(253)                       # Return
+    emit(56)                        # FunctionEnd
+    return tuple(words)
+
+
+def fs_deriv_program():
+    """Quad-derivative fragment module: color(loc0) =
+    vec4(dFdx(vcol.x), dFdy(vcol.y), fwidth(vcol.z), dFdxFine(vcol.x)).
+    Exercises the coarse OpDPdx/OpDPdy/OpFwidth quad-broadcast path and
+    the per-lane OpDPdxFine path — correctness depends on FS-in records
+    arriving in 2x2 screen-quad lane order (TL,TR,BL,BR per four)."""
+    words = [0x07230203, 0x00010300, 0, 48, 0]
+
+    def emit(opcode, *values):
+        words.extend(((len(values) + 1) << 16 | opcode, *values))
+
+    entry, lbl = 9, 10
+    emit(17, 1)                     # OpCapability Shader
+    emit(14, 0, 1)                  # OpMemoryModel Logical GLSL450
+    emit(15, 4, entry, 0x6E69616D, 0, 7, 8)      # EntryPoint Fragment main
+    emit(16, entry, 7)              # OriginUpperLeft
+    emit(71, 7, 30, 0)              # vcol   Location 0 (Input)
+    emit(71, 8, 30, 0)              # color  Location 0 (Output)
+    emit(19, 1)                     # %1    void
+    emit(33, 2, 1)                  # %2    fnty
+    emit(22, 3, 32)                 # %3    float
+    emit(23, 4, 3, 4)               # %4    v4f
+    emit(32, 5, 1, 4)               # %5    ptr Input v4f
+    emit(32, 6, 3, 4)               # %6    ptr Output v4f
+    emit(43, 3, 13, 0)              # %13 = 0.0f
+    emit(43, 3, 14, 0x3F800000)     # %14 = 1.0f
+    emit(59, 5, 7, 1)               # %7    vcol input
+    emit(59, 6, 8, 3)               # %8    color output
+    emit(54, 1, entry, 0, 2)        # main()
+    emit(248, lbl)                  # label
+    emit(61, 4, 11, 7)              # %11 = Load v4f vcol
+    emit(81, 3, 12, 11, 0)          # %12 = vcol.x
+    emit(81, 3, 15, 11, 1)          # %15 = vcol.y
+    emit(81, 3, 19, 11, 2)          # %19 = vcol.z
+    emit(207, 3, 16, 12)            # %16 = dFdx(%12)    OpDPdx coarse
+    emit(208, 3, 17, 15)            # %17 = dFdy(%15)    OpDPdy coarse
+    emit(209, 3, 20, 19)            # %20 = fwidth(%19)  OpFwidth coarse
+    emit(210, 3, 21, 12)            # %21 = dFdxFine(%12) OpDPdxFine
+    emit(80, 4, 22, 16, 17, 20, 21)  # %22 = vec4(dx, dy, fw, dxf)
+    emit(62, 8, 22)                 # Store color
     emit(253)                       # Return
     emit(56)                        # FunctionEnd
     return tuple(words)
@@ -576,6 +713,49 @@ class FragmentShadeTests(unittest.TestCase):
                 return
             self.executor.poll()
         self.fail('bounded fragment shade cohort did not drain')
+
+    def _qrec(self, px, py, tag):
+        rec = bytearray(ATTR_STRIDE)
+        struct.pack_into('<4f', rec, 0, px + 0.5, py + 0.5, 0.0, 1.0)
+        struct.pack_into('<I', rec, 16, tag)      # marker in slot1/vcol
+        return bytes(rec)
+
+    def test_quad_order_groups_quads_and_synthesises_helpers(self):
+        # Scanline input: quad(0,0) complete, quad(2,0) missing its
+        # bottom row (lanes 2,3).  _quad_order must emit each quad as
+        # four consecutive TL,TR,BL,BR lanes and fill uncovered lanes
+        # with helper records carrying an off-screen FragCoord plus a
+        # covered neighbour's varyings.
+        recs = [self._qrec(0, 0, 0xA0), self._qrec(1, 0, 0xA1),
+                self._qrec(0, 1, 0xA2), self._qrec(1, 1, 0xA3),
+                self._qrec(2, 0, 0xB0), self._qrec(3, 0, 0xB1)]
+        out = _quad_order(b''.join(recs))
+        self.assertIsNotNone(out)
+        self.assertEqual(len(out) // ATTR_STRIDE, 8)   # 2 quads * 4 lanes
+
+        def lane(i):
+            return out[i * ATTR_STRIDE:(i + 1) * ATTR_STRIDE]
+
+        def coord(rec):
+            return struct.unpack_from('<2f', rec, 0)
+
+        def tag(rec):
+            return struct.unpack_from('<I', rec, 16)[0]
+
+        # quad(0,0): lanes TL,TR,BL,BR = the four original records.
+        self.assertEqual([tag(lane(i)) for i in range(4)],
+                         [0xA0, 0xA1, 0xA2, 0xA3])
+        # quad(2,0): top row covered (lanes 0,1); bottom row helpers.
+        self.assertEqual(tag(lane(4)), 0xB0)
+        self.assertEqual(coord(lane(4)), (2.5, 0.5))
+        self.assertEqual(tag(lane(5)), 0xB1)
+        self.assertEqual(coord(lane(5)), (3.5, 0.5))
+        for i in (6, 7):
+            self.assertEqual(coord(lane(i)), (-1.0e6, -1.0e6))
+            self.assertEqual(tag(lane(i)), 0xB0)   # ref = lowest lane
+        # degenerate / duplicate FragCoord falls back to scanline order.
+        dup = self._qrec(0, 0, 0xC0) + self._qrec(0, 0, 0xC1)
+        self.assertIsNone(_quad_order(dup))
 
     def test_color_passthrough_records_in_order(self):
         job = self.executor.enqueue(self.context, [self.shade(count=4)])

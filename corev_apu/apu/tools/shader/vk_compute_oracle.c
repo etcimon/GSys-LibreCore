@@ -68,6 +68,18 @@ struct bind {
     int smpminl, smpmaxl, smpbias;          /* q4.4 fixed */
     char init[512];
 };
+/* Resolve the effective VkDescriptorType for a bind row.  "dyn" marks a
+   dynamic-offset binding; the uniform family (UNIFORM_BUFFER /
+   UNIFORM_BUFFER_DYNAMIC) maps to UNIFORM_BUFFER_DYNAMIC while every
+   other kind keeps the historical STORAGE_BUFFER_DYNAMIC default so
+   existing storage vectors are unchanged. */
+static VkDescriptorType btype(const struct bind *b) {
+    if (!b->dyn) return (VkDescriptorType)b->kind;
+    if (b->kind == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
+        b->kind == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC)
+        return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+}
 static unsigned gx = 1, gy = 1, gz = 1;
 static unsigned pushw[32]; static int npush = 0;
 static unsigned dynw[32]; static int ndyn = 0;
@@ -245,11 +257,7 @@ int main(int argc, char **argv) {
                     lbd[k].descriptorCount = cnt;
             } else {
                 lbd[nl++] = (VkDescriptorSetLayoutBinding){
-                    binds[i].binding,
-                    (VkDescriptorType)(
-                        binds[i].dyn
-                            ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC
-                            : binds[i].kind),
+                    binds[i].binding, btype(&binds[i]),
                     cnt, VK_SHADER_STAGE_COMPUTE_BIT, NULL};
             }
         }
@@ -283,9 +291,7 @@ int main(int argc, char **argv) {
     /* pool covers every element of every row, per descriptor type */
     unsigned ptyp[16]; int npt = 0;
     for (int i = 0; i < nbind; i++) {
-        unsigned t = binds[i].dyn
-            ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC
-            : binds[i].kind;
+        unsigned t = btype(&binds[i]);
         int k;
         for (k = 0; k < npt; k++)
             if ((ptyp[k] & 0xFFFF) == t) break;
@@ -479,11 +485,7 @@ int main(int argc, char **argv) {
         VkDescriptorBufferInfo dbi = {buf[i], 0, binds[i].size};
         VkWriteDescriptorSet wds = {
             VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, dsets[dsidx],
-            binds[i].binding, binds[i].idx, 1,
-            (VkDescriptorType)(
-                binds[i].dyn
-                    ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC
-                    : binds[i].kind),
+            binds[i].binding, binds[i].idx, 1, btype(&binds[i]),
             NULL, &dbi, NULL};
         vkUpdateDescriptorSets(dev, 1, &wds, 0, NULL);
     }

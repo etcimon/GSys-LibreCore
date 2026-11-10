@@ -211,6 +211,51 @@ class DescriptorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.operand()
 
+    def test_update_spills_descriptor_count_into_subsequent_binding(self):
+        # VkWriteDescriptorSet Consecutive Binding Updates: a write whose
+        # descriptorCount overruns dstBinding's remaining array elements
+        # continues into the next binding of the same descriptor type,
+        # matching CTS api.descriptor_set.descriptor_set_layout_binding.
+        # update_subsequent_binding (binding0 count=2, binding1 count=1,
+        # one write dstBinding=0 count=3 spills element 2 into binding1[0]).
+        layout, pool, dset = (0x400080001008, 0x400090001009,
+                              0x4000A000100A)
+        dtype = 7
+        self.f.command('vkCreateDescriptorSetLayout', device=self.w.DEVICE,
+            pSetLayout=layout, pCreateInfo=self.w.structure(
+                'VkDescriptorSetLayoutCreateInfo', pNext=[], flags=0,
+                bindingCount=2, pBindings=[
+                    self.w.structure('VkDescriptorSetLayoutBinding',
+                        binding=0, descriptorType=dtype, descriptorCount=2,
+                        stageFlags=0x20, pImmutableSamplers=[]),
+                    self.w.structure('VkDescriptorSetLayoutBinding',
+                        binding=1, descriptorType=dtype, descriptorCount=1,
+                        stageFlags=0x20, pImmutableSamplers=[])]))
+        self.f.command('vkCreateDescriptorPool', device=self.w.DEVICE,
+            pDescriptorPool=pool, pCreateInfo=self.w.structure(
+                'VkDescriptorPoolCreateInfo', pNext=[], flags=1, maxSets=1,
+                poolSizeCount=1, pPoolSizes=[self.w.structure(
+                    'VkDescriptorPoolSize', type=dtype,
+                    descriptorCount=3)]))
+        self.f.command('vkAllocateDescriptorSets', device=self.w.DEVICE,
+            pDescriptorSets=[dset], pAllocateInfo=self.w.structure(
+                'VkDescriptorSetAllocateInfo', pNext=[], descriptorPool=pool,
+                descriptorSetCount=1, pSetLayouts=[layout]))
+        infos = [self.w.structure('VkDescriptorBufferInfo',
+                                  buffer=self.f.BUFFER, offset=off,
+                                  range=128)
+                 for off in (256, 512, 768)]
+        self.f.command('vkUpdateDescriptorSets', device=self.w.DEVICE,
+            descriptorWriteCount=1, descriptorCopyCount=0, pDescriptorCopies=[],
+            pDescriptorWrites=[self.w.structure('VkWriteDescriptorSet',
+                pNext=[], dstSet=dset, dstBinding=0, dstArrayElement=0,
+                descriptorCount=3, descriptorType=dtype, pImageInfo=[],
+                pTexelBufferView=[], pBufferInfo=infos)])
+        for binding, element, want in ((0, 0, 256), (0, 1, 512), (1, 0, 768)):
+            op = buffer_descriptor(self.e, 1, dset, binding,
+                                   element=element)
+            self.assertEqual(op.binding.offset, want)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -1,0 +1,16 @@
+{
+  "module": "g6lc_l2_mshr",
+  "source": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/l2_cache/g6lc_l2_mshr.sv",
+  "template": "r96/boards/current-l3.manifest.json",
+  "binding": "g6lc_l2_top.sv:669,688-693; L3 caller MSHR_DEPTH=4, LINE_WIDTH=512 => OFF_BITS=6 and META_WIDTH=17",
+  "overrides": {
+    "DEPTH": 4,
+    "ADDR_WIDTH": 64,
+    "ID_WIDTH": 4,
+    "MAX_WAITERS": 4,
+    "META_WIDTH": 17,
+    "IDX_W": 2,
+    "NW": 4,
+    "NW_W": 3
+  }
+}

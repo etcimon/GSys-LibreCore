@@ -1,0 +1,18 @@
+{
+  "baseline-verified": {
+    "path": "E:/cva6/build-platform/workspace/build/hyp8-r97-flu-1793294051/baseline-verified",
+    "manifest_sha256": "1d73455032eda4a2af10178a228d6169ea784d5b14b69b956d059223b99c65b4",
+    "rtl_sha256": "25fa7edec94a8489a548ef6e3d142da0f9fa468f16386c154d0bad2778c4c154",
+    "bench_sha256": "64e70ae17e18f081407a22b184e0b38c816683f779c534f6f9200b726f7ff2dc"
+  },
+  "candidate-final": {
+    "path": "E:/cva6/build-platform/workspace/build/hyp8-r97-flu-1793294051/candidate-final",
+    "manifest_sha256": "d21c24f936ff8ad95b620616fbd20204c619d2eb4cd342f26ae7d7c502dddefa",
+    "rtl_sha256": "f2e97a5032227a49a9cadf9b57519a9470ed8084718fcc189c3d3a07e6b82c19",
+    "bench_sha256": "64e70ae17e18f081407a22b184e0b38c816683f779c534f6f9200b726f7ff2dc"
+  },
+  "runner": {
+    "path": "E:/cva6/build-platform/workspace/build/hyp8-r97-flu-1793294051/scripts/run_hyp8_memory.py",
+    "sha256": "64a4fdfe98db62e313f2518e155a19ec8e44dd0e25963ce09274a75d5e4c529b"
+  }
+}

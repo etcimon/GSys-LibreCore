@@ -1,0 +1,79 @@
+
+[1mLint + elaboration (1 target(s))[0m
+[36m•[0m lint: remote via the testharness proxy (1 target(s))
+
+[1mSimulation[0m
+[36m•[0m sim preflight: READY to attempt (tools present)
+[36m•[0m   [ok] bash: git-bash → C:\Program Files\Git\bin\bash.exe
+[36m•[0m   [ok] riscv-gcc: managed or PATH
+[36m•[0m   [ok] spike: managed or PATH
+[36m•[0m   [ok] verilator: managed or PATH
+[36m•[0m   [ok] make: on PATH (must be GNU Make, not Chocolatey Windows shim)
+[34m[1/2][0m smoke-cv64a6 (verif/regress/smoke-tests-cv64a6_imafdc_sv39.sh)
+[36m•[0m regress engine: bash (set G6LC_REGRESS_ENGINE=wsl|git-bash to override)
+Error: required tool 'make' not found on PATH
+  On Windows prefer WSL (default): G6LC_REGRESS_ENGINE=wsl
+  Or fix Git-Bash PATH so /usr/bin (dirname,sed,rm) and GNU make/python3 exist.
+[31m✗[0m smoke-cv64a6 failed (exit 127)
+[34m[2/2][0m smoke-cv32a65x (verif/regress/smoke-tests-cv32a65x.sh)
+[36m•[0m regress engine: bash (set G6LC_REGRESS_ENGINE=wsl|git-bash to override)
+Error: required tool 'make' not found on PATH
+[31m✗[0m smoke-cv32a65x failed (exit 127)
+
+[1mSynthesis smoke[0m
+[36m•[0m synth: remote via the testharness proxy (1 target(s), parallel)
+
+[1mGate summary[0m
+[31m✗[0m FAIL  lint    g6lc64_hyp8            remote exit 1, 3 error(s) (161194 ms)
+[36m•[0m SKIP  lint    g6lc64_hyp8            strict slang elaboration is local-only: no standalone slang on the builder (0 ms)
+[31m✗[0m FAIL  sim     smoke-cv64a6           exit 127 (129 ms)
+[31m✗[0m FAIL  sim     smoke-cv32a65x         exit 127 (99 ms)
+[31m✗[0m FAIL  synth   g6lc64_hyp8            remote exit 1 (122283 ms)
+
+[1mlint log — g6lc64_hyp8[0m
+  %Error: Cannot find file containing module: /opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv
+          ... Looked in:
+               /opt/testharness/repo/core/include///opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv
+               /opt/testharness/repo/core/include///opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv.v
+               /opt/testharness/repo/core/include///opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv.sv
+               /opt/testharness/repo/vendor/pulp-platform/common_cells/include///opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv
+               /opt/testharness/repo/vendor/pulp-platform/common_cells/include///opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv.v
+               /opt/testharness/repo/vendor/pulp-platform/common_cells/include///opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv.sv
+               /opt/testharness/repo/vendor/pulp-platform/common_cells/src///opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv
+               /opt/testharness/repo/vendor/pulp-platform/common_cells/src///opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv.v
+               /opt/testharness/repo/vendor/pulp-platform/common_cells/src///opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv.sv
+               /opt/testharness/repo/vendor/pulp-platform/axi/include///opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv
+               /opt/testharness/repo/vendor/pulp-platform/axi/include///opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv.v
+               /opt/testharness/repo/vendor/pulp-platform/axi/include///opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv.sv
+               /opt/testharness/repo/common/local/util///opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv
+               /opt/testharness/repo/common/local/util///opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv.v
+               /opt/testharness/repo/common/local/util///opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv.sv
+               /opt/testharness/repo/core/cache_subsystem/hpdcache/rtl/include//opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv
+               /opt/testharness/repo/core/cache_subsystem/hpdcache/rtl/include//opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv.v
+               /opt/testharness/repo/core/cache_subsystem/hpdcache/rtl/include//opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv.sv
+               /opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv
+               /opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv.v
+               /opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv.sv
+               obj_dir//opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv
+               obj_dir//opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv.v
+               obj_dir//opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv.sv
+  %Error-PKGNODECL: /opt/testharness/repo/core/include/riscv_pkg.sv:25:21: Package/class 'cva6_config_pkg' not found, and needs to be predeclared (IEEE 1800-2017 26.3)
+     25 |   localparam XLEN = cva6_config_pkg::CVA6ConfigXlen;
+        |                     ^~~~~~~~~~~~~~~
+                    ... For error description see https://verilator.org/warn/PKGNODECL?v=5.008
+  %Error: Exiting due to 2 error(s)
+
+[1msynth log — g6lc64_hyp8[0m
+  /----------------------------------------------------------------------------\
+   |  yosys -- Yosys Open SYnthesis Suite                                       |
+   |  Copyright (C) 2012 - 2026  Claire Xenia Wolf <claire@yosyshq.com>         |
+   |  Distributed under an ISC-like license, type "license" to see terms        |
+   \----------------------------------------------------------------------------/
+   Yosys 0.68+ (git sha1 c30457480, Release, GNU /usr/bin/c++ 13.3.0)
+  
+  -- Running command `read_slang -f /home/ubuntu/.cache/g6lc-synth/g6lc64_hyp8.f --top cva6 --single-unit -DHPDCACHE_ASSERT_OFF -DSYNTHESIS; hierarchy -check -top cva6; proc; opt -fast; check -assert; stat' --
+  
+  1. Executing SLANG frontend.
+  error: '/opt/testharness/repo/core/include/g6lc64_hyp8_config_pkg.sv': No such file or directory
+  ERROR: Bad command
+[31m✗[0m Gate failed: 4 of 5 step(s).

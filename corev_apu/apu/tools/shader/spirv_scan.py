@@ -317,6 +317,7 @@ class Scanner:
         self.calls = []        # (word off, callee func id)
         self.has_kill = False  # kill/terminate/demote present
         self.wr_fdepth = False # module writes FragDepth (FS Output)
+        self.has_deriv = False # quad-derivative op (207..215) present
 
     # -- helpers -----------------------------------------------------
     # regmap row: {tag[31:30], aux[29:26] (const word count),
@@ -763,6 +764,8 @@ class Scanner:
                 raise Fault(FAULT['OPCODE'], opc, at)
             if opc in FRAG_ONLY and self.em != EM['FRAGMENT']:
                 raise Fault(FAULT['OPCODE'], opc, at)
+            if 207 <= opc <= 215:
+                self.has_deriv = True
             if opc in STAGE_BOUND and wc - 1 > OPN_MAX:
                 raise Fault(FAULT['WORDS'], opc, at)
             h = getattr(self, 'h_%d' % opc, None)
@@ -913,12 +916,52 @@ class Scanner:
     h_50 = h_const
     h_51 = h_const
 
+    def _spec_comp_off(self, tid, idx):
+        """packed word offset + element type of constituent `idx` of a
+        composite constant type — mirrors const_count's tight packing
+        (struct members concatenate, no natural-layout padding)."""
+        t = self.types[tid]
+        k = t['kind']
+        if k in (TK['VEC'], TK['MAT'], TK['ARRAY']):
+            cnt = t['comps'] if k == TK['VEC'] else \
+                t['cols'] if k == TK['MAT'] else t['length']
+            if not (0 <= idx < cnt):
+                raise ValueError('constituent index out of range')
+            return idx * self.nwords(t['elem']), t['elem']
+        if k == TK['STRUCT']:
+            if not (0 <= idx < t['nmemb']):
+                raise ValueError('constituent index out of range')
+            mb = self.member_base[tid]
+            off = 0
+            for i in range(idx):
+                off += self.nwords(self.members[mb + i]['type'])
+            return off, self.members[mb + idx]['type']
+        raise ValueError('non-composite constituent')
+
     def h_52(self, opc, ops, at):       # OpSpecConstantOp
         if not self.native_spec_ops or len(ops) < 4:
             raise Fault(FAULT['SPEC'], opc, at)
         try:
             rty, rid, operation, *ids = ops
             kind = self.types[rty]['kind']
+            if operation == 81:
+                # CompositeExtract: first operand is the composite const
+                # id, the rest are LITERAL constituent indices (not const
+                # ids), so it bypasses the scalar operand decode below.
+                cid = ids[0]
+                words = self.consts[cid]
+                t = self.const_tid[cid]
+                off = 0
+                for idx in ids[1:]:
+                    sub, t = self._spec_comp_off(t, idx)
+                    off += sub
+                n = self.nwords(rty)
+                if off + n > len(words):
+                    raise ValueError('constituent out of range')
+                self.consts[rid] = words[off:off + n]
+                self.const_tid[rid] = rty
+                self.reg(rid, tag=1, tid=rty, aux=n)
+                return
             values = [self.consts[c] for c in ids]
             tids = [self.const_tid[c] for c in ids]
             kinds = [self.types[t]['kind'] for t in tids]

@@ -40,6 +40,36 @@ def op_program(operation=128, operands=(5, 19)):
     return tuple(result)
 
 
+def composite_program():
+    """GLCompute module exercising OpSpecConstantComposite +
+    OpSpecConstantOp CompositeExtract: comp=[2,3,5]; e_i = extract i;
+    prod = IMul(e0,e1) = 6; sum = IAdd(prod,e2) = 11.  No SpecId — the
+    spec constants carry their default values."""
+    return tuple(
+        [119734787, 67072, 458752, 16, 0] +
+        [2 << 16 | 17, 1,
+         3 << 16 | 14, 0, 1,
+         5 << 16 | 15, 5, 1, 1852399981, 0,
+         6 << 16 | 16, 1, 17, 1, 1, 1,
+         2 << 16 | 19, 2,
+         3 << 16 | 33, 3, 2,
+         4 << 16 | 21, 4, 32, 0,
+         4 << 16 | 23, 5, 4, 3,
+         4 << 16 | 50, 4, 6, 2,
+         4 << 16 | 50, 4, 7, 3,
+         4 << 16 | 50, 4, 8, 5,
+         6 << 16 | 51, 5, 9, 6, 7, 8,
+         6 << 16 | 52, 4, 10, 81, 9, 0,
+         6 << 16 | 52, 4, 11, 81, 9, 1,
+         6 << 16 | 52, 4, 12, 81, 9, 2,
+         6 << 16 | 52, 4, 13, 132, 10, 11,
+         6 << 16 | 52, 4, 14, 128, 13, 12,
+         5 << 16 | 54, 2, 1, 0, 3,
+         2 << 16 | 248, 15,
+         1 << 16 | 253,
+         1 << 16 | 56])
+
+
 def encoded(entries=((7, 1, 4),), data=b'x\x63\0\0\0'):
     words = [1, 0, len(entries), len(entries), 0]
     for identifier, offset, size in entries:
@@ -172,6 +202,22 @@ class SpecializationTests(unittest.TestCase):
         with patch('vn_specialization.Scanner.scan', side_effect=RecursionError('depth')):
             with self.assertRaisesRegex(ValueError, 'operations'):
                 specialize(op_program())
+
+    def test_spec_constant_composite_extract_folds(self):
+        words = composite_program()
+        # native scan evaluates the spec-ops: composite extract yields the
+        # component, then IMul/IAdd fold to concrete constants.
+        sc = Scanner(list(words), native_spec_ops=True).scan()
+        self.assertEqual(sc.consts[9], [2, 3, 5])
+        self.assertEqual(sc.consts[10], [2])
+        self.assertEqual(sc.consts[11], [3])
+        self.assertEqual(sc.consts[12], [5])
+        self.assertEqual(sc.consts[13], [6])
+        self.assertEqual(sc.consts[14], [11])
+        # specialize() folds the spec-ops to OpConstant for the device path.
+        folded = Scanner(list(specialize(words))).scan()
+        self.assertEqual(folded.consts[13], [6])
+        self.assertEqual(folded.consts[14], [11])
 
     def test_specialized_null_array_rejects_before_unbounded_materialization(self):
         source = list(spec_program())

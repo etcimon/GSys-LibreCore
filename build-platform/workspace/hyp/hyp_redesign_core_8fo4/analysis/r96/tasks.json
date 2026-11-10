@@ -1,0 +1,1429 @@
+{
+  "schema": "hyp8-r96-strategy-tasks.v1",
+  "captured_utc": "2026-10-29T16:44:04.729333+00:00",
+  "qualification": "Structural screening and source-derived strategy tasks; no implementation or physical timing acceptance.",
+  "card_sha256": "306cfa6a6c104083006965376ea1d62f7fd5d128bc86ff06cebaaf8c9e4ae5c2",
+  "cones_sha256": "f67dd76f483396bc25b4b880fc70e98026aa7f0149f2b25aa8d769ad3974ca95",
+  "reports": [
+    {
+      "profile": "ai",
+      "manifest": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/boards/current-ai.manifest.json",
+      "manifest_sha256": "a1dcba0ed8c79d4db289120aa7089aa6a6907985da95fb666173901255c63c55",
+      "report_sha256": "07838baf993a8dbf3363fa53b1b63c1041caeb02ab6ee23f19650e9412dd7d21",
+      "versions": {
+        "cost_model": "fo4-v1",
+        "ir": "ir-v6",
+        "measurement": "delay-v49",
+        "package": "0.1.0",
+        "parser_pin": "v0.13.5"
+      },
+      "budget_fo4": 8.0,
+      "fo4_ps": 20.0
+    },
+    {
+      "profile": "coh",
+      "manifest": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/boards/current-coh.manifest.json",
+      "manifest_sha256": "ae99b4c72a215e3817b6406157a188f26615ab44b44772a67184acc65ea4fe6c",
+      "report_sha256": "c47d040c7a130aa949284a57ca9b397d3b93b25ba32a10ac31c4134ddc7cb468",
+      "versions": {
+        "cost_model": "fo4-v1",
+        "ir": "ir-v6",
+        "measurement": "delay-v49",
+        "package": "0.1.0",
+        "parser_pin": "v0.13.5"
+      },
+      "budget_fo4": 8.0,
+      "fo4_ps": 20.0
+    },
+    {
+      "profile": "core-all",
+      "manifest": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/boards/current-core-all.manifest.json",
+      "manifest_sha256": "09be0cda9f3bf64bd89dfd6fa8b6508fc47391d102f5dd888f490f40586d472f",
+      "report_sha256": "3a2c8ed798a716a7c4d9221b6e8cb44c5a15469dfdb22c5c8b213ba0a1a1982b",
+      "versions": {
+        "cost_model": "fo4-v1",
+        "ir": "ir-v6",
+        "measurement": "delay-v49",
+        "package": "0.1.0",
+        "parser_pin": "v0.13.5"
+      },
+      "budget_fo4": 8.0,
+      "fo4_ps": 20.0
+    },
+    {
+      "profile": "core",
+      "manifest": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/boards/current-core.manifest.json",
+      "manifest_sha256": "f295058dca6f72a19bb67442abcf9dce26dadd603d64676de5109e5f11f01268",
+      "report_sha256": "1e9aa37ca1779cd7eb412a6ef8f0c539bf6456e609b22aa5a529fb07c5fbfbbe",
+      "versions": {
+        "cost_model": "fo4-v1",
+        "ir": "ir-v6",
+        "measurement": "delay-v49",
+        "package": "0.1.0",
+        "parser_pin": "v0.13.5"
+      },
+      "budget_fo4": 8.0,
+      "fo4_ps": 20.0
+    },
+    {
+      "profile": "fma-fp32",
+      "manifest": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/boards/current-fma-fp32.manifest.json",
+      "manifest_sha256": "9799b5962c4f3755777ec68f605d170b2e1d62dcdd7b32c671590afc43f38c7b",
+      "report_sha256": "2a3f2f897afb0657cf41a42136b4f519a8c81e758b8a8eb39bd71f9ae450ed8b",
+      "versions": {
+        "cost_model": "fo4-v1",
+        "ir": "ir-v6",
+        "measurement": "delay-v49",
+        "package": "0.1.0",
+        "parser_pin": "v0.13.5"
+      },
+      "budget_fo4": 8.0,
+      "fo4_ps": 20.0
+    },
+    {
+      "profile": "fma-fp64",
+      "manifest": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/boards/current-fma-fp64.manifest.json",
+      "manifest_sha256": "bc3eb2ec799fffdd3998e72ebdee946eac393c3ffacf36333ab1f0bc3e14e679",
+      "report_sha256": "503299705afd4d013dbac82645529c32f97564bf2aa206394b1ad5e03174e3a4",
+      "versions": {
+        "cost_model": "fo4-v1",
+        "ir": "ir-v6",
+        "measurement": "delay-v49",
+        "package": "0.1.0",
+        "parser_pin": "v0.13.5"
+      },
+      "budget_fo4": 8.0,
+      "fo4_ps": 20.0
+    },
+    {
+      "profile": "l2-tag-bound",
+      "manifest": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/boards/current-l2-tag-bound.manifest.json",
+      "manifest_sha256": "a9c4527c152e6dbd6584db6b810e8236dc23929e9bf5f9998f470dd478730a79",
+      "report_sha256": "390b5b26a769414bbb4ab2558cfab0f77e5db61a820c1f2d86337836cce86509",
+      "versions": {
+        "cost_model": "fo4-v1",
+        "ir": "ir-v6",
+        "measurement": "delay-v49",
+        "package": "0.1.0",
+        "parser_pin": "v0.13.5"
+      },
+      "budget_fo4": 8.0,
+      "fo4_ps": 20.0
+    },
+    {
+      "profile": "l2",
+      "manifest": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/boards/current-l2.manifest.json",
+      "manifest_sha256": "046e48019c7dbed9c7104604713950a18101b619d8641ff0557bc52f054a80d2",
+      "report_sha256": "79e29e60630a8c77ebe93be61c2739ca79731931bd83e0260f6d5a91d794449b",
+      "versions": {
+        "cost_model": "fo4-v1",
+        "ir": "ir-v6",
+        "measurement": "delay-v49",
+        "package": "0.1.0",
+        "parser_pin": "v0.13.5"
+      },
+      "budget_fo4": 8.0,
+      "fo4_ps": 20.0
+    },
+    {
+      "profile": "l3-tag-bound",
+      "manifest": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/boards/current-l3-tag-bound.manifest.json",
+      "manifest_sha256": "d784e72e2c32f7806c88147b70056d17e74deac3cc7777fbbb4427746533cddd",
+      "report_sha256": "ad4006d241eb82c986e8d2af82d1442cf4c16c123f4408ab2005aee17d950fc1",
+      "versions": {
+        "cost_model": "fo4-v1",
+        "ir": "ir-v6",
+        "measurement": "delay-v49",
+        "package": "0.1.0",
+        "parser_pin": "v0.13.5"
+      },
+      "budget_fo4": 8.0,
+      "fo4_ps": 20.0
+    },
+    {
+      "profile": "l3",
+      "manifest": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/boards/current-l3.manifest.json",
+      "manifest_sha256": "29b44a7a3b7fc0d1dff420a3f34fcf569b3c1fe938375e4f2ada08f8d4053030",
+      "report_sha256": "679dd6f426b52c402ceabe54bcbe38a8e4f7a6838ed0d40ee218aaded7061543",
+      "versions": {
+        "cost_model": "fo4-v1",
+        "ir": "ir-v6",
+        "measurement": "delay-v49",
+        "package": "0.1.0",
+        "parser_pin": "v0.13.5"
+      },
+      "budget_fo4": 8.0,
+      "fo4_ps": 20.0
+    },
+    {
+      "profile": "rename-bound",
+      "manifest": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/boards/current-rename-bound.manifest.json",
+      "manifest_sha256": "d08704ce5415549ed3ebc5b3bee0bf329a81d32f0e43bc01e60740d9c8d2f52f",
+      "report_sha256": "a75893534351875b95dd1a71cc174431fc736c6e17540ee2c2e74ec4155781c0",
+      "versions": {
+        "cost_model": "fo4-v1",
+        "ir": "ir-v6",
+        "measurement": "delay-v49",
+        "package": "0.1.0",
+        "parser_pin": "v0.13.5"
+      },
+      "budget_fo4": 8.0,
+      "fo4_ps": 20.0
+    }
+  ],
+  "measurement_tasks": [
+    "M96-FMA-REG",
+    "M96-GEN",
+    "M96-GUARD",
+    "M96-BIND",
+    "M96-SINK",
+    "M96-LOAD"
+  ],
+  "module_tasks": [
+    {
+      "id": "H96-fpnew_fma",
+      "parent_task": "H95-fpnew_fma",
+      "module": "fpnew_fma",
+      "source": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cvfpu/src/fpnew_fma.sv",
+      "source_sha256": "726d910d60ba0b6ff3292ed527a6f42524d87242bc510baab4ce5fcf76de5afd",
+      "state": "measurement-blocked; concrete arithmetic strategy available.",
+      "profile": "core-all",
+      "raw_max_by_kind": {
+        "reg_to_reg": {
+          "id": 8941,
+          "fo4": 101.31797000057693
+        },
+        "reg_to_out": {
+          "id": 8945,
+          "fo4": 101.31797000057693
+        },
+        "in_to_out": {
+          "id": 1815,
+          "fo4": 56.0
+        },
+        "in_to_reg": {
+          "id": 8922,
+          "fo4": 20.8
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 97,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cvfpu/src/fpnew_opgroup_fmt_slice.sv",
+          "line": 115,
+          "module": "fpnew_fma",
+          "instance": "i_fma"
+        },
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_fp_mac.sv",
+          "line": 63,
+          "module": "fpnew_fma",
+          "instance": "i_fp32"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-fpnew_fma_multi",
+      "parent_task": "H95-fpnew_fma_multi",
+      "module": "fpnew_fma_multi",
+      "source": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cvfpu/src/fpnew_fma_multi.sv",
+      "source_sha256": "e9deda9b4a449b544b7b77720579fc2fa70a8377bf554c7fb3e7b465b487c4c4",
+      "state": "inactive for scalar Hyp ADDMUL; defer RTL.",
+      "profile": "core-all",
+      "raw_max_by_kind": {
+        "reg_to_reg": {
+          "id": 8892,
+          "fo4": 72.5
+        },
+        "in_to_out": {
+          "id": 1564,
+          "fo4": 56.0
+        },
+        "reg_to_out": {
+          "id": 8901,
+          "fo4": 32.66797000057692
+        },
+        "in_to_reg": {
+          "id": 8895,
+          "fo4": 17.5
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 123,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cvfpu/src/fpnew_opgroup_multifmt_slice.sv",
+          "line": 231,
+          "module": "fpnew_fma_multi",
+          "instance": "i_fpnew_fma_multi"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-norm_div_sqrt_mvp",
+      "parent_task": "H95-norm_div_sqrt_mvp",
+      "module": "norm_div_sqrt_mvp",
+      "source": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cvfpu/src/fpu_div_sqrt_mvp/hdl/norm_div_sqrt_mvp.sv",
+      "source_sha256": "04e26c08c56182b496dc5c08c01437952bcb526f5fa49285be305921cfe667bf",
+      "state": "conditional live DIVSQRT path; binding/boundary audit first.",
+      "profile": "core-all",
+      "raw_max_by_kind": {
+        "in_to_out": {
+          "id": 9176,
+          "fo4": 60.300000000000004
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 134,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cvfpu/src/fpu_div_sqrt_mvp/hdl/div_sqrt_top_mvp.sv",
+          "line": 157,
+          "module": "norm_div_sqrt_mvp",
+          "instance": "fpu_norm_U0"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-g6lc_flu_reserve",
+      "parent_task": "H95-g6lc_flu_reserve",
+      "module": "g6lc_flu_reserve",
+      "source": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_flu_reserve.sv",
+      "source_sha256": "25fa7edec94a8489a548ef6e3d142da0f9fa468f16386c154d0bad2778c4c154",
+      "state": "first control-restructure candidate.",
+      "profile": "core-all",
+      "raw_max_by_kind": {
+        "in_to_out": {
+          "id": 10695,
+          "fo4": 67.44999999999999
+        },
+        "in_to_reg": {
+          "id": 10699,
+          "fo4": 45.15
+        },
+        "reg_to_reg": {
+          "id": 4032,
+          "fo4": 6.5
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 150,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/issue_read_operands.sv",
+          "line": 1725,
+          "module": "g6lc_flu_reserve",
+          "instance": "i_flu_reserve"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-csr_regfile",
+      "parent_task": "H95-csr_regfile",
+      "module": "csr_regfile",
+      "source": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/csr_regfile.sv",
+      "source_sha256": "fdd1b406670522aa309b03eb146eb0303d71181f481f896d02f9891256c813b4",
+      "state": "first control-restructure candidate.",
+      "profile": "core-all",
+      "raw_max_by_kind": {
+        "reg_to_reg": {
+          "id": 10441,
+          "fo4": 59.467970000576926
+        },
+        "in_to_out": {
+          "id": 3229,
+          "fo4": 52.6
+        },
+        "reg_to_out": {
+          "id": 10423,
+          "fo4": 41.41797000057693
+        },
+        "in_to_reg": {
+          "id": 10361,
+          "fo4": 34.5
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 177,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/smt/g6lc_smt_csr_bank.sv",
+          "line": 250,
+          "module": "csr_regfile",
+          "instance": "i_csr"
+        },
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/smt/g6lc_smt_csr_bank.sv",
+          "line": 503,
+          "module": "csr_regfile",
+          "instance": "i_csr"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-store_unit",
+      "parent_task": "H95-store_unit",
+      "module": "store_unit",
+      "source": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/store_unit.sv",
+      "source_sha256": "254b2532c6b346b50266e2e869dcc19650cb20a6ca0cfbc9b3614af6d26ae26e",
+      "state": "exact wiring candidate before any new stage.",
+      "profile": "core-all",
+      "raw_max_by_kind": {
+        "in_to_reg": {
+          "id": 11617,
+          "fo4": 58.0
+        },
+        "in_to_out": {
+          "id": 5886,
+          "fo4": 34.5
+        },
+        "reg_to_reg": {
+          "id": 11611,
+          "fo4": 22.4
+        },
+        "reg_to_out": {
+          "id": 11608,
+          "fo4": 21.4
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 200,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/load_store_unit.sv",
+          "line": 748,
+          "module": "store_unit",
+          "instance": "i_store_unit"
+        },
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/verif/tb/core/tb_g6lc_stq_cancel_ptw.sv",
+          "line": 127,
+          "module": "store_unit",
+          "instance": "dut"
+        },
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/verif/tb/core/tb_g6lc_stq_cboz.sv",
+          "line": 122,
+          "module": "store_unit",
+          "instance": "dut"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-serdiv",
+      "parent_task": "H95-serdiv",
+      "module": "serdiv",
+      "source": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/serdiv.sv",
+      "source_sha256": "fa6c3fece0d2b5da247fda4b7df4147765996b1c449072ce3aea12c4f6b4ac60",
+      "state": "recurrence-sensitive; prioritize state-specific factoring.",
+      "profile": "core-all",
+      "raw_max_by_kind": {
+        "reg_to_reg": {
+          "id": 11394,
+          "fo4": 55.3
+        },
+        "in_to_out": {
+          "id": 5504,
+          "fo4": 52.8
+        },
+        "reg_to_out": {
+          "id": 11371,
+          "fo4": 26.0
+        },
+        "in_to_reg": {
+          "id": 5486,
+          "fo4": 3.5
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 219,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/mult.sv",
+          "line": 221,
+          "module": "serdiv",
+          "instance": "i_div"
+        },
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/tb/tb_serdiv/hdl/tb.sv",
+          "line": 96,
+          "module": "serdiv",
+          "instance": "i_dut"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-g6lc_decode_s3",
+      "parent_task": "H95-g6lc_decode_s3",
+      "module": "g6lc_decode_s3",
+      "source": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_decode_s3.sv",
+      "source_sha256": "35d6b40c71557f05194cb8f04efe7e723a785f0e561d229cc9bdcd79db455c64",
+      "state": "parallel legality-selection candidate.",
+      "profile": "core-all",
+      "raw_max_by_kind": {
+        "in_to_out": {
+          "id": 10510,
+          "fo4": 51.967970000576926
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 237,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/decoder.sv",
+          "line": 229,
+          "module": "g6lc_decode_s3",
+          "instance": "i_s3"
+        },
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/id_stage.sv",
+          "line": 820,
+          "module": "g6lc_decode_s3",
+          "instance": "i_d3"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-g6lc_rename_read",
+      "parent_task": "H95-g6lc_rename_read",
+      "module": "g6lc_rename_read",
+      "source": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_rename_read.sv",
+      "source_sha256": "b7766ad05d24ac3fad5e0e02a853c5dadc0b97924cb7ff78a5ccd25632020a7c",
+      "state": "caller-bound screen obtained; generate/width audit remains.",
+      "profile": "core-all",
+      "raw_max_by_kind": {
+        "in_to_out": {
+          "id": 10758,
+          "fo4": 51.0
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 254,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_rename.sv",
+          "line": 346,
+          "module": "g6lc_rename_read",
+          "instance": "u_read"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-load_unit",
+      "parent_task": "H95-load_unit",
+      "module": "load_unit",
+      "source": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/load_unit.sv",
+      "source_sha256": "e11d4448b53e8aefcaed939052e09aa342237ad9d54f91a8675fa08afec7c018",
+      "state": "cancellation/publication composition audit before retiming.",
+      "profile": "core-all",
+      "raw_max_by_kind": {
+        "reg_to_reg": {
+          "id": 11244,
+          "fo4": 47.050000000000004
+        },
+        "in_to_reg": {
+          "id": 11269,
+          "fo4": 43.199999999999996
+        },
+        "in_to_out": {
+          "id": 11272,
+          "fo4": 43.199999999999996
+        },
+        "reg_to_out": {
+          "id": 11321,
+          "fo4": 42.550000000000004
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 276,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/load_store_unit.sv",
+          "line": 824,
+          "module": "load_unit",
+          "instance": "i_load_unit"
+        },
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/verif/tb/core/tb_g6lc_rtl_review.sv",
+          "line": 275,
+          "module": "load_unit",
+          "instance": "dut"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-g6lc_loop_buffer",
+      "parent_task": "H95-g6lc_loop_buffer",
+      "module": "g6lc_loop_buffer",
+      "source": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/g6lc_loop_buffer.sv",
+      "source_sha256": "44772d18eca96f9e19011586a7e939d1319d0716870c68049d096b820ba15144",
+      "state": "input-dependent fill-match candidate; prior address cache already exists.",
+      "profile": "core-all",
+      "raw_max_by_kind": {
+        "reg_to_reg": {
+          "id": 11911,
+          "fo4": 46.91470984411521
+        },
+        "reg_to_out": {
+          "id": 11881,
+          "fo4": 24.700000000000003
+        },
+        "in_to_out": {
+          "id": 6312,
+          "fo4": 23.55
+        },
+        "in_to_reg": {
+          "id": 11893,
+          "fo4": 2.5
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 295,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/fetch_B/frontend.sv",
+          "line": 627,
+          "module": "g6lc_loop_buffer",
+          "instance": "i_lbuf"
+        },
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/verif/tb/core/tb_g6lc_loop_buffer_sbs.sv",
+          "line": 34,
+          "module": "g6lc_loop_buffer",
+          "instance": "dut"
+        },
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/verif/tb/core/tb_g6lc_loop_buffer_sbs.sv",
+          "line": 57,
+          "module": "g6lc_loop_buffer",
+          "instance": "u_new"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-g6lc_ai_exec",
+      "parent_task": "H95-g6lc_ai_exec",
+      "module": "g6lc_ai_exec",
+      "source": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cvxif_g6lc_ai/g6lc_ai_exec.sv",
+      "source_sha256": "1cb9de38e5f9fa56537228c3d64f86ce5041da33376364af87e609011c068082",
+      "state": "alternate enabled-CVXIF task; excluded from scalar core priority.",
+      "profile": "core-all",
+      "raw_max_by_kind": {
+        "in_to_reg": {
+          "id": 9394,
+          "fo4": 45.6
+        },
+        "reg_to_reg": {
+          "id": 9495,
+          "fo4": 34.1
+        },
+        "in_to_out": {
+          "id": 2627,
+          "fo4": 28.357542475909888
+        },
+        "reg_to_out": {
+          "id": 2496,
+          "fo4": 7.6499999999999995
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 311,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cvxif_g6lc_ai/g6lc_ai_coprocessor.sv",
+          "line": 161,
+          "module": "g6lc_ai_exec",
+          "instance": "i_exec"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-wt_dcache_wbuffer",
+      "parent_task": "H95-wt_dcache_wbuffer",
+      "module": "wt_dcache_wbuffer",
+      "source": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cache_subsystem/wt_dcache_wbuffer.sv",
+      "source_sha256": "818fbcf82ef747d57f36be348c395145ddbab8dbe3ec3f03c951bc62a76749c3",
+      "state": "lifetime-sensitive fixup update candidate.",
+      "profile": "core-all",
+      "raw_max_by_kind": {
+        "reg_to_reg": {
+          "id": 12282,
+          "fo4": 44.88594000115385
+        },
+        "reg_to_out": {
+          "id": 12306,
+          "fo4": 39.45
+        },
+        "in_to_out": {
+          "id": 7220,
+          "fo4": 21.1
+        },
+        "in_to_reg": {
+          "id": 12356,
+          "fo4": 4.5
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 329,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cache_subsystem/wt_dcache.sv",
+          "line": 462,
+          "module": "wt_dcache_wbuffer",
+          "instance": "i_wt_dcache_wbuffer"
+        },
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/verif/tb/core/tb_g6lc_rtl_review.sv",
+          "line": 4060,
+          "module": "wt_dcache_wbuffer",
+          "instance": "dut"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-g6lc_lsq",
+      "parent_task": "H95-g6lc_lsq",
+      "module": "g6lc_lsq",
+      "source": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_lsq.sv",
+      "source_sha256": "624a08b8f04b7764e695548ddaf598a3bfc0e9333f7b2651d0c047939f571308",
+      "state": "first credit-reduction candidate.",
+      "profile": "core-all",
+      "raw_max_by_kind": {
+        "in_to_out": {
+          "id": 4856,
+          "fo4": 36.8
+        },
+        "in_to_reg": {
+          "id": 11171,
+          "fo4": 29.6
+        },
+        "reg_to_reg": {
+          "id": 4890,
+          "fo4": 11.5
+        },
+        "reg_to_out": {
+          "id": 4928,
+          "fo4": 2.5
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 346,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_ooo_dispatch.sv",
+          "line": 1485,
+          "module": "g6lc_lsq",
+          "instance": "i_lsq"
+        },
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/verif/tb/core/tb_g6lc_lsq.sv",
+          "line": 68,
+          "module": "g6lc_lsq",
+          "instance": "dut"
+        },
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/verif/tb/core/tb_g6lc_rtl_review.sv",
+          "line": 1568,
+          "module": "g6lc_lsq",
+          "instance": "dut"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-g6lc_iq",
+      "parent_task": "H95-g6lc_iq",
+      "module": "g6lc_iq",
+      "source": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_iq.sv",
+      "source_sha256": "1f03eca7f2dee5904b7091be47cad0dddd9ed606b30a5d880024eabd5cb8062a",
+      "state": "slot-selection candidate with consumer-shape check.",
+      "profile": "core-all",
+      "raw_max_by_kind": {
+        "in_to_out": {
+          "id": 10901,
+          "fo4": 36.01797000057692
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 362,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_ooo_dispatch.sv",
+          "line": 915,
+          "module": "g6lc_iq",
+          "instance": "i_iq"
+        },
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/verif/tb/core/tb_g6lc_iq_cvxif_head.sv",
+          "line": 36,
+          "module": "g6lc_iq",
+          "instance": "dut"
+        },
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/verif/tb/core/tb_g6lc_iq_store_age.sv",
+          "line": 39,
+          "module": "g6lc_iq",
+          "instance": "dut"
+        },
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/verif/tb/core/tb_g6lc_rtl_review.sv",
+          "line": 684,
+          "module": "g6lc_iq",
+          "instance": "dut"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-g6lc_l2_top",
+      "parent_task": "H95-g6lc_l2_top",
+      "module": "g6lc_l2_top",
+      "source": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/l2_cache/g6lc_l2_top.sv",
+      "source_sha256": "dda1c7f5478816e377f99f75a2d0a3aae79e9aaf1d7c7a17cd898e4cab7fb46d",
+      "state": "live cache control candidate; raw maximum requires guard audit.",
+      "profile": "l3",
+      "raw_max_by_kind": {
+        "reg_to_reg": {
+          "id": 604,
+          "fo4": 62.68789500201924
+        },
+        "reg_to_out": {
+          "id": 463,
+          "fo4": 52.28789500201924
+        },
+        "in_to_out": {
+          "id": 231,
+          "fo4": 40.65
+        },
+        "in_to_reg": {
+          "id": 673,
+          "fo4": 25.599999999999998
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 378,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/l3_cache/g6lc_l3_top.sv",
+          "line": 91,
+          "module": "g6lc_l2_top",
+          "instance": "i_l3_as_l2"
+        },
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/src/g6lc_cluster.sv",
+          "line": 548,
+          "module": "g6lc_l2_top",
+          "instance": "i_l2"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-g6lc_l2_tag",
+      "parent_task": "H95-g6lc_l2_tag",
+      "module": "g6lc_l2_tag",
+      "source": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/l2_cache/g6lc_l2_tag.sv",
+      "source_sha256": "fb19f2271f3b2596add3c37c7772a0a39c23a4f87c98c2aa8aed611ee95c69ac",
+      "state": "disabled-path measurement blocker; do not optimize the reported PF maximum.",
+      "profile": "l3",
+      "raw_max_by_kind": {
+        "reg_to_reg": {
+          "id": 267,
+          "fo4": 41.56797000057692
+        },
+        "reg_to_out": {
+          "id": 262,
+          "fo4": 30.267970000576923
+        },
+        "in_to_out": {
+          "id": 21,
+          "fo4": 18.9
+        },
+        "in_to_reg": {
+          "id": 258,
+          "fo4": 5.3
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 401,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/l2_cache/g6lc_l2_top.sv",
+          "line": 588,
+          "module": "g6lc_l2_tag",
+          "instance": "i_tag"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-g6lc_l2_mshr",
+      "parent_task": "H95-g6lc_l2_mshr",
+      "module": "g6lc_l2_mshr",
+      "source": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/l2_cache/g6lc_l2_mshr.sv",
+      "source_sha256": "1d2c5d5cfb3307eeda2d669744fd00f01aa8b94fd6690db99b34ea564adb57e5",
+      "state": "first small-table restructuring candidate.",
+      "profile": "l3",
+      "raw_max_by_kind": {
+        "reg_to_reg": {
+          "id": 309,
+          "fo4": 39.75
+        },
+        "reg_to_out": {
+          "id": 289,
+          "fo4": 20.95
+        },
+        "in_to_out": {
+          "id": 62,
+          "fo4": 20.6
+        },
+        "in_to_reg": {
+          "id": 293,
+          "fo4": 2.5
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 418,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/l2_cache/g6lc_l2_top.sv",
+          "line": 688,
+          "module": "g6lc_l2_mshr",
+          "instance": "i_mshr"
+        },
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/verif/tb/core/tb_g6lc_rtl_review.sv",
+          "line": 876,
+          "module": "g6lc_l2_mshr",
+          "instance": "dut"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-g6lc_l2_wtrk",
+      "parent_task": "H95-g6lc_l2_wtrk",
+      "module": "g6lc_l2_wtrk",
+      "source": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/l2_cache/g6lc_l2_wtrk.sv",
+      "source_sha256": "2fc4ed9a2d07cbd5405e3f298db5160007504534e1dfcca30c43c4fab575ad16",
+      "state": "residual one-hot state-update candidate.",
+      "profile": "l3",
+      "raw_max_by_kind": {
+        "reg_to_reg": {
+          "id": 340,
+          "fo4": 27.9
+        },
+        "reg_to_out": {
+          "id": 314,
+          "fo4": 25.4
+        },
+        "in_to_out": {
+          "id": 71,
+          "fo4": 22.9
+        },
+        "in_to_reg": {
+          "id": 331,
+          "fo4": 3.5
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 437,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/l2_cache/g6lc_l2_top.sv",
+          "line": 1039,
+          "module": "g6lc_l2_wtrk",
+          "instance": "i_wtrk"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-g6lc_l2_rdtrk",
+      "parent_task": "H95-g6lc_l2_rdtrk",
+      "module": "g6lc_l2_rdtrk",
+      "source": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/l2_cache/g6lc_l2_wtrk.sv",
+      "source_sha256": "2fc4ed9a2d07cbd5405e3f298db5160007504534e1dfcca30c43c4fab575ad16",
+      "state": "sibling one-hot state-update candidate.",
+      "profile": "l3",
+      "raw_max_by_kind": {
+        "reg_to_reg": {
+          "id": 351,
+          "fo4": 18.55
+        },
+        "in_to_out": {
+          "id": 90,
+          "fo4": 13.549999999999999
+        },
+        "reg_to_out": {
+          "id": 344,
+          "fo4": 7.9
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 452,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/l2_cache/g6lc_l2_top.sv",
+          "line": 1086,
+          "module": "g6lc_l2_rdtrk",
+          "instance": "i_rdtrk"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-g6lc_ai_gemm_seq",
+      "parent_task": "H95-g6lc_ai_gemm_seq",
+      "module": "g6lc_ai_gemm_seq",
+      "source": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_gemm_seq.sv",
+      "source_sha256": "3ad804b883d00a0221b4f57b0a20d5031de65e641c153ba92501819192b7a17d",
+      "state": "terminal-fact/window candidate.",
+      "profile": "ai",
+      "raw_max_by_kind": {
+        "reg_to_reg": {
+          "id": 1331,
+          "fo4": 52.0
+        },
+        "in_to_out": {
+          "id": 604,
+          "fo4": 38.099999999999994
+        },
+        "in_to_reg": {
+          "id": 1279,
+          "fo4": 27.745883937646084
+        },
+        "reg_to_out": {
+          "id": 449,
+          "fo4": 4.0
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 463,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_cluster_dispatch.sv",
+          "line": 464,
+          "module": "g6lc_ai_gemm_seq",
+          "instance": "i_eng"
+        },
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_island_top.sv",
+          "line": 1078,
+          "module": "g6lc_ai_gemm_seq",
+          "instance": "i_gemm"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-g6lc_ai_desc_engine",
+      "parent_task": "H95-g6lc_ai_desc_engine",
+      "module": "g6lc_ai_desc_engine",
+      "source": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_desc_engine.sv",
+      "source_sha256": "1b558ecd4436a8c4e5038016c7e17e2ac5084eaa93af3d9dbb8c8e59eaeb63f7",
+      "state": "span completion-window candidate.",
+      "profile": "ai",
+      "raw_max_by_kind": {
+        "reg_to_reg": {
+          "id": 1008,
+          "fo4": 46.544735626056905
+        },
+        "in_to_out": {
+          "id": 62,
+          "fo4": 34.75
+        },
+        "reg_to_out": {
+          "id": 1019,
+          "fo4": 34.75
+        },
+        "in_to_reg": {
+          "id": 1102,
+          "fo4": 4.55
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 484,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_island_top.sv",
+          "line": 1500,
+          "module": "g6lc_ai_desc_engine",
+          "instance": "i_engine"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-g6lc_ai_gemm_fp32_norm",
+      "parent_task": "H95-g6lc_ai_gemm_fp32_norm",
+      "module": "g6lc_ai_gemm_fp32_norm",
+      "source": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_gemm_fp32_add.sv",
+      "source_sha256": "56841236bba3696ae86a45014faecc08201fd88c9b25b7f71be35be50a14f7e0",
+      "state": "exact arithmetic candidate; recurrence constrains extra latency.",
+      "profile": "ai",
+      "raw_max_by_kind": {
+        "in_to_out": {
+          "id": 1369,
+          "fo4": 44.102797331369224
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 500,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_gemm_fp32_add.sv",
+          "line": 203,
+          "module": "g6lc_ai_gemm_fp32_norm",
+          "instance": "i_norm"
+        },
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_gemm_fp32_add.sv",
+          "line": 223,
+          "module": "g6lc_ai_gemm_fp32_norm",
+          "instance": "i_norm"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-g6lc_ai_gemm_fp32_align",
+      "parent_task": "H95-g6lc_ai_gemm_fp32_align",
+      "module": "g6lc_ai_gemm_fp32_align",
+      "source": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_gemm_fp32_add.sv",
+      "source_sha256": "56841236bba3696ae86a45014faecc08201fd88c9b25b7f71be35be50a14f7e0",
+      "state": "sibling early-preparation candidate.",
+      "profile": "ai",
+      "raw_max_by_kind": {
+        "in_to_out": {
+          "id": 1363,
+          "fo4": 36.699999999999996
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 517,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_gemm_fp32_add.sv",
+          "line": 202,
+          "module": "g6lc_ai_gemm_fp32_align",
+          "instance": "i_align"
+        },
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_gemm_fp32_add.sv",
+          "line": 218,
+          "module": "g6lc_ai_gemm_fp32_align",
+          "instance": "i_align"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-g6lc_ai_island_top",
+      "parent_task": "H95-g6lc_ai_island_top",
+      "module": "g6lc_ai_island_top",
+      "source": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_island_top.sv",
+      "source_sha256": "1269a87d0c7de6612fb4036d640276369e7d3192aac76242341462a1340e954a",
+      "state": "control-plane task; separate from compute throughput.",
+      "profile": "ai",
+      "raw_max_by_kind": {
+        "reg_to_reg": {
+          "id": 1445,
+          "fo4": 43.949999999999996
+        },
+        "in_to_out": {
+          "id": 949,
+          "fo4": 36.75
+        },
+        "in_to_reg": {
+          "id": 1440,
+          "fo4": 31.499999999999996
+        },
+        "reg_to_out": {
+          "id": 1446,
+          "fo4": 22.799999999999997
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 529,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_island_apb.sv",
+          "line": 76,
+          "module": "g6lc_ai_island_top",
+          "instance": "i_island"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-g6lc_ai_pe_dot_float_pipe",
+      "parent_task": "H95-g6lc_ai_pe_dot_float_pipe",
+      "module": "g6lc_ai_pe_dot_float_pipe",
+      "source": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_pe_dot_float_pipe.sv",
+      "source_sha256": "c93c86c8fd4c4c54aca710b02c42f2a94c2bd77f45b979b47771e4839142c616",
+      "state": "rebalance existing S1/S2 reduction window.",
+      "profile": "ai",
+      "raw_max_by_kind": {
+        "in_to_out": {
+          "id": 174,
+          "fo4": 38.75
+        },
+        "in_to_reg": {
+          "id": 1156,
+          "fo4": 38.75
+        },
+        "reg_to_reg": {
+          "id": 1162,
+          "fo4": 37.25
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 545,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_gemm_seq.sv",
+          "line": 1470,
+          "module": "g6lc_ai_pe_dot_float_pipe",
+          "instance": "i_pe_float_pipe"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-g6lc_ai_cluster_dispatch",
+      "parent_task": "H95-g6lc_ai_cluster_dispatch",
+      "module": "g6lc_ai_cluster_dispatch",
+      "source": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_cluster_dispatch.sv",
+      "source_sha256": "83f7f12482bed8d6baecf256915607d8f251817d06a4df0e995beab6d0b080ca",
+      "state": "cluster-specific binding/selection candidate.",
+      "profile": "ai",
+      "raw_max_by_kind": {
+        "reg_to_reg": {
+          "id": 812,
+          "fo4": 34.3
+        },
+        "in_to_out": {
+          "id": 827,
+          "fo4": 25.614709844115207
+        },
+        "reg_to_out": {
+          "id": 1408,
+          "fo4": 5.449999999999999
+        },
+        "in_to_reg": {
+          "id": 1402,
+          "fo4": 3.5
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 563,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/ai_island/g6lc_ai_island_top.sv",
+          "line": 1165,
+          "module": "g6lc_ai_cluster_dispatch",
+          "instance": "i_gemm"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-g6lc_coherence_hub",
+      "parent_task": "H95-g6lc_coherence_hub",
+      "module": "g6lc_coherence_hub",
+      "source": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/coherence/g6lc_coherence_hub.sv",
+      "source_sha256": "22ca501c34c89dcb99bb155fc993a969cc3217129c6922f767e6c432a461237a",
+      "state": "raw-maximum excluded; active slot/response audit.",
+      "profile": "coh",
+      "raw_max_by_kind": {
+        "reg_to_reg": {
+          "id": 275,
+          "fo4": 121.59999999999998
+        },
+        "in_to_out": {
+          "id": 81,
+          "fo4": 113.31797000057692
+        },
+        "reg_to_out": {
+          "id": 168,
+          "fo4": 66.1
+        },
+        "in_to_reg": {
+          "id": 92,
+          "fo4": 0.0
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 579,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/src/g6lc_cluster.sv",
+          "line": 495,
+          "module": "g6lc_coherence_hub",
+          "instance": "i_hub"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-g6lc_inval_bus",
+      "parent_task": "H95-g6lc_inval_bus",
+      "module": "g6lc_inval_bus",
+      "source": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/coherence/g6lc_inval_bus.sv",
+      "source_sha256": "736ba0a3cbb59502b54893d0090efd5f2be3a1816a578f27ec17bc27a1234aae",
+      "state": "measurement-blocked; semantic queue task retained.",
+      "profile": "coh",
+      "raw_max_by_kind": {
+        "reg_to_reg": {
+          "id": 16,
+          "fo4": 123.29999999999998
+        },
+        "reg_to_out": {
+          "id": 116,
+          "fo4": 33.867970000576925
+        },
+        "in_to_out": {
+          "id": 9,
+          "fo4": 12.967970000576925
+        },
+        "in_to_reg": {
+          "id": 117,
+          "fo4": 4.5
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 596,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/coherence/g6lc_coherence_hub.sv",
+          "line": 1350,
+          "module": "g6lc_inval_bus",
+          "instance": "i_inval"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-g6lc_cmo_engine",
+      "parent_task": "H95-g6lc_cmo_engine",
+      "module": "g6lc_cmo_engine",
+      "source": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/coherence/g6lc_cmo_engine.sv",
+      "source_sha256": "dd06ed18ffdaaa3f4dfe200cc86e9a5076f38d23d326a1c2acc9a73bd93c1cfb",
+      "state": "selected-request capture candidate.",
+      "profile": "coh",
+      "raw_max_by_kind": {
+        "in_to_out": {
+          "id": 111,
+          "fo4": 29.5
+        },
+        "in_to_reg": {
+          "id": 334,
+          "fo4": 29.5
+        },
+        "reg_to_reg": {
+          "id": 348,
+          "fo4": 15.450000000000001
+        },
+        "reg_to_out": {
+          "id": 358,
+          "fo4": 7.85
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 611,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/src/g6lc_cluster.sv",
+          "line": 839,
+          "module": "g6lc_cmo_engine",
+          "instance": "i_cmo_engine"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    },
+    {
+      "id": "H96-g6lc_snoop_filter",
+      "parent_task": "H95-g6lc_snoop_filter",
+      "module": "g6lc_snoop_filter",
+      "source": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/coherence/g6lc_snoop_filter.sv",
+      "source_sha256": "214b5ac604dbb9e5f6542bc85741a9ceafd7ed3d04bab5967d2b370aac86e8cc",
+      "state": "row-local update candidate.",
+      "profile": "coh",
+      "raw_max_by_kind": {
+        "reg_to_reg": {
+          "id": 135,
+          "fo4": 26.57588054715439
+        },
+        "in_to_out": {
+          "id": 29,
+          "fo4": 24.82588054715439
+        },
+        "reg_to_out": {
+          "id": 124,
+          "fo4": 16.737940273577195
+        },
+        "in_to_reg": {
+          "id": 128,
+          "fo4": 2.5
+        }
+      },
+      "evidence": "analysis/r96/cones.json",
+      "card_file": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r96/module-tasks.md",
+      "card_start_line": 625,
+      "caller_candidates_at_r95": [
+        {
+          "file": "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/coherence/g6lc_coherence_hub.sv",
+          "line": 1135,
+          "module": "g6lc_snoop_filter",
+          "instance": "i_sf"
+        }
+      ],
+      "caller_note": "Lexical candidates, not elaboration. Current reviewed bindings and ownership limits are in the card."
+    }
+  ]
+}

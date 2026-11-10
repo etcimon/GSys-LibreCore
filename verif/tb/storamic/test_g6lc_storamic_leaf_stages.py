@@ -380,14 +380,20 @@ class IndependentFormalStageTests(unittest.TestCase):
             if isinstance(node, ast.If) and isinstance(node.test, ast.BinOp):
                 text = ast.unparse(node.test)
                 if text in {"set(stages) & {'cpu-origin'}",
-                            "set(stages) & {'cpu-debug'}",
+                            "set(stages) & {'cpu-debug', 'cpu-debug-stq-mutant'}",
+                            "set(stages) & {'stq-commit-flush'}",
                             "set(stages) & {'csr-scc'}"}:
                     dispatch[text] = ast.unparse(node)
-        self.assertEqual(set(dispatch), {"set(stages) & {'cpu-origin'}",
-                                         "set(stages) & {'cpu-debug'}",
-                                         "set(stages) & {'csr-scc'}"})
+        self.assertEqual(set(dispatch), {
+            "set(stages) & {'cpu-origin'}",
+            "set(stages) & {'cpu-debug', 'cpu-debug-stq-mutant'}",
+            "set(stages) & {'stq-commit-flush'}",
+            "set(stages) & {'csr-scc'}"})
         self.assertIn("run_cpu_origin", dispatch["set(stages) & {'cpu-origin'}"])
-        self.assertIn("run_cpu_debug", dispatch["set(stages) & {'cpu-debug'}"])
+        self.assertIn("run_cpu_debug",
+                      dispatch["set(stages) & {'cpu-debug', 'cpu-debug-stq-mutant'}"])
+        self.assertIn("run_stq_commit_flush",
+                      dispatch["set(stages) & {'stq-commit-flush'}"])
         self.assertIn("run_csr_scc", dispatch["set(stages) & {'csr-scc'}"])
 
 

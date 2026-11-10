@@ -10,7 +10,9 @@ module tb_g6lc_storamic_cpu_debug #(
   parameter bit Negative = 0,
   parameter bit RequestEnabled = 1,
   parameter int EntryPrivilege = 3,
-  parameter int Mprv = 0
+  parameter int Mprv = 0,
+  parameter int Mechanism = 0,
+  parameter bit NegativeFirmware = 0
 );
   logic clk = 0, rst_n = 0;
   logic done, failed, debug_origin_failed, debug_seen;
@@ -24,7 +26,9 @@ module tb_g6lc_storamic_cpu_debug #(
     .Negative(Negative),
     .RequestEnabled(RequestEnabled),
     .EntryPrivilege(EntryPrivilege),
-    .Mprv(Mprv)
+    .Mprv(Mprv),
+    .Mechanism(Mechanism),
+    .NegativeFirmware(NegativeFirmware)
   ) interpreter (
     .clk(clk), .rst_n(rst_n),
     .done(done), .failed(failed), .debug_origin_failed(debug_origin_failed),

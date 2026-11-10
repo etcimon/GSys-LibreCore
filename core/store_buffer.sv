@@ -581,7 +581,13 @@ module store_buffer
     // happened if we got a grant
 
     // shift the store request from the speculative buffer to the non-speculative
+`ifdef G6LC_MUT_STQ_COMMIT_DROPPED_ON_FLUSH
+    // Review-only mutation: a coincident flush drops the committing store
+    // instead of letting it reach the commit queue.
+    if (commit_i && !flush_i) begin
+`else
     if (commit_i) begin
+`endif
       commit_queue_n[commit_write_pointer_q] = spec_head;
       commit_write_pointer_n = commit_write_pointer_n + 1'b1;
       commit_status_cnt++;
@@ -1065,11 +1071,25 @@ module store_buffer
     end
   end
 
-  // assert that commit is never set when we are flushing this would be counter intuitive
-  // as flush and commit is decided in the same stage
-  commit_and_flush :
-  assert property (@(posedge clk_i) rst_ni && flush_i |-> !commit_i)
-  else $error("[Commit Queue] You are trying to commit and flush in the same cycle");
+  // The commit stage can retire a store in the same cycle it raises a full
+  // flush (single-step debug entry on that store, or a trap on a younger
+  // commit port). The flush targets younger speculative stores only: the
+  // retiring head must still move to the commit queue unchanged.
+  commit_and_flush_keeps_head :
+  assert property (@(posedge clk_i) disable iff (!rst_ni) (flush_i && commit_i) |=>
+      commit_queue_q[$past(commit_write_pointer_q)].valid &&
+      commit_queue_q[$past(commit_write_pointer_q)].address == $past(spec_head.address) &&
+      commit_queue_q[$past(commit_write_pointer_q)].data == $past(spec_head.data) &&
+      commit_queue_q[$past(commit_write_pointer_q)].be == $past(spec_head.be) &&
+      commit_queue_q[$past(commit_write_pointer_q)].data_size == $past(spec_head.data_size) &&
+      commit_queue_q[$past(commit_write_pointer_q)].cbo_op == $past(spec_head.cbo_op))
+  else $error("[Commit Queue] a store retired with a flush did not reach the commit queue");
+
+  // A full flush (without the legacy SMT forward-keep) leaves no speculative store.
+  flush_empties_speculative :
+  assert property (@(posedge clk_i) disable iff (!rst_ni) (flush_i && !LEGACY_SMT_KEEP) |=>
+      speculative_status_cnt_q == 0)
+  else $error("[Speculative Queue] speculative stores survived a full flush");
 
   speculative_buffer_overflow :
   assert property (@(posedge clk_i) rst_ni && (speculative_status_cnt_q == $bits(speculative_status_cnt_q)'(DEPTH_SPEC)) |-> !valid_i)

@@ -199,9 +199,11 @@ package g6lc_apu_objtab_pkg;
   //   [pay_off,        +PayMemBytes)             ObjPay payload arena
   // pay_off is the first 64 KiB boundary after the stack.  All of it
   // sits under APU_VG_SHM_BYTES; vgtop/vgsys assert the fit.
-  localparam logic [63:0] APU_OBJMEM_OFF = 64'h0480_0000; // 72 MiB
-  // (above the 64 MiB guest window + 8 MiB private arena — §5a
-  //  revision 2026-10-16, API-X4 guest-window growth)
+  localparam logic [63:0] APU_OBJMEM_OFF = 64'h0600_0000; // 96 MiB
+  // (above the 64 MiB guest window + 32 MiB private arena — §5a
+  //  revision 2026-10-16, API-X4 guest-window growth; private arena
+  //  8 -> 32 MiB on 2026-11-09 for CTS memory.binding device-local
+  //  allocations — objmem+pay ~21 MiB still fits the 32 MiB carve)
 
   function automatic logic [63:0] apu_objmem_dir_off(
       input int unsigned entries);

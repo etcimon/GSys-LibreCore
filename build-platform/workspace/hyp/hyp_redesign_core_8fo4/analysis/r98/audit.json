@@ -1,0 +1,991 @@
+{
+  "timing": {
+    "lsq-v50-before": {
+      "summary": {
+        "maximum": 36.8,
+        "max_by_kind": {
+          "intoout": {
+            "calibrated_fo4": null,
+            "class_note": "cache-hint: independent-LHS bundle lhs=4 writes=8 max_writes=2 max_field=32.8 sum_fields=72.6 makespan=32.8 cycles=5 wire=4.0 next_state=false write_only=2 depth=1 calls=0 procedural_ok=true raw=72.6\u219236.8",
+            "closes": false,
+            "endpoint": "g6lc_lsq.out0",
+            "max_freq_mhz": 1086.9565217391305,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 8,
+            "path_class": "independent_lhs_bundle",
+            "path_id": 0,
+            "path_kind": "intoout",
+            "primary_loc": {
+              "end_col": 17,
+              "end_line": 350,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/lsq-v50.before.sv",
+              "start_col": 9,
+              "start_line": 350
+            },
+            "slack_fo4": -28.799999999999997,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "g6lc_lsq.in0",
+            "total_fo4": 36.8,
+            "total_fo4_raw": 72.6
+          },
+          "intoreg": {
+            "calibrated_fo4": null,
+            "class_note": "over-budget plain path \u2014 no exclusive/atomic exception",
+            "closes": false,
+            "endpoint": "g6lc_lsq.reg1/D",
+            "max_freq_mhz": 1204.8192771084339,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 2,
+            "path_class": "plain",
+            "path_id": 109,
+            "path_kind": "intoreg",
+            "primary_loc": {
+              "end_col": 19,
+              "end_line": 581,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/lsq-v50.before.sv",
+              "start_col": 11,
+              "start_line": 581
+            },
+            "slack_fo4": -25.200000000000003,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "g6lc_lsq.in0",
+            "total_fo4": 33.2,
+            "total_fo4_raw": null
+          },
+          "regtoreg": {
+            "calibrated_fo4": null,
+            "class_note": "cache-hint: unique-case exclusive lhs=`checked_q` arms=5 max_arm=11.5 crit=11.5 mux=0.0 prep_arm=0.0 leftover=0.0 dom=1.00 raw=32.0\u219211.5",
+            "closes": false,
+            "endpoint": "g6lc_lsq.reg1/D",
+            "max_freq_mhz": 3478.2608695652175,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 5,
+            "path_class": "exclusive_case_mux",
+            "path_id": 34,
+            "path_kind": "regtoreg",
+            "primary_loc": {
+              "end_col": 19,
+              "end_line": 1185,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/lsq-v50.before.sv",
+              "start_col": 11,
+              "start_line": 1185
+            },
+            "slack_fo4": -3.5,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "g6lc_lsq.reg0/CP",
+            "total_fo4": 11.5,
+            "total_fo4_raw": 32.0
+          },
+          "regtoout": {
+            "calibrated_fo4": null,
+            "class_note": "raw 2.5 \u2264 budget 8.0 \u2014 cheap path",
+            "closes": true,
+            "endpoint": "g6lc_lsq.out0",
+            "max_freq_mhz": 16000.0,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 1,
+            "path_class": "under_budget",
+            "path_id": 72,
+            "path_kind": "regtoout",
+            "primary_loc": {
+              "end_col": 27,
+              "end_line": 1353,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/lsq-v50.before.sv",
+              "start_col": 10,
+              "start_line": 1353
+            },
+            "slack_fo4": 5.5,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "g6lc_lsq.reg0/CP",
+            "total_fo4": 2.5,
+            "total_fo4_raw": null
+          }
+        },
+        "versions": {
+          "cost_model": "fo4-v1",
+          "ir": "ir-v6",
+          "measurement": "delay-v50",
+          "package": "0.1.0",
+          "parser_pin": "v0.13.5"
+        },
+        "fo4_ps": 20.0,
+        "budget_fo4": 8.0,
+        "report_sha256": "716f44d524f31a3da2fe191c1f6ea642ffb816797a822d4bc5ab68c108e818f3"
+      },
+      "source_sha256": "cee8f510582a627736e418a7ea6b5e03e3ec686a7005bad5ac362d8606f4ee78"
+    },
+    "lsq-v50-after": {
+      "summary": {
+        "maximum": 33.2,
+        "max_by_kind": {
+          "intoreg": {
+            "calibrated_fo4": null,
+            "class_note": "over-budget plain path \u2014 no exclusive/atomic exception",
+            "closes": false,
+            "endpoint": "g6lc_lsq.reg1/D",
+            "max_freq_mhz": 1204.8192771084339,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 2,
+            "path_class": "plain",
+            "path_id": 110,
+            "path_kind": "intoreg",
+            "primary_loc": {
+              "end_col": 19,
+              "end_line": 578,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_lsq.sv",
+              "start_col": 11,
+              "start_line": 578
+            },
+            "slack_fo4": -25.200000000000003,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "g6lc_lsq.in0",
+            "total_fo4": 33.2,
+            "total_fo4_raw": null
+          },
+          "intoout": {
+            "calibrated_fo4": null,
+            "class_note": "cache-hint: independent-LHS bundle lhs=5 writes=15 max_writes=3 max_field=30.2 sum_fields=99.0 makespan=30.2 cycles=4 wire=0.0 next_state=true write_only=5 depth=0 calls=2 procedural_ok=true raw=191.5\u219230.2",
+            "closes": false,
+            "endpoint": "g6lc_lsq.out0",
+            "max_freq_mhz": 1324.5033112582782,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 15,
+            "path_class": "independent_lhs_bundle",
+            "path_id": 12,
+            "path_kind": "intoout",
+            "primary_loc": {
+              "end_col": 23,
+              "end_line": 563,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_lsq.sv",
+              "start_col": 15,
+              "start_line": 563
+            },
+            "slack_fo4": -22.2,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "g6lc_lsq.in0",
+            "total_fo4": 30.2,
+            "total_fo4_raw": 191.49999999999997
+          },
+          "regtoreg": {
+            "calibrated_fo4": null,
+            "class_note": "cache-hint: unique-case exclusive lhs=`checked_q` arms=5 max_arm=11.5 crit=11.5 mux=0.0 prep_arm=0.0 leftover=0.0 dom=1.00 raw=32.0\u219211.5",
+            "closes": false,
+            "endpoint": "g6lc_lsq.reg1/D",
+            "max_freq_mhz": 3478.2608695652175,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 5,
+            "path_class": "exclusive_case_mux",
+            "path_id": 39,
+            "path_kind": "regtoreg",
+            "primary_loc": {
+              "end_col": 19,
+              "end_line": 1182,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_lsq.sv",
+              "start_col": 11,
+              "start_line": 1182
+            },
+            "slack_fo4": -3.5,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "g6lc_lsq.reg0/CP",
+            "total_fo4": 11.5,
+            "total_fo4_raw": 32.0
+          },
+          "regtoout": {
+            "calibrated_fo4": null,
+            "class_note": "raw 2.5 \u2264 budget 8.0 \u2014 cheap path",
+            "closes": true,
+            "endpoint": "g6lc_lsq.out0",
+            "max_freq_mhz": 16000.0,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 1,
+            "path_class": "under_budget",
+            "path_id": 77,
+            "path_kind": "regtoout",
+            "primary_loc": {
+              "end_col": 27,
+              "end_line": 1350,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_lsq.sv",
+              "start_col": 10,
+              "start_line": 1350
+            },
+            "slack_fo4": 5.5,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "g6lc_lsq.reg0/CP",
+            "total_fo4": 2.5,
+            "total_fo4_raw": null
+          }
+        },
+        "versions": {
+          "cost_model": "fo4-v1",
+          "ir": "ir-v6",
+          "measurement": "delay-v50",
+          "package": "0.1.0",
+          "parser_pin": "v0.13.5"
+        },
+        "fo4_ps": 20.0,
+        "budget_fo4": 8.0,
+        "report_sha256": "02def64d048865f33fd9bb35eb78a9b382130807d1150d68c9652279918613cb"
+      },
+      "source_sha256": "15732c3bcfc794ffe59d017215a49ac1870dfc14b2caff9e749be17571a735ec"
+    },
+    "pmp-raw-v50-before": {
+      "summary": {
+        "maximum": 59.467970000576926,
+        "max_by_kind": {
+          "regtoreg": {
+            "calibrated_fo4": null,
+            "class_note": "over-budget plain path \u2014 no exclusive/atomic exception; cycle csr: pmpcfg_o\u2192csr_rdata_o not measured; cone stays on the board; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+            "closes": false,
+            "endpoint": "csr_regfile.reg1/D",
+            "max_freq_mhz": 672.6309978230624,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 6,
+            "path_class": "plain",
+            "path_id": 409,
+            "path_kind": "regtoreg",
+            "primary_loc": {
+              "end_col": 21,
+              "end_line": 3021,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/pmp-scalar-v50.before.sv",
+              "start_col": 13,
+              "start_line": 3021
+            },
+            "slack_fo4": -51.467970000576926,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "csr_regfile.reg0/CP",
+            "total_fo4": 59.467970000576926,
+            "total_fo4_raw": null
+          },
+          "intoout": {
+            "calibrated_fo4": null,
+            "class_note": "independent-LHS bundle lhs=96 writes=158 max_writes=8 max_field=50.5 sum_fields=456.0 makespan=52.6 cycles=7 wire=0.0 next_state=true write_only=89 depth=2 calls=0 procedural_ok=true raw=855.1\u219250.5; dependency floor makespan=52.6 (deps=25) > deflated 50.5; chain L3821(50.5); P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+            "closes": false,
+            "endpoint": "csr_regfile.out0",
+            "max_freq_mhz": 760.4562737642586,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 158,
+            "path_class": "independent_lhs_bundle",
+            "path_id": 107,
+            "path_kind": "intoout",
+            "primary_loc": {
+              "end_col": 15,
+              "end_line": 3821,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/pmp-scalar-v50.before.sv",
+              "start_col": 11,
+              "start_line": 3821
+            },
+            "slack_fo4": -44.6,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "csr_regfile.in0",
+            "total_fo4": 52.6,
+            "total_fo4_raw": 855.0999999999999
+          },
+          "regtoout": {
+            "calibrated_fo4": null,
+            "class_note": "over-budget plain path \u2014 no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+            "closes": false,
+            "endpoint": "csr_regfile.out0",
+            "max_freq_mhz": 965.7643771397493,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 5,
+            "path_class": "plain",
+            "path_id": 391,
+            "path_kind": "regtoout",
+            "primary_loc": {
+              "end_col": 24,
+              "end_line": 1800,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/pmp-scalar-v50.before.sv",
+              "start_col": 16,
+              "start_line": 1800
+            },
+            "slack_fo4": -33.41797000057693,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "csr_regfile.reg0/CP",
+            "total_fo4": 41.41797000057693,
+            "total_fo4_raw": null
+          },
+          "intoreg": {
+            "calibrated_fo4": null,
+            "class_note": "over-budget plain path \u2014 no exclusive/atomic exception",
+            "closes": false,
+            "endpoint": "csr_regfile.reg1/D",
+            "max_freq_mhz": 1159.4202898550725,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 2,
+            "path_class": "plain",
+            "path_id": 329,
+            "path_kind": "intoreg",
+            "primary_loc": {
+              "end_col": 20,
+              "end_line": 3454,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/pmp-scalar-v50.before.sv",
+              "start_col": 10,
+              "start_line": 3454
+            },
+            "slack_fo4": -26.5,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "csr_regfile.in0",
+            "total_fo4": 34.5,
+            "total_fo4_raw": null
+          }
+        },
+        "versions": {
+          "cost_model": "fo4-v1",
+          "ir": "ir-v6",
+          "measurement": "delay-v50",
+          "package": "0.1.0",
+          "parser_pin": "v0.13.5"
+        },
+        "fo4_ps": 20.0,
+        "budget_fo4": 8.0,
+        "report_sha256": "37c6b4961741e7ef81ade054002fe49a27f040493d182115a8f1aaf1da7b4e3a"
+      },
+      "source_sha256": "fdd1b406670522aa309b03eb146eb0303d71181f481f896d02f9891256c813b4"
+    },
+    "pmp-raw-v50-after": {
+      "summary": {
+        "maximum": 52.6,
+        "max_by_kind": {
+          "intoout": {
+            "calibrated_fo4": null,
+            "class_note": "independent-LHS bundle lhs=96 writes=158 max_writes=8 max_field=50.5 sum_fields=456.0 makespan=52.6 cycles=7 wire=0.0 next_state=true write_only=89 depth=2 calls=0 procedural_ok=true raw=855.1\u219250.5; dependency floor makespan=52.6 (deps=25) > deflated 50.5; chain L3754(50.5); P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+            "closes": false,
+            "endpoint": "csr_regfile.out0",
+            "max_freq_mhz": 760.4562737642586,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 158,
+            "path_class": "independent_lhs_bundle",
+            "path_id": 110,
+            "path_kind": "intoout",
+            "primary_loc": {
+              "end_col": 15,
+              "end_line": 3754,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/csr_regfile.sv",
+              "start_col": 11,
+              "start_line": 3754
+            },
+            "slack_fo4": -44.6,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "csr_regfile.in0",
+            "total_fo4": 52.6,
+            "total_fo4_raw": 855.0999999999999
+          },
+          "regtoreg": {
+            "calibrated_fo4": null,
+            "class_note": "over-budget plain path \u2014 no exclusive/atomic exception; cycle csr: pmpcfg_o\u2192csr_rdata_o not measured; cone stays on the board; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+            "closes": false,
+            "endpoint": "csr_regfile.reg1/D",
+            "max_freq_mhz": 760.4562737642586,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 1,
+            "path_class": "plain",
+            "path_id": 361,
+            "path_kind": "regtoreg",
+            "primary_loc": {
+              "end_col": 15,
+              "end_line": 3754,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/csr_regfile.sv",
+              "start_col": 11,
+              "start_line": 3754
+            },
+            "slack_fo4": -44.6,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "csr_regfile.reg0/CP",
+            "total_fo4": 52.6,
+            "total_fo4_raw": null
+          },
+          "regtoout": {
+            "calibrated_fo4": null,
+            "class_note": "over-budget plain path \u2014 no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+            "closes": false,
+            "endpoint": "csr_regfile.out0",
+            "max_freq_mhz": 965.7643771397493,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 5,
+            "path_class": "plain",
+            "path_id": 394,
+            "path_kind": "regtoout",
+            "primary_loc": {
+              "end_col": 24,
+              "end_line": 1800,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/csr_regfile.sv",
+              "start_col": 16,
+              "start_line": 1800
+            },
+            "slack_fo4": -33.41797000057693,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "csr_regfile.reg0/CP",
+            "total_fo4": 41.41797000057693,
+            "total_fo4_raw": null
+          },
+          "intoreg": {
+            "calibrated_fo4": null,
+            "class_note": "over-budget plain path \u2014 no exclusive/atomic exception",
+            "closes": false,
+            "endpoint": "csr_regfile.reg1/D",
+            "max_freq_mhz": 1159.4202898550725,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 2,
+            "path_class": "plain",
+            "path_id": 332,
+            "path_kind": "intoreg",
+            "primary_loc": {
+              "end_col": 20,
+              "end_line": 3387,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/csr_regfile.sv",
+              "start_col": 10,
+              "start_line": 3387
+            },
+            "slack_fo4": -26.5,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "csr_regfile.in0",
+            "total_fo4": 34.5,
+            "total_fo4_raw": null
+          }
+        },
+        "versions": {
+          "cost_model": "fo4-v1",
+          "ir": "ir-v6",
+          "measurement": "delay-v50",
+          "package": "0.1.0",
+          "parser_pin": "v0.13.5"
+        },
+        "fo4_ps": 20.0,
+        "budget_fo4": 8.0,
+        "report_sha256": "74429bdc1dd1b8a662d121fd03eafa2d6acaaf039339c276dfcf147216f273ca"
+      },
+      "source_sha256": "f19d4504eaa79b8ed5ceb7205f7fbd217e792234c77b046575f244255b37b37a"
+    }
+  },
+  "functional": {
+    "hyp8-r98-lsq-credit-before-c5b-lf2": {
+      "results": [
+        {
+          "log": "build-model.log",
+          "warnings": [],
+          "sourceManifestSha256": "d9d348d91c559e334f461407de7509abb463d58862a25c0a402234c5dfe0f6ae",
+          "warningCensus": {
+            "UNSIGNED": 2,
+            "UNOPTFLAT": 12
+          },
+          "openDiagnostics": {
+            "WIDTHEXPAND": 0,
+            "WIDTHTRUNC": 0,
+            "WIDTHCONCAT": 0
+          },
+          "verilatorBinSha256": "3e622e33b741d1b2ba6913e43158e2dba6aa9d2fd5e8e89ad2c978360426a254",
+          "verilatorDriverSha256": "1da6decbd57bb1e87799bcb22c5d013f9e4d31eb15f2c33c786994f6a421b7b0",
+          "modelSha256": "1eed13ad98ba81fb4271d751ae42ff245c43641d9a5c388b36406f19b82c5ae0"
+        },
+        {
+          "log": "sim.log",
+          "rc": 0,
+          "leafArgs": [
+            "+credit_only"
+          ],
+          "matched": true
+        }
+      ],
+      "sources": {
+        "config_pkg.sv": "387477f4bc118f3a95165deedbb9fb04ecfde4f7521737401f8c7eae13d280b3",
+        "build_config_pkg.sv": "88321dc48ade047d7a863ff5ae118bb05957c8f25e0d12fe54a72ca5c6b9e3c2",
+        "g6lc_hyp_pkg.sv": "e776aac90519ab7bbd46b9854d5cebbd946c69138038d65718320d12016c9d19",
+        "g6lc64_hyp8_config_pkg.sv": "f1fb63dff387992e067bed7fa9b6b541904eb00358553fecd77d1b88a112b8a5",
+        "riscv_pkg.sv": "d7ef7a1651d5fe3486957e0cc88802b7e85e59df571e1b64a2374d531fbee10b",
+        "g6lc_core_pkg.sv": "b62d1a88a7cc9d5de94657ccd8459f657dfc28378ae38bc551aad6c0c5ab98f8",
+        "g6lc_ooo_pkg.sv": "051742e91341e634dc849306be43f2f450f9b90da7cb84d778597fd38c1d795f",
+        "g6lc_lsq_event.sv": "a0ee8c297884987b93250c239c5f11280a09e5662211b44f1b152bf000ea89b9",
+        "g6lc_lsq_slot.sv": "ad42fd9e09988dc37ae6dedc62a8a0f85785bc623bab12465b32d649288a039f",
+        "g6lc_lsq_cam_bank.sv": "20d71142d760f237742232311f3c22fc54df41087293572920c1b39dbbe90427",
+        "g6lc_lsq_age.sv": "b63a5c54a1b477814ba96f9af861c02352c6fde1112651f0e8026e6ca6908918",
+        "g6lc_lsq_reduce.sv": "12b39f3109421124f11a488c5c344a1cfcc705123ac760bdb60905ae74b034c7",
+        "g6lc_lsq_verdict.sv": "7b91603ad75b944262e90f908e2eed6a023f03ea53b5bcae77f7e9fb49579d17",
+        "g6lc_lsq_release.sv": "9720bb20be952532ecbaef4b88f219eed8c24595ffb68a9026e25e71d89d4cda",
+        "g6lc_lsq.sv": "cee8f510582a627736e418a7ea6b5e03e3ec686a7005bad5ac362d8606f4ee78",
+        "tb_g6lc_hyp8_control.sv": "6a1770472b0ade65493ce92a22300faf3b10038fec6d5b2cebcdd56609adf7d1",
+        "g6lc_core_types.svh": "e945a7a16a9ae33f8cea6bf73e562a23638112763ef845f2a37cf4d77748beb7",
+        "rvfi_types.svh": "c27c829e9972329c17acdbf5011749426a8ff62ee0425dab23d78acac5281f79"
+      },
+      "sim_sha256": "68a7890c04ddb2e025819024b684eaacbe3067494774a3f44e5282391a4ce2ff",
+      "full": {
+        "tag": "hyp8-r98-lsq-credit-before-c5b-lf",
+        "results": [
+          {
+            "log": "build-model.log",
+            "warnings": [],
+            "sourceManifestSha256": "d9d348d91c559e334f461407de7509abb463d58862a25c0a402234c5dfe0f6ae",
+            "warningCensus": {
+              "UNSIGNED": 2,
+              "UNOPTFLAT": 12
+            },
+            "openDiagnostics": {
+              "WIDTHEXPAND": 0,
+              "WIDTHTRUNC": 0,
+              "WIDTHCONCAT": 0
+            },
+            "verilatorBinSha256": "3e622e33b741d1b2ba6913e43158e2dba6aa9d2fd5e8e89ad2c978360426a254",
+            "verilatorDriverSha256": "1da6decbd57bb1e87799bcb22c5d013f9e4d31eb15f2c33c786994f6a421b7b0",
+            "modelSha256": "c2187b4dde4e0a890d4252cd05968d61f99cb5d764abe48ee3b3fe36dd15715e"
+          },
+          {
+            "log": "sim.log",
+            "rc": 0,
+            "leafArgs": [],
+            "matched": false
+          }
+        ],
+        "raw_sim_sha256": "9593bfc85ed92ef893303582ae3f4f80ac70848ac2ef273cd0b8ab40e213eeea"
+      }
+    },
+    "hyp8-r98-lsq-credit-after-c5-lf2": {
+      "results": [
+        {
+          "log": "build-model.log",
+          "warnings": [],
+          "sourceManifestSha256": "addd02fe97e0dbe6fe26877c873671f6d98646937fa40d47d2dfb6690eb2305e",
+          "warningCensus": {
+            "UNSIGNED": 2,
+            "UNOPTFLAT": 12
+          },
+          "openDiagnostics": {
+            "WIDTHEXPAND": 0,
+            "WIDTHTRUNC": 0,
+            "WIDTHCONCAT": 0
+          },
+          "verilatorBinSha256": "3e622e33b741d1b2ba6913e43158e2dba6aa9d2fd5e8e89ad2c978360426a254",
+          "verilatorDriverSha256": "1da6decbd57bb1e87799bcb22c5d013f9e4d31eb15f2c33c786994f6a421b7b0",
+          "modelSha256": "e02e43f169f8646c0d667fccd4dae2032a831a03c4427625f1e571e94539030a"
+        },
+        {
+          "log": "sim.log",
+          "rc": 0,
+          "leafArgs": [
+            "+credit_only"
+          ],
+          "matched": true
+        }
+      ],
+      "sources": {
+        "config_pkg.sv": "387477f4bc118f3a95165deedbb9fb04ecfde4f7521737401f8c7eae13d280b3",
+        "build_config_pkg.sv": "88321dc48ade047d7a863ff5ae118bb05957c8f25e0d12fe54a72ca5c6b9e3c2",
+        "g6lc_hyp_pkg.sv": "e776aac90519ab7bbd46b9854d5cebbd946c69138038d65718320d12016c9d19",
+        "g6lc64_hyp8_config_pkg.sv": "f1fb63dff387992e067bed7fa9b6b541904eb00358553fecd77d1b88a112b8a5",
+        "riscv_pkg.sv": "d7ef7a1651d5fe3486957e0cc88802b7e85e59df571e1b64a2374d531fbee10b",
+        "g6lc_core_pkg.sv": "b62d1a88a7cc9d5de94657ccd8459f657dfc28378ae38bc551aad6c0c5ab98f8",
+        "g6lc_ooo_pkg.sv": "051742e91341e634dc849306be43f2f450f9b90da7cb84d778597fd38c1d795f",
+        "g6lc_lsq_event.sv": "a0ee8c297884987b93250c239c5f11280a09e5662211b44f1b152bf000ea89b9",
+        "g6lc_lsq_slot.sv": "ad42fd9e09988dc37ae6dedc62a8a0f85785bc623bab12465b32d649288a039f",
+        "g6lc_lsq_cam_bank.sv": "20d71142d760f237742232311f3c22fc54df41087293572920c1b39dbbe90427",
+        "g6lc_lsq_age.sv": "b63a5c54a1b477814ba96f9af861c02352c6fde1112651f0e8026e6ca6908918",
+        "g6lc_lsq_reduce.sv": "12b39f3109421124f11a488c5c344a1cfcc705123ac760bdb60905ae74b034c7",
+        "g6lc_lsq_verdict.sv": "7b91603ad75b944262e90f908e2eed6a023f03ea53b5bcae77f7e9fb49579d17",
+        "g6lc_lsq_release.sv": "9720bb20be952532ecbaef4b88f219eed8c24595ffb68a9026e25e71d89d4cda",
+        "g6lc_lsq.sv": "15732c3bcfc794ffe59d017215a49ac1870dfc14b2caff9e749be17571a735ec",
+        "tb_g6lc_hyp8_control.sv": "6a1770472b0ade65493ce92a22300faf3b10038fec6d5b2cebcdd56609adf7d1",
+        "g6lc_core_types.svh": "e945a7a16a9ae33f8cea6bf73e562a23638112763ef845f2a37cf4d77748beb7",
+        "rvfi_types.svh": "c27c829e9972329c17acdbf5011749426a8ff62ee0425dab23d78acac5281f79"
+      },
+      "sim_sha256": "7bc8c4b798afa379b9accbb60e6148a7016f89fff8a851f1bb32121fb8a73939",
+      "full": {
+        "tag": "hyp8-r98-lsq-credit-after-c5-lf",
+        "results": [
+          {
+            "log": "build-model.log",
+            "warnings": [],
+            "sourceManifestSha256": "addd02fe97e0dbe6fe26877c873671f6d98646937fa40d47d2dfb6690eb2305e",
+            "warningCensus": {
+              "UNSIGNED": 2,
+              "UNOPTFLAT": 12
+            },
+            "openDiagnostics": {
+              "WIDTHEXPAND": 0,
+              "WIDTHTRUNC": 0,
+              "WIDTHCONCAT": 0
+            },
+            "verilatorBinSha256": "3e622e33b741d1b2ba6913e43158e2dba6aa9d2fd5e8e89ad2c978360426a254",
+            "verilatorDriverSha256": "1da6decbd57bb1e87799bcb22c5d013f9e4d31eb15f2c33c786994f6a421b7b0",
+            "modelSha256": "3d3fab437bedf3413504af7b7a7ed3ad3bf3df5a875582773397111438768ce9"
+          },
+          {
+            "log": "sim.log",
+            "rc": 0,
+            "leafArgs": [],
+            "matched": false
+          }
+        ],
+        "raw_sim_sha256": "4314b6f3219a0b92c966720291c133d6b097d261064cb52ad5424473e4376b95"
+      }
+    },
+    "hyp8-r98-pmp-write-c2": {
+      "results": [
+        {
+          "log": "build-model.log",
+          "warnings": [],
+          "sourceManifestSha256": "46384d93818e255d6c0004f54be7308515f720baa4aa256a3f41d5c747b28196",
+          "warningCensus": {
+            "WIDTHCONCAT": 2
+          },
+          "openDiagnostics": {
+            "WIDTHEXPAND": 0,
+            "WIDTHTRUNC": 0,
+            "WIDTHCONCAT": 2
+          },
+          "verilatorBinSha256": "3e622e33b741d1b2ba6913e43158e2dba6aa9d2fd5e8e89ad2c978360426a254",
+          "verilatorDriverSha256": "1da6decbd57bb1e87799bcb22c5d013f9e4d31eb15f2c33c786994f6a421b7b0",
+          "modelSha256": "940ba20edd8b229278dd62933a9afd4aab853b57f7e9ae694d97a9117fbd48dc"
+        },
+        {
+          "log": "sim.log",
+          "rc": 0,
+          "leafArgs": [],
+          "matched": true
+        }
+      ],
+      "sources": {
+        "config_pkg.sv": "387477f4bc118f3a95165deedbb9fb04ecfde4f7521737401f8c7eae13d280b3",
+        "build_config_pkg.sv": "88321dc48ade047d7a863ff5ae118bb05957c8f25e0d12fe54a72ca5c6b9e3c2",
+        "g6lc_hyp_pkg.sv": "e776aac90519ab7bbd46b9854d5cebbd946c69138038d65718320d12016c9d19",
+        "g6lc64_hyp8_config_pkg.sv": "f1fb63dff387992e067bed7fa9b6b541904eb00358553fecd77d1b88a112b8a5",
+        "riscv_pkg.sv": "d7ef7a1651d5fe3486957e0cc88802b7e85e59df571e1b64a2374d531fbee10b",
+        "g6lc_core_pkg.sv": "b62d1a88a7cc9d5de94657ccd8459f657dfc28378ae38bc551aad6c0c5ab98f8",
+        "g6lc_ooo_pkg.sv": "051742e91341e634dc849306be43f2f450f9b90da7cb84d778597fd38c1d795f",
+        "g6lc_hyp8_pmp_bank_reference.sv": "06fc876d658ed34f38052f26e10e531f26f7283580e45de2b7f41a5ad023041d",
+        "g6lc_hyp8_pmp_bank_candidate.sv": "2ef84102766dab9c29c9451436575116e54df9d643a67ce2cddb3c3973e4e144",
+        "tb_g6lc_hyp8_control.sv": "4a368c430110abe9186936eb40690a69cc1ef0daac092c0ee2ded1bd37e68519",
+        "g6lc_core_types.svh": "e945a7a16a9ae33f8cea6bf73e562a23638112763ef845f2a37cf4d77748beb7",
+        "rvfi_types.svh": "c27c829e9972329c17acdbf5011749426a8ff62ee0425dab23d78acac5281f79"
+      },
+      "sim_sha256": "ec293cec53a6578b3c4ff960dd826161b201940ba6154062cc270d0e2129cc28"
+    },
+    "hyp8-r98-pmp-write-neg-c1": {
+      "results": [
+        {
+          "log": "build-model.log",
+          "warnings": [],
+          "sourceManifestSha256": "4f754b43c4863a5535fdd7216ad47086ec5bbdd1d03a530346fe73f7281fa968",
+          "warningCensus": {
+            "WIDTHCONCAT": 2
+          },
+          "openDiagnostics": {
+            "WIDTHEXPAND": 0,
+            "WIDTHTRUNC": 0,
+            "WIDTHCONCAT": 2
+          },
+          "verilatorBinSha256": "3e622e33b741d1b2ba6913e43158e2dba6aa9d2fd5e8e89ad2c978360426a254",
+          "verilatorDriverSha256": "1da6decbd57bb1e87799bcb22c5d013f9e4d31eb15f2c33c786994f6a421b7b0",
+          "modelSha256": "c292c11188bd90b086efcf5ae5e85566741f5e6bb75bb12b76920cb9e06c4a9c"
+        },
+        {
+          "log": "sim.log",
+          "rc": -6,
+          "leafArgs": [],
+          "matched": false
+        }
+      ],
+      "sources": {
+        "config_pkg.sv": "387477f4bc118f3a95165deedbb9fb04ecfde4f7521737401f8c7eae13d280b3",
+        "build_config_pkg.sv": "88321dc48ade047d7a863ff5ae118bb05957c8f25e0d12fe54a72ca5c6b9e3c2",
+        "g6lc_hyp_pkg.sv": "e776aac90519ab7bbd46b9854d5cebbd946c69138038d65718320d12016c9d19",
+        "g6lc64_hyp8_config_pkg.sv": "f1fb63dff387992e067bed7fa9b6b541904eb00358553fecd77d1b88a112b8a5",
+        "riscv_pkg.sv": "d7ef7a1651d5fe3486957e0cc88802b7e85e59df571e1b64a2374d531fbee10b",
+        "g6lc_core_pkg.sv": "b62d1a88a7cc9d5de94657ccd8459f657dfc28378ae38bc551aad6c0c5ab98f8",
+        "g6lc_ooo_pkg.sv": "051742e91341e634dc849306be43f2f450f9b90da7cb84d778597fd38c1d795f",
+        "g6lc_hyp8_pmp_bank_reference.sv": "5329a38035894ed5693ee2cedf936858b2f8b14abfb3f15b99e8d12b310e70e1",
+        "g6lc_hyp8_pmp_bank_candidate.sv": "7383cea8af96019c657f874918cfaa51f8244efe7d10c36224d46b8342b1209b",
+        "tb_g6lc_hyp8_control.sv": "697d5799545303d3008f4162ad9793e1488f749a379bbc0f86ce421e577f4038",
+        "g6lc_core_types.svh": "e945a7a16a9ae33f8cea6bf73e562a23638112763ef845f2a37cf4d77748beb7",
+        "rvfi_types.svh": "c27c829e9972329c17acdbf5011749426a8ff62ee0425dab23d78acac5281f79"
+      },
+      "sim_sha256": "97c925f4083c51fb6eb2d85c9762bcee9365c4889d3f3cc3253369655f8abaa5"
+    },
+    "hyp8-r98-mshr-before-c2b": {
+      "results": [
+        {
+          "log": "build-model.log",
+          "warnings": [],
+          "sourceManifestSha256": "4d7207640a1caa011dd14471caf07a5095441056d93d9f1808bdbff31df3e4e5",
+          "warningCensus": {
+            "TIMESCALEMOD": 2,
+            "UNSIGNED": 2
+          },
+          "openDiagnostics": {
+            "WIDTHEXPAND": 0,
+            "WIDTHTRUNC": 0,
+            "WIDTHCONCAT": 0
+          },
+          "verilatorBinSha256": "3e622e33b741d1b2ba6913e43158e2dba6aa9d2fd5e8e89ad2c978360426a254",
+          "verilatorDriverSha256": "1da6decbd57bb1e87799bcb22c5d013f9e4d31eb15f2c33c786994f6a421b7b0",
+          "modelSha256": "c14340262fc4815532da20a842fd9c1f03a900db46c9bfdf3e4f12876e96c881"
+        },
+        {
+          "log": "sim.log",
+          "rc": 0,
+          "leafArgs": [],
+          "matched": true
+        }
+      ],
+      "sources": {
+        "g6lc_l2_mshr.sv": "1d2c5d5cfb3307eeda2d669744fd00f01aa8b94fd6690db99b34ea564adb57e5",
+        "g6lc_l2_mshr_reference.sv": "d0410e3b169810e7ad949788995b66bc6257f8556cd626ba19553ad10a0514af",
+        "tb_g6lc_l2_units.sv": "a29fb0cd28fe2aa872c39cf8f73741437b65a8d746b5b6bceb442af5754fe04d"
+      },
+      "sim_sha256": "a3a4aaea96385043af7e21bc29cb584f631328aa5f61a7b17571d0abc0305499"
+    },
+    "hyp8-r98-mshr-after-c2": {
+      "results": [
+        {
+          "log": "build-model.log",
+          "warnings": [],
+          "sourceManifestSha256": "0f46ee5bf2b43a0d0e994ac81dfb837e232cc409ab68a806400b2f61ba1aa813",
+          "warningCensus": {
+            "TIMESCALEMOD": 2,
+            "UNSIGNED": 2
+          },
+          "openDiagnostics": {
+            "WIDTHEXPAND": 0,
+            "WIDTHTRUNC": 0,
+            "WIDTHCONCAT": 0
+          },
+          "verilatorBinSha256": "3e622e33b741d1b2ba6913e43158e2dba6aa9d2fd5e8e89ad2c978360426a254",
+          "verilatorDriverSha256": "1da6decbd57bb1e87799bcb22c5d013f9e4d31eb15f2c33c786994f6a421b7b0",
+          "modelSha256": "5776a0f874eddc46a04feecf8e0aa5e43edfb03ae14826d35ef48b742d6af5d9"
+        },
+        {
+          "log": "sim.log",
+          "rc": 0,
+          "leafArgs": [],
+          "matched": true
+        }
+      ],
+      "sources": {
+        "g6lc_l2_mshr.sv": "bada532052ab28f12a9b3d9adcc09b65dfbd6e73e09b6ad91e02ef5576319c76",
+        "g6lc_l2_mshr_reference.sv": "d0410e3b169810e7ad949788995b66bc6257f8556cd626ba19553ad10a0514af",
+        "tb_g6lc_l2_units.sv": "a29fb0cd28fe2aa872c39cf8f73741437b65a8d746b5b6bceb442af5754fe04d"
+      },
+      "sim_sha256": "4c2a3594b55ce30ddff14e98ee0dfaa48760e513b88a2cacceb9cbd05fd3d28a"
+    },
+    "hyp8-r98-mshr-neg-c2": {
+      "results": [
+        {
+          "log": "build-model.log",
+          "warnings": [],
+          "sourceManifestSha256": "28f822877282e7daa93417dbc9be3bca81e4e71a93c6c817abe5f42ca4924e43",
+          "warningCensus": {
+            "TIMESCALEMOD": 2,
+            "UNSIGNED": 2
+          },
+          "openDiagnostics": {
+            "WIDTHEXPAND": 0,
+            "WIDTHTRUNC": 0,
+            "WIDTHCONCAT": 0
+          },
+          "verilatorBinSha256": "3e622e33b741d1b2ba6913e43158e2dba6aa9d2fd5e8e89ad2c978360426a254",
+          "verilatorDriverSha256": "1da6decbd57bb1e87799bcb22c5d013f9e4d31eb15f2c33c786994f6a421b7b0",
+          "modelSha256": "30e3720a0a8146e2dd1b8465772e32443d027f81f838b821ea6964d3bcb69759"
+        },
+        {
+          "log": "sim.log",
+          "rc": -6,
+          "leafArgs": [],
+          "matched": false
+        }
+      ],
+      "sources": {
+        "g6lc_l2_mshr.sv": "bada532052ab28f12a9b3d9adcc09b65dfbd6e73e09b6ad91e02ef5576319c76",
+        "g6lc_l2_mshr_reference.sv": "657de21726aa5f15fb354ca436682673b65159c68e2f354ba0fb38f58b051fad",
+        "tb_g6lc_l2_units.sv": "a29fb0cd28fe2aa872c39cf8f73741437b65a8d746b5b6bceb442af5754fe04d"
+      },
+      "sim_sha256": "80e43c044a10a75715f305d0dc69c1620bda402722d2a94addb29ae9866a97a2"
+    }
+  },
+  "licensing": {
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_lsq.sv": {
+      "tier": "R",
+      "license": "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial",
+      "sha256": "15732c3bcfc794ffe59d017215a49ac1870dfc14b2caff9e749be17571a735ec"
+    },
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/csr_regfile.sv": {
+      "tier": "R",
+      "license": "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial",
+      "sha256": "f19d4504eaa79b8ed5ceb7205f7fbd217e792234c77b046575f244255b37b37a"
+    },
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_lsq_event.sv": {
+      "tier": "R",
+      "license": "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial",
+      "sha256": "a0ee8c297884987b93250c239c5f11280a09e5662211b44f1b152bf000ea89b9"
+    },
+    "verif/tb/core/tb_g6lc_hyp8_control.sv": {
+      "tier": "T",
+      "license": "MIT",
+      "sha256": "4a368c430110abe9186936eb40690a69cc1ef0daac092c0ee2ded1bd37e68519"
+    },
+    "verif/tb/l2/tb_g6lc_l2_units.sv": {
+      "tier": "T",
+      "license": "MIT",
+      "sha256": "32578e61aaf11d5d72fe5777f4be6134c81c446ccf9103c2d20c0dc45fc05f39"
+    },
+    "verif/regress/remote/run_hyp8_memory.py": {
+      "tier": "T",
+      "license": "MIT",
+      "sha256": "2b109aa85b240b0a60b7aef78e5ce50cd3d68d616d95024b5bdfcbbf63733887"
+    },
+    "verif/regress/remote/run_hyp8_integration.py": {
+      "tier": "T",
+      "license": "MIT",
+      "sha256": "d6be091f19a87ee6beb281a870b3147c9f14732fd4b01dfc399d386e4d7d6a73"
+    },
+    "verif/regress/remote/run_hyp8_smokes.py": {
+      "tier": "T",
+      "license": "MIT",
+      "sha256": "423860f26a0abb5f0a728ae63829bcb0bc45dd92b6f9ad947b0ab86d2c8f178d"
+    },
+    "verif/regress/remote/hyp8/build_closure.py": {
+      "tier": "T",
+      "license": "MIT",
+      "sha256": "ff79e8b48bb452df2c3060c9f722fb1677593ae19b54eef739a5ee8ca99b045f"
+    },
+    "verif/tests/custom/hyp8_h34_shift_dep.S": {
+      "tier": "T",
+      "license": "MIT",
+      "sha256": "a2cfc38cbe6a5a6485d908f4a87ad0763dc409835519ea77bf7f4edf49bc518d"
+    },
+    "verif/tests/custom/hyp8_h33_st_fwd.S": {
+      "tier": "T",
+      "license": "MIT",
+      "sha256": "f7c5cf3caf8bc6dda5f256aea57bed1822cb279e01898a274404b428066c144b"
+    },
+    "sv-timing/fixtures/countones_intrinsic.sv": {
+      "tier": "T",
+      "license": "MIT",
+      "sha256": "7e81c2e3190039c6fda487c9bc351afe5feb55bfa89e53b66509bd468caf73f4"
+    },
+    "sv-timing/crates/sv-timing-core/src/expr.rs": {
+      "tier": "T",
+      "license": "MIT",
+      "sha256": "fd1630363a0558121e90ce75a30488fe465184919f45e9be95f643d9f3d451af"
+    },
+    "sv-timing/crates/sv-timing-core/src/measure.rs": {
+      "tier": "T",
+      "license": "MIT",
+      "sha256": "d735b76080e16264735b22688db4c9aa395fea9258745d98120bdaf19456e10f"
+    },
+    "sv-timing/crates/sv-timing-core/src/width.rs": {
+      "tier": "T",
+      "license": "MIT",
+      "sha256": "528afdf8f8e353b3798fb2b7f68c3be52a31cfb20e02e51b7e557694c9045bb2"
+    },
+    "sv-timing/crates/sv-timing-core/src/version.rs": {
+      "tier": "T",
+      "license": "MIT",
+      "sha256": "475444a64e72dada21e43f446e3853183290041a35fc90662bba0eabb53f9a75"
+    },
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/audit.py": {
+      "tier": "T",
+      "license": "MIT",
+      "sha256": "ae0b2b3782aacf83031fe8a34059325e8c83ff993ee02122430dfa0dcc300fca"
+    },
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/finalize.py": {
+      "tier": "T",
+      "license": "MIT",
+      "sha256": "c2aa807c265ba12b142594a67f2ad0f114fc902014823cb9a4cf011e716797bb"
+    },
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/prepare_pmp.py": {
+      "tier": "T",
+      "license": "MIT",
+      "sha256": "29ac26014534206dc0a95fe3e5076da181f799e982172a1165d7cb105e753c3f"
+    },
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/screen.py": {
+      "tier": "T",
+      "license": "MIT",
+      "sha256": "5c7b12e350161d60d53f3c40624afe78cfbe883267349e90912f08a25ed8b20f"
+    },
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/lsq-final.before.sv": {
+      "tier": "R",
+      "license": "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial",
+      "sha256": "5dda884c76183d8e3349c29038fe81972deace46b7d45c90151ec8d1117ecf35"
+    },
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/lsq-qualified.before.sv": {
+      "tier": "R",
+      "license": "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial",
+      "sha256": "cee8f510582a627736e418a7ea6b5e03e3ec686a7005bad5ac362d8606f4ee78"
+    },
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/lsq-v50.before.sv": {
+      "tier": "R",
+      "license": "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial",
+      "sha256": "cee8f510582a627736e418a7ea6b5e03e3ec686a7005bad5ac362d8606f4ee78"
+    },
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/lsq-widths.before.sv": {
+      "tier": "R",
+      "license": "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial",
+      "sha256": "5dda884c76183d8e3349c29038fe81972deace46b7d45c90151ec8d1117ecf35"
+    },
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/lsq.before.sv": {
+      "tier": "R",
+      "license": "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial",
+      "sha256": "624a08b8f04b7764e695548ddaf598a3bfc0e9333f7b2651d0c047939f571308"
+    },
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/mshr-l2-v50.before.sv": {
+      "tier": "R",
+      "license": "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial",
+      "sha256": "1d2c5d5cfb3307eeda2d669744fd00f01aa8b94fd6690db99b34ea564adb57e5"
+    },
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/mshr-l2.before.sv": {
+      "tier": "R",
+      "license": "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial",
+      "sha256": "1d2c5d5cfb3307eeda2d669744fd00f01aa8b94fd6690db99b34ea564adb57e5"
+    },
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/mshr-l3-v50.before.sv": {
+      "tier": "R",
+      "license": "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial",
+      "sha256": "1d2c5d5cfb3307eeda2d669744fd00f01aa8b94fd6690db99b34ea564adb57e5"
+    },
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/mshr-l3.before.sv": {
+      "tier": "R",
+      "license": "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial",
+      "sha256": "1d2c5d5cfb3307eeda2d669744fd00f01aa8b94fd6690db99b34ea564adb57e5"
+    },
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/mshr-per-entry.rejected.sv": {
+      "tier": "R",
+      "license": "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial",
+      "sha256": "bada532052ab28f12a9b3d9adcc09b65dfbd6e73e09b6ad91e02ef5576319c76"
+    },
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r98/pmp-scalar-v50.before.sv": {
+      "tier": "R",
+      "license": "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial",
+      "sha256": "fdd1b406670522aa309b03eb146eb0303d71181f481f896d02f9891256c813b4"
+    }
+  },
+  "limitations": "Focused checks/structural screens; MSHR timing rejected. Aggregate gate recorded separately. No boot, STA or 8-FO4 closure."
+}

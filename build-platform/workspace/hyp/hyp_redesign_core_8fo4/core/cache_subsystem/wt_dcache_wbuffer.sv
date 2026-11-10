@@ -845,7 +845,11 @@ module wt_dcache_wbuffer
       // this cycle, so a push that hits the active entry still blocks
       // retire. The ack below reads the register-only request copy, so
       // completion does not loop through the request this block writes.
-      assign fixup_coalesced = fixup_push && (snap_bypass_hit || (|snap_push_first));
+      // r115-E115-L4: |fixup_first_from_head(m)| == |m| — the encoder
+      // returns a one-hot (or zero) so its reduction equals the input
+      // mask reduction; use the CAM mask directly and keep the encoder
+      // only for the positional read below.
+      assign fixup_coalesced = fixup_push && (snap_bypass_hit || (|snap_push_match));
       assign fixup_active_coalesced = fixup_push &&
           (snap_bypass_hit || (!fixup_bypass_valid_q && snap_push_first[fixup_head]));
 

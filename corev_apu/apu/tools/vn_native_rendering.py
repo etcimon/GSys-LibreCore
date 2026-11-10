@@ -12,9 +12,12 @@ class RenderPass:
     colors: tuple
     # subpass-0 color refs live in `colors` (the only executable profile);
     # `subpasses` retains every subpass's refs and `dependencies` the
-    # validated VkSubpassDependency records for the execution follow-up
+    # validated VkSubpassDependency records for the execution follow-up.
+    # `depths` retains each subpass's optional depth-stencil reference
+    # `(attachment_index, layout)` or None, parallel to `subpasses`.
     subpasses: tuple = ()
     dependencies: tuple = ()
+    depths: tuple = ()
 
     @property
     def subpass_count(self):
@@ -26,15 +29,33 @@ class RenderPass:
             raise ValueError('render pass subpass index exceeds profile')
         return refs[index]
 
+    def subpass_depth(self, index):
+        """Depth-stencil attachment ref `(index, layout)` for `index`, or
+        None when the subpass declares no depth attachment.  Multi-subpass
+        passes carry the per-subpass refs; single-subpass passes fall back
+        to the `depths` tuple's single entry."""
+        refs = self.subpasses or (self.colors,)
+        if not 0 <= index < len(refs):
+            raise ValueError('render pass subpass index exceeds profile')
+        depths = self.depths or (None,) * len(refs)
+        return depths[index] if index < len(depths) else None
+
     def compatible(self, other):
         if (not isinstance(other, RenderPass) or self.context is not other.context or
-                self.device != other.device or len(self.colors) != len(other.colors)):
+                self.device != other.device or len(self.colors) != len(other.colors) or
+                len(self.depths or ()) != len(other.depths or ())):
             return False
         for (left, _), (right, _) in zip(self.colors, other.colors):
             if left == 0xFFFFFFFF or right == 0xFFFFFFFF:
                 if left != right:
                     return False
             elif self.attachments[left][:2] != other.attachments[right][:2]:
+                return False
+        for left, right in zip(self.depths or (), other.depths or ()):
+            if (left is None) != (right is None):
+                return False
+            if (left is not None and
+                    self.attachments[left[0]][:2] != other.attachments[right[0]][:2]):
                 return False
         return True
 
@@ -117,24 +138,32 @@ def capture(engine, current, name, words, record):
             return values
 
         # every per-subpass scalar/array field appears once per element;
-        # input/resolve/depth/preserve stay refused inside each subpass
+        # input/resolve/preserve stay refused inside each subpass.  The
+        # depth-stencil reference is admitted: its pointer presence is
+        # `pDepthStencilAttachment` (one per subpass, 0 = NULL) and its
+        # {attachment,layout} members interleave into the flat
+        # `attachment`/`layout` lists right after that subpass's colour
+        # references (the decoder drops the pointer hop).
         if (any(per('pipelineBindPoint', nsub)) or
                 any(per('inputAttachmentCount', nsub)) or
                 any(per('pInputAttachments', nsub)) or
                 any(per('pResolveAttachments', nsub)) or
-                any(per('pDepthStencilAttachment', nsub)) or
                 any(per('preserveAttachmentCount', nsub)) or
                 any(per('pPreserveAttachments', nsub))):
-            raise ValueError('render pass subpass inputs/resolve/depth/preserve exceed profile')
+            raise ValueError('render pass subpass inputs/resolve/preserve exceed profile')
+        depth_flags = per('pDepthStencilAttachment', nsub)
         color_counts = per('colorAttachmentCount', nsub)
         if (any(c > 4 for c in color_counts) or
                 list(per('pColorAttachments', nsub)) != list(color_counts)):
             raise ValueError('render pass color attachment counts exceed profile')
-        att_list, lay_list = fields.get('attachment', ()), fields.get('layout', ())
-        if (len(att_list) != len(lay_list) or len(att_list) != sum(color_counts)):
-            raise ValueError('render pass color references are incomplete')
-        subpasses, pos = [], 0
-        for c in color_counts:
+        att_list = list(fields.get('attachment', ()))
+        lay_list = list(fields.get('layout', ()))
+        total_refs = (sum(color_counts) +
+                      sum(1 for d in depth_flags if d))
+        if len(att_list) != len(lay_list) or len(att_list) != total_refs:
+            raise ValueError('render pass attachment references are incomplete')
+        subpasses, depths, pos = [], [], 0
+        for i, c in enumerate(color_counts):
             refs = tuple(zip(att_list[pos:pos + c], lay_list[pos:pos + c]))
             pos += c
             used = [index for index, _ in refs if index != 0xFFFFFFFF]
@@ -143,6 +172,16 @@ def capture(engine, current, name, words, record):
                         if index != 0xFFFFFFFF)):
                 raise ValueError('render pass color references exceed profile')
             subpasses.append(refs)
+            if depth_flags[i]:
+                dref = (att_list[pos], lay_list[pos])
+                pos += 1
+                # a present depth reference must name a real attachment and
+                # an in-use attachment layout (GENERAL..SHADER_READ_ONLY)
+                if not 0 <= dref[0] < count or dref[1] not in (1, 2, 3, 4, 5):
+                    raise ValueError('render pass depth reference exceeds profile')
+                depths.append(dref)
+            else:
+                depths.append(None)
         dependencies = ()
         if ndep:
             dep_names = ('srcSubpass', 'dstSubpass', 'srcStageMask', 'dstStageMask',
@@ -164,15 +203,28 @@ def capture(engine, current, name, words, record):
                  'stencilStoreOp', 'initialLayout', 'finalLayout')
         if any(len(fields.get(key, ())) != count for key in names):
             raise ValueError('render pass attachment fields are incomplete')
+        # an attachment referenced as a subpass depth-stencil target must
+        # carry a bounded depth format: device fmt 12 = D32_SFLOAT (the
+        # float32 depth path) or fmt 14 = D24S8 (the packed depth-stencil
+        # path, {stencil[31:24], depth_unorm24[23:0]}); every other
+        # attachment keeps the colour-format bound.  Bounded profile: an
+        # attachment may not serve as both a colour and a depth target.
+        depth_idx = {d[0] for d in depths if d is not None}
+        color_idx = {index for refs in subpasses for index, _ in refs
+                     if index != 0xFFFFFFFF}
+        if depth_idx & color_idx:
+            raise ValueError('render pass attachment is both colour and depth')
         attachments = tuple(zip(*(fields[key] for key in names)))
-        for fmt, samples, load, store, sload, sstore, initial, final in attachments:
-            if (engine.golden.img_fmt_id(engine.model, fmt) not in (2, 3, 4, 5) or samples != 1 or
+        for i, (fmt, samples, load, store, sload, sstore, initial, final) in enumerate(attachments):
+            dev_fmt = engine.golden.img_fmt_id(engine.model, fmt)
+            fmt_ok = (dev_fmt in (12, 14)) if i in depth_idx else dev_fmt in (2, 3, 4, 5)
+            if (not fmt_ok or samples != 1 or
                     load not in (0, 1, 2) or store not in (0, 1) or
                     sload not in (0, 1, 2) or sstore not in (0, 1) or
                     initial not in (0, 1, 2, 5, 6, 7, 8) or final not in (1, 2, 5, 6, 7)):
                 raise ValueError('render pass attachment format/ops/layout exceed profile')
         return RenderPass(context, device, attachments, subpasses[0],
-                          tuple(subpasses), dependencies)
+                          tuple(subpasses), dependencies, tuple(depths))
     _, entry = resolve(one('renderPass'), 'VkRenderPass')
     render_pass = entry.get('native_rendering')
     if (not isinstance(render_pass, RenderPass) or render_pass.context is not context or
@@ -183,6 +235,10 @@ def capture(engine, current, name, words, record):
             not 0 < width <= 4096 or not 0 < height <= 4096 or one('layers') != 1 or
             len(record['pay']) != 6 + 2 * count):
         raise ValueError('framebuffer attachment count/dimensions exceed profile')
+    # attachment indices named as a subpass depth-stencil target back a
+    # DEPTH_STENCIL_ATTACHMENT-usage image; every other slot stays a
+    # colour-attachment image (aux usage bits 22+ -> aux>>54)
+    depth_idx = {d[0] for d in (render_pass.depths or ()) if d is not None}
     attachments = []
     for i in range(count):
         position = 3 + i * 2
@@ -195,12 +251,13 @@ def capture(engine, current, name, words, record):
         memory, me = resolve(ie.get('bind_mgen', 0) << 16 | slot, 'VkDeviceMemory')
         aux, va = ie['aux'], ve['aux']
         mip, layer = va >> 28 & 15, va >> 36 & 1023
+        need_usage = 32 if i in depth_idx else 16
         if (any(value['parent'] != device & 0xFFFF for value in (ve, ie, me)) or
                 ie['state'] >> 19 & 3 != 1 or va & 0xFFFF != image & 0xFFFF or
                 va >> 56 & 7 or va >> 16 & 0xFFF or
                 va >> 32 & 15 != 1 or va >> 46 & 1023 != 1 or
                 mip >= aux >> 40 & 31 or layer >= aux >> 45 & 511 or
-                not aux >> 54 & 16 or
+                not aux >> 54 & need_usage or
                 aux >> 32 & 255 != engine.golden.img_fmt_id(
                     engine.model, render_pass.attachments[i][0]) or
                 width > max(1, (aux & 0xFFFF) >> mip) or

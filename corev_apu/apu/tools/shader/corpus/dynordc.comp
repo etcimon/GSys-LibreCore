@@ -1,0 +1,13 @@
+#version 460
+layout(local_size_x = 1) in;
+// dynordu: faithful CTS layout_binding_order analogue — three
+// UNIFORM_BUFFER_DYNAMIC bindings in set 0 plus a static storage
+// output, declared out of binding-number order.  Mirrors the Amber
+// block0/1/2 + result shape.
+layout(set = 0, binding = 0) readonly uniform B0 { int d0; };
+layout(set = 0, binding = 1) readonly uniform B1 { int d1; };
+layout(set = 0, binding = 2) readonly uniform B2 { int d2; };
+layout(set = 0, binding = 3) buffer Out { int o[4]; };
+void main() {
+    o[0] = d0; o[1] = d1; o[2] = d2; o[3] = d0 + d1 + d2;
+}

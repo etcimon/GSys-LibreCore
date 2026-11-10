@@ -4,7 +4,8 @@
 import hashlib
 import unittest
 
-from g6lc_cpu_debug_program import build_debug_program
+from g6lc_cpu_debug_program import (EXPECTED_DPC, FIRMWARE_TARGET,
+                                    build_debug_program, program_metadata)
 from test_g6lc_cpu_origin_program import branch_offset
 
 
@@ -150,6 +151,120 @@ class DebugProgramTests(unittest.TestCase):
                 for index, word in enumerate(code):
                     if word & 127 == 0x63:
                         self.assertEqual(index * 4 + branch_offset(word), 0x300)
+
+    def test_mechanism_normal_image_differs_only_at_firmware_target(self):
+        for mechanism in ("ebreak", "step"):
+            for privilege in (0, 3):
+                with self.subTest(mechanism=mechanism, privilege=privilege):
+                    normal, _ = ([int(w, 16) for w in image.splitlines()]
+                                 for image in build_debug_program(
+                                     privilege, 0, mechanism))
+                    halt_normal, _ = ([int(w, 16) for w in image.splitlines()]
+                                      for image in build_debug_program(privilege, 0))
+                    differing = [index for index, (a, b) in
+                                 enumerate(zip(normal, halt_normal)) if a != b]
+                    self.assertEqual(differing, [FIRMWARE_TARGET // 4,
+                                                 FIRMWARE_TARGET // 4 + 1])
+                    self.assertEqual(normal[FIRMWARE_TARGET // 4], 0x0262a823)
+                    self.assertEqual(normal[FIRMWARE_TARGET // 4 + 1], 0x00100073)
+
+    def test_mechanism_debug_dispatch_and_two_drets(self):
+        for mechanism in ("ebreak", "step"):
+            for privilege in (0, 3):
+                with self.subTest(mechanism=mechanism, privilege=privilege):
+                    _, debug = ([int(w, 16) for w in image.splitlines()]
+                                for image in build_debug_program(
+                                    privilege, 0, mechanism))
+                    self.assertEqual(debug[0x840 // 4], 0x7b002e73)  # CSRR dcsr
+                    self.assertEqual(sum(1 for w in debug if w == 0x7b200073), 2)
+                    self.assertEqual(sum(1 for w in debug if w == 0x7b03a073), 1)
+                    self.assertEqual(sum(1 for w in debug if w == 0x7b03b073), 1)
+                    # Store offsets in address order: two fail stubs, then the
+                    # second-entry Probe+56 record before the first-entry ones.
+                    stores = [((w >> 25) << 5) | ((w >> 7) & 31)
+                              for w in debug if w & 127 == 0x23]
+                    self.assertEqual(stores, [36, 36, 56, 8, 24, 16])
+
+    def test_mechanism_arm_and_clear_masks(self):
+        # ebreakm=bit15 (lui x7,8), ebreaku=bit12 (lui x7,1), step=bit2 (addi x7,4).
+        expected = {("ebreak", 3): 0x000083b7, ("ebreak", 0): 0x000013b7,
+                    ("step", 3): 0x400393, ("step", 0): 0x400393}
+        for (mechanism, privilege), mask in expected.items():
+            with self.subTest(mechanism=mechanism, privilege=privilege):
+                _, debug = ([int(w, 16) for w in image.splitlines()]
+                            for image in build_debug_program(
+                                privilege, 0, mechanism))
+                self.assertEqual(debug.count(mask), 2)  # arm + clear
+
+    def test_mechanism_expected_dpc_and_metadata(self):
+        for mechanism, cause in (("ebreak", 1), ("step", 4)):
+            for privilege in (0, 3):
+                with self.subTest(mechanism=mechanism, privilege=privilege):
+                    meta = program_metadata(privilege, 0, mechanism)
+                    self.assertEqual(meta["mechanism"], mechanism)
+                    self.assertEqual(meta["mechanism_id"],
+                                     {"ebreak": 1, "step": 2}[mechanism])
+                    self.assertEqual(meta["expected_writes"], 8)
+                    self.assertEqual(meta["expected_reads"], 4)
+                    self.assertEqual(meta["debug_writes"], 4)
+                    self.assertEqual(meta["debug_reads"], 2)
+                    self.assertEqual(meta["csr_checks"], 3)
+                    self.assertEqual(meta["second_entry"]["firmware_target"],
+                                     "0x80000140")
+                    self.assertEqual(meta["second_entry"]["expected_dpc"],
+                                     "0x80000144")
+                    self.assertEqual(meta["second_entry"]["expected_cause"], cause)
+                    self.assertEqual(EXPECTED_DPC, 0x80000144)
+
+    def test_mechanism_rejects_invalid_combinations(self):
+        for privilege, mprv, mechanism in (
+                (1, 0, "ebreak"), (1, 0, "step"), (3, 1, "ebreak"),
+                (3, 2, "step"), (0, 1, "ebreak"), (3, 0, "bogus"),
+                (2, 0, "step")):
+            with self.subTest(privilege=privilege, mprv=mprv,
+                              mechanism=mechanism):
+                with self.assertRaises(ValueError):
+                    build_debug_program(privilege, mprv, mechanism)
+
+    def test_halt_metadata_has_no_second_entry(self):
+        meta = program_metadata(3, 0, "halt")
+        self.assertIsNone(meta["second_entry"])
+        self.assertEqual((meta["expected_writes"], meta["expected_reads"],
+                          meta["debug_writes"], meta["debug_reads"],
+                          meta["csr_checks"]), (6, 4, 3, 2, 2))
+
+
+class CpuDebugStageInventoryTests(unittest.TestCase):
+    def test_case_list_covers_halt_and_mechanism_matrix(self):
+        import run_cpu_debug
+        cases = run_cpu_debug._case_list()
+        self.assertEqual(len(cases), 48)
+        keys = [tuple(case[field] for field in
+                      ("origin", "delay", "priv", "mprv", "mechanism",
+                       "negative", "negative_firmware", "mutant",
+                       "program_mutant")) for case in cases]
+        self.assertEqual(len(set(keys)), len(keys))
+        halt = [case for case in cases if case["mechanism"] == 0]
+        self.assertEqual(len(halt), 25)
+        positive = [case for case in cases
+                    if case["mechanism"] in (1, 2) and not case["negative"]
+                    and not case["negative_firmware"] and not case["mutant"]
+                    and not case["program_mutant"]]
+        self.assertEqual(len(positive), 16)
+        self.assertEqual({(case["mechanism"], case["priv"]) for case in positive},
+                         {(1, 0), (1, 3), (2, 0), (2, 3)})
+        bench_neg = [case for case in cases if case["negative"]]
+        self.assertEqual(len(bench_neg), 4)
+        self.assertEqual({case["mechanism"] for case in bench_neg}, {0, 1, 2})
+        fw_neg = [case for case in cases if case["negative_firmware"]]
+        self.assertEqual(len(fw_neg), 2)
+        self.assertEqual({case["mechanism"] for case in fw_neg}, {1, 2})
+        mutants = [case for case in cases if case["mutant"]]
+        self.assertEqual(len(mutants), 5)
+        self.assertEqual({case["mechanism"] for case in mutants}, {0, 1, 2})
+        program_mutants = [case for case in cases if case["program_mutant"]]
+        self.assertEqual(len(program_mutants), 1)
+        self.assertEqual(program_mutants[0]["mechanism"], 2)
 
 
 if __name__ == "__main__":

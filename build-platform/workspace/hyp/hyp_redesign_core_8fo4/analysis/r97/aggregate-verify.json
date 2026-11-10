@@ -1,0 +1,14 @@
+{
+  "argv": [
+    "bun",
+    "build-platform/src/cli/index.ts",
+    "verify",
+    "--lint",
+    "--sim",
+    "--synth",
+    "--target",
+    "g6lc64_hyp8",
+    "--remote"
+  ],
+  "returncode": 1
+}

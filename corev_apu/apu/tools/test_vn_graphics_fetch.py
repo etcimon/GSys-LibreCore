@@ -94,6 +94,63 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(job.state, 'done')
         self.assertEqual(job.fetch_stats[0]['robust'], 0)
 
+    def test_indexed_restart_marks_sentinel_breaks_u16(self):
+        # uint16 indices [0,1,0xFFFF,2,3]: the 0xFFFF sentinel at slot 2 is
+        # a break record, detected on the raw index before vertexOffset.
+        # Every index slot still emits a record so record indices stay
+        # aligned with the raster's vary stream.
+        verts = bytearray()
+        for i in range(8):
+            verts += struct.pack('<2f', float(i), 0.0)
+        self.write(0, bytes(verts))
+        self.write(512, struct.pack('<5H', 0, 1, 0xFFFF, 2, 3))
+        fetch = Fetch(True, self.span(512, 16, index_bytes=2), (
+            self.vertex(0, 103, 0, stride=8),),
+            (5, 1, 0, 4, 0), None, 1)
+        job = self.job(fetch)
+        runtime = job.runtimes[0]
+        self.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertEqual(job.fetch_stats[0]['records'], 5)
+        self.assertEqual(runtime.breaks, {2})
+
+    def test_indexed_restart_marks_sentinel_breaks_u32_and_offset(self):
+        # uint32 sentinel 0xFFFFFFFF; vertexOffset must NOT rescue it —
+        # the sentinel is matched on the raw index.  Two sentinels split
+        # the stream into three runs.
+        verts = bytearray()
+        for i in range(8):
+            verts += struct.pack('<2f', float(i), 0.0)
+        self.write(0, bytes(verts))
+        self.write(512, struct.pack('<6I', 0, 0xFFFFFFFF, 1, 2,
+                                     0xFFFFFFFF, 3))
+        fetch = Fetch(True, self.span(512, 32, index_bytes=4), (
+            self.vertex(0, 103, 0, stride=8),),
+            (6, 1, 0, 1, 0), None, 1)
+        job = self.job(fetch)
+        runtime = job.runtimes[0]
+        self.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertEqual(job.fetch_stats[0]['records'], 6)
+        self.assertEqual(runtime.breaks, {1, 4})
+
+    def test_restart_disabled_leaves_breaks_empty(self):
+        # primitiveRestartEnable=0: the same sentinel indices are ordinary
+        # (robust-clamped) vertex indices, never breaks.
+        verts = bytearray()
+        for i in range(8):
+            verts += struct.pack('<2f', float(i), 0.0)
+        self.write(0, bytes(verts))
+        self.write(512, struct.pack('<3H', 0, 0xFFFF, 1))
+        fetch = Fetch(True, self.span(512, 8, index_bytes=2), (
+            self.vertex(0, 103, 0, stride=8),),
+            (3, 1, 0, 0, 0), None, 0)
+        job = self.job(fetch)
+        runtime = job.runtimes[0]
+        self.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertEqual(runtime.breaks, set())
+
     def test_instance_rate_attribute_uses_instance_index(self):
         # per-instance color at stride 16 offset 0, fmt R32_SFLOAT (100)
         inst = struct.pack('<4f', 0.0, 1.0, 2.0, 3.0)

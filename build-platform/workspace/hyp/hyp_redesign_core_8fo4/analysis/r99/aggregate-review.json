@@ -1,0 +1,40 @@
+{
+  "reviewedGate": "bounded aggregate green at integration/build/smoke level; warning census remains",
+  "sourceClosure": "build-platform/workspace/build/hyp8-r99-mcfix3",
+  "sourceFiles": 731,
+  "manifestSha256": "d2a9440f4d428c4bfa69e6689811bb9a15ce18e924310f23466421f98578fb2e",
+  "modelSha256": "d4b061a07a609b98a9a8c3733abc352f6d0318ea86578b698a873f96f755ebc4",
+  "lint": {
+    "scalar": 602,
+    "smt2": 623,
+    "mc": 688,
+    "hardDiagnostics": 0,
+    "selrange": 0,
+    "usererror": 0
+  },
+  "focused": {
+    "dispatch": "HYP8_DISPATCH_PASS checked=125",
+    "ckpt128": "CKPT128_PASS last=127"
+  },
+  "smokes": {
+    "count": 7,
+    "passed": 7,
+    "cycles": {
+      "h34_shift_dep": 685,
+      "h33_st_fwd": 1011,
+      "hyp8_branch_cancel": 492,
+      "hyp8_csr_flush_skip": 2364,
+      "hyp8_amo_store_order": 2199,
+      "hyp8_amo_ready_order": 1231,
+      "hyp8_f14_store_offset": 671
+    }
+  },
+  "receiptSha256": {
+    "lint": "ff7967e35a7e9d731add35ba689b779d19de26cabf43744f4600be1803dc19c9",
+    "aggregate": "9772fb0af3e9f4ce4dc9c2675ac13aad4d658026a3417691a875263f7ed9b1dc",
+    "smokes": "0ab2d416992ba53548d301a5d62219a901f69432fc0ed44bb21abd728765c97b",
+    "dispatch": "685bb91c9d36a73666a206ffbc5b6827329bc03b10f55fb1cfc1797c5e1d8ee3",
+    "ckpt128": "9798710aa5aef179f8f430cfff4964d665434f72743340223048f751684ac50f"
+  },
+  "limitations": "Bounded scalar smokes and leaf simulation only; no Linux/OpenSBI boot, MC simulation, physical STA, clean-warning claim or 8-FO4 closure."
+}

@@ -9,16 +9,24 @@ import vn_golden
 from test_vn_graphics_pshade import (fs_dref_gather_program, fs_dref_program,
                                      fs_gather_program,
                                      fs_image_program, fs_image_store_program,
-                                     fs_program, fs_proj_sample_program,
+                                     fs_program, fs_program2, fs_kill_program,
+                                     fs_deriv_program,
+                                     fs_proj_sample_program,
                                      fs_sample_program, fs_separate_sample_program)
-from test_vn_graphics_shade import vs_program
+from test_vn_graphics_shade import (vs_inst_program, vs_program,
+                                    vs_rate_program)
+from vn_graphics_writeback import (_BLEND_K255, _blend_factor, _blend_op,
+                                   _f32, _lop)
 from vn_native_execution import StreamFault
 
 
 class DrawReplayTests(unittest.TestCase):
-    VB, VS2, FS2, PIPE2 = (0x790000001000 + i for i in range(4))
+    VB, VS2, FS2, PIPE2, IB, XB, VS3, VB2 = (0x790000001000 + i
+                                            for i in range(8))
     POOL, DSET, UBO, IMAGE, VIEW = (0x7A0000001000 + i for i in range(5))
     SAMPLER = 0x7A0000002000
+    DIMAGE, DVIEW, DRP, DFB = (0x7B0000001000 + i for i in range(4))
+    BIMAGE, BVIEW, BRP, BFB = (0x7C0000001000 + i for i in range(4))
 
     def setUp(self):
         self.r = resource_fixture.ResourceTests()
@@ -30,6 +38,30 @@ class DrawReplayTests(unittest.TestCase):
                 pQueueFamilyIndices=[]))
         self.f.command('vkBindBufferMemory', device=self.w.DEVICE, buffer=self.VB,
                        memory=self.w.MEMORY, memoryOffset=0)
+        # index buffer for vkCmdDrawIndexed coverage: usage=0x40
+        # (INDEX_BUFFER), parked at offset 512 right after the 512-byte VB.
+        self.f.command('vkCreateBuffer', device=self.w.DEVICE, pBuffer=self.IB,
+            pCreateInfo=self.w.structure('VkBufferCreateInfo', pNext=[], flags=0,
+                size=128, usage=0x40, sharingMode=0, queueFamilyIndexCount=0,
+                pQueueFamilyIndices=[]))
+        self.f.command('vkBindBufferMemory', device=self.w.DEVICE, buffer=self.IB,
+                       memory=self.w.MEMORY, memoryOffset=512)
+        # indirect-args buffer for vkCmdDrawIndirect/vkCmdDrawIndexedIndirect:
+        # usage=0x100 (INDIRECT_BUFFER), parked at offset 1024.
+        self.f.command('vkCreateBuffer', device=self.w.DEVICE, pBuffer=self.XB,
+            pCreateInfo=self.w.structure('VkBufferCreateInfo', pNext=[], flags=0,
+                size=64, usage=0x100, sharingMode=0, queueFamilyIndexCount=0,
+                pQueueFamilyIndices=[]))
+        self.f.command('vkBindBufferMemory', device=self.w.DEVICE, buffer=self.XB,
+                       memory=self.w.MEMORY, memoryOffset=1024)
+        # second vertex buffer for the inputRate=1 (per-instance) attribute:
+        # usage=0x80 (VERTEX_BUFFER), parked at offset 1088 right after XB.
+        self.f.command('vkCreateBuffer', device=self.w.DEVICE, pBuffer=self.VB2,
+            pCreateInfo=self.w.structure('VkBufferCreateInfo', pNext=[], flags=0,
+                size=64, usage=0x80, sharingMode=0, queueFamilyIndexCount=0,
+                pQueueFamilyIndices=[]))
+        self.f.command('vkBindBufferMemory', device=self.w.DEVICE, buffer=self.VB2,
+                       memory=self.w.MEMORY, memoryOffset=1088)
         self.module(self.VS2, vs_program())
         self.module(self.FS2, fs_program('fc'))
         self.f.begin()
@@ -40,68 +72,102 @@ class DrawReplayTests(unittest.TestCase):
             pCreateInfo=self.w.structure('VkShaderModuleCreateInfo', pNext=[],
                 flags=0, codeSize=len(code) * 4, pCode=list(code)))
 
-    def pipeline(self, rp=None, subpass=0):
+    def pipeline(self, rp=None, subpass=0, blend=None, blend_constants=None,
+                 logic_op=None, raster_discard=0, poly_mode=0, topology=3,
+                 attachments=None, cull=0, front=0, restart=0, vs=None,
+                 rate1=False):
         s = self.w.structure
+        # rate1 adds a second vertex binding (binding1, inputRate=1,
+        # stride=4) carrying a per-instance scalar float at location 2 —
+        # exercises the rate-1 fetch path (inst_index addressing).
+        vbinds = [s('VkVertexInputBindingDescription',
+                    binding=0, stride=24, inputRate=0)]
+        vattrs = [s('VkVertexInputAttributeDescription', location=0,
+                    binding=0, format=103, offset=0),
+                  s('VkVertexInputAttributeDescription', location=1,
+                    binding=0, format=109, offset=8)]
+        if rate1:
+            vbinds.append(s('VkVertexInputBindingDescription',
+                            binding=1, stride=4, inputRate=1))
+            vattrs.append(s('VkVertexInputAttributeDescription',
+                            location=2, binding=1, format=100, offset=0))
+        att = dict(blendEnable=0, srcColorBlendFactor=1,
+                   dstColorBlendFactor=0, colorBlendOp=0,
+                   srcAlphaBlendFactor=1, dstAlphaBlendFactor=0,
+                   alphaBlendOp=0, colorWriteMask=15)
+        att.update(blend or {})
+        atts = ([dict(a) for a in attachments] if attachments is not None
+                else [att])
+        for a in atts:
+            a.setdefault('blendEnable', 0)
+            a.setdefault('srcColorBlendFactor', 1)
+            a.setdefault('dstColorBlendFactor', 0)
+            a.setdefault('colorBlendOp', 0)
+            a.setdefault('srcAlphaBlendFactor', 1)
+            a.setdefault('dstAlphaBlendFactor', 0)
+            a.setdefault('alphaBlendOp', 0)
+            a.setdefault('colorWriteMask', 15)
         self.f.command('vkCreateGraphicsPipelines', device=self.w.DEVICE,
             pipelineCache=0, createInfoCount=1, pPipelines=[self.PIPE2],
             pCreateInfos=[s('VkGraphicsPipelineCreateInfo', pNext=[], flags=0,
                 stageCount=2, pStages=[
                     s('VkPipelineShaderStageCreateInfo', pNext=[], flags=0,
-                        stage=1, module=self.VS2, pName='main',
+                        stage=1, module=vs or self.VS2, pName='main',
                         pSpecializationInfo=None),
                     s('VkPipelineShaderStageCreateInfo', pNext=[], flags=0,
                         stage=0x10, module=self.FS2, pName='main',
                         pSpecializationInfo=None)],
                 pVertexInputState=s('VkPipelineVertexInputStateCreateInfo',
-                    pNext=[], flags=0, vertexBindingDescriptionCount=1,
-                    pVertexBindingDescriptions=[s('VkVertexInputBindingDescription',
-                        binding=0, stride=24, inputRate=0)],
-                    vertexAttributeDescriptionCount=2,
-                    pVertexAttributeDescriptions=[
-                        s('VkVertexInputAttributeDescription', location=0,
-                          binding=0, format=103, offset=0),
-                        s('VkVertexInputAttributeDescription', location=1,
-                          binding=0, format=109, offset=8)]),
+                    pNext=[], flags=0,
+                    vertexBindingDescriptionCount=len(vbinds),
+                    pVertexBindingDescriptions=vbinds,
+                    vertexAttributeDescriptionCount=len(vattrs),
+                    pVertexAttributeDescriptions=vattrs),
                 pInputAssemblyState=s('VkPipelineInputAssemblyStateCreateInfo',
-                    pNext=[], flags=0, topology=3, primitiveRestartEnable=0),
+                    pNext=[], flags=0, topology=topology,
+                    primitiveRestartEnable=restart),
                 pTessellationState=None,
                 pViewportState=s('VkPipelineViewportStateCreateInfo', pNext=[],
                     flags=0, viewportCount=1, pViewports=[], scissorCount=1,
                     pScissors=[]),
                 pRasterizationState=s('VkPipelineRasterizationStateCreateInfo',
                     pNext=[], flags=0, depthClampEnable=0,
-                    rasterizerDiscardEnable=0, polygonMode=0, cullMode=0,
-                    frontFace=0, depthBiasEnable=0, depthBiasConstantFactor=0,
-                    depthBiasClamp=0, depthBiasSlopeFactor=0,
-                    lineWidth=0x3F800000),
+                    rasterizerDiscardEnable=raster_discard, polygonMode=poly_mode,
+                    cullMode=cull, frontFace=front, depthBiasEnable=0,
+                    depthBiasConstantFactor=0, depthBiasClamp=0,
+                    depthBiasSlopeFactor=0, lineWidth=0x3F800000),
                 pMultisampleState=s('VkPipelineMultisampleStateCreateInfo',
                     pNext=[], flags=0, rasterizationSamples=1,
                     sampleShadingEnable=0, minSampleShading=0, pSampleMask=[],
                     alphaToCoverageEnable=0, alphaToOneEnable=0),
                 pDepthStencilState=None,
                 pColorBlendState=s('VkPipelineColorBlendStateCreateInfo',
-                    pNext=[], flags=0, logicOpEnable=0, logicOp=0,
-                    attachmentCount=1, pAttachments=[s(
-                        'VkPipelineColorBlendAttachmentState', blendEnable=0,
-                        srcColorBlendFactor=1, dstColorBlendFactor=0,
-                        colorBlendOp=0, srcAlphaBlendFactor=1,
-                        dstAlphaBlendFactor=0, alphaBlendOp=0,
-                        colorWriteMask=15)], blendConstants=[0, 0, 0, 0]),
+                    pNext=[], flags=0,
+                    logicOpEnable=1 if logic_op is not None else 0,
+                    logicOp=logic_op if logic_op is not None else 0,
+                    attachmentCount=len(atts),
+                    pAttachments=[s('VkPipelineColorBlendAttachmentState',
+                                    **a) for a in atts],
+                    blendConstants=blend_constants or [0, 0, 0, 0]),
                 pDynamicState=s('VkPipelineDynamicStateCreateInfo', pNext=[],
                     flags=0, dynamicStateCount=2, pDynamicStates=[0, 1]),
                 layout=self.g.PL, renderPass=rp or self.g.r.RP,
                 subpass=subpass, basePipelineHandle=0, basePipelineIndex=-1)])
 
-    def begin_pass(self):
+    def begin_pass(self, clear=None, rp=None, fb=None, clears=None):
+        # `clears` is a list of per-attachment [r,g,b,a] uint32 clears (MRT);
+        # `clear` is the single-attachment shorthand.
+        values = clears if clears is not None else [clear or [0, 0, 0, 0x3F800000]]
         self.f.command('vkCmdBeginRenderPass', commandBuffer=self.f.CB,
             contents=0, pRenderPassBegin=self.w.structure('VkRenderPassBeginInfo',
-                pNext=[], renderPass=self.g.r.RP, framebuffer=self.g.r.FB,
+                pNext=[], renderPass=rp or self.g.r.RP,
+                framebuffer=fb or self.g.r.FB,
                 renderArea=self.w.structure('VkRect2D',
                     offset=self.w.structure('VkOffset2D', x=0, y=0),
                     extent=self.w.structure('VkExtent2D', width=8, height=4)),
-                clearValueCount=1, pClearValues=[self.w.structure('VkClearValue',
-                    color=self.w.structure('VkClearColorValue',
-                        uint32=[0, 0, 0, 0x3F800000]))]))
+                clearValueCount=len(values), pClearValues=[self.w.structure(
+                    'VkClearValue', color=self.w.structure('VkClearColorValue',
+                        uint32=c)) for c in values]))
 
     def viewport(self):
         self.f.command('vkCmdSetViewport', commandBuffer=self.f.CB,
@@ -139,6 +205,13 @@ class DrawReplayTests(unittest.TestCase):
                 ((1.0, -1.0), (0.25, 0.5, 0.75, 1.0)),
                 ((-1.0, 1.0), (0.25, 0.5, 0.75, 1.0))]
 
+    def fs_triangle(self):
+        # fullscreen triangle (-1,-1),(3,-1),(-1,3): every 8x4 pixel
+        # centre satisfies x+y<2 so the whole viewport is covered.
+        return [((-1.0, -1.0), (0.0, 0.0, 0.0, 1.0)),
+                ((3.0, -1.0), (0.0, 0.0, 0.0, 1.0)),
+                ((-1.0, 3.0), (0.0, 0.0, 0.0, 1.0))]
+
     def color_triangle(self):
         # distinct per-vertex colors so flat vs smooth interpolation differ:
         # v0 red, v1 green, v2 blue (provoking vertex is v0)
@@ -156,6 +229,500 @@ class DrawReplayTests(unittest.TestCase):
         self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
         self.f.end()
 
+    def poly_prepared(self, poly_mode, **draw_kw):
+        self.pipeline(poly_mode=poly_mode)
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.draw(**draw_kw)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+
+    # clip-space vertices the draw's vs_program emits for ndc_triangle:
+    # Position=vec4(pos.xy,0.5,1) -> (-1,-1),(1,-1),(-1,1) at z=0.5,w=1.
+    NDG_CLIP = [(-1.0, -1.0, 0.5, 1.0), (1.0, -1.0, 0.5, 1.0),
+                (-1.0, 1.0, 0.5, 1.0)]
+
+    def poly_coverage(self, poly_mode):
+        # expected covered framebuffer pixels for polygonMode via the
+        # golden line oracle: LINE unions the three edge Bresenhams,
+        # POINT the three degenerate vertex pixels.
+        vp, sc, cw, ch = ((0.0, 0.0, 8.0, 4.0, 0.0, 1.0),
+                          (0, 0, 8, 4), 8, 4)
+        cov = set()
+        for i in range(3):
+            if poly_mode == 2:
+                cov |= vn_golden.gfx_line_coverage(
+                    [self.NDG_CLIP[i], self.NDG_CLIP[i]], vp, sc, cw, ch)
+            else:
+                cov |= vn_golden.gfx_line_coverage(
+                    [self.NDG_CLIP[i], self.NDG_CLIP[(i + 1) % 3]],
+                    vp, sc, cw, ch)
+        return cov
+
+    def line_prepared(self, topology, vertex_count, **draw_kw):
+        self.pipeline(topology=topology)
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.draw(vertexCount=vertex_count, **draw_kw)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+
+    # clip-space endpoints the draw's vs_program emits for the uploaded
+    # 2-D positions: Position=vec4(pos.xy,0.5,1) -> (x,y,0.5,1).
+    LINE_SEGS = [[(-1.0, -1.0, 0.5, 1.0), (1.0, 1.0, 0.5, 1.0)],
+                 [(1.0, -1.0, 0.5, 1.0), (-1.0, 1.0, 0.5, 1.0)]]
+
+    def line_verts(self):
+        # LINE_LIST vertex order: v0,v1 = segment 0; v2,v3 = segment 1.
+        # Each vertex carries a constant colour (fragcoord FS ignores it).
+        return [((-1.0, -1.0), (0.25, 0.5, 0.75, 1.0)),
+                ((1.0, 1.0), (0.25, 0.5, 0.75, 1.0)),
+                ((1.0, -1.0), (0.25, 0.5, 0.75, 1.0)),
+                ((-1.0, 1.0), (0.25, 0.5, 0.75, 1.0))]
+
+    def line_coverage(self):
+        # expected covered framebuffer pixels for LINE_LIST via the golden
+        # line oracle, unioned over both segments.
+        vp, sc, cw, ch = ((0.0, 0.0, 8.0, 4.0, 0.0, 1.0),
+                          (0, 0, 8, 4), 8, 4)
+        cov = set()
+        for seg in self.LINE_SEGS:
+            cov |= vn_golden.gfx_line_coverage(seg, vp, sc, cw, ch)
+        return cov
+
+    # ---- bounded UNORM8 RGBA blend end-to-end ----
+    # blendEnable=1 on the single colour output: pipeline retains the blend
+    # tuple, draw_replay forwards it, writeback reads the stored dst texel
+    # (u8*K255), applies the factors/op and the writeMask.
+    def blend_prepared(self, blend, clear, blend_constants=None, **draw_kw):
+        self.pipeline(blend=blend, blend_constants=blend_constants)
+        self.begin_pass(clear=clear)
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.draw(**draw_kw)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+
+    def blend_clear_texel(self, clear):
+        did = self.e.golden.img_fmt_id(self.e.model, 37)
+        return self.e.golden.img_clear_texel(self.e.model, did, tuple(clear))
+
+    def blend_fc_texel(self, x, y, clear, *, sf, df, cop, saf, daf, aop,
+                       mask, konst=(0.0, 0.0, 0.0, 0.0)):
+        # oracle-mirror of Writeback._blend_write for the fragcoord FS:
+        # src=(x+0.5,y+0.5,0,1), dst = the clear texel dequantized u8*K255.
+        did = self.e.golden.img_fmt_id(self.e.model, 37)
+        dst = list(self.e.golden.img_clear_texel(
+            self.e.model, did, tuple(clear)))
+        dv = [_f32(dst[c] * _BLEND_K255) for c in range(4)]
+        sv = [x + 0.5, y + 0.5, 0.0, 1.0]
+        out = bytearray(4)
+        for c in range(4):
+            s_f, d_f, bop = (sf, df, cop) if c < 3 else (saf, daf, aop)
+            sfv = _blend_factor(s_f, c, sv, dv, konst)
+            dfv = _blend_factor(d_f, c, sv, dv, konst)
+            res = _blend_op(bop, _f32(sv[c] * sfv), _f32(dv[c] * dfv))
+            if (mask >> c) & 1:
+                out[c] = vn_golden.cl_f32_u8(
+                    struct.unpack('<I', struct.pack('<f', res))[0])
+            else:
+                out[c] = dst[c]
+        return bytes(out)
+
+    def test_blend_writes_blended_texels_to_attachment(self):
+        self.upload(self.ndc_triangle())
+        # ONE/ONE ADD colour + ONE/ZERO alpha over a 0.25-gray clear
+        blend = dict(blendEnable=1, srcColorBlendFactor=1,
+                     dstColorBlendFactor=1, colorBlendOp=0,
+                     srcAlphaBlendFactor=1, dstAlphaBlendFactor=0,
+                     alphaBlendOp=0, colorWriteMask=15)
+        clear = [0x3E800000, 0x3E800000, 0, 0x3F800000]
+        self.blend_prepared(blend, clear)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertGreater(job.drawexec_stats[job.operation - 1]['records'], 0)
+        kw = dict(sf=1, df=1, cop=0, saf=1, daf=0, aop=0, mask=15)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y),
+                             self.blend_fc_texel(x, y, clear, **kw))
+        # uncovered corner keeps the clear texel (no blend applied)
+        self.assertEqual(self.read_texel(7, 3), self.blend_clear_texel(clear))
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_blend_constant_factors_use_blend_constants(self):
+        self.upload(self.ndc_triangle())
+        # CONSTANT_COLOR/1M_CONSTANT_COLOR colour + ONE/ZERO alpha; the four
+        # fp32 blendConstants ride the wire blob into the retained tuple.
+        blend = dict(blendEnable=1, srcColorBlendFactor=10,
+                     dstColorBlendFactor=11, colorBlendOp=0,
+                     srcAlphaBlendFactor=1, dstAlphaBlendFactor=0,
+                     alphaBlendOp=0, colorWriteMask=15)
+        clear = [0x3E800000, 0x3E800000, 0, 0x3F800000]
+        # blendConstants are fp32 bit patterns on the wire: 0.5f,0.5f,0.5f,1.0f
+        self.blend_prepared(blend, clear,
+                            blend_constants=[0x3F000000] * 3 + [0x3F800000])
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertGreater(job.drawexec_stats[job.operation - 1]['records'], 0)
+        kw = dict(sf=10, df=11, cop=0, saf=1, daf=0, aop=0, mask=15,
+                  konst=(0.5, 0.5, 0.5, 1.0))
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y),
+                             self.blend_fc_texel(x, y, clear, **kw))
+        self.assertEqual(self.read_texel(7, 3), self.blend_clear_texel(clear))
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    # ---- standalone colourWriteMask (blendEnable=0) end-to-end ----
+    # the mask is retained per-attachment and forwarded to writeback, which
+    # merges the packed src texel with the stored dst on clear mask bits.
+    def masked_texel(self, x, y, clear, mask):
+        # oracle-mirror of Writeback._mask_merge on the RGBA (fmt 2,
+        # cmap=identity) attachment: src fragcoord texel gated per channel.
+        did = self.e.golden.img_fmt_id(self.e.model, 37)
+        src = list(self.e.golden.img_clear_texel(
+            self.e.model, did, struct.unpack('<4I', struct.pack(
+                '<4f', x + 0.5, y + 0.5, 0.0, 1.0))))
+        dst = list(self.e.golden.img_clear_texel(
+            self.e.model, did, tuple(clear)))
+        return bytes(src[c] if (mask >> c) & 1 else dst[c] for c in range(4))
+
+    def test_write_mask_gates_unblended_channels(self):
+        self.upload(self.ndc_triangle())
+        # blendEnable=0 (default) + colourWriteMask=7: RGB channels write
+        # the fragcoord src, the alpha channel keeps the dst clear byte.
+        self.pipeline(blend={'colorWriteMask': 7})
+        clear = [0, 0, 0, 0x3F000000]      # alpha 0.5 -> dst byte 128
+        self.begin_pass(clear=clear)
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.draw()
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertGreater(job.drawexec_stats[job.operation - 1]['records'], 0)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y),
+                             self.masked_texel(x, y, clear, 7))
+        # uncovered corner is never shaded: keeps the raw clear texel
+        self.assertEqual(self.read_texel(7, 3),
+                         self.e.golden.img_clear_texel(
+                             self.e.model,
+                             self.e.golden.img_fmt_id(self.e.model, 37),
+                             tuple(clear)))
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    # ---- bounded logicOp (VkLogicOp) end-to-end ----
+    # logicOpEnable=1 with blendEnable=0: writeback applies the per-channel
+    # f_lop byte table on the UNORM8 src/dst encodings (cmap for BGRA).
+    def logic_prepared(self, lop, clear, **draw_kw):
+        self.pipeline(logic_op=lop)
+        self.begin_pass(clear=clear)
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.draw(**draw_kw)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+
+    def logic_fc_texel(self, x, y, clear, lop, mask=15):
+        # oracle-mirror of Writeback._logic_write on the RGBA (fmt 2,
+        # cmap=identity) attachment: src fragcoord -> UNORM8 byte, f_lop
+        # vs the clear dst byte, writeMask keeps dst on clear bits.
+        did = self.e.golden.img_fmt_id(self.e.model, 37)
+        src = struct.unpack('<4I', struct.pack('<4f',
+                                               x + 0.5, y + 0.5, 0.0, 1.0))
+        dst = list(self.e.golden.img_clear_texel(
+            self.e.model, did, tuple(clear)))
+        out = bytearray(4)
+        for c in range(4):
+            if (mask >> c) & 1:
+                out[c] = _lop(lop, vn_golden.cl_f32_u8(src[c]), dst[c])
+            else:
+                out[c] = dst[c]
+        return bytes(out)
+
+    def test_logicop_xor_writes_framebuffer(self):
+        self.upload(self.ndc_triangle())
+        # logicOp XOR(6) over a 0.25-gray clear; blendEnable stays 0.
+        clear = [0x3E800000, 0x3E800000, 0, 0x3F800000]
+        self.logic_prepared(6, clear)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertGreater(job.drawexec_stats[job.operation - 1]['records'], 0)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y),
+                             self.logic_fc_texel(x, y, clear, 6))
+        self.assertEqual(self.read_texel(7, 3), self.blend_clear_texel(clear))
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    # ---- bounded rasterizerDiscardEnable end-to-end ----
+    # rasterizerDiscardEnable=1: vertex fetch+shade still run, but raster
+    # emits zero fragment records so writeback never fires — every
+    # framebuffer texel keeps the attachment clear.
+    def test_rasterizer_discard_keeps_framebuffer_clear(self):
+        self.upload(self.ndc_triangle())
+        clear = [0x3E800000, 0x3E800000, 0, 0x3F800000]
+        self.pipeline(raster_discard=1)
+        self.begin_pass(clear=clear)
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.draw()
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        # zero fragment records reach writeback
+        self.assertEqual(
+            job.drawexec_stats[job.operation - 1]['records'], 0)
+        clear_texel = self.e.golden.img_clear_texel(
+            self.e.model,
+            self.e.golden.img_fmt_id(self.e.model, 37),
+            tuple(clear))
+        # every texel — covered and uncovered — keeps the clear value
+        for x in range(8):
+            for y in range(4):
+                self.assertEqual(self.read_texel(x, y), clear_texel)
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    # ---- bounded late-z depth end-to-end ----
+    # D32_SFLOAT (VkFormat 126 -> device fmt 12) depth attachment beside the
+    # colour one: render pass admits pDepthStencilAttachment, the framebuffer
+    # resolves the depth view, the pipeline carries a plain depth test, and
+    # draw_replay forwards (owner, offset, pitch, compareOp, writeEnable).
+    DEPTH_OFF = 4608          # after the colour image (4096..4352), in 5001B mem
+
+    def depth_resources(self, load=1, depth_load=0, fmt=126):
+        s = self.w.structure
+        self.f.command('vkCreateImage', device=self.w.DEVICE, pImage=self.DIMAGE,
+            pCreateInfo=s('VkImageCreateInfo', pNext=[], flags=0, imageType=1,
+                format=fmt,
+                extent=s('VkExtent3D', width=8, height=4, depth=1),
+                mipLevels=1, arrayLayers=1, samples=1, tiling=0, usage=0x23,
+                sharingMode=0, queueFamilyIndexCount=0, pQueueFamilyIndices=[],
+                initialLayout=0))
+        self.f.command('vkBindImageMemory', device=self.w.DEVICE,
+            image=self.DIMAGE, memory=self.w.MEMORY, memoryOffset=self.DEPTH_OFF)
+        self.f.command('vkCreateImageView', device=self.w.DEVICE, pView=self.DVIEW,
+            pCreateInfo=s('VkImageViewCreateInfo', pNext=[], flags=0,
+                image=self.DIMAGE, viewType=1, format=fmt,
+                components=s('VkComponentMapping', r=0, g=0, b=0, a=0),
+                subresourceRange=s('VkImageSubresourceRange', aspectMask=2,
+                    baseMipLevel=0, levelCount=1, baseArrayLayer=0, layerCount=1)))
+        self.f.command('vkCreateRenderPass', device=self.w.DEVICE,
+            pRenderPass=self.DRP,
+            pCreateInfo=s('VkRenderPassCreateInfo', pNext=[], flags=0,
+                attachmentCount=2,
+                pAttachments=[
+                    s('VkAttachmentDescription', flags=0, format=37, samples=1,
+                        loadOp=load, storeOp=0, stencilLoadOp=2, stencilStoreOp=1,
+                        initialLayout=0, finalLayout=1),
+                    s('VkAttachmentDescription', flags=0, format=fmt, samples=1,
+                        loadOp=depth_load, storeOp=1, stencilLoadOp=2,
+                        stencilStoreOp=1, initialLayout=0, finalLayout=5)],
+                subpassCount=1,
+                pSubpasses=[s('VkSubpassDescription', flags=0,
+                    pipelineBindPoint=0, inputAttachmentCount=0,
+                    pInputAttachments=[], colorAttachmentCount=1,
+                    pColorAttachments=[s('VkAttachmentReference',
+                        attachment=0, layout=2)],
+                    pResolveAttachments=[],
+                    pDepthStencilAttachment=s('VkAttachmentReference',
+                        attachment=1, layout=3),
+                    preserveAttachmentCount=0, pPreserveAttachments=[])],
+                dependencyCount=0, pDependencies=[]))
+        self.f.command('vkCreateFramebuffer', device=self.w.DEVICE,
+            pFramebuffer=self.DFB,
+            pCreateInfo=s('VkFramebufferCreateInfo', pNext=[], flags=0,
+                renderPass=self.DRP, attachmentCount=2,
+                pAttachments=[self.g.r.VIEW, self.DVIEW],
+                width=8, height=4, layers=1))
+
+    def depth_pipeline(self, compare=1, write=1, blend=None, depth_test=1,
+                       bounds=None, bias=None, depth_clamp=0, stencil=None):
+        s = self.w.structure
+        att = dict(blendEnable=0, srcColorBlendFactor=1,
+                   dstColorBlendFactor=0, colorBlendOp=0,
+                   srcAlphaBlendFactor=1, dstAlphaBlendFactor=0,
+                   alphaBlendOp=0, colorWriteMask=15)
+        att.update(blend or {})
+        bmin = (struct.unpack('<I', struct.pack('<f', bounds[0]))[0]
+                if bounds is not None else 0)
+        bmax = (struct.unpack('<I', struct.pack('<f', bounds[1]))[0]
+                if bounds is not None else 0x3F800000)
+        # bias=(constantFactor, clamp, slopeFactor) fp32 -> wire uint32 bits;
+        # the z_ndc is constant across the draw triangle so only the
+        # constant term contributes (slope term needs a depth gradient).
+        if bias is not None:
+            ben = 1
+            bcf = struct.unpack('<I', struct.pack('<f', bias[0]))[0]
+            bcl = struct.unpack('<I', struct.pack('<f', bias[1]))[0]
+            bsf = struct.unpack('<I', struct.pack('<f', bias[2]))[0]
+        else:
+            ben, bcf, bcl, bsf = 0, 0, 0, 0
+        # stencil=(front_ops, back_ops); each ops dict carries the
+        # VkStencilOpState fields (failOp/passOp/depthFailOp/compareOp/
+        # compareMask/writeMask/reference).  None keeps stencilTestEnable=0.
+        if stencil is None:
+            front = back = dict(failOp=0, passOp=0, depthFailOp=0,
+                                compareOp=0, compareMask=0, writeMask=0,
+                                reference=0)
+            sten = 0
+        else:
+            front = dict(stencil[0])
+            back = dict(stencil[1])
+            sten = 1
+        ds = s('VkPipelineDepthStencilStateCreateInfo', pNext=[], flags=0,
+            depthTestEnable=depth_test, depthWriteEnable=write,
+            depthCompareOp=compare,
+            depthBoundsTestEnable=1 if bounds is not None else 0,
+            stencilTestEnable=sten,
+            front=s('VkStencilOpState', **front),
+            back=s('VkStencilOpState', **back),
+            minDepthBounds=bmin, maxDepthBounds=bmax)
+        self.f.command('vkCreateGraphicsPipelines', device=self.w.DEVICE,
+            pipelineCache=0, createInfoCount=1, pPipelines=[self.PIPE2],
+            pCreateInfos=[s('VkGraphicsPipelineCreateInfo', pNext=[], flags=0,
+                stageCount=2, pStages=[
+                    s('VkPipelineShaderStageCreateInfo', pNext=[], flags=0,
+                        stage=1, module=self.VS2, pName='main',
+                        pSpecializationInfo=None),
+                    s('VkPipelineShaderStageCreateInfo', pNext=[], flags=0,
+                        stage=0x10, module=self.FS2, pName='main',
+                        pSpecializationInfo=None)],
+                pVertexInputState=s('VkPipelineVertexInputStateCreateInfo',
+                    pNext=[], flags=0, vertexBindingDescriptionCount=1,
+                    pVertexBindingDescriptions=[s(
+                        'VkVertexInputBindingDescription', binding=0, stride=24,
+                        inputRate=0)],
+                    vertexAttributeDescriptionCount=2,
+                    pVertexAttributeDescriptions=[
+                        s('VkVertexInputAttributeDescription', location=0,
+                          binding=0, format=103, offset=0),
+                        s('VkVertexInputAttributeDescription', location=1,
+                          binding=0, format=109, offset=8)]),
+                pInputAssemblyState=s('VkPipelineInputAssemblyStateCreateInfo',
+                    pNext=[], flags=0, topology=3, primitiveRestartEnable=0),
+                pTessellationState=None,
+                pViewportState=s('VkPipelineViewportStateCreateInfo', pNext=[],
+                    flags=0, viewportCount=1, pViewports=[], scissorCount=1,
+                    pScissors=[]),
+                pRasterizationState=s('VkPipelineRasterizationStateCreateInfo',
+                    pNext=[], flags=0, depthClampEnable=depth_clamp,
+                    rasterizerDiscardEnable=0, polygonMode=0, cullMode=0,
+                    frontFace=0, depthBiasEnable=ben,
+                    depthBiasConstantFactor=bcf, depthBiasClamp=bcl,
+                    depthBiasSlopeFactor=bsf, lineWidth=0x3F800000),
+                pMultisampleState=s('VkPipelineMultisampleStateCreateInfo',
+                    pNext=[], flags=0, rasterizationSamples=1,
+                    sampleShadingEnable=0, minSampleShading=0, pSampleMask=[],
+                    alphaToCoverageEnable=0, alphaToOneEnable=0),
+                pDepthStencilState=ds,
+                pColorBlendState=s('VkPipelineColorBlendStateCreateInfo',
+                    pNext=[], flags=0, logicOpEnable=0, logicOp=0,
+                    attachmentCount=1, pAttachments=[s(
+                        'VkPipelineColorBlendAttachmentState', **att)],
+                    blendConstants=[0, 0, 0, 0]),
+                pDynamicState=s('VkPipelineDynamicStateCreateInfo', pNext=[],
+                    flags=0, dynamicStateCount=2, pDynamicStates=[0, 1]),
+                layout=self.g.PL, renderPass=self.DRP, subpass=0,
+                basePipelineHandle=0, basePipelineIndex=-1)])
+
+    def depth_begin_pass(self, depth_clear=None, color_clear=None,
+                         stencil_clear=None):
+        # the wire VkClearValue union has no depthStencil arm: a depth
+        # attachment's clear rides the colour uint32[0] slot as the float32
+        # depth bits (img_clear_texel fmt12 consumes cw[0] verbatim); for
+        # D24S8 (fmt14) uint32[1][7:0] carries the stencil byte.
+        color_clear = color_clear or [0, 0, 0, 0x3F800000]
+        clears = [self.w.structure('VkClearValue',
+            color=self.w.structure('VkClearColorValue',
+                uint32=color_clear))]
+        if depth_clear is not None or stencil_clear is not None:
+            dbits = (struct.unpack('<I', struct.pack('<f', depth_clear))[0]
+                     if depth_clear is not None else 0)
+            clears.append(self.w.structure('VkClearValue',
+                color=self.w.structure('VkClearColorValue',
+                    uint32=[dbits, stencil_clear or 0, 0, 0])))
+        self.f.command('vkCmdBeginRenderPass', commandBuffer=self.f.CB,
+            contents=0, pRenderPassBegin=self.w.structure('VkRenderPassBeginInfo',
+                pNext=[], renderPass=self.DRP, framebuffer=self.DFB,
+                renderArea=self.w.structure('VkRect2D',
+                    offset=self.w.structure('VkOffset2D', x=0, y=0),
+                    extent=self.w.structure('VkExtent2D', width=8, height=4)),
+                clearValueCount=len(clears), pClearValues=clears))
+
+    def depth_prepared(self, compare=1, write=1, depth_load=0,
+                       depth_clear=None, blend=None, color_clear=None,
+                       depth_test=1, bounds=None, bias=None, depth_clamp=0,
+                       **draw_kw):
+        self.depth_resources(depth_load=depth_load)
+        self.depth_pipeline(compare=compare, write=write, blend=blend,
+                            depth_test=depth_test, bounds=bounds, bias=bias,
+                            depth_clamp=depth_clamp)
+        self.depth_begin_pass(depth_clear=depth_clear,
+                              color_clear=color_clear)
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.draw(**draw_kw)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+
+    def seed_depth(self, value):
+        # float32 depth grid: pitch 64 (img_mpitch for fmt 12, width 8), 4 rows;
+        # each row holds 8 texels (32B) plus 32B pitch padding
+        row = struct.pack('<8f', *([value] * 8))
+        buf = b''.join(row + b'\0' * 32 for _ in range(4))
+        self.f.state.aperture.write(self.f.owner.base + self.DEPTH_OFF, buf)
+
+    def read_depth(self, x, y):
+        return struct.unpack('<f', self.f.state.aperture.read(
+            self.f.owner.base + self.DEPTH_OFF + y * 64 + x * 4, 4))[0]
+
+    def read_ds(self, x, y):
+        # D24S8 packed word {stencil[31:24], depth_unorm24[23:0]}
+        return int.from_bytes(self.f.state.aperture.read(
+            self.f.owner.base + self.DEPTH_OFF + y * 64 + x * 4, 4),
+            'little')
+
+    def stencil_prepared(self, stencil, compare=7, write=1, depth_test=1,
+                         depth_clear=1.0, stencil_clear=0, **draw_kw):
+        self.depth_resources(depth_load=1, fmt=129)
+        self.depth_pipeline(compare=compare, write=write,
+                            depth_test=depth_test, stencil=stencil)
+        self.depth_begin_pass(depth_clear=depth_clear,
+                              stencil_clear=stencil_clear)
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.draw(**draw_kw)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+
+    def st_ops(self, fail=0, pas=0, dfail=0, cmpop=7, cmask=0xFF,
+               wmask=0xFF, ref=0):
+        return dict(failOp=fail, passOp=pas, depthFailOp=dfail,
+                    compareOp=cmpop, compareMask=cmask, writeMask=wmask,
+                    reference=ref)
+
     def read_texel(self, x, y):
         return self.f.state.aperture.read(
             self.f.owner.base + 4096 + y * 64 + x * 4, 4)
@@ -171,6 +738,127 @@ class DrawReplayTests(unittest.TestCase):
                                                 x + 0.5, y + 0.5, 0.0, 1.0))
         return self.e.golden.img_clear_texel(self.e.model, did, words)
 
+    # ---- bounded BGRA (device fmt 4) blend end-to-end ----
+    # VK_FORMAT_B8G8R8A8_UNORM stores bytes [B,G,R,A]; the writeback cmap
+    # permutes logical components through it.  Single colour attachment.
+    def bgr_resources(self, load=1):
+        s = self.w.structure
+        self.f.command('vkCreateImage', device=self.w.DEVICE, pImage=self.BIMAGE,
+            pCreateInfo=s('VkImageCreateInfo', pNext=[], flags=0, imageType=1,
+                format=44,
+                extent=s('VkExtent3D', width=8, height=4, depth=1),
+                mipLevels=1, arrayLayers=1, samples=1, tiling=0, usage=0x12,
+                sharingMode=0, queueFamilyIndexCount=0, pQueueFamilyIndices=[],
+                initialLayout=0))
+        self.f.command('vkBindImageMemory', device=self.w.DEVICE,
+            image=self.BIMAGE, memory=self.w.MEMORY, memoryOffset=4096)
+        self.f.command('vkCreateImageView', device=self.w.DEVICE, pView=self.BVIEW,
+            pCreateInfo=s('VkImageViewCreateInfo', pNext=[], flags=0,
+                image=self.BIMAGE, viewType=1, format=44,
+                components=s('VkComponentMapping', r=0, g=0, b=0, a=0),
+                subresourceRange=s('VkImageSubresourceRange', aspectMask=1,
+                    baseMipLevel=0, levelCount=1, baseArrayLayer=0, layerCount=1)))
+        self.f.command('vkCreateRenderPass', device=self.w.DEVICE,
+            pRenderPass=self.BRP,
+            pCreateInfo=s('VkRenderPassCreateInfo', pNext=[], flags=0,
+                attachmentCount=1,
+                pAttachments=[s('VkAttachmentDescription', flags=0, format=44,
+                    samples=1, loadOp=load, storeOp=0, stencilLoadOp=2,
+                    stencilStoreOp=1, initialLayout=0, finalLayout=1)],
+                subpassCount=1,
+                pSubpasses=[s('VkSubpassDescription', flags=0,
+                    pipelineBindPoint=0, inputAttachmentCount=0,
+                    pInputAttachments=[], colorAttachmentCount=1,
+                    pColorAttachments=[s('VkAttachmentReference',
+                        attachment=0, layout=2)],
+                    pResolveAttachments=[], pDepthStencilAttachment=None,
+                    preserveAttachmentCount=0, pPreserveAttachments=[])],
+                dependencyCount=0, pDependencies=[]))
+        self.f.command('vkCreateFramebuffer', device=self.w.DEVICE,
+            pFramebuffer=self.BFB,
+            pCreateInfo=s('VkFramebufferCreateInfo', pNext=[], flags=0,
+                renderPass=self.BRP, attachmentCount=1,
+                pAttachments=[self.BVIEW], width=8, height=4, layers=1))
+
+    def bgr_begin_pass(self, clear):
+        self.f.command('vkCmdBeginRenderPass', commandBuffer=self.f.CB,
+            contents=0, pRenderPassBegin=self.w.structure('VkRenderPassBeginInfo',
+                pNext=[], renderPass=self.BRP, framebuffer=self.BFB,
+                renderArea=self.w.structure('VkRect2D',
+                    offset=self.w.structure('VkOffset2D', x=0, y=0),
+                    extent=self.w.structure('VkExtent2D', width=8, height=4)),
+                clearValueCount=1, pClearValues=[self.w.structure('VkClearValue',
+                    color=self.w.structure('VkClearColorValue',
+                        uint32=clear))]))
+
+    def bgr_clear_texel(self, clear):
+        did = self.e.golden.img_fmt_id(self.e.model, 44)
+        return self.e.golden.img_clear_texel(self.e.model, did, tuple(clear))
+
+    def bgr_prepared(self, blend, clear, **draw_kw):
+        self.bgr_resources()
+        self.pipeline(rp=self.BRP, blend=blend)
+        self.bgr_begin_pass(clear)
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.draw(**draw_kw)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+
+    def read_bgr_texel(self, x, y):
+        return self.f.state.aperture.read(
+            self.f.owner.base + 4096 + y * 64 + x * 4, 4)
+
+    def bgr_fc_texel(self, x, y, clear, *, sf, df, cop, saf, daf, aop,
+                     mask, konst=(0.0, 0.0, 0.0, 0.0)):
+        # oracle-mirror of Writeback._blend_write for BGRA: logical component
+        # c decodes from dst byte cmap[c] (cmap=[2,1,0,3]) and the result
+        # re-encodes to byte cmap[c], so the texel stays [B,G,R,A] ordered.
+        cmap = (2, 1, 0, 3)
+        did = self.e.golden.img_fmt_id(self.e.model, 44)
+        dst = list(self.e.golden.img_clear_texel(
+            self.e.model, did, tuple(clear)))
+        dv = [_f32(dst[cmap[c]] * _BLEND_K255) for c in range(4)]
+        sv = [x + 0.5, y + 0.5, 0.0, 1.0]
+        out = bytearray(4)
+        for c in range(4):
+            s_f, d_f, bop = (sf, df, cop) if c < 3 else (saf, daf, aop)
+            sfv = _blend_factor(s_f, c, sv, dv, konst)
+            dfv = _blend_factor(d_f, c, sv, dv, konst)
+            res = _blend_op(bop, _f32(sv[c] * sfv), _f32(dv[c] * dfv))
+            p = cmap[c]
+            if (mask >> c) & 1:
+                out[p] = vn_golden.cl_f32_u8(
+                    struct.unpack('<I', struct.pack('<f', res))[0])
+            else:
+                out[p] = dst[p]
+        return bytes(out)
+
+    def test_blend_bgra_writes_permuted_texels(self):
+        self.upload(self.ndc_triangle())
+        # ONE/ONE ADD colour + ONE/ZERO alpha over a BGRA clear; the dst
+        # decode and result encode must permute through the BGRA cmap.
+        blend = dict(blendEnable=1, srcColorBlendFactor=1,
+                     dstColorBlendFactor=1, colorBlendOp=0,
+                     srcAlphaBlendFactor=1, dstAlphaBlendFactor=0,
+                     alphaBlendOp=0, colorWriteMask=15)
+        clear = [0x3E800000, 0x3E800000, 0, 0x3F800000]
+        self.bgr_prepared(blend, clear)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertGreater(job.drawexec_stats[job.operation - 1]['records'], 0)
+        kw = dict(sf=1, df=1, cop=0, saf=1, daf=0, aop=0, mask=15)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_bgr_texel(x, y),
+                             self.bgr_fc_texel(x, y, clear, **kw))
+        # uncovered corner keeps the BGRA clear texel
+        self.assertEqual(self.read_bgr_texel(7, 3),
+                         self.bgr_clear_texel(clear))
+        self.assertEqual(self.f.owner.work_refs, 0)
+
     def test_draw_writes_fragcoord_texels_to_attachment(self):
         self.upload(self.ndc_triangle())
         self.prepared()
@@ -185,6 +873,1349 @@ class DrawReplayTests(unittest.TestCase):
             self.assertEqual(self.read_texel(x, y), self.fc_texel(x, y))
         # far corner is outside the triangle: keeps the pass clear value
         self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_fs_kill_discards_fragments_per_pixel(self):
+        # fs_kill_program OpKills every fragment with FragCoord.x < 4.0
+        # (columns 0-3) and writes vec4(0,1,0,1) elsewhere.  The fullscreen
+        # triangle covers all 32 pixels, so columns 0-3 keep the pass
+        # clear while columns 4-7 take the green write — per-fragment
+        # conditional discard through the real vkCmdDraw path.
+        self.f.command('vkDestroyShaderModule', device=self.w.DEVICE,
+                       shaderModule=self.FS2)
+        self.module(self.FS2, fs_kill_program())
+        self.upload(self.fs_triangle())
+        self.prepared()
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        stats = job.drawexec_stats[job.operation - 1]
+        self.assertGreater(stats['records'], 0)
+        did = self.e.golden.img_fmt_id(self.e.model, 37)
+        green = self.e.golden.img_clear_texel(
+            self.e.model, did,
+            struct.unpack('<4I', struct.pack('<4f', 0.0, 1.0, 0.0, 1.0)))
+        for x in range(8):
+            for y in range(4):
+                want = green if x >= 4 else self.clear_texel()
+                self.assertEqual(self.read_texel(x, y), want,
+                                 'texel (%d,%d)' % (x, y))
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_fs_derivatives_read_quad_neighbours(self):
+        # fs_deriv_program outputs vec4(dFdx(vcol.x), dFdy(vcol.y),
+        # fwidth(vcol.z), dFdxFine(vcol.x)).  Quad derivatives read the
+        # 2x2 screen-neighbour lanes, so the FS-in records must reach the
+        # model in quad lane order (TL,TR,BL,BR per four).  Expected
+        # values come from the golden smooth-interp map: coarse dFdx is
+        # TR-TL broadcast quad-wide, coarse dFdy is BL-TL, coarse
+        # fwidth is |dx|+|dy|, and fine dFdx is the per-row horizontal
+        # neighbour diff (TR-TL on the top row, BR-BL on the bottom).
+        self.f.command('vkDestroyShaderModule', device=self.w.DEVICE,
+                       shaderModule=self.FS2)
+        self.module(self.FS2, fs_deriv_program())
+        pos = [(-1.0, -1.0), (3.0, -1.0), (-1.0, 3.0)]
+        col = [(0.0, 0.0, 0.0, 1.0), (1.0, 0.5, 0.25, 1.0),
+               (0.0, 1.0, 0.75, 1.0)]
+        self.upload(list(zip(pos, col)))
+        self.prepared()
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        stats = job.drawexec_stats[job.operation - 1]
+        self.assertGreater(stats['records'], 0)
+        verts = [(x, y, 0.5, 1.0) for x, y in pos]
+        vc = vn_golden.gfx_grad_pixels(
+            verts, col, (0.0, 0.0, 8.0, 4.0, 0.0, 1.0), (0, 0, 8, 4),
+            8, 4, True, 0)
+        did = self.e.golden.img_fmt_id(self.e.model, 37)
+
+        def fsub(a, b):
+            return vn_golden._f32(a - b)
+
+        for py in range(4):
+            for px in range(8):
+                qx, qy = px & ~1, py & ~1
+                vtl, vtr = vc[(qx, qy)], vc[(qx + 1, qy)]
+                vbl, vbr = vc[(qx, qy + 1)], vc[(qx + 1, qy + 1)]
+                dx = fsub(vtr[0], vtl[0])              # coarse dFdx comp0
+                dy = fsub(vbl[1], vtl[1])              # coarse dFdy comp1
+                fw = vn_golden._f32(abs(fsub(vtr[2], vtl[2])) +
+                                    abs(fsub(vbl[2], vtl[2])))
+                # fine dFdx: top quad row reads TR-TL, bottom BR-BL.
+                if py & 1:
+                    dxf = fsub(vbr[0], vbl[0])
+                else:
+                    dxf = dx
+                words = struct.unpack('<4I', struct.pack(
+                    '<4f', dx, dy, fw, dxf))
+                want = self.e.golden.img_clear_texel(
+                    self.e.model, did, words)
+                self.assertEqual(self.read_texel(px, py), want,
+                                 'texel (%d,%d)' % (px, py))
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_depth_test_writes_color_and_depth(self):
+        # z_win is a constant 0.5 (vs_program emits Position.z=0.5); seeding
+        # the D32 attachment to 1.0 makes every covered fragment pass LESS
+        # and store 0.5, while the uncovered corner keeps 1.0.
+        self.upload(self.ndc_triangle())
+        self.seed_depth(1.0)
+        self.depth_prepared(compare=1, write=1)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertGreater(job.drawexec_stats[job.operation - 1]['records'], 0)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), self.fc_texel(x, y))
+            self.assertAlmostEqual(self.read_depth(x, y), 0.5, places=6)
+        # uncovered corner: colour keeps the clear value, depth keeps 1.0
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertAlmostEqual(self.read_depth(7, 3), 1.0, places=6)
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_depth_fail_drops_color_and_depth(self):
+        # seed depth to 0.0 so every fragment (z_win 0.5) fails LESS: no
+        # colour and no depth write anywhere.
+        self.upload(self.ndc_triangle())
+        self.seed_depth(0.0)
+        self.depth_prepared(compare=1, write=1)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertEqual(self.read_texel(0, 0), self.clear_texel())
+        self.assertAlmostEqual(self.read_depth(0, 0), 0.0, places=6)
+        self.assertAlmostEqual(self.read_depth(4, 1), 0.0, places=6)
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_stencil_pass_replace_writes_stencil_and_depth(self):
+        # D24S8 packed path: stencilTestEnable + passOp=REPLACE(ref 0x5A)
+        # under compareOp=ALWAYS writes the stencil byte on every covered
+        # fragment while depth (z_win 0.5 -> u24 0x800000) commits; the
+        # uncovered corner keeps the {stencil=0, depth=u24(1.0)} clear.
+        self.upload(self.ndc_triangle())
+        ops = (self.st_ops(pas=2, ref=0x5A), self.st_ops(pas=2, ref=0x5A))
+        self.stencil_prepared(ops, compare=7, write=1, depth_test=1,
+                              depth_clear=1.0, stencil_clear=0)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            w = self.read_ds(x, y)
+            self.assertEqual(w >> 24, 0x5A)
+            self.assertEqual(w & 0xFFFFFF, 0x800000)
+        # uncovered corner keeps the clear {stencil=0, depth=u24(1.0)}
+        w = self.read_ds(7, 3)
+        self.assertEqual(w >> 24, 0)
+        self.assertEqual(w & 0xFFFFFF, 0xFFFFFF)
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_stencil_fail_applies_failop_and_discards(self):
+        # stencil compareOp=EQUAL(ref 0xC3) vs cleared stencil 0 fails ->
+        # failOp=REPLACE writes 0xC3 to the stencil byte but the fragment
+        # is discarded: no colour and the stored depth stays at the clear.
+        self.upload(self.ndc_triangle())
+        ops = (self.st_ops(fail=2, ref=0xC3, cmpop=2),
+               self.st_ops(fail=2, ref=0xC3, cmpop=2))
+        self.stencil_prepared(ops, compare=7, write=1, depth_test=1,
+                              depth_clear=1.0, stencil_clear=0)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        for x, y in ((0, 0), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), self.clear_texel())
+            w = self.read_ds(x, y)
+            self.assertEqual(w >> 24, 0xC3)          # failOp REPLACE
+            self.assertEqual(w & 0xFFFFFF, 0xFFFFFF)  # depth kept at clear
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_stencil_depth_fail_applies_depthfailop(self):
+        # stencil compare ALWAYS passes; depthCompareOp=NEVER fails depth
+        # -> depthFailOp=REPLACE(ref 0xA5) writes the stencil byte, depth
+        # is never written, and the fragment is discarded.
+        self.upload(self.ndc_triangle())
+        ops = (self.st_ops(dfail=2, ref=0xA5, cmpop=7),
+               self.st_ops(dfail=2, ref=0xA5, cmpop=7))
+        self.stencil_prepared(ops, compare=0, write=1, depth_test=1,
+                              depth_clear=1.0, stencil_clear=0)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        for x, y in ((0, 0), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), self.clear_texel())
+            w = self.read_ds(x, y)
+            self.assertEqual(w >> 24, 0xA5)          # depthFailOp REPLACE
+            self.assertEqual(w & 0xFFFFFF, 0xFFFFFF)  # depth kept at clear
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_stencil_invert_op(self):
+        # oracle stencil_inv: passOp=INVERT on the cleared stencil 0 ->
+        # ~0 = 0xFF; the pass branch also writes frag depth u24(0.5).
+        self.upload(self.ndc_triangle())
+        ops = (self.st_ops(pas=5, ref=0), self.st_ops(pas=5, ref=0))
+        self.stencil_prepared(ops, compare=7, write=1, depth_test=1,
+                              depth_clear=1.0, stencil_clear=0)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        for x, y in ((0, 0), (4, 1)):
+            w = self.read_ds(x, y)
+            self.assertEqual(w >> 24, 0xFF)          # ~0 INVERT
+            self.assertEqual(w & 0xFFFFFF, 0x800000)  # depth u24(0.5)
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_stencil_incr_sat_nonzero_clear(self):
+        # oracle stencil_clr: clear stencil 0x33, compareOp=EQUAL ref 0x33
+        # passes -> passOp=INCR_SAT saturating-increments to 0x34.
+        self.upload(self.ndc_triangle())
+        ops = (self.st_ops(pas=3, cmpop=2, ref=0x33),
+               self.st_ops(pas=3, cmpop=2, ref=0x33))
+        self.stencil_prepared(ops, compare=7, write=1, depth_test=1,
+                              depth_clear=1.0, stencil_clear=0x33)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        for x, y in ((0, 0), (4, 1)):
+            w = self.read_ds(x, y)
+            self.assertEqual(w >> 24, 0x34)          # 0x33 INCR_SAT
+            self.assertEqual(w & 0xFFFFFF, 0x800000)
+        # uncovered keeps the nonzero {0x33, u24(1.0)} clear
+        w = self.read_ds(7, 3)
+        self.assertEqual(w >> 24, 0x33)
+        self.assertEqual(w & 0xFFFFFF, 0xFFFFFF)
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_stencil_write_mask_gates_result(self):
+        # oracle stencil_msk: passOp=REPLACE ref 0xFF under writeMask 0xF0
+        # on cleared stencil 0 -> only the masked high nibble takes ref:
+        # (0 & ~0xF0) | (0xFF & 0xF0) = 0xF0.
+        self.upload(self.ndc_triangle())
+        ops = (self.st_ops(pas=2, ref=0xFF, wmask=0xF0),
+               self.st_ops(pas=2, ref=0xFF, wmask=0xF0))
+        self.stencil_prepared(ops, compare=7, write=1, depth_test=1,
+                              depth_clear=1.0, stencil_clear=0)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        for x, y in ((0, 0), (4, 1)):
+            w = self.read_ds(x, y)
+            self.assertEqual(w >> 24, 0xF0)          # masked REPLACE
+            self.assertEqual(w & 0xFFFFFF, 0x800000)
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_depth_write_disabled_is_read_only(self):
+        # depthWriteEnable=0: the compare still gates colour but the stored
+        # depth is left untouched.
+        self.upload(self.ndc_triangle())
+        self.seed_depth(1.0)
+        self.depth_prepared(compare=1, write=0)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertEqual(self.read_texel(0, 0), self.fc_texel(0, 0))
+        self.assertAlmostEqual(self.read_depth(0, 0), 1.0, places=6)
+        self.assertAlmostEqual(self.read_depth(7, 3), 1.0, places=6)
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_depth_clear_initializes_attachment(self):
+        # depth loadOp=CLEAR: vkCmdBeginRenderPass writes the clear value
+        # (riding colour uint32[0] as float32 bits) across the whole D32
+        # attachment before any draw.  Seed 0.9 so a passing read of 0.25
+        # proves the clear ran; GREATER lets z_win=0.5 pass and store.
+        self.upload(self.ndc_triangle())
+        self.seed_depth(0.9)
+        self.depth_prepared(compare=4, write=1, depth_load=1, depth_clear=0.25)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        # covered fragments pass GREATER (0.5 > 0.25) and store z_win
+        self.assertAlmostEqual(self.read_depth(0, 0), 0.5, places=6)
+        self.assertAlmostEqual(self.read_depth(4, 1), 0.5, places=6)
+        # uncovered corner keeps the cleared 0.25 (not the 0.9 seed)
+        self.assertAlmostEqual(self.read_depth(7, 3), 0.25, places=6)
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_occlusion_query_counts_post_depth_fragments(self):
+        # an occlusion query around a late-z draw must publish the samples
+        # that PASS the depth test, not the pre-test raster records: with
+        # the attachment cleared to 0.0 every z_win=0.5 fragment fails LESS
+        # and the count is 0 even though the raster produced fragments.
+        pool = 0x7A0000008000
+        self.f.command('vkCreateQueryPool', device=self.w.DEVICE,
+            pQueryPool=pool,
+            pCreateInfo=self.w.structure('VkQueryPoolCreateInfo', pNext=[],
+                flags=0, queryType=0, queryCount=1,
+                pipelineStatistics=0, checksum=0))
+        self.upload(self.ndc_triangle())
+        self.depth_resources(depth_load=1)
+        self.depth_pipeline(compare=1, write=1)
+        self.f.command('vkCmdBeginQuery', commandBuffer=self.f.CB,
+            queryPool=pool, query=0, flags=1)
+        self.depth_begin_pass(depth_clear=0.0)
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.draw()
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.command('vkCmdEndQuery', commandBuffer=self.f.CB,
+            queryPool=pool, query=0)
+        self.f.end()
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        stats = list(job.drawexec_stats.values())[0]
+        # non-degenerate: the raster really did cover fragments, all of
+        # which the depth test then rejected
+        self.assertGreater(stats['fragments'], 0)
+        self.assertEqual(stats['records'], 0)
+        self.assertEqual(self.f.entry(pool)['qslots'], [0])
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_depth_and_blend_compose(self):
+        # late-z gates the blended write: z_win=0.5 passes LESS against a
+        # 1.0-seeded D32 attachment, so covered texels get the ONE/ONE-ADD
+        # blend over the 0.25-gray clear and depth stores 0.5.
+        self.upload(self.ndc_triangle())
+        self.seed_depth(1.0)
+        blend = dict(blendEnable=1, srcColorBlendFactor=1,
+                     dstColorBlendFactor=1, colorBlendOp=0,
+                     srcAlphaBlendFactor=1, dstAlphaBlendFactor=0,
+                     alphaBlendOp=0, colorWriteMask=15)
+        clear = [0x3E800000, 0x3E800000, 0, 0x3F800000]
+        self.depth_prepared(compare=1, write=1, blend=blend,
+                            color_clear=clear)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertGreater(job.drawexec_stats[job.operation - 1]['records'], 0)
+        kw = dict(sf=1, df=1, cop=0, saf=1, daf=0, aop=0, mask=15)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y),
+                             self.blend_fc_texel(x, y, clear, **kw))
+            self.assertAlmostEqual(self.read_depth(x, y), 0.5, places=6)
+        self.assertEqual(self.read_texel(7, 3), self.blend_clear_texel(clear))
+        self.assertEqual(self.read_depth(7, 3), 1.0)
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_depth_fail_drops_blend_write(self):
+        # stored depth 0.0 -> z_win 0.5 fails LESS everywhere: blend must
+        # NOT write, so colour keeps the clear texel and depth stays 0.0.
+        self.upload(self.ndc_triangle())
+        self.seed_depth(0.0)
+        blend = dict(blendEnable=1, srcColorBlendFactor=1,
+                     dstColorBlendFactor=1, colorBlendOp=0,
+                     srcAlphaBlendFactor=1, dstAlphaBlendFactor=0,
+                     alphaBlendOp=0, colorWriteMask=15)
+        clear = [0x3E800000, 0x3E800000, 0, 0x3F800000]
+        self.depth_prepared(compare=1, write=1, blend=blend,
+                            color_clear=clear)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        stats = job.drawexec_stats[job.operation - 1]
+        # every covered fragment failed the depth test: nothing written
+        self.assertGreater(stats['fragments'], 0)
+        self.assertEqual(stats['records'], 0)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1), (7, 3)):
+            self.assertEqual(self.read_texel(x, y),
+                             self.blend_clear_texel(clear))
+            self.assertAlmostEqual(self.read_depth(x, y), 0.0, places=6)
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    # ---- bounded depthBoundsTestEnable end-to-end ----
+    # depthBoundsTestEnable=1 gates fragments by the [min,max] window on
+    # window-space z_win, independent of the depth compare.  z_win=0.5
+    # for the whole triangle, so a window either keeps every covered
+    # fragment or drops them all.
+    def test_depth_bounds_rejects_out_of_window(self):
+        # bounds=[0.6,1.0] sits above z_win=0.5 with depthTestEnable=0:
+        # every covered fragment fails the window -> colour keeps the
+        # clear and the depth attachment keeps its 0.25 clear.
+        self.upload(self.ndc_triangle())
+        clear = [0x3E800000, 0x3E800000, 0, 0x3F800000]
+        self.depth_prepared(depth_test=0, write=1, bounds=(0.6, 1.0),
+                            depth_load=1, depth_clear=0.25,
+                            color_clear=clear)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        stats = job.drawexec_stats[job.operation - 1]
+        # fragments were produced but every one failed the bounds window
+        self.assertGreater(stats['fragments'], 0)
+        self.assertEqual(stats['records'], 0)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1), (7, 3)):
+            self.assertEqual(self.read_texel(x, y),
+                             self.blend_clear_texel(clear))
+            self.assertAlmostEqual(self.read_depth(x, y), 0.25, places=6)
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_depth_bounds_admits_and_writes_depth(self):
+        # bounds=[0.0,0.6] includes z_win=0.5 with depthTestEnable=0 and
+        # depthWriteEnable=1: the window passes every covered fragment
+        # and the lone depth write commits 0.5 — proving the depth
+        # attachment path stays live without a depth compare.
+        self.upload(self.ndc_triangle())
+        clear = [0x3E800000, 0x3E800000, 0, 0x3F800000]
+        self.depth_prepared(depth_test=0, write=1, bounds=(0.0, 0.6),
+                            depth_load=1, depth_clear=1.0,
+                            color_clear=clear)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertGreater(job.drawexec_stats[job.operation - 1]['records'], 0)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), self.fc_texel(x, y))
+            self.assertAlmostEqual(self.read_depth(x, y), 0.5, places=6)
+        # uncovered corner keeps the colour clear and the 1.0 depth clear
+        self.assertEqual(self.read_texel(7, 3),
+                         self.blend_clear_texel(clear))
+        self.assertAlmostEqual(self.read_depth(7, 3), 1.0, places=6)
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_depth_bias_shifts_stored_depth(self):
+        # depthBiasEnable constantFactor=0.25 (slope=0, no clamp): the draw
+        # triangle's z_win=0.5 is biased to 0.75 in raster, so the LESS
+        # compare still passes against the 1.0 seed and the *biased* 0.75
+        # — not 0.5 — is what the late-z write commits.
+        self.upload(self.ndc_triangle())
+        self.seed_depth(1.0)
+        self.depth_prepared(compare=1, write=1, bias=(0.25, 0.0, 0.0))
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertGreater(job.drawexec_stats[job.operation - 1]['records'], 0)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), self.fc_texel(x, y))
+            self.assertAlmostEqual(self.read_depth(x, y), 0.75, places=6)
+        self.assertAlmostEqual(self.read_depth(7, 3), 1.0, places=6)
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_depth_bias_flips_compare_result(self):
+        # seed depth to 0.6: unbiased z_win=0.5 would pass LESS and store,
+        # but the +0.25 bias lifts it to 0.75 which now fails — no colour
+        # and no depth write anywhere, proving the bias reached the
+        # late-z compare (not just the write).
+        self.upload(self.ndc_triangle())
+        self.seed_depth(0.6)
+        self.depth_prepared(compare=1, write=1, bias=(0.25, 0.0, 0.0))
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertEqual(self.read_texel(0, 0), self.clear_texel())
+        self.assertAlmostEqual(self.read_depth(0, 0), 0.6, places=6)
+        self.assertAlmostEqual(self.read_depth(4, 1), 0.6, places=6)
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def _z2_vertex_shader(self):
+        # rebuild VS2 emitting Position.z=2.0 (NDC depth beyond far) so
+        # the draw exercises the depthClamp clip/clamp path.
+        self.f.command('vkDestroyShaderModule', device=self.w.DEVICE,
+                       shaderModule=self.VS2)
+        self.module(self.VS2, vs_program(z=2.0))
+
+    def test_depth_clamp_off_clips_out_of_range_geometry(self):
+        # vs_program(z=2.0) -> ndc z=2.0 beyond far: depthClampEnable=0
+        # near/far-clips every fragment -> no records -> colour keeps the
+        # clear and depth keeps the 0.25 clear (the dclampoff oracle).
+        self._z2_vertex_shader()
+        self.upload(self.ndc_triangle())
+        clear = [0x3E800000, 0x3E800000, 0, 0x3F800000]
+        self.depth_prepared(depth_test=0, write=1, depth_clamp=0,
+                            depth_load=1, depth_clear=0.25,
+                            color_clear=clear)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertEqual(job.drawexec_stats[job.operation - 1]['records'], 0)
+        self.assertEqual(self.read_texel(0, 0),
+                         self.blend_clear_texel(clear))
+        self.assertAlmostEqual(self.read_depth(0, 0), 0.25, places=6)
+        self.assertAlmostEqual(self.read_depth(4, 1), 0.25, places=6)
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_depth_clamp_on_rasterizes_and_clamps_depth(self):
+        # same z=2.0 geometry with depthClampEnable=1: the near/far clip
+        # is skipped so the triangle rasterizes, and each fragment's
+        # window depth is clamped into [0,1] — the covered texels get the
+        # fragcoord colour and store the *clamped* depth 1.0 (unclamped
+        # would be 2.0), while the uncovered corner keeps the 0.25 clear.
+        self._z2_vertex_shader()
+        self.upload(self.ndc_triangle())
+        clear = [0x3E800000, 0x3E800000, 0, 0x3F800000]
+        self.depth_prepared(depth_test=0, write=1, depth_clamp=1,
+                            depth_load=1, depth_clear=0.25,
+                            color_clear=clear)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertGreater(job.drawexec_stats[job.operation - 1]['records'], 0)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), self.fc_texel(x, y))
+            self.assertAlmostEqual(self.read_depth(x, y), 1.0, places=6)
+        self.assertEqual(self.read_texel(7, 3),
+                         self.blend_clear_texel(clear))
+        self.assertAlmostEqual(self.read_depth(7, 3), 0.25, places=6)
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_polygon_mode_line_writes_edge_coverage(self):
+        # polygonMode=LINE over real vkCmdDraw: only the triangle's three
+        # edges are covered — every covered texel gets fragcoord colour,
+        # interior and exterior keep the clear (polyln oracle coverage).
+        self.upload(self.ndc_triangle())
+        self.poly_prepared(1)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        cov = self.poly_coverage(1)
+        self.assertTrue(cov)
+        for x in range(8):
+            for y in range(4):
+                want = self.fc_texel(x, y) if (x, y) in cov \
+                    else self.clear_texel()
+                self.assertEqual(self.read_texel(x, y), want,
+                                 'texel (%d,%d)' % (x, y))
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_polygon_mode_point_writes_vertex_pixels(self):
+        # polygonMode=POINT over real vkCmdDraw: only the three vertex
+        # pixels are covered — sparse fragcoord colour, rest clear
+        # (polypnt oracle coverage).
+        self.upload(self.ndc_triangle())
+        self.poly_prepared(2)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        cov = self.poly_coverage(2)
+        self.assertTrue(0 < len(cov) <= 3)
+        for x in range(8):
+            for y in range(4):
+                want = self.fc_texel(x, y) if (x, y) in cov \
+                    else self.clear_texel()
+                self.assertEqual(self.read_texel(x, y), want,
+                                 'texel (%d,%d)' % (x, y))
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_line_list_topology_writes_segment_coverage(self):
+        # topology=LINE_LIST over real vkCmdDraw: the four uploaded
+        # vertices form two independent segments rasterized as Bresenham
+        # coverage (the line oracle); covered texels get fragcoord colour,
+        # the rest keep the clear.
+        self.upload(self.line_verts())
+        self.line_prepared(1, 4)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        cov = self.line_coverage()
+        self.assertTrue(cov)
+        for x in range(8):
+            for y in range(4):
+                want = self.fc_texel(x, y) if (x, y) in cov \
+                    else self.clear_texel()
+                self.assertEqual(self.read_texel(x, y), want,
+                                 'texel (%d,%d)' % (x, y))
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def check_fb_coverage(self, cov):
+        self.assertTrue(cov)
+        for x in range(8):
+            for y in range(4):
+                want = self.fc_texel(x, y) if (x, y) in cov \
+                    else self.clear_texel()
+                self.assertEqual(self.read_texel(x, y), want,
+                                 'texel (%d,%d)' % (x, y))
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_line_strip_topology_writes_chained_coverage(self):
+        # topology=LINE_STRIP over real vkCmdDraw: three vertices form two
+        # chained segments sharing the middle vertex (the lstrip oracle).
+        col = (0.25, 0.5, 0.75, 1.0)
+        self.upload([((-1.0, -1.0), col), ((1.0, -1.0), col),
+                     ((-1.0, 1.0), col)])
+        self.line_prepared(2, 3)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        vp, sc, cw, ch = ((0.0, 0.0, 8.0, 4.0, 0.0, 1.0),
+                          (0, 0, 8, 4), 8, 4)
+        pts = [(-1.0, -1.0, 0.5, 1.0), (1.0, -1.0, 0.5, 1.0),
+               (-1.0, 1.0, 0.5, 1.0)]
+        cov = set()
+        for i in range(2):
+            cov |= vn_golden.gfx_line_coverage([pts[i], pts[i + 1]],
+                                               vp, sc, cw, ch)
+        self.check_fb_coverage(cov)
+
+    def test_point_list_topology_writes_vertex_pixels(self):
+        # topology=POINT_LIST over real vkCmdDraw: each of the three
+        # vertices emits its single pixel (the polypnt oracle per-vertex).
+        col = (0.25, 0.5, 0.75, 1.0)
+        self.upload([((-1.0, -1.0), col), ((1.0, -1.0), col),
+                     ((-1.0, 1.0), col)])
+        self.line_prepared(0, 3)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        vp, sc, cw, ch = ((0.0, 0.0, 8.0, 4.0, 0.0, 1.0),
+                          (0, 0, 8, 4), 8, 4)
+        cov = set()
+        for p in [(-1.0, -1.0, 0.5, 1.0), (1.0, -1.0, 0.5, 1.0),
+                  (-1.0, 1.0, 0.5, 1.0)]:
+            cov |= vn_golden.gfx_line_coverage([p, p], vp, sc, cw, ch)
+        self.check_fb_coverage(cov)
+
+    def tri_strip_fan_prepared(self, topology, vertex_count, cull=0,
+                               front=0, **draw_kw):
+        self.pipeline(topology=topology, cull=cull, front=front)
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.draw(vertexCount=vertex_count, **draw_kw)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+
+    def test_triangle_strip_topology_writes_sliding_coverage(self):
+        # topology=TRIANGLE_STRIP over real vkCmdDraw: five vertices give
+        # three sliding-window triangles (v0v1v2, v1v3v2, v2v3v4) — the odd
+        # primitive's slot 1/2 swap keeps one winding.  Coverage is the
+        # strip oracle's union; a wrong vertex index would shift a whole
+        # triangle and change the covered texels.
+        col = (0.25, 0.5, 0.75, 1.0)
+        self.upload([((-1.0, -1.0), col), ((-1.0, 1.0), col),
+                     ((0.5, -1.0), col), ((1.0, 0.0), col),
+                     ((1.0, 1.0), col)])
+        self.tri_strip_fan_prepared(4, 5)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        vp, sc, cw, ch = ((0.0, 0.0, 8.0, 4.0, 0.0, 1.0),
+                          (0, 0, 8, 4), 8, 4)
+        pts = [(-1.0, -1.0, 0.5, 1.0), (-1.0, 1.0, 0.5, 1.0),
+               (0.5, -1.0, 0.5, 1.0), (1.0, 0.0, 0.5, 1.0),
+               (1.0, 1.0, 0.5, 1.0)]
+        cov = vn_golden.gfx_strip_coverage(pts, vp, sc, cw, ch, True, 0)
+        self.check_fb_coverage(cov)
+
+    def test_triangle_fan_topology_writes_anchored_coverage(self):
+        # topology=TRIANGLE_FAN over real vkCmdDraw: five vertices give
+        # three triangles all anchored at v0 — (v0,v1,v2), (v0,v2,v3),
+        # (v0,v3,v4) — the fan oracle's sliding pair.
+        col = (0.25, 0.5, 0.75, 1.0)
+        self.upload([((-1.0, -1.0), col), ((-1.0, 1.0), col),
+                     ((0.0, 0.5), col), ((1.0, 1.0), col),
+                     ((1.0, -1.0), col)])
+        self.tri_strip_fan_prepared(5, 5)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        vp, sc, cw, ch = ((0.0, 0.0, 8.0, 4.0, 0.0, 1.0),
+                          (0, 0, 8, 4), 8, 4)
+        pts = [(-1.0, -1.0, 0.5, 1.0), (-1.0, 1.0, 0.5, 1.0),
+               (0.0, 0.5, 0.5, 1.0), (1.0, 1.0, 0.5, 1.0),
+               (1.0, -1.0, 0.5, 1.0)]
+        cov = vn_golden.gfx_fan_coverage(pts, vp, sc, cw, ch, True, 0)
+        self.check_fb_coverage(cov)
+
+    def inst_prepared(self, topology, vertex_count, instance_count, step=0.4,
+                      **draw_kw):
+        # vs_inst_program offsets Position.x by InstanceIndex*step, so each
+        # instance lands in a distinct column — exercises the BuiltIn
+        # InstanceIndex record-slot-8 feed plus per-instance primitive
+        # assembly.  Distinct VS3 handle: VS2 already owns vs_program.
+        self.module(self.VS3, vs_inst_program(step))
+        self.pipeline(topology=topology, vs=self.VS3)
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.draw(vertexCount=vertex_count, instanceCount=instance_count,
+                  **draw_kw)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+
+    def test_instanced_draw_offsets_each_instance(self):
+        # instanceCount=4 TRIANGLE_LIST with vs_inst_program(step=0.4):
+        # instance i's clip-x shifts by 0.4*i, landing four triangles in
+        # distinct columns.  Coverage is the per-instance oracle union — a
+        # single-instance or instance-boundary-blind replay cannot reproduce
+        # the spread.
+        col = (0.25, 0.5, 0.75, 1.0)
+        # narrow triangle centred at clip-x=-0.6 so instances 0..3 land at
+        # -0.6,-0.2,+0.2,+0.6 (all inside the viewport).
+        base = [(-0.75, -1.0), (-0.45, -1.0), (-0.6, 1.0)]
+        self.upload([(p, col) for p in base])
+        self.inst_prepared(3, 3, 4)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        vp, sc, cw, ch = ((0.0, 0.0, 8.0, 4.0, 0.0, 1.0),
+                          (0, 0, 8, 4), 8, 4)
+        cov = set()
+        for i in range(4):
+            dx = 0.4 * i
+            cov |= vn_golden.gfx_tri_coverage(
+                [(x + dx, y, 0.5, 1.0) for (x, y) in base],
+                vp, sc, cw, ch, True, 0)
+        self.check_fb_coverage(cov)
+
+    def test_instanced_strip_resets_assembly_per_instance(self):
+        # instanceCount=2 TRIANGLE_STRIP with vs_inst_program(step=0.4):
+        # four vertices per instance form two sliding-window triangles
+        # each.  Without per-instance primitive assembly the strip window
+        # crosses the instance boundary and emits spurious cross-instance
+        # triangles — coverage would diverge from the two independent strip
+        # oracles.
+        col = (0.25, 0.5, 0.75, 1.0)
+        # strip quad centred near clip-x=-0.2 so instance0 ~-0.2 and
+        # instance1 ~+0.2 land in separate columns.
+        base = [(-0.4, -1.0), (-0.4, 0.5), (0.0, -1.0), (0.0, 0.5)]
+        self.upload([(p, col) for p in base])
+        self.inst_prepared(4, 4, 2)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        vp, sc, cw, ch = ((0.0, 0.0, 8.0, 4.0, 0.0, 1.0),
+                          (0, 0, 8, 4), 8, 4)
+        cov = set()
+        for i in range(2):
+            dx = 0.4 * i
+            cov |= vn_golden.gfx_strip_coverage(
+                [(x + dx, y, 0.5, 1.0) for (x, y) in base],
+                vp, sc, cw, ch, True, 0)
+        self.check_fb_coverage(cov)
+
+    def test_instanced_draw_first_instance_offsets_index(self):
+        # firstInstance shifts the InstanceIndex builtin: with
+        # firstInstance=1 and instanceCount=2 the shader sees indices 1,2
+        # -> clip-x offsets 0.4,0.8 (not 0,0.4).  Coverage diverges if the
+        # base instance index is dropped.
+        col = (0.25, 0.5, 0.75, 1.0)
+        base = [(-0.75, -1.0), (-0.45, -1.0), (-0.6, 1.0)]
+        self.upload([(p, col) for p in base])
+        self.inst_prepared(3, 3, 2, step=0.4, firstInstance=1)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        vp, sc, cw, ch = ((0.0, 0.0, 8.0, 4.0, 0.0, 1.0),
+                          (0, 0, 8, 4), 8, 4)
+        cov = set()
+        for i in range(2):
+            # effective InstanceIndex = firstInstance(1) + instance(i)
+            dx = 0.4 * (1 + i)
+            cov |= vn_golden.gfx_tri_coverage(
+                [(x + dx, y, 0.5, 1.0) for (x, y) in base],
+                vp, sc, cw, ch, True, 0)
+        self.check_fb_coverage(cov)
+
+    def test_instanced_indexed_restart_offsets_each_instance(self):
+        # vkCmdDrawIndexed + primitiveRestartEnable + instanceCount=2 with
+        # vs_inst_program: every instance replays the SAME restart-delimited
+        # index stream (a u16 sentinel splits two triangles) shifted by
+        # InstanceIndex*step.  Exercises fetch sentinel->breaks composes
+        # with per-instance boundaries: each instance's run is independently
+        # break-split, and no primitive straddles an instance edge.  A
+        # boundary-blind raster would merge instance0's tail with
+        # instance1's head into cross-instance triangles.
+        col = (0.25, 0.5, 0.75, 1.0)
+        # quad corners; indices select tri(0,1,2) and tri(2,3,0) split by
+        # the 0xFFFF sentinel at index-position 3.
+        pos = [(-0.7, -0.9), (-0.1, -0.9), (-0.7, 0.9), (-0.1, 0.9)]
+        self.upload([(p, col) for p in pos])
+        indices = [0, 1, 2, 0xFFFF, 2, 3, 0]
+        self.upload_indices(indices, 0)
+        self.module(self.VS3, vs_inst_program(0.4))
+        self.indexed_prepared(0, len(indices), topology=3, restart=1,
+                              instance_count=2, vs=self.VS3)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        vp, sc, cw, ch = ((0.0, 0.0, 8.0, 4.0, 0.0, 1.0),
+                          (0, 0, 8, 4), 8, 4)
+        cov = set()
+        for i in range(2):
+            dx = 0.4 * i
+            clip = [(x + dx, y, 0.5, 1.0) for x, y in pos]
+            for tri in ([0, 1, 2], [2, 3, 0]):
+                cov |= vn_golden.gfx_tri_coverage(
+                    [clip[j] for j in tri], vp, sc, cw, ch, True, 0)
+        self.check_fb_coverage(cov)
+
+    def test_triangle_strip_winding_swap_holds_under_cull(self):
+        # TRIANGLE_STRIP + cullMode=BACK over real vkCmdDraw: the odd-
+        # primitive slot 1/2 swap keeps every triangle's winding
+        # consistent, so front-facing culling resolves whole primitives
+        # uniformly.  The raw (unswapped) order would alternate facing and
+        # cull half the strip — coverage would diverge from the oracle.
+        col = (0.25, 0.5, 0.75, 1.0)
+        self.upload([((-1.0, -1.0), col), ((-1.0, 1.0), col),
+                     ((0.5, -1.0), col), ((1.0, 0.0), col),
+                     ((1.0, 1.0), col)])
+        self.tri_strip_fan_prepared(4, 5, cull=2, front=0)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        vp, sc, cw, ch = ((0.0, 0.0, 8.0, 4.0, 0.0, 1.0),
+                          (0, 0, 8, 4), 8, 4)
+        pts = [(-1.0, -1.0, 0.5, 1.0), (-1.0, 1.0, 0.5, 1.0),
+               (0.5, -1.0, 0.5, 1.0), (1.0, 0.0, 0.5, 1.0),
+               (1.0, 1.0, 0.5, 1.0)]
+        cov = vn_golden.gfx_strip_coverage(pts, vp, sc, cw, ch, True, 2)
+        self.check_fb_coverage(cov)
+
+    # ---- bounded indexed draws (vkCmdDrawIndexed) end-to-end ----
+    # The index buffer reorders/selects vertex records before shading;
+    # coverage is the per-triple gfx_tri_coverage union over the indexed
+    # vertex order.  Indices that skip or permute vertices make a broken
+    # (index-ignoring) replay diverge from the oracle.
+    IB_OFF = 512
+
+    def upload_indices(self, indices, index_type):
+        fmt = '<H' if index_type == 0 else '<I'
+        data = b''.join(struct.pack(fmt, i) for i in indices)
+        self.f.state.aperture.write(self.f.owner.base + self.IB_OFF, data)
+
+    def indexed_prepared(self, index_type, index_count, first_index=0,
+                         vertex_offset=0, topology=3, restart=0,
+                         instance_count=1, first_instance=0, vs=None):
+        self.pipeline(topology=topology, restart=restart, vs=vs)
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.f.command('vkCmdBindIndexBuffer', commandBuffer=self.f.CB,
+                       buffer=self.IB, offset=0, indexType=index_type)
+        self.f.command('vkCmdDrawIndexed', commandBuffer=self.f.CB,
+                       indexCount=index_count, instanceCount=instance_count,
+                       firstIndex=first_index, vertexOffset=vertex_offset,
+                       firstInstance=first_instance)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+
+    def indexed_coverage(self, clip, indices):
+        # clip = per-vertex clip positions; indices select/reorder them
+        # into TRIANGLE_LIST triples for the golden coverage union.
+        vp, sc, cw, ch = ((0.0, 0.0, 8.0, 4.0, 0.0, 1.0),
+                          (0, 0, 8, 4), 8, 4)
+        cov = set()
+        for t in range(0, len(indices), 3):
+            tri = [clip[indices[t + k]] for k in range(3)]
+            cov |= vn_golden.gfx_tri_coverage(tri, vp, sc, cw, ch, True, 0)
+        return cov
+
+    def test_draw_indexed_uint16_reorders_vertices(self):
+        # uint16 indices [0,1,2,1,3,2] draw two triangles over four
+        # uploaded vertices — the second triangle reuses v1 and selects
+        # v3, so ignoring the index buffer cannot reproduce the coverage.
+        col = (0.25, 0.5, 0.75, 1.0)
+        pos = [(-1.0, -1.0), (-1.0, 1.0), (0.5, -1.0), (1.0, 0.0)]
+        self.upload([(p, col) for p in pos])
+        indices = [0, 1, 2, 1, 3, 2]
+        self.upload_indices(indices, 0)
+        self.indexed_prepared(0, len(indices))
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        clip = [(x, y, 0.5, 1.0) for x, y in pos]
+        self.check_fb_coverage(self.indexed_coverage(clip, indices))
+
+    def test_draw_indexed_uint32_selects_subset(self):
+        # uint32 indices select a 3-vertex subset out of order — v1 is a
+        # decoy that would change coverage if the index buffer were
+        # ignored; indices [2,0,3] draw tri(v2,v0,v3) only.
+        col = (0.25, 0.5, 0.75, 1.0)
+        pos = [(-1.0, -1.0), (1.0, 1.0), (-1.0, 1.0), (1.0, -1.0)]
+        self.upload([(p, col) for p in pos])
+        indices = [2, 0, 3]
+        self.upload_indices(indices, 1)
+        self.indexed_prepared(1, len(indices))
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        clip = [(x, y, 0.5, 1.0) for x, y in pos]
+        self.check_fb_coverage(self.indexed_coverage(clip, indices))
+
+    def test_draw_indexed_vertex_offset_selects_shifted_vertices(self):
+        # vertexOffset is added to every fetched index: indices [0,1,2]
+        # with vertexOffset=1 resolve to vertex records 1,2,3 — tri
+        # (v1,v2,v3), not (v0,v1,v2).  Coverage diverges if the offset is
+        # dropped.
+        col = (0.25, 0.5, 0.75, 1.0)
+        pos = [(-1.0, -1.0), (1.0, 1.0), (-1.0, 1.0), (1.0, -1.0)]
+        self.upload([(p, col) for p in pos])
+        indices = [0, 1, 2]
+        self.upload_indices(indices, 0)
+        self.indexed_prepared(0, len(indices), vertex_offset=1)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        clip = [(x, y, 0.5, 1.0) for x, y in pos]
+        eff = [i + 1 for i in indices]
+        self.check_fb_coverage(self.indexed_coverage(clip, eff))
+
+    def test_draw_indexed_first_index_offsets_index_buffer(self):
+        # firstIndex selects where in the index buffer the draw starts:
+        # leading pad indices [9,9] are skipped so indices[2:5]=[0,2,3]
+        # draw tri(v0,v2,v3).  Reading from index 0 would fault on the
+        # out-of-range 9s, so coverage proves the offset is honored.
+        col = (0.25, 0.5, 0.75, 1.0)
+        pos = [(-1.0, -1.0), (1.0, 1.0), (-1.0, 1.0), (1.0, -1.0)]
+        self.upload([(p, col) for p in pos])
+        indices = [9, 9, 0, 2, 3]
+        self.upload_indices(indices, 0)
+        self.indexed_prepared(0, 3, first_index=2)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        clip = [(x, y, 0.5, 1.0) for x, y in pos]
+        self.check_fb_coverage(self.indexed_coverage(clip, [0, 2, 3]))
+
+    def restart_coverage(self, clip, indices, sentinel, topo):
+        # primitive-restart oracle: map each index slot to its vertex clip
+        # position, marking sentinel values as stream breaks, then union
+        # the per-run topology coverage via gfx_restart_coverage.
+        vp, sc, cw, ch = ((0.0, 0.0, 8.0, 4.0, 0.0, 1.0),
+                          (0, 0, 8, 4), 8, 4)
+        stream = [None if i == sentinel else clip[i] for i in indices]
+        return vn_golden.gfx_restart_coverage(
+            stream, topo, vp, sc, cw, ch, True, 0)
+
+    def upload_rate(self, offsets):
+        # per-instance scalar float offsets -> binding1 (inputRate=1,
+        # stride=4, fmt100=R32_SFLOAT): instance i reads the float at
+        # VB2[i*4].
+        data = b''.join(struct.pack('<f', o) for o in offsets)
+        self.f.state.aperture.write(self.f.owner.base + self.VB2_OFF, data)
+
+    def rate_prepared(self, vertex_count, instance_count, **draw_kw):
+        # vs_rate_program adds the binding1 per-instance float (Location 2)
+        # to Position.x.  Distinct VS3 handle: VS2 already owns vs_program.
+        # Binds both vertex buffers: binding0=VB (rate0), binding1=VB2 (rate1).
+        self.module(self.VS3, vs_rate_program())
+        self.pipeline(rate1=True, vs=self.VS3)
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.f.command('vkCmdBindPipeline', commandBuffer=self.f.CB,
+                       pipelineBindPoint=0, pipeline=self.PIPE2)
+        self.f.command('vkCmdBindVertexBuffers', commandBuffer=self.f.CB,
+            firstBinding=0, bindingCount=2, pBuffers=[self.VB, self.VB2],
+            pOffsets=[0, 0])
+        self.draw(vertexCount=vertex_count, instanceCount=instance_count,
+                  **draw_kw)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+
+    def test_rate1_attribute_offsets_each_instance(self):
+        # inputRate=1 per-instance attribute: binding1 carries one float per
+        # instance (Location 2, R32_SFLOAT) that vs_rate_program adds to
+        # Position.x.  instanceCount=4 -> instances read VB2[0..3] =
+        # [0,0.4,0.8,1.2] and land in four separated columns.  A vertex-rate
+        # or rate-ignoring replay reads a single offset for every record and
+        # cannot reproduce the spread; a vertex-index-addressed read would
+        # distort each triangle differently.
+        col = (0.25, 0.5, 0.75, 1.0)
+        # same proven base as the InstanceIndex test: narrow triangle centred
+        # near clip-x=-0.6; per-instance offsets [0,0.4,0.8,1.2] reproduce the
+        # four columns -0.6,-0.2,+0.2,+0.6 (all inside the viewport).
+        base = [(-0.75, -1.0), (-0.45, -1.0), (-0.6, 1.0)]
+        self.upload([(p, col) for p in base])
+        offsets = [0.0, 0.4, 0.8, 1.2]
+        self.upload_rate(offsets)
+        self.rate_prepared(3, 4)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        vp, sc, cw, ch = ((0.0, 0.0, 8.0, 4.0, 0.0, 1.0),
+                          (0, 0, 8, 4), 8, 4)
+        cov = set()
+        for off in offsets:
+            cov |= vn_golden.gfx_tri_coverage(
+                [(x + off, y, 0.5, 1.0) for (x, y) in base],
+                vp, sc, cw, ch, True, 0)
+        self.check_fb_coverage(cov)
+
+    def test_rate1_attribute_first_instance_selects_offset(self):
+        # firstInstance composes with rate-1 addressing: inst_index =
+        # firstInstance + instance, so firstInstance=1 + instanceCount=2
+        # reads VB2[1],VB2[2] = offsets[1],offsets[2] = 0.4,0.8 -> centres
+        # -0.2,+0.2 (NOT 0.0,0.4).  Diverges if the base instance index is
+        # dropped from the rate-1 fetch index.
+        col = (0.25, 0.5, 0.75, 1.0)
+        base = [(-0.75, -1.0), (-0.45, -1.0), (-0.6, 1.0)]
+        self.upload([(p, col) for p in base])
+        offsets = [0.0, 0.4, 0.8, 1.2]
+        self.upload_rate(offsets)
+        self.rate_prepared(3, 2, firstInstance=1)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        vp, sc, cw, ch = ((0.0, 0.0, 8.0, 4.0, 0.0, 1.0),
+                          (0, 0, 8, 4), 8, 4)
+        cov = set()
+        for off in (offsets[1], offsets[2]):
+            cov |= vn_golden.gfx_tri_coverage(
+                [(x + off, y, 0.5, 1.0) for (x, y) in base],
+                vp, sc, cw, ch, True, 0)
+        self.check_fb_coverage(cov)
+
+    def rate_indexed_prepared(self, index_type, index_count, instance_count,
+                              first_instance=0, **draw_kw):
+        # vkCmdDrawIndexed + inputRate=1 attribute: the rate-1 fetch uses
+        # inst_index (firstInstance+instance), independent of the index
+        # buffer — each instance still reads its own VB2 offset while the
+        # index stream selects/reorders the rate-0 vertices.
+        self.module(self.VS3, vs_rate_program())
+        self.pipeline(rate1=True, vs=self.VS3)
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.f.command('vkCmdBindPipeline', commandBuffer=self.f.CB,
+                       pipelineBindPoint=0, pipeline=self.PIPE2)
+        self.f.command('vkCmdBindVertexBuffers', commandBuffer=self.f.CB,
+            firstBinding=0, bindingCount=2, pBuffers=[self.VB, self.VB2],
+            pOffsets=[0, 0])
+        self.f.command('vkCmdBindIndexBuffer', commandBuffer=self.f.CB,
+                       buffer=self.IB, offset=0, indexType=index_type)
+        self.f.command('vkCmdDrawIndexed', commandBuffer=self.f.CB,
+                       indexCount=index_count, instanceCount=instance_count,
+                       firstIndex=0, vertexOffset=0,
+                       firstInstance=first_instance)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+
+    def test_rate1_attribute_with_indexed_draw(self):
+        # vkCmdDrawIndexed + inputRate=1: a u16 index stream reorders four
+        # uploaded vertices into two triangles per instance while the
+        # rate-1 attribute offsets each instance via VB2.  instanceCount=2
+        # reads offsets[0],offsets[1]; a vertex-rate or index-confused read
+        # cannot reproduce both the reorder and the per-instance spread.
+        col = (0.25, 0.5, 0.75, 1.0)
+        # four vertices forming two triangles when indexed [0,1,2, 1,3,2];
+        # base geometry centred near clip-x=-0.6 like the rate-1 tests.
+        pos = [(-0.75, -1.0), (-0.45, -1.0), (-0.6, 1.0), (-0.3, 0.2)]
+        self.upload([(p, col) for p in pos])
+        indices = [0, 1, 2, 1, 3, 2]
+        self.upload_indices(indices, 0)
+        offsets = [0.0, 0.4]
+        self.upload_rate(offsets)
+        self.rate_indexed_prepared(0, len(indices), 2)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        vp, sc, cw, ch = ((0.0, 0.0, 8.0, 4.0, 0.0, 1.0),
+                          (0, 0, 8, 4), 8, 4)
+        cov = set()
+        for off in offsets:
+            clip = [(x + off, y, 0.5, 1.0) for (x, y) in pos]
+            for t in range(0, len(indices), 3):
+                cov |= vn_golden.gfx_tri_coverage(
+                    [clip[indices[t + k]] for k in range(3)],
+                    vp, sc, cw, ch, True, 0)
+        self.check_fb_coverage(cov)
+
+    XB_OFF = 1024
+    VB2_OFF = 1088
+
+    def upload_indirect(self, *args):
+        # pack u32 draw arguments into the indirect buffer's memory span
+        data = b''.join(struct.pack('<I', a) for a in args)
+        self.f.state.aperture.write(self.f.owner.base + self.XB_OFF, data)
+
+    def indirect_coverage(self, clip, vertex_indices):
+        # expected coverage for an indirect draw that resolves to the
+        # given vertex-index triple (firstVertex/indices already applied).
+        vp, sc, cw, ch = ((0.0, 0.0, 8.0, 4.0, 0.0, 1.0),
+                          (0, 0, 8, 4), 8, 4)
+        return vn_golden.gfx_tri_coverage(
+            [clip[i] for i in vertex_indices], vp, sc, cw, ch, True, 0)
+
+    def test_draw_indirect_reads_args_from_buffer(self):
+        # vkCmdDrawIndirect reads {vertexCount,instanceCount,firstVertex,
+        # firstInstance} from the indirect buffer: vertexCount=3 with
+        # firstVertex=1 draws verts[1],[2],[3] — a different triangle than
+        # the firstVertex=0 default, so ignoring the args cannot match.
+        col = (0.25, 0.5, 0.75, 1.0)
+        pos = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]
+        self.upload([(p, col) for p in pos])
+        self.upload_indirect(3, 1, 1, 0)   # vertexCount=3, firstVertex=1
+        self.pipeline()
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.f.command('vkCmdDrawIndirect', commandBuffer=self.f.CB,
+                       buffer=self.XB, offset=0, drawCount=1, stride=16)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        clip = [(x, y, 0.5, 1.0) for x, y in pos]
+        self.check_fb_coverage(self.indirect_coverage(clip, [1, 2, 3]))
+
+    def test_draw_indexed_indirect_reads_args_from_buffer(self):
+        # vkCmdDrawIndexedIndirect reads {indexCount,instanceCount,
+        # firstIndex,vertexOffset,firstInstance}: indexCount=3 with
+        # vertexOffset=1 and indices [0,1,2] resolves to vertex records
+        # 1,2,3 — proving both the indirect args and the index buffer are
+        # honored through the indirect path.
+        col = (0.25, 0.5, 0.75, 1.0)
+        pos = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]
+        self.upload([(p, col) for p in pos])
+        self.upload_indices([0, 1, 2], 0)
+        # indexCount=3, instanceCount=1, firstIndex=0, vertexOffset=1,
+        # firstInstance=0 — the 20-byte DrawIndexedIndirectCommand.
+        self.upload_indirect(3, 1, 0, 1, 0)
+        self.pipeline(topology=3)
+        self.begin_pass()
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.f.command('vkCmdBindIndexBuffer', commandBuffer=self.f.CB,
+                       buffer=self.IB, offset=0, indexType=0)
+        self.f.command('vkCmdDrawIndexedIndirect', commandBuffer=self.f.CB,
+                       buffer=self.XB, offset=0, drawCount=1, stride=20)
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        clip = [(x, y, 0.5, 1.0) for x, y in pos]
+        # indices [0,1,2] + vertexOffset 1 -> vertex records 1,2,3
+        self.check_fb_coverage(self.indirect_coverage(clip, [1, 2, 3]))
+
+    def test_draw_indexed_primitive_restart_splits_triangles(self):
+        # primitiveRestartEnable + uint16 indices [0,1,2,0xFFFF,3,4,5]:
+        # the sentinel breaks the stream into two independent triangles.
+        # indexCount=7 is not a multiple of 3, so only break-aware assembly
+        # admits the draw — a restart-ignoring replay faults or misdraws.
+        col = (0.25, 0.5, 0.75, 1.0)
+        pos = [(-1.0, -1.0), (-1.0, 1.0), (0.0, -1.0),
+               (0.0, 1.0), (1.0, -1.0), (1.0, 1.0)]
+        self.upload([(p, col) for p in pos])
+        indices = [0, 1, 2, 0xFFFF, 3, 4, 5]
+        self.upload_indices(indices, 0)
+        self.indexed_prepared(0, len(indices), topology=3, restart=1)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        clip = [(x, y, 0.5, 1.0) for x, y in pos]
+        self.check_fb_coverage(
+            self.restart_coverage(clip, indices, 0xFFFF, 3))
+
+    def test_draw_indexed_primitive_restart_strip_resets_window(self):
+        # TRIANGLE_STRIP [v0,v1,v2] SENT [v3,v4,v5]: the break resets the
+        # sliding window so each three-vertex run emits one triangle —
+        # concatenating the runs would emit four cross-break triangles.
+        col = (0.25, 0.5, 0.75, 1.0)
+        pos = [(-1.0, -1.0), (-1.0, 1.0), (0.0, -1.0),
+               (0.0, 1.0), (1.0, -1.0), (1.0, 1.0)]
+        self.upload([(p, col) for p in pos])
+        indices = [0, 1, 2, 0xFFFF, 3, 4, 5]
+        self.upload_indices(indices, 0)
+        self.indexed_prepared(0, len(indices), topology=4, restart=1)
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        clip = [(x, y, 0.5, 1.0) for x, y in pos]
+        self.check_fb_coverage(
+            self.restart_coverage(clip, indices, 0xFFFF, 4))
+
+    # ---- bounded MRT (two colour attachments) end-to-end ----
+    # fs_program2 emits loc0=vcol, loc1=const; the single Writeback stage
+    # writes both attachments per fragment under one shared depth gate.
+    # att1 image memory offset: 4352 sits in the 256-byte slot right after
+    # att0's 4096..4352 span (the 5001-byte MEMORY has no room past ~4745).
+    MRT_IMAGE, MRT_VIEW, MRT_OFF = (0x7D0000001000,
+                                  0x7D0000001001, 4352)
+
+    def read_mrt_texel(self, x, y):
+        return self.f.state.aperture.read(
+            self.f.owner.base + self.MRT_OFF + y * 64 + x * 4, 4)
+
+    def mrt_texel(self, *floats):
+        did = self.e.golden.img_fmt_id(self.e.model, 37)
+        return self.e.golden.img_clear_texel(
+            self.e.model, did,
+            struct.unpack('<4I', struct.pack('<4f', *floats)))
+
+    def test_mrt_two_attachments_write_both_targets(self):
+        # two colour attachments: att0 = base VIEW (offset 4096),
+        # att1 = MRT_VIEW (offset MRT_OFF).  Both fmt37 UNORM8 RGBA.
+        self.g.r.image(handle=self.MRT_IMAGE, offset=self.MRT_OFF)
+        self.g.r.view(handle=self.MRT_VIEW, image=self.MRT_IMAGE)
+        self.g.r.render_pass(handle=self.g.r.RP2, count=2)
+        self.g.r.framebuffer(handle=self.g.r.FB2, render_pass=self.g.r.RP2,
+                             views=[self.g.r.VIEW, self.MRT_VIEW])
+        self.f.command('vkDestroyShaderModule', device=self.w.DEVICE,
+                       shaderModule=self.FS2)
+        self.module(self.FS2, fs_program2())
+        self.pipeline(rp=self.g.r.RP2, attachments=[{}, {}])
+        self.begin_pass(rp=self.g.r.RP2, fb=self.g.r.FB2,
+                        clears=[[0, 0, 0, 0x3F800000],
+                                [0, 0x3F800000, 0, 0x3F800000]])
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.upload(self.ndc_triangle())
+        self.draw()
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertGreater(job.drawexec_stats[job.operation - 1]['records'], 0)
+        c0 = self.mrt_texel(0.5, 0.25, 0.75, 1.0)    # fs_program2 loc0
+        c1 = self.mrt_texel(1.0, 0.0, 1.0, 1.0)      # fs_program2 loc1
+        clear0 = self.mrt_texel(0.0, 0.0, 0.0, 1.0)
+        clear1 = self.mrt_texel(0.0, 1.0, 0.0, 1.0)
+        for x, y in ((0, 0), (1, 1), (2, 0), (0, 2), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), c0, 'att0 (%d,%d)' % (x, y))
+            self.assertEqual(self.read_mrt_texel(x, y), c1,
+                             'att1 (%d,%d)' % (x, y))
+        # uncovered corner keeps each attachment's own clear on both targets
+        self.assertEqual(self.read_texel(7, 3), clear0)
+        self.assertEqual(self.read_mrt_texel(7, 3), clear1)
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_mrt_per_attachment_blend(self):
+        # is_mrtblend: att0 blendEnable=0 writes loc0 plainly; att1
+        # blendEnable=1 with ONE/ONE ADD blends loc1 against att1's OWN
+        # clear dst.  att1 clear (0.5,0.5,0.5,0.5) -> dst u8 ~128; src loc1
+        # = (1,0,1,1).  Per channel res = src+dst clamped: R=1+~0.5->255,
+        # G=0+~0.5->~128 (proves dst contributed — plain write gives 0),
+        # B=1+~0.5->255, A via ONE/ZERO alpha factors -> 255.
+        self.g.r.image(handle=self.MRT_IMAGE, offset=self.MRT_OFF)
+        self.g.r.view(handle=self.MRT_VIEW, image=self.MRT_IMAGE)
+        self.g.r.render_pass(handle=self.g.r.RP2, count=2)
+        self.g.r.framebuffer(handle=self.g.r.FB2, render_pass=self.g.r.RP2,
+                             views=[self.g.r.VIEW, self.MRT_VIEW])
+        self.f.command('vkDestroyShaderModule', device=self.w.DEVICE,
+                       shaderModule=self.FS2)
+        self.module(self.FS2, fs_program2())
+        # att0 no blend; att1 ONE/ONE ADD on colour, ONE/ZERO on alpha.
+        self.pipeline(rp=self.g.r.RP2, attachments=[
+            {},
+            dict(blendEnable=1, srcColorBlendFactor=1,
+                 dstColorBlendFactor=1, colorBlendOp=0,
+                 srcAlphaBlendFactor=1, dstAlphaBlendFactor=0,
+                 alphaBlendOp=0, colorWriteMask=15)])
+        self.begin_pass(rp=self.g.r.RP2, fb=self.g.r.FB2,
+                        clears=[[0, 0, 0, 0x3F800000],
+                                [0x3F000000, 0x3F000000, 0x3F000000,
+                                 0x3F000000]])
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.upload(self.ndc_triangle())
+        self.draw()
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        # att0 unblended: plain loc0 constant write
+        for x, y in ((0, 0), (4, 1)):
+            self.assertEqual(self.read_texel(x, y),
+                             self.mrt_texel(0.5, 0.25, 0.75, 1.0))
+            b = self.read_mrt_texel(x, y)
+            # att1 blended: G byte ~128 (dst contributed), R/B saturate 255
+            self.assertEqual(b[0], 255)
+            self.assertGreater(b[1], 0)      # G != plain-write 0
+            self.assertEqual(b[2], 255)
+            self.assertEqual(b[3], 255)
+        # uncovered keeps each attachment's own clear
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.read_mrt_texel(7, 3),
+                         self.mrt_texel(0.5, 0.5, 0.5, 0.5))
+        self.assertEqual(self.f.owner.work_refs, 0)
+
+    def test_mrt_logicop_applies_per_attachment(self):
+        # is_mrtlop: pipeline-global logicOp XOR applies to EVERY colour
+        # attachment, each against its OWN stored dst.  att0 src=loc0
+        # (0.5,0.25,0.75,1)->u8[128,64,191,255] ^ clear[0,0,0,255];
+        # att1 src=loc1 (1,0,1,1)->u8[255,0,255,255] ^ clear[0,255,0,255].
+        self.g.r.image(handle=self.MRT_IMAGE, offset=self.MRT_OFF)
+        self.g.r.view(handle=self.MRT_VIEW, image=self.MRT_IMAGE)
+        self.g.r.render_pass(handle=self.g.r.RP2, count=2)
+        self.g.r.framebuffer(handle=self.g.r.FB2, render_pass=self.g.r.RP2,
+                             views=[self.g.r.VIEW, self.MRT_VIEW])
+        self.f.command('vkDestroyShaderModule', device=self.w.DEVICE,
+                       shaderModule=self.FS2)
+        self.module(self.FS2, fs_program2())
+        self.pipeline(rp=self.g.r.RP2, attachments=[{}, {}], logic_op=6)
+        self.begin_pass(rp=self.g.r.RP2, fb=self.g.r.FB2,
+                        clears=[[0, 0, 0, 0x3F800000],
+                                [0, 0x3F800000, 0, 0x3F800000]])
+        self.viewport()
+        self.scissor()
+        self.bind()
+        self.upload(self.ndc_triangle())
+        self.draw()
+        self.f.command('vkCmdEndRenderPass', commandBuffer=self.f.CB)
+        self.f.end()
+        job = self.f.enqueue()
+        self.assertIsNotNone(job)
+        self.f.drain()
+        self.assertEqual(job.state, 'done')
+        # att0: [128,64,191,255] ^ [0,0,0,255] = [128,64,191,0]
+        # att1: [255,0,255,255] ^ [0,255,0,255] = [255,255,255,0]
+        e0 = bytes([128, 64, 191, 0])
+        e1 = bytes([255, 255, 255, 0])
+        for x, y in ((0, 0), (4, 1)):
+            self.assertEqual(self.read_texel(x, y), e0, 'att0 (%d,%d)' % (x, y))
+            self.assertEqual(self.read_mrt_texel(x, y), e1,
+                             'att1 (%d,%d)' % (x, y))
+        self.assertEqual(self.read_texel(7, 3), self.clear_texel())
+        self.assertEqual(self.read_mrt_texel(7, 3),
+                         self.mrt_texel(0.0, 1.0, 0.0, 1.0))
         self.assertEqual(self.f.owner.work_refs, 0)
 
     def test_fragment_ubo_descriptor_reaches_framebuffer(self):

@@ -1,5 +1,72 @@
 # Storamic development and qualification lanes
 
+Latest C1 follow-up (CPU49c): the CPU49b store-buffer fix is re-qualified on
+remote owned-tools evidence only — local WSL Verilator 5.020 leaf runs are
+development-only and non-qualifying.
+- **`commit_and_flush_keeps_head` strengthened** to compare the moved head's
+  `address`/`data`/`be`/`data_size`/`cbo_op` (all commit-entry fields).
+- **`stq-commit-flush` is now a permanent remote stage** (`run_remote.py` /
+  `run_leaf.py` / `run_stq_commit_flush.py`): remote leaf runs the real
+  `store_buffer` positive plus oracle-negative, prefix-assertion (old
+  assertion reconstructed in-script, exactly-once substitution required),
+  and mutant profiles; per-check results land in `leaf-result.json`.
+- **`cpu-debug-stq-mutant` is a new stage**: the full real-CPU step-positive
+  matrix under `G6LC_MUT_STQ_COMMIT_DROPPED_ON_FLUSH` — every step-on-store
+  case is rejected by `commit_and_flush_keeps_head` (rc=-6, no pass marker).
+- **hyp8 ported:** `hyp_redesign_core_8fo4/core/store_buffer.sv` verified
+  semantically equivalent on coincident commit+flush; the same assertion
+  replacement applied (no mutant); remote lint `hyp8-stq-lint-r8` rc=0.
+  Other-session hyp8 files untouched.
+- **Remote runs:** `storamic-53c3f4d3522b` (stq-commit-flush 5/5 per-check
+  pass, cpu-debug-stq-mutant 8/8 rejections, cpu-origin pass) and
+  `storamic-cc977ef86fa1` (full `cpu-debug`+`cpu-debug-stq-mutant`+`cpu-origin`+`stq-commit-flush`).
+  Report: `build/storamic-cpu-49/RESULT.md` §CPU49c.
+
+Latest C1 follow-up (CPU49b): the CPU49 single-step deviation is fixed and
+single-step is now qualified on the `cpu-debug` stage. The defect was the
+`store_buffer.sv` `commit_and_flush` assertion (`flush_i |-> !commit_i`),
+whose premise was false: a stepped store's own commit legitimately coincides
+with the step-entry flush (the flush retires younger speculative stores only;
+the head still reaches the commit queue). `core/store_buffer.sv` only — no
+CSR/commit-stage change — now carries `commit_and_flush_keeps_head` and
+`flush_empties_speculative`, plus the `G6LC_MUT_STQ_COMMIT_DROPPED_ON_FLUSH`
+review mutant.
+- **Leaf:** `tb_g6lc_stq_commit_flush` + `run-stq-commit-flush.sh` — 16
+  checks pass; coincident commit+flush retires exactly the head to memory.
+  The HEAD assertion fires on the coincident case (the CPU49 abort);
+  the mutant is rejected by the new assertion under `--assert` and by the
+  bench without it. **Superseded by CPU49c's remote stage; the local WSL
+  evidence is non-qualifying.**
+- **Remote `storamic-13226d782517` (cpu-debug + cpu-origin): PASS.** All 48
+  cpu-debug cases pass — halt 25 and ebreak 11 unchanged; **step 8/8
+  positives now pass** (cause 4, `DPC=T+4`, `DCSR`@`Probe+56`, `0x33` firmware
+  store, `DRET` resume) and all 4 step negatives reject with named reasons
+  (`fw` now cleanly `failed`). cpu-origin 6/6, no regression.
+- **Open:** `tdata` breakpoint triggers, virtualization/SMT debug contexts,
+  remaining queue classes — unchanged. Report:
+  `build/storamic-cpu-49/RESULT.md` §CPU49b.
+
+Latest C1 follow-up (CPU49): the `cpu-debug` stage now covers the ebreak and
+single-step debug-entry mechanisms through the real CPU (48 cases). It is
+verification-only; no RTL changed.
+- **Halt (25) + ebreak (11):** all correct. The 25 CPU47 halt cases are
+  unchanged and byte-identical; ebreak passes all 8 positives (U/M entry,
+  both origins, delays 0/16 — second entry cause 1, `DPC=T+4`, `DCSR` record,
+  `DRET` resume) plus its three negatives (`debug-origin-failed` ×2,
+  `failed` ×1).
+- **Single-step: real-CPU deviation.** All 8 step positives abort in
+  `store_buffer.sv:1072` — `[Commit Queue] commit and flush in the same
+  cycle`. With `dcsr.step` armed, the stepped `sd` store's own commit both
+  retires it (`commit_i`) and decides the debug entry (`set_debug_pc` →
+  `flush_i`) in the same cycle, violating the store-buffer mutual-exclusion
+  assertion. ebreak/halt entries commit on a non-store so they never collide.
+  The step `NegativeFirmware` case crashes the same way (collateral); the
+  step `n1`/`x1` negatives still reject `debug-origin-failed`, and the
+  step-arm-NOP program mutant rejects `failed` (no re-entry without the step
+  bit). Report: `build/storamic-cpu-49/RESULT.md` (`storamic-190989cd57a7`).
+- **Open:** `tdata` breakpoint triggers, virtualization/SMT debug contexts,
+  remaining queue classes — unchanged from CPU47.
+
 Latest C1 follow-up (CPU47): the new `cpu-debug` stage (`run_cpu_debug.py`)
 runs real external-debug entry, CSR checks and DRET through the CPU.
 - **Positives (20):** entry U/S/M, plus M with MPRV=1/MPP=U and

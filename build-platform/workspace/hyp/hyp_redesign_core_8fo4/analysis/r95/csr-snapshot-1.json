@@ -1,0 +1,9 @@
+{
+  "base": "E:\\cva6\\build-platform\\workspace\\build\\hyp8-r95-csr-1d1626c609",
+  "current": "E:\\cva6\\build-platform\\workspace\\build\\hyp8-r95-csr-1d1626c609\\current",
+  "runner": "E:\\cva6\\build-platform\\workspace\\build\\hyp8-r95-csr-1d1626c609\\scripts\\run_hyp8_memory.py",
+  "tag": "hyp8-r95-csr-1d1626c609-current",
+  "manifest_sha256": "22fce3a49184d3d26935c68bd241f3fe5c3880760ea42b3c8245c70a525032ea",
+  "runner_sha256": "2edaa24aa7c778f5d13d546fe8f3f47e27cae52ea7daf2ba07f79c44a663cd43",
+  "git_head": "cea7c94edec8048d44ab04cdc1effbb1a11460ea"
+}

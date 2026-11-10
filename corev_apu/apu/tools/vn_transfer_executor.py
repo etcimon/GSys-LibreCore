@@ -266,16 +266,22 @@ class TransferExecutor:
             if job.state != 'running':
                 return used
             if runtime.done:
-                # occlusion queries count every fragment the bounded
-                # raster stages generate while open; there is no
-                # depth/stencil test in the profile, so all covered
-                # samples pass. Accumulation is per-context and per
-                # (pool,index) so concurrent opens each observe the
-                # same stream-ordered fragment stream.
+                # occlusion queries count the fragments a bounded draw
+                # lets through: every covered sample for a depth-free
+                # draw, only the depth-passing writes once a draw
+                # carries a late-z attachment.  Accumulation is
+                # per-context and per (pool,index) so concurrent opens
+                # each observe the same stream-ordered fragment stream.
                 produced = (runtime.fragments if isinstance(op, Raster)
                             else runtime.raster.fragments
                             if isinstance(op, (RasterShade, DrawExec)) and
                             runtime.raster is not None else 0)
+                if (isinstance(op, DrawExec) and op.depth is not None and
+                        runtime.wb is not None):
+                    # late-z: occlusion counts samples that pass the depth
+                    # test — the writeback `written` count — not the
+                    # pre-test raster records that failed the compare
+                    produced = runtime.wb.written
                 if produced:
                     open_queries = self.occlusion.get(id(job.context))
                     if open_queries:

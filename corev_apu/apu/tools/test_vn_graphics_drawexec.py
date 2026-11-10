@@ -109,6 +109,47 @@ class DrawExecTests(unittest.TestCase):
         self.assertGreater(stats['records'], 0)
         self.assertEqual(self.owner.work_refs, 0)
 
+    def _depth_clear(self, value):
+        # float32 depth attachment: 8x8 px, 4B/px, pitch=32 -> 64 floats
+        # parked at owner offset 1024 (clear of verts@0 and colour@2048)
+        self.aperture.write(self.owner.base + 1024,
+                            struct.pack('<64f', *([value] * 64)))
+
+    def _depth_at(self, px, py):
+        return struct.unpack('<f', self.aperture.read(
+            self.owner.base + 1024 + py * 32 + px * 4, 4))[0]
+
+    def test_depth_test_gates_writes(self):
+        # vs emits Position.z=.5 -> every fragment z_win=0.5.  A float32
+        # depth attachment exercises the late-z compare + conditional
+        # colour/depth write in the writeback stage.
+        self.upload(self.ndc_triangle())
+        # FAIL arm: stored depth 0.0, compare LESS -> 0.5 < 0.0 is false,
+        # so every covered fragment is dropped (no colour, no depth write)
+        self._depth_clear(0.0)
+        depth = (self.owner, 1024, 32, 1, 1)      # LESS, writeEnable
+        job = self.executor.enqueue(self.context, [self.op(depth=depth)])
+        self.drain()
+        self.assertEqual(job.state, 'done')
+        self.assertTrue(all(self._depth_at(x, y) == 0.0
+                            for x in range(8) for y in range(8)))
+        colour = self.aperture.read(self.owner.base + 2048, 8 * 256)
+        self.assertEqual(colour, b'\0' * len(colour))
+        # PASS arm: stored depth 1.0 -> 0.5 < 1.0 true on covered pixels;
+        # they take colour AND depth=0.5, uncovered stay at the clear
+        self._depth_clear(1.0)
+        job = self.executor.enqueue(self.context, [self.op(depth=depth)])
+        self.drain()
+        self.assertEqual(job.state, 'done')
+        written = sum(1 for x in range(8) for y in range(8)
+                      if self._depth_at(x, y) == 0.5)
+        self.assertGreater(written, 0)
+        # every written depth texel is exactly z_win=0.5; the rest stay 1.0
+        for x in range(8):
+            for y in range(8):
+                self.assertIn(self._depth_at(x, y), (0.5, 1.0))
+        self.assertEqual(self.owner.work_refs, 0)
+
     def test_admission_refusals(self):
         self.upload(self.ndc_triangle())
         base = self.op()

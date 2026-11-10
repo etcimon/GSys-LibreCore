@@ -531,6 +531,47 @@ DESC = {
                                    (2, 0, 96, 0,
                                     (9 << 16) | (1 << 8)),
                                    (3, 0, 32, 0, 7 << 16)]),
+    # dynord: CTS api.descriptor_set...layout_binding_order analogue —
+    # three STORAGE_BUFFER_DYNAMIC bindings in ONE set, pBindings
+    # declared out of binding-number order ([2,0,1,3]).  dyn_off is
+    # authored in binding-NUMBER order (Vulkan pDynamicOffsets order);
+    # the per-entry ord is the list-order dynamic ordinal the shwave
+    # harness assigns.  Ramp infn makes a wrong dyn_off slot read a
+    # different element.
+    'dynord':       dict(groups=(1, 1, 1), fmt='i', push=0, cf=False,
+                         dyn_off=[(0, 1, 0), (0, 2, 256), (0, 0, 512)],
+                         infn=lambda s, bi, w:
+                             [(bi + 1) * 100000 + j for j in range(w)],
+                         bindings=[(0, 2, 256, 0, (9 << 16) | (1 << 8)),
+                                   (0, 0, 256, 0, (9 << 16) | (1 << 8)),
+                                   (0, 1, 256, 0, (9 << 16) | (1 << 8)),
+                                   (0, 3, 8, 1, 7 << 16)]),
+    # dynordu: faithful CTS layout_binding_order analogue — three
+    # UNIFORM_BUFFER_DYNAMIC bindings (kind 8) in ONE set, pBindings
+    # declared out of binding-number order ([2,0,1,3]), uniform-block
+    # reads (Uniform storage class) rather than SSBO.  Exercises the
+    # uniform descriptor-fetch + dyn_off path that storage_dynamic
+    # vectors cannot reach.
+    'dynordu':      dict(groups=(1, 1, 1), fmt='i', push=0, cf=False,
+                         dyn_off=[(0, 1, 0), (0, 2, 256), (0, 0, 512)],
+                         infn=lambda s, bi, w:
+                             [(bi + 1) * 100000 + j for j in range(w)],
+                         bindings=[(0, 2, 256, 0, (8 << 16) | (1 << 8)),
+                                   (0, 0, 256, 0, (8 << 16) | (1 << 8)),
+                                   (0, 1, 256, 0, (8 << 16) | (1 << 8)),
+                                   (0, 3, 8, 1, 7 << 16)]),
+    # dynordc: byte-exact CTS layout_binding_order.amber analogue —
+    # uniform_dynamic bindings with the SAME dynamic offsets
+    # (b0=1024,b1=2048,b2=0 -> pDynamicOffsets=[1024,2048,0] binding-
+    # number order) and buffer series bufN[i]=i+N so a dyn_off
+    # permutation reads a distinguishable element.  BIND order [2,0,1,3].
+    'dynordc':      dict(groups=(1, 1, 1), fmt='i', push=0, cf=False,
+                         dyn_off=[(0, 1, 1024), (0, 2, 2048), (0, 0, 0)],
+                         infn=lambda s, bi, w: [bi + j for j in range(w)],
+                         bindings=[(0, 2, 1024, 0, (8 << 16) | (1 << 8)),
+                                   (0, 0, 1024, 0, (8 << 16) | (1 << 8)),
+                                   (0, 1, 1024, 0, (8 << 16) | (1 << 8)),
+                                   (0, 3, 8, 1, 7 << 16)]),
     # arroob: gid indexes a 4-element array with gid up to 15;
     # elements >= 4 hit the null record -> robust zero loads.
     'arroob':       dict(groups=(2, 1, 1), fmt='f', push=0, cf=False,
@@ -1584,7 +1625,7 @@ def main():
                 owords = list(struct.unpack('<%dI' % (len(data) // 4),
                                             data))
                 o2 = oracle_image(owords, mc, desc)
-                if o2 is not owords:
+                if o2 != owords:
                     print('%s_%d: oracle beyond Gate-2 tolerance — '
                           'ORACLE section carries model words'
                           % (name, seed))
@@ -1698,7 +1739,7 @@ def main():
                 owords = list(struct.unpack('<%dI' % (len(data) // 4),
                                             data))
                 o2 = oracle_image(owords, mc, desc)
-                if o2 is not owords:
+                if o2 != owords:
                     print('%s_opt_%d: oracle beyond Gate-2 tolerance — '
                           'ORACLE section carries model words'
                           % (name, seed))

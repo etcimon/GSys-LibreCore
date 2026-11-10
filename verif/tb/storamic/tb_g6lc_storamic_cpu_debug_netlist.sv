@@ -3,7 +3,10 @@
 `include "axi/typedef.svh"
 // Separate test wrapper: existing non-debug model identities remain intact.
 module g6lc_storamic_cpu_debug_netlist #(
-  parameter bit OriginEnabled = 1
+  parameter bit OriginEnabled = 1,
+  // When 1, enable SDTRIG + Mcontrol6 so mcontrol6 tdata triggers can enter
+  // debug mode. Default 0 preserves the existing cpu-debug/cpu-origin image.
+  parameter bit Sdtrig = 0
 ) (
   input logic clk, rst_n, debug_req,
   output logic awv, input logic awr,
@@ -34,6 +37,10 @@ module g6lc_storamic_cpu_debug_netlist #(
       c.StoramicEn = 1;
       c.StoramicIoEn = 1;
       c.StoramicCheckpointEn = 1;
+    end
+    if (Sdtrig) begin
+      c.SDTRIG = 1;
+      c.Mcontrol6 = 1;
     end
     return c;
   endfunction

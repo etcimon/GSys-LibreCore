@@ -1,0 +1,21 @@
+{
+  "module": "g6lc_lsq",
+  "source": "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_lsq.sv",
+  "binding": "Hyp8 scalar caller: build_config_pkg.sv:424-433; g6lc_ooo_dispatch.sv:147-148,1489-1492; elaborated-scalar-param-map.json",
+  "overrides": {
+    "G6LCCfg.LsqLoadEntries": 8,
+    "G6LCCfg.LsqStoreEntries": 8,
+    "G6LCCfg.NrIssuePorts": 2,
+    "G6LCCfg.NrHarts": 1,
+    "G6LCCfg.NR_SB_ENTRIES": 32,
+    "G6LCCfg.TRANS_ID_BITS": 5,
+    "G6LCCfg.NrWbPorts": 4,
+    "G6LCCfg.NrCommitPorts": 2,
+    "LD_ENTRIES": 8,
+    "ST_ENTRIES": 8,
+    "NR_ALLOC": 2,
+    "NR_UPDATE": 2,
+    "LD_FREE_W": 4,
+    "ST_FREE_W": 4
+  }
+}

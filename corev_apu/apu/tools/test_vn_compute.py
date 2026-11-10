@@ -1,10 +1,12 @@
 # Copyright 2026 Etienne Cimon
 # SPDX-License-Identifier: MIT
 """Internal cooperative compute with real owned memory, not wire shader admission."""
+import struct
 import unittest
 from unittest.mock import patch
 
 import test_vn_transfers as transfer_fixture
+import vn_golden
 from vn_compute import Compute, ShaderBinding
 from vn_transfer_executor import Transfer
 
@@ -101,6 +103,169 @@ class ComputeTests(unittest.TestCase):
         self.assertEqual(job.state, 'faulted')
         self.assertIn('instruction budget', job.error)
         self.assertEqual(self.state.aperture.read(self.owner.base, 4), b'\0' * 4)
+
+    def test_global_invocation_id_drives_per_lane_store(self):
+        # corpus builtin_gid.spv: dst[gl_GlobalInvocationID.x] =
+        # gl_GlobalInvocationID.x*3+1.  groups=(4,1,1) x LocalSize 8 ->
+        # 32 invocations with GID.x = 0..31; each writes a distinct slot,
+        # so a wrong workgroup/lane decomposition cannot reproduce
+        # dst[i] = 3i+1.  Exercises ShaderRuntime's per-workgroup wg
+        # decomposition and round-robin lane scheduling end-to-end.
+        code = tuple(vn_golden.spv_words('builtin_gid'))
+        op = Compute(code, (ShaderBinding(self.owner, 0, 128, kind=7),),
+                     groups=(4, 1, 1))
+        job = self.executor.enqueue(self.context, [op])
+        self.drain()
+        self.assertEqual(job.state, 'done')
+        vals = struct.unpack('<32I',
+                             self.state.aperture.read(self.owner.base, 128))
+        self.assertEqual(vals, tuple(3 * i + 1 for i in range(32)))
+
+    def test_workgroup_and_local_index_builtins_drive_stores(self):
+        # corpus builtin_lindex.spv (LocalSize 4x4): w = WorkGroupId.x +
+        # WorkGroupId.y*NumWorkGroups.x; dst[w*16 + LocalInvocationIndex] =
+        # LocalInvocationIndex + w.  groups=(2,2,1) -> 4 workgroups x 16
+        # lanes: exercises the 2-D workgroup-id decomposition, the
+        # NumWorkgroups readback and the per-lane linear index — a wrong
+        # wg.x/wg.y/lane ordering cannot reproduce dst[w*16+l] = l+w.
+        code = tuple(vn_golden.spv_words('builtin_lindex'))
+        op = Compute(code, (ShaderBinding(self.owner, 0, 256, kind=7),),
+                     groups=(2, 2, 1))
+        job = self.executor.enqueue(self.context, [op])
+        self.drain()
+        self.assertEqual(job.state, 'done')
+        vals = struct.unpack('<64I',
+                             self.state.aperture.read(self.owner.base, 256))
+        self.assertEqual(vals, tuple(l + w for w in range(4)
+                                     for l in range(16)))
+
+    def test_local_invocation_id_xy_and_global_y_drive_stores(self):
+        # corpus builtin_lid.spv (LocalSize 8x2): i = GlobalInvocationID.y *
+        # NumWorkGroups.x * 8 + GlobalInvocationID.x;
+        # dst[i] = WorkGroupId.x*1000 + LocalInvocationId.y*100 +
+        # LocalInvocationId.x.  groups=(2,1,1) -> 2 workgroups x 16 lanes:
+        # exercises the 2-D local-id decomposition (liy=(inv//lx)%ly), the
+        # global-Y fold and the NumWorkgroups readback together.
+        code = tuple(vn_golden.spv_words('builtin_lid'))
+        op = Compute(code, (ShaderBinding(self.owner, 0, 128, kind=7),),
+                     groups=(2, 1, 1))
+        job = self.executor.enqueue(self.context, [op])
+        self.drain()
+        self.assertEqual(job.state, 'done')
+        vals = struct.unpack('<32I',
+                             self.state.aperture.read(self.owner.base, 128))
+        exp = [0] * 32
+        for w in range(2):
+            for liy in range(2):
+                for lix in range(8):
+                    exp[liy * 16 + w * 8 + lix] = w * 1000 + liy * 100 + lix
+        self.assertEqual(vals, tuple(exp))
+
+    def test_shared_memory_barrier_reduction(self):
+        # corpus barrier_reduce.spv (LocalSize 64, one workgroup):
+        # sh[i]=src[i]; barrier; tree-reduce sh[i]+=sh[i+s] for s=32..1;
+        # dst[0]=sh[0] (total), dst[64+i]=sh[i].  Exercises the Workgroup
+        # slab shared across all 64 lanes plus barrier() rendezvous — a
+        # per-lane slab or missing barrier yields a wrong partial sum.
+        # Two SBUF bindings: src readonly @0 (64 uints), dst @512 (128).
+        code = tuple(vn_golden.spv_words('barrier_reduce'))
+        src = struct.pack('<64I', *range(64))
+        self.state.aperture.write(self.owner.base, src)
+        self.state.aperture.write(self.owner.base + 512, bytes(512))
+        op = Compute(code, (ShaderBinding(self.owner, 0, 256, binding=0,
+                                           kind=7),
+                             ShaderBinding(self.owner, 512, 512, binding=1,
+                                           kind=7)),
+                     groups=(1, 1, 1))
+        job = self.executor.enqueue(self.context, [op])
+        # 64 lanes x a multi-round barrier tree reduction needs more poll
+        # quanta than the shared drain()'s 256.
+        for _ in range(4096):
+            if not self.executor.active:
+                break
+            self.executor.poll()
+        self.assertFalse(self.executor.active)
+        self.assertEqual(job.state, 'done')
+        # oracle: replay the same tree reduction over src[i]=i
+        sh = list(range(64))
+        for s in (32, 16, 8, 4, 2, 1):
+            for i in range(s):
+                sh[i] += sh[i + s]
+        out = struct.unpack('<128I',
+                            self.state.aperture.read(self.owner.base + 512,
+                                                     512))
+        self.assertEqual(out[0], sh[0])
+        self.assertEqual(out[64:128], tuple(sh))
+
+    def test_atomic_histogram_shared_counter_and_barriers(self):
+        # corpus atomic_hist.spv (LocalSize 32, one workgroup):
+        #   dst[v&3]      += 1            (atomicAdd, data-dependent index)
+        #   dst[4+(v&3)]   = max(..., v)  (atomicMax)
+        #   shared wgcount += v&7         (Workgroup atomic + barrier)
+        #   lane1: dst[8] += wgcount
+        #   dst[16+i]     = atomicOr(...)  (returns OLD value -> stores 0)
+        # src[i]=i over 32 lanes.  A per-lane slab, a missing barrier, or
+        # an atomic that drops its RMW write all corrupt the histogram /
+        # max / counter cells independently.
+        code = tuple(vn_golden.spv_words('atomic_hist'))
+        src = struct.pack('<64I', *range(64))
+        self.state.aperture.write(self.owner.base, src)
+        self.state.aperture.write(self.owner.base + 512, bytes(512))
+        op = Compute(code, (ShaderBinding(self.owner, 0, 256, binding=0,
+                                           kind=7),
+                             ShaderBinding(self.owner, 512, 256, binding=1,
+                                           kind=7)),
+                     groups=(1, 1, 1))
+        job = self.executor.enqueue(self.context, [op])
+        for _ in range(4096):
+            if not self.executor.active:
+                break
+            self.executor.poll()
+        self.assertFalse(self.executor.active)
+        self.assertEqual(job.state, 'done')
+        out = struct.unpack('<64I',
+                            self.state.aperture.read(self.owner.base + 512,
+                                                     256))
+        # histogram: i&3 hits each bucket 8 times
+        self.assertEqual(out[0:4], (8, 8, 8, 8))
+        # per-bucket max of v=i: bucket b tops out at 28+b
+        self.assertEqual(out[4:8], (28, 29, 30, 31))
+        # shared counter = sum_{i=0..31}(i&7) = 4*(0+..+7) = 112
+        self.assertEqual(out[8], 112)
+        # atomicOr returns the pre-op cell (0); the plain store keeps 0
+        self.assertEqual(out[16:48], (0,) * 32)
+
+    def test_atomic_compare_exchange_retry_loop_counts_lanes(self):
+        # corpus atomic_cas.spv (LocalSize 8, one workgroup): a
+        # do { cur = dst[0] } while (atomicCompSwap(dst[0], cur,
+        # cur+1) != cur) retry loop plus per-lane Exchange/Min/And/Xor
+        # self-assignments (which store the atomic's OLD-value return
+        # back, netting 0).  The only observable is dst[0]: every lane
+        # must land exactly one successful CAS bump, so dst[0] == 8.
+        # A wrong OpAtomicCompareExchange operand decode (Value and
+        # Comparator trail the Equal/Unequal semantics pair) makes every
+        # CAS compare fail and leaves dst[0] at its preload image.
+        code = tuple(vn_golden.spv_words('atomic_cas'))
+        self.state.aperture.write(self.owner.base, struct.pack(
+            '<64I', *range(64)))
+        self.state.aperture.write(self.owner.base + 512, bytes(512))
+        op = Compute(code, (ShaderBinding(self.owner, 0, 256, binding=0,
+                                           kind=7),
+                             ShaderBinding(self.owner, 512, 256, binding=1,
+                                           kind=7)),
+                     groups=(1, 1, 1))
+        job = self.executor.enqueue(self.context, [op])
+        for _ in range(4096):
+            if not self.executor.active:
+                break
+            self.executor.poll()
+        self.assertFalse(self.executor.active)
+        self.assertEqual(job.state, 'done')
+        out = struct.unpack('<64I',
+                            self.state.aperture.read(self.owner.base + 512,
+                                                     256))
+        # dst[0] started 0; 8 lanes each CAS-bump it once -> 8.
+        self.assertEqual(out[0], 8)
 
     def test_workgroup_barrier_resumes_and_zero_group_is_empty(self):
         job = self.executor.enqueue(self.context, [self.operation(program(barrier=True))])

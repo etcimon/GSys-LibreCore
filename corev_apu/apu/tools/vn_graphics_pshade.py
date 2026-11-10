@@ -2,7 +2,9 @@
 # Copyright 2026 Etienne Cimon
 # SPDX-License-Identifier: MIT
 """Bounded fragment-shader stage over FS-in records; no raster/ROP/descriptor admission."""
-from dataclasses import dataclass
+import math
+import struct
+from dataclasses import dataclass, replace
 
 from shader.spirv_model import Model
 from shader.spirv_scan import EM, Scanner
@@ -12,6 +14,53 @@ from vn_graphics_shade import (BATCH_MAX, GfxMemory, STEP_QUANTUM, MAX_STEPS,
 
 RECORD_STRIDE = ATTR_STRIDE       # FS-in/out records share the 144-byte stride
 MAX_INPUT = MAX_RECORDS * RECORD_STRIDE
+
+
+def _quad_order(records):
+    """Reorder fragment FS-in records into 2x2 quad lane order so the
+    OpDPdx/OpDPdy/OpFwidth{,Fine,Coarse} quad-lane derivatives resolve
+    against true screen neighbours.  The model groups lanes {4k..4k+3}
+    of each 8-lane wave as one quad (lane0=TL,1=TR,2=BL,3=BR anchored at
+    the even pixel pair), so every consecutive group of four records must
+    be one complete screen quad.  Uncovered quad pixels are filled with
+    helper records carrying an off-screen FragCoord — the writeback
+    bounds gate drops them — and a covered neighbour's varyings.  Returns
+    the reordered record bytes, or None when the coverage cannot form
+    clean quads (non-finite or duplicated FragCoord) so the caller keeps
+    scanline order."""
+    n = len(records) // RECORD_STRIDE
+    if n == 0:
+        return None
+    pix_of = {}
+    order = []
+    for i in range(n):
+        fx, fy = struct.unpack_from('<2f', records, i * RECORD_STRIDE)
+        if not (math.isfinite(fx) and math.isfinite(fy)):
+            return None
+        px, py = int(fx), int(fy)
+        if px < 0 or py < 0 or (px, py) in pix_of:
+            return None
+        pix_of[(px, py)] = i
+        order.append((px, py))
+    # lane = (py&1)*2 + (px&1): quad pixels TL,TR,BL,BR -> 0,1,2,3
+    quads = {}
+    for i, (px, py) in enumerate(order):
+        lane = (py & 1) * 2 + (px & 1)
+        quads.setdefault((px & ~1, py & ~1), {})[lane] = i
+    out = bytearray()
+    for (qx, qy) in sorted(quads, key=lambda k: (k[1], k[0])):
+        lanes = quads[(qx, qy)]
+        ref = lanes[min(lanes)]
+        refrec = records[ref * RECORD_STRIDE:(ref + 1) * RECORD_STRIDE]
+        for lane in range(4):
+            ri = lanes.get(lane)
+            if ri is not None:
+                out += records[ri * RECORD_STRIDE:(ri + 1) * RECORD_STRIDE]
+            else:
+                h = bytearray(refrec)
+                struct.pack_into('<4f', h, 0, -1.0e6, -1.0e6, 0.0, 1.0)
+                out += h
+    return bytes(out)
 
 
 @dataclass(frozen=True)
@@ -65,6 +114,13 @@ class FragmentShadeRuntime:
             raise ValueError('fragment shader scan failed: ' + str(error)) from error
         if scan.em != EM['FRAGMENT']:
             raise ValueError('fragment shade requires a fragment execution model')
+        if scan.has_deriv:
+            # quad-lane derivatives need 2x2 screen-quad record order;
+            # reorder (synthesizing off-screen helper lanes for uncovered
+            # quad pixels) when the coverage forms clean quads.
+            q = _quad_order(operation.records)
+            if q is not None and len(q) <= MAX_INPUT:
+                operation = replace(operation, records=q)
         bind_rows, bind_pad, bound_owners = resolve_bindings(
             executor, context, operation.bindings, scan, 'fragment')
         self.executor, self.context, self.operation = executor, context, operation

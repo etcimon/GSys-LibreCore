@@ -1,0 +1,536 @@
+{
+  "functional": {
+    "hyp8-r97-flu-baseline-v1": {
+      "results": [
+        {
+          "log": "build-model.log",
+          "warnings": [],
+          "sourceManifestSha256": "1d73455032eda4a2af10178a228d6169ea784d5b14b69b956d059223b99c65b4",
+          "warningCensus": {},
+          "openDiagnostics": {
+            "WIDTHEXPAND": 0,
+            "WIDTHTRUNC": 0,
+            "WIDTHCONCAT": 0
+          },
+          "verilatorBinSha256": "3e622e33b741d1b2ba6913e43158e2dba6aa9d2fd5e8e89ad2c978360426a254",
+          "verilatorDriverSha256": "1da6decbd57bb1e87799bcb22c5d013f9e4d31eb15f2c33c786994f6a421b7b0",
+          "modelSha256": "6f200fe58562846ab912d76ac864c05d7518ad2e61c6dc6bd633287e56517483"
+        },
+        {
+          "log": "sim.log",
+          "rc": 0,
+          "leafArgs": [],
+          "matched": true
+        }
+      ],
+      "sources_sha256": "413d108480554dbb91099421c9d693845e62df025a1cdcd88ddd9980018a8cfc",
+      "sim_log_sha256": "083cb7ac338ededa4aa23b9e1167092ad52398f7472c9702cff3180fc7a6cdf6"
+    },
+    "hyp8-r97-flu-candidate-v1": {
+      "results": [
+        {
+          "log": "build-model.log",
+          "warnings": [],
+          "sourceManifestSha256": "d21c24f936ff8ad95b620616fbd20204c619d2eb4cd342f26ae7d7c502dddefa",
+          "warningCensus": {},
+          "openDiagnostics": {
+            "WIDTHEXPAND": 0,
+            "WIDTHTRUNC": 0,
+            "WIDTHCONCAT": 0
+          },
+          "verilatorBinSha256": "3e622e33b741d1b2ba6913e43158e2dba6aa9d2fd5e8e89ad2c978360426a254",
+          "verilatorDriverSha256": "1da6decbd57bb1e87799bcb22c5d013f9e4d31eb15f2c33c786994f6a421b7b0",
+          "modelSha256": "1d3f52a9af7d06f687e92a28ebd92ba3e167bea372e71338330d262455ccd4b5"
+        },
+        {
+          "log": "sim.log",
+          "rc": 0,
+          "leafArgs": [],
+          "matched": true
+        }
+      ],
+      "sources_sha256": "1649b3b8bbd72c69f45f441356fbf62909c5f072c6dd1415b7cdbfd005ffe16e",
+      "sim_log_sha256": "c048ffab86c7c0064f99a84aa99e33a71f98c526b0012dda38a50d462e822ffe"
+    },
+    "hyp8-r97-issue-v1": {
+      "results": [
+        {
+          "log": "build-model.log",
+          "warnings": [],
+          "sourceManifestSha256": null,
+          "warningCensus": {
+            "PINMISSING": 3,
+            "WIDTHEXPAND": 23,
+            "WIDTHTRUNC": 3,
+            "SELRANGE": 1,
+            "WIDTHCONCAT": 4,
+            "UNOPTFLAT": 5
+          },
+          "openDiagnostics": {
+            "WIDTHEXPAND": 23,
+            "WIDTHTRUNC": 3,
+            "WIDTHCONCAT": 4
+          },
+          "verilatorBinSha256": "3e622e33b741d1b2ba6913e43158e2dba6aa9d2fd5e8e89ad2c978360426a254",
+          "verilatorDriverSha256": "1da6decbd57bb1e87799bcb22c5d013f9e4d31eb15f2c33c786994f6a421b7b0",
+          "modelSha256": "f53078f23dabdd537bc6309af353aa7ef1dd07c9da3f381bd2b1101626310a70"
+        },
+        {
+          "log": "sim.log",
+          "rc": 0,
+          "leafArgs": [],
+          "matched": true
+        }
+      ],
+      "sources_sha256": "fa1ab1cedf86cc27bc29224b950fbbfc74b78de9250806ba8afd6c11d86b58ee",
+      "sim_log_sha256": "080a9e17c2a3d0b2dbe7bded3aaf56e6d389dd17685222de5a57c67b232e7870"
+    }
+  },
+  "timing": {
+    "bound-before-p2": {
+      "summary": {
+        "max_by_kind": {
+          "intoout": {
+            "calibrated_fo4": null,
+            "class_note": "over-budget plain path \u2014 no exclusive/atomic exception",
+            "closes": false,
+            "endpoint": "g6lc_flu_reserve.out0",
+            "max_freq_mhz": 593.0318754633063,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 6,
+            "path_class": "plain",
+            "path_id": 10,
+            "path_kind": "intoout",
+            "primary_loc": {
+              "end_col": 16,
+              "end_line": 91,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r97/g6lc_flu_reserve.before.sv",
+              "start_col": 9,
+              "start_line": 91
+            },
+            "slack_fo4": -59.44999999999999,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "g6lc_flu_reserve.in0",
+            "total_fo4": 67.44999999999999,
+            "total_fo4_raw": null
+          },
+          "intoreg": {
+            "calibrated_fo4": null,
+            "class_note": "over-budget plain path \u2014 no exclusive/atomic exception",
+            "closes": false,
+            "endpoint": "g6lc_flu_reserve.reg1/D",
+            "max_freq_mhz": 874.3169398907104,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 4,
+            "path_class": "plain",
+            "path_id": 14,
+            "path_kind": "intoreg",
+            "primary_loc": {
+              "end_col": 16,
+              "end_line": 91,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r97/g6lc_flu_reserve.before.sv",
+              "start_col": 9,
+              "start_line": 91
+            },
+            "slack_fo4": -37.75,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "g6lc_flu_reserve.in0",
+            "total_fo4": 45.75,
+            "total_fo4_raw": null
+          },
+          "regtoreg": {
+            "calibrated_fo4": null,
+            "class_note": "cache-hint: parallel-timing makespan=6.7 cycles=1 deps=0 lhs=3 vars_ready=3 fns=0 raw=39.2\u21926.7",
+            "closes": true,
+            "endpoint": "g6lc_flu_reserve.reg1/D",
+            "max_freq_mhz": 5970.149253731343,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 8,
+            "path_class": "independent_lhs_bundle",
+            "path_id": 6,
+            "path_kind": "regtoreg",
+            "primary_loc": {
+              "end_col": 53,
+              "end_line": 164,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r97/g6lc_flu_reserve.before.sv",
+              "start_col": 45,
+              "start_line": 164
+            },
+            "slack_fo4": 1.2999999999999998,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "g6lc_flu_reserve.reg0/CP",
+            "total_fo4": 6.7,
+            "total_fo4_raw": 39.2
+          }
+        },
+        "maximum": 67.44999999999999,
+        "versions": {
+          "cost_model": "fo4-v1",
+          "ir": "ir-v6",
+          "measurement": "delay-v49",
+          "package": "0.1.0",
+          "parser_pin": "v0.13.5"
+        },
+        "budget_fo4": 8.0,
+        "fo4_ps": 20.0,
+        "report_sha256": "117fbe6c117d64c0dacf1534e3ce8d6ca016007d81ab3c3cfeb1167fd924c110"
+      },
+      "width_defaulted_nodes": [],
+      "source_sha256": "25fa7edec94a8489a548ef6e3d142da0f9fa468f16386c154d0bad2778c4c154"
+    },
+    "bound-before-p8": {
+      "summary": {
+        "max_by_kind": {
+          "intoout": {
+            "calibrated_fo4": null,
+            "class_note": "over-budget plain path \u2014 no exclusive/atomic exception",
+            "closes": false,
+            "endpoint": "g6lc_flu_reserve.out0",
+            "max_freq_mhz": 375.76326914044154,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 6,
+            "path_class": "plain",
+            "path_id": 10,
+            "path_kind": "intoout",
+            "primary_loc": {
+              "end_col": 35,
+              "end_line": 114,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r97/g6lc_flu_reserve.before.sv",
+              "start_col": 27,
+              "start_line": 114
+            },
+            "slack_fo4": -98.44999999999999,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "g6lc_flu_reserve.in0",
+            "total_fo4": 106.44999999999999,
+            "total_fo4_raw": null
+          },
+          "intoreg": {
+            "calibrated_fo4": null,
+            "class_note": "over-budget plain path \u2014 no exclusive/atomic exception",
+            "closes": false,
+            "endpoint": "g6lc_flu_reserve.reg1/D",
+            "max_freq_mhz": 874.3169398907104,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 4,
+            "path_class": "plain",
+            "path_id": 14,
+            "path_kind": "intoreg",
+            "primary_loc": {
+              "end_col": 16,
+              "end_line": 91,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r97/g6lc_flu_reserve.before.sv",
+              "start_col": 9,
+              "start_line": 91
+            },
+            "slack_fo4": -37.75,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "g6lc_flu_reserve.in0",
+            "total_fo4": 45.75,
+            "total_fo4_raw": null
+          },
+          "regtoreg": {
+            "calibrated_fo4": null,
+            "class_note": "cache-hint: parallel-timing makespan=6.7 cycles=1 deps=0 lhs=3 vars_ready=3 fns=0 raw=39.2\u21926.7",
+            "closes": true,
+            "endpoint": "g6lc_flu_reserve.reg1/D",
+            "max_freq_mhz": 5970.149253731343,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 8,
+            "path_class": "independent_lhs_bundle",
+            "path_id": 6,
+            "path_kind": "regtoreg",
+            "primary_loc": {
+              "end_col": 53,
+              "end_line": 164,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r97/g6lc_flu_reserve.before.sv",
+              "start_col": 45,
+              "start_line": 164
+            },
+            "slack_fo4": 1.2999999999999998,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "g6lc_flu_reserve.reg0/CP",
+            "total_fo4": 6.7,
+            "total_fo4_raw": 39.2
+          }
+        },
+        "maximum": 106.44999999999999,
+        "versions": {
+          "cost_model": "fo4-v1",
+          "ir": "ir-v6",
+          "measurement": "delay-v49",
+          "package": "0.1.0",
+          "parser_pin": "v0.13.5"
+        },
+        "budget_fo4": 8.0,
+        "fo4_ps": 20.0,
+        "report_sha256": "083cd023d0cb55a2b25e74ff0727b198d20af7f064dd2d30de31d7d20ece7dcc"
+      },
+      "width_defaulted_nodes": [],
+      "source_sha256": "25fa7edec94a8489a548ef6e3d142da0f9fa468f16386c154d0bad2778c4c154"
+    },
+    "bound-after-p2": {
+      "summary": {
+        "max_by_kind": {
+          "regtoout": {
+            "calibrated_fo4": null,
+            "class_note": "over-budget plain path \u2014 no exclusive/atomic exception",
+            "closes": false,
+            "endpoint": "g6lc_flu_reserve.out0",
+            "max_freq_mhz": 1159.4202898550725,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 9,
+            "path_class": "plain",
+            "path_id": 25,
+            "path_kind": "regtoout",
+            "primary_loc": {
+              "end_col": 22,
+              "end_line": 108,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_flu_reserve.sv",
+              "start_col": 14,
+              "start_line": 108
+            },
+            "slack_fo4": -26.5,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "g6lc_flu_reserve.reg0/CP",
+            "total_fo4": 34.5,
+            "total_fo4_raw": null
+          },
+          "regtoreg": {
+            "calibrated_fo4": null,
+            "class_note": "over-budget plain path \u2014 no exclusive/atomic exception",
+            "closes": false,
+            "endpoint": "g6lc_flu_reserve.reg1/D",
+            "max_freq_mhz": 1951.2195121951222,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 5,
+            "path_class": "plain",
+            "path_id": 26,
+            "path_kind": "regtoreg",
+            "primary_loc": {
+              "end_col": 22,
+              "end_line": 108,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_flu_reserve.sv",
+              "start_col": 14,
+              "start_line": 108
+            },
+            "slack_fo4": -12.5,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "g6lc_flu_reserve.reg0/CP",
+            "total_fo4": 20.5,
+            "total_fo4_raw": null
+          },
+          "intoout": {
+            "calibrated_fo4": null,
+            "class_note": "over-budget plain path \u2014 no exclusive/atomic exception",
+            "closes": false,
+            "endpoint": "g6lc_flu_reserve.out0",
+            "max_freq_mhz": 4761.904761904762,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 1,
+            "path_class": "plain",
+            "path_id": 5,
+            "path_kind": "intoout",
+            "primary_loc": {
+              "end_col": 22,
+              "end_line": 108,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_flu_reserve.sv",
+              "start_col": 14,
+              "start_line": 108
+            },
+            "slack_fo4": -0.3999999999999986,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "g6lc_flu_reserve.in0",
+            "total_fo4": 8.399999999999999,
+            "total_fo4_raw": null
+          }
+        },
+        "maximum": 34.5,
+        "versions": {
+          "cost_model": "fo4-v1",
+          "ir": "ir-v6",
+          "measurement": "delay-v49",
+          "package": "0.1.0",
+          "parser_pin": "v0.13.5"
+        },
+        "budget_fo4": 8.0,
+        "fo4_ps": 20.0,
+        "report_sha256": "233316eef45fc90f53573a406b3d9bc6ed1168a343de54087d61668d7a2d99cb"
+      },
+      "width_defaulted_nodes": [],
+      "source_sha256": "f2e97a5032227a49a9cadf9b57519a9470ed8084718fcc189c3d3a07e6b82c19"
+    },
+    "bound-after-p8": {
+      "summary": {
+        "max_by_kind": {
+          "regtoout": {
+            "calibrated_fo4": null,
+            "class_note": "over-budget plain path \u2014 no exclusive/atomic exception",
+            "closes": false,
+            "endpoint": "g6lc_flu_reserve.out0",
+            "max_freq_mhz": 1159.4202898550725,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 9,
+            "path_class": "plain",
+            "path_id": 25,
+            "path_kind": "regtoout",
+            "primary_loc": {
+              "end_col": 22,
+              "end_line": 108,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_flu_reserve.sv",
+              "start_col": 14,
+              "start_line": 108
+            },
+            "slack_fo4": -26.5,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "g6lc_flu_reserve.reg0/CP",
+            "total_fo4": 34.5,
+            "total_fo4_raw": null
+          },
+          "regtoreg": {
+            "calibrated_fo4": null,
+            "class_note": "over-budget plain path \u2014 no exclusive/atomic exception",
+            "closes": false,
+            "endpoint": "g6lc_flu_reserve.reg1/D",
+            "max_freq_mhz": 1951.2195121951222,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 5,
+            "path_class": "plain",
+            "path_id": 26,
+            "path_kind": "regtoreg",
+            "primary_loc": {
+              "end_col": 22,
+              "end_line": 108,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_flu_reserve.sv",
+              "start_col": 14,
+              "start_line": 108
+            },
+            "slack_fo4": -12.5,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "g6lc_flu_reserve.reg0/CP",
+            "total_fo4": 20.5,
+            "total_fo4_raw": null
+          },
+          "intoout": {
+            "calibrated_fo4": null,
+            "class_note": "over-budget plain path \u2014 no exclusive/atomic exception",
+            "closes": false,
+            "endpoint": "g6lc_flu_reserve.out0",
+            "max_freq_mhz": 4761.904761904762,
+            "module_id": 0,
+            "multi_cycle": false,
+            "node_count": 1,
+            "path_class": "plain",
+            "path_id": 5,
+            "path_kind": "intoout",
+            "primary_loc": {
+              "end_col": 22,
+              "end_line": 108,
+              "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_flu_reserve.sv",
+              "start_col": 14,
+              "start_line": 108
+            },
+            "slack_fo4": -0.3999999999999986,
+            "stage_end": null,
+            "stage_start": null,
+            "startpoint": "g6lc_flu_reserve.in0",
+            "total_fo4": 8.399999999999999,
+            "total_fo4_raw": null
+          }
+        },
+        "maximum": 34.5,
+        "versions": {
+          "cost_model": "fo4-v1",
+          "ir": "ir-v6",
+          "measurement": "delay-v49",
+          "package": "0.1.0",
+          "parser_pin": "v0.13.5"
+        },
+        "budget_fo4": 8.0,
+        "fo4_ps": 20.0,
+        "report_sha256": "0f781df66297416c25448fc25fa25a8ab979380044896e2d3b77be6f18bd065f"
+      },
+      "width_defaulted_nodes": [],
+      "source_sha256": "f2e97a5032227a49a9cadf9b57519a9470ed8084718fcc189c3d3a07e6b82c19"
+    }
+  },
+  "licensing": {
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_flu_reserve.sv": {
+      "tier": "R",
+      "license": "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial",
+      "sha256": "f2e97a5032227a49a9cadf9b57519a9470ed8084718fcc189c3d3a07e6b82c19"
+    },
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r97/g6lc_flu_reserve.before.sv": {
+      "tier": "R",
+      "license": "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial",
+      "sha256": "25fa7edec94a8489a548ef6e3d142da0f9fa468f16386c154d0bad2778c4c154"
+    },
+    "verif/tb/core/tb_g6lc_hyp8_control.sv": {
+      "tier": "T",
+      "license": "MIT",
+      "sha256": "64e70ae17e18f081407a22b184e0b38c816683f779c534f6f9200b726f7ff2dc"
+    },
+    "verif/regress/remote/run_hyp8_memory.py": {
+      "tier": "T",
+      "license": "MIT",
+      "sha256": "64a4fdfe98db62e313f2518e155a19ec8e44dd0e25963ce09274a75d5e4c529b"
+    },
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r97/audit.py": {
+      "tier": "T",
+      "license": "MIT",
+      "sha256": "cb5682f98d1c34641c3348799c990e52ef8401b3699796ff7727d7757b9e36a6"
+    },
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r97/bound_measure.py": {
+      "tier": "T",
+      "license": "MIT",
+      "sha256": "3050f364270a8a132d9cdda4b7c936fbbdb65f3672a34864f9d08f9829dc0e56"
+    },
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r97/measure.py": {
+      "tier": "T",
+      "license": "MIT",
+      "sha256": "7bf46fccdd306d0b8d1d012d000796b4f1c0e9b2c66376e565b22b431ebb0bf4"
+    },
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r97/prepare_functional.py": {
+      "tier": "T",
+      "license": "MIT",
+      "sha256": "7c78310be15f5773bb1a9cece1379dadd615846ad712b570faeee9edb3e16cb5"
+    }
+  },
+  "gate": {
+    "argv": [
+      "bun",
+      "build-platform/src/cli/index.ts",
+      "verify",
+      "--lint",
+      "--sim",
+      "--synth",
+      "--target",
+      "g6lc64_hyp8",
+      "--remote"
+    ],
+    "returncode": 1
+  },
+  "limitation": "Structural screens only; see worklog for classifier/guard and gate limits."
+}

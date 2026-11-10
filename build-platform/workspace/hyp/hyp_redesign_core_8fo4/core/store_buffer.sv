@@ -1183,11 +1183,33 @@ module store_buffer
     end
   end
 
-  // assert that commit is never set when we are flushing this would be counter intuitive
-  // as flush and commit are decided in the same stage
-  commit_and_flush :
-  assert property (@(posedge clk_i) rst_ni && flush_i |-> !commit_i)
-  else $error("[Commit Queue] You are trying to commit and flush in the same cycle");
+  // The commit stage can retire a store in the same cycle it raises a full
+  // flush (single-step debug entry on that store, or a trap on a younger
+  // commit port). The flush targets younger speculative stores only: the
+  // retiring head must still move to the commit queue unchanged. hyp8
+  // carries the head through the registered pend record one cycle later,
+  // so the checks below read the shadowed commit-edge facts like
+  // commit_shadow_* (same post-edge evaluation constraint).
+  logic    cf_pending_q;
+  logic    flush_seen_q;
+  entry_t  cf_head_q;
+  always_ff @(posedge clk_i) begin
+    cf_pending_q <= flush_i && commit_i && spec_head_valid;
+    cf_head_q    <= spec_head;
+    flush_seen_q <= flush_i && !LEGACY_SMT_KEEP;
+  end
+
+  commit_and_flush_keeps_head :
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+                   cf_pending_q |->
+                   (commit_push_valid && commit_push_entry == cf_head_q))
+  else $error("[Commit Queue] a store retired with a flush did not reach the commit queue");
+
+  // A full flush (without the legacy SMT forward-keep) leaves no speculative store.
+  flush_empties_speculative :
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+                   flush_seen_q |-> (speculative_status_cnt_q == 0))
+  else $error("[Speculative Queue] speculative stores survived a full flush");
 
   speculative_buffer_overflow :
   assert property (@(posedge clk_i) rst_ni && (speculative_status_cnt_q == $bits(speculative_status_cnt_q)'(DEPTH_SPEC)) |-> !valid_i)

@@ -232,9 +232,10 @@ python3 $G --graphics-session ue_gpos_ftexr_1 1
 python3 $G --graphics-session ue_gpos_ftexmir_1 1
 # fragment NEAREST multi-texel + CLAMP_TO_BORDER: same 4x4 CIS + wide
 # uv; coords outside [0,dim) raise the f_twrap m=3 border flag ->
-# f_bord16(borderColor) border substitute.  ftexc=5 white, ftexc2=2 white
-# (regression for the raw-VkBorderColor decode), ftexcb=1 black,
-# ftexct=0 transparent — together they pin f_bord16/32 for {0,1,2,5}.
+# f_bord16(borderColor) border substitute.  ftexc=5 INT_OPAQUE_WHITE,
+# ftexc2=4 FLOAT_OPAQUE_WHITE (regression for the raw-VkBorderColor
+# decode), ftexcb=2 FLOAT_OPAQUE_BLACK, ftexct=0 FLOAT_TRANSPARENT_BLACK
+# — together they pin f_bord16/32 for {0,2,4,5} (real VkBorderColor).
 python3 $G --graphics-session ue_gpos_ftexc_1 1
 python3 $G --graphics-session ue_gpos_ftexc2_1 1
 python3 $G --graphics-session ue_gpos_ftexcb_1 1
@@ -257,6 +258,196 @@ python3 $G --graphics-session ue_gpos_ftex_gath_1 1
 # sampled format — 8B fp16 texels (2 u32 words, pitch align(w*8,64)),
 # W_TXD widens fp16->fp32 exactly (f_f16_f32) then f_f32_u8 store
 python3 $G --graphics-session ue_gpos_ftexh_1 1
+# fragment explicit textureLod(1.5): 3-mip RGBA8 4x4->2x2->1x1, le=24 q4.4
+# -> m0=1,m1=2,fw=128 trilinear; per-mip 8.8 coord + CLAMP bilinear into
+# acc/acc1 then rr=(rr0*(256-fw)+rr1*fw+128)>>8 -> *1/65535 -> UNORM8.
+# Exercises the W_TX* mip walk + trilinear WITHOUT quad derivatives.
+python3 $G --graphics-session ue_gpos_ftex_lod_1 1
+# fragment implicit texture(): uv=(FragCoord.x^2/128, vcol.y) ->
+# OpImageSampleImplicitLod; quad finite-difference derivatives over the
+# 2x2 lane group (incl. helper lanes) -> rho2 -> SFU log2 -> lam ->
+# le=floor(lam*16) -> m0/m1/fw -> per-mip 8.8 bilinear + u16 trilinear,
+# REPEAT wrap.  Same 3-mip image as ftex_lod; mip varies mip0->mip2
+# across the screen as FragCoord.x^2 ramps the derivative.
+python3 $G --graphics-session ue_gpos_ftexi_1 1
+# fragment textureQueryLod: OpImageQueryLod(105) — SAME quad-derivative
+# lambda as ftexi but coord = vcol.xy smooth interp (no FragCoord) and
+# NO fetch; result {clamped lambda=lec*2^-4, raw lambda} -> FS emits
+# vec4(l.x*0.25, l.y*0.125+0.5,0,1).  3-mip image so lec=min(le,32)
+# exercises the mip-range clamp.
+python3 $G --graphics-session ue_gpos_ftexq_1 1
+# fragment projective EXPLICIT-lod: OpImageSampleProjExplicitLod(92)
+# coord=(vcol.xy,vcol.z) -> W_TXJ divides xy/z wave-wide -> lod=0 ->
+# mip0 LINEAR bilinear at the DIVIDED coord, REPEAT wrap.  vs_texzw
+# supplies nonzero varying vcol.z (0.4+1.4u); explicit lod -> no quad
+# derivatives so only covered pixels matter.
+python3 $G --graphics-session ue_gpos_ftexpj_1 1
+# fragment projective IMPLICIT-lod: OpImageSampleProjImplicitLod(91)
+# coord=(vcol.xy,vcol.z) -> W_TXJ divides xy/z wave-wide -> quad
+# finite-differences of the DIVIDED coord -> lambda -> le -> m0/m1/fw
+# -> per-mip 8.8 bilinear + u16 trilinear, REPEAT, 3-mip image.  The
+# hardest coord path: divide + derivative + lod + trilinear.
+python3 $G --graphics-session ue_gpos_ftexpi_1 1
+# fragment 2D-ARRAY explicit-lod: OpImageSampleExplicitLod(88)
+# coord=vec3(vcol.xy,vcol.w) -> W_TXJ layer=RNE(coord.z)=RNE(vcol.w) in
+# {0,1} -> mip0 LINEAR bilinear inside that layer, CLAMP_TO_EDGE.  2
+# DISTINCT layers (unlike degenerate ftexa) + nonzero vs_texzw vcol.w
+# selector straddling the 0.5 RNE boundary -> both layers sampled.
+python3 $G --graphics-session ue_gpos_ftex_ary_1 1
+# fragment explicit-lod DEPTH-REFERENCE: OpImageSampleDrefExplicitLod(90)
+# coord=vec3(vcol.xy,vcol.z) -> ref16=round(clamp01(dref)*65535) on a
+# 4x4 D16_UNORM map (aspectMask=DEPTH_BIT, compareEnable+LESS_OR_EQUAL)
+# -> mip0 LINEAR PCF: per-corner f_dcmp(ref16,depth16) weighted ->
+# compare fraction.  vs_texsh supplies the dref sweep.
+python3 $G --graphics-session ue_gpos_ftex_dref_1 1
+# fragment implicit-lod DEPTH-REFERENCE: OpImageSampleDrefImplicitLod(89)
+# texture(sampler2DShadow, vec3(vcol.xy,vcol.z)) — same vs_texsh dref
+# sweep + D16_UNORM/compareEnable/LESS_OR_EQUAL plumbing as ftex_dref;
+# implicit lambda clamps to mip0 on the single-mip map so it shares the
+# covered-pixel PCF oracle (the opcode still runs quad-derivative lambda
+# in RTL).  Distinct fs_texshi.spv proves the implicit-dref opcode path.
+python3 $G --graphics-session ue_gpos_ftex_dri_1 1
+# fragment proj-implicit-lod DEPTH-REFERENCE: OpImageSampleProjDref
+# ImplicitLod(93) textureProj(sampler2DShadow, vec4(u,v,dref,q)) —
+# W_TXJ divides coord.xy by vcol.w (vs_texshw nonzero divisor), quad
+# finite-differences the DIVIDED coord -> lambda -> mip0 (single-mip
+# D16 clamps) -> LINEAR PCF at the divided texcoord, REPEAT wrap.
+# Shares the is_ftexd D16+compare plumbing; distinct fs_texshpi.spv.
+python3 $G --graphics-session ue_gpos_ftex_dpi_1 1
+# fragment DEPTH-REFERENCE GATHER: OpImageDrefGather(97)
+# textureGather(sampler2DShadow, vec2 coord, float dref) — gathers the
+# 2x2 footprint around the mip0 texel (CLAMP_TO_EDGE), each texel ->
+# f_dcmp(ref16,depth16,LESS_OR_EQUAL) -> wb[gi]=1.0/0.0 NO filtering.
+# Shares is_ftexd D16+compare plumbing + vs_texsh; distinct fs_texshg.
+python3 $G --graphics-session ue_gpos_ftex_dg_1 1
+# fragment proj-explicit-lod DEPTH-REFERENCE: OpImageSampleProjDref
+# ExplicitLod(94) textureProjLod(sampler2DShadow, vec4(u,v,dref,q),0) —
+# same W_TXJ divide + vs_texshw divisor + is_ftexd D16/compare plumbing
+# as ftex_dpi; explicit Lod=0 -> mip0 LINEAR PCF at divided coord,
+# REPEAT.  Distinct fs_texshpe.spv; completes the 87-97/105 sample set.
+python3 $G --graphics-session ue_gpos_ftex_dpe_1 1
+# fragment OpImageFetch(95) + R8G8B8A8_UINT: texelFetch(usampler2D,
+# ivec2(gl_FragCoord.xy)&3, 0) — integer texel coord, NO filtering/wrap
+# (bounds check only), returns uvec4 raw uint8 -> vec4/255.  vkfmt41/
+# device fmt15, _utel 4-distinct-uint8/texel; default vs_tex (coord is
+# gl_FragCoord not a varying).  Completes the 87-97/105 sample matrix.
+python3 $G --graphics-session ue_gpos_ftexfetch_1 1
+# fragment OpImageSampleImplicitLod(87) + Bias operand: fs_tex_bias runs
+# texture(tex,vcol.xy,vcol.z) -> Bias %vcol.z.  coord=vcol.xy (smooth
+# interp) -> ilod_v lambda, then lod_in=fadd(lambda,bias) BEFORE the
+# q4.4 quantize -> le -> mip -> trilinear over the shared 3-mip image.
+# vs_texbias emits vcol.z=(0.6-uv.y)*4 sweeping ~[-1.2,+1.2] so bias
+# crosses the mip0/mip1/mip2 boundaries -> real per-pixel mip variation
+# driven by the Bias operand.  'ftex_bias' token keeps the degenerate
+# committed ftexb_1 ('ftexb' not a substring) untouched.
+python3 $G --graphics-session ue_gpos_ftex_bias_1 1
+# fragment OpImageFetch(95) on R32_UINT: fs_texfetch32 runs
+# texelFetch(usampler2D, ivec2(gl_FragCoord.xy)&3, 0) -> uvec4(u32,0,0,1);
+# tx_decode fmt10 packs the u32 into fc[0] (single-channel int, ATTR=8).
+# FS spreads the u32's 4 bytes into RGBA/255 -> every fetched bit
+# observable.  vkfmt98 -> device fmt10, BPP=4 same 16-word pitch as
+# R8G8B8A8_UINT; _u32tel gives 4 distinct bytes/texel.
+python3 $G --graphics-session ue_gpos_ftex_u32_1 1
+# fragment OpImageFetch(95) on R32G32B32A32_UINT: fs_tex_rgba32 runs
+# texelFetch(usampler2D,...) -> uvec4 of four uint32 channels, each
+# normalized /2^32 -> RGBA.  tx_decode fmt11 packs 4 u32 channels
+# (by[4c..4c+3] LE); bpp=16 -> 4 words/texel at _row[4*x+c].  vkfmt107
+# -> device fmt11, last int-format decode arm; _rgba32tel gives 4
+# distinct u32 channels/texel.
+python3 $G --graphics-session ue_gpos_ftex_rgba32_1 1
+# MRT — TWO colour attachments (G3a-iv-n): fs_mrt emits
+# location0->ca[0] (o0 = the fs_color gradient, att0 reuses the
+# is_fcolor oracle) and location1->ca[1] (o1 = R<->B channel swap of o0,
+# a pure permutation so the per-channel UNORM8 encode commutes -> att1's
+# word is a byte-permute of att0's).  Reuses the is_gradlike pos+col
+# vertex layout (vs_pos3/vcol, GRAD_COLS).  Render pass attachmentCount
+# ->2 colour (colorAttachmentCount=2, two VkAttachmentReference),
+# framebuffer +view2, second img2/imem2 + rb3/rb3mem readback.  Per-
+# attachment clears are DISTINCT (att0 (0,0,0,1), att1 (0,0,1,1)) so the
+# clearv_q[att*4] per-attachment clear indexing is observable.  RTL
+# ca[3:0]/at_q cursor + per-attachment dr_q.ca/blend already supported
+# 4 colour attachments — the gap was only vn_golden emitting 1.
+python3 $G --graphics-session ue_gpos_mrt_1 1
+# mrtb: per-attachment BLEND — att0 blendEnable=0 (raw o0), att1
+# blendEnable=1 SRC_ALPHA/1-SRC_ALPHA ADD vs its own (0,0,1,1) clear;
+# proves dr_q.blend[at_q] is per-attachment (ulp=0 vgtop+vgsys).
+python3 $G --graphics-session ue_gpos_mrtb_1 1
+# mrt3: THREE colour attachments — fs_mrt3 o0/o1/o2 at locations 0/1/2 ->
+# ca[0]/ca[1]/ca[2]; att2 clear (0,1,0,1)->0xFF00FF00 distinct; exercises
+# at_q=2 (3rd ROP iter), ca[2], clearv_q[8..11] (ulp=0 both levels).
+python3 $G --graphics-session ue_gpos_mrt3_1 1
+# mrt4: FOUR colour attachments — the full ca[3:0]/at_q cursor range;
+# fs_mrt4 o3 = full channel reversal [A,B,G,R]=[b3,b2,b1,b0] -> ca[3];
+# att3 clear (1,1,0,1)->0xFF00FFFF; exercises at_q=3 terminal cursor +
+# S_ROP_NX fragment-done (ulp=0 both levels).
+python3 $G --graphics-session ue_gpos_mrt4_1 1
+# mrt4depth: MAXIMUM attachment config — is_mrt4 (4 colour) + is_depth
+# (write-only D32, depthTestEnable=0) compose with NO new flag: 5
+# attachments (ca[0..3]+da), 5 readback gates; depth at index n_col=4.
+# depth=0.0 on covered px (vs_pos3 pos.z=0), 0.5f clear elsewhere.
+python3 $G --graphics-session ue_gpos_mrt4depth_1 1
+# mrtlop: 2-colour MRT + logicOp XOR (VkLogicOp 6) on EVERY attachment.
+# 'mrtlop' keeps is_mrt (2 att) but no lop_* token so is_lop/lop_op stay
+# unset; logicOp is pipeline-global (logic_op_en) yet the ROP reads
+# dr_q.ca[at_q] dst PER-ATTACHMENT, so each att's permuted src XORs its
+# OWN clear: att0 [b0,b1,b2,~b3] vs att1 [b2,b1,~b0,~b3] (ulp=0 both).
+python3 $G --graphics-session ue_gpos_mrtlop_1 1
+# mrt4lop: FOUR colour attachments + logicOp XOR (VkLogicOp 6) on EVERY
+# attachment — is_mrtlop broadened to is_mrt and 'lop' in gfx and
+# lop_op is None, so 'mrt{,3,4}lop' composes with is_mrt/is_mrt3/is_mrt4.
+# Exercises logicOp dst reads at at_q=0..3 (full ca[3:0] cursor): each
+# att's permuted src XORs its OWN clear -> [b^clr] per byte (ulp=0 both).
+python3 $G --graphics-session ue_gpos_mrt4lop_1 1
+# mrt3lop: THREE colour attachments + logicOp XOR on all — the middle
+# count of the logicOp x MRT matrix (at_q=0,1,2); same _lopw path.
+python3 $G --graphics-session ue_gpos_mrt3lop_1 1
+# stencil: D24_UNORM_S8_UINT depth-stencil attachment (vkfmt 129, device
+# did 14) with stencilTestEnable + front/back VkStencilOpState — compareOp
+# ALWAYS, passOp REPLACE(ref=0x5A), masks 0xFF.  The raster S_DZ_RD->C2
+# path runs stencil ops on covered fragments; the packed {stencil[31:24],
+# depth_unorm24[23:0]} word read back via aspectMask=2 single-plane copy
+# (covered=0x5A000000, cleared=0x00800000; ulp=0 both levels).
+python3 $G --graphics-session ue_gpos_stencil_1 1
+# stencil_df: depthFailOp variant — depthCompareOp=NEVER fails every covered
+# fragment while stencil compareOp=ALWAYS passes -> S_DZ_C2 depthFail branch
+# depthFailOp=REPLACE(ref 0xA5); help_q suppresses colour, st_hold_q keeps
+# stored depth -> covered=0xA5800000 / cleared=0x00800000 (ulp=0 both).
+python3 $G --graphics-session ue_gpos_stencil_df_1 1
+# stencil_f: failOp variant — stencil compareOp=EQUAL(ref 0xC3) vs cleared 0
+# fails -> S_DZ_C2 stencil-fail branch failOp=REPLACE before depth eval;
+# help_q suppresses colour, depth stays CLEAR -> covered=0xC3800000 /
+# cleared=0x00800000 (ulp=0 both).  Completes all three S_DZ_C2 branches.
+python3 $G --graphics-session ue_gpos_stencil_f_1 1
+# stencil_inv: passOp=INVERT arithmetic variant — f_sop ~oldb on cleared 0
+# -> 0xFF under the normal depth-ALWAYS pass branch -> covered=0xFF000000 /
+# cleared=0x00800000 (ulp=0 both); proves f_sop's non-REPLACE op path.
+python3 $G --graphics-session ue_gpos_stencil_inv_1 1
+# stencil_clr: NONZERO stencil clear (VkClearValue.color.uint32[1]=0x33 ->
+# cmdexec clear_color[1] -> rast D24S8 clear byte).  compareOp=EQUAL ref=0x33
+# passes -> passOp=INCR_SAT 0x33->0x34; uncovered keeps cleared 0x33 ->
+# covered=0x34000000 / uncovered=0x33800000 (ulp=0 both); exercises the
+# real nonzero-clear RTL path (cmdexec:2968 + rast:1259).
+python3 $G --graphics-session ue_gpos_stencil_clr_1 1
+# stencil_msk: writeMask=0xF0 (compareMask stays 0xFF), passOp=REPLACE
+# ref=0xFF -> f_sop (oldb&~mask)|(n&mask) on cleared 0 writes only the high
+# nibble -> covered=0xF0000000 / uncovered=0x00800000 (ulp=0 both); proves
+# the writeMask gating distinct from a full 0xFF mask (would give 0xFF).
+python3 $G --graphics-session ue_gpos_stencil_msk_1 1
+# secnd: GRAPHICS secondary command buffer — draw-state records
+# (BindPipeline/binds/Viewport/Scissor/Draw) recorded into cb2
+# (level=SECONDARY, inheritanceInfo={renderPass,subpass=0,framebuffer});
+# primary runs BeginRenderPass -> vkCmdExecuteCommands([cb2]) ->
+# EndRenderPass.  Exercises cmdexec's one-deep secondary stack on
+# CLS_WORK draw records with the primary's active render-pass
+# attachments (ca_q/da_q).  ulp=0 both levels.
+python3 $G --graphics-session ue_gpos_secnd_1 1
+# multi-subpass render pass: subpassCount=2 (two identical colour-only
+# VkSubpassDescription on attachment 0), graphics pipeline created for
+# subpass=1, BeginRenderPass -> vkCmdNextSubpass -> draw -> EndRenderPass.
+# Exercises cmdexec's sp_ncl_q/sp_cref_q/sp_dref_q table + NextSubpass
+# ca_q/da_q re-snapshot + pipeline-subpass admission (sp_act==aux[9:8])
+# for a draw in subpass>0.  ulp=0 both levels.
+python3 $G --graphics-session ue_gpos_msub_1 1
 # line-list draw: topology=1, vertexCount=2; gfx_line_coverage mirrors the
 # RTL S_LN_* integer Bresenham (vxi>>>8 pixel coords, lerr=ldx-ldy) so the
 # 1-px line footprint is bit-exact; fs_vcol keeps flat vertex-0 colour

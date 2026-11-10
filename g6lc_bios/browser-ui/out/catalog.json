@@ -1,0 +1,25 @@
+{
+  "live": [
+    "NodeDef",
+    "@prop",
+    "@child",
+    "@visible",
+    "_start",
+    "FileMgr",
+    "Menu",
+    "Settings",
+    "Store",
+    "Window"
+  ],
+  "stub": [
+    "{#each}",
+    "{#await}",
+    "Slot",
+    "@callback"
+  ],
+  "refused": [
+    "router",
+    "$state",
+    "sveltekit"
+  ]
+}

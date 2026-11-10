@@ -1,0 +1,785 @@
+{
+  "round": "r115",
+  "status": "analysis-and-tasking-only",
+  "head": "7d7d7dc5a",
+  "local_lint": {
+    "script": "verif/regress/remote/hyp8/lint_hyp8_core_local.sh",
+    "top": "g6lc_core",
+    "verilator": "v5.008",
+    "result": "clean of fatal classes; 0 warnings"
+  },
+  "screen": {
+    "analyzer": "delay-v49",
+    "fo4_ps": 20,
+    "margin": 0.2,
+    "budget_fo4": 8,
+    "board_dir": "../r96/boards/"
+  },
+  "tracks": {
+    "scalar_witness": {
+      "tag": "hyp8-osbi-scalar-r114",
+      "model_sha": "18278962b6c0523cedf2cc6e9f7c0cb08fff1ad1f5e1ed25ab82c554345d2f97",
+      "fw_sha": "ac36f37942ad52ae7f59c23cfaa3afbe2d1d4bc168cdbb74771ee5eda23b2fe1",
+      "state": "open",
+      "milestones": [
+        "G6LC_LINUX_INIT_UP",
+        "G6LC_LINUX_SHELL"
+      ],
+      "last_rvfi_cycles": {
+        "r113": 285042210,
+        "r114": 16784637
+      }
+    },
+    "mc_smt2_witness": {
+      "state": "owed-canonical-budget",
+      "note": "t6 short runs are harness smoke, not a boot verdict; retired_mask=0000 within 1.2-6k cycles is expected at that horizon",
+      "flist": "Flist.hyp8_mc_sim"
+    },
+    "port_amo_fetch_lint": {
+      "tag": "hyp8-port-amo-fetch-lint-r1",
+      "state": "blocked-infra",
+      "missing": "/opt/testharness/runs/review-private-runtime-20260915/runtime/include/verilated_funcs.h"
+    }
+  },
+  "changed_modules_since_r96_freeze": [
+    {
+      "module": "core/store_buffer.sv",
+      "batch": "io-amo-7d7d7dc5a",
+      "callers": [
+        "commit_stage.sv",
+        "lsu",
+        "g6lc_rvfi_probes.sv"
+      ],
+      "path_classes": [
+        "commit",
+        "forward",
+        "squash",
+        "leftover",
+        "cross-hart"
+      ]
+    },
+    {
+      "module": "core/stb_fwd.sv",
+      "batch": "io-amo-7d7d7dc5a",
+      "callers": [
+        "load_unit.sv",
+        "store_buffer.sv"
+      ],
+      "path_classes": [
+        "forward",
+        "squash"
+      ]
+    },
+    {
+      "module": "core/issue_read_operands.sv",
+      "batch": "io-amo-7d7d7dc5a",
+      "callers": [
+        "ex_stage.sv",
+        "issue_stage.sv"
+      ],
+      "path_classes": [
+        "accepted-vs-presented",
+        "operand-capture"
+      ]
+    },
+    {
+      "module": "core/frontend/g6lc_fe_frontier.sv + frontend/*",
+      "batch": "r113-a5fc9e4e6",
+      "callers": [
+        "fetch_B",
+        "decode/ID",
+        "g6lc_core"
+      ],
+      "path_classes": [
+        "redirect",
+        "restart",
+        "squash-refill"
+      ]
+    },
+    {
+      "module": "core/load_unit.sv + g6lc_lu_result.sv + lsu_bypass.sv",
+      "batch": "r100-r114",
+      "callers": [
+        "ex_stage.sv",
+        "store_buffer.sv"
+      ],
+      "path_classes": [
+        "AMO_RESULT",
+        "forwarding",
+        "publish-vs-squash",
+        "replay"
+      ]
+    },
+    {
+      "module": "core/csr_regfile.sv + csr_buffer.sv + g6lc_smt_csr_bank.sv",
+      "batch": "r95-r100",
+      "callers": [
+        "commit_stage.sv",
+        "controller.sv"
+      ],
+      "path_classes": [
+        "alloc-release",
+        "xRET-WFI",
+        "dead-slot"
+      ]
+    },
+    {
+      "module": "core/ooo/g6lc_hyp_lzc.sv / g6lc_hyp_alu.sv",
+      "batch": "r112",
+      "callers": [
+        "ex_stage.sv"
+      ],
+      "path_classes": [
+        "WIDTH-boundary",
+        "zero-count"
+      ]
+    },
+    {
+      "module": "core/g6lc_rvfi.sv + g6lc_rvfi_probes.sv",
+      "batch": "r100-r114",
+      "callers": [
+        "observability"
+      ],
+      "path_classes": [
+        "staged-frame-flush",
+        "mask-qualification"
+      ]
+    },
+    {
+      "module": "core/wt_dcache*.sv",
+      "batch": "r100-r114",
+      "callers": [
+        "load_unit.sv",
+        "store_buffer.sv"
+      ],
+      "path_classes": [
+        "miss-ordering",
+        "wbuffer-commit",
+        "AMO-through-D"
+      ]
+    }
+  ],
+  "cross_cutting_contracts": [
+    "common-retirement-event",
+    "csr-alloc-dispatch-release-commit-drop",
+    "prf-read-on-accepted-issue-only",
+    "store-buffer-snapshot-with-match",
+    "amo-lrsc-verdict-qualified-by-AMO_RESULT",
+    "frontend-restart=last-consumed-CF-prediction",
+    "counter-rollover-inhibit-freeze-dead-slot"
+  ],
+  "tasks": [
+    {
+      "id": "E115-C1",
+      "path_class": "retirement",
+      "modules": [
+        "commit_stage.sv",
+        "sb_commit_bundle.sv",
+        "sb_head.sv"
+      ],
+      "screen_fo4": "21-25 bound",
+      "callers": [
+        "g6lc_core",
+        "controller.sv"
+      ],
+      "mechanism": "stage commit-verdict; one-hot head select",
+      "contract": "common retirement event; same-cycle squash-vs-commit; counter rollover",
+      "verify": "commit-order mini + board re-run; audit sb_head.sv CMPCONST warnings (TRANS_ID_BITS slot-width boundary, lines 111/115/159-162/217)",
+      "inherits": null,
+      "status": "open"
+    },
+    {
+      "id": "E115-C2",
+      "path_class": "retirement",
+      "modules": [
+        "store_buffer.sv"
+      ],
+      "screen_fo4": "~50 pre-batch",
+      "callers": [
+        "commit_stage",
+        "lsu"
+      ],
+      "mechanism": "split commit-verdict from forwarding-match cone",
+      "contract": "pending-owner age; committed-pending across kill",
+      "verify": "hyp8_amo_store_order + hyp8_lrsc_store",
+      "inherits": null,
+      "status": "open"
+    },
+    {
+      "id": "E115-C3",
+      "path_class": "retirement",
+      "modules": [
+        "controller.sv",
+        "csr_buffer.sv"
+      ],
+      "screen_fo4": "~22",
+      "callers": [
+        "g6lc_core"
+      ],
+      "mechanism": "hoist CSR release decode; parallel free/valid",
+      "contract": "alloc@dispatch release@commit/drop; dead-slot no-publish",
+      "verify": "csr leaf + full-caller elab",
+      "inherits": null,
+      "status": "open"
+    },
+    {
+      "id": "E115-I1",
+      "path_class": "issue",
+      "modules": [
+        "g6lc_iq.sv",
+        "g6lc_iq_bank.sv",
+        "g6lc_iq_arb.sv"
+      ],
+      "screen_fo4": "101.7/32.3/~30.6",
+      "callers": [
+        "g6lc_ooo_dispatch",
+        "issue_stage"
+      ],
+      "mechanism": "stage selection/payload; structured parallel grants; one-hot issue",
+      "contract": "Serial chain identified (g6lc_iq.sv:227-257): lane p nused[b]=popcount(earlier pick_oh & valid) -> elig=ge[nused+1] -> rot/rotr(hint) -> pick_r=rot&-rot -> rotl unrotate -> asgn -> disp_ack=back&&group_fits. Depth ~NP x (lookup+rotate+isolate+unrotate) ~ 36 FO4 at NP=8. Serial dependency is ONLY pick_oh[p]->nused[p+1]; per-lane popcount already parallel. Candidate: resolve per-bank assignment by bounded enumeration over bank capacity (free[b] small) OR k-th-free-choice per bank preserving low/high tie + starvation policy; translate_off ref_steer (g6lc_iq.sv:263-283) is the built-in equivalence oracle. Must preserve: group-wide acceptance (group_fits), intra-group allocation order, bank capacity, dead-lane skip (pick_oh[j]&disp_valid_i[j]), hold winning entry+identity through backpressure/wakeup/cancel/ready-requalify -- no grant without retained payload. || DEEPER (this pass): Hyp8 binds IqBanks=8, IqBankEntries=4, NP=8 -> BANKS=8 pow2, bank_free<=4, ge[k][b]=bank_free[b]>=k precomputed. Serial chain is NP-deep: pick_oh[p]->nused[p+1]->elig->rotr/rotl->pick_oh[p+1] (~4-5 FO4/stage). Exact serial-dictatorship has no O(1) parallel form. Candidate structures ranked: (a) PIPELINED STEER inside existing grp_v_q hold -- cycle1 register per-lane hint-ordered eligibility prefs, cycle2 resolve picks+allocs while group still held (+1 alloc latency, no throughput loss, satisfies no-grant-without-payload); requires dispatch caller proof that grp_v_q/iqi_take hold covers the extra cycle and back[b] payload is registered not comb-dependent. (b) distance-encoded priority pick replacing rotr/rotl barrel shifts ((b-hint)&7 subtract bank + 8-way min-dist encoder) -- shortens stage ~2 FO4 but keeps NP depth, insufficient alone. (c) BANKS=2 specialization rejected: config binds 8. ref_steer translate_off oracle already instantiated for equivalence.",
+      "verify": "ref_steer translate_off equivalence (already instantiated); exhaustive small-window steer decisions vs serial form; issue smokes; r96 cones re-board",
+      "inherits": "r96 H96-iq cards",
+      "status": "open"
+    },
+    {
+      "id": "E115-I2",
+      "path_class": "issue",
+      "modules": [
+        "g6lc_ooo_dispatch.sv"
+      ],
+      "screen_fo4": "~54.6 older",
+      "callers": [
+        "ex_stage",
+        "g6lc_core"
+      ],
+      "mechanism": "split operand-capture arm from candidate-select",
+      "contract": "read_enable only on accepted take; PRF port lifetime",
+      "verify": "PRF-ownership leaf tests",
+      "inherits": null,
+      "status": "open"
+    },
+    {
+      "id": "E115-I3",
+      "path_class": "issue",
+      "modules": [
+        "issue_read_operands.sv"
+      ],
+      "screen_fo4": "~27-28",
+      "callers": [
+        "ex_stage"
+      ],
+      "mechanism": "per-lane operand mux to banked/local select; caller-specialized",
+      "contract": "capture vs pop same edge",
+      "verify": "io/amo smokes + operand-forwarding minis",
+      "inherits": null,
+      "status": "open"
+    },
+    {
+      "id": "E115-I4",
+      "path_class": "issue",
+      "modules": [
+        "g6lc_flu_reserve.sv"
+      ],
+      "screen_fo4": "r96 order-1",
+      "callers": [
+        "g6lc_iq*"
+      ],
+      "mechanism": "static class/offset masks; parallel earlier-offer conflicts; state on final accept only",
+      "contract": "admission credit vs occupancy; no new external cycle",
+      "verify": "r97: static class/offset masks + parallel earlier-offer conflicts implemented (commit 40aebfee8 batch source r97); functional baseline-vs-candidate matched rc=0, zero width diagnostics; bound-before/after-p2/p8 measured; await re-board",
+      "inherits": "r96 H96-flu",
+      "status": "landed-awaiting-board"
+    },
+    {
+      "id": "E115-I5",
+      "path_class": "issue",
+      "modules": [
+        "g6lc_prf.sv"
+      ],
+      "screen_fo4": "~30.6",
+      "callers": [
+        "g6lc_ooo_dispatch"
+      ],
+      "mechanism": "registered read-address stage qualified by read_enable_i",
+      "contract": "captured addr survives hold; zero-reg bypass",
+      "verify": "landed; re-board",
+      "inherits": null,
+      "status": "landed-awaiting-board"
+    },
+    {
+      "id": "E115-R1",
+      "path_class": "rename",
+      "modules": [
+        "g6lc_rename.sv",
+        "g6lc_rename_read.sv"
+      ],
+      "screen_fo4": "51.00 rename_read in0->out0 (current-core-all r96 board; node chain: lowest_set w72 @220=32 + mask_to_tag @285=12) | attempt-2 board: 72.45 (worse)",
+      "callers": [
+        "dispatch",
+        "commit"
+      ],
+      "mechanism": "stage kill/recovery; candidate select; bound 72i+72fp 2-bank 32-ckpt. ATTEMPT 1 (reverted-timing-negative): direct prd index via countones((~x)&(x-1)) â€” math verified 120k-case Python vs mask_to_tag(pick_free_mask), but the 72-bit (ord-1) borrow chain priced ~66-79 FO4 (rename-read-pidx.json). ATTEMPT 2 (reverted-timing-negative): 3-slice lowest-set decomposition (N/3 slices, per-slice countones((~s)&(s-1)) + lowest-nonempty select + index compose), math verified 0-mismatch/150k Python, int inline + FP generate-guarded for FPN==1. Board rename-read-slices.json: critical path 72.45 FO4 @L337 — analyzer prices each countones/sub expr as ONE add_sub node ~1 FO4/bit regardless of slicing (23.1 for 24-bit slice), so decomposition adds nodes without shrinking the dominant borrow. LESSON: countones((~s)&(s-1)) is timing-negative in this analyzer at ANY width >= ~16; do not retry. Remaining ideas: (a) genuine gate-level priority encoder as balanced tree of 2:1 muxes/one-hot (analyzer may price mux trees cheaper than arith); (b) precompute pick indices one cycle earlier if caller window allows (rename_read inputs are registered? check); (c) accept 51 and cut upstream (bank_mask/taken_lt cone).",
+      "contract": "different-bank picks cannot serialize; RAT ownership across squash; prd must equal mask_to_tag(pick_free_mask(free&bank&~taken, gp==1)) for all masks incl. empty (gated by do_alloc)",
+      "verify": "current-rename-bound.json; rename leaf + squash minis",
+      "inherits": "r96 H96-rename",
+      "status": "open"
+    },
+    {
+      "id": "E115-R2",
+      "path_class": "rename",
+      "modules": [
+        "g6lc_rename_recover.sv",
+        "g6lc_freelist.sv"
+      ],
+      "screen_fo4": "31.8/37.1",
+      "callers": [
+        "commit",
+        "flush"
+      ],
+      "mechanism": "parallel recovery decode; absolute-slot only if consumer wants slot",
+      "contract": "recovery restores exact pre-rename on every squash class",
+      "verify": "rename leaf + squash minis",
+      "inherits": null,
+      "status": "open"
+    },
+    {
+      "id": "E115-L1",
+      "path_class": "lsu",
+      "modules": [
+        "load_unit.sv"
+      ],
+      "screen_fo4": "47.40 load_unit in0->out0 (core-all-r115); post-split board load-unit-split.json: 43.20 (FSM state_d cone L1042-1180)",
+      "callers": [
+        "ex_stage",
+        "stb_fwd"
+      ],
+      "mechanism": "split addr/perm check from data-return merge; calibrate unbuffered-load law first | LANDED r115 attempt-1: ex_pub 9-term flat AND (priced ONE compare node @10.5) decomposed into ex_slot_ok (rresp_idx-indexed slot reads + cancelled_mask) && ex_ctx_ok (kill_req_w/ex_i.valid/ex_ptw_i/state_q) && — pure && regroup, identical function. Board: ex_pub path fell out of top; new critical = load_control FSM next-state cone state_d/pop_ld_o/st_fwd_done @L1042-1180 all 43.20 (nested data_gnt->dtlb_hit->stall_ni->fwd decision chain — next candidate: balance FSM arms or register page_offset/dtlb facts). Endpoint ldbuf_valid_d[rindex] clear @486 still 42.90.",
+      "contract": "AMO_RESULT gating; subword forwarding; publish vs squash",
+      "verify": "hyp8_amo_ready_order + load minis",
+      "inherits": null,
+      "status": "landed-awaiting-validation"
+    },
+    {
+      "id": "E115-L2",
+      "path_class": "lsu",
+      "modules": [
+        "g6lc_lsq*.sv"
+      ],
+      "screen_fo4": "~94 older; r96 order-1",
+      "callers": [
+        "ex_stage",
+        "store_buffer",
+        "load_unit"
+      ],
+      "mechanism": "balanced valid-vector popcounts for admission credits; split verdict windows",
+      "contract": "admission credit exactness; LSQ depth derived",
+      "verify": "r98: balanced valid-vector popcounts at clog2(cap+1) widths landed (g6lc_lsq.sv:341-354); LSQ store-reservation contract resolved same commit (spec-store geometry, MC lint USERERROR cleared per commit validation); await re-board",
+      "inherits": "r96 H96-lsq",
+      "status": "landed-awaiting-board"
+    },
+    {
+      "id": "E115-L3",
+      "path_class": "lsu",
+      "modules": [
+        "store_unit.sv",
+        "stb_fwd.sv"
+      ],
+      "screen_fo4": "58.00 store_unit.sv:569 intoreg (current-core-all r96 board; screen value was stale)",
+      "callers": [
+        "ex_stage",
+        "store_buffer"
+      ],
+      "mechanism": "r96 card: fuse endian permute + data_align rotate into one byte crossbar â€” compose permutations on indices, single byte mux per slice. LANDED: store_data_fused()+store_idx()+store_byte_at() in store_unit.sv; concat-return form (function+loop+part-select-write priced opaque logic_bit@267 â€” rejected; concat-of-case-slices inlines). sv-timing store_unit-only re-board: 58.00 -> 41.35 FO4 intoreg (residual = one logic_bit@38.5 opaque permutation node + 2.85 input; further decomposition needs case-arm style). Index math verified vs original semantics 40k-case Python model (XLEN64+32, all wb/off/amo); data_align rotate-right model triple-verified vs case arms. st_be_n/st_data_size_n/amo_op_d/cbo_op_d/CBO_ZERO override untouched; AMO passthrough = identity rotate; bug-compatible wb classes (D-variant AMOs+SD -> XLEN).",
+      "contract": "data/BE/op/VA/TID/hart/epoch; AMO passthrough; CBO_ZERO '0+BE='1; same-cycle st_data_q capture; cancel-before-grant; value-identical for all inputs",
+      "verify": "lint clean (7 known sb_head warnings); PENDING: hyp8_f14_store_offset + h33_st_fwd + h34_shift_dep smokes on remote model; boards store-unit-fused4.json/.ir.json",
+      "inherits": "r96 H96-store_unit",
+      "status": "landed-awaiting-validation"
+    },
+    {
+      "id": "E115-L4",
+      "path_class": "lsu",
+      "modules": [
+        "wt_dcache_wbuffer.sv",
+        "missunit",
+        "ctrl",
+        "mem"
+      ],
+      "screen_fo4": "75.85 hpdcache_ctrl_pe in0->out0 (core-all-r115 board, worst untagged); wt_dcache_wbuffer 44.89",
+      "callers": [
+        "load_unit",
+        "store_buffer"
+      ],
+      "mechanism": "collector/admission vs lookup/MSHR decision; write-buffer fixup | ANALYSIS r115: hpdcache_ctrl_pe.sv is a SINGLE always_comb (L288-1285, ~1000 lines) under top if-chain !cachedir_init_ready/refill_busy/flush_busy/.../normal-op. Analyzer bills opaque other-nodes 9-16 FO4 for constant/branch assignments because it cannot decompose the nested DAG — TRUE depth unknown but structural monolith is real for synthesis too. Critical path st1_fence->rtab_check_o->st1_err_o->st1_nop->nop->core_req_ready_o->st0_req_cachedir_read_o. st1_nop/st2_nop have ~15 hazard assignment sites each (33 total) — they are automatic locals, so any split must first promote them (+nop, st0_req_is_pstore/pamo) to module level or recompute. Decomposition plan: (1) extract tail request-arb section L1187-1285 (ready/valid/st0 outputs) into own always_comb reading promoted nop/st1_nop/st2_nop; (2) split stage-1 ECC/error/nop cone (L595-700) from stage-2/MHSR cone; (3) keep top-level mode chain (init/refill/flush/normal) as the sequencing spine. RISK: deadlock/livelock sensitivity (in-code FIXME L613), replay-table ordering — needs remote witness before trusting. Estimated effort: dedicated session; do NOT attempt piecemeal without full signal-writer audit. | LANDED r115 (wt_dcache_wbuffer portion): fixup_coalesced used |fixup_first_from_head(snap_push_match)| — encoder returns one-hot/zero so |result|==|input mask|; replaced with |snap_push_match| directly (encoder retained only for positional read snap_push_first[fixup_head] in fixup_active_coalesced). Board wbuffer-cammask.json: 44.89->41.72; residual = 8-way paddr CAM + OR-reduce (inherent).",
+      "contract": "MSHR owner stability; wbuffer commit vs pending",
+      "verify": "D-cache checks",
+      "inherits": null,
+      "status": "open"
+    },
+    {
+      "id": "E115-L5",
+      "path_class": "lsu",
+      "modules": [
+        "lsu_bypass.sv",
+        "g6lc_lu_result.sv"
+      ],
+      "screen_fo4": "~19-26",
+      "callers": [
+        "ex_stage"
+      ],
+      "mechanism": "audit after L1-L4; avoid optimizing moved-not-shrunk path",
+      "contract": "bypass source priority vs AMO",
+      "verify": "leaf + integration",
+      "inherits": null,
+      "status": "deferred"
+    },
+    {
+      "id": "E115-F1",
+      "path_class": "frontend",
+      "modules": [
+        "frontend/*"
+      ],
+      "screen_fo4": "142.4 whole; 18-45 module",
+      "callers": [
+        "g6lc_core",
+        "decode/ID"
+      ],
+      "mechanism": "stage prefix/queue gather and tag-compare separately | ANALYSIS r115 (instr_queue 43.25 board): critical = gen_compact_slots prefix-popcount — slot_fifo[s]=(idx_is_q+rank)&IdxMask with serial rank+=valid[s] carried across NrSlot (priced ONE add_sub 11.7). Parallel-prefix (Kogge-Stone/mux-compress) est ~8-10 FO4 — marginal ~3 gain for generic-NrSlot generate risk; ALSO slot0_pos=rotate_left barrel + leftover_slot0_push fn (4.4 opaque) + push_address CF mux @726 (6.5) on same cone. Deprioritized vs load_unit/wbuffer wins; revisit if frontend becomes top-5.",
+      "contract": "restart=last-consumed-CF prediction; squash refill; fetch-dbg rebind pending",
+      "verify": "frontend minis + witness PC trace",
+      "inherits": null,
+      "status": "open"
+    },
+    {
+      "id": "E115-F2",
+      "path_class": "frontend",
+      "modules": [
+        "g6lc_fe_redirect.sv",
+        "g6lc_fe_frontier.sv"
+      ],
+      "screen_fo4": "33.1",
+      "callers": [
+        "frontend",
+        "g6lc_core"
+      ],
+      "mechanism": "split arbitration from record formation",
+      "contract": "redirect ownership vs consumed-slot prediction; ckpt 8-bit",
+      "verify": "r113 linecheck 75",
+      "inherits": null,
+      "status": "open"
+    },
+    {
+      "id": "E115-F3",
+      "path_class": "frontend",
+      "modules": [
+        "g6lc_loop_buffer.sv",
+        "bp_ckpt.sv",
+        "bp_*"
+      ],
+      "screen_fo4": "~30.6",
+      "callers": [
+        "frontend"
+      ],
+      "mechanism": "loop-buffer match under flush; predictor ckpt write",
+      "contract": "match must not resurrect squashed path",
+      "verify": "bp/loop directed",
+      "inherits": null,
+      "status": "landed-awaiting-validation",
+      "r115_note": "r115: next-state always_comb split into 2 always_comb by write ownership (arm/capture vs fill/replay), identical flush/enable skeleton, per-signal last-writer preserved. Board loop-buffer-splitab: 46.91->46.91 NEUTRAL — binding cone is fill_accept addr_eq (22.5: 6b low EQ + carry-muxed 58b hi EQ) + fill_low_lit add; genuine logic floor unless fill-stream contract allows hi-relaxation (options in worklog order-9). Local lint clean."
+    },
+    {
+      "id": "E115-D1",
+      "path_class": "decode",
+      "modules": [
+        "g6lc_decode_s3.sv"
+      ],
+      "screen_fo4": "53.7",
+      "callers": [
+        "issue_stage",
+        "ex_stage"
+      ],
+      "mechanism": "priority-preserving legality selection; span/terminal facts in windows | LANDED r115: serial SFENCE/HFENCE override chain (illA->illB->illC->illD, virA->virD) collapsed to single priority select — arms are opcode-disjoint (dec_i.op single-valued) so at most one fires; verified 0-mismatch/2048 Python over contracted input space (co-firing impossible by construction). Board decode-s3-flatov.json: 51.97->44.47 FO4; residual dominated by exception-assembly tail (ex_fin.gva @402=9.9) + illegal mux @289=8.5 + illA 8-way OR @258=7.0 — next cuts need exception-priority restructure (separate card).",
+      "contract": "never speculate illegal as legal; flush on redirect",
+      "verify": "decode leaf + smoke; decode-s3-flatov.json board; lint clean",
+      "inherits": "r96 order-2",
+      "status": "landed-awaiting-validation"
+    },
+    {
+      "id": "E115-D2",
+      "path_class": "decode",
+      "modules": [
+        "issue_stage.sv",
+        "ex_stage.sv"
+      ],
+      "screen_fo4": "~22-28",
+      "callers": [
+        "g6lc_core"
+      ],
+      "mechanism": "caller-specialized operand classes; aligned stage boundaries",
+      "contract": "valid/ID/result/flush complete across every boundary",
+      "verify": "full-caller elab + smokes",
+      "inherits": null,
+      "status": "open"
+    },
+    {
+      "id": "E115-M1",
+      "path_class": "mmu",
+      "modules": [
+        "g6lc_mmu.sv"
+      ],
+      "screen_fo4": "33.6",
+      "callers": [
+        "ex_stage",
+        "load_unit",
+        "store_buffer"
+      ],
+      "mechanism": "split context compute from match; stage walk arbitration",
+      "contract": "walk vs squash; SMT2 context-switch shootdown",
+      "verify": "mmu leaf + ctx-switch mini",
+      "inherits": null,
+      "status": "open"
+    },
+    {
+      "id": "E115-M2",
+      "path_class": "mmu",
+      "modules": [
+        "g6lc_tlb.sv",
+        "pmp*"
+      ],
+      "screen_fo4": "30.9",
+      "callers": [
+        "g6lc_mmu",
+        "LSU"
+      ],
+      "mechanism": "tag compare / permission merge staging; PMP row-local update",
+      "contract": "PMP row-local update per r96 order-1",
+      "verify": "pmp directed + OpenSBI PMP path",
+      "inherits": "r96 order-1",
+      "status": "open"
+    },
+    {
+      "id": "E115-S1",
+      "path_class": "csr",
+      "modules": [
+        "csr_regfile.sv"
+      ],
+      "screen_fo4": "37.4",
+      "callers": [
+        "commit_stage",
+        "controller",
+        "csr_buffer"
+      ],
+      "mechanism": "constant-entry decode + parallel row-local lock/update (PMP writes)",
+      "contract": "CSR alloc@dispatch release@commit/drop",
+      "verify": "r98: constant-entry decode + parallel row-local PMP lock/update retained in 40aebfee8; scalar smokes 7/7 exit0 at r90 cycle counts; await re-board + OpenSBI PMP path",
+      "inherits": "r96 order-1",
+      "status": "landed-awaiting-validation",
+      "r115_note": "r115: dpc_d trap-entry arms coalesced (3 identical sext(pc_i) writes -> 1 guarded assign, mirrored in rf_ shadow; cz_brk/cz_dbg proven identical to inline compares). Board csr-regfile-dpccoal: 52.60->52.60 NEUTRAL — binding cone is single-step arm 4-way priority + always_comb program-order serialization. Real fix = csr_update monolith decomposition -> E115-S3."
+    },
+    {
+      "id": "E115-S2",
+      "path_class": "csr",
+      "modules": [
+        "perf_counters.sv",
+        "csr_counters.sv"
+      ],
+      "screen_fo4": "~22-25",
+      "callers": [
+        "commit_stage",
+        "RVFI"
+      ],
+      "mechanism": "counter update on retirement event only",
+      "contract": "same-cycle rollover; dead-slot exclusion; freeze",
+      "verify": "counter minis",
+      "inherits": null,
+      "status": "open"
+    },
+    {
+      "id": "E115-S3",
+      "path_class": "csr",
+      "modules": [
+        "csr_regfile.sv"
+      ],
+      "screen_fo4": "52.60 csr_regfile in0->out0 / reg0->reg1 (core-all-r115)",
+      "callers": [
+        "commit_stage",
+        "controller",
+        "csr_buffer",
+        "decode"
+      ],
+      "mechanism": "decompose csr_update always_comb (L3391-~3960) into per-output-owner always_comb processes; promote shared temporaries (cz_*, trap_to_priv_lvl, tval_zero_*) to module nets; preserve last-writer order across trap-entry/step/debug/eret arms and rf_ shadow==primary assertion",
+      "contract": "dpc_d/dcsr_d/mstatus_d last-writer semantics; rf_dpc_d==dpc_d assertion; precise exception+debug entry; CSR write-lock",
+      "verify": "csr_regfile module board + hyp8 lint + debug/exception smokes (ebreak, trigger, single-step) + OpenSBI boot",
+      "inherits": "E115-S1",
+      "status": "open",
+      "r115_note": "analyzer serializes always_comb in program order (verified via IR fanin chains); local expr transforms exhausted at 52.60"
+    },
+    {
+      "id": "E115-P1",
+      "path_class": "fpu-multicycle",
+      "modules": [
+        "cvfpu/src/fpnew_fma.sv",
+        "fpnew_fma_multi.sv"
+      ],
+      "screen_fo4": "133.26/142.72 bound-measurement-blocked",
+      "callers": [
+        "fpnew_opgroup_fmt_slice",
+        "g6lc_ai_fp_mac"
+      ],
+      "mechanism": "product capture in p_fma_exp_mant; rebalance S1/S2",
+      "contract": "M96-FMA-REG boundary model first; multi-cycle latency contract",
+      "verify": "M96-FMA-REG fixture",
+      "inherits": "r96 H96-fma",
+      "status": "blocked-on-M96-FMA-REG"
+    },
+    {
+      "id": "E115-P2",
+      "path_class": "fpu-multicycle",
+      "modules": [
+        "multiplier.sv",
+        "mult_clmul.sv",
+        "alu.sv"
+      ],
+      "screen_fo4": "~52/~27-28",
+      "callers": [
+        "ex_stage"
+      ],
+      "mechanism": "A132 tile->carry-save->final both rows reconverge; stage dials",
+      "contract": "carry companion across every boundary",
+      "verify": "multiplier leaf",
+      "inherits": "A132",
+      "status": "open"
+    },
+    {
+      "id": "E115-P3",
+      "path_class": "fpu-multicycle",
+      "modules": [
+        "serdiv.sv",
+        "vfdsu*",
+        "aes*"
+      ],
+      "screen_fo4": "~44.9",
+      "callers": [
+        "ex_stage",
+        "FPU"
+      ],
+      "mechanism": "multi-cycle latency contract; recurrence rebalance",
+      "contract": "occupancy/interval vs issue",
+      "verify": "directed latency minis",
+      "inherits": null,
+      "status": "open"
+    },
+    {
+      "id": "E115-A1",
+      "path_class": "apu-l2l3",
+      "modules": [
+        "g6lc_l2_mshr.sv",
+        "l2 tag/top"
+      ],
+      "screen_fo4": "62.69 guard-incompatible",
+      "callers": [
+        "wt_dcache",
+        "g6lc_l3*"
+      ],
+      "mechanism": "per-entry pop/attach/complete; parallel free/merge",
+      "contract": "S_IDLE vs S_BYPASS_B not sensitizable; observable alternative",
+      "verify": "r98: per-entry pop/attach/complete rewrite measured timing-negative and REVERTED in 40aebfee8 (baselines archived analysis/r98/mshr-*.before.sv, mshr-per-entry.rejected.sv); 62.69 FO4 guard-incompatible path stands; needs a different mechanism or accept as structural floor pending re-measure",
+      "inherits": "r96 order-1",
+      "status": "reverted-timing-negative"
+    },
+    {
+      "id": "E115-A2",
+      "path_class": "apu-l2l3",
+      "modules": [
+        "g6lc_l3*"
+      ],
+      "screen_fo4": "41.57 disabled-PF_TAG excluded",
+      "callers": [
+        "L2",
+        "coherence"
+      ],
+      "mechanism": "same as A1; generate-arm reachability audit",
+      "contract": "PF_TAG=0 disabled path no priority",
+      "verify": "current-l3-tag-bound.json",
+      "inherits": "M96-GEN",
+      "status": "open"
+    },
+    {
+      "id": "E115-A3",
+      "path_class": "apu-l2l3",
+      "modules": [
+        "coherence/*",
+        "inval_bus",
+        "cmo_engine"
+      ],
+      "screen_fo4": "121.60/123.30 sink-aggregates",
+      "callers": [
+        "corev_apu top",
+        "L3"
+      ],
+      "mechanism": "largest observable alternative; slot/response/applied-inval ownership",
+      "contract": "private counters rejected r94; reset/NBA excluded",
+      "verify": "observable-path audit",
+      "inherits": "M96-SINK",
+      "status": "open"
+    },
+    {
+      "id": "E115-N1",
+      "path_class": "ai-island",
+      "modules": [
+        "g6lc_ai_exec.sv",
+        "gemm seq/norm/align",
+        "desc_engine"
+      ],
+      "screen_fo4": "per r96",
+      "callers": [
+        "g6lc_core (CVXIF)",
+        "cluster"
+      ],
+      "mechanism": "span/terminal facts in windows; normalization split",
+      "contract": "descriptor lifetime across flush; AI commit contract verify",
+      "verify": "ai_island leaf + cvxif boundary",
+      "inherits": "r96 order-2/4",
+      "status": "open"
+    },
+    {
+      "id": "E115-N2",
+      "path_class": "ai-island",
+      "modules": [
+        "AI PE dot pipeline",
+        "cluster dispatch"
+      ],
+      "screen_fo4": "per r96",
+      "callers": [
+        "GEMM engine"
+      ],
+      "mechanism": "rebalance only; Baugh-Wooley DOT exists",
+      "contract": "stationary slots need stable ordering (A138/A141)",
+      "verify": "r96 cards",
+      "inherits": "r96",
+      "status": "open"
+    }
+  ],
+  "measurement_tasks_inherited": [
+    "M96-FMA-REG",
+    "M96-GEN",
+    "M96-GUARD",
+    "M96-BIND",
+    "M96-SINK",
+    "M96-LOAD"
+  ],
+  "next_actions": [
+    "reboard r96 bindings against HEAD 7d7d7dc5a",
+    "execute M96-FMA-REG fixture",
+    "consume current-rename-bound.json for E115-R1",
+    "rerun port-amo-fetch lint after runtime restore",
+    "queue canonical-budget MC/SMT2 witness",
+    "first RTL batch: E115-I4 + E115-S1 + E115-L2 + E115-A1 (r96 order-1, no new external cycle)"
+  ],
+  "limits": [
+    "no Linux userspace boot observed",
+    "no SMT2/MC boot evidence",
+    "no physical timing closure; structural 8-FO4 is a screen",
+    "r96 caller lists partially lexical (M96-BIND)",
+    "unbuffered-load law may price wide select above 8 (M96-LOAD)"
+  ]
+}

@@ -19,7 +19,9 @@ SIMULATION_STAGES = frozenset({
     "checkpoint-service", "checkpoint-endpoint", "checkpoint-policy", "quiesce",
     "checkpoint-writer", "checkpoint-writer-reset", "vdma-ownership", "policy-writer",
     "commit-defaults", "load-translation", "fetch-queue", "cpu-origin",
-    "cpu-debug",
+    "cpu-debug", "cpu-debug-stq-mutant", "cpu-debug-trigger",
+    "cpu-debug-return", "cpu-debug-queue",
+    "stq-commit-flush",
 })
 ALLOWED_STAGES = SIMULATION_STAGES | frozenset({
     "synth", "formal", "model-synth", "model-formal", "map-synth", "map-formal",
@@ -230,7 +232,7 @@ def main():
             "verif/tb/apu/g6lc_dram_peek64_stub.cpp",
             "verif/tb/storamic/run_cpu_origin.py",
         ]]
-    if set(stages) & {"cpu-debug"}:
+    if set(stages) & {"cpu-debug", "cpu-debug-stq-mutant"}:
         cpu_plan = json.loads(
             (root / "verif/tb/storamic/cpu_origin_plan.json").read_text())
         cpu_closure = cpu_plan["files"] + cpu_plan.get("support_files", [])
@@ -247,6 +249,73 @@ def main():
             "verif/tb/apu/g6lc_dram_peek64_stub.cpp",
             "verif/tb/storamic/run_cpu_origin.py",
             "verif/tb/storamic/run_cpu_debug.py",
+        ]] if p not in sources]
+    if set(stages) & {"cpu-debug-trigger"}:
+        cpu_plan = json.loads(
+            (root / "verif/tb/storamic/cpu_origin_plan.json").read_text())
+        cpu_closure = cpu_plan["files"] + cpu_plan.get("support_files", [])
+        sources += [p for p in [root / rel for rel in cpu_closure]
+                    if p not in sources]
+        sources += [p for p in [root / path for path in [
+            "verif/tb/storamic/cpu_origin_plan.json",
+            "verif/tb/storamic/tb_g6lc_storamic_cpu_debug_trigger.sv",
+            "verif/tb/storamic/tb_g6lc_storamic_cpu_debug_trigger_interpreter.sv",
+            "verif/tb/storamic/tb_g6lc_storamic_cpu_debug_netlist.sv",
+            "verif/tb/storamic/g6lc_cpu_debug_trigger_program.py",
+            "verif/tb/storamic/g6lc_cpu_debug_program.py",
+            "verif/tb/storamic/g6lc_cpu_origin_program.py",
+            "verif/tb/storamic/origin_cache.vlt",
+            "verif/tb/apu/g6lc_dram_peek64_stub.cpp",
+            "verif/tb/storamic/run_cpu_origin.py",
+            "verif/tb/storamic/run_cpu_debug_trigger.py",
+        ]] if p not in sources]
+    if set(stages) & {"cpu-debug-return"}:
+        cpu_plan = json.loads(
+            (root / "verif/tb/storamic/cpu_origin_plan.json").read_text())
+        cpu_closure = cpu_plan["files"] + cpu_plan.get("support_files", [])
+        sources += [p for p in [root / rel for rel in cpu_closure]
+                    if p not in sources]
+        sources += [p for p in [root / path for path in [
+            "verif/tb/storamic/cpu_origin_plan.json",
+            "verif/tb/storamic/tb_g6lc_storamic_cpu_debug_return.sv",
+            "verif/tb/storamic/tb_g6lc_storamic_cpu_debug_return_interpreter.sv",
+            "verif/tb/storamic/tb_g6lc_storamic_cpu_debug_netlist.sv",
+            "verif/tb/storamic/g6lc_cpu_debug_return_program.py",
+            "verif/tb/storamic/g6lc_cpu_debug_program.py",
+            "verif/tb/storamic/g6lc_cpu_origin_program.py",
+            "verif/tb/storamic/origin_cache.vlt",
+            "verif/tb/apu/g6lc_dram_peek64_stub.cpp",
+            "verif/tb/storamic/run_cpu_origin.py",
+            "verif/tb/storamic/run_cpu_debug_return.py",
+        ]] if p not in sources]
+    if set(stages) & {"cpu-debug-queue"}:
+        cpu_plan = json.loads(
+            (root / "verif/tb/storamic/cpu_origin_plan.json").read_text())
+        cpu_closure = cpu_plan["files"] + cpu_plan.get("support_files", [])
+        sources += [p for p in [root / rel for rel in cpu_closure]
+                    if p not in sources]
+        sources += [p for p in [root / path for path in [
+            "verif/tb/storamic/cpu_origin_plan.json",
+            "verif/tb/storamic/tb_g6lc_storamic_cpu_debug_queue.sv",
+            "verif/tb/storamic/tb_g6lc_storamic_cpu_debug_queue_interpreter.sv",
+            "verif/tb/storamic/tb_g6lc_storamic_cpu_debug_netlist.sv",
+            "verif/tb/storamic/g6lc_cpu_debug_program.py",
+            "verif/tb/storamic/g6lc_cpu_origin_program.py",
+            "verif/tb/storamic/origin_cache.vlt",
+            "verif/tb/apu/g6lc_dram_peek64_stub.cpp",
+            "verif/tb/storamic/run_cpu_origin.py",
+            "verif/tb/storamic/run_cpu_debug_queue.py",
+        ]] if p not in sources]
+    if set(stages) & {"stq-commit-flush"}:
+        sources += [p for p in [root / path for path in [
+            "core/include/config_pkg.sv",
+            "core/include/g6lc64_ooo_config_pkg.sv",
+            "core/include/riscv_pkg.sv",
+            "core/include/ariane_pkg.sv",
+            "core/ooo/g6lc_ooo_pkg.sv",
+            "core/store_buffer.sv",
+            "verif/tb/core/tb_g6lc_stq_commit_flush.sv",
+            "verif/tb/storamic/run_stq_commit_flush.py",
         ]] if p not in sources]
     if set(stages) & {"csr-scc"}:
         sources += [p for p in [root / path for path in [

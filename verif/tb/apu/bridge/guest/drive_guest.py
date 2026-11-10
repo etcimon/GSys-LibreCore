@@ -473,7 +473,8 @@ def main():
                 "  [ -n \"$d\" ] && mount -o ro $d /mnt/cidata 2>/dev/null && break; "
                 "done; "
                 "cp /mnt/cidata/vkcompute.c /mnt/cidata/vkdescarr.c "
-                "/mnt/cidata/vkmem.c /mnt/cidata/vkimage.c "
+                "/mnt/cidata/vkmem.c /mnt/cidata/vkmembig.c "
+                "/mnt/cidata/vkimage.c "
                 "/mnt/cidata/vktri.c /mnt/cidata/vkcmp.c /mnt/cidata/vkping.c "
                 "/mnt/cidata/bufcopy.spv /mnt/cidata/descarr.spv "
                 "/mnt/cidata/vkimage.spv "
@@ -521,6 +522,14 @@ def main():
                 rc = con.run("cd /root && gcc -O2 -o vkmem vkmem.c -lvulkan "
                              "&& ./vkmem bufcopy.spv", timeout=1200)
                 print(f"[drive] vkmem rc={rc}", flush=True)
+                fail |= (rc != 0)
+            # >1 MiB buffer copy round-trip sweep (CTS memory.binding
+            # buffer_1048577 reproducer): host-write -> vkCmdCopyBuffer
+            # -> host-read across a size ladder, first-bad-byte offset.
+            if not only or "vkmembig" in only:
+                rc = con.run("cd /root && gcc -O2 -o vkmembig vkmembig.c "
+                             "-lvulkan && ./vkmembig", timeout=1200)
+                print(f"[drive] vkmembig rc={rc}", flush=True)
                 fail |= (rc != 0)
             # §12.3 C/5b: images + samplers + Xfer image copies on the
             # stock path (textureLod bilinear edge/repeat into an
@@ -794,6 +803,8 @@ def main():
                               "cts-TestResults.qpa"),
                              ("/results/vulkaninfo-summary.txt",
                               "cts-vulkaninfo-summary.txt"),
+                             ("/results/deqp-stdout.txt",
+                              "cts-deqp-stdout.txt"),
                              ("/results/dmesg.txt", "cts-dmesg.txt")):
                 r = subprocess.run(
                     ["debugfs", "-R", f"dump {src} {args.out}/{dst}",

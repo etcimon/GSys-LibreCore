@@ -167,7 +167,10 @@ minMemoryMapAlignment = 4096
 
 [memory]
 # VkPhysicalDeviceMemoryProperties: two heaps (§12.3 C).
-#   heap 0 = the device-private arena (top 8 MiB of the SHM window);
+#   heap 0 = the device-private arena (top 32 MiB of the 96 MiB
+#            managed SHM window; grew 8 -> 32 MiB on 2026-11-09 so ten
+#            ~1 MiB+1 DEVICE_LOCAL VkDeviceMemory allocations fit —
+#            CTS memory.binding buffer_1048577 was OOM at 8 MiB);
 #            type 0 DEVICE_LOCAL allocations are eager ALLOC_PRIV there
 #   heap 1 = the guest-mappable span (SHM_LEN = 64 MiB);
 #            type 1 DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT is lazy at
@@ -175,7 +178,7 @@ minMemoryMapAlignment = 4096
 #            3d-d): bind ALLOC_HI's a device-chosen extent (DEVBACKED);
 #            MAP_BLOB ALLOC_ATs the kernel offset, relocating the
 #            DEVBACKED extent when it differs
-heap0_size = 0x00800000
+heap0_size = 0x02000000
 heap1_size = 0x04000000
 type0_flags = "DEVICE_LOCAL"
 type0_heap = 0
@@ -240,9 +243,16 @@ R32G32B32A32_UINT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST
 D32_SFLOAT = { f = "DEPTH_STENCIL_ATTACHMENT|SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|TRANSFER_SRC|TRANSFER_DST", bpp = 4, comps = 1, flt = 1 }
 D16_UNORM = { f = "DEPTH_STENCIL_ATTACHMENT|SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|TRANSFER_SRC|TRANSFER_DST", bpp = 2, comps = 1 }
 # wired: the raster depth/stencil path consumes device id 14 (D24 in
-# [23:0], stencil in [31:24]), but stencil is front-face only, so no
-# format feature is advertised.  Declared after D16 so the id stays 14.
-D24_UNORM_S8_UINT = { f = "", wired = 1, bpp = 4, comps = 1 }
+# [23:0], stencil in [31:24]).  stencilTestEnable + front/back
+# VkStencilOpState transport (cmdexec w51-54) and the S_DZ_C2 compare/
+# fail/dfail/pass update (f_scmp/f_sop) are implemented for this format;
+# stencil clear still writes the high byte 0 (rast CLEAR packs
+# {8'h00,u24(depth)}), so a non-zero stencil arrives only via pass/fail/
+# dfail ops — verified by the ue_gpos_stencil* sessions.  DEPTH_STENCIL_
+# ATTACHMENT + TRANSFER_SRC advertise attach + copy-readback; no
+# SAMPLED_IMAGE (depth/stencil sampling is a separate path).  Declared
+# after D16 so the id stays 14.
+D24_UNORM_S8_UINT = { f = "DEPTH_STENCIL_ATTACHMENT|TRANSFER_SRC", wired = 1, bpp = 4, comps = 1 }
 # device id 15 (appended: existing ids stay put).  TRANSFER: the xfer
 # copy/fill paths are byte-exact for any 4-byte texel (memory.binding.*).
 # STORAGE_IMAGE (T3): shwave decodes 4 x u8 and stores one byte per

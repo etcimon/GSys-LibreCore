@@ -189,6 +189,8 @@ module g6lc_apu_xfer
       XClrPat,                       // build the packed clear pattern
       XSrEnc,                        // sRGB binary search (1 step/cyc)
       XClrMip,                       // clear: mip walk per range
+      XSbRow,                        // scaled blit: arm one dst row
+      XSbNxt,                        // scaled blit: advance row/layer
       XDone, XAbort
     } xf_state_e;
     xf_state_e state_q;
@@ -255,6 +257,22 @@ module g6lc_apu_xfer
     logic [31:0]    s_rstep_q, s_ladj_q;
     logic [31:0]    d_rstep_q, d_ladj_q;
     logic [31:0]    r_sz_q;            // bytes per row (w*bpp)
+    // ---- T1 scaled NEAREST blit (exact-2x, bpp==4, offsets 0, mip0/layer0)
+    // A VkImageBlit whose dst extent is exactly 2x the src extent on both
+    // axes runs a dedicated row-expansion path: each dst row re-reads src
+    // row (yy>>1) and horizontally duplicates every texel into one
+    // {texel,texel} fragment.  sblit_q gates every branch below so the
+    // verified 1:1 ops are untouched.
+    logic           sblit_q;           // scaled mode active this record
+    logic [31:0]    sb_srclen_q;       // src row bytes  = extent.x*bpp
+    logic [31:0]    sb_dstlen_q;       // dst row bytes  = 2*extent.x*bpp
+    logic [31:0]    sb_drows_q;        // dst rows this layer (=2*sey)
+    logic [31:0]    sb_spit_q, sb_dpit_q;   // src/dst row pitch (bytes)
+    logic [31:0]    sb_srow_q, sb_drow_q;   // current row byte addrs
+    logic [31:0]    sb_yy_q;           // dst row index this layer
+    apu_dma_read_data_t sb_frag_q;     // latched src fragment
+    logic [1:0]     sb_ntex_q, sb_k_q; // texels in / next texel of frag
+    logic           sb_have_q;         // a src frag is being expanded
     // ---- §12.3 C/5b-r2: shared address-gen micro-engine --------------
     // Every image-state product runs on one iterative 32x32->64
     // multiplier: a micro-program ({op,dst,a,b} steps) is walked one
@@ -658,12 +676,14 @@ module g6lc_apu_xfer
     apu_dma_axi_req_t   rd_axi, wr_axi;
 
     assign rd_req = '{resource_id: 32'h1, context_id: 32'h0, epoch: 32'h0,
-                     offset: so_q + coff_q, bytes: csz_q,
+                     offset: so_q + coff_q,
+                     bytes: sblit_q ? sb_srclen_q : csz_q,
                      tag: {48'h0, ei_q}};
     assign wr_req = '{resource_id: 32'h1, context_id: 32'h0, epoch: 32'h0,
                      offset: (is_copy || is_img) ? (do_q + coff_q)
                                                  : (hoff_q + coff_q),
-                     bytes: csz_q, tag: {48'h0, ei_q}};
+                     bytes: sblit_q ? sb_dstlen_q : csz_q,
+                     tag: {48'h0, ei_q}};
 
     g6lc_apu_dma_read #(.ApuCfg(XCfg)) i_rd (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
@@ -722,8 +742,17 @@ module g6lc_apu_xfer
                      !up_ph_q && !up_v_q && !pay_fly_q &&
                      fifo_space && !discard;
 
+    // scaled-blit expander: one src texel -> one {texel,texel} dst frag.
+    // dst byte pos = src_frag.offset*2 + texel*8 (2x horizontal); frag.offset
+    // is read-request-relative so this stays correct under any DMA split.
+    logic        sb_go;                 // expander may emit a dst frag now
+    logic [31:0] sb_tx;                 // current src texel (32 bpp==4)
+    assign sb_go = sblit_q && sb_have_q && fifo_space;
+    assign sb_tx = sb_k_q[0] ? sb_frag_q.data[63:32]
+                             : sb_frag_q.data[31:0];
+
     assign fifo_push = state_q == XRun && !discard &&
-        ((is_rd && rd_dv && fifo_space) ||
+        (((is_rd && !sblit_q) && rd_dv && fifo_space) || sb_go ||
          fill_go || clr_go ||
          (is_upd && up_v_q && fifo_space));
 
@@ -736,7 +765,15 @@ module g6lc_apu_xfer
 
     always_comb begin
       push_frag = '0;
-      if (is_rd) begin
+      if (sblit_q) begin
+        // dst frag = current src texel duplicated into both 32-bit halves;
+        // offset/last are dst-row-relative for the write request
+        push_frag.data   = {sb_tx, sb_tx};
+        push_frag.keep   = 8'hff;
+        push_frag.offset = sb_frag_q.offset * 32'd2 +
+                           32'(sb_k_q) * 32'd8;
+        push_frag.last   = push_frag.offset + 32'd8 == sb_dstlen_q;
+      end else if (is_rd) begin
         push_frag = rd_data;
       end else if (is_fill) begin
         // dstOffset and size are 4-byte aligned -> fragments are 8 or 4 B
@@ -760,9 +797,12 @@ module g6lc_apu_xfer
     end
 
     // read leg drains into the FIFO; under fault/flush it still consumes
-    // beats (into /dev/null) so an in-flight burst always retires
+    // beats (into /dev/null) so an in-flight burst always retires.  The
+    // scaled expander holds one src fragment, so it only accepts the next
+    // when the current one is fully expanded (!sb_have_q).
     assign rd_dr = (state_q == XRun || state_q == XAbort) &&
-                   (fifo_space || discard);
+                   (sblit_q ? (!sb_have_q || discard)
+                            : (fifo_space || discard));
     assign wr_dv    = fn_q != '0;
     assign wr_data  = ff_q[frd_q];
     assign fifo_pop = wr_dv && wr_dr;
@@ -839,6 +879,10 @@ module g6lc_apu_xfer
         rw_i_q     <= '0;
         rg_n_q     <= '0;
         blit_q     <= 1'b0;
+        sblit_q    <= 1'b0;
+        sb_have_q  <= 1'b0;
+        sb_k_q     <= '0;
+        sb_ntex_q  <= '0;
         rg_ret_q   <= XIdle;
         ri_q       <= '0;
         im_acc_q   <= '0;
@@ -923,6 +967,7 @@ module g6lc_apu_xfer
           XIdle: begin
             xf_fault_q <= 1'b0;
             blit_q     <= 1'b0;
+            sblit_q    <= 1'b0;
             if (work_valid_i && work_ready_o) begin
               xf_q   <= xf_i;
               fill_q <= work_i.rec.imm[0];
@@ -1270,13 +1315,41 @@ module g6lc_apu_xfer
                          (crem >= 32'd8 ? 32'd8 : {29'h0, crem[2:0]});
             end
 
+            // ---- scaled-blit fragment expander -------------------------
+            // latch one src fragment when the expander is idle, then emit
+            // its texels as {texel,texel} dst fragments over later cycles.
+            // A fragment must start and end on a texel boundary (bpp==4);
+            // anything else is refused rather than writing misaligned data.
+            if (sblit_q && rd_dv && rd_dr && !discard) begin
+              if ((rd_data.offset & 32'h3) != 32'h0 ||
+                  ($countones(rd_data.keep) & 32'h3) != 32'h0 ||
+                  $countones(rd_data.keep) < 32'd4) begin
+                xf_fault_q <= 1'b1;
+              end else begin
+                sb_frag_q <= rd_data;
+                sb_ntex_q <= 2'($countones(rd_data.keep) >> 2);
+                sb_k_q    <= '0;
+                sb_have_q <= 1'b1;
+              end
+            end
+            if (sblit_q && sb_go && !discard) begin
+              // a dst fragment was pushed this cycle: consume the texel
+              if (sb_k_q + 2'd1 >= sb_ntex_q)
+                sb_have_q <= 1'b0;
+              else
+                sb_k_q    <= sb_k_q + 2'd1;
+            end
+
             // chunk done when both legs completed and the FIFO drained;
             // on fault the halted leg never drains — stranded fragments
             // and a pending update word are discarded instead of blocking
             if (rd_settled && wr_settled && !fifo_push &&
+                (!sblit_q || !sb_have_q) &&
                 (fn_q == '0 || xf_fault_q) && (!up_v_q || xf_fault_q)) begin
               if (xf_fault_q) begin
                 state_q <= XDone;
+              end else if (sblit_q) begin
+                state_q <= XSbNxt;           // dst row done
               end else if (is_copy && coff_q + 64'(csz_q) < sz_q) begin
                 // next chunk of the same region
                 coff_q    <= coff_q + 64'(csz_q);
@@ -1362,7 +1435,8 @@ module g6lc_apu_xfer
           // extent 14..16}.  Only an unscaled, unflipped region is a copy
           // (filter irrelevant); scaled/flipped/empty is refused unwritten.
           XBlitCvt: begin
-            automatic logic [31:0] ex, ey, ez;
+            automatic logic [31:0] ex, ey, ez, dex, dey, dez;
+            automatic logic        s_ok;
             // pragma translate_off
 `ifndef SYNTHESIS
             if ($test$plusargs("dbg_blit")) begin
@@ -1372,10 +1446,70 @@ module g6lc_apu_xfer
             end
 `endif
             // pragma translate_on
-            ex = rg_q[7] - rg_q[4];
-            ey = rg_q[8] - rg_q[5];
-            ez = rg_q[9] - rg_q[6];
-            if ($signed(rg_q[7]) <= $signed(rg_q[4]) ||
+            ex  = rg_q[7]  - rg_q[4];
+            ey  = rg_q[8]  - rg_q[5];
+            ez  = rg_q[9]  - rg_q[6];
+            dex = rg_q[17] - rg_q[14];
+            dey = rg_q[18] - rg_q[15];
+            dez = rg_q[19] - rg_q[16];
+            // T1 scaled NEAREST: exact-2x upscale on both axes, one
+            // colour R8G8B8A8-class region (bpp==4) with zero offsets,
+            // mip0 and a single layer — the only shape CTS emits
+            // (BLIT_SCALE_20).  Everything else keeps the 1:1 rewrite or
+            // faults; sblit_q gates the whole dedicated path below.
+            s_ok = xf_q.regions == 16'd1 &&
+                   dex == ex + ex && dey == ey + ey &&
+                   ez == 32'd1 && dez == 32'd1 &&
+                   rg_q[4] == 32'h0 && rg_q[5] == 32'h0 &&
+                   rg_q[6] == 32'h0 &&
+                   rg_q[14] == 32'h0 && rg_q[15] == 32'h0 &&
+                   rg_q[16] == 32'h0 &&
+                   rg_q[1] == 32'h0 && rg_q[11] == 32'h0 &&
+                   rg_q[2] == 32'h0 && rg_q[3] == 32'd1 &&
+                   rg_q[12] == 32'h0 && rg_q[13] == 32'd1 &&
+                   rg_q[0] == 32'd1 && rg_q[10] == 32'd1 &&
+                   cbpp == 32'd4 && ex >= 32'd1 && ey >= 32'd1 &&
+                   32'(APU_VN_IMG_BPP[xf_q.img1.fmt[3:0]]) == 32'd4 &&
+                   xf_q.img0.fmt == xf_q.img1.fmt &&
+                   ex  <= 32'(f_mdim(xf_q.img0.w, 5'd0)) &&
+                   ey  <= 32'(f_mdim(xf_q.img0.h, 5'd0)) &&
+                   dex <= 32'(f_mdim(xf_q.img1.w, 5'd0)) &&
+                   dey <= 32'(f_mdim(xf_q.img1.h, 5'd0)) &&
+                   ex * 32'd4 <= 32'(ChunkMax) &&
+                   dex * 32'd4 <= 32'(ChunkMax);
+            if (s_ok) begin
+              if (!pass_b_q) begin
+                // validation sweep: geometry is clean; hand off to the
+                // execute sweep exactly like XImgChkN — re-read region 0
+                // so pass B re-derives the same s_ok and arms the path
+                pass_b_q  <= 1'b1;
+                ri_q      <= '0;
+                rw_i_q    <= '0;
+                c_mip_q   <= '0;
+                pay_adr_q <= xf_q.pay_base;
+                rg_ret_q  <= XBlitCvt;
+                state_q   <= XImgRd;
+              end else begin
+                // execute sweep: arm the row-expansion path; op stays
+                // I2I so the read/write aperture maps and is_rd/is_img
+                // plumbing hold, and sblit_q diverts execution away from
+                // the 1:1 microprogram
+                sblit_q     <= 1'b1;
+                sb_srclen_q <= ex  * 32'd4;
+                sb_dstlen_q <= dex * 32'd4;
+                sb_drows_q  <= dey;
+                sb_spit_q   <= f_mpitch(xf_q.img0.w, xf_q.img0.fmt, 5'd0);
+                sb_dpit_q   <= f_mpitch(xf_q.img1.w, xf_q.img1.fmt, 5'd0);
+                sb_srow_q   <= '0;
+                sb_drow_q   <= '0;
+                sb_yy_q     <= '0;
+                sb_have_q   <= 1'b0;
+                sb_k_q      <= '0;
+                sb_ntex_q   <= '0;
+                xf_q.op     <= APU_XFER_OP_I2I;
+                state_q     <= XSbRow;
+              end
+            end else if ($signed(rg_q[7]) <= $signed(rg_q[4]) ||
                 $signed(rg_q[8]) <= $signed(rg_q[5]) ||
                 $signed(rg_q[9]) <= $signed(rg_q[6]) ||
                 rg_q[17] - rg_q[14] != ex ||
@@ -1820,6 +1954,48 @@ module g6lc_apu_xfer
                 rw_i_q   <= '0;
                 rg_ret_q <= XImgGo;
                 state_q  <= XImgRd;
+              end
+            end
+          end
+
+          // ---- scaled NEAREST blit (exact-2x, bpp==4, zero offsets) ----
+          // arm one dst row: re-read src row (yy>>1) and expand each src
+          // texel into a {texel,texel} dst fragment.  Row bases are
+          // image-internal offsets (the DMA map adds img{i}.base).
+          XSbRow: begin
+            so_q      <= {32'h0, sb_srow_q};
+            do_q      <= {32'h0, sb_drow_q};
+            coff_q    <= '0;
+            csz_q     <= sb_dstlen_q;
+            csent_q   <= '0;
+            rd_iss_q  <= 1'b0; rd_done_q <= 1'b0;
+            wr_iss_q  <= 1'b0; wr_done_q <= 1'b0;
+            fn_q      <= '0; fwr_q <= '0; frd_q <= '0;
+            sb_have_q <= 1'b0;
+            sb_k_q    <= '0;
+            sb_ntex_q <= '0;
+            state_q   <= XReq;
+          end
+
+          // dst row done: advance the dst row every row and the src row
+          // every second dst row (src_row = yy>>1 changes after an odd
+          // yy).  A >u32 row address faults rather than wrapping.
+          XSbNxt: begin
+            automatic logic [64:0] s_n, d_n;
+            if (sb_yy_q + 32'd1 >= sb_drows_q) begin
+              state_q <= XDone;              // single layer: record done
+            end else begin
+              d_n = {1'b0, sb_drow_q} + 65'(sb_dpit_q);
+              s_n = sb_yy_q[0] ? ({1'b0, sb_srow_q} + 65'(sb_spit_q))
+                               : {1'b0, sb_srow_q};
+              if (d_n[64:32] != 33'h0 || s_n[64:32] != 33'h0) begin
+                xf_fault_q <= 1'b1;
+                state_q    <= XDone;
+              end else begin
+                sb_drow_q <= d_n[31:0];
+                if (sb_yy_q[0]) sb_srow_q <= s_n[31:0];
+                sb_yy_q   <= sb_yy_q + 32'd1;
+                state_q   <= XSbRow;
               end
             end
           end

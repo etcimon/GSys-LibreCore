@@ -828,6 +828,9 @@ module g6lc_apu_shwave
       else if (o == 12)                 f_opid = oq[4 + k];
       else if (o == 228)                // AtomicStore: ptr,scope,sem,val
         f_opid = (k == 0) ? oq[0] : oq[3];
+      else if (o == 230)                // CAS: ptr,scope,sem,eq,uneq,Val,Cmp
+        f_opid = (k == 0) ? oq[2]       // Value/Comparator sit one slot
+               : (k == 1) ? oq[6] : oq[7]; // later than the simple atomics
       else if (o >= 227 && o <= 242)    // atomic: ptr, scope, sem,
         f_opid = (k == 0) ? oq[2]       // value[, cmp]
                : (k == 1) ? oq[5] : oq[6];
@@ -1102,21 +1105,21 @@ module g6lc_apu_shwave
       end
     endfunction
     // border colour — the sampler record carries the raw VkBorderColor
-    // enum (0..5), so decode it directly: FLOAT_TRANSPARENT_BLACK(0) and
-    // INT_TRANSPARENT_BLACK(3) -> transparent; FLOAT_OPAQUE_BLACK(1) and
-    // INT_OPAQUE_BLACK(4) -> opaque black (RGB 0, A max); FLOAT_OPAQUE_WHITE(2)
-    // and INT_OPAQUE_WHITE(5) -> opaque white.  FLOAT_* and INT_* share the
-    // same numerals once normalised, so one table serves both on UNORM/float.
+    // enum: FLOAT_TRANSPARENT_BLACK(0), INT_TRANSPARENT_BLACK(1),
+    // FLOAT_OPAQUE_BLACK(2), INT_OPAQUE_BLACK(3), FLOAT_OPAQUE_WHITE(4),
+    // INT_OPAQUE_WHITE(5), UINT_* (6..8, out of the 3-bit field's reach on
+    // the float path).  FLOAT_* and INT_* share the same numerals once
+    // normalised, so one table serves both on UNORM/float.
     function automatic logic [15:0] f_bord16(input logic [2:0] b,
                                              input logic [2:0] c);
-      f_bord16 = (b == 3'd2 || b == 3'd5) ? 16'hFFFF   // opaque white
-               : (b == 3'd1 || b == 3'd4) ? (c == 3 ? 16'hFFFF : 16'h0)
+      f_bord16 = (b == 3'd4 || b == 3'd5) ? 16'hFFFF   // opaque white
+               : (b == 3'd2 || b == 3'd3) ? (c == 3 ? 16'hFFFF : 16'h0)
                : 16'h0;                               // transparent
     endfunction
     function automatic logic [31:0] f_bord32(input logic [2:0] b,
                                              input logic [2:0] c);
-      f_bord32 = (b == 3'd2 || b == 3'd5) ? 32'h3F80_0000
-               : (b == 3'd1 || b == 3'd4) ? (c == 3 ? 32'h3F80_0000
+      f_bord32 = (b == 3'd4 || b == 3'd5) ? 32'h3F80_0000
+               : (b == 3'd2 || b == 3'd3) ? (c == 3 ? 32'h3F80_0000
                                                   : 32'h0)
                : 32'h0;
     endfunction

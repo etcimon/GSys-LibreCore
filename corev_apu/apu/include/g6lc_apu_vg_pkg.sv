@@ -30,7 +30,7 @@ package g6lc_apu_vg_pkg;
   // the vg engines do not depend on g6lc_apu_pkg.
   // G3b-i (§5a "Implementation decisions (2026-10-15)"): the aperture
   // grew 32 -> 128 MiB; the vgpages bitmap manages only the first
-  // APU_VG_MANAGED_BYTES (guest window + 8 MiB ALLOC_PRIV arena) at
+  // APU_VG_MANAGED_BYTES (guest window + ALLOC_PRIV arena) at
   // 4 KiB page density while the upper region is the static
   // objmem/PayMem carve the bitmap never hands out.
   // §5a revision 2026-10-16 (API-X4): the guest window grew
@@ -38,10 +38,17 @@ package g6lc_apu_vg_pkg;
   // devices pin ~57 MiB of MAPPABLE blob extents, which a 24 MiB
   // window could not hold (guest drm_mm ENOSPC before any virtio
   // request).  APU_VG_AP_WORD_W widens with the aperture.
+  // 2026-11-09 (CTS memory.binding): the ALLOC_PRIV arena grew
+  // 8 -> 32 MiB and managed 72 -> 96 MiB — CTS binds 10 device-local
+  // VkDeviceMemory of ~1 MiB+1 each (~10.5 MiB) which an 8 MiB arena
+  // could not hold (VK_ERROR_OUT_OF_DEVICE_MEMORY).  The growth is
+  // taken from the objmem/PayMem static carve's slack (objmem+pay
+  // uses ~21 MiB of the former 56 MiB carve); APU_OBJMEM_OFF moves up
+  // to the new managed boundary and still fits under APU_VG_SHM_BYTES.
   localparam logic [63:0] APU_VG_SHM_BASE  = 64'h8200_0000;
   localparam logic [63:0] APU_VG_SHM_BYTES = 64'h0800_0000;
-  localparam logic [63:0] APU_VG_MANAGED_BYTES = 64'h0480_0000;
-  localparam int unsigned APU_VG_PAGES     = 18432;
+  localparam logic [63:0] APU_VG_MANAGED_BYTES = 64'h0600_0000;
+  localparam int unsigned APU_VG_PAGES     = 24576;
   localparam int unsigned APU_VG_PAGE_BYTES =
       32'(APU_VG_MANAGED_BYTES / APU_VG_PAGES);
   // §12.3 F5: the guest kernel's shm drm_mm owns MAP_BLOB placement

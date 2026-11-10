@@ -474,9 +474,21 @@ def main():
     if set(stages) & {"cpu-origin"}:
         from run_cpu_origin import run as run_cpu_origin
         run_cpu_origin(data, out, stages, manifest, builds, outcomes, verilator, build_model)
-    if set(stages) & {"cpu-debug"}:
+    if set(stages) & {"cpu-debug", "cpu-debug-stq-mutant"}:
         from run_cpu_debug import run as run_cpu_debug
         run_cpu_debug(data, out, stages, manifest, builds, outcomes, verilator, build_model)
+    if set(stages) & {"cpu-debug-trigger"}:
+        from run_cpu_debug_trigger import run as run_cpu_debug_trigger
+        run_cpu_debug_trigger(data, out, stages, manifest, builds, outcomes, verilator, build_model)
+    if set(stages) & {"cpu-debug-return"}:
+        from run_cpu_debug_return import run as run_cpu_debug_return
+        run_cpu_debug_return(data, out, stages, manifest, builds, outcomes, verilator, build_model)
+    if set(stages) & {"cpu-debug-queue"}:
+        from run_cpu_debug_queue import run as run_cpu_debug_queue
+        run_cpu_debug_queue(data, out, stages, manifest, builds, outcomes, verilator, build_model)
+    if set(stages) & {"stq-commit-flush"}:
+        from run_stq_commit_flush import run as run_stq_commit_flush
+        run_stq_commit_flush(data, out, stages, manifest, builds, outcomes, verilator, build_model)
     if set(stages) & {"csr-scc"}:
         from run_csr_scc import run as run_csr_scc
         run_csr_scc(data, out, stages, manifest, builds, outcomes, verilator, build_model)

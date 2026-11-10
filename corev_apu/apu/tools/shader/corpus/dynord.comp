@@ -1,0 +1,16 @@
+#version 460
+layout(local_size_x = 4) in;
+// dynord: three STORAGE_BUFFER_DYNAMIC bindings in set 0 plus a static
+// output.  The vector declares the pBindings out of binding-number
+// order ([2,0,1,3]) to exercise dynamic-offset slot ordering: each
+// dynamic binding must consume its own pDynamicOffsets entry in
+// binding-number order.  Ramp-filled buffers make a wrong dyn_off
+// slot read a different element -> detectable in the output.
+layout(set = 0, binding = 0) buffer D0 { int v[]; } d0;
+layout(set = 0, binding = 1) buffer D1 { int v[]; } d1;
+layout(set = 0, binding = 2) buffer D2 { int v[]; } d2;
+layout(set = 0, binding = 3) buffer Out { int o[]; } outb;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    outb.o[i] = d0.v[i] + d1.v[i] + d2.v[i];
+}

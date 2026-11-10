@@ -281,37 +281,71 @@ assign span_bytes = cf_pc_i - cf_target_i;
   assign fill_accept = capturing_q && fill_valid_i && addr_eq(fill_vaddr_i, fill_low_sum) &&
                        (body_len_q < NR_EXT);
 
+  // r115-E115-F3: the next-state bundle was one ~35-statement always_comb;
+  // the timing model prices always_comb program order, so every output paid
+  // for every unrelated statement. Split by write ownership into two
+  // processes that replicate the identical flush/enable skeleton — each
+  // _d still has exactly one driver and per-signal last-writer order is
+  // preserved statement-for-statement.
+
+  // Group A: arm/capture state (capturing, armed, arm epoch, loop bounds)
+  always_comb begin
+    capturing_d  = capturing_q;
+    armed_d      = armed_q;
+    arm_epoch_d  = arm_epoch_q;
+    base_d       = base_q;
+    base_hi_p1_d = base_hi_p1_q;
+    end_d        = end_q;
+
+    if (flush_i) begin
+      capturing_d = 1'b0;
+      armed_d     = 1'b0;
+      arm_epoch_d = '0;
+    end else if (enable_i) begin
+      // ---- Arm: start capture on short back-edge ----
+      if (short_back && !capturing_q) begin
+        capturing_d  = 1'b1;
+        armed_d      = 1'b0;
+        arm_epoch_d  = epoch_i;
+        base_d       = cf_target_i;
+        base_hi_p1_d = cf_target_i[63:LOW_W] + HI_W'(1);
+        end_d        = cf_pc_i;
+      end
+
+      // ---- Capture sequential fill: close clears capture/arm ----
+      if (fill_accept) begin
+        if (fill_vaddr_i == end_q || body_len_q == NR_EXT - (IDX_W+1)'(1)) begin
+          capturing_d = 1'b0;
+          armed_d     = 1'b1;
+        end
+      end
+
+      // ---- Disarm on taken CF leaving the loop region ----
+      if (armed_q && cf_valid_i && cf_taken_i &&
+          !((cf_target_i >= base_q) && (cf_target_i <= end_q))) begin
+        armed_d     = 1'b0;
+        capturing_d = 1'b0;
+      end
+    end
+  end
+
+  // Group B: fill pointer / body length / replay / capture data
   always_comb begin
     data_d       = data_q;
     body_len_d   = body_len_q;
     fill_ptr_d   = fill_ptr_q;
     replay_d     = replay_q;
-    capturing_d  = capturing_q;
-    armed_d      = armed_q;
-    base_d       = base_q;
-    base_hi_p1_d = base_hi_p1_q;
-    end_d        = end_q;
-    arm_epoch_d  = arm_epoch_q;
 
     if (flush_i) begin
-      capturing_d = 1'b0;
-      armed_d     = 1'b0;
       fill_ptr_d  = '0;
       body_len_d  = '0;
       replay_d    = '0;
-      arm_epoch_d = '0;
     end else if (enable_i) begin
       // ---- Arm: start capture on short back-edge ----
       if (short_back && !capturing_q) begin
-        capturing_d = 1'b1;
-        armed_d     = 1'b0;
         fill_ptr_d  = '0;
         body_len_d  = '0;
         replay_d    = '0;
-        arm_epoch_d = epoch_i;
-        base_d      = cf_target_i;
-        base_hi_p1_d = cf_target_i[63:LOW_W] + HI_W'(1);
-        end_d       = cf_pc_i;
       end
 
       // ---- Capture sequential fill (indexed write, single EQ) ----
@@ -321,9 +355,7 @@ assign span_bytes = cf_pc_i - cf_target_i;
         body_len_d = body_len_q + (IDX_W+1)'(1);
         // Close when we filled the back-edge line or the buffer is full
         if (fill_vaddr_i == end_q || body_len_q == NR_EXT - (IDX_W+1)'(1)) begin
-          capturing_d = 1'b0;
-          armed_d     = 1'b1;
-          replay_d    = '0;
+          replay_d = '0;
         end
       end
 
@@ -334,15 +366,7 @@ assign span_bytes = cf_pc_i - cf_target_i;
         else
           replay_d = replay_q + IDX_W'(1);
       end
-
-      // ---- Disarm on taken CF leaving the loop region ----
-      if (armed_q && cf_valid_i && cf_taken_i &&
-          !((cf_target_i >= base_q) && (cf_target_i <= end_q))) begin
-        armed_d     = 1'b0;
-        capturing_d = 1'b0;
-      end
     end
-
   end
 
   // Expected head PC of the NEXT state, derived from the final base_d/

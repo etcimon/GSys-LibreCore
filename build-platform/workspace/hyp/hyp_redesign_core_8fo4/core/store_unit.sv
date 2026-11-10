@@ -179,30 +179,82 @@ module store_unit
   // svt-pipe: cycle su q=trans_id_o d=result_o hold=valid_i steps=1
 
   // align data to address e.g.: shift data to be naturally 64
-  function automatic [G6LCCfg.XLEN-1:0] data_align(logic [2:0] addr, logic [63:0] data);
-    // Set addr[2] to 1'b0 when 32bits
-    logic [ 2:0] addr_tmp = {(addr[2] && G6LCCfg.IS_XLEN64), addr[1:0]};
-    logic [63:0] data_tmp = {64{1'b0}};
-    case (addr_tmp)
-      3'b000: data_tmp[G6LCCfg.XLEN-1:0] = {data[G6LCCfg.XLEN-1:0]};
-      3'b001:
-      data_tmp[G6LCCfg.XLEN-1:0] = {data[G6LCCfg.XLEN-9:0], data[G6LCCfg.XLEN-1:G6LCCfg.XLEN-8]};
-      3'b010:
-      data_tmp[G6LCCfg.XLEN-1:0] = {data[G6LCCfg.XLEN-17:0], data[G6LCCfg.XLEN-1:G6LCCfg.XLEN-16]};
-      3'b011:
-      data_tmp[G6LCCfg.XLEN-1:0] = {data[G6LCCfg.XLEN-25:0], data[G6LCCfg.XLEN-1:G6LCCfg.XLEN-24]};
-      default:
-      if (G6LCCfg.IS_XLEN64) begin
-        case (addr_tmp)
-          3'b100:  data_tmp = {data[31:0], data[63:32]};
-          3'b101:  data_tmp = {data[23:0], data[63:24]};
-          3'b110:  data_tmp = {data[15:0], data[63:16]};
-          3'b111:  data_tmp = {data[7:0], data[63:8]};
-          default: data_tmp = {data[63:0]};
-        endcase
-      end
+  // e115-L3: fused endian byte-reverse + address align. The previous cone
+  // was two serial XLEN-wide selects — the op-class endian permute (mbe)
+  // feeding the data_align rotate — measured 58.0 FO4 into st_data_q.
+  // Both stages are pure byte permutations, so they are composed on the
+  // INDEX side instead: output byte j reads data[idx(j)] with
+  // idx(j) = endian_perm(base(j)) and base(j) = j for AMO passthrough,
+  // else (j - vaddr_off) mod nbytes. Permutation math runs on 4-bit
+  // indices; data crosses a single byte mux per slice. Verified
+  // value-identical to endian_data+data_align for every op/offset/data/
+  // mbe/AMO combination (wb classes mirror the former case arms exactly,
+  // including D-variant AMOs and SD falling through to XLEN).
+  function automatic logic [7:0] store_byte_at(
+      input logic [63:0] d, input logic [2:0] k);
+    case (k)
+      3'd0: return d[7:0];
+      3'd1: return d[15:8];
+      3'd2: return d[23:16];
+      3'd3: return d[31:24];
+      3'd4: return d[39:32];
+      3'd5: return d[47:40];
+      3'd6: return d[55:48];
+      default: return d[63:56];
     endcase
-    return data_tmp[G6LCCfg.XLEN-1:0];
+  endfunction
+
+  function automatic logic [2:0] store_idx(
+      input int unsigned j,
+      input logic [2:0] off_m,
+      input logic [3:0] wb,
+      input logic is_amo);
+    logic [3:0] base, idx;
+    base = is_amo ? j[3:0] : ((j[3:0] - off_m) & (G6LCCfg.XLEN/8 - 1));
+    idx = (base < wb) ? (wb - 4'd1 - base) : base;
+    return idx[2:0];
+  endfunction
+
+  function automatic logic [G6LCCfg.XLEN-1:0] store_data_fused(
+      input logic [G6LCCfg.XLEN-1:0] data,
+      input fu_op op,
+      input logic [2:0] off,
+      input logic mbe,
+      input logic is_amo);
+    logic [63:0] d64;
+    logic [3:0] wb;
+    logic [2:0] off_m;
+    if (!mbe) begin
+      wb = 4'd1;
+    end else begin
+      case (op)
+        SB, HSV_B, FSB: wb = 4'd1;
+        SH, HSV_H, FSH: wb = 4'd2;
+        SW, HSV_W, FSW, AMO_LRW, AMO_SCW, AMO_SWAPW, AMO_ADDW, AMO_ANDW,
+        AMO_ORW, AMO_XORW, AMO_MAXW, AMO_MINW, AMO_MAXWU, AMO_MINWU,
+        AMO_CASW, AMO_CASQ: wb = 4'd4;
+        default:         wb = G6LCCfg.XLEN/8;
+      endcase
+    end
+    // align offset within the XLEN working width: addr[2] participates
+    // only for XLEN64, as in the former data_align addr_tmp mask
+    off_m = G6LCCfg.IS_XLEN64 ? off : {1'b0, off[1:0]};
+    d64 = {{64-G6LCCfg.XLEN{1'b0}}, data};
+    if (G6LCCfg.IS_XLEN64) begin
+      return {store_byte_at(d64, store_idx(7, off_m, wb, is_amo)),
+              store_byte_at(d64, store_idx(6, off_m, wb, is_amo)),
+              store_byte_at(d64, store_idx(5, off_m, wb, is_amo)),
+              store_byte_at(d64, store_idx(4, off_m, wb, is_amo)),
+              store_byte_at(d64, store_idx(3, off_m, wb, is_amo)),
+              store_byte_at(d64, store_idx(2, off_m, wb, is_amo)),
+              store_byte_at(d64, store_idx(1, off_m, wb, is_amo)),
+              store_byte_at(d64, store_idx(0, off_m, wb, is_amo))};
+    end else begin
+      return {store_byte_at(d64, store_idx(3, off_m, wb, is_amo)),
+              store_byte_at(d64, store_idx(2, off_m, wb, is_amo)),
+              store_byte_at(d64, store_idx(1, off_m, wb, is_amo)),
+              store_byte_at(d64, store_idx(0, off_m, wb, is_amo))};
+    end
   endfunction
 
   // it doesn't matter what we are writing back as stores don't return anything
@@ -536,38 +588,16 @@ assign result_o = lsu_ctrl_i.data;
   end
 
   // -------------
-  // Byte-Swapper
+  // Byte-Swapper + Re-aligner (fused — see store_data_fused)
   // -------------
   // We need to reverse the byte order of what we intend to Store in Data Memory if we are in Big Endian Mode (mbe defines endianness and comes from CSRregfile).
-  logic [G6LCCfg.XLEN-1:0] endian_data;
-
-  always_comb begin
-    endian_data = lsu_ctrl_i.data;
-    if (mbe_i) begin
-      case (lsu_ctrl_i.operation)
-        SB, HSV_B, FSB: endian_data[7:0] = {lsu_ctrl_i.data[7:0]};
-        SH, HSV_H, FSH: endian_data[15:0] = {<<8{lsu_ctrl_i.data[15:0]}};
-        SW, HSV_W, FSW, AMO_LRW, AMO_SCW, AMO_SWAPW, AMO_ADDW, AMO_ANDW, AMO_ORW, AMO_XORW, AMO_MAXW,
-        AMO_MINW, AMO_MAXWU, AMO_MINWU, AMO_CASW, AMO_CASQ:
-        endian_data[31:0] = {<<8{lsu_ctrl_i.data[31:0]}};
-        default: endian_data[G6LCCfg.XLEN-1:0] = {<<8{lsu_ctrl_i.data[G6LCCfg.XLEN-1:0]}};
-      endcase
-    end
-  end
-
-  // -----------
-  // Re-aligner
-  // -----------
   // re-align the write data to comply with the address offset
-  // r42-T item 23 classify: this cone is the data_align barrel shifter
-  // on endian_data — the exclusive arms (AMO passthrough / align /
-  // CBO_ZERO) are already single-level over the shifter; the shifter is
-  // the floor, not the arm select. Recorded, no RTL spent.
   always_comb begin
     st_be_n = lsu_ctrl_i.be;
     // don't shift the data if we are going to perform an AMO as we still need to operate on this data
-    st_data_n = ((G6LCCfg.RVA && instr_is_amo) ? endian_data[G6LCCfg.XLEN-1:0] :
-                 data_align(lsu_ctrl_i.vaddr[2:0], {{64 - G6LCCfg.XLEN{1'b0}}, endian_data}));
+    st_data_n = store_data_fused(lsu_ctrl_i.data, lsu_ctrl_i.operation,
+                                 lsu_ctrl_i.vaddr[2:0], mbe_i,
+                                 G6LCCfg.RVA && instr_is_amo);
     // Zicboz: force zero data + full BE (drain-time expansion covers the line)
     if (G6LCCfg.RVZiCboz && lsu_ctrl_i.operation == g6lc_core_pkg::CBO_ZERO) begin
       st_data_n = '0;

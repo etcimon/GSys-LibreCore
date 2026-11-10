@@ -1,0 +1,69 @@
+<main id="bios-ui" data-start-menu="main" data-worker-url="WORKER_URL_PLACEHOLDER" data-worker-limit="WORKER_LIMIT_PLACEHOLDER" data-wasm-url="WASM_URL_PLACEHOLDER">
+<h1 id="banner">G6LC-BIOS | GSys LibreCore</h1><div id="bios-mark" src="/ui/g6lc.svg" width="48" height="24" alt="G6LC"></div><p id="profile"></p><nav id="bios-menu" role="tablist" aria-label="Setup menus">
+<span id="menu-title">SETUP</span><a id="tab-main" class="bios-tab bios-tab-active" href="#menu-main" data-menu-link="main" role="tab" tabindex="0" aria-selected="true" on click="{selectTab}">Main</a><a id="tab-cpu" class="bios-tab" href="#menu-cpu" data-menu-link="cpu" role="tab" tabindex="-1" aria-selected="false" on click="{selectTab}">CPU</a><a id="tab-memory" class="bios-tab" href="#menu-memory" data-menu-link="memory" role="tab" tabindex="-1" aria-selected="false" on click="{selectTab}">Memory</a><a id="tab-uncore" class="bios-tab" href="#menu-uncore" data-menu-link="uncore" role="tab" tabindex="-1" aria-selected="false" on click="{selectTab}">Uncore</a><a id="tab-devices" class="bios-tab" href="#menu-devices" data-menu-link="devices" role="tab" tabindex="-1" aria-selected="false" on click="{selectTab}">Devices</a><a id="tab-boot" class="bios-tab" href="#menu-boot" data-menu-link="boot" role="tab" tabindex="-1" aria-selected="false" on click="{selectTab}">Boot</a><a id="tab-settings" class="bios-tab" href="#menu-settings" data-menu-link="settings" role="tab" tabindex="-1" aria-selected="false" on click="{selectTab}">Settings</a>
+</nav><p id="status" role="status">UI-BOOT</p><p id="hw-nat-status" role="status"></p><p id="read-only-note">Read-only BoardSpec setup. F10 refreshes values. Editing and flash are unavailable here.</p><button id="refresh" type="button" on click="{refresh}">Refresh values</button><section id="menu-main" data-menu="main" data-fetch="/bios/menu/main" aria-labelledby="main-title">
+<h2 id="main-title">Main</h2><table>
+<thead>
+<tr>
+<th class="col-head">Setting</th><th class="col-head">Value</th><th class="col-head">Access</th>
+</tr>
+</thead><tbody id="menu-main-body"></tbody>
+</table>
+</section><section id="menu-cpu" data-menu="cpu" data-fetch="/bios/menu/cpu" aria-labelledby="cpu-title" hidden>
+<h2 id="cpu-title" hidden>CPU</h2><table hidden>
+<thead hidden>
+<tr hidden>
+<th class="col-head" hidden>Setting</th><th class="col-head" hidden>Value</th><th class="col-head" hidden>Access</th>
+</tr>
+</thead><tbody id="menu-cpu-body" hidden></tbody>
+</table>
+</section><section id="menu-memory" data-menu="memory" data-fetch="/bios/menu/memory" aria-labelledby="memory-title" hidden>
+<h2 id="memory-title" hidden>Memory</h2><table hidden>
+<thead hidden>
+<tr hidden>
+<th class="col-head" hidden>Setting</th><th class="col-head" hidden>Value</th><th class="col-head" hidden>Access</th>
+</tr>
+</thead><tbody id="menu-memory-body" hidden></tbody>
+</table>
+</section><section id="menu-uncore" data-menu="uncore" data-fetch="/bios/menu/uncore" aria-labelledby="uncore-title" hidden>
+<h2 id="uncore-title" hidden>Uncore</h2><table hidden>
+<thead hidden>
+<tr hidden>
+<th class="col-head" hidden>Setting</th><th class="col-head" hidden>Value</th><th class="col-head" hidden>Access</th>
+</tr>
+</thead><tbody id="menu-uncore-body" hidden></tbody>
+</table>
+</section><section id="menu-devices" data-menu="devices" data-fetch="/bios/menu/devices" aria-labelledby="devices-title" hidden>
+<h2 id="devices-title" hidden>Devices</h2><table hidden>
+<thead hidden>
+<tr hidden>
+<th class="col-head" hidden>Setting</th><th class="col-head" hidden>Value</th><th class="col-head" hidden>Access</th>
+</tr>
+</thead><tbody id="menu-devices-body" hidden></tbody>
+</table>
+</section><section id="menu-boot" data-menu="boot" data-fetch="/bios/menu/boot" aria-labelledby="boot-title" hidden>
+<h2 id="boot-title" hidden>Boot</h2><table hidden>
+<thead hidden>
+<tr hidden>
+<th class="col-head" hidden>Setting</th><th class="col-head" hidden>Value</th><th class="col-head" hidden>Access</th>
+</tr>
+</thead><tbody id="menu-boot-body" hidden></tbody>
+</table>
+</section><section id="menu-settings" data-menu="settings" data-fetch="/bios/menu/settings" aria-labelledby="settings-title" hidden>
+<h2 id="settings-title" hidden>Settings</h2><table hidden>
+<thead hidden>
+<tr hidden>
+<th class="col-head" hidden>Setting</th><th class="col-head" hidden>Value</th><th class="col-head" hidden>Access</th>
+</tr>
+</thead><tbody id="menu-settings-body" hidden></tbody>
+</table>
+</section><div id="g6b-ui-conditional"></div><footer>
+<p id="bios-hint">ArrowLeft/ArrowRight Select tab   Home/End First/Last   F10 Refresh (not save)   Esc stays in setup</p>
+</footer>
+</main>
+<section id="filemgr" data-menu="settings" aria-labelledby="files-title" hidden>
+<h2 id="files-title" hidden>USB Files</h2><pre id="fm-list" data-fetch="/bios/files" hidden>USB-FILES</pre><pre id="usb-ls" data-fetch="/bios/usb/ls" hidden></pre>
+</section>
+<section id="store" data-menu="settings" aria-labelledby="store-title" hidden>
+<h2 id="store-title" hidden>Store</h2><p id="store-status" hidden></p>
+</section>

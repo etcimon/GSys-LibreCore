@@ -1,0 +1,236 @@
+{
+  "originalRunnerStatus": "build_complete",
+  "reviewedGate": "unqualified: MC configuration assertion; lint diagnostics remain",
+  "scalarSmokesPassed": true,
+  "modelSha256": "cb359522a1c20a10aadd8250d102170840c2a98c95726aacedc232b1a65b1b58",
+  "inputManifestSha256": "226f960c85698a40e64cefc8923bb6b00dab59b5f1ff50e25157096da94301fa",
+  "retainedSourceSha256": {
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/csr_regfile.sv": "f19d4504eaa79b8ed5ceb7205f7fbd217e792234c77b046575f244255b37b37a",
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_lsq.sv": "15732c3bcfc794ffe59d017215a49ac1870dfc14b2caff9e749be17571a735ec",
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_lsq_event.sv": "cd69cbb59fe721fe23120ad759d63331d28bde1a63adcb7a8ec55859d21576fd",
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_flu_reserve.sv": "f2e97a5032227a49a9cadf9b57519a9470ed8084718fcc189c3d3a07e6b82c19",
+    "build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/l2_cache/g6lc_l2_mshr.sv": "1d2c5d5cfb3307eeda2d669744fd00f01aa8b94fd6690db99b34ea564adb57e5",
+    "verif/regress/remote/hyp8/Flist.hyp8_mc_sim": "40bc1e29c7d15dec9b759103abd1ae95ddd06146527de03a1638c30b27c78c46"
+  },
+  "lineEndingEquivalent": {
+    "build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_lsq_event.sv": {
+      "current_sha256": "a0ee8c297884987b93250c239c5f11280a09e5662211b44f1b152bf000ea89b9",
+      "tested_sha256": "cd69cbb59fe721fe23120ad759d63331d28bde1a63adcb7a8ec55859d21576fd",
+      "comparison": "lf-normalized bytes"
+    }
+  },
+  "build": {
+    "rc": 0,
+    "modelSha256": "cb359522a1c20a10aadd8250d102170840c2a98c95726aacedc232b1a65b1b58",
+    "runtimeDepFiles": 211,
+    "runtimeDepChecked": true,
+    "warnings": {
+      "%Warning-WIDTHEXPAND": 82,
+      "%Warning-WIDTHCONCAT": 3,
+      "%Warning-WIDTHTRUNC": 17,
+      "%Warning-UNSIGNED": 5,
+      "%Warning-CMPCONST": 7,
+      "%Warning-SYMRSVDWORD": 1,
+      "%Error": 0
+    },
+    "harnessLog": "build-harness.log",
+    "buildLog": "model/build.log"
+  },
+  "lint": {
+    "scalar": {
+      "rc": 0,
+      "warnings": {
+        "%Warning-IMPLICITSTATIC": 4,
+        "%Warning-LITENDIAN": 123,
+        "%Warning-WIDTHEXPAND": 348,
+        "%Warning-WIDTHTRUNC": 89,
+        "%Warning-WIDTHCONCAT": 3,
+        "%Warning-STMTDLY": 5,
+        "%Warning-UNSIGNED": 11,
+        "%Warning-CMPCONST": 10,
+        "%Warning-CASEINCOMPLETE": 9,
+        "%Warning-SYMRSVDWORD": 1,
+        "%Warning-LATCH": 3,
+        "%Warning-COMBDLY": 1,
+        "%Error": 0
+      },
+      "log": "lint-scalar.log",
+      "warningCount": 607,
+      "hardFailureOnReassessment": false
+    },
+    "smt2": {
+      "rc": 0,
+      "warnings": {
+        "%Warning-IMPLICITSTATIC": 4,
+        "%Warning-LITENDIAN": 123,
+        "%Warning-WIDTHEXPAND": 359,
+        "%Warning-WIDTHTRUNC": 99,
+        "%Warning-WIDTHCONCAT": 3,
+        "%Warning-STMTDLY": 5,
+        "%Warning-UNSIGNED": 11,
+        "%Warning-CMPCONST": 10,
+        "%Warning-CASEINCOMPLETE": 9,
+        "%Warning-SYMRSVDWORD": 1,
+        "%Warning-LATCH": 3,
+        "%Warning-COMBDLY": 1,
+        "%Error": 0
+      },
+      "log": "lint-smt2.log",
+      "warningCount": 628,
+      "hardFailureOnReassessment": false
+    },
+    "mc": {
+      "rc": 0,
+      "warnings": {
+        "%Warning-IMPLICITSTATIC": 4,
+        "%Warning-LITENDIAN": 123,
+        "%Warning-WIDTHEXPAND": 399,
+        "%Warning-WIDTHTRUNC": 110,
+        "%Warning-WIDTHCONCAT": 16,
+        "%Warning-SELRANGE": 2,
+        "%Warning-USERERROR": 1,
+        "%Warning-STMTDLY": 5,
+        "%Warning-UNSIGNED": 11,
+        "%Warning-CMPCONST": 10,
+        "%Warning-CASEINCOMPLETE": 9,
+        "%Warning-SYMRSVDWORD": 1,
+        "%Warning-LATCH": 3,
+        "%Warning-COMBDLY": 1,
+        "%Error": 0
+      },
+      "log": "lint-mc.log",
+      "warningCount": 695,
+      "hardFailureOnReassessment": true
+    }
+  },
+  "tests": {
+    "h34_shift_dep": {
+      "rc": 0,
+      "state": "pass",
+      "argv": [
+        "/opt/testharness/runs/hyp8-r98-integration-final2/output/model/Variane_testharness",
+        "+tohost_addr=0x80001000",
+        "+debug_disable",
+        "+max-cycles=400000",
+        "/opt/testharness/runs/hyp8-r98-integration-final2/output/inputs/h34_shift_dep.elf"
+      ],
+      "elfSha256": "285212bab22c6fb8edb1683ff4d18f91e65388520c229944ce76462473a45f07",
+      "cycles": 685,
+      "verdict": [
+        "*** [mc_hub] aw_fire=0 ar_fire=0 aw_hold_other split: wbusy=0 inv_adm=0 mem_nready=0 rr_loss=0"
+      ],
+      "log": "h34_shift_dep.log"
+    },
+    "h33_st_fwd": {
+      "rc": 0,
+      "state": "pass",
+      "argv": [
+        "/opt/testharness/runs/hyp8-r98-integration-final2/output/model/Variane_testharness",
+        "+tohost_addr=0x80001000",
+        "+debug_disable",
+        "+max-cycles=400000",
+        "/opt/testharness/runs/hyp8-r98-integration-final2/output/inputs/h33_st_fwd.elf"
+      ],
+      "elfSha256": "05f7b5c7c9a49e68985f053e2e5864e08a3d1cb80f5a137802be99b196832aff",
+      "cycles": 1011,
+      "verdict": [
+        "*** [mc_hub] aw_fire=0 ar_fire=0 aw_hold_other split: wbusy=0 inv_adm=0 mem_nready=0 rr_loss=0"
+      ],
+      "log": "h33_st_fwd.log"
+    },
+    "hyp8_branch_cancel": {
+      "rc": 0,
+      "state": "pass",
+      "argv": [
+        "/opt/testharness/runs/hyp8-r98-integration-final2/output/model/Variane_testharness",
+        "+tohost_addr=0x80001000",
+        "+debug_disable",
+        "+max-cycles=400000",
+        "/opt/testharness/runs/hyp8-r98-integration-final2/output/inputs/hyp8_branch_cancel.elf"
+      ],
+      "elfSha256": "776c81eb85081b19b9d52cd6a88ffd30d1281d430d8c2c66ec88aa9066911aa6",
+      "cycles": 492,
+      "verdict": [
+        "*** [mc_hub] aw_fire=0 ar_fire=0 aw_hold_other split: wbusy=0 inv_adm=0 mem_nready=0 rr_loss=0"
+      ],
+      "log": "hyp8_branch_cancel.log"
+    },
+    "hyp8_csr_flush_skip": {
+      "rc": 0,
+      "state": "pass",
+      "argv": [
+        "/opt/testharness/runs/hyp8-r98-integration-final2/output/model/Variane_testharness",
+        "+tohost_addr=0x80001000",
+        "+debug_disable",
+        "+max-cycles=400000",
+        "/opt/testharness/runs/hyp8-r98-integration-final2/output/inputs/hyp8_csr_flush_skip.elf"
+      ],
+      "elfSha256": "c0a2cd1393612a3174d1b1e28118b92f2884d7c63f05bdb66869d55344ccbecf",
+      "cycles": 2364,
+      "verdict": [
+        "*** [mc_hub] aw_fire=0 ar_fire=0 aw_hold_other split: wbusy=0 inv_adm=0 mem_nready=0 rr_loss=0"
+      ],
+      "log": "hyp8_csr_flush_skip.log"
+    },
+    "hyp8_amo_store_order": {
+      "rc": 0,
+      "state": "pass",
+      "argv": [
+        "/opt/testharness/runs/hyp8-r98-integration-final2/output/model/Variane_testharness",
+        "+tohost_addr=0x80001000",
+        "+debug_disable",
+        "+max-cycles=400000",
+        "/opt/testharness/runs/hyp8-r98-integration-final2/output/inputs/hyp8_amo_store_order.elf"
+      ],
+      "elfSha256": "3486be93d998c6c59082106212d874d41a72601e98bab210237fb282d4915caf",
+      "cycles": 2199,
+      "verdict": [
+        "*** [mc_hub] aw_fire=0 ar_fire=0 aw_hold_other split: wbusy=0 inv_adm=0 mem_nready=0 rr_loss=0"
+      ],
+      "log": "hyp8_amo_store_order.log"
+    },
+    "hyp8_amo_ready_order": {
+      "rc": 0,
+      "state": "pass",
+      "argv": [
+        "/opt/testharness/runs/hyp8-r98-integration-final2/output/model/Variane_testharness",
+        "+tohost_addr=0x80001000",
+        "+debug_disable",
+        "+max-cycles=400000",
+        "/opt/testharness/runs/hyp8-r98-integration-final2/output/inputs/hyp8_amo_ready_order.elf"
+      ],
+      "elfSha256": "7761cca5447e1e12ab9a6c922063a56da9cda63fdf765bad3987e4e1e492f16b",
+      "cycles": 1231,
+      "verdict": [
+        "*** [mc_hub] aw_fire=0 ar_fire=0 aw_hold_other split: wbusy=0 inv_adm=0 mem_nready=0 rr_loss=0"
+      ],
+      "log": "hyp8_amo_ready_order.log"
+    },
+    "hyp8_f14_store_offset": {
+      "rc": 0,
+      "state": "pass",
+      "argv": [
+        "/opt/testharness/runs/hyp8-r98-integration-final2/output/model/Variane_testharness",
+        "+tohost_addr=0x80001000",
+        "+debug_disable",
+        "+max-cycles=400000",
+        "/opt/testharness/runs/hyp8-r98-integration-final2/output/inputs/hyp8_f14_store_offset.elf"
+      ],
+      "elfSha256": "359270c930ffcafcea7d05864c75e299cdb6fadf90f75adbdd9e928d6d97cc54",
+      "cycles": 671,
+      "verdict": [
+        "*** [mc_hub] aw_fire=0 ar_fire=0 aw_hold_other split: wbusy=0 inv_adm=0 mem_nready=0 rr_loss=0"
+      ],
+      "log": "hyp8_f14_store_offset.log"
+    }
+  },
+  "priorCycleReference": "analysis/r90/remote-gate.md; counts only, not trace equivalence",
+  "currentRunnerSha256": "d6be091f19a87ee6beb281a870b3147c9f14732fd4b01dfc399d386e4d7d6a73",
+  "graderControlsPassed": 5,
+  "priorFocusedAuditSha256": "98ee2d8c4ebb02d063c1ff64c4b226eb3746eef8142359fb13f240d5d21552a2",
+  "rawReceiptSha256": {
+    "hyp8-r98-integration-final2": "ff96b0aed405158a09a3b9539188c4f4e9c2a4ddee04a0695f1dd194b4470686",
+    "hyp8-r98-smokes-final2": "7937405dfca2cfde38f117b591e92974b6fd82ed6fe26593ee23ead2dd86480f"
+  },
+  "limitations": "No clean aggregate, MC validity, complete SMT retirement, Linux/OpenSBI boot, synthesis/STA or eight-FO4 closure claim."
+}
