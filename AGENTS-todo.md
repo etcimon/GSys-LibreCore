@@ -2456,6 +2456,28 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
       `G6LC_CTS_TIMEOUT` default 14400s). If a case STILL hangs with
       no_abort, THEN it's a genuine infinite-loop bug — the no_abort
       run is the decisive slow-vs-hung discriminator.
+      **no_abort RUN (out-noabort-1024, single all_device.1024):**
+      CONFIRMED the watchdog diagnosis — fence-wait iter blew PAST
+      16384 to **22528** then RESET to 1024 (×3): a fence wait
+      completed and the next began, i.e. **fences DO post, just slower
+      than 2^14 polls** — slow-not-hung, exactly the documented Mesa
+      timeout. Raster scan still advancing between `[dbg]` dumps
+      (`cur` (152,138)→(176,168), `st` cycling S_FPS↔S_FS_WAIT). BUT a
+      **`device_faults=1`** surfaced at cyc≈45.3M — decoded via
+      tb sel67/`dbg_faults_o` = cmdexec `i_exec.fault_q` per-context
+      sticky fault regs (`{count[63:48],work_id[47:40],code[39:32],
+      pc[31:16],wave[15:0]}`; code 1=FAULT/2=UNSUPPORTED/3=BUDGET,
+      work_id&0xff 01=VS/02=FS). ONE exec/shader context faulted once —
+      a real shader fault inside the vertex_buffer_stride workload,
+      candidate mechanism for a strand (faulted op may not post its
+      fence even as sibling draws retire). **Instrumentation added:**
+      `bridge_main.cpp` `[dbg]` block now dumps per-context fault words
+      (`[dbg] fctx[i] cnt/wid/code/pc/wave`) when fault_agg>0; rebuilt
+      `obj_venus/apu_bridge` incrementally (bridge_main.o+relink, no
+      re-verilate). Live-query of the RUNNING bridge is impossible
+      (single-client socket, `sock_accept` early-returns on cfd>=0), so
+      fault detail needs the NEXT instrumented run. Verdicts still
+      pending — case is huge (many fence waits); run continues.
     - [ ] `api.descriptor_set.descriptor_set_layout_binding.layout_binding_order`: Fail
       "Verifier failed: 513 == 257, at index 0". The shader read the value of another
       binding: the layout's bindings are created out of numeric order, and a lookup keyed

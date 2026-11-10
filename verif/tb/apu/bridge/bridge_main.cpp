@@ -623,6 +623,22 @@ static void stats() {
       (unsigned)(dbg_read(DBG_BASE + 64 * 8)),
       (unsigned)((ot3 >> 16) & 0xffff), (unsigned)(ot3 & 0xffff),
       (unsigned)((ot3 >> 32) & 0xff), (unsigned long)oid);
+    // §7b exec fault detail: sel67 lo = fault_agg; sel68+i = ctx i
+    // {count[63:48], work_id[47:40], code[39:32], pc[31:16], wave[15:0]}
+    // code: 1=FAULT 2=UNSUPPORTED 3=BUDGET; work_id&0xff: 01=VS 02=FS
+    uint32_t fagg = dbg_read(DBG_BASE + 67 * 8);
+    if (fagg) {
+      for (int i = 0; i < 32; i++) {
+        uint32_t wlo = dbg_read(DBG_BASE + (68 + i) * 8);
+        uint32_t whi = dbg_read(DBG_BASE + (68 + i) * 8 + 4);
+        if (whi || wlo) {
+          fprintf(stderr,
+            "[dbg] fctx[%d] cnt=%u wid=%02x code=%u pc=%04x wave=%04x\n",
+            i, (whi >> 16) & 0xffff, (whi >> 8) & 0xff, whi & 0xff,
+            (wlo >> 16) & 0xffff, wlo & 0xffff);
+        }
+      }
+    }
   }
 }
 
