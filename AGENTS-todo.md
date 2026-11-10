@@ -2540,6 +2540,18 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
       bypasses, draw sees pre-copy data → wrong points; (c) exec
       fault (fctx pending). Raster `g_oob` bounds + `robust_q`
       handling is the last fetch-side check worth a look.
+      **COHERENCE EXONERATED:** `g6lc_apu_apmem` is a stateless AXI
+      bridge — every `mp_req` (dom bit: 1=aperture-rel resource win,
+      0=guest-abs) becomes raw AW/W/AR/R beats, NO caches. Vertex
+      gather and xfer copies share this single coherent path; with
+      `StDrain` retire-ordering, copy→fetch visibility is guaranteed.
+      ⇒ bug is **copy-data correctness** (BUFFER_COPY/I2B region
+      payload) or **fetch-address/bounds** (`vb_base`/`vb_size`/
+      `caddr` units vs `g_oob` zero-fill → all-verts-at-origin), not
+      staleness. Instrumented run cyc54M faults=0 → no exec fault;
+      awaiting verdict. If copy is byte-exact in `tb_g6lc_apu_xfer`,
+      next probe is the `g_oob`/`gbase`/`gsize` aperture-vs-absolute
+      units on the 1024B stride-2 buffer.
     - [ ] `api.descriptor_set.descriptor_set_layout_binding.layout_binding_order`: Fail
       "Verifier failed: 513 == 257, at index 0". The shader read the value of another
       binding: the layout's bindings are created out of numeric order, and a lookup keyed
