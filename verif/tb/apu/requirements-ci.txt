@@ -1,0 +1,7 @@
+# APU CI Python deps (apu-ci suite: Venus golden model + shader generators).
+# numpy is pinned: gen_sfu_tables.py fits the SFU polynomials with
+# numpy.linalg.lstsq, and the committed g6lc_apu_sfu_pkg.sv / sfu_tables.py
+# reproduce bit-exactly with this release (newer numpy/LAPACK builds round
+# differently and the --check reports the tables stale).
+numpy==1.26.4
+Mako==1.4.3

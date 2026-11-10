@@ -411,7 +411,7 @@ jobs:
           python-version: "3.12"
 
       - name: Python deps
-        run: python -m pip install --quiet Mako numpy
+        run: python -m pip install --quiet -r verif/tb/apu/requirements-ci.txt
 
       - if: env.COVERAGE != 'quick'
         uses: ./.github/actions/pinned-verilator

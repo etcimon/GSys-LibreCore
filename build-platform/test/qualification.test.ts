@@ -275,7 +275,9 @@ print(json.dumps({
 }))
 `;
     const made = Bun.spawnSync(["python3", "-c", gen, root]);
-    expect(made.exitCode).toBe(0);
+    if (made.exitCode !== 0) {
+      throw new Error(`python3 exited ${made.exitCode}: ${made.stderr.toString().slice(-2000)}`);
+    }
     const selection = selectQualification(config(), "perf-foundation", "g6lc64_smt2")[0]!;
     const identity = evidenceIdentityFromManifest(root, JSON.parse(made.stdout.toString()), { ...selection, kind: "rtl-core" }, "run-x");
     expect(identity.sourceSha256).toMatch(/^[a-f0-9]{64}$/);
@@ -283,7 +285,8 @@ print(json.dumps({
   } finally {
     rmSync(root, { recursive: true });
   }
-});
+  // A cold python3 launch on a hosted Windows runner can exceed the 5 s default.
+}, 30_000);
 
 test.skipIf(!hasBinary("python3") && !hasBinary("python"))("isolated L2 proxy rejects incomplete snapshots and hashes the exact input set", () => {
   const python = hasBinary("python3") ? "python3" : "python";

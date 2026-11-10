@@ -299,7 +299,7 @@ apu:
   script:
     # `update = none` in .gitmodules: explicit syncs pass --checkout.
     - git submodule update --init --checkout --depth 1 specs/venus-protocol || git submodule update --init --checkout specs/venus-protocol
-    - python3 -m pip install --quiet --break-system-packages Mako numpy
+    - python3 -m pip install --quiet --break-system-packages -r verif/tb/apu/requirements-ci.txt
     - ./build.sh test apu-ci --coverage "$G6LC_CI_COVERAGE" --strict
   artifacts:
     when: always
