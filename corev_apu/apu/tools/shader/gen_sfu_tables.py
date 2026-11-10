@@ -179,6 +179,16 @@ def _texp2(x):
     return math.fsum(terms)
 
 
+def vpow(x, d):
+    """x**d by repeated multiplication: ndarray**int can route through a
+    SIMD pow on some numpy builds; a fixed product order is identical on
+    every host."""
+    p = np.ones_like(x)
+    for _ in range(d):
+        p = p * x
+    return p
+
+
 def cheb_nodes(a, b, n):
     k = np.arange(n)
     x = tfun(_tcos, np.pi * (2 * k + 1) / (2 * n))
@@ -188,7 +198,8 @@ def cheb_nodes(a, b, n):
 def fit_poly(x, y, deg, basis=None):
     """Least-squares poly fit on nodes x; basis(x)->design matrix cols."""
     if basis is None:
-        basis = lambda t: np.vstack([t**i for i in range(deg + 1)]).T
+        basis = lambda t: np.vstack([vpow(t, i)
+                                     for i in range(deg + 1)]).T
     A = basis(np.asarray(x, dtype=np.float64))
     return det_lstsq(A, np.asarray(y, dtype=np.float64))
 
@@ -210,7 +221,7 @@ def fit_all():
     # Slot order for the Horner chain: c6..c0, then 128.0, -150.0.
     x = cheb_nodes(0.0, 1.0, 4096)
     w = 1.0 / tfun(_texp2, x)                  # relative-error weight
-    A = np.vstack([x**i for i in range(7)]).T * w[:, None]
+    A = np.vstack([vpow(x, i) for i in range(7)]).T * w[:, None]
     c = det_lstsq(A, np.ones_like(x))
     # c is the weighted fit of 2^f/2^f = 1 -> coefficients of 2^f
     poly = c                                   # c[i] ~ f^i
@@ -227,7 +238,7 @@ def fit_all():
     t = cheb_nodes(-tmax, tmax, 4096)
     m = (1.0 + t) / (1.0 - t)
     y = tfun(_tlog2, m)
-    A = np.vstack([t**(2 * i + 1) for i in range(5)]).T
+    A = np.vstack([vpow(t, 2 * i + 1) for i in range(5)]).T
     cc = det_lstsq(A, y)
     perr = np.abs(A @ cc - y)
     assert perr.max() < 1e-6, f"log2 fit err {perr.max():g}"
@@ -244,7 +255,7 @@ def fit_all():
     uu = cheb_nodes(0.0, (math.pi / 4) ** 2, 4096)
     rr = np.sqrt(uu)
     ss = (tfun(_tsin, rr) - rr) / (rr * uu)
-    A = np.vstack([uu**i for i in range(5)]).T
+    A = np.vstack([vpow(uu, i) for i in range(5)]).T
     sc = det_lstsq(A, ss)
     ccv = (tfun(_tcos, rr) - 1.0) / uu
     cc2 = det_lstsq(A, ccv)
@@ -272,7 +283,7 @@ def fit_all():
     # atan: odd deg-11 on [0,1]: atan a ~= a1 a + a3 a^3 + ... a11 a^11.
     # Slot order: a11..a1, then pi/2.
     a = cheb_nodes(0.0, 1.0, 4096)
-    A = np.vstack([a**(2 * i + 1) for i in range(6)]).T
+    A = np.vstack([vpow(a, 2 * i + 1) for i in range(6)]).T
     ay = tfun(_tatan, a)
     ac = det_lstsq(A, ay)
     aerr = np.abs(A @ ac - ay).max()
