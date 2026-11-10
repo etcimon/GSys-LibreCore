@@ -40,6 +40,41 @@ TAB = os.path.join(HERE, "sfu_tables.py")
 # ---------------------------------------------------------------------
 
 
+def det_lstsq(A, y):
+    """Deterministic least-squares solve for the small full-rank design
+    matrices below.  np.linalg.lstsq routes through the host LAPACK SVD,
+    whose last-ulp results differ across BLAS builds (Debian-packaged
+    numpy vs the PyPI wheel) and flip f32 coefficient roundings between
+    machines — which is exactly the drift --check exists to flag.  This
+    is modified Gram-Schmidt QR with math.fsum inner products (correctly
+    rounded, order-independent) and only IEEE-double primitive ops, so
+    the emitted tables are byte-reproducible on any host.  One
+    reorthogonalization pass keeps it stable for these Vandermonde
+    systems."""
+    a = np.asarray(A, dtype=np.float64)
+    yv = list(map(float, np.asarray(y, dtype=np.float64).ravel()))
+    n = a.shape[1]
+    q = []                                        # orthonormal columns
+    r = [[0.0] * n for _ in range(n)]
+    for j in range(n):
+        v = list(map(float, a[:, j]))
+        for i in range(len(q)):
+            for _ in range(2):                    # twice = reorthogonalized
+                s = math.fsum(qi * vi for qi, vi in zip(q[i], v))
+                r[i][j] += s
+                v = [vi - s * qi for vi, qi in zip(v, q[i])]
+        nj = math.sqrt(math.fsum(vi * vi for vi in v))
+        q.append([vi / nj for vi in v])
+        r[j][j] = nj
+    qty = [math.fsum(qi * bi for qi, bi in zip(q[i], yv))
+           for i in range(n)]
+    x = [0.0] * n
+    for j in range(n - 1, -1, -1):
+        x[j] = (qty[j] - math.fsum(r[j][k] * x[k]
+                                   for k in range(j + 1, n))) / r[j][j]
+    return np.asarray(x)
+
+
 def cheb_nodes(a, b, n):
     k = np.arange(n)
     x = np.cos(np.pi * (2 * k + 1) / (2 * n))
@@ -51,9 +86,7 @@ def fit_poly(x, y, deg, basis=None):
     if basis is None:
         basis = lambda t: np.vstack([t**i for i in range(deg + 1)]).T
     A = basis(np.asarray(x, dtype=np.float64))
-    coef, *_ = np.linalg.lstsq(A, np.asarray(y, dtype=np.float64),
-                               rcond=None)
-    return coef
+    return det_lstsq(A, np.asarray(y, dtype=np.float64))
 
 
 def f32(x):
@@ -74,7 +107,7 @@ def fit_all():
     x = cheb_nodes(0.0, 1.0, 4096)
     w = 1.0 / np.power(2.0, x)                 # relative-error weight
     A = np.vstack([x**i for i in range(7)]).T * w[:, None]
-    c, *_ = np.linalg.lstsq(A, np.ones_like(x), rcond=None)
+    c = det_lstsq(A, np.ones_like(x))
     # c is the weighted fit of 2^f/2^f = 1 -> coefficients of 2^f
     poly = c                                   # c[i] ~ f^i
     rel = np.abs(np.polyval(poly[::-1], x) / np.power(2.0, x) - 1)
@@ -91,7 +124,7 @@ def fit_all():
     m = (1.0 + t) / (1.0 - t)
     y = np.log2(m)
     A = np.vstack([t**(2 * i + 1) for i in range(5)]).T
-    cc, *_ = np.linalg.lstsq(A, y, rcond=None)
+    cc = det_lstsq(A, y)
     perr = np.abs(A @ cc - y)
     assert perr.max() < 1e-6, f"log2 fit err {perr.max():g}"
     co['log2'] = [bits32(v) for v in cc[::-1]] + [0x3FB504F3]
@@ -108,9 +141,9 @@ def fit_all():
     rr = np.sqrt(uu)
     ss = (np.sin(rr) - rr) / (rr * uu)
     A = np.vstack([uu**i for i in range(5)]).T
-    sc, *_ = np.linalg.lstsq(A, ss, rcond=None)
+    sc = det_lstsq(A, ss)
     ccv = (np.cos(rr) - 1.0) / uu
-    cc2, *_ = np.linalg.lstsq(A, ccv, rcond=None)
+    cc2 = det_lstsq(A, ccv)
     err_s = np.abs(np.polyval(sc[::-1], u) * r**3 + r - np.sin(r)).max()
     err_c = np.abs(np.polyval(cc2[::-1], u) * u + 1 - np.cos(r)).max()
     assert err_s < 1e-7 and err_c < 1e-7, (err_s, err_c)
@@ -134,7 +167,7 @@ def fit_all():
     # Slot order: a11..a1, then pi/2.
     a = cheb_nodes(0.0, 1.0, 4096)
     A = np.vstack([a**(2 * i + 1) for i in range(6)]).T
-    ac, *_ = np.linalg.lstsq(A, np.arctan(a), rcond=None)
+    ac = det_lstsq(A, np.arctan(a))
     aerr = np.abs(A @ ac - np.arctan(a)).max()
     assert aerr < 1e-5, aerr
     co['atan'] = [bits32(v) for v in ac[::-1]] + [bits32(pi2)]
