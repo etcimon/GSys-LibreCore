@@ -75,9 +75,27 @@ def det_lstsq(A, y):
     return np.asarray(x)
 
 
+def tfun(fn, arr):
+    """math.* applied elementwise.  numpy's transcendental ufuncs take
+    different SIMD code paths on different CPUs (AVX-512 dispatch etc.)
+    and can differ by an ulp across builds/hosts; libm results on
+    x86-64 glibc are stable, so fit inputs and reference values stay
+    host-reproducible."""
+    return np.array([fn(float(v)) for v in
+                     np.asarray(arr, dtype=np.float64)],
+                    dtype=np.float64)
+
+
+def tlog(fn):
+    """Log with numpy's non-positive-domain results (0 -> -inf, <0 ->
+    nan) instead of math.*'s ValueError."""
+    return lambda v: fn(v) if v > 0.0 else (
+        float('-inf') if v == 0.0 else float('nan'))
+
+
 def cheb_nodes(a, b, n):
     k = np.arange(n)
-    x = np.cos(np.pi * (2 * k + 1) / (2 * n))
+    x = tfun(math.cos, np.pi * (2 * k + 1) / (2 * n))
     return 0.5 * (a + b) + 0.5 * (b - a) * x
 
 
@@ -105,12 +123,12 @@ def fit_all():
     # exp2: p(f) ~= 2^f on f in [0,1), deg 6, relative error.
     # Slot order for the Horner chain: c6..c0, then 128.0, -150.0.
     x = cheb_nodes(0.0, 1.0, 4096)
-    w = 1.0 / np.power(2.0, x)                 # relative-error weight
+    w = 1.0 / tfun(lambda v: 2.0 ** v, x)      # relative-error weight
     A = np.vstack([x**i for i in range(7)]).T * w[:, None]
     c = det_lstsq(A, np.ones_like(x))
     # c is the weighted fit of 2^f/2^f = 1 -> coefficients of 2^f
     poly = c                                   # c[i] ~ f^i
-    rel = np.abs(np.polyval(poly[::-1], x) / np.power(2.0, x) - 1)
+    rel = np.abs(np.polyval(poly[::-1], x) * w - 1)
     assert rel.max() < 2**-22, f"exp2 fit rel err {rel.max():g}"
     co['exp2'] = [bits32(v) for v in poly[::-1]] + \
         [bits32(128.0), bits32(-150.0)]
@@ -122,7 +140,7 @@ def fit_all():
     tmax = (s2 - 1.0) / (s2 + 1.0)
     t = cheb_nodes(-tmax, tmax, 4096)
     m = (1.0 + t) / (1.0 - t)
-    y = np.log2(m)
+    y = tfun(math.log2, m)
     A = np.vstack([t**(2 * i + 1) for i in range(5)]).T
     cc = det_lstsq(A, y)
     perr = np.abs(A @ cc - y)
@@ -139,13 +157,15 @@ def fit_all():
     ss = (np.sin(r) - r) / (r * u)             # S(u), r!=0 guarded below
     uu = cheb_nodes(0.0, (math.pi / 4) ** 2, 4096)
     rr = np.sqrt(uu)
-    ss = (np.sin(rr) - rr) / (rr * uu)
+    ss = (tfun(math.sin, rr) - rr) / (rr * uu)
     A = np.vstack([uu**i for i in range(5)]).T
     sc = det_lstsq(A, ss)
-    ccv = (np.cos(rr) - 1.0) / uu
+    ccv = (tfun(math.cos, rr) - 1.0) / uu
     cc2 = det_lstsq(A, ccv)
-    err_s = np.abs(np.polyval(sc[::-1], u) * r**3 + r - np.sin(r)).max()
-    err_c = np.abs(np.polyval(cc2[::-1], u) * u + 1 - np.cos(r)).max()
+    err_s = np.abs(np.polyval(sc[::-1], u) * r**3 + r
+                   - tfun(math.sin, r)).max()
+    err_c = np.abs(np.polyval(cc2[::-1], u) * u + 1
+                   - tfun(math.cos, r)).max()
     assert err_s < 1e-7 and err_c < 1e-7, (err_s, err_c)
 
     # Cody-Waite C1+C2+C3 = pi/2, each with the low mantissa bits
@@ -167,8 +187,9 @@ def fit_all():
     # Slot order: a11..a1, then pi/2.
     a = cheb_nodes(0.0, 1.0, 4096)
     A = np.vstack([a**(2 * i + 1) for i in range(6)]).T
-    ac = det_lstsq(A, np.arctan(a))
-    aerr = np.abs(A @ ac - np.arctan(a)).max()
+    ay = tfun(math.atan, a)
+    ac = det_lstsq(A, ay)
+    aerr = np.abs(A @ ac - ay).max()
     assert aerr < 1e-5, aerr
     co['atan'] = [bits32(v) for v in ac[::-1]] + [bits32(pi2)]
 
@@ -849,7 +870,7 @@ def measure(mod):
     xb = np.float32(x).view(np.uint32)
     xf = xb.astype(np.uint32).view(np.float32).astype(np.float64)
     r = run_op(mod, 29, [xb])
-    u, _, _ = ulp_err(r, np.power(2.0, xf))
+    u, _, _ = ulp_err(r, tfun(lambda v: 2.0 ** v, xf))
     bnd = 3.0 + 2.0 * np.abs(xf)
     bad = u > bnd
     assert not bad.any(), f"exp2 over budget: {u[bad].max():g} ulp"
@@ -859,7 +880,7 @@ def measure(mod):
     xeb = np.float32(xe).view(np.uint32)
     xef = xeb.astype(np.uint32).view(np.float32).astype(np.float64)
     r = run_op(mod, 27, [xeb])
-    u, _, _ = ulp_err(r, np.exp(xef))
+    u, _, _ = ulp_err(r, tfun(math.exp, xef))
     bnd = 3.0 + 2.0 * np.abs(xef)
     bad = u > bnd
     assert not bad.any(), f"exp over budget: {u[bad].max():g}"
@@ -867,12 +888,12 @@ def measure(mod):
 
     # log2: 3 ULP outside [0.5,2]; abs < 2^-21 inside
     xl = np.concatenate([
-        np.logspace(-45, 38, N, dtype=np.float64),    # incl denormals
-        np.linspace(0.45, 2.05, N)])
+        tfun(lambda v: 10.0 ** v, np.linspace(-45.0, 38.0, N)),
+        np.linspace(0.45, 2.05, N)])                # incl denormals
     xb = np.float32(np.abs(xl)).view(np.uint32)
     xa32 = xb.astype(np.uint32).view(np.float32).astype(np.float64)
     r = run_op(mod, 30, [xb])
-    ref = np.log2(xa32)
+    ref = tfun(tlog(math.log2), xa32)
     u, ad, rf = ulp_err(r, ref)
     inside = (xa32 >= 0.5) & (xa32 <= 2.0)
     bad_o = (~inside) & (u > 3.0)
@@ -881,7 +902,7 @@ def measure(mod):
     assert not bad_i.any(), f"log2 abs {ad[bad_i].max():g}"
     bounds['log2'] = max(u[~inside].max(), 0.0)
     rl = run_op(mod, 28, [xb])
-    refl = np.log(xa32)
+    refl = tfun(tlog(math.log), xa32)
     u, ad, _ = ulp_err(rl, refl)
     bad = (~inside) & (u > 3.0)
     badi = inside & (ad > 2**-21)
@@ -892,13 +913,13 @@ def measure(mod):
     xs = np.linspace(-math.pi, math.pi, N)
     xb = np.float32(xs).view(np.uint32)
     xsf = xb.astype(np.uint32).view(np.float32).astype(np.float64)
-    for xn, refn, nm in ((13, np.sin, 'sin'), (14, np.cos, 'cos')):
+    for xn, refn, nm in ((13, math.sin, 'sin'), (14, math.cos, 'cos')):
         r = run_op(mod, xn, [xb])
-        _, ad, _ = ulp_err(r, refn(xsf))
+        _, ad, _ = ulp_err(r, tfun(refn, xsf))
         assert ad.max() <= 2**-11, f"{nm} abs {ad.max():g}"
         bounds[nm] = ad.max()
     r = run_op(mod, 15, [xb])
-    u, ad, _ = ulp_err(r, np.tan(xsf))
+    u, ad, _ = ulp_err(r, tfun(math.tan, xsf))
     bounds['tan'] = u.max()
 
     # atan / atan2: 4096 ULP
@@ -906,7 +927,7 @@ def measure(mod):
     xb = np.float32(xa).view(np.uint32)
     xaf = xb.astype(np.uint32).view(np.float32).astype(np.float64)
     r = run_op(mod, 18, [xb])
-    u, _, _ = ulp_err(r, np.arctan(xaf))
+    u, _, _ = ulp_err(r, tfun(math.atan, xaf))
     assert u.max() <= 4096, f"atan {u.max():g}"
     bounds['atan'] = u.max()
 
@@ -914,10 +935,10 @@ def measure(mod):
     ya = np.float32(rng.uniform(-100, 100, N)).view(np.uint32)
     xaa = np.float32(rng.uniform(-100, 100, N)).view(np.uint32)
     r = run_op(mod, 25, [ya, xaa])
-    ref = np.arctan2(ya.astype(np.uint32).view(np.float32)
-                     .astype(np.float64),
-                     xaa.astype(np.uint32).view(np.float32)
-                     .astype(np.float64))
+    ref = np.array([math.atan2(float(y), float(x)) for y, x in zip(
+        ya.astype(np.uint32).view(np.float32).astype(np.float64),
+        xaa.astype(np.uint32).view(np.float32).astype(np.float64))],
+        dtype=np.float64)
     u, _, _ = ulp_err(r, ref)
     assert u.max() <= 4096, f"atan2 {u.max():g}"
     bounds['atan2'] = u.max()
@@ -926,26 +947,26 @@ def measure(mod):
     xp = np.float32(rng.uniform(0.001, 1e4, N)).view(np.uint32)
     yp = np.float32(rng.uniform(-32, 32, N)).view(np.uint32)
     r = run_op(mod, 26, [xp, yp])
-    ref = np.power(xp.astype(np.uint32).view(np.float32)
-                   .astype(np.float64),
-                   yp.astype(np.uint32).view(np.float32)
-                   .astype(np.float64))
+    ref = np.array([float(b) ** float(e) for b, e in zip(
+        xp.astype(np.uint32).view(np.float32).astype(np.float64),
+        yp.astype(np.uint32).view(np.float32).astype(np.float64))],
+        dtype=np.float64)
     u, _, _ = ulp_err(r, ref)
     bounds['pow'] = u.max()
 
     # asin/acos/hyperbolics: record
     xi = np.float32(np.linspace(-1.0, 1.0, N)).view(np.uint32)
     for xn, refn, nm, lo, hi in (
-            (16, np.arcsin, 'asin', -1, 1), (17, np.arccos, 'acos', -1, 1),
-            (22, np.arcsinh, 'asinh', -100, 100),
-            (23, np.arccosh, 'acosh', 1, 100),
-            (24, np.arctanh, 'atanh', -0.9999, 0.9999),
-            (19, np.sinh, 'sinh', -10, 10), (20, np.cosh, 'cosh', -10, 10),
-            (21, np.tanh, 'tanh', -10, 10)):
+            (16, math.asin, 'asin', -1, 1), (17, math.acos, 'acos', -1, 1),
+            (22, math.asinh, 'asinh', -100, 100),
+            (23, math.acosh, 'acosh', 1, 100),
+            (24, math.atanh, 'atanh', -0.9999, 0.9999),
+            (19, math.sinh, 'sinh', -10, 10), (20, math.cosh, 'cosh', -10, 10),
+            (21, math.tanh, 'tanh', -10, 10)):
         xw = np.float32(np.linspace(lo, hi, N)).view(np.uint32) \
             if nm not in ('asin', 'acos') else xi
         r = run_op(mod, xn, [xw])
-        ref = refn(xw.astype(np.uint32).view(np.float32)
+        ref = tfun(refn, xw.astype(np.uint32).view(np.float32)
                    .astype(np.float64))
         u, _, _ = ulp_err(r, ref)
         bounds[nm] = u.max()
