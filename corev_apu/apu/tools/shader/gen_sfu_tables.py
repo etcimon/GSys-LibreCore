@@ -1111,10 +1111,24 @@ def main():
     tab = build_tables_src(co, bounds)
     pkg = build_pkg_src(co, bounds)
     if '--check' in sys.argv:
-        drift = [p for p, t in ((TAB, tab), (PKG, pkg))
-                 if not os.path.exists(p) or open(p).read() != t]
+        drift = False
+        for p, t in ((TAB, tab), (PKG, pkg)):
+            if not os.path.exists(p):
+                print('FAIL missing generated file:', p)
+                drift = True
+                continue
+            old = open(p).read()
+            if old != t:
+                import difflib
+                d = list(difflib.unified_diff(
+                    old.splitlines(), t.splitlines(),
+                    fromfile=p, tofile='regenerated', lineterm=''))
+                print('FAIL sfu table stale:', p)
+                print('\n'.join(d[:80]))
+                if len(d) > 80:
+                    print(f'  ... ({len(d) - 80} more diff lines)')
+                drift = True
         if drift:
-            print('FAIL sfu tables stale:', *drift)
             sys.exit(1)
         print('PASS g6lc_apu_sfu_pkg.sv + sfu_tables.py: fresh')
         return
