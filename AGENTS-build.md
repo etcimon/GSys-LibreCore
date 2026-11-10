@@ -446,7 +446,29 @@ the package's own green gate through `./build.sh` where a surface exists:
 | `bios` | Rust 1.85.0; `g6b.py spec-sync` (kernel-spec + botan vectors) | `g6b check --rust-only` (browser-ui bun lane needs the libwasm/svelte-d submodules + LDC, so it stays local) |
 | `qemu` | Rust 1.85.0 | `g6q doctor`, `g6q check` |
 | `ai-tensor` | Rust 1.85.0; `pytest numpy` | `tensor doctor`, `tensor test`, `pytest ai-tensor/python/tests` |
+| `apu` | submodule `specs/venus-protocol` (`--checkout`, it is `update = none`); `pip install Mako`; pinned Verilator (shared action) unless `quick` | `test apu-ci --coverage <level> --strict` |
+| `storamic` | pinned Verilator (shared action) unless `quick` | `test storamic-ci --coverage <level> --strict` |
 | `smoke` | `setup --install --allow-system-install` (Verilator + Spike + RISC-V GCC) | `test --group smoke` — **workflow_dispatch only** (`smoke: true`) |
+
+### Coverage levels (`apu`, `storamic`)
+
+`test --coverage quick|standard|full` (default `tests.coverage`, `quick`) exports `G6LC_COVERAGE` to
+every suite; coverage-aware suites (`TestSuite.coverageTools`) widen with it and the per-level tools
+join the preflight. `--strict` turns a preflight skip into exit 4 (incomplete), so a lane that lost
+its Verilator can never pass green. Push/PR runs use `standard`; `workflow_dispatch` (`coverage`
+input) and GitLab web/scheduled pipelines (`G6LC_CI_COVERAGE`) pick any level.
+
+| Level | `apu-ci` (`verif/tb/apu/run-apu-ci.sh`) | `storamic-ci` (`verif/tb/storamic/run_ci.py`) |
+|---|---|---|
+| `quick` | `gen_dmprog`/`gen_sfu_tables --check`; `verif/tb/apu` unittests (33); Venus golden-model unittests in `corev_apu/apu/tools` (~890, ~90 s) | host unittests minus the four slow collector/remote modules (12 modules, ~15 s) |
+| `standard` | + RTL unit cohort on Verilator (`APU_CI_STANDARD_SUITES`) | + config-bench lint; protocol / config / region / map benches with negative oracles and illegal-config fatals (same commands and verdict markers as `run_leaf.py`; builds run in parallel) |
+| `full` | + every remaining `unit`-stage bench (`APU_CI_FULL_SUITES`) | + every stick / slot / width profile, config lint across every target package, the slow unittests |
+
+A PASS covers the selected tier only. It is not Vulkan conformance, media/CXL qualification or leaf
+evidence: the strict, identity-checked runs stay `apu-remote-leaf` / `storamic-remote-leaf` through
+the remote gateway. **Growing coverage:** a new APU unit bench (`run-apu-<x>.sh`) joins
+`APU_CI_FULL_SUITES` (and `APU_CI_STANDARD_SUITES` when it builds in about a minute); a new Storamic
+bench joins `benches()` in `run_ci.py` with its pass marker and, when it has one, its negative oracle.
 
 Design rules the workflow follows:
 
@@ -456,6 +478,9 @@ Design rules the workflow follows:
   (`vendor/ara/upstream`, `g6lc_qemu/linux-dist/*` — ~2.6 GB, 21 nested submodules, ~4 of the
   ~6 minutes) are `update = none` in `.gitmodules`, so recursive inits skip them and the explicit
   syncs (`vendor sync`, `linux-dist/init-submodules.sh`) pass `--checkout` (see `AGENTS-vendor.md` §4.1).
+- **One pinned-Verilator recipe for every lane** — `.github/actions/pinned-verilator` (GitHub) and
+  the `.pinned-verilator` template (GitLab) restore/build/verify/select the prefix for `rtl-lint`,
+  `apu` and `storamic` under one cache key.
 - **The lint gate's Verilator is the pinned v5.008 with the repo's custom fixes** (the overlay sets
   `toolchain.verilatorFlavour: "pinned"`; the simulation build of record is the g6lc fork, see
   "Verilator of record" above). Ubuntu's `verilator`
@@ -473,8 +498,11 @@ Design rules the workflow follows:
 - **`G6LC_NO_TOOL_PROMPT=1`** so `test` never waits on the "install missing tools?" prompt.
 - Heavy upstream regressions (`openhw-cva6-ci-tier1/2.yml`) are `workflow_dispatch` only; docs are
   built and published by `deploy-docs.yml`.
-- **GitLab mirror** (`https://gitlab.com/etcimon/GSys-LibreCore`): the repo-root `.gitlab-ci.yml`
-  is the same six lanes for gitlab.com shared runners (2 vCPU; GitLab `cache:` for the Verilator
+- **GitLab mirrors** (`https://gitlab.com/librecore1/GSys-LibreCore`, the group project on the
+  Ultimate trial, created by push-to-create; and `https://gitlab.com/etcimon/GSys-LibreCore`): the
+  repo-root `.gitlab-ci.yml` is the same eight lanes for gitlab.com shared runners. Pushing needs only
+  the Git Credential Manager OAuth token (`read_repository`/`write_repository`); project settings and
+  pipeline status via the API need a token with `api` scope (2 vCPU; GitLab `cache:` for the Verilator
   prefix, `sv-timing/.tools` + `target`, and the Rust `target/` dirs; `GIT_SUBMODULE_PATHS` per lane;
   pipelines on the default branch, MRs, web and schedules, `interruptible`). The upstream
   OpenHW/Thales pipeline — a private `$CI_PROJECT_NAMESPACE/setup-ci` include and VCS/Questa/Vivado

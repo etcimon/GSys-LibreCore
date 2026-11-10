@@ -18,7 +18,7 @@ import { pathToFileURL } from "node:url";
 import { deepMerge } from "../util/object.ts";
 import { storamicConfigIssues } from "../tooling/storamic.ts";
 import { DEFAULT_CONFIG } from "./defaults.ts";
-import { EVIDENCE_KINDS, type BuildConfigInput, type ResolvedBuildConfig, type QualificationRequirement, type TestSuite } from "./schema.ts";
+import { COVERAGE_LEVELS, EVIDENCE_KINDS, type BuildConfigInput, type ResolvedBuildConfig, type QualificationRequirement, type TestSuite } from "./schema.ts";
 
 export function qualificationIssues(
   profiles: ResolvedBuildConfig["verify"]["qualifications"],
@@ -159,6 +159,16 @@ export function validateConfig(config: ResolvedBuildConfig): void {
   }
   if (tests.parallelism < 1) {
     issues.push("tests.parallelism must be >= 1.");
+  }
+  if (!(COVERAGE_LEVELS as string[]).includes(tests.coverage)) {
+    issues.push(`tests.coverage '${tests.coverage}' must be one of ${COVERAGE_LEVELS.join(", ")}.`);
+  }
+  for (const suite of tests.suites) {
+    for (const level of Object.keys(suite.coverageTools ?? {})) {
+      if (!(COVERAGE_LEVELS as string[]).includes(level)) {
+        issues.push(`tests.suites '${suite.id}' coverageTools level '${level}' is not a coverage level.`);
+      }
+    }
   }
 
   // Vendor catalog: ids and checkout paths must be unique, and every entry

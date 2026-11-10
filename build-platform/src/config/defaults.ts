@@ -205,6 +205,35 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         optional: true,
         execution: "host",
       },
+      // --- coverage-aware subproject gates (G6LC_COVERAGE quick|standard|full)
+      {
+        id: "apu-ci",
+        description:
+          "APU/Venus CI gate: quick = generator checks + verif/tb/apu + Venus model unittests; standard adds a bounded RTL unit-sim cohort; full runs every unit-stage bench. Not Vulkan conformance.",
+        script: "verif/tb/apu/run-apu-ci.sh",
+        group: "directed",
+        target: "g6lc64_stream8",
+        dvSimulators: "none",
+        tools: [],
+        coverageTools: { standard: ["verilator"] },
+        openSource: true,
+        optional: true,
+        execution: "host",
+      },
+      {
+        id: "storamic-ci",
+        description:
+          "Storamic CI gate: quick = host unittests; standard adds Verilator lint + protocol/config/region benches with negative oracles; full adds every stick/slot profile and the slow unittests. Not media or CXL qualification.",
+        script: "verif/tb/storamic/run-storamic-ci.sh",
+        group: "directed",
+        target: "g6lc64_smt2",
+        dvSimulators: "none",
+        tools: [],
+        coverageTools: { standard: ["verilator"] },
+        openSource: true,
+        optional: true,
+        execution: "host",
+      },
       {
         id: "apu-remote-leaf",
         description:
@@ -1322,6 +1351,7 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       },
     ],
     defaultSuites: ["smoke-cv64a6"],
+    coverage: "quick",
     parallelism: 1,
     seed: 1,
     uvmVerbosity: "UVM_NONE",

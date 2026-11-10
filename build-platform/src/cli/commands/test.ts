@@ -13,10 +13,11 @@ import {
   runSuites,
   selectSuites,
   suitesInGroup,
+  suiteTools,
   TEST_GROUPS,
 } from "../../tests/runner.ts";
 import type { PlatformContext } from "../../context.ts";
-import type { TestSuite } from "../../config/schema.ts";
+import { COVERAGE_LEVELS, type CoverageLevel, type TestSuite } from "../../config/schema.ts";
 import {
   applyFromTimingFlags,
   formatTimingsDashboardLines,
@@ -62,7 +63,7 @@ export const testCommand: Command = {
   name: "test",
   summary: "Run LibreCore regression suite(s) discovered from verif/regress.",
   usage:
-    "bun run src/cli/index.ts test [<id...>] [--suite a,b] [--group <g>] [--ai] [--ai-remote] [--ai-qemu] [--channels N] [--ai-dram 0|1] [--from-timing DIR] [--all] [--open-source] [--list] [--use-emit] [--yes] [--dry-run]",
+    "bun run src/cli/index.ts test [<id...>] [--suite a,b] [--group <g>] [--coverage quick|standard|full] [--strict] [--ai] [--ai-remote] [--ai-qemu] [--channels N] [--ai-dram 0|1] [--from-timing DIR] [--all] [--open-source] [--list] [--use-emit] [--yes] [--dry-run]",
   details:
     "Selection (first match wins):\n" +
     "  <id...> / --suite a,b   explicit suite ids\n" +
@@ -77,6 +78,11 @@ export const testCommand: Command = {
     "(not failed), so a broad run validates cleanly on a partially-provisioned\n" +
     "host — unless you accept an interactive install prompt (or pass --yes).\n" +
     "`--list` shows every suite with its runnable status.\n" +
+    "\n" +
+    `--coverage <level>   ${COVERAGE_LEVELS.join("|")} (default tests.coverage), exported as\n` +
+    "                     G6LC_COVERAGE. Coverage-aware suites (apu-ci, storamic-ci)\n" +
+    "                     widen with it; per-level coverageTools join the preflight.\n" +
+    "--strict             a skipped suite is an incomplete gate (exit 4), not a pass.\n" +
     "\n" +
     "SI knobs (export AI_ISLAND_DRAM_* / S4_FLAVOUR for regress scripts):\n" +
     "  --channels 1|2|4|8      DramChannels stripe (x4 = class-1 LiteDRAM N=4)\n" +
@@ -102,6 +108,7 @@ export const testCommand: Command = {
     "bun run src/cli/index.ts test --group arch",
     "bun run src/cli/index.ts test --open-source --dry-run",
     "bun run src/cli/index.ts test --all --include-optional",
+    "bun run src/cli/index.ts test apu-ci storamic-ci --coverage standard",
     "bun run src/cli/index.ts test sv-timing-smoke --from-timing workspace/build/sv-timing/verif-tests/smoke",
   ],
   needsContext: true,
@@ -109,6 +116,14 @@ export const testCommand: Command = {
     const ctx = requireContext(args);
     validateStoramicFlags(ctx.config.soc, args.flags);
     const { logger, config } = ctx;
+    const coverage = flagString(args.flags, "coverage");
+    if (args.flags.coverage !== undefined) {
+      if (!coverage || !(COVERAGE_LEVELS as string[]).includes(coverage)) {
+        logger.error(`--coverage must be one of ${COVERAGE_LEVELS.join(", ")}.`);
+        return 2;
+      }
+      config.tests.coverage = coverage as CoverageLevel;
+    }
 
     if (flagBool(args.flags, "list")) {
       printList(ctx);
@@ -181,12 +196,12 @@ export const testCommand: Command = {
     // Offer install when selected suites need managed tools that are missing.
     if (!ctx.dryRun) {
       const needed = new Set<ManagedTool>();
-      for (const s of suites) for (const t of s.tools) needed.add(t);
+      for (const s of suites) for (const t of suiteTools(s, config.tests.coverage)) needed.add(t);
       // Heavy directed suites often list tools:[] but still need Verilator at runtime.
       if (
         suites.some(
           (s) =>
-            s.group === "directed" ||
+            (s.group === "directed" && !s.coverageTools) ||
             s.id.includes("ooo") ||
             s.id.includes("l3") ||
             isAiSuiteId(s.id),
@@ -255,6 +270,11 @@ export const testCommand: Command = {
     logger.info(
       `selected: ${results.length}, skipped: ${skipped.length}, failures: ${failures.length}`,
     );
-    return failures.length > 0 ? 1 : 0;
+    if (failures.length > 0) return 1;
+    if (flagBool(args.flags, "strict") && skipped.length > 0) {
+      for (const s of skipped) logger.error(`--strict: '${s.id}' did not run (${s.reason ?? "skipped"})`);
+      return 4;
+    }
+    return 0;
   },
 };

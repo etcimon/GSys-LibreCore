@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: MIT
 #
 # GitLab mirror of the fast GitHub gate (.github/workflows/ci.yml), for
-# https://gitlab.com/etcimon/GSys-LibreCore on gitlab.com shared runners.
+# https://gitlab.com/librecore1/GSys-LibreCore (and etcimon/GSys-LibreCore)
+# on gitlab.com shared runners.
 #
 # Same lanes, same entry points (each package's own green gate through
 # ./build.sh), same provisioning rules: no recursive submodule checkout, the
@@ -44,6 +45,9 @@ variables:
   FF_USE_FASTZIP: "true"
   CACHE_COMPRESSION_LEVEL: fast
   DEBIAN_FRONTEND: noninteractive
+  G6LC_CI_COVERAGE:
+    value: "standard"
+    description: "apu / storamic coverage level: quick | standard | full"
 
 default:
   interruptible: true
@@ -111,46 +115,59 @@ platform:
       grep -q 'cva6-fo4-retune-proposal' "$lab/retune-proposal.json"
       head -n 40 "$lab/lab-report.md"
 
-# ---------------------------------------------------------------------------
-rtl-lint:
+# Pinned v5.008 + verif/regress/verilator-*.patch in the managed prefix the
+# build platform expects, shared by rtl-lint / apu / storamic. The cache key
+# covers the recipe and the custom patch, so editing a fix rebuilds the tool.
+# The lanes stay on the pinned upstream flavour: the default flavour is the
+# g6lc fork (tools/verilator gitlink), which these lanes do not check out.
+.pinned-verilator:
   image: ubuntu:24.04
-  timeout: 2h
   variables:
-    GIT_SUBMODULE_STRATEGY: recursive
-    GIT_SUBMODULE_PATHS: core/cvfpu core/cache_subsystem/hpdcache
     # Deps are installed below; the recipe must not try apt itself.
     VERILATOR_SKIP_DEPS: "1"
-  # The managed prefix the build platform expects. The key covers the recipe
-  # and the custom patches, so editing a fix rebuilds the tool.
+    VERILATOR_FLAVOUR: pinned
   cache:
-    key:
-      files:
-        - build-platform/scripts/install-verilator.sh
-        - verif/regress/verilator-v5.patch
-      prefix: verilator-v5.008
-    paths:
-      - build-platform/workspace/tooling/verilator-v5.008
-    policy: pull-push
+    - key:
+        files:
+          - build-platform/scripts/install-verilator.sh
+          - verif/regress/verilator-v5.patch
+        prefix: verilator-v5.008
+      paths:
+        - build-platform/workspace/tooling/verilator-v5.008
+      policy: pull-push
   before_script:
     - apt-get update -qq
-    - apt-get install -y -qq --no-install-recommends git ca-certificates curl unzip python3 perl make g++ autoconf bison flex help2man libfl-dev libfl2 zlib1g-dev > /dev/null
+    - apt-get install -y -qq --no-install-recommends git ca-certificates curl unzip python3 python3-pip perl make g++ autoconf bison flex help2man libfl-dev libfl2 zlib1g-dev > /dev/null
     - *bun-bootstrap
-  script:
     # One recipe, shared with every host: clones the pinned tag, applies every
     # verif/regress/verilator-*.patch strictly, skips Verilator's own `make
     # test`, verifies the installed headers carry each patched line. On a
     # cache hit it re-verifies and reports "already installed (patched ...)".
+    - |
+      cat > build-platform/.config.local.ts <<'EOF'
+      export default { toolchain: { verilatorFlavour: "pinned" } };
+      EOF
     - ./build.sh tools install verilator
     - |
       prefix="$PWD/build-platform/workspace/tooling/verilator-v5.008"
       "$prefix/bin/verilator_bin" --version
       "$prefix/bin/verilator_bin" --version | grep -q '(mod)'
       grep -q 'WData\* data() { return (WData\*)&m_storage\[0\]; }' "$prefix/share/verilator/include/verilated_types.h"
+      export PATH="$prefix/bin:$PATH"
     - |
       cat > build-platform/.config.local.ts <<'EOF'
-      // CI overlay: lint/elab tools come from the managed pinned Verilator prefix.
-      export default { verify: { suite: { root: "verilator-v5.008", version: "v5.008" } } };
+      // CI overlay: lint/elab/sim tools come from the managed pinned Verilator prefix.
+      export default { toolchain: { verilatorFlavour: "pinned" }, verify: { suite: { root: "verilator-v5.008", version: "v5.008" } } };
       EOF
+
+# ---------------------------------------------------------------------------
+rtl-lint:
+  extends: .pinned-verilator
+  timeout: 2h
+  variables:
+    GIT_SUBMODULE_STRATEGY: recursive
+    GIT_SUBMODULE_PATHS: core/cvfpu core/cache_subsystem/hpdcache
+  script:
     - ./build.sh diag status
     # core = ISA red lines + firmware-accommodation scan + cv64a6_imafdc_sv39 /
     # cv32a65x lint + formal-package presence; the ids add the LibreCore packages.
@@ -269,3 +286,34 @@ ai-tensor:
     # cargo tests + golden-check + queue-soak via monorepo-soak/run-ai-tensor.sh
     - ./build.sh tensor test
     - cd ai-tensor && PYTHONPATH=python python3 -m pytest -q -p no:cacheprovider python/tests
+
+# ---------------------------------------------------------------------------
+# Coverage-aware subproject gates (build-platform suites apu-ci /
+# storamic-ci). G6LC_CI_COVERAGE (quick|standard|full) is a pipeline
+# variable: set it on a web/scheduled pipeline to widen or narrow the run.
+# quick is host-only; standard adds Verilator lint + bounded RTL benches;
+# full runs every locally runnable bench.
+apu:
+  extends: .pinned-verilator
+  timeout: 1h
+  script:
+    # `update = none` in .gitmodules: explicit syncs pass --checkout.
+    - git submodule update --init --checkout --depth 1 specs/venus-protocol || git submodule update --init --checkout specs/venus-protocol
+    - python3 -m pip install --quiet --break-system-packages Mako
+    - ./build.sh test apu-ci --coverage "$G6LC_CI_COVERAGE" --strict
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - build-platform/workspace/build/apu-ci
+
+storamic:
+  extends: .pinned-verilator
+  timeout: 1h
+  script:
+    - ./build.sh test storamic-ci --coverage "$G6LC_CI_COVERAGE" --strict
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - build-platform/workspace/build/storamic-ci/**/*.log

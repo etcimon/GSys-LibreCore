@@ -1,5 +1,31 @@
 # AGENTS workflow todo / pending-log
 
+## CI gate: green lanes + APU / Storamic coverage lanes (2026-11-10)
+
+- [x] GitHub `ci` green on all lanes for the first time in this history (run
+  42832877106): platform (hpdcache submodule for remote-verify planning),
+  sv-timing (transform tests compile; delay-v51 loop-carried liveness; stale
+  fixtures), bios (matched browser-ui/out artifacts; the stale checkpoint
+  build had 283 jcode funcs > 256 guest JIT bound), qemu (rustfmt).
+- [x] GitLab: `gitlab.com/librecore1/GSys-LibreCore` created by push-to-create
+  (GCM OAuth token = read/write_repository only; API/pipeline status needs an
+  `api`-scoped token). `.gitlab-ci.yml` rtl-lint now installs the pinned
+  flavour (it built the unchecked-out g6lc fork before) via `.pinned-verilator`.
+- [x] Coverage-aware suites `apu-ci` / `storamic-ci` + `test --coverage
+  quick|standard|full` + `--strict`; CI lanes `apu` / `storamic` at
+  `standard` (AGENTS-build.md § Coverage levels).
+- [x] Arising issue: `ue_sm5_session.exp` and `ue_sm5_reply.{hex,exp}` were
+  stale vs the golden model after ab0349843 (one reply field 0x00800000 ->
+  0x02000000); regenerated with `vn_golden.py --session ue_sm5_session 1` /
+  `--reply-vectors ue_sm5_reply 1`. vnfront (all arms) and vnrep pass on the
+  pinned v5.008. Regenerating needs the uapi `virtio_gpu.h` from
+  `g6lc_qemu/linux-dist/ubuntu/kernel` (not in CI; vectors stay committed).
+- [ ] `shwave` RTL bench needs a writable `~/.cache/librecore` (simulator PGO
+  receipt cache); blocked under WSL here, expected fine on CI runners. Watch
+  the `full` dispatch run.
+- [ ] Venus native-bridge tests (`test_vn_native_bridge`) wait 3 s for CLI
+  readiness; flaked once under heavy host load. Raise the bound if CI flakes.
+
 ## Storamic current correctness review
 
 - [x] Reassess non-hyp8 source against `completion-plan.md`; distinguish the

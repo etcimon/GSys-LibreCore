@@ -243,6 +243,17 @@ change needed. Preflight (`tools` / `requiresSubmodule` / `requiresUvm`) decides
 whether the suite runs or is skipped-with-reason, so it self-integrates into
 `--all` / `--open-source` runs and `test --list`.
 
+**Coverage-aware suites.** `tests.coverage` (`quick|standard|full`, default `quick`;
+`test --coverage <level>` overrides) is exported to every suite as `G6LC_COVERAGE`. A suite whose
+script widens with the level declares the extra managed tools per level in
+`coverageTools` (cumulative: `full` also needs the `standard` tools); `suiteTools()` feeds both the
+preflight and the install offer, and such suites are exempt from the "directed suites need Verilator
++ GCC" heuristic. `test --strict` makes a skipped suite exit 4 (incomplete) instead of 0 — CI uses
+it. The shipped coverage-aware suites are `apu-ci` (`verif/tb/apu/run-apu-ci.sh`) and
+`storamic-ci` (`verif/tb/storamic/run_ci.py`), both `optional` + `execution: "host"`; the level
+table and how to grow their cohorts is in `AGENTS-build.md` § Coverage levels. Unit tests:
+`test/coverage.test.ts`.
+
 ### 4.5 Add a vendored uncore controller / PHY
 1. Add a `VendorControllerSpec` entry to `defaults.ts` `vendor.controllers` (or
    `.config.ts`) with: `id`, `description`, `domain`, `kind`, `mechanism`,

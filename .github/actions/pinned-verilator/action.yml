@@ -1,0 +1,72 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+#
+# pinned-verilator -- provision the build platform's managed pinned Verilator
+# (v5.008 + verif/regress/verilator-*.patch) into
+# build-platform/workspace/tooling/verilator-v5.008, and point the platform at
+# it through the gitignored overlay build-platform/.config.local.ts.
+#
+# One recipe for every lane that needs Verilator (rtl-lint, apu, storamic):
+# `tools install verilator` clones the pinned tag, applies every patch
+# strictly, and verifies the installed headers. The cache key covers the
+# recipe and every patch. restore/save are split so a ten-minute build is
+# kept even when a later step of the job fails. Requires Bun on PATH.
+name: pinned-verilator
+description: Restore or build the managed pinned Verilator and select it.
+runs:
+  using: composite
+  steps:
+    - name: Restore pinned Verilator
+      id: cache
+      uses: actions/cache/restore@v4
+      with:
+        path: build-platform/workspace/tooling/verilator-v5.008
+        key: verilator-v5.008-${{ runner.os }}-${{ hashFiles('build-platform/scripts/install-verilator.sh', 'build-platform/src/tooling/recipes.ts', 'verif/regress/verilator-*.patch') }}
+
+    - name: Build prerequisites (cache miss)
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends autoconf bison flex help2man libfl-dev libfl2 zlib1g-dev
+
+    # The default flavour is the g6lc fork (tools/verilator gitlink, the
+    # simulation build of record); CI stays on the pinned upstream flavour.
+    - name: tools install verilator (pinned + patched)
+      shell: bash
+      env:
+        VERILATOR_SKIP_DEPS: "1"
+        VERILATOR_FLAVOUR: pinned
+      run: |
+        cat > build-platform/.config.local.ts <<'CFG'
+        export default { toolchain: { verilatorFlavour: "pinned" } };
+        CFG
+        ./build.sh tools install verilator
+
+    - name: Save pinned Verilator
+      if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: build-platform/workspace/tooling/verilator-v5.008
+        key: ${{ steps.cache.outputs.cache-primary-key }}
+
+    # Independent proof that the installed tool carries the fixes: `(mod)`
+    # marks a tree built with local modifications, and the VlUnpacked::data()
+    # cast from verilator-v5.patch must be in the installed runtime header.
+    - name: Verify custom fixes in the installed Verilator
+      shell: bash
+      run: |
+        set -euo pipefail
+        prefix="$PWD/build-platform/workspace/tooling/verilator-v5.008"
+        "$prefix/bin/verilator_bin" --version
+        "$prefix/bin/verilator_bin" --version | grep -q '(mod)'
+        grep -q 'WData\* data() { return (WData\*)&m_storage\[0\]; }' "$prefix/share/verilator/include/verilated_types.h"
+        echo "$prefix/bin" >> "$GITHUB_PATH"
+
+    - name: Select the managed Verilator
+      shell: bash
+      run: |
+        cat > build-platform/.config.local.ts <<'CFG'
+        // CI overlay: lint/elab/sim tools come from the managed pinned Verilator prefix.
+        export default { toolchain: { verilatorFlavour: "pinned" }, verify: { suite: { root: "verilator-v5.008", version: "v5.008" } } };
+        CFG

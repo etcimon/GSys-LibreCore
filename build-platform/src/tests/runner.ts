@@ -19,7 +19,7 @@ import {
   resolveRegressEngine,
   runRegressScript,
 } from "../platform/shell.ts";
-import { EVIDENCE_KINDS, type EvidenceKind, type QualificationRequirement, type ManagedTool, type ResolvedBuildConfig, type TestGroup, type TestSuite } from "../config/schema.ts";
+import { COVERAGE_LEVELS, EVIDENCE_KINDS, type CoverageLevel, type EvidenceKind, type QualificationRequirement, type ManagedTool, type ResolvedBuildConfig, type TestGroup, type TestSuite } from "../config/schema.ts";
 import { qualificationIssues } from "../config/load.ts";
 import { findOssCadVerilatorRoot, isVerilatorInstalled } from "../tooling/recipes.ts";
 import { copyAiEnv } from "../tooling/aiTesting.ts";
@@ -295,6 +295,15 @@ export function submoduleCheckedOut(ctx: PlatformContext, id: string): boolean {
   return existsSync(join(ctx.repoRoot, spec.path, ".git"));
 }
 
+/** Managed tools a suite needs at a coverage level (levels are cumulative). */
+export function suiteTools(suite: TestSuite, level: CoverageLevel): ManagedTool[] {
+  const tools = new Set(suite.tools);
+  for (const l of COVERAGE_LEVELS.slice(0, COVERAGE_LEVELS.indexOf(level) + 1)) {
+    for (const t of suite.coverageTools?.[l] ?? []) tools.add(t);
+  }
+  return [...tools];
+}
+
 /** Decide whether a suite can run on this host, and if not, why. */
 export function preflightSuite(ctx: PlatformContext, suite: TestSuite): SuitePreflight {
   if (!canRunSuites()) {
@@ -314,9 +323,11 @@ export function preflightSuite(ctx: PlatformContext, suite: TestSuite): SuitePre
       };
     }
   }
-  const missing = suite.tools.filter((t) => !hasManagedTool(ctx, t));
+  const level = ctx.config.tests.coverage;
+  const missing = suiteTools(suite, level).filter((t) => !hasManagedTool(ctx, t));
   if (missing.length > 0) {
-    return { runnable: false, reason: `missing tool(s): ${missing.join(", ")} — run 'bun run src/cli/index.ts setup --install'` };
+    const at = suite.coverageTools ? ` at coverage '${level}'` : "";
+    return { runnable: false, reason: `missing tool(s)${at}: ${missing.join(", ")} — run 'bun run src/cli/index.ts setup --install'` };
   }
   if (suite.requiresSubmodule && !submoduleCheckedOut(ctx, suite.requiresSubmodule)) {
     return { runnable: false, reason: `submodule '${suite.requiresSubmodule}' not checked out — run 'bun run src/cli/index.ts setup'` };
@@ -389,6 +400,8 @@ export async function runSuite(
   }
   // Xg6lcai DRAM/channel/flavour knobs (test --ai --channels 4 --ai-dram 1).
   copyAiEnv(extra);
+  // Coverage-aware suites widen with the level (test --coverage <level>).
+  extra.G6LC_COVERAGE = config.tests.coverage;
   const env = childEnv(ctx, extra);
 
   if (options.dryRun) {

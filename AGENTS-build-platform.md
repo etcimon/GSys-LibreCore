@@ -347,7 +347,13 @@ only the submodules it needs and calls `./build.sh` wherever a surface exists.
 | bios | `g6b check --rust-only` + `bios-regress` |
 | qemu | `g6q doctor` · `g6q check` |
 | ai-tensor | `tensor doctor` · `tensor test` + python unit tests |
+| apu | `test apu-ci --coverage <level> --strict` (Venus model + generator checks; RTL unit cohort at `standard`+) |
+| storamic | `test storamic-ci --coverage <level> --strict` (unittests; lint + protocol/config/region/map benches at `standard`+) |
 | smoke | optional heavy Verilator smoke |
+
+`rtl-lint`, `apu` and `storamic` share one pinned-Verilator recipe (`.github/actions/pinned-verilator`
+/ GitLab `.pinned-verilator`). Coverage levels (`quick|standard|full`, `TestSuite.coverageTools`,
+`G6LC_COVERAGE`, `--strict`) and how to grow the bench cohorts: `AGENTS-build.md` § Coverage levels.
 
 ---
 

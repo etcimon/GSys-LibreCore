@@ -14,6 +14,8 @@
 #   bios       g6lc_bios `g6b check --rust-only` (spec-sync, independence, fmt, clippy, cargo test, bios-regress)
 #   qemu       g6lc_qemu `g6q check` (independence, fmt, clippy, cargo test)
 #   ai-tensor  ai-tensor `tensor doctor` + `tensor test` + python unit tests
+#   apu        `test apu-ci --coverage <level>` (Venus model + RTL unit cohort)
+#   storamic   `test storamic-ci --coverage <level>` (unittests + protocol benches)
 #   smoke      (workflow_dispatch only) heavy Verilator+Spike open-source smoke suites
 #
 # The heavy OpenHW regressions stay in openhw-cva6-ci-tier{1,2}.yml (dispatch).
@@ -38,6 +40,11 @@ on:
         description: "Also run the heavy open-source Verilator+Spike smoke suites"
         type: boolean
         default: false
+      coverage:
+        description: "apu / storamic coverage level (push and PR runs use standard)"
+        type: choice
+        options: [quick, standard, full]
+        default: standard
 
 permissions:
   contents: read
@@ -151,71 +158,12 @@ jobs:
         with:
           bun-version: latest
 
-      # The managed prefix the build platform expects (workspace/tooling/verilator-v5.008).
-      # restore/save are split so a ten-minute build is kept even when a later
-      # step of this job fails (actions/cache's post step only saves on success).
-      # The key covers the recipe and every custom patch, so editing a fix
-      # rebuilds the tool.
-      - name: Restore pinned Verilator
-        id: cache-verilator
-        uses: actions/cache/restore@v4
-        with:
-          path: build-platform/workspace/tooling/verilator-v5.008
-          key: verilator-v5.008-${{ runner.os }}-${{ hashFiles('build-platform/scripts/install-verilator.sh', 'build-platform/src/tooling/recipes.ts', 'verif/regress/verilator-*.patch') }}
+      # Pinned v5.008 + verif/regress/verilator-*.patch, cached; shared with
+      # the apu / storamic lanes (.github/actions/pinned-verilator).
+      - uses: ./.github/actions/pinned-verilator
 
-      # One recipe, shared with every host: `tools install verilator` runs
-      # build-platform/scripts/install-verilator.sh, which clones the pinned tag,
-      # applies every verif/regress/verilator-*.patch strictly (a patch that does
-      # not apply is a hard error, never a silent stock build), skips Verilator's
-      # own `make test`, and verifies the installed headers carry each patched
-      # line. On a cache hit the same command re-verifies the restored prefix and
-      # reports "already installed (patched ...)".
-      - name: Build prerequisites (cache miss)
-        if: steps.cache-verilator.outputs.cache-hit != 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends autoconf bison flex help2man libfl-dev libfl2 zlib1g-dev
-
-      # The lint gate stays on the pinned upstream flavour: the default flavour is
-      # the g6lc fork (tools/verilator gitlink, the simulation build of record),
-      # whose commit must be reachable from the submodule or the fork remote.
-      - name: tools install verilator (pinned + patched)
-        env:
-          VERILATOR_SKIP_DEPS: "1"
-          VERILATOR_FLAVOUR: pinned
-        run: |
-          cat > build-platform/.config.local.ts <<'EOF'
-          export default { toolchain: { verilatorFlavour: "pinned" } };
-          EOF
-          ./build.sh tools install verilator
-
-      - name: Save pinned Verilator
-        if: steps.cache-verilator.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: build-platform/workspace/tooling/verilator-v5.008
-          key: ${{ steps.cache-verilator.outputs.cache-primary-key }}
-
-      # Independent proof that the tool the gate will run carries the fixes:
-      # `--version` reports "(mod)" for a tree built with local modifications,
-      # and the VlUnpacked::data() cast from verilator-v5.patch must be in the
-      # installed runtime header.
-      - name: Verify custom fixes in the installed Verilator
-        run: |
-          set -euo pipefail
-          prefix="$PWD/build-platform/workspace/tooling/verilator-v5.008"
-          "$prefix/bin/verilator_bin" --version
-          "$prefix/bin/verilator_bin" --version | grep -q '(mod)'
-          grep -q 'WData\* data() { return (WData\*)&m_storage\[0\]; }' "$prefix/share/verilator/include/verilated_types.h"
-          echo "verilator-v5.patch present in installed headers"
-
-      - name: Point the gate at the managed Verilator
-        run: |
-          cat > build-platform/.config.local.ts <<'EOF'
-          // CI overlay: lint/elab tools come from the managed pinned Verilator prefix.
-          export default { toolchain: { verilatorFlavour: "pinned" }, verify: { suite: { root: "verilator-v5.008", version: "v5.008" } } };
-          EOF
-          ./build.sh diag status
+      - name: Diagnostics status
+        run: ./build.sh diag status
 
       # core = ISA red lines + firmware-accommodation scan + cv64a6_imafdc_sv39 /
       # cv32a65x lint + formal-package presence. The named ids add the LibreCore
@@ -433,6 +381,86 @@ jobs:
         env:
           PYTHONPATH: python
         run: python -m pytest -q -p no:cacheprovider python/tests
+
+  # ---------------------------------------------------------------------------
+  # Coverage-aware subproject gates (build-platform suites apu-ci /
+  # storamic-ci; G6LC_COVERAGE via `test --coverage`). quick is host-only;
+  # standard adds Verilator lint + bounded RTL benches; full runs every
+  # locally runnable bench. Logs land under workspace/build/<suite>/.
+  apu:
+    name: apu (${{ inputs.coverage || 'standard' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      COVERAGE: ${{ inputs.coverage || 'standard' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # `update = none` in .gitmodules: explicit syncs pass --checkout.
+      - name: Venus protocol spec (golden-model tables)
+        run: |
+          git submodule update --init --checkout --depth 1 specs/venus-protocol \
+            || git submodule update --init --checkout specs/venus-protocol
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python deps
+        run: python -m pip install --quiet Mako
+
+      - if: env.COVERAGE != 'quick'
+        uses: ./.github/actions/pinned-verilator
+
+      - name: test apu-ci
+        run: ./build.sh test apu-ci --coverage "$COVERAGE" --strict
+
+      - name: Upload apu-ci logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apu-ci-logs
+          path: build-platform/workspace/build/apu-ci
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  storamic:
+    name: storamic (${{ inputs.coverage || 'standard' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      COVERAGE: ${{ inputs.coverage || 'standard' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - if: env.COVERAGE != 'quick'
+        uses: ./.github/actions/pinned-verilator
+
+      - name: test storamic-ci
+        run: ./build.sh test storamic-ci --coverage "$COVERAGE" --strict
+
+      - name: Upload storamic-ci logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: storamic-ci-logs
+          path: |
+            build-platform/workspace/build/storamic-ci/**/*.log
+          if-no-files-found: ignore
+          retention-days: 7
 
   # ---------------------------------------------------------------------------
   smoke:

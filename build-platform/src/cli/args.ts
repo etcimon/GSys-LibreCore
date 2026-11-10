@@ -22,6 +22,7 @@ const VALUE_FLAGS = new Set([
   "qualification",
   "suite",
   "group",
+  "coverage",
   "log-level",
   "ref",
   // setup / tools install profiles

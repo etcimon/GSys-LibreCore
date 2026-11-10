@@ -418,13 +418,32 @@ export interface TestSuite {
   optional?: boolean;
   execution?: "host" | "remote-proxy";
   args?: string[];
+  /**
+   * Coverage-aware suite: its script reads `G6LC_COVERAGE` and widens what it
+   * runs with the level. Extra managed tools a level needs on top of `tools`
+   * (levels are cumulative: `full` also needs every `standard` tool).
+   */
+  coverageTools?: Partial<Record<CoverageLevel, ManagedTool[]>>;
 }
+
+/**
+ * Coverage depth for coverage-aware suites, exported to every suite as
+ * `G6LC_COVERAGE`. `quick` is host-only (models, unit tests, generator
+ * checks); `standard` adds Verilator lint + a bounded RTL simulation cohort;
+ * `full` runs every locally runnable bench of the subproject.
+ */
+export type CoverageLevel = "quick" | "standard" | "full";
+
+/** Ordered (cumulative) coverage levels. */
+export const COVERAGE_LEVELS: CoverageLevel[] = ["quick", "standard", "full"];
 
 export interface TestsConfig {
   /** Named regression suites the platform knows how to run. */
   suites: TestSuite[];
   /** Suites that make up the default `bun test` / `test` run. */
   defaultSuites: string[];
+  /** Default coverage level (`test --coverage <level>` overrides). */
+  coverage: CoverageLevel;
   /** Parallel suite workers (hardware sims are heavy — keep small). */
   parallelism: number;
   /** Base RNG seed forwarded to constrained-random generation. */
