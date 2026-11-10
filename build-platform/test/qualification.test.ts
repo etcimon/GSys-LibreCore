@@ -6,7 +6,7 @@ import { DEFAULT_CONFIG } from "../src/config/defaults.ts";
 import { validateConfig } from "../src/config/load.ts";
 import { selectQualification, validateSuiteEvidence, evidenceIdentityFromManifest } from "../src/tests/runner.ts";
 import { createHash } from "node:crypto";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs, type FlagValue } from "../src/cli/args.ts";
@@ -97,7 +97,10 @@ test("a skipped stage cannot report a passed gate", () => {
   expect(gateVerdict([step("pass")], { ...opts, qualified: true }).message).toContain("qualified");
 });
 
-test("remote dry runs plan stages without fabricating missing-result failures", async () => {
+// Remote planning walks the real core/Flist.cva6, which includes the
+// hpdcache submodule manifest; a non-recursive checkout cannot plan it.
+const hpdcacheFlist = join(import.meta.dir, "../../core/cache_subsystem/hpdcache/rtl/hpdcache.Flist");
+test.skipIf(!existsSync(hpdcacheFlist))("remote dry runs plan stages without fabricating missing-result failures", async () => {
   const ctx = await createContext({
     cwd: join(import.meta.dir, "../.."), dryRun: true,
     logLevel: "silent", ensureWorkspaceDirs: true,

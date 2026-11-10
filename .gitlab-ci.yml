@@ -79,6 +79,10 @@ default:
 # ---------------------------------------------------------------------------
 platform:
   image: oven/bun:1
+  variables:
+    # Remote verify planning (qualification.test.ts) walks core/Flist.cva6.
+    GIT_SUBMODULE_STRATEGY: recursive
+    GIT_SUBMODULE_PATHS: core/cvfpu core/cache_subsystem/hpdcache
   before_script:
     - apt-get update -qq
     - apt-get install -y -qq --no-install-recommends git python3 ca-certificates > /dev/null

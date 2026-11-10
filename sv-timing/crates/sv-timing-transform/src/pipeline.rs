@@ -4047,27 +4047,29 @@ mod tests {
         assert_eq!(serde_json::to_value(&ctx.design).unwrap(), before);
         assert!(!ctx.pending_ir_dirty);
 
-        // This failure occurs after expansion: a later cut names a block-local.
+        // This failure occurs after expansion: the schedule refuses a
+        // multi-cycle path and the legacy mid-cut fallback finds the
+        // opportunity under budget. (A block-local cut is now dropped per cut,
+        // and the expansion's own spine node names none, so block-locals no
+        // longer refuse this cone.)
         ctx.assume_clk = true;
-        let module = ctx.design.modules.get_mut(&0).unwrap();
-        module.decls.push(sv_timing_core::ir::DeclSite {
-            name: "local_value".into(),
-            type_name: "logic".into(),
-            packed_text: String::new(),
-            unpacked_text: String::new(),
-            loc: loc(),
-            block_local: true,
-            scope: None,
-            loop_var: false,
-        });
-        for id in 1..4 {
-            module.nodes.get_mut(&id).unwrap().lhs = Some("local_value".into());
-        }
+        ctx.design
+            .paths
+            .iter_mut()
+            .find(|p| p.id == opp.path_id)
+            .unwrap()
+            .multi_cycle = true;
+        let opp = Opportunity {
+            estimated_fo4_before: 1.0,
+            ..opp
+        };
         let before = serde_json::to_value(&ctx.design).unwrap();
-        assert!(matches!(
-            prepare_pipeline_cuts(&mut ctx, &opp),
-            Err(TransformError::InvalidOpportunity(_))
-        ));
+        let r = prepare_pipeline_cuts(&mut ctx, &opp);
+        assert!(
+            matches!(r, Err(TransformError::InvalidOpportunity(_))),
+            "{:?}",
+            r.as_ref().err()
+        );
         assert_eq!(serde_json::to_value(&ctx.design).unwrap(), before);
         assert!(!ctx.pending_ir_dirty);
         assert!(ctx.trace.records.is_empty());
@@ -4309,6 +4311,7 @@ mod tests {
                 onehot_facts: Default::default(),
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
+                stage_decls: Default::default(),
                 pipe_pragmas: vec![
                     pragma("require-contract", None, vec![]),
                     pragma("protocol", Some("cb"), vec![("valid", "n1")]),

@@ -70,6 +70,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Remote verify planning (qualification.test.ts) walks core/Flist.cva6.
+      - name: Submodules for core/Flist.cva6
+        run: git submodule update --init --recursive --depth 1 core/cvfpu core/cache_subsystem/hpdcache
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest

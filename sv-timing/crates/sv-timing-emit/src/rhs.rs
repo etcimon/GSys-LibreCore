@@ -4857,7 +4857,7 @@ module wbuf_fixup (
     output logic req_o, miss_req_o
 );
   logic req, t1;
-  assign t1 = 1'b1;
+  assign t1 = !rst_ni;
   assign req = (state_q == 2'd1) && !hit_q && !(|tocheck) && !en_q && !en_q1;
   assign miss_req_o = (|tocheck) && en_q;
   assign req_o = req;
@@ -4938,7 +4938,7 @@ module icache_we (
     output logic we, req
 );
   logic t1;
-  assign t1 = 1'b1;
+  assign t1 = !rst_ni;
   assign we = (cache_wren | inv_en | flush_en);
   assign req = (en_q == 1'b1) && !hit_q && !(|tocheck) && !en_q && !flush_en;
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -5008,7 +5008,7 @@ module wbuf_gen (
     input  logic [1:0] state_q
 );
   logic t1, req;
-  assign t1 = 1'b1;
+  assign t1 = !rst_ni;
   generate
     if (1) begin : gen_fixup_queue
       assign req = (state_q == 2'd1) && !hit_q && !(|tocheck) && !en_q && !en_q1;

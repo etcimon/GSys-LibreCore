@@ -509,6 +509,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         }
     }
 
@@ -577,6 +579,7 @@ mod tests {
                 typedef_texts: Default::default(),
                 config_branch: false,
                 guards: Default::default(),
+                stage_decls: Default::default(),
                 onehot_facts: Default::default(),
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),

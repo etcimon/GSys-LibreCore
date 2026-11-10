@@ -24,6 +24,17 @@
 
 ## Current correctness audit: source origins and validation
 
+### Loop-carried liveness (delay-v51)
+
+Live-node pruning (delay-v48) keeps a node when it is backward-reachable from
+a sink over dependency edges. Reaching definitions only link a read to earlier
+writes of the same procedural block, so a loop-carried update written after
+its reads (`cid = cid + 1` at the bottom of a ring walk) had no live
+successor and was pruned. Inside a procedural `for` span, a later write of a
+key now reaches earlier reads of that key in the same span (the next
+iteration). These back-edges extend liveness only; they never enter
+`dep_pred`, so chain enumeration remains acyclic.
+
 ### Population-count attribution (delay-v50)
 
 Ordinary RHS and guard attribution resolve `$countones` from the argument's

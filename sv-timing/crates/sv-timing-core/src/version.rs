@@ -162,7 +162,11 @@ pub const CORRECTION_VERSION: &str = "correction-v5";
 /// count over its operand bits, using existing adder costs at each level.
 /// Nested intrinsic calls accumulate and parallel arms take their maximum;
 /// unresolved operand widths use the reference width and mark the node.
-pub const MEASUREMENT_VERSION: &str = "delay-v50";
+/// `delay-v51`: live-node pruning follows loop-carried back-edges — inside a
+/// procedural `for`, a write after a read of the same key reaches that read
+/// on the next iteration (`cid = cid + 1` in a ring walk), so the carried
+/// update is not pruned as dead. Liveness only; `dep_pred` stays acyclic.
+pub const MEASUREMENT_VERSION: &str = "delay-v51";
 
 /// Hint for which upstream pin the vendored tree should track (see tools/sv-parser.rev).
 pub const PARSER_PIN_HINT: &str = "v0.13.5";

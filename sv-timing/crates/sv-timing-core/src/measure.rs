@@ -678,7 +678,15 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
     let seq_reads_roots = by_root(&seq_reads);
     let outputs_roots = by_root(&outputs);
 
+    // delay-v51: procedural `for` spans for loop-carried liveness.
+    let loop_spans: Vec<(&str, u32, u32)> = module
+        .gen_loops
+        .iter()
+        .filter(|g| g.procedural)
+        .map(|g| (g.loc.file.as_str(), g.loc.byte_start, g.loc.byte_end))
+        .collect();
     let mut edges: Vec<(NodeId, NodeId)> = Vec::new();
+    let mut loop_back: Vec<(NodeId, NodeId)> = Vec::new();
     let mut reads_reg: Vec<NodeId> = Vec::new();
     let mut sinks: Vec<NodeId> = Vec::new();
     let mut out_sinks: Vec<NodeId> = Vec::new();
@@ -702,6 +710,42 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
             for src in related_defs(r, nid, n.loc.byte_start) {
                 if src != nid && !dead_guard.contains(&src) && !edges.contains(&(src, nid)) {
                     edges.push((src, nid));
+                }
+            }
+            // delay-v51: inside a procedural loop, a later write of the same
+            // block reaches this read on the next iteration (`cid = cid + 1`
+            // feeds `if (cid == b)` / `mask[cid]`). Liveness only: these
+            // back-edges never enter `dep_pred`, so chains stay acyclic.
+            let Some(reader_region) = region_of.get(&nid).copied() else {
+                continue;
+            };
+            if !procedural.contains(&reader_region) {
+                continue;
+            }
+            let pos = n.loc.byte_start;
+            let spans: Vec<(u32, u32)> = loop_spans
+                .iter()
+                .filter(|(f, s, e)| *f == n.loc.file && pos >= *s && pos < *e)
+                .map(|(_, s, e)| (*s, *e))
+                .collect();
+            if spans.is_empty() {
+                continue;
+            }
+            let Some(keys) = crate::ref_order::dep_root(r).and_then(|root| defs_by_root.get(&root))
+            else {
+                continue;
+            };
+            for k in keys.iter().filter(|k| crate::ref_order::dep_related(k, r)) {
+                for &(region, dpos, did) in comb_defs.get(k).into_iter().flatten() {
+                    if region == reader_region
+                        && did != nid
+                        && dpos > pos
+                        && !dead_guard.contains(&did)
+                        && spans.iter().any(|(s, e)| dpos >= *s && dpos < *e)
+                        && !loop_back.contains(&(did, nid))
+                    {
+                        loop_back.push((did, nid));
+                    }
                 }
             }
         }
@@ -730,6 +774,7 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
     }
 
     drop(bindings);
+    drop(loop_spans);
     if let Some(module) = design.modules.get_mut(&mid) {
         for (src, dst) in &edges {
             if let Some(n) = module.nodes.get_mut(src) {
@@ -780,12 +825,16 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
     // so it drops off the `*toout` paths; it stays on `*toreg` paths
     // when it still feeds a register.
     if !design.keep_dead_nodes {
+        let mut live_pred = dep_pred.clone();
+        for (src, dst) in &loop_back {
+            live_pred.entry(*dst).or_default().push(*src);
+        }
         let reach = |seeds: &[NodeId]| -> BTreeSet<NodeId> {
             let mut live = BTreeSet::new();
             let mut stack: Vec<NodeId> = seeds.to_vec();
             while let Some(n) = stack.pop() {
                 if live.insert(n) {
-                    if let Some(ps) = dep_pred.get(&n) {
+                    if let Some(ps) = live_pred.get(&n) {
                         stack.extend(ps);
                     }
                 }

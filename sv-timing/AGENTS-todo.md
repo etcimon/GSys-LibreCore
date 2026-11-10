@@ -3,6 +3,22 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## r99 - Loop-carried liveness + CI test truth (implemented and tested)
+
+- [x] delay-v51: live-node pruning (delay-v48) follows loop-carried
+  back-edges. Inside a procedural `for`, a write after a read of the same
+  key reaches that read on the next iteration; the ring walk's
+  `cid = cid + 1` was pruned as dead and `loop_walks` RingWalk billed 6.0
+  FO4 (under budget, never rewritten). Back-edges feed liveness only;
+  `dep_pred` stays acyclic for `longest_comb_path`.
+- [x] Test fixtures caught up with intentional behavior: `rhs_is_initializer`
+  (63ff80b61) refuses `assign t = 1'b1` anchors, so emit tests anchor on
+  `!rst_ni`; per-cut block-local dropping (63ff80b61) means the post-expansion
+  refusal test now uses multi-cycle schedule refusal + under-budget fallback.
+  `stage_decls` / `stage_start` / `stage_end` added to transform test
+  initializers. `svt.py test` green (first time CI compiles the transform
+  tests since r9x). Package-wide rustfmt drift still open (informational).
+
 ## r98 - Population-count measurement (implemented and tested)
 
 - [x] Verify delay-v50: `$countones` on a known-width operand uses a balanced

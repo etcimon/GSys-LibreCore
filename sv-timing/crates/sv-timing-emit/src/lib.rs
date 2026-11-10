@@ -1857,7 +1857,7 @@ endmodule
   output logic spec_d
 );
   logic t0;
-  assign t0 = 1'b1;
+  assign t0 = !rst_ni;
   assign spec_d = (spec_q && !resolved || |is_branch || |is_return) && !flush_i;
 endmodule
 "#;

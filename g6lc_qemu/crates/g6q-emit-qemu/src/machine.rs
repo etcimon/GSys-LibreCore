@@ -592,15 +592,9 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
     } else {
         "0"
     };
-    body.push_str(
-        "    /* Optional second DRAM bank for -m above the low bank's\n",
-    );
-    body.push_str(
-        "     * usable capacity (-m counts usable bytes; the aperture is\n",
-    );
-    body.push_str(
-        "     * carved out of the low bank but still backed by QEMU RAM). */\n",
-    );
+    body.push_str("    /* Optional second DRAM bank for -m above the low bank's\n");
+    body.push_str("     * usable capacity (-m counts usable bytes; the aperture is\n");
+    body.push_str("     * carved out of the low bank but still backed by QEMU RAM). */\n");
     body.push_str("    {\n");
     body.push_str(&format!(
         "        const uint64_t low_usable = dram_size - {};\n",
@@ -609,16 +603,10 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
     body.push_str("        if (machine->ram_size > low_usable) {\n");
     body.push_str("            MemoryRegion *dram2 = g_new(MemoryRegion, 1);\n");
     body.push_str("            memory_region_init_ram(dram2, NULL, \"g6lc.dram2\",\n");
-    body.push_str(
-        "                                   machine->ram_size - low_usable,\n",
-    );
+    body.push_str("                                   machine->ram_size - low_usable,\n");
     body.push_str("                                   &error_fatal);\n");
-    body.push_str(
-        "            memory_region_add_subregion(system_memory,\n",
-    );
-    body.push_str(
-        "                                        dram2_base, dram2);\n",
-    );
+    body.push_str("            memory_region_add_subregion(system_memory,\n");
+    body.push_str("                                        dram2_base, dram2);\n");
     body.push_str("        }\n");
     body.push_str("    }\n\n");
 
