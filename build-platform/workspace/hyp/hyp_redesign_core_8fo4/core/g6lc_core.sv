@@ -2591,7 +2591,7 @@ assign irq_active = irq_i[smt_active_hart];
     longint unsigned sc_lu_replay, sc_mem_viol;
     // +hang_dump=N state (see below)
     longint unsigned hd_at, hd_last_ack;
-    int unsigned hd_n;
+    int unsigned hd_n, hd_tot;
     function automatic int unsigned sc_class(input g6lc_core_pkg::fu_t fu);
       case (fu)
         g6lc_core_pkg::LOAD: return 0;
@@ -2691,16 +2691,23 @@ assign irq_active = irq_i[smt_active_hart];
         // and their gates, LSQ store entries, LSU bypass/store/load units, STQ),
         // then again every 1000 cycles, three times. For a boot that stops
         // retiring where no probe window is known in advance.
-        if (anyack) hd_last_ack = sc_cyc;
-        if (hd_at != 0 && (sc_cyc - hd_last_ack) >= hd_at && hd_n < 3 &&
+        // Re-arms after every commit so a later stall is dumped too (r121: a
+        // transient stall consumed the one-shot dump and the terminal one at
+        // 441.9M printed nothing); hd_tot bounds the log.
+        if (anyack) begin
+          hd_last_ack = sc_cyc;
+          hd_n = 0;
+        end
+        if (hd_at != 0 && (sc_cyc - hd_last_ack) >= hd_at && hd_n < 3 && hd_tot < 30 &&
             ((sc_cyc - hd_last_ack - hd_at) % 1000) == 0) begin
           hd_n++;
+          hd_tot++;
           hd_print();
         end
       end
     end
     initial begin
-      hd_at = 0; hd_last_ack = 0; hd_n = 0;
+      hd_at = 0; hd_last_ack = 0; hd_n = 0; hd_tot = 0;
       void'($value$plusargs("hang_dump=%d", hd_at));
     end
     function automatic void hd_print();
@@ -2856,8 +2863,8 @@ assign irq_active = irq_i[smt_active_hart];
     if (G6LCCfg.DCacheType == config_pkg::WT) begin : gen_hd_wt
       int unsigned hd_wt_seen = 0;
       always @(posedge clk_i) begin
-        if (hd_wt_seen != hd_n) begin
-          hd_wt_seen = hd_n;
+        if (hd_wt_seen != hd_tot) begin
+          hd_wt_seen = hd_tot;
           $display("[hang] LU req: valid_i=%b tid=%0d vaddr=%h paddr=%h dtlb_hit=%b treq=%b ex=%b cancelled=%b | port data_req=%b gnt=%b tag_valid=%b kill=%b rvalid=%b | wbuf_not_ni=%b po_match=%b st_empty=%b no_st=%b",
                    ex_stage_i.lsu_i.i_load_unit.valid_i, ex_stage_i.lsu_i.i_load_unit.lsu_ctrl_i.trans_id,
                    ex_stage_i.lsu_i.i_load_unit.lsu_ctrl_i.vaddr, ex_stage_i.lsu_i.i_load_unit.paddr_i,
