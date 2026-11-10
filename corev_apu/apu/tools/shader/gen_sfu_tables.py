@@ -76,26 +76,112 @@ def det_lstsq(A, y):
 
 
 def tfun(fn, arr):
-    """math.* applied elementwise.  numpy's transcendental ufuncs take
-    different SIMD code paths on different CPUs (AVX-512 dispatch etc.)
-    and can differ by an ulp across builds/hosts; libm results on
-    x86-64 glibc are stable, so fit inputs and reference values stay
-    host-reproducible."""
+    """fn applied elementwise with a float64 ndarray out."""
     return np.array([fn(float(v)) for v in
                      np.asarray(arr, dtype=np.float64)],
                     dtype=np.float64)
 
 
+# ---------------------------------------------------------------------
+# Deterministic transcendentals for the fit inputs.
+#
+# The Vandermonde fits below are ill-conditioned: a single differing
+# f64 ulp in a design-matrix entry moves the emitted f32 coefficient
+# bits by tens of ulps.  numpy's transcendental ufuncs take different
+# SIMD code paths per CPU, and libm (math.*) results are not guaranteed
+# correctly rounded across glibc builds — both already caused real
+# drift between a maintainer host and a shared CI runner.  These
+# helpers use only +,-,*,/ and math.fsum on IEEE doubles, which every
+# x86-64/ARM64 host evaluates identically, so the emitted tables are
+# byte-reproducible anywhere.  measure() keeps libm references: bounds
+# are max-statistics over 1e6 points and tolerate a last-ulp shift.
+# ---------------------------------------------------------------------
+
+_PI2 = math.pi / 2.0
+
+
+def _tsin(x):
+    """sin on |x| <= pi/2 via alternating Taylor terms + fsum."""
+    x2 = x * x
+    t = x
+    terms = [t]
+    for k in range(1, 20):
+        t *= -x2 / ((2 * k) * (2 * k + 1))
+        terms.append(t)
+    return math.fsum(terms)
+
+
+def _tcos(x):
+    """cos on (0, pi): sin(pi/2 - x); _PI2 is exact, subtraction exact
+    near pi/2 (Sterbenz)."""
+    return _tsin(_PI2 - x)
+
+
+def _tatan(x):
+    """atan on [0,1]: argument halving atan(x) = 2*atan(x/(1+sqrt(1+x^2)))
+    until |x| < ~0.05, then alternating Taylor."""
+    n = 0
+    while x > 0.05:
+        x = x / (1.0 + math.sqrt(1.0 + x * x))
+        n += 1
+    x2 = x * x
+    t = x
+    terms = [t]
+    for k in range(1, 25):
+        t *= x2
+        terms.append(-t / (2 * k + 1) if k & 1 else t / (2 * k + 1))
+    return math.fsum(terms) * (1 << n)
+
+
+def _tatanh(t):
+    """atanh(t) = t + t^3/3 + t^5/5 + ... for |t| < ~0.35."""
+    t2 = t * t
+    u = t
+    terms = [u]
+    for k in range(1, 40):
+        u *= t2
+        terms.append(u / (2 * k + 1))
+    return math.fsum(terms)
+
+
 def tlog(fn):
     """Log with numpy's non-positive-domain results (0 -> -inf, <0 ->
-    nan) instead of math.*'s ValueError."""
+    nan) instead of math.*'s ValueError — used by measure() references
+    whose grids underflow to zero."""
     return lambda v: fn(v) if v > 0.0 else (
         float('-inf') if v == 0.0 else float('nan'))
 
 
+_LN2 = None
+
+
+def _tln2():
+    """ln 2 = 2*atanh(1/3), computed once."""
+    global _LN2
+    if _LN2 is None:
+        _LN2 = 2.0 * _tatanh(1.0 / 3.0)
+    return _LN2
+
+
+def _tlog2(m):
+    """log2(m) = ln(m)/ln(2); ln(m) = 2*atanh((m-1)/(m+1))."""
+    return 2.0 * _tatanh((m - 1.0) / (m + 1.0)) / _tln2()
+
+
+def _texp2(x):
+    """2^x = exp(x*ln2) Taylor, x in [0,1)."""
+    u = x * _tln2()
+    t = u
+    terms = [1.0, t]
+    for k in range(2, 30):
+        t *= u / k
+        terms.append(t)
+    return math.fsum(terms)
+
+
 def cheb_nodes(a, b, n):
     k = np.arange(n)
-    x = tfun(math.cos, np.pi * (2 * k + 1) / (2 * n))
+    x = tfun(_tcos, np.pi * (2 * k + 1) / (2 * n))
     return 0.5 * (a + b) + 0.5 * (b - a) * x
 
 
@@ -123,7 +209,7 @@ def fit_all():
     # exp2: p(f) ~= 2^f on f in [0,1), deg 6, relative error.
     # Slot order for the Horner chain: c6..c0, then 128.0, -150.0.
     x = cheb_nodes(0.0, 1.0, 4096)
-    w = 1.0 / tfun(lambda v: 2.0 ** v, x)      # relative-error weight
+    w = 1.0 / tfun(_texp2, x)                  # relative-error weight
     A = np.vstack([x**i for i in range(7)]).T * w[:, None]
     c = det_lstsq(A, np.ones_like(x))
     # c is the weighted fit of 2^f/2^f = 1 -> coefficients of 2^f
@@ -140,7 +226,7 @@ def fit_all():
     tmax = (s2 - 1.0) / (s2 + 1.0)
     t = cheb_nodes(-tmax, tmax, 4096)
     m = (1.0 + t) / (1.0 - t)
-    y = tfun(math.log2, m)
+    y = tfun(_tlog2, m)
     A = np.vstack([t**(2 * i + 1) for i in range(5)]).T
     cc = det_lstsq(A, y)
     perr = np.abs(A @ cc - y)
@@ -157,15 +243,15 @@ def fit_all():
     ss = (np.sin(r) - r) / (r * u)             # S(u), r!=0 guarded below
     uu = cheb_nodes(0.0, (math.pi / 4) ** 2, 4096)
     rr = np.sqrt(uu)
-    ss = (tfun(math.sin, rr) - rr) / (rr * uu)
+    ss = (tfun(_tsin, rr) - rr) / (rr * uu)
     A = np.vstack([uu**i for i in range(5)]).T
     sc = det_lstsq(A, ss)
-    ccv = (tfun(math.cos, rr) - 1.0) / uu
+    ccv = (tfun(_tcos, rr) - 1.0) / uu
     cc2 = det_lstsq(A, ccv)
     err_s = np.abs(np.polyval(sc[::-1], u) * r**3 + r
-                   - tfun(math.sin, r)).max()
+                   - tfun(_tsin, np.abs(r)) * np.sign(r)).max()
     err_c = np.abs(np.polyval(cc2[::-1], u) * u + 1
-                   - tfun(math.cos, r)).max()
+                   - tfun(_tcos, np.abs(r))).max()
     assert err_s < 1e-7 and err_c < 1e-7, (err_s, err_c)
 
     # Cody-Waite C1+C2+C3 = pi/2, each with the low mantissa bits
@@ -187,23 +273,25 @@ def fit_all():
     # Slot order: a11..a1, then pi/2.
     a = cheb_nodes(0.0, 1.0, 4096)
     A = np.vstack([a**(2 * i + 1) for i in range(6)]).T
-    ay = tfun(math.atan, a)
+    ay = tfun(_tatan, a)
     ac = det_lstsq(A, ay)
     aerr = np.abs(A @ ac - ay).max()
     assert aerr < 1e-5, aerr
     co['atan'] = [bits32(v) for v in ac[::-1]] + [bits32(pi2)]
 
-    # wrapper-op constants
-    co['exp'] = [bits32(math.log2(math.e))]                # log2e
-    co['log'] = [bits32(math.log(2.0))]                    # ln2
+    # wrapper-op constants (log2e = 1/ln2; ln2 from the deterministic
+    # evaluator so the emitted bits are host-independent too)
+    log2e = 1.0 / _tln2()
+    co['exp'] = [bits32(log2e)]                            # log2e
+    co['log'] = [bits32(_tln2())]                          # ln2
     co['acos'] = [bits32(math.pi)]
     co['atan2'] = [bits32(math.pi)]
-    co['sinh'] = [bits32(math.log2(math.e))]
-    co['cosh'] = [bits32(math.log2(math.e))]
-    co['tanh'] = [bits32(2.0 * math.log2(math.e))]
-    co['asinh'] = [bits32(math.log(2.0))]
-    co['acosh'] = [bits32(math.log(2.0))]
-    co['atanh'] = [bits32(0.5 * math.log(2.0))]
+    co['sinh'] = [bits32(log2e)]
+    co['cosh'] = [bits32(log2e)]
+    co['tanh'] = [bits32(2.0 * log2e)]
+    co['asinh'] = [bits32(_tln2())]
+    co['acosh'] = [bits32(_tln2())]
+    co['atanh'] = [bits32(0.5 * _tln2())]
     return co
 
 
