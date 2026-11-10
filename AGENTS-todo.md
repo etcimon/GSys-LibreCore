@@ -2513,6 +2513,33 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
       (`run-fault-1024.sh`→`out-fault-1024`, mon-fault.sh watching
       `fctx`) will confirm whether an exec fault also contributes;
       launched 07:50, ~40min to fault region.
+      **NARROWED (CTS source + vgtop, ~08:3x):** the verify is
+      `RenderVertexBuffer` — **POINT_LIST** draw, **R8G8_UNORM**
+      attribute (2B), `stride∈{2,4}`, `count=bufferSize/stride`
+      (1024B/stride2 → 512 pts). Vertex `pos` reads bytes
+      `[pos*stride]`,`[pos*stride+1]` as x,y pixel coords from a
+      buffer filled by the barrier-protected copy ops
+      (`cts_barrier_repro.py 1:4`, seed `0xb3aab207`: IMAGE_CREATE/
+      BINDMEMORY, 8×TRANSITION_LAYOUT, 12×BARRIER_IMAGE, 8×
+      BARRIER_GLOBAL, IMAGE_COPY_FROM_BUFFER, IMAGE_COPY_FROM_
+      IMAGE, BUFFER_COPY_FROM_BUFFER, 3× SECONDARY cmdbuf — **no
+      blits**). vgtop vectors **all PASS bit-exact (ulp=0)**:
+      `ue_gpos_vbwide_1` (vb+render), `ue_gpos_ptsrg8_1` (POINT_LIST
+      +RG8 attr), `ue_gpos_ptsvidx_1`, `ue_gpos_polypnt_1`.
+      Vertex-fetch formula `base+idx*rate?inst:ib_i *stride+off`
+      (rast S_GA_ATTR) and cmdexec decode `vb_stride=rdata[15:0]`,
+      `vb_rate=rdata[21]`, `attr={valid,loc,bnd,fmt,off}` are correct;
+      secondary CMDBUFs nest via shared `outst_q`/`StDrain` so
+      barrier ordering holds; texture cache is per-wave. **Exonerated:
+      scaled-blit, vertex fetch, point raster, basic render, barrier
+      retire-ordering, texcache staleness.** Remaining suspects:
+      (a) copy op writes wrong vertex-buffer bytes
+      (BUFFER_COPY_FROM_BUFFER offset/size or IMAGE_COPY payload);
+      (b) copy→vertex-fetch coherence — vertex gather reads buffer
+      via `mp_req` memport; if xfer writes land in a path the gather
+      bypasses, draw sees pre-copy data → wrong points; (c) exec
+      fault (fctx pending). Raster `g_oob` bounds + `robust_q`
+      handling is the last fetch-side check worth a look.
     - [ ] `api.descriptor_set.descriptor_set_layout_binding.layout_binding_order`: Fail
       "Verifier failed: 513 == 257, at index 0". The shader read the value of another
       binding: the layout's bindings are created out of numeric order, and a lookup keyed
