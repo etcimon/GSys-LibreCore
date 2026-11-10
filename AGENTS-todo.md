@@ -2478,6 +2478,41 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
       (single-client socket, `sock_accept` early-returns on cfd>=0), so
       fault detail needs the NEXT instrumented run. Verdicts still
       pending — case is huge (many fence waits); run continues.
+      **no_abort VERDICT (run completed ~07:48):** `all_device.1024_
+      vertex_buffer_stride_2` → **`Fail (5:SubmitRenderPass Image
+      comparison failed)`**, 0/1 passed. dmesg CLEAN (no GPU fault/
+      reset/XID); QPA fails inside `MemoryType1Verify4`→`SubmitRender
+      Pass`. **This REFRAMES the bug: NOT a fence/completion hang —
+      fences post and all command buffers execute; the rendered image
+      CONTENT is wrong.** A `pipeline_barrier` correctness failure —
+      leading hypotheses: (a) barrier/data-visibility ordering gap →
+      render pass reads stale/unsynced data → wrong pixels; (b) a
+      shader exec fault (mid-run `device_faults=1` snapshot) corrupting
+      output; (c) genuine raster/shader correctness. Now a concrete
+      image-compare target, not a mysterious stall. Next: rerun
+      instrumented (`obj_venus/apu_bridge` has fctx dump) to capture
+      `{stage,code,pc,wave}` of any exec fault + confirm reproducibility.
+      **ARCHITECTURAL CONTEXT (why image-compare, not hang):** the
+      graphics barrier work is **host-model only** —
+      `apu-native-image-barrier-implementation.md` implements barrier
+      legality + per-image layout tracking in the Python replay/oracle
+      (`vn_image_barriers.py`, `vn_render_pass_replay.py`), explicitly
+      "no RTL/config/capability change, zero capsets." On the real CTS
+      path (deqp→Mesa Venus→virtio-gpu→QEMU→APU RTL) barriers execute
+      in RTL, where the documented gaps are OPEN: "deeper
+      synchronization (queue submission ordering beyond ordered
+      retirement), render-pass subpass dependencies,
+      layout-transition validation against recorded image state" and
+      "memory barriers stay scope-validation-only" (ledger ~L21270,
+      impl doc §Known-gaps). A `pipeline_barrier` image-compare fail is
+      the expected signature of that gap — the render pass reads data
+      whose barrier/layout-transition visibility the RTL path does not
+      yet enforce. **So the pipeline_barrier graphics family needs the
+      documented deeper-synchronization RTL work — a large open
+      workstream, not a small bug.** Instrumented rerun
+      (`run-fault-1024.sh`→`out-fault-1024`, mon-fault.sh watching
+      `fctx`) will confirm whether an exec fault also contributes;
+      launched 07:50, ~40min to fault region.
     - [ ] `api.descriptor_set.descriptor_set_layout_binding.layout_binding_order`: Fail
       "Verifier failed: 513 == 257, at index 0". The shader read the value of another
       binding: the layout's bindings are created out of numeric order, and a lookup keyed
