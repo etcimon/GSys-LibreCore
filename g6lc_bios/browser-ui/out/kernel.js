@@ -1148,11 +1148,18 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly, 
       if (!url || url === ":" || /[\s\[\]]/.test(url)) throw new TypeError("Failed to construct 'Request': Invalid URL");
       if (!/^\/(bios|ui)\//.test(url)) throw new Error("libwasm fetch URL not a local /bios/ or /ui/ path: " + url);
       if (!asyncify) return 1;
-      const promise = fetchFn(url, { method: "GET", credentials: "same-origin", redirect: "error" }).then((r) => {
+      const promise = fetchFn(url, { method: "GET", credentials: "same-origin", cache: "no-store", redirect: "error" }).then((r) => {
         if (typeof r === "string") return r;
         if (!r || typeof r.ok !== "boolean") throw new Error("libwasm fetch returned non-Response");
         if (!r.ok) throw new Error(url + " HTTP " + r.status);
         return r.text();
+      }).then((body) => {
+        const menu = url.match(/^\/bios\/menu\/([a-z0-9-]+)$/);
+        if (!menu) return body;
+        const data = JSON.parse(body);
+        if (Array.isArray(data)) return body;
+        if (data?.id !== menu[1] || !Array.isArray(data.items)) throw new Error("Invalid menu response: " + url);
+        return JSON.stringify(data.items);
       });
       return objAdd(promise);
     },
@@ -2281,6 +2288,61 @@ export function computeBios(job, options) {
   return activeBrowserApp.compute(job, options);
 }
 
+/** Fill the setup status nodes from fetch bodies. The kernel does not write these. */
+export function applySetupFaces(doc, faces) {
+  const pendingNode = doc.getElementById("settings-pending");
+  if (pendingNode && faces.pending) {
+    try {
+      const data = JSON.parse(faces.pending);
+      const rows = (data.pending || []).map((p) => p.id + " = " + p.value + " (pending)");
+      pendingNode.textContent = rows.length ? rows.join("\n") : "no pending settings writes";
+    } catch (error) {
+      pendingNode.textContent = String(faces.pending);
+    }
+  }
+  const cli = doc.getElementById("cli-screen");
+  if (cli && typeof faces.screen === "string") cli.textContent = faces.screen;
+  const digest = doc.getElementById("fw-digest");
+  if (digest && faces.fw && String(faces.fw).indexOf("sha256=") >= 0) {
+    const hex = String(faces.fw).split("sha256=")[1].trim().split(/\s+/)[0];
+    if (hex) digest.textContent = "sha256=" + hex;
+  }
+  const nat = doc.getElementById("hw-nat-status");
+  if (nat && faces.hw) {
+    try {
+      const data = JSON.parse(faces.hw);
+      nat.textContent = ["hw", data.nat || "", data.phase || ""].filter((s) => s).join(" ");
+    } catch (error) {
+      nat.textContent = String(faces.hw);
+    }
+  }
+  const body = doc.getElementById("disk-body");
+  if (body && faces.disk) {
+    let disks = [];
+    try { disks = (JSON.parse(faces.disk).disks) || []; } catch (error) { disks = []; }
+    if (typeof doc.createElement === "function") {
+      body.textContent = "";
+      for (const disk of disks) {
+        const tr = doc.createElement("tr");
+        for (const text of [disk.name || "", disk.fs || "", disk.size || "n/a", disk.proof || ""]) {
+          const td = doc.createElement("td");
+          td.textContent = text;
+          tr.appendChild(td);
+        }
+        body.appendChild(tr);
+      }
+    } else {
+      body.textContent = disks.map((d) => [d.name || "", d.fs || "", d.proof || ""].join(" ")).join("\n");
+    }
+  }
+}
+
+/** Password fields do not join the platform clipboard. Other inputs do. */
+export function blockSecretClipboard(target) {
+  if (!target || !target.getAttribute) return false;
+  return target.getAttribute("type") === "password";
+}
+
 export function createBrowserApp(doc, fetchFn = globalThis.fetch.bind(globalThis), wasmApi = globalThis.WebAssembly) {
   const ui = doc.getElementById("bios-ui");
   let computePool;
@@ -2308,6 +2370,22 @@ export function createBrowserApp(doc, fetchFn = globalThis.fetch.bind(globalThis
   const initial = ui && ui.getAttribute("data-start-menu");
   let selected = menus.some((node) => node.getAttribute("data-menu") === initial) ? initial : "main";
   let started = false;
+  const fieldFocus = new Map();
+  function focusField(delta) {
+    const fields = [...new Map(Array.from(doc.querySelectorAll("[data-field]"))
+      .filter((field) => field.id?.startsWith("field-" + selected + "-"))
+      .map((field) => [field.id, field])).values()];
+    if (!fields.length) return false;
+    const index = ((fieldFocus.get(selected) || 0) + delta + fields.length) % fields.length;
+    fieldFocus.set(selected, index);
+    fields.forEach((field, i) => {
+      field.setAttribute("class", i === index ? "bios-field bios-field-active" : "bios-field");
+      field.setAttribute("tabindex", i === index ? "0" : "-1");
+      field.setAttribute("aria-selected", String(i === index));
+    });
+    fields[index].focus?.();
+    return true;
+  }
   function message(value) {
     if (status) status.textContent = value;
   }
@@ -2429,13 +2507,103 @@ export function createBrowserApp(doc, fetchFn = globalThis.fetch.bind(globalThis
     try {
       await request("/bios/menu/" + selected);
       message(targets.has("/bios/menu/" + selected) ? "UI-BOOT: " + selected + " menu; read-only setup" : "Static view: " + selected + " menu; browser refresh unavailable");
+      if (id === "devices") await paintDisks();
+      await paintSetupFaces();
     } catch (error) { fallback(error, "Menu refresh"); }
+  }
+  async function paintSetupFaces() {
+    const grab = async (url) => {
+      try {
+        const resp = await fetchFn(url);
+        if (!resp || !resp.ok || !resp.text) return "";
+        return await resp.text();
+      } catch (error) {
+        return "";
+      }
+    };
+    applySetupFaces(doc, {
+      pending: await grab("/bios/settings/pending"),
+      screen: await grab("/bios/cli/screen"),
+      disk: await grab("/bios/disk"),
+      fw: await grab("/bios/fw/status"),
+      hw: await grab("/bios/hw/stat"),
+    });
+  }
+  function setupControlValue(node) {
+    if (!node) return "";
+    if (typeof node.value === "string" && node.value) return node.value;
+    const attr = node.getAttribute && node.getAttribute("value");
+    if (attr) return attr;
+    const options = node.children || [];
+    for (const child of options) {
+      if (String(child.tagName || "").toLowerCase() !== "option" && child.getAttribute && !child.getAttribute("value")) continue;
+      const value = (child.getAttribute && child.getAttribute("value")) || child.textContent || "";
+      if (value) return value;
+    }
+    return "";
+  }
+  async function postCli(body) {
+    const resp = await fetchFn("/bios/cli", {
+      method: "POST",
+      credentials: "same-origin",
+      cache: "no-store",
+      redirect: "error",
+      headers: { "content-type": "text/plain" },
+      body,
+    });
+    const text = resp && typeof resp.text === "function" ? await resp.text() : "";
+    if (resp && resp.ok === false) throw new Error(text || "console command refused");
+    return text;
+  }
+  async function postSetup(line) {
+    const resp = await fetchFn("/bios/holyc", {
+      method: "POST",
+      credentials: "same-origin",
+      cache: "no-store",
+      redirect: "error",
+      headers: { "content-type": "text/plain" },
+      body: line,
+    });
+    const text = resp && typeof resp.text === "function" ? await resp.text() : "";
+    if (resp && resp.ok === false) throw new Error(text || "setup command refused");
+    return text;
+  }
+  async function paintDisks() {
+    const body = doc.getElementById("disk-body");
+    if (!body) return;
+    const resp = await fetchFn("/bios/disk");
+    if (!resp || !resp.ok || !resp.json) return;
+    const data = await resp.json();
+    body.textContent = "";
+    for (const disk of (data && data.disks) || []) {
+      const tr = doc.createElement("tr");
+      const cells = [disk.name || "", disk.fs || "", disk.size || "n/a", disk.proof || ""];
+      for (const text of cells) {
+        const td = doc.createElement("td");
+        td.textContent = text;
+        tr.appendChild(td);
+      }
+      body.appendChild(tr);
+    }
   }
   async function handleKey(event) {
     if (event.defaultPrevented || event.repeat || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey ||
         event.isComposing || event.target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(event.target?.tagName || "")) return;
+    const consoleWin = doc.getElementById("console-window");
+    if (consoleWin && consoleWin.hidden === false) {
+      event.preventDefault();
+      try {
+        const screen = await postCli("key " + event.key);
+        applySetupFaces(doc, { screen });
+      } catch (error) {
+        if (status) status.textContent = String(error && error.message || error);
+      }
+      return;
+    }
     const index = menus.findIndex((node) => node.getAttribute("data-menu") === selected);
-    if (event.key === "F10") {
+    if (["ArrowUp", "ArrowDown", "Tab"].includes(event.key) && focusField(event.key === "ArrowUp" ? -1 : 1)) {
+      event.preventDefault();
+    } else if (event.key === "F10") {
       event.preventDefault();
       await refresh();
     } else if (index >= 0 && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
@@ -2464,7 +2632,149 @@ export function createBrowserApp(doc, fetchFn = globalThis.fetch.bind(globalThis
       }
       const button = doc.getElementById("refresh");
       if (button) button.addEventListener("click", refresh);
+      for (const act of doc.querySelectorAll("[data-setting-apply]")) {
+        act.addEventListener("click", async (event) => {
+          event.preventDefault();
+          const key = act.getAttribute("data-setting-apply");
+          if (!key) return;
+          const value = setupControlValue(doc.getElementById("edit-" + key.replace(/\./g, "-")));
+          if (!value) {
+            if (status) status.textContent = "SET-REFUSED " + key + " has no value";
+            return;
+          }
+          try {
+            const text = await postSetup("SettingSet(\"" + key + "\",\"" + value + "\")");
+            if (status) status.textContent = String(text).trim();
+            const pending = await fetchFn("/bios/settings/pending");
+            if (pending && pending.ok && pending.text) {
+              applySetupFaces(doc, { pending: await pending.text() });
+            }
+          } catch (error) {
+            if (status) status.textContent = String(error && error.message || error);
+          }
+        });
+      }
+      for (const act of doc.querySelectorAll("[data-console]")) {
+        act.addEventListener("click", async (event) => {
+          event.preventDefault();
+          const win = doc.getElementById("console-window");
+          const open = act.getAttribute("data-console") !== "close";
+          if (win) win.hidden = !open;
+          if (status) status.textContent = open ? "console open" : "console closed";
+          try {
+            const screen = await postCli(open ? "open" : "close");
+            if (open) applySetupFaces(doc, { screen });
+          } catch (error) {
+            if (status) status.textContent = String(error && error.message || error);
+          }
+        });
+      }
+      for (const act of doc.querySelectorAll("[data-manual]")) {
+        act.addEventListener("click", (event) => {
+          event.preventDefault();
+          const win = doc.getElementById("manual-window");
+          if (win) win.hidden = false;
+          const loc = doc.getElementById("manual-loc");
+          if (status) status.textContent = loc && loc.textContent ? "manual: " + loc.textContent : "manual closed";
+        });
+      }
+      for (const act of doc.querySelectorAll("[data-fw]")) {
+        act.addEventListener("click", async (event) => {
+          event.preventDefault();
+          const which = act.getAttribute("data-fw") || "";
+          if (which === "commit") {
+            const shown = (doc.getElementById("fw-digest") || {}).textContent || "";
+            const hex = (shown.split("sha256=")[1] || "").trim().split(/\s+/)[0] || "";
+            if (!hex) {
+              if (status) status.textContent = "fw: digest not shown; commit refused";
+              return;
+            }
+            try {
+              const text = await postSetup("FwApply(\"" + hex + "\")");
+              if (status) status.textContent = String(text).trim();
+            } catch (error) {
+              if (status) status.textContent = String(error && error.message || error);
+            }
+            return;
+          }
+          const src = (doc.getElementById("fw-src") || {}).value || "";
+          try {
+            const text = await postSetup("FwUpdate(\"" + src + "\")");
+            const body = String(text);
+            if (status) status.textContent = body.trim();
+            const digest = doc.getElementById("fw-digest");
+            const mark = body.split("sha256=")[1];
+            if (digest && mark) digest.textContent = "sha256=" + mark.trim().split(/\s+/)[0];
+          } catch (error) {
+            if (status) status.textContent = String(error && error.message || error);
+          }
+        });
+      }
+      for (const act of doc.querySelectorAll("[data-net]")) {
+        act.addEventListener("click", async (event) => {
+          event.preventDefault();
+          const which = act.getAttribute("data-net") || "";
+          let line = "";
+          if (which === "link-up") line = "HwLink(\"net0\",\"up\")";
+          else if (which === "link-down") line = "HwLink(\"net0\",\"down\")";
+          else if (which === "nat") line = "HwConfig(\"net0\",\"nat\")";
+          else if (which === "static") {
+            const addr = (doc.getElementById("net-addr") || {}).value || "";
+            if (!addr) {
+              if (status) status.textContent = "NET-REFUSED static address required";
+              return;
+            }
+            const gw = (doc.getElementById("net-gw") || {}).value || "";
+            const dns = (doc.getElementById("net-dns") || {}).value || "";
+            line = "HwIfconfig(\"net0\",\"" + addr + "\")";
+            if (gw) line += "; HwRoute(\"net0\",\"default\",\"" + gw + "\")";
+            if (dns) line += "; HwDns(\"net0\",\"" + dns + "\")";
+            line += "; HwLink(\"net0\",\"up\")";
+          } else {
+            if (status) status.textContent = "NET-REFUSED unknown action " + which;
+            return;
+          }
+          try {
+            const text = await postSetup(line);
+            if (status) status.textContent = String(text).trim();
+          } catch (error) {
+            if (status) status.textContent = String(error && error.message || error);
+          }
+        });
+      }
+      for (const act of doc.querySelectorAll("[data-settings]")) {
+        act.addEventListener("click", async (event) => {
+          event.preventDefault();
+          const which = act.getAttribute("data-settings");
+          const line = which === "load" ? "SettingsImport(\"uart\")" : "SettingsExport(\"uart\")";
+          try {
+            const text = await postSetup(line);
+            if (status) status.textContent = String(text).trim();
+          } catch (error) {
+            if (status) status.textContent = String(error && error.message || error);
+          }
+        });
+      }
+      for (const pick of doc.querySelectorAll("[data-boot]")) {
+        pick.addEventListener("click", async (event) => {
+          event.preventDefault();
+          const id = pick.getAttribute("data-boot");
+          if (!id) return;
+          try {
+            const text = await postSetup("BootSelect(\"" + id + "\")");
+            if (status) status.textContent = String(text).trim();
+          } catch (error) {
+            if (status) status.textContent = "BootSelect failed: " + (error && error.message || error);
+          }
+        });
+      }
       ui.addEventListener("keydown", handleKey);
+      const keepSecrets = (event) => {
+        if (blockSecretClipboard(event.target)) event.preventDefault();
+      };
+      ui.addEventListener("copy", keepSecrets);
+      ui.addEventListener("cut", keepSecrets);
+      ui.addEventListener("paste", keepSecrets);
       const workerButton = doc.getElementById("worker-check");
       workerButton?.addEventListener("click", async () => {
         const note = doc.getElementById("worker-status");

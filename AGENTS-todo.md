@@ -2566,6 +2566,24 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
       SPIR-V→APU-sh ISA to check for an unsupported/mis-executed op,
       or build a vgtop vector replaying the EXACT CTS vertex data +
       shader + POINT_LIST config.
+      **★★ MAJOR CORRECTION (QPA+repro, mt=1 it=2 = MemoryType1Verify2):**
+      the failing verify is NOT vertex-buffer. `cts_barrier_repro.py
+      1:2` (seed `0x6eb7b9f0`) shows the render ops are
+      **`OP_RENDER_VERTEX_SAMPLED_IMAGE`×12 + `OP_RENDER_FRAGMENT_
+      SAMPLED_IMAGE`×1 across 4 RENDERPASS_BEGIN/END** — a
+      **texture/sampled-image render**, fed by `IMAGE_COPY_FROM_IMAGE`
+      (vkCmdCopyImage) + 8× layout transitions + image/global barriers
+      (incl. SECONDARY cmdbufs). The sampled image is written by I2I
+      copy then sampled by `sampled-image.vert/.frag`. ⇒ the bug is
+      in the **image-copy→sampled-image path**: either vkCmdCopyImage
+      (I2I) wrote wrong texels, the combined-image-sampler descriptor
+      points at wrong memory/layout, or the barrier/layout-transition
+      didn't make copied texels visible to the texture read — the
+      documented "deeper synchronization / layout-transition" gap.
+      Vertex-buffer/raster/copy-buffer paths exonerated but were the
+      WRONG target. Next: check I2I copy region/format correctness in
+      `g6lc_apu_xfer` (XImgGo) and the sampled-image descriptor→image
+      memory map + texture-read path in shwave.
     - [ ] `api.descriptor_set.descriptor_set_layout_binding.layout_binding_order`: Fail
       "Verifier failed: 513 == 257, at index 0". The shader read the value of another
       binding: the layout's bindings are created out of numeric order, and a lookup keyed
