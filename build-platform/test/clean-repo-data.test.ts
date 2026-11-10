@@ -5,9 +5,10 @@
 // repo-cache / regen): holds, tag families, trace-only removal, allowlist.
 
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { gunzipSync } from "node:zlib";
 
 import { DEFAULT_CONFIG } from "../src/config/defaults.ts";
 import {
@@ -23,7 +24,14 @@ import {
 import type { WorkspacePaths } from "../src/workspace/layout.ts";
 
 const FIX = join(tmpdir(), `cva6-clean-repo-test-${process.pid}`);
-const CFG = { ...DEFAULT_CONFIG.workspace.clean, regenerableDirs: ["pkg/target"] };
+// Holds never expire in the base fixture; the expiry test sets its own ages.
+const CFG = {
+  ...DEFAULT_CONFIG.workspace.clean,
+  regenerableDirs: ["pkg/target"],
+  citedMaxAgeDays: 0,
+  keptMaxAgeDays: 0,
+  logCompressMinMiB: 0.001,
+};
 const DAY = 86_400_000;
 const NOW = Date.now();
 
@@ -86,7 +94,53 @@ test("runFamily strips repeat counters, timestamps and old/new markers", () => {
 test("subcommand aliases map to repo-level purposes", () => {
   expect(purposesFromSubcommand("traces")).toEqual(["traces"]);
   expect(purposesFromSubcommand("remote-runs")).toEqual(["runs"]);
-  expect(purposesFromSubcommand("stale")).toEqual(["traces", "runs", "repo-cache", "regen"]);
+  expect(purposesFromSubcommand("compress-logs")).toEqual(["logs"]);
+  expect(purposesFromSubcommand("stale")).toEqual(["traces", "runs", "logs", "repo-cache", "regen"]);
+});
+
+test("family heads expire; expired cited runs lose traces but are never deleted", () => {
+  const cfg = { ...CFG, citedMaxAgeDays: 12, keptMaxAgeDays: 15 };
+  const inv = listRepoDataTargets(FIX, cfg, new Set(["evid-r1"]), NOW);
+  const tagsOf = (ts: CleanTarget[]) => ts.map((t) => t.path.split(/[\\/]/).pop()).sort();
+  // soak-r3 (20d) outlives keptMaxAgeDays; soak-r4 (10d) stays kept, live-r1
+  // stays active, and evid-r1 (cited, 15d) is evidence: never a whole-run target.
+  expect(tagsOf(selectCleanTargets(inv, ["runs"]).selected)).toEqual(["soak-r1", "soak-r2", "soak-r3"]);
+  // ...but its trace dumps are, once past citedMaxAgeDays.
+  expect(tagsOf(selectCleanTargets(inv, ["traces"]).selected)).toContain("evid-r1");
+  const fresh = listRepoDataTargets(FIX, { ...cfg, citedMaxAgeDays: 30 }, new Set(["evid-r1"]), NOW);
+  expect(tagsOf(selectCleanTargets(fresh, ["traces"]).selected)).not.toContain("evid-r1");
+});
+
+test("logs: big logs gzip in place, cited runs included, mtimes preserved", async () => {
+  const big = "line of simulator output\n".repeat(200);
+  put("remote-runs/gz-r1/output/run.log", big, 15);
+  put("remote-runs/gz-r1/output/small.log", "x\n", 15);
+  put("remote-runs/gz-r1/output/results.json", "{}\n", 15);
+  age("remote-runs/gz-r1/output", 15);
+  age("remote-runs/gz-r1", 15);
+  put("remote-runs/gz-live/run.log", big, 0);
+  const inv = listRepoDataTargets(FIX, CFG, new Set(["gz-r1"]), NOW);
+  const { selected } = selectCleanTargets(inv, ["logs"]);
+  const part = selected.find((t) => t.path.endsWith("gz-r1"))!;
+  expect(part.files!.map((f) => f.split(/[\\/]/).pop())).toEqual(["run.log"]);
+  expect(selected.some((t) => t.path.endsWith("gz-live"))).toBe(false);
+
+  const paths = { root: join(FIX, "ws") } as WorkspacePaths;
+  const allow = cleanAllowRoots(paths, FIX, [], CFG);
+  const dirBefore = statSync(join(FIX, "remote-runs/gz-r1/output")).mtimeMs;
+  const [res] = await removeCleanTargets([part], { dryRun: false, yes: true, allowRoots: allow });
+  expect(res!.status).toBe("compressed");
+  expect(res!.bytes).toBeGreaterThan(0);
+  const gz = join(FIX, "remote-runs/gz-r1/output/run.log.gz");
+  expect(existsSync(join(FIX, "remote-runs/gz-r1/output/run.log"))).toBe(false);
+  expect(gunzipSync(readFileSync(gz)).toString()).toBe(big);
+  expect(existsSync(join(FIX, "remote-runs/gz-r1/output/small.log"))).toBe(true);
+  expect(Math.abs(statSync(gz).mtimeMs - (NOW - 15 * DAY))).toBeLessThan(2000);
+  expect(Math.abs(statSync(join(FIX, "remote-runs/gz-r1/output")).mtimeMs - dirBefore)).toBeLessThan(2000);
+  // a compressed run is not offered again
+  const again = selectCleanTargets(listRepoDataTargets(FIX, CFG, new Set(), NOW), ["logs"]).selected;
+  expect(again.some((t) => t.path.endsWith("gz-r1"))).toBe(false);
+  for (const r of ["gz-r1", "gz-live"]) rmSync(join(FIX, "remote-runs", r), { recursive: true, force: true });
 });
 
 test("collectCitedTags finds run tags in tracked text", () => {

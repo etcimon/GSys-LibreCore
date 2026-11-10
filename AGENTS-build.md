@@ -157,7 +157,15 @@ suite (sim / dual-hart / R3). Full detail: `AGENTS-build-platform.md` +
    optional: timings compile -o <dir> → test --from-timing <dir>
    manual redesign output: --from-timing out_rtl   (symlink → workspace/hyp; not a stamp package)
    gate-level STA: timings sta-rtl --target <cfg> [--platform nangate45|sky130hd] [--remote]
-   free space: clean status | clean timings | clean svt | clean svt-tools --yes
+   free space: clean status | clean stale --dry-run | clean timings | clean svt | clean svt-tools --yes
+```
+
+Routine space reclaim (holds keep active, cited-evidence and newest-per-family runs;
+purposes, holds and knobs in `AGENTS-build-platform.md` §2.6):
+
+```bash
+./build.sh clean diag verify formal timings stale --older-than 2d --include-active --dry-run
+./build.sh clean diag verify formal timings stale --older-than 2d --include-active --yes
 ```
 
 Concrete examples:

@@ -114,7 +114,7 @@ export const cleanCommand: Command = {
   summary:
     "Remove workspace build/cache artifacts by purpose (and opt-in sim outs).",
   usage:
-    "bun run src/cli/index.ts clean [status|build|diag|verify|formal|timings|cache|manifests|downloads|man|dts|tooling|firmware|sim|svt|svt-tools|rust-target|traces|runs|repo-cache|regen|stale|all] [--older-than Nd|Nh|Nm] [--execution all|last|failed|ok] [--target T] [--compartment C] [--include-active] [--include-cited] [--tooling] [--cache] [--all] [--yes] [--json] [--dry-run]",
+    "bun run src/cli/index.ts clean [status|build|diag|verify|formal|timings|cache|manifests|downloads|man|dts|tooling|firmware|sim|svt|svt-tools|rust-target|traces|runs|logs|repo-cache|regen|stale|all] [--older-than Nd|Nh|Nm] [--execution all|last|failed|ok] [--target T] [--compartment C] [--include-active] [--include-cited] [--tooling] [--cache] [--all] [--yes] [--json] [--dry-run]",
   details:
     "Frees space from managed outputs (diag/verify/formal/timings caches, etc.).\n" +
     "Bare `clean` (no subcommand) removes workspace/build only (compat).\n" +
@@ -134,15 +134,21 @@ export const cleanCommand: Command = {
     "Repo-level (workspace.clean in .config.ts; holds keep what is still useful):\n" +
     "  traces            .dasm/.traces/wave dumps inside remote-runs/<tag>; logs,\n" +
     "                    results and summaries stay (requires --yes)\n" +
-    "  runs              whole remote runs superseded in their tag family (tag minus\n" +
-    "                    -rN / timestamp); newest keepRunsPerFamily kept (requires --yes)\n" +
+    "  runs              whole uncited remote runs superseded in their tag family (tag\n" +
+    "                    minus -rN / timestamp); newest keepRunsPerFamily kept until\n" +
+    "                    keptMaxAgeDays (requires --yes)\n" +
+    "  logs              gzip logs >= logCompressMinMiB inside non-active runs, in\n" +
+    "                    place (<log>.gz, content kept; cited runs included; requires --yes)\n" +
     "  repo-cache        stale children of the repo-root .cache/ (requires --yes)\n" +
-    "  regen             regenerable build outputs (Cargo targets, UE Intermediate,\n" +
-    "                    Next.js .next) not used recently\n" +
-    "  stale             all four above\n" +
+    "  regen             regenerable build outputs (Cargo targets, UE Intermediate/\n" +
+    "                    Saved/Binaries, Next.js .next, node_modules, QEMU build) not\n" +
+    "                    used recently\n" +
+    "  stale             all five above\n" +
     "  Holds: active (modified < activeAgeDays), cited (run tag referenced by a\n" +
-    "  tracked file = evidence), kept (newest-N per family). remote-runs/builds is\n" +
-    "  never touched. --include-active / --include-cited lift holds.\n" +
+    "  tracked file = evidence: never deleted whole; its traces after\n" +
+    "  citedMaxAgeDays), kept (newest-N per family, until keptMaxAgeDays).\n" +
+    "  remote-runs/builds is never touched.\n" +
+    "  --include-active / --include-cited lift holds regardless of age.\n" +
     "\n" +
     "Filters:\n" +
     "  --older-than 7d|12h|30m   only remove trees older than the duration\n" +
@@ -170,6 +176,7 @@ export const cleanCommand: Command = {
     "bun run src/cli/index.ts clean stale --dry-run",
     "bun run src/cli/index.ts clean traces --older-than 7d --yes",
     "bun run src/cli/index.ts clean runs --dry-run",
+    "bun run src/cli/index.ts clean logs --dry-run",
     "bun run src/cli/index.ts clean regen",
     "bun run src/cli/index.ts clean all --yes",
   ],
@@ -350,9 +357,16 @@ export const cleanCommand: Command = {
       if (r.status === "removed") {
         logger.success(`Removed ${r.label}: ${r.path} (${formatBytes(r.bytes)})`);
         removed++;
+      } else if (r.status === "compressed") {
+        logger.success(`Compressed ${r.label}: ${r.path} (saved ${formatBytes(r.bytes)})`);
+        removed++;
       } else if (r.status === "would-remove") {
         logger.info(
           `[dry-run] would remove ${r.label}: ${r.path} (${formatBytes(r.bytes)})`,
+        );
+      } else if (r.status === "would-compress") {
+        logger.info(
+          `[dry-run] would gzip ${r.label}: ${r.path} (${formatBytes(r.bytes)} of logs)`,
         );
       } else if (r.status === "refused") {
         logger.error(`Refused ${r.label}: ${r.detail ?? "?"} (${r.path})`);

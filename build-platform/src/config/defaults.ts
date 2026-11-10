@@ -27,9 +27,18 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       remoteRunsDir: "remote-runs",
       // `builds/*.manifest.json` are referenced by qualification entries below.
       remoteRunsProtect: ["builds"],
-      traceSuffixes: [".dasm", ".traces", ".vcd", ".fst", ".fsdb"],
+      // `.tree`: Verilator --dump-tree stage dumps (debug model builds).
+      traceSuffixes: [".dasm", ".traces", ".vcd", ".fst", ".fsdb", ".tree"],
       activeAgeDays: 3,
       keepRunsPerFamily: 2,
+      // Holds expire: an uncited family head older than keptMaxAgeDays is
+      // deleted by `clean runs`; a cited (evidence) run is never deleted whole,
+      // but after citedMaxAgeDays its trace dumps go (`clean traces`) and its big
+      // logs are gzipped (`clean logs`). --include-cited lifts both holds now.
+      keptMaxAgeDays: 7,
+      citedMaxAgeDays: 7,
+      logSuffixes: [".log", ".txt", ".out"],
+      logCompressMinMiB: 64,
       repoCacheDir: ".cache",
       regenerableDirs: [
         "g6lc_qemu/target",
@@ -37,8 +46,13 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         "ai-tensor/target",
         "mbgen/target",
         "quantum_ai/intuition_synthetics/target",
-        "mbgen/mbsim/MbgenSim/Intermediate/Build",
+        "mbgen/mbsim/MbgenSim/Intermediate",
+        "mbgen/mbsim/MbgenSim/Saved",
+        "mbgen/mbsim/MbgenSim/Binaries",
         "docs/website/.next",
+        "docs/website/node_modules",
+        "g6lc_qemu/qemu/build",
+        "riscv-compilers/ldc2-build",
       ],
       citationExtensions: [".md", ".mdx", ".json", ".ts", ".py", ".sh", ".toml", ".txt"],
     },

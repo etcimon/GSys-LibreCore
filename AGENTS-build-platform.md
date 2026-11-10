@@ -8,6 +8,9 @@
 > `g6b`, `ai-overlay` added); repo-level `clean traces|runs|repo-cache|regen|stale`
 > with evidence holds; `verify --qualification|--ai-overlay|--remote`; per-target synth
 > pass recipes; patched-Verilator check; CI lanes driven through `./build.sh`.
+> **2026-11-10:** `clean` holds expire (`keptMaxAgeDays`, `citedMaxAgeDays`; cited runs are
+> never deleted whole), new `clean logs` (gzip in place), `.tree` trace suffix, wider
+> `regenerableDirs`, routine reclaim command — §2.6.
 
 ---
 
@@ -31,7 +34,7 @@ probe / doctor  →  tools install | setup --install  →  probe install  →  d
          optional: monorepo FO4 soak (package) → timings validate/sta-handoff --from-timing
          remote:   remote <proxy-subcommand>   (SSH + rsync + Verilator on a big host)
          packages: g6b <type> · g6q <sub> · tensor <sub>   (spawn-only gateways)
-         free space: clean status  →  clean stale --dry-run  →  clean <purpose> [--yes]
+         free space: clean status  →  clean stale --dry-run  →  clean <purpose> [--yes]   (routine: §2.6)
 ```
 
 ---
@@ -157,20 +160,39 @@ Validation accepts the redesign trees without `portable.f` / `analyze.json` and 
 
 **Repo-level leaves** (`workspace.clean` in `.config.ts`; selection applies *holds*)
 
-| Purpose (alias) | Removes | Keeps | `--yes`? |
+| Purpose (alias) | Acts on | Keeps | `--yes`? |
 |-----------------|---------|-------|----------|
-| **`traces`** (`remote-traces`) | `.dasm` / `.traces` / `.vcd` / `.fst` / `.fsdb` inside `remote-runs/<tag>/` | logs, `results.json`, summaries, the run dir | **yes** |
-| **`runs`** (`remote-runs`) | whole runs superseded in their tag family (tag minus `-rN`, `-YYYYMMDDTHHMMSS-<hash>`, `-old/-new`) | newest `keepRunsPerFamily` (2) per family | **yes** |
-| **`repo-cache`** | stale children of repo-root `.cache/` | recently modified entries | **yes** |
-| **`regen`** (`regenerable`) | `regenerableDirs`: `g6lc_qemu/target`, `g6lc_bios/target`, `ai-tensor/target`, `mbgen/target`, `quantum_ai/intuition_synthetics/target`, `mbgen/mbsim/MbgenSim/Intermediate/Build`, `docs/website/.next` | recently used dirs | no |
-| **`stale`** | all four above | holds still apply | per purpose |
+| **`traces`** (`remote-traces`) | deletes files with `traceSuffixes` (`.dasm` `.traces` `.vcd` `.fst` `.fsdb` `.tree`) inside `remote-runs/<tag>/`, **cited runs included** once older than `citedMaxAgeDays` | logs, `results.json`, summaries, the run dir | **yes** |
+| **`runs`** (`remote-runs`) | deletes whole **uncited** runs: superseded in their tag family (tag minus `-rN`, `-YYYYMMDDTHHMMSS-<hash>`, `-old/-new`), or a family head older than `keptMaxAgeDays` | every cited run; newest `keepRunsPerFamily` (2) per family while younger than `keptMaxAgeDays` | **yes** |
+| **`logs`** (`compress-logs`) | gzips `logSuffixes` (`.log` `.txt` `.out`) files ≥ `logCompressMinMiB` (64) **in place** → `<file>.gz`; cited runs included | content (read with `zcat`/`zgrep`); file + parent-dir mtimes preserved so the run is not re-marked active | **yes** |
+| **`repo-cache`** | stale children of repo-root `.cache/` (an active entry offers its own stale sub-entries instead) | recently modified entries; loose files < 1 MiB | **yes** |
+| **`regen`** (`regenerable`) | `regenerableDirs`: `g6lc_qemu/target`, `g6lc_qemu/qemu/build`, `g6lc_bios/target`, `ai-tensor/target`, `mbgen/target`, `quantum_ai/intuition_synthetics/target`, `mbgen/mbsim/MbgenSim/{Intermediate,Saved,Binaries}`, `docs/website/{.next,node_modules}`, `riscv-compilers/ldc2-build` | recently used dirs | no |
+| **`stale`** | all five above | holds still apply | per purpose |
 
-Holds: **active** (modified within `activeAgeDays`, default 3 — live sims/caches),
-**cited** (run tag referenced by any tracked file of `citationExtensions` = evidence for a
-recorded result), **kept** (newest-N per family). `--include-active` / `--include-cited`
-lift them. `remote-runs/builds/` (manifests referenced by `verify.qualifications`) is
-never listed. `clean status` shows reclaimable bytes after holds plus held counts;
-`traces` and `runs` overlap (a removed run takes its traces with it).
+Holds (a held target is listed as `skip … held (<hold>)`):
+
+| Hold | Applies when | Effect | Expires | Lift early |
+|------|--------------|--------|---------|------------|
+| **active** | newest file under the target is younger than `activeAgeDays` (3) | nothing touched (run may still be written) | naturally | `--include-active` |
+| **cited** | a tracked file (`git ls-files`, `citationExtensions`) contains the run tag — evidence for a recorded result | run is **never deleted whole** by default; big logs may still be gzipped | trace dumps only, after `citedMaxAgeDays` (7) | `--include-cited` (also deletes the whole run) |
+| **kept** | among the newest `keepRunsPerFamily` of its tag family | run kept whole | after `keptMaxAgeDays` (7) | `--include-cited` |
+
+Set `citedMaxAgeDays` / `keptMaxAgeDays` to `0` for holds that never expire. Knobs
+(defaults in `build-platform/src/config/defaults.ts`; override any subset in `.config.ts`):
+
+```ts
+workspace: { clean: {
+  remoteRunsDir: "remote-runs", remoteRunsProtect: ["builds"],
+  traceSuffixes: [".dasm", ".traces", ".vcd", ".fst", ".fsdb", ".tree"],
+  activeAgeDays: 3, keepRunsPerFamily: 2, keptMaxAgeDays: 7, citedMaxAgeDays: 7,
+  logSuffixes: [".log", ".txt", ".out"], logCompressMinMiB: 64,
+  repoCacheDir: ".cache", regenerableDirs: [/* see regen row */],
+  citationExtensions: [".md", ".mdx", ".json", ".ts", ".py", ".sh", ".toml", ".txt"],
+} }
+```
+`remote-runs/builds/` (manifests referenced by `verify.qualifications`) is never listed.
+`clean status` shows reclaimable bytes after holds plus held counts; `traces`/`logs` and
+`runs` overlap (a removed run takes its traces and logs with it, so aggregate sums double-count).
 
 | Filter | Effect |
 |--------|--------|
@@ -193,19 +215,47 @@ walk + citation grep of `git ls-files`) runs only for `status` or a repo-level p
 | `clean svt-tools --yes` | Package **`sv-timing/.tools`** | Workspace `tooling/` |
 | `clean regen` | Other packages' Cargo/UE/Next outputs | `sv-timing/target` (that is `svt`) |
 | `clean traces --yes` | Trace dumps only | Run logs / results (evidence) |
+| `clean logs --yes` | Nothing — compresses big logs in place | Log content |
+| `clean runs --yes` | Uncited runs only | Cited runs (evidence), unless `--include-cited` |
 | `python tools/svt.py clean` (in package) | Same Cargo/out dirs via package CLI | Host workspace |
 
-Examples:
+**Routine space reclaim** (what is run when E: fills; review the dry-run first — it prints
+one `would remove` / `would gzip` / `skip … held (…)` line per candidate):
+
+```bash
+./build.sh clean diag verify formal timings stale --older-than 2d --include-active --dry-run
+./build.sh clean diag verify formal timings stale --older-than 2d --include-active --yes
+```
+
+`--include-active` with `--older-than 2d` replaces the 3-day active hold by a 2-day cutoff;
+cited and kept holds still apply. Inputs that live in `.cache/` but are expensive to
+re-fetch (e.g. `.cache/apu-guest/*.img`, `vmlinuz`, `.cache/cts/ctsdata.img`) are ordinary
+`repo-cache` candidates: there is no exclude flag, so check the dry-run and move such
+items aside (or bump their mtime) before `--yes` if they must survive.
+
+Other examples:
 
 ```bash
 ./build.sh clean status
 ./build.sh clean stale --dry-run               # review every repo-level candidate + holds
 ./build.sh clean traces --yes                  # largest win: remote-run trace dumps
+./build.sh clean logs --dry-run                # oversized run logs that would be gzipped
 ./build.sh clean runs --older-than 14d --dry-run
 ./build.sh clean timings sta build             # host FO4 soak + STA handoff + build tree
 ./build.sh clean svt                           # free ~GiB Cargo artifacts
 ./build.sh clean svt-tools --yes               # re-run: cd sv-timing && python tools/svt.py setup
 ```
+
+After a `regen` clean, rebuild costs: `g6lc_qemu/qemu/build` → full QEMU reconfigure/build;
+`docs/website/node_modules` → `bun install`; MbgenSim → UE rebuilds `Intermediate/` /
+`Binaries/` on next editor open (`Saved/` is logs/autosaves only).
+
+**Out of scope** (invariant: never write outside the repo): on this Windows host the
+project also consumes C: — the WSL `ext4.vhdx` (dynamic; does not shrink after deletes,
+compact with `wsl --shutdown` + `Optimize-VHD` only when no WSL job runs), WSL
+`/root/{apu-guest2,cts,.cache/ccache,…}`, `%LOCALAPPDATA%/Temp/cva6-artifacts`
+(the approved pull destination, `AGENTS.md`), `C:/Users/<u>/cva6-artifacts`, and agent
+worktrees under `~/.grok/worktrees/cva6`. `clean` never touches these; they are manual.
 
 ---
 
@@ -230,7 +280,7 @@ repo root (opt-in clean — allowlisted leaves only):
   sv-timing/target/       # Cargo build (clean svt | rust-target)
   sv-timing/.tools/       # contained rustup/cargo (clean svt-tools --yes)
   sv-timing/.sv-timing-{out,cache}/  # package defaults (clean svt)
-  remote-runs/<tag>/      # remote proxy pulls (clean traces | runs --yes); builds/ protected
+  remote-runs/<tag>/      # remote proxy pulls (clean traces | runs | logs --yes); builds/ protected
   .cache/<entry>/         # repo-root scratch (clean repo-cache --yes)
   <pkg>/target/ …         # regenerable build outputs (clean regen)
 ```

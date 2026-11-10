@@ -5,6 +5,8 @@
 // artifacts. Deletions are allowlist-guarded; never walks the whole repo.
 
 import {
+  createReadStream,
+  createWriteStream,
   existsSync,
   lstatSync,
   readFileSync,
@@ -12,8 +14,10 @@ import {
   realpathSync,
   statSync,
 } from "node:fs";
-import { rm } from "node:fs/promises";
-import { isAbsolute, join, normalize, resolve, sep } from "node:path";
+import { rename, rm, utimes } from "node:fs/promises";
+import { dirname, isAbsolute, join, normalize, resolve, sep } from "node:path";
+import { pipeline } from "node:stream/promises";
+import { createGzip } from "node:zlib";
 
 import { DEFAULT_CONFIG } from "../config/defaults.ts";
 import type { CleanConfig } from "../config/schema.ts";
@@ -47,6 +51,8 @@ export type CleanPurpose =
   | "traces"
   /** Whole remote runs superseded within their tag family (stale, uncited, not newest-N). */
   | "runs"
+  /** Gzip oversized logs inside stale remote runs in place (content kept, cited runs included). */
+  | "logs"
   /** Stale children of the repo-root scratch `.cache/`. */
   | "repo-cache"
   /** Regenerable build outputs (Cargo targets, UE intermediates, Next.js) not used recently. */
@@ -72,6 +78,7 @@ export const CLEAN_PURPOSES: CleanPurpose[] = [
   "svt-tools",
   "traces",
   "runs",
+  "logs",
   "repo-cache",
   "regen",
   "workspace",
@@ -85,6 +92,7 @@ export const CLEAN_REQUIRES_YES: ReadonlySet<CleanPurpose> = new Set([
   "svt-tools",
   "traces",
   "runs",
+  "logs",
   "repo-cache",
   "workspace",
 ]);
@@ -93,6 +101,7 @@ export const CLEAN_REQUIRES_YES: ReadonlySet<CleanPurpose> = new Set([
 export const REPO_DATA_PURPOSES: ReadonlySet<CleanPurpose> = new Set([
   "traces",
   "runs",
+  "logs",
   "repo-cache",
   "regen",
 ]);
@@ -114,10 +123,14 @@ export interface CleanTarget {
   rootKind: "workspace" | "repo-sim" | "repo-pkg" | "repo-data";
   /** When set, only these files are removed (the target dir itself stays). */
   files?: string[];
+  /** `gzip`: compress `files` in place to `<file>.gz` instead of removing them. */
+  action?: "gzip";
   /**
    * Why the target is kept by default: `active` (modified within
-   * `activeAgeDays`), `cited` (run tag referenced by a tracked file — evidence),
-   * `kept` (newest-N of its tag family). Lifted by --include-active / --include-cited.
+   * `activeAgeDays`), `cited` (run tag referenced by a tracked file — evidence;
+   * the run is never deleted whole, its trace dumps only until `citedMaxAgeDays`),
+   * `kept` (newest-N of its tag family, until `keptMaxAgeDays`).
+   * Lifted by --include-active / --include-cited.
    */
   hold?: "active" | "cited" | "kept";
   /** Selectable children (aggregate repo-data targets); status shows the parent. */
@@ -211,8 +224,8 @@ function dirChildren(dir: string): string[] {
   }
 }
 
-/** Trace files (by suffix) under `dir`, with total bytes. Never follows symlinks. */
-function findTraceFiles(dir: string, suffixes: string[]): { files: string[]; bytes: number } {
+/** Files (by suffix, at least `minBytes`) under `dir`, with total bytes. Never follows symlinks. */
+function findTraceFiles(dir: string, suffixes: string[], minBytes = 0): { files: string[]; bytes: number } {
   const files: string[] = [];
   let bytes = 0;
   const walk = (p: string): void => {
@@ -231,7 +244,7 @@ function findTraceFiles(dir: string, suffixes: string[]): { files: string[]; byt
         continue;
       }
       if (st.isDirectory()) walk(c);
-      else if (st.isFile() && suffixes.some((s) => n.toLowerCase().endsWith(s))) {
+      else if (st.isFile() && st.size >= minBytes && suffixes.some((s) => n.toLowerCase().endsWith(s))) {
         files.push(c);
         bytes += st.size;
       }
@@ -282,6 +295,11 @@ export function listRepoDataTargets(
 ): CleanTarget[] {
   const activeMs = cfg.activeAgeDays * 86_400_000;
   const isActive = (m: number | null) => m != null && now - m < activeMs;
+  // A newest-of-family hold expires after its max age (0 = never). A cited run
+  // is evidence and is never deleted whole; only its trace-dump hold expires,
+  // so the bulk goes and logs / results / summaries stay.
+  const within = (days: number, m: number | null) => days <= 0 || m == null || now - m < days * 86_400_000;
+  const tracesCited = (tag: string, m: number | null) => citedTags.has(tag) && within(cfg.citedMaxAgeDays, m);
   const out: CleanTarget[] = [];
 
   const runsRoot = join(repoRoot, cfg.remoteRunsDir);
@@ -308,7 +326,7 @@ export function listRepoDataTargets(
       requiresYes: true,
       rootKind: "repo-data",
       files: tr.files,
-      hold: isActive(r.mtimeMs) ? "active" : citedTags.has(r.tag) ? "cited" : undefined,
+      hold: isActive(r.mtimeMs) ? "active" : tracesCited(r.tag, r.mtimeMs) ? "cited" : undefined,
     });
   }
   out.push(aggregate("traces", runsRoot, `${cfg.remoteRunsDir} traces`, traceParts, "runs"));
@@ -335,13 +353,35 @@ export function listRepoDataTargets(
           ? "active"
           : citedTags.has(r.tag)
             ? "cited"
-            : i < cfg.keepRunsPerFamily
+            : i < cfg.keepRunsPerFamily && within(cfg.keptMaxAgeDays, r.mtimeMs)
               ? "kept"
               : undefined,
       });
     });
   }
   out.push(aggregate("runs", runsRoot, `${cfg.remoteRunsDir} superseded`, runParts, "runs"));
+
+  // Oversized logs are compressed, not deleted, so cited and family-head runs
+  // are candidates too; only active runs (possibly still being written) wait.
+  const logParts: CleanTarget[] = [];
+  for (const r of runs) {
+    const lg = findTraceFiles(r.path, cfg.logSuffixes, cfg.logCompressMinMiB * 1024 * 1024);
+    if (lg.files.length === 0) continue;
+    logParts.push({
+      purpose: "logs",
+      path: r.path,
+      label: `${cfg.remoteRunsDir}/${r.tag} (logs, gzip)`,
+      present: true,
+      bytes: lg.bytes,
+      mtimeMs: r.mtimeMs,
+      requiresYes: true,
+      rootKind: "repo-data",
+      files: lg.files,
+      action: "gzip",
+      hold: isActive(r.mtimeMs) ? "active" : undefined,
+    });
+  }
+  out.push(aggregate("logs", runsRoot, `${cfg.remoteRunsDir} big logs`, logParts, "runs"));
 
   const cacheRoot = join(repoRoot, cfg.repoCacheDir);
   const cacheParts: CleanTarget[] = [];
@@ -429,7 +469,15 @@ export interface CleanRemoveResult {
   purpose: CleanPurpose;
   path: string;
   label: string;
-  status: "removed" | "would-remove" | "skipped-missing" | "skipped-age" | "skipped-filter" | "refused";
+  status:
+    | "removed"
+    | "would-remove"
+    | "compressed"
+    | "would-compress"
+    | "skipped-missing"
+    | "skipped-age"
+    | "skipped-filter"
+    | "refused";
   detail?: string;
   bytes: number;
 }
@@ -922,11 +970,38 @@ export function purposesFromSubcommand(sub: string): CleanPurpose[] | null {
   if (s === "remote-traces") return ["traces"];
   if (s === "remote-runs") return ["runs"];
   if (s === "regenerable") return ["regen"];
+  if (s === "compress-logs") return ["logs"];
   // Everything stale and reclaimable at repo level, holds still apply.
-  if (s === "stale") return ["traces", "runs", "repo-cache", "regen"];
+  if (s === "stale") return ["traces", "runs", "logs", "repo-cache", "regen"];
   if ((CLEAN_PURPOSES as string[]).includes(s)) return [s as CleanPurpose];
   // Legacy flags handled in command, not here.
   return null;
+}
+
+/**
+ * Compress `file` to `<file>.gz` (streamed; never buffers the whole file),
+ * then drop the original. The `.gz` keeps the original mtime and the parent
+ * directory's mtime is restored, so compression does not make a run "active"
+ * or reorder its tag family. Returns bytes saved; a missing file saves 0.
+ */
+async function gzipInPlace(file: string): Promise<number> {
+  if (!existsSync(file)) return 0;
+  const st = statSync(file);
+  const dir = dirname(file);
+  const dst = statSync(dir);
+  const out = `${file}.gz`;
+  const partial = `${out}.partial`;
+  try {
+    await pipeline(createReadStream(file), createGzip({ level: 6 }), createWriteStream(partial));
+  } catch (e) {
+    await rm(partial, { force: true });
+    throw e;
+  }
+  await rename(partial, out);
+  await utimes(out, st.atime, st.mtime);
+  await rm(file, { force: true });
+  await utimes(dir, dst.atime, dst.mtime);
+  return st.size - statSync(out).size;
 }
 
 /**
@@ -976,7 +1051,7 @@ export async function removeCleanTargets(
         purpose: t.purpose,
         path: t.path,
         label: t.label,
-        status: "would-remove",
+        status: t.action === "gzip" ? "would-compress" : "would-remove",
         bytes: t.bytes,
       });
       continue;
@@ -995,6 +1070,12 @@ export async function removeCleanTargets(
         continue;
       }
       try {
+        if (t.action === "gzip") {
+          let saved = 0;
+          for (const f of t.files) saved += await gzipInPlace(f);
+          results.push({ purpose: t.purpose, path: t.path, label: t.label, status: "compressed", bytes: saved });
+          continue;
+        }
         for (const f of t.files) await rm(f, { force: true });
         results.push({ purpose: t.purpose, path: t.path, label: t.label, status: "removed", bytes: t.bytes });
       } catch (e) {

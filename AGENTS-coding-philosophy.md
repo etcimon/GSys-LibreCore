@@ -209,6 +209,7 @@ for tool correctness is the package soak above.
 | STA handoff seeds | `./build.sh clean sta` |
 | Cargo `sv-timing/target` | `./build.sh clean svt` **or** `cd sv-timing && python tools/svt.py clean` |
 | Contained rustup/cargo `.tools` | `./build.sh clean svt-tools --yes` **or** `python tools/svt.py clean --all` |
+| Remote-run pulls, repo `.cache/`, regenerable package outputs | `./build.sh clean stale --dry-run` then `--yes` (cited evidence runs keep logs/results; see `AGENTS-build-platform.md` §2.6) |
 
 **Normative fix priority (do not invert):**
 

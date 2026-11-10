@@ -1056,6 +1056,17 @@ export interface CleanConfig {
   activeAgeDays: number;
   /** `clean runs`: newest N runs kept per tag family (tag minus `-rN` / timestamp suffix). */
   keepRunsPerFamily: number;
+  /** The newest-of-family hold expires once a run is older than this (days; 0 = never). */
+  keptMaxAgeDays: number;
+  /**
+   * Trace dumps in a cited (evidence) run become reclaimable once it is older
+   * than this (days; 0 = never). The run itself — logs, results — is kept.
+   */
+  citedMaxAgeDays: number;
+  /** File-name suffixes of logs that `clean logs` may gzip in place. */
+  logSuffixes: string[];
+  /** `clean logs`: only logs at least this large (MiB) are compressed. */
+  logCompressMinMiB: number;
   /** Repo-root scratch cache (`clean repo-cache`). */
   repoCacheDir: string;
   /** Regenerable build outputs (Cargo targets, UE intermediates, Next.js) for `clean regen`. */

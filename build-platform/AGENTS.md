@@ -33,10 +33,13 @@ Preserve these in every change (they are why the platform is reliable):
    (`clean sim` → repo-root `work-ver/`; `clean svt` → `sv-timing/target` and
    package out/cache; `clean svt-tools` → `sv-timing/.tools`; and the
    `workspace.clean` leaves: `clean traces|runs` → `remote-runs/<tag>` (never
-   `builds/`), `clean repo-cache` → repo-root `.cache/*`, `clean regen` → the
+   `builds/`), `clean logs` → gzip-in-place of logs ≥ `logCompressMinMiB` in
+   non-active runs, `clean repo-cache` → repo-root `.cache/*`, `clean regen` → the
    listed regenerable build dirs). Repo-level selection applies holds — active
-   (< `activeAgeDays`), cited (tag referenced by a tracked file = evidence),
-   newest `keepRunsPerFamily` — lifted only by `--include-active|--include-cited`.
+   (< `activeAgeDays`), cited (tag referenced by a tracked file = evidence: never
+   deleted whole by default; its trace dumps become reclaimable after
+   `citedMaxAgeDays`), newest `keepRunsPerFamily` (expiring after
+   `keptMaxAgeDays`) — lifted early only by `--include-active|--include-cited`.
    Never walk the whole repo or touch `core/` / crates / NDA PDK.
 4. **Cross-platform by construction.** No OS-specific assumptions outside
    `src/platform/`. Use `platform/os.ts`, `platform/exec.ts`, `platform/shell.ts`
@@ -753,12 +756,24 @@ Coding loop: [`AGENTS-coding-philosophy.md`](../AGENTS-coding-philosophy.md) §2
 | **`svt`** (`rust-target`, `sv-timing-target`) | **repo** `sv-timing/target`, `.sv-timing-out`, `.sv-timing-cache` | Not under `workspace/`; allowlisted leaf only |
 | **`svt-tools`** | **repo** `sv-timing/.tools` | Requires `--yes`; re-run package `python tools/svt.py setup` |
 | Filters | `--older-than`, `--execution last\|failed\|ok`, `--target` | Stamp-aware selection for timings packages |
+| `traces` / `runs` / `logs` | `listRepoDataTargets` over `remote-runs/<tag>` | Holds `active` / `cited` / `kept`; `kept` expires after `keptMaxAgeDays`, cited traces after `citedMaxAgeDays`; a cited run is never a `runs` target unless `--include-cited` |
+| `logs` | `CleanTarget.action = "gzip"` → `gzipInPlace` | Streamed `node:zlib` gzip to `<file>.gz.partial` → rename → drop original; restores file + parent-dir mtimes; status `compressed` / `would-compress` |
+| `repo-cache` / `regen` | repo-root `.cache/*`, `regenerableDirs` | Active hold only; allowlist roots come from `workspace.clean` |
+
+Repo-level behaviour is covered by `test/clean-repo-data.test.ts` (families, holds and
+their expiry, trace-only removal, gzip round-trip + mtimes, allowlist refusal). A new
+repo-level purpose = add it to `CleanPurpose`, `CLEAN_PURPOSES`, `CLEAN_REQUIRES_YES` /
+`REPO_DATA_PURPOSES` as applicable, emit parts in `listRepoDataTargets`, map aliases in
+`purposesFromSubcommand` (and `stale` if routine), extend the test, then document it in
+repo-root `AGENTS-build-platform.md` §2.6.
 
 ```bash
 bun run src/cli/index.ts clean status
 bun run src/cli/index.ts clean timings --older-than 14d --dry-run
 bun run src/cli/index.ts clean svt
 bun run src/cli/index.ts clean svt-tools --yes
+bun run src/cli/index.ts clean stale --older-than 2d --include-active --dry-run
+bun run src/cli/index.ts clean logs --dry-run
 ```
 
 **`timings` host adapter** (`src/tooling/timings.ts`): expand flists → portable `.f`,

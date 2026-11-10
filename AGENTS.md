@@ -294,6 +294,15 @@ A failed rsync now propagates failure; a partial download is not complete eviden
 This is diagnostic-artifact storage, not permission to install managed tools
 outside the build-platform workspace.
 
+**Reclaiming E: (2026-11-10):** use the build-platform `clean`, never ad-hoc `rm` in
+`remote-runs/`. Routine: `./build.sh clean diag verify formal timings stale --older-than 2d
+--include-active --dry-run`, review, then rerun with `--yes`. Cited runs (tag referenced by
+a tracked file) are evidence and are never deleted whole; after 7 days only their trace
+dumps go and logs ≥ 64 MiB are gzipped in place (read with `zcat`/`zgrep`). Uncited
+superseded runs and family heads older than 7 days are deleted. `--include-cited` deletes
+evidence and needs explicit approval. Details: `AGENTS-build-platform.md` §2.6. The C:
+locations above (and the WSL disk) are outside `clean` and are managed by hand.
+
 **Verilator 5.008 runtime caveat (same review):** `VL_CONSTHI_W_*X` shifts `o`
 then zero-fills with absolute word indices through `o`, which can overwrite
 host stack data for wide config constants. `run_runtime_repair.py` reproduces
