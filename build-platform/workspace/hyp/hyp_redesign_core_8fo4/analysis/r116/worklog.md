@@ -224,3 +224,26 @@ unchanged).
 
 **r125** (model `ffdb9de6…`, sim-PGO 225 profiles, 12/12 smokes) is running
 with a 1.5B-cycle budget and the marker observer. Userspace not yet reached.
+
+## 10. r125 outcome and the held-PA capture (r126)
+
+**r125** (model `ffdb9de6…`) passed the 475.3M assertion point and ran to
+1,284,039,107 cycles: `Unpacking initramfs...`, `workingset`, squashfs,
+jffs2, `Freeing initrd memory: 908K`, io schedulers `mq-deadline` and
+`kyber`, `shpchp`, `switchtec: loaded.` (UART `[19.454]`). 12 stream
+refusals and 6 hang dumps (all transient). It stopped on
+`g6lc_pa_shadow_eq` (`load_unit.sv`): the live held load PA differed from
+the `load_pa_now_v`-gated shadow. r48 had widened the `load_pa_q` write
+enable to `valid_i && dtlb_hit_i` on the argument that the key cannot change
+while its valid bit is set; the boot refutes that argument. Which input
+moved was not traced. Commit `ad6a429b9` writes the register under
+`load_pa_now_v` again (the shadow's own definition), giving back the r48
+enable-cone timing gain until it is re-derived with this case covered.
+
+The first observer flagged r125 as `model-error` at 363M because its check
+matched the testbench's non-fatal `%Warning … Assertion failed … R Response
+Errored` lines. The checker now matches `%Error` lines only; a second
+observer was attached for the rest of that run.
+
+**r126** (model `3a82cda6…`, sim-PGO 225 profiles, 12/12 smokes) is running
+with a 3B-cycle budget. Userspace markers not yet reached.
