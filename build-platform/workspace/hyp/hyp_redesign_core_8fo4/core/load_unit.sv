@@ -775,7 +775,14 @@ assign ldbuf_full = &ldbuf_valid_q;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni)
       load_pa_q <= '0;
-    else if (valid_i && dtlb_hit_i)
+    // r126: back to the exact capture qualifier. The r48 argument above
+    // ("a TLB entry cannot change under a continuously asserted hit") does
+    // not hold on the Linux boot: r125 @1,284,039,107 rewrote a live key
+    // outside a capture cycle with a different value (g6lc_pa_shadow_eq;
+    // which input moved was not traced).
+    // The cheap enable is a timing optimization that must be re-derived
+    // with that case covered; correctness first.
+    else if (load_pa_now_v)
       load_pa_q <= load_pa_now;
   end
   // One select into every physical-address bit is a 56-way fanout.
