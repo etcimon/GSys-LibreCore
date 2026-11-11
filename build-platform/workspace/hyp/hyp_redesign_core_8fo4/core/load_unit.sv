@@ -1792,8 +1792,15 @@ assign ldbuf_full = &ldbuf_valid_q;
     misaligned_entry_excepts :
     assert property (@(posedge clk_i) disable iff (~rst_ni)
         (mis_trk_q[gi] && ldbuf_r && ldbuf_rindex == ldbuf_id_t'(gi)) |->
+          // r124 (@475,300,009): the privileged spec lets a misaligned
+          // load report its page/access fault instead of the misaligned
+          // exception ("may have either higher or lower priority"); the
+          // WAIT_TRANSLATION head arm publishes the MMU fault for the tid.
           (valid_o && ex_o.valid &&
-           ex_o.cause == riscv::LD_ADDR_MISALIGNED &&
+           (ex_o.cause == riscv::LD_ADDR_MISALIGNED ||
+            ex_o.cause == riscv::LD_ACCESS_FAULT ||
+            ex_o.cause == riscv::LOAD_PAGE_FAULT ||
+            ex_o.cause == riscv::LOAD_GUEST_PAGE_FAULT) &&
            (trans_id_o == ldbuf_q[gi].trans_id) &&
            ((req_port_o.kill_req && ldbuf_last_id_q == ldbuf_id_t'(gi)) ||
             rkill_q[gi] || ex_pend_q[gi])) ||
