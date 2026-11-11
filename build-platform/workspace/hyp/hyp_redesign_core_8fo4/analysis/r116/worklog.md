@@ -195,3 +195,32 @@ at ~504M cycles and committed as `6a5d55603` (frontend guard). Deterministic
 replay `hyp8-osbi-scalar-r122diag` (same model, frontend, commit and refusal
 traces windowed on 441,937,800–441,942,000) is running to classify it. This
 is a new frontier, not a userspace result; both markers are still required.
+
+## 9. Load-unit deadlock (r124) and misaligned-fault assertion (r125)
+
+**Wedge at 441,938,308 classified (`hyp8-osbi-scalar-r123diag`, re-armed
+`+hang_dump`, commit `6a85016b8`).** The commit head was load tid 18
+(`ld t1,0(t0)` at `0xffffffff80657f58`), issued and queued in the LSU bypass
+FIFO. The load unit was occupied by younger load tid 30 (vaddr
+`0xffffffd801807558`): flagged speculative, DTLB miss, no translation
+request, PTW idle. It ping-ponged `IDLE`<->`WAIT_SPEC_LOAD` waiting to
+become non-speculative, which needs the older head load to retire first.
+r71 had cleared the flag only for the commit head. Fix `c5c9262de`: after
+32 cycles in that loop the load is handed back through the existing T33
+replay path (pop + `lu_replay_o`, refetched at commit), mirrored in the
+reference FSM. `hyp8-r124-aggregate-t4` model `b661f20d…`: 12/12 smokes,
+identical cycle counts.
+
+**r124** passed 441.9M and went on: UDP/UDP-Lite hash tables,
+`NET: Registered PF_UNIX/PF_LOCAL`, `PCI: CLS 0 bytes` (UART `[4.275]`,
+~474M cycles), with 12 stream-continuity refusals. It stopped at
+475,300,009 on `misaligned_entry_excepts`: slot 0 (tid 9) drained by rkill
+with cause 0xd (load page fault) published by the `WAIT_TRANSLATION` head
+arm for the same tid. The privileged spec allows address-misaligned
+exceptions to rank either above or below page/access faults, so that is
+legal. Commit `7eb2f6e1c` accepts misaligned, access-fault, page-fault or
+guest-page-fault causes there (sim-only check; tid and drain conditions
+unchanged).
+
+**r125** (model `ffdb9de6…`, sim-PGO 225 profiles, 12/12 smokes) is running
+with a 1.5B-cycle budget and the marker observer. Userspace not yet reached.
