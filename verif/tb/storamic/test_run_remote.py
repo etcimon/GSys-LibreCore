@@ -423,6 +423,38 @@ class PrepareTests(unittest.TestCase):
                          "tb_g6lc_storamic_cpu_origin.sv", "cva6.sv"):
                 self.assertNotIn(name, manifest["sources"])
 
+    def test_strict_pins_and_core_scc_register_and_track_closure(self):
+        for stage in ("cpu-strict-pins", "core-scc",
+                      "cpu-strict-pins,core-scc"):
+            with self.subTest(stage=stage), \
+                    tempfile.TemporaryDirectory(
+                        dir=ROOT / "build-platform/workspace") as tmp:
+                self.assertEqual(self.invoke(
+                    Path(tmp), "--prepare-only", "--stages", stage), 0)
+                plan = json.loads(
+                    next(Path(tmp).glob("*/launch-plan.json")).read_text())
+                manifest = json.loads(Path(plan["manifest"]).read_text())
+                self.assertEqual(manifest["stages"], plan["stages"])
+                # cpu_origin closure is the shared proof/diagnostic basis.
+                self.assertGreater(len(manifest["sources"]), 260)
+                for name in ("cpu_origin_plan.json", "cva6.sv",
+                             "csr_regfile.sv", "g6lc_core_scc_top.sv",
+                             "run_core_scc.py"):
+                    self.assertIn(name, manifest["sources"])
+                if "cpu-strict-pins" in stage:
+                    for name in ("cpu_strict_pins.json",
+                                 "cpu_strict_fields.vlt",
+                                 "g6lc_strict_pins_canary.sv",
+                                 "tb_g6lc_storamic_cpu_origin.sv",
+                                 "run_cpu_strict_pins.py"):
+                        self.assertIn(name, manifest["sources"])
+
+    def test_core_scc_is_not_a_simulation_stage(self):
+        # core-scc is Yosys-only: it must not force the C++/Verilator runtime.
+        self.assertNotIn("core-scc", RUNNER.SIMULATION_STAGES)
+        self.assertIn("core-scc", RUNNER.ALLOWED_STAGES)
+        self.assertIn("cpu-strict-pins", RUNNER.SIMULATION_STAGES)
+
     def test_stq_commit_flush_sources_are_leaf_only(self):
         with tempfile.TemporaryDirectory(dir=ROOT / "build-platform/workspace") as tmp:
             self.assertEqual(self.invoke(

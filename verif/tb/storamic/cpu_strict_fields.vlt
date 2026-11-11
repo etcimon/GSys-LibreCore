@@ -1,0 +1,14 @@
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: MIT
+// cpu-strict-pins "fields" diagnostic control: the frozen Verilator
+// diagnostic-representation split rules used by the CPU45/CPU46 full-core
+// diagnostic baseline. Appended verbatim to `verilator_config`.
+`verilator_config
+split_var -module "fpnew_*" -var "*_pipe_*_q"
+split_var -module "lzc" -var "*_nodes"
+split_var -module "rr_arb_tree" -var "*_nodes"
+split_var -module "wt_dcache_mem" -var "node"
+split_var -module "fpnew_*" -var "*_pipe_ready"
+split_var -module "fpnew_opgroup_block" -var "fmt_in_ready"
+split_var -module "fpnew_fma" -var "regular_status"
+split_var -module "fpnew_cast_multi" -var "fp_regular_status"

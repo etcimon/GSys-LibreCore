@@ -498,6 +498,14 @@ def main():
     if set(stages) & {"csr-scc"}:
         from run_csr_scc import run as run_csr_scc
         run_csr_scc(data, out, stages, manifest, builds, outcomes, verilator, build_model)
+    # core-scc must precede cpu-strict-pins: the strict-pins verdict is
+    # `incomplete` unless core-scc passed on the identical source manifest.
+    if set(stages) & {"core-scc"}:
+        from run_core_scc import run as run_core_scc
+        run_core_scc(data, out, stages, manifest, builds, outcomes, verilator, build_model)
+    if set(stages) & {"cpu-strict-pins"}:
+        from run_cpu_strict_pins import run as run_cpu_strict_pins
+        run_cpu_strict_pins(data, out, stages, manifest, builds, outcomes, verilator, build_model)
     config_failures = []
     profiles = [
         ("one", ["-GMaxSticks=1"], None),

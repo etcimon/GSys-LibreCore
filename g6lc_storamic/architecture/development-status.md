@@ -1,5 +1,46 @@
 # Storamic development and qualification lanes
 
+Latest C0 follow-up (CPU51, closed under the pinned-diagnostic rule): the
+full-core gate-level SCC/latch proof is a permanent registered stage
+(`core-scc`), and the strict full-CPU Verilator `UNOPTFLAT` diagnostic is a
+permanent registered stage (`cpu-strict-pins`) whose residual identities are
+pinned by name in `cpu_strict_pins.json` against that proof — any new
+identity fails, a disappeared pin is reported `stale-pin`. Verification-only;
+no production RTL changed, no `UNOPTFLAT` suppression, no FP disabling.
+- **`core-scc` (new, Yosys-only).** Whole-`cva6` gate-level flow
+  (`read_slang → hierarchy -check → proc → flatten → techmap → scc` +
+  `select -assert-none t:$dlatch t:$_DLATCH_*`) over the cpu-origin closure
+  under `g6lc_core_scc_top` (OriginEnabled=1, cv64a6 config). Requires SCC=0,
+  latches=0. Writes `core-scc-result.json` + `manifest["core_scc"]` with the
+  source-manifest hash. The `csr_regfile` mask/`DirVecOnly` revert oracle
+  stays with the existing `csr-scc` admission-mutant.
+- **`cpu-strict-pins` (new, Verilator lint).** Reproduces the CPU45/46 strict
+  diagnostic on the cpu-origin closure in both origin modes and both
+  diagnostic representations — `fields` (frozen `cpu_strict_fields.vlt` =
+  `diagnostic.vlt`) and `fp` (FP-controls-only `split_var fpnew_* *_pipe_*_q`).
+  Options are the CPU46 manifest set (`--lint-only --timing --assert
+  --threads 1 -Wno-fatal -Werror-LATCH -Werror-UNOPTFLAT -Werror-PINMISSING
+  --error-limit 0` + runtime `--unroll-count 256 --unroll-stmts 131072`), with
+  `lint_(off|on) (UNOPTFLAT|LATCH)` comment waivers stripped first. Every
+  `UNOPTFLAT` is parsed to a verbatim hierarchical identity (no line/generate
+  stripping — strictest, so a new loop cannot alias a pin).
+- **HEAD re-baseline vs CPU46.** Identical counts (fields 4, fp 21, both
+  origins); the only change is the I-cache `dreq_o` bit index `366 → 365`
+  from the ready-field split documented in `cpu-icache-ready-interface.md`.
+  `cpu_strict_pins.json` pins the observed HEAD sets with a `basis` field per
+  identity referencing the `core-scc` proof.
+- **Verdict + coupling.** PASS iff observed ⊆ pins per variant/origin; an
+  unpinned identity fails naming it; a missing pin is `stale-pin`. The stage
+  is `incomplete` unless `core-scc` passed (SCC=0, latches=0) on the identical
+  source manifest (`sources_sha256` match). Canary oracle: a looped
+  `g6lc_strict_pins_canary` injected under `g6lc_strict_pins_canary_top`
+  (which instantiates the real core) must surface an unpinned
+  `...canary.g6lc_strict_pins_canary_comb` identity — verified.
+- **Runs:** discovery `storamic-14027ce366ba` (pre-fix NameError, retained as
+  history) and `storamic-d3f6c13851a6` (all 4 diagnostics pass, canary names
+  the loop, correctly `incomplete` without `core-scc`); qualifying coupled run
+  `storamic-2dd777a4bea5` (`cpu-strict-pins,core-scc`).
+
 Latest C1 follow-up (CPU50, closed for the qualified profile): real-CPU
 `tdata`/Sdtrig trigger coverage plus the debug-origin queue/return/atomic/
 unsupported items all pass in one combined remote run. Verification-only; no

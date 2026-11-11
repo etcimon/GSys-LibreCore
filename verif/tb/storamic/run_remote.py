@@ -22,6 +22,7 @@ SIMULATION_STAGES = frozenset({
     "cpu-debug", "cpu-debug-stq-mutant", "cpu-debug-trigger",
     "cpu-debug-return", "cpu-debug-queue", "cpu-origin-unsupported",
     "cpu-origin-atomic", "origin-profile", "origin-queue",
+    "cpu-strict-pins",
     "stq-commit-flush",
 })
 ALLOWED_STAGES = SIMULATION_STAGES | frozenset({
@@ -40,7 +41,7 @@ ALLOWED_STAGES = SIMULATION_STAGES | frozenset({
     "policy-writer-synth",
     "policy-writer-formal",
     "commit-defaults-formal", "commit-defaults-synth", "load-translation-synth",
-    "fetch-queue-synth", "csr-scc",
+    "fetch-queue-synth", "csr-scc", "core-scc",
 })
 
 
@@ -343,6 +344,22 @@ def main():
             "core/include/cv64a6_imafdc_sv39_config_pkg.sv",
             "core/include/triggers_pkg.sv", "core/include/rvfi_types.svh",
             "verif/tb/storamic/run_csr_scc.py",
+        ]] if p not in sources]
+    if set(stages) & {"cpu-strict-pins", "core-scc"}:
+        cpu_plan = json.loads(
+            (root / "verif/tb/storamic/cpu_origin_plan.json").read_text())
+        cpu_closure = cpu_plan["files"] + cpu_plan.get("support_files", [])
+        sources += [p for p in [root / rel for rel in cpu_closure]
+                    if p not in sources]
+        sources += [p for p in [root / path for path in [
+            "verif/tb/storamic/cpu_origin_plan.json",
+            "verif/tb/storamic/g6lc_core_scc_top.sv",
+            "verif/tb/storamic/g6lc_strict_pins_canary.sv",
+            "verif/tb/storamic/cpu_strict_fields.vlt",
+            "verif/tb/storamic/cpu_strict_pins.json",
+            "verif/tb/storamic/tb_g6lc_storamic_cpu_origin.sv",
+            "verif/tb/storamic/run_cpu_strict_pins.py",
+            "verif/tb/storamic/run_core_scc.py",
         ]] if p not in sources]
     if args.runtime_record:
         record = args.runtime_record.resolve()

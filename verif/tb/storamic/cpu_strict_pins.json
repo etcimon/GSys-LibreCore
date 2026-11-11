@@ -1,0 +1,250 @@
+{
+ "description": "cpu-strict-pins frozen UNOPTFLAT identity pins. Verdict: observed set must be a subset of pins per variant+origin; unpinned identity => fail; disappeared pin => stale-pin (pins may only shrink). Basis: full-core gate-level SCC=0/latch=0 proof (core-scc stage) on the identical source manifest.",
+ "top": "tb_g6lc_storamic_cpu_origin",
+ "closure": "cpu_origin_plan.json (264 files + support_files) + tb_g6lc_storamic_cpu_origin.sv",
+ "diagnostic": {
+  "base": [
+   "--lint-only",
+   "--timing",
+   "--assert",
+   "--threads",
+   "1",
+   "-Wno-fatal",
+   "-Werror-LATCH",
+   "-Werror-UNOPTFLAT",
+   "-Werror-PINMISSING",
+   "--error-limit",
+   "0"
+  ],
+  "unroll": [
+   "--unroll-count",
+   "256",
+   "--unroll-stmts",
+   "131072"
+  ],
+  "controls": {
+   "fields": "cpu_strict_fields.vlt",
+   "fp": "inline split_var -module \"fpnew_*\" -var \"*_pipe_*_q\""
+  },
+  "generics": [
+   "-GOriginEnabled={0,1}",
+   "-GIntegerDiagnostic=0"
+  ],
+  "identity_regex": "UNOPTFLAT:.*?Circular combinational logic: '([^']+)'"
+ },
+ "pinned_from": "HEAD re-baseline storamic-14027ce366ba strict-pins-observed.json; diff vs CPU46 storamic-cpu46core-f62bf710 = icache dreq_o bit index 366->365 only (ready-field split, cpu-icache-ready-interface.md); counts unchanged (fields 4, fp 21)",
+ "variants": {
+  "fields": {
+   "origin0": [
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.csr_regfile_i.gen_single.i_csr.update_access_exception",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.lsu_i.__Vcellout__i_load_unit__req_port_o",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.flush_ctrl_id",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.gen_cache_wt.i_cache_subsystem.i_g6lc_icache.dreq_o[365]",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    }
+   ],
+   "origin1": [
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.csr_regfile_i.gen_single.i_csr.update_access_exception",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.lsu_i.__Vcellout__i_load_unit__req_port_o",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.flush_ctrl_id",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.gen_cache_wt.i_cache_subsystem.i_g6lc_icache.dreq_o[365]",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    }
+   ]
+  },
+  "fp": {
+   "origin0": [
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.csr_regfile_i.gen_single.i_csr.update_access_exception",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.fpu_gen.fpu_i.fpu_gen.i_fpnew_bulk.gen_operation_groups[0].i_opgroup_block.gen_parallel_slices[0].active_format.i_fmt_slice.gen_num_lanes[0].active_lane.lane_instance.i_fma.regular_status",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.fpu_gen.fpu_i.fpu_gen.i_fpnew_bulk.gen_operation_groups[0].i_opgroup_block.gen_parallel_slices[1].active_format.i_fmt_slice.gen_num_lanes[0].active_lane.lane_instance.i_fma.inp_pipe_ready",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.fpu_gen.fpu_i.fpu_gen.i_fpnew_bulk.gen_operation_groups[0].i_opgroup_block.gen_parallel_slices[1].active_format.i_fmt_slice.gen_num_lanes[0].active_lane.lane_instance.i_fma.mid_pipe_ready",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.fpu_gen.fpu_i.fpu_gen.i_fpnew_bulk.gen_operation_groups[0].i_opgroup_block.gen_parallel_slices[1].active_format.i_fmt_slice.gen_num_lanes[0].active_lane.lane_instance.i_fma.out_pipe_ready",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.fpu_gen.fpu_i.fpu_gen.i_fpnew_bulk.gen_operation_groups[1].i_opgroup_block.gen_merged_slice.i_multifmt_slice.gen_num_lanes[0].active_lane.lane_instance.gen_thmulti_c910_divsqrt.i_fpnew_divsqrt_th_64_c910.inp_pipe_ready",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.fpu_gen.fpu_i.fpu_gen.i_fpnew_bulk.gen_operation_groups[1].i_opgroup_block.gen_merged_slice.i_multifmt_slice.gen_num_lanes[0].active_lane.lane_instance.gen_thmulti_c910_divsqrt.i_fpnew_divsqrt_th_64_c910.out_pipe_ready",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.fpu_gen.fpu_i.fpu_gen.i_fpnew_bulk.gen_operation_groups[2].i_opgroup_block.gen_parallel_slices[1].active_format.i_fmt_slice.gen_num_lanes[0].active_lane.lane_instance.i_noncomp.inp_pipe_ready",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.fpu_gen.fpu_i.fpu_gen.i_fpnew_bulk.gen_operation_groups[3].i_opgroup_block.fmt_in_ready",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.fpu_gen.fpu_i.fpu_gen.i_fpnew_bulk.gen_operation_groups[3].i_opgroup_block.gen_merged_slice.i_multifmt_slice.gen_num_lanes[0].active_lane.lane_instance.i_fpnew_cast_multi.fp_regular_status",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.fpu_gen.fpu_i.fpu_gen.i_fpnew_bulk.gen_operation_groups[3].i_opgroup_block.gen_merged_slice.i_multifmt_slice.gen_num_lanes[0].active_lane.lane_instance.i_fpnew_cast_multi.inp_pipe_ready",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.fpu_gen.fpu_i.fpu_gen.i_fpnew_bulk.gen_operation_groups[3].i_opgroup_block.gen_merged_slice.i_multifmt_slice.gen_num_lanes[0].active_lane.lane_instance.i_fpnew_cast_multi.mid_pipe_ready",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.fpu_gen.fpu_i.fpu_gen.i_fpnew_bulk.i_arbiter.gen_arbiter.req_nodes",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.lsu_i.__Vcellout__i_load_unit__req_port_o",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.lsu_i.i_load_unit.ldbuf_free_index_multi_gen.lzc_windex_i.gen_lzc.index_nodes",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.flush_ctrl_id",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.gen_cache_wt.i_cache_subsystem.i_g6lc_icache.dreq_o[365]",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_mem.gen_fwd_lane[0].node",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_mem.i_rr_arb_tree.gen_arbiter.gnt_nodes",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_wbuffer.i_dirty_rr.gen_arbiter.index_nodes",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.i_frontend.gen_tage_lite.i_bp_top.gen_ckpt.i_ckpt.gen_oldest_live[0].gen_lzc.i_lzc.gen_lzc.sel_nodes",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    }
+   ],
+   "origin1": [
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.csr_regfile_i.gen_single.i_csr.update_access_exception",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.fpu_gen.fpu_i.fpu_gen.i_fpnew_bulk.gen_operation_groups[0].i_opgroup_block.gen_parallel_slices[0].active_format.i_fmt_slice.gen_num_lanes[0].active_lane.lane_instance.i_fma.regular_status",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.fpu_gen.fpu_i.fpu_gen.i_fpnew_bulk.gen_operation_groups[0].i_opgroup_block.gen_parallel_slices[1].active_format.i_fmt_slice.gen_num_lanes[0].active_lane.lane_instance.i_fma.inp_pipe_ready",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.fpu_gen.fpu_i.fpu_gen.i_fpnew_bulk.gen_operation_groups[0].i_opgroup_block.gen_parallel_slices[1].active_format.i_fmt_slice.gen_num_lanes[0].active_lane.lane_instance.i_fma.mid_pipe_ready",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.fpu_gen.fpu_i.fpu_gen.i_fpnew_bulk.gen_operation_groups[0].i_opgroup_block.gen_parallel_slices[1].active_format.i_fmt_slice.gen_num_lanes[0].active_lane.lane_instance.i_fma.out_pipe_ready",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.fpu_gen.fpu_i.fpu_gen.i_fpnew_bulk.gen_operation_groups[1].i_opgroup_block.gen_merged_slice.i_multifmt_slice.gen_num_lanes[0].active_lane.lane_instance.gen_thmulti_c910_divsqrt.i_fpnew_divsqrt_th_64_c910.inp_pipe_ready",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.fpu_gen.fpu_i.fpu_gen.i_fpnew_bulk.gen_operation_groups[1].i_opgroup_block.gen_merged_slice.i_multifmt_slice.gen_num_lanes[0].active_lane.lane_instance.gen_thmulti_c910_divsqrt.i_fpnew_divsqrt_th_64_c910.out_pipe_ready",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.fpu_gen.fpu_i.fpu_gen.i_fpnew_bulk.gen_operation_groups[2].i_opgroup_block.gen_parallel_slices[1].active_format.i_fmt_slice.gen_num_lanes[0].active_lane.lane_instance.i_noncomp.inp_pipe_ready",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.fpu_gen.fpu_i.fpu_gen.i_fpnew_bulk.gen_operation_groups[3].i_opgroup_block.fmt_in_ready",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.fpu_gen.fpu_i.fpu_gen.i_fpnew_bulk.gen_operation_groups[3].i_opgroup_block.gen_merged_slice.i_multifmt_slice.gen_num_lanes[0].active_lane.lane_instance.i_fpnew_cast_multi.fp_regular_status",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.fpu_gen.fpu_i.fpu_gen.i_fpnew_bulk.gen_operation_groups[3].i_opgroup_block.gen_merged_slice.i_multifmt_slice.gen_num_lanes[0].active_lane.lane_instance.i_fpnew_cast_multi.inp_pipe_ready",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.fpu_gen.fpu_i.fpu_gen.i_fpnew_bulk.gen_operation_groups[3].i_opgroup_block.gen_merged_slice.i_multifmt_slice.gen_num_lanes[0].active_lane.lane_instance.i_fpnew_cast_multi.mid_pipe_ready",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.fpu_gen.fpu_i.fpu_gen.i_fpnew_bulk.i_arbiter.gen_arbiter.req_nodes",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.lsu_i.__Vcellout__i_load_unit__req_port_o",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.ex_stage_i.lsu_i.i_load_unit.ldbuf_free_index_multi_gen.lzc_windex_i.gen_lzc.index_nodes",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.flush_ctrl_id",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.gen_cache_wt.i_cache_subsystem.i_g6lc_icache.dreq_o[365]",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_mem.gen_fwd_lane[0].node",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_mem.i_rr_arb_tree.gen_arbiter.gnt_nodes",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_wbuffer.i_dirty_rr.gen_arbiter.index_nodes",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    },
+    {
+     "identity": "tb_g6lc_storamic_cpu_origin.cpu.i_frontend.gen_tage_lite.i_bp_top.gen_ckpt.i_ckpt.gen_oldest_live[0].gen_lzc.i_lzc.gen_lzc.sel_nodes",
+     "basis": "gate-level core-scc SCC=0 latch=0 proof on identical source manifest (cpu-strict-pins coupling); residual UNOPTFLAT diagnostic on HEAD"
+    }
+   ]
+  }
+ }
+}
