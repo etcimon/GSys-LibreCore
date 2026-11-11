@@ -20,7 +20,8 @@ SIMULATION_STAGES = frozenset({
     "checkpoint-writer", "checkpoint-writer-reset", "vdma-ownership", "policy-writer",
     "commit-defaults", "load-translation", "fetch-queue", "cpu-origin",
     "cpu-debug", "cpu-debug-stq-mutant", "cpu-debug-trigger",
-    "cpu-debug-return", "cpu-debug-queue",
+    "cpu-debug-return", "cpu-debug-queue", "cpu-origin-unsupported",
+    "cpu-origin-atomic", "origin-profile", "origin-queue",
     "stq-commit-flush",
 })
 ALLOWED_STAGES = SIMULATION_STAGES | frozenset({
@@ -60,6 +61,8 @@ def main():
     parser.add_argument("--solver-bin", default=None,
                         help="Remote directory prepended to PATH (e.g. yices bin)")
     parser.add_argument("--output-root", type=Path)
+    parser.add_argument("--timeout", type=int, default=2400,
+                        help="Remote harness timeout in seconds")
     parser.add_argument("--prepare-only", action="store_true",
                         help="Write source manifest and launch plan locally; never contact the host")
     args = parser.parse_args()
@@ -218,7 +221,7 @@ def main():
             "verif/tb/core/tb_g6lc_fetch_queue.sv",
             "verif/tb/storamic/run_fetch_queue.py",
         ]] if p not in sources]
-    if set(stages) & {"cpu-origin"}:
+    if set(stages) & {"cpu-origin", "cpu-origin-unsupported", "cpu-origin-atomic"}:
         cpu_plan = json.loads(
             (root / "verif/tb/storamic/cpu_origin_plan.json").read_text())
         cpu_closure = cpu_plan["files"] + cpu_plan.get("support_files", [])
@@ -306,6 +309,21 @@ def main():
             "verif/tb/storamic/run_cpu_origin.py",
             "verif/tb/storamic/run_cpu_debug_queue.py",
         ]] if p not in sources]
+    if set(stages) & {"origin-profile", "origin-queue"}:
+        # Pull the cpu_origin_plan closure too: it carries every package/.svh
+        # the component benches may transitively include. Dedup makes this free
+        # when CPU stages are co-selected.
+        cpu_plan = json.loads(
+            (root / "verif/tb/storamic/cpu_origin_plan.json").read_text())
+        cpu_closure = cpu_plan["files"] + cpu_plan.get("support_files", [])
+        sources += [p for p in [root / rel for rel in cpu_closure]
+                    if p not in sources]
+        sources += [p for p in [root / path for path in [
+            "core/include/g6lc64_ooo_config_pkg.sv",
+            "verif/tb/storamic/tb_g6lc_storamic_origin_profile.sv",
+            "verif/tb/storamic/tb_g6lc_storamic_origin_queue.sv",
+            "verif/tb/storamic/run_origin_remote.py",
+        ]] if p not in sources]
     if set(stages) & {"stq-commit-flush"}:
         sources += [p for p in [root / path for path in [
             "core/include/config_pkg.sv",
@@ -388,7 +406,7 @@ def main():
         if not (str(path) in seen or seen.add(str(path)))))
     command = [
         bun, str(root / "build-platform/src/cli/index.ts"), "remote",
-        "--timeout", "2400", "py", "--", str(runner),
+        "--timeout", str(args.timeout), "py", "--", str(runner),
         "--tag", tag, "--pull", "--dest", str(dest),
         "--data", str(manifest_file),
         "--env", "STORAMIC_MANIFEST_FILE=" + manifest_file.name,
@@ -417,6 +435,14 @@ def main():
         command += ["--env", "STORAMIC_RUNTIME_JSON=" + args.runtime_json]
     if args.runtime_header_sha256:
         command += ["--env", "STORAMIC_RUNTIME_HEADER_SHA256=" + args.runtime_header_sha256]
+    # cpu-debug-trigger diagnostics: forward the optional trace/subset knobs so
+    # a remote run can emit +trace handshakes and/or run a case subset. These are
+    # runtime selectors only; they do not alter any hashed source identity.
+    for knob in ("G6LC_TRIGGER_TRACE", "G6LC_TRIGGER_ONLY", "G6LC_ATOMIC_ONLY",
+                 "G6LC_ATOMIC_TRACE", "G6LC_ATOMIC_SMT", "G6LC_QUEUE_ONLY"):
+        value = os.environ.get(knob)
+        if value:
+            command += ["--env", knob + "=" + value]
     plan = {
         "status": "prepared", "qualification": False,
         "tag": tag, "stages": stages, "blockers": blockers,

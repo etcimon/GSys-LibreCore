@@ -12,6 +12,7 @@ oracle and the LSU debug-ignore mutant.
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -41,22 +42,25 @@ LSU_NEW = "ld_st_priv_lvl_i, ld_st_v_i, 1'b0);"
 HOLD_CYCLES = 192
 SIM_TIMEOUT = 300
 BUILD_TIMEOUT = 2400
-# Implemented HoldStage coverage: 1 unaccepted AW, 2 accepted AW/held W,
-# 3 held B. HoldStage 4/5 (load AR / held R) are not yet implemented.
-STAGES = (1, 2, 3)
+# HoldStage coverage: 1 unaccepted AW, 2 accepted AW/held W, 3 held B,
+# 4 unaccepted load AR, 5 accepted AR/held R. Stages 4/5 use the queue_load
+# firmware variant (a dedicated Probe+48 load the debugger never reads).
+STAGES = (1, 2, 3, 4, 5)
+LOAD_STAGES = (4, 5)
 
 
 def _sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _images(program, cache, priv):
-    if priv not in cache:
-        normal, debug = program.build_debug_program(priv)
-        cache[priv] = {"normal": normal, "debug": debug,
-                       "program_sha256": hashlib.sha256(normal).hexdigest(),
-                       "debug_sha256": hashlib.sha256(debug).hexdigest()}
-    return cache[priv]
+def _images(program, cache, priv, queue_load=False):
+    key = (priv, queue_load)
+    if key not in cache:
+        normal, debug = program.build_debug_program(priv, queue_load=queue_load)
+        cache[key] = {"normal": normal, "debug": debug,
+                      "program_sha256": hashlib.sha256(normal).hexdigest(),
+                      "debug_sha256": hashlib.sha256(debug).hexdigest()}
+    return cache[key]
 
 
 def _case(origin, delay, priv, stage, negative=0, mutant=0):
@@ -64,22 +68,32 @@ def _case(origin, delay, priv, stage, negative=0, mutant=0):
             "negative": negative, "mutant": mutant}
 
 
+def _label(case):
+    label = (f"cpu-dbgq-o{case['origin']}-d{case['delay']}-p{case['priv']}"
+             f"-s{case['stage']}")
+    if case["negative"]:
+        label += "-n"
+    if case["mutant"]:
+        label += "-x1"
+    return label
+
+
 def _case_list():
     cases = []
-    # priv=M: stage x origin x delay positives.
+    # origin1 positives: U/S/M x HoldStage 1-5 at delay16.
+    for priv in (0, 1, 3):
+        for stage in STAGES:
+            cases.append(_case(1, 16, priv, stage))
+    # origin0 positives: M x HoldStage 1-5 at delay0.
     for stage in STAGES:
-        for origin in (0, 1):
-            for delay in (0, 16):
-                cases.append(_case(origin, delay, 3, stage))
-    # priv=M: Negative oracle on each stage at delay16, both origins.
-    for stage in STAGES:
+        cases.append(_case(0, 0, 3, stage))
+    # Negative oracle on HoldStage 3 and 5 (both origins, delay16, M).
+    for stage in (3, 5):
         for origin in (0, 1):
             cases.append(_case(origin, 16, 3, stage, negative=1))
-    # priv=U/S coverage on stage 3, origin on, delay16.
-    for priv in (0, 1):
-        cases.append(_case(1, 16, priv, 3))
-    # LSU debug-ignore mutant on stage 2 (priv=M, origin on, delay16).
-    cases.append(_case(1, 16, 3, 2, mutant=1))
+    # LSU debug-ignore mutant on HoldStage 2 and 5 (origin1, delay16, M).
+    for stage in (2, 5):
+        cases.append(_case(1, 16, 3, stage, mutant=1))
     return cases
 
 
@@ -103,7 +117,7 @@ def run(data, out, stages, manifest, builds, outcomes, verilator, build_model):
     env = _build_env(manifest)
     images = {}
     for case in _case_list():
-        _images(program, images, case["priv"])
+        _images(program, images, case["priv"], case["stage"] in LOAD_STAGES)
     manifest["cpu_debug_queue"] = {
         "plan": PLAN_REL,
         "files": len(plan["files"]),
@@ -115,12 +129,13 @@ def run(data, out, stages, manifest, builds, outcomes, verilator, build_model):
         "encoder_sha256": _sha(data / Path(ENCODER_REL).name),
         "hold_cycles": HOLD_CYCLES,
         "hold_stages": list(STAGES),
-        "hold_stages_pending": [4, 5],
-        "images": {str(priv): {
-            "entry_privilege": priv,
+        "load_stages": list(LOAD_STAGES),
+        "load_slot": "Probe+48",
+        "images": {f"p{priv}-q{int(ql)}": {
+            "entry_privilege": priv, "queue_load": ql,
             "program_sha256": img["program_sha256"],
             "debug_sha256": img["debug_sha256"]}
-            for priv, img in sorted(images.items())},
+            for (priv, ql), img in sorted(images.items())},
         "mutant": {"file": LSU_REL, "old": LSU_OLD, "new": LSU_NEW},
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
@@ -132,14 +147,10 @@ def run(data, out, stages, manifest, builds, outcomes, verilator, build_model):
                                       case["priv"], case["stage"])
         negative = case["negative"]
         mutant = case["mutant"]
-        label = f"cpu-dbgq-o{origin}-d{delay}-p{priv}-s{stage}"
-        if negative:
-            label += "-n"
-        if mutant:
-            label += "-x1"
+        label = _label(case)
         model = out / ("model-" + label)
         model.mkdir()
-        img = _images(program, images, priv)
+        img = _images(program, images, priv, stage in LOAD_STAGES)
         (model / "program.hex").write_bytes(img["normal"])
         (model / "debug.hex").write_bytes(img["debug"])
         command = [str(verilator), "--binary", "--timing", "--assert",
@@ -205,12 +216,12 @@ def run(data, out, stages, manifest, builds, outcomes, verilator, build_model):
             # LSU ignores debug_mode: debugger accesses carry the firmware
             # origin -> debug-origin-failed, no pass marker.
             ok = (rc != 0 and not pass_matches and len(fail_matches) == 1 and
-                  fail_match and fail_match.group(6) == "debug-origin-failed")
+                  fail_match and fail_match.group(5) == "debug-origin-failed")
         elif negative:
             # Negative=1 forces a wrong debug-origin expectation on Probe+8:
             # must reject debug-origin-failed and emit no pass marker.
             ok = (rc != 0 and not pass_matches and len(fail_matches) == 1 and
-                  fail_match and fail_match.group(6) == "debug-origin-failed")
+                  fail_match and fail_match.group(5) == "debug-origin-failed")
         else:
             ok = (rc == 0 and len(pass_matches) == 1 and pass_match and
                   not fail_matches and
@@ -227,8 +238,16 @@ def run(data, out, stages, manifest, builds, outcomes, verilator, build_model):
         record["pass"] = bool(ok)
         outcomes.append(record)
 
-    pristine_cases = [c for c in _case_list() if not c["mutant"]]
-    mutant_cases = [c for c in _case_list() if c["mutant"]]
+    cases = _case_list()
+    # G6LC_QUEUE_ONLY=<label,...> runs a traced subset before the full matrix.
+    only = os.environ.get("G6LC_QUEUE_ONLY")
+    if only:
+        wanted = set(only.split(","))
+        cases = [c for c in cases if _label(c) in wanted]
+        if not cases:
+            raise RuntimeError("G6LC_QUEUE_ONLY matched no cases: " + only)
+    pristine_cases = [c for c in cases if not c["mutant"]]
+    mutant_cases = [c for c in cases if c["mutant"]]
     for case in pristine_cases:
         build_and_run(case)
     if mutant_cases:

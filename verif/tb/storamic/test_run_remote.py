@@ -163,6 +163,23 @@ class PrepareTests(unittest.TestCase):
                     "--runtime-header-sha256", "a" * 64,
                     "--verilator", "/usr/bin/verilator")
 
+    def test_timeout_is_forwarded_to_the_remote_command(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "build-platform/workspace") as tmp:
+            self.assertEqual(self.invoke(
+                Path(tmp), "--prepare-only", "--stages", "fetch-queue",
+                "--timeout", "6000"), 0)
+            plan = json.loads(next(Path(tmp).glob("*/launch-plan.json")).read_text())
+            command = plan["command"]
+            index = command.index("--timeout")
+            self.assertEqual(command[index + 1], "6000")
+        with tempfile.TemporaryDirectory(dir=ROOT / "build-platform/workspace") as tmp:
+            self.assertEqual(self.invoke(
+                Path(tmp), "--prepare-only", "--stages", "fetch-queue"), 0)
+            plan = json.loads(next(Path(tmp).glob("*/launch-plan.json")).read_text())
+            command = plan["command"]
+            index = command.index("--timeout")
+            self.assertEqual(command[index + 1], "2400")
+
     def test_core_leaf_stages_share_the_reference_package_without_duplication(self):
         with tempfile.TemporaryDirectory(dir=ROOT / "build-platform/workspace") as tmp:
             self.assertEqual(self.invoke(

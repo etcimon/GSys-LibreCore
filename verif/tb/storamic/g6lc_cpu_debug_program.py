@@ -57,12 +57,18 @@ def _arm_mask(mechanism, entry_privilege):
     return (1 << 12) | (7 << 7) | 0x37                    # lui x7, 1 -> 0x1000 ebreaku
 
 
-def build_debug_program(entry_privilege=3, mprv=0, mechanism="halt"):
+def build_debug_program(entry_privilege=3, mprv=0, mechanism="halt",
+                        queue_load=False):
     """mprv: 0 none; 1 M firmware runs MPRV=1/MPP=U, dcsr.mprven=0;
     2 as 1 with the debugger setting dcsr.mprven=1 before its accesses.
     mechanism: halt (external debug_req only), ebreak or step. The latter
     two reuse the external-halt entry as a first debug entry, arm the
-    mechanism, DRET to a firmware target, and verify the second entry."""
+    mechanism, DRET to a firmware target, and verify the second entry.
+    queue_load: halt-only variant that adds a dedicated firmware load from
+    Probe+48 (a slot the debugger never reads) after the entry store, giving
+    cpu-debug-queue HoldStage 4/5 a load AR/R to hold across debug entry.
+    Default False keeps the shared cpu-debug/cpu-debug-queue image
+    byte-identical."""
     if mechanism not in MECHANISMS:
         raise ValueError("mechanism must be halt, ebreak or step")
     if mechanism == "halt":
@@ -75,6 +81,8 @@ def build_debug_program(entry_privilege=3, mprv=0, mechanism="halt"):
             raise ValueError("ebreak/step requires mprv=0")
     if mprv not in (0, 1, 2) or (mprv and entry_privilege != 3):
         raise ValueError("MPRV variants require machine-mode entry")
+    if queue_load and mechanism != "halt":
+        raise ValueError("queue_load requires the halt mechanism")
     if mechanism != "halt":
         return _build_mechanism_program(entry_privilege, mechanism)
     normal, debug = _Program(), _Program()
@@ -99,6 +107,12 @@ def build_debug_program(entry_privilege=3, mprv=0, mechanism="halt"):
         normal.cursor = 0x180 // 4
     normal.addi(6, 0, 0x11)
     normal.store(0)
+    if queue_load:
+        # Dedicated firmware-load slot Probe+48: never read by the debugger
+        # (is_debug_data covers only +8/+16/+24), so its AR keeps the
+        # firmware origin tag. Result is unused; the transaction is the
+        # HoldStage 4/5 stimulus.
+        normal.lw(28, 48, 5)
     normal.emit(0x0000006f)  # No path to completion without a debugger.
     normal.cursor = 64
     normal.addi(6, 0, 0x11)

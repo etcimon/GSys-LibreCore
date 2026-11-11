@@ -26,15 +26,18 @@ class TriggerProgramTests(unittest.TestCase):
                     self.assertEqual(debug[0x808 // 4], 0x500002b7)
 
     def test_firmware_target_per_mechanism(self):
-        # exec/store: sw x6,48(x5) at T; load: lw x6,52(x5) at T; T+4 hangs.
+        # exec: sw x6,48(x5) at T (Boot+0x140); store/load: the same access is
+        # delayed to Boot+SL_PC_OFF (Boot+0x2c0) by NOPs that drain the
+        # post-DRET frontend transient; the instruction after the access hangs.
         for mechanism, expected in (("exec", 0x0262a823), ("store", 0x0262a823),
                                     ("load", 0x0342a303)):
             with self.subTest(mechanism=mechanism):
                 normal, _ = (words(i) for i in
                              trigger.build_trigger_program(3, mechanism))
-                self.assertEqual(normal[trigger.FIRMWARE_TARGET // 4], expected)
-                self.assertEqual(normal[trigger.FIRMWARE_TARGET // 4 + 1],
-                                 0x0000006f)
+                off = (trigger.FIRMWARE_TARGET if mechanism == "exec"
+                       else trigger.SL_PC_OFF)
+                self.assertEqual(normal[off // 4], expected)
+                self.assertEqual(normal[off // 4 + 1], 0x0000006f)
 
     def test_debug_programs_tselect_tdata2_tdata1_then_dret(self):
         for mechanism in ("exec", "store", "load"):

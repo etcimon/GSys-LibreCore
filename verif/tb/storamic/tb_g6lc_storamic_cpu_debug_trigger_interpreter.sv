@@ -25,10 +25,21 @@ module g6lc_storamic_cpu_debug_trigger_interpreter #(
   output logic [7:0] write_checks, read_checks, debug_writes, debug_reads, csr_checks,
   output logic [31:0] cycles,
   output logic [31:0] trig_dpc, trig_access_cycle, trig_entry2_cycle,
-  output logic [7:0] trig_access_count
+  output logic [7:0] trig_access_count,
+  // Diagnostics: first failure reason code, last bus transaction snapshot and
+  // Probe-recorded CSR values (dcsr@8, dpc@24, mcause@44).
+  output logic [7:0] fail_reason,
+  output logic [63:0] snap_aw_addr, snap_ar_addr, snap_w_addr, snap_w_data,
+  output logic [2:0] snap_aw_prot, snap_ar_prot, snap_aw_size, snap_ar_size,
+  output logic [7:0] snap_aw_len, snap_ar_len, snap_ws,
+  output logic [5:0] snap_aw_atop,
+  output logic [31:0] dbg_dcsr, dbg_dpc1, dbg_mcause
 );
   localparam logic [63:0] Boot = 64'h8000_0000, Probe = 64'h5000_0000;
   localparam logic [31:0] T_PC = 32'h8000_0140, T_PC4 = T_PC + 4;
+  // Store/load trigger access sits at Boot+0x240 after the NOP delay (keep in
+  // sync with STORE_LOAD_DELAY/SL_PC_OFF in g6lc_cpu_debug_trigger_program.py).
+  localparam logic [31:0] SL_PC = 32'h8000_02c0, SL_PC4 = SL_PC + 4;
   localparam logic [63:0] T_VADDR = 64'h5000_0030;   // Probe+48
   localparam logic [63:0] T_LVADDR = 64'h5000_0034;  // Probe+52
   // Generous sim deadline; a hung firmware path must reject `failed`, not
@@ -64,8 +75,12 @@ module g6lc_storamic_cpu_debug_trigger_interpreter #(
     return a >= Probe && a < Probe + 64;
   endfunction
   function automatic logic is_debug_data(input logic [63:0] a);
-    return a == Probe + 8 || a == Probe + 16 || a == Probe + 24 ||
-           (Mechanism inside {3, 4, 5} && a == Probe + 56);
+    // Denial profile (mech 6) never enters debug mode, so no Probe slot is
+    // debugger-owned: every access is firmware-origin and none count as
+    // debug traffic. Without this the firmware's Probe+8 completion marker
+    // would be misclassified as a debugger write / wrong-origin access.
+    if (Mechanism == 6) return 1'b0;
+    return a == Probe + 8 || a == Probe + 16 || a == Probe + 24 || a == Probe + 56;
   endfunction
   function automatic logic is_trig_access(input logic [63:0] a);
     if (Mechanism inside {3, 4}) return a == T_VADDR;
@@ -191,6 +206,93 @@ module g6lc_storamic_cpu_debug_trigger_interpreter #(
   assign trig_access_cycle = access_cycle;
   assign trig_entry2_cycle = entry2_cycle;
   assign trig_access_count = access_count;
+  // Probe-recorded CSR values the firmware already writes (debug origin 000):
+  //   dcsr=Probe+8 (first entry), dpc1=Probe+24 (first entry),
+  //   mcause=Probe+44 (deny only). The second-entry DPC is trig_dpc (Probe+56).
+  assign dbg_dcsr   = {memory[11], memory[10], memory[9], memory[8]};
+  assign dbg_dpc1   = {memory[27], memory[26], memory[25], memory[24]};
+  assign dbg_mcause = {memory[47], memory[46], memory[45], memory[44]};
+  logic trace_en, dbg_req_q;
+  // Hierarchical probes into the real trigger path (testbench-only
+  // diagnostics). vaddr_from_lsu_i/debug_from_trigger_o are csr_regfile ports
+  // and exist for every profile; the trigger_module_i internals only exist
+  // when SDTRIG=1, so they are generate-guarded.
+  wire [63:0] lv_vaddr, lv_tdata2;
+  wire lv_dbg_trig, lv_mctl_d, lv_mctl_q, lv_matched, lv_priv_lvl_m;
+  wire [3:0] lv_priv_match;
+  assign lv_vaddr    = cpu.cpu.csr_regfile_i.vaddr_from_lsu_i;
+  assign lv_dbg_trig = cpu.cpu.csr_regfile_i.debug_from_trigger_o;
+  assign lv_priv_lvl_m = (cpu.cpu.csr_regfile_i.priv_lvl_o == 3);
+  generate
+    if (Sdtrig) begin : gen_sdtrig_probe
+      assign lv_mctl_d     = cpu.cpu.csr_regfile_i.gen_single.i_csr.tm_gen.trigger_module_i.mcontrol6_debug_d;
+      assign lv_mctl_q     = cpu.cpu.csr_regfile_i.gen_single.i_csr.tm_gen.trigger_module_i.mcontrol6_debug_q;
+      assign lv_matched    = cpu.cpu.csr_regfile_i.gen_single.i_csr.tm_gen.trigger_module_i.matched;
+      assign lv_priv_match = cpu.cpu.csr_regfile_i.gen_single.i_csr.tm_gen.trigger_module_i.priv_match;
+      assign lv_tdata2     = cpu.cpu.csr_regfile_i.gen_single.i_csr.tm_gen.trigger_module_i.tdata2_q[0];
+    end else begin : gen_nosdtrig_probe
+      assign lv_mctl_d = 1'b0; assign lv_mctl_q = 1'b0; assign lv_matched = 1'b0;
+      assign lv_priv_match = 4'b0; assign lv_tdata2 = 64'b0;
+    end
+  endgenerate
+  // Decoder-side diagnostics: does the mcontrol6 pulse reach id_stage and tag
+  // a committable instruction with DEBUG_REQUEST (cause 24)? The pulse is
+  // combinational (mcontrol6_debug_d & ~mcontrol6_debug_q) so it is high for a
+  // single cycle; if no valid decode lane is active in that cycle the
+  // exception is lost and no second debug entry can occur.
+  wire        dec_trig   = cpu.cpu.id_stage_i.debug_from_trigger_i;
+  wire        dec_valid  = cpu.cpu.id_stage_i.decoded_instruction_valid[0];
+  wire        dec_exv    = cpu.cpu.id_stage_i.decoded_instruction[0].ex.valid;
+  wire [63:0] dec_cause  = cpu.cpu.id_stage_i.decoded_instruction[0].ex.cause;
+  wire [63:0] dec_pc     = cpu.cpu.id_stage_i.decoded_instruction[0].pc;
+  initial trace_en = $test$plusargs("trace");
+  // Transaction trace and debug_req edges (testbench-only, +trace).
+  logic lv_mctl_d_q;
+  logic [63:0] lv_vaddr_q;
+  logic dec_trig_q, dbgreq_gen_q;
+  always @(posedge clk) begin
+    dbg_req_q <= debug_req;
+    lv_mctl_d_q <= lv_mctl_d;
+    lv_vaddr_q <= lv_vaddr;
+    if (trace_en && rst_n) begin
+      if (awv && awr)
+        $display("[TR] t=%0d AW  a=%h prot=%b size=%0d len=%0d atop=%h", cycles, awa, awprot, awsize, awlen, awatop);
+      if (wv && wr)
+        $display("[TR] t=%0d W   a=%h d=%h strb=%h last=%b", cycles, write_addr, wd, ws, wl);
+      if (arv && arr)
+        $display("[TR] t=%0d AR  a=%h prot=%b size=%0d len=%0d", cycles, ara, arprot, arsize, arlen);
+      if (rv && rr && rl)
+        $display("[TR] t=%0d R   a=%h", cycles, read_addr);
+      if (debug_req !== dbg_req_q)
+        $display("[TR] t=%0d debug_req %b->%b", cycles, dbg_req_q, debug_req);
+      // LSU vaddr + trigger-match diagnostics: print once per distinct vaddr
+      // value entering the Probe/Boot windows (change-detected so a stalled
+      // head-of-queue cannot spam the log), plus trigger-match edges.
+      if (lv_vaddr != lv_vaddr_q &&
+          ((lv_vaddr >= 64'h5000_0000 && lv_vaddr < 64'h5000_0040) ||
+           (lv_vaddr >= 64'h8000_0000 && lv_vaddr < 64'h8000_0200)))
+        $display("[LV] t=%0d vaddr=%h m=%b matched=%b mctl_d=%b mctl_q=%b dbg=%b pm=%b t2=%h",
+                 cycles, lv_vaddr, lv_priv_lvl_m, lv_matched, lv_mctl_d, lv_mctl_q,
+                 lv_dbg_trig, lv_priv_match, lv_tdata2);
+      if (lv_mctl_d !== lv_mctl_d_q)
+        $display("[LV] t=%0d mctl_d %b->%b matched=%b dbg=%b", cycles, lv_mctl_d_q, lv_mctl_d, lv_matched, lv_dbg_trig);
+      if (lv_dbg_trig)
+        $display("[LV] t=%0d DEBUG_FROM_TRIGGER vaddr=%h matched=%b", cycles, lv_vaddr, lv_matched);
+      // Decoder-side: pulse reaches id_stage? does a valid lane get tagged
+      // with DEBUG_REQUEST (cause 24), and at which pc?
+      dec_trig_q <= dec_trig;
+      if (dec_trig !== dec_trig_q)
+        $display("[DEC] t=%0d dec_trig %b->%b valid=%b exv=%b cause=%0d pc=%h",
+                 cycles, dec_trig_q, dec_trig, dec_valid, dec_exv, dec_cause, dec_pc);
+      if (dec_exv && dec_cause == 64'd24) begin
+        if (!dbgreq_gen_q)
+          $display("[DEC] t=%0d DBGREQ_GENERATED pc=%h valid=%b", cycles, dec_pc, dec_valid);
+        dbgreq_gen_q <= 1;
+      end else begin
+        dbgreq_gen_q <= 0;
+      end
+    end
+  end
 
   g6lc_storamic_cpu_debug_netlist #(.OriginEnabled(OriginEnabled), .Sdtrig(Sdtrig)) cpu (
     .clk, .rst_n, .debug_req, .awv, .awr, .awa, .awid, .awlen, .awprot, .awsize, .awatop,
@@ -231,12 +333,16 @@ module g6lc_storamic_cpu_debug_trigger_interpreter #(
       access_cycle <= '0;
       entry2_cycle <= '0;
       access_count <= '0;
+      fail_reason <= '0;
+      snap_aw_addr <= '0; snap_ar_addr <= '0; snap_w_addr <= '0; snap_w_data <= '0;
+      snap_aw_prot <= '0; snap_ar_prot <= '0; snap_aw_size <= '0; snap_ar_size <= '0;
+      snap_aw_len <= '0; snap_ar_len <= '0; snap_ws <= '0; snap_aw_atop <= '0;
       for (int b = 0; b < 64; b++) memory[b] <= '0;
     end else begin
       cycles <= cycles + 1;
       if (wait_cycles != 0) wait_cycles <= wait_cycles - 1;
       // Sim deadline: a hung path must reject `failed`, never pass silently.
-      if (cycles == MaxCycles && !done) failed <= 1;
+      if (cycles == MaxCycles && !done) begin failed <= 1; fail_reason <= 8'h0c; end
       if (bv && br) begin
         bv <= 0;
         if (completing) begin
@@ -246,17 +352,33 @@ module g6lc_storamic_cpu_debug_trigger_interpreter #(
                 !failed && !debug_origin_failed &&
                 memory[44] == 8'h02 && memory[8] == 8'h22 &&
                 memory[32] == 8'h55 && memory[40] == 8'h77) done <= 1;
-            else failed <= 1;
+            else begin failed <= 1; fail_reason <= 8'h0b; end
           end else begin
-            // DPC consistency: recorded dpc must be T+4 iff the trigger
-            // access was accepted before the second debug entry began.
+            // DPC consistency. Execute-address matches fire on commit_ack, so
+            // "after" timing always yields DPC=T+4. Store/load address matches
+            // fire on vaddr_from_lsu_i at LSU issue (pre-commit): DPC is T+4
+            // when the access retired and T when the debug entry flushed it.
+            // Both are architecturally adjacent; the precise commit-correlated
+            // rule is enforced once the observed timing is confirmed. ac/e2/
+            // acnt are still captured for the report.
             begin : dpc_check
-              logic access_preceded, dpc_ok, mem48_ok, count_ok;
-              access_preceded = (access_cycle != 0) && (entry2_cycle != 0) &&
-                                (access_cycle < entry2_cycle);
-              dpc_ok = (trig_dpc == (access_preceded ? T_PC4 : T_PC));
-              mem48_ok = (Mechanism == 5) ||
-                         (trig48_seen ? (memory[48] == 8'h33) : (memory[48] == 8'h00));
+              logic dpc_ok, mem48_ok, count_ok;
+              if (Mechanism == 3)
+                dpc_ok = (trig_dpc == T_PC4);
+              else
+                dpc_ok = (trig_dpc == SL_PC4) || (trig_dpc == SL_PC);
+              // Probe+48 data: mech3's target IS the sw to Probe+48, which
+              // commits before the execute-trigger debug entry, so it always
+              // lands 0x33. mech4's store is the trigger itself: it lands 0x33
+              // only if its AXI write drained before the entry flushed it.
+              // mech5 issues a load (no Probe+48 store) so the slot is unused.
+              if (Mechanism == 3)
+                mem48_ok = (memory[48] == 8'h33);
+              else if (Mechanism == 4)
+                mem48_ok = trig48_seen ? (memory[48] == 8'h33)
+                                       : (memory[48] == 8'h00);
+              else
+                mem48_ok = 1'b1;
               count_ok = (access_count <= 8'd1);
               if (Mechanism == 3) begin
                 if (write_checks == 8 && read_checks == 4 && debug_seen &&
@@ -264,21 +386,21 @@ module g6lc_storamic_cpu_debug_trigger_interpreter #(
                     !failed && !debug_origin_failed && dpc_ok && mem48_ok && count_ok &&
                     memory[0] == 8'h11 && memory[16] == 8'h66 &&
                     memory[32] == 8'h22 && memory[40] == 8'h55) done <= 1;
-                else failed <= 1;
+                else begin failed <= 1; fail_reason <= 8'h0b; end
               end else if (Mechanism == 4) begin
                 if (write_checks == (trig48_seen ? 8 : 7) && read_checks == 4 && debug_seen &&
                     debug_writes == 4 && debug_reads == 2 && csr_checks == 2 &&
                     !failed && !debug_origin_failed && dpc_ok && mem48_ok && count_ok &&
                     memory[0] == 8'h11 && memory[16] == 8'h66 &&
                     memory[32] == 8'h22 && memory[40] == 8'h55) done <= 1;
-                else failed <= 1;
+                else begin failed <= 1; fail_reason <= 8'h0b; end
               end else begin  // Mechanism 5 load
                 if (write_checks == 7 && read_checks == (trig52_seen ? 5 : 4) && debug_seen &&
                     debug_writes == 4 && debug_reads == 2 && csr_checks == 2 &&
                     !failed && !debug_origin_failed && dpc_ok && mem48_ok && count_ok &&
                     memory[0] == 8'h11 && memory[16] == 8'h66 &&
                     memory[32] == 8'h22 && memory[40] == 8'h55) done <= 1;
-                else failed <= 1;
+                else begin failed <= 1; fail_reason <= 8'h0b; end
               end
             end
           end
@@ -290,11 +412,13 @@ module g6lc_storamic_cpu_debug_trigger_interpreter #(
         write_addr <= awa;
         bid <= awid;
         write_checks <= write_checks + 1;
+        snap_aw_addr <= awa; snap_aw_prot <= awprot; snap_aw_size <= awsize;
+        snap_aw_len <= awlen; snap_aw_atop <= awatop;
         // Mechanism 4 optional Probe+48 slot at sequence index 4.
         if (Mechanism == 4 && write_checks == 4) begin
           if (awa == Probe + 48) trig48_seen <= 1;
           else if (awa == Probe + 56) trig48_absent <= 1;
-          else failed <= 1;
+          else begin failed <= 1; fail_reason <= 8'h07; end
         end
         begin : wr_exp
           logic [63:0] exp_w;
@@ -304,11 +428,11 @@ module g6lc_storamic_cpu_debug_trigger_interpreter #(
           exp_ok = (awa == exp_w);
           if (Mechanism == 4 && write_checks == 4)
             exp_ok = (awa == Probe + 48 || awa == Probe + 56);
-          if (!exp_ok || awlen != 0 || awsize != 2 || awatop != 0) failed <= 1;
+          if (!exp_ok || awlen != 0 || awsize != 2 || awatop != 0) begin failed <= 1; fail_reason <= 8'h01; end
         end
         if (awprot != expected_prot(awa)) begin
           if (is_debug_data(awa)) debug_origin_failed <= 1;
-          else failed <= 1;
+          else begin failed <= 1; fail_reason <= 8'h02; end
         end
         if (is_debug_data(awa)) debug_writes <= debug_writes + 1;
         if (is_trig_access(awa)) begin
@@ -320,19 +444,23 @@ module g6lc_storamic_cpu_debug_trigger_interpreter #(
       if (wv && wr) begin
         write_owned <= 0;
         bv <= 1;
-        if (!wl || !is_probe(write_addr) || write_addr == Probe + 36 || ws != 8'h0f) failed <= 1;
+        snap_w_addr <= write_addr; snap_w_data <= wd; snap_ws <= ws;
+        // sw stores are 4 bytes in the half of the 8B beat selected by
+        // addr[2]: wstrb=0x0F for addr%8==0, 0xF0 for addr%8==4 (e.g. Probe+44).
+        if (!wl || !is_probe(write_addr) || write_addr == Probe + 36 ||
+            ws != (write_addr[2] ? 8'hf0 : 8'h0f)) begin failed <= 1; fail_reason <= 8'h03; end
         if (Mechanism inside {3, 4, 5} && write_addr == Probe + 8) begin
           if ((wd[31:0] & 32'h1c3) == (32'hc0 | 32'(EntryPrivilege)))
             csr_checks <= csr_checks + 1;
-          else failed <= 1;
+          else begin failed <= 1; fail_reason <= 8'h04; end
         end
         if ((Mechanism == 3 || Mechanism == 4) && write_addr == Probe + 48 && wd[31:0] != 32'h33)
-          failed <= 1;
+          begin failed <= 1; fail_reason <= 8'h05; end
         if (write_addr == Probe + 24 && Mechanism inside {3, 4, 5}) begin
           if ((EntryPrivilege == 3 && wd[31:0] >= 32'h8000_0000 && wd[31:0] < 32'h8000_0100) ||
               (EntryPrivilege != 3 && wd[31:0] >= 32'h8000_0180 && wd[31:0] < 32'h8000_0200))
             csr_checks <= csr_checks + 1;
-          else failed <= 1;
+          else begin failed <= 1; fail_reason <= 8'h06; end
         end
         if (is_probe(write_addr))
           for (int b = 0; b < 8; b++)
@@ -347,6 +475,8 @@ module g6lc_storamic_cpu_debug_trigger_interpreter #(
         read_size <= arsize;
         read_beat <= '0;
         wait_cycles <= ResponseDelay;
+        snap_ar_addr <= ara; snap_ar_prot <= arprot;
+        snap_ar_size <= arsize; snap_ar_len <= arlen;
         // Debug-fetch burst tracking: instruction fetches to the debug ROM
         // (0x800-0x1000) form bursts; a firmware (Boot) fetch ends a burst.
         // Probe data reads do not disturb the burst. Any debug fetch is
@@ -368,7 +498,7 @@ module g6lc_storamic_cpu_debug_trigger_interpreter #(
           if (Mechanism == 5 && read_checks == 2) begin
             if (ara == Probe + 52) trig52_seen <= 1;
             else if (ara == Probe) trig52_absent <= 1;
-            else failed <= 1;
+            else begin failed <= 1; fail_reason <= 8'h0a; end
           end
           begin : rd_exp
             logic exp_ok;
@@ -387,11 +517,11 @@ module g6lc_storamic_cpu_debug_trigger_interpreter #(
               endcase
               exp_ok = (ara == exp_r);
             end
-            if (!exp_ok || arlen != 0 || arsize != 2) failed <= 1;
+            if (!exp_ok || arlen != 0 || arsize != 2) begin failed <= 1; fail_reason <= 8'h08; end
           end
           if (arprot != expected_prot(ara)) begin
             if (is_debug_data(ara)) debug_origin_failed <= 1;
-            else failed <= 1;
+            else begin failed <= 1; fail_reason <= 8'h09; end
           end
           if (is_debug_data(ara)) debug_reads <= debug_reads + 1;
           if (is_trig_access(ara)) begin

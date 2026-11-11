@@ -92,7 +92,7 @@ under `build-platform/workspace/build/`. A running command is not a verdict.
 | Work | Current Status | Next Closure Action |
 | --- | --- | --- |
 | C0 | Open. Commit29 fixes the four retirement latch errors. CPU31 separates independent load translation from hazard arbitration with control equivalence and actual-module regressions: 28 → 27 unwaived scheduling errors per origin mode, no new named error. CPU36 makes IQ address admission independent of the checkpoint payload; with the current-source compiler this goes 27 → 25 (FP controls) and 10 → 8 (diagnostic representation), both origins, with nothing new. CPU37 splits the PTW leaf TLB-update process from the walker (full-module combinational equivalence in three configs): 25 → 24 and 8 → 7, removing only `shared_tlb_hit_d`. CPU38 removes the missunit `mem_req_c` packet self-reference (full-module equivalence in three configs): 24 → 23 and 7 → 6. A CPU40/41 full-core bit-level SCC check found 65 real combinational SCCs, all in `csr_regfile` `csr_update` (undefaulted `mask`, static `DirVecOnly`). After the fix it finds 0 SCCs and 0 latches, so the six remaining UNOPTFLAT identities are Verilator representation artifacts. CPU43 corrects the cpu-origin bench's AXI cache expectation to `CACHE_MODIFIABLE`, and it now passes in both origins. CPU44 registers the `cpu-origin` and `csr-scc` stages. CPU45/46 make two edits: the scoreboard issue pointer becomes a direct offset (cone SAT proof 24/24, mutant rejected), and I-cache `flush_d`, `fetch_req` and response valid move out of the kill_s2-reading FSM (full-module equivalence, three configs). Diagnostics go 6 → 4 (fields) and 23 → 21 (FP). The four left are the frontend kill_s2 loop through I-cache `ready` and the D-cache port arrays; `split_var` does not remove them. The two registered load stages and the two registered fetch-queue stages pass on promoted sources. Older local-tool 11/12 counts remain historical, not directly comparable. | Resolve the remaining dependencies and qualify the current compiler without warning suppression or FP disabling; retain source/tool identities and rejecting regressions. See [cpu-load-translation.md](cpu-load-translation.md). No native qualification follows from these component fixes. |
-| C1 | Original/extended interpreter matrices, M/S/U external-debug round trips, scoped AW/W/B pending-entry checks and debug-issued B responses across DRET pass. MPRV covers supported MPP values S/U/M. CPU47 adds the registered `cpu-debug` stage (`storamic-34a969bd68a9`, 25/25), which covers combined debug/MPRV. M firmware runs with MPRV=1/MPP=U and carries U origin (010). The debugger runs with `dcsr.mprven` = 0 and = 1. Its accesses stay unknown (000) in both cases. An LSU mutant that ignores debug mode is rejected in all three MPRV variants. CPU49 extends `cpu-debug` to 48 cases (`storamic-190989cd57a7`): ebreak passes all positives and negatives (second entry cause 1, `DPC=T+4`, DCSR record, `DRET` resume; halt images byte-identical). Single-step initially exposed a `store_buffer.sv` `commit_and_flush` violation — the stepped store's own commit legitimately coincides with the step-entry flush — reported by CPU49 (`storamic-190989cd57a7`). CPU49b replaced the assertion's false premise with `commit_and_flush_keeps_head`/`flush_empties_speculative` (store_buffer only) and re-qualified: `storamic-13226d782517` passes all 48 cpu-debug cases including 8/8 step positives (cause 4, `DPC=T+4`, `DRET` resume) and all step negatives, plus cpu-origin 6/6. CPU49c hardened the evidence: the head comparison now covers `address`/`data`/`be`/`data_size`/`cbo_op`; `stq-commit-flush` and `cpu-debug-stq-mutant` are permanent remote stages with per-check results (`storamic-53c3f4d3522b`, `storamic-cc977ef86fa1`); the `G6LC_MUT_STQ_COMMIT_DROPPED_ON_FLUSH` mutant is rejected by `commit_and_flush_keeps_head` in every real-CPU step-on-store case; the hyp8 tree received the equivalent assertion replacement and passes remote lint `hyp8-stq-lint-r8`. | Complete remaining queue classes/directions, `tdata` triggers, virtualization/SMT and other debug mechanisms/privilege corners; retain independent C0. |
+| C1 | Original/extended interpreter matrices, M/S/U external-debug round trips, scoped AW/W/B pending-entry checks and debug-issued B responses across DRET pass. MPRV covers supported MPP values S/U/M. CPU47 adds the registered `cpu-debug` stage (`storamic-34a969bd68a9`, 25/25), which covers combined debug/MPRV. M firmware runs with MPRV=1/MPP=U and carries U origin (010). The debugger runs with `dcsr.mprven` = 0 and = 1. Its accesses stay unknown (000) in both cases. An LSU mutant that ignores debug mode is rejected in all three MPRV variants. CPU49 extends `cpu-debug` to 48 cases (`storamic-190989cd57a7`): ebreak passes all positives and negatives (second entry cause 1, `DPC=T+4`, DCSR record, `DRET` resume; halt images byte-identical). Single-step initially exposed a `store_buffer.sv` `commit_and_flush` violation — the stepped store's own commit legitimately coincides with the step-entry flush — reported by CPU49 (`storamic-190989cd57a7`). CPU49b replaced the assertion's false premise with `commit_and_flush_keeps_head`/`flush_empties_speculative` (store_buffer only) and re-qualified: `storamic-13226d782517` passes all 48 cpu-debug cases including 8/8 step positives (cause 4, `DPC=T+4`, `DRET` resume) and all step negatives, plus cpu-origin 6/6. CPU49c hardened the evidence: the head comparison now covers `address`/`data`/`be`/`data_size`/`cbo_op`; `stq-commit-flush` and `cpu-debug-stq-mutant` are permanent remote stages with per-check results (`storamic-53c3f4d3522b`, `storamic-cc977ef86fa1`); the `G6LC_MUT_STQ_COMMIT_DROPPED_ON_FLUSH` mutant is rejected by `commit_and_flush_keeps_head` in every real-CPU step-on-store case; the hyp8 tree received the equivalent assertion replacement and passes remote lint `hyp8-stq-lint-r8`. CPU50 closes the remaining C1 rows in one combined remote run `storamic-b74425a4c1bc` (`leaf-result` `status: pass`, 266 per-case records all `pass`): `cpu-debug-queue` HoldStage 1-5 including the dedicated firmware-load AR/R held across entry, `cpu-debug-return` held-B across `DRET`, `cpu-debug-trigger` Sdtrig=0 deny pair plus mechanism-3 execute and store/load address triggers, `cpu-origin-atomic` real-CPU AMO/LR/SC `prot==000`, `cpu-origin-unsupported` RVH=1 zeroing, and `origin-profile`/`origin-queue`. | Closed for the qualified profile via `storamic-b74425a4c1bc`; out-of-profile items (SDTRIG=1 trigger entry, `tdata` triggers, virtualization/SMT, `NrHarts>1`, OoO, other debug mechanisms/privilege corners) stay refused by `g6lc_storamic_origin_supported` and must be requalified before the predicate widens; retain independent C0. |
 | C2 | Direct/mux/protected-target crossbar component receipts pass; actual native-top authority binding remains open. | Freeze native topology, widths, source identities and adapter ownership. |
 | C3-C6 | Model components exist; real policy/descriptor/writer/synchronization bindings are incomplete. Native refusal remains in place. | Supply and qualify the platform owners, then compose them; do not substitute fixture acknowledgements. |
 | P0-P1 | Physical media/protection qualification is open. | Establish actual media/PHY/technology contracts and measured fault/energy evidence. |
@@ -195,13 +195,73 @@ approved tool/runtime inputs are available. Scope closure is evidence-based.
 
 ## Next Session Order
 
-1. Resolve the remaining C0 scheduling diagnostics and C1 debug/queued-transition
-   coverage, preserving the passing independent instruction matrix and all
-   earlier failures. Complete fresh nonsimulation gates rather than promoting
-   partial interrupted results. Avoid another blind pragma sweep.
-2. Inventory actual native sources and all upstream queues. Specify C3 policy
-   replacement against producer, fabric, route, active-operation and held-result
-   ownership; then implement C4/C5 against genuine writer/synchronization ports.
+Method (2026-11-10 review; proposals marked *decision* need owner approval):
+
+- **Close gates by checklist, not by "remaining corners".** Each gate gets a
+  finite evidence table (requirement → registered remote stage → run ID). A
+  gate is closed when every row has a passing stage and a rejecting oracle.
+- **C1 exit table** — closed for the qualified profile. Every row passed in the
+  single combined remote run **`storamic-b74425a4c1bc`** (`leaf-result`
+  `status: pass`, 266 per-case records all `pass`, `STORAMIC_REMOTE_SELECTED_
+  STAGES_PASS`, `run_remote.py` exited 0 after post-run identity verification
+  and auto-pull); earlier per-stage runs (`cpu-debug-trigger`
+  `storamic-8d679ba79ca3`, `cpu-debug-queue` `storamic-b108f5361c8b`,
+  `cpu-origin-atomic` `storamic-85eafabb8b42`, `cpu-origin-unsupported`/
+  `origin-profile`/`origin-queue` `storamic-3d48a7b778aa`) are the item-level
+  evidence. `storamic-b8efef926eaf` produced an identical remote `leaf-result`
+  `status: pass` but the runner reported `Incomplete` (2400 s watchdog at the
+  completion boundary → pull race, post-run identity check not executed), so it
+  is corroborating history, not closure evidence. Aborted attempts
+  (`storamic-2c3f96bae2c8`, `storamic-601cd89e9a1e`) are non-qualifying
+  history.
+
+  | Requirement | Stage | Combined run |
+  |---|---|---|
+  | M/S/U + MPRV data-origin tags; default-off `prot` | `cpu-origin`, `cpu-debug` | `storamic-b74425a4c1bc` |
+  | Debug halt/ebreak/step entry + `DRET` resume; commit+flush correctness | `cpu-debug`, `stq-commit-flush`, `cpu-debug-stq-mutant` | `storamic-b74425a4c1bc` |
+  | Queued AW/W/B/AR/R held across debug entry, HoldStage 1-5 (incl. dedicated firmware-load AR/R at s4/s5) | `cpu-debug-queue` | `storamic-b74425a4c1bc` |
+  | Held-B response across `DRET`; read cannot pend across `DRET` | `cpu-debug-return` | `storamic-b74425a4c1bc` |
+  | Flush/slot reuse and profile predicate | `origin-queue`, `origin-profile` | `storamic-b74425a4c1bc` |
+  | Real-CPU AMO/LR/SC `prot==000`, ordinary M/U tags kept | `cpu-origin-atomic` | `storamic-b74425a4c1bc` |
+  | Unsupported profile (RVH=1) zeroes all data `prot`; refusal path | `cpu-origin-unsupported` | `storamic-b74425a4c1bc` |
+  | Trigger CSRs denied at SDTRIG=0; mechanism-3 execute + store/load address triggers | `cpu-debug-trigger` | `storamic-b74425a4c1bc` |
+
+  Omitted / out-of-profile (refused by `g6lc_storamic_origin_supported`, not C1
+  rows; require requalification before the predicate widens): SDTRIG=1 trigger
+  entry, `NrHarts>1`, OoO, virtualization/SMT debug paths, `tdata` triggers,
+  and other debug mechanisms/privilege corners. Two upstream Sdtrig deviations
+  are logged separately (mcontrol6 records `dcsr.cause=3`/post-trigger DPC;
+  the store/load `debug_from_mcontrol_o` pulse is not commit-qualified) —
+  SDTRIG=0 in the qualified profile, so not C1-blocking.
+- **C0 exit (*decision*):** gate-level SCC/latch = 0 on the full core
+  (registered) plus a strict compile whose residual `UNOPTFLAT` identities
+  are pinned by name against that SCC proof, any new identity failing. The
+  alternative is the coordinated frontend/D-cache port restructure in
+  `cpu-icache-ready-interface.md`; split hints are exhausted.
+- **Bound the first native profile (*decision*):** one hart, in-order, WT,
+  no AI/APU/accelerator, ordinary 64-bit device path. Encode it as a
+  `check_cfg` legality predicate so every other branch in
+  `native-provider-inventory.md` is refused rather than drained.
+- **Build order inside that profile:** C2 topology manifest asserted at
+  elaboration → C4 Storamic writer (existing VirtIO `quiesce`/`inflight`
+  and DMA `inflight` ports) → C4 CPU producer (new pause/drain-acknowledge
+  port; none exists in `cva6.sv` or `g6lc_cluster.sv`) → debug master →
+  C3 facts from `rtl/discovery` → C5 resume (clean/invalidate plus
+  reservation clear) → C6. Prove each pause/drain handshake formally
+  (no false idle, old epoch retained); simulate only the composition.
+  Compose in a bench-only top; `g6lc_storamic_attach` keeps its refusal
+  until C6 passes.
+- **Bench discipline:** rejections carry a reason code and the offending
+  transaction; run a traced subset before a matrix; freeze the snapshot
+  during a run; time-box a bench and mark unqualified cases as omitted.
+- **Prerequisites outside RTL:** free space on the evidence volume, the
+  default testharness toolchain directory, a finished PGO Verilator
+  identity, an isolated branch/worktree for in-progress files, and the
+  physical inputs for P0/P1 (PHY, flash part, technology, hold-up budget).
+
+1. Finish the C1 table above in one combined remote run; settle C0 by the
+   decision above.
+2. C2, then C4/C3/C5 in the bounded profile, in the order above.
 3. Qualify the complete C6 composition before any native admission change.
    Obtain the missing physical/runtime inputs and explicit remote/network or
    cleanup approvals for P0/P1/V0. Proceed to Linux only after those gates.

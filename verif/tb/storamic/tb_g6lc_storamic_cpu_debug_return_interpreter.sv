@@ -98,7 +98,9 @@ module g6lc_storamic_cpu_debug_return_interpreter #(
   assign rl = read_beat == read_len;
   assign rd = read_data(read_addr + (64'(read_beat) << read_size));
 
-  g6lc_storamic_cpu_debug_netlist cpu (
+  g6lc_storamic_cpu_debug_netlist #(
+    .OriginEnabled(OriginEnabled)
+  ) cpu (
     .clk, .rst_n, .debug_req, .awv, .awr, .awa, .awid, .awlen, .awprot, .awsize, .awatop,
     .wv, .wr, .wd, .ws, .wl, .bv, .br, .bid, .bresp(2'b00),
     .arv, .arr, .ara, .arid, .arlen, .arprot, .arsize,

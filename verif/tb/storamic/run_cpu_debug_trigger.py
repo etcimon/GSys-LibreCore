@@ -12,6 +12,7 @@ the SDTRIG=0 denial profile, and the program/LSU/firmware negatives.
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -80,6 +81,21 @@ def _case(origin, delay, priv, mechanism, negative=0, negative_firmware=0,
             "mechanism": mechanism, "negative": negative,
             "negative_firmware": negative_firmware, "mutant": mutant,
             "program_mutant": program_mutant}
+
+
+def _case_label(case):
+    origin, delay = case["origin"], case["delay"]
+    priv, mechanism = case["priv"], case["mechanism"]
+    sdtrig = 0 if mechanism == 6 else 1
+    label = (f"cpu-dbgtrig-o{origin}-d{delay}-p{priv}-g{mechanism}"
+             f"-s{sdtrig}")
+    if case["negative_firmware"]:
+        label += "-fw"
+    if case["mutant"]:
+        label += "-x1"
+    if case["program_mutant"]:
+        label += "-pm"
+    return label
 
 
 def _case_list():
@@ -167,14 +183,7 @@ def run(data, out, stages, manifest, builds, outcomes, verilator, build_model):
         mutant = case["mutant"]
         program_mutant = case["program_mutant"]
         sdtrig = 0 if mechanism == 6 else 1
-        label = (f"cpu-dbgtrig-o{origin}-d{delay}-p{priv}-g{mechanism}"
-                 f"-s{sdtrig}")
-        if negative_firmware:
-            label += "-fw"
-        if mutant:
-            label += "-x1"
-        if program_mutant:
-            label += "-pm"
+        label = _case_label(case)
         model = out / ("model-" + label)
         model.mkdir()
         img = _images(program, images, priv, mechanism)
@@ -226,7 +235,10 @@ def run(data, out, stages, manifest, builds, outcomes, verilator, build_model):
                          "seconds": seconds, "executable": str(executable),
                          "pass": True})
         try:
-            result = subprocess.run([str(executable)], env=env, cwd=model,
+            sim_cmd = [str(executable)]
+            if os.environ.get("G6LC_TRIGGER_TRACE"):
+                sim_cmd.append("+trace")
+            result = subprocess.run(sim_cmd, env=env, cwd=model,
                                     capture_output=True, text=True,
                                     timeout=SIM_TIMEOUT)
             text = result.stdout + result.stderr
@@ -266,14 +278,14 @@ def run(data, out, stages, manifest, builds, outcomes, verilator, build_model):
             # so the run must reject `failed` (interpreter deadline) and emit
             # no pass marker.
             ok = (rc != 0 and not pass_matches and
-                  ((fail_match and fail_match.group(6) == "failed") or
+                  ((fail_match and fail_match.group(5) == "failed") or
                    (not fail_match and "TIMEOUT" in text)))
         elif mutant:
             ok = (rc != 0 and not pass_matches and len(fail_matches) == 1 and
-                  fail_match and fail_match.group(6) == "debug-origin-failed")
+                  fail_match and fail_match.group(5) == "debug-origin-failed")
         elif negative_firmware:
             ok = (rc != 0 and not pass_matches and len(fail_matches) == 1 and
-                  fail_match and fail_match.group(6) == "failed")
+                  fail_match and fail_match.group(5) == "failed")
         else:
             ew, er, dw, dr, csr, seen = MECHANISM_COUNTS[mechanism]
             ok = (rc == 0 and len(pass_matches) == 1 and pass_match and
@@ -292,6 +304,12 @@ def run(data, out, stages, manifest, builds, outcomes, verilator, build_model):
         outcomes.append(record)
 
     cases = _case_list()
+    only = os.environ.get("G6LC_TRIGGER_ONLY")
+    if only:
+        wanted = set(only.split(","))
+        cases = [c for c in cases if _case_label(c) in wanted]
+        if not cases:
+            raise RuntimeError("G6LC_TRIGGER_ONLY matched no cases: " + only)
     pristine_cases = [c for c in cases if not c["mutant"]]
     mutant_cases = [c for c in cases if c["mutant"]]
     for case in pristine_cases:

@@ -63,6 +63,13 @@
 - [ ] Resume fresh C0/C1 and native topology/provider dependencies from the
   completion plan; hyp8/compiler progress does not close functional-core
   qualification. Native checkpoint admission remains disabled.
+- [ ] Sdtrig conformance (upstream behaviour, found by CPU50; not C1-blocking
+  because SDTRIG=0 in qualified profiles): an mcontrol6 action=1 hit is turned
+  into a DEBUG_REQUEST exception on the next decoded instruction
+  (`core/decoder.sv:2111-2113`), so `csr_regfile.sv:2689-2699` records
+  dcsr.cause=3 (request) with "after" timing; the spec requires cause=2
+  (trigger). Only icount uses `CauseTrigger` (`csr_regfile.sv:2649-2655`).
+  Fix and qualify before enabling SDTRIG in any product profile.
 
 ## Storamic M0 foundation — selected gates pass, aggregate qualification open
 
@@ -1822,10 +1829,554 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
       - `compute.pipeline.basic.image_atomic_op_local_size_8`: STORAGE on opcode 32 —
         **RESOLVED**: both cases now scan OK through `specialize()` (2D R32ui storage
         image atomic admitted);
-      - `compute.pipeline.basic.undefined_values`: OPCODE 400 — **still faults**
-        (edge opcode, 1 case);
+      - `compute.pipeline.basic.undefined_values`: OPCODE 400 — **IMPLEMENTED
+        (2026-11-10); local shwave suite PASS after a struct-mask fix (see
+        below); not run on a remote leaf.** Opcode 400 =
+        `OpCopyLogical` (SPIR-V 1.4): copies an *aggregate* whose result type
+        differs from but logically matches the operand (different type IDs,
+        same members — NOT a same-type copy like `OpCopyObject`83, and NOT a
+        pointer op). Because our shader registers hold logical
+        (layout-independent) values, a register copy `wb_q <= va_q[0]` is
+        correct whenever operand/result logically match, which the spec
+        requires. Edits (11 sites, all additive — only newly-accepts a
+        previously-faulting opcode, cannot regress existing ops):
+        `spirv_scan.py` OP `CopyLogical=400` + `h_result` list;
+        `spirv_model.py` exec `opc in (83,400)` + `HAS_RTY` + `nva`→1;
+        `g6lc_apu_shmod.sv` `is_accepted`/`has_result` `16'd400`;
+        `g6lc_apu_shwave.sv` `f_has_rty`/`f_nva`/`int_alu`/`writeback` `400`.
+        New corpus shader `copylogical.spvasm`→`.spv` (spec-valid:
+        `OpTypeStruct` pair_a/pair_b same members diff IDs, `vulkan1.2` env —
+        note vulkan1.2/SPIR-V1.5 requires ALL used globals in the OpEntryPoint
+        interface list, unlike vulkan1.1). `spirv-val` clean, scanner accepts,
+        lavapipe oracle runs it (`.out.bin` real). **VERIFIED (2026-11-10):**
+        (a) `spirv_model.py` output == lavapipe oracle **bit-exact** on the
+        `copylogical_*` vectors; (b) **shmod RTL PASS** —
+        `tb_g6lc_apu_shmod` `PASS cases=111 checks=2029478` (Verilator build of
+        `Flist.apu_shmod` incl. edited `g6lc_apu_shmod.sv`): commit scanner
+        accepts opcode 400, marks `has_result`, emits `.tab` word-identical to
+        `spirv_scan.py`. Registered `copylogical` in both
+        `tb_g6lc_apu_shwave.sv` `names[65]` (+opt-loop exclusion) and
+        `tb_g6lc_apu_shmod.sv` `names[37]`/`no_opt`.
+        **shwave RTL sim (2026-11-10, second pass): the first run FAILED, and
+        the "identical to proven `OpCopyObject`, residual risk low" reading
+        above was wrong.** `copylogical_{1,2,3}` 32/32 words wrong: RTL wrote
+        `in[i]` where the model wrote `in[i]+in[i+32]`. Mechanism: `W_EX`
+        defaults `wbm_q` to `(1<<ncomp)-1`, a struct result has `ncomp=1`, so
+        `83/400` wrote member 0 only. `OpCopyObject` of a struct had the same
+        latent defect (no corpus vector copied a struct). Fix in
+        `g6lc_apu_shwave.sv`: for `83,400` with `rkind_q == APU_SH_TK_STRUCT`
+        the mask covers `rsz/4` flat words (the `149..152` rule). After the
+        fix: `PASS tb_g6lc_apu_shwave cases=484 checks=86935 ulp1=52 ulp2=0
+        maxulp=1 ouw=14856 oum=0 cycles=5569650`. Not yet run on a remote
+        leaf, so `compute.pipeline.basic.undefined_values` is still unscored.
+        `g6lc_apu_spirv.sv` is a separate diagnostic interpreter, not the
+        Venus path, and is untouched.
+      - **Three verification-infrastructure defects found on the way
+        (2026-11-10), all fixed in the tree, uncommitted:**
+        1. *The 196 MB translation unit was the testbench, not the RTL.*
+           `024root DepSet__0.cpp` (1,959,324 lines, ~19 GB to compile, never
+           finished at `-Os`/`-O1`/`-O0`) held **535 inlined copies of
+           `run_vec`**: Verilator unrolled every constant-bound corpus loop in
+           `tb_g6lc_apu_shwave.sv` and inlined the task per iteration.
+           `--output-split*` cannot help (one coroutine) and
+           `--unroll-stmts` cannot drop (the RTL needs it). Fix: the corpus
+           loop bounds are run-time values (`n_names/n_fault/n_gfx/n_seeds`,
+           plusargs that can only shorten a run). 9 copies remain; verilate +
+           compile + full suite now takes about 8 minutes here. Every corpus
+           name added before this fix made the unit larger, which is why the
+           PGO wrapper's 600 s compile cap started looping.
+        2. *`uout[UoNames]` was 64 while `names[]` became 65.* The 65th
+           name's stash aliased index 0 and produced false `FAIL-OU
+           arrlen_opt_*` (the "unopt" words were copylogical's). `UoNames=65`.
+           The bound is a separate literal from `names[]`; keep them in step.
+        3. *`sfu_hyper_*.exp` were stale against HEAD.* Commits `d0744a168`,
+           `09611f8c7`, `5d07d02c4` (2026-11-10) changed
+           `g6lc_apu_sfu_pkg.sv` and `sfu_tables.py`; the vectors dated from
+           `21318e235` (2026-10-15). Gate 1 failed on one word per vector
+           (`b1[254]` got `3dcd2440`, stored model `3dcd243c`); the current
+           model also gives `3dcd2440`, so RTL and model agree and only the
+           stored expectation was old. Regenerated `sfu_hyper` (6 `.exp`, one
+           word each). The other `sfu_*` vectors passed unchanged. The
+           "all-green run" in `404ada572` was `gen-sfu --check`, not this
+           suite.
+        Side effect to review before any commit: the filtered regeneration
+        rewrote `dispbase_0`, `fn_deep_0`, `zerodim_0` (`.exp`/`.hex` CRLF→LF
+        only; `.desc.json` `init` paths `E:\…` → `/mnt/e/…`).
+        Also: under WSL root the build scripts print `Build tools/verilator
+        first` when git refuses the repo as "dubious ownership"
+        (`apu_verilator_source_id` fails). Workaround used, no config
+        change: `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory
+        GIT_CONFIG_VALUE_0='*'` in the environment.
+      - **OPEN, silent wrong result — whole-aggregate values (found
+        2026-11-10).** `spirv_scan.py`/`shmod` accept `OpLoad`/`OpStore` of a
+        struct or array type and `83/400` on any aggregate, but the value
+        path is one RF row and the load/store walk is `ncomps()` words, which
+        is 1 for struct and array. Evidence, model only (RTL follows the same
+        table):
+        - plain GLSL through glslang, two std430 SSBOs, `o.s = i.s;`
+          (`agg_probe.py`): 4-word struct, 8-word struct, `uint s[8]`, and a
+          copy through two Function locals all commit with no fault and copy
+          **word 0 only**.
+        - the 11 CTS shaders in
+          `amber/spirv_assembly/instruction/spirv1p4/opcopylogical/`
+          (`ocl_run.py`, probes from each `[test]` block): all `spirv-val`
+          clean, all `SCAN OK`, **0/11 correct** (3/4 … 255/256 words wrong).
+          Before opcode 400 was accepted these refused at commit with
+          `OPCODE 400`; they now run and produce wrong data.
+        - `83/400` copies row 0 only, so a struct over 16 bytes is truncated
+          in both model (`setres(rid, va[0], …)`, `va` is one row) and RTL.
+          `reg()` gives an array-typed id one row whatever its length.
+        `undefined_values` is not affected in a way the test can see: `Bar`
+        is 16 bytes and its content is undefined; the test reads `a` and `c`.
+        This is the next shader-front implementation pass (plan, "Review
+        2026-11-10").
+      - **Aggregate value model — step 1 of 3 done: scanner + model
+        (2026-11-10, uncommitted). RTL not started; model is now AHEAD of
+        RTL for these ops.**
+        Rule: a struct/array VALUE in the register file is the *logical*
+        image (members packed in declaration order, 4 words per RF row);
+        `Offset`/`ArrayStride`/`MatrixStride`/row-major apply only in the
+        `OpLoad`/`OpStore` leaf walk. Hence `OpCopyLogical` = plain copy.
+        - `spirv_scan.py`: `struct_words` is the logical sum (was
+          offset-extent); `member_woff`, `is_agg`; `reg_rows` gives arrays
+          `ceil(words/4)` rows (was 1); `reg()` uses `reg_rows`.
+        - `spirv_model.py`: `agg_leaves` (memory leaf walk, same offset
+          rules as `chain()`), `agg_woff` (value literal walk);
+          aggregate `OpLoad`/`OpStore`; all-row `83/400`;
+          `CompositeConstruct` (any operand count), `Extract`, `Insert`
+          on struct/array values (the old extract walk indexed
+          `TK['ARR']`, a key that does not exist).
+        - **Second defect found and fixed in the model: `chain()` treated
+          the first index of ANY chain into an array under buffer storage
+          as a descriptor-array select.** glslang's element-wise array copy
+          chains from a derived pointer (`%22 = AccessChain %o 0;
+          AccessChain %22 k`), so every element landed on record k, word 0.
+          Now only a variable's own pointer selects a record: chain results
+          set pointer word3 bit18 and the rule skips when it is set. **RTL
+          `W_CHT1` (`ck_q == 0` test) still has the old rule.**
+        - Evidence: `tools/shader/agg_probe.py` 4/4 (was 0/4);
+          `tools/shader/opcopylogical_probe.py` 11/11 against the amber
+          probes (was 0/11). Regression: full `shader_vectors.main()` into
+          a scratch dir (499 cases) — every existing `.exp`/`.tab`/`.hex`
+          byte-identical to the tree (ignoring CR), so the corpus `.tab`
+          contract with `shmod` is unchanged.
+        - Remaining: (2) `shmod`: logical word count in the type row
+          (struct: `length` slot `w1[31:16]`; array: `mbase` slot
+          `w1[15:0]`, both unused for those kinds), `res_rows()` from it,
+          `type_words()` mirror — changes every `.tab` with a struct or
+          array type. (3) `shwave`: leaf-walk micro-sequence (type/member
+          row DFS, depth ≤ 6) feeding the existing LSU one word at a time
+          with a row flush every 4 words (generalises the matrix
+          `W_MLF`/`W_SMR0` path); N-row copy for `83/400` (reuse the
+          `W_FN4/5` arg-row loop); multi-row construct/extract/insert;
+          `W_CHT1` bit18. Then new corpus vectors from the two probes.
+        - **Steps 2 and 3a done (2026-11-10, uncommitted, local only).**
+          `shmod`: `lw_q`/`lwe_q` accumulate logical words; struct rows
+          carry them in `[63:48]`, array rows in `[47:32]`; `res_rows()`
+          uses them. `nwords(RARRAY)` is 0 in the scanner to match (a
+          block ending in a runtime array is never a value).
+          `PASS tb_g6lc_apu_shmod cases=111 checks=2029478`.
+          `shwave`: states `W_AG0..W_AGR` (leaf walk, stack `AGD=8`,
+          running offsets, no multiplier; one RF row of up to 4 leaf
+          offsets handed to the existing LSU via `ls_agg_q`), `W_AC0/1`
+          (N-row copy for `83/400`), `cder_q` + pointer word3 bit18 in
+          `W_CHT1`/`W_CHFIN`, `resn_q` from logical words. New vectors
+          `agg_struct` (GLSL, 8-word struct), `cl_arr` (ArrayStride 4→8),
+          `cl_mix` ({float, vec3, mat3, uint[3]}, column-major/stride-16 →
+          row-major/stride-4), written from scratch.
+          `PASS tb_g6lc_apu_shwave cases=496 checks=89044 ulp1=52 ulp2=0
+          maxulp=1 ouw=14856 oum=0 cycles=5653799`.
+          Not built: synthesis screen for the new states; leaf run.
+          Still model-only (3b): multi-row `CompositeConstruct`/`Extract`/
+          `Insert`, `OpPhi`/`OpSelect` of aggregates — `agg_probe.py`
+          `array_8w` and `local_struct_8w` depend on them.
+        - **Refusal for the model-only ops (2026-11-10).** `shwave`
+          `W_TY1`/`W_OT1` end the dispatch with `APU_SH_DONE_FAULT` for
+          `80/82/169/245` producing, or `81` reading, a struct/array
+          value over 4 logical words, instead of writing a truncated
+          value. Suite unchanged after it (496 cases PASS). No vector
+          exercises the refusal yet; the model still executes these ops,
+          so a vector for them will fail Gate 1 until 3b lands.
+        - **`tools/shader/shader_audit.py` (new).** `lists`: the
+          result-bearing sets in scan/model/shmod/shwave and the accept
+          sets in scan/shmod agree (136 result-bearing, 196 accepted, 0
+          findings; removing 400 from `f_has_rty` is reported). In the
+          `apu-ci` quick tier. `vectors`: regenerate and compare all
+          1,145 `.exp/.tab/.hex` (0 stale, 45 s); needs the lavapipe
+          oracle, so local/leaf only.
+        - Plan decisions inferred 2026-11-10 (plan §9): local snapshot
+          branch per green gate, no push; hardware-only SPIR-V commit
+          stands; gating by axis; no compressed formats advertised.
+        - **Step 3b done for Extract / Construct / Insert (2026-11-10,
+          second pass, uncommitted on master; local only).**
+          Member rows carry the member's word offset in a value
+          (`[63:50]`, written by `shmod` from `lw_q`, mirrored by
+          `spirv_scan.member_words`). `shwave`: literal walk
+          `W_AW0..W_AWE1` (struct → member row, array → element words ×
+          literal, matrix/vector inside a value) to a flat word offset;
+          word mover `W_MV0..2` (row base + (row, word) cursor + wrap per
+          side: 4 for a flat image, comps for a matrix id; constant
+          source = its 16-word image; 3 cycles per word); construct loop
+          `W_AK0..W_AKN` over any number of constituents; Insert = N-row
+          copy of the composite (`ac_s_q`/`ac_ret_q`) then one move.
+          Model: `flatv` of a matrix id reads one column per row.
+          `OpSelect`/`OpPhi` of a value over 4 words still fault in RTL;
+          the model now raises the same fault (`AGGREGATE`).
+          New vectors (written from scratch): `agg_arr` (GLSL float[8]
+          assignment, 8 extracts), `agg_local` (20-word struct {mat3,
+          vec2, uint[3], float} through two Function locals), `agg_ins`
+          (two inserts into a loaded float[8]), `agg_con` (construct
+          {vec2, float, mat2, float[2]} from a vector, scalar, matrix id
+          and array value). Model == lavapipe on all of them.
+          `PASS tb_g6lc_apu_shmod cases=111 checks=2029478`;
+          `PASS tb_g6lc_apu_shwave cases=512 checks=91708 ulp1=52 ulp2=0
+          maxulp=1 ouw=14856 oum=0 cycles=5810509`.
+          Not done: synthesis screen; a vector for the Select/Phi
+          refusal; the 16×16 multiply in `W_AWE1` has no timing note yet.
+        - **Opcode table (plan P1, accept + result sets).**
+          `tools/shader/sh_opcodes.py` is the one list (196 opcodes, 136
+          result-bearing, `SCAN_OWN`/`SHMOD_OWN` exceptions).
+          `spirv_scan.OP/ACCEPT` and its result-handler loop and
+          `spirv_model.HAS_RTY` import it; `gen_sh_opcodes.py` writes the
+          case labels of `shmod.is_accepted`, `shmod.has_result`,
+          `shwave.f_has_rty` between `GEN-BEGIN/END` markers, `--check`
+          in the `apu-ci` quick tier. All seven sets compared equal
+          before/after; benches above were run on the generated labels.
+          Not in the table yet: operand counts (`f_nva`/`Model.nva`),
+          legal operand type kinds, stage legality (`FRAG_ONLY`).
+        - **Format table, step 1 (plan P3).** `tools/gen_fmt_table.py`
+          reads the pinned `vk.xml` `<formats>` block into
+          `tools/vk_formats.py` (264 formats: block bytes, texels per
+          block, packing, compression, components) and audits the
+          profile's 17 `[formats]` rows against it (bpp, comps, uint,
+          flt, half, bgr, srgb): 0 findings; a deliberately wrong `bpp`
+          is reported. `--check` in the quick tier. No RTL is generated
+          from it yet; the engines keep their own format cases.
+        - **Third local pass (2026-11-10). Development and testing are
+          now kept apart on the owner's instruction: the per-edit check is
+          a 10 s Verilator lint (`--lint-only` of `Flist.apu_shcore` +
+          bench, and of `g6lc_apu_shwave_fixture -GEnable=1
+          -GPerfCountersEn=1`); the 8-minute bench is run per batch, not
+          per edit.**
+          - Aggregate `OpSelect` (`W_SL0..W_SLW`: two row reads, per-lane
+            merge on the scalar condition, row write) and `OpPhi`
+            (`ph_row_q` outer loop over the existing pair walk, `W_PHW`
+            row write) replace the refusal; the model follows. Vector
+            `agg_sel` (per-lane odd/even condition, both ops on a 2-row
+            array). Bench after this change: `PASS tb_g6lc_apu_shwave
+            cases=516 checks=92107 ulp1=52 ulp2=0 maxulp=1`.
+          - **Lint only since that bench run (not simulated):**
+            (a) operand counts in the opcode table — `sh_opcodes.NVA`
+            (184 fixed-count opcodes; 12 computed ones stay hand-written
+            in `f_nva` and `Model.nva`), four more generated regions
+            (`nva0/1/3/4`); the old `f_nva` and `Model.nva` disagreed on
+            18 opcodes (Undef, FunctionCall, Variable, the derivative
+            family, AtomicIIncrement/Decrement, BranchConditional,
+            Switch, IsHelper, FunctionParameter) — the RTL values were
+            kept, the model now reads the table; all 1,190 stored
+            expectations still regenerate identically, so the model's
+            old values were unused on the corpus.
+            (b) `sh_opcodes.FRAG_ONLY` (flag `f`) feeds the scanner;
+            `shader_audit.py lists` compares it with the two `shmod`
+            commit arms.
+            (c) `PerfCountersEn` on `g6lc_apu_shwave` (default 0, no
+            cells): `perf_o` = {tex, fpu, lsu cycles, memory requests,
+            instructions, busy cycles} of the current dispatch.
+            `shcore` leaves the port open; nothing reads it yet.
+          - Synthesis screen: `SHWAVE_SYNTH=1` passed the Enable=0 arm
+            (`SYNTH OK -0`); the small Enable=1 arm was stopped after 40
+            minutes inside yosys `SHARE` at 10 GB. No cell count for the
+            new states. Needs a leaf or a screen without `share`.
+          - The `dispbase_0`/`fn_deep_0`/`zerodim_0` churn is closed as
+            benign: those three are the only vectors stored CRLF in the
+            index; regeneration writes LF, content is identical.
+        - **Batch bench after the lint-only edits (2026-11-10):**
+          `PASS tb_g6lc_apu_shmod cases=111 checks=2029478`;
+          `PASS tb_g6lc_apu_shwave cases=516 checks=92107 ulp1=52 ulp2=0
+          maxulp=1` — covers the operand-count table, `FRAG_ONLY`, the
+          counters, and two further edits:
+          - **I1 at commit:** table flag `a` (`AGG_RESULT`, 15 opcodes)
+            names the result-bearing opcodes that carry a struct/array
+            through every row; `shmod` `S_RES` (`agg_ok()`, generated
+            labels) and the scanner fault `TYPE` for any other opcode
+            with such a result type. All 189 corpus modules still commit.
+            No negative vector yet.
+          - **Counters wired to the bench** (`shcore` parameter
+            `PerfCountersEn`, bench prints `PERF`). First numbers, one
+            dispatch each (busy cycles / instructions / memory requests /
+            cycles in the load-store unit):
+            `bufcopy_1` 2302 / 52 / 72 / 850; `vec4arith_1` 13538 / 160 /
+            392 / 8530; `math450_1` 58550 / 1012 / 1416 / 26066;
+            `cts_b2b_1` 50738 / 1721 / 136 / 12197; `agg_local_1` 23470 /
+            232 / 968 / 15178. So 30–60 cycles per wave-instruction, and
+            the load-store unit is 37–65% of the time on memory-bound
+            shaders (22 cycles per memory request on `vec4arith`).
+          - **First throughput change, measured:** operand words stream
+            one per cycle (`W_LD1` issues the next read instead of going
+            back through `W_LD0`). Same results, total suite cycles
+            5,839,342 → 5,616,302 (−3.8%); `cts_b2b_1` −5.8%,
+            `math450_1` −4.8%, `bufcopy_1` −4.5%.
+          - **Two more, each bench-checked (516 cases PASS, same
+            checks):** operand regmap reads overlap the previous
+            operand's capture (`W_CV1`/`W_RV1` issue the next id) →
+            5,580,763; a repeat of the same {set, binding, element}
+            within one instruction skips the descriptor resolve
+            (`ds_v_q`/`ds_key_q`, cleared at `W_NEXT` and by the record /
+            image paths) → **5,507,174 cycles, −5.7% from 5,839,342**.
+            `vec4arith_1` 13538 → 12766, `math450_1` 58550 → 53998.
+            These are single-digit gains; the lane-serial memory access
+            itself (M2) is untouched.
+          - **Read-beat reuse (first M2 step), bench-checked:** a load
+            keeps the last 64-bit beat (`lb_v_q/lb_a_q/lb_d_q`); the other
+            32-bit word of the same beat is served without a request.
+            Dropped by any accepted write and at `W_NEXT`. 516 cases PASS,
+            suite 5,475,980 cycles (−6.2% from 5,839,342); memory
+            requests `vec4arith_1` 392 → 264, `bufcopy_1` 72 → 56.
+          - **Negative vector for the aggregate-result rule:** shmod bench
+            case `aggres` (OpIAdd with a struct result type → `TYPE`,
+            opcode 128). `PASS tb_g6lc_apu_shmod cases=112
+            checks=2029481`.
+          - **Load/store advance folded into the access completion**
+            (`ls_adv()` task called from `W_LS2`, the read-beat hit and
+            `W_SSB1`; `W_LSA` kept for the other exits). 516 cases PASS,
+            same checks; suite **5,173,971 cycles, −11.4% from
+            5,839,342**. `vec4arith_1` 10,590, `math450_1` 47,950,
+            `agg_local_1` 18,714.
+          - **Result-type row reuse** (`rty_v_q`/`rty_id_q`: the same
+            result type id as the previous instruction skips
+            `W_TY0/W_TY1`; dropped at `W_DONE`). 516 cases PASS, same
+            checks; suite **5,097,599 cycles, −12.7% from 5,839,342**.
+          - Mesa 25.2.8 `vn_physical_device.c` (upstream source, read
+            not run): passes through YCbCr, pipeline libraries, extended
+            dynamic state 3, transform feedback, shading rate, interlock
+            and ray tracing; has no mesh shader, cooperative matrix,
+            shader object or micromap entry. Recorded in the
+            release-contract note.
+          - Rast bench after the `stat_o` port was added (counters off
+            in the bench, so this shows no regression, not that the
+            counters count correctly): `PASS tb_g6lc_apu_rast cases=42
+            checks=15602 cycles=3656805`.
+          - **Counters exercised (2026-11-10):** the rast bench now
+            enables them and checks they moved and that pixel writes do
+            not exceed busy cycles. The triangle count skips the later
+            triangles of a clip fan (still before culling).
+            `STAT busy=3656558 tris=53 pixwr=14514`;
+            `PASS tb_g6lc_apu_rast cases=42 checks=15603`. The bench does
+            not check the counts against an expected value per case.
+          - Correction to the two lines above: the primitives-generated
+            query counts primitives leaving the last pre-rasterization
+            stage, i.e. before clipping and culling. Counting on the first
+            triangle of a clip fan, before the cull test, is therefore the
+            right point for triangles. Whether point and line primitives
+            pass `S_PR_AREA` has not been checked, so they may be
+            uncounted.
+          - Sizing of the dynamic-state prerequisite: adding set-commands
+            to `vn_command_set.txt` regenerates the Venus decode tables
+            (`g6lc_apu_vn_pkg`) and with them every front-end vector, so
+            it is a whole-front regeneration plus the vnfront, cmdexec,
+            vgtop and vgsys benches, not a local edit. Not started.
+          - **Result-id lookup issued from `W_RMI`** (skips `W_RW0` when
+            operands are done). 516 cases PASS, same checks; suite
+            **5,022,047 cycles, −14.0% from 5,839,342**. Decisions
+            inferred: stay on the shader core; leaf/CTS/synthesis-host
+            runs stay off; no Venus table regeneration.
+          - Checked: line primitives enter `S_LN_INIT` from three
+            assembly sites without passing `S_PR_AREA`, so the triangle
+            counter does not count lines (and `S_LN_INIT` is re-entered
+            for later edges, so it cannot be counted on entry as is).
+            Open: one count at primitive assembly for every topology.
+          - Top level after the rast port change: Verilator lint of
+            `Flist.apu_vgtop` + `tb_g6lc_apu_vgtop` is clean. The vgtop
+            bench itself was not run.
+          - Decisions inferred for the remaining list (2026-11-10): leaf,
+            CTS and synthesis-host runs stay off (last explicit
+            instruction); next build item is the per-field source mask on
+            `apu_rast_draw_t`. Finding that sizes it: only viewport,
+            scissor and blend constants have set-commands in
+            `vn_command_set.txt`, so each further dynamic state needs a
+            decode-table entry, a golden-model path and a shadow register
+            before the mask bit means anything.
+          - **Draw-path counters, first step (superseded by the line
+            above):**
+            `g6lc_apu_rast` parameter `PerfCountersEn` (default 0, no
+            cells) and port `stat_o` = {pixel writes, primitives reaching
+            setup, busy cycles}, counted on entry to `S_ROP_WR` /
+            `S_PR_AREA`. `vgtop` and the rast bench leave it open. Not yet
+            a query object: no pool storage, no begin/end window, no
+            copy path. "Primitives reaching setup" is before culling and
+            after clip-fan expansion, so it is not yet the
+            primitives-generated count the CTS checks.
+        - **Release-contract families and throughput architecture
+          (2026-11-10):** `specs/architecture/release-contract-
+          architecture.md`. Findings that change the plan: the pinned
+          Venus protocol has no shader objects, opacity micromaps,
+          invocation reorder, device-generated commands or descriptor
+          buffers (645,404 shader-object cases are unreachable at this
+          pin); transform feedback and mesh lists are dominated by query
+          counters (107,866 and 24,680 cases); `apu_rast_draw_t` is
+          already a per-draw state record with one dynamic selector
+          (`dr_bcdyn_q`), so library parts and dynamic state are a
+          per-field source mask on it. Nothing in that file is run.
+        - `apu_exec.vlt` pinned an UNSIGNED waiver to `shwave` lines
+          2465-2466; the first insertion above them broke the build.
+          `W_MLF` now tests `c < lcc + 1` and the waiver is gone. The
+          `objmem.sv -lines 900` waiver has the same weakness.
+        - Note: only `dispbase_0`/`fn_deep_0`/`zerodim_0` are CRLF in the
+          index (`i/crlf`); every other vector is LF, so the regeneration
+          churn on those three is EOL normalisation, not content.
+          - **Primitive counter counts every topology (2026-11-11):**
+            the count moved from `S_PR_AREA` (triangles only, after
+            clip-fan expansion) to `S_PR_W` — the single-cycle state
+            every point/line/triangle passes once after vertex fetch,
+            before outcode/clip/cull, with `clip_q` excluding clip-fan
+            triangles (they belong to the clipped parent). Lines no
+            longer bypass it; trivially-rejected primitives now count,
+            matching primitives-generated semantics. Clipped lines exit
+            through `S_LC_N`→`S_T0R`, never re-entering `S_PR_W`, so no
+            double count. `PASS tb_g6lc_apu_rast cases=42 checks=15603
+            cycles=3656805`; `STAT busy=3656558 tris=263 pixwr=14514`
+            (was tris=53 — the delta is lines/points now counted). The
+            bench still checks movement, not per-case expected counts.
+          - **Remote leaf infra fix (2026-11-11):** `run-apu-vgtop.sh`
+            and `run-apu-vgsys.sh` were committed `i/crlf`; the remote
+            `env bash` shebang fails `bash\r` → both top suites rc=127.
+            Normalised both to LF in the working tree (index still
+            crlf — a whole-file EOL diff on next commit). Leaf
+            `apu-leaf-20261110T213656-238b545faabf` (pre-fix snapshot)
+            ran `sys-venus` clean (41+ session PASSes and counting) but
+            vgtop/vgsys rc=127; a second leaf was launched on the
+            LF-fixed tree for clean top-stage evidence.
+          - Query objects remain the next draw-path item: the counters
+            now produce the right per-assembly counts, but there is no
+            pool storage, begin/end window, drain-then-snapshot, or
+            result write path yet (`stat_o` is still `.stat_o()`-open
+            in vgtop; cmdexec never sees it). The bounded contract is
+            now specified from `vn_query_replay.py`/`vn_golden.py` in
+            `release-contract-architecture.md` §3a.
+            **Design constraint:** `g6lc_apu_vgtop.sv:804` builds
+            `g6lc_apu_rast` with default `PerfCountersEn=1'b0`, so the
+            counters are *not elaborated* in the production APU — they
+            cost zero area today and the remote `sys-venus` PASS
+            validated the design without them. Queries need them
+            enabled (`PerfCountersEn=1'b1` at that instantiation, or
+            always-on); the three 32-bit counters + enables are
+            trivial area, but they must not be turned on before a
+            consumer exists or it is dead logic.
+          - **Remote evidence (2026-11-11):** leaf
+            `apu-leaf-20261110T213656-238b545faabf` (pre-CRLF-fix
+            snapshot `4f2658511502`) — `sys-venus` **PASS rc=0,
+            218,605 checks, 959 s** (full system Venus bench: ue_cpos/
+            ue_cneg sessions, dev_reset, q_reset, venusoff, worksink0,
+            legality — exercises the aggregate shader work, the
+            throughput changes and the new primitive counter
+            end-to-end); vgtop/vgsys rc=127 on the committed-CRLF
+            shebang, an infra defect not a functional fail. Collected
+            to `remote-runs/apu-leaf-20261110T213656-238b545faabf`.
+            Leaf `apu-leaf-20261110T215213-0da0011bf0a3` (LF-fixed tree
+            `fc1f4742eb7a`) is running the clean top stage for
+            vgtop/vgsys evidence.
+          - **Query ops, first slice (2026-11-11, snapshot `44e9d8849`):**
+            `g6lc_apu_cmdexec` gained the §3a pool-LOOKUP → extent-write
+            frame — `StQryLk/StQryLkC` resolve `handle[0]` through ObjTab
+            (kind `VK_QUERY_POOL`), validate kind/type/range in 64 bits
+            (no 32-bit wrap on a malformed `{first,count}`), capture the
+            result-extent word base `aux[63:48]<<6`, `size`=queryCount and
+            `aux[7:0]`=type; `StQryW/StQryWC` commit slot words through
+            `op_req` WRITE.  `RESET_QUERY_POOL` clears availability over
+            `[first,+count)`; `WRITE_TIMESTAMP`/`_2` store the honest u64 0
+            (`timestampPeriod==0`) with avail set.  Slots are 16 words:
+            word[0] avail, words[1:4] hold up to four **32-bit** counter
+            deltas in spec order (read path zero-extends to u64), `<<4`
+            stride in vnfront.
+          - **Query ops, BEGIN/END + counter plumbing (2026-11-11,
+            COMMITTED `fa2e26303` on `snapshot/apu-aggregate-2026-11-10`,
+            REMOTE-VERIFIED):** `g6lc_apu_cmdexec` now executes
+            `BEGIN/END_QUERY(_INDEXED)` and `WRITE_TIMESTAMP_2`.  A new
+            8-entry open-query table (`qry_ov/opool/oidx/osnap`) tracks
+            concurrent opens; BEGIN/END route through `StDrain` so the
+            free-running `qry_stat_i` bus is differenced over exactly the
+            bracketing draw window — BEGIN snapshots post-drain
+            (`StQryBegS`), END computes per-spec-bit deltas in
+            spec-bit order {0,1,2,7} (`StQryEndD`, rank = count of lower
+            enabled bits) then walks avail+counters into the slot and
+            frees the entry.  Timestamp-pool BEGIN/END degenerate to a
+            QueryStamp per the model; duplicate-begin / end-without-open
+            / bad-flags / table-overflow / out-of-range all lose the
+            submission.  `imm[2:]==0` spare check added for all non-COPY
+            query records; indexed variants admit index==0 via it.
+            `g6lc_apu_rast` gained `qry_stat_o`={fs_inv,occ,ia_prim,
+            ia_vtx} (`PerfCountersEn`), wired through `g6lc_apu_vgtop`
+            into cmdexec's new `qry_stat_i` port; tb ports tied.
+            **Remote verification (apu-leaf `230658`, isolated snapshot
+            = snapshot-branch + this slice):** targeted `run-apu-*` benches
+            on the pushed source — cmdexec `VERILATOR BUILD OK` +
+            `PASS cases=14 checks=80`; rast `BUILD OK` +
+            `PASS cases=42 checks=15604` with `QSTAT ia_vtx=443
+            ia_prim=263 occ=15312 fs_inv=17446`; vnfront `BUILD OK` +
+            `PASS cases=179 checks=3093`; vgtop `--lint-only` elaborates
+            clean end-to-end (qry_stat bus + `PerfCountersEn` wiring, no
+            PINMISSING/PINWIDTH).  Bugs the remote compile caught and I
+            fixed: an unbalanced `state_q` ternary paren, `WIDTHTRUNC`
+            open-table/counter-slot index widths (`qry_ti_q`→3b,
+            `qry_cd_q` indices→2b), and a missed `tb_g6lc_apu_rast.sv`
+            `qry_stat_o` tie.  Infra fixes en route: `remote-runs` moved
+            off drvfs (9P hang) via symlink to ext4; the `git archive`
+            snapshot lacked submodule contents so `core/cvfpu` (fpnew) +
+            10 surface submodules were populated manually for the FP-
+            dependent benches.  COPY_QUERY_POOL_RESULTS and
+            GET_QUERY_POOL_RESULTS remain open — design pinned below.
+          - **Query readback design map (2026-11-11, analysis only — NOT
+            implemented):** both ops are large cross-subsystem builds,
+            scoped but not started.
+            *`vkCmdCopyQueryPoolResults`* (ctype 131, currently
+            `CLS_NOP` = silently dropped, which is incorrect): device-side,
+            model = `vn_query_replay.py::QueryCopy`/`_pool`.  Handles:
+            `handle[0]`=src pool, `handle[1]`=dst VkBuffer (required),
+            `handle[2:]`=0, `payload_words`=0.  imm: `[0]`first `[1]`count
+            `[2]`flags (only bits 0x9: 64-bit + with-availability) `[3:4]`
+            dstOffset u64 `[5:6]`stride u64 `[7:]`=0.  Semantics: per query
+            emit `counters` values (stat_count for type-1 else 1) as u64 if
+            flags&1 else u32, +u32 avail if flags&8, pad to `stride`;
+            `record_size=counters*(8|4)+(4|0)`; validate `first+count<=size`,
+            `stride>=record_size`, `stride%4==0`, `dst_offset%4==0`,
+            `(count-1)*stride+record_size <= capacity-dst_offset`, count>0
+            (count==0 no-op).  RTL path: reuse `StQryLk` pool LOOKUP
+            (result extent `aux[63:48]<<6`, 16-word slots, word0=avail,
+            words1-4=u32 counter deltas) for the SOURCE; dst needs a
+            VkBuffer→bound VkDeviceMemory→aperture-base resolve (the
+            `xf_dst_base_q`/`xf_dst_size_q` pattern: memory `aux[63:32]`=
+            aperture byte base, `entry.size`=capacity, `entry.gen` must
+            match the recorded bind gen) then per-query ObjPay READ of
+            avail+counters + format + **first-of-kind mp WRITE**
+            (`mp_req_o`→`mp_req_o[5]`=`APU_MP_EXEC`, `we=1` — cmdexec
+            currently only reads on this port; objmem writes on a
+            different port).  Open risk: whether the EXEC aperture port
+            accepts writes must be confirmed in `g6lc_apu_apmem`/vgsys.
+            Estimated ~300-400 lines new FSM (dual resolve + per-query
+            read/format/write walk).
+            *`vkGetQueryPoolResults`* (ctype 49, currently unclassified →
+            UNSUPPORTED): host-side readback, model =
+            `vn_native_submit.py::_query_results`.  Variable-length reply
+            blob of `needed=count*packed` bytes where `packed=stride||
+            record_bytes`, `record_bytes=counters*8+(flags&8?4:0)`;
+            requires flags&1 (64-bit), flags&~0xB rejected, blob_count==
+            size, `first+count<=pool_size`, `size>=needed`.  Per query:
+            counters as u64 lo/hi word pairs + u32 avail (if flags&8) +
+            zero pad to packed; returns VK_OK / VK_NOT_READY (any slot
+            unavailable, no WAIT) / VK_ERR_VALIDATION_FAILED /
+            VK_ERROR_FEATURE_NOT_PRESENT.  WAIT flag (0x2) blocks until
+            all slots available (model raises RingBlocked).  RTL blocker:
+            `g6lc_apu_vnrep` reply programs source data only from the
+            command stream/exec buffer/profile constants — there is **no
+            ObjPay-read reply source**, so GET needs either a new vnrep
+            op that walks the query extent or a vnfront staging buffer the
+            reply program copies; plus WAIT needs executor/extent polling.
+            This is an architectural extension, larger than COPY.
       - also re-scanned: `STORAGE opcode=59` (7, mutable-descriptor/storage limits —
-        still fault), `BRANCH opcode=249` (1, still faults), `BOUND opcode=0` (40,
+        still fault), `BRANCH opcode=249` (1, still faults — `spirv_scan.py:787`
+        `tgt not in labels`: an `OpBranch`/`OpSwitch` targets a label id the
+        scanner never saw, i.e. malformed/unsupported control-flow structure, not
+        an opcode-acceptance gap), `BOUND opcode=0` (40,
         shader-size — intentional).  Net: the JSON's commit-fault census **overstates**
         current refusals — the spec-constant/storage work closed the CONST-50 and
         STORAGE-32 clusters; what remains is dominated by truthful capability bounds
@@ -2618,6 +3169,185 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
       WRONG target. Next: check I2I copy region/format correctness in
       `g6lc_apu_xfer` (XImgGo) and the sampled-image descriptor→image
       memory map + texture-read path in shwave.
+      **★★★ NONDETERMINISM PROVEN (instrumented rerun out-fault-1024
+      PASSED):** identical config (`VN_DEBUG=no_abort`, same
+      `--deqp-case`, same seeds) — earlier `out-noabort-1024` gave
+      `Fail (5:SubmitRenderPass Image comparison failed)`, this run
+      gave **`Pass (Pass)`**, `device_faults=0`, iter to 25600.
+      Same RTL, different outcome ⇒ **the bug is a RACE /
+      timing-sensitive synchronization hazard, NOT a deterministic
+      data-path error.** All the copy/fetch/raster/descriptor
+      exonerations stand; the real defect is an ordering/visibility
+      gap that only manifests in some interleavings — squarely the
+      documented "deeper synchronization" open workstream.
+      **Mechanism traced (cmdexec+tdma+shwave):**
+      - `StDrain` waits `outst_q==0`; copies/xfer count into outst_q
+        (pipelined via StWork). BUT **draws/dispatches go StDsIssue→
+        StDsDone and NEVER count into outst_q** (cmdexec ~1133,2319) —
+        a barrier does NOT wait for an in-flight draw's async memory
+        tail (vertex fetch / texture reads / framebuffer writes).
+        `dsd_skip_q` only aligns the shared work_done pulse.
+      - `g6lc_apu_tdma` is a 2:1 AXI join locking **per-burst** (not
+        per-op): port A (apmem: all mp_req incl. texture/vertex/raster)
+        wins over port B (xfer copies) when unlocked; lock clears on
+        each b_done/r_done ⇒ reads CAN interleave between a copy's
+        write bursts.
+      - xfer writes DO settle before done (`XDone` needs `wr_settled`
+        = write-B), and apmem is an uncached AXI bridge ⇒ single-op
+        copy→read ordering is sound. The gap is the **draw-side**:
+        draw `work_done` may retire before its memory transactions
+        fully drain, letting a subsequent copy/read overlap it.
+      Remaining race loci (ranked): (a) draw work_done vs full memory
+      settle — next op overlaps draw's texture/FB tail; (b) same-pixel
+      render-target write hazard across the 4 render passes;
+      (c) tdma per-burst lock letting a port-A read split a port-B
+      multi-burst copy. Next: check what draw `work_done` actually
+      waits on (shcore retire vs AXI drain) + measure failure rate.
+      **Deeper trace (~all exonerated):** draw `work_done`=`rs_done`
+      (rast `S_FIN_OK`) fires only after every framebuffer `mp_req`
+      got its `mp_rsp` (single-outstanding port); `apmem` writes run
+      `StWrIssue→StWrB`(waits AXI `b_valid`)→`StDone`→`rsp` so writes
+      settle before the requester proceeds; shwave texture cache is
+      dispatch-scoped + tag-checked + single-wave-at-a-time;
+      secondary cmdbufs flow through the SAME cmdexec FSM
+      (`cur_cbd_q` swaps to the secondary's descriptor block, `outst_q`/
+      `StDsDone`/`StDrain` shared) so ordering is preserved;
+      **`dsd_skip_q` is CONSERVATIVE/safe** — the draw's own done is
+      always in the pulse stream and skipping `dsd_skip_q` pulses then
+      consuming the next can only exit on/after the draw's real
+      completion (an early draw-done is skipped, a later copy-done is
+      consumed — both safe, never premature). ⇒ the residual
+      nondeterminism is NOT in cmdexec ordering, engine retire, memory
+      coherence, texture cache, tdma arbitration, secondary nesting, or
+      done-matching. It is either (i) a microarchitectural hazard
+      inside an engine's data path that static reading can't isolate,
+      (ii) a Mesa/Venus/QEMU transport-level race (`device_faults=0`,
+      clean RTL ordering keeps this live), or (iii) an image
+      copy-region/format edge that only diverges under specific
+      timing. **Needs runtime evidence**: a vgtop stress repro
+      (copy→barrier→sampled-render→re-copy→sample loop) or
+      texel-divergence instrumentation on a failing run.
+      **outst_q decrement-asymmetry (checked, EXONERATED):** `rs_done`
+      (raster/draw) reaches cmdexec `work_done_i` via the vgtop doneq
+      (`push_i={ext,rs_done,xf_done,sh_done&&!gfx}`→`ex_done_v`), and
+      `StDsIssue` does NOT increment `outst_q` — only `StWork`(copies)
+      and `StBrpIssue`(clears) do. So a draw's done decrements
+      `outst_q` (~line 1117 `work_done_i&&outst_q!=0`) with no matching
+      increment ⇒ transient under-count. BUT it is masked:
+      `StDsDone` consumes `dsd_skip_q(=outst_q@issue)+1` pulses = ALL
+      outstanding copies + the draw, exiting exactly on the last done
+      ⇒ FSM never reaches a drain state while work runs; pure-copy
+      pipelines stay balanced. `idle_o`/`StDrain`/watchdog only observe
+      `outst_q==0` when truly drained. Real wart (draw done "steals" a
+      copy's decrement) but NOT a premature-release path here.
+      **DEVBACKED relocation (checked, EXONERATED):** `vgctl hold_o`
+      spans the whole relocation (drain+evict+move+publish);
+      `idle_o=StIdle&&outst_q==0` gates the drain so no submission is
+      mid-flight when memory moves. Not the race.
+      **Second instrumented CTS run VERDICT: PASS** (`out-fault2-1024`,
+      `Pass`, `device_faults=0`, 2599 s). Samples now **1 Fail / 2
+      Pass** ⇒ intermittent race, fail-rate ≲1/3 (small n). Stdout
+      shows repeated Mesa `stuck in fence wait` (~2^14 watchdog,
+      no_abort) — slow-but-functional transport, not a hang.
+      **Diagnostic detail (failing QPA `out-noabort-1024`):**
+      `MemoryType1Verify2 → 5:SubmitRenderPass` reports
+      `Image comparison failed: max difference = (255,254,255,255),
+      threshold = (0,0,0,0)`. A **maximal** channel delta on a single
+      render pass ⇒ some sampled texels/positions are wholly wrong —
+      consistent with the shader reading the WRONG image/descriptor
+      (garbage texels → scattered points → large pixel delta) rather
+      than a 1-ulp tear. Refocuses suspicion on descriptor→image
+      binding or texture-fetch returning wrong data intermittently.
+      **vn_golden repro primitives confirmed present:** `--graphics-
+      session` emits COMBINED_IMAGE_SAMPLER texture sessions —
+      `vtex` (vertex-stage sample, set0/binding0 stageFlags VERTEX)
+      and `ftex*` (fragment implicit/bias/array/gather/nearest/linear/
+      repeat/mirror/clamp) — plus `vkCmdCopyImage`,
+      `vkCmdCopyBufferToImage`, `vkCmdCopyImageToBuffer` ops and
+      image binds (§12.3 C/5b). Remaining work is composing an
+      I2I-copy→barrier→sampled-POINT-render→readback loop and running
+      it under `+mp_lat_min/max`+`+mp_ready_pct` jitter — scoped, but
+      a multi-session build.
+      **★★ Repro harness FOUND (cheaper than a new session):** the
+      vgtop regression ALREADY runs ~30 `ue_gpos_ftex*`/`vtex` texture
+      vectors under `+mp_lat_min=1 +mp_lat_max=20 +mp_ready_pct=60`
+      jitter (run-apu-vgtop.sh step2), and those vectors populate the
+      sampled image via `vkCmdCopyBufferToImage` upload (vn_golden
+      ~9184) THEN sample it — the SAME xfer-write→apmem-read ordering
+      as the CTS I2I copy. `+verilator+seed+N` varies the `$urandom`
+      timing per run (confirmed: cycle counts differ). So sweeping
+      seeds on the existing texture vectors under jitter IS a
+      copy→sample race repro without building a new session.
+      **Seed sweeps launched (autonomous, background):**
+      `ue_gpos_vtex_1` (vertex-stage sample, closest to
+      sampled-image.vert) ×40 seeds; `ue_gpos_ftexn_1` (fragment 4×4
+      multi-texel + B2I upload) ×60 seeds — any `FAIL`/non-PASS
+      localizes an RTL texture/copy-ordering race; all-PASS across
+      seeds pushes suspicion back to transport (Mesa/QEMU) or the
+      more complex CTS-only structure (I2I + secondary cmdbufs + 4
+      render passes).
+      **★★ Sweep VERDICT (2026-11-10): NEGATIVE — texture path robust.**
+      ~80 jittered runs (`mp_lat 1..20`, `ready_pct 60`, per-seed
+      `$urandom`) across `ue_gpos_vtex_1`×~40 + `ue_gpos_ftexn_1`×~40:
+      **zero real failures.** Two flagged "NONDETERMINISTIC/FAIL"
+      (vtex s31, ftexn s30) were **`timeout 120` kills, not faults** —
+      both re-ran clean to `PASS` at ~2.2M cycles with `timeout 150/160`
+      (heavy jitter stretches wall-time; the sweep's 120s cap is too
+      tight). So the simple copy→sample texture path (B2I upload→sample,
+      vertex+fragment) shows **no nondeterminism** ⇒ the `all_device`
+      race is NOT in the basic texture-fetch/copy-ordering datapath;
+      residual locus narrows to the **CTS-only structure** (I2I
+      `vkCmdCopyImage` + secondary cmdbufs + 4 chained render passes +
+      cross-pass image layout/barrier state) or the **Mesa/QEMU/rutabaga
+      transport** — consistent with ranked hypotheses (1)/(3) below.
+      **Transport/QEMU avenue (mapped, unaudited):** chain is guest
+      Mesa Venus → QEMU `virtio-gpu` (Venus-capable, `blob`+`hostmem`
+      required, hw/display/virtio-gpu*.c) → bridge → APU RTL. QEMU
+      virtio-gpu is large/stock-ish; a fence-signal or resource-backing
+      race there is NOT exonerated and is consistent with
+      `device_faults=0`+clean RTL+nondeterminism. Needs a dedicated
+      QEMU-side audit or a guest-side fence/readback probe.
+      **Final ranked hypotheses for the residual race:**
+      (1) Mesa/Venus/QEMU transport race (fence or SHM backing
+      visibility) — most consistent with all RTL being sound;
+      (2) microarchitectural hazard inside an engine data path
+      (pipeline hazard/reset-recovery) invisible to module analysis —
+      needs waveform on a failing run;
+      (3) address-value-dependent bug (image lands at varying physical
+      addr run-to-run → latent addressing edge) — needs addr capture.
+      **vn_golden.py repro path identified** (16k-line golden model,
+      `--graphics-session`/`--variant`, emits copy→sample tapes) but
+      building a looped copy→sample→verify stress vector exceeds a
+      single session's budget; deferred.
+      **★★ ARCHITECTURE CONFIRMED (this session):** `bridge_main.cpp`
+      **Verilates the REAL `g6lc_apu_sys` RTL cycle-by-cycle**
+      (`ApuVenus`), served over a unix socket; QEMU
+      `virtio-gpu-rutabaga.c`→`rutabaga_gfx_ffi`→bridge→RTL. So the
+      guest path runs genuine synthesizable RTL, and the run-to-run
+      nondeterminism is **QEMU/host arrival-timing variation** feeding
+      real RTL timing — an RTL microarchitectural race is fully
+      possible (not just a functional-model artifact). This is exactly
+      what vgtop `tb_apu_mp_mem.sv` models with `+mp_lat_min/max` +
+      `+mp_ready_pct` ($urandom_range latency + ready backpressure),
+      so a vn_golden graphics session run under jittered mp timing is
+      the correct deterministic repro harness.
+      **★★ Two more paths EXONERATED this session:**
+      (a) `txc`/`dc_val_q` texture+descriptor caches — `W_IDLE:
+      if(disp_i)` clears `txc_v_q`/`txc_vic_q`/`dc_v_q`/`dc_vic_q`
+      (g6lc_apu_shwave.sv ~3044-3066) for **every** dispatch incl.
+      `APU_SH_WORK_VS`/`_FS` graphics work_ids ⇒ per-draw, no stale
+      texel carry across the 4 render passes;
+      (b) framebuffer write ordering — raster `S_ROP_WR` is
+      acknowledged (`mp_acked_q`, single outstanding mp_req) so pixel
+      writes retire in order; primitives are processed serially by the
+      FSM ⇒ no same-pixel reorder across points.
+      **Concrete next-step repro (scoped):** emit a vn_golden
+      `--graphics-session` that does VkImageCreate→CopyImage(I2I)→
+      barrier→sampled-image POINT render→readback-verify in a loop,
+      run under `+mp_lat_min=1 +mp_lat_max=N +mp_ready_pct<100` over
+      many `$urandom` seeds in `tb_g6lc_apu_vgtop`; a nondeterministic
+      .exp mismatch localizes the race to RTL (then waveform), while
+      all-pass points back to QEMU/Mesa transport.
     - [ ] `api.descriptor_set.descriptor_set_layout_binding.layout_binding_order`: Fail
       "Verifier failed: 513 == 257, at index 0". The shader read the value of another
       binding: the layout's bindings are created out of numeric order, and a lookup keyed

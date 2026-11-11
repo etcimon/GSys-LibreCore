@@ -4,7 +4,8 @@
 import hashlib
 import unittest
 
-from g6lc_cpu_origin_program import build_program
+from g6lc_cpu_origin_program import (ATOMIC_DONE, ATOMIC_TRAP, ATOMIC_U_ENTRY,
+                                     build_atomic_program, build_program)
 
 
 def signed(value, width):
@@ -111,6 +112,144 @@ class ProgramTests(unittest.TestCase):
             stores, reads = trace_program(build_program(extended), corrupt_read=True)
             self.assertEqual(stores[-1][:2], (36, 0x7f))
             self.assertEqual(reads, 1)
+
+
+def _sext(value, width):
+    sign = 1 << (width - 1)
+    mask = (1 << width) - 1
+    value &= mask
+    return value - (1 << width) if value & sign else value
+
+
+def trace_atomic(image, corrupt_read=False):
+    """Simulate the atomic firmware on a byte-addressable model.
+
+    Returns (stores, reads) where stores records (probe_offset, value, mode)
+    for every sd/sw and reads counts every ld/lw/AMO/LR data return. AMO/LR/SC
+    update the byte memory; sc.d sets rd=0 on a held reservation."""
+    words = [int(word, 16) for word in image.splitlines()]
+    regs = [0] * 32
+    csrs, mem, stores = {}, {}, []
+    reservation = None
+    reads = 0
+    pc, mode = 0x80000000, 3
+
+    def rb(addr, n):
+        return sum(mem.get(addr + i, 0) << (8 * i) for i in range(n))
+
+    def wb(addr, n, val):
+        for i in range(n):
+            mem[addr + i] = (val >> (8 * i)) & 0xff
+
+    for _ in range(512):
+        word = words[(pc - 0x80000000) // 4]
+        opcode = word & 127
+        rd, rs1, rs2 = (word >> 7) & 31, (word >> 15) & 31, (word >> 20) & 31
+        next_pc = pc + 4
+        if opcode == 0x17:                       # auipc
+            regs[rd] = (pc + signed(word & 0xfffff000, 32)) & 0xffffffffffffffff
+        elif opcode == 0x37:                     # lui
+            regs[rd] = signed(word & 0xfffff000, 32) & 0xffffffffffffffff
+        elif opcode == 0x13:                     # addi (li)
+            regs[rd] = (regs[rs1] + signed(word >> 20, 12)) & 0xffffffffffffffff
+        elif word == 0x30200073:                 # mret
+            next_pc, mode = csrs[0x341], (csrs[0x300] >> 11) & 3
+            if mode != 3:
+                csrs[0x300] &= ~(1 << 17)
+        elif opcode == 0x73:                     # csrw
+            csrs[word >> 20] = regs[rs1]
+        elif opcode == 0x23:                     # sd/sw
+            funct3 = (word >> 12) & 7
+            n = 8 if funct3 == 3 else 4
+            offset = signed(((word >> 25) << 5) | ((word >> 7) & 31), 12)
+            addr = regs[rs1] + offset
+            wb(addr, n, regs[rs2] & ((1 << (8 * n)) - 1))
+            stores.append((addr - 0x50000000, regs[rs2], mode))
+            if addr - 0x50000000 == ATOMIC_DONE:
+                return stores, reads
+            if addr - 0x50000000 == ATOMIC_TRAP:
+                return stores, reads
+        elif opcode == 0x03:                     # ld/lw
+            funct3 = (word >> 12) & 7
+            n = 8 if funct3 == 3 else 4
+            addr = regs[rs1] + signed(word >> 20, 12)
+            val = rb(addr, n)
+            regs[rd] = val if n == 8 else _sext(val, 32) & 0xffffffffffffffff
+            reads += 1
+            if corrupt_read:
+                regs[rd] ^= 1
+        elif opcode == 0x63:                     # bne
+            assert (word >> 12) & 7 == 1
+            if regs[rs1] != regs[rs2]:
+                next_pc = pc + branch_offset(word)
+        elif opcode == 0x2f:                     # RV64A AMO/LR/SC
+            funct5, funct3 = (word >> 27) & 31, (word >> 12) & 7
+            n = 8 if funct3 == 3 else 4
+            mask = (1 << (8 * n)) - 1
+            addr = regs[rs1]
+            old = rb(addr, n)
+            operand = regs[rs2] & mask
+            if funct5 == 2:                      # LR
+                regs[rd] = old if n == 8 else _sext(old, 32) & 0xffffffffffffffff
+                reservation = addr
+            elif funct5 == 3:                    # SC
+                if reservation == addr:
+                    wb(addr, n, operand)
+                    regs[rd] = 0
+                    reservation = None
+                else:
+                    regs[rd] = 1
+                stores.append((addr - 0x50000000, regs[rs2], mode))
+            else:
+                if funct5 == 0:
+                    new = (old + operand) & mask
+                elif funct5 == 1:
+                    new = operand
+                elif funct5 == 4:
+                    new = old ^ operand
+                elif funct5 == 8:
+                    new = old | operand
+                elif funct5 == 12:
+                    new = old & operand
+                else:
+                    raise AssertionError(f"unhandled amo funct5 {funct5}")
+                wb(addr, n, new)
+                regs[rd] = old if n == 8 else _sext(old, 32) & 0xffffffffffffffff
+                stores.append((addr - 0x50000000, new, mode))
+            reads += 1
+        elif opcode == 0x6f:                     # jal (incl. jal x0,0 hang)
+            if word == 0x0000006f:
+                raise AssertionError("program hung before completion")
+            imm = signed(((word >> 31) << 20) | (((word >> 12) & 0xff) << 12) |
+                         (((word >> 20) & 1) << 11) | (((word >> 21) & 0x3ff) << 1), 21)
+            regs[rd] = pc + 4
+            next_pc = pc + imm
+        else:
+            raise AssertionError(f"unexpected instruction {word:08x} at {pc - 0x80000000:#x}")
+        regs = [v & 0xffffffffffffffff for v in regs]
+        regs[0] = 0
+        pc = next_pc
+    raise AssertionError("atomic program did not reach completion or trap")
+
+
+class AtomicProgramTests(unittest.TestCase):
+    def test_atomic_image_builds(self):
+        image = build_atomic_program()
+        self.assertEqual(len(image.splitlines()), 1024)
+        self.assertNotEqual(image, build_program())
+
+    def test_atomic_program_completes_and_checks_pass(self):
+        stores, reads = trace_atomic(build_atomic_program())
+        # The last store is the completion marker at Probe+ATOMIC_DONE.
+        self.assertEqual(stores[-1][0], ATOMIC_DONE)
+        # Both privilege sections ran: M slots (0..40) and U slots (64..104).
+        offsets = sorted({off for off, _, _ in stores})
+        self.assertIn(0, offsets)
+        self.assertIn(64, offsets)
+
+    def test_atomic_program_corrupt_read_fails_to_trap(self):
+        stores, _ = trace_atomic(build_atomic_program(), corrupt_read=True)
+        self.assertEqual(stores[-1][0], ATOMIC_TRAP)
 
 
 if __name__ == "__main__":

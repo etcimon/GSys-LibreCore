@@ -38,15 +38,10 @@ STUB_REL = "verif/tb/apu/g6lc_dram_peek64_stub.cpp"
 LSU_REL = "core/load_store_unit.sv"
 LSU_OLD = "ld_st_priv_lvl_i, ld_st_v_i, debug_mode_i);"
 LSU_NEW = "ld_st_priv_lvl_i, ld_st_v_i, 1'b0);"
-# The committed interpreter instantiates the netlist without forwarding
-# OriginEnabled (tb_g6lc_storamic_cpu_debug_interpreter.sv:95); the prior
-# Yosys flow parameterized cpu.il separately, but a single-shot Verilator
-# build needs the forwarding or every OriginEnabled=0 case fails spuriously.
-# Applied to the remote tree copy only; committed sources stay untouched and
-# both hashes are recorded in the manifest.
-INTERP_OLD = "g6lc_storamic_cpu_debug_netlist cpu ("
-INTERP_NEW = ("g6lc_storamic_cpu_debug_netlist #(.OriginEnabled(OriginEnabled)) "
-              "cpu (")
+# The committed interpreter forwards OriginEnabled to the netlist
+# (tb_g6lc_storamic_cpu_debug_interpreter.sv), so a single-shot Verilator
+# build runs every OriginEnabled=0 case with origin genuinely off; no remote
+# patch is applied and interpreter_sha256 is the only interpreter identity.
 SIM_TIMEOUT = 300
 BUILD_TIMEOUT = 2400
 CYCLE_LIMIT = 200000
@@ -159,14 +154,6 @@ def run(data, out, stages, manifest, builds, outcomes, verilator, build_model):
             for (priv, mprv, mechanism), img in sorted(images.items())},
         "mutant": {"file": LSU_REL, "old": LSU_OLD, "new": LSU_NEW},
     }
-    (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
-    interp_path = tree / INTERP_REL
-    interp_text = interp_path.read_text(encoding="utf-8")
-    if interp_text.count(INTERP_OLD) != 1:
-        raise RuntimeError("CPU_DEBUG_INTERPRETER_PATCH_INVENTORY")
-    interp_path.write_text(
-        interp_text.replace(INTERP_OLD, INTERP_NEW), encoding="utf-8")
-    manifest["cpu_debug"]["interpreter_patched_sha256"] = _sha(interp_path)
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
     lsu_path = tree / LSU_REL
     lsu_pristine = lsu_path.read_bytes()

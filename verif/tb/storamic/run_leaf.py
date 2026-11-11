@@ -471,7 +471,13 @@ def main():
     if set(stages) & {"fetch-queue", "fetch-queue-synth"}:
         from run_fetch_queue import run as run_fetch_queue
         run_fetch_queue(data, out, stages, manifest, builds, outcomes, verilator, build_model)
-    if set(stages) & {"cpu-origin"}:
+    # origin-profile/origin-queue are small independent component benches; run
+    # them before the CPU stages so their evidence is produced even if a later
+    # CPU variant (e.g. cpu-origin-unsupported RVH=1) fails to elaborate.
+    if set(stages) & {"origin-profile", "origin-queue"}:
+        from run_origin_remote import run as run_origin_remote
+        run_origin_remote(data, out, stages, manifest, builds, outcomes, verilator, build_model)
+    if set(stages) & {"cpu-origin", "cpu-origin-unsupported", "cpu-origin-atomic"}:
         from run_cpu_origin import run as run_cpu_origin
         run_cpu_origin(data, out, stages, manifest, builds, outcomes, verilator, build_model)
     if set(stages) & {"cpu-debug", "cpu-debug-stq-mutant"}:

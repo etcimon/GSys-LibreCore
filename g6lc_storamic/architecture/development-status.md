@@ -1,5 +1,85 @@
 # Storamic development and qualification lanes
 
+Latest C1 follow-up (CPU50, closed for the qualified profile): real-CPU
+`tdata`/Sdtrig trigger coverage plus the debug-origin queue/return/atomic/
+unsupported items all pass in one combined remote run. Verification-only; no
+production RTL changed.
+- **`cpu-debug-trigger` reworked and store/load unblocked.** Debug entries are
+  discriminated by a debugger-owned `dscratch0` flag (not `dcsr.cause`), the
+  second entry requires `dcsr.cause==3` plus the exact post-trigger DPC, and
+  the deny case's position-correct `wstrb` (`0xF0` on the high-half `sw`) is
+  now accepted. mcontrol6 address triggers (store/load) initially produced no
+  second entry: the `debug_from_mcontrol_o` pulse is keyed to
+  `vaddr_from_lsu_i` at LSU issue and is **not commit-qualified**, so it landed
+  on a stale squashed debug-ROM decode (`pc=0x8dc`) right after the first
+  `DRET` and the `DEBUG_REQUEST` was lost. That pulse not being commit-
+  qualified — and thus losable on any squashed decode — is an **upstream
+  Sdtrig defect** (SDTRIG=0 in every qualified profile, so not C1-blocking;
+  logged for upstream). The bench works around it by padding the firmware
+  target with 64 NOPs so the frontend drains the post-`DRET` transient before
+  the trigger access; store/load then commit a real firmware decode and enter
+  debug. The execute-address match is commit-synchronized
+  (`commit_instr_i.pc && commit_ack`) and is unaffected.
+- **Observed trigger timing (all "after"):** execute → `DPC=T+4`
+  (`0x80000144`); store/load → `DPC=access_pc+4` (`0x80000244`). `dcsr.cause=3`
+  (`CauseRequest`) for both entries — see deviation note below.
+- **mcontrol6 `dcsr.cause` deviation (upstream, not C1-blocking).**
+  `decoder.sv:2111-2113` routes an mcontrol6 hit through the `DEBUG_REQUEST`
+  exception path, so `csr_regfile.sv:2689-2699` records `dcsr.cause=3`
+  (`CauseRequest`) with DPC at the instruction after the trigger point. Only
+  the icount path (`csr_regfile.sv:2649-2655`) yields `CauseTrigger=2`. This is
+  an Sdtrig conformance deviation (spec expects cause 2 for `action=1`), but
+  **SDTRIG=0 in every qualified profile**, so it does not block C1 origin
+  authority; logged separately for upstream.
+- **`cpu-debug-return` registered** under Verilator (M/S/U × origin × delay +
+  Negative, HoldStage=3 held-B). A debug-issued read cannot be pending across
+  `DRET`: `load_unit.sv:762-765` only raises `valid_o` when
+  `req_port_i.data_rvalid` arrives on a non-flushed `ldbuf` entry, and
+  `load_unit.sv:241-251` marks flushed entries so they never produce a result —
+  a load either retires on its R or is flushed; there is no committed-load-
+  pending state to carry across `DRET`.
+- **`cpu-debug-queue` HoldStage 1-5 QUALIFIED** (`storamic-b108f5361c8b`,
+  26/26): stage 4 holds the dedicated firmware-load AR (`Probe+48`) unaccepted
+  and stage 5 accepts it with R held across entry; the load carries firmware
+  origin, debugger accesses stay `000`, firmware completes after `DRET`. Three
+  testbench/runner bugs fixed (premature first-write `debug_req`,
+  `OriginEnabled` not forwarded to the netlist, FAIL-reason regex group) — no
+  RTL defect.
+- **`cpu-origin-atomic` QUALIFIED** (`storamic-85eafabb8b42`, 6/6): AMO/LR/SC
+  emit `prot==000` on AXI (AMO old-value on R+B, LR `AR.lock`, SC `AW.lock`→
+  `B.EXOKAY`); ordinary keep M/U origin; `+expect_atomic_origin` rejects. The
+  earlier post-`mret` stall was a missing firmware prologue (CSR/`pmpcfg`/`mtvec`
+  → trap loop), not RTL.
+- **`cpu-origin-unsupported` + `origin-profile` + `origin-queue` QUALIFIED**
+  (`storamic-3d48a7b778aa`, 17/17): RVH=1 variant zeroes all data `prot`;
+  `+expect_supported` rejects `aw-prot`.
+- **`cpu-debug-trigger` QUALIFIED** (`storamic-8d679ba79ca3`, 19/19): Sdtrig=0
+  deny pair + mechanism-3 execute + store/load address triggers.
+- **`cpu-debug-return` registered** (M/S/U × origin × delay + Negative,
+  HoldStage=3 held-B); read-return reasoning `load_unit.sv:762-765`/`241-251`.
+- **Combined run `storamic-b74425a4c1bc` — all 11 CPU50 stages PASS**
+  (`leaf-result` `status: pass`, 266 per-case records all `pass`,
+  `STORAMIC_REMOTE_SELECTED_STAGES_PASS`; `run_remote.py` exited 0 after
+  post-run source/stage identity verification and auto-pull, launched with
+  `--timeout 6000`): cpu-debug-trigger 19, cpu-debug-queue 26-case matrix
+  incl. HoldStage 4/5, cpu-debug-return, cpu-origin-atomic,
+  cpu-origin-unsupported, origin-profile, origin-queue, cpu-debug (48 cases +
+  stq-mutant), cpu-origin, stq-commit-flush, cpu-debug-stq-mutant. The
+  `cpu-debug` interpreter now forwards `OriginEnabled` to the netlist in
+  committed source (the remote patch was removed); its origin-0 verdicts are
+  byte-identical to `storamic-cc977ef86fa1`, so earlier origin-0 evidence
+  stands. `storamic-b8efef926eaf` produced an identical remote `leaf-result`
+  `status: pass` but the runner reported `Incomplete` (2400 s watchdog at the
+  completion boundary → pull race, post-run identity check not executed) —
+  corroborating history, not closure evidence. Two earlier combined attempts
+  (`storamic-2c3f96bae2c8`, `storamic-601cd89e9a1e`) aborted before all stages
+  ran and are non-qualifying history.
+- **Remote runs:** combined `storamic-b74425a4c1bc` (corroborating
+  `storamic-b8efef926eaf`); trigger `storamic-8d679ba79ca3`; queue
+  `storamic-b108f5361c8b`; atomic `storamic-85eafabb8b42`;
+  unsupported/profile/queue `storamic-3d48a7b778aa`; focused trigger
+  `storamic-c8818918c7b9`.
+
 Latest C1 follow-up (CPU49c): the CPU49b store-buffer fix is re-qualified on
 remote owned-tools evidence only — local WSL Verilator 5.020 leaf runs are
 development-only and non-qualifying.

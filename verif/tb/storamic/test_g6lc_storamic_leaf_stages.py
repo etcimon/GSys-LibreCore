@@ -375,23 +375,34 @@ class IndependentFormalStageTests(unittest.TestCase):
         tree = ast.parse(runner.read_text())
         main = next(node for node in tree.body
                     if isinstance(node, ast.FunctionDef) and node.name == "main")
+        wanted = {
+            "set(stages) & {'origin-profile', 'origin-queue'}",
+            "set(stages) & {'cpu-origin', 'cpu-origin-unsupported', 'cpu-origin-atomic'}",
+            "set(stages) & {'cpu-debug', 'cpu-debug-stq-mutant'}",
+            "set(stages) & {'cpu-debug-trigger'}",
+            "set(stages) & {'cpu-debug-return'}",
+            "set(stages) & {'cpu-debug-queue'}",
+            "set(stages) & {'stq-commit-flush'}",
+            "set(stages) & {'csr-scc'}"}
         dispatch = {}
         for node in ast.walk(main):
             if isinstance(node, ast.If) and isinstance(node.test, ast.BinOp):
                 text = ast.unparse(node.test)
-                if text in {"set(stages) & {'cpu-origin'}",
-                            "set(stages) & {'cpu-debug', 'cpu-debug-stq-mutant'}",
-                            "set(stages) & {'stq-commit-flush'}",
-                            "set(stages) & {'csr-scc'}"}:
+                if text in wanted:
                     dispatch[text] = ast.unparse(node)
-        self.assertEqual(set(dispatch), {
-            "set(stages) & {'cpu-origin'}",
-            "set(stages) & {'cpu-debug', 'cpu-debug-stq-mutant'}",
-            "set(stages) & {'stq-commit-flush'}",
-            "set(stages) & {'csr-scc'}"})
-        self.assertIn("run_cpu_origin", dispatch["set(stages) & {'cpu-origin'}"])
+        self.assertEqual(set(dispatch), wanted)
+        self.assertIn("run_origin_remote",
+                      dispatch["set(stages) & {'origin-profile', 'origin-queue'}"])
+        self.assertIn("run_cpu_origin",
+                      dispatch["set(stages) & {'cpu-origin', 'cpu-origin-unsupported', 'cpu-origin-atomic'}"])
         self.assertIn("run_cpu_debug",
                       dispatch["set(stages) & {'cpu-debug', 'cpu-debug-stq-mutant'}"])
+        self.assertIn("run_cpu_debug_trigger",
+                      dispatch["set(stages) & {'cpu-debug-trigger'}"])
+        self.assertIn("run_cpu_debug_return",
+                      dispatch["set(stages) & {'cpu-debug-return'}"])
+        self.assertIn("run_cpu_debug_queue",
+                      dispatch["set(stages) & {'cpu-debug-queue'}"])
         self.assertIn("run_stq_commit_flush",
                       dispatch["set(stages) & {'stq-commit-flush'}"])
         self.assertIn("run_csr_scc", dispatch["set(stages) & {'csr-scc'}"])
