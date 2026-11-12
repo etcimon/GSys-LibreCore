@@ -188,6 +188,34 @@ def main():
             os.environ["G6LC_CTS_CASELIST"] = SHARD_LIST
             print(f"[drive] shard {CTS_SHARD}: {len(cases[idx::count])} of "
                   f"{len(cases)} cases from /{src}", flush=True)
+        # G6LC_CTS_CASELIST_HOST=<name|path>: inject an arbitrary
+        # caselist into the private CTSDATA image as
+        # caselists/g6lc-custom.txt and run it. <name> resolves under
+        # the source-tree caselists dir (GUEST_DIR/cts/caselists/);
+        # an absolute/relative path is used as-is. Lets one leaf batch a
+        # custom case set without rebuilding ctsdata.img.
+        host_list = os.environ.get("G6LC_CTS_CASELIST_HOST", "")
+        if host_list:
+            base = INSTANCE or args.out
+            src_path = host_list if (os.path.isabs(host_list)
+                                     or os.sep in host_list) else \
+                os.path.join(GUEST_DIR, "cts", "caselists", host_list)
+            if not os.path.isfile(src_path):
+                print(f"FATAL: caselist host file missing: {src_path}")
+                return 2
+            dst = "caselists/g6lc-custom.txt"
+            cmds = f"{base}/debugfs-custom.cmd"
+            open(cmds, "w").write(f"rm /{dst}\nwrite {src_path} /{dst}\n")
+            r = subprocess.run(["debugfs", "-w", "-f", cmds, CTSDATA],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                print(f"FATAL: debugfs inject {src_path} -> /{dst}: "
+                      f"{r.stderr.strip()}")
+                return 2
+            os.environ["G6LC_CTS_CASELIST"] = dst
+            print(f"[drive] custom caselist {src_path} -> /{dst} "
+                  f"({sum(1 for l in open(src_path) if l.strip())} cases)",
+                  flush=True)
     server_log = open(f"{args.out}/server-run-{mode}.log", "wb")
 
     for p in (SOCK, CONSOLE, MON):
