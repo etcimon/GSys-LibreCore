@@ -1,0 +1,28 @@
+{
+  "g6lc_rename_read": {
+    "calibrated_fo4": null,
+    "class_note": "over-budget plain path \u2014 no exclusive/atomic exception",
+    "closes": false,
+    "endpoint": "g6lc_rename_read.out0",
+    "max_freq_mhz": 754.7169811320755,
+    "module_id": 0,
+    "multi_cycle": false,
+    "node_count": 9,
+    "path_class": "plain",
+    "path_id": 65,
+    "path_kind": "intoout",
+    "primary_loc": {
+      "end_col": 18,
+      "end_line": 222,
+      "file": "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\timing\\../../core/ooo/g6lc_rename_read.sv",
+      "start_col": 12,
+      "start_line": 222
+    },
+    "slack_fo4": -45.0,
+    "stage_end": null,
+    "stage_start": null,
+    "startpoint": "g6lc_rename_read.in0",
+    "total_fo4": 53.0,
+    "total_fo4_raw": null
+  }
+}

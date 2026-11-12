@@ -132,7 +132,12 @@ assign dn_req_o  = up_req_i;
         // Find matching stream (same or strided)
         for (int unsigned s = 0; s < NR_STREAMS; s++) begin
           if (st_q[s].valid) begin
-            delta = signed'(demand_line - st_q[s].addr);
+            // r127-u: delta is signed[31:0]; (a-b) mod 2^32 depends only on the
+            // low 32 bits of each operand, so the 64-bit subtract narrows to
+            // 32 with a bit-identical result — halves the carry chain on the
+            // match path. demand_line/st_q[s].addr are line-aligned (low OFF
+            // bits zero), so the truncated operands stay exact.
+            delta = signed'(demand_line[31:0] - st_q[s].addr[31:0]);
             if (demand_line == st_q[s].addr + (st_q[s].stride)) begin
               hit_stream[s] = 1'b1;
               st_d[s].addr = demand_line;

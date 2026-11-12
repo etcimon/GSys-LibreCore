@@ -49,7 +49,16 @@ module g6lc_ai_pe_dot_float_pipe #(
   // r94: the minimum-exponent search is pre-reduced in groups of
   // EXP_GROUP_SIZE lanes during S1 (inside the existing multiply
   // window); S2's tree then only walks the group roots.
-  localparam int unsigned EXP_GROUP_LEVELS = (LEVELS < 3) ? LEVELS : 3;
+  // r127-ab: rebalance the exponent-min tree across the S1/S2 boundary. The
+  // tree is LEVELS deep; the r94 cap of 3 left S2 walking a (LEVELS-3)-level
+  // tail that dominated the stage (80 FO4 at Lanes=512 / LEVELS=9). S1's
+  // makespan is set by the per-lane FP multiply, not the exponent cone, so it
+  // absorbs ~half the tree. Split evenly for deep trees; keep the r94 cap for
+  // shallow ones (LEVELS<=6 is already balanced). Latency-neutral: same
+  // pipeline depth, same s2_block_exp_q capture edge, identical min value
+  // (guarded by the s2_block_exp_d == ref_min assertion).
+  localparam int unsigned EXP_GROUP_LEVELS =
+      (LEVELS <= 6) ? ((LEVELS < 3) ? LEVELS : 3) : ((LEVELS + 1) / 2);
   localparam int unsigned EXP_GROUP_SIZE   = 1 << EXP_GROUP_LEVELS;
   localparam int unsigned EXP_GROUPS       = P2 / EXP_GROUP_SIZE;
   localparam int unsigned EXP_TAIL_LEVELS  = LEVELS - EXP_GROUP_LEVELS;
@@ -573,19 +582,23 @@ assign fmt_ok = (numfmt_i == AI_FMT_FP8_E4M3) ||
       end
     end
 
-    any_nan = 1'b0;
-    any_inf = 1'b0;
-    any_finite = 1'b0;
-    has_pos_inf = 1'b0;
-    has_neg_inf = 1'b0;
-    for (int unsigned l = 0; l < P2; l++) begin
-      any_nan    = any_nan    | s1_is_nan[l];
-      any_inf    = any_inf    | s1_is_inf[l];
-      any_finite = any_finite | s1_vld[l];
-      if (s1_is_inf[l]) begin
-        if (s1_sign[l]) has_neg_inf = 1'b1;
-        else            has_pos_inf = 1'b1;
+    // r127-t: the unpacked per-lane flag loops billed as a serial chain;
+    // gather to packed vectors once (parallel bit selects) and use
+    // reduction operators. Identical: the flags are set-only, so the OR
+    // reduce and the (is_inf & sign) qualifies are exact.
+    begin : gflags
+      logic [P2-1:0] nan_v, inf_v, vld_v, sgn_v;
+      for (int unsigned l = 0; l < P2; l++) begin
+        nan_v[l] = s1_is_nan[l];
+        inf_v[l] = s1_is_inf[l];
+        vld_v[l] = s1_vld[l];
+        sgn_v[l] = s1_sign[l];
       end
+      any_nan      = |nan_v;
+      any_inf      = |inf_v;
+      any_finite   = |vld_v;
+      has_pos_inf  = |(inf_v & ~sgn_v);
+      has_neg_inf  = |(inf_v &  sgn_v);
     end
     s2_block_exp_d    = exp_min[EXP_TAIL_LEVELS][0];
     s2_any_nan_d      = any_nan;

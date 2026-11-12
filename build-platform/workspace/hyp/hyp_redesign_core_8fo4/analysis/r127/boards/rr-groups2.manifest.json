@@ -1,0 +1,35 @@
+{
+  "tag": "rr-groups2",
+  "argv": [
+    "E:\\cva6\\sv-timing\\target\\release\\sv-timing.exe",
+    "analyze",
+    "--files-from",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\timing\\hyp8-core.f",
+    "--modules",
+    "g6lc_rename_read",
+    "--param-map",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r95\\params-core-all.json",
+    "--assume-xlen",
+    "64",
+    "--package-mode",
+    "packages",
+    "--stages",
+    "--target-mhz",
+    "5000",
+    "--fo4-ps",
+    "20",
+    "--budget-margin",
+    "0.2",
+    "--json-out",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r127\\boards\\rr-groups2.json",
+    "--ir-out",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r127\\boards\\rr-groups2.ir.json"
+  ],
+  "returncode": 0,
+  "gitHead": "e4145351070ccb0f488853d70733037b67186ce3",
+  "sha256": {
+    "E:\\cva6\\sv-timing\\target\\release\\sv-timing.exe": "c567e1b2959aee5fd8035e4efabac4446826f7d16f57053f8f62c742486d3bcc",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\timing\\hyp8-core.f": "f7919a93fff647f7f520b3a421bc7e28a6f38979d1a0438c028ce7bff4e8b68a",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r95\\params-core-all.json": "514aef69c95896c0a5bc4f38bc02cb773c6e1055b2f20a774c178edb23f256c9"
+  }
+}

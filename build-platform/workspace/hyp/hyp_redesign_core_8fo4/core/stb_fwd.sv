@@ -326,27 +326,90 @@ module stb_fwd
   logic [NB-1:0][1:0]                      ins_win_c;
   logic [NB-1:0]                           ins_cboz_c, cover_c;
 
+  // r127: thermometer of the registered commit read pointer (slot s lies
+  // below it), shared by every byte lane's commit-winner split.
+  logic [DEPTH_COMMIT-1:0] cmt_below;
+  for (genvar s = 0; s < DEPTH_COMMIT; s++) begin : gen_cmt_below
+    if (s == DEPTH_COMMIT - 1) begin : gen_top
+      // the highest slot is never below the pointer (constant compare)
+      assign cmt_below[s] = 1'b0;
+    end else begin : gen_cmp
+      assign cmt_below[s] = (CW2'(s) < f1_cmt_rd_ptr_q);
+    end
+  end
+  //pragma translate_off
+  initial begin
+    assert ((DEPTH_COMMIT & (DEPTH_COMMIT - 1)) == 0)
+      else $fatal(1, "stb_fwd: the commit ring index wraps on a power-of-two DEPTH_COMMIT");
+  end
+  //pragma translate_on
   for (genvar b = 0; b < NB; b++) begin : gen_f2
     // spec winners
     for (genvar i = 0; i < DEPTH_SPEC; i++) begin : gen_swin
       assign spec_win_c[b][i] =
           f1_sc_b[b][i] && !(|(f1_older_q[i] & f1_sc_b[b]));
     end
-    // commit winner: rotate, highest-set, rotate back
-    logic [DEPTH_COMMIT-1:0] rot, above, hi;
-    for (genvar k = 0; k < DEPTH_COMMIT; k++) begin : gen_rot
-      assign rot[k] = f1_cc_b[b][f1_cmt_rd_ptr_q + CW2'(k)];
-    end
+    // commit winner, in slot order (r127; the A136/A144 form). The newest
+    // writer in queue order is the candidate with the largest ring offset
+    // from rd_ptr: the highest candidate slot BELOW rd_ptr when there is
+    // one, else the highest at or above it. Two downward prefix-OR
+    // isolates split by the pointer thermometer replace rotate ->
+    // isolate -> popcount(hi-1) -> pointer add -> indexed read; the slot
+    // index is an OR encode of the one-hot winner and the cbo.zero flag a
+    // one-hot AND-OR. With no candidate the index keeps its old value
+    // (rd_ptr), so every output is bit-identical to the rotate form.
+    logic [DEPTH_COMMIT-1:0] c_lo, c_hi, lo_ab, hi_ab, cwin_oh;
+    logic [CW2-1:0]          cwin_enc;
+    assign c_lo = f1_cc_b[b] & cmt_below;
+    assign c_hi = f1_cc_b[b] & ~cmt_below;
     always_comb begin : c_above
-      above = rot >> 1;
-      for (int unsigned l = 1; l < DEPTH_COMMIT; l = l << 1)
-        above = above | (above >> l);
+      lo_ab = c_lo >> 1;
+      hi_ab = c_hi >> 1;
+      for (int unsigned l = 1; l < DEPTH_COMMIT; l = l << 1) begin
+        lo_ab = lo_ab | (lo_ab >> l);
+        hi_ab = hi_ab | (hi_ab >> l);
+      end
     end
-    assign hi         = rot & ~above;
-    assign cmt_any_c[b] = |rot;
-    assign cwin_c[b]    = f1_cmt_rd_ptr_q +
-                          CW2'($countones(hi - DEPTH_COMMIT'(1)));
-    assign cmt_cboz_c[b] = cmt_any_c[b] && f1_cmt_cboz_q[cwin_c[b]];
+    assign cwin_oh = (|c_lo) ? (c_lo & ~lo_ab) : (c_hi & ~hi_ab);
+    for (genvar j = 0; j < CW2; j++) begin : gen_cwin_enc
+      logic [DEPTH_COMMIT-1:0] m;
+      for (genvar s = 0; s < DEPTH_COMMIT; s++) begin : gen_m
+        if (((s >> j) & 1) != 0) begin : gen_set
+          assign m[s] = cwin_oh[s];
+        end else begin : gen_clr
+          assign m[s] = 1'b0;
+        end
+      end
+      assign cwin_enc[j] = |m;
+    end
+    assign cmt_any_c[b]  = |f1_cc_b[b];
+    assign cwin_c[b]     = cmt_any_c[b] ? cwin_enc : f1_cmt_rd_ptr_q;
+    assign cmt_cboz_c[b] = |(cwin_oh & f1_cmt_cboz_q);
+    //pragma translate_off
+    // r127 equivalence: the pre-r127 rotate form, every cycle.
+    logic [DEPTH_COMMIT-1:0] rf_rot, rf_above, rf_hi;
+    logic [CW2-1:0]          rf_win;
+    logic                    rf_any, rf_cboz;
+    for (genvar k = 0; k < DEPTH_COMMIT; k++) begin : gen_rf_rot
+      assign rf_rot[k] = f1_cc_b[b][f1_cmt_rd_ptr_q + CW2'(k)];
+    end
+    always_comb begin : c_rf_above
+      rf_above = rf_rot >> 1;
+      for (int unsigned l = 1; l < DEPTH_COMMIT; l = l << 1)
+        rf_above = rf_above | (rf_above >> l);
+    end
+    assign rf_hi   = rf_rot & ~rf_above;
+    assign rf_any  = |rf_rot;
+    assign rf_win  = f1_cmt_rd_ptr_q + CW2'($countones(rf_hi - DEPTH_COMMIT'(1)));
+    assign rf_cboz = rf_any && f1_cmt_cboz_q[rf_win];
+    always_ff @(posedge clk_i) begin
+      if (rst_ni && !$isunknown({f1_cc_b[b], f1_cmt_rd_ptr_q, f1_cmt_cboz_q})) begin
+        g6lc_r127_cwin_eq: assert (cmt_any_c[b] === rf_any && cwin_c[b] === rf_win &&
+                                   cmt_cboz_c[b] === rf_cboz)
+          else $error("stb_fwd: equiv commit winner b=%0d", b);
+      end
+    end
+    //pragma translate_on
     // arrivals (fixed priority; index 0 is program-youngest)
     assign ins_win_c[b]  = f1_ins_cand_q[0][b] ? 2'd0 :
                            f1_ins_cand_q[1][b] ? 2'd1 : 2'd3;

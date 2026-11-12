@@ -1,0 +1,17 @@
+sv-timing-core 0.1.0 ir=ir-v6 measurement=delay-v50 correction=correction-v5 parser_pin=v0.13.5
+opt=-O2 (max_passes=4 worklist_width=1 cut=cost-balanced stages=1 min_gain=2 slack_target=0 area_weight=0 max_cells_per_fo4=16 reassoc=false effort=balanced cache=unit)
+target_mhz=5000
+from_cache=false
+modules=7
+paths=51
+opportunities=9
+ir_out=probes/probe2.ir.json
+  module p_b6_nested_comb nodes=19 regions=3
+  module p_b7_flat_sliced_comb nodes=22 regions=11
+  module p_b8_mux2_sliced nodes=6 regions=3
+  module p_h3_read_predecoded nodes=6 regions=2
+  module p_h4_read_late_cmp nodes=10 regions=3
+  module p_f3_enable_wide nodes=12 regions=5
+  module p_f4_write_uncond nodes=13 regions=5
+json_out=probes/probe2.json
+stages: none (no svt-stage pragmas)

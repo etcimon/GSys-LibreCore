@@ -850,8 +850,25 @@ module wt_dcache_wbuffer
       // mask reduction; use the CAM mask directly and keep the encoder
       // only for the positional read below.
       assign fixup_coalesced = fixup_push && (snap_bypass_hit || (|snap_push_match));
+      // r127: "the first match in FIFO order from the head is the head
+      // slot" is "the head slot matches": the head has ring distance 0, so
+      // when it matches no other slot precedes it, and when it does not the
+      // encoder's head bit is 0. The positional encoder leaves this cone
+      // (it still feeds the merge select below).
       assign fixup_active_coalesced = fixup_push &&
-          (snap_bypass_hit || (!fixup_bypass_valid_q && snap_push_first[fixup_head]));
+          (snap_bypass_hit || (!fixup_bypass_valid_q && snap_push_match[fixup_head]));
+      //pragma translate_off
+      always_ff @(posedge clk_i) begin
+        if (rst_ni && !$isunknown({snap_push_match, fixup_head})) begin
+          g6lc_r127_fixup_head_eq: assert (snap_push_first[fixup_head] ===
+                                           snap_push_match[fixup_head])
+            else $error("wt_dcache_wbuffer: equiv fixup head match");
+          g6lc_r127_fixup_match_onehot: assert ($onehot0(snap_push_match) &&
+                                                (snap_push_first === snap_push_match))
+            else $error("wt_dcache_wbuffer: fixup CAM match not one-hot (%b)", snap_push_match);
+        end
+      end
+      //pragma translate_on
 
       // T47 word match. Merge copies paddr through, and the invalidate
       // clear only writes be, so a slot's word address changes only when
@@ -1032,7 +1049,12 @@ module wt_dcache_wbuffer
             fixup_bypass_d = merge_fixup(fixup_bypass_q, fixup_data_push, fixup_user_push, fixup_be_push);
           end else begin
             for (int unsigned k = 0; k < FixupDepth; k++) begin
-              if (snap_push_first[k]) begin
+              // r127: a push that matches a valid slot coalesces instead of
+              // allocating, so at most one valid slot holds a word address
+              // (g6lc_r127_fixup_match_onehot); the CAM bit is then the
+              // "first match" bit and the positional encoder leaves the
+              // merge select.
+              if (snap_push_match[k]) begin
                 fixup_d[k] = merge_fixup(fixup_q[k], fixup_data_push, fixup_user_push, fixup_be_push);
                 fixup_ver_d[k] = fixup_ver_q[k] + 2'd1;  // hyp8: supersede epoch
               end
@@ -1291,7 +1313,17 @@ module wt_dcache_wbuffer
           below = below | (below << l);
         return x & ~below;
       endfunction
-      assign exp_pick = (|exp_hit) ? fwd_lowest(exp_hit) : fwd_lowest(exp_free);
+      // r127: both lowest-set isolates are formed side by side and the
+      // hit/free choice is a per-slot select (same value as the former
+      // single ternary over two function calls).
+      logic [FixupForwardDepth-1:0] exp_pick_hit, exp_pick_free;
+      assign exp_pick_hit  = fwd_lowest(exp_hit);
+      assign exp_pick_free = fwd_lowest(exp_free);
+      for (genvar gi = 0; gi < FixupForwardDepth; gi++) begin : gen_exp_pick
+        logic any_hit;
+        assign any_hit      = |exp_hit;
+        assign exp_pick[gi] = any_hit ? exp_pick_hit[gi] : exp_pick_free[gi];
+      end
       always_comb begin : p_fixup_wbuffer
         fixup_wbuffer_o = fwd_ent;
         // Same-cycle VOID ACK overlay. The match was already resolved

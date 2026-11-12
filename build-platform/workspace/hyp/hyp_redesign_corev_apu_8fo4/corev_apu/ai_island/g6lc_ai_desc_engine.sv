@@ -281,15 +281,45 @@ module g6lc_ai_desc_engine
   assign c_over = !c_empty && (|spc_prod[63:62]);
   assign a_zero = !a_over && span_a_sum[63:0] == 0;
   assign b_zero = !b_over && span_b_sum[63:0] == 0;
-  assign span_a_c = ({64{a_empty || a_zero}} & 64'd1) |
-                    {64{a_over}} |
-                    ({64{!a_empty && !a_over && !a_zero}} & span_a_sum[63:0]);
-  assign span_b_c = ({64{b_empty || b_zero}} & 64'd1) |
-                    {64{b_over}} |
-                    ({64{!b_empty && !b_over && !b_zero}} & span_b_sum[63:0]);
-  assign span_c_c = ({64{c_empty}} & 64'd1) |
-                    {64{c_over}} |
-                    ({64{!c_empty && !c_over}} & {spc_prod[61:0], 2'b00});
+  // r127: the same three clamped spans, selected per byte lane. Each lane
+  // forms its own empty/overflow/zero terms, so no predicate drives a
+  // 64-bit select; the whole-word forms are kept below as the reference.
+  logic [63:0] span_c_w;
+  assign span_c_w = {spc_prod[61:0], 2'b00};
+  for (genvar sl = 0; sl < 8; sl++) begin : gen_span_lane
+    localparam logic [7:0] ONE = (sl == 0) ? 8'd1 : 8'd0;
+    logic ae, ao, az, be, bo, bz, ce, co;
+    assign ae = desc_q.m == 0;
+    assign be = desc_q.n == 0;
+    assign ce = ae || be;
+    assign ao = !ae && ((|spa_prod[95:64]) || span_a_sum[64]);
+    assign bo = !be && ((|spb_prod[95:64]) || span_b_sum[64]);
+    assign co = !ce && (|spc_prod[63:62]);
+    assign az = !ao && span_a_sum[63:0] == 0;
+    assign bz = !bo && span_b_sum[63:0] == 0;
+    assign span_a_c[8*sl +: 8] = ({8{ae || az}} & ONE) | {8{ao}} |
+                                 ({8{!ae && !ao && !az}} & span_a_sum[8*sl +: 8]);
+    assign span_b_c[8*sl +: 8] = ({8{be || bz}} & ONE) | {8{bo}} |
+                                 ({8{!be && !bo && !bz}} & span_b_sum[8*sl +: 8]);
+    assign span_c_c[8*sl +: 8] = ({8{ce}} & ONE) | {8{co}} |
+                                 ({8{!ce && !co}} & span_c_w[8*sl +: 8]);
+  end
+  // pragma translate_off
+  logic [63:0] rf_span_a, rf_span_b, rf_span_c;
+  assign rf_span_a = ({64{a_empty || a_zero}} & 64'd1) | {64{a_over}} |
+                     ({64{!a_empty && !a_over && !a_zero}} & span_a_sum[63:0]);
+  assign rf_span_b = ({64{b_empty || b_zero}} & 64'd1) | {64{b_over}} |
+                     ({64{!b_empty && !b_over && !b_zero}} & span_b_sum[63:0]);
+  assign rf_span_c = ({64{c_empty}} & 64'd1) | {64{c_over}} |
+                     ({64{!c_empty && !c_over}} & {spc_prod[61:0], 2'b00});
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && !$isunknown({rf_span_a, rf_span_b, rf_span_c})) begin
+      g6lc_r127_span_eq: assert (span_a_c === rf_span_a && span_b_c === rf_span_b &&
+                                 span_c_c === rf_span_c)
+        else $error("g6lc_ai_desc_engine: equiv span lanes");
+    end
+  end
+  // pragma translate_on
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) span_a_q <= '0;
     else if (spa_done) span_a_q <= span_a_c;

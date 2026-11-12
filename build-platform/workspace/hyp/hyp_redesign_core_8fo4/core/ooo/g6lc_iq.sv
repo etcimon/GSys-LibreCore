@@ -66,6 +66,11 @@ module g6lc_iq
     // the lane's rs1 tag, so a likely consumer wakes same-bank (the local
     // same-cycle path) instead of through the +1 xbar.
     input  logic [G6LCCfg.NrIssuePorts-1:0][($clog2((HypCfg.IqBanks>1)?HypCfg.IqBanks:2))-1:0] steer_hint_i,
+    // r127 B2 (HypCfg.IqSteerStages==2): next cycle's group lanes and hints,
+    // so the first-fit steer is evaluated one cycle early and registered.
+    // Unused (tie to '0) when IqSteerStages==1.
+    input  logic [G6LCCfg.NrIssuePorts-1:0]              steer_pre_valid_i,
+    input  logic [G6LCCfg.NrIssuePorts-1:0][($clog2((HypCfg.IqBanks>1)?HypCfg.IqBanks:2))-1:0] steer_pre_hint_i,
     // hyp8: LSU replay/kill by trans_id -- re-arms speculative wakeups.
     input  logic                                         replay_valid_i,
     input  logic [G6LCCfg.TRANS_ID_BITS-1:0]             replay_tid_i,
@@ -224,6 +229,21 @@ module g6lc_iq
       assign ge[k][b] = (int'(bank_free[b]) >= k);
     end
   end
+  // r127 B2: the lane logic below computes the steer of the group named by
+  // (sv, sh). IqSteerStages==1: (sv, sh) are this cycle's lanes and hints
+  // and the result is used directly (the pre-r127 netlist). IqSteerStages==2:
+  // (sv, sh) are NEXT cycle's lanes and hints; the result is registered and,
+  // at use, each lane rechecks its bank against the current free counts
+  // (ge[used+1][bank]), so a record that no longer fits makes the group
+  // wait instead of allocating -- the all-or-nothing ack is unchanged.
+  localparam bit STEER2 = (HypCfg.IqSteerStages == 2);
+  logic [NP-1:0]         sv;
+  logic [NP-1:0][BW-1:0] sh;
+  assign sv = STEER2 ? steer_pre_valid_i : disp_valid_i;
+  assign sh = STEER2 ? steer_pre_hint_i  : steer_hint_i;
+  logic [NP-1:0]         c_found;
+  logic [NP-1:0][BW-1:0] c_asgn;
+  logic [NP-1:0][CW-1:0] c_used;
   for (genvar p = 0; p < NP; p++) begin : gen_steer_lane
     logic [BANKS-1:0] elig, rot, pick_r;
     // eligibility of this lane at each bank = "free > # earlier picks".
@@ -235,24 +255,53 @@ module g6lc_iq
         // skipped invalid lanes entirely; a dead lane 0 with a live lane 1
         // is a legal group after a kill).
         for (int unsigned j = 0; j < p; j++)
-          nused += CW'(pick_oh[j][b] & disp_valid_i[j]);
+          nused += CW'(pick_oh[j][b] & sv[j]);
       end
       assign elig[b] = ge[nused + 1][b];
     end
     // x & -x lowest-priority pick inside the hint-rotated window,
     // unchanged from the serial form.
     always_comb begin : lane_pick
-      rot        = rotr(elig, steer_hint_i[p]);
+      rot        = rotr(elig, sh[p]);
       pick_r     = rot & (~rot + 1'b1);
-      pick_oh[p] = rotl(pick_r, steer_hint_i[p]);
+      pick_oh[p] = rotl(pick_r, sh[p]);
     end
-    assign steer_found[p] = disp_valid_i[p] & (|pick_oh[p]);
+    assign c_found[p] = sv[p] & (|pick_oh[p]);
     always_comb begin : lane_asgn
-      asgn[p] = '0;
+      c_asgn[p] = '0;
       for (int unsigned b = 0; b < BANKS; b++)
-        if (disp_valid_i[p] && pick_oh[p][b])
-          asgn[p] |= bank_idx_c[b];
+        if (sv[p] && pick_oh[p][b])
+          c_asgn[p] |= bank_idx_c[b];
     end
+    // earlier live lanes that picked the same bank (for the STEER2 recheck):
+    // pick_oh is one-hot, so "same bank" is a non-empty AND of the two picks
+    always_comb begin : lane_used
+      c_used[p] = '0;
+      for (int unsigned j = 0; j < p; j++)
+        c_used[p] += CW'(sv[p] & sv[j] & (|(pick_oh[j] & pick_oh[p])));
+    end
+  end
+  if (STEER2) begin : gen_steer2
+    logic [NP-1:0]         found_q, lane_q;
+    logic [NP-1:0][BW-1:0] asgn_q;
+    logic [NP-1:0][CW-1:0] used_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        found_q <= '0; lane_q <= '0; asgn_q <= '0; used_q <= '0;
+      end else begin
+        found_q <= c_found; lane_q <= sv; asgn_q <= c_asgn; used_q <= c_used;
+      end
+    end
+    for (genvar p = 0; p < NP; p++) begin : gen_use
+      // the record must be for exactly this lane set; then one compare per
+      // lane against the current counts
+      assign steer_found[p] = disp_valid_i[p] && (lane_q == disp_valid_i) && found_q[p] &&
+                              ge[used_q[p] + 1][asgn_q[p]];
+      assign asgn[p]        = disp_valid_i[p] ? asgn_q[p] : '0;
+    end
+  end else begin : gen_steer1
+    assign steer_found = c_found;
+    assign asgn        = c_asgn;
   end
   assign group_fits = &(~disp_valid_i | steer_found);
 
@@ -285,7 +334,7 @@ module g6lc_iq
   always_ff @(posedge clk_i) begin
     if (rst_ni && !$isunknown({disp_valid_i, bank_free, steer_hint_i})) begin
       r69_steer_n <= r69_steer_n + 1;
-      g6lc_r69_steer_eq: assert (group_fits === ref_fits &&
+      g6lc_r69_steer_eq: assert (STEER2 || group_fits === ref_fits &&
                                  (!group_fits || asgn === ref_asgn))
         else $error("g6lc_iq: equiv steer");
     end

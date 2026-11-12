@@ -298,6 +298,33 @@ package g6lc_hyp_pkg;
       MissunitResultStages: 2
   };
 
+  // r127: the profile the integrated core has actually run. Until r127
+  // load_store_unit instantiated g6lc_mmu without a HypCfg override, so the
+  // MMU subtree (g6lc_mmu, both g6lc_tlb, g6lc_ptw) elaborated under its own
+  // HypDefault -- TlbStages=1, PtwDecodeStage=0 -- in every integration
+  // build and every boot witness, whatever the profile said. The profile is
+  // now threaded to the MMU; this function keeps that boot-qualified MMU
+  // staging so threading it changes no netlist. The staged MMU the Hyp8
+  // literal declares (TlbStages=3, PtwDecodeStage=1) is selected with
+  // -DG6LC_HYP8_MMU_STAGED and needs its own smokes and boot witness.
+  // Only the MMU subtree reads these two fields.
+  function automatic g6lc_hyp_cfg_t hyp_mmu_unstaged(input g6lc_hyp_cfg_t h);
+    g6lc_hyp_cfg_t r;
+    r = h;
+    r.TlbStages = 1;
+    r.PtwDecodeStage = 0;
+    return r;
+  endfunction
+
+  // r127 B2: the profile with the early (registered) IQ bank steer. Selected
+  // with -DG6LC_HYP8_IQSTEER2; not the default until a boot witness passes.
+  function automatic g6lc_hyp_cfg_t hyp_iq_steer2(input g6lc_hyp_cfg_t h);
+    g6lc_hyp_cfg_t r;
+    r = h;
+    r.IqSteerStages = 2;
+    return r;
+  endfunction
+
   // Wakeup/contract latency classes used by scoreboard + functional units.
   typedef enum logic [2:0] {
     LAT_NONSPEC   = 0,  // non-speculative: wake on real writeback only

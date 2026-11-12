@@ -61,18 +61,65 @@ module g6lc_prf #(
       end
     end
   end
-  always_comb begin
-    for (int unsigned r = 0; r < NR_READ; r++) begin
-      rdata_o[r] = '0;
-      if (ZERO_REG_ZERO && raddr_q[r] == '0) begin
-        rdata_o[r] = '0;
-      end else begin
-        for (int unsigned w = 0; w < NR_WRITE; w++)
-          rdata_o[r] |= {$bits(rdata_o[r]){byp_pri[r][w]}} & wdata_q[w];
-        if (!(|byp_hit[r])) rdata_o[r] = mem_q[raddr_q[r]];
+  // r127: the same read value, selected per byte lane. Each lane recomputes
+  // its own zero / hit / priority terms (small compares on registers), so
+  // no compare output drives a DATA_WIDTH-wide select; the array word is
+  // read once per port. The pre-r127 whole-word form is kept below as the
+  // every-cycle reference.
+  if (DATA_WIDTH % 8 != 0) begin : gen_bad_data_width
+    $error("g6lc_prf: DATA_WIDTH must be a whole number of bytes (read byte lanes)");
+  end
+  for (genvar r = 0; r < NR_READ; r++) begin : gen_rd
+    logic [DATA_WIDTH-1:0] arr_w;
+    assign arr_w = mem_q[raddr_q[r]];
+    for (genvar l = 0; l < DATA_WIDTH / 8; l++) begin : gen_lane
+      logic [NR_WRITE-1:0] h, pri;
+      logic                z, any;
+      assign z = ZERO_REG_ZERO && (raddr_q[r] == '0);
+      for (genvar w = 0; w < NR_WRITE; w++) begin : gen_h
+        assign h[w] = we_q[w] && (waddr_q[w] == raddr_q[r]) &&
+                      (!ZERO_REG_ZERO || waddr_q[w] != '0);
+        if (w == NR_WRITE - 1) begin : gen_top
+          assign pri[w] = h[w];
+        end else begin : gen_lower
+          assign pri[w] = h[w] && !(|h[NR_WRITE-1:w+1]);
+        end
+      end
+      assign any = |h;
+      always_comb begin : p_lane
+        rdata_o[r][8*l +: 8] = '0;
+        if (!z) begin
+          if (any) begin
+            for (int unsigned w = 0; w < NR_WRITE; w++)
+              rdata_o[r][8*l +: 8] |= {8{pri[w]}} & wdata_q[w][8*l +: 8];
+          end else begin
+            rdata_o[r][8*l +: 8] = arr_w[8*l +: 8];
+          end
+        end
       end
     end
   end
+  //pragma translate_off
+  logic [NR_READ-1:0][DATA_WIDTH-1:0] rf_rdata;
+  always_comb begin : p_rf_rdata
+    for (int unsigned r = 0; r < NR_READ; r++) begin
+      rf_rdata[r] = '0;
+      if (ZERO_REG_ZERO && raddr_q[r] == '0) begin
+        rf_rdata[r] = '0;
+      end else begin
+        for (int unsigned w = 0; w < NR_WRITE; w++)
+          rf_rdata[r] |= {DATA_WIDTH{byp_pri[r][w]}} & wdata_q[w];
+        if (!(|byp_hit[r])) rf_rdata[r] = mem_q[raddr_q[r]];
+      end
+    end
+  end
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && !$isunknown(rf_rdata)) begin
+      g6lc_r127_prf_rd_eq: assert (rdata_o === rf_rdata)
+        else $error("g6lc_prf: equiv read lanes");
+    end
+  end
+  //pragma translate_on
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin

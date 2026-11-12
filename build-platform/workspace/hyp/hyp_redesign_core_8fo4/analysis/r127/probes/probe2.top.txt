@@ -1,0 +1,9 @@
+# delay-v50 budget=8.0 fo4_ps=20.0 modules=7 board-worst=31.5 (regtoreg)
+module                       live    any k  class                    line |    rr    ir    ro    io
+p_f3_enable_wide             Y      31.5 rr plain                  L92    |  31.5     -  11.2  27.7
+p_b6_nested_comb             Y      27.5 io exclusive_case_mux     L18    |  27.5     -     -  27.5
+p_h3_read_predecoded         Y      26.0 rr plain                  L69    |  26.0     -     -     -
+p_f4_write_uncond            Y      20.7 rr plain                  L103   |  20.7     -  11.2  16.9
+p_h4_read_late_cmp           Y      15.2 rr plain                  L78    |  15.2     -     -  10.2
+p_b7_flat_sliced_comb        Y      13.1 rr plain                  L45    |  13.1     -     -   6.0
+p_b8_mux2_sliced             Y       5.5 rr under_budget           L56    |   5.5     -     -   3.0

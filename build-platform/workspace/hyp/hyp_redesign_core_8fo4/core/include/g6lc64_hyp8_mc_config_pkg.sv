@@ -324,9 +324,26 @@ L2En: bit'(1),  // hyp8-mc: always on (4-core shared L2/L3)
   // -DG6LC_HYP8_DEEP selects the r76 deep-publish profile (Hyp8 with
   // LoadPubStages==2), same seam style as G6LC_HYP8_SMT2.
 `ifdef G6LC_HYP8_DEEP
-  localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t HypCfg = g6lc_hyp_pkg::Hyp8Deep;
+  localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t HypCfgSel = g6lc_hyp_pkg::Hyp8Deep;
 `else
-  localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t HypCfg = g6lc_hyp_pkg::Hyp8;
+  localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t HypCfgSel = g6lc_hyp_pkg::Hyp8;
+`endif
+  // r127: the profile now reaches the MMU, the LSU and the D$ (it stopped at
+  // ex_stage / the cache subsystem before). The default binding keeps the
+  // MMU staging every boot witness ran (g6lc_hyp_pkg::hyp_mmu_unstaged);
+  // -DG6LC_HYP8_MMU_STAGED binds the profile as declared.
+`ifdef G6LC_HYP8_MMU_STAGED
+  localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t HypCfgMmu = HypCfgSel;
+`else
+  localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t HypCfgMmu =
+      g6lc_hyp_pkg::hyp_mmu_unstaged(HypCfgSel);
+`endif
+  // r127 B2: -DG6LC_HYP8_IQSTEER2 selects the early IQ bank steer
+  // (IqSteerStages=2); the default keeps the same-cycle steer.
+`ifdef G6LC_HYP8_IQSTEER2
+  localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t HypCfg = g6lc_hyp_pkg::hyp_iq_steer2(HypCfgMmu);
+`else
+  localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t HypCfg = HypCfgMmu;
 `endif
 
   // hyp8 bring-up: `initial` is illegal at package scope (a package body

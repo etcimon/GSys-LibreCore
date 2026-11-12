@@ -162,6 +162,17 @@ module instr_realign
   // gather (svt-plan boundary "halfword classification/visits/ranks -> gather").
   logic                     a_valid_q;
   logic [G6LCCfg.VLEN-1:0]  a_addr_q;
+  // r127 (A134, cache a state predicate): how many halfwords of the block
+  // are available is a function of the captured address only, so the
+  // per-position availability bits are registered with it instead of being
+  // re-derived (subtract + compare per position) in front of the prefix,
+  // the gather and the carry select. a_lt_q[h] = h < hw_avail,
+  // a_lt1_q[h] = h + 1 < hw_avail, a_nz_q = hw_avail != 0.
+  logic [CurW-1:0]          hw_first_n, hw_avail_n;
+  logic [NrHalfWords-1:0]   a_lt_q, a_lt1_q;
+  logic                     a_nz_q;
+  assign hw_first_n = G6LCCfg.RVC ? CurW'(address_i[CurW-1:1]) : '0;
+  assign hw_avail_n = CurW'(NrHalfWords) - hw_first_n;
   logic [NrHalfWords-1:0][15:0] a_hw_q;
   logic [NrHalfWords-1:0]   a_hw_compressed_q;
   logic                     a_kill_q;
@@ -172,6 +183,10 @@ module instr_realign
     if (!rst_ni) begin
       a_valid_q         <= 1'b0;
       a_addr_q          <= '0;
+      // the reset address is 0: every halfword available
+      a_lt_q            <= '1;
+      a_lt1_q           <= {1'b0, {(NrHalfWords - 1) {1'b1}}};
+      a_nz_q            <= 1'b1;
       a_hw_q            <= '0;
       a_hw_compressed_q <= '0;
       a_kill_q          <= 1'b0;
@@ -180,6 +195,11 @@ module instr_realign
     end else begin
       a_valid_q <= valid_i & ~flush_i;
       a_addr_q  <= address_i;
+      for (int unsigned j = 0; j < NrHalfWords; j++) begin
+        a_lt_q[j]  <= (CurW'(j) < hw_avail_n);
+        a_lt1_q[j] <= (CurW'(j) + CurW'(1) < hw_avail_n);
+      end
+      a_nz_q    <= (hw_avail_n != '0);
       for (int unsigned j = 0; j < NrHalfWords; j++) begin
         a_hw_q[j]            <= data_i[16*j+:16];
         // without RVC no halfword can terminate an instruction
@@ -281,6 +301,21 @@ module instr_realign
   // The part-select is that mask. The function form was a shift on this cone.
   assign hw_first = G6LCCfg.RVC ? CurW'(a_addr_q[CurW-1:1]) : '0;
   assign hw_avail = CurW'(NrHalfWords) - hw_first;
+  //pragma translate_off
+  // r127 equivalence: the registered availability bits against the
+  // expressions they replace, every cycle.
+  always_ff @(posedge clk_i) begin
+    if (rst_ni) begin
+      for (int unsigned h = 0; h < NrHalfWords; h++) begin
+        g6lc_r127_rl_avail_eq: assert (a_lt_q[h] === (CurW'(h) < hw_avail) &&
+                                       a_lt1_q[h] === (CurW'(h) + CurW'(1) < hw_avail))
+          else $error("instr_realign: equiv availability h=%0d", h);
+      end
+      g6lc_r127_rl_nz_eq: assert (a_nz_q === (hw_avail != '0))
+        else $error("instr_realign: equiv availability nz");
+    end
+  end
+  //pragma translate_on
 
   // hyp8 geometry (RVC, power-of-two window, VLEN in (align, 64]) makes
   // FastContinuation constant 1; the registered successor keeps
@@ -378,13 +413,13 @@ module instr_realign
   logic [1:0][G6LCCfg.VLEN-1:0] ca_fin;
 
   // side 0: no completing carry. side 1: position 0 consumes the carried half.
-  assign vis0_s[0] = (hw_avail != '0);
+  assign vis0_s[0] = a_nz_q;
   assign vis0_s[1] = 1'b1;
 
   for (genvar h = 0; h < NrHalfWords; h++) begin : gen_rl_pre
     // on the last halfword there is no successor to read; the zero is
     // never emitted as instruction bytes (a split RVI carries instead)
-    assign rl_hi[h]    = (CurW'(h) + CurW'(1) < hw_avail)
+    assign rl_hi[h]    = a_lt1_q[h]
                            ? hw[(h + 1) % NrHalfWords] : 16'b0;
     assign rl_saddr[h] = a_addr_q +
         {{(G6LCCfg.VLEN - CurW - 1) {1'b0}}, CurW'(h), 1'b0};
@@ -453,19 +488,19 @@ module instr_realign
 
   for (genvar h = 0; h < NrHalfWords; h++) begin : gen_vis0
     assign vis0v[h] = (h == 0) ? vis0_s[0]
-                   : (pfx0[Lvl][h][0][0] & vis0_s[0] & (CurW'(h) < hw_avail));
+                   : (pfx0[Lvl][h][0][0] & vis0_s[0] & a_lt_q[h]);
     assign vis[0][h] = vis0v[h];
   end
   for (genvar h = 0; h < NrHalfWords; h++) begin : gen_vis1
     assign vis1v[h] = (h == 0) ? vis0_s[1]
-                   : (pfx1[Lvl][h][0][0] & vis0_s[1] & (CurW'(h) < hw_avail));
+                   : (pfx1[Lvl][h][0][0] & vis0_s[1] & a_lt_q[h]);
     assign vis[1][h] = vis1v[h];
   end
 
   for (genvar side = 0; side < 2; side++) begin : gen_side
     for (genvar h = 0; h < NrHalfWords; h++) begin : gen_vis
       assign idx[side][h] = IdxW'($countones(vis[side] & NrHalfWords'((NrHalfWords'(1) << h) - 1'b1)));
-      assign split[side][h] = vis[side][h] && !cprime[side][h] && (CurW'(h) + CurW'(1) >= hw_avail);
+      assign split[side][h] = vis[side][h] && !cprime[side][h] && !a_lt1_q[h];
       assign rl_csel[side][h] = vis[side][h] && (int'(idx[side][h]) < int'(G6LCCfg.INSTR_PER_FETCH)) &&
                           split[side][h];
       if (h == NrHalfWords - 1) begin : gen_col

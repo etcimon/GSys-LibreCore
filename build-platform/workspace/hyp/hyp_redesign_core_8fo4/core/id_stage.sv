@@ -1505,7 +1505,12 @@ assign g1gy_lo =
       if (i == 0) begin : gen_r0
         assign crank[i] = '0;
       end else begin : gen_rn
-        assign crank[i] = FRW'($countones(vpost[i-1:0]));
+        // r127: the rank is a population count of the slots below i taken
+        // through a constant mask on the whole vector (same value as the
+        // former count over the part-select vpost[i-1:0]).
+        logic [NIP-1:0] below_i;
+        assign below_i  = vpost & NIP'((NIP'(1) << i) - NIP'(1));
+        assign crank[i] = FRW'($countones(below_i));
       end
     end
     assign wptr = (FRW + 1)'($countones(vpost));

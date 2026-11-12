@@ -1,0 +1,20 @@
+sv-timing-core 0.1.0 ir=ir-v6 measurement=delay-v50 correction=correction-v5 parser_pin=v0.13.5
+opt=-O2 (max_passes=4 worklist_width=1 cut=cost-balanced stages=1 min_gain=2 slack_target=0 area_weight=0 max_cells_per_fo4=16 reassoc=false effort=balanced cache=unit)
+target_mhz=5000
+from_cache=false
+modules=10
+paths=59
+opportunities=12
+ir_out=probes/probe3.ir.json
+  module p_j1_ring_cur nodes=10 regions=6
+  module p_j2_ring_slot nodes=14 regions=8
+  module p_k1_pop_index nodes=12 regions=6
+  module p_k2_pop_onehot nodes=8 regions=3
+  module p_m1_place_add nodes=10 regions=6
+  module p_m2_place_rot nodes=8 regions=4
+  module p_n1_fn_rotate nodes=4 regions=2
+  module p_n2_onehot_bytes nodes=6 regions=3
+  module p_q1_legal_chain nodes=12 regions=9
+  module p_q2_legal_table nodes=5 regions=2
+json_out=probes/probe3.json
+stages: none (no svt-stage pragmas)

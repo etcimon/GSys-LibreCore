@@ -1,0 +1,5342 @@
+{
+  "ast": {
+    "cross_module_path_count": 0,
+    "files_parsed": 1,
+    "instance_count": 0,
+    "kind": "timing_ir_v0",
+    "module_count": 10,
+    "note": "CST lowered to operator regions + FO4-ranked paths + P2 instance graph + sta_hints",
+    "opportunity_count": 12,
+    "path_count": 59,
+    "sta_hint_count": 8
+  },
+  "banner": "sv-timing-core 0.1.0 ir=ir-v6 measurement=delay-v50 correction=correction-v5 parser_pin=v0.13.5",
+  "budget_fo4": 8.0,
+  "budget_margin": 0.2,
+  "cross_module_paths": [],
+  "disclaimer": "structural FO4 from lower_to_ir — not STA sign-off",
+  "files": [
+    {
+      "byte_len": 7857,
+      "parse_ok": true,
+      "path": "probes/probe3.sv"
+    }
+  ],
+  "fo4_ps": 20.0,
+  "frequency_closure": {
+    "budget_fo4": 8.0,
+    "calibrated": null,
+    "closes": false,
+    "failing_paths": 15,
+    "intoout_failing": 6,
+    "max_freq_mhz": 864.1568167715352,
+    "reg_to_reg_paths": 21,
+    "regtoreg_failing": 9,
+    "target_mhz": 5000.0,
+    "uninstantiated_modules": [],
+    "worst_endpoint": "p_j1_ring_cur.reg1/D",
+    "worst_path_fo4": 46.28789500201923,
+    "worst_path_id": 49,
+    "worst_path_kind": "regtoreg",
+    "worst_slack_fo4": -38.28789500201923,
+    "worst_startpoint": "p_j1_ring_cur.reg0/CP"
+  },
+  "instances": [],
+  "module_cleanliness": {
+    "mean_C": -0.11233333333333331,
+    "modules": 10,
+    "timing_pass": 9,
+    "weights": {
+      "aggressiveness": 0.2,
+      "always_comb": 0.4,
+      "always_ff": 0.4,
+      "timing_fail": 0.5
+    }
+  },
+  "modules": [
+    {
+      "cleanliness": {
+        "C": -0.13999999999999999,
+        "D_comb": 0.0,
+        "D_ff": 0.0,
+        "chosen": "jit_datapath",
+        "feasible": true,
+        "n_always_comb": 1,
+        "n_always_ff": 1,
+        "rationale": "argmax C among timing-pass sets → jit_datapath C=-0.140 D_ff=0.00 D_comb=0.00 A=0.70",
+        "timing_now": false,
+        "timing_pass": true
+      },
+      "file": "probes/probe3.sv",
+      "functions": [],
+      "gen_loops": [
+        {
+          "body_assign_count": 1,
+          "bound_hint": "gen_rot.rot",
+          "genvar": "k",
+          "label": "gen_rot",
+          "loc": {
+            "file": "probes/probe3.sv",
+            "start_line": 9
+          }
+        },
+        {
+          "body_assign_count": 1,
+          "bound_hint": null,
+          "genvar": "l",
+          "label": null,
+          "loc": {
+            "file": "probes/probe3.sv",
+            "start_line": 14
+          }
+        }
+      ],
+      "id": 0,
+      "instances": [],
+      "localparams": [],
+      "name": "p_j1_ring_cur",
+      "node_count": 10,
+      "package_imports": [],
+      "parameters": [],
+      "ports": [
+        {
+          "direction": "input",
+          "name": "clk_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "c_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "z_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "p_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "output",
+          "name": "z_o",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        }
+      ],
+      "region_count": 6,
+      "regions": [
+        {
+          "async_reset": null,
+          "clock_edge": "posedge",
+          "clock_name": "clk_i",
+          "id": 0,
+          "kind": "alwaysff",
+          "label": null,
+          "node_count": 4,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 1,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 2,
+          "kind": "alwayscomb",
+          "label": null,
+          "node_count": 2,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 3,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 4,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 5,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        }
+      ]
+    },
+    {
+      "cleanliness": {
+        "C": -0.29,
+        "D_comb": 0.3125,
+        "D_ff": 0.3625,
+        "chosen": "seq_plus_comb",
+        "feasible": false,
+        "n_always_comb": 1,
+        "n_always_ff": 1,
+        "rationale": "no timing-pass set; argmax C with fail penalty → seq_plus_comb C=-0.290",
+        "timing_now": false,
+        "timing_pass": false
+      },
+      "file": "probes/probe3.sv",
+      "functions": [],
+      "gen_loops": [
+        {
+          "body_assign_count": 2,
+          "bound_hint": null,
+          "genvar": "l",
+          "label": null,
+          "loc": {
+            "file": "probes/probe3.sv",
+            "start_line": 30
+          }
+        }
+      ],
+      "id": 1,
+      "instances": [],
+      "localparams": [],
+      "name": "p_j2_ring_slot",
+      "node_count": 14,
+      "package_imports": [],
+      "parameters": [],
+      "ports": [
+        {
+          "direction": "input",
+          "name": "clk_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "c_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "z_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "m_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "output",
+          "name": "z_o",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        }
+      ],
+      "region_count": 8,
+      "regions": [
+        {
+          "async_reset": null,
+          "clock_edge": "posedge",
+          "clock_name": "clk_i",
+          "id": 6,
+          "kind": "alwaysff",
+          "label": null,
+          "node_count": 4,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 7,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 8,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 9,
+          "kind": "alwayscomb",
+          "label": null,
+          "node_count": 4,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 10,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 11,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 12,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 13,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        }
+      ]
+    },
+    {
+      "cleanliness": {
+        "C": -0.13999999999999999,
+        "D_comb": 0.0,
+        "D_ff": 0.0,
+        "chosen": "jit_datapath",
+        "feasible": true,
+        "n_always_comb": 1,
+        "n_always_ff": 1,
+        "rationale": "argmax C among timing-pass sets → jit_datapath C=-0.140 D_ff=0.00 D_comb=0.00 A=0.70",
+        "timing_now": false,
+        "timing_pass": true
+      },
+      "file": "probes/probe3.sv",
+      "functions": [],
+      "gen_loops": [],
+      "id": 2,
+      "instances": [],
+      "localparams": [],
+      "name": "p_k1_pop_index",
+      "node_count": 12,
+      "package_imports": [],
+      "parameters": [],
+      "ports": [
+        {
+          "direction": "input",
+          "name": "clk_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "r_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "p_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "d_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "a_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "v_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "output",
+          "name": "v_o",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        }
+      ],
+      "region_count": 6,
+      "regions": [
+        {
+          "async_reset": null,
+          "clock_edge": "posedge",
+          "clock_name": "clk_i",
+          "id": 14,
+          "kind": "alwaysff",
+          "label": null,
+          "node_count": 6,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 15,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 16,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 17,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 18,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 19,
+          "kind": "alwayscomb",
+          "label": null,
+          "node_count": 2,
+          "reset_edge": null,
+          "reset_name": null
+        }
+      ]
+    },
+    {
+      "cleanliness": {
+        "C": -0.13999999999999999,
+        "D_comb": 0.0,
+        "D_ff": 0.0,
+        "chosen": "jit_datapath",
+        "feasible": true,
+        "n_always_comb": 0,
+        "n_always_ff": 1,
+        "rationale": "argmax C among timing-pass sets → jit_datapath C=-0.140 D_ff=0.00 D_comb=0.00 A=0.70",
+        "timing_now": false,
+        "timing_pass": true
+      },
+      "file": "probes/probe3.sv",
+      "functions": [],
+      "gen_loops": [],
+      "id": 3,
+      "instances": [],
+      "localparams": [],
+      "name": "p_k2_pop_onehot",
+      "node_count": 8,
+      "package_imports": [],
+      "parameters": [],
+      "ports": [
+        {
+          "direction": "input",
+          "name": "clk_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "r_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "p_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "d_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "a_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "v_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "output",
+          "name": "v_o",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        }
+      ],
+      "region_count": 3,
+      "regions": [
+        {
+          "async_reset": null,
+          "clock_edge": "posedge",
+          "clock_name": "clk_i",
+          "id": 20,
+          "kind": "alwaysff",
+          "label": null,
+          "node_count": 6,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 21,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 22,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        }
+      ]
+    },
+    {
+      "cleanliness": {
+        "C": -0.13999999999999999,
+        "D_comb": 0.0,
+        "D_ff": 0.0,
+        "chosen": "jit_datapath",
+        "feasible": true,
+        "n_always_comb": 1,
+        "n_always_ff": 1,
+        "rationale": "argmax C among timing-pass sets → jit_datapath C=-0.140 D_ff=0.00 D_comb=0.00 A=0.70",
+        "timing_now": false,
+        "timing_pass": true
+      },
+      "file": "probes/probe3.sv",
+      "functions": [],
+      "gen_loops": [
+        {
+          "body_assign_count": 3,
+          "bound_hint": "gen_s.rank",
+          "genvar": "s",
+          "label": "gen_n",
+          "loc": {
+            "file": "probes/probe3.sv",
+            "start_line": 67
+          }
+        },
+        {
+          "body_assign_count": 1,
+          "bound_hint": null,
+          "genvar": "s",
+          "label": null,
+          "loc": {
+            "file": "probes/probe3.sv",
+            "start_line": 78
+          }
+        }
+      ],
+      "id": 4,
+      "instances": [],
+      "localparams": [],
+      "name": "p_m1_place_add",
+      "node_count": 10,
+      "package_imports": [],
+      "parameters": [],
+      "ports": [
+        {
+          "direction": "input",
+          "name": "clk_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "idx_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "v_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "f_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "output",
+          "name": "ov_o",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        }
+      ],
+      "region_count": 6,
+      "regions": [
+        {
+          "async_reset": null,
+          "clock_edge": "posedge",
+          "clock_name": "clk_i",
+          "id": 23,
+          "kind": "alwaysff",
+          "label": null,
+          "node_count": 4,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 24,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 25,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 26,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 27,
+          "kind": "alwayscomb",
+          "label": null,
+          "node_count": 2,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 28,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        }
+      ]
+    },
+    {
+      "cleanliness": {
+        "C": -0.13999999999999999,
+        "D_comb": 0.0,
+        "D_ff": 0.0,
+        "chosen": "jit_datapath",
+        "feasible": true,
+        "n_always_comb": 1,
+        "n_always_ff": 1,
+        "rationale": "argmax C among timing-pass sets → jit_datapath C=-0.140 D_ff=0.00 D_comb=0.00 A=0.70",
+        "timing_now": false,
+        "timing_pass": true
+      },
+      "file": "probes/probe3.sv",
+      "functions": [],
+      "gen_loops": [
+        {
+          "body_assign_count": 1,
+          "bound_hint": null,
+          "genvar": "r",
+          "label": null,
+          "loc": {
+            "file": "probes/probe3.sv",
+            "start_line": 91
+          }
+        }
+      ],
+      "id": 5,
+      "instances": [],
+      "localparams": [],
+      "name": "p_m2_place_rot",
+      "node_count": 8,
+      "package_imports": [],
+      "parameters": [],
+      "ports": [
+        {
+          "direction": "input",
+          "name": "clk_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "idx_oh_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "v_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "f_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "output",
+          "name": "ov_o",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        }
+      ],
+      "region_count": 4,
+      "regions": [
+        {
+          "async_reset": null,
+          "clock_edge": "posedge",
+          "clock_name": "clk_i",
+          "id": 29,
+          "kind": "alwaysff",
+          "label": null,
+          "node_count": 4,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 30,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 31,
+          "kind": "alwayscomb",
+          "label": null,
+          "node_count": 2,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 32,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        }
+      ]
+    },
+    {
+      "cleanliness": {
+        "C": -0.12,
+        "D_comb": 0.0,
+        "D_ff": 0.04999999999999999,
+        "chosen": "jit_datapath",
+        "feasible": true,
+        "n_always_comb": 0,
+        "n_always_ff": 1,
+        "rationale": "argmax C among timing-pass sets → jit_datapath C=-0.120 D_ff=0.05 D_comb=0.00 A=0.70",
+        "timing_now": false,
+        "timing_pass": true
+      },
+      "file": "probes/probe3.sv",
+      "functions": [
+        "byte_at",
+        "fused"
+      ],
+      "gen_loops": [],
+      "id": 6,
+      "instances": [],
+      "localparams": [],
+      "name": "p_n1_fn_rotate",
+      "node_count": 4,
+      "package_imports": [],
+      "parameters": [],
+      "ports": [
+        {
+          "direction": "input",
+          "name": "clk_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "d_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "o_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "output",
+          "name": "q_o",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        }
+      ],
+      "region_count": 2,
+      "regions": [
+        {
+          "async_reset": null,
+          "clock_edge": "posedge",
+          "clock_name": "clk_i",
+          "id": 33,
+          "kind": "alwaysff",
+          "label": null,
+          "node_count": 3,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 34,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        }
+      ]
+    },
+    {
+      "cleanliness": {
+        "C": -0.13333333333333333,
+        "D_comb": 0.016666666666666663,
+        "D_ff": 0.0,
+        "chosen": "jit_datapath",
+        "feasible": true,
+        "n_always_comb": 1,
+        "n_always_ff": 1,
+        "rationale": "argmax C among timing-pass sets → jit_datapath C=-0.133 D_ff=0.00 D_comb=0.02 A=0.70",
+        "timing_now": false,
+        "timing_pass": true
+      },
+      "file": "probes/probe3.sv",
+      "functions": [],
+      "gen_loops": [
+        {
+          "body_assign_count": 3,
+          "bound_hint": "gen_j.sel",
+          "genvar": "j",
+          "label": "gen_s",
+          "loc": {
+            "file": "probes/probe3.sv",
+            "start_line": 116
+          }
+        },
+        {
+          "body_assign_count": 1,
+          "bound_hint": "gen_s.sel",
+          "genvar": "s",
+          "label": "gen_s",
+          "loc": {
+            "file": "probes/probe3.sv",
+            "start_line": 118
+          }
+        },
+        {
+          "body_assign_count": 1,
+          "bound_hint": null,
+          "genvar": "s",
+          "label": null,
+          "loc": {
+            "file": "probes/probe3.sv",
+            "start_line": 123
+          }
+        }
+      ],
+      "id": 7,
+      "instances": [],
+      "localparams": [],
+      "name": "p_n2_onehot_bytes",
+      "node_count": 6,
+      "package_imports": [],
+      "parameters": [],
+      "ports": [
+        {
+          "direction": "input",
+          "name": "clk_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "d_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "o_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "output",
+          "name": "q_o",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        }
+      ],
+      "region_count": 3,
+      "regions": [
+        {
+          "async_reset": null,
+          "clock_edge": "posedge",
+          "clock_name": "clk_i",
+          "id": 35,
+          "kind": "alwaysff",
+          "label": null,
+          "node_count": 3,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 36,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 37,
+          "kind": "alwayscomb",
+          "label": null,
+          "node_count": 2,
+          "reset_edge": null,
+          "reset_name": null
+        }
+      ]
+    },
+    {
+      "cleanliness": {
+        "C": -0.13999999999999999,
+        "D_comb": 0.0,
+        "D_ff": 0.0,
+        "chosen": "jit_datapath",
+        "feasible": true,
+        "n_always_comb": 0,
+        "n_always_ff": 1,
+        "rationale": "argmax C among timing-pass sets → jit_datapath C=-0.140 D_ff=0.00 D_comb=0.00 A=0.70",
+        "timing_now": false,
+        "timing_pass": true
+      },
+      "file": "probes/probe3.sv",
+      "functions": [],
+      "gen_loops": [],
+      "id": 8,
+      "instances": [],
+      "localparams": [],
+      "name": "p_q1_legal_chain",
+      "node_count": 12,
+      "package_imports": [],
+      "parameters": [],
+      "ports": [
+        {
+          "direction": "input",
+          "name": "clk_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "i_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "p_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "c_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "output",
+          "name": "ill_o",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        }
+      ],
+      "region_count": 9,
+      "regions": [
+        {
+          "async_reset": null,
+          "clock_edge": "posedge",
+          "clock_name": "clk_i",
+          "id": 38,
+          "kind": "alwaysff",
+          "label": null,
+          "node_count": 4,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 39,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 40,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 41,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 42,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 43,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 44,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 45,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 46,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        }
+      ]
+    },
+    {
+      "cleanliness": {
+        "C": 0.26000000000000006,
+        "D_comb": 0.25,
+        "D_ff": 0.55,
+        "chosen": "seq_plus_comb",
+        "feasible": true,
+        "n_always_comb": 0,
+        "n_always_ff": 1,
+        "rationale": "argmax C among timing-pass sets → seq_plus_comb C=0.260 D_ff=0.55 D_comb=0.25 A=0.30",
+        "timing_now": true,
+        "timing_pass": true
+      },
+      "file": "probes/probe3.sv",
+      "functions": [],
+      "gen_loops": [],
+      "id": 9,
+      "instances": [],
+      "localparams": [],
+      "name": "p_q2_legal_table",
+      "node_count": 5,
+      "package_imports": [],
+      "parameters": [],
+      "ports": [
+        {
+          "direction": "input",
+          "name": "clk_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "cls_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "tab_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "exv_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "output",
+          "name": "ill_o",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        }
+      ],
+      "region_count": 2,
+      "regions": [
+        {
+          "async_reset": null,
+          "clock_edge": "posedge",
+          "clock_name": "clk_i",
+          "id": 47,
+          "kind": "alwaysff",
+          "label": null,
+          "node_count": 4,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 48,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        }
+      ]
+    }
+  ],
+  "modules_requested": "*",
+  "opportunities": [
+    {
+      "changes_latency": true,
+      "estimated_fo4_after": 8.0,
+      "estimated_fo4_before": 11.0,
+      "kind": "insert_reg",
+      "loc": {
+        "end_col": 53,
+        "end_line": 14,
+        "file": "probes/probe3.sv",
+        "start_col": 49,
+        "start_line": 14
+      },
+      "path_id": 2,
+      "rationale": "path 2 JIT cut after node 6 (scratchboard cycle bar; slack -3.0 FO4)",
+      "requires_clock_in_scope": true
+    },
+    {
+      "changes_latency": false,
+      "estimated_fo4_after": 9.02,
+      "estimated_fo4_before": 11.0,
+      "kind": "balance_mux",
+      "loc": {
+        "end_col": 11,
+        "end_line": 31,
+        "file": "probes/probe3.sv",
+        "start_col": 7,
+        "start_line": 31
+      },
+      "path_id": 9,
+      "rationale": "path 9 class=IndependentLhsBundle balance_mux on hottest node 18 (no latency)",
+      "requires_clock_in_scope": false
+    },
+    {
+      "changes_latency": false,
+      "estimated_fo4_after": 43.970902501875,
+      "estimated_fo4_before": 46.28789500201923,
+      "kind": "split_assign",
+      "loc": {
+        "end_col": 12,
+        "end_line": 17,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 17
+      },
+      "path_id": 49,
+      "rationale": "path 49 deep expr at node 8 (ops=3); split_assign (no latency)",
+      "requires_clock_in_scope": false
+    },
+    {
+      "changes_latency": true,
+      "estimated_fo4_after": 38.28789500201923,
+      "estimated_fo4_before": 46.28789500201923,
+      "kind": "insert_reg",
+      "loc": {
+        "end_col": 53,
+        "end_line": 14,
+        "file": "probes/probe3.sv",
+        "start_col": 49,
+        "start_line": 14
+      },
+      "path_id": 49,
+      "rationale": "path 49 JIT cut after node 6 (scratchboard cycle bar; slack -38.3 FO4)",
+      "requires_clock_in_scope": true
+    },
+    {
+      "changes_latency": true,
+      "estimated_fo4_after": 13.899999999999999,
+      "estimated_fo4_before": 21.9,
+      "kind": "insert_reg",
+      "loc": {
+        "end_col": 11,
+        "end_line": 32,
+        "file": "probes/probe3.sv",
+        "start_col": 7,
+        "start_line": 32
+      },
+      "path_id": 50,
+      "rationale": "path 50 JIT cut after node 19 (scratchboard cycle bar; slack -13.9 FO4)",
+      "requires_clock_in_scope": true
+    },
+    {
+      "changes_latency": false,
+      "estimated_fo4_after": 14.25,
+      "estimated_fo4_before": 14.549999999999999,
+      "kind": "split_assign",
+      "loc": {
+        "end_col": 14,
+        "end_line": 48,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 48
+      },
+      "path_id": 52,
+      "rationale": "path 52 deep expr at node 32 (ops=4); split_assign (no latency)",
+      "requires_clock_in_scope": false
+    },
+    {
+      "changes_latency": true,
+      "estimated_fo4_after": 8.0,
+      "estimated_fo4_before": 14.549999999999999,
+      "kind": "insert_reg",
+      "loc": {
+        "end_col": 15,
+        "end_line": 47,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 47
+      },
+      "path_id": 52,
+      "rationale": "path 52 JIT cut after node 31 (scratchboard cycle bar; slack -6.5 FO4)",
+      "requires_clock_in_scope": true
+    },
+    {
+      "changes_latency": false,
+      "estimated_fo4_after": 7.760000000000001,
+      "estimated_fo4_before": 8.4,
+      "kind": "split_assign",
+      "loc": {
+        "end_col": 15,
+        "end_line": 59,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 59
+      },
+      "path_id": 53,
+      "rationale": "path 53 deep expr at node 42 (ops=14); split_assign (no latency)",
+      "requires_clock_in_scope": false
+    },
+    {
+      "changes_latency": true,
+      "estimated_fo4_after": 8.0,
+      "estimated_fo4_before": 8.4,
+      "kind": "insert_reg",
+      "loc": {
+        "end_col": 15,
+        "end_line": 59,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 59
+      },
+      "path_id": 53,
+      "rationale": "path 53 JIT cut after node 42 (scratchboard cycle bar; slack -0.4 FO4)",
+      "requires_clock_in_scope": true
+    },
+    {
+      "changes_latency": true,
+      "estimated_fo4_after": 19.483706192659348,
+      "estimated_fo4_before": 27.483706192659348,
+      "kind": "insert_reg",
+      "loc": {
+        "end_col": 20,
+        "end_line": 74,
+        "file": "probes/probe3.sv",
+        "start_col": 12,
+        "start_line": 74
+      },
+      "path_id": 54,
+      "rationale": "path 54 JIT cut after node 50 (scratchboard cycle bar; slack -19.5 FO4)",
+      "requires_clock_in_scope": true
+    },
+    {
+      "changes_latency": false,
+      "estimated_fo4_after": 22.11385393822301,
+      "estimated_fo4_before": 22.81385393822301,
+      "kind": "split_assign",
+      "loc": {
+        "end_col": 14,
+        "end_line": 138,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 138
+      },
+      "path_id": 58,
+      "rationale": "path 58 deep expr at node 81 (ops=16); split_assign (no latency)",
+      "requires_clock_in_scope": false
+    },
+    {
+      "changes_latency": true,
+      "estimated_fo4_after": 14.813853938223009,
+      "estimated_fo4_before": 22.81385393822301,
+      "kind": "insert_reg",
+      "loc": {
+        "end_col": 15,
+        "end_line": 135,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 135
+      },
+      "path_id": 58,
+      "rationale": "path 58 JIT cut after node 78 (scratchboard cycle bar; slack -14.8 FO4)",
+      "requires_clock_in_scope": true
+    }
+  ],
+  "opt": {
+    "correction": "correction-v5",
+    "dials": {
+      "allow_reassoc": false,
+      "area_weight": 0.0,
+      "cache_mode": "unit",
+      "cut_strategy": "cost-balanced",
+      "effort": "balanced",
+      "jobs": null,
+      "max_cells_per_fo4": 16.0,
+      "max_passes": 4,
+      "max_stages_per_region": 1,
+      "min_gain_fo4": 2.0,
+      "slack_target_fo4": 0.0,
+      "worklist_width": 1
+    },
+    "digest": "O2:p4:w1:ccost-balanced:s1:g2.000:t0.000:a0.000:r0:ebalanced:jauto:kunit",
+    "level": "O2",
+    "measurement": "delay-v50"
+  },
+  "package_mode": false,
+  "packages": [],
+  "param_map_keys": [],
+  "pass_plan": {
+    "abort_correct": false,
+    "artifacts": 0,
+    "by_pattern": {
+      "P3": 4,
+      "P5": 6,
+      "P6": 7,
+      "P7": 1
+    },
+    "rationale": "S0 clean. Schedule S1–S5 over {\"P3\": 4, \"P5\": 6, \"P6\": 7, \"P7\": 1}"
+  },
+  "path_class_summary": {
+    "adjusted_paths": 1,
+    "counts": {
+      "IndependentLhsBundle": 1,
+      "Plain": 14,
+      "UnderBudget": 44
+    },
+    "max_adjusted_fo4": 46.28789500201923,
+    "max_raw_fo4": 46.28789500201923
+  },
+  "path_exceptions": [
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_j1_ring_cur",
+      "path_class": "under_budget",
+      "path_id": 0,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_j1_ring_cur|r0|n4|cand:1,cboz:1,ptr:1,z_o:1"
+    },
+    {
+      "adjusted_fo4": 6.617970000576925,
+      "confidence": 1.0,
+      "evidence": "raw 6.6 ≤ budget 8.0 — cheap path",
+      "module_name": "p_j1_ring_cur",
+      "path_class": "under_budget",
+      "path_id": 1,
+      "raw_fo4": 6.617970000576925,
+      "signature": "v25|p_j1_ring_cur|r1|n1|rot:1"
+    },
+    {
+      "adjusted_fo4": 11.0,
+      "attempted": [
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "not a multi-LHS statement-order bundle"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_j1_ring_cur",
+      "path_class": "plain",
+      "path_id": 2,
+      "raw_fo4": 11.0,
+      "signature": "v25|p_j1_ring_cur|r2|n2|above:2"
+    },
+    {
+      "adjusted_fo4": 2.0,
+      "confidence": 1.0,
+      "evidence": "raw 2.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_j1_ring_cur",
+      "path_class": "under_budget",
+      "path_id": 3,
+      "raw_fo4": 2.0,
+      "signature": "v25|p_j1_ring_cur|r3|n1|hi:1"
+    },
+    {
+      "adjusted_fo4": 23.519925001442314,
+      "attempted": [
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "not a multi-LHS statement-order bundle"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_j1_ring_cur",
+      "path_class": "plain",
+      "path_id": 4,
+      "raw_fo4": 23.519925001442314,
+      "signature": "v25|p_j1_ring_cur|r4|n1|win:1"
+    },
+    {
+      "adjusted_fo4": 3.5,
+      "confidence": 1.0,
+      "evidence": "raw 3.5 ≤ budget 8.0 — cheap path",
+      "module_name": "p_j1_ring_cur",
+      "path_class": "under_budget",
+      "path_id": 5,
+      "raw_fo4": 3.5,
+      "signature": "v25|p_j1_ring_cur|r5|n1|z_d:1"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_j2_ring_slot",
+      "path_class": "under_budget",
+      "path_id": 6,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_j2_ring_slot|r6|n4|below_q:1,cand:1,cboz:1,z_o:1"
+    },
+    {
+      "adjusted_fo4": 1.0,
+      "confidence": 1.0,
+      "evidence": "raw 1.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_j2_ring_slot",
+      "path_class": "under_budget",
+      "path_id": 7,
+      "raw_fo4": 1.0,
+      "signature": "v25|p_j2_ring_slot|r7|n1|lo:1"
+    },
+    {
+      "adjusted_fo4": 2.0,
+      "confidence": 1.0,
+      "evidence": "raw 2.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_j2_ring_slot",
+      "path_class": "under_budget",
+      "path_id": 8,
+      "raw_fo4": 2.0,
+      "signature": "v25|p_j2_ring_slot|r8|n1|hi:1"
+    },
+    {
+      "adjusted_fo4": 11.0,
+      "attempted": [
+        {
+          "candidate_fo4": 11.0,
+          "detector": "cache_hint",
+          "matched": true,
+          "note": "reused path_class from cache"
+        }
+      ],
+      "confidence": 0.6649999999999999,
+      "evidence": "cache-hint: parallel-timing makespan=11.0 cycles=2 deps=2 lhs=2 vars_ready=2 fns=0 raw=22.0→11.0",
+      "module_name": "p_j2_ring_slot",
+      "path_class": "independent_lhs_bundle",
+      "path_id": 9,
+      "raw_fo4": 22.0,
+      "signature": "v25|p_j2_ring_slot|r9|n4|hi_ab:2,lo_ab:2"
+    },
+    {
+      "adjusted_fo4": 2.0,
+      "confidence": 1.0,
+      "evidence": "raw 2.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_j2_ring_slot",
+      "path_class": "under_budget",
+      "path_id": 10,
+      "raw_fo4": 2.0,
+      "signature": "v25|p_j2_ring_slot|r10|n1|lo_w:1"
+    },
+    {
+      "adjusted_fo4": 2.0,
+      "confidence": 1.0,
+      "evidence": "raw 2.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_j2_ring_slot",
+      "path_class": "under_budget",
+      "path_id": 11,
+      "raw_fo4": 2.0,
+      "signature": "v25|p_j2_ring_slot|r11|n1|hi_w:1"
+    },
+    {
+      "adjusted_fo4": 4.9,
+      "confidence": 1.0,
+      "evidence": "raw 4.9 ≤ budget 8.0 — cheap path",
+      "module_name": "p_j2_ring_slot",
+      "path_class": "under_budget",
+      "path_id": 12,
+      "raw_fo4": 4.9,
+      "signature": "v25|p_j2_ring_slot|r12|n1|win_oh:1"
+    },
+    {
+      "adjusted_fo4": 2.0,
+      "confidence": 1.0,
+      "evidence": "raw 2.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_j2_ring_slot",
+      "path_class": "under_budget",
+      "path_id": 13,
+      "raw_fo4": 2.0,
+      "signature": "v25|p_j2_ring_slot|r13|n1|z_d:1"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_k1_pop_index",
+      "path_class": "under_budget",
+      "path_id": 14,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_k1_pop_index|r14|n6|didx:1,pidx:1,ridx:1,v_o:1,v_q:1,{ex, pub, drn}:1"
+    },
+    {
+      "adjusted_fo4": 0.7,
+      "confidence": 1.0,
+      "evidence": "raw 0.7 ≤ budget 8.0 — cheap path",
+      "module_name": "p_k1_pop_index",
+      "path_class": "under_budget",
+      "path_id": 15,
+      "raw_fo4": 0.7,
+      "signature": "v25|p_k1_pop_index|r15|n1|a_ex:1"
+    },
+    {
+      "adjusted_fo4": 2.35,
+      "confidence": 1.0,
+      "evidence": "raw 2.4 ≤ budget 8.0 — cheap path",
+      "module_name": "p_k1_pop_index",
+      "path_class": "under_budget",
+      "path_id": 16,
+      "raw_fo4": 2.35,
+      "signature": "v25|p_k1_pop_index|r16|n1|a_data:1"
+    },
+    {
+      "adjusted_fo4": 3.0,
+      "confidence": 1.0,
+      "evidence": "raw 3.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_k1_pop_index",
+      "path_class": "under_budget",
+      "path_id": 17,
+      "raw_fo4": 3.0,
+      "signature": "v25|p_k1_pop_index|r17|n1|a_drn:1"
+    },
+    {
+      "adjusted_fo4": 3.0,
+      "confidence": 1.0,
+      "evidence": "raw 3.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_k1_pop_index",
+      "path_class": "under_budget",
+      "path_id": 18,
+      "raw_fo4": 3.0,
+      "signature": "v25|p_k1_pop_index|r18|n1|rindex:1"
+    },
+    {
+      "adjusted_fo4": 5.5,
+      "confidence": 1.0,
+      "evidence": "raw 5.5 ≤ budget 8.0 — cheap path",
+      "module_name": "p_k1_pop_index",
+      "path_class": "under_budget",
+      "path_id": 19,
+      "raw_fo4": 5.5,
+      "signature": "v25|p_k1_pop_index|r19|n2|v_d:2"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_k2_pop_onehot",
+      "path_class": "under_budget",
+      "path_id": 20,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_k2_pop_onehot|r20|n6|d_oh:1,p_oh:1,r_oh:1,v_o:1,v_q:1,{ex, pub, drn}:1"
+    },
+    {
+      "adjusted_fo4": 6.4,
+      "confidence": 1.0,
+      "evidence": "raw 6.4 ≤ budget 8.0 — cheap path",
+      "module_name": "p_k2_pop_onehot",
+      "path_class": "under_budget",
+      "path_id": 21,
+      "raw_fo4": 6.4,
+      "signature": "v25|p_k2_pop_onehot|r21|n1|pop_oh:1"
+    },
+    {
+      "adjusted_fo4": 2.0,
+      "confidence": 1.0,
+      "evidence": "raw 2.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_k2_pop_onehot",
+      "path_class": "under_budget",
+      "path_id": 22,
+      "raw_fo4": 2.0,
+      "signature": "v25|p_k2_pop_onehot|r22|n1|v_d:1"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_m1_place_add",
+      "path_class": "under_budget",
+      "path_id": 23,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_m1_place_add|r23|n4|full:1,idx_q:1,ov_o:1,valid:1"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_m1_place_add",
+      "path_class": "under_budget",
+      "path_id": 24,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_m1_place_add|r24|n1|rank:1"
+    },
+    {
+      "adjusted_fo4": 18.983706192659348,
+      "attempted": [
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "not a multi-LHS statement-order bundle"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_m1_place_add",
+      "path_class": "plain",
+      "path_id": 25,
+      "raw_fo4": 18.983706192659348,
+      "signature": "v25|p_m1_place_add|r25|n1|rank:1"
+    },
+    {
+      "adjusted_fo4": 3.0,
+      "confidence": 1.0,
+      "evidence": "raw 3.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_m1_place_add",
+      "path_class": "under_budget",
+      "path_id": 26,
+      "raw_fo4": 3.0,
+      "signature": "v25|p_m1_place_add|r26|n1|slot_fifo:1"
+    },
+    {
+      "adjusted_fo4": 3.5,
+      "confidence": 1.0,
+      "evidence": "raw 3.5 ≤ budget 8.0 — cheap path",
+      "module_name": "p_m1_place_add",
+      "path_class": "under_budget",
+      "path_id": 27,
+      "raw_fo4": 3.5,
+      "signature": "v25|p_m1_place_add|r27|n1|fifo_pos:1"
+    },
+    {
+      "adjusted_fo4": 2.0,
+      "confidence": 1.0,
+      "evidence": "raw 2.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_m1_place_add",
+      "path_class": "under_budget",
+      "path_id": 28,
+      "raw_fo4": 2.0,
+      "signature": "v25|p_m1_place_add|r28|n1|ov_d:1"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_m2_place_rot",
+      "path_class": "under_budget",
+      "path_id": 29,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_m2_place_rot|r29|n4|full:1,idx_oh_q:1,ov_o:1,valid:1"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_m2_place_rot",
+      "path_class": "under_budget",
+      "path_id": 30,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_m2_place_rot|r30|n1|therm:1"
+    },
+    {
+      "adjusted_fo4": 10.0,
+      "attempted": [
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "not a multi-LHS statement-order bundle"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_m2_place_rot",
+      "path_class": "plain",
+      "path_id": 31,
+      "raw_fo4": 10.0,
+      "signature": "v25|p_m2_place_rot|r31|n2|fifo_pos:2"
+    },
+    {
+      "adjusted_fo4": 2.0,
+      "confidence": 1.0,
+      "evidence": "raw 2.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_m2_place_rot",
+      "path_class": "under_budget",
+      "path_id": 32,
+      "raw_fo4": 2.0,
+      "signature": "v25|p_m2_place_rot|r32|n1|ov_d:1"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_n1_fn_rotate",
+      "path_class": "under_budget",
+      "path_id": 33,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_n1_fn_rotate|r33|n3|d:1,off:1,q_o:1"
+    },
+    {
+      "adjusted_fo4": 9.5,
+      "attempted": [
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "not a multi-LHS statement-order bundle"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_n1_fn_rotate",
+      "path_class": "plain",
+      "path_id": 34,
+      "raw_fo4": 9.5,
+      "signature": "v25|p_n1_fn_rotate|r34|n1|q_d:1"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_n2_onehot_bytes",
+      "path_class": "under_budget",
+      "path_id": 35,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_n2_onehot_bytes|r35|n3|d:1,off:1,q_o:1"
+    },
+    {
+      "adjusted_fo4": 1.2679700005769248,
+      "confidence": 1.0,
+      "evidence": "raw 1.3 ≤ budget 8.0 — cheap path",
+      "module_name": "p_n2_onehot_bytes",
+      "path_class": "under_budget",
+      "path_id": 36,
+      "raw_fo4": 1.2679700005769248,
+      "signature": "v25|p_n2_onehot_bytes|r36|n1|sel:1"
+    },
+    {
+      "adjusted_fo4": 7.4,
+      "confidence": 1.0,
+      "evidence": "raw 7.4 ≤ budget 8.0 — cheap path",
+      "module_name": "p_n2_onehot_bytes",
+      "path_class": "under_budget",
+      "path_id": 37,
+      "raw_fo4": 7.4,
+      "signature": "v25|p_n2_onehot_bytes|r37|n2|q_d:2"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_q1_legal_chain",
+      "path_class": "under_budget",
+      "path_id": 38,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_q1_legal_chain|r38|n4|ill_o:1,instr:1,priv:1,{tsr, tvm, tw, exv}:1"
+    },
+    {
+      "adjusted_fo4": 3.9458839376460837,
+      "confidence": 1.0,
+      "evidence": "raw 3.9 ≤ budget 8.0 — cheap path",
+      "module_name": "p_q1_legal_chain",
+      "path_class": "under_budget",
+      "path_id": 39,
+      "raw_fo4": 3.9458839376460837,
+      "signature": "v25|p_q1_legal_chain|r39|n1|sys:1"
+    },
+    {
+      "adjusted_fo4": 4.567970000576925,
+      "confidence": 1.0,
+      "evidence": "raw 4.6 ≤ budget 8.0 — cheap path",
+      "module_name": "p_q1_legal_chain",
+      "path_class": "under_budget",
+      "path_id": 40,
+      "raw_fo4": 4.567970000576925,
+      "signature": "v25|p_q1_legal_chain|r40|n1|c_sret:1"
+    },
+    {
+      "adjusted_fo4": 4.567970000576925,
+      "confidence": 1.0,
+      "evidence": "raw 4.6 ≤ budget 8.0 — cheap path",
+      "module_name": "p_q1_legal_chain",
+      "path_class": "under_budget",
+      "path_id": 41,
+      "raw_fo4": 4.567970000576925,
+      "signature": "v25|p_q1_legal_chain|r41|n1|c_mret:1"
+    },
+    {
+      "adjusted_fo4": 4.567970000576925,
+      "confidence": 1.0,
+      "evidence": "raw 4.6 ≤ budget 8.0 — cheap path",
+      "module_name": "p_q1_legal_chain",
+      "path_class": "under_budget",
+      "path_id": 42,
+      "raw_fo4": 4.567970000576925,
+      "signature": "v25|p_q1_legal_chain|r42|n1|c_wfi:1"
+    },
+    {
+      "adjusted_fo4": 3.9458839376460837,
+      "confidence": 1.0,
+      "evidence": "raw 3.9 ≤ budget 8.0 — cheap path",
+      "module_name": "p_q1_legal_chain",
+      "path_class": "under_budget",
+      "path_id": 43,
+      "raw_fo4": 3.9458839376460837,
+      "signature": "v25|p_q1_legal_chain|r43|n1|c_sf:1"
+    },
+    {
+      "adjusted_fo4": 8.05,
+      "attempted": [
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "not a multi-LHS statement-order bundle"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_q1_legal_chain",
+      "path_class": "plain",
+      "path_id": 44,
+      "raw_fo4": 8.05,
+      "signature": "v25|p_q1_legal_chain|r44|n1|ill_a:1"
+    },
+    {
+      "adjusted_fo4": 6.55,
+      "confidence": 1.0,
+      "evidence": "raw 6.5 ≤ budget 8.0 — cheap path",
+      "module_name": "p_q1_legal_chain",
+      "path_class": "under_budget",
+      "path_id": 45,
+      "raw_fo4": 6.55,
+      "signature": "v25|p_q1_legal_chain|r45|n1|ill_b:1"
+    },
+    {
+      "adjusted_fo4": 2.5,
+      "confidence": 1.0,
+      "evidence": "raw 2.5 ≤ budget 8.0 — cheap path",
+      "module_name": "p_q1_legal_chain",
+      "path_class": "under_budget",
+      "path_id": 46,
+      "raw_fo4": 2.5,
+      "signature": "v25|p_q1_legal_chain|r46|n1|ill_d:1"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_q2_legal_table",
+      "path_class": "under_budget",
+      "path_id": 47,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_q2_legal_table|r47|n4|cls_q:1,exv:1,ill_o:1,ill_tab_q:1"
+    },
+    {
+      "adjusted_fo4": 3.0,
+      "confidence": 1.0,
+      "evidence": "raw 3.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_q2_legal_table",
+      "path_class": "under_budget",
+      "path_id": 48,
+      "raw_fo4": 3.0,
+      "signature": "v25|p_q2_legal_table|r48|n1|ill_d:1"
+    },
+    {
+      "adjusted_fo4": 46.28789500201923,
+      "attempted": [
+        {
+          "detector": "p5_composed_cone",
+          "matched": true,
+          "note": "P5 composed cone — exclusive/dense/parallel-timing; IndependentLhsBundle only if next-state FSM"
+        },
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "skipped on P5 composed cone (gemm serial chain)"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_j1_ring_cur",
+      "path_class": "plain",
+      "path_id": 49,
+      "raw_fo4": 46.28789500201923,
+      "signature": "v25|p_j1_ring_cur|r5|n6|above:2,hi:1,rot:1,win:1,z_d:1"
+    },
+    {
+      "adjusted_fo4": 21.9,
+      "attempted": [
+        {
+          "detector": "p5_composed_cone",
+          "matched": true,
+          "note": "P5 composed cone — exclusive/dense/parallel-timing; IndependentLhsBundle only if next-state FSM"
+        },
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "skipped on P5 composed cone (gemm serial chain)"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_j2_ring_slot",
+      "path_class": "plain",
+      "path_id": 50,
+      "raw_fo4": 21.9,
+      "signature": "v25|p_j2_ring_slot|r13|n6|hi:1,hi_ab:2,hi_w:1,win_oh:1,z_d:1"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_k1_pop_index",
+      "path_class": "under_budget",
+      "path_id": 51,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_k1_pop_index|r19|n1|v_d:1"
+    },
+    {
+      "adjusted_fo4": 14.549999999999999,
+      "attempted": [
+        {
+          "detector": "p5_composed_cone",
+          "matched": true,
+          "note": "P5 composed cone — exclusive/dense/parallel-timing; IndependentLhsBundle only if next-state FSM"
+        },
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "skipped on P5 composed cone (gemm serial chain)"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_k1_pop_index",
+      "path_class": "plain",
+      "path_id": 52,
+      "raw_fo4": 14.549999999999999,
+      "signature": "v25|p_k1_pop_index|r19|n5|a_data:1,a_drn:1,a_ex:1,rindex:1,v_d:1"
+    },
+    {
+      "adjusted_fo4": 8.4,
+      "attempted": [
+        {
+          "detector": "p5_composed_cone",
+          "matched": true,
+          "note": "P5 composed cone — exclusive/dense/parallel-timing; IndependentLhsBundle only if next-state FSM"
+        },
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "skipped on P5 composed cone (gemm serial chain)"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_k2_pop_onehot",
+      "path_class": "plain",
+      "path_id": 53,
+      "raw_fo4": 8.4,
+      "signature": "v25|p_k2_pop_onehot|r22|n2|pop_oh:1,v_d:1"
+    },
+    {
+      "adjusted_fo4": 27.483706192659348,
+      "attempted": [
+        {
+          "detector": "p5_composed_cone",
+          "matched": true,
+          "note": "P5 composed cone — exclusive/dense/parallel-timing; IndependentLhsBundle only if next-state FSM"
+        },
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "skipped on P5 composed cone (gemm serial chain)"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_m1_place_add",
+      "path_class": "plain",
+      "path_id": 54,
+      "raw_fo4": 27.483706192659348,
+      "signature": "v25|p_m1_place_add|r28|n4|fifo_pos:1,ov_d:1,rank:1,slot_fifo:1"
+    },
+    {
+      "adjusted_fo4": 12.0,
+      "attempted": [
+        {
+          "detector": "p5_composed_cone",
+          "matched": true,
+          "note": "P5 composed cone — exclusive/dense/parallel-timing; IndependentLhsBundle only if next-state FSM"
+        },
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "skipped on P5 composed cone (gemm serial chain)"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_m2_place_rot",
+      "path_class": "plain",
+      "path_id": 55,
+      "raw_fo4": 12.0,
+      "signature": "v25|p_m2_place_rot|r32|n2|fifo_pos:1,ov_d:1"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_n2_onehot_bytes",
+      "path_class": "under_budget",
+      "path_id": 56,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_n2_onehot_bytes|r37|n1|q_d:1"
+    },
+    {
+      "adjusted_fo4": 8.667970000576926,
+      "attempted": [
+        {
+          "detector": "p5_composed_cone",
+          "matched": true,
+          "note": "P5 composed cone — exclusive/dense/parallel-timing; IndependentLhsBundle only if next-state FSM"
+        },
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "skipped on P5 composed cone (gemm serial chain)"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_n2_onehot_bytes",
+      "path_class": "plain",
+      "path_id": 57,
+      "raw_fo4": 8.667970000576926,
+      "signature": "v25|p_n2_onehot_bytes|r37|n2|q_d:1,sel:1"
+    },
+    {
+      "adjusted_fo4": 22.81385393822301,
+      "attempted": [
+        {
+          "detector": "p5_composed_cone",
+          "matched": true,
+          "note": "P5 composed cone — exclusive/dense/parallel-timing; IndependentLhsBundle only if next-state FSM"
+        },
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "skipped on P5 composed cone (gemm serial chain)"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_q1_legal_chain",
+      "path_class": "plain",
+      "path_id": 58,
+      "raw_fo4": 22.81385393822301,
+      "signature": "v25|p_q1_legal_chain|r46|n5|c_mret:1,ill_a:1,ill_b:1,ill_d:1,sys:1"
+    }
+  ],
+  "paths": [
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception",
+      "closes": false,
+      "endpoint": "p_j1_ring_cur.reg1/D",
+      "max_freq_mhz": 864.1568167715352,
+      "module_id": 0,
+      "multi_cycle": false,
+      "node_count": 6,
+      "path_class": "plain",
+      "path_id": 49,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 12,
+        "end_line": 17,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 17
+      },
+      "slack_fo4": -38.28789500201923,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_j1_ring_cur.reg0/CP",
+      "total_fo4": 46.28789500201923,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception",
+      "closes": false,
+      "endpoint": "p_m1_place_add.reg1/D",
+      "max_freq_mhz": 1455.4077866937625,
+      "module_id": 4,
+      "multi_cycle": false,
+      "node_count": 4,
+      "path_class": "plain",
+      "path_id": 54,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 17,
+        "end_line": 72,
+        "file": "probes/probe3.sv",
+        "start_col": 14,
+        "start_line": 72
+      },
+      "slack_fo4": -19.483706192659348,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_m1_place_add.reg0/CP",
+      "total_fo4": 27.483706192659348,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception",
+      "closes": false,
+      "endpoint": "p_j1_ring_cur.out0",
+      "max_freq_mhz": 1700.6856951094476,
+      "module_id": 0,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "plain",
+      "path_id": 4,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 12,
+        "end_line": 17,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 17
+      },
+      "slack_fo4": -15.519925001442314,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_j1_ring_cur.in0",
+      "total_fo4": 23.519925001442314,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception",
+      "closes": false,
+      "endpoint": "p_q1_legal_chain.reg1/D",
+      "max_freq_mhz": 1753.3205967003591,
+      "module_id": 8,
+      "multi_cycle": false,
+      "node_count": 5,
+      "path_class": "plain",
+      "path_id": 58,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 14,
+        "end_line": 138,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 138
+      },
+      "slack_fo4": -14.813853938223009,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_q1_legal_chain.reg0/CP",
+      "total_fo4": 22.81385393822301,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception",
+      "closes": false,
+      "endpoint": "p_j2_ring_slot.reg1/D",
+      "max_freq_mhz": 1826.4840182648402,
+      "module_id": 1,
+      "multi_cycle": false,
+      "node_count": 6,
+      "path_class": "plain",
+      "path_id": 50,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 11,
+        "end_line": 32,
+        "file": "probes/probe3.sv",
+        "start_col": 7,
+        "start_line": 32
+      },
+      "slack_fo4": -13.899999999999999,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_j2_ring_slot.reg0/CP",
+      "total_fo4": 21.9,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception",
+      "closes": false,
+      "endpoint": "p_m1_place_add.out0",
+      "max_freq_mhz": 2107.0701155008005,
+      "module_id": 4,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "plain",
+      "path_id": 25,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 17,
+        "end_line": 72,
+        "file": "probes/probe3.sv",
+        "start_col": 14,
+        "start_line": 72
+      },
+      "slack_fo4": -10.983706192659348,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_m1_place_add.in0",
+      "total_fo4": 18.983706192659348,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception",
+      "closes": false,
+      "endpoint": "p_k1_pop_index.reg1/D",
+      "max_freq_mhz": 2749.1408934707906,
+      "module_id": 2,
+      "multi_cycle": false,
+      "node_count": 5,
+      "path_class": "plain",
+      "path_id": 52,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 36,
+        "end_line": 52,
+        "file": "probes/probe3.sv",
+        "start_col": 34,
+        "start_line": 52
+      },
+      "slack_fo4": -6.549999999999999,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_k1_pop_index.reg0/CP",
+      "total_fo4": 14.549999999999999,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception",
+      "closes": false,
+      "endpoint": "p_m2_place_rot.reg1/D",
+      "max_freq_mhz": 3333.3333333333335,
+      "module_id": 5,
+      "multi_cycle": false,
+      "node_count": 2,
+      "path_class": "plain",
+      "path_id": 55,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 14,
+        "end_line": 92,
+        "file": "probes/probe3.sv",
+        "start_col": 7,
+        "start_line": 92
+      },
+      "slack_fo4": -4.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_m2_place_rot.reg0/CP",
+      "total_fo4": 12.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception",
+      "closes": false,
+      "endpoint": "p_j1_ring_cur.out0",
+      "max_freq_mhz": 3636.363636363637,
+      "module_id": 0,
+      "multi_cycle": false,
+      "node_count": 2,
+      "path_class": "plain",
+      "path_id": 2,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 53,
+        "end_line": 14,
+        "file": "probes/probe3.sv",
+        "start_col": 49,
+        "start_line": 14
+      },
+      "slack_fo4": -3.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_j1_ring_cur.in0",
+      "total_fo4": 11.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "cache-hint: parallel-timing makespan=11.0 cycles=2 deps=2 lhs=2 vars_ready=2 fns=0 raw=22.0→11.0",
+      "closes": false,
+      "endpoint": "p_j2_ring_slot.out0",
+      "max_freq_mhz": 3636.363636363637,
+      "module_id": 1,
+      "multi_cycle": false,
+      "node_count": 4,
+      "path_class": "independent_lhs_bundle",
+      "path_id": 9,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 11,
+        "end_line": 31,
+        "file": "probes/probe3.sv",
+        "start_col": 7,
+        "start_line": 31
+      },
+      "slack_fo4": -3.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_j2_ring_slot.in0",
+      "total_fo4": 11.0,
+      "total_fo4_raw": 22.0
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception",
+      "closes": false,
+      "endpoint": "p_m2_place_rot.out0",
+      "max_freq_mhz": 4000.0,
+      "module_id": 5,
+      "multi_cycle": false,
+      "node_count": 2,
+      "path_class": "plain",
+      "path_id": 31,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 14,
+        "end_line": 92,
+        "file": "probes/probe3.sv",
+        "start_col": 7,
+        "start_line": 92
+      },
+      "slack_fo4": -2.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_m2_place_rot.in0",
+      "total_fo4": 10.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception",
+      "closes": false,
+      "endpoint": "p_n1_fn_rotate.reg1/D",
+      "max_freq_mhz": 4210.526315789474,
+      "module_id": 6,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "plain",
+      "path_id": 34,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 12,
+        "end_line": 111,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 111
+      },
+      "slack_fo4": -1.5,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_n1_fn_rotate.reg0/CP",
+      "total_fo4": 9.5,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception",
+      "closes": false,
+      "endpoint": "p_n2_onehot_bytes.reg1/D",
+      "max_freq_mhz": 4614.690636600919,
+      "module_id": 7,
+      "multi_cycle": false,
+      "node_count": 2,
+      "path_class": "plain",
+      "path_id": 57,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 46,
+        "end_line": 123,
+        "file": "probes/probe3.sv",
+        "start_col": 44,
+        "start_line": 123
+      },
+      "slack_fo4": -0.6679700005769256,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_n2_onehot_bytes.reg0/CP",
+      "total_fo4": 8.667970000576926,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception",
+      "closes": false,
+      "endpoint": "p_k2_pop_onehot.reg1/D",
+      "max_freq_mhz": 4761.904761904762,
+      "module_id": 3,
+      "multi_cycle": false,
+      "node_count": 2,
+      "path_class": "plain",
+      "path_id": 53,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 15,
+        "end_line": 59,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 59
+      },
+      "slack_fo4": -0.40000000000000036,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_k2_pop_onehot.reg0/CP",
+      "total_fo4": 8.4,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception",
+      "closes": false,
+      "endpoint": "p_q1_legal_chain.out0",
+      "max_freq_mhz": 4968.944099378882,
+      "module_id": 8,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "plain",
+      "path_id": 44,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 14,
+        "end_line": 138,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 138
+      },
+      "slack_fo4": -0.05000000000000071,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_q1_legal_chain.in0",
+      "total_fo4": 8.05,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 7.4 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_n2_onehot_bytes.out0",
+      "max_freq_mhz": 5405.405405405406,
+      "module_id": 7,
+      "multi_cycle": false,
+      "node_count": 2,
+      "path_class": "under_budget",
+      "path_id": 37,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 46,
+        "end_line": 123,
+        "file": "probes/probe3.sv",
+        "start_col": 44,
+        "start_line": 123
+      },
+      "slack_fo4": 0.5999999999999996,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_n2_onehot_bytes.in0",
+      "total_fo4": 7.4,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 6.6 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_j1_ring_cur.out0",
+      "max_freq_mhz": 6044.149489422433,
+      "module_id": 0,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 1,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 14,
+        "end_line": 10,
+        "file": "probes/probe3.sv",
+        "start_col": 12,
+        "start_line": 10
+      },
+      "slack_fo4": 1.3820299994230751,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_j1_ring_cur.in0",
+      "total_fo4": 6.617970000576925,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 6.5 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_q1_legal_chain.out0",
+      "max_freq_mhz": 6106.8702290076335,
+      "module_id": 8,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 45,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 14,
+        "end_line": 140,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 140
+      },
+      "slack_fo4": 1.4500000000000002,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_q1_legal_chain.in0",
+      "total_fo4": 6.55,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 6.4 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_k2_pop_onehot.out0",
+      "max_freq_mhz": 6250.0,
+      "module_id": 3,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 21,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 15,
+        "end_line": 59,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 59
+      },
+      "slack_fo4": 1.5999999999999996,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_k2_pop_onehot.in0",
+      "total_fo4": 6.4,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 5.5 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_k1_pop_index.out0",
+      "max_freq_mhz": 7272.727272727274,
+      "module_id": 2,
+      "multi_cycle": false,
+      "node_count": 2,
+      "path_class": "under_budget",
+      "path_id": 19,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 36,
+        "end_line": 52,
+        "file": "probes/probe3.sv",
+        "start_col": 34,
+        "start_line": 52
+      },
+      "slack_fo4": 2.5,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_k1_pop_index.in0",
+      "total_fo4": 5.5,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 4.9 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_j2_ring_slot.out0",
+      "max_freq_mhz": 8163.265306122449,
+      "module_id": 1,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 12,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 15,
+        "end_line": 37,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 37
+      },
+      "slack_fo4": 3.0999999999999996,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_j2_ring_slot.in0",
+      "total_fo4": 4.9,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 4.6 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_q1_legal_chain.out0",
+      "max_freq_mhz": 8756.624932945726,
+      "module_id": 8,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 40,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 15,
+        "end_line": 134,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 134
+      },
+      "slack_fo4": 3.432029999423075,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_q1_legal_chain.in0",
+      "total_fo4": 4.567970000576925,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 4.6 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_q1_legal_chain.out0",
+      "max_freq_mhz": 8756.624932945726,
+      "module_id": 8,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 41,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 15,
+        "end_line": 135,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 135
+      },
+      "slack_fo4": 3.432029999423075,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_q1_legal_chain.in0",
+      "total_fo4": 4.567970000576925,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 4.6 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_q1_legal_chain.out0",
+      "max_freq_mhz": 8756.624932945726,
+      "module_id": 8,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 42,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 14,
+        "end_line": 136,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 136
+      },
+      "slack_fo4": 3.432029999423075,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_q1_legal_chain.in0",
+      "total_fo4": 4.567970000576925,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 3.9 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_q1_legal_chain.out0",
+      "max_freq_mhz": 10137.145600856673,
+      "module_id": 8,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 39,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 12,
+        "end_line": 133,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 133
+      },
+      "slack_fo4": 4.054116062353916,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_q1_legal_chain.in0",
+      "total_fo4": 3.9458839376460837,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 3.9 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_q1_legal_chain.out0",
+      "max_freq_mhz": 10137.145600856673,
+      "module_id": 8,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 43,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 13,
+        "end_line": 137,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 137
+      },
+      "slack_fo4": 4.054116062353916,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_q1_legal_chain.in0",
+      "total_fo4": 3.9458839376460837,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 3.5 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_j1_ring_cur.out0",
+      "max_freq_mhz": 11428.571428571428,
+      "module_id": 0,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 5,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 12,
+        "end_line": 18,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 18
+      },
+      "slack_fo4": 4.5,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_j1_ring_cur.in0",
+      "total_fo4": 3.5,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 3.5 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_m1_place_add.out0",
+      "max_freq_mhz": 11428.571428571428,
+      "module_id": 4,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 27,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 63,
+        "end_line": 78,
+        "file": "probes/probe3.sv",
+        "start_col": 56,
+        "start_line": 78
+      },
+      "slack_fo4": 4.5,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_m1_place_add.in0",
+      "total_fo4": 3.5,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 3.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_k1_pop_index.out0",
+      "max_freq_mhz": 13333.333333333334,
+      "module_id": 2,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 17,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 14,
+        "end_line": 48,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 48
+      },
+      "slack_fo4": 5.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_k1_pop_index.in0",
+      "total_fo4": 3.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 3.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_k1_pop_index.out0",
+      "max_freq_mhz": 13333.333333333334,
+      "module_id": 2,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 18,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 15,
+        "end_line": 49,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 49
+      },
+      "slack_fo4": 5.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_k1_pop_index.in0",
+      "total_fo4": 3.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 3.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_m1_place_add.out0",
+      "max_freq_mhz": 13333.333333333334,
+      "module_id": 4,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 26,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 20,
+        "end_line": 74,
+        "file": "probes/probe3.sv",
+        "start_col": 12,
+        "start_line": 74
+      },
+      "slack_fo4": 5.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_m1_place_add.in0",
+      "total_fo4": 3.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 3.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_q2_legal_table.reg1/D",
+      "max_freq_mhz": 13333.333333333334,
+      "module_id": 9,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 48,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 14,
+        "end_line": 146,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 146
+      },
+      "slack_fo4": 5.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_q2_legal_table.reg0/CP",
+      "total_fo4": 3.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 2.5 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_q1_legal_chain.out0",
+      "max_freq_mhz": 16000.0,
+      "module_id": 8,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 46,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 14,
+        "end_line": 141,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 141
+      },
+      "slack_fo4": 5.5,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_q1_legal_chain.in0",
+      "total_fo4": 2.5,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 2.4 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_k1_pop_index.out0",
+      "max_freq_mhz": 17021.276595744683,
+      "module_id": 2,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 16,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 15,
+        "end_line": 47,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 47
+      },
+      "slack_fo4": 5.65,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_k1_pop_index.in0",
+      "total_fo4": 2.35,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 2.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_j1_ring_cur.out0",
+      "max_freq_mhz": 20000.0,
+      "module_id": 0,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 3,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 11,
+        "end_line": 16,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 16
+      },
+      "slack_fo4": 6.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_j1_ring_cur.in0",
+      "total_fo4": 2.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 2.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_j2_ring_slot.out0",
+      "max_freq_mhz": 20000.0,
+      "module_id": 1,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 8,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 11,
+        "end_line": 27,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 27
+      },
+      "slack_fo4": 6.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_j2_ring_slot.in0",
+      "total_fo4": 2.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 2.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_j2_ring_slot.out0",
+      "max_freq_mhz": 20000.0,
+      "module_id": 1,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 10,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 13,
+        "end_line": 35,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 35
+      },
+      "slack_fo4": 6.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_j2_ring_slot.in0",
+      "total_fo4": 2.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 2.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_j2_ring_slot.out0",
+      "max_freq_mhz": 20000.0,
+      "module_id": 1,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 11,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 13,
+        "end_line": 36,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 36
+      },
+      "slack_fo4": 6.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_j2_ring_slot.in0",
+      "total_fo4": 2.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 2.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_j2_ring_slot.out0",
+      "max_freq_mhz": 20000.0,
+      "module_id": 1,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 13,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 12,
+        "end_line": 38,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 38
+      },
+      "slack_fo4": 6.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_j2_ring_slot.in0",
+      "total_fo4": 2.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 2.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_k2_pop_onehot.out0",
+      "max_freq_mhz": 20000.0,
+      "module_id": 3,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 22,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 12,
+        "end_line": 60,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 60
+      },
+      "slack_fo4": 6.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_k2_pop_onehot.in0",
+      "total_fo4": 2.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 2.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_m1_place_add.out0",
+      "max_freq_mhz": 20000.0,
+      "module_id": 4,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 28,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 13,
+        "end_line": 80,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 80
+      },
+      "slack_fo4": 6.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_m1_place_add.in0",
+      "total_fo4": 2.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 2.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_m2_place_rot.out0",
+      "max_freq_mhz": 20000.0,
+      "module_id": 5,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 32,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 13,
+        "end_line": 94,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 94
+      },
+      "slack_fo4": 6.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_m2_place_rot.in0",
+      "total_fo4": 2.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 1.3 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_n2_onehot_bytes.out0",
+      "max_freq_mhz": 31546.487678572874,
+      "module_id": 7,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 36,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 16,
+        "end_line": 119,
+        "file": "probes/probe3.sv",
+        "start_col": 14,
+        "start_line": 119
+      },
+      "slack_fo4": 6.732029999423075,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_n2_onehot_bytes.in0",
+      "total_fo4": 1.2679700005769248,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 1.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_j2_ring_slot.out0",
+      "max_freq_mhz": 40000.0,
+      "module_id": 1,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 7,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 11,
+        "end_line": 26,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 26
+      },
+      "slack_fo4": 7.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_j2_ring_slot.in0",
+      "total_fo4": 1.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.7 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_k1_pop_index.out0",
+      "max_freq_mhz": 57142.85714285715,
+      "module_id": 2,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 15,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 13,
+        "end_line": 46,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 46
+      },
+      "slack_fo4": 7.3,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_k1_pop_index.in0",
+      "total_fo4": 0.7,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_j1_ring_cur.reg1/D",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 0,
+      "multi_cycle": false,
+      "node_count": 4,
+      "path_class": "under_budget",
+      "path_id": 0,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 39,
+        "end_line": 8,
+        "file": "probes/probe3.sv",
+        "start_col": 36,
+        "start_line": 8
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_j1_ring_cur.reg0/CP",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_j2_ring_slot.reg1/D",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 1,
+      "multi_cycle": false,
+      "node_count": 4,
+      "path_class": "under_budget",
+      "path_id": 6,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 39,
+        "end_line": 25,
+        "file": "probes/probe3.sv",
+        "start_col": 36,
+        "start_line": 25
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_j2_ring_slot.reg0/CP",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_k1_pop_index.reg1/D",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 2,
+      "multi_cycle": false,
+      "node_count": 6,
+      "path_class": "under_budget",
+      "path_id": 14,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 39,
+        "end_line": 45,
+        "file": "probes/probe3.sv",
+        "start_col": 36,
+        "start_line": 45
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_k1_pop_index.reg0/CP",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_k2_pop_onehot.reg1/D",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 3,
+      "multi_cycle": false,
+      "node_count": 6,
+      "path_class": "under_budget",
+      "path_id": 20,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 39,
+        "end_line": 58,
+        "file": "probes/probe3.sv",
+        "start_col": 36,
+        "start_line": 58
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_k2_pop_onehot.reg0/CP",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_m1_place_add.reg1/D",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 4,
+      "multi_cycle": false,
+      "node_count": 4,
+      "path_class": "under_budget",
+      "path_id": 23,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 40,
+        "end_line": 66,
+        "file": "probes/probe3.sv",
+        "start_col": 36,
+        "start_line": 66
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_m1_place_add.reg0/CP",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_m1_place_add.out0",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 4,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 24,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 17,
+        "end_line": 70,
+        "file": "probes/probe3.sv",
+        "start_col": 14,
+        "start_line": 70
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_m1_place_add.in0",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_m2_place_rot.reg1/D",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 5,
+      "multi_cycle": false,
+      "node_count": 4,
+      "path_class": "under_budget",
+      "path_id": 29,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 43,
+        "end_line": 86,
+        "file": "probes/probe3.sv",
+        "start_col": 36,
+        "start_line": 86
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_m2_place_rot.reg0/CP",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_m2_place_rot.out0",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 5,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 30,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 14,
+        "end_line": 88,
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 88
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_m2_place_rot.in0",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_n1_fn_rotate.reg1/D",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 6,
+      "multi_cycle": false,
+      "node_count": 3,
+      "path_class": "under_budget",
+      "path_id": 33,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 36,
+        "end_line": 100,
+        "file": "probes/probe3.sv",
+        "start_col": 36,
+        "start_line": 100
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_n1_fn_rotate.reg0/CP",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_n2_onehot_bytes.reg1/D",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 7,
+      "multi_cycle": false,
+      "node_count": 3,
+      "path_class": "under_budget",
+      "path_id": 35,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 36,
+        "end_line": 115,
+        "file": "probes/probe3.sv",
+        "start_col": 36,
+        "start_line": 115
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_n2_onehot_bytes.reg0/CP",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_q1_legal_chain.reg1/D",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 8,
+      "multi_cycle": false,
+      "node_count": 4,
+      "path_class": "under_budget",
+      "path_id": 38,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 40,
+        "end_line": 131,
+        "file": "probes/probe3.sv",
+        "start_col": 36,
+        "start_line": 131
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_q1_legal_chain.reg0/CP",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_q2_legal_table.reg1/D",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 9,
+      "multi_cycle": false,
+      "node_count": 4,
+      "path_class": "under_budget",
+      "path_id": 47,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 40,
+        "end_line": 145,
+        "file": "probes/probe3.sv",
+        "start_col": 36,
+        "start_line": 145
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_q2_legal_table.reg0/CP",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_k1_pop_index.reg1/D",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 2,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 51,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 7,
+        "end_line": 51,
+        "file": "probes/probe3.sv",
+        "start_col": 5,
+        "start_line": 51
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_k1_pop_index.reg0/CP",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_n2_onehot_bytes.reg1/D",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 7,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 56,
+      "path_kind": "intoreg",
+      "primary_loc": {
+        "end_col": 9,
+        "end_line": 122,
+        "file": "probes/probe3.sv",
+        "start_col": 7,
+        "start_line": 122
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_n2_onehot_bytes.in0",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    }
+  ],
+  "pipeline_contracts": [],
+  "relocation_plan": {
+    "budget_fo4": 8.0,
+    "cards": [
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception",
+        "endpoint": "p_j1_ring_cur.reg1/D",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_j1_ring_cur",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 23.143947501009617,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          },
+          {
+            "algorithms": [
+              "rebalance_associative_node"
+            ],
+            "auto_correct": true,
+            "confidence": 0.7,
+            "expected_fo4_after": 39.34471075171635,
+            "id": "t1_rebalance",
+            "kind": "rebalance_assoc",
+            "latency_delta": 0,
+            "rationale": "Latency-neutral depth reduction on +/|/& chains",
+            "risk": "low",
+            "score": 0.105,
+            "tier": "t1",
+            "title": "Rebalance associative expression tree"
+          },
+          {
+            "algorithms": [
+              "split_assign"
+            ],
+            "auto_correct": true,
+            "confidence": 0.6,
+            "expected_fo4_after": 41.65910550181731,
+            "id": "t1_split",
+            "kind": "split_assign",
+            "latency_delta": 0,
+            "rationale": "Enables cleaner cuts and rebalance",
+            "risk": "low",
+            "score": 0.060000000000000026,
+            "tier": "t1",
+            "title": "Split deep assign into named wires"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 49,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 792,
+          "byte_start": 789,
+          "end_col": 12,
+          "end_line": 17,
+          "file": "probes/probe3.sv",
+          "origin": "user_file",
+          "start_col": 10,
+          "start_line": 17
+        },
+        "slack_fo4": -38.28789500201923,
+        "startpoint": "p_j1_ring_cur.reg0/CP",
+        "total_fo4": 46.28789500201923
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception",
+        "endpoint": "p_m1_place_add.reg1/D",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_m1_place_add",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 13.741853096329674,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 54,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 3645,
+          "byte_start": 3641,
+          "end_col": 17,
+          "end_line": 72,
+          "file": "probes/probe3.sv",
+          "origin": "user_file",
+          "start_col": 14,
+          "start_line": 72
+        },
+        "slack_fo4": -19.483706192659348,
+        "startpoint": "p_m1_place_add.reg0/CP",
+        "total_fo4": 27.483706192659348
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception",
+        "endpoint": "p_j1_ring_cur.out0",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_j1_ring_cur",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 11.759962500721157,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          },
+          {
+            "algorithms": [
+              "rebalance_associative_node"
+            ],
+            "auto_correct": true,
+            "confidence": 0.7,
+            "expected_fo4_after": 19.991936251225965,
+            "id": "t1_rebalance",
+            "kind": "rebalance_assoc",
+            "latency_delta": 0,
+            "rationale": "Latency-neutral depth reduction on +/|/& chains",
+            "risk": "low",
+            "score": 0.10500000000000002,
+            "tier": "t1",
+            "title": "Rebalance associative expression tree"
+          },
+          {
+            "algorithms": [
+              "split_assign"
+            ],
+            "auto_correct": true,
+            "confidence": 0.6,
+            "expected_fo4_after": 21.167932501298083,
+            "id": "t1_split",
+            "kind": "split_assign",
+            "latency_delta": 0,
+            "rationale": "Enables cleaner cuts and rebalance",
+            "risk": "low",
+            "score": 0.05999999999999999,
+            "tier": "t1",
+            "title": "Split deep assign into named wires"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 4,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 792,
+          "byte_start": 789,
+          "end_col": 12,
+          "end_line": 17,
+          "file": "probes/probe3.sv",
+          "origin": "user_file",
+          "start_col": 10,
+          "start_line": 17
+        },
+        "slack_fo4": -15.519925001442314,
+        "startpoint": "p_j1_ring_cur.in0",
+        "total_fo4": 23.519925001442314
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception",
+        "endpoint": "p_q1_legal_chain.reg1/D",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_q1_legal_chain",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 11.406926969111504,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          },
+          {
+            "algorithms": [
+              "rebalance_associative_node"
+            ],
+            "auto_correct": true,
+            "confidence": 0.7,
+            "expected_fo4_after": 19.39177584748956,
+            "id": "t1_rebalance",
+            "kind": "rebalance_assoc",
+            "latency_delta": 0,
+            "rationale": "Latency-neutral depth reduction on +/|/& chains",
+            "risk": "low",
+            "score": 0.10499999999999995,
+            "tier": "t1",
+            "title": "Rebalance associative expression tree"
+          },
+          {
+            "algorithms": [
+              "split_assign"
+            ],
+            "auto_correct": true,
+            "confidence": 0.6,
+            "expected_fo4_after": 20.532468544400707,
+            "id": "t1_split",
+            "kind": "split_assign",
+            "latency_delta": 0,
+            "rationale": "Enables cleaner cuts and rebalance",
+            "risk": "low",
+            "score": 0.06000000000000001,
+            "tier": "t1",
+            "title": "Split deep assign into named wires"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 58,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 7115,
+          "byte_start": 7110,
+          "end_col": 14,
+          "end_line": 138,
+          "file": "probes/probe3.sv",
+          "origin": "user_file",
+          "start_col": 10,
+          "start_line": 138
+        },
+        "slack_fo4": -14.813853938223009,
+        "startpoint": "p_q1_legal_chain.reg0/CP",
+        "total_fo4": 22.81385393822301
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception",
+        "endpoint": "p_j2_ring_slot.reg1/D",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_j2_ring_slot",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 10.95,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 50,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 1630,
+          "byte_start": 1625,
+          "end_col": 11,
+          "end_line": 32,
+          "file": "probes/probe3.sv",
+          "origin": "user_file",
+          "start_col": 7,
+          "start_line": 32
+        },
+        "slack_fo4": -13.899999999999999,
+        "startpoint": "p_j2_ring_slot.reg0/CP",
+        "total_fo4": 21.9
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception",
+        "endpoint": "p_m1_place_add.out0",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_m1_place_add",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 9.491853096329674,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 25,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 3645,
+          "byte_start": 3641,
+          "end_col": 17,
+          "end_line": 72,
+          "file": "probes/probe3.sv",
+          "origin": "user_file",
+          "start_col": 14,
+          "start_line": 72
+        },
+        "slack_fo4": -10.983706192659348,
+        "startpoint": "p_m1_place_add.in0",
+        "total_fo4": 18.983706192659348
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception",
+        "endpoint": "p_k1_pop_index.reg1/D",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_k1_pop_index",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 7.2749999999999995,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          },
+          {
+            "algorithms": [
+              "rebalance_associative_node"
+            ],
+            "auto_correct": true,
+            "confidence": 0.7,
+            "expected_fo4_after": 12.367499999999998,
+            "id": "t1_rebalance",
+            "kind": "rebalance_assoc",
+            "latency_delta": 0,
+            "rationale": "Latency-neutral depth reduction on +/|/& chains",
+            "risk": "low",
+            "score": 0.10500000000000005,
+            "tier": "t1",
+            "title": "Rebalance associative expression tree"
+          },
+          {
+            "algorithms": [
+              "split_assign"
+            ],
+            "auto_correct": true,
+            "confidence": 0.6,
+            "expected_fo4_after": 13.094999999999999,
+            "id": "t1_split",
+            "kind": "split_assign",
+            "latency_delta": 0,
+            "rationale": "Enables cleaner cuts and rebalance",
+            "risk": "low",
+            "score": 0.06,
+            "tier": "t1",
+            "title": "Split deep assign into named wires"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 52,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 2541,
+          "byte_start": 2538,
+          "end_col": 36,
+          "end_line": 52,
+          "file": "probes/probe3.sv",
+          "origin": "user_file",
+          "start_col": 34,
+          "start_line": 52
+        },
+        "slack_fo4": -6.549999999999999,
+        "startpoint": "p_k1_pop_index.reg0/CP",
+        "total_fo4": 14.549999999999999
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception",
+        "endpoint": "p_m2_place_rot.reg1/D",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_m2_place_rot",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 6.0,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          },
+          {
+            "algorithms": [
+              "rebalance_associative_node"
+            ],
+            "auto_correct": true,
+            "confidence": 0.7,
+            "expected_fo4_after": 10.2,
+            "id": "t1_rebalance",
+            "kind": "rebalance_assoc",
+            "latency_delta": 0,
+            "rationale": "Latency-neutral depth reduction on +/|/& chains",
+            "risk": "low",
+            "score": 0.10500000000000002,
+            "tier": "t1",
+            "title": "Rebalance associative expression tree"
+          },
+          {
+            "algorithms": [
+              "split_assign"
+            ],
+            "auto_correct": true,
+            "confidence": 0.6,
+            "expected_fo4_after": 10.8,
+            "id": "t1_split",
+            "kind": "split_assign",
+            "latency_delta": 0,
+            "rationale": "Enables cleaner cuts and rebalance",
+            "risk": "low",
+            "score": 0.059999999999999956,
+            "tier": "t1",
+            "title": "Split deep assign into named wires"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 55,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 4573,
+          "byte_start": 4565,
+          "end_col": 14,
+          "end_line": 92,
+          "file": "probes/probe3.sv",
+          "origin": "user_file",
+          "start_col": 7,
+          "start_line": 92
+        },
+        "slack_fo4": -4.0,
+        "startpoint": "p_m2_place_rot.reg0/CP",
+        "total_fo4": 12.0
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception",
+        "endpoint": "p_j1_ring_cur.out0",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_j1_ring_cur",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 5.5,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 2,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 717,
+          "byte_start": 712,
+          "end_col": 53,
+          "end_line": 14,
+          "file": "probes/probe3.sv",
+          "origin": "user_file",
+          "start_col": 49,
+          "start_line": 14
+        },
+        "slack_fo4": -3.0,
+        "startpoint": "p_j1_ring_cur.in0",
+        "total_fo4": 11.0
+      },
+      {
+        "class_note": "cache-hint: parallel-timing makespan=11.0 cycles=2 deps=2 lhs=2 vars_ready=2 fns=0 raw=22.0→11.0",
+        "endpoint": "p_j2_ring_slot.out0",
+        "function_hint": "multi-LHS always_comb — parallel fields, not serial FO4 sum",
+        "module": "p_j2_ring_slot",
+        "options": [
+          {
+            "algorithms": [
+              "classify_and_adjust_paths"
+            ],
+            "auto_correct": true,
+            "confidence": 0.95,
+            "expected_fo4_after": 11.0,
+            "id": "t0_measure",
+            "kind": "measure_relocate",
+            "latency_delta": 0,
+            "rationale": "raw 22.0 → adjusted 11.0 via IndependentLhsBundle; do not re-sum exclusive/bundle arms",
+            "risk": "low",
+            "score": 0.1425,
+            "tier": "t0",
+            "title": "Keep path-class measure relocate"
+          },
+          {
+            "algorithms": [
+              "independent_lhs_bundle",
+              "balance_mux_on_path"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 8.8,
+            "id": "t1_balance_bundle",
+            "kind": "balance_mux",
+            "latency_delta": 0,
+            "rationale": "Measurement already max-field; BalanceMux only if residual over budget",
+            "risk": "low",
+            "score": 0.12999999999999995,
+            "tier": "t1",
+            "title": "Keep parallel field costing; optional field rebalance"
+          },
+          {
+            "algorithms": [
+              "process split",
+              "STA cone isolation"
+            ],
+            "auto_correct": false,
+            "confidence": 0.55,
+            "expected_fo4_after": 8.0,
+            "id": "t3_split_comb",
+            "kind": "split_comb_process",
+            "latency_delta": 0,
+            "rationale": "Same cycle, clearer placement and timing cones — human RTL style",
+            "risk": "medium",
+            "score": 0.1111111111111111,
+            "tier": "t3",
+            "title": "Split always_comb by field groups (address vs flags)"
+          }
+        ],
+        "path_class": "independent_lhs_bundle",
+        "path_id": 9,
+        "pattern": "independent_bundle",
+        "preferred_any": "t0_measure",
+        "preferred_auto": "t1_balance_bundle",
+        "primary_loc": {
+          "byte_end": 1593,
+          "byte_start": 1588,
+          "end_col": 11,
+          "end_line": 31,
+          "file": "probes/probe3.sv",
+          "origin": "user_file",
+          "start_col": 7,
+          "start_line": 31
+        },
+        "slack_fo4": -3.0,
+        "startpoint": "p_j2_ring_slot.in0",
+        "total_fo4": 11.0,
+        "total_fo4_raw": 22.0
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception",
+        "endpoint": "p_m2_place_rot.out0",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_m2_place_rot",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 5.0,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          },
+          {
+            "algorithms": [
+              "rebalance_associative_node"
+            ],
+            "auto_correct": true,
+            "confidence": 0.7,
+            "expected_fo4_after": 8.5,
+            "id": "t1_rebalance",
+            "kind": "rebalance_assoc",
+            "latency_delta": 0,
+            "rationale": "Latency-neutral depth reduction on +/|/& chains",
+            "risk": "low",
+            "score": 0.105,
+            "tier": "t1",
+            "title": "Rebalance associative expression tree"
+          },
+          {
+            "algorithms": [
+              "split_assign"
+            ],
+            "auto_correct": true,
+            "confidence": 0.6,
+            "expected_fo4_after": 9.0,
+            "id": "t1_split",
+            "kind": "split_assign",
+            "latency_delta": 0,
+            "rationale": "Enables cleaner cuts and rebalance",
+            "risk": "low",
+            "score": 0.06,
+            "tier": "t1",
+            "title": "Split deep assign into named wires"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 31,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 4573,
+          "byte_start": 4565,
+          "end_col": 14,
+          "end_line": 92,
+          "file": "probes/probe3.sv",
+          "origin": "user_file",
+          "start_col": 7,
+          "start_line": 92
+        },
+        "slack_fo4": -2.0,
+        "startpoint": "p_m2_place_rot.in0",
+        "total_fo4": 10.0
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception",
+        "endpoint": "p_n1_fn_rotate.reg1/D",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_n1_fn_rotate",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 4.75,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 34,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 5670,
+          "byte_start": 5667,
+          "end_col": 12,
+          "end_line": 111,
+          "file": "probes/probe3.sv",
+          "origin": "user_file",
+          "start_col": 10,
+          "start_line": 111
+        },
+        "slack_fo4": -1.5,
+        "startpoint": "p_n1_fn_rotate.reg0/CP",
+        "total_fo4": 9.5
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception",
+        "endpoint": "p_n2_onehot_bytes.reg1/D",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_n2_onehot_bytes",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 4.333985000288463,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          },
+          {
+            "algorithms": [
+              "rebalance_associative_node"
+            ],
+            "auto_correct": true,
+            "confidence": 0.7,
+            "expected_fo4_after": 7.367774500490387,
+            "id": "t1_rebalance",
+            "kind": "rebalance_assoc",
+            "latency_delta": 0,
+            "rationale": "Latency-neutral depth reduction on +/|/& chains",
+            "risk": "low",
+            "score": 0.105,
+            "tier": "t1",
+            "title": "Rebalance associative expression tree"
+          },
+          {
+            "algorithms": [
+              "split_assign"
+            ],
+            "auto_correct": true,
+            "confidence": 0.6,
+            "expected_fo4_after": 7.801173000519233,
+            "id": "t1_split",
+            "kind": "split_assign",
+            "latency_delta": 0,
+            "rationale": "Enables cleaner cuts and rebalance",
+            "risk": "low",
+            "score": 0.06,
+            "tier": "t1",
+            "title": "Split deep assign into named wires"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 57,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 6265,
+          "byte_start": 6262,
+          "end_col": 46,
+          "end_line": 123,
+          "file": "probes/probe3.sv",
+          "origin": "user_file",
+          "start_col": 44,
+          "start_line": 123
+        },
+        "slack_fo4": -0.6679700005769256,
+        "startpoint": "p_n2_onehot_bytes.reg0/CP",
+        "total_fo4": 8.667970000576926
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception",
+        "endpoint": "p_k2_pop_onehot.reg1/D",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_k2_pop_onehot",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 4.2,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          },
+          {
+            "algorithms": [
+              "rebalance_associative_node"
+            ],
+            "auto_correct": true,
+            "confidence": 0.7,
+            "expected_fo4_after": 7.14,
+            "id": "t1_rebalance",
+            "kind": "rebalance_assoc",
+            "latency_delta": 0,
+            "rationale": "Latency-neutral depth reduction on +/|/& chains",
+            "risk": "low",
+            "score": 0.10500000000000005,
+            "tier": "t1",
+            "title": "Rebalance associative expression tree"
+          },
+          {
+            "algorithms": [
+              "split_assign"
+            ],
+            "auto_correct": true,
+            "confidence": 0.6,
+            "expected_fo4_after": 7.5600000000000005,
+            "id": "t1_split",
+            "kind": "split_assign",
+            "latency_delta": 0,
+            "rationale": "Enables cleaner cuts and rebalance",
+            "risk": "low",
+            "score": 0.059999999999999984,
+            "tier": "t1",
+            "title": "Split deep assign into named wires"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 53,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 2974,
+          "byte_start": 2968,
+          "end_col": 15,
+          "end_line": 59,
+          "file": "probes/probe3.sv",
+          "origin": "user_file",
+          "start_col": 10,
+          "start_line": 59
+        },
+        "slack_fo4": -0.40000000000000036,
+        "startpoint": "p_k2_pop_onehot.reg0/CP",
+        "total_fo4": 8.4
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception",
+        "endpoint": "p_q1_legal_chain.out0",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_q1_legal_chain",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 4.025,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          },
+          {
+            "algorithms": [
+              "rebalance_associative_node"
+            ],
+            "auto_correct": true,
+            "confidence": 0.7,
+            "expected_fo4_after": 6.8425,
+            "id": "t1_rebalance",
+            "kind": "rebalance_assoc",
+            "latency_delta": 0,
+            "rationale": "Latency-neutral depth reduction on +/|/& chains",
+            "risk": "low",
+            "score": 0.10500000000000002,
+            "tier": "t1",
+            "title": "Rebalance associative expression tree"
+          },
+          {
+            "algorithms": [
+              "split_assign"
+            ],
+            "auto_correct": true,
+            "confidence": 0.6,
+            "expected_fo4_after": 7.245000000000001,
+            "id": "t1_split",
+            "kind": "split_assign",
+            "latency_delta": 0,
+            "rationale": "Enables cleaner cuts and rebalance",
+            "risk": "low",
+            "score": 0.05999999999999997,
+            "tier": "t1",
+            "title": "Split deep assign into named wires"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 44,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 7115,
+          "byte_start": 7110,
+          "end_col": 14,
+          "end_line": 138,
+          "file": "probes/probe3.sv",
+          "origin": "user_file",
+          "start_col": 10,
+          "start_line": 138
+        },
+        "slack_fo4": -0.05000000000000071,
+        "startpoint": "p_q1_legal_chain.in0",
+        "total_fo4": 8.05
+      }
+    ],
+    "disclaimer": "structural FO4 screening — not STA; relocation options are suggestions only; never auto-merge host RTL",
+    "schema_version": "relocation-plan-v0",
+    "summary": {
+      "auto_correct_options": 34,
+      "by_pattern": {
+        "IndependentBundle": 1,
+        "PlainCone": 14
+      },
+      "cards": 15,
+      "failing_primary": 15,
+      "t3_only_cards": 0
+    },
+    "target_mhz": 5000.0
+  },
+  "schema_version": "0",
+  "skipped_files": [],
+  "sta_hints": [
+    {
+      "comment": "sv-timing structural path in p_j1_ring_cur (kind=RegToReg); NOT STA sign-off",
+      "from": "p_j1_ring_cur.reg0/CP",
+      "kind": "local_path",
+      "loc": {
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 17
+      },
+      "path_id": 49,
+      "sdc_comment": "# sv-timing path_id=49 fo4=46.3 slack=-38.3 — NOT set_max_delay\n# report_timing -from {p_j1_ring_cur.reg0/CP} -to {p_j1_ring_cur.reg1/D}",
+      "structural_fo4": 46.28789500201923,
+      "structural_slack_fo4": -38.28789500201923,
+      "through": [],
+      "to": "p_j1_ring_cur.reg1/D"
+    },
+    {
+      "comment": "sv-timing structural path in p_m1_place_add (kind=RegToReg); NOT STA sign-off",
+      "from": "p_m1_place_add.reg0/CP",
+      "kind": "local_path",
+      "loc": {
+        "file": "probes/probe3.sv",
+        "start_col": 14,
+        "start_line": 72
+      },
+      "path_id": 54,
+      "sdc_comment": "# sv-timing path_id=54 fo4=27.5 slack=-19.5 — NOT set_max_delay\n# report_timing -from {p_m1_place_add.reg0/CP} -to {p_m1_place_add.reg1/D}",
+      "structural_fo4": 27.483706192659348,
+      "structural_slack_fo4": -19.483706192659348,
+      "through": [],
+      "to": "p_m1_place_add.reg1/D"
+    },
+    {
+      "comment": "sv-timing structural path in p_j1_ring_cur (kind=InToOut); NOT STA sign-off",
+      "from": "p_j1_ring_cur.in0",
+      "kind": "local_path",
+      "loc": {
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 17
+      },
+      "path_id": 4,
+      "sdc_comment": "# sv-timing path_id=4 fo4=23.5 slack=-15.5 — NOT set_max_delay\n# report_timing -from {p_j1_ring_cur.in0} -to {p_j1_ring_cur.out0}",
+      "structural_fo4": 23.519925001442314,
+      "structural_slack_fo4": -15.519925001442314,
+      "through": [],
+      "to": "p_j1_ring_cur.out0"
+    },
+    {
+      "comment": "sv-timing structural path in p_q1_legal_chain (kind=RegToReg); NOT STA sign-off",
+      "from": "p_q1_legal_chain.reg0/CP",
+      "kind": "local_path",
+      "loc": {
+        "file": "probes/probe3.sv",
+        "start_col": 10,
+        "start_line": 138
+      },
+      "path_id": 58,
+      "sdc_comment": "# sv-timing path_id=58 fo4=22.8 slack=-14.8 — NOT set_max_delay\n# report_timing -from {p_q1_legal_chain.reg0/CP} -to {p_q1_legal_chain.reg1/D}",
+      "structural_fo4": 22.81385393822301,
+      "structural_slack_fo4": -14.813853938223009,
+      "through": [],
+      "to": "p_q1_legal_chain.reg1/D"
+    },
+    {
+      "comment": "sv-timing structural path in p_j2_ring_slot (kind=RegToReg); NOT STA sign-off",
+      "from": "p_j2_ring_slot.reg0/CP",
+      "kind": "local_path",
+      "loc": {
+        "file": "probes/probe3.sv",
+        "start_col": 7,
+        "start_line": 32
+      },
+      "path_id": 50,
+      "sdc_comment": "# sv-timing path_id=50 fo4=21.9 slack=-13.9 — NOT set_max_delay\n# report_timing -from {p_j2_ring_slot.reg0/CP} -to {p_j2_ring_slot.reg1/D}",
+      "structural_fo4": 21.9,
+      "structural_slack_fo4": -13.899999999999999,
+      "through": [],
+      "to": "p_j2_ring_slot.reg1/D"
+    },
+    {
+      "comment": "sv-timing structural path in p_m1_place_add (kind=InToOut); NOT STA sign-off",
+      "from": "p_m1_place_add.in0",
+      "kind": "local_path",
+      "loc": {
+        "file": "probes/probe3.sv",
+        "start_col": 14,
+        "start_line": 72
+      },
+      "path_id": 25,
+      "sdc_comment": "# sv-timing path_id=25 fo4=19.0 slack=-11.0 — NOT set_max_delay\n# report_timing -from {p_m1_place_add.in0} -to {p_m1_place_add.out0}",
+      "structural_fo4": 18.983706192659348,
+      "structural_slack_fo4": -10.983706192659348,
+      "through": [],
+      "to": "p_m1_place_add.out0"
+    },
+    {
+      "comment": "sv-timing structural path in p_k1_pop_index (kind=RegToReg); NOT STA sign-off",
+      "from": "p_k1_pop_index.reg0/CP",
+      "kind": "local_path",
+      "loc": {
+        "file": "probes/probe3.sv",
+        "start_col": 34,
+        "start_line": 52
+      },
+      "path_id": 52,
+      "sdc_comment": "# sv-timing path_id=52 fo4=14.5 slack=-6.5 — NOT set_max_delay\n# report_timing -from {p_k1_pop_index.reg0/CP} -to {p_k1_pop_index.reg1/D}",
+      "structural_fo4": 14.549999999999999,
+      "structural_slack_fo4": -6.549999999999999,
+      "through": [],
+      "to": "p_k1_pop_index.reg1/D"
+    },
+    {
+      "comment": "sv-timing structural path in p_m2_place_rot (kind=RegToReg); NOT STA sign-off",
+      "from": "p_m2_place_rot.reg0/CP",
+      "kind": "local_path",
+      "loc": {
+        "file": "probes/probe3.sv",
+        "start_col": 7,
+        "start_line": 92
+      },
+      "path_id": 55,
+      "sdc_comment": "# sv-timing path_id=55 fo4=12.0 slack=-4.0 — NOT set_max_delay\n# report_timing -from {p_m2_place_rot.reg0/CP} -to {p_m2_place_rot.reg1/D}",
+      "structural_fo4": 12.0,
+      "structural_slack_fo4": -4.0,
+      "through": [],
+      "to": "p_m2_place_rot.reg1/D"
+    }
+  ],
+  "stage_bubbles": [],
+  "stage_users": [],
+  "stages": [],
+  "structural_patterns": [],
+  "target_mhz": 5000.0,
+  "versions": {
+    "cost_model": "fo4-v1",
+    "ir": "ir-v6",
+    "measurement": "delay-v50",
+    "package": "0.1.0",
+    "parser_pin": "v0.13.5"
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "tag": "iq-b2-steer2",
+  "argv": [
+    "E:\\cva6\\sv-timing\\target\\release\\sv-timing.exe",
+    "analyze",
+    "--files-from",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\timing\\hyp8-core.f",
+    "--modules",
+    "g6lc_iq,g6lc_ooo_dispatch",
+    "--param-map",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r127\\params-hyp8-iqsteer2.json",
+    "--assume-xlen",
+    "64",
+    "--package-mode",
+    "packages",
+    "--stages",
+    "--target-mhz",
+    "5000",
+    "--fo4-ps",
+    "20",
+    "--budget-margin",
+    "0.2",
+    "--json-out",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r127\\boards\\iq-b2-steer2.json",
+    "--ir-out",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r127\\boards\\iq-b2-steer2.ir.json"
+  ],
+  "returncode": 0,
+  "gitHead": "65911368704e7c66f3ac5e6ef1e23300c177437c",
+  "sha256": {
+    "E:\\cva6\\sv-timing\\target\\release\\sv-timing.exe": "c567e1b2959aee5fd8035e4efabac4446826f7d16f57053f8f62c742486d3bcc",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\timing\\hyp8-core.f": "f7919a93fff647f7f520b3a421bc7e28a6f38979d1a0438c028ce7bff4e8b68a",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r127\\params-hyp8-iqsteer2.json": "459ea286a9d1792973364114d9b45735dad8e37519467a37449b8309792aa9fc"
+  }
+}

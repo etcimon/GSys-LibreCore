@@ -120,44 +120,54 @@ module g6lc_inval_bus
     end
 
     // Push / pop
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) begin
-        for (int unsigned c = 0; c < NC; c++) begin
-          head_q[c]   <= '0;
-          tail_q[c]   <= '0;
-          count_q[c]  <= '0;
-          enq_seq_q[c] <= '0;
-          deq_seq_q[c] <= '0;
+    // r127: the per-core events are wires and each register group has its
+    // own clocked process (they were automatics inside one clocked block
+    // that wrote the pointers, the counters, the sequence numbers and the
+    // queue storage, read as one serial chain). Same events, same writes,
+    // and the queue storage keeps its merge / push / pop write order.
+    logic [NC-1:0] ev_take, ev_merge, ev_push, ev_pop;
+    for (genvar c = 0; c < NC; c++) begin : gen_regs
+      assign ev_pop[c]   = inv_core_ready_i[c] & ~empty[c];
+      assign ev_take[c]  = inv_req_i.valid && inv_ready_o && inv_target_i[c];
+      assign ev_merge[c] = ev_take[c] && merge_tail[c];
+      assign ev_push[c]  = ev_take[c] && !merge_tail[c] && !full[c];
+
+      always_ff @(posedge clk_i or negedge rst_ni) begin : p_fifo
+        if (!rst_ni) begin
           for (int unsigned d = 0; d < DP; d++) fifo_q[c][d] <= '0;
+        end else begin
+          if (ev_merge[c]) begin
+            // Coalesce: OR flags into tail entry
+            fifo_q[c][tail_m1[c]].dcache  <= fifo_q[c][tail_m1[c]].dcache | inv_req_i.dcache;
+            fifo_q[c][tail_m1[c]].icache  <= fifo_q[c][tail_m1[c]].icache | inv_req_i.icache;
+            fifo_q[c][tail_m1[c]].all_ways<= fifo_q[c][tail_m1[c]].all_ways | inv_req_i.all_ways;
+          end
+          if (ev_push[c]) fifo_q[c][tail_q[c]] <= inv_req_i;
+          if (ev_pop[c])  fifo_q[c][head_q[c]].valid <= 1'b0;
         end
-      end else begin
-        for (int unsigned c = 0; c < NC; c++) begin
-          automatic logic do_push, do_pop;
-          do_push = 1'b0;
-          do_pop  = inv_core_ready_i[c] & ~empty[c];
-
-          if (inv_req_i.valid && inv_ready_o && inv_target_i[c]) begin
-            if (merge_tail[c]) begin
-              // Coalesce: OR flags into tail entry
-              fifo_q[c][tail_m1[c]].dcache  <= fifo_q[c][tail_m1[c]].dcache | inv_req_i.dcache;
-              fifo_q[c][tail_m1[c]].icache  <= fifo_q[c][tail_m1[c]].icache | inv_req_i.icache;
-              fifo_q[c][tail_m1[c]].all_ways<= fifo_q[c][tail_m1[c]].all_ways | inv_req_i.all_ways;
-            end else if (!full[c]) begin
-              do_push = 1'b1;
-              fifo_q[c][tail_q[c]] <= inv_req_i;
-              tail_q[c] <= (tail_q[c] == PTR_W'(DP - 1)) ? '0 : tail_q[c] + 1'b1;
-            end
-          end
-
-          if (do_pop) begin
-            fifo_q[c][head_q[c]].valid <= 1'b0;
-            head_q[c] <= (head_q[c] == PTR_W'(DP - 1)) ? '0 : head_q[c] + 1'b1;
-          end
-
-          enq_seq_q[c] <= enq_seq_q[c] + COH_INV_SEQ_W'(do_push);
-          deq_seq_q[c] <= deq_seq_q[c] + COH_INV_SEQ_W'(do_pop);
-
-          unique case ({do_push, do_pop})
+      end
+      always_ff @(posedge clk_i or negedge rst_ni) begin : p_tail
+        if (!rst_ni) tail_q[c] <= '0;
+        else if (ev_push[c])
+          tail_q[c] <= (tail_q[c] == PTR_W'(DP - 1)) ? '0 : tail_q[c] + 1'b1;
+      end
+      always_ff @(posedge clk_i or negedge rst_ni) begin : p_head
+        if (!rst_ni) head_q[c] <= '0;
+        else if (ev_pop[c])
+          head_q[c] <= (head_q[c] == PTR_W'(DP - 1)) ? '0 : head_q[c] + 1'b1;
+      end
+      always_ff @(posedge clk_i or negedge rst_ni) begin : p_enq_seq
+        if (!rst_ni) enq_seq_q[c] <= '0;
+        else enq_seq_q[c] <= enq_seq_q[c] + COH_INV_SEQ_W'(ev_push[c]);
+      end
+      always_ff @(posedge clk_i or negedge rst_ni) begin : p_deq_seq
+        if (!rst_ni) deq_seq_q[c] <= '0;
+        else deq_seq_q[c] <= deq_seq_q[c] + COH_INV_SEQ_W'(ev_pop[c]);
+      end
+      always_ff @(posedge clk_i or negedge rst_ni) begin : p_count
+        if (!rst_ni) count_q[c] <= '0;
+        else begin
+          unique case ({ev_push[c], ev_pop[c]})
             2'b10: count_q[c] <= count_q[c] + 1'b1;
             2'b01: count_q[c] <= count_q[c] - 1'b1;
             default: ;

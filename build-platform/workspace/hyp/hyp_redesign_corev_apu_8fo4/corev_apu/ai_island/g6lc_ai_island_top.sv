@@ -2219,33 +2219,37 @@ assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
     rcls[40] = (a >= 16'h0140 && a < 16'h0180); rval[40] = desc_words_q[a[5:2]];
   end
 
-  always_comb begin
+  // r127: the per-queue read cone is formed beside the class cone (it reads
+  // only the address and the queue registers), and joins it with one OR
+  // under the same "no class matched" test. It used to be accumulated into
+  // rdata_n after the class OR, i.e. in series with it. Same read data.
+  logic [31:0] rd_que;
+  always_comb begin : p_rd_que
     logic [11:0] qd;
-    int unsigned q;
-    qd = '0;
-    q  = 0;
+    qd     = ai_queue_decode(addr_i[15:0], NumQueues);
+    rd_que = '0;
+    // E4: masked-OR over the per-queue one-hot -- no dynamic index.
+    for (int unsigned q = 0; q < NumQueues; q++) begin
+      if (qd[11] && (qd[10:3] == 8'(q))) begin
+        unique case (qd[2:0])
+          3'd0: rd_que |= base_q[q][31:0];
+          3'd1: rd_que |= base_q[q][63:32];
+          3'd2: rd_que |= limit_q[q][31:0];
+          3'd3: rd_que |= limit_q[q][63:32];
+          3'd4: rd_que |= {30'h0, perm_q[q]};
+          default: ;
+        endcase
+      end
+    end
+  end
+  always_comb begin
     rdata_n  = '0;
     rvalid_n = 1'b0;
     if (req_i && !cap_sel) begin
       rvalid_n = 1'b1;
       for (int unsigned rc = 0; rc < RDCLS; rc++)
         if (rcls[rc]) rdata_n |= rval[rc];
-      if (rcls == '0) begin
-        qd = ai_queue_decode(addr_i[15:0], NumQueues);
-        // E4: masked-OR over the per-queue one-hot -- no dynamic index.
-        for (int unsigned q = 0; q < NumQueues; q++) begin
-          if (qd[11] && (qd[10:3] == 8'(q))) begin
-            unique case (qd[2:0])
-              3'd0: rdata_n |= base_q[q][31:0];
-              3'd1: rdata_n |= base_q[q][63:32];
-              3'd2: rdata_n |= limit_q[q][31:0];
-              3'd3: rdata_n |= limit_q[q][63:32];
-              3'd4: rdata_n |= {30'h0, perm_q[q]};
-              default: ;
-            endcase
-          end
-        end
-      end
+      if (rcls == '0) rdata_n |= rd_que;
     end
   end
 

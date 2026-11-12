@@ -722,7 +722,11 @@ assign shared_tlb_access_o = shared_tlb_access_q;
 
     unique case (flush_state_q)
       IDLE: begin
-        if (G6LCCfg.UseSharedTlb && flush_i) begin
+        // r127: the flush walk also runs with UseSharedTlb=0. That arm is the
+        // reference of the mmu leaf's router miter (g6lc_tlb_miss_router keeps
+        // the same quiet window); the r90 gate on it made the two differ. With
+        // UseSharedTlb=1 the removed term was the constant 1.
+        if (flush_i) begin
           flush_state_d = FLUSH_READ;
           flush_idx_d = '0;
           flush_asid_d = asid_to_be_flushed_i;
@@ -730,7 +734,7 @@ assign shared_tlb_access_o = shared_tlb_access_q;
           flush_kind_d = FLUSH_SFENCE;
           flush_vmid_d = '0;
           flush_gpaddr_d = '0;
-        end else if (G6LCCfg.UseSharedTlb && flush_vvma_i) begin
+        end else if (flush_vvma_i) begin
           flush_state_d = FLUSH_READ;
           flush_idx_d = '0;
           flush_asid_d = asid_to_be_flushed_i;
@@ -738,7 +742,7 @@ assign shared_tlb_access_o = shared_tlb_access_q;
           flush_kind_d = FLUSH_VVMA;
           flush_vmid_d = lu_vmid_i;
           flush_gpaddr_d = '0;
-        end else if (G6LCCfg.UseSharedTlb && flush_gvma_i) begin
+        end else if (flush_gvma_i) begin
           flush_state_d = FLUSH_READ;
           flush_idx_d = '0;
           flush_asid_d = '0;
@@ -985,7 +989,7 @@ assign shared_tlb_access_o = shared_tlb_access_q;
     tag_wr_en = '0;
     pte_wr_en = '0;
 
-    if (G6LCCfg.UseSharedTlb && flush_state_q == FLUSH_APPLY) begin
+    if (flush_state_q == FLUSH_APPLY) begin
       for (int unsigned i = 0; i < SHARED_TLB_WAYS; i++) begin
         if (flush_match_way[i]) begin
           shared_tag_valid_d[flush_idx_q][i] = 1'b0;
@@ -993,7 +997,7 @@ assign shared_tlb_access_o = shared_tlb_access_q;
       end
     end
 
-    if (G6LCCfg.UseSharedTlb && (flush_state_q == IDLE) && !flush_i && !flush_vvma_i && !flush_gvma_i && shared_tlb_update_i.valid) begin
+    if ((flush_state_q == IDLE) && !flush_i && !flush_vvma_i && !flush_gvma_i && shared_tlb_update_i.valid) begin
       for (int unsigned i = 0; i < SHARED_TLB_WAYS; i++) begin
         if (repl_way_oh_d[i]) begin
           shared_tag_valid_d[vpn_index][i] = 1'b1;

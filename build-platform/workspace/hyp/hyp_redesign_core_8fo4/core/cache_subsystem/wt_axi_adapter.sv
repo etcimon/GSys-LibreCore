@@ -759,12 +759,36 @@ assign icache_data_ack_o = icache_data_req_i & ~icache_data_full;
   logic rtrn_self, rtrn_ext, rtrn_inv, rtrn_rd, rtrn_b;
   assign axi_rd_rdy = ~invalidate && !self_inval_pend_q &&
                       !(inval_valid_i && axi_rd_id_out[0]);
-  assign rtrn_self = G6LCCfg.RVA && self_inval_pend_q;
-  assign rtrn_ext  = inval_valid_i && !rtrn_self;
-  assign rtrn_inv  = G6LCCfg.RVA && invalidate && !rtrn_self && !rtrn_ext;
-  assign rtrn_rd   = axi_rd_valid && axi_rd_id_out[0] && axi_rd_rdy &&
-                     !rtrn_self && !rtrn_ext && !rtrn_inv;
-  assign rtrn_b    = !b_empty && !rtrn_rd && !rtrn_inv && !rtrn_ext && !rtrn_self;
+  // r127: each grant masks the raw requests ahead of it instead of the
+  // grants ahead of it. Same five values (a grant ahead is its request
+  // minus the requests ahead of that one), without the serial chain.
+  logic rq_self, rq_ext, rq_inv, rq_rd;
+  assign rq_self   = G6LCCfg.RVA && self_inval_pend_q;
+  assign rq_ext    = inval_valid_i;
+  assign rq_inv    = G6LCCfg.RVA && invalidate;
+  assign rq_rd     = axi_rd_valid && axi_rd_id_out[0] && axi_rd_rdy;
+  assign rtrn_self = rq_self;
+  assign rtrn_ext  = rq_ext && !rq_self;
+  assign rtrn_inv  = rq_inv && !rq_self && !rq_ext;
+  assign rtrn_rd   = rq_rd && !rq_self && !rq_ext && !rq_inv;
+  assign rtrn_b    = !b_empty && !rq_rd && !rq_inv && !rq_ext && !rq_self;
+  //pragma translate_off
+  // r127 equivalence: the pre-r127 chained form, every cycle.
+  logic rf_self, rf_ext, rf_inv, rf_rd, rf_b;
+  assign rf_self = G6LCCfg.RVA && self_inval_pend_q;
+  assign rf_ext  = inval_valid_i && !rf_self;
+  assign rf_inv  = G6LCCfg.RVA && invalidate && !rf_self && !rf_ext;
+  assign rf_rd   = axi_rd_valid && axi_rd_id_out[0] && axi_rd_rdy &&
+                   !rf_self && !rf_ext && !rf_inv;
+  assign rf_b    = !b_empty && !rf_rd && !rf_inv && !rf_ext && !rf_self;
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && !$isunknown({rf_self, rf_ext, rf_inv, rf_rd, rf_b})) begin
+      g6lc_r127_rtrn_eq: assert ({rtrn_self, rtrn_ext, rtrn_inv, rtrn_rd, rtrn_b} ===
+                                 {rf_self, rf_ext, rf_inv, rf_rd, rf_b})
+        else $error("wt_axi_adapter: equiv rtrn priority");
+    end
+  end
+  //pragma translate_on
   // AMO arm of p_axi_req: grant pulse, dcache selected, atomic opcode.
   assign invalidate = G6LCCfg.RVA && arb_gnt && (|arb_req) && arb_idx &&
                       (dcache_data.rtype == wt_cache_pkg::DCACHE_ATOMIC_REQ);

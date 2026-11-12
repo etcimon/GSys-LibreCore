@@ -154,8 +154,15 @@ module aes
       };
       // AES Key Schedule subword input: rotate of rs1[63:32] unless the
       // round constant is 0xA (exactly the original select).
-      assign aes_subw_in = (orig_instr_aes[3:0] == 4'hA) ? fu_data_i.operand_a[63:32]
-                                                       : ((fu_data_i.operand_a[63:32] >> 8) | (fu_data_i.operand_a[63:32] << 24));
+      // r127: per byte lane, each with its own copy of the round test (one
+      // compare no longer drives the 32-bit select in front of the S-boxes).
+      // The rotate is ror32 by 8: result byte b = source byte (b + 1) % 4.
+      for (genvar bl = 0; bl < 4; bl++) begin : gen_subw_lane
+        logic no_rot;
+        assign no_rot = (orig_instr_aes[3:0] == 4'hA);
+        assign aes_subw_in[8*bl +: 8] = no_rot ? fu_data_i.operand_a[32 + 8*bl +: 8]
+                                               : fu_data_i.operand_a[32 + 8*((bl + 1) % 4) +: 8];
+      end
       assign sha512sig0h_gen = '0;
       assign sha512sig0l_gen = '0;
       assign sha512sig1h_gen = '0;
@@ -267,14 +274,26 @@ module aes
   // classified multi-cycle, not a single-cycle rank-0 kernel.
   // svt-pipe: multi-cycle on=aes op occupancy
   logic [31:0] sbox_fwd_rot, sbox_inv_rot, mix_fwd_rot, mix_inv_rot;
-  assign sbox_fwd_rot = ({24'b0, sbox_fwd_q} << {orig_q[5:4], 3'b000}) |
-                        ({24'b0, sbox_fwd_q} >> (32 - {orig_q[5:4], 3'b000}));
-  assign sbox_inv_rot = ({24'b0, sbox_inv_q} << {orig_q[5:4], 3'b000}) |
-                        ({24'b0, sbox_inv_q} >> (32 - {orig_q[5:4], 3'b000}));
-  assign mix_fwd_rot  = (aes_mixcolumn_fwd({24'h000000, sbox_fwd_q}) << {orig_q[5:4], 3'b000}) |
-                        (aes_mixcolumn_fwd({24'h000000, sbox_fwd_q}) >> (32 - {orig_q[5:4], 3'b000}));
-  assign mix_inv_rot  = (aes_mixcolumn_inv({24'h000000, sbox_inv_q}) << {orig_q[5:4], 3'b000}) |
-                        (aes_mixcolumn_inv({24'h000000, sbox_inv_q}) >> (32 - {orig_q[5:4], 3'b000}));
+  // r127: the rotate amount is 8 * orig_q[5:4], so each rotate is a 4-way
+  // select of byte-rotated copies (it was a variable left shift ORed with a
+  // variable right shift by 32 - amount), and each MixColumns is formed
+  // once instead of once per shift. Same values (rol32 by 0/8/16/24);
+  // checked against the shift form by verif/tb/core/tb_g6lc_hyp8_aes_eq.sv.
+  function automatic logic [31:0] aes_rol8x(input logic [31:0] x, input logic [1:0] bs);
+    unique case (bs)
+      2'd0:    return x;
+      2'd1:    return {x[23:0], x[31:24]};
+      2'd2:    return {x[15:0], x[31:16]};
+      default: return {x[7:0],  x[31:8]};
+    endcase
+  endfunction
+  logic [31:0] mix_fwd_w, mix_inv_w;
+  assign mix_fwd_w    = aes_mixcolumn_fwd({24'h000000, sbox_fwd_q});
+  assign mix_inv_w    = aes_mixcolumn_inv({24'h000000, sbox_inv_q});
+  assign sbox_fwd_rot = aes_rol8x({24'b0, sbox_fwd_q}, orig_q[5:4]);
+  assign sbox_inv_rot = aes_rol8x({24'b0, sbox_inv_q}, orig_q[5:4]);
+  assign mix_fwd_rot  = aes_rol8x(mix_fwd_w, orig_q[5:4]);
+  assign mix_inv_rot  = aes_rol8x(mix_inv_w, orig_q[5:4]);
 
   assign aes32esi_gen  = a_q ^ sbox_fwd_rot;
   assign aes32esmi_gen = a_q ^ mix_fwd_rot;

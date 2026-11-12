@@ -1,0 +1,28 @@
+{
+  "g6lc_l2_tag": {
+    "calibrated_fo4": null,
+    "class_note": "over-budget plain path \u2014 no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+    "closes": false,
+    "endpoint": "g6lc_l2_tag.reg1/D",
+    "max_freq_mhz": 962.2793703768754,
+    "module_id": 0,
+    "multi_cycle": false,
+    "node_count": 3,
+    "path_class": "plain",
+    "path_id": 63,
+    "path_kind": "regtoreg",
+    "primary_loc": {
+      "end_col": 26,
+      "end_line": 437,
+      "file": "E:/cva6/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/l2_cache/g6lc_l2_tag.sv",
+      "start_col": 23,
+      "start_line": 437
+    },
+    "slack_fo4": -33.56797000057692,
+    "stage_end": null,
+    "stage_start": null,
+    "startpoint": "g6lc_l2_tag.reg0/CP",
+    "total_fo4": 41.56797000057692,
+    "total_fo4_raw": null
+  }
+}

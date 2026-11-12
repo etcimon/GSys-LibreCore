@@ -7336,3 +7336,42 @@ Fix-package-first (coding-philosophy §2.8, E6). Two measurement-truth defects f
 - **Issue 6 — superseded replay hypothesis:** the early byte-loop RVFI trace contains extra `sub` records interleaved with a continuing walk. These records did not establish that a load retired stale data and replayed after retirement, or that caller stores escaped. The previous causal claim and proposed LSQ `checked_q` fix are withdrawn. H36 and H37 both pass on the affected baseline; neither reproduces issue 6. The trace anomaly remains unclassified and must not be used as evidence of an LSQ defect.
 - **Issue 6 — confirmed arithmetic defect (r112):** the later kernel executes the runtime-patched Zbb `strlen`, not only the byte loop. In frozen r107 RVFI line 20,332,120, `ctz t1,t1` (`0x60131313`, PC `0xffffffff80657f68`) returns `0x3f` immediately after `not t1,t1` at `0xffffffff80657f64` produces zero. Seven further sampled zero-input calls have the same result. The architectural result is 64. The recursive `g6lc_hyp_lzc` used its standalone WIDTH=1 empty count (1) inside a WIDTH=2 tree: `1+1` wraps to zero in a one-bit count, yielding 62 at WIDTH=64 and 63 after the ALU's empty increment. `63 >> 3` is 7, so a full nonzero eight-byte word is incorrectly treated as ending at byte seven. r112 adds a direct WIDTH=2 base case, preserving standalone WIDTH=1 behavior and the existing tree above it. No LSQ/replay changes were made.
 - **r112 directed qualification:** remote pinned PGO Verilator 5.008, aggregate `hyp8-r112-aggregate-c1`, model SHA256 `29752206111032213223befaec07ccc116b96c91cbe9aadee4546863e7aca286`. Scalar/SMT2/MC lint has zero errors and USERERRORs; ordinary warning totals remain 602/623/688. `hyp8-r112-aluleaf-c3` passes 19,508 checks: CLZ/CTZ zero and one-hot operands, word-form controls, and generic widths 1–9/32/64 in both directions with an independent bit-position reference. `hyp8-r112-smokes-c1` passes all 11 smokes; H38 passes at 883 cycles, H36/H37 at 9095/5959. The first two ALU-leaf attempts were test compilation/operand errors, not negative RTL evidence. The canonical local `verify --lint --sim --synth` command is blocked by missing managed Verilator; these remote results do not imply synthesis or physical timing sign-off. The corrected Linux witness remains a separate required gate.
+
+## r127 — live-hierarchy FO4 census implemented (rank-0 batch), APU group reductions, staged-MMU verdict (uncommitted)
+
+Record of work: `analysis/r127/worklog.md` (ledger, every board tag / gate log / remote tag) and
+`analysis/r127/fo4-census.md` (§6 = per-item status table). Summary only:
+
+- **Core (hyp8), whole-core board `core-all-r127-final3` vs `core-all-r127-v50`: worst 52.6 → 36.9.**
+  Exact (latency-neutral) rewrites in alu, wt_axi_adapter, g6lc_iq_legal, wt_dcache_wbuffer,
+  stb_fwd, id_stage, instr_realign, g6lc_rename_read, csr_regfile, g6lc_mmu, g6lc_prf,
+  g6lc_ooo_dispatch, g6lc_loop_buffer, load_unit, wt_dcache_missunit, store_unit; each keeps its
+  pre-r127 form as a translate_off reference with an every-cycle assertion. Remote integrations
+  `hyp8-r127{,b,c,d,e,f,g,h,i,k,m}-aggregate-t1` + `-smokes-t1`: lint scalar/smt2 0 %Error, 12/12
+  smokes at the r126 cycle counts.
+- **`HypCfg` now reaches the MMU, LSU and D$.** The default binding keeps the unstaged MMU
+  (`hyp_mmu_unstaged`). The staged MMU (`-DG6LC_HYP8_MMU_STAGED`, target
+  `g6lc64_hyp8_mmu_staged`) builds and passes the 12 smokes but **wedges in the Linux witness at
+  the first translated load** (cyc 22,258,830, SB head load at a kernel virtual pc never
+  completes; evidence `build-platform/workspace/build/r127-remote/staged-mmu-wedge-evidence.txt`).
+  Not qualified; needs LSU-side work.
+- **`IqSteerStages=2` (r76 B2) implemented as an off-by-default knob** (`-DG6LC_HYP8_IQSTEER2`,
+  target `g6lc64_hyp8_iqsteer2`): early registered bank steer with a per-lane recheck. Arm-only
+  boards: allocation-cycle in→out 36.4 → 27.4, in→reg 32.3. Smokes 12/12 at the r126 counts on
+  the staged target; no boot witness yet.
+- **APU groups** (not elaborated in the scalar hyp8 SoC; unit-bench / miter evidence): ai board
+  worst 149.0 → 71.5, coh 123.3 → 62.6, l2 59.9 → 52.7, l3 62.7 → 55.5.
+- **Not done:** IqSelStages, write-buffer versioned writes, realigner per-position targets, csr
+  trap-write record, FreelistPickStages, decode legality table, LoadPubStages, AesStages, the
+  staged-MMU LSU repair; APU rows listed in `fo4-census.md` §6.
+
+- **r127 continuation (after closure-r127m; details in `analysis/r127/worklog.md`):** smoke set of
+  record is 13 tests (adds `verif/tests/custom/hyp8_sv39_load.S`, the only one that enables
+  translation; 3,893 cycles on the default binding). Staged-MMU wedge root-caused with it (a
+  3-cycle load-FSM livelock: the ABORT state's one-cycle hole in `translation_req_o` against a
+  TLB that answers two cycles late) and fixed in three config-gated hunks; staged target 13/13
+  (`hyp8-r127x-aggregate-t1`), default binding unchanged. mmu leaf repaired (r90 had gated the
+  flush walk of the `UseSharedTlb=0` reference arm). Further exact reductions: `g6lc_tlb` rr
+  34.1 → 22.9, `aes` 39.9 → 35.5, `g6lc_ai_cluster_dispatch` 34.3 → 25.6, `g6lc_l2_top`
+  52.7 → 49.5, `g6lc_ai_gemm_seq` 52.0 → 51.0. Deep profile (`LoadExPubStages=2`) smoke-gated.
+  Witnesses: default final tree cycle-identical to the r127d reference through 50M cycles.

@@ -237,6 +237,8 @@ module load_unit
   logic      ldbuf_r;
   ldbuf_t    ldbuf_rdata;
   ldbuf_id_t ldbuf_rindex;
+  // r127: the same pop as a one-hot slot mask (formed beside ldbuf_rindex).
+  logic [G6LCCfg.NrLoadBufEntries-1:0] ldbuf_pop_oh;
   ldbuf_id_t ldbuf_last_id_q;
 
   // svt-stage: begin L3
@@ -477,14 +479,13 @@ assign ldbuf_full = &ldbuf_valid_q;
   assign ldbuf_windex = ldbuf_free_index;
 
   always_comb begin : ldbuf_comb
-    ldbuf_valid_d = ldbuf_valid_q;
-
     //  Free read entry (in the case of fall-through mode, free the entry
     //  only if there is no pending load). hyp8: freeing happens at L5
     //  publish or tombstone/rkill drain, not at the rvalid pulse.
-    if (ldbuf_r && (!LDBUF_FALLTHROUGH || !ldbuf_w)) begin
-      ldbuf_valid_d[ldbuf_rindex] = 1'b0;
-    end
+    //  r127: cleared through the one-hot pop mask (an AND per slot) instead
+    //  of an indexed write behind the pop-index mux; same next state.
+    ldbuf_valid_d = ldbuf_valid_q &
+        ~(ldbuf_pop_oh & {G6LCCfg.NrLoadBufEntries{!LDBUF_FALLTHROUGH || !ldbuf_w}});
     //  Track a new outstanding operation in the load buffer
     if (ldbuf_w) begin
       ldbuf_valid_d[ldbuf_windex] = 1'b1;
@@ -598,6 +599,8 @@ assign ldbuf_full = &ldbuf_valid_q;
   // is dead-on-arrival because a_expub pops the slot the same edge —
   // so the LU_EXPEND arm is an explicit no-op on the ==1 profile.
   localparam bit LU_EXPEND = (HypCfg.LoadExPubStages == 2);
+  // r127: the TLB answers two cycles after the request (HypCfg.TlbStages >= 2).
+  localparam bit LU_TLB_STAGED = (HypCfg.TlbStages >= 2);
   logic ex_pend_set;
   logic ex_pend_slot_live;
   // Same reduction as ex_pub (flushed_d): on a valid slot new_hit is
@@ -743,9 +746,13 @@ assign ldbuf_full = &ldbuf_valid_q;
   // Exact equivalence to the composed form is asserted under
   // translate_off.
   logic                    pa_capture_state;
+  // r127: under the staged TLB the request is also presented in the abort
+  // state (tr_abort_hold below), so that state joins the capture window
+  // and the r45 identity with translation_req_o keeps holding.
   assign pa_capture_state = state_q[1] ||
       (state_q[6] && (G6LCCfg.MmuPresent || G6LCCfg.NonIdemPotenceEn)) ||
-      ((state_q[0] || state_q[2]) && !ldbuf_full);
+      ((state_q[0] || state_q[2]) && !ldbuf_full) ||
+      (LU_TLB_STAGED && state_q[LU_B_ABORT_TRANSACTION] && G6LCCfg.MmuPresent);
   assign load_pa_now_v = valid_i && dtlb_hit_i &&
       (!G6LCCfg.OoOEn || !cancel_hit) && pa_capture_state;
   assign load_pa_now   = G6LCCfg.PLEN'({dtlb_ppn_i, lsu_ctrl_i.vaddr[11:0]});
@@ -772,19 +779,42 @@ assign ldbuf_full = &ldbuf_valid_q;
   // therefore rewrites the same key while the valid bit is set; every
   // consumer reads load_pa_q only through the pa_hold_lo selects gated
   // by load_pa_v_q. Exact equivalence is asserted under translate_off.
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni)
-      load_pa_q <= '0;
-    // r126: back to the exact capture qualifier. The r48 argument above
-    // ("a TLB entry cannot change under a continuously asserted hit") does
-    // not hold on the Linux boot: r125 @1,284,039,107 rewrote a live key
-    // outside a capture cycle with a different value (g6lc_pa_shadow_eq;
-    // which input moved was not traced).
-    // The cheap enable is a timing optimization that must be re-derived
-    // with that case covered; correctness first.
-    else if (load_pa_now_v)
-      load_pa_q <= load_pa_now;
+  // r126: back to the exact capture qualifier. The r48 argument above
+  // ("a TLB entry cannot change under a continuously asserted hit") does
+  // not hold on the Linux boot: r125 @1,284,039,107 rewrote a live key
+  // outside a capture cycle with a different value (g6lc_pa_shadow_eq;
+  // which input moved was not traced).
+  // The cheap enable is a timing optimization that must be re-derived
+  // with that case covered; correctness first.
+  // r127: still the exact qualifier, but one copy of it per lane of the
+  // key register (the same expression as load_pa_now_v, asserted below),
+  // so the flop enables are not one net behind the publish-side select.
+  localparam int unsigned PA_LANES  = 4;
+  localparam int unsigned PA_LANE_W = (G6LCCfg.PLEN + PA_LANES - 1) / PA_LANES;
+  logic [PA_LANES-1:0] load_pa_en;
+  for (genvar gl = 0; gl < PA_LANES; gl++) begin : gen_pa_lane
+    localparam int unsigned LO = gl * PA_LANE_W;
+    localparam int unsigned HI = ((gl + 1) * PA_LANE_W > G6LCCfg.PLEN) ? G6LCCfg.PLEN
+                                                                       : (gl + 1) * PA_LANE_W;
+    assign load_pa_en[gl] = valid_i && dtlb_hit_i &&
+        (!G6LCCfg.OoOEn || !cancel_hit) && pa_capture_state;
+    if (HI > LO) begin : gen_reg
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni)
+          load_pa_q[HI-1:LO] <= '0;
+        else if (load_pa_en[gl])
+          load_pa_q[HI-1:LO] <= load_pa_now[HI-1:LO];
+      end
+    end
   end
+  //pragma translate_off
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && !$isunknown(load_pa_now_v)) begin
+      g6lc_r127_lu_pa_en_copy: assert (load_pa_en === {PA_LANES{load_pa_now_v}})
+        else $error("load_unit: equiv load_pa_q lane enables");
+    end
+  end
+  //pragma translate_on
   // One select into every physical-address bit is a 56-way fanout.
   // hyp8 PLEN is 56. Four copies of each select drive 14 bits. Now
   // still wins over the held key, and the held key over the virtual
@@ -916,6 +946,29 @@ assign ldbuf_full = &ldbuf_valid_q;
   assign st_pipeline_busy = G6LCCfg.SpeculativeSb && G6LCCfg.SuperscalarEn &&
                             page_offset_matches_i && !st_fwd_covers &&
                             (!store_buffer_empty_i || !dcache_wbuffer_empty_i);
+  // r127: the new-request decision of the FSM reads its own copy of the
+  // term (same expression), so the D$ request decode above keeps the
+  // original net to itself.
+  logic st_busy_fsm;
+  assign st_busy_fsm = G6LCCfg.SpeculativeSb && G6LCCfg.SuperscalarEn &&
+                       page_offset_matches_i && !st_fwd_covers &&
+                       (!store_buffer_empty_i || !dcache_wbuffer_empty_i);
+  //pragma translate_off
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && !$isunknown({st_pipeline_busy, st_busy_fsm})) begin
+      g6lc_r127_lu_busy_copy: assert (st_busy_fsm === st_pipeline_busy)
+        else $error("load_unit: equiv st_pipeline_busy copy");
+    end
+  end
+  // The idle_next concatenation in load_control places the predicates by
+  // literal bit position.
+  initial begin
+    g6lc_r127_lu_state_bits: assert (LU_B_IDLE == 0 && LU_B_WAIT_GNT == 1 && LU_B_SEND_TAG == 2 &&
+        LU_B_WAIT_PAGE_OFFSET == 3 && LU_B_ABORT_TRANSACTION == 4 &&
+        LU_B_ABORT_TRANSACTION_NI == 5 && LU_B_WAIT_SPEC_LOAD == 9)
+      else $fatal(1, "load_unit: idle_next concatenation assumes the LU_B_* positions");
+  end
+  //pragma translate_on
 
   // Pulse: load completed from STQ forward this cycle (no D$ request)
   logic st_fwd_done;
@@ -982,7 +1035,16 @@ assign ldbuf_full = &ldbuf_valid_q;
   assign tr_issue_acc = tr_issue_st & accept_req_w;
   assign tr_issue = tr_issue_acc & tr_idle_ok;
   assign tr_or_gx = st_gnt | tr_xlat_en;
-  assign tr_state = tr_or_gx | tr_issue;
+  // r127 (staged TLB only): the abort state keeps the translation request
+  // asserted. With a TLB that answers two cycles after the request, the
+  // one-cycle hole this state used to leave made the WAIT_GNT cycle sample
+  // the answer to a non-request (a miss) and abort again -- a three-cycle
+  // livelock on every translated load that is granted before its hit
+  // (hyp8_sv39_load; the first translated load of the Linux witness).
+  // TlbStages == 1: the term is the constant 0 (the unstaged netlist).
+  logic tr_abort_hold;
+  assign tr_abort_hold = LU_TLB_STAGED & state_q[LU_B_ABORT_TRANSACTION] & G6LCCfg.MmuPresent;
+  assign tr_state = tr_or_gx | tr_issue | tr_abort_hold;
   assign translation_req_o = ~cancelled_request & tr_state;
   // D$ request is the same decode, not a priority arm inside the FSM.
   // IDLE and SEND_TAG issue only when the load is not speculative-NC,
@@ -1023,6 +1085,12 @@ assign ldbuf_full = &ldbuf_valid_q;
   // single superset value).
   always_comb begin : load_control
     automatic logic accept_req;
+    // r127: the new-request decision shared by the IDLE and SEND_TAG arms
+    // (see below, after accept_req).
+    automatic logic idle_spec_ok, idle_c_fwd, idle_c_iss, idle_base, idle_miss;
+    automatic logic idle_p_spec, idle_p_wpo, idle_p_fwd, idle_p_wgnt, idle_p_abort, idle_p_tag,
+                    idle_p_ni, idle_p_keep, idle_pop;
+    automatic logic [9:0] idle_next;
 
     // default assignments
     state_d              = state_q;
@@ -1040,56 +1108,47 @@ assign ldbuf_full = &ldbuf_valid_q;
     // read the retire pop, so a new request is not in series with it.
     accept_req = valid_i && !ldbuf_full;
 
+    // r127: IDLE and SEND_TAG take a new request with the same decision. It
+    // is formed once here as mutually exclusive predicates over inputs and
+    // store-forward terms (nothing reads state_q), and both arms assign the
+    // resulting one-hot target; it used to be a five-deep nest written out
+    // in each arm. "keep" is LU_S_IDLE in both arms. The nested form lives
+    // on in the reference FSM (rf_state_d / rf_pop_ld_o / rf_st_fwd_done),
+    // compared with this every cycle.
+    idle_spec_ok = !G6LCCfg.SpeculativeSb || !spec_ld || (dtlb_hit_i && !paddr_ni);
+    idle_c_fwd   = page_offset_matches_i && st_fwd_covers && !req_port_i.data_rvalid &&
+                   ld_checked_head;
+    idle_c_iss   = !page_offset_matches_i && !(st_fwd_covers && !ld_checked_head);
+    idle_base    = accept_req && idle_spec_ok && !st_busy_fsm;
+    idle_miss    = G6LCCfg.MmuPresent && !dtlb_hit_i;
+    idle_p_spec  = accept_req && !idle_spec_ok;
+    idle_p_fwd   = idle_base && idle_c_fwd;
+    idle_p_wpo   = (accept_req && idle_spec_ok && st_busy_fsm) ||
+                   (idle_base && !idle_c_fwd && !idle_c_iss);
+    idle_p_wgnt  = idle_base && idle_c_iss && !req_port_i.data_gnt;
+    idle_p_abort = idle_base && idle_c_iss && req_port_i.data_gnt && idle_miss;
+    idle_p_tag   = idle_base && idle_c_iss && req_port_i.data_gnt && !idle_miss && !stall_ni;
+    idle_p_ni    = idle_base && idle_c_iss && req_port_i.data_gnt && !idle_miss && stall_ni &&
+                   G6LCCfg.NonIdemPotenceEn;
+    // "keep" (stay in / return to IDLE) is formed beside the others, not
+    // as their complement: no request, the forward completion, or a
+    // granted hit held by stall_ni without the non-idempotent arm.
+    idle_p_keep  = !accept_req || idle_p_fwd ||
+                   (idle_base && idle_c_iss && req_port_i.data_gnt && !idle_miss && stall_ni &&
+                    !G6LCCfg.NonIdemPotenceEn);
+    // One predicate per state bit (positions asserted next to st_busy_fsm):
+    // {WAIT_SPEC_LOAD, WAIT_WB_EMPTY, WAIT_FLUSH, WAIT_TRANSLATION,
+    //  ABORT_TRANSACTION_NI, ABORT_TRANSACTION, WAIT_PAGE_OFFSET, SEND_TAG,
+    //  WAIT_GNT, IDLE}.
+    idle_next    = {idle_p_spec, 3'b000, idle_p_ni, idle_p_abort, idle_p_wpo, idle_p_tag,
+                    idle_p_wgnt, idle_p_keep};
+    idle_pop     = idle_p_fwd | idle_p_tag;
+
     case (1'b1)  // hyp8: one-hot state select
       state_q[LU_B_IDLE]: begin
-        if (accept_req) begin
-          // translation_req_o is the continuous decode above.
-          // check if load is speculative and non idempotent, if it is then stall and wait for branch result
-          if (!G6LCCfg.SpeculativeSb || !spec_ld || (dtlb_hit_i && !paddr_ni)) begin
-            // R3a: if STQ can fully satisfy this load, complete from forward
-            // (no D$ request). Closes stack *nextoffset RAW without waiting for
-            // STQ drain + wbuffer. Partial coverage still waits in WAIT_PAGE_OFFSET.
-            // R3a cont.4/5: wait until STQ + D$ wbuffer empty (unless forward).
-            if (st_pipeline_busy) begin
-              state_d = LU_S_WAIT_PAGE_OFFSET; // hyp8: literal FSM target (svt balance-mux arm restored)
-            end else if (page_offset_matches_i && st_fwd_covers && !req_port_i.data_rvalid &&
-                         ld_checked_head) begin // hyp8: publish only verdict-final
-              state_d = LU_S_IDLE; // hyp8: literal FSM target (svt balance-mux arm restored)
-              pop_ld_o    = 1'b1;
-              st_fwd_done = 1'b1;
-              // hyp8: a covered load whose verdict is not yet final waits
-              // (forward data would otherwise be consumed unchecked); a
-              // non-matching or unchecked-covered load still issues to D$.
-            end else if (!page_offset_matches_i &&
-                         !(st_fwd_covers && !ld_checked_head)) begin
-              // data_req is the continuous decode above.
-              // we got no data grant so wait for the grant before sending the tag
-              if (!req_port_i.data_gnt) begin
-                state_d = LU_S_WAIT_GNT; // hyp8: literal FSM target (svt balance-mux arm restored)
-              end else begin
-                if (G6LCCfg.MmuPresent && !dtlb_hit_i) begin
-                  state_d = LU_S_ABORT_TRANSACTION; // hyp8: literal FSM target (svt balance-mux arm restored)
-                end else begin
-                  if (!stall_ni) begin
-                    // we got a grant and a hit on the DTLB so we can send the tag in the next cycle
-                    state_d = LU_S_SEND_TAG; // hyp8: literal FSM target (svt balance-mux arm restored)
-                    pop_ld_o = 1'b1;
-                    // translation valid but this is to NC and the WB is not yet empty.
-                  end else if (G6LCCfg.NonIdemPotenceEn) begin
-                    state_d = LU_S_ABORT_TRANSACTION_NI;
-                  end
-                end
-              end
-            end else begin
-              // wait for the store buffer to train and the page offset to not match anymore
-              // (or until STQ forward fully covers)
-              state_d = LU_S_WAIT_PAGE_OFFSET; // hyp8: literal FSM target (svt balance-mux arm restored)
-            end
-          end else begin
-            // check branch result on the next cycle
-            state_d = LU_S_WAIT_SPEC_LOAD; // hyp8: literal FSM target (svt balance-mux arm restored)
-          end
-        end
+        state_d = idle_next;  // r127: shared new-request decision (above)
+        if (idle_pop) pop_ld_o = 1'b1;
+        if (idle_p_fwd) st_fwd_done = 1'b1;
       end
 
       // wait here for the page offset to not match anymore
@@ -1115,7 +1174,7 @@ assign ldbuf_full = &ldbuf_valid_q;
             st_fwd_done = 1'b1;
           end
 `endif
-        end else if (st_pipeline_busy && lu_replay_fire) begin
+        end else if (st_busy_fsm && lu_replay_fire) begin
           // T33: the only store in the way is speculative and has not left in
           // WPO_REPLAY_AFTER cycles -- it is waiting on retirement, possibly on
           // an older load queued behind this one. Hand this load back: the
@@ -1124,7 +1183,7 @@ assign ldbuf_full = &ldbuf_valid_q;
           state_d     = LU_S_IDLE;
           pop_ld_o    = 1'b1;
           lu_replay_o = 1'b1;
-        end else if (st_pipeline_busy) begin
+        end else if (st_busy_fsm) begin
           // hold until STQ + D$ wbuffer drain
           state_d = LU_S_WAIT_PAGE_OFFSET;
         end else begin
@@ -1178,54 +1237,11 @@ assign ldbuf_full = &ldbuf_valid_q;
       // we know for sure that the tag we want to send is valid
       state_q[LU_B_SEND_TAG]: begin
         req_port_o.tag_valid = 1'b1;
-        state_d = LU_S_IDLE;
-
-        if (accept_req) begin
-          // translation_req_o is the continuous decode above.
-          // check if load is speculative and non idempotent, if it is then stall and wait for branch result
-          if (!G6LCCfg.SpeculativeSb || !spec_ld || (dtlb_hit_i && !paddr_ni)) begin
-            // check if the page offset matches with a store, if it does stall and wait
-            // R3a: STQ forward path (mirror IDLE)
-            if (st_pipeline_busy) begin
-              state_d = LU_S_WAIT_PAGE_OFFSET; // hyp8: literal FSM target (svt balance-mux arm restored)
-            end else if (page_offset_matches_i && st_fwd_covers && !req_port_i.data_rvalid &&
-                         ld_checked_head) begin // hyp8: publish only verdict-final
-              state_d = LU_S_IDLE; // hyp8: literal FSM target (svt balance-mux arm restored)
-              pop_ld_o    = 1'b1;
-              st_fwd_done = 1'b1;
-              // hyp8: a covered load whose verdict is not yet final waits
-              // (forward data would otherwise be consumed unchecked); a
-              // non-matching or unchecked-covered load still issues to D$.
-            end else if (!page_offset_matches_i &&
-                         !(st_fwd_covers && !ld_checked_head)) begin
-              // data_req is the continuous decode above.
-              // we got no data grant so wait for the grant before sending the tag
-              if (!req_port_i.data_gnt) begin
-                state_d = LU_S_WAIT_GNT; // hyp8: literal FSM target (svt balance-mux arm restored)
-              end else begin
-                // we got a grant so we can send the tag in the next cycle
-                if (G6LCCfg.MmuPresent && !dtlb_hit_i) begin
-                  state_d = LU_S_ABORT_TRANSACTION; // hyp8: literal FSM target (svt balance-mux arm restored)
-                end else begin
-                  if (!stall_ni) begin
-                    // we got a grant and a hit on the DTLB so we can send the tag in the next cycle
-                    state_d = LU_S_SEND_TAG; // hyp8: literal FSM target (svt balance-mux arm restored)
-                    pop_ld_o = 1'b1;
-                    // translation valid but this is to NC and the WB is not yet empty.
-                  end else if (G6LCCfg.NonIdemPotenceEn) begin
-                    state_d = LU_S_ABORT_TRANSACTION_NI;
-                  end
-                end
-              end
-            end else begin
-              // wait for the store buffer to train and the page offset to not match anymore
-              state_d = LU_S_WAIT_PAGE_OFFSET; // hyp8: literal FSM target (svt balance-mux arm restored)
-            end
-          end else begin
-            // check branch result on the next cycle
-            state_d = LU_S_WAIT_SPEC_LOAD; // hyp8: literal FSM target (svt balance-mux arm restored)
-          end
-        end
+        // r127: the next request is decided exactly as in IDLE (this arm's
+        // default target was LU_S_IDLE too).
+        state_d = idle_next;
+        if (idle_pop) pop_ld_o = 1'b1;
+        if (idle_p_fwd) st_fwd_done = 1'b1;
         // ----------
         // Exception
         // ----------
@@ -1449,11 +1465,35 @@ assign ldbuf_full = &ldbuf_valid_q;
   // the pending publish is never starved. The pending pop is deferred
   // (the record's slot is marked rkill_q; the drn pick frees it next
   // cycle), keeping this gate out of the ldbuf_valid_d register cone.
-  assign pend_state_ok =
-      state_q[LU_B_SEND_TAG] | state_q[LU_B_ABORT_TRANSACTION] |
-      state_q[LU_B_ABORT_TRANSACTION_NI] | state_q[LU_B_WAIT_FLUSH] |
-      state_q[LU_B_WAIT_WB_EMPTY] |
-      (!valid_i && !state_q[LU_B_WAIT_PAGE_OFFSET]);
+  // r127: the two state-only parts of this gate are registered beside the
+  // state register (written from state_d on the same edge), so the pending
+  // publish select starts from two dedicated flops instead of the widely
+  // read state vector. Same value every cycle (asserted below).
+  logic pend_st_set_q, pend_st_nwpo_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      pend_st_set_q  <= 1'b0;  // reset state is LU_S_IDLE
+      pend_st_nwpo_q <= 1'b1;
+    end else begin
+      pend_st_set_q  <= state_d[LU_B_SEND_TAG] | state_d[LU_B_ABORT_TRANSACTION] |
+                        state_d[LU_B_ABORT_TRANSACTION_NI] | state_d[LU_B_WAIT_FLUSH] |
+                        state_d[LU_B_WAIT_WB_EMPTY];
+      pend_st_nwpo_q <= !state_d[LU_B_WAIT_PAGE_OFFSET];
+    end
+  end
+  assign pend_state_ok = pend_st_set_q | (!valid_i && pend_st_nwpo_q);
+  //pragma translate_off
+  always_ff @(posedge clk_i) begin
+    if (rst_ni) begin
+      g6lc_r127_lu_pend_state_eq: assert (pend_state_ok ===
+          (state_q[LU_B_SEND_TAG] | state_q[LU_B_ABORT_TRANSACTION] |
+           state_q[LU_B_ABORT_TRANSACTION_NI] | state_q[LU_B_WAIT_FLUSH] |
+           state_q[LU_B_WAIT_WB_EMPTY] |
+           (!valid_i && !state_q[LU_B_WAIT_PAGE_OFFSET])))
+        else $error("load_unit: equiv pend_state_ok registered parts");
+    end
+  end
+  //pragma translate_on
   // A dead head pops unconditionally (precise drop — free the queue
   // slot); a live head pops only on publish (ready + safe state).
   // flush_i stays live: a flush kills every entry this cycle.
@@ -1514,8 +1554,25 @@ assign ldbuf_full = &ldbuf_valid_q;
                       !ldbuf_flushed_q[rresp_idx] &&
                       !flush_i &&
                       !cancelled_mask_i[ldbuf_q[rresp_idx].trans_id];
-  assign ex_ctx_ok  = ((ldbuf_last_id_q == rresp_idx) || !kill_req_w) &&
+  // r127: `(last == rresp) || !kill_req_w` reduces to `last == rresp` here.
+  // The other three terms (SEND_TAG, ex_i.valid, !ex_ptw_i) are exactly
+  // kill_send's own conjunction with its first disjunct true, so whenever
+  // they hold kill_send -- hence kill_req_w -- is 1; when they do not, the
+  // product is 0 either way. The kill cone leaves the exception-publish
+  // path; the old expression is kept as the every-cycle reference.
+  assign ex_ctx_ok  = (ldbuf_last_id_q == rresp_idx) &&
                       ex_i.valid && !ex_ptw_i && state_q[LU_B_SEND_TAG];
+  //pragma translate_off
+  logic rf_ex_ctx_ok;
+  assign rf_ex_ctx_ok = ((ldbuf_last_id_q == rresp_idx) || !kill_req_w) &&
+                        ex_i.valid && !ex_ptw_i && state_q[LU_B_SEND_TAG];
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && !$isunknown({rf_ex_ctx_ok, ex_ctx_ok})) begin
+      g6lc_r127_lu_exctx_eq: assert (ex_ctx_ok === rf_ex_ctx_ok)
+        else $error("load_unit: equiv ex_ctx_ok");
+    end
+  end
+  //pragma translate_on
   assign ex_pub = ex_slot_ok && ex_ctx_ok;
 
   // F15: the three FSM-head completion arms below (translation fault,
@@ -1579,10 +1636,48 @@ assign ldbuf_full = &ldbuf_valid_q;
   // r84: the a_expub reads in the data/drain masks are LU_EXPEND
   // ternaries so the constant fold drops the ex_pub cone from the
   // output path under ==2 (under ==1 each folds to !a_expub).
-  assign a_data  = pub_fire && !a_pend && (LU_EXPEND ? 1'b1 : !a_expub);
+  // r127: the same win/lose order written on the raw requests, so the
+  // data and drain arms are not in series behind the expub arm:
+  //   data = pub_fire & !pend & !expub        = pub_fire & !pend & !ex_pub
+  //   drn  = drn_any & !expub & !data
+  //        = drn_any & (pend | (!ex_pub & !pub_fire))
+  // (ex_pub terms drop under LU_EXPEND, as before).
+  assign a_data  = pub_fire && !a_pend && (LU_EXPEND ? 1'b1 : !ex_pub);
+  assign a_drn   = drn_any &&
+                   (a_pend || ((LU_EXPEND ? 1'b1 : !ex_pub) && !pub_fire));
 `endif
   assign a_head = head_pub;        // wt | spec | fwd (fwd = st_fwd_done)
+`ifdef G6LC_MUT_LSU_EXPEND
   assign a_drn  = drn_any && (LU_EXPEND ? 1'b1 : !a_expub) && !a_data;
+`endif
+  for (genvar gi = 0; gi < G6LCCfg.NrLoadBufEntries; gi++) begin : gen_pop_oh
+    // r127: the publish and drain picks are already one-hot (pub_oh /
+    // drn_oh, lowest set of pub_ok / drn_ok); a_data implies pub_any and
+    // a_drn implies drn_any, so the pick bit itself is the pop bit. The
+    // former form went one-hot -> index tree -> per-slot compare. Checked
+    // every cycle by g6lc_r127_lu_pop_eq below.
+    assign ldbuf_pop_oh[gi] =
+        ((LU_EXPEND ? 1'b0 : a_expub) && (ldbuf_id_t'(rresp_idx) == ldbuf_id_t'(gi))) |
+        (a_data && pub_oh[gi]) |
+        (a_drn  && drn_oh[gi]);
+  end
+  //pragma translate_off
+  // r127 equivalence: the pre-r127 serial arm order and the indexed pop.
+  logic rf_a_data, rf_a_drn;
+  assign rf_a_data = pub_fire && !a_pend && (LU_EXPEND ? 1'b1 : !a_expub);
+  assign rf_a_drn  = drn_any && (LU_EXPEND ? 1'b1 : !a_expub) && !rf_a_data;
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && !$isunknown({a_pend, ex_pub, pub_fire, drn_any})) begin
+`ifndef G6LC_MUT_LSU_EXPEND
+      g6lc_r127_lu_arms_eq: assert (a_data === rf_a_data && a_drn === rf_a_drn)
+        else $error("load_unit: equiv publish arms");
+`endif
+      g6lc_r127_lu_pop_eq: assert (ldbuf_pop_oh ===
+          (ldbuf_r ? (G6LCCfg.NrLoadBufEntries'(1) << ldbuf_rindex) : '0))
+        else $error("load_unit: equiv pop mask");
+    end
+  end
+  //pragma translate_on
 `ifdef G6LC_MUT_LU_L5_ARMS
   // MUTANT: unmasked presentation — a head completion ORs its tid over
   // a concurrent ex/data arm's; the equivalence below must trip.
@@ -2364,6 +2459,7 @@ assign ldbuf_full = &ldbuf_valid_q;
         // we are here because of a TLB miss, we need to abort the current request and give way for the
         // PTW walker to satisfy the TLB miss
         if (rf_state_q == 4'(LU_B_ABORT_TRANSACTION) && G6LCCfg.MmuPresent) begin
+          if (LU_TLB_STAGED) rf_translation_req_o = 1'b1;  // r127: held under the staged TLB
           rf_req_port_o.kill_req = 1'b1;
           rf_req_port_o.tag_valid = 1'b1;
           // wait until the WB is empty

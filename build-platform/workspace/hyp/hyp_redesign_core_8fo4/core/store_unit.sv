@@ -590,17 +590,94 @@ assign result_o = lsu_ctrl_i.data;
   // -------------
   // Byte-Swapper + Re-aligner (fused — see store_data_fused)
   // -------------
+  // r127: store_data_fused, one cone per output byte. The op decode only
+  // chooses the endian-reversal width class (1, 2, 4 or XLEN/8 bytes); for
+  // each class the source byte of output byte j is a constant for an AMO
+  // (no alignment) and a constant per address offset otherwise, so each
+  // lane is a one-hot offset AND-OR over wired source bytes followed by a
+  // one-hot class select. The op decode, the offset decode and the data
+  // run in parallel instead of in series through one function. The
+  // function is kept as the every-cycle reference; all (op, offset, mbe,
+  // amo) values are swept in verif/tb/core/tb_g6lc_hyp8_stdata_eq.sv.
+  localparam int unsigned ST_NB   = G6LCCfg.XLEN / 8;
+  localparam int unsigned ST_OFFW = $clog2(ST_NB);
+  function automatic int unsigned st_perm_idx(input int unsigned j, input int unsigned o,
+                                              input int unsigned wb, input bit amo);
+    int unsigned base;
+    base = amo ? j : ((j + ST_NB - o) % ST_NB);
+    return (base < wb) ? (wb - 1 - base) : base;
+  endfunction
+  logic [3:0]              st_wb_oh;       // reversal width class: {XLEN/8, 4, 2, 1}
+  logic [63:0]             st_d64;
+  logic [G6LCCfg.XLEN-1:0] st_data_lane;
+  // zero-extended to 64 bits (a size cast: no zero-width replication at XLEN=64)
+  assign st_d64 = 64'(lsu_ctrl_i.data);
+  always_comb begin : p_st_wb_class
+    st_wb_oh = 4'b0001;
+    if (mbe_i) begin
+      case (lsu_ctrl_i.operation)
+        SB, HSV_B, FSB: st_wb_oh = 4'b0001;
+        SH, HSV_H, FSH: st_wb_oh = 4'b0010;
+        SW, HSV_W, FSW, AMO_LRW, AMO_SCW, AMO_SWAPW, AMO_ADDW, AMO_ANDW,
+        AMO_ORW, AMO_XORW, AMO_MAXW, AMO_MINW, AMO_MAXWU, AMO_MINWU,
+        AMO_CASW, AMO_CASQ: st_wb_oh = 4'b0100;
+        default:         st_wb_oh = 4'b1000;
+      endcase
+    end
+  end
+  for (genvar j = 0; j < ST_NB; j++) begin : gen_st_byte
+    logic [ST_NB-1:0] off_oh;
+    logic [3:0]       cls;
+    logic             amo_l, cbo_l;
+    logic [3:0][7:0]  cand;
+    for (genvar o = 0; o < ST_NB; o++) begin : gen_off
+      assign off_oh[o] = (lsu_ctrl_i.vaddr[ST_OFFW-1:0] == ST_OFFW'(o));
+    end
+    assign cls   = st_wb_oh;
+    assign amo_l = G6LCCfg.RVA && instr_is_amo;
+    assign cbo_l = G6LCCfg.RVZiCboz && (lsu_ctrl_i.operation == g6lc_core_pkg::CBO_ZERO);
+    for (genvar c = 0; c < 4; c++) begin : gen_cls
+      localparam int unsigned WB = (c == 0) ? 1 : (c == 1) ? 2 : (c == 2) ? 4 : ST_NB;
+      localparam int unsigned AIDX = st_perm_idx(j, 0, WB, 1'b1);
+      logic [ST_NB-1:0][7:0] term;
+      logic [7:0]            ali;
+      for (genvar o = 0; o < ST_NB; o++) begin : gen_o
+        localparam int unsigned IDX = st_perm_idx(j, o, WB, 1'b0);
+        assign term[o] = {8{off_oh[o]}} & st_d64[8*IDX +: 8];
+      end
+      always_comb begin : p_ali
+        ali = '0;
+        for (int unsigned o = 0; o < ST_NB; o++) ali |= term[o];
+      end
+      assign cand[c] = amo_l ? st_d64[8*AIDX +: 8] : ali;
+    end
+    assign st_data_lane[8*j +: 8] = {8{!cbo_l}} &
+        (({8{cls[0]}} & cand[0]) | ({8{cls[1]}} & cand[1]) |
+         ({8{cls[2]}} & cand[2]) | ({8{cls[3]}} & cand[3]));
+  end
+  //pragma translate_off
+  logic [G6LCCfg.XLEN-1:0] rf_st_data;
+  assign rf_st_data =
+      (G6LCCfg.RVZiCboz && lsu_ctrl_i.operation == g6lc_core_pkg::CBO_ZERO) ? '0 :
+      store_data_fused(lsu_ctrl_i.data, lsu_ctrl_i.operation, lsu_ctrl_i.vaddr[2:0], mbe_i,
+                       G6LCCfg.RVA && instr_is_amo);
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && !$isunknown({lsu_ctrl_i.data, lsu_ctrl_i.operation, lsu_ctrl_i.vaddr[2:0], mbe_i})) begin
+      g6lc_r127_st_data_eq: assert (st_data_lane === rf_st_data)
+        else $error("store_unit: equiv store data lanes");
+    end
+  end
+  //pragma translate_on
   // We need to reverse the byte order of what we intend to Store in Data Memory if we are in Big Endian Mode (mbe defines endianness and comes from CSRregfile).
   // re-align the write data to comply with the address offset
   always_comb begin
     st_be_n = lsu_ctrl_i.be;
     // don't shift the data if we are going to perform an AMO as we still need to operate on this data
-    st_data_n = store_data_fused(lsu_ctrl_i.data, lsu_ctrl_i.operation,
-                                 lsu_ctrl_i.vaddr[2:0], mbe_i,
-                                 G6LCCfg.RVA && instr_is_amo);
+    // r127: the fused permutation is formed per output byte lane below
+    // (st_data_lane, Zicboz zeroing included); see gen_st_byte.
+    st_data_n = st_data_lane;
     // Zicboz: force zero data + full BE (drain-time expansion covers the line)
     if (G6LCCfg.RVZiCboz && lsu_ctrl_i.operation == g6lc_core_pkg::CBO_ZERO) begin
-      st_data_n = '0;
       st_be_n   = '1;
     end
     st_data_size_n = extract_transfer_size(lsu_ctrl_i.operation);

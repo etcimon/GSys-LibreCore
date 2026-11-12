@@ -1,0 +1,35 @@
+{
+  "tag": "apu-l2pos",
+  "argv": [
+    "E:\\cva6\\sv-timing\\target\\release\\sv-timing.exe",
+    "analyze",
+    "--files-from",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r94\\apu.f",
+    "--modules",
+    "g6lc_l2_top",
+    "--param-map",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r94\\params-l2.json",
+    "--assume-xlen",
+    "64",
+    "--package-mode",
+    "packages",
+    "--stages",
+    "--target-mhz",
+    "5000",
+    "--fo4-ps",
+    "20",
+    "--budget-margin",
+    "0.2",
+    "--json-out",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r127\\boards\\apu-l2pos.json",
+    "--ir-out",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r127\\boards\\apu-l2pos.ir.json"
+  ],
+  "returncode": 0,
+  "gitHead": "65911368704e7c66f3ac5e6ef1e23300c177437c",
+  "sha256": {
+    "E:\\cva6\\sv-timing\\target\\release\\sv-timing.exe": "c567e1b2959aee5fd8035e4efabac4446826f7d16f57053f8f62c742486d3bcc",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r94\\apu.f": "4bbd202c948e98c5ecd45683b45e408a6763c48e995d3af0f7aa719b701b0e9c",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r94\\params-l2.json": "6f571d8f0dab95652d4334c67a493e61a4d903ea320170b3ccd1adf40bbdb77e"
+  }
+}

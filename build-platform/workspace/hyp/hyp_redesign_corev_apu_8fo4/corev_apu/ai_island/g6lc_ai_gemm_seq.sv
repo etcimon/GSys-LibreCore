@@ -2822,6 +2822,9 @@ module g6lc_ai_gemm_seq #(
   logic [31:0] store_beats, store_beats_done;
   logic [31:0] store_beat_addr;
   logic [15:0] store_retire_elems;
+  logic        rows_left_q;     // r23 registered `i_q < m_q` (declared here: read by store_reset)
+  logic [31:0] stc_j_next;      // r127: next store column (see its assign)
+  logic        stc_row_done;    // r127: that column closes the row
   wbeat_t store_word;
 
   assign load_a = state_q == ST_LA;
@@ -3158,12 +3161,21 @@ module g6lc_ai_gemm_seq #(
       (state_q == ST_MAC && DualCRead && DataWidth >= 64 && !acc_mode_q &&
        dot_pending_q == '0 && trail_ready);
   assign store_pair = DataWidth >= 64 && !n_q[0];
-  assign store_rows_done = stc_i_q + 32'd1 >= m_q &&
-                           stc_j_q + 32'(store_retire_elems) >= n_q;
+  assign store_rows_done = stc_i_q + 32'd1 >= m_q && stc_row_done;
   // The dedicated drain starts after the last token has written its element.
-  assign store_reset = state_q == ST_IDLE ||
-      (state_q == ST_MAC && (!DualCRead || acc_mode_q) &&
-       i_q >= m_q && dot_pending_q == '0 && !rd_v_q && !sum_v_q && !s1_v_q && !commit_v_q);
+  // r127: inside ST_MAC `i_q >= m_q` is the registered fact !rows_left_q
+  // (r23 invariant `state_q == ST_MAC |-> rows_left_q == (i_q < m_q)`,
+  // asserted where rows_left_q is written), so the 32-bit compare leaves
+  // the drain-start and done decisions.
+  // r127-t: the drain-quiet terms shared by store_reset and the ST_MAC exit
+  // check as one flat reduction -- the two serial && chains billed ~20 FO4
+  // each on the state_d cone; the shared quiet cone plus per-arm terms is
+  // strictly shallower. Identical operands, identical value.
+  logic mac_quiet;
+  assign mac_quiet = !rows_left_q & (dot_pending_q == '0) &
+      !(rd_v_q | sum_v_q | s1_v_q | commit_v_q);
+  assign store_reset = (state_q == ST_IDLE) |
+      ((state_q == ST_MAC) & (!DualCRead | acc_mode_q) & mac_quiet);
 
   g6lc_ai_gemm_store_plan #(
     .AddrWidth(AddrWidth), .DataWidth(DataWidth), .NrChannels(NrChannels),
@@ -3172,7 +3184,7 @@ module g6lc_ai_gemm_seq #(
     .clk_i, .rst_ni, .job_start_i(state_q == ST_IDLE && start_i),
     .base_i(ptr_c_i), .pitch_words_i(ldc_i == 0 ? n_i : 32'(ldc_i)),
     .request_i(store_active && !aw_sent_q), .retire_i(store_b_fire),
-    .retire_row_i(stc_j_q + 32'(store_retire_elems) >= n_q),
+    .retire_row_i(stc_row_done),
     .retire_words_i(store_retire_elems),
     .n_i(n_q), .column_i(stc_j_q), .committed_i(c_cols_done_q),
     .row_complete_i(state_q == ST_STC || stc_i_q < 32'(c_rows_done_q)),
@@ -3191,8 +3203,11 @@ module g6lc_ai_gemm_seq #(
   logic [BytesPerBeat-1:0] w_mask_q;
   logic [BeatLaneW-1:0] w_lane_q;
   // The planner clamps bursts to 255 beats, so the fetch compare is 9 bits.
+  // r127-t: `w_fetch_q == 0` is `w_fetch_q < 1` unsigned, so the pair/single
+  // arm select moves inside the threshold -- one 9-bit compare instead of a
+  // compare, a compare and a mux. Identical for every (w_fetch_q, store_beats).
   assign w_fetch_needed = store_plan_valid &&
-      (store_pair ? w_fetch_q < store_beats[8:0] : w_fetch_q == 0);
+      (w_fetch_q < (store_pair ? store_beats[8:0] : 9'd1));
   // pragma translate_off
   assert property (@(posedge clk_i) disable iff (!rst_ni) store_plan_valid |-> store_beats < 32'd512);
   // pragma translate_on
@@ -3280,6 +3295,12 @@ module g6lc_ai_gemm_seq #(
   end
   assign store_b_fire = store_req.b_ready && axi_resp_s.b_valid;
   assign store_retire_elems = store_pair ? stc_elem_q : 16'd1;
+  // r127: the next store column and the row-done compare are formed once,
+  // beside the B handshake (they read only registers), and shared by the
+  // store plan, the rows-done test and the column update; the update used
+  // to form its own add + compare behind store_b_fire. Same values.
+  assign stc_j_next   = stc_j_q + 32'(store_retire_elems);
+  assign stc_row_done = stc_j_next >= n_q;
   always_comb begin : advance_store
     aw_sent_d = aw_sent_q;
     w_sent_d = w_sent_q;
@@ -3316,10 +3337,10 @@ module g6lc_ai_gemm_seq #(
       c_pair_hold_d = 1'b0;
       stc_elem_d = '0;
       stc_j_en = 1'b1;
-      if (stc_j_q + 32'(store_retire_elems) >= n_q) begin
+      if (stc_row_done) begin
         stc_j_d = '0;
         stc_i_en = 1'b1; stc_i_d = stc_i_q + 32'd1;
-      end else stc_j_d = stc_j_q + 32'(store_retire_elems);
+      end else stc_j_d = stc_j_next;
     end
     if (store_reset) begin
       aw_sent_d = 1'b0; w_sent_d = 1'b0;
@@ -3362,8 +3383,7 @@ module g6lc_ai_gemm_seq #(
         end else if (seed_done) state_d = ST_MAC;
       end
       ST_MAC: begin
-        if (i_q >= m_q && stc_i_q >= m_q && !aw_sent_q && !rd_v_q && !sum_v_q && !s1_v_q &&
-            !commit_v_q && dot_pending_q == '0) state_d = ST_DONE;
+        if (mac_quiet && stc_i_q >= m_q && !aw_sent_q) state_d = ST_DONE;
         else if (store_reset) state_d = ST_STC;
       end
       ST_STC: if (store_b_fire && store_rows_done) state_d = ST_DONE;
@@ -3408,7 +3428,6 @@ module g6lc_ai_gemm_seq #(
   // r23: `i_q < m_q` as a registered fact; it only changes when the MAC row
   // cursor is written (row advance to m) or the job starts / the loads reset
   // the cursor to zero.
-  logic rows_left_q;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) rows_left_q <= 1'b0;
     else if (state_q == ST_MAC && rows_left_q && ph_q && t_q + mac_step >= k_q &&

@@ -429,7 +429,10 @@ module load_store_unit
         .icache_drsp_t (icache_drsp_t),
         .dcache_req_i_t(dcache_req_i_t),
         .dcache_req_o_t(dcache_req_o_t),
-        .HYP_EXT       (HYP_EXT)
+        .HYP_EXT       (HYP_EXT),
+        // r127: the MMU subtree elaborated under its own HypDefault since
+        // the first check-in (no override here); it now follows the core.
+        .HypCfg        (HypCfg)
     ) i_g6lc_mmu (
         .clk_i(clk_i),
         .rst_ni(rst_ni),

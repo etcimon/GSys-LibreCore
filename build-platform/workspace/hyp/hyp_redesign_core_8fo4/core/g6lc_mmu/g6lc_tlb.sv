@@ -594,6 +594,18 @@ module g6lc_tlb
   // ------------------
   // Update and Flush
   // ------------------
+  // r127: the per-entry flush match terms (r78 A135) at module scope. They
+  // were block-local variables with initializers inside conditional arms
+  // of update_flush, which a stricter Verilator reads as latches; the
+  // expressions are unchanged and read only registered tags and inputs.
+  logic [TLB_ENTRIES-1:0] tl_vmid_ok, tl_asid_ok, tl_gvmid_ok;
+  for (genvar gi = 0; gi < TLB_ENTRIES; gi++) begin : gen_tl_match
+    assign tl_vmid_ok[gi]  = (tags_q[gi].v_st_enbl[HYP_EXT] &&
+                              (lu_vmid_i == tags_q[gi].vmid)) ||
+                             !tags_q[gi].v_st_enbl[HYP_EXT];
+    assign tl_asid_ok[gi]  = (asid_to_be_flushed_i == tags_q[gi].asid);
+    assign tl_gvmid_ok[gi] = (vmid_to_be_flushed_i == tags_q[gi].vmid);
+  end
   always_comb begin : update_flush
     tags_n                 = tags_q;
     content_n              = content_q;
@@ -625,30 +637,22 @@ module g6lc_tlb
           // invalidate logic
           // r78 A135: the VMID/ASID entry-match terms are shared by
           // every flush rule below — hoisted once per entry.
-          automatic logic tl_vmid_ok =
-              (tags_q[i].v_st_enbl[HYP_EXT] &&
-               (lu_vmid_i == tags_q[i].vmid)) ||
-              !tags_q[i].v_st_enbl[HYP_EXT];
-          automatic logic tl_asid_ok =
-              (asid_to_be_flushed_i == tags_q[i].asid);
           // flush everything if current VMID matches and ASID is 0 and vaddr is 0 ("SFENCE.VMA/HFENCE.VVMA x0 x0" case)
-          if (asid_to_be_flushed_is0 && vaddr_to_be_flushed_is0 && tl_vmid_ok)
+          if (asid_to_be_flushed_is0 && vaddr_to_be_flushed_is0 && tl_vmid_ok[i])
             tags_n[i].valid = 1'b0;
           // flush vaddr in all addressing space if current VMID matches ("SFENCE.VMA/HFENCE.VVMA vaddr x0" case), it should happen only for leaf pages
-          else if (asid_to_be_flushed_is0 && (row_flush_addr_match[i]) && (~vaddr_to_be_flushed_is0) && tl_vmid_ok)
+          else if (asid_to_be_flushed_is0 && (row_flush_addr_match[i]) && (~vaddr_to_be_flushed_is0) && tl_vmid_ok[i])
             tags_n[i].valid = 1'b0;
           // the entry is flushed if it's not global and asid and vaddr and current VMID matches with the entry to be flushed ("SFENCE.VMA/HFENCE.VVMA vaddr asid" case)
-          else if ((!content_q[i].pte.g) && (row_flush_addr_match[i]) && (tl_asid_ok && tl_vmid_ok) && (!vaddr_to_be_flushed_is0) && (!asid_to_be_flushed_is0))
+          else if ((!content_q[i].pte.g) && (row_flush_addr_match[i]) && (tl_asid_ok[i] && tl_vmid_ok[i]) && (!vaddr_to_be_flushed_is0) && (!asid_to_be_flushed_is0))
             tags_n[i].valid = 1'b0;
           // the entry is flushed if it's not global, and the asid and the current VMID matches and vaddr is 0. ("SFENCE.VMA/HFENCE.VVMA 0 asid" case)
-          else if ((!content_q[i].pte.g) && (vaddr_to_be_flushed_is0) && (tl_asid_ok && tl_vmid_ok) && (!asid_to_be_flushed_is0))
+          else if ((!content_q[i].pte.g) && (vaddr_to_be_flushed_is0) && (tl_asid_ok[i] && tl_vmid_ok[i]) && (!asid_to_be_flushed_is0))
             tags_n[i].valid = 1'b0;
         end
       end else if (flush_gvma_i && G6LCCfg.RVH) begin
         if (tags_q[i].v_st_enbl[HYP_EXT]) begin
           // r78 A135: shared gvma entry-VMID match.
-          automatic logic tl_gvmid_ok =
-              (vmid_to_be_flushed_i == tags_q[i].vmid);
           // invalidate logic
           // flush everything if vmid is 0 and addr is 0 ("HFENCE.GVMA x0 x0" case)
           if (vmid_to_be_flushed_is0 && gpaddr_to_be_flushed_is0) tags_n[i].valid = 1'b0;
@@ -656,10 +660,10 @@ module g6lc_tlb
           else if (vmid_to_be_flushed_is0 && (|vaddr_level_match[i][HYP_EXT]) && (~gpaddr_to_be_flushed_is0))
             tags_n[i].valid = 1'b0;
           // the entry vmid and gpaddr both match with the entry to be flushed ("HFENCE.GVMA gpaddr vmid" case)
-          else if ((|vaddr_level_match[i][HYP_EXT]) && tl_gvmid_ok && (~gpaddr_to_be_flushed_is0) && (~vmid_to_be_flushed_is0))
+          else if ((|vaddr_level_match[i][HYP_EXT]) && tl_gvmid_ok[i] && (~gpaddr_to_be_flushed_is0) && (~vmid_to_be_flushed_is0))
             tags_n[i].valid = 1'b0;
           // the entry is flushed if the vmid matches and gpaddr is 0. ("HFENCE.GVMA 0 vmid" case)
-          else if ((gpaddr_to_be_flushed_is0) && tl_gvmid_ok && (!vmid_to_be_flushed_is0))
+          else if ((gpaddr_to_be_flushed_is0) && tl_gvmid_ok[i] && (!vmid_to_be_flushed_is0))
             tags_n[i].valid = 1'b0;
         end
         // normal replacement
@@ -735,8 +739,33 @@ module g6lc_tlb
   end
 `endif
 
-  always_comb begin : plru_replacement
-    replace_en = '0;
+  // r127: the replacement select per entry as elaboration-time masks over
+  // the tree (same idea as the PLRU update above): entry i is the victim
+  // when every node on its path holds the value that points at it. The
+  // per-entry level walk it replaces indexed the tree with loop arithmetic
+  // (billed as a serial chain); the walk is kept below as the every-cycle
+  // reference.
+  function automatic logic [PLRU_NODES-1:0] plru_ent_nodes(
+      input int unsigned i, input logic dir);
+    logic [PLRU_NODES-1:0] m;
+    int unsigned idx_base, shift;
+    m = '0;
+    for (int unsigned lvl = 0; lvl < PLRU_LVL; lvl++) begin
+      idx_base = (1 << lvl) - 1;
+      shift    = PLRU_LVL - lvl;
+      if ((((i >> (shift - 1)) & 32'b1) != 0) == dir) m[idx_base + (i >> shift)] = 1'b1;
+    end
+    return m;
+  endfunction
+  for (genvar gi = 0; gi < TLB_ENTRIES; gi++) begin : gen_replace_en
+    localparam logic [PLRU_NODES-1:0] ONEM  = plru_ent_nodes(gi, 1'b1);
+    localparam logic [PLRU_NODES-1:0] ZEROM = plru_ent_nodes(gi, 1'b0);
+    assign replace_en[gi] = (&(plru_tree_q | ~ONEM)) & ~(|(plru_tree_q & ZEROM));
+  end
+  //pragma translate_off
+  logic [TLB_ENTRIES-1:0] rf_replace_en;
+  always_comb begin : plru_replacement_ref
+    rf_replace_en = '0;
     // The PLRU-tree indexing:
     // lvl0        0
     //            / \
@@ -789,14 +818,14 @@ module g6lc_tlb
     // Decode tree to write enable signals
     // Next for-loop basically creates the following logic for e.g. an 8 entry
     // TLB (note: pseudo-code obviously):
-    // replace_en[7] = &plru_tree_q[ 6, 2, 0]; //plru_tree_q[0,2,6]=={1,1,1}
-    // replace_en[6] = &plru_tree_q[~6, 2, 0]; //plru_tree_q[0,2,6]=={1,1,0}
-    // replace_en[5] = &plru_tree_q[ 5,~2, 0]; //plru_tree_q[0,2,5]=={1,0,1}
-    // replace_en[4] = &plru_tree_q[~5,~2, 0]; //plru_tree_q[0,2,5]=={1,0,0}
-    // replace_en[3] = &plru_tree_q[ 4, 1,~0]; //plru_tree_q[0,1,4]=={0,1,1}
-    // replace_en[2] = &plru_tree_q[~4, 1,~0]; //plru_tree_q[0,1,4]=={0,1,0}
-    // replace_en[1] = &plru_tree_q[ 3,~1,~0]; //plru_tree_q[0,1,3]=={0,0,1}
-    // replace_en[0] = &plru_tree_q[~3,~1,~0]; //plru_tree_q[0,1,3]=={0,0,0}
+    // rf_replace_en[7] = &plru_tree_q[ 6, 2, 0]; //plru_tree_q[0,2,6]=={1,1,1}
+    // rf_replace_en[6] = &plru_tree_q[~6, 2, 0]; //plru_tree_q[0,2,6]=={1,1,0}
+    // rf_replace_en[5] = &plru_tree_q[ 5,~2, 0]; //plru_tree_q[0,2,5]=={1,0,1}
+    // rf_replace_en[4] = &plru_tree_q[~5,~2, 0]; //plru_tree_q[0,2,5]=={1,0,0}
+    // rf_replace_en[3] = &plru_tree_q[ 4, 1,~0]; //plru_tree_q[0,1,4]=={0,1,1}
+    // rf_replace_en[2] = &plru_tree_q[~4, 1,~0]; //plru_tree_q[0,1,4]=={0,1,0}
+    // rf_replace_en[1] = &plru_tree_q[ 3,~1,~0]; //plru_tree_q[0,1,3]=={0,0,1}
+    // rf_replace_en[0] = &plru_tree_q[~3,~1,~0]; //plru_tree_q[0,1,3]=={0,0,0}
     // For each entry traverse the tree. If every tree-node matches,
     // the corresponding bit of the entry's index, this is
     // the next entry to replace.
@@ -820,9 +849,16 @@ module g6lc_tlb
           en &= ~plru_tree_q[idx_base+(i>>shift)];
         end
       end
-      replace_en[i] = en;
+      rf_replace_en[i] = en;
     end
   end
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && !$isunknown(plru_tree_q)) begin
+      g6lc_r127_tlb_replace_eq: assert (replace_en === rf_replace_en)
+        else $error("g6lc_tlb: equiv replace_en masks");
+    end
+  end
+  //pragma translate_on
 
   // sequential process
   always_ff @(posedge clk_i or negedge rst_ni) begin

@@ -225,6 +225,7 @@
 ../../core/frontend/g6lc_fe_redirect.sv
 ../../core/frontend/g6lc_fe_nextline.sv
 ../../core/frontend/g6lc_fe_btb_check.sv
+../../core/frontend/g6lc_fe_frontier.sv
 ../../core/frontend/g6lc_fe_override.sv
 ../../core/cache_subsystem/g6lc_way_predictor.sv
 ../../core/cache_subsystem/g6lc_rrip_repl.sv

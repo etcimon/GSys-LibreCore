@@ -1,0 +1,35 @@
+{
+  "tag": "core-all-r127-final3",
+  "argv": [
+    "E:\\cva6\\sv-timing\\target\\release\\sv-timing.exe",
+    "analyze",
+    "--files-from",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\timing\\hyp8-core.f",
+    "--modules",
+    "AsyncDpRam,AsyncThreePortRam,SyncDpRam,SyncDpRam_ind_r_w,SyncThreePortRam,acc_dispatcher,aes,alu,alu_shift_hi,alu_wrapper,amo_buffer,axi_adapter,axi_adapter_arbiter,axi_shim,bht,bht2lvl,branch_unit,btb,cache_ctrl,commit_stage,compressed_decoder,compressed_instr_decoder,control_mvp,controller,copro_alu,counter,csr_buffer,csr_counters,csr_decode,csr_irq,csr_read,csr_regfile,csr_trap,csr_write,ct_vfdsu_ctrl,ct_vfdsu_double,ct_vfdsu_ff1,ct_vfdsu_pack,ct_vfdsu_prepare,ct_vfdsu_round,ct_vfdsu_scalar_dp,ct_vfdsu_srt,ct_vfdsu_srt_radix16_bound_table,ct_vfdsu_srt_radix16_with_sqrt,ct_vfdsu_top,cvxif_compressed_if_driver,cvxif_example_coprocessor,cvxif_fu,cvxif_issue_register_commit_if_driver,decoder,delta_counter,div_sqrt_top_mvp,ex_stage,fifo_v3,fmalza,fpnew_cast_multi,fpnew_classifier,fpnew_divsqrt_multi,fpnew_divsqrt_th_32,fpnew_divsqrt_th_64_multi,fpnew_fma,fpnew_fma_multi,fpnew_noncomp,fpnew_opgroup_block,fpnew_opgroup_fmt_slice,fpnew_opgroup_multifmt_slice,fpnew_rounding,fpnew_top,fpu_wrap,frontend,g6lc_accel_first_pass_decoder,g6lc_ai_acc_bank,g6lc_ai_coprocessor,g6lc_ai_exec,g6lc_bp_ckpt,g6lc_bp_ghist,g6lc_bp_gshare,g6lc_bp_ittage,g6lc_bp_loop,g6lc_bp_statcor,g6lc_bp_tage,g6lc_bp_tage_table,g6lc_bp_top,g6lc_core,g6lc_decode_s1,g6lc_decode_s2,g6lc_decode_s3,g6lc_fdip,g6lc_fe_btb_check,g6lc_fe_nextline,g6lc_fe_override,g6lc_fe_redirect,g6lc_fetch_dbg,g6lc_fifo_v3,g6lc_flu_reserve,g6lc_freelist,g6lc_ftq,g6lc_hart_state,g6lc_hpdcache_if_adapter,g6lc_hpdcache_subsystem,g6lc_hpdcache_subsystem_axi_arbiter,g6lc_hpdcache_wrapper,g6lc_hyp_exp_backoff,g6lc_hyp_fifo,g6lc_hyp_lfsr,g6lc_hyp_lzc,g6lc_hyp_popcount,g6lc_hyp_rr_arb_tree,g6lc_icache,g6lc_icache_axi_wrapper,g6lc_inval_retain,g6lc_iq,g6lc_iq_arb,g6lc_iq_bank,g6lc_iq_legal,g6lc_iq_payload,g6lc_iq_xbar,g6lc_issue_barrier,g6lc_loop_buffer,g6lc_lsq,g6lc_lsq_age,g6lc_lsq_cam_bank,g6lc_lsq_event,g6lc_lsq_reduce,g6lc_lsq_release,g6lc_lsq_slot,g6lc_lsq_verdict,g6lc_lu_result,g6lc_memdep,g6lc_mmu,g6lc_ooo_backend,g6lc_ooo_dispatch,g6lc_prf,g6lc_ptw,g6lc_ptw_leg_decode,g6lc_rat,g6lc_regfile,g6lc_regfile_fpga,g6lc_rename,g6lc_rename_publish,g6lc_rename_read,g6lc_rename_recover,g6lc_rename_resolve,g6lc_rob,g6lc_rrip_repl,g6lc_rvfi_probes,g6lc_shared_tlb,g6lc_slice_dispatch,g6lc_slice_iq,g6lc_slice_ist,g6lc_slice_rmt,g6lc_slice_steer,g6lc_smt_csr_bank,g6lc_smt_pc_bank,g6lc_smt_regfile,g6lc_thread_select,g6lc_tlb,g6lc_tlb_miss_router,g6lc_way_predictor,gated_clk_cell,hpdcache,hpdcache_1hot_to_binary,hpdcache_amo,hpdcache_cbuf,hpdcache_cmo,hpdcache_core_arbiter,hpdcache_ctrl,hpdcache_ctrl_pe,hpdcache_data_downsize,hpdcache_data_resize,hpdcache_data_upsize,hpdcache_decoder,hpdcache_demux,hpdcache_fifo_reg,hpdcache_fifo_reg_initialized,hpdcache_flush,hpdcache_fxarb,hpdcache_lfsr,hpdcache_mem_req_read_arbiter,hpdcache_mem_req_write_arbiter,hpdcache_mem_resp_demux,hpdcache_mem_to_axi_read,hpdcache_mem_to_axi_write,hpdcache_memctrl,hpdcache_miss_handler,hpdcache_mshr,hpdcache_mux,hpdcache_prio_1hot_encoder,hpdcache_prio_bin_encoder,hpdcache_regbank_wbyteenable_1rw,hpdcache_regbank_wmask_1rw,hpdcache_rrarb,hpdcache_rtab,hpdcache_sram,hpdcache_sram_1rw,hpdcache_sram_wbyteenable,hpdcache_sram_wbyteenable_1rw,hpdcache_sram_wmask,hpdcache_sram_wmask_1rw,hpdcache_sync_buffer,hpdcache_uncached,hpdcache_victim_plru,hpdcache_victim_random,hpdcache_victim_sel,hpdcache_wbuf,hwpf_stride,hwpf_stride_arb,hwpf_stride_wrapper,id_stage,instr_decoder,instr_queue,instr_realign,instr_scan,instr_tracer,issue_read_operands,issue_stage,iteration_div_sqrt_mvp,lfsr_8bit,load_store_unit,load_unit,lsu_bypass,lzc,macro_decoder,miss_handler,mult,mult_clmul,multiplier,norm_div_sqrt_mvp,nrbd_nrsc_mvp,pa_fdsu_ctrl,pa_fdsu_ff1,pa_fdsu_pack_single,pa_fdsu_prepare,pa_fdsu_round_single,pa_fdsu_special,pa_fdsu_srt_single,pa_fdsu_top,pa_fpu_dp,pa_fpu_frbus,pa_fpu_src_type,perf_counters,pmp,pmp_data_if,pmp_entry,popcount,preprocess_mvp,ras,raw_checker,rr_arb_tree,sb_cancel,sb_commit_bundle,sb_head,sb_lifecycle,scoreboard,serdiv,shift_reg,sram,sram_cache,stb_commit,stb_drain,stb_fwd,stb_insert,std_cache_subsystem,std_nbdcache,store_buffer,store_unit,stream_arbiter,stream_arbiter_flushable,stream_demux,stream_mux,tag_cmp,tc_sram,tc_sram_wrapper,tc_sram_wrapper_cache_techno,trigger_module,unread,wt_axi_adapter,wt_cache_subsystem,wt_dcache,wt_dcache_ctrl,wt_dcache_mem,wt_dcache_missunit,wt_dcache_wbuffer,wt_dcache_wbuffer_leg,zcmt_decoder,g6lc_fe_frontier",
+    "--param-map",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r95\\params-core-all.json",
+    "--assume-xlen",
+    "64",
+    "--package-mode",
+    "packages",
+    "--stages",
+    "--target-mhz",
+    "5000",
+    "--fo4-ps",
+    "20",
+    "--budget-margin",
+    "0.2",
+    "--json-out",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r127\\boards\\core-all-r127-final3.json",
+    "--ir-out",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r127\\boards\\core-all-r127-final3.ir.json"
+  ],
+  "returncode": 0,
+  "gitHead": "65911368704e7c66f3ac5e6ef1e23300c177437c",
+  "sha256": {
+    "E:\\cva6\\sv-timing\\target\\release\\sv-timing.exe": "c567e1b2959aee5fd8035e4efabac4446826f7d16f57053f8f62c742486d3bcc",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\timing\\hyp8-core.f": "f7919a93fff647f7f520b3a421bc7e28a6f38979d1a0438c028ce7bff4e8b68a",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r95\\params-core-all.json": "514aef69c95896c0a5bc4f38bc02cb773c6e1055b2f20a774c178edb23f256c9"
+  }
+}

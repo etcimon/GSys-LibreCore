@@ -1,0 +1,25 @@
+== lint
+hyp8 lint (g6lc_core): clean of fatal classes; 7 open warnings in /mnt/e/cva6/build-platform/workspace/build/hyp8-lint-r127u/lint.log
+== iqleg
+HYP8_IQLEG_PASS checked=23
+== iqleg-nh2
+g6lc_iq_legal NH=2: clean
+== cwin-eq
+HYP8_CWIN_EQ_PASS checked=525312
+== leaf mmu
+LEAF mmu-r127u rc=0 0 error-lines
+HYP8_MMU_PASS checked=716 miter=771
+[equiv] g6lc_shared_tlb vvma: checked=771
+[equiv] g6lc_shared_tlb flushsel: checked=771
+[equiv] g6lc_shared_tlb vvma: checked=771
+[equiv] g6lc_shared_tlb flushsel: checked=771
+[equiv] g6lc_shared_tlb vvma: checked=771
+[equiv] g6lc_shared_tlb flushsel: checked=771
+[equiv] g6lc_shared_tlb vvma: checked=771
+[equiv] g6lc_shared_tlb flushsel: checked=771
+[equiv] g6lc_shared_tlb vvma: checked=771
+[equiv] g6lc_shared_tlb flushsel: checked=771
+[equiv] g6lc_shared_tlb vvma: checked=771
+[equiv] g6lc_shared_tlb flushsel: checked=771
+[equiv] g6lc_tlb plru: checked=771
+GATE_DONE

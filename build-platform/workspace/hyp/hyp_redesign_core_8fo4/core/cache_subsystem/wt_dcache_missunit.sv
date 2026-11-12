@@ -510,8 +510,17 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
       {32{amo_raw_half[7]}}, amoResult_32bitBE_NoSign
     };  // +7 to the base address to find the sign bit, as in BE the Most Significant Byte is always at the lowest addressed byte.
 
-    assign amoResult_BE = (amo_req_i.size == 2'b10) ? amoResult_32bitBE : amoResult_64bitBE;
-    assign amoResult_LE = (amo_req_i.size == 2'b10) ? amoResult_32bitLE : amo_raw_q;
+    // r127: the word/doubleword select per byte lane, each lane with its own
+    // copy of the size test, so one compare does not drive both 64-bit
+    // selects (same values as the former whole-word ternaries).
+    for (genvar bl = 0; bl < 8; bl++) begin : gen_amo_res_lane
+      logic w32;
+      assign w32 = (amo_req_i.size == 2'b10);
+      assign amoResult_BE[8*bl +: 8] = w32 ? amoResult_32bitBE[8*bl +: 8]
+                                           : amoResult_64bitBE[8*bl +: 8];
+      assign amoResult_LE[8*bl +: 8] = w32 ? amoResult_32bitLE[8*bl +: 8]
+                                           : amo_raw_q[8*bl +: 8];
+    end
 
     // hyp8: registered formation step. The byte-order / sign-extend network is
     // a wide cone hanging off the return packet; the raw return word is
@@ -747,6 +756,14 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
   assign cas_eq_lo = amo_rtrn_mux[31:0] == amo_req_i.operand_c[31:0];
   assign cas_eq_hi = amo_rtrn_mux[63:32] == amo_req_i.operand_c[63:32];
   assign cas_eq    = cas_eq_lo && cas_eq_hi;
+  // r127: the compare-and-swap data select per byte lane behind an explicit
+  // fan-out copy of the compare result (same value as `cas_eq ? b : rtrn`).
+  logic [63:0] cas_new_w;
+  for (genvar cl = 0; cl < 8; cl++) begin : gen_cas_lane
+    logic eq;
+    assign eq = cas_eq;
+    assign cas_new_w[8*cl +: 8] = eq ? amo_req_i.operand_b[8*cl +: 8] : amo_rtrn_mux[8*cl +: 8];
+  end
   logic load_miss_go;
   assign load_miss_go = (state_q == IDLE) && !(flush_i || (enable_i && !enable_q)) &&
                         !(G6LCCfg.RVA && amo_req_i.req) && (|miss_req_masked_d) &&
@@ -962,7 +979,7 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
           if (cas_ld_ack) begin
             // Full 64-bit lane (dword CAS is naturally aligned)
             cas_old_d = amo_rtrn_mux;
-            cas_new_d = cas_eq ? amo_req_i.operand_b : amo_rtrn_mux;
+            cas_new_d = cas_new_w;
             state_d   = AMO_CAS_ST;
           end
         end

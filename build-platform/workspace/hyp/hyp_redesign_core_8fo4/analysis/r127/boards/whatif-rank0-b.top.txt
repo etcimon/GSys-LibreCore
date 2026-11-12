@@ -1,0 +1,5 @@
+# delay-v50 budget=8.0 fo4_ps=20.0 modules=3 board-worst=32.9 (regtoreg)
+module                       live    any k  class                    line |    rr    ir    ro    io
+alu                          Y      32.9 rr plain                  L946   |  32.9  24.0  26.6  26.0
+wt_axi_adapter               Y      32.0 rr plain                  L771   |  32.0  17.5   9.8  14.0
+g6lc_iq_legal                Y      18.6 ir plain                  L122   |  15.2  18.6     -  15.2

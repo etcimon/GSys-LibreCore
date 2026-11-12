@@ -511,4 +511,21 @@ module g6lc_rename
     end
   end
 
+  //pragma translate_off
+  // r127: u_read's group-hierarchy pick against the pre-r127 function forms
+  // (u_read is combinational; the comparison is sampled here every cycle).
+  int unsigned r127_pick_n = 0;
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && !$isunknown(u_read.r127_pick_ok)) begin
+      r127_pick_n <= r127_pick_n + 1;
+      g6lc_r127_pick_eq: assert (u_read.r127_pick_ok)
+        else $error("g6lc_rename: equiv free-list pick");
+    end
+  end
+  final begin
+    if ($test$plusargs("equiv_report"))
+      $display("[equiv] g6lc_rename r127 pick: checked=%0d", r127_pick_n);
+  end
+  //pragma translate_on
+
 endmodule

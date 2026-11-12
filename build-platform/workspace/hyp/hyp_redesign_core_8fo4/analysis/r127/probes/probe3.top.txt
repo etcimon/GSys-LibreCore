@@ -1,0 +1,12 @@
+# delay-v50 budget=8.0 fo4_ps=20.0 modules=10 board-worst=46.3 (regtoreg)
+module                       live    any k  class                    line |    rr    ir    ro    io
+p_j1_ring_cur                Y      46.3 rr plain                  L17    |  46.3     -     -  23.5
+p_m1_place_add               Y      27.5 rr plain                  L72    |  27.5     -     -  19.0
+p_q1_legal_chain             Y      22.8 rr plain                  L138   |  22.8     -     -   8.1
+p_j2_ring_slot               Y      21.9 rr plain                  L32    |  21.9     -     -  11.0
+p_k1_pop_index               Y      14.5 rr plain                  L52    |  14.5     -     -   5.5
+p_m2_place_rot               Y      12.0 rr plain                  L92    |  12.0     -     -  10.0
+p_n1_fn_rotate               Y       9.5 rr plain                  L111   |   9.5     -     -     -
+p_n2_onehot_bytes            Y       8.7 rr plain                  L123   |   8.7     -     -   7.4
+p_k2_pop_onehot              Y       8.4 rr plain                  L59    |   8.4     -     -   6.4
+p_q2_legal_table             Y       3.0 rr under_budget           L146   |   3.0     -     -     -

@@ -1,0 +1,28 @@
+{
+  "fpnew_fma": {
+    "calibrated_fo4": null,
+    "class_note": "multi_cycle tag; no exclusive/dense deflation; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+    "closes": false,
+    "endpoint": "fpnew_fma.reg1/D",
+    "max_freq_mhz": 300.17009021727,
+    "module_id": 0,
+    "multi_cycle": true,
+    "node_count": 18,
+    "path_class": "multi_cycle_tagged",
+    "path_id": 233,
+    "path_kind": "regtoreg",
+    "primary_loc": {
+      "end_col": 16,
+      "end_line": 482,
+      "file": "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\timing\\../../core/cvfpu/src/fpnew_fma.sv",
+      "start_col": 10,
+      "start_line": 482
+    },
+    "slack_fo4": -125.25778051719641,
+    "stage_end": null,
+    "stage_start": null,
+    "startpoint": "fpnew_fma.reg0/CP",
+    "total_fo4": 133.2577805171964,
+    "total_fo4_raw": null
+  }
+}

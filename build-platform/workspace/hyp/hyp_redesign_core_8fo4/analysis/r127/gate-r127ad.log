@@ -1,0 +1,48 @@
+== lint
+hyp8 lint (g6lc_core): clean of fatal classes; 7 open warnings in /mnt/e/cva6/build-platform/workspace/build/hyp8-lint-r127ad/lint.log
+== iqleg
+HYP8_IQLEG_PASS checked=23
+== iqleg-nh2
+g6lc_iq_legal NH=2: clean
+== cwin-eq
+HYP8_CWIN_EQ_PASS checked=525312
+== leaf dispatch
+LEAF dispatch-r127ad rc=0 0 error-lines
+HYP8_DISPATCH_PASS checked=125 pop_take_same=0 opasm_int=1 opasm_fp=1
+[equiv] g6lc_ooo_dispatch grpgo: checked=47
+[equiv] g6lc_ooo_dispatch fp_pred: checked=619 lane0_active_fp=14 lane0_active_int=97
+[equiv] g6lc_rename r127 pick: checked=619
+[equiv] g6lc_rename_resolve latesel p0 f0: checked=619
+[equiv] g6lc_rename_resolve latesel p0 f1: checked=619
+[equiv] g6lc_rename_resolve latesel p0 f2: checked=619
+[equiv] g6lc_rename_resolve latesel p0 f3: checked=619
+[equiv] g6lc_rename_resolve latesel p0 f4: checked=619
+[equiv] g6lc_rename_resolve latesel p0 f5: checked=619
+[equiv] g6lc_rename_resolve latesel p0 f6: checked=619
+[equiv] g6lc_rename_resolve cover p0: checked=619
+[equiv] g6lc_rename_resolve latesel p1 f0: checked=619
+[equiv] g6lc_rename_resolve latesel p1 f1: checked=619
+== leaf lsq
+LEAF lsq-r127ad rc=0 0 error-lines
+HYP8_LSQ_PASS checked=2826
+[equiv] g6lc_lsq pvpick: checked=197
+[equiv] g6lc_lsq_event evcount: checked=202
+[equiv] g6lc_lsq_slot arms: checked=202
+[equiv] g6lc_lsq_release arms: checked=202
+[equiv] g6lc_lsq_reduce dwait: checked=197
+[equiv] g6lc_lsq_reduce age_miter: checked=197
+[equiv] g6lc_lsq_reduce lsqr2: checked=197
+[equiv] g6lc_lsq_reduce dwait: checked=197
+[equiv] g6lc_lsq_reduce age_miter: checked=197
+[equiv] g6lc_lsq_reduce lsqr2: checked=197
+[equiv] g6lc_lsq_reduce dwait: checked=200
+[equiv] g6lc_lsq_reduce age_miter: checked=200
+[equiv] g6lc_lsq_reduce dwait: checked=200
+== leaf dcache
+LEAF dcache-r127ad rc=0 0 error-lines
+HYP8_DCACHE_PASS checked=334 dchx=2 stores=88
+[equiv] wt_dcache_wbuffer l1_obligation: dropped=2 plain=2
+[equiv] wt_dcache_wbuffer tx_single: checked=88 viol=0
+[equiv] wt_dcache_mem fwd_snap: checked=859
+[equiv] wt_dcache_mem fwd_snap: checked=3
+GATE_DONE

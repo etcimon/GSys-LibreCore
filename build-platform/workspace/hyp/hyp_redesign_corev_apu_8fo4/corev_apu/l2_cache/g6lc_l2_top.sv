@@ -845,6 +845,19 @@ assign mst_req_o  = slv_req_i;
   // fill collector drains their beats unconditionally.
   logic mst_r_ot_q, mst_r_ot_d;
   logic wr_r_pending_q,wr_r_pending_d,wr_b_done_q,wr_b_done_d;
+  // r127: "this blocking write's B is done" as seen in S_BYPASS_B.
+  logic wr_b_done_now;
+  assign wr_b_done_now = wr_b_done_q ||
+      (!POSTED_WRITES && mst_resp_i.b_valid && (mst_resp_i.b.id == id_q) && slv_req_i.b_ready);
+  //pragma translate_off
+  logic rf_wr_b_done_mid;
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && (state_q == S_BYPASS_B) && !$isunknown({rf_wr_b_done_mid, wr_b_done_now})) begin
+      g6lc_r127_l2_b_done_eq: assert (rf_wr_b_done_mid === wr_b_done_now)
+        else $error("g6lc_l2_top: equiv wr_b_done in S_BYPASS_B");
+    end
+  end
+  //pragma translate_on
   // T9a eWT write-idle (CMO clean/flush ordering): no write accepted and not
   // yet B-acknowledged. A blocking write traverses S_BYPASS_AW→W→B with
   // is_write_q latched at AW accept; under POSTED_WRITES a posted write's
@@ -963,7 +976,26 @@ assign mst_req_o  = slv_req_i;
   // The installed line's pf provenance — tag_wpf is only consumed alongside
   // tag_write at install time.
   assign tag_wpf        = PF_EN && fill_pf_q[inst_idx];
-  assign collect_pos    = fifo_wrap((MSHR_W + 1)'(fifo_rd_q) + collect_cnt_q);
+  // r127: the collector position rd + collect_cnt as a registered pointer.
+  // A head retire moves rd up and collect_cnt down together (position
+  // unchanged); only a finished collect advances it. The add + wrap leaves
+  // the fill-beat path; the old expression is the every-cycle reference.
+  logic [MSHR_W-1:0] collect_pos_q;
+  logic              collect_done;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) collect_pos_q <= '0;
+    else if (collect_done) collect_pos_q <= fifo_inc(collect_pos_q);
+  end
+  assign collect_pos    = collect_pos_q;
+  //pragma translate_off
+  always_ff @(posedge clk_i) begin
+    if (rst_ni) begin
+      g6lc_r127_l2_collect_pos_eq: assert (collect_pos_q ===
+          fifo_wrap((MSHR_W + 1)'(fifo_rd_q) + collect_cnt_q))
+        else $error("g6lc_l2_top: equiv collector position");
+    end
+  end
+  //pragma translate_on
   assign issue_pos      = fifo_wrap((MSHR_W + 1)'(fifo_rd_q) + issued_cnt_q);
   assign collect_idx    = fifo_q[collect_pos];
   assign issue_idx      = fifo_q[issue_pos];
@@ -977,15 +1009,29 @@ assign mst_req_o  = slv_req_i;
   assign issue_vld      = (issued_cnt_q < fifo_cnt_q) && !bfid_busy &&
                           (fill_state_q[issue_idx] == F_QUEUED)
                           && !((state_q==S_BYPASS_AW || state_q==S_BYPASS_W || state_q==S_BYPASS_B) && id_q==FILL_ID);
+  // r127-t: the fifo head entry was re-read ~10x per evaluation
+  // (fifo_q[fifo_rd_q] into fill_state/fill_pf/fill_addr/fill_len and the
+  // fill_act clear). Share the head index and the four head fields; every
+  // consumer reads the identical same-cycle value -- pure CSE, no contract
+  // change.
+  logic [MSHR_W-1:0]            head_idx;
+  fstate_e                      head_state;
+  logic                         head_pf_bit;
+  logic [AXI_ADDR_WIDTH-1:0]    head_addr;
+  logic [7:0]                   head_len;
+  assign head_idx    = fifo_q[fifo_rd_q];
+  assign head_state  = fill_state_q[head_idx];
+  assign head_pf_bit = fill_pf_q[head_idx];
+  assign head_addr   = fill_addr_q[head_idx];
+  assign head_len    = fill_len_q[head_idx];
   // A pf fill head with waiters still claims the serve channel (the waiters
   // are demand readers); a waitless pf head retires without a slave burst.
-  assign head_pf        = PF_EN && (fifo_cnt_q != '0) &&
-                          fill_pf_q[fifo_q[fifo_rd_q]];
+  assign head_pf        = PF_EN && (fifo_cnt_q != '0) && head_pf_bit;
   assign serve_pend     = (fifo_cnt_q != '0) &&
-                          (fill_state_q[fifo_q[fifo_rd_q]] == F_READY) &&
+                          (head_state == F_READY) &&
                           !(head_pf && !mshr_waiter_valid);
   assign pf_retire      = (fifo_cnt_q != '0) &&
-                          (fill_state_q[fifo_q[fifo_rd_q]] == F_READY) &&
+                          (head_state == F_READY) &&
                           head_pf && !mshr_waiter_valid &&
                           (state_q != S_SERVE) && (state_q != S_SERVE_POP);
   // Postable iff non-atomic, unlocked and outside the reserved fill id —
@@ -1422,7 +1468,7 @@ assign mst_req_o  = slv_req_i;
     // issue-order fifo head (the S_IDLE serve candidate). All waiter/complete
     // probes of the MSHR index off this.
     mshr_complete_idx = ((state_q == S_SERVE) || (state_q == S_SERVE_POP))
-                        ? serve_idx_q : fifo_q[fifo_rd_q];
+                        ? serve_idx_q : head_idx;
     rr_adv           = 1'b0;
 
     // Fill engine defaults
@@ -1448,6 +1494,7 @@ assign mst_req_o  = slv_req_i;
     fifo_cnt_d    = fifo_cnt_q;
     issued_cnt_d  = issued_cnt_q;
     collect_cnt_d = collect_cnt_q;
+    collect_done  = 1'b0;
     bfid_rpend_d  = bfid_rpend_q;
     bfid_timer_d  = bfid_timer_q;
     serve_turn_d  = serve_turn_q;
@@ -1553,10 +1600,10 @@ assign mst_req_o  = slv_req_i;
           // whose id has a live bypass-read tracker entry waits for that
           // entry to pop (per-id response order), and the arbiter may hold
           // the entry one more cycle for a tracked burst.
-          serve_idx_d  = fifo_q[fifo_rd_q];
-          serve_addr_d = fill_addr_q[fifo_q[fifo_rd_q]];
+          serve_idx_d  = head_idx;
+          serve_addr_d = head_addr;
           serve_id_d   = mshr_complete_id;
-          serve_len_d  = fill_len_q[fifo_q[fifo_rd_q]];
+          serve_len_d  = head_len;
           serve_beat_d = '0;
           serve_intr_d = 1'b0;
           // A pf fill has no primary burst: waitered pf heads start at the
@@ -1605,10 +1652,10 @@ assign mst_req_o  = slv_req_i;
         if (tag_row_valid) begin
         if((tag_hit && (|mshr_id_match)) || (!tag_hit && merge_order_block))begin
           if(serve_pend && r_fsm_start_ok && !rdtrk_probe_match[1])begin
-            serve_idx_d=fifo_q[fifo_rd_q];
-            serve_addr_d=fill_addr_q[fifo_q[fifo_rd_q]];
+            serve_idx_d=head_idx;
+            serve_addr_d=head_addr;
             serve_id_d=mshr_complete_id;
-            serve_len_d=fill_len_q[fifo_q[fifo_rd_q]];
+            serve_len_d=head_len;
             serve_beat_d='0;
             serve_intr_d=1'b1;
             state_d=head_pf ? S_SERVE_POP : S_SERVE;
@@ -1686,10 +1733,10 @@ assign mst_req_o  = slv_req_i;
               // path — which needs this FSM. Interrupt: drain the oldest
               // ready entry on the dedicated serve regs (the captive request
               // stays in addr_q & friends), then return to S_TAG to retry.
-              serve_idx_d  = fifo_q[fifo_rd_q];
-              serve_addr_d = fill_addr_q[fifo_q[fifo_rd_q]];
+              serve_idx_d  = head_idx;
+              serve_addr_d = head_addr;
               serve_id_d   = mshr_complete_id;
-              serve_len_d  = fill_len_q[fifo_q[fifo_rd_q]];
+              serve_len_d  = head_len;
               serve_beat_d = '0;
               serve_intr_d = 1'b1;
               state_d      = head_pf ? S_SERVE_POP : S_SERVE;
@@ -1818,10 +1865,10 @@ assign mst_req_o  = slv_req_i;
         end
         else if((|mshr_id_match) && serve_pend && r_fsm_start_ok &&
                 !rdtrk_probe_match[1])begin
-          serve_idx_d=fifo_q[fifo_rd_q];
-          serve_addr_d=fill_addr_q[fifo_q[fifo_rd_q]];
+          serve_idx_d=head_idx;
+          serve_addr_d=head_addr;
           serve_id_d=mshr_complete_id;
-          serve_len_d=fill_len_q[fifo_q[fifo_rd_q]];
+          serve_len_d=head_len;
           serve_beat_d='0;
           serve_intr_d=1'b1;
           state_d=head_pf ? S_SERVE_POP : S_SERVE;
@@ -1940,7 +1987,15 @@ assign mst_req_o  = slv_req_i;
        wr_r_pending_q && mst_resp_i.r_valid && mst_resp_i.r.id==id_q &&
        !is_fill_beat && slv_req_i.r_ready && mst_resp_i.r.last)
       wr_r_pending_d=1'b0;
-    if(state_q==S_BYPASS_B && wr_b_done_d && !wr_r_pending_d)state_d=S_IDLE;
+    // r127: in S_BYPASS_B the only write to wr_b_done_d ahead of this point
+    // is the B-accept set of that state's arm (the clear is in the S_IDLE
+    // arm, the tracker set comes after), so the test reads the registered
+    // flag ORed with that one event (wr_b_done_now) instead of the
+    // next-state variable every arm of the case writes.
+    //pragma translate_off
+    rf_wr_b_done_mid = wr_b_done_d;
+    //pragma translate_on
+    if(state_q==S_BYPASS_B && wr_b_done_now && !wr_r_pending_d)state_d=S_IDLE;
     // Write-update state lives only inside one bypassed write.
     if (state_d == S_IDLE) begin
       wu_decided_d = 1'b0;
@@ -1972,6 +2027,7 @@ assign mst_req_o  = slv_req_i;
         if (mst_resp_i.r.last) begin
           fill_state_d[collect_idx] = F_DONE;
           collect_cnt_d             = collect_cnt_d + 1'b1;
+          collect_done              = 1'b1;
         end
       end
     end
@@ -2190,7 +2246,7 @@ assign mst_req_o  = slv_req_i;
     // retire retries next cycle — the head then drains via the serve path.
     if (pf_retire && !mshr_alloc) begin
       mshr_complete                 = 1'b1;
-      fill_act_d[fifo_q[fifo_rd_q]] = 1'b0;
+      fill_act_d[head_idx] = 1'b0;
       fifo_rd_d                     = fifo_inc(fifo_rd_q);
       // Accumulate on _d, not _q: this block runs after the collector and
       // issue engine, whose same-cycle +1s (an AR issue or a last-beat

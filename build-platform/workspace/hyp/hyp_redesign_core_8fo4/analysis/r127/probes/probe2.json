@@ -1,0 +1,5400 @@
+{
+  "ast": {
+    "cross_module_path_count": 0,
+    "files_parsed": 1,
+    "instance_count": 0,
+    "kind": "timing_ir_v0",
+    "module_count": 7,
+    "note": "CST lowered to operator regions + FO4-ranked paths + P2 instance graph + sta_hints",
+    "opportunity_count": 9,
+    "path_count": 51,
+    "sta_hint_count": 8
+  },
+  "banner": "sv-timing-core 0.1.0 ir=ir-v6 measurement=delay-v50 correction=correction-v5 parser_pin=v0.13.5",
+  "budget_fo4": 8.0,
+  "budget_margin": 0.2,
+  "cross_module_paths": [],
+  "disclaimer": "structural FO4 from lower_to_ir — not STA sign-off",
+  "files": [
+    {
+      "byte_len": 5802,
+      "parse_ok": true,
+      "path": "probes/probe2.sv"
+    }
+  ],
+  "fo4_ps": 20.0,
+  "frequency_closure": {
+    "budget_fo4": 8.0,
+    "calibrated": null,
+    "closes": false,
+    "failing_paths": 24,
+    "intoout_failing": 7,
+    "max_freq_mhz": 1269.6657417093522,
+    "reg_to_reg_paths": 26,
+    "regtoreg_failing": 15,
+    "target_mhz": 5000.0,
+    "uninstantiated_modules": [],
+    "worst_endpoint": "p_f3_enable_wide.reg1/D",
+    "worst_path_fo4": 31.504354796678978,
+    "worst_path_id": 46,
+    "worst_path_kind": "regtoreg",
+    "worst_slack_fo4": -23.504354796678978,
+    "worst_startpoint": "p_f3_enable_wide.reg0/CP"
+  },
+  "instances": [],
+  "module_cleanliness": {
+    "mean_C": -0.13809523809523808,
+    "modules": 7,
+    "timing_pass": 3,
+    "weights": {
+      "aggressiveness": 0.2,
+      "always_comb": 0.4,
+      "always_ff": 0.4,
+      "timing_fail": 0.5
+    }
+  },
+  "modules": [
+    {
+      "cleanliness": {
+        "C": -0.20666666666666667,
+        "D_comb": 0.41666666666666663,
+        "D_ff": 0.4666666666666667,
+        "chosen": "seq_plus_comb",
+        "feasible": false,
+        "n_always_comb": 1,
+        "n_always_ff": 1,
+        "rationale": "no timing-pass set; argmax C with fail penalty → seq_plus_comb C=-0.207",
+        "timing_now": false,
+        "timing_pass": false
+      },
+      "file": "probes/probe2.sv",
+      "functions": [],
+      "gen_loops": [],
+      "id": 0,
+      "instances": [],
+      "localparams": [],
+      "name": "p_b6_nested_comb",
+      "node_count": 19,
+      "package_imports": [],
+      "parameters": [],
+      "ports": [
+        {
+          "direction": "input",
+          "name": "clk_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "pc_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "tgt_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "tvec_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "epc_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "pc4_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "fu_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "step_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "ack_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "ex_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "eret_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "trap_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "output",
+          "name": "x_o",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        }
+      ],
+      "region_count": 3,
+      "regions": [
+        {
+          "async_reset": null,
+          "clock_edge": "posedge",
+          "clock_name": "clk_i",
+          "id": 0,
+          "kind": "alwaysff",
+          "label": null,
+          "node_count": 12,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 1,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 2,
+          "kind": "alwayscomb",
+          "label": null,
+          "node_count": 6,
+          "reset_edge": null,
+          "reset_name": null
+        }
+      ]
+    },
+    {
+      "cleanliness": {
+        "C": -0.13999999999999999,
+        "D_comb": 0.0,
+        "D_ff": 0.0,
+        "chosen": "jit_datapath",
+        "feasible": true,
+        "n_always_comb": 0,
+        "n_always_ff": 1,
+        "rationale": "argmax C among timing-pass sets → jit_datapath C=-0.140 D_ff=0.00 D_comb=0.00 A=0.70",
+        "timing_now": false,
+        "timing_pass": true
+      },
+      "file": "probes/probe2.sv",
+      "functions": [],
+      "gen_loops": [
+        {
+          "body_assign_count": 9,
+          "bound_hint": "gen_b.st",
+          "genvar": "b",
+          "label": "gen_b",
+          "loc": {
+            "file": "probes/probe2.sv",
+            "start_line": 35
+          }
+        }
+      ],
+      "id": 1,
+      "instances": [],
+      "localparams": [],
+      "name": "p_b7_flat_sliced_comb",
+      "node_count": 22,
+      "package_imports": [],
+      "parameters": [],
+      "ports": [
+        {
+          "direction": "input",
+          "name": "clk_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "pc_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "tgt_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "tvec_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "epc_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "pc4_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "fu_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "step_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "ack_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "ex_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "eret_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "trap_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "output",
+          "name": "x_o",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        }
+      ],
+      "region_count": 11,
+      "regions": [
+        {
+          "async_reset": null,
+          "clock_edge": "posedge",
+          "clock_name": "clk_i",
+          "id": 3,
+          "kind": "alwaysff",
+          "label": null,
+          "node_count": 12,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 4,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 5,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 6,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 7,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 8,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 9,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 10,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 11,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 12,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 13,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        }
+      ]
+    },
+    {
+      "cleanliness": {
+        "C": 0.22666666666666668,
+        "D_comb": 0.25,
+        "D_ff": 0.4666666666666667,
+        "chosen": "seq_plus_comb",
+        "feasible": true,
+        "n_always_comb": 0,
+        "n_always_ff": 1,
+        "rationale": "argmax C among timing-pass sets → seq_plus_comb C=0.227 D_ff=0.47 D_comb=0.25 A=0.30",
+        "timing_now": true,
+        "timing_pass": true
+      },
+      "file": "probes/probe2.sv",
+      "functions": [],
+      "gen_loops": [
+        {
+          "body_assign_count": 2,
+          "bound_hint": "gen_s.sel",
+          "genvar": "s",
+          "label": "gen_s",
+          "loc": {
+            "file": "probes/probe2.sv",
+            "start_line": 54
+          }
+        }
+      ],
+      "id": 2,
+      "instances": [],
+      "localparams": [],
+      "name": "p_b8_mux2_sliced",
+      "node_count": 6,
+      "package_imports": [],
+      "parameters": [],
+      "ports": [
+        {
+          "direction": "input",
+          "name": "clk_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "a_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "b_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "k_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "output",
+          "name": "x_o",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        }
+      ],
+      "region_count": 3,
+      "regions": [
+        {
+          "async_reset": null,
+          "clock_edge": "posedge",
+          "clock_name": "clk_i",
+          "id": 14,
+          "kind": "alwaysff",
+          "label": null,
+          "node_count": 4,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 15,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 16,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        }
+      ]
+    },
+    {
+      "cleanliness": {
+        "C": -0.12,
+        "D_comb": 0.0,
+        "D_ff": 0.04999999999999999,
+        "chosen": "jit_datapath",
+        "feasible": true,
+        "n_always_comb": 0,
+        "n_always_ff": 1,
+        "rationale": "argmax C among timing-pass sets → jit_datapath C=-0.120 D_ff=0.05 D_comb=0.00 A=0.70",
+        "timing_now": false,
+        "timing_pass": true
+      },
+      "file": "probes/probe2.sv",
+      "functions": [],
+      "gen_loops": [],
+      "id": 3,
+      "instances": [],
+      "localparams": [],
+      "name": "p_h3_read_predecoded",
+      "node_count": 6,
+      "package_imports": [],
+      "parameters": [],
+      "ports": [
+        {
+          "direction": "input",
+          "name": "clk_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "ra_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "wa_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "we_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "wd_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "m_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "output",
+          "name": "d_o",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        }
+      ],
+      "region_count": 2,
+      "regions": [
+        {
+          "async_reset": null,
+          "clock_edge": "posedge",
+          "clock_name": "clk_i",
+          "id": 17,
+          "kind": "alwaysff",
+          "label": null,
+          "node_count": 5,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 18,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        }
+      ]
+    },
+    {
+      "cleanliness": {
+        "C": -0.20666666666666667,
+        "D_comb": 0.41666666666666663,
+        "D_ff": 0.4666666666666667,
+        "chosen": "seq_plus_comb",
+        "feasible": false,
+        "n_always_comb": 1,
+        "n_always_ff": 1,
+        "rationale": "no timing-pass set; argmax C with fail penalty → seq_plus_comb C=-0.207",
+        "timing_now": false,
+        "timing_pass": false
+      },
+      "file": "probes/probe2.sv",
+      "functions": [],
+      "gen_loops": [],
+      "id": 4,
+      "instances": [],
+      "localparams": [],
+      "name": "p_h4_read_late_cmp",
+      "node_count": 10,
+      "package_imports": [],
+      "parameters": [],
+      "ports": [
+        {
+          "direction": "input",
+          "name": "clk_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "ra_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "wa_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "we_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "wd_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "m_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "output",
+          "name": "d_o",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        }
+      ],
+      "region_count": 3,
+      "regions": [
+        {
+          "async_reset": null,
+          "clock_edge": "posedge",
+          "clock_name": "clk_i",
+          "id": 19,
+          "kind": "alwaysff",
+          "label": null,
+          "node_count": 6,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 20,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 21,
+          "kind": "alwayscomb",
+          "label": null,
+          "node_count": 3,
+          "reset_edge": null,
+          "reset_name": null
+        }
+      ]
+    },
+    {
+      "cleanliness": {
+        "C": -0.25999999999999995,
+        "D_comb": 0.35,
+        "D_ff": 0.4,
+        "chosen": "seq_plus_comb",
+        "feasible": false,
+        "n_always_comb": 1,
+        "n_always_ff": 1,
+        "rationale": "no timing-pass set; argmax C with fail penalty → seq_plus_comb C=-0.260",
+        "timing_now": false,
+        "timing_pass": false
+      },
+      "file": "probes/probe2.sv",
+      "functions": [],
+      "gen_loops": [],
+      "id": 5,
+      "instances": [],
+      "localparams": [],
+      "name": "p_f3_enable_wide",
+      "node_count": 12,
+      "package_imports": [],
+      "parameters": [],
+      "ports": [
+        {
+          "direction": "input",
+          "name": "clk_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "a_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "base_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "ptr_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "d_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "output",
+          "name": "q_o",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "output",
+          "name": "p_o",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        }
+      ],
+      "region_count": 5,
+      "regions": [
+        {
+          "async_reset": null,
+          "clock_edge": "posedge",
+          "clock_name": "clk_i",
+          "id": 22,
+          "kind": "alwaysff",
+          "label": null,
+          "node_count": 5,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 23,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 24,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 25,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 26,
+          "kind": "alwayscomb",
+          "label": null,
+          "node_count": 4,
+          "reset_edge": null,
+          "reset_name": null
+        }
+      ]
+    },
+    {
+      "cleanliness": {
+        "C": -0.25999999999999995,
+        "D_comb": 0.35,
+        "D_ff": 0.4,
+        "chosen": "seq_plus_comb",
+        "feasible": false,
+        "n_always_comb": 1,
+        "n_always_ff": 1,
+        "rationale": "no timing-pass set; argmax C with fail penalty → seq_plus_comb C=-0.260",
+        "timing_now": false,
+        "timing_pass": false
+      },
+      "file": "probes/probe2.sv",
+      "functions": [],
+      "gen_loops": [],
+      "id": 6,
+      "instances": [],
+      "localparams": [],
+      "name": "p_f4_write_uncond",
+      "node_count": 13,
+      "package_imports": [],
+      "parameters": [],
+      "ports": [
+        {
+          "direction": "input",
+          "name": "clk_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "a_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "base_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "ptr_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "v_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "input",
+          "name": "d_i",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "output",
+          "name": "q_o",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        },
+        {
+          "direction": "output",
+          "name": "p_o",
+          "packed_dims": null,
+          "type_name": "logic",
+          "uses_hierarchical": false
+        }
+      ],
+      "region_count": 5,
+      "regions": [
+        {
+          "async_reset": null,
+          "clock_edge": "posedge",
+          "clock_name": "clk_i",
+          "id": 27,
+          "kind": "alwaysff",
+          "label": null,
+          "node_count": 6,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 28,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 29,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 30,
+          "kind": "contassign",
+          "label": null,
+          "node_count": 1,
+          "reset_edge": null,
+          "reset_name": null
+        },
+        {
+          "async_reset": null,
+          "clock_edge": null,
+          "clock_name": null,
+          "id": 31,
+          "kind": "alwayscomb",
+          "label": null,
+          "node_count": 4,
+          "reset_edge": null,
+          "reset_name": null
+        }
+      ]
+    }
+  ],
+  "modules_requested": "*",
+  "opportunities": [
+    {
+      "changes_latency": false,
+      "estimated_fo4_after": 22.549999999999997,
+      "estimated_fo4_before": 27.5,
+      "kind": "balance_mux",
+      "loc": {
+        "end_col": 25,
+        "end_line": 18,
+        "file": "probes/probe2.sv",
+        "start_col": 23,
+        "start_line": 18
+      },
+      "path_id": 2,
+      "rationale": "path 2 class=ExclusiveCaseMux balance_mux on hottest node 15 (no latency)",
+      "requires_clock_in_scope": false
+    },
+    {
+      "changes_latency": false,
+      "estimated_fo4_after": 12.273735400473077,
+      "estimated_fo4_before": 14.967970000576925,
+      "kind": "balance_mux",
+      "loc": {
+        "end_col": 43,
+        "end_line": 95,
+        "file": "probes/probe2.sv",
+        "start_col": 39,
+        "start_line": 95
+      },
+      "path_id": 26,
+      "rationale": "path 26 class=IndependentLhsBundle balance_mux on hottest node 74 (no latency)",
+      "requires_clock_in_scope": false
+    },
+    {
+      "changes_latency": false,
+      "estimated_fo4_after": 12.273735400473077,
+      "estimated_fo4_before": 14.967970000576925,
+      "kind": "balance_mux",
+      "loc": {
+        "end_col": 18,
+        "end_line": 107,
+        "file": "probes/probe2.sv",
+        "start_col": 14,
+        "start_line": 107
+      },
+      "path_id": 31,
+      "rationale": "path 31 class=IndependentLhsBundle balance_mux on hottest node 87 (no latency)",
+      "requires_clock_in_scope": false
+    },
+    {
+      "changes_latency": false,
+      "estimated_fo4_after": 12.5,
+      "estimated_fo4_before": 13.1,
+      "kind": "split_assign",
+      "loc": {
+        "end_col": 14,
+        "end_line": 45,
+        "file": "probes/probe2.sv",
+        "start_col": 12,
+        "start_line": 45
+      },
+      "path_id": 38,
+      "rationale": "path 38 deep expr at node 40 (ops=29); split_assign (no latency)",
+      "requires_clock_in_scope": false
+    },
+    {
+      "changes_latency": true,
+      "estimated_fo4_after": 8.0,
+      "estimated_fo4_before": 13.1,
+      "kind": "insert_reg",
+      "loc": {
+        "end_col": 13,
+        "end_line": 37,
+        "file": "probes/probe2.sv",
+        "start_col": 12,
+        "start_line": 37
+      },
+      "path_id": 38,
+      "rationale": "path 38 JIT cut after node 32 (scratchboard cycle bar; slack -5.1 FO4)",
+      "requires_clock_in_scope": true
+    },
+    {
+      "changes_latency": true,
+      "estimated_fo4_after": 8.0,
+      "estimated_fo4_before": 15.245883937646084,
+      "kind": "insert_reg",
+      "loc": {
+        "end_col": 17,
+        "end_line": 82,
+        "file": "probes/probe2.sv",
+        "start_col": 15,
+        "start_line": 82
+      },
+      "path_id": 42,
+      "rationale": "path 42 JIT cut after node 62 (scratchboard cycle bar; slack -7.2 FO4)",
+      "requires_clock_in_scope": true
+    },
+    {
+      "changes_latency": false,
+      "estimated_fo4_after": 29.58274631649185,
+      "estimated_fo4_before": 31.236384796102055,
+      "kind": "split_assign",
+      "loc": {
+        "end_col": 12,
+        "end_line": 92,
+        "file": "probes/probe2.sv",
+        "start_col": 10,
+        "start_line": 92
+      },
+      "path_id": 45,
+      "rationale": "path 45 deep expr at node 70 (ops=3); split_assign (no latency)",
+      "requires_clock_in_scope": false
+    },
+    {
+      "changes_latency": false,
+      "estimated_fo4_after": 29.850716317068773,
+      "estimated_fo4_before": 31.504354796678978,
+      "kind": "split_assign",
+      "loc": {
+        "end_col": 12,
+        "end_line": 92,
+        "file": "probes/probe2.sv",
+        "start_col": 10,
+        "start_line": 92
+      },
+      "path_id": 46,
+      "rationale": "path 46 deep expr at node 70 (ops=3); split_assign (no latency)",
+      "requires_clock_in_scope": false
+    },
+    {
+      "changes_latency": false,
+      "estimated_fo4_after": 20.085716317068773,
+      "estimated_fo4_before": 20.65435479667898,
+      "kind": "split_assign",
+      "loc": {
+        "end_col": 12,
+        "end_line": 103,
+        "file": "probes/probe2.sv",
+        "start_col": 10,
+        "start_line": 103
+      },
+      "path_id": 50,
+      "rationale": "path 50 deep expr at node 83 (ops=3); split_assign (no latency)",
+      "requires_clock_in_scope": false
+    }
+  ],
+  "opt": {
+    "correction": "correction-v5",
+    "dials": {
+      "allow_reassoc": false,
+      "area_weight": 0.0,
+      "cache_mode": "unit",
+      "cut_strategy": "cost-balanced",
+      "effort": "balanced",
+      "jobs": null,
+      "max_cells_per_fo4": 16.0,
+      "max_passes": 4,
+      "max_stages_per_region": 1,
+      "min_gain_fo4": 2.0,
+      "slack_target_fo4": 0.0,
+      "worklist_width": 1
+    },
+    "digest": "O2:p4:w1:ccost-balanced:s1:g2.000:t0.000:a0.000:r0:ebalanced:jauto:kunit",
+    "level": "O2",
+    "measurement": "delay-v50"
+  },
+  "package_mode": false,
+  "packages": [],
+  "param_map_keys": [],
+  "pass_plan": {
+    "abort_correct": false,
+    "artifacts": 0,
+    "by_pattern": {
+      "P10": 18,
+      "P3": 14,
+      "P5": 7,
+      "P6": 6,
+      "P7": 2
+    },
+    "rationale": "S0 clean. Schedule S1–S5 over {\"P10\": 18, \"P3\": 14, \"P5\": 7, \"P6\": 6, \"P7\": 2}"
+  },
+  "path_class_summary": {
+    "adjusted_paths": 3,
+    "counts": {
+      "ExclusiveCaseMux": 2,
+      "IndependentLhsBundle": 2,
+      "Plain": 20,
+      "UnderBudget": 27
+    },
+    "max_adjusted_fo4": 31.504354796678978,
+    "max_raw_fo4": 83.9
+  },
+  "path_exceptions": [
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_b6_nested_comb",
+      "path_class": "under_budget",
+      "path_id": 0,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_b6_nested_comb|r0|n12|ack:1,epc:1,eret:1,ex:1,fu:1,pc4:1,pc:1,step:1,tgt:1,trap:1,tvec:1,x_q:1"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_b6_nested_comb",
+      "path_class": "under_budget",
+      "path_id": 1,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_b6_nested_comb|r1|n1|x_o:1"
+    },
+    {
+      "adjusted_fo4": 27.5,
+      "attempted": [
+        {
+          "candidate_fo4": 27.5,
+          "detector": "cache_hint",
+          "matched": true,
+          "note": "reused path_class from cache"
+        }
+      ],
+      "confidence": 0.874,
+      "evidence": "cache-hint: unique-case exclusive lhs=`x_d` arms=6 max_arm=26.1 crit=26.1 mux=0.0 prep_arm=0.0 leftover=0.0 dom=0.96 raw=83.9→26.1; dependency floor makespan=27.5 (deps=0) > deflated 26.1; chain L16(24.5)",
+      "module_name": "p_b6_nested_comb",
+      "path_class": "exclusive_case_mux",
+      "path_id": 2,
+      "raw_fo4": 83.9,
+      "signature": "v25|p_b6_nested_comb|r2|n6|x_d:6"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_b7_flat_sliced_comb",
+      "path_class": "under_budget",
+      "path_id": 3,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_b7_flat_sliced_comb|r3|n12|ack:1,epc:1,eret:1,ex:1,fu:1,pc4:1,pc:1,step:1,tgt:1,trap:1,tvec:1,x_q:1"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_b7_flat_sliced_comb",
+      "path_class": "under_budget",
+      "path_id": 4,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_b7_flat_sliced_comb|r4|n1|x_o:1"
+    },
+    {
+      "adjusted_fo4": 1.7,
+      "confidence": 1.0,
+      "evidence": "raw 1.7 ≤ budget 8.0 — cheap path",
+      "module_name": "p_b7_flat_sliced_comb",
+      "path_class": "under_budget",
+      "path_id": 5,
+      "raw_fo4": 1.7,
+      "signature": "v25|p_b7_flat_sliced_comb|r5|n1|st:1"
+    },
+    {
+      "adjusted_fo4": 1.6,
+      "confidence": 1.0,
+      "evidence": "raw 1.6 ≤ budget 8.0 — cheap path",
+      "module_name": "p_b7_flat_sliced_comb",
+      "path_class": "under_budget",
+      "path_id": 6,
+      "raw_fo4": 1.6,
+      "signature": "v25|p_b7_flat_sliced_comb|r6|n1|cf:1"
+    },
+    {
+      "adjusted_fo4": 2.4,
+      "confidence": 1.0,
+      "evidence": "raw 2.4 ≤ budget 8.0 — cheap path",
+      "module_name": "p_b7_flat_sliced_comb",
+      "path_class": "under_budget",
+      "path_id": 7,
+      "raw_fo4": 2.4,
+      "signature": "v25|p_b7_flat_sliced_comb|r7|n1|s_tgt:1"
+    },
+    {
+      "adjusted_fo4": 4.75,
+      "confidence": 1.0,
+      "evidence": "raw 4.8 ≤ budget 8.0 — cheap path",
+      "module_name": "p_b7_flat_sliced_comb",
+      "path_class": "under_budget",
+      "path_id": 8,
+      "raw_fo4": 4.75,
+      "signature": "v25|p_b7_flat_sliced_comb|r8|n1|s_tvec:1"
+    },
+    {
+      "adjusted_fo4": 5.75,
+      "confidence": 1.0,
+      "evidence": "raw 5.8 ≤ budget 8.0 — cheap path",
+      "module_name": "p_b7_flat_sliced_comb",
+      "path_class": "under_budget",
+      "path_id": 9,
+      "raw_fo4": 5.75,
+      "signature": "v25|p_b7_flat_sliced_comb|r9|n1|s_epc:1"
+    },
+    {
+      "adjusted_fo4": 5.75,
+      "confidence": 1.0,
+      "evidence": "raw 5.8 ≤ budget 8.0 — cheap path",
+      "module_name": "p_b7_flat_sliced_comb",
+      "path_class": "under_budget",
+      "path_id": 10,
+      "raw_fo4": 5.75,
+      "signature": "v25|p_b7_flat_sliced_comb|r10|n1|s_pc4:1"
+    },
+    {
+      "adjusted_fo4": 4.75,
+      "confidence": 1.0,
+      "evidence": "raw 4.8 ≤ budget 8.0 — cheap path",
+      "module_name": "p_b7_flat_sliced_comb",
+      "path_class": "under_budget",
+      "path_id": 11,
+      "raw_fo4": 4.75,
+      "signature": "v25|p_b7_flat_sliced_comb|r11|n1|s_pc:1"
+    },
+    {
+      "adjusted_fo4": 4.75,
+      "confidence": 1.0,
+      "evidence": "raw 4.8 ≤ budget 8.0 — cheap path",
+      "module_name": "p_b7_flat_sliced_comb",
+      "path_class": "under_budget",
+      "path_id": 12,
+      "raw_fo4": 4.75,
+      "signature": "v25|p_b7_flat_sliced_comb|r12|n1|s_hold:1"
+    },
+    {
+      "adjusted_fo4": 6.0,
+      "confidence": 1.0,
+      "evidence": "raw 6.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_b7_flat_sliced_comb",
+      "path_class": "under_budget",
+      "path_id": 13,
+      "raw_fo4": 6.0,
+      "signature": "v25|p_b7_flat_sliced_comb|r13|n1|x_d:1"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_b8_mux2_sliced",
+      "path_class": "under_budget",
+      "path_id": 14,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_b8_mux2_sliced|r14|n4|a:1,b:1,k:1,x_o:1"
+    },
+    {
+      "adjusted_fo4": 3.0,
+      "confidence": 1.0,
+      "evidence": "raw 3.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_b8_mux2_sliced",
+      "path_class": "under_budget",
+      "path_id": 15,
+      "raw_fo4": 3.0,
+      "signature": "v25|p_b8_mux2_sliced|r15|n1|sel:1"
+    },
+    {
+      "adjusted_fo4": 2.5,
+      "confidence": 1.0,
+      "evidence": "raw 2.5 ≤ budget 8.0 — cheap path",
+      "module_name": "p_b8_mux2_sliced",
+      "path_class": "under_budget",
+      "path_id": 16,
+      "raw_fo4": 2.5,
+      "signature": "v25|p_b8_mux2_sliced|r16|n1|x_d:1"
+    },
+    {
+      "adjusted_fo4": 3.2458839376460835,
+      "confidence": 1.0,
+      "evidence": "raw 3.2 ≤ budget 8.0 — cheap path",
+      "module_name": "p_h3_read_predecoded",
+      "path_class": "under_budget",
+      "path_id": 17,
+      "raw_fo4": 3.2458839376460835,
+      "signature": "v25|p_h3_read_predecoded|r17|n5|byp_q:1,d_o:1,mem_q:1,ra_q:1,wd_q:1"
+    },
+    {
+      "adjusted_fo4": 26.0,
+      "attempted": [
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "not a multi-LHS statement-order bundle"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_h3_read_predecoded",
+      "path_class": "plain",
+      "path_id": 18,
+      "raw_fo4": 26.0,
+      "signature": "v25|p_h3_read_predecoded|r18|n1|d_d:1"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_h4_read_late_cmp",
+      "path_class": "under_budget",
+      "path_id": 19,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_h4_read_late_cmp|r19|n6|d_o:1,mem_q:1,ra_q:1,wa_q:1,wd_q:1,we_q:1"
+    },
+    {
+      "adjusted_fo4": 10.245883937646084,
+      "attempted": [
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "not a multi-LHS statement-order bundle"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_h4_read_late_cmp",
+      "path_class": "plain",
+      "path_id": 20,
+      "raw_fo4": 10.245883937646084,
+      "signature": "v25|p_h4_read_late_cmp|r20|n1|hit:1"
+    },
+    {
+      "adjusted_fo4": 9.0,
+      "attempted": [
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "candidate_fo4": 5.0,
+          "detector": "exclusive_case_mux",
+          "matched": true,
+          "note": "unique-case exclusive lhs=`d_d` arms=3 max_arm=5.0 crit=5.0 mux=0.0 prep_arm=0.0 leftover=0.0 dom=0.78 raw=9.0→5.0"
+        },
+        {
+          "candidate_fo4": 5.0,
+          "detector": "exclusive_if_chain",
+          "matched": true,
+          "note": "priority-if exclusive lhs=`d_d` arms=3 max_arm=5.0 crit=5.0 mux=0.0 prep_arm=0.0 leftover=0.0 dom=0.78 raw=9.0→5.0"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "not a multi-LHS statement-order bundle"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        }
+      ],
+      "confidence": 0.79,
+      "evidence": "unique-case exclusive lhs=`d_d` arms=3 max_arm=5.0 crit=5.0 mux=0.0 prep_arm=0.0 leftover=0.0 dom=0.78 raw=9.0→5.0; dependency floor makespan=9.0 (deps=1) > deflated 5.0; chain L82(5.0)",
+      "module_name": "p_h4_read_late_cmp",
+      "path_class": "exclusive_case_mux",
+      "path_id": 21,
+      "raw_fo4": 9.0,
+      "signature": "v25|p_h4_read_late_cmp|r21|n3|d_d:3"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_f3_enable_wide",
+      "path_class": "under_budget",
+      "path_id": 22,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_f3_enable_wide|r22|n5|a:1,base_q:1,d:1,data_q:1,ptr_q:1"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_f3_enable_wide",
+      "path_class": "under_budget",
+      "path_id": 23,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_f3_enable_wide|r23|n1|q_o:1"
+    },
+    {
+      "adjusted_fo4": 11.2,
+      "attempted": [
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "not a multi-LHS statement-order bundle"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_f3_enable_wide",
+      "path_class": "plain",
+      "path_id": 24,
+      "raw_fo4": 11.2,
+      "signature": "v25|p_f3_enable_wide|r24|n1|p_o:1"
+    },
+    {
+      "adjusted_fo4": 27.736384796102055,
+      "attempted": [
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "not a multi-LHS statement-order bundle"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_f3_enable_wide",
+      "path_class": "plain",
+      "path_id": 25,
+      "raw_fo4": 27.736384796102055,
+      "signature": "v25|p_f3_enable_wide|r25|n1|acc:1"
+    },
+    {
+      "adjusted_fo4": 14.967970000576925,
+      "attempted": [
+        {
+          "candidate_fo4": 14.967970000576925,
+          "detector": "cache_hint",
+          "matched": true,
+          "note": "reused path_class from cache"
+        }
+      ],
+      "confidence": 0.6649999999999999,
+      "evidence": "cache-hint: parallel-timing makespan=15.0 cycles=2 deps=0 lhs=2 vars_ready=2 fns=0 raw=18.5→15.0",
+      "module_name": "p_f3_enable_wide",
+      "path_class": "independent_lhs_bundle",
+      "path_id": 26,
+      "raw_fo4": 18.467970000576926,
+      "signature": "v25|p_f3_enable_wide|r26|n4|data_d:2,ptr_d:2"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_f4_write_uncond",
+      "path_class": "under_budget",
+      "path_id": 27,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_f4_write_uncond|r27|n6|a:1,base_q:1,d:1,data_q:1,ptr_q:1,v:1"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_f4_write_uncond",
+      "path_class": "under_budget",
+      "path_id": 28,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_f4_write_uncond|r28|n1|q_o:1"
+    },
+    {
+      "adjusted_fo4": 11.2,
+      "attempted": [
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "not a multi-LHS statement-order bundle"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_f4_write_uncond",
+      "path_class": "plain",
+      "path_id": 29,
+      "raw_fo4": 11.2,
+      "signature": "v25|p_f4_write_uncond|r29|n1|p_o:1"
+    },
+    {
+      "adjusted_fo4": 16.886384796102057,
+      "attempted": [
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "not a multi-LHS statement-order bundle"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_f4_write_uncond",
+      "path_class": "plain",
+      "path_id": 30,
+      "raw_fo4": 16.886384796102057,
+      "signature": "v25|p_f4_write_uncond|r30|n1|acc:1"
+    },
+    {
+      "adjusted_fo4": 14.967970000576925,
+      "attempted": [
+        {
+          "candidate_fo4": 14.967970000576925,
+          "detector": "cache_hint",
+          "matched": true,
+          "note": "reused path_class from cache"
+        }
+      ],
+      "confidence": 0.6649999999999999,
+      "evidence": "cache-hint: parallel-timing makespan=15.0 cycles=2 deps=0 lhs=2 vars_ready=2 fns=0 raw=18.5→15.0",
+      "module_name": "p_f4_write_uncond",
+      "path_class": "independent_lhs_bundle",
+      "path_id": 31,
+      "raw_fo4": 18.467970000576926,
+      "signature": "v25|p_f4_write_uncond|r31|n4|data_d:2,ptr_d:2"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_b6_nested_comb",
+      "path_class": "under_budget",
+      "path_id": 32,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_b6_nested_comb|r2|n1|x_d:1"
+    },
+    {
+      "adjusted_fo4": 27.5,
+      "attempted": [
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "not a multi-LHS statement-order bundle"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_b6_nested_comb",
+      "path_class": "plain",
+      "path_id": 33,
+      "raw_fo4": 27.5,
+      "signature": "v25|p_b6_nested_comb|r2|n1|x_d:1"
+    },
+    {
+      "adjusted_fo4": 26.1,
+      "attempted": [
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "not a multi-LHS statement-order bundle"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_b6_nested_comb",
+      "path_class": "plain",
+      "path_id": 34,
+      "raw_fo4": 26.1,
+      "signature": "v25|p_b6_nested_comb|r2|n1|x_d:1"
+    },
+    {
+      "adjusted_fo4": 13.1,
+      "attempted": [
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "not a multi-LHS statement-order bundle"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_b6_nested_comb",
+      "path_class": "plain",
+      "path_id": 35,
+      "raw_fo4": 13.1,
+      "signature": "v25|p_b6_nested_comb|r2|n1|x_d:1"
+    },
+    {
+      "adjusted_fo4": 13.1,
+      "attempted": [
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "not a multi-LHS statement-order bundle"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_b6_nested_comb",
+      "path_class": "plain",
+      "path_id": 36,
+      "raw_fo4": 13.1,
+      "signature": "v25|p_b6_nested_comb|r2|n1|x_d:1"
+    },
+    {
+      "adjusted_fo4": 13.1,
+      "attempted": [
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "not a multi-LHS statement-order bundle"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_b6_nested_comb",
+      "path_class": "plain",
+      "path_id": 37,
+      "raw_fo4": 13.1,
+      "signature": "v25|p_b6_nested_comb|r2|n1|x_d:1"
+    },
+    {
+      "adjusted_fo4": 13.1,
+      "attempted": [
+        {
+          "detector": "p5_composed_cone",
+          "matched": true,
+          "note": "P5 composed cone — exclusive/dense/parallel-timing; IndependentLhsBundle only if next-state FSM"
+        },
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "skipped on P5 composed cone (gemm serial chain)"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_b7_flat_sliced_comb",
+      "path_class": "plain",
+      "path_id": 38,
+      "raw_fo4": 13.1,
+      "signature": "v25|p_b7_flat_sliced_comb|r13|n3|s_epc:1,st:1,x_d:1"
+    },
+    {
+      "adjusted_fo4": 5.5,
+      "confidence": 1.0,
+      "evidence": "raw 5.5 ≤ budget 8.0 — cheap path",
+      "module_name": "p_b8_mux2_sliced",
+      "path_class": "under_budget",
+      "path_id": 39,
+      "raw_fo4": 5.5,
+      "signature": "v25|p_b8_mux2_sliced|r16|n2|sel:1,x_d:1"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_h4_read_late_cmp",
+      "path_class": "under_budget",
+      "path_id": 40,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_h4_read_late_cmp|r21|n1|d_d:1"
+    },
+    {
+      "adjusted_fo4": 12.245883937646084,
+      "attempted": [
+        {
+          "detector": "p5_composed_cone",
+          "matched": true,
+          "note": "P5 composed cone — exclusive/dense/parallel-timing; IndependentLhsBundle only if next-state FSM"
+        },
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "skipped on P5 composed cone (gemm serial chain)"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_h4_read_late_cmp",
+      "path_class": "plain",
+      "path_id": 41,
+      "raw_fo4": 12.245883937646084,
+      "signature": "v25|p_h4_read_late_cmp|r21|n2|d_d:1,hit:1"
+    },
+    {
+      "adjusted_fo4": 15.245883937646084,
+      "attempted": [
+        {
+          "detector": "p5_composed_cone",
+          "matched": true,
+          "note": "P5 composed cone — exclusive/dense/parallel-timing; IndependentLhsBundle only if next-state FSM"
+        },
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "skipped on P5 composed cone (gemm serial chain)"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_h4_read_late_cmp",
+      "path_class": "plain",
+      "path_id": 42,
+      "raw_fo4": 15.245883937646084,
+      "signature": "v25|p_h4_read_late_cmp|r21|n2|d_d:1,hit:1"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_f3_enable_wide",
+      "path_class": "under_budget",
+      "path_id": 43,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_f3_enable_wide|r26|n1|data_d:1"
+    },
+    {
+      "adjusted_fo4": 11.2,
+      "attempted": [
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "not a multi-LHS statement-order bundle"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_f3_enable_wide",
+      "path_class": "plain",
+      "path_id": 44,
+      "raw_fo4": 11.2,
+      "signature": "v25|p_f3_enable_wide|r26|n1|ptr_d:1"
+    },
+    {
+      "adjusted_fo4": 31.236384796102055,
+      "attempted": [
+        {
+          "detector": "p5_composed_cone",
+          "matched": true,
+          "note": "P5 composed cone — exclusive/dense/parallel-timing; IndependentLhsBundle only if next-state FSM"
+        },
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "skipped on P5 composed cone (gemm serial chain)"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_f3_enable_wide",
+      "path_class": "plain",
+      "path_id": 45,
+      "raw_fo4": 31.236384796102055,
+      "signature": "v25|p_f3_enable_wide|r26|n2|acc:1,data_d:1"
+    },
+    {
+      "adjusted_fo4": 31.504354796678978,
+      "attempted": [
+        {
+          "detector": "p5_composed_cone",
+          "matched": true,
+          "note": "P5 composed cone — exclusive/dense/parallel-timing; IndependentLhsBundle only if next-state FSM"
+        },
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "skipped on P5 composed cone (gemm serial chain)"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_f3_enable_wide",
+      "path_class": "plain",
+      "path_id": 46,
+      "raw_fo4": 31.504354796678978,
+      "signature": "v25|p_f3_enable_wide|r26|n2|acc:1,ptr_d:1"
+    },
+    {
+      "adjusted_fo4": 0.0,
+      "confidence": 1.0,
+      "evidence": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "module_name": "p_f4_write_uncond",
+      "path_class": "under_budget",
+      "path_id": 47,
+      "raw_fo4": 0.0,
+      "signature": "v25|p_f4_write_uncond|r31|n1|data_d:1"
+    },
+    {
+      "adjusted_fo4": 11.2,
+      "attempted": [
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "not a multi-LHS statement-order bundle"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_f4_write_uncond",
+      "path_class": "plain",
+      "path_id": 48,
+      "raw_fo4": 11.2,
+      "signature": "v25|p_f4_write_uncond|r31|n1|ptr_d:1"
+    },
+    {
+      "adjusted_fo4": 14.7,
+      "attempted": [
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "not a multi-LHS statement-order bundle"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_f4_write_uncond",
+      "path_class": "plain",
+      "path_id": 49,
+      "raw_fo4": 14.7,
+      "signature": "v25|p_f4_write_uncond|r31|n1|data_d:1"
+    },
+    {
+      "adjusted_fo4": 20.65435479667898,
+      "attempted": [
+        {
+          "detector": "p5_composed_cone",
+          "matched": true,
+          "note": "P5 composed cone — exclusive/dense/parallel-timing; IndependentLhsBundle only if next-state FSM"
+        },
+        {
+          "detector": "atomic_over_budget",
+          "matched": false,
+          "note": "no Mul/DivRem node alone over budget"
+        },
+        {
+          "detector": "exclusive_case_mux",
+          "matched": false,
+          "note": "no dominant shared-LHS arm sum"
+        },
+        {
+          "detector": "exclusive_if_chain",
+          "matched": false,
+          "note": "no if-chain exclusive pattern"
+        },
+        {
+          "detector": "independent_lhs_bundle",
+          "matched": false,
+          "note": "skipped on P5 composed cone (gemm serial chain)"
+        },
+        {
+          "detector": "dense_control_cone",
+          "matched": false,
+          "note": "not a dense small-op control cone"
+        },
+        {
+          "detector": "parallel_timing",
+          "matched": false,
+          "note": "makespan not below serial sum"
+        }
+      ],
+      "confidence": 0.7,
+      "evidence": "over-budget plain path — no exclusive/atomic exception",
+      "module_name": "p_f4_write_uncond",
+      "path_class": "plain",
+      "path_id": 50,
+      "raw_fo4": 20.65435479667898,
+      "signature": "v25|p_f4_write_uncond|r31|n2|acc:1,ptr_d:1"
+    }
+  ],
+  "paths": [
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+      "closes": false,
+      "endpoint": "p_f3_enable_wide.reg1/D",
+      "max_freq_mhz": 1269.6657417093522,
+      "module_id": 5,
+      "multi_cycle": false,
+      "node_count": 2,
+      "path_class": "plain",
+      "path_id": 46,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 12,
+        "end_line": 92,
+        "file": "probes/probe2.sv",
+        "start_col": 10,
+        "start_line": 92
+      },
+      "slack_fo4": -23.504354796678978,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_f3_enable_wide.reg0/CP",
+      "total_fo4": 31.504354796678978,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+      "closes": false,
+      "endpoint": "p_f3_enable_wide.reg1/D",
+      "max_freq_mhz": 1280.5579218306834,
+      "module_id": 5,
+      "multi_cycle": false,
+      "node_count": 2,
+      "path_class": "plain",
+      "path_id": 45,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 12,
+        "end_line": 92,
+        "file": "probes/probe2.sv",
+        "start_col": 10,
+        "start_line": 92
+      },
+      "slack_fo4": -23.236384796102055,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_f3_enable_wide.reg0/CP",
+      "total_fo4": 31.236384796102055,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+      "closes": false,
+      "endpoint": "p_f3_enable_wide.out0",
+      "max_freq_mhz": 1442.1490145183384,
+      "module_id": 5,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "plain",
+      "path_id": 25,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 12,
+        "end_line": 92,
+        "file": "probes/probe2.sv",
+        "start_col": 10,
+        "start_line": 92
+      },
+      "slack_fo4": -19.736384796102055,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_f3_enable_wide.in0",
+      "total_fo4": 27.736384796102055,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "cache-hint: unique-case exclusive lhs=`x_d` arms=6 max_arm=26.1 crit=26.1 mux=0.0 prep_arm=0.0 leftover=0.0 dom=0.96 raw=83.9→26.1; dependency floor makespan=27.5 (deps=0) > deflated 26.1; chain L16(24.5)",
+      "closes": false,
+      "endpoint": "p_b6_nested_comb.out0",
+      "max_freq_mhz": 1454.5454545454545,
+      "module_id": 0,
+      "multi_cycle": false,
+      "node_count": 6,
+      "path_class": "exclusive_case_mux",
+      "path_id": 2,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 25,
+        "end_line": 18,
+        "file": "probes/probe2.sv",
+        "start_col": 23,
+        "start_line": 18
+      },
+      "slack_fo4": -19.5,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_b6_nested_comb.in0",
+      "total_fo4": 27.5,
+      "total_fo4_raw": 83.9
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception",
+      "closes": false,
+      "endpoint": "p_b6_nested_comb.reg1/D",
+      "max_freq_mhz": 1454.5454545454545,
+      "module_id": 0,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "plain",
+      "path_id": 33,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 23,
+        "end_line": 16,
+        "file": "probes/probe2.sv",
+        "start_col": 21,
+        "start_line": 16
+      },
+      "slack_fo4": -19.5,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_b6_nested_comb.reg0/CP",
+      "total_fo4": 27.5,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception",
+      "closes": false,
+      "endpoint": "p_b6_nested_comb.reg1/D",
+      "max_freq_mhz": 1532.5670498084291,
+      "module_id": 0,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "plain",
+      "path_id": 34,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 25,
+        "end_line": 18,
+        "file": "probes/probe2.sv",
+        "start_col": 23,
+        "start_line": 18
+      },
+      "slack_fo4": -18.1,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_b6_nested_comb.reg0/CP",
+      "total_fo4": 26.1,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception",
+      "closes": false,
+      "endpoint": "p_h3_read_predecoded.reg1/D",
+      "max_freq_mhz": 1538.4615384615383,
+      "module_id": 3,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "plain",
+      "path_id": 18,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 12,
+        "end_line": 69,
+        "file": "probes/probe2.sv",
+        "start_col": 10,
+        "start_line": 69
+      },
+      "slack_fo4": -18.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_h3_read_predecoded.reg0/CP",
+      "total_fo4": 26.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+      "closes": false,
+      "endpoint": "p_f4_write_uncond.reg1/D",
+      "max_freq_mhz": 1936.6375950136974,
+      "module_id": 6,
+      "multi_cycle": false,
+      "node_count": 2,
+      "path_class": "plain",
+      "path_id": 50,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 12,
+        "end_line": 103,
+        "file": "probes/probe2.sv",
+        "start_col": 10,
+        "start_line": 103
+      },
+      "slack_fo4": -12.65435479667898,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_f4_write_uncond.reg0/CP",
+      "total_fo4": 20.65435479667898,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+      "closes": false,
+      "endpoint": "p_f4_write_uncond.out0",
+      "max_freq_mhz": 2368.7722673021963,
+      "module_id": 6,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "plain",
+      "path_id": 30,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 12,
+        "end_line": 103,
+        "file": "probes/probe2.sv",
+        "start_col": 10,
+        "start_line": 103
+      },
+      "slack_fo4": -8.886384796102057,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_f4_write_uncond.in0",
+      "total_fo4": 16.886384796102057,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception",
+      "closes": false,
+      "endpoint": "p_h4_read_late_cmp.reg1/D",
+      "max_freq_mhz": 2623.658960254152,
+      "module_id": 4,
+      "multi_cycle": false,
+      "node_count": 2,
+      "path_class": "plain",
+      "path_id": 42,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 12,
+        "end_line": 78,
+        "file": "probes/probe2.sv",
+        "start_col": 10,
+        "start_line": 78
+      },
+      "slack_fo4": -7.245883937646084,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_h4_read_late_cmp.reg0/CP",
+      "total_fo4": 15.245883937646084,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "cache-hint: parallel-timing makespan=15.0 cycles=2 deps=0 lhs=2 vars_ready=2 fns=0 raw=18.5→15.0; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+      "closes": false,
+      "endpoint": "p_f3_enable_wide.out0",
+      "max_freq_mhz": 2672.373073867615,
+      "module_id": 5,
+      "multi_cycle": false,
+      "node_count": 4,
+      "path_class": "independent_lhs_bundle",
+      "path_id": 26,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 43,
+        "end_line": 95,
+        "file": "probes/probe2.sv",
+        "start_col": 39,
+        "start_line": 95
+      },
+      "slack_fo4": -6.9679700005769245,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_f3_enable_wide.in0",
+      "total_fo4": 14.967970000576925,
+      "total_fo4_raw": 18.467970000576926
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "cache-hint: parallel-timing makespan=15.0 cycles=2 deps=0 lhs=2 vars_ready=2 fns=0 raw=18.5→15.0; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+      "closes": false,
+      "endpoint": "p_f4_write_uncond.out0",
+      "max_freq_mhz": 2672.373073867615,
+      "module_id": 6,
+      "multi_cycle": false,
+      "node_count": 4,
+      "path_class": "independent_lhs_bundle",
+      "path_id": 31,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 18,
+        "end_line": 107,
+        "file": "probes/probe2.sv",
+        "start_col": 14,
+        "start_line": 107
+      },
+      "slack_fo4": -6.9679700005769245,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_f4_write_uncond.in0",
+      "total_fo4": 14.967970000576925,
+      "total_fo4_raw": 18.467970000576926
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+      "closes": false,
+      "endpoint": "p_f4_write_uncond.reg1/D",
+      "max_freq_mhz": 2721.0884353741503,
+      "module_id": 6,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "plain",
+      "path_id": 49,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 17,
+        "end_line": 106,
+        "file": "probes/probe2.sv",
+        "start_col": 12,
+        "start_line": 106
+      },
+      "slack_fo4": -6.699999999999999,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_f4_write_uncond.reg0/CP",
+      "total_fo4": 14.7,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception",
+      "closes": false,
+      "endpoint": "p_b6_nested_comb.reg1/D",
+      "max_freq_mhz": 3053.4351145038167,
+      "module_id": 0,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "plain",
+      "path_id": 35,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 22,
+        "end_line": 19,
+        "file": "probes/probe2.sv",
+        "start_col": 20,
+        "start_line": 19
+      },
+      "slack_fo4": -5.1,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_b6_nested_comb.reg0/CP",
+      "total_fo4": 13.1,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception",
+      "closes": false,
+      "endpoint": "p_b6_nested_comb.reg1/D",
+      "max_freq_mhz": 3053.4351145038167,
+      "module_id": 0,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "plain",
+      "path_id": 36,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 24,
+        "end_line": 20,
+        "file": "probes/probe2.sv",
+        "start_col": 22,
+        "start_line": 20
+      },
+      "slack_fo4": -5.1,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_b6_nested_comb.reg0/CP",
+      "total_fo4": 13.1,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception",
+      "closes": false,
+      "endpoint": "p_b6_nested_comb.reg1/D",
+      "max_freq_mhz": 3053.4351145038167,
+      "module_id": 0,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "plain",
+      "path_id": 37,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 14,
+        "end_line": 21,
+        "file": "probes/probe2.sv",
+        "start_col": 12,
+        "start_line": 21
+      },
+      "slack_fo4": -5.1,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_b6_nested_comb.reg0/CP",
+      "total_fo4": 13.1,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception",
+      "closes": false,
+      "endpoint": "p_b7_flat_sliced_comb.reg1/D",
+      "max_freq_mhz": 3053.4351145038167,
+      "module_id": 1,
+      "multi_cycle": false,
+      "node_count": 3,
+      "path_class": "plain",
+      "path_id": 38,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 14,
+        "end_line": 45,
+        "file": "probes/probe2.sv",
+        "start_col": 12,
+        "start_line": 45
+      },
+      "slack_fo4": -5.1,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_b7_flat_sliced_comb.reg0/CP",
+      "total_fo4": 13.1,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception",
+      "closes": false,
+      "endpoint": "p_h4_read_late_cmp.reg1/D",
+      "max_freq_mhz": 3266.4036507019873,
+      "module_id": 4,
+      "multi_cycle": false,
+      "node_count": 2,
+      "path_class": "plain",
+      "path_id": 41,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 12,
+        "end_line": 78,
+        "file": "probes/probe2.sv",
+        "start_col": 10,
+        "start_line": 78
+      },
+      "slack_fo4": -4.245883937646084,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_h4_read_late_cmp.reg0/CP",
+      "total_fo4": 12.245883937646084,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+      "closes": false,
+      "endpoint": "p_f3_enable_wide.out0",
+      "max_freq_mhz": 3571.428571428572,
+      "module_id": 5,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "plain",
+      "path_id": 24,
+      "path_kind": "regtoout",
+      "primary_loc": {
+        "end_col": 33,
+        "end_line": 91,
+        "file": "probes/probe2.sv",
+        "start_col": 31,
+        "start_line": 91
+      },
+      "slack_fo4": -3.1999999999999993,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_f3_enable_wide.reg0/CP",
+      "total_fo4": 11.2,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+      "closes": false,
+      "endpoint": "p_f4_write_uncond.out0",
+      "max_freq_mhz": 3571.428571428572,
+      "module_id": 6,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "plain",
+      "path_id": 29,
+      "path_kind": "regtoout",
+      "primary_loc": {
+        "end_col": 33,
+        "end_line": 102,
+        "file": "probes/probe2.sv",
+        "start_col": 31,
+        "start_line": 102
+      },
+      "slack_fo4": -3.1999999999999993,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_f4_write_uncond.reg0/CP",
+      "total_fo4": 11.2,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+      "closes": false,
+      "endpoint": "p_f3_enable_wide.reg1/D",
+      "max_freq_mhz": 3571.428571428572,
+      "module_id": 5,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "plain",
+      "path_id": 44,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 26,
+        "end_line": 94,
+        "file": "probes/probe2.sv",
+        "start_col": 22,
+        "start_line": 94
+      },
+      "slack_fo4": -3.1999999999999993,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_f3_enable_wide.reg0/CP",
+      "total_fo4": 11.2,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+      "closes": false,
+      "endpoint": "p_f4_write_uncond.reg1/D",
+      "max_freq_mhz": 3571.428571428572,
+      "module_id": 6,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "plain",
+      "path_id": 48,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 26,
+        "end_line": 105,
+        "file": "probes/probe2.sv",
+        "start_col": 22,
+        "start_line": 105
+      },
+      "slack_fo4": -3.1999999999999993,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_f4_write_uncond.reg0/CP",
+      "total_fo4": 11.2,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "over-budget plain path — no exclusive/atomic exception",
+      "closes": false,
+      "endpoint": "p_h4_read_late_cmp.out0",
+      "max_freq_mhz": 3904.006744896791,
+      "module_id": 4,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "plain",
+      "path_id": 20,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 12,
+        "end_line": 78,
+        "file": "probes/probe2.sv",
+        "start_col": 10,
+        "start_line": 78
+      },
+      "slack_fo4": -2.2458839376460844,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_h4_read_late_cmp.in0",
+      "total_fo4": 10.245883937646084,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "unique-case exclusive lhs=`d_d` arms=3 max_arm=5.0 crit=5.0 mux=0.0 prep_arm=0.0 leftover=0.0 dom=0.78 raw=9.0→5.0; dependency floor makespan=9.0 (deps=1) > deflated 5.0; chain L82(5.0)",
+      "closes": false,
+      "endpoint": "p_h4_read_late_cmp.out0",
+      "max_freq_mhz": 4444.444444444445,
+      "module_id": 4,
+      "multi_cycle": false,
+      "node_count": 3,
+      "path_class": "exclusive_case_mux",
+      "path_id": 21,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 17,
+        "end_line": 82,
+        "file": "probes/probe2.sv",
+        "start_col": 15,
+        "start_line": 82
+      },
+      "slack_fo4": -1.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_h4_read_late_cmp.in0",
+      "total_fo4": 9.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 6.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_b7_flat_sliced_comb.out0",
+      "max_freq_mhz": 6666.666666666667,
+      "module_id": 1,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 13,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 14,
+        "end_line": 45,
+        "file": "probes/probe2.sv",
+        "start_col": 12,
+        "start_line": 45
+      },
+      "slack_fo4": 2.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_b7_flat_sliced_comb.in0",
+      "total_fo4": 6.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 5.8 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_b7_flat_sliced_comb.out0",
+      "max_freq_mhz": 6956.521739130435,
+      "module_id": 1,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 9,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 16,
+        "end_line": 41,
+        "file": "probes/probe2.sv",
+        "start_col": 12,
+        "start_line": 41
+      },
+      "slack_fo4": 2.25,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_b7_flat_sliced_comb.in0",
+      "total_fo4": 5.75,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 5.8 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_b7_flat_sliced_comb.out0",
+      "max_freq_mhz": 6956.521739130435,
+      "module_id": 1,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 10,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 16,
+        "end_line": 42,
+        "file": "probes/probe2.sv",
+        "start_col": 12,
+        "start_line": 42
+      },
+      "slack_fo4": 2.25,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_b7_flat_sliced_comb.in0",
+      "total_fo4": 5.75,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 5.5 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_b8_mux2_sliced.reg1/D",
+      "max_freq_mhz": 7272.727272727274,
+      "module_id": 2,
+      "multi_cycle": false,
+      "node_count": 2,
+      "path_class": "under_budget",
+      "path_id": 39,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 14,
+        "end_line": 56,
+        "file": "probes/probe2.sv",
+        "start_col": 12,
+        "start_line": 56
+      },
+      "slack_fo4": 2.5,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_b8_mux2_sliced.reg0/CP",
+      "total_fo4": 5.5,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 4.8 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_b7_flat_sliced_comb.out0",
+      "max_freq_mhz": 8421.052631578948,
+      "module_id": 1,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 8,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 17,
+        "end_line": 40,
+        "file": "probes/probe2.sv",
+        "start_col": 12,
+        "start_line": 40
+      },
+      "slack_fo4": 3.25,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_b7_flat_sliced_comb.in0",
+      "total_fo4": 4.75,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 4.8 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_b7_flat_sliced_comb.out0",
+      "max_freq_mhz": 8421.052631578948,
+      "module_id": 1,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 11,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 15,
+        "end_line": 43,
+        "file": "probes/probe2.sv",
+        "start_col": 12,
+        "start_line": 43
+      },
+      "slack_fo4": 3.25,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_b7_flat_sliced_comb.in0",
+      "total_fo4": 4.75,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 4.8 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_b7_flat_sliced_comb.out0",
+      "max_freq_mhz": 8421.052631578948,
+      "module_id": 1,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 12,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 17,
+        "end_line": 44,
+        "file": "probes/probe2.sv",
+        "start_col": 12,
+        "start_line": 44
+      },
+      "slack_fo4": 3.25,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_b7_flat_sliced_comb.in0",
+      "total_fo4": 4.75,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 3.2 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_h3_read_predecoded.reg1/D",
+      "max_freq_mhz": 12323.299529005346,
+      "module_id": 3,
+      "multi_cycle": false,
+      "node_count": 5,
+      "path_class": "under_budget",
+      "path_id": 17,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 9,
+        "end_line": 67,
+        "file": "probes/probe2.sv",
+        "start_col": 5,
+        "start_line": 67
+      },
+      "slack_fo4": 4.7541160623539165,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_h3_read_predecoded.reg0/CP",
+      "total_fo4": 3.2458839376460835,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 3.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_b8_mux2_sliced.out0",
+      "max_freq_mhz": 13333.333333333334,
+      "module_id": 2,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 15,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 14,
+        "end_line": 56,
+        "file": "probes/probe2.sv",
+        "start_col": 12,
+        "start_line": 56
+      },
+      "slack_fo4": 5.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_b8_mux2_sliced.in0",
+      "total_fo4": 3.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 2.5 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_b8_mux2_sliced.out0",
+      "max_freq_mhz": 16000.0,
+      "module_id": 2,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 16,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 14,
+        "end_line": 57,
+        "file": "probes/probe2.sv",
+        "start_col": 12,
+        "start_line": 57
+      },
+      "slack_fo4": 5.5,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_b8_mux2_sliced.in0",
+      "total_fo4": 2.5,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 2.4 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_b7_flat_sliced_comb.out0",
+      "max_freq_mhz": 16666.666666666668,
+      "module_id": 1,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 7,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 16,
+        "end_line": 39,
+        "file": "probes/probe2.sv",
+        "start_col": 12,
+        "start_line": 39
+      },
+      "slack_fo4": 5.6,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_b7_flat_sliced_comb.in0",
+      "total_fo4": 2.4,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 1.7 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_b7_flat_sliced_comb.out0",
+      "max_freq_mhz": 23529.41176470588,
+      "module_id": 1,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 5,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 13,
+        "end_line": 37,
+        "file": "probes/probe2.sv",
+        "start_col": 12,
+        "start_line": 37
+      },
+      "slack_fo4": 6.3,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_b7_flat_sliced_comb.in0",
+      "total_fo4": 1.7,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 1.6 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_b7_flat_sliced_comb.out0",
+      "max_freq_mhz": 25000.0,
+      "module_id": 1,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 6,
+      "path_kind": "intoout",
+      "primary_loc": {
+        "end_col": 13,
+        "end_line": 38,
+        "file": "probes/probe2.sv",
+        "start_col": 12,
+        "start_line": 38
+      },
+      "slack_fo4": 6.4,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_b7_flat_sliced_comb.in0",
+      "total_fo4": 1.6,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_b6_nested_comb.reg1/D",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 0,
+      "multi_cycle": false,
+      "node_count": 12,
+      "path_class": "under_budget",
+      "path_id": 0,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 6,
+        "end_line": 10,
+        "file": "probes/probe2.sv",
+        "start_col": 5,
+        "start_line": 10
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_b6_nested_comb.reg0/CP",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_b6_nested_comb.out0",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 0,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 1,
+      "path_kind": "regtoout",
+      "primary_loc": {
+        "end_col": 12,
+        "end_line": 13,
+        "file": "probes/probe2.sv",
+        "start_col": 10,
+        "start_line": 13
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_b6_nested_comb.reg0/CP",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_b7_flat_sliced_comb.reg1/D",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 1,
+      "multi_cycle": false,
+      "node_count": 12,
+      "path_class": "under_budget",
+      "path_id": 3,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 6,
+        "end_line": 31,
+        "file": "probes/probe2.sv",
+        "start_col": 5,
+        "start_line": 31
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_b7_flat_sliced_comb.reg0/CP",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_b7_flat_sliced_comb.out0",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 1,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 4,
+      "path_kind": "regtoout",
+      "primary_loc": {
+        "end_col": 12,
+        "end_line": 34,
+        "file": "probes/probe2.sv",
+        "start_col": 10,
+        "start_line": 34
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_b7_flat_sliced_comb.reg0/CP",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_b8_mux2_sliced.reg1/D",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 2,
+      "multi_cycle": false,
+      "node_count": 4,
+      "path_class": "under_budget",
+      "path_id": 14,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 36,
+        "end_line": 53,
+        "file": "probes/probe2.sv",
+        "start_col": 36,
+        "start_line": 53
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_b8_mux2_sliced.reg0/CP",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_h4_read_late_cmp.reg1/D",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 4,
+      "multi_cycle": false,
+      "node_count": 6,
+      "path_class": "under_budget",
+      "path_id": 19,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 8,
+        "end_line": 76,
+        "file": "probes/probe2.sv",
+        "start_col": 5,
+        "start_line": 76
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_h4_read_late_cmp.reg0/CP",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+      "closes": true,
+      "endpoint": "p_f3_enable_wide.reg1/D",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 5,
+      "multi_cycle": false,
+      "node_count": 5,
+      "path_class": "under_budget",
+      "path_id": 22,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 36,
+        "end_line": 90,
+        "file": "probes/probe2.sv",
+        "start_col": 36,
+        "start_line": 90
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_f3_enable_wide.reg0/CP",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+      "closes": true,
+      "endpoint": "p_f3_enable_wide.out0",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 5,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 23,
+      "path_kind": "regtoout",
+      "primary_loc": {
+        "end_col": 12,
+        "end_line": 91,
+        "file": "probes/probe2.sv",
+        "start_col": 10,
+        "start_line": 91
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_f3_enable_wide.reg0/CP",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+      "closes": true,
+      "endpoint": "p_f4_write_uncond.reg1/D",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 6,
+      "multi_cycle": false,
+      "node_count": 6,
+      "path_class": "under_budget",
+      "path_id": 27,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 36,
+        "end_line": 101,
+        "file": "probes/probe2.sv",
+        "start_col": 36,
+        "start_line": 101
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_f4_write_uncond.reg0/CP",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+      "closes": true,
+      "endpoint": "p_f4_write_uncond.out0",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 6,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 28,
+      "path_kind": "regtoout",
+      "primary_loc": {
+        "end_col": 12,
+        "end_line": 102,
+        "file": "probes/probe2.sv",
+        "start_col": 10,
+        "start_line": 102
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_f4_write_uncond.reg0/CP",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_b6_nested_comb.reg1/D",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 0,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 32,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 7,
+        "end_line": 15,
+        "file": "probes/probe2.sv",
+        "start_col": 5,
+        "start_line": 15
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_b6_nested_comb.reg0/CP",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path",
+      "closes": true,
+      "endpoint": "p_h4_read_late_cmp.reg1/D",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 4,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 40,
+      "path_kind": "intoreg",
+      "primary_loc": {
+        "end_col": 7,
+        "end_line": 80,
+        "file": "probes/probe2.sv",
+        "start_col": 5,
+        "start_line": 80
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_h4_read_late_cmp.in0",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+      "closes": true,
+      "endpoint": "p_f3_enable_wide.reg1/D",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 5,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 43,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 10,
+        "end_line": 94,
+        "file": "probes/probe2.sv",
+        "start_col": 5,
+        "start_line": 94
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_f3_enable_wide.reg0/CP",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    },
+    {
+      "calibrated_fo4": null,
+      "class_note": "raw 0.0 ≤ budget 8.0 — cheap path; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+      "closes": true,
+      "endpoint": "p_f4_write_uncond.reg1/D",
+      "max_freq_mhz": 40000000000000.0,
+      "module_id": 6,
+      "multi_cycle": false,
+      "node_count": 1,
+      "path_class": "under_budget",
+      "path_id": 47,
+      "path_kind": "regtoreg",
+      "primary_loc": {
+        "end_col": 10,
+        "end_line": 105,
+        "file": "probes/probe2.sv",
+        "start_col": 5,
+        "start_line": 105
+      },
+      "slack_fo4": 8.0,
+      "stage_end": null,
+      "stage_start": null,
+      "startpoint": "p_f4_write_uncond.reg0/CP",
+      "total_fo4": 0.0,
+      "total_fo4_raw": null
+    }
+  ],
+  "pipeline_contracts": [],
+  "relocation_plan": {
+    "budget_fo4": 8.0,
+    "cards": [
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+        "endpoint": "p_f3_enable_wide.reg1/D",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_f3_enable_wide",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 15.752177398339489,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          },
+          {
+            "algorithms": [
+              "rebalance_associative_node"
+            ],
+            "auto_correct": true,
+            "confidence": 0.7,
+            "expected_fo4_after": 26.77870157717713,
+            "id": "t1_rebalance",
+            "kind": "rebalance_assoc",
+            "latency_delta": 0,
+            "rationale": "Latency-neutral depth reduction on +/|/& chains",
+            "risk": "low",
+            "score": 0.10500000000000001,
+            "tier": "t1",
+            "title": "Rebalance associative expression tree"
+          },
+          {
+            "algorithms": [
+              "split_assign"
+            ],
+            "auto_correct": true,
+            "confidence": 0.6,
+            "expected_fo4_after": 28.35391931701108,
+            "id": "t1_split",
+            "kind": "split_assign",
+            "latency_delta": 0,
+            "rationale": "Enables cleaner cuts and rebalance",
+            "risk": "low",
+            "score": 0.06,
+            "tier": "t1",
+            "title": "Split deep assign into named wires"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 46,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 4829,
+          "byte_start": 4826,
+          "end_col": 12,
+          "end_line": 92,
+          "file": "probes/probe2.sv",
+          "origin": "user_file",
+          "start_col": 10,
+          "start_line": 92
+        },
+        "slack_fo4": -23.504354796678978,
+        "startpoint": "p_f3_enable_wide.reg0/CP",
+        "total_fo4": 31.504354796678978
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+        "endpoint": "p_f3_enable_wide.reg1/D",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_f3_enable_wide",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 15.618192398051027,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          },
+          {
+            "algorithms": [
+              "rebalance_associative_node"
+            ],
+            "auto_correct": true,
+            "confidence": 0.7,
+            "expected_fo4_after": 26.550927076686747,
+            "id": "t1_rebalance",
+            "kind": "rebalance_assoc",
+            "latency_delta": 0,
+            "rationale": "Latency-neutral depth reduction on +/|/& chains",
+            "risk": "low",
+            "score": 0.10499999999999997,
+            "tier": "t1",
+            "title": "Rebalance associative expression tree"
+          },
+          {
+            "algorithms": [
+              "split_assign"
+            ],
+            "auto_correct": true,
+            "confidence": 0.6,
+            "expected_fo4_after": 28.11274631649185,
+            "id": "t1_split",
+            "kind": "split_assign",
+            "latency_delta": 0,
+            "rationale": "Enables cleaner cuts and rebalance",
+            "risk": "low",
+            "score": 0.05999999999999997,
+            "tier": "t1",
+            "title": "Split deep assign into named wires"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 45,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 4829,
+          "byte_start": 4826,
+          "end_col": 12,
+          "end_line": 92,
+          "file": "probes/probe2.sv",
+          "origin": "user_file",
+          "start_col": 10,
+          "start_line": 92
+        },
+        "slack_fo4": -23.236384796102055,
+        "startpoint": "p_f3_enable_wide.reg0/CP",
+        "total_fo4": 31.236384796102055
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+        "endpoint": "p_f3_enable_wide.out0",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_f3_enable_wide",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 13.868192398051027,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          },
+          {
+            "algorithms": [
+              "rebalance_associative_node"
+            ],
+            "auto_correct": true,
+            "confidence": 0.7,
+            "expected_fo4_after": 23.575927076686746,
+            "id": "t1_rebalance",
+            "kind": "rebalance_assoc",
+            "latency_delta": 0,
+            "rationale": "Latency-neutral depth reduction on +/|/& chains",
+            "risk": "low",
+            "score": 0.10500000000000001,
+            "tier": "t1",
+            "title": "Rebalance associative expression tree"
+          },
+          {
+            "algorithms": [
+              "split_assign"
+            ],
+            "auto_correct": true,
+            "confidence": 0.6,
+            "expected_fo4_after": 24.96274631649185,
+            "id": "t1_split",
+            "kind": "split_assign",
+            "latency_delta": 0,
+            "rationale": "Enables cleaner cuts and rebalance",
+            "risk": "low",
+            "score": 0.06000000000000001,
+            "tier": "t1",
+            "title": "Split deep assign into named wires"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 25,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 4829,
+          "byte_start": 4826,
+          "end_col": 12,
+          "end_line": 92,
+          "file": "probes/probe2.sv",
+          "origin": "user_file",
+          "start_col": 10,
+          "start_line": 92
+        },
+        "slack_fo4": -19.736384796102055,
+        "startpoint": "p_f3_enable_wide.in0",
+        "total_fo4": 27.736384796102055
+      },
+      {
+        "class_note": "cache-hint: unique-case exclusive lhs=`x_d` arms=6 max_arm=26.1 crit=26.1 mux=0.0 prep_arm=0.0 leftover=0.0 dom=0.96 raw=83.9→26.1; dependency floor makespan=27.5 (deps=0) > deflated 26.1; chain L16(24.5)",
+        "endpoint": "p_b6_nested_comb.out0",
+        "function_hint": "exclusive result/select mux — one hot arm live per cycle",
+        "module": "p_b6_nested_comb",
+        "options": [
+          {
+            "algorithms": [
+              "CVA6Cfg opcode latency",
+              "scoreboard multi-cycle"
+            ],
+            "auto_correct": false,
+            "confidence": 0.55,
+            "expected_fo4_after": 8.0,
+            "id": "t3_hot_arm_multicycle",
+            "kind": "arch_multicycle",
+            "latency_delta": 1,
+            "rationale": "Isolate rare/heavy case arms from single-cycle EX critical path (human RTL)",
+            "risk": "high",
+            "score": 0.195,
+            "tier": "t3",
+            "title": "Config multi-cycle for expensive opcode arm only"
+          },
+          {
+            "algorithms": [
+              "classify_and_adjust_paths"
+            ],
+            "auto_correct": true,
+            "confidence": 0.95,
+            "expected_fo4_after": 27.5,
+            "id": "t0_measure",
+            "kind": "measure_relocate",
+            "latency_delta": 0,
+            "rationale": "raw 83.9 → adjusted 27.5 via ExclusiveCaseMux; do not re-sum exclusive/bundle arms",
+            "risk": "low",
+            "score": 0.1425,
+            "tier": "t0",
+            "title": "Keep path-class measure relocate"
+          },
+          {
+            "algorithms": [
+              "balance_mux_on_path",
+              "rebalance_associative_node"
+            ],
+            "auto_correct": true,
+            "confidence": 0.7,
+            "expected_fo4_after": 22.549999999999997,
+            "id": "t1_balance_mux",
+            "kind": "balance_mux",
+            "latency_delta": 0,
+            "rationale": "Latency-neutral: mux-depth credit + associative rebalance on hottest arm expr",
+            "risk": "medium",
+            "score": 0.09333333333333337,
+            "tier": "t1",
+            "title": "Balance exclusive select / rebalance hot arm"
+          },
+          {
+            "algorithms": [
+              "decode enable fanout",
+              "physical mux tree"
+            ],
+            "auto_correct": false,
+            "confidence": 0.45,
+            "expected_fo4_after": 20.625,
+            "id": "t3_early_opcode_enables",
+            "kind": "split_comb_process",
+            "latency_delta": 0,
+            "rationale": "Move select generation earlier; keep arms local — floorplan + microarch",
+            "risk": "high",
+            "score": 0.0642857142857143,
+            "tier": "t3",
+            "title": "Early opcode enables / one-hot select near datapath"
+          }
+        ],
+        "path_class": "exclusive_case_mux",
+        "path_id": 2,
+        "pattern": "exclusive_select",
+        "preferred_any": "t3_hot_arm_multicycle",
+        "preferred_auto": "t1_balance_mux",
+        "primary_loc": {
+          "byte_end": 927,
+          "byte_start": 924,
+          "end_col": 25,
+          "end_line": 18,
+          "file": "probes/probe2.sv",
+          "origin": "user_file",
+          "start_col": 23,
+          "start_line": 18
+        },
+        "slack_fo4": -19.5,
+        "startpoint": "p_b6_nested_comb.in0",
+        "total_fo4": 27.5,
+        "total_fo4_raw": 83.9
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception",
+        "endpoint": "p_b6_nested_comb.reg1/D",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_b6_nested_comb",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 13.75,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 33,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 866,
+          "byte_start": 863,
+          "end_col": 23,
+          "end_line": 16,
+          "file": "probes/probe2.sv",
+          "origin": "user_file",
+          "start_col": 21,
+          "start_line": 16
+        },
+        "slack_fo4": -19.5,
+        "startpoint": "p_b6_nested_comb.reg0/CP",
+        "total_fo4": 27.5
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception",
+        "endpoint": "p_b6_nested_comb.reg1/D",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_b6_nested_comb",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 13.05,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 34,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 927,
+          "byte_start": 924,
+          "end_col": 25,
+          "end_line": 18,
+          "file": "probes/probe2.sv",
+          "origin": "user_file",
+          "start_col": 23,
+          "start_line": 18
+        },
+        "slack_fo4": -18.1,
+        "startpoint": "p_b6_nested_comb.reg0/CP",
+        "total_fo4": 26.1
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception",
+        "endpoint": "p_h3_read_predecoded.reg1/D",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_h3_read_predecoded",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 13.0,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 18,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 3517,
+          "byte_start": 3514,
+          "end_col": 12,
+          "end_line": 69,
+          "file": "probes/probe2.sv",
+          "origin": "user_file",
+          "start_col": 10,
+          "start_line": 69
+        },
+        "slack_fo4": -18.0,
+        "startpoint": "p_h3_read_predecoded.reg0/CP",
+        "total_fo4": 26.0
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+        "endpoint": "p_f4_write_uncond.reg1/D",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_f4_write_uncond",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 10.32717739833949,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          },
+          {
+            "algorithms": [
+              "rebalance_associative_node"
+            ],
+            "auto_correct": true,
+            "confidence": 0.7,
+            "expected_fo4_after": 17.556201577177134,
+            "id": "t1_rebalance",
+            "kind": "rebalance_assoc",
+            "latency_delta": 0,
+            "rationale": "Latency-neutral depth reduction on +/|/& chains",
+            "risk": "low",
+            "score": 0.10499999999999995,
+            "tier": "t1",
+            "title": "Rebalance associative expression tree"
+          },
+          {
+            "algorithms": [
+              "split_assign"
+            ],
+            "auto_correct": true,
+            "confidence": 0.6,
+            "expected_fo4_after": 18.588919317011083,
+            "id": "t1_split",
+            "kind": "split_assign",
+            "latency_delta": 0,
+            "rationale": "Enables cleaner cuts and rebalance",
+            "risk": "low",
+            "score": 0.05999999999999998,
+            "tier": "t1",
+            "title": "Split deep assign into named wires"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 50,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 5548,
+          "byte_start": 5545,
+          "end_col": 12,
+          "end_line": 103,
+          "file": "probes/probe2.sv",
+          "origin": "user_file",
+          "start_col": 10,
+          "start_line": 103
+        },
+        "slack_fo4": -12.65435479667898,
+        "startpoint": "p_f4_write_uncond.reg0/CP",
+        "total_fo4": 20.65435479667898
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+        "endpoint": "p_f4_write_uncond.out0",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_f4_write_uncond",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 8.443192398051028,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          },
+          {
+            "algorithms": [
+              "rebalance_associative_node"
+            ],
+            "auto_correct": true,
+            "confidence": 0.7,
+            "expected_fo4_after": 14.353427076686748,
+            "id": "t1_rebalance",
+            "kind": "rebalance_assoc",
+            "latency_delta": 0,
+            "rationale": "Latency-neutral depth reduction on +/|/& chains",
+            "risk": "low",
+            "score": 0.10500000000000002,
+            "tier": "t1",
+            "title": "Rebalance associative expression tree"
+          },
+          {
+            "algorithms": [
+              "split_assign"
+            ],
+            "auto_correct": true,
+            "confidence": 0.6,
+            "expected_fo4_after": 15.197746316491852,
+            "id": "t1_split",
+            "kind": "split_assign",
+            "latency_delta": 0,
+            "rationale": "Enables cleaner cuts and rebalance",
+            "risk": "low",
+            "score": 0.05999999999999998,
+            "tier": "t1",
+            "title": "Split deep assign into named wires"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 30,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 5548,
+          "byte_start": 5545,
+          "end_col": 12,
+          "end_line": 103,
+          "file": "probes/probe2.sv",
+          "origin": "user_file",
+          "start_col": 10,
+          "start_line": 103
+        },
+        "slack_fo4": -8.886384796102057,
+        "startpoint": "p_f4_write_uncond.in0",
+        "total_fo4": 16.886384796102057
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception",
+        "endpoint": "p_h4_read_late_cmp.reg1/D",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_h4_read_late_cmp",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 7.622941968823042,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 42,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 4104,
+          "byte_start": 4101,
+          "end_col": 12,
+          "end_line": 78,
+          "file": "probes/probe2.sv",
+          "origin": "user_file",
+          "start_col": 10,
+          "start_line": 78
+        },
+        "slack_fo4": -7.245883937646084,
+        "startpoint": "p_h4_read_late_cmp.reg0/CP",
+        "total_fo4": 15.245883937646084
+      },
+      {
+        "class_note": "cache-hint: parallel-timing makespan=15.0 cycles=2 deps=0 lhs=2 vars_ready=2 fns=0 raw=18.5→15.0; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+        "endpoint": "p_f3_enable_wide.out0",
+        "function_hint": "multi-LHS always_comb — parallel fields, not serial FO4 sum",
+        "module": "p_f3_enable_wide",
+        "options": [
+          {
+            "algorithms": [
+              "independent_lhs_bundle",
+              "balance_mux_on_path"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 8.8,
+            "id": "t1_balance_bundle",
+            "kind": "balance_mux",
+            "latency_delta": 0,
+            "rationale": "Measurement already max-field; BalanceMux only if residual over budget",
+            "risk": "low",
+            "score": 0.26785065043693107,
+            "tier": "t1",
+            "title": "Keep parallel field costing; optional field rebalance"
+          },
+          {
+            "algorithms": [
+              "process split",
+              "STA cone isolation"
+            ],
+            "auto_correct": false,
+            "confidence": 0.55,
+            "expected_fo4_after": 8.0,
+            "id": "t3_split_comb",
+            "kind": "split_comb_process",
+            "latency_delta": 0,
+            "rationale": "Same cycle, clearer placement and timing cones — human RTL style",
+            "risk": "medium",
+            "score": 0.1896584902774536,
+            "tier": "t3",
+            "title": "Split always_comb by field groups (address vs flags)"
+          },
+          {
+            "algorithms": [
+              "classify_and_adjust_paths"
+            ],
+            "auto_correct": true,
+            "confidence": 0.95,
+            "expected_fo4_after": 14.967970000576925,
+            "id": "t0_measure",
+            "kind": "measure_relocate",
+            "latency_delta": 0,
+            "rationale": "raw 18.5 → adjusted 15.0 via IndependentLhsBundle; do not re-sum exclusive/bundle arms",
+            "risk": "low",
+            "score": 0.1425,
+            "tier": "t0",
+            "title": "Keep path-class measure relocate"
+          }
+        ],
+        "path_class": "independent_lhs_bundle",
+        "path_id": 26,
+        "pattern": "independent_bundle",
+        "preferred_any": "t1_balance_bundle",
+        "preferred_auto": "t1_balance_bundle",
+        "primary_loc": {
+          "byte_end": 4982,
+          "byte_start": 4977,
+          "end_col": 43,
+          "end_line": 95,
+          "file": "probes/probe2.sv",
+          "origin": "user_file",
+          "start_col": 39,
+          "start_line": 95
+        },
+        "slack_fo4": -6.9679700005769245,
+        "startpoint": "p_f3_enable_wide.in0",
+        "total_fo4": 14.967970000576925,
+        "total_fo4_raw": 18.467970000576926
+      },
+      {
+        "class_note": "cache-hint: parallel-timing makespan=15.0 cycles=2 deps=0 lhs=2 vars_ready=2 fns=0 raw=18.5→15.0; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+        "endpoint": "p_f4_write_uncond.out0",
+        "function_hint": "multi-LHS always_comb — parallel fields, not serial FO4 sum",
+        "module": "p_f4_write_uncond",
+        "options": [
+          {
+            "algorithms": [
+              "independent_lhs_bundle",
+              "balance_mux_on_path"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 8.8,
+            "id": "t1_balance_bundle",
+            "kind": "balance_mux",
+            "latency_delta": 0,
+            "rationale": "Measurement already max-field; BalanceMux only if residual over budget",
+            "risk": "low",
+            "score": 0.26785065043693107,
+            "tier": "t1",
+            "title": "Keep parallel field costing; optional field rebalance"
+          },
+          {
+            "algorithms": [
+              "process split",
+              "STA cone isolation"
+            ],
+            "auto_correct": false,
+            "confidence": 0.55,
+            "expected_fo4_after": 8.0,
+            "id": "t3_split_comb",
+            "kind": "split_comb_process",
+            "latency_delta": 0,
+            "rationale": "Same cycle, clearer placement and timing cones — human RTL style",
+            "risk": "medium",
+            "score": 0.1896584902774536,
+            "tier": "t3",
+            "title": "Split always_comb by field groups (address vs flags)"
+          },
+          {
+            "algorithms": [
+              "classify_and_adjust_paths"
+            ],
+            "auto_correct": true,
+            "confidence": 0.95,
+            "expected_fo4_after": 14.967970000576925,
+            "id": "t0_measure",
+            "kind": "measure_relocate",
+            "latency_delta": 0,
+            "rationale": "raw 18.5 → adjusted 15.0 via IndependentLhsBundle; do not re-sum exclusive/bundle arms",
+            "risk": "low",
+            "score": 0.1425,
+            "tier": "t0",
+            "title": "Keep path-class measure relocate"
+          }
+        ],
+        "path_class": "independent_lhs_bundle",
+        "path_id": 31,
+        "pattern": "independent_bundle",
+        "preferred_any": "t1_balance_bundle",
+        "preferred_auto": "t1_balance_bundle",
+        "primary_loc": {
+          "byte_end": 5766,
+          "byte_start": 5761,
+          "end_col": 18,
+          "end_line": 107,
+          "file": "probes/probe2.sv",
+          "origin": "user_file",
+          "start_col": 14,
+          "start_line": 107
+        },
+        "slack_fo4": -6.9679700005769245,
+        "startpoint": "p_f4_write_uncond.in0",
+        "total_fo4": 14.967970000576925,
+        "total_fo4_raw": 18.467970000576926
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+        "endpoint": "p_f4_write_uncond.reg1/D",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_f4_write_uncond",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 7.35,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 49,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 5675,
+          "byte_start": 5669,
+          "end_col": 17,
+          "end_line": 106,
+          "file": "probes/probe2.sv",
+          "origin": "user_file",
+          "start_col": 12,
+          "start_line": 106
+        },
+        "slack_fo4": -6.699999999999999,
+        "startpoint": "p_f4_write_uncond.reg0/CP",
+        "total_fo4": 14.7
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception",
+        "endpoint": "p_b6_nested_comb.reg1/D",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_b6_nested_comb",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 6.55,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 35,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 958,
+          "byte_start": 955,
+          "end_col": 22,
+          "end_line": 19,
+          "file": "probes/probe2.sv",
+          "origin": "user_file",
+          "start_col": 20,
+          "start_line": 19
+        },
+        "slack_fo4": -5.1,
+        "startpoint": "p_b6_nested_comb.reg0/CP",
+        "total_fo4": 13.1
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception",
+        "endpoint": "p_b6_nested_comb.reg1/D",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_b6_nested_comb",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 6.55,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 36,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 992,
+          "byte_start": 989,
+          "end_col": 24,
+          "end_line": 20,
+          "file": "probes/probe2.sv",
+          "origin": "user_file",
+          "start_col": 22,
+          "start_line": 20
+        },
+        "slack_fo4": -5.1,
+        "startpoint": "p_b6_nested_comb.reg0/CP",
+        "total_fo4": 13.1
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception",
+        "endpoint": "p_b6_nested_comb.reg1/D",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_b6_nested_comb",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 6.55,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 37,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 1015,
+          "byte_start": 1012,
+          "end_col": 14,
+          "end_line": 21,
+          "file": "probes/probe2.sv",
+          "origin": "user_file",
+          "start_col": 12,
+          "start_line": 21
+        },
+        "slack_fo4": -5.1,
+        "startpoint": "p_b6_nested_comb.reg0/CP",
+        "total_fo4": 13.1
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception",
+        "endpoint": "p_b7_flat_sliced_comb.reg1/D",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_b7_flat_sliced_comb",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 6.55,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          },
+          {
+            "algorithms": [
+              "rebalance_associative_node"
+            ],
+            "auto_correct": true,
+            "confidence": 0.7,
+            "expected_fo4_after": 11.135,
+            "id": "t1_rebalance",
+            "kind": "rebalance_assoc",
+            "latency_delta": 0,
+            "rationale": "Latency-neutral depth reduction on +/|/& chains",
+            "risk": "low",
+            "score": 0.105,
+            "tier": "t1",
+            "title": "Rebalance associative expression tree"
+          },
+          {
+            "algorithms": [
+              "split_assign"
+            ],
+            "auto_correct": true,
+            "confidence": 0.6,
+            "expected_fo4_after": 11.79,
+            "id": "t1_split",
+            "kind": "split_assign",
+            "latency_delta": 0,
+            "rationale": "Enables cleaner cuts and rebalance",
+            "risk": "low",
+            "score": 0.060000000000000026,
+            "tier": "t1",
+            "title": "Split deep assign into named wires"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 38,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 2211,
+          "byte_start": 2208,
+          "end_col": 14,
+          "end_line": 45,
+          "file": "probes/probe2.sv",
+          "origin": "user_file",
+          "start_col": 12,
+          "start_line": 45
+        },
+        "slack_fo4": -5.1,
+        "startpoint": "p_b7_flat_sliced_comb.reg0/CP",
+        "total_fo4": 13.1
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception",
+        "endpoint": "p_h4_read_late_cmp.reg1/D",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_h4_read_late_cmp",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 6.122941968823042,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          },
+          {
+            "algorithms": [
+              "rebalance_associative_node"
+            ],
+            "auto_correct": true,
+            "confidence": 0.7,
+            "expected_fo4_after": 10.40900134699917,
+            "id": "t1_rebalance",
+            "kind": "rebalance_assoc",
+            "latency_delta": 0,
+            "rationale": "Latency-neutral depth reduction on +/|/& chains",
+            "risk": "low",
+            "score": 0.10500000000000005,
+            "tier": "t1",
+            "title": "Rebalance associative expression tree"
+          },
+          {
+            "algorithms": [
+              "split_assign"
+            ],
+            "auto_correct": true,
+            "confidence": 0.6,
+            "expected_fo4_after": 11.021295543881477,
+            "id": "t1_split",
+            "kind": "split_assign",
+            "latency_delta": 0,
+            "rationale": "Enables cleaner cuts and rebalance",
+            "risk": "low",
+            "score": 0.05999999999999994,
+            "tier": "t1",
+            "title": "Split deep assign into named wires"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 41,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 4104,
+          "byte_start": 4101,
+          "end_col": 12,
+          "end_line": 78,
+          "file": "probes/probe2.sv",
+          "origin": "user_file",
+          "start_col": 10,
+          "start_line": 78
+        },
+        "slack_fo4": -4.245883937646084,
+        "startpoint": "p_h4_read_late_cmp.reg0/CP",
+        "total_fo4": 12.245883937646084
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+        "endpoint": "p_f3_enable_wide.out0",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_f3_enable_wide",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 5.6,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 24,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 4806,
+          "byte_start": 4803,
+          "end_col": 33,
+          "end_line": 91,
+          "file": "probes/probe2.sv",
+          "origin": "user_file",
+          "start_col": 31,
+          "start_line": 91
+        },
+        "slack_fo4": -3.1999999999999993,
+        "startpoint": "p_f3_enable_wide.reg0/CP",
+        "total_fo4": 11.2
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+        "endpoint": "p_f4_write_uncond.out0",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_f4_write_uncond",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 5.6,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 29,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 5525,
+          "byte_start": 5522,
+          "end_col": 33,
+          "end_line": 102,
+          "file": "probes/probe2.sv",
+          "origin": "user_file",
+          "start_col": 31,
+          "start_line": 102
+        },
+        "slack_fo4": -3.1999999999999993,
+        "startpoint": "p_f4_write_uncond.reg0/CP",
+        "total_fo4": 11.2
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+        "endpoint": "p_f3_enable_wide.reg1/D",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_f3_enable_wide",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 5.6,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 44,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 4928,
+          "byte_start": 4923,
+          "end_col": 26,
+          "end_line": 94,
+          "file": "probes/probe2.sv",
+          "origin": "user_file",
+          "start_col": 22,
+          "start_line": 94
+        },
+        "slack_fo4": -3.1999999999999993,
+        "startpoint": "p_f3_enable_wide.reg0/CP",
+        "total_fo4": 11.2
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception; P10 handshake lock (same-edge pulse+index; InsertReg refuse)",
+        "endpoint": "p_f4_write_uncond.reg1/D",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_f4_write_uncond",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 5.6,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 48,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 5647,
+          "byte_start": 5642,
+          "end_col": 26,
+          "end_line": 105,
+          "file": "probes/probe2.sv",
+          "origin": "user_file",
+          "start_col": 22,
+          "start_line": 105
+        },
+        "slack_fo4": -3.1999999999999993,
+        "startpoint": "p_f4_write_uncond.reg0/CP",
+        "total_fo4": 11.2
+      },
+      {
+        "class_note": "over-budget plain path — no exclusive/atomic exception",
+        "endpoint": "p_h4_read_late_cmp.out0",
+        "function_hint": "plain combinational cone (InsertReg candidate)",
+        "module": "p_h4_read_late_cmp",
+        "options": [
+          {
+            "algorithms": [
+              "schedule_pipeline_cuts",
+              "insert_register"
+            ],
+            "auto_correct": true,
+            "confidence": 0.65,
+            "expected_fo4_after": 5.122941968823042,
+            "id": "t2_insert_reg",
+            "kind": "insert_reg",
+            "latency_delta": 1,
+            "rationale": "Only for plain cones — adds architectural latency; GateInfo required",
+            "risk": "medium",
+            "score": 0.203125,
+            "tier": "t2",
+            "title": "Budget multi-cut InsertReg (allow-latency)"
+          }
+        ],
+        "path_class": "plain",
+        "path_id": 20,
+        "pattern": "plain_cone",
+        "preferred_any": "t2_insert_reg",
+        "preferred_auto": "t2_insert_reg",
+        "primary_loc": {
+          "byte_end": 4104,
+          "byte_start": 4101,
+          "end_col": 12,
+          "end_line": 78,
+          "file": "probes/probe2.sv",
+          "origin": "user_file",
+          "start_col": 10,
+          "start_line": 78
+        },
+        "slack_fo4": -2.2458839376460844,
+        "startpoint": "p_h4_read_late_cmp.in0",
+        "total_fo4": 10.245883937646084
+      },
+      {
+        "class_note": "unique-case exclusive lhs=`d_d` arms=3 max_arm=5.0 crit=5.0 mux=0.0 prep_arm=0.0 leftover=0.0 dom=0.78 raw=9.0→5.0; dependency floor makespan=9.0 (deps=1) > deflated 5.0; chain L82(5.0)",
+        "endpoint": "p_h4_read_late_cmp.out0",
+        "function_hint": "exclusive result/select mux — one hot arm live per cycle",
+        "module": "p_h4_read_late_cmp",
+        "options": [
+          {
+            "algorithms": [
+              "balance_mux_on_path",
+              "rebalance_associative_node"
+            ],
+            "auto_correct": true,
+            "confidence": 0.7,
+            "expected_fo4_after": 7.38,
+            "id": "t1_balance_mux",
+            "kind": "balance_mux",
+            "latency_delta": 0,
+            "rationale": "Latency-neutral: mux-depth credit + associative rebalance on hottest arm expr",
+            "risk": "medium",
+            "score": 0.09333333333333332,
+            "tier": "t1",
+            "title": "Balance exclusive select / rebalance hot arm"
+          },
+          {
+            "algorithms": [
+              "split_assign"
+            ],
+            "auto_correct": true,
+            "confidence": 0.6,
+            "expected_fo4_after": 8.1,
+            "id": "t1_split_hot_arm",
+            "kind": "split_assign",
+            "latency_delta": 0,
+            "rationale": "Deep expr on hot arm — named intermediates enable further rebalance",
+            "risk": "medium",
+            "score": 0.04444444444444445,
+            "tier": "t1",
+            "title": "Split / stage hottest exclusive arm expression"
+          },
+          {
+            "algorithms": [
+              "CVA6Cfg opcode latency",
+              "scoreboard multi-cycle"
+            ],
+            "auto_correct": false,
+            "confidence": 0.55,
+            "expected_fo4_after": 8.0,
+            "id": "t3_hot_arm_multicycle",
+            "kind": "arch_multicycle",
+            "latency_delta": 1,
+            "rationale": "Isolate rare/heavy case arms from single-cycle EX critical path (human RTL)",
+            "risk": "high",
+            "score": 0.030555555555555558,
+            "tier": "t3",
+            "title": "Config multi-cycle for expensive opcode arm only"
+          },
+          {
+            "algorithms": [
+              "decode enable fanout",
+              "physical mux tree"
+            ],
+            "auto_correct": false,
+            "confidence": 0.45,
+            "expected_fo4_after": 8.0,
+            "id": "t3_early_opcode_enables",
+            "kind": "split_comb_process",
+            "latency_delta": 0,
+            "rationale": "Move select generation earlier; keep arms local — floorplan + microarch",
+            "risk": "high",
+            "score": 0.02857142857142857,
+            "tier": "t3",
+            "title": "Early opcode enables / one-hot select near datapath"
+          }
+        ],
+        "path_class": "exclusive_case_mux",
+        "path_id": 21,
+        "pattern": "exclusive_select",
+        "preferred_any": "t1_balance_mux",
+        "preferred_auto": "t1_balance_mux",
+        "primary_loc": {
+          "byte_end": 4215,
+          "byte_start": 4212,
+          "end_col": 17,
+          "end_line": 82,
+          "file": "probes/probe2.sv",
+          "origin": "user_file",
+          "start_col": 15,
+          "start_line": 82
+        },
+        "slack_fo4": -1.0,
+        "startpoint": "p_h4_read_late_cmp.in0",
+        "total_fo4": 9.0
+      }
+    ],
+    "disclaimer": "structural FO4 screening — not STA; relocation options are suggestions only; never auto-merge host RTL",
+    "schema_version": "relocation-plan-v0",
+    "summary": {
+      "auto_correct_options": 42,
+      "by_pattern": {
+        "ExclusiveSelect": 2,
+        "IndependentBundle": 2,
+        "PlainCone": 20
+      },
+      "cards": 24,
+      "failing_primary": 24,
+      "t3_only_cards": 0
+    },
+    "target_mhz": 5000.0
+  },
+  "schema_version": "0",
+  "skipped_files": [],
+  "sta_hints": [
+    {
+      "comment": "sv-timing structural path in p_f3_enable_wide (kind=RegToReg); NOT STA sign-off",
+      "from": "p_f3_enable_wide.reg0/CP",
+      "kind": "local_path",
+      "loc": {
+        "file": "probes/probe2.sv",
+        "start_col": 10,
+        "start_line": 92
+      },
+      "path_id": 46,
+      "sdc_comment": "# sv-timing path_id=46 fo4=31.5 slack=-23.5 — NOT set_max_delay\n# report_timing -from {p_f3_enable_wide.reg0/CP} -to {p_f3_enable_wide.reg1/D}",
+      "structural_fo4": 31.504354796678978,
+      "structural_slack_fo4": -23.504354796678978,
+      "through": [],
+      "to": "p_f3_enable_wide.reg1/D"
+    },
+    {
+      "comment": "sv-timing structural path in p_f3_enable_wide (kind=RegToReg); NOT STA sign-off",
+      "from": "p_f3_enable_wide.reg0/CP",
+      "kind": "local_path",
+      "loc": {
+        "file": "probes/probe2.sv",
+        "start_col": 10,
+        "start_line": 92
+      },
+      "path_id": 45,
+      "sdc_comment": "# sv-timing path_id=45 fo4=31.2 slack=-23.2 — NOT set_max_delay\n# report_timing -from {p_f3_enable_wide.reg0/CP} -to {p_f3_enable_wide.reg1/D}",
+      "structural_fo4": 31.236384796102055,
+      "structural_slack_fo4": -23.236384796102055,
+      "through": [],
+      "to": "p_f3_enable_wide.reg1/D"
+    },
+    {
+      "comment": "sv-timing structural path in p_f3_enable_wide (kind=InToOut); NOT STA sign-off",
+      "from": "p_f3_enable_wide.in0",
+      "kind": "local_path",
+      "loc": {
+        "file": "probes/probe2.sv",
+        "start_col": 10,
+        "start_line": 92
+      },
+      "path_id": 25,
+      "sdc_comment": "# sv-timing path_id=25 fo4=27.7 slack=-19.7 — NOT set_max_delay\n# report_timing -from {p_f3_enable_wide.in0} -to {p_f3_enable_wide.out0}",
+      "structural_fo4": 27.736384796102055,
+      "structural_slack_fo4": -19.736384796102055,
+      "through": [],
+      "to": "p_f3_enable_wide.out0"
+    },
+    {
+      "comment": "sv-timing structural path in p_b6_nested_comb (kind=InToOut); NOT STA sign-off",
+      "from": "p_b6_nested_comb.in0",
+      "kind": "local_path",
+      "loc": {
+        "file": "probes/probe2.sv",
+        "start_col": 23,
+        "start_line": 18
+      },
+      "path_id": 2,
+      "sdc_comment": "# sv-timing path_id=2 fo4=27.5 slack=-19.5 — NOT set_max_delay\n# report_timing -from {p_b6_nested_comb.in0} -to {p_b6_nested_comb.out0}",
+      "structural_fo4": 27.5,
+      "structural_slack_fo4": -19.5,
+      "through": [],
+      "to": "p_b6_nested_comb.out0"
+    },
+    {
+      "comment": "sv-timing structural path in p_b6_nested_comb (kind=RegToReg); NOT STA sign-off",
+      "from": "p_b6_nested_comb.reg0/CP",
+      "kind": "local_path",
+      "loc": {
+        "file": "probes/probe2.sv",
+        "start_col": 21,
+        "start_line": 16
+      },
+      "path_id": 33,
+      "sdc_comment": "# sv-timing path_id=33 fo4=27.5 slack=-19.5 — NOT set_max_delay\n# report_timing -from {p_b6_nested_comb.reg0/CP} -to {p_b6_nested_comb.reg1/D}",
+      "structural_fo4": 27.5,
+      "structural_slack_fo4": -19.5,
+      "through": [],
+      "to": "p_b6_nested_comb.reg1/D"
+    },
+    {
+      "comment": "sv-timing structural path in p_b6_nested_comb (kind=RegToReg); NOT STA sign-off",
+      "from": "p_b6_nested_comb.reg0/CP",
+      "kind": "local_path",
+      "loc": {
+        "file": "probes/probe2.sv",
+        "start_col": 23,
+        "start_line": 18
+      },
+      "path_id": 34,
+      "sdc_comment": "# sv-timing path_id=34 fo4=26.1 slack=-18.1 — NOT set_max_delay\n# report_timing -from {p_b6_nested_comb.reg0/CP} -to {p_b6_nested_comb.reg1/D}",
+      "structural_fo4": 26.1,
+      "structural_slack_fo4": -18.1,
+      "through": [],
+      "to": "p_b6_nested_comb.reg1/D"
+    },
+    {
+      "comment": "sv-timing structural path in p_h3_read_predecoded (kind=RegToReg); NOT STA sign-off",
+      "from": "p_h3_read_predecoded.reg0/CP",
+      "kind": "local_path",
+      "loc": {
+        "file": "probes/probe2.sv",
+        "start_col": 10,
+        "start_line": 69
+      },
+      "path_id": 18,
+      "sdc_comment": "# sv-timing path_id=18 fo4=26.0 slack=-18.0 — NOT set_max_delay\n# report_timing -from {p_h3_read_predecoded.reg0/CP} -to {p_h3_read_predecoded.reg1/D}",
+      "structural_fo4": 26.0,
+      "structural_slack_fo4": -18.0,
+      "through": [],
+      "to": "p_h3_read_predecoded.reg1/D"
+    },
+    {
+      "comment": "sv-timing structural path in p_f4_write_uncond (kind=RegToReg); NOT STA sign-off",
+      "from": "p_f4_write_uncond.reg0/CP",
+      "kind": "local_path",
+      "loc": {
+        "file": "probes/probe2.sv",
+        "start_col": 10,
+        "start_line": 103
+      },
+      "path_id": 50,
+      "sdc_comment": "# sv-timing path_id=50 fo4=20.7 slack=-12.7 — NOT set_max_delay\n# report_timing -from {p_f4_write_uncond.reg0/CP} -to {p_f4_write_uncond.reg1/D}",
+      "structural_fo4": 20.65435479667898,
+      "structural_slack_fo4": -12.65435479667898,
+      "through": [],
+      "to": "p_f4_write_uncond.reg1/D"
+    }
+  ],
+  "stage_bubbles": [],
+  "stage_users": [],
+  "stages": [],
+  "structural_patterns": [],
+  "target_mhz": 5000.0,
+  "versions": {
+    "cost_model": "fo4-v1",
+    "ir": "ir-v6",
+    "measurement": "delay-v50",
+    "package": "0.1.0",
+    "parser_pin": "v0.13.5"
+  }
+}

@@ -1,0 +1,13 @@
+== lint
+hyp8 lint (g6lc_core): clean of fatal classes; 7 open warnings in /mnt/e/cva6/build-platform/workspace/build/hyp8-lint-r127g/lint.log
+== iqleg
+HYP8_IQLEG_PASS checked=23
+== iqleg-nh2
+g6lc_iq_legal NH=2: clean
+== cwin-eq
+HYP8_CWIN_EQ_PASS checked=525312
+== leaf csr
+/mnt/e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r127/run_hyp8_leaf_local.sh: line 22: 29511 Aborted                 (core dumped) "$OUT/model/hyp8_$LEAF" ${LEAF_PLUSARGS:-+equiv_report} > "$OUT/sim.log" 2>&1
+LEAF csr-r127g rc=134 1 error-lines
+%Error: /mnt/e/cva6/verif/tb/core/tb_g6lc_hyp8_control.sv:257: Verilog $stop
+GATE_DONE

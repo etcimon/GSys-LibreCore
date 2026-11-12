@@ -281,6 +281,27 @@ assign span_bytes = cf_pc_i - cf_target_i;
   assign fill_accept = capturing_q && fill_valid_i && addr_eq(fill_vaddr_i, fill_low_sum) &&
                        (body_len_q < NR_EXT);
 
+  // r127: capture data write. Same next state as the former
+  // `if (fill_accept) data_d[fill_ptr_q] = fill_data_i` under the
+  // flush/enable skeleton, written as an explicit enable fan-out: the
+  // accept strobe feeds one decode per slot, and each slot enable feeds
+  // one select copy per byte lane, so the address-compare result is not
+  // the direct select of the whole capture array.
+  if (DATA_W % 8 != 0) begin : gen_bad_data_w
+    $error("g6lc_loop_buffer: DATA_W must be a whole number of bytes (capture byte lanes)");
+  end
+  logic                  fill_wr;
+  logic [NR_ENTRIES-1:0] fill_we_slot;
+  assign fill_wr = !flush_i && enable_i && fill_accept;
+  for (genvar k = 0; k < NR_ENTRIES; k++) begin : gen_fill_slot
+    assign fill_we_slot[k] = fill_wr && (fill_ptr_q == IDX_W'(k));
+    for (genvar l = 0; l < DATA_W / 8; l++) begin : gen_lane
+      logic we;
+      assign we = fill_we_slot[k];
+      assign data_d[k][8*l +: 8] = we ? fill_data_i[8*l +: 8] : data_q[k][8*l +: 8];
+    end
+  end
+
   // r115-E115-F3: the next-state bundle was one ~35-statement always_comb;
   // the timing model prices always_comb program order, so every output paid
   // for every unrelated statement. Split by write ownership into two
@@ -331,7 +352,6 @@ assign span_bytes = cf_pc_i - cf_target_i;
 
   // Group B: fill pointer / body length / replay / capture data
   always_comb begin
-    data_d       = data_q;
     body_len_d   = body_len_q;
     fill_ptr_d   = fill_ptr_q;
     replay_d     = replay_q;
@@ -350,7 +370,6 @@ assign span_bytes = cf_pc_i - cf_target_i;
 
       // ---- Capture sequential fill (indexed write, single EQ) ----
       if (fill_accept) begin
-        data_d[fill_ptr_q] = fill_data_i;
         fill_ptr_d = fill_ptr_q + IDX_W'(1);
         body_len_d = body_len_q + (IDX_W+1)'(1);
         // Close when we filled the back-edge line or the buffer is full

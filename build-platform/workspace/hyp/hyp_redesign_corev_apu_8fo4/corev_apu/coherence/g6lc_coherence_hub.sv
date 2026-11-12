@@ -329,19 +329,33 @@ assign mem_req_o            = core_req_i[0];
         input logic [NC-1:0] reqs,
         input logic [CID_W-1:0] start
     );
-      logic [CID_W-1:0] sel;
-      logic found;
-      sel   = start;
-      found = 1'b0;
-      for (int unsigned k = 0; k < NC; k++) begin
-        automatic logic [CID_W-1:0] cand;
-        cand = CID_W'((int'(start) + k) % NC);
-        if (reqs[cand] && !found) begin
-          sel   = cand;
-          found = 1'b1;
-        end
+      // r127: the first requester in ring order from `start`, in slot order:
+      // the lowest requester at or above `start`, else the lowest below it
+      // (two prefix-OR isolates split by the pointer thermometer and an OR
+      // encode), instead of NC modulo additions feeding a serial first-found
+      // scan. No requester returns `start`, as before. Checked against the
+      // scan for every (reqs, start) -- including start >= NC -- at NC = 1..8 by
+      // verif/tb/l2/tb_g6lc_hub_pick_rr_eq.sv.
+      logic [NC-1:0]    ge, hi, lo, hi_bl, lo_bl, pick;
+      logic [CID_W-1:0] sel, st;
+      // The scan started at start % NC. A pointer is always below NC here,
+      // but the form stays exact for any CID_W value: on a non-power-of-two
+      // NC a start in [NC, 2**CID_W) wraps once (2**CID_W < 2*NC).
+      st = start;
+      if (((NC & (NC - 1)) != 0) && (int'(start) >= NC)) st = CID_W'(int'(start) - NC);
+      for (int unsigned i = 0; i < NC; i++) ge[i] = (i >= int'(st));
+      hi    = reqs & ge;
+      lo    = reqs & ~ge;
+      hi_bl = hi << 1;
+      lo_bl = lo << 1;
+      for (int unsigned l = 1; l < NC; l = l << 1) begin
+        hi_bl = hi_bl | (hi_bl << l);
+        lo_bl = lo_bl | (lo_bl << l);
       end
-      return sel;
+      pick = (|hi) ? (hi & ~hi_bl) : (lo & ~lo_bl);
+      sel  = '0;
+      for (int unsigned i = 0; i < NC; i++) if (pick[i]) sel = sel | CID_W'(i);
+      return (|reqs) ? sel : start;
     endfunction
 
     //  The starve override picks ROUND-ROBIN among starved cores, not "last one
@@ -453,6 +467,11 @@ assign mem_req_o            = core_req_i[0];
     ot_entry_t ar_ot_q[OT_MAX], ar_ot_d[OT_MAX];
     ot_entry_t aw_ot_q[OT_MAX], aw_ot_d[OT_MAX];
     inv_ot_t   inv_ot_q[OT_MAX], inv_ot_d[OT_MAX];
+    // r127: the outstanding-transaction counters have no functional reader
+    // (slot occupancy comes from the slot valid bits; these feed only
+    // themselves and a testbench probe). Every write to them is fenced as
+    // a simulation diagnostic, so the serial decrement chain is not part of
+    // the synthesized next-state cone. Simulation still carries them.
     logic [OT_CNT_W-1:0] ar_ot_cnt_q, ar_ot_cnt_d, aw_ot_cnt_q, aw_ot_cnt_d;
     logic ar_ot_full, aw_ot_full;
     logic [OT_W-1:0] ar_free_slot, aw_free_slot;
@@ -673,6 +692,118 @@ assign mem_req_o            = core_req_i[0];
       end
     end
 
+    // ================================================================
+    // r127v: B/R response demux precompute.
+    // The mem-side response id *is* the slot index, so the (slot -> core)
+    // binding is a per-pair compare. It is evaluated in these dedicated
+    // always_comb blocks because nested procedural for-loops are not
+    // supported inside the large response always_comb below; that process
+    // then applies the per-core/per-slot writes with single-level loops
+    // only. Semantics are identical to the former bs/rs -> bc/rc demux:
+    // fast-path forward, park-on-unapplied, safety drain, held replay
+    // precedence, and the ar-before-aw arm priority for R are all preserved.
+    // ================================================================
+    logic [OT_MAX-1:0] b_hit_p, b_park_p, b_fire_p;
+    logic [NC-1:0]     b_fwd_c;
+    logic [OT_W-1:0]   b_fwd_slot_c [NC];
+    logic [AXI_ID_WIDTH-1:0] b_fwd_orig_c [NC];
+    logic              b_ready_p;
+    logic [OT_MAX-1:0] r_ar_hit_p, r_aw_hit_p, r_aw_park_p;
+    logic [OT_MAX-1:0] r_ar_fire_p, r_aw_fire_p;
+    logic [NC-1:0]     r_fwd_c;
+    logic [AXI_ID_WIDTH-1:0] r_fwd_orig_c [NC];
+    logic              r_ready_p;
+
+    always_comb begin
+      b_hit_p = '0;
+      b_park_p = '0;
+      b_fire_p = '0;
+      b_fwd_c = '0;
+      b_ready_p = 1'b0;
+      for (int unsigned c = 0; c < NC; c++) begin
+        b_fwd_slot_c[c] = '0;
+        b_fwd_orig_c[c] = '0;
+      end
+      if (mem_resp_i.b_valid) begin
+        for (int unsigned s = 0; s < OT_MAX; s++) begin
+          if (AXI_ID_WIDTH'(s) == mem_resp_i.b.id && aw_ot_q[s].valid) begin
+            b_hit_p[s] = 1'b1;
+            for (int unsigned c = 0; c < NC; c++) begin
+              if (aw_ot_q[s].core == CID_W'(c)) begin
+                if ((b_predecessors_q[s] == '0) &&
+                    slot_applied(inv_ot_q[s]) && !held_found[c] &&
+                    (!b_offer_locked_q[c] || b_offer_slot_q[c] == OT_W'(s))) begin
+                  // Fast path: forward B with no added latency.
+                  b_fwd_c[c]       = 1'b1;
+                  b_fwd_slot_c[c]  = OT_W'(s);
+                  b_fwd_orig_c[c]  = aw_ot_q[s].orig_id;
+                  b_ready_p        = core_req_i[c].b_ready;
+                  if (core_req_i[c].b_ready) b_fire_p[s] = 1'b1;
+                end else begin
+                  // Park the response until the invalidation has applied.
+                  b_park_p[s] = 1'b1;
+                  b_ready_p   = 1'b1;
+                end
+              end
+            end
+          end
+        end
+        if (!(|b_hit_p)) b_ready_p = 1'b1;
+      end
+    end
+
+    always_comb begin
+      r_ar_hit_p   = '0;
+      r_aw_hit_p   = '0;
+      r_aw_park_p  = '0;
+      r_ar_fire_p  = '0;
+      r_aw_fire_p  = '0;
+      r_fwd_c      = '0;
+      r_ready_p    = 1'b0;
+      for (int unsigned c = 0; c < NC; c++) r_fwd_orig_c[c] = '0;
+      if (mem_resp_i.r_valid) begin
+        for (int unsigned s = 0; s < OT_MAX; s++) begin
+          if (AXI_ID_WIDTH'(s) == mem_resp_i.r.id) begin
+            if (ar_ot_q[s].valid) begin
+              // Normal read: slot in ar_ot.
+              r_ar_hit_p[s] = 1'b1;
+              for (int unsigned c = 0; c < NC; c++) begin
+                if (ar_ot_q[s].core == CID_W'(c) && !r_held_found[c]) begin
+                  r_fwd_c[c]        = 1'b1;
+                  r_fwd_orig_c[c]   = ar_ot_q[s].orig_id;
+                  r_ready_p         = core_req_i[c].r_ready;
+                  if (core_req_i[c].r_ready) r_ar_fire_p[s] = 1'b1;
+                end
+              end
+              // else a parked ATOP R is replayed to this core; the incoming
+              // beat is withheld (bounded by the core's r_ready).
+            end else if (aw_ot_q[s].valid && aw_ot_q[s].expect_r) begin
+              // Atomic R (ATOP load/swap/compare) — same id as parent AW.
+              r_aw_hit_p[s] = 1'b1;
+              for (int unsigned c = 0; c < NC; c++) begin
+                if (aw_ot_q[s].core == CID_W'(c)) begin
+                  if (slot_applied(inv_ot_q[s]) && !r_held_found[c]) begin
+                    r_fwd_c[c]        = 1'b1;
+                    r_fwd_orig_c[c]   = aw_ot_q[s].orig_id;
+                    r_ready_p         = core_req_i[c].r_ready;
+                    if (core_req_i[c].r_ready && mem_resp_i.r.last)
+                      r_aw_fire_p[s] = 1'b1;
+                  end else if (!aw_ot_q[s].r_held) begin
+                    // Park the beat like B: consume it now, replay once the
+                    // invalidation has been applied.
+                    r_aw_park_p[s] = 1'b1;
+                    r_ready_p      = 1'b1;
+                  end
+                  // else r_held already set while still unapplied: withhold.
+                end
+              end
+            end
+          end
+        end
+        if (!(|r_ar_hit_p) && !(|r_aw_hit_p)) r_ready_p = 1'b1;
+      end
+    end
+
     // Combinational grant eligibility
     logic aw_grant, ar_grant;
     logic aw_fire, ar_fire, w_fire, b_fire, r_fire;
@@ -685,16 +816,7 @@ assign mem_req_o            = core_req_i[0];
         !w_busy_q && !inv_pend_valid_q && |aw_req && !aw_ot_full;
 
     always_comb begin
-      logic [OT_W-1:0] bs, rs;
-      logic [CID_W-1:0] bc, rc;
-      logic b_id_ok, r_id_ok;
       // Defaults
-      bs = '0;
-      rs = '0;
-      bc = '0;
-      rc = '0;
-      b_id_ok = 1'b0;
-      r_id_ok = 1'b0;
       mem_req_o   = '0;
       aw_fire     = 1'b0;
       ar_fire     = 1'b0;
@@ -704,8 +826,12 @@ assign mem_req_o            = core_req_i[0];
       r_fire      = 1'b0;
       aw_rr_d     = aw_rr_q;
       ar_rr_d     = ar_rr_q;
+      //pragma translate_off
       ar_ot_cnt_d = ar_ot_cnt_q;
+      //pragma translate_on
+      //pragma translate_off
       aw_ot_cnt_d = aw_ot_cnt_q;
+      //pragma translate_on
       w_owner_d   = w_owner_q;
       w_busy_d    = w_busy_q;
       w_slot_d    = w_slot_q;
@@ -748,7 +874,9 @@ assign mem_req_o            = core_req_i[0];
         core_resp_o[aw_winner].aw_ready = 1'b1;
         aw_fire   = 1'b1;
         aw_rr_d   = CID_W'((int'(aw_winner) + 1) % NC);
+        //pragma translate_off
         aw_ot_cnt_d = aw_ot_cnt_q + 1'b1;
+        //pragma translate_on
         aw_ot_d[aw_free_slot].valid    = 1'b1;
         // AXI ATOP[5]=1 ⇒ R beat with AW id (load/swap/compare)
         aw_ot_d[aw_free_slot].expect_r = core_req_i[aw_winner].aw.atop[5];
@@ -777,7 +905,9 @@ assign mem_req_o            = core_req_i[0];
         core_resp_o[ar_winner].ar_ready = 1'b1;
         ar_fire = 1'b1;
         ar_rr_d = CID_W'((int'(ar_winner) + 1) % NC);
+        //pragma translate_off
         ar_ot_cnt_d = ar_ot_cnt_q + 1'b1;
+        //pragma translate_on
         ar_ot_d[ar_free_slot].valid   = 1'b1;
         ar_ot_d[ar_free_slot].core    = ar_winner;
         ar_ot_d[ar_free_slot].orig_id = core_req_i[ar_winner].ar.id;
@@ -817,52 +947,50 @@ assign mem_req_o            = core_req_i[0];
               aw_ot_d[held_slot[c]].b_done = 1'b1;
             end else begin
               aw_ot_d[held_slot[c]].valid = 1'b0;
+              //pragma translate_off
               if (aw_ot_cnt_d != '0) aw_ot_cnt_d = aw_ot_cnt_d - 1'b1;
+              //pragma translate_on
             end
           end
         end
       end
 
       // ---- B response demux by OT slot id; restore original core id ----
-      if (mem_resp_i.b_valid) begin
-        // Compare full id against OT_MAX (do not truncate OT_MAX to OT_W bits —
-        // when OT_MAX is a power of two that truncates to 0).
-        b_id_ok = ({1'b0, mem_resp_i.b.id} < (AXI_ID_WIDTH + 1)'(OT_MAX));
-        bs      = OT_W'(mem_resp_i.b.id);
-        if (b_id_ok && aw_ot_q[bs].valid) begin
-          bc = aw_ot_q[bs].core;
-          if ((b_predecessors_q[bs] == '0) &&
-              slot_applied(inv_ot_q[bs]) && !held_found[bc] &&
-              (!b_offer_locked_q[bc] || b_offer_slot_q[bc] == bs)) begin
-            // Fast path: obligation already delivered and settled (or the
-            // write carried none) -- forward B with no added latency.
-            b_offer_slot[bc] = bs;
-            core_resp_o[bc].b_valid = 1'b1;
-            core_resp_o[bc].b       = mem_resp_i.b;
-            core_resp_o[bc].b.id    = aw_ot_q[bs].orig_id;
-            mem_req_o.b_ready = core_req_i[bc].b_ready;
-            if (core_req_i[bc].b_ready) begin
-              b_fire = 1'b1;
-              b_completed[bs] = 1'b1;
-              if (aw_ot_q[bs].expect_r) begin
-                // Keep slot until ATOP R is forwarded (amos injects R after B)
-                aw_ot_d[bs].b_done = 1'b1;
-              end else begin
-                aw_ot_d[bs].valid = 1'b0;
-                if (aw_ot_cnt_d != '0) aw_ot_cnt_d = aw_ot_cnt_d - 1'b1;
-              end
-            end
+      // r127v: the (slot -> core) binding and fast/park/fire decisions were
+      // computed in the b_*_p always_comb above; here only constant-index
+      // per-core/per-slot writes remain.
+      mem_req_o.b_ready = b_ready_p;
+      for (int unsigned c = 0; c < NC; c++) begin
+        if (!held_found[c] && b_fwd_c[c]) begin
+          // Fast path: obligation already delivered and settled (or the
+          // write carried none) -- forward B with no added latency.
+          b_offer_slot[c]       = b_fwd_slot_c[c];
+          core_resp_o[c].b_valid = 1'b1;
+          core_resp_o[c].b.id    = b_fwd_orig_c[c];
+          core_resp_o[c].b.resp  = mem_resp_i.b.resp;
+          core_resp_o[c].b.user  = mem_resp_i.b.user;
+        end
+      end
+      for (int unsigned s = 0; s < OT_MAX; s++) begin
+        if (b_park_p[s]) begin
+          // Park the response: consume it from memory (resp/user captured)
+          // and replay it once the invalidation has been applied.
+          aw_ot_d[s].b_held = 1'b1;
+          aw_ot_d[s].b_resp = mem_resp_i.b.resp;
+          aw_ot_d[s].b_user = mem_resp_i.b.user;
+        end
+        if (b_fire_p[s]) begin
+          b_fire = 1'b1;
+          b_completed[s] = 1'b1;
+          if (aw_ot_q[s].expect_r) begin
+            // Keep slot until ATOP R is forwarded (amos injects R after B)
+            aw_ot_d[s].b_done = 1'b1;
           end else begin
-            // Park the response: consume it from memory (resp/user captured)
-            // and replay it once the invalidation has been applied.
-            mem_req_o.b_ready  = 1'b1;
-            aw_ot_d[bs].b_held = 1'b1;
-            aw_ot_d[bs].b_resp = mem_resp_i.b.resp;
-            aw_ot_d[bs].b_user = mem_resp_i.b.user;
+            aw_ot_d[s].valid = 1'b0;
+            //pragma translate_off
+            if (aw_ot_cnt_d != '0) aw_ot_cnt_d = aw_ot_cnt_d - 1'b1;
+            //pragma translate_on
           end
-        end else begin
-          // Safety: free the mem response so a bad id cannot hang the interconnect
-          mem_req_o.b_ready = 1'b1;
         end
       end
 
@@ -890,7 +1018,9 @@ assign mem_req_o            = core_req_i[0];
               aw_ot_d[r_held_slot[c]].expect_r = 1'b0;
               if (aw_ot_d[r_held_slot[c]].b_done) begin
                 aw_ot_d[r_held_slot[c]].valid = 1'b0;
+                //pragma translate_off
                 if (aw_ot_cnt_d != '0) aw_ot_cnt_d = aw_ot_cnt_d - 1'b1;
+                //pragma translate_on
               end
             end
           end
@@ -902,58 +1032,50 @@ assign mem_req_o            = core_req_i[0];
       // data on R with the *AW* id — demux via aw_ot and free the slot here
       // (B may already have completed; see expect_r above).
       if (mem_resp_i.r_valid) begin
-        r_id_ok = ({1'b0, mem_resp_i.r.id} < (AXI_ID_WIDTH + 1)'(OT_MAX));
-        rs      = OT_W'(mem_resp_i.r.id);
-        if (r_id_ok && ar_ot_q[rs].valid) begin
-          rc = ar_ot_q[rs].core;
-          if (!r_held_found[rc]) begin
-            core_resp_o[rc].r_valid = 1'b1;
-            core_resp_o[rc].r       = mem_resp_i.r;
-            core_resp_o[rc].r.id    = ar_ot_q[rs].orig_id;
-            mem_req_o.r_ready = core_req_i[rc].r_ready;
-            if (core_req_i[rc].r_ready) begin
-              r_fire = 1'b1;
-              if (mem_resp_i.r.last) begin
-                ar_ot_d[rs].valid = 1'b0;
-                if (ar_ot_cnt_d != '0) ar_ot_cnt_d = ar_ot_cnt_d - 1'b1;
-              end
+        // r127v: binding/arm/fire decisions from the r_*_p always_comb above.
+        mem_req_o.r_ready = r_ready_p;
+        for (int unsigned c = 0; c < NC; c++) begin
+          if (!r_held_found[c] && r_fwd_c[c]) begin
+            core_resp_o[c].r_valid = 1'b1;
+            core_resp_o[c].r.id    = r_fwd_orig_c[c];
+            core_resp_o[c].r.data  = mem_resp_i.r.data;
+            core_resp_o[c].r.resp  = mem_resp_i.r.resp;
+            core_resp_o[c].r.last  = mem_resp_i.r.last;
+            core_resp_o[c].r.user  = mem_resp_i.r.user;
+          end
+        end
+        for (int unsigned s = 0; s < OT_MAX; s++) begin
+          if (r_ar_fire_p[s]) begin
+            r_fire = 1'b1;
+            if (mem_resp_i.r.last) begin
+              ar_ot_d[s].valid = 1'b0;
+              //pragma translate_off
+              if (ar_ot_cnt_d != '0) ar_ot_cnt_d = ar_ot_cnt_d - 1'b1;
+              //pragma translate_on
             end
           end
-          // else a parked ATOP R is being replayed to this core this cycle;
-          // the incoming beat is withheld (bounded by the core's r_ready).
-        end else if (r_id_ok && aw_ot_q[rs].valid && aw_ot_q[rs].expect_r) begin
-          // Atomic R (ATOP load/swap/compare) — same core/id as parent AW
-          rc = aw_ot_q[rs].core;
-          if (slot_applied(inv_ot_q[rs]) && !r_held_found[rc]) begin
-            core_resp_o[rc].r_valid = 1'b1;
-            core_resp_o[rc].r       = mem_resp_i.r;
-            core_resp_o[rc].r.id    = aw_ot_q[rs].orig_id;
-            mem_req_o.r_ready = core_req_i[rc].r_ready;
-            if (core_req_i[rc].r_ready && mem_resp_i.r.last) begin
-              r_fire = 1'b1;
-              aw_ot_d[rs].expect_r = 1'b0;
-              if (aw_ot_d[rs].b_done) begin
-                aw_ot_d[rs].valid = 1'b0;
-                if (aw_ot_cnt_d != '0) aw_ot_cnt_d = aw_ot_cnt_d - 1'b1;
-              end
+          if (r_aw_fire_p[s]) begin
+            r_fire = 1'b1;
+            aw_ot_d[s].expect_r = 1'b0;
+            if (aw_ot_d[s].b_done) begin
+              aw_ot_d[s].valid = 1'b0;
+              //pragma translate_off
+              if (aw_ot_cnt_d != '0) aw_ot_cnt_d = aw_ot_cnt_d - 1'b1;
+              //pragma translate_on
             end
-          end else if (!aw_ot_q[rs].r_held) begin
+          end
+          if (r_aw_park_p[s]) begin
             // Park the beat like B: consume it now, replay once the
-            // invalidation has been applied. Withholding it (r_ready=0)
-            // stalls the shared R channel and deadlocks against
-            // inv_fill_hold — the fill the delivery waits on can be queued
-            // behind this very beat.
-            mem_req_o.r_ready   = 1'b1;
-            aw_ot_d[rs].r_held  = 1'b1;
-            aw_ot_d[rs].r_data  = mem_resp_i.r.data;
-            aw_ot_d[rs].r_resp  = mem_resp_i.r.resp;
-            aw_ot_d[rs].r_user  = mem_resp_i.r.user;
-            aw_ot_d[rs].r_last  = mem_resp_i.r.last;
+            // invalidation has been applied.
+            aw_ot_d[s].r_held  = 1'b1;
+            aw_ot_d[s].r_data  = mem_resp_i.r.data;
+            aw_ot_d[s].r_resp  = mem_resp_i.r.resp;
+            aw_ot_d[s].r_user  = mem_resp_i.r.user;
+            aw_ot_d[s].r_last  = mem_resp_i.r.last;
           end
-          // else r_held already set while still unapplied: withhold — only
-          // reachable for a multi-beat ATOP R, which the downstream
-          // axi_riscv_amos never emits (single-beat read result).
-        end else begin
+        end
+        if (!(|r_ar_hit_p) && !(|r_aw_hit_p)) begin
+          // Safety: free the mem response so a bad id cannot hang the interconnect
           mem_req_o.r_ready = 1'b1;
         end
       end
@@ -971,6 +1093,21 @@ assign mem_req_o            = core_req_i[0];
                  ar_starve_q[c] < AXI_STARVE_LIMIT[ST_W-1:0])
           ar_starve_d[c] = ar_starve_q[c] + 1'b1;
         else if (!ar_req[c]) ar_starve_d[c] = '0;
+      end
+    end
+
+    logic [OT_MAX-1:0] b_hit_t;
+    logic [NC-1:0]   b_bind_t;
+    always_comb begin
+      b_hit_t = '0;
+      b_bind_t = '0;
+      for (int unsigned s = 0; s < OT_MAX; s++) begin
+        if (mem_resp_i.b_valid && AXI_ID_WIDTH'(s) == mem_resp_i.b.id && aw_ot_q[s].valid) begin
+          b_hit_t[s] = 1'b1;
+          for (int unsigned c = 0; c < NC; c++) begin
+            if (aw_ot_q[s].core == CID_W'(c)) b_bind_t[c] = 1'b1;
+          end
+        end
       end
     end
 
@@ -1005,8 +1142,12 @@ assign mem_req_o            = core_req_i[0];
         ar_hold_slot_q <= '0;
         aw_rr_q     <= '0;
         ar_rr_q     <= '0;
+        //pragma translate_off
         ar_ot_cnt_q <= '0;
+        //pragma translate_on
+        //pragma translate_off
         aw_ot_cnt_q <= '0;
+        //pragma translate_on
         w_owner_q   <= '0;
         w_busy_q    <= 1'b0;
         w_slot_q    <= '0;
@@ -1039,8 +1180,12 @@ assign mem_req_o            = core_req_i[0];
         end
         aw_rr_q     <= aw_rr_d;
         ar_rr_q     <= ar_rr_d;
+        //pragma translate_off
         ar_ot_cnt_q <= ar_ot_cnt_d;
+        //pragma translate_on
+        //pragma translate_off
         aw_ot_cnt_q <= aw_ot_cnt_d;
+        //pragma translate_on
         w_owner_q   <= w_owner_d;
         w_busy_q    <= w_busy_d;
         w_slot_q    <= w_slot_d;
@@ -1246,6 +1391,15 @@ assign mem_req_o            = core_req_i[0];
     // slot.
     logic [NC-1:0] inv_wr_target;
 
+    // r127: the candidate target set of a write by aw_winner depends only on
+    // the winner and the filter answer, so it is formed beside the grant
+    // (inv_wr_cand) instead of behind aw_fire; the fire event then only
+    // selects it. Same values as the former in-place shift/mask.
+    logic [NC-1:0] inv_others;
+    logic [NC-1:0] inv_wr_cand;
+    assign inv_others  = ~({{NC-1{1'b0}}, 1'b1} << aw_winner);
+    assign inv_wr_cand = (POLICY == COH_BROADCAST) ? inv_others : (sf_present & inv_others);
+
     always_comb begin
       inv_new        = '0;
       inv_new_target = '0;
@@ -1256,13 +1410,8 @@ assign mem_req_o            = core_req_i[0];
         inv_new.icache    = 1'b0;
         inv_new.all_ways  = 1'b0;
         inv_new.line_addr = coh_line_tag(core_req_i[aw_winner].aw.addr, LINE_BYTES);
-        unique case (POLICY)
-          COH_BROADCAST:
-            inv_wr_target = {NC{1'b1}} & ~({{NC-1{1'b0}}, 1'b1} << aw_winner);
-          default:
-            inv_wr_target = sf_present & ~({{NC-1{1'b0}}, 1'b1} << aw_winner);
-        endcase
-        inv_new_target = inv_wr_target;
+        inv_wr_target  = inv_wr_cand;
+        inv_new_target = inv_wr_cand;
       end
       // Union LR-kill victims (they need D$ inv of the reserved line)
       if (lr_kill_v) begin
@@ -1277,8 +1426,6 @@ assign mem_req_o            = core_req_i[0];
     // filter spared at least one non-writer core, overapprox = the write had
     // to target every other core. Same definition for FILTERED and OOO; a
     // BROADCAST hub reports every invalidating write as overapprox.
-    logic [NC-1:0] inv_others;
-    assign inv_others = ~({{NC-1{1'b0}}, 1'b1} << aw_winner);
     assign sf_hit  = aw_fire && aw_may_invalidate && (inv_wr_target != inv_others);
     assign sf_over = aw_fire && aw_may_invalidate && (inv_wr_target == inv_others);
 

@@ -800,18 +800,22 @@ module alu
     end
 
     if (G6LCCfg.RVB) begin : gen_orcbw_rev8w_results
-      assign orcbw = {
-        {8{|s3_a[31:24]}}, {8{|s3_a[23:16]}}, {8{|s3_a[15:8]}}, {8{|s3_a[7:0]}}
-      };
+      // r127: one reduction net per byte, replicated into its own byte
+      // lane (same value as the former concat of replicated reductions,
+      // which billed every reduction as driving the whole word).
+      for (genvar ob = 0; ob < 4; ob++) begin : gen_orcb_lo
+        logic any;
+        assign any = |s3_a[8*ob +: 8];
+        assign orcbw[8*ob +: 8] = {8{any}};
+      end
       assign rev8w = {{s3_a[7:0]}, {s3_a[15:8]}, {s3_a[23:16]}, {s3_a[31:24]}};
       if (G6LCCfg.IS_XLEN64) begin : gen_64b
-        assign orcbw_result = {
-          {8{|s3_a[63:56]}},
-          {8{|s3_a[55:48]}},
-          {8{|s3_a[47:40]}},
-          {8{|s3_a[39:32]}},
-          orcbw
-        };
+        for (genvar ob = 4; ob < 8; ob++) begin : gen_orcb_hi
+          logic any;
+          assign any = |s3_a[8*ob +: 8];
+          assign orcbw_result[8*ob +: 8] = {8{any}};
+        end
+        assign orcbw_result[31:0] = orcbw;
         assign rev8w_result = {
           rev8w, {s3_a[39:32]}, {s3_a[47:40]}, {s3_a[55:48]}, {s3_a[63:56]}
         };

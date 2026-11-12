@@ -891,6 +891,19 @@ module g6lc_ooo_dispatch
   for (genvar p = 0; p < NP; p++) begin : gen_steer_hint
     assign steer_hint[p] = steer_q + BW'(p);
   end
+  // r127 B2: the lanes and hints the IQ will see NEXT cycle (the next state
+  // of grp_v_q / steer_q written by the group-register process above).
+  logic [NP-1:0]         steer_pre_valid;
+  logic [NP-1:0][BW-1:0] steer_pre_hint;
+  assign steer_pre_valid =
+      (mispredict_i || flush_i || flush_unissued_i) ? '0 :
+      ren_pub              ? (ren_group_valid & dispatch_valid_i) :
+      (grp_go && grp_done) ? '0 : grp_v_q;
+  for (genvar p = 0; p < NP; p++) begin : gen_steer_pre_hint
+    assign steer_pre_hint[p] =
+        ((ren_pub && !(mispredict_i || flush_i || flush_unissued_i)) ? steer_q + BW'(NP) : steer_q)
+        + BW'(p);
+  end
 
   logic [NP-1:0]                 agu_valid;
   logic [NP-1:0][G6LCCfg.PLEN-1:0] agu_addr;
@@ -943,6 +956,8 @@ module g6lc_ooo_dispatch
       .disp_fpr_rs1_i(grp_is_fpr_rs1_q), .disp_fpr_rs2_i(grp_is_fpr_rs2_q),
       .disp_fpr_rs3_i(grp_is_fpr_rs3_q),
       .steer_hint_i    (steer_hint),
+      .steer_pre_valid_i(steer_pre_valid),
+      .steer_pre_hint_i (steer_pre_hint),
       // hyp8: the IQ re-arm broadcast merges the LSQ violation pulse
       // (group 8/9) with the LSU load-unit replay — a load's dependents
       // lose their spec wakeup so they cannot issue ahead of the
@@ -1289,14 +1304,29 @@ module g6lc_ooo_dispatch
     assign sel_fpf_b = fp_b && !(|fh_b);
     assign sel_ib_b  = !fp_b;
     assign sel_if_b  = !fp_b && !(|hit_b);
-    assign op_a_agu[p] = (ofa[WLV][0] & {G6LCCfg.XLEN{sel_fpb_a}})
-                       | (G6LCCfg.XLEN'(fprf_rdata[0]) & {G6LCCfg.XLEN{sel_fpf_a}})
-                       | (oa[WLV][0] & {G6LCCfg.XLEN{sel_ib_a}})
-                       | (prf_rdata[p*2+0] & {G6LCCfg.XLEN{sel_if_a}});
-    assign op_b_pre[p] = (ofb[WLV][0] & {G6LCCfg.XLEN{sel_fpb_b}})
-                       | (G6LCCfg.XLEN'(fprf_rdata[1]) & {G6LCCfg.XLEN{sel_fpf_b}})
-                       | (ob[WLV][0] & {G6LCCfg.XLEN{sel_ib_b}})
-                       | (prf_rdata[p*2+1] & {G6LCCfg.XLEN{sel_if_b}});
+    // r127: the same four-way AND-OR with one copy of the quadrant selects
+    // per byte lane, so the hit reductions do not drive an XLEN-wide select
+    // (g6lc_opasm_eq_a/b below still compare against the nested-mux form).
+    logic [G6LCCfg.XLEN-1:0] fpf_a_w, fpf_b_w;
+    assign fpf_a_w = G6LCCfg.XLEN'(fprf_rdata[0]);
+    assign fpf_b_w = G6LCCfg.XLEN'(fprf_rdata[1]);
+    for (genvar ol = 0; ol < G6LCCfg.XLEN / 8; ol++) begin : gen_op_lane
+      logic la_fp, la_fpf, la_if, lb_fp, lb_fpf, lb_if;
+      assign la_fp  = iss_fpa_q[p];
+      assign lb_fp  = iss_fpb_q[p];
+      assign la_fpf = la_fp && !(|fh_a);
+      assign la_if  = !la_fp && !(|hit_a);
+      assign lb_fpf = lb_fp && !(|fh_b);
+      assign lb_if  = !lb_fp && !(|hit_b);
+      assign op_a_agu[p][8*ol +: 8] = (ofa[WLV][0][8*ol +: 8] & {8{la_fp}})
+                                    | (fpf_a_w[8*ol +: 8] & {8{la_fpf}})
+                                    | (oa[WLV][0][8*ol +: 8] & {8{!la_fp}})
+                                    | (prf_rdata[p*2+0][8*ol +: 8] & {8{la_if}});
+      assign op_b_pre[p][8*ol +: 8] = (ofb[WLV][0][8*ol +: 8] & {8{lb_fp}})
+                                    | (fpf_b_w[8*ol +: 8] & {8{lb_fpf}})
+                                    | (ob[WLV][0][8*ol +: 8] & {8{!lb_fp}})
+                                    | (prf_rdata[p*2+1][8*ol +: 8] & {8{lb_if}});
+    end
     //pragma translate_off
     // Reference for the flat select: the pre-r46 nested mux form,
     // compared every cycle, plus an exact-onehot check on the quadrant.

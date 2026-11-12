@@ -1,0 +1,35 @@
+{
+  "tag": "whatif-rank0-b",
+  "argv": [
+    "E:\\cva6\\sv-timing\\target\\release\\sv-timing.exe",
+    "analyze",
+    "--files-from",
+    "E:\\cva6\\build-platform\\workspace\\build\\r127-whatif\\flist.f",
+    "--modules",
+    "alu,g6lc_iq_legal,wt_axi_adapter",
+    "--param-map",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r95\\params-core-all.json",
+    "--assume-xlen",
+    "64",
+    "--package-mode",
+    "packages",
+    "--stages",
+    "--target-mhz",
+    "5000",
+    "--fo4-ps",
+    "20",
+    "--budget-margin",
+    "0.2",
+    "--json-out",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r127\\boards\\whatif-rank0-b.json",
+    "--ir-out",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r127\\boards\\whatif-rank0-b.ir.json"
+  ],
+  "returncode": 0,
+  "gitHead": "e4145351070ccb0f488853d70733037b67186ce3",
+  "sha256": {
+    "E:\\cva6\\sv-timing\\target\\release\\sv-timing.exe": "c567e1b2959aee5fd8035e4efabac4446826f7d16f57053f8f62c742486d3bcc",
+    "E:\\cva6\\build-platform\\workspace\\build\\r127-whatif\\flist.f": "b9f75f6a50c58c9405af15b2d3a88c5520f032160283c3fe29957c15e82be4a8",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r95\\params-core-all.json": "514aef69c95896c0a5bc4f38bc02cb773c6e1055b2f20a774c178edb23f256c9"
+  }
+}

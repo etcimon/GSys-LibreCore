@@ -1,0 +1,80 @@
+  74.2 g6lc_ptw.i_leg_dec:g6lc_ptw_leg_decode port_bridged via leg_state_d=leg_state_d,leg_global_mapping_n=leg_global_mapp
+        instance g6lc_ptw.i_leg_dec:g6lc_ptw_leg_decode port_bridged (child 38.2 + parent 36.0 FO4; child output(s) driven onto parent nets)
+  69.8 csr_regfile.i_csr_counters:csr_counters port_bridged via cycle_o=cycle_incr,instret_o=instret_incr
+        instance csr_regfile.i_csr_counters:csr_counters port_bridged (child 17.1 + parent 52.6 FO4; child output(s) driven onto parent nets)
+  67.7 g6lc_mmu.i_ptw:g6lc_ptw port_bridged via ptw_active_o=ptw_active,walking_instr_o=walking_instr,ptw_er
+        instance g6lc_mmu.i_ptw:g6lc_ptw port_bridged (child 36.0 + parent 31.6 FO4; child output(s) driven onto parent nets)
+  67.0 g6lc_rename.u_read:g6lc_rename_read port_bridged via stall_o=r1_stall,lane_o=r1_lane,res_pick_mask_o=res_pick_mas
+        instance g6lc_rename.u_read:g6lc_rename_read port_bridged (child 32.0 + parent 35.0 FO4; child output(s) driven onto parent nets)
+  66.2 g6lc_rename.u_recover:g6lc_rename_recover port_bridged via map_q_o=map_q,fmap_q_o=fmap_q,free_q_o=free_q,ffree_q_o=ffre
+        instance g6lc_rename.u_recover:g6lc_rename_recover port_bridged (child 31.2 + parent 35.0 FO4; child output(s) driven onto parent nets)
+  64.3 csr_regfile.i_csr_trap:csr_trap port_bridged via csr_exception_o=csr_exception_o,trap_vector_base_o=trap_vect
+        instance csr_regfile.i_csr_trap:csr_trap port_bridged (child 11.7 + parent 52.6 FO4; child output(s) driven onto parent nets)
+  62.7 g6lc_iq.i_legal:g6lc_iq_legal port_bridged via legal_o=legal
+        instance g6lc_iq.i_legal:g6lc_iq_legal port_bridged (child 31.3 + parent 31.4 FO4; child output(s) driven onto parent nets)
+  62.2 g6lc_core.perf_counters_i:perf_counters port_bridged via data_o=data_perf_csr,scountovf_o=scountovf_perf_csr,lcofi_o=
+        instance g6lc_core.perf_counters_i:perf_counters port_bridged (child 29.4 + parent 32.8 FO4; child output(s) driven onto parent nets)
+  62.1 csr_regfile.i_csr_decode:csr_decode port_bridged via req_op_o=req_op,req_addr_o=req_addr,req_wdata_o=req_wdata,re
+        instance csr_regfile.i_csr_decode:csr_decode port_bridged (child 9.5 + parent 52.6 FO4; child output(s) driven onto parent nets)
+  61.8 load_unit.i_lu_result:g6lc_lu_result port_bridged via result_o=result_o
+        instance load_unit.i_lu_result:g6lc_lu_result port_bridged (child 27.1 + parent 34.8 FO4; child output(s) driven onto parent nets)
+  61.5 store_unit.store_buffer_i:store_buffer port_bridged via no_st_pending_o=no_st_pending_o,store_buffer_empty_o=store_b
+        instance store_unit.store_buffer_i:store_buffer port_bridged (child 23.0 + parent 38.5 FO4; child output(s) driven onto parent nets)
+  60.6 csr_regfile.i_csr_irq:csr_irq port_bridged via irq_ctrl_o=irq_ctrl_o
+        instance csr_regfile.i_csr_irq:csr_irq port_bridged (child 8.0 + parent 52.6 FO4; child output(s) driven onto parent nets)
+  59.5 csr_regfile.i_csr_read:csr_read port_bridged via csr_wdata_o=csr_wdata,csr_we_o=csr_we,csr_rd_en_o=csr_rd_en,
+        instance csr_regfile.i_csr_read:csr_read port_bridged (child 6.8 + parent 52.6 FO4; child output(s) driven onto parent nets)
+  59.3 g6lc_ooo_dispatch.i_rename:g6lc_rename port_bridged via fprs3_o=fprs3,rs3_ready_o=rs3_ready_o,fprs1_o=fprs1,fprs2_o=
+        instance g6lc_ooo_dispatch.i_rename:g6lc_rename port_bridged (child 35.0 + parent 24.3 FO4; child output(s) driven onto parent nets)
+  58.1 csr_regfile.i_csr_write:csr_write port_bridged via flush_o=flush_o,flush_pc_o=flush_pc_o
+        instance csr_regfile.i_csr_write:csr_write port_bridged (child 5.5 + parent 52.6 FO4; child output(s) driven onto parent nets)
+  57.9 g6lc_core.controller_i:controller port_bridged via drain_pending_o=drain_req,pc_commit_hold_o=pc_commit_hold,se
+        instance g6lc_core.controller_i:controller port_bridged (child 25.0 + parent 32.8 FO4; child output(s) driven onto parent nets)
+  57.8 g6lc_ooo_dispatch.i_fprf:g6lc_prf port_bridged via rdata_o=fprf_rdata
+        instance g6lc_ooo_dispatch.i_fprf:g6lc_prf port_bridged (child 33.5 + parent 24.3 FO4; child output(s) driven onto parent nets)
+  57.8 g6lc_ooo_dispatch.i_prf:g6lc_prf port_bridged via rdata_o=prf_rdata
+        instance g6lc_ooo_dispatch.i_prf:g6lc_prf port_bridged (child 33.5 + parent 24.3 FO4; child output(s) driven onto parent nets)
+  57.3 g6lc_iq.i_arb:g6lc_iq_arb port_bridged via pay_bank_o=pay_bank,pay_entry_o=pay_entry,issue_sbe_o=issue_
+        instance g6lc_iq.i_arb:g6lc_iq_arb port_bridged (child 25.9 + parent 31.4 FO4; child output(s) driven onto parent nets)
+  57.1 g6lc_rename.u_publish:g6lc_rename_publish port_bridged via pub_map_wr_v_o=pub_map_wr_v,pub_map_h_o=pub_map_h,pub_map_rd
+        instance g6lc_rename.u_publish:g6lc_rename_publish port_bridged (child 22.1 + parent 35.0 FO4; child output(s) driven onto parent nets)
+  55.7 g6lc_ooo_dispatch.i_iq:g6lc_iq port_bridged via disp_ack_o=iqdisp_ack,full_o=iq_full,empty_o=iq_empty,issue_
+        instance g6lc_ooo_dispatch.i_iq:g6lc_iq port_bridged (child 31.4 + parent 24.3 FO4; child output(s) driven onto parent nets)
+  55.1 id_stage.i_d3:g6lc_decode_s3 port_bridged via instruction_o=decoded_instruction,orig_instr_o=orig_instr,is
+        instance id_stage.i_d3:g6lc_decode_s3 port_bridged (child 34.5 + parent 20.7 FO4; child output(s) driven onto parent nets)
+  53.8 fpnew_opgroup_multifmt_slice.i_fpnew_cast_multi:fpnew_cast_multi port_bridged via in_ready_o=lane_in_ready,result_o=op_result,status_o=op_stat
+        instance fpnew_opgroup_multifmt_slice.i_fpnew_cast_multi:fpnew_cast_multi port_bridged (child 21.2 + parent 32.5 FO4; child output(s) driven onto parent nets)
+  53.5 g6lc_ptw.i_pmp_ptw:pmp port_bridged via allow_o=allow_access
+        instance g6lc_ptw.i_pmp_ptw:pmp port_bridged (child 17.5 + parent 36.0 FO4; child output(s) driven onto parent nets)
+  53.5 load_store_unit.i_store_unit:store_unit port_bridged via phys_valid_o=phys_valid_o,phys_addr_o=phys_addr_o,phys_id_o=
+        instance load_store_unit.i_store_unit:store_unit port_bridged (child 38.5 + parent 15.0 FO4; child output(s) driven onto parent nets)
+  53.5 g6lc_core.id_stage_i:id_stage port_bridged via fetch_entry_ready_o=fetch_ready_id_if,issue_entry_o=issue_en
+        instance g6lc_core.id_stage_i:id_stage port_bridged (child 20.7 + parent 32.8 FO4; child output(s) driven onto parent nets)
+  52.8 mult.i_multiplier:multiplier port_bridged via result_o=mul_result,mult_valid_o=mul_valid_raw,mult_trans_id
+        instance mult.i_multiplier:multiplier port_bridged (child 28.2 + parent 24.5 FO4; child output(s) driven onto parent nets)
+  52.6 g6lc_smt_csr_bank.i_csr:csr_regfile port_bridged via flush_o=flush_o,flush_pc_o=flush_pc_o,halt_csr_o=halt_csr_o,
+        instance g6lc_smt_csr_bank.i_csr:csr_regfile port_bridged (child 52.6 + parent 0.0 FO4; child output(s) driven onto parent nets)
+  51.8 g6lc_core.commit_stage_i:commit_stage port_bridged via exception_o=ex_commit,dirty_fp_state_o=dirty_fp_state,commit
+        instance g6lc_core.commit_stage_i:commit_stage port_bridged (child 19.0 + parent 32.8 FO4; child output(s) driven onto parent nets)
+  51.8 id_stage.i_d2:g6lc_decode_s2 port_bridged via sbe_o=d2_n,instr_o=d2_n,tinst_o=d2_n,compressed_instr_o=d2_n
+        instance id_stage.i_d2:g6lc_decode_s2 port_bridged (child 31.1 + parent 20.7 FO4; child output(s) driven onto parent nets)
+  51.8 g6lc_iq.i_bank:g6lc_iq_bank port_bridged via alloc_ack_o=back,alloc_slot_o=bslot,free_cnt_o=bank_free,bca
+        instance g6lc_iq.i_bank:g6lc_iq_bank port_bridged (child 20.4 + parent 31.4 FO4; child output(s) driven onto parent nets)
+  50.7 g6lc_lsq.i_event:g6lc_lsq_event port_bridged via ev_addr_valid_o=ev_addr_valid,ev_addr_is_st_o=ev_addr_is_st,
+        instance g6lc_lsq.i_event:g6lc_lsq_event port_bridged (child 26.1 + parent 24.6 FO4; child output(s) driven onto parent nets)
+  50.5 g6lc_mmu.i_itlb:g6lc_tlb port_bridged via lu_gpaddr_o=itlb_gpaddr,lu_content_o=itlb_content,lu_g_conte
+        instance g6lc_mmu.i_itlb:g6lc_tlb port_bridged (child 18.9 + parent 31.6 FO4; child output(s) driven onto parent nets)
+  50.5 g6lc_mmu.i_dtlb:g6lc_tlb port_bridged via lu_gpaddr_o=dtlb_gpaddr,lu_content_o=dtlb_content,lu_g_conte
+        instance g6lc_mmu.i_dtlb:g6lc_tlb port_bridged (child 18.9 + parent 31.6 FO4; child output(s) driven onto parent nets)
+  49.8 load_store_unit.i_load_unit:load_unit port_bridged via pop_ld_o=pop_ld,valid_o=ld_valid,trans_id_o=ld_trans_id,resu
+        instance load_store_unit.i_load_unit:load_unit port_bridged (child 34.8 + parent 15.0 FO4; child output(s) driven onto parent nets)
+  49.6 g6lc_ooo_dispatch.i_rob:g6lc_rob port_bridged via alloc_id_o=alloc_id_o,full_o=rob_full,empty_o=rob_empty,reti
+        instance g6lc_ooo_dispatch.i_rob:g6lc_rob port_bridged (child 25.3 + parent 24.3 FO4; child output(s) driven onto parent nets)
+  49.4 ex_stage.aes_i:aes port_bridged via result_o=aes_result
+        instance ex_stage.aes_i:aes port_bridged (child 33.9 + parent 15.5 FO4; child output(s) driven onto parent nets)
+  49.1 g6lc_core.i_frontend:frontend port_bridged via npc_q_o=smt_npc_live,fetch_frontier_pc_o=smt_fetch_frontier,
+        instance g6lc_core.i_frontend:frontend port_bridged (child 16.3 + parent 32.8 FO4; child output(s) driven onto parent nets)
+  49.0 g6lc_ooo_dispatch.i_lsq:g6lc_lsq port_bridged via phys_pending_o=phys_pending_o,phys_replay_o=phys_replay_o,ld
+        instance g6lc_ooo_dispatch.i_lsq:g6lc_lsq port_bridged (child 24.6 + parent 24.3 FO4; child output(s) driven onto parent nets)
+  48.6 g6lc_iq.i_payload:g6lc_iq_payload port_bridged via rd_sbe_o=pay_sbe,rd_orig_o=pay_orig,rd_prd_o=pay_prd
+        instance g6lc_iq.i_payload:g6lc_iq_payload port_bridged (child 17.2 + parent 31.4 FO4; child output(s) driven onto parent nets)

@@ -4106,6 +4106,7 @@ assign irq_active = irq_i[smt_active_hart];
     // this is a cache subsystem that is compatible with OpenPiton
     wt_cache_subsystem #(
         .G6LCCfg   (G6LCCfg),
+        .HypCfg    (HypCfg),
         .icache_areq_t(icache_areq_t),
         .icache_arsp_t(icache_arsp_t),
         .icache_dreq_t(icache_dreq_t),

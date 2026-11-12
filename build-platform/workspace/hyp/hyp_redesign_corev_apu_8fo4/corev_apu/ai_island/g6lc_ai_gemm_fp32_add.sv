@@ -182,7 +182,16 @@ module g6lc_ai_gemm_fp32_norm (
                              ({23{|subnormal_hit}} & subnormal_fraction);
   // At most one significand bit is discarded: msb <= 24. There is no
   // subnormal right shift because ec >= 1 (integer exponent >= -149).
-  assign subnormal_fraction = 23'(magnitude << (ec - 8'd1));
+  // r127-t: subnormal_fraction is only consumed under |subnormal_hit, which
+  // needs ec < 24-b for some b <= 24, i.e. ec <= 23 and ec-1 <= 22. Larger
+  // ec leave |subnormal_hit = 0 and mask the term to zero, so the shift
+  // amount is clamped to 5 bits -- identical on every consumed value, and
+  // the 44.1-FO4 8-bit barrel collapses to a 5-bit one.
+  logic [4:0] sub_shift;
+  assign sub_shift = (ec >= 8'd24) ? 5'd22 : 5'(ec - 8'd1);
+  // magnitude[23:24] can never reach the 23-bit result (i-s <= 22-s <= 22),
+  // so the barrel runs on 23 bits, not 25.
+  assign subnormal_fraction = 23'(magnitude[22:0] << sub_shift);
   always_comb begin
     if (align_i.nan) result_o = {5'b10000, 32'h7fc00000};
     else if (align_i.inf_a) result_o = {5'b00100, align_i.sign_a, 8'hff, 23'd0};

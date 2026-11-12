@@ -425,6 +425,31 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
   logic mmu_req_flush;
   assign mmu_req_flush = flush_i | flush_tlb_i | flush_tlb_vvma_i | flush_tlb_gvma_i;
 
+  // r127 (staged TLB only): the verdict visible in cycle N answers the
+  // request of cycle N - STLB_DLY. The fetch / load-store consumers pair it
+  // with the request presented NOW (current page offset, registered beside
+  // the current vaddr), so it may only count as a hit when it belongs to
+  // that request: an access was looked up STLB_DLY cycles ago for the same
+  // page and context. Without this a new request saw the previous
+  // request's hit and PTE for STLB_DLY cycles (wrong frame across a page
+  // change), and a one-cycle hole in a held request turned the hit of the
+  // cycle before the hole into a miss two cycles later. The miss router
+  // keeps the unqualified verdict with its own delayed request record.
+  // STLB_DLY == 0: both terms are the constant 1 (the unstaged netlist).
+  logic itlb_ans_cur, dtlb_ans_cur, itlb_lu_hit_fe, dtlb_lu_hit_lsu;
+  assign itlb_ans_cur = (STLB_DLY == 0) ? 1'b1 :
+      (itlb_acc_dly[STLB_DLY] &&
+       (itlb_va_dly[STLB_DLY][G6LCCfg.VLEN-1:12] == icache_areq_i.fetch_vaddr[G6LCCfg.VLEN-1:12]) &&
+       (itlb_asid_dly[STLB_DLY] == itlb_lu_asid) && (itlb_vmid_dly[STLB_DLY] == fet_vmid_i) &&
+       (itlb_hart_dly[STLB_DLY] == fetch_hart_i));
+  assign dtlb_ans_cur = (STLB_DLY == 0) ? 1'b1 :
+      (dtlb_acc_dly[STLB_DLY] &&
+       (dtlb_va_dly[STLB_DLY][G6LCCfg.VLEN-1:12] == lsu_vaddr_i[G6LCCfg.VLEN-1:12]) &&
+       (dtlb_asid_dly[STLB_DLY] == dtlb_lu_asid) && (dtlb_vmid_dly[STLB_DLY] == vmid_i) &&
+       (dtlb_hart_dly[STLB_DLY] == lsu_hart_i));
+  assign itlb_lu_hit_fe  = itlb_lu_hit & itlb_ans_cur;
+  assign dtlb_lu_hit_lsu = dtlb_lu_hit & dtlb_ans_cur;
+
   // stage 0 is the live request (killed on flush); stages 1..STLB_DLY are
   // the delay registers. STLB_DLY==0 (TlbStages==1) means the shared TLB
   // sees the untouched passthrough.
@@ -726,7 +751,7 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
       // ITLB Hit
       // --------//
       // if we hit the ITLB output the request signal immediately
-      if (itlb_lu_hit) begin
+      if (itlb_lu_hit_fe) begin
         icache_areq_o.fetch_valid = icache_areq_i.fetch_req;
         if (G6LCCfg.RVH && i_g_st_access_err) begin
           icache_areq_o.fetch_exception.cause = riscv::INSTR_GUEST_PAGE_FAULT;
@@ -849,6 +874,14 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
   logic           ctx_mxr_q, ctx_vmxr_q;
   logic           chk_en_ld_st_translation;
   logic           chk_en_ld_st_g_translation;
+  // r127: the G-stage PPN alternative exists only with RVH; without it the
+  // translated PPN is the stage-1 PTE's, with no select in front of it.
+  logic [$bits(dtlb_pte_q.ppn)-1:0] lsu_ppn_sel;
+  if (G6LCCfg.RVH) begin : gen_ppn_rvh
+    assign lsu_ppn_sel = chk_en_ld_st_g_translation ? dtlb_gpte_q.ppn : dtlb_pte_q.ppn;
+  end else begin : gen_ppn_norvh
+    assign lsu_ppn_sel = dtlb_pte_q.ppn;
+  end
   riscv::priv_lvl_t chk_ld_st_priv_lvl;
   logic           chk_ld_st_v;
   logic           chk_sum, chk_vs_sum;
@@ -877,7 +910,7 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
 `endif
 
   // check if we need to do translation or if we are always ready (e.g.: we are not translating anything)
-  assign lsu_dtlb_hit_o = (en_ld_st_translation_i || en_ld_st_g_translation_i) ? dtlb_lu_hit : 1'b1;
+  assign lsu_dtlb_hit_o = (en_ld_st_translation_i || en_ld_st_g_translation_i) ? dtlb_lu_hit_lsu : 1'b1;
 
 
   // The data interface is simpler and only consists of a request/response interface
@@ -886,7 +919,7 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
     lsu_vaddr_n = lsu_vaddr_i;
     lsu_req_n = lsu_req_i;
     dtlb_pte_n = dtlb_content;
-    dtlb_hit_n = dtlb_lu_hit;
+    dtlb_hit_n = dtlb_lu_hit_lsu;
     lsu_is_store_n = lsu_is_store_i;
     dtlb_is_page_n = dtlb_is_page;
     misaligned_ex_n = misaligned_ex_i;
@@ -933,10 +966,7 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
       lsu_valid_o = 1'b0;
 
       lsu_dtlb_ppn_o = (en_ld_st_g_translation_i && G6LCCfg.RVH) ? dtlb_g_content.ppn : dtlb_content.ppn;
-      lsu_paddr_o = {
-        (chk_en_ld_st_g_translation && G6LCCfg.RVH) ? dtlb_gpte_q.ppn : dtlb_pte_q.ppn,
-        lsu_vaddr_q[11:0]
-      };
+      lsu_paddr_o = {lsu_ppn_sel, lsu_vaddr_q[11:0]};
 
       if (G6LCCfg.PtLevels == 3 && dtlb_is_page_q[G6LCCfg.PtLevels-2]) begin
         // Strange 9+PtLevels to avoid CI errors on (purely syntactic) checks on Sv32, where

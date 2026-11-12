@@ -138,6 +138,12 @@ assign present_o    = {NC{1'b1}};
     assign al_tag = tag_of(alloc_addr_i);
     assign cl_idx = idx_of(clear_addr_i);
     assign cl_tag = tag_of(clear_addr_i);
+    // r127: update predicates on the registered entry (see the update block).
+    logic al_hit, al_cl_same, cl_match;
+    assign al_hit     = mem_q[al_idx].valid && (mem_q[al_idx].tag == al_tag);
+    assign al_cl_same = alloc_valid_i && !al_hit && (cl_idx == al_idx);
+    assign cl_match   = al_cl_same ? (al_tag == cl_tag)
+                                   : (mem_q[cl_idx].valid && (mem_q[cl_idx].tag == cl_tag));
 
     // Combinational lookup
     always_comb begin
@@ -176,12 +182,18 @@ assign present_o    = {NC{1'b1}};
           end
         end
         // Alloc / update presence
+        // r127: the tag tests read the registered entry. The invalidation
+        // clears above write only presence bits, so the alloc test is on
+        // mem_q; the clear test sees an entry this same cycle's install
+        // rewrote as "valid with al_tag" (al_cl_same), otherwise mem_q.
+        // Same decisions as the former reads of mem_d, without chaining
+        // the three updates through the entry's valid/tag next state.
         if (alloc_valid_i) begin
-          if (mem_d[al_idx].valid && mem_d[al_idx].tag == al_tag) begin
+          if (al_hit) begin
             mem_d[al_idx].present[alloc_core_i] = 1'b1;
           end else begin
             // Install (replace on conflict — over-approx until refilled)
-            if (mem_d[al_idx].valid) install_present = {NC{1'b1}};
+            if (mem_q[al_idx].valid) install_present = {NC{1'b1}};
             mem_d[al_idx].valid                 = 1'b1;
             mem_d[al_idx].tag                   = al_tag;
             mem_d[al_idx].present               = install_present;
@@ -190,7 +202,7 @@ assign present_o    = {NC{1'b1}};
         end
         // Clear one core's presence
         if (clear_valid_i) begin
-          if (mem_d[cl_idx].valid && mem_d[cl_idx].tag == cl_tag) begin
+          if (cl_match) begin
             mem_d[cl_idx].present[clear_core_i] = 1'b0;
           end
         end

@@ -1,0 +1,9 @@
+# delay-v50 budget=8.0 fo4_ps=20.0 modules=7 board-worst=75.4 (regtoreg)
+module                       live    any k  class                    line |    rr    ir    ro    io
+g6lc_coherence_hub           Y      75.4 rr plain                  L772   |  75.4     -  64.0  66.1
+g6lc_inval_bus               Y      33.9 ro plain                  L99    |  29.9     -  33.9  13.0
+g6lc_cmo_engine              Y      29.5 io independent_lhs_bundle L217   |  15.5  29.5   7.8  29.5
+g6lc_snoop_filter            Y      27.2 rr plain                  L145   |  27.2   5.5  16.7  14.8
+g6lc_ooo_snoop_filter        Y      22.3 ro plain                  L69    |  20.3     -  22.3     -
+g6lc_lr_sc_tracker           Y      11.6 io exclusive_case_mux     L119   |  11.6   4.5  11.6  11.6
+g6lc_l1_inv_adapter          Y       4.5 io under_budget           L34    |     -     -     -   4.5

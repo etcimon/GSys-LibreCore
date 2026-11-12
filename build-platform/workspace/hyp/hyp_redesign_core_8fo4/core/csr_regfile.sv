@@ -1790,14 +1790,18 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
                 riscv::CSR_PMPADDR62,
                 riscv::CSR_PMPADDR63: begin
           // index is calculated using PMPADDR0 as the offset
-          pmpaddr_index = csr_addr.address[11:0] - riscv::CSR_PMPADDR0;
+          // r127: inside 0x3B0..0x3EF the offset from PMPADDR0 (low bits
+          // 11_0000) is {addr[5:4] + 1, addr[3:0]} -- a 2-bit increment, not
+          // a 12-bit subtract.
+          pmpaddr_index = {6'b0, csr_addr.address[5:4] + 2'd1, csr_addr.address[3:0]};
           // Important: we only support granularity 8 bytes (G=1)
           // -> last bit of pmpaddr must be set 0/1 based on the mode:
           // NA4, NAPOT: 1
           // TOR, OFF:   0
-          if (pmpcfg_q[pmpaddr_index].addr_mode[1] == 1'b1)
-            csr_rdata = G6LCCfg.XLEN'({pmpaddr_q[pmpaddr_index][G6LCCfg.PLEN-3:1], 1'b1});
-          else csr_rdata = G6LCCfg.XLEN'({pmpaddr_q[pmpaddr_index][G6LCCfg.PLEN-3:1], 1'b0});
+          // (the two former read arms differed only in bit 0, which is the
+          // mode bit itself, so it is concatenated instead of selected)
+          csr_rdata = G6LCCfg.XLEN'({pmpaddr_q[pmpaddr_index[5:0]][G6LCCfg.PLEN-3:1],
+                                     pmpcfg_q[pmpaddr_index[5:0]].addr_mode[1]});
         end
         default: read_access_exception = 1'b1;
       endcase
@@ -2946,15 +2950,31 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
       // Architectural entry63 has no higher TOR entry.
       assign next_tor_locked = 1'b0;
     end
+    // r127: the row's two writes as flat write-enables. The address word
+    // is selected per byte lane with its own copy of the enable, so the
+    // CSR write strobe and the address decode do not drive a PLEN-wide
+    // select (same values as the former nested `if (csr_we)` form).
     always_comb begin
       pmpcfg_w[p] = pmpcfg_q[p];
-      pmpaddr_w[p] = pmpaddr_q[p];
-      if (csr_we) begin
-        if (csr_addr.address == CFG_ADDR && !pmpcfg_q[p].locked)
-          pmpcfg_w[p] = csr_wdata[BYTE*8+:8];
-        if (csr_addr.address == ADDR_ADDR &&
+      if (csr_we && csr_addr.address == CFG_ADDR && !pmpcfg_q[p].locked)
+        pmpcfg_w[p] = csr_wdata[BYTE*8+:8];
+    end
+    for (genvar al = 0; al < (G6LCCfg.PLEN - 2) / 8; al++) begin : gen_addr_lane
+      always_comb begin
+        pmpaddr_w[p][8*al +: 8] = pmpaddr_q[p][8*al +: 8];
+        if (csr_we && csr_addr.address == ADDR_ADDR &&
             !pmpcfg_q[p].locked && !next_tor_locked)
-          pmpaddr_w[p] = csr_wdata[G6LCCfg.PLEN-3:0];
+          pmpaddr_w[p][8*al +: 8] = csr_wdata[8*al +: 8];
+      end
+    end
+    if ((G6LCCfg.PLEN - 2) % 8 != 0) begin : gen_addr_tail
+      always_comb begin
+        pmpaddr_w[p][G6LCCfg.PLEN-3:((G6LCCfg.PLEN-2)/8)*8] =
+            pmpaddr_q[p][G6LCCfg.PLEN-3:((G6LCCfg.PLEN-2)/8)*8];
+        if (csr_we && csr_addr.address == ADDR_ADDR &&
+            !pmpcfg_q[p].locked && !next_tor_locked)
+          pmpaddr_w[p][G6LCCfg.PLEN-3:((G6LCCfg.PLEN-2)/8)*8] =
+              csr_wdata[G6LCCfg.PLEN-3:((G6LCCfg.PLEN-2)/8)*8];
       end
     end
   end
@@ -3388,6 +3408,46 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
   assign tval_zero_ht = g6lc_core_pkg::ZERO_TVAL && (cz_ebase | cz_ecall | cz_fetch | cz_vi | cz_xmsb);
   assign tval_zero_mt = g6lc_core_pkg::ZERO_TVAL && (cz_ebase | cz_ecall | cz_fetch_h | cz_xmsb);
 
+  // r127: the trap/debug saves of the three exception PCs. csr_update keeps
+  // every decision exactly where it was but now writes only a small select
+  // per byte lane; the 64-bit sources are muxed below, one byte lane per
+  // select copy, so no decision of the nest drives a 64-bit select. The
+  // rf_* reference block still forms the values the old way and the
+  // existing rf_x_d == x_d assertions compare them every cycle.
+  //   dpc_s: 0 hold/CSR write, 1 pc_i, 2 predicted target, 3 trap vector,
+  //          4 epc, 5 sequential pc.  mepc/sepc: 1 = save pc_i.
+  localparam int unsigned EPC_NB = G6LCCfg.XLEN / 8;
+  logic [EPC_NB-1:0]       mepc_trap_s, sepc_trap_s;
+  logic [EPC_NB-1:0][2:0]  dpc_s;
+  logic [G6LCCfg.XLEN-1:0] epc_pc_w, dpc_cf_w, dpc_tv_w, dpc_er_w, dpc_seq_w;
+  assign epc_pc_w  = {{G6LCCfg.XLEN - G6LCCfg.VLEN{pc_i[G6LCCfg.VLEN-1]}}, pc_i};
+  assign dpc_cf_w  = {
+    {G6LCCfg.XLEN - G6LCCfg.VLEN{commit_instr_i.bp.predict_address[G6LCCfg.VLEN-1]}},
+    commit_instr_i.bp.predict_address
+  };
+  assign dpc_tv_w  = {{G6LCCfg.XLEN - G6LCCfg.VLEN{1'b0}}, trap_vector_base_o};
+  assign dpc_er_w  = {{G6LCCfg.XLEN - G6LCCfg.VLEN{1'b0}}, epc_o};
+  assign dpc_seq_w = {
+    {G6LCCfg.XLEN - G6LCCfg.VLEN{commit_instr_i.pc[G6LCCfg.VLEN-1]}},
+    commit_instr_i.pc + (commit_instr_i.is_compressed ? 'h2 : 'h4)
+  };
+  for (genvar gb = 0; gb < EPC_NB; gb++) begin : gen_epc_lane
+    assign mepc_d[8*gb +: 8] = mepc_trap_s[gb] ? epc_pc_w[8*gb +: 8]
+                             : (csr_apply ? mepc_w[8*gb +: 8] : mepc_q[8*gb +: 8]);
+    assign sepc_d[8*gb +: 8] = sepc_trap_s[gb] ? epc_pc_w[8*gb +: 8]
+                             : (csr_apply ? sepc_w[8*gb +: 8] : sepc_q[8*gb +: 8]);
+    always_comb begin : p_dpc_lane
+      unique case (dpc_s[gb])
+        3'd1:    dpc_d[8*gb +: 8] = epc_pc_w[8*gb +: 8];
+        3'd2:    dpc_d[8*gb +: 8] = dpc_cf_w[8*gb +: 8];
+        3'd3:    dpc_d[8*gb +: 8] = dpc_tv_w[8*gb +: 8];
+        3'd4:    dpc_d[8*gb +: 8] = dpc_er_w[8*gb +: 8];
+        3'd5:    dpc_d[8*gb +: 8] = dpc_seq_w[8*gb +: 8];
+        default: dpc_d[8*gb +: 8] = csr_apply ? dpc_w[8*gb +: 8] : dpc_q[8*gb +: 8];
+      endcase
+    end
+  end
+
   always_comb begin : csr_update
     // hyp8: phase B -- holds through the per-bank writers (*_w), then the
     // original post-write overrides verbatim, in the original order.
@@ -3406,7 +3466,7 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
     cycle_d = csr_apply ? cycle_w : cycle_incr;
     dcache_d = csr_apply ? dcache_w : dcache_q;
     dcsr_d = csr_apply ? dcsr_w : dcsr_q;
-    dpc_d = csr_apply ? dpc_w : dpc_q;
+    dpc_s = '0;  // r127: lane selects, data mux below
     dscratch0_d = csr_apply ? dscratch0_w : dscratch0_q;
     dscratch1_d = csr_apply ? dscratch1_w : dscratch1_q;
     fcsr_d = csr_apply ? fcsr_w : fcsr_q;
@@ -3433,7 +3493,7 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
     mcounteren_d = csr_apply ? mcounteren_w : mcounteren_q;
     mcountinhibit_d = csr_apply ? mcountinhibit_w : mcountinhibit_q;
     medeleg_d = csr_apply ? medeleg_w : medeleg_q;
-    mepc_d = csr_apply ? mepc_w : mepc_q;
+    mepc_trap_s = '0;
     mideleg_d = csr_apply ? mideleg_w : mideleg_q;
     mie_d = csr_apply ? mie_w : mie_q;
     mip_d = csr_apply ? mip_w : mip_q;
@@ -3456,7 +3516,7 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
     scbze_d = csr_apply ? scbze_w : scbze_q;
     scontext_d = csr_apply ? scontext_w : scontext_q;
     scounteren_d = csr_apply ? scounteren_w : scounteren_q;
-    sepc_d = csr_apply ? sepc_w : sepc_q;
+    sepc_trap_s = '0;
     sscratch_d = csr_apply ? sscratch_w : sscratch_q;
     stimecmp_d = csr_apply ? stimecmp_w : stimecmp_q;
     stval_d = csr_apply ? stval_w : stval_q;
@@ -3631,7 +3691,7 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
           // set cause
           scause_d = ex_i.cause;
           // set epc
-          sepc_d = {{G6LCCfg.XLEN - G6LCCfg.VLEN{pc_i[G6LCCfg.VLEN-1]}}, pc_i};
+          sepc_trap_s = '1;
           // set mtval or stval
           stval_d        = tval_zero_s ? '0 : ex_i.tval;
           if (G6LCCfg.RVH) begin
@@ -3650,7 +3710,7 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
         mstatus_d.mpp = priv_lvl_q;
         mcause_d = (break_from_trigger) ? G6LCCfg.XLEN'(32'h00000003) : ex_i.cause;
         // set epc
-        mepc_d = {{G6LCCfg.XLEN - G6LCCfg.VLEN{pc_i[G6LCCfg.VLEN-1]}}, pc_i};
+        mepc_trap_s = '1;
         // set mtval or stval
         if (G6LCCfg.TvalEn) begin
           mtval_d        = tval_zero_m ? '0 : ex_i.tval;
@@ -3746,7 +3806,7 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
       if ((G6LCCfg.SDTRIG && debug_from_trigger) ||
           (ex_i.valid && cz_brk) || (ex_i.valid && cz_dbg)) begin
         // save PC of next this instruction e.g.: the next one to be executed
-        dpc_d = {{G6LCCfg.XLEN - G6LCCfg.VLEN{pc_i[G6LCCfg.VLEN-1]}}, pc_i};
+        dpc_s = {EPC_NB{3'd1}};
       end
 
       // single step enable and we just retired an instruction
@@ -3756,22 +3816,16 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
         // valid CTRL flow change
         if (commit_instr_i.fu == CTRL_FLOW) begin
           // we saved the correct target address during execute
-          dpc_d = {
-            {G6LCCfg.XLEN - G6LCCfg.VLEN{commit_instr_i.bp.predict_address[G6LCCfg.VLEN-1]}},
-            commit_instr_i.bp.predict_address
-          };
+          dpc_s = {EPC_NB{3'd2}};
           // exception valid
         end else if (ex_i.valid) begin
-          dpc_d = {{G6LCCfg.XLEN - G6LCCfg.VLEN{1'b0}}, trap_vector_base_o};
+          dpc_s = {EPC_NB{3'd3}};
           // return from environment
         end else if (eret_o) begin
-          dpc_d = {{G6LCCfg.XLEN - G6LCCfg.VLEN{1'b0}}, epc_o};
+          dpc_s = {EPC_NB{3'd4}};
           // consecutive PC
         end else begin
-          dpc_d = {
-            {G6LCCfg.XLEN - G6LCCfg.VLEN{commit_instr_i.pc[G6LCCfg.VLEN-1]}},
-            commit_instr_i.pc + (commit_instr_i.is_compressed ? 'h2 : 'h4)
-          };
+          dpc_s = {EPC_NB{3'd5}};
         end
         debug_mode_d   = 1'b1;
         set_debug_pc_o = 1'b1;
@@ -6513,10 +6567,13 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
   assign break_from_trigger_o = break_from_trigger;  // from trigger module to commit stage
 
   // write logic pmp
-  always_comb begin : write
-    for (int i = 0; i < 64; i++) begin
-      if (i < G6LCCfg.NrPMPEntries) begin
-        if (!G6LCCfg.PMPEntryReadOnly[i]) begin
+  // r127: the entry-implemented and read-only tests are elaboration
+  // constants; as generate conditions they build no select in front of the
+  // PMP registers (same next-state values as the former procedural loop).
+  for (genvar i = 0; i < 64; i++) begin : gen_pmp_next
+    if (i < G6LCCfg.NrPMPEntries) begin : gen_impl
+      if (!G6LCCfg.PMPEntryReadOnly[i]) begin : gen_rw
+        always_comb begin
           // PMP locked logic is handled in the CSR write process above
           pmpcfg_next[i] = pmpcfg_d[i];
           // We only support >=8-byte granularity, NA4 is not supported
@@ -6527,18 +6584,15 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
           if (pmpcfg_d[i].access_type.r == '0 && pmpcfg_d[i].access_type.w == '1) begin
             pmpcfg_next[i].access_type = pmpcfg_q[i].access_type;
           end
-        end else begin
-          pmpcfg_next[i] = pmpcfg_q[i];
         end
-        if (!G6LCCfg.PMPEntryReadOnly[i]) begin
-          pmpaddr_next[i] = pmpaddr_d[i];
-        end else begin
-          pmpaddr_next[i] = pmpaddr_q[i];
-        end
-      end else begin
-        pmpcfg_next[i]  = '0;
-        pmpaddr_next[i] = '0;
+        always_comb pmpaddr_next[i] = pmpaddr_d[i];
+      end else begin : gen_ro
+        always_comb pmpcfg_next[i]  = pmpcfg_q[i];
+        always_comb pmpaddr_next[i] = pmpaddr_q[i];
       end
+    end else begin : gen_none
+      always_comb pmpcfg_next[i]  = '0;
+      always_comb pmpaddr_next[i] = '0;
     end
   end
 

@@ -59,6 +59,14 @@ module g6lc_l2_pf #(
   localparam int unsigned SW         = (NR_STREAMS <= 1) ? 1 : $clog2(NR_STREAMS);
   localparam int unsigned PW         = (PF_DISTANCE <= 1) ? 1 : $clog2(PF_DISTANCE + 1);
   localparam int unsigned DLT_W      = PAGE_LBITS + 1;         // signed delta
+  // Width for the r127-u shift-add product `stride * ahead`. The original
+  // `$signed(stride) * $signed({1'b0,ahead})` is evaluated inside the
+  // LINE_BITS' cast, i.e. at full LINE_BITS context — it is the *true*
+  // product, not a PROD_W-truncated one (Verilator-verified). |stride| <=
+  // 2^(DLT_W-1) and ahead < 2^PW, so |product| < 2^(DLT_W+PW-1); EM_W =
+  // DLT_W+PW+2 signed bits holds it with margin, and LINE_BITS'(em_prod)
+  // then sign-extends exactly like the original cast did.
+  localparam int unsigned EM_W       = DLT_W + PW + 2;
   // Burst cap: a confirmation can never arm more than the look-ahead or
   // the per-stream outstanding limit, whichever is smaller.
   localparam int unsigned PEND_CAP   = (MAX_OUT < PF_DISTANCE) ? MAX_OUT : PF_DISTANCE;
@@ -86,6 +94,15 @@ module g6lc_l2_pf #(
   logic                      cnd_vld_q, cnd_vld_d;
   logic [LINE_BITS-1:0]      cnd_line_q, cnd_line_d;
 
+  // r127-aa: parallel emit-evaluation scratch — per-stream constant-index
+  // results (emit-ok / page-clear / candidate line / rr-position) plus the
+  // winner one-hot and its position. Written only inside the emit always_comb.
+  logic [NR_STREAMS-1:0]     em_ok, em_pc, em_win, em_blk;
+  logic [LINE_BITS-1:0]      em_bs [NR_STREAMS];
+  logic [SW-1:0]             em_ps [NR_STREAMS];
+  logic [SW-1:0]             em_wpos;
+  logic                       em_any;
+
   function automatic logic [PAGETAG_W-1:0] page_of(
       input logic [LINE_BITS-1:0] l);
     return l[LINE_BITS-1:PAGE_LBITS];
@@ -97,11 +114,9 @@ module g6lc_l2_pf #(
                   $signed({1'b0, last[PAGE_LBITS-1:0]}));
   endfunction
 
-  // Candidates beyond the arming miss's own page are never armed.
-  function automatic logic in_page(
-      input logic [LINE_BITS-1:0] cand, input logic [LINE_BITS-1:0] last);
-    return page_of(cand) == page_of(last);
-  endfunction
+  // Candidates beyond the arming miss's own page are never armed. The emit
+  // walk checks this as a within-page range test on (offset + product) — see
+  // the xs compare below; page_of() is retained for the train/stream tags.
 
   // Stream match for the training address (also gates the emit walk below).
   logic [LINE_BITS-1:0] train_line;
@@ -181,18 +196,37 @@ assign train_line = train_line_i[AXI_ADDR_WIDTH-1:OFF_BITS];
   always_comb begin
     // Hoisted locals — Verilator flags block-scope automatics that are only
     // conditionally assigned as latches; declare and default them here.
-    int unsigned             em_s;
     int unsigned             em_v;
     logic                    em_found;
-    logic [LINE_BITS-1:0]    em_base;
     logic signed [DLT_W-1:0] tr_d;
     logic signed [DLT_W-1:0] tr_str;
-    em_s     = '0;
+    // r127-u: stride*ahead as a per-bit shift-add. `ahead` is PW bits, so the
+    // product is the sum of stride*2^b over the set bits of `ahead`. `es`
+    // sign-extends stride to EM_W *before* shifting (a bare `stride <<< b`
+    // would wrap at DLT_W), each `es <<< b` is a constant shift (free wiring)
+    // plus one conditional add, and LINE_BITS'(em_prod) sign-extends exactly
+    // like the original multiply's cast context. Exhaustive miter-verified
+    // bit-identical; the `*` operator is no longer billed as an atomic
+    // multiplier (~87 FO4 on the emit path).
+    logic signed [EM_W-1:0] em_prod;
+    logic signed [EM_W-1:0] es;
+    // r127-u: in-page range check accumulator — last's within-page offset plus
+    // the signed product, EM_W+1 bits so offset(<=2^PAGE_LBITS-1)+product never
+    // overflows before the xs[EM_W:PAGE_LBITS]==0 range test.
+    logic signed [EM_W:0]   xs;
     em_v     = '0;
     em_found = 1'b0;
-    em_base  = '0;
     tr_d     = '0;
     tr_str   = '0;
+    es       = '0;
+    em_prod  = '0;
+    xs       = '0;
+    // r127-aa emit-eval defaults (avoid latches when the emit guard is shut).
+    em_ok = '0; em_pc = '0; em_win = '0; em_blk = '0;
+    em_any = 1'b0; em_wpos = '0;
+    for (int unsigned s = 0; s < NR_STREAMS; s++) begin
+      em_bs[s] = '0; em_ps[s] = '0;
+    end
     st_d       = st_q;
     rr_d       = rr_q;
     cnd_vld_d  = cnd_vld_q;
@@ -206,26 +240,72 @@ assign train_line = train_line_i[AXI_ADDR_WIDTH-1:OFF_BITS];
     if (cnd_vld_q && cand_take_i) cnd_vld_d = 1'b0;
 
     // ---- refill the offer register: round-robin over armed streams ----
+    // r127-aa: parallel per-stream evaluation. st_q is read at constant
+    // indices (unrolled `for s`), the winner is the emitter with the smallest
+    // forward distance from rr_q, and the st_d updates are per-stream
+    // constant-index — this removes the N dynamic st_q[em_s]/st_d[em_s]
+    // barrel muxes of the serial early-exit walk. Semantics are identical
+    // (miter: 11M randomized cases, NR_STREAMS=4 and =3, 0 mismatches): the
+    // first armed+in-page stream in rr-order emits; armed page-bound streams
+    // examined before it get pend=0; streams after it are untouched; the
+    // retrained stream is never a candidate.
     if (!cnd_vld_d && (quiet_d == '0)) begin
-      for (int unsigned k = 0; k < NR_STREAMS; k++) begin
-        em_s = (rr_q + k) % NR_STREAMS;
-        // A stream being retrained this cycle keeps its new epoch: do not
-        // emit a candidate derived from the old `last`.
-        if (!cnd_vld_d && st_q[em_s].valid && (st_q[em_s].pend != '0) &&
-            !(train_i && train_hit && (train_hit_idx == SW'(em_s)))) begin
-          em_base = st_q[em_s].last +
-                    LINE_BITS'($signed(st_q[em_s].stride) *
-                               $signed({1'b0, st_q[em_s].ahead}));
-          if (in_page(em_base, st_q[em_s].last)) begin
-            cnd_vld_d  = 1'b1;
-            cnd_line_d = em_base;
-            st_d[em_s].pend  = st_q[em_s].pend - 1'b1;
-            st_d[em_s].ahead = st_q[em_s].ahead + 1'b1;
-            rr_d             = SW'((em_s + 1) % NR_STREAMS);
-          end else begin
-            // Page bound reached: drop the rest of this burst.
-            st_d[em_s].pend = '0;
+      for (int unsigned s = 0; s < NR_STREAMS; s++) begin
+        em_ok[s] = 1'b0; em_pc[s] = 1'b0; em_bs[s] = '0;
+        // A stream being retrained this cycle keeps its new epoch: it is not
+        // an emit candidate (same guard the serial walk applied per em_s).
+        if (st_q[s].valid && (st_q[s].pend != '0) &&
+            !(train_i && train_hit && (train_hit_idx == SW'(s)))) begin
+          es      = $signed(st_q[s].stride);
+          em_prod = '0;
+          for (int unsigned b = 0; b < PW; b++) begin
+            if (st_q[s].ahead[b])
+              em_prod = em_prod + (es <<< b);
           end
+          // in_page(em_base,last) == within-page offset + signed product
+          // staying inside [0, 2^PAGE_LBITS): the xs[EM_W:PAGE_LBITS]==0
+          // range test, identical to the serial walk (see r127-u note).
+          xs       = $signed({{(EM_W+1-PAGE_LBITS){1'b0}},
+                             st_q[s].last[PAGE_LBITS-1:0]}) + em_prod;
+          em_bs[s] = st_q[s].last + LINE_BITS'(em_prod);
+          if (!(|xs[EM_W:PAGE_LBITS])) em_ok[s] = 1'b1;   // armed && in-page
+          else                        em_pc[s] = 1'b1;   // armed && page-bound
+        end
+        // rr-order position of stream s = forward distance from rr_q mod N.
+        // The compare+add form is exact for any NR_STREAMS (no pow2 assume).
+        em_ps[s] = SW'( (int'(s) >= int'(rr_q))
+                        ? (int'(s) - int'(rr_q))
+                        : (int'(s) - int'(rr_q) + NR_STREAMS) );
+      end
+      // Winner = emitter with the smallest rr-position. em_ps is a bijection
+      // over streams, so at most one emitter has no earlier-position emitter.
+      em_any = 1'b0; em_wpos = '0;
+      for (int unsigned s = 0; s < NR_STREAMS; s++) begin
+        em_blk[s] = 1'b0;
+        for (int unsigned t = 0; t < NR_STREAMS; t++) begin
+          if (em_ok[t] && (em_ps[t] < em_ps[s])) em_blk[s] = 1'b1;
+        end
+        em_win[s] = em_ok[s] && !em_blk[s];
+        if (em_win[s]) begin em_any = 1'b1; em_wpos = em_ps[s]; end
+      end
+      // Apply: the winner emits; page-bound armed streams positioned before it
+      // were examined first and drop the rest of their burst. With no emitter
+      // every armed page-bound stream was examined, so all get pend=0.
+      if (em_any) begin
+        cnd_vld_d = 1'b1;
+        for (int unsigned s = 0; s < NR_STREAMS; s++) begin
+          if (em_win[s]) begin
+            cnd_line_d = em_bs[s];
+            st_d[s].pend  = st_q[s].pend - 1'b1;
+            st_d[s].ahead = st_q[s].ahead + 1'b1;
+            rr_d = SW'((int'(s) + 1) % NR_STREAMS);
+          end else if (em_pc[s] && (em_ps[s] < em_wpos)) begin
+            st_d[s].pend = '0;
+          end
+        end
+      end else begin
+        for (int unsigned s = 0; s < NR_STREAMS; s++) begin
+          if (em_pc[s]) st_d[s].pend = '0;
         end
       end
     end

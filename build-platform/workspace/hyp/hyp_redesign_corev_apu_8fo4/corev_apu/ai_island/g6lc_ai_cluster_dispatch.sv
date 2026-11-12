@@ -441,14 +441,36 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) b_offset_q <= '0;
       else if (phase_q == DP_MUL_WAIT && span_done_vec[c]) b_offset_q <= span_product;
     end
+    // r127: the remaining-columns subtract and the "slice starts inside the
+    // matrix" compare are captured in DP_MUL_START, where col0_q is already
+    // final (written at the DP_OFFSETS edge) and n_q / slice_q are job
+    // constants, so DP_ADDR only compares the remainder with the slice and
+    // selects. Same e_active / e_n as the former single-edge expression
+    // (checked every DP_ADDR by g6lc_r127_cdisp_rem_eq).
+    logic [31:0] e_rem_q;
+    logic        e_lt_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin e_rem_q <= '0; e_lt_q <= 1'b0; end
+      else if (phase_q == DP_MUL_START) begin
+        e_rem_q <= n_q - col0_q;
+        e_lt_q  <= col0_q < n_q;
+      end
+    end
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin e_active[c] <= 1'b0; e_n[c] <= '0; end
       else if (phase_q == DP_ADDR) begin
-        e_active[c] <= col0_q < n_q;
-        e_n[c] <= col0_q < n_q ?
-            ((n_q - col0_q > slice_q) ? slice_q : n_q - col0_q) : 32'd0;
+        e_active[c] <= e_lt_q;
+        e_n[c] <= e_lt_q ? ((e_rem_q > slice_q) ? slice_q : e_rem_q) : 32'd0;
       end
     end
+    // pragma translate_off
+    always_ff @(posedge clk_i) begin
+      if (rst_ni && phase_q == DP_ADDR) begin
+        g6lc_r127_cdisp_rem_eq: assert (e_rem_q === (n_q - col0_q) && e_lt_q === (col0_q < n_q))
+          else $error("g6lc_ai_cluster_dispatch: equiv early remainder c=%0d", c);
+      end
+    end
+    // pragma translate_on
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin e_pb[c] <= '0; e_pc[c] <= '0; end
       else if (phase_q == DP_ADDR) begin

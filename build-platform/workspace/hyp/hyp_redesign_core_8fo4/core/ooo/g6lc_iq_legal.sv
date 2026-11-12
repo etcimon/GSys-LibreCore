@@ -380,7 +380,10 @@ module g6lc_iq_legal
         is_ld  = info_cls_i[b][e][C_LD];
         is_csr = info_cls_i[b][e][C_CSR];
         is_st  = info_cls_i[b][e][C_ST];
-        h = info_hart_i[b][e];
+        // r127: a single-hart build has one frontier row; the hart index is
+        // the constant 0 there (asserted below), so the frontier read is not
+        // a dynamic index on a port.
+        h = (NH <= 1) ? '0 : info_hart_i[b][e];
         // N1d / T24: oldest of THIS hart only. Another hart's store or
         // CSR does not hold this one.
         older_csr = csr_front_v_q[h] && (csr_front_tid_q[h] != info_tid_i[b][e]);
@@ -467,6 +470,12 @@ module g6lc_iq_legal
     if (rst_ni && !flush_i) begin
       for (int unsigned b = 0; b < BANKS; b++) begin
         for (int unsigned e = 0; e < ENTRIES; e++) begin
+          // r127: the NH<=1 frontier read uses hart 0 as a constant.
+          if (info_v_i[b][e] && !$isunknown(info_hart_i[b][e])) begin
+            g6lc_r127_iqleg_hart: assert (NH > 1 || info_hart_i[b][e] == '0)
+              else $error("g6lc_iq_legal: live entry b=%0d e=%0d carries hart %0d with NH=%0d",
+                          b, e, info_hart_i[b][e], NH);
+          end
           if (info_v_i[b][e] && legal_o[b][e] &&
               !$isunknown({info_tid_i[b][e], info_cls_i[b][e]})) begin
             r68_iqleg_n <= r68_iqleg_n + 1;

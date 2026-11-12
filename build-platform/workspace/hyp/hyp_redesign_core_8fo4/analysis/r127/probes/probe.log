@@ -1,0 +1,30 @@
+sv-timing-core 0.1.0 ir=ir-v6 measurement=delay-v50 correction=correction-v5 parser_pin=v0.13.5
+opt=-O2 (max_passes=4 worklist_width=1 cut=cost-balanced stages=1 min_gain=2 slack_target=0 area_weight=0 max_cells_per_fo4=16 reassoc=false effort=balanced cache=unit)
+target_mhz=5000
+from_cache=false
+modules=20
+paths=114
+opportunities=14
+ir_out=probes/probe.ir.json
+  module p_a1_orcb_concat nodes=4 regions=3
+  module p_a2_orcb_bytes nodes=4 regions=3
+  module p_b1_nested nodes=18 regions=3
+  module p_b2_flat_onehot nodes=19 regions=9
+  module p_b3_flat_regsel nodes=9 regions=3
+  module p_b4_sliced_regsel nodes=9 regions=3
+  module p_b5_mux2_comb_sel nodes=6 regions=3
+  module p_c1_pick_cur nodes=6 regions=4
+  module p_c2_pick_low_only nodes=7 regions=5
+  module p_c3_pick_groups nodes=21 regions=18
+  module p_d1_rank_slice nodes=4 regions=3
+  module p_d2_rank_masked nodes=4 regions=3
+  module p_e1_ctz_countones nodes=4 regions=2
+  module p_e2_ctz_encode nodes=5 regions=3
+  module p_f1_addr_eq_case nodes=7 regions=3
+  module p_f2_addr_eq_split nodes=10 regions=6
+  module p_g1_prio_chain nodes=8 regions=7
+  module p_g2_prio_flat nodes=7 regions=6
+  module p_h1_read_index nodes=4 regions=2
+  module p_h2_read_onehot_q nodes=5 regions=2
+json_out=probes/probe.json
+stages: none (no svt-stage pragmas)

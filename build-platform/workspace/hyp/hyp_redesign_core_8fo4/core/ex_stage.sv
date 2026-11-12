@@ -1214,7 +1214,8 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
       .cbo_t(cbo_t),
       .acc_mmu_req_t(acc_mmu_req_t),
       .acc_mmu_resp_t(acc_mmu_resp_t),
-      .bp_resolve_t(bp_resolve_t)
+      .bp_resolve_t(bp_resolve_t),
+      .HypCfg    (HypCfg)
   ) lsu_i (
       .clk_i,
       .rst_ni,

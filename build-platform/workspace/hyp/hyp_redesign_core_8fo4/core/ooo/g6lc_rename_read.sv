@@ -200,6 +200,11 @@ module g6lc_rename_read
   logic [NR_PORTS-1:0]    lane_stall;
   logic [NR_PORTS-1:0]    lane_ckpt;
   logic [NR_PORTS-1:0]    need_int, need_fp;
+  // r127: entry index of each lane's pick (group-hierarchy encode).
+  localparam int unsigned PICK_GS = 8;
+  localparam int unsigned PICK_LW = 3;
+  logic [PRF_W-1:0]       pidx  [NR_PORTS];
+  logic [FPRF_W-1:0]      fpidx [NR_PORTS];
 
   for (genvar gp = 0; gp < NR_PORTS; gp++) begin : gen_picks
     assign need_int[gp] = valid_i[gp] && need_rd_i[gp] &&
@@ -217,10 +222,102 @@ module g6lc_rename_read
         end
       end
     end
-    assign lone_p[gp]   = pick_free_mask (free_q_i  & bank_mask(gp) &
-                                          ~taken_lt[gp],  (gp == 1));
-    assign flone_p[gp]  = pick_ffree_mask(ffree_q_i & fbank_mask(gp) &
-                                          ~ftaken_lt[gp], (gp == 1));
+    // r127: one-hot pick as a two-level group hierarchy (groups of PICK_GS
+    // entries): per-group isolate and group-any in parallel, one isolate
+    // over the group-any bits, and the tag formed by OR encodes of the two
+    // one-hots ({group, in-group} is the entry index because PICK_GS is a
+    // power of two). Lane 1 takes the highest candidate, every other lane
+    // the lowest, as pick_free_mask did; the direction is a generate
+    // constant, so no bit reversal or direction select is built. Same
+    // one-hot and same tag as pick_free_mask + mask_to_tag (checked every
+    // cycle from g6lc_rename against the function forms).
+    for (genvar pool = 0; pool < 2; pool++) begin : gen_pool
+      localparam int unsigned PN  = (pool == 0) ? PRF_ENTRIES : FPN;
+      localparam int unsigned PNG = (PN + PICK_GS - 1) / PICK_GS;
+      localparam int unsigned PGW = (PNG > 1) ? $clog2(PNG) : 1;
+      logic [PNG*PICK_GS-1:0]      cand;
+      logic [PNG-1:0]              gany, gpick;
+      logic [PNG-1:0][PICK_GS-1:0] lsel;
+      logic [PNG-1:0][PICK_LW-1:0] lidx;
+      logic [PN-1:0]               oh;
+      logic [PGW-1:0]              gidx;
+      logic [PICK_LW-1:0]          lix;
+      if (pool == 0) begin : gen_src_int
+        assign cand = (PNG*PICK_GS)'(free_q_i & bank_mask(gp) & ~taken_lt[gp] &
+                                     ~PRF_ENTRIES'(1));
+      end else begin : gen_src_fp
+        assign cand = (PNG*PICK_GS)'(ffree_q_i & fbank_mask(gp) & ~ftaken_lt[gp]);
+      end
+      for (genvar g = 0; g < PNG; g++) begin : gen_g
+        logic [PICK_GS-1:0] x;
+        assign x       = cand[g*PICK_GS +: PICK_GS];
+        assign gany[g] = |x;
+        for (genvar i = 0; i < PICK_GS; i++) begin : gen_i
+          if (gp == 1) begin : gen_hi
+            if (i == PICK_GS - 1) begin : gen_e
+              assign lsel[g][i] = x[i];
+            end else begin : gen_n
+              assign lsel[g][i] = x[i] & ~(|x[PICK_GS-1:i+1]);
+            end
+          end else begin : gen_lo
+            if (i == 0) begin : gen_e
+              assign lsel[g][i] = x[i];
+            end else begin : gen_n
+              assign lsel[g][i] = x[i] & ~(|x[i-1:0]);
+            end
+          end
+        end
+        for (genvar j = 0; j < PICK_LW; j++) begin : gen_lj
+          logic [PICK_GS-1:0] m;
+          for (genvar i = 0; i < PICK_GS; i++) begin : gen_m
+            if (((i >> j) & 1) != 0) begin : gen_s
+              assign m[i] = lsel[g][i];
+            end else begin : gen_c
+              assign m[i] = 1'b0;
+            end
+          end
+          assign lidx[g][j] = |m;
+        end
+        if (gp == 1) begin : gen_ghi
+          if (g == PNG - 1) begin : gen_e
+            assign gpick[g] = gany[g];
+          end else begin : gen_n
+            assign gpick[g] = gany[g] & ~(|gany[PNG-1:g+1]);
+          end
+        end else begin : gen_glo
+          if (g == 0) begin : gen_e
+            assign gpick[g] = gany[g];
+          end else begin : gen_n
+            assign gpick[g] = gany[g] & ~(|gany[g-1:0]);
+          end
+        end
+      end
+      for (genvar k = 0; k < PN; k++) begin : gen_oh
+        assign oh[k] = gpick[k / PICK_GS] & lsel[k / PICK_GS][k % PICK_GS];
+      end
+      for (genvar j = 0; j < PGW; j++) begin : gen_gj
+        logic [PNG-1:0] m;
+        for (genvar g = 0; g < PNG; g++) begin : gen_m
+          if (((g >> j) & 1) != 0) begin : gen_s
+            assign m[g] = gpick[g];
+          end else begin : gen_c
+            assign m[g] = 1'b0;
+          end
+        end
+        assign gidx[j] = |m;
+      end
+      always_comb begin : p_lix
+        lix = '0;
+        for (int unsigned g = 0; g < PNG; g++) lix |= {PICK_LW{gpick[g]}} & lidx[g];
+      end
+      if (pool == 0) begin : gen_out_int
+        assign lone_p[gp] = oh;
+        assign pidx[gp]   = PRF_W'({gidx, lix});
+      end else begin : gen_out_fp
+        assign flone_p[gp] = oh;
+        assign fpidx[gp]   = FPRF_W'({gidx, lix});
+      end
+    end
     assign alloc_ok[gp]  = |lone_p[gp];
     assign falloc_ok[gp] = |flone_p[gp];
     assign alloc_do[gp]  = need_int[gp] && alloc_ok[gp];
@@ -229,6 +326,28 @@ module g6lc_rename_read
     assign lane_stall[gp] = valid_i[gp] && need_rd_i[gp] &&
                             (is_fpr_rd_i[gp] ? !falloc_ok[gp] : !alloc_ok[gp]);
   end
+  //pragma translate_off
+  // r127 reference: the pre-r127 function forms. This module has no clock;
+  // g6lc_rename samples r127_pick_ok every cycle.
+  logic [PRF_ENTRIES-1:0] r127_ref_lone  [NR_PORTS];
+  logic [FPN-1:0]         r127_ref_flone [NR_PORTS];
+  logic                   r127_pick_ok;
+  for (genvar gp = 0; gp < NR_PORTS; gp++) begin : gen_r127_ref
+    assign r127_ref_lone[gp]  = pick_free_mask (free_q_i  & bank_mask(gp) &
+                                                ~taken_lt[gp],  (gp == 1));
+    assign r127_ref_flone[gp] = pick_ffree_mask(ffree_q_i & fbank_mask(gp) &
+                                                ~ftaken_lt[gp], (gp == 1));
+  end
+  always_comb begin : p_r127_pick_ok
+    r127_pick_ok = 1'b1;
+    for (int unsigned p = 0; p < NR_PORTS; p++) begin
+      if (lone_p[p] !== r127_ref_lone[p] || flone_p[p] !== r127_ref_flone[p] ||
+          pidx[p] !== mask_to_tag(r127_ref_lone[p]) ||
+          fpidx[p] !== mask_to_ftag(r127_ref_flone[p]))
+        r127_pick_ok = 1'b0;
+    end
+  end
+  //pragma translate_on
   // Reservation masks: OR gather of every lane's actual take.
   always_comb begin : p_resmask
     res_pick_mask_o  = '0;
@@ -282,9 +401,9 @@ module g6lc_rename_read
 
       // -- destination pick ------------------------------------------------
       lane_o[gp].do_alloc  = alloc_do[gp];
-      lane_o[gp].prd       = alloc_do[gp]  ? 8'(mask_to_tag(lone_p[gp]))  : '0;
+      lane_o[gp].prd       = alloc_do[gp]  ? 8'(pidx[gp])  : '0;
       lane_o[gp].do_falloc = falloc_do[gp];
-      lane_o[gp].fprd      = falloc_do[gp] ? 8'(mask_to_ftag(flone_p[gp])) : '0;
+      lane_o[gp].fprd      = falloc_do[gp] ? 8'(fpidx[gp]) : '0;
     end
   end
 

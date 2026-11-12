@@ -135,8 +135,37 @@ module g6lc_ai_gemm_arplan #(
   logic                 s3_vld_q;
   logic [31:0]          s3_elems_w;
   logic                 s3_row_last_w;
-  assign s3_elems_w    = elems_for_burst(s2_rem_q, s2_lane_q, s2_nb_q);
-  assign s3_row_last_w = s3_elems_w >= s2_rem_q;
+  // r127: elems_for_burst(rem, lane0, nb) is min(nb' * BytesPerBeat - lane0, rem)
+  // with nb' = max(nb, 1): the first-beat clamp and the burst-capacity clamp
+  // of the function are the same clamp against rem (first > rem implies
+  // cap > rem; otherwise cap = first + (nb-1) * BytesPerBeat = nb * BPB - lane0).
+  // The total is a (8 + BeatAlignW + 1)-bit quantity formed by one narrow
+  // subtract; one compare against rem gives both the element count and
+  // row_last (= total >= rem). The function stays as the reference below.
+  localparam int unsigned EfbW = 8 + BeatAlignW + 1;
+  if (BytesPerBeat != (1 << BeatAlignW) || BeatLaneW > BeatAlignW || EfbW > 32) begin : gen_bad_beat_geom
+    $error("g6lc_ai_gemm_arplan: BytesPerBeat must be 2**BeatAlignW and a lane index must fit in a beat");
+  end
+  logic [7:0]      s3_nb_e;
+  logic [EfbW-1:0] s3_total;
+  logic            s3_total_lt_rem;
+  assign s3_nb_e         = (s2_nb_q == 8'd0) ? 8'd1 : s2_nb_q;
+  assign s3_total        = {1'b0, s3_nb_e, {BeatAlignW{1'b0}}} - EfbW'(s2_lane_q);
+  assign s3_total_lt_rem = (|s2_rem_q[31:EfbW]) || (s3_total < s2_rem_q[EfbW-1:0]);
+  assign s3_elems_w      = s3_total_lt_rem ? 32'(s3_total) : s2_rem_q;
+  assign s3_row_last_w   = !s3_total_lt_rem;
+  // pragma translate_off
+  logic [31:0] rf_s3_elems;
+  assign rf_s3_elems = elems_for_burst(s2_rem_q, s2_lane_q, s2_nb_q);
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && !$isunknown({s2_rem_q, s2_lane_q, s2_nb_q})) begin
+      g6lc_r127_arplan_elems_eq: assert (s3_elems_w === rf_s3_elems &&
+                                         s3_row_last_w === (rf_s3_elems >= s2_rem_q))
+        else $error("g6lc_ai_gemm_arplan: equiv elems_for_burst rem=%0d lane=%0d nb=%0d",
+                    s2_rem_q, s2_lane_q, s2_nb_q);
+    end
+  end
+  // pragma translate_on
 
   // ---------------------------------------------------------------- depth-2 candidate FIFO
   typedef struct packed {
@@ -192,34 +221,46 @@ module g6lc_ai_gemm_arplan #(
   end
 
   // S1 register group: cheap per-cursor terms.
+  // r127: the next-state terms are module-scope cones (they were automatics
+  // inside the clocked block, where every register write was read as one
+  // serial chain); the clocked block only captures them. Same expressions.
+  // r8 R2c: next_addr is derived from the pushed plan's own fields
+  // (addr + elems*elemsize, or row_start + ld on a row advance) --
+  // NOT row_addr(post_cursor), whose row*ld mul was the deep cone.
+  logic [AddrWidth-1:0] s1_addr_s;
+  logic [31:0]          s1_row_s, s1_t_s, s1_rem_s;
+  logic [7:0]           s1_room_s;
+  assign s1_row_s  = fifo_push ? post_row : cur_row_q;
+  assign s1_t_s    = fifo_push ? post_t   : cur_t_q;
+  assign s1_addr_s = s3_row_last_q
+                   ? (s3_addr_q + AddrWidth'(s3_lane_q) - AddrWidth'(s3_t_q)
+                              + AddrWidth'(ld_q))
+                   : (s3_addr_q + AddrWidth'(s3_lane_q)
+                              + AddrWidth'(s3_elems_q << elem_shift_q));
+  assign s1_rem_s  = k_bytes_q - s1_t_s;
+  assign s1_room_s = 8'(g6lc_ai_island_cfg_pkg::dram_beats_in_stripe(
+      NrChannels, ChanShift, BytesPerBeat, 64'(beat_align(s1_addr_s))));
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       s1_addr_q <= '0; s1_lane_q <= '0; s1_rem_q <= '0; s1_room_q <= '0;
-      s1_row_q <= '0; s1_t_q <= '0; s1_vld_q <= 1'b0;
+      s1_row_q <= '0; s1_t_q <= '0;
+    end else if (!job_start_i && s1_launch) begin
+      s1_addr_q <= beat_align(s1_addr_s);
+      s1_lane_q <= s1_addr_s[BeatAlignW-1:0];
+      s1_rem_q  <= s1_rem_s;
+      s1_room_q <= s1_room_s;
+      s1_row_q  <= s1_row_s;
+      s1_t_q    <= s1_t_s;
+    end
+  end
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      s1_vld_q <= 1'b0;
     end else begin
       if (job_start_i) begin
         s1_vld_q <= 1'b0;
       end else if (s1_launch) begin
-        // r8 R2c: next_addr is derived from the pushed plan's own fields
-        // (addr + elems*elemsize, or row_start + ld on a row advance) --
-        // NOT row_addr(post_cursor), whose row*ld mul was the deep cone.
-        automatic logic [AddrWidth-1:0] addr_s;
-        automatic logic [31:0]          row_s, t_s;
-        row_s  = fifo_push ? post_row : cur_row_q;
-        t_s    = fifo_push ? post_t   : cur_t_q;
-        addr_s = s3_row_last_q
-               ? (s3_addr_q + AddrWidth'(s3_lane_q) - AddrWidth'(s3_t_q)
-                          + AddrWidth'(ld_q))
-               : (s3_addr_q + AddrWidth'(s3_lane_q)
-                          + AddrWidth'(s3_elems_q << elem_shift_q));
-        s1_addr_q <= beat_align(addr_s);
-        s1_lane_q <= addr_s[BeatAlignW-1:0];
-        s1_rem_q  <= k_bytes_q - t_s;
-        s1_room_q <= 8'(g6lc_ai_island_cfg_pkg::dram_beats_in_stripe(
-            NrChannels, ChanShift, BytesPerBeat, 64'(beat_align(addr_s))));
-        s1_row_q  <= row_s;
-        s1_t_q    <= t_s;
-        s1_vld_q  <= 1'b1;
+        s1_vld_q <= 1'b1;
       end else if (s2a_ready) begin
         s1_vld_q <= 1'b0;
       end

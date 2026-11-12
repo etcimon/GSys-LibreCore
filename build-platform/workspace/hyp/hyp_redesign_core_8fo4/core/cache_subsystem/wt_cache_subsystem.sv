@@ -26,6 +26,8 @@ module wt_cache_subsystem
   import wt_cache_pkg::*;
 #(
     parameter config_pkg::g6lc_cfg_t G6LCCfg        = config_pkg::g6lc_cfg_empty,
+    // r127: threaded to wt_dcache, which kept its own Hyp8 default.
+    parameter g6lc_hyp_pkg::g6lc_hyp_cfg_t HypCfg   = g6lc_hyp_pkg::Hyp8,
     parameter type                   icache_areq_t  = logic,
     parameter type                   icache_arsp_t  = logic,
     parameter type                   icache_dreq_t  = logic,
@@ -165,6 +167,7 @@ module wt_cache_subsystem
   // Port 2 is write only and goes into the merging write buffer
   wt_dcache #(
       .G6LCCfg(G6LCCfg),
+      .HypCfg(HypCfg),
       .dcache_req_i_t(dcache_req_i_t),
       .dcache_req_o_t(dcache_req_o_t),
       .dcache_req_t(dcache_req_t),

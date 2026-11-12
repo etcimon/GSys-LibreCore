@@ -1,0 +1,22 @@
+# delay-v50 budget=8.0 fo4_ps=20.0 modules=20 board-worst=43.4 (regtoreg)
+module                       live    any k  class                    line |    rr    ir    ro    io
+p_c1_pick_cur                Y      43.4 rr plain                  L119   |  43.4     -     -  29.0
+p_a1_orcb_concat             Y      35.2 rr plain                  L11    |  35.2     -     -  23.9
+p_h2_read_onehot_q           Y      35.0 io plain                  L278   |  35.0     -     -  35.0
+p_b2_flat_onehot             Y      31.7 rr plain                  L56    |  31.7     -     -  25.7
+p_c2_pick_low_only           Y      28.4 rr plain                  L138   |  28.4     -     -  13.0
+p_b5_mux2_comb_sel           Y      25.1 rr plain                  L91    |  25.1     -     -  22.6
+p_b1_nested                  Y      23.5 io exclusive_case_mux     L38    |  23.5     -     -  23.5
+p_e1_ctz_countones           Y      19.2 rr plain                  L207   |  19.2     -     -     -
+p_d1_rank_slice              Y      19.0 rr plain                  L190   |  19.0     -     -     -
+p_c3_pick_groups             Y      18.3 rr plain                  L178   |  18.3     -     -   8.0
+p_g1_prio_chain              Y      15.2 rr plain                  L254   |  15.2     -     -   5.3
+p_f1_addr_eq_case            Y      12.6 rr plain                  L231   |  12.6     -     -   6.5
+p_f2_addr_eq_split           Y      11.7 rr plain                  L238   |  11.7     -     -   6.1
+p_d2_rank_masked             Y      10.2 rr plain                  L199   |  10.2     -     -   9.2
+p_b3_flat_regsel             Y      10.0 rr plain                  L70    |  10.0     -     -     -
+p_b4_sliced_regsel           Y       8.1 rr plain                  L82    |   8.1     -     -     -
+p_h1_read_index              Y       5.5 rr under_budget           L271   |   5.5     -     -     -
+p_g2_prio_flat               Y       4.8 rr under_budget           L262   |   4.8     -     -     -
+p_e2_ctz_encode              Y       3.5 rr under_budget           L213   |   3.5     -     -   2.0
+p_a2_orcb_bytes              Y       2.4 io under_budget           L18    |   2.4     -     -   2.4

@@ -1,0 +1,6 @@
+# Generated sv-timing board dumps — keep only small curated
+# manifest/peaks summaries (same convention as analysis/r94/boards).
+*.json
+*.log
+!*.manifest.json
+!*.peaks.json

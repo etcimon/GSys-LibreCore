@@ -1,0 +1,35 @@
+{
+  "tag": "iq-b2-arm1",
+  "argv": [
+    "E:\\cva6\\sv-timing\\target\\release\\sv-timing.exe",
+    "analyze",
+    "--files-from",
+    "E:\\cva6\\build-platform\\workspace\\build\\r127-whatif\\steer1\\flist.f",
+    "--modules",
+    "g6lc_iq",
+    "--param-map",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r95\\params-core-all.json",
+    "--assume-xlen",
+    "64",
+    "--package-mode",
+    "packages",
+    "--stages",
+    "--target-mhz",
+    "5000",
+    "--fo4-ps",
+    "20",
+    "--budget-margin",
+    "0.2",
+    "--json-out",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r127\\boards\\iq-b2-arm1.json",
+    "--ir-out",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r127\\boards\\iq-b2-arm1.ir.json"
+  ],
+  "returncode": 0,
+  "gitHead": "65911368704e7c66f3ac5e6ef1e23300c177437c",
+  "sha256": {
+    "E:\\cva6\\sv-timing\\target\\release\\sv-timing.exe": "c567e1b2959aee5fd8035e4efabac4446826f7d16f57053f8f62c742486d3bcc",
+    "E:\\cva6\\build-platform\\workspace\\build\\r127-whatif\\steer1\\flist.f": "f7e8850c7ee381e43a60a41112b61480049ff57c11ce8ff70d29e4295fce1f43",
+    "E:\\cva6\\build-platform\\workspace\\hyp\\hyp_redesign_core_8fo4\\analysis\\r95\\params-core-all.json": "514aef69c95896c0a5bc4f38bc02cb773c6e1055b2f20a774c178edb23f256c9"
+  }
+}
