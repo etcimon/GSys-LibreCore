@@ -1,0 +1,19 @@
+{
+  "kind": "storamic-tools-record",
+  "qualification": true,
+  "verilator": {
+    "head": "44063db83db8887f9c1d37aefa831f970dd67ec0",
+    "verilator": "/opt/testharness/toolchains/verilator-v5.008-g6lc-44063db8-pgo/runtime/bin/verilator",
+    "runtime_json": "/opt/testharness/runs/storamic-tools36-validate/output/runtime.json",
+    "runtime_header_sha256": "e900ec451629715860e4faffdce5127f5f118ddcaa433125b79f12d3cbb718f8",
+    "compiler_sha256": "d219b63fc4f8fcba45deef3c6a1672c526f66ec11873da941bc2194cd84dd24e",
+    "note": "tools36 profile-use runtime; staged source verified file-by-file == tools/verilator@44063db83 (5184/5184); simulatorPgo + unroll 256/131072 match tools35"
+  },
+  "yosys": {
+    "head": "5f1ebc2941020b71e46e77339363b3e31235f113",
+    "path": "/opt/testharness/toolchains/yosys-g6lc/bin/yosys",
+    "sha256": "517198d02ed5e3777a90feb20247f9edc20ece8c9123eb80bb0173c1c48d8316",
+    "note": "PGO profile-use build (-O3 -march=native -fprofile-use); 486 gcda in ~/.cache/g6lc-yosys/pgo-profile; csr-scc validated 0/0 prod + 130 mutant"
+  },
+  "solver_bin": "/opt/testharness/runs/storamic-solver-bfdf7f162a30/owned-solver/yices-2.6.5/bin"
+}

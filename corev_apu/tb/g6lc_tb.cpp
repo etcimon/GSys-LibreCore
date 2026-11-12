@@ -305,11 +305,30 @@ static const char *verilog_plusargs[] = {
     "g6lc_virtio_mmio_trace",
     // Storamic primary-role AXI/seam trace (g6lc_storamic_attach.sv).
     "g6lc_storamic_mem_trace",
+    // C2 native-topology manifest + scoreboard report
+    // (ariane_testharness.sv gen_storamic_c2_topology and
+    // g6lc_storamic_c2_monitor.sv): prints STORAMIC_C2_TOPOLOGY /
+    // STORAMIC_C2_NATIVE at time 0 / final. Same allowlist rule as above:
+    // unlisted, HTIF rejects it and the run dies before the report arms.
+    "storamic_c2_report",
+    // C2 port-1 DMI System Bus Access probe (preload_aware_dtm_t): real
+    // sbcs/sbaddress/sbdata traffic through the debug module. Opt-in; same
+    // allowlist rule.
+    "storamic_sba_probe",
+    // C2 monitor transaction trace (g6lc_storamic_c2_monitor.sv, $test$plusargs
+    // gated). Diagnostic only; same allowlist rule.
+    "c2_trace",
     nullptr};
 
 // +mem_poke entries, applied inside the sim loop once main_time reaches cycle.
 struct MemPoke { uint64_t addr, val, cycle; bool applied; };
 static std::vector<MemPoke> mem_pokes;
+
+// +storamic_sba_probe: arm the DMI System Bus Access probe in
+// preload_aware_dtm_t::reset(). Set from argv in main() (the plusarg is
+// allowlisted above; Verilator consumes it before htif_argv is built, so the
+// DTM constructor never sees it).
+static bool g_storamic_sba_probe = false;
 
 extern dtm_t* dtm;
 extern remote_bitbang_t * jtag;
@@ -418,7 +437,82 @@ class preload_aware_dtm_t : public dtm_t {
     // the privilege level and in general does not perform proper reset (despite the name).
     // As all our binaries in preloading will always start at the base of DRAM this should not
     // be such a big problem.
-    void reset() {}
+    // reset() runs inside htif_t::start(), which producer_thread reaches only
+    // after halt(0)/get_xlen()/resume(0) — i.e. only when the hart can actually
+    // halt. With +debug_disable the core's debug_req is gated off, halt(0)
+    // spins forever, and this (and the whole poll loop) is never entered, so
+    // the C2 SBA probe requires running without +debug_disable.
+    void reset() override { maybe_sba(); }
+
+  private:
+    bool sba_done_ = false;
+    void maybe_sba() {
+      if (sba_done_ || !g_storamic_sba_probe) return;
+      sba_done_ = true;
+      sba_probe();
+    }
+    // +storamic_sba_probe: real DMI System Bus Access through the debug module
+    // (xbar slave port 1 -> Storamic window). read()/write() are raw DMI
+    // register accesses (op 1/2) serialized through the ucontext switch, safe
+    // on this producer thread. dm_top is BusWidth=64 -> sbaccess64=1,
+    // sbaccess32=0 (dm_csrs.sv static fields); the 64-bit SBA size
+    // (sbaccess=3) is used. Route Enable=0 refuses both accesses — the
+    // refusal is the scored traffic.
+    void sba_probe() {
+      const uint32_t SBCS = 0x38, SBADDR0 = 0x39, SBADDR1 = 0x3a,
+                     SBDATA0 = 0x3c;
+      const uint32_t SBVER    = 1u << 29;   // sbversion[31:29] reads back 1
+      const uint32_t SBACC64  = 3u << 17;   // sbaccess = 3 (64-bit)
+      const uint32_t SBROA    = 1u << 20;   // sbreadonaddr
+      const uint32_t SBBUSY   = 1u << 21;
+      const uint32_t W1C_ERR  = (0x7u << 12) | (1u << 22);  // sberror|sbbusyerror
+      const uint32_t BASE     = 0x50000000u;               // StoramicBase
+      // Target the reserved window (offset >= 0x2000, unserved) so the route
+      // refuses with an error response — that refusal is the scored traffic.
+      // The control/virtio pages (<0x2000) are served and must answer OK.
+      const uint32_t HOLE     = BASE + 0x8000u;
+      unsigned sba_reads = 0, sba_writes = 0;
+      unsigned rd_err = 0, wr_err = 0;
+      auto sba_idle = [&]() -> bool {
+        for (int i = 0; i < 50000; i++) {
+          if (!(read(SBCS) & SBBUSY)) return true;
+        }
+        return false;
+      };
+      uint32_t sbcs = read(SBCS);
+      const bool cap = ((sbcs >> 29) == 1) && (sbcs & (1u << 3));
+      if (!cap) {
+        std::cerr << "STORAMIC_SBA_NOTE sbcs=0x" << std::hex << sbcs
+                  << std::dec << " capability_fail\n";
+      } else if (sba_idle()) {
+        // One SBA read: sbreadonaddr makes the SBAddress0 write trigger it.
+        write(SBCS, SBVER | SBACC64 | SBROA | W1C_ERR);
+        write(SBADDR1, 0);
+        write(SBADDR0, HOLE);
+        if (sba_idle()) {
+          (void)read(SBDATA0);
+          rd_err = (read(SBCS) >> 12) & 7;
+          sba_reads = 1;
+        }
+        // One SBA write: without sbreadonaddr the SBData0 write triggers it.
+        // HOLE+8 stays inside the reserved window -> refused with an error.
+        if (sba_idle()) {
+          write(SBCS, SBVER | SBACC64 | W1C_ERR);
+          write(SBADDR1, 0);
+          write(SBADDR0, HOLE + 8);
+          write(SBDATA0, 0);
+          if (sba_idle()) {
+            wr_err = (read(SBCS) >> 12) & 7;
+            write(SBCS, SBVER | SBACC64 | W1C_ERR);  // W1C clear sberror
+            sba_writes = 1;
+          }
+        }
+      }
+      std::cerr << "STORAMIC_SBA_PROBE reads=" << sba_reads
+                << " writes=" << sba_writes
+                << " rd_sberror=" << rd_err << " wr_sberror=" << wr_err
+                << "\n";
+    }
 };
 
 int main(int argc, char **argv) {
@@ -524,6 +618,11 @@ int main(int argc, char **argv) {
           if (!legal_verilog_plusarg) {
             verilog_plusargs_legal = 0;
           } else {
+            // C2 port-1 SBA probe: arm the flag here at parse time —
+            // Verilated::commandArgs() later compacts argv, so a post-parse
+            // argv scan cannot be trusted to still see this plusarg.
+            if (arg == "+storamic_sba_probe")
+              g_storamic_sba_probe = true;
             c = 'P';
           }
           goto retry;
@@ -574,6 +673,8 @@ done_processing:
   Verilated::commandArgs(argc, argv);
 
   for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "+storamic_sba_probe") == 0)
+      g_storamic_sba_probe = true;
     if (strncmp(argv[i], "+mem_poke=", 10) == 0) {
       uint64_t pa = 0, pv = 0, pc = 0;
       if (sscanf(argv[i] + 10, "%llx:%llx:%llu", (unsigned long long *)&pa,

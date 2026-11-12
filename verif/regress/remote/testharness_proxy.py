@@ -713,15 +713,17 @@ class Remote:
         )
         log(f"push done in {time.time()-t0:.3f}s")
 
-    def pull(self, remote_path: str, local: Path, optional: bool = False) -> None:
+    def pull(self, remote_path: str, local: Path, optional: bool = False,
+             excludes: list[str] | None = None) -> None:
         local.mkdir(parents=True, exist_ok=True)
         ssh_cmd = "ssh " + " ".join(shlex.quote(o) for o in self.base_opts())
         log(f"pull {self.host}:{remote_path} -> {local}")
         t0 = time.time()
-        proc = subprocess.run(
-            [*RSYNC_BIN, "-az", "-e", ssh_cmd, f"{self.host}:{remote_path}", str(local)],
-            check=False,
-        )
+        cmd = [*RSYNC_BIN, "-az", "-e", ssh_cmd]
+        for pattern in excludes or []:
+            cmd.append("--exclude=" + pattern)
+        cmd += [f"{self.host}:{remote_path}", str(local)]
+        proc = subprocess.run(cmd, check=False)
         log(f"pull rc={proc.returncode} in {time.time()-t0:.3f}s")
         if not optional:
             proc.check_returncode()
@@ -2142,7 +2144,7 @@ APU_LEAF_ENV_ALLOW = (
     # diagnostic only: image/shader logs break the CTS run contract
     'G6LC_CTS_LOG_IMAGES', 'G6LC_CTS_LOG_SHADERS',
     'G6LC_ONLY', 'G6LC_SKIP_APT', 'G6LC_VN_DEBUG', 'G6LC_GUEST_MEM',
-    'G6LC_VENUS_ONLY',
+    'G6LC_VENUS_ONLY', 'G6LC_VKCMP_ENV',
     'APU_DEV_COHORT', 'APU_DEV_TEST_TIMEOUT', 'APU_DEV_BUILD_TIMEOUT',
     'APU_TOOL_SETUP_TIMEOUT', 'APU_AUTO_INSTALL',
     'APU_SIM_PGO_TIMEOUT', 'APU_SIM_BUILD_TIMEOUT', 'APU_SIM_TRAIN_TIMEOUT',
@@ -2785,6 +2787,18 @@ sys.exit(summary["max_rc"])
 '''
 
 
+# Bulky build products kept out of a ``py --pull --pull-exclude-build`` fetch.
+# These are Verilator Mdir / Yosys-intermediate / PGO artifacts; the evidence a
+# stage needs (logs, json, manifests, commands.json, summaries) never matches.
+PULL_BUILD_EXCLUDES = [
+    "*.o", "*.a", "*.so", "*.d",
+    "*.gcno", "*.gcda", "*.gcov",
+    "*.cpp", "*.cc", "*.cxx", "*.hpp", "*.hh",
+    "*.mk", "*.bc", "*.ll",
+    "training-executable",
+]
+
+
 def cmd_py(rem: Remote, args) -> int:
     """Upload one or more local Python scripts and run them remotely with a
     multi-threaded worker pool.
@@ -2883,7 +2897,8 @@ def cmd_py(rem: Remote, args) -> int:
 
     if args.pull:
         dest = Path(args.dest).resolve() if args.dest else repo_root() / "remote-runs" / tag / "output"
-        rem.pull(f"{rundir}/output/", dest)
+        rem.pull(f"{rundir}/output/", dest,
+                 excludes=PULL_BUILD_EXCLUDES if args.pull_exclude_build else None)
         log(f"pulled output -> {dest}")
     return rc
 
@@ -3037,6 +3052,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="KEY=VALUE env var for the scripts (repeatable)")
     sp.add_argument("--pull", action="store_true",
                     help="copy output/ back when done")
+    sp.add_argument("--pull-exclude-build", action="store_true",
+                    help="with --pull, skip bulky Verilator/Yosys build products "
+                         "(object files, generated C++, PGO profiles, intermediates) "
+                         "so only logs/json/manifests come back")
     sp.add_argument("--dest", default=None,
                     help="local output directory for --pull (default remote-runs/<tag>/output)")
     sp.set_defaults(fn=cmd_py)

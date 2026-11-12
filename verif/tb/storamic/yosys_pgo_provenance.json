@@ -1,0 +1,67 @@
+{
+  "kind": "g6lc-yosys-pgo-provenance",
+  "recorded": "2026-11-11",
+  "note": "Owned Yosys PGO build consumed for Storamic remote stages. Built on the testharness by a prior session; this record captures verified on-host facts (no rebuild, no interference).",
+  "source": {
+    "repository": "github.com/etcimon/yosys g6lc fork",
+    "head": "5f1ebc2941020b71e46e77339363b3e31235f113",
+    "subject": "SigMap: resolve compound connections through existing aliases, invalidate canon on promote",
+    "build_tree": "/opt/testharness/src/yosys-g6lc",
+    "worktree_clean": true,
+    "git_log_top": [
+      "5f1ebc294 SigMap: resolve compound connections through existing aliases, invalidate canon on promote",
+      "a28b00ba6 SigMap span walk, dense SigBit index, multiply-high buckets, remaining four-state kernels"
+    ]
+  },
+  "slang_frontend": {
+    "backend": "read_slang (frontends/slang)",
+    "libs_slang_submodule": "545f88b2ed3a2d20325fbd17413af177a6bca72f (v12.0)",
+    "frontends_slang_lib_submodule": "ddb91c219c00260a3675bb321e6f693ea79d915e",
+    "driver_binary": "/opt/testharness/toolchains/yosys-g6lc/bin/sn",
+    "read_slang_probe": "SLANG frontend executes (read_slang /dev/null reaches frontend; file-content error is expected for /dev/null)"
+  },
+  "binary": {
+    "path": "/opt/testharness/toolchains/yosys-g6lc/bin/yosys",
+    "sha256": "517198d02ed5e3777a90feb20247f9edc20ece8c9123eb80bb0173c1c48d8316",
+    "version_string": "Yosys 0.69+ (git sha1 5f1ebc294, Release, GNU /usr/bin/c++ 13.3.0) [github.com/etcimon/yosys at HEAD]",
+    "install_root": "/opt/testharness/toolchains/yosys-g6lc",
+    "companions": ["yosys-abc", "yosys-smtbmc", "yosys-witness", "yosys-filterlib", "sn", "yosys-config"]
+  },
+  "pgo": {
+    "flow": "profile-generate -> train on host -> profile-use",
+    "train_build": {
+      "cmake_dir": "/home/ubuntu/.cache/g6lc-yosys/build-pgo1",
+      "install_prefix": "/opt/testharness/toolchains/yosys-g6lc.pgo-train",
+      "cxx_flags": "-O3 -march=native -fprofile-generate -fprofile-dir=/home/ubuntu/.cache/g6lc-yosys/pgo-profile -fprofile-update=atomic"
+    },
+    "profile_use_build": {
+      "cmake_dir": "/home/ubuntu/.cache/g6lc-yosys/build",
+      "install_prefix": "/opt/testharness/toolchains/yosys-g6lc",
+      "cxx_flags": "-O3 -march=native -fprofile-use -fprofile-dir=/home/ubuntu/.cache/g6lc-yosys/pgo-profile -fprofile-correction -Wno-missing-profile"
+    },
+    "build_type": "Release",
+    "common_flags": "-std=gnu++20 -fno-exceptions -O3 -DNDEBUG",
+    "compiler": "/usr/bin/c++ (GNU 13.3.0)",
+    "profile_dir": "/home/ubuntu/.cache/g6lc-yosys/pgo-profile",
+    "gcda_object_count": 486,
+    "lto": false,
+    "training_workload": "profile data present for 486 objects; exact training invocation not retained in on-host artifacts (consumed build)"
+  },
+  "validation": {
+    "run_tag": "storamic-4aa711c5241a",
+    "stage": "csr-scc",
+    "production": {"sccs": 0, "latches": 0, "seconds": 59.2, "pass": true},
+    "admission_mutant_reverted_fix": {"sccs": 130, "seconds": 59.7, "pass": true},
+    "equivalence": "SCC/latch counts identical in kind to the prior owned binary (0/0 production, >0 mutant)"
+  },
+  "prior_binary": {
+    "path": "/opt/testharness/runs/storamic-sigmap-repair-20-r3/owned-install/bin/yosys",
+    "sha256": "c2e67033f6e0d864b7ec56907a8b73175d5e9c432e6d7033562b62e5dc660bcd",
+    "version_string": "Yosys 0.69+ (git sha1 a28b00ba6-dirty, Release, GNU /usr/bin/c++ 13.3.0)",
+    "note": "parent commit a28b00ba6 with a dirty tree; commit identity and PGO status were previously unknown"
+  },
+  "timing_comparison": {
+    "status": "pending",
+    "note": "csr-scc wall time on the new PGO binary is 59.2s (production) / 59.7s (mutant); old-binary timing run deferred to avoid CPU contention with the concurrent checkpoint-route qualification"
+  }
+}

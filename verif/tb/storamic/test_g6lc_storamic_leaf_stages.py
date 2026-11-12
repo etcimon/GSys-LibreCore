@@ -408,5 +408,56 @@ class IndependentFormalStageTests(unittest.TestCase):
         self.assertIn("run_csr_scc", dispatch["set(stages) & {'csr-scc'}"])
 
 
+class FailuresExtractTests(unittest.TestCase):
+    """run_leaf.py is Unix-only (imports ``resource``), so the pure-Python
+    failures extractor is lifted out of its AST and exercised directly."""
+
+    @classmethod
+    def setUpClass(cls):
+        import ast as _ast
+        import types
+        source = Path(__file__).with_name("run_leaf.py").read_text()
+        tree = _ast.parse(source)
+        wanted = {"_FAILURE_MARKERS", "_first_failure_line", "_write_failures"}
+        namespace = {"json": json, "re": re, "Path": Path}
+        for node in tree.body:
+            if isinstance(node, (_ast.FunctionDef, _ast.Assign)):
+                names = ({node.name} if isinstance(node, _ast.FunctionDef)
+                         else {t.id for t in node.targets if isinstance(t, _ast.Name)})
+                if names & wanted:
+                    code = compile(_ast.Module(body=[node], type_ignores=[]),
+                                   "run_leaf.py", "exec")
+                    exec(code, namespace)
+        cls.leaf = types.SimpleNamespace(**{k: namespace[k] for k in wanted})
+
+    def test_write_failures_records_failed_records_first_log_error_and_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            (out / "route-direct.log").write_text(
+                "build ok\nCHECKPOINT_ROUTE_FAIL aw-source-ok\nmore\n")
+            (out / "clean.log").write_text("all good, 0 errors\n")
+            outcomes = [{"case": "direct-pos", "pass": True},
+                        {"case": "direct-neg", "pass": False, "reason": "x"},
+                        {"synth_cells": 12}]
+            self.leaf._write_failures(out, outcomes, error=RuntimeError("boom"))
+            payload = json.loads((out / "failures.json").read_text())
+            self.assertEqual([f["case"] for f in payload["failures"]],
+                             ["direct-neg"])
+            self.assertEqual(payload["error"], "boom")
+            self.assertEqual(payload["log_errors"],
+                             [{"log": "route-direct.log",
+                               "line": "CHECKPOINT_ROUTE_FAIL aw-source-ok"}])
+
+    def test_write_failures_clean_run_has_empty_failures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            (out / "ok.log").write_text("PASS everything\n")
+            self.leaf._write_failures(out, [{"pass": True}], error=None)
+            payload = json.loads((out / "failures.json").read_text())
+            self.assertEqual(payload["failures"], [])
+            self.assertEqual(payload["log_errors"], [])
+            self.assertIsNone(payload["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

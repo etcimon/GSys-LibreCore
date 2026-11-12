@@ -152,6 +152,13 @@ authorize artifact recovery or shared cleanup.
   `g6lc_storamic/architecture/implementation-tasks.md`.
 - [x] **ST-037D flush + stick composition (2026-11-04):** the model stick
   (`corev_apu/storamic/g6lc_storamic_model_stick.sv`) now carries the flash
+- [ ] **Primary-role virtio-blk pre-existing failure (not a C2 regression):**
+  `storamic_virtio_blk` built `-DSTORAMIC_PRIMARY` on
+  `G6LC_STORAMIC+G6LC_STORAMIC_MODEL` stops retiring right after the first B
+  error response (`tohost=126`, ~t=60610) — reproduced identically on
+  committed HEAD, so it predates the C2 route/monitor work. The documented
+  IO role (`G6LC_STORAMIC_IO`, `-DSTORAMIC_COHERENT_DMA`) passes positive and
+  negative-oracle on HEAD and the C2 tree (`storamic-bc778d3f3d34`).
   chip as a commit-boundary durable store (`g6lc_storamic_durable_store.sv`:
   write-back staging, flush drains to tc_sram, spill-on-full). The device
   offers VIRTIO_BLK_F_FLUSH (bank-0 bit 9) and the bare-metal test

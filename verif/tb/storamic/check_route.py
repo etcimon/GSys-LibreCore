@@ -29,6 +29,7 @@ def main():
             raise RuntimeError("snapshot source changed: " + name)
     out.mkdir(parents=True, exist_ok=False)
     inputs = [source / n for n in (
+        "vendor/pulp-platform/axi/src/axi_pkg.sv",
         "g6lc_storamic/rtl/include/g6lc_storamic_pkg.sv",
         "corev_apu/storamic/g6lc_storamic_ctrl_bridge.sv",
         "corev_apu/storamic/g6lc_storamic_checkpoint_route.sv")]

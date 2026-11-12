@@ -4,3 +4,83 @@
 // Per-element LZC trees are acyclic; retain scalar dependency diagnostics.
 split_var -module "lzc" -var "*sel_nodes"
 split_var -module "lzc" -var "*index_nodes"
+
+// Native-profile (NoMstPorts>=NB_MST, NO_LATENCY) crossbar: the packed request/
+// response channel aggregates and round-robin arbiter node arrays form the same
+// documented FALSE combinational loops (UNOPTFLAT) as the full testharness in
+// build-platform/scripts/verilator-split-loops.vlt. Candidates below are exactly
+// those `--report-unoptflat` listed as "can split_var" for the native build;
+// splitting is semantics-preserving and leaves RTL untouched. Entries are inert
+// for profiles that do not instantiate these modules.
+split_var -module "axi_xbar"        -var "slv_reqs"
+split_var -module "axi_xbar"        -var "slv_resps"
+split_var -module "axi_xbar"        -var "mst_reqs"
+split_var -module "axi_xbar"        -var "mst_resps"
+split_var -module "axi_demux"       -var "mst_reqs_o"
+split_var -module "axi_demux"       -var "mst_b_readies"
+split_var -module "axi_demux"       -var "mst_r_readies"
+split_var -module "axi_demux"       -var "mst_r_chans"
+split_var -module "axi_mux"         -var "slv_resps_o"
+split_var -module "axi_err_slv"     -var "err_resp"
+split_var -module "axi_atop_filter" -var "slv_resp_o"
+split_var -module "rr_arb_tree"     -var "req_nodes"
+split_var -module "rr_arb_tree"     -var "gnt_nodes"
+split_var -module "rr_arb_tree"     -var "req_d"
+split_var -module "rr_arb_tree"     -var "data_nodes"
+split_var -module "rr_arb_tree"     -var "index_nodes"
+
+// Residual per-port leaf aggregates: after the wide crossbar bundles above are
+// split, the same false ready/valid loops re-form through the packed channel
+// structs and valid/ready vectors inside axi_mux / axi_demux / axi_id_prepend /
+// axi_err_slv / axi_atop_filter. Splitting those packed vectors into their
+// per-bus elements/per-struct fields is likewise semantics-preserving; entries a
+// build cannot honour are reported as SPLITVAR (non-fatal) and are inert for
+// profiles that do not instantiate the module.
+split_var -module "axi_mux"         -var "slv_reqs_i"
+split_var -module "axi_mux"         -var "mst_req_o"
+split_var -module "axi_mux"         -var "mst_resp_i"
+split_var -module "axi_mux"         -var "slv_aw_chans"
+split_var -module "axi_mux"         -var "slv_w_chans"
+split_var -module "axi_mux"         -var "slv_b_chans"
+split_var -module "axi_mux"         -var "slv_ar_chans"
+split_var -module "axi_mux"         -var "slv_r_chans"
+split_var -module "axi_mux"         -var "slv_aw_valids"
+split_var -module "axi_mux"         -var "slv_w_valids"
+split_var -module "axi_mux"         -var "slv_b_valids"
+split_var -module "axi_mux"         -var "slv_ar_valids"
+split_var -module "axi_mux"         -var "slv_r_valids"
+split_var -module "axi_mux"         -var "slv_aw_readies"
+split_var -module "axi_mux"         -var "slv_w_readies"
+split_var -module "axi_mux"         -var "slv_b_readies"
+split_var -module "axi_mux"         -var "slv_ar_readies"
+split_var -module "axi_mux"         -var "slv_r_readies"
+split_var -module "axi_demux"       -var "slv_req_i"
+split_var -module "axi_demux"       -var "slv_resp_o"
+split_var -module "axi_demux"       -var "mst_resps_i"
+split_var -module "axi_demux"       -var "mst_b_chans"
+split_var -module "axi_demux"       -var "mst_r_chans"
+split_var -module "axi_demux"       -var "mst_b_valids"
+split_var -module "axi_demux"       -var "mst_r_valids"
+split_var -module "axi_demux"       -var "mst_b_readies"
+split_var -module "axi_demux"       -var "mst_r_readies"
+split_var -module "axi_id_prepend"  -var "slv_aw_readies_o"
+split_var -module "axi_id_prepend"  -var "slv_w_readies_o"
+split_var -module "axi_id_prepend"  -var "slv_ar_readies_o"
+split_var -module "axi_id_prepend"  -var "mst_b_readies_o"
+split_var -module "axi_id_prepend"  -var "mst_r_readies_o"
+split_var -module "axi_id_prepend"  -var "slv_aw_valids_i"
+split_var -module "axi_id_prepend"  -var "slv_w_valids_i"
+split_var -module "axi_id_prepend"  -var "slv_b_valids_o"
+split_var -module "axi_id_prepend"  -var "slv_ar_valids_i"
+split_var -module "axi_id_prepend"  -var "slv_r_valids_o"
+split_var -module "axi_id_prepend"  -var "mst_aw_readies_i"
+split_var -module "axi_id_prepend"  -var "mst_w_readies_i"
+split_var -module "axi_id_prepend"  -var "mst_b_valids_i"
+split_var -module "axi_id_prepend"  -var "mst_ar_readies_i"
+split_var -module "axi_id_prepend"  -var "mst_r_valids_i"
+split_var -module "axi_err_slv"     -var "err_req"
+split_var -module "axi_err_slv"     -var "slv_req_i"
+split_var -module "axi_err_slv"     -var "slv_resp_o"
+split_var -module "axi_atop_filter" -var "mst_req_o"
+split_var -module "axi_atop_filter" -var "mst_resp_i"
+split_var -module "axi_atop_filter" -var "slv_req_i"

@@ -19,9 +19,14 @@ def main():
                         help="exercise real AXI mux/ID insertion and AW-owner routing")
     parser.add_argument("--crossbar", action="store_true",
                         help="exercise complete real crossbar decode/demux/mux")
+    parser.add_argument("--native", action="store_true",
+                        help="crossbar with the real ariane dimensions and "
+                             "concurrent 3-port adversarial drive")
     args = parser.parse_args()
-    if args.crossbar:
+    if args.crossbar or args.native:
         args.interconnect = True
+    if args.native:
+        args.crossbar = True
     root = Path(__file__).resolve().parents[3]
     out = Path(args.output_root).resolve()
     if not out.is_relative_to((root / "build-platform/workspace").resolve()):
@@ -98,10 +103,18 @@ def main():
 
     save()
     try:
-        profiles = ([(0, 3, 0), (1, 3, 0), (0, 3, 1), (1, 3, 1), (1, 2, 0)]
-                    if args.interconnect else [(0, 3, 0), (1, 3, 0), (1, 2, 0)])
-        for enabled, masters, spill in profiles:
-            name = (f"enabled{enabled}-masters{masters}-mux{int(args.interconnect)}"
+        # (enabled, masters, spill, native). NativeProfile uses the real ariane
+        # crossbar dimensions with 3 concurrent requester ports; its adversarial
+        # port-1/port-2 refusal is baked into the bench (no +oracle_negative).
+        if args.native:
+            builds = [(e, 3, 0, True) for e in (0, 1)]
+        else:
+            builds = [(e, m, s, False) for e, m, s in
+                      ([(0, 3, 0), (1, 3, 0), (0, 3, 1), (1, 3, 1), (1, 2, 0)]
+                       if args.interconnect else [(0, 3, 0), (1, 3, 0), (1, 2, 0)])]
+        for enabled, masters, spill, native in builds:
+            name = (f"native-enabled{enabled}" if native else
+                    f"enabled{enabled}-masters{masters}-mux{int(args.interconnect)}"
                     f"-spill{spill}-xbar{int(args.crossbar)}")
             command = [str(verilator), "--binary", "--timing", "--assert", "-j", "2",
                        "-Wno-fatal", "-Werror-LATCH", "-Werror-UNOPTFLAT", "-Werror-PINMISSING",
@@ -112,18 +125,21 @@ def main():
                        f"-GEnabled={enabled}", f"-GMasterCount={masters}",
                        f"-GUseMux={int(args.interconnect)}", f"-GSpillRequests={spill}",
                        f"-GUseXbar={int(args.crossbar)}",
+                       f"-GNativeProfile={int(native)}",
+                       "-GNativeMstPorts=16", "-GStoramicIdx=13",
                        *([str(source / "verif/tb/storamic/route_interconnect.vlt"),
                           str(setup)] if args.interconnect else []),
                        *[str(source / n) for n in files if n != legacy and n.endswith(".sv")
                          and not Path(n).name.startswith("formal_")]]
             (out / f"{name}-command.json").write_text(json.dumps(command), encoding="utf-8")
             with (out / f"{name}-build.log").open("w") as log:
-                subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=300)
-            for negative in ((False, True) if masters == 3 else (False,)):
+                subprocess.run(command, stdout=log, stderr=subprocess.STDOUT,
+                               check=True, timeout=600 if native else 300)
+            for negative in ((False, True) if (masters == 3 and not native) else (False,)):
                 label = name + ("-negative" if negative else "")
                 result = subprocess.run([str(out / name / "test"),
                                          *(["+oracle_negative"] if negative else [])],
-                                        capture_output=True, text=True, timeout=30)
+                                        capture_output=True, text=True, timeout=60)
                 text = result.stdout + result.stderr
                 (out / f"{label}.log").write_text(text, encoding="utf-8")
                 marker = ("STORAMIC_CHECKPOINT_ROUTE_CONFIG" if masters != 3 else

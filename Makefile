@@ -262,6 +262,7 @@ src :=  $(if $(spike-tandem),verif/tb/core/uvma_core_cntrl_pkg.sv)              
         corev_apu/include/g6lc_storamic_soc_cfg_pkg.sv                               \
         corev_apu/storamic/g6lc_storamic_attach.sv                                  \
         corev_apu/storamic/g6lc_storamic_ctrl_bridge.sv                             \
+        corev_apu/storamic/g6lc_storamic_checkpoint_route.sv                        \
         corev_apu/storamic/g6lc_storamic_dma_axi.sv                                 \
         corev_apu/storamic/g6lc_storamic_durable_store.sv                           \
         corev_apu/storamic/g6lc_storamic_model_store.sv                             \
@@ -347,6 +348,7 @@ src :=  $(if $(spike-tandem),verif/tb/core/uvma_core_cntrl_pkg.sv)              
         corev_apu/instr_tracing/rv_encapsulator-main/src/include/encap_pkg.sv        \
         corev_apu/tb/g6lc_tb_dram_latency.sv                                       \
         corev_apu/tb/ariane_testharness.sv                                           \
+        verif/tb/storamic/g6lc_storamic_c2_monitor.sv                                \
         corev_apu/tb/ariane_peripherals.sv                                           \
         corev_apu/tb/rvfi_tracer.sv                                                  \
         corev_apu/tb/common/uart.sv                                                  \

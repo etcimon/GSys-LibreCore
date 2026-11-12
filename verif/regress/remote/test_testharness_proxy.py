@@ -1849,5 +1849,50 @@ class LaneSchedulerTests(unittest.TestCase):
         self.assertLessEqual(peak[0], 8)
 
 
+class PullExcludeBuildTests(unittest.TestCase):
+    def _remote(self):
+        rem = object.__new__(proxy.Remote)
+        rem.host = "testhost"
+        rem.verbose = False
+        rem._debug = False
+        rem.timeout = 0.0
+        return rem
+
+    def test_pull_excludes_build_artifacts_when_requested(self):
+        captured = {}
+
+        def fake_run(cmd, check=False, **kwargs):
+            captured["cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(proxy.Remote, "base_opts", return_value=[]), \
+                patch.object(proxy.subprocess, "run", side_effect=fake_run):
+            self._remote().pull("host:/runs/x/output/", Path(tmp),
+                                excludes=proxy.PULL_BUILD_EXCLUDES)
+        cmd = captured["cmd"]
+        excludes = [a for a in cmd if a.startswith("--exclude=")]
+        self.assertIn("--exclude=*.o", excludes)
+        self.assertIn("--exclude=*.gcda", excludes)
+        self.assertIn("--exclude=*.cpp", excludes)
+        # Evidence extensions are never excluded.
+        self.assertFalse(any(e in ("--exclude=*.log", "--exclude=*.json")
+                             for e in excludes))
+
+    def test_pull_without_excludes_sends_no_exclude_flags(self):
+        captured = {}
+
+        def fake_run(cmd, check=False, **kwargs):
+            captured["cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(proxy.Remote, "base_opts", return_value=[]), \
+                patch.object(proxy.subprocess, "run", side_effect=fake_run):
+            self._remote().pull("host:/runs/x/output/", Path(tmp))
+        self.assertFalse(any(a.startswith("--exclude=")
+                             for a in captured["cmd"]))
+
+
 if __name__ == '__main__':
     unittest.main()

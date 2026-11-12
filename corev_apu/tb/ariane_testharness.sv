@@ -313,26 +313,77 @@ module ariane_testharness #(
   // ST-025 stick-level save/restore/power-cut pulses (driven inside
   // gen_storamic_ctrl; tied off when StoramicIoEn is off).
   logic        storamic_power_cut, storamic_save, storamic_restore;
+  // C2 observability sidebands from the checkpoint route (constant 0 while
+  // native admission stays refused). aw/ar_authorized must never assert.
+  logic storamic_service_enable, storamic_policy_hold;
+  logic storamic_aw_authorized, storamic_ar_authorized;
+  logic storamic_aw_source_ok, storamic_ar_source_ok;
   if (CVA6Cfg.StoramicIoEn) begin : gen_storamic_ctrl
     ariane_axi_soc::req_slv_t  storamic_axi_req;
     ariane_axi_soc::resp_slv_t storamic_axi_resp;
     `AXI_ASSIGN_TO_REQ(storamic_axi_req, master[STORAMIC_IDX])
     `AXI_ASSIGN_FROM_RESP(master[STORAMIC_IDX], storamic_axi_resp)
-    g6lc_storamic_ctrl_bridge #(
-      .AddrWidth(AXI_ADDRESS_WIDTH), .DataWidth(AXI_DATA_WIDTH),
+    // Native admission stays refused until C6: the route observes and scores
+    // source candidates but never authorizes service (Enable=0, no policy).
+    localparam bit STORAMIC_ROUTE_ADMIT = 1'b0;
+    g6lc_storamic_checkpoint_route #(
+      .Enable(STORAMIC_ROUTE_ADMIT),
+      .LocalIdWidth(ariane_axi_soc::IdWidth),
+      .NumMasters(ariane_soc::NrSlaves),
+      .TrustedMaster(0),
       .IdWidth(ariane_axi_soc::IdWidthSlave),
-      .UserWidth(AXI_USER_WIDTH), .Base(ariane_soc::StoramicBase),
+      .Base(ariane_soc::StoramicBase),
       .CtrlPageEn(CVA6Cfg.StoramicEn),
-      .axi_req_t(ariane_axi_soc::req_slv_t),
-      .axi_resp_t(ariane_axi_soc::resp_slv_t)
-    ) i_storamic_bridge (
+      .req_t(ariane_axi_soc::req_slv_t),
+      .resp_t(ariane_axi_soc::resp_slv_t)
+    ) i_storamic_route (
       .clk_i, .rst_ni(ndmreset_n),
-      .axi_req_i(storamic_axi_req), .axi_resp_o(storamic_axi_resp),
+      .req_i(storamic_axi_req), .resp_o(storamic_axi_resp),
+      .policy_ready_i(1'b0), .policy_epoch_i('0),
       .ctrl_req_o(storamic_ctrl_req),
       .ctrl_resp_i(storamic_ctrl_resp),
       .vctrl_req_o(storamic_vctrl_req),
-      .vctrl_resp_i(storamic_vctrl_resp)
+      .vctrl_resp_i(storamic_vctrl_resp),
+      .service_enable_o(storamic_service_enable),
+      .aw_authorized_o(storamic_aw_authorized),
+      .ar_authorized_o(storamic_ar_authorized),
+      .policy_hold_o(storamic_policy_hold),
+      .aw_source_ok_o(storamic_aw_source_ok),
+      .ar_source_ok_o(storamic_ar_source_ok)
     );
+    // C2 passive interconnect scoreboard (sim-only, translate_off). The
+    // requestor ports and the Storamic master port are converted to packed
+    // request/response structs; the monitor takes no interface ports.
+    // pragma translate_off
+    ariane_axi::req_t          c2_slv_req [ariane_soc::NrSlaves];
+    ariane_axi::resp_t         c2_slv_resp[ariane_soc::NrSlaves];
+    ariane_axi_soc::resp_slv_t c2_mst_resp;
+    for (genvar gi = 0; gi < ariane_soc::NrSlaves; gi++) begin : gen_c2_slv_tap
+      `AXI_ASSIGN_TO_REQ (c2_slv_req[gi],  slave[gi])
+      `AXI_ASSIGN_TO_RESP(c2_slv_resp[gi], slave[gi])
+    end
+    `AXI_ASSIGN_TO_RESP(c2_mst_resp, master[STORAMIC_IDX])
+    g6lc_storamic_c2_monitor #(
+      .NrSlaves(ariane_soc::NrSlaves),
+      .LocalIdWidth(ariane_axi_soc::IdWidth),
+      .IdWidthSlave(ariane_axi_soc::IdWidthSlave),
+      .Base(ariane_soc::StoramicBase),
+      .Length(ariane_soc::StoramicLength),
+      .CtrlPageEn(CVA6Cfg.StoramicEn),
+      .slv_req_t (ariane_axi::req_t),
+      .slv_resp_t(ariane_axi::resp_t),
+      .mst_req_t (ariane_axi_soc::req_slv_t),
+      .mst_resp_t(ariane_axi_soc::resp_slv_t)
+    ) i_storamic_c2_monitor (
+      .clk_i(clk_i), .rst_ni(ndmreset_n),
+      .slv_req(c2_slv_req), .slv_resp(c2_slv_resp),
+      .mst_req(storamic_axi_req), .mst_resp(c2_mst_resp),
+      .aw_source_ok_i(storamic_aw_source_ok),
+      .ar_source_ok_i(storamic_ar_source_ok),
+      .aw_authorized_i(storamic_aw_authorized),
+      .ar_authorized_i(storamic_ar_authorized)
+    );
+    // pragma translate_on
     // ST-037B/C: the first virtio-blk MMIO transport at StoramicBase+0x1000,
     // bound (user-approved) to the labelled VOLATILE model store: 64 KiB of
     // SRAM, 128 sectors, contents lost on power loss, no FLUSH offered. Its
@@ -511,6 +562,12 @@ module ariane_testharness #(
     assign storamic_virtio_irq = 1'b0;
     assign storamic_inval_valid = 1'b0;
     assign storamic_inval_addr = '0;
+    assign storamic_service_enable = 1'b0;
+    assign storamic_policy_hold = 1'b0;
+    assign storamic_aw_authorized = 1'b0;
+    assign storamic_ar_authorized = 1'b0;
+    assign storamic_aw_source_ok = 1'b0;
+    assign storamic_ar_source_ok = 1'b0;
   end
 
 `ifdef G6LC_APU
@@ -1451,6 +1508,57 @@ module ariane_testharness #(
     .default_mst_port_i    ( '0         )
   );
 
+  // C2 native-topology manifest: elaboration-time structural checks on
+  // the real crossbar binding plus a time-0 report line. translate_off only;
+  // a violation is a hard $fatal tagged STORAMIC_C2_TOPOLOGY.
+  // pragma translate_off
+  if (CVA6Cfg.StoramicIoEn) begin : gen_storamic_c2_topology
+    integer c2_storamic_idx_rules;
+    integer c2_storamic_overlap;
+    initial begin
+      c2_storamic_idx_rules = 0;
+      c2_storamic_overlap = 0;
+      for (int unsigned r = 0; r < NB_RULES; r++) begin
+        if (addr_map[r].idx == STORAMIC_IDX) begin
+          c2_storamic_idx_rules++;
+          if (!(addr_map[r].start_addr == ariane_soc::StoramicBase &&
+                addr_map[r].end_addr == ariane_soc::StoramicBase +
+                    ariane_soc::StoramicLength))
+            $fatal(1, "STORAMIC_C2_TOPOLOGY rule_range");
+        end else begin
+          // Any other rule overlapping the Storamic window is illegal.
+          if (addr_map[r].start_addr < ariane_soc::StoramicBase +
+                  ariane_soc::StoramicLength &&
+              addr_map[r].end_addr > ariane_soc::StoramicBase)
+            c2_storamic_overlap++;
+        end
+      end
+      if (ariane_axi_soc::IdWidthSlave !=
+          ariane_axi_soc::IdWidth + $clog2(ariane_soc::NrSlaves))
+        $fatal(1, "STORAMIC_C2_TOPOLOGY idwidth");
+      if (AXI_XBAR_CFG.NoSlvPorts != ariane_soc::NrSlaves ||
+          AXI_XBAR_CFG.NoMstPorts != NB_MST)
+        $fatal(1, "STORAMIC_C2_TOPOLOGY xbar_ports");
+      if (AXI_XBAR_CFG.AxiIdUsedSlvPorts != ariane_axi_soc::IdWidth ||
+          AXI_XBAR_CFG.AxiIdWidthSlvPorts != ariane_axi_soc::IdWidth)
+        $fatal(1, "STORAMIC_C2_TOPOLOGY xbar_idw");
+      if (!(STORAMIC_IDX < NB_MST))
+        $fatal(1, "STORAMIC_C2_TOPOLOGY idx_oob");
+      if (c2_storamic_idx_rules != 1)
+        $fatal(1, "STORAMIC_C2_TOPOLOGY idx_rules");
+      if (c2_storamic_overlap != 0)
+        $fatal(1, "STORAMIC_C2_TOPOLOGY overlap");
+      if (AXI_ADDRESS_WIDTH != 64 || AXI_DATA_WIDTH != 64)
+        $fatal(1, "STORAMIC_C2_TOPOLOGY axw");
+      if ($test$plusargs("storamic_c2_report"))
+        $display("STORAMIC_C2_TOPOLOGY slv=%0d mst=%0d idx=%0d idw=%0d idws=%0d latency=%0d maxtrans=%0d",
+                 ariane_soc::NrSlaves, NB_MST, STORAMIC_IDX,
+                 ariane_axi_soc::IdWidth, ariane_axi_soc::IdWidthSlave,
+                 AXI_XBAR_CFG.LatencyMode, AXI_XBAR_CFG.MaxMstTrans);
+    end
+  end
+  // pragma translate_on
+
 `ifdef G6LC_APU
   // Opt-in APU load compositor: guest/control + firmware RAM + DRAM hole +
   // hart-1 boot PC. Testharness only stitches xbar masters. DMA stays idle.
@@ -1670,8 +1778,32 @@ module ariane_testharness #(
       cluster_boot[c] = ariane_soc::ROMBase[CVA6Cfg.VLEN-1:0];
   end
 `endif
+  // C2 origin probe (bench-only): hand the cluster/CPU a config copy with the
+  // checkpoint-origin bit set so the bounded single-hart in-order WT profile
+  // emits the source-candidate AXI PROT encoding the route scores. Every other
+  // consumer (DRAM backend, peripherals, the attach refusal) keeps the package
+  // default (0); g6lc_storamic_attach and the route Enable=0 are untouched.
+  // Without the define nothing changes.
+`ifdef G6LC_STORAMIC_ORIGIN_PROBE
+  function automatic config_pkg::cva6_cfg_t c2_cluster_probe_cfg(
+      config_pkg::cva6_cfg_t base);
+    base.StoramicCheckpointEn = 1'b1;
+    return base;
+  endfunction
+  localparam config_pkg::cva6_cfg_t C2_CLUSTER_CFG = c2_cluster_probe_cfg(CVA6Cfg);
+`else
+  localparam config_pkg::cva6_cfg_t C2_CLUSTER_CFG = CVA6Cfg;
+`endif
+`ifdef G6LC_STORAMIC_ORIGIN_PROBE
+  // pragma translate_off
+  initial begin
+    if (!config_pkg::g6lc_storamic_origin_supported(C2_CLUSTER_CFG))
+      $fatal(1, "STORAMIC_C2_ORIGIN_PROBE_UNSUPPORTED");
+  end
+  // pragma translate_on
+`endif
   g6lc_cluster #(
-    .CVA6Cfg        ( CVA6Cfg             ),
+    .CVA6Cfg        ( C2_CLUSTER_CFG       ),
     .NR_CORES       ( NR_CORES            ),
     .L2_ENABLE      ( CVA6Cfg.L2En        ),
     .IDENTITY_FAST  ( 1'b1                ),

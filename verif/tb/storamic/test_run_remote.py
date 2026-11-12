@@ -23,11 +23,29 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class PrepareTests(unittest.TestCase):
-    def invoke(self, output, *args, tracked=""):
+    def invoke(self, output, *args, tracked="", toolrec=None,
+               toolrec_path=None, git_heads=None):
+        # toolrec=None keeps the legacy no-record path; pass a dict to exercise
+        # the tools record. git_heads maps a submodule suffix to a HEAD sha.
+        if toolrec_path is None and toolrec is not None:
+            toolrec_path = ROOT / "verif/tb/storamic/storamic_tools.json"
+        load_ret = ((toolrec, None, toolrec_path) if toolrec is not None
+                    else (None, None, None))
+
+        def fake_head(path):
+            text = str(path).replace("\\", "/")
+            for suffix, head in (git_heads or {}).items():
+                if text.endswith(suffix):
+                    return head
+            return None
+
         with mock.patch.object(sys, "argv", [
                 "run_remote.py", "--stages", "dstore",
                 "--output-root", str(output), *args]), \
                 mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(RUNNER, "load_tools_record",
+                                  return_value=load_ret), \
+                mock.patch.object(RUNNER, "_git_head", side_effect=fake_head), \
                 mock.patch.object(RUNNER.shutil, "which", return_value="/offline/bun"), \
                 mock.patch.object(RUNNER.subprocess, "check_output", return_value=tracked), \
                 mock.patch.object(RUNNER.subprocess, "call",
@@ -162,6 +180,92 @@ class PrepareTests(unittest.TestCase):
                     "--runtime-json", "/opt/testharness/x/runtime.json",
                     "--runtime-header-sha256", "a" * 64,
                     "--verilator", "/usr/bin/verilator")
+
+    RECORD = {
+        "verilator": {
+            "head": "1" * 40,
+            "verilator": "/opt/testharness/toolchains/vlt-pgo/runtime/bin/verilator",
+            "runtime_json": "/opt/testharness/runs/vlt-validate/output/runtime.json",
+            "runtime_header_sha256": "a" * 64,
+            "compiler_sha256": "b" * 64,
+        },
+        "yosys": {
+            "head": "2" * 40,
+            "path": "/opt/testharness/toolchains/yosys-g6lc/bin/yosys",
+            "sha256": "c" * 64,
+        },
+        "solver_bin": "/opt/testharness/runs/solver/yices-2.6.5/bin",
+    }
+    RECORD_HEADS = {"tools/verilator": "1" * 40, "tools/yosys": "2" * 40}
+
+    def _record_file(self, directory, record=None):
+        path = Path(directory) / "storamic_tools.json"
+        path.write_text(json.dumps(record or self.RECORD))
+        return path
+
+    def test_tools_record_supplies_defaults_and_pins_source(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "build-platform/workspace") as tmp:
+            rec_path = self._record_file(tmp)
+            self.assertEqual(self.invoke(
+                Path(tmp) / "out", "--prepare-only", toolrec=self.RECORD,
+                toolrec_path=rec_path, git_heads=self.RECORD_HEADS), 0)
+            plan = json.loads(next((Path(tmp) / "out").glob("*/launch-plan.json")).read_text())
+            self.assertEqual(plan["blockers"], [])
+            self.assertEqual(plan["tools"]["verilator"],
+                             self.RECORD["verilator"]["verilator"])
+            self.assertEqual(plan["tools"]["yosys"], self.RECORD["yosys"]["path"])
+            self.assertEqual(plan["tools"]["solver_bin"], self.RECORD["solver_bin"])
+            command = plan["command"]
+            self.assertIn("VERILATOR=" + self.RECORD["verilator"]["verilator"], command)
+            self.assertIn("YOSYS=" + self.RECORD["yosys"]["path"], command)
+            self.assertIn("STORAMIC_RUNTIME_JSON=" +
+                          self.RECORD["verilator"]["runtime_json"], command)
+            self.assertIn("STORAMIC_RUNTIME_HEADER_SHA256=" +
+                          self.RECORD["verilator"]["runtime_header_sha256"], command)
+            self.assertIn("STORAMIC_EXPECT_YOSYS_SHA256=" +
+                          self.RECORD["yosys"]["sha256"], command)
+            manifest = json.loads(Path(plan["manifest"]).read_text())
+            self.assertIn("storamic_tools.json", manifest["sources"])
+
+    def test_tools_record_explicit_verilator_overrides_record(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "build-platform/workspace") as tmp:
+            rec_path = self._record_file(tmp)
+            self.assertEqual(self.invoke(
+                Path(tmp) / "out", "--prepare-only",
+                "--verilator", "/opt/testharness/runs/custom/bin/verilator",
+                toolrec=self.RECORD, toolrec_path=rec_path,
+                git_heads=self.RECORD_HEADS), 0)
+            plan = json.loads(next((Path(tmp) / "out").glob("*/launch-plan.json")).read_text())
+            self.assertEqual(plan["tools"]["verilator"],
+                             "/opt/testharness/runs/custom/bin/verilator")
+            self.assertIn("VERILATOR=/opt/testharness/runs/custom/bin/verilator",
+                          plan["command"])
+
+    def test_tools_record_head_mismatch_is_incomplete(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "build-platform/workspace") as tmp:
+            rec_path = self._record_file(tmp)
+            bad_heads = dict(self.RECORD_HEADS)
+            bad_heads["tools/verilator"] = "9" * 40
+            self.assertEqual(self.invoke(
+                Path(tmp) / "out", "--prepare-only", toolrec=self.RECORD,
+                toolrec_path=rec_path, git_heads=bad_heads), 4)
+            self.assertFalse(list((Path(tmp) / "out").glob("*/launch-plan.json")))
+
+    def test_load_tools_record_rejects_invalid_json_and_none(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            f.write("{not json")
+            bad = f.name
+        try:
+            args = type("A", (), {"tools_record": bad})()
+            rec, err, _ = RUNNER.load_tools_record(args, ROOT)
+            self.assertIsNone(rec)
+            self.assertIn("not valid JSON", err)
+        finally:
+            os.unlink(bad)
+        none_args = type("A", (), {"tools_record": "none"})()
+        self.assertEqual(RUNNER.load_tools_record(none_args, ROOT), (None, None, None))
+        missing_args = type("A", (), {"tools_record": "/nonexistent/x.json"})()
+        self.assertEqual(RUNNER.load_tools_record(missing_args, ROOT), (None, None, None))
 
     def test_timeout_is_forwarded_to_the_remote_command(self):
         with tempfile.TemporaryDirectory(dir=ROOT / "build-platform/workspace") as tmp:
@@ -511,6 +615,55 @@ class PrepareTests(unittest.TestCase):
                     self.invoke(Path(tmp), "--prepare-only", "--stages", stages)
                 self.assertEqual(cm.exception.code, 2)
                 self.assertEqual(list(Path(tmp).iterdir()), [])
+
+    def test_query_command_searches_output_and_work_with_tail(self):
+        cmd = RUNNER.query_command("/opt/testharness", "storamic-abc123",
+                                   "CHECKPOINT_ROUTE_FAIL", tail=7, file_glob="*.log")
+        self.assertIn("/opt/testharness/runs/storamic-abc123", cmd)
+        self.assertIn("find output work", cmd)
+        self.assertIn("-name '*.log'", cmd)
+        self.assertIn("grep -HnE " + __import__("shlex").quote("CHECKPOINT_ROUTE_FAIL"), cmd)
+        self.assertTrue(cmd.rstrip().endswith("tail -7"))
+
+    def test_query_command_quotes_hostile_pattern(self):
+        import shlex
+        pattern = "a'; rm -rf /; echo '"
+        cmd = RUNNER.query_command("/opt/testharness", "r1", pattern)
+        # The pattern is single-quoted for the remote shell, so it cannot break out.
+        self.assertIn("grep -HnE " + shlex.quote(pattern), cmd)
+
+    def test_query_mode_invokes_remote_shell_without_stages(self):
+        captured = {}
+
+        def fake_call(command, cwd=None):
+            captured["command"] = command
+            return 0
+
+        with tempfile.TemporaryDirectory(dir=ROOT / "build-platform/workspace") as tmp, \
+                mock.patch.object(sys, "argv", [
+                    "run_remote.py", "--query", "storamic-abc123",
+                    "--grep", "UNOPTFLAT", "--tail", "3", "--file", "*.log"]), \
+                mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(RUNNER.shutil, "which", return_value="/offline/bun"), \
+                mock.patch.object(RUNNER.subprocess, "call", side_effect=fake_call), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(RUNNER.main(), 0)
+        command = captured["command"]
+        self.assertIn("remote", command)
+        self.assertIn("shell", command)
+        remote_cmd = command[command.index("--") + 1]
+        self.assertIn("/runs/storamic-abc123", remote_cmd)
+        self.assertIn("UNOPTFLAT", remote_cmd)
+        self.assertTrue(remote_cmd.rstrip().endswith("tail -3"))
+
+    def test_query_requires_grep(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "build-platform/workspace") as tmp, \
+                mock.patch.object(sys, "argv", [
+                    "run_remote.py", "--query", "storamic-abc123"]), \
+                mock.patch.dict(os.environ, {}, clear=True), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(RUNNER.main(), 4)
+        self.assertIn("--grep", out.getvalue())
 
 
 if __name__ == "__main__":

@@ -1329,3 +1329,53 @@ FP-representation/defaults probe still reports 28 scheduling errors off/on;
 older local-tool 11/12 counts are historical. No vendor waiver or FP disabling
 is introduced. C0, native providers/cache/fabric, physical, aggregate/compliance
 and Linux gates remain open. See [cpu-commit-defaults.md](cpu-commit-defaults.md).
+
+### Native C2 Topology And Source Closure30
+
+The `native-c2` stage now builds the full `ariane_testharness` from a
+frozen, manifest-hashed source tar uploaded per run (no shared build tree),
+with Verilator/gcc/libfesvr identities recorded. Qualifying run
+`storamic-84f9f5d16c0b` (runner exit 0, verdict pass) covers the bounded
+profile: primary probe-on and probe-off C2 firmware with exact
+`STORAMIC_C2_TOPOLOGY slv=3 mst=11 idx=10 idw=4 idws=6` and
+`STORAMIC_C2_NATIVE` counts (probe-on `src_ok 9/14`, probe-off `0/0`,
+identical functional counts, `max_lid=1`), IO-role virtio positive and
+negative (port-2 `m2_aw=m2_ar=0`, `beats2>0`, negative tohost=16), a
+default-config elaboration with no `i_storamic_route`/monitor instance, and
+mutants m1–m5 all rejected — m5 is a derived-width monitor `LocalIdWidth`
+mutant (`floor(log2(max_lid))`=0) killed by `ar_unmatched`.
+
+Port-1 debug-SBA native traffic is now exercised. A real DMI System Bus
+Access probe lives in `preload_aware_dtm_t::reset()` (`g6lc_tb.cpp`,
+armed by `+storamic_sba_probe`): it reads `sbcs`, requires `sbversion==1`
+and `sbaccess64`, then issues one SBA read and one SBA write through
+`dm_top` (`sbcs`/`sbaddress0/1`/`sbdata0`, 64-bit `sbaccess=3`) targeting
+the reserved, unserved Storamic window (`0x50008000`/`+8`), and prints
+`STORAMIC_SBA_PROBE reads=1 writes=1 rd_sberror=0 wr_sberror=0`. The SBA
+cases (`c2-po-sba`, `c2-qf-sba`) and mutant `m6-trustedmaster-sba` run
+**without** `+debug_disable`: that plusarg gates `debug_req_core` to 0 in
+`ariane_testharness.sv`, so fesvr `producer_thread()`'s `halt(0)` spins
+forever and `htif_t::run()`→`reset()` is never reached — the earlier
+"fesvr does not dispatch the hooks" reading was wrong; DMI itself is live
+through `SimDTM`→`debug_tick` regardless. With debug enabled the probe
+fires and the run still reaches `SUCCESS` via the independent
+rvfi/tohost exit; fesvr's tohost polling only touches non-window
+addresses, so port-0/port-1 Storamic counts stay exact
+(`p1_ar=p1_aw=m1_ar=m1_aw=1`, `done_w=11 done_r=19`, `err_resp=4` — two
+firmware plus two SBA DECERR — `src_ok` unchanged at `9/14` probe-on and
+`0/0` probe-off, `pending=0 violations=0`). `rd/wr_sberror` read 0
+because `dm_sba.sv` maps bus-error responses to `sberror` only for
+invalid `sbaccess>3` (bus-error→`sberror` is an explicit TODO), so the
+AXI DECERR is scored by the monitor but invisible to the DMI field. The
+`-DSTORAMIC_DELAY_EARLY` spin ELF is retained: the probe's multi-step DMI
+sequence runs on fesvr's producer thread concurrent with the sim and
+needs the firmware to stay alive past tohost-exit. Mutant m6 is killed
+non-vacuously (`source_ok_value` fatal with the SBA line present), not by
+a port-0-only fatal. Route component
+sim 12/12 and formal 4/4 pass at `storamic-a3b5c579d314`; the remote unit
+suite passes 19 files/235 tests at `storamic-unittests-dbd29dbb5935`.
+
+Port-2/L2/L3/prefetch/multi-hart paths, latency cuts other
+than `LatencyMode=0`, and the primary-role virtio-blk `tohost=126`
+failure (reproduced on committed HEAD, pre-existing) remain open. Native
+admission stays refused until C3–C6.

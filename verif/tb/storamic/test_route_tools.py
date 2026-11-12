@@ -55,5 +55,97 @@ class RouteToolSafety(unittest.TestCase):
             self.assertFalse(output.exists())
 
 
+class CheckpointRouteUnoptflatPins(unittest.TestCase):
+    """Unit tests for run_checkpoint_route's crossbar UNOPTFLAT pin-check."""
+
+    LEGACY = [
+        "top.gen.crossbar.g_legacy_xbar.slv.err_resp[82]",
+        "top.gen.crossbar.g_legacy_xbar.mst.__Vcellout__x.i_id_prepend__slv_aw_readies_o",
+    ]
+    NATIVE = [
+        "top.gen.crossbar.g_native_xbar.slv.err_resp[82]",
+        "top.gen.crossbar.g_native_xbar.mst.__Vcellout__x.i_id_prepend__slv_aw_readies_o",
+    ]
+
+    def setUp(self):
+        import run_checkpoint_route as rcr
+        self.rcr = rcr
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.data = self.root / "data"
+        self.data.mkdir()
+        self.out = self.root / "out"
+        self.out.mkdir()
+        (self.data / rcr.PINS_FILE).write_text(json.dumps({"flavors": {
+            "legacy": {"identities": self.LEGACY},
+            "native": {"identities": self.NATIVE},
+        }}), encoding="utf-8")
+
+    def _log(self, name, text):
+        path = self.out / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def _ident(self, sig):
+        return f"%Warning-UNOPTFLAT: f.sv:1:1: Circular combinational logic: '{sig}'\n"
+
+    def _check(self, log, flavor="legacy"):
+        return self.rcr._check_unoptflat_pins(
+            self.data, self.out, "crossbar", log, flavor)
+
+    def test_missing_pins_file_is_an_error(self):
+        (self.data / self.rcr.PINS_FILE).unlink()
+        log = self._log("b.log", self._ident(self.LEGACY[0]))
+        with self.assertRaises(RuntimeError):
+            self._check(log)
+
+    def test_missing_flavour_is_an_error(self):
+        log = self._log("b.log", self._ident(self.LEGACY[0]))
+        with self.assertRaises(RuntimeError):
+            self._check(log, flavor="nosuch")
+
+    def test_all_pinned_identities_pass(self):
+        log = self._log("b.log",
+                        self._ident(self.LEGACY[0]) + self._ident(self.LEGACY[1]))
+        result = self._check(log)
+        self.assertEqual(result["flavor"], "legacy")
+        self.assertEqual(result["observed"], 2)
+        self.assertEqual(result["pinned"], 2)
+        self.assertEqual(result["stale_pins"], [])
+
+    def test_flavours_are_independent(self):
+        # A native-flavour identity must NOT satisfy the legacy pin set.
+        log = self._log("b.log", self._ident(self.NATIVE[0]))
+        with self.assertRaises(RuntimeError) as ctx:
+            self._check(log, flavor="legacy")
+        self.assertIn(self.NATIVE[0], str(ctx.exception))
+        # ...but it is pinned under the native flavour.
+        result = self._check(log, flavor="native")
+        self.assertEqual(result["observed"], 1)
+        self.assertEqual(result["stale_pins"], [self.NATIVE[1]])
+
+    def test_unpinned_identity_fails_naming_it(self):
+        extra = "top.gen.crossbar.brand_new_loop.sig"
+        log = self._log("b.log",
+                        self._ident(self.LEGACY[0]) + self._ident(extra))
+        with self.assertRaises(RuntimeError) as ctx:
+            self._check(log)
+        self.assertIn(extra, str(ctx.exception))
+
+    def test_stale_pin_is_reported_not_failed(self):
+        log = self._log("b.log", self._ident(self.LEGACY[0]))
+        result = self._check(log)
+        self.assertEqual(result["stale_pins"], [self.LEGACY[1]])
+        self.assertEqual(result["observed"], 1)
+
+    def test_shipped_pins_file_parses_both_flavours(self):
+        flavors = self.rcr._unoptflat_pins(Path(__file__).resolve().parent)
+        self.assertIsNotNone(flavors)
+        self.assertEqual(set(flavors), {"legacy", "native"})
+        for flavor in flavors.values():
+            self.assertEqual(len(flavor["identities"]), 3)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,22 @@
+{
+  "comment": "Pinned UNOPTFLAT residual diagnostics for the checkpoint-route AXI crossbar. These are the documented FALSE combinational ready/valid loops inside pulp-platform axi_xbar (per-slave-port axi_demux/axi_err_slv/axi_atop_filter and per-master-port axi_mux/axi_id_prepend). The loops run through 1-bit valid/ready handshake signals and generate-scoped aggregates that split_var cannot break (Verilator reports them as bitwidth-1 / dynamic-range SPLITVAR). They appear identically in BOTH crossbar flavours — g_legacy_xbar (UseXbar=1, NativeProfile=0) and g_native_xbar (NativeProfile=1) — because the loop structure is a property of axi_xbar, not of the profile. The production ariane testharness build (verif/regress/remote/hyp8/hyp8-build-harness.sh) carries the same crossbar and uses -Wno-UNOPTFLAT for exactly this reason; route_interconnect.vlt already splits every aggregate Verilator offers as 'can split_var', leaving only these residuals. Qualification posture: for every UseXbar=1 profile UNOPTFLAT stays a WARNING (never -Wno, never suppressed) so verilation still yields a model, and every observed identity must be a member of that flavour's pin set; any unpinned identity fails the stage. Non-crossbar profiles keep -Werror-UNOPTFLAT (they produce none).",
+  "basis": "pulp-platform axi_xbar false ready/valid combinational loops; production hyp8-build-harness.sh -Wno-UNOPTFLAT; route_interconnect.vlt split_var minimization",
+  "flavors": {
+    "legacy": {
+      "note": "g_legacy_xbar — UseXbar=1, NativeProfile=0 (the 'crossbar' profile)",
+      "identities": [
+        "tb_g6lc_storamic_checkpoint_route.gen_mux.gen_xbar.g_legacy_xbar.crossbar.gen_slv_port_demux[0].i_axi_err_slv.err_resp[82]",
+        "tb_g6lc_storamic_checkpoint_route.gen_mux.gen_xbar.g_legacy_xbar.crossbar.gen_slv_port_demux[0].i_axi_err_slv.genblk1.i_atop_filter.slv_resp_o[74]",
+        "tb_g6lc_storamic_checkpoint_route.gen_mux.gen_xbar.g_legacy_xbar.crossbar.gen_mst_port_mux[0].i_axi_mux.__Vcellout__gen_mux.gen_id_prepend[0].i_id_prepend__slv_aw_readies_o"
+      ]
+    },
+    "native": {
+      "note": "g_native_xbar — UseXbar=1, NativeProfile=1 ('native' and 'native-disabled')",
+      "identities": [
+        "tb_g6lc_storamic_checkpoint_route.gen_mux.gen_xbar.g_native_xbar.crossbar.gen_mst_port_mux[0].i_axi_mux.__Vcellout__gen_mux.gen_id_prepend[0].i_id_prepend__slv_aw_readies_o",
+        "tb_g6lc_storamic_checkpoint_route.gen_mux.gen_xbar.g_native_xbar.crossbar.gen_slv_port_demux[0].i_axi_err_slv.err_resp[82]",
+        "tb_g6lc_storamic_checkpoint_route.gen_mux.gen_xbar.g_native_xbar.crossbar.gen_slv_port_demux[0].i_axi_err_slv.genblk1.i_atop_filter.slv_resp_o[74]"
+      ]
+    }
+  }
+}

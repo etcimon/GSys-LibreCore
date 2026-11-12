@@ -3,12 +3,15 @@
 
 import argparse
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import uuid
 
 
@@ -24,6 +27,7 @@ SIMULATION_STAGES = frozenset({
     "cpu-origin-atomic", "origin-profile", "origin-queue",
     "cpu-strict-pins",
     "stq-commit-flush",
+    "checkpoint-route",
 })
 ALLOWED_STAGES = SIMULATION_STAGES | frozenset({
     "synth", "formal", "model-synth", "model-formal", "map-synth", "map-formal",
@@ -41,8 +45,249 @@ ALLOWED_STAGES = SIMULATION_STAGES | frozenset({
     "policy-writer-synth",
     "policy-writer-formal",
     "commit-defaults-formal", "commit-defaults-synth", "load-translation-synth",
-    "fetch-queue-synth", "csr-scc", "core-scc",
+    "fetch-queue-synth", "csr-scc", "core-scc", "checkpoint-route-formal",
+    "native-c2",
 })
+
+
+# Build-closure pathspecs for the native-c2 source tar: everything
+# ``make verilate target=cv64a6_imafdc_sv39`` plus the firmware tree needs.
+# Explicit directory prefixes (never file globs) so untracked-but-unignored
+# scratch trees elsewhere in the repo (remote-runs.drvfs-bak, .cache,
+# node_modules, obj_dir, work-ver-*) cannot leak in; --exclude-standard drops
+# gitignored build products while keeping new untracked source files.
+_C2_TAR_DIRS = (
+    "core", "corev_apu", "vendor", "common", "util", "config",
+    "g6lc_storamic", "verif/tb/storamic", "verif/tb/core",
+    "verif/tests/custom",
+)
+_C2_TAR_FILES = ("Makefile", "Flist.ariane", "verilator_config.vlt")
+# Belt-and-suspenders: never tar generated/binary trees or formal/sim
+# artifact dirs even though ``-co`` (no --exclude-standard) is required —
+# needed sources such as ``core/fetch/*.sv`` are themselves gitignored, so
+# exclude-standard would drop real build inputs. The explicit directory
+# pathspecs above are what keep repo-wide scratch (remote-runs.drvfs-bak,
+# .cache, node_modules) out.
+_C2_TAR_SKIP_SUBSTR = ("/obj_dir/", "/node_modules/", "/.cache/",
+                       "/__pycache__/", "/.venv/", "/work-ver",
+                       "/formal/", "/formal_", "/engine_", "/sim_work",
+                       "/csrc/", "/simv.daidir/")
+_C2_TAR_SKIP_SUFFIX = (".o", ".a", ".so", ".d", ".elf", ".pyc",
+                       ".tar", ".tar.gz", ".tgz", ".zip", ".bin",
+                       ".vcd", ".fst", ".wlf", ".vpd", ".fsdb",
+                       ".gcno", ".gcda", ".gcov")
+
+
+def _ls_files(cwd, prefix, pathspecs=None):
+    """Yield ``(repo_rel, abspath)`` for ``git ls-files -co`` under ``cwd``.
+
+    ``prefix`` is the repo-relative path of ``cwd`` ("" for the superproject);
+    ``pathspecs`` are interpreted relative to ``cwd``. ``-co`` without
+    ``--exclude-standard`` keeps gitignored build inputs (e.g. ``core/fetch``)
+    while dropping nothing tracked. Submodule *contents* are NOT returned —
+    ``ls-files`` records only the gitlink — so callers recurse separately.
+    """
+    cmd = ["git", "-C", str(cwd), "ls-files", "-co", "-z"]
+    if pathspecs:
+        cmd += ["--"] + list(pathspecs)
+    try:
+        out = subprocess.check_output(cmd, text=False)
+    except Exception:
+        return
+    base = Path(cwd)
+    for raw in out.split(b"\0"):
+        if not raw:
+            continue
+        rel = raw.decode("utf-8", "surrogateescape")
+        yield (f"{prefix}/{rel}" if prefix else rel), base / rel
+
+
+def _submodule_paths(cwd):
+    """Repo-relative paths of *initialized* submodules directly under ``cwd``."""
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", str(cwd), "submodule", "status"], text=True)
+    except Exception:
+        return
+    for line in out.splitlines():
+        # "<sha> <path> (<describe>)"; a leading '-' marks *uninitialized*
+        # (no files on disk). ' '/'+'/'U' all have a populated worktree whose
+        # checked-out content is what the build must see, so keep them.
+        if line.startswith("-"):
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            yield parts[1]
+
+
+def _c2_tar_members(root):
+    """Collect ``{repo_rel: abspath}`` for the native-c2 build closure.
+
+    Superproject files come from ``git ls-files -co`` over the explicit
+    ``_C2_TAR_DIRS``/``_C2_TAR_FILES`` pathspecs. Every initialized submodule
+    whose path sits under a tar dir contributes its own ``ls-files`` set —
+    ``git ls-files`` only records the gitlink, never the submodule's files, so
+    without this the ariane build misses hpdcache/cvfpu/riscv-dbg/etc. Nested
+    submodules are recursed (cvfpu's ``src/common_cells`` is required) except
+    under ``vendor/`` where nested trees are toolchain/SDK bundles the
+    Verilator build never reads.
+    """
+    members = {}
+    for repo_rel, ap in _ls_files(root, "", _C2_TAR_DIRS + _C2_TAR_FILES):
+        members[repo_rel] = ap
+
+    def _add_sub(sub_path, depth):
+        sub = root / sub_path
+        if not sub.is_dir():
+            return
+        for repo_rel, ap in _ls_files(sub, sub_path):
+            members[repo_rel] = ap
+        # Recurse into this submodule's own submodules, but never descend into
+        # vendor toolchain/SDK bundles (riscv-gnu-toolchain, newlib, verilator,
+        # ... under vendor/ara) which are not part of the ariane build.
+        if depth >= 4 or sub_path.startswith("vendor/"):
+            return
+        for nested in _submodule_paths(sub):
+            _add_sub(f"{sub_path}/{nested}", depth + 1)
+
+    for sp in _submodule_paths(root):
+        if any(sp == d or sp.startswith(d + "/") for d in _C2_TAR_DIRS):
+            _add_sub(sp, 0)
+    return members
+
+
+def _c2_source_tar(root, dest):
+    """Freeze the build closure into a gzipped tar for the native-c2 stage.
+
+    The member set (superproject + needed submodule contents) is collected by
+    ``_c2_tar_members``; repo-relative arc names keep the on-disk layout
+    identical to a checkout. Binary/artifact members are dropped by the
+    ``_C2_TAR_SKIP_*`` filters. Returns the written Path.
+    """
+    members = _c2_tar_members(root)
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(dest, "w:gz", compresslevel=6) as tar:
+        for rel in sorted(members):
+            if any(s in ("/" + rel) for s in _C2_TAR_SKIP_SUBSTR):
+                continue
+            if rel.endswith(_C2_TAR_SKIP_SUFFIX):
+                continue
+            p = members[rel]
+            if not p.is_file():
+                continue
+            try:
+                data = p.read_bytes()
+            except OSError:
+                continue
+            info = tarfile.TarInfo(rel)
+            info.size = len(data)
+            info.mtime = 0
+            tar.addfile(info, io.BytesIO(data))
+    return dest
+
+
+def query_command(remote_root, run_id, pattern, tail=50, file_glob="*.log"):
+    """Shell command grepping a previous remote run's logs.
+
+    Searches both ``output/`` (pulled evidence: logs, json, summaries) and
+    ``work/`` (kept-local bulky build products such as Verilator Mdirs) under
+    ``<remote_root>/runs/<run_id>/``. ``work`` may not exist; ``find`` reports
+    it on stderr which is suppressed, and ``xargs -r`` skips an empty list.
+    """
+    base = f"{remote_root}/runs/{run_id}"
+    find = ("find output work -type f "
+            f"-name {shlex.quote(file_glob)} 2>/dev/null")
+    grep = f"xargs -r grep -HnE {shlex.quote(pattern)} 2>/dev/null"
+    return (f"cd {shlex.quote(base)} && {find} | {grep} | tail -{int(tail)}")
+
+
+def run_query(args, root):
+    """--query mode: grep/tail a previous remote run without launching stages."""
+    if not args.grep:
+        print("Incomplete: --query requires --grep REGEX")
+        return 4
+    sys.path.insert(0, str(root / "verif/regress/remote"))
+    import testharness_proxy as gateway
+    remote_cmd = query_command(gateway.REMOTE_ROOT, args.query,
+                               args.grep, args.tail, args.query_glob)
+    bun = shutil.which("bun")
+    if bun is None:
+        print("Incomplete: Bun is required for the configured remote gateway")
+        return 4
+    command = [
+        bun, str(root / "build-platform/src/cli/index.ts"), "remote",
+        "--timeout", str(args.timeout), "shell", "--", remote_cmd,
+    ]
+    return subprocess.call(command, cwd=root)
+
+
+def _git_head(path):
+    """Return `git rev-parse HEAD` for a repo/submodule path, or None."""
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(path), "rev-parse", "HEAD"],
+            text=True, stderr=subprocess.DEVNULL).strip() or None
+    except Exception:
+        return None
+
+
+def load_tools_record(args, root):
+    """Load the tools record. Returns (record|None, error|None, path|None).
+
+    record is None when no record is configured or the file is absent (the
+    legacy per-flag defaults then apply).  error is a string when a configured
+    record exists but cannot be used.  path is the resolved record file so the
+    caller can pin it into the source manifest.
+    """
+    record_path = getattr(args, "tools_record", None)
+    if record_path == "none":
+        return None, None, None
+    if record_path is None:
+        record_path = root / "verif/tb/storamic/storamic_tools.json"
+    path = Path(record_path)
+    if not path.is_file():
+        return None, None, None
+    try:
+        record = json.loads(path.read_text())
+    except Exception as exc:
+        return None, f"tools record {path} is not valid JSON: {exc}", path
+    if not isinstance(record, dict):
+        return None, f"tools record {path} is not a JSON object", path
+    return record, None, path
+
+
+def apply_tools_record(args, record):
+    """Fill unset tool selectors from the record; explicit args/env win."""
+    verilator = record.get("verilator") or {}
+    if args.verilator is None and verilator.get("verilator"):
+        args.verilator = verilator["verilator"]
+    if (args.runtime_json is None and args.runtime_record is None
+            and verilator.get("runtime_json")):
+        args.runtime_json = verilator["runtime_json"]
+    if (args.runtime_header_sha256 is None
+            and verilator.get("runtime_header_sha256")):
+        args.runtime_header_sha256 = verilator["runtime_header_sha256"]
+    yosys = record.get("yosys") or {}
+    if args.yosys is None and yosys.get("path"):
+        args.yosys = yosys["path"]
+    if args.solver_bin is None and record.get("solver_bin"):
+        args.solver_bin = record["solver_bin"]
+
+
+def verify_tool_heads(root, record):
+    """Refuse when a recorded tool commit != the current submodule HEAD."""
+    for sub, expected in (
+        ("tools/verilator", (record.get("verilator") or {}).get("head")),
+        ("tools/yosys", (record.get("yosys") or {}).get("head")),
+    ):
+        if not expected:
+            continue
+        actual = _git_head(root / sub)
+        if actual != expected:
+            return (f"{sub} HEAD {actual or '<unresolved>'} != tools record "
+                    f"{expected}; rebuild or re-pin storamic_tools.json")
+    return None
 
 
 def main():
@@ -61,16 +306,41 @@ def main():
                         help="Remote Yosys binary path under the gateway root")
     parser.add_argument("--solver-bin", default=None,
                         help="Remote directory prepended to PATH (e.g. yices bin)")
+    parser.add_argument("--tools-record", default=None,
+                        help="Tools record JSON supplying default tool paths "
+                             "(default: verif/tb/storamic/storamic_tools.json; "
+                             "pass 'none' to disable)")
     parser.add_argument("--output-root", type=Path)
     parser.add_argument("--timeout", type=int, default=2400,
                         help="Remote harness timeout in seconds")
     parser.add_argument("--prepare-only", action="store_true",
                         help="Write source manifest and launch plan locally; never contact the host")
+    parser.add_argument("--query", metavar="RUN_ID", default=None,
+                        help="grep/tail a previous remote run's logs (output/ and work/) "
+                             "instead of launching stages; pair with --grep")
+    parser.add_argument("--grep", metavar="REGEX", default=None,
+                        help="regular expression to search for in --query mode")
+    parser.add_argument("--tail", type=int, default=50,
+                        help="maximum matching lines returned in --query mode")
+    parser.add_argument("--file", dest="query_glob", default="*.log",
+                        help="file glob to search in --query mode (default: *.log)")
     args = parser.parse_args()
+    root = Path(__file__).resolve().parents[3]
+    if args.query:
+        return run_query(args, root)
+    toolrec, record_error, toolrec_path = load_tools_record(args, root)
+    if record_error:
+        print("Incomplete: " + record_error)
+        return 4
+    if toolrec:
+        apply_tools_record(args, toolrec)
+        head_error = verify_tool_heads(root, toolrec)
+        if head_error:
+            print("Incomplete: " + head_error)
+            return 4
     stages = args.stages.split(",")
     if len(stages) != len(set(stages)) or not set(stages) <= ALLOWED_STAGES:
         parser.error("invalid or duplicate stages")
-    root = Path(__file__).resolve().parents[3]
     needs_runtime = bool(set(stages) & SIMULATION_STAGES)
     blockers = []
     if needs_runtime:
@@ -361,11 +631,44 @@ def main():
             "verif/tb/storamic/run_cpu_strict_pins.py",
             "verif/tb/storamic/run_core_scc.py",
         ]] if p not in sources]
+    if set(stages) & {"checkpoint-route", "checkpoint-route-formal"}:
+        from run_checkpoint_route import FILES as ROUTE_FILES
+        sources += [p for p in [root / rel for rel in ROUTE_FILES]
+                    if p not in sources]
+        sources += [p for p in [root / path for path in [
+            "verif/tb/storamic/run_checkpoint_route.py",
+            "verif/tb/storamic/route_native_unoptflat_pins.json",
+        ]] if p not in sources]
+    if set(stages) & {"native-c2"}:
+        # native-c2 builds the full ariane_testharness from a frozen snapshot of
+        # the working tree, uploaded as one gzipped tar and sha256-pinned in the
+        # manifest (the leaf re-hashes data/cva6-src-c2.tar.gz before extract).
+        # This is not the leaf's curated component set; it is the ~30 MB closure
+        # run_native_c2.py needs to run `make verilate` for ariane_testharness.
+        # Write under gitignored tmp/ (a real repo dir): remote-runs is a
+        # symlink that resolves outside /mnt/<drive> in WSL, which would make
+        # _listing() emit an unresolvable upload path for the tar.
+        c2_tar = _c2_source_tar(root, root / "tmp" / "cva6-src-c2.tar.gz")
+        sources += [p for p in [root / path for path in [
+            "verif/tb/storamic/run_native_c2.py",
+            "verif/tb/storamic/g6lc_storamic_c2_monitor.sv",
+            "verif/tests/custom/storamic/storamic_c2.c",
+            "verif/tests/custom/storamic/storamic_virtio_blk.c",
+            "corev_apu/storamic/g6lc_storamic_checkpoint_route.sv",
+            "corev_apu/tb/ariane_testharness.sv",
+            "corev_apu/tb/g6lc_tb.cpp",
+        ]] if p not in sources]
+        if c2_tar.is_file() and c2_tar not in sources:
+            sources.append(c2_tar)
     if args.runtime_record:
         record = args.runtime_record.resolve()
         if record.name != "runtime.json":
             parser.error("--runtime-record must name runtime.json")
         sources += [record, record.with_name("canaries.json")]
+    if toolrec_path is not None:
+        toolrec_path = Path(toolrec_path)
+        if toolrec_path.is_file() and toolrec_path not in sources:
+            sources.append(toolrec_path)
     configs = []
     tracked = subprocess.check_output(
         ["git", "-C", str(root), "ls-files", "--", "core/include/*config_pkg.sv"],
@@ -424,7 +727,7 @@ def main():
     command = [
         bun, str(root / "build-platform/src/cli/index.ts"), "remote",
         "--timeout", str(args.timeout), "py", "--", str(runner),
-        "--tag", tag, "--pull", "--dest", str(dest),
+        "--tag", tag, "--pull", "--pull-exclude-build", "--dest", str(dest),
         "--data", str(manifest_file),
         "--env", "STORAMIC_MANIFEST_FILE=" + manifest_file.name,
         "--env", "STORAMIC_RUNNER_SHA=" + runner_sha,
@@ -447,6 +750,14 @@ def main():
     elif args.solver_bin:
         command += ["--env", "PATH=" + args.solver_bin +
                     ":/usr/local/bin:/usr/bin:/bin"]
+    if toolrec:
+        toolrec_yosys = toolrec.get("yosys") or {}
+        # Pin the expected binary sha only when the selected Yosys is the
+        # recorded one; an explicit --yosys override opts out of that identity.
+        if (toolrec_yosys.get("sha256")
+                and args.yosys == toolrec_yosys.get("path")):
+            command += ["--env",
+                        "STORAMIC_EXPECT_YOSYS_SHA256=" + toolrec_yosys["sha256"]]
     command += ["--data-list", str(data_list)]
     if args.runtime_json:
         command += ["--env", "STORAMIC_RUNTIME_JSON=" + args.runtime_json]

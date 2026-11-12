@@ -506,6 +506,14 @@ def main():
     if set(stages) & {"cpu-strict-pins"}:
         from run_cpu_strict_pins import run as run_cpu_strict_pins
         run_cpu_strict_pins(data, out, stages, manifest, builds, outcomes, verilator, build_model)
+    if set(stages) & {"checkpoint-route", "checkpoint-route-formal"}:
+        from run_checkpoint_route import run as run_checkpoint_route
+        run_checkpoint_route(data, out, stages, manifest, builds, outcomes,
+                             verilator, build_model)
+    if set(stages) & {"native-c2"}:
+        from run_native_c2 import run as run_native_c2
+        run_native_c2(data, out, stages, manifest, builds, outcomes,
+                      verilator, build_model)
     config_failures = []
     profiles = [
         ("one", ["-GMaxSticks=1"], None),
@@ -1391,6 +1399,9 @@ def main():
         yosys = Path(yosys_bin())
         manifest["yosys"] = str(yosys)
         manifest["yosys_sha256"] = sha(yosys)
+        expected_yosys = os.environ.get("STORAMIC_EXPECT_YOSYS_SHA256")
+        if expected_yosys and manifest["yosys_sha256"] != expected_yosys:
+            raise RuntimeError("STORAMIC_TOOL_IDENTITY_CHANGED")
         (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
         if "checkpoint-policy-synth" in stages:
             for enabled in (0, 1):
@@ -2369,6 +2380,7 @@ def main():
         raise RuntimeError("STORAMIC_TOOL_IDENTITY_CHANGED")
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
     (out / "stage-results.json").write_text(json.dumps(outcomes, indent=2))
+    _write_failures(out, outcomes)
     if not outcomes:
         raise RuntimeError("STORAMIC_NO_SELECTED_STAGES_EXECUTED")
     if config_failures:
@@ -2378,6 +2390,46 @@ def main():
         "sources": actual, "qualification": False,
     }, indent=2))
     print("STORAMIC_REMOTE_SELECTED_STAGES_PASS")
+
+
+_FAILURE_MARKERS = re.compile(
+    r"_FAIL\b|CHECKPOINT_ROUTE_FAIL|\bFAIL\b|%Error|Error:|FAILED|Traceback|"
+    r"STORAMIC_.*(FAIL|ERROR)", re.I)
+
+
+def _first_failure_line(path):
+    try:
+        with path.open("r", errors="replace") as handle:
+            for line in handle:
+                if _FAILURE_MARKERS.search(line):
+                    return line.strip()[:400]
+    except OSError:
+        return None
+    return None
+
+
+def _write_failures(out, outcomes=None, error=None):
+    """Compact failures.json so diagnosis does not require the full logs.
+
+    Records every outcome flagged as failed, the first strong failure marker
+    in each top-level ``*.log`` under ``out``, and the terminal error when the
+    leaf aborted. Bulky build products are unaffected (they live in the model
+    dirs, not these logs).
+    """
+    failed = []
+    for record in outcomes or []:
+        if isinstance(record, dict) and (
+                record.get("pass") is False or record.get("status") == "fail"
+                or record.get("error")):
+            failed.append(record)
+    log_errors = []
+    for log in sorted(out.glob("*.log")):
+        line = _first_failure_line(log)
+        if line is not None:
+            log_errors.append({"log": log.name, "line": line})
+    payload = {"failures": failed, "log_errors": log_errors,
+               "error": str(error) if error is not None else None}
+    (out / "failures.json").write_text(json.dumps(payload, indent=2))
 
 
 def _manifest_sources():
@@ -2395,7 +2447,9 @@ if __name__ == "__main__":
         status = "fail" if isinstance(error, (subprocess.CalledProcessError, RuntimeError)) else "incomplete"
         if "IDENTITY" in str(error) or "SOURCE_CHANGED" in str(error):
             status = "incomplete"
-        Path(os.environ["TH_OUT_DIR"], "leaf-result.json").write_text(json.dumps({
+        out_dir = Path(os.environ["TH_OUT_DIR"])
+        _write_failures(out_dir, error=error)
+        out_dir.joinpath("leaf-result.json").write_text(json.dumps({
             "status": status, "error": str(error),
             "sources": _manifest_sources(),
             "stages": os.environ.get("STORAMIC_STAGES", "").split(","),
