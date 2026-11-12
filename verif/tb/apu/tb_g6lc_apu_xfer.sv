@@ -499,8 +499,10 @@ module tb_g6lc_apu_xfer;
   function automatic logic [7:0] m_srgb(input logic [15:0] lin);
     int flo; logic [15:0] flut, lup;
     flo = 0;
+    /* verilator lint_off UNSIGNED */
     for (int i = 0; i < 256; i++)
       if (g6lc_apu_srgb_pkg::APU_SRGB_TO_LIN[i] <= lin) flo = i;
+    /* verilator lint_on UNSIGNED */
     if (flo == 255) return 8'd255;
     flut = g6lc_apu_srgb_pkg::APU_SRGB_TO_LIN[flo];
     lup  = g6lc_apu_srgb_pkg::APU_SRGB_TO_LIN[flo + 1];

@@ -260,7 +260,7 @@ module tb_g6lc_apu_vnfront;
     .mp_req_valid_o(xmp_v), .mp_req_ready_i(1'b1),
     .mp_req_o(xmp_req),
     .mp_rsp_valid_i(xmp_rv), .mp_rsp_i(xmp_rsp),
-    .hold_i(1'b0), .idle_o(), .busy_o());
+    .hold_i(1'b0), .idle_o(), .busy_o(), .qry_stat_i('0));
 
   // ---- shared backends with 4-master arbitration -----------------------
   // objtab: 0=front, 1=exec, 2=tb(final RESET_CTX), 3=shcore record

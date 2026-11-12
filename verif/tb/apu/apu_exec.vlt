@@ -20,7 +20,8 @@ lint_off -rule UNOPTFLAT -file "*/core/cvfpu/src/fpu_div_sqrt_mvp/hdl/control_mv
 // tc_sram byte-write loop: delayed assign inside for (Verilator
 // limitation; generic tech cell, do not edit).
 lint_off -rule BLKLOOPINIT -file "*/vendor/pulp-platform/tech_cells_generic/src/rtl/tc_sram.sv"
-// Older 5.008 builds unroll index zero before UNSIGNED lint. Both inclusive
-// bounds deliberately include zero; keep these waivers line-specific.
-lint_off -rule UNSIGNED -file "*/corev_apu/apu/g6lc_apu_shwave.sv" -lines 2465-2466
+// Older 5.008 builds unroll index zero before UNSIGNED lint. The inclusive
+// bound deliberately includes zero; keep this waiver line-specific.
+// (g6lc_apu_shwave.sv W_MLF had the same waiver pinned to a line number
+// that moved with every edit above it; the bound is now `c < lcc + 1`.)
 lint_off -rule UNSIGNED -file "*/corev_apu/apu/g6lc_apu_objmem.sv" -lines 900

@@ -101,7 +101,7 @@ provision() {
         "$CORPUS/fs_deriv2.spv" \
         "$CORPUS/fs_scene8.spv" \
         "$CORPUS/vs_shadowfog.spv" "$CORPUS/fs_shadowfog.spv" \
-        "$CORPUS/vs_texlod.spv"
+        "$CORPUS/vs_texlod.spv" "$CORPUS/fs_sepsmp.spv"
     else
       # NoCloud only requires a filesystem labelled CIDATA; on hosts
       # without xorrisofs/genisoimage an ext image serves the same seed
@@ -120,7 +120,7 @@ provision() {
         "$CORPUS/fs_deriv2.spv" \
         "$CORPUS/fs_scene8.spv" \
         "$CORPUS/vs_shadowfog.spv" "$CORPUS/fs_shadowfog.spv" \
-        "$CORPUS/vs_texlod.spv" \
+        "$CORPUS/vs_texlod.spv" "$CORPUS/fs_sepsmp.spv" \
         "$cidata_src/"
       truncate -s 16M "$GUEST_CACHE/cidata.img"
       mke2fs -q -t ext4 -L CIDATA -d "$cidata_src" \
@@ -160,7 +160,7 @@ build_cidata() {
       "$CORPUS/fs_deriv2.spv" \
       "$CORPUS/fs_scene8.spv" \
       "$CORPUS/vs_shadowfog.spv" "$CORPUS/fs_shadowfog.spv" \
-      "$CORPUS/vs_texlod.spv"
+      "$CORPUS/vs_texlod.spv" "$CORPUS/fs_sepsmp.spv"
     return
   fi
   cidata_src="$(mktemp -d)"
@@ -176,7 +176,7 @@ build_cidata() {
     "$CORPUS/fs_deriv2.spv" \
     "$CORPUS/fs_scene8.spv" \
     "$CORPUS/vs_shadowfog.spv" "$CORPUS/fs_shadowfog.spv" \
-    "$CORPUS/vs_texlod.spv" \
+    "$CORPUS/vs_texlod.spv" "$CORPUS/fs_sepsmp.spv" \
     "$cidata_src/"
   truncate -s 16M "$GUEST_CACHE/cidata.img"
   mke2fs -q -t ext4 -L CIDATA -d "$cidata_src" "$GUEST_CACHE/cidata.img"

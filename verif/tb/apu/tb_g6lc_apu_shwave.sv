@@ -128,7 +128,7 @@ module tb_g6lc_apu_shwave;
   logic [7:0]   mem_wstrb;
   logic [63:0]  mem_rdata;
 
-  g6lc_apu_shcore #(.Enable(1)) dut (
+  g6lc_apu_shcore #(.Enable(1), .PerfCountersEn(1)) dut (
     .clk_i(clk), .rst_ni(rst_n), .testmode_i(1'b0),
     .wr_en_i(wr_en), .wr_slot_i(wr_slot), .wr_addr_i(wr_addr),
     .wr_data_i(wr_data),
@@ -853,7 +853,7 @@ module tb_g6lc_apu_shwave;
   // check — uout[name idx][seed][word pos over out bindings].
   // First dim must cover names[] (indices are position-based):
   // overflow drops the stash silently and opt reads zeros.
-  localparam int UoNames = 64;
+  localparam int UoNames = 82;
   logic [31:0] uout [UoNames][4][2048];
   int          cur_nidx, cur_seed, ou_mism, ou_mism_t, ou_words;
   bit          is_opt;
@@ -987,7 +987,12 @@ module tb_g6lc_apu_shwave;
         ad   = {32'h0, wbuf[boff_w[b] + 3]};
         i2   = wbuf[boff_w[b] + 4][7:0];
         kind = wbuf[boff_w[b] + 4][23:16];
-        if (kind == 8'h00) kind = 8'h06;
+        // buffer binds with no explicit kind default to UBO(6); image/
+        // sampler binds (aux bit24) keep kind verbatim so a standalone
+        // SAMPLER descriptor (kind 0) reaches the record — the CTS
+        // sampled_image/sampler descriptor_copy shapes need it.
+        if (kind == 8'h00 && !wbuf[boff_w[b] + 4][24])
+          kind = 8'h06;
         if (row_of[b] >= 0) begin
           r  = row_of[b];
           ra = 64'(desc.set_base[st[1:0]]) +
@@ -1317,6 +1322,14 @@ module tb_g6lc_apu_shwave;
              file, dcyc, dpl.code, dpl.pc, dpl.wave, dpl.robust,
              dut.gen_on.i_wave.gen_on.wsw_q,
              dut.gen_on.i_wave.gen_on.nwaves_q);
+    // W1.5 counters of this dispatch (informational, not checked)
+    $display("PERF %s busy=%0d insns=%0d mem=%0d lsu=%0d fpu=%0d tex=%0d",
+             file, dut.gen_on.i_wave.perf_o[31:0],
+             dut.gen_on.i_wave.perf_o[63:32],
+             dut.gen_on.i_wave.perf_o[95:64],
+             dut.gen_on.i_wave.perf_o[127:96],
+             dut.gen_on.i_wave.perf_o[159:128],
+             dut.gen_on.i_wave.perf_o[191:160]);
     // §7c: a multi-wave workgroup must have actually interleaved the
     // round-robin scheduler at least once during the dispatch.
     checks++;
@@ -1348,9 +1361,22 @@ module tb_g6lc_apu_shwave;
   endtask
 
   // G1a graphics wave work — no mut/bad/opt arms (single vector each)
-  string gfx_names [17] = '{"vs_passthru",
+  string gfx_names [22] = '{"vs_passthru",
                           // G3a-ii: vertex-stage ExplicitLod sample
                           "vs_texlod", "fs_color",
+                          // descriptor_copy.graphics shape: FS reads a
+                          // UBO descriptor (kind6) bound at set0/binding0
+                          "fs_ubo",
+                          // UBO descriptor array: u[1].c must hit element 1
+                          "fs_ubo_array",
+                          // descriptor_copy.graphics shapes: FS reads a
+                          // uniform texel-buffer (kind4) and a storage
+                          // image (kind3) — the SC_IMAGE/tx_* descriptor
+                          // kinds distinct from the buffer F5 resolve
+                          "fs_texbuf", "fs_img",
+                          // separate texture2D(kind2)+sampler(kind0) ->
+                          // OpSampledImage -> the W_TX3 kind0 record fetch
+                          "fs_smp",
                           "fs_deriv", "fs_tex_implicit",
                           // G3a-i: FS function calls, discard, GLSL.450
                           // geometry ops, FS SSBO atomics, demote
@@ -1373,7 +1399,7 @@ module tb_g6lc_apu_shwave;
   // carry the base offset (flags bit4 header extension)
   string fault_names [3] = '{"fn_deep", "zerodim", "dispbase"};
 
-  string names [64] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
+  string names [82] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
       "builtin_lid", "builtin_lindex", "compare", "composite",
       "intmix", "localsize32", "localsize64", "math450", "oob",
       "pushscale", "vec4arith",
@@ -1402,6 +1428,31 @@ module tb_g6lc_apu_shwave;
       // textureLod bilinear+mip/address modes, sRGB, 2D-array, query)
       "texfetch", "texfetch_mip", "texlod_lin", "texlod_mip",
       "imgloadstore", "texarr", "texsrgb", "texquery",
+      // §12.3 texel-buffer corpus (Dim=Buffer): OpImageFetch on
+      // textureBuffer (kind 4) + OpImageRead/OpImageWrite/OpImageTexelPointer
+      // on imageBuffer (kind 5); base seeds only — no mut/bad/opt arm yet
+      "texbuf", "texbuf_img", "texbuf_wr", "texbuf_atom",
+      // §12.3 F5 image descriptor array: sampler2D texs[4] indexed by
+      // gid/8 (dsc_idx_q); combined-image-sampler elements kind=2.
+      // base seeds only — no mut/bad/opt arm yet
+      "imgarr",
+      // §12.3 F5 storage-image descriptor array: image2D imgs[4]
+      // kind=3 at binding 0, gid/8 (dsc_idx_q); imageLoad+imageStore.
+      // base seeds only — no mut/bad/opt arm yet
+      "imgarr_st",
+      // §12.3 F5 sampled-image descriptor array: texture2D texs[4]
+      // kind=1 at binding 0, gid/8 (dsc_idx_q); texelFetch (no sampler).
+      // base seeds only — no mut/bad/opt arm yet
+      "imgarr_smp",
+      // §12.3 F5 texel-buffer descriptor array: textureBuffer texs[4]
+      // kind=4 at binding 0, gid/8 (dsc_idx_q); texelFetch Dim=Buffer.
+      // base seeds only — no mut/bad/opt arm yet
+      "texbuf_arr",
+      // §12.3 F5 storage-texel-buffer descriptor array: imageBuffer
+      // imgs[4] kind=5 at binding 0, gid/8 (dsc_idx_q); imageLoad+
+      // imageStore+imageLoad race-free per-lane texels.
+      // base seeds only — no mut/bad/opt arm yet
+      "texbuf_arr_st",
       // G3a-i: function calls, atomics, integer/bit ops, pack/unpack
       // + Modf/Frexp/Ldexp, dynamic vector ops
       "fn_call", "atomic_hist", "atomic_cas", "bitops", "packops",
@@ -1414,7 +1465,16 @@ module tb_g6lc_apu_shwave;
       "ssbo_sarr",
       // same block with the CTS compare-function shape (296 RF rows,
       // 58 branch targets). Commit used to fault REGS and BRANCH.
-      "ssbo_cap"};
+      "ssbo_cap",
+      // OpCopyLogical (opcode 400): aggregate copy across logically
+      // matching but distinct type IDs — hand-assembled, no .comp twin
+      "copylogical",
+      // whole-aggregate values: struct OpLoad/OpStore, OpCopyLogical
+      // across ArrayStride / MatrixStride / row-major layouts
+      "agg_struct", "cl_arr", "cl_mix",
+      "agg_arr", "agg_local", "agg_ins", "agg_con", "agg_sel"};
+
+  int n_names, n_fault, n_gfx, n_seeds;
 
   initial begin
     checks = 0; cases = 0; fails = 0; cyc = 0; dcyc = 0;
@@ -1423,6 +1483,19 @@ module tb_g6lc_apu_shwave;
     dbg_sc = $test$plusargs("dbg_sc");
     dbg_wd = $test$plusargs("dbg_wd");
     if (!$value$plusargs("only=%s", only)) only = "";
+    // Corpus loop bounds are read at run time on purpose.  With constant
+    // bounds Verilator unrolls every corpus loop and inlines run_vec once
+    // per iteration (535 copies): one 196 MB / 1.96 M-line coroutine that
+    // needs ~19 GB to compile.  Run-time bounds keep one copy per call
+    // site.  The plusargs only ever shorten a run.
+    if (!$value$plusargs("n_names=%d", n_names) ||
+        n_names > $size(names)) n_names = $size(names);
+    if (!$value$plusargs("n_fault=%d", n_fault) ||
+        n_fault > $size(fault_names)) n_fault = $size(fault_names);
+    if (!$value$plusargs("n_gfx=%d", n_gfx) ||
+        n_gfx > $size(gfx_names)) n_gfx = $size(gfx_names);
+    if (!$value$plusargs("n_seeds=%d", n_seeds) || n_seeds > 3)
+      n_seeds = 3;
     wr_en = 0; commit = 0; retire = 0; work = 0; work_ctype = 0;
     work_imm = '0; disp_slot = 0; desc = '0; push_n = 0; push = '0;
     for (int i = 0; i < MEMW; i++) mem[i] = '0;
@@ -1430,8 +1503,8 @@ module tb_g6lc_apu_shwave;
     repeat (4) @(negedge clk);
 
     is_opt = 0; cur_nidx = -1; cur_seed = 0; ou_words = 0;
-    for (int i = 0; i < $size(names); i++) begin
-      for (int s = 1; s <= 3; s++) begin
+    for (int i = 0; i < n_names; i++) begin
+      for (int s = 1; s <= n_seeds; s++) begin
         if (only_skip(names[i])) continue;
         cases++;
         cur_nidx = i; cur_seed = s;
@@ -1440,7 +1513,7 @@ module tb_g6lc_apu_shwave;
       end
     end
     cur_nidx = -1; cur_seed = 0;
-    for (int i = 0; i < $size(names); i++) begin
+    for (int i = 0; i < n_names; i++) begin
       if (only_skip(names[i])) continue;
       // atomic_hist has no mut arm: a flipped index op can move one
       // atomic onto another's cell and the result then depends on
@@ -1453,26 +1526,38 @@ module tb_g6lc_apu_shwave;
       // model-invisible (mut=False in DESC — no _mut_0 emitted).
       if (names[i] == "atomic_hist" || names[i] == "cts_arrlensb" ||
           names[i] == "cts_wgloop" || names[i] == "cts_shared1" ||
-          names[i] == "ssbo_sarr" || names[i] == "ssbo_cap")
+          names[i] == "ssbo_sarr" || names[i] == "ssbo_cap" ||
+          // pure copies: no arithmetic op to flip (mut=False in DESC)
+          names[i] == "agg_struct" || names[i] == "cl_arr" ||
+          names[i] == "cl_mix" || names[i] == "agg_arr" ||
+          names[i] == "agg_local" || names[i] == "agg_ins" ||
+          names[i] == "agg_con" || names[i] == "agg_sel" ||
+          // texel-buffer: no mut arm emitted (oracle is model-only)
+          names[i] == "texbuf" || names[i] == "texbuf_img" ||
+          names[i] == "texbuf_wr" || names[i] == "texbuf_atom" ||
+          names[i] == "imgarr" || names[i] == "imgarr_st" || names[i] == "imgarr_smp" || names[i] == "texbuf_arr" || names[i] == "texbuf_arr_st")
         continue;
       cases++;
       run_vec(names[i], {names[i], "_mut_0"});
     end
-    for (int i = 0; i < $size(names); i++) begin
+    for (int i = 0; i < n_names; i++) begin
       if (only_skip(names[i])) continue;
-      if (names[i] == "ssbo_sarr" || names[i] == "ssbo_cap") continue;
+      if (names[i] == "ssbo_sarr" || names[i] == "ssbo_cap" ||
+          names[i] == "texbuf" || names[i] == "texbuf_img" ||
+          names[i] == "texbuf_wr" || names[i] == "texbuf_atom" ||
+          names[i] == "imgarr" || names[i] == "imgarr_st" || names[i] == "imgarr_smp" || names[i] == "texbuf_arr" || names[i] == "texbuf_arr_st") continue;
       cases++;
       run_vec(names[i], {names[i], "_bad_0"});
     end
 
     // G1a graphics wave work: vertex/fragment record batches
     // G3a-i runtime-fault arms
-    for (int i = 0; i < $size(fault_names); i++) begin
+    for (int i = 0; i < n_fault; i++) begin
       if (only_skip(fault_names[i])) continue;
       cases++;
       run_vec(fault_names[i], {fault_names[i], "_0"});
     end
-    for (int i = 0; i < $size(gfx_names); i++) begin
+    for (int i = 0; i < n_gfx; i++) begin
       if (only_skip(gfx_names[i])) continue;
       cases++;
       run_vec(gfx_names[i], {gfx_names[i], "_1"});
@@ -1483,7 +1568,7 @@ module tb_g6lc_apu_shwave;
     // plus the unopt==opt bit-exact check against the outputs stashed
     // during the base runs above.
     is_opt = 1;
-    for (int i = 0; i < $size(names); i++) begin
+    for (int i = 0; i < n_names; i++) begin
       // no spirv-opt twin for hand-assembled phiflow or the G3a-i
       // corpus (the optimizer inlines calls/folds atomics away)
       // cts_arrlensb has no optimizer twin either (CTS-probe corpus)
@@ -1494,9 +1579,16 @@ module tb_g6lc_apu_shwave;
           names[i] == "cts_arrlensb" || names[i] == "nclamp" ||
           names[i] == "cts_wgloop" || names[i] == "cts_mls64" ||
           names[i] == "cts_shared1" || names[i] == "cts_sharedg" ||
-          names[i] == "ssbo_sarr" || names[i] == "ssbo_cap")
+          names[i] == "ssbo_sarr" || names[i] == "ssbo_cap" ||
+          names[i] == "copylogical" || names[i] == "agg_struct" ||
+          names[i] == "cl_arr" || names[i] == "cl_mix" || names[i] == "agg_arr" ||
+          names[i] == "agg_local" || names[i] == "agg_ins" ||
+          names[i] == "agg_con" || names[i] == "agg_sel" ||
+          names[i] == "texbuf" || names[i] == "texbuf_img" ||
+          names[i] == "texbuf_wr" || names[i] == "texbuf_atom" ||
+          names[i] == "imgarr" || names[i] == "imgarr_st" || names[i] == "imgarr_smp" || names[i] == "texbuf_arr" || names[i] == "texbuf_arr_st")
         continue;
-      for (int s = 1; s <= 3; s++) begin
+      for (int s = 1; s <= n_seeds; s++) begin
         if (only_skip(names[i])) continue;
         cases++;
         cur_nidx = i; cur_seed = s;

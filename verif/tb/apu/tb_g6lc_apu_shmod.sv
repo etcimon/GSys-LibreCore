@@ -263,7 +263,7 @@ module tb_g6lc_apu_shmod;
     end
   endtask
 
-  string names [36] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
+  string names [37] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
       "builtin_lid", "builtin_lindex", "compare", "composite",
       "intmix", "localsize32", "localsize64", "math450", "oob",
       "pushscale", "vec4arith",
@@ -276,12 +276,14 @@ module tb_g6lc_apu_shmod;
       // G3a-i corpus (no spirv-opt twins — `spirv-opt -O` inlines the
       // calls and folds the atomics, so the new paths would be lost)
       "fn_call", "atomic_hist", "atomic_cas", "bitops", "packops",
-      "dynvec"};
+      "dynvec",
+      // OpCopyLogical (opcode 400) — hand-assembled, no .comp/opt twin
+      "copylogical"};
   // names with no <name>_opt.spv twin
   function automatic bit no_opt(input string n);
     return n == "phiflow" || n == "fn_call" || n == "atomic_hist" ||
            n == "atomic_cas" || n == "bitops" || n == "packops" ||
-           n == "dynvec";
+           n == "dynvec" || n == "copylogical";
   endfunction
 
   initial begin
@@ -294,7 +296,7 @@ module tb_g6lc_apu_shmod;
     repeat (4) @(negedge clk);
 
     // ---- 1. every corpus module: commit + table compare -------------
-    for (int i = 0; i < 36; i++) begin
+    for (int i = 0; i < 37; i++) begin
       cases++;
       run_commit({names[i], "_1.hex"}, 0, 0, 0);
       check_tab(names[i]);
@@ -304,7 +306,7 @@ module tb_g6lc_apu_shmod;
 
     // ---- 1b. every `spirv-opt -O` module: commit + table compare ---
     // (no phiflow — hand-assembled, no .comp/_opt twin)
-    for (int i = 0; i < 36; i++) begin
+    for (int i = 0; i < 37; i++) begin
       if (no_opt(names[i])) continue;
       cases++;
       run_commit({names[i], "_opt_1.hex"}, 0, 0, 0);
@@ -316,7 +318,7 @@ module tb_g6lc_apu_shmod;
     // 4a bads inject OpSin (FAULT_OPCODE); 4b control-flow bads strip
     // the merge instruction (FAULT_BRANCH).  The vector's .exp words 0/1
     // carry the expected fault code and faulting opcode.
-    for (int i = 0; i < 36; i++) begin
+    for (int i = 0; i < 37; i++) begin
       int efd;
       logic [31:0] ec, eo;
       cases++;
@@ -372,6 +374,22 @@ module tb_g6lc_apu_shmod;
     end
     minst(253, 1); minst(56, 1);
     cases++; run_synth("manyregs", APU_SH_FAULT_REGS, -1);
+
+    // a struct result on an opcode that does not carry every row of it
+    // (OpIAdd): accepted means executed, so commit refuses with TYPE
+    mheader(64); minst(17, 2); mw(1); minst(14, 3); mw(0); mw(1);
+    minst(15, 4); mw(5); mw(4); mw(0);
+    minst(16, 6); mw(4); mw(17); mw(8); mw(1); mw(1);
+    minst(19, 2); mw(5);                       // %5 void
+    minst(21, 4); mw(6); mw(32); mw(0);        // %6 int
+    minst(30, 3); mw(9); mw(6);                // %9 struct { int }
+    minst(33, 3); mw(8); mw(5);                // %8 fn
+    minst(43, 4); mw(6); mw(11); mw(0);        // %11 = const int 0
+    minst(54, 5); mw(5); mw(4); mw(0); mw(8);
+    minst(248, 2); mw(10);
+    minst(128, 5); mw(9); mw(12); mw(11); mw(11);   // IAdd -> struct
+    minst(253, 1); minst(56, 1);
+    cases++; run_synth("aggres", APU_SH_FAULT_TYPE, 128);
 
     // a valid preamble still commits after the fault sweep
     mheader(32); mpreamble();

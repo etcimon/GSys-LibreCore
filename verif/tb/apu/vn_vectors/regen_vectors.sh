@@ -26,6 +26,9 @@ python3 $G --bindfull-session ue_sm5_bindfull 1
 # W3.5 wedge-3 arm: CbBufs=16 exhaustion -> OOM alloc reply, phantom-
 # handle submit -> VK_ERROR_UNKNOWN with no executor push
 python3 $G --cbfull-session ue_sm5_cbfull 1
+# vkCreateBufferView/vkDestroyBufferView arm: kind-9 ALLOC validation
+# (bound extent, format, geometry, unbound) + RETIRE destroy
+python3 $G --bvw-session ue_sm5_bvw 1
 
 # pure positive sessions: ue_cpos_<v>_<n> <- shvec <v>_<n>
 for v in arrlen arroob barrier_reduce barrier_reduce_opt bufcopy \

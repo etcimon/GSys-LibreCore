@@ -485,7 +485,7 @@ def main():
                 "/mnt/cidata/vs_clip.spv /mnt/cidata/vs_uvc.spv "
                 "/mnt/cidata/fs_deriv2.spv /mnt/cidata/fs_scene8.spv "
                 "/mnt/cidata/vs_shadowfog.spv /mnt/cidata/fs_shadowfog.spv "
-                "/mnt/cidata/vs_texlod.spv "
+                "/mnt/cidata/vs_texlod.spv /mnt/cidata/fs_sepsmp.spv "
                 "/mnt/cidata/expected.json /root/ && ls -la /root/",
                 timeout=60)
 
@@ -618,7 +618,8 @@ def main():
                              "fs_color.spv vs_pc.spv fs_vcol.spv "
                              "vs_pos3.spv vs_inst.spv vs_tex.spv fs_mip.spv "
                              "vs_clip.spv vs_uvc.spv fs_deriv2.spv fs_scene8.spv "
-                             "vs_shadowfog.spv fs_shadowfog.spv vs_texlod.spv",
+                             "vs_shadowfog.spv fs_shadowfog.spv vs_texlod.spv "
+                             "fs_sepsmp.spv",
                              timeout=int(os.environ.get(
                                  "G6LC_VKCMP_TIMEOUT", "5400")))
                 print(f"[drive] vkcmp rc={rc}", flush=True)

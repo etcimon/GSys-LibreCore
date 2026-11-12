@@ -81,7 +81,9 @@ module tb_g6lc_apu_rast;
   apu_vgpages_cpl_t   pgcpl;
   logic               rbusy;
 
-  g6lc_apu_rast #(.Enable(1'b1)) dut (
+  logic [95:0] rstat;
+  logic [127:0] qstat;
+  g6lc_apu_rast #(.Enable(1'b1), .PerfCountersEn(1'b1)) dut (
     .clk_i(clk), .rst_ni(rst_n), .testmode_i(1'b0),
     .work_valid_i(w_v), .work_ready_o(w_r),
     .work_i(w_o), .rd_i(rd),
@@ -96,7 +98,9 @@ module tb_g6lc_apu_rast;
     .mp_rsp_valid_i(mpsv), .mp_rsp_i(mprsp),
     .pg_req_valid_o(pgv), .pg_req_ready_i(pgr), .pg_req_o(pgreq),
     .pg_cpl_valid_i(pgcv), .pg_cpl_ready_o(pgcr), .pg_cpl_i(pgcpl),
-    .busy_o(rbusy));
+    .busy_o(rbusy),
+    .stat_o(rstat),
+    .qry_stat_o(qstat));
 
   tb_apu_mp_mem #(.N(1), .GMW(16), .APW(APW),
                   .PWB(PWB), .PPW(PPW)) i_mem (
@@ -2619,6 +2623,27 @@ module tb_g6lc_apu_rast;
       fail($sformatf("case42 refused blend wrote px=%08x", got));
 
     // ---- report ---------------------------------------------------------
+    // draw-path counters: the suite draws and writes pixels, so both
+    // must have moved, and no more pixels than busy cycles
+    $display("STAT busy=%0d tris=%0d pixwr=%0d", rstat[31:0], rstat[63:32],
+             rstat[95:64]);
+    checks++;
+    if (rstat[63:32] == 0 || rstat[95:64] == 0 ||
+        rstat[95:64] > rstat[31:0]) begin
+      fails++; $display("FAIL draw-path counters");
+    end
+    // §3a query counters {fs_inv, occ, ia_prim, ia_vtx}: the suite
+    // fetches vertices, assembles primitives and shades fragments, so
+    // the fetch/assembly/fragment counters must all have moved, and
+    // FS invocations (helpers included) can never drop below the
+    // covered-sample occlusion count
+    $display("QSTAT ia_vtx=%0d ia_prim=%0d occ=%0d fs_inv=%0d",
+             qstat[31:0], qstat[63:32], qstat[95:64], qstat[127:96]);
+    checks++;
+    if (qstat[31:0] == 0 || qstat[63:32] == 0 || qstat[95:64] == 0 ||
+        qstat[127:96] < qstat[95:64]) begin
+      fails++; $display("FAIL query counters");
+    end
     if (fails == 0)
       $display("PASS tb_g6lc_apu_rast cases=%0d checks=%0d cycles=%0d",
                cases, checks, cyc);

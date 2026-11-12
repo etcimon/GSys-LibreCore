@@ -141,6 +141,69 @@ if [ "$rc" -ne 0 ]; then
   echo "SIM-CBFULL rc=$rc despite PASS"
   exit 1
 fi
+# §6 query arm A: vkGetQueryPoolResults on unpublished pools returns
+# VK_NOT_READY / per-query availability=0 (regenerate with
+#   vn_golden.py --qry-session ue_sm5_qry 1) plus the validation arms
+# (unsupported flag bits -> FEATURE_NOT_PRESENT, missing 64_BIT ->
+# FEATURE_NOT_PRESENT).  Reuses the default-geometry sim binary.
+set +e
+(cd "$ROOT/verif/tb/apu" && stdbuf -o0 -e0 \
+  "$OUT/sim/tb_g6lc_apu_vnfront" +ses=ue_sm5_qry) \
+  > "$OUT/sim-qry.log" 2>&1
+rc=$?
+set -e
+echo "SIM-QRY rc=$rc"
+cat "$OUT/sim-qry.log"
+if ! grep -q '^PASS tb_g6lc_apu_vnfront ' "$OUT/sim-qry.log"; then
+  echo "SIM-QRY FAILED"
+  exit 1
+fi
+if [ "$rc" -ne 0 ]; then
+  echo "SIM-QRY rc=$rc despite PASS"
+  exit 1
+fi
+# §6 query arm B: vkGetQueryPoolResults on POPULATED slots — a real
+# command-buffer submit records vkCmdWriteTimestamp /
+# vkCmd{Begin,End}Query for timestamp/occlusion/statistics pools, then
+# GET reads the committed ObjPay slots back (regenerate with
+#   vn_golden.py --qry2-session ue_sm5_qry2 1).  Reuses the
+# default-geometry sim binary.
+set +e
+(cd "$ROOT/verif/tb/apu" && stdbuf -o0 -e0 \
+  "$OUT/sim/tb_g6lc_apu_vnfront" +ses=ue_sm5_qry2) \
+  > "$OUT/sim-qry2.log" 2>&1
+rc=$?
+set -e
+echo "SIM-QRY2 rc=$rc"
+cat "$OUT/sim-qry2.log"
+if ! grep -q '^PASS tb_g6lc_apu_vnfront ' "$OUT/sim-qry2.log"; then
+  echo "SIM-QRY2 FAILED"
+  exit 1
+fi
+if [ "$rc" -ne 0 ]; then
+  echo "SIM-QRY2 rc=$rc despite PASS"
+  exit 1
+fi
+# vkCreateBufferView/vkDestroyBufferView arm: kind-9 ALLOC validation
+# (bound extent, format, geometry, unbound) + kind-agnostic RETIRE
+# destroy (regenerate with vn_golden.py --bvw-session ue_sm5_bvw 1).
+# Reuses the default-geometry sim binary.
+set +e
+(cd "$ROOT/verif/tb/apu" && stdbuf -o0 -e0 \
+  "$OUT/sim/tb_g6lc_apu_vnfront" +ses=ue_sm5_bvw) \
+  > "$OUT/sim-bvw.log" 2>&1
+rc=$?
+set -e
+echo "SIM-BVW rc=$rc"
+cat "$OUT/sim-bvw.log"
+if ! grep -q '^PASS tb_g6lc_apu_vnfront ' "$OUT/sim-bvw.log"; then
+  echo "SIM-BVW FAILED"
+  exit 1
+fi
+if [ "$rc" -ne 0 ]; then
+  echo "SIM-BVW rc=$rc despite PASS"
+  exit 1
+fi
 if [ "${VNFRONT_SYNTH:-0}" != 1 ]; then
   exit 0
 fi

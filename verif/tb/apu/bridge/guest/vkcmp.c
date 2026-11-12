@@ -46,13 +46,15 @@ enum {
     S_VSHF,   /* vs_shadowfog — scene 10 */
     S_FSHF,   /* fs_shadowfog — scene 10 */
     S_VTEXLOD,/* vs_texlod   — scene 11 */
+    S_FSEPSMP,/* fs_sepsmp   — scene 12 (separate sampler) */
     S_N
 };
 static const char *spv_dflt[S_N] = {
     "vs_passthru.spv", "fs_color.spv", "vs_pc.spv", "fs_vcol.spv",
     "vs_pos3.spv", "vs_inst.spv", "vs_tex.spv", "fs_mip.spv",
     "vs_clip.spv", "vs_uvc.spv", "fs_deriv2.spv", "fs_scene8.spv",
-    "vs_shadowfog.spv", "fs_shadowfog.spv", "vs_texlod.spv"};
+    "vs_shadowfog.spv", "fs_shadowfog.spv", "vs_texlod.spv",
+    "fs_sepsmp.spv"};
 
 typedef struct {
     uint32_t *w;
@@ -781,6 +783,151 @@ static void scene_tex(vkdev *d, const spv_t *spv, uint8_t *out)
     vkDestroyShaderModule(d->dev, g.fs, NULL);
 }
 
+/* scene 11 (index 11): the SAME 4-mip texture + FragCoord uv as
+   scene_tex, but through SEPARATE descriptors — a SAMPLED_IMAGE
+   (texture2D, kind2) at binding0 and a SAMPLER (kind0) at binding1
+   combined in-shader by OpSampledImage.  This is the exact path the
+   descriptor_copy.graphics sampler/sampled_image cases and the
+   shwave tx_smpk_q fix cover; scene_tex only exercises the fused
+   COMBINED_IMAGE_SAMPLER.  fs_sepsmp computes the identical uv as
+   fs_mip so the oracle expects the same sampled pixels. */
+static void scene_sepsmp(vkdev *d, const spv_t *spv, uint8_t *out)
+{
+    static const float verts[6][4] = {
+        {-1.0f, -1.0f, 0.0f, 0.5f}, { 1.0f,  1.0f, 0.0f, 0.5f},
+        { 1.0f, -1.0f, 0.0f, 0.5f},
+        {-1.0f, -1.0f, 0.0f, 0.5f}, {-1.0f,  1.0f, 0.0f, 0.5f},
+        { 1.0f,  1.0f, 0.0f, 0.5f}};
+    static const uint8_t mipcol[4][4] = {
+        {255, 0, 0, 255}, {0, 255, 0, 255},
+        {0, 0, 255, 255}, {255, 255, 255, 255}};
+    uint8_t texdata[8 * 8 * 4 + 4 * 4 * 4 + 2 * 2 * 4 + 1 * 4];
+    memset(texdata, 0, sizeof(texdata));
+    for (int m = 0, off = 0; m < 4; m++) {
+        int dim = 8 >> m;
+        for (int i = 0; i < dim * dim; i++)
+            memcpy(texdata + off + i * 4, mipcol[m], 4);
+        off += dim * dim * 4;
+    }
+    obj_t o = {0};
+    mkimg(d, VK_FORMAT_R8G8B8A8_UNORM, W, H, 1,
+          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+          VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &o.cimg, &o.cmem);
+    o.cview = mkview(d, o.cimg, VK_FORMAT_R8G8B8A8_UNORM,
+                     VK_IMAGE_ASPECT_COLOR_BIT, 1);
+    mkimg(d, VK_FORMAT_R8G8B8A8_UNORM, 8, 8, 4,
+          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+          &o.tex, &o.texm);
+    o.tv = mkview(d, o.tex, VK_FORMAT_R8G8B8A8_UNORM,
+                  VK_IMAGE_ASPECT_COLOR_BIT, 4);
+    VkSamplerCreateInfo sci = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        NULL, 0, VK_FILTER_NEAREST, VK_FILTER_NEAREST,
+        VK_SAMPLER_MIPMAP_MODE_NEAREST,
+        VK_SAMPLER_ADDRESS_MODE_REPEAT, VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        0.0f, VK_FALSE, 1.0f, VK_FALSE, VK_COMPARE_OP_NEVER,
+        0.0f, 3.0f, VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK, VK_FALSE};
+    chk(vkCreateSampler(d->dev, &sci, NULL, &o.samp), "sampler");
+    /* separate descriptors: binding0 = SAMPLED_IMAGE (view only),
+       binding1 = SAMPLER (sampler only) */
+    VkDescriptorSetLayoutBinding lb[2] = {
+        {0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1,
+         VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
+        {1, VK_DESCRIPTOR_TYPE_SAMPLER, 1,
+         VK_SHADER_STAGE_FRAGMENT_BIT, NULL}};
+    VkDescriptorSetLayoutCreateInfo dlci = {
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0,
+        2, lb};
+    chk(vkCreateDescriptorSetLayout(d->dev, &dlci, NULL, &o.dsl),
+        "dslayout");
+    VkDescriptorPoolSize psz[2] = {
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1},
+        {VK_DESCRIPTOR_TYPE_SAMPLER, 1}};
+    VkDescriptorPoolCreateInfo pci = {
+        VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, 0, 2,
+        2, psz};
+    chk(vkCreateDescriptorPool(d->dev, &pci, NULL, &o.pool), "dpool");
+    VkDescriptorSetAllocateInfo dsai = {
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, o.pool,
+        1, &o.dsl};
+    chk(vkAllocateDescriptorSets(d->dev, &dsai, &o.dset), "dset alloc");
+    VkDescriptorImageInfo dii_img = {
+        VK_NULL_HANDLE, o.tv, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkDescriptorImageInfo dii_smp = {
+        o.samp, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet wr[2] = {
+        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, o.dset, 0, 0, 1,
+         VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &dii_img, NULL, NULL},
+        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, o.dset, 1, 0, 1,
+         VK_DESCRIPTOR_TYPE_SAMPLER, &dii_smp, NULL, NULL}};
+    vkUpdateDescriptorSets(d->dev, 2, wr, 0, NULL);
+    mk_rp_fb(d, &o, VK_FORMAT_R8G8B8A8_UNORM, 0);
+    mk_pl(d, &o, o.dsl);
+    gp_t g = {0};
+    g.vs = mksm(d, &spv[S_VTEX]);  g.fs = mksm(d, &spv[S_FSEPSMP]);
+    g.binds[0] = (VkVertexInputBindingDescription){
+        0, 16, VK_VERTEX_INPUT_RATE_VERTEX};
+    g.atts[0] = (VkVertexInputAttributeDescription){
+        0, 0, VK_FORMAT_R32G32_SFLOAT, 0};
+    g.atts[1] = (VkVertexInputAttributeDescription){
+        1, 0, VK_FORMAT_R32G32_SFLOAT, 8};
+    g.nbind = 1;  g.natt = 2;
+    g.topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    g.wmask = 0xF;  g.layout = o.pl;  g.rp = o.rp;
+    o.pipe = mkgp(d, &g);
+    mkbuf(d, sizeof(verts), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+          &o.vb, &o.vbm);
+    upload(d, o.vbm, verts, sizeof(verts));
+    mkbuf(d, sizeof(texdata), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+          &o.stage, &o.stagem);
+    upload(d, o.stagem, texdata, sizeof(texdata));
+    mkbuf(d, NPX * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, &o.rb, &o.rbm);
+    VkClearValue clr = {{{0.0f, 0.0f, 0.0f, 1.0f}}};
+    VkCommandBufferAllocateInfo cbai = {
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, NULL, d->cpool,
+        VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
+    chk(vkAllocateCommandBuffers(d->dev, &cbai, &o.cb), "cmdbuf");
+    VkCommandBufferBeginInfo bbi = {
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL,
+        VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, NULL};
+    chk(vkBeginCommandBuffer(o.cb, &bbi), "begin cb");
+    barrier_img(o.cb, o.tex, VK_IMAGE_ASPECT_COLOR_BIT, 4,
+                VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT);
+    VkBufferImageCopy regs[4];
+    for (int m = 0, off = 0; m < 4; m++) {
+        int dim = 8 >> m;
+        regs[m] = (VkBufferImageCopy){(VkDeviceSize)off, 0, 0,
+            {VK_IMAGE_ASPECT_COLOR_BIT, (uint32_t)m, 0, 1},
+            {0, 0, 0}, {(uint32_t)dim, (uint32_t)dim, 1}};
+        off += dim * dim * 4;
+    }
+    vkCmdCopyBufferToImage(o.cb, o.stage, o.tex,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           4, regs);
+    barrier_img(o.cb, o.tex, VK_IMAGE_ASPECT_COLOR_BIT, 4,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    submit_cb(d, o.cb);
+    frame_begin(d, &o, &clr, 1);
+    vkCmdBindDescriptorSets(o.cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          o.pl, 0, 1, &o.dset, 0, NULL);
+    VkDeviceSize off = 0;
+    vkCmdBindVertexBuffers(o.cb, 0, 1, &o.vb, &off);
+    vkCmdDraw(o.cb, 6, 1, 0, 0);
+    frame_end(d, &o, out);
+    vkDestroyPipeline(d->dev, o.pipe, NULL);
+    vkDestroyShaderModule(d->dev, g.vs, NULL);
+    vkDestroyShaderModule(d->dev, g.fs, NULL);
+}
+
 /* scene 6: one vertex behind the camera (w<0), gradient colour */
 static void scene_clip(vkdev *d, const spv_t *spv, uint8_t *out)
 {
@@ -1034,12 +1181,24 @@ static void scene_f8(vkdev *d, const spv_t *spv, uint8_t *out,
     /* the device keeps only 8 shader-module slots — release the
        pipeline's refs and the module objects per scene (Venus
        forwards these in-order on the primary ring) */
-    vkDestroyPipeline(d->dev, o.pipe, NULL);
-    vkDestroyPipeline(d->dev, pipe2, NULL);
-    vkDestroyShaderModule(d->dev, g.vs, NULL);
-    vkDestroyShaderModule(d->dev, g.fs, NULL);
-    vkDestroyShaderModule(d->dev, g2.vs, NULL);
-    vkDestroyShaderModule(d->dev, g2.fs, NULL);
+    /* VKCMP_S8_KEEP_PIPELINES: leak both pipelines — probes whether
+       scene-9 contamination is the pipeline destroy->client-id-reuse
+       ->stale-directory-resolution path (bound-pipeline persistence)
+       rather than module/draw state. */
+    if (!getenv("VKCMP_S8_KEEP_PIPELINES")) {
+        vkDestroyPipeline(d->dev, o.pipe, NULL);
+        vkDestroyPipeline(d->dev, pipe2, NULL);
+    }
+    /* VKCMP_S8_KEEP_MODULES: leak the four shader modules — probes
+       whether scene-9 contamination comes from the module
+       destroy->reuse->stale-resolution path (zombie ObjTab/shcore
+       slot) rather than draw-execution state. */
+    if (!getenv("VKCMP_S8_KEEP_MODULES")) {
+        vkDestroyShaderModule(d->dev, g.vs, NULL);
+        vkDestroyShaderModule(d->dev, g.fs, NULL);
+        vkDestroyShaderModule(d->dev, g2.vs, NULL);
+        vkDestroyShaderModule(d->dev, g2.fs, NULL);
+    }
     vkDestroyDescriptorPool(d->dev, o.pool, NULL);
     vkDestroyDescriptorSetLayout(d->dev, o.dsl, NULL);
 }
@@ -1161,7 +1320,6 @@ static void scene_vstex(vkdev *d, const spv_t *spv, uint8_t *out)
                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
                 VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
-    vkEndCommandBuffer(o.cb);
     submit_cb(d, o.cb);
     VkClearValue clr = {{{0.0f, 0.0f, 0.0f, 1.0f}}};
     frame_begin(d, &o, &clr, 1);
@@ -1573,7 +1731,7 @@ int main(int argc, char **argv)
     }
 
     /* name, tolerance (LSB), budget (fraction of NPX) */
-    struct { const char *name; int tol; float budget; } sc[11] = {
+    struct { const char *name; int tol; float budget; } sc[12] = {
         {"tri_gradient",       2, 0.005f},
         {"depth_less",         2, 0.005f},
         {"blend_layers",       2, 0.010f},
@@ -1585,12 +1743,13 @@ int main(int argc, char **argv)
         {"f8_latez_atomic",    2, 0.030f},
         {"f10_shadow_fog",     4, 0.050f},
         {"vs_texlod",          4, 0.050f},
+        {"sepsmp_tex",         4, 0.050f},
     };
     static uint8_t va[NPX * 4], la[NPX * 4];
     /* VKCMP_ONLY: single index or comma list ("8,9") */
     const char *only = getenv("VKCMP_ONLY");
     int npass = 0, nrun = 0;
-    for (int k = 0; k < 11; k++) {
+    for (int k = 0; k < 12; k++) {
         if (only) {
             const char *p = only;
             int hit = 0;
@@ -1620,7 +1779,13 @@ int main(int argc, char **argv)
         case 8: scene_f8(&venus, spv, va, &cv); break;
         case 9: scene_shadowfog(&venus, spv, va); break;
         case 10: scene_vstex(&venus, spv, va); break;
+        case 11: scene_sepsmp(&venus, spv, va); break;
         }
+        /* VKCMP_IDLE: drain the device after each venus scene — probes
+           whether a prior scene's deferred object retire (zombie module
+           ZDONE -> shcore INVAL) must complete before the next scene's
+           module FILL, i.e. a lifecycle-ordering contamination. */
+        if (getenv("VKCMP_IDLE")) vkDeviceWaitIdle(venus.dev);
         double t1 = wall();
         printf("SCENE %d llvmpipe...\n", k);
         fflush(stdout);
@@ -1638,6 +1803,7 @@ int main(int argc, char **argv)
         case 8: scene_f8(&lava, spv, la, &cl); break;
         case 9: scene_shadowfog(&lava, spv, la); break;
         case 10: scene_vstex(&lava, spv, la); break;
+        case 11: scene_sepsmp(&lava, spv, la); break;
         }
         double t2 = wall();
         if (getenv("VKCMP_DUMP")) {

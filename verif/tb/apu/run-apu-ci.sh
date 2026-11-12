@@ -88,6 +88,11 @@ run() { # name command...  (appends one row to results.tsv)
 echo "APU-CI coverage=$LEVEL out=$OUT"
 run gen-dmprog python3 -B "$ROOT/corev_apu/apu/tools/shader/gen_dmprog.py" --check
 run gen-sfu python3 -B "$ROOT/corev_apu/apu/tools/shader/gen_sfu_tables.py" --check
+# RTL opcode case labels match sh_opcodes.py; the consumers' sets agree.
+run gen-sh-opcodes python3 -B "$ROOT/corev_apu/apu/tools/shader/gen_sh_opcodes.py" --check
+# `shader_audit.py vectors` is not run here: it needs the lavapipe oracle.
+run gen-fmt-table python3 -B "$ROOT/corev_apu/apu/tools/gen_fmt_table.py" --check
+run shader-lists python3 -B "$ROOT/corev_apu/apu/tools/shader/shader_audit.py" lists
 run tb-apu-unittests python3 -B -m unittest discover -s "$TB" -p 'test_*.py'
 run venus-model-unittests python3 -B -m unittest discover -s "$ROOT/corev_apu/apu/tools" -p 'test_*.py'
 

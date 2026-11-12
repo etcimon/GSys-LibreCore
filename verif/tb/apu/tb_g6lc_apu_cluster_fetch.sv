@@ -189,7 +189,8 @@ module tb_g6lc_apu_cluster_fetch;
     .ai_isl_retired_ticket_i('0),
     .ai_isl_attached_i(1'b0),
     .ai_isl_last_ticket_i('0),
-    .ai_isl_last_status_i('0)
+    .ai_isl_last_status_i('0),
+    .storamic_pause_i(1'b0), .storamic_drained_o()
   );
 
   assign rvfi1 = i_cluster.gen_core[1].i_ariane.rvfi_probes_o;

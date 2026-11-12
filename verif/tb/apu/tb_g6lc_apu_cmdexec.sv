@@ -78,6 +78,9 @@ module tb_g6lc_apu_cmdexec;
   // §12.3 3d-d: relocation hold — cmdexec must stop dequeuing new
   // submissions while high and report true drain on idle_o
   logic               hold = 1'b0;
+  // §3a query-stat counter bus into the DUT — driven per-case so a
+  // Begin/End window can be given a known counter trajectory
+  logic [4*32-1:0]    qstat_drv = '0;
   logic               ce_idle;
   // §7b exception contract: the done model returns a per-item code —
   // work index fault_at completes with APU_SH_DONE_FAULT; pc/wave/
@@ -114,24 +117,22 @@ module tb_g6lc_apu_cmdexec;
     .fence_clr_i(fclr), .fence_fail_i(ffail), .xf_o(), .rd_o(),
     .devlost_valid_o(dl_v), .devlost_ctx_o(dl_ctx),
     .dead_o(dl_dead),
-    .mp_req_valid_o(emp_v), .mp_req_ready_i(1'b1),
+    .mp_req_valid_o(emp_v), .mp_req_ready_i(emr),
     .mp_req_o(emp_req),
     .mp_rsp_valid_i(emp_rv), .mp_rsp_i(emp_rsp),
-    .hold_i(hold), .idle_o(ce_idle), .busy_o());
-  // §5a G3b-iii: the indirect-operand aperture port gets a null
-  // responder — no case here fetches indirect words (the vgsys
-  // vectors cover it); a request would still complete benignly
-  logic        emp_v, emp_rv = 1'b0;
+    .hold_i(hold), .idle_o(ce_idle), .busy_o(),
+    .qry_stat_i(qstat_drv));
+  // §5a G3b-iii + §COPY: the EXEC aperture port now backs a real word
+  // store — indirect-operand reads return apm data and
+  // COPY_QUERY_POOL_RESULTS writes are observable at i_emem.apm
+  logic        emp_v, emp_rv = 1'b0, emr;
   apu_mp_req_t emp_req;
   apu_mp_rsp_t emp_rsp;
-  always_ff @(posedge clk or negedge rst_ni) begin
-    if (!rst_ni) begin
-      emp_rv <= 1'b0; emp_rsp <= '0;
-    end else begin
-      emp_rv <= emp_v;
-      if (emp_v) emp_rsp <= '{rdata: '0, default: '0};
-    end
-  end
+  tb_apu_mp_mem #(.N(1), .GMW(1), .APW(32'h40000),
+                  .PWB(1), .PPW(1)) i_emem (
+    .clk_i(clk), .rst_ni(rst_ni),
+    .req_valid_i(emp_v), .req_ready_o(emr), .req_i('{emp_req}),
+    .rsp_valid_o(emp_rv), .rsp_o('{emp_rsp}));
   g6lc_apu_cmdexec_fixture #(.Enable(1'b0), .Fences(Fences)) i_off (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .submit_valid_i(sub_v), .submit_ready_o(osub_r), .submit_i(sub),
@@ -155,7 +156,7 @@ module tb_g6lc_apu_cmdexec;
     .mp_req_valid_o(), .mp_req_ready_i(1'b0),
     .mp_req_o(),
     .mp_rsp_valid_i(1'b0), .mp_rsp_i(apu_mp_rsp_t'('0)),
-    .hold_i(hold), .idle_o(), .busy_o());
+    .hold_i(hold), .idle_o(), .busy_o(), .qry_stat_i('0));
 
   // ---- backend mux: TB setup vs executor ------------------------------
   // The real cmdrec/objtab buses fan out to both masters; tb_drv selects
@@ -274,20 +275,43 @@ module tb_g6lc_apu_cmdexec;
   logic [31:0] pay_bump = 32'd4096;   // first word above the fixtures
   logic [3:0]  m_rn_rem = 0;
   logic [31:0] m_rn_addr = '0;
+  // executor-side READN continuation: COPY_QUERY_POOL_RESULTS issues a
+  // burst slot fetch; the model streams one completion per word in
+  // address order like the rop model does for cmdrec
+  logic [4:0]  m_xn_rem = 0;
+  logic [31:0] m_xn_addr = '0;
   logic        xop_cv = 1'b0;
   always_ff @(posedge clk or negedge rst_ni) begin
     if (!rst_ni) begin
       xop_cv <= 1'b0; xop_cpl <= '0;
       rop_cv <= 1'b0; rop_cpl <= '0; rop_r <= 1'b1;
       m_rn_rem <= '0; m_rn_addr <= '0;
+      m_xn_rem <= '0; m_xn_addr <= '0;
     end else begin
       xop_cv <= 1'b0;
-      if (xop_v) begin
+      if (m_xn_rem != 0) begin
+        // READN continuation beat — one completion per remaining word
+        xop_cv    <= 1'b1;
+        xop_cpl   <= '{status: APU_OBJPAY_OK,
+                      rdata: paymem[m_xn_addr[14:0]], default: '0};
+        m_xn_addr <= m_xn_addr + 32'd1;
+        m_xn_rem  <= m_xn_rem - 5'd1;
+      end else if (xop_v) begin
+        // §3a query results: the executor's ObjPay WRITE lands in the
+        // same paymem image so cases can observe result-slot contents
+        if (xop_req.op == APU_OBJPAY_OP_WRITE)
+          paymem[xop_req.addr[14:0]] <= xop_req.wdata;
         xop_cv  <= 1'b1;
         xop_cpl <= '{status: APU_OBJPAY_OK,
-                     rdata: xop_req.op == APU_OBJPAY_OP_READ
+                     rdata: (xop_req.op == APU_OBJPAY_OP_READ ||
+                             xop_req.op == APU_OBJPAY_OP_READN)
                             ? paymem[xop_req.addr[14:0]] : 32'h0,
                      default: '0};
+        if (xop_req.op == APU_OBJPAY_OP_READN &&
+            xop_req.words > 32'd1) begin
+          m_xn_rem  <= xop_req.words[4:0] - 5'd1;
+          m_xn_addr <= xop_req.addr + 32'd1;
+        end
       end
       // cmdrec ObjPay client — one outstanding op, READN streams one
       // completion per word (ready rises on the last beat)
@@ -518,6 +542,12 @@ module tb_g6lc_apu_cmdexec;
   logic [31:0] cb_h, pipe_h, dset_h, buf0_h, buf1_h;
   logic [31:0] lay_h, gpipe_h, rp_h, fb_h, view_h, img_h;
   logic [31:0] img2_h, view2_h, rp2_h, fb2_h, gpipe1_h;
+  logic [31:0] qry_h, qry2_h, qry3_h;
+  logic [31:0] cp_mem_h, cp_buf_h;
+  localparam int QRY_EXT = 28672;   // result-extent word base in paymem
+  // COPY dst aperture: dedicated memory at byte base 0x8000 -> apm
+  // word 0x2000, kept clear of the shared buf0/buf1 region (0x4000)
+  localparam int CP_AP_MEM = 32'h8000;
   logic [15:0] seq0;
   // §5a G3b-iii: cmdrec buffer identifiers are PayMem descriptor
   // block addresses (allocated by vnfront in the real system — the
@@ -1183,6 +1213,571 @@ module tb_g6lc_apu_cmdexec;
       submit(5'd15, 1, cbd[17], cb_h, 32'h0, 32'h0);
       wait_fence(15, 8000);
       check("mspf fence lost", flost[15] === 1'b1);
+      cases++;
+    end
+
+    // ---- §3a case: query pool WRITE_TIMESTAMP ---------------------------
+    // Runs before case 13 (watchdog device-death): a dead device rejects
+    // new ObjTab ALLOCs, so the pools must be created while the device is
+    // still live.  timestamp pool (type 2): WRITE_TIMESTAMP stores
+    // avail=1 + honest-0 counter at slot {QRY_EXT + q*16}.  The xop model
+    // lands executor ObjPay WRITEs in paymem so the slot is observable.
+    begin
+      apu_cmdrec_rec_t wq;
+      tb_drv = 1'b1;
+      // result extent = QRY_EXT word base; aux[63:48]=QRY_EXT>>6 chunk,
+      // aux[31:8]=stats mask, aux[7:0]=type (0 occ, 1 stats, 2 ts)
+      ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0050,
+            APU_VN_KIND_VK_QUERY_POOL, .size(64'd4));
+      qry_h = ot_cpl.handle;
+      ot_op(APU_OBJTAB_OP_SETAUX, 64'h1000_0000_0000_0050,
+            APU_VN_KIND_VK_QUERY_POOL, .mask(32'hFFFF_FFFF), .value(32'h2));
+      ot_op(APU_OBJTAB_OP_SETAUXHI, 64'h1000_0000_0000_0050,
+            APU_VN_KIND_VK_QUERY_POOL,
+            .mask(32'hFFFF_FFFF),
+            .value(32'(QRY_EXT >> 6) << 16));
+      // occlusion pool (type 0, one counter) for BEGIN/END
+      ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0051,
+            APU_VN_KIND_VK_QUERY_POOL, .size(64'd4));
+      qry2_h = ot_cpl.handle;
+      ot_op(APU_OBJTAB_OP_SETAUX, 64'h1000_0000_0000_0051,
+            APU_VN_KIND_VK_QUERY_POOL, .mask(32'hFFFF_FFFF), .value(32'h0));
+      ot_op(APU_OBJTAB_OP_SETAUXHI, 64'h1000_0000_0000_0051,
+            APU_VN_KIND_VK_QUERY_POOL,
+            .mask(32'hFFFF_FFFF),
+            .value(32'(QRY_EXT >> 6) << 16));
+      // statistics pool (type 1) — aux[31:8]=stat mask {0,1}={ia_vtx,
+      // ia_prim} for a two-counter spec-ordered BEGIN/END delta
+      ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0052,
+            APU_VN_KIND_VK_QUERY_POOL, .size(64'd4));
+      qry3_h = ot_cpl.handle;
+      ot_op(APU_OBJTAB_OP_SETAUX, 64'h1000_0000_0000_0052,
+            APU_VN_KIND_VK_QUERY_POOL, .mask(32'hFFFF_FFFF),
+            .value(32'h0000_0301));   // type=1, stats mask bits{0,1}
+      ot_op(APU_OBJTAB_OP_SETAUXHI, 64'h1000_0000_0000_0052,
+            APU_VN_KIND_VK_QUERY_POOL,
+            .mask(32'hFFFF_FFFF),
+            .value(32'(QRY_EXT >> 6) << 16));
+      check("alloc query pools", qry_h !== '0 && qry2_h !== '0 &&
+                                   qry3_h !== '0);
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[18], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_WRITE_TIMESTAMP_EXT, qry_h,
+                 APU_VN_KIND_VK_QUERY_POOL, 32'h0);
+      wq.imm[1] = 32'd2;               // query index
+      cr_op(APU_CMDREC_OP_APPEND, cbd[18], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[18], 0, '0);
+      tb_drv = 1'b0;
+      // clear fence 0 so wait_fence observes this submission's signal
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[18], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      // query 2 slot: word0 avail=1, word1 counter=0
+      check("ts avail",   paymem[QRY_EXT + 2*16 + 0] == 32'h1);
+      check("ts counter", paymem[QRY_EXT + 2*16 + 1] == 32'h0);
+      check("ts no lost", flost[0] === 1'b0);
+      cases++;
+
+      // ---- RESET_QUERY_POOL: clears availability over [first,+count) --
+      // ts pool q2 was just stamped avail=1; RESET(first=2,count=1)
+      // rewrites word0=0 for exactly that slot.
+      tb_drv = 1'b1;
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[19], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_RESET_QUERY_POOL_EXT, qry_h,
+                 APU_VN_KIND_VK_QUERY_POOL, 32'd2);   // firstQuery=2
+      wq.imm[1] = 32'd1;                              // queryCount=1
+      cr_op(APU_CMDREC_OP_APPEND, cbd[19], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[19], 0, '0);
+      tb_drv = 1'b0;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[19], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      check("rst avail clr", paymem[QRY_EXT + 2*16 + 0] == 32'h0);
+      check("rst no lost",   flost[0] === 1'b0);
+      cases++;
+
+      // ---- WRITE_TIMESTAMP_2: query at imm[0], stageFlags at imm[1] ----
+      // TS2 shares the timestamp write path (qry_op_q=1) but packs the
+      // query index at imm[0] and a stageFlags scalar at imm[1]; imm[2:7]
+      // must stay zero (qspare_bad).  Verifies slot targeting on an
+      // untouched query (index 1): avail=1 + honest-0 counter.
+      tb_drv = 1'b1;
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[19], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_WRITE_TIMESTAMP_2_EXT, qry_h,
+                 APU_VN_KIND_VK_QUERY_POOL, 32'h0);
+      wq.imm[0] = 32'd1;                   // query index (TS2: imm[0])
+      wq.imm[1] = 32'h5;                   // stageFlags (used operand)
+      cr_op(APU_CMDREC_OP_APPEND, cbd[19], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[19], 0, '0);
+      tb_drv = 1'b0;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[19], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      check("ts2 avail",   paymem[QRY_EXT + 1*16 + 0] == 32'h1);
+      check("ts2 counter", paymem[QRY_EXT + 1*16 + 1] == 32'h0);
+      check("ts2 no lost", flost[0] === 1'b0);
+      cases++;
+
+      // ---- BEGIN/END_QUERY on the timestamp pool (type 2) --------------
+      // Degenerate path: aux[7:0]==2 reduces both ops to a QueryStamp —
+      // avail=1 + honest-0 counter at imm[0], flags/imm[1] must be 0, and
+      // no open-table entry is taken (matches the model's unconditional
+      // stamp).  BEGIN stamps query 0; END stamps query 3 without a prior
+      // BEGIN (timestamp END needs no open state).
+      tb_drv = 1'b1;
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[19], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_BEGIN_QUERY_EXT, qry_h,
+                 APU_VN_KIND_VK_QUERY_POOL, 32'd0);   // query index 0
+      wq.imm[1] = 32'd0;                               // flags = 0
+      cr_op(APU_CMDREC_OP_APPEND, cbd[19], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[19], 0, '0);
+      tb_drv = 1'b0;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[19], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      check("tsbeg avail",   paymem[QRY_EXT + 0*16 + 0] == 32'h1);
+      check("tsbeg counter", paymem[QRY_EXT + 0*16 + 1] == 32'h0);
+      check("tsbeg no lost", flost[0] === 1'b0);
+      cases++;
+      tb_drv = 1'b1;
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[19], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_END_QUERY_EXT, qry_h,
+                 APU_VN_KIND_VK_QUERY_POOL, 32'd3);   // query index 3
+      wq.imm[1] = 32'd0;                               // imm[1] must be 0
+      cr_op(APU_CMDREC_OP_APPEND, cbd[19], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[19], 0, '0);
+      tb_drv = 1'b0;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[19], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      check("tsend avail",   paymem[QRY_EXT + 3*16 + 0] == 32'h1);
+      check("tsend counter", paymem[QRY_EXT + 3*16 + 1] == 32'h0);
+      check("tsend no lost", flost[0] === 1'b0);
+      cases++;
+      // BEGIN on a timestamp pool with flags!=0 must be rejected — the
+      // aux[7:0]==2 branch requires qry_n_q(=imm[1])==0.
+      tb_drv = 1'b1;
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[19], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_BEGIN_QUERY_EXT, qry_h,
+                 APU_VN_KIND_VK_QUERY_POOL, 32'd1);   // query index 1
+      wq.imm[1] = 32'd1;                               // flags = 1 -> lost
+      cr_op(APU_CMDREC_OP_APPEND, cbd[19], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[19], 0, '0);
+      tb_drv = 1'b0;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[19], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      check("tsbeg bad flags lost", flost[0] === 1'b1);
+      cases++;
+
+      // ---- BEGIN/END_QUERY on the occlusion pool (type 0) ---------------
+      // Open-table + drain-then-delta: BEGIN snapshots qry_stat_i, END
+      // differences the drained counters and writes avail + occ delta.
+      // Drive qstat_drv occ field [95:64] 100 -> 200 across the two
+      // submissions so the delta is a deterministic 100.
+      //   qstat layout: {fs_inv[127:96], occ[95:64], ia_prim[63:32],
+      //                  ia_vtx[31:0]}
+      qstat_drv = {32'h0, 32'h64, 32'h0, 32'h0};   // occ = 100
+      tb_drv = 1'b1;
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[18], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_BEGIN_QUERY_EXT, qry2_h,
+                 APU_VN_KIND_VK_QUERY_POOL, 32'd3);  // query index 3
+      wq.imm[1] = 32'd0;                             // flags = 0
+      cr_op(APU_CMDREC_OP_APPEND, cbd[18], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[18], 0, '0);
+      tb_drv = 1'b0;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[18], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      check("beg no lost", flost[0] === 1'b0);
+      // advance the occlusion counter, then close the query
+      qstat_drv = {32'h0, 32'hC8, 32'h0, 32'h0};   // occ = 200
+      tb_drv = 1'b1;
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[19], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_END_QUERY_EXT, qry2_h,
+                 APU_VN_KIND_VK_QUERY_POOL, 32'd3);
+      // imm[1] already 0 (required for END)
+      cr_op(APU_CMDREC_OP_APPEND, cbd[19], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[19], 0, '0);
+      tb_drv = 1'b0;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[19], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      // occ-pool q3 slot: word0 avail=1, word1 = occ delta = 200-100
+      check("end avail",  paymem[QRY_EXT + 3*16 + 0] == 32'h1);
+      check("end occ dlt",paymem[QRY_EXT + 3*16 + 1] == 32'd100);
+      check("end no lost",flost[0] === 1'b0);
+      cases++;
+
+      // ---- BEGIN/END_QUERY on the statistics pool (type 1) --------------
+      // stats mask {0,1}={ia_vtx,ia_prim}: END packs two spec-ordered
+      // deltas {vtx,prim} after avail.  Drive both counters 1000/500 ->
+      // 1200/600 for deltas {200,100}.
+      qstat_drv = {32'h0, 32'h0, 32'd500, 32'd1000};  // prim=500 vtx=1000
+      tb_drv = 1'b1;
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[18], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_BEGIN_QUERY_EXT, qry3_h,
+                 APU_VN_KIND_VK_QUERY_POOL, 32'd1);   // stats q index 1
+      wq.imm[1] = 32'd0;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[18], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[18], 0, '0);
+      tb_drv = 1'b0;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[18], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      check("sbeg no lost", flost[0] === 1'b0);
+      qstat_drv = {32'h0, 32'h0, 32'd600, 32'd1200}; // prim=600 vtx=1200
+      tb_drv = 1'b1;
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[19], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_END_QUERY_EXT, qry3_h,
+                 APU_VN_KIND_VK_QUERY_POOL, 32'd1);
+      cr_op(APU_CMDREC_OP_APPEND, cbd[19], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[19], 0, '0);
+      tb_drv = 1'b0;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[19], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      // stats-pool q1 slot: avail + {vtx_d=200, prim_d=100}
+      check("send avail", paymem[QRY_EXT + 1*16 + 0] == 32'h1);
+      check("send vtx d", paymem[QRY_EXT + 1*16 + 1] == 32'd200);
+      check("send prm d", paymem[QRY_EXT + 1*16 + 2] == 32'd100);
+      check("send no lost",flost[0] === 1'b0);
+      cases++;
+
+      // ---- COPY_QUERY_POOL_RESULTS on the occlusion pool --------------
+      // q3 holds avail=1 + occ delta=100.  COPY(first=3,count=1,
+      // flags=0x9 64_BIT|AVAILABILITY,dstOffset=0,stride=16) into buf0
+      // (mem ...0060 aperture byte 0x8000 -> apm word 0x2000) must
+      // emit [u64 counter=100][u64 avail=1] = 4 words.  SETBIND
+      // carries the buffer's declared size like production vnfront
+      // (entry.size feeds the extent check).
+      tb_drv = 1'b1;
+      ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0060,
+            APU_VN_KIND_VK_DEVICE_MEMORY, .size(64'd1024));
+      cp_mem_h = ot_cpl.handle;
+      ot_op(APU_OBJTAB_OP_SETAUXHI, 64'h1000_0000_0000_0060,
+            APU_VN_KIND_VK_DEVICE_MEMORY,
+            .mask(32'hFFFF_FFFF), .value(CP_AP_MEM[31:0]));
+      ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0061,
+            APU_VN_KIND_VK_BUFFER, .size(64'd256));
+      cp_buf_h = ot_cpl.handle;
+      ot_op(APU_OBJTAB_OP_SETBIND, 64'h1000_0000_0000_0061,
+            APU_VN_KIND_VK_BUFFER, .size(64'd256),
+            .mem_id(64'h1000_0000_0000_0060));
+      check("alloc copy dst", cp_mem_h !== '0 && cp_buf_h !== '0);
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[18], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_COPY_QUERY_POOL_RESULTS_EXT,
+                 qry2_h, APU_VN_KIND_VK_QUERY_POOL, 32'd3); // first=3
+      wq.handle[1] = cp_buf_h; wq.kind[1] = APU_VN_KIND_VK_BUFFER;
+      wq.imm[1] = 32'd1;      // queryCount
+      wq.imm[2] = 32'h9;      // flags = 64_BIT | WITH_AVAILABILITY
+      wq.imm[3] = 32'd0;      // dstOffset lo
+      wq.imm[4] = 32'd0;      // dstOffset hi
+      wq.imm[5] = 32'd16;     // stride
+      wq.imm[6] = 32'd0;      // stride hi
+      wq.imm[7] = 32'd0;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[18], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[18], 0, '0);
+      tb_drv = 1'b0;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[18], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      check("cpy no lost", flost[0] === 1'b0);
+      // aperture 0x8000 -> apm word 0x2000: {ctr=100,0, avail=1,0}
+      check("cpy ctr lo",  i_emem.apm[32'h2000] == 32'd100);
+      check("cpy ctr hi",  i_emem.apm[32'h2001] == 32'h0);
+      check("cpy av lo",   i_emem.apm[32'h2002] == 32'd1);
+      check("cpy av hi",   i_emem.apm[32'h2003] == 32'h0);
+      cases++;
+      qstat_drv = '0;
+
+      // ---- COPY 32-bit records (flags=0x8 avail only) ----------------
+      // occlusion q3 {avail=1,occ=100}: [ctr u32][avail u32] = 8B
+      // record, stride=8 -> apm {ctr=100, avail=1}
+      tb_drv = 1'b1;
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[18], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_COPY_QUERY_POOL_RESULTS_EXT,
+                 qry2_h, APU_VN_KIND_VK_QUERY_POOL, 32'd3);
+      wq.handle[1] = cp_buf_h; wq.kind[1] = APU_VN_KIND_VK_BUFFER;
+      wq.imm[1] = 32'd1; wq.imm[2] = 32'h8;    // count=1, AVAIL(32b)
+      wq.imm[3] = 32'd0; wq.imm[4] = 32'd0;    // dstOffset=0
+      wq.imm[5] = 32'd8;  wq.imm[6] = 32'd0;    // stride=8
+      wq.imm[7] = 32'd0;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[18], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[18], 0, '0);
+      tb_drv = 1'b0;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[18], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      check("cpy32 no lost", flost[0] === 1'b0);
+      check("cpy32 ctr", i_emem.apm[32'h2000] == 32'd100);
+      check("cpy32 av",  i_emem.apm[32'h2001] == 32'd1);
+      cases++;
+
+      // ---- COPY stride padding (flags=0x9 stride=32 > record 16) -----
+      // pre-fill the pad words nonzero so the zero-pad writes are
+      // observable; data {100,0,1,0} then four zero pad words
+      i_emem.apm[32'h2004] = 32'hDEAD_BEEF;
+      i_emem.apm[32'h2005] = 32'hDEAD_BEEF;
+      i_emem.apm[32'h2006] = 32'hDEAD_BEEF;
+      i_emem.apm[32'h2007] = 32'hDEAD_BEEF;
+      tb_drv = 1'b1;
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[18], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_COPY_QUERY_POOL_RESULTS_EXT,
+                 qry2_h, APU_VN_KIND_VK_QUERY_POOL, 32'd3);
+      wq.handle[1] = cp_buf_h; wq.kind[1] = APU_VN_KIND_VK_BUFFER;
+      wq.imm[1] = 32'd1; wq.imm[2] = 32'h9;    // count=1, 64b+AVAIL
+      wq.imm[3] = 32'd0; wq.imm[4] = 32'd0;    // dstOffset=0
+      wq.imm[5] = 32'd32; wq.imm[6] = 32'd0;    // stride=32
+      wq.imm[7] = 32'd0;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[18], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[18], 0, '0);
+      tb_drv = 1'b0;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[18], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      check("cpypad no lost", flost[0] === 1'b0);
+      check("cpypad ctr", i_emem.apm[32'h2000] == 32'd100);
+      check("cpypad av",  i_emem.apm[32'h2002] == 32'd1);
+      check("cpypad p0",  i_emem.apm[32'h2004] == 32'd0);
+      check("cpypad p3",  i_emem.apm[32'h2007] == 32'd0);
+      cases++;
+
+      // ---- COPY loss: query range out of bounds (first=3,count=2) ----
+      // pool size=4 -> 3+2=5 > 4 -> lost before any dst resolve
+      tb_drv = 1'b1;
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[18], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_COPY_QUERY_POOL_RESULTS_EXT,
+                 qry2_h, APU_VN_KIND_VK_QUERY_POOL, 32'd3); // first=3
+      wq.handle[1] = cp_buf_h; wq.kind[1] = APU_VN_KIND_VK_BUFFER;
+      wq.imm[1] = 32'd2; wq.imm[2] = 32'h9;    // count=2, 64b+AVAIL
+      wq.imm[3] = 32'd0; wq.imm[4] = 32'd0;
+      wq.imm[5] = 32'd16; wq.imm[6] = 32'd0;    // stride=16
+      wq.imm[7] = 32'd0;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[18], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[18], 0, '0);
+      tb_drv = 1'b0;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[18], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      check("cpy range lost", flost[0] === 1'b1);
+      cases++;
+
+      // ---- COPY loss: stride < record (stride=4 < 16B record) --------
+      tb_drv = 1'b1;
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[18], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_COPY_QUERY_POOL_RESULTS_EXT,
+                 qry2_h, APU_VN_KIND_VK_QUERY_POOL, 32'd3);
+      wq.handle[1] = cp_buf_h; wq.kind[1] = APU_VN_KIND_VK_BUFFER;
+      wq.imm[1] = 32'd1; wq.imm[2] = 32'h9;    // count=1, 64b+AVAIL
+      wq.imm[3] = 32'd0; wq.imm[4] = 32'd0;
+      wq.imm[5] = 32'd4;  wq.imm[6] = 32'd0;    // stride=4 < record
+      wq.imm[7] = 32'd0;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[18], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[18], 0, '0);
+      tb_drv = 1'b0;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[18], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      check("cpy stride lost", flost[0] === 1'b1);
+      cases++;
+
+      // ---- COPY statistics pool: two counters (nc=2) ------------------
+      // qry3_h stats mask {0,1}={ia_vtx,ia_prim}; q1 slot holds
+      // {avail=1, vtx_d=200, prim_d=100}.  COPY emits spec-order
+      // [vtx][prim][avail].  64-bit: each value u64 -> 24B record.
+      tb_drv = 1'b1;
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[18], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_COPY_QUERY_POOL_RESULTS_EXT,
+                 qry3_h, APU_VN_KIND_VK_QUERY_POOL, 32'd1); // stats q1
+      wq.handle[1] = cp_buf_h; wq.kind[1] = APU_VN_KIND_VK_BUFFER;
+      wq.imm[1] = 32'd1; wq.imm[2] = 32'h9;    // count=1, 64b+AVAIL
+      wq.imm[3] = 32'd0; wq.imm[4] = 32'd0;    // dstOffset=0
+      wq.imm[5] = 32'd24; wq.imm[6] = 32'd0;    // stride=24
+      wq.imm[7] = 32'd0;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[18], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[18], 0, '0);
+      tb_drv = 1'b0;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[18], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      check("cpyst no lost", flost[0] === 1'b0);
+      check("cpyst vtx lo", i_emem.apm[32'h2000] == 32'd200);
+      check("cpyst vtx hi", i_emem.apm[32'h2001] == 32'h0);
+      check("cpyst prm lo", i_emem.apm[32'h2002] == 32'd100);
+      check("cpyst prm hi", i_emem.apm[32'h2003] == 32'h0);
+      check("cpyst av lo",  i_emem.apm[32'h2004] == 32'd1);
+      check("cpyst av hi",  i_emem.apm[32'h2005] == 32'h0);
+      cases++;
+
+      // ---- COPY statistics pool, 32-bit packed (flags=0x8) ------------
+      // record = [vtx u32][prim u32][avail u32] = 12B, stride=12,
+      // dstOffset=64 -> apm word 0x2010
+      tb_drv = 1'b1;
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[18], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_COPY_QUERY_POOL_RESULTS_EXT,
+                 qry3_h, APU_VN_KIND_VK_QUERY_POOL, 32'd1);
+      wq.handle[1] = cp_buf_h; wq.kind[1] = APU_VN_KIND_VK_BUFFER;
+      wq.imm[1] = 32'd1; wq.imm[2] = 32'h8;    // count=1, AVAIL(32b)
+      wq.imm[3] = 32'd64; wq.imm[4] = 32'd0;    // dstOffset=64
+      wq.imm[5] = 32'd12; wq.imm[6] = 32'd0;    // stride=12
+      wq.imm[7] = 32'd0;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[18], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[18], 0, '0);
+      tb_drv = 1'b0;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[18], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      check("cpyst32 no lost", flost[0] === 1'b0);
+      check("cpyst32 vtx", i_emem.apm[32'h2010] == 32'd200);
+      check("cpyst32 prm", i_emem.apm[32'h2011] == 32'd100);
+      check("cpyst32 av",  i_emem.apm[32'h2012] == 32'd1);
+      cases++;
+
+      // ---- COPY count=2: exercises the query-iteration loop ------------
+      // first=2,count=2 on the occ pool -> q2 (never written, zero slot)
+      // then q3 {avail=1,occ=100}.  64-bit stride=16 packs two 16B
+      // records: q2 {0,0,0,0} at 0x2000, q3 {100,0,1,0} at 0x2004.
+      tb_drv = 1'b1;
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[18], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_COPY_QUERY_POOL_RESULTS_EXT,
+                 qry2_h, APU_VN_KIND_VK_QUERY_POOL, 32'd2); // first=2
+      wq.handle[1] = cp_buf_h; wq.kind[1] = APU_VN_KIND_VK_BUFFER;
+      wq.imm[1] = 32'd2; wq.imm[2] = 32'h9;    // count=2, 64b+AVAIL
+      wq.imm[3] = 32'd0; wq.imm[4] = 32'd0;    // dstOffset=0
+      wq.imm[5] = 32'd16; wq.imm[6] = 32'd0;    // stride=16
+      wq.imm[7] = 32'd0;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[18], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[18], 0, '0);
+      tb_drv = 1'b0;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[18], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      check("cpy2 no lost", flost[0] === 1'b0);
+      check("cpy2 q2 ctr", i_emem.apm[32'h2000] == 32'h0);
+      check("cpy2 q2 av",  i_emem.apm[32'h2002] == 32'h0);
+      check("cpy2 q3 ctr", i_emem.apm[32'h2004] == 32'd100);
+      check("cpy2 q3 av",  i_emem.apm[32'h2006] == 32'd1);
+      cases++;
+
+      // ---- query-op validation loss arms (each -> flost[0], recover) --
+      // BEGIN_QUERY out-of-range: index 4 >= pool size 4
+      tb_drv = 1'b1;
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[18], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_BEGIN_QUERY_EXT, qry2_h,
+                 APU_VN_KIND_VK_QUERY_POOL, 32'd4);
+      wq.imm[1] = 32'd0;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[18], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[18], 0, '0);
+      tb_drv = 1'b0;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[18], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      check("qbeg range lost", flost[0] === 1'b1);
+      cases++;
+
+      // END_QUERY out-of-range: index 4 >= size 4
+      tb_drv = 1'b1;
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[18], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_END_QUERY_EXT, qry2_h,
+                 APU_VN_KIND_VK_QUERY_POOL, 32'd4);
+      cr_op(APU_CMDREC_OP_APPEND, cbd[18], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[18], 0, '0);
+      tb_drv = 1'b0;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[18], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      check("qend range lost", flost[0] === 1'b1);
+      cases++;
+
+      // BEGIN_QUERY flags=2 (>PRECISE=1) -> lost
+      tb_drv = 1'b1;
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[18], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_BEGIN_QUERY_EXT, qry2_h,
+                 APU_VN_KIND_VK_QUERY_POOL, 32'd0);
+      wq.imm[1] = 32'd2;               // flags = 2 (invalid)
+      cr_op(APU_CMDREC_OP_APPEND, cbd[18], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[18], 0, '0);
+      tb_drv = 1'b0;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[18], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      check("qbeg flags lost", flost[0] === 1'b1);
+      cases++;
+
+      // END_QUERY imm[1]!=0 -> lost (END requires imm[1]==0)
+      tb_drv = 1'b1;
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[18], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_END_QUERY_EXT, qry2_h,
+                 APU_VN_KIND_VK_QUERY_POOL, 32'd3);
+      wq.imm[1] = 32'd1;               // must be 0 for END
+      cr_op(APU_CMDREC_OP_APPEND, cbd[18], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[18], 0, '0);
+      tb_drv = 1'b0;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[18], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      check("qend imm lost", flost[0] === 1'b1);
+      cases++;
+
+      // END_QUERY on a query never opened (q0; only q3 was begun+ended)
+      tb_drv = 1'b1;
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[18], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_END_QUERY_EXT, qry2_h,
+                 APU_VN_KIND_VK_QUERY_POOL, 32'd0); // q0 never opened
+      cr_op(APU_CMDREC_OP_APPEND, cbd[18], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[18], 0, '0);
+      tb_drv = 1'b0;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[18], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      check("qend unopened lost", flost[0] === 1'b1);
+      cases++;
+
+      // WRITE_TIMESTAMP on an occlusion pool (type 0 != timestamp 2)
+      tb_drv = 1'b1;
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[18], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_WRITE_TIMESTAMP_EXT, qry2_h,
+                 APU_VN_KIND_VK_QUERY_POOL, 32'd0); // occ pool, not ts
+      wq.imm[1] = 32'd0;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[18], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[18], 0, '0);
+      tb_drv = 1'b0;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[18], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      check("qts wrongpool lost", flost[0] === 1'b1);
+      cases++;
+
+      // BEGIN_QUERY (plain) with spare imm[2]!=0 -> spare-check lost
+      tb_drv = 1'b1;
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[18], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_BEGIN_QUERY_EXT, qry2_h,
+                 APU_VN_KIND_VK_QUERY_POOL, 32'd0);
+      wq.imm[1] = 32'd0;
+      wq.imm[2] = 32'd1;               // spare operand -> lost
+      cr_op(APU_CMDREC_OP_APPEND, cbd[18], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[18], 0, '0);
+      tb_drv = 1'b0;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[18], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      check("qbeg spare lost", flost[0] === 1'b1);
+      cases++;
+
+      // BEGIN_QUERY_INDEXED with index(imm[2])!=0 -> spare-check lost
+      tb_drv = 1'b1;
+      cr_op(APU_CMDREC_OP_BEGIN, cbd[18], 0, '0);
+      wq = mkrec(APU_VN_TYPE_VK_CMD_BEGIN_QUERY_INDEXED_EXT_EXT,
+                 qry2_h, APU_VN_KIND_VK_QUERY_POOL, 32'd0);
+      wq.imm[1] = 32'd0;
+      wq.imm[2] = 32'd1;               // index != 0 (multiview) -> lost
+      cr_op(APU_CMDREC_OP_APPEND, cbd[18], 0, wq);
+      cr_op(APU_CMDREC_OP_END, cbd[18], 0, '0);
+      tb_drv = 1'b0;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[18], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      check("qbegidx lost", flost[0] === 1'b1);
       cases++;
     end
 

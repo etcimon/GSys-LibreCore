@@ -83,7 +83,8 @@ module tb_g6lc_apu_cva6_fetch;
     .ai_isl_retired_ticket_i('0),
     .ai_isl_attached_i(1'b0),
     .ai_isl_last_ticket_i('0),
-    .ai_isl_last_status_i('0)
+    .ai_isl_last_status_i('0),
+    .storamic_pause_i(1'b0), .storamic_drained_o()
   );
 
   g6lc_apu_fwram #(
