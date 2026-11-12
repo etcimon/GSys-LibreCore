@@ -1,0 +1,11 @@
+#version 450
+// Whole-struct assignment between two std430 buffers: glslang emits one
+// OpLoad and one OpStore of the 8-word struct type (2 RF rows).
+layout(local_size_x = 8) in;
+struct S { vec4 a; uint b; uint c; uint d; uint e; };
+layout(set = 0, binding = 0, std430) buffer I { S s[32]; } i;
+layout(set = 0, binding = 1, std430) buffer O { S s[32]; } o;
+void main() {
+    uint k = gl_GlobalInvocationID.x;
+    o.s[k] = i.s[k];
+}

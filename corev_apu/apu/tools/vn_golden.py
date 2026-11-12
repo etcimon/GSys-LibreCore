@@ -1418,6 +1418,7 @@ VK_ERR_FRAG = 0xFFFFFFF4   # VK_ERROR_FRAGMENTED_POOL (G3b-iii)
 VK_ERR_LOST = 0xFFFFFFFC
 VK_ERR_FEATURE = 0xFFFFFFF8
 VK_ERR_UNKNOWN = 0xFFFFFFF3
+VK_ERR_VALIDATION_FAILED = 0xC4650B08   # VK_ERROR_VALIDATION_FAILED
 VK_ERR_FEATURE_NOT_PRESENT = 0xFFFFFFF8     # -8
 # graphics-pipeline ObjPay state block (vnfront gp_pay_w w0..w56)
 GP_PAY_WORDS = 57
@@ -2533,11 +2534,19 @@ class FrontModel(ObjectTable, PayloadMemory):
         """§12.3 C/5b: types staging VkDescriptorImageInfo."""
         return t <= 3
 
+    @staticmethod
+    def _tex_typ(t):
+        """§12.3 texel-buffer types staging pTexelBufferView (a
+        VkBufferView u64 handle per element)."""
+        return t in (4, 5)
+
     def _upd_stride(self, t):
         if self._buf_typ(t):
             return 6
         if self._img_typ(t):
             return 5
+        if self._tex_typ(t):
+            return 2
         return 0
 
     def _upd_elem(self, out, stg, sbase, row, idx, dtype, pay):
@@ -2552,6 +2561,7 @@ class FrontModel(ObjectTable, PayloadMemory):
         elok = 0
         source = None
         eb = esz = mh = 0
+        texdid = 0
         iw = [0] * 5
         if self._img_typ(dtype):
             # §12.3 C/5b: staged VkDescriptorImageInfo {sampler u64,
@@ -2655,6 +2665,34 @@ class FrontModel(ObjectTable, PayloadMemory):
                     esz = rng_eff & 0xFFFFFFFF
                     source = ((be['gen'] << 16) | bs, mh, boff, bsz,
                               off, rng_eff, dtype)
+        elif self._tex_typ(dtype):
+            # §12.3 texel-buffer descriptor — staged pTexelBufferView
+            # is a VkBufferView u64 handle (2 words).  The view's
+            # size={off,rng}, aux={buffer handle, fmt}; resolve the
+            # buffer's bound memory for {mh, eb=bind_off+view_off,
+            # esz=view_rng} plus the format id in texdid.
+            vw = pay[stg] | (pay[stg + 1] << 32)
+            vst, vs, ve = self.resolve(vw, KIND['VkBufferView'])
+            if vst == 'OK':
+                view_off = ve['size'] & 0xFFFFFFFF
+                view_rng = (ve['size'] >> 32) & 0xFFFFFFFF
+                texdid = (ve['aux'] >> 32) & 0xFF
+                bufhandle = ve['aux'] & 0xFFFFFFFF
+                bst, bs, be = self.resolve(bufhandle, KIND['VkBuffer'])
+                ext = self._buf_bound_size(be) if bst == 'OK' else None
+                if bst == 'OK' and ext is not None and \
+                        view_off + view_rng <= ext:
+                    ms = be.get('bind_mem', -1)
+                    me = self.ent[ms] if 0 <= ms < self.SLOTS else None
+                    if (me is not None and
+                            me['kind'] == KIND['VkDeviceMemory'] and
+                            me['gen'] == be.get('bind_mgen', 0) and
+                            (me['aux'] >> 32) & 0xFFFFFFFF != UNBACKED):
+                        elok = 1
+                        mh = ((me['gen'] & 0xFFFF) << 16) | ms
+                        eb = (be.get('bind_off', 0) + view_off) \
+                            & 0xFFFFFFFF
+                        esz = view_rng & 0xFFFFFFFF
         if self.descriptor_sources is not None and self._img_typ(dtype) and elok:
             source = capture_source(self, KIND, dtype, vw, smp, pay[stg + 4],
                 self.apr64(rec_addr + 20) if immutable else None)
@@ -2674,11 +2712,15 @@ class FrontModel(ObjectTable, PayloadMemory):
             self.apw32(out, rec_addr + 28, eb if elok else 0)
         else:
             self.apw32(out, rec_addr + 8, (elok << 8) | dtype)
+            if self._tex_typ(dtype):
+                # texel-buffer record carries the device format id in
+                # the word image descriptors leave to sampler/meta
+                self.apw32(out, rec_addr + 12, texdid if elok else 0)
             self.apw32(out, rec_addr + 28, eb if elok else 0)
         if self.descriptor_sources is not None and source is not None:
             self.descriptor_sources[rec_addr] = source
-        return 1 if (self._buf_typ(dtype) or self._img_typ(dtype)) \
-            and not elok else 0
+        return 1 if (self._buf_typ(dtype) or self._img_typ(dtype) or
+                     self._tex_typ(dtype)) and not elok else 0
 
     def _xfer_extent(self, h, kind):
         """§12.3 C/5a: mirror cmdexec's StXf* operand assembly —
@@ -2731,6 +2773,21 @@ class FrontModel(ObjectTable, PayloadMemory):
                 'layers': (ie['aux'] >> 45) & 0x1FF,
                 'itype': (ie['state'] >> 19) & 3,
                 'layb': (ie['state'] & 0x7FFFF) << 6}
+
+    def _buf_bound_size(self, be):
+        """vkCreateBufferView extent: min(buf.size, mem.size - bind_off)
+        with NO UNBACKED gate — a lazy type-1 memory is still bound;
+        backing is a fetch-time concern.  None -> unbound/dead."""
+        ms = be.get('bind_mem', -1)
+        if ms < 0 or ms >= self.SLOTS or self.ent[ms] is None:
+            return None
+        me = self.ent[ms]
+        bo = be.get('bind_off', 0)
+        if (me['kind'] != KIND['VkDeviceMemory'] or
+                me['gen'] != be.get('bind_mgen', 0) or
+                me['size'] > 0xFFFFFFFF or bo > me['size']):
+            return None
+        return min(be['size'], me['size'] - bo)
 
     def _xfer_record_lost(self, session, r, aux):
         """mirror g6lc_apu_xfer's validation: bounds checked before
@@ -2897,6 +2954,83 @@ class FrontModel(ObjectTable, PayloadMemory):
         if doff > de[1] or eff > de[1] - doff:
             return True
         return False
+
+    def _qry_op_apply(self, session, r):
+        """§12.4 query-op mirror of cmdexec's StQry* ObjPay commit.
+        Resolves the queryPool record handle and stamps e['qslots']
+        so a later vkGetQueryPoolResults reads the same availability/
+        counter the engine wrote.  Returns True -> DEVICE_LOST (the
+        op is out of contract for the bounded profile)."""
+        T = session['T']
+        ct = r['ctype']
+        # the queryPool is the VkQueryPool-kind record handle
+        ph = 0
+        for i in range(4):
+            if r['kind'][i] == KIND['VkQueryPool']:
+                ph = r['handle'][i]
+                break
+        if not ph:
+            return True
+        st, _ps, pe = self.resolve(ph, KIND['VkQueryPool'])
+        if st != 'OK' or pe is None or 'qslots' not in pe:
+            return True
+        ptype = pe['aux'] & 0xFF
+        size = pe.get('size') or 0
+        slots = pe['qslots']
+        qopen = pe.setdefault('qopen', set())
+        # committed slot shape mirrors _query_results: statistics pools
+        # carry one u64 per enabled counter, other types one scalar
+        if ptype == 1:
+            smask = (pe['aux'] & 0xFFFFFFFF) >> 8
+            commit = [0] * sum(1 for b in range(11) if (smask >> b) & 1)
+        else:
+            commit = 0
+        if ct == T.get('vkCmdResetQueryPool', -1):
+            # cmdrec packs firstQuery->imm[0], queryCount->imm[1]
+            # (flags ride rec['flags'], not imm)
+            first = r['imm'][0] & 0xFFFFFFFF
+            cnt = r['imm'][1] & 0xFFFFFFFF
+            if first + cnt > size:
+                return True
+            for i in range(first, first + cnt):
+                slots[i] = None
+                qopen.discard(i)
+            return False
+        if ct == T.get('vkCmdWriteTimestamp', -1):
+            qi = r['imm'][1] & 0xFFFFFFFF
+            # WRITE_TIMESTAMP is a timestamp-pool op only; the honest
+            # bounded counter is 0 (avail + one counter word)
+            if ptype != 2 or qi >= size:
+                return True
+            slots[qi] = commit
+            return False
+        if ct in (T.get('vkCmdBeginQuery', -1), T.get('vkCmdEndQuery', -1)):
+            qi = r['imm'][0] & 0xFFFFFFFF
+            fl = r['imm'][1] & 0xFFFFFFFF
+            if qi >= size:
+                return True
+            if ptype == 2:
+                # timestamp pool: begin/end degenerate to a stamp —
+                # avail + honest-0 counter; flags/imm[1] must be 0
+                if fl != 0:
+                    return True
+                slots[qi] = commit
+                return False
+            # occlusion/statistics: open-table then commit.  The
+            # bounded profile tracks no raster contribution, so the
+            # committed count is 0 (avail + counter words of 0).
+            # cmdexec pins Begin flags<=1 and End imm[1]==0.
+            if ct == T.get('vkCmdBeginQuery', -1):
+                if fl > 1 or qi in qopen:
+                    return True
+                qopen.add(qi)
+                return False
+            if fl != 0 or qi not in qopen:
+                return True
+            qopen.discard(qi)
+            slots[qi] = commit
+            return False
+        return False   # indexed/2/copy variants: not model-tracked yet
 
     def _disp_assembly_lost(self, session, s, resume=None):
         """§7b/5a-ii + §12.3 F5: replay one command buffer's records
@@ -3334,6 +3468,15 @@ class FrontModel(ObjectTable, PayloadMemory):
                 # losing — the record's writes are suppressed and the
                 # remaining records/buffers continue
                 self._xfer_record_lost(session, r, s)
+            elif ct in (T.get('vkCmdResetQueryPool', -1),
+                        T.get('vkCmdBeginQuery', -1),
+                        T.get('vkCmdEndQuery', -1),
+                        T.get('vkCmdWriteTimestamp', -1)):
+                # query-slot writes ride the same ObjPay commit cmdexec
+                # performs — mirror them into e['qslots'] so a later
+                # vkGetQueryPoolResults sees populated slots
+                if self._qry_op_apply(session, r):
+                    return True
         self.aux_work[s] = wk
         return False
 
@@ -3781,6 +3924,23 @@ class FrontModel(ObjectTable, PayloadMemory):
             elif ek == 'MRES':
                 # vkGetMemoryResourcePropertiesMESA: memoryTypeBits = 3
                 ew[0] = 3
+            elif ek == 'QRESULTS':
+                # vkGetQueryPoolResults (ctype 49): ew[0] = needed byte
+                # count, ew[1:] = packed u64 result records for the
+                # REXBUF pData reply.
+                pe = ent_of(lu[1]) if len(lu) > 1 else None
+                # hnd[lu[0]] is the resolved device handle
+                # (gen<<16)|slot; its low 16 bits are the device ObjTab
+                # slot that pe['parent'] records.
+                res, qout = self._query_results(
+                    pe, hnd[lu[0]] if lu else 0,
+                    rec['imm'][0] & 0xFFFFFFFF,
+                    rec['imm'][1] & 0xFFFFFFFF, rec['imm'][2] & 0xFFFFFFFF,
+                    rec['q'][2], rec['q'][3])
+                out['result'] = res
+                n = min(len(qout), len(ew))
+                ew[:n] = qout[:n]
+                ew[n:] = [0] * (len(ew) - n)
 
         elif cls == 'ALLOC':
             new = next((i for i in range(8)
@@ -4200,6 +4360,42 @@ class FrontModel(ObjectTable, PayloadMemory):
                                           | (f32_q44(rec['imm'][13])
                                              << 8)
                                           | f32_q44(rec['imm'][12]))
+                elif obj_kind == KIND['VkBufferView']:
+                    # §12.3 texel-buffer view — the buffer is the second
+                    # resolve (lu[1]); bound extent = min(buf.size,
+                    # mem.size - bind_off) with no UNBACKED gate (lazy
+                    # memory is still bound).  size={offset,range},
+                    # aux={buffer handle, fmt}; VK_WHOLE_SIZE resolves
+                    # against the bound extent at create.
+                    st, bs_, be = self.resolve(hnd[lu[1]],
+                                               KIND['VkBuffer'])
+                    ext = self._buf_bound_size(be) if st == 'OK' else None
+                    did = img_fmt_id(self.m, rec['imm'][1] & 0xFF)
+                    tb = img_fmt_tables(self.m)[1][did & 15] \
+                        if did != 0xFF else 0
+                    off = rec['q'][2]
+                    rng0 = rec['q'][3]
+                    rng = ext - off if (rng0 == 0xFFFFFFFFFFFFFFFF and
+                                        ext is not None and
+                                        off <= ext) else rng0
+                    if st != 'OK' or ext is None:
+                        out['result'] = VK_ERR_UNKNOWN
+                    elif (did == 0xFF or off > ext or rng == 0 or
+                          off + rng > ext or
+                          (tb and (off % tb or
+                                   (rng0 != 0xFFFFFFFFFFFFFFFF and
+                                    rng0 % tb)))):
+                        out['result'] = VK_ERR_FMTNS
+                    else:
+                        st2, h, slot = self.alloc(rec['q'][new],
+                                                  obj_kind, par)
+                        if st2 != 'OK':
+                            out['result'] = self._err(st2)
+                        else:
+                            self.ent[slot]['size'] = off | (rng << 32)
+                            self.setaux(h, 0xFFFFFFFF,
+                                        hnd[lu[1]] & 0xFFFFFFFF)
+                            self.setauxhi(h, did)
                 elif obj_kind in (KIND['VkRenderPass'],
                                   KIND['VkFramebuffer']):
                     # G1c: payload objects — the staged keep words copy
@@ -4250,18 +4446,33 @@ class FrontModel(ObjectTable, PayloadMemory):
                             not stats_ok or qcount > 4096):
                         out['result'] = VK_ERR_FEATURE_NOT_PRESENT
                     else:
-                        st, h, slot = self.alloc(rec['q'][new],
-                                                 obj_kind, par)
-                        if st != 'OK':
-                            out['result'] = self._err(st)
+                        # the result-slot ObjPay extent must be
+                        # allocated exactly like RTL's op_words_q =
+                        # queryCount<<4 so later ObjPay consumers
+                        # (command-buffer record chunks) land on the
+                        # same addresses; qslots stays the semantic
+                        # mirror GET reads, aux[63:32] carries the
+                        # extent {base_chunk,words} while aux[31:0]
+                        # keeps type|statisticsMask
+                        pbase = self.pay_alloc(qcount << 4)
+                        if pbase is None:
+                            out['result'] = VK_ERR_OOM
                         else:
-                            e = self.ent[slot]
-                            e['size'] = qcount
-                            e['qslots'] = [None] * qcount
-                            st2, _s2 = self.setaux(h, 0xFFFFFFFF,
-                                                   qtype | (qstats << 8))
-                            if st2 != 'OK':
-                                out['result'] = VK_ERR_UNKNOWN
+                            st, h, slot = self.alloc(rec['q'][new],
+                                                     obj_kind, par)
+                            if st != 'OK':
+                                self.pay_free(pbase, qcount << 4)
+                                out['result'] = self._err(st)
+                            else:
+                                e = self.ent[slot]
+                                e['size'] = qcount
+                                e['qslots'] = [None] * qcount
+                                self.setauxhi(h, ((pbase >> 6) << 16) |
+                                              (qcount << 4))
+                                st2, _s2 = self.setaux(
+                                    h, 0xFFFFFFFF, qtype | (qstats << 8))
+                                if st2 != 'OK':
+                                    out['result'] = VK_ERR_UNKNOWN
                 else:
                     st, h, slot = self.alloc(rec['q'][new], obj_kind, par)
                     if st != 'OK':
@@ -5398,6 +5609,58 @@ class FrontModel(ObjectTable, PayloadMemory):
         out['rep'] = rep_sim.run(words, rec, out['result'], supply,
                                  null_mask=out['null_mask'])
 
+    def _query_results(self, pe, dev, first, count, flags, size, stride):
+        """vkGetQueryPoolResults oracle — mirrors
+        vn_native_submit._query_results.  Returns (VkResult, exec
+        words): exec[0] is the needed byte count and exec[1:] the
+        packed u64 result records the REXBUF pData reply consumes
+        (the out-blob wire carries only a byte count, so the host
+        copies the reply payload into pData).  Device loss is not
+        modelled on this path and WAIT cannot block a single-shot
+        session, so an unpublished WAIT reports NOT_READY."""
+        if pe is None or pe['parent'] != (dev & 0xFFFF):
+            return VK_ERR_UNKNOWN, []
+        pool_size = pe.get('size')
+        slots = pe.get('qslots')
+        pool_type = pe['aux'] & 0xFF
+        if (pool_type not in (0, 1, 2) or type(pool_size) is not int or
+                not isinstance(slots, list) or len(slots) != pool_size):
+            return VK_ERR_UNKNOWN, []
+        # VK_QUERY_RESULT_64_BIT (0x1) is required; WAIT (0x2) and
+        # WITH_AVAILABILITY (0x8) are admitted; PARTIAL/unknown refuse
+        if flags & ~0xB or not flags & 0x1:
+            return VK_ERR_FEATURE, []
+        # statistics pools return one u64 per spec-bit counter (mask
+        # restricted to {0,1,2,7} at create); other types one u64
+        smask = (pe['aux'] & 0xFFFFFFFF) >> 8
+        counters = (sum(1 for b in range(11) if (smask >> b) & 1)
+                    if pool_type == 1 else 1)
+        record_bytes = counters * 8 + (8 if flags & 0x8 else 0)
+        packed = stride if stride else record_bytes
+        if packed < record_bytes or (count > 1 and packed % 8):
+            return VK_ERR_VALIDATION_FAILED, []
+        needed = count * packed
+        if first + count > pool_size or size < needed:
+            return VK_ERR_VALIDATION_FAILED, []
+        unavailable = any(slots[first + i] is None
+                          for i in range(count))
+        out = [needed]
+        for i in range(count):
+            slot = slots[first + i]
+            present = slot is not None
+            if pool_type == 1:
+                values = slot if present else [0] * counters
+                for value in values:
+                    out += [value & 0xFFFFFFFF, (value >> 32) & 0xFFFFFFFF]
+            else:
+                value = slot if present else 0
+                out += [value & 0xFFFFFFFF, (value >> 32) & 0xFFFFFFFF]
+            if flags & 0x8:
+                # u64 availability: low word 0/1, high word 0
+                out += [1 if present else 0, 0]
+            out += [0] * ((packed - record_bytes) // 4)
+        return (VK_NOT_READY if unavailable else VK_OK), out
+
     def exec_kind(self, ct):
         T = self.m.cmd_info
         nm = {v['type_id']: k for k, v in T.items()}
@@ -5430,6 +5693,8 @@ class FrontModel(ObjectTable, PayloadMemory):
             return 'IMGSUB'
         if name == 'vkGetMemoryResourcePropertiesMESA':
             return 'MRES'
+        if name == 'vkGetQueryPoolResults':
+            return 'QRESULTS'
         return 'NONE'
 
     def is_work(self, ct):
@@ -5595,6 +5860,112 @@ def build_session(model, asm, sim, rep_sim, enc, gen, rng,
         cmd('vkDestroyInstance', instance=P['inst'])
         return cmds, fm
 
+    if kind == 'bvw':
+        # vkCreateBufferView/vkDestroyBufferView session: exercises the
+        # kind-9 ALLOC path (RTL StBufVwCk).  A bound type-1 memory backs
+        # buf; buf2 stays unbound.  Valid whole-size/explicit views
+        # succeed; OOB/unaligned/zero-range/bad-format ->
+        # VK_ERROR_FORMAT_NOT_SUPPORTED; unbound -> VK_ERROR_UNKNOWN.
+        # Destroy is kind-agnostic RETIRE.  The {size,aux} packing is
+        # consumed by descriptor types 4/5, whose RTL write path is a
+        # separate increment, so this vector locks the validation/result
+        # codes only.
+        P = {k: newid() for k in
+             ('inst', 'pd', 'dev', 'mem', 'buf', 'buf2',
+              'dsl', 'pool', 'dset')}
+        cmd('vkCreateInstance', pInstance=P['inst'])
+        cmd('vkEnumeratePhysicalDevices', instance=P['inst'],
+            pPhysicalDeviceCount=1, pPhysicalDevices=[P['pd']])
+        cmd('vkCreateDevice', physicalDevice=P['pd'],
+            pCreateInfo=struct('VkDeviceCreateInfo'), pDevice=P['dev'])
+        cmd('vkAllocateMemory', device=P['dev'],
+            pAllocateInfo=struct(
+                'VkMemoryAllocateInfo', allocationSize=0x10000,
+                memoryTypeIndex=1, pNext=[]),
+            pMemory=P['mem'])
+        for tag in ('buf', 'buf2'):
+            cmd('vkCreateBuffer', device=P['dev'],
+                pCreateInfo=struct(
+                    'VkBufferCreateInfo', size=0x8000, usage=0x61,
+                    sharingMode=0, queueFamilyIndexCount=0,
+                    pQueueFamilyIndices=[]),
+                pBuffer=P[tag])
+        cmd('vkBindBufferMemory', device=P['dev'], buffer=P['buf'],
+            memory=P['mem'], memoryOffset=0)
+        # descriptor set with one UNIFORM_TEXEL_BUFFER(4) binding so the
+        # pTexelBufferView -> record path (word3=texdid) is exercised
+        cmd('vkCreateDescriptorSetLayout', device=P['dev'],
+            pCreateInfo=struct(
+                'VkDescriptorSetLayoutCreateInfo', flags=0,
+                bindingCount=1,
+                pBindings=[struct(
+                    'VkDescriptorSetLayoutBinding', binding=0,
+                    descriptorType=4, descriptorCount=1,
+                    stageFlags=0x20, pImmutableSamplers=[])]),
+            pSetLayout=P['dsl'])
+        cmd('vkCreateDescriptorPool', device=P['dev'],
+            pCreateInfo=struct(
+                'VkDescriptorPoolCreateInfo', flags=0, maxSets=1,
+                poolSizeCount=1,
+                pPoolSizes=[struct('VkDescriptorPoolSize',
+                                    type=4, descriptorCount=1)]),
+            pDescriptorPool=P['pool'])
+        cmd('vkAllocateDescriptorSets', device=P['dev'],
+            pAllocateInfo=struct(
+                'VkDescriptorSetAllocateInfo',
+                descriptorPool=P['pool'], descriptorSetCount=1,
+                pSetLayouts=[P['dsl']]),
+            pDescriptorSets=[P['dset']])
+
+        WHOLE = 0xFFFFFFFFFFFFFFFF
+        kept = []
+
+        def bv(buf, fmt, off, rng):
+            v = newid()
+            cmd('vkCreateBufferView', device=P['dev'],
+                pCreateInfo=struct(
+                    'VkBufferViewCreateInfo', buffer=buf, format=fmt,
+                    offset=off, range=rng),
+                pView=v)
+            return v
+
+        kept.append(bv(P['buf'], 37, 0, WHOLE))    # whole-size -> extent
+        kept.append(bv(P['buf'], 37, 256, 512))    # explicit off+range
+        kept.append(bv(P['buf'], 37, 0, 0x100))   # small explicit
+        bv(P['buf'], 37, 0, 0x9000)                # range past extent
+        bv(P['buf'], 37, 0x7F00, 0x200)            # off+range escape
+        bv(P['buf'], 0, 0, 0x100)                  # unsupported format
+        bv(P['buf2'], 37, 0, 0x100)                # unbound -> UNKNOWN
+        bv(P['buf'], 37, 2, 0x100)                 # unaligned offset
+        bv(P['buf'], 37, 0, 0)                     # zero range
+        # descriptor-write arm: a live view -> pTexelBufferView record
+        # {mh, esz=view_rng, (elok<<8)|4, texdid@+12, eb=bind_off+off}
+        v_desc = bv(P['buf'], 37, 256, 512)
+        cmd('vkUpdateDescriptorSets', device=P['dev'],
+            descriptorWriteCount=1, descriptorCopyCount=0,
+            pDescriptorCopies=[],
+            pDescriptorWrites=[struct(
+                'VkWriteDescriptorSet', pNext=[],
+                dstSet=P['dset'], dstBinding=0, dstArrayElement=0,
+                descriptorCount=1, descriptorType=4,
+                pImageInfo=[], pTexelBufferView=[v_desc],
+                pBufferInfo=[])])
+        for v in kept + [v_desc]:
+            cmd('vkDestroyBufferView', device=P['dev'], bufferView=v)
+        cmd('vkFreeDescriptorSets', device=P['dev'],
+            descriptorPool=P['pool'], descriptorSetCount=1,
+            pDescriptorSets=[P['dset']])
+        cmd('vkDestroyDescriptorPool', device=P['dev'],
+            descriptorPool=P['pool'])
+        cmd('vkDestroyDescriptorSetLayout', device=P['dev'],
+            descriptorSetLayout=P['dsl'])
+        cmd('vkDestroyBuffer', device=P['dev'], buffer=P['buf'])
+        cmd('vkDestroyBuffer', device=P['dev'], buffer=P['buf2'])
+        cmd('vkFreeMemory', device=P['dev'], memory=P['mem'])
+        cmd('vkDestroyDevice', device=P['dev'])
+        cmd('vkDestroyInstance', instance=P['inst'])
+        return cmds, fm
+
     if kind == 'cbfull':
         # W3.5 wedge characterization: the command-buffer arena holds
         # CB_BUFS=16 slots.  Slot 17's vkAllocateCommandBuffers reply
@@ -5656,6 +6027,162 @@ def build_session(model, asm, sim, rep_sim, enc, gen, rng,
         cmd('vkDestroyFence', device=P['dev'], fence=P['fen'])
         cmd('vkDestroyDevice', device=P['dev'])
         cmd('vkDestroyInstance', instance=P['inst'])
+        return cmds, fm
+
+    if kind == 'qry':
+        # vkGetQueryPoolResults (ctype 49) directed arm.  The pool's
+        # qslots stay unpublished on this host-only path, so every
+        # read reports unavailable: a plain 64-bit GET replies
+        # VK_NOT_READY with a zeroed REXBUF record payload, and a
+        # WITH_AVAILABILITY variant adds the u64 availability words.
+        Q = {k: newid() for k in ('qp',)}
+        cmd('vkCreateInstance', pInstance=I['inst'])
+        cmd('vkEnumeratePhysicalDevices', instance=I['inst'],
+            pPhysicalDeviceCount=1, pPhysicalDevices=[I['pd']])
+        cmd('vkCreateDevice', physicalDevice=I['pd'],
+            pCreateInfo=struct('VkDeviceCreateInfo'), pDevice=I['dev'])
+        cmd('vkCreateQueryPool', device=I['dev'],
+            pCreateInfo=struct('VkQueryPoolCreateInfo', flags=0,
+                               queryType=0, queryCount=4,
+                               pipelineStatistics=0),
+            pQueryPool=Q['qp'])
+        # flags=0x1 (64_BIT only): record = one u64 per query
+        cmd('vkGetQueryPoolResults', device=I['dev'], queryPool=Q['qp'],
+            firstQuery=0, queryCount=4, flags=0x1, dataSize=32,
+            stride=0, pData=bytes(32))
+        # flags=0x9 (64_BIT|WITH_AVAILABILITY): record = u64 value +
+        # u64 availability per query
+        cmd('vkGetQueryPoolResults', device=I['dev'], queryPool=Q['qp'],
+            firstQuery=0, queryCount=4, flags=0x9, dataSize=64,
+            stride=0, pData=bytes(64))
+        # validation arms (refuse before the slot walk, so unpublished
+        # slots are irrelevant): flags=0x5 sets 64_BIT plus the
+        # unsupported PARTIAL bit -> FEATURE_NOT_PRESENT via the mask;
+        # flags=0x0 clears the mandatory 64_BIT -> FEATURE_NOT_PRESENT
+        cmd('vkGetQueryPoolResults', device=I['dev'], queryPool=Q['qp'],
+            firstQuery=0, queryCount=4, flags=0x5, dataSize=64,
+            stride=0, pData=bytes(64))
+        cmd('vkGetQueryPoolResults', device=I['dev'], queryPool=Q['qp'],
+            firstQuery=0, queryCount=4, flags=0x0, dataSize=32,
+            stride=0, pData=bytes(32))
+        cmd('vkDestroyQueryPool', device=I['dev'], queryPool=Q['qp'])
+        cmd('vkDestroyDevice', device=I['dev'])
+        cmd('vkDestroyInstance', instance=I['inst'])
+        return cmds, fm
+
+    if kind == 'qry2':
+        # vkGetQueryPoolResults populated-slot arm.  A submitted command
+        # buffer's query ops stamp e['qslots'] through _qry_op_apply
+        # (mirroring cmdexec's StQry* ObjPay commit), so these GETs read
+        # real availability + counter data — the 'qry' session covers
+        # the all-unpublished NOT_READY path.
+        Q = {k: newid() for k in ('qp', 'qo', 'qs')}
+        cmd('vkCreateInstance', pInstance=I['inst'])
+        cmd('vkEnumeratePhysicalDevices', instance=I['inst'],
+            pPhysicalDeviceCount=1, pPhysicalDevices=[I['pd']])
+        cmd('vkCreateDevice', physicalDevice=I['pd'],
+            pCreateInfo=struct('VkDeviceCreateInfo'), pDevice=I['dev'])
+        cmd('vkGetDeviceQueue', device=I['dev'], queueFamilyIndex=0,
+            queueIndex=0, pQueue=I['queue'])
+        # timestamp pool (type 2): WriteTimestamp stamps avail + the
+        # honest-0 counter; queries 2,3 stay unpublished
+        cmd('vkCreateQueryPool', device=I['dev'],
+            pCreateInfo=struct('VkQueryPoolCreateInfo', flags=0,
+                               queryType=2, queryCount=4,
+                               pipelineStatistics=0),
+            pQueryPool=Q['qp'])
+        # occlusion pool (type 0): Begin+End commits a zero count
+        cmd('vkCreateQueryPool', device=I['dev'],
+            pCreateInfo=struct('VkQueryPoolCreateInfo', flags=0,
+                               queryType=0, queryCount=2,
+                               pipelineStatistics=0),
+            pQueryPool=Q['qo'])
+        # statistics pool (type 1): mask 0x87 enables the four
+        # bounded counters {0,1,2,7} -> one u64 per counter per query
+        cmd('vkCreateQueryPool', device=I['dev'],
+            pCreateInfo=struct('VkQueryPoolCreateInfo', flags=0,
+                               queryType=1, queryCount=2,
+                               pipelineStatistics=0x87),
+            pQueryPool=Q['qs'])
+        cmd('vkCreateCommandPool', device=I['dev'],
+            pCreateInfo=struct('VkCommandPoolCreateInfo',
+                               queueFamilyIndex=0),
+            pCommandPool=I['cp'])
+        cmd('vkAllocateCommandBuffers', device=I['dev'],
+            pAllocateInfo=struct('VkCommandBufferAllocateInfo',
+                                 commandPool=I['cp'], level=0,
+                                 commandBufferCount=1),
+            pCommandBuffers=[I['cb']])
+        cmd('vkBeginCommandBuffer', commandBuffer=I['cb'],
+            pBeginInfo=struct('VkCommandBufferBeginInfo', flags=0,
+                              pInheritanceInfo=None))
+        cmd('vkCmdWriteTimestamp', commandBuffer=I['cb'],
+            pipelineStage=0, queryPool=Q['qp'], query=0)
+        cmd('vkCmdWriteTimestamp', commandBuffer=I['cb'],
+            pipelineStage=0, queryPool=Q['qp'], query=1)
+        cmd('vkCmdBeginQuery', commandBuffer=I['cb'],
+            queryPool=Q['qo'], query=0, flags=0)
+        cmd('vkCmdEndQuery', commandBuffer=I['cb'],
+            queryPool=Q['qo'], query=0)
+        cmd('vkCmdBeginQuery', commandBuffer=I['cb'],
+            queryPool=Q['qs'], query=0, flags=0)
+        cmd('vkCmdEndQuery', commandBuffer=I['cb'],
+            queryPool=Q['qs'], query=0)
+        cmd('vkEndCommandBuffer', commandBuffer=I['cb'])
+        cmd('vkCreateFence', device=I['dev'],
+            pCreateInfo=struct('VkFenceCreateInfo', flags=0),
+            pFence=I['fen'])
+        cmd('vkQueueSubmit', queue=I['queue'], submitCount=1,
+            pSubmits=[struct('VkSubmitInfo', waitSemaphoreCount=0,
+                             pWaitSemaphores=[], pWaitDstStageMask=[],
+                             commandBufferCount=1,
+                             pCommandBuffers=[I['cb']],
+                             signalSemaphoreCount=0,
+                             pSignalSemaphores=[])],
+            fence=I['fen'])
+        cmd('vkDeviceWaitIdle', device=I['dev'])
+        # populated range (slots 0,1 stamped) -> VK_OK, one u64 each
+        cmd('vkGetQueryPoolResults', device=I['dev'], queryPool=Q['qp'],
+            firstQuery=0, queryCount=2, flags=0x1, dataSize=16,
+            stride=0, pData=bytes(16))
+        # WITH_AVAILABILITY adds the u64 availability words
+        cmd('vkGetQueryPoolResults', device=I['dev'], queryPool=Q['qp'],
+            firstQuery=0, queryCount=2, flags=0x9, dataSize=32,
+            stride=0, pData=bytes(32))
+        # WAIT (0x2) on already-available slots returns VK_OK without
+        # blocking — exercises the admit mask + the StQryEnd re-poll
+        # condition being evaluated and correctly not taken
+        cmd('vkGetQueryPoolResults', device=I['dev'], queryPool=Q['qp'],
+            firstQuery=0, queryCount=2, flags=0x3, dataSize=16,
+            stride=0, pData=bytes(16))
+        # mixed range: slots 2,3 unpublished -> NOT_READY while the
+        # per-query availability still distinguishes the stamped slots
+        cmd('vkGetQueryPoolResults', device=I['dev'], queryPool=Q['qp'],
+            firstQuery=0, queryCount=4, flags=0x9, dataSize=64,
+            stride=0, pData=bytes(64))
+        # occlusion Begin/End committed an available zero count
+        cmd('vkGetQueryPoolResults', device=I['dev'], queryPool=Q['qo'],
+            firstQuery=0, queryCount=1, flags=0x9, dataSize=16,
+            stride=0, pData=bytes(16))
+        # statistics pool: four enabled counters -> four u64 per query
+        cmd('vkGetQueryPoolResults', device=I['dev'], queryPool=Q['qs'],
+            firstQuery=0, queryCount=1, flags=0x1, dataSize=32,
+            stride=0, pData=bytes(32))
+        # WITH_AVAILABILITY appends the u64 availability word
+        cmd('vkGetQueryPoolResults', device=I['dev'], queryPool=Q['qs'],
+            firstQuery=0, queryCount=1, flags=0x9, dataSize=40,
+            stride=0, pData=bytes(40))
+        cmd('vkDestroyQueryPool', device=I['dev'], queryPool=Q['qp'])
+        cmd('vkDestroyQueryPool', device=I['dev'], queryPool=Q['qo'])
+        cmd('vkDestroyQueryPool', device=I['dev'], queryPool=Q['qs'])
+        cmd('vkFreeCommandBuffers', device=I['dev'],
+            commandPool=I['cp'], commandBufferCount=1,
+            pCommandBuffers=[I['cb']])
+        cmd('vkDestroyCommandPool', device=I['dev'],
+            commandPool=I['cp'])
+        cmd('vkDestroyFence', device=I['dev'], fence=I['fen'])
+        cmd('vkDestroyDevice', device=I['dev'])
+        cmd('vkDestroyInstance', instance=I['inst'])
         return cmds, fm
 
     # ---------------- positive session ------------------------------------
@@ -15601,6 +16128,26 @@ def main():
                          'submit referencing the phantom handle '
                          'replies VK_ERROR_UNKNOWN with no executor '
                          'push (no fence armed)')
+    ap.add_argument('--qry-session', nargs=2,
+                    metavar=('NAME', 'SEED'),
+                    help='vkGetQueryPoolResults (ctype 49) directed '
+                         'arm: an all-unavailable occlusion pool '
+                         'replies VK_NOT_READY with a zeroed REXBUF '
+                         'record payload (64-bit and '
+                         'WITH_AVAILABILITY variants)')
+    ap.add_argument('--qry2-session', nargs=2,
+                    metavar=('NAME', 'SEED'),
+                    help='vkGetQueryPoolResults populated-slot arm: a '
+                         'submitted command buffer stamps query slots '
+                         '(timestamp WriteTimestamp + occlusion '
+                         'Begin/End), so GETs read real availability '
+                         'and counter data')
+    ap.add_argument('--bvw-session', nargs=2,
+                    metavar=('NAME', 'SEED'),
+                    help='vkCreateBufferView/vkDestroyBufferView session: '
+                         'kind-9 ALLOC validation arms (bound extent, '
+                         'format, geometry, unbound) plus kind-agnostic '
+                         'RETIRE destroy')
     ap.add_argument('--objslots', type=int, default=None,
                     help='FrontModel ObjTab capacity (default 256); '
                          'raise to the RTL ObjEntries parameter for '
@@ -15928,6 +16475,48 @@ def main():
         insts = write_session(name, cmds, fm)
         nerr = sum(1 for c in cmds if c['out']['result'] != VK_OK)
         print('wrote %s cbfull session to %s: %d commands, '
+              '%d non-OK' % (name, VEC_DIR, len(cmds), nerr))
+        return 0
+
+    if args.qry_session:
+        name, seed = args.qry_session
+        rng = random.Random(int(seed))
+        gen = ArgGen(model, rng)
+        rep_sim = ReplySim(model, asm)
+        VEC_DIR.mkdir(parents=True, exist_ok=True)
+        cmds, fm = build_session(model, asm, sim, rep_sim, enc, gen,
+                                 rng, kind='qry')
+        insts = write_session(name, cmds, fm)
+        nerr = sum(1 for c in cmds if c['out']['result'] != VK_OK)
+        print('wrote %s qry session to %s: %d commands, '
+              '%d non-OK' % (name, VEC_DIR, len(cmds), nerr))
+        return 0
+
+    if args.qry2_session:
+        name, seed = args.qry2_session
+        rng = random.Random(int(seed))
+        gen = ArgGen(model, rng)
+        rep_sim = ReplySim(model, asm)
+        VEC_DIR.mkdir(parents=True, exist_ok=True)
+        cmds, fm = build_session(model, asm, sim, rep_sim, enc, gen,
+                                 rng, kind='qry2')
+        insts = write_session(name, cmds, fm)
+        nerr = sum(1 for c in cmds if c['out']['result'] != VK_OK)
+        print('wrote %s qry2 session to %s: %d commands, '
+              '%d non-OK' % (name, VEC_DIR, len(cmds), nerr))
+        return 0
+
+    if args.bvw_session:
+        name, seed = args.bvw_session
+        rng = random.Random(int(seed))
+        gen = ArgGen(model, rng)
+        rep_sim = ReplySim(model, asm)
+        VEC_DIR.mkdir(parents=True, exist_ok=True)
+        cmds, fm = build_session(model, asm, sim, rep_sim, enc, gen,
+                                 rng, kind='bvw')
+        insts = write_session(name, cmds, fm)
+        nerr = sum(1 for c in cmds if c['out']['result'] != VK_OK)
+        print('wrote %s bvw session to %s: %d commands, '
               '%d non-OK' % (name, VEC_DIR, len(cmds), nerr))
         return 0
 

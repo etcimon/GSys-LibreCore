@@ -1,0 +1,15 @@
+#version 460
+layout(local_size_x = 8) in;
+// §12.3 F5 image analogue of descarr / CTS combined_image_sampler_array:
+// a 4-element COMBINED image-sampler descriptor array at binding 0;
+// gid/8 selects the element divergently across the 8-lane wave (32
+// invocations -> elements 0..3).  texelFetch is OpImageFetch — it reads
+// the image half only, so this isolates the descriptor index path
+// (dsc_idx_q) that must select BOTH the image and sampler halves of the
+// same array element.
+layout(set = 0, binding = 0) uniform sampler2D texs[4];
+layout(set = 0, binding = 1) buffer Out { vec4 o[]; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    o[i] = texelFetch(texs[i / 8], ivec2(i & 3, 0), 0);
+}

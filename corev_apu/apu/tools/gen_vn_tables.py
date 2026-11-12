@@ -1008,7 +1008,8 @@ class Model:
                 'Requirements' in name or \
                 name in ('vkGetDeviceMemoryCommitment',
                          'vkGetRenderAreaGranularity',
-                         'vkGetImageSubresourceLayout'):
+                         'vkGetImageSubresourceLayout',
+                         'vkGetQueryPoolResults'):
             return 'QUERY'
         if name in ('vkGetEventStatus', 'vkSetEvent', 'vkResetEvent'):
             return 'EVENT'

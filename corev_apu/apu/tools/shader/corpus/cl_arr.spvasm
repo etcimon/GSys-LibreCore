@@ -1,0 +1,45 @@
+; cl_arr.spvasm - OpCopyLogical between two arrays of one logical type
+; and different ArrayStride (4 -> 8).  The value is loaded whole, copied,
+; and stored whole: 32 words, 8 RF rows.  Words between the strided
+; output elements must keep their initial contents.
+; Assembled with `spirv-as --target-env vulkan1.2`.
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %in_var %out_var
+               OpExecutionMode %main LocalSize 4 1 1
+               OpDecorate %arr_a ArrayStride 4
+               OpDecorate %arr_b ArrayStride 8
+               OpDecorate %blk_a Block
+               OpMemberDecorate %blk_a 0 Offset 0
+               OpDecorate %blk_b Block
+               OpMemberDecorate %blk_b 0 Offset 0
+               OpDecorate %in_var DescriptorSet 0
+               OpDecorate %in_var Binding 0
+               OpDecorate %out_var DescriptorSet 0
+               OpDecorate %out_var Binding 1
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+      %float = OpTypeFloat 32
+       %uint = OpTypeInt 32 0
+        %int = OpTypeInt 32 1
+      %int_0 = OpConstant %int 0
+    %uint_32 = OpConstant %uint 32
+      %arr_a = OpTypeArray %float %uint_32
+      %arr_b = OpTypeArray %float %uint_32
+      %blk_a = OpTypeStruct %arr_a
+      %blk_b = OpTypeStruct %arr_b
+  %ptr_blk_a = OpTypePointer StorageBuffer %blk_a
+  %ptr_blk_b = OpTypePointer StorageBuffer %blk_b
+  %ptr_arr_a = OpTypePointer StorageBuffer %arr_a
+  %ptr_arr_b = OpTypePointer StorageBuffer %arr_b
+     %in_var = OpVariable %ptr_blk_a StorageBuffer
+    %out_var = OpVariable %ptr_blk_b StorageBuffer
+       %main = OpFunction %void None %3
+          %5 = OpLabel
+         %pa = OpAccessChain %ptr_arr_a %in_var %int_0
+         %va = OpLoad %arr_a %pa
+         %vb = OpCopyLogical %arr_b %va
+         %pb = OpAccessChain %ptr_arr_b %out_var %int_0
+               OpStore %pb %vb
+               OpReturn
+               OpFunctionEnd

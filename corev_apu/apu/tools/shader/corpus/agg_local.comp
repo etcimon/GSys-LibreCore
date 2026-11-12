@@ -1,0 +1,15 @@
+#version 450
+// A 20-word struct with a matrix, a vector, an array and a scalar goes
+// buffer -> Function local -> Function local -> buffer.  The buffer and
+// local struct types differ, so glslang rebuilds the value member by
+// member (OpCompositeExtract / OpCompositeConstruct, matrix included).
+layout(local_size_x = 8) in;
+struct S { mat3 m; vec2 v; uint a[3]; float f; };
+layout(set = 0, binding = 0, std430) buffer I { S s[8]; } i;
+layout(set = 0, binding = 1, std430) buffer O { S s[8]; } o;
+void main() {
+    uint k = gl_GlobalInvocationID.x & 7u;
+    S t = i.s[k];
+    S u = t;
+    o.s[k] = u;
+}

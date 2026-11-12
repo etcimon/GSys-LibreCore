@@ -78,17 +78,24 @@ class QueryCopy:
 
     def __init__(self, entry, first, count, flags, owner, offset, stride,
                  counters=1):
-        record = (counters * (8 if flags & 0x1 else 4) +
-                  (4 if flags & 0x8 else 0)
+        # VK_QUERY_RESULT_64_BIT widens results AND the availability
+        # value to u64; otherwise both are u32 (spec: "results and
+        # availability or status values ... as an array of 64-bit
+        # values" when 64_BIT is set).  dstOffset takes the field
+        # alignment unconditionally; stride only when count > 1.
+        cw = 8 if flags & 0x1 else 4
+        record = (counters * cw + (cw if flags & 0x8 else 0)
                   if type(flags) is int else 0)
+        off_align = 8 if flags & 0x1 else 4
+        stride_align = off_align if count > 1 else 1
         if (not isinstance(entry, dict) or type(first) is not int or
                 type(count) is not int or type(flags) is not int or
                 type(offset) is not int or type(stride) is not int or
                 type(counters) is not int or counters < 0 or
                 not 0 < count <= MAX_QUERIES or
                 first + count > len(entry.get('qslots') or ()) or
-                flags & ~0x9 or stride < record or stride % 4 or
-                offset % 4):
+                flags & ~0x9 or stride < record or
+                stride % stride_align or offset % off_align):
             raise ValueError('invalid native query copy operation')
         self.entry, self.first, self.count = entry, first, count
         self.flags, self.owner, self.offset, self.stride = \
@@ -182,8 +189,8 @@ class QueryCopyRuntime(_QueryRuntime):
     def __init__(self, executor, context, operation):
         super().__init__(executor, context, operation)
         op = operation
-        record = (op.counters * (8 if op.flags & 0x1 else 4) +
-                  (4 if op.flags & 0x8 else 0))
+        cw = 8 if op.flags & 0x1 else 4
+        record = op.counters * cw + (cw if op.flags & 0x8 else 0)
         self.record, self.pad = record, op.stride - record
         total = (op.count - 1) * op.stride + record
         # enqueue-time extent validation mirrors Transfer._extent so a
@@ -196,6 +203,7 @@ class QueryCopyRuntime(_QueryRuntime):
         if self.done or budget <= 0:
             return 0
         op = self.operation
+        cw = 8 if op.flags & 0x1 else 4
         out = bytearray()
         for index in range(op.first, op.first + op.count):
             slot = op.entry['qslots'][index]
@@ -216,7 +224,7 @@ class QueryCopyRuntime(_QueryRuntime):
                 else:
                     out += (value & 0xFFFFFFFF).to_bytes(4, 'little')
             if op.flags & 0x8:
-                out += (1 if stamped else 0).to_bytes(4, 'little')
+                out += (1 if stamped else 0).to_bytes(cw, 'little')
             out += b'\0' * self.pad
         if not self.executor._live(self.context):
             return 0
@@ -277,10 +285,12 @@ def replay(images, record, name, *, compute=False, device=None):
         owner, binding, capacity = images.extent(record, 1)
         counters = (_stat_count(entry)
                     if (entry['aux'] & 0xFF) == 1 else 1)
-        record_size = (counters * (8 if flags & 0x1 else 4) +
-                       (4 if flags & 0x8 else 0))
+        cw = 8 if flags & 0x1 else 4
+        record_size = counters * cw + (cw if flags & 0x8 else 0)
+        off_align = 8 if flags & 0x1 else 4
+        stride_align = off_align if count > 1 else 1
         if (first + count > entry['size'] or stride < record_size or
-                stride % 4 or dst_offset % 4 or
+                stride % stride_align or dst_offset % off_align or
                 dst_offset > capacity or
                 (count - 1) * stride + record_size > capacity - dst_offset):
             raise ValueError('query copy range/stride exceeds buffer')

@@ -1,0 +1,53 @@
+; cl_mix.spvasm - OpCopyLogical of a whole block struct between two
+; memory layouts of one logical type {float, vec3, mat3, uint[3]}:
+;   in : mat3 column-major, MatrixStride 16; uint[3] ArrayStride 16
+;   out: mat3 row-major,    MatrixStride 16; uint[3] ArrayStride 4
+; 16 logical words (4 RF rows).  The block is loaded and stored through
+; the variable's own pointer, with no access chain.
+; Assembled with `spirv-as --target-env vulkan1.2`.
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %in_var %out_var
+               OpExecutionMode %main LocalSize 4 1 1
+               OpDecorate %ua_a ArrayStride 16
+               OpDecorate %ua_b ArrayStride 4
+               OpDecorate %blk_a Block
+               OpMemberDecorate %blk_a 0 Offset 0
+               OpMemberDecorate %blk_a 1 Offset 16
+               OpMemberDecorate %blk_a 2 ColMajor
+               OpMemberDecorate %blk_a 2 MatrixStride 16
+               OpMemberDecorate %blk_a 2 Offset 32
+               OpMemberDecorate %blk_a 3 Offset 80
+               OpDecorate %blk_b Block
+               OpMemberDecorate %blk_b 0 Offset 0
+               OpMemberDecorate %blk_b 1 Offset 16
+               OpMemberDecorate %blk_b 2 RowMajor
+               OpMemberDecorate %blk_b 2 MatrixStride 16
+               OpMemberDecorate %blk_b 2 Offset 32
+               OpMemberDecorate %blk_b 3 Offset 80
+               OpDecorate %in_var DescriptorSet 0
+               OpDecorate %in_var Binding 0
+               OpDecorate %out_var DescriptorSet 0
+               OpDecorate %out_var Binding 1
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+      %float = OpTypeFloat 32
+       %uint = OpTypeInt 32 0
+     %uint_3 = OpConstant %uint 3
+    %v3float = OpTypeVector %float 3
+      %mat3  = OpTypeMatrix %v3float 3
+       %ua_a = OpTypeArray %uint %uint_3
+       %ua_b = OpTypeArray %uint %uint_3
+      %blk_a = OpTypeStruct %float %v3float %mat3 %ua_a
+      %blk_b = OpTypeStruct %float %v3float %mat3 %ua_b
+  %ptr_blk_a = OpTypePointer StorageBuffer %blk_a
+  %ptr_blk_b = OpTypePointer StorageBuffer %blk_b
+     %in_var = OpVariable %ptr_blk_a StorageBuffer
+    %out_var = OpVariable %ptr_blk_b StorageBuffer
+       %main = OpFunction %void None %3
+          %5 = OpLabel
+         %va = OpLoad %blk_a %in_var
+         %vb = OpCopyLogical %blk_b %va
+               OpStore %out_var %vb
+               OpReturn
+               OpFunctionEnd

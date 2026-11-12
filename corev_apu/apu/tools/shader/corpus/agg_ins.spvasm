@@ -1,0 +1,41 @@
+; agg_ins.spvasm - OpCompositeInsert into a 2-row array value: one
+; constant and one extracted element are inserted into a loaded float[8],
+; and the result is stored whole.  out = in, except out[5] = 2.5 and
+; out[7] = in[0].
+; Assembled with `spirv-as --target-env vulkan1.2`.
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %in_var %out_var
+               OpExecutionMode %main LocalSize 4 1 1
+               OpDecorate %arr ArrayStride 4
+               OpDecorate %blk Block
+               OpMemberDecorate %blk 0 Offset 0
+               OpDecorate %in_var DescriptorSet 0
+               OpDecorate %in_var Binding 0
+               OpDecorate %out_var DescriptorSet 0
+               OpDecorate %out_var Binding 1
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+      %float = OpTypeFloat 32
+       %uint = OpTypeInt 32 0
+        %int = OpTypeInt 32 1
+      %int_0 = OpConstant %int 0
+     %uint_8 = OpConstant %uint 8
+  %float_2_5 = OpConstant %float 2.5
+        %arr = OpTypeArray %float %uint_8
+        %blk = OpTypeStruct %arr
+    %ptr_blk = OpTypePointer StorageBuffer %blk
+    %ptr_arr = OpTypePointer StorageBuffer %arr
+     %in_var = OpVariable %ptr_blk StorageBuffer
+    %out_var = OpVariable %ptr_blk StorageBuffer
+       %main = OpFunction %void None %3
+          %5 = OpLabel
+         %pa = OpAccessChain %ptr_arr %in_var %int_0
+          %a = OpLoad %arr %pa
+          %b = OpCompositeInsert %arr %float_2_5 %a 5
+          %e = OpCompositeExtract %float %a 0
+          %d = OpCompositeInsert %arr %e %b 7
+         %pb = OpAccessChain %ptr_arr %out_var %int_0
+               OpStore %pb %d
+               OpReturn
+               OpFunctionEnd

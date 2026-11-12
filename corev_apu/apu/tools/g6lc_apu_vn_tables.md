@@ -64,10 +64,6 @@ The harness compiles with WSL `/usr/bin/gcc` (the Windows host has no C toolchai
 
 `APU_VN_ACT[type]` is a packed `apu_vn_act_t` `{act_class[4:0], obj_kind[5:0], parent_qslot[2:0], cmdbuf_qslot[2:0], flags[7:0]}` (class in the most significant bits).  `parent_qslot` is the first LOOKUP-role q slot, `cmdbuf_qslot` the q slot holding `commandBuffer` for RECORD/CB_* commands; both use `APU_VN_QSLOT_NONE` (all-ones) when absent.  `flags[0]` = `APU_VN_ACT_F_REPLY` (GENERATE_REPLY: the command has a reply program).
 
-### UNSUPPORTED (1)
-
-- `vkGetQueryPoolResults` (kind=0, parent_q=0, cmdbuf_q=none, flags=0x01)
-
 ### ALLOC (26)
 
 - `vkCreateInstance` (kind=1, parent_q=none, cmdbuf_q=none, flags=0x01)
@@ -129,7 +125,7 @@ The harness compiles with WSL `/usr/bin/gcc` (the Windows host has no C toolchai
 - `vkBindImageMemory` (kind=0, parent_q=0, cmdbuf_q=none, flags=0x01)
 - `vkBindImageMemory2` (kind=0, parent_q=0, cmdbuf_q=none, flags=0x01)
 
-### QUERY (25)
+### QUERY (26)
 
 - `vkEnumerateInstanceVersion` (kind=0, parent_q=none, cmdbuf_q=none, flags=0x01)
 - `vkEnumeratePhysicalDevices` (kind=2, parent_q=0, cmdbuf_q=none, flags=0x01)
@@ -155,6 +151,7 @@ The harness compiles with WSL `/usr/bin/gcc` (the Windows host has no C toolchai
 - `vkGetImageMemoryRequirements` (kind=0, parent_q=0, cmdbuf_q=none, flags=0x01)
 - `vkGetImageMemoryRequirements2` (kind=0, parent_q=0, cmdbuf_q=none, flags=0x01)
 - `vkGetImageSubresourceLayout` (kind=0, parent_q=0, cmdbuf_q=none, flags=0x01)
+- `vkGetQueryPoolResults` (kind=0, parent_q=0, cmdbuf_q=none, flags=0x01)
 - `vkGetMemoryResourcePropertiesMESA` (kind=0, parent_q=0, cmdbuf_q=none, flags=0x01)
 
 ### CB_BEGIN (1)
@@ -272,8 +269,6 @@ The harness compiles with WSL `/usr/bin/gcc` (the Windows host has no C toolchai
 - `vkSetEvent` (kind=0, parent_q=0, cmdbuf_q=none, flags=0x01)
 - `vkResetEvent` (kind=0, parent_q=0, cmdbuf_q=none, flags=0x01)
 
-`UNSUPPORTED` commands reach the front-end and return `VK_ERROR_FEATURE_NOT_PRESENT` (no reply program is run).
-
 ## Payload layouts
 
 KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words on `pay_valid_o`/`pay_data_o` in decode order; `pay_words` counts them.  Keep semantics: `U32`/`U64` emit the value words, `HANDLE` emits the two id words (unresolved), `PTR` emits the 0/1 presence word, `ARRAY` emits the element count (1 word), `BLOB` emits its data words.  This layout is generated — RTL never hand-encodes it.
@@ -338,7 +333,7 @@ KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words 
 
 ### vkUpdateDescriptorSets (type 79)
 
-- per `pDescriptorWrites` element (element count = `descriptorWriteCount`): `pDescriptorWrites.dstSet` handle id (2 words), `pDescriptorWrites.dstBinding` u32, `pDescriptorWrites.dstArrayElement` u32, `pDescriptorWrites.descriptorCount` u32, `pDescriptorWrites.descriptorType` u32
+- per `pDescriptorWrites` element (element count = `descriptorWriteCount`): `pDescriptorWrites.dstSet` handle id (2 words), `pDescriptorWrites.dstBinding` u32, `pDescriptorWrites.dstArrayElement` u32, `pDescriptorWrites.descriptorCount` u32, `pDescriptorWrites.descriptorType` u32, `pDescriptorWrites.pTexelBufferView` data words
 - per `pDescriptorWrites.pImageInfo` element (element count = `descriptorCount`): `pDescriptorWrites.pImageInfo.sampler` handle id (2 words), `pDescriptorWrites.pImageInfo.imageView` handle id (2 words), `pDescriptorWrites.pImageInfo.imageLayout` u32
 - per `pDescriptorWrites.pBufferInfo` element (element count = `descriptorCount`): `pDescriptorWrites.pBufferInfo.buffer` handle id (2 words), `pDescriptorWrites.pBufferInfo.offset` u64 (2 words), `pDescriptorWrites.pBufferInfo.range` u64 (2 words)
 - per `pDescriptorCopies` element (element count = `descriptorCopyCount`): `pDescriptorCopies.srcSet` handle id (2 words), `pDescriptorCopies.srcBinding` u32, `pDescriptorCopies.srcArrayElement` u32, `pDescriptorCopies.dstSet` handle id (2 words), `pDescriptorCopies.dstBinding` u32, `pDescriptorCopies.dstArrayElement` u32, `pDescriptorCopies.descriptorCount` u32
@@ -1804,7 +1799,7 @@ KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words 
 | U64 | 127 | 0x0 | offset **KEEP** |
 | U64 | 127 | 0x0 | range **KEEP** |
 | ENDARR | 0 | 0x0 |  |
-| BLOB | 1 | 0x1 | pTexelBufferView |
+| BLOB | 1 | 0x1 | pTexelBufferView **KEEP** |
 | ENDARR | 0 | 0x0 |  |
 | U32 | 1 | 0x0 | descriptorCopyCount |
 | ARRAY | 1 | 0x0 | pDescriptorCopies |
@@ -2734,7 +2729,7 @@ KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words 
 | U32 | 1 | 0x0 | query |
 | END | 0 | 0x0 |  |
 
-### vkGetQueryPoolResults — type 49, mpc 2389..2397, reply 73, act UNSUPPORTED
+### vkGetQueryPoolResults — type 49, mpc 2389..2397, reply 73, act QUERY
 
 | op | a | b | note |
 |---|---|---|---|

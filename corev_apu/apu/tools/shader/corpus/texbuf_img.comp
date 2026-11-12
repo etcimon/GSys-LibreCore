@@ -1,0 +1,11 @@
+#version 450
+// §12.3 texel-buffer — OpImageRead on an imageBuffer (Dim=Buffer,
+// STORAGE_TEXEL_BUFFER kind 5).  Single linear texel index i -> texel i.
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0, rgba8) uniform imageBuffer img;
+layout(set = 0, binding = 1) buffer Out { vec4 o[]; } ob;
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    ob.o[i] = imageLoad(img, i);
+}

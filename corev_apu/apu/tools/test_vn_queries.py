@@ -44,7 +44,10 @@ class QueryTests(unittest.TestCase):
         return self.f.entry(self.POOL)['qslots']
 
     def results(self, first=0, count=4, flags=0x1, stride=0, data_size=None):
-        record = 12 if flags & 0x8 else 8
+        # single-counter record: u64 result + u64 availability when
+        # 64_BIT is set, else u32 each (spec widens both together)
+        cw = 8 if flags & 0x1 else 4
+        record = cw + (cw if flags & 0x8 else 0)
         packed = stride or record
         if data_size is None:
             data_size = count * packed
@@ -106,8 +109,8 @@ class QueryTests(unittest.TestCase):
         self.f.command('vkSeekReplyCommandStreamMESA', position=0)
         self.results(count=1, flags=0x9)
         _rtype, result, count, payload = self.read_reply()
-        self.assertEqual((result, count), (0, 12))
-        value, avail = struct.unpack('<QI', payload)
+        self.assertEqual((result, count), (0, 16))
+        value, avail = struct.unpack('<QQ', payload)
         self.assertEqual((value, avail), (0, 1))
 
     def test_occlusion_pairing_and_flag_refusals(self):
@@ -168,14 +171,14 @@ class QueryTests(unittest.TestCase):
         self.end(0)
         self.f.command('vkCmdCopyQueryPoolResults', commandBuffer=self.f.CB,
             queryPool=self.POOL, dstBuffer=self.f.BUFFER, dstOffset=0,
-            queryCount=1, firstQuery=0, stride=12,
+            queryCount=1, firstQuery=0, stride=16,
             flags=0x1 | 0x8)
         self.f.end()
         job = self.f.enqueue()
         self.f.drain()
         self.assertEqual(job.state, 'done')
-        data = self.f.state.aperture.read(self.f.owner.base, 12)
-        value, avail = struct.unpack('<QI', data[:12])
+        data = self.f.state.aperture.read(self.f.owner.base, 16)
+        value, avail = struct.unpack('<QQ', data[:16])
         self.assertEqual((value, avail), (0, 1))
 
     def test_query_bounds_flags_and_stages_refuse(self):
@@ -232,13 +235,13 @@ class QueryTests(unittest.TestCase):
         rtype, result, count, payload = self.read_reply()
         self.assertEqual((rtype, result, count), (49, 0, 16))
         self.assertEqual(payload, b'\0' * 16)
-        # availability variant: 12-byte records, value then u32 flag
+        # availability variant: 16-byte records, u64 value then u64 flag
         self.f.command('vkSeekReplyCommandStreamMESA', position=0)
         self.results(count=2, flags=0x9)
         _rtype, result, count, payload = self.read_reply()
-        self.assertEqual((result, count), (0, 24))
-        records = struct.unpack('<QQII', payload[:24])
-        # per record: u64 value (2 words) + u32 available; packed stride 12
+        self.assertEqual((result, count), (0, 32))
+        records = struct.unpack('<QQQQ', payload[:32])
+        # per record: u64 value + u64 available; packed stride 16
         self.assertEqual(records, (0, 1, 0, 1))
 
     def test_results_not_ready_before_stamps_drain(self):
@@ -315,7 +318,8 @@ class QueryTests(unittest.TestCase):
             stage=stage, queryPool=self.POOL, query=query)
 
     def copy_results(self, first=0, count=4, flags=0x9, dst=512, stride=0):
-        record = (8 if flags & 1 else 4) + (4 if flags & 8 else 0)
+        cw = 8 if flags & 1 else 4
+        record = cw + (cw if flags & 8 else 0)
         self.f.command('vkCmdCopyQueryPoolResults', commandBuffer=self.f.CB,
             queryPool=self.POOL, firstQuery=first, queryCount=count,
             dstBuffer=self.f.BUFFER, dstOffset=dst, stride=stride or record,
@@ -361,8 +365,7 @@ class QueryTests(unittest.TestCase):
         expected = b''
         for stamped in (True, False, True, False):
             expected += ((0).to_bytes(8, 'little') +
-                         (1 if stamped else 0).to_bytes(4, 'little') +
-                         b'\0' * 4)
+                         (1 if stamped else 0).to_bytes(8, 'little'))
         self.assertEqual(
             self.f.state.aperture.read(self.f.owner.base + 512, 64), expected)
         self.assertEqual(self.f.entry(self.f.BUFFER)['pins'], 0)
@@ -412,7 +415,8 @@ class QueryTests(unittest.TestCase):
 
     def stat_results(self, first=0, count=1, flags=0x1, stride=0,
                      data_size=None, counters=4):
-        record = counters * 8 + (4 if flags & 0x8 else 0)
+        cw = 8 if flags & 0x1 else 4
+        record = counters * cw + (cw if flags & 0x8 else 0)
         packed = stride or record
         if data_size is None:
             data_size = count * packed
@@ -467,10 +471,10 @@ class QueryTests(unittest.TestCase):
         self.f.command('vkSeekReplyCommandStreamMESA', position=0)
         self.stat_results(count=2, flags=0x9, counters=1)
         _rtype, result, count, payload = self.read_reply()
-        self.assertEqual((result, count), (1, 24))  # VK_NOT_READY
+        self.assertEqual((result, count), (1, 32))  # VK_NOT_READY
         self.assertEqual(payload, (0).to_bytes(8, 'little') +
-                         (1).to_bytes(4, 'little') +
-                         (0).to_bytes(8, 'little') + (0).to_bytes(4, 'little'))
+                         (1).to_bytes(8, 'little') +
+                         (0).to_bytes(8, 'little') + (0).to_bytes(8, 'little'))
 
     def test_statistics_copy_writes_counter_arrays(self):
         self.create(qtype=1, count=2, stats=0x87)
@@ -480,7 +484,7 @@ class QueryTests(unittest.TestCase):
         self.f.end()
         self.f.enqueue()
         self.f.drain()
-        # 4 counters * u64 + availability = 36 bytes per query; stride 40
+        # 4 counters * u64 + u64 availability = 40 bytes per query
         self.f.begin()
         self.copy_results(count=1, flags=0x9, dst=512, stride=40)
         self.f.end()
@@ -489,8 +493,7 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(job.state, 'done')
         out = self.f.state.aperture.read(self.f.owner.base + 512, 40)
         self.assertEqual(out[:32], b'\0' * 32)
-        self.assertEqual(out[32:36], (1).to_bytes(4, 'little'))
-        self.assertEqual(out[36:], b'\0' * 4)
+        self.assertEqual(out[32:40], (1).to_bytes(8, 'little'))
 
     def test_statistics_wrong_type_ops_refuse(self):
         self.create(qtype=1, count=1, stats=0x87)

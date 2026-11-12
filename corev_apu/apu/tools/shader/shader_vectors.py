@@ -179,6 +179,52 @@ def img_init(spec, seed):
             for i in range(0, len(buf), 4)]
 
 
+def texel_bind(st, bd, ntex, texdid, kind=4, out=0, idx=0):
+    """§12.3 texel-buffer binding (UNIFORM_TEXEL_BUFFER=4 /
+    STORAGE_TEXEL_BUFFER=5).  The image-meta record's hw carries
+    h=texdid so the TB writes texdid at record byte12 (shwave reads
+    r[103:96]); w=ntex fills bytes10-11 (f_bufview_rec overwrites).
+    `size`=ntex words = ntex*bpp bytes view range (bpp==4 formats only,
+    keeping the .hex data block word-aligned)."""
+    assert img_fmts.BPP[texdid] == 4, 'texel_bind wants a 4-byte format'
+    spec = dict(w=ntex, h=texdid, fmt=texdid, mips=1, layers=1,
+                dim=0, swz=0, texel=True, ntex=ntex, texdid=texdid)
+    return (st, bd, ntex, out, (kind << 16) | idx | (1 << 24), spec)
+
+
+def texel_init(spec, seed):
+    """linear texel-buffer device data: ntex*bpp bytes; texel i gets a
+    deterministic per-index pattern (img_init's int/float/byte split
+    without the mip/layer/pitch geometry — a buffer is one row)."""
+    ntex = spec['ntex']; fmt = spec['texdid']
+    bpp = img_fmts.BPP[fmt]; attr = img_fmts.ATTR[fmt]
+    isint = (attr >> 3) & 1
+    ish16 = (attr >> 5) & 1
+    isflt = ((attr >> 4) | ish16) & 1
+    buf = bytearray(ntex * bpp)
+    rng = random.Random(seed * 104729 + ntex * 131 + fmt * 17)
+    for i in range(ntex):
+        off = i * bpp
+        if isint:
+            for c in range(bpp // 4):
+                struct.pack_into('<I', buf, off + c * 4,
+                                 (i * 37 + c * 11 + seed) & 0xFFFFFFFF)
+        elif isflt and not ish16:
+            for c in range(bpp // 4):
+                struct.pack_into('<f', buf, off + c * 4,
+                                 i * 0.5 + c * 0.25 +
+                                 rng.uniform(-0.05, 0.05))
+        elif ish16:
+            for c in range(bpp // 2):
+                struct.pack_into('<e', buf, off + c * 2,
+                                 i * 0.25 + c * 0.125)
+        else:
+            for c in range(bpp):
+                buf[off + c] = (i * 53 + c * 17 + seed * 7) & 0xFF
+    return [struct.unpack_from('<I', buf, i)[0]
+            for i in range(0, len(buf), 4)]
+
+
 # VkFormat enum for each device format id (img_fmts.VK2D inverted).
 IMG_VKFMT = (9, 16, 37, 43, 44, 50, 97, 100, 103, 109, 98, 107,
              126, 124, 129, 41)
@@ -509,6 +555,43 @@ DESC = {
     # never emits OpPhi, so phi coverage needs the .spvasm source.
     'phiflow':      dict(groups=(1, 1, 1), fmt='f', push=0, cf=True,
                          bindings=[(0, 0, 64, 0), (0, 1, 32, 1)]),
+    # copylogical is assembled from copylogical.spvasm (hand-written):
+    # glslang does not emit OpCopyLogical (opcode 400) for value copies,
+    # so coverage needs the .spvasm source.  out[i] = in[i] + copy(in[i+32]).
+    'copylogical':  dict(groups=(1, 1, 1), fmt='f', push=0, cf=False,
+                         bindings=[(0, 0, 64, 0), (0, 1, 32, 1)]),
+    # Whole-aggregate values (struct / array by value).  Pure copies: no
+    # arithmetic op to flip, so no mut arm.
+    #   agg_struct: GLSL `o.s[k] = i.s[k]`, one OpLoad + OpStore of an
+    #               8-word struct (2 RF rows) per invocation.
+    #   cl_arr:     OpCopyLogical float[32], ArrayStride 4 -> 8.
+    #   cl_mix:     OpCopyLogical {float, vec3, mat3, uint[3]} between a
+    #               column-major/stride-16 and a row-major/stride-4 layout.
+    'agg_struct':   dict(groups=(4, 1, 1), fmt='f', push=0, mut=False,
+                         bindings=[(0, 0, 256, 0), (0, 1, 256, 1)]),
+    'cl_arr':       dict(groups=(4, 1, 1), fmt='f', push=0, mut=False,
+                         bindings=[(0, 0, 32, 0), (0, 1, 64, 1)]),
+    'cl_mix':       dict(groups=(4, 1, 1), fmt='f', push=0, mut=False,
+                         bindings=[(0, 0, 32, 0), (0, 1, 24, 1)]),
+    #   agg_arr:    GLSL float[8] assignment: load by value, 8 extracts.
+    #   agg_local:  20-word struct {mat3, vec2, uint[3], float} through
+    #               two Function locals: extract + construct per member.
+    #   agg_ins:    OpCompositeInsert (constant and extracted element)
+    #               into a loaded float[8].
+    'agg_arr':      dict(groups=(4, 1, 1), fmt='f', push=0, mut=False,
+                         bindings=[(0, 0, 256, 0), (0, 1, 256, 1)]),
+    'agg_local':    dict(groups=(4, 1, 1), fmt='f', push=0, mut=False,
+                         bindings=[(0, 0, 160, 0), (0, 1, 160, 1)]),
+    'agg_ins':      dict(groups=(4, 1, 1), fmt='f', push=0, mut=False,
+                         bindings=[(0, 0, 8, 0), (0, 1, 8, 1)]),
+    #   agg_con:    OpCompositeConstruct of {vec2, float, mat2, float[2]}
+    #               (matrix id and small array value as constituents).
+    'agg_con':      dict(groups=(4, 1, 1), fmt='f', push=0, mut=False,
+                         bindings=[(0, 0, 8, 0), (0, 1, 10, 1)]),
+    #   agg_sel:    OpSelect and OpPhi of float[8], per-lane condition.
+    'agg_sel':      dict(groups=(4, 1, 1), fmt='f', push=0, mut=False,
+                         cf=True,
+                         bindings=[(0, 0, 16, 0), (0, 1, 64, 1)]),
     # §12.3 F5 corpus — memory-resident descriptor records.
     # bind aux = {kind[23:16], dyn[8], elem_idx[7:0]}; kind 7 =
     # STORAGE_BUFFER, 9 = STORAGE_BUFFER_DYNAMIC.
@@ -631,6 +714,54 @@ DESC = {
         img_bind(0, 0, dict(w=2, h=2, fmt=2, layers=4, dim=1),
                  kind=1),
         (0, 1, 32, 1, 7 << 16)]),
+    # imgarr: CTS combined_image_sampler_array analogue — a 4-element
+    # COMBINED image-sampler descriptor array at binding 0 (kind=2,
+    # idx=0..3); gid/8 selects the element divergently.  Each element is
+    # a plain 2D image (dim=0) of a DIFFERENT width on R32G32B32A32_
+    # SFLOAT so img_init's w-seeded rng yields distinguishable per-
+    # element texels — a wrong dsc_idx read returns another element's
+    # data and mismatches.  texelFetch -> OpImageFetch reads the image
+    # half only; the sampler half still resolves from the same record.
+    'imgarr':       dict(groups=(4, 1, 1), fmt='f', push=0, cf=False,
+                         bindings=[
+        img_bind(0, 0, dict(w=4, h=4, fmt=9, mips=1, layers=1, dim=0),
+                 kind=2, idx=0),
+        img_bind(0, 0, dict(w=5, h=4, fmt=9, mips=1, layers=1, dim=0),
+                 kind=2, idx=1),
+        img_bind(0, 0, dict(w=6, h=4, fmt=9, mips=1, layers=1, dim=0),
+                 kind=2, idx=2),
+        img_bind(0, 0, dict(w=7, h=4, fmt=9, mips=1, layers=1, dim=0),
+                 kind=2, idx=3),
+        (0, 1, 128, 1, 7 << 16)]),
+    # imgarr_smp: CTS sampled_image_array analogue — a 4-element
+    # SAMPLED_IMAGE descriptor array (kind=1, texture2D, Unknown fmt)
+    # at binding 0, gid/8 indexed; texelFetch needs no sampler.
+    'imgarr_smp':  dict(groups=(4, 1, 1), fmt='f', push=0, cf=False,
+                         bindings=[
+        img_bind(0, 0, dict(w=4, h=4, fmt=9, mips=1, layers=1, dim=0),
+                 kind=1, idx=0),
+        img_bind(0, 0, dict(w=5, h=4, fmt=9, mips=1, layers=1, dim=0),
+                 kind=1, idx=1),
+        img_bind(0, 0, dict(w=6, h=4, fmt=9, mips=1, layers=1, dim=0),
+                 kind=1, idx=2),
+        img_bind(0, 0, dict(w=7, h=4, fmt=9, mips=1, layers=1, dim=0),
+                 kind=1, idx=3),
+        (0, 1, 128, 1, 7 << 16)]),
+    # imgarr_st: CTS storage_image_array analogue — a 4-element STORAGE
+    # image descriptor array (kind=3, rgba32f) at binding 0, gid/8
+    # indexed.  imageLoad reads each element's distinct w-seeded data
+    # (read-index proof); imageStore+reload proves write coherence.
+    'imgarr_st':   dict(groups=(4, 1, 1), fmt='f', push=0, cf=False,
+                         bindings=[
+        img_bind(0, 0, dict(w=4, h=4, fmt=9, mips=1, layers=1, dim=0),
+                 kind=3, idx=0),
+        img_bind(0, 0, dict(w=5, h=4, fmt=9, mips=1, layers=1, dim=0),
+                 kind=3, idx=1),
+        img_bind(0, 0, dict(w=6, h=4, fmt=9, mips=1, layers=1, dim=0),
+                 kind=3, idx=2),
+        img_bind(0, 0, dict(w=7, h=4, fmt=9, mips=1, layers=1, dim=0),
+                 kind=3, idx=3),
+        (0, 1, 128, 1, 7 << 16)]),
     # texsrgb: R8G8B8A8_SRGB sample + R8G8B8A8_UNORM (rgba8) store.
     # The store-out words carry packed unorm bytes -> class 3.
     'texsrgb':      dict(groups=(1, 1, 1), fmt='i', push=0, cf=False,
@@ -644,6 +775,71 @@ DESC = {
         img_bind(0, 0, dict(w=4, h=4, fmt=2, mips=2), kind=1),
         img_bind(0, 1, dict(w=4, h=2, fmt=10), kind=3),
         (0, 2, 32, 1, 7 << 16)]),
+    # ---- §12.3 texel-buffer corpus (Dim=Buffer) ----------------------
+    # texbuf: OpImageFetch(95) on textureBuffer -> UNIFORM_TEXEL_BUFFER
+    # (kind 4); texbuf_img: OpImageRead(98) on imageBuffer ->
+    # STORAGE_TEXEL_BUFFER (kind 5).  groups=(2,1,1) -> i=0..15 with
+    # ntex=8 texels covers in-range fetch AND robust-zero OOB in one
+    # vector; out buffer = 16 vec4 = 64 words.
+    'texbuf':       dict(groups=(2, 1, 1), fmt='i', push=0, cf=False,
+                         ucls=True,
+                         bindings=[
+        texel_bind(0, 0, 8, 2, kind=4),
+        (0, 1, 64, 1, 7 << 16)]),
+    'texbuf_img':   dict(groups=(2, 1, 1), fmt='i', push=0, cf=False,
+                         ucls=True,
+                         bindings=[
+        texel_bind(0, 0, 8, 2, kind=5),
+        (0, 1, 64, 1, 7 << 16)]),
+    # texbuf_wr: OpImageWrite(99)+OpImageRead(98) on uimageBuffer ->
+    # STORAGE_TEXEL_BUFFER (kind 5), Rgba8ui (texdid 15, isint).  out=1
+    # on the image binding so .exp captures the post-write buffer memory
+    # directly (the imgcopy_rgba8ui/imgatom kind3 precedent); the SSBO
+    # carries the per-lane read-back for store->load coherence coverage.
+    'texbuf_wr':    dict(groups=(2, 1, 1), fmt='i', push=0, cf=False,
+                         ucls=True,
+                         bindings=[
+        texel_bind(0, 0, 8, 15, kind=5, out=1),
+        (0, 1, 64, 1, 7 << 16)]),
+    # texbuf_atom: imageAtomicAdd on uimageBuffer r32ui ->
+    # OpImageTexelPointer(60)+OpAtomicIAdd(234), kind5.  ntex=16 =
+    # 16 invocations so every lane hits a DISTINCT in-range texel —
+    # deterministic per-texel `old` (init value) with no RMW ordering
+    # ambiguity; out=1 captures post-add buffer memory.
+    'texbuf_atom':  dict(groups=(2, 1, 1), fmt='i', push=0, cf=False,
+                         ucls=True,
+                         bindings=[
+        texel_bind(0, 0, 16, 10, kind=5, out=1),
+        (0, 1, 16, 1, 7 << 16)]),
+    # texbuf_arr: CTS uniform_texel_buffer_array analogue — a 4-element
+    # UNIFORM_TEXEL_BUFFER descriptor array (kind=4, textureBuffer,
+    # R32_SFLOAT texdid=7) at binding 0, gid/8 indexed (dsc_idx_q).
+    # Distinct ntex per element seeds texel_init's rng differently so a
+    # wrong element index returns another element's texels; every ntex
+    # >= 8 keeps the i&7 fetch in range.  texelFetch -> OpImageFetch on
+    # Dim=Buffer (single linear index).
+    'texbuf_arr':   dict(groups=(4, 1, 1), fmt='f', push=0, cf=False,
+                         bindings=[
+        texel_bind(0, 0, 8,  7, kind=4, idx=0),
+        texel_bind(0, 0, 16, 7, kind=4, idx=1),
+        texel_bind(0, 0, 24, 7, kind=4, idx=2),
+        texel_bind(0, 0, 32, 7, kind=4, idx=3),
+        (0, 1, 128, 1, 7 << 16)]),
+    # texbuf_arr_st: CTS storage_texel_buffer_array analogue — a
+    # 4-element STORAGE_TEXEL_BUFFER descriptor array (kind=5,
+    # imageBuffer r32f) at binding 0, gid/8 indexed (dsc_idx_q).  Each
+    # lane hits a unique texel (j=i%8 -> 0..7) so load/store are
+    # race-free; distinct ntex seeds texel_init's rng per element.
+    # imageLoad reads init (read-index), imageStore writes marker
+    # e+0.5, imageLoad reads it back (store-index + store->load
+    # coherence).  out=1 captures post-write buffer memory.
+    'texbuf_arr_st':dict(groups=(4, 1, 1), fmt='f', push=0, cf=False,
+                         bindings=[
+        texel_bind(0, 0, 8,  7, kind=5, idx=0, out=1),
+        texel_bind(0, 0, 16, 7, kind=5, idx=1, out=1),
+        texel_bind(0, 0, 24, 7, kind=5, idx=2, out=1),
+        texel_bind(0, 0, 32, 7, kind=5, idx=3, out=1),
+        (0, 1, 128, 1, 7 << 16)]),
     # ---- G3a-i corpus ------------------------------------------------
     # fn_call: value-param + inout pointer-param helpers, a depth-3
     # chain, and a two-site early return — OpFunctionCall through the
@@ -782,7 +978,9 @@ def gen_inputs(desc, seed):
     outs = []
     for bi, b in enumerate(desc['bindings']):
         if len(b) > 5:
-            outs.append(img_init(img_spec(b[5], seed), seed))
+            sp = img_spec(b[5], seed)
+            outs.append(texel_init(sp, seed) if sp.get('texel')
+                        else img_init(sp, seed))
             continue
         w = b[2]
         infn = desc.get('infn')
@@ -1212,6 +1410,42 @@ GFX = {
                                                 au=2, av=2))]),
     # 16 fragments: FragCoord + vcol(loc0) -> o(loc0)
     'fs_color':    dict(stage=4, count=16, vbase=0, inst=0),
+    # fs_ubo: fragment colour = a uniform buffer read at set0/binding0
+    # (the CTS descriptor_copy.graphics shape — a UBO descriptor feed).
+    # kind 6 = UNIFORM buffer; init words carry vec4(1,.5,.25,1) so a
+    # broken resolve reads back something other than the bound data.
+    'fs_ubo':      dict(stage=4, count=16, vbase=0, inst=0,
+                       binds=[(0, 0, 4, 0, 6 << 16,
+                               [0x3F800000, 0x3F000000,
+                                0x3E800000, 0x3F800000])]),
+    # fs_ubo_array: fragment colour = u[1].c of a 2-element UBO
+    # descriptor array at binding 0 — the CTS descriptor_copy.graphics
+    # shape where the copied descriptor must reach array element 1, not
+    # the decoy element 0.  aux = {kind6[23:16], elem_idx[7:0]}; element
+    # 0 carries a distinct wrong vec4 so a dsc_idx=0 bug mismatches.
+    'fs_ubo_array': dict(stage=4, count=16, vbase=0, inst=0,
+                       binds=[(0, 0, 4, 0, (6 << 16) | 0,
+                               [0x3F400000, 0x3E000000,
+                                0x3D800000, 0x3F800000]),
+                              (0, 0, 4, 0, (6 << 16) | 1,
+                               [0x3F800000, 0x3F000000,
+                                0x3E800000, 0x3F800000])]),
+    # fs_texbuf: FS reads a UNIFORM_TEXEL_BUFFER (kind4, Dim=Buffer)
+    # via texelFetch -> OpImageFetch.  ntex=16, texdid=7 (R32_SFLOAT);
+    # 16 fragments read texels 0..15 (fragcoord.x + y*4) so each gets a
+    # distinct seeded texel — the SC_IMAGE/tx_* path for buffer-dim
+    # images, distinct from the buffer F5 resolve proven by fs_ubo.
+    'fs_texbuf':   dict(stage=4, count=16, vbase=0, inst=0,
+                       binds=[texel_bind(0, 0, 16, 7, kind=4)]),
+    # fs_img: FS reads a STORAGE_IMAGE (kind3, rgba32f) via imageLoad
+    # -> OpImageRead.  4x4 image, fragments tile (fragcoord&3); each
+    # reads a distinct seeded texel — exercises kind3 storage-image
+    # descriptor resolve + texel fetch in the fragment stage.
+    'fs_img':      dict(stage=4, count=16, vbase=0, inst=0,
+                       binds=[img_bind(0, 0,
+                                       dict(w=4, h=4, fmt=9, mips=1,
+                                            layers=1, dim=0),
+                                       kind=3)]),
     # 16 fragments in 4 quads: linear loc-0 varyings exercise
     # dFdx/dFdy/fwidth plus the Fine/Coarse forms (vbase.0 fronts)
     'fs_deriv':    dict(stage=4, count=16, vbase=1, inst=0),
@@ -1226,6 +1460,18 @@ GFX = {
                                                     mm=0, au=2,
                                                     av=2,
                                                     maxl=2.0))]),
+    # fs_smp: separate sampled-image (texture2D, kind2 @binding0) +
+    # sampler (kind0 @binding1) fused by OpSampledImage -> the W_TX3
+    # separate-sampler record fetch.  CTS descriptor_copy.graphics
+    # sampler_*/sampled_image_* analogue — the only corpus shape that
+    # exercises a standalone kind0 SAMPLER descriptor record.
+    'fs_smp':      dict(stage=4, count=16, vbase=1, inst=0,
+                         binds=[
+        img_bind(0, 0, dict(w=4, h=4, fmt=2, mips=2), kind=2),
+        img_bind(0, 1, dict(w=1, h=1, fmt=0,
+                            smp=dict(mag=1, min=1, mm=1, au=2, av=2,
+                                     maxl=2.0)), kind=0),
+    ]),
     # ---- G3a-i graphics corpus -------------------------------------
     # fs_fncall: the fn_call helper family in an FS (value params,
     # inout pointer param, depth-3 chain, early return).
@@ -1333,11 +1579,12 @@ def gfx_inputs(name, g, seed):
             rec[7] = f2b_w(0.5 * lx + 0.25 * ly + 0.03125 * q)
             w += rec
         return w
-    if name == 'fs_tex_implicit':
+    if name == 'fs_tex_implicit' or name == 'fs_smp':
         # vcol.xy texcoords: quad 0 dx-only 0.5 px^-1, quad 1 a mild
         # 0.125, quad 2 dy-only 0.5, quad 3 mild in both — a 4x4
         # mip-0 texture puts quads 0/2 at lambda=+1 (mip 1) and
-        # quads 1/3 at lambda=-1 (mip 0)
+        # quads 1/3 at lambda=-1 (mip 0).  fs_smp reuses the spread:
+        # implicit-LOD needs per-quad derivative variation.
         for i in range(g['count']):
             lx, ly, q = i & 1, (i >> 1) & 1, i >> 2
             du = (0.5, 0.125, 0.0, 0.0625)[q]
@@ -1481,8 +1728,16 @@ def emit_gfx(name, seed, spv_words, g):
             hexw += img_meta(b[5], seed)
     hexw += [0]                        # dynamic-offset section: empty
     for i, b in enumerate(binds):
-        if len(b) > 5:
-            hexw += img_init(img_spec(b[5], seed), seed)
+        if len(b) > 5 and isinstance(b[5], (list, tuple)):
+            # explicit init words for a buffer bind (b[5] is a word list)
+            iw = [w & 0xFFFFFFFF for w in b[5]]
+            hexw += iw[:b[2]] + [0] * max(0, b[2] - len(iw))
+        elif len(b) > 5:
+            sp = img_spec(b[5], seed)
+            # §12.3 texel-buffer binds (kind 4/5, spec['texel']) carry a
+            # linear texel array via texel_init, not an image via img_init
+            hexw += texel_init(sp, seed) if sp.get('texel') \
+                else img_init(sp, seed)
         else:
             hexw += [0] * b[2]
     hexw += [g['stage'], g['count'], GFXIN, GFXOUT,

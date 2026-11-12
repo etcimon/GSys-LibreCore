@@ -120,9 +120,12 @@ class NativeSubmissions:
         # spec bit order per query; other types return one u64
         counters = (len(_stat_bits((entry['aux'] & 0xFFFFFFFF) >> 8))
                     if pool_type == 1 else 1)
-        record_bytes = counters * 8 + (4 if flags & 0x8 else 0)
+        # 64_BIT is mandatory on this path, so results and the
+        # availability value are both u64 (8 bytes each)
+        record_bytes = counters * 8 + (8 if flags & 0x8 else 0)
         packed = stride if stride else record_bytes
-        if packed < record_bytes or packed % 4:
+        if (packed < record_bytes or
+                (count > 1 and packed % 8)):
             return VK_ERR_VALIDATION_FAILED, []
         needed = count * packed
         if first + count > pool_size or size < needed:
@@ -142,7 +145,8 @@ class NativeSubmissions:
                 value = slot if present else 0
                 out += [value & 0xFFFFFFFF, (value >> 32) & 0xFFFFFFFF]
             if flags & 0x8:
-                out.append(1 if present else 0)
+                # u64 availability: low word carries 0/1, high is 0
+                out += [1 if present else 0, 0]
             out += [0] * ((packed - record_bytes) // 4)
         return (golden.VK_NOT_READY if unavailable
                 else golden.VK_OK), out

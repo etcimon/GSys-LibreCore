@@ -4,12 +4,13 @@
 import importlib.util
 import io
 from pathlib import Path
-import selectors
+import queue
 import socket
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -80,12 +81,26 @@ class NativeBridgeTests(unittest.TestCase):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.client = bridge_client.Client(bridge_client.Mem())
         cleanup_owner.addCleanup(self.stop)
-        with selectors.DefaultSelector() as ready:
-            ready.register(self.process.stdout, selectors.EVENT_READ)
-            self.assertTrue(ready.select(3), 'native CLI did not become ready')
+        # Cross-platform readiness: select() cannot monitor a pipe on
+        # Windows, so the ready line is read on a daemon thread and the
+        # wait bounded with a queue timeout instead.
+        ready_q = queue.Queue()
+
+        def _ready_line():
+            try:
+                ready_q.put(self.process.stdout.readline())
+            except Exception as exc:  # noqa: BLE001 - surfaced below
+                ready_q.put(exc)
+
+        threading.Thread(target=_ready_line, daemon=True).start()
         label = ('COMPUTE-DEBUG' if getattr(self, 'compute_submit', False) else
                  'TRANSFER-DEBUG' if getattr(self, 'transfer_submit', False) else 'CONTROL-ONLY')
-        ready_line = self.process.stdout.readline()
+        try:
+            ready_line = ready_q.get(timeout=3)
+        except queue.Empty:
+            self.fail('native CLI did not become ready')
+        if isinstance(ready_line, Exception):
+            raise ready_line
         self.assertIn(label + ' NATIVE BACKEND READY', ready_line)
         self.assertIn('Vulkan-capsets=0', ready_line)
         self.client.connect(str(self.path), tmo=3)

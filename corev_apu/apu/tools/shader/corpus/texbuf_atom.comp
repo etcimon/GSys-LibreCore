@@ -1,0 +1,14 @@
+#version 450
+// §12.3 texel-buffer — imageAtomicAdd on uimageBuffer (Dim=Buffer,
+// STORAGE_TEXEL_BUFFER kind 5, r32ui).  OpImageTexelPointer(60) yields
+// the absolute texel address base+i*4; OpAtomicIAdd(234) does the
+// lane-serial RMW.  out=1 on the image binding captures post-add memory.
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0, r32ui) uniform uimageBuffer buf;
+layout(set = 0, binding = 1) buffer Out { uint o[]; } ob;
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    uint old = imageAtomicAdd(buf, i, 1u);   // pre-add texel value
+    ob.o[i] = old;
+}

@@ -1,0 +1,22 @@
+#version 460
+layout(local_size_x = 8) in;
+// §12.3 F5 storage-texel-buffer descriptor array (CTS
+// storage_texel_buffer_array analogue): 4 imageBuffer elements at
+// binding 0, kind=5, indexed by gid/8 (dsc_idx_q).  Each lane uses a
+// UNIQUE texel within its element (j=i%8 -> texels 0..7) so no two
+// invocations race on one texel.  imageLoad reads element e's distinct
+// ntex-seeded texel (read-index proof); imageStore writes marker
+// (e+0.5); imageLoad reads it back (store-index + store->load
+// coherence through dsc_idx_q on OpImageWrite/OpImageRead).  r32f
+// imageBuffer imageLoad/imageStore carry vec4 (single float channel).
+layout(set = 0, binding = 0, r32f) uniform imageBuffer imgs[4];
+layout(set = 0, binding = 1) buffer Out { vec4 o[]; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint e = i / 8;
+    uint j = i % 8;
+    vec4 before = imageLoad(imgs[e], int(j));
+    imageStore(imgs[e], int(j), vec4(float(e) + 0.5, 0.0, 0.0, 1.0));
+    vec4 after = imageLoad(imgs[e], int(j));
+    o[i] = before * 1024.0 + after;
+}

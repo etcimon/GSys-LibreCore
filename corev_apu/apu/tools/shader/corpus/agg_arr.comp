@@ -1,0 +1,10 @@
+#version 450
+// Whole-array assignment: glslang loads float[8] by value and stores it
+// element by element (OpCompositeExtract x8 from a 2-row value).
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0, std430) buffer I { float a[32][8]; } i;
+layout(set = 0, binding = 1, std430) buffer O { float a[32][8]; } o;
+void main() {
+    uint k = gl_GlobalInvocationID.x;
+    o.a[k] = i.a[k];
+}

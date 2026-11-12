@@ -3195,13 +3195,15 @@ class DrawReplayTests(unittest.TestCase):
         # host readback returns the same ordered count
         self.f.command('vkSeekReplyCommandStreamMESA', position=0)
         self.f.command('vkGetQueryPoolResults', device=self.w.DEVICE,
-            queryPool=pool, firstQuery=0, queryCount=1, dataSize=12,
-            pData=b'\0' * 12, stride=12, flags=0x1 | 0x8)
+            queryPool=pool, firstQuery=0, queryCount=1, dataSize=16,
+            pData=b'\0' * 16, stride=16, flags=0x1 | 0x8)
         mapping = self.f.blobs.map(7, 0)
         head = self.f.blobs.read(mapping, 0, 16)
         rtype, result, count = struct.unpack('<IIQ', head)
         payload = self.f.blobs.read(mapping, 16, count)
-        value, avail = struct.unpack('<QI', payload[:12])
+        # 64_BIT widens the availability word to u64 too (spec): the
+        # (result,availability) pair is 16 bytes, not 12.
+        value, avail = struct.unpack('<QQ', payload[:16])
         self.assertEqual((result, value, avail), (0, fragments, 1))
 
     def test_statistics_query_counts_draw_stage_work(self):

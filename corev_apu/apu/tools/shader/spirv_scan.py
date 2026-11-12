@@ -21,6 +21,8 @@ import json
 import struct
 import sys
 
+import sh_opcodes
+
 MAGIC = 0x07230203
 
 # ---- table geometry (must match g6lc_apu_sh_pkg) ------------------
@@ -135,102 +137,37 @@ DEC_MBR_OK = {DEC['RelaxedPrecision'], DEC['RowMajor'], DEC['ColMajor'],
               DEC['NonReadable'], DEC['NoContraction'], DEC['SpecId'],
               DEC['Builtin']}
 
-CAP_OK = {1, 50, 51, 5379}  # + DemoteToHelperInvocation (G3a-i)
+CAP_OK = {1, 46, 47, 50, 51, 5379,
+          # descriptor-array dynamic indexing — the shwave dsc_idx_q
+          # record-select path is storage-class agnostic (UNIFORM /
+          # UNIFORMCONST / SBUF), so every array-of-descriptors kind
+          # the module admits is covered.  5303 input-attachment and
+          # the 5306-5312 NonUniform variants stay refused: input
+          # attachments are a fragment subpass mechanism and
+          # nonuniformEXT needs divergent-fetch qualification.
+          28, 29, 30, 31, 5304, 5305}
+# 1=Shader, 46=SampledBuffer, 47=ImageBuffer (§12.3 Dim=Buffer texel
+# fetch/read — operand values verified from corpus .spv), 50/51=
+# storage-image format caps, 5379=DemoteToHelper; 28-31/5304-5305 =
+# *ArrayDynamicIndexing (UniformBuffer/SampledImage/StorageBuffer/
+# StorageImage/UniformTexelBuffer/StorageTexelBuffer)
 EXEC_MODE_OK = {17}    # LocalSize (OriginUpperLeft=7 handled inline)
 MEM_OK = (0, 1)        # Logical GLSL450
 ENTRY_MODEL_OK = set(EM.values())   # Vertex/Fragment/GLCompute
 
 # accepted opcodes (grammar spirv.core.grammar.json vulkan-sdk-
 # 1.4.309.0): the 4a execution subset plus header/type/decor
-OP = dict(
-    Nop=0, Source=3, SourceExtension=4, Name=5, MemberName=6,
-    String=7, Line=8, Extension=10,
-    ExtInstImport=11, ExtInst=12, MemoryModel=14, EntryPoint=15,
-    ExecutionMode=16, Capability=17,
-    TypeVoid=19, TypeBool=20, TypeInt=21, TypeFloat=22, TypeVector=23,
-    TypeMatrix=24, TypeImage=25, TypeSampler=26, TypeSampledImage=27,
-    TypeArray=28, TypeRuntimeArray=29,
-    TypeStruct=30, TypePointer=32, TypeFunction=33,
-    ConstantTrue=41, ConstantFalse=42, Constant=43,
-    ConstantComposite=44, ConstantNull=46,
-    SpecConstantTrue=48, SpecConstantFalse=49, SpecConstant=50,
-    SpecConstantComposite=51, SpecConstantOp=52,
-    # §12.3 C/5b image ops — the implicit-lod forms (87,89,91,93) and
-    # QueryLod (105) are fragment-only (FRAG_ONLY below); explicit
-    # (90,92,94) and gather (96,97) run in any model
-    SampledImage=86, ImageSampleImplicitLod=87,
-    ImageSampleExplicitLod=88,
-    ImageSampleDrefImplicitLod=89, ImageSampleDrefExplicitLod=90,
-    ImageSampleProjImplicitLod=91, ImageSampleProjExplicitLod=92,
-    ImageSampleProjDrefImplicitLod=93, ImageSampleProjDrefExplicitLod=94,
-    ImageFetch=95, ImageGather=96, ImageDrefGather=97,
-    ImageRead=98, ImageWrite=99, Image=100,
-    ImageQuerySizeLod=103, ImageQuerySize=104, ImageQueryLod=105,
-    ImageQueryLevels=106,
-    Function=54, FunctionParameter=55, FunctionEnd=56,
-    FunctionCall=57, Variable=59, ImageTexelPointer=60, Load=61, Store=62,
-    AccessChain=65, InBoundsAccessChain=66, ArrayLength=68,
-    Decorate=71, MemberDecorate=72,
-    VectorShuffle=79, CompositeConstruct=80, CompositeExtract=81,
-    CompositeInsert=82, Transpose=84,
-    # G3a-i: misc/value ops
-    Undef=1, VectorExtractDynamic=77, VectorInsertDynamic=78,
-    CopyObject=83, FRem=140, FMod=141,
-    IAddCarry=149, ISubBorrow=150, UMulExtended=151, SMulExtended=152,
-    Any=154, All=155, IsNan=156, IsInf=157,
-    ConvertFToU=109, ConvertFToS=110, ConvertSToF=111,
-    ConvertUToF=112, Bitcast=124,
-    SNegate=126, FNegate=127, IAdd=128, FAdd=129, ISub=130, FSub=131,
-    IMul=132, FMul=133, UDiv=134, SDiv=135, FDiv=136, UMod=137,
-    SRem=138, SMod=139,
-    VectorTimesScalar=142,
-    MatrixTimesScalar=143, VectorTimesMatrix=144,
-    MatrixTimesVector=145, MatrixTimesMatrix=146,
-    OuterProduct=147, Dot=148,
-    LogicalEqual=164, LogicalNotEqual=165, LogicalOr=166,
-    LogicalAnd=167, LogicalNot=168, Select=169,
-    IEqual=170, INotEqual=171, UGreaterThan=172, SGreaterThan=173,
-    UGreaterThanEqual=174, SGreaterThanEqual=175, ULessThan=176,
-    SLessThan=177, ULessThanEqual=178, SLessThanEqual=179,
-    FOrdEqual=180, FUnordEqual=181, FOrdNotEqual=182,
-    FUnordNotEqual=183, FOrdLessThan=184, FUnordLessThan=185,
-    FOrdGreaterThan=186, FUnordGreaterThan=187,
-    FOrdLessThanEqual=188, FUnordLessThanEqual=189,
-    FOrdGreaterThanEqual=190, FUnordGreaterThanEqual=191,
-    ShiftRightLogical=194, ShiftRightArithmetic=195,
-    ShiftLeftLogical=196, BitwiseOr=197, BitwiseXor=198,
-    BitwiseAnd=199, Not=200,
-    BitFieldInsert=201, BitFieldSExtract=202, BitFieldUExtract=203,
-    BitReverse=204, BitCount=205,
-    # G3a-i: 32-bit atomics (lane-serial read-modify-write)
-    AtomicLoad=227, AtomicStore=228, AtomicExchange=229,
-    AtomicCompareExchange=230, AtomicIIncrement=232,
-    AtomicIDecrement=233, AtomicIAdd=234, AtomicISub=235,
-    AtomicSMin=236, AtomicUMin=237, AtomicSMax=238, AtomicUMax=239,
-    AtomicAnd=240, AtomicOr=241, AtomicXor=242,
-    # G2b derivative family — fragment-only (FRAG_ONLY); quads are
-    # lanes {4k..4k+3} of a wave
-    DPdx=207, DPdy=208, Fwidth=209,
-    DPdxFine=210, DPdyFine=211, FwidthFine=212,
-    DPdxCoarse=213, DPdyCoarse=214, FwidthCoarse=215,
-    ControlBarrier=224, MemoryBarrier=225,
-    Phi=245, LoopMerge=246, SelectionMerge=247,
-    Label=248, Branch=249, BranchConditional=250, Switch=251,
-    Kill=252, Return=253, ReturnValue=254, Unreachable=255,
-    # G3a-i fragment termination / helper ops (SPV_EXT_terminator /
-    # demote; all FRAG_ONLY)
-    TerminateInvocation=4416, DemoteToHelperInvocation=5380,
-    IsHelperInvocationEXT=5381,
-)
+# The opcode set lives in sh_opcodes.py (one table for the scanner,
+# the model and the RTL case labels).
+OP = dict(sh_opcodes.OP)
 
-ACCEPT = set(OP.values())
+ACCEPT = set(sh_opcodes.ACCEPT)
 
 # opcodes legal only inside a Fragment-execution-model module: the
 # implicit-LOD samples (87/89/91/93) and QueryLod (105) need quad
 # derivatives that VS/compute waves never form, and 207-215 *are*
 # quad derivatives
-FRAG_ONLY = {87, 89, 91, 93, 105, 207, 208, 209, 210, 211, 212, 213,
-             214, 215, 252, 4416, 5380, 5381}
+FRAG_ONLY = set(sh_opcodes.FRAG_ONLY)
 
 # instruction word bound for ops that stage all operand words
 STAGE_BOUND = {57, 245, 224, 225, 246, 247, 250, 251, 84,
@@ -334,14 +271,10 @@ class Scanner:
             self.regmap[iid] = (1, iid, tid, aux)
             self.n_consts += 1
         else:
-            n = 1
-            t = self.types.get(tid)
-            if t is not None and t['kind'] == TK['MAT']:
-                n = t['cols']
-            elif t is not None and t['kind'] == TK['STRUCT']:
-                # G3a-i struct-typed results (IAddCarry / ModfStruct /
-                # FrexpStruct): flat word image, 4 words per RF row
-                n = (self.struct_words(tid) + 3) // 4
+            # struct / array values: flat logical word image, 4 words per
+            # RF row (IAddCarry / ModfStruct / FrexpStruct results, and
+            # any aggregate loaded, constructed or copied by value)
+            n = self.reg_rows(tid)
             if self.n_regs + n > SHADER_REGS:
                 raise Fault(FAULT['REGS'], 0, 0)
             self.regmap[iid] = (0, self.n_regs, tid, aux)
@@ -360,29 +293,42 @@ class Scanner:
             return self.struct_words(tid)
         if k == TK['ARRAY']:
             return t.get('length', 0) * self.nwords(t['elem'])
+        if k == TK['RARRAY']:
+            return 0            # never a value; a block ending in one
         return 1
 
     def struct_words(self, tid):
-        """word extent of a struct-typed value (member offsets + each
-        member's flat word count)."""
+        """words of a struct-typed VALUE.  A value in the register file is
+        the logical image: members packed in declaration order, each at
+        its own flat word count.  Offset / ArrayStride / MatrixStride
+        describe memory only and are applied by the OpLoad / OpStore leaf
+        walk, so two layouts of one logical type share one image (that is
+        what makes OpCopyLogical a plain copy)."""
         t = self.types.get(tid, {})
         if t.get('kind') != TK['STRUCT']:
             return 0
         mb = self.member_base.get(tid, 0)
-        top = 0
-        for i in range(t['nmemb']):
-            m = self.members[mb + i]
-            top = max(top, m['offset'] // 4 + self.nwords(m['type']))
-        return top
+        return sum(self.nwords(self.members[mb + i]['type'])
+                   for i in range(t['nmemb']))
+
+    def member_woff(self, tid, idx):
+        """flat word offset of member idx inside a struct VALUE."""
+        mb = self.member_base.get(tid, 0)
+        return sum(self.nwords(self.members[mb + i]['type'])
+                   for i in range(idx))
+
+    def is_agg(self, tid):
+        return self.types.get(tid, {}).get('kind') in (TK['STRUCT'],
+                                                       TK['ARRAY'])
 
     def reg_rows(self, tid):
-        """RF rows a value of type tid occupies (mat=cols, struct=
+        """RF rows a value of type tid occupies (mat=cols, struct/array=
         ceil(words/4), everything else 1) — the reg() row count."""
         t = self.types.get(tid, {})
         if t.get('kind') == TK['MAT']:
             return t['cols']
-        if t.get('kind') == TK['STRUCT']:
-            return (self.struct_words(tid) + 3) // 4
+        if t.get('kind') in (TK['STRUCT'], TK['ARRAY']):
+            return max(1, (self.nwords(tid) + 3) // 4)
         return 1
 
     def decor_of(self, iid):
@@ -472,10 +418,13 @@ class Scanner:
                 raise Fault(FAULT['FWDREF'], opc, at)
             if self.types[st]['kind'] not in (TK['INT'], TK['FLOAT']):
                 raise Fault(FAULT['TYPE'], opc, at)
-            # 2D images only, no MSAA; the declared ImageFormat operand
+            # 2D (dim 1) and Buffer (dim 5) images; Buffer forbids
+            # depth/arrayed.  No MSAA; the declared ImageFormat operand
             # (0..41 defined) is informational — the descriptor record's
             # format governs decode, so any legal value is accepted
-            if (dim != 1 or depth > 1 or arr > 1 or ms != 0 or
+            dimok = (dim == 1 and depth <= 1 and arr <= 1) or \
+                    (dim == 5 and depth == 0 and arr == 0)
+            if (not dimok or ms != 0 or
                     smp not in (1, 2) or fmt > 41):
                 raise Fault(FAULT['TYPE'], opc, at)
             t = dict(kind=TK['IMG'], sign=depth, comps=arr,
@@ -530,6 +479,7 @@ class Scanner:
             # packed layout (each member at the running size total) —
             # carry/borrow structs never carry decorations
             noff = 0
+            woff = 0
             for i, mt in enumerate(ops):
                 if mt not in self.types:
                     raise Fault(FAULT['FWDREF'], opc, at)
@@ -537,8 +487,10 @@ class Scanner:
                 mo = d.get('offset', noff)
                 self.members.append(dict(type=mt, offset=mo,
                                          mstride=d.get('mstride', 0),
-                                         flags=d.get('flags', 0)))
+                                         flags=d.get('flags', 0),
+                                         woff=woff))
                 noff = mo + self.nwords(mt) * 4
+                woff += self.nwords(mt)
             t = dict(kind=TK['STRUCT'], sign=0, comps=0, cols=0,
                      storage=0, elem=0, nmemb=len(ops), length=0,
                      size=0, stride=0, has_bi=has_bi)
@@ -626,10 +578,17 @@ class Scanner:
             raise Fault(FAULT['TYPE'], OP['Variable'], at)
         if sc in (SC['UNIFORMCONST'],):
             # §12.3 C/5b: image/sampler/sampled-image vars only —
-            # everything else under UniformConstant stays refused
+            # everything else under UniformConstant stays refused.
+            # A descriptor array wraps the image element in
+            # OpTypeArray/OpTypeRuntimeArray, so unwrap to the base
+            # element kind before the family check (the access-chain
+            # index into the array becomes the record's elem_idx).
             et = self.types.get(t['elem'])
-            if et is None or et['kind'] not in (
-                    TK['IMG'], TK['SAMP'], TK['SIMG']):
+            ek = et['kind'] if et is not None else TK['NONE']
+            while ek in (TK['ARRAY'], TK['RARRAY']):
+                et = self.types.get(et['elem'])
+                ek = et['kind'] if et is not None else TK['NONE']
+            if ek not in (TK['IMG'], TK['SAMP'], TK['SIMG']):
                 raise Fault(FAULT['STORAGE'], OP['Variable'], at)
         d = self.decor_of(rid)
         off = 0
@@ -766,6 +725,12 @@ class Scanner:
                 raise Fault(FAULT['OPCODE'], opc, at)
             if 207 <= opc <= 215:
                 self.has_deriv = True
+            # accepted means executed: a struct / array result is legal
+            # only on the opcodes that carry every row of it
+            if (opc in sh_opcodes.RESULT and
+                    opc not in sh_opcodes.AGG_RESULT and len(ops) >= 1 and
+                    self.is_agg(ops[0])):
+                raise Fault(FAULT['TYPE'], opc, at)
             if opc in STAGE_BOUND and wc - 1 > OPN_MAX:
                 raise Fault(FAULT['WORDS'], opc, at)
             h = getattr(self, 'h_%d' % opc, None)
@@ -1172,29 +1137,9 @@ class Scanner:
     def h_noresult(self, opc, ops, at):
         pass
 
-    # result-bearing execution instructions
-    for _o in [61, 65, 66, 68, 79, 80, 81, 82, 84, 109, 110, 111, 112,
-               124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135,
-               136, 137, 138, 139, 142, 143, 144, 145, 146, 147, 148,
-               164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174,
-               175, 176, 177, 178, 179, 180, 182, 183, 184, 186, 188,
-               190, 194, 195, 196, 197, 198, 199, 200,
-               # G2b: implicit LOD + quad-derivative result registers
-               87, 207, 208, 209, 210, 211, 212, 213, 214, 215,
-               # §12.3 C/5b: image ops with a result register
-               60, 86, 88, 95, 98, 100, 103, 104, 106,
-               # G3a-ii: dref/proj/gather/querylod results
-               89, 90, 91, 92, 93, 94, 96, 97, 105,
-               # G3a-i: undef/copy, dynamic vector ops, fp/int
-               # remainder + carry/borrow/wide-mul struct results,
-               # reductions, fp tests, unordered compares, bitfield ops
-               1, 77, 78, 83, 140, 141, 149, 150, 151, 152, 154, 155,
-               156, 157, 181, 185, 187, 189, 191,
-               201, 202, 203, 204, 205,
-               # G3a-i: atomics with a result (AtomicStore has none),
-               # helper-invocation query
-               227, 229, 230, 232, 233, 234, 235, 236, 237, 238, 239,
-               240, 241, 242, 5381]:
+    # result-bearing execution instructions (sh_opcodes.py); the
+    # SCAN_OWN opcodes register their result in their own handler
+    for _o in sorted(sh_opcodes.RESULT - set(sh_opcodes.SCAN_OWN)):
         exec('h_%d = h_result' % _o)
 
     h_99 = h_noresult                        # OpImageWrite
@@ -1211,6 +1156,12 @@ class Scanner:
               (TY_HAS_MBI if t.get('has_bi') else 0))
         w1 = (self.member_base.get(tid, 0) & 0xFFFF) | \
              ((t['length'] & 0xFFFF) << 16)
+        # logical word count of a value of this type, in the slot the
+        # kind leaves free: struct -> length slot, array -> member base
+        if t['kind'] == TK['STRUCT']:
+            w1 |= (self.nwords(tid) & 0xFFFF) << 16
+        elif t['kind'] == TK['ARRAY']:
+            w1 |= self.nwords(tid) & 0xFFFF
         w2 = (self.size_of(tid) & 0xFFFF) | ((t['stride'] & 0xFFFF) << 16)
         return [w32(w0), w32(w1), w32(w2)]
 
@@ -1231,7 +1182,8 @@ class Scanner:
     def member_words(self, i):
         m = self.members[i]
         return [w32(m['offset'] | (m['mstride'] << 16)),
-                w32(m['flags'] | (m['type'] << 8))]
+                w32(m['flags'] | (m['type'] << 8) |
+                    ((m.get('woff', 0) & 0x3FFF) << 18))]
 
     def const_tab(self, iid):
         return (self.consts.get(iid, []) + [0] * CONST_WORDS)[:CONST_WORDS]

@@ -1,0 +1,69 @@
+; agg_sel.spvasm - OpSelect and OpPhi of a 2-row array value, with a
+; condition that differs per lane (odd / even invocation index).
+;   o[i] = (i & 1) ? a : b      (OpSelect, scalar condition)
+;   p[i] = (i & 1) ? b : a      (OpPhi over two branches)
+; Assembled with `spirv-as --target-env vulkan1.2`.
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %in_var %out_var %lii
+               OpExecutionMode %main LocalSize 4 1 1
+               OpDecorate %lii BuiltIn LocalInvocationIndex
+               OpDecorate %arr ArrayStride 4
+               OpDecorate %arr4 ArrayStride 32
+               OpDecorate %blk_a Block
+               OpMemberDecorate %blk_a 0 Offset 0
+               OpMemberDecorate %blk_a 1 Offset 32
+               OpDecorate %blk_b Block
+               OpMemberDecorate %blk_b 0 Offset 0
+               OpMemberDecorate %blk_b 1 Offset 128
+               OpDecorate %in_var DescriptorSet 0
+               OpDecorate %in_var Binding 0
+               OpDecorate %out_var DescriptorSet 0
+               OpDecorate %out_var Binding 1
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+       %bool = OpTypeBool
+      %float = OpTypeFloat 32
+       %uint = OpTypeInt 32 0
+        %int = OpTypeInt 32 1
+      %int_0 = OpConstant %int 0
+      %int_1 = OpConstant %int 1
+     %uint_0 = OpConstant %uint 0
+     %uint_1 = OpConstant %uint 1
+     %uint_4 = OpConstant %uint 4
+     %uint_8 = OpConstant %uint 8
+        %arr = OpTypeArray %float %uint_8
+       %arr4 = OpTypeArray %arr %uint_4
+      %blk_a = OpTypeStruct %arr %arr
+      %blk_b = OpTypeStruct %arr4 %arr4
+  %ptr_blk_a = OpTypePointer StorageBuffer %blk_a
+  %ptr_blk_b = OpTypePointer StorageBuffer %blk_b
+    %ptr_arr = OpTypePointer StorageBuffer %arr
+ %ptr_in_u32 = OpTypePointer Input %uint
+     %in_var = OpVariable %ptr_blk_a StorageBuffer
+    %out_var = OpVariable %ptr_blk_b StorageBuffer
+        %lii = OpVariable %ptr_in_u32 Input
+       %main = OpFunction %void None %3
+          %5 = OpLabel
+          %i = OpLoad %uint %lii
+        %bit = OpBitwiseAnd %uint %i %uint_1
+          %c = OpINotEqual %bool %bit %uint_0
+         %pa = OpAccessChain %ptr_arr %in_var %int_0
+         %pb = OpAccessChain %ptr_arr %in_var %int_1
+          %a = OpLoad %arr %pa
+          %b = OpLoad %arr %pb
+          %s = OpSelect %arr %c %a %b
+         %po = OpAccessChain %ptr_arr %out_var %int_0 %i
+               OpStore %po %s
+               OpSelectionMerge %m None
+               OpBranchConditional %c %t %f
+          %t = OpLabel
+               OpBranch %m
+          %f = OpLabel
+               OpBranch %m
+          %m = OpLabel
+          %v = OpPhi %arr %b %t %a %f
+         %pp = OpAccessChain %ptr_arr %out_var %int_1 %i
+               OpStore %pp %v
+               OpReturn
+               OpFunctionEnd

@@ -1,0 +1,15 @@
+#version 460
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 8) in;
+// §12.3 F5 texel-buffer descriptor array (CTS uniform_texel_buffer_array
+// analogue): 4 textureBuffer elements at binding 0, kind=4, indexed by
+// gid/8.  texelFetch is OpImageFetch on Dim=Buffer — a single linear
+// texel index; isolates dsc_idx_q for UNIFORM_TEXEL_BUFFER records.
+// Distinct ntex per element seeds texel_init's rng differently (float
+// R32_SFLOAT) so a wrong index returns another element's texels.
+layout(set = 0, binding = 0) uniform textureBuffer texs[4];
+layout(set = 0, binding = 1) buffer Out { vec4 o[]; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    o[i] = texelFetch(texs[i / 8], int(i & 7));
+}

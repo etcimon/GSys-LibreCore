@@ -1,0 +1,16 @@
+#version 450
+// §12.3 texel-buffer — OpImageWrite(99) on uimageBuffer (Dim=Buffer,
+// STORAGE_TEXEL_BUFFER kind 5).  Each lane stores a deterministic
+// uvec4 to texel i then reads it back; the image binding is is_out so
+// the .exp also captures the post-write buffer memory directly.
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0, rgba8ui) uniform uimageBuffer buf;
+layout(set = 0, binding = 1) buffer Out { uvec4 o[]; } ob;
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    uvec4 v = uvec4(uint(i) * 4u + 1u, uint(i) * 4u + 2u,
+                    uint(i) * 4u + 3u, uint(i) * 4u + 4u);
+    imageStore(buf, i, v);          // OpImageWrite — kind5 Dim=Buffer
+    ob.o[i] = imageLoad(buf, i);    // OpImageRead  — read back written texel
+}

@@ -1,0 +1,95 @@
+; phiflow.spvasm — OpPhi coverage for increment 4b.
+; glslang 15.1.0 never emits OpPhi (?: && || lower through Function
+; temporaries), so this file is the glslang disassembly of
+; corpus/phitest.comp with the %40 temporary replaced by a real OpPhi
+; at the selection merge:
+;     dst[i] = (a > 0.5) ? a*b : sqrt(a)
+; Assembled with `spirv-as --target-env vulkan1.1`.
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %_ %gl_LocalInvocationIndex %__0
+               OpExecutionMode %main LocalSize 32 1 1
+               OpSource GLSL 460
+               OpName %main "main"
+               OpName %gl_LocalInvocationIndex "gl_LocalInvocationIndex"
+               OpName %In "In"
+               OpMemberName %In 0 "src"
+               OpName %_ ""
+               OpName %Out "Out"
+               OpMemberName %Out 0 "dst"
+               OpName %__0 ""
+               OpDecorate %gl_LocalInvocationIndex BuiltIn LocalInvocationIndex
+               OpDecorate %_runtimearr_float ArrayStride 4
+               OpDecorate %In Block
+               OpMemberDecorate %In 0 NonWritable
+               OpMemberDecorate %In 0 Offset 0
+               OpDecorate %_ NonWritable
+               OpDecorate %_ Binding 0
+               OpDecorate %_ DescriptorSet 0
+               OpDecorate %_runtimearr_float_0 ArrayStride 4
+               OpDecorate %Out Block
+               OpMemberDecorate %Out 0 NonReadable
+               OpMemberDecorate %Out 0 Offset 0
+               OpDecorate %__0 NonReadable
+               OpDecorate %__0 Binding 1
+               OpDecorate %__0 DescriptorSet 0
+               OpDecorate %gl_WorkGroupSize BuiltIn WorkgroupSize
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+%_ptr_Function_uint = OpTypePointer Function %uint
+%_ptr_Input_uint = OpTypePointer Input %uint
+%gl_LocalInvocationIndex = OpVariable %_ptr_Input_uint Input
+      %float = OpTypeFloat 32
+%_ptr_Function_float = OpTypePointer Function %float
+%_runtimearr_float = OpTypeRuntimeArray %float
+         %In = OpTypeStruct %_runtimearr_float
+%_ptr_StorageBuffer_In = OpTypePointer StorageBuffer %In
+          %_ = OpVariable %_ptr_StorageBuffer_In StorageBuffer
+        %int = OpTypeInt 32 1
+      %int_0 = OpConstant %int 0
+%_ptr_StorageBuffer_float = OpTypePointer StorageBuffer %float
+    %uint_32 = OpConstant %uint 32
+%_runtimearr_float_0 = OpTypeRuntimeArray %float
+        %Out = OpTypeStruct %_runtimearr_float_0
+%_ptr_StorageBuffer_Out = OpTypePointer StorageBuffer %Out
+        %__0 = OpVariable %_ptr_StorageBuffer_Out StorageBuffer
+  %float_0_5 = OpConstant %float 0.5
+       %bool = OpTypeBool
+     %v3uint = OpTypeVector %uint 3
+     %uint_1 = OpConstant %uint 1
+%gl_WorkGroupSize = OpConstantComposite %v3uint %uint_32 %uint_1 %uint_1
+; copylogical.spvasm - OpCopyLogical (opcode 400) coverage.
+; glslang does not emit OpCopyLogical, so this is hand-written SPIR-V
+; (same 2-SSBO shape as phiflow).  OpCopyLogical copies an aggregate
+; whose result type differs from (but logically matches) the operand:
+;     pair = {in[i], in[i+32]}; q = OpCopyLogical(pair); out[i]=q.0+q.1
+; Assembled with `spirv-as --target-env vulkan1.2`.
+      %pair_a = OpTypeStruct %float %float
+      %pair_b = OpTypeStruct %float %float
+%_ptr_Function_pair_a = OpTypePointer Function %pair_a
+%_ptr_Function_pair_b = OpTypePointer Function %pair_b
+       %main = OpFunction %void None %3
+          %5 = OpLabel
+          %i = OpVariable %_ptr_Function_uint Function
+         %pa = OpVariable %_ptr_Function_pair_a Function
+         %11 = OpLoad %uint %gl_LocalInvocationIndex
+               OpStore %i %11
+         %21 = OpLoad %uint %i
+         %23 = OpAccessChain %_ptr_StorageBuffer_float %_ %int_0 %21
+         %av = OpLoad %float %23
+         %26 = OpLoad %uint %i
+         %28 = OpIAdd %uint %26 %uint_32
+         %29 = OpAccessChain %_ptr_StorageBuffer_float %_ %int_0 %28
+         %bv = OpLoad %float %29
+         %pk = OpCompositeConstruct %pair_a %av %bv
+         %cv = OpCopyLogical %pair_b %pk
+               OpStore %pa %pk
+         %e0 = OpCompositeExtract %float %cv 0
+         %e1 = OpCompositeExtract %float %cv 1
+         %sum = OpFAdd %float %e0 %e1
+         %50 = OpAccessChain %_ptr_StorageBuffer_float %__0 %int_0 %21
+               OpStore %50 %sum
+               OpReturn
+               OpFunctionEnd

@@ -68,6 +68,7 @@ from fractions import Fraction
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import spirv_scan  # noqa: E402
+import sh_opcodes  # noqa: E402  the opcode table
 import srgb_lut    # noqa: E402  generated — mirrors g6lc_apu_srgb_pkg
 import sfu_tables  # noqa: E402  generated — mirrors g6lc_apu_sfu_pkg
 import img_fmts    # noqa: E402  generated — mirrors APU_VN_IMG_*
@@ -385,11 +386,11 @@ def u32(x):
 
 # descriptor-kind legality per opcode (f_tx_kind): 0 SAMPLER,
 # 1 COMBINED_IMAGE_SAMPLER, 2 SAMPLED_IMAGE, 3 STORAGE_IMAGE
-IMG_KIND_OK = {95: (1, 2), 87: (1, 2), 88: (1, 2), 98: (2, 3),
+IMG_KIND_OK = {95: (1, 2, 4), 87: (1, 2), 88: (1, 2), 98: (2, 3, 5),
                89: (1, 2), 90: (1, 2), 91: (1, 2), 92: (1, 2),
                93: (1, 2), 94: (1, 2), 96: (1, 2), 97: (1, 2),
                105: (1, 2),
-               99: (3,),
+               99: (3, 5),
                103: (0, 1, 2, 3), 104: (0, 1, 2, 3), 106: (0, 1, 2, 3)}
 
 
@@ -641,6 +642,17 @@ class Model:
             kind = (ax >> 16) & 0xFF
             if not kind and not ax & (1 << 24):
                 kind = 7
+            # §12.3 texel-buffer: kinds 4/5 carry no image-view half —
+            # synthesize the degenerate Wx1 meta that shwave's
+            # f_bufview_rec produces (width=esz/bpp(texdid), h=1,
+            # fmt=texdid, mips=1, layers=1).  texdid sits at record
+            # byte12 = meta-word hw[23:16] = (hw>>16)&0xFF.
+            if kind in (4, 5) and ax & (1 << 24):
+                td = (b[5] >> 16) & 0xFF
+                bpp = img_fmts.BPP[td & 15] or 1
+                meta = dict(w=sz // bpp, h=1, fmt=td & 15,
+                            mdim=0x01, layers=1, swz=0, smp0=0, smp1=0,
+                            buf=1)
             key = (st, bd)
             row = self.drows.get(key)
             if row is None:
@@ -926,8 +938,13 @@ class Model:
                 if opc != 99:
                     self.setres(rid, wb, ncomp)
                 return nxt
-            iu, iv = s32(va[1][0]), s32(va[1][1])
-            ly = (va[1][2] & 0xFFFF) if dim == 1 else 0
+            # §12.3 texel-buffer: a single linear index — no v/layer
+            # component; force iv=0 like shwave's tx_iv_q so a stale
+            # vector slot can't trip the (synthesized) height bound
+            iu = s32(va[1][0])
+            iv = 0 if meta.get('buf') else s32(va[1][1])
+            ly = (va[1][2] & 0xFFFF) if (dim == 1 and not meta.get('buf')) \
+                 else 0
             wk, layb = self.img_walk(meta, lod)
             mof, pit, w0, h0 = wk[lod]
             # W_TXB bounds
@@ -1592,9 +1609,9 @@ class Model:
                 for j in range(comps):
                     dst[j] = vec[c * comps + j] & 0xFFFFFFFF
             return
-        if t.get('kind') == TK['STRUCT']:
-            # G3a-i struct results (IAddCarry, ModfStruct, ...): the
-            # flat word image packs 4 words per RF row
+        if t.get('kind') in (TK['STRUCT'], TK['ARRAY']):
+            # struct / array values: the flat logical word image packs
+            # 4 words per RF row
             nw = self.sc.nwords(r[2])
             for j in range(min(nw, len(vec))):
                 self.rf[r[1] + j // 4][j % 4] = vec[j] & 0xFFFFFFFF
@@ -1611,8 +1628,84 @@ class Model:
             return [0]
         if r[0] == 1:
             return list(self.sc.consts.get(iid, [0]))
+        if self.sc.types.get(r[2], {}).get('kind') == TK['MAT']:
+            # a matrix id holds one column per RF row
+            return [w for col in self.matv(iid) for w in col]
         n = self.sc.nwords(r[2])
         return [self.rf[r[1] + k // 4][k % 4] for k in range(n)]
+
+    def agg_leaves(self, ptr, tid):
+        """Memory leaf walk of a struct / array at `ptr`: one (byte
+        offset, class) per flat word, in value (logical) order.  The
+        offsets follow the same rules as chain(): member Offset,
+        ArrayStride (natural size when undecorated), MatrixStride and
+        row-major."""
+        out = []
+        sc = ptr[1] & 0xF
+        w3 = ptr[3] if len(ptr) > 3 else 0
+
+        def walk(t_id, off, mstr, rm, vs):
+            t = self.sc.types.get(t_id, {})
+            k = t.get('kind')
+            if k == TK['STRUCT']:
+                mb = self.sc.member_base.get(t_id, 0)
+                for i in range(t['nmemb']):
+                    m = self.sc.members[mb + i]
+                    walk(m['type'], off + m['offset'], m['mstride'],
+                         bool(m['flags'] & 0x10), False)
+            elif k == TK['ARRAY']:
+                st = t['stride'] if t['stride'] else \
+                    self.natural_size(t['elem'])
+                for i in range(t['length']):
+                    walk(t['elem'], off + i * st, mstr, rm, vs)
+            elif k == TK['MAT']:
+                comps = self.sc.types[t['elem']]['comps']
+                ms = mstr
+                if ms == 0 and sc == SC_UNIFORM:
+                    ms = 16
+                cls = self.classof(t_id)
+                for c in range(t['cols']):
+                    for r in range(comps):
+                        if rm:
+                            o = off + r * (ms if ms else 4 * comps) + c * 4
+                        else:
+                            o = off + c * (ms if ms else 4 * comps) + r * 4
+                        out.append((u32(o), cls))
+            elif k == TK['VEC']:
+                step = mstr if (vs and mstr) else 4
+                cls = self.classof(t_id)
+                for c in range(t['comps']):
+                    out.append((u32(off + c * step), cls))
+            else:
+                out.append((u32(off), self.classof(t_id)))
+
+        walk(tid, ptr[0], w3 & 0xFFFF, bool(w3 & 0x10000),
+             bool(w3 & 0x20000))
+        return out
+
+    def agg_woff(self, tid, lits):
+        """CompositeExtract / Insert literal walk over a VALUE: returns
+        (flat word offset, type id) of the selected part."""
+        off = 0
+        for lit in lits:
+            t = self.sc.types.get(tid, {})
+            k = t.get('kind')
+            if k == TK['STRUCT']:
+                off += self.sc.member_woff(tid, lit)
+                tid = self.sc.members[
+                    self.sc.member_base.get(tid, 0) + lit]['type']
+            elif k == TK['ARRAY']:
+                off += lit * self.sc.nwords(t['elem'])
+                tid = t['elem']
+            elif k == TK['MAT']:
+                off += lit * self.sc.types[t['elem']]['comps']
+                tid = t['elem']
+            elif k == TK['VEC']:
+                off += lit
+                tid = t['elem']
+            else:
+                break
+        return off, tid
 
     # -- quad-lane operand values (G2b derivatives) -----------------------
     # The model steps graphics invocations one instruction at a time in
@@ -1791,7 +1884,12 @@ class Model:
             # §12.3 F5 (W_CHT1): first index into an array under
             # UNIFORM/SBUF storage selects the descriptor record —
             # it lands in ptr[2], not the byte offset.
+            # Only a variable's own pointer can designate a descriptor
+            # array.  A pointer that an earlier chain produced (word3
+            # bit18) already sits inside one block, so an array there is
+            # ordinary data and its index is a byte offset.
             if (first and k in (TK['ARRAY'], TK['RARRAY']) and
+                    not (w3in & 0x40000) and
                     (tag & 0xF) in (SC_UNIFORM, SC_SBUF, SC_UCONST)):
                 didx = self.idxval(iid)
                 cty = t.get('elem', cty)
@@ -1839,7 +1937,7 @@ class Model:
         # (cmstride cleared) still spaces columns.  Zero when no member set
         # one.
         whi = (ptr[3] & 0xFF000000) if len(ptr) > 3 else 0
-        return [off, tag, didx, whi | (0x10000 if rm else 0) |
+        return [off, tag, didx, whi | 0x40000 | (0x10000 if rm else 0) |
                 (0x20000 if vs else 0) | (cmstride & 0xFFFF)]
 
     def natural_size(self, tid):
@@ -2266,13 +2364,23 @@ class Model:
         if opc == 255:                        # Unreachable — run fault
             self.fault = 'UNREACHABLE'
             return 'ret'
+        if opc == 169 and self.sc.is_agg(rty):
+            # struct / array select: the scalar condition picks a whole
+            # value
+            fl = self.flatv(ops[3] if va[0][0] else ops[4])
+            self.setres(rid, fl, len(fl))
+            return pc + wc
         if opc == 245:                        # Phi — pick by prev block
             val = ops[2]                      # fallback: first pair
             for k in range((wc - 3) // 2):
                 if ops[3 + 2 * k] == self.prev_lbl:
                     val = ops[2 + 2 * k]
                     break
-            self.setres(rid, self.regv(val), ncomp)
+            if self.sc.is_agg(rty):
+                fl = self.flatv(val)
+                self.setres(rid, fl, len(fl))
+            else:
+                self.setres(rid, self.regv(val), ncomp)
             return pc + wc
         if opc == 249:                        # Branch
             self.prev_lbl = self.cur_lbl
@@ -2317,14 +2425,24 @@ class Model:
                 self.robust += 1
                 self.setres(rid, [0, 0, 0, 0], 4)
                 return pc + wc
+            # W_TX2 kind legality — storage image(3) or storage texel
+            # buffer(5); uniform/sampled/combined are read-only or
+            # unsized and fault truthfully (mirrors f_tx_kind op60)
+            if rec[2] not in (3, 5):
+                self.fault = 'IMGKIND'
+                return 'ret'
             meta = rec[4]
             if va[2][0] != 0:                # sample must be 0 (no MSAA)
                 self.robust += 1
                 self.setres(rid, [0, 0, 0, 0], 4)
                 return pc + wc
-            iu, iv = s32(va[1][0]), s32(va[1][1])
+            # §12.3 texel-buffer: single linear index — no v/layer
+            # component; force iv=0 like shwave's tx_iv_q
+            iu = s32(va[1][0])
+            iv = 0 if meta.get('buf') else s32(va[1][1])
             dim = (meta['mdim'] >> 4) & 3
-            ly = (va[1][2] & 0xFFFF) if dim == 1 else 0
+            ly = (va[1][2] & 0xFFFF) if (dim == 1 and not meta.get('buf')) \
+                 else 0
             wk, layb = self.img_walk(meta, 0)
             mof, pit, w0, h0 = wk[0]
             if (ly >= meta['layers'] or iu < 0 or iv < 0 or
@@ -2348,6 +2466,16 @@ class Model:
             if tk in (TK['IMG'], TK['SAMP'], TK['SIMG']):
                 # image/sampler loads pass the descriptor ref through
                 self.setres(rid, va[0], 4)
+                return pc + wc
+            if tk in (TK['STRUCT'], TK['ARRAY']):
+                # whole-aggregate load: one word per leaf, memory layout
+                # -> logical image
+                wb = []
+                for off, _ in self.agg_leaves(va[0], rty):
+                    r = self.lsu(off, va[0][1], va[0][2], 0,
+                                 False, 0, 'i')
+                    wb.append(r if r is not None else 0)
+                self.setres(rid, wb, len(wb))
                 return pc + wc
             mcomps = self.matshape(rty)[1] if tk == TK['MAT'] else 1
             wb = [0] * ncomp
@@ -2375,6 +2503,14 @@ class Model:
                 # lanes keep their per-invocation state for quad
                 # derivatives; killed lanes never reach here ('ret'
                 # at the kill site)
+                return pc + wc
+            if self.sc.is_agg(vt[1]):
+                # whole-aggregate store: logical image -> memory layout
+                src = self.flatv(ops[1])
+                for i, (off, lc) in enumerate(
+                        self.agg_leaves(va[0], vt[1])):
+                    self.lsu(off, va[0][1], va[0][2], 0, True,
+                             src[i] if i < len(src) else 0, lc)
                 return pc + wc
             ncs = self.ncomps(vt[1])          # stored value words
             cls = self.classof(vt[1])
@@ -2444,6 +2580,14 @@ class Model:
                         flat += va[k][:self.ncomps(vt[k])]
                 self.setres(rid, flat, ncomp)
                 return pc + wc
+            if self.sc.is_agg(rty):
+                # struct / array: constituents concatenate in order, each
+                # at its own flat word count (any number of operands)
+                flat = []
+                for k in range(wc - 3):
+                    flat += self.flatv(ops[2 + k])
+                self.setres(rid, flat, len(flat))
+                return pc + wc
             wb = [0] * 4
             pos = 0
             for k in range(nva):
@@ -2465,21 +2609,9 @@ class Model:
                     self.setres(rid, [col[ops[4] & 3], 0, 0, 0], 1)
                 else:
                     self.setres(rid, (col + [0, 0, 0, 0])[:4], ncomp)
-            elif t0.get('kind') == TK['STRUCT']:
-                # walk literals through member offsets then sub-index
-                off, tid = 0, vt[0]
-                for lit in ops[3:]:
-                    t = self.sc.types.get(tid, {})
-                    if t.get('kind') == TK['STRUCT']:
-                        m = self.sc.members[
-                            self.sc.member_base.get(tid, 0) + lit]
-                        off += m['offset'] // 4
-                        tid = m['type']
-                    elif t.get('kind') in (TK['VEC'], TK['ARR']):
-                        off += lit * self.sc.nwords(t['elem'])
-                        tid = t['elem']
-                    else:
-                        off += lit
+            elif self.sc.is_agg(vt[0]):
+                # walk the literals over the flat value image
+                off, _ = self.agg_woff(vt[0], ops[3:])
                 fl = self.flatv(opid(0))
                 nw = self.sc.nwords(rty)
                 self.setres(rid, (fl[off:off + nw] + [0] * nw)[:nw],
@@ -2488,6 +2620,14 @@ class Model:
                 self.setres(rid, [va[0][ops[3] & 3], 0, 0, 0], 1)
             return pc + wc
         if opc == 82:                         # CompositeInsert
+            if self.sc.is_agg(rty):
+                off, pt = self.agg_woff(rty, ops[4:])
+                fl = self.flatv(ops[3])
+                ob = self.flatv(ops[2])
+                nw = self.sc.nwords(pt)
+                fl[off:off + nw] = (ob + [0] * nw)[:nw]
+                self.setres(rid, fl, len(fl))
+                return pc + wc
             wb = list(va[1])
             wb[ops[4] & 3] = va[0][0]
             self.setres(rid, wb, ncomp)
@@ -2629,8 +2769,14 @@ class Model:
             wb[va[2][0] & 3] = va[1][0]
             self.setres(rid, wb, ncomp)
             return pc + wc
-        if opc == 83 or opc == 1:             # CopyObject / Undef
-            self.setres(rid, va[0] if opc == 83 else [0] * 4, ncomp)
+        if opc in (83, 400) or opc == 1:       # CopyObject/CopyLogical/Undef
+            if opc != 1 and self.sc.is_agg(rty):
+                # every row of the logical image; two layouts of one
+                # logical type share it, so CopyLogical is this copy too
+                fl = self.flatv(ops[2])
+                self.setres(rid, fl, len(fl))
+                return pc + wc
+            self.setres(rid, va[0] if opc in (83, 400) else [0] * 4, ncomp)
             return pc + wc
         elif opc in self.INTOPS:
             wb = self.intop(opc, va, vt)
@@ -2692,21 +2838,7 @@ class Model:
     # 32-bit atomics over StorageBuffer/Workgroup — lane-serial RMW
     ATOMOPS = frozenset((227, 229, 230, 232, 233, 234, 235, 236, 237,
                          238, 239, 240, 241, 242))
-    HAS_RTY = frozenset((1, 12, 57, 60, 61, 65, 66, 68, 77, 78, 79, 80, 81,
-                         82, 83, 84, 86, 87, 88, 89, 90, 91, 92, 93, 94,
-                         95, 96, 97, 98, 100, 103, 104, 105,
-                         106, 109, 110, 111, 112, 124, 126, 127, 128,
-                         129, 130, 131, 132, 133, 134, 135, 136, 137,
-                         138, 139, 140, 141, 142, 143, 144, 145, 146,
-                         147, 148, 149, 150, 151, 152, 154, 155, 156,
-                         157, 164, 165, 166, 167, 168, 169, 170, 171,
-                         172, 173, 174, 175, 176, 177, 178, 179, 180,
-                         181, 182, 183, 184, 185, 186, 187, 188, 189,
-                         190, 191, 194, 195, 196, 197, 198, 199, 200,
-                         201, 202, 203, 204, 205,
-                         207, 208, 209, 210, 211, 212, 213, 214, 215,
-                         227, 229, 230, 232, 233, 234, 235, 236, 237,
-                         238, 239, 240, 241, 242, 245, 5381))
+    HAS_RTY = sh_opcodes.RESULT
 
     @staticmethod
     def atomic_op(opc, old, val, cmpv):
@@ -2744,6 +2876,9 @@ class Model:
     def nva(opc, wc, ops):
         """f_nva() — operand count per opcode (mask-aware for the
         G3a-ii image ops: Lod/ConstOffset ids trail the mask word)."""
+        n = sh_opcodes.NVA.get(opc)           # fixed counts: the table
+        if n is not None:
+            return n
         if opc == 62:
             return 2
         if opc == 80:
@@ -2797,7 +2932,7 @@ class Model:
             return 2
         if opc == 60:
             return 3                          # img, coord, sample
-        if opc in (61, 65, 66, 68, 81, 83, 84, 109, 110, 111, 112,
+        if opc in (61, 65, 66, 68, 81, 83, 84, 400, 109, 110, 111, 112,
                    124, 126, 127, 154, 155, 156, 157, 168, 200, 204,
                    205):
             return 1

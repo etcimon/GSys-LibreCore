@@ -58,6 +58,13 @@ shaderStorageBufferArrayDynamicIndexing = true
 shaderUniformBufferArrayDynamicIndexing = true
 shaderSampledImageArrayDynamicIndexing = true
 shaderStorageImageArrayDynamicIndexing = true
+# §12.3 texel-buffer arrays resolve through the same per-element
+# VkBufferView -> {mem handle, size, texdid} record path as scalar
+# texel buffers (StUpdTex* / _upd_elem); dsc_idx selects the element.
+# Verified: shwave corpus texbuf_arr/texbuf_arr_st + CTS
+# descriptor_copy.compute.*texel_buffer_array* (19/19 Pass).
+shaderUniformTexelBufferArrayDynamicIndexing = true
+shaderStorageTexelBufferArrayDynamicIndexing = true
 shaderStorageImageWriteWithoutFormat = false
 shaderStorageImageReadWithoutFormat = false
 # G2a: per-attachment blend state is supported; clamping z to the
@@ -463,6 +470,7 @@ fields = ["pDescriptorWrites.dstSet", "pDescriptorWrites.dstBinding",
           "pDescriptorWrites.pBufferInfo.buffer",
           "pDescriptorWrites.pBufferInfo.offset",
           "pDescriptorWrites.pBufferInfo.range",
+          "pDescriptorWrites.pTexelBufferView",
           "pDescriptorCopies.srcSet", "pDescriptorCopies.srcBinding",
           "pDescriptorCopies.srcArrayElement",
           "pDescriptorCopies.dstSet", "pDescriptorCopies.dstBinding",

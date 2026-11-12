@@ -1,0 +1,14 @@
+#version 460
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 8) in;
+// §12.3 F5 sampled-image descriptor array (CTS sampled_image_array
+// analogue): 4 texture2D elements at binding 0, kind=1, indexed by
+// gid/8.  texelFetch is a fetch (OpImageFetch 95) needing no sampler —
+// isolates dsc_idx_q for SAMPLED_IMAGE descriptors.  Distinct widths on
+// R32G32B32A32_SFLOAT give per-element-distinguishable texels.
+layout(set = 0, binding = 0) uniform texture2D texs[4];
+layout(set = 0, binding = 1) buffer Out { vec4 o[]; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    o[i] = texelFetch(texs[i / 8], ivec2(i & 3, 0), 0);
+}
