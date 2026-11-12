@@ -45,15 +45,19 @@ GPU refusal and zero Vulkan capsets remain unchanged.
   binding checked) before emitting one `QueryCopy` op. `flags` admits
   only `VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY`;
   `WAIT`, `PARTIAL_BIT` and unknown bits refuse. `stride` must be a
-  multiple of 4 and at least the packed record size (4/8/12 bytes for
-  32-bit, 64-bit and availability variants); `dstOffset` must be 4-aligned
+  multiple of 4 and at least the packed record size - result width times
+  (1 + availability): 4 or 8 bytes for 32-bit results, 8 or 16 bytes for
+  64-bit results, the availability word taking the result width (the spec
+  widens both together: u32 availability for 32-bit, u64 for 64-bit);
+  `dstOffset` must be 4-aligned
   and `dstOffset + (count-1)*stride + recordSize` must fit the buffer
   extent. `queryCount == 0` emits no op.
 - `QueryCopyRuntime` validates the destination extent at enqueue (same
   `_extent` path as `Transfer`), pins the buffer owner for the job, and
   at its turn writes the packed little-endian records through the memory
-  aperture: the honest value (`0` or the stamped slot) plus a u32
-  availability word when requested, stride-padded. Unavailable slots
+  aperture: the honest value (`0` or the stamped slot) plus an
+  availability word of the result width (u32 for 32-bit, u64 for
+  64-bit results) when requested, stride-padded. Unavailable slots
   write value 0 with availability 0 - the same truthful ordered state
   `vkGetQueryPoolResults` exposes, never a fabricated timestamp.
 - `QueryStamp` writes the honest value `0`: the bounded profile has no
@@ -96,8 +100,8 @@ GPU refusal and zero Vulkan capsets remain unchanged.
   publishes the counter list into `qslots` at its stream position.
 - Statistics results are per-query counter arrays, not scalars:
   `vkGetQueryPoolResults` and `vkCmdCopyQueryPoolResults` size each
-  record as `popcount(mask) * width` (+ availability u32 when
-  requested), counters packed as u64 (readback requires 64_BIT; copy
+  record as `popcount(mask) * width` (+ an availability word of the
+  result width when requested), counters packed as u64 (readback requires 64_BIT; copy
   admits 32/64-bit widths) in ascending bit order. Unavailable slots
   write zero counters with availability 0; `VK_NOT_READY`/`WAIT`
   semantics are identical to scalar pools.
@@ -121,8 +125,8 @@ GPU refusal and zero Vulkan capsets remain unchanged.
   timestamp profile, admits `VK_QUERY_RESULT_64_BIT` with optional
   `WAIT`/`WITH_AVAILABILITY`, and refuses 32-bit results, `PARTIAL_BIT`
   and unknown flag bits with `VK_ERROR_FEATURE_NOT_PRESENT`. `stride`
-  must be a multiple of 4 and at least the record size (8 or 12 bytes
-  packed); `dataSize` must cover `queryCount * stride`; the pData blob
+  must be a multiple of 4 and at least the record size (8 or 16 bytes
+  packed for the admitted 64-bit results); `dataSize` must cover `queryCount * stride`; the pData blob
   count must equal `dataSize`. Out-of-range queries, undersized buffers
   and bad strides return `VK_ERROR_VALIDATION_FAILED`.
 - Readback is truthful ordered state: a slot is available only after its
@@ -133,8 +137,9 @@ GPU refusal and zero Vulkan capsets remain unchanged.
   ordered ops publish - matching fence-wait suspension semantics.
 - The reply uses the generated reply program 73
   (`RTYPE, RRESULT, REXBUF(pData)`): exec words carry the byte count then
-  packed little-endian records - u64 value plus u32 availability when
-  requested, stride-padded.
+  packed little-endian records - u64 value plus a u64 availability word
+  when requested (the spec widens availability to the result width),
+  stride-padded.
 
 ## Evidence
 

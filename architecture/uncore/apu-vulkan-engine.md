@@ -684,7 +684,17 @@ G3b-iii), `UPDATE` 1 (`vkUpdateDescriptorSets` — LOOKUPs of the set and the
 written buffers/views; descriptor contents are consumed by the shader core in increment
 4), TRANSPORT 10 (internal ring ops — no guest API), UNSUPPORTED 1
 (`vkGetQueryPoolResults` — needs executor query data; stays refused
-until queries execute).
+until queries execute).  *Update 2026-11-11:* queries now execute —
+cmdexec commits slot availability+counters to the pool's ObjPay
+extent on `vkCmd{Begin,End}Query`/`WriteTimestamp`/`Reset`/
+`CopyQueryPoolResults`, and `vkGetQueryPoolResults` (ctype 49) is
+implemented in vnfront `ExecQueryRes` and reclassified UNSUPPORTED→
+QUERY.  Wire-proven end-to-end on `tb_g6lc_apu_vnfront`
+(`ue_sm5_qry`/`ue_sm5_qry2`: NOT_READY, populated timestamp/occlusion/
+statistics reads, WITH_AVAILABILITY, mixed-range) and synth-clean
+(Enable=0 `synth -noabc`; Enable=1 small-geometry pre-synth, zero
+latches).  Bounded-profile limits: honest-zero counters (no raster
+contribution yet), WAIT returns NOT_READY rather than blocking.
 
 ## 6. CmdRec and the submit-time executor
 
