@@ -131,8 +131,22 @@ module ariane import ariane_pkg::*; #(
   input  logic                         ai_isl_retired_valid_i,
   input  logic [31:0]                  ai_isl_retired_ticket_i,
   input  logic [31:0]                  ai_isl_last_ticket_i,
-  input  logic [15:0]                  ai_isl_last_status_i
+  input  logic [15:0]                  ai_isl_last_status_i,
+  // C4 CPU producer pause/drain provider (bounded origin profile only). The
+  // pause is an additional commit-halt source; drained reports the commit/
+  // store/LSU path drained. Gated on g6lc_storamic_origin_supported(CVA6Cfg);
+  // constant-inert otherwise. The cluster drives this scalar to core 0 only.
+  input  logic                         storamic_pause_i,
+  output logic                         storamic_drained_o
 );
+
+  // C4 storamic pause/drain provider sideband (bounded origin profile only).
+  logic storamic_pause_gated;
+  logic core_sto_drained;
+  assign storamic_pause_gated =
+      config_pkg::g6lc_storamic_origin_supported(CVA6Cfg) ? storamic_pause_i : 1'b0;
+  assign storamic_drained_o =
+      config_pkg::g6lc_storamic_origin_supported(CVA6Cfg) ? core_sto_drained : 1'b0;
 
   //////////////////////////////////////////////////////////////////////////////
   // Standard path: CVXIF or bare core (no RVV accelerator)
@@ -224,7 +238,7 @@ module ariane import ariane_pkg::*; #(
       .l2_pwhold_i          ( l2_pwhold_i               ),
       .l3_pwhold_i          ( l3_pwhold_i               ),
       .l2_pf_issue_i        ( l2_pf_issue_i             ),
-      .l2_pf_useful_i       ( l2_pf_useful_i            ), .coh_sf_filtered_i       ( coh_sf_filtered_i            ), .coh_sf_broadcast_i       ( coh_sf_broadcast_i            )
+      .l2_pf_useful_i       ( l2_pf_useful_i            ), .coh_sf_filtered_i       ( coh_sf_filtered_i            ), .coh_sf_broadcast_i       ( coh_sf_broadcast_i            ), .storamic_pause_i( storamic_pause_gated ), .storamic_drained_o( core_sto_drained )
     );
 
     if (CVA6Cfg.CvxifEn) begin: gen_cvxif
@@ -458,7 +472,7 @@ module ariane import ariane_pkg::*; #(
       .l2_pwhold_i          ( l2_pwhold_i               ),
       .l3_pwhold_i          ( l3_pwhold_i               ),
       .l2_pf_issue_i        ( l2_pf_issue_i             ),
-      .l2_pf_useful_i       ( l2_pf_useful_i            ), .coh_sf_filtered_i       ( coh_sf_filtered_i            ), .coh_sf_broadcast_i       ( coh_sf_broadcast_i            )
+      .l2_pf_useful_i       ( l2_pf_useful_i            ), .coh_sf_filtered_i       ( coh_sf_filtered_i            ), .coh_sf_broadcast_i       ( coh_sf_broadcast_i            ), .storamic_pause_i( storamic_pause_gated ), .storamic_drained_o( core_sto_drained )
     );
 
     g6lc_ara_attach #(

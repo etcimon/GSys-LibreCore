@@ -6736,6 +6736,7 @@ module tb_g6lc_hyp8_ctrl;
       .flush_tlb_gvma_o    (f_ftlbg),
       .halt_csr_i          (1'b0),
       .halt_acc_i          (1'b0),
+      .halt_storamic_i     (1'b0),
       .halt_frontend_o     (f_hf),
       .halt_o              (f_halt),
       .eret_i              (eret),

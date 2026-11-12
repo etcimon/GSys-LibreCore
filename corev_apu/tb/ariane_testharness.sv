@@ -1484,7 +1484,13 @@ module ariane_testharness #(
     MaxMstTrans: unsigned'(8),
     MaxSlvTrans: unsigned'(8),
     FallThrough: 1'b0,
+`ifdef G6LC_XBAR_LATENCY
+    // C2-wide latency sweep (bench-only): +define+G6LC_XBAR_LATENCY=<xbar_latency_e
+    // member> registers the named channels. Absent -> byte-identical NO_LATENCY.
+    LatencyMode: axi_pkg::xbar_latency_e'(axi_pkg::`G6LC_XBAR_LATENCY),
+`else
     LatencyMode: axi_pkg::NO_LATENCY,
+`endif
     AxiIdWidthSlvPorts: unsigned'(ariane_axi_soc::IdWidth),
     AxiIdUsedSlvPorts: unsigned'(ariane_axi_soc::IdWidth),
     UniqueIds: 1'b0,
@@ -1802,6 +1808,22 @@ module ariane_testharness #(
   end
   // pragma translate_on
 `endif
+  // pragma translate_off
+  // C2-wide config fingerprint: proves which config package the harness
+  // actually elaborated and whether the bounded supported profile holds.
+  // Printed for every run under +storamic_c2_report (probe-on and probe-off)
+  // so a mis-selected `make target=` can never pass silently.
+  initial begin
+    if ($test$plusargs("storamic_c2_report"))
+      $display("STORAMIC_C2_PROFILE ooo=%0d harts=%0d cores=%0d l2=%0d l3=%0d rvh=%0d wt=%0d ckpt=%0d supported=%0d",
+               C2_CLUSTER_CFG.OoOEn, C2_CLUSTER_CFG.NrHarts,
+               C2_CLUSTER_CFG.NrCores, C2_CLUSTER_CFG.L2En,
+               C2_CLUSTER_CFG.L3En, C2_CLUSTER_CFG.RVH,
+               (C2_CLUSTER_CFG.DCacheType == config_pkg::WT),
+               C2_CLUSTER_CFG.StoramicCheckpointEn,
+               config_pkg::g6lc_storamic_origin_supported(C2_CLUSTER_CFG));
+  end
+  // pragma translate_on
   g6lc_cluster #(
     .CVA6Cfg        ( C2_CLUSTER_CFG       ),
     .NR_CORES       ( NR_CORES            ),
@@ -1864,7 +1886,9 @@ module ariane_testharness #(
     .storamic_dma_inval_done_o  ( storamic_inval_done  ),
     .ai_isl_retired_ticket_i( ai_isl_retired_ticket ),
     .ai_isl_last_ticket_i   ( ai_isl_last_ticket    ),
-    .ai_isl_last_status_i   ( ai_isl_last_status    )
+    .ai_isl_last_status_i   ( ai_isl_last_status    ),
+    .storamic_pause_i       ( 1'b0                  ),
+    .storamic_drained_o     (                       )
   );
 
   `AXI_ASSIGN_FROM_REQ(slave[0], axi_ariane_req)

@@ -85,13 +85,28 @@ module g6lc_cluster
     input  logic                      storamic_dma_inval_valid_i,
     input  logic [AXI_ADDR_WIDTH-1:0] storamic_dma_inval_addr_i,
     output logic                      storamic_dma_inval_ready_o,
-    output logic                      storamic_dma_inval_done_o
+    output logic                      storamic_dma_inval_done_o,
+    // C4 CPU producer pause/drain provider (bounded origin profile only).
+    // Scalar sideband wired to core 0 only; for NR_CORES>1 or an unsupported
+    // config the pause is ignored and drained_o is tied constant 0.
+    input  logic                      storamic_pause_i,
+    output logic                      storamic_drained_o
 );
 
   localparam int unsigned NC = (NR_CORES < 1) ? 1 : NR_CORES;
   // Effective inclusion policy: TB override parameter OR package bit. The
   // testbench keeps INCLUSIVE_L3=0 so production packages own the policy.
   localparam bit INCL = INCLUSIVE_L3 || CVA6Cfg.L3InclusiveEn;
+  // C4 storamic pause/drain provider: scalar, core-0 only, single-core and
+  // bounded-origin-profile gated. NR_CORES>1 or unsupported => fully inert.
+  logic cluster_sto_pause;
+  logic [NC-1:0] core_sto_drained_w;
+  assign cluster_sto_pause =
+      (NC == 1) && config_pkg::g6lc_storamic_origin_supported(CVA6Cfg)
+          ? storamic_pause_i : 1'b0;
+  assign storamic_drained_o =
+      (NC == 1) && config_pkg::g6lc_storamic_origin_supported(CVA6Cfg)
+          ? core_sto_drained_w[0] : 1'b0;
   localparam int unsigned LINE_B =
       (CVA6Cfg.DCACHE_LINE_WIDTH != 0) ? CVA6Cfg.DCACHE_LINE_WIDTH / 8
                                        : COH_DEFAULT_LINE_BYTES;
@@ -390,7 +405,9 @@ module g6lc_cluster
         .ai_isl_retired_valid_i(ai_isl_retired_valid_i),
         .ai_isl_retired_ticket_i(ai_isl_retired_ticket_i),
         .ai_isl_last_ticket_i   (ai_isl_last_ticket_i),
-        .ai_isl_last_status_i   (ai_isl_last_status_i)
+        .ai_isl_last_status_i   (ai_isl_last_status_i),
+        .storamic_pause_i       ((c == 0) ? cluster_sto_pause : 1'b0),
+        .storamic_drained_o     (core_sto_drained_w[c])
     );
 
     g6lc_l1_inv_adapter #(

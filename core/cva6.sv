@@ -478,7 +478,14 @@ module cva6
     input  logic        l2_pf_useful_i,
     // Hub snoop-filter effectiveness (PMU group-2 indices 11/12)
     input  logic        coh_sf_filtered_i,
-    input  logic        coh_sf_broadcast_i
+    input  logic        coh_sf_broadcast_i,
+    // C4 CPU producer pause/drain provider (bounded origin profile only).
+    // storamic_pause_i is an additional commit-halt source into the controller,
+    // exactly like halt_csr_i/halt_acc_i; storamic_drained_o reports that the
+    // commit/store/LSU path is drained while paused. Both are constant-inert
+    // (input ignored, output tied 0) unless g6lc_storamic_origin_supported.
+    input  logic        storamic_pause_i,
+    output logic        storamic_drained_o
 );
 
   // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
@@ -929,6 +936,11 @@ module cva6
   logic hfence_gvma_commit_controller;
   logic halt_ctrl;
   logic halt_frontend;
+  // C4 storamic pause/drain provider: gated pause into the controller halt and
+  // the registered drain acknowledgement. Inert unless the bounded origin
+  // profile is supported.
+  logic storamic_halt;
+  logic storamic_pause_q;
   logic halt_csr_ctrl;
   logic [CVA6Cfg.NrHarts-1:0] smt_csr_hart_halt;
   logic dcache_flush_ctrl_cache;
@@ -3406,6 +3418,44 @@ module cva6
 `endif
 //pragma translate_on
 
+  // C4 storamic pause/drain provider. The pause is gated on the bounded origin
+  // profile so unsupported / multi-hart configs ignore the input entirely.
+  // Timing: one extra OR into halt_o (registered consumers) and drained_o is a
+  // registered AND of existing commit/write-buffer/LSU status — no new
+  // combinational cone on the commit path.
+  // The halt may only begin in a cycle where the commit head is not an
+  // AMO/LR/SC: commit_stage drops amo_valid_commit_o under halt, which would
+  // withdraw amo_req from a miss unit already in AMO_WAIT with the atomic on
+  // the bus and orphan its acknowledgement. Once the halt is in effect a
+  // later AMO at the head is never started, so the latch is safe to hold.
+  logic storamic_pause_gated, storamic_halt_q, storamic_amo_head;
+  assign storamic_pause_gated = config_pkg::g6lc_storamic_origin_supported(CVA6Cfg)
+                                    ? storamic_pause_i : 1'b0;
+  assign storamic_amo_head = CVA6Cfg.RVA && commit_instr_id_commit[0].valid &&
+                             ariane_pkg::is_amo(commit_instr_id_commit[0].op);
+  assign storamic_halt = storamic_pause_gated && storamic_halt_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      storamic_pause_q   <= 1'b0;
+      storamic_drained_o <= 1'b0;
+      storamic_halt_q    <= 1'b0;
+    end else begin
+      storamic_halt_q <= storamic_pause_gated && (storamic_halt_q || !storamic_amo_head);
+      storamic_pause_q <= storamic_halt;
+      // drained_o certifies the committed-store path is empty (no_st_pending_
+      // commit = commit queue + D$ write buffer drained), no LSU operation is
+      // stuck at the commit handshake (AMO/LR/SC "cannot cancel in flight",
+      // the same term smt_drain_safe uses), no debug redirect owns the commit,
+      // and commit is actually halted. The AXI gate separately certifies the
+      // bus boundary, so any non-commit source (PTW/CMO/speculative) is still
+      // covered there.
+      storamic_drained_o <= storamic_pause_q && halt_ctrl &&
+                            no_st_pending_commit &&
+                            !(lsu_commit_commit_ex && !lsu_commit_ready_ex_commit) &&
+                            !(CVA6Cfg.DebugEn && set_debug_pc);
+    end
+  end
+
   controller #(
       .CVA6Cfg(CVA6Cfg),
       .bp_resolve_t(bp_resolve_t)
@@ -3430,6 +3480,7 @@ module cva6
       .flush_tlb_gvma_o      (flush_tlb_gvma_ctrl_ex),
       .halt_csr_i            (halt_csr_ctrl),
       .halt_acc_i            (halt_acc_ctrl),
+      .halt_storamic_i       (storamic_halt),
       .halt_frontend_o       (halt_frontend),
       .halt_o                (halt_ctrl),
       .smt_switch_i          (smt_switch),

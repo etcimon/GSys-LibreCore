@@ -54,6 +54,9 @@ module controller
     input logic halt_csr_i,
     // Halt request from accelerator dispatcher - ACC_DISPATCHER
     input logic halt_acc_i,
+    // C4 storamic producer pause - already gated on the bounded origin profile
+    // by the parent; an additional commit-halt source like halt_csr/halt_acc.
+    input logic halt_storamic_i,
     // Halt frontend during fence.i to prevent fetching stale instructions
     output logic halt_frontend_o,
     // Halt signal to commit stage - COMMIT_STAGE
@@ -350,7 +353,8 @@ module controller
   // ----------------------
   always_comb begin
     // halt the core if the fence is active
-    halt_o = halt_csr_i || halt_acc_i || ((CVA6Cfg.DcacheFlushOnFence || CVA6Cfg.DcacheFlushOnFenceI) && fence_active_q);
+    halt_o = halt_csr_i || halt_acc_i || halt_storamic_i ||
+             ((CVA6Cfg.DcacheFlushOnFence || CVA6Cfg.DcacheFlushOnFenceI) && fence_active_q);
     // Halt frontend during fence.i to synchronize ICache/DCache flushes
     halt_frontend_o = fence_i_active_q;
   end

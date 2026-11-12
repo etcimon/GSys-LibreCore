@@ -122,7 +122,7 @@ module tb_g6lc_review_fp_lifetime;
     .clk_i(clk),.rst_ni(rst_n),.v_i(1'b0),.set_pc_commit_o(),.flush_if_o(flush_if),
     .flush_unissued_instr_o(flush_unissued),.flush_id_o(flush_id),.flush_ex_o(flush_ex),
     .flush_bp_o(),.flush_icache_o(),.flush_dcache_o(),.flush_dcache_ack_i(1'b0),
-    .flush_tlb_o(),.flush_tlb_vvma_o(),.flush_tlb_gvma_o(),.halt_csr_i(1'b0),.halt_acc_i(1'b0),
+    .flush_tlb_o(),.flush_tlb_vvma_o(),.flush_tlb_gvma_o(),.halt_csr_i(1'b0),.halt_acc_i(1'b0),.halt_storamic_i(1'b0),
     .halt_frontend_o(),.halt_o(),.eret_i(1'b0),.ex_valid_i(ex_event),.set_debug_pc_i(1'b0),
     .resolved_branch_i(branch),.flush_csr_i(1'b0),.fence_i_i(1'b0),.fence_i(1'b0),
     .sfence_vma_i(1'b0),.hfence_vvma_i(1'b0),.hfence_gvma_i(1'b0),.flush_commit_i(1'b0),
@@ -3718,7 +3718,7 @@ module tb_g6lc_review_wfi;
     .flush_unissued_instr_o(flush_unissued),.flush_id_o(flush_id),.flush_ex_o(flush_ex),
     .flush_bp_o(),.flush_icache_o(),.flush_dcache_o(),.flush_dcache_ack_i(1'b0),
     .flush_tlb_o(),.flush_tlb_vvma_o(),.flush_tlb_gvma_o(),.halt_csr_i(halt),
-    .halt_acc_i(1'b0),.halt_frontend_o(),.halt_o(),.eret_i(1'b0),.ex_valid_i(1'b0),
+    .halt_acc_i(1'b0),.halt_storamic_i(1'b0),.halt_frontend_o(),.halt_o(),.eret_i(1'b0),.ex_valid_i(1'b0),
     .set_debug_pc_i(1'b0),.resolved_branch_i('0),.flush_csr_i(1'b0),.fence_i_i(1'b0),
     .fence_i(1'b0),.sfence_vma_i(1'b0),.hfence_vvma_i(1'b0),.hfence_gvma_i(1'b0),
     .flush_commit_i(flush_commit),.replay_i(1'b0),.mem_replay_pc_o(),.flush_acc_i(1'b0),.smt_switch_i(1'b0));

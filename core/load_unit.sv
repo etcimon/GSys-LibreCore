@@ -527,6 +527,17 @@ module load_unit
         end else if (st_pipeline_busy) begin
           // hold until STQ + D$ wbuffer drain
           state_d = WAIT_PAGE_OFFSET;
+        end else if (!CVA6Cfg.OoOEn && CVA6Cfg.NrHarts == 1 && page_offset_matches_i) begin
+          // In-order single hart: st_pipeline_busy is constant 0 without
+          // SpeculativeSb+SuperscalarEn, so falling through here re-issued an
+          // uncovered load (non-cacheable, or partially covered) to the D$
+          // while the older matching store was still speculative; if commit
+          // was held (slow older instruction, Storamic pause) the load read
+          // the bytes the store had not written yet. The matching store is
+          // strictly older and commits without this load, and the sticky match
+          // clears once the D$ write buffer drains, so the classic interlock
+          // (wait until the match clears) is live here.
+          state_d = WAIT_PAGE_OFFSET;
         end else begin
           // No in-flight stores (or sticky match only): re-issue to D$
           state_d = WAIT_GNT;
