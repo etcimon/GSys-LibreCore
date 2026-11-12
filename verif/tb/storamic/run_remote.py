@@ -24,7 +24,7 @@ SIMULATION_STAGES = frozenset({
     "commit-defaults", "load-translation", "fetch-queue", "cpu-origin",
     "cpu-debug", "cpu-debug-stq-mutant", "cpu-debug-trigger",
     "cpu-debug-return", "cpu-debug-queue", "cpu-origin-unsupported",
-    "cpu-origin-atomic", "origin-profile", "origin-queue",
+    "cpu-origin-atomic", "cpu-pause", "origin-profile", "origin-queue",
     "cpu-strict-pins",
     "stq-commit-flush",
     "checkpoint-route",
@@ -46,7 +46,7 @@ ALLOWED_STAGES = SIMULATION_STAGES | frozenset({
     "policy-writer-formal",
     "commit-defaults-formal", "commit-defaults-synth", "load-translation-synth",
     "fetch-queue-synth", "csr-scc", "core-scc", "checkpoint-route-formal",
-    "native-c2",
+    "axi-gate-formal", "native-c2", "native-c2-wide", "prim-aw",
 })
 
 
@@ -102,22 +102,69 @@ def _ls_files(cwd, prefix, pathspecs=None):
         yield (f"{prefix}/{rel}" if prefix else rel), base / rel
 
 
-def _submodule_paths(cwd):
-    """Repo-relative paths of *initialized* submodules directly under ``cwd``."""
+def _submodule_status(cwd):
+    """Yield ``(path, initialized)`` for submodules directly under ``cwd``.
+
+    ``git submodule status`` lines are ``<flag><sha> <path> (<describe>)``; a
+    leading ``-`` marks *uninitialized* (no worktree, no files on disk), while
+    ``' '/'+'/'U'`` all have a populated worktree. Unlike ``_ls_files`` this
+    does NOT swallow git failures: a silent empty result here once produced a
+    native-c2 source tar with zero submodule contents, which only failed deep
+    inside the remote build on missing sources (``hpdcache.Flist``).
+    """
     try:
         out = subprocess.check_output(
             ["git", "-C", str(cwd), "submodule", "status"], text=True)
-    except Exception:
-        return
+    except Exception as exc:
+        raise RuntimeError(
+            f"git submodule status failed under {cwd}: {exc}") from exc
     for line in out.splitlines():
-        # "<sha> <path> (<describe>)"; a leading '-' marks *uninitialized*
-        # (no files on disk). ' '/'+'/'U' all have a populated worktree whose
-        # checked-out content is what the build must see, so keep them.
-        if line.startswith("-"):
+        if not line.strip():
             continue
         parts = line.split()
         if len(parts) >= 2:
-            yield parts[1]
+            yield parts[1], not line.startswith("-")
+
+
+def _submodule_paths(cwd):
+    """Repo-relative paths of *initialized* submodules directly under ``cwd``."""
+    for path, init in _submodule_status(cwd):
+        if init:
+            yield path
+
+
+def _c2_submodule_coverage(root):
+    """Count ``(initialized, total)`` submodule paths under the tar dirs.
+
+    Traversal mirrors ``_add_sub`` — same depth cap and ``vendor/`` nested
+    skip — so only submodules the tar would actually pull are counted.
+    ``total`` includes uninitialized (``-``) entries; ``initialized`` excludes
+    them. ``total > 0`` with ``initialized == 0`` means the whole submodule
+    closure was dropped (e.g. a fresh clone without ``--recursive``), which
+    would ship a source tar with no submodule files and fail remotely on
+    missing sources. Individual uninitialized submodules (e.g. the cvfpu
+    ``tb/flexfloat`` testbench) are tolerated — the build closure does not
+    require them.
+    """
+    init = total = 0
+
+    def _walk(cwd, prefix, depth):
+        nonlocal init, total
+        for sp, ok in _submodule_status(cwd):
+            rel = f"{prefix}/{sp}" if prefix else sp
+            if not any(rel == d or rel.startswith(d + "/")
+                       for d in _C2_TAR_DIRS):
+                continue
+            total += 1
+            if not ok:
+                continue
+            init += 1
+            if depth >= 4 or rel.startswith("vendor/"):
+                continue
+            _walk(Path(cwd) / sp, rel, depth + 1)
+
+    _walk(Path(root), "", 0)
+    return init, total
 
 
 def _c2_tar_members(root):
@@ -164,6 +211,13 @@ def _c2_source_tar(root, dest):
     identical to a checkout. Binary/artifact members are dropped by the
     ``_C2_TAR_SKIP_*`` filters. Returns the written Path.
     """
+    root = Path(root)
+    n_init, n_total = _c2_submodule_coverage(root)
+    if n_total and not n_init:
+        raise RuntimeError(
+            "native-c2 source closure found submodules under the tar dirs "
+            f"but none are initialized ({n_total} registered); run "
+            "`git submodule update --init --recursive` and retry")
     members = _c2_tar_members(root)
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -580,6 +634,23 @@ def main():
             "verif/tb/storamic/run_cpu_origin.py",
             "verif/tb/storamic/run_cpu_debug_queue.py",
         ]] if p not in sources]
+    if set(stages) & {"cpu-pause"}:
+        cpu_plan = json.loads(
+            (root / "verif/tb/storamic/cpu_origin_plan.json").read_text())
+        cpu_closure = cpu_plan["files"] + cpu_plan.get("support_files", [])
+        sources += [p for p in [root / rel for rel in cpu_closure]
+                    if p not in sources]
+        sources += [p for p in [root / path for path in [
+            "verif/tb/storamic/cpu_origin_plan.json",
+            "verif/tb/storamic/tb_g6lc_storamic_cpu_pause.sv",
+            "verif/tb/storamic/g6lc_cpu_pause_program.py",
+            "verif/tb/storamic/origin_cache.vlt",
+            "verif/tb/apu/g6lc_dram_peek64_stub.cpp",
+            "verif/tb/storamic/run_cpu_pause.py",
+            "core/cva6_rvfi.sv",
+            "corev_apu/storamic/g6lc_storamic_axi_gate.sv",
+            "corev_apu/storamic/g6lc_storamic_cpu_pause.sv",
+        ]] if p not in sources]
     if set(stages) & {"origin-profile", "origin-queue"}:
         # Pull the cpu_origin_plan closure too: it carries every package/.svh
         # the component benches may transitively include. Dedup makes this free
@@ -639,7 +710,14 @@ def main():
             "verif/tb/storamic/run_checkpoint_route.py",
             "verif/tb/storamic/route_native_unoptflat_pins.json",
         ]] if p not in sources]
-    if set(stages) & {"native-c2"}:
+    if set(stages) & {"axi-gate-formal"}:
+        from run_axi_gate_formal import FILES as AXI_GATE_FILES
+        sources += [p for p in [root / rel for rel in AXI_GATE_FILES]
+                    if p not in sources]
+        sources += [p for p in [root / path for path in [
+            "verif/tb/storamic/run_axi_gate_formal.py",
+        ]] if p not in sources]
+    if set(stages) & {"native-c2", "native-c2-wide", "prim-aw"}:
         # native-c2 builds the full ariane_testharness from a frozen snapshot of
         # the working tree, uploaded as one gzipped tar and sha256-pinned in the
         # manifest (the leaf re-hashes data/cva6-src-c2.tar.gz before extract).
@@ -648,7 +726,13 @@ def main():
         # Write under gitignored tmp/ (a real repo dir): remote-runs is a
         # symlink that resolves outside /mnt/<drive> in WSL, which would make
         # _listing() emit an unresolvable upload path for the tar.
-        c2_tar = _c2_source_tar(root, root / "tmp" / "cva6-src-c2.tar.gz")
+        # Per-process subdirectory: _c2_source_tar rebuilds unconditionally and
+        # gzip embeds a timestamp, so two concurrent c2 stages writing the same
+        # tmp/cva6-src-c2.tar.gz would race between manifest-hash and push and
+        # trip STORAMIC_SOURCE_IDENTITY on the remote leaf. The basename must
+        # stay cva6-src-c2.tar.gz (run_native_c2.SRC_TAR_NAME).
+        c2_tar = _c2_source_tar(
+            root, root / "tmp" / f"c2-{os.getpid()}" / "cva6-src-c2.tar.gz")
         sources += [p for p in [root / path for path in [
             "verif/tb/storamic/run_native_c2.py",
             "verif/tb/storamic/g6lc_storamic_c2_monitor.sv",

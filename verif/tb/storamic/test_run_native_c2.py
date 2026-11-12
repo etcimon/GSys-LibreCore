@@ -371,5 +371,206 @@ class M5WidthTests(unittest.TestCase):
         self.assertFalse(good)
 
 
+class WideStageTests(unittest.TestCase):
+    """native-c2-wide: latency modes, alternate targets, port-2 oracle."""
+
+    VIRTIO_SNIPPET = ("        if ({1'b0, saddr_q[i]} < {1'b0, dma_base_i} ||\n"
+                      "            {1'b0, saddr_q[i]} + 65'(slen_q[i]) > "
+                      "win_end) win_ok = 1'b0;\n")
+
+    def test_m7_patch_neuters_win_ok(self):
+        out = C2._mut_patch_m7(self.VIRTIO_SNIPPET)
+        self.assertIsNotNone(out)
+        self.assertIn("win_ok = 1'b1;", out)
+        self.assertNotIn("win_ok = 1'b0;", out)
+        # Absent needle -> None (no silent no-op).
+        self.assertIsNone(C2._mut_patch_m7("module x; endmodule"))
+
+    def _m7_sim(self, m2=0, fatal=False, fatal_msg="", tohost="28",
+                src_ok=0, viol=0):
+        nat = {"m2_aw": m2, "m2_ar": 0, "src_ok_aw": src_ok,
+               "src_ok_ar": src_ok, "violations": viol, "pending": 0}
+        return {"rc": 0, "success": False, "fatal": fatal,
+                "fatal_msg": fatal_msg, "native": nat, "tail": "",
+                "fail_tohost": tohost}
+
+    def test_m7_judge_port2_dma_kills(self):
+        good, note = C2._judge_m7(self._m7_sim(m2=3))
+        self.assertTrue(good)
+        self.assertIn("m2=3", note)
+
+    def test_m7_judge_fatal_kills(self):
+        good, _ = C2._judge_m7(self._m7_sim(
+            fatal=True, fatal_msg="STORAMIC_C2_VIOLATION aw_payload"))
+        self.assertTrue(good)
+
+    def test_m7_judge_survived_is_fail(self):
+        # Still rejected, no port-2 DMA, no fatal -> mutant did not take.
+        good, note = C2._judge_m7(self._m7_sim(m2=0, tohost="28"))
+        self.assertFalse(good)
+        self.assertIn("survived", note)
+
+    def test_m7_judge_authorized_is_fail(self):
+        good, _ = C2._judge_m7(self._m7_sim(
+            fatal=True, fatal_msg="authorized asserted p=2"))
+        self.assertFalse(good)
+
+    def test_m7_judge_dirty_src_ok_fails(self):
+        good, _ = C2._judge_m7(self._m7_sim(m2=2, src_ok=4))
+        self.assertFalse(good)
+
+    RING_SNIPPET = (
+        "  function automatic logic in_window(input logic [63:0] a,\n"
+        "                                     input logic [64:0] n,\n"
+        "                                     input logic [63:0] base,\n"
+        "                                     input logic [64:0] wend);\n"
+        "    logic [64:0] e;\n"
+        "    e = {1'b0, a} + n;\n"
+        "    return ({1'b0, a} >= {1'b0, base}) && (e <= wend);\n"
+        "  endfunction\n")
+
+    def test_m7_ring_patch_neuters_in_window(self):
+        out = C2._mut_patch_m7_ring(self.RING_SNIPPET)
+        self.assertIsNotNone(out)
+        self.assertIn("return 1'b1;", out)
+        self.assertNotIn("(e <= wend)", out)
+        # Absent needle -> None (no silent no-op).
+        self.assertIsNone(C2._mut_patch_m7_ring("module x; endmodule"))
+
+    def test_prim_aw_stage_and_evidence_exist(self):
+        # The focused prim-aw leaf + shared evidence helper must be wired so
+        # the AW power-cut trace can be captured ahead of the firmware guard.
+        self.assertTrue(callable(getattr(C2, "run_prim_aw", None)))
+        self.assertTrue(callable(getattr(C2, "_prim_evidence", None)))
+
+    def test_latency_modes_values(self):
+        # Spot-check the 10-bit channel-cut masks against axi_pkg
+        # (Demux*=1<<9..5, Mux*=1<<4..0).
+        vals = {s: v for s, _m, v in C2.XBAR_LATENCY_MODES}
+        self.assertEqual(vals["cut_slv_ax"], 576)    # DemuxAw|DemuxAr
+        self.assertEqual(vals["cut_mst_ax"], 18)     # MuxAw|MuxAr
+        self.assertEqual(vals["cut_all_ports"], 1023)
+        members = {m for _s, m, _v in C2.XBAR_LATENCY_MODES}
+        self.assertEqual(members, {"CUT_SLV_AX", "CUT_MST_AX", "CUT_ALL_AX",
+                                   "CUT_SLV_PORTS", "CUT_MST_PORTS",
+                                   "CUT_ALL_PORTS"})
+
+    def test_latency_topology_string(self):
+        for slug, _m, val in C2.XBAR_LATENCY_MODES:
+            topo = C2.TOPO_EXPECT.replace("latency=0", f"latency={val}")
+            self.assertIn(f"latency={val}", topo)
+            self.assertNotIn("latency=0", topo)
+
+    def test_wide_targets_use_makefile_names(self):
+        # target= must NOT carry the _config_pkg suffix (Makefile appends it).
+        for slug, pkg, _note in C2.WIDE_TARGETS:
+            self.assertFalse(pkg.endswith("_config_pkg"), pkg)
+            self.assertTrue(pkg.startswith("g6lc64_"), pkg)
+
+    def test_a2_probeon_refused(self):
+        sim = _sim(native=False, topo=False, success=False, fatal=True)
+        sim["fatal_msg"] = "%Error: STORAMIC_C2_ORIGIN_PROBE_UNSUPPORTED"
+        sim["tail"] = ""
+        ctx = _Ctx(sim)
+        rec = C2._a2_probeon(ctx, "smt2", "smt2-po", Path("x.elf"))
+        self.assertEqual(rec["outcome"], "unsupported-refused")
+        self.assertEqual(rec["status"], "pass")
+
+    def test_a2_probeon_refused_no_profile_still_passes(self):
+        # Regression: the t=0 UNSUPPORTED $fatal precedes the PROFILE
+        # $display, so a refused probe-on emits no profile line. With an
+        # expect_profile fingerprint set that must NOT be scored
+        # 'incomplete' -- the refusal is the required negative and the
+        # sibling probe-off PROFILE proves target identity.
+        sim = _sim(native=False, topo=False, success=False, fatal=True)
+        sim["fatal_msg"] = "%Error: STORAMIC_C2_ORIGIN_PROBE_UNSUPPORTED"
+        sim["tail"] = ""
+        ctx = _Ctx(sim)
+        rec = C2._a2_probeon(ctx, "ooo", "ooo-po", Path("x.elf"),
+                             expect_profile=C2.PROFILE_FP["ooo"])
+        self.assertEqual(rec["outcome"], "unsupported-refused")
+        self.assertEqual(rec["status"], "pass")
+        self.assertTrue(rec["pass"])
+
+    def test_a2_probeon_ran_profile_mismatch_incomplete(self):
+        # The fingerprint still gates the ran path: a supported target that
+        # ran but elaborated the wrong config is incomplete, not pass.
+        sim = _sim(native=True, topo=True, success=True, fatal=False)
+        sim["profile"] = {"line": "STORAMIC_C2_PROFILE ooo=0 harts=1 cores=1",
+                          "ooo": 0, "harts": 1, "cores": 1}
+        ctx = _Ctx(sim)
+        rec = C2._a2_probeon(ctx, "ooo", "ooo-po", Path("x.elf"),
+                             expect_profile=C2.PROFILE_FP["ooo"])
+        self.assertEqual(rec["outcome"], "supported-ran")
+        self.assertEqual(rec["status"], "incomplete")
+
+    def test_a2_probeon_ran_supported(self):
+        sim = _sim(native=True, topo=True, success=True, fatal=False)
+        ctx = _Ctx(sim)
+        rec = C2._a2_probeon(ctx, "srvmath", "srvmath-po", Path("x.elf"))
+        self.assertEqual(rec["outcome"], "supported-ran")
+        self.assertEqual(rec["status"], "pass")
+
+    def test_a2_probeon_inconclusive(self):
+        sim = _sim(native=False, topo=False, success=False, fatal=False)
+        ctx = _Ctx(sim)
+        rec = C2._a2_probeon(ctx, "smt2", "smt2-po", Path("x.elf"))
+        self.assertEqual(rec["outcome"], "inconclusive")
+        self.assertEqual(rec["status"], "incomplete")
+
+    def test_wide_entries_exist(self):
+        self.assertTrue(callable(C2.execute_wide))
+        self.assertTrue(callable(C2.run_wide))
+
+
+class DmaWinTests(unittest.TestCase):
+    def test_dma_win_kind_codes(self):
+        # enum order: ...OK=27 REJ=28 NEEDS_RESET=29 STALL=30; status/istat
+        # ride in bits 8+, so only the low byte selects the kind.
+        self.assertEqual(C2.dma_win_kind("28"), ("rej", 28))
+        self.assertEqual(C2.dma_win_kind("29")[0], "needs_reset")
+        self.assertEqual(C2.dma_win_kind(str(29 | (0x0f << 8)))[0],
+                         "needs_reset")
+        self.assertEqual(C2.dma_win_kind(str(30 | (0x0f << 8) |
+                                              (0x03 << 28)))[0], "stall")
+        self.assertEqual(C2.dma_win_kind("27"), ("ok", 27))
+        self.assertEqual(C2.dma_win_kind("22")[0], "other")   # FAIL_TIMEOUT
+        self.assertEqual(C2.dma_win_kind(None)[0], "other")
+        self.assertEqual(C2.dma_win_kind("garbage")[0], "other")
+
+    def test_dma_win_pred_accepts_defined_rejections(self):
+        # rej / needs_reset / stall are defined device outcomes; 'ok'
+        # (wrongly accepted) and 'other' (timeout/crash) are not.
+        self.assertTrue(C2._dma_win_pred("28"))
+        self.assertTrue(C2._dma_win_pred(str(29 | (1 << 8))))
+        self.assertTrue(C2._dma_win_pred(str(30 | (2 << 8))))
+        self.assertFalse(C2._dma_win_pred("27"))
+        self.assertFalse(C2._dma_win_pred("22"))
+        self.assertFalse(C2._dma_win_pred(None))
+
+    def test_case_callable_fail_tohost(self):
+        fd, name = tempfile.mkstemp(suffix=".elf")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(b"x")
+            elf = Path(name)
+            # A defined rejection tohost passes the callable check.
+            rec = C2._case(_Ctx(_sim(success=False, fail_tohost="28")),
+                           "d", "t", elf,
+                           expect_success=False,
+                           expect_fail_tohost=C2._dma_win_pred,
+                           require_topo=False)
+            self.assertTrue(rec["pass"], rec)
+            # FAIL_TIMEOUT (22) is not a defined outcome -> fail.
+            rec2 = C2._case(_Ctx(_sim(success=False, fail_tohost="22")),
+                            "d", "t", elf,
+                            expect_success=False,
+                            expect_fail_tohost=C2._dma_win_pred,
+                            require_topo=False)
+            self.assertFalse(rec2["pass"])
+        finally:
+            elf.unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -263,6 +263,8 @@ src :=  $(if $(spike-tandem),verif/tb/core/uvma_core_cntrl_pkg.sv)              
         corev_apu/storamic/g6lc_storamic_attach.sv                                  \
         corev_apu/storamic/g6lc_storamic_ctrl_bridge.sv                             \
         corev_apu/storamic/g6lc_storamic_checkpoint_route.sv                        \
+        corev_apu/storamic/g6lc_storamic_axi_gate.sv                                \
+        corev_apu/storamic/g6lc_storamic_cpu_pause.sv                               \
         corev_apu/storamic/g6lc_storamic_dma_axi.sv                                 \
         corev_apu/storamic/g6lc_storamic_durable_store.sv                           \
         corev_apu/storamic/g6lc_storamic_model_store.sv                             \

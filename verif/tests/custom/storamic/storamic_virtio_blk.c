@@ -97,7 +97,11 @@ enum {
   FAIL_OUT, FAIL_IRQ_ISTAT, FAIL_IRQ_PLIC, FAIL_IRQ_ACK,
   FAIL_IN, FAIL_IN_DATA, FAIL_GETID, FAIL_IOERR, FAIL_AFTER_IOERR,
   FAIL_REINIT, FAIL_REINIT_IO, FAIL_TIMEOUT, FAIL_CPU_RAW, FAIL_FLUSH,
-  FAIL_DURABLE, FAIL_ATOMIC
+  FAIL_DURABLE, FAIL_ATOMIC,
+  // A3 port-2 oracle: distinct tohost codes for a DMA-window-address request.
+  FAIL_DMA_WIN_OK, FAIL_DMA_WIN_REJ,
+  // Timeout split: DEVICE_NEEDS_RESET (status bit 6, 0x40) vs silent stall.
+  FAIL_DMA_WIN_NEEDS_RESET, FAIL_DMA_WIN_STALL
 };
 
 struct vq_desc { unsigned long long addr; unsigned int len;
@@ -259,7 +263,14 @@ static int blk_req(int type, unsigned long long sector,
   *(unsigned long long *)(h + 2) = sector;
   vdesc[0].addr = ptr(req_hdr); vdesc[0].len = 16;
   vdesc[0].flags = D_NEXT; vdesc[0].next = 1;
-  vdesc[1].addr = ptr(data); vdesc[1].len = dlen;
+#ifdef ORACLE_DMA_WINDOW
+  // A3: ORACLE_DMA_WINDOW carries the in-window offset; the data segment is
+  // forced into the Storamic window so the device's DMA-window check decides.
+  vdesc[1].addr = 0x50000000UL + ORACLE_DMA_WINDOW;
+#else
+  vdesc[1].addr = ptr(data);
+#endif
+  vdesc[1].len = dlen;
   vdesc[1].flags = D_NEXT | (type == T_OUT ? 0 : D_WRITE); vdesc[1].next = 2;
   vdesc[2].addr = ptr(stat_buf); vdesc[2].len = 1;
   vdesc[2].flags = D_WRITE; vdesc[2].next = 0;
@@ -386,9 +397,27 @@ int main(void) {
 
   // d. OUT 1024 bytes at sector 5.
   for (i = 0; i < 1024; i++) out_buf[i] = (unsigned char)((i * 7 + 3) ^ (i >> 8));
+#ifdef ORACLE_DMA_WINDOW
+  // A3: the data segment targets the Storamic window; the device must reject
+  // it (win_ok) with a non-OK status and issue no port-2 DMA. A status of OK
+  // means the window address was wrongly accepted -> FAIL_DMA_WIN_OK.
+  rc = blk_req(T_OUT, 5, out_buf, 1024);
+  if (rc < 0) {
+    // Timeout: classify by device state. status bit 6 (0x40) is
+    // DEVICE_NEEDS_RESET; anything else with no completion/interrupt is a
+    // silent stall (a device-liveness finding). Status is encoded in bits 8+.
+    unsigned int dst = RD32(R_STATUS);
+    unsigned int dist = RD32(R_ISTAT);
+    if (dst & 0x40) return FAIL_DMA_WIN_NEEDS_RESET | (dst << 8);
+    return FAIL_DMA_WIN_STALL | (dst << 8) | ((dist & 0xFF) << 28);
+  }
+  if (rc == 0) return FAIL_DMA_WIN_OK;
+  return FAIL_DMA_WIN_REJ;
+#else
   rc = blk_req(T_OUT, 5, out_buf, 1024);
   if (rc < 0) return FAIL_TIMEOUT;
   if (rc != 0 || last_len != 1) return FAIL_OUT;
+#endif
 
   // e. Interrupt: device status bit, PLIC pending, acknowledge clears it.
   if ((RD32(R_ISTAT) & 1) == 0) return FAIL_IRQ_ISTAT;
@@ -408,6 +437,16 @@ int main(void) {
   //     A power cut then must drop only the staged tail — the read shows
   //     B for 448 bytes and A for the last 64.
   {
+#ifndef STORAMIC_PRIMARY
+    // ST-025 durability-after-cut oracle. In the primary role the Storamic
+    // stick RAM *is* the system memory this program runs from: PWR_CUT
+    // (CTRL_BASE+0x3000) raises storamic_power_cut -> lost_q/ScanClear of the
+    // live array, so the staged-tail-survival check is meaningless and the
+    // cut itself wedges the hart (the next main-memory AW is never serviced,
+    // observed as tohost=126). Power-cut survival is the C5/C6 checkpoint
+    // flow, not this native virtio test -> compiled out under STORAMIC_PRIMARY.
+    // The sector-5 pattern restore below is *not* part of the cut test and
+    // stays for every role.
     static unsigned char a_buf[512] __attribute__((aligned(64)));
     for (i = 0; i < 512; i++) a_buf[i] = out_buf[i] = (unsigned char)(0xA5 ^ i);
     rc = blk_req(T_OUT, 10, out_buf, 512);
@@ -478,6 +517,7 @@ int main(void) {
         return FAIL_DURABLE;
     }
 #endif
+#endif  // !STORAMIC_PRIMARY — durability-after-cut oracle (see note above)
     // Restore the sector-5 pattern that step f compares against.
     for (i = 0; i < 1024; i++) out_buf[i] = (unsigned char)((i * 7 + 3) ^ (i >> 8));
   }

@@ -33,6 +33,11 @@ ALL_DIRS = (
     "verif/tb/storamic/",
     "verif/regress/remote/",
     "g6lc_storamic/",
+    # Untracked first-party Storamic RTL (axi_gate/cpu_pause) lives here; it is
+    # not yet git-added, so it must be discovered via --others like the suite's
+    # own benches. Scoped to storamic/ so unrelated untracked corev_apu trees
+    # (apu shader corpus/tools) stay out of the payload.
+    "corev_apu/storamic/",
 )
 SRC_DIRS = (
     "verif/tb/apu/",

@@ -480,6 +480,9 @@ def main():
     if set(stages) & {"cpu-origin", "cpu-origin-unsupported", "cpu-origin-atomic"}:
         from run_cpu_origin import run as run_cpu_origin
         run_cpu_origin(data, out, stages, manifest, builds, outcomes, verilator, build_model)
+    if set(stages) & {"cpu-pause"}:
+        from run_cpu_pause import run as run_cpu_pause
+        run_cpu_pause(data, out, stages, manifest, builds, outcomes, verilator, build_model)
     if set(stages) & {"cpu-debug", "cpu-debug-stq-mutant"}:
         from run_cpu_debug import run as run_cpu_debug
         run_cpu_debug(data, out, stages, manifest, builds, outcomes, verilator, build_model)
@@ -510,10 +513,22 @@ def main():
         from run_checkpoint_route import run as run_checkpoint_route
         run_checkpoint_route(data, out, stages, manifest, builds, outcomes,
                              verilator, build_model)
+    if set(stages) & {"axi-gate-formal"}:
+        from run_axi_gate_formal import run as run_axi_gate_formal
+        run_axi_gate_formal(data, out, stages, manifest, builds, outcomes,
+                            verilator, build_model)
     if set(stages) & {"native-c2"}:
         from run_native_c2 import run as run_native_c2
         run_native_c2(data, out, stages, manifest, builds, outcomes,
                       verilator, build_model)
+    if set(stages) & {"native-c2-wide"}:
+        from run_native_c2 import run_wide as run_native_c2_wide
+        run_native_c2_wide(data, out, stages, manifest, builds, outcomes,
+                           verilator, build_model)
+    if set(stages) & {"prim-aw"}:
+        from run_native_c2 import run_prim_aw as run_prim_aw
+        run_prim_aw(data, out, stages, manifest, builds, outcomes,
+                    verilator, build_model)
     config_failures = []
     profiles = [
         ("one", ["-GMaxSticks=1"], None),

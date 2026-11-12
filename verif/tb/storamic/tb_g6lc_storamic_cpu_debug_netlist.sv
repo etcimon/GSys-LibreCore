@@ -99,7 +99,8 @@ module g6lc_storamic_cpu_debug_netlist #(
     .l2_miss_i(1'b0), .l3_hit_i(1'b0), .l3_miss_i(1'b0), .pf_issue_i(1'b0),
     .pf_train_i(1'b0), .l2_pwhold_i(1'b0), .l3_pwhold_i(1'b0),
     .l2_pf_issue_i(1'b0), .l2_pf_useful_i(1'b0),
-    .coh_sf_filtered_i(1'b0), .coh_sf_broadcast_i(1'b0)
+    .coh_sf_filtered_i(1'b0), .coh_sf_broadcast_i(1'b0),
+    .storamic_pause_i(1'b0), .storamic_drained_o()
   );
   initial begin
     assert(Cfg.FpPresent)

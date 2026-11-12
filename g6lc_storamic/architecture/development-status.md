@@ -1375,7 +1375,91 @@ a port-0-only fatal. Route component
 sim 12/12 and formal 4/4 pass at `storamic-a3b5c579d314`; the remote unit
 suite passes 19 files/235 tests at `storamic-unittests-dbd29dbb5935`.
 
-Port-2/L2/L3/prefetch/multi-hart paths, latency cuts other
-than `LatencyMode=0`, and the primary-role virtio-blk `tohost=126`
-failure (reproduced on committed HEAD, pre-existing) remain open. Native
-admission stays refused until C3–C6.
+A `native-c2-wide` stage (`run_native_c2.run_wide`) extends C2 past the
+bounded profile. **A1 latency:** a `` `G6LC_XBAR_LATENCY`` `` bench knob
+(`` `ifdef`` → `axi_pkg::xbar_latency_e'(...)`, default `NO_LATENCY`,
+byte-identical) sweeps every other `xbar_latency_e` member; all six modes
+reach `SUCCESS` with baseline-identical window counts and the monitor stays
+latency-agnostic (`max_outstanding ≤ MaxMstTrans`). **A2 targets:** a
+`STORAMIC_C2_PROFILE` line fingerprints the elaborated `C2_CLUSTER_CFG`
+(`ooo/harts/cores/l2/l3/rvh/wt/ckpt/supported`) per case so a mis-selected
+`make target=` cannot pass silently — this caught a real plumbing bug:
+`base_env` pinned `TARGET_CFG` to the baseline, so `ifndef TARGET_CFG` never
+took `target=` and every wide target elaborated the baseline package while
+the C++ `G6LC_TB_*` defines still grepped `$(target)`; `ensure_model` now
+aligns `TARGET_CFG` with the requested target. That same plumbing bug —
+not a `g6lc_tb.cpp` hierarchy gap — was the earlier `no-existing-flow`
+reading: with `TARGET_CFG` pinned to baseline the SV side elaborated the
+baseline package (no SMT/cluster generates) while the C++ `G6LC_TB_*`
+defines still grepped `$(target)`, so the public-signal macros referenced
+members absent from the baseline hierarchy and the tb C++ failed to
+compile. Once `TARGET_CFG` tracks `target=`, all four alternate targets
+build and qualify: `g6lc64_smt2` (`harts=2 l2=1`), `g6lc64_smt2_l3`
+(`harts=2 l2=1 l3=1`), `g6lc64_server_math` (`cores=2 l2=1 rvh=1`,
+HwPrefetch) and `g6lc64_ooo` (`ooo=1`) each run the c2 firmware probe-off
+to `SUCCESS` with `p0==m0`, `done==m0`, `src_ok=0/0`, `pending=0
+violations=0`, and each dies `STORAMIC_C2_ORIGIN_PROBE_UNSUPPORTED`
+probe-on (`supported=0` for all four — no supported-alternate probe-on-ran
+case exists). **A3 port-2:** the virtio ring's `in_window` check
+(`g6lc_storamic_virtio_ring.sv`) faults an out-of-window descriptor address
+into `DEVICE_NEEDS_RESET` (status bit `0x40`) before any port-2 DMA — the
+measured, asserted contract is tohost low byte `29` with `status&0x40`,
+`m2_aw=m2_ar=0`, `src_ok=0`, `violations=0`, `pending=0`. Mutant m7 removes
+BOTH that ring check and the blk `win_ok` in one mutant so nothing
+downstream masks it. **Primary virtio-blk `tohost=126`:** root cause
+confirmed by the new permanent `C2TR AW`/`AWV` monitor trace — the ST-025
+power-cut oracle writes `CTRL_BASE+0x3000` (`0x50003000`); in the primary
+role the stick RAM is system memory, so the cut clears the live array and
+the next main-memory AW never completes. `storamic_virtio_blk.c` now
+compiles the durability-after-cut block out under `#ifndef STORAMIC_PRIMARY`
+(cut survival is the C5/C6 checkpoint flow); `virtio-prim-pos`/`neg` cases
+assert SUCCESS / `FAIL_IN_DATA` tohost=16 on the probe-off primary model.
+Evidence of record: `native-c2-wide` qualifying run `storamic-a6d19cf81d55`
+(sims identical to `storamic-0af4518fca44`, whose only defect was a
+probe-on judging order fixed in `_a2_probeon`), `native-c2` rerun
+`storamic-a46b25ee1349` (verdict pass, port-1 SBA exercised, m1–m6
+killed), remote unit suite `storamic-unittests-d595e36baab9` (19 files /
+267 tests). Native admission stays refused until C3–C6.
+
+### CPU Pause/Drain Provider (C4 step 1, slice C)
+
+The `cpu-pause` stage is now a permanent registered stage
+(`run_cpu_pause.py` / `tb_g6lc_storamic_cpu_pause.sv` /
+`g6lc_cpu_pause_program.py`): a real configured `cva6`
+(`StoramicCheckpointEn=1`, `origin_supported`) drives
+`g6lc_storamic_cpu_pause` → `g6lc_storamic_axi_gate` → a bench AXI memory at
+response delay 0/16. Oracles: o1 no downstream AW/AR/W valid while
+`paused_o`; o2 bench memory equals an RVFI-retire committed-store reference
+(`cva6_rvfi` `mem_wmask`/`mem_addr`/`mem_wdata`, AMO/SC included) sampled
+while paused; o3 `error_o` never; o4 final signature identical to a
+never-paused reference; a bounded watchdog reports a stuck drain with the
+false term named. The program adds a 12-store-per-iteration burst (mixed
+sb/sh/sw/sd to a dedicated `Data+0x600` lane set, values from the loop
+counter) that saturates the `DEPTH_COMMIT=4` store-buffer commit queue so
+several committed stores sit without AW-valid across a B return — the
+pressure that makes the `no_st_pending_commit` drain term observable.
+
+Two real core defects were found by this stage and fixed in `core/` (not
+the bench): the **AMO-head commit orphan** (`core/cva6.sv` — `commit_stage`
+asserts `amo_valid_commit_o` only under `!halt_i`, so a pause with an AMO in
+`AMO_WAIT` orphaned the ack; halt now begins only when the commit head is
+not an AMO) and the **`load_unit` WAIT_PAGE_OFFSET fall-through**
+(`core/load_unit.sv` — a non-cacheable narrow store still speculative let a
+wider same-lane load re-issue to the D$ after one cycle in the in-order
+single-hart config; now holds `WAIT_PAGE_OFFSET` while
+`page_offset_matches_i`). The OoO/SMT fall-through path is unaudited and
+logged in `AGENTS-todo.md`; the hyp8 tree was not ported.
+
+Evidence of record: `cpu-pause` qualifying run `storamic-a5e1324652e8`
+(verdict pass; 12 positives seeds{1,7}×delay{0,16}×stall{0,24/8,48/8} all
+sig `d17673a511d1877b`, 1463–2616 pauses; mutants k1–k5 all killed —
+k1 o2-dirty, k2/k3 o3-error_o, k4 timeout-deadlock, k5 trap; directed
+`+nopause` load_unit regression passes fixed RTL at delay 0/16 and is
+rejected on the k5 copy at both, proving the defect is pause-independent).
+Core-RTL regression on the same tree `storamic-72a94e83a5b7` passes all
+five stages (`core-scc` 0 SCC/0 latch; `cpu-strict-pins` observed==pinned,
+no new UNOPTFLAT; `cpu-origin`, `cpu-debug`, `native-c2` incl. m1–m6).
+Remote unit suite totals recorded in the run receipt. This qualifies the
+CPU-origin pause/drain handshake only — DMA/VirtIO/debug writers, C3/C5
+composition and native admission remain open; native stays refused until
+C3–C6.

@@ -67,6 +67,22 @@ MAX_LID_C2 = 1
 # or above it would be equivalent, so no valid m5 exists then.
 M5_MAX_WIDTH = 4
 
+# C2-wide: axi_pkg::xbar_latency_e members other than NO_LATENCY (=0, the
+# native-c2 baseline). ``member`` is the enum name passed to
+# +define+G6LC_XBAR_LATENCY; ``value`` is the 10-bit channel-cut mask the
+# STORAMIC_C2_TOPOLOGY latency= field prints. (Demux*=1<<9..5, Mux*=1<<4..0.)
+XBAR_LATENCY_MODES = [
+    ("cut_slv_ax",    "CUT_SLV_AX",    576),   # DemuxAw|DemuxAr
+    ("cut_mst_ax",    "CUT_MST_AX",    18),    # MuxAw|MuxAr
+    ("cut_all_ax",    "CUT_ALL_AX",    594),   # Demux+Mux AW/AR
+    ("cut_slv_ports", "CUT_SLV_PORTS", 992),   # all Demux channels
+    ("cut_mst_ports", "CUT_MST_PORTS", 31),    # all Mux channels
+    ("cut_all_ports", "CUT_ALL_PORTS", 1023),  # every channel
+]
+# MaxMstTrans bound for the xbar (AXI_XBAR_CFG.MaxMstTrans=8); latency may
+# raise max_outstanding but never past this.
+XBAR_MAX_MST_TRANS = 8
+
 # +storamic_sba_probe cases: one real DMI SBA read (0x50008000) and one write
 # (0x50008008) through dm_top -> axi_adapter -> xbar slave port 1 -> route.
 # Both target the reserved window (unserved -> DECERR), the scored refusal.
@@ -84,6 +100,78 @@ C2_SBA_PO = dict(C2_SBA_FIELDS, src_ok_aw=9, src_ok_ar=14,
 C2_SBA_QF = dict(C2_SBA_FIELDS, src_ok_aw=0, src_ok_ar=0,
                  max_lid=MAX_LID_C2)
 SBA_EXPECT = {"reads": 1, "writes": 1, "rd_sberror": 0, "wr_sberror": 0}
+
+# --- C2-wide (native-c2-wide) ---------------------------------------------
+# A2 feature-sweep targets: existing config packages that set multi-hart /
+# multi-core / L2 / L3 / prefetch. ``origin_supported`` (config_pkg.sv:1068)
+# requires NrHarts==1 && !OoOEn && !RVH && DCacheType==WT && !EnableAccelerator
+# && CoproType==COPRO_NONE (NrCores is NOT checked). Each target is built
+# probe-off (real traffic, src_ok must stay 0/0) and probe-on (must fatal
+# STORAMIC_C2_ORIGIN_PROBE_UNSUPPORTED when unsupported).
+# ``target`` is the Makefile ``target=`` name; the Makefile appends
+# ``_config_pkg`` to locate core/include/<target>_config_pkg.sv.
+WIDE_TARGETS = [
+    ("smt2",    "g6lc64_smt2",        "NrHarts=2 L2En=1"),
+    ("smt2l3",  "g6lc64_smt2_l3",     "NrHarts=2 L2En=1 L3En=1"),
+    ("srvmath", "g6lc64_server_math", "NrCores=2 L2En=1 HwPrefetch=1"),
+    ("ooo",     "g6lc64_ooo",         "OoOEn=1"),
+]
+# A3 port-2 DMA-window oracle: virtio device+ring RTL patched for mutant m7.
+VIRTIO_DEV = "g6lc_storamic/rtl/host/virtio/g6lc_storamic_virtio_blk.sv"
+VIRTIO_RING = "g6lc_storamic/rtl/host/virtio/g6lc_storamic_virtio_ring.sv"
+# tohost codes for the ORACLE_DMA_WINDOW firmware variant (enum order in
+# storamic_virtio_blk.c): FAIL_DMA_WIN_OK=27 wrongly accepted, FAIL_DMA_WIN_REJ
+# =28 expected rejection.
+DMA_WIN_REJ_TOHOST = "28"
+DMA_WIN_OK_TOHOST = "27"
+# Timeout-split codes added for the out-of-window descriptor oracle. The low
+# byte of the tohost carries the enum value; status/istat ride in bits 8+.
+DMA_WIN_NEEDS_RESET = 29   # status & 0x40 (DEVICE_NEEDS_RESET)
+DMA_WIN_STALL = 30         # no completion, no NEEDS_RESET -> silent stall
+
+
+def dma_win_kind(fail_tohost):
+    """Classify a dma-window oracle tohost into rej/needs_reset/stall/other.
+
+    Returns (kind, raw_int_or_None). kind is one of 'rej', 'needs_reset',
+    'stall', 'ok', 'other'. Only the low byte is the enum code."""
+    try:
+        v = int(str(fail_tohost), 0)
+    except (TypeError, ValueError):
+        return "other", None
+    code = v & 0xFF
+    if code == int(DMA_WIN_OK_TOHOST):
+        return "ok", v
+    if code == int(DMA_WIN_REJ_TOHOST):
+        return "rej", v
+    if code == DMA_WIN_NEEDS_RESET:
+        return "needs_reset", v
+    if code == DMA_WIN_STALL:
+        return "stall", v
+    return "other", v
+
+
+def _dma_win_pred(fail_tohost):
+    """tohost predicate for the dma-window oracle: accept only a *defined*
+    device outcome (rej / needs_reset / stall). 'ok' means the window address
+    was wrongly accepted; 'other' (incl. FAIL_TIMEOUT=22) means no defined
+    response."""
+    return dma_win_kind(fail_tohost)[0] in ("rej", "needs_reset", "stall")
+
+# STORAMIC_C2_PROFILE package fingerprints: the fields that identify which
+# config package the harness actually elaborated. Asserting these per case
+# means a mis-selected `make target=` can never pass silently. ``supported``
+# and ``ckpt`` are role/define-dependent and recorded, not pinned here.
+PROFILE_FP = {
+    "base":     {"ooo": 0, "harts": 1, "cores": 1},
+    "smt2":     {"ooo": 0, "harts": 2, "cores": 1},
+    "smt2l3":   {"ooo": 0, "harts": 2, "cores": 1},
+    "srvmath":  {"ooo": 0, "harts": 1, "cores": 2},
+    "ooo":      {"ooo": 1, "harts": 1, "cores": 1},
+}
+# Full-record fields shown for every case (asserted only via fingerprint).
+PROFILE_RECORD = ("ooo", "harts", "cores", "l2", "l3", "rvh", "wt",
+                  "ckpt", "supported")
 
 
 def m5_width_for(max_lid):
@@ -172,6 +260,19 @@ def parse_topo(logtxt):
     return m[-1] if m else None
 
 
+def parse_profile(logtxt):
+    """STORAMIC_C2_PROFILE line -> {line, ooo, harts, cores, l2, l3, rvh,
+    wt, ckpt, supported}. Diagnostic fingerprint of the elaborated config."""
+    m = re.findall(r"STORAMIC_C2_PROFILE[^\n]*", logtxt)
+    if not m:
+        return None
+    line = m[-1]
+    d = {"line": line}
+    for kv in re.findall(r"(\w+)=(-?\d+)", line):
+        d[kv[0]] = int(kv[1])
+    return d
+
+
 def parse_sba(logtxt):
     """STORAMIC_SBA_PROBE line -> {line, reads, writes, rd_sberror, wr_sberror}."""
     m = re.findall(r"STORAMIC_SBA_PROBE[^\n]*", logtxt)
@@ -213,13 +314,25 @@ class Ctx:
     def model(self, tag):
         return self.src / f"work-ver-{tag}" / "Variane_testharness"
 
-    def ensure_model(self, tag, defines):
-        """Build the ariane_testharness model for a define set."""
+    def ensure_model(self, tag, defines, target=None):
+        """Build the ariane_testharness model for a define set.
+
+        ``target`` selects the config package (``make verilate target=``);
+        defaults to the C2 baseline ``TARGET``. ``defines`` is the
+        ``+``-joined G6LC_STORAMIC_DEFINES set (may carry ``NAME=VALUE``
+        entries such as ``G6LC_XBAR_LATENCY=<member>``)."""
         if self.model(tag).exists():
             return True, 0.0
+        tgt = target or TARGET
         e = dict(self.env)
         e["G6LC_STORAMIC_DEFINES"] = defines
-        cmd = ["make", "verilate", f"target={TARGET}",
+        # base_env pins TARGET_CFG to the baseline TARGET; make imports it as a
+        # variable so `ifndef TARGET_CFG` (Makefile) never takes `target=`, and
+        # Flist.cva6 would elaborate the baseline config package while the
+        # G6LC_TB_* C++ defines still grep $(target). Align TARGET_CFG with tgt
+        # so the SV config package and the C++ defines always agree.
+        e["TARGET_CFG"] = tgt
+        cmd = ["make", "verilate", f"target={tgt}",
                f"ver-library=work-ver-{tag}", f"verilator={self.verilator}",
                f"VERILATOR_INSTALL_DIR={self.vroot}", f"RISCV={RISCV}",
                f"SPIKE_INSTALL_DIR={SPIKE}",
@@ -246,10 +359,31 @@ class Ctx:
                         self.out / f"gcc-{tag}.log")
         return elf if rc == 0 else None
 
-    def run_sim(self, tag, elf, plusargs=(), debug_disable=True):
+    def tb_flow_error(self, tag):
+        """Classify a failed ``make verilate`` for tag.
+
+        Returns ``"no-existing-flow"`` when the build died inside
+        ``g6lc_tb.cpp`` on Verilator hierarchy members that do not exist for
+        the target's generate structure (SMT banked regfile / multi-core
+        cluster paths) — i.e. no existing flow builds this target with
+        ``g6lc_tb.cpp``. Returns ``None`` for any other/absent failure so the
+        caller keeps the generic build-failed reporting."""
+        log = self.out / f"verilate-{tag}.log"
+        try:
+            txt = log.read_text(errors="replace")
+        except OSError:
+            return None
+        if "g6lc_tb.cpp" in txt and "no member named" in txt:
+            line = next((l.strip() for l in txt.splitlines()
+                         if "no member named" in l), "")
+            return f"no-existing-flow: g6lc_tb.cpp unsupported hierarchy ({line[:160]})"
+        return None
+
+    def run_sim(self, tag, elf, plusargs=(), debug_disable=True,
+                budget=20000000):
         sim = self.model(tag)
         th = tohost_addr(elf)
-        argv = [str(sim), "+time_out=20000000"]
+        argv = [str(sim), f"+time_out={budget}"]
         if debug_disable:
             argv.append("+debug_disable")
         argv += ["+storamic_c2_report", "+g6lc_storamic_mem_trace",
@@ -259,6 +393,7 @@ class Ctx:
         nat = parse_native(txt)
         topo = parse_topo(txt)
         sba = parse_sba(txt)
+        prof = parse_profile(txt)
         success = "*** SUCCESS ***" in txt and "cycle budget reached" not in txt
         failed = re.findall(r"\*\*\* FAILED \*\*\* \(tohost\s*=\s*(\d+)", txt)
         # NB: the benign report line "STORAMIC_C2_TOPOLOGY slv=..." is printed
@@ -280,7 +415,7 @@ class Ctx:
                 "fail_code": failed[0] if failed else None,
                 "fail_tohost": failed[0] if failed else None,
                 "topology": topo, "native": nat, "fatal": fatal,
-                "sba_probe": sba,
+                "sba_probe": sba, "profile": prof,
                 "fatal_msg": (fl[-1] if fl else None),
                 "native_line": (nat or {}).get("line"),
                 "violations": (nat or {}).get("violations"),
@@ -290,8 +425,13 @@ class Ctx:
 
 def _case(ctx, name, tag, elf, expect_fields=None, expect_gt=None,
           expect_success=True, expect_fail_tohost=None, require_topo=True,
-          plusargs=(), expect_sba=None, debug_disable=True):
-    """Run one sim and evaluate it against the case contract."""
+          plusargs=(), expect_sba=None, debug_disable=True,
+          topo_expect=TOPO_EXPECT, extra_checks=None, expect_profile=None):
+    """Run one sim and evaluate it against the case contract.
+
+    ``topo_expect`` overrides the baseline topology string (C2-wide latency
+    modes print a nonzero ``latency=``). ``extra_checks`` is an optional
+    ``fn(add, sim)`` that appends further checks before the verdict."""
     sim = ctx.run_sim(tag, elf, plusargs=plusargs,
                       debug_disable=debug_disable)
     nat = sim.get("native")
@@ -314,14 +454,19 @@ def _case(ctx, name, tag, elf, expect_fields=None, expect_gt=None,
                 add(f"gt_{k}", (nat.get(k) or 0) > thr,
                     f"{k}={nat.get(k)} !> {thr}")
     if require_topo:
-        add("topology", sim.get("topology") == TOPO_EXPECT,
+        add("topology", sim.get("topology") == topo_expect,
             f"topology={sim.get('topology')}")
     if expect_success is not None:
         add("success", sim.get("success") == expect_success,
             f"success={sim.get('success')} fail_code={sim.get('fail_code')}")
     if expect_fail_tohost is not None:
-        add("fail_tohost", sim.get("fail_tohost") == str(expect_fail_tohost),
-            f"tohost={sim.get('fail_tohost')}")
+        ft = sim.get("fail_tohost")
+        if callable(expect_fail_tohost):
+            add("fail_tohost", bool(expect_fail_tohost(ft)),
+                f"tohost={ft} pred")
+        else:
+            add("fail_tohost", ft == str(expect_fail_tohost),
+                f"tohost={ft}")
     if expect_sba is not None:
         sba = sim.get("sba_probe")
         bad = ({k: ((sba or {}).get(k), v) for k, v in expect_sba.items()
@@ -330,10 +475,20 @@ def _case(ctx, name, tag, elf, expect_fields=None, expect_gt=None,
         add("sba_probe", sba is not None and not bad,
             f"sba mismatch {bad}" if bad else "sba ok")
     add("no_fatal", not sim.get("fatal"), "monitor/RTL fatal")
+    if expect_profile is not None:
+        prof = sim.get("profile")
+        bad = ({k: ((prof or {}).get(k), v) for k, v in expect_profile.items()
+                if (prof or {}).get(k) != v}
+               if prof else {"line": None})
+        add("profile", prof is not None and not bad,
+            f"profile mismatch {bad}" if bad else "profile ok")
+    if extra_checks is not None:
+        extra_checks(add, sim)
     rec = {"case": name, "model": tag, "elf": elf.name,
            "elf_sha256": sha256_file(elf)[:16], "sim": sim,
            "report_line": sim.get("native_line"),
            "topology_line": sim.get("topology"),
+           "profile_line": (sim.get("profile") or {}).get("line"),
            "checks": checks}
     # A missing STORAMIC_C2_NATIVE (or topology) report line, or a wall-clock
     # kill, means the run produced no verdict evidence -> incomplete, not a
@@ -409,7 +564,8 @@ def execute(ctx):
         rep["cases"]["c2-po"] = _case(ctx, "c2-po", "po", c2_elf,
                                        expect_fields=po_fields,
                                        expect_gt={"max_lid": 0},
-                                       expect_success=True)
+                                       expect_success=True,
+                                       expect_profile=PROFILE_FP["base"])
         po_max_lid = (((rep["cases"]["c2-po"].get("sim") or {})
                        .get("native") or {}).get("max_lid"))
         rep["max_lid_c2_po"] = po_max_lid
@@ -427,7 +583,8 @@ def execute(ctx):
         rep["cases"]["c2-qf"] = _case(ctx, "c2-qf", "qf", c2_elf,
                                        expect_fields=qf_fields,
                                        expect_gt=qf_gt,
-                                       expect_success=True)
+                                       expect_success=True,
+                                       expect_profile=PROFILE_FP["base"])
     # ---- cases b2: port-1 debug SBA native traffic -------------------------
     # Same models + firmware as c2-po/c2-qf plus +storamic_sba_probe: the
     # fesvr DTM issues real sbcs/sbaddress/sbdata ops whose SBA master traffic
@@ -440,13 +597,13 @@ def execute(ctx):
             ctx, "c2-po-sba", "po", c2_sba_elf,
             expect_fields=C2_SBA_PO, expect_success=True,
             plusargs=("+storamic_sba_probe",), expect_sba=SBA_EXPECT,
-            debug_disable=False)
+            debug_disable=False, expect_profile=PROFILE_FP["base"])
     if c2_sba_elf is not None and ctx.model("qf").exists():
         rep["cases"]["c2-qf-sba"] = _case(
             ctx, "c2-qf-sba", "qf", c2_sba_elf,
             expect_fields=C2_SBA_QF, expect_success=True,
             plusargs=("+storamic_sba_probe",), expect_sba=SBA_EXPECT,
-            debug_disable=False)
+            debug_disable=False, expect_profile=PROFILE_FP["base"])
     # ---- case c: IO role virtio pos/neg ------------------------------------
     if virtio_pos_elf is not None and ctx.model("io").exists():
         nat_sem = {"m2_aw": 0, "m2_ar": 0, "src_ok_aw": 0, "src_ok_ar": 0,
@@ -455,12 +612,13 @@ def execute(ctx):
             ctx, "virtio-io-pos", "io", virtio_pos_elf,
             expect_fields=nat_sem,
             expect_gt={"beats2": 0, "max_lid": 0},
-            expect_success=True)
+            expect_success=True, expect_profile=PROFILE_FP["base"])
     if virtio_neg_elf is not None and ctx.model("io").exists():
         rep["cases"]["virtio-io-neg"] = _case(
             ctx, "virtio-io-neg", "io", virtio_neg_elf,
             expect_fields={"violations": 0, "pending": 0},
-            expect_success=False, expect_fail_tohost=16)
+            expect_success=False, expect_fail_tohost=16,
+            expect_profile=PROFILE_FP["base"])
 
     # ---- case d: default-config lint ---------------------------------------
     e = dict(ctx.env); e["G6LC_STORAMIC_DEFINES"] = DEFS_DEFAULT
@@ -602,6 +760,72 @@ def _mut_patch_m5(t, width):
 
 M5_KILL_TOKENS = ("aw_bad_prefix", "ar_bad_prefix", "aw_unmatched",
                   "ar_unmatched", "aw_payload", "ar_payload")
+
+
+def _mut_patch_m7(t):
+    """m7: neuter the virtio device's DMA-window confinement (win_ok).
+
+    The data-segment address check in g6lc_storamic_virtio_blk.sv clears
+    ``win_ok`` when a segment escapes ``[dma_base_i, win_end)``. Flipping the
+    clearing assignment to a no-op keeps ``win_ok`` high, so a guest-supplied
+    descriptor address inside the Storamic window is accepted and DMA is
+    issued on port 2. Only the single ``win_ok = 1'b0`` site is touched.
+    """
+    old = "win_ok = 1'b0;"
+    if old not in t:
+        return None
+    return t.replace(old, "win_ok = 1'b1;", 1)
+
+
+def _mut_patch_m7_ring(t):
+    """m7 ring half: neuter the virtio ring's DMA-window confinement.
+
+    ``g6lc_storamic_virtio_ring.sv`` raises ``ring_fault_o`` (->
+    DEVICE_NEEDS_RESET via ``virtio_mmio`` status_q[6]) when a descriptor or
+    ring address escapes ``[dma_base_i, dma_base_i+dma_size_i)`` — every such
+    check funnels through ``in_window``. That upstream check fires before the
+    blk device's ``win_ok``/``StIoErr`` path, which is why the unmutated oracle
+    returns NEEDS_RESET with m2=0. Forcing ``in_window`` to 1'b1 removes it so
+    the out-of-window descriptor data address reaches port-2 DMA. Applied in
+    the SAME mutant as the ``win_ok`` removal so nothing downstream masks it.
+    """
+    old = "return ({1'b0, a} >= {1'b0, base}) && (e <= wend);"
+    if old not in t:
+        return None
+    return t.replace(old, "return 1'b1;", 1)
+
+
+def _judge_m7(sim):
+    """m7 judge: window-address DMA must reach port 2 and be refused.
+
+    The unmutated oracle firmware is rejected upstream by the ring's
+    ``in_window`` check -> DEVICE_NEEDS_RESET, tohost low byte 29, m2=0. With
+    BOTH that ring check and the blk ``win_ok`` removed, the window address is
+    accepted, so the run either (a) issues port-2 window DMA the route refuses
+    (m2>0 / a non-29 tohost as the firmware takes a later path) or (b) dies on
+    a monitor fatal. A run that still exits NEEDS_RESET with m2=0 means the
+    mutant did not take -> survived -> fail. ``authorized`` asserting is
+    always a fail. Returns (failed_as_expected, note).
+    """
+    nat = sim.get("native") or {}
+    blob = ((sim.get("fatal_msg") or "") + "\n" + (sim.get("tail") or ""))
+    m2 = (nat.get("m2_aw") or 0) + (nat.get("m2_ar") or 0)
+    if sim.get("fatal") and "authorized" in blob:
+        return False, "authorized asserted"
+    if sim.get("fatal"):
+        return True, "monitor/RTL fatal on window DMA"
+    # The device DMA to the window is refused by the route (Enable=0) -> the
+    # firmware still observes a request error and exits tohost=28, so the
+    # tohost code does NOT distinguish mutant from unmutated. The signal is
+    # port-2 window DMA (m2>0) appearing where the unmutated run had m2=0.
+    if m2 > 0:
+        ok = (nat.get("src_ok_aw") == 0 and nat.get("src_ok_ar") == 0
+              and nat.get("violations") == 0)
+        return ok, (f"m2={m2} window DMA issued+refused src_ok=0 viol=0"
+                    if ok else
+                    f"m2={m2} but src_ok/violations dirty: {nat}")
+    return False, (f"no port-2 window DMA (m2=0) tohost="
+                   f"{sim.get('fail_tohost')} - mutant survived")
 
 
 def _judge_m5(sim):
@@ -803,6 +1027,450 @@ def _extract_tar(src_tar, dest):
     return dest
 
 
+def _maxout_check(add, sim):
+    """A1: latency may raise max_outstanding but never past MaxMstTrans."""
+    nat = sim.get("native") or {}
+    mo = nat.get("max_outstanding")
+    add("max_outstanding_le", mo is not None and mo <= XBAR_MAX_MST_TRANS,
+        f"max_outstanding={mo} !<= {XBAR_MAX_MST_TRANS}")
+
+
+def _a2_offline(ctx, slug, mode, tag, elf, expect_profile=None):
+    """A2 probe-off run on an alternate target: real traffic, src_ok 0/0."""
+    def _done_eq_m0(add, sim):
+        nat = sim.get("native") or {}
+        add("done_eq_m0",
+            nat.get("done_w") == nat.get("m0_aw") and
+            nat.get("done_r") == nat.get("m0_ar"),
+            f"done={nat.get('done_w')}/{nat.get('done_r')} "
+            f"m0={nat.get('m0_aw')}/{nat.get('m0_ar')}")
+    return _case(ctx, f"{slug}-{mode}", tag, elf,
+                 expect_fields={"src_ok_aw": 0, "src_ok_ar": 0,
+                                "pending": 0, "violations": 0},
+                 expect_success=True, require_topo=False,
+                 extra_checks=_done_eq_m0, expect_profile=expect_profile)
+
+
+def _a2_probeon(ctx, slug, tag, elf, expect_profile=None):
+    """A2 probe-on run: unsupported target must fatal
+    STORAMIC_C2_ORIGIN_PROBE_UNSUPPORTED; a supported target runs clean.
+    Returns a record (not a _case: the fatal has no native report line)."""
+    sim = ctx.run_sim(tag, elf, plusargs=(), debug_disable=True)
+    blob = ((sim.get("fatal_msg") or "") + "\n" + (sim.get("tail") or ""))
+    refused = "STORAMIC_C2_ORIGIN_PROBE_UNSUPPORTED" in blob
+    ran = sim.get("success") and not sim.get("fatal")
+    nat = sim.get("native") or {}
+    prof = sim.get("profile")
+    rec = {"case": f"{slug}-po", "model": tag, "sim": {
+               "rc": sim["rc"], "success": sim["success"],
+               "fatal": sim["fatal"], "fatal_msg": sim.get("fatal_msg"),
+               "native_line": sim.get("native_line"),
+               "topology_line": sim.get("topology"),
+               "reason": _sim_reason(sim)},
+           "outcome": ("unsupported-refused" if refused else
+                       "supported-ran" if ran else "inconclusive"),
+           "report_line": sim.get("native_line"),
+           "topology_line": sim.get("topology"),
+           "profile_line": (prof or {}).get("line"),
+           "checks": []}
+    if refused:
+        # The t=0 $fatal precedes the PROFILE $display, so the refusal path
+        # emits no profile line; the UNSUPPORTED death is itself the required
+        # negative and target identity is proven by the sibling probe-off
+        # PROFILE fingerprint, so it is not gated here.
+        rec["checks"].append({"check": "origin_probe_refused", "ok": True,
+                              "why": "STORAMIC_C2_ORIGIN_PROBE_UNSUPPORTED"})
+        rec["status"] = "pass"
+        rec["pass"] = True
+        return rec
+    # Profile fingerprint: prove the elaborated config matches the requested
+    # target so a mis-selected `make target=` cannot pass silently. Only the
+    # ran/inconclusive paths reach here (a confirmed refusal returned above).
+    if expect_profile is not None:
+        bad = ({k: ((prof or {}).get(k), v) for k, v in expect_profile.items()
+                if (prof or {}).get(k) != v}
+               if prof else {"line": None})
+        rec["checks"].append({"check": "profile", "ok": bool(prof) and not bad,
+                              "why": ("profile ok" if prof and not bad else
+                                      f"profile mismatch {bad}")})
+        if bad or not prof:
+            rec["status"] = "incomplete"
+            rec["pass"] = False
+            return rec
+    if ran:
+        # Supported multi-config target: real probe-on traffic. Invariants
+        # only (counts are target-dependent -> recorded, not pinned).
+        ok = (nat.get("violations") == 0 and nat.get("pending") == 0 and
+              p_eq_m(nat))
+        rec["checks"].append({"check": "ran_clean", "ok": ok,
+                              "why": _sim_reason(sim)})
+        rec["status"] = "pass" if ok else "fail"
+    else:
+        rec["status"] = "incomplete"
+        rec["checks"].append({"check": "verdict", "ok": False,
+                              "why": _sim_reason(sim)})
+    rec["pass"] = rec["status"] == "pass"
+    return rec
+
+
+def _prim_evidence(ctx):
+    """Primary-role virtio-blk evidence (Part B / ``prim-aw`` stage).
+
+    Builds the probe-off primary model + ``-DSTORAMIC_PRIMARY`` firmware and
+    runs it with the full trace plusargs. Returns a dict of measured evidence;
+    never a pass/fail verdict. The ``prim-aw`` stage and ``execute_wide``'s
+    Part B share this so the AW/AR trace capture stays identical.
+    """
+    prim_elf = ctx.compile_fw(FW_VIRTIO, "virtio-primary",
+                              ["-DSTORAMIC_COHERENT_DMA",
+                               "-DSTORAMIC_PRIMARY"])
+    if prim_elf is None:
+        return {"error": "primary virtio firmware gcc failed"}
+    okp, _ = ctx.ensure_model("prim-po", DEFS_PO)
+    if not okp:
+        return {"error": "prim-po model build failed"}
+    sim = ctx.run_sim("prim-po", prim_elf, debug_disable=True,
+                      budget=2000000,
+                      plusargs=("+c2_trace", "+g6lc_storamic_mem_trace",
+                                "+g6lc_virtio_mmio_trace", "+rvfi_cycle_stamp"))
+    ev = {"model": "prim-po", "elf": prim_elf.name,
+          "rc": sim["rc"], "success": sim["success"],
+          "fail_tohost": sim.get("fail_tohost"),
+          "fatal": sim.get("fatal"),
+          "native_line": sim.get("native_line"),
+          "topology_line": sim.get("topology"),
+          "profile_line": ((sim.get("profile") or {}).get("line")),
+          "pending": (sim.get("native") or {}).get("pending"),
+          "violations": (sim.get("native") or {}).get("violations")}
+    slog = ctx.out / "sim-prim-po.log"
+    stxt = slog.read_text(errors="replace") if slog.is_file() else ""
+
+    def _tail_lines(pat, n):
+        ls = [l for l in stxt.splitlines() if pat in l]
+        return ls[-n:]
+    ev["c2_trace_last10"] = _tail_lines("STORAMIC_C2_TRACE", 10) \
+        or _tail_lines("c2_trace", 10)
+    ev["c2_aw_window"] = [l for l in stxt.splitlines()
+                          if "C2TR AW" in l and "0x50003" in l][-20:]
+    ev["mem_trace_last20"] = _tail_lines("STORAMIC_MEM", 20)
+    ev["mmio_trace_last20"] = _tail_lines("MMIO", 20) \
+        or _tail_lines("virtio", 20)
+    traces = {}
+    for pat in ("trace_hart_*.dasm", "*.traces", "rvfi*"):
+        for p in sorted(ctx.src.glob(pat)):
+            try:
+                lines = p.read_text(errors="replace").splitlines()
+                traces[p.name] = {"lines": len(lines), "tail": lines[-40:]}
+            except Exception:
+                pass
+    ev["trace_files"] = traces
+    return ev
+
+
+def execute_wide(ctx):
+    """C2-wide matrix: A1 xbar latency modes, A2 multi-config targets,
+    A3 port-2 DMA-window oracle + m7. Mirrors execute()'s report shape."""
+    rep = {"stage": "native-c2-wide", "work": str(ctx.src),
+           "out": str(ctx.out),
+           "defines": {"po": DEFS_PO, "qf": DEFS_QF, "io": DEFS_IO},
+           "verilator": ctx.verilator,
+           "gcc": subprocess.run([f"{RISCV}/bin/riscv-none-elf-gcc",
+                                  "--version"], capture_output=True,
+                                 text=True).stdout.splitlines()[0],
+           "cases": {}, "targets": {}, "mutants": {}, "builds": ctx.builds,
+           "incomplete": [],
+           "facts": {
+               "origin_supported":
+                   "config_pkg.sv:1068 requires StoramicEn&&StoramicIoEn&&"
+                   "StoramicCheckpointEn&&NrHarts==1&&!OoOEn&&!RVH&&"
+                   "DCacheType==WT&&!EnableAccelerator&&CoproType=="
+                   "COPRO_NONE (NrCores NOT checked)",
+               "dma_window_check":
+                   "g6lc_storamic_virtio_blk.sv win_ok confines data "
+                   "segments to [dma_base_i,win_end)"}}
+
+    # Firmware: c2 (role-independent) + two A3 DMA-window oracle ELFs.
+    c2_elf = ctx.compile_fw(FW_C2, "c2",
+                            ["-DSTORAMIC_COHERENT_DMA", "-DSTORAMIC_PRIMARY"])
+    dma_mmio = ctx.compile_fw(FW_VIRTIO, "virtio-dma-win-mmio",
+                              ["-DSTORAMIC_COHERENT_DMA",
+                               "-DORACLE_DMA_WINDOW=0x1000"])
+    dma_ctrl = ctx.compile_fw(FW_VIRTIO, "virtio-dma-win-ctrl",
+                              ["-DSTORAMIC_COHERENT_DMA",
+                               "-DORACLE_DMA_WINDOW=0x0"])
+    if c2_elf is None:
+        rep["incomplete"].append("c2 firmware gcc failed")
+    for nm, e in (("dma-win-mmio", dma_mmio), ("dma-win-ctrl", dma_ctrl)):
+        if e is None:
+            rep["incomplete"].append(f"{nm} firmware gcc failed")
+
+    # ---- A1: xbar latency sweep (probe-on, c2 fw) ---------------------------
+    lat_fields = dict(C2_FIELDS_PO)
+    lat_fields["max_lid"] = MAX_LID_C2
+    for slug, member, val in XBAR_LATENCY_MODES:
+        cname = f"lat-{slug}"
+        tag = f"lat-{slug}"
+        defines = f"{DEFS_PO}+G6LC_XBAR_LATENCY={member}"
+        ok, _ = ctx.ensure_model(tag, defines)
+        if not ok or c2_elf is None:
+            rep["cases"][cname] = {"status": "incomplete", "pass": False,
+                                   "error": "model/fw build failed"}
+            rep["incomplete"].append(f"{cname} build")
+            continue
+        topo = TOPO_EXPECT.replace("latency=0", f"latency={val}")
+        rep["cases"][cname] = _case(
+            ctx, cname, tag, c2_elf, expect_fields=lat_fields,
+            expect_success=True, require_topo=True, topo_expect=topo,
+            extra_checks=_maxout_check, expect_profile=PROFILE_FP["base"])
+    # m4 response-tap swap under CUT_ALL_PORTS must still be killed.
+    hpath = ctx.src / HARNESS
+    horig = hpath.read_text() if hpath.is_file() else None
+    if horig is not None:
+        m4t = _mut_patch_m4(horig)
+        if m4t and m4t != horig:
+            hpath.write_text(m4t)
+            try:
+                ok, _ = ctx.ensure_model("lat-mut-m4",
+                                         f"{DEFS_PO}+G6LC_XBAR_LATENCY="
+                                         "CUT_ALL_PORTS")
+                if ok and c2_elf is not None:
+                    sim = ctx.run_sim("lat-mut-m4", c2_elf,
+                                      debug_disable=True)
+                    good = sim.get("fatal") and _has_sim(
+                        sim, "spurious", "without_device", "unmatched",
+                        "bad_prefix", "payload", "w_no_owner", "rtab")
+                    rep["mutants"]["m4-tapswap-allports"] = {
+                        "mutant": "m4-tapswap-allports",
+                        "expected_reason": "response-port fatal under "
+                                           "CUT_ALL_PORTS",
+                        "failed_as_expected": bool(good),
+                        "status": "pass" if good else
+                                  ("fail" if _mutant_status(False, sim)
+                                   == "fail" else "incomplete"),
+                        "sim": {"fatal": sim.get("fatal"),
+                                "fatal_msg": sim.get("fatal_msg"),
+                                "native_line": sim.get("native_line")}}
+                    rep["mutants"]["m4-tapswap-allports"]["pass"] = \
+                        rep["mutants"]["m4-tapswap-allports"]["status"] == "pass"
+                else:
+                    rep["mutants"]["m4-tapswap-allports"] = {
+                        "mutant": "m4-tapswap-allports",
+                        "status": "incomplete", "pass": False,
+                        "error": "mutant model build failed"}
+            finally:
+                hpath.write_text(horig)
+        else:
+            rep["mutants"]["m4-tapswap-allports"] = {
+                "mutant": "m4-tapswap-allports", "status": "incomplete",
+                "pass": False, "error": "m4 patch not applied"}
+
+    # ---- A2: alternate config targets --------------------------------------
+    for slug, pkg, note in WIDE_TARGETS:
+        trec = {"target": pkg, "note": note, "probe_off": None,
+                "probe_on": None}
+        rep["targets"][slug] = trec
+        # probe-off (DEFS_QF): real traffic, src_ok must stay 0/0.
+        tag_off = f"{slug}-qf"
+        ok, _ = ctx.ensure_model(tag_off, DEFS_QF, target=pkg)
+        if ok and c2_elf is not None:
+            trec["probe_off"] = _a2_offline(ctx, slug, "qf", tag_off, c2_elf,
+                                            expect_profile=PROFILE_FP[slug])
+            trec["probe_off"]["target"] = pkg
+        else:
+            terr = ctx.tb_flow_error(tag_off) if not ok else None
+            trec["probe_off"] = {"status": "incomplete", "pass": False,
+                                 "error": terr or "model/fw build failed",
+                                 "target": pkg}
+            rep["incomplete"].append(f"{slug}-qf build")
+        # probe-on (DEFS_PO): unsupported -> ORIGIN_PROBE_UNSUPPORTED fatal.
+        tag_on = f"{slug}-po"
+        ok, _ = ctx.ensure_model(tag_on, DEFS_PO, target=pkg)
+        if ok and c2_elf is not None:
+            trec["probe_on"] = _a2_probeon(ctx, slug, tag_on, c2_elf,
+                                           expect_profile=PROFILE_FP[slug])
+            trec["probe_on"]["target"] = pkg
+        else:
+            terr = ctx.tb_flow_error(tag_on) if not ok else None
+            trec["probe_on"] = {"status": "incomplete", "pass": False,
+                                "error": terr or "model/fw build failed",
+                                "target": pkg}
+            rep["incomplete"].append(f"{slug}-po build")
+
+    # ---- A3: port-2 DMA-window oracle + m7 ----------------------------------
+    tag_io = "io"
+    ok, _ = ctx.ensure_model(tag_io, DEFS_IO)
+    if ok:
+        for nm, elf, off in (("dma-win-mmio", dma_mmio, "0x1000"),
+                             ("dma-win-ctrl", dma_ctrl, "0x0")):
+            if elf is None:
+                rep["cases"][nm] = {"status": "incomplete", "pass": False,
+                                    "error": "firmware gcc failed"}
+                continue
+            rep["cases"][nm] = _case(
+                ctx, nm, tag_io, elf,
+                expect_fields={"m2_aw": 0, "m2_ar": 0, "src_ok_aw": 0,
+                               "src_ok_ar": 0, "pending": 0, "violations": 0},
+                expect_success=False, expect_fail_tohost=_dma_win_pred,
+                require_topo=False, expect_profile=PROFILE_FP["base"])
+            rep["cases"][nm]["dma_window_offset"] = off
+            # Assert the measured/expected outcome: DEVICE_NEEDS_RESET. The
+            # virtio ring's in_window check faults the out-of-window descriptor
+            # before any port-2 DMA, so the device latches status bit 6 (0x40)
+            # and the firmware reports FAIL_DMA_WIN_NEEDS_RESET (low tohost
+            # byte 29) with the device status in bits 8+. 'rej'/'stall'/'ok'
+            # are deviations from that contract -> fail.
+            kind, raw = dma_win_kind(
+                (rep["cases"][nm].get("sim") or {}).get("fail_tohost"))
+            rep["cases"][nm]["dma_win_outcome"] = kind
+            rep["cases"][nm]["dma_win_tohost"] = raw
+            status = ((raw or 0) >> 8) & 0xFF if raw is not None else 0
+            rep["cases"][nm]["dma_win_status"] = status
+            if kind != "needs_reset" or not (status & 0x40):
+                rep["cases"][nm]["pass"] = False
+                rep["cases"][nm]["status"] = "fail"
+                rep["cases"][nm]["dma_win_finding"] = (
+                    "expected DEVICE_NEEDS_RESET (tohost 29, status&0x40); "
+                    f"got '{kind}' status=0x{status:02x}")
+        # m7: remove BOTH the ring's in_window NEEDS_RESET check and the blk
+        # win_ok -> window DMA must be issued on port 2 and refused. Removing
+        # only win_ok leaves the upstream ring check rejecting the descriptor
+        # (the observed NEEDS_RESET/m2=0 survival); both must go in one mutant.
+        vpath = ctx.src / VIRTIO_DEV
+        rpath = ctx.src / VIRTIO_RING
+        vorig = vpath.read_text() if vpath.is_file() else None
+        rorig = rpath.read_text() if rpath.is_file() else None
+        if (vorig is not None and rorig is not None
+                and dma_mmio is not None):
+            vnew = _mut_patch_m7(vorig)
+            rnew = _mut_patch_m7_ring(rorig)
+            if (vnew and vnew != vorig and rnew and rnew != rorig):
+                vpath.write_text(vnew)
+                rpath.write_text(rnew)
+                try:
+                    okm, _ = ctx.ensure_model("io-m7", DEFS_IO)
+                    if okm:
+                        sim = ctx.run_sim("io-m7", dma_mmio,
+                                          debug_disable=True)
+                        good, note = _judge_m7(sim)
+                        rep["mutants"]["m7-dmawin"] = {
+                            "mutant": "m7-dmawin",
+                            "patches": ["blk win_ok", "ring in_window"],
+                            "expected_reason": "window DMA issued on "
+                                               "port 2 / monitor fatal",
+                            "failed_as_expected": bool(good),
+                            "judge": note,
+                            "status": ("pass" if good else
+                                       ("fail" if _mutant_status(False, sim)
+                                        == "fail" else "incomplete")),
+                            "sim": {"fatal": sim.get("fatal"),
+                                    "fatal_msg": sim.get("fatal_msg"),
+                                    "native_line": sim.get("native_line"),
+                                    "profile_line": ((sim.get("profile") or {})
+                                                     .get("line")),
+                                    "fail_tohost": sim.get("fail_tohost")}}
+                        rep["mutants"]["m7-dmawin"]["pass"] = \
+                            rep["mutants"]["m7-dmawin"]["status"] == "pass"
+                    else:
+                        rep["mutants"]["m7-dmawin"] = {
+                            "mutant": "m7-dmawin", "status": "incomplete",
+                            "pass": False, "error": "mutant build failed"}
+                finally:
+                    vpath.write_text(vorig)
+                    rpath.write_text(rorig)
+            else:
+                rep["mutants"]["m7-dmawin"] = {
+                    "mutant": "m7-dmawin", "status": "incomplete",
+                    "pass": False, "error": "m7 patch not applied"}
+        else:
+            rep["mutants"]["m7-dmawin"] = {
+                "mutant": "m7-dmawin", "status": "incomplete", "pass": False,
+                "error": "virtio src/fw missing"}
+    else:
+        rep["incomplete"].append("io model build failed")
+        for nm in ("dma-win-mmio", "dma-win-ctrl"):
+            rep["cases"][nm] = {"status": "incomplete", "pass": False,
+                                "error": "io model build failed"}
+        rep["mutants"]["m7-dmawin"] = {"mutant": "m7-dmawin",
+                                       "status": "incomplete", "pass": False}
+
+    # ---- primary-role virtio-blk (probe-off model) --------------------------
+    # STORAMIC_PRIMARY firmware on the G6LC_STORAMIC+MODEL probe-off model. The
+    # ST-025 durability-after-cut oracle is compiled out under STORAMIC_PRIMARY
+    # (stick RAM is system memory there; cut survival is C5/C6), so pos must
+    # now reach SUCCESS and neg must fail at FAIL_IN_DATA (tohost 16). Window
+    # isolation invariants are role-independent: no port-2 window DMA (m2=0),
+    # no source candidate (src_ok=0), clean monitor.
+    prim_pos_elf = ctx.compile_fw(FW_VIRTIO, "virtio-prim-pos",
+                                  ["-DSTORAMIC_COHERENT_DMA",
+                                   "-DSTORAMIC_PRIMARY"])
+    prim_neg_elf = ctx.compile_fw(FW_VIRTIO, "virtio-prim-neg",
+                                  ["-DSTORAMIC_COHERENT_DMA",
+                                   "-DSTORAMIC_PRIMARY", "-DORACLE_NEGATIVE"])
+    okp, _ = ctx.ensure_model("prim-qf", DEFS_QF)
+    if okp:
+        nat_sem = {"m2_aw": 0, "m2_ar": 0, "src_ok_aw": 0, "src_ok_ar": 0,
+                   "pending": 0, "violations": 0}
+        if prim_pos_elf is not None:
+            rep["cases"]["virtio-prim-pos"] = _case(
+                ctx, "virtio-prim-pos", "prim-qf", prim_pos_elf,
+                expect_fields=nat_sem,
+                expect_gt={"beats2": 0},
+                expect_success=True, require_topo=False,
+                expect_profile=PROFILE_FP["base"])
+        else:
+            rep["cases"]["virtio-prim-pos"] = {
+                "status": "incomplete", "pass": False,
+                "error": "primary pos firmware gcc failed"}
+            rep["incomplete"].append("virtio-prim-pos gcc")
+        if prim_neg_elf is not None:
+            rep["cases"]["virtio-prim-neg"] = _case(
+                ctx, "virtio-prim-neg", "prim-qf", prim_neg_elf,
+                expect_fields={"violations": 0, "pending": 0,
+                               "m2_aw": 0, "m2_ar": 0,
+                               "src_ok_aw": 0, "src_ok_ar": 0},
+                expect_success=False, expect_fail_tohost=16,
+                require_topo=False, expect_profile=PROFILE_FP["base"])
+        else:
+            rep["cases"]["virtio-prim-neg"] = {
+                "status": "incomplete", "pass": False,
+                "error": "primary neg firmware gcc failed"}
+            rep["incomplete"].append("virtio-prim-neg gcc")
+    else:
+        rep["incomplete"].append("prim-qf model build failed")
+        for nm in ("virtio-prim-pos", "virtio-prim-neg"):
+            rep["cases"][nm] = {"status": "incomplete", "pass": False,
+                                "error": "prim-qf model build failed"}
+
+    # ---- Part B: primary-role virtio-blk hang evidence (evidence only) ------
+    # G6LC_STORAMIC+G6LC_STORAMIC_MODEL with -DSTORAMIC_PRIMARY. Shared with the
+    # ``prim-aw`` stage via _prim_evidence so the AW trace capture is identical.
+    rep["evidence"] = {"primary_virtio_hang": _prim_evidence(ctx)}
+
+    # ---- verdict -------------------------------------------------------------
+    def _st(rec):
+        if not isinstance(rec, dict):
+            return None
+        return rec.get("status") or ("pass" if rec.get("pass") else "fail")
+    statuses = [_st(r) for r in rep["cases"].values()]
+    statuses += [_st(t.get("probe_off")) for t in rep["targets"].values()]
+    statuses += [_st(t.get("probe_on")) for t in rep["targets"].values()]
+    statuses += [_st(m) for m in rep["mutants"].values()]
+    statuses = [s for s in statuses if s]
+    if "fail" in statuses:
+        rep["verdict"] = "FAIL"
+    elif rep["incomplete"] or "incomplete" in statuses:
+        rep["verdict"] = "INCOMPLETE"
+    else:
+        rep["verdict"] = "PASS"
+    (ctx.out / "native-c2-wide.json").write_text(json.dumps(rep, indent=2))
+    return rep
+
+
+def _has_sim(sim, *subs):
+    blob = ((sim.get("fatal_msg") or "") + "\n" + (sim.get("tail") or ""))
+    return any(s in blob for s in subs)
+
+
 def _tools(src):
     """Resolve + verify tool identity from storamic_tools.json in the tree.
 
@@ -920,6 +1588,131 @@ def run(data, out, stages, manifest, builds, outcomes, verilator, build_model):
                 if isinstance(v, dict) and not v.get("pass")]
         raise RuntimeError("native-c2 FAIL: " + ", ".join(bad or ["unknown"]))
     raise _Incomplete("; ".join(result.get("incomplete") or ["incomplete"]))
+
+
+def run_wide(data, out, stages, manifest, builds, outcomes, verilator,
+             build_model):
+    """run_leaf.py stage entry for ``native-c2-wide``.
+
+    Same frozen, manifest-hashed source tar + tool-identity discipline as
+    ``run()``; builds its own ``work/native-c2-wide`` tree so it never
+    clobbers the ``native-c2`` stage's cached models. Returns on PASS, raises
+    RuntimeError on FAIL, _Incomplete on INCOMPLETE.
+    """
+    data = Path(data); out = Path(out); out.mkdir(parents=True, exist_ok=True)
+    src_tar = data / SRC_TAR_NAME
+    expected = (manifest.get("sources") or {}).get(SRC_TAR_NAME)
+    rep = {"stage": "native-c2-wide", "src_tar": str(src_tar),
+           "leaf_verilator": str(verilator) if verilator else None}
+
+    def _inc(reason):
+        rep["verdict"] = "incomplete"
+        rep["reason"] = reason
+        (out / "native-c2-wide.json").write_text(json.dumps(rep, indent=2))
+        outcomes.append({"native_c2_wide": "incomplete", "reason": reason,
+                         "pass": False})
+        raise _Incomplete(reason)
+
+    if not src_tar.is_file():
+        _inc(f"missing {SRC_TAR_NAME} in run data")
+    actual = sha256_file(src_tar)
+    rep["src_tar_sha256"] = actual
+    if expected and actual != expected:
+        _inc("source tar sha256 mismatch vs manifest")
+    run_dir = Path(os.environ.get("TH_RUN_DIR") or out.parent)
+    work = run_dir / "work" / "native-c2-wide"
+    rep["work_dir"] = str(work)
+    try:
+        src = _extract_tar(src_tar, work / "src")
+    except Exception as exc:
+        _inc(f"source tar extract failed: {exc}")
+    tools, verilator_use, vroot_use, terr = _tools(src)
+    rep["tools"] = tools
+    if terr:
+        _inc(terr)
+    env = base_env(verilator_use, vroot_use)
+    ctx = Ctx(src, out, verilator_use, vroot_use, env)
+    result = execute_wide(ctx)
+    result.update({"tools": tools, "leaf_verilator": rep["leaf_verilator"]})
+    (out / "native-c2-wide.json").write_text(json.dumps(result, indent=2))
+    verdict = result.get("verdict", "incomplete")
+
+    def _st(rec):
+        return (rec.get("status") or ("pass" if rec.get("pass") else "fail")
+                ) if isinstance(rec, dict) else None
+    outcomes.append({"native_c2_wide": verdict, "verdict": verdict,
+                     "incomplete": result.get("incomplete", []),
+                     "pass": verdict == "PASS",
+                     "cases": {k: _st(v) for k, v in
+                               result.get("cases", {}).items()},
+                     "targets": {k: {"probe_off": _st(v.get("probe_off")),
+                                     "probe_on": _st(v.get("probe_on"))}
+                                 for k, v in
+                                 result.get("targets", {}).items()},
+                     "mutants": {k: _st(v) for k, v in
+                                 result.get("mutants", {}).items()}})
+    if verdict == "PASS":
+        return
+    if verdict == "FAIL":
+        bad = [k for k, v in result.get("cases", {}).items()
+               if isinstance(v, dict) and not v.get("pass")]
+        for slug, t in result.get("targets", {}).items():
+            for ph in ("probe_off", "probe_on"):
+                r = t.get(ph)
+                if isinstance(r, dict) and not r.get("pass"):
+                    bad.append(f"{slug}-{ph}")
+        bad += [k for k, v in result.get("mutants", {}).items()
+                if isinstance(v, dict) and not v.get("pass")]
+        raise RuntimeError("native-c2-wide FAIL: " +
+                           ", ".join(bad or ["unknown"]))
+    raise _Incomplete("; ".join(result.get("incomplete") or ["incomplete"]))
+
+
+def run_prim_aw(data, out, stages, manifest, builds, outcomes, verilator,
+                build_model):
+    """run_leaf.py stage entry for ``prim-aw``.
+
+    Focused primary-role virtio-blk run (probe-off model + ``-DSTORAMIC_PRIMARY``
+    firmware) with the full trace plusargs. Exists to capture the C2TR AW/AR
+    window writes (the ST-025 power-cut target) cheaply, ahead of the firmware
+    ``#ifndef STORAMIC_PRIMARY`` guard. Evidence only — never a pass/fail gate.
+    """
+    data = Path(data); out = Path(out); out.mkdir(parents=True, exist_ok=True)
+    src_tar = data / SRC_TAR_NAME
+    expected = (manifest.get("sources") or {}).get(SRC_TAR_NAME)
+    rep = {"stage": "prim-aw", "src_tar": str(src_tar),
+           "leaf_verilator": str(verilator) if verilator else None}
+
+    def _inc(reason):
+        rep["verdict"] = "incomplete"
+        rep["reason"] = reason
+        (out / "prim-aw.json").write_text(json.dumps(rep, indent=2))
+        outcomes.append({"prim_aw": "incomplete", "reason": reason,
+                         "pass": False})
+        raise _Incomplete(reason)
+
+    if not src_tar.is_file():
+        _inc(f"missing {SRC_TAR_NAME} in run data")
+    actual = sha256_file(src_tar)
+    rep["src_tar_sha256"] = actual
+    if expected and actual != expected:
+        _inc("source tar sha256 mismatch vs manifest")
+    run_dir = Path(os.environ.get("TH_RUN_DIR") or out.parent)
+    work = run_dir / "work" / "prim-aw"
+    try:
+        src = _extract_tar(src_tar, work / "src")
+    except Exception as exc:
+        _inc(f"source tar extract failed: {exc}")
+    tools, verilator_use, vroot_use, terr = _tools(src)
+    rep["tools"] = tools
+    if terr:
+        _inc(terr)
+    env = base_env(verilator_use, vroot_use)
+    ctx = Ctx(src, out, verilator_use, vroot_use, env)
+    rep["evidence"] = {"primary_virtio_hang": _prim_evidence(ctx)}
+    rep["verdict"] = "evidence"
+    (out / "prim-aw.json").write_text(json.dumps(rep, indent=2))
+    outcomes.append({"prim_aw": "evidence", "pass": True})
 
 
 def main():

@@ -559,6 +559,46 @@ class PrepareTests(unittest.TestCase):
         self.assertIn("core-scc", RUNNER.ALLOWED_STAGES)
         self.assertIn("cpu-strict-pins", RUNNER.SIMULATION_STAGES)
 
+    def test_axi_gate_formal_registers_and_tracks_its_closure(self):
+        # axi-gate-formal is Yosys-only (no C++/Verilator runtime) and its
+        # source closure is exactly the two DUTs, two wrappers and the runner.
+        self.assertNotIn("axi-gate-formal", RUNNER.SIMULATION_STAGES)
+        self.assertIn("axi-gate-formal", RUNNER.ALLOWED_STAGES)
+        with tempfile.TemporaryDirectory(
+                dir=ROOT / "build-platform/workspace") as tmp:
+            self.assertEqual(self.invoke(
+                Path(tmp), "--prepare-only", "--stages", "axi-gate-formal"), 0)
+            plan = json.loads(
+                next(Path(tmp).glob("*/launch-plan.json")).read_text())
+            manifest = json.loads(Path(plan["manifest"]).read_text())
+            self.assertEqual(manifest["stages"], ["axi-gate-formal"])
+            for name in ("g6lc_storamic_axi_gate.sv",
+                         "g6lc_storamic_cpu_pause.sv",
+                         "formal_g6lc_storamic_axi_gate.sv",
+                         "formal_g6lc_storamic_cpu_pause.sv",
+                         "run_axi_gate_formal.py", "yosys_bin.py"):
+                self.assertIn(name, manifest["sources"])
+
+    def test_cpu_pause_registers_and_tracks_its_closure(self):
+        # cpu-pause is a real-CPU simulation stage: it must be allowed, need the
+        # runtime, and carry the cpu_origin closure plus gate/pause/rvfi/bench.
+        self.assertIn("cpu-pause", RUNNER.SIMULATION_STAGES)
+        self.assertIn("cpu-pause", RUNNER.ALLOWED_STAGES)
+        with tempfile.TemporaryDirectory(
+                dir=ROOT / "build-platform/workspace") as tmp:
+            self.assertEqual(self.invoke(
+                Path(tmp), "--prepare-only", "--stages", "cpu-pause"), 0)
+            plan = json.loads(
+                next(Path(tmp).glob("*/launch-plan.json")).read_text())
+            manifest = json.loads(Path(plan["manifest"]).read_text())
+            self.assertEqual(manifest["stages"], ["cpu-pause"])
+            for name in ("cpu_origin_plan.json", "cva6.sv", "cva6_rvfi.sv",
+                         "g6lc_storamic_axi_gate.sv",
+                         "g6lc_storamic_cpu_pause.sv",
+                         "tb_g6lc_storamic_cpu_pause.sv",
+                         "g6lc_cpu_pause_program.py", "run_cpu_pause.py"):
+                self.assertIn(name, manifest["sources"])
+
     def test_stq_commit_flush_sources_are_leaf_only(self):
         with tempfile.TemporaryDirectory(dir=ROOT / "build-platform/workspace") as tmp:
             self.assertEqual(self.invoke(

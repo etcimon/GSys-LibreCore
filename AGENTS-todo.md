@@ -144,6 +144,46 @@ authorize artifact recovery or shared cleanup.
   bare-metal test on the full harness passes with its negative oracle
   (`storamic-native-virtio-09b`); full Storamic sim `storamic-be8f643dc369`,
   synth+formal `storamic-fac26aab948c`. Model store only — no durability.
+- [x] **Primary-role virtio-blk `tohost=126` — root cause found + firmware
+  guarded (2026-11-12):** the ST-025 durability-after-cut oracle wrote
+  `PWR_CUT = CTRL_BASE+0x3000` (`0x50003000`) and armed `PWR_CUT_DRAIN =
+  +0x3008`. In the primary role the Storamic stick RAM *is* the system
+  memory the program runs from, so the accepted power-cut write raises
+  `storamic_power_cut` → `lost_q`/`ScanClear` of the live array; the next
+  main-memory AW (`0x8000a008`) is then never serviced and the hart stops
+  retiring (`tohost=126`). Confirmed by permanent `C2TR AW`/`AWV` monitor
+  trace (prim-aw run `storamic-874e6c599407`): last accepted writes are
+  `AW p=0 0x50001064` (IACK), **`AW p=0 0x50003000` (the cut)**,
+  `AW p=0 0x8000a000`, then `AWV p=0 0x8000a008 ready=0` retrying to the
+  timeout. Correct volatile-RAM behaviour, not an RTL bug — the firmware
+  step is invalid in this role. `storamic_virtio_blk.c` now compiles the
+  whole durability-after-cut block (e3 + e4) out under
+  `#ifndef STORAMIC_PRIMARY` with a comment pointing cut-survival at the
+  C5/C6 checkpoint flow; the sector-5 restore and every other step are
+  unchanged. `native-c2-wide` gained `virtio-prim-pos`/`virtio-prim-neg`
+  cases on the probe-off primary model (pos → SUCCESS, neg →
+  `FAIL_IN_DATA` tohost=16) — qualification verdict lands with the
+  `native-c2-wide` run.
+- [x] **SMT/cluster/prefetch native C2 — qualified (was a `TARGET_CFG`
+  plumbing artifact, not a tb gap; resolved 2026-11-12):** the earlier
+  `g6lc_tb.cpp cannot build SMT/cluster hierarchies` / `no-existing-flow`
+  reading was the *same* `TARGET_CFG` bug as the OoO `ooo=0` case —
+  `base_env` pinned `TARGET_CFG` to the baseline so `make target=` never
+  reached `Flist.cva6`, while the C++ `G6LC_TB_BANKED`/`G6LC_TB_CLUSTER`
+  defines still grepped `$(target)`. The SV side then elaborated the
+  baseline package (no SMT/cluster generates) but the C++ public-signal
+  macros referenced members that only exist in those generates → compile
+  error. `ensure_model` now aligns `TARGET_CFG` with the requested target,
+  so package and defines agree. `native-c2-wide` run
+  `storamic-0af4518fca44` (re-judged `storamic-a6d19cf81d55`) qualifies all
+  four: `g6lc64_smt2` (`harts=2 l2=1`), `g6lc64_smt2_l3` (`harts=2 l2=1
+  l3=1`), `g6lc64_server_math` (`cores=2 l2=1 rvh=1`, HwPrefetch) and
+  `g6lc64_ooo` (`ooo=1`) each run the c2 firmware probe-off to `SUCCESS`
+  with `p0==m0`, `done==m0`, `src_ok=0/0` (unsupported → no source
+  candidate), `pending=0 violations=0`, and each dies
+  `STORAMIC_C2_ORIGIN_PROBE_UNSUPPORTED` probe-on. None are
+  origin-supported (`supported=0`), so there is no supported-alternate
+  probe-on-ran case — that is the `config_pkg.sv:1068` contract, not a gap.
 - [ ] **Core (LSU owners), blocks Linux MMIO drivers:** on `cv64a6_imafdc_sv39`
   adjacent 32-bit MMIO stores were coalesced into one 64-bit write and a load
   right after a store to the same register was answered without reaching the
@@ -152,13 +192,6 @@ authorize artifact recovery or shared cleanup.
   `g6lc_storamic/architecture/implementation-tasks.md`.
 - [x] **ST-037D flush + stick composition (2026-11-04):** the model stick
   (`corev_apu/storamic/g6lc_storamic_model_stick.sv`) now carries the flash
-- [ ] **Primary-role virtio-blk pre-existing failure (not a C2 regression):**
-  `storamic_virtio_blk` built `-DSTORAMIC_PRIMARY` on
-  `G6LC_STORAMIC+G6LC_STORAMIC_MODEL` stops retiring right after the first B
-  error response (`tohost=126`, ~t=60610) — reproduced identically on
-  committed HEAD, so it predates the C2 route/monitor work. The documented
-  IO role (`G6LC_STORAMIC_IO`, `-DSTORAMIC_COHERENT_DMA`) passes positive and
-  negative-oracle on HEAD and the C2 tree (`storamic-bc778d3f3d34`).
   chip as a commit-boundary durable store (`g6lc_storamic_durable_store.sv`:
   write-back staging, flush drains to tc_sram, spill-on-full). The device
   offers VIRTIO_BLK_F_FLUSH (bank-0 bit 9) and the bare-metal test
@@ -22812,3 +22845,10 @@ canceled or cleaned by this session.
   physical media, aggregate/compliance or Linux. Native admission stays disabled.
 
 Receipt: `build-platform/workspace/build/storamic-review-30/FINAL-SV-30.md`.
+
+### CPU Pause/Drain — load_unit interlock audit carry-over
+
+- [ ] `load_unit` WAIT_PAGE_OFFSET fall-through: fixed for in-order
+  single-hart (`!OoOEn && NrHarts==1`); OoO/SMT configs keep the old
+  fall-through and rely on `st_pipeline_busy`/replay — needs an audit with
+  their own regressions; hyp8 tree not ported.

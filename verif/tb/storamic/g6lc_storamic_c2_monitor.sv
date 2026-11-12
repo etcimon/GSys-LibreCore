@@ -170,6 +170,10 @@ module g6lc_storamic_c2_monitor #(
 
       // ---- requestor ports: record every accepted request ------------------
       for (int p = 0; p < NrSlaves; p++) begin
+        if (slv_req[p].aw_valid && $test$plusargs("c2_trace"))
+          $display("C2TR AWV p=%0d id=%0d addr=%h ready=%0d cyc=%0d",
+                   p, slv_req[p].aw.id, slv_req[p].aw.addr,
+                   slv_resp[p].aw_ready, cycle_q);
         if (slv_req[p].aw_valid && slv_resp[p].aw_ready) begin
           k = free_slot(1'b1, p);
           if (k < 0) c2_fatal("wtab_full", p, slv_req[p].aw.id, slv_req[p].aw.addr);
@@ -192,6 +196,10 @@ module g6lc_storamic_c2_monitor #(
             e.seq = seq_q; seq_q = seq_q + 1;
             rtab[p][k] = e;
           end
+          if ($test$plusargs("c2_trace"))
+            $display("C2TR AW p=%0d id=%0d addr=%h len=%0d size=%0d beats=%0d seq=%0d",
+                     p, e.id, e.addr, e.len, e.size,
+                     32'(slv_req[p].aw.len) + 1, e.seq);
         end
         if (slv_req[p].ar_valid && $test$plusargs("c2_trace"))
           $display("C2TR ARV p=%0d id=%0d addr=%h ready=%0d cyc=%0d",
