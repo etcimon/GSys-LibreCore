@@ -1049,7 +1049,17 @@ module g6lc_apu_cmdrec
         end
 
         // ================ completion ================================
-        StCpl: if (cpl_ready_i) state_q <= StIdle;
+        StCpl: if (cpl_ready_i) begin
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+          if (cpl_q.status != APU_CMDREC_OK)
+            $display("[DBG] cmdrec op=%0d cbd=%08x status=%0d count=%0d pay_n=%0d t=%0t",
+                     req_q.op, req_q.cbd, cpl_q.status, cpl_q.count,
+                     req_q.pay_n, $time);
+`endif
+// pragma translate_on
+          state_q <= StIdle;
+        end
 
         default: state_q <= StIdle;
         endcase

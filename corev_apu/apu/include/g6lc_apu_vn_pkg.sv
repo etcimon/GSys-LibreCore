@@ -2066,7 +2066,7 @@ package g6lc_apu_vn_pkg;
     48'h02FF00000000, // U64 a=127 b=0x0 offset KEEP
     48'h02FF00000000, // U64 a=127 b=0x0 range KEEP
     48'h080000000000, // ENDARR a=0 b=0x0 
-    48'h090100000001, // BLOB a=1 b=0x1 pTexelBufferView
+    48'h098100000001, // BLOB a=1 b=0x1 pTexelBufferView KEEP
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h010100000000, // U32 a=1 b=0x0 descriptorCopyCount
     48'h070100000000, // ARRAY a=1 b=0x0 pDescriptorCopies
@@ -5121,7 +5121,7 @@ package g6lc_apu_vn_pkg;
     25'h1000701, // EVENT kind=0 pq=0 cq=7 f=01
     25'h0168701, // ALLOC kind=26 pq=0 cq=7 f=01
     25'h0268700, // RETIRE kind=26 pq=0 cq=7 f=00
-    25'h0000701, // UNSUPPORTED kind=0 pq=0 cq=7 f=01
+    25'h0400701, // QUERY kind=0 pq=0 cq=7 f=01
     25'h011C701, // ALLOC kind=7 pq=0 cq=7 f=01
     25'h021C700, // RETIRE kind=7 pq=0 cq=7 f=00
     25'h0124701, // ALLOC kind=9 pq=0 cq=7 f=01

@@ -373,6 +373,8 @@ module g6lc_apu_vgtop
 
     // ---- cmdexec --------------------------------------------------------------
     logic        ex_busy;
+    // §3a raster query-stat bus {fs_inv,occ,ia_prim,ia_vtx} into cmdexec
+    logic [4*32-1:0] qry_stat_w;
     logic        ex_cr_v, ex_cr_rdy, ex_cr_cpl_rdy;
     apu_cmdrec_req_t ex_cr_req;
     logic        ex_ot_v, ex_ot_rdy, ex_ot_cpl_rdy;
@@ -490,7 +492,9 @@ module g6lc_apu_vgtop
       // §7b exception contract: watchdog device loss -> ring FATAL
       .devlost_valid_o(ex_devlost_v), .devlost_ctx_o(ex_devlost_ctx),
       .dead_o(ex_dead),
-      .busy_o(ex_busy));
+      .busy_o(ex_busy),
+      // §3a query-stat counters from the raster
+      .qry_stat_i(qry_stat_w));
 
     // ---- cmdrec -----------------------------------------------------------------
     // §5a G3b-iii: PayMem-resident command buffers — descriptor blocks
@@ -801,7 +805,10 @@ module g6lc_apu_vgtop
       .busy_o(xfer_busy_o),
       .axi_req_o(xf_axi_req_o), .axi_rsp_i(xf_axi_rsp_i));
 
-    g6lc_apu_rast #(.Enable(1'b1)) i_rast (
+    // §3a query-stat bus {fs_inv,occ,ia_prim,ia_vtx} — PerfCountersEn
+    // elaborates the monotonic counters cmdexec differences across a
+    // Begin/End drain window
+    g6lc_apu_rast #(.Enable(1'b1), .PerfCountersEn(1'b1)) i_rast (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
       .work_valid_i(ex_work_v && work_is_draw),
       .work_ready_o(rs_work_rdy),
@@ -821,7 +828,9 @@ module g6lc_apu_vgtop
       .pg_req_o(rs_pg_req),
       .pg_cpl_valid_i(pg_cpl_valid && pgg_q == PGG_RAST),
       .pg_cpl_ready_o(rs_pg_cpl_rdy), .pg_cpl_i(pg_cpl),
-      .busy_o(rs_busy));
+      .busy_o(rs_busy),
+      .stat_o(),
+      .qry_stat_o(qry_stat_w));
 
     // wave-in-flight latch (clocked with the grant owners below):
     // while set, the shcore sidebands carry the raster's copies —

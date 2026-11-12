@@ -341,6 +341,7 @@ module g6lc_apu_vnfront
       StUpdInfo, StUpdInfoC, StUpdBufGo, StUpdBufCpl, StUpdMemCpl,
       StUpdImgRd, StUpdImgGo, StUpdImgVC, StUpdImgIC, StUpdImgMW,
       StUpdImgMC, StUpdImgSC,
+      StUpdTexRd, StUpdTexGo, StUpdTexVC, StUpdTexBC, StUpdTexMC,
       StUpdWr0, StUpdWr1, StUpdWr2, StUpdWr3, StUpdWrO, StUpdElemCk,
       StUpdPoisC,
       StUpdCpRd, StUpdCpS, StUpdCpD, StUpdCpDSet, StUpdCpGo,
@@ -384,6 +385,14 @@ module g6lc_apu_vnfront
       // subresource layout reply
       StImgCk, StImgMip, StImgAuxH, StImgState,
       StImgVwCk, StImgVwAuxH, StSamCk, StSamAuxH, StImgSubRep,
+      // §12.3 texel-buffer view create: buffer-bound extent check via a
+      // second ObjTab read (mirrors StUpdBufCpl/StUpdMemCpl), then the
+      // {range,offset} size + {bufhandle,fmt} aux pack
+      StBufVwCk, StBufVwMC, StBufVwAuxH,
+      // vkGetQueryPoolResults: pool-field capture + per-query ObjPay
+      // slot read (avail word0 + counter words1..nc) -> exec_w_q
+      // REXBUF payload; WAIT re-polls until every slot is available
+      StQryGo, StQryRd, StQryRdC, StQryFmt, StQryWait, StQryEnd,
       StRep, StRepKick, StRepWait, StDone
     } state_e;
     state_e              state_q, ot_ret_q, cr_ret_q, cs_ret_q;
@@ -539,6 +548,25 @@ module g6lc_apu_vnfront
     logic [4:0][31:0]    upd_iw_q;     // record words at +8..+24
     logic [15:0]         ud_mslot_q;   // bound memory slot
     logic [15:0]         ud_mgen_q;    // §12.3 3d-d: bound memory gen
+    // §12.3 texel-buffer descriptor element — staged VkBufferView u64
+    // handle resolved view->buffer->memory; record carries texdid@+12
+    logic [63:0]         upd_texvw_q;  // staged VkBufferView handle
+    logic [7:0]          upd_texdid_q; // device format id (record +12)
+    logic [31:0]         upd_texoff_q; // view offset  (view.size[31:0])
+    logic [31:0]         upd_texrng_q; // view range   (view.size[63:32])
+    logic [63:0]         upd_texboff_q;// buffer bind_offset
+    logic [63:0]         upd_texbsz_q; // buffer size (bound-extent min)
+
+    // §12.3 texel-buffer view create — captured in StBufVwCk for the
+    // bound-extent check in StBufVwMC and the aux/size pack
+    logic [15:0]         bvw_mslot_q;  // bound memory slot
+    logic [15:0]         bvw_mgen_q;   // bound memory gen at bind time
+    logic [63:0]         bvw_boff_q;   // buffer bind_offset
+    logic [63:0]         bvw_bsz_q;    // buffer declared size
+    logic [31:0]         bvw_buf_q;    // buffer {gen,slot} for aux[31:0]
+    logic [7:0]          bvw_did_q;    // device format id (aux[63:32])
+    logic [31:0]         bvw_off_q;    // resolved view offset -> size[31:0]
+    logic [31:0]         bvw_rng_q;    // resolved view range -> size[63:32]
 
     // vkUpdateDescriptorSets copies
     logic [15:0]         cp_i_q;       // copy index
@@ -721,6 +749,25 @@ module g6lc_apu_vnfront
     logic [31:0]         imw_off_q, imw_pit_q;  // off/pitch at tgt
     logic [15:0]         imw_wm_q, imw_hm_q;    // dims at tgt
     state_e              imw_ret_q;
+    // vkGetQueryPoolResults (ExecQueryRes): operand + pool fields latched
+    // at dispatch; the per-query slot walk reuses opr_q/StOpReq/StOpCpl.
+    // Slot word base = {aux[63:48]}<<6; each slot is 16 words with
+    // word[0]bit0=avail and words[1..nc] compacted u32 counter deltas.
+    logic [31:0]         gq_first_q, gq_count_q, gq_flags_q;
+    logic [63:0]         gq_dsize_q, gq_stride_q;
+    logic [7:0]          gq_ptype_q;   // pool type aux[7:0]
+    logic [31:0]         gq_mask_q;    // stats mask aux[31:8]
+    logic [31:0]         gq_pool_q;    // pool capacity entry.size[31:0]
+    logic [31:0]         gq_base_q;    // slot extent word base
+    logic [31:0]         gq_needed_q;  // count*packed byte count
+    logic [31:0]         gq_packed_q;  // bytes per record (stride|rec)
+    logic [7:0]          gq_nc_q;      // counters per query (<=4)
+    logic [31:0]         gq_qi_q;      // current query index
+    logic [4:0]          gq_rd_q;      // slot word read index (0=avail)
+    logic                gq_av_q;      // current query availability
+    logic [3:0][31:0]    gq_ct_q;      // current query counter deltas
+    logic [31:0]         gq_ew_q;      // exec_w_q payload word cursor
+    logic                gq_notready_q;// any slot unavailable seen
     // vkCreateImageView: resolved effective range (VK_REMAINING_*)
     logic [3:0]          vw_lvl_q;
     logic [9:0]          vw_lay_q;
@@ -1056,7 +1103,7 @@ module g6lc_apu_vnfront
                  ExecEnumPd = 3, ExecEnumExt = 4, ExecMres = 5,
                  ExecEnumQf2 = 6, ExecEnumQGrp = 7, ExecExtBuf = 8,
                  ExecExtZero = 9, ExecSparse = 10, ExecFmt = 11,
-                 ExecImgFmt = 12, ExecImgSub = 13;
+                 ExecImgFmt = 12, ExecImgSub = 13, ExecQueryRes = 14;
     function automatic int exec_kind(input logic [31:0] t);
       case (t)
         APU_VN_TYPE_VK_GET_BUFFER_MEMORY_REQUIREMENTS_EXT,
@@ -1090,6 +1137,8 @@ module g6lc_apu_vnfront
           return ExecImgFmt;
         APU_VN_TYPE_VK_GET_IMAGE_SUBRESOURCE_LAYOUT_EXT:
           return ExecImgSub;
+        APU_VN_TYPE_VK_GET_QUERY_POOL_RESULTS_EXT:
+          return ExecQueryRes;
         default: return ExecNone;
       endcase
     endfunction
@@ -1124,6 +1173,9 @@ module g6lc_apu_vnfront
              // §5a G3b-iii: a command pool's destroy walks the buffer
              // chain (aux[63:32] head) before RETIRE_KIDS
              k == 6'(APU_VN_KIND_VK_COMMAND_POOL) ||
+             // query pools park their result-slot extent in aux[63:32]
+             // — retire must LOOKUP-read it before freeing
+             k == 6'(APU_VN_KIND_VK_QUERY_POOL) ||
              k == 6'(APU_VN_KIND_VK_DESCRIPTOR_SET_LAYOUT);
     endfunction
     // §12.3 F5: descriptor types that carry pBufferInfo staged words
@@ -1137,10 +1189,16 @@ module g6lc_apu_vnfront
     function automatic logic is_img_typ(input logic [7:0] t);
       return t <= 8'd3;
     endfunction
+    // §12.3 texel-buffer types staging pTexelBufferView — a VkBufferView
+    // u64 handle (2 staged words), resolved view->buffer->memory
+    function automatic logic is_tex_typ(input logic [7:0] t);
+      return t == 8'd4 || t == 8'd5;
+    endfunction
     // staged words consumed per element of a descriptor write
     function automatic logic [4:0] upd_stride(input logic [7:0] t);
       if (is_buf_typ(t)) return 5'd6;
       if (is_img_typ(t)) return 5'd5;
+      if (is_tex_typ(t)) return 5'd2;
       return 5'd0;
     endfunction
     // prepend words ahead of the staged payload copy
@@ -1173,6 +1231,11 @@ module g6lc_apu_vnfront
         stg_we    = stg_req;
         stg_addr  = stg_n_q[StgBits-1:0];
         stg_wdata = dec_pay_d;
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+        $display("[DBG] paywr n=%0d w=%08x t=%0t", stg_n_q, dec_pay_d, $time);
+`endif
+// pragma translate_on
       end else if (state_q == StStgRd) begin
         stg_req  = 1'b1;
         stg_addr = stg_i_q;
@@ -1287,6 +1350,9 @@ module g6lc_apu_vnfront
         upd_iw_q <= '0; upd_mh_q <= '0;
         arr_i_q <= '0; rw_seq_q <= 1'b0;
         ud_mslot_q <= '0; ud_mgen_q <= '0;
+        bvw_mslot_q <= '0; bvw_mgen_q <= '0; bvw_boff_q <= '0;
+        bvw_bsz_q <= '0; bvw_buf_q <= '0; bvw_did_q <= '0;
+        bvw_off_q <= '0; bvw_rng_q <= '0;
         cp_i_q <= '0; cp_src_q <= '0; cp_dsid_q <= '0;
         cp_sb_q <= '0; cp_sa_q <= '0; cp_db_q <= '0;
         cp_da_q <= '0; cp_n_q <= '0;
@@ -1317,6 +1383,13 @@ module g6lc_apu_vnfront
         imw_off_q <= '0; imw_pit_q <= '0;
         imw_wm_q <= '0; imw_hm_q <= '0;
         imw_ret_q <= StIdle;
+        gq_first_q <= '0; gq_count_q <= '0; gq_flags_q <= '0;
+        gq_dsize_q <= '0; gq_stride_q <= '0;
+        gq_ptype_q <= '0; gq_mask_q <= '0; gq_pool_q <= '0;
+        gq_base_q <= '0; gq_needed_q <= '0; gq_packed_q <= '0;
+        gq_nc_q <= '0; gq_qi_q <= '0; gq_rd_q <= '0;
+        gq_av_q <= 1'b0; gq_ct_q <= '0; gq_ew_q <= '0;
+        gq_notready_q <= 1'b0;
         vw_lvl_q <= '0; vw_lay_q <= '0;
         sam_w0_q <= '0; sam_w1_q <= '0;
         pg_ok_q <= 1'b0; pg_res_q <= '0;
@@ -1449,18 +1522,23 @@ module g6lc_apu_vnfront
                                 .cmdbuf_qslot};
               end else if (exec_kind(dec_op.cmd_type) == ExecBufReq ||
                            exec_kind(dec_op.cmd_type) == ExecImgReq ||
+                           exec_kind(dec_op.cmd_type) == ExecQueryRes ||
                            dec_op.cmd_type ==
                            APU_VN_TYPE_VK_GET_FENCE_STATUS_EXT) begin
+                // ExecQueryRes: watch the queryPool (2nd LOOKUP after
+                // the device) so ent_q carries {type|stats,extent}+size
                 automatic int ls = lu_slot(dec_op, 1);
                 watch_q <= ls < 0 ? 4'hF : 4'(ls);
               end else if (dec_op.cmd_type ==
                            APU_VN_TYPE_VK_CREATE_IMAGE_VIEW_EXT ||
                            dec_op.cmd_type ==
+                           APU_VN_TYPE_VK_CREATE_BUFFER_VIEW_EXT ||
+                           dec_op.cmd_type ==
                            APU_VN_TYPE_VK_GET_IMAGE_SUBRESOURCE_LAYOUT_EXT
                           ) begin
-                // §12.3 5b: watch the image (second LOOKUP after the
-                // device) so ent_q carries its {w,h,fmt,mips,layers}
-                // aux + layer_bytes state
+                // §12.3 5b: watch the image/buffer (second LOOKUP after
+                // the device) so ent_q carries its aux + bind state —
+                // buffer views read {size,bind_mem,bind_offset}
                 automatic int ls = lu_slot(dec_op, 1);
                 watch_q <= ls < 0 ? 4'hF : 4'(ls);
               end else if (APU_VN_ACT[dec_op.cmd_type[
@@ -1752,6 +1830,32 @@ module g6lc_apu_vnfront
                     exec_w_q[0*32 +: 32] <= 32'd3;
                     state_q     <= StRep;
                   end
+                  ExecQueryRes: begin
+                    // vkGetQueryPoolResults: ent_q is the queryPool
+                    // (watch_q=2nd LOOKUP).  Latch operands + pool
+                    // fields; StQryGo validates and sizes the walk.
+                    //   imm[0]=firstQuery imm[1]=queryCount
+                    //   imm[2]=flags  q[2]=dataSize  q[3]=stride
+                    //   blob[0]=pData (out blob; byte count == dataSize
+                    //   is a client-asserted protocol check the decoder
+                    //   does not retain, so RTL bounds on dataSize).
+                    gq_first_q   <= op_q.imm[0];
+                    gq_count_q   <= op_q.imm[1];
+                    gq_flags_q   <= op_q.imm[2];
+                    gq_dsize_q   <= op_q.q[2];
+                    gq_stride_q  <= op_q.q[3];
+                    gq_ptype_q   <= ent_q.aux[7:0];
+                    gq_mask_q    <= ent_q.aux[31:8];
+                    gq_pool_q    <= ent_q.size[31:0];
+                    gq_base_q    <= {16'h0, ent_q.aux[63:48]} << 6;
+                    gq_qi_q      <= '0;
+                    gq_rd_q      <= '0;
+                    gq_av_q      <= 1'b0;
+                    gq_ct_q      <= '0;
+                    gq_ew_q      <= '0;
+                    gq_notready_q<= 1'b0;
+                    state_q      <= StQryGo;
+                  end
                   default: state_q <= StRep;
                 endcase
               end
@@ -1902,6 +2006,11 @@ module g6lc_apu_vnfront
                                6'(APU_VN_KIND_VK_IMAGE_VIEW)) begin
                     state_q <= StImgVwCk;
                   end else if (act_q.obj_kind ==
+                               6'(APU_VN_KIND_VK_BUFFER_VIEW)) begin
+                    // §12.3 texel-buffer view — bound-extent check needs
+                    // the buffer's bound VkDeviceMemory (2nd ObjTab read)
+                    state_q <= StBufVwCk;
+                  end else if (act_q.obj_kind ==
                                6'(APU_VN_KIND_VK_SAMPLER)) begin
                     state_q <= StSamCk;
                   end else if (act_q.obj_kind ==
@@ -1919,6 +2028,42 @@ module g6lc_apu_vnfront
                                   default: '0};
                     op_ret_q <= StPayAlcCpl;
                     state_q  <= StOpReq;
+                  end else if (act_q.obj_kind ==
+                               6'(APU_VN_KIND_VK_QUERY_POOL)) begin
+                    // bounded profile (mirrors vn_golden): imm[0]=0,
+                    // imm[1]=queryType in {0,1,2}, imm[2]=queryCount
+                    // <=4096, imm[3]=statistics mask subset of 0x87 for
+                    // PIPELINE_STATISTICS and 0 otherwise; any violation
+                    // refuses before the ObjTab alloc
+                    if (op_q.imm[0] != 32'h0 ||
+                        !(op_q.imm[1] == 32'd0 || op_q.imm[1] == 32'd1 ||
+                          op_q.imm[1] == 32'd2) ||
+                        op_q.imm[2] > 32'd4096 ||
+                        (op_q.imm[1] == 32'd1
+                           ? (op_q.imm[3] & ~32'h87) != 32'h0
+                           : op_q.imm[3] != 32'h0)) begin
+                      result_q <= APU_VK_ERROR_FEATURE_NOT_PRESENT;
+                      state_q  <= StRep;
+                    end else if (op_q.imm[2] == 32'd0) begin
+                      // empty pool: no result extent
+                      op_base_q <= '0;
+                      op_words_q <= '0;
+                      state_q  <= StAllocGo;
+                    end else begin
+                      // result store: uniform 16-word (64B) slot record —
+                      // word[0] availability, words[1:8] up to 4 x u64
+                      // counters, rest reserved; power-of-2 stride keeps
+                      // slot addressing a shift.  Base is parked into
+                      // aux[63:32] as {chunk,words} at StAllocCpl.
+                      // StPayAlcCpl captures op_base_q and falls through
+                      // to StAllocGo for this kind.
+                      op_words_q <= 16'(op_q.imm[2] << 4);
+                      opr_q    <= '{op: APU_OBJPAY_OP_ALLOC,
+                                    words: 32'(op_q.imm[2] << 4),
+                                    default: '0};
+                      op_ret_q <= StPayAlcCpl;
+                      state_q  <= StOpReq;
+                    end
                   end else begin
                     state_q <= StAllocGo;
                   end
@@ -2301,6 +2446,16 @@ module g6lc_apu_vnfront
                               ? 64'(op_q.imm[1] == 32'd2
                                     ? op_q.imm[5] : op_q.imm[7]) *
                                 64'(imw_lay_q)
+                              : act_q.obj_kind ==
+                                6'(APU_VN_KIND_VK_QUERY_POOL)
+                              // bounded profile: entry.size = queryCount
+                              ? {32'h0, op_q.imm[2]}
+                              : act_q.obj_kind ==
+                                6'(APU_VN_KIND_VK_BUFFER_VIEW)
+                              // §12.3 texel-buffer view: entry.size =
+                              // {range[63:32], offset[31:0]} resolved in
+                              // StBufVwMC (VK_WHOLE_SIZE already applied)
+                              ? {bvw_rng_q, bvw_off_q}
                               : ds < 0 ? 64'h0 : op_q.q[ds],
                          // §12.3 3d-d: a type-1 (lazy host-visible)
                          // entry is born aux[63:32]=UNBACKED — no
@@ -2320,6 +2475,16 @@ module g6lc_apu_vnfront
               result_q <= err_of(ot_cpl_i.status);
               if (is_pay_kind(act_q.obj_kind)) begin
                 // object not created: release the payload extent
+                opr_q    <= '{op: APU_OBJPAY_OP_FREE,
+                              addr: op_base_q,
+                              words: {16'h0, op_words_q},
+                              default: '0};
+                op_ret_q <= StRep;
+                state_q  <= StOpReq;
+              end else if (act_q.obj_kind ==
+                           6'(APU_VN_KIND_VK_QUERY_POOL) &&
+                           op_words_q != 16'h0) begin
+                // object not created: release the result extent
                 opr_q    <= '{op: APU_OBJPAY_OP_FREE,
                               addr: op_base_q,
                               words: {16'h0, op_words_q},
@@ -2413,6 +2578,15 @@ module g6lc_apu_vnfront
               auxlo_ret_q  <= StSamAuxH;
               state_q      <= StAuxLo;
             end else if (op_q.cmd_type ==
+                         APU_VN_TYPE_VK_CREATE_BUFFER_VIEW_EXT) begin
+              // §12.3 texel-buffer view: aux[31:0]=buffer {gen,slot},
+              // aux[63:32]=device format id (StBufVwAuxH writes hi)
+              hnd_pay_q    <= ot_cpl_i.handle;
+              auxlo_val_q  <= bvw_buf_q;
+              auxlo_mask_q <= 32'hFFFF_FFFF;
+              auxlo_ret_q  <= StBufVwAuxH;
+              state_q      <= StAuxLo;
+            end else if (op_q.cmd_type ==
                          APU_VN_TYPE_VK_CREATE_FENCE_EXT) begin
               otr_q <= '{op: APU_OBJTAB_OP_SETAUX,
                          id: {32'h0, ot_cpl_i.handle},
@@ -2446,6 +2620,18 @@ module g6lc_apu_vnfront
                 auxhi_ret_q <= StRep;
                 state_q     <= StAuxSet;
               end
+            end else if (act_q.obj_kind ==
+                         6'(APU_VN_KIND_VK_QUERY_POOL)) begin
+              // bounded profile: aux[31:0] = queryType |
+              // (pipelineStatistics << 8); aux[63:32] parks the
+              // result-extent {chunk,words} for the slot store
+              hnd_pay_q    <= ot_cpl_i.handle;
+              auxlo_val_q  <= (op_q.imm[3] << 8) | op_q.imm[1];
+              auxlo_mask_q <= 32'hFFFF_FFFF;
+              auxlo_ret_q  <= StAuxSet;
+              auxhi_val_q  <= {16'(op_base_q >> 6), op_words_q};
+              auxhi_ret_q  <= StRep;
+              state_q      <= StAuxLo;
             end else if (is_pay_kind(act_q.obj_kind)) begin
               // §7b: copy staging -> ObjPay, then SETAUXHI
               // {base>>6,words} — §5a G3b-i: the parked base is a
@@ -2870,8 +3056,11 @@ module g6lc_apu_vnfront
               ot_ret_q <= StDsFPl;
               state_q  <= StOtReq;
             end else begin
-              // §7b: payload kinds free their ObjPay extent on retire
-              payf_q       <= is_pay_kind(act_q.obj_kind);
+              // §7b: payload kinds free their ObjPay extent on retire;
+              // a query pool's aux[63:32] parks its result-slot extent
+              payf_q       <= is_pay_kind(act_q.obj_kind) ||
+                              act_q.obj_kind ==
+                              6'(APU_VN_KIND_VK_QUERY_POOL);
               // §5a: parked payload base is a 64-word chunk index
               payf_base_q  <= 32'(ot_cpl_i.entry.aux[63:48]) << 6;
               payf_words_q <= ot_cpl_i.entry.aux[47:32];
@@ -3207,11 +3396,14 @@ module g6lc_apu_vnfront
                               ot_cpl_i.entry.aux[7:0] < 8'(Fences);
               // §7b: payload kinds free their ObjPay extent on retire;
               // §5a G3b-iii: a FREE_DESCRIPTOR_SET pool's size[63:32]
-              // parks its free-list block
+              // parks its free-list block; a query pool's aux[63:32]
+              // parks its result-slot extent
               payf_q       <= is_pay_kind(act_q.obj_kind) ||
                               (act_q.obj_kind ==
                                6'(APU_VN_KIND_VK_DESCRIPTOR_POOL) &&
-                               ot_cpl_i.entry.size[63:32] != 32'h0);
+                               ot_cpl_i.entry.size[63:32] != 32'h0) ||
+                              act_q.obj_kind ==
+                              6'(APU_VN_KIND_VK_QUERY_POOL);
               // §5a: parked payload base is a 64-word chunk index
               payf_base_q  <=
                   act_q.obj_kind == 6'(APU_VN_KIND_VK_DESCRIPTOR_POOL)
@@ -4926,6 +5118,12 @@ module g6lc_apu_vnfront
               upd_h_q   <= '0;
               stg_ret_q <= StUpdImgRd;
               state_q   <= StStgRd;
+            end else if (is_tex_typ(upd_type_q[7:0])) begin
+              // §12.3 texel-buffer: pTexelBufferView is a VkBufferView
+              // u64 handle — 2 staged words
+              upd_h_q   <= '0;
+              stg_ret_q <= StUpdTexRd;
+              state_q   <= StStgRd;
             end else begin
               // other descriptor kinds: no staged info; write a
               // null record carrying the declared kind (refused
@@ -5195,6 +5393,133 @@ module g6lc_apu_vnfront
             end
             state_q <= StUpdWr0;
           end
+          // ---- §12.3 texel-buffer descriptor elements ------------------
+          // staged pTexelBufferView = VkBufferView u64 handle (2 words);
+          // resolve view -> buffer -> bound memory (model _upd_elem).
+          StUpdTexRd: begin
+            case (upd_h_q)
+              4'd0: upd_texvw_q[31:0]  <= stg_word_q;
+              default: upd_texvw_q[63:32] <= stg_word_q;
+            endcase
+            stg_i_q <= stg_i_q + 1'b1;
+            upd_h_q <= upd_h_q + 4'd1;
+            if (upd_h_q == 4'd1) begin
+              state_q <= StUpdTexGo;
+            end else begin
+              stg_ret_q <= StUpdTexRd;
+              state_q   <= StStgRd;
+            end
+          end
+          StUpdTexGo: begin
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+            $display("[DBG] texGo vw=%016x t=%0t", upd_texvw_q, $time);
+`endif
+// pragma translate_on
+            otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
+                         id: APU_VN_ID_TAG | upd_texvw_q,
+                         kind: 6'(APU_VN_KIND_VK_BUFFER_VIEW),
+                         ctx: ctx_i, default: '0};
+            ot_ret_q <= StUpdTexVC;
+            state_q  <= StOtReq;
+          end
+          StUpdTexVC: begin
+            // view resolved: size={view_off,view_rng}, aux={buf hnd,fmt}
+            upd_rec_q <= {5'h0, rsv_base_q, 2'b00} +
+                         ((32'(rw_off_q) + arr_i_q) << 5);
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+            $display("[DBG] texVC st=%0d kind=%0d gen=%0d aux=%016x sz=%016x t=%0t",
+                     ot_cpl_i.status, ot_cpl_i.entry.kind,
+                     ot_cpl_i.entry.gen, ot_cpl_i.entry.aux,
+                     ot_cpl_i.entry.size, $time);
+`endif
+// pragma translate_on
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              upd_elok_q <= 1'b0;
+              state_q    <= StUpdWr0;
+            end else begin
+              upd_texoff_q <= ot_cpl_i.entry.size[31:0];
+              upd_texrng_q <= ot_cpl_i.entry.size[63:32];
+              upd_texdid_q <= ot_cpl_i.entry.aux[39:32];
+              // aux[31:0] = underlying buffer {gen,slot} generational
+              // handle — id[63:32]==0 selects the direct entry-SRAM
+              // decode (no APU_VN_ID_TAG directory probe)
+              otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
+                           id: {32'h0, ot_cpl_i.entry.aux[31:0]},
+                           kind: 6'(APU_VN_KIND_VK_BUFFER),
+                           ctx: ctx_i, default: '0};
+              ot_ret_q <= StUpdTexBC;
+              state_q  <= StOtReq;
+            end
+          end
+          StUpdTexBC: begin
+            // buffer resolved: capture bind {slot,gen,off} + size, then
+            // read the bound VkDeviceMemory for extent/backing
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+            $display("[DBG] texBC st=%0d kind=%0d gen=%0d bindmem=%08x boff=%016x bsz=%016x t=%0t",
+                     ot_cpl_i.status, ot_cpl_i.entry.kind,
+                     ot_cpl_i.entry.gen, ot_cpl_i.entry.bind_mem,
+                     ot_cpl_i.entry.bind_offset, ot_cpl_i.entry.size, $time);
+`endif
+// pragma translate_on
+            if (ot_cpl_i.status != APU_OBJTAB_OK ||
+                ot_cpl_i.entry.bind_mem[15:0] ==
+                    APU_OBJTAB_SLOT_NONE) begin
+              upd_elok_q <= 1'b0;
+              state_q    <= StUpdWr0;
+            end else begin
+              ud_mslot_q    <= ot_cpl_i.entry.bind_mem[15:0];
+              ud_mgen_q     <= ot_cpl_i.entry.bind_mem[31:16];
+              upd_texboff_q <= ot_cpl_i.entry.bind_offset;
+              upd_texbsz_q  <= ot_cpl_i.entry.size;
+              otr_q    <= '{op: APU_OBJTAB_OP_READSLOT,
+                           id: {48'h0, ot_cpl_i.entry.bind_mem[15:0]},
+                           kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY),
+                           default: '0};
+              ot_ret_q <= StUpdTexMC;
+              state_q  <= StOtReq;
+            end
+          end
+          StUpdTexMC: begin
+            // memory entry: §12.3 C unbacked backing fails the record;
+            // bound extent = min(buf.size, mem.size - bind_off) with
+            // mem.size <= 32 bits and bind_off <= mem.size (model
+            // _buf_bound_size + the fetch-time UNBACKED gate).  elok ->
+            // record {mh=mem hnd, esz=view_rng, eb=bind_off+view_off,
+            // word3=texdid}
+            automatic logic [63:0] msz = ot_cpl_i.entry.size;
+            automatic logic [63:0] sub = (upd_texboff_q <= msz)
+                ? (msz - upd_texboff_q) : 64'hFFFF_FFFF_FFFF_FFFF;
+            automatic logic [63:0] ext = (64'(upd_texbsz_q) < sub)
+                ? 64'(upd_texbsz_q) : sub;
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+            $display("[DBG] texMC st=%0d kind=%0d gen=%0d mgen=%0d aux=%016x msz=%016x boff=%016x bsz=%016x off=%08x rng=%08x ext=%016x t=%0t",
+                     ot_cpl_i.status, ot_cpl_i.entry.kind,
+                     ot_cpl_i.entry.gen, ud_mgen_q, ot_cpl_i.entry.aux,
+                     msz, upd_texboff_q, upd_texbsz_q,
+                     upd_texoff_q, upd_texrng_q, ext, $time);
+`endif
+// pragma translate_on
+            if (ot_cpl_i.status != APU_OBJTAB_OK ||
+                ot_cpl_i.entry.kind !=
+                    6'(APU_VN_KIND_VK_DEVICE_MEMORY) ||
+                ot_cpl_i.entry.gen != ud_mgen_q ||
+                ot_cpl_i.entry.aux[63:32] == APU_MEM_UNBACKED ||
+                ot_cpl_i.entry.size[63:32] != 32'h0 ||
+                upd_texboff_q > msz ||
+                64'(upd_texoff_q) + 64'(upd_texrng_q) > ext) begin
+              upd_elok_q <= 1'b0;
+            end else begin
+              upd_elok_q <= 1'b1;
+              upd_mh_q   <= {ud_mgen_q, ud_mslot_q};
+              upd_esz_q  <= upd_texrng_q;
+              upd_eb_q   <= upd_texboff_q[31:0] + upd_texoff_q;
+            end
+            state_q <= StUpdWr0;
+          end
           // record beats: §12.3 3d-d +0 = mem{gen,slot} +4 = size,
           // then {flags,kind} at [15:8]
           StUpdWr0: begin
@@ -5219,6 +5544,14 @@ module g6lc_apu_vnfront
                              upd_iw_q[0][7:0]};
               ap_wstrb_q <= 8'hFF;
               ap_ret_q   <= StUpdWr2;
+            end else if (is_tex_typ(upd_type_q[7:0])) begin
+              // texel-buffer record: word2={elok,kind}@8 plus
+              // word3=device format id @12 (model apw32 +8/+12)
+              ap_wdata_q <= {{24'h0, upd_elok_q ? upd_texdid_q : 8'h0},
+                             {16'h0, 7'h0, upd_elok_q,
+                              upd_type_q[7:0]}};
+              ap_wstrb_q <= 8'hFF;
+              ap_ret_q   <= StUpdWrO;
             end else begin
               ap_wdata_q <= {32'h0, 16'h0, 7'h0, upd_elok_q,
                              upd_type_q[7:0]};
@@ -5263,7 +5596,8 @@ module g6lc_apu_vnfront
             // truthfully fatal at dispatch)
             if (!upd_elok_q &&
                 (is_buf_typ(upd_type_q[7:0]) ||
-                 is_img_typ(upd_type_q[7:0]))) begin
+                 is_img_typ(upd_type_q[7:0]) ||
+                 is_tex_typ(upd_type_q[7:0]))) begin
               upd_pois_q <= 1'b1;
 // pragma translate_off
 `ifdef G6LC_APU_DBG_LOST
@@ -6318,6 +6652,15 @@ module g6lc_apu_vnfront
             if (ot_cpl_i.status != APU_OBJTAB_OK) begin
               state_q <= StPipeFail;
             end else begin
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+              $display("[DBG] gpmod st=%0d cid=%016x -> hnd=%08x ext=%08x chk=%04x nwd=%04x t=%0t",
+                       gp_st_q, gp_st_q ? gp_mod1_q : gp_mod0_q,
+                       ot_cpl_i.handle, ot_cpl_i.entry.aux[63:32],
+                       ot_cpl_i.entry.aux[63:48], ot_cpl_i.entry.aux[47:32],
+                       $time);
+`endif
+// pragma translate_on
               if (!gp_st_q) begin
                 gp_mh0_q <= ot_cpl_i.handle;
                 gp_mc0_q <= ot_cpl_i.entry.aux[63:32];
@@ -7251,6 +7594,84 @@ module g6lc_apu_vnfront
             state_q     <= StAuxSet;
           end
 
+          // ---- §12.3 texel-buffer view create --------------------------
+          // ent_q = buffer (2nd LOOKUP); op_q.imm[1]=format, q[2]=offset,
+          // q[3]=range.  Mirror vn_golden vkCreateBufferView: the bound
+          // extent min(buf.size, mem.size-bind_off) needs the bound
+          // VkDeviceMemory, so capture the bind triple and READSLOT it —
+          // the same second read StUpdBufCpl/StUpdMemCpl performs.
+          StBufVwCk: begin
+            if (ent_q.bind_mem[15:0] == APU_OBJTAB_SLOT_NONE) begin
+              // unbound buffer -> no bound extent -> UNKNOWN
+              result_q <= APU_VK_ERROR_UNKNOWN;
+              state_q  <= StRep;
+            end else begin
+              bvw_mslot_q <= ent_q.bind_mem[15:0];
+              bvw_mgen_q  <= ent_q.bind_mem[31:16];
+              bvw_boff_q  <= ent_q.bind_offset;
+              bvw_bsz_q   <= ent_q.size;
+              bvw_buf_q   <= hnd_q[lu_slot(op_q, 1)];
+              // mirror model img_fmt_id(m, imm[1] & 0xFF): mask to the
+              // low byte so an out-of-range format wraps identically
+              bvw_did_q   <= f_img_fmt({24'h0, op_q.imm[1][7:0]});
+              otr_q    <= '{op: APU_OBJTAB_OP_READSLOT,
+                            id: {48'h0, ent_q.bind_mem[15:0]},
+                            kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY),
+                            default: '0};
+              ot_ret_q <= StBufVwMC;
+              state_q  <= StOtReq;
+            end
+          end
+          StBufVwMC: begin
+            // ot_cpl_i.entry = bound VkDeviceMemory.  _buf_bound_size:
+            // valid iff mem is a DEVICE_MEMORY whose gen still owns the
+            // slot, mem.size fits u32 and bind_off <= mem.size — NO
+            // UNBACKED gate (lazy type-1 memory is still bound).
+            automatic logic [63:0] memsz = ot_cpl_i.entry.size;
+            automatic logic        memok =
+                ot_cpl_i.status == APU_OBJTAB_OK &&
+                ot_cpl_i.entry.kind ==
+                    6'(APU_VN_KIND_VK_DEVICE_MEMORY) &&
+                ot_cpl_i.entry.gen == bvw_mgen_q &&
+                memsz[63:32] == 32'h0 && bvw_boff_q <= memsz;
+            automatic logic [63:0] ext = memok
+                ? (bvw_bsz_q < (memsz - bvw_boff_q)
+                   ? bvw_bsz_q : (memsz - bvw_boff_q)) : 64'h0;
+            automatic logic [63:0] off  = op_q.q[2];
+            automatic logic [63:0] rng0 = op_q.q[3];
+            automatic logic [63:0] rng  =
+                (rng0 == 64'hFFFF_FFFF_FFFF_FFFF && off <= ext)
+                ? ext - off : rng0;
+            // texel alignment: APU_VN_IMG_BPP is a power of two so
+            // x % tb == x & (tb-1); only the low 4 bits can be set
+            automatic logic [7:0]  tb   = APU_VN_IMG_BPP[bvw_did_q[3:0]];
+            automatic logic [7:0]  tbm1 = tb - 8'd1;   // {0,1,3,7,15}
+            automatic logic        abad =
+                (off[3:0] & tbm1[3:0]) != 4'h0 ||
+                ((rng0 != 64'hFFFF_FFFF_FFFF_FFFF) &&
+                 (rng0[3:0] & tbm1[3:0]) != 4'h0);
+            if (!memok) begin
+              result_q <= APU_VK_ERROR_UNKNOWN;
+              state_q  <= StRep;
+            end else if (bvw_did_q == 8'hFF || off > ext ||
+                         rng == 64'h0 || rng > (ext - off) || abad) begin
+              // rng > ext-off is off+rng>ext written overflow-free
+              // (off<=ext is implied by the off>ext term above)
+              result_q <= APU_VK_ERROR_FORMAT_NOT_SUPPORTED;
+              state_q  <= StRep;
+            end else begin
+              bvw_off_q <= off[31:0];
+              bvw_rng_q <= rng[31:0];
+              state_q   <= StAllocGo;
+            end
+          end
+          StBufVwAuxH: begin
+            // aux[63:32] = device format id (model setauxhi(h, did))
+            auxhi_val_q <= {24'h0, bvw_did_q};
+            auxhi_ret_q <= StRep;
+            state_q     <= StAuxSet;
+          end
+
           // ---- §12.3 C/5b: vkGetImageSubresourceLayout -------------------
           // ent_q = image; imm: 0=aspect 1=mipLevel 2=arrayLayer.
           // Reply VkSubresourceLayout {offset,size,rowPitch,arrayPitch,
@@ -7274,6 +7695,144 @@ module g6lc_apu_vnfront
               exec_w_q[8*32 +: 32] <= ent_q.state[20:19] == 2'd2
                   ? imw_lay_q : imw_pit_q * 32'(imw_hm_q);
               result_q <= APU_VK_SUCCESS;
+              state_q  <= StRep;
+            end
+          end
+
+          // ---- vkGetQueryPoolResults (ExecQueryRes) -------------------
+          // ent_q is the queryPool (watch_q = 2nd LOOKUP).  StQryGo
+          // validates flags/geometry/size and sizes the record; the walk
+          // then reads each slot's availability word + counter words
+          // with single-word OP_READ fetches (vnfront has no multi-
+          // completion consume path, so READN is not used) and formats
+          // u64 lo/hi pairs into exec_w_q for the generated REXBUF reply.
+          // WAIT re-walks until every slot publishes availability.
+          StQryGo: begin
+            // counters per query: a statistics pool returns one u64 per
+            // enabled statistic in spec order — the four implemented
+            // bits {0,1,2,7} that cmdexec's StQryEndD compacts into
+            // words[1..nc]; occlusion/timestamp return a single u64.
+            automatic int unsigned ncv =
+                (gq_ptype_q == 8'd1)
+                  ? (32'(gq_mask_q[0]) + 32'(gq_mask_q[1]) +
+                     32'(gq_mask_q[2]) + 32'(gq_mask_q[7]))
+                  : 32'd1;
+            automatic int unsigned recb = ncv * 8 +
+                (gq_flags_q[3] ? 32'd8 : 32'd0);
+            automatic logic [63:0] psz =
+                (gq_stride_q != 64'h0) ? gq_stride_q : 64'(recb);
+            automatic logic [63:0] need = 64'(gq_count_q) * psz;
+            gq_nc_q     <= 8'(ncv);
+            gq_packed_q <= 32'(psz[31:0]);
+            // flags admits only {64_BIT,WAIT,WITH_AVAILABILITY} and
+            // 64_BIT is mandatory; geometry/size bound the walk to the
+            // exec-word buffer (REXBUF reads exec_n_i=EXEC_WORDS).
+            if ((gq_flags_q & ~32'hB) != 32'h0 || gq_flags_q[0] == 1'b0) begin
+              result_q <= APU_VK_ERROR_FEATURE_NOT_PRESENT;
+              // pData is not written on error: publish an empty REXBUF
+              // count so the reply matches the model's zeroed ew.
+              exec_w_q[0*32 +: 32] <= 32'h0;
+              state_q  <= StRep;
+            end else if (gq_ptype_q > 8'd2 || psz < 64'(recb) ||
+                         (gq_count_q > 32'd1 && psz[2:0] != 3'h0) ||
+                         64'({32'h0, gq_first_q}) + 64'(gq_count_q) >
+                             64'(gq_pool_q) ||
+                         gq_dsize_q < need ||
+                         need > 64'(32'((APU_VN_EXEC_WORDS - 1) * 4))) begin
+              result_q <= APU_VK_ERROR_VALIDATION_FAILED;
+              exec_w_q[0*32 +: 32] <= 32'h0;
+              state_q  <= StRep;
+            end else begin
+              exec_w_q[0*32 +: 32] <= 32'(need[31:0]);
+              // Zero the record arena once up front (static bound —
+              // synthesizable).  StQryFmt then writes only each query's
+              // data words, so the stride padding between records stays
+              // 0 without a variable-bound fill loop.
+              for (int i = 1; i < APU_VN_EXEC_WORDS; i++)
+                exec_w_q[32*i +: 32] <= 32'h0;
+              gq_needed_q <= 32'(need[31:0]);
+              gq_ew_q     <= 32'd1;
+              state_q     <= (gq_count_q == 32'h0) ? StQryEnd : StQryRd;
+            end
+          end
+          // fetch slot word gq_rd_q of query (firstQuery+qi): word0 is
+          // availability, words1..nc are the u32 counter deltas
+          StQryRd: begin
+            opr_q    <= '{op: APU_OBJPAY_OP_READ,
+                          addr: gq_base_q +
+                                ((gq_first_q + gq_qi_q) << 4) +
+                                {27'h0, gq_rd_q},
+                          default: '0};
+            op_ret_q <= StQryRdC;
+            state_q  <= StOpReq;
+          end
+          StQryRdC: begin
+            if (op_cpl_i.status != APU_OBJPAY_OK) begin
+              result_q <= APU_VK_ERROR_UNKNOWN;
+              state_q  <= StRep;
+            end else begin
+              if (gq_rd_q == 5'd0) begin
+                gq_av_q <= op_cpl_i.rdata[0];
+                if (op_cpl_i.rdata[0] == 1'b0)
+                  gq_notready_q <= 1'b1;
+              end else begin
+                gq_ct_q[gq_rd_q - 5'd1] <= op_cpl_i.rdata;
+              end
+              if (32'(gq_rd_q) >= 32'(gq_nc_q)) begin
+                state_q <= StQryFmt;
+              end else begin
+                gq_rd_q <= gq_rd_q + 5'd1;
+                state_q <= StQryRd;
+              end
+            end
+          end
+          // emit the current query's record at exec_w_q[gq_ew_q..+recw):
+          // nc counter u64s (lo = u32 delta zero-extended, hi = 0), the
+          // availability u64 [avail,0] when flags&8, then zero pad to
+          // the packed stride.  Unavailable slots emit zeros.
+          StQryFmt: begin
+            for (int k = 0; k < 4; k++) begin
+              if (k < int'(gq_nc_q)) begin
+                exec_w_q[(gq_ew_q + 32'(2*k))*32 +: 32] <=
+                    gq_av_q ? gq_ct_q[k] : 32'h0;
+                exec_w_q[(gq_ew_q + 32'(2*k) + 32'd1)*32 +: 32] <=
+                    32'h0;
+              end
+            end
+            if (gq_flags_q[3]) begin
+              exec_w_q[(gq_ew_q + 32'(2)*32'(gq_nc_q))*32 +: 32] <=
+                  gq_av_q ? 32'd1 : 32'd0;
+              exec_w_q[(gq_ew_q + 32'(2)*32'(gq_nc_q) + 32'd1)*32 +: 32]
+                  <= 32'h0;
+            end
+            // Stride padding needs no writes: StQryGo pre-zeroed the
+            // arena, so [dataw,recw) of every record is already 0.
+            begin
+              automatic int unsigned recw =
+                  (32'(gq_packed_q) + 32'd3) >> 2;
+              gq_ew_q <= gq_ew_q + 32'(recw);
+            end
+            gq_qi_q <= gq_qi_q + 32'd1;
+            gq_rd_q <= '0;
+            gq_av_q <= 1'b0;
+            gq_ct_q <= '0;
+            state_q <= (gq_qi_q + 32'd1 >= gq_count_q)
+                        ? StQryEnd : StQryRd;
+          end
+          // all slots walked: WAIT re-polls while any is unavailable,
+          // else report OK / NOT_READY per the availability seen
+          StQryEnd: begin
+            if (gq_flags_q[1] && gq_notready_q) begin
+              gq_qi_q       <= '0;
+              gq_rd_q       <= '0;
+              gq_ew_q       <= 32'd1;
+              gq_av_q       <= 1'b0;
+              gq_ct_q       <= '0;
+              gq_notready_q <= 1'b0;
+              state_q       <= StQryRd;
+            end else begin
+              result_q <= gq_notready_q ? APU_VK_NOT_READY
+                                       : APU_VK_SUCCESS;
               state_q  <= StRep;
             end
           end

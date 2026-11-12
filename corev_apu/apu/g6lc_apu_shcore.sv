@@ -38,7 +38,9 @@ module g6lc_apu_shcore
   parameter int unsigned ShaderMembers = 256,
   parameter int unsigned ScratchBytes  = 4096,
   parameter int unsigned SlabBytes     = 16384,
-  parameter int unsigned ShaderBudget  = 32'h0100_0000
+  parameter int unsigned ShaderBudget  = 32'h0100_0000,
+  // W1.5 wave-engine counters (g6lc_apu_shwave.perf_o); 0 = no cells
+  parameter bit          PerfCountersEn = 1'b0
 ) (
   input  logic         clk_i,
   input  logic         rst_ni,
@@ -598,8 +600,11 @@ module g6lc_apu_shcore
       .ShaderSlots(ShaderSlots), .ShaderWords(ShaderWords),
       .ShaderInit(ShaderInit), .ShaderMembers(ShaderMembers),
       .ScratchBytes(ScratchBytes), .SlabBytes(SlabBytes),
-      .ShaderBudget(ShaderBudget)
+      .ShaderBudget(ShaderBudget),
+      .PerfCountersEn(PerfCountersEn)
     ) i_wave (
+      .perf_o(),                   // read hierarchically by benches;
+                                   // no register window yet
       .clk_i, .rst_ni, .testmode_i,
       .disp_i(disp_q_valid && !wbusy), .disp_pl_i(disp_q),
       .desc_i, .push_n_i, .push_i,

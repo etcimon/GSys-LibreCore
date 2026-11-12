@@ -20,6 +20,9 @@ package g6lc_apu_vnfront_pkg;
   // 3d-b: VkResult -11 — format/tiling combo not in the profile
   localparam logic [31:0] APU_VK_ERROR_FORMAT_NOT_SUPPORTED =
                                                         32'hFFFF_FFF5;
+  // vkGetQueryPoolResults: bad geometry/size (stride, range, dataSize)
+  localparam logic [31:0] APU_VK_ERROR_VALIDATION_FAILED =
+                                                        32'hC465_0B08;
 
   // CMDBUF lifecycle bits in the ObjTab entry state word
   localparam logic [31:0] APU_CB_RECORDING  = 32'h1;

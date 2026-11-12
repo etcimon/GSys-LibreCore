@@ -62,7 +62,9 @@ module g6lc_apu_shwave
   parameter int unsigned WaitBound     = 32'd4096,
   parameter int unsigned CfDepth       = 8,
   parameter int unsigned CallDepth     = 8,     // G3a-i call-stack bound
-  parameter bit          MatHelperEn   = 1'b0   // §8 — unused in 4b
+  parameter bit          MatHelperEn   = 1'b0,  // §8 — unused in 4b
+  // W1.5 counters: where the dispatch spent its cycles.  0 = no cells.
+  parameter bit          PerfCountersEn = 1'b0
 ) (
   input  logic         clk_i,
   input  logic         rst_ni,
@@ -125,9 +127,13 @@ module g6lc_apu_shwave
   output apu_objtab_req_t ot_req_o,
   input  logic            ot_cpl_valid_i,
   output logic            ot_cpl_ready_o,
-  input  apu_objtab_cpl_t ot_cpl_i
+  input  apu_objtab_cpl_t ot_cpl_i,
+  // PerfCountersEn: {tex, fpu, lsu, mem requests, instructions, busy}
+  // cycle / event counts of the current or last dispatch, 32 bits each
+  output logic [6*32-1:0] perf_o
 );
   if (!Enable) begin : gen_off
+    assign perf_o = '0;
     assign busy_o = 1'b0;   assign done_o = 1'b0;
     assign done_pl_o = '0;
     assign rd_slot_o = '0;  assign prog_addr_o = '0;
@@ -262,7 +268,22 @@ module g6lc_apu_shwave
       W_WB2,                           // second result row (149-152)
       // Determinant/MatrixInverse micro-program (DM_PROG): operand
       // column staging, step issue, step retire, result-row flush
-      W_DM0, W_DM1, W_DMS, W_DMN, W_DMF
+      W_DM0, W_DM1, W_DMS, W_DMN, W_DMF,
+      // whole-aggregate OpLoad / OpStore: memory leaf walk (type row,
+      // array element size, member row, next leaf, leaf out), operand
+      // row stage, result row flush, row retire
+      W_AG0, W_AG1, W_AGE0, W_AGE1, W_AGM0, W_AGM1, W_AGN, W_AGL,
+      W_AGS0, W_AGS1, W_AGF, W_AGR,
+      // whole-aggregate OpCopyObject / OpCopyLogical: row read, row write
+      W_AC0, W_AC1,
+      // aggregate word mover; literal walk (type row, member row, array
+      // element row); construct loop (regmap row, type + const, next)
+      W_MV0, W_MV1, W_MV2,
+      W_AW0, W_AW1, W_AWM0, W_AWM1, W_AWE0, W_AWE1,
+      W_AK0, W_AK1, W_AK2, W_AK3, W_AKN,
+      // aggregate OpPhi row write; aggregate OpSelect (two row reads,
+      // merge, row write)
+      W_PHW, W_SL0, W_SL1, W_SL2, W_SLW
     } st_e;
     st_e st_q, ret_q;
 
@@ -360,6 +381,11 @@ module g6lc_apu_shwave
     // tx_1lane_q restricts unit issue to ls_lane_q)
     logic [31:0]  txfa_q [VEC];
     logic         tx_1lane_q;         // fma/cvt issue only tx_lane
+    // OpSampledImage packs the separate-sampler descriptor key into the
+    // result's comp0.  The texture LOD path reuses va_q[0][*][0] as SFU
+    // scratch (W_TXL8), which would clobber that key before later lanes
+    // reach their sampler-record fetch — stash it per lane at W_TX0.
+    logic [31:0]  tx_smpk_q [LAN];
     // texel datapath
     logic [31:0]  tx_ta_q;            // texel byte address
     logic [4:0]   tx_bpp_q;           // bytes per texel
@@ -661,8 +687,136 @@ module g6lc_apu_shwave
     logic [5:0]   dv_i_q;
     logic         dv_sg_q, dv_sr_q, dv_md_q, dv_sm_q, dv_init_q;
     logic [9:0]   ot_elem_q, al_ty_q;
+    // ---- whole-aggregate values (struct / array by value) -----------------
+    // A value is the logical word image, 4 words per RF row.  Memory
+    // layout (Offset, ArrayStride, MatrixStride, row-major) is applied
+    // by a leaf walk over the type tree that yields one byte offset per
+    // word; the LSU then serves one RF row (up to 4 words) at a time.
+    localparam int unsigned AGD = 8;     // type nesting depth of the walk
+    logic         ls_agg_q;              // LSU is serving an aggregate row
+    logic         cder_q;                // chain base is a derived pointer
+    logic [15:0]  rlw_q, ot_lw_q;        // logical words: result / operand type
+    logic [15:0]  ag_lw_q, ag_w_q;       // words in the value / walked so far
+    logic [13:0]  ag_row_q;              // RF row cursor
+    logic [2:0]   ag_k_q;                // words gathered for this row
+    logic [31:0]  ag_o_q [4];            // leaf byte offsets of this row
+    logic [31:0]  ag_lf_q;               // leaf byte offset just produced
+    logic [3:0]   ag_sp_q;               // walk stack depth
+    logic [3:0]   ag_sc_q;               // storage class of the pointer
+    // walk frame: kind 0 struct, 1 array, 2 matrix, 3 vector
+    logic [1:0]   agf_k_q [AGD];
+    logic [15:0]  agf_i_q [AGD];         // child cursor
+    logic [15:0]  agf_n_q [AGD];         // child count
+    logic [31:0]  agf_c_q [AGD];         // byte offset of the next child
+    logic [15:0]  agf_s_q [AGD];         // child stride (bytes)
+    logic [15:0]  agf_a_q [AGD];         // struct: member base; array:
+                                         // element type; matrix: comps
+    logic [15:0]  agf_m_q [AGD];         // MatrixStride handed to children
+                                         // (matrix: component step)
+    logic         agf_r_q [AGD];         // row-major handed to children
+    // child about to be opened by W_AG0 / W_AG1
+    logic [9:0]   ag_ct_q;
+    logic [31:0]  ag_cb_q;
+    logic [15:0]  ag_cm_q;
+    logic         ag_cr_q;
+    // ---- aggregate word mover (CompositeExtract / Insert / Construct) ------
+    // Moves mv_n_q words between two values.  Each side has a row base,
+    // a (row, word) cursor and a wrap: 4 for a flat image, comps for a
+    // matrix id (one column per row).  A constant source is its flat
+    // 16-word image.  One word per three cycles: read, hold, write.
+    logic [15:0]  mv_n_q;
+    logic         mv_sc_q;               // source is a constant
+    logic [511:0] mv_cst_q;
+    logic [15:0]  mv_ci_q;               // constant word index
+    logic [RI-1:0] mv_sb_q, mv_db_q;     // row bases
+    logic [13:0]  mv_sr_q, mv_dr_q;      // row cursors
+    logic [2:0]   mv_sp_q, mv_dp_q;      // word-in-row cursors
+    logic [2:0]   mv_sw_q, mv_dw_q;      // wraps (1..4)
+    logic [LAN-1:0][31:0] mv_w_q;        // the word in flight, per lane
+    st_e          mv_ret_q;
+    // literal walk over a value's type: flat word offset of the part
+    logic [9:0]   aw_ty_q;
+    logic [15:0]  aw_off_q;
+    logic [5:0]   aw_k_q;                // operand index of the next literal
+    logic         aw_ins_q;              // 1 = CompositeInsert, 0 = Extract
+    // construct: constituent cursor and its regmap row
+    logic [5:0]   ak_k_q;
+    logic [1:0]   ak_tag_q;
+    logic [RI-1:0] ak_idx_q;
+    logic [9:0]   ak_ty_q;
+    // N-row copy source slot and return state (Insert copies slot 1)
+    logic         ac_s_q;
+    st_e          ac_ret_q;
+    // OpPhi / OpSelect of a struct or array value: RF row cursor.  The
+    // words of the current row replace the vector component count.
+    logic [13:0]  ph_row_q;
+    // descriptor resolved for the previous word of this instruction:
+    // a repeat of the same {set, binding, element} skips W_DS0
+    logic         ds_v_q;
+    logic [39:0]  ds_key_q;
+    // last 64-bit beat read by a load of this instruction: the other
+    // 32-bit word of the same beat is served from it (no second request).
+    // Dropped by any write and at the end of the instruction.
+    // result type row held from the previous instruction: the same
+    // type id skips the type-table read (W_TY0/W_TY1)
+    logic         rty_v_q;
+    logic [9:0]   rty_id_q;
+    logic         lb_v_q;
+    logic [60:0]  lb_a_q;
+    logic [63:0]  lb_d_q;
+    wire  [63:0]  lb_addr = ls_bind_q + {32'h0, ls_off_q};
+    wire  [15:0]  ph_rem = rlw_q - {ph_row_q, 2'b00};
+    wire  [3:0]   ph_nc  = !f_isagg(rkind_q) ? 4'(ncomp_q)
+                         : (ph_rem >= 16'd4) ? 4'd4 : ph_rem[3:0];
 
     assign busy_o = st_q != W_IDLE;
+    // ---- W1.5 performance counters ------------------------------------------
+    // Cleared when a dispatch is accepted.  Classes are by engine state:
+    // lsu = load/store unit incl. descriptor resolve and the aggregate
+    // walk; fpu = arithmetic unit waits; tex = texture pipe.
+    if (PerfCountersEn) begin : gen_perf
+      logic [31:0] pc_busy_q, pc_lsu_q, pc_fpu_q, pc_tex_q, pc_mem_q;
+      logic s_lsu, s_fpu, s_tex;
+      always_comb begin
+        s_lsu = st_q inside {W_LS0, W_LS1, W_LS2, W_LSC, W_LSA, W_SSB,
+                             W_SSB1, W_DS0, W_DS1, W_DS2, W_DS3, W_DS4,
+                             W_DS5, W_DS6, W_DS7, W_DS8, W_DSA, W_MLF,
+                             W_SMR0, W_SMR1, W_AG0, W_AG1, W_AGE0, W_AGE1,
+                             W_AGM0, W_AGM1, W_AGN, W_AGL, W_AGS0, W_AGS1,
+                             W_AGF, W_AGR, W_ATR, W_ATC, W_ATW, W_ATS0,
+                             W_ATS1};
+        s_fpu = st_q inside {W_FU0, W_FU1, W_DQ0, W_DQ1, W_CVT0, W_CVT1,
+                             W_NC0, W_NC1, W_IDIV};
+        s_tex = st_q inside {W_TX0, W_TX1, W_TX2, W_TX3, W_TX4, W_TXM,
+                             W_TXC0, W_TXC1, W_TXC2, W_TXC3, W_TXC4,
+                             W_TXC5, W_TXC6, W_TXB, W_TXT0, W_TXT1,
+                             W_TXT2, W_TXF0, W_TXF1, W_TXD, W_TXA, W_TXR0,
+                             W_TXR1, W_TXN, W_TXE0, W_TXE1, W_TXE2,
+                             W_TXW0, W_TXW1, W_TXQ};
+      end
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          pc_busy_q <= '0; pc_lsu_q <= '0; pc_fpu_q <= '0;
+          pc_tex_q <= '0; pc_mem_q <= '0;
+        end else if (st_q == W_IDLE) begin
+          if (disp_i) begin
+            pc_busy_q <= '0; pc_lsu_q <= '0; pc_fpu_q <= '0;
+            pc_tex_q <= '0; pc_mem_q <= '0;
+          end
+        end else begin
+          pc_busy_q <= pc_busy_q + 32'd1;
+          if (s_lsu) pc_lsu_q <= pc_lsu_q + 32'd1;
+          if (s_fpu) pc_fpu_q <= pc_fpu_q + 32'd1;
+          if (s_tex) pc_tex_q <= pc_tex_q + 32'd1;
+          if ((mem_re_o || mem_we_o) && mem_ready_i)
+            pc_mem_q <= pc_mem_q + 32'd1;
+        end
+      end
+      assign perf_o = {pc_tex_q, pc_fpu_q, pc_lsu_q, pc_mem_q, insns_q,
+                       pc_busy_q};
+    end else begin : gen_noperf
+      assign perf_o = '0;
+    end
     assign done_pl_o = '{code: done_code_q, wave: fl_wave_q,
                         pc: fl_pc_q, robust: robust_q, work_id: wid_q};
 
@@ -674,6 +828,25 @@ module g6lc_apu_shwave
     wire [15:0] ty_mbase  = type_data_i[47:32];
     wire [15:0] ty_size   = type_data_i[79:64];
     wire [15:0] ty_stride = type_data_i[95:80];
+    wire [15:0] ty_len    = type_data_i[63:48];   // array length
+    wire [3:0]  ty_nmemb  = type_data_i[28:25];
+    // logical words of a value of this type: struct rows carry it in the
+    // length slot, array rows in the member-base slot (g6lc_apu_shmod)
+    wire [15:0] ty_lw     = (ty_kind == APU_SH_TK_STRUCT) ? type_data_i[63:48]
+                          : (ty_kind == APU_SH_TK_ARRAY)  ? type_data_i[47:32]
+                          : 16'(ty_size >> 2);
+    function automatic logic f_isagg(input logic [3:0] k);
+      return k == APU_SH_TK_STRUCT || k == APU_SH_TK_ARRAY;
+    endfunction
+    // top walk frame (valid while ag_sp_q != 0)
+    wire [2:0]  ag_top    = 3'(ag_sp_q - 4'd1);
+    // words left in the value at the current RF row (row write enable)
+    wire [15:0] ag_rem    = ag_lw_q - {ag_row_q, 2'b00};
+    // W_AG1, matrix row in hand: byte step between columns
+    // (column-major) or between a column's components (row-major)
+    wire [15:0] ag_ms     = (ag_cm_q != 16'h0) ? ag_cm_q
+                          : (ag_sc_q == APU_SH_SC_UNIFORM) ? 16'd16
+                          : {11'h0, f_nc(ty_comps), 2'b00};
     wire [1:0]  rm_tag    = rm_data_i[31:30];
     wire [3:0]  rm_aux    = rm_data_i[29:26];
     wire [9:0]  rm_tid    = rm_data_i[25:16];
@@ -690,6 +863,8 @@ module g6lc_apu_shwave
     // member row: {14'h0, ty[9:0], flags[7:0], mstride[15:0], off[15:0]}
     wire [9:0]  mb_ty     = memb_data_i[49:40];
     wire [7:0]  mb_fl     = memb_data_i[39:32];   // APU_SH_MF_*
+    // member's word offset inside a value of its struct (logical image)
+    wire [13:0] mb_woff   = memb_data_i[63:50];
     wire [14:0] blk_pc    = blk_data_i[14:0];
     wire        blk_ok    = blk_data_i[15];
 
@@ -728,22 +903,18 @@ module g6lc_apu_shwave
     endfunction
     function automatic logic f_has_rty(input logic [15:0] o);
       unique case (o)
-        12,60,61,65,66,68,79,80,81,82,84,86,87,88,95,98,100,103,104,106,
-        109,110,111,112,124,126,127,128,
-        129,130,131,132,133,134,135,136,137,138,139,142,143,144,145,
-        146,147,148,164,165,166,167,168,169,170,171,172,173,174,175,
-        176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,
-        191,194,195,196,197,198,199,200,
-        207,208,209,210,211,212,213,214,215,245,
-        // G3a-i: Undef, dynamic vec ops, Carry/Borrow/MulExtended,
-        // Any/All/IsNan/IsInf, FRem/FMod, bitfield family, atomics
-        // (227-242 minus Store), FunctionCall, IsHelperInvocationEXT
-        1,77,78,83,140,141,149,150,151,152,154,155,156,157,
-        201,202,203,204,205,
-        227,229,230,232,233,234,235,236,237,238,239,240,241,242,
-        // G3a-ii: Dref/proj samples, gathers, QueryLod
-        89,90,91,92,93,94,96,97,105,
-        57,5381:
+        // Opcode labels are generated from tools/shader/sh_opcodes.py
+        // (gen_sh_opcodes.py); edit the table, not this list.
+        // GEN-BEGIN sh_opcodes:result
+        1,12,57,60,61,65,66,68,77,78,79,80,81,82,83,84,86,87,88,89,90,91,92,
+        93,94,95,96,97,98,100,103,104,105,106,109,110,111,112,124,126,127,
+        128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,
+        145,146,147,148,149,150,151,152,154,155,156,157,164,165,166,167,168,
+        169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,
+        186,187,188,189,190,191,194,195,196,197,198,199,200,201,202,203,204,
+        205,207,208,209,210,211,212,213,214,215,227,229,230,232,233,234,235,
+        236,237,238,239,240,241,242,245,16'd400,16'd5381:
+        // GEN-END
           f_has_rty = 1'b1;
         default: f_has_rty = 1'b0;
       endcase
@@ -752,22 +923,13 @@ module g6lc_apu_shwave
                                          input logic [15:0] wc,
                                          input logic [31:0] oq [OPB]);
       unique case (o)
-        62:      f_nva = 3'd2;
+        // Operand counts.  The arms below with a computed count are
+        // written here; every fixed count comes from sh_opcodes.py
+        // (2 is the default).
         80:      f_nva = (wc > 7) ? 3'd4 : 3'(wc - 3);
-        169:     f_nva = 3'd3;
-        82:      f_nva = 3'd2;
         12:      f_nva = (wc > 8) ? 3'd3
                        : (wc > 5 ? 3'(wc - 5) : 3'd0);
-        61,65,66,68,81,84,109,110,111,112,124,126,127,168,200:
-                 f_nva = 3'd1;
-        250,251: f_nva = 3'd1;              // cond / selector
-        60:      f_nva = 3'd3;              // ImageTexelPointer: img,coord,sample
-        99:      f_nva = 3'd3;              // ImageWrite: img,coord,texel
         95:      f_nva = (wc > 6) ? 3'd3 : 3'd2;  // Fetch: img,coord[,lod]
-        88:      f_nva = 3'd3;              // SampleExplicitLod + Lod op
-        // G3a-ii: operand counts grow with the image-operands mask —
-        // Bias (bit 0) on the implicit forms and gathers; Lod (bit 1)
-        // and ConstOffset (bit 3) ids trail the mask word in that order
         87:      f_nva = 3'(3'd2 + ((wc > 5) ? {2'b0, oq[4][3]} +
                                             {2'b0, oq[4][0]} : 4'd0));
         89:      f_nva = 3'(3'd3 + ((wc > 6) ? {2'b0, oq[5][3]} +
@@ -784,24 +946,25 @@ module g6lc_apu_shwave
         96,97:   f_nva = 3'(3'd3 + ((wc > 6) ? {2'b0, oq[5][3]} +
                                              {2'b0, oq[5][1]} +
                                              {2'b0, oq[5][0]} : 4'd0));
-        105:     f_nva = 3'd2;              // QueryLod: img,coord
-        207,208,209,210,211,212,213,214,215:
-               f_nva = 3'd1;              // G2b derivative ops: 1 operand
-        86:      f_nva = 3'd2;              // SampledImage: img,smp
-        103:     f_nva = 3'd2;              // QuerySizeLod: img,lod
-        // G3a-i
-        78:      f_nva = 3'd3;              // VectorInsertDynamic
-        201:     f_nva = 3'd4;              // BitFieldInsert
-        202,203: f_nva = 3'd3;              // BitField(S|U)Extract
-        83,154,155,156,157,204,205:
-                 f_nva = 3'd1;
-        227:     f_nva = 3'd1;              // AtomicLoad: ptr
-        230:     f_nva = 3'd3;              // CompExchange: ptr,val,cmp
-        228,229,232,233,234,235,236,237,238,239,240,241,242:
-                 f_nva = 3'd2;              // atomic: ptr,value
-        0,54,56,59,224,225,245,246,247,248,249,253,255,
-        1,57,252,254,4416,5380,5381:
+        // GEN-BEGIN sh_opcodes:nva0
+        0,1,54,56,57,59,224,225,245,246,247,248,249,252,253,254,255,
+        16'd4416,16'd5380,16'd5381:
+        // GEN-END
                  f_nva = 3'd0;
+        // GEN-BEGIN sh_opcodes:nva1
+        61,65,66,68,81,83,84,109,110,111,112,124,126,127,154,155,156,157,
+        168,200,204,205,207,208,209,210,211,212,213,214,215,227,250,251,
+        16'd400:
+        // GEN-END
+                 f_nva = 3'd1;
+        // GEN-BEGIN sh_opcodes:nva3
+        60,78,88,99,169,202,203,230:
+        // GEN-END
+                 f_nva = 3'd3;
+        // GEN-BEGIN sh_opcodes:nva4
+        201:
+        // GEN-END
+                 f_nva = 3'd4;
         default: f_nva = 3'd2;
       endcase
     endfunction
@@ -940,16 +1103,30 @@ module g6lc_apu_shwave
     function automatic logic f_tx_kind(input logic [15:0] o,
                                        input logic [7:0] k);
       unique case (o)
-        16'd95:               f_tx_kind = k == 8'd1 || k == 8'd2;
+        // §12.3 texel-buffer: OpImageFetch reads UNIFORM_TEXEL_BUFFER(4)
+        // (samplerBuffer/textureBuffer), OpImageRead reads
+        // STORAGE_TEXEL_BUFFER(5) (imageBuffer) — folded into the image
+        // record shape by f_bufview_rec before the shared fetch path
+        16'd95:               f_tx_kind = k == 8'd1 || k == 8'd2 ||
+                                     k == 8'd4;
         // G3a-ii: sampled/dref/proj/gather/query-lod all need a
         // combined or sampled-with-sampler record
         16'd87, 16'd88, 16'd89, 16'd90, 16'd91, 16'd92, 16'd93,
         16'd94, 16'd96, 16'd97, 16'd105:
                               f_tx_kind = k == 8'd1 || k == 8'd2;
-        16'd98:               f_tx_kind = k == 8'd2 || k == 8'd3;
-        16'd99:               f_tx_kind = k == 8'd3;
-        // OpImageTexelPointer: storage image only (r32ui/r32i atomics)
-        16'd60:               f_tx_kind = k == 8'd3;
+        16'd98:               f_tx_kind = k == 8'd2 || k == 8'd3 ||
+                                     k == 8'd5;
+        // §12.3 texel-buffer: OpImageWrite stores to STORAGE_TEXEL_BUFFER(5)
+        // (imageBuffer/iimageBuffer/uimageBuffer); uniform texel(4) is
+        // read-only and stays rejected.  kind5 reaches here already folded
+        // to a Wx1 image by f_bufview_rec, so the shared encode+store-beat
+        // path writes base + index*bpp.
+        16'd99:               f_tx_kind = k == 8'd3 || k == 8'd5;
+        // OpImageTexelPointer: storage image(3) or storage texel buffer(5)
+        // — the kind5 record is already folded to a Wx1 image by
+        // f_bufview_rec so the pointer's absolute texel address is
+        // base + index*bpp; uniform texel(4) stays rejected (read-only)
+        16'd60:               f_tx_kind = k == 8'd3 || k == 8'd5;
         16'd103, 16'd104, 16'd106:
                               f_tx_kind = k <= 8'd3;
         default:              f_tx_kind = 1'b0;
@@ -962,6 +1139,45 @@ module g6lc_apu_shwave
       f_tx_smp = (o == 16'd87 || o == 16'd88 ||
                   (o >= 16'd89 && o <= 16'd94) ||
                   o == 16'd96 || o == 16'd97 || o == 16'd105);
+    endfunction
+    // §12.3 texel-buffer fetch: fold a UNIFORM/STORAGE_TEXEL_BUFFER record
+    // {mh, esz=view_rng, kind|elok, texdid, …, eb} into the image-view
+    // half the shared fetch path reads — a texel_count x 1 image whose
+    // fmt is the buffer's device format id, one mip level, no array
+    // layer.  The single gather point then lands at
+    // base + index*bpp(texdid) with the byte-extent bound intact; the
+    // sampler/swizzle words stay zero (fetch/read never sample).
+    // width saturates at 16'hFFFF — the coord datapath is 16-bit, so a
+    // larger view reports robust-zero past that index exactly like an
+    // over-wide image does.
+    function automatic logic [255:0] f_bufview_rec(
+        input logic [255:0] r);
+      logic [7:0]  did, bpp;
+      logic [4:0]  sh;
+      logic [31:0] tc;
+      logic [15:0] w16;
+      did = r[103:96];                 // word3 = device format id
+      bpp = g6lc_apu_vn_pkg::APU_VN_IMG_BPP[did];
+      unique case (bpp)
+        8'd1:    sh = 5'd0;
+        8'd2:    sh = 5'd1;
+        8'd4:    sh = 5'd2;
+        8'd8:    sh = 5'd3;
+        default: sh = 5'd4;            // 16 (and any odd bpp -> /16)
+      endcase
+      tc  = r[63:32] >> sh;            // view_rng / bpp = texel count
+      w16 = (tc > 32'd65535) ? 16'hFFFF : tc[15:0];
+      f_bufview_rec = {r[255:224],               // eb byte offset
+                       32'h0,                    // sampler w1 (unused)
+                       32'h0,                    // sampler w0 (unused)
+                       16'h0, 16'd1,             // swizzle, layers = 1
+                       8'h01,                    // byte15: dims=0,mips=1
+                       did,                      // byte14: fmt = texdid
+                       16'd1,                    // bytes12-13: height = 1
+                       w16,                      // bytes10-11: width
+                       r[79:72], r[71:64],        // flags, kind @8-9
+                       r[63:32],                 // extent = view_rng
+                       r[31:0]};                 // base/mh
     endfunction
     // address-mode wrap: returns {border, coord[15:0]}; REPEAT=0,
     // MIRRORED_REPEAT=1, CLAMP_TO_EDGE=2, CLAMP_TO_BORDER=3
@@ -1234,8 +1450,62 @@ module g6lc_apu_shwave
         endcase
       end
     endfunction
+    // matrix-access column/comps bounds — nets declared ahead of ls_adv
+    // (slang requires declaration-before-use; the continuous assigns
+    //  stay with the matrix-address block below)
+    wire [2:0]  ls_ccn;
+    wire [2:0]  ls_ccl;
     // unit job descriptor: jmode 0=fma-vec,1=dsq,2=cvt,3=nc;
     // ac/bc/cc2 = per-slot comp for cmode==3 operands (G3a-i)
+    // Load/store cursor advance: next word, next lane, or the exit of
+    // the access.  Called from W_LSA and, to save a cycle per word,
+    // directly from the states that complete an access.
+    task automatic ls_adv();
+            if (ls_agg_q) begin
+              // aggregate row — (lane, word) order over the ag_k_q
+              // words of this RF row; then flush (load) or retire
+              if (lcc_q + 1 < ag_k_q) begin
+                lcc_q <= lcc_q + 1; st_q <= W_LS0;
+              end else if (ls_lane_q + 1 < LAN) begin
+                lcc_q <= '0; ls_lane_q <= ls_lane_q + 1;
+                st_q <= W_LS0;
+              end else begin
+                lcc_q <= '0; ls_lane_q <= '0;
+                st_q <= ls_store_q ? W_AGR : W_AGF;
+              end
+            end else if (!ls_mat_q) begin
+              if (ls_comp_q + 1 < ncomp_q) begin
+                ls_comp_q <= ls_comp_q + 1; st_q <= W_LS0;
+              end else if (ls_lane_q + 1 < LAN) begin
+                ls_comp_q <= '0; ls_lane_q <= ls_lane_q + 1;
+                st_q <= W_LS0;
+              end else begin
+                ls_comp_q <= '0; ls_lane_q <= '0;
+                st_q <= (ls_store_q && !ls_wbb_q) ? W_NEXT : W_WB;
+              end
+            end else begin
+              // matrix access — (column, lane, comp) order: the RF row
+              // for a column is complete when the last lane's last comp
+              // of that column retires, and is flushed (load) or the
+              // next column staged (store) at that boundary.
+              ls_comp_q <= ls_comp_q + 1;
+              if (lcc_q + 1 < ls_ccn) begin
+                lcc_q <= lcc_q + 1; st_q <= W_LS0;
+              end else if (ls_lane_q + 1 < LAN) begin
+                lcc_q <= '0; ls_lane_q <= ls_lane_q + 1;
+                st_q <= W_LS0;
+              end else if (!ls_store_q) begin
+                st_q <= W_MLF;          // flush column lrc_q row
+              end else if (lrc_q + 1 >= ls_ccl) begin
+                lcc_q <= '0; ls_lane_q <= '0; ls_comp_q <= '0;
+                st_q <= W_NEXT;
+              end else begin
+                lcc_q <= '0; ls_lane_q <= '0; lrc_q <= lrc_q + 1;
+                st_q <= (otag_q[1] == APU_SH_RT_CONST)
+                        ? W_LS0 : W_SMR0;
+              end
+            end
+    endtask
     task automatic jset(input logic [1:0] jm, input logic [4:0] xo,
                         input logic [6:0] a, b, c,
                         input logic [2:0] dst, input logic dot,
@@ -1862,6 +2132,9 @@ module g6lc_apu_shwave
     always_comb begin
       pa_w = pc_q[wave_q];
       if (st_q == W_LD0) pa_w = pc_q[wave_q] + {10'h0, vk_q} + 1;
+      // operand words stream one per cycle: while word vk is captured
+      // in W_LD1 the read of word vk+1 is already issued
+      if (st_q == W_LD1) pa_w = pc_q[wave_q] + {10'h0, vk_q} + 2;
       ty_w = '0; rm_w = '0; mb_w = '0; fn_w = '0; pt_w = '0;
       unique case (st_q)
         W_TY0:  ty_w = ops_q[0][9:0];
@@ -1879,7 +2152,13 @@ module g6lc_apu_shwave
         W_CM0:  ty_w = vty_q[vk_q[1:0]];
         W_MS0:  ty_w = vty_q[0];
         W_MS1:  ty_w = vty_q[1];
-        W_RMI:  rm_w = f_opid10(opc_q, vk_q, ops_q);
+        // operands done: the result id lookup is issued here, so the
+        // engine goes straight to W_RW1
+        W_RMI:  rm_w = (vk_q >= 6'(nva_q)) ? ops_q[1][9:0]
+                                           : f_opid10(opc_q, vk_q, ops_q);
+        // the next operand's regmap read is issued while this one's
+        // value is captured, so the loop skips W_RMI after operand 0
+        W_CV1, W_RV1: rm_w = f_opid10(opc_q, vk_q + 16'd1, ops_q);
         W_IR0:  rm_w = res_id_q;
         W_RW0:  rm_w = ops_q[1][9:0];
         W_PH0:  rm_w = ops_q[1][9:0];
@@ -1891,6 +2170,14 @@ module g6lc_apu_shwave
         W_AL2:  ty_w = al_ty_q;
         W_AL4:  mb_w = cmb_q;
         W_AL6:  ty_w = al_ty2_q;
+        W_AG0:  ty_w = ag_ct_q;
+        W_AGE0: ty_w = agf_a_q[ag_top][9:0];
+        W_AGM0: mb_w = 10'(agf_a_q[ag_top] + agf_i_q[ag_top]);
+        W_AW0:  ty_w = aw_ty_q;
+        W_AWE0: ty_w = aw_ty_q;
+        W_AWM0: mb_w = cmb_q;
+        W_AK0:  rm_w = ops_q[ak_k_q[4:0] + 5'd2][9:0];
+        W_AK2:  ty_w = ak_ty_q;
         default: ;
       endcase
     end
@@ -1991,7 +2278,7 @@ module g6lc_apu_shwave
                  (|va_q[0][l][(ot_comps_q > 1) ? c[1:0] : 2'd0])
                  ? va_q[1][l][c] : va_q[2][l][c];
         // ---- G3a-i scalar/vector misc --------------------------------
-        1,83:  for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
+        1,83,400: for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
                  int_alu[l][c] = (opc_q == 1) ? 32'h0 : va_q[0][l][c];
         // OpVectorExtractDynamic: comp index = va1[l][0] (&3 wrap)
         77:    for (int l = 0; l < LAN; l++)
@@ -2337,11 +2624,13 @@ module g6lc_apu_shwave
 
     // stored/loaded word for the current (lane,word) cursor: matrix
     // operands read/write column rows (rf or the latched const row)
-    wire [2:0]  ls_wc = ls_mat_q ? lcc_q : {1'b0, ls_comp_q[1:0]};
+    wire [2:0]  ls_wc = (ls_mat_q || ls_agg_q) ? lcc_q
+                                               : {1'b0, ls_comp_q[1:0]};
     // matrix access shape: comps per column / column count, keyed on
     // whether the operand (store) or the result (load) is the matrix
-    wire [2:0]  ls_ccn = ls_store_q ? ot_comps_q : 3'(f_nc(rcomps_q));
-    wire [2:0]  ls_ccl = ls_store_q ? ot_cols_q  : rcols_q;
+    // (nets declared above, before ls_adv)
+    assign ls_ccn = ls_store_q ? ot_comps_q : 3'(f_nc(rcomps_q));
+    assign ls_ccl = ls_store_q ? ot_cols_q  : rcols_q;
     // flat word index inside one lane's matrix extent (column-major)
     // = column * comps-per-column + comp-in-column.  Used for a
     // tightly packed constant matrix.  A memory matrix uses
@@ -2357,7 +2646,13 @@ module g6lc_apu_shwave
                        : {4'h0, lrc_q} * ls_msw + {6'h0, lcc_q};
     // strided column vector of a row-major matrix: comp c at c*stride
     wire [8:0]  ls_vsi = 9'(ls_comp_q) * {1'b0, ls_mstr_q[15:2]};
-    wire [31:0] ls_wd = !ls_mat_q
+    wire [31:0] ls_wd = ls_agg_q
+                      // aggregate store: word lcc of the staged RF row,
+                      // or of the constant's flat image (16 words)
+                      ? ((otag_q[1] == APU_SH_RT_CONST)
+                         ? ocst_q[1][32*{ag_row_q[1:0], lcc_q[1:0]} +: 32]
+                         : ma_q[ls_lane_q[2:0]][lcc_q[1:0]])
+                      : !ls_mat_q
                       ? (ls_tsrc_q
                          ? t1_q[ls_lane_q[2:0]][ls_comp_q[1:0]]
                          : va_q[1][ls_lane_q[2:0]][ls_comp_q[1:0]])
@@ -2409,7 +2704,28 @@ module g6lc_apu_shwave
         end
         W_PH2: begin
           rf_req = 1'b1;
-          rf_addr = {wave_q, rm_idx[RI-1:0]};
+          rf_addr = {wave_q, rm_idx[RI-1:0] + RI'(ph_row_q)};
+        end
+        W_PHW, W_SLW: begin                // aggregate phi / select row
+          rf_req = 1'b1; rf_we = 1'b1;
+          rf_addr = {wave_q, wreg_q + RI'(ph_row_q)};
+          rf_wdata = wb_q;
+          for (int l = 0; l < LAN; l++)
+            for (int c = 0; c < VEC; c++)
+              if (act_w[l] && 4'(c) < ph_nc)
+                rf_be[l*16 + c*4 +: 4] = 4'hF;
+        end
+        W_SL0: begin                       // select: object 1 row
+          if (otag_q[1] != APU_SH_RT_CONST) begin
+            rf_req = 1'b1;
+            rf_addr = {wave_q, oidx_q[1] + RI'(ph_row_q)};
+          end
+        end
+        W_SL1: begin                       // select: object 2 row
+          if (otag_q[2] != APU_SH_RT_CONST) begin
+            rf_req = 1'b1;
+            rf_addr = {wave_q, oidx_q[2] + RI'(ph_row_q)};
+          end
         end
         W_MRD0: begin                      // matrix operand column
           if (otag_q[mrds_q] != APU_SH_RT_CONST) begin
@@ -2462,7 +2778,56 @@ module g6lc_apu_shwave
           rf_wdata = wb_q;
           for (int l = 0; l < LAN; l++)
             for (int c = 0; c < VEC; c++)
-              if (act_w[l] && c <= lcc_q)
+              if (act_w[l] && 4'(c) < {1'b0, lcc_q} + 4'd1)
+                rf_be[l*16 + c*4 +: 4] = 4'hF;
+        end
+        W_AGS0: begin                      // aggregate store: value row
+          rf_req = 1'b1;
+          rf_addr = {wave_q, oidx_q[1] + RI'(ag_row_q)};
+        end
+        W_AGF: begin                       // aggregate load: row flush
+          rf_req = 1'b1; rf_we = 1'b1;
+          rf_addr = {wave_q, wreg_q + RI'(ag_row_q)};
+          rf_wdata = wb_q;
+          for (int l = 0; l < LAN; l++)
+            for (int c = 0; c < VEC; c++)
+              if (act_w[l] && c < ag_k_q)
+                rf_be[l*16 + c*4 +: 4] = 4'hF;
+        end
+        W_AC0: begin                       // aggregate copy: source row
+          if (otag_q[ac_s_q] != APU_SH_RT_CONST) begin
+            rf_req = 1'b1;
+            rf_addr = {wave_q, oidx_q[ac_s_q] + RI'(ag_row_q)};
+          end
+        end
+        W_MV0: begin                       // mover: source row
+          if (!mv_sc_q) begin
+            rf_req = 1'b1;
+            rf_addr = {wave_q, mv_sb_q + RI'(mv_sr_q)};
+          end
+        end
+        W_MV2: begin                       // mover: one word out
+          rf_req = 1'b1; rf_we = 1'b1;
+          rf_addr = {wave_q, mv_db_q + RI'(mv_dr_q)};
+          for (int l = 0; l < LAN; l++) begin
+            rf_wdata[l*128 + 32*mv_dp_q[1:0] +: 32] = mv_w_q[l];
+            if (act_w[l]) rf_be[l*16 + 4*mv_dp_q[1:0] +: 4] = 4'hF;
+          end
+        end
+        W_AC1: begin                       // aggregate copy: result row
+          rf_req = 1'b1; rf_we = 1'b1;
+          rf_addr = {wave_q, wreg_q + RI'(ag_row_q)};
+          // W_AC0's read lands this cycle; a constant is its flat
+          // 16-word image, the same row for every lane
+          if (otag_q[ac_s_q] == APU_SH_RT_CONST) begin
+            for (int l = 0; l < LAN; l++)
+              rf_wdata[l*128 +: 128] =
+                ocst_q[ac_s_q][128*ag_row_q[1:0] +: 128];
+          end else
+            rf_wdata = rf_rdata;
+          for (int l = 0; l < LAN; l++)
+            for (int c = 0; c < VEC; c++)
+              if (act_w[l] && 16'(c) < ag_rem)
                 rf_be[l*16 + c*4 +: 4] = 4'hF;
         end
         W_WB: begin
@@ -3020,8 +3385,30 @@ module g6lc_apu_shwave
         for (int k = 0; k < 4; k++) begin
           dtm_q[k] <= '0; dres_q[k] <= '0;
         end
+        for (int l = 0; l < LAN; l++) tx_smpk_q[l] <= '0;
         ls_ps_q <= '0; ls_tsrc_q <= '0; ls_wbb_q <= '0;
         ls_atom_q <= '0; ls_mat_q <= '0; ls_mstr_q <= '0;
+        ls_agg_q <= 1'b0; cder_q <= 1'b0;
+        mv_n_q <= '0; mv_sc_q <= 1'b0; mv_cst_q <= '0; mv_ci_q <= '0;
+        mv_sb_q <= '0; mv_db_q <= '0; mv_sr_q <= '0; mv_dr_q <= '0;
+        mv_sp_q <= '0; mv_dp_q <= '0; mv_sw_q <= '0; mv_dw_q <= '0;
+        mv_w_q <= '0; mv_ret_q <= W_NEXT;
+        aw_ty_q <= '0; aw_off_q <= '0; aw_k_q <= '0; aw_ins_q <= 1'b0;
+        ak_k_q <= '0; ak_tag_q <= '0; ak_idx_q <= '0; ak_ty_q <= '0;
+        ac_s_q <= 1'b0; ac_ret_q <= W_NEXT; ph_row_q <= '0;
+        ds_v_q <= 1'b0; ds_key_q <= '0;
+        lb_v_q <= 1'b0; lb_a_q <= '0; lb_d_q <= '0;
+        rty_v_q <= 1'b0; rty_id_q <= '0;
+        rlw_q <= '0; ot_lw_q <= '0; ag_lw_q <= '0; ag_w_q <= '0;
+        ag_row_q <= '0; ag_k_q <= '0; ag_lf_q <= '0; ag_sp_q <= '0;
+        ag_sc_q <= '0; ag_ct_q <= '0; ag_cb_q <= '0; ag_cm_q <= '0;
+        ag_cr_q <= 1'b0;
+        for (int i = 0; i < 4; i++) ag_o_q[i] <= '0;
+        for (int i = 0; i < AGD; i++) begin
+          agf_k_q[i] <= '0; agf_i_q[i] <= '0; agf_n_q[i] <= '0;
+          agf_c_q[i] <= '0; agf_s_q[i] <= '0; agf_a_q[i] <= '0;
+          agf_m_q[i] <= '0; agf_r_q[i] <= 1'b0;
+        end
         ls_rm_q <= 1'b0; ls_vs_q <= 1'b0; crm_q <= 1'b0; cvs_q <= 1'b0;
         ls_dyn_q <= '0;
         wb2_q <= '0; xk_q <= '0;
@@ -3196,13 +3583,19 @@ module g6lc_apu_shwave
             if (vk_q + 1 >= 16'(wc_q) - 1) begin
               vk_q <= '0; st_q <= W_TY0A;
             end else begin
-              vk_q <= vk_q + 1; st_q <= W_LD0;
+              vk_q <= vk_q + 1; st_q <= W_LD1;
             end
           end
           // ------------------------------ result-type / operand resolve
           W_TY0A: begin
             nva_q <= f_nva(opc_q, wc_q, ops_q);
-            if (f_has_rty(opc_q)) st_q <= W_TY0;
+            if (f_has_rty(opc_q) && rty_v_q &&
+                rty_id_q == ops_q[0][9:0]) begin
+              // r* already describe this type; only ncomp is scratch
+              ncomp_q <= 4'(f_nc(rcomps_q));
+              vk_q <= '0;
+              st_q <= (f_nva(opc_q, wc_q, ops_q) != 0) ? W_RMI : W_RW0;
+            end else if (f_has_rty(opc_q)) st_q <= W_TY0;
             else begin
               ncomp_q <= 4'd1;
               // nva==0 result ops (OpUndef) still need the W_RW0
@@ -3217,6 +3610,8 @@ module g6lc_apu_shwave
             rcols_q <= ty_cols;
             relem_q <= ty_elem;
             rsz_q   <= ty_size;
+            rlw_q   <= ty_lw;
+            rty_v_q <= 1'b1; rty_id_q <= ops_q[0][9:0];
             ncomp_q <= 4'(f_nc(ty_comps));
             vk_q <= '0;
             st_q <= (nva_q != 0) ? W_RMI : W_RW0;
@@ -3227,6 +3622,7 @@ module g6lc_apu_shwave
             ot_kind_q  <= ty_kind;
             ot_cols_q  <= ty_cols;
             ot_elem_q <= ty_elem;
+            ot_lw_q   <= ty_lw;
             if (opc_q == 62)
               ncomp_q <= (ty_kind == APU_SH_TK_MAT)
                          ? 5'(ty_cols) * {2'b0, f_nc(ty_comps)}
@@ -3235,7 +3631,7 @@ module g6lc_apu_shwave
           end
           W_RMI: begin
             if (vk_q >= nva_q) begin
-              vk_q <= '0; st_q <= W_RW0;
+              vk_q <= '0; st_q <= W_RW1;
             end else begin
               res_id_q <= f_opid10(opc_q, vk_q, ops_q);
               res_slot_q <= vk_q[2:0];
@@ -3263,12 +3659,24 @@ module g6lc_apu_shwave
               for (int c = 0; c < VEC; c++)
                 va_q[res_slot_q][l][c] <=
                   const_data_i[32 * ((c < raux_q) ? c : 0) +: 32];
-            vk_q <= vk_q + 1; st_q <= W_RMI;
+            vk_q <= vk_q + 1;
+            if (vk_q + 16'd1 >= 16'(nva_q)) st_q <= W_RMI;
+            else begin
+              res_id_q <= f_opid10(opc_q, vk_q + 16'd1, ops_q);
+              res_slot_q <= 3'(vk_q[2:0] + 3'd1);
+              st_q <= W_RMC;
+            end
           end
           W_RV0: st_q <= W_RV1;
           W_RV1: begin
             va_q[res_slot_q] <= rf_rdata;
-            vk_q <= vk_q + 1; st_q <= W_RMI;
+            vk_q <= vk_q + 1;
+            if (vk_q + 16'd1 >= 16'(nva_q)) st_q <= W_RMI;
+            else begin
+              res_id_q <= f_opid10(opc_q, vk_q + 16'd1, ops_q);
+              res_slot_q <= 3'(vk_q[2:0] + 3'd1);
+              st_q <= W_RMC;
+            end
           end
           // composite construct: merge each resolved constituent
           W_CC0: st_q <= W_CC1;
@@ -3286,7 +3694,15 @@ module g6lc_apu_shwave
             unique case (opc_q)
               62:  begin oty_id_q <= vty_q[1]; st_q <= W_OT0; end
               81:  begin oty_id_q <= vty_q[0]; st_q <= W_OT0; end
-              142,148,169:
+              169: if (f_isagg(rkind_q)) begin
+                     // struct / array select: one condition per lane
+                     // picks whole rows of object 1 or object 2
+                     ph_row_q <= '0;
+                     st_q <= (rlw_q == 16'h0) ? W_NEXT : W_SL0;
+                   end else begin
+                     oty_id_q <= vty_q[0]; st_q <= W_OT0;
+                   end
+              142,148:
                    begin oty_id_q <= vty_q[0]; st_q <= W_OT0; end
               // G3a-ii: proj-sample ops need the coordinate operand's
               // vector width — the divisor is its last component
@@ -3297,8 +3713,22 @@ module g6lc_apu_shwave
                 oty_id_q <= vty_q[0]; st_q <= W_OT0;
               end
               68:  st_q <= W_AL0;
+              // CompositeInsert into a struct / array: the object's type
+              // shape (words, matrix or flat) is needed for the mover
+              82:  begin
+                if (f_isagg(rkind_q)) begin
+                  oty_id_q <= vty_q[0]; st_q <= W_OT0;
+                end else st_q <= W_EX;
+              end
               80:  begin vk_q <= '0; ccp_q <= '0;
-                         if (rkind_q == APU_SH_TK_MAT) begin
+                         if (f_isagg(rkind_q)) begin
+                           // struct / array: constituents are moved in
+                           // one at a time, each at its own word count
+                           ak_k_q <= '0;
+                           mv_db_q <= wreg_q; mv_dr_q <= '0;
+                           mv_dp_q <= '0; mv_dw_q <= 3'd4;
+                           st_q <= (wc_q > 16'd3) ? W_AK0 : W_NEXT;
+                         end else if (rkind_q == APU_SH_TK_MAT) begin
                            ccr_q <= '0; st_q <= W_CM0;
                          end else begin
                            wbm_q <= 4'b1111; st_q <= W_CC0;
@@ -3498,7 +3928,20 @@ module g6lc_apu_shwave
                 // side, per-column rows on the RF side.
                 ls_rm_q <= va_q[0][0][3][16];
                 ls_vs_q <= 1'b0;
-                if (opc_q == 61 && rkind_q == APU_SH_TK_MAT) begin
+                if ((opc_q == 61 && f_isagg(rkind_q)) ||
+                    (opc_q == 62 && f_isagg(ot_kind_q))) begin
+                  // whole struct / array: the leaf walk opens the
+                  // pointee type at the pointer's own offset
+                  ls_mat_q <= 1'b0; ls_agg_q <= 1'b1;
+                  ag_lw_q  <= (opc_q == 61) ? rlw_q : ot_lw_q;
+                  ag_w_q <= '0; ag_row_q <= '0; ag_k_q <= '0;
+                  ag_sp_q <= '0;
+                  ag_ct_q  <= (opc_q == 61) ? ops_q[0][9:0] : vty_q[1];
+                  ag_cb_q  <= '0;
+                  ag_cm_q  <= va_q[0][0][3][15:0];
+                  ag_cr_q  <= va_q[0][0][3][16];
+                  ag_sc_q  <= va_q[0][0][1][3:0];
+                end else if (opc_q == 61 && rkind_q == APU_SH_TK_MAT) begin
                   ls_mat_q <= 1'b1;
                   // pointer word 3 is the member MatrixStride.  A
                   // std140 uniform block column is 16 bytes apart
@@ -3533,7 +3976,11 @@ module g6lc_apu_shwave
                   ls_vs_q  <= va_q[0][0][3][17] && va_q[0][0][3][15:0] != 0;
                   ls_mstr_q <= va_q[0][0][3][17] ? va_q[0][0][3][15:0] : '0;
                 end
-                if (!(opc_q == 61 &&
+                if ((opc_q == 61 && f_isagg(rkind_q)) ||
+                    (opc_q == 62 && f_isagg(ot_kind_q)))
+                  st_q <= (((opc_q == 61) ? rlw_q : ot_lw_q) == 16'h0)
+                          ? W_NEXT : W_AG0;
+                else if (!(opc_q == 61 &&
                       (rkind_q == APU_SH_TK_IMG ||
                        rkind_q == APU_SH_TK_SAMP ||
                        rkind_q == APU_SH_TK_SIMG)))
@@ -3554,6 +4001,9 @@ module g6lc_apu_shwave
                   poff_q[l][3] <= va_q[0][l][3];
                 end
                 ctag_q <= va_q[0][0][1];
+                // a pointer an earlier chain produced (word3 bit18) is
+                // already inside one block: an array there is data
+                cder_q <= va_q[0][0][3][18];
                 // re-chaining a row-major matrix / column pointer keeps
                 // its layout state and stride
                 crm_q <= va_q[0][0][3][16];
@@ -3580,7 +4030,13 @@ module g6lc_apu_shwave
                 st_q <= W_WB;
               end
               81: begin                            // CompositeExtract
-                if (ot_kind_q == APU_SH_TK_MAT) begin
+                if (f_isagg(ot_kind_q)) begin
+                  // struct / array value: walk the literals to a flat
+                  // word offset, then move the part out
+                  aw_ty_q <= vty_q[0]; aw_off_q <= '0;
+                  aw_k_q <= 6'd3; aw_ins_q <= 1'b0;
+                  st_q <= W_AW0;
+                end else if (ot_kind_q == APU_SH_TK_MAT) begin
                   // matrix operand: [col] column extract (vector
                   // result) or [col][comp] element extract (scalar).
                   // RF-resident matrix: one extra column-row read.
@@ -3605,7 +4061,15 @@ module g6lc_apu_shwave
                   st_q <= W_WB;
                 end
               end
-              82: begin                            // CompositeInsert
+              82: if (f_isagg(rkind_q)) begin      // CompositeInsert
+                // copy the whole composite (slot 1), then walk the
+                // literals and move the object (slot 0) in
+                ag_lw_q <= rlw_q; ag_row_q <= '0;
+                ac_s_q <= 1'b1; ac_ret_q <= W_AW0;
+                aw_ty_q <= ops_q[0][9:0]; aw_off_q <= '0;
+                aw_k_q <= 6'd4; aw_ins_q <= 1'b1;
+                st_q <= (rlw_q == 16'h0) ? W_NEXT : W_AC0;
+              end else begin
                 wb_q <= va_q[1];
                 for (int l = 0; l < LAN; l++)
                   wb_q[l][ops_q[4][1:0]] <= va_q[0][l][0];
@@ -3613,7 +4077,19 @@ module g6lc_apu_shwave
               end
               // -------------------- G3a-i ---------------------------
               1:   begin wb_q <= '0;      st_q <= W_WB; end  // Undef
-              83:  begin wb_q <= va_q[0]; st_q <= W_WB; end  // CopyObj
+              // CopyObject / CopyLogical.  A struct / array value is its
+              // logical word image, 4 words per RF row, and two layouts
+              // of one logical type share that image — so both opcodes
+              // copy every row (W_AC0/W_AC1).
+              83,400: begin
+                if (f_isagg(rkind_q)) begin
+                  ag_lw_q <= rlw_q; ag_row_q <= '0;
+                  ac_s_q <= 1'b0; ac_ret_q <= W_NEXT; ph_row_q <= '0;
+                  st_q <= (rlw_q == 16'h0) ? W_NEXT : W_AC0;
+                end else begin
+                  wb_q <= va_q[0]; st_q <= W_WB;
+                end
+              end
               // Any/All/IsNan/IsInf + the bitfield family — int_alu
               154,155,156,157,201,202,203,204,205:
                    begin wb_q <= int_alu; st_q <= W_WB; end
@@ -4790,7 +5266,7 @@ module g6lc_apu_shwave
                 st_q <= W_CHM0;
               end
               4'd7, 4'd8: begin                  // array / runtime array
-                if (ck_q == 4'd0 &&
+                if (ck_q == 4'd0 && !cder_q &&
                     (ctag_q[3:0] == APU_SH_SC_UNIFORM ||
                      ctag_q[3:0] == APU_SH_SC_UNIFORMCONST ||
                      ctag_q[3:0] == APU_SH_SC_SBUF)) begin
@@ -4878,9 +5354,10 @@ module g6lc_apu_shwave
               // word 3 carries MatrixStride so the later OpLoad
               // (a new instruction, cmstride cleared) still spaces
               // columns.  Zero when the member has no MatrixStride.
-              // [31:24] binding hi, [17] row-major column vector, [16]
-              // row-major matrix, [15:0] MatrixStride
-              wb_q[l][3] <= {poff_q[l][3][31:24], 6'h0, cvs_q, crm_q,
+              // [31:24] binding hi, [18] derived pointer (set by every
+              // chain), [17] row-major column vector, [16] row-major
+              // matrix, [15:0] MatrixStride
+              wb_q[l][3] <= {poff_q[l][3][31:24], 5'h0, 1'b1, cvs_q, crm_q,
                              cmstride_q};
             end
             wbm_q <= 4'b1111;
@@ -4971,8 +5448,9 @@ module g6lc_apu_shwave
             // ls_ps_q (ext pointer stores: Modf/Frexp) puts the pointer
             // word in operand slot 1 instead of 0
             o32 = va_q[ls_ps_q][ls_lane_q[2:0]][0] +
-                  {21'h0, (ls_mat_q ? ls_mad :
-                           ls_vs_q ? ls_vsi : 9'(ls_comp_q)), 2'b00};
+                  (ls_agg_q ? ag_o_q[lcc_q[1:0]] :
+                   {21'h0, (ls_mat_q ? ls_mad :
+                            ls_vs_q ? ls_vsi : 9'(ls_comp_q)), 2'b00});
             tg  = va_q[ls_ps_q][ls_lane_q[2:0]][1];
             ls_off_q <= o32;
             ls_sc_q  <= tg[3:0];
@@ -5008,6 +5486,7 @@ module g6lc_apu_shwave
               // extent count*stride and issues the access
               ls_rec_q <= 1'b1;
               ls_bok_q <= 1'b1;
+              ds_v_q <= 1'b0;
               if (tg[3:0] == APU_SH_SC_INPUT) begin
                 ls_bind_q <= {32'h0, in_base_q};
                 ls_off_q  <= (32'(wave_q) * LAN + 32'(ls_lane_q)) *
@@ -5030,6 +5509,7 @@ module g6lc_apu_shwave
               // longer read for these builtins.
               ls_rec_q <= 1'b1;
               ls_bok_q <= 1'b1;
+              ds_v_q <= 1'b0;
               ls_bind_q <= {32'h0, in_base_q};
               ls_off_q  <= (32'(wave_q) * LAN + 32'(ls_lane_q)) *
                            gfx_istr + 32'd128 +
@@ -5060,6 +5540,7 @@ module g6lc_apu_shwave
               // absolute texel address.  Lane-serial RMW follows.
               ls_bok_q  <= 1'b1;
               ls_bind_q <= '0;
+              ds_v_q <= 1'b0;
               ls_off_q  <= o32;
               ls_bsz_q  <= 32'hFFFF_FFFF;
               st_q <= W_LSC;
@@ -5072,7 +5553,18 @@ module g6lc_apu_shwave
                             tg[27:20]};
               dsc_idx_q <= va_q[ls_ps_q][ls_lane_q[2:0]][2][15:0];
               dret_q    <= W_LSC;
-              st_q      <= W_DS0;
+              ds_key_q  <= {tg[19:12],
+                            va_q[ls_ps_q][ls_lane_q[2:0]][3][31:24],
+                            tg[27:20],
+                            va_q[ls_ps_q][ls_lane_q[2:0]][2][15:0]};
+              ds_v_q    <= 1'b1;
+              // same record as the previous word: ls_bind/bsz/bok hold
+              st_q      <= (ds_v_q && ds_key_q ==
+                            {tg[19:12],
+                             va_q[ls_ps_q][ls_lane_q[2:0]][3][31:24],
+                             tg[27:20],
+                             va_q[ls_ps_q][ls_lane_q[2:0]][2][15:0]})
+                           ? W_LSC : W_DS0;
             end else if (tg[3:0] == APU_SH_SC_WORKGROUP ||
                          tg[3:0] == APU_SH_SC_FUNCTION ||
                          tg[3:0] == APU_SH_SC_PRIVATE) begin
@@ -5297,6 +5789,10 @@ module g6lc_apu_shwave
                 ls_lane_q <= '0; tx_full_q <= 1'b1;
                 tx_1lane_q <= 1'b1;     // unit jobs for ls_lane only
                 wbm_q <= 4'b1111;
+                // stash each lane's OpSampledImage sampler key (comp0)
+                // before the LOD path reuses va_q[0][*][0] as scratch
+                for (int l = 0; l < LAN; l++)
+                  tx_smpk_q[l] <= va_q[0][l][0];
                 tx_dref_q <= (opc_q == 16'd89 || opc_q == 16'd90 ||
                               opc_q == 16'd93 || opc_q == 16'd94 ||
                               opc_q == 16'd97);
@@ -5411,11 +5907,13 @@ module g6lc_apu_shwave
               st_q <= W_DONE;
             end else if (f_tx_smp(opc_q) &&
                          va_q[0][ls_lane_q[2:0]][1][31]) begin
-              // OpSampledImage-merged: fetch the sampler record too
+              // OpSampledImage-merged: fetch the sampler record too.
+              // comp0 (the packed sampler key) was stashed per lane at
+              // W_TX0 — va_q[0][*][0] is scratch by now (W_TXL8).
               tx_full_q <= 1'b0;      // keep the image record
-              dsc_set_q <= va_q[0][ls_lane_q[2:0]][0][23:16];
-              dsc_bd_q  <= va_q[0][ls_lane_q[2:0]][0][31:24];
-              dsc_idx_q <= va_q[0][ls_lane_q[2:0]][0][15:0];
+              dsc_set_q <= tx_smpk_q[ls_lane_q[2:0]][23:16];
+              dsc_bd_q  <= tx_smpk_q[ls_lane_q[2:0]][31:24];
+              dsc_idx_q <= tx_smpk_q[ls_lane_q[2:0]][15:0];
               dret_q    <= W_TX3;
               st_q      <= W_DS0;
             end else if (f_tx_smp(opc_q) &&
@@ -5432,7 +5930,15 @@ module g6lc_apu_shwave
               fl_pc_q <= pc_q[wave_q]; fl_wave_q <= {8'h0, wave_q};
               st_q <= W_DONE;
             end else begin
-              tx_smp_q   <= tx_rec_q[223:160];
+              // §12.3 texel-buffer: kinds 4/5 carry no image view — fold
+              // the record into a texel_count x 1 image so the shared
+              // fetch path computes base + index*bpp linearly
+              if (tx_rec_q[71:64] == 8'd4 || tx_rec_q[71:64] == 8'd5) begin
+                tx_smp_q   <= 64'h0;
+                tx_rec_q   <= f_bufview_rec(tx_rec_q);
+              end else begin
+                tx_smp_q   <= tx_rec_q[223:160];
+              end
               tx_smpok_q <= tx_rec_q[71:64] == 8'd1;
               st_q       <= W_TX4;
             end
@@ -5571,7 +6077,13 @@ module g6lc_apu_shwave
                     st_q <= W_TXR0;
                   end else begin
                     tx_iu_q <= 32'(va_q[1][ls_lane_q[2:0]][0]);
-                    tx_iv_q <= 32'(va_q[1][ls_lane_q[2:0]][1]);
+                    // §12.3 texel-buffer: Dim=Buffer has a single index
+                    // coordinate — no v component; force it to zero so a
+                    // stale vector slot can't trip the height bound
+                    tx_iv_q <= (tx_rec_q[71:64] == 8'd4 ||
+                                tx_rec_q[71:64] == 8'd5)
+                               ? 32'sd0
+                               : 32'(va_q[1][ls_lane_q[2:0]][1]);
                     tx_ld_q <= lod;
                     tx_mt_q <= lod;
                     tx_mret_q <= W_TXB;    // bounds + gather build
@@ -6537,6 +7049,12 @@ module g6lc_apu_shwave
               if (!ls_store_q)
                 wb_q[ls_lane_q[2:0]][ls_wc] <= '0;
               st_q <= W_LSA;
+            end else if (!ls_store_q && !ls_atom_q && lb_v_q &&
+                         lb_a_q == lb_addr[63:3]) begin
+              // the beat is already here
+              wb_q[ls_lane_q[2:0]][ls_wc] <= lb_addr[2] ? lb_d_q[63:32]
+                                                        : lb_d_q[31:0];
+              ls_adv();
             end else begin
               ls_addr_q <= ls_bind_q + {32'h0, ls_off_q};
               st_q <= ls_atom_q ? W_ATR : W_LS1;
@@ -6556,12 +7074,16 @@ module g6lc_apu_shwave
               if (mem_err_i) robust_q <= robust_q + 1;
               // atomics latch the old word in W_ATC — the write
               // response carries no data, don't overwrite it
+              if (!ls_store_q && !ls_atom_q && !mem_err_i) begin
+                lb_v_q <= 1'b1; lb_a_q <= ls_addr_q[63:3];
+                lb_d_q <= mem_rdata_i;
+              end
               if (!ls_store_q && !ls_atom_q)
                 wb_q[ls_lane_q[2:0]][ls_wc] <=
                   mem_err_i ? 32'h0 :
                   ls_addr_q[2] ? mem_rdata_i[63:32]
                                : mem_rdata_i[31:0];
-              st_q <= W_LSA;
+              ls_adv();
             end
           end
           W_SSB: st_q <= W_SSB1;              // sb/sc issued
@@ -6593,42 +7115,9 @@ module g6lc_apu_shwave
                 wb_q[ls_lane_q[2:0]][ls_wc] <= sc_rdata;
               end
             end
-            st_q <= W_LSA;
+            ls_adv();
           end
-          W_LSA: begin
-            if (!ls_mat_q) begin
-              if (ls_comp_q + 1 < ncomp_q) begin
-                ls_comp_q <= ls_comp_q + 1; st_q <= W_LS0;
-              end else if (ls_lane_q + 1 < LAN) begin
-                ls_comp_q <= '0; ls_lane_q <= ls_lane_q + 1;
-                st_q <= W_LS0;
-              end else begin
-                ls_comp_q <= '0; ls_lane_q <= '0;
-                st_q <= (ls_store_q && !ls_wbb_q) ? W_NEXT : W_WB;
-              end
-            end else begin
-              // matrix access — (column, lane, comp) order: the RF row
-              // for a column is complete when the last lane's last comp
-              // of that column retires, and is flushed (load) or the
-              // next column staged (store) at that boundary.
-              ls_comp_q <= ls_comp_q + 1;
-              if (lcc_q + 1 < ls_ccn) begin
-                lcc_q <= lcc_q + 1; st_q <= W_LS0;
-              end else if (ls_lane_q + 1 < LAN) begin
-                lcc_q <= '0; ls_lane_q <= ls_lane_q + 1;
-                st_q <= W_LS0;
-              end else if (!ls_store_q) begin
-                st_q <= W_MLF;          // flush column lrc_q row
-              end else if (lrc_q + 1 >= ls_ccl) begin
-                lcc_q <= '0; ls_lane_q <= '0; ls_comp_q <= '0;
-                st_q <= W_NEXT;
-              end else begin
-                lcc_q <= '0; ls_lane_q <= '0; lrc_q <= lrc_q + 1;
-                st_q <= (otag_q[1] == APU_SH_RT_CONST)
-                        ? W_LS0 : W_SMR0;
-              end
-            end
-          end
+          W_LSA: ls_adv();
           // load matrix: flush the assembled column row into the RF
           W_MLF: begin
             lcc_q <= '0; ls_lane_q <= '0;
@@ -6637,6 +7126,272 @@ module g6lc_apu_shwave
             end else begin
               lrc_q <= '0; ls_comp_q <= '0; st_q <= W_NEXT;
             end
+          end
+          // ---------------- whole-aggregate OpLoad / OpStore -----------
+          // The walk keeps a stack of open composite types.  Each frame
+          // holds the byte offset of its next child and the stride to
+          // the one after, so no multiplier is needed.  W_AGN picks the
+          // next child of the top frame: a vector component is a leaf;
+          // a matrix column opens a vector frame; an array element or
+          // struct member opens its type through W_AG0/W_AG1.
+          W_AG0: st_q <= W_AG1;                  // type row read issued
+          W_AG1: begin
+            if (ty_kind != APU_SH_TK_VEC && ty_kind != APU_SH_TK_MAT &&
+                !f_isagg(ty_kind)) begin
+              // scalar: one word at the child's own offset
+              ag_lf_q <= ag_cb_q; st_q <= W_AGL;
+            end else if (ag_sp_q >= 4'(AGD)) begin
+              // nesting deeper than the walk stack: truthful fault
+              done_code_q <= APU_SH_DONE_FAULT;
+              fl_pc_q <= pc_q[wave_q]; fl_wave_q <= {8'h0, wave_q};
+              ls_agg_q <= 1'b0;
+              st_q <= W_DONE;
+            end else begin
+              agf_i_q[ag_sp_q[2:0]] <= '0;
+              agf_c_q[ag_sp_q[2:0]] <= ag_cb_q;
+              agf_m_q[ag_sp_q[2:0]] <= ag_cm_q;
+              agf_r_q[ag_sp_q[2:0]] <= ag_cr_q;
+              ag_sp_q <= ag_sp_q + 4'd1;
+              st_q <= W_AGN;
+              unique case (ty_kind)
+                APU_SH_TK_VEC: begin
+                  agf_k_q[ag_sp_q[2:0]] <= 2'd3;
+                  agf_n_q[ag_sp_q[2:0]] <= 16'(f_nc(ty_comps));
+                  agf_s_q[ag_sp_q[2:0]] <= 16'd4;
+                end
+                APU_SH_TK_MAT: begin
+                  // column-major: columns MatrixStride apart, components
+                  // 4 apart.  Row-major: the two steps swap.  An
+                  // undecorated uniform matrix is 16 bytes per column.
+                  agf_k_q[ag_sp_q[2:0]] <= 2'd2;
+                  agf_n_q[ag_sp_q[2:0]] <= 16'(ty_cols);
+                  agf_a_q[ag_sp_q[2:0]] <= 16'(f_nc(ty_comps));
+                  agf_s_q[ag_sp_q[2:0]] <= ag_cr_q ? 16'd4 : ag_ms;
+                  agf_m_q[ag_sp_q[2:0]] <= ag_cr_q ? ag_ms : 16'd4;
+                end
+                APU_SH_TK_ARRAY: begin
+                  agf_k_q[ag_sp_q[2:0]] <= 2'd1;
+                  agf_n_q[ag_sp_q[2:0]] <= ty_len;
+                  agf_a_q[ag_sp_q[2:0]] <= 16'(ty_elem);
+                  agf_s_q[ag_sp_q[2:0]] <= ty_stride;
+                  // no ArrayStride: the element's natural size
+                  if (ty_stride == 16'h0) st_q <= W_AGE0;
+                end
+                default: begin                   // struct
+                  agf_k_q[ag_sp_q[2:0]] <= 2'd0;
+                  agf_n_q[ag_sp_q[2:0]] <= 16'(ty_nmemb);
+                  agf_a_q[ag_sp_q[2:0]] <= ty_mbase;
+                  agf_s_q[ag_sp_q[2:0]] <= '0;
+                end
+              endcase
+            end
+          end
+          W_AGE0: st_q <= W_AGE1;                // element type row read
+          W_AGE1: begin
+            agf_s_q[ag_top] <= (ty_size != 16'h0) ? ty_size : 16'd4;
+            st_q <= W_AGN;
+          end
+          W_AGN: begin
+            if (ag_sp_q == 4'h0) begin
+              // walk ran out before the word count: nothing more to do
+              ls_agg_q <= 1'b0; ls_comp_q <= '0; st_q <= W_NEXT;
+            end else if (agf_i_q[ag_top] >= agf_n_q[ag_top]) begin
+              ag_sp_q <= ag_sp_q - 4'd1;         // frame done
+            end else begin
+              agf_i_q[ag_top] <= agf_i_q[ag_top] + 16'd1;
+              agf_c_q[ag_top] <= agf_c_q[ag_top] + {16'h0, agf_s_q[ag_top]};
+              unique case (agf_k_q[ag_top])
+                2'd3: begin                      // vector component
+                  ag_lf_q <= agf_c_q[ag_top]; st_q <= W_AGL;
+                end
+                2'd2: begin                      // matrix column
+                  if (ag_sp_q >= 4'(AGD)) begin
+                    done_code_q <= APU_SH_DONE_FAULT;
+                    fl_pc_q <= pc_q[wave_q]; fl_wave_q <= {8'h0, wave_q};
+                    ls_agg_q <= 1'b0;
+                    st_q <= W_DONE;
+                  end else begin
+                    agf_k_q[ag_sp_q[2:0]] <= 2'd3;
+                    agf_i_q[ag_sp_q[2:0]] <= '0;
+                    agf_n_q[ag_sp_q[2:0]] <= agf_a_q[ag_top];
+                    agf_c_q[ag_sp_q[2:0]] <= agf_c_q[ag_top];
+                    agf_s_q[ag_sp_q[2:0]] <= agf_m_q[ag_top];
+                    ag_sp_q <= ag_sp_q + 4'd1;
+                  end
+                end
+                2'd1: begin                      // array element
+                  ag_ct_q <= agf_a_q[ag_top][9:0];
+                  ag_cb_q <= agf_c_q[ag_top];
+                  ag_cm_q <= agf_m_q[ag_top];
+                  ag_cr_q <= agf_r_q[ag_top];
+                  st_q <= W_AG0;
+                end
+                // struct member: the frame's stride is 0, so its
+                // offset stays the struct base; the member row adds
+                // Offset.  W_AGM0 reads row (member base + cursor), so
+                // the cursor moves in W_AGM1 instead.
+                default: begin
+                  agf_i_q[ag_top] <= agf_i_q[ag_top];
+                  st_q <= W_AGM0;
+                end
+              endcase
+            end
+          end
+          W_AGM0: st_q <= W_AGM1;                // member row read issued
+          W_AGM1: begin
+            ag_ct_q <= mb_ty;
+            ag_cb_q <= agf_c_q[ag_top] + {16'h0, mb_off};
+            ag_cm_q <= mb_mst;
+            ag_cr_q <= mb_fl[4];                 // RowMajor member
+            agf_i_q[ag_top] <= agf_i_q[ag_top] + 16'd1;
+            st_q <= W_AG0;
+          end
+          W_AGL: begin                           // one leaf offset out
+            ag_o_q[ag_k_q[1:0]] <= ag_lf_q;
+            ag_k_q <= ag_k_q + 3'd1;
+            ag_w_q <= ag_w_q + 16'd1;
+            if (ag_k_q == 3'd3 || ag_w_q + 16'd1 >= ag_lw_q)
+              // row gathered: stage the value row (store) and serve it
+              st_q <= (ls_store_q && otag_q[1] != APU_SH_RT_CONST)
+                      ? W_AGS0 : W_LS0;
+            else
+              st_q <= W_AGN;
+          end
+          W_AGS0: st_q <= W_AGS1;                // value row read issued
+          W_AGS1: begin
+            ma_q <= rf_rdata;
+            st_q <= W_LS0;
+          end
+          W_AGF: st_q <= W_AGR;                  // result row written
+          W_AGR: begin
+            ag_row_q <= ag_row_q + 14'd1;
+            ag_k_q <= '0;
+            if (ag_w_q >= ag_lw_q) begin
+              ls_agg_q <= 1'b0; ls_comp_q <= '0; st_q <= W_NEXT;
+            end else
+              st_q <= W_AGN;
+          end
+          // ---------------- whole-aggregate copy (83 / 400) -------------
+          W_AC0: st_q <= W_AC1;                  // source row read issued
+          W_AC1: begin                           // result row written
+            if ({ag_row_q, 2'b00} + 16'd4 >= ag_lw_q)
+              st_q <= ac_ret_q;
+            else begin
+              ag_row_q <= ag_row_q + 14'd1; st_q <= W_AC0;
+            end
+          end
+          // ---------------- aggregate word mover ------------------------
+          W_MV0: st_q <= W_MV1;                  // source row read issued
+          W_MV1: begin                           // hold the word per lane
+            for (int l = 0; l < LAN; l++)
+              mv_w_q[l] <= mv_sc_q
+                ? ((mv_ci_q < 16'd16) ? mv_cst_q[32*mv_ci_q[3:0] +: 32]
+                                      : 32'h0)
+                : rf_rdata[l*128 + 32*mv_sp_q[1:0] +: 32];
+            st_q <= W_MV2;
+          end
+          W_MV2: begin                           // word written (port)
+            mv_ci_q <= mv_ci_q + 16'd1;
+            if (mv_sp_q + 3'd1 >= mv_sw_q) begin
+              mv_sp_q <= '0; mv_sr_q <= mv_sr_q + 14'd1;
+            end else mv_sp_q <= mv_sp_q + 3'd1;
+            if (mv_dp_q + 3'd1 >= mv_dw_q) begin
+              mv_dp_q <= '0; mv_dr_q <= mv_dr_q + 14'd1;
+            end else mv_dp_q <= mv_dp_q + 3'd1;
+            mv_n_q <= mv_n_q - 16'd1;
+            st_q <= (mv_n_q <= 16'd1) ? mv_ret_q : W_MV0;
+          end
+          // ---------------- literal walk over a value's type ------------
+          // CompositeExtract / Insert indices are literals in ops_q;
+          // each step adds the selected part's flat word offset.
+          W_AW0: st_q <= W_AW1;                  // type row read issued
+          W_AW1: begin
+            if (16'(aw_k_q) + 16'd1 >= wc_q) begin
+              // no literal left: aw_off_q is the part's word offset
+              mv_n_q <= aw_ins_q ? ot_lw_q : rlw_q;
+              mv_sc_q  <= (otag_q[0] == APU_SH_RT_CONST);
+              mv_cst_q <= ocst_q[0];
+              mv_sb_q  <= oidx_q[0];
+              mv_db_q  <= wreg_q;
+              mv_ret_q <= W_NEXT;
+              if (aw_ins_q) begin
+                // object (slot 0, whole) -> result at the offset
+                mv_sr_q <= '0; mv_sp_q <= '0; mv_ci_q <= '0;
+                mv_sw_q <= (ot_kind_q == APU_SH_TK_MAT) ? ot_comps_q : 3'd4;
+                mv_dr_q <= aw_off_q[15:2]; mv_dp_q <= {1'b0, aw_off_q[1:0]};
+                mv_dw_q <= 3'd4;
+                st_q <= (ot_lw_q == 16'h0) ? W_NEXT : W_MV0;
+              end else begin
+                // composite (slot 0) at the offset -> result (whole)
+                mv_sr_q <= aw_off_q[15:2]; mv_sp_q <= {1'b0, aw_off_q[1:0]};
+                mv_ci_q <= aw_off_q; mv_sw_q <= 3'd4;
+                mv_dr_q <= '0; mv_dp_q <= '0;
+                mv_dw_q <= (rkind_q == APU_SH_TK_MAT) ? 3'(f_nc(rcomps_q))
+                                                      : 3'd4;
+                st_q <= (rlw_q == 16'h0) ? W_NEXT : W_MV0;
+              end
+            end else begin
+              unique case (ty_kind)
+                APU_SH_TK_STRUCT: begin
+                  cmb_q <= 10'(ty_mbase + ops_q[aw_k_q[4:0]][15:0]);
+                  st_q <= W_AWM0;
+                end
+                APU_SH_TK_ARRAY: begin
+                  aw_ty_q <= ty_elem; st_q <= W_AWE0;
+                end
+                APU_SH_TK_MAT: begin               // column inside a value
+                  aw_off_q <= aw_off_q + 16'(ops_q[aw_k_q[4:0]][13:0] *
+                                             {11'h0, f_nc(ty_comps)});
+                  aw_ty_q <= ty_elem; aw_k_q <= aw_k_q + 6'd1;
+                  st_q <= W_AW0;
+                end
+                default: begin                     // vector component
+                  aw_off_q <= aw_off_q + ops_q[aw_k_q[4:0]][15:0];
+                  aw_ty_q <= ty_elem; aw_k_q <= aw_k_q + 6'd1;
+                  st_q <= W_AW0;
+                end
+              endcase
+            end
+          end
+          W_AWM0: st_q <= W_AWM1;                // member row read issued
+          W_AWM1: begin
+            aw_off_q <= aw_off_q + {2'b00, mb_woff};
+            aw_ty_q <= mb_ty; aw_k_q <= aw_k_q + 6'd1;
+            st_q <= W_AW0;
+          end
+          W_AWE0: st_q <= W_AWE1;                // element row read issued
+          W_AWE1: begin
+            aw_off_q <= aw_off_q + 16'(ops_q[aw_k_q[4:0]][15:0] * ty_lw);
+            aw_k_q <= aw_k_q + 6'd1;
+            st_q <= W_AW0;
+          end
+          // ---------------- struct / array CompositeConstruct -----------
+          // constituent k is ops_q[2+k]; the destination cursor runs on
+          W_AK0: begin                           // regmap row read issued
+            res_id_q <= ops_q[ak_k_q[4:0] + 5'd2][9:0];   // const fetch id
+            st_q <= W_AK1;
+          end
+          W_AK1: begin
+            ak_tag_q <= rm_tag; ak_idx_q <= rm_idx[RI-1:0];
+            ak_ty_q <= rm_tid;
+            st_q <= W_AK2;
+          end
+          W_AK2: st_q <= W_AK3;                  // type row read issued
+          W_AK3: begin
+            mv_n_q   <= ty_lw;
+            mv_sc_q  <= (ak_tag_q == APU_SH_RT_CONST);
+            mv_cst_q <= const_data_i;
+            mv_ci_q  <= '0;
+            mv_sb_q  <= ak_idx_q;
+            mv_sr_q  <= '0; mv_sp_q <= '0;
+            mv_sw_q  <= (ty_kind == APU_SH_TK_MAT) ? 3'(f_nc(ty_comps))
+                                                   : 3'd4;
+            mv_ret_q <= W_AKN;
+            st_q <= (ty_lw == 16'h0) ? W_AKN : W_MV0;
+          end
+          W_AKN: begin
+            ak_k_q <= ak_k_q + 6'd1;
+            st_q <= (16'(ak_k_q) + 16'd4 >= wc_q) ? W_NEXT : W_AK0;
           end
           // store matrix: stage operand column lrc_q into ma_q
           W_SMR0: st_q <= W_SMR1;       // rf read issued in port comb
@@ -6659,8 +7414,8 @@ module g6lc_apu_shwave
             // result RF row count for the frame (mat=cols, struct=
             // ceil(size/16), else 1)
             resn_q <= (rkind_q == APU_SH_TK_MAT) ? 4'(rcols_q)
-                    : (rkind_q == APU_SH_TK_STRUCT)
-                      ? 4'((32'(rsz_q) + 15) >> 4) : 4'd1;
+                    : f_isagg(rkind_q)
+                      ? 4'((32'(rlw_q) + 3) >> 2) : 4'd1;
             if (func_data_i == '0 ||                 // undefined callee
                 csp_q[wave_q] >= 5'(CLD)) begin      // stack overflow
               done_code_q <= APU_SH_DONE_FAULT;
@@ -6892,18 +7647,19 @@ module g6lc_apu_shwave
             pi_q <= '0; phhit_q <= '0;
             wb_q <= '0;
             wbm_q <= 4'((4'b1 << ncomp_q) - 1);
+            ph_row_q <= '0;
             st_q <= W_PH1;                       // result rm read issued
           end
           W_PH1: begin
-            if (pi_q == 0) wreg_q <= rm_idx[RI-1:0];
+            if (pi_q == 0 && ph_row_q == 0) wreg_q <= rm_idx[RI-1:0];
             if (pi_q >= ph_npi[2:0]) begin
               // no parent matched → the first pair's value is the
               // model's fallback (t2 stashed at pair 0)
               for (int l = 0; l < LAN; l++)
                 for (int c = 0; c < VEC; c++)
-                  if (act_w[l] && !phhit_q[l] && c < ncomp_q)
+                  if (act_w[l] && !phhit_q[l] && 4'(c) < ph_nc)
                     wb_q[l][c] <= t2_q[l][c];
-              st_q <= W_WB;
+              st_q <= f_isagg(rkind_q) ? W_PHW : W_WB;
             end else st_q <= W_PH2;              // pair rm read issued
           end
           W_PH2: begin                           // pair rm row arrived
@@ -6920,24 +7676,61 @@ module g6lc_apu_shwave
           W_PH3: begin
             for (int l = 0; l < LAN; l++) begin
               for (int c = 0; c < VEC; c++) begin
-                if (phm_q[l] && c < ncomp_q)
+                if (phm_q[l] && 4'(c) < ph_nc)
                   wb_q[l][c] <=
                     (phtag_q == APU_SH_RT_CONST)
-                    ? const_data_i[32 *
-                                   ((c < phaux_q) ? c : 0) +: 32]
+                    ? (f_isagg(rkind_q)
+                       ? const_data_i[32 * {ph_row_q[1:0], c[1:0]} +: 32]
+                       : const_data_i[32 *
+                                      ((c < phaux_q) ? c : 0) +: 32])
                     : rf_rdata[l*128 + c*32 +: 32];
                 // pair 0's value is the no-match fallback
                 if (pi_q == 0 && act_w[l])
                   t2_q[l][c] <=
                     (phtag_q == APU_SH_RT_CONST)
-                    ? const_data_i[32 *
-                                   ((c < phaux_q) ? c : 0) +: 32]
+                    ? (f_isagg(rkind_q)
+                       ? const_data_i[32 * {ph_row_q[1:0], c[1:0]} +: 32]
+                       : const_data_i[32 *
+                                      ((c < phaux_q) ? c : 0) +: 32])
                     : rf_rdata[l*128 + c*32 +: 32];
               end
               if (phm_q[l]) phhit_q[l] <= 1'b1;
             end
             pi_q <= pi_q + 1;
             st_q <= W_PH1;
+          end
+          W_PHW: begin                           // aggregate phi row
+            if ({ph_row_q, 2'b00} + 16'd4 >= rlw_q) st_q <= W_NEXT;
+            else begin
+              ph_row_q <= ph_row_q + 14'd1;
+              pi_q <= '0; phhit_q <= '0; wb_q <= '0;
+              st_q <= W_PH1;
+            end
+          end
+          // ---------------- aggregate OpSelect --------------------------
+          W_SL0: st_q <= W_SL1;                  // object 1 row read
+          W_SL1: begin                           // hold it; object 2 read
+            for (int l = 0; l < LAN; l++)
+              for (int c = 0; c < VEC; c++)
+                ma_q[l][c] <= (otag_q[1] == APU_SH_RT_CONST)
+                  ? ocst_q[1][32 * {ph_row_q[1:0], c[1:0]} +: 32]
+                  : rf_rdata[l*128 + c*32 +: 32];
+            st_q <= W_SL2;
+          end
+          W_SL2: begin                           // merge per lane
+            for (int l = 0; l < LAN; l++)
+              for (int c = 0; c < VEC; c++)
+                wb_q[l][c] <= (va_q[0][l][0] != 32'h0) ? ma_q[l][c]
+                  : (otag_q[2] == APU_SH_RT_CONST)
+                    ? ocst_q[2][32 * {ph_row_q[1:0], c[1:0]} +: 32]
+                    : rf_rdata[l*128 + c*32 +: 32];
+            st_q <= W_SLW;
+          end
+          W_SLW: begin                           // row written (port)
+            if ({ph_row_q, 2'b00} + 16'd4 >= rlw_q) st_q <= W_NEXT;
+            else begin
+              ph_row_q <= ph_row_q + 14'd1; st_q <= W_SL0;
+            end
           end
           // ---------------------------------------------------- CF ----
           // control-flow retire: commit the engine's next-state; the
@@ -7337,6 +8130,9 @@ module g6lc_apu_shwave
             insns_q <= insns_q + 1;
             xq_q <= '0;      // ExtInst step counter is per instruction
             xsub_q <= '0; xcall_q <= '0;   // §7d SFU seq is per instr
+            ls_agg_q <= 1'b0;              // aggregate LSU mode is too
+            ds_v_q <= 1'b0;
+            lb_v_q <= 1'b0;
             if (insns_q + 1 > ShaderBudget) begin
               done_code_q <= APU_SH_DONE_BUDGET;
               fl_pc_q <= pc_q[wave_q]; fl_wave_q <= {8'h0, wave_q};
@@ -7361,6 +8157,7 @@ module g6lc_apu_shwave
           W_DONE: begin
             done_o <= 1'b1;
             tx_1lane_q <= 1'b0;
+            rty_v_q <= 1'b0;        // the next dispatch may use another slot
             st_q <= W_IDLE;
           end
           default: begin
@@ -7369,6 +8166,8 @@ module g6lc_apu_shwave
             st_q <= W_DONE;
           end
         endcase
+        // any accepted device-memory write drops the held read beat
+        if (mem_we_o && mem_ready_i) lb_v_q <= 1'b0;
       end
     end
   end
@@ -7395,7 +8194,8 @@ module g6lc_apu_shwave_fixture
   // 100x100 invocations of local size 1; 1M left the tail unwritten.
   parameter int unsigned ShaderBudget  = 32'h0100_0000,
   parameter int unsigned WaitBound     = 32'd4096,
-  parameter int unsigned CallDepth     = 8
+  parameter int unsigned CallDepth     = 8,
+  parameter bit          PerfCountersEn = 1'b0
 ) (
   input  logic         clk_i,
   input  logic         rst_ni,
@@ -7444,7 +8244,8 @@ module g6lc_apu_shwave_fixture
   output apu_objtab_req_t ot_req_o,
   input  logic            ot_cpl_valid_i,
   output logic            ot_cpl_ready_o,
-  input  apu_objtab_cpl_t ot_cpl_i
+  input  apu_objtab_cpl_t ot_cpl_i,
+  output logic [6*32-1:0] perf_o
 );
   g6lc_apu_shwave #(.Enable(Enable), .ShaderLanes(ShaderLanes),
       .ShaderVec(ShaderVec), .ShaderRegs(ShaderRegs),
@@ -7453,6 +8254,6 @@ module g6lc_apu_shwave_fixture
       .ShaderInit(ShaderInit), .ShaderMembers(ShaderMembers),
       .ScratchBytes(ScratchBytes), .SlabBytes(SlabBytes),
       .ShaderBudget(ShaderBudget), .WaitBound(WaitBound),
-      .CallDepth(CallDepth)
+      .CallDepth(CallDepth), .PerfCountersEn(PerfCountersEn)
     ) i_dut (.*);
 endmodule

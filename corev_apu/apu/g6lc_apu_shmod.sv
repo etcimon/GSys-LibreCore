@@ -211,6 +211,10 @@ module g6lc_apu_shmod
     logic [9:0]  cl_id_q [CLN];
     logic [7:0]  cl_n_q;
     logic [15:0] esize_q, stride_q, sz_q, voff_q, nat_off_q;
+    // logical word count of the struct / array type being committed
+    // (lwe_q: one array element).  A value of such a type lives in the
+    // register file as its logical image, 4 words per row.
+    logic [15:0] lw_q, lwe_q;
     logic [511:0] crow_q;
     logic [4:0]   cn_q, cn_i_q;
     // member-decor window
@@ -263,6 +267,13 @@ module g6lc_apu_shmod
     wire [3:0]  ty_storage = ty_rdata[14:11];
     wire [9:0]  ty_elem    = ty_rdata[24:15];
     wire [15:0] ty_size    = ty_rdata[79:64];
+    // logical words of a value of the type row in hand.  Struct rows
+    // carry it in the length slot [63:48], array rows in the member-base
+    // slot [47:32] (each unused by that kind); every other kind is
+    // size/4.
+    wire [15:0] ty_lw      = (ty_kind == APU_SH_TK_STRUCT) ? ty_rdata[63:48]
+                           : (ty_kind == APU_SH_TK_ARRAY)  ? ty_rdata[47:32]
+                           : 16'(ty_size >> 2);
 
     // ---- mdecor window lookups (combinational) ------------------------
     logic [6:0]  md_hit_d, md_hit_s;
@@ -297,55 +308,53 @@ module g6lc_apu_shmod
     // ---- opcode predicates -------------------------------------------
     function automatic logic is_accepted(input logic [15:0] o);
       unique case (o)
-        // G3a-i adds: 1 Undef, 55 FunctionParameter, 57 FunctionCall,
-        // 77/78 dynamic vector ops, 83 CopyObject, 140/141 FRem/FMod,
-        // 149-152 carry/borrow/extended mul, 154-157 Any/All/IsNan/
-        // IsInf, the FUnord* compares (181..191 odd), 201-205
-        // bitfield/reverse/count, 227-242 atomics, 252 Kill,
-        // 254 ReturnValue, 4416 TerminateInvocation, 5380 Demote,
-        // 5381 IsHelper (all fragment-only where S_OP says so)
-        0,1,3,4,5,6,7,8,10,11,12,14,15,16,17,19,20,21,22,23,24,25,26,27,
-        28,29,30,32,33,
-        41,42,43,44,46,48,49,50,51,52,54,55,56,57,59,60,61,62,65,66,68,71,72,
-        77,78,79,80,81,82,83,84,
-        // §12.3 C/5b image ops — the implicit-lod forms (87,89,91,93,
-        // 105) are fragment-only, gated on the execution model in
-        // S_OP; 90/92/94 (explicit) and the gathers (96,97) run in any
-        // model.  Undecoded operand-mask bits still fault in the wave
-        // engine (W_TX0).
-        86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,103,104,105,106,
-        109,110,111,112,124,126,127,128,129,130,131,132,
-        133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,
-        149,150,151,152,154,155,156,157,
-        164,165,166,167,168,169,
-        170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,
-        186,187,188,189,190,191,194,195,196,197,198,199,200,
-        201,202,203,204,205,
-        207,208,209,210,211,212,213,214,215,
-        224,225,227,228,229,230,232,233,234,235,236,237,238,239,240,241,
-        242,245,246,247,248,249,250,251,252,253,254,255,
-        16'd4416, 16'd5380, 16'd5381:
+        // Opcode labels are generated from tools/shader/sh_opcodes.py
+        // (gen_sh_opcodes.py); edit the table, not this list.
+        // GEN-BEGIN sh_opcodes:accept
+        0,1,3,4,5,6,7,8,10,11,12,14,15,16,17,19,20,21,22,23,24,25,26,27,28,
+        29,30,32,33,41,42,43,44,46,48,49,50,51,52,54,55,56,57,59,60,61,62,
+        65,66,68,71,72,77,78,79,80,81,82,83,84,86,87,88,89,90,91,92,93,94,
+        95,96,97,98,99,100,103,104,105,106,109,110,111,112,124,126,127,128,
+        129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,
+        146,147,148,149,150,151,152,154,155,156,157,164,165,166,167,168,169,
+        170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,
+        187,188,189,190,191,194,195,196,197,198,199,200,201,202,203,204,205,
+        207,208,209,210,211,212,213,214,215,224,225,227,228,229,230,232,233,
+        234,235,236,237,238,239,240,241,242,245,246,247,248,249,250,251,252,
+        253,254,255,16'd400,16'd4416,16'd5380,16'd5381:
+        // GEN-END
           is_accepted = 1'b1;
         default: is_accepted = 1'b0;
       endcase
     endfunction
     function automatic logic has_result(input logic [15:0] o);
       unique case (o)
-        1,                                    // OpUndef
-        61,65,66,68,77,78,79,80,81,82,83,84,
-        60,86,87,88,89,90,91,92,93,94,95,96,97,98,100,103,104,105,106,
-        109,110,111,112,124,126,127,128,129,
-        130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,
-        146,147,148,149,150,151,152,154,155,156,157,164,165,166,
-        167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,
-        183,184,185,186,187,188,189,190,191,194,195,196,197,198,199,200,
-        201,202,203,204,205,
-        207,208,209,210,211,212,213,214,215,245,
-        // G3a-i atomics (227 load, 229 xchg, 230 cmpxchg, 232..242 RMW;
-        // 228 store has no result id)
-        227,229,230,232,233,234,235,236,237,238,239,240,241,242:
+        // Opcode labels are generated from tools/shader/sh_opcodes.py
+        // (gen_sh_opcodes.py); edit the table, not this list.
+        // GEN-BEGIN sh_opcodes:result_shmod
+        1,60,61,65,66,68,77,78,79,80,81,82,83,84,86,87,88,89,90,91,92,93,94,
+        95,96,97,98,100,103,104,105,106,109,110,111,112,124,126,127,128,129,
+        130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,
+        147,148,149,150,151,152,154,155,156,157,164,165,166,167,168,169,170,
+        171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,
+        188,189,190,191,194,195,196,197,198,199,200,201,202,203,204,205,207,
+        208,209,210,211,212,213,214,215,227,229,230,232,233,234,235,236,237,
+        238,239,240,241,242,245,16'd400:
+        // GEN-END
           has_result = 1'b1;
         default: has_result = 1'b0;
+      endcase
+    endfunction
+    // result-bearing opcodes that carry a struct / array value through
+    // every register row; any other opcode with such a result type is
+    // refused at commit (accepted means executed)
+    function automatic logic agg_ok(input logic [15:0] o);
+      unique case (o)
+        // GEN-BEGIN sh_opcodes:agg_result
+        1,12,57,61,80,81,82,83,149,150,151,152,169,245,16'd400:
+        // GEN-END
+          agg_ok = 1'b1;
+        default: agg_ok = 1'b0;
       endcase
     endfunction
     function automatic logic is_type_op(input logic [15:0] o);
@@ -481,7 +490,9 @@ module g6lc_apu_shmod
     function automatic logic [15:0] res_rows();
       logic [15:0] r;
       r = (ty_kind == APU_SH_TK_MAT) ? 16'(ty_cols)
-                                     : 16'((32'(ty_size) + 15) >> 4);
+        : (ty_kind == APU_SH_TK_STRUCT || ty_kind == APU_SH_TK_ARRAY)
+          ? 16'((32'(ty_lw) + 3) >> 2)
+          : 16'((32'(ty_size) + 15) >> 4);
       return (r == 0) ? 16'd1 : r;
     endfunction
     // OpPhi table row: word0 = pair count, word(1+k) = {parent, value}
@@ -682,11 +693,12 @@ module g6lc_apu_shmod
                   ty_req = 1'b1; ty_we = 1'b1;
                   ty_addr = {slot_q, ops_q[0][9:0]};
                   // IMG row: sign = depth, comps[0] = arrayed,
-                  // cols[1:0] = sampled (1 sampled / 2 storage)
+                  // cols[1:0] = sampled (1 sampled / 2 storage),
+                  // nm = dim (nmemb unused for images; ty_nmemb[28:25])
                   ty_wdata = (opc_q == 25)
                       ? mk_type(APU_SH_TK_IMG, ops_q[3][0],
                                 {2'b0, ops_q[4][0]}, ops_q[6][2:0],
-                                4'h0, ops_q[1][9:0], 4'h0, 16'h0,
+                                4'h0, ops_q[1][9:0], ops_q[2][3:0], 16'h0,
                                 16'h0, 16'd4, 16'h0)
                       : mk_type(APU_SH_TK_SIMG, 1'b0, 3'h0, 3'h0,
                                 4'h0, ops_q[1][9:0], 4'h0, 16'h0,
@@ -738,7 +750,7 @@ module g6lc_apu_shmod
                   6: begin ty_req = 1'b1; ty_we = 1'b1;
                        ty_addr = {slot_q, ops_q[0][9:0]};
                        ty_wdata = mk_type(APU_SH_TK_ARRAY, 0, 0, 0, 0,
-                                   ops_q[1][9:0], 0, 0, sz_q,
+                                   ops_q[1][9:0], 0, lw_q, sz_q,
                                    esize_q, stride_q); end
                   default: ;
                 endcase
@@ -765,7 +777,9 @@ module g6lc_apu_shmod
                 if (ph_q[0] && (ph_q >> 1) < 6'(wc_q - 2)) begin
                   mb_req = 1'b1; mb_we = 1'b1;
                   mb_addr = {slot_q, MW'(n_memb_q + (ph_q >> 1))};
-                  mb_wdata = {14'h0, ops_q[1 + (ph_q >> 1)][9:0],
+                  // [63:50]: the member's word offset inside a VALUE of
+                  // the struct (logical image) — lw_q before this member
+                  mb_wdata = {lw_q[13:0], ops_q[1 + (ph_q >> 1)][9:0],
                               mdv_fl, mdv_ms, moff_w};
                 end
                 if (ph_q == 6'(2 * (wc_q - 2))) begin
@@ -775,7 +789,7 @@ module g6lc_apu_shmod
                   // (gl_PerVertex) — lets S_VRB distinguish it from a
                   // Location-less plain struct
                   ty_wdata = mk_type(APU_SH_TK_STRUCT, 0, 0, 0, 0, 0,
-                                     4'(wc_q - 2), n_memb_q, 0,
+                                     4'(wc_q - 2), n_memb_q, lw_q,
                                      sz_q, 0) |
                              (sbi_q ? (96'h1 << 29) : 96'h0);
                 end
@@ -887,6 +901,19 @@ module g6lc_apu_shmod
                    // so ph2 can check it reads all-zero
                    if (wc_q == 5) begin
                      co_req = 1'b1; co_addr = {slot_q, ops_q[3][9:0]};
+                   end
+                end
+              2: begin
+                   // §12.3 descriptor array: a UniformConstant pointee
+                   // that is itself an ARRAY/RARRAY defers its element
+                   // kind check to ph_q=4 — fetch that element's type
+                   // row now (ty_elem = the array row's elem id) so it
+                   // is in hand one phase later.  Other storage classes
+                   // and non-array pointees issue no read here.
+                   if (ops_q[2][3:0] == APU_SH_SC_UNIFORMCONST &&
+                       (ty_kind == APU_SH_TK_ARRAY ||
+                        ty_kind == APU_SH_TK_RARRAY)) begin
+                     ty_req = 1'b1; ty_addr = {slot_q, ty_elem};
                    end
                 end
               3: begin
@@ -1015,6 +1042,7 @@ module g6lc_apu_shmod
         lz_q <= '0; entry_off_q <= '0; glsl_id_q <= '0; elem_q <= '0;
         entry_seen_q <= 1'b0; in_func_q <= 1'b0;
         esize_q <= '0; stride_q <= '0; sz_q <= '0; voff_q <= '0;
+        lw_q <= '0; lwe_q <= '0;
         nat_off_q <= '0;
         crow_q <= '0; cn_q <= '0; cn_i_q <= '0;
         dw_rm_q <= 1'b0; dw_bk_q <= 1'b0; dw_ph_q <= 1'b0;
@@ -1184,9 +1212,20 @@ module g6lc_apu_shmod
                 // and G2b DerivativeControl (51 — enables the Fine/
                 // Coarse derivative ops this module accepts for
                 // fragment execution models); G3a-i adds
-                // DemoteToHelperInvocation (5379)
-                if (ops_q[0] != 32'd1 && ops_q[0] != 32'd50 &&
-                    ops_q[0] != 32'd51 && ops_q[0] != 32'd5379) begin
+                // DemoteToHelperInvocation (5379); §12.3 texel-buffer
+                // adds SampledBuffer (46) and ImageBuffer (47);
+                // §12.3 F5 descriptor arrays add the six
+                // *ArrayDynamicIndexing caps — the dsc_idx_q record
+                // select is storage-class agnostic, so UniformBuffer/
+                // SampledImage/StorageBuffer/StorageImage (28-31) and
+                // Uniform/StorageTexelBuffer (5304/5305) arrays are all
+                // admitted.  InputAttachment (5303) and the NonUniform
+                // variants (5306-5312) stay refused.
+                if (ops_q[0] != 32'd1 && ops_q[0] != 32'd46 &&
+                    ops_q[0] != 32'd47 && ops_q[0] != 32'd50 &&
+                    ops_q[0] != 32'd51 && ops_q[0] != 32'd5379 &&
+                    !(ops_q[0] >= 32'd28 && ops_q[0] <= 32'd31) &&
+                    ops_q[0] != 32'd5304 && ops_q[0] != 32'd5305) begin
                   fl_code_q <= APU_SH_FAULT_CAP; fl_opc_q <= opc_q;
                   fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
                 end else begin
@@ -1643,12 +1682,17 @@ module g6lc_apu_shmod
                 unique case (ph_q)
                   0: begin
                     // {sampled_type, dim, depth, arrayed, ms, sampled,
-                    //  format, [aq]} — 2D only, no MSAA, sampled ∈ {1,2};
-                    // the declared ImageFormat is informational (the
-                    // descriptor record format governs decode) so any
-                    // defined SPIR-V value (<=41) is accepted
+                    //  format, [aq]} — 2D plus Dim=Buffer (texel buffer),
+                    // no MSAA, sampled ∈ {1,2}; Buffer requires depth=0
+                    // and arrayed=0.  The declared ImageFormat is
+                    // informational (the descriptor record format
+                    // governs decode) so any defined SPIR-V value
+                    // (<=41) is accepted
                     if (ops_q[1] >= 32'(ShaderIds) ||
-                        ops_q[2] != 32'd1 || ops_q[3] > 32'd1 ||
+                        !(ops_q[2] == 32'd1 ||
+                          (ops_q[2] == 32'd5 && ops_q[3] == 32'd0 &&
+                           ops_q[4] == 32'd0)) ||
+                        ops_q[3] > 32'd1 ||
                         ops_q[4] > 32'd1 || ops_q[5] != 32'd0 ||
                         (ops_q[6] != 32'd1 && ops_q[6] != 32'd2) ||
                         ops_q[7] > 32'd41) begin
@@ -1754,7 +1798,7 @@ module g6lc_apu_shmod
                       fl_opc_q <= opc_q; fl_word_q <= at_q;
                       fail_q <= 1'b1; st_q <= S_DONE;
                     end else begin
-                      esize_q <= ty_size; ph_q <= 2;
+                      esize_q <= ty_size; lwe_q <= ty_lw; ph_q <= 2;
                     end
                   end
                   2: ph_q <= 3;
@@ -1768,6 +1812,7 @@ module g6lc_apu_shmod
                   end
                   4: begin
                     esize_q <= 16'(32'(esize_q) * co_rdata[31:0]);
+                    lw_q <= 16'(32'(lwe_q) * co_rdata[31:0]);
                     sz_q <= co_rdata[15:0];
                     ph_q <= 5;
                   end
@@ -1837,6 +1882,7 @@ module g6lc_apu_shmod
                     if (moff_w + ty_size > sz_q)
                       sz_q <= moff_w + ty_size;
                     nat_off_q <= moff_w + ty_size;
+                    lw_q <= lw_q + ty_lw;
                     ph_q <= ph_q + 1;
                   end
                 end else if (ph_q == 6'(2 * (wc_q - 2)) + 1) begin
@@ -1849,6 +1895,7 @@ module g6lc_apu_shmod
                   // sz_q may still hold a preceding OpTypeArray length.
                   if (ph_q == 0) begin
                     sz_q <= '0; sbi_q <= 1'b0; nat_off_q <= '0;
+                    lw_q <= '0;
                   end
                   ph_q <= ph_q + 1;
                 end
@@ -2070,10 +2117,15 @@ module g6lc_apu_shmod
                   APU_SH_SC_UNIFORMCONST: begin
                     // §12.3 C/5b: image/sampler/sampled-image pointee
                     // only — the variable is a descriptor slot, not
-                    // scratch storage (ty_rdata = the elem type row)
+                    // scratch storage (ty_rdata = the elem type row).
+                    // An ARRAY/RARRAY pointee is a descriptor array:
+                    // its base element kind is verified one phase later
+                    // at ph_q=4 once that element's type row is read.
                     if (ty_kind != APU_SH_TK_IMG &&
                         ty_kind != APU_SH_TK_SAMP &&
-                        ty_kind != APU_SH_TK_SIMG) begin
+                        ty_kind != APU_SH_TK_SIMG &&
+                        ty_kind != APU_SH_TK_ARRAY &&
+                        ty_kind != APU_SH_TK_RARRAY) begin
                       fl_code_q <= APU_SH_FAULT_STORAGE;
                       fl_opc_q <= opc_q; fl_word_q <= at_q;
                       fail_q <= 1'b1; st_q <= S_DONE;
@@ -2230,7 +2282,26 @@ module g6lc_apu_shmod
                   fl_code_q <= APU_SH_FAULT_VAR; fl_opc_q <= opc_q;
                   fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
                 end
-                ph_q <= 3;
+                // descriptor array: detour through ph_q=4 to verify the
+                // element kind before the ph_q=3 variable write
+                ph_q <= (ops_q[2][3:0] == APU_SH_SC_UNIFORMCONST &&
+                         (ty_kind == APU_SH_TK_ARRAY ||
+                          ty_kind == APU_SH_TK_RARRAY))
+                        ? 8'd4 : 8'd3;
+              end
+              4: begin
+                // §12.3 descriptor array element row (ty_rdata): the
+                // base kind must be image/sampler/sampled-image — a
+                // nested or non-image element faults truthfully
+                if (ty_kind != APU_SH_TK_IMG &&
+                    ty_kind != APU_SH_TK_SAMP &&
+                    ty_kind != APU_SH_TK_SIMG) begin
+                  fl_code_q <= APU_SH_FAULT_STORAGE;
+                  fl_opc_q <= opc_q; fl_word_q <= at_q;
+                  fail_q <= 1'b1; st_q <= S_DONE;
+                end else begin
+                  ph_q <= 3;
+                end
               end
               default: begin
                 n_regs_q <= n_regs_q + 1;
@@ -2251,6 +2322,12 @@ module g6lc_apu_shmod
                          ty_kind == APU_SH_TK_VOID) begin
               // void OpFunctionCall — no result register
               at_q <= at_q + wc_q; st_q <= S_IW;
+            end else if (!is_par_q && !agg_ok(opc_q) &&
+                         (ty_kind == APU_SH_TK_STRUCT ||
+                          ty_kind == APU_SH_TK_ARRAY)) begin
+              fl_code_q <= APU_SH_FAULT_TYPE; fl_opc_q <= opc_q;
+              fl_word_q <= at_q;
+              fail_q <= 1'b1; st_q <= S_DONE;
             end else if (n_regs_q + res_rows() > 16'(ShaderRegs)) begin
               fl_code_q <= is_par_q ? APU_SH_FAULT_FUNC
                                     : APU_SH_FAULT_REGS;

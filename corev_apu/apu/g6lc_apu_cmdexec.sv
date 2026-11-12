@@ -128,7 +128,12 @@ module g6lc_apu_cmdexec
   output logic               dead_o,
   // drained indication: FSM idle, submit FIFO empty, no outstanding
   // work items (used by the vgsys idle_o / reset sequencer)
-  output logic               busy_o
+  output logic               busy_o,
+  // §3a query-statistics bus from the raster {fs_invocations,
+  //   occlusion_samples, ia_primitives, ia_vertices} — free-running and
+  //   monotonic; Begin/End difference it across the drain-bounded
+  //   window.  Constant '0 while the raster's PerfCountersEn is 0.
+  input  logic [4*32-1:0]    qry_stat_i
 );
   if (!Enable) begin : gen_off
     assign submit_ready_o  = 1'b0;
@@ -240,7 +245,22 @@ module g6lc_apu_cmdexec
       // §5a G3b-iii: indirect operand fetch — aperture beats of the
       // bound buffer stream into ind_w_q, then the resolved record
       // takes the direct-command assembly path
-      StIndRd, StIndRdC
+      StIndRd, StIndRdC,
+      // §3a: query-pool ops — pool LOOKUP resolves the result extent
+      // (aux[63:48]<<6 word base, size=queryCount, aux[7:0]=type),
+      // then a write walk commits availability/counter words through
+      // op_req.  RESET clears avail; WRITE_TIMESTAMP stores the honest
+      // 0 (timestampPeriod==0).  BEGIN/END ride StDrain so the
+      // free-running qry_stat_i counters are differenced over exactly
+      // the bracketing draw window, then snapshot/delta+write.
+      StQryLk, StQryLkC, StQryW, StQryWC, StQryBegS, StQryEndD,
+      // COPY_QUERY_POOL_RESULTS: dst VkBuffer->bound-memory->aperture
+      // resolve (StCpBuf*/StCpMem*), then a per-query READN slot fetch
+      // (avail+counters, one 16-word line) followed by a stride walk
+      // of formatted result words through the EXEC aperture write
+      // port — [counters][availability][zero pad] per record
+      StCpBufReq, StCpBufCpl, StCpMemReq, StCpMemCpl,
+      StCpRd, StCpRdC, StCpWr, StCpWrC
     } state_e;
     state_e              state_q;
     // submit FIFO (flops)
@@ -307,6 +327,96 @@ module g6lc_apu_cmdexec
     wire                 wd_fire = (&wb_cnt_q) && outst_q != 8'h0 &&
                                    !dead_q;
     apu_cmdexec_state_t  snap_q;
+    // §3a query-pool ops: pool LOOKUP -> result-extent write walk.
+    // Slot layout (16 words): word[0] bit0 = availability, words[1:4]
+    // hold up to four 32-bit counter deltas in spec-bit order (the
+    // read path zero-extends each to the u64 result), rest reserved.
+    // qry_op_q selects the op; BEGIN/END additionally ride a drain
+    // (qry_drain_q) so the free-running qry_stat_i counters are
+    // differenced over exactly the bracketing draw window.
+    logic [2:0]          qry_op_q;      // 0 reset,1 ts,2 begin,3 end
+    logic [31:0]         qry_pool_q;    // pool {gen,slot} handle
+    logic [31:0]         qry_i_q;       // first / query index
+    logic [31:0]         qry_n_q;       // reset count / begin flags
+    logic [31:0]         qry_base_q;    // result extent word base
+    logic [7:0]          qry_type_q;    // pool queryType (aux[7:0])
+    logic [31:0]         qry_stats_q;   // statistics mask (aux[31:8])
+    logic [31:0]         qry_cnt_q;     // queryCount (entry.size)
+    logic [15:0]         qry_idx_q;     // slot walk index
+    logic [3:0]          qry_wsub_q;    // word sub-index in slot
+    logic [3:0]          qry_nc_q;      // counters in this pool's slot
+    // open-query table: Begin snapshots qry_stat_i per {pool,index};
+    // End differences it after the drain.  QRY_OPEN bounds concurrent
+    // opens — overflow loses the submission like any profile bound.
+    localparam int       QRY_OPEN = 8;
+    logic [QRY_OPEN-1:0]        qry_ov_q;
+    logic [QRY_OPEN-1:0][31:0]  qry_opool_q;
+    logic [QRY_OPEN-1:0][15:0]  qry_oidx_q;
+    logic [QRY_OPEN-1:0][127:0] qry_osnap_q;
+    // post-drain query continuation
+    logic                qry_drain_q;   // StDrain routes to qry_post_q
+    logic [1:0]          qry_post_q;    // 0 begin-snap, 1 end-write
+    logic [2:0]          qry_ti_q;      // chosen open-table index (0..QRY_OPEN-1)
+    logic [31:0]         qry_bp_q;      // pending begin pool handle
+    logic [15:0]         qry_bi_q;      // pending begin query index
+    // slot-order counter deltas packed at End (post-drain)
+    logic [3:0][31:0]    qry_cd_q;
+    // combinational open-table search for the pending {pool,index}:
+    // open_hit = matching entry or QRY_OPEN; free_hit = first invalid
+    logic [3:0]          qry_open_hit;
+    logic [3:0]          qry_free_hit;
+    // COPY_QUERY_POOL_RESULTS (ctype 131): dst VkBuffer handle plus
+    // the u64 dstOffset/stride operand pair, the resolved aperture
+    // base + effective capacity, and the per-query {READN fetch ->
+    // word writes} walk.  Each record lands [counter results]
+    // [availability][zero pad to stride]; every field is 4 or 8 bytes
+    // so the write side emits aligned 4-byte aperture words only.
+    logic [31:0]         cp_buf_q;     // dst VkBuffer handle
+    logic [31:0]         cp_first_q;   // firstQuery
+    logic [31:0]         cp_count_q;   // queryCount
+    logic [31:0]         cp_flags_q;   // result flags (subset of 0x9)
+    logic [63:0]         cp_dstoff_q;  // dstOffset into dstBuffer
+    logic [63:0]         cp_stride_q;  // per-query stride (bytes)
+    logic [15:0]         cp_ms_q;      // bound memory slot
+    logic [15:0]         cp_mg_q;      // bound memory generation
+    logic [63:0]         cp_bo_q;      // bind_offset into memory
+    logic [63:0]         cp_bs_q;      // buffer size
+    logic [63:0]         cp_dst_q;     // dst aperture byte base
+    logic [31:0]         cp_cap_q;     // effective dst capacity
+    logic [15:0]         cp_i_q;       // query walk index
+    logic [3:0]          cp_nc_q;      // counters per record (<=4)
+    logic [4:0]          cp_rb_q;      // READN beat cursor (0..nc)
+    logic [3:0][31:0]    cp_cw_q;      // captured counter words
+    logic                cp_av_q;      // captured availability
+    logic [63:0]         cp_rbase_q;   // current record byte address
+    logic [31:0]         cp_fw_q;      // output word cursor in stride
+    logic [31:0]         cp_tw_q;      // stride>>2 words per query
+    logic [31:0]         cp_rw_q;      // record data words (excl pad)
+    // comb next-count for the COPY pool: one result per enabled
+    // {0,1,2,7} mask bit in spec order (aux[31:8] bit k lives at
+    // aux[8+k]); every other admitted pool type yields one result.
+    // Read only inside the op==4 branch of StQryLkC where ot_cpl_i is
+    // the live pool completion — a continuous assign keeps the
+    // always_ff block free of automatic temporaries.
+    wire  [3:0]          cp_ncv_w;
+    // COPY dst-extent geometry, comb from the live buffer/memory
+    // completion + staged operands — consumed only inside StCpMemCpl
+    // where ot_cpl_i is the bound-memory entry
+    logic [63:0]         cp_rem_m_w;    // memory extent past bind_offset
+    logic [31:0]         cp_xs_w;       // effective dst capacity (min)
+    logic [63:0]         cp_xb_w;       // aperture byte base + bind_offset
+    logic [63:0]         cp_span_w;     // dstOffset+(count-1)*stride+record
+    logic                cp_strd_big_w; // stride exceeds capacity, count>1
+    // COPY result-word formatting for the StCpWr aperture write —
+    // computed in cp_fmt_comb so the issue always_comb stays a pure
+    // request mux with no per-branch temporaries
+    logic [63:0]         cp_wr_addr;
+    logic [63:0]         cp_wr_wdata;
+    logic [7:0]          cp_wr_wstrb;
+    // query-op spare-operand violation: a nonzero imm[2:7] on a
+    // non-COPY query record is a record-time resolve miss — the
+    // submission is lost like a dead object (model rejects these)
+    wire                 qspare_bad;
     // §7b/5a-ii + §12.3 F5: dispatch assembly state
     logic [2:0]          ds_slot_q;     // resolved module slot
     // G3b-ii: module-resolver operand ({handle, {chunk,words}} from
@@ -519,7 +629,11 @@ module g6lc_apu_cmdexec
         APU_VN_TYPE_VK_CMD_RESET_QUERY_POOL_EXT,
         APU_VN_TYPE_VK_CMD_BEGIN_QUERY_EXT,
         APU_VN_TYPE_VK_CMD_END_QUERY_EXT,
-        APU_VN_TYPE_VK_CMD_WRITE_TIMESTAMP_EXT:
+        APU_VN_TYPE_VK_CMD_WRITE_TIMESTAMP_EXT,
+        APU_VN_TYPE_VK_CMD_WRITE_TIMESTAMP_2_EXT,
+        APU_VN_TYPE_VK_CMD_BEGIN_QUERY_INDEXED_EXT_EXT,
+        APU_VN_TYPE_VK_CMD_END_QUERY_INDEXED_EXT_EXT,
+        APU_VN_TYPE_VK_CMD_COPY_QUERY_POOL_RESULTS_EXT:
           return APU_CMDEXEC_CLS_STATE;
         APU_VN_TYPE_VK_CMD_PIPELINE_BARRIER_EXT,
         // §5a G3b-iii: event records ride the drain — the action
@@ -637,6 +751,81 @@ module g6lc_apu_cmdexec
       if (iw == {ind_i_q, 1'b1}) return mp_rsp_i.rdata[63:32];
       return ind_w_q[iw];
     endfunction
+
+    // §3a open-query table search — evaluated on the pending pool
+    // handle + query index captured at record dispatch
+    always_comb begin
+      qry_open_hit = 4'(QRY_OPEN);
+      qry_free_hit = 4'(QRY_OPEN);
+      for (int k = 0; k < QRY_OPEN; k++) begin
+        if (qry_ov_q[k] && qry_opool_q[k] == qry_pool_q &&
+            qry_oidx_q[k] == qry_i_q[15:0])
+          qry_open_hit = 4'(k);
+        if (!qry_ov_q[k] && qry_free_hit == 4'(QRY_OPEN))
+          qry_free_hit = 4'(k);
+      end
+    end
+
+    assign cp_ncv_w = (ot_cpl_i.entry.aux[7:0] == 8'd1)
+        ? 4'(ot_cpl_i.entry.aux[8]) +
+          4'(ot_cpl_i.entry.aux[9]) +
+          4'(ot_cpl_i.entry.aux[10]) +
+          4'(ot_cpl_i.entry.aux[15])
+        : 4'd1;
+
+    // query-op spare operands: RESET/WRITE_TS(+2)/BEGIN(+INDEXED)/
+    // END(+INDEXED) keep imm[0],[1] live and must leave imm[2:7] at
+    // zero — imm is a packed [7:0][31:0] so the spare words are
+    // OR-ed element-wise (a bare imm[7:2] range select does not
+    // reduce the intended words under Verilator)
+    assign qspare_bad =
+        (rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_RESET_QUERY_POOL_EXT) ||
+         rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_WRITE_TIMESTAMP_EXT) ||
+         rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_WRITE_TIMESTAMP_2_EXT) ||
+         rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_BEGIN_QUERY_EXT) ||
+         rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_BEGIN_QUERY_INDEXED_EXT_EXT) ||
+         rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_END_QUERY_EXT) ||
+         rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_END_QUERY_INDEXED_EXT_EXT)) &&
+        (|{rec_q.imm[7], rec_q.imm[6], rec_q.imm[5],
+           rec_q.imm[4], rec_q.imm[3], rec_q.imm[2]}) != 1'b0;
+
+    // dst-extent geometry for StCpMemCpl — unconditional assigns keep
+    // the always_ff block free of automatic temporaries; the values
+    // are only consumed while ot_cpl_i holds the bound-memory entry
+    always_comb begin
+      cp_rem_m_w    = ot_cpl_i.entry.size - cp_bo_q;
+      cp_xs_w       = (cp_bs_q[31:0] < cp_rem_m_w[31:0])
+                      ? cp_bs_q[31:0] : cp_rem_m_w[31:0];
+      cp_xb_w       = {32'h0, ot_cpl_i.entry.aux[63:32]} + cp_bo_q;
+      // footprint = dstOffset + (count-1)*stride + record bytes; a
+      // stride wider than the whole window already fails for count>1,
+      // which keeps the 64-bit product bounded
+      cp_span_w     = (64'(cp_count_q) - 64'd1) * cp_stride_q +
+                      ({32'h0, cp_rw_q} << 2);
+      cp_strd_big_w = (cp_count_q > 32'd1) &&
+                      (cp_stride_q > {32'h0, cp_xs_w});
+    end
+
+    // COPY result-word formatting for the StCpWr aperture write:
+    // counters occupy fields 0..nc-1, availability field nc, then zero
+    // pad to the stride.  64-bit fields emit the low word then a zero
+    // high word; byte strobes/wdata are pre-positioned for the 8-byte
+    // beat on addr[2] exactly like the vqwalk publish writes.  The
+    // temporaries are assigned unconditionally so no latch is inferred.
+    always_comb begin
+      automatic logic [31:0] f_idx =
+          cp_flags_q[0] ? cp_fw_q[31:1] : cp_fw_q;
+      automatic logic        is_data = cp_fw_q < cp_rw_q;
+      automatic logic        is_av   = is_data &&
+          (f_idx == {28'h0, cp_nc_q});
+      automatic logic [31:0] fval = is_av ? {31'h0, cp_av_q}
+          : (cp_av_q ? cp_cw_q[f_idx[1:0]] : 32'h0);
+      automatic logic        w_lo = !(cp_flags_q[0] && cp_fw_q[0]);
+      automatic logic [31:0] wv = (is_data && w_lo) ? fval : 32'h0;
+      cp_wr_addr  = cp_rbase_q + ({32'h0, cp_fw_q} << 2);
+      cp_wr_wdata = cp_wr_addr[2] ? {wv, 32'h0} : {32'h0, wv};
+      cp_wr_wstrb = cp_wr_addr[2] ? 8'hF0 : 8'h0F;
+    end
 
     always_comb begin
       cr_req_valid_o = 1'b0;
@@ -964,6 +1153,77 @@ module g6lc_apu_cmdexec
           work_valid_o = !pinq_full;
           work_o       = '{ctype: rec_q.ctype, snap: snap_q, rec: rec_q};
         end
+        // §3a: query-pool handle -> ObjTab LOOKUP (kind VK_QUERY_POOL);
+        // the completion carries aux={type|stats,extent} + size=count
+        StQryLk: begin
+          ot_req_valid_o = 1'b1;
+          ot_req_o       = '{op: APU_OBJTAB_OP_LOOKUP,
+                             id: {32'h0, qry_pool_q},
+                             kind: 6'(APU_VN_KIND_VK_QUERY_POOL),
+                             default: '0};
+        end
+        // §3a: result-extent word write — slot stride is 16 words,
+        // word[0] bit0 is availability, words[1:4] hold up to four
+        // 32-bit counter deltas in spec order.  reset clears avail;
+        // timestamp/end set avail then commit their counter words
+        // (timestamp's honest 0, end's differenced deltas in cd[])
+        StQryW: begin
+          op_req_valid_o = 1'b1;
+          op_req_o       = '{op: APU_OBJPAY_OP_WRITE,
+                             addr: qry_base_q + (32'(qry_idx_q) << 4) +
+                                   {28'h0, qry_wsub_q},
+                             wdata: (qry_op_q == 3'd0) ? 32'd0 :
+                                    (qry_wsub_q == 4'd0) ? 32'd1 :
+                                    (qry_op_q == 3'd3)
+                                      ? qry_cd_q[(qry_wsub_q == 4'd0)
+                                          ? 2'd0
+                                          : 2'(qry_wsub_q - 4'd1)]
+                                      : 32'd0,
+                             default: '0};
+        end
+        // ---- COPY_QUERY_POOL_RESULTS operand resolve ---------------
+        // dst VkBuffer LOOKUP (record handle[1]); the bound memory is
+        // then READSLOT'd by slot with its generation re-checked —
+        // the same seam the Xfer operand path uses
+        StCpBufReq: begin
+          ot_req_valid_o = 1'b1;
+          ot_req_o       = '{op: APU_OBJTAB_OP_LOOKUP,
+                             id: {32'h0, cp_buf_q},
+                             kind: 6'(APU_VN_KIND_VK_BUFFER),
+                             default: '0};
+        end
+        StCpMemReq: begin
+          ot_req_valid_o = 1'b1;
+          ot_req_o       = '{op: APU_OBJTAB_OP_READSLOT,
+                             id: {48'h0, cp_ms_q},
+                             kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY),
+                             default: '0};
+        end
+        // per-query slot fetch: one READN covers the slot's first
+        // nc+1 words (availability at word 0, counters at 1..nc) —
+        // the slot is a 16-word-aligned ObjPay line so the burst
+        // never crosses a line boundary
+        StCpRd: begin
+          op_req_valid_o = 1'b1;
+          op_req_o       = '{op: APU_OBJPAY_OP_READN,
+                             addr: qry_base_q +
+                                   ((cp_first_q + {16'h0, cp_i_q})
+                                    << 4),
+                             words: {28'h0, cp_nc_q} + 32'd1,
+                             default: '0};
+        end
+        // formatted result word -> dst buffer through the EXEC
+        // aperture port.  Every emitted word is 4-byte aligned; the
+        // byte strobe/wdata pair is pre-positioned for the 8-byte
+        // beat exactly like the vqwalk publish writes.  Counter and
+        // availability values are <=32 bits so a 64-bit field's high
+        // word is always zero; stride padding emits zeros too, which
+        // is what the bounded model writes.
+        StCpWr: begin
+          mp_req_valid_o = 1'b1;
+          mp_req_o       = '{dom: 1'b1, we: 1'b1, addr: cp_wr_addr,
+                             wdata: cp_wr_wdata, wstrb: cp_wr_wstrb};
+        end
         default: ;
       endcase
     end
@@ -1087,6 +1347,34 @@ module g6lc_apu_cmdexec
         ca_q        <= '0; ca_valid_q <= '0;
         da_q        <= '0; da_valid_q <= 1'b0;
         bconst_q    <= '0;
+        qry_op_q    <= '0;
+        qry_pool_q  <= '0;
+        qry_i_q     <= '0;
+        qry_n_q     <= '0;
+        qry_base_q  <= '0;
+        qry_type_q  <= '0;
+        qry_stats_q <= '0;
+        qry_cnt_q   <= '0;
+        qry_idx_q   <= '0;
+        qry_wsub_q  <= '0;
+        qry_nc_q    <= '0;
+        qry_ov_q    <= '0;
+        qry_opool_q <= '0;
+        qry_oidx_q  <= '0;
+        qry_osnap_q <= '0;
+        qry_drain_q <= 1'b0;
+        qry_post_q  <= '0;
+        qry_ti_q    <= '0;
+        qry_bp_q    <= '0;
+        qry_bi_q    <= '0;
+        qry_cd_q    <= '0;
+        cp_buf_q    <= '0; cp_first_q <= '0; cp_count_q <= '0;
+        cp_flags_q  <= '0; cp_dstoff_q <= '0; cp_stride_q <= '0;
+        cp_ms_q     <= '0; cp_mg_q    <= '0; cp_bo_q <= '0;
+        cp_bs_q     <= '0; cp_dst_q   <= '0; cp_cap_q <= '0;
+        cp_i_q      <= '0; cp_nc_q    <= '0; cp_rb_q <= '0;
+        cp_cw_q     <= '0; cp_av_q    <= '0; cp_rbase_q <= '0;
+        cp_fw_q     <= '0; cp_tw_q    <= '0; cp_rw_q <= '0;
         rd_q        <= '0;
         xf_for_q    <= '0; xf_xoff_q <= '0;
         dr_bq       <= '0; dr_vbmask_q <= '0; dr_pi_q <= '0;
@@ -1272,6 +1560,13 @@ module g6lc_apu_cmdexec
           // ---- per-buffer record walk --------------------------------
           StCntReq: if (cr_req_ready_i) state_q <= StCntCpl;
           StCntCpl: if (cr_cpl_valid_i) begin
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+            $display("[DBG] bufwalk cbd=%08x status=%0d count=%0d bufidx=%0d t=%0t",
+                     cur_cbd_q, cr_cpl_i.status, cr_cpl_i.count,
+                     buf_i_q, $time);
+`endif
+// pragma translate_on
             if (cr_cpl_i.status != APU_CMDREC_OK) begin
               lost_q  <= 1'b1;
               state_q <= StUnpReq;
@@ -1281,6 +1576,26 @@ module g6lc_apu_cmdexec
               // buffer walk
               state_q <= sec_v_q ? StXcPop : StUnpReq;
             end else begin
+              // G6LC vkBeginCommandBuffer semantics: a PRIMARY command
+              // buffer starts with undefined dynamic state — bound
+              // pipeline/descriptor-set/vertex+index-buffer/viewport/
+              // scissor/push-constant/attachment state must NOT leak in
+              // from an earlier buffer or submission, or a draw
+              // re-resolves a stale (freed) object and the submit
+              // aborts.  Secondaries (sec_v_q==1) inherit the primary's
+              // live state, so the reset is primary-only.
+              if (!sec_v_q) begin
+                snap_q      <= '0;
+                vb_hnd_q    <= '0; vb_off_q <= '0;
+                ib_hnd_q    <= '0; ib_off_q <= '0; ib_type_q <= '0;
+                vp_q        <= '0; sc_q <= '0;
+                clearv_q    <= '0;
+                att_img_q   <= '0; att_ld_q <= '0;
+                ca_q        <= '0; ca_valid_q <= '0;
+                da_q        <= '0; da_valid_q <= 1'b0;
+                bconst_q    <= '0;
+                push_sh_q   <= '0; push_max_q <= '0;
+              end
               rec_n_q <= cr_cpl_i.count[15:0];
               rec_i_q <= '0;
               state_q <= StRdReq;
@@ -1289,6 +1604,12 @@ module g6lc_apu_cmdexec
           StRdReq: if (cr_req_ready_i) state_q <= StRdCpl;
           StRdCpl: if (cr_cpl_valid_i) begin
             if (cr_cpl_i.status != APU_CMDREC_OK) begin
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+              $display("[DBG] rdrec status=%0d idx=%0d bufidx=%0d t=%0t",
+                       cr_cpl_i.status, rec_i_q, buf_i_q, $time);
+`endif
+// pragma translate_on
               lost_q  <= 1'b1;
               state_q <= StUnpReq;
             end else begin
@@ -1327,6 +1648,14 @@ module g6lc_apu_cmdexec
           StResCpl: if (ot_cpl_valid_i) begin
             if (ot_cpl_i.status != APU_OBJTAB_OK) begin
               // stale generation / dead object: submission lost
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+              $display("[DBG] resfail ctype=%0d hi=%0d hnd=%08x kind=%0d status=%0d bufidx=%0d t=%0t",
+                       rec_q.ctype, h_i_q, rec_q.handle[h_i_q[1:0]],
+                       rec_q.kind[h_i_q[1:0]], ot_cpl_i.status,
+                       buf_i_q, $time);
+`endif
+// pragma translate_on
               lost_q  <= 1'b1;
               state_q <= StUnpReq;
             end else begin
@@ -1444,6 +1773,13 @@ module g6lc_apu_cmdexec
 
           // ---- dispatch ----------------------------------------------
           StDispatch: begin
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+            $display("[DBG] cmd ri=%0d ctype=%0d h0=%08x h1=%08x bufidx=%0d t=%0t",
+                     rec_i_q, rec_q.ctype, rec_q.handle[0], rec_q.handle[1],
+                     buf_i_q, $time);
+`endif
+// pragma translate_on
             case (rec_cls(rec_q.ctype))
               APU_CMDEXEC_CLS_STATE: begin
                 case (rec_q.ctype)
@@ -1618,10 +1954,108 @@ module g6lc_apu_cmdexec
                   APU_VN_TYPE_VK_CMD_END_RENDER_PASS_EXT,
                   APU_VN_TYPE_VK_CMD_END_RENDER_PASS_2_EXT:
                     snap_q.rp_active <= 1'b0;
+                  // §3a query-pool ops: capture the operands and hand
+                  // off to the pool-LOOKUP -> extent-write walk.  The
+                  // pool handle is record handle[0]; BEGIN/END need the
+                  // draw counters and stay no-ops until they are plumbed.
+                  APU_VN_TYPE_VK_CMD_RESET_QUERY_POOL_EXT: begin
+                    qry_op_q   <= 2'd0;
+                    qry_pool_q <= rec_q.handle[0];
+                    qry_i_q    <= rec_q.imm[0];   // firstQuery
+                    qry_n_q    <= rec_q.imm[1];   // queryCount
+                  end
+                  APU_VN_TYPE_VK_CMD_WRITE_TIMESTAMP_EXT: begin
+                    qry_op_q   <= 3'd1;
+                    qry_pool_q <= rec_q.handle[0];
+                    qry_i_q    <= rec_q.imm[1];   // query index
+                    qry_n_q    <= 32'h0;
+                  end
+                  // WRITE_TIMESTAMP_2 packs the u64 stage at imm[1:3]
+                  // and keeps the query at imm[0] — same stamp write
+                  APU_VN_TYPE_VK_CMD_WRITE_TIMESTAMP_2_EXT: begin
+                    qry_op_q   <= 3'd1;
+                    qry_pool_q <= rec_q.handle[0];
+                    qry_i_q    <= rec_q.imm[0];   // query index
+                    qry_n_q    <= 32'h0;
+                  end
+                  // BEGIN(+INDEXED): imm[0]=query, imm[1]=flags;
+                  // indexed index rides imm[2] which the spare check
+                  // below pins to zero
+                  APU_VN_TYPE_VK_CMD_BEGIN_QUERY_EXT,
+                  APU_VN_TYPE_VK_CMD_BEGIN_QUERY_INDEXED_EXT_EXT: begin
+                    qry_op_q   <= 3'd2;
+                    qry_pool_q <= rec_q.handle[0];
+                    qry_i_q    <= rec_q.imm[0];   // query index
+                    qry_n_q    <= rec_q.imm[1];   // flags
+                  end
+                  // END(+INDEXED): imm[0]=query; imm[1] must be zero
+                  APU_VN_TYPE_VK_CMD_END_QUERY_EXT,
+                  APU_VN_TYPE_VK_CMD_END_QUERY_INDEXED_EXT_EXT: begin
+                    qry_op_q   <= 3'd3;
+                    qry_pool_q <= rec_q.handle[0];
+                    qry_i_q    <= rec_q.imm[0];   // query index
+                    qry_n_q    <= rec_q.imm[1];   // must be 0 (checked)
+                  end
+                  // COPY_QUERY_POOL_RESULTS: pool is handle[0], dst
+                  // VkBuffer handle[1]; imm = {first,count,flags,
+                  // dstOffset.lo/hi,stride.lo/hi} per the bounded
+                  // record packing (imm[7] must stay zero)
+                  APU_VN_TYPE_VK_CMD_COPY_QUERY_POOL_RESULTS_EXT: begin
+                    qry_op_q    <= 3'd4;
+                    qry_pool_q  <= rec_q.handle[0];
+                    cp_buf_q    <= rec_q.handle[1];
+                    cp_first_q  <= rec_q.imm[0];
+                    cp_count_q  <= rec_q.imm[1];
+                    cp_flags_q  <= rec_q.imm[2];
+                    cp_dstoff_q <= {rec_q.imm[4], rec_q.imm[3]};
+                    cp_stride_q <= {rec_q.imm[6], rec_q.imm[5]};
+                  end
                   default: ;
                 endcase
+                // spare operands on a query record lose the submission —
+                // the ternary below routes to StUnpReq but cannot set
+                // lost_q itself, so mark it here like the StQryLkC path
+                if (qspare_bad) lost_q <= 1'b1;
                 state_q <=
+                    // COPY_QUERY_POOL_RESULTS packs dstOffset/stride
+                    // into imm[3:6], so its spare check is imm[7]
+                    // alone; flags must stay inside {0x1,0x8}, both
+                    // record handles must resolve, and the unused
+                    // handle tail must be zero — else a record-time
+                    // resolve miss abandons the buffer like the other
+                    // query ops
                     (rec_q.ctype ==
+                         APU_VN_TYPE_VK_CMD_COPY_QUERY_POOL_RESULTS_EXT)
+                    ? ((rec_q.imm[7] != 32'h0 ||
+                        (rec_q.imm[2] & ~32'h0000_0009) != 32'h0 ||
+                        rec_q.handle[0] == 32'h0 ||
+                        rec_q.handle[1] == 32'h0 ||
+                        rec_q.handle[2] != 32'h0 ||
+                        rec_q.handle[3] != 32'h0)
+                       ? StUnpReq : StQryLk)
+                    // §3a: query ops take the pool-LOOKUP -> extent-write
+                    // walk; a zero pool handle or a nonzero spare
+                    // operand (model: imm[2:]==0 for non-COPY records)
+                    // is a record-time resolve miss and loses the
+                    // submission like a dead object
+                    : (qspare_bad)
+                    ? StUnpReq
+                    : (rec_q.ctype ==
+                         APU_VN_TYPE_VK_CMD_RESET_QUERY_POOL_EXT ||
+                     rec_q.ctype ==
+                         APU_VN_TYPE_VK_CMD_WRITE_TIMESTAMP_EXT ||
+                     rec_q.ctype ==
+                         APU_VN_TYPE_VK_CMD_WRITE_TIMESTAMP_2_EXT ||
+                     rec_q.ctype ==
+                         APU_VN_TYPE_VK_CMD_BEGIN_QUERY_EXT ||
+                     rec_q.ctype ==
+                         APU_VN_TYPE_VK_CMD_BEGIN_QUERY_INDEXED_EXT_EXT ||
+                     rec_q.ctype ==
+                         APU_VN_TYPE_VK_CMD_END_QUERY_EXT ||
+                     rec_q.ctype ==
+                         APU_VN_TYPE_VK_CMD_END_QUERY_INDEXED_EXT_EXT)
+                    ? (rec_q.handle[0] == 32'h0 ? StUnpReq : StQryLk)
+                    : ((rec_q.ctype ==
                          APU_VN_TYPE_VK_CMD_BIND_DESCRIPTOR_SETS_EXT &&
                      rec_q.imm[1] < 32'd4 && rec_q.imm[2] != 32'h0) ||
                     (rec_q.ctype ==
@@ -1656,7 +2090,7 @@ module g6lc_apu_cmdexec
                        // resolve miss) loses the submission like a
                        // dead pipeline
                        ? StUnpReq : StPayReq)
-                    : StNextBuf;
+                    : StNextBuf);
               end
               APU_CMDEXEC_CLS_WORK: begin
                 if (rec_q.ctype ==
@@ -1847,6 +2281,15 @@ module g6lc_apu_cmdexec
               lost_q  <= 1'b1;
               state_q <= StUnpReq;
             end else begin
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+              $display("[DBG] dsco pipe=%08x g=%0d aux6=%0d sub=%0d pay=%04x lay=%04x bufidx=%0d t=%0t",
+                       snap_q.pipeline, ot_cpl_i.entry.gen,
+                       ot_cpl_i.entry.aux[6], ot_cpl_i.entry.aux[9:8],
+                       ot_cpl_i.entry.aux[31:16], ot_cpl_i.entry.aux[63:48],
+                       buf_i_q, $time);
+`endif
+// pragma translate_on
               ds_pl_q   <= ot_cpl_i.entry.aux[47:32];
               ds_plg_q  <= ot_cpl_i.entry.aux[63:48];
               // §5a: the ObjPay block base is a 64-word chunk index —
@@ -1984,6 +2427,13 @@ module g6lc_apu_cmdexec
                 state_q <= StNextBuf;
               end
             end else begin
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+              $display("[DBG] drawfs pipe=%08x fshnd=%08x fsext=%08x fsslot=%0d bufidx=%0d t=%0t",
+                       snap_q.pipeline, rs_hnd_q, rs_cw_q, rs_slot_q,
+                       buf_i_q, $time);
+`endif
+// pragma translate_on
               rd_q.fs_slot      <= rs_slot_q;
               rec_pin_q[7:4]    <= {1'b1, rs_slot_q};
               state_q           <= StDsLayReq;
@@ -2327,8 +2777,15 @@ module g6lc_apu_cmdexec
           end
           StDrain: if (outst_q == 8'h0 ||
                        (outst_q == 8'h1 && work_done_i)) begin
+            // §3a: a drained query Begin/End continues to its
+            // snapshot/delta step — the counter window is exactly the
+            // work that drained here
+            if (qry_drain_q) begin
+              qry_drain_q <= 1'b0;
+              state_q     <= (qry_post_q == 2'd0)
+                              ? StQryBegS : StQryEndD;
             // §5a G3b-iii: a barrier record may carry an event action
-            if (bar_act_q == 2'd1 || bar_act_q == 2'd2) begin
+            end else if (bar_act_q == 2'd1 || bar_act_q == 2'd2) begin
               state_q <= StEvSet;
             end else if (bar_act_q == 2'd3) begin
               wv_i_q   <= '0;
@@ -3163,6 +3620,13 @@ module g6lc_apu_cmdexec
 
           // ---- next record / buffer -----------------------------------
           StNextBuf: begin
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+            $display("[DBG] nextbuf ri=%0d rn=%0d sec=%0d pinned=%0d lost=%0d bufidx=%0d t=%0t",
+                     rec_i_q, rec_n_q, sec_v_q, pinned_q[buf_i_q[1:0]],
+                     lost_q, buf_i_q, $time);
+`endif
+// pragma translate_on
             if (rec_i_q + 16'h1 < rec_n_q) begin
               rec_i_q <= rec_i_q + 16'h1;
               state_q <= StRdReq;
@@ -3176,6 +3640,14 @@ module g6lc_apu_cmdexec
             end
           end
           StUnpReq: begin
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+            if (lost_q)
+              $display("[DBG] unpreq ri=%0d ctype=%0d rn=%0d h0=%08x bufidx=%0d t=%0t",
+                       rec_i_q, rec_q.ctype, rec_n_q, rec_q.handle[0],
+                       buf_i_q, $time);
+`endif
+// pragma translate_on
             if (rec_pin_q != 8'h0) begin
               // a record abandoned mid-walk (lost submit) may still
               // hold module pins — its work never issued so the
@@ -3257,6 +3729,348 @@ module g6lc_apu_cmdexec
                 flost_q[cur_q.fence_idx[$clog2(Fences)-1:0]] <= 1'b1;
             end
             state_q <= StIdle;
+          end
+
+          // ---- §3a query-pool ops ----------------------------------
+          // pool LOOKUP request in flight
+          StQryLk: if (ot_req_ready_i) state_q <= StQryLkC;
+          // completion: kind/type/range validation, capture the
+          // result-extent word base, then branch per op.  Range and
+          // pool-type checks run in 64 bits so a malformed {first,
+          // count} pair cannot wrap a 32-bit sum past the bound.
+          StQryLkC: if (ot_cpl_valid_i) begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK ||
+                ot_cpl_i.entry.kind !=
+                    6'(APU_VN_KIND_VK_QUERY_POOL)) begin
+              lost_q  <= 1'b1;
+              state_q <= StUnpReq;
+            end else if (qry_op_q == 3'd0) begin
+              // RESET: first+count <= size; zero count is a no-op
+              if ({32'h0, qry_i_q} + {32'h0, qry_n_q} >
+                  ot_cpl_i.entry.size) begin
+                lost_q  <= 1'b1;
+                state_q <= StUnpReq;
+              end else begin
+                qry_type_q <= ot_cpl_i.entry.aux[7:0];
+                qry_stats_q<= ot_cpl_i.entry.aux[31:8];
+                qry_cnt_q  <= ot_cpl_i.entry.size[31:0];
+                qry_base_q <= {16'h0, ot_cpl_i.entry.aux[63:48]} << 6;
+                qry_idx_q  <= qry_i_q[15:0];
+                qry_wsub_q <= '0;
+                state_q    <= (qry_n_q == 32'h0)
+                              ? StNextBuf : StQryW;
+              end
+            end else if (qry_op_q == 3'd1) begin
+              // WRITE_TIMESTAMP: timestamp pool, query in range;
+              // honest 0 counter — avail + one counter word
+              if (ot_cpl_i.entry.aux[7:0] != 8'd2 ||
+                  {32'h0, qry_i_q} >= ot_cpl_i.entry.size) begin
+                lost_q  <= 1'b1;
+                state_q <= StUnpReq;
+              end else begin
+                qry_type_q <= ot_cpl_i.entry.aux[7:0];
+                qry_stats_q<= ot_cpl_i.entry.aux[31:8];
+                qry_cnt_q  <= ot_cpl_i.entry.size[31:0];
+                qry_base_q <= {16'h0, ot_cpl_i.entry.aux[63:48]} << 6;
+                qry_idx_q  <= qry_i_q[15:0];
+                qry_wsub_q <= '0;
+                qry_nc_q   <= 4'd1;
+                state_q    <= StQryW;
+              end
+            end else if (qry_op_q == 3'd2 || qry_op_q == 3'd3) begin
+              // BEGIN(op2)/END(op3).  A timestamp pool (type 2)
+              // degenerates both to a QueryStamp at imm[0] in the
+              // bounded model — avail + honest-0 counter, flags and
+              // imm[1] must be zero.  Occlusion/statistics pools ride
+              // the open-table + drain-then-delta path.
+              if ({32'h0, qry_i_q} >= ot_cpl_i.entry.size) begin
+                lost_q  <= 1'b1;
+                state_q <= StUnpReq;
+              end else if (ot_cpl_i.entry.aux[7:0] == 8'd2) begin
+                // timestamp stamp: degenerate begin/end require
+                // flags/imm[1]==0 in the bounded model
+                if (qry_n_q != 32'd0) begin
+                  lost_q  <= 1'b1;
+                  state_q <= StUnpReq;
+                end else begin
+                  qry_type_q <= ot_cpl_i.entry.aux[7:0];
+                  qry_stats_q<= ot_cpl_i.entry.aux[31:8];
+                  qry_cnt_q  <= ot_cpl_i.entry.size[31:0];
+                  qry_base_q <= {16'h0, ot_cpl_i.entry.aux[63:48]} << 6;
+                  qry_idx_q  <= qry_i_q[15:0];
+                  qry_wsub_q <= '0;
+                  qry_nc_q   <= 4'd1;
+                  state_q    <= StQryW;
+                end
+              end else if (qry_op_q == 3'd2) begin
+                // BEGIN occlusion/statistics: PRECISE flag only
+                // (imm[1] in {0,1} — but model admits flags&~1==0, so
+                // flags==0 also fine), not already open, slot free
+                if ((ot_cpl_i.entry.aux[7:0] != 8'd0 &&
+                     ot_cpl_i.entry.aux[7:0] != 8'd1) ||
+                    qry_n_q > 32'd1 ||
+                    qry_open_hit != 4'(QRY_OPEN) ||
+                    qry_free_hit == 4'(QRY_OPEN)) begin
+                  lost_q  <= 1'b1;
+                  state_q <= StUnpReq;
+                end else begin
+                  qry_type_q <= ot_cpl_i.entry.aux[7:0];
+                  qry_stats_q<= ot_cpl_i.entry.aux[31:8];
+                  qry_cnt_q  <= ot_cpl_i.entry.size[31:0];
+                  qry_base_q <= {16'h0, ot_cpl_i.entry.aux[63:48]} << 6;
+                  qry_bp_q   <= qry_pool_q;
+                  qry_bi_q   <= qry_i_q[15:0];
+                  qry_ti_q   <= qry_free_hit[2:0];
+                  qry_drain_q<= 1'b1;
+                  qry_post_q <= 2'd0;
+                  state_q    <= StDrain;
+                end
+              end else begin
+                // END occlusion/statistics: imm[1]==0 and the query
+                // must currently be open
+                if ((ot_cpl_i.entry.aux[7:0] != 8'd0 &&
+                     ot_cpl_i.entry.aux[7:0] != 8'd1) ||
+                    qry_n_q != 32'd0 ||
+                    qry_open_hit == 4'(QRY_OPEN)) begin
+                  lost_q  <= 1'b1;
+                  state_q <= StUnpReq;
+                end else begin
+                  qry_type_q <= ot_cpl_i.entry.aux[7:0];
+                  qry_stats_q<= ot_cpl_i.entry.aux[31:8];
+                  qry_cnt_q  <= ot_cpl_i.entry.size[31:0];
+                  qry_base_q <= {16'h0, ot_cpl_i.entry.aux[63:48]} << 6;
+                  qry_ti_q   <= qry_open_hit[2:0];
+                  qry_drain_q<= 1'b1;
+                  qry_post_q <= 2'd1;
+                  state_q    <= StDrain;
+                end
+              end
+            end else if (qry_op_q == 3'd4) begin
+              // COPY_QUERY_POOL_RESULTS: the pool LOOKUP already
+              // proved kind==VK_QUERY_POOL; range/stride checks run
+              // in 64 bits, then the dst-buffer resolve chain.  A
+              // zero queryCount retires here like the model — the
+              // dst extent is never touched.
+              if ({32'h0, cp_first_q} + {32'h0, cp_count_q} >
+                  ot_cpl_i.entry.size) begin
+                lost_q  <= 1'b1;
+                state_q <= StUnpReq;
+              end else if (cp_count_q == 32'h0) begin
+                state_q <= StNextBuf;
+              end else begin
+                qry_type_q <= ot_cpl_i.entry.aux[7:0];
+                qry_stats_q<= ot_cpl_i.entry.aux[31:8];
+                qry_cnt_q  <= ot_cpl_i.entry.size[31:0];
+                qry_base_q <= {16'h0, ot_cpl_i.entry.aux[63:48]} << 6;
+                // counters per record: statistics pools emit one
+                // result per enabled {0,1,2,7} mask bit in spec
+                // order (aux[31:8] bit k lives at aux[8+k]); every
+                // other admitted pool type yields a single result.
+                // cp_ncv_w is the comb next-count: the stride check
+                // and cp_rw_q must see THIS cycle's count, not the
+                // stale register.
+                cp_nc_q <= cp_ncv_w;
+                // record geometry: field width cw = 8 (64-bit) or 4,
+                // availability rides the same width when flags[3]
+                // (0x8) is set; rw = data words, tw = stride words
+                if (|(cp_flags_q & 32'hFFFF_FFF6) ||
+                    cp_stride_q[63:32] != 32'h0 ||
+                    cp_stride_q[1:0] != 2'b00 ||
+                    cp_dstoff_q[1:0] != 2'b00 ||
+                    (cp_flags_q[0] &&
+                     (cp_dstoff_q[2:0] != 3'b000 ||
+                      (cp_count_q > 32'd1 &&
+                       cp_stride_q[2:0] != 3'b000))) ||
+                    // stride must cover the record and a multi-query
+                    // copy needs a nonzero stride
+                    cp_stride_q <
+                        (({28'h0, cp_ncv_w} +
+                          (cp_flags_q[3] ? 32'd1 : 32'd0)) <<
+                         (cp_flags_q[0] ? 3 : 2)) ||
+                    (cp_count_q > 32'd1 && cp_stride_q == 64'h0)) begin
+                  lost_q  <= 1'b1;
+                  state_q <= StUnpReq;
+                end else begin
+                  cp_tw_q <= 32'(cp_stride_q[31:2]);
+                  cp_rw_q <= ({28'h0, cp_ncv_w} +
+                              (cp_flags_q[3] ? 32'd1 : 32'd0)) <<
+                             (cp_flags_q[0] ? 1 : 0);
+                  state_q <= StCpBufReq;
+                end
+              end
+            end
+          end
+          // post-drain BEGIN: latch the drained counter snapshot and
+          // publish the open entry — single-cycle, then retire record
+          StQryBegS: begin
+            qry_ov_q[qry_ti_q]     <= 1'b1;
+            qry_opool_q[qry_ti_q]  <= qry_bp_q;
+            qry_oidx_q[qry_ti_q]   <= qry_bi_q;
+            qry_osnap_q[qry_ti_q]  <= qry_stat_i;
+            state_q               <= StNextBuf;
+          end
+          // post-drain END: difference the drained counters against
+          // the stored baseline, pack deltas into the slot-order
+          // counter array (spec-bit order for statistics, occ for
+          // occlusion), then walk avail+counters into the slot
+          StQryEndD: begin
+            // difference the drained counters against the stored
+            // baseline.  Statistics counters are emitted in ascending
+            // spec-bit order {0,1,2,7}; a counter's slot position is
+            // the count of lower enabled bits, so the indices are
+            // explicit 4-bit sums (concatenation would give the bit
+            // pattern, not the rank, and narrow adds could truncate).
+            // vs_invocations shares the vertex-fetch count.
+            qry_cd_q <= '0;
+            if (qry_type_q == 8'd0) begin
+              qry_cd_q[2'd0] <= qry_stat_i[95:64] -
+                                qry_osnap_q[qry_ti_q][95:64];
+              qry_nc_q   <= 4'd1;
+            end else begin
+              if (qry_stats_q[0])
+                qry_cd_q[2'd0] <= qry_stat_i[31:0] -
+                                  qry_osnap_q[qry_ti_q][31:0];
+              if (qry_stats_q[1])
+                qry_cd_q[2'(qry_stats_q[0])]
+                  <= qry_stat_i[63:32] - qry_osnap_q[qry_ti_q][63:32];
+              if (qry_stats_q[2])
+                qry_cd_q[2'(qry_stats_q[0]) + 2'(qry_stats_q[1])]
+                  <= qry_stat_i[31:0] - qry_osnap_q[qry_ti_q][31:0];
+              if (qry_stats_q[7])
+                qry_cd_q[2'(qry_stats_q[0]) + 2'(qry_stats_q[1]) +
+                         2'(qry_stats_q[2])]
+                  <= qry_stat_i[127:96] - qry_osnap_q[qry_ti_q][127:96];
+              qry_nc_q <= 4'(qry_stats_q[0]) + 4'(qry_stats_q[1]) +
+                          4'(qry_stats_q[2]) + 4'(qry_stats_q[7]);
+            end
+            qry_idx_q  <= qry_i_q[15:0];
+            qry_wsub_q <= '0;
+            state_q    <= StQryW;
+          end
+          // extent word write issued; completion advances the walk.
+          // reset clears avail once per slot over [first,+count);
+          // timestamp/end write word0=avail then counter words
+          // wsub=1..nc (timestamp nc=1 -> honest 0; end nc=popcount)
+          StQryW: if (op_req_ready_i) state_q <= StQryWC;
+          StQryWC: if (op_cpl_valid_i) begin
+            if (op_cpl_i.status != APU_OBJPAY_OK) begin
+              lost_q  <= 1'b1;
+              state_q <= StUnpReq;
+            end else if (qry_op_q == 3'd0) begin
+              if (32'(qry_idx_q) + 32'd1 >= qry_i_q + qry_n_q)
+                state_q <= StNextBuf;
+              else begin
+                qry_idx_q <= qry_idx_q + 16'd1;
+                state_q   <= StQryW;
+              end
+            end else begin
+              // single-slot ops (timestamp=1, end=3): last word is
+              // wsub==nc; end also frees its open-table entry
+              if (qry_wsub_q == qry_nc_q) begin
+                if (qry_op_q == 3'd3)
+                  qry_ov_q[qry_ti_q] <= 1'b0;
+                state_q <= StNextBuf;
+              end else begin
+                qry_wsub_q <= qry_wsub_q + 4'd1;
+                state_q    <= StQryW;
+              end
+            end
+          end
+
+          // ---- COPY_QUERY_POOL_RESULTS walk -------------------------
+          // dst VkBuffer LOOKUP: must be bound to a sub-4 GiB
+          // DEVICE_MEMORY — the same operand contract the Xfer path
+          // enforces
+          StCpBufReq: if (ot_req_ready_i) state_q <= StCpBufCpl;
+          StCpBufCpl: if (ot_cpl_valid_i) begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK ||
+                ot_cpl_i.entry.bind_mem[15:0] == APU_OBJTAB_SLOT_NONE ||
+                |ot_cpl_i.entry.size[63:32]) begin
+              lost_q  <= 1'b1;
+              state_q <= StUnpReq;
+            end else begin
+              cp_ms_q <= ot_cpl_i.entry.bind_mem[15:0];
+              cp_mg_q <= ot_cpl_i.entry.bind_mem[31:16];
+              cp_bo_q <= ot_cpl_i.entry.bind_offset;
+              cp_bs_q <= ot_cpl_i.entry.size;
+              state_q <= StCpMemReq;
+            end
+          end
+          // bound memory READSLOT: kind/gen/unbacked/range checks
+          // mirror StXfMemCpl; the aperture base + bind offset is the
+          // dst window and the clamped buffer extent its capacity
+          StCpMemReq: if (ot_req_ready_i) state_q <= StCpMemCpl;
+          StCpMemCpl: if (ot_cpl_valid_i) begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK ||
+                ot_cpl_i.entry.kind !=
+                    6'(APU_VN_KIND_VK_DEVICE_MEMORY) ||
+                |ot_cpl_i.entry.size[63:32] ||
+                ot_cpl_i.entry.gen != cp_mg_q ||
+                ot_cpl_i.entry.aux[63:32] == APU_MEM_UNBACKED ||
+                cp_bo_q > ot_cpl_i.entry.size) begin
+              lost_q  <= 1'b1;
+              state_q <= StUnpReq;
+            end else begin
+              // rem_m/xs/xb/span/strd_big are the cp_*_w comb wires —
+              // see the always_comb above; only valid while ot_cpl_i
+              // holds the bound-memory entry
+              if (cp_strd_big_w || cp_dstoff_q > {32'h0, cp_xs_w} ||
+                  cp_span_w > {32'h0, cp_xs_w} - cp_dstoff_q ||
+                  cp_xb_w[1:0] != 2'b00) begin
+                lost_q  <= 1'b1;
+                state_q <= StUnpReq;
+              end else begin
+                cp_dst_q    <= cp_xb_w;
+                cp_cap_q    <= cp_xs_w;
+                cp_rbase_q  <= cp_xb_w + cp_dstoff_q;
+                cp_i_q      <= '0;
+                cp_rb_q     <= '0;
+                state_q     <= StCpRd;
+              end
+            end
+          end
+          // per-query slot fetch issued; each READN beat lands one
+          // completion — beat 0 is availability, beats 1..nc the
+          // counter words in slot order
+          StCpRd: if (op_req_ready_i) state_q <= StCpRdC;
+          StCpRdC: if (op_cpl_valid_i) begin
+            if (op_cpl_i.status != APU_OBJPAY_OK) begin
+              lost_q  <= 1'b1;
+              state_q <= StUnpReq;
+            end else begin
+              if (cp_rb_q == 5'd0)
+                cp_av_q <= (op_cpl_i.rdata != 32'h0);
+              else
+                cp_cw_q[cp_rb_q - 5'd1] <= op_cpl_i.rdata;
+              if (cp_rb_q == {1'b0, cp_nc_q}) begin
+                cp_fw_q  <= '0;
+                state_q  <= StCpWr;
+              end else begin
+                cp_rb_q  <= cp_rb_q + 5'd1;
+              end
+            end
+          end
+          // one formatted 4-byte result word issued; the completion
+          // walks the stride — data words then zero pad — and the
+          // last word of the last query retires the record
+          StCpWr: if (mp_req_ready_i) state_q <= StCpWrC;
+          StCpWrC: if (mp_rsp_valid_i) begin
+            if (mp_rsp_i.err) begin
+              lost_q  <= 1'b1;
+              state_q <= StUnpReq;
+            end else if (cp_fw_q + 32'd1 >= cp_tw_q) begin
+              if ({16'h0, cp_i_q} + 32'd1 >= cp_count_q) begin
+                state_q <= StNextBuf;
+              end else begin
+                cp_i_q     <= cp_i_q + 16'd1;
+                cp_rbase_q <= cp_rbase_q + cp_stride_q;
+                cp_rb_q    <= '0;
+                state_q    <= StCpRd;
+              end
+            end else begin
+              cp_fw_q  <= cp_fw_q + 32'd1;
+              state_q  <= StCpWr;
+            end
           end
 
           default: state_q <= StIdle;
@@ -3387,7 +4201,8 @@ module g6lc_apu_cmdexec_fixture
   output logic               devlost_valid_o,
   output logic [7:0]         devlost_ctx_o,
   output logic               dead_o,
-  output logic               busy_o
+  output logic               busy_o,
+  input  logic [4*32-1:0]    qry_stat_i
 );
   g6lc_apu_cmdexec #(.Enable(Enable), .Fences(Fences),
                      .WorkBudgetLog2(WorkBudgetLog2),

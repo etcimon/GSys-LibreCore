@@ -85,7 +85,10 @@ module g6lc_apu_rast
   import g6lc_apu_vn_pkg::*;
   import g6lc_apu_srgb_pkg::*;
 #(
-  parameter bit Enable = 1'b0
+  parameter bit Enable = 1'b0,
+  // draw-path counters (W1.5; also the source for primitives-generated
+  // and pipeline-statistics queries).  0 = no cells.
+  parameter bit PerfCountersEn = 1'b0
 ) (
   input  logic              clk_i,
   input  logic              rst_ni,
@@ -126,9 +129,20 @@ module g6lc_apu_rast
   input  logic              pg_cpl_valid_i,
   output logic              pg_cpl_ready_o,
   input  apu_vgpages_cpl_t  pg_cpl_i,
-  output logic              busy_o
+  output logic              busy_o,
+  // {pixel writes, triangles assembled (before culling), busy cycles}
+  // since reset
+  output logic [3*32-1:0]   stat_o,
+  // §3a query-statistics bus {fs_invocations, occlusion_samples,
+  //   ia_primitives, ia_vertices} — the four draw-stage counters the
+  //   bounded statistics mask 0x87 reads (VS-invocations reuse the
+  //   ia_vertices value per the model).  All four are free-running and
+  //   monotonic; cmdexec differences them across a Begin/End window.
+  output logic [4*32-1:0]   qry_stat_o
 );
   if (!Enable) begin : gen_off
+    assign stat_o = '0;
+    assign qry_stat_o = '0;
     assign work_ready_o = 1'b0;
     assign done_o = 1'b0; assign done_pl_o = '0;
     assign sh_work_valid_o = 1'b0; assign sh_ctype_o = '0;
@@ -1114,6 +1128,53 @@ module g6lc_apu_rast
                                         : dr_q.blend[at_q].op_c;
 
     assign busy_o = st_q != S_IDLE;
+    if (PerfCountersEn) begin : gen_stat
+      logic [31:0] n_busy_q, n_prim_q, n_pix_q;
+      logic [31:0] q_vtx_q, q_fs_q, q_occ_q;
+      logic        in_wr_q, in_vsi_q;
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          n_busy_q <= '0; n_prim_q <= '0; n_pix_q <= '0;
+          q_vtx_q <= '0; q_fs_q <= '0; q_occ_q <= '0;
+          in_wr_q <= 1'b0; in_vsi_q <= 1'b0;
+        end else begin
+          in_wr_q  <= (st_q == S_ROP_WR);
+          in_vsi_q <= (st_q == S_VS_ISS);
+          if (st_q != S_IDLE) n_busy_q <= n_busy_q + 32'd1;
+          // one count per primitive at assembly: S_PR_W is a
+          // single-cycle state every point/line/triangle passes once
+          // after its vertices are fetched, before outcode, clip and
+          // cull — the primitives-generated point.  Clip-fan triangles
+          // re-enter it with clip_q set and belong to the primitive
+          // that produced the fan, so they are not counted again.
+          if (st_q == S_PR_W && !clip_q)
+            n_prim_q <= n_prim_q + 32'd1;
+          if (st_q == S_ROP_WR && !in_wr_q)
+            n_pix_q <= n_pix_q + 32'd1;
+          // §3a query counters (model vn_transfer_executor.py:297):
+          // IA-vertices and VS-invocations both equal the fetched
+          // vertex-record count — nv_q per accepted VS batch, counted
+          // once on S_VS_ISS entry (the state is held until the wave
+          // is granted, so edge-detect, not level).  FS-invocations
+          // count every recorded fragment lane (helpers included, as
+          // fs.total does); occlusion counts only non-helper lanes —
+          // the covered samples.  Fragment record is the single
+          // S_F_LSET pass at lc_q==8.
+          if (st_q == S_VS_ISS && !in_vsi_q)
+            q_vtx_q <= q_vtx_q + {26'h0, nv_q};
+          if (st_q == S_F_LSET && lc_q == 4'd8) begin
+            q_fs_q  <= q_fs_q + 32'd1;
+            if (!help_q) q_occ_q <= q_occ_q + 32'd1;
+          end
+        end
+      end
+      assign stat_o = {n_pix_q, n_prim_q, n_busy_q};
+      // {fs_inv, occ, ia_prim, ia_vtx}; VS-invocations reuse ia_vtx
+      assign qry_stat_o = {q_fs_q, q_occ_q, n_prim_q, q_vtx_q};
+    end else begin : gen_nostat
+      assign stat_o = '0;
+      assign qry_stat_o = '0;
+    end
     assign work_ready_o = st_q == S_IDLE;
     assign mp_req_valid_o = st_q == S_MPW && !mp_acked_q;
     assign mp_req_o = '{dom: 1'b1, we: mp_we_q, addr: mp_addr_q,
@@ -3935,7 +3996,8 @@ module g6lc_apu_rast_fixture
   input  logic              pg_cpl_valid_i,
   output logic              pg_cpl_ready_o,
   input  apu_vgpages_cpl_t  pg_cpl_i,
-  output logic              busy_o
+  output logic              busy_o,
+  output logic [3*32-1:0]   stat_o
 );
   g6lc_apu_rast #(.Enable(Enable)) i_dut (.*);
 endmodule
