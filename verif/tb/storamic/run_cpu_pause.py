@@ -20,7 +20,8 @@ import time
 
 PASS_RE = re.compile(
     r"CPU_PAUSE_PASS pauses=(\d+) max_drain_cycles=(\d+) seed=(\d+) "
-    r"delay=(\d+) sig=([0-9a-f]+)")
+    r"delay=(\d+) sig=([0-9a-f]+) wstall=(\d+) rstall=(\d+) "
+    r"replaces=(\d+) repause=(\d+) code_chk=(\d+) data_chk=(\d+)")
 REF_RE = re.compile(r"CPU_PAUSE_REF sig=([0-9a-f]+) cycles=(\d+)")
 DIRTY_RE = re.compile(r"CPU_PAUSE_FAIL dirty addr=([0-9a-f]+)")
 BENCH_REL = "verif/tb/storamic/tb_g6lc_storamic_cpu_pause.sv"
@@ -42,20 +43,45 @@ WSTALL, RSTALL = 24, 8
 WSTALL_HI = 48   # deeper write back-pressure: each write stays outstanding
                  # longer so the commit queue (DEPTH_COMMIT=4) stays full and
                  # committed stores sit without AW-valid across a B return.
-# (seed, delay, wstall, rstall, name-tag): all four unstalled seeds/delays
-# plus the same matrix under write+read back-pressure at two depths.
+# (seed, delay, wstall, rstall, repause, name-tag): all four unstalled
+# seeds/delays plus the same matrix under write+read back-pressure at two
+# depths. repause=N re-requests pause 1..3 cycles after every Nth release so
+# pause_req rises while the core is still inside resync (re-pause during
+# resync must keep commit halted and still complete the flush+squash).
 CASES = tuple(
-    (seed, delay, w, r, ("" if w == 0 else f"-w{w}r{r}"))
-    for (w, r) in ((0, 0), (WSTALL, RSTALL), (WSTALL_HI, RSTALL))
+    (seed, delay, w, r, rep,
+     ("" if w == 0 else f"-w{w}r{r}") + (f"-rp{rep}" if rep else ""))
+    for (w, r, rep) in ((0, 0, 19), (WSTALL, RSTALL, 11),
+                        (WSTALL_HI, RSTALL, 7))
     for seed in SEEDS for delay in DELAYS)
 
+# Throwaway single-case diagnostic filter: CP_ONLY="s1-d16" keeps only the
+# matching positive and skips directed/mutant sections entirely.
+_ONLY = os.environ.get("CP_ONLY", "")
+if _ONLY:
+    CASES = tuple(c for c in CASES
+                  if f"s{c[0]}-d{c[1]}" in _ONLY or _ONLY in f"s{c[0]}-d{c[1]}{c[5]}")
 
-def _maxcycles(wstall):
-    """Liveness watchdog budget per stall tier. Deep +wstall legitimately
-    stretches a correct pause/resume stream; the o1-o4 oracles are unchanged,
-    only the wall-clock cap grows. Unstalled keeps the historical 400k."""
-    return {0: 400000, WSTALL: 600000, WSTALL_HI: 1000000}.get(
-        wstall, 400000 + wstall * 10000)
+
+def _maxcycles(wstall, delay):
+    """Liveness watchdog budget per stall tier. C5 resync makes every release
+    pay a D$+I$ flush (~512 cycles) plus a commit-head refetch, and the pause
+    gap now floors at RUN_GAP_MIN (~712) so each release leaves a real run
+    window -- a correct stream legitimately runs far longer than the C4
+    drain-only budget. Deep +wstall stretches it further; the o1-o4 oracles
+    are unchanged, only the wall-clock cap grows. +delay=N is per-read bus
+    latency on a load/store-heavy firmware: it slows every access and the
+    wall-clock pause schedule then accumulates proportionally more pauses, so
+    the budget must grow with delay too (delay=16 roughly triples it)."""
+    base = {0: 1000000, WSTALL: 1600000, WSTALL_HI: 2800000}.get(
+        wstall, 1000000 + wstall * 20000)
+    return base * (1 + delay // 8)
+
+# Diagnostic sim plusargs appended to every run (ref/positive/directed/
+# mutant). MUST be "" for qualification runs; set only for throwaway
+# divergence hunts (e.g. "+win_lo=N +win_hi=M").
+# Empty for qualification runs.
+RS_EXTRA_FILE = ""
 
 # Mutant patches: (name, relpath, anchor, replacement). Each anchor must occur
 # exactly once or the stage is incomplete.
@@ -71,13 +97,13 @@ MUTANTS = [
     ("k3", "corev_apu/storamic/g6lc_storamic_cpu_pause.sv",
      "else if (core_drained_i) state_q <= S_CLOSE;",
      "else if (core_drained_i) state_q <= S_PAUSED;"),
-    # k4 reverts the AMO-head guard: halt begins immediately on pause_gated,
+    # k4 reverts the AMO-head guard: halt_q sets on pause_gated regardless of the head,
     # so a pause landing while an AMO/LR/SC is the commit head withdraws
     # amo_req from a miss unit already in AMO_WAIT -> orphaned ack -> the
     # observed post-release deadlock (CPU_PAUSE_FAIL timeout).
     ("k4", "core/cva6.sv",
-     "assign storamic_halt = storamic_pause_gated && storamic_halt_q;",
-     "assign storamic_halt = storamic_pause_gated;"),
+     "(storamic_halt_q || !storamic_amo_head)) &&",
+     "1'b1) &&"),
     # k5 reverts the load_unit WAIT_PAGE_OFFSET interlock for the in-order
     # single-hart config: an uncovered load (page_offset_matches set, no STQ
     # forward -- non-cacheable) falls through to WAIT_GNT after one cycle and
@@ -86,6 +112,47 @@ MUTANTS = [
     ("k5", "core/load_unit.sv",
      "!CVA6Cfg.OoOEn && CVA6Cfg.NrHarts == 1 && page_offset_matches_i",
      "1'b0"),
+    # ---- C5 resync-on-release mutants r1..r4 (r5 N/A: reservation is
+    # bus-side in the endpoint exclusive monitor, not a core flop) ----
+    # r1 skips the D$ flush phase: entry jumps FLUSH_D->WAIT_HEAD so
+    # resync_flush_i never asserts -> D$ keeps stale lines -> o5 kind=data.
+    ("r1", "core/cva6.sv",
+     "storamic_resync_state_q <= RESYNC_FLUSH_D;",
+     "storamic_resync_state_q <= RESYNC_WAIT_HEAD;"),
+    # r2 drops flush_icache_o from the one-cycle resync squash: the frontend
+    # still refetches the commit head but the I$ retains pre-pause lines ->
+    # the patched hot-loop addi stays stale -> o5 kind=code.
+    ("r2", "core/controller.sv",
+     "    if (resync_storamic_squash_i) begin\n"
+     "      set_pc_commit_o        = 1'b1;\n"
+     "      flush_if_o             = 1'b1;\n"
+     "      flush_unissued_instr_o = 1'b1;\n"
+     "      flush_id_o             = 1'b1;\n"
+     "      flush_ex_o             = 1'b1;\n"
+     "      flush_icache_o         = 1'b1;\n"
+     "    end",
+     "    if (resync_storamic_squash_i) begin\n"
+     "      set_pc_commit_o        = 1'b1;\n"
+     "      flush_if_o             = 1'b1;\n"
+     "      flush_unissued_instr_o = 1'b1;\n"
+     "      flush_id_o             = 1'b1;\n"
+     "      flush_ex_o             = 1'b1;\n"
+     "      flush_icache_o         = 1'b0;\n"
+     "    end"),
+    # r3 suppresses the squash pulse entirely: no set_pc_commit/flush_if/
+    # flush_unissued/id/ex/icache -> the pipeline is not squashed and the
+    # frontend is not redirected to the commit head, so an uncommitted
+    # pre-pause load or fetched instruction survives -> o5/o4/timeout.
+    ("r3", "core/cva6.sv",
+     "  assign resync_squash = (storamic_resync_state_q == RESYNC_WAIT_HEAD) &&\n"
+     "                         commit_instr_id_commit[0].valid;",
+     "  assign resync_squash = 1'b0;"),
+    # r4 wedges the resync FSM in IDLE (entry never leaves): resync_held's
+    # IDLE-entry term keeps halt_q asserted forever -> release never happens
+    # -> timeout-deadlock. Proves the resync cannot simply be skipped.
+    ("r4", "core/cva6.sv",
+     "storamic_resync_state_q <= RESYNC_FLUSH_D;",
+     "storamic_resync_state_q <= RESYNC_IDLE;"),
 ]
 
 
@@ -169,7 +236,17 @@ def run(data, out, stages, manifest, builds, outcomes, verilator, build_model):
         "seeds": list(SEEDS), "delays": list(DELAYS),
         "min_pauses": MIN_PAUSES,
         "stall_tiers": [[0, 0], [WSTALL, RSTALL], [WSTALL_HI, RSTALL]],
-        "cases": [list(c[:4]) + [c[4]] for c in CASES],
+        "repause_periods": [19, 11, 7],
+        "run_gap_floor": "RUN_GAP_MIN = DCACHE_NUM_WORDS + ICACHE_NUM_WORDS "
+                         "+ 260 (=772 for cv64a6_imafdc_sv39: 256-set D$ + "
+                         "256-set I$ flush + ~60 head-wait + ~150 productive "
+                         "+ margin). Normal gaps = RUN_GAP_MIN + lfsr%60/40; "
+                         "repause(1-3) and 1/16 back-to-back(1-16) gaps kept "
+                         "as re-pause-during-resync stress (commit-halted, "
+                         "no run window needed). C5 liveness contract.",
+        "maxcycles_tiers": {"0": 1000000, str(WSTALL): 1600000,
+                            str(WSTALL_HI): 2800000},
+        "cases": [list(c) for c in CASES],
         "o2_source": "formatted RVFI retire stream via cva6_rvfi "
                      "(core/cva6_rvfi.sv mem_wmask/mem_addr/mem_wdata), "
                      "fed by cpu.rvfi_probes_o",
@@ -211,6 +288,10 @@ def run(data, out, stages, manifest, builds, outcomes, verilator, build_model):
         return executable
 
     def _sim(executable, case, args, timeout=600):
+        # Diagnostic plusargs for remote runs: RS_EXTRA_FILE module constant
+        # (shipped) or RS_EXTRA env (local). Empty for qualification runs.
+        extra = os.environ.get("RS_EXTRA", "") or RS_EXTRA_FILE
+        args = list(args) + extra.split()
         try:
             result = subprocess.run(args, env=env, cwd=executable.parent,
                                     capture_output=True, text=True,
@@ -226,7 +307,7 @@ def run(data, out, stages, manifest, builds, outcomes, verilator, build_model):
     ref_exe = _build("cpu-pause")
     ref_text, ref_rc = _sim(ref_exe, "cpu-pause-ref",
                             [str(ref_exe), f"+rom={rom}", "+delay=0",
-                             "+nopause"])
+                             f"+maxcycles={_maxcycles(0, 0)}", "+nopause"])
     ref_m = REF_RE.search(ref_text)
     ref_sig = ref_m.group(1) if ref_m else None
     outcomes.append({"cpu_pause": "cpu-pause-ref", "rc": ref_rc,
@@ -238,19 +319,24 @@ def run(data, out, stages, manifest, builds, outcomes, verilator, build_model):
 
     # ---- positive runs: seeds x delays x bus back-pressure ----
     ref_sigs = set()
-    for seed, delay, wstall, rstall, tag in CASES:
+    for seed, delay, wstall, rstall, repause, tag in CASES:
         case = f"cpu-pause-s{seed}-d{delay}{tag}"
         args = [str(ref_exe), f"+rom={rom}", f"+delay={delay}",
-                f"+seed={seed}", f"+maxcycles={_maxcycles(wstall)}"]
+                f"+seed={seed}", f"+maxcycles={_maxcycles(wstall, delay)}"]
         if wstall:
             args.append(f"+wstall={wstall}")
         if rstall:
             args.append(f"+rstall={rstall}")
+        if repause:
+            args.append(f"+repause={repause}")
         text, rc = _sim(ref_exe, case, args)
         m = PASS_RE.search(text)
         ok = (rc == 0 and m and int(m.group(1)) >= MIN_PAUSES and
               int(m.group(3)) == seed and int(m.group(4)) == delay and
               m.group(5) == ref_sig and
+              int(m.group(8)) >= MIN_PAUSES and
+              int(m.group(10)) >= MIN_PAUSES and
+              int(m.group(11)) >= MIN_PAUSES and
               "CPU_PAUSE_FAIL" not in text and
               "error_o" not in text)
         outcomes.append({
@@ -277,7 +363,7 @@ def run(data, out, stages, manifest, builds, outcomes, verilator, build_model):
         case = f"cpu-pause-directed-d{ddelay}"
         d_text, d_rc = _sim(ref_exe, case,
                             [str(ref_exe), f"+rom={drom}",
-                             f"+delay={ddelay}", "+nopause"])
+                             f"+delay={ddelay}", "+nopause", "+directed"])
         d_m = REF_RE.search(d_text)
         d_ok = (d_rc == 0 and d_m is not None and
                 "CPU_PAUSE_FAIL" not in d_text)
@@ -317,20 +403,24 @@ def run(data, out, stages, manifest, builds, outcomes, verilator, build_model):
         mexe = _build("cpu-pause-" + name, src_root=mtree)
         mutant_exes[name] = mexe
         # each mutant must be rejected by an oracle on >=1 case
-        for seed, delay, wstall, rstall, tag in CASES:
+        for seed, delay, wstall, rstall, repause, tag in CASES:
             case = f"cpu-pause-{name}-s{seed}-d{delay}{tag}"
             args = [str(mexe), f"+rom={rom}", f"+delay={delay}",
-                    f"+seed={seed}", f"+maxcycles={_maxcycles(wstall)}"]
+                    f"+seed={seed}", f"+maxcycles={_maxcycles(wstall, delay)}"]
             if wstall:
                 args.append(f"+wstall={wstall}")
             if rstall:
                 args.append(f"+rstall={rstall}")
+            if repause:
+                args.append(f"+repause={repause}")
             text, rc = _sim(mexe, case, args)
             m = PASS_RE.search(text)
-            survived = (rc == 0 and m and int(m.group(1)) >= MIN_PAUSES)
+            sig_bad = bool(m) and m.group(5) != ref_sig
+            survived = (rc == 0 and m and int(m.group(1)) >= MIN_PAUSES
+                        and not sig_bad)
             rejected = (not survived) and (
                 "CPU_PAUSE_FAIL" in text or "error_o" in text or
-                DIRTY_RE.search(text) is not None or rc != 0)
+                DIRTY_RE.search(text) is not None or rc != 0 or sig_bad)
             outcomes.append({
                 "cpu_pause": case, "mutant": name, "seed": seed,
                 "delay": delay, "wstall": wstall, "rstall": rstall,
@@ -353,8 +443,12 @@ def run(data, out, stages, manifest, builds, outcomes, verilator, build_model):
                     kill_reason = "o3-error_o"
                 elif "o1" in text:
                     kill_reason = "o1-dn-valid"
-                elif "o4" in text or "final-mismatch" in text:
+                elif "o4" in text or "final-mismatch" in text or sig_bad:
                     kill_reason = "o4-final"
+                elif "stale" in text:
+                    kill_reason = "o5-stale"
+                elif "reservation" in text or "lrsc" in text:
+                    kill_reason = "o6-lrsc"
                 else:
                     kill_reason = f"rc={rc}"
             if killed:
@@ -380,7 +474,7 @@ def run(data, out, stages, manifest, builds, outcomes, verilator, build_model):
             case = f"cpu-pause-directed-k5-d{ddelay}"
             kd_text, kd_rc = _sim(k5exe, case,
                                  [str(k5exe), f"+rom={drom}",
-                                  f"+delay={ddelay}", "+nopause"])
+                                  f"+delay={ddelay}", "+nopause", "+directed"])
             kd_rej = (kd_rc != 0 or "CPU_PAUSE_FAIL" in kd_text or
                       REF_RE.search(kd_text) is None)
             outcomes.append({

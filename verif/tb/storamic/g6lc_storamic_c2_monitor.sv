@@ -33,6 +33,10 @@ module g6lc_storamic_c2_monitor #(
   parameter logic [63:0] Base         = 64'h5000_0000,
   parameter logic [63:0] Length       = 64'h10_0000,
   parameter bit          CtrlPageEn   = 1'b1,
+  // Native checkpoint build: the control page is a command service that
+  // answers SLVERR for unauthorized or unready requests by design, so an
+  // error there is a refusal (counted), not a decode violation.
+  parameter bit          CtrlMayRefuse = 1'b0,
   parameter int unsigned Depth        = 32,
   parameter int unsigned MaxAge       = 100000,
   parameter type slv_req_t  = logic,
@@ -96,6 +100,10 @@ module g6lc_storamic_c2_monitor #(
   function automatic bit served(input logic [63:0] a);
     return (CtrlPageEn && (a - Base) < 64'h1000) ||
            ((a - Base) >= 64'h1000 && (a - Base) < 64'h2000);
+  endfunction
+  function automatic bit ctrl_refusal(input logic [63:0] a, input logic [1:0] r);
+    return CtrlMayRefuse && CtrlPageEn && (a - Base) < 64'h1000 &&
+           (r == axi_pkg::RESP_SLVERR || r == axi_pkg::RESP_DECERR);
   endfunction
   function automatic bit is_err(input logic [1:0] r);
     return r == axi_pkg::RESP_SLVERR || r == axi_pkg::RESP_DECERR;
@@ -291,7 +299,8 @@ module g6lc_storamic_c2_monitor #(
         if (32'(mst_resp.b.id) != ((own_w_p << LocalIdWidth) | e.id))
           c2_fatal("b_id", own_w_p, mst_resp.b.id, e.addr);
         if (!own_w_wdone) c2_fatal("b_before_wlast", own_w_p, mst_resp.b.id, e.addr);
-        if (served(e.addr) == is_err(mst_resp.b.resp))
+        if (served(e.addr) == is_err(mst_resp.b.resp) &&
+            !ctrl_refusal(e.addr, mst_resp.b.resp))
           c2_fatal(served(e.addr) ? "served_b_err" : "unserved_b_okay",
                    own_w_p, mst_resp.b.id, e.addr);
         if (aw_source_ok_i != src_shape(own_w_p, e))
@@ -311,7 +320,8 @@ module g6lc_storamic_c2_monitor #(
         if (mst_resp.r.last != (own_r_beats == 0))
           c2_fatal("r_last", own_r_p, mst_resp.r.id, e.addr);
         if (mst_resp.r.last) begin
-          if (served(e.addr) == is_err(mst_resp.r.resp))
+          if (served(e.addr) == is_err(mst_resp.r.resp) &&
+              !ctrl_refusal(e.addr, mst_resp.r.resp))
             c2_fatal(served(e.addr) ? "served_r_err" : "unserved_r_okay",
                      own_r_p, mst_resp.r.id, e.addr);
           if (ar_source_ok_i != src_shape(own_r_p, e))

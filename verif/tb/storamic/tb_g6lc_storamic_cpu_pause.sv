@@ -15,6 +15,20 @@ module tb_g6lc_storamic_cpu_pause;
   localparam int DoneOff = 19'h780;    // Data+0x780 completion store (0x5a)
   localparam int TrapOff = 19'h7F8;    // Data+0x7F8 trap store     (0x7f)
   localparam int WatchdogBound = 50000;
+  // ---- C5 resync-on-release observability ----------------------------------
+  // The whole Boot image (0x8000_0000, CachedRegion len 0x4000_0000) is
+  // cacheable for I$ and D$; rom[] is its writable backing. rom[] indices must
+  // match g6lc_cpu_pause_program.py (CDataIdx/PATCH_IDX/RESYNC_PROBE_IDX).
+  localparam int CDataIdx  = 500;      // cacheable data word (Boot+0x7D0)
+  localparam int PatchIdx  = 300;      // patchable addi (Boot+0x4B0)
+  localparam int ScratchIdx= 502;      // cacheable CPU-writable scratch
+  // Non-cacheable Data log offsets (mirror the program's *_OFF constants).
+  localparam int ProbeOff = 19'h740;   // packed {salt,gen} observation (sd)
+  localparam int ArmOff   = 19'h748;   // LR/SC armed flag
+  localparam int GoOff    = 19'h74C;   // LR/SC go flag
+  localparam int RsvOff   = 19'h750;   // LR/SC reserved word
+  localparam int ScOff    = 19'h758;   // packed {sc_result,0x5C} (sd)
+  localparam int HBOff    = 19'h760;   // probe heartbeat counter (sw)
 
   function automatic config_pkg::cva6_cfg_t make_cfg();
     config_pkg::cva6_user_cfg_t u = cva6_config_pkg::cva6_cfg;
@@ -27,6 +41,23 @@ module tb_g6lc_storamic_cpu_pause;
     return c;
   endfunction
   localparam config_pkg::cva6_cfg_t Cfg = make_cfg();
+  // ---- C5 resync liveness: minimum pause-to-pause run window --------------
+  // A release first runs the resync FSM (D$ flush held to ack + commit-head
+  // wait, commit still halted) and then the I-cache flush blocks fetch for
+  // ICACHE_NUM_WORDS cycles before the refetched head can retire. Both flush
+  // lengths are the cache SET count = 2^(INDEX_WIDTH - clog2(LINE_WIDTH/8));
+  // the qualified cv64a6_imafdc_sv39 geometries (I$ 16KB/4w, D$ 32KB/8w, 16B
+  // lines) give INDEX-OFFSET = 8 -> 256 sets -> a 256-cycle flush each.
+  localparam int IC_LINE_OFF_W = $clog2(Cfg.ICACHE_LINE_WIDTH / 8);
+  localparam int IC_FLUSH_CYC  = 2 ** (Cfg.ICACHE_INDEX_WIDTH - IC_LINE_OFF_W);
+  localparam int DC_FLUSH_CYC = Cfg.DCACHE_NUM_WORDS;
+  // The pause-to-pause gap must leave a post-release run window >=
+  // IC_FLUSH_CYC + ~150 productive cycles on top of the resync overhead
+  // (D$ flush + commit-head wait + release). The +260 covers that overhead
+  // (~60 head-wait/release, incl. Sv39 TLB-fill slack) plus the ~150-cycle
+  // productive floor and margin; below it the hart livelocks (C5 liveness is
+  // the pause requester's obligation -- see cpu-pause-provider.md).
+  localparam int RUN_GAP_MIN = DC_FLUSH_CYC + IC_FLUSH_CYC + 260;
   typedef logic [Cfg.AxiAddrWidth-1:0] addr_t;
   typedef logic [Cfg.AxiIdWidth-1:0] id_t;
   typedef logic [Cfg.AxiDataWidth-1:0] data_t;
@@ -78,6 +109,10 @@ module tb_g6lc_storamic_cpu_pause;
   bit ptrace;
   int ptrace_lo = 0, ptrace_hi = -1;
   bit ptrace_hdr = 0;
+  // +ostale: fine-grained C5 stale-code trace (replaces, resync/gate edges,
+  // retires of the patched addi, o5 probe evals). Simulation-only.
+  bit ostale;
+  bit directed;
   // ---- AXI ready back-pressure: +wstall/+rstall pseudo-random stretches ----
   // Committed stores linger in the commit queue / D$ write buffer while the
   // downstream AW/W (or AR) ready is deasserted, so a drain acknowledgement
@@ -148,6 +183,10 @@ module tb_g6lc_storamic_cpu_pause;
 
   function automatic bit is_data(input logic [63:0] a);
     return a >= Data && a < Data + DataBytes;
+  endfunction
+  // cacheable Boot image backing (rom[]): CPU stores here are real RAM writes.
+  function automatic bit is_boot(input logic [63:0] a);
+    return a >= Boot && a < Boot + 4096;
   endfunction
   function automatic logic [63:0] nbytes_mask(input int nbytes);
     return (nbytes >= 8) ? 64'hffff_ffff_ffff_ffff
@@ -307,6 +346,24 @@ module tb_g6lc_storamic_cpu_pause;
   // ================= oracle / monitor sequential block =================
   always @(posedge clk) if (rst_n) begin
     cycles <= cycles + 1;
+    // progress heartbeat: distinguishes slow-progress from a hard hang
+    if ((cycles % 30000) == 0) begin
+      $display("[PROG] cyc=%0d cmt_pc=%h npc=%h cmt_val=%0d rs=%0d rh=%0d hq=%0d pg=%0d",
+               cycles, cpu.commit_instr_id_commit[0].pc,
+               cpu.smt_npc_live, cpu.commit_instr_id_commit[0].valid,
+               cpu.storamic_resync_state_q, cpu.resync_held,
+               cpu.storamic_halt_q, cpu.storamic_pause_gated);
+      $display("[FE]   fa=%h npcq=%h av=%b apc=%h rpd=%b rpc=%h icv=%b icva=%h icst=%0d infl=%b ia=%h ifr=%b fev=%b ireq=%b iva=%h iresp=%b",
+               cpu.i_frontend.fetch_address, cpu.i_frontend.npc_q,
+               cpu.i_frontend.arch_valid, cpu.i_frontend.arch_pc,
+               cpu.i_frontend.redirect_pend_q, cpu.i_frontend.redirect_pc_q,
+               cpu.i_frontend.icache_valid_q, cpu.i_frontend.icache_vaddr_q,
+               int'(cpu.gen_cache_wt.i_cache_subsystem.i_g6lc_icache.state_q),
+               cpu.i_frontend.inflight_q, cpu.i_frontend.inflight_addr_q,
+               cpu.i_frontend.if_ready, cpu.fetch_valid_if_id[0],
+               cpu.icache_dreq_if_cache.req, cpu.icache_dreq_if_cache.vaddr,
+               cpu.icache_dreq_cache_if.valid);
+    end
     // ---- (o3) error_o never ----
     if (error_o) $fatal(1, "CPU_PAUSE_FAIL error_o cycles=%0d", cycles);
     // ---- (o1) while paused_o, zero aw/ar/w valid downstream of the gate ----
@@ -344,6 +401,33 @@ module tb_g6lc_storamic_cpu_pause;
                gen_state, req_wait, pauses_done,
                cpu.lsu_commit_commit_ex, cpu.lsu_commit_ready_ex_commit,
                int'(cpu.ex_stage_i.lsu_i.i_store_unit.state_q));
+      $display("[FE] fa=%h npcq=%h av=%b apc=%h rpd=%b rpc=%h icv=%b icva=%h infl=%b ia=%h ifr=%b fev=%b ireq=%b iva=%h iresp=%b",
+               cpu.i_frontend.fetch_address, cpu.i_frontend.npc_q,
+               cpu.i_frontend.arch_valid, cpu.i_frontend.arch_pc,
+               cpu.i_frontend.redirect_pend_q, cpu.i_frontend.redirect_pc_q,
+               cpu.i_frontend.icache_valid_q, cpu.i_frontend.icache_vaddr_q,
+               cpu.i_frontend.inflight_q, cpu.i_frontend.inflight_addr_q,
+               cpu.i_frontend.if_ready, cpu.fetch_valid_if_id[0],
+               cpu.icache_dreq_if_cache.req, cpu.icache_dreq_if_cache.vaddr,
+               cpu.icache_dreq_cache_if.valid);
+      $display("[FE2] rs=%0d rh=%0d hq=%0d pg=%0d sbh0=%b sbhpc=%h cmtack=%0d exv=%b setpc=%b fif=%b fid=%b fex=%b fic=%b",
+               cpu.storamic_resync_state_q, cpu.resync_held, cpu.storamic_halt_q,
+               cpu.storamic_pause_gated, cpu.sb_head_valid[0], cpu.sb_head_pc[0],
+               cpu.commit_ack[0], cpu.ex_commit.valid,
+               cpu.set_pc_ctrl_pcgen, cpu.flush_ctrl_if, cpu.flush_ctrl_id,
+               cpu.flush_ctrl_ex, cpu.icache_flush_ctrl_cache);
+      $display("[AREQ] icst=%0d fcnt=%0d fen=%0d fdone=%0d areq_req=%b areq_va=%h areq_val=%b areq_pa=%h dreq_rdy=%b mem_req=%b mem_ack=%b en=%b cen=%b",
+               int'(cpu.gen_cache_wt.i_cache_subsystem.i_g6lc_icache.state_q),
+               int'(cpu.gen_cache_wt.i_cache_subsystem.i_g6lc_icache.flush_cnt_q),
+               cpu.gen_cache_wt.i_cache_subsystem.i_g6lc_icache.flush_en,
+               cpu.gen_cache_wt.i_cache_subsystem.i_g6lc_icache.flush_done,
+               cpu.icache_areq_cache_ex.fetch_req, cpu.icache_areq_cache_ex.fetch_vaddr,
+               cpu.icache_areq_ex_cache.fetch_valid, cpu.icache_areq_ex_cache.fetch_paddr,
+               cpu.gen_cache_wt.i_cache_subsystem.i_g6lc_icache.dreq_ready_o,
+               cpu.gen_cache_wt.i_cache_subsystem.i_g6lc_icache.mem_data_req_o,
+               cpu.gen_cache_wt.i_cache_subsystem.i_g6lc_icache.mem_data_ack_i,
+               cpu.gen_cache_wt.i_cache_subsystem.i_g6lc_icache.en_i,
+               cpu.gen_cache_wt.i_cache_subsystem.i_g6lc_icache.cache_en_q);
       $fatal(1, "CPU_PAUSE_FAIL timeout cycles=%0d writes=%0d reads=%0d",
              cycles, write_checks, read_checks);
     end
@@ -393,8 +477,11 @@ module tb_g6lc_storamic_cpu_pause;
       b_resp <= axi_pkg::RESP_OKAY;
       if (trace) $display("[W ] t=%0d a=%h d=%h wat=%0d", cycles,
           write_header.addr, dn_req.w.data, write_atomic);
-      if (write_header.addr == Data + TrapOff)
+      if (write_header.addr == Data + TrapOff) begin
+        // trap stub stored mepc at Data+0x7F0 just before the 0x7f marker
+        $display("CPU_PAUSE_TRAP mepc=%h", data_aligned(Data + 19'h7F0));
         $fatal(1, "CPU_PAUSE_FAIL trap addr=%h", write_header.addr);
+      end
       if (is_data(write_header.addr)) begin
         if (write_atomic == 2'b01) begin
           int nbytes, lane, off;
@@ -455,6 +542,19 @@ module tb_g6lc_storamic_cpu_pause;
             finish_pending <= 1'b1;
           end
         end
+      end else if (is_boot(write_header.addr) && write_atomic == 2'b00) begin
+        // C5: cacheable Boot-region store -> rom[] backing (CPU-writable RAM).
+        int nbytes, lane, boff, bidx, bin;
+        nbytes = 1 << write_header.size;
+        lane = int'(write_header.addr[2:0]);
+        for (int i = 0; i < nbytes; i++) begin
+          boff = int'(write_header.addr - Boot) + i;
+          bidx = boff >> 2;
+          bin  = boff & 3;
+          if (bidx >= 0 && bidx < 1024)
+            rom[bidx][8*bin +: 8] = dn_req.w.data[8*(lane+i) +: 8];
+        end
+        write_checks <= write_checks + 1;
       end
     end
     if (b_valid && dn_req.b_ready) begin
@@ -498,8 +598,25 @@ module tb_g6lc_storamic_cpu_pause;
   function automatic logic [63:0] mem_sig();
     logic [63:0] s;
     s = 64'h9e3779b97f4a7c15;
-    for (int i = 0; i < DataBytes; i++)
+    for (int i = 0; i < DataBytes; i++) begin
+      // C5 observation log [ProbeOff, ScOff+8): packed gen/salt probes, the
+      // LR/SC arm/go/reserved/result fields. These legitimately differ between
+      // the never-paused reference (no replaces -> constant gen) and paused
+      // runs (gen/salt advance per replace), so they are excluded from the
+      // cross-run signature; their correctness is covered by o5/o6 instead.
+      if (i >= ProbeOff && i < ScOff + 8) continue;
       s = (s ^ {56'h0, data_mem[i]}) * 64'h100000001b3;
+    end
+    return s;
+  endfunction
+  // 256-byte block hash over the same exclusion as mem_sig: bisects which
+  // region a cross-run signature mismatch lives in (cpu-pause C5 debug).
+  function automatic logic [63:0] sig_block(input int base);
+    logic [63:0] s;
+    s = 64'h9e3779b97f4a7c15;
+    for (int i = base; i < base + 256; i++)
+      if (!(i >= ProbeOff && i < ScOff + 8))
+        s = (s ^ {56'h0, data_mem[i]}) * 64'h100000001b3;
     return s;
   endfunction
   // find first data/ref mismatch byte offset (for the dirty report)
@@ -533,12 +650,27 @@ module tb_g6lc_storamic_cpu_pause;
                  Data + fd, fd, cycles);
         $fatal(1, "CPU_PAUSE_FAIL o4-final-mismatch off=%0d", fd);
       end
+      // C5: cacheable CPU-writable scratch must have reached rom[] (D$ drain).
+      // (+directed: the directed load_unit program has no C5 phases.)
+      if (!directed && rom[ScratchIdx] !== 32'h0000005C)
+        $fatal(1, "CPU_PAUSE_FAIL cacheable-scratch rom=%h", rom[ScratchIdx]);
+      // cross-run signature bisection: 8 x 256B block hashes + C5 field dump
+      for (int b = 0; b < 8; b++)
+        $display("SIGBLK %0d %h", b, sig_block(b * 256));
+      // word-level dump of the differing work_sub block (0x300..0x3ff) so the
+      // exact slots/values can be compared across runs.
+      for (int i = 12'h300; i < 12'h400; i = i + 8)
+        $display("W3 %h %h", i, data_aligned(Data + i));
+      $display("C5FLD hb=%h probe=%h sc=%h done=%h trap=%h",
+               data_aligned(Data + HBOff), data_aligned(Data + ProbeOff),
+               data_aligned(Data + ScOff), data_aligned(Data + DoneOff),
+               data_aligned(Data + TrapOff));
       if (!gen_en) begin
         $display("CPU_PAUSE_REF sig=%h cycles=%0d", mem_sig(), cycles);
       end else begin
-        $display("CPU_PAUSE_PASS pauses=%0d max_drain_cycles=%0d seed=%0d delay=%0d sig=%h wstall=%0d rstall=%0d",
+        $display("CPU_PAUSE_PASS pauses=%0d max_drain_cycles=%0d seed=%0d delay=%0d sig=%h wstall=%0d rstall=%0d replaces=%0d repause=%0d code_chk=%0d data_chk=%0d",
                  pauses_done, max_drain, seed_val, delay_cycles, mem_sig(),
-                 wstall_max, rstall_max);
+                 wstall_max, rstall_max, replace_count, repause_mod, code_chk, data_chk);
       end
       $finish;
     end
@@ -573,7 +705,7 @@ module tb_g6lc_storamic_cpu_pause;
           pause_req <= 1'b0;         // withdrawn before Paused
           gen_state <= 0;
           gap_cnt <= 0;
-          gap_target <= 20 + int'(lfsr_q[20:12] % 60);
+          gap_target <= RUN_GAP_MIN + int'(lfsr_q[20:12] % 60);
         end else if (req_wait > WatchdogBound) begin
           $display("CPU_PAUSE_FAIL stuck drained=%b closed=%b inflight=%b paused=%b error=%b",
                    core_drained, gate_closed, gate_inflight, paused_o, error_o);
@@ -604,17 +736,148 @@ module tb_g6lc_storamic_cpu_pause;
           pause_req <= 1'b0;         // release -> sequencer unwinds
           gen_state <= 0;
           gap_cnt <= 0;
-          // back-to-back: sometimes a tiny gap
-          gap_target <= (lfsr_q[3:0] == 4'h5) ? (1 + int'(lfsr_q[9:6]))
-                                                 : (20 + int'(lfsr_q[20:12] % 60));
+          // +repause=N: every Nth release re-requests after 1..3 idle cycles so
+          // pause_req rises while the core is still inside resync (re-pause
+          // during resync must keep commit halted and still complete).
+          if (repause_mod > 0 && (pauses_done % repause_mod) == 0)
+            gap_target <= 1 + int'(lfsr_q[7:6] % 3);
+          // back-to-back: sometimes a tiny gap (re-pause lands inside resync,
+          // commit still halted -- drain/arrival stress, not a run window)
+          else gap_target <= (lfsr_q[3:0] == 4'h5) ? (1 + int'(lfsr_q[9:6]))
+                                                 : (RUN_GAP_MIN + int'(lfsr_q[20:12] % 60));
         end
       end
       default: gen_state <= 0;
     endcase
   end
 
+  // ================= C5 resync-on-release replace + oracles ================
+  // While paused_o holds, the bench rewrites the cacheable data word and the
+  // patchable hot-loop instruction in rom[] (the "RAM replacement" the resync
+  // exists for), plus -- once the program has armed -- the LR/SC reserved word
+  // in data_mem with a bus-side reservation clear and a go flag. After release
+  // the resync must have flushed D$/I$ and squashed+refetched, so the program's
+  // post-release observations equal the NEW contents.
+  //
+  // o5 is exact and retire-based (see o5 block). o6 requires the SC to fail
+  // (bus-side reservation cleared).
+  int replace_count = 0;
+  int code_chk = 0, data_chk = 0;
+  logic [31:0] exp_gen = 32'h5EED0000, exp_salt = 32'h0;
+  logic [31:0] rep_imm_v = 32'h0, rep_word_v = 32'h0;
+  logic in_pause_q = 1'b0, arm_seen = 1'b0, rsv_done = 1'b0;
+  logic post_rel_q = 1'b0, was_paused_q = 1'b0;
+  logic sc_done_seen = 1'b0;
+  bit go_nopause = 0;
+  int repause_mod = 0;
+
+  // bench-initiated Data-window write: mirror into ref_mem so o2 (committed-
+  // store equality) stays consistent -- the replace is an external memory
+  // change, not a lost CPU store.
+  task automatic bench_wr32(input int off, input logic [31:0] val);
+    for (int i = 0; i < 4; i++) begin
+      data_mem[off + i] <= val[8*i +: 8];
+      ref_mem[off  + i] <= val[8*i +: 8];
+    end
+  endtask
+
+  always @(posedge clk) if (rst_n) begin
+    // arm detect: program committed ArmOff!=0 (lr done, spinning on go)
+    if (data_mem[ArmOff] != 8'h00) arm_seen <= 1'b1;
+    // +nopause reference: no pause ever runs the replace block that raises
+    // GO_OFF, so raise it once armed to let the program's sc.w complete. The
+    // reserved word is NOT replaced and the reservation is NOT cleared, so sc
+    // succeeds -- o6 (sc-must-fail) is gated off under nopause below.
+    if (!gen_en && arm_seen && !go_nopause) begin
+      go_nopause <= 1'b1;
+      bench_wr32(GoOff, 32'h00000001);
+    end
+    // post-release observation window (release -> next paused_o)
+    if (paused_o) begin post_rel_q <= 1'b0; was_paused_q <= 1'b1; end
+    else if (was_paused_q) begin post_rel_q <= 1'b1; was_paused_q <= 1'b0; end
+    // replace on each new pause hold
+    if (paused_o && !in_pause_q) begin
+      in_pause_q <= 1'b1;
+      replace_count <= replace_count + 1;
+      rom[CDataIdx] <= 32'h5EED0000 + 32'(replace_count);
+      exp_gen     <= 32'h5EED0000 + 32'(replace_count);
+      // patchable addi x26,x0,imm : imm = 0x40 + (count % 0x700), stays <0x800
+      // so the addi result (and the packed salt field) is a clean positive.
+      rep_imm_v  = (32'h040 + 32'(replace_count % 32'h700)) & 32'hFFF;
+      rep_word_v = (rep_imm_v << 20) | (26 << 7) | 32'h13;
+      rom[PatchIdx] <= rep_word_v;
+      exp_salt <= rep_imm_v;
+      if (ostale)
+        $display("[OST] t=%0d REPLACE cnt=%0d patch %h->%h salt %h->%h gen=%h",
+                 cycles, replace_count, rom[PatchIdx], rep_word_v,
+                 32'(rom[PatchIdx] >> 20) & 32'hFFF, rep_imm_v, exp_gen);
+      if (arm_seen && !rsv_done) begin
+        rsv_done <= 1'b1;
+        bench_wr32(RsvOff, 32'h00000077);   // replace reserved word
+        reserved_valid <= 1'b0;             // clear bus-side reservation (h3)
+        bench_wr32(GoOff, 32'h00000001);     // raise go -> program runs sc
+      end
+    end else if (!paused_o) in_pause_q <= 1'b0;
+    // ---- o5: exact, retire-based staleness check (zero tolerance) ----
+    // The bench only replaces rom[] while paused_o, when nothing retires, so
+    // every retire of the patched addi must produce the CURRENT immediate and
+    // every retire of a load from the cacheable data word must return the
+    // CURRENT word. An instruction that retired before the pause legitimately
+    // carries the old value and is simply checked against the old contents.
+    for (int k = 0; k < Cfg.NrCommitPorts; k++) begin
+      if (!directed && |rvfi_instr[k].valid && !rvfi_instr[k].trap) begin
+        if (rvfi_instr[k].pc_rdata == 64'(Boot + 4*PatchIdx)) begin
+          if (replace_count != 0) code_chk <= code_chk + 1;
+          if (rvfi_instr[k].rd_wdata != 64'(rom[PatchIdx] >> 20))
+            $fatal(1, "CPU_PAUSE_FAIL stale kind=code got=%h exp=%h cyc=%0d",
+                   rvfi_instr[k].rd_wdata, 64'(rom[PatchIdx] >> 20), cycles);
+        end
+        if ((|rvfi_instr[k].mem_rmask) && !(|rvfi_instr[k].mem_wmask) &&
+            rvfi_instr[k].mem_addr == 64'(Boot + 4*CDataIdx)) begin
+          if (replace_count != 0) data_chk <= data_chk + 1;
+          if (rvfi_instr[k].rd_wdata != 64'(rom[CDataIdx]))
+            $fatal(1, "CPU_PAUSE_FAIL stale kind=data got=%h exp=%h cyc=%0d",
+                   rvfi_instr[k].rd_wdata, 64'(rom[CDataIdx]), cycles);
+        end
+      end
+    end
+    // ---- o6: packed {sc_result,0x5C} at ScOff; sc must have FAILED ----
+    begin : o6chk
+      logic [63:0] scv;
+      scv = data_aligned(Data + ScOff);
+      if (gen_en && !sc_done_seen && scv[31:0] == 32'h0000005C) begin
+        sc_done_seen <= 1'b1;
+        if (scv[63:32] == 32'h00000000)
+          $fatal(1, "CPU_PAUSE_FAIL lrsc reservation-not-cleared cyc=%0d", cycles);
+      end
+    end
+  end
+
+  // +ostale: fine-grained C5 stale-code trace — pause/gate/resync edges and
+  // every retire of the patched addi (0x800004B0). commit_instr_result is the
+  // addi's rd write-data == the salt, so it reveals old-vs-new code directly.
+  logic ost_p, ost_g, ost_sq;
+  always @(posedge clk) if (rst_n && ostale) begin
+    if (paused_o !== ost_p)
+      $display("[OST] t=%0d paused_o %b->%b", cycles, ost_p, paused_o);
+    if (gate_closed !== ost_g)
+      $display("[OST] t=%0d gate_closed %b->%b", cycles, ost_g, gate_closed);
+    if (cpu.resync_squash !== ost_sq)
+      $display("[OST] t=%0d resync_squash %b->%b state=%0d halt=%b",
+               cycles, ost_sq, cpu.resync_squash,
+               int'(cpu.storamic_resync_state_q), cpu.storamic_halt);
+    if (rvfi_probes.instr.commit_instr_valid[0] && rvfi_probes.instr.commit_ack[0] &&
+        rvfi_probes.instr.commit_instr_pc[0] == 64'h800004B0)
+      $display("[OST] t=%0d RETIRE pc=%h salt=%h", cycles,
+               rvfi_probes.instr.commit_instr_pc[0],
+               rvfi_probes.instr.commit_instr_result[0]);
+    ost_p <= paused_o; ost_g <= gate_closed; ost_sq <= cpu.resync_squash;
+  end
+
   initial begin
     trace = $test$plusargs("trace");
+    ostale = $test$plusargs("ostale");
+    directed = $test$plusargs("directed");
     gen_en = !$test$plusargs("nopause");
     if (!$value$plusargs("rom=%s", rom_path)) $fatal(1, "CPU_PAUSE_ROM_REQUIRED");
     if (!$value$plusargs("delay=%d", delay_cycles)) delay_cycles = 0;
@@ -624,6 +887,7 @@ module tb_g6lc_storamic_cpu_pause;
     if (!$value$plusargs("ptrace_hi=%d", ptrace_hi)) ptrace_hi = ptrace_lo;
     if (!$value$plusargs("wstall=%d", wstall_max)) wstall_max = 0;
     if (!$value$plusargs("rstall=%d", rstall_max)) rstall_max = 0;
+    if (!$value$plusargs("repause=%d", repause_mod)) repause_mod = 0;
     if (!$value$plusargs("maxcycles=%d", max_cycles)) max_cycles = 400000;
     if (max_cycles < 1) max_cycles = 400000;
     if (wstall_max < 0) wstall_max = 0;
@@ -632,7 +896,7 @@ module tb_g6lc_storamic_cpu_pause;
     rstall_lfsr = 32'h85ebca6b ^ (seed_val * 32'h27d4eb2f);
     if (seed_val == 0) seed_val = 1;
     lfsr_q = 32'h9e3779b9 ^ (seed_val * 32'h85ebca6b);
-    gap_target = 30 + int'(lfsr_q[15:8] % 40);
+    gap_target = RUN_GAP_MIN + int'(lfsr_q[15:8] % 40);
     foreach (rom[i]) rom[i] = 32'h0000_0013;
     foreach (data_mem[i]) data_mem[i] = 8'h00;
     foreach (ref_mem[i])  ref_mem[i]  = 8'h00;

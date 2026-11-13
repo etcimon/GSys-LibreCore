@@ -1463,3 +1463,60 @@ Remote unit suite totals recorded in the run receipt. This qualifies the
 CPU-origin pause/drain handshake only — DMA/VirtIO/debug writers, C3/C5
 composition and native admission remain open; native stays refused until
 C3–C6.
+
+## Native C3-C6 composition in the bounded profile
+
+Scope: one hart, in-order, write-through cache, primary role, checkpoint build
+(`G6LC_STORAMIC_CKPT`). Design of record: `native-composition.md`; CPU side:
+`cpu-pause-provider.md` (C4 pause/drain, C5 resync on release).
+
+What is bound, with no fixture acknowledgement:
+
+- **C3** `g6lc_storamic_native_providers`: one discovery slot reading a real
+  descriptor transaction; presence, synchronized power-good, identity,
+  descriptor binding against the model geometry and resume capability feed the
+  five provider facts; one policy update per mapping generation.
+- **C4** CPU pause sequencer plus AXI gate, debug-master AXI gate, VirtIO
+  `quiesce`/`inflight`; all three reported to the endpoint as producers.
+- **C5** core resync on release (D-cache flush, I-cache invalidate, squash to
+  the commit head, `commit_step_i` in the frontends) and reservation clear in
+  `g6lc_axi_lrsc`; `restore_resume_safe` is computed from the owners.
+- **C6** `g6lc_storamic_native_ckpt` (policy + endpoint) behind
+  `g6lc_storamic_attach` with `NativeBound`; the refusal now applies only to
+  `CheckpointRequested && !NativeBound`.
+- **C6b** `g6lc_storamic_boot_recovery`: after a power cycle the endpoint
+  comes up locked on its checkpoint and only accepts `RESTORE` with every
+  producer paused, so the hart cannot issue it. The agent holds the pause,
+  issues `RESTORE`/`CONSUME` on the ordinary control port, and fails closed.
+
+Evidence of record (remote testharness, frozen snapshot, runner identity
+check): see the run tags in `completion-plan.md` row C3-C6. `native-ckpt`
+cases: boot, save/restore flow at response delay 0 and 2, negative firmware
+oracle, debug SBA command refused at the route, presence drop, power-good
+drop, hot swap to another identity, cold recovery and its negative oracle;
+mutants n1-n7 each killed by its named symptom.
+
+Findings made on the way:
+
+- `resync_squash` was used before its declaration in `core/cva6.sv`
+  (Verilator accepted it, the `core-scc` slang front end did not); the
+  declaration moved, and a sim-only resync trace block was removed from the
+  core.
+- Withdrawing the stick is caught three ways (provider facts, presence,
+  captured module identity). The "synthetic providers" mutant had to freeze
+  all three before a `SAVE` completed on a withdrawn stick.
+- A debug-master command is refused at the checkpoint route, not by the
+  endpoint policy; the oracle scores the port-1 error responses.
+
+Still open (not claimed):
+
+- Profiles outside the bounded one (multi-hart, out-of-order, L2/L3 caches,
+  AI/APU writers) stay refused by `origin_supported`.
+- No native case has a VirtIO job in flight across a checkpoint; that rests on
+  component-level quiesce evidence.
+- The media under the endpoint is the flash model: persistence across the
+  bench power cycle is model persistence. P0/P1 (real PHY, flash part,
+  hold-up energy) and V0/L0 are untouched.
+- Debug `sberror` still reads 0 for the refused 64-bit SBA access
+  (`dm_sba.sv`), as recorded for C2.
+- hyp8 port: nothing of C3-C6 is ported; work list in `hyp8-port-ledger.md`.

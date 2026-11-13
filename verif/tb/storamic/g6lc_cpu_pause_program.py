@@ -71,6 +71,10 @@ class _Program:
     def csr(self, number, rs):
         self.emit((number << 20) | (rs << 15) | (1 << 12) | 0x73)
 
+    def csrr(self, rd, number):
+        # csrrs rd, csr, x0 : read CSR into rd (rs1=x0 -> no CSR write)
+        self.emit((number << 20) | (1 << 12) | (rd << 7) | 0x73)
+
     def address(self, rd, target):
         here = self.cursor * 4
         self.emit((rd << 7) | 0x17)
@@ -108,6 +112,9 @@ class _Program:
     def lhu(self, rd, imm, rs1):
         self._i(imm, rs1, 5, rd, 0x03)
 
+    def lwu(self, rd, imm, rs1):
+        self._i(imm, rs1, 6, rd, 0x03)
+
     def li(self, rd, value):
         assert -2048 <= value < 2048
         self.addi(rd, 0, value)
@@ -133,6 +140,9 @@ class _Program:
 
     def bne(self, rs1, rs2, target):
         self._branch(1, rs1, rs2, target)
+
+    def beq(self, rs1, rs2, target):
+        self._branch(0, rs1, rs2, target)
 
     def blt(self, rs1, rs2, target):
         self._branch(4, rs1, rs2, target)
@@ -170,8 +180,29 @@ class _Program:
 DATA_BASE = 0x5000_0000
 DONE_OFF = 0x780          # completion store -> Data+0x780 (bench PASS)
 TRAPD_OFF = 0x7F8         # trap store     -> Data+0x7F8 (bench FAIL)
-CODE_TRAP = 0x300         # image byte offset of the trap stub
+CODE_TRAP = 0x400         # image byte offset of the trap stub (was 0x300;
+                          # raised to leave room for the C5 resync code)
 ITER = 220                # loop iterations -> thousands of committed stores
+# ---- C5 resync-on-release observability ------------------------------------
+# Cacheable region is the whole Boot image (CachedRegion 0x8000_0000 len
+# 0x4000_0000): I$ caches fetched code, D$ caches data reads. rom[] indices:
+#   0..~210  main+subs, 256.. trap stub (CODE_TRAP=0x400), 300.. _resync_probe
+#   (first instr = patchable addi), then _resync_phase, 500 cacheable data word.
+BOOT_BASE = 0x8000_0000
+CDataIdx = 500            # rom index of the cacheable data word (Boot+0x7D0)
+CDataOff = CDataIdx * 4   # 0x7D0 byte offset (< 2048 -> single addi reachable)
+PATCH_IDX = 300           # rom index of the patchable `addi x26,x0,imm`
+RESYNC_PROBE_IDX = PATCH_IDX   # _resync_probe is emitted so its addi lands here
+RESYNC_ITER = 600         # dense resync-probe loop iterations
+# Non-cacheable Data log offsets (bench reads these; all < DONE_OFF 0x780):
+PROBE_OFF = 0x740         # packed {salt[63:32], gen[31:0]} observation (sd)
+ARM_OFF   = 0x748         # LR/SC armed flag (sw)
+GO_OFF    = 0x74C         # LR/SC go flag    (lw/sw)
+RSV_OFF   = 0x750         # LR/SC reserved word (lr.w/sc.w)
+SC_OFF    = 0x758         # packed {sc_result[63:32], 0x5C[31:0]} (sd, 8-aligned)
+HB_OFF    = 0x760         # probe heartbeat counter (sw; deterministic +600)
+# Cacheable CPU-writable scratch proof lives in the Boot image at rom index
+# CDataIdx+2 (Boot + CDataOff + 8); the bench verifies it landed in rom[].
 # Dedicated 48-byte store-burst area: above _work_sub's rotating slots
 # (max ~0x5F0) and below DONE(0x780)/TRAPD(0x7F8). 12 back-to-back stores per
 # iteration saturate the store_buffer commit queue (DEPTH_COMMIT=4) so several
@@ -296,6 +327,78 @@ def _leaf(p):
     p.jalr(0, 1, 0)                 # ret
 
 
+def _cache_scratch_check(p):
+    """Prove the cacheable Boot region is CPU-writable RAM: a store then a
+    readback of a scratch word (D$ -> AXI W -> bench rom[]). The bench also
+    verifies rom[SCRATCH_IDX] landed, covering end-to-end writability."""
+    p.address(8, CDataOff + 8)          # x8 = Boot+(CDataOff+8) via auipc:
+                                       # clean 0x8000_xxxx (lui would sign-extend
+                                       # to the 0xFFFF_FFFF_8000_xxxx DRAM alias
+                                       # that is_boot/read_data/rom[] reject)
+    p.li(7, 0x5C)
+    p.sw(7, 0, 8)                   # cacheable store -> rom[502]
+    p.lw(24, 0, 8)                  # readback (store-buffer forward ok)
+    p.bne(24, 7, CODE_TRAP)
+
+
+def _lrsc_test(p):
+    """LR/SC-under-pause. lr.w reserves RSV_OFF (bench exclusive monitor sets
+    reserved_valid on the locked AR), arm the bench, then spin on GO_OFF. The
+    bench, during a later paused hold, replaces the reserved word AND clears
+    the bus-side reservation AND raises GO_OFF. After release the sc.w must
+    FAIL (reservation was cleared by the replace); its result is recorded for
+    oracle o6. x5 = Data base throughout."""
+    p.addi(8, 5, RSV_OFF)
+    p.lr(9, 8, 2)                   # lr.w x9,(x8)  funct3=2 (.w)
+    p.li(7, 1)
+    p.sw(7, ARM_OFF, 5)             # arm the bench's LR/SC replace
+    spin_top = p.cursor * 4
+    p.lw(10, GO_OFF, 5)             # x10 = GoOff
+    p.beq(10, 0, spin_top)          # spin while GoOff==0 (non-cacheable AR)
+    p.addi(8, 5, RSV_OFF)
+    p.li(7, 0x99)
+    p.sc(2, 12, 8, 7)               # sc.w x12,(x8),x7 -> 0=ok !=0=fail
+    p.slli(12, 12, 32)              # result << 32
+    p.addi(12, 12, 0x5C)            # | 0x5C done marker (low32 was 0)
+    p.sd(12, SC_OFF, 5)             # packed {result,0x5C} -> non-cacheable
+
+
+def _resync_probe(p):
+    """One resync observation. FIRST instruction is the patch target: the bench
+    rewrites its immediate while paused, so x26 = the salt the core fetched.
+    Reads the cacheable data word (D$) and packs {salt,gen} into a SINGLE sd so
+    the observation is one atomic commit that cannot be split across a pause."""
+    p.addi(26, 0, 0x40)             # PATCH: addi x26,x0,imm -> PATCH_IDX
+    p.address(8, CDataOff)          # x8 = Boot+CDataOff (cacheable), auipc form
+    p.lwu(24, 0, 8)                 # x24 = gen word, zero-extended (D$)
+    p.slli(26, 26, 32)              # x26 = salt << 32
+    p.add(27, 26, 24)               # x27 = salt<<32 | gen
+    p.sd(27, PROBE_OFF, 5)          # atomic packed obs -> non-cacheable Data
+    # heartbeat LAST: bench watches HB_OFF advance to know a fresh probe
+    # committed, then checks the packed observation against the live replace.
+    p.lw(28, HB_OFF, 5)
+    p.addi(28, 28, 1)
+    p.sw(28, HB_OFF, 5)
+    p.jalr(0, 1, 0)                 # ret
+
+
+def _resync_phase(p):
+    """Dense resync-probe loop: RESYNC_ITER observations so post-release reads
+    are frequent. Returns the jal placeholder idx to patch -> _resync_probe.
+    The inner jal x1->probe clobbers ra each iteration, so the caller ra is
+    saved to x13 up front and restored before ret (same pattern as _work_sub)."""
+    p.addi(13, 1, 0)                # save caller ra across probe calls
+    p.li(6, 0)
+    p.li(2, RESYNC_ITER)
+    head = p.cursor * 4
+    probe_jal = p.jal_placeholder(1)      # -> _resync_probe (patched later)
+    p.addi(6, 6, 1)
+    p.blt(6, 2, head)
+    p.addi(1, 13, 0)               # restore caller ra before ret
+    p.jalr(0, 1, 0)                       # ret
+    return probe_jal
+
+
 def build_program():
     p = _Program()
     # ---- M-mode prologue (same CSR/PMP setup as the proven cpu-origin) ----
@@ -309,6 +412,9 @@ def build_program():
     p.lui(5, DATA_BASE >> 12)       # x5 = Data base
     p.li(2, ITER)                   # x2 = bound
     p.li(6, 0)                      # x6 = i = 0
+    # ---- C5: cacheable CPU-writable proof + LR/SC-under-pause ----
+    _cache_scratch_check(p)
+    _lrsc_test(p)
     # ---- main loop ----
     loop_head = p.cursor * 4          # byte offset (branch targets are bytes)
     p.andi(9, 6, 0x1f)              # x9 = i & 31
@@ -320,6 +426,7 @@ def build_program():
     verify_call = p.jal_placeholder(1)  # -> _burst_verify (readback checks)
     p.addi(6, 6, 1)
     p.blt(6, 2, loop_head)
+    resync_call = p.jal_placeholder(1)   # -> _resync_phase (C5)
     # ---- completion ----
     p.li(7, 0x5a)
     p.sd(7, DONE_OFF, 5)            # Data+0x780 = 0x5a -> bench PASS
@@ -333,15 +440,27 @@ def build_program():
     leaf_jal = _work_sub(p)
     leaf_off = p.cursor * 4
     _leaf(p)
+    assert p.cursor * 4 <= CODE_TRAP, "code overlaps trap stub"
+    # ---- C5 resync code at fixed rom indices (above the trap stub) ----
+    while p.cursor < RESYNC_PROBE_IDX:
+        p.emit(0x00000013)         # nop pad; trap stub overwrites 256 region
+    resync_probe_off = p.cursor * 4    # == RESYNC_PROBE_IDX * 4
+    _resync_probe(p)                    # patchable addi lands at PATCH_IDX
+    resync_phase_off = p.cursor * 4
+    probe_jal = _resync_phase(p)
+    p.patch_jal(probe_jal, resync_probe_off)    # phase -> probe
+    p.patch_jal(resync_call, resync_phase_off)  # main -> phase
     p.patch_jal(burst_call, burst_off)    # main jal -> _burst
     p.patch_jal(sub_call, sub_off)        # main jal -> _work_sub
     p.patch_jal(verify_call, burstv_off)  # main jal -> _burst_verify
     p.patch_jal(leaf_jal, leaf_off)       # _work_sub jal -> _leaf
-    assert p.cursor * 4 <= CODE_TRAP, "code overlaps trap stub"
+    p.rom[CDataIdx] = 0x5EED0000           # initial cacheable gen word
     # ---- trap stub at image CODE_TRAP ----
     p.cursor = CODE_TRAP // 4
     p.lui(5, DATA_BASE >> 12)
     p.li(7, 0x7f)
+    p.csrr(6, 0x341)                # x6 = mepc (faulting PC) -> diagnostic
+    p.sd(6, 0x7F0, 5)               # Data+0x7F0 = mepc (read by bench on trap)
     p.sd(7, TRAPD_OFF, 5)           # Data+0x7F8 = 0x7f -> bench FAIL
     p.jal_self()
     return "".join(f"{word:08x}\n" for word in p.rom).encode("ascii")

@@ -4,6 +4,14 @@
 module g6lc_storamic_attach #(
   parameter bit Enable = 1'b0,
   parameter bit CheckpointRequested = 1'b0,
+  // Native checkpoint binding (native-composition.md). When CheckpointRequested
+  // && NativeBound the packed platform structs are driven and the endpoint
+  // serves slave+ctrl; the legacy g6lc_storamic_top path is not instantiated.
+  parameter bit NativeBound = 1'b0,
+  parameter int unsigned CkptRawFlashBytes = 4096,
+  parameter int unsigned CkptRspCycles = 0,
+  parameter int unsigned CkptTimeoutCycles = 0,
+  parameter bit CkptBootRecovery = 1'b1,
   parameter int unsigned DramClass = 0,
   parameter int unsigned NrChannels = 1,
   parameter int unsigned IdWidth = 4,
@@ -31,15 +39,27 @@ module g6lc_storamic_attach #(
   input logic save_i,
   input logic restore_i,
   output logic save_busy_o,
-  output logic restore_done_o
+  output logic restore_done_o,
+  // Native checkpoint platform boundary; only meaningful under NativeBound.
+  input g6lc_storamic_soc_cfg_pkg::ckpt_plat_in_t ckpt_plat_in_i,
+  output g6lc_storamic_soc_cfg_pkg::ckpt_plat_out_t ckpt_plat_out_o
 );
   localparam g6lc_storamic_cfg_pkg::storamic_cfg_t Cfg =
       CheckpointRequested ? g6lc_storamic_cfg_pkg::StoramicOff :
       g6lc_storamic_soc_cfg_pkg::make_cfg(
           Enable, ModelBase, 64'(ModelWords) * 64'(DataWidth / 8));
 
+  // Checkpoint profile Cfg for the native endpoint: model RAM is main memory.
+  localparam g6lc_storamic_cfg_pkg::storamic_cfg_t CkptCfg =
+      g6lc_storamic_soc_cfg_pkg::make_cfg(
+          CheckpointRequested && NativeBound, ModelBase,
+          64'(ModelWords) * 64'(DataWidth / 8));
+  // 0 selects the legal minimum save/restore timeout for the model window.
+  localparam int unsigned CkptTimeoutEff =
+      CkptTimeoutCycles != 0 ? CkptTimeoutCycles : (ModelWords * 32 + 64);
+
   // pragma translate_off
-  if (CheckpointRequested) begin : gen_checkpoint_binding_required
+  if (CheckpointRequested && !NativeBound) begin : gen_checkpoint_binding_required
     // No native privilege/descriptor/coherence providers are bound yet. Do not
     // silently service a requested checkpoint profile as legacy volatile RAM.
     initial $fatal(1, "STORAMIC_CHECKPOINT_NATIVE_BINDING_REQUIRED");
@@ -213,20 +233,43 @@ module g6lc_storamic_attach #(
     assign restore_done_o = 1'b0;
   end
 
-  g6lc_storamic_top #(.Cfg(Cfg), .req_t(req_t), .resp_t(resp_t),
-                      .DataWidth(DataWidth)) i_storamic (
-    .clk_i, .rst_ni, .testmode_i, .req_i(req), .resp_o(resp),
-    .ctrl_req_i, .ctrl_resp_o, .init_done_o, .service_ready_o,
-    .media_ready_o(), .pad_o(),
-    .source_i('0), .reset_generation_i('0), .model_ready_o(),
-    .sequence_exhausted_o(), .faults_o(), .events_o(),
-    .mem_ready_i(mem_ready), .mem_req_o(mem_req), .mem_gnt_i(mem_gnt),
-    .mem_we_o(mem_we),
-    .mem_addr_o(mem_addr), .mem_wdata_o(mem_wdata), .mem_be_o(mem_be),
-    .mem_tag_o(mem_tag_out), .mem_slot_o(),
-    .mem_rvalid_i(mem_rvalid), .mem_rdata_i(mem_rdata),
-    .mem_error_i(mem_error), .mem_tag_i(mem_tag_in), .irq_o, .stray_i(1'b0)
-  );
+  if (CheckpointRequested && NativeBound) begin : gen_native_ckpt
+    g6lc_storamic_native_ckpt #(
+      .Cfg(CkptCfg), .NumIngress(3), .NumProviders(5), .NumProducers(3),
+      .RawFlashBytes(CkptRawFlashBytes), .RspCycles(CkptRspCycles),
+      .TimeoutCycles(CkptTimeoutEff), .BootRecovery(CkptBootRecovery),
+      .policy_t(logic [31:0]), .req_t(req_t), .resp_t(resp_t),
+      .ctrl_req_t(g6lc_storamic_pkg::axil_req_t),
+      .ctrl_resp_t(g6lc_storamic_pkg::axil_resp_t)
+    ) i_native_ckpt (
+      .clk_i, .rst_ni, .testmode_i,
+      .req_i(req), .resp_o(resp),
+      .ctrl_req_i(ctrl_req_i), .ctrl_resp_o(ctrl_resp_o),
+      .plat_in_i(ckpt_plat_in_i), .plat_out_o(ckpt_plat_out_o)
+    );
+    assign init_done_o = ckpt_plat_out_o.initialized;
+    assign service_ready_o = ckpt_plat_out_o.initialized &&
+                            ckpt_plat_out_o.metadata_ok &&
+                            !ckpt_plat_out_o.recovery_locked;
+    assign irq_o = ckpt_plat_out_o.events.done || ckpt_plat_out_o.events.error;
+  end else begin : gen_storamic_top
+    g6lc_storamic_top #(.Cfg(Cfg), .req_t(req_t), .resp_t(resp_t),
+                        .DataWidth(DataWidth)) i_storamic (
+      .clk_i, .rst_ni, .testmode_i, .req_i(req), .resp_o(resp),
+      .ctrl_req_i, .ctrl_resp_o, .init_done_o, .service_ready_o,
+      .media_ready_o(), .pad_o(),
+      .source_i('0), .reset_generation_i('0), .model_ready_o(),
+      .sequence_exhausted_o(), .faults_o(), .events_o(),
+      .mem_ready_i(mem_ready), .mem_req_o(mem_req), .mem_gnt_i(mem_gnt),
+      .mem_we_o(mem_we),
+      .mem_addr_o(mem_addr), .mem_wdata_o(mem_wdata), .mem_be_o(mem_be),
+      .mem_tag_o(mem_tag_out), .mem_slot_o(),
+      .mem_rvalid_i(mem_rvalid), .mem_rdata_i(mem_rdata),
+      .mem_error_i(mem_error), .mem_tag_i(mem_tag_in), .irq_o, .stray_i(1'b0)
+    );
+    // Native platform boundary is idle on the legacy path.
+    assign ckpt_plat_out_o = '0;
+  end
 
   // Simulation-only AXI/seam trace, enabled by +g6lc_storamic_mem_trace.
   // pragma translate_off

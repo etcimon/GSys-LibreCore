@@ -35,6 +35,7 @@ module g6lc_storamic_checkpoint_endpoint #(
   output logic checkpoint_valid_o, metadata_ok_o, degraded_o,
   output logic [63:0] checkpoint_generation_o, block_sectors_o, reserved_bytes_o,
   output logic [3:0] phase_o,
+  output logic boot_ready_o,
   output logic issue_event_o, refuse_event_o, revoke_event_o, done_event_o, error_event_o,
   input logic st_req_i, st_we_i,
   output logic st_gnt_o,
@@ -127,7 +128,7 @@ module g6lc_storamic_checkpoint_endpoint #(
       .axi_quiesce_o(seal), .axi_quiesced_i(sealed), .media_hold_o(media_hold),
       .initialized_o, .busy_o, .recovery_locked_o, .checkpoint_valid_o,
       .metadata_ok_o, .degraded_o, .checkpoint_generation_o, .block_sectors_o, .reserved_bytes_o,
-      .phase_o, .media_phase_o(), .guard_phase_o(),
+      .phase_o, .media_phase_o(), .guard_phase_o(), .boot_ready_o(boot_ready_o),
       .done_event_o, .error_event_o, .refuse_event_o(), .stale_event_o(),
       .mem_ready_o(mready), .mem_req_i(mr), .mem_we_i(mw), .mem_gnt_o(mg),
       .mem_addr_i(ma), .mem_wdata_i(md), .mem_be_i(mb), .mem_tag_i(mt),
@@ -158,6 +159,7 @@ module g6lc_storamic_checkpoint_endpoint #(
     assign block_sectors_o = 0;
     assign reserved_bytes_o = 0;
     assign phase_o = 0;
+    assign boot_ready_o = 1'b0;
     assign done_event_o = 0;
     assign error_event_o = 0;
     assign st_gnt_o = 0;

@@ -376,6 +376,7 @@ module g6lc_storamic_soc_synth #(
                         .CheckpointRequested(CheckpointRequested),
                         .DataWidth(64), .UserWidth(1)) dut (
     .clk_i, .rst_ni, .testmode_i, .slave(bus), .ctrl_req_i('0),
-    .ctrl_resp_o(), .irq_o(), .init_done_o, .service_ready_o
+    .ctrl_resp_o(), .irq_o(), .init_done_o, .service_ready_o,
+    .ckpt_plat_in_i('0), .ckpt_plat_out_o()
   );
 endmodule

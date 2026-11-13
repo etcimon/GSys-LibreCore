@@ -11,3 +11,6 @@ ${CVA6_REPO_DIR}/corev_apu/storamic/g6lc_storamic_model_stick.sv
 ${CVA6_REPO_DIR}/corev_apu/storamic/g6lc_storamic_sim_mem.sv
 ${CVA6_REPO_DIR}/corev_apu/storamic/g6lc_storamic_checkpoint_model.sv
 ${CVA6_REPO_DIR}/corev_apu/storamic/g6lc_storamic_checkpoint_endpoint.sv
+${CVA6_REPO_DIR}/corev_apu/storamic/g6lc_storamic_boot_recovery.sv
+${CVA6_REPO_DIR}/corev_apu/storamic/g6lc_storamic_native_ckpt.sv
+${CVA6_REPO_DIR}/corev_apu/storamic/g6lc_storamic_native_providers.sv

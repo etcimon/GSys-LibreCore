@@ -33,6 +33,9 @@ module g6lc_storamic_checkpoint_model #(
   output logic [3:0] phase_o,
   output logic [5:0] media_phase_o,
   output logic [2:0] guard_phase_o,
+  // Boot RAM cleared (post boot-cut, not busy): bench preload window. Distinct
+  // from initialized_o; the CPU may still be held while this is high.
+  output logic boot_ready_o,
   output logic done_event_o, error_event_o, refuse_event_o, stale_event_o,
   // Existing canonical tagged, relative-byte-address RAM seam.
   output logic mem_ready_o,
@@ -81,6 +84,7 @@ module g6lc_storamic_checkpoint_model #(
   logic guard_idle;
   assign exclusive = axi_quiesced_i && (&producer_paused_i) &&
                      guard_idle && !st_flush_req_i;
+  assign boot_ready_o = boot_ready_q && !ram_busy;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin boot_cut_q <= 1; boot_ready_q <= 0; end
     else begin

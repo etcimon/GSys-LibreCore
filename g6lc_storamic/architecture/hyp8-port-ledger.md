@@ -84,6 +84,45 @@ hyp8-specific design points, to settle before porting:
 Qualification to repeat: `cpu-pause` (12 positive cases, mutants k1–k5),
 `axi-gate-formal`.
 
+## 3a. CPU resume synchronization (C5)
+
+Contract: `cpu-pause-provider.md` (resync on release). Runs when a pause that
+replaced RAM is released: flush D-cache, invalidate I-cache, squash to the
+commit head, clear LR/SC reservations, then acknowledge.
+
+| Main-tree file | Hook | hyp8 counterpart | Status |
+|---|---|---|---|
+| `core/controller.sv` | Storamic D-cache flush request/ack and squash inputs, folded into the existing flush outputs | `core/controller.sv` | not ported |
+| `core/cva6.sv` | resync FSM between pause release and core un-halt; `resync_squash` redirect to the commit head | `core/g6lc_core.sv` | not ported |
+| `core/fetch_B/frontend.sv`, `core/fetch_A/frontend/frontend.sv` | `commit_step_i`: lets the commit-source redirect advance the architectural PC while `halt_i` is held, otherwise the head block is fetched twice | hyp8 `fetch_B` frontend | not ported |
+| `corev_apu/src/g6lc_axi_lrsc.sv`, `g6lc_axi_atomics_wrap.sv` | `res_clr_i`: drop every reservation (clear wins over a same-cycle LR) | same names | not ported |
+
+hyp8-specific design points: the squash must also empty hyp8's LSQ and loop
+buffer; the frontend redirect-under-halt case must be re-derived for hyp8's
+fetch pipeline rather than copied. Qualification to repeat: `cpu-pause` C5
+cases with mutants r1–r4, and `native-ckpt` mutants n2–n4.
+
+## 3b. Native checkpoint composition (C3/C6)
+
+Contract: `native-composition.md`. All logic is in `corev_apu/storamic/`
+(`g6lc_storamic_native_ckpt`, `g6lc_storamic_native_providers`, `attach`); the
+outside-folder surface is wiring only.
+
+| Main-tree file | Content | hyp8 counterpart | Status |
+|---|---|---|---|
+| `corev_apu/include/g6lc_storamic_soc_cfg_pkg.sv` | `ckpt_plat_in_t`, `ckpt_plat_out_t`, `ckpt_events_t` platform boundary structs | absent in hyp8 | not ported (copy) |
+| `corev_apu/src/g6lc_ai_dram_backend.sv` | attach checkpoint ports tied off (native profile instantiates the attach from the harness) | same name | not ported |
+| `corev_apu/tb/ariane_testharness.sv` | native attach binding, provider/pause/quiesce wiring for CPU, debug and VirtIO, reservation clear, `STORAMIC_CKPT_STATE` report, sim triggers | `corev_apu/tb/g6lc_testharness.sv` | not ported |
+| `corev_apu/tb/g6lc_tb.cpp` | deferred preload into the native endpoint RAM on `boot_ready`, `+storamic_ckpt_report`, `+storamic_sba_ctrl` | hyp8 C++/SV driver | not ported |
+| `Makefile` | source list and defines | hyp8 build lists | not ported |
+
+The boot recovery agent (`g6lc_storamic_boot_recovery`, C6b) is inside
+`g6lc_storamic_native_ckpt` and needs no port; outside the folder it adds only
+the bench power-cycle trigger (`StoramicBase + 0x3078`, a reset term on the
+harness `rstgen`) and the `CkptBootRecovery` attach parameter.
+
+Qualification to repeat: `native-ckpt` (cases and mutants n1-n7).
+
 ## 4. Generic core fixes found through Storamic
 
 | Fix | Main-tree file | hyp8 status |

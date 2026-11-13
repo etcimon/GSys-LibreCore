@@ -117,6 +117,37 @@ stages (`core-scc` 0 SCC/0 latch; `cpu-strict-pins` observed==pinned, no new
 UNOPTFLAT; `cpu-origin`, `cpu-debug`, `native-c2` incl. m1–m6). Remote unit
 suite totals are recorded in the run receipt.
 
+## C5: Resync On Release
+
+Every release from a Storamic pause may follow a RAM replacement (checkpoint
+restore), so the core never resumes on state fetched before the pause.
+
+- `core/cva6.sv`: a three-state FSM (`RESYNC_IDLE` → `RESYNC_FLUSH_D` →
+  `RESYNC_WAIT_HEAD`) entered when the pause is released. The core stays
+  halted through it (`resync_held` is part of `storamic_halt` and removes
+  `storamic_drained_o`), and a pause re-asserted mid-resync keeps it halted;
+  the next release starts a fresh resync.
+- `core/controller.sv`: `resync_storamic_flush_i` requests a D-cache flush and
+  returns `resync_storamic_dack_o`; `resync_storamic_squash_i` flushes
+  IF/ID/EX and the scoreboard, invalidates the I-cache and redirects to the
+  commit head, through the existing flush outputs.
+- Frontends (`core/fetch_B/frontend.sv`, `core/fetch_A/frontend/frontend.sv`):
+  `commit_step_i` lets that one commit-source redirect advance the
+  architectural PC although `halt_i` is still set. Without it the head block
+  was presented twice and executed twice.
+- LR/SC reservations live outside the core, in `g6lc_axi_lrsc`. Its
+  `res_clr_i` (via `g6lc_axi_atomics_wrap`) is asserted by the platform while
+  the CPU is reported paused; a spurious SC failure is ISA-legal.
+
+Inert when the profile is not `origin_supported` (FSM unreachable,
+`commit_step_i` constant 0). Timing: registered state, ORs into existing flush
+terms; no new path through the commit or fetch critical cones.
+
+Evidence: `cpu-pause` C5 cases with a retire-based oracle (`code_chk`,
+`data_chk` on every patched instruction and reload) and mutants r1 (no D-cache
+flush), r2 (no I-cache flush), r3/r4 (missing or wedged resync); natively by
+`native-ckpt` mutants n2–n4 (`native-composition.md`).
+
 ## What This Does Not Provide
 
 - No memory, cache, fabric, transport, DMA or persistence provider; the gate

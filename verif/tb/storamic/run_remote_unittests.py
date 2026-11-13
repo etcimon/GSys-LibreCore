@@ -38,6 +38,8 @@ ALL_DIRS = (
     # own benches. Scoped to storamic/ so unrelated untracked corev_apu trees
     # (apu shader corpus/tools) stay out of the payload.
     "corev_apu/storamic/",
+    # Storamic firmware the stage judges parse for their fail codes.
+    "verif/tests/custom/storamic/",
 )
 SRC_DIRS = (
     "verif/tb/apu/",
