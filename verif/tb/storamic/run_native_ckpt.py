@@ -21,6 +21,7 @@ from pathlib import Path
 import run_native_c2 as c2
 
 FW_CKPT = "verif/tests/custom/storamic/storamic_ckpt.c"
+FW_VIO = "verif/tests/custom/storamic/storamic_ckpt_vio.c"
 HARNESS = "corev_apu/tb/ariane_testharness.sv"
 DEFS_CKPT = ("G6LC_STORAMIC+G6LC_STORAMIC_MODEL+G6LC_STORAMIC_ORIGIN_PROBE"
              "+G6LC_STORAMIC_CKPT+G6LC_AI_EXCL_MULTI")
@@ -117,6 +118,15 @@ MUTANTS = [
     ("n7-no-boot-recovery",
      [(HARNESS, "    .CkptBootRecovery(1'b1),", "    .CkptBootRecovery(1'b0),")],
      "cold", ("locked-stall", None)),
+    # The endpoint is told the VirtIO writer is paused while its accepted job
+    # is still running.
+    ("n8-virtio-paused-tied",
+     [(HARNESS,
+       "{ckpt_virtio_paused, ckpt_dbg_closed, ckpt_cpu_paused};\n"
+       "    ckpt_in.producer_error",
+       "{1'b1, ckpt_dbg_closed, ckpt_cpu_paused};\n"
+       "    ckpt_in.producer_error")],
+     "vio", ("marker", VIOLATION)),
 ]
 
 
@@ -225,9 +235,13 @@ def execute(ctx):
     swap_elf = fw("ckpt-swap", [f"-DCKPT_TRIGGER=0x{TRIG_HOT_SWAP:x}UL"])
     cold_elf = fw("ckpt-cold", ["-DCKPT_COLD"])
     cold_neg_elf = fw("ckpt-cold-neg", ["-DCKPT_COLD", "-DCKPT_ORACLE_EXPECT_B"])
+    vio_elf = ctx.compile_fw(FW_VIO, "ckpt-vio", ["-DSTORAMIC_COHERENT_DMA"])
+    if vio_elf is None:
+        rep["incomplete"].append("firmware ckpt-vio failed to compile")
     if rep["incomplete"]:
         return rep
-    fw_by_key = {"flow": flow_elf, "presence": presence_elf, "cold": cold_elf}
+    fw_by_key = {"flow": flow_elf, "presence": presence_elf, "cold": cold_elf,
+                 "vio": vio_elf}
 
     def case(name, elf, want_success, want_fail, expect_state):
         sim = run_sim(ctx, "ckpt", elf)
@@ -314,6 +328,13 @@ def execute(ctx):
     sim = case("cold-oracle-expect-b", cold_neg_elf, False, FAIL_DATA_RESTORED,
                cold_state)
     sim["pass"] = bool(sim["pass"] and sim["preloads"] == 1)
+
+    # C4 with a VirtIO job in flight: SAVE is issued right behind a notified
+    # virtio-blk request. The pause must find the writer busy (non-vacuity
+    # counter), the job must retire exactly once before the image is taken.
+    case("virtio-inflight", vio_elf, True, None,
+         dict(common, valid="1", generation="1", done=(">=", 2), error="0",
+              vio_busy_pauses=(">=", 1)))
 
     # Positive flow again with delayed RAM/flash responses.
     ok, _ = ctx.ensure_model("ckpt-rsp", DEFS_CKPT_RSP)

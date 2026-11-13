@@ -162,7 +162,7 @@ fail with its code); provider negatives (presence drop, power-good drop: sealed
 and locked, never a fabricated result); hot swap to a different identity
 (discovery re-qualifies it, mapping generation 2, endpoint stays locked); debug
 SBA command to the control page refused at the route; cold recovery and its
-negative oracle. Mutants, each killed by its named symptom:
+negative oracle; a VirtIO job in flight across `SAVE`. Mutants, each killed by its named symptom:
 
 | Mutant | Change | Symptom |
 |---|---|---|
@@ -173,11 +173,15 @@ negative oracle. Mutants, each killed by its named symptom:
 | n5 | CPU `paused` tied high | `STORAMIC_CKPT_VIOLATION` |
 | n6 | provider facts and module identity synthetic | SAVE completes on a withdrawn stick (22) |
 | n7 | no boot recovery agent | locked on a valid checkpoint after the power cycle, hart never runs |
+| n8 | VirtIO `paused` tied high | `STORAMIC_CKPT_VIOLATION` with a job in flight |
 
-Not covered natively: the VirtIO device and its DMA master are present and
-their real `quiesced`/`inflight` signals are the ones bound, but the checkpoint
-firmware issues no VirtIO job, so "an accepted VirtIO job finishes exactly once
-across a native checkpoint" rests on the component-level quiesce evidence only.
+VirtIO writer in flight (`storamic_ckpt_vio.c`, case `virtio-inflight`): a
+virtio-blk OUT is notified and `SAVE` issued right behind it. The pause request
+must find the writer busy (`vio_busy_pauses >= 1` in `STORAMIC_CKPT_STATE`),
+the job retires exactly once before the RAM is sealed (one used-ring entry
+after `SAVE` and in the restored image), and after `RESTORE` the driver
+re-initializes the device, whose state is not part of the image, and reads the
+block back.
 `native-c2`, `native-c2-wide` and the default (non-checkpoint) harness are
 unchanged.
 

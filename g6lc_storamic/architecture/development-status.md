@@ -1493,8 +1493,9 @@ Evidence of record (remote testharness, frozen snapshot, runner identity
 check): see the run tags in `completion-plan.md` row C3-C6. `native-ckpt`
 cases: boot, save/restore flow at response delay 0 and 2, negative firmware
 oracle, debug SBA command refused at the route, presence drop, power-good
-drop, hot swap to another identity, cold recovery and its negative oracle;
-mutants n1-n7 each killed by its named symptom.
+drop, hot swap to another identity, cold recovery and its negative oracle, a
+VirtIO job in flight across `SAVE`; mutants n1-n8 each killed by its named
+symptom.
 
 Findings made on the way:
 
@@ -1512,8 +1513,8 @@ Still open (not claimed):
 
 - Profiles outside the bounded one (multi-hart, out-of-order, L2/L3 caches,
   AI/APU writers) stay refused by `origin_supported`.
-- No native case has a VirtIO job in flight across a checkpoint; that rests on
-  component-level quiesce evidence.
+- Device state is not checkpointed: after a restore, software must
+  re-initialize the VirtIO device (shown by the `virtio-inflight` case).
 - The media under the endpoint is the flash model: persistence across the
   bench power cycle is model persistence. P0/P1 (real PHY, flash part,
   hold-up energy) and V0/L0 are untouched.

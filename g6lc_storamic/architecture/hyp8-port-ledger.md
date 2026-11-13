@@ -121,7 +121,7 @@ The boot recovery agent (`g6lc_storamic_boot_recovery`, C6b) is inside
 the bench power-cycle trigger (`StoramicBase + 0x3078`, a reset term on the
 harness `rstgen`) and the `CkptBootRecovery` attach parameter.
 
-Qualification to repeat: `native-ckpt` (cases and mutants n1-n7).
+Qualification to repeat: `native-ckpt` (cases and mutants n1-n8).
 
 ## 4. Generic core fixes found through Storamic
 

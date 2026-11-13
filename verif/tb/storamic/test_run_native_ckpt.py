@@ -59,7 +59,7 @@ class NativeCkptJudgeTest(unittest.TestCase):
 
     def test_mutant_anchors_exist_exactly_once(self):
         for name, patches, fw_key, _ in CK.MUTANTS:
-            self.assertIn(fw_key, ("flow", "presence", "cold"), name)
+            self.assertIn(fw_key, ("flow", "presence", "cold", "vio"), name)
             for rel, anchor, repl in patches:
                 text = (ROOT / rel).read_text().replace("\r\n", "\n")
                 self.assertEqual(text.count(anchor), 1, name)
