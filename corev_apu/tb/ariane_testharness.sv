@@ -1612,13 +1612,15 @@ module ariane_testharness #(
   // and command activity checkable by the runner.
   int unsigned ckpt_pause_count, ckpt_release_count, ckpt_done_count;
   int unsigned ckpt_error_count, ckpt_refuse_count, ckpt_issue_count;
-  logic ckpt_paused_d;
+  logic ckpt_paused_d, ckpt_pause_req_d;
+  // Pause requests that found the VirtIO writer with work outstanding.
+  int unsigned ckpt_vio_busy_pauses;
   logic [3:0] ckpt_phase_d;
   logic ckpt_locked_d, ckpt_init_d;
   bit ckpt_trace_en;
   initial ckpt_trace_en = $test$plusargs("storamic_ckpt_trace");
   task automatic ckpt_state_line(input string tag);
-    $display("STORAMIC_CKPT_STATE %s t=%0t initialized=%0d locked=%0d busy=%0d phase=%0d valid=%0d generation=%0d policy_ready=%0d policy_epoch=%0d providers=%02h present=%0d paused=%03b errors=%03b map_gen=%0d reset_gen=%0d pauses=%0d releases=%0d issue=%0d done=%0d error=%0d refuse=%0d rec_active=%0d rec_failed=%0d",
+    $display("STORAMIC_CKPT_STATE %s t=%0t initialized=%0d locked=%0d busy=%0d phase=%0d valid=%0d generation=%0d policy_ready=%0d policy_epoch=%0d providers=%02h present=%0d paused=%03b errors=%03b map_gen=%0d reset_gen=%0d pauses=%0d releases=%0d issue=%0d done=%0d error=%0d refuse=%0d rec_active=%0d rec_failed=%0d vio_busy_pauses=%0d",
              tag, $time, ckpt_out.initialized, ckpt_out.recovery_locked,
              ckpt_out.busy, ckpt_out.phase, ckpt_out.checkpoint_valid,
              ckpt_out.checkpoint_generation, ckpt_out.policy_ready,
@@ -1627,16 +1629,22 @@ module ariane_testharness #(
              ckpt_mapping_generation, ckpt_reset_generation,
              ckpt_pause_count, ckpt_release_count, ckpt_issue_count,
              ckpt_done_count, ckpt_error_count, ckpt_refuse_count,
-             ckpt_out.recovery_active, ckpt_out.recovery_failed);
+             ckpt_out.recovery_active, ckpt_out.recovery_failed,
+             ckpt_vio_busy_pauses);
   endtask
   always_ff @(posedge clk_i) begin
     if (!ndmreset_n) begin
       ckpt_paused_d <= 1'b0;
+      ckpt_pause_req_d <= 1'b1;
       ckpt_phase_d <= '0;
       ckpt_locked_d <= 1'b0;
       ckpt_init_d <= 1'b0;
     end else begin
       ckpt_paused_d <= ckpt_cpu_paused;
+      ckpt_pause_req_d <= ckpt_pause_req;
+      if (ckpt_pause_req && !ckpt_pause_req_d &&
+          (ckpt_virtio_inflight || ckpt_dma_inflight))
+        ckpt_vio_busy_pauses <= ckpt_vio_busy_pauses + 1;
       ckpt_phase_d <= ckpt_out.phase;
       ckpt_locked_d <= ckpt_out.recovery_locked;
       ckpt_init_d <= ckpt_out.initialized;
