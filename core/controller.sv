@@ -94,7 +94,17 @@ module controller
     // N1c bounded drain force - SMT selector (drained handoff): the resident
     // hart's uncommitted state is killed so the pending handoff can complete;
     // the outgoing hart's restart PC is banked via npc_alt, not set_pc.
-    input logic drain_force_i
+    input logic drain_force_i,
+    // C5 storamic resync-on-release. Level request to hold the D$ flush until
+    // acknowledged (independent of DcacheFlushOnFence/FenceI, which are 0 in the
+    // qualified config so fence_active_q cannot be reused). One-cycle pulse that
+    // issues the FENCE.I squash set (set_pc + IF/unissued/ID/EX flush + I$ flush)
+    // while commit stays halted, so the frontend refetches the commit head.
+    input logic resync_storamic_flush_i,
+    input logic resync_storamic_squash_i,
+    // Single-cycle acknowledge of the requested D$ flush (flush_dcache_ack_i
+    // qualified by the request level).
+    output logic resync_storamic_dack_o
 );
 
   // active fence - high if we are currently flushing the dcache
@@ -346,7 +356,36 @@ module controller
       flush_id_o             = 1'b1;
       flush_ex_o             = 1'b1;
     end
+
+    // ---------------------------------
+    // C5 storamic resync-on-release
+    // ---------------------------------
+    // Ordered last so the flush outputs can only be raised, never degraded, by
+    // an earlier block. The D$ flush is a level request held by the parent until
+    // flush_dcache_ack_i returns; it is intentionally independent of
+    // DcacheFlushOnFence/FenceI (both 0 in the qualified config, so
+    // fence_active_q cannot carry it). The squash pulse issues the FENCE.I set
+    // (set_pc + IF/unissued/ID/EX + I$ flush) in a single cycle while commit is
+    // halted, so the frontend redirect refetches the commit head. I$ flush is
+    // fire-and-forget and must coincide with flush_if_o (asserted here).
+    // Timing: pure OR into existing flush outputs from registered parent
+    // signals; no new combinational cone from commit.
+    if (resync_storamic_flush_i) begin
+      flush_dcache = 1'b1;
+    end
+    if (resync_storamic_squash_i) begin
+      set_pc_commit_o        = 1'b1;
+      flush_if_o             = 1'b1;
+      flush_unissued_instr_o = 1'b1;
+      flush_id_o             = 1'b1;
+      flush_ex_o             = 1'b1;
+      flush_icache_o         = 1'b1;
+    end
   end
+
+  // resync D$ flush acknowledge: the request level is held by the parent until
+  // this pulses, so it is a clean single-cycle done.
+  assign resync_storamic_dack_o = resync_storamic_flush_i & flush_dcache_ack_i;
 
   // ----------------------
   // Halt Logic

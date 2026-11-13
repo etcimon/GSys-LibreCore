@@ -23,6 +23,8 @@ module g6lc_axi_atomics_wrap #(
 ) (
     input  logic   clk_i,
     input  logic   rst_ni,
+    // Storamic C5 reservation clear, forwarded to g6lc_axi_lrsc. Tie 0 if unused.
+    input  logic   res_clr_i,
     AXI_BUS.Master mst,
     AXI_BUS.Slave  slv
 );
@@ -50,6 +52,7 @@ module g6lc_axi_atomics_wrap #(
   ) i_lrsc (
       .clk_i,
       .rst_ni,
+      .res_clr_i,
       .slv ( slv ),
       .mst ( lrsc_m )
   );

@@ -99,7 +99,10 @@ module g6lc_ai_dram_backend
       .power_cut_i(storamic_power_cut_i), .save_i(storamic_save_i),
       .restore_i(storamic_restore_i),
       .save_busy_o(storamic_save_busy_o),
-      .restore_done_o(storamic_restore_done_o)
+      .restore_done_o(storamic_restore_done_o),
+      // Native checkpoint boundary: never bound through this backend (the
+      // harness instantiates the attach directly for that profile).
+      .ckpt_plat_in_i('0), .ckpt_plat_out_o()
     );
   end else if (DramClass == AI_DRAM_SIM_AXI && NrChannels == 1) begin : gen_sim_axi
     assign init_done_o = 1'b1;

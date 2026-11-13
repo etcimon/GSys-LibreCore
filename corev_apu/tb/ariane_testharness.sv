@@ -318,6 +318,45 @@ module ariane_testharness #(
   logic storamic_service_enable, storamic_policy_hold;
   logic storamic_aw_authorized, storamic_ar_authorized;
   logic storamic_aw_source_ok, storamic_ar_source_ok;
+  // Native checkpoint composition sidebands (native-composition.md). Driven by
+  // gen_storamic_ckpt under +define+G6LC_STORAMIC_CKPT, constant 0 otherwise,
+  // so every other build is unchanged.
+  logic        ckpt_pause_req;            // to every upstream RAM writer
+  logic        ckpt_policy_ready;
+  logic [31:0] ckpt_policy_epoch;
+  logic        ckpt_core_pause, ckpt_core_drained;
+  logic        ckpt_res_clr;
+  logic        ckpt_virtio_quiesced, ckpt_virtio_qerr, ckpt_virtio_ctrl_quiesced;
+  logic        ckpt_virtio_inflight, ckpt_dma_inflight;
+  logic        ckpt_cpu_paused, ckpt_cpu_err, ckpt_cpu_inflight;
+  logic        ckpt_dbg_closed, ckpt_dbg_inflight;
+  // Bench power cycle (sim stimulus): resets the ndmreset_n domain.
+  logic        ckpt_cycle_rst;
+  // Bench ELF loader hook: RAM cleared and idle after the boot power cut.
+  logic        storamic_ckpt_boot_ready /*verilator public_flat_rd*/;
+`ifdef G6LC_STORAMIC_CKPT
+  localparam bit STORAMIC_CKPT = 1'b1;
+  // Checkpointed main memory is reduced: save/restore are word-serial.
+`ifdef G6LC_STORAMIC_CKPT_WORDS
+  localparam int unsigned STORAMIC_CKPT_WORDS = `G6LC_STORAMIC_CKPT_WORDS;
+`else
+  localparam int unsigned STORAMIC_CKPT_WORDS = 2**15;
+`endif
+`else
+  localparam bit STORAMIC_CKPT = 1'b0;
+  assign ckpt_cycle_rst = 1'b0;
+  assign ckpt_pause_req = 1'b0;
+  assign ckpt_policy_ready = 1'b0;
+  assign ckpt_policy_epoch = '0;
+  assign ckpt_core_pause = 1'b0;
+  assign ckpt_res_clr = 1'b0;
+  assign ckpt_cpu_paused = 1'b0;
+  assign ckpt_cpu_err = 1'b0;
+  assign ckpt_cpu_inflight = 1'b0;
+  assign ckpt_dbg_closed = 1'b0;
+  assign ckpt_dbg_inflight = 1'b0;
+  assign storamic_ckpt_boot_ready = 1'b0;
+`endif
   if (CVA6Cfg.StoramicIoEn) begin : gen_storamic_ctrl
     ariane_axi_soc::req_slv_t  storamic_axi_req;
     ariane_axi_soc::resp_slv_t storamic_axi_resp;
@@ -325,7 +364,8 @@ module ariane_testharness #(
     `AXI_ASSIGN_FROM_RESP(master[STORAMIC_IDX], storamic_axi_resp)
     // Native admission stays refused until C6: the route observes and scores
     // source candidates but never authorizes service (Enable=0, no policy).
-    localparam bit STORAMIC_ROUTE_ADMIT = 1'b0;
+    // The only admitting build is the bounded native checkpoint composition.
+    localparam bit STORAMIC_ROUTE_ADMIT = STORAMIC_CKPT;
     g6lc_storamic_checkpoint_route #(
       .Enable(STORAMIC_ROUTE_ADMIT),
       .LocalIdWidth(ariane_axi_soc::IdWidth),
@@ -339,7 +379,7 @@ module ariane_testharness #(
     ) i_storamic_route (
       .clk_i, .rst_ni(ndmreset_n),
       .req_i(storamic_axi_req), .resp_o(storamic_axi_resp),
-      .policy_ready_i(1'b0), .policy_epoch_i('0),
+      .policy_ready_i(ckpt_policy_ready), .policy_epoch_i(ckpt_policy_epoch),
       .ctrl_req_o(storamic_ctrl_req),
       .ctrl_resp_i(storamic_ctrl_resp),
       .vctrl_req_o(storamic_vctrl_req),
@@ -370,6 +410,7 @@ module ariane_testharness #(
       .Base(ariane_soc::StoramicBase),
       .Length(ariane_soc::StoramicLength),
       .CtrlPageEn(CVA6Cfg.StoramicEn),
+      .CtrlMayRefuse(STORAMIC_CKPT),
       .slv_req_t (ariane_axi::req_t),
       .slv_resp_t(ariane_axi::resp_t),
       .mst_req_t (ariane_axi_soc::req_slv_t),
@@ -380,8 +421,9 @@ module ariane_testharness #(
       .mst_req(storamic_axi_req), .mst_resp(c2_mst_resp),
       .aw_source_ok_i(storamic_aw_source_ok),
       .ar_source_ok_i(storamic_ar_source_ok),
-      .aw_authorized_i(storamic_aw_authorized),
-      .ar_authorized_i(storamic_ar_authorized)
+      // Authorization is legitimate only in the native checkpoint build.
+      .aw_authorized_i(storamic_aw_authorized && !STORAMIC_CKPT),
+      .ar_authorized_i(storamic_ar_authorized && !STORAMIC_CKPT)
     );
     // pragma translate_on
     // ST-037B/C: the first virtio-blk MMIO transport at StoramicBase+0x1000,
@@ -473,16 +515,23 @@ module ariane_testharness #(
 `endif
     g6lc_storamic_virtio_dev #(.QueueNumMax(128), .MaxSegs(8)) i_storamic_virtio (
       .clk_i, .rst_ni(ndmreset_n),
-      .quiesce_i(1'b0), .quiesced_o(), .quiesce_error_o(),
-      .ctrl_quiesce_i(1'b0), .ctrl_quiesced_o(),
-      .inflight_o(),
+      // C4: the VirtIO writer's real pause/drain owner (0 unless CKPT).
+      .quiesce_i(ckpt_pause_req), .quiesced_o(ckpt_virtio_quiesced),
+      .quiesce_error_o(ckpt_virtio_qerr),
+      .ctrl_quiesce_i(ckpt_pause_req), .ctrl_quiesced_o(ckpt_virtio_ctrl_quiesced),
+      .inflight_o(ckpt_virtio_inflight),
       .ctrl_req_i(storamic_vctrl_req), .ctrl_resp_o(storamic_vctrl_resp),
       .irq_o(storamic_virtio_irq),
       .device_usable_i(vd_usable && stick_present),
       .capacity_i(stick_flash_sectors), .capacity_update_i(1'b0),
       .serial_i(stick_serial),
       .store_ready_i(stick_present),
-      .dma_base_i(ariane_soc::DRAMBase), .dma_size_i(ariane_soc::DRAMLength),
+      .dma_base_i(ariane_soc::DRAMBase),
+`ifdef G6LC_STORAMIC_CKPT
+      .dma_size_i(64'(STORAMIC_CKPT_WORDS) * 64'd8),
+`else
+      .dma_size_i(ariane_soc::DRAMLength),
+`endif
       .dma_req_o(vd_req), .dma_gnt_i(vd_gnt), .dma_we_o(vd_we),
       .dma_addr_o(vd_addr), .dma_wdata_o(vd_wdata), .dma_be_o(vd_be),
       .dma_rvalid_i(vd_rvalid), .dma_rdata_i(vd_rdata), .dma_err_i(vd_err),
@@ -533,13 +582,14 @@ module ariane_testharness #(
     assign vd_rdata = '0; assign vd_err = 1'b0;
     assign ai_dma_sh_req = '0;
     assign storamic_inval_valid = 1'b0; assign storamic_inval_addr = '0;
+    assign ckpt_dma_inflight = 1'b0;
 `else
     g6lc_storamic_dma_axi #(
       .IdWidth(ariane_axi::IdWidth), .DmaId('0), .InvalEn(1'b1),
       .axi_req_t(ariane_axi::req_t), .axi_resp_t(ariane_axi::resp_t)
     ) i_storamic_dma (
       .clk_i, .rst_ni(ndmreset_n),
-      .inflight_o(),
+      .inflight_o(ckpt_dma_inflight),
       .dma_req_i(vd_req), .dma_gnt_o(vd_gnt), .dma_we_i(vd_we),
       .dma_addr_i(vd_addr), .dma_wdata_i(vd_wdata), .dma_be_i(vd_be),
       .dma_rvalid_o(vd_rvalid), .dma_rdata_o(vd_rdata), .dma_err_o(vd_err),
@@ -562,6 +612,11 @@ module ariane_testharness #(
     assign storamic_virtio_irq = 1'b0;
     assign storamic_inval_valid = 1'b0;
     assign storamic_inval_addr = '0;
+    assign ckpt_virtio_quiesced = 1'b0;
+    assign ckpt_virtio_qerr = 1'b0;
+    assign ckpt_virtio_ctrl_quiesced = 1'b0;
+    assign ckpt_virtio_inflight = 1'b0;
+    assign ckpt_dma_inflight = 1'b0;
     assign storamic_service_enable = 1'b0;
     assign storamic_policy_hold = 1'b0;
     assign storamic_aw_authorized = 1'b0;
@@ -581,7 +636,7 @@ module ariane_testharness #(
   // RAM master, and the RAM fault clears because of that reset.
   rstgen i_rstgen_main (
     .clk_i        ( clk_i                ),
-    .rst_ni       ( rst_ni & (~ndmreset) & ~apu_fault_reset ),
+    .rst_ni       ( rst_ni & (~ndmreset) & ~apu_fault_reset & ~ckpt_cycle_rst ),
     .test_mode_i  ( test_en              ),
     .rst_no       ( ndmreset_n           ),
     .init_no      (                      ) // keep open
@@ -794,8 +849,26 @@ module ariane_testharness #(
     .data_i     ( dm_slave_rdata            )
   );
 
+`ifdef G6LC_STORAMIC_CKPT
+  // C4: debug-master (port 1) admission gate. Closed while a checkpoint pause
+  // is requested; closed_o is the debug writer's drain acknowledgement.
+  ariane_axi::req_t    ckpt_dbg_req;
+  ariane_axi::resp_t   ckpt_dbg_resp;
+  g6lc_storamic_axi_gate #(
+    .req_t(ariane_axi::req_t), .resp_t(ariane_axi::resp_t)
+  ) i_ckpt_dbg_gate (
+    .clk_i, .rst_ni(ndmreset_n),
+    .close_i(ckpt_pause_req), .closed_o(ckpt_dbg_closed),
+    .inflight_o(ckpt_dbg_inflight),
+    .up_req_i(dm_axi_m_req), .up_resp_o(dm_axi_m_resp),
+    .dn_req_o(ckpt_dbg_req), .dn_resp_i(ckpt_dbg_resp)
+  );
+  `AXI_ASSIGN_FROM_REQ(slave[1], ckpt_dbg_req)
+  `AXI_ASSIGN_TO_RESP(ckpt_dbg_resp, slave[1])
+`else
   `AXI_ASSIGN_FROM_REQ(slave[1], dm_axi_m_req)
   `AXI_ASSIGN_TO_RESP(dm_axi_m_resp, slave[1])
+`endif
 
   axi_adapter #(
     .CVA6Cfg               ( CVA6Cfg                   ),
@@ -1157,10 +1230,17 @@ module ariane_testharness #(
   ) i_axi_riscv_atomics (
     .clk_i,
     .rst_ni ( ndmreset_n               ),
+    // C5: reservations are dropped while the CPU is paused for a checkpoint.
+    .res_clr_i ( ckpt_res_clr          ),
     .slv    ( master[ariane_soc::DRAM] ),
     .mst    ( dram                     )
   );
 `else
+`ifdef G6LC_STORAMIC_CKPT
+  // The vendor exclusive monitor has no reservation clear: the checkpoint
+  // profile requires the LibreCore monitor (+define+G6LC_AI_EXCL_MULTI).
+  initial $fatal(1, "STORAMIC_CKPT_LRSC_REQUIRED");
+`endif
   axi_riscv_atomics_wrap #(
     .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
     .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),
@@ -1318,6 +1398,274 @@ module ariane_testharness #(
       .master      ( join_mst       )
   );
 `endif
+`ifdef G6LC_STORAMIC_CKPT
+  // ==========================================================================
+  // Native checkpoint composition (C3-C6), bounded profile only. Design of
+  // record: g6lc_storamic/architecture/native-composition.md. Main memory is
+  // the endpoint's checkpointed model RAM; g6lc_ai_dram_backend is not
+  // instantiated. Every ckpt_plat_in_t field comes from a real owner below.
+  // ==========================================================================
+`ifdef G6LC_STORAMIC_CKPT_RSP
+  localparam int unsigned STORAMIC_CKPT_RSP = `G6LC_STORAMIC_CKPT_RSP;
+`else
+  localparam int unsigned STORAMIC_CKPT_RSP = 0;
+`endif
+  localparam int unsigned STORAMIC_CKPT_BYTES = STORAMIC_CKPT_WORDS * 8;
+  // checkpoint_layout: raw >= ceil512(2*image + 128) + 512 user bytes.
+  localparam int unsigned STORAMIC_CKPT_FLASH =
+      ((2 * STORAMIC_CKPT_BYTES + 128 + 511) / 512) * 512 + 4096;
+  // pragma translate_off
+  initial begin
+    // The cluster only carries the checkpoint-origin profile under the origin
+    // probe configuration, which also refuses every unsupported target.
+`ifndef G6LC_STORAMIC_ORIGIN_PROBE
+    $fatal(1, "STORAMIC_CKPT_REQUIRES_ORIGIN_PROBE");
+`endif
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+    $fatal(1, "STORAMIC_CKPT_PROFILE_UNSUPPORTED");
+`endif
+  end
+  // pragma translate_on
+
+  g6lc_storamic_soc_cfg_pkg::ckpt_plat_in_t  ckpt_in;
+  g6lc_storamic_soc_cfg_pkg::ckpt_plat_out_t ckpt_out;
+
+  // ---- bench triggers (simulation stimulus, not providers) -----------------
+  // StoramicBase + 0x3040 presence=0, +0x3048 presence=1, +0x3050 power-good=0,
+  // +0x3058 power-good=1, +0x3060 next insertion presents the alternate stick,
+  // +0x3068 discovery fault clear, +0x3070 hot swap (presence drops, the
+  // alternate stick is inserted CkptSwapCycles later with no firmware help:
+  // the hart cannot run while its RAM is withdrawn). Power-on reset only, so
+  // they survive ndmreset like real pads would. +0x3078 power cycle: supply
+  // lost for CkptCycleCut cycles (power_cut to the endpoint), then the whole
+  // ndmreset_n domain is reset for CkptCycleRst cycles; the flash model keeps
+  // its contents, the RAM does not.
+  localparam int unsigned CkptSwapCycles = 256;
+  localparam int unsigned CkptCycleCut = 16;
+  localparam int unsigned CkptCycleRst = 16;
+  logic [8:0] ckpt_swap_cnt_q;
+  logic [5:0] ckpt_cycle_cnt_q;
+  logic       ckpt_cycle_cut;
+  assign ckpt_cycle_cut = ckpt_cycle_cnt_q > 6'(CkptCycleRst);
+  assign ckpt_cycle_rst = ckpt_cycle_cnt_q != '0 && !ckpt_cycle_cut;
+  logic ckpt_presence_q, ckpt_pgood_q, ckpt_desc_alt_q, ckpt_fault_clear_q;
+  logic ckpt_trig_hit;
+  logic [63:0] ckpt_trig_addr;
+  assign ckpt_trig_hit = gen_storamic_ctrl.storamic_axi_req.aw_valid &&
+                         gen_storamic_ctrl.storamic_axi_resp.aw_ready;
+  assign ckpt_trig_addr = gen_storamic_ctrl.storamic_axi_req.aw.addr;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      ckpt_presence_q <= 1'b1;
+      ckpt_pgood_q <= 1'b1;
+      ckpt_desc_alt_q <= 1'b0;
+      ckpt_fault_clear_q <= 1'b0;
+      ckpt_swap_cnt_q <= '0;
+      ckpt_cycle_cnt_q <= '0;
+    end else begin
+      ckpt_fault_clear_q <= 1'b0;
+      if (ckpt_cycle_cnt_q != '0) ckpt_cycle_cnt_q <= ckpt_cycle_cnt_q - 6'd1;
+      if (ckpt_swap_cnt_q != '0) begin
+        ckpt_swap_cnt_q <= ckpt_swap_cnt_q - 9'd1;
+        // Platform management acknowledges the surprise removal while the
+        // slot is empty (discovery leaves Fault only then), then reinserts.
+        if (ckpt_swap_cnt_q == 9'(CkptSwapCycles / 2)) ckpt_fault_clear_q <= 1'b1;
+        if (ckpt_swap_cnt_q == 9'd1) ckpt_presence_q <= 1'b1;
+      end
+      if (ckpt_trig_hit) begin
+        unique case (ckpt_trig_addr)
+          ariane_soc::StoramicBase + 64'h3040: ckpt_presence_q <= 1'b0;
+          ariane_soc::StoramicBase + 64'h3048: ckpt_presence_q <= 1'b1;
+          ariane_soc::StoramicBase + 64'h3050: ckpt_pgood_q <= 1'b0;
+          ariane_soc::StoramicBase + 64'h3058: ckpt_pgood_q <= 1'b1;
+          ariane_soc::StoramicBase + 64'h3060: ckpt_desc_alt_q <= 1'b1;
+          ariane_soc::StoramicBase + 64'h3068: ckpt_fault_clear_q <= 1'b1;
+          ariane_soc::StoramicBase + 64'h3078:
+            ckpt_cycle_cnt_q <= 6'(CkptCycleCut + CkptCycleRst);
+          ariane_soc::StoramicBase + 64'h3070: begin
+            ckpt_presence_q <= 1'b0;
+            ckpt_desc_alt_q <= 1'b1;
+            ckpt_swap_cnt_q <= 9'(CkptSwapCycles);
+          end
+          default: ;
+        endcase
+      end
+    end
+  end
+
+  // ---- C3: reset generation, owned by the power-on reset domain ------------
+  logic        ckpt_ndm_q;
+  logic [31:0] ckpt_reset_generation_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      ckpt_ndm_q <= 1'b0;
+      ckpt_reset_generation_q <= '0;
+    end else begin
+      ckpt_ndm_q <= ndmreset_n;
+      if (ckpt_ndm_q && !ndmreset_n && ckpt_reset_generation_q != '1)
+        ckpt_reset_generation_q <= ckpt_reset_generation_q + 32'd1;
+    end
+  end
+
+  // ---- C4/C5: producer facts ----------------------------------------------
+  logic ckpt_virtio_paused, ckpt_any_error, ckpt_res_clr_seen_q;
+  assign ckpt_virtio_paused = ckpt_virtio_quiesced && ckpt_virtio_ctrl_quiesced;
+  assign ckpt_any_error = ckpt_cpu_err || ckpt_virtio_qerr;
+  // C5: reservations are dropped for as long as the CPU is reported paused;
+  // resume-safe additionally needs to have seen the clear applied.
+  assign ckpt_res_clr = ckpt_cpu_paused;
+  always_ff @(posedge clk_i or negedge ndmreset_n) begin
+    if (!ndmreset_n) ckpt_res_clr_seen_q <= 1'b0;
+    else ckpt_res_clr_seen_q <= ckpt_cpu_paused;
+  end
+
+  // ---- C3: descriptor / identity / policy providers ------------------------
+  logic [4:0]   ckpt_providers;
+  logic         ckpt_present, ckpt_identity_valid, ckpt_protection_ok;
+  logic [159:0] ckpt_module_id;
+  logic [31:0]  ckpt_mapping_generation, ckpt_reset_generation;
+  logic         ckpt_update_valid;
+  logic [31:0]  ckpt_update_policy;
+  g6lc_storamic_native_providers #(
+    .ModelBytes(64'(STORAMIC_CKPT_BYTES)),
+    .RawFlashBytes(64'(STORAMIC_CKPT_FLASH)),
+    .ResyncCapable(1'b1)
+  ) i_ckpt_providers (
+    .clk_i, .rst_ni(ndmreset_n), .testmode_i(test_en),
+    .presence_i(ckpt_presence_q), .power_good_i(ckpt_pgood_q),
+    .quiesce_req_i(1'b0),
+    .drain_i(ckpt_cpu_paused && ckpt_dbg_closed && ckpt_virtio_paused),
+    .fault_clear_i(ckpt_fault_clear_q),
+    .desc_alt_i(ckpt_desc_alt_q),
+    .reset_generation_i(ckpt_reset_generation_q),
+    .txn_policy_ok_i(!ckpt_any_error),
+    .pause_error_i(ckpt_any_error),
+    .update_ready_i(ckpt_out.update_ready),
+    .providers_ready_o(ckpt_providers),
+    .present_o(ckpt_present), .identity_valid_o(ckpt_identity_valid),
+    .protection_ok_o(ckpt_protection_ok), .module_id_o(ckpt_module_id),
+    .mapping_generation_o(ckpt_mapping_generation),
+    .reset_generation_o(ckpt_reset_generation),
+    .update_valid_o(ckpt_update_valid), .update_policy_o(ckpt_update_policy)
+  );
+
+  always_comb begin
+    ckpt_in = '0;
+    ckpt_in.providers_ready    = ckpt_providers;
+    ckpt_in.present            = ckpt_present;
+    ckpt_in.identity_valid     = ckpt_identity_valid;
+    ckpt_in.protection_ok      = ckpt_protection_ok;
+    ckpt_in.power_cut          = storamic_power_cut || ckpt_cycle_cut;
+    ckpt_in.module_id          = ckpt_module_id;
+    ckpt_in.mapping_generation = ckpt_mapping_generation;
+    ckpt_in.reset_generation   = ckpt_reset_generation;
+    ckpt_in.update_valid       = ckpt_update_valid;
+    ckpt_in.update_policy      = ckpt_update_policy;
+    // Producer order is fixed: 0 CPU, 1 debug master, 2 VirtIO writer.
+    ckpt_in.producer_paused    = {ckpt_virtio_paused, ckpt_dbg_closed, ckpt_cpu_paused};
+    ckpt_in.producer_error     = {ckpt_virtio_qerr, 1'b0, ckpt_cpu_err};
+    ckpt_in.ingress_hold       = {ckpt_virtio_inflight || ckpt_dma_inflight,
+                                  ckpt_dbg_inflight, ckpt_cpu_inflight};
+    ckpt_in.route_hold         = storamic_policy_hold;
+    // No maintenance agent exists in the bounded profile.
+    ckpt_in.maintenance_hold   = 1'b0;
+    ckpt_in.service_enable     = storamic_service_enable;
+    ckpt_in.aw_authorized      = storamic_aw_authorized;
+    ckpt_in.ar_authorized      = storamic_ar_authorized;
+    ckpt_in.restore_resume_safe = ckpt_cpu_paused && ckpt_dbg_closed &&
+                                  ckpt_virtio_paused && ckpt_res_clr_seen_q &&
+                                  !ckpt_any_error;
+  end
+
+  assign ckpt_pause_req = ckpt_out.pause_req;
+  assign ckpt_policy_ready = ckpt_out.policy_ready;
+  assign ckpt_policy_epoch = ckpt_out.policy_epoch;
+  assign storamic_ckpt_boot_ready = ckpt_out.boot_ready;
+  assign dram_ch_r_beats = '0;
+  assign dram_ch_w_beats = '0;
+
+  g6lc_storamic_attach #(
+    .Enable(1'b1), .CheckpointRequested(1'b1), .NativeBound(1'b1),
+    .CkptBootRecovery(1'b1),
+    .DramClass(AiIslandCfg.DramClass), .NrChannels(AiIslandCfg.DramChannels),
+    .IdWidth(ariane_axi_soc::IdWidthSlave), .AddrWidth(AXI_ADDRESS_WIDTH),
+    .DataWidth(AXI_DATA_WIDTH), .UserWidth(AXI_USER_WIDTH),
+    .ModelBase(ariane_soc::DRAMBase), .ModelWords(STORAMIC_CKPT_WORDS),
+    .CkptRawFlashBytes(STORAMIC_CKPT_FLASH), .CkptRspCycles(STORAMIC_CKPT_RSP),
+    // Word-serial save/restore through the staged flash model: far above the
+    // legal minimum (32 cycles/word) so a slow medium is not a false timeout.
+    .CkptTimeoutCycles(STORAMIC_CKPT_WORDS * 256)
+  ) i_ckpt_attach (
+    .clk_i, .rst_ni(ndmreset_n), .testmode_i(test_en),
+    .slave(dram_lat),
+    .ctrl_req_i(storamic_ctrl_req), .ctrl_resp_o(storamic_ctrl_resp),
+    .irq_o(storamic_irq),
+    .init_done_o(dram_init_done), .service_ready_o(dram_service_ready),
+    .power_cut_i(1'b0), .save_i(1'b0), .restore_i(1'b0),
+    .save_busy_o(), .restore_done_o(),
+    .ckpt_plat_in_i(ckpt_in), .ckpt_plat_out_o(ckpt_out)
+  );
+
+  // pragma translate_off
+  // STORAMIC_CKPT_STATE: one line per change under +storamic_ckpt_trace and a
+  // final line under +storamic_ckpt_report. Counters make boot pause/release
+  // and command activity checkable by the runner.
+  int unsigned ckpt_pause_count, ckpt_release_count, ckpt_done_count;
+  int unsigned ckpt_error_count, ckpt_refuse_count, ckpt_issue_count;
+  logic ckpt_paused_d;
+  logic [3:0] ckpt_phase_d;
+  logic ckpt_locked_d, ckpt_init_d;
+  bit ckpt_trace_en;
+  initial ckpt_trace_en = $test$plusargs("storamic_ckpt_trace");
+  task automatic ckpt_state_line(input string tag);
+    $display("STORAMIC_CKPT_STATE %s t=%0t initialized=%0d locked=%0d busy=%0d phase=%0d valid=%0d generation=%0d policy_ready=%0d policy_epoch=%0d providers=%02h present=%0d paused=%03b errors=%03b map_gen=%0d reset_gen=%0d pauses=%0d releases=%0d issue=%0d done=%0d error=%0d refuse=%0d rec_active=%0d rec_failed=%0d",
+             tag, $time, ckpt_out.initialized, ckpt_out.recovery_locked,
+             ckpt_out.busy, ckpt_out.phase, ckpt_out.checkpoint_valid,
+             ckpt_out.checkpoint_generation, ckpt_out.policy_ready,
+             ckpt_out.policy_epoch, ckpt_providers, ckpt_present,
+             ckpt_in.producer_paused, ckpt_in.producer_error,
+             ckpt_mapping_generation, ckpt_reset_generation,
+             ckpt_pause_count, ckpt_release_count, ckpt_issue_count,
+             ckpt_done_count, ckpt_error_count, ckpt_refuse_count,
+             ckpt_out.recovery_active, ckpt_out.recovery_failed);
+  endtask
+  always_ff @(posedge clk_i) begin
+    if (!ndmreset_n) begin
+      ckpt_paused_d <= 1'b0;
+      ckpt_phase_d <= '0;
+      ckpt_locked_d <= 1'b0;
+      ckpt_init_d <= 1'b0;
+    end else begin
+      ckpt_paused_d <= ckpt_cpu_paused;
+      ckpt_phase_d <= ckpt_out.phase;
+      ckpt_locked_d <= ckpt_out.recovery_locked;
+      ckpt_init_d <= ckpt_out.initialized;
+      if (ckpt_cpu_paused && !ckpt_paused_d) ckpt_pause_count <= ckpt_pause_count + 1;
+      if (!ckpt_cpu_paused && ckpt_paused_d) ckpt_release_count <= ckpt_release_count + 1;
+      if (ckpt_out.events.issue) ckpt_issue_count <= ckpt_issue_count + 1;
+      if (ckpt_out.events.done) ckpt_done_count <= ckpt_done_count + 1;
+      if (ckpt_out.events.error) ckpt_error_count <= ckpt_error_count + 1;
+      if (ckpt_out.events.refuse) ckpt_refuse_count <= ckpt_refuse_count + 1;
+      if (ckpt_trace_en && (ckpt_cpu_paused != ckpt_paused_d ||
+                            ckpt_out.phase != ckpt_phase_d ||
+                            ckpt_out.recovery_locked != ckpt_locked_d ||
+                            ckpt_out.initialized != ckpt_init_d))
+        ckpt_state_line("trace");
+    end
+  end
+  final if ($test$plusargs("storamic_ckpt_report")) ckpt_state_line("final");
+  // Independent oracle (uses the owners' own acknowledgements, not the packed
+  // facts handed to the endpoint): while the endpoint copies RAM to or from
+  // flash (CPrepare/CWaitPrepare/CPublish/CRestore/CWaitRestore) every writer
+  // must really be paused.
+  always_ff @(posedge clk_i) begin
+    if (ndmreset_n && (ckpt_out.phase inside {4'd3, 4'd4, 4'd5, 4'd8, 4'd9}) &&
+        !(ckpt_cpu_paused && ckpt_dbg_closed && ckpt_virtio_paused))
+      $fatal(1, "STORAMIC_CKPT_VIOLATION producer_running phase=%0d paused=%b%b%b",
+             ckpt_out.phase, ckpt_virtio_paused, ckpt_dbg_closed, ckpt_cpu_paused);
+  end
+  // pragma translate_on
+`else
   g6lc_ai_dram_backend #(
     .StoramicEn     ( CVA6Cfg.StoramicEn                ),
     .StoramicCheckpointEn( CVA6Cfg.StoramicCheckpointEn  ),
@@ -1367,6 +1715,7 @@ module ariane_testharness #(
     .ch_r_beats_o ( dram_ch_r_beats ),
     .ch_w_beats_o ( dram_ch_w_beats )
   );
+`endif
 
   // Cache geometry comes from the built configuration passed to this harness.
   localparam int unsigned L1D_LINE_B = CVA6Cfg.DCACHE_LINE_WIDTH / 8;
@@ -1887,12 +2236,39 @@ module ariane_testharness #(
     .ai_isl_retired_ticket_i( ai_isl_retired_ticket ),
     .ai_isl_last_ticket_i   ( ai_isl_last_ticket    ),
     .ai_isl_last_status_i   ( ai_isl_last_status    ),
-    .storamic_pause_i       ( 1'b0                  ),
-    .storamic_drained_o     (                       )
+    .storamic_pause_i       ( ckpt_core_pause       ),
+    .storamic_drained_o     ( ckpt_core_drained     )
   );
 
+`ifdef G6LC_STORAMIC_CKPT
+  // C4: CPU (port 0) pause sequencer and AXI admission gate. paused_o is the
+  // CPU writer's drain acknowledgement (core drained AND gate closed).
+  ariane_axi::req_t    ckpt_cpu_req;
+  ariane_axi::resp_t   ckpt_cpu_resp;
+  logic                ckpt_gate_close, ckpt_cpu_closed;
+  g6lc_storamic_cpu_pause i_ckpt_cpu_pause (
+    .clk_i, .rst_ni(ndmreset_n),
+    .pause_req_i(ckpt_pause_req), .paused_o(ckpt_cpu_paused),
+    .error_o(ckpt_cpu_err),
+    .core_pause_o(ckpt_core_pause), .core_drained_i(ckpt_core_drained),
+    .gate_close_o(ckpt_gate_close), .gate_closed_i(ckpt_cpu_closed),
+    .gate_inflight_i(ckpt_cpu_inflight)
+  );
+  g6lc_storamic_axi_gate #(
+    .req_t(ariane_axi::req_t), .resp_t(ariane_axi::resp_t)
+  ) i_ckpt_cpu_gate (
+    .clk_i, .rst_ni(ndmreset_n),
+    .close_i(ckpt_gate_close), .closed_o(ckpt_cpu_closed),
+    .inflight_o(ckpt_cpu_inflight),
+    .up_req_i(axi_ariane_req), .up_resp_o(axi_ariane_resp),
+    .dn_req_o(ckpt_cpu_req), .dn_resp_i(ckpt_cpu_resp)
+  );
+  `AXI_ASSIGN_FROM_REQ(slave[0], ckpt_cpu_req)
+  `AXI_ASSIGN_TO_RESP(ckpt_cpu_resp, slave[0])
+`else
   `AXI_ASSIGN_FROM_REQ(slave[0], axi_ariane_req)
   `AXI_ASSIGN_TO_RESP(axi_ariane_resp, slave[0])
+`endif
 
   // -------------
   // Simulation Helper Functions

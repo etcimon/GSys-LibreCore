@@ -318,6 +318,14 @@ static const char *verilog_plusargs[] = {
     // C2 monitor transaction trace (g6lc_storamic_c2_monitor.sv, $test$plusargs
     // gated). Diagnostic only; same allowlist rule.
     "c2_trace",
+    // Native checkpoint composition (ariane_testharness.sv, G6LC_STORAMIC_CKPT):
+    // STORAMIC_CKPT_STATE final/trace lines and the bench preload bound.
+    "storamic_ckpt_report",
+    "storamic_ckpt_trace",
+    "ckpt_preload_max",
+    // Aim the SBA probe at the checkpoint control page: a debug-master
+    // command must be refused (not the trusted source). With +storamic_sba_probe.
+    "storamic_sba_ctrl",
     nullptr};
 
 // +mem_poke entries, applied inside the sim loop once main_time reaches cycle.
@@ -329,6 +337,7 @@ static std::vector<MemPoke> mem_pokes;
 // allowlisted above; Verilator consumes it before htif_argv is built, so the
 // DTM constructor never sees it).
 static bool g_storamic_sba_probe = false;
+static bool g_storamic_sba_ctrl = false;
 
 extern dtm_t* dtm;
 extern remote_bitbang_t * jtag;
@@ -470,7 +479,9 @@ class preload_aware_dtm_t : public dtm_t {
       // Target the reserved window (offset >= 0x2000, unserved) so the route
       // refuses with an error response — that refusal is the scored traffic.
       // The control/virtio pages (<0x2000) are served and must answer OK.
-      const uint32_t HOLE     = BASE + 0x8000u;
+      // +storamic_sba_ctrl: aim at the checkpoint control page instead (SAVE
+      // register); the route must not authorize a debug-master command.
+      const uint32_t HOLE     = g_storamic_sba_ctrl ? BASE : BASE + 0x8000u;
       unsigned sba_reads = 0, sba_writes = 0;
       unsigned rd_err = 0, wr_err = 0;
       auto sba_idle = [&]() -> bool {
@@ -500,7 +511,7 @@ class preload_aware_dtm_t : public dtm_t {
           write(SBCS, SBVER | SBACC64 | W1C_ERR);
           write(SBADDR1, 0);
           write(SBADDR0, HOLE + 8);
-          write(SBDATA0, 0);
+          write(SBDATA0, g_storamic_sba_ctrl ? 0xC0DE00DBu : 0);
           if (sba_idle()) {
             wr_err = (read(SBCS) >> 12) & 7;
             write(SBCS, SBVER | SBACC64 | W1C_ERR);  // W1C clear sberror
@@ -623,6 +634,8 @@ int main(int argc, char **argv) {
             // argv scan cannot be trusted to still see this plusarg.
             if (arg == "+storamic_sba_probe")
               g_storamic_sba_probe = true;
+            if (arg == "+storamic_sba_ctrl")
+              g_storamic_sba_ctrl = true;
             c = 'P';
           }
           goto retry;
@@ -675,6 +688,8 @@ done_processing:
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "+storamic_sba_probe") == 0)
       g_storamic_sba_probe = true;
+    if (strcmp(argv[i], "+storamic_sba_ctrl") == 0)
+      g_storamic_sba_ctrl = true;
     if (strncmp(argv[i], "+mem_poke=", 10) == 0) {
       uint64_t pa = 0, pv = 0, pc = 0;
       if (sscanf(argv[i] + 10, "%llx:%llx:%llu", (unsigned long long *)&pa,
@@ -763,7 +778,10 @@ done_processing:
   // in ariane_tb.cpp.
 #if (VERILATOR_VERSION_INTEGER >= 5000000)
   // Verilator v5: Use rootp pointer and .data() accessor.
-#ifdef G6LC_STORAMIC_MODEL_TB
+#if defined(G6LC_STORAMIC_CKPT_TB)
+  // Native checkpoint composition: main memory is the endpoint RAM.
+#define MEM top->rootp->ariane_testharness__DOT__i_ckpt_attach__DOT__gen_native_ckpt__DOT__i_native_ckpt__DOT__endpoint__DOT__gen_model__DOT__media__DOT__i_ram__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__i_tc_sram_wrapper__DOT__i_tc_sram__DOT__sram.m_storage
+#elif defined(G6LC_STORAMIC_MODEL_TB)
   // ST-011B: with G6LC_STORAMIC+G6LC_STORAMIC_MODEL the DRAM slave is the
   // Storamic attach's model-profile frontend backed by g6lc_storamic_sim_mem
   // (same pulp sram as gen_sim_axi). There is no user array in this binding.
@@ -774,7 +792,10 @@ done_processing:
 #endif
 #else
   // Verilator v4
-#ifdef G6LC_STORAMIC_MODEL_TB
+#if defined(G6LC_STORAMIC_CKPT_TB)
+  // Native checkpoint composition: main memory is the endpoint RAM.
+#define MEM top->ariane_testharness__DOT__i_ckpt_attach__DOT__gen_native_ckpt__DOT__i_native_ckpt__DOT__endpoint__DOT__gen_model__DOT__media__DOT__i_ram__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__i_tc_sram_wrapper__DOT__i_tc_sram__DOT__sram
+#elif defined(G6LC_STORAMIC_MODEL_TB)
 #define MEM top->ariane_testharness__DOT__i_dram_backend__DOT__gen_storamic__DOT__i_storamic__DOT__gen_model_mem__DOT__i_sim_mem__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__i_tc_sram_wrapper__DOT__i_tc_sram__DOT__sram
 #else
 #define MEM top->ariane_testharness__DOT__i_dram_backend__DOT__gen_sim_axi__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__i_tc_sram_wrapper__DOT__i_tc_sram__DOT__sram
@@ -873,6 +894,22 @@ done_processing:
   g6lc_dram_bytes = (uint64_t)mem_size;
   g6lc_dram_base  = dram_base;
 
+#ifdef G6LC_STORAMIC_CKPT_TB
+  // The checkpointed RAM is cleared by the endpoint's boot power cut, so the
+  // time-0 image above is wiped. Keep a staged copy and load it each time the
+  // model first reports the RAM cleared and idle (before the hart is
+  // released). Only the first such event loads by default: a later one (abort,
+  // power cycle) must not hand the hart a fresh image. +ckpt_preload_max=<n>
+  // overrides (negative = unbounded). +preload_bytes must not exceed the RAM.
+  std::vector<uint8_t> ckpt_image(reinterpret_cast<const uint8_t *>(MEM),
+                                  reinterpret_cast<const uint8_t *>(MEM) + mem_size);
+  long ckpt_preload_max = 1, ckpt_preload_count = 0;
+  for (int i = 1; i < argc; i++)
+    if (std::strncmp(argv[i], "+ckpt_preload_max=", 18) == 0)
+      ckpt_preload_max = std::strtol(argv[i] + 18, nullptr, 0);
+  bool ckpt_boot_ready_q = false;
+#endif
+
   // Optional mid-run MEM probe (set env CVA6_PRELOAD_PROBE=1)
   const bool probe = (std::getenv("CVA6_PRELOAD_PROBE") != nullptr);
   auto mem_half = [&](size_t off) -> uint16_t {
@@ -920,6 +957,20 @@ done_processing:
       top->rtc_i ^= 1;
     }
     main_time++;
+#ifdef G6LC_STORAMIC_CKPT_TB
+    {
+      const bool br = top->rootp->ariane_testharness__DOT__storamic_ckpt_boot_ready;
+      if (br && !ckpt_boot_ready_q &&
+          (ckpt_preload_max < 0 || ckpt_preload_count < ckpt_preload_max)) {
+        std::memcpy(reinterpret_cast<uint8_t *>(MEM), ckpt_image.data(), mem_size);
+        ckpt_preload_count++;
+        std::cerr << "[preload] ckpt boot_ready load #" << ckpt_preload_count
+                  << " t=" << main_time << " bytes=0x" << std::hex << mem_size
+                  << std::dec << "\n";
+      }
+      ckpt_boot_ready_q = br;
+    }
+#endif
 #ifdef MEM
     // +mem_poke: backdoor 64-bit write straight into the DRAM array behind
     // every cache level — the non-coherent mutation a cbo.inval must expose.

@@ -51,6 +51,14 @@ ifneq (,$(filter G6LC_STORAMIC_SKELETON,$(subst +, ,$(defines))))
 $(error G6LC_STORAMIC_MODEL conflicts with G6LC_STORAMIC_SKELETON)
 endif
 endif
+# Native checkpoint composition (bounded profile): needs the primary role with
+# the model memory, the origin-probe cluster profile and the LibreCore
+# exclusive monitor (reservation clear).
+ifneq (,$(filter G6LC_STORAMIC_CKPT,$(subst +, ,$(defines))))
+ifeq (,$(and $(filter G6LC_STORAMIC,$(subst +, ,$(defines))),$(filter G6LC_STORAMIC_MODEL,$(subst +, ,$(defines))),$(filter G6LC_STORAMIC_ORIGIN_PROBE,$(subst +, ,$(defines))),$(filter G6LC_AI_EXCL_MULTI,$(subst +, ,$(defines)))))
+$(error G6LC_STORAMIC_CKPT requires G6LC_STORAMIC G6LC_STORAMIC_MODEL G6LC_STORAMIC_ORIGIN_PROBE G6LC_AI_EXCL_MULTI)
+endif
+endif
 # test name for torture runs (binary name)
 test-location  ?= output/test
 # set to either nothing or -log
@@ -270,6 +278,11 @@ src :=  $(if $(spike-tandem),verif/tb/core/uvma_core_cntrl_pkg.sv)              
         corev_apu/storamic/g6lc_storamic_model_store.sv                             \
         corev_apu/storamic/g6lc_storamic_model_stick.sv                             \
         corev_apu/storamic/g6lc_storamic_sim_mem.sv                                 \
+        corev_apu/storamic/g6lc_storamic_checkpoint_model.sv                        \
+        corev_apu/storamic/g6lc_storamic_checkpoint_endpoint.sv                     \
+        corev_apu/storamic/g6lc_storamic_boot_recovery.sv                           \
+        corev_apu/storamic/g6lc_storamic_native_ckpt.sv                             \
+        corev_apu/storamic/g6lc_storamic_native_providers.sv                        \
         corev_apu/src/g6lc_ai_dram_backend.sv                                        \
         corev_apu/src/g6lc_ai_litedram_wrap.sv                                       \
         corev_apu/src/g6lc_ai_dram_channels.sv                                       \
@@ -864,7 +877,7 @@ verilate_command := $(verilator) --no-timing verilator_config.vlt $(verilator_as
                     $(if $(TRACE_COMPACT), --trace-fst $(VL_INC_DIR)/verilated_fst_c.cpp)                        \
                     $(if $(TRACE_FAST), --trace $(VL_INC_DIR)/verilated_vcd_c.cpp)                               \
                     -LDFLAGS "-L$(RISCV)/lib -L$(SPIKE_INSTALL_DIR)/lib -Wl,-rpath,$(RISCV)/lib -Wl,-rpath,$(SPIKE_INSTALL_DIR)/lib -lfesvr -lriscv -ldisasm -lyaml-cpp $(if $(PROFILE), -g -pg,) -lpthread $(if $(TRACE_COMPACT), -lz,)" \
-                    -CFLAGS "$(CFLAGS)$(if $(PROFILE), -g -pg,) -DVL_DEBUG -I$(SPIKE_INSTALL_DIR)$(if $(or $(findstring G6LC_HAVE_LITEDRAM,$(defines)),$(findstring G6LC_AI_DRAM_CLASS1,$(defines)),$(findstring G6LC_AI_DRAM_CHANS_2,$(defines)),$(findstring G6LC_AI_DRAM_CHANS_4,$(defines)),$(findstring G6LC_AI_DRAM_CHANS_8,$(defines))), -DG6LC_HAVE_LITEDRAM,)$(if $(findstring G6LC_AI_DRAM_SIM_CHANS_2,$(defines)), -DG6LC_AI_DRAM_SIM_CHANS_2,)$(if $(findstring G6LC_AI_DRAM_SIM_CHANS_4,$(defines)), -DG6LC_AI_DRAM_SIM_CHANS_4,)$(if $(findstring G6LC_AI_DRAM_SIM_CHANS_8,$(defines)), -DG6LC_AI_DRAM_SIM_CHANS_8,)$(if $(findstring G6LC_AI_DRAM_WIDE_CH,$(defines)), -DG6LC_AI_DRAM_WIDE_CH,)$(if $(findstring G6LC_STORAMIC_MODEL,$(defines)), -DG6LC_STORAMIC_MODEL_TB,)$(if $(findstring G6LC_CORE_HB,$(defines)), -DG6LC_CORE_HB -I$(ver-library)/Vg6lc_core_hb,)" \
+                    -CFLAGS "$(CFLAGS)$(if $(PROFILE), -g -pg,) -DVL_DEBUG -I$(SPIKE_INSTALL_DIR)$(if $(or $(findstring G6LC_HAVE_LITEDRAM,$(defines)),$(findstring G6LC_AI_DRAM_CLASS1,$(defines)),$(findstring G6LC_AI_DRAM_CHANS_2,$(defines)),$(findstring G6LC_AI_DRAM_CHANS_4,$(defines)),$(findstring G6LC_AI_DRAM_CHANS_8,$(defines))), -DG6LC_HAVE_LITEDRAM,)$(if $(findstring G6LC_AI_DRAM_SIM_CHANS_2,$(defines)), -DG6LC_AI_DRAM_SIM_CHANS_2,)$(if $(findstring G6LC_AI_DRAM_SIM_CHANS_4,$(defines)), -DG6LC_AI_DRAM_SIM_CHANS_4,)$(if $(findstring G6LC_AI_DRAM_SIM_CHANS_8,$(defines)), -DG6LC_AI_DRAM_SIM_CHANS_8,)$(if $(findstring G6LC_AI_DRAM_WIDE_CH,$(defines)), -DG6LC_AI_DRAM_WIDE_CH,)$(if $(findstring G6LC_STORAMIC_MODEL,$(defines)), -DG6LC_STORAMIC_MODEL_TB,)$(if $(findstring G6LC_STORAMIC_CKPT,$(defines)), -DG6LC_STORAMIC_CKPT_TB,)$(if $(findstring G6LC_CORE_HB,$(defines)), -DG6LC_CORE_HB -I$(ver-library)/Vg6lc_core_hb,)" \
                     $(if $(SPIKE_TANDEM), +define+SPIKE_TANDEM, )                                                \
                     --cc --vpi                                                                                   \
                     $(if $(findstring G6LC_CORE_HB,$(defines)), --hierarchical,)                                 \

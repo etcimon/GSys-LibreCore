@@ -49,6 +49,57 @@ package g6lc_storamic_soc_cfg_pkg;
 `endif
       ;
 
+  // Native checkpoint composition platform boundary (native-composition.md).
+  // Packed structs cross the backend/attach hierarchy only; no loose ports.
+  typedef struct packed {
+    logic [4:0]  providers_ready;
+    logic        present;
+    logic        identity_valid;
+    logic        protection_ok;
+    logic        power_cut;
+    logic [159:0] module_id;
+    logic [31:0] mapping_generation;
+    logic [31:0] reset_generation;
+    logic        update_valid;
+    logic [31:0] update_policy;
+    logic [2:0]  producer_paused;
+    logic [2:0]  producer_error;
+    logic [2:0]  ingress_hold;
+    logic        route_hold;
+    logic        maintenance_hold;
+    logic        service_enable;
+    logic        aw_authorized;
+    logic        ar_authorized;
+    logic        restore_resume_safe;
+  } ckpt_plat_in_t;
+
+  typedef struct packed {
+    logic issue, refuse, revoke, done, error;
+    logic policy_commit, policy_revoke, policy_exhaust, policy_reject;
+  } ckpt_events_t;
+
+  typedef struct packed {
+    logic        pause_req;
+    logic        policy_quiesce;
+    logic        update_ready;
+    logic        policy_ready;
+    logic [31:0] policy_epoch;
+    logic        policy_revoked;
+    logic        initialized;
+    logic        busy;
+    logic        recovery_locked;
+    logic        checkpoint_valid;
+    logic        metadata_ok;
+    logic        axi_quiesce;
+    logic [63:0] checkpoint_generation;
+    logic [3:0]  phase;
+    logic        boot_ready;
+    // Boot recovery agent (C6b): running / terminally failed (pause held).
+    logic        recovery_active;
+    logic        recovery_failed;
+    ckpt_events_t events;
+  } ckpt_plat_out_t;
+
   function automatic g6lc_storamic_cfg_pkg::storamic_cfg_t make_cfg(bit enable,
       logic [63:0] model_base = '0, logic [63:0] model_bytes = '0);
     return '{Enable: enable,

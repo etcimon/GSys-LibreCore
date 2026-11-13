@@ -57,6 +57,12 @@ module frontend
     input logic [CVA6Cfg.VLEN-1:0] pc_commit_i,
     // Memory-order replay: refetch the committing PC instead of pc+4 - CONTROLLER
     input logic mem_replay_pc_i,
+    // C5 storamic resync: this commit redirect is issued while commit is halted
+    // AND its head is killed by the same flush, so the fetch target must still
+    // step once (npc_d = next_block) — holding npc_q at arch_pc would re-push
+    // the head block and double-commit it. Tied low on every non-resync path,
+    // so the existing halted set_pc_commit users keep arch_step = ~halt_i.
+    input logic commit_step_i,
     // Exception event - COMMIT
     input logic ex_valid_i,
     // Mispredict event and next PC - EXECUTE
@@ -586,7 +592,11 @@ module frontend
       end
       g6lc_fetch_pkg::SRC_COMMIT: begin
         arch_pc     = commit_next_pc;
-        arch_step   = FtqEn & ~halt_i;
+        // commit_step_i (C5 resync only) forces the step even under halt: the
+        // resync squash kills the commit head with the same flush that issues
+        // this redirect, so the head block must be consumed once — else
+        // npc_q = arch_pc re-presents it and the head double-commits.
+        arch_step   = FtqEn & (~halt_i | commit_step_i);
         arch_reseed = flush_i;
       end
       g6lc_fetch_pkg::SRC_PEER: begin

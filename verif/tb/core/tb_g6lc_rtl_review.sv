@@ -126,7 +126,7 @@ module tb_g6lc_review_fp_lifetime;
     .halt_frontend_o(),.halt_o(),.eret_i(1'b0),.ex_valid_i(ex_event),.set_debug_pc_i(1'b0),
     .resolved_branch_i(branch),.flush_csr_i(1'b0),.fence_i_i(1'b0),.fence_i(1'b0),
     .sfence_vma_i(1'b0),.hfence_vvma_i(1'b0),.hfence_gvma_i(1'b0),.flush_commit_i(1'b0),
-    .replay_i(1'b0),.mem_replay_pc_o(),.flush_acc_i(1'b0),.smt_switch_i(1'b0));
+    .replay_i(1'b0),.mem_replay_pc_o(),.flush_acc_i(1'b0),.smt_switch_i(1'b0),.drain_force_i(1'b0),.resync_storamic_flush_i(1'b0),.resync_storamic_squash_i(1'b0),.resync_storamic_dack_o());
   fpu_wrap #(.CVA6Cfg(C),.exception_t(exception_t),.fu_data_t(fu_typed_t)) fpu(
     .clk_i(clk),.rst_ni(rst_n),.flush_i(flush_ex),.cancelled_mask_i(cancel),.fpu_valid_i(fp_in && !DIVIDER),.fpu_ready_o(fpu_ready),
     .fu_data_i(fp_data),.fpu_fmt_i(2'b01),.fpu_rm_i(3'b000),.fpu_frm_i(3'b000),.fpu_prec_i('0),
@@ -3721,7 +3721,7 @@ module tb_g6lc_review_wfi;
     .halt_acc_i(1'b0),.halt_storamic_i(1'b0),.halt_frontend_o(),.halt_o(),.eret_i(1'b0),.ex_valid_i(1'b0),
     .set_debug_pc_i(1'b0),.resolved_branch_i('0),.flush_csr_i(1'b0),.fence_i_i(1'b0),
     .fence_i(1'b0),.sfence_vma_i(1'b0),.hfence_vvma_i(1'b0),.hfence_gvma_i(1'b0),
-    .flush_commit_i(flush_commit),.replay_i(1'b0),.mem_replay_pc_o(),.flush_acc_i(1'b0),.smt_switch_i(1'b0));
+    .flush_commit_i(flush_commit),.replay_i(1'b0),.mem_replay_pc_o(),.flush_acc_i(1'b0),.smt_switch_i(1'b0),.drain_force_i(1'b0),.resync_storamic_flush_i(1'b0),.resync_storamic_squash_i(1'b0),.resync_storamic_dack_o());
   initial begin
     scenario=0;negative=$test$plusargs("oracle_negative");
     void'($value$plusargs("scenario=%d",scenario));
