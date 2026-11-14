@@ -47,7 +47,7 @@ ALLOWED_STAGES = SIMULATION_STAGES | frozenset({
     "commit-defaults-formal", "commit-defaults-synth", "load-translation-synth",
     "fetch-queue-synth", "csr-scc", "core-scc", "checkpoint-route-formal",
     "axi-gate-formal", "native-c2", "native-c2-wide", "prim-aw",
-    "native-ckpt",
+    "native-ckpt", "native-fixes",
 })
 
 
@@ -719,7 +719,7 @@ def main():
             "verif/tb/storamic/run_axi_gate_formal.py",
         ]] if p not in sources]
     if set(stages) & {"native-c2", "native-c2-wide", "prim-aw",
-                      "native-ckpt"}:
+                      "native-ckpt", "native-fixes"}:
         # native-c2 builds the full ariane_testharness from a frozen snapshot of
         # the working tree, uploaded as one gzipped tar and sha256-pinned in the
         # manifest (the leaf re-hashes data/cva6-src-c2.tar.gz before extract).
@@ -738,7 +738,9 @@ def main():
         sources += [p for p in [root / path for path in [
             "verif/tb/storamic/run_native_c2.py",
             "verif/tb/storamic/run_native_ckpt.py",
+            "verif/tb/storamic/run_native_fixes.py",
             "verif/tests/custom/storamic/storamic_ckpt.c",
+            "verif/tests/custom/storamic/storamic_lu_hazard.c",
             "verif/tb/storamic/g6lc_storamic_c2_monitor.sv",
             "verif/tests/custom/storamic/storamic_c2.c",
             "verif/tests/custom/storamic/storamic_virtio_blk.c",

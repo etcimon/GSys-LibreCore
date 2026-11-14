@@ -269,6 +269,44 @@ Method (2026-11-10 review; proposals marked *decision* need owner approval):
    Obtain the missing physical/runtime inputs and explicit remote/network or
    cleanup approvals for P0/P1/V0. Proceed to Linux only after those gates.
 
+## Checkpoint Profile Widening Plan (2026-11-13, planning only)
+
+Nothing in this section is implemented. The non-checkpoint fixes that had to
+come first (load ordering on in-order multi-hart, storage with the AI island
+port, debugger `sberror`) are done: `development-status.md`, run tags
+`storamic-cc258881b9df` (`core-scc`, `cpu-strict-pins`, `cpu-origin`, `cpu-debug`, `native-c2`, `native-c2-wide`, `cpu-pause`, `native-ckpt`, `native-fixes` on one tree) and unit suite `storamic-unittests-6fba4b02e393` (22 files).
+
+Rules carried over from the bounded profile, binding for every step:
+
+- A profile stays refused until its own step below is qualified. Widening is
+  one predicate term at a time in `g6lc_storamic_origin_supported`, with a
+  `native-ckpt` variant on that target (flow, cold recovery, the resync and
+  pause mutants) before the term is relaxed.
+- Every writer gets a real pause owner and a real drain acknowledgement, each
+  added as an endpoint producer (`NumProducers` and the policy `NumIngress`
+  are already parameters). No constant acknowledgement, and a k1-style mutant
+  that leaves state behind for every new drain term.
+- Everything that can hold a copy of RAM is invalidated on release, with a
+  mutant that removes the invalidation and a firmware oracle that sees the
+  stale copy.
+- New logic goes into `corev_apu/storamic/` where possible. Each hook outside
+  the Storamic folders is config-gated, inert when off, committed separately
+  and added to `hyp8-port-ledger.md` in the same series.
+
+| Step | Scope | Work | Main risk |
+|---|---|---|---|
+| W0 | Close the refusal gap | `g6lc_storamic_origin_supported` does not look at `L2En`/`L3En`, and the checkpoint build only rejects the island port. An L2/L3 target would elaborate with checkpointing on and resume on stale L2/L3 contents. Add the terms (and `check_cfg` coverage) so those targets are refused until W1. | None; a few lines plus the profile unit checks. Do this first. |
+| W1 | L2/L3 below one in-order hart | Drain: add the cluster's `l2_write_idle`/`l3_write_idle` (posted writes) and the CMO engine idle to the CPU producer's drained term. Resync: a whole-cache invalidate for L2 and L3 on release (the CMO engine only does single lines today), sequenced before the core resync acknowledges. Prefetchers must be quiet while paused. | The invalidate-all path is new RTL in `corev_apu/l2_cache`/`l3_cache`; inclusive back-invalidation must not race it. |
+| W2 | In-order multi-hart (SMT2, then multi-core) | Per-hart pause and drained (today scalar, core 0 only, forced off for `NR_CORES > 1`); cluster reports paused only when every hart is halted and drained. Per-hart resync, and the resync squash must respect the SMT switch machinery (`SmtDrainedHandoff`, retained `fwd_keep` store-buffer entries). Origin tagging per hart (C1 requalification on the SMT target). The LR/SC clear already covers all masters. | Interaction with SMT switching while a pause is pending; the store buffer's retained entries need an explicit empty term. |
+| W3 | AI island and APU writers | Pause owner per DMA master: the island's wide DMA (`g6lc_ai_island_apb`, behind `g6lc_ai_dram_join`, which needs a gate or a quiesce input because it bypasses the crossbar) and the APU compositor/read/write DMA engines (internal idle signals exist, none is exported as a pause contract). Their device state is not checkpointed, as for VirtIO: software re-initializes after a restore. Then lift the island-port refusal in the checkpoint build. | Volume: many APU engines. Start with one coarse gate per DMA master (`g6lc_storamic_axi_gate`), refine only if drain latency is a problem. |
+| W4 | Out-of-order | New drain definition: reorder buffer empty or squashed to the commit head, no speculative store, no replay pending, LSQ empty; re-derive the atomic-at-head guard; resync squash for the OoO structures; origin tagging through the OoO load/store queues with its own queue-class cases. | A new design rather than an extension. Do last, and only after W2 so per-hart work is not redone. |
+| W5 | Hypervisor (`RVH`) and coprocessor configs | Origin encoding for virtualized privilege; currently carried as unknown. | Needs a decision on what authority a guest access may carry. |
+
+Order: W0 now, then W1, W2, W3; W4 and W5 on demand. P0/P1 (real media,
+hold-up energy) are independent of this table and still need physical inputs.
+The hyp8 port can start after W0 from `hyp8-port-ledger.md` and does not have
+to wait for W1-W5.
+
 ## Backend Correctness Reassessment
 
 The source audit found that the small-capacity block fixtures did not cover

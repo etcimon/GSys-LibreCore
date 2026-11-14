@@ -73,13 +73,13 @@ class ParseTests(unittest.TestCase):
 
     def test_parse_sba(self):
         line = ("STORAMIC_SBA_PROBE reads=1 writes=1 "
-                "rd_sberror=0 wr_sberror=0")
+                "rd_sberror=2 wr_sberror=2 blocked_sberror=2 cleared_sberror=0")
         d = C2.parse_sba("noise\n" + line + "\nmore")
         self.assertIsNotNone(d)
         self.assertEqual(d["reads"], 1)
         self.assertEqual(d["writes"], 1)
-        self.assertEqual(d["rd_sberror"], 0)
-        self.assertEqual(d["wr_sberror"], 0)
+        self.assertEqual(d["rd_sberror"], 2)
+        self.assertEqual(d["wr_sberror"], 2)
         self.assertIsNone(C2.parse_sba("no probe line"))
 
     def test_fields_ok_exact_and_mismatch(self):
@@ -178,7 +178,7 @@ SBA_NATIVE_LINE = ("STORAMIC_C2_NATIVE p0_aw=10 p0_ar=18 p1_aw=1 p1_ar=1 "
                    "src_ok_ar=14 err_resp=4 max_outstanding=2 beats0=135 "
                    "beats1=2 beats2=0 max_lid=1 pending=0 violations=0")
 SBA_LINE = ("STORAMIC_SBA_PROBE reads=1 writes=1 "
-            "rd_sberror=0 wr_sberror=0")
+            "rd_sberror=2 wr_sberror=2 blocked_sberror=2 cleared_sberror=0")
 
 
 def _sba_sim():

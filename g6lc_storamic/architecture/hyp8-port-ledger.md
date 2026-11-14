@@ -135,7 +135,9 @@ Qualification to repeat: `native-ckpt` (cases and mutants n1-n8).
 | False-loop cuts: scoreboard issue pointer, PTW leaf update, miss-unit `mem_req`, instruction-queue admission, I-cache split | `core/scoreboard.sv`, `core/cva6_mmu/cva6_ptw.sv`, `wt_dcache_missunit.sv`, `instr_queue.sv`, `g6lc_icache.sv` | ported (`4f65b65b9`) |
 | I-cache `ready` on its own wire | `core/cva6.sv`, cache subsystems, frontends | not ported (no warning reduction; optional) |
 | Store-buffer commit+flush assertions | `core/store_buffer.sv` | ported, lint only; not simulated |
-| `load_unit` `WAIT_PAGE_OFFSET` holds while the page-offset match is live (`!OoOEn && NrHarts == 1`) | `core/load_unit.sv` | **not ported**; hyp8 and OoO/SMT rely on `st_pipeline_busy`/replay, which is unaudited |
+| `load_unit` `WAIT_PAGE_OFFSET` holds while the page-offset match is live (`!OoOEn && NrHarts == 1`) | `core/load_unit.sv` | **not ported** |
+| `load_unit` in-order multi-hart hold (`LuSmtHold`): held while the match can still be an older store (load not yet the commit head, or a commit-queue/write-buffer/sticky match); released once the load is the commit head and only speculative entries match. Elaborated only with a Storamic role (`StoramicEn || StoramicIoEn`); every other build is unchanged and keeps the hazard | `core/load_unit.sv` | **not ported**. hyp8 must re-derive it against its LSQ/`sb_lifecycle`; decide there whether to drop the Storamic gate |
+| OoO `load_unit` path audited, no change: `st_pipeline_busy` (`SpeculativeSb && SuperscalarEn`) holds an uncovered match until the store buffer and write buffer are empty or the load is replayed; `g6lc64_ooo` passes `storamic_lu_hazard.c` | `core/load_unit.sv` | n/a (repeat the test on hyp8) |
 | Trigger module: address trigger enters debug with cause 3; store/load trigger lost on a squashed instruction | `core/trigger_module.sv` | open in both trees (`AGENTS-todo.md`) |
 
 ## 5. SoC and harness integration
@@ -153,6 +155,21 @@ Qualification to repeat: `native-ckpt` (cases and mutants n1-n8).
 Qualification to repeat: `native-c2`, `native-c2-wide`, `native-virtio`, the
 checkpoint-route stages, then the C3–C6 native composition stages once they
 exist in the main tree.
+
+### 5a. Non-checkpoint fixes (2026-11-13)
+
+All three are elaborated only with a Storamic role; a build without one is
+textually or structurally identical to before (`native-fixes` checks this).
+
+| Main-tree file | Content | hyp8 counterpart | Status |
+|---|---|---|---|
+| `corev_apu/tb/ariane_testharness.sv` | **AI island port + Storamic storage.** Under `G6LC_AI_DRAM_ISLAND_PORT`, crossbar port 2 is driven from `ai_dma_sh_req` (as in the non-island build) with upstream sharer `p2_up` = the `G6LC_APU` compositor DMA or idle. With the Storamic IO role, `g6lc_storamic_dma_axi` time-shares the port with `p2_up`; without it `ai_dma_sh_req = p2_up` (same values as the old explicit tie-off / APU assignment). `vd_usable` is no longer forced to 0. Also removes a second driver of `ai_dma_resp` in island builds without Storamic | `corev_apu/tb/g6lc_testharness.sv` (port-2 sharing) | not ported |
+| `corev_apu/tb/ariane_testharness.sv` | **Debug `sbcs.sberror`.** `dm_top`'s DMI port goes through `dm_dmi_*`; `gen_dmi_sberror` (only `if (CVA6Cfg.StoramicIoEn)`) inserts `g6lc_storamic_dmi_sberror` fed by the SBA AXI master's error responses, otherwise the wires are assigned straight through. The vendored `corev_apu/riscv-dbg` submodule is not modified | hyp8 instantiates its own `dm_top` in `g6lc_testharness.sv` / `g6lc_soc.sv`; the shim itself is in `corev_apu/storamic/` and needs no port | not ported |
+| `corev_apu/tb/g6lc_tb.cpp` | SBA probe also checks that a set `sberror` blocks the next trigger and clears on W1C (`blocked_sberror`, `cleared_sberror`) | hyp8 driver | not ported |
+| `Makefile` | `g6lc_storamic_dmi_sberror.sv` in the testharness source list (after `dm_pkg`) | hyp8 build lists | not ported |
+
+Qualification to repeat: `native-fixes`, and the SBA cases of `native-c2` and
+`native-ckpt`.
 
 ## 6. Suggested port order
 

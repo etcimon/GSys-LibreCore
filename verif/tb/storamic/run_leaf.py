@@ -529,6 +529,10 @@ def main():
         from run_native_ckpt import run as run_native_ckpt
         run_native_ckpt(data, out, stages, manifest, builds, outcomes,
                         verilator, build_model)
+    if set(stages) & {"native-fixes"}:
+        from run_native_fixes import run as run_native_fixes
+        run_native_fixes(data, out, stages, manifest, builds, outcomes,
+                         verilator, build_model)
     if set(stages) & {"prim-aw"}:
         from run_native_c2 import run_prim_aw as run_prim_aw
         run_prim_aw(data, out, stages, manifest, builds, outcomes,

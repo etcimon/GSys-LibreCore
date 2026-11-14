@@ -1521,3 +1521,43 @@ Still open (not claimed):
 - Debug `sberror` still reads 0 for the refused 64-bit SBA access
   (`dm_sba.sv`), as recorded for C2.
 - hyp8 port: nothing of C3-C6 is ported; work list in `hyp8-port-ledger.md`.
+
+## Non-checkpoint fixes: load ordering, AI island storage, debugger error
+
+Three defects outside the checkpoint path, each elaborated only with a
+Storamic role so that builds without one are unchanged. Outside-folder edits
+are listed in `hyp8-port-ledger.md` section 5a and section 4.
+
+- **`load_unit` on in-order multi-hart builds.** A load whose page offset
+  matched an older, not yet committed store that could not be forwarded (a
+  non-cacheable load, or a partially covered one) was re-issued after one
+  cycle and read the device or cache before the store arrived. Reproduced on
+  `g6lc64_smt2` with `storamic_lu_hazard.c`: a 64-bit load of CLINT
+  `mtimecmp` right after a store to it returns the old value. `LuSmtHold`
+  keeps the load in `WAIT_PAGE_OFFSET` while the match can still be an older
+  store and releases it once the load is the commit head and only speculative
+  entries match (those are retained or younger entries that never clear).
+  The out-of-order path was audited and needs no change.
+- **VirtIO storage with the AI island DMA port.** Under
+  `G6LC_AI_DRAM_ISLAND_PORT` the device was reported unusable. The wide island
+  DMA has its own DRAM port, so crossbar port 2 now carries the Storamic DMA,
+  time-shared with the APU compositor DMA when that is present. The
+  checkpoint profile still refuses the island port.
+- **Debugger `sbcs.sberror`.** The vendored debug module ignores SBA bus
+  errors. `g6lc_storamic_dmi_sberror` at the DMI boundary reports them as
+  `sberror = 2`, blocks further SBA triggers while set and clears on W1C. The
+  `riscv-dbg` submodule is untouched.
+
+Evidence: remote stage `native-fixes` (`run_native_fixes.py`): the hazard
+firmware passes on `g6lc64_smt2`, `g6lc64_ooo` and the island-port baseline
+with a Storamic role; the mutant that removes `LuSmtHold` is killed; virtio-blk
+positive and negative cases pass with the island port, including on
+`g6lc64_smt2_ai` where the island is really present; the shim is present in
+every Storamic build and absent from every build without a Storamic role. The
+SBA probe in `native-c2` and `native-ckpt` now requires `rd_sberror=2
+wr_sberror=2 blocked_sberror=2 cleared_sberror=0` with the port-1 access
+counts unchanged. Run tags are in `completion-plan.md`.
+
+Known and left as is: without a Storamic role `g6lc64_smt2` still fails the
+hazard firmware (tohost 33). That run is part of the stage as the isolation
+witness and is logged in `AGENTS-todo.md` for the SMT owners.

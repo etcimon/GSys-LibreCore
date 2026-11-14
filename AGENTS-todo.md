@@ -22848,7 +22848,18 @@ Receipt: `build-platform/workspace/build/storamic-review-30/FINAL-SV-30.md`.
 
 ### CPU Pause/Drain — load_unit interlock audit carry-over
 
-- [ ] `load_unit` WAIT_PAGE_OFFSET fall-through: fixed for in-order
-  single-hart (`!OoOEn && NrHarts==1`); OoO/SMT configs keep the old
-  fall-through and rely on `st_pipeline_busy`/replay — needs an audit with
-  their own regressions; hyp8 tree not ported.
+- [x] `load_unit` WAIT_PAGE_OFFSET fall-through, OoO/SMT audit (2026-11-13,
+  remote `native-fixes` `storamic-3e83fe1c7341`, firmware
+  `verif/tests/custom/storamic/storamic_lu_hazard.c`):
+  - OoO (`g6lc64_ooo`): no defect found; `st_pipeline_busy` holds the load.
+  - In-order multi-hart (`g6lc64_smt2`): defect confirmed. A 64-bit load of
+    CLINT `mtimecmp` right after a store to it returns the old value
+    (tohost 33). Fixed by `LuSmtHold` in `core/load_unit.sv`, **elaborated
+    only with a Storamic role**.
+- [ ] The same in-order multi-hart hazard is still present in builds without a
+  Storamic role (`g6lc64_smt2`, no Storamic defines: tohost 33 on the same
+  firmware). Any MMIO read that follows a store to the same page offset while
+  commit is held can read the device before the store reaches it. Left
+  unchanged on purpose so the SMT boot ladders are not disturbed; the owner of
+  those ladders should decide whether to drop the Storamic term from
+  `LuSmtHold`. hyp8 tree not ported.

@@ -99,7 +99,10 @@ C2_SBA_PO = dict(C2_SBA_FIELDS, src_ok_aw=9, src_ok_ar=14,
                  max_lid=MAX_LID_C2)
 C2_SBA_QF = dict(C2_SBA_FIELDS, src_ok_aw=0, src_ok_ar=0,
                  max_lid=MAX_LID_C2)
-SBA_EXPECT = {"reads": 1, "writes": 1, "rd_sberror": 0, "wr_sberror": 0}
+# sberror 2 = bus error on the refused access (g6lc_storamic_dmi_sberror); it
+# must block the next trigger and clear on W1C.
+SBA_EXPECT = {"reads": 1, "writes": 1, "rd_sberror": 2, "wr_sberror": 2,
+              "blocked_sberror": 2, "cleared_sberror": 0}
 
 # --- C2-wide (native-c2-wide) ---------------------------------------------
 # A2 feature-sweep targets: existing config packages that set multi-hart /
