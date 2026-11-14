@@ -201,6 +201,22 @@ def main():
         with concurrent.futures.ThreadPoolExecutor(max(1, args.jobs)) as pool:
             results += pool.map(lambda b: run_bench(verilator, out, b), benches(tier))
 
+    if tier >= 2:
+        # Local-only checkpoint-route service bench (run_route.py builds the
+        # real route/ctrl-bridge/interconnect matrix under Verilator).  It is
+        # a standalone runner, not a benches() tuple, so invoke it here; the
+        # remote-leaf native/CPU benches stay out of this local gate.
+        started = time.monotonic()
+        route_log = out / "route.log"
+        with route_log.open("w") as log:
+            route = subprocess.run(
+                [sys.executable, "-B", str(HERE / "run_route.py"),
+                 "--output-root", str(out / "run-route")],
+                cwd=HERE, env=env, stdout=log, stderr=subprocess.STDOUT)
+        results.append(("route-checkpoint", route.returncode == 0,
+                        f"rc={route.returncode} (see route.log)",
+                        time.monotonic() - started))
+
     fails = 0
     for name, ok, detail, seconds in results:
         fails += not ok

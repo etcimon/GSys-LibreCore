@@ -37,7 +37,7 @@ case "$LEVEL" in quick) TIER=0;; standard) TIER=1;; full) TIER=2;;
 
 # Ordered cheapest-first; standard runs the first group, full adds the rest.
 STANDARD_SUITES="${APU_CI_STANDARD_SUITES:-doneq gcs vndec vnrep cmdexec vgctl shmod}"
-FULL_SUITES="${APU_CI_FULL_SUITES:-objtab xfer vgpages vnpump rast vnfront shwave shcore}"
+FULL_SUITES="${APU_CI_FULL_SUITES:-objtab xfer vgpages vnpump rast vnfront shwave shcore vgtop vgsys sys-venus}"
 
 command -v python3 >/dev/null 2>&1 || { echo "BLOCKED: python3 missing" >&2; exit 3; }
 python3 -c 'import mako, numpy' 2>/dev/null || {
@@ -99,7 +99,7 @@ run venus-model-unittests python3 -B -m unittest discover -s "$ROOT/corev_apu/ap
 # RTL benches are independent (own OUT dirs): run up to APU_CI_JOBS at once.
 rtl() { # suite
   local s="$1" up
-  up="$(printf '%s' "$s" | tr '[:lower:]' '[:upper:]')"
+  up="$(printf '%s' "$s" | tr '[:lower:]' '[:upper:]' | tr -d '-')"
   if [ ! -f "$TB/run-apu-$s.sh" ]; then
     printf 'rtl-%s	127	0s
 ' "$s" >> "$OUT/results.tsv"; echo "FAIL rtl-$s: no runner"; return
