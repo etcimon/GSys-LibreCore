@@ -483,7 +483,7 @@ class preload_aware_dtm_t : public dtm_t {
       // register); the route must not authorize a debug-master command.
       const uint32_t HOLE     = g_storamic_sba_ctrl ? BASE : BASE + 0x8000u;
       unsigned sba_reads = 0, sba_writes = 0;
-      unsigned rd_err = 0, wr_err = 0;
+      unsigned rd_err = 0, wr_err = 0, blk_err = 0, clr_err = 7;
       auto sba_idle = [&]() -> bool {
         for (int i = 0; i < 50000; i++) {
           if (!(read(SBCS) & SBBUSY)) return true;
@@ -504,6 +504,11 @@ class preload_aware_dtm_t : public dtm_t {
           (void)read(SBDATA0);
           rd_err = (read(SBCS) >> 12) & 7;
           sba_reads = 1;
+          // With sberror set no further access may start: this read trigger
+          // (sbreadonaddr still set) must not reach the bus. The C2 monitor's
+          // port-1 AR count stays 1; the error must still read back.
+          write(SBADDR0, HOLE + 16);
+          if (sba_idle()) blk_err = (read(SBCS) >> 12) & 7;
         }
         // One SBA write: without sbreadonaddr the SBData0 write triggers it.
         // HOLE+8 stays inside the reserved window -> refused with an error.
@@ -515,6 +520,7 @@ class preload_aware_dtm_t : public dtm_t {
           if (sba_idle()) {
             wr_err = (read(SBCS) >> 12) & 7;
             write(SBCS, SBVER | SBACC64 | W1C_ERR);  // W1C clear sberror
+            clr_err = (read(SBCS) >> 12) & 7;
             sba_writes = 1;
           }
         }
@@ -522,6 +528,8 @@ class preload_aware_dtm_t : public dtm_t {
       std::cerr << "STORAMIC_SBA_PROBE reads=" << sba_reads
                 << " writes=" << sba_writes
                 << " rd_sberror=" << rd_err << " wr_sberror=" << wr_err
+                << " blocked_sberror=" << blk_err
+                << " cleared_sberror=" << clr_err
                 << "\n";
     }
 };

@@ -379,6 +379,13 @@ module load_unit
                             page_offset_matches_i && !st_fwd_covers &&
                             (!store_buffer_empty_i || !dcache_wbuffer_empty_i);
 
+  // In-order multi-hart page-offset hold (see WAIT_PAGE_OFFSET). Limited to
+  // Storamic builds so every other in-order SMT configuration keeps its
+  // qualified behaviour; the hazard itself is not Storamic-specific
+  // (AGENTS-todo.md, load_unit interlock audit).
+  localparam bit LuSmtHold = !CVA6Cfg.OoOEn && CVA6Cfg.NrHarts > 1 &&
+                             (CVA6Cfg.StoramicEn || CVA6Cfg.StoramicIoEn);
+
   // Pulse: load completed from STQ forward this cycle (no D$ request)
   logic st_fwd_done;
   // T33: WAIT_PAGE_OFFSET dwell counter; replay only under OoO (the cancel +
@@ -537,6 +544,18 @@ module load_unit
           // strictly older and commits without this load, and the sticky match
           // clears once the D$ write buffer drains, so the classic interlock
           // (wait until the match clears) is live here.
+          state_d = WAIT_PAGE_OFFSET;
+        end else if (LuSmtHold && page_offset_matches_i &&
+                     (not_commit_time || !page_offset_spec_only_i)) begin
+          // In-order multi-hart, Storamic builds only (LuSmtHold): same hazard
+          // as the single-hart branch above. The match is held while it can
+          // still be an older store: before this load is the commit head the
+          // older stores of its hart have not all retired, and a commit-queue,
+          // write-buffer or sticky match drains by itself. Once the load is
+          // the commit head and only speculative entries match, every older
+          // store has left the speculative queue, so what remains is a
+          // retained (G1ah fwd_keep) or younger entry that would never clear:
+          // release, as before.
           state_d = WAIT_PAGE_OFFSET;
         end else begin
           // No in-flight stores (or sticky match only): re-issue to D$

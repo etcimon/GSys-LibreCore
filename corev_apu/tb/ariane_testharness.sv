@@ -205,46 +205,22 @@ module ariane_testharness #(
 `endif
       ;
 `ifdef G6LC_AI_DRAM_ISLAND_PORT
-  // Island DMA leaves the 64-bit xbar on a 512-bit port. slave[2] stays idle
-  // without G6LC_APU. With G6LC_APU the compositor DMA master takes this port
-  // (widths differ, so the 2:1 join is not used).
+  // Island DMA leaves the 64-bit xbar on a 512-bit port. slave[2] carries the
+  // remaining 64-bit DMA masters through ai_dma_sh_req: the upstream sharer
+  // p2_up (the G6LC_APU compositor DMA, otherwise idle) and, when the Storamic
+  // IO role is elaborated, its VirtIO DMA time-shared with that sharer
+  // (g6lc_storamic_dma_axi in gen_storamic_ctrl). Without the Storamic role
+  // ai_dma_sh_req is p2_up unchanged.
+  ariane_axi::req_t  p2_up_req;
+  ariane_axi::resp_t p2_up_resp;
 `ifdef G6LC_APU
-  `AXI_ASSIGN_FROM_REQ(slave[2], apu_dma_req)
-  `AXI_ASSIGN_TO_RESP(apu_dma_rsp, slave[2])
+  assign p2_up_req   = apu_dma_req;
+  assign apu_dma_rsp = p2_up_resp;
 `else
-  assign slave[2].aw_valid  = 1'b0;
-  assign slave[2].aw_id     = '0;
-  assign slave[2].aw_addr   = '0;
-  assign slave[2].aw_len    = '0;
-  assign slave[2].aw_size   = '0;
-  assign slave[2].aw_burst  = axi_pkg::BURST_FIXED;
-  assign slave[2].aw_lock   = 1'b0;
-  assign slave[2].aw_cache  = '0;
-  assign slave[2].aw_prot   = '0;
-  assign slave[2].aw_qos    = '0;
-  assign slave[2].aw_region = '0;
-  assign slave[2].aw_atop   = '0;
-  assign slave[2].aw_user   = '0;
-  assign slave[2].w_valid   = 1'b0;
-  assign slave[2].w_data    = '0;
-  assign slave[2].w_strb    = '0;
-  assign slave[2].w_last    = 1'b0;
-  assign slave[2].w_user    = '0;
-  assign slave[2].b_ready   = 1'b0;
-  assign slave[2].ar_valid  = 1'b0;
-  assign slave[2].ar_id     = '0;
-  assign slave[2].ar_addr   = '0;
-  assign slave[2].ar_len    = '0;
-  assign slave[2].ar_size   = '0;
-  assign slave[2].ar_burst  = axi_pkg::BURST_FIXED;
-  assign slave[2].ar_lock   = 1'b0;
-  assign slave[2].ar_cache  = '0;
-  assign slave[2].ar_prot   = '0;
-  assign slave[2].ar_qos    = '0;
-  assign slave[2].ar_region = '0;
-  assign slave[2].ar_user   = '0;
-  assign slave[2].r_ready   = 1'b0;
+  assign p2_up_req   = '0;
 `endif
+  `AXI_ASSIGN_FROM_REQ(slave[2], ai_dma_sh_req)
+  `AXI_ASSIGN_TO_RESP(ai_dma_sh_resp, slave[2])
 `else
 `ifdef G6LC_APU
   // Enable=1 so AI DMA still reaches slave[2]. ApuHarness.DmaReadEn=0 keeps
@@ -508,11 +484,7 @@ module ariane_testharness #(
     logic [31:0] stick_identity;
     logic [63:0] stick_ram_bytes, stick_flash_bytes, stick_flash_sectors;
     logic [159:0] stick_serial;
-`ifdef G6LC_AI_DRAM_ISLAND_PORT
-    localparam bit vd_usable = 1'b0;
-`else
     localparam bit vd_usable = 1'b1;
-`endif
     g6lc_storamic_virtio_dev #(.QueueNumMax(128), .MaxSegs(8)) i_storamic_virtio (
       .clk_i, .rst_ni(ndmreset_n),
       // C4: the VirtIO writer's real pause/drain owner (0 unless CKPT).
@@ -575,15 +547,6 @@ module ariane_testharness #(
       .stick_commit_gen_o(stick_commit_gen),
       .stick_serial_o(stick_serial)
     );
-`ifdef G6LC_AI_DRAM_ISLAND_PORT
-    // The wide island DMA owns crossbar port 2 in this build: no shared DMA
-    // path exists, so the device is reported unusable (vd_usable = 0).
-    assign vd_gnt = 1'b0; assign vd_rvalid = 1'b0;
-    assign vd_rdata = '0; assign vd_err = 1'b0;
-    assign ai_dma_sh_req = '0;
-    assign storamic_inval_valid = 1'b0; assign storamic_inval_addr = '0;
-    assign ckpt_dma_inflight = 1'b0;
-`else
     g6lc_storamic_dma_axi #(
       .IdWidth(ariane_axi::IdWidth), .DmaId('0), .InvalEn(1'b1),
       .axi_req_t(ariane_axi::req_t), .axi_resp_t(ariane_axi::resp_t)
@@ -593,20 +556,29 @@ module ariane_testharness #(
       .dma_req_i(vd_req), .dma_gnt_o(vd_gnt), .dma_we_i(vd_we),
       .dma_addr_i(vd_addr), .dma_wdata_i(vd_wdata), .dma_be_i(vd_be),
       .dma_rvalid_o(vd_rvalid), .dma_rdata_o(vd_rdata), .dma_err_o(vd_err),
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+      // The wide island DMA has its own DRAM port; port 2 is shared with p2_up.
+      .up_req_i(p2_up_req), .up_resp_o(p2_up_resp),
+`else
       .up_req_i(ai_dma_req), .up_resp_o(ai_dma_resp),
+`endif
       .mst_req_o(ai_dma_sh_req), .mst_resp_i(ai_dma_sh_resp),
       .inval_valid_o(storamic_inval_valid), .inval_addr_o(storamic_inval_addr),
       .inval_ready_i(storamic_inval_ready), .inval_done_i(storamic_inval_done)
     );
-`endif
   end else begin : gen_no_storamic_ctrl
     // The backend answers '0 and drives storamic_irq low when disabled.
     assign storamic_ctrl_req = '0;
     assign storamic_power_cut = 1'b0;
     assign storamic_save = 1'b0;
     assign storamic_restore = 1'b0;
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+    assign ai_dma_sh_req = p2_up_req;
+    assign p2_up_resp = ai_dma_sh_resp;
+`else
     assign ai_dma_sh_req = ai_dma_req;
     assign ai_dma_resp = ai_dma_sh_resp;
+`endif
     assign storamic_vctrl_req = '0;
     assign storamic_vctrl_resp = '0;
     assign storamic_virtio_irq = 1'b0;
@@ -792,6 +764,13 @@ module ariane_testharness #(
   logic                dm_master_r_valid;
   logic [64-1:0]       dm_master_r_rdata;
 
+  // DMI as seen by the debug module. Identical to the DTM-side signals unless
+  // the Storamic sberror shim is elaborated (gen_dmi_sberror below).
+  logic          dm_dmi_req_valid, dm_dmi_req_ready;
+  logic          dm_dmi_resp_valid, dm_dmi_resp_ready;
+  dm::dmi_req_t  dm_dmi_req;
+  dm::dmi_resp_t dm_dmi_resp;
+
   // debug module
   dm_top #(
     .NrHarts              ( 1                           ),
@@ -821,12 +800,12 @@ module ariane_testharness #(
     .master_r_valid_i     ( dm_master_r_valid           ),
     .master_r_rdata_i     ( dm_master_r_rdata           ),
     .dmi_rst_ni           ( rst_ni                      ),
-    .dmi_req_valid_i      ( debug_req_valid             ),
-    .dmi_req_ready_o      ( debug_req_ready             ),
-    .dmi_req_i            ( debug_req                   ),
-    .dmi_resp_valid_o     ( debug_resp_valid            ),
-    .dmi_resp_ready_i     ( debug_resp_ready            ),
-    .dmi_resp_o           ( debug_resp                  )
+    .dmi_req_valid_i      ( dm_dmi_req_valid            ),
+    .dmi_req_ready_o      ( dm_dmi_req_ready            ),
+    .dmi_req_i            ( dm_dmi_req                  ),
+    .dmi_resp_valid_o     ( dm_dmi_resp_valid           ),
+    .dmi_resp_ready_i     ( dm_dmi_resp_ready           ),
+    .dmi_resp_o           ( dm_dmi_resp                 )
   );
 
 
@@ -896,6 +875,36 @@ module ariane_testharness #(
     .axi_req_o             ( dm_axi_m_req              ),
     .axi_resp_i            ( dm_axi_m_resp             )
   );
+
+  // Debug SBA bus errors -> sbcs.sberror. The vendored debug module drops
+  // them; Storamic builds add the DMI-boundary shim so a refused access to
+  // the Storamic window or control page is visible to the debugger. Every
+  // other build keeps the direct DMI connection.
+  if (CVA6Cfg.StoramicIoEn) begin : gen_dmi_sberror
+    logic dm_sba_bus_err;
+    assign dm_sba_bus_err =
+        (dm_axi_m_resp.r_valid && dm_axi_m_req.r_ready && dm_axi_m_resp.r.resp[1]) ||
+        (dm_axi_m_resp.b_valid && dm_axi_m_req.b_ready && dm_axi_m_resp.b.resp[1]);
+    g6lc_storamic_dmi_sberror i_dmi_sberror (
+      .clk_i, .rst_ni,
+      .dtm_req_valid_i(debug_req_valid), .dtm_req_ready_o(debug_req_ready),
+      .dtm_req_i(debug_req),
+      .dtm_resp_valid_o(debug_resp_valid), .dtm_resp_ready_i(debug_resp_ready),
+      .dtm_resp_o(debug_resp),
+      .dm_req_valid_o(dm_dmi_req_valid), .dm_req_ready_i(dm_dmi_req_ready),
+      .dm_req_o(dm_dmi_req),
+      .dm_resp_valid_i(dm_dmi_resp_valid), .dm_resp_ready_o(dm_dmi_resp_ready),
+      .dm_resp_i(dm_dmi_resp),
+      .bus_err_i(dm_sba_bus_err), .sberror_o()
+    );
+  end else begin : gen_no_dmi_sberror
+    assign dm_dmi_req_valid  = debug_req_valid;
+    assign debug_req_ready   = dm_dmi_req_ready;
+    assign dm_dmi_req        = debug_req;
+    assign debug_resp_valid  = dm_dmi_resp_valid;
+    assign dm_dmi_resp_ready = debug_resp_ready;
+    assign debug_resp        = dm_dmi_resp;
+  end
 
 
   // ---------------
