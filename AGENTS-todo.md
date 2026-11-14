@@ -19063,6 +19063,27 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   `Initmem setup node 0`, no markers or reported kernel error. PID
   2644580 and remote observer 2677910 remain active under the 1B budget.
 
+- Hyp8 r115–r126: fork-PGO toolchain (`tools/verilator` `44063db83`,
+  compiler PGO + `--unroll-count 256 --unroll-stmts 131072` + split-loop
+  `.vlt`), simulation PGO in `hyp8-build-harness.sh`, and the r115–r127
+  FO4 batches qualified on the remote (lint rc 0, 14/14 smokes at
+  baseline cycle counts through closure-r127ag). Boot defects fixed en
+  route: frontend accepted-stream continuity (`6a5d55603`), younger
+  DTLB-miss load replay (`c5c9262de`), misaligned-slot fault-cause
+  assertion (`7eb2f6e1c`), held-load PA capture qualifier (`ad6a429b9`).
+  **r126 PASSED 2026-11-14**: model `3a82cda6…` (ad6a429b9 RTL, t4 +
+  sim-PGO) reached `G6LC_LINUX_INIT_UP` and `G6LC_LINUX_SHELL` — Linux
+  6.6.93 `/init` → BusyBox ash `~ #` — and ran the full 3e9-cycle budget
+  clean (monitor exit 0; ~54.3 h wall on the shared host). Evidence:
+  `analysis/r116/worklog.md` §11. r127 witnesses: r127m (default,
+  closure-r127m model) still running at 1.37B cycles; the OFF-by-default
+  deep (`LoadExPubStages=2`) and staged-MMU profiles each died on
+  assertions (load_unit misaligned-slot @254.9M, g6lc_tlb multi-hit
+  @317.4M) — recorded, not enabled. Committed tree `3438607dc` core ==
+  closure-r127ag; a t4 witness-quality build of HEAD (`closure-r128`,
+  `hyp8-r128-aggregate-t4`) is in flight — no boot witness has yet run
+  on the final committed RTL.
+
 - Canonical verification follow-up: harness selection fixed (`774f9cc6f`);
   the cv64 depth-8 load buffer now has a derived 3-bit cache ID; the shared
   testbench reads built-config cache geometry; optional `mtval` storage

@@ -247,3 +247,46 @@ observer was attached for the rest of that run.
 
 **r126** (model `3a82cda6…`, sim-PGO 225 profiles, 12/12 smokes) is running
 with a 3B-cycle budget. Userspace markers not yet reached.
+
+## 11. r126 PASS: Linux 6.6.93 to the BusyBox shell (2026-11-14)
+
+**r126 is the first hyp8 witness to reach userspace.** Monitor exit 0;
+uart lines 288/303 carry both required markers:
+
+- `[   23.460080] Run /init as init process` then `G6LC_LINUX_INIT_UP`
+  (uart line 288): /init ran; kernel banner `Linux version 6.6.93`,
+  `isa rv64imafdc_zicboz_zicsr_zifencei_zba_zbb_zbs`, `mmu sv39`,
+  cpuinfo/meminfo (`Mem: 238896K total, 230072K free`) printed.
+- `G6LC_LINUX_SHELL` (uart line 303): BusyBox v1.36.1 ash prompt `~ #`.
+
+Model `hyp8-r126-aggregate-t4` sha256
+`3a82cda6a5cb4d14e6f29e1cc4b24cf9b1a7125d036dbc3068bf59f565977c07`
+(= ad6a429b9 RTL, fork PGO compiler, Verilator --threads 4, sim-PGO 225
+profiles, 12/12 smokes at baseline cycle counts). Firmware
+`hyp8-firmware-r116` ELF `30e1311e…`, tohost `0x80041730`, budget 3e9.
+Final census cyc=2,999,999,986 (ran the full budget after the shell);
+wall 195,444,600 ms (~54.3 h on the shared host), CPU 746,835 s.
+
+**r127-session witnesses (analysis/r127/worklog.md, models older than
+the committed tree):**
+
+- `hyp8-osbi-scalar-r127m` (default binding, closure-r127m model
+  f4ac24f7…): ALIVE at cyc=1,366,000,000 on 2026-11-14, still running.
+- `hyp8-osbi-scalar-r127n-deep` (LoadExPubStages=2, OFF by default):
+  DEAD at cyc=254,915,572 on `misaligned_entry_excepts`
+  (load_unit.sv:1879) — ldbuf slot 0 popped by rkill with no exception
+  published (state_q=…10, rkill=1, pend=1, ex_o.cause=0). First witness
+  data point for the deep profile; needs its own fix before enabling.
+- `hyp8-osbi-scalar-r127x-mmustaged` (staged MMU + 3-hunk fix, OFF by
+  default): DEAD at cyc=317,424,744 on `g6lc_tlb_hit_onehot0`
+  (g6lc_tlb.sv:919) — multi-hit on a valid lookup. The staged-MMU
+  experiment got past its earlier wedge into the kernel, then hit this.
+
+**Committed tree vs witnesses.** 3438607dc's hyp8 core == closure-r127ag
+(manifest-verified: the only core delta vs closure-r127z is the four
+load_unit hunks; r127ag remote gate = lint rc0 + **14/14 smokes** at
+baseline counts incl. sv39_load 3893 and zkn_kat 6949). The APU island
+edits in the same commit are compiled into Flist.hyp8_sim but are not on
+the scalar boot path. No boot witness has run on the final tree yet:
+`closure-r128` was built from HEAD and `hyp8-r128-aggregate-t4`
+(witness-quality: fork PGO + threads 4 + sim-PGO) is building remotely.
