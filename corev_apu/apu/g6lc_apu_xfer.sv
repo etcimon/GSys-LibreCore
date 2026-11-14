@@ -85,7 +85,10 @@ module g6lc_apu_xfer
   // §12.3 C/5b-r2: shared iterative-multiplier radix — one
   // MulRadixBits-bit digit of the multiplicand per cycle
   // (8 -> a 32x32 product completes in 4 cycles)
-  parameter int unsigned MulRadixBits = 8
+  parameter int unsigned MulRadixBits = 8,
+  // FP0 frame counters: read/write leg + setup occupancy, read
+  // hierarchically by benches (no port; 0 = no cells)
+  parameter bit          PerfClassEn = 1'b0
 ) (
   input  logic              clk_i,
   input  logic              rst_ni,
@@ -2146,6 +2149,28 @@ module g6lc_apu_xfer
     assert property (@(posedge clk_i) disable iff (!rst_ni)
       fifo_push |-> fn_q < (FBits+1)'(FifoDepth));
     `endif
+
+    // FP0 frame counters: xfer read/write leg occupancy + setup cost,
+    // read hierarchically by benches (no port; PerfClassEn=0 -> no cells).
+    // The legs overlap during XRun streaming, so a cycle can count in
+    // BOTH rd and wr — this is leg OCCUPANCY, not a partition.  setup =
+    // FSM busy with both legs idle (bounds/overlap/calc/mip/blit work).
+    if (PerfClassEn) begin : gen_leg
+      logic [2:0][31:0] leg_q;   // {setup, wr, rd}
+      logic [31:0]      busy_q;
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          leg_q  <= '0;
+          busy_q <= '0;
+        end else begin
+          if (state_q != XIdle) busy_q <= busy_q + 32'd1;
+          if (!rd_idle) leg_q[0] <= leg_q[0] + 32'd1;                 // read leg
+          if (!wr_idle) leg_q[1] <= leg_q[1] + 32'd1;                 // write leg
+          if (state_q != XIdle && rd_idle && wr_idle)
+            leg_q[2] <= leg_q[2] + 32'd1;                            // setup
+        end
+      end
+    end
   end
 endmodule
 

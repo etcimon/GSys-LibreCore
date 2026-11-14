@@ -35,10 +35,19 @@
 // used_len, publication order (response < used elem < used idx <
 // ISR), ring head/status through the pump's observability ports,
 // reply bytes in the aperture, and ObjTab live count after teardown.
+//
+// Boot: before reset release the TB pre-seeds the objmem magic pair
+// (MAG_PAT at MAG_OFF, epoch 0 at MAG_OFF+8) so i_objmem takes the
+// warm OT_INIT_RD -> OT_INIT_RD2 -> OT_INIT_MW path instead of the
+// cold OT_INIT_SW directory sweep (~2*ObjEntries writes).  Pass
+// +objmem_cold to keep the power-on sweep (the transport runs do).
 
 module tb_g6lc_apu_vgtop
 #(parameter int unsigned ObjEntries  = 65536,
-  parameter int unsigned PayMemBytes = 16 * 1024 * 1024);
+  parameter int unsigned PayMemBytes = 16 * 1024 * 1024,
+  // TP5: -GVtxCacheEntries=N enables post-transform vertex reuse through
+  // the real apmem vertex window + rast FSM (end-to-end).  0 = dormant.
+  parameter int unsigned VtxCacheEntries = 0);
   import g6lc_apu_mp_pkg::*;
   import g6lc_apu_vn_pkg::*;
   import g6lc_apu_vg_pkg::*;
@@ -79,6 +88,7 @@ module tb_g6lc_apu_vgtop
 
   logic clk = 0, rst_ni = 0;
   int errors = 0, checks = 0, cycles = 0, cases = 0;
+  int unsigned wmag;   // objmem magic word index (warm-boot preload)
 
   // ---- DUT ------------------------------------------------------------
   logic            ch_v = 0, ch_r;
@@ -112,7 +122,9 @@ module tb_g6lc_apu_vgtop
 
   g6lc_apu_vgtop #(.Enable(1'b1), .Rings(Rings),
                     .ObjEntries(ObjEntries),
-                    .PayMemBytes(PayMemBytes)) i_dut (
+                    .PayMemBytes(PayMemBytes),
+                    .PerfCountersEn(1'b1),
+                    .VtxCacheEntries(VtxCacheEntries)) i_dut (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .chain_valid_i(ch_v), .chain_ready_o(ch_r),
     .chain_id_i(ch_id), .chain_n_i(ch_n), .chain_desc_i(ch_d),
@@ -134,7 +146,8 @@ module tb_g6lc_apu_vgtop
     .dbg_ot_cpl_o(dot_cpl),
     .xf_axi_req_o(xf_areq), .xf_axi_rsp_i(xf_arsp),
     .ap_base_i(64'(g6lc_apu_pkg::APU_SHM_BASE)),
-    .xf_flush_i(1'b0), .xfer_busy_o(xf_busy));
+    .xf_flush_i(1'b0), .xfer_busy_o(xf_busy),
+    .scratch_base_o(), .scratch_valid_o());
 
   // shared memory model: mp ports 0..3,5 -> {guest, aperture} backing
   // vgtop port order {CTL,PUMP,SH,RAST,OBJ,EXEC} — six requesters; the
@@ -297,7 +310,8 @@ module tb_g6lc_apu_vgtop
     .dbg_ot_cpl_o(o_dotcpl),
     .xf_axi_req_o(o_xareq),
     .xf_axi_rsp_i(g6lc_apu_bus_pkg::apu_dma_axi_resp_t'('0)),
-    .ap_base_i('0), .xf_flush_i(1'b0), .xfer_busy_o(o_xbusy));
+    .ap_base_i('0), .xf_flush_i(1'b0), .xfer_busy_o(o_xbusy),
+    .scratch_base_o(), .scratch_valid_o());
 
   // ---- tape / expected stores (the guest RAM + aperture live in the
   // mp model i_mem; this TB pokes i_mem.gmem / i_mem.apm directly) ----
@@ -341,11 +355,27 @@ module tb_g6lc_apu_vgtop
   // count is always reported (XF_FAULTS) for the run script to gate on.
   bit xf_ok;
   initial xf_ok = $test$plusargs("xf_ok");
+  // +objmem_cold: keep the objmem power-on directory sweep; default is
+  // a warm boot (the TB pre-seeds the magic pair — see the initial
+  // block below).  A warm-mode run that still visits OT_INIT_SW means
+  // the preload missed and is a hard failure, never silent cold timing.
+  bit cold_boot;
+  initial cold_boot = $test$plusargs("objmem_cold");
   int unsigned xf_faults = 0;
   always @(posedge clk)
     if (rst_ni && i_dut.gen_on.xf_done &&
         i_dut.gen_on.xf_done_pl.code != g6lc_apu_sh_pkg::APU_SH_DONE_OK)
       xf_faults <= xf_faults + 1;
+  // warm-boot guard: with the magic pre-seeded, i_objmem must never
+  // enter OT_INIT_SW (the cold directory sweep; ot_state_e index 2).
+  // If the preload lands anywhere but where the DUT reads, OT_INIT_RD
+  // misses MAG_PAT and the run silently becomes a cold boot — fail
+  // loudly instead.
+  always @(posedge clk)
+    if (!cold_boot && rst_ni &&
+        6'(i_dut.gen_on.i_objmem.gen_on.ot_q) == 6'd2)
+      $fatal(1, "objmem warm boot failed: OT_INIT_SW visited");
+
   always @(posedge clk)
     if (eng_trace && rst_ni) begin
       if (i_dut.gen_on.ex_work_v && i_dut.gen_on.ex_work_rdy)
@@ -429,6 +459,13 @@ module tb_g6lc_apu_vgtop
 
   always #5 clk = ~clk;
   always @(posedge clk) cycles++;
+  // Wave-engine state histogram for the session, printed as HIST lines
+  // with the other counters (same format as tb_g6lc_apu_shwave: codes
+  // are positions in g6lc_apu_shwave's st_e).  Bench-only measurement.
+  int unsigned st_hist [256];
+  logic [7:0]  st_code;
+  assign st_code = i_dut.gen_on.i_sh.gen_on.i_wave.gen_on.st_q;
+  always @(posedge clk) st_hist[st_code] = st_hist[st_code] + 1;
   always @(negedge clk) begin
     if (o_wv || o_dn || o_bsy || o_cpl || o_fp || o_dotcv || o_chr ||
         o_mf || o_xbusy ||
@@ -628,6 +665,18 @@ module tb_g6lc_apu_vgtop
     $readmemh({"vn_vectors/", vname, ".exp"}, expm, 0);
     tp = 0; ep = 0;
     repeat (8) @(posedge clk);
+    // warm boot: seed the objmem magic pair before reset release so
+    // i_objmem skips the OT_INIT_SW directory sweep.  MAG_OFF mirrors
+    // g6lc_apu_objmem (STK_OFF + ObjEntries*2) via the same pkg
+    // functions; MAG_PAT is its 64'h6F62_6A5F_6D65_6D21 split across
+    // two 32-bit apm words.  The epoch word (MAG_OFF+8) stays 0 —
+    // i_mem pre-zeroed apm and the DUT bumps it on the warm path.
+    if (!cold_boot) begin
+      wmag = apix(32'((apu_objmem_stk_off(ObjEntries)
+                     + 64'(ObjEntries) * 64'd2) >> 2));
+      i_mem.apm[wmag]     = 32'h6D65_6D21;  // MAG_PAT[31:0]
+      i_mem.apm[wmag + 1] = 32'h6F62_6A5F;  // MAG_PAT[63:32]
+    end
     rst_ni = 1;
     repeat (4) @(posedge clk);
 
@@ -867,6 +916,127 @@ module tb_g6lc_apu_vgtop
       if (g1_n != 0)
         $display("PASS-COMPUTE g1=%0d g2=%0d ulp1=%0d ulp2=%0d maxulp=%0d cycles=%0d",
                  g1_n, g2_n, ulp1, ulp2, maxulp, cycles);
+      for (int i = 1; i < 256; i++)
+        if (st_hist[i] != 0) $display("HIST st=%0d cyc=%0d", i, st_hist[i]);
+      // raster stage counters live inside i_rast (stat_o is left
+      // unconnected at the vgtop boundary — read hierarchically)
+      $display("STAT busy=%0d tris=%0d pixwr=%0d",
+               i_dut.gen_on.i_rast.stat_o[31:0],
+               i_dut.gen_on.i_rast.stat_o[63:32],
+               i_dut.gen_on.i_rast.stat_o[95:64]);
+      $display("PERFR rast ctl=%0d clear=%0d gather=%0d vswait=%0d setup=%0d clip=%0d scan=%0d interp=%0d depth=%0d fswait=%0d merge=%0d mpw=%0d mpn=%0d fpw=%0d fpn=%0d dvw=%0d wqw=%0d",
+               i_dut.gen_on.i_rast.gen_on.gen_cls.cyc_q[0],
+               i_dut.gen_on.i_rast.gen_on.gen_cls.cyc_q[1],
+               i_dut.gen_on.i_rast.gen_on.gen_cls.cyc_q[2],
+               i_dut.gen_on.i_rast.gen_on.gen_cls.cyc_q[3],
+               i_dut.gen_on.i_rast.gen_on.gen_cls.cyc_q[4],
+               i_dut.gen_on.i_rast.gen_on.gen_cls.cyc_q[5],
+               i_dut.gen_on.i_rast.gen_on.gen_cls.cyc_q[6],
+               i_dut.gen_on.i_rast.gen_on.gen_cls.cyc_q[7],
+               i_dut.gen_on.i_rast.gen_on.gen_cls.cyc_q[8],
+               i_dut.gen_on.i_rast.gen_on.gen_cls.cyc_q[9],
+               i_dut.gen_on.i_rast.gen_on.gen_cls.cyc_q[10],
+               i_dut.gen_on.i_rast.gen_on.gen_cls.mpw_q,
+               i_dut.gen_on.i_rast.gen_on.gen_cls.mpn_q,
+               i_dut.gen_on.i_rast.gen_on.gen_cls.fpw_q,
+               i_dut.gen_on.i_rast.gen_on.gen_cls.fpn_q,
+               i_dut.gen_on.i_rast.gen_on.gen_cls.dvw_q,
+               i_dut.gen_on.i_rast.gen_on.gen_cls.wqw_q);
+      // device-level split: engine busy cycles and per-requester
+      // memory-port traffic (i_dut.gen_on.gen_top_perf)
+      $display("PERFT top any=%0d ctl=%0d pump=%0d exec=%0d sh=%0d rast=%0d xfer=%0d mpn_ctl=%0d mpn_pump=%0d mpn_sh=%0d mpn_rast=%0d mpn_obj=%0d mpn_exec=%0d mpw_ctl=%0d mpw_pump=%0d mpw_sh=%0d mpw_rast=%0d mpw_obj=%0d mpw_exec=%0d",
+               i_dut.gen_on.gen_top_perf.any_q,
+               i_dut.gen_on.gen_top_perf.eng_q[0],
+               i_dut.gen_on.gen_top_perf.eng_q[1],
+               i_dut.gen_on.gen_top_perf.eng_q[2],
+               i_dut.gen_on.gen_top_perf.eng_q[3],
+               i_dut.gen_on.gen_top_perf.eng_q[4],
+               i_dut.gen_on.gen_top_perf.eng_q[5],
+               i_dut.gen_on.gen_top_perf.mpn_q[0],
+               i_dut.gen_on.gen_top_perf.mpn_q[1],
+               i_dut.gen_on.gen_top_perf.mpn_q[2],
+               i_dut.gen_on.gen_top_perf.mpn_q[3],
+               i_dut.gen_on.gen_top_perf.mpn_q[4],
+               i_dut.gen_on.gen_top_perf.mpn_q[5],
+               i_dut.gen_on.gen_top_perf.mpw_q[0],
+               i_dut.gen_on.gen_top_perf.mpw_q[1],
+               i_dut.gen_on.gen_top_perf.mpw_q[2],
+               i_dut.gen_on.gen_top_perf.mpw_q[3],
+               i_dut.gen_on.gen_top_perf.mpw_q[4],
+               i_dut.gen_on.gen_top_perf.mpw_q[5]);
+      // FP0 frame-class counters (PerfClassEn=PerfCountersEn=1 arm):
+      // pump {decode,poll,park,xfer,ctl}, exec {assembly,work,ctl},
+      // xfer {rd,wr,setup} leg occupancy + per-engine busy.
+      $display("PERFC pump_b=%0d pdec=%0d pexec=%0d ppoll=%0d ppark=%0d pxfer=%0d pctl=%0d ex_b=%0d easm=%0d ewrk=%0d ectl=%0d xf_b=%0d xrd=%0d xwr=%0d xset=%0d",
+               i_dut.gen_on.i_pump.gen_on.gen_pcls.busy_q,
+               i_dut.gen_on.i_pump.gen_on.gen_pcls.cyc_q[0],
+               i_dut.gen_on.i_pump.gen_on.gen_pcls.cyc_q[1],
+               i_dut.gen_on.i_pump.gen_on.gen_pcls.cyc_q[2],
+               i_dut.gen_on.i_pump.gen_on.gen_pcls.cyc_q[3],
+               i_dut.gen_on.i_pump.gen_on.gen_pcls.cyc_q[4],
+               i_dut.gen_on.i_pump.gen_on.gen_pcls.cyc_q[5],
+               i_dut.gen_on.i_exec.gen_on.gen_pcls.busy_q,
+               // FP0b/c: easm = sum of the assembly sub-classes
+               // (all but WORK idx8 / CTL idx9); ewrk=WORK, ectl=CTL —
+               // keeps frame.cmdexec.{assembly,work,ctl} identical
+               // while PERFX exposes the breakdown.
+               (i_dut.gen_on.i_exec.gen_on.gen_pcls.cyc_q[0] +
+                i_dut.gen_on.i_exec.gen_on.gen_pcls.cyc_q[1] +
+                i_dut.gen_on.i_exec.gen_on.gen_pcls.cyc_q[2] +
+                i_dut.gen_on.i_exec.gen_on.gen_pcls.cyc_q[3] +
+                i_dut.gen_on.i_exec.gen_on.gen_pcls.cyc_q[4] +
+                i_dut.gen_on.i_exec.gen_on.gen_pcls.cyc_q[5] +
+                i_dut.gen_on.i_exec.gen_on.gen_pcls.cyc_q[6] +
+                i_dut.gen_on.i_exec.gen_on.gen_pcls.cyc_q[7] +
+                i_dut.gen_on.i_exec.gen_on.gen_pcls.cyc_q[10]),
+               i_dut.gen_on.i_exec.gen_on.gen_pcls.cyc_q[8],
+               i_dut.gen_on.i_exec.gen_on.gen_pcls.cyc_q[9],
+               i_dut.gen_on.i_xf.gen_on.gen_leg.busy_q,
+               i_dut.gen_on.i_xf.gen_on.gen_leg.leg_q[0],
+               i_dut.gen_on.i_xf.gen_on.gen_leg.leg_q[1],
+               i_dut.gen_on.i_xf.gen_on.gen_leg.leg_q[2]);
+      // FP0 vnfront class counters (i_fr.gen_on.gen_pcls): the pump
+      // StFrontWait/pexec wait decomposed by front-FSM operation class.
+      $display("PERFV vf_b=%0d core=%0d sub=%0d waidle=%0d fence=%0d ot=%0d cr=%0d cs=%0d elem=%0d bind=%0d pool=%0d pay=%0d dsl=%0d dset=%0d upd=%0d sh=%0d pipe=%0d ret=%0d gp=%0d img=%0d qry=%0d oth=%0d",
+               i_dut.gen_on.i_pump.gen_on.i_fr.gen_on.gen_pcls.busy_q,
+               i_dut.gen_on.i_pump.gen_on.i_fr.gen_on.gen_pcls.cyc_q[0],
+               i_dut.gen_on.i_pump.gen_on.i_fr.gen_on.gen_pcls.cyc_q[1],
+               i_dut.gen_on.i_pump.gen_on.i_fr.gen_on.gen_pcls.cyc_q[2],
+               i_dut.gen_on.i_pump.gen_on.i_fr.gen_on.gen_pcls.cyc_q[3],
+               i_dut.gen_on.i_pump.gen_on.i_fr.gen_on.gen_pcls.cyc_q[4],
+               i_dut.gen_on.i_pump.gen_on.i_fr.gen_on.gen_pcls.cyc_q[5],
+               i_dut.gen_on.i_pump.gen_on.i_fr.gen_on.gen_pcls.cyc_q[6],
+               i_dut.gen_on.i_pump.gen_on.i_fr.gen_on.gen_pcls.cyc_q[7],
+               i_dut.gen_on.i_pump.gen_on.i_fr.gen_on.gen_pcls.cyc_q[8],
+               i_dut.gen_on.i_pump.gen_on.i_fr.gen_on.gen_pcls.cyc_q[9],
+               i_dut.gen_on.i_pump.gen_on.i_fr.gen_on.gen_pcls.cyc_q[10],
+               i_dut.gen_on.i_pump.gen_on.i_fr.gen_on.gen_pcls.cyc_q[11],
+               i_dut.gen_on.i_pump.gen_on.i_fr.gen_on.gen_pcls.cyc_q[12],
+               i_dut.gen_on.i_pump.gen_on.i_fr.gen_on.gen_pcls.cyc_q[13],
+               i_dut.gen_on.i_pump.gen_on.i_fr.gen_on.gen_pcls.cyc_q[14],
+               i_dut.gen_on.i_pump.gen_on.i_fr.gen_on.gen_pcls.cyc_q[15],
+               i_dut.gen_on.i_pump.gen_on.i_fr.gen_on.gen_pcls.cyc_q[16],
+               i_dut.gen_on.i_pump.gen_on.i_fr.gen_on.gen_pcls.cyc_q[17],
+               i_dut.gen_on.i_pump.gen_on.i_fr.gen_on.gen_pcls.cyc_q[18],
+               i_dut.gen_on.i_pump.gen_on.i_fr.gen_on.gen_pcls.cyc_q[19],
+               i_dut.gen_on.i_pump.gen_on.i_fr.gen_on.gen_pcls.cyc_q[20]);
+      // FP0b/c cmdexec assembly sub-classes (i_exec.gen_on.gen_pcls):
+      // the old easm catch-all split by operand-resolve cluster, with
+      // dispatch assembly further split into DOTO (pipe/lay/mod/issue)
+      // vs DRES (descriptor-set layout/pool/row resolution).
+      $display("PERFX ex_b=%0d rec=%0d doto=%0d dres=%0d draw=%0d xfer=%0d brp=%0d evt=%0d qry=%0d work=%0d ctl=%0d oth=%0d",
+               i_dut.gen_on.i_exec.gen_on.gen_pcls.busy_q,
+               i_dut.gen_on.i_exec.gen_on.gen_pcls.cyc_q[0],
+               i_dut.gen_on.i_exec.gen_on.gen_pcls.cyc_q[1],
+               i_dut.gen_on.i_exec.gen_on.gen_pcls.cyc_q[2],
+               i_dut.gen_on.i_exec.gen_on.gen_pcls.cyc_q[3],
+               i_dut.gen_on.i_exec.gen_on.gen_pcls.cyc_q[4],
+               i_dut.gen_on.i_exec.gen_on.gen_pcls.cyc_q[5],
+               i_dut.gen_on.i_exec.gen_on.gen_pcls.cyc_q[6],
+               i_dut.gen_on.i_exec.gen_on.gen_pcls.cyc_q[7],
+               i_dut.gen_on.i_exec.gen_on.gen_pcls.cyc_q[8],
+               i_dut.gen_on.i_exec.gen_on.gen_pcls.cyc_q[9],
+               i_dut.gen_on.i_exec.gen_on.gen_pcls.cyc_q[10]);
       $display("PASS tb_g6lc_apu_vgtop cases=%0d checks=%0d cycles=%0d",
                cases, checks, cycles);
     end else

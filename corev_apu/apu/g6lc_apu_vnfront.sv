@@ -125,7 +125,10 @@ module g6lc_apu_vnfront
   // vkCmdUpdateBuffer's spec maximum (65536 bytes) plus its
   // 4-word header.  A KEEP stream past this window is still a
   // decode-class PAYLOAD fault.
-  parameter int unsigned PayStageWords = 32768
+  parameter int unsigned PayStageWords = 32768,
+  // FP0: per-class busy-cycle counters over the front FSM state.  =0
+  // elaborates no counter cells (observe-only; never in the datapath).
+  parameter bit          PerfClassEn = 1'b0
 ) (
   input  logic               clk_i,
   input  logic               rst_ni,
@@ -677,6 +680,7 @@ module g6lc_apu_vnfront
     logic [7:0]          gp_fsm_q;    // FS entry.in_mask
     logic                gp_late_q;   // FS entry.fs_late (G3a-i late-Z)
     logic                gp_fdep_q;   // FS entry.fs_fdepth (writes FragDepth)
+    logic                gp_vsf_q;    // VS entry.vs_sidefx (TP5 vertex reuse)
     logic [4:0]          gp_nbind_q;
     logic [3:0]          gp_nattr_q;
     logic [4:0]          gp_i_q;      // binding/attr/attach/dyn cursor
@@ -1043,7 +1047,9 @@ module g6lc_apu_vnfront
       if (i < 6'd25)
         return gp_atr_q[3'(i - 6'd17)];
       if (i == 6'd25)
-        return {9'h0, gp_lop_q, gp_loe_q,
+        // [23] = gp_vsf_q (TP5 VS-side-effect flag for vertex reuse);
+        // cmdexec reads only rdata[15:0] of this word so [31:24] stay pad
+        return {8'h0, gp_vsf_q, gp_lop_q, gp_loe_q,
                 gp_sca_q && !gp_scdyn_q, gp_vpa_q && !gp_vpdyn_q,
                 gp_dcl_q, gp_natt_q, gp_rsd_q, gp_poly_q, gp_sten_q, gp_dbe_q,
                 gp_dcmp_q, gp_dbn_q, gp_bcdyn_q, gp_dwr_q, gp_dte_q};
@@ -1401,7 +1407,7 @@ module g6lc_apu_vnfront
         gp_st_q <= 1'b0; gp_refs_q <= '0;
         gp_mh0_q <= '0; gp_mh1_q <= '0;
         gp_mc0_q <= '0; gp_mc1_q <= '0; gp_fsm_q <= '0;
-        gp_late_q <= 1'b0; gp_fdep_q <= 1'b0;
+        gp_late_q <= 1'b0; gp_fdep_q <= 1'b0; gp_vsf_q <= 1'b0;
         pl_modh_q <= '0; pl_modc_q <= '0; pl_pin_q <= 1'b0;
         gp_nbind_q <= '0; gp_nattr_q <= '0; gp_i_q <= '0;
         gp_sp_q <= '0;
@@ -6692,6 +6698,11 @@ module g6lc_apu_vnfront
                 gp_fsm_q  <= sm_entry_q.in_mask;
                 gp_late_q <= sm_entry_q.fs_late;
                 gp_fdep_q <= sm_entry_q.fs_fdepth;
+              end else begin
+                // TP5: VS stage — capture the module's global-side-effect
+                // flag; the draw record carries it to the rasteriser's
+                // vertex-reuse enable
+                gp_vsf_q  <= sm_entry_q.vs_sidefx;
               end
               // keep the module materialized for the pipeline's
               // lifetime: an ObjTab pin makes a later module destroy
@@ -7949,6 +7960,134 @@ module g6lc_apu_vnfront
     end
 `endif
 // pragma translate_on
+
+    // FP0: per-class busy-cycle counters over the front FSM state
+    // (PerfClassEn=0 -> no cells; observe-only, never in the datapath).
+    // f_vfcls buckets the ~300-state object-model FSM into operation
+    // classes so the pump StFrontWait (pexec) cost attributes to the
+    // dominant sub-operation.  Mirrors g6lc_apu_vnpump gen_pcls.
+    if (PerfClassEn) begin : gen_pcls
+      localparam int unsigned NCLS = 21;
+      typedef enum logic [4:0] {
+        VF_CORE, VF_SUB, VF_WAIDLE, VF_FENCE, VF_OT, VF_CR, VF_CS,
+        VF_ELEM, VF_BIND, VF_POOL, VF_PAY, VF_DSL, VF_DSET, VF_UPD,
+        VF_SH, VF_PIPE, VF_RETIRE, VF_GPIPE, VF_IMG, VF_QRY, VF_OTHER
+      } vfcls_e;
+      function automatic vfcls_e f_vfcls(input state_e s);
+        if (s inside {
+                      StIdle, StDec, StDecWait, StResolve, StResCpl, StAct,
+                      StRep, StRepKick, StRepWait, StDone
+                      }) return VF_CORE;
+        if (s inside {
+                      StSubPush, StSubState, StSubStateNext
+                      }) return VF_SUB;
+        if (s inside {
+                      StWaitIdle
+                      }) return VF_WAIDLE;
+        if (s inside {
+                      StFencPoll, StFencClr
+                      }) return VF_FENCE;
+        if (s inside {
+                      StOtReq, StOtCpl
+                      }) return VF_OT;
+        if (s inside {
+                      StCrReq, StCrCpl, StRecFill, StRecApp, StAppendCpl
+                      }) return VF_CR;
+        if (s inside {
+                      StCsRd, StCsCap, StBlobRd, StBlobLo, StBlobHi
+                      }) return VF_CS;
+        if (s inside {
+                      StElemAlloc, StElemAllocCpl, StElemAuxCpl, StElemPd, StElemPdCpl, StElemSub,
+                      StElemSubCpl, StElemSubW, StElemFenc, StElemFencCpl, StElemRec, StElemRecCpl,
+                      StElemRetL, StElemRetR, StElemRetCpl, StElemRetPay
+                      }) return VF_ELEM;
+        if (s inside {
+                      StAllocGo, StAllocCpl, StAllocAux, StRetCpl, StRetPre, StRetKids,
+                      StRetPgF, StBindMemCk, StBind2Rd, StBind2ResC, StBind2MemC, StBind2SetC,
+                      StBindDev, StBindDevCas, StBindSet, StBind2Set, StCbGo, StCbCrCpl,
+                      StCbSetCpl, StCbPendW, StCbPayC, StCbPoolC, StCbDescW, StCbDescC,
+                      StCbLinkN, StCbAuxP, StCbAuxP2, StCbFailF, StCbFailR, StCbFRd,
+                      StCbFU, StCbFF, StCbFU2, StCbFD, StCbFRet
+                      }) return VF_BIND;
+        if (s inside {
+                      StPoolLoop, StPoolSet, StPoolSweep, StPoolSweepS, StPoolDes, StDPoolFlC,
+                      StDPoolFlF, StDPoolRsF, StFlRdNC, StFlSc, StFlScC, StFlWrC,
+                      StFlHit, StFlMiss, StFlIns, StDsFPl, StDsFLay, StDsFNs,
+                      StDsFRet, StDPoolSum, StDPoolSumC, StDPoolPgC, StDPoolAuxH, StDPoolAuxS,
+                      StDPoolRs, StDPoolRsK, StDPoolRsHi
+                      }) return VF_POOL;
+        if (s inside {
+                      StOpReq, StOpCpl, StStgRd, StStgCap, StPayAlcCpl, StPayLoop,
+                      StPayNext, StPayWr, StAuxSet, StAuxHiCpl, StAuxLo, StAuxLoCpl,
+                      StStSet, StStSetCpl, StApReq, StApCpl, StPayProd, StPayResLo,
+                      StPayResHi, StPayResCpl, StPayCapW, StPaySend
+                      }) return VF_PAY;
+        if (s inside {
+                      StDslHdrC, StDslRd, StDslPick, StDslEmit, StDslWr, StDslWrC,
+                      StDslAuxL, StDslHash, StDslPtr, StDslPtrC, StDslSamLo, StDslSamHi,
+                      StDslSamC, StDslSamW0C, StDslSamW1C, StDslFail
+                      }) return VF_DSL;
+        if (s inside {
+                      StDSetLayLo, StDSetLayHi, StDSetLayId, StDSetLayCpl, StDSetPoolC, StDSetObj,
+                      StDSetOCpl, StDSetAuxH, StDSetEpoch, StDSetZero, StDSetZeroC, StDSetBump,
+                      StDSetBumpC, StDiHdr, StDiHdrC, StDiRow, StDiRow0C, StDiRow1C,
+                      StDiPtrC, StDiSam0C, StDiSam1C, StDiWrite, StDiWriteC, StDiFail,
+                      StDiFailC
+                      }) return VF_DSET;
+        if (s inside {
+                      StRsvLuC, StRsvPoolC, StRsvLayC, StRsvHdrC, StRowSc, StRowW0C,
+                      StRowW1C, StUpdHdrC, StUpdSetCpl, StUpdWBegin, StUpdWBad, StUpdSpillC,
+                      StUpdWNext, StUpdInfo, StUpdInfoC, StUpdBufGo, StUpdBufCpl, StUpdMemCpl,
+                      StUpdImgRd, StUpdImgGo, StUpdImgVC, StUpdImgIC, StUpdImgMW, StUpdImgMC,
+                      StUpdImgSC, StUpdTexRd, StUpdTexGo, StUpdTexVC, StUpdTexBC, StUpdTexMC,
+                      StUpdWr0, StUpdWr1, StUpdWr2, StUpdWr3, StUpdWrO, StUpdElemCk,
+                      StUpdPoisC, StUpdCpRd, StUpdCpS, StUpdCpD, StUpdCpDSet, StUpdCpGo,
+                      StUpdCpPC, StUpdCpRC, StUpdCpBC, StUpdCpNext
+                      }) return VF_UPD;
+        if (s inside {
+                      StSmReq, StSmCpl, StShRd, StShWr, StShWrC, StShFill,
+                      StShFillC, StShFillR, StPgReq, StPgCpl, StShModObj, StShModCpl
+                      }) return VF_SH;
+        if (s inside {
+                      StPipeH0, StPipeH1, StPipeH2, StPipeH3, StPipeH4, StPipeSpId,
+                      StPipeSpOff, StPipeSpSz0, StPipeSpSz1, StPipeSpDs0, StPipeSpDs1, StPipeSpDat,
+                      StPipeSpLay, StPipeLay0, StPipeModCpl, StPipeModPin, StPipeLayCpl, StPipeSpAlc,
+                      StPipeSpWn, StPipeSpWp, StPipeSpEnd, StPipeAlcP, StPipeW1, StPipeW2,
+                      StPipeAllocC, StPipeAuxC, StPipeAuxCpl, StPipeAuxHiC, StPipeFail, StPipeFaux
+                      }) return VF_PIPE;
+        if (s inside {
+                      StRetLazyC, StRetModI, StRetPBR, StRetPBR2, StRetPSW, StRetPipeC,
+                      StRetUnp, StRetUnpC, StRetUnpF, StRetUnpI, StRetPNext, StRetPSChk,
+                      StRetPSRd, StRetPFree
+                      }) return VF_RETIRE;
+        if (s inside {
+                      StGpRd, StGpCap, StGpModL, StGpModC, StGpFillC, StGpPinC,
+                      StGpLayC, StGpAlcC, StGpPayW, StGpPayWd, StGpObjC, StGpAuxH,
+                      StGpUnr, StBrpIdLo, StBrpIdHi, StBrpIdCpl
+                      }) return VF_GPIPE;
+        if (s inside {
+                      StImgCk, StImgMip, StImgAuxH, StImgState, StImgVwCk, StImgVwAuxH,
+                      StSamCk, StSamAuxH, StImgSubRep, StBufVwCk, StBufVwMC, StBufVwAuxH
+                      }) return VF_IMG;
+        if (s inside {
+                      StQryGo, StQryRd, StQryRdC, StQryFmt, StQryWait, StQryEnd
+                      }) return VF_QRY;
+        return VF_OTHER;
+      endfunction
+      vfcls_e cls_w;
+      logic [NCLS-1:0][31:0] cyc_q;
+      logic [31:0]           busy_q;
+      assign cls_w = f_vfcls(state_q);
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          cyc_q <= '0; busy_q <= '0;
+        end else begin
+          if (state_q != StIdle)
+            cyc_q[cls_w] <= cyc_q[cls_w] + 32'd1;
+          if (busy_o) busy_q <= busy_q + 32'd1;
+        end
+      end
+    end
   end
 
 endmodule

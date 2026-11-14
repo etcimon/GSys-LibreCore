@@ -42,7 +42,10 @@ module g6lc_apu_cmdexec
   // legal work item; verification fixtures override it.
   parameter int unsigned WorkBudgetLog2 = 30,
   // sticky execution-fault registers, one per context tag
-  parameter int unsigned FaultCtxs = 32
+  parameter int unsigned FaultCtxs = 32,
+  // FP0 frame counters: assembly vs work-wait class breakdown, read
+  // hierarchically by benches (no port; 0 = no cells)
+  parameter bit          PerfClassEn = 1'b0
 ) (
   input  logic               clk_i,
   input  logic               rst_ni,
@@ -1133,13 +1136,30 @@ module g6lc_apu_cmdexec
                              kind: 6'(APU_VN_KIND_VK_IMAGE_VIEW),
                              default: '0};
         end
-        // G1c: graphics-pipeline ObjPay — 44-word state block
+        // G1c: graphics-pipeline ObjPay — 57-word state block fetched
+        // as four READN bursts {0..15},{16..31},{32..43},{48..56}; the
+        // w44..47 stage descriptors are read separately via pbr.  Each
+        // burst stays inside one 16-word ObjPay line (n<=16).  dr_pi_q
+        // is the segment base {0,16,32,48} at issue; the beats stream
+        // back on op_cpl_valid and StDrPayCpl decodes them by dr_pi_q.
         StDrPay: begin
           op_req_valid_o = 1'b1;
-          op_req_o       = '{op: APU_OBJPAY_OP_READ,
-                             addr: rd_gpay_q +
-                                   32'(dr_pi_q),
-                             default: '0};
+          if      (dr_pi_q == 6'd0)
+            op_req_o = '{op: APU_OBJPAY_OP_READN,
+                         addr: rd_gpay_q + 32'd0,  words: 32'd16,
+                         default: '0};
+          else if (dr_pi_q == 6'd16)
+            op_req_o = '{op: APU_OBJPAY_OP_READN,
+                         addr: rd_gpay_q + 32'd16, words: 32'd16,
+                         default: '0};
+          else if (dr_pi_q == 6'd32)
+            op_req_o = '{op: APU_OBJPAY_OP_READN,
+                         addr: rd_gpay_q + 32'd32, words: 32'd12,
+                         default: '0};
+          else
+            op_req_o = '{op: APU_OBJPAY_OP_READN,
+                         addr: rd_gpay_q + 32'd48, words: 32'd9,
+                         default: '0};
         end
         // the internal render-pass CLEAR rides the work port with the
         // CLEAR_ATTACHMENTS carrier so vgtop routes it to the raster
@@ -3507,6 +3527,9 @@ module g6lc_apu_cmdexec
                   rd_q.depth_bounds_en <= op_cpl_i.rdata[3];
                   rd_q.logic_op_en   <= op_cpl_i.rdata[18];
                   rd_q.logic_op      <= op_cpl_i.rdata[22:19];
+                  // TP5: w25[23] = VS module global-side-effect flag —
+                  // gates vertex-shader reuse in the rasteriser
+                  rd_q.vs_sidefx     <= op_cpl_i.rdata[23];
                   dr_bcdyn_q       <= op_cpl_i.rdata[2];
                   dr_vpsta_q       <= op_cpl_i.rdata[16];
                   dr_scsta_q       <= op_cpl_i.rdata[17];
@@ -3579,9 +3602,17 @@ module g6lc_apu_cmdexec
                 state_q <= StDrPay;
               end else if (dr_pi_q == 6'd56) begin
                 state_q <= StDrVbN;
-              end else begin
+              end else if (dr_pi_q == 6'd15 ||
+                           dr_pi_q == 6'd31) begin
+                // READN burst boundary: w15/w31 close the {0..15} and
+                // {16..31} bursts; dr_pi_q+1 is already the next
+                // burst's first word (16/32) so re-issue in StDrPay
                 dr_pi_q <= dr_pi_q + 6'd1;
                 state_q <= StDrPay;
+              end else begin
+                // mid-burst beat: stay in StDrPayCpl for the next word
+                dr_pi_q <= dr_pi_q + 6'd1;
+                state_q <= StDrPayCpl;
               end
             end
           end
@@ -4129,6 +4160,82 @@ module g6lc_apu_cmdexec
     end
 `endif
 // pragma translate_on
+
+    // FP0c: split CD_ASM_DISP into DOTO (pipeline/layout/module/
+    // issue) vs DRES (descriptor-set layout/pool/row resolution) so the
+    // dominant dispatch-assembly sub-cost is visible.
+    if (PerfClassEn) begin : gen_pcls
+      localparam int unsigned NCLS = 11;
+      typedef enum logic [3:0] {
+        CD_ASM_REC, CD_ASM_DOTO, CD_ASM_DRES, CD_ASM_DRAW,
+        CD_ASM_XFER, CD_ASM_BRP, CD_ASM_EVT, CD_ASM_QRY, CD_WORK,
+        CD_CTL, CD_ASM_OTH
+      } cmdcls_e;
+      function automatic cmdcls_e f_cmdcls(input state_e s);
+        if (s inside {
+                      StPinReq, StPinCpl, StCntReq, StCntCpl, StRdReq,
+                      StRdCpl, StResReq, StResCpl, StUnpReq, StUnpCpl,
+                      StSmReq, StSmCpl, StRsReq, StRsLookC, StRsFillC,
+                      StUnpD, StPBR, StPBRC
+        }) return CD_ASM_REC;
+        if (s inside {
+                      StDsModR0, StDsModR1, StDsModR2, StDsModRC,
+                      StDsPipeReq, StDsPipeCpl, StDsLayReq, StDsLayCpl
+        }) return CD_ASM_DOTO;
+        if (s inside {
+                      StDsSetCk, StDsSetCkN, StDsSlRd, StDsSlRdC, StDsSlHi,
+                      StDsSlHiC, StDsSlReq, StDsSlCpl, StDsSetReq,
+                      StDsSetCpl, StDsDslReq, StDsDslCpl, StDsPoolReq,
+                      StDsPoolCpl, StDsRowNb, StDsRowNbC, StDsRowRd,
+                      StDsRowRdC
+        }) return CD_ASM_DRES;
+        if (s inside {
+                      StDrModR0, StDrModR1, StDrModR2, StDrModR3, StDrModRC0,
+                      StDrModRC1, StPayReq, StPayCpl, StDrPay, StDrPayCpl,
+                      StDrVbN, StDrIbN
+        }) return CD_ASM_DRAW;
+        if (s inside {
+                      StXfBufReq, StXfBufCpl, StXfMemReq, StXfMemCpl,
+                      StXcFetch, StXcFetchC, StXcLk, StXcLkC, StXcPop,
+                      StIndRd, StIndRdC
+        }) return CD_ASM_XFER;
+        if (s inside {
+                      StBrpRpReq, StBrpRpCpl, StBrpPayReq, StBrpPayCpl,
+                      StBrpFbReq, StBrpFbCpl, StBrpVwLo, StBrpVwLoC,
+                      StBrpVwHi, StBrpVwHiC, StBrpVwReq, StBrpVwCpl,
+                      StBrpIssue, StBrpClrN
+        }) return CD_ASM_BRP;
+        if (s inside {
+                      StEvSet, StEvSetC, StWvRd, StWvRdC, StWvLk, StWvLkC,
+                      StWvWait
+        }) return CD_ASM_EVT;
+        if (s inside {
+                      StQryLk, StQryLkC, StQryW, StQryWC, StQryBegS,
+                      StQryEndD, StCpBufReq, StCpBufCpl, StCpMemReq,
+                      StCpMemCpl, StCpRd, StCpRdC, StCpWr, StCpWrC
+        }) return CD_ASM_QRY;
+        if (s inside {
+                      StDispatch, StWork, StDrain, StNextBuf, StBufDone,
+                      StFinalDrain, StCbRes, StCbResCpl, StDone, StDsIssue,
+                      StDsDone
+        }) return CD_WORK;
+        if (s == StIdle) return CD_CTL;
+        return CD_ASM_OTH;
+      endfunction
+      cmdcls_e cls_w;
+      logic [NCLS-1:0][31:0] cyc_q;
+      logic [31:0]           busy_q;
+      assign cls_w = f_cmdcls(state_q);
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          cyc_q <= '0; busy_q <= '0;
+        end else begin
+          if (state_q != StIdle)
+            cyc_q[cls_w] <= cyc_q[cls_w] + 32'd1;
+          if (state_q != StIdle) busy_q <= busy_q + 32'd1;
+        end
+      end
+    end
   end
 endmodule
 

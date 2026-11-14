@@ -81,8 +81,13 @@ module g6lc_apu_vgtop
   parameter int unsigned ScratchBytes  = 4096,
   parameter int unsigned SlabBytes     = 16384,
   parameter int unsigned ShaderBudget  = 32'h0100_0000,
+  // TP5 vertex reuse: post-transform cache entries; 0 = reuse off
+  parameter int unsigned VtxCacheEntries = 0,
   // §12.3 C/5a: the Xfer engine derives its internal DMA view from this
-  parameter g6lc_apu_cfg_pkg::apu_cfg_t ApuCfg = g6lc_apu_cfg_pkg::ApuVenus
+  parameter g6lc_apu_cfg_pkg::apu_cfg_t ApuCfg = g6lc_apu_cfg_pkg::ApuVenus,
+  // W1.5/FP0 bench counters: shader-core perf_o and raster stage
+  // classes; 0 = no cells
+  parameter bit          PerfCountersEn = 1'b0
 ) (
   input  logic            clk_i,
   input  logic            rst_ni,
@@ -150,7 +155,11 @@ module g6lc_apu_vgtop
   input  apu_objtab_req_t dbg_ot_req_i,
   output logic            dbg_ot_cpl_valid_o,
   input  logic            dbg_ot_cpl_ready_i,
-  output apu_objtab_cpl_t dbg_ot_cpl_o
+  output apu_objtab_cpl_t dbg_ot_cpl_o,
+  // R3 record store: rasteriser record/clip carve aperture (dom=1)
+  // base + valid, forwarded by vgsys to apmem.rec_base_i/rec_en_i.
+  output logic [31:0]     scratch_base_o,
+  output logic            scratch_valid_o
 );
   if (!Enable) begin : gen_off
     assign chain_ready_o = 1'b0;
@@ -172,6 +181,7 @@ module g6lc_apu_vgtop
     assign objtab_live_o = '0;
     assign dbg_ot_ready_o = 1'b0; assign dbg_ot_cpl_valid_o = 1'b0;
     assign dbg_ot_cpl_o = '0;
+    assign scratch_base_o = '0; assign scratch_valid_o = 1'b0;
     logic unused;
     assign unused = clk_i | rst_ni | testmode_i | chain_valid_i |
                     (|chain_id_i) | (|chain_n_i) | cpl_ready_i |
@@ -324,7 +334,8 @@ module g6lc_apu_vgtop
     logic        ex_dead;
 
     g6lc_apu_vnpump #(.Enable(1'b1), .Rings(Rings),
-                      .AliveTickLog2(AliveTickLog2)) i_pump (
+                      .AliveTickLog2(AliveTickLog2),
+                      .PerfClassEn(PerfCountersEn)) i_pump (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
       .xs_valid_i(vc_xs_v), .xs_ready_o(vc_xs_rdy),
       .xs_desc_i(vc_xs_desc), .xs_ndesc_i(vc_xs_n),
@@ -453,7 +464,8 @@ module g6lc_apu_vgtop
                           work_is_draw ? rs_work_rdy : work_ready_i;
 
     g6lc_apu_cmdexec #(.Enable(1'b1), .Fences(Fences),
-                       .WorkBudgetLog2(WorkBudgetLog2)) i_exec (
+                       .WorkBudgetLog2(WorkBudgetLog2),
+                       .PerfClassEn(PerfCountersEn)) i_exec (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
       .submit_valid_i(vp_ex_v), .submit_ready_o(vp_ex_rdy),
       .submit_i(vp_ex_submit),
@@ -731,6 +743,8 @@ module g6lc_apu_vgtop
     apu_vgpages_req_t  rs_pg_req;
     logic              rs_mp_v;
     apu_mp_req_t       rs_mp_req;
+    logic [31:0]       rs_scratch_base;
+    logic              rs_scratch_valid;
 
     // G1c: rs_rd is driven by cmdexec's draw assembly (rd_o)
     g6lc_apu_shcore #(
@@ -738,7 +752,8 @@ module g6lc_apu_vgtop
       .ShaderIds(ShaderIds), .ShaderSlots(ShaderSlots),
       .ShaderWords(ShaderWords), .ShaderInit(ShaderInit),
       .ShaderMembers(ShaderMembers), .ScratchBytes(ScratchBytes),
-      .SlabBytes(SlabBytes), .ShaderBudget(ShaderBudget)) i_sh (
+      .SlabBytes(SlabBytes), .ShaderBudget(ShaderBudget),
+      .PerfCountersEn(PerfCountersEn)) i_sh (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
       // G3b-ii: module staging/commit is internal to the residency
       // FILL engine now — the external ports are a TB backdoor
@@ -791,7 +806,8 @@ module g6lc_apu_vgtop
     // vgsys joins it with apmem's through g6lc_apu_tdma.
     logic xf_op_v, xf_op_rdy, xf_op_cpl_rdy;
     apu_objpay_req_t xf_op_req;
-    g6lc_apu_xfer #(.Enable(1'b1), .ApuCfg(ApuCfg)) i_xf (
+    g6lc_apu_xfer #(.Enable(1'b1), .ApuCfg(ApuCfg),
+                    .PerfClassEn(PerfCountersEn)) i_xf (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
       .work_valid_i(ex_work_v && work_is_xfer),
       .work_ready_o(xf_work_rdy),
@@ -808,7 +824,9 @@ module g6lc_apu_vgtop
     // §3a query-stat bus {fs_inv,occ,ia_prim,ia_vtx} — PerfCountersEn
     // elaborates the monotonic counters cmdexec differences across a
     // Begin/End drain window
-    g6lc_apu_rast #(.Enable(1'b1), .PerfCountersEn(1'b1)) i_rast (
+    g6lc_apu_rast #(.Enable(1'b1), .PerfCountersEn(1'b1),
+                    .PerfClassEn(PerfCountersEn),
+                    .VtxCacheEntries(VtxCacheEntries)) i_rast (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
       .work_valid_i(ex_work_v && work_is_draw),
       .work_ready_o(rs_work_rdy),
@@ -830,7 +848,12 @@ module g6lc_apu_vgtop
       .pg_cpl_ready_o(rs_pg_cpl_rdy), .pg_cpl_i(pg_cpl),
       .busy_o(rs_busy),
       .stat_o(),
-      .qry_stat_o(qry_stat_w));
+      .qry_stat_o(qry_stat_w),
+      .scratch_base_o(rs_scratch_base),
+      .scratch_valid_o(rs_scratch_valid));
+    // R3: record/clip carve base + valid -> apmem record window.
+    assign scratch_base_o  = rs_scratch_base;
+    assign scratch_valid_o = rs_scratch_valid;
 
     // wave-in-flight latch (clocked with the grant owners below):
     // while set, the shcore sidebands carry the raster's copies —
@@ -998,6 +1021,38 @@ module g6lc_apu_vgtop
     assign mem_fault_o = vc_mem_fault;
     assign busy_o      = vc_busy | vp_busy | sh_busy | ex_busy |
                          xfer_busy_o | rs_busy;
+    // ---- W1.5/FP0 device-level counters (bench-read, no port) -----------
+    // PerfCountersEn: busy cycles per engine in the order {ctl, pump,
+    // exec, shader, raster, xfer}, cycles with any engine busy, and per
+    // memory-port requester (indexed as mp_req_valid_o: ctl, pump, sh,
+    // rast, obj, exec) the accepted requests and the cycles spent with a
+    // request pending or in flight.
+    if (PerfCountersEn) begin : gen_top_perf
+      logic [5:0][31:0] eng_q, mpn_q, mpw_q;
+      logic [31:0]      any_q;
+      logic [5:0]       mfl_q;                 // request in flight
+      wire  [5:0]       eng_w = {xfer_busy_o, rs_busy, sh_busy, ex_busy,
+                                 vp_busy, vc_busy};
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          eng_q <= '0; mpn_q <= '0; mpw_q <= '0;
+          any_q <= '0; mfl_q <= '0;
+        end else begin
+          if (|eng_w) any_q <= any_q + 32'd1;
+          for (int i = 0; i < 6; i++) begin
+            if (eng_w[i]) eng_q[i] <= eng_q[i] + 32'd1;
+            if (mp_req_valid_o[i] && mp_req_ready_i[i]) begin
+              mpn_q[i] <= mpn_q[i] + 32'd1;
+              mfl_q[i] <= 1'b1;
+            end else if (mp_rsp_valid_i[i]) begin
+              mfl_q[i] <= 1'b0;
+            end
+            if (mp_req_valid_o[i] || mfl_q[i])
+              mpw_q[i] <= mpw_q[i] + 32'd1;
+          end
+        end
+      end
+    end
     // chain_id is published by the walker, not consumed here
     logic unused_chain;
     assign unused_chain = |chain_id_i;

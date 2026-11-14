@@ -14,12 +14,17 @@
 #   guest  stock Ubuntu riscv64 Venus gate (run-guest.sh; heavy — the
 #          image download is ~1.2 GiB the first time)
 #   synth  Enable=0/1 yosys screens for vgpages(2 geoms) objtab vnfront
-#          vnpump cmdexec vgctl (re-runs each suite with its *_SYNTH=1
+#          vnpump cmdexec vgctl rast shwave (re-runs each suite with its *_SYNTH=1
 #          flag; full enabled/disabled screens are required, with no
 #          pre-synthesis fallback). Run the entire launcher on an isolated
 #          remote snapshot; the old partial --remote routing is refused.
 #   profile bounded static Vulkan audit (no RTL build; not conformance).
 #   dev    bounded vgtop development cohort; repository-tools auto-provisioning.
+#   perf   throughput loop (run-apu-perf.sh): rast + shwave suites and the
+#          frame cohort gated against the admitted capture (same checked
+#          work, no cycle regression), plus the RowCacheEntries=0 and
+#          memory-jitter control arms.  The capture is collected as
+#          perf/capture.json; admit it with run-apu-perf.sh --admit-from.
 #
 # Suites remain serial; aggregate remote job budgets are owned by the caller.
 # Logs persist under a NEW --out (default .cache/apu-regress/<ts>-<pid>).
@@ -44,7 +49,7 @@ while [ $# -gt 0 ]; do
       echo "BLOCKED: partial remote routing is unsafe; run this entire launcher through the build-platform remote gateway on an isolated source snapshot." >&2
       exit 4;;
     --help)
-      printf '%s\n' 'Usage: run-apu-regress.sh [--stages unit,top,soc,bridge,guest,synth,profile,dev] [--out NEW_DIR]' \
+      printf '%s\n' 'Usage: run-apu-regress.sh [--stages unit,top,soc,bridge,guest,synth,profile,dev,perf] [--out NEW_DIR]' \
         'Run RTL stages through the remote proxy. PASS covers selected stages only, not device qualification.'
       exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
@@ -56,7 +61,7 @@ done
 IFS=, read -r -a selected <<< "$STAGES"
 seen=,
 for stage in "${selected[@]}"; do
-  case "$stage" in unit|top|soc|bridge|guest|synth|profile|dev) ;; *) echo "unknown stage: $stage" >&2; exit 2;; esac
+  case "$stage" in unit|top|soc|bridge|guest|synth|profile|dev|perf) ;; *) echo "unknown stage: $stage" >&2; exit 2;; esac
   [[ "$seen" != *",$stage,"* ]] || { echo "duplicate stage: $stage" >&2; exit 2; }
   seen+="$stage,"
 done
@@ -105,6 +110,12 @@ if has profile; then
 fi
 if has dev; then
   run_suite dev env APU_DEV_LOG_DIR="$OUT/dev" bash "$TB/run-apu-dev.sh"
+fi
+if has perf; then
+  # cycle counts do not depend on the simulator build, so the loop keeps
+  # its non-PGO simulator; the capture lands in $OUT/perf/capture.json
+  run_suite perf env APU_SIM_PGO=0 APU_PERF_OUT="$OUT/perf" \
+    bash "$TB/run-apu-perf.sh"
 fi
 
 if has unit; then
@@ -184,6 +195,8 @@ if has synth; then
     APU_RAST_OUT="$OUT/synth/rast" "$TB/run-apu-rast.sh"
   run_suite synth-vnfront env VNFRONT_SYNTH=1 VNFRONT_SYNTH_PREONLY=0 \
     APU_VNFRONT_OUT="$OUT/synth/vnfront" "$TB/run-apu-vnfront.sh"
+  run_suite synth-shwave env SHWAVE_SYNTH=1 \
+    APU_SHWAVE_OUT="$OUT/synth/shwave" "$TB/run-apu-shwave.sh"
 fi
 
 # ----------------------------------------------------------- summary
@@ -259,6 +272,20 @@ for line in (out / 'results.tsv').read_text().splitlines():
     elif name == 'profile':
         if not isinstance(audit, dict) or audit.get('status') != 'pass' or checks <= 0:
             status, reason = 'incomplete', 'missing profile audit verdict'
+    elif name == 'perf':
+        # rc 0 already means the gate diff passed; the verdict line and a
+        # readable capture with checked work are required as evidence
+        checks = 0
+        try:
+            capture = json.loads((out / 'perf' / 'capture.json').read_text())
+            checks = sum(int(run.get('pass', {}).get('checks', 0))
+                         for run in capture['runs'].values())
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            pass
+        if not re.search(r'^OK same checked work; no cycle regression$', text, re.M):
+            status, reason = 'incomplete', 'missing throughput gate verdict'
+        elif not checks:
+            status, reason = 'incomplete', 'missing or empty throughput capture'
     elif not checks:
         status, reason = 'incomplete', 'no positive checked simulation verdict'
     if status == 'pass' and name.startswith('synth-'):

@@ -207,9 +207,11 @@ fi
 if [ "${VNFRONT_SYNTH:-0}" != 1 ]; then
   exit 0
 fi
+# The staging memory is a backend SRAM macro; its 32,768-word
+# behavioural model exceeds the slang unroll limit — screen the logic.
 for en in 0 1; do
   cat > "$OUT/vnfront-synth$en.ys" <<EOF
-read_slang -f $ROOT/corev_apu/apu/Flist.apu_vnfront --top g6lc_apu_vnfront_fixture -GEnable=$en
+read_slang -f $ROOT/corev_apu/apu/Flist.apu_vnfront --top g6lc_apu_vnfront_fixture -GEnable=$en$(if [ "$en" = 1 ]; then echo " -GPayStageWords=64"; fi)
 hierarchy -top g6lc_apu_vnfront_fixture
 flatten
 proc

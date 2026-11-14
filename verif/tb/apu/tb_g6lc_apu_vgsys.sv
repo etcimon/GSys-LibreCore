@@ -18,7 +18,10 @@
 
 module tb_g6lc_apu_vgsys
 #(parameter int unsigned ObjEntries  = 65536,
-  parameter int unsigned PayMemBytes = 16 * 1024 * 1024);
+  parameter int unsigned PayMemBytes = 16 * 1024 * 1024,
+  // TP5: -GVtxCacheEntries=N enables post-transform vertex reuse through
+  // the real apmem vertex window + rast FSM (end-to-end).  0 = dormant.
+  parameter int unsigned VtxCacheEntries = 0);
   import g6lc_apu_bus_pkg::*;
   import g6lc_apu_mp_pkg::*;
   import g6lc_apu_vn_pkg::*;
@@ -138,10 +141,22 @@ module tb_g6lc_apu_vgsys
   wire [31:0] pay_free =
       ws_arm_q ? i_ws0.gen_on.i_top.gen_on.i_pay.gen_on.used_q
                : i_dut.gen_on.i_top.gen_on.i_pay.gen_on.used_q;
+  // TP5: the vertex-cache window rides inside the rasterizer's ALLOC_PRIV
+  // scratch carve (rast_pkg APU_RAST_SCRATCH_BYTES=64 KiB + VTX_WIN_B), so
+  // at VtxCacheEntries>0 it adds ceil(VTX_WIN_B/PageBytes) used pages once
+  // the carve is live.  Gate the CK_PAGES expectation on the carve's valid
+  // strobe so sessions that never rasterize (no ALLOC_PRIV) keep =0 counts.
+  wire scratch_live = ws_arm_q ? i_ws0.gen_on.vg_scratch_valid
+                               : i_dut.gen_on.vg_scratch_valid;
+  localparam int unsigned VTXC_ENT_B = APU_SH_VARY_STRIDE + 8;  // 152 B/entry
+  localparam int unsigned VTX_PG_D =
+      (VtxCacheEntries == 0) ? 0
+                             : ((VtxCacheEntries * VTXC_ENT_B + 4095) / 4096);
 
   g6lc_apu_vgsys #(.Enable(1'b1), .Rings(Rings),
                     .ObjEntries(ObjEntries),
-                    .PayMemBytes(PayMemBytes)) i_dut (
+                    .PayMemBytes(PayMemBytes),
+                    .VtxCacheEntries(VtxCacheEntries)) i_dut (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .vq0_i(vq0), .vq1_i(vq1),
     .queue_enable_i(ws_arm_q ? 2'b00 : qen),
@@ -187,7 +202,8 @@ module tb_g6lc_apu_vgsys
 
   g6lc_apu_vgsys #(.Enable(1'b1), .Rings(Rings), .WorkSink(1'b0),
                     .ObjEntries(ObjEntries),
-                    .PayMemBytes(PayMemBytes)) i_ws0 (
+                    .PayMemBytes(PayMemBytes),
+                    .VtxCacheEntries(VtxCacheEntries)) i_ws0 (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .vq0_i(vq0), .vq1_i(vq1),
     .queue_enable_i(ws_arm_q ? qen : 2'b00),
@@ -268,6 +284,8 @@ module tb_g6lc_apu_vgsys
     .rsp_valid_o(z_rv), .rsp_o(z_mprsp),
     .guest_base_i(GB), .guest_bytes_i(64'h100000),
     .ap_base_i(AB), .ap_bytes_i(ap_bytes),
+    .rec_base_i('0), .rec_en_i(1'b0),
+    .vtx_base_i('0), .vtx_en_i(1'b0),
     .axi_req_o(z_areq), .axi_rsp_i(arsp0),
     .outstanding_o(z_aout), .fault_cnt_o(z_afcnt),
     .idle_o(z_aidle));
@@ -916,10 +934,13 @@ module tb_g6lc_apu_vgsys
               ep += 8;
               check(rec_kind() == 11, "EK_PAGES kind");
               check(vgp_used
-                    == int'(expm[ep + 1]),
-                    $sformatf("CK_PAGES got=%0d exp=%0d",
+                    == int'(expm[ep + 1]) +
+                       (scratch_live ? VTX_PG_D : 0),
+                    $sformatf("CK_PAGES got=%0d exp=%0d (+vtx%0d)",
                               vgp_used,
-                              expm[ep + 1]));
+                              expm[ep + 1] +
+                                  (scratch_live ? VTX_PG_D : 0),
+                              scratch_live ? VTX_PG_D : 0));
               ep += 8;
             end
             4: begin // CK_EXTRA [ring][byte off]

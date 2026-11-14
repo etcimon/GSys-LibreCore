@@ -68,6 +68,7 @@ package g6lc_apu_rast_pkg;
     logic [7:0]        fs_in_mask;           // FS Input locations to interpolate (entry.in_mask of the FS module)
     logic              fs_late;              // FS writes FragDepth or may kill/demote -> late-Z in the ROP
     logic              fs_fdepth;            // FS declares FragDepth out -> slot8 word0 is the depth source
+    logic              vs_sidefx;            // TP5: VS module may side-effect globally -> vertex reuse unsafe
     logic [7:0]        topology;             // VkPrimitiveTopology: 3 LIST, 4 STRIP, 5 FAN (others → UNSUPPORTED)
     logic [1:0]        poly_mode;            // VkPolygonMode: 0 fill, 1 line, 2 point
     logic              rast_discard;         // rasterizerDiscardEnable

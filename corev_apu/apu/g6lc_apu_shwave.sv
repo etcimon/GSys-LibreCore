@@ -36,6 +36,131 @@
 // from DM_PROG in include/g6lc_apu_dmprog.svh — a generated file
 // (tools/shader/gen_dmprog.py; `gen_dmprog.py --check` is the
 // run-apu-regress.sh `dmprog` freshness suite).
+//
+// SP1 decoded-row cache (RowCacheEntries): the decode walk between
+// W_F1 and W_PRE re-derives, for a given program counter of a
+// committed module, facts that never change until the module store
+// does — the result-type shape, each operand's regmap tag/index/aux
+// and const/reg id, and the result register row.  The first
+// execution of an instruction walks the long path unchanged and
+// stores those facts in a tc_sram row at W_RW1 (only when f_rowok
+// proves every operand id lands inside the streamed words and
+// nva <= 3); a later execution of the same {slot, pc} hits at W_F1,
+// restores the decode state, and reads operand values while the
+// operand words stream through W_LD0/W_LD1, then enters W_PRE.
+// Rows are tagged {slot, pc[15:IDXW]} and flash-invalidated by
+// rc_inval_i on any module-store mutation; RowCacheEntries=0
+// elaborates no cache cells and keeps the long path bit-for-bit.
+// Timing impact: W_F1 adds row-SRAM-out -> tag compare -> restore
+// enables; operand reads are flop -> SRAM address (no SRAM-to-SRAM
+// path).  Review checklist: tc_sram arrays only (<=128-bit banks),
+// valid bits in flops, RowCacheEntries=0 elaborates no cells, no
+// latches, execution from W_PRE onward untouched.
+//
+// SP2 sequencing merges: W_NEXT absorbs the scheduler pick (the
+// usual W_NEXT -> W_SCHED cycle is gone), a skipped load/store word
+// advances the (lane,comp) cursor straight from W_LS0 instead of
+// detouring through W_LSA, and a non-atomic scratch/slab word
+// issues its SRAM access on the sb_*/sc_* ports in the W_LS0 decode
+// cycle itself — the comb block drives them from ls_o32_w/ls_tg_w
+// while W_SSB1 still captures bounds and data one cycle later.
+// W_SSB/W_LSA stay for the atomic and residual paths; no enum,
+// state-number or wait-set change.
+// Timing impact: the W_LS0 issue puts va_q operand mux -> 32-bit
+// add (ls_o32_w) -> SRAM address/bounds compare -> SRAM write
+// enable in one cycle; with SCW and LAN powers of two the scratch
+// address is a concatenation, so the address path is one adder
+// deep, while the write-enable path adds one comparator — flagged
+// for the timing program rather than pipelined now.  Review
+// checklist: tc_sram ports only, ls_fast_w is the exact W_LS0
+// priority chain (sequential and combinational views cannot
+// disagree), W_SSB1/W_LSC/W_LS1/W_LS2/atomics/aggregate walk/row
+// cache untouched, no latches.
+//
+// SP3 lane-parallel scratch: the single flat Function/Private
+// scratch SRAM (MaxWaves*LAN*SCW words, addressed
+// (wave*LAN+lane)*SCW+word) becomes LAN banks of MaxWaves*SCW
+// words — bank l owns lane l at in-bank address wave*SCW+word, same
+// total bits.  W_SC0's clear now writes word ls_comp_q of every
+// bank in one cycle (the per-lane serial sweep is gone).  A plain
+// load/store word whose active lanes all carry the same
+// Function/Private tag takes the vector pass: W_LS0 issues every
+// active lane's access on its own bank in one cycle (ls_o32_l/
+// ls_wd_l per lane, bounds per lane), latches the offsets in
+// ls_offv_q, and W_SSB1 captures all lanes' data/robust accounting
+// in one cycle.  Every other access — atomics, aggregates,
+// matrices, workgroup slab, non-uniform tags, dropped/record/
+// descriptor paths — keeps the serial sc_* view, which the port
+// block maps onto bank ls_lane_q unchanged.
+// Timing impact: W_LS0's vector arm replicates the SP2 decode
+// eight times — eight 32-bit adds (ls_o32_l) and eight bounds
+// compares (ls_inb_l), each feeding only its own bank's address
+// and write-enable, so the cone depth is the SP2 depth, not
+// 8x; the tag-uniformity AND tree (ls_tgu_w) and the lane-0
+// ls_vec_w condition feed the next-state select.  Area: eight
+// tc_sram instances of MaxWaves*SCW words replace one of
+// MaxWaves*LAN*SCW — identical total bits, one-eighth the depth
+// per bank, which moves scratch toward the SRAM macro's efficient
+// envelope.  Review checklist: banks via tc_sram only, serial
+// port view preserved bit-for-bit for every non-vector user,
+// ls_vec_w is a pure function of stable per-instruction state so
+// a word cannot be half vector/half serial, inactive lanes issue
+// nothing and count nothing, W_SSB1 is the only ls_vec_q reader,
+// no latches, no enum change.
+//
+// SP4 beat pairing: on the device-memory path (W_LSC -> W_LS1 ->
+// W_LS2), a plain-mode word that is the low half of an 8-byte beat
+// and has a next component in the same lane issues ONE 64-bit
+// request carrying both words — the port already moves beats, and
+// the serial path's second word was either a second half-beat
+// write or a guaranteed beat-reuse hit.  ls_pair_w requires plain
+// mode (no aggregate/matrix/strided/atomic), a record/Uniform/SBUF
+// tag, valid binding, beat alignment, a next component, and the
+// +8-byte bound that proves the pair's second word in bounds;
+// ls_pair_q is registered in W_LSC and read only by the W_LS1 port
+// drive (full-beat wdata/strobe) and W_LS2 (both wb halves, double
+// robust count on error, advance by two components with ls_adv's
+// own lane/instruction tail spelled out).
+// Timing impact: W_LS1's write-data mux gains one more 32-bit
+// select (ls_wd_p = the comp+1 store word); W_LS2 writes two wb_q
+// words in one cycle; no new path into the port address — the
+// beat base is the same ls_addr_q the serial first word used.
+// Review checklist: pairing is a pure function of per-access
+// state (tag/base/bound/descriptor key cannot differ between two
+// components of one plain access), mem_we_o/mem_re_o conditions
+// unchanged, W_LS1's masked-store skip and W_LSC's bounds/reuse
+// exits clear ls_pair_q, atomics/aggregates/matrices/images/
+// scratch untouched, no enum change, no latches.
+//
+// SP5 classify-time issue: the device-memory request used to be
+// presented to the port only in W_LS1, one full state after W_LSC
+// had already resolved binding, bounds, beat-reuse and pairing.
+// W_LSC's else-branch now drives mem_re_o/mem_we_o with the
+// combinational access (ls_iss_w = the else-branch predicate
+// restricted to non-atomics; lb_addr is the same sum W_LSC
+// registers into ls_addr_q, ls_pair_w the same flag it registers
+// into ls_pair_q), and a same-cycle mem_ready_i accept goes
+// straight to W_LS2.  An unaccepted or masked request still
+// lands in W_LS1, which re-issues the identical beat from the
+// now-registered ls_addr_q/ls_pair_q — the port sees one
+// continuous request either way, so the response count and the
+// W_LS2 capture are unchanged.
+// Timing impact: the port request-valid cone now includes the
+// W_LSC else-branch predicate (already computed for next-state)
+// and a 64-bit address mux (lb_addr vs ls_addr_q) one state
+// earlier; W_LS1's cone is unchanged.  The beat payload muxes
+// (wdata/wstrb half-select, pair select) gain a same-shaped
+// combinational arm.  Area: five small comb muxes/wires, no new
+// state, no new flops.
+// Review checklist: ls_iss_w is literally the W_LSC else-branch
+// condition (bounds pass, no beat-reuse hit) AND !ls_atom_q, so
+// it cannot fire on the bounds/reuse exits or on atomics; the
+// registered captures still happen every issue so W_LS1 re-issue
+// and W_LS2 bookkeeping are bit-identical; masked stores keep
+// req_o low (act/dead/record terms unchanged) and still detour
+// W_LS1 -> W_LSA; descriptor/image/record returns share the same
+// W_LSC funnel and are covered uniformly; the wait_q watchdog
+// only ever sees fewer wait states; no enum change, no latches.
 
 module g6lc_apu_shwave
   import g6lc_apu_vn_pkg::*;
@@ -64,11 +189,19 @@ module g6lc_apu_shwave
   parameter int unsigned CallDepth     = 8,     // G3a-i call-stack bound
   parameter bit          MatHelperEn   = 1'b0,  // §8 — unused in 4b
   // W1.5 counters: where the dispatch spent its cycles.  0 = no cells.
-  parameter bit          PerfCountersEn = 1'b0
+  parameter bit          PerfCountersEn = 1'b0,
+  // SP1 decoded-row cache: pcs of a committed module resolve their
+  // operand regmap/const ids, result type and result row once; later
+  // executions of the same pc restore them at W_F1 and stream operand
+  // values during W_LD0/W_LD1.  0 = no cache cells, long decode only.
+  parameter int unsigned RowCacheEntries = 1024
 ) (
   input  logic         clk_i,
   input  logic         rst_ni,
   input  logic         testmode_i,
+  // SP1: pulse/level from the module-store owner — any staging write,
+  // commit, retire or commit completion invalidates every cached row.
+  input  logic         rc_inval_i,
   // dispatch (single-cycle strobe; only while !busy_o)
   input  logic         disp_i,
   input  apu_sh_dispatch_t disp_pl_i,
@@ -128,9 +261,9 @@ module g6lc_apu_shwave
   input  logic            ot_cpl_valid_i,
   output logic            ot_cpl_ready_o,
   input  apu_objtab_cpl_t ot_cpl_i,
-  // PerfCountersEn: {tex, fpu, lsu, mem requests, instructions, busy}
-  // cycle / event counts of the current or last dispatch, 32 bits each
-  output logic [6*32-1:0] perf_o
+  // PerfCountersEn: {rhit, tex, fpu, lsu, mem requests, instructions,
+  // busy} cycle / event counts of the current or last dispatch
+  output logic [7*32-1:0] perf_o
 );
   if (!Enable) begin : gen_off
     assign perf_o = '0;
@@ -155,7 +288,7 @@ module g6lc_apu_shwave
                     (|init_data_i) | (|blk_data_i) | (|phi_data_i) |
                     (|func_data_i) | (|parm_data_i) |
                     (|entry_data_i) | (|mem_rdata_i) | mem_ready_i |
-                    mem_rvalid_i | mem_err_i |
+                    mem_rvalid_i | mem_err_i | rc_inval_i |
                     ot_req_ready_i | ot_cpl_valid_i | (|ot_cpl_i) |
                     MatHelperEn;
   end else begin : gen_on
@@ -164,12 +297,23 @@ module g6lc_apu_shwave
     localparam int unsigned RL   = (MaxWaves > 1) ? $clog2(MaxWaves) : 1;
     localparam int unsigned RI   = $clog2(ShaderRegs);
     localparam int unsigned SCW  = (ScratchBytes > 0) ? ScratchBytes / 4 : 1;
-    localparam int unsigned SWD  = MaxWaves * LAN * SCW;
-    localparam int unsigned SDW  = (SWD > 1) ? $clog2(SWD) : 1;
+    // SP3: scratch is LAN per-lane banks of MaxWaves*SCW words each —
+    // bank l holds lane l at in-bank address wave*SCW + word.
+    localparam int unsigned SCBN = MaxWaves * SCW;
+    localparam int unsigned SBA  = (SCBN > 1) ? $clog2(SCBN) : 1;
     localparam int unsigned SLW  = (SlabBytes > 0) ? SlabBytes / 4 : 1;
     localparam int unsigned SLWA = (SLW > 1) ? $clog2(SLW) : 1;
     localparam int unsigned OPB  = 32;          // operand words/instr
     localparam int unsigned CFD  = (CfDepth > 0) ? CfDepth : 1;
+
+`ifndef SYNTHESIS
+    initial begin
+      assert (RowCacheEntries == 0 ||
+              (RowCacheEntries <= 4096 &&
+               (RowCacheEntries & (RowCacheEntries - 1)) == 0))
+        else $fatal(1, "g6lc_apu_shwave: RowCacheEntries must be 0 or a power of two <= 4096");
+    end
+`endif
 
     typedef logic [LAN-1:0][VEC-1:0][31:0] vt_t;
 
@@ -179,9 +323,16 @@ module g6lc_apu_shwave
     logic [LAN*VEC*32-1:0] rf_wdata, rf_rdata;
     logic [LAN*VEC*4-1:0]  rf_be;
     logic                  sc_req, sc_we;
-    logic [SDW-1:0]        sc_addr;
+    logic [SBA-1:0]        sc_addr;
     logic [31:0]           sc_wdata, sc_rdata;
     logic [3:0]            sc_be;
+    // SP3: per-lane scratch banks — the serial sc_* view above maps
+    // onto bank ls_lane_q; W_SC0 broadcasts and the W_LS0 vector arm
+    // drive the banks directly.
+    logic [LAN-1:0]        scb_req, scb_we;
+    logic [SBA-1:0]        scb_addr [LAN];
+    logic [31:0]           scb_wdata [LAN];
+    logic [31:0]           scb_rdata [LAN];
     logic                  sb_req, sb_we;
     logic [SLWA-1:0]       sb_addr;
     logic [31:0]           sb_wdata, sb_rdata;
@@ -189,6 +340,56 @@ module g6lc_apu_shwave
     // active-lane mask of the selected wave (§7c): the wave scheduler
     // chooses wave_q; every per-lane loop gates on act_w.
     wire [LAN-1:0] act_w;
+
+    // ---- SP1 decoded-row cache ---------------------------------------------
+    // One row per committed-module pc holds every decode fact that is a
+    // pure function of (slot, pc): result-type shape, per-operand regmap
+    // results and ids, and the result register row.  va_q/ocst_q stay
+    // value reads (RF/const ports) and are refetched every execution.
+    localparam int unsigned RCIDXW = (RowCacheEntries > 1)
+                                    ? $clog2(RowCacheEntries) : 0;
+    localparam int unsigned RCIWA  = (RCIDXW > 0) ? RCIDXW : 1;
+    typedef struct packed {
+      logic [18-RCIDXW:0]  tag;      // {slot_q, pc[15:RCIDXW]}
+      logic               has_rty;
+      logic [3:0]         rkind;
+      logic [2:0]         rcomps;
+      logic [2:0]         rcols;
+      logic [9:0]         relem;
+      logic [15:0]        rsz;
+      logic [15:0]        rlw;
+      logic [9:0]         rty_id;
+      logic [1:0]         nva;       // 0..3 (wider nva never cached)
+      logic [29:0]        vty;       // {s2,s1,s0} x 10b
+      logic [5:0]         otag;      // {s2,s1,s0} x 2b
+      logic [3*RI-1:0]    oidx;      // {s2,s1,s0} x RI
+      logic [11:0]        oaux;      // {s2,s1,s0} x 4b
+      logic [29:0]        oid;       // {s2,s1,s0} x 10b
+      logic [RI-1:0]      wreg;
+    } rc_row_t;
+    localparam int unsigned RCW = $bits(rc_row_t);
+    // registered at W_F0 from the flop valid bits; the row data itself
+    // arrives from the SRAM array with the same 1-cycle latency as
+    // prog_data_i, so W_F1 sees {valid, tag, fields} together.
+    logic                rc_vq;
+    logic                fast_q;    // this instruction took a row hit
+    logic [3:0]          oaux_q [3]; // rm_aux per operand slot (row write)
+    logic [9:0]          oid_q  [3]; // operand regmap/const id per slot
+    rc_row_t             rc_row;    // row read this W_F0 (hit view)
+    wire                 rc_hit_w;  // rc_vq && tag match && !rc_inval_i
+    wire                 rc_f1_fault;   // W_F1 bounds/word-count fault
+    wire                 rc_f1_taken;   // hit branch actually executed
+    wire [RCIWA-1:0]     rc_idx;    // pc & (RowCacheEntries-1)
+    wire                 rc_vld_w;  // rcv_q[rc_idx] (gen_rc only)
+    // hit view of the row's operand part, formed inside the generate
+    // arm so the RowCacheEntries=0 arm carries no constant select:
+    // rc_kv[k] = operand slot k is in the row (k < nva); rc_l_* = the
+    // last operand's slot, id, RF row and aux (meaningful for nva != 0)
+    wire [2:0]           rc_kv;
+    wire [1:0]           rc_l_slot;
+    wire [9:0]           rc_l_oid;
+    wire [RI-1:0]        rc_l_oidx;
+    wire [3:0]           rc_l_oaux;
 
     // ---- states --------------------------------------------------------------
     typedef enum logic [7:0] {
@@ -661,6 +862,15 @@ module g6lc_apu_shwave
     logic [31:0]  ls_bsz_q;
     logic         ls_bok_q;
     logic         ls_rec_q;           // graphics record access (no DS resolve)
+    // SP3: vector scratch pass — one W_LS0/W_SSB1 pair covers every
+    // active lane's word; ls_offv_q holds each lane's registered
+    // byte offset for the W_SSB1 bounds/data capture.
+    logic         ls_vec_q;
+    logic [31:0]  ls_offv_q [LAN];
+    // SP4: beat pairing — W_LSC registers that this word's request
+    // carries the next component too; only W_LS1's port drive and
+    // W_LS2 read it.
+    logic         ls_pair_q;
     logic [63:0]  ls_addr_q;
     // counters / faults
     logic [31:0]  insns_q, robust_q;
@@ -775,12 +985,13 @@ module g6lc_apu_shwave
     // lsu = load/store unit incl. descriptor resolve and the aggregate
     // walk; fpu = arithmetic unit waits; tex = texture pipe.
     if (PerfCountersEn) begin : gen_perf
-      logic [31:0] pc_busy_q, pc_lsu_q, pc_fpu_q, pc_tex_q, pc_mem_q;
+      logic [31:0] pc_busy_q, pc_lsu_q, pc_fpu_q, pc_tex_q, pc_mem_q,
+                   pc_rhit_q;
       logic s_lsu, s_fpu, s_tex;
       always_comb begin
         s_lsu = st_q inside {W_LS0, W_LS1, W_LS2, W_LSC, W_LSA, W_SSB,
                              W_SSB1, W_DS0, W_DS1, W_DS2, W_DS3, W_DS4,
-                             W_DS5, W_DS6, W_DS7, W_DS8, W_DSA, W_MLF,
+                             W_DS5, W_DS6, W_DS7, W_DS8, W_DS9, W_DSA, W_MLF,
                              W_SMR0, W_SMR1, W_AG0, W_AG1, W_AGE0, W_AGE1,
                              W_AGM0, W_AGM1, W_AGN, W_AGL, W_AGS0, W_AGS1,
                              W_AGF, W_AGR, W_ATR, W_ATC, W_ATW, W_ATS0,
@@ -788,20 +999,27 @@ module g6lc_apu_shwave
         s_fpu = st_q inside {W_FU0, W_FU1, W_DQ0, W_DQ1, W_CVT0, W_CVT1,
                              W_NC0, W_NC1, W_IDIV};
         s_tex = st_q inside {W_TX0, W_TX1, W_TX2, W_TX3, W_TX4, W_TXM,
-                             W_TXC0, W_TXC1, W_TXC2, W_TXC3, W_TXC4,
-                             W_TXC5, W_TXC6, W_TXB, W_TXT0, W_TXT1,
-                             W_TXT2, W_TXF0, W_TXF1, W_TXD, W_TXA, W_TXR0,
+                             W_TXL0, W_TXL1, W_TXL2, W_TXL3, W_TXL4,
+                             W_TXL5, W_TXL6, W_TXL7, W_TXL8, W_TXL9,
+                             W_TXLA, W_TXLB, W_TXLC,
+                             W_TXC0, W_TXC0A, W_TXC1, W_TXC1B, W_TXC2,
+                             W_TXC3, W_TXC4, W_TXC5, W_TXC6,
+                             W_TXJ0, W_TXJ1, W_TXS0, W_TXS1, W_TXS2,
+                             W_TXG0, W_TXG1, W_TXQ0, W_TXQ1,
+                             W_TXB, W_TXT0, W_TXP, W_TXT1, W_TXT2,
+                             W_TXF0, W_TXF1, W_TXD,
+                             W_TXA, W_TXA2, W_TXA3, W_TXA4, W_TXR0,
                              W_TXR1, W_TXN, W_TXE0, W_TXE1, W_TXE2,
                              W_TXW0, W_TXW1, W_TXQ};
       end
       always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
           pc_busy_q <= '0; pc_lsu_q <= '0; pc_fpu_q <= '0;
-          pc_tex_q <= '0; pc_mem_q <= '0;
+          pc_tex_q <= '0; pc_mem_q <= '0; pc_rhit_q <= '0;
         end else if (st_q == W_IDLE) begin
           if (disp_i) begin
             pc_busy_q <= '0; pc_lsu_q <= '0; pc_fpu_q <= '0;
-            pc_tex_q <= '0; pc_mem_q <= '0;
+            pc_tex_q <= '0; pc_mem_q <= '0; pc_rhit_q <= '0;
           end
         end else begin
           pc_busy_q <= pc_busy_q + 32'd1;
@@ -810,10 +1028,11 @@ module g6lc_apu_shwave
           if (s_tex) pc_tex_q <= pc_tex_q + 32'd1;
           if ((mem_re_o || mem_we_o) && mem_ready_i)
             pc_mem_q <= pc_mem_q + 32'd1;
+          if (rc_f1_taken) pc_rhit_q <= pc_rhit_q + 32'd1;
         end
       end
-      assign perf_o = {pc_tex_q, pc_fpu_q, pc_lsu_q, pc_mem_q, insns_q,
-                       pc_busy_q};
+      assign perf_o = {pc_rhit_q, pc_tex_q, pc_fpu_q, pc_lsu_q, pc_mem_q,
+                       insns_q, pc_busy_q};
     end else begin : gen_noperf
       assign perf_o = '0;
     end
@@ -1003,6 +1222,45 @@ module g6lc_apu_shwave
                                             input logic [5:0] k,
                                             input logic [31:0] oq [OPB]);
       f_opid10 = 10'(f_opid(o, k[2:0], oq));
+    endfunction
+    // ops_q index that f_opid(o,k,·) reads — mirrors f_opid's layout
+    // table exactly; the row cache is only written when every
+    // decode-time operand-id read lands inside the streamed words, so
+    // a stale ops_q tail can never resolve differently on a later hit.
+    function automatic logic [3:0] f_opidx(input logic [15:0] o,
+                                           input logic [2:0] k);
+      if (o == 62 || o == 99 || o == 250 || o == 251)
+        f_opidx = 4'(k);
+      else if (o == 95 || o == 88)
+        f_opidx = (k == 0) ? 4'd2 : (k == 1) ? 4'd3 : 4'd5;
+      else if (o == 90 || o == 94 || o == 89 || o == 93 || o == 96 ||
+               o == 97)
+        f_opidx = (k < 3) ? 4'(k + 2) : 4'(k + 3);
+      else if (o == 92 || o == 87 || o == 91)
+        f_opidx = (k < 2) ? 4'(k + 2) : 4'(k + 3);
+      else if (o == 105)              f_opidx = 4'(k + 2);
+      else if (o == 12)               f_opidx = 4'(k + 4);
+      else if (o == 228)              f_opidx = (k == 0) ? 4'd0 : 4'd3;
+      else if (o == 230)              f_opidx = (k == 0) ? 4'd2
+                                         : (k == 1) ? 4'd6 : 4'd7;
+      else if (o >= 227 && o <= 242)
+        f_opidx = (k == 0) ? 4'd2 : (k == 1) ? 4'd5 : 4'd6;
+      else                            f_opidx = 4'(k + 2);
+    endfunction
+    // row-write eligibility: the row has room for three operand slots
+    // (nva <= 3), the result-id word ops_q[1] must be streamed (wc >= 3)
+    // and every operand-id index f_opid can touch for k < nva must be
+    // < wc-1.  Anything else keeps the long decode path forever.
+    function automatic logic f_rowok(input logic [15:0] o,
+                                     input logic [15:0] wc,
+                                     input logic [2:0] nv);
+      logic [3:0] m;
+      m = 4'd0;
+      if (nv > 3'd0) m = f_opidx(o, 3'd0);
+      if (nv > 3'd1 && f_opidx(o, 3'd1) > m) m = f_opidx(o, 3'd1);
+      if (nv > 3'd2 && f_opidx(o, 3'd2) > m) m = f_opidx(o, 3'd2);
+      f_rowok = (nv <= 3'd3) && (wc >= 16'd3) &&
+                (16'(m) < wc - 16'd1);
     endfunction
     // builtin value: lane l, builtin bi, vector component c
     function automatic logic [31:0] f_bi(
@@ -1505,6 +1763,39 @@ module g6lc_apu_shwave
                         ? W_LS0 : W_SMR0;
               end
             end
+    endtask
+    // SP2: the scheduler pick, shared by W_SCHED (every other entry
+    // into it) and W_NEXT's non-budget branch — W_NEXT absorbs the
+    // pick so the usual W_NEXT -> W_SCHED cycle disappears.
+    task automatic t_sched();
+      int pick, first, w;
+      logic any_live;
+      // A store between two atomic instructions must be visible.
+      at_fwd_v_q <= 1'b0;
+      pick = -1; first = -1; any_live = 1'b0;
+      for (int i = 1; i <= MaxWaves; i++) begin
+        w = (32'(wave_q) + i) % MaxWaves;
+        if (pick < 0 && w < 32'(nwaves_q) &&
+            !wfin_q[w] && !wbar_q[w])
+          pick = w;
+      end
+      for (w = 0; w < MaxWaves; w++)
+        if (w < 32'(nwaves_q) && !wfin_q[w]) begin
+          any_live = 1'b1;
+          if (first < 0) first = w;
+        end
+      if (pick >= 0) begin
+        if (pick != 32'(wave_q)) wsw_q <= wsw_q + 1;
+        wave_q <= RL'(pick); st_q <= W_F0;
+      end else if (!any_live) begin
+        st_q <= W_EOW;
+      end else begin
+        // every live wave is parked at the barrier → release
+        // them together; the lowest lane continues first.
+        wbar_q <= '0;
+        if (first != 32'(wave_q)) wsw_q <= wsw_q + 1;
+        wave_q <= RL'(first); st_q <= W_F0;
+      end
     endtask
     task automatic jset(input logic [1:0] jm, input logic [4:0] xo,
                         input logic [6:0] a, b, c,
@@ -2076,11 +2367,18 @@ module g6lc_apu_shwave
       .clk_i, .rst_ni, .req_i(rf_req), .we_i(rf_we),
       .addr_i(rf_addr), .wdata_i(rf_wdata[1023:512]),
       .be_i(rf_be[127:64]), .rdata_o(rf_rdata_hi));
-    tc_sram #(.NumWords(SWD), .DataWidth(32), .NumPorts(1),
-              .SimInit("none")) i_scratch (
-      .clk_i, .rst_ni, .req_i(sc_req), .we_i(sc_we),
-      .addr_i(sc_addr), .wdata_i(sc_wdata), .be_i(sc_be),
-      .rdata_o(sc_rdata));
+    // SP3: one 32-bit bank per lane — bank l holds lane l's scratch
+    // at in-bank address wave*SCW + word (same total bits as the old
+    // flat SWD array, an eighth the depth).  The serial sc_* view and
+    // the W_SC0/W_LS0-vector drives all land on scb_* in the port
+    // comb block below.
+    for (genvar l = 0; l < LAN; l++) begin : g_scb
+      tc_sram #(.NumWords(SCBN), .DataWidth(32), .NumPorts(1),
+                .SimInit("none")) i_scratch (
+        .clk_i, .rst_ni, .req_i(scb_req[l]), .we_i(scb_we[l]),
+        .addr_i(scb_addr[l]), .wdata_i(scb_wdata[l]), .be_i(4'hF),
+        .rdata_o(scb_rdata[l]));
+    end
     tc_sram #(.NumWords(SLW), .DataWidth(32), .NumPorts(1),
               .SimInit("none")) i_slab (
       .clk_i, .rst_ni, .req_i(sb_req), .we_i(sb_we),
@@ -2118,6 +2416,108 @@ module g6lc_apu_shwave
         txc_we = 1'b1;
         txc_aw = {1'b0, txc_ln_q, txc_fi_q};
       end
+    end
+
+    // fast-path operand stream indices: operand k's value read is
+    // issued during stream index k (W_LD0 = 0, W_LD1 vk=j = j+1) and
+    // captured one cycle later; saturated so array indexing stays
+    // in bounds — the *_v qualifiers gate every use.  (Placed after
+    // the state/register declarations: slang requires decl-before-
+    // use; Verilator tolerated the earlier position.)
+    wire [5:0] rc_is_k = (st_q == W_LD0) ? 6'd0 : vk_q + 6'd1;
+    wire       rc_is_v = fast_q && (st_q == W_LD0 || st_q == W_LD1) &&
+                         (rc_is_k < 6'(nva_q));
+    wire [2:0] rc_ik   = (rc_is_k < 6'd3) ? 3'(rc_is_k) : 3'd0;
+    wire       rc_cap_v = (st_q == W_LD1) && fast_q &&
+                          (vk_q < 6'(nva_q));
+    wire [2:0] rc_jk   = (vk_q < 6'd3) ? 3'(vk_q) : 3'd0;
+    assign rc_idx     = RCIWA'(pc_q[wave_q] & 32'(RowCacheEntries - 1));
+    assign rc_f1_fault = (prog_data_i[31:16] == 0) ||
+                         (prog_data_i[31:16] > 16'(OPB) + 1) ||
+                         (32'(pc_q[wave_q]) + prog_data_i[31:16] >
+                          32'(ShaderWords));
+    assign rc_f1_taken = (st_q == W_F1) && rc_hit_w && !rc_f1_fault;
+
+    // ---- SP1 row-cache SRAM --------------------------------------------------
+    // Rows live in tc_sram banks of <=128 bits (AGENTS-configuration
+    // envelope); valid bits are flops so invalidation is a clean reset.
+    // Read every W_F0 (pc index), write at W_RW1 when f_rowok passes.
+    if (RowCacheEntries != 0) begin : gen_rc
+      localparam int unsigned RCB = (RCW + 127) / 128;
+      logic rc_req, rc_we;
+      logic [RCW-1:0] row_w_flat;
+      rc_row_t row_w;
+      logic [RCW-1:0] rc_flat_r;
+      logic [RowCacheEntries-1:0] rcv_q;
+
+      assign rc_vld_w = rcv_q[rc_idx];
+
+      always_comb begin
+        rc_req = (st_q == W_F0) ||
+                 ((st_q == W_RW1) && f_rowok(opc_q, wc_q, nva_q));
+        rc_we  = (st_q == W_RW1) && f_rowok(opc_q, wc_q, nva_q);
+        // the row is exactly what the long decode walk leaves behind
+        row_w.tag     = {slot_q, pc_q[wave_q][15:RCIDXW]};
+        row_w.has_rty = f_has_rty(opc_q);
+        row_w.rkind   = rkind_q;
+        row_w.rcomps  = rcomps_q;
+        row_w.rcols   = rcols_q;
+        row_w.relem   = relem_q;
+        row_w.rsz     = rsz_q;
+        row_w.rlw     = rlw_q;
+        row_w.rty_id  = ops_q[0][9:0];
+        row_w.nva     = nva_q[1:0];
+        row_w.vty     = {vty_q[2], vty_q[1], vty_q[0]};
+        row_w.otag    = {otag_q[2], otag_q[1], otag_q[0]};
+        row_w.oidx    = {oidx_q[2], oidx_q[1], oidx_q[0]};
+        row_w.oaux    = {oaux_q[2], oaux_q[1], oaux_q[0]};
+        row_w.oid     = {oid_q[2],  oid_q[1],  oid_q[0]};
+        row_w.wreg    = rm_idx[RI-1:0];   // value latched into wreg_q now
+        row_w_flat    = row_w;
+      end
+
+      for (genvar b = 0; b < RCB; b++) begin : gen_rcb
+        localparam int raw = (b == RCB - 1) ? int'(RCW) - 128*b : 128;
+        localparam int WB  = ((raw + 7) / 8) * 8;   // whole bytes for be_i
+        logic [WB-1:0] rdata_b;
+        logic [WB-1:0] wdata_b;
+        assign wdata_b = {{(WB - raw){1'b0}}, row_w_flat[128*b +: raw]};
+        assign rc_flat_r[128*b +: raw] = rdata_b[raw-1:0];
+        tc_sram #(.NumWords(RowCacheEntries), .DataWidth(WB),
+                  .NumPorts(1), .SimInit("none")) i_rc (
+          .clk_i, .rst_ni,
+          .req_i(rc_req), .we_i(rc_we), .addr_i(rc_idx),
+          .wdata_i(wdata_b), .be_i('1), .rdata_o(rdata_b));
+      end
+      assign rc_row  = rc_row_t'(rc_flat_r);
+      assign rc_kv     = {rc_row.nva > 2'd2, rc_row.nva > 2'd1,
+                          rc_row.nva > 2'd0};
+      assign rc_l_slot = (rc_row.nva == 2'd0) ? 2'd0 : rc_row.nva - 2'd1;
+      assign rc_l_oid  = rc_row.oid[rc_l_slot*10 +: 10];
+      assign rc_l_oidx = rc_row.oidx[rc_l_slot*RI +: RI];
+      assign rc_l_oaux = rc_row.oaux[rc_l_slot*4 +: 4];
+      assign rc_hit_w = rc_vq &&
+          (rc_row.tag == {slot_q, pc_q[wave_q][15:RCIDXW]}) &&
+          !rc_inval_i;
+
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          rcv_q <= '0;
+        end else if (rc_inval_i) begin
+          rcv_q <= '0;                 // invalidation wins over a set
+        end else if (rc_we) begin
+          rcv_q[rc_idx] <= 1'b1;
+        end
+      end
+    end else begin : gen_norc
+      assign rc_vld_w = 1'b0;
+      assign rc_row   = '0;
+      assign rc_kv     = '0;
+      assign rc_l_slot = '0;
+      assign rc_l_oid  = '0;
+      assign rc_l_oidx = '0;
+      assign rc_l_oaux = '0;
+      assign rc_hit_w = 1'b0;
     end
 
     // ---- shmod read port addresses ------------------------------------------
@@ -2186,7 +2586,10 @@ module g6lc_apu_shwave
     assign rd_slot_o   = slot_q;
     assign prog_addr_o = pa_w;
     assign type_id_o   = ty_w;
-    assign const_id_o  = (st_q == W_PH2) ? phv_c[9:0] : res_id_q;
+    assign const_id_o  = (st_q == W_PH2) ? phv_c[9:0]
+                       : (rc_is_v && otag_q[rc_ik] == APU_SH_RT_CONST)
+                         ? oid_q[rc_ik]
+                       : res_id_q;
     assign memb_id_o   = mb_w;
     assign rm_id_o     = rm_w;
     assign func_id_o   = fn_w;
@@ -2660,12 +3063,121 @@ module g6lc_apu_shwave
                         ? ocst_q[1][32*({23'h0, ls_flw}) +: 32]
                         : ma_q[ls_lane_q[2:0]][lcc_q];
 
+    // SP2: W_LS0's decode of the current (lane,comp) access word,
+    // visible to both the sequential body and the port comb block so
+    // a non-atomic scratch/slab access can issue in the decode cycle
+    // itself (ls_ps_q puts the pointer word in operand slot 1).
+    wire [31:0] ls_o32_w = va_q[ls_ps_q][ls_lane_q[2:0]][0] +
+                  (ls_agg_q ? ag_o_q[lcc_q[1:0]] :
+                   {21'h0, (ls_mat_q ? ls_mad :
+                            ls_vs_q ? ls_vsi : 9'(ls_comp_q)), 2'b00});
+    wire [31:0] ls_tg_w  = va_q[ls_ps_q][ls_lane_q[2:0]][1];
+    // ls_fast_w is the exact W_LS0 else-if priority chain reduced to
+    // "the scratch/slab non-atomic branch is taken": the sequential
+    // body and the comb port arm share this one wire so they cannot
+    // disagree.
+    wire        ls_fast_w = act_w[ls_lane_q[2:0]] &&
+                  !(ls_atom_q && (dead_q[wave_q][ls_lane_q[2:0]] ||
+                                  hlp_w[ls_lane_q[2:0]])) &&
+                  !((dead_q[wave_q][ls_lane_q[2:0]] ||
+                     hlp_w[ls_lane_q[2:0]]) && ls_store_q &&
+                    (ls_tg_w[3:0] == APU_SH_SC_UNIFORM ||
+                     ls_tg_w[3:0] == APU_SH_SC_SBUF ||
+                     ls_tg_w[3:0] == APU_SH_SC_WORKGROUP)) &&
+                  !(ls_tg_w[31:28] == APU_SH_VF_DROP) &&
+                  !(gfx_q != APU_SH_GFX_NONE &&
+                    ls_tg_w[31:28] == APU_SH_VF_REC &&
+                    (ls_tg_w[3:0] == APU_SH_SC_INPUT ||
+                     ls_tg_w[3:0] == APU_SH_SC_OUTPUT)) &&
+                  !(ls_tg_w[3:0] == APU_SH_SC_INPUT &&
+                    gfx_q == APU_SH_GFX_VS &&
+                    (ls_tg_w[11:4] == 8'(APU_SH_BI_VERTEXINDEX) ||
+                     ls_tg_w[11:4] == 8'(APU_SH_BI_INSTANCEINDEX))) &&
+                  !(ls_tg_w[3:0] == APU_SH_SC_INPUT) &&
+                  !(ls_tg_w[3:0] == APU_SH_SC_PUSHCONST) &&
+                  !(ls_tg_w[3:0] == APU_SH_SC_IMAGE) &&
+                  !(ls_tg_w[3:0] == APU_SH_SC_UNIFORM ||
+                    ls_tg_w[3:0] == APU_SH_SC_SBUF) &&
+                  (ls_tg_w[3:0] == APU_SH_SC_WORKGROUP ||
+                   ls_tg_w[3:0] == APU_SH_SC_FUNCTION ||
+                   ls_tg_w[3:0] == APU_SH_SC_PRIVATE) &&
+                  !ls_atom_q;
+
+    // SP3 vector scratch: per-lane decode of the plain-mode access —
+    // lane l's byte offset, tag, store data and in-bounds result.
+    // Plain mode only: aggregate/matrix/strided offsets and the
+    // lane-serial modes never reach here (ls_vec_w excludes them).
+    logic [31:0] ls_o32_l [LAN];
+    logic [31:0] ls_tg_l  [LAN];
+    logic [31:0] ls_wd_l  [LAN];
+    logic        ls_inb_l [LAN];
+    always_comb begin
+      for (int l = 0; l < LAN; l++) begin
+        ls_o32_l[l] = va_q[ls_ps_q][l][0] +
+                      {21'h0, 9'(ls_comp_q), 2'b00};
+        ls_tg_l[l]  = va_q[ls_ps_q][l][1];
+        ls_wd_l[l]  = ls_tsrc_q ? t1_q[l][ls_comp_q[1:0]]
+                                : va_q[1][l][ls_comp_q[1:0]];
+        ls_inb_l[l] = ((ls_o32_l[l] >> 2) < SCW) &&
+                      (ls_o32_l[l] < {16'h0, escratch_q});
+      end
+    end
+    // tgv = tag of the lowest active lane; ls_tgu_w = every active
+    // lane carries that same tag (the vector path needs tag
+    // uniformity so one storage-class decision covers all lanes).
+    logic [31:0] tgv;
+    logic        ls_tgu_w;
+    always_comb begin
+      int l0;
+      tgv = '0; ls_tgu_w = 1'b1; l0 = -1;
+      for (int l = 0; l < LAN; l++)
+        if (act_w[l] && l0 < 0) l0 = l;
+      if (l0 >= 0) begin
+        tgv = ls_tg_l[l0];
+        for (int l = 0; l < LAN; l++)
+          if (act_w[l] && ls_tg_l[l] != tgv) ls_tgu_w = 1'b0;
+      end
+    end
+    // ls_vec_w: exactly when W_LS0's else-if chain would take the
+    // plain Function/Private scratch branch for EVERY active lane —
+    // lane cursor at 0 (the vector pass owns the whole lane sweep for
+    // this comp), non-atomic, non-aggregate/matrix/strided, uniform
+    // Function/Private tag, not a dropped variable.
+    wire ls_vec_w = (ls_lane_q == '0) && !ls_atom_q && !ls_agg_q &&
+                    !ls_mat_q && !ls_vs_q && (|act_w) && ls_tgu_w &&
+                    (tgv[3:0] == APU_SH_SC_FUNCTION ||
+                     tgv[3:0] == APU_SH_SC_PRIVATE) &&
+                    (tgv[31:28] != APU_SH_VF_DROP);
+
+    // SP4 beat pairing: the next component of this lane's plain-mode
+    // device-memory access is offset +4 in the same descriptor — it
+    // pairs when this word is the low half of an 8-byte beat, a next
+    // component exists, and that word passes the same bounds check.
+    // Plain mode only: aggregate/matrix/strided offsets, atomics and
+    // the image-texel path never pair; scratch/workgroup/slab never
+    // reach W_LSC's request path with these tags anyway.
+    wire ls_pair_w = !ls_atom_q && !ls_agg_q && !ls_mat_q && !ls_vs_q &&
+                     (ls_rec_q || ls_sc_q == APU_SH_SC_UNIFORM ||
+                      ls_sc_q == APU_SH_SC_SBUF) &&
+                     ls_bok_q && (lb_addr[2:0] == 3'b000) &&
+                     ({1'b0, ls_comp_q} + 1 < ncomp_q) &&
+                     ({32'h0, ls_off_q} + 8 <= {32'h0, ls_bsz_q});
+    // store data of the paired (next) component, same lane — the
+    // plain-mode half of ls_wd with comp+1
+    wire [31:0] ls_wd_p = ls_tsrc_q
+                        ? t1_q[ls_lane_q[2:0]][ls_comp_q[1:0] + 2'd1]
+                        : va_q[1][ls_lane_q[2:0]][ls_comp_q[1:0] + 2'd1];
+
     // ---- SRAM port drive ------------------------------------------------------
     always_comb begin
       rf_req = 1'b0; rf_we = 1'b0; rf_addr = '0; rf_wdata = '0;
       rf_be = '0;
       sc_req = 1'b0; sc_we = 1'b0; sc_addr = '0; sc_wdata = '0;
       sc_be = '0;
+      for (int l = 0; l < LAN; l++) begin
+        scb_req[l] = 1'b0; scb_we[l] = 1'b0;
+        scb_addr[l] = '0; scb_wdata[l] = '0;
+      end
       sb_req = 1'b0; sb_we = 1'b0; sb_addr = '0; sb_wdata = '0;
       sb_be = '0;
       unique case (st_q)
@@ -2684,10 +3196,13 @@ module g6lc_apu_shwave
           rf_be = '1;
         end
         W_SC0: begin                       // per-lane scratch clear
-          sc_req = 1'b1; sc_we = 1'b1;
-          sc_addr = SDW'((32'(wave_q) * LAN + ls_lane_q) * SCW +
-                         ls_comp_q);
-          sc_wdata = '0; sc_be = 4'hF;
+          // SP3: word ls_comp_q of EVERY lane's bank in one cycle —
+          // the serial view is bypassed (sc_req stays 0).
+          for (int l = 0; l < LAN; l++) begin
+            scb_req[l]  = 1'b1; scb_we[l] = 1'b1;
+            scb_addr[l] = SBA'(32'(wave_q) * SCW + ls_comp_q);
+            scb_wdata[l]= '0;
+          end
         end
         W_SCLR: begin                      // per-workgroup slab clear
           sb_req = 1'b1; sb_we = 1'b1;
@@ -2697,6 +3212,16 @@ module g6lc_apu_shwave
         W_RV0: begin
           rf_req = 1'b1;
           rf_addr = {wave_q, ridx_q};
+        end
+        W_LD0, W_LD1: begin
+          // SP1 fast stream: operand rc_ik's register-file row read,
+          // issued one stream cycle before its W_LD1 capture — the
+          // same flop -> SRAM address -> registered data timing the
+          // long path uses across W_RV0 -> W_RV1.
+          if (rc_is_v && otag_q[rc_ik] != APU_SH_RT_CONST) begin
+            rf_req = 1'b1;
+            rf_addr = {wave_q, oidx_q[rc_ik]};
+          end
         end
         W_IR2: begin
           rf_req = 1'b1;
@@ -2884,7 +3409,7 @@ module g6lc_apu_shwave
           end else begin
             if ((ls_off_q >> 2) < SCW &&
                 ls_off_q < {16'h0, escratch_q}) sc_req = 1'b1;
-            sc_addr = SDW'((32'(wave_q) * LAN + ls_lane_q) * SCW +
+            sc_addr = SBA'(32'(wave_q) * SCW +
                            (ls_off_q >> 2));
           end
         end
@@ -2903,7 +3428,7 @@ module g6lc_apu_shwave
               sc_req = 1'b1;
               sc_we  = (at_op_q != 16'd227);
             end
-            sc_addr = SDW'((32'(wave_q) * LAN + ls_lane_q) * SCW +
+            sc_addr = SBA'(32'(wave_q) * SCW +
                            (ls_off_q >> 2));
             sc_wdata = atomic_alu; sc_be = 4'hF;
           end
@@ -2922,6 +3447,54 @@ module g6lc_apu_shwave
             for (int c = 0; c < VEC; c++)
               if (act_w[l] && c < rcomps_q)
                 rf_be[l*16 + c*4 +: 4] = 4'hF;
+        end
+        W_LS0: begin
+          // SP2 fast path: the same scratch/slab access W_SSB would
+          // issue next cycle, driven from this cycle's decoded
+          // ls_o32_w/ls_tg_w — active only when the always_ff W_LS0
+          // body takes the non-atomic scratch/slab branch (ls_fast_w
+          // is that exact condition).  W_SSB1 captures next cycle.
+          // SP3: the vector pass issues every active lane's plain
+          // Function/Private word on its own bank in this same cycle;
+          // ls_vec_w is mutually exclusive with ls_fast_w (ls_lane_q
+          // is 0 here, ls_tg_w is lane 0's tag, and the uniformity
+          // check covers the other lanes).
+          if (ls_vec_w) begin
+            for (int l = 0; l < LAN; l++) begin
+              scb_req[l]  = act_w[l];
+              // stores write only in-bounds lanes; loads always read
+              // (the out-of-bounds data is discarded at capture)
+              scb_we[l]   = ls_store_q && act_w[l] && ls_inb_l[l];
+              scb_addr[l] = SBA'(32'(wave_q) * SCW + (ls_o32_l[l] >> 2));
+              scb_wdata[l]= ls_wd_l[l];
+            end
+          end else if (ls_fast_w) begin
+            if (ls_tg_w[3:0] == APU_SH_SC_WORKGROUP) begin
+              sb_req = 1'b1;
+              sb_we = ls_store_q && act_w[ls_lane_q[2:0]] &&
+                      !dead_q[wave_q][ls_lane_q[2:0]] &&
+                      !hlp_w[ls_lane_q[2:0]] &&
+                      ((ls_o32_w >> 2) < SLW) &&
+                      (ls_o32_w < {16'h0, eslab_q});
+              sb_addr = SLWA'(ls_o32_w >> 2);
+              sb_wdata = ls_wd;
+              sb_be = 4'hF;
+            end else begin
+              sc_req = 1'b1;
+              // Function/Private stores are never suppressed — dead
+              // lanes that still execute are demoted helpers, and
+              // Vulkan keeps their private state (and Output records)
+              // live for quad derivatives; killed lanes left act_w at
+              // the kill site.
+              sc_we = ls_store_q && act_w[ls_lane_q[2:0]] &&
+                      ((ls_o32_w >> 2) < SCW) &&
+                      (ls_o32_w < {16'h0, escratch_q});
+              sc_addr = SBA'(32'(wave_q) * SCW +
+                             (ls_o32_w >> 2));
+              sc_wdata = ls_wd;
+              sc_be = 4'hF;
+            end
+          end
         end
         W_SSB: begin
           if (ls_sc_q == APU_SH_SC_WORKGROUP) begin
@@ -2943,7 +3516,7 @@ module g6lc_apu_shwave
             sc_we = ls_store_q && act_w[ls_lane_q[2:0]] &&
                     ((ls_off_q >> 2) < SCW) &&
                     (ls_off_q < {16'h0, escratch_q});
-            sc_addr = SDW'((32'(wave_q) * LAN + ls_lane_q) * SCW +
+            sc_addr = SBA'(32'(wave_q) * SCW +
                            (ls_off_q >> 2));
             sc_wdata = ls_wd;
             sc_be = 4'hF;
@@ -2951,6 +3524,20 @@ module g6lc_apu_shwave
         end
         default: ;
       endcase
+      // SP3: the serial scratch view lands on bank ls_lane_q — every
+      // sc_* request above (W_ATS0/W_ATS1 atomics, W_SSB fallback, the
+      // W_LS0 serial arm) reaches exactly one bank.  W_SC0 and the
+      // W_LS0 vector arm drive the banks directly and leave sc_req 0.
+      // The read data is the selected bank's, valid one cycle after
+      // the request exactly as the flat array was.
+      for (int l = 0; l < LAN; l++)
+        if (sc_req && l == ls_lane_q[2:0]) begin
+          scb_req[l]  = sc_req;
+          scb_we[l]   = sc_we;
+          scb_addr[l] = sc_addr;
+          scb_wdata[l]= sc_wdata;
+        end
+      sc_rdata = scb_rdata[ls_lane_q[2:0]];
     end
 
     wire ls_mem = (ls_sc_q == APU_SH_SC_UNIFORM) ||
@@ -2975,14 +3562,37 @@ module g6lc_apu_shwave
     // G3a-i: SSBO atomic read-modify-write and the FS-out slot-8 tail beats
     wire atr_mem = (st_q == W_ATR) || (st_q == W_ATW);
     wire f8_mem  = (st_q == W_F8A) || (st_q == W_F8B);
-    assign mem_re_o    = ((st_q == W_LS1) && ls_mem && !ls_store_q &&
-                          ls_bok_q) || (st_q == W_ATR) ||
+    // SP5: W_LSC issues the plain device-memory request in the
+    // classify cycle itself, one state earlier than the old
+    // W_LSC -> W_LS1 -> (ready) -> W_LS2 walk.  ls_iss_w is exactly
+    // the W_LSC else-branch (bounds passed, no beat-reuse hit)
+    // restricted to non-atomics; the registered ls_addr_q/ls_pair_q
+    // still capture the same values so W_LS1 can re-issue an
+    // unaccepted request and W_LS2 keeps its bookkeeping.
+    wire        ls_iss_w = (st_q == W_LSC) && ls_bok_q &&
+                           ({32'h0, ls_off_q} + 4 <= {32'h0, ls_bsz_q}) &&
+                           !(!ls_store_q && lb_v_q &&
+                             lb_a_q == lb_addr[63:3]) && !ls_atom_q;
+    wire [63:0] ls_addr_d = ls_iss_w ? lb_addr : ls_addr_q;
+    wire        ls_addr2  = ls_iss_w ? lb_addr[2] : ls_addr_q[2];
+    wire        ls_pair_d = ls_iss_w ? ls_pair_w : ls_pair_q;
+    // request-valid for the issue cycle, mirroring the mem_re_o /
+    // mem_we_o LSU terms so the FSM can take W_LS2 on a same-cycle
+    // accept without reading the port outputs back
+    wire        ls_req_v  = ls_iss_w && ls_mem &&
+                           (!ls_store_q ||
+                            (act_w[ls_lane_q[2:0]] &&
+                             (!(dead_q[wave_q][ls_lane_q[2:0]] ||
+                                hlp_w[ls_lane_q[2:0]]) || ls_rec_q)));
+    assign mem_re_o    = (((st_q == W_LS1) || ls_iss_w) && ls_mem &&
+                          !ls_store_q && ls_bok_q) || (st_q == W_ATR) ||
                          dsc_mem || txr_mem;
     // dead/helper lanes lose device-memory stores but keep Output
     // record stores (per-invocation stream; rast drops them via the
     // slot-8 discard flag for demoted, helpers are never drawn)
-    assign mem_we_o    = ((st_q == W_LS1) && ls_mem && ls_store_q &&
-                          ls_bok_q && act_w[ls_lane_q[2:0]] &&
+    assign mem_we_o    = (((st_q == W_LS1) || ls_iss_w) && ls_mem &&
+                          ls_store_q && ls_bok_q &&
+                          act_w[ls_lane_q[2:0]] &&
                           (!(dead_q[wave_q][ls_lane_q[2:0]] ||
                              hlp_w[ls_lane_q[2:0]]) || ls_rec_q)) ||
                          (st_q == W_ATW) || f8_mem || txw_mem;
@@ -2991,7 +3601,7 @@ module g6lc_apu_shwave
                          txr_mem ? txc_addr_q :
                          f8_mem  ? (f8a_w & ~64'h7) :
                          txw_mem ? ({32'h0, tx_ta_q} & ~64'h7) :
-                                   (ls_addr_q & ~64'h7);
+                                   (ls_addr_d & ~64'h7);
     assign mem_wdata_o = f8_mem ? (f8a_w[2] ? {f8d_q, 32'h0}
                                            : {32'h0, f8d_q}) :
                          txw_mem ? (tx_stb_q[63:0] <<
@@ -2999,11 +3609,17 @@ module g6lc_apu_shwave
                          (st_q == W_ATW)
                            ? (ls_addr_q[2] ? {at_new_q, 32'h0}
                                            : {32'h0, at_new_q}) :
-                         ls_addr_q[2] ? {ls_wd, 32'h0}
-                                      : {32'h0, ls_wd};
+                         // SP4: a paired request writes both halves of
+                         // the beat — lo = this word, hi = comp+1's
+                         (((st_q == W_LS1) || ls_iss_w) && ls_pair_d)
+                           ? {ls_wd_p, ls_wd} :
+                         ls_addr2 ? {ls_wd, 32'h0}
+                                  : {32'h0, ls_wd};
     assign mem_wstrb_o = f8_mem ? (f8a_w[2] ? 8'hF0 : 8'h0F) :
                          txw_mem ? tx_wbe_q :
-                         ls_addr_q[2] ? 8'hF0 : 8'h0F;
+                         (((st_q == W_LS1) || ls_iss_w) && ls_pair_d)
+                           ? 8'hFF :
+                         ls_addr2 ? 8'hF0 : 8'h0F;
 
     // =========================================================================
     // §7c control-flow engine — combinational next-state of the selected
@@ -3334,6 +3950,9 @@ module g6lc_apu_shwave
         ccr_q <= '0; cmj_q <= '0; cmc_q <= '0;
         moc_q <= '0; mocl_q <= '0;
         nva_q <= '0; vk_q <= '0; res_id_q <= '0; res_slot_q <= '0;
+        rc_vq <= 1'b0; fast_q <= 1'b0;
+        oaux_q[0] <= '0; oaux_q[1] <= '0; oaux_q[2] <= '0;
+        oid_q[0]  <= '0; oid_q[1]  <= '0; oid_q[2]  <= '0;
         vix_q <= '0; ccp_q <= '0;
         cty_q <= '0; poff_q <= '0; ctag_q <= '0; ck_q <= '0;
         cmstride_q <= '0; cty2_q <= '0;
@@ -3346,7 +3965,7 @@ module g6lc_apu_shwave
         ls_lane_q <= '0; ls_comp_q <= '0; ls_off_q <= '0;
         ls_sc_q <= '0; ls_bi_q <= '0; ls_store_q <= '0;
         ls_bind_q <= '0; ls_bsz_q <= '0; ls_bok_q <= '0;
-        ls_rec_q <= 1'b0;
+        ls_rec_q <= 1'b0; ls_vec_q <= 1'b0; ls_pair_q <= 1'b0;
         ls_addr_q <= '0;
         insns_q <= '0; robust_q <= '0; wait_q <= '0;
         done_code_q <= '0; fl_pc_q <= '0; fl_wave_q <= '0;
@@ -3519,8 +4138,6 @@ module g6lc_apu_shwave
                 ((({16'h0, escratch_q} + 3) >> 2) > 32'(SCW)
                  ? 32'(SCW) : (({16'h0, escratch_q} + 3) >> 2))) begin
               ls_comp_q <= ls_comp_q + 1;
-            end else if (ls_lane_q + 1 < LAN) begin
-              ls_comp_q <= '0; ls_lane_q <= ls_lane_q + 1;
             end else begin
               // wave control state (§7c): full or partial lane mask,
               // empty reconvergence stack, pc at the entry label.
@@ -3561,27 +4178,81 @@ module g6lc_apu_shwave
             end
           end
           // ---------------------------------------------------- fetch --
-          W_F0: begin wait_q <= '0; st_q <= W_F1; end
+          W_F0: begin
+            wait_q <= '0;
+            // SP1: the row read for this pc was issued this cycle; its
+            // valid bit is registered alongside (invalidation wins).
+            rc_vq <= rc_vld_w && !rc_inval_i;
+            st_q  <= W_F1;
+          end
           W_F1: begin
             wc_q <= prog_data_i[31:16];
             opc_q <= prog_data_i[15:0];
-            if (prog_data_i[31:16] == 0 ||
-                prog_data_i[31:16] > 16'(OPB) + 1 ||
-                32'(pc_q[wave_q]) + prog_data_i[31:16] >
-                32'(ShaderWords)) begin
+            if (rc_f1_fault) begin
               done_code_q <= APU_SH_DONE_FAULT;
               fl_pc_q <= pc_q[wave_q]; fl_wave_q <= {8'h0, wave_q};
               st_q <= W_DONE;
             end else begin
               vk_q <= '0;
-              st_q <= (prog_data_i[31:16] > 1) ? W_LD0 : W_TY0A;
+              if (rc_hit_w) begin
+                // SP1 hit: restore every fact the long decode walk
+                // would leave; operand values stream in W_LD0/W_LD1.
+                fast_q <= 1'b1;
+                nva_q  <= {1'b0, rc_row.nva};
+                wreg_q <= rc_row.wreg;
+                if (rc_row.has_rty) begin
+                  rkind_q <= rc_row.rkind; rcomps_q <= rc_row.rcomps;
+                  rcols_q <= rc_row.rcols;
+                  relem_q <= rc_row.relem; rsz_q <= rc_row.rsz;
+                  rlw_q   <= rc_row.rlw;
+                  rty_v_q <= 1'b1; rty_id_q <= rc_row.rty_id;
+                  ncomp_q <= 4'(f_nc(rc_row.rcomps));
+                end else begin
+                  ncomp_q <= 4'd1;
+                end
+                for (int k = 0; k < 3; k++) begin
+                  if (rc_kv[k]) begin
+                    vty_q[k]  <= rc_row.vty[k*10 +: 10];
+                    otag_q[k] <= rc_row.otag[k*2 +: 2];
+                    oidx_q[k] <= rc_row.oidx[k*RI +: RI];
+                    oaux_q[k] <= rc_row.oaux[k*4 +: 4];
+                    oid_q[k]  <= rc_row.oid[k*10 +: 10];
+                  end
+                end
+                if (rc_row.nva != 2'd0) begin
+                  // scratch the long loop leaves: last operand's id,
+                  // slot, RF row and aux
+                  res_id_q   <= rc_l_oid;
+                  res_slot_q <= {1'b0, rc_l_slot};
+                  ridx_q     <= rc_l_oidx;
+                  raux_q     <= rc_l_oaux;
+                end
+                st_q <= (prog_data_i[31:16] > 1) ? W_LD0 : W_PRE;
+              end else begin
+                fast_q <= 1'b0;
+                st_q   <= (prog_data_i[31:16] > 1) ? W_LD0 : W_TY0A;
+              end
             end
           end
           W_LD0: st_q <= W_LD1;
           W_LD1: begin
             ops_q[vk_q[4:0]] <= prog_data_i;
+            if (rc_cap_v) begin
+              // SP1: operand vk_q's value read was issued one stream
+              // cycle earlier; rf_rdata/const_data_i answer it now.
+              if (otag_q[rc_jk] == APU_SH_RT_CONST) begin
+                ocst_q[rc_jk] <= const_data_i;
+                for (int l = 0; l < LAN; l++)
+                  for (int c = 0; c < VEC; c++)
+                    va_q[rc_jk][l][c] <=
+                      const_data_i[32 * ((c < oaux_q[rc_jk]) ? c : 0)
+                                    +: 32];
+              end else begin
+                va_q[rc_jk] <= rf_rdata;
+              end
+            end
             if (vk_q + 1 >= 16'(wc_q) - 1) begin
-              vk_q <= '0; st_q <= W_TY0A;
+              vk_q <= '0; st_q <= fast_q ? W_PRE : W_TY0A;
             end else begin
               vk_q <= vk_q + 1; st_q <= W_LD1;
             end
@@ -3650,6 +4321,12 @@ module g6lc_apu_shwave
             raux_q <= rm_aux;
             otag_q[res_slot_q] <= rm_tag;
             oidx_q[res_slot_q] <= rm_idx[RI-1:0];
+            // SP1: row-write operands — id is res_id_q (the f_opid10
+            // result for this slot), aux is this operand's rm_aux.
+            if (res_slot_q < 3'd3) begin
+              oaux_q[res_slot_q] <= rm_aux;
+              oid_q[res_slot_q]  <= res_id_q;
+            end
             st_q <= (rm_tag == APU_SH_RT_CONST) ? W_CV0 : W_RV0;
           end
           W_CV0: st_q <= W_CV1;
@@ -3919,7 +4596,7 @@ module g6lc_apu_shwave
               // memory / pointer ops
               61,62: begin
                 ls_store_q <= (opc_q == 62);
-                ls_atom_q <= 1'b0; ls_ps_q <= 1'b0;
+                ls_atom_q <= 1'b0; ls_vec_q <= 1'b0; ls_ps_q <= 1'b0;
                 ls_tsrc_q <= 1'b0; ls_wbb_q <= 1'b0;
                 ls_lane_q <= '0; ls_comp_q <= '0;
                 lcc_q <= '0; lrc_q <= '0;
@@ -4463,6 +5140,7 @@ module g6lc_apu_shwave
                       ls_store_q <= 1'b1; ls_ps_q <= 1'b1;
                       ls_tsrc_q <= 1'b1; ls_wbb_q <= 1'b1;
                       ls_atom_q <= 1'b0; ls_mat_q <= 1'b0;
+                      ls_vec_q <= 1'b0;
                       ls_dyn_q <= 1'b0;
                       ls_lane_q <= '0; ls_comp_q <= '0;
                       st_q <= W_LS0;
@@ -4532,6 +5210,7 @@ module g6lc_apu_shwave
                       ls_store_q <= 1'b1; ls_ps_q <= 1'b1;
                       ls_tsrc_q <= 1'b1; ls_wbb_q <= 1'b1;
                       ls_atom_q <= 1'b0; ls_mat_q <= 1'b0;
+                      ls_vec_q <= 1'b0;
                       ls_dyn_q <= 1'b0;
                       ls_lane_q <= '0; ls_comp_q <= '0;
                       st_q <= W_LS0;
@@ -5440,69 +6119,79 @@ module g6lc_apu_shwave
           end
           // ------------------------------------------------------- LSU
           // W_LS0 decodes the current (lane,comp) access with fresh
-          // operand values; W_LS1 issues the memory port; W_LS2
-          // captures; W_SSB/W_SSB1 do the same for scratch/slab;
-          // W_LSA advances the (lane,comp) cursor.
+          // operand values — and for a non-atomic scratch/slab word
+          // issues the SRAM access in the same cycle (W_SSB1 captures
+          // it next); W_LS1 issues the memory port; W_LS2
+          // captures; W_SSB/W_SSB1 do the same for the residual
+          // scratch/slab paths; W_LSA advances the (lane,comp)
+          // cursor for accesses that still detour through it.
           W_LS0: begin
-            logic [31:0] o32, tg;
-            // ls_ps_q (ext pointer stores: Modf/Frexp) puts the pointer
-            // word in operand slot 1 instead of 0
-            o32 = va_q[ls_ps_q][ls_lane_q[2:0]][0] +
-                  (ls_agg_q ? ag_o_q[lcc_q[1:0]] :
-                   {21'h0, (ls_mat_q ? ls_mad :
-                            ls_vs_q ? ls_vsi : 9'(ls_comp_q)), 2'b00});
-            tg  = va_q[ls_ps_q][ls_lane_q[2:0]][1];
-            ls_off_q <= o32;
-            ls_sc_q  <= tg[3:0];
-            ls_bi_q  <= tg[11:4];
+            // SP2: ls_o32_w/ls_tg_w are the module-scope decode of this
+            // word (shared with the port comb block); skipped words
+            // advance the cursor via ls_adv() in place, and a
+            // non-atomic scratch/slab word issues its SRAM access in
+            // this same cycle and lands in W_SSB1 to capture.
+            ls_off_q <= ls_o32_w;
+            ls_sc_q  <= ls_tg_w[3:0];
+            ls_bi_q  <= ls_tg_w[11:4];
             ls_rec_q <= 1'b0;
-            if (!act_w[ls_lane_q[2:0]]) st_q <= W_LSA;
+            // SP3: the vector pass — one W_LS0 cycle issues every
+            // active lane's plain Function/Private scratch word on its
+            // own bank; W_SSB1 captures all of them next cycle.  The
+            // serial lane sweep below is skipped entirely.
+            if (ls_vec_w) begin
+              ls_vec_q <= 1'b1;
+              for (int l = 0; l < LAN; l++) ls_offv_q[l] <= ls_o32_l[l];
+              st_q <= W_SSB1;
+            end else begin
+              ls_vec_q <= 1'b0;
+              if (!act_w[ls_lane_q[2:0]]) ls_adv();
             else if (ls_atom_q && (dead_q[wave_q][ls_lane_q[2:0]] ||
                                    hlp_w[ls_lane_q[2:0]])) begin
               // dead/helper lanes do no atomic writes; result ops get 0
               if (!ls_store_q) wb_q[ls_lane_q[2:0]][0] <= '0;
-              st_q <= W_LSA;
+              ls_adv();
             end else if ((dead_q[wave_q][ls_lane_q[2:0]] ||
                           hlp_w[ls_lane_q[2:0]]) && ls_store_q &&
-                         (tg[3:0] == APU_SH_SC_UNIFORM ||
-                          tg[3:0] == APU_SH_SC_SBUF ||
-                          tg[3:0] == APU_SH_SC_WORKGROUP)) begin
+                         (ls_tg_w[3:0] == APU_SH_SC_UNIFORM ||
+                          ls_tg_w[3:0] == APU_SH_SC_SBUF ||
+                          ls_tg_w[3:0] == APU_SH_SC_WORKGROUP)) begin
               // dead/helper lane: device-visible stores suppressed
               // with no robust accounting; private/function/out-record
               // stores still proceed (mirrors the model's store gate)
-              st_q <= W_LSA;
-            end else if (tg[31:28] == APU_SH_VF_DROP) begin
+              ls_adv();
+            end else if (ls_tg_w[31:28] == APU_SH_VF_DROP) begin
               // dropped variable/member (PointSize/Clip/CullDistance):
               // stores ignored, loads return zero
               if (!ls_store_q)
                 wb_q[ls_lane_q[2:0]][ls_wc] <= '0;
-              st_q <= W_LSA;
+              ls_adv();
             end else if ((gfx_q != APU_SH_GFX_NONE) &&
-                         (tg[31:28] == APU_SH_VF_REC) &&
-                         (tg[3:0] == APU_SH_SC_INPUT ||
-                          tg[3:0] == APU_SH_SC_OUTPUT)) begin
+                         (ls_tg_w[31:28] == APU_SH_VF_REC) &&
+                         (ls_tg_w[3:0] == APU_SH_SC_INPUT ||
+                          ls_tg_w[3:0] == APU_SH_SC_OUTPUT)) begin
               // graphics record access: base + inv*stride + off on the
               // aperture port; W_LSC bounds-checks against the batch
               // extent count*stride and issues the access
               ls_rec_q <= 1'b1;
               ls_bok_q <= 1'b1;
               ds_v_q <= 1'b0;
-              if (tg[3:0] == APU_SH_SC_INPUT) begin
+              if (ls_tg_w[3:0] == APU_SH_SC_INPUT) begin
                 ls_bind_q <= {32'h0, in_base_q};
                 ls_off_q  <= (32'(wave_q) * LAN + 32'(ls_lane_q)) *
-                             gfx_istr + o32;
+                             gfx_istr + ls_o32_w;
                 ls_bsz_q  <= gcnt_q * gfx_istr;
               end else begin
                 ls_bind_q <= {32'h0, out_base_q};
                 ls_off_q  <= (32'(wave_q) * LAN + 32'(ls_lane_q)) *
-                             gfx_ostr + o32;
+                             gfx_ostr + ls_o32_w;
                 ls_bsz_q  <= gcnt_q * gfx_ostr;
               end
               st_q <= W_LSC;
-            end else if (tg[3:0] == APU_SH_SC_INPUT &&
+            end else if (ls_tg_w[3:0] == APU_SH_SC_INPUT &&
                          gfx_q == APU_SH_GFX_VS &&
-                         (tg[11:4] == 8'(APU_SH_BI_VERTEXINDEX) ||
-                          tg[11:4] == 8'(APU_SH_BI_INSTANCEINDEX))) begin
+                         (ls_tg_w[11:4] == 8'(APU_SH_BI_VERTEXINDEX) ||
+                          ls_tg_w[11:4] == 8'(APU_SH_BI_INSTANCEINDEX))) begin
               // G2a: slot 8 of the VS-in record is the source of truth
               // for VertexIndex/InstanceIndex ({vi, ii, 0, 0} at +128)
               // — the work imm words stay for compatibility but are no
@@ -5513,67 +6202,73 @@ module g6lc_apu_shwave
               ls_bind_q <= {32'h0, in_base_q};
               ls_off_q  <= (32'(wave_q) * LAN + 32'(ls_lane_q)) *
                            gfx_istr + 32'd128 +
-                           (tg[11:4] == 8'(APU_SH_BI_INSTANCEINDEX)
+                           (ls_tg_w[11:4] == 8'(APU_SH_BI_INSTANCEINDEX)
                             ? 32'd4 : 32'd0);
               ls_bsz_q  <= gcnt_q * gfx_istr;
               st_q <= W_LSC;
-            end else if (tg[3:0] == APU_SH_SC_INPUT) begin
+            end else if (ls_tg_w[3:0] == APU_SH_SC_INPUT) begin
               // builtin vec component comes from the pointer byte
               // offset (scalar extracts load .y/.z too), not from the
               // output component cursor
               if (!ls_store_q)
                 wb_q[ls_lane_q[2:0]][ls_wc] <=
-                  f_bi(tg[11:4], ls_lane_q, 3'(o32 >> 2));
-              st_q <= W_LSA;
-            end else if (tg[3:0] == APU_SH_SC_PUSHCONST) begin
-              if ((o32 >> 2) >= {26'h0, push_n_q}) begin
+                  f_bi(ls_tg_w[11:4], ls_lane_q, 3'(ls_o32_w >> 2));
+              ls_adv();
+            end else if (ls_tg_w[3:0] == APU_SH_SC_PUSHCONST) begin
+              if ((ls_o32_w >> 2) >= {26'h0, push_n_q}) begin
                 robust_q <= robust_q + 1;
                 if (!ls_store_q)
                   wb_q[ls_lane_q[2:0]][ls_wc] <= '0;
               end else if (!ls_store_q) begin
                 wb_q[ls_lane_q[2:0]][ls_wc] <=
-                  push_q[o32[31:2] > 31 ? 5'd31 : o32[6:2]];
+                  push_q[ls_o32_w[31:2] > 31 ? 5'd31 : ls_o32_w[6:2]];
               end
-              st_q <= W_LSA;
-            end else if (tg[3:0] == APU_SH_SC_IMAGE) begin
+              ls_adv();
+            end else if (ls_tg_w[3:0] == APU_SH_SC_IMAGE) begin
               // OpImageTexelPointer result: comp0 is already the
               // absolute texel address.  Lane-serial RMW follows.
               ls_bok_q  <= 1'b1;
               ls_bind_q <= '0;
               ds_v_q <= 1'b0;
-              ls_off_q  <= o32;
+              ls_off_q  <= ls_o32_w;
               ls_bsz_q  <= 32'hFFFF_FFFF;
               st_q <= W_LSC;
-            end else if (tg[3:0] == APU_SH_SC_UNIFORM ||
-                         tg[3:0] == APU_SH_SC_SBUF) begin
+            end else if (ls_tg_w[3:0] == APU_SH_SC_UNIFORM ||
+                         ls_tg_w[3:0] == APU_SH_SC_SBUF) begin
               // §12.3 F5: {set,binding,idx} -> binding row -> record
               // fetch -> bounds check at W_LSC
-              dsc_set_q <= tg[19:12];
+              dsc_set_q <= ls_tg_w[19:12];
               dsc_bd_q  <= {va_q[ls_ps_q][ls_lane_q[2:0]][3][31:24],
-                            tg[27:20]};
+                            ls_tg_w[27:20]};
               dsc_idx_q <= va_q[ls_ps_q][ls_lane_q[2:0]][2][15:0];
               dret_q    <= W_LSC;
-              ds_key_q  <= {tg[19:12],
+              ds_key_q  <= {ls_tg_w[19:12],
                             va_q[ls_ps_q][ls_lane_q[2:0]][3][31:24],
-                            tg[27:20],
+                            ls_tg_w[27:20],
                             va_q[ls_ps_q][ls_lane_q[2:0]][2][15:0]};
               ds_v_q    <= 1'b1;
               // same record as the previous word: ls_bind/bsz/bok hold
               st_q      <= (ds_v_q && ds_key_q ==
-                            {tg[19:12],
+                            {ls_tg_w[19:12],
                              va_q[ls_ps_q][ls_lane_q[2:0]][3][31:24],
-                             tg[27:20],
+                             ls_tg_w[27:20],
                              va_q[ls_ps_q][ls_lane_q[2:0]][2][15:0]})
                            ? W_LSC : W_DS0;
-            end else if (tg[3:0] == APU_SH_SC_WORKGROUP ||
-                         tg[3:0] == APU_SH_SC_FUNCTION ||
-                         tg[3:0] == APU_SH_SC_PRIVATE) begin
-              st_q <= ls_atom_q ? W_ATS0 : W_SSB;
+            end else if (ls_tg_w[3:0] == APU_SH_SC_WORKGROUP ||
+                         ls_tg_w[3:0] == APU_SH_SC_FUNCTION ||
+                         ls_tg_w[3:0] == APU_SH_SC_PRIVATE) begin
+              // SP2: a non-atomic scratch/slab word issues its SRAM
+              // access in this same cycle (comb W_LS0 arm, gated by
+              // ls_fast_w) and lands in W_SSB1 to capture; atomics
+              // keep the W_ATS0 path and W_SSB is unreachable here.
+              if (ls_fast_w) st_q <= W_SSB1;
+              else           st_q <= ls_atom_q ? W_ATS0 : W_SSB;
             end else begin
               robust_q <= robust_q + 1;
               if (!ls_store_q)
                 wb_q[ls_lane_q[2:0]][ls_wc] <= '0;
-              st_q <= W_LSA;
+              ls_adv();
+            end
             end
           end
           // ---- §12.3 F5: descriptor record resolve ------------------
@@ -7048,16 +7743,27 @@ module g6lc_apu_shwave
               robust_q <= robust_q + 1;
               if (!ls_store_q)
                 wb_q[ls_lane_q[2:0]][ls_wc] <= '0;
+              ls_pair_q <= 1'b0;
               st_q <= W_LSA;
             end else if (!ls_store_q && !ls_atom_q && lb_v_q &&
                          lb_a_q == lb_addr[63:3]) begin
               // the beat is already here
               wb_q[ls_lane_q[2:0]][ls_wc] <= lb_addr[2] ? lb_d_q[63:32]
                                                         : lb_d_q[31:0];
+              ls_pair_q <= 1'b0;
               ls_adv();
             end else begin
               ls_addr_q <= ls_bind_q + {32'h0, ls_off_q};
-              st_q <= ls_atom_q ? W_ATR : W_LS1;
+              // SP4: this request carries comp and comp+1 in one beat
+              ls_pair_q <= ls_pair_w;
+              // SP5: the request was already on the port during this
+              // classify cycle (ls_iss_w drives mem_re_o/mem_we_o with
+              // the combinational address/data); a same-cycle accept
+              // skips the W_LS1 wait entirely, an unaccepted or masked
+              // request still lands in W_LS1 exactly as before.
+              st_q <= ls_atom_q ? W_ATR
+                                : (ls_req_v && mem_ready_i ? W_LS2
+                                                            : W_LS1);
             end
           end
           // mem_re_o/mem_we_o hold until mem_ready_i; a masked-out
@@ -7071,6 +7777,34 @@ module g6lc_apu_shwave
           // zero and counts as an out-of-range robust access
           W_LS2: begin
             if (mem_rvalid_i) begin
+              if (ls_pair_q) begin
+                // SP4: the beat carried two words — both halves land
+                // in wb_q, a port error counts both robust accesses,
+                // and the cursor advances by two components with the
+                // same lane/instruction tail ls_adv's plain branch
+                // would take after the second word.
+                if (mem_err_i) robust_q <= robust_q + 2;
+                if (!ls_store_q && !ls_atom_q) begin
+                  if (!mem_err_i) begin
+                    lb_v_q <= 1'b1; lb_a_q <= ls_addr_q[63:3];
+                    lb_d_q <= mem_rdata_i;
+                  end
+                  wb_q[ls_lane_q[2:0]][ls_wc] <=
+                    mem_err_i ? 32'h0 : mem_rdata_i[31:0];
+                  wb_q[ls_lane_q[2:0]][ls_wc + 1] <=
+                    mem_err_i ? 32'h0 : mem_rdata_i[63:32];
+                end
+                if ({1'b0, ls_comp_q} + 2 < ncomp_q) begin
+                  ls_comp_q <= ls_comp_q + 2;
+                  st_q <= W_LS0;
+                end else if (ls_lane_q + 1 < LAN) begin
+                  ls_comp_q <= '0; ls_lane_q <= ls_lane_q + 1;
+                  st_q <= W_LS0;
+                end else begin
+                  ls_comp_q <= '0; ls_lane_q <= '0;
+                  st_q <= (ls_store_q && !ls_wbb_q) ? W_NEXT : W_WB;
+                end
+              end else begin
               if (mem_err_i) robust_q <= robust_q + 1;
               // atomics latch the old word in W_ATC — the write
               // response carries no data, don't overwrite it
@@ -7084,10 +7818,41 @@ module g6lc_apu_shwave
                   ls_addr_q[2] ? mem_rdata_i[63:32]
                                : mem_rdata_i[31:0];
               ls_adv();
+              end
             end
           end
           W_SSB: st_q <= W_SSB1;              // sb/sc issued
           W_SSB1: begin
+            // SP3 vector capture: ls_vec_q marks the W_LS0 pass that
+            // issued every active lane's plain Function/Private word
+            // on its own bank.  Each lane's latched offset decides
+            // bounds exactly as the serial check did; in-bounds loads
+            // take their own bank's rdata, out-of-bounds lanes count
+            // once toward robust_q and load zero.  The advance skips
+            // the whole lane sweep: next comp, or instruction end.
+            int vrob;
+            if (ls_vec_q) begin
+              vrob = 0;
+              for (int l = 0; l < LAN; l++) begin
+                if (act_w[l]) begin
+                  if ((ls_offv_q[l] >> 2) >= SCW ||
+                      ls_offv_q[l] >= {16'h0, escratch_q}) begin
+                    vrob = vrob + 1;
+                    if (!ls_store_q) wb_q[l][ls_wc] <= '0;
+                  end else if (!ls_store_q) begin
+                    wb_q[l][ls_wc] <= scb_rdata[l];
+                  end
+                end
+              end
+              robust_q <= robust_q + vrob;
+              if (ls_comp_q + 1 < ncomp_q) begin
+                ls_comp_q <= ls_comp_q + 1;
+                st_q <= W_LS0;
+              end else begin
+                ls_comp_q <= '0; ls_lane_q <= '0;
+                st_q <= (ls_store_q && !ls_wbb_q) ? W_NEXT : W_WB;
+              end
+            end else begin
             if (ls_sc_q == APU_SH_SC_WORKGROUP) begin
               if ((ls_off_q >> 2) >= SLW ||
                   ls_off_q >= {16'h0, eslab_q}) begin
@@ -7116,6 +7881,7 @@ module g6lc_apu_shwave
               end
             end
             ls_adv();
+            end
           end
           W_LSA: ls_adv();
           // load matrix: flush the assembled column row into the RF
@@ -8090,36 +8856,7 @@ module g6lc_apu_shwave
           // runnable wave after wave_q wins; a wave parked at
           // OpControlBarrier is skipped until every live wave of the
           // workgroup has arrived (finished waves count as arrived).
-          W_SCHED: begin
-            int pick, first, w;
-            logic any_live;
-            // A store between two atomic instructions must be visible.
-            at_fwd_v_q <= 1'b0;
-            pick = -1; first = -1; any_live = 1'b0;
-            for (int i = 1; i <= MaxWaves; i++) begin
-              w = (32'(wave_q) + i) % MaxWaves;
-              if (pick < 0 && w < 32'(nwaves_q) &&
-                  !wfin_q[w] && !wbar_q[w])
-                pick = w;
-            end
-            for (w = 0; w < MaxWaves; w++)
-              if (w < 32'(nwaves_q) && !wfin_q[w]) begin
-                any_live = 1'b1;
-                if (first < 0) first = w;
-              end
-            if (pick >= 0) begin
-              if (pick != 32'(wave_q)) wsw_q <= wsw_q + 1;
-              wave_q <= RL'(pick); st_q <= W_F0;
-            end else if (!any_live) begin
-              st_q <= W_EOW;
-            end else begin
-              // every live wave is parked at the barrier → release
-              // them together; the lowest lane continues first.
-              wbar_q <= '0;
-              if (first != 32'(wave_q)) wsw_q <= wsw_q + 1;
-              wave_q <= RL'(first); st_q <= W_F0;
-            end
-          end
+          W_SCHED: t_sched();               // SP2: pick lives in the task
           W_WG0: begin                           // workgroup start
             wfin_q <= '0; wbar_q <= '0;
             wave_q <= '0; init_i_q <= '0;
@@ -8137,7 +8874,7 @@ module g6lc_apu_shwave
               done_code_q <= APU_SH_DONE_BUDGET;
               fl_pc_q <= pc_q[wave_q]; fl_wave_q <= {8'h0, wave_q};
               st_q <= W_DONE;
-            end else st_q <= W_SCHED;
+            end else t_sched();      // SP2: absorb the scheduler pick
           end
           W_EOW: begin
             // all waves of the workgroup finished → next workgroup
@@ -8195,7 +8932,8 @@ module g6lc_apu_shwave_fixture
   parameter int unsigned ShaderBudget  = 32'h0100_0000,
   parameter int unsigned WaitBound     = 32'd4096,
   parameter int unsigned CallDepth     = 8,
-  parameter bit          PerfCountersEn = 1'b0
+  parameter bit          PerfCountersEn = 1'b0,
+  parameter int unsigned RowCacheEntries = 1024
 ) (
   input  logic         clk_i,
   input  logic         rst_ni,
@@ -8245,7 +8983,8 @@ module g6lc_apu_shwave_fixture
   input  logic            ot_cpl_valid_i,
   output logic            ot_cpl_ready_o,
   input  apu_objtab_cpl_t ot_cpl_i,
-  output logic [6*32-1:0] perf_o
+  input  logic            rc_inval_i,
+  output logic [7*32-1:0] perf_o
 );
   g6lc_apu_shwave #(.Enable(Enable), .ShaderLanes(ShaderLanes),
       .ShaderVec(ShaderVec), .ShaderRegs(ShaderRegs),
@@ -8254,6 +8993,7 @@ module g6lc_apu_shwave_fixture
       .ShaderInit(ShaderInit), .ShaderMembers(ShaderMembers),
       .ScratchBytes(ScratchBytes), .SlabBytes(SlabBytes),
       .ShaderBudget(ShaderBudget), .WaitBound(WaitBound),
-      .CallDepth(CallDepth), .PerfCountersEn(PerfCountersEn)
+      .CallDepth(CallDepth), .PerfCountersEn(PerfCountersEn),
+      .RowCacheEntries(RowCacheEntries)
     ) i_dut (.*);
 endmodule

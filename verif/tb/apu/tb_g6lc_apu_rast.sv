@@ -35,6 +35,11 @@
 //           full write mask — the vkcmp blend_layers configuration:
 //           dst alpha is consumed and overwritten by the blend
 module tb_g6lc_apu_rast;
+  // TP5: -GVtxCacheEntries=N enables the vertex-cache reuse path in the
+  // DUT (indexed, instance_count==1, pure-VS draws only).  Default 0 keeps
+  // every case on the dormant bit-identical path; =256 runs case 15
+  // (indexed+restart) through scatter-v1 and must still PASS.
+  parameter int unsigned VtxCacheEntries = 0;
   import g6lc_apu_mp_pkg::*;
   import g6lc_apu_cmdexec_pkg::*;
   import g6lc_apu_sh_pkg::*;
@@ -83,7 +88,9 @@ module tb_g6lc_apu_rast;
 
   logic [95:0] rstat;
   logic [127:0] qstat;
-  g6lc_apu_rast #(.Enable(1'b1), .PerfCountersEn(1'b1)) dut (
+  g6lc_apu_rast #(.Enable(1'b1), .PerfCountersEn(1'b1),
+                  .PerfClassEn(1'b1),
+                  .VtxCacheEntries(VtxCacheEntries)) dut (
     .clk_i(clk), .rst_ni(rst_n), .testmode_i(1'b0),
     .work_valid_i(w_v), .work_ready_o(w_r),
     .work_i(w_o), .rd_i(rd),
@@ -100,7 +107,8 @@ module tb_g6lc_apu_rast;
     .pg_cpl_valid_i(pgcv), .pg_cpl_ready_o(pgcr), .pg_cpl_i(pgcpl),
     .busy_o(rbusy),
     .stat_o(rstat),
-    .qry_stat_o(qstat));
+    .qry_stat_o(qstat),
+    .scratch_base_o(), .scratch_valid_o());
 
   tb_apu_mp_mem #(.N(1), .GMW(16), .APW(APW),
                   .PWB(PWB), .PPW(PPW)) i_mem (
@@ -148,6 +156,12 @@ module tb_g6lc_apu_rast;
                                  // 1=checkerboard discard, 2=FragDepth
   logic [31:0] sh_f8z = '0;      // FragDepth value for mode 2
   bit          dbg_f8 = 1'b0;
+  // TP5 perf sensitivity probe: +vscost=N injects N extra cycles per VS
+  // vertex (models an expensive real vertex shader).  Default 0 = the
+  // historical 1-vertex/cycle stub, bit-identical for every existing
+  // case.  Used to measure the vertex-reuse break-even VS cost.
+  int          sh_vcost = 0;
+  int          sh_vd    = 0;     // per-vertex delay countdown
   // A1.3: FS batch observability — count batches and accumulate the
   // per-batch FrontFacing bits (imm[3].0) the DUT emits
   int          fs_batches = 0;
@@ -160,6 +174,7 @@ module tb_g6lc_apu_rast;
     if (!rst_n) begin
       shst <= SH_IDLE; shdone <= 1'b0; shdone_pl <= '0;
       sh_ctype_q <= '0; sh_imm_q <= '0; sh_i <= 0; sh_n <= 0;
+      sh_vd <= 0;
     end else begin
       shdone <= 1'b0;
       unique case (shst)
@@ -169,6 +184,7 @@ module tb_g6lc_apu_rast;
             sh_imm_q <= shim;
             sh_n <= int'(shim[0]);
             sh_i <= 0;
+            sh_vd <= 0;
             if (shc == APU_SH_WORK_FS) begin
               fs_batches <= fs_batches + 1;
               fs_frontm  <= fs_frontm | (2'b01 << shim[3][0]);
@@ -178,31 +194,41 @@ module tb_g6lc_apu_rast;
         end
         SH_RUN: begin
           if (sh_ctype_q == APU_SH_WORK_VS) begin
-            // Position = {attr0.x, attr0.y, 0.5, 1.0} — or the raw
-            // clip-space Position = loc0 when sh_pos4 (case 9);
-            // varying loc0 = attr1 (vec4 at in+16)
-            automatic int unsigned ib = int'(sh_imm_q[1]);
-            automatic int unsigned ob = int'(sh_imm_q[2]);
-            automatic int unsigned v  = sh_i;
-            if (sh_pos4) begin
+            // +vscost sensitivity: while sh_vd counts down the vertex is
+            // held (no re-write, no advance) — models per-vertex shader
+            // latency.  sh_vd==0 does the write then arms sh_vcost for
+            // the NEXT vertex, so a wave of sh_n costs ~sh_n*(vcost+1).
+            if (sh_vd == 0) begin
+              // Position = {attr0.x, attr0.y, 0.5, 1.0} — or the raw
+              // clip-space Position = loc0 when sh_pos4 (case 9);
+              // varying loc0 = attr1 (vec4 at in+16)
+              automatic int unsigned ib = int'(sh_imm_q[1]);
+              automatic int unsigned ob = int'(sh_imm_q[2]);
+              automatic int unsigned v  = sh_i;
+              if (sh_pos4) begin
+                for (int c = 0; c < 4; c++)
+                  i_mem.apm[apix((ob + v*144 + 4*c) >> 2)] =
+                    i_mem.apm[apix((ib + v*144 + 4*c) >> 2)];
+              end else begin
+                i_mem.apm[apix((ob + v*144 + 0) >> 2)] =
+                  i_mem.apm[apix((ib + v*144 + 0) >> 2)];
+                i_mem.apm[apix((ob + v*144 + 4) >> 2)] =
+                  i_mem.apm[apix((ib + v*144 + 4) >> 2)];
+                // Position.z = attr1.w (lets a case steer early-Z
+                // through the per-vertex colour alpha); w = 1.0
+                i_mem.apm[apix((ob + v*144 + 8) >> 2)] =
+                  i_mem.apm[apix((ib + v*144 + 28) >> 2)];
+                i_mem.apm[apix((ob + v*144 + 12) >> 2)] =
+                  32'h3F800000;
+              end
               for (int c = 0; c < 4; c++)
-                i_mem.apm[apix((ob + v*144 + 4*c) >> 2)] =
-                  i_mem.apm[apix((ib + v*144 + 4*c) >> 2)];
+                i_mem.apm[apix((ob + v*144 + 16 + 4*c) >> 2)] =
+                  i_mem.apm[apix((ib + v*144 + 16 + 4*c) >> 2)];
+              if (sh_i + 1 >= sh_n) shst <= SH_DONE;
+              else begin sh_i <= sh_i + 1; sh_vd <= sh_vcost; end
             end else begin
-              i_mem.apm[apix((ob + v*144 + 0) >> 2)] =
-                i_mem.apm[apix((ib + v*144 + 0) >> 2)];
-              i_mem.apm[apix((ob + v*144 + 4) >> 2)] =
-                i_mem.apm[apix((ib + v*144 + 4) >> 2)];
-              // Position.z = attr1.w (lets a case steer early-Z
-              // through the per-vertex colour alpha); w = 1.0
-              i_mem.apm[apix((ob + v*144 + 8) >> 2)] =
-                i_mem.apm[apix((ib + v*144 + 28) >> 2)];
-              i_mem.apm[apix((ob + v*144 + 12) >> 2)] =
-                32'h3F800000;
+              sh_vd <= sh_vd - 1;
             end
-            for (int c = 0; c < 4; c++)
-              i_mem.apm[apix((ob + v*144 + 16 + 4*c) >> 2)] =
-                i_mem.apm[apix((ib + v*144 + 16 + 4*c) >> 2)];
           end else begin
             // FS: fs_out[f].loc0 = fs_in[f].loc0 (varying slot at +16)
             automatic int unsigned ib = int'(sh_imm_q[1]);
@@ -234,9 +260,9 @@ module tb_g6lc_apu_rast;
                 32'hFFFFFFFF;
               i_mem.apm[apix((ob + f*144 + 140) >> 2)] = 32'h0;
             end
+            if (sh_i + 1 >= sh_n) shst <= SH_DONE;
+            else sh_i <= sh_i + 1;
           end
-          if (sh_i + 1 >= sh_n) shst <= SH_DONE;
-          else sh_i <= sh_i + 1;
         end
         SH_DONE: begin
           shdone <= 1'b1;
@@ -452,10 +478,16 @@ module tb_g6lc_apu_rast;
   // (S_OC_G1=110 .. S_CP_PDN=140 — keep in sync with g6lc_apu_rast.sv)
   int  clip_fpop = 0;
   bit  clip_arm = 1'b0;
-  always_ff @(posedge clk)
-    if (clip_arm && dut.gen_on.fp_iss_q &&
+  bit  clip_iss_d = 1'b0;
+  // count accepted jobs, not fp_iss_q-high cycles: the strobe now
+  // stays up until the *targeted* unit is ready, which can be more
+  // than one cycle for a busy divider
+  always_ff @(posedge clk) begin
+    clip_iss_d <= dut.gen_on.fp_iss_q;
+    if (clip_arm && clip_iss_d && !dut.gen_on.fp_iss_q &&
         dut.gen_on.fp_ret_q >= 8'd110 && dut.gen_on.fp_ret_q <= 8'd140)
       clip_fpop <= clip_fpop + 1;
+  end
 
 `ifdef RAST_TRC
   logic [7:0] lst = 8'hFF;
@@ -631,6 +663,9 @@ module tb_g6lc_apu_rast;
 
   initial begin
     rd = '0; w_o = '0; w_v = 1'b0;
+    // TP5 perf probe: +vscost=N adds N cycles per VS vertex (0 = stock
+    // 1-vertex/cycle stub).  Read once; applies to every VS wave in the run.
+    if (!$value$plusargs("vscost=%d", sh_vcost)) sh_vcost = 0;
     // guard machinery unused in this bench — mark the arrays driven
     i_mem.guard_on = 1'b0;
     i_mem.guard_n = 0;
@@ -2622,11 +2657,260 @@ module tb_g6lc_apu_rast;
     if (got !== 32'hD4C3B2A1)
       fail($sformatf("case42 refused blend wrote px=%08x", got));
 
+    // ================= case 43: late-Z slope bias is per-primitive ======
+    // Two same-facing triangles merge into one FS batch unless the
+    // slope_bias_late flush splits them.  A is flat (constant Position.z
+    // -> slope 0), B is z-tilted (slope > 0); fs_late + FragDepth routes
+    // depth through the late-Z bias.  Without the flush both fragments
+    // take the LAST primitive's slope, so A's depth picks up B's slope
+    // term and differs from FragDepth.  With the flush A keeps slope 0:
+    // its biased depth is exactly FragDepth.
+    cases++;
+    d = mk_clear();
+    d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
+             fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
+             layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    d.da_valid = 1'b1;
+    d.clear_color[0] = 32'h3F800000;   // depth clear 1.0
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    // A (flat): screen (2,4),(14,4),(2,28); every Position.z = 0.5.
+    put_vert(0, f2s(2.0/16.0-1.0), f2s(4.0/16.0-1.0),
+             32'h3F000000, 32'h3F000000, 32'h3F000000, 32'h3F000000);
+    put_vert(1, f2s(14.0/16.0-1.0), f2s(4.0/16.0-1.0),
+             32'h3F000000, 32'h3F000000, 32'h3F000000, 32'h3F000000);
+    put_vert(2, f2s(2.0/16.0-1.0), f2s(28.0/16.0-1.0),
+             32'h3F000000, 32'h3F000000, 32'h3F000000, 32'h3F000000);
+    // B (tilted): screen (18,4),(30,4),(18,28); Position.z = 0.25,0.75,0.5.
+    put_vert(3, f2s(18.0/16.0-1.0), f2s(4.0/16.0-1.0),
+             32'h3F000000, 32'h3F000000, 32'h3F000000, 32'h3E800000);
+    put_vert(4, f2s(30.0/16.0-1.0), f2s(4.0/16.0-1.0),
+             32'h3F000000, 32'h3F000000, 32'h3F000000, 32'h3F400000);
+    put_vert(5, f2s(18.0/16.0-1.0), f2s(28.0/16.0-1.0),
+             32'h3F000000, 32'h3F000000, 32'h3F000000, 32'h3F000000);
+    sh_f8 = 2; sh_f8z = 32'h3F000000;   // FragDepth 0.5 for every fragment
+    d = mk_draw();
+    d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
+             fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
+             layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    d.da_valid = 1'b1;
+    d.depth_test = 1'b1; d.depth_write = 1'b1; d.depth_op = 3'd1;
+    d.depth_bias_en = 1'b1;
+    d.depth_bias_slope = 32'h3F800000;  // slopeFactor 1.0
+    d.fs_late = 1'b1; d.fs_fdepth = 1'b1;
+    d.vertex_count = 6;                 // two triangles, one draw
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    sh_f8 = 0;
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case43 code=%0d", w_dpl.code));
+    checks++;
+    // A is flat -> slope 0 -> biased depth == FragDepth 0.5 exactly.
+    // Under the merged-batch bug A would carry B's slope and differ.
+    got = dbpx(6, 10);
+    if (got != 32'h3F000000)
+      fail($sformatf("case43 flat-tri depth=%08x exp 3f000000 (slope leak)", got));
+    // B is tilted -> nonzero slope term -> depth differs from FragDepth.
+    got = dbpx(22, 10);
+    if (got == 32'h3F000000)
+      fail($sformatf("case43 tilted-tri depth=%08x exp slope-biased != 3f000000", got));
+
+    // ================= case 44: TP5 vertex-cache reuse ================
+    // Multi-batch indexed draw that produces REAL cache hits.  The
+    // scatter-v1 fill is deferred to post-VS, so a repeated index inside
+    // one gather batch always misses; hits need a LATER batch of the SAME
+    // draw (vt_gen persists across batches).  66 triangle-list indices =
+    // {0,1,2}x22: batch0 takes indices 0..62 (63 vtx, all miss -> fills
+    // cache for resolved 0,1,2), batch1 takes 63..65 = {0,1,2} -> all HIT.
+    // instance_count==1 + pure stub VS -> reuse_en at VtxCacheEntries>0.
+    // Uniform red + coverage/exterior checks: a wrong hit slot/entry
+    // corrupts the batch-1 triangle's position and breaks coverage.
+    // At VtxCacheEntries=0 the whole draw is dormant and must agree.
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    // right triangle TL,TR,BL at NDC +/-0.75, uniform opaque red
+    put_vert(0, 32'hBF400000, 32'hBF400000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(1, 32'h3F400000, 32'hBF400000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(2, 32'hBF400000, 32'h3F400000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    // ib @ 0x20000: 66 x u16 = {0,1,2} repeating (idx j = j%3).
+    // u32 word i packs {idx[2i+1], idx[2i]} in the low/high u16.
+    for (int i = 0; i < 33; i++)
+      apwr(32'h20000 + i*4, {16'((2*i+1) % 3), 16'((2*i) % 3)});
+    d = mk_draw();
+    d.ib_type = 2'd1;                     // UINT16
+    d.ib_base = 32'h20000; d.ib_size = 32'd132;
+    d.first_index = 0; d.vertex_offset = 0;
+    d.vertex_count = 66; d.instance_count = 1;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case44 code=%0d", w_dpl.code));
+    // interior of the triangle (x+y small) -> opaque red
+    for (int i = 0; i < 2; i++) begin
+      automatic int px = (i == 0) ? 8 : 10;
+      automatic int py = (i == 0) ? 8 : 10;
+      checks++;
+      got = fbpx(px, py);
+      if (px_bad(got, 32'hFF0000FF, 8))
+        fail($sformatf("case44 in px(%0d,%0d)=%08x exp~ff0000ff", px, py, got));
+    end
+    // outside the triangle hypotenuse -> clear
+    for (int i = 0; i < 2; i++) begin
+      automatic int px = (i == 0) ? 28 : 30;
+      automatic int py = (i == 0) ? 28 : 30;
+      checks++;
+      got = fbpx(px, py);
+      if (got != 32'hFF000000)
+        fail($sformatf("case44 out px(%0d,%0d)=%08x expclr", px, py, got));
+    end
+
+    // ================= case 45: TP5 cross-draw generation ==============
+    // Two draws share the SAME resolved indices {0,1,2} but the vb data
+    // is overwritten between them (T1 red top-left -> T2 blue
+    // bottom-right).  The cache tag is generation-scoped: draw2 must MISS
+    // draw1's entries and shade the NEW vertices.  If vt_gen failed to
+    // invalidate, draw2 would hit the stale T1 records and paint the
+    // top-left triangle again, leaving bottom-right clear -> the blue
+    // check fails.  Only meaningful at VtxCacheEntries>0; dormant at =0.
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    // draw1: T1 red top-left triangle {TL,TR,BL}
+    put_vert(0, 32'hBF400000, 32'hBF400000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(1, 32'h3F400000, 32'hBF400000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(2, 32'hBF400000, 32'h3F400000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    apwr(32'h20000 + 0, 32'h00010000);   // u16 {0,1}
+    apwr(32'h20000 + 4, 32'h00000002);   // u16 {2}
+    d = mk_draw();
+    d.ib_type = 2'd1;
+    d.ib_base = 32'h20000; d.ib_size = 32'd6;
+    d.first_index = 0; d.vertex_offset = 0;
+    d.vertex_count = 3; d.instance_count = 1;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case45 d1 code=%0d", w_dpl.code));
+    // overwrite vb with T2 blue bottom-right triangle {TR,BR,BL}
+    put_vert(0, 32'h3F400000, 32'hBF400000,   // TR pos, blue
+                32'h00000000, 32'h00000000, 32'h3F800000, 32'h3F800000);
+    put_vert(1, 32'h3F400000, 32'h3F400000,   // BR pos, blue
+                32'h00000000, 32'h00000000, 32'h3F800000, 32'h3F800000);
+    put_vert(2, 32'hBF400000, 32'h3F400000,   // BL pos, blue
+                32'h00000000, 32'h00000000, 32'h3F800000, 32'h3F800000);
+    // draw2: same indices -> must miss (new generation) and shade T2
+    d = mk_draw();
+    d.ib_type = 2'd1;
+    d.ib_base = 32'h20000; d.ib_size = 32'd6;
+    d.first_index = 0; d.vertex_offset = 0;
+    d.vertex_count = 3; d.instance_count = 1;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case45 d2 code=%0d", w_dpl.code));
+    checks++;
+    got = fbpx(24, 24);                      // bottom-right interior
+    if (px_bad(got, 32'hFFFF0000, 8))        // opaque blue
+      fail($sformatf("case45 T2 px(24,24)=%08x exp~ffff0000 (stale-hit?)", got));
+    checks++;
+    got = fbpx(8, 8);                        // top-left interior stays red
+    if (px_bad(got, 32'hFF0000FF, 8))
+      fail($sformatf("case45 T1 px(8,8)=%08x exp~ff0000ff", got));
+
+    // ================= case 46: TP5 vertex-reuse perf probe ==========
+    // High-reuse indexed draw for the =0/=256 cycle+invocation capture.
+    // A SMALL triangle (screen legs ~8px -> ~32px coverage) is used so the
+    // raster/fragment cost stays tiny while the VERTEX path still sees a
+    // large index stream: identical vertex-path behaviour (index slots ->
+    // VS invocations / cache hits) but ~16x less per-tri pixel work than
+    // case44's full-FB triangle.  indexCount=630 = {0,1,2}x210 -> 10 vertex
+    // batches of 63.  Deferred fill means batch0's 63 slots all miss; the
+    // cache then holds resolved {0,1,2}, so batches1..9 are all HITS and
+    // the VS wave is skipped.  Expect ia_vtx ~=63 at =256 vs ~630 at =0.
+    // Coverage is a single small triangle repeated -> identical pixels.
+    // (indexCount kept modest: the rast pipeline's per-triangle setup/
+    // merge/scan cost is several thousand cycles regardless of triangle
+    // size, so the draw must stay well under the 4M-cycle do_work bound
+    // without dominating the suite's total cycle count.)
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    // screen (8,8),(16,8),(8,16) -> NDC (-0.5,-0.5),(0,-0.5),(-0.5,0); the
+    // hypotenuse is x+y=24 in screen px, interior is x+y<24.
+    put_vert(0, 32'hBF000000, 32'hBF000000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(1, 32'h00000000, 32'hBF000000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(2, 32'hBF000000, 32'h00000000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    // ib @ 0x20000: 630 x u16 = {0,1,2} repeating (idx j = j%3).
+    // u32 word i packs {idx[2i+1], idx[2i]} in the low/high u16.
+    for (int i = 0; i < 315; i++)
+      apwr(32'h20000 + i*4, {16'((2*i+1) % 3), 16'((2*i) % 3)});
+    d = mk_draw();
+    d.ib_type = 2'd1;                     // UINT16
+    d.ib_base = 32'h20000; d.ib_size = 32'd1260;
+    d.first_index = 0; d.vertex_offset = 0;
+    d.vertex_count = 630; d.instance_count = 1;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case46 code=%0d", w_dpl.code));
+    // identical small triangle repeated: interior red (x+y<24), exterior
+    // clear.  px(10,10):21<24 in; px(14,14):29>24 out.
+    for (int i = 0; i < 2; i++) begin
+      automatic int px = (i == 0) ? 10 : 9;
+      automatic int py = (i == 0) ? 10 : 9;
+      checks++;
+      got = fbpx(px, py);
+      if (px_bad(got, 32'hFF0000FF, 8))
+        fail($sformatf("case46 in px(%0d,%0d)=%08x exp~ff0000ff", px, py, got));
+    end
+    for (int i = 0; i < 2; i++) begin
+      automatic int px = (i == 0) ? 14 : 16;
+      automatic int py = (i == 0) ? 14 : 16;
+      checks++;
+      got = fbpx(px, py);
+      if (got != 32'hFF000000)
+        fail($sformatf("case46 out px(%0d,%0d)=%08x expclr", px, py, got));
+    end
+
     // ---- report ---------------------------------------------------------
     // draw-path counters: the suite draws and writes pixels, so both
     // must have moved, and no more pixels than busy cycles
     $display("STAT busy=%0d tris=%0d pixwr=%0d", rstat[31:0], rstat[63:32],
              rstat[95:64]);
+    // FP0 stage-class split of the busy cycles (dut.gen_on.gen_cls)
+    $display("PERFR rast ctl=%0d clear=%0d gather=%0d vswait=%0d setup=%0d clip=%0d scan=%0d interp=%0d depth=%0d fswait=%0d merge=%0d mpw=%0d mpn=%0d fpw=%0d fpn=%0d",
+             dut.gen_on.gen_cls.cyc_q[0], dut.gen_on.gen_cls.cyc_q[1],
+             dut.gen_on.gen_cls.cyc_q[2], dut.gen_on.gen_cls.cyc_q[3],
+             dut.gen_on.gen_cls.cyc_q[4], dut.gen_on.gen_cls.cyc_q[5],
+             dut.gen_on.gen_cls.cyc_q[6], dut.gen_on.gen_cls.cyc_q[7],
+             dut.gen_on.gen_cls.cyc_q[8], dut.gen_on.gen_cls.cyc_q[9],
+             dut.gen_on.gen_cls.cyc_q[10], dut.gen_on.gen_cls.mpw_q,
+             dut.gen_on.gen_cls.mpn_q, dut.gen_on.gen_cls.fpw_q,
+             dut.gen_on.gen_cls.fpn_q);
+    checks++;
+    if (dut.gen_on.gen_cls.cyc_q[0] + dut.gen_on.gen_cls.cyc_q[1] +
+        dut.gen_on.gen_cls.cyc_q[2] + dut.gen_on.gen_cls.cyc_q[3] +
+        dut.gen_on.gen_cls.cyc_q[4] + dut.gen_on.gen_cls.cyc_q[5] +
+        dut.gen_on.gen_cls.cyc_q[6] + dut.gen_on.gen_cls.cyc_q[7] +
+        dut.gen_on.gen_cls.cyc_q[8] + dut.gen_on.gen_cls.cyc_q[9] +
+        dut.gen_on.gen_cls.cyc_q[10] != rstat[31:0]) begin
+      fails++; $display("FAIL class partition");
+    end
     checks++;
     if (rstat[63:32] == 0 || rstat[95:64] == 0 ||
         rstat[95:64] > rstat[31:0]) begin

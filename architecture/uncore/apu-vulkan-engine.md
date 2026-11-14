@@ -1327,6 +1327,17 @@ bound image through DMA with the format conversions the profile advertises. Imag
 `ObjTab` objects with metadata (format, extent, tiling, layout); 64×64 is a test
 rectangle, not a limit. `Xfer` handles copies/clears/blits and MSAA resolve.
 
+Status 2026-11-12: the paragraph above is the target, not the RTL. `g6lc_apu_rast` is an
+immediate-mode micro-sequencer: a bounding-box scan in 2×2 blocks, interpolation and blend
+in series on one FMA, one divider and one converter, vertex and fragment records exchanged
+with the shader core through DRAM, and pixels merged one 8-byte beat at a time. There is no
+binning, no tile store, no stamp, no resolve engine and no multisampling. The stage-by-stage
+reading, the measured cost (about 250 cycles per pixel in the rasteriser bench) and the
+ordered route to the tile engine (interpolation on the shader core's lanes, a depth store,
+a write-combining merge behind a pixel-store interface, then tiles on the same merge
+datapath) are in `specs/architecture/performance-area-scalability.md` §9, with gates
+G-F1…G-F3 in the plan's §5b. Research only; nothing built.
+
 ### 9a. Image dimensionality — object contract first, sampling second (Aggregation A3 / B; decision 2026-10-17)
 
 CTS-1 `api.object_management.*.{image_1d, image_3d, image_view_1d, image_view_1d_arr,
@@ -1496,7 +1507,12 @@ cluster-dispatch pattern, `DramChannels` by profile; the virtio-pci endpoint fun
 prerequisites landed in 3d-c — `vgpages` is now a `tc_sram` word array + flop summary
 (elaboration-proven at 8192 and 65536 pages = 256 MiB) instead of the 8192-flop bitmap,
 and `vnpump` polls live rings with exponential backoff (36× fewer aperture reads
-idle-but-live) instead of burning LSU bandwidth.
+idle-but-live) instead of burning LSU bandwidth. Status 2026-11-12: `shwave` measures
+27–81 cycles per wave-instruction, not 1. The ordered route from there (predecoded rows,
+lane-vector memory with a concurrent `apmem`, pipelined issue with a banked register file,
+record store, vertex reuse, then `ShaderCores`) is
+`specs/architecture/performance-area-scalability.md` §8, with gates G-T1…G-T3 in the plan's
+§5a. Research only; nothing built.
 
 **E — Workloads.** UE 5.8.3 SM5 packaged project on 26.04.1, then 24.04; CS2 requirement
 pin from the binary (bindless, 64-bit atomics, timeline semaphores are the expected

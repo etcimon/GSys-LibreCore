@@ -57,13 +57,19 @@ module g6lc_apu_vnpump
   // below is real flops, not a bare constant.
   parameter int unsigned Rings   = 64,
   parameter int unsigned TBUF    = 40,  // transport arg stage words
+  // staging depth of the front end it owns; default = the front
+  // end's default
+  parameter int unsigned PayStageWords = 32768,
   // Ring ALIVE heartbeat: the guest-side ring watchdog clears the
   // ALIVE status bit on every wait iteration and aborts if the
   // renderer never re-asserts it, so every live ring's status word is
   // refreshed every 2**AliveTickLog2 cycles.  The default (~1 ms at
   // a 1 GHz silicon clock) keeps the guest's ~100 ms-scale patience
   // far away; simulation fixtures override to 12 (4096 cycles).
-  parameter int unsigned AliveTickLog2 = 20
+  parameter int unsigned AliveTickLog2 = 20,
+  // FP0 frame counters: decode/poll/park/xfer/ctl class breakdown, read
+  // hierarchically by benches (no port; 0 = no cells)
+  parameter bit          PerfClassEn = 1'b0
 ) (
   input  logic            clk_i,
   input  logic            rst_ni,
@@ -469,7 +475,9 @@ module g6lc_apu_vnpump
     logic [15:0] fr_repn;
     logic [3:0]  fr_fault;
 
-    g6lc_apu_vnfront #(.Enable(1'b1)) i_fr (
+    g6lc_apu_vnfront #(.Enable(1'b1),
+                       .PayStageWords(PayStageWords),
+                       .PerfClassEn(PerfClassEn)) i_fr (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
       .start_i(fr_start_q),
       .cs_base_i(16'h0), .cs_len_i(cmd_words_q[depth_q]),
@@ -1765,6 +1773,48 @@ module g6lc_apu_vnpump
         endcase
       end
     end
+
+    // FP0 frame counters: decode/poll/park/xfer/ctl class breakdown of
+    // non-StIdle cycles, read hierarchically by benches (no port;
+    // PerfClassEn=0 -> no cells).  Mirrors g6lc_apu_rast's gen_cls: a
+    // comb f_vpcls(state) index into per-class busy counters.  Class
+    // counts cover every non-StIdle cycle (incl. StPollGap poll waits);
+    // busy_q tracks busy_o (StIdle && StPollGap excluded) for reference.
+    if (PerfClassEn) begin : gen_pcls
+      localparam int unsigned NCLS = 6;
+      typedef enum logic [3:0] {
+        VP_DECODE, VP_EXEC, VP_POLL, VP_PARK, VP_XFER, VP_CTL
+      } vpcls_e;
+      function automatic vpcls_e f_vpcls(input state_e s);
+        // VP_DECODE = vndec header decode only (StDecFire/Wait/Next);
+        // StFrontWait is the vnfront per-command EXECUTE wait and gets its
+        // own class so decode-fetch and command-execute are not conflated.
+        if (s inside {StDecFire, StDecWait, StDecNext})
+          return VP_DECODE;
+        if (s == StFrontWait) return VP_EXEC;
+        if (s inside {StPollFire, StPollCap, StPollNext, StPollGap,
+                      StIdleWr}) return VP_POLL;
+        if (s inside {StWaitVq, StWaitR, StWaitSem}) return VP_PARK;
+        if (s inside {StTrFire, StTrCap, StTrExec, StTrDo, StOtReq, StOtCpl,
+                      StOtDo, StCreate, StWinNext, StXsTuple, StXsRep,
+                      StXsOpen, StApWr, StHeadWr, StStatWr, StNext,
+                      StXsDone}) return VP_XFER;
+        return VP_CTL;
+      endfunction
+      vpcls_e cls_w;
+      logic [NCLS-1:0][31:0] cyc_q;
+      logic [31:0]           busy_q;
+      assign cls_w = f_vpcls(state_q);
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          cyc_q <= '0; busy_q <= '0;
+        end else begin
+          if (state_q != StIdle)
+            cyc_q[cls_w] <= cyc_q[cls_w] + 32'd1;
+          if (busy_o) busy_q <= busy_q + 32'd1;
+        end
+      end
+    end
   end
 endmodule
 
@@ -1782,7 +1832,8 @@ module g6lc_apu_vnpump_fixture
 #(
   parameter bit          Enable  = 1'b0,
   parameter int unsigned Rings   = 64,
-  parameter int unsigned TBUF    = 40
+  parameter int unsigned TBUF    = 40,
+  parameter int unsigned PayStageWords = 32768
 ) (
   input  logic            clk_i,
   input  logic            rst_ni,
@@ -1858,5 +1909,6 @@ module g6lc_apu_vnpump_fixture
   output logic [Rings-1:0][APU_VG_AP_WORD_W-1:0] ring_extra_w_o
 );
   g6lc_apu_vnpump #(.Enable(Enable), .Rings(Rings),
-                    .TBUF(TBUF)) i_dut (.*);
+                    .TBUF(TBUF), .PayStageWords(PayStageWords)) i_dut
+                    (.*);
 endmodule

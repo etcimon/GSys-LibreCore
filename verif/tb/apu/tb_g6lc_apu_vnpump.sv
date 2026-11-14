@@ -113,7 +113,8 @@ module tb_g6lc_apu_vnpump
   logic [7:0]  ctx_kill_id;
 
   g6lc_apu_vnpump #(.Enable(1'b1), .Rings(Rings),
-                    .AliveTickLog2(AliveTickLog2)) dut (
+                    .AliveTickLog2(AliveTickLog2),
+                    .PerfClassEn(1'b1)) dut (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .xs_valid_i(xs_v), .xs_ready_o(xs_rdy),
     .xs_desc_i(xs_d), .xs_ndesc_i(xs_n), .xs_off_i(xs_off),
@@ -1296,6 +1297,15 @@ module tb_g6lc_apu_vnpump
     for (int i = 0; i < 6; i++) wq.push_back(SEMWAIT[i]);
     xs_go(wq, 1'b1, "T23g wait on fatal resource faults");
 
+    // FP0 class counters (aggregate across cases; PerfClassEn=1 arm)
+    $display("PERF vnpump busy=%0d decode=%0d exec=%0d poll=%0d park=%0d xfer=%0d ctl=%0d",
+             dut.gen_on.gen_pcls.busy_q,
+             dut.gen_on.gen_pcls.cyc_q[0],
+             dut.gen_on.gen_pcls.cyc_q[1],
+             dut.gen_on.gen_pcls.cyc_q[2],
+             dut.gen_on.gen_pcls.cyc_q[3],
+             dut.gen_on.gen_pcls.cyc_q[4],
+             dut.gen_on.gen_pcls.cyc_q[5]);
     if (errors == 0)
       $display("PASS tb_g6lc_apu_vnpump cases=%0d checks=%0d cycles=%0d",
                cases, checks, cycles);

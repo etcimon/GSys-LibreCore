@@ -205,6 +205,13 @@ module g6lc_apu_shmod
     logic        fn_head_q, is_par_q;
     // G3a-i: FS late-Z flags for the entry record
     logic        fs_late_q, fs_fdepth_q;
+    // TP5: VS vertex-cache purity — a module is reuse-unsafe when it can
+    // produce a global memory side-effect a cache hit would skip.  An
+    // OpImageWrite (99) or any atomic (227..242; a VS has no workgroup
+    // shared memory so every VS atomic is global) is unconditionally
+    // unsafe; an OpStore (62) is unsafe only when it can reach an SSBO,
+    // i.e. the module also declares an SBUF storage-class variable.
+    logic        vs_sidefx_q, vs_store_q, vs_sbuf_q;
     // queued OpFunctionCall targets — existence-checked at S_BRC
     // (a call's target may be defined later in the module)
     logic [15:0] cl_at_q [CLN];
@@ -1055,6 +1062,7 @@ module g6lc_apu_shmod
         fn_cnt_q <= '0; fn_par_q <= '0; fn_pb_q <= '0;
         fn_head_q <= 1'b0; is_par_q <= 1'b0;
         fs_late_q <= 1'b0; fs_fdepth_q <= 1'b0;
+        vs_sidefx_q <= 1'b0; vs_store_q <= 1'b0; vs_sbuf_q <= 1'b0;
         cl_n_q <= '0;
         md_n_q <= '0; br_n_q <= '0; mp_q <= 1'b0; lp_n_q <= '0;
         for (t = 0; t < OPB; t++) ops_q[t] <= '0;
@@ -1120,6 +1128,7 @@ module g6lc_apu_shmod
               ent_fn_q <= '0; fn_cnt_q <= '0; fn_par_q <= '0;
               fn_pb_q <= '0; fn_head_q <= 1'b0; is_par_q <= 1'b0;
               fs_late_q <= 1'b0; fs_fdepth_q <= 1'b0;
+              vs_sidefx_q <= 1'b0; vs_store_q <= 1'b0; vs_sbuf_q <= 1'b0;
               cl_n_q <= '0;
               in_mask_q <= '0; out_mask_q <= '0; sbi_q <= 1'b0;
               live_q[commit_pl_i.slot] <= 1'b0;
@@ -1194,6 +1203,17 @@ module g6lc_apu_shmod
             end else begin
               nl_q <= ops_need(pr_rdata[15:0], pr_rdata[31:16] - 1);
               i_q <= '0; st_q <= S_LD;
+              // TP5 vertex-cache purity: ImageWrite and the atomic family
+              // are unconditionally global side-effects in any model; a
+              // VS has no workgroup shared memory so every VS atomic must
+              // target SBUF/global.  OpStore is flagged separately and
+              // only counts when the module also declares an SBUF var.
+              if (pr_rdata[15:0] == 16'd99 ||
+                  (pr_rdata[15:0] >= 16'd227 &&
+                   pr_rdata[15:0] <= 16'd242))
+                vs_sidefx_q <= 1'b1;
+              else if (pr_rdata[15:0] == 16'd62)
+                vs_store_q <= 1'b1;
             end
           end
           S_LD: begin
@@ -1614,6 +1634,11 @@ module g6lc_apu_shmod
                   fl_code_q <= APU_SH_FAULT_BOUND; fl_word_q <= at_q;
                   fail_q <= 1'b1; st_q <= S_DONE;
                 end else begin
+                  // TP5: an SBUF (SSBO) variable means an OpStore in this
+                  // module could reach global memory — mark reuse-unsafe
+                  // when combined with a store opcode (vs_store_q).
+                  if (ops_q[2][3:0] == APU_SH_SC_SBUF)
+                    vs_sbuf_q <= 1'b1;
                   ph_q <= '0; st_q <= S_VRB;
                 end
               end
@@ -2402,6 +2427,10 @@ module g6lc_apu_shmod
             done_pl_o.entry.out_mask <= out_mask_q;
             done_pl_o.entry.fs_late <= fs_late_q;
             done_pl_o.entry.fs_fdepth <= fs_fdepth_q;
+            // TP5: reuse-unsafe iff an unconditional side-effect opcode
+            // was seen, or both an OpStore and an SBUF variable exist
+            done_pl_o.entry.vs_sidefx <=
+                vs_sidefx_q | (vs_store_q & vs_sbuf_q);
             done_pl_o.n_regs <= n_regs_q;
             done_pl_o.n_vars <= n_init_q;
             st_q <= S_IDLE;

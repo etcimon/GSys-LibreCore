@@ -71,6 +71,8 @@ module g6lc_apu_vgsys
   parameter int unsigned ScratchBytes  = 4096,
   parameter int unsigned SlabBytes     = 16384,
   parameter int unsigned ShaderBudget  = 32'h0100_0000,
+  // TP5 vertex reuse: post-transform cache entries; 0 = reuse off
+  parameter int unsigned VtxCacheEntries = 0,
   // 1: non-dispatch cmdexec records go to the external work_* port (TB
   // sink).  0 (§6c F1 SoC seam): refuse them truthfully — answered
   // APU_SH_DONE_UNSUPPORTED one cycle after accept, so cmdexec marks
@@ -195,12 +197,18 @@ module g6lc_apu_vgsys
     logic                     xf_flush;
     apu_dma_axi_req_t         mem_axi_req, xf_axi_req;
     apu_dma_axi_resp_t        mem_axi_rsp, xf_axi_rsp;
+    // R3 record store: rasteriser record/clip carve base + valid,
+    // driven by vgtop (from rast's latched scratch base) into apmem's
+    // tc_sram fast-path window inputs below.
+    logic [31:0]              vg_scratch_base;
+    logic                     vg_scratch_valid;
 
     // port 0 (PUB) is unused: vqwalk publishes used elements itself
     assign mp_req_valid[APU_MP_PUB] = 1'b0;
     assign mp_req[APU_MP_PUB]       = '0;
 
-    g6lc_apu_apmem #(.Enable(1'b1), .N(APU_MP_N)) i_mem (
+    g6lc_apu_apmem #(.Enable(1'b1), .N(APU_MP_N),
+                     .VtxCacheEntries(VtxCacheEntries)) i_mem (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
       .flush_i(apflush),
       .req_valid_i(mp_req_valid), .req_ready_o(mp_req_ready),
@@ -208,6 +216,22 @@ module g6lc_apu_vgsys
       .rsp_valid_o(mp_rsp_valid), .rsp_o(mp_rsp),
       .guest_base_i(guest_base_i), .guest_bytes_i(guest_bytes_i),
       .ap_base_i(ap_base_i), .ap_bytes_i(ap_bytes_i),
+      // R3 record store: serve the rasteriser record/clip carve from
+      // the on-chip tc_sram fast-path.  rec_base_i is the dynamic
+      // ALLOC_PRIV carve base (vsi_q) and rec_en_i its valid strobe,
+      // both driven by vgtop from rast once S_ALLOC_W latches them.
+      .rec_base_i({32'h0, vg_scratch_base}), .rec_en_i(vg_scratch_valid),
+      // TP5 vertex cache: second tc_sram window parallel to the record
+      // carve.  The rasteriser's ALLOC_PRIV region now spans the 64 KiB
+      // record carve PLUS the vertex window appended at +64 KiB, so the
+      // vertex base is scratch_base + APU_REC_CARVE_BYTES — derived here
+      // from the same vg_scratch_base that feeds rec_base_i (no new
+      // up-plumb port).  vtx_en_i reuses the scratch valid strobe,
+      // qualified by VtxCacheEntries!=0; 0 entries = no cells + window
+      // never matches = bit-identical.
+      .vtx_base_i({32'h0, vg_scratch_base} +
+                  64'(g6lc_apu_pkg::APU_REC_CARVE_BYTES)),
+      .vtx_en_i(vg_scratch_valid && (VtxCacheEntries != 0)),
       .axi_req_o(mem_axi_req), .axi_rsp_i(mem_axi_rsp),
       .outstanding_o(mem_outst), .fault_cnt_o(fault_cnt_o),
       .idle_o(mem_idle));
@@ -334,6 +358,7 @@ module g6lc_apu_vgsys
       .ShaderWords(ShaderWords), .ShaderInit(ShaderInit),
       .ShaderMembers(ShaderMembers), .ScratchBytes(ScratchBytes),
       .SlabBytes(SlabBytes), .ShaderBudget(ShaderBudget),
+      .VtxCacheEntries(VtxCacheEntries),
       .ApuCfg(ApuCfg)) i_top (
       .clk_i(clk_i), .rst_ni(eng_rst_n), .testmode_i(testmode_i),
       .chain_valid_i(vw_chain_v), .chain_ready_o(vw_chain_rdy),
@@ -362,7 +387,9 @@ module g6lc_apu_vgsys
       .dbg_ot_req_i(dbg_ot_req_i),
       .dbg_ot_cpl_valid_o(dbg_ot_cpl_valid_o),
       .dbg_ot_cpl_ready_i(dbg_ot_cpl_ready_i),
-      .dbg_ot_cpl_o(dbg_ot_cpl_o));
+      .dbg_ot_cpl_o(dbg_ot_cpl_o),
+      .scratch_base_o(vg_scratch_base),
+      .scratch_valid_o(vg_scratch_valid));
 
     assign apflush = rst_q == RFlush || reset_req_i;
     // §12.3 C/5a: the Xfer engine gets the same cancel-and-drain as
@@ -456,6 +483,7 @@ module g6lc_apu_vgsys_fixture
   parameter int unsigned ScratchBytes  = 4096,
   parameter int unsigned SlabBytes     = 16384,
   parameter int unsigned ShaderBudget  = 32'h0100_0000,
+  parameter int unsigned VtxCacheEntries = 0,
   parameter bit          WorkSink = 1'b1
 ) (
   input  logic            clk_i,
@@ -517,5 +545,6 @@ module g6lc_apu_vgsys_fixture
     .ShaderWords(ShaderWords), .ShaderInit(ShaderInit),
     .ShaderMembers(ShaderMembers), .ScratchBytes(ScratchBytes),
     .SlabBytes(SlabBytes), .ShaderBudget(ShaderBudget),
+    .VtxCacheEntries(VtxCacheEntries),
     .WorkSink(WorkSink)) i_dut (.*);
 endmodule

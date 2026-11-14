@@ -1,0 +1,12 @@
+# g6lc-dpool-reset — focused descriptor_pool reset-family repro for the
+# batch4 hang (dEQP-VK.api.descriptor_pool.repeated_reset_short open
+# TestCaseResult, flat irq/mmio ~60min).  Isolates the vkResetDescriptorPool
+# -> vnfront StDPoolRs -> ObjTab RETIRE_KIDS ctx/kind-list-walk path.
+# Variants: _short vs _long iteration count; free_reset frees sets
+# explicitly before reset (different RETIRE_KIDS child set).
+dEQP-VK.api.descriptor_pool.repeated_reset_short
+dEQP-VK.api.descriptor_pool.repeated_reset_long
+dEQP-VK.api.descriptor_pool.repeated_free_reset_short
+dEQP-VK.api.descriptor_pool.repeated_free_reset_long
+dEQP-VK.api.descriptor_pool.zero_pool_size_count
+dEQP-VK.api.descriptor_pool.out_of_pool_memory

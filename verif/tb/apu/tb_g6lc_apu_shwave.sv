@@ -38,7 +38,8 @@
 // per set (512 B window each), above every buffer the vectors use.
 localparam int unsigned RECBASE = 32'hF0000;   // 960 KiB, 1 KiB/set
 
-module tb_g6lc_apu_shwave;
+module tb_g6lc_apu_shwave
+  #(parameter int unsigned RowCacheEntries = 1024);
   import g6lc_apu_vn_pkg::*;
   import g6lc_apu_objtab_pkg::*;
   import g6lc_apu_sh_pkg::*;
@@ -69,6 +70,13 @@ module tb_g6lc_apu_shwave;
   logic clk = 0, rst_n = 0;
   always #5 clk = ~clk;
   always_ff @(posedge clk) cyc <= cyc + 1;
+  // Wave-engine state histogram over the whole suite, printed as HIST
+  // lines before PASS: where the cycles go, state by state (state codes
+  // are positions in g6lc_apu_shwave's st_e).  Bench-only measurement.
+  int unsigned st_hist [256];
+  logic [7:0]  st_code;
+  assign st_code = dut.gen_on.i_wave.gen_on.st_q;
+  always @(posedge clk) st_hist[st_code] = st_hist[st_code] + 1;
   // scheduler-state watchdog, one line per 100k cycles (+dbg_wd)
   always_ff @(posedge clk)
     if (dbg_wd && cyc % 100000 == 99999)
@@ -128,7 +136,8 @@ module tb_g6lc_apu_shwave;
   logic [7:0]   mem_wstrb;
   logic [63:0]  mem_rdata;
 
-  g6lc_apu_shcore #(.Enable(1), .PerfCountersEn(1)) dut (
+  g6lc_apu_shcore #(.Enable(1), .PerfCountersEn(1),
+                    .RowCacheEntries(RowCacheEntries)) dut (
     .clk_i(clk), .rst_ni(rst_n), .testmode_i(1'b0),
     .wr_en_i(wr_en), .wr_slot_i(wr_slot), .wr_addr_i(wr_addr),
     .wr_data_i(wr_data),
@@ -1323,13 +1332,14 @@ module tb_g6lc_apu_shwave;
              dut.gen_on.i_wave.gen_on.wsw_q,
              dut.gen_on.i_wave.gen_on.nwaves_q);
     // W1.5 counters of this dispatch (informational, not checked)
-    $display("PERF %s busy=%0d insns=%0d mem=%0d lsu=%0d fpu=%0d tex=%0d",
+    $display("PERF %s busy=%0d insns=%0d mem=%0d lsu=%0d fpu=%0d tex=%0d rhit=%0d",
              file, dut.gen_on.i_wave.perf_o[31:0],
              dut.gen_on.i_wave.perf_o[63:32],
              dut.gen_on.i_wave.perf_o[95:64],
              dut.gen_on.i_wave.perf_o[127:96],
              dut.gen_on.i_wave.perf_o[159:128],
-             dut.gen_on.i_wave.perf_o[191:160]);
+             dut.gen_on.i_wave.perf_o[191:160],
+             dut.gen_on.i_wave.perf_o[223:192]);
     // §7c: a multi-wave workgroup must have actually interleaved the
     // round-robin scheduler at least once during the dispatch.
     checks++;
@@ -1344,9 +1354,13 @@ module tb_g6lc_apu_shwave;
                cmax, cn1, cn2, smax);
     // +dbg_sc: per-case scratch slab and RF dump for bring-up debug
     if (dbg_sc) begin
+      // SP3: scratch is LAN per-lane banks (g_scb[l].i_scratch); the
+      // old flat array's first 128 words were wave0/lane0/words0-127
+      // (SCW=1024 > 128 under the bench's default params), which is
+      // exactly bank 0's first 128 words — output unchanged.
       for (int w = 0; w < 128; w++)
         $display("DSC %s sc[%3d] = %08x", file, w,
-                 dut.gen_on.i_wave.gen_on.i_scratch.sram[w]);
+                 dut.gen_on.i_wave.gen_on.g_scb[0].i_scratch.sram[w]);
       for (int r = 8; r < 80; r++)
         $display("DRF %s rf[%2d] = %08x %08x %08x %08x", file, r,
                  dut.gen_on.i_wave.gen_on.i_rf_lo.sram[r][31:0],
@@ -1620,6 +1634,8 @@ module tb_g6lc_apu_shwave;
       fails++; $display("FAIL Enable=0 not quiet");
     end
 
+    for (int i = 0; i < 256; i++)
+      if (st_hist[i] != 0) $display("HIST st=%0d cyc=%0d", i, st_hist[i]);
     if (fails == 0)
       $display("PASS tb_g6lc_apu_shwave cases=%0d checks=%0d ulp1=%0d ulp2=%0d maxulp=%0d ouw=%0d oum=%0d cycles=%0d",
                cases, checks, ulp1c, ulp2c, maxulp, ou_words,

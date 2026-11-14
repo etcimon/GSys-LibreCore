@@ -92,6 +92,29 @@ package g6lc_apu_pkg;
   // it is device-private and unreachable through guest-visible paths.
   // Mirrors g6lc_apu_vg_pkg::APU_VG_MANAGED_BYTES.
   localparam logic [63:0] APU_SHM_MANAGED_BYTES   = 64'h0000_0000_0600_0000;
+  // R3 record store: the rasteriser's record/clip carve (~64 KiB,
+  // APU_RAST_SCRATCH_BYTES) is a candidate for the apmem tc_sram
+  // fast-path.  The carve keeps its dynamic vgpages ALLOC_PRIV base —
+  // a fixed high aperture offset was rejected because every bench that
+  // bypasses apmem (vgtop perf cohort, the small rast unit bench)
+  // models the aperture densely and cannot cover a 128 MiB-scale
+  // static-carve offset.  Instead apmem takes the window as inputs
+  // (rec_base_i aperture offset + rec_en_i, driven from the rasteriser
+  // scratch base once S_ALLOC_W latches it) and serves dom=1 requests
+  // inside [rec_base_i, rec_base_i + APU_REC_CARVE_BYTES) from tc_sram.
+  // APU_REC_CARVE_BYTES mirrors the OFF_* carve extent.
+  localparam logic [63:0] APU_REC_CARVE_BYTES     = 64'h0000_0000_0001_0000; // 64 KiB
+  // TP5 vertex reuse: post-transform vertex-cache entry layout, shared
+  // by the rasteriser (window address generation) and apmem (isvtx_w
+  // window sizing + tc_sram bank count).  One entry packs on an 8-byte
+  // beat boundary as APU_VTX_ENTRY_WORDS 64-bit words: word0 = the
+  // {valid, tag} bookkeeping word, words 1..18 = the 144 B
+  // post-transform record (9 x 16 B slots).  The window holds
+  // VtxCacheEntries entries => VtxCacheEntries*APU_VTX_ENTRY_BYTES bytes.
+  // apmem's vertex store is two 4096x64b banks = 8192 words, capping
+  // VtxCacheEntries at 8192/APU_VTX_ENTRY_WORDS = 431.
+  localparam int unsigned      APU_VTX_ENTRY_WORDS = 19;      // 1 tag + 18 rec
+  localparam logic [63:0]      APU_VTX_ENTRY_BYTES  = 64'(APU_VTX_ENTRY_WORDS) * 64'd8; // 152 B
   localparam logic [31:0] APU_BLOB_MEM_HOST3D     = 32'h0000_0002;
   localparam logic [31:0] APU_BLOB_FLAG_MAPPABLE  = 32'h0000_0001;
   localparam logic [31:0] APU_VGPU_CAPSET_VENUS   = 32'd4;

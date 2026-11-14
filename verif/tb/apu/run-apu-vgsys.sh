@@ -41,6 +41,7 @@ if ! "$VERILATOR" --binary --timing --assert -Wall -j "$APU_BUILD_JOBS" \
   -f "$ROOT/corev_apu/apu/Flist.apu_vgsys" \
   "$ROOT/verif/tb/apu/tb_g6lc_apu_vgsys.sv" \
   --top-module tb_g6lc_apu_vgsys \
+  ${APU_VTX_ENTRIES:+-GVtxCacheEntries=$APU_VTX_ENTRIES} \
   -Mdir "$OUT/sim" -o tb_g6lc_apu_vgsys \
   > "$OUT/build.log" 2>&1; then
   echo "VERILATOR BUILD FAILED"

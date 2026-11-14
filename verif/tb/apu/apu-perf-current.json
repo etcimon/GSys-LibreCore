@@ -1,0 +1,10391 @@
+{
+ "head": "unknown",
+ "note": "",
+ "runs": {
+  "rast": {
+   "derived": {
+    "busy_per_pixel": 96.3,
+    "class_pct": {
+     "clear": 6.3,
+     "clip": 0.2,
+     "ctl": 0.1,
+     "depth": 3.0,
+     "fswait": 1.4,
+     "gather": 1.1,
+     "interp": 66.2,
+     "merge": 19.1,
+     "scan": 0.7,
+     "setup": 1.9,
+     "vswait": 0.1
+    },
+    "class_sum": 1397098,
+    "fpw_per_fpn": 0.06,
+    "mpw_per_mpn": 0.78
+   },
+   "pass": {
+    "bench": "tb_g6lc_apu_rast",
+    "cases": 42,
+    "checks": 15605,
+    "cycles": 1397345
+   },
+   "perfr": {
+    "clear": 87324,
+    "clip": 3253,
+    "ctl": 1033,
+    "depth": 41523,
+    "fpn": 564743,
+    "fpw": 34889,
+    "fswait": 19916,
+    "gather": 14849,
+    "interp": 924837,
+    "merge": 267454,
+    "mpn": 159527,
+    "mpw": 124107,
+    "scan": 9910,
+    "setup": 26026,
+    "vswait": 973
+   },
+   "qstat": {
+    "fs_inv": 17446,
+    "ia_prim": 263,
+    "ia_vtx": 443,
+    "occ": 15312
+   },
+   "stat": {
+    "busy": 1397098,
+    "pixwr": 14514,
+    "tris": 263
+   }
+  },
+  "shwave": {
+   "derived": {
+    "cycles_per_insn": 21.15,
+    "perf_total": {
+     "busy": 2361153,
+     "fpu": 165236,
+     "insns": 111622,
+     "lsu": 432715,
+     "mem": 63519,
+     "rhit": 68648,
+     "tex": 46194
+    }
+   },
+   "pass": {
+    "bench": "tb_g6lc_apu_shwave",
+    "cases": 548,
+    "checks": 100832,
+    "cycles": 3666123,
+    "maxulp": 1,
+    "oum": 0,
+    "ouw": 14856,
+    "ulp1": 52,
+    "ulp2": 0
+   },
+   "perf": {
+    "agg_arr_1": {
+     "busy": 4381,
+     "fpu": 0,
+     "insns": 144,
+     "lsu": 1672,
+     "mem": 392,
+     "rhit": 102,
+     "tex": 0
+    },
+    "agg_arr_2": {
+     "busy": 4381,
+     "fpu": 0,
+     "insns": 144,
+     "lsu": 1672,
+     "mem": 392,
+     "rhit": 102,
+     "tex": 0
+    },
+    "agg_arr_3": {
+     "busy": 4381,
+     "fpu": 0,
+     "insns": 144,
+     "lsu": 1672,
+     "mem": 392,
+     "rhit": 102,
+     "tex": 0
+    },
+    "agg_con_1": {
+     "busy": 3360,
+     "fpu": 0,
+     "insns": 84,
+     "lsu": 1436,
+     "mem": 216,
+     "rhit": 54,
+     "tex": 0
+    },
+    "agg_con_2": {
+     "busy": 3360,
+     "fpu": 0,
+     "insns": 84,
+     "lsu": 1436,
+     "mem": 216,
+     "rhit": 54,
+     "tex": 0
+    },
+    "agg_con_3": {
+     "busy": 3360,
+     "fpu": 0,
+     "insns": 84,
+     "lsu": 1436,
+     "mem": 216,
+     "rhit": 54,
+     "tex": 0
+    },
+    "agg_ins_1": {
+     "busy": 2077,
+     "fpu": 0,
+     "insns": 40,
+     "lsu": 1300,
+     "mem": 200,
+     "rhit": 24,
+     "tex": 0
+    },
+    "agg_ins_2": {
+     "busy": 2077,
+     "fpu": 0,
+     "insns": 40,
+     "lsu": 1300,
+     "mem": 200,
+     "rhit": 24,
+     "tex": 0
+    },
+    "agg_ins_3": {
+     "busy": 2077,
+     "fpu": 0,
+     "insns": 40,
+     "lsu": 1300,
+     "mem": 200,
+     "rhit": 24,
+     "tex": 0
+    },
+    "agg_local_1": {
+     "busy": 12299,
+     "fpu": 0,
+     "insns": 232,
+     "lsu": 7536,
+     "mem": 808,
+     "rhit": 168,
+     "tex": 0
+    },
+    "agg_local_2": {
+     "busy": 12299,
+     "fpu": 0,
+     "insns": 232,
+     "lsu": 7536,
+     "mem": 808,
+     "rhit": 168,
+     "tex": 0
+    },
+    "agg_local_3": {
+     "busy": 12299,
+     "fpu": 0,
+     "insns": 232,
+     "lsu": 7536,
+     "mem": 808,
+     "rhit": 168,
+     "tex": 0
+    },
+    "agg_sel_1": {
+     "busy": 4202,
+     "fpu": 0,
+     "insns": 100,
+     "lsu": 2612,
+     "mem": 392,
+     "rhit": 48,
+     "tex": 0
+    },
+    "agg_sel_2": {
+     "busy": 4202,
+     "fpu": 0,
+     "insns": 100,
+     "lsu": 2612,
+     "mem": 392,
+     "rhit": 48,
+     "tex": 0
+    },
+    "agg_sel_3": {
+     "busy": 4202,
+     "fpu": 0,
+     "insns": 100,
+     "lsu": 2612,
+     "mem": 392,
+     "rhit": 48,
+     "tex": 0
+    },
+    "agg_struct_1": {
+     "busy": 2723,
+     "fpu": 0,
+     "insns": 52,
+     "lsu": 1852,
+     "mem": 392,
+     "rhit": 33,
+     "tex": 0
+    },
+    "agg_struct_2": {
+     "busy": 2723,
+     "fpu": 0,
+     "insns": 52,
+     "lsu": 1852,
+     "mem": 392,
+     "rhit": 33,
+     "tex": 0
+    },
+    "agg_struct_3": {
+     "busy": 2723,
+     "fpu": 0,
+     "insns": 52,
+     "lsu": 1852,
+     "mem": 392,
+     "rhit": 33,
+     "tex": 0
+    },
+    "arrlen_1": {
+     "busy": 2508,
+     "fpu": 132,
+     "insns": 128,
+     "lsu": 388,
+     "mem": 72,
+     "rhit": 90,
+     "tex": 0
+    },
+    "arrlen_2": {
+     "busy": 2508,
+     "fpu": 132,
+     "insns": 128,
+     "lsu": 388,
+     "mem": 72,
+     "rhit": 90,
+     "tex": 0
+    },
+    "arrlen_3": {
+     "busy": 2508,
+     "fpu": 132,
+     "insns": 128,
+     "lsu": 388,
+     "mem": 72,
+     "rhit": 90,
+     "tex": 0
+    },
+    "arrlen_mut_0": {
+     "busy": 2508,
+     "fpu": 132,
+     "insns": 128,
+     "lsu": 388,
+     "mem": 72,
+     "rhit": 90,
+     "tex": 0
+    },
+    "arrlen_opt_1": {
+     "busy": 1739,
+     "fpu": 132,
+     "insns": 80,
+     "lsu": 324,
+     "mem": 72,
+     "rhit": 54,
+     "tex": 0
+    },
+    "arrlen_opt_2": {
+     "busy": 1739,
+     "fpu": 132,
+     "insns": 80,
+     "lsu": 324,
+     "mem": 72,
+     "rhit": 54,
+     "tex": 0
+    },
+    "arrlen_opt_3": {
+     "busy": 1739,
+     "fpu": 132,
+     "insns": 80,
+     "lsu": 324,
+     "mem": 72,
+     "rhit": 54,
+     "tex": 0
+    },
+    "arroob_1": {
+     "busy": 687,
+     "fpu": 0,
+     "insns": 26,
+     "lsu": 192,
+     "mem": 40,
+     "rhit": 11,
+     "tex": 0
+    },
+    "arroob_2": {
+     "busy": 687,
+     "fpu": 0,
+     "insns": 26,
+     "lsu": 192,
+     "mem": 40,
+     "rhit": 11,
+     "tex": 0
+    },
+    "arroob_3": {
+     "busy": 687,
+     "fpu": 0,
+     "insns": 26,
+     "lsu": 192,
+     "mem": 40,
+     "rhit": 11,
+     "tex": 0
+    },
+    "arroob_mut_0": {
+     "busy": 687,
+     "fpu": 0,
+     "insns": 26,
+     "lsu": 192,
+     "mem": 40,
+     "rhit": 11,
+     "tex": 0
+    },
+    "arroob_opt_1": {
+     "busy": 560,
+     "fpu": 0,
+     "insns": 18,
+     "lsu": 180,
+     "mem": 40,
+     "rhit": 7,
+     "tex": 0
+    },
+    "arroob_opt_2": {
+     "busy": 560,
+     "fpu": 0,
+     "insns": 18,
+     "lsu": 180,
+     "mem": 40,
+     "rhit": 7,
+     "tex": 0
+    },
+    "arroob_opt_3": {
+     "busy": 560,
+     "fpu": 0,
+     "insns": 18,
+     "lsu": 180,
+     "mem": 40,
+     "rhit": 7,
+     "tex": 0
+    },
+    "atomic_cas_1": {
+     "busy": 3992,
+     "fpu": 0,
+     "insns": 191,
+     "lsu": 828,
+     "mem": 192,
+     "rhit": 84,
+     "tex": 0
+    },
+    "atomic_cas_2": {
+     "busy": 3992,
+     "fpu": 0,
+     "insns": 191,
+     "lsu": 828,
+     "mem": 192,
+     "rhit": 84,
+     "tex": 0
+    },
+    "atomic_cas_3": {
+     "busy": 3992,
+     "fpu": 0,
+     "insns": 191,
+     "lsu": 828,
+     "mem": 192,
+     "rhit": 84,
+     "tex": 0
+    },
+    "atomic_cas_mut_0": {
+     "busy": 3992,
+     "fpu": 0,
+     "insns": 191,
+     "lsu": 828,
+     "mem": 192,
+     "rhit": 84,
+     "tex": 0
+    },
+    "atomic_frag_1": {
+     "busy": 1783,
+     "fpu": 12,
+     "insns": 72,
+     "lsu": 502,
+     "mem": 152,
+     "rhit": 28,
+     "tex": 0
+    },
+    "atomic_hist_1": {
+     "busy": 7941,
+     "fpu": 0,
+     "insns": 400,
+     "lsu": 2236,
+     "mem": 492,
+     "rhit": 305,
+     "tex": 0
+    },
+    "atomic_hist_2": {
+     "busy": 7941,
+     "fpu": 0,
+     "insns": 400,
+     "lsu": 2236,
+     "mem": 492,
+     "rhit": 305,
+     "tex": 0
+    },
+    "atomic_hist_3": {
+     "busy": 7941,
+     "fpu": 0,
+     "insns": 400,
+     "lsu": 2236,
+     "mem": 492,
+     "rhit": 305,
+     "tex": 0
+    },
+    "barrier_prefix_1": {
+     "busy": 13090,
+     "fpu": 0,
+     "insns": 928,
+     "lsu": 1839,
+     "mem": 56,
+     "rhit": 636,
+     "tex": 0
+    },
+    "barrier_prefix_2": {
+     "busy": 13090,
+     "fpu": 0,
+     "insns": 928,
+     "lsu": 1839,
+     "mem": 56,
+     "rhit": 636,
+     "tex": 0
+    },
+    "barrier_prefix_3": {
+     "busy": 13090,
+     "fpu": 0,
+     "insns": 928,
+     "lsu": 1839,
+     "mem": 56,
+     "rhit": 636,
+     "tex": 0
+    },
+    "barrier_prefix_mut_0": {
+     "busy": 13090,
+     "fpu": 0,
+     "insns": 928,
+     "lsu": 1839,
+     "mem": 56,
+     "rhit": 636,
+     "tex": 0
+    },
+    "barrier_prefix_opt_1": {
+     "busy": 8595,
+     "fpu": 0,
+     "insns": 579,
+     "lsu": 1269,
+     "mem": 56,
+     "rhit": 360,
+     "tex": 0
+    },
+    "barrier_prefix_opt_2": {
+     "busy": 8595,
+     "fpu": 0,
+     "insns": 579,
+     "lsu": 1269,
+     "mem": 56,
+     "rhit": 360,
+     "tex": 0
+    },
+    "barrier_prefix_opt_3": {
+     "busy": 8595,
+     "fpu": 0,
+     "insns": 579,
+     "lsu": 1269,
+     "mem": 56,
+     "rhit": 360,
+     "tex": 0
+    },
+    "barrier_reduce_1": {
+     "busy": 18776,
+     "fpu": 0,
+     "insns": 1450,
+     "lsu": 1845,
+     "mem": 105,
+     "rhit": 919,
+     "tex": 0
+    },
+    "barrier_reduce_2": {
+     "busy": 18776,
+     "fpu": 0,
+     "insns": 1450,
+     "lsu": 1845,
+     "mem": 105,
+     "rhit": 919,
+     "tex": 0
+    },
+    "barrier_reduce_3": {
+     "busy": 18776,
+     "fpu": 0,
+     "insns": 1450,
+     "lsu": 1845,
+     "mem": 105,
+     "rhit": 919,
+     "tex": 0
+    },
+    "barrier_reduce_mut_0": {
+     "busy": 18776,
+     "fpu": 0,
+     "insns": 1450,
+     "lsu": 1845,
+     "mem": 105,
+     "rhit": 919,
+     "tex": 0
+    },
+    "barrier_reduce_opt_1": {
+     "busy": 13491,
+     "fpu": 0,
+     "insns": 1006,
+     "lsu": 1157,
+     "mem": 105,
+     "rhit": 607,
+     "tex": 0
+    },
+    "barrier_reduce_opt_2": {
+     "busy": 13491,
+     "fpu": 0,
+     "insns": 1006,
+     "lsu": 1157,
+     "mem": 105,
+     "rhit": 607,
+     "tex": 0
+    },
+    "barrier_reduce_opt_3": {
+     "busy": 13491,
+     "fpu": 0,
+     "insns": 1006,
+     "lsu": 1157,
+     "mem": 105,
+     "rhit": 607,
+     "tex": 0
+    },
+    "bitops_1": {
+     "busy": 4947,
+     "fpu": 40,
+     "insns": 203,
+     "lsu": 540,
+     "mem": 112,
+     "rhit": 0,
+     "tex": 0
+    },
+    "bitops_2": {
+     "busy": 4947,
+     "fpu": 40,
+     "insns": 203,
+     "lsu": 540,
+     "mem": 112,
+     "rhit": 0,
+     "tex": 0
+    },
+    "bitops_3": {
+     "busy": 4947,
+     "fpu": 40,
+     "insns": 203,
+     "lsu": 540,
+     "mem": 112,
+     "rhit": 0,
+     "tex": 0
+    },
+    "bitops_mut_0": {
+     "busy": 4951,
+     "fpu": 40,
+     "insns": 203,
+     "lsu": 544,
+     "mem": 108,
+     "rhit": 0,
+     "tex": 0
+    },
+    "bufcopy_1": {
+     "busy": 1135,
+     "fpu": 0,
+     "insns": 52,
+     "lsu": 260,
+     "mem": 56,
+     "rhit": 33,
+     "tex": 0
+    },
+    "bufcopy_2": {
+     "busy": 1135,
+     "fpu": 0,
+     "insns": 52,
+     "lsu": 260,
+     "mem": 56,
+     "rhit": 33,
+     "tex": 0
+    },
+    "bufcopy_3": {
+     "busy": 1135,
+     "fpu": 0,
+     "insns": 52,
+     "lsu": 260,
+     "mem": 56,
+     "rhit": 33,
+     "tex": 0
+    },
+    "bufcopy_mut_0": {
+     "busy": 1123,
+     "fpu": 0,
+     "insns": 52,
+     "lsu": 248,
+     "mem": 44,
+     "rhit": 33,
+     "tex": 0
+    },
+    "bufcopy_opt_1": {
+     "busy": 908,
+     "fpu": 0,
+     "insns": 36,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 21,
+     "tex": 0
+    },
+    "bufcopy_opt_2": {
+     "busy": 908,
+     "fpu": 0,
+     "insns": 36,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 21,
+     "tex": 0
+    },
+    "bufcopy_opt_3": {
+     "busy": 908,
+     "fpu": 0,
+     "insns": 36,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 21,
+     "tex": 0
+    },
+    "bufscale_1": {
+     "busy": 1197,
+     "fpu": 8,
+     "insns": 56,
+     "lsu": 260,
+     "mem": 56,
+     "rhit": 36,
+     "tex": 0
+    },
+    "bufscale_2": {
+     "busy": 1197,
+     "fpu": 8,
+     "insns": 56,
+     "lsu": 260,
+     "mem": 56,
+     "rhit": 36,
+     "tex": 0
+    },
+    "bufscale_3": {
+     "busy": 1197,
+     "fpu": 8,
+     "insns": 56,
+     "lsu": 260,
+     "mem": 56,
+     "rhit": 36,
+     "tex": 0
+    },
+    "bufscale_mut_0": {
+     "busy": 1265,
+     "fpu": 76,
+     "insns": 56,
+     "lsu": 260,
+     "mem": 56,
+     "rhit": 36,
+     "tex": 0
+    },
+    "bufscale_opt_1": {
+     "busy": 970,
+     "fpu": 8,
+     "insns": 40,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 24,
+     "tex": 0
+    },
+    "bufscale_opt_2": {
+     "busy": 970,
+     "fpu": 8,
+     "insns": 40,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 24,
+     "tex": 0
+    },
+    "bufscale_opt_3": {
+     "busy": 970,
+     "fpu": 8,
+     "insns": 40,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 24,
+     "tex": 0
+    },
+    "builtin_gid_1": {
+     "busy": 910,
+     "fpu": 0,
+     "insns": 44,
+     "lsu": 174,
+     "mem": 36,
+     "rhit": 27,
+     "tex": 0
+    },
+    "builtin_gid_2": {
+     "busy": 910,
+     "fpu": 0,
+     "insns": 44,
+     "lsu": 174,
+     "mem": 36,
+     "rhit": 27,
+     "tex": 0
+    },
+    "builtin_gid_3": {
+     "busy": 910,
+     "fpu": 0,
+     "insns": 44,
+     "lsu": 174,
+     "mem": 36,
+     "rhit": 27,
+     "tex": 0
+    },
+    "builtin_gid_mut_0": {
+     "busy": 910,
+     "fpu": 0,
+     "insns": 44,
+     "lsu": 174,
+     "mem": 36,
+     "rhit": 27,
+     "tex": 0
+    },
+    "builtin_gid_opt_1": {
+     "busy": 736,
+     "fpu": 0,
+     "insns": 36,
+     "lsu": 142,
+     "mem": 36,
+     "rhit": 21,
+     "tex": 0
+    },
+    "builtin_gid_opt_2": {
+     "busy": 736,
+     "fpu": 0,
+     "insns": 36,
+     "lsu": 142,
+     "mem": 36,
+     "rhit": 21,
+     "tex": 0
+    },
+    "builtin_gid_opt_3": {
+     "busy": 736,
+     "fpu": 0,
+     "insns": 36,
+     "lsu": 142,
+     "mem": 36,
+     "rhit": 21,
+     "tex": 0
+    },
+    "builtin_lid_1": {
+     "busy": 5728,
+     "fpu": 0,
+     "insns": 324,
+     "lsu": 934,
+     "mem": 100,
+     "rhit": 275,
+     "tex": 0
+    },
+    "builtin_lid_2": {
+     "busy": 5728,
+     "fpu": 0,
+     "insns": 324,
+     "lsu": 934,
+     "mem": 100,
+     "rhit": 275,
+     "tex": 0
+    },
+    "builtin_lid_3": {
+     "busy": 5728,
+     "fpu": 0,
+     "insns": 324,
+     "lsu": 934,
+     "mem": 100,
+     "rhit": 275,
+     "tex": 0
+    },
+    "builtin_lid_mut_0": {
+     "busy": 5728,
+     "fpu": 0,
+     "insns": 324,
+     "lsu": 934,
+     "mem": 77,
+     "rhit": 275,
+     "tex": 0
+    },
+    "builtin_lid_opt_1": {
+     "busy": 5252,
+     "fpu": 0,
+     "insns": 288,
+     "lsu": 886,
+     "mem": 100,
+     "rhit": 242,
+     "tex": 0
+    },
+    "builtin_lid_opt_2": {
+     "busy": 5252,
+     "fpu": 0,
+     "insns": 288,
+     "lsu": 886,
+     "mem": 100,
+     "rhit": 242,
+     "tex": 0
+    },
+    "builtin_lid_opt_3": {
+     "busy": 5252,
+     "fpu": 0,
+     "insns": 288,
+     "lsu": 886,
+     "mem": 100,
+     "rhit": 242,
+     "tex": 0
+    },
+    "builtin_lindex_1": {
+     "busy": 3099,
+     "fpu": 0,
+     "insns": 176,
+     "lsu": 578,
+     "mem": 68,
+     "rhit": 140,
+     "tex": 0
+    },
+    "builtin_lindex_2": {
+     "busy": 3099,
+     "fpu": 0,
+     "insns": 176,
+     "lsu": 578,
+     "mem": 68,
+     "rhit": 140,
+     "tex": 0
+    },
+    "builtin_lindex_3": {
+     "busy": 3099,
+     "fpu": 0,
+     "insns": 176,
+     "lsu": 578,
+     "mem": 68,
+     "rhit": 140,
+     "tex": 0
+    },
+    "builtin_lindex_mut_0": {
+     "busy": 3099,
+     "fpu": 0,
+     "insns": 176,
+     "lsu": 578,
+     "mem": 36,
+     "rhit": 140,
+     "tex": 0
+    },
+    "builtin_lindex_opt_1": {
+     "busy": 2521,
+     "fpu": 0,
+     "insns": 136,
+     "lsu": 466,
+     "mem": 68,
+     "rhit": 105,
+     "tex": 0
+    },
+    "builtin_lindex_opt_2": {
+     "busy": 2521,
+     "fpu": 0,
+     "insns": 136,
+     "lsu": 466,
+     "mem": 68,
+     "rhit": 105,
+     "tex": 0
+    },
+    "builtin_lindex_opt_3": {
+     "busy": 2521,
+     "fpu": 0,
+     "insns": 136,
+     "lsu": 466,
+     "mem": 68,
+     "rhit": 105,
+     "tex": 0
+    },
+    "cl_arr_1": {
+     "busy": 5631,
+     "fpu": 0,
+     "insns": 32,
+     "lsu": 5068,
+     "mem": 776,
+     "rhit": 18,
+     "tex": 0
+    },
+    "cl_arr_2": {
+     "busy": 5631,
+     "fpu": 0,
+     "insns": 32,
+     "lsu": 5068,
+     "mem": 776,
+     "rhit": 18,
+     "tex": 0
+    },
+    "cl_arr_3": {
+     "busy": 5631,
+     "fpu": 0,
+     "insns": 32,
+     "lsu": 5068,
+     "mem": 776,
+     "rhit": 18,
+     "tex": 0
+    },
+    "cl_mix_1": {
+     "busy": 2977,
+     "fpu": 0,
+     "insns": 24,
+     "lsu": 2640,
+     "mem": 468,
+     "rhit": 12,
+     "tex": 0
+    },
+    "cl_mix_2": {
+     "busy": 2977,
+     "fpu": 0,
+     "insns": 24,
+     "lsu": 2640,
+     "mem": 468,
+     "rhit": 12,
+     "tex": 0
+    },
+    "cl_mix_3": {
+     "busy": 2977,
+     "fpu": 0,
+     "insns": 24,
+     "lsu": 2640,
+     "mem": 468,
+     "rhit": 12,
+     "tex": 0
+    },
+    "compare_1": {
+     "busy": 8498,
+     "fpu": 200,
+     "insns": 488,
+     "lsu": 984,
+     "mem": 168,
+     "rhit": 360,
+     "tex": 0
+    },
+    "compare_2": {
+     "busy": 8498,
+     "fpu": 200,
+     "insns": 488,
+     "lsu": 984,
+     "mem": 168,
+     "rhit": 360,
+     "tex": 0
+    },
+    "compare_3": {
+     "busy": 8498,
+     "fpu": 200,
+     "insns": 488,
+     "lsu": 984,
+     "mem": 168,
+     "rhit": 360,
+     "tex": 0
+    },
+    "compare_mut_0": {
+     "busy": 8690,
+     "fpu": 200,
+     "insns": 488,
+     "lsu": 1176,
+     "mem": 104,
+     "rhit": 360,
+     "tex": 0
+    },
+    "compare_opt_1": {
+     "busy": 4514,
+     "fpu": 192,
+     "insns": 244,
+     "lsu": 544,
+     "mem": 168,
+     "rhit": 177,
+     "tex": 0
+    },
+    "compare_opt_2": {
+     "busy": 4514,
+     "fpu": 192,
+     "insns": 244,
+     "lsu": 544,
+     "mem": 168,
+     "rhit": 177,
+     "tex": 0
+    },
+    "compare_opt_3": {
+     "busy": 4514,
+     "fpu": 192,
+     "insns": 244,
+     "lsu": 544,
+     "mem": 168,
+     "rhit": 177,
+     "tex": 0
+    },
+    "composite_1": {
+     "busy": 5270,
+     "fpu": 32,
+     "insns": 260,
+     "lsu": 960,
+     "mem": 168,
+     "rhit": 183,
+     "tex": 0
+    },
+    "composite_2": {
+     "busy": 5270,
+     "fpu": 32,
+     "insns": 260,
+     "lsu": 960,
+     "mem": 168,
+     "rhit": 183,
+     "tex": 0
+    },
+    "composite_3": {
+     "busy": 5270,
+     "fpu": 32,
+     "insns": 260,
+     "lsu": 960,
+     "mem": 168,
+     "rhit": 183,
+     "tex": 0
+    },
+    "composite_mut_0": {
+     "busy": 5338,
+     "fpu": 100,
+     "insns": 260,
+     "lsu": 960,
+     "mem": 168,
+     "rhit": 183,
+     "tex": 0
+    },
+    "composite_opt_1": {
+     "busy": 1447,
+     "fpu": 32,
+     "insns": 64,
+     "lsu": 348,
+     "mem": 104,
+     "rhit": 42,
+     "tex": 0
+    },
+    "composite_opt_2": {
+     "busy": 1447,
+     "fpu": 32,
+     "insns": 64,
+     "lsu": 348,
+     "mem": 104,
+     "rhit": 42,
+     "tex": 0
+    },
+    "composite_opt_3": {
+     "busy": 1447,
+     "fpu": 32,
+     "insns": 64,
+     "lsu": 348,
+     "mem": 104,
+     "rhit": 42,
+     "tex": 0
+    },
+    "copylogical_1": {
+     "busy": 2068,
+     "fpu": 8,
+     "insns": 88,
+     "lsu": 540,
+     "mem": 72,
+     "rhit": 60,
+     "tex": 0
+    },
+    "copylogical_2": {
+     "busy": 2068,
+     "fpu": 8,
+     "insns": 88,
+     "lsu": 540,
+     "mem": 72,
+     "rhit": 60,
+     "tex": 0
+    },
+    "copylogical_3": {
+     "busy": 2068,
+     "fpu": 8,
+     "insns": 88,
+     "lsu": 540,
+     "mem": 72,
+     "rhit": 60,
+     "tex": 0
+    },
+    "copylogical_mut_0": {
+     "busy": 2084,
+     "fpu": 8,
+     "insns": 88,
+     "lsu": 556,
+     "mem": 56,
+     "rhit": 60,
+     "tex": 0
+    },
+    "cts_arrlensb_1": {
+     "busy": 484,
+     "fpu": 35,
+     "insns": 15,
+     "lsu": 113,
+     "mem": 14,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_arrlensb_2": {
+     "busy": 484,
+     "fpu": 35,
+     "insns": 15,
+     "lsu": 113,
+     "mem": 14,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_arrlensb_3": {
+     "busy": 484,
+     "fpu": 35,
+     "insns": 15,
+     "lsu": 113,
+     "mem": 14,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_b2b_1": {
+     "busy": 24037,
+     "fpu": 67,
+     "insns": 1721,
+     "lsu": 2535,
+     "mem": 136,
+     "rhit": 1202,
+     "tex": 0
+    },
+    "cts_b2b_2": {
+     "busy": 24037,
+     "fpu": 67,
+     "insns": 1721,
+     "lsu": 2535,
+     "mem": 136,
+     "rhit": 1202,
+     "tex": 0
+    },
+    "cts_b2b_3": {
+     "busy": 24037,
+     "fpu": 67,
+     "insns": 1721,
+     "lsu": 2535,
+     "mem": 136,
+     "rhit": 1202,
+     "tex": 0
+    },
+    "cts_b2b_mut_0": {
+     "busy": 24037,
+     "fpu": 67,
+     "insns": 1721,
+     "lsu": 2535,
+     "mem": 73,
+     "rhit": 1202,
+     "tex": 0
+    },
+    "cts_b2b_opt_1": {
+     "busy": 14989,
+     "fpu": 67,
+     "insns": 928,
+     "lsu": 1477,
+     "mem": 136,
+     "rhit": 697,
+     "tex": 0
+    },
+    "cts_b2b_opt_2": {
+     "busy": 14989,
+     "fpu": 67,
+     "insns": 928,
+     "lsu": 1477,
+     "mem": 136,
+     "rhit": 697,
+     "tex": 0
+    },
+    "cts_b2b_opt_3": {
+     "busy": 14989,
+     "fpu": 67,
+     "insns": 928,
+     "lsu": 1477,
+     "mem": 136,
+     "rhit": 697,
+     "tex": 0
+    },
+    "cts_imgcopy_1": {
+     "busy": 560,
+     "fpu": 0,
+     "insns": 15,
+     "lsu": 89,
+     "mem": 48,
+     "rhit": 0,
+     "tex": 165
+    },
+    "cts_imgcopy_2": {
+     "busy": 560,
+     "fpu": 0,
+     "insns": 15,
+     "lsu": 89,
+     "mem": 48,
+     "rhit": 0,
+     "tex": 165
+    },
+    "cts_imgcopy_3": {
+     "busy": 560,
+     "fpu": 0,
+     "insns": 15,
+     "lsu": 89,
+     "mem": 48,
+     "rhit": 0,
+     "tex": 165
+    },
+    "cts_imgcopy_mut_0": {
+     "busy": 560,
+     "fpu": 0,
+     "insns": 15,
+     "lsu": 89,
+     "mem": 48,
+     "rhit": 0,
+     "tex": 165
+    },
+    "cts_imgcopy_opt_1": {
+     "busy": 502,
+     "fpu": 0,
+     "insns": 12,
+     "lsu": 85,
+     "mem": 48,
+     "rhit": 0,
+     "tex": 165
+    },
+    "cts_imgcopy_opt_2": {
+     "busy": 502,
+     "fpu": 0,
+     "insns": 12,
+     "lsu": 85,
+     "mem": 48,
+     "rhit": 0,
+     "tex": 165
+    },
+    "cts_imgcopy_opt_3": {
+     "busy": 502,
+     "fpu": 0,
+     "insns": 12,
+     "lsu": 85,
+     "mem": 48,
+     "rhit": 0,
+     "tex": 165
+    },
+    "cts_mls64_1": {
+     "busy": 999,
+     "fpu": 0,
+     "insns": 48,
+     "lsu": 274,
+     "mem": 68,
+     "rhit": 28,
+     "tex": 0
+    },
+    "cts_mls64_2": {
+     "busy": 999,
+     "fpu": 0,
+     "insns": 48,
+     "lsu": 274,
+     "mem": 68,
+     "rhit": 28,
+     "tex": 0
+    },
+    "cts_mls64_3": {
+     "busy": 999,
+     "fpu": 0,
+     "insns": 48,
+     "lsu": 274,
+     "mem": 68,
+     "rhit": 28,
+     "tex": 0
+    },
+    "cts_mls64_mut_0": {
+     "busy": 999,
+     "fpu": 0,
+     "insns": 48,
+     "lsu": 274,
+     "mem": 68,
+     "rhit": 28,
+     "tex": 0
+    },
+    "cts_shared1_1": {
+     "busy": 1458,
+     "fpu": 0,
+     "insns": 62,
+     "lsu": 139,
+     "mem": 5,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_shared1_2": {
+     "busy": 1458,
+     "fpu": 0,
+     "insns": 62,
+     "lsu": 139,
+     "mem": 5,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_shared1_3": {
+     "busy": 1458,
+     "fpu": 0,
+     "insns": 62,
+     "lsu": 139,
+     "mem": 5,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_sharedg_1": {
+     "busy": 4401,
+     "fpu": 0,
+     "insns": 248,
+     "lsu": 630,
+     "mem": 34,
+     "rhit": 180,
+     "tex": 0
+    },
+    "cts_sharedg_2": {
+     "busy": 4401,
+     "fpu": 0,
+     "insns": 248,
+     "lsu": 630,
+     "mem": 34,
+     "rhit": 180,
+     "tex": 0
+    },
+    "cts_sharedg_3": {
+     "busy": 4401,
+     "fpu": 0,
+     "insns": 248,
+     "lsu": 630,
+     "mem": 34,
+     "rhit": 180,
+     "tex": 0
+    },
+    "cts_sharedg_mut_0": {
+     "busy": 4401,
+     "fpu": 0,
+     "insns": 248,
+     "lsu": 630,
+     "mem": 34,
+     "rhit": 180,
+     "tex": 0
+    },
+    "cts_wgloop_1": {
+     "busy": 884,
+     "fpu": 0,
+     "insns": 47,
+     "lsu": 86,
+     "mem": 8,
+     "rhit": 10,
+     "tex": 0
+    },
+    "cts_wgloop_2": {
+     "busy": 884,
+     "fpu": 0,
+     "insns": 47,
+     "lsu": 86,
+     "mem": 8,
+     "rhit": 10,
+     "tex": 0
+    },
+    "cts_wgloop_3": {
+     "busy": 884,
+     "fpu": 0,
+     "insns": 47,
+     "lsu": 86,
+     "mem": 8,
+     "rhit": 10,
+     "tex": 0
+    },
+    "descarr_1": {
+     "busy": 1438,
+     "fpu": 136,
+     "insns": 60,
+     "lsu": 298,
+     "mem": 68,
+     "rhit": 39,
+     "tex": 0
+    },
+    "descarr_2": {
+     "busy": 1438,
+     "fpu": 136,
+     "insns": 60,
+     "lsu": 298,
+     "mem": 68,
+     "rhit": 39,
+     "tex": 0
+    },
+    "descarr_3": {
+     "busy": 1438,
+     "fpu": 136,
+     "insns": 60,
+     "lsu": 298,
+     "mem": 68,
+     "rhit": 39,
+     "tex": 0
+    },
+    "descarr_mut_0": {
+     "busy": 1426,
+     "fpu": 136,
+     "insns": 60,
+     "lsu": 286,
+     "mem": 56,
+     "rhit": 39,
+     "tex": 0
+    },
+    "descarr_opt_1": {
+     "busy": 1156,
+     "fpu": 136,
+     "insns": 40,
+     "lsu": 266,
+     "mem": 68,
+     "rhit": 24,
+     "tex": 0
+    },
+    "descarr_opt_2": {
+     "busy": 1156,
+     "fpu": 136,
+     "insns": 40,
+     "lsu": 266,
+     "mem": 68,
+     "rhit": 24,
+     "tex": 0
+    },
+    "descarr_opt_3": {
+     "busy": 1156,
+     "fpu": 136,
+     "insns": 40,
+     "lsu": 266,
+     "mem": 68,
+     "rhit": 24,
+     "tex": 0
+    },
+    "dispbase_0": {
+     "busy": 2326,
+     "fpu": 0,
+     "insns": 112,
+     "lsu": 470,
+     "mem": 100,
+     "rhit": 78,
+     "tex": 0
+    },
+    "dynvec_1": {
+     "busy": 835,
+     "fpu": 34,
+     "insns": 27,
+     "lsu": 153,
+     "mem": 32,
+     "rhit": 0,
+     "tex": 0
+    },
+    "dynvec_2": {
+     "busy": 835,
+     "fpu": 34,
+     "insns": 27,
+     "lsu": 153,
+     "mem": 32,
+     "rhit": 0,
+     "tex": 0
+    },
+    "dynvec_3": {
+     "busy": 835,
+     "fpu": 34,
+     "insns": 27,
+     "lsu": 153,
+     "mem": 32,
+     "rhit": 0,
+     "tex": 0
+    },
+    "dynvec_mut_0": {
+     "busy": 839,
+     "fpu": 34,
+     "insns": 27,
+     "lsu": 157,
+     "mem": 28,
+     "rhit": 0,
+     "tex": 0
+    },
+    "earlyret_1": {
+     "busy": 1984,
+     "fpu": 0,
+     "insns": 120,
+     "lsu": 308,
+     "mem": 56,
+     "rhit": 78,
+     "tex": 0
+    },
+    "earlyret_2": {
+     "busy": 1984,
+     "fpu": 0,
+     "insns": 120,
+     "lsu": 308,
+     "mem": 56,
+     "rhit": 78,
+     "tex": 0
+    },
+    "earlyret_3": {
+     "busy": 1984,
+     "fpu": 0,
+     "insns": 120,
+     "lsu": 308,
+     "mem": 56,
+     "rhit": 78,
+     "tex": 0
+    },
+    "earlyret_mut_0": {
+     "busy": 1984,
+     "fpu": 0,
+     "insns": 120,
+     "lsu": 308,
+     "mem": 56,
+     "rhit": 78,
+     "tex": 0
+    },
+    "earlyret_opt_1": {
+     "busy": 1517,
+     "fpu": 0,
+     "insns": 92,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 48,
+     "tex": 0
+    },
+    "earlyret_opt_2": {
+     "busy": 1517,
+     "fpu": 0,
+     "insns": 92,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 48,
+     "tex": 0
+    },
+    "earlyret_opt_3": {
+     "busy": 1517,
+     "fpu": 0,
+     "insns": 92,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 48,
+     "tex": 0
+    },
+    "fn_call_1": {
+     "busy": 1942,
+     "fpu": 0,
+     "insns": 99,
+     "lsu": 157,
+     "mem": 24,
+     "rhit": 4,
+     "tex": 0
+    },
+    "fn_call_2": {
+     "busy": 1942,
+     "fpu": 0,
+     "insns": 99,
+     "lsu": 157,
+     "mem": 24,
+     "rhit": 4,
+     "tex": 0
+    },
+    "fn_call_3": {
+     "busy": 1942,
+     "fpu": 0,
+     "insns": 99,
+     "lsu": 157,
+     "mem": 24,
+     "rhit": 4,
+     "tex": 0
+    },
+    "fn_call_mut_0": {
+     "busy": 1946,
+     "fpu": 0,
+     "insns": 99,
+     "lsu": 161,
+     "mem": 20,
+     "rhit": 4,
+     "tex": 0
+    },
+    "fn_deep_0": {
+     "busy": 1296,
+     "fpu": 0,
+     "insns": 68,
+     "lsu": 79,
+     "mem": 8,
+     "rhit": 0,
+     "tex": 0
+    },
+    "fn_divret_1": {
+     "busy": 1094,
+     "fpu": 0,
+     "insns": 54,
+     "lsu": 111,
+     "mem": 24,
+     "rhit": 0,
+     "tex": 0
+    },
+    "fn_divret_2": {
+     "busy": 1094,
+     "fpu": 0,
+     "insns": 54,
+     "lsu": 111,
+     "mem": 24,
+     "rhit": 0,
+     "tex": 0
+    },
+    "fn_divret_3": {
+     "busy": 1094,
+     "fpu": 0,
+     "insns": 54,
+     "lsu": 111,
+     "mem": 24,
+     "rhit": 0,
+     "tex": 0
+    },
+    "fn_divret_mut_0": {
+     "busy": 1094,
+     "fpu": 0,
+     "insns": 54,
+     "lsu": 111,
+     "mem": 24,
+     "rhit": 0,
+     "tex": 0
+    },
+    "fs_color_1": {
+     "busy": 650,
+     "fpu": 12,
+     "insns": 22,
+     "lsu": 240,
+     "mem": 80,
+     "rhit": 8,
+     "tex": 0
+    },
+    "fs_demote_deriv_1": {
+     "busy": 1764,
+     "fpu": 24,
+     "insns": 80,
+     "lsu": 356,
+     "mem": 160,
+     "rhit": 31,
+     "tex": 0
+    },
+    "fs_deriv_1": {
+     "busy": 1339,
+     "fpu": 48,
+     "insns": 50,
+     "lsu": 384,
+     "mem": 128,
+     "rhit": 22,
+     "tex": 0
+    },
+    "fs_fncall_1": {
+     "busy": 2824,
+     "fpu": 20,
+     "insns": 150,
+     "lsu": 456,
+     "mem": 64,
+     "rhit": 56,
+     "tex": 0
+    },
+    "fs_img_1": {
+     "busy": 941,
+     "fpu": 104,
+     "insns": 22,
+     "lsu": 218,
+     "mem": 76,
+     "rhit": 9,
+     "tex": 275
+    },
+    "fs_kill_1": {
+     "busy": 824,
+     "fpu": 8,
+     "insns": 36,
+     "lsu": 192,
+     "mem": 112,
+     "rhit": 14,
+     "tex": 0
+    },
+    "fs_kill_fn_1": {
+     "busy": 1227,
+     "fpu": 12,
+     "insns": 66,
+     "lsu": 256,
+     "mem": 96,
+     "rhit": 20,
+     "tex": 0
+    },
+    "fs_smp_1": {
+     "busy": 3443,
+     "fpu": 1392,
+     "insns": 20,
+     "lsu": 242,
+     "mem": 112,
+     "rhit": 8,
+     "tex": 1001
+    },
+    "fs_tex_array_1": {
+     "busy": 3234,
+     "fpu": 1392,
+     "insns": 26,
+     "lsu": 266,
+     "mem": 132,
+     "rhit": 11,
+     "tex": 640
+    },
+    "fs_tex_bias_1": {
+     "busy": 3197,
+     "fpu": 1424,
+     "insns": 20,
+     "lsu": 266,
+     "mem": 124,
+     "rhit": 8,
+     "tex": 679
+    },
+    "fs_tex_gather_1": {
+     "busy": 7488,
+     "fpu": 3488,
+     "insns": 50,
+     "lsu": 378,
+     "mem": 132,
+     "rhit": 21,
+     "tex": 1704
+    },
+    "fs_tex_implicit_1": {
+     "busy": 2900,
+     "fpu": 1392,
+     "insns": 16,
+     "lsu": 218,
+     "mem": 92,
+     "rhit": 6,
+     "tex": 549
+    },
+    "fs_tex_proj_1": {
+     "busy": 8799,
+     "fpu": 3716,
+     "insns": 78,
+     "lsu": 598,
+     "mem": 196,
+     "rhit": 36,
+     "tex": 2082
+    },
+    "fs_tex_qlod_1": {
+     "busy": 2834,
+     "fpu": 1148,
+     "insns": 36,
+     "lsu": 234,
+     "mem": 68,
+     "rhit": 15,
+     "tex": 322
+    },
+    "fs_tex_shadow_1": {
+     "busy": 14255,
+     "fpu": 6364,
+     "insns": 116,
+     "lsu": 826,
+     "mem": 276,
+     "rhit": 53,
+     "tex": 3488
+    },
+    "fs_texbuf_1": {
+     "busy": 1139,
+     "fpu": 104,
+     "insns": 34,
+     "lsu": 226,
+     "mem": 76,
+     "rhit": 15,
+     "tex": 259
+    },
+    "fs_ubo_1": {
+     "busy": 397,
+     "fpu": 0,
+     "insns": 12,
+     "lsu": 204,
+     "mem": 68,
+     "rhit": 4,
+     "tex": 0
+    },
+    "fs_ubo_array_1": {
+     "busy": 411,
+     "fpu": 0,
+     "insns": 12,
+     "lsu": 204,
+     "mem": 68,
+     "rhit": 4,
+     "tex": 0
+    },
+    "geomops_1": {
+     "busy": 10460,
+     "fpu": 1682,
+     "insns": 240,
+     "lsu": 2636,
+     "mem": 96,
+     "rhit": 112,
+     "tex": 0
+    },
+    "ifelse_1": {
+     "busy": 2226,
+     "fpu": 0,
+     "insns": 140,
+     "lsu": 316,
+     "mem": 56,
+     "rhit": 81,
+     "tex": 0
+    },
+    "ifelse_2": {
+     "busy": 2226,
+     "fpu": 0,
+     "insns": 140,
+     "lsu": 316,
+     "mem": 56,
+     "rhit": 81,
+     "tex": 0
+    },
+    "ifelse_3": {
+     "busy": 2226,
+     "fpu": 0,
+     "insns": 140,
+     "lsu": 316,
+     "mem": 56,
+     "rhit": 81,
+     "tex": 0
+    },
+    "ifelse_mut_0": {
+     "busy": 2226,
+     "fpu": 0,
+     "insns": 140,
+     "lsu": 316,
+     "mem": 56,
+     "rhit": 81,
+     "tex": 0
+    },
+    "ifelse_opt_1": {
+     "busy": 1649,
+     "fpu": 0,
+     "insns": 96,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 48,
+     "tex": 0
+    },
+    "ifelse_opt_2": {
+     "busy": 1649,
+     "fpu": 0,
+     "insns": 96,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 48,
+     "tex": 0
+    },
+    "ifelse_opt_3": {
+     "busy": 1649,
+     "fpu": 0,
+     "insns": 96,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 48,
+     "tex": 0
+    },
+    "imgarr_1": {
+     "busy": 2522,
+     "fpu": 328,
+     "insns": 80,
+     "lsu": 342,
+     "mem": 116,
+     "rhit": 51,
+     "tex": 588
+    },
+    "imgarr_2": {
+     "busy": 2522,
+     "fpu": 328,
+     "insns": 80,
+     "lsu": 342,
+     "mem": 116,
+     "rhit": 51,
+     "tex": 588
+    },
+    "imgarr_3": {
+     "busy": 2522,
+     "fpu": 328,
+     "insns": 80,
+     "lsu": 342,
+     "mem": 116,
+     "rhit": 51,
+     "tex": 588
+    },
+    "imgarr_smp_1": {
+     "busy": 2430,
+     "fpu": 328,
+     "insns": 76,
+     "lsu": 342,
+     "mem": 116,
+     "rhit": 51,
+     "tex": 584
+    },
+    "imgarr_smp_2": {
+     "busy": 2430,
+     "fpu": 328,
+     "insns": 76,
+     "lsu": 342,
+     "mem": 116,
+     "rhit": 51,
+     "tex": 584
+    },
+    "imgarr_smp_3": {
+     "busy": 2430,
+     "fpu": 328,
+     "insns": 76,
+     "lsu": 342,
+     "mem": 116,
+     "rhit": 51,
+     "tex": 584
+    },
+    "imgarr_st_1": {
+     "busy": 6184,
+     "fpu": 688,
+     "insns": 216,
+     "lsu": 662,
+     "mem": 276,
+     "rhit": 153,
+     "tex": 1660
+    },
+    "imgarr_st_2": {
+     "busy": 6184,
+     "fpu": 688,
+     "insns": 216,
+     "lsu": 662,
+     "mem": 276,
+     "rhit": 153,
+     "tex": 1660
+    },
+    "imgarr_st_3": {
+     "busy": 6184,
+     "fpu": 688,
+     "insns": 216,
+     "lsu": 662,
+     "mem": 276,
+     "rhit": 153,
+     "tex": 1660
+    },
+    "imgcopy_rgba8ui_1": {
+     "busy": 1331,
+     "fpu": 68,
+     "insns": 43,
+     "lsu": 113,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 238
+    },
+    "imgcopy_rgba8ui_2": {
+     "busy": 1331,
+     "fpu": 68,
+     "insns": 43,
+     "lsu": 113,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 238
+    },
+    "imgcopy_rgba8ui_3": {
+     "busy": 1331,
+     "fpu": 68,
+     "insns": 43,
+     "lsu": 113,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 238
+    },
+    "imgcopy_rgba8ui_mut_0": {
+     "busy": 1331,
+     "fpu": 68,
+     "insns": 43,
+     "lsu": 113,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 238
+    },
+    "imgcopy_rgba8ui_opt_1": {
+     "busy": 952,
+     "fpu": 68,
+     "insns": 27,
+     "lsu": 69,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 238
+    },
+    "imgcopy_rgba8ui_opt_2": {
+     "busy": 952,
+     "fpu": 68,
+     "insns": 27,
+     "lsu": 69,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 238
+    },
+    "imgcopy_rgba8ui_opt_3": {
+     "busy": 952,
+     "fpu": 68,
+     "insns": 27,
+     "lsu": 69,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 238
+    },
+    "imgloadstore_1": {
+     "busy": 1062,
+     "fpu": 50,
+     "insns": 30,
+     "lsu": 147,
+     "mem": 60,
+     "rhit": 0,
+     "tex": 252
+    },
+    "imgloadstore_2": {
+     "busy": 1062,
+     "fpu": 50,
+     "insns": 30,
+     "lsu": 147,
+     "mem": 60,
+     "rhit": 0,
+     "tex": 252
+    },
+    "imgloadstore_3": {
+     "busy": 1062,
+     "fpu": 50,
+     "insns": 30,
+     "lsu": 147,
+     "mem": 60,
+     "rhit": 0,
+     "tex": 252
+    },
+    "imgloadstore_mut_0": {
+     "busy": 1062,
+     "fpu": 50,
+     "insns": 30,
+     "lsu": 147,
+     "mem": 60,
+     "rhit": 0,
+     "tex": 252
+    },
+    "imgloadstore_opt_1": {
+     "busy": 776,
+     "fpu": 50,
+     "insns": 17,
+     "lsu": 103,
+     "mem": 60,
+     "rhit": 0,
+     "tex": 252
+    },
+    "imgloadstore_opt_2": {
+     "busy": 776,
+     "fpu": 50,
+     "insns": 17,
+     "lsu": 103,
+     "mem": 60,
+     "rhit": 0,
+     "tex": 252
+    },
+    "imgloadstore_opt_3": {
+     "busy": 776,
+     "fpu": 50,
+     "insns": 17,
+     "lsu": 103,
+     "mem": 60,
+     "rhit": 0,
+     "tex": 252
+    },
+    "intmix_1": {
+     "busy": 7994,
+     "fpu": 816,
+     "insns": 476,
+     "lsu": 712,
+     "mem": 72,
+     "rhit": 351,
+     "tex": 0
+    },
+    "intmix_2": {
+     "busy": 7994,
+     "fpu": 816,
+     "insns": 476,
+     "lsu": 712,
+     "mem": 72,
+     "rhit": 351,
+     "tex": 0
+    },
+    "intmix_3": {
+     "busy": 7994,
+     "fpu": 816,
+     "insns": 476,
+     "lsu": 712,
+     "mem": 72,
+     "rhit": 351,
+     "tex": 0
+    },
+    "intmix_mut_0": {
+     "busy": 8010,
+     "fpu": 816,
+     "insns": 476,
+     "lsu": 728,
+     "mem": 56,
+     "rhit": 351,
+     "tex": 0
+    },
+    "intmix_opt_1": {
+     "busy": 4733,
+     "fpu": 816,
+     "insns": 244,
+     "lsu": 320,
+     "mem": 72,
+     "rhit": 177,
+     "tex": 0
+    },
+    "intmix_opt_2": {
+     "busy": 4733,
+     "fpu": 816,
+     "insns": 244,
+     "lsu": 320,
+     "mem": 72,
+     "rhit": 177,
+     "tex": 0
+    },
+    "intmix_opt_3": {
+     "busy": 4733,
+     "fpu": 816,
+     "insns": 244,
+     "lsu": 320,
+     "mem": 72,
+     "rhit": 177,
+     "tex": 0
+    },
+    "localsize32_1": {
+     "busy": 2404,
+     "fpu": 0,
+     "insns": 120,
+     "lsu": 564,
+     "mem": 104,
+     "rhit": 91,
+     "tex": 0
+    },
+    "localsize32_2": {
+     "busy": 2404,
+     "fpu": 0,
+     "insns": 120,
+     "lsu": 564,
+     "mem": 104,
+     "rhit": 91,
+     "tex": 0
+    },
+    "localsize32_3": {
+     "busy": 2404,
+     "fpu": 0,
+     "insns": 120,
+     "lsu": 564,
+     "mem": 104,
+     "rhit": 91,
+     "tex": 0
+    },
+    "localsize32_mut_0": {
+     "busy": 2404,
+     "fpu": 0,
+     "insns": 120,
+     "lsu": 564,
+     "mem": 104,
+     "rhit": 91,
+     "tex": 0
+    },
+    "localsize32_opt_1": {
+     "busy": 1977,
+     "fpu": 0,
+     "insns": 88,
+     "lsu": 516,
+     "mem": 104,
+     "rhit": 63,
+     "tex": 0
+    },
+    "localsize32_opt_2": {
+     "busy": 1977,
+     "fpu": 0,
+     "insns": 88,
+     "lsu": 516,
+     "mem": 104,
+     "rhit": 63,
+     "tex": 0
+    },
+    "localsize32_opt_3": {
+     "busy": 1977,
+     "fpu": 0,
+     "insns": 88,
+     "lsu": 516,
+     "mem": 104,
+     "rhit": 63,
+     "tex": 0
+    },
+    "localsize64_1": {
+     "busy": 2498,
+     "fpu": 0,
+     "insns": 128,
+     "lsu": 564,
+     "mem": 104,
+     "rhit": 98,
+     "tex": 0
+    },
+    "localsize64_2": {
+     "busy": 2498,
+     "fpu": 0,
+     "insns": 128,
+     "lsu": 564,
+     "mem": 104,
+     "rhit": 98,
+     "tex": 0
+    },
+    "localsize64_3": {
+     "busy": 2498,
+     "fpu": 0,
+     "insns": 128,
+     "lsu": 564,
+     "mem": 104,
+     "rhit": 98,
+     "tex": 0
+    },
+    "localsize64_mut_0": {
+     "busy": 2498,
+     "fpu": 0,
+     "insns": 128,
+     "lsu": 564,
+     "mem": 104,
+     "rhit": 98,
+     "tex": 0
+    },
+    "localsize64_opt_1": {
+     "busy": 2071,
+     "fpu": 0,
+     "insns": 96,
+     "lsu": 516,
+     "mem": 104,
+     "rhit": 70,
+     "tex": 0
+    },
+    "localsize64_opt_2": {
+     "busy": 2071,
+     "fpu": 0,
+     "insns": 96,
+     "lsu": 516,
+     "mem": 104,
+     "rhit": 70,
+     "tex": 0
+    },
+    "localsize64_opt_3": {
+     "busy": 2071,
+     "fpu": 0,
+     "insns": 96,
+     "lsu": 516,
+     "mem": 104,
+     "rhit": 70,
+     "tex": 0
+    },
+    "loopfor_1": {
+     "busy": 4933,
+     "fpu": 0,
+     "insns": 340,
+     "lsu": 599,
+     "mem": 87,
+     "rhit": 217,
+     "tex": 0
+    },
+    "loopfor_2": {
+     "busy": 4931,
+     "fpu": 0,
+     "insns": 340,
+     "lsu": 597,
+     "mem": 88,
+     "rhit": 217,
+     "tex": 0
+    },
+    "loopfor_3": {
+     "busy": 4923,
+     "fpu": 0,
+     "insns": 340,
+     "lsu": 589,
+     "mem": 87,
+     "rhit": 217,
+     "tex": 0
+    },
+    "loopfor_mut_0": {
+     "busy": 4938,
+     "fpu": 0,
+     "insns": 340,
+     "lsu": 604,
+     "mem": 88,
+     "rhit": 217,
+     "tex": 0
+    },
+    "loopfor_opt_1": {
+     "busy": 3179,
+     "fpu": 0,
+     "insns": 216,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 128,
+     "tex": 0
+    },
+    "loopfor_opt_2": {
+     "busy": 3179,
+     "fpu": 0,
+     "insns": 216,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 128,
+     "tex": 0
+    },
+    "loopfor_opt_3": {
+     "busy": 3179,
+     "fpu": 0,
+     "insns": 216,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 128,
+     "tex": 0
+    },
+    "loopwhile_1": {
+     "busy": 46675,
+     "fpu": 3264,
+     "insns": 3740,
+     "lsu": 2400,
+     "mem": 56,
+     "rhit": 2345,
+     "tex": 0
+    },
+    "loopwhile_2": {
+     "busy": 46675,
+     "fpu": 3264,
+     "insns": 3740,
+     "lsu": 2400,
+     "mem": 56,
+     "rhit": 2345,
+     "tex": 0
+    },
+    "loopwhile_3": {
+     "busy": 46956,
+     "fpu": 3264,
+     "insns": 3764,
+     "lsu": 2412,
+     "mem": 56,
+     "rhit": 2357,
+     "tex": 0
+    },
+    "loopwhile_mut_0": {
+     "busy": 46555,
+     "fpu": 3230,
+     "insns": 3733,
+     "lsu": 2396,
+     "mem": 56,
+     "rhit": 2342,
+     "tex": 0
+    },
+    "loopwhile_opt_1": {
+     "busy": 37217,
+     "fpu": 3264,
+     "insns": 2738,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 1562,
+     "tex": 0
+    },
+    "loopwhile_opt_2": {
+     "busy": 37215,
+     "fpu": 3264,
+     "insns": 2738,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 1562,
+     "tex": 0
+    },
+    "loopwhile_opt_3": {
+     "busy": 37424,
+     "fpu": 3264,
+     "insns": 2756,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 1568,
+     "tex": 0
+    },
+    "math450_1": {
+     "busy": 22863,
+     "fpu": 2132,
+     "insns": 1012,
+     "lsu": 3304,
+     "mem": 712,
+     "rhit": 678,
+     "tex": 0
+    },
+    "math450_2": {
+     "busy": 22895,
+     "fpu": 2164,
+     "insns": 1012,
+     "lsu": 3304,
+     "mem": 712,
+     "rhit": 678,
+     "tex": 0
+    },
+    "math450_3": {
+     "busy": 22895,
+     "fpu": 2164,
+     "insns": 1012,
+     "lsu": 3304,
+     "mem": 712,
+     "rhit": 678,
+     "tex": 0
+    },
+    "math450_mut_0": {
+     "busy": 22957,
+     "fpu": 2034,
+     "insns": 1012,
+     "lsu": 3496,
+     "mem": 648,
+     "rhit": 678,
+     "tex": 0
+    },
+    "math450_opt_1": {
+     "busy": 13658,
+     "fpu": 2156,
+     "insns": 516,
+     "lsu": 2208,
+     "mem": 712,
+     "rhit": 354,
+     "tex": 0
+    },
+    "math450_opt_2": {
+     "busy": 13658,
+     "fpu": 2156,
+     "insns": 516,
+     "lsu": 2208,
+     "mem": 712,
+     "rhit": 354,
+     "tex": 0
+    },
+    "math450_opt_3": {
+     "busy": 13658,
+     "fpu": 2156,
+     "insns": 516,
+     "lsu": 2208,
+     "mem": 712,
+     "rhit": 354,
+     "tex": 0
+    },
+    "matmat_1": {
+     "busy": 21522,
+     "fpu": 384,
+     "insns": 484,
+     "lsu": 11412,
+     "mem": 200,
+     "rhit": 336,
+     "tex": 0
+    },
+    "matmat_2": {
+     "busy": 21522,
+     "fpu": 384,
+     "insns": 484,
+     "lsu": 11412,
+     "mem": 200,
+     "rhit": 336,
+     "tex": 0
+    },
+    "matmat_3": {
+     "busy": 21522,
+     "fpu": 384,
+     "insns": 484,
+     "lsu": 11412,
+     "mem": 200,
+     "rhit": 336,
+     "tex": 0
+    },
+    "matmat_mut_0": {
+     "busy": 21522,
+     "fpu": 384,
+     "insns": 484,
+     "lsu": 11412,
+     "mem": 199,
+     "rhit": 336,
+     "tex": 0
+    },
+    "matmat_opt_1": {
+     "busy": 6581,
+     "fpu": 384,
+     "insns": 244,
+     "lsu": 652,
+     "mem": 200,
+     "rhit": 156,
+     "tex": 0
+    },
+    "matmat_opt_2": {
+     "busy": 6581,
+     "fpu": 384,
+     "insns": 244,
+     "lsu": 652,
+     "mem": 200,
+     "rhit": 156,
+     "tex": 0
+    },
+    "matmat_opt_3": {
+     "busy": 6581,
+     "fpu": 384,
+     "insns": 244,
+     "lsu": 652,
+     "mem": 200,
+     "rhit": 156,
+     "tex": 0
+    },
+    "matvec_1": {
+     "busy": 12454,
+     "fpu": 352,
+     "insns": 360,
+     "lsu": 6064,
+     "mem": 264,
+     "rhit": 261,
+     "tex": 0
+    },
+    "matvec_2": {
+     "busy": 12454,
+     "fpu": 352,
+     "insns": 360,
+     "lsu": 6064,
+     "mem": 264,
+     "rhit": 261,
+     "tex": 0
+    },
+    "matvec_3": {
+     "busy": 12454,
+     "fpu": 352,
+     "insns": 360,
+     "lsu": 6064,
+     "mem": 264,
+     "rhit": 261,
+     "tex": 0
+    },
+    "matvec_mut_0": {
+     "busy": 12454,
+     "fpu": 352,
+     "insns": 360,
+     "lsu": 6064,
+     "mem": 263,
+     "rhit": 261,
+     "tex": 0
+    },
+    "matvec_opt_1": {
+     "busy": 4282,
+     "fpu": 352,
+     "insns": 152,
+     "lsu": 852,
+     "mem": 264,
+     "rhit": 105,
+     "tex": 0
+    },
+    "matvec_opt_2": {
+     "busy": 4282,
+     "fpu": 352,
+     "insns": 152,
+     "lsu": 852,
+     "mem": 264,
+     "rhit": 105,
+     "tex": 0
+    },
+    "matvec_opt_3": {
+     "busy": 4282,
+     "fpu": 352,
+     "insns": 152,
+     "lsu": 852,
+     "mem": 264,
+     "rhit": 105,
+     "tex": 0
+    },
+    "multiset_1": {
+     "busy": 1072,
+     "fpu": 0,
+     "insns": 34,
+     "lsu": 260,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "multiset_2": {
+     "busy": 1072,
+     "fpu": 0,
+     "insns": 34,
+     "lsu": 260,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "multiset_3": {
+     "busy": 1072,
+     "fpu": 0,
+     "insns": 34,
+     "lsu": 260,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "multiset_mut_0": {
+     "busy": 1072,
+     "fpu": 0,
+     "insns": 34,
+     "lsu": 260,
+     "mem": 60,
+     "rhit": 0,
+     "tex": 0
+    },
+    "multiset_opt_1": {
+     "busy": 881,
+     "fpu": 0,
+     "insns": 24,
+     "lsu": 242,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "multiset_opt_2": {
+     "busy": 881,
+     "fpu": 0,
+     "insns": 24,
+     "lsu": 242,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "multiset_opt_3": {
+     "busy": 881,
+     "fpu": 0,
+     "insns": 24,
+     "lsu": 242,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "nclamp_1": {
+     "busy": 2422,
+     "fpu": 32,
+     "insns": 96,
+     "lsu": 604,
+     "mem": 152,
+     "rhit": 66,
+     "tex": 0
+    },
+    "nclamp_2": {
+     "busy": 2422,
+     "fpu": 32,
+     "insns": 96,
+     "lsu": 604,
+     "mem": 152,
+     "rhit": 66,
+     "tex": 0
+    },
+    "nclamp_3": {
+     "busy": 2422,
+     "fpu": 32,
+     "insns": 96,
+     "lsu": 604,
+     "mem": 152,
+     "rhit": 66,
+     "tex": 0
+    },
+    "nclamp_mut_0": {
+     "busy": 2438,
+     "fpu": 32,
+     "insns": 96,
+     "lsu": 620,
+     "mem": 136,
+     "rhit": 66,
+     "tex": 0
+    },
+    "oob_1": {
+     "busy": 2210,
+     "fpu": 0,
+     "insns": 104,
+     "lsu": 508,
+     "mem": 78,
+     "rhit": 72,
+     "tex": 0
+    },
+    "oob_2": {
+     "busy": 2210,
+     "fpu": 0,
+     "insns": 104,
+     "lsu": 508,
+     "mem": 78,
+     "rhit": 72,
+     "tex": 0
+    },
+    "oob_3": {
+     "busy": 2210,
+     "fpu": 0,
+     "insns": 104,
+     "lsu": 508,
+     "mem": 78,
+     "rhit": 72,
+     "tex": 0
+    },
+    "oob_mut_0": {
+     "busy": 2210,
+     "fpu": 0,
+     "insns": 104,
+     "lsu": 508,
+     "mem": 78,
+     "rhit": 72,
+     "tex": 0
+    },
+    "oob_opt_1": {
+     "busy": 1517,
+     "fpu": 0,
+     "insns": 56,
+     "lsu": 436,
+     "mem": 78,
+     "rhit": 36,
+     "tex": 0
+    },
+    "oob_opt_2": {
+     "busy": 1517,
+     "fpu": 0,
+     "insns": 56,
+     "lsu": 436,
+     "mem": 78,
+     "rhit": 36,
+     "tex": 0
+    },
+    "oob_opt_3": {
+     "busy": 1517,
+     "fpu": 0,
+     "insns": 56,
+     "lsu": 436,
+     "mem": 78,
+     "rhit": 36,
+     "tex": 0
+    },
+    "packops_1": {
+     "busy": 6371,
+     "fpu": 286,
+     "insns": 225,
+     "lsu": 751,
+     "mem": 168,
+     "rhit": 0,
+     "tex": 0
+    },
+    "packops_2": {
+     "busy": 6423,
+     "fpu": 338,
+     "insns": 225,
+     "lsu": 751,
+     "mem": 168,
+     "rhit": 0,
+     "tex": 0
+    },
+    "packops_3": {
+     "busy": 6371,
+     "fpu": 286,
+     "insns": 225,
+     "lsu": 751,
+     "mem": 168,
+     "rhit": 0,
+     "tex": 0
+    },
+    "packops_mut_0": {
+     "busy": 6398,
+     "fpu": 309,
+     "insns": 225,
+     "lsu": 755,
+     "mem": 164,
+     "rhit": 0,
+     "tex": 0
+    },
+    "phiflow_1": {
+     "busy": 2565,
+     "fpu": 28,
+     "insns": 148,
+     "lsu": 400,
+     "mem": 72,
+     "rhit": 84,
+     "tex": 0
+    },
+    "phiflow_2": {
+     "busy": 2565,
+     "fpu": 28,
+     "insns": 148,
+     "lsu": 400,
+     "mem": 72,
+     "rhit": 84,
+     "tex": 0
+    },
+    "phiflow_3": {
+     "busy": 2565,
+     "fpu": 28,
+     "insns": 148,
+     "lsu": 400,
+     "mem": 72,
+     "rhit": 84,
+     "tex": 0
+    },
+    "phiflow_mut_0": {
+     "busy": 2581,
+     "fpu": 28,
+     "insns": 148,
+     "lsu": 416,
+     "mem": 56,
+     "rhit": 84,
+     "tex": 0
+    },
+    "precise_dot_1": {
+     "busy": 12613,
+     "fpu": 120,
+     "insns": 496,
+     "lsu": 3884,
+     "mem": 392,
+     "rhit": 345,
+     "tex": 0
+    },
+    "precise_dot_2": {
+     "busy": 12613,
+     "fpu": 120,
+     "insns": 496,
+     "lsu": 3884,
+     "mem": 392,
+     "rhit": 345,
+     "tex": 0
+    },
+    "precise_dot_3": {
+     "busy": 12613,
+     "fpu": 120,
+     "insns": 496,
+     "lsu": 3884,
+     "mem": 392,
+     "rhit": 345,
+     "tex": 0
+    },
+    "precise_dot_mut_0": {
+     "busy": 12613,
+     "fpu": 120,
+     "insns": 496,
+     "lsu": 3884,
+     "mem": 391,
+     "rhit": 345,
+     "tex": 0
+    },
+    "precise_dot_opt_1": {
+     "busy": 5404,
+     "fpu": 120,
+     "insns": 192,
+     "lsu": 1252,
+     "mem": 392,
+     "rhit": 129,
+     "tex": 0
+    },
+    "precise_dot_opt_2": {
+     "busy": 5404,
+     "fpu": 120,
+     "insns": 192,
+     "lsu": 1252,
+     "mem": 392,
+     "rhit": 129,
+     "tex": 0
+    },
+    "precise_dot_opt_3": {
+     "busy": 5404,
+     "fpu": 120,
+     "insns": 192,
+     "lsu": 1252,
+     "mem": 392,
+     "rhit": 129,
+     "tex": 0
+    },
+    "pushscale_1": {
+     "busy": 1623,
+     "fpu": 16,
+     "insns": 76,
+     "lsu": 324,
+     "mem": 56,
+     "rhit": 51,
+     "tex": 0
+    },
+    "pushscale_2": {
+     "busy": 1623,
+     "fpu": 16,
+     "insns": 76,
+     "lsu": 324,
+     "mem": 56,
+     "rhit": 51,
+     "tex": 0
+    },
+    "pushscale_3": {
+     "busy": 1623,
+     "fpu": 16,
+     "insns": 76,
+     "lsu": 324,
+     "mem": 56,
+     "rhit": 51,
+     "tex": 0
+    },
+    "pushscale_mut_0": {
+     "busy": 1691,
+     "fpu": 84,
+     "insns": 76,
+     "lsu": 324,
+     "mem": 56,
+     "rhit": 51,
+     "tex": 0
+    },
+    "pushscale_opt_1": {
+     "busy": 1396,
+     "fpu": 16,
+     "insns": 60,
+     "lsu": 300,
+     "mem": 56,
+     "rhit": 39,
+     "tex": 0
+    },
+    "pushscale_opt_2": {
+     "busy": 1396,
+     "fpu": 16,
+     "insns": 60,
+     "lsu": 300,
+     "mem": 56,
+     "rhit": 39,
+     "tex": 0
+    },
+    "pushscale_opt_3": {
+     "busy": 1396,
+     "fpu": 16,
+     "insns": 60,
+     "lsu": 300,
+     "mem": 56,
+     "rhit": 39,
+     "tex": 0
+    },
+    "sfu_atrig_1": {
+     "busy": 7917,
+     "fpu": 1761,
+     "insns": 240,
+     "lsu": 1036,
+     "mem": 264,
+     "rhit": 168,
+     "tex": 0
+    },
+    "sfu_atrig_2": {
+     "busy": 7917,
+     "fpu": 1761,
+     "insns": 240,
+     "lsu": 1036,
+     "mem": 264,
+     "rhit": 168,
+     "tex": 0
+    },
+    "sfu_atrig_3": {
+     "busy": 7917,
+     "fpu": 1761,
+     "insns": 240,
+     "lsu": 1036,
+     "mem": 264,
+     "rhit": 168,
+     "tex": 0
+    },
+    "sfu_atrig_mut_0": {
+     "busy": 7700,
+     "fpu": 1352,
+     "insns": 240,
+     "lsu": 1228,
+     "mem": 200,
+     "rhit": 168,
+     "tex": 0
+    },
+    "sfu_atrig_opt_1": {
+     "busy": 6036,
+     "fpu": 1761,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 90,
+     "tex": 0
+    },
+    "sfu_atrig_opt_2": {
+     "busy": 6036,
+     "fpu": 1761,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 90,
+     "tex": 0
+    },
+    "sfu_atrig_opt_3": {
+     "busy": 6036,
+     "fpu": 1761,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 90,
+     "tex": 0
+    },
+    "sfu_exp_1": {
+     "busy": 6818,
+     "fpu": 928,
+     "insns": 224,
+     "lsu": 1020,
+     "mem": 264,
+     "rhit": 156,
+     "tex": 0
+    },
+    "sfu_exp_2": {
+     "busy": 6818,
+     "fpu": 928,
+     "insns": 224,
+     "lsu": 1020,
+     "mem": 264,
+     "rhit": 156,
+     "tex": 0
+    },
+    "sfu_exp_3": {
+     "busy": 6818,
+     "fpu": 928,
+     "insns": 224,
+     "lsu": 1020,
+     "mem": 264,
+     "rhit": 156,
+     "tex": 0
+    },
+    "sfu_exp_mut_0": {
+     "busy": 7010,
+     "fpu": 928,
+     "insns": 224,
+     "lsu": 1212,
+     "mem": 200,
+     "rhit": 156,
+     "tex": 0
+    },
+    "sfu_exp_opt_1": {
+     "busy": 5237,
+     "fpu": 928,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 90,
+     "tex": 0
+    },
+    "sfu_exp_opt_2": {
+     "busy": 5237,
+     "fpu": 928,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 90,
+     "tex": 0
+    },
+    "sfu_exp_opt_3": {
+     "busy": 5237,
+     "fpu": 928,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 90,
+     "tex": 0
+    },
+    "sfu_hyper_1": {
+     "busy": 8534,
+     "fpu": 2004,
+     "insns": 224,
+     "lsu": 1020,
+     "mem": 264,
+     "rhit": 156,
+     "tex": 0
+    },
+    "sfu_hyper_2": {
+     "busy": 8534,
+     "fpu": 2004,
+     "insns": 224,
+     "lsu": 1020,
+     "mem": 264,
+     "rhit": 156,
+     "tex": 0
+    },
+    "sfu_hyper_3": {
+     "busy": 8534,
+     "fpu": 2004,
+     "insns": 224,
+     "lsu": 1020,
+     "mem": 264,
+     "rhit": 156,
+     "tex": 0
+    },
+    "sfu_hyper_mut_0": {
+     "busy": 8546,
+     "fpu": 1824,
+     "insns": 224,
+     "lsu": 1212,
+     "mem": 200,
+     "rhit": 156,
+     "tex": 0
+    },
+    "sfu_hyper_opt_1": {
+     "busy": 6953,
+     "fpu": 2004,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 90,
+     "tex": 0
+    },
+    "sfu_hyper_opt_2": {
+     "busy": 6953,
+     "fpu": 2004,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 90,
+     "tex": 0
+    },
+    "sfu_hyper_opt_3": {
+     "busy": 6953,
+     "fpu": 2004,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 90,
+     "tex": 0
+    },
+    "sfu_log_1": {
+     "busy": 7250,
+     "fpu": 1392,
+     "insns": 224,
+     "lsu": 1020,
+     "mem": 264,
+     "rhit": 156,
+     "tex": 0
+    },
+    "sfu_log_2": {
+     "busy": 7250,
+     "fpu": 1392,
+     "insns": 224,
+     "lsu": 1020,
+     "mem": 264,
+     "rhit": 156,
+     "tex": 0
+    },
+    "sfu_log_3": {
+     "busy": 7250,
+     "fpu": 1392,
+     "insns": 224,
+     "lsu": 1020,
+     "mem": 264,
+     "rhit": 156,
+     "tex": 0
+    },
+    "sfu_log_mut_0": {
+     "busy": 7202,
+     "fpu": 1152,
+     "insns": 224,
+     "lsu": 1212,
+     "mem": 200,
+     "rhit": 156,
+     "tex": 0
+    },
+    "sfu_log_opt_1": {
+     "busy": 5669,
+     "fpu": 1392,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 90,
+     "tex": 0
+    },
+    "sfu_log_opt_2": {
+     "busy": 5669,
+     "fpu": 1392,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 90,
+     "tex": 0
+    },
+    "sfu_log_opt_3": {
+     "busy": 5669,
+     "fpu": 1392,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 90,
+     "tex": 0
+    },
+    "sfu_pow_1": {
+     "busy": 10538,
+     "fpu": 2336,
+     "insns": 288,
+     "lsu": 1084,
+     "mem": 264,
+     "rhit": 204,
+     "tex": 0
+    },
+    "sfu_pow_2": {
+     "busy": 10538,
+     "fpu": 2336,
+     "insns": 288,
+     "lsu": 1084,
+     "mem": 264,
+     "rhit": 204,
+     "tex": 0
+    },
+    "sfu_pow_3": {
+     "busy": 10538,
+     "fpu": 2336,
+     "insns": 288,
+     "lsu": 1084,
+     "mem": 264,
+     "rhit": 204,
+     "tex": 0
+    },
+    "sfu_pow_mut_0": {
+     "busy": 10474,
+     "fpu": 2080,
+     "insns": 288,
+     "lsu": 1276,
+     "mem": 200,
+     "rhit": 204,
+     "tex": 0
+    },
+    "sfu_pow_opt_1": {
+     "busy": 7757,
+     "fpu": 2336,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 90,
+     "tex": 0
+    },
+    "sfu_pow_opt_2": {
+     "busy": 7757,
+     "fpu": 2336,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 90,
+     "tex": 0
+    },
+    "sfu_pow_opt_3": {
+     "busy": 7757,
+     "fpu": 2336,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 90,
+     "tex": 0
+    },
+    "sfu_trig_1": {
+     "busy": 8162,
+     "fpu": 1448,
+     "insns": 248,
+     "lsu": 1036,
+     "mem": 264,
+     "rhit": 174,
+     "tex": 0
+    },
+    "sfu_trig_2": {
+     "busy": 8162,
+     "fpu": 1448,
+     "insns": 248,
+     "lsu": 1036,
+     "mem": 264,
+     "rhit": 174,
+     "tex": 0
+    },
+    "sfu_trig_3": {
+     "busy": 8162,
+     "fpu": 1448,
+     "insns": 248,
+     "lsu": 1036,
+     "mem": 264,
+     "rhit": 174,
+     "tex": 0
+    },
+    "sfu_trig_mut_0": {
+     "busy": 8290,
+     "fpu": 1384,
+     "insns": 248,
+     "lsu": 1228,
+     "mem": 200,
+     "rhit": 174,
+     "tex": 0
+    },
+    "sfu_trig_opt_1": {
+     "busy": 6281,
+     "fpu": 1448,
+     "insns": 144,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 96,
+     "tex": 0
+    },
+    "sfu_trig_opt_2": {
+     "busy": 6281,
+     "fpu": 1448,
+     "insns": 144,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 96,
+     "tex": 0
+    },
+    "sfu_trig_opt_3": {
+     "busy": 6281,
+     "fpu": 1448,
+     "insns": 144,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 96,
+     "tex": 0
+    },
+    "shortcircuit_1": {
+     "busy": 3347,
+     "fpu": 0,
+     "insns": 208,
+     "lsu": 464,
+     "mem": 72,
+     "rhit": 132,
+     "tex": 0
+    },
+    "shortcircuit_2": {
+     "busy": 3347,
+     "fpu": 0,
+     "insns": 208,
+     "lsu": 464,
+     "mem": 72,
+     "rhit": 132,
+     "tex": 0
+    },
+    "shortcircuit_3": {
+     "busy": 3347,
+     "fpu": 0,
+     "insns": 208,
+     "lsu": 464,
+     "mem": 72,
+     "rhit": 132,
+     "tex": 0
+    },
+    "shortcircuit_mut_0": {
+     "busy": 2744,
+     "fpu": 0,
+     "insns": 160,
+     "lsu": 448,
+     "mem": 56,
+     "rhit": 105,
+     "tex": 0
+    },
+    "shortcircuit_opt_1": {
+     "busy": 2127,
+     "fpu": 0,
+     "insns": 120,
+     "lsu": 320,
+     "mem": 72,
+     "rhit": 66,
+     "tex": 0
+    },
+    "shortcircuit_opt_2": {
+     "busy": 2127,
+     "fpu": 0,
+     "insns": 120,
+     "lsu": 320,
+     "mem": 72,
+     "rhit": 66,
+     "tex": 0
+    },
+    "shortcircuit_opt_3": {
+     "busy": 2127,
+     "fpu": 0,
+     "insns": 120,
+     "lsu": 320,
+     "mem": 72,
+     "rhit": 66,
+     "tex": 0
+    },
+    "ssbo_cap_1": {
+     "busy": 24373,
+     "fpu": 60,
+     "insns": 1199,
+     "lsu": 5287,
+     "mem": 210,
+     "rhit": 615,
+     "tex": 0
+    },
+    "ssbo_cap_2": {
+     "busy": 24373,
+     "fpu": 60,
+     "insns": 1199,
+     "lsu": 5287,
+     "mem": 210,
+     "rhit": 615,
+     "tex": 0
+    },
+    "ssbo_cap_3": {
+     "busy": 24373,
+     "fpu": 60,
+     "insns": 1199,
+     "lsu": 5287,
+     "mem": 210,
+     "rhit": 615,
+     "tex": 0
+    },
+    "ssbo_rowmajor_1": {
+     "busy": 5077,
+     "fpu": 0,
+     "insns": 274,
+     "lsu": 861,
+     "mem": 51,
+     "rhit": 117,
+     "tex": 0
+    },
+    "ssbo_rowmajor_2": {
+     "busy": 5077,
+     "fpu": 0,
+     "insns": 274,
+     "lsu": 861,
+     "mem": 51,
+     "rhit": 117,
+     "tex": 0
+    },
+    "ssbo_rowmajor_3": {
+     "busy": 5077,
+     "fpu": 0,
+     "insns": 274,
+     "lsu": 861,
+     "mem": 51,
+     "rhit": 117,
+     "tex": 0
+    },
+    "ssbo_rowmajor_mut_0": {
+     "busy": 5077,
+     "fpu": 0,
+     "insns": 274,
+     "lsu": 861,
+     "mem": 50,
+     "rhit": 117,
+     "tex": 0
+    },
+    "ssbo_rowmajor_opt_1": {
+     "busy": 3725,
+     "fpu": 0,
+     "insns": 180,
+     "lsu": 561,
+     "mem": 51,
+     "rhit": 81,
+     "tex": 0
+    },
+    "ssbo_rowmajor_opt_2": {
+     "busy": 3725,
+     "fpu": 0,
+     "insns": 180,
+     "lsu": 561,
+     "mem": 51,
+     "rhit": 81,
+     "tex": 0
+    },
+    "ssbo_rowmajor_opt_3": {
+     "busy": 3725,
+     "fpu": 0,
+     "insns": 180,
+     "lsu": 561,
+     "mem": 51,
+     "rhit": 81,
+     "tex": 0
+    },
+    "ssbo_sarr_1": {
+     "busy": 15111,
+     "fpu": 102,
+     "insns": 517,
+     "lsu": 5023,
+     "mem": 210,
+     "rhit": 163,
+     "tex": 0
+    },
+    "ssbo_sarr_2": {
+     "busy": 15111,
+     "fpu": 102,
+     "insns": 517,
+     "lsu": 5023,
+     "mem": 210,
+     "rhit": 163,
+     "tex": 0
+    },
+    "ssbo_sarr_3": {
+     "busy": 15111,
+     "fpu": 102,
+     "insns": 517,
+     "lsu": 5023,
+     "mem": 210,
+     "rhit": 163,
+     "tex": 0
+    },
+    "switchcase_1": {
+     "busy": 2624,
+     "fpu": 0,
+     "insns": 170,
+     "lsu": 342,
+     "mem": 56,
+     "rhit": 82,
+     "tex": 0
+    },
+    "switchcase_2": {
+     "busy": 2602,
+     "fpu": 0,
+     "insns": 168,
+     "lsu": 338,
+     "mem": 56,
+     "rhit": 78,
+     "tex": 0
+    },
+    "switchcase_3": {
+     "busy": 2566,
+     "fpu": 0,
+     "insns": 165,
+     "lsu": 338,
+     "mem": 56,
+     "rhit": 79,
+     "tex": 0
+    },
+    "switchcase_mut_0": {
+     "busy": 2301,
+     "fpu": 0,
+     "insns": 144,
+     "lsu": 324,
+     "mem": 56,
+     "rhit": 72,
+     "tex": 0
+    },
+    "switchcase_opt_1": {
+     "busy": 1965,
+     "fpu": 0,
+     "insns": 116,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 42,
+     "tex": 0
+    },
+    "switchcase_opt_2": {
+     "busy": 1925,
+     "fpu": 0,
+     "insns": 114,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 38,
+     "tex": 0
+    },
+    "switchcase_opt_3": {
+     "busy": 1910,
+     "fpu": 0,
+     "insns": 112,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 40,
+     "tex": 0
+    },
+    "texarr_1": {
+     "busy": 794,
+     "fpu": 80,
+     "insns": 21,
+     "lsu": 95,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 174
+    },
+    "texarr_2": {
+     "busy": 794,
+     "fpu": 80,
+     "insns": 21,
+     "lsu": 95,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 174
+    },
+    "texarr_3": {
+     "busy": 794,
+     "fpu": 80,
+     "insns": 21,
+     "lsu": 95,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 174
+    },
+    "texarr_mut_0": {
+     "busy": 794,
+     "fpu": 80,
+     "insns": 21,
+     "lsu": 95,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 174
+    },
+    "texarr_opt_1": {
+     "busy": 658,
+     "fpu": 80,
+     "insns": 14,
+     "lsu": 85,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 174
+    },
+    "texarr_opt_2": {
+     "busy": 658,
+     "fpu": 80,
+     "insns": 14,
+     "lsu": 85,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 174
+    },
+    "texarr_opt_3": {
+     "busy": 658,
+     "fpu": 80,
+     "insns": 14,
+     "lsu": 85,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 174
+    },
+    "texbuf_1": {
+     "busy": 898,
+     "fpu": 80,
+     "insns": 28,
+     "lsu": 162,
+     "mem": 48,
+     "rhit": 12,
+     "tex": 179
+    },
+    "texbuf_2": {
+     "busy": 898,
+     "fpu": 80,
+     "insns": 28,
+     "lsu": 162,
+     "mem": 48,
+     "rhit": 12,
+     "tex": 179
+    },
+    "texbuf_3": {
+     "busy": 898,
+     "fpu": 80,
+     "insns": 28,
+     "lsu": 162,
+     "mem": 48,
+     "rhit": 12,
+     "tex": 179
+    },
+    "texbuf_arr_1": {
+     "busy": 2319,
+     "fpu": 328,
+     "insns": 72,
+     "lsu": 342,
+     "mem": 116,
+     "rhit": 48,
+     "tex": 552
+    },
+    "texbuf_arr_2": {
+     "busy": 2319,
+     "fpu": 328,
+     "insns": 72,
+     "lsu": 342,
+     "mem": 116,
+     "rhit": 48,
+     "tex": 552
+    },
+    "texbuf_arr_3": {
+     "busy": 2319,
+     "fpu": 328,
+     "insns": 72,
+     "lsu": 342,
+     "mem": 116,
+     "rhit": 48,
+     "tex": 552
+    },
+    "texbuf_arr_st_1": {
+     "busy": 5526,
+     "fpu": 688,
+     "insns": 192,
+     "lsu": 606,
+     "mem": 180,
+     "rhit": 135,
+     "tex": 1396
+    },
+    "texbuf_arr_st_2": {
+     "busy": 5526,
+     "fpu": 688,
+     "insns": 192,
+     "lsu": 606,
+     "mem": 180,
+     "rhit": 135,
+     "tex": 1396
+    },
+    "texbuf_arr_st_3": {
+     "busy": 5526,
+     "fpu": 688,
+     "insns": 192,
+     "lsu": 606,
+     "mem": 180,
+     "rhit": 135,
+     "tex": 1396
+    },
+    "texbuf_atom_1": {
+     "busy": 899,
+     "fpu": 0,
+     "insns": 34,
+     "lsu": 218,
+     "mem": 56,
+     "rhit": 15,
+     "tex": 98
+    },
+    "texbuf_atom_2": {
+     "busy": 899,
+     "fpu": 0,
+     "insns": 34,
+     "lsu": 218,
+     "mem": 56,
+     "rhit": 15,
+     "tex": 98
+    },
+    "texbuf_atom_3": {
+     "busy": 899,
+     "fpu": 0,
+     "insns": 34,
+     "lsu": 218,
+     "mem": 56,
+     "rhit": 15,
+     "tex": 98
+    },
+    "texbuf_img_1": {
+     "busy": 898,
+     "fpu": 80,
+     "insns": 28,
+     "lsu": 162,
+     "mem": 48,
+     "rhit": 12,
+     "tex": 179
+    },
+    "texbuf_img_2": {
+     "busy": 898,
+     "fpu": 80,
+     "insns": 28,
+     "lsu": 162,
+     "mem": 48,
+     "rhit": 12,
+     "tex": 179
+    },
+    "texbuf_img_3": {
+     "busy": 898,
+     "fpu": 80,
+     "insns": 28,
+     "lsu": 162,
+     "mem": 48,
+     "rhit": 12,
+     "tex": 179
+    },
+    "texbuf_wr_1": {
+     "busy": 1753,
+     "fpu": 0,
+     "insns": 74,
+     "lsu": 230,
+     "mem": 56,
+     "rhit": 34,
+     "tex": 301
+    },
+    "texbuf_wr_2": {
+     "busy": 1753,
+     "fpu": 0,
+     "insns": 74,
+     "lsu": 230,
+     "mem": 56,
+     "rhit": 34,
+     "tex": 301
+    },
+    "texbuf_wr_3": {
+     "busy": 1753,
+     "fpu": 0,
+     "insns": 74,
+     "lsu": 230,
+     "mem": 56,
+     "rhit": 34,
+     "tex": 301
+    },
+    "texfetch_1": {
+     "busy": 735,
+     "fpu": 80,
+     "insns": 20,
+     "lsu": 93,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 140
+    },
+    "texfetch_2": {
+     "busy": 735,
+     "fpu": 80,
+     "insns": 20,
+     "lsu": 93,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 140
+    },
+    "texfetch_3": {
+     "busy": 735,
+     "fpu": 80,
+     "insns": 20,
+     "lsu": 93,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 140
+    },
+    "texfetch_mip_1": {
+     "busy": 1457,
+     "fpu": 94,
+     "insns": 46,
+     "lsu": 137,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 248
+    },
+    "texfetch_mip_2": {
+     "busy": 1457,
+     "fpu": 94,
+     "insns": 46,
+     "lsu": 137,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 248
+    },
+    "texfetch_mip_3": {
+     "busy": 1457,
+     "fpu": 94,
+     "insns": 46,
+     "lsu": 137,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 248
+    },
+    "texfetch_mip_mut_0": {
+     "busy": 1474,
+     "fpu": 111,
+     "insns": 46,
+     "lsu": 137,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 248
+    },
+    "texfetch_mip_opt_1": {
+     "busy": 1085,
+     "fpu": 94,
+     "insns": 29,
+     "lsu": 101,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 248
+    },
+    "texfetch_mip_opt_2": {
+     "busy": 1085,
+     "fpu": 94,
+     "insns": 29,
+     "lsu": 101,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 248
+    },
+    "texfetch_mip_opt_3": {
+     "busy": 1085,
+     "fpu": 94,
+     "insns": 29,
+     "lsu": 101,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 248
+    },
+    "texfetch_mut_0": {
+     "busy": 735,
+     "fpu": 80,
+     "insns": 20,
+     "lsu": 93,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 140
+    },
+    "texfetch_opt_1": {
+     "busy": 639,
+     "fpu": 80,
+     "insns": 15,
+     "lsu": 85,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 140
+    },
+    "texfetch_opt_2": {
+     "busy": 639,
+     "fpu": 80,
+     "insns": 15,
+     "lsu": 85,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 140
+    },
+    "texfetch_opt_3": {
+     "busy": 639,
+     "fpu": 80,
+     "insns": 15,
+     "lsu": 85,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 140
+    },
+    "texfetch_rgba8ui_1": {
+     "busy": 1069,
+     "fpu": 68,
+     "insns": 36,
+     "lsu": 85,
+     "mem": 32,
+     "rhit": 0,
+     "tex": 132
+    },
+    "texfetch_rgba8ui_2": {
+     "busy": 1069,
+     "fpu": 68,
+     "insns": 36,
+     "lsu": 85,
+     "mem": 32,
+     "rhit": 0,
+     "tex": 132
+    },
+    "texfetch_rgba8ui_3": {
+     "busy": 1069,
+     "fpu": 68,
+     "insns": 36,
+     "lsu": 85,
+     "mem": 32,
+     "rhit": 0,
+     "tex": 132
+    },
+    "texfetch_rgba8ui_mut_0": {
+     "busy": 1069,
+     "fpu": 68,
+     "insns": 36,
+     "lsu": 85,
+     "mem": 32,
+     "rhit": 0,
+     "tex": 132
+    },
+    "texfetch_rgba8ui_opt_1": {
+     "busy": 803,
+     "fpu": 68,
+     "insns": 25,
+     "lsu": 61,
+     "mem": 32,
+     "rhit": 0,
+     "tex": 132
+    },
+    "texfetch_rgba8ui_opt_2": {
+     "busy": 803,
+     "fpu": 68,
+     "insns": 25,
+     "lsu": 61,
+     "mem": 32,
+     "rhit": 0,
+     "tex": 132
+    },
+    "texfetch_rgba8ui_opt_3": {
+     "busy": 803,
+     "fpu": 68,
+     "insns": 25,
+     "lsu": 61,
+     "mem": 32,
+     "rhit": 0,
+     "tex": 132
+    },
+    "texlod_lin_1": {
+     "busy": 1344,
+     "fpu": 300,
+     "insns": 29,
+     "lsu": 101,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 349
+    },
+    "texlod_lin_2": {
+     "busy": 1328,
+     "fpu": 300,
+     "insns": 29,
+     "lsu": 101,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 333
+    },
+    "texlod_lin_3": {
+     "busy": 1344,
+     "fpu": 300,
+     "insns": 29,
+     "lsu": 101,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 349
+    },
+    "texlod_lin_mut_0": {
+     "busy": 1361,
+     "fpu": 317,
+     "insns": 29,
+     "lsu": 101,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 349
+    },
+    "texlod_lin_opt_1": {
+     "busy": 1126,
+     "fpu": 300,
+     "insns": 18,
+     "lsu": 85,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 349
+    },
+    "texlod_lin_opt_2": {
+     "busy": 1110,
+     "fpu": 300,
+     "insns": 18,
+     "lsu": 85,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 333
+    },
+    "texlod_lin_opt_3": {
+     "busy": 1126,
+     "fpu": 300,
+     "insns": 18,
+     "lsu": 85,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 349
+    },
+    "texlod_mip_1": {
+     "busy": 1705,
+     "fpu": 304,
+     "insns": 37,
+     "lsu": 107,
+     "mem": 64,
+     "rhit": 0,
+     "tex": 542
+    },
+    "texlod_mip_2": {
+     "busy": 1705,
+     "fpu": 304,
+     "insns": 37,
+     "lsu": 107,
+     "mem": 64,
+     "rhit": 0,
+     "tex": 542
+    },
+    "texlod_mip_3": {
+     "busy": 1705,
+     "fpu": 304,
+     "insns": 37,
+     "lsu": 107,
+     "mem": 64,
+     "rhit": 0,
+     "tex": 542
+    },
+    "texlod_mip_mut_0": {
+     "busy": 1722,
+     "fpu": 321,
+     "insns": 37,
+     "lsu": 107,
+     "mem": 64,
+     "rhit": 0,
+     "tex": 542
+    },
+    "texlod_mip_opt_1": {
+     "busy": 1363,
+     "fpu": 302,
+     "insns": 20,
+     "lsu": 85,
+     "mem": 64,
+     "rhit": 0,
+     "tex": 542
+    },
+    "texlod_mip_opt_2": {
+     "busy": 1363,
+     "fpu": 302,
+     "insns": 20,
+     "lsu": 85,
+     "mem": 64,
+     "rhit": 0,
+     "tex": 542
+    },
+    "texlod_mip_opt_3": {
+     "busy": 1363,
+     "fpu": 302,
+     "insns": 20,
+     "lsu": 85,
+     "mem": 64,
+     "rhit": 0,
+     "tex": 542
+    },
+    "texquery_1": {
+     "busy": 1142,
+     "fpu": 0,
+     "insns": 40,
+     "lsu": 139,
+     "mem": 28,
+     "rhit": 0,
+     "tex": 141
+    },
+    "texquery_2": {
+     "busy": 1142,
+     "fpu": 0,
+     "insns": 40,
+     "lsu": 139,
+     "mem": 28,
+     "rhit": 0,
+     "tex": 141
+    },
+    "texquery_3": {
+     "busy": 1142,
+     "fpu": 0,
+     "insns": 40,
+     "lsu": 139,
+     "mem": 28,
+     "rhit": 0,
+     "tex": 141
+    },
+    "texquery_mut_0": {
+     "busy": 1142,
+     "fpu": 0,
+     "insns": 40,
+     "lsu": 139,
+     "mem": 28,
+     "rhit": 0,
+     "tex": 141
+    },
+    "texquery_opt_1": {
+     "busy": 760,
+     "fpu": 0,
+     "insns": 23,
+     "lsu": 111,
+     "mem": 28,
+     "rhit": 0,
+     "tex": 141
+    },
+    "texquery_opt_2": {
+     "busy": 760,
+     "fpu": 0,
+     "insns": 23,
+     "lsu": 111,
+     "mem": 28,
+     "rhit": 0,
+     "tex": 141
+    },
+    "texquery_opt_3": {
+     "busy": 760,
+     "fpu": 0,
+     "insns": 23,
+     "lsu": 111,
+     "mem": 28,
+     "rhit": 0,
+     "tex": 141
+    },
+    "texsrgb_1": {
+     "busy": 1245,
+     "fpu": 162,
+     "insns": 33,
+     "lsu": 139,
+     "mem": 52,
+     "rhit": 0,
+     "tex": 253
+    },
+    "texsrgb_2": {
+     "busy": 1245,
+     "fpu": 162,
+     "insns": 33,
+     "lsu": 139,
+     "mem": 52,
+     "rhit": 0,
+     "tex": 253
+    },
+    "texsrgb_3": {
+     "busy": 1245,
+     "fpu": 162,
+     "insns": 33,
+     "lsu": 139,
+     "mem": 52,
+     "rhit": 0,
+     "tex": 253
+    },
+    "texsrgb_mut_0": {
+     "busy": 1245,
+     "fpu": 162,
+     "insns": 33,
+     "lsu": 139,
+     "mem": 52,
+     "rhit": 0,
+     "tex": 253
+    },
+    "texsrgb_opt_1": {
+     "busy": 920,
+     "fpu": 162,
+     "insns": 18,
+     "lsu": 103,
+     "mem": 52,
+     "rhit": 0,
+     "tex": 253
+    },
+    "texsrgb_opt_2": {
+     "busy": 920,
+     "fpu": 162,
+     "insns": 18,
+     "lsu": 103,
+     "mem": 52,
+     "rhit": 0,
+     "tex": 253
+    },
+    "texsrgb_opt_3": {
+     "busy": 920,
+     "fpu": 162,
+     "insns": 18,
+     "lsu": 103,
+     "mem": 52,
+     "rhit": 0,
+     "tex": 253
+    },
+    "vec4arith_1": {
+     "busy": 3750,
+     "fpu": 352,
+     "insns": 160,
+     "lsu": 1024,
+     "mem": 200,
+     "rhit": 114,
+     "tex": 0
+    },
+    "vec4arith_2": {
+     "busy": 3750,
+     "fpu": 352,
+     "insns": 160,
+     "lsu": 1024,
+     "mem": 200,
+     "rhit": 114,
+     "tex": 0
+    },
+    "vec4arith_3": {
+     "busy": 3750,
+     "fpu": 352,
+     "insns": 160,
+     "lsu": 1024,
+     "mem": 200,
+     "rhit": 114,
+     "tex": 0
+    },
+    "vec4arith_mut_0": {
+     "busy": 3926,
+     "fpu": 336,
+     "insns": 160,
+     "lsu": 1216,
+     "mem": 136,
+     "rhit": 114,
+     "tex": 0
+    },
+    "vec4arith_opt_1": {
+     "busy": 2331,
+     "fpu": 352,
+     "insns": 80,
+     "lsu": 640,
+     "mem": 200,
+     "rhit": 54,
+     "tex": 0
+    },
+    "vec4arith_opt_2": {
+     "busy": 2331,
+     "fpu": 352,
+     "insns": 80,
+     "lsu": 640,
+     "mem": 200,
+     "rhit": 54,
+     "tex": 0
+    },
+    "vec4arith_opt_3": {
+     "busy": 2331,
+     "fpu": 352,
+     "insns": 80,
+     "lsu": 640,
+     "mem": 200,
+     "rhit": 54,
+     "tex": 0
+    },
+    "vs_passthru_1": {
+     "busy": 596,
+     "fpu": 2,
+     "insns": 18,
+     "lsu": 192,
+     "mem": 64,
+     "rhit": 0,
+     "tex": 0
+    },
+    "vs_texlod_1": {
+     "busy": 915,
+     "fpu": 288,
+     "insns": 13,
+     "lsu": 162,
+     "mem": 60,
+     "rhit": 0,
+     "tex": 178
+    },
+    "zerodim_0": {
+     "busy": 1,
+     "fpu": 0,
+     "insns": 0,
+     "lsu": 0,
+     "mem": 0,
+     "rhit": 0,
+     "tex": 0
+    }
+   }
+  },
+  "shwave-rc0": {
+   "derived": {
+    "cycles_per_insn": 26.09,
+    "perf_total": {
+     "busy": 2912707,
+     "fpu": 165236,
+     "insns": 111622,
+     "lsu": 432715,
+     "mem": 63519,
+     "rhit": 0,
+     "tex": 46194
+    }
+   },
+   "pass": {
+    "bench": "tb_g6lc_apu_shwave",
+    "cases": 548,
+    "checks": 100832,
+    "cycles": 4218442,
+    "maxulp": 1,
+    "oum": 0,
+    "ouw": 14856,
+    "ulp1": 52,
+    "ulp2": 0
+   },
+   "perf": {
+    "agg_arr_1": {
+     "busy": 5278,
+     "fpu": 0,
+     "insns": 144,
+     "lsu": 1672,
+     "mem": 392,
+     "rhit": 0,
+     "tex": 0
+    },
+    "agg_arr_2": {
+     "busy": 5278,
+     "fpu": 0,
+     "insns": 144,
+     "lsu": 1672,
+     "mem": 392,
+     "rhit": 0,
+     "tex": 0
+    },
+    "agg_arr_3": {
+     "busy": 5278,
+     "fpu": 0,
+     "insns": 144,
+     "lsu": 1672,
+     "mem": 392,
+     "rhit": 0,
+     "tex": 0
+    },
+    "agg_con_1": {
+     "busy": 3822,
+     "fpu": 0,
+     "insns": 84,
+     "lsu": 1436,
+     "mem": 216,
+     "rhit": 0,
+     "tex": 0
+    },
+    "agg_con_2": {
+     "busy": 3822,
+     "fpu": 0,
+     "insns": 84,
+     "lsu": 1436,
+     "mem": 216,
+     "rhit": 0,
+     "tex": 0
+    },
+    "agg_con_3": {
+     "busy": 3822,
+     "fpu": 0,
+     "insns": 84,
+     "lsu": 1436,
+     "mem": 216,
+     "rhit": 0,
+     "tex": 0
+    },
+    "agg_ins_1": {
+     "busy": 2284,
+     "fpu": 0,
+     "insns": 40,
+     "lsu": 1300,
+     "mem": 200,
+     "rhit": 0,
+     "tex": 0
+    },
+    "agg_ins_2": {
+     "busy": 2284,
+     "fpu": 0,
+     "insns": 40,
+     "lsu": 1300,
+     "mem": 200,
+     "rhit": 0,
+     "tex": 0
+    },
+    "agg_ins_3": {
+     "busy": 2284,
+     "fpu": 0,
+     "insns": 40,
+     "lsu": 1300,
+     "mem": 200,
+     "rhit": 0,
+     "tex": 0
+    },
+    "agg_local_1": {
+     "busy": 13778,
+     "fpu": 0,
+     "insns": 232,
+     "lsu": 7536,
+     "mem": 808,
+     "rhit": 0,
+     "tex": 0
+    },
+    "agg_local_2": {
+     "busy": 13778,
+     "fpu": 0,
+     "insns": 232,
+     "lsu": 7536,
+     "mem": 808,
+     "rhit": 0,
+     "tex": 0
+    },
+    "agg_local_3": {
+     "busy": 13778,
+     "fpu": 0,
+     "insns": 232,
+     "lsu": 7536,
+     "mem": 808,
+     "rhit": 0,
+     "tex": 0
+    },
+    "agg_sel_1": {
+     "busy": 4598,
+     "fpu": 0,
+     "insns": 100,
+     "lsu": 2612,
+     "mem": 392,
+     "rhit": 0,
+     "tex": 0
+    },
+    "agg_sel_2": {
+     "busy": 4598,
+     "fpu": 0,
+     "insns": 100,
+     "lsu": 2612,
+     "mem": 392,
+     "rhit": 0,
+     "tex": 0
+    },
+    "agg_sel_3": {
+     "busy": 4598,
+     "fpu": 0,
+     "insns": 100,
+     "lsu": 2612,
+     "mem": 392,
+     "rhit": 0,
+     "tex": 0
+    },
+    "agg_struct_1": {
+     "busy": 2978,
+     "fpu": 0,
+     "insns": 52,
+     "lsu": 1852,
+     "mem": 392,
+     "rhit": 0,
+     "tex": 0
+    },
+    "agg_struct_2": {
+     "busy": 2978,
+     "fpu": 0,
+     "insns": 52,
+     "lsu": 1852,
+     "mem": 392,
+     "rhit": 0,
+     "tex": 0
+    },
+    "agg_struct_3": {
+     "busy": 2978,
+     "fpu": 0,
+     "insns": 52,
+     "lsu": 1852,
+     "mem": 392,
+     "rhit": 0,
+     "tex": 0
+    },
+    "arrlen_1": {
+     "busy": 3270,
+     "fpu": 132,
+     "insns": 128,
+     "lsu": 388,
+     "mem": 72,
+     "rhit": 0,
+     "tex": 0
+    },
+    "arrlen_2": {
+     "busy": 3270,
+     "fpu": 132,
+     "insns": 128,
+     "lsu": 388,
+     "mem": 72,
+     "rhit": 0,
+     "tex": 0
+    },
+    "arrlen_3": {
+     "busy": 3270,
+     "fpu": 132,
+     "insns": 128,
+     "lsu": 388,
+     "mem": 72,
+     "rhit": 0,
+     "tex": 0
+    },
+    "arrlen_mut_0": {
+     "busy": 3270,
+     "fpu": 132,
+     "insns": 128,
+     "lsu": 388,
+     "mem": 72,
+     "rhit": 0,
+     "tex": 0
+    },
+    "arrlen_opt_1": {
+     "busy": 2234,
+     "fpu": 132,
+     "insns": 80,
+     "lsu": 324,
+     "mem": 72,
+     "rhit": 0,
+     "tex": 0
+    },
+    "arrlen_opt_2": {
+     "busy": 2234,
+     "fpu": 132,
+     "insns": 80,
+     "lsu": 324,
+     "mem": 72,
+     "rhit": 0,
+     "tex": 0
+    },
+    "arrlen_opt_3": {
+     "busy": 2234,
+     "fpu": 132,
+     "insns": 80,
+     "lsu": 324,
+     "mem": 72,
+     "rhit": 0,
+     "tex": 0
+    },
+    "arroob_1": {
+     "busy": 772,
+     "fpu": 0,
+     "insns": 26,
+     "lsu": 192,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 0
+    },
+    "arroob_2": {
+     "busy": 772,
+     "fpu": 0,
+     "insns": 26,
+     "lsu": 192,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 0
+    },
+    "arroob_3": {
+     "busy": 772,
+     "fpu": 0,
+     "insns": 26,
+     "lsu": 192,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 0
+    },
+    "arroob_mut_0": {
+     "busy": 772,
+     "fpu": 0,
+     "insns": 26,
+     "lsu": 192,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 0
+    },
+    "arroob_opt_1": {
+     "busy": 618,
+     "fpu": 0,
+     "insns": 18,
+     "lsu": 180,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 0
+    },
+    "arroob_opt_2": {
+     "busy": 618,
+     "fpu": 0,
+     "insns": 18,
+     "lsu": 180,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 0
+    },
+    "arroob_opt_3": {
+     "busy": 618,
+     "fpu": 0,
+     "insns": 18,
+     "lsu": 180,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 0
+    },
+    "atomic_cas_1": {
+     "busy": 4727,
+     "fpu": 0,
+     "insns": 191,
+     "lsu": 828,
+     "mem": 192,
+     "rhit": 0,
+     "tex": 0
+    },
+    "atomic_cas_2": {
+     "busy": 4727,
+     "fpu": 0,
+     "insns": 191,
+     "lsu": 828,
+     "mem": 192,
+     "rhit": 0,
+     "tex": 0
+    },
+    "atomic_cas_3": {
+     "busy": 4727,
+     "fpu": 0,
+     "insns": 191,
+     "lsu": 828,
+     "mem": 192,
+     "rhit": 0,
+     "tex": 0
+    },
+    "atomic_cas_mut_0": {
+     "busy": 4727,
+     "fpu": 0,
+     "insns": 191,
+     "lsu": 828,
+     "mem": 192,
+     "rhit": 0,
+     "tex": 0
+    },
+    "atomic_frag_1": {
+     "busy": 2000,
+     "fpu": 12,
+     "insns": 72,
+     "lsu": 502,
+     "mem": 152,
+     "rhit": 0,
+     "tex": 0
+    },
+    "atomic_hist_1": {
+     "busy": 10272,
+     "fpu": 0,
+     "insns": 400,
+     "lsu": 2236,
+     "mem": 492,
+     "rhit": 0,
+     "tex": 0
+    },
+    "atomic_hist_2": {
+     "busy": 10272,
+     "fpu": 0,
+     "insns": 400,
+     "lsu": 2236,
+     "mem": 492,
+     "rhit": 0,
+     "tex": 0
+    },
+    "atomic_hist_3": {
+     "busy": 10272,
+     "fpu": 0,
+     "insns": 400,
+     "lsu": 2236,
+     "mem": 492,
+     "rhit": 0,
+     "tex": 0
+    },
+    "barrier_prefix_1": {
+     "busy": 17804,
+     "fpu": 0,
+     "insns": 928,
+     "lsu": 1839,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "barrier_prefix_2": {
+     "busy": 17804,
+     "fpu": 0,
+     "insns": 928,
+     "lsu": 1839,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "barrier_prefix_3": {
+     "busy": 17804,
+     "fpu": 0,
+     "insns": 928,
+     "lsu": 1839,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "barrier_prefix_mut_0": {
+     "busy": 17804,
+     "fpu": 0,
+     "insns": 928,
+     "lsu": 1839,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "barrier_prefix_opt_1": {
+     "busy": 11012,
+     "fpu": 0,
+     "insns": 579,
+     "lsu": 1269,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "barrier_prefix_opt_2": {
+     "busy": 11012,
+     "fpu": 0,
+     "insns": 579,
+     "lsu": 1269,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "barrier_prefix_opt_3": {
+     "busy": 11012,
+     "fpu": 0,
+     "insns": 579,
+     "lsu": 1269,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "barrier_reduce_1": {
+     "busy": 25378,
+     "fpu": 0,
+     "insns": 1450,
+     "lsu": 1845,
+     "mem": 105,
+     "rhit": 0,
+     "tex": 0
+    },
+    "barrier_reduce_2": {
+     "busy": 25378,
+     "fpu": 0,
+     "insns": 1450,
+     "lsu": 1845,
+     "mem": 105,
+     "rhit": 0,
+     "tex": 0
+    },
+    "barrier_reduce_3": {
+     "busy": 25378,
+     "fpu": 0,
+     "insns": 1450,
+     "lsu": 1845,
+     "mem": 105,
+     "rhit": 0,
+     "tex": 0
+    },
+    "barrier_reduce_mut_0": {
+     "busy": 25378,
+     "fpu": 0,
+     "insns": 1450,
+     "lsu": 1845,
+     "mem": 105,
+     "rhit": 0,
+     "tex": 0
+    },
+    "barrier_reduce_opt_1": {
+     "busy": 17498,
+     "fpu": 0,
+     "insns": 1006,
+     "lsu": 1157,
+     "mem": 105,
+     "rhit": 0,
+     "tex": 0
+    },
+    "barrier_reduce_opt_2": {
+     "busy": 17498,
+     "fpu": 0,
+     "insns": 1006,
+     "lsu": 1157,
+     "mem": 105,
+     "rhit": 0,
+     "tex": 0
+    },
+    "barrier_reduce_opt_3": {
+     "busy": 17498,
+     "fpu": 0,
+     "insns": 1006,
+     "lsu": 1157,
+     "mem": 105,
+     "rhit": 0,
+     "tex": 0
+    },
+    "bitops_1": {
+     "busy": 4947,
+     "fpu": 40,
+     "insns": 203,
+     "lsu": 540,
+     "mem": 112,
+     "rhit": 0,
+     "tex": 0
+    },
+    "bitops_2": {
+     "busy": 4947,
+     "fpu": 40,
+     "insns": 203,
+     "lsu": 540,
+     "mem": 112,
+     "rhit": 0,
+     "tex": 0
+    },
+    "bitops_3": {
+     "busy": 4947,
+     "fpu": 40,
+     "insns": 203,
+     "lsu": 540,
+     "mem": 112,
+     "rhit": 0,
+     "tex": 0
+    },
+    "bitops_mut_0": {
+     "busy": 4951,
+     "fpu": 40,
+     "insns": 203,
+     "lsu": 544,
+     "mem": 108,
+     "rhit": 0,
+     "tex": 0
+    },
+    "bufcopy_1": {
+     "busy": 1390,
+     "fpu": 0,
+     "insns": 52,
+     "lsu": 260,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "bufcopy_2": {
+     "busy": 1390,
+     "fpu": 0,
+     "insns": 52,
+     "lsu": 260,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "bufcopy_3": {
+     "busy": 1390,
+     "fpu": 0,
+     "insns": 52,
+     "lsu": 260,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "bufcopy_mut_0": {
+     "busy": 1378,
+     "fpu": 0,
+     "insns": 52,
+     "lsu": 248,
+     "mem": 44,
+     "rhit": 0,
+     "tex": 0
+    },
+    "bufcopy_opt_1": {
+     "busy": 1082,
+     "fpu": 0,
+     "insns": 36,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "bufcopy_opt_2": {
+     "busy": 1082,
+     "fpu": 0,
+     "insns": 36,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "bufcopy_opt_3": {
+     "busy": 1082,
+     "fpu": 0,
+     "insns": 36,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "bufscale_1": {
+     "busy": 1482,
+     "fpu": 8,
+     "insns": 56,
+     "lsu": 260,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "bufscale_2": {
+     "busy": 1482,
+     "fpu": 8,
+     "insns": 56,
+     "lsu": 260,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "bufscale_3": {
+     "busy": 1482,
+     "fpu": 8,
+     "insns": 56,
+     "lsu": 260,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "bufscale_mut_0": {
+     "busy": 1550,
+     "fpu": 76,
+     "insns": 56,
+     "lsu": 260,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "bufscale_opt_1": {
+     "busy": 1174,
+     "fpu": 8,
+     "insns": 40,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "bufscale_opt_2": {
+     "busy": 1174,
+     "fpu": 8,
+     "insns": 40,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "bufscale_opt_3": {
+     "busy": 1174,
+     "fpu": 8,
+     "insns": 40,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "builtin_gid_1": {
+     "busy": 1144,
+     "fpu": 0,
+     "insns": 44,
+     "lsu": 174,
+     "mem": 36,
+     "rhit": 0,
+     "tex": 0
+    },
+    "builtin_gid_2": {
+     "busy": 1144,
+     "fpu": 0,
+     "insns": 44,
+     "lsu": 174,
+     "mem": 36,
+     "rhit": 0,
+     "tex": 0
+    },
+    "builtin_gid_3": {
+     "busy": 1144,
+     "fpu": 0,
+     "insns": 44,
+     "lsu": 174,
+     "mem": 36,
+     "rhit": 0,
+     "tex": 0
+    },
+    "builtin_gid_mut_0": {
+     "busy": 1144,
+     "fpu": 0,
+     "insns": 44,
+     "lsu": 174,
+     "mem": 36,
+     "rhit": 0,
+     "tex": 0
+    },
+    "builtin_gid_opt_1": {
+     "busy": 916,
+     "fpu": 0,
+     "insns": 36,
+     "lsu": 142,
+     "mem": 36,
+     "rhit": 0,
+     "tex": 0
+    },
+    "builtin_gid_opt_2": {
+     "busy": 916,
+     "fpu": 0,
+     "insns": 36,
+     "lsu": 142,
+     "mem": 36,
+     "rhit": 0,
+     "tex": 0
+    },
+    "builtin_gid_opt_3": {
+     "busy": 916,
+     "fpu": 0,
+     "insns": 36,
+     "lsu": 142,
+     "mem": 36,
+     "rhit": 0,
+     "tex": 0
+    },
+    "builtin_lid_1": {
+     "busy": 7992,
+     "fpu": 0,
+     "insns": 324,
+     "lsu": 934,
+     "mem": 100,
+     "rhit": 0,
+     "tex": 0
+    },
+    "builtin_lid_2": {
+     "busy": 7992,
+     "fpu": 0,
+     "insns": 324,
+     "lsu": 934,
+     "mem": 100,
+     "rhit": 0,
+     "tex": 0
+    },
+    "builtin_lid_3": {
+     "busy": 7992,
+     "fpu": 0,
+     "insns": 324,
+     "lsu": 934,
+     "mem": 100,
+     "rhit": 0,
+     "tex": 0
+    },
+    "builtin_lid_mut_0": {
+     "busy": 7992,
+     "fpu": 0,
+     "insns": 324,
+     "lsu": 934,
+     "mem": 77,
+     "rhit": 0,
+     "tex": 0
+    },
+    "builtin_lid_opt_1": {
+     "busy": 7296,
+     "fpu": 0,
+     "insns": 288,
+     "lsu": 886,
+     "mem": 100,
+     "rhit": 0,
+     "tex": 0
+    },
+    "builtin_lid_opt_2": {
+     "busy": 7296,
+     "fpu": 0,
+     "insns": 288,
+     "lsu": 886,
+     "mem": 100,
+     "rhit": 0,
+     "tex": 0
+    },
+    "builtin_lid_opt_3": {
+     "busy": 7296,
+     "fpu": 0,
+     "insns": 288,
+     "lsu": 886,
+     "mem": 100,
+     "rhit": 0,
+     "tex": 0
+    },
+    "builtin_lindex_1": {
+     "busy": 4212,
+     "fpu": 0,
+     "insns": 176,
+     "lsu": 578,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "builtin_lindex_2": {
+     "busy": 4212,
+     "fpu": 0,
+     "insns": 176,
+     "lsu": 578,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "builtin_lindex_3": {
+     "busy": 4212,
+     "fpu": 0,
+     "insns": 176,
+     "lsu": 578,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "builtin_lindex_mut_0": {
+     "busy": 4212,
+     "fpu": 0,
+     "insns": 176,
+     "lsu": 578,
+     "mem": 36,
+     "rhit": 0,
+     "tex": 0
+    },
+    "builtin_lindex_opt_1": {
+     "busy": 3396,
+     "fpu": 0,
+     "insns": 136,
+     "lsu": 466,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "builtin_lindex_opt_2": {
+     "busy": 3396,
+     "fpu": 0,
+     "insns": 136,
+     "lsu": 466,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "builtin_lindex_opt_3": {
+     "busy": 3396,
+     "fpu": 0,
+     "insns": 136,
+     "lsu": 466,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cl_arr_1": {
+     "busy": 5778,
+     "fpu": 0,
+     "insns": 32,
+     "lsu": 5068,
+     "mem": 776,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cl_arr_2": {
+     "busy": 5778,
+     "fpu": 0,
+     "insns": 32,
+     "lsu": 5068,
+     "mem": 776,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cl_arr_3": {
+     "busy": 5778,
+     "fpu": 0,
+     "insns": 32,
+     "lsu": 5068,
+     "mem": 776,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cl_mix_1": {
+     "busy": 3070,
+     "fpu": 0,
+     "insns": 24,
+     "lsu": 2640,
+     "mem": 468,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cl_mix_2": {
+     "busy": 3070,
+     "fpu": 0,
+     "insns": 24,
+     "lsu": 2640,
+     "mem": 468,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cl_mix_3": {
+     "busy": 3070,
+     "fpu": 0,
+     "insns": 24,
+     "lsu": 2640,
+     "mem": 468,
+     "rhit": 0,
+     "tex": 0
+    },
+    "compare_1": {
+     "busy": 11918,
+     "fpu": 200,
+     "insns": 488,
+     "lsu": 984,
+     "mem": 168,
+     "rhit": 0,
+     "tex": 0
+    },
+    "compare_2": {
+     "busy": 11918,
+     "fpu": 200,
+     "insns": 488,
+     "lsu": 984,
+     "mem": 168,
+     "rhit": 0,
+     "tex": 0
+    },
+    "compare_3": {
+     "busy": 11918,
+     "fpu": 200,
+     "insns": 488,
+     "lsu": 984,
+     "mem": 168,
+     "rhit": 0,
+     "tex": 0
+    },
+    "compare_mut_0": {
+     "busy": 12110,
+     "fpu": 200,
+     "insns": 488,
+     "lsu": 1176,
+     "mem": 104,
+     "rhit": 0,
+     "tex": 0
+    },
+    "compare_opt_1": {
+     "busy": 6374,
+     "fpu": 192,
+     "insns": 244,
+     "lsu": 544,
+     "mem": 168,
+     "rhit": 0,
+     "tex": 0
+    },
+    "compare_opt_2": {
+     "busy": 6374,
+     "fpu": 192,
+     "insns": 244,
+     "lsu": 544,
+     "mem": 168,
+     "rhit": 0,
+     "tex": 0
+    },
+    "compare_opt_3": {
+     "busy": 6374,
+     "fpu": 192,
+     "insns": 244,
+     "lsu": 544,
+     "mem": 168,
+     "rhit": 0,
+     "tex": 0
+    },
+    "composite_1": {
+     "busy": 6782,
+     "fpu": 32,
+     "insns": 260,
+     "lsu": 960,
+     "mem": 168,
+     "rhit": 0,
+     "tex": 0
+    },
+    "composite_2": {
+     "busy": 6782,
+     "fpu": 32,
+     "insns": 260,
+     "lsu": 960,
+     "mem": 168,
+     "rhit": 0,
+     "tex": 0
+    },
+    "composite_3": {
+     "busy": 6782,
+     "fpu": 32,
+     "insns": 260,
+     "lsu": 960,
+     "mem": 168,
+     "rhit": 0,
+     "tex": 0
+    },
+    "composite_mut_0": {
+     "busy": 6850,
+     "fpu": 100,
+     "insns": 260,
+     "lsu": 960,
+     "mem": 168,
+     "rhit": 0,
+     "tex": 0
+    },
+    "composite_opt_1": {
+     "busy": 1810,
+     "fpu": 32,
+     "insns": 64,
+     "lsu": 348,
+     "mem": 104,
+     "rhit": 0,
+     "tex": 0
+    },
+    "composite_opt_2": {
+     "busy": 1810,
+     "fpu": 32,
+     "insns": 64,
+     "lsu": 348,
+     "mem": 104,
+     "rhit": 0,
+     "tex": 0
+    },
+    "composite_opt_3": {
+     "busy": 1810,
+     "fpu": 32,
+     "insns": 64,
+     "lsu": 348,
+     "mem": 104,
+     "rhit": 0,
+     "tex": 0
+    },
+    "copylogical_1": {
+     "busy": 2506,
+     "fpu": 8,
+     "insns": 88,
+     "lsu": 540,
+     "mem": 72,
+     "rhit": 0,
+     "tex": 0
+    },
+    "copylogical_2": {
+     "busy": 2506,
+     "fpu": 8,
+     "insns": 88,
+     "lsu": 540,
+     "mem": 72,
+     "rhit": 0,
+     "tex": 0
+    },
+    "copylogical_3": {
+     "busy": 2506,
+     "fpu": 8,
+     "insns": 88,
+     "lsu": 540,
+     "mem": 72,
+     "rhit": 0,
+     "tex": 0
+    },
+    "copylogical_mut_0": {
+     "busy": 2522,
+     "fpu": 8,
+     "insns": 88,
+     "lsu": 556,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_arrlensb_1": {
+     "busy": 484,
+     "fpu": 35,
+     "insns": 15,
+     "lsu": 113,
+     "mem": 14,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_arrlensb_2": {
+     "busy": 484,
+     "fpu": 35,
+     "insns": 15,
+     "lsu": 113,
+     "mem": 14,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_arrlensb_3": {
+     "busy": 484,
+     "fpu": 35,
+     "insns": 15,
+     "lsu": 113,
+     "mem": 14,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_b2b_1": {
+     "busy": 34090,
+     "fpu": 67,
+     "insns": 1721,
+     "lsu": 2535,
+     "mem": 136,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_b2b_2": {
+     "busy": 34090,
+     "fpu": 67,
+     "insns": 1721,
+     "lsu": 2535,
+     "mem": 136,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_b2b_3": {
+     "busy": 34090,
+     "fpu": 67,
+     "insns": 1721,
+     "lsu": 2535,
+     "mem": 136,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_b2b_mut_0": {
+     "busy": 34090,
+     "fpu": 67,
+     "insns": 1721,
+     "lsu": 2535,
+     "mem": 73,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_b2b_opt_1": {
+     "busy": 20873,
+     "fpu": 67,
+     "insns": 928,
+     "lsu": 1477,
+     "mem": 136,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_b2b_opt_2": {
+     "busy": 20873,
+     "fpu": 67,
+     "insns": 928,
+     "lsu": 1477,
+     "mem": 136,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_b2b_opt_3": {
+     "busy": 20873,
+     "fpu": 67,
+     "insns": 928,
+     "lsu": 1477,
+     "mem": 136,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_imgcopy_1": {
+     "busy": 560,
+     "fpu": 0,
+     "insns": 15,
+     "lsu": 89,
+     "mem": 48,
+     "rhit": 0,
+     "tex": 165
+    },
+    "cts_imgcopy_2": {
+     "busy": 560,
+     "fpu": 0,
+     "insns": 15,
+     "lsu": 89,
+     "mem": 48,
+     "rhit": 0,
+     "tex": 165
+    },
+    "cts_imgcopy_3": {
+     "busy": 560,
+     "fpu": 0,
+     "insns": 15,
+     "lsu": 89,
+     "mem": 48,
+     "rhit": 0,
+     "tex": 165
+    },
+    "cts_imgcopy_mut_0": {
+     "busy": 560,
+     "fpu": 0,
+     "insns": 15,
+     "lsu": 89,
+     "mem": 48,
+     "rhit": 0,
+     "tex": 165
+    },
+    "cts_imgcopy_opt_1": {
+     "busy": 502,
+     "fpu": 0,
+     "insns": 12,
+     "lsu": 85,
+     "mem": 48,
+     "rhit": 0,
+     "tex": 165
+    },
+    "cts_imgcopy_opt_2": {
+     "busy": 502,
+     "fpu": 0,
+     "insns": 12,
+     "lsu": 85,
+     "mem": 48,
+     "rhit": 0,
+     "tex": 165
+    },
+    "cts_imgcopy_opt_3": {
+     "busy": 502,
+     "fpu": 0,
+     "insns": 12,
+     "lsu": 85,
+     "mem": 48,
+     "rhit": 0,
+     "tex": 165
+    },
+    "cts_mls64_1": {
+     "busy": 1188,
+     "fpu": 0,
+     "insns": 48,
+     "lsu": 274,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_mls64_2": {
+     "busy": 1188,
+     "fpu": 0,
+     "insns": 48,
+     "lsu": 274,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_mls64_3": {
+     "busy": 1188,
+     "fpu": 0,
+     "insns": 48,
+     "lsu": 274,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_mls64_mut_0": {
+     "busy": 1188,
+     "fpu": 0,
+     "insns": 48,
+     "lsu": 274,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_shared1_1": {
+     "busy": 1458,
+     "fpu": 0,
+     "insns": 62,
+     "lsu": 139,
+     "mem": 5,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_shared1_2": {
+     "busy": 1458,
+     "fpu": 0,
+     "insns": 62,
+     "lsu": 139,
+     "mem": 5,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_shared1_3": {
+     "busy": 1458,
+     "fpu": 0,
+     "insns": 62,
+     "lsu": 139,
+     "mem": 5,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_sharedg_1": {
+     "busy": 5766,
+     "fpu": 0,
+     "insns": 248,
+     "lsu": 630,
+     "mem": 34,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_sharedg_2": {
+     "busy": 5766,
+     "fpu": 0,
+     "insns": 248,
+     "lsu": 630,
+     "mem": 34,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_sharedg_3": {
+     "busy": 5766,
+     "fpu": 0,
+     "insns": 248,
+     "lsu": 630,
+     "mem": 34,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_sharedg_mut_0": {
+     "busy": 5766,
+     "fpu": 0,
+     "insns": 248,
+     "lsu": 630,
+     "mem": 34,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_wgloop_1": {
+     "busy": 961,
+     "fpu": 0,
+     "insns": 47,
+     "lsu": 86,
+     "mem": 8,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_wgloop_2": {
+     "busy": 961,
+     "fpu": 0,
+     "insns": 47,
+     "lsu": 86,
+     "mem": 8,
+     "rhit": 0,
+     "tex": 0
+    },
+    "cts_wgloop_3": {
+     "busy": 961,
+     "fpu": 0,
+     "insns": 47,
+     "lsu": 86,
+     "mem": 8,
+     "rhit": 0,
+     "tex": 0
+    },
+    "descarr_1": {
+     "busy": 1744,
+     "fpu": 136,
+     "insns": 60,
+     "lsu": 298,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "descarr_2": {
+     "busy": 1744,
+     "fpu": 136,
+     "insns": 60,
+     "lsu": 298,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "descarr_3": {
+     "busy": 1744,
+     "fpu": 136,
+     "insns": 60,
+     "lsu": 298,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "descarr_mut_0": {
+     "busy": 1732,
+     "fpu": 136,
+     "insns": 60,
+     "lsu": 286,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "descarr_opt_1": {
+     "busy": 1360,
+     "fpu": 136,
+     "insns": 40,
+     "lsu": 266,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "descarr_opt_2": {
+     "busy": 1360,
+     "fpu": 136,
+     "insns": 40,
+     "lsu": 266,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "descarr_opt_3": {
+     "busy": 1360,
+     "fpu": 136,
+     "insns": 40,
+     "lsu": 266,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "dispbase_0": {
+     "busy": 3016,
+     "fpu": 0,
+     "insns": 112,
+     "lsu": 470,
+     "mem": 100,
+     "rhit": 0,
+     "tex": 0
+    },
+    "dynvec_1": {
+     "busy": 835,
+     "fpu": 34,
+     "insns": 27,
+     "lsu": 153,
+     "mem": 32,
+     "rhit": 0,
+     "tex": 0
+    },
+    "dynvec_2": {
+     "busy": 835,
+     "fpu": 34,
+     "insns": 27,
+     "lsu": 153,
+     "mem": 32,
+     "rhit": 0,
+     "tex": 0
+    },
+    "dynvec_3": {
+     "busy": 835,
+     "fpu": 34,
+     "insns": 27,
+     "lsu": 153,
+     "mem": 32,
+     "rhit": 0,
+     "tex": 0
+    },
+    "dynvec_mut_0": {
+     "busy": 839,
+     "fpu": 34,
+     "insns": 27,
+     "lsu": 157,
+     "mem": 28,
+     "rhit": 0,
+     "tex": 0
+    },
+    "earlyret_1": {
+     "busy": 2530,
+     "fpu": 0,
+     "insns": 120,
+     "lsu": 308,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "earlyret_2": {
+     "busy": 2530,
+     "fpu": 0,
+     "insns": 120,
+     "lsu": 308,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "earlyret_3": {
+     "busy": 2530,
+     "fpu": 0,
+     "insns": 120,
+     "lsu": 308,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "earlyret_mut_0": {
+     "busy": 2530,
+     "fpu": 0,
+     "insns": 120,
+     "lsu": 308,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "earlyret_opt_1": {
+     "busy": 1850,
+     "fpu": 0,
+     "insns": 92,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "earlyret_opt_2": {
+     "busy": 1850,
+     "fpu": 0,
+     "insns": 92,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "earlyret_opt_3": {
+     "busy": 1850,
+     "fpu": 0,
+     "insns": 92,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "fn_call_1": {
+     "busy": 1972,
+     "fpu": 0,
+     "insns": 99,
+     "lsu": 157,
+     "mem": 24,
+     "rhit": 0,
+     "tex": 0
+    },
+    "fn_call_2": {
+     "busy": 1972,
+     "fpu": 0,
+     "insns": 99,
+     "lsu": 157,
+     "mem": 24,
+     "rhit": 0,
+     "tex": 0
+    },
+    "fn_call_3": {
+     "busy": 1972,
+     "fpu": 0,
+     "insns": 99,
+     "lsu": 157,
+     "mem": 24,
+     "rhit": 0,
+     "tex": 0
+    },
+    "fn_call_mut_0": {
+     "busy": 1976,
+     "fpu": 0,
+     "insns": 99,
+     "lsu": 161,
+     "mem": 20,
+     "rhit": 0,
+     "tex": 0
+    },
+    "fn_deep_0": {
+     "busy": 1296,
+     "fpu": 0,
+     "insns": 68,
+     "lsu": 79,
+     "mem": 8,
+     "rhit": 0,
+     "tex": 0
+    },
+    "fn_divret_1": {
+     "busy": 1094,
+     "fpu": 0,
+     "insns": 54,
+     "lsu": 111,
+     "mem": 24,
+     "rhit": 0,
+     "tex": 0
+    },
+    "fn_divret_2": {
+     "busy": 1094,
+     "fpu": 0,
+     "insns": 54,
+     "lsu": 111,
+     "mem": 24,
+     "rhit": 0,
+     "tex": 0
+    },
+    "fn_divret_3": {
+     "busy": 1094,
+     "fpu": 0,
+     "insns": 54,
+     "lsu": 111,
+     "mem": 24,
+     "rhit": 0,
+     "tex": 0
+    },
+    "fn_divret_mut_0": {
+     "busy": 1094,
+     "fpu": 0,
+     "insns": 54,
+     "lsu": 111,
+     "mem": 24,
+     "rhit": 0,
+     "tex": 0
+    },
+    "fs_color_1": {
+     "busy": 714,
+     "fpu": 12,
+     "insns": 22,
+     "lsu": 240,
+     "mem": 80,
+     "rhit": 0,
+     "tex": 0
+    },
+    "fs_demote_deriv_1": {
+     "busy": 1992,
+     "fpu": 24,
+     "insns": 80,
+     "lsu": 356,
+     "mem": 160,
+     "rhit": 0,
+     "tex": 0
+    },
+    "fs_deriv_1": {
+     "busy": 1498,
+     "fpu": 48,
+     "insns": 50,
+     "lsu": 384,
+     "mem": 128,
+     "rhit": 0,
+     "tex": 0
+    },
+    "fs_fncall_1": {
+     "busy": 3194,
+     "fpu": 20,
+     "insns": 150,
+     "lsu": 456,
+     "mem": 64,
+     "rhit": 0,
+     "tex": 0
+    },
+    "fs_img_1": {
+     "busy": 1015,
+     "fpu": 104,
+     "insns": 22,
+     "lsu": 218,
+     "mem": 76,
+     "rhit": 0,
+     "tex": 275
+    },
+    "fs_kill_1": {
+     "busy": 929,
+     "fpu": 8,
+     "insns": 36,
+     "lsu": 192,
+     "mem": 112,
+     "rhit": 0,
+     "tex": 0
+    },
+    "fs_kill_fn_1": {
+     "busy": 1360,
+     "fpu": 12,
+     "insns": 66,
+     "lsu": 256,
+     "mem": 96,
+     "rhit": 0,
+     "tex": 0
+    },
+    "fs_smp_1": {
+     "busy": 3507,
+     "fpu": 1392,
+     "insns": 20,
+     "lsu": 242,
+     "mem": 112,
+     "rhit": 0,
+     "tex": 1001
+    },
+    "fs_tex_array_1": {
+     "busy": 3322,
+     "fpu": 1392,
+     "insns": 26,
+     "lsu": 266,
+     "mem": 132,
+     "rhit": 0,
+     "tex": 640
+    },
+    "fs_tex_bias_1": {
+     "busy": 3261,
+     "fpu": 1424,
+     "insns": 20,
+     "lsu": 266,
+     "mem": 124,
+     "rhit": 0,
+     "tex": 679
+    },
+    "fs_tex_gather_1": {
+     "busy": 7644,
+     "fpu": 3488,
+     "insns": 50,
+     "lsu": 378,
+     "mem": 132,
+     "rhit": 0,
+     "tex": 1704
+    },
+    "fs_tex_implicit_1": {
+     "busy": 2947,
+     "fpu": 1392,
+     "insns": 16,
+     "lsu": 218,
+     "mem": 92,
+     "rhit": 0,
+     "tex": 549
+    },
+    "fs_tex_proj_1": {
+     "busy": 9080,
+     "fpu": 3716,
+     "insns": 78,
+     "lsu": 598,
+     "mem": 196,
+     "rhit": 0,
+     "tex": 2082
+    },
+    "fs_tex_qlod_1": {
+     "busy": 2952,
+     "fpu": 1148,
+     "insns": 36,
+     "lsu": 234,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 322
+    },
+    "fs_tex_shadow_1": {
+     "busy": 14666,
+     "fpu": 6364,
+     "insns": 116,
+     "lsu": 826,
+     "mem": 276,
+     "rhit": 0,
+     "tex": 3488
+    },
+    "fs_texbuf_1": {
+     "busy": 1251,
+     "fpu": 104,
+     "insns": 34,
+     "lsu": 226,
+     "mem": 76,
+     "rhit": 0,
+     "tex": 259
+    },
+    "fs_ubo_1": {
+     "busy": 424,
+     "fpu": 0,
+     "insns": 12,
+     "lsu": 204,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "fs_ubo_array_1": {
+     "busy": 438,
+     "fpu": 0,
+     "insns": 12,
+     "lsu": 204,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "geomops_1": {
+     "busy": 11298,
+     "fpu": 1682,
+     "insns": 240,
+     "lsu": 2636,
+     "mem": 96,
+     "rhit": 0,
+     "tex": 0
+    },
+    "ifelse_1": {
+     "busy": 2802,
+     "fpu": 0,
+     "insns": 140,
+     "lsu": 316,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "ifelse_2": {
+     "busy": 2802,
+     "fpu": 0,
+     "insns": 140,
+     "lsu": 316,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "ifelse_3": {
+     "busy": 2802,
+     "fpu": 0,
+     "insns": 140,
+     "lsu": 316,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "ifelse_mut_0": {
+     "busy": 2802,
+     "fpu": 0,
+     "insns": 140,
+     "lsu": 316,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "ifelse_opt_1": {
+     "busy": 1970,
+     "fpu": 0,
+     "insns": 96,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "ifelse_opt_2": {
+     "busy": 1970,
+     "fpu": 0,
+     "insns": 96,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "ifelse_opt_3": {
+     "busy": 1970,
+     "fpu": 0,
+     "insns": 96,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "imgarr_1": {
+     "busy": 2972,
+     "fpu": 328,
+     "insns": 80,
+     "lsu": 342,
+     "mem": 116,
+     "rhit": 0,
+     "tex": 588
+    },
+    "imgarr_2": {
+     "busy": 2972,
+     "fpu": 328,
+     "insns": 80,
+     "lsu": 342,
+     "mem": 116,
+     "rhit": 0,
+     "tex": 588
+    },
+    "imgarr_3": {
+     "busy": 2972,
+     "fpu": 328,
+     "insns": 80,
+     "lsu": 342,
+     "mem": 116,
+     "rhit": 0,
+     "tex": 588
+    },
+    "imgarr_smp_1": {
+     "busy": 2880,
+     "fpu": 328,
+     "insns": 76,
+     "lsu": 342,
+     "mem": 116,
+     "rhit": 0,
+     "tex": 584
+    },
+    "imgarr_smp_2": {
+     "busy": 2880,
+     "fpu": 328,
+     "insns": 76,
+     "lsu": 342,
+     "mem": 116,
+     "rhit": 0,
+     "tex": 584
+    },
+    "imgarr_smp_3": {
+     "busy": 2880,
+     "fpu": 328,
+     "insns": 76,
+     "lsu": 342,
+     "mem": 116,
+     "rhit": 0,
+     "tex": 584
+    },
+    "imgarr_st_1": {
+     "busy": 7492,
+     "fpu": 688,
+     "insns": 216,
+     "lsu": 662,
+     "mem": 276,
+     "rhit": 0,
+     "tex": 1660
+    },
+    "imgarr_st_2": {
+     "busy": 7492,
+     "fpu": 688,
+     "insns": 216,
+     "lsu": 662,
+     "mem": 276,
+     "rhit": 0,
+     "tex": 1660
+    },
+    "imgarr_st_3": {
+     "busy": 7492,
+     "fpu": 688,
+     "insns": 216,
+     "lsu": 662,
+     "mem": 276,
+     "rhit": 0,
+     "tex": 1660
+    },
+    "imgcopy_rgba8ui_1": {
+     "busy": 1331,
+     "fpu": 68,
+     "insns": 43,
+     "lsu": 113,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 238
+    },
+    "imgcopy_rgba8ui_2": {
+     "busy": 1331,
+     "fpu": 68,
+     "insns": 43,
+     "lsu": 113,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 238
+    },
+    "imgcopy_rgba8ui_3": {
+     "busy": 1331,
+     "fpu": 68,
+     "insns": 43,
+     "lsu": 113,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 238
+    },
+    "imgcopy_rgba8ui_mut_0": {
+     "busy": 1331,
+     "fpu": 68,
+     "insns": 43,
+     "lsu": 113,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 238
+    },
+    "imgcopy_rgba8ui_opt_1": {
+     "busy": 952,
+     "fpu": 68,
+     "insns": 27,
+     "lsu": 69,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 238
+    },
+    "imgcopy_rgba8ui_opt_2": {
+     "busy": 952,
+     "fpu": 68,
+     "insns": 27,
+     "lsu": 69,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 238
+    },
+    "imgcopy_rgba8ui_opt_3": {
+     "busy": 952,
+     "fpu": 68,
+     "insns": 27,
+     "lsu": 69,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 238
+    },
+    "imgloadstore_1": {
+     "busy": 1062,
+     "fpu": 50,
+     "insns": 30,
+     "lsu": 147,
+     "mem": 60,
+     "rhit": 0,
+     "tex": 252
+    },
+    "imgloadstore_2": {
+     "busy": 1062,
+     "fpu": 50,
+     "insns": 30,
+     "lsu": 147,
+     "mem": 60,
+     "rhit": 0,
+     "tex": 252
+    },
+    "imgloadstore_3": {
+     "busy": 1062,
+     "fpu": 50,
+     "insns": 30,
+     "lsu": 147,
+     "mem": 60,
+     "rhit": 0,
+     "tex": 252
+    },
+    "imgloadstore_mut_0": {
+     "busy": 1062,
+     "fpu": 50,
+     "insns": 30,
+     "lsu": 147,
+     "mem": 60,
+     "rhit": 0,
+     "tex": 252
+    },
+    "imgloadstore_opt_1": {
+     "busy": 776,
+     "fpu": 50,
+     "insns": 17,
+     "lsu": 103,
+     "mem": 60,
+     "rhit": 0,
+     "tex": 252
+    },
+    "imgloadstore_opt_2": {
+     "busy": 776,
+     "fpu": 50,
+     "insns": 17,
+     "lsu": 103,
+     "mem": 60,
+     "rhit": 0,
+     "tex": 252
+    },
+    "imgloadstore_opt_3": {
+     "busy": 776,
+     "fpu": 50,
+     "insns": 17,
+     "lsu": 103,
+     "mem": 60,
+     "rhit": 0,
+     "tex": 252
+    },
+    "intmix_1": {
+     "busy": 11090,
+     "fpu": 816,
+     "insns": 476,
+     "lsu": 712,
+     "mem": 72,
+     "rhit": 0,
+     "tex": 0
+    },
+    "intmix_2": {
+     "busy": 11090,
+     "fpu": 816,
+     "insns": 476,
+     "lsu": 712,
+     "mem": 72,
+     "rhit": 0,
+     "tex": 0
+    },
+    "intmix_3": {
+     "busy": 11090,
+     "fpu": 816,
+     "insns": 476,
+     "lsu": 712,
+     "mem": 72,
+     "rhit": 0,
+     "tex": 0
+    },
+    "intmix_mut_0": {
+     "busy": 11106,
+     "fpu": 816,
+     "insns": 476,
+     "lsu": 728,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "intmix_opt_1": {
+     "busy": 6494,
+     "fpu": 816,
+     "insns": 244,
+     "lsu": 320,
+     "mem": 72,
+     "rhit": 0,
+     "tex": 0
+    },
+    "intmix_opt_2": {
+     "busy": 6494,
+     "fpu": 816,
+     "insns": 244,
+     "lsu": 320,
+     "mem": 72,
+     "rhit": 0,
+     "tex": 0
+    },
+    "intmix_opt_3": {
+     "busy": 6494,
+     "fpu": 816,
+     "insns": 244,
+     "lsu": 320,
+     "mem": 72,
+     "rhit": 0,
+     "tex": 0
+    },
+    "localsize32_1": {
+     "busy": 3058,
+     "fpu": 0,
+     "insns": 120,
+     "lsu": 564,
+     "mem": 104,
+     "rhit": 0,
+     "tex": 0
+    },
+    "localsize32_2": {
+     "busy": 3058,
+     "fpu": 0,
+     "insns": 120,
+     "lsu": 564,
+     "mem": 104,
+     "rhit": 0,
+     "tex": 0
+    },
+    "localsize32_3": {
+     "busy": 3058,
+     "fpu": 0,
+     "insns": 120,
+     "lsu": 564,
+     "mem": 104,
+     "rhit": 0,
+     "tex": 0
+    },
+    "localsize32_mut_0": {
+     "busy": 3058,
+     "fpu": 0,
+     "insns": 120,
+     "lsu": 564,
+     "mem": 104,
+     "rhit": 0,
+     "tex": 0
+    },
+    "localsize32_opt_1": {
+     "busy": 2442,
+     "fpu": 0,
+     "insns": 88,
+     "lsu": 516,
+     "mem": 104,
+     "rhit": 0,
+     "tex": 0
+    },
+    "localsize32_opt_2": {
+     "busy": 2442,
+     "fpu": 0,
+     "insns": 88,
+     "lsu": 516,
+     "mem": 104,
+     "rhit": 0,
+     "tex": 0
+    },
+    "localsize32_opt_3": {
+     "busy": 2442,
+     "fpu": 0,
+     "insns": 88,
+     "lsu": 516,
+     "mem": 104,
+     "rhit": 0,
+     "tex": 0
+    },
+    "localsize64_1": {
+     "busy": 3212,
+     "fpu": 0,
+     "insns": 128,
+     "lsu": 564,
+     "mem": 104,
+     "rhit": 0,
+     "tex": 0
+    },
+    "localsize64_2": {
+     "busy": 3212,
+     "fpu": 0,
+     "insns": 128,
+     "lsu": 564,
+     "mem": 104,
+     "rhit": 0,
+     "tex": 0
+    },
+    "localsize64_3": {
+     "busy": 3212,
+     "fpu": 0,
+     "insns": 128,
+     "lsu": 564,
+     "mem": 104,
+     "rhit": 0,
+     "tex": 0
+    },
+    "localsize64_mut_0": {
+     "busy": 3212,
+     "fpu": 0,
+     "insns": 128,
+     "lsu": 564,
+     "mem": 104,
+     "rhit": 0,
+     "tex": 0
+    },
+    "localsize64_opt_1": {
+     "busy": 2596,
+     "fpu": 0,
+     "insns": 96,
+     "lsu": 516,
+     "mem": 104,
+     "rhit": 0,
+     "tex": 0
+    },
+    "localsize64_opt_2": {
+     "busy": 2596,
+     "fpu": 0,
+     "insns": 96,
+     "lsu": 516,
+     "mem": 104,
+     "rhit": 0,
+     "tex": 0
+    },
+    "localsize64_opt_3": {
+     "busy": 2596,
+     "fpu": 0,
+     "insns": 96,
+     "lsu": 516,
+     "mem": 104,
+     "rhit": 0,
+     "tex": 0
+    },
+    "loopfor_1": {
+     "busy": 6541,
+     "fpu": 0,
+     "insns": 340,
+     "lsu": 599,
+     "mem": 87,
+     "rhit": 0,
+     "tex": 0
+    },
+    "loopfor_2": {
+     "busy": 6539,
+     "fpu": 0,
+     "insns": 340,
+     "lsu": 597,
+     "mem": 88,
+     "rhit": 0,
+     "tex": 0
+    },
+    "loopfor_3": {
+     "busy": 6531,
+     "fpu": 0,
+     "insns": 340,
+     "lsu": 589,
+     "mem": 87,
+     "rhit": 0,
+     "tex": 0
+    },
+    "loopfor_mut_0": {
+     "busy": 6546,
+     "fpu": 0,
+     "insns": 340,
+     "lsu": 604,
+     "mem": 88,
+     "rhit": 0,
+     "tex": 0
+    },
+    "loopfor_opt_1": {
+     "busy": 4062,
+     "fpu": 0,
+     "insns": 216,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "loopfor_opt_2": {
+     "busy": 4062,
+     "fpu": 0,
+     "insns": 216,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "loopfor_opt_3": {
+     "busy": 4062,
+     "fpu": 0,
+     "insns": 216,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "loopwhile_1": {
+     "busy": 66570,
+     "fpu": 3264,
+     "insns": 3740,
+     "lsu": 2400,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "loopwhile_2": {
+     "busy": 66504,
+     "fpu": 3264,
+     "insns": 3740,
+     "lsu": 2400,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "loopwhile_3": {
+     "busy": 66832,
+     "fpu": 3264,
+     "insns": 3764,
+     "lsu": 2412,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "loopwhile_mut_0": {
+     "busy": 66669,
+     "fpu": 3230,
+     "insns": 3733,
+     "lsu": 2396,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "loopwhile_opt_1": {
+     "busy": 49175,
+     "fpu": 3264,
+     "insns": 2738,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "loopwhile_opt_2": {
+     "busy": 49149,
+     "fpu": 3264,
+     "insns": 2738,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "loopwhile_opt_3": {
+     "busy": 49398,
+     "fpu": 3264,
+     "insns": 2756,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "math450_1": {
+     "busy": 28854,
+     "fpu": 2132,
+     "insns": 1012,
+     "lsu": 3304,
+     "mem": 712,
+     "rhit": 0,
+     "tex": 0
+    },
+    "math450_2": {
+     "busy": 28886,
+     "fpu": 2164,
+     "insns": 1012,
+     "lsu": 3304,
+     "mem": 712,
+     "rhit": 0,
+     "tex": 0
+    },
+    "math450_3": {
+     "busy": 28886,
+     "fpu": 2164,
+     "insns": 1012,
+     "lsu": 3304,
+     "mem": 712,
+     "rhit": 0,
+     "tex": 0
+    },
+    "math450_mut_0": {
+     "busy": 28948,
+     "fpu": 2034,
+     "insns": 1012,
+     "lsu": 3496,
+     "mem": 648,
+     "rhit": 0,
+     "tex": 0
+    },
+    "math450_opt_1": {
+     "busy": 17006,
+     "fpu": 2156,
+     "insns": 516,
+     "lsu": 2208,
+     "mem": 712,
+     "rhit": 0,
+     "tex": 0
+    },
+    "math450_opt_2": {
+     "busy": 17006,
+     "fpu": 2156,
+     "insns": 516,
+     "lsu": 2208,
+     "mem": 712,
+     "rhit": 0,
+     "tex": 0
+    },
+    "math450_opt_3": {
+     "busy": 17006,
+     "fpu": 2156,
+     "insns": 516,
+     "lsu": 2208,
+     "mem": 712,
+     "rhit": 0,
+     "tex": 0
+    },
+    "matmat_1": {
+     "busy": 24096,
+     "fpu": 384,
+     "insns": 484,
+     "lsu": 11412,
+     "mem": 200,
+     "rhit": 0,
+     "tex": 0
+    },
+    "matmat_2": {
+     "busy": 24096,
+     "fpu": 384,
+     "insns": 484,
+     "lsu": 11412,
+     "mem": 200,
+     "rhit": 0,
+     "tex": 0
+    },
+    "matmat_3": {
+     "busy": 24096,
+     "fpu": 384,
+     "insns": 484,
+     "lsu": 11412,
+     "mem": 200,
+     "rhit": 0,
+     "tex": 0
+    },
+    "matmat_mut_0": {
+     "busy": 24096,
+     "fpu": 384,
+     "insns": 484,
+     "lsu": 11412,
+     "mem": 199,
+     "rhit": 0,
+     "tex": 0
+    },
+    "matmat_opt_1": {
+     "busy": 7886,
+     "fpu": 384,
+     "insns": 244,
+     "lsu": 652,
+     "mem": 200,
+     "rhit": 0,
+     "tex": 0
+    },
+    "matmat_opt_2": {
+     "busy": 7886,
+     "fpu": 384,
+     "insns": 244,
+     "lsu": 652,
+     "mem": 200,
+     "rhit": 0,
+     "tex": 0
+    },
+    "matmat_opt_3": {
+     "busy": 7886,
+     "fpu": 384,
+     "insns": 244,
+     "lsu": 652,
+     "mem": 200,
+     "rhit": 0,
+     "tex": 0
+    },
+    "matvec_1": {
+     "busy": 14464,
+     "fpu": 352,
+     "insns": 360,
+     "lsu": 6064,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "matvec_2": {
+     "busy": 14464,
+     "fpu": 352,
+     "insns": 360,
+     "lsu": 6064,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "matvec_3": {
+     "busy": 14464,
+     "fpu": 352,
+     "insns": 360,
+     "lsu": 6064,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "matvec_mut_0": {
+     "busy": 14464,
+     "fpu": 352,
+     "insns": 360,
+     "lsu": 6064,
+     "mem": 263,
+     "rhit": 0,
+     "tex": 0
+    },
+    "matvec_opt_1": {
+     "busy": 5140,
+     "fpu": 352,
+     "insns": 152,
+     "lsu": 852,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "matvec_opt_2": {
+     "busy": 5140,
+     "fpu": 352,
+     "insns": 152,
+     "lsu": 852,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "matvec_opt_3": {
+     "busy": 5140,
+     "fpu": 352,
+     "insns": 152,
+     "lsu": 852,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "multiset_1": {
+     "busy": 1072,
+     "fpu": 0,
+     "insns": 34,
+     "lsu": 260,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "multiset_2": {
+     "busy": 1072,
+     "fpu": 0,
+     "insns": 34,
+     "lsu": 260,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "multiset_3": {
+     "busy": 1072,
+     "fpu": 0,
+     "insns": 34,
+     "lsu": 260,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "multiset_mut_0": {
+     "busy": 1072,
+     "fpu": 0,
+     "insns": 34,
+     "lsu": 260,
+     "mem": 60,
+     "rhit": 0,
+     "tex": 0
+    },
+    "multiset_opt_1": {
+     "busy": 881,
+     "fpu": 0,
+     "insns": 24,
+     "lsu": 242,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "multiset_opt_2": {
+     "busy": 881,
+     "fpu": 0,
+     "insns": 24,
+     "lsu": 242,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "multiset_opt_3": {
+     "busy": 881,
+     "fpu": 0,
+     "insns": 24,
+     "lsu": 242,
+     "mem": 68,
+     "rhit": 0,
+     "tex": 0
+    },
+    "nclamp_1": {
+     "busy": 2980,
+     "fpu": 32,
+     "insns": 96,
+     "lsu": 604,
+     "mem": 152,
+     "rhit": 0,
+     "tex": 0
+    },
+    "nclamp_2": {
+     "busy": 2980,
+     "fpu": 32,
+     "insns": 96,
+     "lsu": 604,
+     "mem": 152,
+     "rhit": 0,
+     "tex": 0
+    },
+    "nclamp_3": {
+     "busy": 2980,
+     "fpu": 32,
+     "insns": 96,
+     "lsu": 604,
+     "mem": 152,
+     "rhit": 0,
+     "tex": 0
+    },
+    "nclamp_mut_0": {
+     "busy": 2996,
+     "fpu": 32,
+     "insns": 96,
+     "lsu": 620,
+     "mem": 136,
+     "rhit": 0,
+     "tex": 0
+    },
+    "oob_1": {
+     "busy": 2774,
+     "fpu": 0,
+     "insns": 104,
+     "lsu": 508,
+     "mem": 78,
+     "rhit": 0,
+     "tex": 0
+    },
+    "oob_2": {
+     "busy": 2774,
+     "fpu": 0,
+     "insns": 104,
+     "lsu": 508,
+     "mem": 78,
+     "rhit": 0,
+     "tex": 0
+    },
+    "oob_3": {
+     "busy": 2774,
+     "fpu": 0,
+     "insns": 104,
+     "lsu": 508,
+     "mem": 78,
+     "rhit": 0,
+     "tex": 0
+    },
+    "oob_mut_0": {
+     "busy": 2774,
+     "fpu": 0,
+     "insns": 104,
+     "lsu": 508,
+     "mem": 78,
+     "rhit": 0,
+     "tex": 0
+    },
+    "oob_opt_1": {
+     "busy": 1826,
+     "fpu": 0,
+     "insns": 56,
+     "lsu": 436,
+     "mem": 78,
+     "rhit": 0,
+     "tex": 0
+    },
+    "oob_opt_2": {
+     "busy": 1826,
+     "fpu": 0,
+     "insns": 56,
+     "lsu": 436,
+     "mem": 78,
+     "rhit": 0,
+     "tex": 0
+    },
+    "oob_opt_3": {
+     "busy": 1826,
+     "fpu": 0,
+     "insns": 56,
+     "lsu": 436,
+     "mem": 78,
+     "rhit": 0,
+     "tex": 0
+    },
+    "packops_1": {
+     "busy": 6371,
+     "fpu": 286,
+     "insns": 225,
+     "lsu": 751,
+     "mem": 168,
+     "rhit": 0,
+     "tex": 0
+    },
+    "packops_2": {
+     "busy": 6423,
+     "fpu": 338,
+     "insns": 225,
+     "lsu": 751,
+     "mem": 168,
+     "rhit": 0,
+     "tex": 0
+    },
+    "packops_3": {
+     "busy": 6371,
+     "fpu": 286,
+     "insns": 225,
+     "lsu": 751,
+     "mem": 168,
+     "rhit": 0,
+     "tex": 0
+    },
+    "packops_mut_0": {
+     "busy": 6398,
+     "fpu": 309,
+     "insns": 225,
+     "lsu": 755,
+     "mem": 164,
+     "rhit": 0,
+     "tex": 0
+    },
+    "phiflow_1": {
+     "busy": 3144,
+     "fpu": 28,
+     "insns": 148,
+     "lsu": 400,
+     "mem": 72,
+     "rhit": 0,
+     "tex": 0
+    },
+    "phiflow_2": {
+     "busy": 3144,
+     "fpu": 28,
+     "insns": 148,
+     "lsu": 400,
+     "mem": 72,
+     "rhit": 0,
+     "tex": 0
+    },
+    "phiflow_3": {
+     "busy": 3144,
+     "fpu": 28,
+     "insns": 148,
+     "lsu": 400,
+     "mem": 72,
+     "rhit": 0,
+     "tex": 0
+    },
+    "phiflow_mut_0": {
+     "busy": 3160,
+     "fpu": 28,
+     "insns": 148,
+     "lsu": 416,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "precise_dot_1": {
+     "busy": 15304,
+     "fpu": 120,
+     "insns": 496,
+     "lsu": 3884,
+     "mem": 392,
+     "rhit": 0,
+     "tex": 0
+    },
+    "precise_dot_2": {
+     "busy": 15304,
+     "fpu": 120,
+     "insns": 496,
+     "lsu": 3884,
+     "mem": 392,
+     "rhit": 0,
+     "tex": 0
+    },
+    "precise_dot_3": {
+     "busy": 15304,
+     "fpu": 120,
+     "insns": 496,
+     "lsu": 3884,
+     "mem": 392,
+     "rhit": 0,
+     "tex": 0
+    },
+    "precise_dot_mut_0": {
+     "busy": 15304,
+     "fpu": 120,
+     "insns": 496,
+     "lsu": 3884,
+     "mem": 391,
+     "rhit": 0,
+     "tex": 0
+    },
+    "precise_dot_opt_1": {
+     "busy": 6448,
+     "fpu": 120,
+     "insns": 192,
+     "lsu": 1252,
+     "mem": 392,
+     "rhit": 0,
+     "tex": 0
+    },
+    "precise_dot_opt_2": {
+     "busy": 6448,
+     "fpu": 120,
+     "insns": 192,
+     "lsu": 1252,
+     "mem": 392,
+     "rhit": 0,
+     "tex": 0
+    },
+    "precise_dot_opt_3": {
+     "busy": 6448,
+     "fpu": 120,
+     "insns": 192,
+     "lsu": 1252,
+     "mem": 392,
+     "rhit": 0,
+     "tex": 0
+    },
+    "pushscale_1": {
+     "busy": 2046,
+     "fpu": 16,
+     "insns": 76,
+     "lsu": 324,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "pushscale_2": {
+     "busy": 2046,
+     "fpu": 16,
+     "insns": 76,
+     "lsu": 324,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "pushscale_3": {
+     "busy": 2046,
+     "fpu": 16,
+     "insns": 76,
+     "lsu": 324,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "pushscale_mut_0": {
+     "busy": 2114,
+     "fpu": 84,
+     "insns": 76,
+     "lsu": 324,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "pushscale_opt_1": {
+     "busy": 1738,
+     "fpu": 16,
+     "insns": 60,
+     "lsu": 300,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "pushscale_opt_2": {
+     "busy": 1738,
+     "fpu": 16,
+     "insns": 60,
+     "lsu": 300,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "pushscale_opt_3": {
+     "busy": 1738,
+     "fpu": 16,
+     "insns": 60,
+     "lsu": 300,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_atrig_1": {
+     "busy": 9327,
+     "fpu": 1761,
+     "insns": 240,
+     "lsu": 1036,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_atrig_2": {
+     "busy": 9327,
+     "fpu": 1761,
+     "insns": 240,
+     "lsu": 1036,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_atrig_3": {
+     "busy": 9327,
+     "fpu": 1761,
+     "insns": 240,
+     "lsu": 1036,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_atrig_mut_0": {
+     "busy": 9110,
+     "fpu": 1352,
+     "insns": 240,
+     "lsu": 1228,
+     "mem": 200,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_atrig_opt_1": {
+     "busy": 6795,
+     "fpu": 1761,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_atrig_opt_2": {
+     "busy": 6795,
+     "fpu": 1761,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_atrig_opt_3": {
+     "busy": 6795,
+     "fpu": 1761,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_exp_1": {
+     "busy": 8102,
+     "fpu": 928,
+     "insns": 224,
+     "lsu": 1020,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_exp_2": {
+     "busy": 8102,
+     "fpu": 928,
+     "insns": 224,
+     "lsu": 1020,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_exp_3": {
+     "busy": 8102,
+     "fpu": 928,
+     "insns": 224,
+     "lsu": 1020,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_exp_mut_0": {
+     "busy": 8294,
+     "fpu": 928,
+     "insns": 224,
+     "lsu": 1212,
+     "mem": 200,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_exp_opt_1": {
+     "busy": 5978,
+     "fpu": 928,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_exp_opt_2": {
+     "busy": 5978,
+     "fpu": 928,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_exp_opt_3": {
+     "busy": 5978,
+     "fpu": 928,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_hyper_1": {
+     "busy": 9818,
+     "fpu": 2004,
+     "insns": 224,
+     "lsu": 1020,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_hyper_2": {
+     "busy": 9818,
+     "fpu": 2004,
+     "insns": 224,
+     "lsu": 1020,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_hyper_3": {
+     "busy": 9818,
+     "fpu": 2004,
+     "insns": 224,
+     "lsu": 1020,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_hyper_mut_0": {
+     "busy": 9830,
+     "fpu": 1824,
+     "insns": 224,
+     "lsu": 1212,
+     "mem": 200,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_hyper_opt_1": {
+     "busy": 7694,
+     "fpu": 2004,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_hyper_opt_2": {
+     "busy": 7694,
+     "fpu": 2004,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_hyper_opt_3": {
+     "busy": 7694,
+     "fpu": 2004,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_log_1": {
+     "busy": 8534,
+     "fpu": 1392,
+     "insns": 224,
+     "lsu": 1020,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_log_2": {
+     "busy": 8534,
+     "fpu": 1392,
+     "insns": 224,
+     "lsu": 1020,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_log_3": {
+     "busy": 8534,
+     "fpu": 1392,
+     "insns": 224,
+     "lsu": 1020,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_log_mut_0": {
+     "busy": 8486,
+     "fpu": 1152,
+     "insns": 224,
+     "lsu": 1212,
+     "mem": 200,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_log_opt_1": {
+     "busy": 6410,
+     "fpu": 1392,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_log_opt_2": {
+     "busy": 6410,
+     "fpu": 1392,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_log_opt_3": {
+     "busy": 6410,
+     "fpu": 1392,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_pow_1": {
+     "busy": 12326,
+     "fpu": 2336,
+     "insns": 288,
+     "lsu": 1084,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_pow_2": {
+     "busy": 12326,
+     "fpu": 2336,
+     "insns": 288,
+     "lsu": 1084,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_pow_3": {
+     "busy": 12326,
+     "fpu": 2336,
+     "insns": 288,
+     "lsu": 1084,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_pow_mut_0": {
+     "busy": 12262,
+     "fpu": 2080,
+     "insns": 288,
+     "lsu": 1276,
+     "mem": 200,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_pow_opt_1": {
+     "busy": 8570,
+     "fpu": 2336,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_pow_opt_2": {
+     "busy": 8570,
+     "fpu": 2336,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_pow_opt_3": {
+     "busy": 8570,
+     "fpu": 2336,
+     "insns": 136,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_trig_1": {
+     "busy": 9614,
+     "fpu": 1448,
+     "insns": 248,
+     "lsu": 1036,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_trig_2": {
+     "busy": 9614,
+     "fpu": 1448,
+     "insns": 248,
+     "lsu": 1036,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_trig_3": {
+     "busy": 9614,
+     "fpu": 1448,
+     "insns": 248,
+     "lsu": 1036,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_trig_mut_0": {
+     "busy": 9742,
+     "fpu": 1384,
+     "insns": 248,
+     "lsu": 1228,
+     "mem": 200,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_trig_opt_1": {
+     "busy": 7082,
+     "fpu": 1448,
+     "insns": 144,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_trig_opt_2": {
+     "busy": 7082,
+     "fpu": 1448,
+     "insns": 144,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "sfu_trig_opt_3": {
+     "busy": 7082,
+     "fpu": 1448,
+     "insns": 144,
+     "lsu": 836,
+     "mem": 264,
+     "rhit": 0,
+     "tex": 0
+    },
+    "shortcircuit_1": {
+     "busy": 4298,
+     "fpu": 0,
+     "insns": 208,
+     "lsu": 464,
+     "mem": 72,
+     "rhit": 0,
+     "tex": 0
+    },
+    "shortcircuit_2": {
+     "busy": 4298,
+     "fpu": 0,
+     "insns": 208,
+     "lsu": 464,
+     "mem": 72,
+     "rhit": 0,
+     "tex": 0
+    },
+    "shortcircuit_3": {
+     "busy": 4298,
+     "fpu": 0,
+     "insns": 208,
+     "lsu": 464,
+     "mem": 72,
+     "rhit": 0,
+     "tex": 0
+    },
+    "shortcircuit_mut_0": {
+     "busy": 3482,
+     "fpu": 0,
+     "insns": 160,
+     "lsu": 448,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "shortcircuit_opt_1": {
+     "busy": 2610,
+     "fpu": 0,
+     "insns": 120,
+     "lsu": 320,
+     "mem": 72,
+     "rhit": 0,
+     "tex": 0
+    },
+    "shortcircuit_opt_2": {
+     "busy": 2610,
+     "fpu": 0,
+     "insns": 120,
+     "lsu": 320,
+     "mem": 72,
+     "rhit": 0,
+     "tex": 0
+    },
+    "shortcircuit_opt_3": {
+     "busy": 2610,
+     "fpu": 0,
+     "insns": 120,
+     "lsu": 320,
+     "mem": 72,
+     "rhit": 0,
+     "tex": 0
+    },
+    "ssbo_cap_1": {
+     "busy": 27913,
+     "fpu": 60,
+     "insns": 1199,
+     "lsu": 5287,
+     "mem": 210,
+     "rhit": 0,
+     "tex": 0
+    },
+    "ssbo_cap_2": {
+     "busy": 27913,
+     "fpu": 60,
+     "insns": 1199,
+     "lsu": 5287,
+     "mem": 210,
+     "rhit": 0,
+     "tex": 0
+    },
+    "ssbo_cap_3": {
+     "busy": 27913,
+     "fpu": 60,
+     "insns": 1199,
+     "lsu": 5287,
+     "mem": 210,
+     "rhit": 0,
+     "tex": 0
+    },
+    "ssbo_rowmajor_1": {
+     "busy": 6058,
+     "fpu": 0,
+     "insns": 274,
+     "lsu": 861,
+     "mem": 51,
+     "rhit": 0,
+     "tex": 0
+    },
+    "ssbo_rowmajor_2": {
+     "busy": 6058,
+     "fpu": 0,
+     "insns": 274,
+     "lsu": 861,
+     "mem": 51,
+     "rhit": 0,
+     "tex": 0
+    },
+    "ssbo_rowmajor_3": {
+     "busy": 6058,
+     "fpu": 0,
+     "insns": 274,
+     "lsu": 861,
+     "mem": 51,
+     "rhit": 0,
+     "tex": 0
+    },
+    "ssbo_rowmajor_mut_0": {
+     "busy": 6058,
+     "fpu": 0,
+     "insns": 274,
+     "lsu": 861,
+     "mem": 50,
+     "rhit": 0,
+     "tex": 0
+    },
+    "ssbo_rowmajor_opt_1": {
+     "busy": 4383,
+     "fpu": 0,
+     "insns": 180,
+     "lsu": 561,
+     "mem": 51,
+     "rhit": 0,
+     "tex": 0
+    },
+    "ssbo_rowmajor_opt_2": {
+     "busy": 4383,
+     "fpu": 0,
+     "insns": 180,
+     "lsu": 561,
+     "mem": 51,
+     "rhit": 0,
+     "tex": 0
+    },
+    "ssbo_rowmajor_opt_3": {
+     "busy": 4383,
+     "fpu": 0,
+     "insns": 180,
+     "lsu": 561,
+     "mem": 51,
+     "rhit": 0,
+     "tex": 0
+    },
+    "ssbo_sarr_1": {
+     "busy": 16217,
+     "fpu": 102,
+     "insns": 517,
+     "lsu": 5023,
+     "mem": 210,
+     "rhit": 0,
+     "tex": 0
+    },
+    "ssbo_sarr_2": {
+     "busy": 16217,
+     "fpu": 102,
+     "insns": 517,
+     "lsu": 5023,
+     "mem": 210,
+     "rhit": 0,
+     "tex": 0
+    },
+    "ssbo_sarr_3": {
+     "busy": 16217,
+     "fpu": 102,
+     "insns": 517,
+     "lsu": 5023,
+     "mem": 210,
+     "rhit": 0,
+     "tex": 0
+    },
+    "switchcase_1": {
+     "busy": 3252,
+     "fpu": 0,
+     "insns": 170,
+     "lsu": 342,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "switchcase_2": {
+     "busy": 3192,
+     "fpu": 0,
+     "insns": 168,
+     "lsu": 338,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "switchcase_3": {
+     "busy": 3163,
+     "fpu": 0,
+     "insns": 165,
+     "lsu": 338,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "switchcase_mut_0": {
+     "busy": 2826,
+     "fpu": 0,
+     "insns": 144,
+     "lsu": 324,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "switchcase_opt_1": {
+     "busy": 2247,
+     "fpu": 0,
+     "insns": 116,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "switchcase_opt_2": {
+     "busy": 2177,
+     "fpu": 0,
+     "insns": 114,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "switchcase_opt_3": {
+     "busy": 2175,
+     "fpu": 0,
+     "insns": 112,
+     "lsu": 236,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 0
+    },
+    "texarr_1": {
+     "busy": 794,
+     "fpu": 80,
+     "insns": 21,
+     "lsu": 95,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 174
+    },
+    "texarr_2": {
+     "busy": 794,
+     "fpu": 80,
+     "insns": 21,
+     "lsu": 95,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 174
+    },
+    "texarr_3": {
+     "busy": 794,
+     "fpu": 80,
+     "insns": 21,
+     "lsu": 95,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 174
+    },
+    "texarr_mut_0": {
+     "busy": 794,
+     "fpu": 80,
+     "insns": 21,
+     "lsu": 95,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 174
+    },
+    "texarr_opt_1": {
+     "busy": 658,
+     "fpu": 80,
+     "insns": 14,
+     "lsu": 85,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 174
+    },
+    "texarr_opt_2": {
+     "busy": 658,
+     "fpu": 80,
+     "insns": 14,
+     "lsu": 85,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 174
+    },
+    "texarr_opt_3": {
+     "busy": 658,
+     "fpu": 80,
+     "insns": 14,
+     "lsu": 85,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 174
+    },
+    "texbuf_1": {
+     "busy": 997,
+     "fpu": 80,
+     "insns": 28,
+     "lsu": 162,
+     "mem": 48,
+     "rhit": 0,
+     "tex": 179
+    },
+    "texbuf_2": {
+     "busy": 997,
+     "fpu": 80,
+     "insns": 28,
+     "lsu": 162,
+     "mem": 48,
+     "rhit": 0,
+     "tex": 179
+    },
+    "texbuf_3": {
+     "busy": 997,
+     "fpu": 80,
+     "insns": 28,
+     "lsu": 162,
+     "mem": 48,
+     "rhit": 0,
+     "tex": 179
+    },
+    "texbuf_arr_1": {
+     "busy": 2724,
+     "fpu": 328,
+     "insns": 72,
+     "lsu": 342,
+     "mem": 116,
+     "rhit": 0,
+     "tex": 552
+    },
+    "texbuf_arr_2": {
+     "busy": 2724,
+     "fpu": 328,
+     "insns": 72,
+     "lsu": 342,
+     "mem": 116,
+     "rhit": 0,
+     "tex": 552
+    },
+    "texbuf_arr_3": {
+     "busy": 2724,
+     "fpu": 328,
+     "insns": 72,
+     "lsu": 342,
+     "mem": 116,
+     "rhit": 0,
+     "tex": 552
+    },
+    "texbuf_arr_st_1": {
+     "busy": 6672,
+     "fpu": 688,
+     "insns": 192,
+     "lsu": 606,
+     "mem": 180,
+     "rhit": 0,
+     "tex": 1396
+    },
+    "texbuf_arr_st_2": {
+     "busy": 6672,
+     "fpu": 688,
+     "insns": 192,
+     "lsu": 606,
+     "mem": 180,
+     "rhit": 0,
+     "tex": 1396
+    },
+    "texbuf_arr_st_3": {
+     "busy": 6672,
+     "fpu": 688,
+     "insns": 192,
+     "lsu": 606,
+     "mem": 180,
+     "rhit": 0,
+     "tex": 1396
+    },
+    "texbuf_atom_1": {
+     "busy": 1026,
+     "fpu": 0,
+     "insns": 34,
+     "lsu": 218,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 98
+    },
+    "texbuf_atom_2": {
+     "busy": 1026,
+     "fpu": 0,
+     "insns": 34,
+     "lsu": 218,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 98
+    },
+    "texbuf_atom_3": {
+     "busy": 1026,
+     "fpu": 0,
+     "insns": 34,
+     "lsu": 218,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 98
+    },
+    "texbuf_img_1": {
+     "busy": 997,
+     "fpu": 80,
+     "insns": 28,
+     "lsu": 162,
+     "mem": 48,
+     "rhit": 0,
+     "tex": 179
+    },
+    "texbuf_img_2": {
+     "busy": 997,
+     "fpu": 80,
+     "insns": 28,
+     "lsu": 162,
+     "mem": 48,
+     "rhit": 0,
+     "tex": 179
+    },
+    "texbuf_img_3": {
+     "busy": 997,
+     "fpu": 80,
+     "insns": 28,
+     "lsu": 162,
+     "mem": 48,
+     "rhit": 0,
+     "tex": 179
+    },
+    "texbuf_wr_1": {
+     "busy": 2057,
+     "fpu": 0,
+     "insns": 74,
+     "lsu": 230,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 301
+    },
+    "texbuf_wr_2": {
+     "busy": 2057,
+     "fpu": 0,
+     "insns": 74,
+     "lsu": 230,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 301
+    },
+    "texbuf_wr_3": {
+     "busy": 2057,
+     "fpu": 0,
+     "insns": 74,
+     "lsu": 230,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 301
+    },
+    "texfetch_1": {
+     "busy": 735,
+     "fpu": 80,
+     "insns": 20,
+     "lsu": 93,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 140
+    },
+    "texfetch_2": {
+     "busy": 735,
+     "fpu": 80,
+     "insns": 20,
+     "lsu": 93,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 140
+    },
+    "texfetch_3": {
+     "busy": 735,
+     "fpu": 80,
+     "insns": 20,
+     "lsu": 93,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 140
+    },
+    "texfetch_mip_1": {
+     "busy": 1457,
+     "fpu": 94,
+     "insns": 46,
+     "lsu": 137,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 248
+    },
+    "texfetch_mip_2": {
+     "busy": 1457,
+     "fpu": 94,
+     "insns": 46,
+     "lsu": 137,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 248
+    },
+    "texfetch_mip_3": {
+     "busy": 1457,
+     "fpu": 94,
+     "insns": 46,
+     "lsu": 137,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 248
+    },
+    "texfetch_mip_mut_0": {
+     "busy": 1474,
+     "fpu": 111,
+     "insns": 46,
+     "lsu": 137,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 248
+    },
+    "texfetch_mip_opt_1": {
+     "busy": 1085,
+     "fpu": 94,
+     "insns": 29,
+     "lsu": 101,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 248
+    },
+    "texfetch_mip_opt_2": {
+     "busy": 1085,
+     "fpu": 94,
+     "insns": 29,
+     "lsu": 101,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 248
+    },
+    "texfetch_mip_opt_3": {
+     "busy": 1085,
+     "fpu": 94,
+     "insns": 29,
+     "lsu": 101,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 248
+    },
+    "texfetch_mut_0": {
+     "busy": 735,
+     "fpu": 80,
+     "insns": 20,
+     "lsu": 93,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 140
+    },
+    "texfetch_opt_1": {
+     "busy": 639,
+     "fpu": 80,
+     "insns": 15,
+     "lsu": 85,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 140
+    },
+    "texfetch_opt_2": {
+     "busy": 639,
+     "fpu": 80,
+     "insns": 15,
+     "lsu": 85,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 140
+    },
+    "texfetch_opt_3": {
+     "busy": 639,
+     "fpu": 80,
+     "insns": 15,
+     "lsu": 85,
+     "mem": 40,
+     "rhit": 0,
+     "tex": 140
+    },
+    "texfetch_rgba8ui_1": {
+     "busy": 1069,
+     "fpu": 68,
+     "insns": 36,
+     "lsu": 85,
+     "mem": 32,
+     "rhit": 0,
+     "tex": 132
+    },
+    "texfetch_rgba8ui_2": {
+     "busy": 1069,
+     "fpu": 68,
+     "insns": 36,
+     "lsu": 85,
+     "mem": 32,
+     "rhit": 0,
+     "tex": 132
+    },
+    "texfetch_rgba8ui_3": {
+     "busy": 1069,
+     "fpu": 68,
+     "insns": 36,
+     "lsu": 85,
+     "mem": 32,
+     "rhit": 0,
+     "tex": 132
+    },
+    "texfetch_rgba8ui_mut_0": {
+     "busy": 1069,
+     "fpu": 68,
+     "insns": 36,
+     "lsu": 85,
+     "mem": 32,
+     "rhit": 0,
+     "tex": 132
+    },
+    "texfetch_rgba8ui_opt_1": {
+     "busy": 803,
+     "fpu": 68,
+     "insns": 25,
+     "lsu": 61,
+     "mem": 32,
+     "rhit": 0,
+     "tex": 132
+    },
+    "texfetch_rgba8ui_opt_2": {
+     "busy": 803,
+     "fpu": 68,
+     "insns": 25,
+     "lsu": 61,
+     "mem": 32,
+     "rhit": 0,
+     "tex": 132
+    },
+    "texfetch_rgba8ui_opt_3": {
+     "busy": 803,
+     "fpu": 68,
+     "insns": 25,
+     "lsu": 61,
+     "mem": 32,
+     "rhit": 0,
+     "tex": 132
+    },
+    "texlod_lin_1": {
+     "busy": 1344,
+     "fpu": 300,
+     "insns": 29,
+     "lsu": 101,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 349
+    },
+    "texlod_lin_2": {
+     "busy": 1328,
+     "fpu": 300,
+     "insns": 29,
+     "lsu": 101,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 333
+    },
+    "texlod_lin_3": {
+     "busy": 1344,
+     "fpu": 300,
+     "insns": 29,
+     "lsu": 101,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 349
+    },
+    "texlod_lin_mut_0": {
+     "busy": 1361,
+     "fpu": 317,
+     "insns": 29,
+     "lsu": 101,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 349
+    },
+    "texlod_lin_opt_1": {
+     "busy": 1126,
+     "fpu": 300,
+     "insns": 18,
+     "lsu": 85,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 349
+    },
+    "texlod_lin_opt_2": {
+     "busy": 1110,
+     "fpu": 300,
+     "insns": 18,
+     "lsu": 85,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 333
+    },
+    "texlod_lin_opt_3": {
+     "busy": 1126,
+     "fpu": 300,
+     "insns": 18,
+     "lsu": 85,
+     "mem": 56,
+     "rhit": 0,
+     "tex": 349
+    },
+    "texlod_mip_1": {
+     "busy": 1705,
+     "fpu": 304,
+     "insns": 37,
+     "lsu": 107,
+     "mem": 64,
+     "rhit": 0,
+     "tex": 542
+    },
+    "texlod_mip_2": {
+     "busy": 1705,
+     "fpu": 304,
+     "insns": 37,
+     "lsu": 107,
+     "mem": 64,
+     "rhit": 0,
+     "tex": 542
+    },
+    "texlod_mip_3": {
+     "busy": 1705,
+     "fpu": 304,
+     "insns": 37,
+     "lsu": 107,
+     "mem": 64,
+     "rhit": 0,
+     "tex": 542
+    },
+    "texlod_mip_mut_0": {
+     "busy": 1722,
+     "fpu": 321,
+     "insns": 37,
+     "lsu": 107,
+     "mem": 64,
+     "rhit": 0,
+     "tex": 542
+    },
+    "texlod_mip_opt_1": {
+     "busy": 1363,
+     "fpu": 302,
+     "insns": 20,
+     "lsu": 85,
+     "mem": 64,
+     "rhit": 0,
+     "tex": 542
+    },
+    "texlod_mip_opt_2": {
+     "busy": 1363,
+     "fpu": 302,
+     "insns": 20,
+     "lsu": 85,
+     "mem": 64,
+     "rhit": 0,
+     "tex": 542
+    },
+    "texlod_mip_opt_3": {
+     "busy": 1363,
+     "fpu": 302,
+     "insns": 20,
+     "lsu": 85,
+     "mem": 64,
+     "rhit": 0,
+     "tex": 542
+    },
+    "texquery_1": {
+     "busy": 1142,
+     "fpu": 0,
+     "insns": 40,
+     "lsu": 139,
+     "mem": 28,
+     "rhit": 0,
+     "tex": 141
+    },
+    "texquery_2": {
+     "busy": 1142,
+     "fpu": 0,
+     "insns": 40,
+     "lsu": 139,
+     "mem": 28,
+     "rhit": 0,
+     "tex": 141
+    },
+    "texquery_3": {
+     "busy": 1142,
+     "fpu": 0,
+     "insns": 40,
+     "lsu": 139,
+     "mem": 28,
+     "rhit": 0,
+     "tex": 141
+    },
+    "texquery_mut_0": {
+     "busy": 1142,
+     "fpu": 0,
+     "insns": 40,
+     "lsu": 139,
+     "mem": 28,
+     "rhit": 0,
+     "tex": 141
+    },
+    "texquery_opt_1": {
+     "busy": 760,
+     "fpu": 0,
+     "insns": 23,
+     "lsu": 111,
+     "mem": 28,
+     "rhit": 0,
+     "tex": 141
+    },
+    "texquery_opt_2": {
+     "busy": 760,
+     "fpu": 0,
+     "insns": 23,
+     "lsu": 111,
+     "mem": 28,
+     "rhit": 0,
+     "tex": 141
+    },
+    "texquery_opt_3": {
+     "busy": 760,
+     "fpu": 0,
+     "insns": 23,
+     "lsu": 111,
+     "mem": 28,
+     "rhit": 0,
+     "tex": 141
+    },
+    "texsrgb_1": {
+     "busy": 1245,
+     "fpu": 162,
+     "insns": 33,
+     "lsu": 139,
+     "mem": 52,
+     "rhit": 0,
+     "tex": 253
+    },
+    "texsrgb_2": {
+     "busy": 1245,
+     "fpu": 162,
+     "insns": 33,
+     "lsu": 139,
+     "mem": 52,
+     "rhit": 0,
+     "tex": 253
+    },
+    "texsrgb_3": {
+     "busy": 1245,
+     "fpu": 162,
+     "insns": 33,
+     "lsu": 139,
+     "mem": 52,
+     "rhit": 0,
+     "tex": 253
+    },
+    "texsrgb_mut_0": {
+     "busy": 1245,
+     "fpu": 162,
+     "insns": 33,
+     "lsu": 139,
+     "mem": 52,
+     "rhit": 0,
+     "tex": 253
+    },
+    "texsrgb_opt_1": {
+     "busy": 920,
+     "fpu": 162,
+     "insns": 18,
+     "lsu": 103,
+     "mem": 52,
+     "rhit": 0,
+     "tex": 253
+    },
+    "texsrgb_opt_2": {
+     "busy": 920,
+     "fpu": 162,
+     "insns": 18,
+     "lsu": 103,
+     "mem": 52,
+     "rhit": 0,
+     "tex": 253
+    },
+    "texsrgb_opt_3": {
+     "busy": 920,
+     "fpu": 162,
+     "insns": 18,
+     "lsu": 103,
+     "mem": 52,
+     "rhit": 0,
+     "tex": 253
+    },
+    "vec4arith_1": {
+     "busy": 4662,
+     "fpu": 352,
+     "insns": 160,
+     "lsu": 1024,
+     "mem": 200,
+     "rhit": 0,
+     "tex": 0
+    },
+    "vec4arith_2": {
+     "busy": 4662,
+     "fpu": 352,
+     "insns": 160,
+     "lsu": 1024,
+     "mem": 200,
+     "rhit": 0,
+     "tex": 0
+    },
+    "vec4arith_3": {
+     "busy": 4662,
+     "fpu": 352,
+     "insns": 160,
+     "lsu": 1024,
+     "mem": 200,
+     "rhit": 0,
+     "tex": 0
+    },
+    "vec4arith_mut_0": {
+     "busy": 4838,
+     "fpu": 336,
+     "insns": 160,
+     "lsu": 1216,
+     "mem": 136,
+     "rhit": 0,
+     "tex": 0
+    },
+    "vec4arith_opt_1": {
+     "busy": 2826,
+     "fpu": 352,
+     "insns": 80,
+     "lsu": 640,
+     "mem": 200,
+     "rhit": 0,
+     "tex": 0
+    },
+    "vec4arith_opt_2": {
+     "busy": 2826,
+     "fpu": 352,
+     "insns": 80,
+     "lsu": 640,
+     "mem": 200,
+     "rhit": 0,
+     "tex": 0
+    },
+    "vec4arith_opt_3": {
+     "busy": 2826,
+     "fpu": 352,
+     "insns": 80,
+     "lsu": 640,
+     "mem": 200,
+     "rhit": 0,
+     "tex": 0
+    },
+    "vs_passthru_1": {
+     "busy": 596,
+     "fpu": 2,
+     "insns": 18,
+     "lsu": 192,
+     "mem": 64,
+     "rhit": 0,
+     "tex": 0
+    },
+    "vs_texlod_1": {
+     "busy": 915,
+     "fpu": 288,
+     "insns": 13,
+     "lsu": 162,
+     "mem": 60,
+     "rhit": 0,
+     "tex": 178
+    },
+    "zerodim_0": {
+     "busy": 1,
+     "fpu": 0,
+     "insns": 0,
+     "lsu": 0,
+     "mem": 0,
+     "rhit": 0,
+     "tex": 0
+    }
+   }
+  },
+  "vgtop:ue_cpos_clear_rgba8_1": {
+   "derived": {
+    "engine_pct": {
+     "any": 68.6,
+     "ctl": 10.7,
+     "exec": 14.2,
+     "pump": 60.1,
+     "sh": 1.7,
+     "xfer": 13.8
+    },
+    "idle_pct": 31.4,
+    "port_cyc_per_req": {
+     "ctl": 3.0,
+     "obj": 3.0,
+     "pump": 3.0,
+     "sh": 3.0
+    },
+    "port_req": {
+     "ctl": 827,
+     "obj": 484,
+     "pump": 3995,
+     "sh": 56
+    }
+   },
+   "pass": {
+    "bench": "tb_g6lc_apu_vgtop",
+    "cases": 43,
+    "checks": 7360,
+    "cycles": 70563
+   },
+   "pass_compute": {
+    "cycles": 70563,
+    "g1": 1616,
+    "g2": 1616,
+    "maxulp": 0,
+    "ulp1": 0,
+    "ulp2": 0
+   },
+   "perfr": {
+    "clear": 0,
+    "clip": 0,
+    "ctl": 0,
+    "depth": 0,
+    "fpn": 0,
+    "fpw": 0,
+    "fswait": 0,
+    "gather": 0,
+    "interp": 0,
+    "merge": 0,
+    "mpn": 0,
+    "mpw": 0,
+    "scan": 0,
+    "setup": 0,
+    "vswait": 0
+   },
+   "perft": {
+    "any": 48409,
+    "ctl": 7579,
+    "exec": 9993,
+    "mpn_ctl": 827,
+    "mpn_exec": 0,
+    "mpn_obj": 484,
+    "mpn_pump": 3995,
+    "mpn_rast": 0,
+    "mpn_sh": 56,
+    "mpw_ctl": 2481,
+    "mpw_exec": 0,
+    "mpw_obj": 1452,
+    "mpw_pump": 11985,
+    "mpw_rast": 0,
+    "mpw_sh": 168,
+    "pump": 42375,
+    "rast": 0,
+    "sh": 1209,
+    "xfer": 9706
+   },
+   "stat": {
+    "busy": 0,
+    "pixwr": 0,
+    "tris": 0
+   }
+  },
+  "vgtop:ue_cpos_math450_1": {
+   "derived": {
+    "engine_pct": {
+     "any": 78.3,
+     "ctl": 4.8,
+     "exec": 21.8,
+     "pump": 74.7,
+     "sh": 21.5
+    },
+    "idle_pct": 21.7,
+    "port_cyc_per_req": {
+     "ctl": 3.0,
+     "obj": 3.0,
+     "pump": 3.0,
+     "sh": 3.0
+    },
+    "port_req": {
+     "ctl": 671,
+     "obj": 1854,
+     "pump": 4012,
+     "sh": 712
+    }
+   },
+   "pass": {
+    "bench": "tb_g6lc_apu_vgtop",
+    "cases": 34,
+    "checks": 5361,
+    "cycles": 109808
+   },
+   "pass_compute": {
+    "cycles": 109808,
+    "g1": 1168,
+    "g2": 1168,
+    "maxulp": 1,
+    "ulp1": 9,
+    "ulp2": 0
+   },
+   "perfr": {
+    "clear": 0,
+    "clip": 0,
+    "ctl": 0,
+    "depth": 0,
+    "fpn": 0,
+    "fpw": 0,
+    "fswait": 0,
+    "gather": 0,
+    "interp": 0,
+    "merge": 0,
+    "mpn": 0,
+    "mpw": 0,
+    "scan": 0,
+    "setup": 0,
+    "vswait": 0
+   },
+   "perft": {
+    "any": 85966,
+    "ctl": 5312,
+    "exec": 23975,
+    "mpn_ctl": 671,
+    "mpn_exec": 0,
+    "mpn_obj": 1854,
+    "mpn_pump": 4012,
+    "mpn_rast": 0,
+    "mpn_sh": 712,
+    "mpw_ctl": 2013,
+    "mpw_exec": 0,
+    "mpw_obj": 5562,
+    "mpw_pump": 12036,
+    "mpw_rast": 0,
+    "mpw_sh": 2136,
+    "pump": 82076,
+    "rast": 0,
+    "sh": 23593,
+    "xfer": 0
+   },
+   "stat": {
+    "busy": 0,
+    "pixwr": 0,
+    "tris": 0
+   }
+  },
+  "vgtop:ue_cpos_vec4arith_1": {
+   "derived": {
+    "engine_pct": {
+     "any": 67.0,
+     "ctl": 9.6,
+     "exec": 8.1,
+     "pump": 59.9,
+     "sh": 7.4
+    },
+    "idle_pct": 33.0,
+    "port_cyc_per_req": {
+     "ctl": 3.0,
+     "obj": 3.0,
+     "pump": 3.0,
+     "sh": 3.0
+    },
+    "port_req": {
+     "ctl": 651,
+     "obj": 350,
+     "pump": 2851,
+     "sh": 200
+    }
+   },
+   "pass": {
+    "bench": "tb_g6lc_apu_vgtop",
+    "cases": 33,
+    "checks": 1250,
+    "cycles": 53703
+   },
+   "pass_compute": {
+    "cycles": 53703,
+    "g1": 144,
+    "g2": 144,
+    "maxulp": 0,
+    "ulp1": 0,
+    "ulp2": 0
+   },
+   "perfr": {
+    "clear": 0,
+    "clip": 0,
+    "ctl": 0,
+    "depth": 0,
+    "fpn": 0,
+    "fpw": 0,
+    "fswait": 0,
+    "gather": 0,
+    "interp": 0,
+    "merge": 0,
+    "mpn": 0,
+    "mpw": 0,
+    "scan": 0,
+    "setup": 0,
+    "vswait": 0
+   },
+   "perft": {
+    "any": 36006,
+    "ctl": 5178,
+    "exec": 4350,
+    "mpn_ctl": 651,
+    "mpn_exec": 0,
+    "mpn_obj": 350,
+    "mpn_pump": 2851,
+    "mpn_rast": 0,
+    "mpn_sh": 200,
+    "mpw_ctl": 1953,
+    "mpw_exec": 0,
+    "mpw_obj": 1050,
+    "mpw_pump": 8553,
+    "mpw_rast": 0,
+    "mpw_sh": 600,
+    "pump": 32164,
+    "rast": 0,
+    "sh": 3968,
+    "xfer": 0
+   },
+   "stat": {
+    "busy": 0,
+    "pixwr": 0,
+    "tris": 0
+   }
+  },
+  "vgtop:ue_cpos_xfer_big_1": {
+   "derived": {
+    "engine_pct": {
+     "any": 97.1,
+     "ctl": 1.3,
+     "exec": 91.3,
+     "pump": 96.0,
+     "sh": 0.2,
+     "xfer": 91.1
+    },
+    "idle_pct": 2.9,
+    "port_cyc_per_req": {
+     "ctl": 3.0,
+     "obj": 3.0,
+     "pump": 3.0,
+     "sh": 3.0
+    },
+    "port_req": {
+     "ctl": 931,
+     "obj": 506,
+     "pump": 4180,
+     "sh": 56
+    }
+   },
+   "pass": {
+    "bench": "tb_g6lc_apu_vgtop",
+    "cases": 49,
+    "checks": 1646,
+    "cycles": 720617
+   },
+   "pass_compute": {
+    "cycles": 720617,
+    "g1": 153,
+    "g2": 153,
+    "maxulp": 0,
+    "ulp1": 0,
+    "ulp2": 0
+   },
+   "perfr": {
+    "clear": 0,
+    "clip": 0,
+    "ctl": 0,
+    "depth": 0,
+    "fpn": 0,
+    "fpw": 0,
+    "fswait": 0,
+    "gather": 0,
+    "interp": 0,
+    "merge": 0,
+    "mpn": 0,
+    "mpw": 0,
+    "scan": 0,
+    "setup": 0,
+    "vswait": 0
+   },
+   "perft": {
+    "any": 699777,
+    "ctl": 9335,
+    "exec": 658086,
+    "mpn_ctl": 931,
+    "mpn_exec": 0,
+    "mpn_obj": 506,
+    "mpn_pump": 4180,
+    "mpn_rast": 0,
+    "mpn_sh": 56,
+    "mpw_ctl": 2793,
+    "mpw_exec": 0,
+    "mpw_obj": 1518,
+    "mpw_pump": 12540,
+    "mpw_rast": 0,
+    "mpw_sh": 168,
+    "pump": 692148,
+    "rast": 0,
+    "sh": 1209,
+    "xfer": 656371
+   },
+   "stat": {
+    "busy": 0,
+    "pixwr": 0,
+    "tris": 0
+   }
+  },
+  "vgtop:ue_gpos_blend_1": {
+   "derived": {
+    "busy_per_pixel": 182.6,
+    "class_pct": {
+     "clear": 6.6,
+     "clip": 0.0,
+     "ctl": 0.0,
+     "fswait": 14.3,
+     "gather": 0.1,
+     "interp": 32.5,
+     "merge": 45.5,
+     "scan": 0.3,
+     "setup": 0.2,
+     "vswait": 0.5
+    },
+    "class_sum": 93480,
+    "engine_pct": {
+     "any": 92.2,
+     "ctl": 11.7,
+     "exec": 63.2,
+     "pump": 81.7,
+     "rast": 56.2,
+     "sh": 8.3,
+     "xfer": 6.7
+    },
+    "fpw_per_fpn": 0.42,
+    "idle_pct": 7.8,
+    "mpw_per_mpn": 0.73,
+    "port_cyc_per_req": {
+     "ctl": 3.0,
+     "obj": 3.0,
+     "pump": 3.0,
+     "rast": 3.0,
+     "sh": 3.0
+    },
+    "port_req": {
+     "ctl": 5681,
+     "obj": 420,
+     "pump": 3376,
+     "rast": 6439,
+     "sh": 2328
+    }
+   },
+   "pass": {
+    "bench": "tb_g6lc_apu_vgtop",
+    "cases": 26,
+    "checks": 17016,
+    "cycles": 166302
+   },
+   "pass_compute": {
+    "cycles": 166302,
+    "g1": 4096,
+    "g2": 4096,
+    "maxulp": 0,
+    "ulp1": 0,
+    "ulp2": 0
+   },
+   "perfr": {
+    "clear": 6140,
+    "clip": 12,
+    "ctl": 21,
+    "depth": 0,
+    "fpn": 30703,
+    "fpw": 12867,
+    "fswait": 13378,
+    "gather": 99,
+    "interp": 30384,
+    "merge": 42560,
+    "mpn": 6439,
+    "mpw": 4684,
+    "scan": 289,
+    "setup": 159,
+    "vswait": 438
+   },
+   "perft": {
+    "any": 153389,
+    "ctl": 19509,
+    "exec": 105167,
+    "mpn_ctl": 5681,
+    "mpn_exec": 0,
+    "mpn_obj": 420,
+    "mpn_pump": 3376,
+    "mpn_rast": 6439,
+    "mpn_sh": 2328,
+    "mpw_ctl": 17043,
+    "mpw_exec": 0,
+    "mpw_obj": 1260,
+    "mpw_pump": 10128,
+    "mpw_rast": 19317,
+    "mpw_sh": 6984,
+    "pump": 135946,
+    "rast": 93480,
+    "sh": 13773,
+    "xfer": 11141
+   },
+   "stat": {
+    "busy": 93480,
+    "pixwr": 512,
+    "tris": 1
+   }
+  },
+  "vgtop:ue_gpos_dbias_1": {
+   "derived": {
+    "busy_per_pixel": 241.4,
+    "class_pct": {
+     "clear": 9.9,
+     "clip": 0.0,
+     "ctl": 0.0,
+     "depth": 11.2,
+     "fswait": 21.6,
+     "gather": 0.2,
+     "interp": 49.6,
+     "merge": 6.3,
+     "scan": 0.5,
+     "setup": 0.3,
+     "vswait": 0.4
+    },
+    "class_sum": 123578,
+    "engine_pct": {
+     "any": 91.8,
+     "ctl": 14.2,
+     "exec": 63.0,
+     "pump": 78.9,
+     "rast": 53.1,
+     "sh": 11.7,
+     "xfer": 9.6
+    },
+    "fpw_per_fpn": 0.06,
+    "idle_pct": 8.2,
+    "mpw_per_mpn": 0.53,
+    "port_cyc_per_req": {
+     "ctl": 3.0,
+     "obj": 3.0,
+     "pump": 3.0,
+     "rast": 3.0,
+     "sh": 3.0
+    },
+    "port_req": {
+     "ctl": 9873,
+     "obj": 516,
+     "pump": 4209,
+     "rast": 11860,
+     "sh": 4656
+    }
+   },
+   "pass": {
+    "bench": "tb_g6lc_apu_vgtop",
+    "cases": 31,
+    "checks": 33519,
+    "cycles": 232779
+   },
+   "pass_compute": {
+    "cycles": 232779,
+    "g1": 8192,
+    "g2": 8192,
+    "maxulp": 0,
+    "ulp1": 0,
+    "ulp2": 0
+   },
+   "perfr": {
+    "clear": 12280,
+    "clip": 24,
+    "ctl": 28,
+    "depth": 13824,
+    "fpn": 37851,
+    "fpw": 2179,
+    "fswait": 26734,
+    "gather": 216,
+    "interp": 61280,
+    "merge": 7808,
+    "mpn": 11860,
+    "mpw": 6316,
+    "scan": 578,
+    "setup": 317,
+    "vswait": 489
+   },
+   "perft": {
+    "any": 213733,
+    "ctl": 33031,
+    "exec": 146704,
+    "mpn_ctl": 9873,
+    "mpn_exec": 0,
+    "mpn_obj": 516,
+    "mpn_pump": 4209,
+    "mpn_rast": 11860,
+    "mpn_sh": 4656,
+    "mpw_ctl": 29619,
+    "mpw_exec": 0,
+    "mpw_obj": 1548,
+    "mpw_pump": 12627,
+    "mpw_rast": 35580,
+    "mpw_sh": 13968,
+    "pump": 183768,
+    "rast": 123578,
+    "sh": 27144,
+    "xfer": 22366
+   },
+   "stat": {
+    "busy": 123578,
+    "pixwr": 512,
+    "tris": 2
+   }
+  },
+  "vgtop:ue_gpos_deriv2_1": {
+   "derived": {
+    "busy_per_pixel": 135.4,
+    "class_pct": {
+     "clear": 1.1,
+     "clip": 0.0,
+     "ctl": 0.0,
+     "fswait": 32.7,
+     "gather": 0.0,
+     "interp": 55.5,
+     "merge": 10.3,
+     "scan": 0.2,
+     "setup": 0.0,
+     "vswait": 0.1
+    },
+    "class_sum": 554782,
+    "engine_pct": {
+     "any": 98.0,
+     "ctl": 3.1,
+     "exec": 89.8,
+     "pump": 95.2,
+     "rast": 88.0,
+     "sh": 28.8,
+     "xfer": 1.8
+    },
+    "fpw_per_fpn": 0.0,
+    "idle_pct": 2.0,
+    "mpw_per_mpn": 0.63,
+    "port_cyc_per_req": {
+     "ctl": 3.0,
+     "obj": 3.0,
+     "pump": 3.0,
+     "rast": 3.0,
+     "sh": 3.0
+    },
+    "port_req": {
+     "ctl": 5681,
+     "obj": 484,
+     "pump": 3471,
+     "rast": 38966,
+     "sh": 16411
+    }
+   },
+   "pass": {
+    "bench": "tb_g6lc_apu_vgtop",
+    "cases": 26,
+    "checks": 17016,
+    "cycles": 630585
+   },
+   "pass_compute": {
+    "cycles": 630585,
+    "g1": 4096,
+    "g2": 4096,
+    "maxulp": 0,
+    "ulp1": 0,
+    "ulp2": 0
+   },
+   "perfr": {
+    "clear": 6140,
+    "clip": 12,
+    "ctl": 21,
+    "depth": 0,
+    "fpn": 192559,
+    "fpw": 80,
+    "fswait": 181218,
+    "gather": 129,
+    "interp": 308149,
+    "merge": 57344,
+    "mpn": 38966,
+    "mpw": 24688,
+    "scan": 1089,
+    "setup": 192,
+    "vswait": 488
+   },
+   "perft": {
+    "any": 617672,
+    "ctl": 19509,
+    "exec": 566469,
+    "mpn_ctl": 5681,
+    "mpn_exec": 0,
+    "mpn_obj": 484,
+    "mpn_pump": 3471,
+    "mpn_rast": 38966,
+    "mpn_sh": 16411,
+    "mpw_ctl": 17043,
+    "mpw_exec": 0,
+    "mpw_obj": 1452,
+    "mpw_pump": 10413,
+    "mpw_rast": 116898,
+    "mpw_sh": 49233,
+    "pump": 600229,
+    "rast": 554782,
+    "sh": 181443,
+    "xfer": 11141
+   },
+   "stat": {
+    "busy": 554782,
+    "pixwr": 4096,
+    "tris": 1
+   }
+  },
+  "vgtop:ue_gpos_dtest_1": {
+   "derived": {
+    "busy_per_pixel": 227.4,
+    "class_pct": {
+     "clear": 10.5,
+     "clip": 0.0,
+     "ctl": 0.0,
+     "depth": 5.7,
+     "fswait": 23.0,
+     "gather": 0.2,
+     "interp": 52.6,
+     "merge": 6.7,
+     "scan": 0.5,
+     "setup": 0.3,
+     "vswait": 0.4
+    },
+    "class_sum": 116410,
+    "engine_pct": {
+     "any": 91.6,
+     "ctl": 14.6,
+     "exec": 61.8,
+     "pump": 78.3,
+     "rast": 51.6,
+     "sh": 12.0,
+     "xfer": 9.9
+    },
+    "fpw_per_fpn": 0.0,
+    "idle_pct": 8.4,
+    "mpw_per_mpn": 0.53,
+    "port_cyc_per_req": {
+     "ctl": 3.0,
+     "obj": 3.0,
+     "pump": 3.0,
+     "rast": 3.0,
+     "sh": 3.0
+    },
+    "port_req": {
+     "ctl": 9873,
+     "obj": 516,
+     "pump": 4209,
+     "rast": 11860,
+     "sh": 4656
+    }
+   },
+   "pass": {
+    "bench": "tb_g6lc_apu_vgtop",
+    "cases": 31,
+    "checks": 33519,
+    "cycles": 225611
+   },
+   "pass_compute": {
+    "cycles": 225611,
+    "g1": 8192,
+    "g2": 8192,
+    "maxulp": 0,
+    "ulp1": 0,
+    "ulp2": 0
+   },
+   "perfr": {
+    "clear": 12280,
+    "clip": 24,
+    "ctl": 28,
+    "depth": 6656,
+    "fpn": 35803,
+    "fpw": 131,
+    "fswait": 26734,
+    "gather": 216,
+    "interp": 61280,
+    "merge": 7808,
+    "mpn": 11860,
+    "mpw": 6316,
+    "scan": 578,
+    "setup": 317,
+    "vswait": 489
+   },
+   "perft": {
+    "any": 206565,
+    "ctl": 33031,
+    "exec": 139536,
+    "mpn_ctl": 9873,
+    "mpn_exec": 0,
+    "mpn_obj": 516,
+    "mpn_pump": 4209,
+    "mpn_rast": 11860,
+    "mpn_sh": 4656,
+    "mpw_ctl": 29619,
+    "mpw_exec": 0,
+    "mpw_obj": 1548,
+    "mpw_pump": 12627,
+    "mpw_rast": 35580,
+    "mpw_sh": 13968,
+    "pump": 176600,
+    "rast": 116410,
+    "sh": 27144,
+    "xfer": 22366
+   },
+   "stat": {
+    "busy": 116410,
+    "pixwr": 512,
+    "tris": 2
+   }
+  },
+  "vgtop:ue_gpos_ftex_1": {
+   "derived": {
+    "busy_per_pixel": 287.3,
+    "class_pct": {
+     "clear": 4.2,
+     "clip": 0.0,
+     "ctl": 0.0,
+     "fswait": 69.6,
+     "gather": 0.1,
+     "interp": 20.7,
+     "merge": 4.9,
+     "scan": 0.2,
+     "setup": 0.1,
+     "vswait": 0.3
+    },
+    "class_sum": 147109,
+    "engine_pct": {
+     "any": 94.3,
+     "ctl": 8.9,
+     "exec": 69.7,
+     "pump": 86.4,
+     "rast": 64.6,
+     "sh": 45.1,
+     "xfer": 4.9
+    },
+    "fpw_per_fpn": 0.0,
+    "idle_pct": 5.7,
+    "mpw_per_mpn": 0.53,
+    "port_cyc_per_req": {
+     "ctl": 3.0,
+     "obj": 3.0,
+     "pump": 3.0,
+     "rast": 3.0,
+     "sh": 3.0
+    },
+    "port_req": {
+     "ctl": 5719,
+     "obj": 552,
+     "pump": 4226,
+     "rast": 5924,
+     "sh": 2430
+    }
+   },
+   "pass": {
+    "bench": "tb_g6lc_apu_vgtop",
+    "cases": 28,
+    "checks": 17122,
+    "cycles": 227695
+   },
+   "pass_compute": {
+    "cycles": 227695,
+    "g1": 4096,
+    "g2": 4096,
+    "maxulp": 0,
+    "ulp1": 0,
+    "ulp2": 0
+   },
+   "perfr": {
+    "clear": 6140,
+    "clip": 12,
+    "ctl": 22,
+    "depth": 0,
+    "fpn": 17903,
+    "fpw": 67,
+    "fswait": 102322,
+    "gather": 90,
+    "interp": 30384,
+    "merge": 7232,
+    "mpn": 5924,
+    "mpw": 3139,
+    "scan": 289,
+    "setup": 159,
+    "vswait": 459
+   },
+   "perft": {
+    "any": 214789,
+    "ctl": 20223,
+    "exec": 158772,
+    "mpn_ctl": 5719,
+    "mpn_exec": 0,
+    "mpn_obj": 552,
+    "mpn_pump": 4226,
+    "mpn_rast": 5924,
+    "mpn_sh": 2430,
+    "mpw_ctl": 17157,
+    "mpw_exec": 0,
+    "mpw_obj": 1656,
+    "mpw_pump": 12678,
+    "mpw_rast": 17772,
+    "mpw_sh": 7290,
+    "pump": 196678,
+    "rast": 147109,
+    "sh": 102738,
+    "xfer": 11117
+   },
+   "stat": {
+    "busy": 147109,
+    "pixwr": 512,
+    "tris": 1
+   }
+  },
+  "vgtop:ue_gpos_ftexl_1": {
+   "derived": {
+    "busy_per_pixel": 322.8,
+    "class_pct": {
+     "clear": 3.7,
+     "clip": 0.0,
+     "ctl": 0.0,
+     "fswait": 72.9,
+     "gather": 0.1,
+     "interp": 18.4,
+     "merge": 4.4,
+     "scan": 0.2,
+     "setup": 0.1,
+     "vswait": 0.3
+    },
+    "class_sum": 165265,
+    "engine_pct": {
+     "any": 94.8,
+     "ctl": 8.2,
+     "exec": 72.0,
+     "pump": 87.4,
+     "rast": 67.2,
+     "sh": 49.2,
+     "xfer": 4.5
+    },
+    "fpw_per_fpn": 0.0,
+    "idle_pct": 5.2,
+    "mpw_per_mpn": 0.53,
+    "port_cyc_per_req": {
+     "ctl": 3.0,
+     "obj": 3.0,
+     "pump": 3.0,
+     "rast": 3.0,
+     "sh": 3.0
+    },
+    "port_req": {
+     "ctl": 5719,
+     "obj": 552,
+     "pump": 4226,
+     "rast": 5924,
+     "sh": 2526
+    }
+   },
+   "pass": {
+    "bench": "tb_g6lc_apu_vgtop",
+    "cases": 28,
+    "checks": 17122,
+    "cycles": 245851
+   },
+   "pass_compute": {
+    "cycles": 245851,
+    "g1": 4096,
+    "g2": 4096,
+    "maxulp": 0,
+    "ulp1": 0,
+    "ulp2": 0
+   },
+   "perfr": {
+    "clear": 6140,
+    "clip": 12,
+    "ctl": 22,
+    "depth": 0,
+    "fpn": 17903,
+    "fpw": 67,
+    "fswait": 120478,
+    "gather": 90,
+    "interp": 30384,
+    "merge": 7232,
+    "mpn": 5924,
+    "mpw": 3139,
+    "scan": 289,
+    "setup": 159,
+    "vswait": 459
+   },
+   "perft": {
+    "any": 232945,
+    "ctl": 20223,
+    "exec": 176928,
+    "mpn_ctl": 5719,
+    "mpn_exec": 0,
+    "mpn_obj": 552,
+    "mpn_pump": 4226,
+    "mpn_rast": 5924,
+    "mpn_sh": 2526,
+    "mpw_ctl": 17157,
+    "mpw_exec": 0,
+    "mpw_obj": 1656,
+    "mpw_pump": 12678,
+    "mpw_rast": 17772,
+    "mpw_sh": 7578,
+    "pump": 214834,
+    "rast": 165265,
+    "sh": 120894,
+    "xfer": 11117
+   },
+   "stat": {
+    "busy": 165265,
+    "pixwr": 512,
+    "tris": 1
+   }
+  },
+  "vgtop:ue_gpos_grad_1": {
+   "derived": {
+    "busy_per_pixel": 113.6,
+    "class_pct": {
+     "clear": 10.6,
+     "clip": 0.0,
+     "ctl": 0.0,
+     "fswait": 23.0,
+     "gather": 0.2,
+     "interp": 52.2,
+     "merge": 12.4,
+     "scan": 0.5,
+     "setup": 0.3,
+     "vswait": 0.8
+    },
+    "class_sum": 58152,
+    "engine_pct": {
+     "any": 90.1,
+     "ctl": 14.9,
+     "exec": 53.4,
+     "pump": 76.8,
+     "rast": 44.5,
+     "sh": 10.5,
+     "xfer": 8.5
+    },
+    "fpw_per_fpn": 0.0,
+    "idle_pct": 9.9,
+    "mpw_per_mpn": 0.53,
+    "port_cyc_per_req": {
+     "ctl": 3.0,
+     "obj": 3.0,
+     "pump": 3.0,
+     "rast": 3.0,
+     "sh": 3.0
+    },
+    "port_req": {
+     "ctl": 5681,
+     "obj": 420,
+     "pump": 3338,
+     "rast": 5927,
+     "sh": 2328
+    }
+   },
+   "pass": {
+    "bench": "tb_g6lc_apu_vgtop",
+    "cases": 26,
+    "checks": 17016,
+    "cycles": 130796
+   },
+   "pass_compute": {
+    "cycles": 130796,
+    "g1": 4096,
+    "g2": 4096,
+    "maxulp": 0,
+    "ulp1": 0,
+    "ulp2": 0
+   },
+   "perfr": {
+    "clear": 6140,
+    "clip": 12,
+    "ctl": 21,
+    "depth": 0,
+    "fpn": 17903,
+    "fpw": 67,
+    "fswait": 13378,
+    "gather": 99,
+    "interp": 30384,
+    "merge": 7232,
+    "mpn": 5927,
+    "mpw": 3148,
+    "scan": 289,
+    "setup": 159,
+    "vswait": 438
+   },
+   "perft": {
+    "any": 117883,
+    "ctl": 19509,
+    "exec": 69839,
+    "mpn_ctl": 5681,
+    "mpn_exec": 0,
+    "mpn_obj": 420,
+    "mpn_pump": 3338,
+    "mpn_rast": 5927,
+    "mpn_sh": 2328,
+    "mpw_ctl": 17043,
+    "mpw_exec": 0,
+    "mpw_obj": 1260,
+    "mpw_pump": 10014,
+    "mpw_rast": 17781,
+    "mpw_sh": 6984,
+    "pump": 100440,
+    "rast": 58152,
+    "sh": 13773,
+    "xfer": 11141
+   },
+   "stat": {
+    "busy": 58152,
+    "pixwr": 512,
+    "tris": 1
+   }
+  },
+  "vgtop:ue_gpos_inst_1": {
+   "derived": {
+    "busy_per_pixel": 114.3,
+    "class_pct": {
+     "clear": 2.6,
+     "clip": 0.0,
+     "ctl": 0.0,
+     "fswait": 32.7,
+     "gather": 0.2,
+     "interp": 50.2,
+     "merge": 12.3,
+     "scan": 0.5,
+     "setup": 0.3,
+     "vswait": 1.2
+    },
+    "class_sum": 232115,
+    "engine_pct": {
+     "any": 95.8,
+     "ctl": 6.3,
+     "exec": 78.8,
+     "pump": 90.2,
+     "rast": 75.1,
+     "sh": 25.4,
+     "xfer": 3.6
+    },
+    "fpw_per_fpn": 0.0,
+    "idle_pct": 4.2,
+    "mpw_per_mpn": 0.73,
+    "port_cyc_per_req": {
+     "ctl": 3.0,
+     "obj": 3.0,
+     "pump": 3.0,
+     "rast": 3.0,
+     "sh": 3.0
+    },
+    "port_req": {
+     "ctl": 5681,
+     "obj": 516,
+     "pump": 3522,
+     "rast": 17126,
+     "sh": 8952
+    }
+   },
+   "pass": {
+    "bench": "tb_g6lc_apu_vgtop",
+    "cases": 26,
+    "checks": 17016,
+    "cycles": 309268
+   },
+   "pass_compute": {
+    "cycles": 309268,
+    "g1": 4096,
+    "g2": 4096,
+    "maxulp": 0,
+    "ulp1": 0,
+    "ulp2": 0
+   },
+   "perfr": {
+    "clear": 6140,
+    "clip": 48,
+    "ctl": 27,
+    "depth": 0,
+    "fpn": 68627,
+    "fpw": 259,
+    "fswait": 75909,
+    "gather": 396,
+    "interp": 116472,
+    "merge": 28598,
+    "mpn": 17126,
+    "mpw": 12484,
+    "scan": 1139,
+    "setup": 636,
+    "vswait": 2750
+   },
+   "perft": {
+    "any": 296355,
+    "ctl": 19509,
+    "exec": 243802,
+    "mpn_ctl": 5681,
+    "mpn_exec": 0,
+    "mpn_obj": 516,
+    "mpn_pump": 3522,
+    "mpn_rast": 17126,
+    "mpn_sh": 8952,
+    "mpw_ctl": 17043,
+    "mpw_exec": 0,
+    "mpw_obj": 1548,
+    "mpw_pump": 10566,
+    "mpw_rast": 51378,
+    "mpw_sh": 26856,
+    "pump": 278912,
+    "rast": 232115,
+    "sh": 78487,
+    "xfer": 11141
+   },
+   "stat": {
+    "busy": 232115,
+    "pixwr": 2030,
+    "tris": 4
+   }
+  },
+  "vgtop:ue_gpos_line_1": {
+   "derived": {
+    "busy_per_pixel": 235.1,
+    "class_pct": {
+     "clear": 63.7,
+     "clip": 0.1,
+     "ctl": 0.2,
+     "fswait": 11.2,
+     "gather": 0.7,
+     "interp": 11.9,
+     "merge": 6.0,
+     "scan": 0.9,
+     "setup": 1.0,
+     "vswait": 4.4
+    },
+    "class_sum": 9641,
+    "engine_pct": {
+     "any": 84.3,
+     "ctl": 23.7,
+     "exec": 25.9,
+     "pump": 63.1,
+     "rast": 11.7,
+     "sh": 1.8,
+     "xfer": 13.5
+    },
+    "fpw_per_fpn": 0.07,
+    "idle_pct": 15.7,
+    "mpw_per_mpn": 0.13,
+    "port_cyc_per_req": {
+     "ctl": 3.0,
+     "obj": 3.0,
+     "pump": 3.0,
+     "rast": 3.0,
+     "sh": 3.0
+    },
+    "port_req": {
+     "ctl": 5681,
+     "obj": 420,
+     "pump": 3338,
+     "rast": 2277,
+     "sh": 180
+    }
+   },
+   "pass": {
+    "bench": "tb_g6lc_apu_vgtop",
+    "cases": 26,
+    "checks": 17016,
+    "cycles": 82285
+   },
+   "pass_compute": {
+    "cycles": 82285,
+    "g1": 4096,
+    "g2": 4096,
+    "maxulp": 0,
+    "ulp1": 0,
+    "ulp2": 0
+   },
+   "perfr": {
+    "clear": 6140,
+    "clip": 10,
+    "ctl": 21,
+    "depth": 0,
+    "fpn": 691,
+    "fpw": 47,
+    "fswait": 1082,
+    "gather": 66,
+    "interp": 1148,
+    "merge": 574,
+    "mpn": 2277,
+    "mpw": 290,
+    "scan": 82,
+    "setup": 97,
+    "vswait": 421
+   },
+   "perft": {
+    "any": 69372,
+    "ctl": 19509,
+    "exec": 21328,
+    "mpn_ctl": 5681,
+    "mpn_exec": 0,
+    "mpn_obj": 420,
+    "mpn_pump": 3338,
+    "mpn_rast": 2277,
+    "mpn_sh": 180,
+    "mpw_ctl": 17043,
+    "mpw_exec": 0,
+    "mpw_obj": 1260,
+    "mpw_pump": 10014,
+    "mpw_rast": 6831,
+    "mpw_sh": 540,
+    "pump": 51929,
+    "rast": 9641,
+    "sh": 1492,
+    "xfer": 11141
+   },
+   "stat": {
+    "busy": 9641,
+    "pixwr": 41,
+    "tris": 1
+   }
+  },
+  "vgtop:ue_gpos_mrt4_1": {
+   "derived": {
+    "busy_per_pixel": 78.6,
+    "class_pct": {
+     "clear": 15.3,
+     "clip": 0.0,
+     "ctl": 0.0,
+     "fswait": 49.9,
+     "gather": 0.1,
+     "interp": 18.9,
+     "merge": 15.3,
+     "scan": 0.2,
+     "setup": 0.1,
+     "vswait": 0.3
+    },
+    "class_sum": 160878,
+    "engine_pct": {
+     "any": 94.3,
+     "ctl": 19.9,
+     "exec": 61.7,
+     "pump": 77.9,
+     "rast": 47.9,
+     "sh": 24.0,
+     "xfer": 13.4
+    },
+    "fpw_per_fpn": 0.0,
+    "idle_pct": 5.7,
+    "mpw_per_mpn": 0.86,
+    "port_cyc_per_req": {
+     "ctl": 3.0,
+     "obj": 3.0,
+     "pump": 3.0,
+     "rast": 3.0,
+     "sh": 3.0
+    },
+    "port_req": {
+     "ctl": 18217,
+     "obj": 868,
+     "pump": 5934,
+     "rast": 16679,
+     "sh": 6360
+    }
+   },
+   "pass": {
+    "bench": "tb_g6lc_apu_vgtop",
+    "cases": 39,
+    "checks": 66495,
+    "cycles": 335683
+   },
+   "pass_compute": {
+    "cycles": 335683,
+    "g1": 16384,
+    "g2": 16384,
+    "maxulp": 0,
+    "ulp1": 0,
+    "ulp2": 0
+   },
+   "perfr": {
+    "clear": 24560,
+    "clip": 12,
+    "ctl": 42,
+    "depth": 0,
+    "fpn": 17903,
+    "fpw": 67,
+    "fswait": 80292,
+    "gather": 99,
+    "interp": 30384,
+    "merge": 24603,
+    "mpn": 16679,
+    "mpw": 14375,
+    "scan": 289,
+    "setup": 159,
+    "vswait": 438
+   },
+   "perft": {
+    "any": 316604,
+    "ctl": 66801,
+    "exec": 206973,
+    "mpn_ctl": 18217,
+    "mpn_exec": 0,
+    "mpn_obj": 868,
+    "mpn_pump": 5934,
+    "mpn_rast": 16679,
+    "mpn_sh": 6360,
+    "mpw_ctl": 54651,
+    "mpw_exec": 0,
+    "mpw_obj": 2604,
+    "mpw_pump": 17802,
+    "mpw_rast": 50037,
+    "mpw_sh": 19080,
+    "pump": 261409,
+    "rast": 160878,
+    "sh": 80687,
+    "xfer": 44878
+   },
+   "stat": {
+    "busy": 160878,
+    "pixwr": 2048,
+    "tris": 1
+   }
+  },
+  "vgtop:ue_gpos_persp_1": {
+   "derived": {
+    "busy_per_pixel": 120.2,
+    "class_pct": {
+     "clear": 5.4,
+     "clip": 0.0,
+     "ctl": 0.0,
+     "fswait": 21.3,
+     "gather": 0.1,
+     "interp": 60.1,
+     "merge": 11.7,
+     "scan": 0.6,
+     "setup": 0.2,
+     "vswait": 0.6
+    },
+    "class_sum": 113379,
+    "engine_pct": {
+     "any": 93.1,
+     "ctl": 10.4,
+     "exec": 66.9,
+     "pump": 83.8,
+     "rast": 60.6,
+     "sh": 13.2,
+     "xfer": 6.0
+    },
+    "fpw_per_fpn": 0.0,
+    "idle_pct": 6.9,
+    "mpw_per_mpn": 0.63,
+    "port_cyc_per_req": {
+     "ctl": 3.0,
+     "obj": 3.0,
+     "pump": 3.0,
+     "rast": 3.0,
+     "sh": 3.0
+    },
+    "port_req": {
+     "ctl": 5681,
+     "obj": 436,
+     "pump": 3381,
+     "rast": 9063,
+     "sh": 4174
+    }
+   },
+   "pass": {
+    "bench": "tb_g6lc_apu_vgtop",
+    "cases": 26,
+    "checks": 17016,
+    "cycles": 186981
+   },
+   "pass_compute": {
+    "cycles": 186981,
+    "g1": 4096,
+    "g2": 4096,
+    "maxulp": 0,
+    "ulp1": 0,
+    "ulp2": 0
+   },
+   "perfr": {
+    "clear": 6140,
+    "clip": 12,
+    "ctl": 21,
+    "depth": 0,
+    "fpn": 32163,
+    "fpw": 106,
+    "fswait": 24114,
+    "gather": 108,
+    "interp": 68117,
+    "merge": 13295,
+    "mpn": 9063,
+    "mpw": 5743,
+    "scan": 729,
+    "setup": 198,
+    "vswait": 645
+   },
+   "perft": {
+    "any": 174068,
+    "ctl": 19509,
+    "exec": 125066,
+    "mpn_ctl": 5681,
+    "mpn_exec": 0,
+    "mpn_obj": 436,
+    "mpn_pump": 3381,
+    "mpn_rast": 9063,
+    "mpn_sh": 4174,
+    "mpw_ctl": 17043,
+    "mpw_exec": 0,
+    "mpw_obj": 1308,
+    "mpw_pump": 10143,
+    "mpw_rast": 27189,
+    "mpw_sh": 12522,
+    "pump": 156625,
+    "rast": 113379,
+    "sh": 24684,
+    "xfer": 11141
+   },
+   "stat": {
+    "busy": 113379,
+    "pixwr": 943,
+    "tris": 1
+   }
+  },
+  "vgtop:ue_gpos_stencil_1": {
+   "derived": {
+    "busy_per_pixel": 136.6,
+    "class_pct": {
+     "clear": 17.6,
+     "clip": 0.0,
+     "ctl": 0.0,
+     "depth": 7.3,
+     "fswait": 19.1,
+     "gather": 0.1,
+     "interp": 44.2,
+     "merge": 10.3,
+     "scan": 0.4,
+     "setup": 0.2,
+     "vswait": 0.6
+    },
+    "class_sum": 69931,
+    "engine_pct": {
+     "any": 89.4,
+     "ctl": 18.4,
+     "exec": 51.9,
+     "pump": 72.6,
+     "rast": 39.0,
+     "sh": 7.7,
+     "xfer": 12.5
+    },
+    "fpw_per_fpn": 0.06,
+    "idle_pct": 10.6,
+    "mpw_per_mpn": 0.52,
+    "port_cyc_per_req": {
+     "ctl": 3.0,
+     "obj": 3.0,
+     "pump": 3.0,
+     "rast": 3.0,
+     "sh": 3.0
+    },
+    "port_req": {
+     "ctl": 9873,
+     "obj": 516,
+     "pump": 4209,
+     "rast": 8999,
+     "sh": 2328
+    }
+   },
+   "pass": {
+    "bench": "tb_g6lc_apu_vgtop",
+    "cases": 31,
+    "checks": 33519,
+    "cycles": 179132
+   },
+   "pass_compute": {
+    "cycles": 179132,
+    "g1": 8192,
+    "g2": 8192,
+    "maxulp": 0,
+    "ulp1": 0,
+    "ulp2": 0
+   },
+   "perfr": {
+    "clear": 12280,
+    "clip": 12,
+    "ctl": 28,
+    "depth": 5120,
+    "fpn": 18927,
+    "fpw": 1091,
+    "fswait": 13378,
+    "gather": 99,
+    "interp": 30896,
+    "merge": 7232,
+    "mpn": 8999,
+    "mpw": 4684,
+    "scan": 289,
+    "setup": 159,
+    "vswait": 438
+   },
+   "perft": {
+    "any": 160086,
+    "ctl": 33031,
+    "exec": 93057,
+    "mpn_ctl": 9873,
+    "mpn_exec": 0,
+    "mpn_obj": 516,
+    "mpn_pump": 4209,
+    "mpn_rast": 8999,
+    "mpn_sh": 2328,
+    "mpw_ctl": 29619,
+    "mpw_exec": 0,
+    "mpw_obj": 1548,
+    "mpw_pump": 12627,
+    "mpw_rast": 26997,
+    "mpw_sh": 6984,
+    "pump": 130121,
+    "rast": 69931,
+    "sh": 13773,
+    "xfer": 22366
+   },
+   "stat": {
+    "busy": 69931,
+    "pixwr": 512,
+    "tris": 1
+   }
+  },
+  "vgtop:ue_gpos_tri_1": {
+   "derived": {
+    "busy_per_pixel": 126.5,
+    "class_pct": {
+     "clear": 9.5,
+     "clip": 0.0,
+     "ctl": 0.0,
+     "fswait": 30.6,
+     "gather": 0.2,
+     "interp": 46.9,
+     "merge": 11.2,
+     "scan": 0.4,
+     "setup": 0.2,
+     "vswait": 0.9
+    },
+    "class_sum": 64759,
+    "engine_pct": {
+     "any": 90.8,
+     "ctl": 14.0,
+     "exec": 54.7,
+     "pump": 78.3,
+     "rast": 46.3,
+     "sh": 14.6,
+     "xfer": 8.0
+    },
+    "fpw_per_fpn": 0.0,
+    "idle_pct": 9.2,
+    "mpw_per_mpn": 0.53,
+    "port_cyc_per_req": {
+     "ctl": 3.0,
+     "obj": 3.0,
+     "pump": 3.0,
+     "rast": 3.0,
+     "sh": 3.0
+    },
+    "port_req": {
+     "ctl": 5681,
+     "obj": 468,
+     "pump": 3436,
+     "rast": 5927,
+     "sh": 2328
+    }
+   },
+   "pass": {
+    "bench": "tb_g6lc_apu_vgtop",
+    "cases": 26,
+    "checks": 17016,
+    "cycles": 139747
+   },
+   "pass_compute": {
+    "cycles": 139747,
+    "g1": 4096,
+    "g2": 4096,
+    "maxulp": 0,
+    "ulp1": 0,
+    "ulp2": 0
+   },
+   "perfr": {
+    "clear": 6140,
+    "clip": 12,
+    "ctl": 21,
+    "depth": 0,
+    "fpn": 17903,
+    "fpw": 67,
+    "fswait": 19839,
+    "gather": 99,
+    "interp": 30384,
+    "merge": 7232,
+    "mpn": 5927,
+    "mpw": 3148,
+    "scan": 289,
+    "setup": 159,
+    "vswait": 584
+   },
+   "perft": {
+    "any": 126834,
+    "ctl": 19509,
+    "exec": 76446,
+    "mpn_ctl": 5681,
+    "mpn_exec": 0,
+    "mpn_obj": 468,
+    "mpn_pump": 3436,
+    "mpn_rast": 5927,
+    "mpn_sh": 2328,
+    "mpw_ctl": 17043,
+    "mpw_exec": 0,
+    "mpw_obj": 1404,
+    "mpw_pump": 10308,
+    "mpw_rast": 17781,
+    "mpw_sh": 6984,
+    "pump": 109391,
+    "rast": 64759,
+    "sh": 20380,
+    "xfer": 11141
+   },
+   "stat": {
+    "busy": 64759,
+    "pixwr": 512,
+    "tris": 1
+   }
+  },
+  "vgtop:ue_gpos_vtex_1": {
+   "derived": {
+    "busy_per_pixel": 126.6,
+    "class_pct": {
+     "clear": 9.5,
+     "clip": 0.0,
+     "ctl": 0.0,
+     "fswait": 30.6,
+     "gather": 0.1,
+     "interp": 46.9,
+     "merge": 11.2,
+     "scan": 0.4,
+     "setup": 0.2,
+     "vswait": 1.0
+    },
+    "class_sum": 64819,
+    "engine_pct": {
+     "any": 91.1,
+     "ctl": 13.9,
+     "exec": 52.5,
+     "pump": 78.7,
+     "rast": 44.5,
+     "sh": 14.0,
+     "xfer": 7.6
+    },
+    "fpw_per_fpn": 0.0,
+    "idle_pct": 8.9,
+    "mpw_per_mpn": 0.53,
+    "port_cyc_per_req": {
+     "ctl": 3.0,
+     "obj": 3.0,
+     "pump": 3.0,
+     "rast": 3.0,
+     "sh": 3.0
+    },
+    "port_req": {
+     "ctl": 5719,
+     "obj": 560,
+     "pump": 4239,
+     "rast": 5924,
+     "sh": 2334
+    }
+   },
+   "pass": {
+    "bench": "tb_g6lc_apu_vgtop",
+    "cases": 28,
+    "checks": 17122,
+    "cycles": 145740
+   },
+   "pass_compute": {
+    "cycles": 145740,
+    "g1": 4096,
+    "g2": 4096,
+    "maxulp": 0,
+    "ulp1": 0,
+    "ulp2": 0
+   },
+   "perfr": {
+    "clear": 6140,
+    "clip": 12,
+    "ctl": 22,
+    "depth": 0,
+    "fpn": 17903,
+    "fpw": 67,
+    "fswait": 19839,
+    "gather": 90,
+    "interp": 30384,
+    "merge": 7232,
+    "mpn": 5924,
+    "mpw": 3139,
+    "scan": 289,
+    "setup": 159,
+    "vswait": 652
+   },
+   "perft": {
+    "any": 132834,
+    "ctl": 20223,
+    "exec": 76482,
+    "mpn_ctl": 5719,
+    "mpn_exec": 0,
+    "mpn_obj": 560,
+    "mpn_pump": 4239,
+    "mpn_rast": 5924,
+    "mpn_sh": 2334,
+    "mpw_ctl": 17157,
+    "mpw_exec": 0,
+    "mpw_obj": 1680,
+    "mpw_pump": 12717,
+    "mpw_rast": 17772,
+    "mpw_sh": 7002,
+    "pump": 114723,
+    "rast": 64819,
+    "sh": 20448,
+    "xfer": 11117
+   },
+   "stat": {
+    "busy": 64819,
+    "pixwr": 512,
+    "tris": 1
+   }
+  }
+ },
+ "schema": 1
+}

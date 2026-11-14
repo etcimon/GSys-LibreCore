@@ -1,0 +1,24 @@
+# g6lc-batch5 — image load_store formats (shwave image path), depth,
+# fragment scissor, occlusion-query NS-confirm. sample-v1 sourced.
+dEQP-VK.image.load_store.with_format.1d.r32_uint
+dEQP-VK.image.load_store.with_format.1d_array.a2b10g10r10_uint_pack32_single_layer_linear
+dEQP-VK.image.load_store.with_format.1d_array.r8g8b8a8_unorm
+dEQP-VK.image.load_store.with_format.2d.a2b10g10r10_unorm_pack32_linear
+dEQP-VK.image.load_store.with_format.2d_array.r16g16b16a16_uint
+dEQP-VK.image.load_store.with_format.2d_array.r8_unorm
+dEQP-VK.image.load_store.with_format.3d.r8_sint_linear
+dEQP-VK.image.load_store.with_format.buffer.r16g16_snorm_minalign_linear
+dEQP-VK.image.load_store.with_format.buffer.r32g32_sint_minalign_uniform
+dEQP-VK.image.load_store.with_format.cube.r16_snorm_linear
+dEQP-VK.image.load_store.with_format.cube_array.r32g32b32a32_uint
+dEQP-VK.depth.bias_fs_clamp
+dEQP-VK.depth.bias_outside_range
+dEQP-VK.depth.ez_fs_clamp
+dEQP-VK.depth.fs_clamp
+dEQP-VK.depth.out_of_range
+dEQP-VK.depth.out_of_range_unrestricted
+dEQP-VK.fragment_operations.scissor.points.partially_inside
+dEQP-VK.fragment_operations.scissor.triangles.partially_inside
+dEQP-VK.query_pool.occlusion_query.copy_results_size_64_stride_0_without_availability
+dEQP-VK.query_pool.occlusion_query.get_reset_results_size_32_stride_16_without_availability
+dEQP-VK.query_pool.occlusion_query.get_results_conservative_size_32_wait_query_without_availability_draw_points

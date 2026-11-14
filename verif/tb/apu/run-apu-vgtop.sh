@@ -109,8 +109,10 @@ run_step() {
   local mpa=("$@")
   echo "=== GATE STEP $step (${mpa[*]:-lat=1 ready=100%}) ==="
   set +e
+  # transport run stays on the cold objmem boot (+objmem_cold); the
+  # per-session compute arm below runs warm (magic pre-seeded)
   (cd "$ROOT/verif/tb/apu" && \
-   stdbuf -o0 -e0 "$OUT/sim/tb_g6lc_apu_vgtop" "${mpa[@]}") \
+   stdbuf -o0 -e0 "$OUT/sim/tb_g6lc_apu_vgtop" +objmem_cold "${mpa[@]}") \
     > "$OUT/sim-step$step.log" 2>&1
   rc=$?
   set -e

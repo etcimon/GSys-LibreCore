@@ -1,0 +1,33 @@
+# g6lc-batch3 — pipeline_barrier coherency + sync/copy coverage.
+# Focus: the host-write / transfer_dst / all_device barrier mechanism that
+# underlies the scene-9 dynamic-state fix.  Mostly size-1024 (fast) plus a
+# few 8192 for scale; deduped against b6/b7/b8 overlap.
+dEQP-VK.memory.pipeline_barrier.all_device.1024_vertex_buffer_stride_2
+dEQP-VK.memory.pipeline_barrier.all_device.8192_vertex_buffer_stride_2
+dEQP-VK.memory.pipeline_barrier.all_device.8192_vertex_buffer_stride_4
+dEQP-VK.memory.pipeline_barrier.host_write_vertex_buffer.1024_vertex_buffer_stride_2
+dEQP-VK.memory.pipeline_barrier.host_write_index_buffer.1024
+dEQP-VK.memory.pipeline_barrier.host_write_index_buffer.8192
+dEQP-VK.memory.pipeline_barrier.host_write_storage_buffer.1024
+dEQP-VK.memory.pipeline_barrier.host_write_storage_buffer.8192
+dEQP-VK.memory.pipeline_barrier.host_write_uniform_buffer.1024
+dEQP-VK.memory.pipeline_barrier.host_write_uniform_buffer.8192
+dEQP-VK.memory.pipeline_barrier.transfer_dst_image_sampled.1024
+dEQP-VK.memory.pipeline_barrier.transfer_dst_storage_image.1024
+dEQP-VK.memory.pipeline_barrier.transfer_dst_vertex_buffer.1024_vertex_buffer_stride_2
+dEQP-VK.memory.pipeline_barrier.transfer_dst_vertex_buffer.8192_vertex_buffer_stride_2
+dEQP-VK.memory.pipeline_barrier.transfer_dst_index_buffer.1024
+dEQP-VK.memory.pipeline_barrier.transfer_dst_storage_buffer.1024
+dEQP-VK.memory.pipeline_barrier.transfer_dst_uniform_buffer.1024
+dEQP-VK.memory.pipeline_barrier.transfer_src_transfer_dst.1024
+dEQP-VK.memory.pipeline_barrier.transfer_src_transfer_dst.8192
+dEQP-VK.synchronization.op.single_queue.fence.write_fill_buffer_read_copy_buffer.buffer_16384
+dEQP-VK.synchronization.op.single_queue.barrier.write_fill_buffer_read_copy_buffer.buffer_16384
+dEQP-VK.synchronization.op.single_queue.event.write_fill_buffer_read_copy_buffer.buffer_16384
+dEQP-VK.synchronization.op.single_queue.fence.write_update_buffer_read_copy_buffer.buffer_16384
+dEQP-VK.synchronization.op.single_queue.barrier.write_update_buffer_read_copy_buffer.buffer_16384
+dEQP-VK.synchronization.op.single_queue.event.write_update_buffer_read_copy_buffer.buffer_16384
+dEQP-VK.api.copy_and_blit.core.buffer_to_image.1d_images.tightly_sized_buffer
+dEQP-VK.api.copy_and_blit.core.image_to_buffer.1d_images.tightly_sized_buffer
+dEQP-VK.api.copy_and_blit.core.buffer_to_image.2d_images.whole
+dEQP-VK.api.copy_and_blit.core.image_to_buffer.2d_images.whole

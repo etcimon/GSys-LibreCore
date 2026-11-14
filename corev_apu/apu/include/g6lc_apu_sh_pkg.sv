@@ -268,6 +268,13 @@ package g6lc_apu_sh_pkg;
     // G3a-i: entry.word3[26] — the FS module declares builtin 22 on an
     // Output (slot-8 word0 carries a shader-written FragDepth)
     logic        fs_fdepth;
+    // TP5: the module can produce a global memory side-effect a vertex-
+    // cache hit would wrongly skip — an OpImageWrite, any atomic (a VS
+    // has no workgroup shared memory so every VS atomic is global), or
+    // an OpStore that can reach an SSBO (SBUF storage class present).
+    // Computed at module commit from the opcode/variable scan; the
+    // rasteriser ANDs !vs_sidefx into the vertex-reuse enable.
+    logic        vs_sidefx;
   } apu_sh_entry_t;
 
   // ---- commit request/completion ------------------------------------

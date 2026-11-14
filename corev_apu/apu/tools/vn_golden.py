@@ -11818,6 +11818,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # 4-mod-8 byte offset inside a dedicated INDIRECT buffer to
         # exercise the unaligned fetch word selection
         is_drawindx = 'drawindx' in gfx
+        # drawindxmesh: same 3-vert indexed triangle as drawindx but the
+        # u16 index list is {0,1,2} repeated to fill ib2 (indexCount=240,
+        # ~4 vertex batches) — exercises post-transform vertex reuse
+        # across batches through the real shader path
+        is_dixmesh = 'drawindxmesh' in gfx
         is_drawind = 'drawind' in gfx and not is_drawindx
         # statvp: pipeline carries a static pViewportState and the
         # command buffer emits NO SetViewport/SetScissor — coverage must
@@ -14908,11 +14913,32 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             ([0] * ((0x800 - 4 * len(vb_words)) // 4) +
              vb2_words if is_wide else [])
         if is_drawind or is_drawindx:
+            # drawindxmesh issues a repeated {0,1,2} index list so the
+            # indexed draw spans multiple vertex batches and exercises
+            # post-transform vertex reuse across batches.  The count is
+            # the digits after 'drawindxmesh' (default 240, the most the
+            # 0x200-byte ib2 index aperture holds).
+            _icount = 3
+            if is_dixmesh:
+                _s = gfx.split('drawindxmesh', 1)[1]
+                _n = ''
+                for _c in _s:
+                    if _c.isdigit():
+                        _n += _c
+                    else:
+                        break
+                _icount = int(_n) if _n else 240
             vmem_words += [0] * (0x301 - len(vmem_words)) + \
-                [3, 1, 0, 0] + ([0] if is_drawindx else [])
+                [_icount, 1, 0, 0] + ([0] if is_drawindx else [])
             if is_drawindx:
-                vmem_words += [0] * (0x308 - len(vmem_words)) + \
-                    [0x0001_0000, 0x0000_0002]
+                if is_dixmesh:
+                    _ix = [j % 3 for j in range(_icount)]
+                    _iw = [(_ix[i + 1] << 16) | _ix[i]
+                           for i in range(0, _icount, 2)]
+                    vmem_words += [0] * (0x308 - len(vmem_words)) + _iw
+                else:
+                    vmem_words += [0] * (0x308 - len(vmem_words)) + \
+                        [0x0001_0000, 0x0000_0002]
         if is_fsubo:
             vmem_words += [0] * (0x380 - len(vmem_words)) + \
                 ([f32b(1.0), f32b(0.0), f32b(0.0), f32b(1.0)] +

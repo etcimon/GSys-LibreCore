@@ -40,7 +40,9 @@ module g6lc_apu_shcore
   parameter int unsigned SlabBytes     = 16384,
   parameter int unsigned ShaderBudget  = 32'h0100_0000,
   // W1.5 wave-engine counters (g6lc_apu_shwave.perf_o); 0 = no cells
-  parameter bit          PerfCountersEn = 1'b0
+  parameter bit          PerfCountersEn = 1'b0,
+  // SP1 decoded-row cache entries in each wave engine; 0 = long decode
+  parameter int unsigned RowCacheEntries = 1024
 ) (
   input  logic         clk_i,
   input  logic         rst_ni,
@@ -601,10 +603,16 @@ module g6lc_apu_shcore
       .ShaderInit(ShaderInit), .ShaderMembers(ShaderMembers),
       .ScratchBytes(ScratchBytes), .SlabBytes(SlabBytes),
       .ShaderBudget(ShaderBudget),
-      .PerfCountersEn(PerfCountersEn)
+      .PerfCountersEn(PerfCountersEn),
+      .RowCacheEntries(RowCacheEntries)
     ) i_wave (
       .perf_o(),                   // read hierarchically by benches;
                                    // no register window yet
+      // SP1: any module-store mutation invalidates every cached row —
+      // staging write (host or FILL), commit start, retire, commit
+      // completion.
+      .rc_inval_i((wr_en_i | fill_wr) | (commit_i | fill_commit) |
+                  retire_i | c_done_o),
       .clk_i, .rst_ni, .testmode_i,
       .disp_i(disp_q_valid && !wbusy), .disp_pl_i(disp_q),
       .desc_i, .push_n_i, .push_i,
@@ -648,7 +656,8 @@ module g6lc_apu_shcore_fixture
   parameter int unsigned ShaderMembers = 256,
   parameter int unsigned ScratchBytes  = 4096,
   parameter int unsigned SlabBytes     = 16384,
-  parameter int unsigned ShaderBudget  = 32'h0100_0000
+  parameter int unsigned ShaderBudget  = 32'h0100_0000,
+  parameter int unsigned RowCacheEntries = 1024
 ) (
   input  logic         clk_i,
   input  logic         rst_ni,
@@ -707,6 +716,7 @@ module g6lc_apu_shcore_fixture
       .ShaderSlots(ShaderSlots), .ShaderWords(ShaderWords),
       .ShaderInit(ShaderInit), .ShaderMembers(ShaderMembers),
       .ScratchBytes(ScratchBytes), .SlabBytes(SlabBytes),
-      .ShaderBudget(ShaderBudget)
+      .ShaderBudget(ShaderBudget),
+      .RowCacheEntries(RowCacheEntries)
     ) i_dut (.*);
 endmodule

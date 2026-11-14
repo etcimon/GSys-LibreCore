@@ -160,7 +160,13 @@ maxSamplerAnisotropy = 1.0
 maxSamplerAllocationCount = 4000
 maxMemoryAllocationCount = 4096
 maxUniformBufferRange = 0x01000000
-maxStorageBufferRange = 0x01000000
+# §limits-ledger verify→profile: the LSU storage path is 32/64-bit
+# clean — ls_off_q/ls_bsz_q are [31:0], lb_addr is a 64-bit aperture
+# base + zero-extended offset, and the W_LSC bounds check compares
+# {32'h0,off}+size vs {32'h0,bsz} — so a >=128 MiB storage range is
+# mechanically supported.  Advertise the 1.1/1.4 minimum (128 MiB);
+# maxUniformBufferRange stays at 16 MiB (its 64 KiB min is already met).
+maxStorageBufferRange = 0x08000000
 # G3a-ii: implicit-LOD λ uses the SFU log2 core (measured bound 1 ULP)
 # — the former linear-mantissa approximation (~0.086 λ error) is gone,
 # so the 8-bit-precision claim is now truthful

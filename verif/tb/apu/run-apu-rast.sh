@@ -22,6 +22,27 @@ if ! command -v "$YOSYS" >/dev/null 2>&1; then
 fi
 rm -rf "$OUT"
 mkdir -p "$OUT"
+# The repository-compiler unroll policy (local-verilator.sh: 256 iterations,
+# 131072 statements, exported for the device benches) must not reach this
+# bench: it unrolls the testbench reference loops into one 344 MB C++
+# translation unit that never finishes compiling on the remote builder.
+# The DUT has no loop that needs the policy; with the compiler defaults the
+# bench builds in minutes and prints the same PASS line.
+unset VERILATOR_UNROLL_COUNT VERILATOR_UNROLL_STMTS VERILATOR_UNROLL_ROLL_NARROW
+# The simulator-PGO launcher appends the same policy as command-line flags,
+# so when a parent selected it this bench goes to the real compiler behind
+# it (APU_REAL_VERILATOR, exported by apu_select_verilator).
+if [ "$(basename "$VERILATOR")" = apu-verilator.sh ] && [ -n "${APU_REAL_VERILATOR:-}" ]; then
+  VERILATOR="$APU_REAL_VERILATOR"
+fi
+# APU_RAST_GFLAGS: extra Verilator arguments for the bench build, used for
+# parameter arms of the bench top (e.g. "-GVtxCacheEntries=256", the
+# post-transform vertex-reuse on/off control of the TP5 perf leaf).
+read -r -a GFLAGS <<< "${APU_RAST_GFLAGS:-}"
+for g in "${GFLAGS[@]}"; do
+  [[ "$g" =~ ^-G[A-Za-z_][A-Za-z0-9_]*=[0-9]+$ ]] || {
+    echo "APU_RAST_GFLAGS accepts -GName=<integer> only: $g" >&2; exit 2; }
+done
 # GENUNNAMED does not exist before Verilator 5.016; gate the waiver.
 VLTS=("$ROOT/verif/tb/apu/apu_axi.vlt"
       "$ROOT/verif/tb/apu/apu_exec.vlt")
@@ -33,6 +54,7 @@ if ! "$VERILATOR" --binary --timing --assert -Wall \
   -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC \
   -Wno-BLKSEQ -Wno-SYNCASYNCNET -Wno-DECLFILENAME \
   -Wno-PINCONNECTEMPTY \
+  "${GFLAGS[@]}" \
   "${VLTS[@]}" \
   -f "$ROOT/corev_apu/apu/Flist.apu_rast" \
   "$ROOT/verif/tb/apu/tb_apu_mp_mem.sv" \
@@ -46,8 +68,8 @@ if ! "$VERILATOR" --binary --timing --assert -Wall \
 fi
 echo "VERILATOR BUILD OK"
 set +e
-(cd "$ROOT/verif/tb/apu" && stdbuf -o0 -e0 "$OUT/sim/tb_g6lc_apu_rast") \
-  > "$OUT/sim.log" 2>&1
+(cd "$ROOT/verif/tb/apu" && stdbuf -o0 -e0 "$OUT/sim/tb_g6lc_apu_rast" \
+  ${APU_RAST_PLUSARGS:-}) > "$OUT/sim.log" 2>&1
 rc=$?
 set -e
 echo "SIM rc=$rc"

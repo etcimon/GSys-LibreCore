@@ -1273,6 +1273,104 @@ module tb_g6lc_apu_objtab;
     end
     cases++;
 
+    // ---- RETIRE_KIDS survivor-relink stress --------------------------
+    // descriptor_pool repeated_reset analog: pool B keeps 32 live
+    // children on the shared ctx as SURVIVORS; each iteration mints
+    // fresh pool-A children and sweeps them — every sweep rewrites
+    // the survivors' ctx_prev/ctx_next links via StScanKeep*.  A
+    // relink bug that closes a cycle deadlocks the walk (caught by
+    // the 4s sim timeout) — the batch4 repeated_reset_short suspect.
+    m_reset;
+    do_reset;
+    begin
+      int psl_a, psl_b, i, iter, na;
+      // Run-time iteration count (+ks_iters=N, default 80).  A constant
+      // bound lets the pinned compiler's unroll policy (256 iterations)
+      // expand this loop and its inlined op/check tasks into a 245 MB
+      // translation unit that does not finish compiling on the builder.
+      int ks_iters;
+      ks_iters = 80;
+      void'($value$plusargs("ks_iters=%d", ks_iters));
+      op(mkr(APU_OBJTAB_OP_ALLOC, 64'hF000_0000_0000_00A1, 6'd20, 0,
+             8'd5, 0, 0, 0, 0, 0), c);
+      check("ks: alloc poolA", c.status == APU_OBJTAB_OK);
+      psl_a = int'(c.handle[15:0]);
+      void'(m_alloc(64'hF000_0000_0000_00A1, 6'd20, 64'h0, 8'd5,
+                    slot, gen));
+      op(mkr(APU_OBJTAB_OP_ALLOC, 64'hF000_0000_0000_00B1, 6'd20, 0,
+             8'd5, 0, 0, 0, 0, 0), c);
+      check("ks: alloc poolB", c.status == APU_OBJTAB_OK);
+      psl_b = int'(c.handle[15:0]);
+      void'(m_alloc(64'hF000_0000_0000_00B1, 6'd20, 64'h0, 8'd5,
+                    slot, gen));
+      // 32 persistent survivor children under pool B (never swept
+      // until teardown) — the relink workload on every A sweep
+      for (i = 0; i < 32; i++) begin
+        id = 64'hF200_0000_0000_0000 | 64'(i);
+        st = m_alloc(id, 6'd21, 64'hF000_0000_0000_00B1, 8'd5,
+                     slot, gen);
+        op(mkr(APU_OBJTAB_OP_ALLOC, id, 6'd21,
+               64'hF000_0000_0000_00B1, 8'd5, 0, 0, 0, 0, 0), c);
+        check($sformatf("ks: B child %0d", i),
+              st == APU_OBJTAB_OK && c.status == APU_OBJTAB_OK);
+      end
+      for (iter = 0; iter < ks_iters; iter++) begin
+        for (i = 0; i < 4; i++) begin
+          id = 64'hF300_0000_0000_0000 | (64'(iter) << 8) | 64'(i);
+          st = m_alloc(id, 6'd21, 64'hF000_0000_0000_00A1, 8'd5,
+                       slot, gen);
+          op(mkr(APU_OBJTAB_OP_ALLOC, id, 6'd21,
+                 64'hF000_0000_0000_00A1, 8'd5, 0, 0, 0, 0, 0), c);
+          check($sformatf("ks: it%0d A child %0d", iter, i),
+                st == APU_OBJTAB_OK && c.status == APU_OBJTAB_OK);
+        end
+        // sweep pool A: kills its 4 children; B's 32 survive+relink
+        op(mkr(APU_OBJTAB_OP_RETIRE_KIDS, 64'(psl_a), 6'd0, 0, 0,
+               0, 0, 0, 0, 0), c);
+        check($sformatf("ks: it%0d sweep count", iter),
+              c.status == APU_OBJTAB_OK &&
+              c.handle[15:0] == 16'd4);
+        na = 0;
+        begin
+          // snapshot first: m_kill mutates m_ctxq through m_unlink
+          int kills [$];
+          kills.delete();          // static in this block: clear per pass
+          for (int q = 0; q < m_ctxq[5].size(); q++) begin
+            automatic int s = m_ctxq[5][q];
+            if (me_live[s] && me_parent[s] == psl_a)
+              kills.push_back(s);
+          end
+          foreach (kills[q]) begin m_kill(kills[q]); na++; end
+        end
+        g_got = na; g_exp = 4;
+        check($sformatf("ks: it%0d model kills", iter), na == 4);
+        me_refcnt[psl_a] = 0;
+        // spot-check a survivor still resolves by id
+        if ((iter & 7) == 0) begin
+          id = 64'hF200_0000_0000_0000 | 64'((iter >> 3) & 31);
+          xpect($sformatf("ks: it%0d survivor", iter),
+                mkr(APU_OBJTAB_OP_LOOKUP, id, 6'd21, 0, 0, 0, 0, 0,
+                    0, 0), APU_OBJTAB_OK);
+        end
+      end
+      // teardown: sweep pool B's 32 survivors too
+      op(mkr(APU_OBJTAB_OP_RETIRE_KIDS, 64'(psl_b), 6'd0, 0, 0,
+             0, 0, 0, 0, 0), c);
+      check("ks: final B sweep", c.status == APU_OBJTAB_OK &&
+            c.handle[15:0] == 16'd32);
+      begin
+        int kills [$];
+        kills.delete();
+        for (int q = 0; q < m_ctxq[5].size(); q++) begin
+          automatic int s = m_ctxq[5][q];
+          if (me_live[s] && me_parent[s] == psl_b) kills.push_back(s);
+        end
+        foreach (kills[q]) m_kill(kills[q]);
+      end
+      me_refcnt[psl_b] = 0;
+    end
+    cases++;
+
     // ---- global invariant ----------------------------------------------
     begin
       int nlive;

@@ -8,6 +8,9 @@
 # -GSlabBytes=1024 -GScratchBytes=64 so logic is visible apart from
 # the SRAMs and scratch flops; the default geometry screen is
 # best-effort via SHWAVE_SYNTH_FULL=1).
+# APU_SHWAVE_GFLAGS: extra Verilator arguments for the bench build, used
+# for parameter arms of the bench top (e.g. "-GRowCacheEntries=0", the
+# long-decode differential control of run-apu-perf.sh).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 export CVA6_REPO_DIR="$ROOT"
@@ -29,13 +32,18 @@ mkdir -p "$OUT"
 apu_record_verilator
 VLTS=("$ROOT/verif/tb/apu/apu_axi.vlt"
       "$ROOT/verif/tb/apu/apu_exec.vlt")
+read -r -a GFLAGS <<< "${APU_SHWAVE_GFLAGS:-}"
+for g in "${GFLAGS[@]}"; do
+  [[ "$g" =~ ^-G[A-Za-z_][A-Za-z0-9_]*=[0-9]+$ ]] || {
+    echo "APU_SHWAVE_GFLAGS accepts -GName=<integer> only: $g" >&2; exit 2; }
+done
 vver="$("$VERILATOR" --version | grep -o '[0-9][0-9.]*' | head -1)"
 # GENUNNAMED does not exist before Verilator 5.016; gate the waiver.
 if awk -v v="$vver" 'BEGIN{split(v,a,"."); exit !(a[1]>5||(a[1]==5&&a[2]>=16))}'; then
   VLTS+=("$ROOT/verif/tb/apu/apu_vn.vlt")
 fi
 if ! "$VERILATOR" --binary --timing --assert -Wall -j "$APU_BUILD_JOBS" \
-  "${APU_VERILATOR_FLAGS[@]}" \
+  "${APU_VERILATOR_FLAGS[@]}" "${GFLAGS[@]}" \
   -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC \
   -Wno-BLKSEQ -Wno-SYNCASYNCNET -Wno-DECLFILENAME \
   -Wno-PINCONNECTEMPTY \
@@ -104,6 +112,10 @@ synth_one "-1s" "-GEnable=1 -GShaderRegs=16 -GMaxWaves=1 \
 if [ "${SHWAVE_SYNTH_FULL:-0}" = 1 ]; then
   synth_one "-1" "-GEnable=1"
 fi
+# run-apu-regress.sh contract: one verdict line per enable state (the
+# enabled screen is the small geometry above, default row cache)
+echo "SYNTH OK Enable=0"
+echo "SYNTH OK Enable=1"
 python3 - "$OUT" <<'PY'
 import re, sys, pathlib
 out = pathlib.Path(sys.argv[1])

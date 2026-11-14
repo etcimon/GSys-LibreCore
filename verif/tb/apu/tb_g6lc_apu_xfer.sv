@@ -159,7 +159,7 @@ module tb_g6lc_apu_xfer;
     .rsp_valid_o(mp_rv), .rsp_o('{mp_rsp}));
 
   g6lc_apu_xfer #(.Enable(1'b1), .ApuCfg(ApuVenus),
-                  .FifoDepth(32)) i_dut (
+                  .FifoDepth(32), .PerfClassEn(1'b1)) i_dut (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .work_valid_i(w_v), .work_ready_o(w_rdy),
     .work_i(work), .xf_i(xf),
@@ -1456,6 +1456,12 @@ module tb_g6lc_apu_xfer;
           o_areq == '0,
           "Enable=0 outputs quiet");
 
+    // FP0 leg counters (aggregate across cases; PerfClassEn=1 arm)
+    $display("PERF xfer busy=%0d rd=%0d wr=%0d setup=%0d",
+             i_dut.gen_on.gen_leg.busy_q,
+             i_dut.gen_on.gen_leg.leg_q[0],
+             i_dut.gen_on.gen_leg.leg_q[1],
+             i_dut.gen_on.gen_leg.leg_q[2]);
     $display("TB_XFER done: cases=%0d checks=%0d errors=%0d cycles=%0d",
              cases, checks, errors, cycles);
     if (errors == 0)

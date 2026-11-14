@@ -97,7 +97,7 @@ module tb_g6lc_apu_cmdexec;
   g6lc_apu_cmdexec #(.Enable(1'b1), .Fences(Fences),
                      // small watchdog budget so the expiry vector is
                      // reachable in a directed run
-                     .WorkBudgetLog2(8)) i_dut (
+                     .WorkBudgetLog2(8), .PerfClassEn(1'b1)) i_dut (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .submit_valid_i(sub_v), .submit_ready_o(sub_r), .submit_i(sub),
     .cr_req_valid_o(xcr_v), .cr_req_ready_i(xcr_r), .cr_req_o(xcr_req),
@@ -718,6 +718,12 @@ module tb_g6lc_apu_cmdexec;
           mkrec(APU_VN_TYPE_VK_CMD_RESOLVE_IMAGE_EXT, 0, 0, 4));
     cr_op(APU_CMDREC_OP_END, cbd[3], 0, '0);
     cr_op(APU_CMDREC_OP_BEGIN, cbd[4], 0, '0);
+    // bound state is per primary command buffer (the executor clears
+    // its snapshot at each primary buffer start), so this buffer binds
+    // its own pipeline before the dispatch
+    cr_op(APU_CMDREC_OP_APPEND, cbd[4], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_BIND_PIPELINE_EXT, pipe_h,
+                APU_VN_KIND_VK_PIPELINE, 0));
     cr_op(APU_CMDREC_OP_APPEND, cbd[4], 0,
           mkrec(APU_VN_TYPE_VK_CMD_DISPATCH_EXT, 0, 0, 2));
     cr_op(APU_CMDREC_OP_END, cbd[4], 0, '0);
@@ -1820,6 +1826,32 @@ module tb_g6lc_apu_cmdexec;
       cases++;
     end
 
+    // FP0b/c class counters (aggregate across cases; PerfClassEn=1 arm).
+    // assembly = sum of the operand-resolve sub-classes; the breakdown
+    // prints per-cluster so the dominant assembly cost is visible.
+    // idx: rec0 doto1 dres2 draw3 xfer4 brp5 evt6 qry7 work8 ctl9 oth10
+    $display("PERF cmdexec busy=%0d assembly=%0d work=%0d ctl=%0d rec=%0d doto=%0d dres=%0d draw=%0d xfer=%0d brp=%0d evt=%0d qry=%0d oth=%0d",
+             i_dut.gen_on.gen_pcls.busy_q,
+             (i_dut.gen_on.gen_pcls.cyc_q[0] +
+              i_dut.gen_on.gen_pcls.cyc_q[1] +
+              i_dut.gen_on.gen_pcls.cyc_q[2] +
+              i_dut.gen_on.gen_pcls.cyc_q[3] +
+              i_dut.gen_on.gen_pcls.cyc_q[4] +
+              i_dut.gen_on.gen_pcls.cyc_q[5] +
+              i_dut.gen_on.gen_pcls.cyc_q[6] +
+              i_dut.gen_on.gen_pcls.cyc_q[7] +
+              i_dut.gen_on.gen_pcls.cyc_q[10]),
+             i_dut.gen_on.gen_pcls.cyc_q[8],
+             i_dut.gen_on.gen_pcls.cyc_q[9],
+             i_dut.gen_on.gen_pcls.cyc_q[0],
+             i_dut.gen_on.gen_pcls.cyc_q[1],
+             i_dut.gen_on.gen_pcls.cyc_q[2],
+             i_dut.gen_on.gen_pcls.cyc_q[3],
+             i_dut.gen_on.gen_pcls.cyc_q[4],
+             i_dut.gen_on.gen_pcls.cyc_q[5],
+             i_dut.gen_on.gen_pcls.cyc_q[6],
+             i_dut.gen_on.gen_pcls.cyc_q[7],
+             i_dut.gen_on.gen_pcls.cyc_q[10]);
     $display("PASS tb_g6lc_apu_cmdexec cases=%0d checks=%0d cycles=%0d",
              cases, checks, cycles);
     if (errors != 0) $fatal(1, "cmdexec %0d errors", errors);
