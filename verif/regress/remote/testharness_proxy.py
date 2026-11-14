@@ -2116,7 +2116,8 @@ def cmd_l2_equiv(rem: Remote, args) -> int:
     return 0 if passed else 1
 
 
-APU_LEAF_STAGES = ('unit', 'top', 'soc', 'bridge', 'guest', 'synth', 'profile', 'dev')
+APU_LEAF_STAGES = ('unit', 'top', 'soc', 'bridge', 'guest', 'synth', 'profile', 'dev',
+                   'perf')
 # Generated oracle inputs (shader_vectors.py / vn_golden.py outputs) that the
 # testbenches $readmem at runtime. verif/.gitignore ignores *.hex, so these
 # dirs would otherwise never ride along — the suites cannot regenerate them
@@ -2492,7 +2493,8 @@ def cmd_apu_leaf(rem: Remote, args) -> int:
     root = Path(args.snapshot).resolve()
     stages = apu_leaf_stages(args.stages)
     leaf_env = apu_leaf_env(getattr(args, 'env', None) or [])
-    repository_tools = any(stage in ('dev', 'unit', 'top', 'soc', 'bridge', 'guest', 'synth')
+    repository_tools = any(stage in ('dev', 'unit', 'top', 'soc', 'bridge', 'guest', 'synth',
+                                     'perf')
                            for stage in stages)
     if 'dev' in stages:
         cohort = leaf_env.get('APU_DEV_COHORT', 'immutable')

@@ -193,6 +193,49 @@ class ApuRegressionGateTests(unittest.TestCase):
         self.assertEqual(summary['results'][0]['checks'], 2)
         self.assertEqual(summary['results'][0]['profileAudit'], report)
 
+    def perf_stub(self, body):
+        script = self.tb / 'run-apu-perf.sh'
+        script.write_text('#!/bin/sh\n' + body)
+        script.chmod(0o755)
+
+    def test_throughput_stage_needs_gate_verdict_and_capture(self):
+        capture = {'schema': 1, 'runs': {
+            'rast': {'pass': {'cases': 1, 'checks': 5, 'cycles': 9}},
+            'shwave': {'pass': {'cases': 2, 'checks': 7, 'cycles': 9}}}}
+        write = (f"mkdir -p \"$APU_PERF_OUT\"\n"
+                 f"printf '%s' '{json.dumps(capture)}' > \"$APU_PERF_OUT/capture.json\"\n")
+        ok = 'echo "OK same checked work; no cycle regression"\n'
+        # the stage hands the loop a non-PGO simulator and its output dir
+        self.perf_stub('[ "$APU_SIM_PGO" = 0 ] || exit 9\n' + write + ok)
+        result = self.run_gate('--stages', 'perf', extra_env={'APU_SIM_PGO': '1'})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        summary = json.loads((self.out / 'summary.json').read_text())
+        self.assertEqual(summary['status'], 'pass')
+        self.assertEqual(summary['results'][0]['name'], 'perf')
+        self.assertEqual(summary['results'][0]['checks'], 12)
+        self.assertFalse(summary['simulatorPgo']['required'])
+
+    def test_throughput_stage_without_capture_is_incomplete(self):
+        self.perf_stub('echo "OK same checked work; no cycle regression"\n')
+        result = self.run_gate('--stages', 'perf')
+        self.assertEqual(result.returncode, 4, result.stdout)
+        self.assertIn('missing or empty throughput capture', result.stdout)
+
+    def test_throughput_stage_without_verdict_is_incomplete(self):
+        self.perf_stub('mkdir -p "$APU_PERF_OUT"\n'
+                       'printf \'{"schema":1,"runs":{"rast":{"pass":{"checks":5}}}}\' '
+                       '> "$APU_PERF_OUT/capture.json"\n')
+        result = self.run_gate('--stages', 'perf')
+        self.assertEqual(result.returncode, 4, result.stdout)
+        self.assertIn('missing throughput gate verdict', result.stdout)
+
+    def test_throughput_regression_fails(self):
+        self.perf_stub('echo "REGRESS rast: stat.busy +1.00%"\nexit 2\n')
+        result = self.run_gate('--stages', 'perf')
+        self.assertEqual(result.returncode, 1, result.stdout)
+        summary = json.loads((self.out / 'summary.json').read_text())
+        self.assertEqual(summary['results'][0]['status'], 'fail')
+
     def test_failed_bridge_build_blocks_consumers(self):
         bridge = self.tb / 'bridge'
         bridge.mkdir()
@@ -362,6 +405,7 @@ class ApuLeafTests(unittest.TestCase):
 
     def test_stage_list_rules_match_the_runner(self):
         self.assertEqual(proxy.apu_leaf_stages('unit,top'), ['unit', 'top'])
+        self.assertEqual(proxy.apu_leaf_stages('perf,synth'), ['perf', 'synth'])
         for bad in ('', 'unit,', 'unit,typo', 'unit,unit'):
             with self.subTest(bad=bad):
                 with self.assertRaises(SystemExit):

@@ -499,9 +499,18 @@ def main():
             hashes[spec['stub']] = digest(stub)
     (out / 'sources.json').write_text(json.dumps(hashes, indent=2))
 
-    runtime = Path('/opt/testharness/runs/review-private-runtime-20260915/runtime')
-    assert digest(runtime / 'include/verilated_funcs.h') == \
-        'dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166'
+    # HYP8_RUNTIME_DIR / HYP8_RUNTIME_DIGEST: same contract as
+    # run_hyp8_integration.py. The default is the pinned private runtime; an
+    # alternate VERILATOR_ROOT (it must match HYP8_VERILATOR_DIR's generated
+    # code) has to name the digest of its verilated_funcs.h explicitly.
+    runtime = Path(os.environ.get(
+        'HYP8_RUNTIME_DIR',
+        '/opt/testharness/runs/review-private-runtime-20260915/runtime'))
+    runtime_digest = os.environ.get(
+        'HYP8_RUNTIME_DIGEST',
+        'dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166')
+    assert digest(runtime / 'include/verilated_funcs.h') == runtime_digest, (
+        'runtime verilated_funcs.h digest mismatch')
     # The managed 5.008-mod build; the proxy PATH does not export it, so the
     # binary is pinned by absolute path like VERILATOR_ROOT itself. Both the
     # perl driver and the actual verilator_bin object are hashed into the

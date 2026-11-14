@@ -1416,7 +1416,11 @@ module tb_g6lc_hyp8_dispatch;
   // uses -- not a hand-edited cfg.
   localparam config_pkg::g6lc_cfg_t C =
       build_config_pkg::build_config(g6lc_config_pkg::g6lc_cfg);
+  `ifdef G6LC_HYP8_IQSTEER2
+  localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t H = g6lc_hyp_pkg::hyp_iq_steer2(g6lc_hyp_pkg::Hyp8);
+`else
   localparam g6lc_hyp_pkg::g6lc_hyp_cfg_t H = g6lc_hyp_pkg::Hyp8;
+`endif
 
   typedef `G6LC_BRANCHPREDICT_SBE_T(C) branchpredict_sbe_t;
   typedef `G6LC_EXCEPTION_T(C)         exception_t;
@@ -3831,6 +3835,25 @@ module tb_g6lc_hyp8_alu;
       end
     end
 
+    // ---- r127: SLLIUW (zext32(rs1) << shamt), an A3-class op the leaf did
+    // not drive. Shift amounts on both sides of 32 and at the ends, on a
+    // word whose upper half must be dropped. Bubbles around each op.
+    begin : slliuw_cases
+      static logic [63:0] sa [2] = '{64'hFFFF_FFFF_8000_0001, 64'h1234_5678_9ABC_DEF0};
+      static int unsigned sh [6] = '{0, 1, 31, 32, 33, 63};
+      for (int ai = 0; ai < 2; ai++) begin
+        for (int si = 0; si < 6; si++) begin
+          drive(SLLIUW, sa[ai], 64'(sh[si]), 9, 1'b1);
+          tick();
+          drive(ADD, '0, '0, 0, 1'b0);
+          tick();
+          tick();
+          check(result == ({32'b0, sa[ai][31:0]} << sh[si]), "SLLIUW_RES");
+          check(rtid == TID'(9), "SLLIUW_RTID");
+          tick();
+        end
+      end
+    end
     $display("HYP8_ALU_PASS checked=%0d", checked);
     $finish;
   end
@@ -6756,6 +6779,9 @@ module tb_g6lc_hyp8_ctrl;
       .flush_acc_i         (1'b0),
       .smt_switch_i        (1'b0),
       .drain_force_i       (1'b0),
+      .resync_storamic_flush_i(1'b0),
+      .resync_storamic_squash_i(1'b0),
+      .resync_storamic_dack_o (),
       .pc_commit_i         ('0),
       .pc_commit_hold_o    (f_pchold),
       .drain_pending_o     (f_drainp)

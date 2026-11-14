@@ -93,6 +93,13 @@ TESTS = [
     # B1 LR->SC window wedged `lr; sd; sc` under in-order issue.
     ('hyp8_lrsc_store',
      'verif/tests/custom/hyp8_lrsc_store.S', '80001000'),
+    # r127: translated loads/stores in S-mode under Sv39 (one identity
+    # gigapage). The only smoke that reaches the ITLB/DTLB/PTW.
+    ('hyp8_sv39_load', 'verif/tests/custom/hyp8_sv39_load.S', '80001000'),
+    # r127: Zkn known-answer test (every RV64 AES/SHA instruction of the AES
+    # functional unit, checksum from Spike). The only smoke that issues to
+    # that unit.
+    ('hyp8_zkn_kat', 'verif/tests/custom/hyp8_zkn_kat.S', '80001000'),
 ]
 LINK_LD = 'verif/tests/custom/common/link_verilator.ld'
 GCC_FLAGS = ['-march=rv64imafdc_zicsr_zifencei', '-mabi=lp64d',
