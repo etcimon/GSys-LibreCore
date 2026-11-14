@@ -393,6 +393,37 @@ then `~/.ssh/th-remote.pass`. The default `ovh_calltorch` key is `~/.ssh/id_ed25
 is loaded into `ssh-agent` once per invocation; a persistent ControlMaster socket is used for all
 subsequent traffic. Nothing is committed to the repository.
 
+### APU/Venus leaves
+
+The APU regression runs remotely on an isolated snapshot of the working tree (dirty
+files included); nothing is shared with the CPU harness sync. The remote harness is the
+harness of record for APU simulation and synthesis evidence.
+
+```bash
+bash verif/tb/apu/run-apu-remote-leaf.sh                          # unit,top,soc,bridge,synth
+APU_LEAF_STAGES=perf bash verif/tb/apu/run-apu-remote-leaf.sh     # throughput loop only
+python3 verif/regress/remote/testharness_proxy.py apu-leaf . --stages unit --detach
+python3 verif/regress/remote/testharness_proxy.py apu-leaf-collect <tag>   # -> remote-runs/<tag>/
+```
+
+| Stage | What it runs |
+|---|---|
+| `unit` | the per-module benches (17 suites) |
+| `top` | `vgtop` (transport, every device session, jitter and small-geometry arms), `vgsys`, `sys-venus` |
+| `soc`, `bridge`, `guest` | the CVA6+Venus bench, the bridge self-test, the stock-guest gate |
+| `synth` | yosys Enable=0/1 screens |
+| `perf` | `run-apu-perf.sh`: rasteriser and shader suites and 18 device sessions gated against `verif/tb/apu/apu-perf-current.json` (same checked work, no cycle regression), with the row-cache-off and memory-jitter control arms |
+| `profile`, `dev` | static profile audit; bounded development cohort |
+
+Admit a passing `perf` capture with
+`bash verif/tb/apu/run-apu-perf.sh --admit-from remote-runs/<tag>/output/perf/capture.json`
+(no simulation; it gates the capture again and records it).
+
+On the shared builder run at most two or three leaves at once and raise the simulator
+PGO budgets: `--env APU_SIM_PGO_TIMEOUT=10800 --env APU_SIM_BUILD_TIMEOUT=5400
+--env APU_SIM_TRAIN_TIMEOUT=600`. Detail and the findings from the first remote runs:
+`specs/architecture/performance-area-scalability.md` §11.8.
+
 ### Layout on the remote host
 
 ```text
