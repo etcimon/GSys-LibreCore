@@ -1033,10 +1033,33 @@ module g6lc_apu_shmod
       if (!rst_ni) ty_rdt_q <= '0;
       else if (ty_req && !ty_we) ty_rdt_q <= ty_tile_w;
     end
-    tc_sram #(.NumWords(ShaderSlots*ShaderIds), .DataWidth(512),
-              .NumPorts(1)) i_const (
-      .clk_i, .rst_ni, .req_i(co_req), .we_i(co_we), .addr_i(co_addr),
-      .wdata_i(co_wdata), .be_i('1), .rdata_o(co_rdata));
+    // i_const: 8192 x 512 -> CO_NW=4 width banks x ID_NT depth tiles of
+    // <=4096 x 128 tc_sram (width+depth envelope).  co_rda[t][w] is the
+    // depth-tile-t, width-bank-w slice; the gather below rebuilds the
+    // 512-bit row and co_rdt_q registers the in-flight read's tile
+    // (tc_sram rdata_o latency).  co_* interface unchanged.
+    localparam int unsigned CO_NW = 4;
+    logic [ID_TW-1:0]                       co_rdt_q;
+    logic [127:0]                           co_rda [ID_NT][CO_NW];
+    wire [ID_TW-1:0]                        co_tile_w = co_addr[ID_AW-1 -: ID_TW];
+    for (genvar w = 0; w < CO_NW; w++) begin : g_cow
+      for (genvar t = 0; t < ID_NT; t++) begin : g_cot
+        tc_sram #(.NumWords(1 << ID_LW), .DataWidth(128), .NumPorts(1),
+                  .SimInit("none")) i_const (
+          .clk_i, .rst_ni,
+          .req_i(co_req && ((ID_NT == 1) || (co_tile_w == id_tile_t'(t)))),
+          .we_i (co_we  && ((ID_NT == 1) || (co_tile_w == id_tile_t'(t)))),
+          .addr_i(co_addr[ID_LW-1:0]),
+          .wdata_i(co_wdata[w*128 +: 128]), .be_i(16'hFFFF),
+          .rdata_o(co_rda[t][w]));
+      end
+    end
+    assign co_rdata = {co_rda[co_rdt_q][3], co_rda[co_rdt_q][2],
+                       co_rda[co_rdt_q][1], co_rda[co_rdt_q][0]};
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) co_rdt_q <= '0;
+      else if (co_req && !co_we) co_rdt_q <= co_tile_w;
+    end
     logic [ID_TW-1:0]                       de_rdt_q;
     logic [63:0]                            de_rda [ID_NT];
     wire [ID_TW-1:0]                        de_tile_w = de_addr[ID_AW-1 -: ID_TW];
@@ -1113,10 +1136,33 @@ module g6lc_apu_shmod
               .NumPorts(1)) i_init (
       .clk_i, .rst_ni, .req_i(in_req), .we_i(in_we), .addr_i(in_addr),
       .wdata_i(in_wdata), .be_i(10'h3FF), .rdata_o(in_rdata));
-    tc_sram #(.NumWords(ShaderSlots*ShaderIds), .DataWidth(160),
-              .NumPorts(1)) i_phi (
-      .clk_i, .rst_ni, .req_i(ph_req), .we_i(ph_we), .addr_i(ph_addr),
-      .wdata_i(ph_wdata), .be_i('1), .rdata_o(ph_rdata));
+    // i_phi: 8192 x 160 -> PH_NW=2 width banks of 80 bits x ID_NT depth
+    // tiles of <=4096 x 80 tc_sram (width+depth envelope).  ph_rda[t][w]
+    // is the depth-tile-t, width-bank-w slice; the gather rebuilds the
+    // 160-bit row and ph_rdt_q registers the in-flight read's tile.
+    // ph_* interface unchanged.
+    localparam int unsigned PH_NW = 2;
+    localparam int unsigned PH_W  = 80;
+    logic [ID_TW-1:0]                       ph_rdt_q;
+    logic [PH_W-1:0]                        ph_rda [ID_NT][PH_NW];
+    wire [ID_TW-1:0]                        ph_tile_w = ph_addr[ID_AW-1 -: ID_TW];
+    for (genvar w = 0; w < PH_NW; w++) begin : g_phw
+      for (genvar t = 0; t < ID_NT; t++) begin : g_pht
+        tc_sram #(.NumWords(1 << ID_LW), .DataWidth(PH_W), .NumPorts(1),
+                  .SimInit("none")) i_phi (
+          .clk_i, .rst_ni,
+          .req_i(ph_req && ((ID_NT == 1) || (ph_tile_w == id_tile_t'(t)))),
+          .we_i (ph_we  && ((ID_NT == 1) || (ph_tile_w == id_tile_t'(t)))),
+          .addr_i(ph_addr[ID_LW-1:0]),
+          .wdata_i(ph_wdata[w*PH_W +: PH_W]), .be_i(10'h3FF),
+          .rdata_o(ph_rda[t][w]));
+      end
+    end
+    assign ph_rdata = {ph_rda[ph_rdt_q][1], ph_rda[ph_rdt_q][0]};
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) ph_rdt_q <= '0;
+      else if (ph_req && !ph_we) ph_rdt_q <= ph_tile_w;
+    end
     logic [ID_TW-1:0]                       fu_rdt_q;
     logic [31:0]                            fu_rda [ID_NT];
     wire [ID_TW-1:0]                        fu_tile_w = fu_addr[ID_AW-1 -: ID_TW];
