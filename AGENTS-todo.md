@@ -1119,9 +1119,13 @@ remain release requirements; intermediate raster gates do not narrow the product
     `ue_gpos_bgracwmb_1` (B8G8R8A8 attachment, R-only and B-only write mask,
     `e6eafe370`) and `ue_gpos_d16lt_1` (D16_UNORM depth compare, packed UNORM16
     readback, `427806fcd`). Each passes on vgtop with maxulp=0 and fails when the
-    corresponding fix of (3) is temporarily undone. Still without a device vector:
-    blend and logic op on sRGB (the generator has no sRGB attachment path yet),
-    UNORM16 vertex attributes, D16 late-Z.
+    corresponding fix of (3) is temporarily undone. Added `e1a71f947`:
+    `ue_gpos_srgbbopadd_1` / `ue_gpos_bgrasrgbbopadd_1` (ONE/ONE ADD on
+    R8G8B8A8_SRGB and B8G8R8A8_SRGB; the generator's blend-op path now models the
+    sRGB encode and destination decode), same pass / undo-fails evidence. Still
+    without a device vector: logic op on sRGB, blend factors and write mask on
+    sRGB (generator raises outside the blend-op path), UNORM16 vertex attributes,
+    D16 late-Z.
     (11) Freshness coverage extended (`32316e814`): `regen_vectors.sh` now
     generates the 68 graphics sessions the run scripts execute but it did not
     list, the 128-invocation compute sessions and the two query arms; 56 of them
