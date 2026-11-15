@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="made-in-canada.jpg" alt="Made in Canada" width="160"/>
+
 # GSys LibreCore
 
 **A source-available, Linux-capable RISC-V application-class super-processor — and the super-intelligence agentic custom-build platform that carries it from core to silicon through bios and pytorch to any GHz desired.**
