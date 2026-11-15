@@ -11827,6 +11827,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             'dalw':      (7, 1.0, 0.25, 0.75, False, False),
             'deq':       (2, 0.5, 0.5,  0.75, False, True),
             'dne':       (5, 0.5, 0.5,  0.5,  False, False),
+            # d16lt: D16_UNORM depth-compare pair — LESS, clear 1.0, near
+            # (red, z 0.25) drawn first then far (blue, z 0.4); red wins.
+            # far z 0.4 is the discriminator: a stored 0.25 decoded ~2x too
+            # large reads ~0.502, and 0.4 < 0.502 would let far win.
+            'd16lt':     (1, 1.0, 0.25, 0.4,  False, True),
         }
         # longest token wins so '*off' controls beat their on-prefixes
         # ('deq' is a prefix of 'deqoff', 'dnever' of 'dneveroff', and
@@ -11861,6 +11866,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # depth-or-depth-stencil attachment is present" for the shared
         # attachment plumbing (dimg/dview/renderpass/framebuffer/copy).
         is_stencil = 'stencil' in gfx
+        # d16: D16_UNORM depth attachment (vkfmt 124, 2 B/px) on a
+        # depth-compare pair — the readback packs two u16 per word.
+        is_d16    = 'd16' in gfx
         # stencil_df: depthFailOp variant — depthCompareOp=NEVER makes every
         # covered fragment fail depth while stencil compareOp=ALWAYS passes,
         # so the S_DZ_C2 depthFail branch (not the pass branch) fires.
@@ -14228,7 +14236,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 device=X['dev'],
                 pCreateInfo=st('VkImageCreateInfo',
                     flags=0, imageType=1,
-                    format=(129 if is_stencil else 126),
+                    format=(124 if is_d16 else (129 if is_stencil else 126)),
                     extent=st('VkExtent3D', width=CW, height=CH,
                               depth=1),
                     mipLevels=1, arrayLayers=1, samples=1, tiling=0,
@@ -14242,7 +14250,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 device=X['dev'],
                 pCreateInfo=st('VkImageViewCreateInfo',
                     flags=0, image=X['dimg'], viewType=1,
-                    format=(129 if is_stencil else 126),
+                    format=(124 if is_d16 else (129 if is_stencil else 126)),
                     components=st('VkComponentMapping',
                                   r=0, g=0, b=0, a=0),
                     subresourceRange=st('VkImageSubresourceRange',
@@ -14455,7 +14463,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         # packed format — CLEAR the stencil plane and STORE
                         # it so the S_DZ_C2 pass/fail/dfail update commits.
                         st('VkAttachmentDescription',
-                        flags=0, format=(129 if is_stencil else 126),
+                        flags=0, format=(124 if is_d16 else (129 if is_stencil else 126)),
                         samples=1,
                         loadOp=1, storeOp=0,
                         stencilLoadOp=(1 if is_stencil else 2),
@@ -15639,15 +15647,26 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                  % (CW * CH,))
         if is_ds:
             # depth/depth-stencil readback gate: rb2 holds the attachment
-            # copied with aspectMask=2 — D32_SFLOAT raw f32 words, or the
-            # packed {stencil,depth_unorm24} word for D24S8
+            # copied with aspectMask=2 — D32_SFLOAT raw f32 words, the
+            # packed {stencil,depth_unorm24} word for D24S8, or D16_UNORM
+            # u16 pairs packed two-per-word for d16 sessions
             rst2_, _rs2, rbe2 = fm.resolve(X['rb2'], KIND['VkBuffer'])
             rb2_off = tm.blobs[RES_BLOB0 + 5]['base_w'] << 2
-            W(TP_CHECK, CK_APR, CW * CH, rb2_off)
             _expd = exp_ds if is_stencil else exp_depth
-            for j in range(CW * CH):
-                rec(EK_APRCHK, rb2_off + 4 * j,
-                    _expd[j], _expd[j], 0)
+            if is_d16:
+                # D16_UNORM stores cl_f32_u16(depth), 2 B/px; packed rows
+                # -> CW*CH/2 words, word k = u16[2k] | u16[2k+1]<<16 with
+                # pixels in row-major order (CW*CH is even for gpos).
+                _u16 = [cl_f32_u16(w) for w in _expd]
+                W(TP_CHECK, CK_APR, CW * CH // 2, rb2_off)
+                for k in range(CW * CH // 2):
+                    _w16 = _u16[2 * k] | (_u16[2 * k + 1] << 16)
+                    rec(EK_APRCHK, rb2_off + 4 * k, _w16, _w16, 0)
+            else:
+                W(TP_CHECK, CK_APR, CW * CH, rb2_off)
+                for j in range(CW * CH):
+                    rec(EK_APRCHK, rb2_off + 4 * j,
+                        _expd[j], _expd[j], 0)
             note('depth readback gate: %d words, %d cov px'
                  % (CW * CH, len(cov)))
 

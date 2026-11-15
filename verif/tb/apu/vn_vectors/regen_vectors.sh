@@ -176,6 +176,9 @@ python3 $G --graphics-session ue_gpos_blend_1    1
 # keeps logical B only (mask 0x4).  A byte-order mask cannot pass both.
 python3 $G --graphics-session ue_gpos_bgracwmr_1 1
 python3 $G --graphics-session ue_gpos_bgracwmb_1 1
+# D16_UNORM depth-compare pair: LESS, near red z=0.25 first, far blue
+# z=0.4 second; the packed u16 readback exposes a wrong D16 decode.
+python3 $G --graphics-session ue_gpos_d16lt_1 1
 
 # Sessions the run scripts execute that this script did not generate
 # (blend ops and factors, logic ops, depth compare/bounds/bias/clamp,
