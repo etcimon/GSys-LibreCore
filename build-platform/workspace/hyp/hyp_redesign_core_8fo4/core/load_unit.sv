@@ -539,16 +539,7 @@ assign ldbuf_full = &ldbuf_valid_q;
       if (req_port_i.data_rvalid && ldbuf_valid_q[rresp_idx]) begin
         rpend_q[rresp_idx] <= 1'b1;
         rdata_q[rresp_idx] <= req_port_i.data_rdata;
-`ifdef G6LC_MUT_LU_EXPEND_DROP
-        // MUTANT: the ex_pub push without its tombstone — the slot is
-        // ex_pend-marked but never drn'd, so the leaf's exception cases
-        // must fail (the pushed record owns the publish while the slot
-        // leaks).
-        rkill_q[rresp_idx] <= (rresp_idx == ldbuf_last_id_q) && req_port_o.kill_req &&
-                              !(LU_EXPEND && ex_pub);
-`else
         rkill_q[rresp_idx] <= (rresp_idx == ldbuf_last_id_q) && req_port_o.kill_req;
-`endif
       end
       if (ldbuf_r) begin
         rpend_q[ldbuf_rindex] <= 1'b0;
@@ -1392,9 +1383,25 @@ assign ldbuf_full = &ldbuf_valid_q;
   // Lowest index wins, the same rule as that scan. Publish and the
   // exception arm still own the slot when they fire.
   logic [NLD-1:0] drn_ok;
+  // r129 (LoadExPubStages==2 only; hyp8-osbi-scalar-r127n-deep
+  // @254,915,572): the kill-cycle push leaves its slot tombstoned by the
+  // capture (rkill) while the record still waits for a safe FSM state. If
+  // the next request was taken in the kill cycle and sits in WAIT_GNT, the
+  // record cannot present, the slot drained anyway, its pending bit fell
+  // with it and the record was dropped as dead: the exception was lost.
+  // A slot with a live pending record now stays until the record pops
+  // (pend_pop clears the bit; the drain follows one cycle later, as for a
+  // deferred record). Under ==1 the term is the constant 1.
   for (genvar di = 0; di < NLD; di++) begin : gen_drn_ok
+`ifdef G6LC_MUT_LU_EXPEND_DROP
+    // MUTANT: the pre-r129 drain, blind to the live pending record.
     assign drn_ok[di] = rpend_q[di] && ldbuf_valid_q[di] &&
                         (ldbuf_flushed_q[di] || rkill_q[di]);
+`else
+    assign drn_ok[di] = rpend_q[di] && ldbuf_valid_q[di] &&
+                        (ldbuf_flushed_q[di] ||
+                         (rkill_q[di] && !(LU_EXPEND && ex_pend_q[di])));
+`endif
   end
 
   // r44: parallel prefix priority masks + balanced masked-OR gathers.
@@ -1881,8 +1888,14 @@ assign ldbuf_full = &ldbuf_valid_q;
           mis_trk_q[i] <= 1'b1;
         else if (ldbuf_r && ldbuf_rindex == ldbuf_id_t'(i))
           mis_trk_q[i] <= 1'b0;
+        // r129: the same four causes the pop-cycle check accepts (r124);
+        // under LoadExPubStages==2 the record presents the cycle before
+        // its slot drains, so the drain relies on this bit.
         if (valid_o && ex_o.valid &&
-            ex_o.cause == riscv::LD_ADDR_MISALIGNED &&
+            (ex_o.cause == riscv::LD_ADDR_MISALIGNED ||
+             ex_o.cause == riscv::LD_ACCESS_FAULT ||
+             ex_o.cause == riscv::LOAD_PAGE_FAULT ||
+             ex_o.cause == riscv::LOAD_GUEST_PAGE_FAULT) &&
             trans_id_o == ldbuf_q[i].trans_id)
           mis_done_q[i] <= 1'b1;
         else if (ldbuf_r && ldbuf_rindex == ldbuf_id_t'(i))

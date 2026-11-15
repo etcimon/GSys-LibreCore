@@ -47,6 +47,12 @@ module tb_g6lc_hyp8_memory;
     c.GPLEN = 64; c.TvalEn = 1; c.NrLoadBufEntries = 2;
     c.PPNW = 44;  // XLEN64 physical-tag width (build_config); cfg_empty
                   // leaves it 0 and dtlb_ppn_i degenerates to [-1:0]
+    // The Hyp8 cacheable region (g6lc64_hyp8_config_pkg): stb_fwd never
+    // forwards an I/O load (ST-037C step 4), and cfg_empty has no region,
+    // which would classify every bench address as I/O.
+    c.NrCachedRegionRules = 1;
+    c.CachedRegionAddrBase = 1024'({64'h8000_0000});
+    c.CachedRegionLength = 1024'({64'h4000_0000});
     return c;
   endfunction
   localparam config_pkg::g6lc_cfg_t C = configuration();
@@ -695,6 +701,17 @@ module tb_g6lc_hyp8_memory;
     check(f3_v && f3_be == 8'hFF && f3_data == '0, "FWD_CBOZ_ZERO");
     flush = 1; tick(); flush = 0; #2;
 
+    // C3b: an I/O load is never forwarded (ST-037C step 4). Same store /
+    // request shape as C2 at an address outside the cacheable region: the
+    // response is present and reports no coverage.
+    store(2, 56'h1000_1000, 64'h1010_1010_1010_1010, 8'hFF, CBO_NONE_V);
+    tick();
+    req_valid = 1; req_tid = 4'd6; req_pa = 56'h1000_1000;
+    tick(); req_valid = 0; tick(); tick();
+    check(f3_v, "FWD_IO_RSP_PRESENT");
+    check(!f3_pos && f3_be == '0, "FWD_IO_NOT_FORWARDED");
+    flush = 1; tick(); flush = 0; #2;
+
     // C4: pending committed push outranks the queued committed entries —
     // commit the older W-store, then a W-store with a different payload:
     // during its pend window the request must take the pend payload.
@@ -864,6 +881,10 @@ module tb_g6lc_hyp8_memory;
     tick();                               // publish consumed -> IDLE, freed
     lu_rpi = '{default: '0}; lu_ex_i = '{default: '0}; #2;
     check(!lu_rdy_v, "LU_MIS_ONCE");
+    if (TB_HYP.LoadExPubStages == 2) begin
+      // r129: the slot is held until its record has popped, then drains.
+      tick(); #2;
+    end
     check(!i_lu.ldbuf_valid_q[lu_rid], "LU_MIS_FREED");
 
     // F2: the publish follows the killed tag's own slot — a second
@@ -886,6 +907,10 @@ module tb_g6lc_hyp8_memory;
           lu_tid_o == TID'(7), "LU_MIS2_EX_PUBLISH");
     tick();
     lu_rpi = '{default: '0}; lu_ex_i = '{default: '0}; #2;
+    if (TB_HYP.LoadExPubStages == 2) begin
+      check(!lu_rdy_v, "LU_MIS2_ONCE");
+      tick(); #2;
+    end
     check(!lu_rdy_v && !(|i_lu.ldbuf_valid_q), "LU_MIS2_FREED");
 
     // =============== G: r44 publish/drain heap trees ===============
@@ -1034,6 +1059,9 @@ module tb_g6lc_hyp8_memory;
     end
     tick(); #2;
     check(!lu_rdy_v, "I1_ONCE");
+    if (TB_HYP.LoadExPubStages == 2) begin
+      tick(); #2;
+    end
     check(!(|i_lu.ldbuf_valid_q), "I1_FREED");
 
     // I2 (L2): the dummy response is a cycle late — the pending bit
@@ -1075,6 +1103,64 @@ module tb_g6lc_hyp8_memory;
     tick(); #2;
     check(!i_lu.ldbuf_valid_q[ridB], "I3_DRAINED");
     check(!lu_rdy_v, "I3_NEVER");
+
+    // I4 (r129, hyp8-osbi-scalar-r127n-deep @254,915,572): the next load
+    // is taken in the kill cycle and then waits for its grant. WAIT_GNT
+    // with a request at the head is not a safe state for the pending
+    // publish, so under LoadExPubStages==2 the record has to outlive the
+    // wait: the faulting slot stays allocated and the exception presents
+    // in the next safe state (B's SEND_TAG). Before r129 the slot drained
+    // on its capture tombstone and the record was dropped as dead.
+    lu_grant(10, 64'h0000_0000_0000_B003, "I4A"); ridA = lu_rid;
+    check(i_lu.state_q[2], "I4_SEND_TAG");
+    lu_ex_i.valid = 1'b1; lu_ex_i.cause = 64'd4; lu_ex_i.tval = 64'hB003;
+    lu_rpi.data_rvalid = 1'b1; lu_rpi.data_rid = C.DcacheIdWidth'(ridA);
+    lu_ctrl = '0;
+    lu_ctrl.valid = 1'b1; lu_ctrl.fu = LOAD; lu_ctrl.operation = LD;
+    lu_ctrl.vaddr = 64'h0000_0000_0000_C000; lu_ctrl.trans_id = TID'(11);
+    lu_ctrl.be = '1; lu_paddr = 56'h0000_0000_00C000;
+    lu_vld = 1'b1; lu_rpi.data_gnt = 1'b0;   // B requested, not granted
+    #2;
+    check(lu_rpo.kill_req && lu_rpo.tag_valid, "I4_KILL");
+    check(lu_rpo.data_req, "I4_B_REQ");
+    if (TB_HYP.LoadExPubStages == 1) begin
+      check(lu_rdy_v && lu_ex_o.valid && lu_ex_o.cause == 64'd4 &&
+            lu_ex_o.tval == 64'hB003 && lu_tid_o == TID'(10), "I4_EX_AT_KILL");
+    end else begin
+      check(!lu_rdy_v, "I4_NO_PUB_AT_KILL");
+    end
+    tick();
+    lu_ex_i = '{default: '0};
+    lu_rpi.data_rvalid = 1'b0; lu_rpi.data_rid = '0;
+    #2;
+    check(i_lu.state_q[1], "I4_WAIT_GNT");
+    check(!lu_rdy_v, "I4_HELD");
+    tick(); #2;                               // second cycle without a grant
+    check(i_lu.state_q[1] && !lu_rdy_v, "I4_HELD2");
+    if (TB_HYP.LoadExPubStages == 2)
+      check(i_lu.ldbuf_valid_q[ridA], "I4_SLOT_HELD");
+    else
+      check(!i_lu.ldbuf_valid_q[ridA], "I4_SLOT_FREED_AT_KILL");
+    lu_rpi.data_gnt = 1'b1; #2;
+    ridB = lu_rpo.data_id;
+    tick();                                   // B granted -> SEND_TAG
+    lu_vld = 0; lu_ctrl = '0; lu_rpi.data_gnt = 0; #2;
+    check(i_lu.state_q[2], "I4_B_SEND_TAG");
+    if (TB_HYP.LoadExPubStages == 2) begin
+      check(lu_rdy_v && lu_ex_o.valid && lu_ex_o.cause == 64'd4 &&
+            lu_ex_o.tval == 64'hB003 && lu_tid_o == TID'(10),
+            "I4_EX_AFTER_HOLD");
+    end else begin
+      check(!lu_rdy_v, "I4_EX_ONCE");
+    end
+    lu_fresp(ridB, '0, '0, 1'b0);             // B's forward verdict
+    #2; check(!lu_rdy_v, "I4_EX_NOT_REPEATED");
+    lu_rvalid(ridB, 64'h1400_0000_0000_00B1);
+    #2;
+    check(lu_rdy_v && !lu_ex_o.valid && lu_tid_o == TID'(11) &&
+          lu_res == 64'h1400_0000_0000_00B1, "I4_B_DATA");
+    tick(); #2;
+    check(!lu_rdy_v && !(|i_lu.ldbuf_valid_q), "I4_FREED");
 
     // =============== F15: publish-port collision (L5) ===============
     // r76 F15: under hyp8 L5 a data slot publishes >=1 cycle after its
