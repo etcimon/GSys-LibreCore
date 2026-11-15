@@ -174,11 +174,21 @@ module g6lc_apu_sg
     assign ram_we = state_q == Store;
     assign ram_addr = state_q == DupReq ? scan_q[AddrWidth-1:0] : index_q[AddrWidth-1:0];
     assign ram_wdata = {total_next[63:0], entry_q[95:0]};
-    tc_sram #(.NumWords(ApuCfg.SgMaxEntries), .DataWidth(160), .NumPorts(1),
-              .Latency(1), .SimInit("none")) i_table (
-      .clk_i, .rst_ni, .req_i(ram_req), .we_i(ram_we), .addr_i(ram_addr),
-      .wdata_i(ram_wdata), .be_i(20'hfffff), .rdata_o(ram_rdata)
-    );
+    // TP3a envelope: the 160-bit table row exceeds the 128-bit SRAM width,
+    // so i_table is SG_NW=2 width banks of 80 bits at the same row address
+    // (SgMaxEntries << 4096 — no depth tiles).  Both banks share the single
+    // req/we/addr port and are read/written in parallel; the gather
+    // rebuilds the 160-bit row into ram_rdata[0].  ram_* interface unchanged.
+    localparam int unsigned SG_NW = 2;
+    logic [79:0]                     sg_rda [SG_NW];
+    for (genvar w = 0; w < SG_NW; w++) begin : g_sgw
+      tc_sram #(.NumWords(ApuCfg.SgMaxEntries), .DataWidth(80), .NumPorts(1),
+                .Latency(1), .SimInit("none")) i_table (
+        .clk_i, .rst_ni,
+        .req_i(ram_req), .we_i(ram_we), .addr_i(ram_addr),
+        .wdata_i(ram_wdata[w*80 +: 80]), .be_i(10'h3FF), .rdata_o(sg_rda[w]));
+    end
+    assign ram_rdata[0] = {sg_rda[1], sg_rda[0]};
     g6lc_apu_dma_read #(.ApuCfg(ApuCfg), .axi_req_t(axi_req_t), .axi_rsp_t(axi_rsp_t)) i_list_reader (
       .clk_i, .rst_ni, .testmode_i, .enable_i(1'b1), .cancel_i(read_cancel),
       .req_valid_i(state_q == Fetch), .req_ready_o(read_ready), .req_i(read_req), .mapping_i(list_q),
