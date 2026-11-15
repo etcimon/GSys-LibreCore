@@ -1042,15 +1042,18 @@ remain release requirements; intermediate raster gates do not narrow the product
     was; R3 (records on-chip, frees the port) and R2 (multi-outstanding) attack the real
     term first. Revisit RP3 only for the residual float chain after R3 lands.
     PROGRESS 2026-11-15 (residual-float-chain capture fusions, NOT the
-    scoreboard-scale pipelined issue which stays open): THREE landed —
-    `S_BL_F2B`→`S_BL_M1`, `S_BL_F1B`→`S_BL_F2`, and `S_BL_F2`-else inlining
-    `S_BL_M1` (now unreachable, removed). Bench coverage hardened first:
-    cases 6b–6h add ONE_MINUS-src, all five blend ops (incl. `S_BL_MM`
-    combinational + `S_BL_OP` subtract/swap), `SRC_ALPHA_SATURATE`, and
-    `CONST_COLOR` factor paths — 53 cases/22,784 checks. Bit-exact (pinned
-    Verilator 5.008); rast merge −2,506 / −2,148 / −5,012 cy (~−9.7k combined,
-    all in `merge=`). `S_BL_ST`/`S_BL_MM` advance fusion + full
-    factor/op scoreboard pipelining remain open (data-dependent, high risk).
+    scoreboard-scale pipelined issue which stays open): FOUR landed —
+    `S_BL_F2B`→`S_BL_M1`, `S_BL_F1B`→`S_BL_F2`, `S_BL_F2`-else inlining
+    `S_BL_M1`, and `S_BL_F1`-else inlining `S_BL_F2`'s dst-dispatch (both
+    `S_BL_M1` and `S_BL_F2` unreachable, removed; `S_BL_F1`/`F1B` now
+    symmetric). Bench coverage hardened first: cases 6b–6h add
+    ONE_MINUS-src, all five blend ops (incl. `S_BL_MM` combinational +
+    `S_BL_OP` subtract/swap), `SRC_ALPHA_SATURATE`, and `CONST_COLOR`
+    factor paths — 53 cases/22,784 checks. Bit-exact (pinned Verilator
+    5.008); rast merge −2,506 / −2,148 / −5,012 / −9,666 cy (~−19.3k
+    combined, all in `merge=`); blend chain now 5 states/component (was 7).
+    `S_BL_ST`/`S_BL_MM` advance fusion + full factor/op scoreboard
+    pipelining remain open (data-dependent, high risk).
   - [ ] Next enablers: R2 memory port slots and bursts (memory requests are now about 37
     of 98.5 cycles per fragment in the rast suite); R3 record store.
   - [x] Resolved 2026-11-13 (goldens regenerated; cmdexec bench fixed; all three pass
