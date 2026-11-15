@@ -589,7 +589,13 @@ AI island / ai-matrix FO4 program (2026-10-26/27, hyp tree of record `build-plat
       each core correctly sees 4 line-granular invalidations. The bench wrongly
       expected `cmo_inv_count==1`. Now checks `count==4` AND a per-core bitmask of the
       4 sub-line `line_addr`s == 4'b1111 (full block coverage, stronger than the old
-      count). Pending remote `run_inval_review.py` re-run for live confirmation.
+      count). **LOCALLY VERIFIED 2026-11-15:** assembled the coherence+L2/L3 cone and
+      built `tb_g6lc_coherence_l2` under pinned Verilator — all 10 scenarios PASS
+      (scenario 6 was the failure), and `+oracle_negative` on scenarios 6/7 still
+      fails at the *later* PROP/SHAPE checks (broadcast coverage intact, defect
+      still detected). Cross-checked against `tb_g6lc_cmo_engine` (unit bench
+      expects SUB_LINES=4 acks + block_base+i*16 addresses; PASSES). Remote
+      `run_inval_review.py` re-run remains for the record but local evidence is conclusive.
 - [ ] hyp8 harness: split-loops `.vlt` (hyp renames) + `--stats` on the fork; PGO training
       now an MT `g6lc64_hyp8_mc` verilation. The PGO prefix `verilator-v5.008-g6lc-pgo`
       (fork f7fa715, header `e900ec45…`) is not in the runners' qualified tables yet.
