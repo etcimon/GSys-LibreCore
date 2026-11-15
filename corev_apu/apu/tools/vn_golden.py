@@ -1644,6 +1644,21 @@ def cl_f32_u16(f):
     return ((p + (1 << (sh - 1))) >> sh) & 0xFFFF
 
 
+def cl_f32_u12(f):
+    """fp32 bits -> UNORM12, clamped round-to-nearest (f_f32_u12);
+    feeds the sRGB search (lin12_to_srgb8) on sRGB attachments."""
+    if f & 0x80000000:
+        return 0
+    e = (f >> 23) & 0xFF
+    if e == 0:
+        return 0
+    if e >= 127:
+        return 0xFFF
+    p = ((1 << 23) | (f & 0x7FFFFF)) * 4095
+    sh = 150 - e
+    return ((p + (1 << (sh - 1))) >> sh) & 0xFFF
+
+
 def f16pack(v):
     """python float -> fp16 bits ('e' half, round-to-nearest)."""
     return struct.unpack('<H', struct.pack('<e', v))[0]
@@ -11684,6 +11699,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # the sw() permute is applied to exp_img after all channel-order
         # blend/mask logic, to covered and clear words alike.
         is_bgra = 'bgra' in gfx
+        # srgb: R8G8B8A8_SRGB (vkfmt 43) / B8G8R8A8_SRGB (vkfmt 50 with
+        # bgra) attachment — RGB channels store sRGB-encoded (u12 linear
+        # -> APU_SRGB_ENC), alpha stays linear UNORM8; the blend dst
+        # decode is TO_LIN16*K16.  Only the is_bop path is adapted.
+        is_srgb = 'srgb' in gfx
         # bloff: blendEnable=0 on the is_bop base — pColorBlendState is
         # still emitted (state transports) but blending is bypassed, so
         # the covered pixel is the src vcol packed UNORM8, not src OP dst.
@@ -11697,6 +11717,18 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             is_bop = True
             if bop_op is None:
                 bop_op = 0
+        if is_srgb and not is_bop:
+            raise ValueError('srgb attachment only adapted on the is_bop '
+                             'blend path')
+        # _enc8: store encode for one f32 channel on attachment 0 — on an
+        # sRGB attachment RGB goes linear-u12 -> sRGB8 while alpha (and
+        # every channel on a non-sRGB attachment) stays UNORM8.  Mirrors
+        # f_enc8; used for the clear word, the blend dst bytes and the
+        # covered blend result alike.
+        def _enc8(c, v):
+            if is_srgb and c < 3:
+                return srgb_lut.lin12_to_srgb8(cl_f32_u12(f32b(v)))
+            return cl_f32_u8(f32b(v))
         is_wide = 'vbwide' in gfx
         # kill: fs_kill discards on a FragCoord 8x8 checkerboard — the
         # helper-lane path; vs_pos3 keeps vcol constant so tri_w holds
@@ -12642,7 +12674,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # blendOp/blendFactor: dst operand = UNORM8 roundtrip of the
             # clear (u8 then f32(u8)*K, K=0x3B808081).  Only clr_w is
             # needed here — the covered word is per-pixel in exp_img.
-            _cb = [cl_f32_u8(f32b(c)) for c in (0.25, 0.5, 0.125, 0.375)]
+            # On an sRGB attachment the clear stores sRGB-encoded RGB
+            # (_enc8) instead of plain UNORM8.
+            _cb = [_enc8(c, _d)
+                   for c, _d in enumerate((0.25, 0.5, 0.125, 0.375))]
             clr_w = (_cb[0] | (_cb[1] << 8) | (_cb[2] << 16) |
                      (_cb[3] << 24))
             tri_w = clr_w
@@ -12773,8 +12808,19 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # /RSUB(d-s); MIN/MAX (op>=3) skip factors, f32 compare.
             _dst = (0.25, 0.5, 0.125, 0.375)
             _K255 = struct.unpack('<f', struct.pack('<I', 0x3B808081))[0]
-            _df = [_f32(cl_f32_u8(f32b(_dst[c])) * _K255)
-                   for c in range(4)]
+            if is_srgb:
+                # sRGB dst operand: the stored clear byte is sRGB-encoded
+                # (_enc8); RGB decodes TO_LIN16*K16 (K16=0x37800080,
+                # *1/65535), alpha stays UNORM8*K255.
+                _K16 = _f32(struct.unpack('<f',
+                                          struct.pack('<I', 0x37800080))[0])
+                _sdb = [_enc8(c, _dst[c]) for c in range(4)]
+                _df = [_f32(float(srgb_lut.TO_LIN16[_sdb[c]]) * _K16)
+                       if c < 3 else _f32(_sdb[c] * _K255)
+                       for c in range(4)]
+            else:
+                _df = [_f32(cl_f32_u8(f32b(_dst[c])) * _K255)
+                       for c in range(4)]
             _gp = gfx_grad_pixels(TRI, [COL] * 3, VP, SC, CW, CH, 1, 2)
             def _bopv(s, d):
                 return (_f32(s + d) if bop_op == 0 else
@@ -12789,9 +12835,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 if _v is None:
                     exp_img.append(clr_w)
                 else:
-                    _rb = ([cl_f32_u8(f32b(_v[c])) for c in range(4)]
+                    _rb = ([_enc8(c, _v[c]) for c in range(4)]
                            if is_bloff else
-                           [cl_f32_u8(f32b(_bopv(_v[c], _df[c])))
+                           [_enc8(c, _bopv(_v[c], _df[c]))
                             for c in range(4)])
                     if is_cwm:
                         # colourWriteMask: channels whose mask bit is clear
@@ -14203,7 +14249,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 device=X['dev'],
                 pCreateInfo=st('VkImageCreateInfo',
                     flags=0, imageType=1,
-                    format=(44 if is_bgra else 37),
+                    format=((50 if is_bgra else 43) if is_srgb
+                        else (44 if is_bgra else 37)),
                     extent=st('VkExtent3D', width=CW, height=CH,
                               depth=1),
                     mipLevels=1, arrayLayers=1, samples=1, tiling=0,
@@ -14217,7 +14264,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 device=X['dev'],
                 pCreateInfo=st('VkImageViewCreateInfo',
                     flags=0, image=X['img'], viewType=1,
-                    format=(44 if is_bgra else 37),
+                    format=((50 if is_bgra else 43) if is_srgb
+                        else (44 if is_bgra else 37)),
                     components=st('VkComponentMapping',
                                   r=0, g=0, b=0, a=0),
                     subresourceRange=st('VkImageSubresourceRange',
@@ -14435,7 +14483,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     attachmentCount=(n_col
                                      + (1 if is_ds else 0)),
                     pAttachments=[st('VkAttachmentDescription',
-                        flags=0, format=(44 if is_bgra else 37),
+                        flags=0, format=((50 if is_bgra else 43) if is_srgb
+                        else (44 if is_bgra else 37)),
                         samples=1,
                         loadOp=1, storeOp=0,
                         stencilLoadOp=2, stencilStoreOp=2,

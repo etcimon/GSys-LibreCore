@@ -179,6 +179,11 @@ python3 $G --graphics-session ue_gpos_bgracwmb_1 1
 # D16_UNORM depth-compare pair: LESS, near red z=0.25 first, far blue
 # z=0.4 second; the packed u16 readback exposes a wrong D16 decode.
 python3 $G --graphics-session ue_gpos_d16lt_1 1
+# sRGB blend: R8G8B8A8_SRGB (vkfmt 43) and B8G8R8A8_SRGB (vkfmt 50)
+# attachments store RGB sRGB-encoded (u12->APU_SRGB_ENC) and decode the
+# dst operand via TO_LIN16*K16 — exposes a wrong sRGB decode scale.
+python3 $G --graphics-session ue_gpos_srgbbopadd_1 1
+python3 $G --graphics-session ue_gpos_bgrasrgbbopadd_1 1
 
 # Sessions the run scripts execute that this script did not generate
 # (blend ops and factors, logic ops, depth compare/bounds/bias/clamp,
