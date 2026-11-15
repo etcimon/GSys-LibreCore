@@ -1071,9 +1071,10 @@ remain release requirements; intermediate raster gates do not narrow the product
     bench. Fixed: `+perf_cohort` (`a7b895783`). ADMITTED from leaf
     `apu-leaf-20261115T091322-cf0d5473a41a` (perf rc 0, "OK same checked work; no cycle
     regression"): rast cohort 1,397,345 → 1,066,697 (−23.7%), fourteen graphics
-    sessions −22.8% in total, shader suite unchanged. Its `vgsys` was at 235 passed /
-    0 failed and still running. The first leaf's `vgsys` hit the 7,200 s suite limit
-    at 218 passed / 0 failed (loaded builder): incomplete, not a failure.
+    sessions −22.8% in total, shader suite unchanged. `vgsys` did not finish on
+    either leaf: 7,200 s suite limit at 235 of 240 sessions passed / 0 failed (218 on
+    the first), on a shared builder. Incomplete, so `vgsys` is still owed a full run;
+    the next leaf uses `--suite-timeout 14400`.
     (2) The remote builder was full (834G of 878G; 520G of uncompressed Hyp8 boot
     traces). With the owner's approval the trace files of the finished runs
     r116–r125 were deleted (40 files, 233.5 GiB; logs, uart, monitors kept; manifest

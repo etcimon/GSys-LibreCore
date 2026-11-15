@@ -177,11 +177,11 @@ to "OK same checked work; no cycle regression", and its capture is now
 `apu-perf-current.json`. Against the previous admitted state: rasteriser cohort
 1,397,345 → 1,066,697 cycles (−23.7%; −70.8% from the origin), the fourteen graphics
 sessions 3,238,455 → 2,501,368 cycles in total (−22.8%), shader suite unchanged at
-3,666,123. On that leaf the unit stage (17 suites) and `vgtop` exit 0; `vgsys` had 235
-sessions passed and none failed when this was written and was still running. The first
-leaf's `vgsys` stopped at the 7,200 s suite limit with 218 sessions passed and none
-failed (the builder was loaded); that is an incomplete run, not a failure. Later leaves
-use `--suite-timeout 14400`.
+3,666,123. On that leaf the unit stage (17 suites) and `vgtop` exit 0. `vgsys` did not
+finish on either leaf: it stopped at the 7,200 s suite limit with 235 of 240 sessions
+passed and none failed (218 on the first leaf), on a builder shared with other jobs.
+That is an incomplete run, not a pass and not a failure; `vgsys` has no complete run
+on these trees. Later leaves use `--suite-timeout 14400`.
 
 The same review found three rasteriser defects by reading the RTL against the model and
 the specification. Each was reproduced by a failing bench case before the fix (commits
