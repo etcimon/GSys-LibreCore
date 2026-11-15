@@ -648,6 +648,17 @@ module g6lc_apu_rast
       return ((32'(w) * 32'(bpp)) + 32'd63) & ~32'd63;
     endfunction
 
+    // raw32 single-word colour attachments (R32_SFLOAT/R32_UINT): the
+    // stored pixel is the 32-bit word of fragment-output channel 0
+    // (res_q[0]) written raw — no UNORM conversion, no clamp; channels
+    // 1..3 are ignored.  colourWriteMask reduces to the R bit (set ->
+    // all four bytes, clear -> untouched).  No blending on either;
+    // logic op applies to R32_UINT on the whole word but not to
+    // R32_SFLOAT (the same rule as sRGB).
+    function automatic logic f_is_raw32(input logic [7:0] f);
+      return f == 8'(APU_IMG_FMT_R32_SFLOAT) ||
+             f == 8'(APU_IMG_FMT_R32_UINT);
+    endfunction
     // color-attachment format legality
     function automatic logic f_cfmt_ok(input logic [7:0] f);
       return f == 8'(APU_IMG_FMT_R8G8B8A8_UNORM) ||
@@ -655,7 +666,8 @@ module g6lc_apu_rast
              f == 8'(APU_IMG_FMT_R8G8B8A8_SRGB)  ||
              f == 8'(APU_IMG_FMT_B8G8R8A8_SRGB)  ||
              // T3: integer RGBA8 (f_enc8 keeps the low byte, no blend)
-             f == 8'(APU_IMG_FMT_R8G8B8A8_UINT);
+             f == 8'(APU_IMG_FMT_R8G8B8A8_UINT)  ||
+             f_is_raw32(f);
     endfunction
     function automatic logic f_dfmt_ok(input logic [7:0] f);
       return f == 8'(APU_IMG_FMT_D32_SFLOAT) ||
@@ -1443,7 +1455,9 @@ module g6lc_apu_rast
     wire [7:0] rop_b1 = f_enc8(dr_q.ca[at_q].fmt, 2'd1, res_q[1]);
     wire [7:0] rop_b2 = f_enc8(dr_q.ca[at_q].fmt, 2'd2, res_q[2]);
     wire [7:0] rop_b3 = f_enc8(dr_q.ca[at_q].fmt, 2'd3, res_q[3]);
-    wire [31:0] rop_pix = f_is_bgr(dr_q.ca[at_q].fmt)
+    wire [31:0] rop_pix = f_is_raw32(dr_q.ca[at_q].fmt)
+        ? res_q[0]
+        : f_is_bgr(dr_q.ca[at_q].fmt)
         ? {rop_b3, rop_b0, rop_b1, rop_b2}
         : {rop_b3, rop_b2, rop_b1, rop_b0};
     // VkLogicOp on the encoded attachment bytes.  Blend is not used.
@@ -1479,26 +1493,40 @@ module g6lc_apu_rast
       logic [1:0]  lane;
       src[0] = s0; src[1] = s1; src[2] = s2; src[3] = s3;
       f_lop_pix = dstw;
-      for (int c = 0; c < 4; c++) begin
-        lane = f_cbyte(fmt, 2'(c));
-        sb = f_enc8(fmt, 2'(c), src[c]);
-        db = dstw[8*lane +: 8];
-        f_lop_pix[8*lane +: 8] = f_lop(op, sb, db);
+      if (fmt == 8'(APU_IMG_FMT_R32_UINT)) begin
+        // raw32 integer: the logic op is bitwise on the whole stored
+        // word — per-byte f_lop on the raw source word s0 against the
+        // destination word (channels 1..3 carry no meaning).
+        for (int b = 0; b < 4; b++)
+          f_lop_pix[8*b +: 8] = f_lop(op, s0[8*b +: 8],
+                                      dstw[8*b +: 8]);
+      end else begin
+        for (int c = 0; c < 4; c++) begin
+          lane = f_cbyte(fmt, 2'(c));
+          sb = f_enc8(fmt, 2'(c), src[c]);
+          db = dstw[8*lane +: 8];
+          f_lop_pix[8*lane +: 8] = f_lop(op, sb, db);
+        end
       end
     endfunction
     logic [31:0] lop_pix_q;
     // byte strobes for the pixel under the ROP cursor.  colorWriteMask
     // names logical channels (R,G,B,A); f_cbyte gives each channel's
     // byte in the attachment's order, so BGRA swaps the R and B strobes.
-    wire [3:0] rop_msk = f_is_bgr(dr_q.ca[at_q].fmt)
+    wire [3:0] rop_msk = f_is_raw32(dr_q.ca[at_q].fmt)
+        ? {4{dr_q.blend[at_q].mask[0]}}
+        : f_is_bgr(dr_q.ca[at_q].fmt)
         ? {dr_q.blend[at_q].mask[3], dr_q.blend[at_q].mask[0],
            dr_q.blend[at_q].mask[1], dr_q.blend[at_q].mask[2]}
         : dr_q.blend[at_q].mask;
     wire [7:0] rop_strb = {4'h0, rop_msk} << {fr_px[0], 2'b00};
     // VkLogicOp applies to integer and normalized-integer attachments
-    // only: an sRGB attachment takes the plain source colour.
-    // logicOpEnable still disables blending on every attachment.
-    wire lop_on_w = dr_q.logic_op_en && !f_is_srgb(dr_q.ca[at_q].fmt);
+    // only: an sRGB attachment takes the plain source colour, and so
+    // does a raw32 float attachment (R32_SFLOAT); R32_UINT is integer
+    // and takes the bitwise op on the whole word.  logicOpEnable still
+    // disables blending on every attachment.
+    wire lop_on_w = dr_q.logic_op_en && !f_is_srgb(dr_q.ca[at_q].fmt) &&
+                    dr_q.ca[at_q].fmt != 8'(APU_IMG_FMT_R32_SFLOAT);
     // Window depth.  Clamp enable uses the viewport range and the
     // near/far planes are not clip planes.  Otherwise the value is
     // held to [0,1], which is what the unclamped fixed path writes.
@@ -1897,7 +1925,9 @@ module g6lc_apu_rast
                       : dr_q.clear_color[0];
                   else
                     clr_pix_q <=
-                      f_is_bgr(dr_q.ca[0].fmt)
+                      f_is_raw32(dr_q.ca[0].fmt)
+                      ? dr_q.clear_color[0]
+                      : f_is_bgr(dr_q.ca[0].fmt)
                       ? {f_enc8(dr_q.ca[0].fmt, 2'd3,
                                 dr_q.clear_color[3]),
                          f_enc8(dr_q.ca[0].fmt, 2'd0,
@@ -1933,15 +1963,21 @@ module g6lc_apu_rast
                     (dr_q.ca_valid[3] && !f_cfmt_ok(dr_q.ca[3].fmt)) ||
                     (dr_q.da_valid && !f_dfmt_ok(dr_q.da.fmt)) ||
                     // T3: blending an integer attachment is invalid
-                    // usage — refuse rather than blend raw bits as fp
+                    // usage — refuse rather than blend raw bits as fp.
+                    // raw32 single-word attachments carry no blend
+                    // either (same refusal).
                     (dr_q.ca_valid[0] && dr_q.blend[0].en &&
-                     dr_q.ca[0].fmt == 8'(APU_IMG_FMT_R8G8B8A8_UINT)) ||
+                     (dr_q.ca[0].fmt == 8'(APU_IMG_FMT_R8G8B8A8_UINT) ||
+                      f_is_raw32(dr_q.ca[0].fmt))) ||
                     (dr_q.ca_valid[1] && dr_q.blend[1].en &&
-                     dr_q.ca[1].fmt == 8'(APU_IMG_FMT_R8G8B8A8_UINT)) ||
+                     (dr_q.ca[1].fmt == 8'(APU_IMG_FMT_R8G8B8A8_UINT) ||
+                      f_is_raw32(dr_q.ca[1].fmt))) ||
                     (dr_q.ca_valid[2] && dr_q.blend[2].en &&
-                     dr_q.ca[2].fmt == 8'(APU_IMG_FMT_R8G8B8A8_UINT)) ||
+                     (dr_q.ca[2].fmt == 8'(APU_IMG_FMT_R8G8B8A8_UINT) ||
+                      f_is_raw32(dr_q.ca[2].fmt))) ||
                     (dr_q.ca_valid[3] && dr_q.blend[3].en &&
-                     dr_q.ca[3].fmt == 8'(APU_IMG_FMT_R8G8B8A8_UINT)) ||
+                     (dr_q.ca[3].fmt == 8'(APU_IMG_FMT_R8G8B8A8_UINT) ||
+                      f_is_raw32(dr_q.ca[3].fmt))) ||
                     (dr_q.ca_valid[0] && dr_q.blend[0].en &&
                      (dr_q.blend[0].src_c > 5'd14 ||
                       dr_q.blend[0].dst_c > 5'd14 ||

@@ -3780,6 +3780,271 @@ module tb_g6lc_apu_rast;
                              x, y, dbpx16(x, y)));
           end
         end
+
+    // ================= case 56: R32_SFLOAT raw colour ================
+    // Single-word float attachment: the stored pixel is res_q[0] raw —
+    // no UNORM conversion, no clamp.  Flat 2.5 (0x40200000) on the
+    // case-2 triangle; a UNORM path would emit ~0x000000FF bytes.
+    cases++;
+    d = mk_clear();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R32_SFLOAT);
+    d.clear_color[0] = 32'h00000000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h40200000, 32'h40200000, 32'h40200000, 32'h3F800000);
+    put_vert(1, 32'h3F400000, 32'hBF200000,
+                32'h40200000, 32'h40200000, 32'h40200000, 32'h3F800000);
+    put_vert(2, 32'hBF200000, 32'h3F600000,
+                32'h40200000, 32'h40200000, 32'h40200000, 32'h3F800000);
+    ref_xi = '{512, 7168, 1536}; ref_yi = '{512, 1536, 7680};
+    d = mk_draw();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R32_SFLOAT);
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case56 code=%0d", w_dpl.code));
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        checks++;
+        got = fbpx(x, y);
+        if (ref_px(x, y) == 32'hFFFF_FFFF) begin
+          if (got != 32'h00000000)
+            fail($sformatf("case56 out px(%0d,%0d)=%08x exp 0",
+                           x, y, got));
+        end else begin
+          automatic int dv = int'(got) - int'(32'h40200000);
+          if (dv < -4 || dv > 4)
+            fail($sformatf("case56 px(%0d,%0d)=%08x exp~40200000",
+                           x, y, got));
+        end
+      end
+
+    // ================= case 57: R32_SFLOAT CLEAR ==================
+    // Attachment CLEAR on the raw format stores clear_color[0] raw.
+    cases++;
+    d = mk_clear();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R32_SFLOAT);
+    d.clear_color[0] = 32'h40490FDB;   // ~pi, raw bits
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case57 code=%0d", w_dpl.code));
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        checks++;
+        got = fbpx(x, y);
+        if (got != 32'h40490FDB)
+          fail($sformatf("case57 px(%0d,%0d)=%08x exp 40490FDB",
+                         x, y, got));
+      end
+
+    // ============ case 58: R32_UINT raw colour ======================
+    // Integer attachment: res_q[0] stored raw.  Point draws (no
+    // interpolation — a single vertex's varying is exact) drive the
+    // 32-bit word 0x00012345; as an f32 it is a subnormal a triangle's
+    // fractional-lambda chain could round, so points are used (the
+    // case-42 mechanism).  Four spread pixels.
+    cases++;
+    d = mk_clear();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R32_UINT);
+    d.clear_color[0] = 32'h00000000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, f2s(4.5/16.0  - 1.0), f2s(4.5/16.0  - 1.0),
+                32'h00012345, 32'h00012345, 32'h00012345, 32'h3F800000);
+    put_vert(1, f2s(12.5/16.0 - 1.0), f2s(20.5/16.0 - 1.0),
+                32'h00012345, 32'h00012345, 32'h00012345, 32'h3F800000);
+    put_vert(2, f2s(20.5/16.0 - 1.0), f2s(12.5/16.0 - 1.0),
+                32'h00012345, 32'h00012345, 32'h00012345, 32'h3F800000);
+    put_vert(3, f2s(28.5/16.0 - 1.0), f2s(28.5/16.0 - 1.0),
+                32'h00012345, 32'h00012345, 32'h00012345, 32'h3F800000);
+    d = mk_draw();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R32_UINT);
+    d.topology = 8'd0;
+    d.vertex_count = 4;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case58 code=%0d", w_dpl.code));
+    begin
+      automatic int npts = 0;
+      for (int y = 0; y < 32; y++)
+        for (int x = 0; x < 32; x++) begin
+          checks++;
+          got = fbpx(x, y);
+          if (got == 32'h00012345) npts++;
+          else if (got != 32'h00000000)
+            fail($sformatf("case58 px(%0d,%0d)=%08x exp 0/12345",
+                           x, y, got));
+        end
+      if (npts != 4)
+        fail($sformatf("case58 covered=%0d exp 4", npts));
+      checks += 4;
+      if (fbpx(4, 4)  != 32'h00012345 || fbpx(12, 20) != 32'h00012345 ||
+          fbpx(20, 12) != 32'h00012345 || fbpx(28, 28) != 32'h00012345)
+        fail("case58 point pixels not 00012345");
+    end
+
+    // ============ case 59: R32_UINT colourWriteMask =================
+    // Only the R bit matters: set -> all four bytes written, clear ->
+    // pixel untouched.  Attachment pre-cleared to 0xDEADBEEF.
+    cases++;
+    d = mk_clear();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R32_UINT);
+    d.clear_color[0] = 32'hDEADBEEF;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    d = mk_draw();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R32_UINT);
+    d.topology = 8'd0;
+    d.vertex_count = 4;
+    d.blend[0].mask = 4'b1110;      // R clear -> nothing written
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case59 maskoff code=%0d", w_dpl.code));
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        checks++;
+        got = fbpx(x, y);
+        if (got != 32'hDEADBEEF)
+          fail($sformatf("case59 masked px(%0d,%0d)=%08x exp deadbeef",
+                         x, y, got));
+      end
+    d = mk_draw();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R32_UINT);
+    d.topology = 8'd0;
+    d.vertex_count = 4;
+    d.blend[0].mask = 4'b0001;      // R set -> covered px written
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case59 maskon code=%0d", w_dpl.code));
+    begin
+      automatic int npts = 0;
+      for (int y = 0; y < 32; y++)
+        for (int x = 0; x < 32; x++) begin
+          checks++;
+          got = fbpx(x, y);
+          if (got == 32'h00012345) npts++;
+          else if (got != 32'hDEADBEEF)
+            fail($sformatf("case59 px(%0d,%0d)=%08x exp deadbeef/12345",
+                           x, y, got));
+        end
+      if (npts != 4)
+        fail($sformatf("case59 covered=%0d exp 4", npts));
+    end
+
+    // ============ case 60: R32_UINT logic op ========================
+    // VkLogicOp applies to R32_UINT on the whole 32-bit word:
+    // source res_q[0] op destination word, bitwise.  XOR of
+    // 0x00012345 with the 0x0F0F0F0F clear.
+    cases++;
+    d = mk_clear();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R32_UINT);
+    d.clear_color[0] = 32'h0F0F0F0F;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    d = mk_draw();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R32_UINT);
+    d.topology = 8'd0;
+    d.vertex_count = 4;
+    d.logic_op_en = 1'b1;
+    d.logic_op = 4'd6;              // XOR
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case60 code=%0d", w_dpl.code));
+    begin
+      automatic int npts = 0;
+      for (int y = 0; y < 32; y++)
+        for (int x = 0; x < 32; x++) begin
+          checks++;
+          got = fbpx(x, y);
+          if (got == 32'h0F0E2C4A) npts++;
+          else if (got != 32'h0F0F0F0F)
+            fail($sformatf("case60 px(%0d,%0d)=%08x exp 0f0f0f0f/0f0e2c4a",
+                           x, y, got));
+        end
+      if (npts != 4)
+        fail($sformatf("case60 covered=%0d exp 4", npts));
+    end
+
+    // ============ case 61: R32_SFLOAT + logicOp INVERT =============
+    // Like sRGB, a float attachment takes the plain source colour —
+    // the logic op is not applied.  INVERT of the zero clear would be
+    // 0xFFFFFFFF; the covered pixels must hold ~0x40200000 instead.
+    cases++;
+    d = mk_clear();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R32_SFLOAT);
+    d.clear_color[0] = 32'h00000000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h40200000, 32'h40200000, 32'h40200000, 32'h3F800000);
+    put_vert(1, 32'h3F400000, 32'hBF200000,
+                32'h40200000, 32'h40200000, 32'h40200000, 32'h3F800000);
+    put_vert(2, 32'hBF200000, 32'h3F600000,
+                32'h40200000, 32'h40200000, 32'h40200000, 32'h3F800000);
+    ref_xi = '{512, 7168, 1536}; ref_yi = '{512, 1536, 7680};
+    d = mk_draw();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R32_SFLOAT);
+    d.logic_op_en = 1'b1;
+    d.logic_op = 4'd10;             // INVERT
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case61 code=%0d", w_dpl.code));
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        checks++;
+        got = fbpx(x, y);
+        if (ref_px(x, y) == 32'hFFFF_FFFF) begin
+          if (got != 32'h00000000)
+            fail($sformatf("case61 out px(%0d,%0d)=%08x exp 0",
+                           x, y, got));
+        end else begin
+          automatic int dv = int'(got) - int'(32'h40200000);
+          if (dv < -4 || dv > 4)
+            fail($sformatf("case61 px(%0d,%0d)=%08x exp~40200000",
+                           x, y, got));
+        end
+      end
+
+    // ============ case 62: blend refused on raw32 ==================
+    // Blending is not supported on either raw format: blendEnable is
+    // refused at record legality (UNSUPPORTED, nothing drawn) exactly
+    // like R8G8B8A8_UINT.  The attachment keeps its clear.
+    cases++;
+    d = mk_clear();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R32_SFLOAT);
+    d.clear_color[0] = 32'h40490FDB;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    d = mk_draw();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R32_SFLOAT);
+    d.blend[0].en = 1'b1;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    checks++;
+    if (w_dpl.code != APU_SH_DONE_UNSUPPORTED)
+      fail($sformatf("case62 sf+blend code=%0d exp UNSUPPORTED",
+                     w_dpl.code));
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        checks++;
+        got = fbpx(x, y);
+        if (got != 32'h40490FDB)
+          fail($sformatf("case62 sf px(%0d,%0d)=%08x exp 40490FDB",
+                         x, y, got));
+      end
+    d = mk_clear();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R32_UINT);
+    d.clear_color[0] = 32'h0000ABCD;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    d = mk_draw();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R32_UINT);
+    d.blend[0].en = 1'b1;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    checks++;
+    if (w_dpl.code != APU_SH_DONE_UNSUPPORTED)
+      fail($sformatf("case62 u+blend code=%0d exp UNSUPPORTED",
+                     w_dpl.code));
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        checks++;
+        got = fbpx(x, y);
+        if (got != 32'h0000ABCD)
+          fail($sformatf("case62 u px(%0d,%0d)=%08x exp 0000abcd",
+                         x, y, got));
+      end
     end
 
     // ---- report ---------------------------------------------------------
