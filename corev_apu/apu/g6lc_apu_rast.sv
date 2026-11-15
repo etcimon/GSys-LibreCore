@@ -1487,9 +1487,14 @@ module g6lc_apu_rast
       end
     endfunction
     logic [31:0] lop_pix_q;
-    // byte strobes for the pixel under the ROP cursor
-    wire [7:0] rop_strb = {4'h0, dr_q.blend[at_q].mask}
-                          << {fr_px[0], 2'b00};
+    // byte strobes for the pixel under the ROP cursor.  colorWriteMask
+    // names logical channels (R,G,B,A); f_cbyte gives each channel's
+    // byte in the attachment's order, so BGRA swaps the R and B strobes.
+    wire [3:0] rop_msk = f_is_bgr(dr_q.ca[at_q].fmt)
+        ? {dr_q.blend[at_q].mask[3], dr_q.blend[at_q].mask[0],
+           dr_q.blend[at_q].mask[1], dr_q.blend[at_q].mask[2]}
+        : dr_q.blend[at_q].mask;
+    wire [7:0] rop_strb = {4'h0, rop_msk} << {fr_px[0], 2'b00};
     // Window depth.  Clamp enable uses the viewport range and the
     // near/far planes are not clip planes.  Otherwise the value is
     // held to [0,1], which is what the unclamped fixed path writes.

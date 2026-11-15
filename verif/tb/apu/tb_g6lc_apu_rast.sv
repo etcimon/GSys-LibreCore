@@ -3425,6 +3425,58 @@ module tb_g6lc_apu_rast;
         end
       end
 
+    // ================= case 50: colorWriteMask on a BGRA attachment ====
+    // VkColorComponentFlags name logical channels (R=1,G=2,B=4,A=8), not
+    // byte positions.  On B8G8R8A8 the R channel is byte 2 and B is byte
+    // 0, so an R-only mask must update byte 2 alone and a B-only mask
+    // byte 0 alone.  Every earlier masked case used R8G8B8A8 or an
+    // R/B-symmetric mask, which cannot tell the two mappings apart.
+    // clear (0.2,0.2,0.2,0.5) -> BGRA word 0x80333333 (51,51,51,128).
+    cases++;
+    ref_xi = '{512, 7168, 1536}; ref_yi = '{512, 1536, 7680};
+    ref_col[0] = '{1.0, 0.0, 0.0, 1.0};
+    ref_col[1] = '{0.0, 1.0, 0.0, 1.0};
+    ref_col[2] = '{0.0, 0.0, 1.0, 1.0};
+    for (int k = 0; k < 2; k++) begin
+      // k=0: flat red, mask R -> byte 2 = 255.  k=1: flat blue, mask B
+      // -> byte 0 = 255.  All other bytes keep the clear.
+      automatic logic [31:0] exp_in = (k == 0) ? 32'h80FF3333
+                                               : 32'h803333FF;
+      automatic logic [31:0] cr = (k == 0) ? 32'h3F800000 : 32'h00000000;
+      automatic logic [31:0] cb = (k == 0) ? 32'h00000000 : 32'h3F800000;
+      d = mk_clear();
+      d.ca[0].fmt = 8'(APU_IMG_FMT_B8G8R8A8_UNORM);
+      d.clear_color[0] = 32'h3E4CCCCD;   // 0.2 -> 51
+      d.clear_color[1] = 32'h3E4CCCCD;
+      d.clear_color[2] = 32'h3E4CCCCD;
+      d.clear_color[3] = 32'h3F000000;   // 0.5 -> 128
+      do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+      put_vert(0, 32'hBF600000, 32'hBF600000,
+                  cr, 32'h00000000, cb, 32'h3F800000);
+      put_vert(1, 32'h3F400000, 32'hBF200000,
+                  cr, 32'h00000000, cb, 32'h3F800000);
+      put_vert(2, 32'hBF200000, 32'h3F600000,
+                  cr, 32'h00000000, cb, 32'h3F800000);
+      d = mk_draw();
+      d.ca[0].fmt = 8'(APU_IMG_FMT_B8G8R8A8_UNORM);
+      d.blend[0].mask = (k == 0) ? 4'b0001 : 4'b0100;
+      do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+      if (w_dpl.code != APU_SH_DONE_OK)
+        fail($sformatf("case50 k=%0d code=%0d", k, w_dpl.code));
+      for (int y = 0; y < 32; y++)
+        for (int x = 0; x < 32; x++) begin
+          checks++;
+          got = fbpx(x, y);
+          if (ref_px(x, y) == 32'hFFFF_FFFF) begin
+            if (got != 32'h80333333)
+              fail($sformatf("case50 k=%0d out px(%0d,%0d)=%08x expclr",
+                             k, x, y, got));
+          end else if (got != exp_in)
+            fail($sformatf("case50 k=%0d in px(%0d,%0d)=%08x exp=%08x",
+                           k, x, y, got, exp_in));
+        end
+    end
+
     // ---- report ---------------------------------------------------------
     // draw-path counters: the suite draws and writes pixels, so both
     // must have moved, and no more pixels than busy cycles
