@@ -11679,11 +11679,20 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # R=1,G=2,B=4,A=8).  cwm sessions reuse the is_bop ONE/ONE ADD base so
         # pColorBlendState is emitted; masked channels keep the dst/clear byte.
         is_cwm = 'cwm' in gfx
+        # bgra: B8G8R8A8_UNORM attachment (vkfmt 44) stores the same four
+        # UNORM8 channels with bytes 0/2 exchanged vs logical RGBA order;
+        # the sw() permute is applied to exp_img after all channel-order
+        # blend/mask logic, to covered and clear words alike.
+        is_bgra = 'bgra' in gfx
         # bloff: blendEnable=0 on the is_bop base — pColorBlendState is
         # still emitted (state transports) but blending is bypassed, so
         # the covered pixel is the src vcol packed UNORM8, not src OP dst.
         is_bloff = 'bloff' in gfx
-        cwm_mask = 0x7 if is_cwm else 0xF
+        # colourWriteMask stays logical-channel (R=1,G=2,B=4,A=8): cwmr
+        # keeps R only, cwmb keeps B only — paired with is_bgra these
+        # expose a mask applied in byte order instead of channel order.
+        cwm_mask = (0x1 if 'cwmr' in gfx else 0x4 if 'cwmb' in gfx
+                    else 0x7 if is_cwm else 0xF)
         if is_cwm or is_bloff:
             is_bop = True
             if bop_op is None:
@@ -14185,7 +14194,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             ('vkCreateImage', dict(
                 device=X['dev'],
                 pCreateInfo=st('VkImageCreateInfo',
-                    flags=0, imageType=1, format=37,
+                    flags=0, imageType=1,
+                    format=(44 if is_bgra else 37),
                     extent=st('VkExtent3D', width=CW, height=CH,
                               depth=1),
                     mipLevels=1, arrayLayers=1, samples=1, tiling=0,
@@ -14198,7 +14208,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             ('vkCreateImageView', dict(
                 device=X['dev'],
                 pCreateInfo=st('VkImageViewCreateInfo',
-                    flags=0, image=X['img'], viewType=1, format=37,
+                    flags=0, image=X['img'], viewType=1,
+                    format=(44 if is_bgra else 37),
                     components=st('VkComponentMapping',
                                   r=0, g=0, b=0, a=0),
                     subresourceRange=st('VkImageSubresourceRange',
@@ -14416,7 +14427,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     attachmentCount=(n_col
                                      + (1 if is_ds else 0)),
                     pAttachments=[st('VkAttachmentDescription',
-                        flags=0, format=37, samples=1,
+                        flags=0, format=(44 if is_bgra else 37),
+                        samples=1,
                         loadOp=1, storeOp=0,
                         stencilLoadOp=2, stencilStoreOp=2,
                         initialLayout=0, finalLayout=5)] + ([
@@ -15578,6 +15590,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # ---- readback gate: all 4096 words of the packed image ---- #
         rst_, _rs, rbe = fm.resolve(X['rb'], KIND['VkBuffer'])
         rb_off = tm.blobs[RES_BLOB0 + 2]['base_w'] << 2
+        if is_bgra:
+            # B8G8R8A8_UNORM stores bytes [B,G,R,A]: exchange bytes 0/2 of
+            # every attachment-0 word (covered and clear alike) now that
+            # blend/mask have run in logical RGBA order.
+            exp_img = [((w & 0xFF00FF00) | ((w >> 16) & 0xFF) |
+                        ((w & 0xFF) << 16)) for w in exp_img]
         W(TP_CHECK, CK_APR, CW * CH, rb_off)
         for j in range(CW * CH):
             rec(EK_APRCHK, rb_off + 4 * j, exp_img[j], exp_img[j], 0)

@@ -171,6 +171,11 @@ python3 $G --graphics-session ue_gpos_statvp_1  1
 python3 $G --graphics-session ue_gpos_drawind_1  1
 python3 $G --graphics-session ue_gpos_drawindx_1 1
 python3 $G --graphics-session ue_gpos_blend_1    1
+# BGRA colour-write-mask pair: B8G8R8A8_UNORM attachment (vkfmt 44)
+# stores bytes [B,G,R,A]; cwmr keeps logical R only (mask 0x1), cwmb
+# keeps logical B only (mask 0x4).  A byte-order mask cannot pass both.
+python3 $G --graphics-session ue_gpos_bgracwmr_1 1
+python3 $G --graphics-session ue_gpos_bgracwmb_1 1
 # dEQP-VK.memory.pipeline_barrier vertex-buffer shape: RG8_UNORM stride 2,
 # POINT_LIST, CTS shaders verbatim (no varyings, constant-white FS)
 python3 $G --graphics-session ue_gpos_ptsrg8_1  1
