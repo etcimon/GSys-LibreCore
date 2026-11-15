@@ -1339,6 +1339,11 @@ def cmd_build(rem: Remote, args) -> int:
             f"SOFT_LADDER_BUILD_CLEAN={shlex.quote(clean)}",
             "VLT_HOME=\"$VLT_HOME\"",
         ]
+        vthreads = getattr(args, "vthreads", None)
+        if vthreads is not None:
+            env_vars.append(
+                f"SOFT_LADDER_VERILATOR_THREADS={shlex.quote(str(vthreads))}"
+            )
     for kv in args.env:
         env_vars.append(shlex.quote(kv))
 
@@ -2950,8 +2955,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--jobs", default=None,
                     help="C++ make -j. AI default 1 (cc1plus OOM at -j2 on 30Gi).")
     sp.add_argument("--vthreads", default=None, type=int,
-                    help="Verilator --threads for the model (AI default: remote nproc). "
-                         "One Variane_testharness then saturates the host. "
+                    help="Verilator --threads for the model (AI: AI_MATRIX_VERILATOR_THREADS, "
+                         "default remote nproc; non-AI: SOFT_LADDER_VERILATOR_THREADS, "
+                         "default 4). One Variane_testharness then saturates the host. "
                          "Does not raise C++ make -j.")
     sp.add_argument("--clean", action="store_true",
                     help="wipe the flavour Mdir and rebuild from scratch")
