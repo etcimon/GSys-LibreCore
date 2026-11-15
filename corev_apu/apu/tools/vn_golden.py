@@ -1622,6 +1622,21 @@ def cl_f32_l16(f):
     return ((p + term) >> sh) & 0xFFFF
 
 
+def cl_f32_u16(f):
+    """fp32 bits -> UNORM16, clamped round-to-nearest (f_f32_u16);
+    the D16_UNORM depth-clear lane."""
+    if f & 0x80000000:
+        return 0
+    e = (f >> 23) & 0xFF
+    if e == 0:
+        return 0
+    if e >= 127:
+        return 0xFFFF
+    p = ((1 << 23) | (f & 0x7FFFFF)) * 65535
+    sh = 150 - e
+    return ((p + (1 << (sh - 1))) >> sh) & 0xFFFF
+
+
 def f16pack(v):
     """python float -> fp16 bits ('e' half, round-to-nearest)."""
     return struct.unpack('<H', struct.pack('<e', v))[0]
@@ -1749,6 +1764,44 @@ def img_clear_words(model, words, im, cw, ranges):
             for i in range(len(words))]
 
 
+def img_dclear_texel(model, did, depth):
+    """packed depth-clear texel — the XClrPat is_dclr arm: D32_SFLOAT
+    (dev fmt 12) stores the fp32 bits raw, D16_UNORM (13) the
+    cl_f32_u16 conversion."""
+    _n, _v2d, bpp, attr = model.img_fmt_tables()
+    if (did & 15) == 13:
+        return cl_f32_u16(depth).to_bytes(2, 'little')
+    return depth.to_bytes(4, 'little')
+
+
+def img_dclear_words(model, words, im, depth, ranges):
+    """apply vkCmdClearDepthStencilImage to a device-layout word
+    image — img_clear_words' depth twin: aspect==DEPTH ranges only,
+    every (layer, mip) texel of every range gets img_dclear_texel;
+    pitch padding is not written."""
+    _v, bpp = img_fmt_tables(model)
+    bpp_ = bpp[im['fmt'] & 15]
+    tb = img_dclear_texel(model, im['fmt'], depth)
+    layb = img_layer_bytes(model, im['w'], im['h'], im['fmt'],
+                           im['mips'])
+    ba = bytearray(b''.join(struct.pack('<I', w) for w in words))
+    for asp, bm, lc, bl, nl in ranges:
+        if asp != 2:
+            continue
+        for l in range(bl, bl + nl):
+            for m in range(bm, bm + lc):
+                wm, hm = img_mdim(im['w'], m), img_mdim(im['h'], m)
+                pt = img_mpitch(model, im['w'], im['fmt'], m)
+                off = l * layb + img_mip_off(model, im['w'], im['h'],
+                                             im['fmt'], m)
+                for y in range(hm):
+                    for x in range(wm):
+                        s = off + y * pt + x * bpp_
+                        ba[s:s + bpp_] = tb
+    return [struct.unpack('<I', bytes(ba[4 * i:4 * i + 4]))[0]
+            for i in range(len(words))]
+
+
 # §12.3 C/5b-r2: the CLEAR sessions — {vkfmt, image geometry, colour
 # words, ranges} per variant; clear_oob carries three ranges that each
 # violate one subresource rule -> DEVICE_LOST, no write.
@@ -1780,6 +1833,19 @@ CLEAR_SESSIONS = {
                           cw=[F32_H, F32_Q, F32_TQ, F32_ONE],
                           ranges=[(1, 0, 4, 0, 1), (1, 0, 1, 1, 2),
                                   (2, 0, 1, 0, 1)]),
+    # §12.3 depth clears ride the same CLEARI op: the descriptor
+    # carries {depth fp32 bits, stencil} and the payload is the
+    # 5-word ranges only; clear_ds_asp's COLOR aspect refuses the
+    # record (the clear_oob gate shape: footprint keeps the init)
+    'clear_d32':     dict(vkfmt=126, w=16, h=16, mips=3, layers=2,
+                          dw=0x3F400000, st=0x5A,
+                          ranges=[(2, 1, 2, 1, 1)]),
+    'clear_d16':     dict(vkfmt=124, w=16, h=16, mips=1, layers=1,
+                          dw=0x3E99999A, st=0,
+                          ranges=[(2, 0, 1, 0, 1)]),
+    'clear_ds_asp':  dict(vkfmt=126, w=16, h=16, mips=3, layers=2,
+                          dw=0x3F400000, st=0x5A,
+                          ranges=[(1, 0, 1, 0, 1)]),
 }
 
 
@@ -2857,7 +2923,7 @@ class FrontModel(ObjectTable, PayloadMemory):
                     return True
                 need = (bo + (((lc - 1) * ih + (eh - 1)) * rl + ew)
                         * bpp) if lc >= 1 else 0
-                if not (asp == 1 and mip < img['mips'] and
+                if not (asp in (1, 2) and mip < img['mips'] and
                         ew >= 1 and eh >= 1 and
                         ox + ew <= wm and oy + eh <= hm and
                         rl >= ew and ih >= eh and need <= buf[1]):
@@ -2921,6 +2987,10 @@ class FrontModel(ObjectTable, PayloadMemory):
             img = self._xfer_img_extent(r['handle'][0], r['kind'][0])
             if img is None:
                 return True
+            # §12.3 depth clear: the engine's flag/format consistency
+            # check refuses CLEARI on a depth format in either variant
+            if (img['fmt'] & 15) in (12, 13, 14):
+                return True
             nr = r['imm'][1] & 0xFFFF
             for i in range(nr):
                 o = 4 + 5 * i
@@ -2930,6 +3000,29 @@ class FrontModel(ObjectTable, PayloadMemory):
                             a32(o + 3) == 0 and a32(o + 4) == 1):
                         return True
                 elif not (a32(o) == 1 and a32(o + 2) >= 1 and
+                          a32(o + 1) + a32(o + 2) <= img['mips'] and
+                          a32(o + 4) >= 1 and
+                          a32(o + 3) + a32(o + 4) <= img['layers']):
+                    return True
+            return False
+        if ct == T['vkCmdClearDepthStencilImage']:
+            img = self._xfer_img_extent(r['handle'][0], r['kind'][0])
+            if img is None:
+                return True
+            # stage A: D32_SFLOAT/D16_UNORM only, DEPTH aspect ranges,
+            # rangeCount in imm[3], ranges at payload offset 5*i (no
+            # colour words)
+            if (img['fmt'] & 15) not in (12, 13):
+                return True
+            nr = r['imm'][3] & 0xFFFF
+            for i in range(nr):
+                o = 5 * i
+                if img.get('itype', 1) == 2:
+                    if not (a32(o) == 2 and a32(o + 2) >= 1 and
+                            a32(o + 1) + a32(o + 2) <= img['mips'] and
+                            a32(o + 3) == 0 and a32(o + 4) == 1):
+                        return True
+                elif not (a32(o) == 2 and a32(o + 2) >= 1 and
                           a32(o + 1) + a32(o + 2) <= img['mips'] and
                           a32(o + 4) >= 1 and
                           a32(o + 3) + a32(o + 4) <= img['layers']):
@@ -3460,7 +3553,8 @@ class FrontModel(ObjectTable, PayloadMemory):
                         T['vkCmdCopyImageToBuffer'],
                         T['vkCmdCopyImage'],
                         T.get('vkCmdBlitImage', -1),
-                        T['vkCmdClearColorImage']):
+                        T['vkCmdClearColorImage'],
+                        T['vkCmdClearDepthStencilImage']):
                 # §12.3 C/5a + C/5b: Xfer operand validation runs in
                 # the engine — unbound/OOB/overlap/misalignment refuse
                 # the record -> DONE_FAULT on the work port.  §7b
@@ -5338,7 +5432,9 @@ class FrontModel(ObjectTable, PayloadMemory):
                                 session['T']['vkCmdCopyImageToBuffer'],
                                 session['T']['vkCmdCopyImage'],
                                 session['T'].get('vkCmdBlitImage', -1),
-                                session['T']['vkCmdClearColorImage']):
+                                session['T']['vkCmdClearColorImage'],
+                                session['T'][
+                                    'vkCmdClearDepthStencilImage']):
                         # §12.3 C/5a + C/5b + G1c/G2a: xfer and
                         # dynamic-state operand payloads stream
                         # verbatim — the engine replays them from the
@@ -8603,6 +8699,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             im = b['img']
             layb = img_layb(im)
             bpp_ = _bpp[im['fmt'] & 15]
+            # depth formats transfer on the DEPTH aspect (the xfer
+            # engine accepts colour(1)/depth(2) on single-plane images)
+            asp_ = 2 if (im['fmt'] & 15) in (12, 13) else 1
             regs = []
             off = 0
             boff = 0
@@ -8615,7 +8714,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                       else l * layb + off),
                         bufferRowLength=0 if pack else pt // bpp_,
                         bufferImageHeight=0 if pack else hm,
-                        sub=(1, m, l, 1), ext=(wm, hm, 1)))
+                        sub=(asp_, m, l, 1), ext=(wm, hm, 1)))
                     boff += hm * wm * bpp_
                 off += pt * hm
             return regs
@@ -9808,18 +9907,36 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                                 height=r['ext'][1],
                                                 depth=r['ext'][2]))
                               for r in regs])))
-                seg_a2.append(('vkCmdClearColorImage', dict(
-                    commandBuffer=V['cb'], image=cl_img,
-                    imageLayout=5,
-                    pColor=st('VkClearColorValue',
-                              uint32=list(clr['cw'])),
-                    rangeCount=len(clr['ranges']),
-                    pRanges=[st('VkImageSubresourceRange',
-                                aspectMask=asp, baseMipLevel=bm,
-                                levelCount=lc, baseArrayLayer=bl,
-                                layerCount=nl)
-                             for asp, bm, lc, bl, nl in
-                             clr['ranges']])))
+                if 'dw' in clr:
+                    # §12.3 depth clear: pDepthStencil carries
+                    # {depth fp32 bits, stencil}; ranges are DEPTH
+                    # aspect, 5 words each, no colour words
+                    seg_a2.append(('vkCmdClearDepthStencilImage', dict(
+                        commandBuffer=V['cb'], image=cl_img,
+                        imageLayout=5,
+                        pDepthStencil=st('VkClearDepthStencilValue',
+                                         depth=clr['dw'],
+                                         stencil=clr['st']),
+                        rangeCount=len(clr['ranges']),
+                        pRanges=[st('VkImageSubresourceRange',
+                                    aspectMask=asp, baseMipLevel=bm,
+                                    levelCount=lc, baseArrayLayer=bl,
+                                    layerCount=nl)
+                                 for asp, bm, lc, bl, nl in
+                                 clr['ranges']])))
+                else:
+                    seg_a2.append(('vkCmdClearColorImage', dict(
+                        commandBuffer=V['cb'], image=cl_img,
+                        imageLayout=5,
+                        pColor=st('VkClearColorValue',
+                                  uint32=list(clr['cw'])),
+                        rangeCount=len(clr['ranges']),
+                        pRanges=[st('VkImageSubresourceRange',
+                                    aspectMask=asp, baseMipLevel=bm,
+                                    levelCount=lc, baseArrayLayer=bl,
+                                    layerCount=nl)
+                                 for asp, bm, lc, bl, nl in
+                                 clr['ranges']])))
                 regs = img_regions(clr_b, pack=1)
                 seg_a2.append(('vkCmdCopyImageToBuffer', dict(
                     commandBuffer=V['cb'],
@@ -10384,6 +10501,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                'xfer_oob', 'xfer_overlap', 'unbacked',
                                'badfmt', 'viewoob', 'kindmix',
                                'xfer_img_oob', 'unnorm', 'clear_oob',
+                               'clear_ds_asp',
                                'bind_full', 'blit_scaled')
             if not lost:
                 # §12.3 F5: the descriptor record-store image — every
@@ -10550,14 +10668,19 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 # padding is never written by B2I — clr_dev masks the
                 # staging pattern to the (layer,mip) row data.
                 clr_dev = img_dev_foot(model, clr_init, clr_im)
-                clr_exp = (clr_dev if variant == 'clear_oob'
-                           else img_clear_words(model, clr_dev,
-                                                clr_im, clr['cw'],
-                                                clr['ranges']))
+                clr_refused = variant in ('clear_oob', 'clear_ds_asp')
+                if clr_refused:
+                    clr_exp = clr_dev
+                elif 'dw' in clr:
+                    clr_exp = img_dclear_words(model, clr_dev, clr_im,
+                                               clr['dw'], clr['ranges'])
+                else:
+                    clr_exp = img_clear_words(model, clr_dev, clr_im,
+                                              clr['cw'], clr['ranges'])
                 W(TP_CHECK, CK_APR, len(clr_exp), clr_img_base)
                 for j, w in enumerate(clr_exp):
                     rec(EK_APRCHK, clr_img_base + 4 * j, w, w, 0)
-                if variant != 'clear_oob':
+                if not clr_refused:
                     pm = img_pack(clr_exp, clr_im)
                     W(TP_CHECK, CK_APR, len(pm), clr_rb_base)
                     for j, w in enumerate(pm):
@@ -10565,7 +10688,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 note("B' gates: clear %s %d footprint words%s"
                      % (variant, len(clr_exp),
                         ' + packed readback'
-                        if variant != 'clear_oob' else ''))
+                        if not clr_refused else ''))
 
             if variant == 'poolreset':
                 # §12.3 D per-frame pool reset: alloc N sets, reset,

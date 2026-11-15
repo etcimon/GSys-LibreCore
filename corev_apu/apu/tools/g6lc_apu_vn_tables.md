@@ -411,6 +411,10 @@ KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words 
 - top level: `uint32` data words
 - per `pRanges` element (element count = `rangeCount`): `pRanges.aspectMask` u32, `pRanges.baseMipLevel` u32, `pRanges.levelCount` u32, `pRanges.baseArrayLayer` u32, `pRanges.layerCount` u32
 
+### vkCmdClearDepthStencilImage (type 120)
+
+- per `pRanges` element (element count = `rangeCount`): `pRanges.aspectMask` u32, `pRanges.baseMipLevel` u32, `pRanges.levelCount` u32, `pRanges.baseArrayLayer` u32, `pRanges.layerCount` u32
+
 ### vkCmdExecuteCommands (type 136)
 
 - top level: `pCommandBuffers` data words
@@ -2385,11 +2389,11 @@ KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words 
 | U32 | 2 | 0x0 | stencil |
 | U32 | 3 | 0x0 | rangeCount |
 | ARRAY | 0 | 0x0 | pRanges |
-| U32 | 127 | 0x0 | aspectMask |
-| U32 | 127 | 0x0 | baseMipLevel |
-| U32 | 127 | 0x0 | levelCount |
-| U32 | 127 | 0x0 | baseArrayLayer |
-| U32 | 127 | 0x0 | layerCount |
+| U32 | 127 | 0x0 | aspectMask **KEEP** |
+| U32 | 127 | 0x0 | baseMipLevel **KEEP** |
+| U32 | 127 | 0x0 | levelCount **KEEP** |
+| U32 | 127 | 0x0 | baseArrayLayer **KEEP** |
+| U32 | 127 | 0x0 | layerCount **KEEP** |
 | ENDARR | 0 | 0x0 |  |
 | END | 0 | 0x0 |  |
 

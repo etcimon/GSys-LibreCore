@@ -598,6 +598,14 @@ fields = ["uint32", "pRanges.aspectMask", "pRanges.baseMipLevel",
           "pRanges.levelCount", "pRanges.baseArrayLayer",
           "pRanges.layerCount"]
 
+[keep.vkCmdClearDepthStencilImage]
+# per pRanges element {aspectMask, baseMipLevel, levelCount,
+# baseArrayLayer, layerCount} = 5w; depth, stencil, rangeCount and
+# imageLayout stay in rec.imm[] (imm[1], imm[2], imm[3], imm[0])
+fields = ["pRanges.aspectMask", "pRanges.baseMipLevel",
+          "pRanges.levelCount", "pRanges.baseArrayLayer",
+          "pRanges.layerCount"]
+
 # ---------------------------------------------------------------------------
 # G1c graphics payload keep-lists.  vkCmdDraw/vkCmdDrawIndexed's counts are
 # scalar immediates and already land in rec.imm; vkCmdBindIndexBuffer's

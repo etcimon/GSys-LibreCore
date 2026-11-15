@@ -496,6 +496,16 @@ module tb_g6lc_apu_xfer;
     if (f[30:23] >= 8'd127) return 16'hffff;
     return 16'((p + (48'h1 << (sh - 9'd1))) >> sh);
   endfunction
+  // fp32 -> UNORM16 mirror of the RTL f_f32_u16 (D16_UNORM depth)
+  function automatic logic [15:0] m_f32_u16(input logic [31:0] f);
+    logic [39:0] p; logic [8:0] sh;
+    p  = 40'({1'b1, f[22:0]}) * 40'd65535;
+    sh = 9'd150 - {1'b0, f[30:23]};
+    if (f[31])              return 16'h0000;
+    if (f[30:23] == 8'h00)  return 16'h0000;
+    if (f[30:23] >= 8'd127) return 16'hFFFF;
+    return 16'((p + (40'h1 << (sh - 9'd1))) >> sh);
+  endfunction
   function automatic logic [7:0] m_srgb(input logic [15:0] lin);
     int flo; logic [15:0] flut, lup;
     flo = 0;
@@ -620,6 +630,51 @@ module tb_g6lc_apu_xfer;
            regions: 16'(nr),
            src_base: '0, src_size: '0,
            dst_base: '0, dst_size: '0, img0: im, img1: '0}, '0, pl);
+  endtask
+
+  // depth-stencil CLEAR model: fmt 13 (D16_UNORM) stores the packed
+  // UNORM16 texel, fmt 12 (D32_SFLOAT) the raw fp32 depth bits
+  task automatic m_apply_dclear(input apu_xfer_img_t im,
+                                input logic [31:0] depth,
+                                input int unsigned nr,
+                                input logic [31:0] rg []);
+    logic [127:0] tex; int bpp;
+    bpp = APU_VN_IMG_BPP[im.fmt[3:0]];
+    tex = bpp == 2 ? {8{m_f32_u16(depth)}} : {4{depth}};
+    for (int r = 0; r < int'(nr); r++) begin
+      int asp, bm, lc, bl, nl;
+      asp = rg[5*r+0][7:0]; bm = rg[5*r+1]; lc = rg[5*r+2];
+      bl  = rg[5*r+3];      nl = rg[5*r+4];
+      for (int l = bl; l < bl + nl; l++)
+        for (int m = bm; m < bm + lc; m++) begin
+          int unsigned wm, hm, pit;
+          wm  = (im.w >> m) == 0 ? 1 : (im.w >> m);
+          hm  = (im.h >> m) == 0 ? 1 : (im.h >> m);
+          pit = m_pitch(im, m);
+          for (int y = 0; y < hm; y++)
+            for (int x = 0; x < wm; x++)
+              for (int b = 0; b < bpp; b++)
+                ewr8(im.base + l * im.layer_bytes + m_mip_off(im, m) +
+                     y * pit + x * bpp + b, tex[8*b +: 8]);
+        end
+    end
+  endtask
+
+  // stage ONLY the nr 5-word ranges (depth rides the descriptor:
+  // src_base=depth fp32, src_size=stencil, dst_size[0]=flag)
+  task automatic run_dclear(input apu_xfer_img_t im,
+                            input logic [31:0] depth,
+                            input logic [31:0] stencil,
+                            input int unsigned nr,
+                            input logic [31:0] rg [],
+                            output apu_sh_done_t pl);
+    for (int r = 0; r < int'(nr); r++)
+      for (int w = 0; w < 5; w++) stage_w[5*r + w] = rg[5*r + w];
+    stage(5*int'(nr), pb);
+    issue('{op: APU_XFER_OP_CLEARI, pay_base: 32'(pb),
+           regions: 16'(nr),
+           src_base: depth, src_size: stencil,
+           dst_base: '0, dst_size: 32'd1, img0: im, img1: '0}, '0, pl);
   endtask
 
   // ---- B2I / I2B drivers ------------------------------------------------------
@@ -1321,6 +1376,143 @@ module tb_g6lc_apu_xfer;
       run_clear(im, cw, 1, rg, pl);
       check(pl.code == APU_SH_DONE_FAULT, "clear lc0 FAULT");
       check(w_n == wmark, "clear lc0: zero W beats");
+    end
+
+    // ============ CLEAR depth: D32_SFLOAT / D16_UNORM ====================
+    // vkCmdClearDepthStencilImage (stage A): the CLEARI descriptor
+    // carries depth in src_base, stencil in src_size and flags the
+    // record with dst_size[0]; the payload is only the 5-word ranges
+    // (aspect must be DEPTH=2).  D32 stores the fp32 bits raw, D16 the
+    // UNORM16 conversion; D24S8 (fmt 14) is refused for CLEARI.
+    begin
+      automatic apu_xfer_img_t im;
+      automatic logic [31:0] rg [];
+      automatic int unsigned fp;
+
+      // D1: D32_SFLOAT, depth 0.75 raw; one range over mips 1-2 of
+      // layer 1 of a two-layer image
+      im = '{base: IMGB, size: 3584, w: 16'd16, h: 16'd16, fmt: 8'd12,
+             mips: 5'd3, layers: 10'd2, itype: 2'd1, layer_bytes: 32'd1792};
+      fp = 3584;
+      cases++;
+      poison(IMGB, fp); fill_src(IMGB, fp, 83);
+      rg = new[5]; rg[0]=2; rg[1]=1; rg[2]=2; rg[3]=1; rg[4]=1;
+      m_apply_dclear(im, 32'h3F40_0000, 1, rg);
+      run_dclear(im, 32'h3F40_0000, 32'h5A, 1, rg, pl);
+      check(pl.code == APU_SH_DONE_OK, "dclear d32 done code");
+      cmp_range(IMGB, IMGB + fp, "dclear d32 (subrange only)");
+      axi_balance("dclear d32");
+
+      // D2: D16_UNORM, depth 0.3 -> UNORM16 0x4CCD; literal byte reads
+      // on the corner texels bypass the mirrored model
+      begin
+        automatic apu_xfer_img_t im2;
+        im2 = '{base: IMGB, size: 1024, w: 16'd16, h: 16'd16, fmt: 8'd13,
+                mips: 5'd1, layers: 10'd1, itype: 2'd1, layer_bytes: 32'd1024};
+        cases++;
+        fp = 1024;
+        poison(IMGB, fp); fill_src(IMGB, fp, 84);
+        rg = new[5]; rg[0]=2; rg[1]=0; rg[2]=1; rg[3]=0; rg[4]=1;
+        m_apply_dclear(im2, 32'h3E99_999A, 1, rg);
+        run_dclear(im2, 32'h3E99_999A, 32'h5A, 1, rg, pl);
+        check(pl.code == APU_SH_DONE_OK, "dclear d16 done code");
+        cmp_range(IMGB, IMGB + fp, "dclear d16");
+        axi_balance("dclear d16");
+        // texel (0,0) at offset 0 and texel (15,15) at 15*64+15*2=990;
+        // rd8 reads the aperture, i.e. what the DUT wrote
+        check(rd8(AB + 64'(IMGB))       == 8'hCD &&
+              rd8(AB + 64'(IMGB + 1))   == 8'h4C,
+              "dclear d16 texel(0,0) = CD 4C");
+        check(rd8(AB + 64'(IMGB + 990))   == 8'hCD &&
+              rd8(AB + 64'(IMGB + 991))   == 8'h4C,
+              "dclear d16 texel(15,15) = CD 4C");
+      end
+
+      // D3: D16 at depth 1.0 -> 0xFFFF; two ranges in one record cover
+      // both layers of a two-layer image
+      begin
+        automatic apu_xfer_img_t im3;
+        im3 = '{base: IMGB, size: 2048, w: 16'd16, h: 16'd16, fmt: 8'd13,
+                mips: 5'd1, layers: 10'd2, itype: 2'd1, layer_bytes: 32'd1024};
+        cases++;
+        fp = 2048;
+        poison(IMGB, fp); fill_src(IMGB, fp, 85);
+        rg = new[10];
+        rg[0]=2; rg[1]=0; rg[2]=1; rg[3]=0; rg[4]=1;
+        rg[5]=2; rg[6]=0; rg[7]=1; rg[8]=1; rg[9]=1;
+        m_apply_dclear(im3, 32'h3F80_0000, 2, rg);
+        run_dclear(im3, 32'h3F80_0000, 32'h5A, 2, rg, pl);
+        check(pl.code == APU_SH_DONE_OK, "dclear d16 2lay done code");
+        cmp_range(IMGB, IMGB + fp, "dclear d16 2lay");
+        axi_balance("dclear d16 2lay");
+      end
+
+      // ---- negatives: flag/format/aspect faults write nothing --------
+      // N1: depth flag on a colour image (fmt 2)
+      im = '{base: IMGB, size: 3584, w: 16'd16, h: 16'd16, fmt: 8'd2,
+             mips: 5'd3, layers: 10'd2, itype: 2'd1, layer_bytes: 32'd1792};
+      fp = 3584;
+      cases++;
+      poison(IMGB, fp); fill_src(IMGB, fp, 86);
+      rg = new[5]; rg[0]=2; rg[1]=0; rg[2]=1; rg[3]=0; rg[4]=1;
+      wmark = w_n;
+      run_dclear(im, 32'h3F40_0000, 32'h5A, 1, rg, pl);
+      check(pl.code == APU_SH_DONE_FAULT, "dclear on colour fmt FAULT");
+      check(w_n == wmark, "dclear colour fmt: zero W beats");
+      cmp_range(IMGB, IMGB + fp, "dclear colour fmt untouched");
+
+      // N2: colour clear (flag clear) aimed at a D32 image
+      im = '{base: IMGB, size: 3584, w: 16'd16, h: 16'd16, fmt: 8'd12,
+             mips: 5'd3, layers: 10'd2, itype: 2'd1, layer_bytes: 32'd1792};
+      cases++;
+      poison(IMGB, fp); fill_src(IMGB, fp, 87);
+      begin
+        automatic logic [31:0] cw [4];
+        cw[0]=32'h3F40_0000; cw[1]=0; cw[2]=0; cw[3]=0;
+        rg = new[5]; rg[0]=1; rg[1]=0; rg[2]=1; rg[3]=0; rg[4]=1;
+        wmark = w_n;
+        run_clear(im, cw, 1, rg, pl);
+        check(pl.code == APU_SH_DONE_FAULT, "colour clr on depth FAULT");
+        check(w_n == wmark, "colour clr on depth: zero W beats");
+        cmp_range(IMGB, IMGB + fp, "colour clr on depth untouched");
+      end
+
+      // N3: depth clear, aspect COLOR (1)
+      cases++;
+      rg = new[5]; rg[0]=1; rg[1]=0; rg[2]=1; rg[3]=0; rg[4]=1;
+      wmark = w_n;
+      run_dclear(im, 32'h3F40_0000, 32'h5A, 1, rg, pl);
+      check(pl.code == APU_SH_DONE_FAULT, "dclear aspect color FAULT");
+      check(w_n == wmark, "dclear aspect color: zero W beats");
+      cmp_range(IMGB, IMGB + fp, "dclear aspect color untouched");
+
+      // N4: depth clear, aspect STENCIL (4)
+      cases++;
+      rg = new[5]; rg[0]=4; rg[1]=0; rg[2]=1; rg[3]=0; rg[4]=1;
+      wmark = w_n;
+      run_dclear(im, 32'h3F40_0000, 32'h5A, 1, rg, pl);
+      check(pl.code == APU_SH_DONE_FAULT, "dclear aspect stencil FAULT");
+      check(w_n == wmark, "dclear aspect stencil: zero W beats");
+      cmp_range(IMGB, IMGB + fp, "dclear aspect stencil untouched");
+
+      // N4b: depth clear, aspect DEPTH|STENCIL (6)
+      cases++;
+      rg = new[5]; rg[0]=6; rg[1]=0; rg[2]=1; rg[3]=0; rg[4]=1;
+      wmark = w_n;
+      run_dclear(im, 32'h3F40_0000, 32'h5A, 1, rg, pl);
+      check(pl.code == APU_SH_DONE_FAULT, "dclear aspect d|s FAULT");
+      check(w_n == wmark, "dclear aspect d|s: zero W beats");
+      cmp_range(IMGB, IMGB + fp, "dclear aspect d|s untouched");
+
+      // N5: depth flag on fmt 14 (D24S8, D32 geometry, bpp 4)
+      im.fmt = 8'd14;
+      cases++;
+      rg = new[5]; rg[0]=2; rg[1]=0; rg[2]=1; rg[3]=0; rg[4]=1;
+      wmark = w_n;
+      run_dclear(im, 32'h3F40_0000, 32'h5A, 1, rg, pl);
+      check(pl.code == APU_SH_DONE_FAULT, "dclear fmt14 FAULT");
+      check(w_n == wmark, "dclear fmt14: zero W beats");
+      cmp_range(IMGB, IMGB + fp, "dclear fmt14 untouched");
     end
 
     // ============ 1D r32_uint, height 1, VK_REMAINING_MIP_LEVELS =======

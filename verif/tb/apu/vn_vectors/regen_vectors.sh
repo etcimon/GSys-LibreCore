@@ -92,10 +92,13 @@ for v in texfetch_bad_0 texlod_lin_bad_0 imgloadstore_bad_0 \
 done
 
 # §12.3 C/5b-r2 clear sessions + ctx-kill reuse (all on bufcopy_1)
-for v in clear_rgba8 clear_r32f clear_r32u clear_srgb clear_rgba16f; do
+for v in clear_rgba8 clear_r32f clear_r32u clear_srgb clear_rgba16f \
+         clear_d32 clear_d16; do
   python3 $G --compute-session ue_cpos_${v}_1 bufcopy_1 --variant $v
 done
 python3 $G --compute-session ue_cneg_clear_oob_1 bufcopy_1 --variant clear_oob
+# depth clear with a COLOR aspect range: refused, image untouched
+python3 $G --compute-session ue_cneg_clear_ds_asp_1 bufcopy_1 --variant clear_ds_asp
 # T1: a scaled blit is refused before any write (unscaled blits run as I2I)
 python3 $G --compute-session ue_cneg_blit_scaled_1 texfetch_1 --variant blit_scaled
 python3 $G --compute-session ue_cpos_blit_id_1 texfetch_1 --variant blit_id

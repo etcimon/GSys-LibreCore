@@ -3987,6 +3987,10 @@ module g6lc_apu_vnfront
                       APU_VN_TYPE_VK_CMD_BLIT_IMAGE_EXT ||
                       op_q.cmd_type ==
                       APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT ||
+                      // depth-stencil clear streams its 5w pRanges the
+                      // same way (value rides rec.imm, not the payload)
+                      op_q.cmd_type ==
+                      APU_VN_TYPE_VK_CMD_CLEAR_DEPTH_STENCIL_IMAGE_EXT ||
                       // G1c: dynamic-state + render-pass keeps stream
                       // verbatim (viewport 6w/vp, scissor 4w/sc,
                       // BeginRP 9+4w/clearval; BindIndexBuffer's u64

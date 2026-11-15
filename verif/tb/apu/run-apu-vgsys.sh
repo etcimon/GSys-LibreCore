@@ -79,6 +79,7 @@ ue_cneg_badfmt_1 ue_cneg_viewoob_1 ue_cneg_kindmix_1 \
 ue_cneg_xfer_img_oob_1 ue_cneg_unnorm_1 \
 ue_cpos_clear_rgba8_1 ue_cpos_clear_r32f_1 ue_cpos_clear_r32u_1 \
 ue_cpos_clear_srgb_1 ue_cpos_clear_rgba16f_1 \
+ue_cpos_clear_d32_1 ue_cpos_clear_d16_1 ue_cneg_clear_ds_asp_1 \
 ue_cneg_clear_oob_1 ue_cpos_ctxkill_reuse_1 \
 ue_cpos_rb_mapafter_1 ue_cpos_ubo_bindfirst_1 \
 ue_cpos_evict_1 ue_cpos_reloc_hold_1 \

@@ -57,6 +57,14 @@
 // sRGB encode walks the 256-entry LUT one binary-search step per
 // cycle (8 cycles per component), not an unrolled compare chain.
 //
+// vkCmdClearDepthStencilImage rides the same CLEARI op: the descriptor
+// carries the value in fields CLEARI does not otherwise use —
+// dst_size[0]=1 flags a depth-stencil clear, src_base holds the depth
+// fp32 bits and src_size the stencil — and the payload holds only the
+// 5-word aspect ranges (no colour words).  Stage A clears D32_SFLOAT
+// and D16_UNORM; D24S8 and any flag/format mismatch fault before a
+// single write.
+//
 // Timing impact: the widest state element is the fragment FIFO
 // (FifoDepth x 105 bits, flops — a deeper geometry should move to
 // tc_sram); control is a micro-FSM with one PAYREAD / AXI beat per
@@ -310,7 +318,7 @@ module g6lc_apu_xfer
     assign fifo_space = fn_q != (FBits+1)'(FifoDepth);
 
     logic is_copy, is_fill, is_upd, is_b2i, is_i2b, is_i2i, is_clr;
-    logic is_img, is_rd;
+    logic is_img, is_rd, is_dclr;
     assign is_copy = xf_q.op == APU_XFER_OP_COPY;
     assign is_fill = xf_q.op == APU_XFER_OP_FILL;
     assign is_upd  = xf_q.op == APU_XFER_OP_UPDATE;
@@ -318,6 +326,9 @@ module g6lc_apu_xfer
     assign is_i2b  = xf_q.op == APU_XFER_OP_I2B;
     assign is_i2i  = xf_q.op == APU_XFER_OP_I2I;
     assign is_clr  = xf_q.op == APU_XFER_OP_CLEARI;
+    // depth-stencil clear: dst_size[0] flags it; src_base carries the
+    // depth fp32 bits and src_size the stencil (VkClearDepthStencilValue)
+    assign is_dclr = is_clr && xf_q.dst_size[0];
     assign is_img  = is_b2i || is_i2b || is_i2i || is_clr;
     // every op except CLEAR streams read-leg fragments; B2I reads the
     // buffer operand, I2B/I2I the source image
@@ -360,6 +371,23 @@ module g6lc_apu_xfer
       if (f[31])              return 16'h0000;
       if (f[30:23] >= 8'd127) return 16'hffff;
       return 16'((p + (48'h1 << (sh - 9'd1))) >> sh);
+    endfunction
+    // fp32 -> UNORM16, clamped, round-to-nearest (D16_UNORM depth)
+    function automatic logic [15:0] f_f32_u16(input logic [31:0] f);
+      logic [39:0] p;
+      logic [8:0]  sh;
+      p  = 40'({1'b1, f[22:0]}) * 40'd65535;
+      sh = 9'd150 - {1'b0, f[30:23]};
+      if (f[31])              return 16'h0000;
+      if (f[30:23] == 8'h00)  return 16'h0000;
+      if (f[30:23] >= 8'd127) return 16'hFFFF;
+      return 16'((p + (40'h1 << (sh - 9'd1))) >> sh);
+    endfunction
+    // legal depth-clear formats: D32_SFLOAT stores the fp32 bits raw,
+    // D16_UNORM the converted UNORM16; D24S8 has no TRANSFER_DST
+    function automatic logic f_is_dfmt(input logic [7:0] f);
+      return f == 8'(APU_IMG_FMT_D32_SFLOAT) ||
+             f == 8'(APU_IMG_FMT_D16_UNORM);
     endfunction
     // linear16 -> sRGB byte is sequential in XSrEnc: one LUT
     // binary-search step per cycle (APU_SRGB_TO_LIN[mid]), same
@@ -1046,6 +1074,17 @@ module g6lc_apu_xfer
               end else if (xf_i.op == APU_XFER_OP_CLEARI) begin
                 if (xf_i.regions == 16'h0) begin
                   state_q <= XDone;
+                end else if (xf_i.dst_size[0] != f_is_dfmt(xf_i.img0.fmt) ||
+                             xf_i.img0.fmt ==
+                               8'(APU_IMG_FMT_D24_UNORM_S8_UINT)) begin
+                  // dst_size[0] must flag exactly a D32/D16 image;
+                  // fmt 14 (D24S8) is refused for CLEARI either way
+                  xf_fault_q <= 1'b1;
+                  state_q    <= XDone;
+                end else if (xf_i.dst_size[0]) begin
+                  // depth clear: the descriptor carries the value —
+                  // no colour words; the ranges start at the pay base
+                  state_q <= XClrPat;
                 end else begin
                   // 4 colour words at the pay base, then 5w ranges
                   rw_i_q    <= '0;
@@ -1597,7 +1636,7 @@ module g6lc_apu_xfer
               // check still sees the wire values.  all-ones is in
               // range only when the base lies inside the image; the
               // clamped count is what the mip cursor walks.
-              v_ok = rg_q[0] == 32'd1 &&
+              v_ok = rg_q[0] == (is_dclr ? 32'd2 : 32'd1) &&
                      (rg_q[2] == 32'hFFFF_FFFF
                         ? rg_q[1] < 32'(xf_q.img0.mips)
                         : (rg_q[2] >= 32'd1 &&
@@ -1685,8 +1724,10 @@ module g6lc_apu_xfer
               ri_q      <= '0;
               rw_i_q    <= '0;
               c_mip_q   <= '0;
-              pay_adr_q <= is_clr ? xf_q.pay_base + 16'd4
-                                  : xf_q.pay_base;
+              // colour clear skips the 4 colour words; a depth clear
+              // has none, so its ranges also start at the pay base
+              pay_adr_q <= (is_clr && !is_dclr)
+                           ? xf_q.pay_base + 16'd4 : xf_q.pay_base;
               rg_ret_q  <= is_clr ? XClrMip : blit_q ? XBlitCvt : XImgGo;
               state_q   <= XImgRd;
             end else begin
@@ -2019,6 +2060,24 @@ module g6lc_apu_xfer
             cbits = 6'({bpp, 3'b0} >>
                     (attr[2:0] == 3'd3 ? 6'd2 :
                      attr[2:0] == 3'd1 ? 6'd1 : 6'd0));
+            if (is_dclr) begin
+              // depth-stencil clear: the packed texel is the
+              // descriptor's depth — D16_UNORM stores f_f32_u16,
+              // D32_SFLOAT the raw fp32 bits — and the payload holds
+              // only the 5-word ranges starting at the pay base
+              clr_pat_q <= f_rep16(
+                  xf_q.img0.fmt == 8'(APU_IMG_FMT_D16_UNORM)
+                    ? 128'(f_f32_u16(xf_q.src_base))
+                    : 128'(xf_q.src_base), f_l2(bpp));
+              ri_q      <= '0;
+              rw_i_q    <= '0;
+              c_mip_q   <= '0;
+              pass_b_q  <= 1'b0;
+              rg_n_q    <= 5'd5;
+              pay_adr_q <= xf_q.pay_base;
+              rg_ret_q  <= XImgChk;
+              state_q   <= XImgRd;
+            end else begin
             if (clr_ci_q == 4'd0) begin
               clr_col_q[0] <= rg_q[0];
               clr_col_q[1] <= rg_q[1];
@@ -2078,6 +2137,7 @@ module g6lc_apu_xfer
                 clr_pat_q <= tex;
                 clr_ci_q  <= clr_ci_q + 4'd1;
               end
+            end
             end
           end
 

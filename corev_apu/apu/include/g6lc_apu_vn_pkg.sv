@@ -539,8 +539,8 @@ package g6lc_apu_vn_pkg;
     48'h0AFF00000001, // FLAGS a=255 b=0x1 globalPriorityQuery
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderInputAttachmentArrayDynamicIndexing
-    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderUniformTexelBufferArrayDynamicIndexing
-    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderStorageTexelBufferArrayDynamicIndexing
+    48'h0AFF00000000, // FLAGS a=255 b=0x0 shaderUniformTexelBufferArrayDynamicIndexing
+    48'h0AFF00000000, // FLAGS a=255 b=0x0 shaderStorageTexelBufferArrayDynamicIndexing
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderUniformBufferArrayNonUniformIndexing
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderSampledImageArrayNonUniformIndexing
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderStorageBufferArrayNonUniformIndexing
@@ -709,8 +709,8 @@ package g6lc_apu_vn_pkg;
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderInt8
     48'h0AFF00000001, // FLAGS a=255 b=0x1 descriptorIndexing
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderInputAttachmentArrayDynamicIndexing
-    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderUniformTexelBufferArrayDynamicIndexing
-    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderStorageTexelBufferArrayDynamicIndexing
+    48'h0AFF00000000, // FLAGS a=255 b=0x0 shaderUniformTexelBufferArrayDynamicIndexing
+    48'h0AFF00000000, // FLAGS a=255 b=0x0 shaderStorageTexelBufferArrayDynamicIndexing
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderUniformBufferArrayNonUniformIndexing
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderSampledImageArrayNonUniformIndexing
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderStorageBufferArrayNonUniformIndexing
@@ -2462,11 +2462,11 @@ package g6lc_apu_vn_pkg;
     48'h010200000000, // U32 a=2 b=0x0 stencil
     48'h010300000000, // U32 a=3 b=0x0 rangeCount
     48'h070000000000, // ARRAY a=0 b=0x0 pRanges
-    48'h017F00000000, // U32 a=127 b=0x0 aspectMask
-    48'h017F00000000, // U32 a=127 b=0x0 baseMipLevel
-    48'h017F00000000, // U32 a=127 b=0x0 levelCount
-    48'h017F00000000, // U32 a=127 b=0x0 baseArrayLayer
-    48'h017F00000000, // U32 a=127 b=0x0 layerCount
+    48'h01FF00000000, // U32 a=127 b=0x0 aspectMask KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 baseMipLevel KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 levelCount KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 baseArrayLayer KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 layerCount KEEP
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP

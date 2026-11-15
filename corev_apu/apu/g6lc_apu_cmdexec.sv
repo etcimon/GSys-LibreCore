@@ -579,7 +579,9 @@ module g6lc_apu_cmdexec
                         rec_q.ctype ==
                         32'(APU_VN_TYPE_VK_CMD_BLIT_IMAGE_EXT) ||
                         rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT);
+                        32'(APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT) ||
+                        rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_CLEAR_DEPTH_STENCIL_IMAGE_EXT);
     // operand handles pack the non-commandBuffer lookup slots
     // sequentially: {srcBuffer,dstImage}, {srcImage,dstBuffer},
     // {srcImage,dstImage}, {image} — operand n rides handle[n].
@@ -591,10 +593,16 @@ module g6lc_apu_cmdexec
     // vkCmdCopyImage (src -> img0, dst -> img1) and issues APU_XFER_OP_BLIT
     wire xf_i2i_rec = rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT) ||
                       rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_BLIT_IMAGE_EXT);
+    // vkCmdClearDepthStencilImage: single image operand (handle[0]),
+    // like the colour clear; the depth/stencil/rangeCount ride rec.imm
+    wire xf_dsclr_rec =
+        rec_q.ctype ==
+        32'(APU_VN_TYPE_VK_CMD_CLEAR_DEPTH_STENCIL_IMAGE_EXT);
     wire xf_op_img =
         xf_for_q == 2'd3 ||
         (xf_for_q == 2'd0 &&
          ((rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT)) ||
+          xf_dsclr_rec ||
           xf_i2i_rec ||
           (rec_q.ctype ==
               32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT)
@@ -716,17 +724,27 @@ module g6lc_apu_cmdexec
                    // imm[0] (CopyBuffer)
                    // CopyImage and BlitImage: regionCount in imm[2],
                    // behind both image layouts
-                   regions:  xf_i2i_rec
-                             ? rec_q.imm[2][15:0]
-                             : rec_q.ctype ==
-                               32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT) ||
-                               rec_q.ctype ==
-                               32'(APU_VN_TYPE_VK_CMD_FILL_BUFFER_EXT) ||
-                               rec_q.ctype ==
-                               32'(APU_VN_TYPE_VK_CMD_UPDATE_BUFFER_EXT)
-                               ? rec_q.imm[0][15:0] : rec_q.imm[1][15:0],
-                   src_base: xf_src_base_q, src_size: xf_src_size_q,
-                   dst_base: xf_dst_base_q, dst_size: xf_dst_size_q,
+                   regions:  xf_dsclr_rec
+                             ? rec_q.imm[3][15:0]
+                             : xf_i2i_rec
+                               ? rec_q.imm[2][15:0]
+                               : rec_q.ctype ==
+                                 32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT) ||
+                                 rec_q.ctype ==
+                                 32'(APU_VN_TYPE_VK_CMD_FILL_BUFFER_EXT) ||
+                                 rec_q.ctype ==
+                                 32'(APU_VN_TYPE_VK_CMD_UPDATE_BUFFER_EXT)
+                                 ? rec_q.imm[0][15:0] : rec_q.imm[1][15:0],
+                   // depth-stencil clear carries its value in rec.imm:
+                   // depth=imm[1], stencil=imm[2], and dst_size[0]=1
+                   // flags the CLEARI depth path (colour clears pass 0)
+                   src_base: xf_dsclr_rec ? rec_q.imm[1] : xf_src_base_q,
+                   src_size: xf_dsclr_rec ? rec_q.imm[2] : xf_src_size_q,
+                   dst_base: xf_dst_base_q,
+                   dst_size: xf_dsclr_rec ? 32'd1
+                            : rec_q.ctype ==
+                              32'(APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT)
+                              ? 32'd0 : xf_dst_size_q,
                    img0: xf_img0_q, img1: xf_img1_q};
     assign desc_o         = desc_q;
     assign push_n_o       = push_max_q;

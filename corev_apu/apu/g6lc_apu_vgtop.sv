@@ -420,7 +420,9 @@ module g6lc_apu_vgtop
                        work_o.ctype ==
                        32'(APU_VN_TYPE_VK_CMD_BLIT_IMAGE_EXT) ||
                        work_o.ctype ==
-                       32'(APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT);
+                       32'(APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT) ||
+                       work_o.ctype ==
+                       32'(APU_VN_TYPE_VK_CMD_CLEAR_DEPTH_STENCIL_IMAGE_EXT);
     // draw-class records route to the raster engine: vkCmdDraw,
     // vkCmdDrawIndexed, the §5a indirect draws (the executor has
     // already fetched their operands into rd_i), and in-render-pass
