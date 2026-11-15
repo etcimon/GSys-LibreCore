@@ -306,6 +306,25 @@ only what is specific to the pass.
   move to a generated micro-code ROM is decided by the area attribution, not here.
 - Target: 2–4 cycles per wave-instruction on arithmetic-bound vectors, i.e. 16–32 FP32
   operations per clock per core, a 25–50% duty on the FMAs against 1–4% today.
+- **TP3a-3 design note (2026-11-15, measured).** The operand stream
+  `W_LD0`/`W_LD1` is the largest per-instruction cost (~449k of 3.67M bench cycles,
+  ~12%) and is **fetch-width-bound, not RF-latency-bound**: `prog_addr_o`/
+  `prog_data_i` move one 32-bit program word per cycle and the operand-value RF read
+  (`rf_addr={wave_q,oidx_q[rc_ik]}`) is already issued one stream-cycle early. The
+  dual RF port (TP3a-2, landed + cycle-exact) therefore does not shorten the stream.
+  `ops_q[]` raw operand words are consumed throughout execute, so the stream cannot
+  be skipped even on a decoded-row-cache hit. Two levers: (a) wider fetch —
+  `prog_data_i` 32→64 needs `i_prog` dual-read, but `i_prog` also serves shmod's own
+  decode/validation reads so the port budget needs care; (b) **instruction-interleave
+  decode-ahead** — a lookahead that runs fetch/decode/operand-prefetch ≥1 instruction
+  ahead so N+1's operand stream overlaps N's execute, the real G-T2 lever. Phased:
+  3a decode-ahead for the row-cache-hit path only (no operand prefetch, no hazard),
+  3b RF port-1 operand prefetch into a shadow `va_q` + RAW check vs the retiring
+  instruction's write rows, 3c wider fetch if still wanted. Hazards: same-wave RAW
+  (N writes a reg N+1 reads → forward `wb_q` or stall), taken-branch invalidation of
+  the shadow, multi-row write-back, row-cache writeback timing. Full analysis in
+  `.cache/apu-perf/tp3a-brief.md` §5a/§7a. `W_IDLE` (~35% of cycles) is dispatch-bound
+  and belongs to TP6/TP7 parallelism, not per-instruction pipelining.
 
 **TP4 — on-chip record store for graphics waves.** Independent of TP1–TP3.
 - Move the VS/FS record rings from the DRAM scratch ring to a `tc_sram` record store with
