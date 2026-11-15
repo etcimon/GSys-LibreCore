@@ -4422,8 +4422,26 @@ module g6lc_apu_rast
             end
           end
           S_BL_F1B: begin
+            // RP3: fuse the src-factor capture with S_BL_F2's dst-factor
+            // dispatch, which would otherwise cost a dedicated cycle. On the
+            // non-ONE_MINUS dst path the src*sf FMA is issued inline; its sf
+            // operand is fp_res_q (the value sf_q is capturing this cycle),
+            // not sf_q, since nonblocking captures have not yet updated it.
             sf_q <= fp_res_q;
-            st_q <= S_BL_F2;
+            if (f_fminus(bdf_w)) begin
+              fp_kind_q <= 2'd0; fp_o_q <= 2'd1; fp_mod_q <= 1'b1;
+              fp_a_q <= '0;
+              fp_b_q <= 32'h3F800000;
+              fp_c_q <= f_fbase(bdf_w, c_q[1:0]);
+              fp_ret_q <= S_BL_F2B;
+              t_fpgo();
+            end else begin
+              df_q <= f_fbase(bdf_w, c_q[1:0]);
+              fp_kind_q <= 2'd0; fp_o_q <= 2'd2; fp_mod_q <= 1'b0;
+              fp_a_q <= src_q[c_q[1:0]]; fp_b_q <= fp_res_q;
+              fp_ret_q <= S_BL_M2;
+              t_fpgo();
+            end
           end
           S_BL_F2: begin
             if (f_fminus(bdf_w)) begin
