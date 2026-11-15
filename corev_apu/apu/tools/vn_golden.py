@@ -31,6 +31,9 @@ import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# vn_specialization imports shader.spirv_scan, which imports sh_opcodes
+# by bare name: the shader directory must be on the path before it.
+sys.path.insert(0, str(Path(__file__).resolve().parent / 'shader'))
 import gen_vn_tables as G   # noqa: E402
 from vn_layout import descriptor_bindings, descriptor_rows, descriptor_row_words  # noqa: E402
 from vn_model import ApertureState, ObjectTable, PAY_CHUNK, PayloadMemory  # noqa: E402
