@@ -1042,12 +1042,14 @@ remain release requirements; intermediate raster gates do not narrow the product
     was; R3 (records on-chip, frees the port) and R2 (multi-outstanding) attack the real
     term first. Revisit RP3 only for the residual float chain after R3 lands.
     PROGRESS 2026-11-15 (residual-float-chain capture fusions, NOT the
-    scoreboard-scale pipelined issue which stays open): `S_BL_F2B`→`S_BL_M1`
-    and `S_BL_F1B`→`S_BL_F2` merged so the dst/src-factor capture issues the
-    next fp job in the same cycle (operand-safe, mirrors `S_BL_M2`). New bench
-    case6b added the missing ONE_MINUS-src blend coverage F1B needed. Bit-exact
-    (47 cases/16,640 checks, pinned Verilator 5.008); rast merge −2,506 then
-    −2,148 cy, all in `merge=`. `S_BL_ST`/`S_BL_MM` advance fusion + full
+    scoreboard-scale pipelined issue which stays open): THREE landed —
+    `S_BL_F2B`→`S_BL_M1`, `S_BL_F1B`→`S_BL_F2`, and `S_BL_F2`-else inlining
+    `S_BL_M1` (now unreachable, removed). Bench coverage hardened first:
+    cases 6b–6h add ONE_MINUS-src, all five blend ops (incl. `S_BL_MM`
+    combinational + `S_BL_OP` subtract/swap), `SRC_ALPHA_SATURATE`, and
+    `CONST_COLOR` factor paths — 53 cases/22,784 checks. Bit-exact (pinned
+    Verilator 5.008); rast merge −2,506 / −2,148 / −5,012 cy (~−9.7k combined,
+    all in `merge=`). `S_BL_ST`/`S_BL_MM` advance fusion + full
     factor/op scoreboard pipelining remain open (data-dependent, high risk).
   - [ ] Next enablers: R2 memory port slots and bursts (memory requests are now about 37
     of 98.5 cycles per fragment in the rast suite); R3 record store.
