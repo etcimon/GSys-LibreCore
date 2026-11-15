@@ -318,6 +318,13 @@ module tb_g6lc_apu_rast;
     return i_mem.apm[apw_i(DB + y*FBP + x*4)];
   endfunction
 
+  // depth word (D16_UNORM) at pixel: 2 B per pixel, row pitch 64
+  function automatic logic [15:0] dbpx16(input int x, input int y);
+    logic [31:0] w;
+    w = i_mem.apm[apw_i(DB + y*64 + x*2)];
+    return w[16*(x & 1) +: 16];
+  endfunction
+
   // floor() of a non-negative f32 bit pattern (pixel coords are
   // exact .5 values well below 2^23)
   function automatic int f32f(input logic [31:0] w);
@@ -3476,6 +3483,294 @@ module tb_g6lc_apu_rast;
                            k, x, y, got, exp_in));
         end
     end
+
+    // ================= case 51: logicOp is not applied to sRGB ========
+    // VkLogicOp applies to integer and normalized-integer attachments
+    // only; an sRGB attachment takes the plain source colour.  With
+    // logicOpEnable set, blending is disabled on every attachment too.
+    // INVERT ignores the source, and the ZERO/ONE blend would keep the
+    // destination, so either mistake leaves a result far from the
+    // case-5 encoding of the source.
+    cases++;
+    d = mk_clear();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_B8G8R8A8_SRGB);
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h3F000000, 32'h3E800000, 32'h3ECCCCCD, 32'h3F800000);
+    put_vert(1, 32'h3F400000, 32'hBF200000,
+                32'h3F000000, 32'h3E800000, 32'h3ECCCCCD, 32'h3F800000);
+    put_vert(2, 32'hBF200000, 32'h3F600000,
+                32'h3F000000, 32'h3E800000, 32'h3ECCCCCD, 32'h3F800000);
+    ref_xi = '{512, 7168, 1536}; ref_yi = '{512, 1536, 7680};
+    d = mk_draw();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_B8G8R8A8_SRGB);
+    d.logic_op_en = 1'b1;
+    d.logic_op = 4'd10;            // INVERT
+    d.blend[0] = '{en: 1'b1,
+                  src_c: APU_RAST_BF_ZERO,
+                  dst_c: APU_RAST_BF_ONE,
+                  op_c:  APU_RAST_BO_ADD,
+                  src_a: APU_RAST_BF_ZERO,
+                  dst_a: APU_RAST_BF_ONE,
+                  op_a:  APU_RAST_BO_ADD,
+                  mask:  4'hF,
+                  pad:   '0};
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case51 code=%0d", w_dpl.code));
+    // BGRA byte order: {a, r_srgb, g_srgb, b_srgb} — same as case 5
+    ex = {8'hFF,
+          APU_SRGB_ENC[f_u12(32'h3F000000)],
+          APU_SRGB_ENC[f_u12(32'h3E800000)],
+          APU_SRGB_ENC[f_u12(32'h3ECCCCCD)]};
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        checks++;
+        got = fbpx(x, y);
+        if (ref_px(x, y) == 32'hFFFF_FFFF) begin
+          if (got != 32'hFF000000)
+            fail($sformatf("case51 out px(%0d,%0d)=%08x expclr", x, y, got));
+        end else if (px_bad(got, ex, 1))
+          fail($sformatf("case51 px(%0d,%0d)=%08x exp~%08x",
+                         x, y, got, ex));
+      end
+
+    // ================= case 52: blend on a BGRA sRGB attachment =======
+    // The stored destination is sRGB-encoded: blending decodes it to
+    // linear (APU_SRGB_TO_LIN, u16 / 65535), blends in linear, and
+    // encodes the result; alpha stays linear.  Distinct r/g/b on both
+    // source and destination so a channel-order slip in the decode or
+    // the encode cannot cancel.  clear (0.2,0.6,0.8,0.4); flat source
+    // (1.0,0.0,0.25,0.5); colour SRC_ALPHA/ONE_MINUS_SRC_ALPHA, alpha
+    // ONE/ZERO -> a = 0.5 -> 128.
+    cases++;
+    d = mk_clear();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_B8G8R8A8_SRGB);
+    d.clear_color[0] = 32'h3E4CCCCD;   // 0.2
+    d.clear_color[1] = 32'h3F19999A;   // 0.6
+    d.clear_color[2] = 32'h3F4CCCCD;   // 0.8
+    d.clear_color[3] = 32'h3ECCCCCD;   // 0.4 -> 102
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h3E800000, 32'h3F000000);
+    put_vert(1, 32'h3F400000, 32'hBF200000,
+                32'h3F800000, 32'h00000000, 32'h3E800000, 32'h3F000000);
+    put_vert(2, 32'hBF200000, 32'h3F600000,
+                32'h3F800000, 32'h00000000, 32'h3E800000, 32'h3F000000);
+    ref_xi = '{512, 7168, 1536}; ref_yi = '{512, 1536, 7680};
+    d = mk_draw();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_B8G8R8A8_SRGB);
+    d.blend[0] = '{en: 1'b1,
+                  src_c: APU_RAST_BF_SRC_ALPHA,
+                  dst_c: APU_RAST_BF_OM_SRC_ALPHA,
+                  op_c:  APU_RAST_BO_ADD,
+                  src_a: APU_RAST_BF_ONE,
+                  dst_a: APU_RAST_BF_ZERO,
+                  op_a:  APU_RAST_BO_ADD,
+                  mask:  4'hF,
+                  pad:   '0};
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case52 code=%0d", w_dpl.code));
+    begin
+      // stored destination bytes (what the clear encoded), r/g/b
+      automatic logic [7:0] dr8 = APU_SRGB_ENC[f_u12(32'h3E4CCCCD)];
+      automatic logic [7:0] dg8 = APU_SRGB_ENC[f_u12(32'h3F19999A)];
+      automatic logic [7:0] db8 = APU_SRGB_ENC[f_u12(32'h3F4CCCCD)];
+      // linear blend: src*0.5 + dst_linear*0.5
+      automatic real rl = 1.0  * 0.5 +
+                          (real'(APU_SRGB_TO_LIN[dr8]) / 65535.0) * 0.5;
+      automatic real gl = 0.0  * 0.5 +
+                          (real'(APU_SRGB_TO_LIN[dg8]) / 65535.0) * 0.5;
+      automatic real bl = 0.25 * 0.5 +
+                          (real'(APU_SRGB_TO_LIN[db8]) / 65535.0) * 0.5;
+      automatic logic [31:0] exo = {8'd102, dr8, dg8, db8};
+      ex = {8'd128,
+            APU_SRGB_ENC[$rtoi(rl * 4095.0 + 0.5)],
+            APU_SRGB_ENC[$rtoi(gl * 4095.0 + 0.5)],
+            APU_SRGB_ENC[$rtoi(bl * 4095.0 + 0.5)]};
+      $display("RAST_INFO case52 clr=%08x exp=%08x", exo, ex);
+      for (int y = 0; y < 32; y++)
+        for (int x = 0; x < 32; x++) begin
+          checks++;
+          got = fbpx(x, y);
+          if (ref_px(x, y) == 32'hFFFF_FFFF) begin
+            if (got != exo)
+              fail($sformatf("case52 out px(%0d,%0d)=%08x expclr=%08x",
+                             x, y, got, exo));
+          end else if (px_bad(got, ex, 1))
+            fail($sformatf("case52 px(%0d,%0d)=%08x exp~%08x",
+                           x, y, got, ex));
+        end
+    end
+
+    // ================= case 53: R16_UNORM mid-scale colour ===========
+    // Unsigned 32768 is 32768/65535 = 0.50001 -> byte 128.  Case 25
+    // feeds 65535 only, where a wrong scale hides behind the [0,1]
+    // output clamp.
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000, 0, 0, 0, 0);
+    put_vert(1, 32'h3F500000, 32'hBF600000, 0, 0, 0, 0);
+    put_vert(2, 32'hBF600000, 32'h3F500000, 0, 0, 0, 0);
+    apwr(VB + 0*24 + 8, 32'h00008000);
+    apwr(VB + 1*24 + 8, 32'h00008000);
+    apwr(VB + 2*24 + 8, 32'h00008000);
+    d = mk_draw();
+    d.attr[1].fmt = APU_RAST_VF_R16_UNORM;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case53 code=%0d", w_dpl.code));
+    checks++;
+    got = fbpx(4, 4);
+    if (px_bad(got, 32'hFF000080, 1))
+      fail($sformatf("case53 px(4,4)=%08x exp~ff000080", got));
+
+    // ================= case 54: D16 depth, near drawn first ===========
+    // Case-7 triangles on a D16_UNORM depth attachment, drawn near
+    // (z 0.2, green) then far (z 0.3, red) with LESS.  The far fragment
+    // must lose against the stored 0.2 read back from u16; the readback
+    // has to be u16/65535 for that.
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    d = '0;
+    d.op = APU_RAST_OP_CLEAR;
+    d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
+             fmt: 8'(APU_IMG_FMT_D16_UNORM), mips: 5'd1,
+             layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    d.da_valid = 1'b1;
+    d.clear_color[0] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case54 dclear code=%0d", w_dpl.code));
+    // near tri: screen (6,6),(24,6),(6,24); colour (0,1,0,a=z=0.2)
+    put_vert(0, 32'hBF200000, 32'hBF200000,
+                32'h00000000, 32'h3F800000, 32'h00000000, 32'h3E4CCCCD);
+    put_vert(1, 32'h3F000000, 32'hBF200000,
+                32'h00000000, 32'h3F800000, 32'h00000000, 32'h3E4CCCCD);
+    put_vert(2, 32'hBF200000, 32'h3F000000,
+                32'h00000000, 32'h3F800000, 32'h00000000, 32'h3E4CCCCD);
+    d = mk_draw();
+    d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
+             fmt: 8'(APU_IMG_FMT_D16_UNORM), mips: 5'd1,
+             layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    d.da_valid = 1'b1;
+    d.depth_test = 1'b1; d.depth_write = 1'b1; d.depth_op = 3'd1; // LESS
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case54 near code=%0d", w_dpl.code));
+    // far tri: screen (2,2),(29,2),(2,29); colour (1,0,0,a=z=0.3)
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3E99999A);
+    put_vert(1, 32'h3F500000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3E99999A);
+    put_vert(2, 32'hBF600000, 32'h3F500000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3E99999A);
+    d.vertex_count = 3;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case54 far code=%0d", w_dpl.code));
+    // (10,10) inside both -> near green kept, depth 0.2 (0x3333);
+    // (20,5) far only -> red, depth 0.3 (0x4CCD); (28,28) neither.
+    begin
+      int sx[3] = '{10, 20, 28};
+      int sy[3] = '{10, 5, 28};
+      logic [31:0] sexp[3] = '{32'h3300FF00, 32'h4D0000FF,
+                              32'hFF000000};
+      logic [15:0] sdep[3] = '{16'h3333, 16'h4CCD, 16'hFFFF};
+      for (int s = 0; s < 3; s++) begin
+        checks += 2;
+        got = fbpx(sx[s], sy[s]);
+        if (px_bad(got, sexp[s], 2))
+          fail($sformatf("case54 px(%0d,%0d)=%08x exp~%08x",
+                         sx[s], sy[s], got, sexp[s]));
+        begin
+          automatic int dv = int'(dbpx16(sx[s], sy[s])) - int'(sdep[s]);
+          if (dv < -2 || dv > 2)
+            fail($sformatf("case54 dep(%0d,%0d)=%04x exp~%04x",
+                           sx[s], sy[s], dbpx16(sx[s], sy[s]), sdep[s]));
+        end
+      end
+    end
+
+    // ================= case 55: D16 late-Z ============================
+    // A: red at z 0.2 through early-Z on D16.  B: green, fs_late with
+    // written FragDepth 0.3 — must fail LESS against the stored 0.2, so
+    // A's colour and depth stay on every covered pixel.
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    d = '0;
+    d.op = APU_RAST_OP_CLEAR;
+    d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
+             fmt: 8'(APU_IMG_FMT_D16_UNORM), mips: 5'd1,
+             layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    d.da_valid = 1'b1;
+    d.clear_color[0] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3E4CCCCD);
+    put_vert(1, 32'h3F400000, 32'hBF200000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3E4CCCCD);
+    put_vert(2, 32'hBF200000, 32'h3F600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3E4CCCCD);
+    ref_xi = '{512, 7168, 1536}; ref_yi = '{512, 1536, 7680};
+    d = mk_draw();
+    d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
+             fmt: 8'(APU_IMG_FMT_D16_UNORM), mips: 5'd1,
+             layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    d.da_valid = 1'b1;
+    d.depth_test = 1'b1; d.depth_write = 1'b1; d.depth_op = 3'd1;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case55 A code=%0d", w_dpl.code));
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h00000000, 32'h3F800000, 32'h00000000, 32'h3E99999A);
+    put_vert(1, 32'h3F400000, 32'hBF200000,
+                32'h00000000, 32'h3F800000, 32'h00000000, 32'h3E99999A);
+    put_vert(2, 32'hBF200000, 32'h3F600000,
+                32'h00000000, 32'h3F800000, 32'h00000000, 32'h3E99999A);
+    sh_f8 = 2; sh_f8z = 32'h3E99999A;   // FragDepth 0.3
+    d.vertex_count = 3;
+    d.fs_late = 1'b1; d.fs_fdepth = 1'b1;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    sh_f8 = 0;
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case55 B code=%0d", w_dpl.code));
+    // A's flat red (1,0,0,0.2) = 0x330000FF and depth 0x3333 stay
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++)
+        if (ref_px(x, y) != 32'hFFFF_FFFF) begin
+          checks += 2;
+          got = fbpx(x, y);
+          if (px_bad(got, 32'h330000FF, 1))
+            fail($sformatf("case55 px(%0d,%0d)=%08x exp 330000FF",
+                           x, y, got));
+          begin
+            automatic int dv = int'(dbpx16(x, y)) - int'(16'h3333);
+            if (dv < -2 || dv > 2)
+              fail($sformatf("case55 dep(%0d,%0d)=%04x exp~3333",
+                             x, y, dbpx16(x, y)));
+          end
+        end
 
     // ---- report ---------------------------------------------------------
     // draw-path counters: the suite draws and writes pixels, so both

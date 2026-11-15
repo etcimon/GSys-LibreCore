@@ -1436,7 +1436,7 @@ module g6lc_apu_rast
     endfunction
     function automatic logic [31:0] f_dec_scale(input logic [1:0] ch);
       f_dec_scale = (f_is_srgb(dr_q.ca[at_q].fmt) && ch != 2'd3)
-                  ? 32'h38008001                    // *1/65535
+                  ? 32'h37800080                    // *1/65535
                   : 32'h3B808081;                   // *1/255
     endfunction
     wire [7:0] rop_b0 = f_enc8(dr_q.ca[at_q].fmt, 2'd0, res_q[0]);
@@ -1495,6 +1495,10 @@ module g6lc_apu_rast
            dr_q.blend[at_q].mask[1], dr_q.blend[at_q].mask[2]}
         : dr_q.blend[at_q].mask;
     wire [7:0] rop_strb = {4'h0, rop_msk} << {fr_px[0], 2'b00};
+    // VkLogicOp applies to integer and normalized-integer attachments
+    // only: an sRGB attachment takes the plain source colour.
+    // logicOpEnable still disables blending on every attachment.
+    wire lop_on_w = dr_q.logic_op_en && !f_is_srgb(dr_q.ca[at_q].fmt);
     // Window depth.  Clamp enable uses the viewport range and the
     // near/far planes are not clip planes.  Otherwise the value is
     // held to [0,1], which is what the unclamped fixed path writes.
@@ -2272,7 +2276,7 @@ module g6lc_apu_rast
             fp_kind_q <= 2'd0; fp_o_q <= 2'd2; fp_mod_q <= 1'b0;
             fp_a_q <= fp_res_q;
             fp_b_q <= (u16_q && snorm_q) ? 32'h38000100 :
-                      u16_q ? 32'h38008001 :
+                      u16_q ? 32'h37800080 :
                       snorm_q ? 32'h3C010204 : 32'h3B808081;
             fp_ret_q <= S_GA_U8S;
             t_fpgo();
@@ -3665,7 +3669,7 @@ module g6lc_apu_rast
             fp_kind_q <= 2'd0; fp_o_q <= 2'd2; fp_mod_q <= 1'b0;
             fp_a_q <= fp_res_q;
             fp_b_q <= (dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM))
-                      ? 32'h38008001 : 32'h33800001;
+                      ? 32'h37800080 : 32'h33800001;
             fp_ret_q <= S_DZ_C2;
             t_fpgo();
           end
@@ -4203,7 +4207,7 @@ module g6lc_apu_rast
           S_ROP_R2: begin
             src_q[2] <= mp_res_q[31:0];
             src_q[3] <= mp_res_q[63:32];
-            if (dr_q.logic_op_en) begin
+            if (lop_on_w) begin
               mp_we_q <= 1'b0;
               mp_addr_q <= {32'h0, dr_q.ca[at_q].base} +
                            64'(fr_py) * 64'(cpitch_w) +
@@ -4212,7 +4216,7 @@ module g6lc_apu_rast
               mp_ret_q <= S_ROP_LOP;
               mp_acked_q <= 1'b0;
               st_q <= S_MPW;
-            end else if (!dr_q.blend[at_q].en) begin
+            end else if (!dr_q.blend[at_q].en || dr_q.logic_op_en) begin
               res_q <= {mp_res_q[63:32], mp_res_q[31:0],
                         src_q[1], src_q[0]};
               st_q <= S_ROP_WR;
@@ -4277,7 +4281,7 @@ module g6lc_apu_rast
           S_ROP_LDM: begin
             fp_kind_q <= 2'd0; fp_o_q <= 2'd2; fp_mod_q <= 1'b0;
             fp_a_q <= fp_res_q;
-            fp_b_q <= 32'h38008001;              // *1/65535
+            fp_b_q <= 32'h37800080;              // *1/65535
             fp_ret_q <= S_ROP_LC;
             t_fpgo();
           end
@@ -4518,7 +4522,7 @@ module g6lc_apu_rast
               t_wq({32'h0, dr_q.ca[at_q].base} +
                    64'(fr_py) * 64'(cpitch_w) +
                    64'((32'(fr_px) * 32'd4) & ~64'd7),
-                   {2{dr_q.logic_op_en ? lop_pix_q : rop_pix}},
+                   {2{lop_on_w ? lop_pix_q : rop_pix}},
                    rop_strb);
               st_q <= S_ROP_NX;
             end
