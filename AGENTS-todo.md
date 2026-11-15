@@ -581,9 +581,15 @@ AI island / ai-matrix FO4 program (2026-10-26/27, hyp tree of record `build-plat
       area delta (one `WAY_W`-wide `tc_sram` per L2/L3 set array).
 - [ ] Synthesis area/timing of the tagged filter under COH_OOO (hyp 8-FO4 screen of the
       per-core clear compare; pipeline the clear one cycle if over budget — still sound).
-- [ ] Pre-existing: `tb_g6lc_coherence_l2` scenario 6 fails `COH_L2_CMO_BCAST c0=4 c1=4`
+- [x] Pre-existing: `tb_g6lc_coherence_l2` scenario 6 fails `COH_L2_CMO_BCAST c0=4 c1=4`
       identically on HEAD (CMO broadcast delivered/counted 4x per core) — triage the CMO
-      engine vs the bench's count.
+      engine vs the bench's count. **TRIAGED+FIXED 2026-11-15:** the RTL was correct —
+      `g6lc_cmo_engine` walks `SUB_LINES=CMO_BLOCK_BYTES(64)/L1_LINE_BYTES(16)=4`
+      sub-lines per cbo.inval, advancing the broadcast address by 16B each pass, so
+      each core correctly sees 4 line-granular invalidations. The bench wrongly
+      expected `cmo_inv_count==1`. Now checks `count==4` AND a per-core bitmask of the
+      4 sub-line `line_addr`s == 4'b1111 (full block coverage, stronger than the old
+      count). Pending remote `run_inval_review.py` re-run for live confirmation.
 - [ ] hyp8 harness: split-loops `.vlt` (hyp renames) + `--stats` on the fork; PGO training
       now an MT `g6lc64_hyp8_mc` verilation. The PGO prefix `verilator-v5.008-g6lc-pgo`
       (fork f7fa715, header `e900ec45…`) is not in the runners' qualified tables yet.

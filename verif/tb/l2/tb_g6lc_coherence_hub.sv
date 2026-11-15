@@ -1660,6 +1660,15 @@ module tb_g6lc_coherence_l2;
   addr_t cmo_bcast_a;
   int cmo_inv_count[2] = '{0,0};
   int cmo_done_count = 0;
+  // A cbo.inval walks the 64B CBO block as SUB_LINES = CMO_BLOCK_BYTES(64) /
+  // L1_LINE_BYTES(16) = 4 sub-line L1 broadcasts (g6lc_cmo_engine S_DONE
+  // advances the broadcast address by L1_LINE_BYTES each pass). Track WHICH
+  // 16B L1 lines each core saw invalidated so the check verifies full block
+  // coverage, not merely a count.
+  localparam int unsigned CMO_SUB = 64/16;
+  logic [55:0] CMO_L1TAG0;
+  assign CMO_L1TAG0 = coh_line_tag(ADDRESS & ~64'(63), 16);
+  logic [CMO_SUB-1:0] cmo_inv_mask [2] = '{default: {CMO_SUB{1'b0}}};
   // Negative arm: +oracle_negative disconnects the L2 match-inval wire so the
   // broadcast completes but the resident L2 line survives — the re-read below
   // then hits, and the expected-miss check fails by construction.
@@ -1686,7 +1695,12 @@ module tb_g6lc_coherence_l2;
       .l2_write_idle_i(cmo_l2_idle),.l3_write_idle_i(cmo_l3_idle));
   always_ff @(posedge clk) begin
     for (int c = 0; c < 2; c++)
-      if (cmo_inv[c].valid && inv_ready[c]) cmo_inv_count[c] <= cmo_inv_count[c]+1;
+      if (cmo_inv[c].valid && inv_ready[c]) begin
+        cmo_inv_count[c] <= cmo_inv_count[c]+1;
+        if (cmo_inv[c].line_addr >= CMO_L1TAG0 &&
+            cmo_inv[c].line_addr < CMO_L1TAG0 + 56'(CMO_SUB))
+          cmo_inv_mask[c][int'(cmo_inv[c].line_addr - CMO_L1TAG0)] <= 1'b1;
+      end
     for (int c = 0; c < 2; c++)
       if (tb_cmo_done[c]) cmo_done_count <= cmo_done_count+1;
   end
@@ -2169,8 +2183,12 @@ module tb_g6lc_coherence_l2;
       end
       for(int n=0;n<2000 && cmo_done_count==0;n++)tick();
       if(cmo_done_count!=1)$fatal(1,"COH_L2_CMO_NO_DONE");
-      if(cmo_inv_count[0]!=1 || cmo_inv_count[1]!=1)
-        $fatal(1,"COH_L2_CMO_BCAST c0=%0d c1=%0d",cmo_inv_count[0],cmo_inv_count[1]);
+      // One cbo.inval must invalidate every 16B sub-line of the 64B CBO block
+      // on BOTH cores: SUB_LINES broadcasts per core, each a distinct line.
+      if(cmo_inv_count[0]!=CMO_SUB || cmo_inv_count[1]!=CMO_SUB ||
+         cmo_inv_mask[0] != {CMO_SUB{1'b1}} || cmo_inv_mask[1] != {CMO_SUB{1'b1}})
+        $fatal(1,"COH_L2_CMO_BCAST c0=%0d/%b c1=%0d/%b",
+               cmo_inv_count[0],cmo_inv_mask[0],cmo_inv_count[1],cmo_inv_mask[1]);
       send_read(2);
       while(read_count!=2)tick();
       if(dram_ar_count!=2)$fatal(1,"COH_L2_CMO_PROP dram_ar=%0d",dram_ar_count);
