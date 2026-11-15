@@ -184,6 +184,10 @@ python3 $G --graphics-session ue_gpos_d16lt_1 1
 # dst operand via TO_LIN16*K16 — exposes a wrong sRGB decode scale.
 python3 $G --graphics-session ue_gpos_srgbbopadd_1 1
 python3 $G --graphics-session ue_gpos_bgrasrgbbopadd_1 1
+# sRGB logicOp INVERT: the logic op is not applied to sRGB attachments
+# (lop_on_w gates on !f_is_srgb) — covered px hold the plain encoded
+# source colour, not ~clear.
+python3 $G --graphics-session ue_gpos_srgblopinvert_1 1
 
 # Sessions the run scripts execute that this script did not generate
 # (blend ops and factors, logic ops, depth compare/bounds/bias/clamp,

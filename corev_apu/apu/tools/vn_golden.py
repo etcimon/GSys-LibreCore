@@ -11717,9 +11717,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             is_bop = True
             if bop_op is None:
                 bop_op = 0
-        if is_srgb and not is_bop:
-            raise ValueError('srgb attachment only adapted on the is_bop '
-                             'blend path')
+        if is_srgb and not (is_bop or is_lop):
+            raise ValueError('srgb attachment only adapted on the is_bop/'
+                             'is_lop paths')
         # _enc8: store encode for one f32 channel on attachment 0 — on an
         # sRGB attachment RGB goes linear-u12 -> sRGB8 while alpha (and
         # every channel on a non-sRGB attachment) stays UNORM8.  Mirrors
@@ -12653,23 +12653,38 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             tri_w = (204 | (13 << 8) | (13 << 16) | (207 << 24))
             clr_w = 0xFF33_3333
         elif is_lop:
-            # logicOp: per-channel f_lop(lop_op, src, dst) on the UNORM8
-            # encodings of the constant src COL and the clear dst
-            # (0.2,0.4,0.6,1.0); uncovered px keep the clear word.  The
-            # 16-case table mirrors rast.sv f_lop (VkLogicOp CLEAR..SET).
-            def _lop(s, d):
-                return ((0x00, s & d, s & (~d & 0xFF), s, (~s & 0xFF) & d,
-                         d, s ^ d, s | d, (~(s | d)) & 0xFF,
-                         (~(s ^ d)) & 0xFF, (~d) & 0xFF, s | (~d & 0xFF),
-                         (~s) & 0xFF, ((~s) & 0xFF) | d,
-                         (~(s & d)) & 0xFF, 0xFF)[lop_op])
-            _sb = [cl_f32_u8(f32b(c)) for c in COL]
-            _db = [cl_f32_u8(f32b(c)) for c in (0.2, 0.4, 0.6, 1.0)]
-            _rb = [_lop(_sb[i], _db[i]) for i in range(4)]
-            tri_w = (_rb[0] | (_rb[1] << 8) | (_rb[2] << 16) |
-                     (_rb[3] << 24))
-            clr_w = (_db[0] | (_db[1] << 8) | (_db[2] << 16) |
-                     (_db[3] << 24))
+            if is_srgb:
+                # sRGB + logicOp: the logic op is NOT applied (lop_on_w
+                # gates on !f_is_srgb) and logicOpEnable disables
+                # blending — covered px hold the plain encoded source
+                # colour, uncovered px the encoded clear.
+                _cb = [_enc8(c, _d)
+                       for c, _d in enumerate((0.2, 0.4, 0.6, 1.0))]
+                clr_w = (_cb[0] | (_cb[1] << 8) | (_cb[2] << 16) |
+                         (_cb[3] << 24))
+                _rb = [_enc8(c, _d) for c, _d in enumerate(COL)]
+                tri_w = (_rb[0] | (_rb[1] << 8) | (_rb[2] << 16) |
+                         (_rb[3] << 24))
+            else:
+                # logicOp: per-channel f_lop(lop_op, src, dst) on the
+                # UNORM8 encodings of the constant src COL and the clear
+                # dst (0.2,0.4,0.6,1.0); uncovered px keep the clear word.
+                # The 16-case table mirrors rast.sv f_lop (VkLogicOp
+                # CLEAR..SET).
+                def _lop(s, d):
+                    return ((0x00, s & d, s & (~d & 0xFF), s,
+                             (~s & 0xFF) & d, d, s ^ d, s | d,
+                             (~(s | d)) & 0xFF, (~(s ^ d)) & 0xFF,
+                             (~d) & 0xFF, s | (~d & 0xFF), (~s) & 0xFF,
+                             ((~s) & 0xFF) | d, (~(s & d)) & 0xFF,
+                             0xFF)[lop_op])
+                _sb = [cl_f32_u8(f32b(c)) for c in COL]
+                _db = [cl_f32_u8(f32b(c)) for c in (0.2, 0.4, 0.6, 1.0)]
+                _rb = [_lop(_sb[i], _db[i]) for i in range(4)]
+                tri_w = (_rb[0] | (_rb[1] << 8) | (_rb[2] << 16) |
+                         (_rb[3] << 24))
+                clr_w = (_db[0] | (_db[1] << 8) | (_db[2] << 16) |
+                         (_db[3] << 24))
         elif is_bop or is_bfac:
             # blendOp/blendFactor: dst operand = UNORM8 roundtrip of the
             # clear (u8 then f32(u8)*K, K=0x3B808081).  Only clr_w is
