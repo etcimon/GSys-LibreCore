@@ -317,3 +317,37 @@ the scalar boot path. No boot witness has run on the final tree yet:
   core batch is latency-neutral on the Linux boot through 794M cycles,
   which is the claim the batch made. r128's own userspace verdict is
   still required and pending (shell expected near 1.55B cycles).
+
+## 13. r128 record impaired by a full host disk; relaunched as r128b
+
+The remote root filesystem was 100% full from about 2026-11-14 23:51 to
+2026-11-15 11:03 UTC (hyp8 witness traces: r126 89G, r127m 87G, r125 76G,
+r128 48G, r121-r124 27-29G each). Another user of the host then freed
+about 280G; r126, r127m and r128 were kept.
+
+Effect on r128 (committed tree, model `f697e3b9…`): `run-hyp8.log` jumps
+from the census line at cyc 794M straight to cyc 1,762M, the observer
+JSONL stops at 23:51, and `uart.txt` ends at `rcu: RCU event` (195
+lines). The simulation itself kept running (0 `%Error`, process alive),
+but everything it printed in between, including the userspace markers,
+was dropped by failed writes. **r128 therefore has no marker verdict.**
+
+What the surviving record shows (`build/r128-compare2.sh`):
+
+| cyc | r126 | r127m | r128 |
+|---:|---:|---:|---:|
+| 794M ret | 210,144,710 | 210,144,710 | 210,144,710 |
+| 1,762M ret | 374,545,943 | 374,545,943 | 374,545,943 |
+| 1,764M ret | 374,560,521 | 374,560,521 | 374,560,521 |
+
+`ack_cyc`/`ack_full` match as well. r126 and r127m reach the shell near
+cyc 1.54B (retirement flattens from 372.5M: the idle shell), so r128 was
+in the same post-shell state with the same retirement count. This is
+equivalence evidence, not a marker record.
+
+r128 was stopped at cyc 1,766M (`STOPPED.txt`) and the same model
+relaunched as **`hyp8-osbi-scalar-r128b`** (pid 2062250, observer 2062592,
+budget 1.75e9, same firmware/tohost/flags) to obtain the direct record.
+r127m's own markers were written on 2026-11-14 17:52, before the disk
+filled; its log has a similar hole after 1,796M, which does not affect
+its verdict.
