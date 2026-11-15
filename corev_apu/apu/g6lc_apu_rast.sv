@@ -827,6 +827,16 @@ module g6lc_apu_rast
       f_vt_ent = (VtxCacheEntries == 0) ? 16'd0
                   : 16'($unsigned(i) % VtxCacheEntries);
     endfunction
+    // Next active varying location strictly above cur in the per-draw
+    // fs_in_mask (varm_q), or 8 when none remains.  The mask is constant
+    // for a draw, so the S_F_LSET inactive-location scan collapses to one
+    // priority jump instead of one cycle per masked-off slot.
+    function automatic logic [3:0] f_nvar(input logic [7:0] m,
+                                         input logic [3:0] cur);
+      f_nvar = 4'd8;
+      for (int l = 0; l < 8; l++)
+        if (l > int'(cur) && m[l] && f_nvar == 4'd8) f_nvar = 4'(l);
+    endfunction
     wire [15:0] span_w = f_mx2(16'd1, f_mx2(
         f_mx2(f_uad(vxi_q[1], vxi_q[0]), f_uad(vyi_q[1], vyi_q[0])),
         f_mx2(f_mx2(f_uad(vxi_q[2], vxi_q[0]), f_uad(vyi_q[2], vyi_q[0])),
@@ -966,6 +976,9 @@ module g6lc_apu_rast
     logic         lzdone_q;                 // current fragment's late step ran
     logic [31:0]  var_q [3][8][4];          // [vert][loc][comp] cache
     logic [7:0]   varm_q;                   // locs fetched this prim
+    // next ACTIVE varying location above the cursor (or 8 = fragment
+    // done); consumed by S_F_VW1 to skip the LSET dispatch on hits
+    wire  [3:0]   nva_w = f_nvar(varm_q, lc_q);
     // G2b quad scan: (sx_q,sy_q) is the even-aligned 2x2 block base,
     // (px_q,py_q) the pixel of the lane under construction; lane_q
     // is the 0..3 lane cursor inside the block and help_q its flag
@@ -3720,7 +3733,7 @@ module g6lc_apu_rast
               end
               end
             end else if (!varm_q[lc_q[2:0]]) begin
-              lc_q <= lc_q + 4'd1;
+              lc_q <= f_nvar(varm_q, lc_q);
             end else begin
               c_q <= '0;
               st_q <= S_F_V0;
@@ -3774,8 +3787,12 @@ module g6lc_apu_rast
               t_wq({32'h0, fsi_wr_w} + {26'h0, f_q} * 64'(VSTR) +
                    64'd16 + {28'h0, lc_q[2:0], 4'h0} + 64'd8,
                    {conv_q[3], conv_q[2]}, 8'hFF);
-              lc_q <= lc_q + 4'd1;
-              st_q <= S_F_LSET;
+              // land the cursor on the next ACTIVE location (nva_w) or 8
+              // = fragment done; a hit goes straight to V0 and skips the
+              // LSET dispatch cycle, masked-off slots cost nothing.
+              lc_q <= nva_w;
+              c_q  <= '0;
+              st_q <= (nva_w == 4'd8) ? S_F_LSET : S_F_V0;
             end
           end
           // ---- 1 px line list / strip (Bresenham) ----------------------

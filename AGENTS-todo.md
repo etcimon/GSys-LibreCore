@@ -1421,6 +1421,34 @@ remain release requirements; intermediate raster gates do not narrow the product
     .cache/apu-perf/fp0-brief.md "RP3 recon": blend draws only, needs an
     in-flight fp result scoreboard for the data-dependent op sequence).
     merge unchanged (FP10-A is the gated next raster lever).
+  - [x] RP3-BOUNDED + FP0e raster interp — LANDED+VERIFIED 2026-11-15:
+    - RP3-BOUNDED (commit 61dc92a87): fixed dst-colour decode subchain
+      (S_ROP_DI 9-job I2F+scale sequence) moved to self-stepping pipelined
+      issue (dd_q cursor + dcv_q staging), same direct-capture discipline as
+      S_F_LE0.  fpw −10.3%, merge −1.7% on the bench; the variable
+      S_BL_* factor/op chain stays serial (data-dependent, needs a result
+      scoreboard).  Detail: fp0-brief "RP3-BOUNDED".
+    - FP0e interp location-loop FSM-trim (the "FSM-trim (B)" residual):
+      varm_q (=dr_q.fs_in_mask) is a PER-DRAW constant, so the active-
+      location set is fixed per draw.  New combinational f_nvar(m,cur)
+      returns the lowest set bit of m strictly above cur else 8(done).
+      S_F_LSET inactive branch lc_q<=lc_q+1 -> lc_q<=f_nvar (inactive runs
+      collapse to one jump, masked-off slots cost 0); S_F_VW1 exit
+      lc_q<=lc_q+1;st<=S_F_LSET -> lc_q<=nva_w;st<=(nva_w==8)?S_F_LSET:
+      S_F_V0 (active-next bypasses the LSET dispatch, byte-identical to
+      LSET's active branch).  lc_q==4'd8 completion guard tested FIRST in
+      S_F_LSET so nva_w==8 never aliases the varm_q index.  Pure comb, NO
+      new state (28,624 FFs unchanged), state enum preserved.
+      VERIFIED: rast 46c/15,616chk pixel-exact; ALL 126 ue_gpos vgtop
+      sessions PASS (real SPIR-V varyings/depth/blend/MRT/texture/stencil);
+      yosys Enable=0/1 clean (0 problems, no latches).
+      MEASURED: interp 1,700,668->1,464,978 (-13.9%), rast busy
+      2,430,944->2,195,847 (-9.7%), cycles -9.7%.  Residual interp ~1.46M
+      (~67% rast busy) is now the serial 1-job/cycle fpnew issue floor +
+      per-location V0->VW0->VW1->VW2 write chain; next real lever = TP3
+      (pipelined shader issue / banked RF) gating the FP6 preamble
+      restructure — still multi-session, deferred.  Detail: fp0-brief
+      "FP0e LANDED+VERIFIED".
   - [ ] Gate G-F1 (with G-T1): graphics-session cycles ≤ 25% of the frame baseline,
     pixel-identical; unchanged-state draws re-resolve nothing; the 50,784-index draw
     finishes inside Mesa's fence patience. Threshold provisional until FP0.
