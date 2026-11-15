@@ -11513,10 +11513,13 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
 - [x] Added opt-in `SOFT_LADDER_BUILD_VLT_ARGS` (default empty) to soft-ladder-build-harness.sh
   so a reviewed Verilator control (the pinned split_var .vlt) can be bound to one candidate
   build without changing default build policy or any waiver.
-- [ ] Defect, NOT fixed: `testharness_proxy.py build --vthreads N` is silently ignored for
-  non-AI flavours (only plumbed as AI_MATRIX_VERILATOR_THREADS). It produced a 12-thread
-  model that the qualification runner correctly rejected. Use
-  `--env SOFT_LADDER_VERILATOR_THREADS=1`. Either plumb the flag or make it refuse.
+- [x] FIXED 2026-11-15 (`025034d87`): `testharness_proxy.py build --vthreads N`
+  was silently ignored for non-AI flavours (only plumbed as
+  AI_MATRIX_VERILATOR_THREADS). It produced a 12-thread model that the
+  qualification runner correctly rejected. cmd_build now emits
+  SOFT_LADDER_VERILATOR_THREADS=N for non-AI builds (honored by both
+  soft-ladder-build-harness.sh and hyp8-build-harness.sh, default 4);
+  --env overrides still win. --vthreads help text now names both env vars.
   Likewise the private Verilator runtime must be selected with `--env VERILATOR_ROOT=...`
   or the model silently links the stock runtime and fails the runtime-header gate.
 - [x] Shared-core measurement correction (2026-09-19): core capacity is not equal
