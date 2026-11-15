@@ -1115,6 +1115,20 @@ remain release requirements; intermediate raster gates do not narrow the product
     (`b41915854`): R8G8B8A8_UINT with a value above 255 used to spill into the
     next channel; RTL, Python model and bench model fixed together, bench case
     first. xfer 285 cases / 1,625 checks.
+    (10) Device sessions beyond RGBA8/D32 (2026-11-15): `ue_gpos_bgracwmr_1` /
+    `ue_gpos_bgracwmb_1` (B8G8R8A8 attachment, R-only and B-only write mask,
+    `e6eafe370`) and `ue_gpos_d16lt_1` (D16_UNORM depth compare, packed UNORM16
+    readback, `427806fcd`). Each passes on vgtop with maxulp=0 and fails when the
+    corresponding fix of (3) is temporarily undone. Still without a device vector:
+    blend and logic op on sRGB (the generator has no sRGB attachment path yet),
+    UNORM16 vertex attributes, D16 late-Z.
+    (11) Freshness coverage extended (`32316e814`): `regen_vectors.sh` now
+    generates the 68 graphics sessions the run scripts execute but it did not
+    list, the 128-invocation compute sessions and the two query arms; 56 of them
+    had drifted (blend, logic-op and depth-compare families, qry, qry2) and are
+    refreshed. `check_fresh.sh`: 986 files current, 0 drifted. Outside it: 19
+    `.exp` (specok probes, dynord, ws0_bufcopy, and nine graphics files no run
+    script lists: drawindxmesh*, bfacc, `ue_gpos__1`).
     (9) Observation for the next coverage step: every graphics device session
     renders to R8G8B8A8_UNORM, which is why the BGRA, sRGB and D16 rasteriser
     defects of (3) had no device vector. The model refuses blend, write mask and
