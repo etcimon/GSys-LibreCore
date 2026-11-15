@@ -244,11 +244,20 @@ module g6lc_apu_storage
         .clk_i, .en_i(testmode_i | ~idle_o | map_valid_i | lookup_valid_i | inval_valid_i),
         .test_en_i(testmode_i), .clk_o(map_clk)
       );
-      tc_sram #(.NumWords(ApuCfg.MaxResources), .DataWidth(256), .NumPorts(1),
-                .Latency(1), .SimInit("none")) i_map (
-        .clk_i(map_clk), .rst_ni, .req_i(map_req), .we_i(map_we), .addr_i(map_addr),
-        .wdata_i(map_wdata), .be_i({32{1'b1}}), .rdata_o(map_rdata)
-      );
+      // SRAM-envelope: split the 256-bit map row across two 128-bit
+      // banks (MaxResources <= 4096 keeps depth in range; 256 was the
+      // width violation).  Width-only split => no tile register; the
+      // gather is combinational on the two registered rdata outputs.
+      localparam int MAP_NW = 2;                          // 256 / 128
+      logic [127:0]    map_rdb [MAP_NW];
+      for (genvar w = 0; w < MAP_NW; w++) begin : g_mapw
+        tc_sram #(.NumWords(ApuCfg.MaxResources), .DataWidth(128), .NumPorts(1),
+                  .Latency(1), .SimInit("none")) i_map (
+          .clk_i(map_clk), .rst_ni, .req_i(map_req), .we_i(map_we), .addr_i(map_addr),
+          .wdata_i(map_wdata[w*128 +: 128]), .be_i('1), .rdata_o(map_rdb[w])
+        );
+      end
+      assign map_rdata[0] = {map_rdb[1], map_rdb[0]};
     end else begin : gen_map_off
       assign map_rdata_word = '0;
       assign scan_map = '0;
@@ -278,11 +287,32 @@ module g6lc_apu_storage
         .clk_i, .en_i(testmode_i | ~idle_o | cmd_valid_i | cmd_rd_valid_i | cmd_data_valid_i),
         .test_en_i(testmode_i), .clk_o(cmd_clk)
       );
-      tc_sram #(.NumWords(CmdWords), .DataWidth(64), .NumPorts(1),
-                .Latency(1), .SimInit("none")) i_cmd (
-        .clk_i(cmd_clk), .rst_ni, .req_i(cmd_req), .we_i(cmd_we), .addr_i(cmd_addr),
-        .wdata_i(cmd_wdata), .be_i(cmd_be), .rdata_o(cmd_rdata)
-      );
+      // SRAM-envelope: CmdWords can reach 8192 (>4096), so the command
+      // store is depth-tiled into <=4096-word macros.  cmd_rdt_q latches
+      // the in-flight read's tile on cmd_clk (the SRAM's own gated clock)
+      // because tc_sram rdata_o is registered and cmd_addr may advance
+      // before the data is gathered.  cmd_* interface unchanged.
+      localparam int unsigned CMD_LW = (CmdAddrWidth > 12) ? 12 : CmdAddrWidth;
+      localparam int unsigned CMD_NT = (CmdAddrWidth > CMD_LW) ? (1 << (CmdAddrWidth - CMD_LW)) : 1;
+      localparam int unsigned CMD_TW = (CMD_NT > 1) ? (CmdAddrWidth - CMD_LW) : 1;
+      typedef logic [CMD_TW-1:0] cmd_tile_t;
+      logic [CMD_TW-1:0]         cmd_rdt_q;
+      logic [63:0]               cmd_rda [CMD_NT];
+      wire [CMD_TW-1:0]          cmd_tile_w = cmd_addr[CmdAddrWidth-1 -: CMD_TW];
+      for (genvar t = 0; t < CMD_NT; t++) begin : g_cmdt
+        tc_sram #(.NumWords(1 << CMD_LW), .DataWidth(64), .NumPorts(1),
+                  .Latency(1), .SimInit("none")) i_cmd (
+          .clk_i(cmd_clk), .rst_ni,
+          .req_i(cmd_req && ((CMD_NT == 1) || (cmd_tile_w == cmd_tile_t'(t)))),
+          .we_i (cmd_we  && ((CMD_NT == 1) || (cmd_tile_w == cmd_tile_t'(t)))),
+          .addr_i(cmd_addr[CMD_LW-1:0]),
+          .wdata_i(cmd_wdata), .be_i(cmd_be), .rdata_o(cmd_rda[t]));
+      end
+      assign cmd_rdata[0] = cmd_rda[cmd_rdt_q];
+      always_ff @(posedge cmd_clk or negedge rst_ni) begin
+        if (!rst_ni) cmd_rdt_q <= '0;
+        else if (cmd_req && !cmd_we && (CMD_NT > 1)) cmd_rdt_q <= cmd_tile_w;
+      end
     end else begin : gen_cmd_off
       assign cmd_rdata_word = '0;
       assign cmd_wdata = '0;

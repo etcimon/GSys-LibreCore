@@ -84,6 +84,7 @@ module tb_g6lc_apu_storage;
   logic [63:0] rddata;
   logic off_mr, off_mcv, off_lr, off_lcv, off_ir, off_icv, off_cr, off_dr, off_ccv;
   logic off_rr, off_rdv, off_idle, off_held, off_fault;
+  logic [255:0] mapw;
   int errors = 0, checks = 0, cycles = 0, cases = 0;
   int source_sent;
   logic [7:0] cmd_mem [0:255];
@@ -268,8 +269,9 @@ module tb_g6lc_apu_storage;
     @(posedge clk); @(negedge clk); invalidate = 0;
     do_lookup('{resource_id: 15, context_id: 21, epoch: 8, write_access: 0, tag: 25}, APU_DMA_BAD_RESOURCE);
     reset_all();
-    i_on.i_dut.gen_on.gen_map.i_map.sram[1] =
-        apu_map_pack(mkmap(40, 21, 1, WindowBase, 32));
+    mapw = apu_map_pack(mkmap(40, 21, 1, WindowBase, 32));
+    i_on.i_dut.gen_on.gen_map.g_mapw[0].i_map.sram[1] = mapw[127:0];
+    i_on.i_dut.gen_on.gen_map.g_mapw[1].i_map.sram[1] = mapw[255:128];
     do_lookup('{resource_id: 40, context_id: 21, epoch: 1, write_access: 0, tag: 26}, APU_DMA_BAD_RESOURCE);
 
     fill_cmd(512, APU_DMA_LIMIT);
