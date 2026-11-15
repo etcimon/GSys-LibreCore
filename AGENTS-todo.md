@@ -21703,6 +21703,28 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   `hyp8-r128-aggregate-t4`) is in flight — no boot witness has yet run
   on the final committed RTL.
 
+- Hyp8 r128/r129 (2026-11-15). `hyp8-osbi-scalar-r127m` PASSED (both
+  markers). r128 (committed tree `3438607dc`, model `f697e3b9…`, lint rc 0,
+  14/14 smokes) retires exactly what r126 and r127m retire at 100M, 400M,
+  700M, 794M, 1,762M and 1,764M cycles, but the remote disk was full for
+  ~11 h and its UART/log lost cycles 794M–1,762M, markers included: **no
+  marker verdict**. Relaunched as `hyp8-osbi-scalar-r128b` (budget 1.75e9);
+  open until `boot-monitor/*.exit` is 0. Deep profile
+  (`LoadExPubStages=2`): the r127n-deep stop at 254,915,572 was a lost
+  exception (slot drained while its pending record waited for a safe FSM
+  state); fixed in `107c4ca3c` with a leaf reproduction and mutant, default
+  netlist unchanged (14/14 smokes, same counts); witness
+  `hyp8-osbi-scalar-r129-deep` running, must pass 254.9M and reach both
+  markers. Memory leaf repaired (stale since `7d7d7dc5a`): 176 default /
+  177 deep on the pinned toolchain. Staged MMU: multi-hit at 317,424,744
+  follows the kernel ASID probe (satp, satp, sfence.vma) by ~10k cycles;
+  cause not established; `+tlb_trace` probe committed (`23dd03fab`),
+  replay `…-r129b-mmustaged-diag2` queued behind the live witnesses
+  (`HYP8_WAIT_PIDS`). Host note: 12 cores; three 4-thread models plus APU
+  leaf jobs drop witnesses to 1–5 kcyc/s — run at most two, and watch
+  `df` (witness traces are 30–90G each). Details: `analysis/r116/worklog.md`
+  §12–13, `analysis/r129/worklog.md`.
+
 - Canonical verification follow-up: harness selection fixed (`774f9cc6f`);
   the cv64 depth-8 load buffer now has a derived 3-bit cache ID; the shared
   testbench reads built-config cache geometry; optional `mtval` storage
