@@ -290,3 +290,30 @@ edits in the same commit are compiled into Flist.hyp8_sim but are not on
 the scalar boot path. No boot witness has run on the final tree yet:
 `closure-r128` was built from HEAD and `hyp8-r128-aggregate-t4`
 (witness-quality: fork PGO + threads 4 + sim-PGO) is building remotely.
+
+## 12. r127m PASS and r128 (committed tree) cycle-identity (2026-11-15)
+
+- **`hyp8-osbi-scalar-r127m` PASSED** (default binding, closure-r127m
+  model `f4ac24f7…`, 1 thread, sim-PGO 197): monitor exit 0, uart lines
+  288/303 `G6LC_LINUX_INIT_UP` / `G6LC_LINUX_SHELL`, 308 uart lines equal
+  to r126, 0 `%Error`. Still running out its 3e9 budget (cyc 1.796B at
+  11:02 UTC).
+- **`hyp8-osbi-scalar-r128`** = committed tree `3438607dc` (closure-r128,
+  model `f697e3b9865dc864bf19dcc63c98396fda4446fff07dce1919af91b1c10db101`,
+  fork PGO compiler, `--threads 4`, unroll 256/131072, split-loops vlt,
+  sim-PGO 234 profiles; lint scalar/SMT2 rc 0; 14/14 smokes at baseline
+  counts). Alive at cyc 794M, 0 `%Error`, observer attached.
+- **Retirement census identical across the three models at equal cycles**
+  (`build/r128-compare.sh`):
+
+  | cyc | ret | ack_cyc | ack_full |
+  |---:|---:|---:|---:|
+  | 100M | 27,067,651 | 18,945,455 | 8,122,196 |
+  | 400M | 109,961,391 | 78,630,170 | 31,331,221 |
+  | 700M | 186,730,291 | 133,743,735 | 52,986,556 |
+  | 794M | 210,144,710 | 150,524,687 | 59,620,023 |
+
+  r126 (ad6a429b9), r127m and r128 agree on every row: the whole r127
+  core batch is latency-neutral on the Linux boot through 794M cycles,
+  which is the claim the batch made. r128's own userspace verdict is
+  still required and pending (shell expected near 1.55B cycles).
