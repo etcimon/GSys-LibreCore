@@ -323,8 +323,11 @@ only what is specific to the pass.
   instruction's write rows, 3c wider fetch if still wanted. Hazards: same-wave RAW
   (N writes a reg N+1 reads → forward `wb_q` or stall), taken-branch invalidation of
   the shadow, multi-row write-back, row-cache writeback timing. Full analysis in
-  `.cache/apu-perf/tp3a-brief.md` §5a/§7a. `W_IDLE` (~35% of cycles) is dispatch-bound
-  and belongs to TP6/TP7 parallelism, not per-instruction pipelining.
+  `.cache/apu-perf/tp3a-brief.md` §5a/§7a. Row-cache *capacity* is not a lever:
+  a `RowCacheEntries=4096` corpus arm saved only 1,536 of 3,666,123 cycles (0.04%)
+  — the 61.5% hit rate is compulsory/conflict-bound, so 1024 stays. `W_IDLE`
+  (~35% of cycles) is dispatch-bound and belongs to TP6/TP7 parallelism, not
+  per-instruction pipelining.
 
 **TP4 — on-chip record store for graphics waves.** Independent of TP1–TP3.
 - Move the VS/FS record rings from the DRAM scratch ring to a `tc_sram` record store with
