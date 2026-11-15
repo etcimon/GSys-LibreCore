@@ -122,3 +122,15 @@ Not done here: no default-binding boot witness was rerun for this change
 (the default expression is unchanged by constant folding; `r128b` is the
 witness of record for the committed default tree). The deep-profile build,
 smokes and boot witness are recorded below once they report.
+
+Deep profile `hyp8-r129-deep-aggregate-t4` (`HYP8_BUILD_TARGET=g6lc64_hyp8_deep`,
+`--threads 4`, unroll 256/131072, split-loops vlt): lint rc 0, model
+`48c0ea782fe31e5307d562801fe983a87080e167ab4bbcf18feaa4667ea4b0c4`, sim-PGO 235
+profiles. `hyp8-r129-deep-smokes-t4`: **14/14 pass** at the same cycle counts
+(the smokes take no load fault, so they do not exercise the pushed record).
+
+Boot witness `hyp8-osbi-scalar-r129-deep` launched on that model (pid 2630423,
+observer 2630715, firmware `30e1311e…`, tohost `0x80041730`, budget 1.75e9).
+The previous deep run stopped at 254,915,572; passing that point and the two
+userspace markers are both required before the deep profile can be proposed
+as a default.
