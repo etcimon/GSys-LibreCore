@@ -301,7 +301,7 @@ module g6lc_apu_rast
       S_ROP_LC, S_ROP_LWR,
       S_ROP_DI, S_ROP_DM, S_ROP_DS,
       S_BL_SAT, S_BL_MM,
-      S_BL_F1, S_BL_F1B, S_BL_F2, S_BL_F2B,
+      S_BL_F1, S_BL_F1B, S_BL_F2B,
       S_BL_M2, S_BL_OP, S_BL_ST,
       S_ROP_WR, S_ROP_NX,
       S_BATNEXT,
@@ -1626,7 +1626,7 @@ module g6lc_apu_rast
         if (s inside {S_FLUSH, S_FS_WAIT, S_DGATE}) return CL_FSWAIT;
         if (s inside {S_ROP_R0, S_ROP_R1, S_ROP_R2,
                       S_ROP_DI, S_ROP_DM, S_ROP_DS,
-                      S_BL_SAT, S_BL_MM, S_BL_F1, S_BL_F1B, S_BL_F2,
+                      S_BL_SAT, S_BL_MM, S_BL_F1, S_BL_F1B,
                       S_BL_F2B, S_BL_M2, S_BL_OP, S_BL_ST,
                       S_ROP_WR, S_ROP_NX, S_ROP_LOP}) return CL_MERGE;
         return CL_CTL;
@@ -4417,8 +4417,26 @@ module g6lc_apu_rast
               fp_ret_q <= S_BL_F1B;
               t_fpgo();
             end else begin
+              // RP3: fuse S_BL_F2's dst-factor dispatch here (S_BL_F1B does
+              // the same for the OM-src path), leaving S_BL_F2 unreachable.
+              // sf_q captures f_fbase(bsf_w) this cycle; the src*sf operand
+              // uses f_fbase(bsf_w) directly since sf_q is not yet updated.
               sf_q <= f_fbase(bsf_w, c_q[1:0]);
-              st_q <= S_BL_F2;
+              if (f_fminus(bdf_w)) begin
+                fp_kind_q <= 2'd0; fp_o_q <= 2'd1; fp_mod_q <= 1'b1;
+                fp_a_q <= '0;
+                fp_b_q <= 32'h3F800000;
+                fp_c_q <= f_fbase(bdf_w, c_q[1:0]);
+                fp_ret_q <= S_BL_F2B;
+                t_fpgo();
+              end else begin
+                df_q <= f_fbase(bdf_w, c_q[1:0]);
+                fp_kind_q <= 2'd0; fp_o_q <= 2'd2; fp_mod_q <= 1'b0;
+                fp_a_q <= src_q[c_q[1:0]];
+                fp_b_q <= f_fbase(bsf_w, c_q[1:0]);
+                fp_ret_q <= S_BL_M2;
+                t_fpgo();
+              end
             end
           end
           S_BL_F1B: begin
@@ -4439,26 +4457,6 @@ module g6lc_apu_rast
               df_q <= f_fbase(bdf_w, c_q[1:0]);
               fp_kind_q <= 2'd0; fp_o_q <= 2'd2; fp_mod_q <= 1'b0;
               fp_a_q <= src_q[c_q[1:0]]; fp_b_q <= fp_res_q;
-              fp_ret_q <= S_BL_M2;
-              t_fpgo();
-            end
-          end
-          S_BL_F2: begin
-            if (f_fminus(bdf_w)) begin
-              fp_kind_q <= 2'd0; fp_o_q <= 2'd1; fp_mod_q <= 1'b1;
-              fp_a_q <= '0;
-              fp_b_q <= 32'h3F800000;
-              fp_c_q <= f_fbase(bdf_w, c_q[1:0]);
-              fp_ret_q <= S_BL_F2B;
-              t_fpgo();
-            end else begin
-              // RP3: fuse the src*sf FMA issue that S_BL_M1 would otherwise
-              // spend a dedicated cycle on (same operand-safety argument as
-              // S_BL_F2B: df_q feeds S_BL_M2 two jobs later, src_q/sf_q are
-              // stable). This leaves S_BL_M1 unreachable.
-              df_q <= f_fbase(bdf_w, c_q[1:0]);
-              fp_kind_q <= 2'd0; fp_o_q <= 2'd2; fp_mod_q <= 1'b0;
-              fp_a_q <= src_q[c_q[1:0]]; fp_b_q <= sf_q;
               fp_ret_q <= S_BL_M2;
               t_fpgo();
             end
