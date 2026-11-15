@@ -998,6 +998,148 @@ module tb_g6lc_apu_rast;
                          x, y, got, ex));
       end
 
+    // ============ case 6c: MIN blend op (S_BL_MM path) ============
+    cases++;
+    // same clear (0.2,0.2,0.2,0.4) and triangle as case6. op_c=MIN routes
+    // RGB through S_BL_MM (combinational compare, factors ignored):
+    // result=min(src,dst). src=(.125,.375,.75,.5) all dyadic-exact and
+    // straddling dst=0.2 -> r=.125->32, g=.2->51, b=.2->51. MAX would give
+    // (.2,.375,.75)->(51,96,191), a factor blend something else — strong
+    // differentiator for the previously-untested S_BL_MM path. alpha goes
+    // through the factor chain (op_a=ADD) but mask RGB keeps dst alpha.
+    d = mk_clear();
+    d.clear_color[0] = 32'h3E4CCCCD;
+    d.clear_color[1] = 32'h3E4CCCCD;
+    d.clear_color[2] = 32'h3E4CCCCD;
+    d.clear_color[3] = 32'h3ECCCCCD;   // 0.4 -> byte 102
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h3E000000, 32'h3EC00000, 32'h3F400000, 32'h3F000000);
+    put_vert(1, 32'h3F400000, 32'hBF200000,
+                32'h3E000000, 32'h3EC00000, 32'h3F400000, 32'h3F000000);
+    put_vert(2, 32'hBF200000, 32'h3F600000,
+                32'h3E000000, 32'h3EC00000, 32'h3F400000, 32'h3F000000);
+    ref_xi = '{512, 7168, 1536}; ref_yi = '{512, 1536, 7680};
+    d = mk_draw();
+    d.blend[0] = '{en: 1'b1,
+                  src_c: APU_RAST_BF_SRC_ALPHA,
+                  dst_c: APU_RAST_BF_OM_SRC_ALPHA,
+                  op_c:  APU_RAST_BO_MIN,
+                  src_a: APU_RAST_BF_ONE,
+                  dst_a: APU_RAST_BF_ZERO,
+                  op_a:  APU_RAST_BO_ADD,
+                  mask:  4'h7,
+                  pad:   '0};
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case6c code=%0d", w_dpl.code));
+    // inside: r=min(.125,.2)=.125->32, g=min(.375,.2)=.2->51, b=min(.75,.2)=.2->51
+    ex = {8'd102, 8'd51, 8'd51, 8'd32};
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        checks++;
+        got = fbpx(x, y);
+        if (ref_px(x, y) == 32'hFFFF_FFFF) begin
+          if (got != 32'h66333333)
+            fail($sformatf("case6c out px(%0d,%0d)=%08x expclr", x, y, got));
+        end else if (px_bad(got, ex, 1))
+          fail($sformatf("case6c px(%0d,%0d)=%08x exp~%08x",
+                         x, y, got, ex));
+      end
+
+    // ============ case 6d: SUBTRACT blend op (factor chain) ============
+    cases++;
+    // same clear/triangle/factors as case6 but op_c=SUBTRACT: the factor
+    // chain runs (src_c=SRC_ALPHA sf=.5, dst_c=OM_SRC_ALPHA df=.5) and
+    // S_BL_OP computes src*sf - dst*df = (src-dst)*.5 with fp_mod=1 —
+    // exercises the subtract combine + operand order the ADD-only suite
+    // never reached. src=(.75,.5,.4,.5): r=(.75-.2)*.5=.275->70,
+    // g=(.5-.2)*.5=.15->38, b=(.4-.2)*.5=.1->26. alpha masked -> 102.
+    d = mk_clear();
+    d.clear_color[0] = 32'h3E4CCCCD;
+    d.clear_color[1] = 32'h3E4CCCCD;
+    d.clear_color[2] = 32'h3E4CCCCD;
+    d.clear_color[3] = 32'h3ECCCCCD;   // 0.4 -> byte 102
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h3F400000, 32'h3F000000, 32'h3ECCCCCD, 32'h3F000000);
+    put_vert(1, 32'h3F400000, 32'hBF200000,
+                32'h3F400000, 32'h3F000000, 32'h3ECCCCCD, 32'h3F000000);
+    put_vert(2, 32'hBF200000, 32'h3F600000,
+                32'h3F400000, 32'h3F000000, 32'h3ECCCCCD, 32'h3F000000);
+    ref_xi = '{512, 7168, 1536}; ref_yi = '{512, 1536, 7680};
+    d = mk_draw();
+    d.blend[0] = '{en: 1'b1,
+                  src_c: APU_RAST_BF_SRC_ALPHA,
+                  dst_c: APU_RAST_BF_OM_SRC_ALPHA,
+                  op_c:  APU_RAST_BO_SUBTRACT,
+                  src_a: APU_RAST_BF_ONE,
+                  dst_a: APU_RAST_BF_ZERO,
+                  op_a:  APU_RAST_BO_ADD,
+                  mask:  4'h7,
+                  pad:   '0};
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case6d code=%0d", w_dpl.code));
+    // inside: r=.275->70, g=.15->38, b=.1->26 (all within tol of dst=.2)
+    ex = {8'd102, 8'd26, 8'd38, 8'd70};
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        checks++;
+        got = fbpx(x, y);
+        if (ref_px(x, y) == 32'hFFFF_FFFF) begin
+          if (got != 32'h66333333)
+            fail($sformatf("case6d out px(%0d,%0d)=%08x expclr", x, y, got));
+        end else if (px_bad(got, ex, 1))
+          fail($sformatf("case6d px(%0d,%0d)=%08x exp~%08x",
+                         x, y, got, ex));
+      end
+
+    // ============ case 6e: MAX blend op (S_BL_MM other branch) ============
+    cases++;
+    // identical to case6c but op_c=MAX: result=max(src,dst) ->
+    // r=max(.125,.2)=.2->51, g=max(.375,.2)=.375->96, b=max(.75,.2)=.75->191.
+    // Covers the bop!=MIN arm of the S_BL_MM comparator select.
+    d = mk_clear();
+    d.clear_color[0] = 32'h3E4CCCCD;
+    d.clear_color[1] = 32'h3E4CCCCD;
+    d.clear_color[2] = 32'h3E4CCCCD;
+    d.clear_color[3] = 32'h3ECCCCCD;   // 0.4 -> byte 102
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h3E000000, 32'h3EC00000, 32'h3F400000, 32'h3F000000);
+    put_vert(1, 32'h3F400000, 32'hBF200000,
+                32'h3E000000, 32'h3EC00000, 32'h3F400000, 32'h3F000000);
+    put_vert(2, 32'hBF200000, 32'h3F600000,
+                32'h3E000000, 32'h3EC00000, 32'h3F400000, 32'h3F000000);
+    ref_xi = '{512, 7168, 1536}; ref_yi = '{512, 1536, 7680};
+    d = mk_draw();
+    d.blend[0] = '{en: 1'b1,
+                  src_c: APU_RAST_BF_SRC_ALPHA,
+                  dst_c: APU_RAST_BF_OM_SRC_ALPHA,
+                  op_c:  APU_RAST_BO_MAX,
+                  src_a: APU_RAST_BF_ONE,
+                  dst_a: APU_RAST_BF_ZERO,
+                  op_a:  APU_RAST_BO_ADD,
+                  mask:  4'h7,
+                  pad:   '0};
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case6e code=%0d", w_dpl.code));
+    // inside: r=.2->51, g=.375->96, b=.75->191
+    ex = {8'd102, 8'd191, 8'd96, 8'd51};
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        checks++;
+        got = fbpx(x, y);
+        if (ref_px(x, y) == 32'hFFFF_FFFF) begin
+          if (got != 32'h66333333)
+            fail($sformatf("case6e out px(%0d,%0d)=%08x expclr", x, y, got));
+        end else if (px_bad(got, ex, 1))
+          fail($sformatf("case6e px(%0d,%0d)=%08x exp~%08x",
+                         x, y, got, ex));
+      end
+
     // ================= case 7: D32 depth, two tris ===============
     cases++;
     // colour clear to opaque black
