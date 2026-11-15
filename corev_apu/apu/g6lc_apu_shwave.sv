@@ -2350,23 +2350,49 @@ module g6lc_apu_shwave
       );
     end
 
-    // Register file split into two 512-bit halves: Verilator cannot
-    // unroll tc_sram's byte-write loop at BeWidth=128 (BLKLOOPINIT
-    // silently drops the write), while BeWidth=64 unrolls fine.
-    logic [511:0] rf_rdata_lo, rf_rdata_hi;
-    assign rf_rdata = {rf_rdata_hi, rf_rdata_lo};
-    tc_sram #(.NumWords(MaxWaves * ShaderRegs),
-              .DataWidth(LAN * VEC * 16), .NumPorts(1),
-              .SimInit("none")) i_rf_lo (
-      .clk_i, .rst_ni, .req_i(rf_req), .we_i(rf_we),
-      .addr_i(rf_addr), .wdata_i(rf_wdata[511:0]),
-      .be_i(rf_be[63:0]), .rdata_o(rf_rdata_lo));
-    tc_sram #(.NumWords(MaxWaves * ShaderRegs),
-              .DataWidth(LAN * VEC * 16), .NumPorts(1),
-              .SimInit("none")) i_rf_hi (
-      .clk_i, .rst_ni, .req_i(rf_req), .we_i(rf_we),
-      .addr_i(rf_addr), .wdata_i(rf_wdata[1023:512]),
-      .be_i(rf_be[127:64]), .rdata_o(rf_rdata_hi));
+    // TP3a: register file re-banked into the SRAM macro envelope.  The
+    // flat MaxWaves*ShaderRegs x (LAN*VEC*32) file (16,384 x 1,024 =
+    // 2 MiB across two 512-bit tc_sram) exceeds the envelope
+    // (depth <= 4096, width <= 128).  It is now LAN per-lane banks of
+    // VEC*32 = 128 bits — lane l's vec slice, the same bank-l-owns-
+    // lane-l split SP3 used for scratch — by RF_NT depth tiles of
+    // <= 4096 words.  Bank l/tile t holds lane l at in-bank address
+    // rf_addr[RF_LW-1:0] of tile rf_addr[RF_AW-1 -: RF_TW]; the logical
+    // {wave,reg} row access and the rf_* port interface are unchanged
+    // (bit-identical), so the operand-fetch/writeback schedule is
+    // untouched.  rf_rdt_q registers the tile of the in-flight read:
+    // tc_sram rdata_o is registered and rf_addr may already point at
+    // the next access when the data is captured, so the gather selects
+    // the tile the access used rather than the live address field.
+    localparam int unsigned RF_AW = RL + RI;
+    localparam int unsigned RF_LW = (RF_AW > 12) ? 12 : RF_AW;
+    localparam int unsigned RF_NT = (RF_AW > RF_LW) ? (1 << (RF_AW - RF_LW)) : 1;
+    localparam int unsigned RF_TW = (RF_NT > 1) ? (RF_AW - RF_LW) : 1;
+    typedef logic [RF_TW-1:0]              rf_tile_t;
+    logic [RF_TW-1:0]                      rf_rdt_q;
+    logic [VEC*32-1:0]                     rf_rda [LAN*RF_NT];
+    wire [RF_TW-1:0]                       rf_tile_w = rf_addr[RF_AW-1 -: RF_TW];
+    for (genvar l = 0; l < LAN; l++) begin : g_rfl
+      for (genvar t = 0; t < RF_NT; t++) begin : g_rft
+        tc_sram #(.NumWords(1 << RF_LW), .DataWidth(VEC*32), .NumPorts(1),
+                  .SimInit("none")) i_rf (
+          .clk_i, .rst_ni,
+          .req_i(rf_req && ((RF_NT == 1) || (rf_tile_w == rf_tile_t'(t)))),
+          .we_i (rf_we  && ((RF_NT == 1) || (rf_tile_w == rf_tile_t'(t)))),
+          .addr_i(rf_addr[RF_LW-1:0]),
+          .wdata_i(rf_wdata[l*(VEC*32) +: (VEC*32)]),
+          .be_i  (rf_be[l*(VEC*4) +: (VEC*4)]),
+          .rdata_o(rf_rda[l*RF_NT + t]));
+      end
+    end
+    always_comb begin
+      for (int l = 0; l < LAN; l++)
+        rf_rdata[l*(VEC*32) +: (VEC*32)] = rf_rda[l*RF_NT + rf_rdt_q];
+    end
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) rf_rdt_q <= '0;
+      else if (rf_req && !rf_we) rf_rdt_q <= rf_tile_w;
+    end
     // SP3: one 32-bit bank per lane — bank l holds lane l's scratch
     // at in-bank address wave*SCW + word (same total bits as the old
     // flat SWD array, an eighth the depth).  The serial sc_* view and

@@ -1260,13 +1260,19 @@ remain release requirements; intermediate raster gates do not narrow the product
     envelope (`AGENTS-configuration.md`: depth ≤ 4096, width ≤ 128; today 16,384 × 512 × 2
     and up to 65,536 deep). Gate G-T2: ≤ 4 cycles per wave-instruction on
     arithmetic-bound vectors, per-core area from a synthesis leaf.
-    GROUNDWORK 2026-11-15 (`.cache/apu-perf/tp3a-brief.md`): elaborated RF =
+    GROUNDWORK+TP3a-1 2026-11-15 (`.cache/apu-perf/tp3a-brief.md`): elaborated RF =
     2× tc_sram 16384×512 NumPorts(1) = 2 MiB, 1024-bit rows over LAN8×VEC4×32,
     single rf_req/we/addr = 1 access/cycle; operand fetch serial across
-    W_F0..W_XC0 into va_q[6], WB via wreg_q, no overlap/bypass. Envelope fix =
-    re-bank to ~32× 4096×128 macros (8 width × 4 depth tiles) w/ 8-bank gather;
-    pipelined issue needs NumPorts(2) or prefetch buffers; wave-interleave may
-    avoid same-wave forwarding. Phased plan TP3a-1..5 + hazards + verify in brief.
+    W_F0..W_XC0 into va_q[6], WB via wreg_q, no overlap/bypass.
+    TP3a-1 LANDED: RF re-banked into envelope — LAN per-lane banks of VEC*32=128b
+    × RF_NT depth tiles ≤4096w (bank[l][t]; tile=rf_addr hi, laddr=lo),
+    rf_rdt_q registers in-flight read tile for the rdata gather; rf_* port
+    interface + operand schedule unchanged (bit-identical). VERIFIED:
+    tb_g6lc_apu_shwave 548 cases/100,832 checks PASS, cycles 3,666,123 =
+    baseline (cycle-exact); synth Enable=0/1 clean. NEXT TP3a-2: NumPorts(1)→(2)
+    read port for operand prefetch; then wave-interleave pipelined issue →
+    G-T2 ≤4 cy/wave-instr. Hazards (RAW/WAR/WAW, multi-row WB, row-cache) +
+    phased plan TP3a-1..5 in brief.
   - [ ] TP6 raster width (replaced by FP5/FP6/FP7/FP10 below); TP7 `ShaderCores` with a
     dispatcher and in-order fragment-batch commit; TP8 fabric; TP9 object-table bursts.
     Gate G-T3: same results at 1/2/4/8 cores, geometry chosen by the Pareto study.

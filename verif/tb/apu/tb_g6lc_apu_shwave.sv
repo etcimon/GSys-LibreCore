@@ -1363,10 +1363,10 @@ module tb_g6lc_apu_shwave
                  dut.gen_on.i_wave.gen_on.g_scb[0].i_scratch.sram[w]);
       for (int r = 8; r < 80; r++)
         $display("DRF %s rf[%2d] = %08x %08x %08x %08x", file, r,
-                 dut.gen_on.i_wave.gen_on.i_rf_lo.sram[r][31:0],
-                 dut.gen_on.i_wave.gen_on.i_rf_lo.sram[r][63:32],
-                 dut.gen_on.i_wave.gen_on.i_rf_lo.sram[r][95:64],
-                 dut.gen_on.i_wave.gen_on.i_rf_lo.sram[r][127:96]);
+                 dut.gen_on.i_wave.gen_on.g_rfl[0].g_rft[0].i_rf.sram[r][31:0],
+                 dut.gen_on.i_wave.gen_on.g_rfl[0].g_rft[0].i_rf.sram[r][63:32],
+                 dut.gen_on.i_wave.gen_on.g_rfl[0].g_rft[0].i_rf.sram[r][95:64],
+                 dut.gen_on.i_wave.gen_on.g_rfl[0].g_rft[0].i_rf.sram[r][127:96]);
     end
     if (cmax > maxulp) maxulp = cmax;
     if (fails != f0)
