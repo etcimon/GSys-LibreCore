@@ -157,6 +157,11 @@ module tb_g6lc_apu_rast;
                                  // 1=checkerboard discard, 2=FragDepth
   logic [31:0] sh_f8z = '0;      // FragDepth value for mode 2
   bit          dbg_f8 = 1'b0;
+  // +perf_cohort: run only the 42 cases of the throughput origin capture
+  // (apu-perf-baseline.json) so run-apu-perf.sh compares equal work.
+  // Cases added later (6b-6h, 43 onward) are skipped; the unit stage
+  // always runs the full bench.
+  bit          perf_cohort = 1'b0;
   // TP5 perf sensitivity probe: +vscost=N injects N extra cycles per VS
   // vertex (models an expensive real vertex shader).  Default 0 = the
   // historical 1-vertex/cycle stub, bit-identical for every existing
@@ -687,6 +692,7 @@ module tb_g6lc_apu_rast;
     // TP5 perf probe: +vscost=N adds N cycles per VS vertex (0 = stock
     // 1-vertex/cycle stub).  Read once; applies to every VS wave in the run.
     if (!$value$plusargs("vscost=%d", sh_vcost)) sh_vcost = 0;
+    if ($test$plusargs("perf_cohort")) perf_cohort = 1'b1;
     // guard machinery unused in this bench — mark the arrays driven
     i_mem.guard_on = 1'b0;
     i_mem.guard_n = 0;
@@ -970,6 +976,7 @@ module tb_g6lc_apu_rast;
                          x, y, got, ex));
       end
 
+    if (!perf_cohort) begin
     // ============ case 6b: ONE_MINUS src factor (S_BL_F1B) ============
     cases++;
     // same clear (0.2,0.2,0.2,0.4) and same screen-space triangle as case6
@@ -1305,6 +1312,7 @@ module tb_g6lc_apu_rast;
           fail($sformatf("case6h px(%0d,%0d)=%08x exp~%08x",
                          x, y, got, ex));
       end
+    end
 
     // ================= case 7: D32 depth, two tris ===============
     cases++;
@@ -3014,6 +3022,7 @@ module tb_g6lc_apu_rast;
     if (got !== 32'hD4C3B2A1)
       fail($sformatf("case42 refused blend wrote px=%08x", got));
 
+    if (!perf_cohort) begin
     // ================= case 43: late-Z slope bias is per-primitive ======
     // Two same-facing triangles merge into one FS batch unless the
     // slope_bias_late flush splits them.  A is flat (constant Position.z
@@ -3771,6 +3780,7 @@ module tb_g6lc_apu_rast;
                              x, y, dbpx16(x, y)));
           end
         end
+    end
 
     // ---- report ---------------------------------------------------------
     // draw-path counters: the suite draws and writes pixels, so both

@@ -101,7 +101,9 @@ t0=$SECONDS
 for b in $BENCHES; do
   case "$b" in
     rast)
-      APU_RAST_OUT="$OUT/rast" bash "$HERE/run-apu-rast.sh" \
+      # the origin's 42-case cohort; the full bench is the unit-stage gate
+      APU_RAST_OUT="$OUT/rast" APU_RAST_PLUSARGS="+perf_cohort" \
+        bash "$HERE/run-apu-rast.sh" \
         > "$OUT/rast.console.log" 2>&1 || {
           tail -n 40 "$OUT/rast.console.log"; echo "PERF: rast FAILED"; exit 1; }
       logs+=("rast=$OUT/rast/sim.log") ;;
