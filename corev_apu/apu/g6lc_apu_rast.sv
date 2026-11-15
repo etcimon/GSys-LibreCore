@@ -311,7 +311,7 @@ module g6lc_apu_rast
       // 1 px line list/strip.  Appended so the clip-state numbers
       // the unit TB pins (S_OC_G1 .. S_CP_PDN) do not move.
       S_LN_VF, S_LN_VF2, S_LN_VF3, S_LN_INIT, S_LN_PIX, S_LN_STEP,
-      S_DB0, S_DBCR, S_DB1, S_DB1B, S_DB2,
+      S_DB0, S_DBCR, S_DB1, S_DB2,
       S_DS0, S_DS1, S_DS2, S_DS3, S_DS4, S_DS5, S_DS6,
       S_ROP_LOP,
       // Line clip.  Appended so earlier state numbers stay put.
@@ -973,7 +973,7 @@ module g6lc_apu_rast
     logic         db_late_q;                 // bias updates FragDepth, else fz
     logic         db_done_q;
     st_e          db_ret_q;
-    logic [31:0]  db_bias_q, db_cr_q, db_dz_q;
+    logic [31:0]  db_cr_q, db_dz_q;
     // FP6-overlap late-Z slope snapshot: the deferred frag drain runs the
     // S_DB0->S_DS* depth-bias chain AFTER frag production may have advanced
     // to the next primitive and overwritten the live vz_q/span_w.  The
@@ -1619,7 +1619,7 @@ module g6lc_apu_rast
                       S_F_V0, S_F_V1, S_F_V2, S_F_VS, S_F_VN,
                       S_F_VW0, S_F_VW1, S_F_LNEXT}) return CL_INTERP;
         if (s inside {S_DZ_RD, S_DZ_DI, S_DZ_DM, S_DZ_C2, S_DZ_WR,
-                      S_DB0, S_DBCR, S_DB1, S_DB1B, S_DB2,
+                      S_DB0, S_DBCR, S_DB1, S_DB2,
                       S_DS0, S_DS1, S_DS2, S_DS3, S_DS4, S_DS5, S_DS6,
                       S_ROP_F8, S_ROP_LRD, S_ROP_LDI, S_ROP_LDM,
                       S_ROP_LC, S_ROP_LWR}) return CL_DEPTH;
@@ -4046,23 +4046,21 @@ module g6lc_apu_rast
             t_fpgo();
           end
           S_DB1: begin
-            if (dr_q.depth_bias_clamp[30:0] != 31'h0 &&
-                !dr_q.depth_bias_clamp[31] &&
-                f_f32_lt(dr_q.depth_bias_clamp, fp_res_q))
-              db_bias_q <= dr_q.depth_bias_clamp;
-            else if (dr_q.depth_bias_clamp[31] &&
-                     dr_q.depth_bias_clamp[30:0] != 31'h0 &&
-                     f_f32_lt(fp_res_q, dr_q.depth_bias_clamp))
-              db_bias_q <= dr_q.depth_bias_clamp;
-            else
-              db_bias_q <= fp_res_q;
-            st_q <= S_DB1B;
-          end
-          S_DB1B: begin
+            // RP3-style capture+issue fusion: the clamp select feeds the
+            // bias FMA's fp_c_q, so issue it here and drop the dedicated
+            // S_DB1B cycle (and the now-dead db_bias_q flop). fp_c_q uses
+            // the same clamp select db_bias_q would capture this cycle.
             fp_kind_q <= 2'd0; fp_o_q <= 2'd0; fp_mod_q <= 1'b0;
             fp_a_q <= 32'h3F800000;
             fp_b_q <= db_late_q ? lz_q : fz_q;
-            fp_c_q <= db_bias_q;
+            fp_c_q <= (dr_q.depth_bias_clamp[30:0] != 31'h0 &&
+                       !dr_q.depth_bias_clamp[31] &&
+                       f_f32_lt(dr_q.depth_bias_clamp, fp_res_q))
+                      ? dr_q.depth_bias_clamp
+                      : (dr_q.depth_bias_clamp[31] &&
+                         dr_q.depth_bias_clamp[30:0] != 31'h0 &&
+                         f_f32_lt(fp_res_q, dr_q.depth_bias_clamp))
+                        ? dr_q.depth_bias_clamp : fp_res_q;
             fp_ret_q <= S_DB2;
             t_fpgo();
           end
