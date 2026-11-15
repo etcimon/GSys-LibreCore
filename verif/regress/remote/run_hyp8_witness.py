@@ -11,6 +11,9 @@ return and the run is collected later with `testharness_proxy.py pull`.
   HYP8_TOHOST     tohost address of that ELF (nm-derived, e.g. 0x80041730)
   HYP8_MAX_CYCLES budget (default 60000000)
   HYP8_PLUSARGS   extra plusargs
+  HYP8_WAIT_PIDS  optional comma-separated PIDs: the model starts once ANY
+                  of them has exited (queue a run behind live witnesses on a
+                  shared host instead of oversubscribing its cores)
 
 The launch record (witness.json) carries model sha, ELF sha, argv and pid.
 A witness is a gate, never a search signal (P1): classify only from its own
@@ -49,12 +52,21 @@ def main():
     cmd = [str(model), f'+tohost_addr={tohost}', '+debug_disable',
            f'+max-cycles={budget}', *extra, str(elf)]
     log = out / 'run-hyp8.log'
-    p = subprocess.Popen(cmd, stdout=log.open('w'), stderr=subprocess.STDOUT,
+    wait = [w for w in os.environ.get('HYP8_WAIT_PIDS', '').split(',') if w]
+    assert all(w.isdecimal() for w in wait), 'HYP8_WAIT_PIDS must be PIDs'
+    launch = cmd
+    if wait:
+        # exec keeps the recorded PID: the waiting shell becomes the model
+        alive = ' && '.join(f'[ -d /proc/{w} ]' for w in wait)
+        launch = ['bash', '-c',
+                  f'while {alive}; do sleep 60; done; exec "$@"',
+                  'hyp8-witness-wait', *cmd]
+    p = subprocess.Popen(launch, stdout=log.open('w'), stderr=subprocess.STDOUT,
                          cwd=out, start_new_session=True)
     (out / 'witness.json').write_text(json.dumps({
         'intTag': tag, 'modelSha256': results['build'].get('modelSha256'),
         'elf': str(elf), 'elfSha256': want, 'argv': cmd, 'pid': p.pid,
-        'budget': budget}, indent=2))
+        'budget': budget, 'waitPids': wait}, indent=2))
     print(f'launched pid={p.pid} model={results["build"].get("modelSha256")} elf={elf}')
     return 0
 

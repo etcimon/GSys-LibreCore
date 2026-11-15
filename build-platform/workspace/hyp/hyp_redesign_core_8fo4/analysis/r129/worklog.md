@@ -134,3 +134,52 @@ observer 2630715, firmware `30e1311e…`, tohost `0x80041730`, budget 1.75e9).
 The previous deep run stopped at 254,915,572; passing that point and the two
 userspace markers are both required before the deep profile can be proposed
 as a default.
+
+## 7. Staged MMU (`G6LC_HYP8_MMU_STAGED`) multi-hit: evidence so far, probe, queued replay
+
+`hyp8-osbi-scalar-r127x-mmustaged` stopped at 317,424,744 on
+`g6lc_tlb_hit_onehot0` in the DTLB. From its hart trace, the last events
+before the stop are the kernel's ASID-width probe (`asids_init`):
+
+| cycle | pc | instruction |
+|---:|---|---|
+| 317,414,300 | `ffffffff808063de` | `csrw satp, a5` (ASID field all ones) |
+| 317,414,483 | `ffffffff80806426` | `csrw satp, a1` (restore) |
+| 317,414,520 | `ffffffff8080642a` | `sfence.vma` (x0, x0) |
+
+The multi-hit follows about 10,200 cycles later. These are the only `satp`
+writes in the last 400,000 trace lines (from about cycle 315.14M; earlier
+lines were not searched), and the only S-mode `sfence.vma` there; the other
+flushes in that span are M-mode `sfence.vma` at `0x80005676`, the last at
+317,224,774. The probe sequence is therefore the leading suspect. This is a **hypothesis**: which two entries collide, and how the
+second one was written, is not known yet.
+
+What is settled by reading `g6lc_tlb.sv`:
+
+- The fill gate is `update_i.valid & replace_en[i] & !lu_hit_o`. Under
+  staging `lu_hit_o` is the answer to the lookup of two cycles earlier, not
+  to the page being filled.
+- Consecutive stale misses of one held request cannot duplicate an entry on
+  their own: the PLRU victim only moves on a hit answer, and a hit answer in
+  the fill cycle suppresses the fill. A duplicate needs a miss answer for a
+  page that is present (a killed in-flight lookup, or a tag that differs
+  only in a field the lookup ignores) after the victim has moved.
+
+Not done: no RTL change to the staged TLB. A fix written before the
+colliding entries are known would be a guess.
+
+Instrument (sim-only, `translate_off`): `+tlb_trace` prints `[tlb]`
+UPD/FLUSH/LU lines inside `+trace_from/+trace_to`; both multi-hit assertions
+now print every entry's tag and PTE before they stop. `hyp8_tb.cpp`
+allowlists the plusarg. Staged target on closure-r129b
+(`hyp8-r129b-mmustaged-aggregate-t4`, model `a222cecea1e8817c…`, sim-PGO 234):
+lint rc 0, 14/14 smokes (`hyp8_sv39_load` 4219, as r127af). Local: lint
+clean for the default and staged defines, `HYP8_MMU_PASS checked=716`.
+
+Replay `hyp8-osbi-scalar-r129b-mmustaged-diag2` (window 317,410,000 to
+317,426,000, budget 330M) is **queued, not running**: three 4-thread models
+plus an APU leaf job oversubscribed the 12-core host (load 17, the deep
+witness fell to about 1 kcyc/s), so the first attempt was stopped after
+five minutes. `run_hyp8_witness.py` gained `HYP8_WAIT_PIDS`; the replay
+starts when either live witness (r128b pid 2062250, r129-deep pid 2630423)
+exits.

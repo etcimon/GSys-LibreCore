@@ -328,6 +328,10 @@ static const char *verilog_plusargs[] = {
     // [ldst] line per change of the accept/issue/hold signature — the
     // parked-load discriminator. Same allowlist rule as above.
     "ld_state",
+    // Small-TLB event probe (core/g6lc_mmu/g6lc_tlb.sv, translate_off):
+    // [tlb] update/flush/lookup lines inside the +trace_from/+trace_to
+    // window; the colliding entries of a multi-hit always print.
+    "tlb_trace",
     nullptr};
 
 // +mem_poke entries, applied inside the sim loop once main_time reaches cycle.

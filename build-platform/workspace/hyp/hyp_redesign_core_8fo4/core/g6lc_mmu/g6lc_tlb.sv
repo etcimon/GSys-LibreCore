@@ -902,6 +902,7 @@ module g6lc_tlb
 
   assert property (@(posedge clk_i) (countSetBits(lu_hit) <= 1))
   else begin
+    tlb_dump_multi();
     $error("More then one hit in TLB!");
     $stop();
   end
@@ -916,7 +917,60 @@ module g6lc_tlb
   g6lc_tlb_hit_onehot0 : assert property (@(posedge clk_i)
       disable iff (!rst_ni || !rq_access)
       $onehot0(tlb_hitv))
-  else $error("g6lc_tlb: multi-hit on a valid lookup (inconsistent page tables or SFENCE race)");
+  else begin
+    tlb_dump_multi();
+    $error("g6lc_tlb: multi-hit on a valid lookup (inconsistent page tables or SFENCE race)");
+  end
+
+  // r129 diagnostic (sim-only): +tlb_trace prints one [tlb] line per update,
+  // flush and answered lookup inside the +trace_from/+trace_to window (cycles
+  // from reset, the common probe base). Independently of the plusarg, the
+  // entries that collide in a multi-hit are always printed with their tags,
+  // so the staged-MMU multi-hit (hyp8-osbi-scalar-r127x-mmustaged
+  // @317,424,744) can be classified from one replay.
+  bit tlb_tr;
+  int unsigned tlb_tr_lo = 0, tlb_tr_hi = 32'hffffffff;
+  int unsigned tlb_tr_cyc = 0;
+  initial begin
+    tlb_tr = $test$plusargs("tlb_trace");
+    void'($value$plusargs("trace_from=%d", tlb_tr_lo));
+    void'($value$plusargs("trace_to=%d", tlb_tr_hi));
+  end
+  always_ff @(posedge clk_i) begin
+    if (!rst_ni) begin
+      tlb_tr_cyc <= 0;
+    end else begin
+      tlb_tr_cyc <= tlb_tr_cyc + 1;
+      if (tlb_tr && (tlb_tr_cyc >= tlb_tr_lo) && (tlb_tr_cyc <= tlb_tr_hi)) begin
+        if (update_i.valid)
+          $display("[tlb] %m c=%0d UPD vpn=%h asid=%h vmid=%h ispg=%b vst=%b g=%b ppn=%h hit_o=%b repl=%b wr=%b",
+                   tlb_tr_cyc, update_i.vpn, update_i.asid, update_i.vmid,
+                   update_i.is_page, update_i.v_st_enbl, update_i.content.g,
+                   update_i.content.ppn, lu_hit_o, replace_en,
+                   update_i.valid && !lu_hit_o && !any_tlb_flush);
+        if (any_tlb_flush)
+          $display("[tlb] %m c=%0d FLUSH f=%b vv=%b gv=%b asid=%h va=%h",
+                   tlb_tr_cyc, flush_i, flush_vvma_i, flush_gvma_i,
+                   asid_to_be_flushed_i, vaddr_to_be_flushed_i);
+        if (rq_access)
+          $display("[tlb] %m c=%0d LU va=%h asid=%h vst=%b hitv=%b ans=%b",
+                   tlb_tr_cyc, rq_vaddr, rq_asid, rq_st_enbl, tlb_hitv, lu_hit_o);
+      end
+    end
+  end
+  // Called from the multi-hit assertions' action blocks, ahead of their
+  // $error/$stop, so the record is in the log even when the model stops.
+  task automatic tlb_dump_multi();
+    $display("[tlb] %m c=%0d MULTI-HIT va=%h asid=%h vmid=%h vst=%b acc=%b",
+             tlb_tr_cyc, rq_vaddr, rq_asid, rq_vmid, rq_st_enbl, rq_access);
+    for (int unsigned i = 0; i < TLB_ENTRIES; i++) begin
+      $display("[tlb] %m   entry %0d v=%b vpn=%h asid=%h vmid=%h ispg=%b vst=%b napot=%b g=%b ppn=%h pte=%h",
+               i, tags_q[i].valid, tags_q[i].vpn, tags_q[i].asid, tags_q[i].vmid,
+               tags_q[i].is_page, tags_q[i].v_st_enbl,
+               tags_q[i].is_napot_64k, content_q[i].pte.g,
+               content_q[i].pte.ppn, content_q[i].pte);
+    end
+  endtask
 
   // hyp8 T1 item 3: flat set/clear PLRU equivalence — the pre-T1 per-entry
   // priority loop is recomputed here and compared against the live
