@@ -171,6 +171,18 @@ checks the capture's exact work (42 cases, 15,605 checks, 159,527 port requests,
 564,743 float jobs) in 1,066,697 cycles against 1,397,345 admitted (−23.7%). Nothing is
 admitted until a leaf on the current tree reports it.
 
+2026-11-15 (later): admitted. Leaf `apu-leaf-20261115T091322-cf0d5473a41a` (snapshot of
+`a7b895783`: the fusions, the three rasteriser fixes and the cohort switch) ran the loop
+to "OK same checked work; no cycle regression", and its capture is now
+`apu-perf-current.json`. Against the previous admitted state: rasteriser cohort
+1,397,345 → 1,066,697 cycles (−23.7%; −70.8% from the origin), the fourteen graphics
+sessions 3,238,455 → 2,501,368 cycles in total (−22.8%), shader suite unchanged at
+3,666,123. On that leaf the unit stage (17 suites) and `vgtop` exit 0; `vgsys` had 235
+sessions passed and none failed when this was written and was still running. The first
+leaf's `vgsys` stopped at the 7,200 s suite limit with 218 sessions passed and none
+failed (the builder was loaded); that is an incomplete run, not a failure. Later leaves
+use `--suite-timeout 14400`.
+
 The same review found three rasteriser defects by reading the RTL against the model and
 the specification. Each was reproduced by a failing bench case before the fix (commits
 `913238cb2`, `4b59ae70d`; local evidence until the next leaf):

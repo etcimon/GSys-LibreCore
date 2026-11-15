@@ -1068,8 +1068,12 @@ remain release requirements; intermediate raster gates do not narrow the product
     17/17 rc 0, vgtop rc 0, arms pass, shader suite cycle-identical, every graphics
     session same work and fewer cycles (deriv2 −45.1%, inst −34.7%, tri −20.0%);
     `perf` rc 1 only because the `rast` run compared the 42-case cohort with a 56-case
-    bench. Fixed: `+perf_cohort` (`a7b895783`). Leaf on the current tree launched;
-    collect both, then `run-apu-perf.sh --admit-from`.
+    bench. Fixed: `+perf_cohort` (`a7b895783`). ADMITTED from leaf
+    `apu-leaf-20261115T091322-cf0d5473a41a` (perf rc 0, "OK same checked work; no cycle
+    regression"): rast cohort 1,397,345 → 1,066,697 (−23.7%), fourteen graphics
+    sessions −22.8% in total, shader suite unchanged. Its `vgsys` was at 235 passed /
+    0 failed and still running. The first leaf's `vgsys` hit the 7,200 s suite limit
+    at 218 passed / 0 failed (loaded builder): incomplete, not a failure.
     (2) The remote builder was full (834G of 878G; 520G of uncompressed Hyp8 boot
     traces). With the owner's approval the trace files of the finished runs
     r116–r125 were deleted (40 files, 233.5 GiB; logs, uart, monitors kept; manifest
@@ -1087,6 +1091,20 @@ remain release requirements; intermediate raster gates do not narrow the product
     formats, 5 of them colour-attachable, against the several dozen the specification
     makes mandatory, and 60% of the CTS names a format). Rasteriser capture fusions are finished and
     were about 1% of the suite; do not resume them.
+    (6) `vkCmdClearDepthStencilImage` now executes (`d65099d58`): D32_SFLOAT and
+    D16_UNORM through the Xfer `CLEARI` op, value in the descriptor, ranges kept by a
+    profile keep-list. Local: xfer 284 cases / 1,618 checks, vnfront all arms, vndec,
+    vnrep, cmdexec, nine `vgtop` clear/copy sessions, 902 + 33 model tests, yosys
+    clean. Leaf `apu-leaf-20261115T130136-4f069406f630` (`unit,top`) is the harness
+    run; collect it. Still unrouted: `vkCmdResolveImage`; D24S8 and stencil-aspect
+    clears are refused.
+    (7) Vector hygiene found on the way (`14e2e0f96`): the committed
+    bindfull/cbfull/bvw front-end expectations had drifted from the generator and
+    only passed against an older untracked `.hex`. `*.hex` under `vn_vectors` is
+    ignored by git, so 196 of 343 tapes exist only on the machine that generated
+    them; a leaf ships whatever is on disk. Regenerating needs
+    `PYTHONPATH=corev_apu/apu/tools/shader`. Open: an oracle-freshness check that
+    regenerates into a scratch directory and compares (plan W0 already asks for it).
     (5) Stale records: the CTS ledger was last rendered around 2026-11-04 and still
     lists the 71 `descriptor_copy` failures that closed on 2026-11-12; the plan's
     ladder table shows R3 as not started.
