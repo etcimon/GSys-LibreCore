@@ -176,6 +176,30 @@ python3 $G --graphics-session ue_gpos_blend_1    1
 # keeps logical B only (mask 0x4).  A byte-order mask cannot pass both.
 python3 $G --graphics-session ue_gpos_bgracwmr_1 1
 python3 $G --graphics-session ue_gpos_bgracwmb_1 1
+
+# Sessions the run scripts execute that this script did not generate
+# (blend ops and factors, logic ops, depth compare/bounds/bias/clamp,
+# derivatives, scissor, discard).  Listed so check_fresh.sh covers
+# every stored vector that a bench reads.
+for s in \
+    bfac1mcc bfacal bfaccc bfacdc bfacdst bfacsat bfacsc bfacsrc bfomda \
+    bfomdc bfomsa bfomsc bfzero bloff bopadd bopmax bopmin boprsub \
+    bopsub cwm dalw dalwoff dbias dbnd dbndoff dclamp dclampoff demdrv \
+    depth deq deqoff deriv2 deriv dgeq dgeqoff dgreat dgtoff dleq \
+    dleqoff dne dneoff dnever dneveroff dtest dtoff dw0 fcolor grad \
+    lopand lopandinv lopandrev lopclear lopcopy lopequiv lopinv2 \
+    lopinvert lopnand lopnoop lopnor lopor loporinv loporrev lopset lopx \
+    persp rdiscard scio scis; do
+  python3 $G --graphics-session ue_gpos_${s}_1 1
+done
+for v in barrier_reduce128 localsize128; do
+  for n in 1 2 3; do
+    python3 $G --compute-session ue_cpos_${v}_${n} ${v}_${n}
+  done
+done
+# vnfront query arms
+python3 $G --qry-session ue_sm5_qry 1
+python3 $G --qry2-session ue_sm5_qry2 1
 # dEQP-VK.memory.pipeline_barrier vertex-buffer shape: RG8_UNORM stride 2,
 # POINT_LIST, CTS shaders verbatim (no varyings, constant-white FS)
 python3 $G --graphics-session ue_gpos_ptsrg8_1  1
