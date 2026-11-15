@@ -2394,16 +2394,36 @@ module g6lc_apu_shwave
       else if (rf_req && !rf_we) rf_rdt_q <= rf_tile_w;
     end
     // SP3: one 32-bit bank per lane — bank l holds lane l's scratch
-    // at in-bank address wave*SCW + word (same total bits as the old
-    // flat SWD array, an eighth the depth).  The serial sc_* view and
-    // the W_SC0/W_LS0-vector drives all land on scb_* in the port
-    // comb block below.
+    // at in-bank address wave*SCW + word.  TP3a: each lane bank is now
+    // depth-tiled into <=4096-word macros (SC_NT tiles) to satisfy the
+    // SRAM envelope — SCBN reaches MaxWaves*SCW = 16384 at the shipping
+    // 16-wave/4KiB-scratch geometry.  scb_rdt_q[l] registers the
+    // in-flight read's tile because tc_sram rdata_o is registered and
+    // scb_addr may advance before the data is gathered.  The serial
+    // sc_* view and the W_SC0/W_LS0-vector drives are unchanged.
+    localparam int unsigned SC_LW = (SBA > 12) ? 12 : SBA;
+    localparam int unsigned SC_NT = (SBA > SC_LW) ? (1 << (SBA - SC_LW)) : 1;
+    localparam int unsigned SC_TW = (SC_NT > 1) ? (SBA - SC_LW) : 1;
+    typedef logic [SC_TW-1:0] sc_tile_t;
+    logic [SC_TW-1:0]         scb_rdt_q [LAN];
+    logic [31:0]              scb_rda [LAN][SC_NT];
     for (genvar l = 0; l < LAN; l++) begin : g_scb
-      tc_sram #(.NumWords(SCBN), .DataWidth(32), .NumPorts(1),
-                .SimInit("none")) i_scratch (
-        .clk_i, .rst_ni, .req_i(scb_req[l]), .we_i(scb_we[l]),
-        .addr_i(scb_addr[l]), .wdata_i(scb_wdata[l]), .be_i(4'hF),
-        .rdata_o(scb_rdata[l]));
+      wire [SC_TW-1:0] scb_tile_w = scb_addr[l][SBA-1 -: SC_TW];
+      for (genvar t = 0; t < SC_NT; t++) begin : g_scbt
+        tc_sram #(.NumWords(1 << SC_LW), .DataWidth(32), .NumPorts(1),
+                  .SimInit("none")) i_scratch (
+          .clk_i, .rst_ni,
+          .req_i(scb_req[l] && ((SC_NT == 1) || (scb_tile_w == sc_tile_t'(t)))),
+          .we_i (scb_we[l]  && ((SC_NT == 1) || (scb_tile_w == sc_tile_t'(t)))),
+          .addr_i(scb_addr[l][SC_LW-1:0]),
+          .wdata_i(scb_wdata[l]), .be_i(4'hF), .rdata_o(scb_rda[l][t]));
+      end
+      assign scb_rdata[l] = scb_rda[l][scb_rdt_q[l]];
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) scb_rdt_q[l] <= '0;
+        else if (scb_req[l] && !scb_we[l] && (SC_NT > 1))
+          scb_rdt_q[l] <= scb_tile_w;
+      end
     end
     tc_sram #(.NumWords(SLW), .DataWidth(32), .NumPorts(1),
               .SimInit("none")) i_slab (

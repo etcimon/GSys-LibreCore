@@ -1298,14 +1298,20 @@ remain release requirements; intermediate raster gates do not narrow the product
     IDENTICAL (cycle-exact, bit-identical cache contents).
     TP3a-1g LANDED: sg i_table (SgMaxEntries×160) → 2×80b width banks;
     ram_* interface unchanged. VERIFIED: tb_g6lc_apu_sg PASS entries=64
-    +128.  **GRAPHICS-PATH (ApuVenus) SRAM ENVELOPE NOW COMPLETE:** all
-    live tc_sram re-banked/compliant (shmod, shwave RF, vnfront staging,
-    objmem caches, sg; objpay/vgpages/apmem already OK).  Only
-    config-gated fwram/storage remain (off in ApuVenus).  NEXT: TP3a-2/3
-    operand prefetch → wave-interleave pipelined issue → G-T2 ≤4
-    cy/wave-instr (RF dual-port config-sanctioned; single-port prefetch
-    during execute-idle may avoid it). Hazards + phased plan TP3a-1..5 +
-    APU audit in brief.
+    +128.  TP3a-1h LANDED: shwave i_scratch per-lane banks
+    (SCBN=MaxWaves*SCW=16384×32, the last live graphics-path violation —
+    SP3 lane-banked but not under 4096) → per-lane SC_NT depth tiles of
+    ≤4096×32 + scb_rdt_q tile gather; sc_* interface unchanged.
+    VERIFIED: tb_g6lc_apu_shwave 548/100,832 PASS, cycles=3,666,123
+    cycle-exact.  Config-gated fwram (32768×64 → 8×4096×64 tiles + tiled
+    hex preload) and storage (i_map 2×128b banks; i_cmd depth tiles +
+    cmd_rdt_q on cmd_clk) also re-banked + verified.  **APU SRAM
+    ENVELOPE NOW FULLY CLOSED — every tc_sram in corev_apu/apu is
+    depth ≤4096 × width ≤128 (graphics-path AND config-gated).**
+    NEXT: TP3a-2/3 operand prefetch → wave-interleave pipelined issue →
+    G-T2 ≤4 cy/wave-instr (RF dual-port config-sanctioned; single-port
+    prefetch during execute-idle may avoid it). Hazards + phased plan
+    TP3a-1..5 + APU audit in brief.
   - [ ] TP6 raster width (replaced by FP5/FP6/FP7/FP10 below); TP7 `ShaderCores` with a
     dispatcher and in-order fragment-batch commit; TP8 fabric; TP9 object-table bursts.
     Gate G-T3: same results at 1/2/4/8 cores, geometry chosen by the Pareto study.

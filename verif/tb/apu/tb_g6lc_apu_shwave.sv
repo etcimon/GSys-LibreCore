@@ -1354,13 +1354,13 @@ module tb_g6lc_apu_shwave
                cmax, cn1, cn2, smax);
     // +dbg_sc: per-case scratch slab and RF dump for bring-up debug
     if (dbg_sc) begin
-      // SP3: scratch is LAN per-lane banks (g_scb[l].i_scratch); the
-      // old flat array's first 128 words were wave0/lane0/words0-127
-      // (SCW=1024 > 128 under the bench's default params), which is
-      // exactly bank 0's first 128 words — output unchanged.
+      // SP3/TP3a: scratch is LAN per-lane banks depth-tiled into
+      // g_scbt[]; the old flat array's first 128 words were
+      // wave0/lane0/words0-127, which is tile 0's first 128 words —
+      // output unchanged.
       for (int w = 0; w < 128; w++)
         $display("DSC %s sc[%3d] = %08x", file, w,
-                 dut.gen_on.i_wave.gen_on.g_scb[0].i_scratch.sram[w]);
+                 dut.gen_on.i_wave.gen_on.g_scb[0].g_scbt[0].i_scratch.sram[w]);
       for (int r = 8; r < 80; r++)
         $display("DRF %s rf[%2d] = %08x %08x %08x %08x", file, r,
                  dut.gen_on.i_wave.gen_on.g_rfl[0].g_rft[0].i_rf.sram[r][31:0],
