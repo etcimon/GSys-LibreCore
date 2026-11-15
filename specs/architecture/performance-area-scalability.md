@@ -180,8 +180,11 @@ sessions 3,238,455 → 2,501,368 cycles in total (−22.8%), shader suite unchan
 3,666,123. On that leaf the unit stage (17 suites) and `vgtop` exit 0. `vgsys` did not
 finish on either leaf: it stopped at the 7,200 s suite limit with 235 of 240 sessions
 passed and none failed (218 on the first leaf), on a builder shared with other jobs.
-That is an incomplete run, not a pass and not a failure; `vgsys` has no complete run
-on these trees. Later leaves use `--suite-timeout 14400`.
+That is an incomplete run, not a pass and not a failure. With `--suite-timeout 14400`
+leaf `apu-leaf-20261115T130136-4f069406f630` (snapshot of `14e2e0f96`, the
+depth-stencil clear tree) completed: `APU-REGRESS PASS` for `unit,top` — 17 unit
+suites, `vgtop`, `vgsys` (7,611 s) and `sys-venus` all exit 0. That is the first
+complete `vgsys` run on the trees of this review.
 
 The same review found three rasteriser defects by reading the RTL against the model and
 the specification. Each was reproduced by a failing bench case before the fix (commits

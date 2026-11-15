@@ -1127,9 +1127,10 @@ remain release requirements; intermediate raster gates do not narrow the product
     not applied), same evidence. Still without a device vector: blend factors
     and write mask on sRGB (generator raises outside the blend-op and logic-op
     paths), UNORM16 vertex attributes, D16 late-Z. Harness: leaf
-    `apu-leaf-20261115T130136-4f069406f630` (depth-stencil clear tree) has unit
-    17/17 and vgtop rc 0 with the three new clear sessions passing; its vgsys was
-    at 257 passed / 0 failed and running. Leaf
+    `apu-leaf-20261115T130136-4f069406f630` (depth-stencil clear tree, `14e2e0f96`)
+    finished `APU-REGRESS PASS` for `unit,top`: unit 17/17, vgtop, vgsys (first
+    complete run, 7,611 s under the 14,400 s limit) and sys-venus all rc 0;
+    collected under `remote-runs/`. Leaf
     `apu-leaf-20261115T160700-b4e4530ae630` covers the commits up to `3e6449cc1`
     (vector refresh, integer clear truncation, BGRA/D16/sRGB-blend sessions);
     the sRGB logic-op session came after it.
@@ -1144,6 +1145,12 @@ remain release requirements; intermediate raster gates do not narrow the product
     renders to R8G8B8A8_UNORM, which is why the BGRA, sRGB and D16 rasteriser
     defects of (3) had no device vector. The model refuses blend, write mask and
     logic op on sRGB, so it cannot yet be the oracle for those paths.
+    (12) Colour attachments beyond 8-bit RGBA, stage 1 (`c8d4ee5a8`): the
+    rasteriser renders to R32_SFLOAT and R32_UINT (raw channel-0 word; R mask bit;
+    clear raw; logic op on the integer format only; blend refused). Unit bench 69
+    cases / 40,971 checks, cohort unchanged at 1,066,697 cycles, yosys clean.
+    Stage 2 open: advertise COLOR_ATTACHMENT in the profile, model the raw store
+    in the generator, device sessions.
     (5) Stale records: the CTS ledger was last rendered around 2026-11-04 and still
     lists the 71 `descriptor_copy` failures that closed on 2026-11-12; the plan's
     ladder table shows R3 as not started.
