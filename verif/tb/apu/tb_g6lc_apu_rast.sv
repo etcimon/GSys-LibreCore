@@ -3380,6 +3380,51 @@ module tb_g6lc_apu_rast;
     if (mism != 0)
       fail($sformatf("case48 %0d ca0 channel mismatches", mism));
 
+    // ================= case 49: sparse ca_valid skip ==============
+    // ca_valid=4'b0010 -> ONLY ca[1] is valid.  The ROP must skip
+    // at_q=0 (no ca[0] write -> FB keeps its clear), process at_q=1
+    // (loc1 cyan -> FB2), then skip at_q=2,3.  Cases 47/48 used the
+    // contiguous mask 4'b0011 so the !ca_valid[at_q] skip branch was
+    // never exercised.
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    ex = 32'hFF000000;
+    for (int i = 0; i < 1024; i++)
+      apwr(FB2 + i*4, 32'h12345678);
+    d = mk_draw();
+    d.ca_valid = 4'b0010;                        // ca[1] only
+    d.ca[1] = '{base: FB2, size: 32'h1000, w: 16'd32, h: 16'd32,
+               fmt: 8'(APU_IMG_FMT_B8G8R8A8_UNORM), mips: 5'd1,
+               layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case49 code=%0d", w_dpl.code));
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        logic [31:0] rpx = ref_px(x, y);
+        checks++;
+        // ca[0] invalid -> FB untouched everywhere (clear inside AND
+        // out — the draw must not write attachment 0 at all)
+        if (fbpx(x, y) != ex)
+          fail($sformatf("case49 ca0 px(%0d,%0d)=%08x expclr(untouched)",
+                         x, y, fbpx(x, y)));
+        if (rpx == 32'hFFFF_FFFF) begin
+          if (fb2px(x, y) != 32'h12345678)
+            fail($sformatf("case49 ca1 out px(%0d,%0d)=%08x expsent",
+                           x, y, fb2px(x, y)));
+        end else begin
+          checks++;
+          if (fb2px(x, y) != 32'hFF00FFFF)
+            fail($sformatf("case49 ca1 in px(%0d,%0d)=%08x exp=ff00ffff",
+                           x, y, fb2px(x, y)));
+        end
+      end
+
     // ---- report ---------------------------------------------------------
     // draw-path counters: the suite draws and writes pixels, so both
     // must have moved, and no more pixels than busy cycles
