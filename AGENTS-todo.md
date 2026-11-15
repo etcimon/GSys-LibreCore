@@ -1284,10 +1284,14 @@ remain release requirements; intermediate raster gates do not narrow the product
     4× 4096×80) re-banked with the RF width-gather pattern; interfaces
     unchanged. VERIFIED: tb_g6lc_apu_shwave 548/100,832 PASS, cycles
     3,666,123 cycle-exact. **ALL shmod + shwave-RF storage now inside the
-    SRAM envelope (depth ≤4096, width ≤128) — storage re-bank COMPLETE.**
-    NEXT: TP3a-2 NumPorts(1)→(2) read port for operand prefetch →
-    wave-interleave pipelined issue → G-T2 ≤4 cy/wave-instr. Hazards +
-    phased plan TP3a-1..5 in brief.
+    SRAM envelope (depth ≤4096, width ≤128) — shader-path storage
+    re-bank COMPLETE.**  BROADER APU AUDIT (tp3a-brief): vnfront i_stg
+    32768×32 (depth 8×, cmd staging), objmem caches ×512 (width 4×),
+    sg ×160, fwram/storage config-gated — separate modules, multi-session.
+    NEXT: TP3a-2/3 operand prefetch → wave-interleave pipelined issue →
+    G-T2 ≤4 cy/wave-instr (RF dual-port config-sanctioned; single-port
+    prefetch during execute-idle may avoid it). Hazards + phased plan
+    TP3a-1..5 + APU audit in brief.
   - [ ] TP6 raster width (replaced by FP5/FP6/FP7/FP10 below); TP7 `ShaderCores` with a
     dispatcher and in-order fragment-batch commit; TP8 fabric; TP9 object-table bursts.
     Gate G-T3: same results at 1/2/4/8 cores, geometry chosen by the Pareto study.
