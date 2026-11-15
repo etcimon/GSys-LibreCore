@@ -1104,8 +1104,21 @@ remain release requirements; intermediate raster gates do not narrow the product
     only passed against an older untracked `.hex`. `*.hex` under `vn_vectors` is
     ignored by git, so 196 of 343 tapes exist only on the machine that generated
     them; a leaf ships whatever is on disk. Regenerating needs
-    `PYTHONPATH=corev_apu/apu/tools/shader`. Open: an oracle-freshness check that
-    regenerates into a scratch directory and compares (plan W0 already asks for it).
+    `PYTHONPATH=corev_apu/apu/tools/shader` (fixed in `db27496c2`: the generator
+    adds the path itself). DONE `1ccc17e1f`: `vn_vectors/check_fresh.sh`
+    regenerates into a scratch directory and compares (about six minutes). Its
+    first run found 38 more drifted sessions (ftex*, vtex, multiset, ctxkill_reuse,
+    pgfull, payfull); refreshed, and they pass in place (37 on vgtop, payfull on
+    vnfront). Open: 95 `.exp` on disk that `regen_vectors.sh` does not generate;
+    the check is not in a CI lane (needs the kernel uapi header).
+    (8) Xfer colour clear truncates integer values to the component width
+    (`b41915854`): R8G8B8A8_UINT with a value above 255 used to spill into the
+    next channel; RTL, Python model and bench model fixed together, bench case
+    first. xfer 285 cases / 1,625 checks.
+    (9) Observation for the next coverage step: every graphics device session
+    renders to R8G8B8A8_UNORM, which is why the BGRA, sRGB and D16 rasteriser
+    defects of (3) had no device vector. The model refuses blend, write mask and
+    logic op on sRGB, so it cannot yet be the oracle for those paths.
     (5) Stale records: the CTS ledger was last rendered around 2026-11-04 and still
     lists the 71 `descriptor_copy` failures that closed on 2026-11-12; the plan's
     ladder table shows R3 as not started.
