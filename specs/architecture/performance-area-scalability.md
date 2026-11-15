@@ -154,6 +154,37 @@ differs from the order in §8.2 or §9.4, §11 is current.
 (§11.8). The loop is the `perf` stage of `run-apu-regress.sh`; the decoded-row cache
 (SP1) is admitted from a remote capture on the pinned compiler.
 
+2026-11-15: evidence review. The last remote leaf before today was
+`apu-leaf-20261114T112821-7d61c828d186`; eighteen APU RTL commits followed it with local
+evidence only (rasteriser FP0e and FP0f, the five RP3 fusions, the storage re-banking of
+TP3a-1, the second register-file port of TP3a-2). Leaf
+`apu-leaf-20261115T060601-bec7c93d610b` (`unit,top,perf`, snapshot of `c6cf6705b`) covers
+them. At the time of writing: unit stage 17 of 17 suites with exit code 0, `vgtop` exit
+code 0, both control arms pass, the shader suite is cycle-identical, and every graphics
+session of the loop checks the same work in fewer cycles than the admitted capture
+(deriv2 −45.1%, inst −34.7%, persp −22.2%, tri −20.0%, blend −19.2%, dtest −19.0%,
+mrt4 −8.5%, line −0.8%). `vgsys` was still running. The loop itself exits 1 on that leaf:
+its `rast` run compares the 42-case origin cohort with a bench that had grown to 56
+cases, so it reports a work difference, not a regression. The bench now takes
+`+perf_cohort` (origin cases only) and `run-apu-perf.sh` passes it; locally the cohort
+checks the capture's exact work (42 cases, 15,605 checks, 159,527 port requests,
+564,743 float jobs) in 1,066,697 cycles against 1,397,345 admitted (−23.7%). Nothing is
+admitted until a leaf on the current tree reports it.
+
+The same review found three rasteriser defects by reading the RTL against the model and
+the specification. Each was reproduced by a failing bench case before the fix (commits
+`913238cb2`, `4b59ae70d`; local evidence until the next leaf):
+
+| Defect | Effect | Why no vector saw it |
+|---|---|---|
+| The colour write mask was used directly as byte strobes | On B8G8R8A8 an R-only mask wrote the B byte and a B-only mask the R byte | the one masked device vector uses RGB (R/B symmetric); the model maps mask bits to channel bytes |
+| The UNORM16 scale constant was `32'h38008001` (1/32640) instead of `32'h37800080` (1/65535), at four sites | sRGB destination decode for blending, UNORM16 vertex attributes and D16 depth readback (early and late) were about 2.008 times too large | vertex cases fed 65535 only, which clamps; no bench case used D16 depth or blended on sRGB, and the model refuses blend on sRGB |
+| `VkLogicOp` was applied to every colour format | sRGB attachments got the logic op instead of the plain source colour | the model refuses logic op on sRGB; the bench only used UNORM |
+
+The method (read one engine's datapath against the model's handling of the same field,
+then look for inputs the vectors never use) is cheap. It applies unchanged to the
+transfer engine, the sampler and the vertex fetch.
+
 ## 8. Throughput closure program (2026-11-12)
 
 Written from the RTL at HEAD `f694ad11a` plus the working tree, and from the counter
@@ -1008,9 +1039,9 @@ its counter before it starts.
 | Rung | Enabler | Passes | State |
 |---|---|---|---|
 | R0 | counters, loop, origin (TP0, FP0) | — | done |
-| R1 | none: sequencing inside one module, results unchanged | RP1 float-job hand-off; RP2 interleaved issue in the per-fragment chains; RP3 merge and blend chains on the same pattern; SP1 decoded-row cache in the shader core (TP1 delivered lazily, see below) | RP1, RP2, RP4, SP1, SP2, SP3 done; SP4 done; RP3 partial 2026-11-15: five capture+issue fusions landed — four in the blend chain (`S_BL_F2B`→`S_BL_M1`, `S_BL_F1B`→`S_BL_F2`, `S_BL_F2`-else inlining `S_BL_M1`, `S_BL_F1`-else inlining `S_BL_F2`'s dst-dispatch; `S_BL_M1`/`S_BL_F2` unreachable+removed, `S_BL_F1`/`F1B` symmetric → blend chain 5 states/component, was 7) plus `S_DB1`→`S_DB1B` depth-bias clamp-select (`S_DB1B`+`db_bias_q` flop removed). Bit-exact; rast merge −19.3k cy + depth −1.1k cy local. Bench coverage hardened first: cases 6b–6h add ONE_MINUS-src, all five blend ops, `SRC_ALPHA_SATURATE`, `CONST_COLOR` — 53 cases / 22,784 checks. `S_BL_ST`/`S_BL_MM` advance fusion + read-overlap + scoreboard-scale pipelining analysed in `.cache/apu-perf/rp3-brief.md`, pending remote `perf`-leaf admission. 2026-11-15 exhaustive sweep: no remaining pure-NOP states, dead regs, or operand-stable capture→issue candidates in any rast path (blend/depth/vertex/gather/ROP/clip) — the bounded sequencing surface is exhausted; next gains need R2 (memory port) or the TP/FP features |
-| R2 | memory port with one slot per requester and bursts (TP2b) | clears as bursts (FP3), transfer write leg (FP11), object and texel line fills (TP9, FP9 fill), stream window (FP1), pipeline block read (FP2), lane-vector load/store (TP2a) | not started |
-| R3 | on-chip record store (TP4) | vertex and fragment records, primitive record, push block; vertex reuse (TP5); burst vertex fetch (FP4); screen cache (FP5) | TP4 core ADMITTED 2026-11-14: apmem serves the record/clip carve from 2x4096x64b tc_sram (dynamic ALLOC_PRIV base plumbed rast->vgtop->vgsys->apmem); remote top leaf PASS (vgtop/vgsys/sys-venus, every ue_gpos_* bit-exact through SRAM) + perf leaf PASS, capture bit-identical to SP5 on the apmem-bypassing cohort -> apu-perf-current.json=R3. sys-venus A/B: six ue_gpos_* vecs uniformly -4567 cy (-0.55%, ~254 record beats x ~18 cy/access, AXI ~20->SRAM ~2 cy), all ue_cpos_* bit-identical. TP5/FP4/FP5 + primitive/push consumers open |
+| R1 | none: sequencing inside one module, results unchanged | RP1 float-job hand-off; RP2 interleaved issue in the per-fragment chains; RP3 merge and blend chains on the same pattern; SP1 decoded-row cache in the shader core (TP1 delivered lazily, see below) | RP1, RP2, RP4, SP1, SP2, SP3 done; SP4 done; RP3 partial 2026-11-15: five capture+issue fusions landed — four in the blend chain (`S_BL_F2B`→`S_BL_M1`, `S_BL_F1B`→`S_BL_F2`, `S_BL_F2`-else inlining `S_BL_M1`, `S_BL_F1`-else inlining `S_BL_F2`'s dst-dispatch; `S_BL_M1`/`S_BL_F2` unreachable+removed, `S_BL_F1`/`F1B` symmetric → blend chain 5 states/component, was 7) plus `S_DB1`→`S_DB1B` depth-bias clamp-select (`S_DB1B`+`db_bias_q` flop removed). Bit-exact; rast merge −19.3k cy + depth −1.1k cy local. Bench coverage hardened first: cases 6b–6h add ONE_MINUS-src, all five blend ops, `SRC_ALPHA_SATURATE`, `CONST_COLOR` — 53 cases / 22,784 checks; cases 47–55 (2026-11-15) add two-attachment draws, per-attachment blend, a sparse attachment mask, the colour write mask on BGRA, logic op and blend on sRGB, a mid-scale UNORM16 vertex colour and D16 depth (early and late) — 62 cases / 31,749 checks. `S_BL_ST`/`S_BL_MM` advance fusion + read-overlap + scoreboard-scale pipelining analysed in `.cache/apu-perf/rp3-brief.md`, pending remote `perf`-leaf admission. 2026-11-15 exhaustive sweep: no remaining pure-NOP states, dead regs, or operand-stable capture→issue candidates in any rast path (blend/depth/vertex/gather/ROP/clip) — the bounded sequencing surface is exhausted; next gains need R2 (memory port) or the TP/FP features |
+| R2 | memory port with one slot per requester and bursts (TP2b) | clears as bursts (FP3), transfer write leg (FP11), object and texel line fills (TP9, FP9 fill), stream window (FP1), pipeline block read (FP2), lane-vector load/store (TP2a) | not started; sized 2026-11-14 from the existing counters: device-memory accept is 2.3% of shader busy in aggregate and at most about 15% on the memory-stress vectors, and the path is serial end to end (`apmem`, `tdma`, the bench slave), so this is a multi-module rework with a small measured return on the present corpus. Deferred behind the fragment path (interpolation, shader wait, merge) |
+| R3 | on-chip record store (TP4) | vertex and fragment records, primitive record, push block; vertex reuse (TP5); burst vertex fetch (FP4); screen cache (FP5) | TP4 core ADMITTED 2026-11-14: apmem serves the record/clip carve from 2x4096x64b tc_sram (dynamic ALLOC_PRIV base plumbed rast->vgtop->vgsys->apmem); remote top leaf PASS (vgtop/vgsys/sys-venus, every ue_gpos_* bit-exact through SRAM) + perf leaf PASS, capture bit-identical to SP5 on the apmem-bypassing cohort -> apu-perf-current.json=R3. sys-venus A/B: six ue_gpos_* vecs uniformly -4567 cy (-0.55%, ~254 record beats x ~18 cy/access, AXI ~20->SRAM ~2 cy), all ue_cpos_* bit-identical. TP5 built 2026-11-14 behind `VtxCacheEntries` (default 0, results identical; rast cases 44–46): vertex-shader invocations −90% on the ten-batch probe, but cycles +0.7% to +2.0%, because the 18-word hit copy costs more than the bench's stub vertex shader — left off, not admitted. FP4/FP5 + primitive/push consumers open |
 | R4 | format table generator (plan P3) | vertex convert (FP4), texel decode (FP9), attachment encode and decode (FP10) | not started |
 | R5 | pipelined issue and banked register file (TP3) | interpolation preamble (FP6), then G-T2 | not started |
 | R6 | texture unit, tile store, shader cores (FP9, FP10 stage B, TP7) | the Pareto study, G-T3 and G-F3 | not started |

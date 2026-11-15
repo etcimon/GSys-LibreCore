@@ -1059,6 +1059,37 @@ remain release requirements; intermediate raster gates do not narrow the product
     (data-dependent, high risk).
   - [ ] Next enablers: R2 memory port slots and bursts (memory requests are now about 37
     of 98.5 cycles per fragment in the rast suite); R3 record store.
+  - [ ] **Evidence review 2026-11-15** (perf doc §7 has the detail).
+    (1) Admission had lapsed: eighteen APU RTL commits after leaf
+    `apu-leaf-20261114T112821-7d61c828d186` carried local evidence only. An earlier
+    note in this file ("admission is not mine per the handoff rule") quoted a rule from
+    a delegation brief; it never applied to the session that owns the work. Leaf
+    `apu-leaf-20261115T060601-bec7c93d610b` (`unit,top,perf` on `c6cf6705b`): unit
+    17/17 rc 0, vgtop rc 0, arms pass, shader suite cycle-identical, every graphics
+    session same work and fewer cycles (deriv2 −45.1%, inst −34.7%, tri −20.0%);
+    `perf` rc 1 only because the `rast` run compared the 42-case cohort with a 56-case
+    bench. Fixed: `+perf_cohort` (`a7b895783`). Leaf on the current tree launched;
+    collect both, then `run-apu-perf.sh --admit-from`.
+    (2) The remote builder was full (834G of 878G; 520G of uncompressed Hyp8 boot
+    traces). With the owner's approval the trace files of the finished runs
+    r116–r125 were deleted (40 files, 233.5 GiB; logs, uart, monitors kept; manifest
+    in `.cache/remote-free-20261115-manifest.txt`). Open: the Hyp8 boot runs write
+    roughly 3 GB/h of traces between them; cap or compress them, or the disk fills
+    again.
+    (3) Three rasteriser defects found by reading RTL against model and
+    specification, each with a failing case first: colour write mask on BGRA
+    (`913238cb2`, case 50); UNORM16 scale 1/32640 instead of 1/65535 at four sites —
+    sRGB blend decode, UNORM16 vertex attributes, D16 depth readback — and logic op
+    applied to sRGB (`4b59ae70d`, cases 51–55). Rast bench 62 cases / 31,749 checks,
+    yosys Enable=0/1 clean, 270,514 cells / 28,689 flops.
+    (4) Next by leverage, not by convenience: the same model-against-RTL reading on
+    `xfer`, the sampler and vertex fetch; then the P3 format axis (the profile has 17
+    formats, 5 of them colour-attachable, against the several dozen the specification
+    makes mandatory, and 60% of the CTS names a format). Rasteriser capture fusions are finished and
+    were about 1% of the suite; do not resume them.
+    (5) Stale records: the CTS ledger was last rendered around 2026-11-04 and still
+    lists the 71 `descriptor_copy` failures that closed on 2026-11-12; the plan's
+    ladder table shows R3 as not started.
   - [x] Resolved 2026-11-13 (goldens regenerated; cmdexec bench fixed; all three pass
     in the remote `unit` stage): `rtl-vnrep`, `rtl-vndec`, `rtl-cmdexec` of
     `run-apu-ci.sh --coverage standard` failed on the working tree. The vnrep mismatch is
