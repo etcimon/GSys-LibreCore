@@ -150,14 +150,31 @@ module g6lc_apu_objmem
     logic [PcIdxBits-1:0] pc_addr;
     logic [511:0]         pc_wdata, pc_rdata;
 
-    tc_sram #(.NumWords(EntCacheLines), .DataWidth(512), .NumPorts(1),
-              .Latency(1), .SimInit("none")) i_ec (
-      .clk_i, .rst_ni, .req_i(ec_req), .we_i(ec_we), .addr_i(ec_addr),
-      .wdata_i(ec_wdata), .be_i('1), .rdata_o(ec_rdata));
-    tc_sram #(.NumWords(PayCacheLines), .DataWidth(512), .NumPorts(1),
-              .Latency(1), .SimInit("none")) i_pc (
-      .clk_i, .rst_ni, .req_i(pc_req), .we_i(pc_we), .addr_i(pc_addr),
-      .wdata_i(pc_wdata), .be_i('1), .rdata_o(pc_rdata));
+    // TP3a envelope: the 512-bit cache-line data exceeds the 128-bit SRAM
+    // width, so each array is EC_NW/PC_NW=4 width banks of 128 bits at the
+    // same row address (depth stays << 4096 — no tiles).  All banks share
+    // the single req/we/addr port and are read/written in parallel; the
+    // gather rebuilds the 512-bit line.  ec_*/pc_* interfaces unchanged.
+    localparam int unsigned EC_NW = 4;
+    localparam int unsigned PC_NW = 4;
+    logic [127:0]                  ec_rda [EC_NW];
+    logic [127:0]                  pc_rda [PC_NW];
+    for (genvar w = 0; w < EC_NW; w++) begin : g_ecw
+      tc_sram #(.NumWords(EntCacheLines), .DataWidth(128), .NumPorts(1),
+                .Latency(1), .SimInit("none")) i_ec (
+        .clk_i, .rst_ni,
+        .req_i(ec_req), .we_i(ec_we), .addr_i(ec_addr),
+        .wdata_i(ec_wdata[w*128 +: 128]), .be_i('1), .rdata_o(ec_rda[w]));
+    end
+    assign ec_rdata = {ec_rda[3], ec_rda[2], ec_rda[1], ec_rda[0]};
+    for (genvar w = 0; w < PC_NW; w++) begin : g_pcw
+      tc_sram #(.NumWords(PayCacheLines), .DataWidth(128), .NumPorts(1),
+                .Latency(1), .SimInit("none")) i_pc (
+        .clk_i, .rst_ni,
+        .req_i(pc_req), .we_i(pc_we), .addr_i(pc_addr),
+        .wdata_i(pc_wdata[w*128 +: 128]), .be_i('1), .rdata_o(pc_rda[w]));
+    end
+    assign pc_rdata = {pc_rda[3], pc_rda[2], pc_rda[1], pc_rda[0]};
 
     // entry-index under test
     logic [15:0]          eg_idx_q;

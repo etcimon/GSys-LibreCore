@@ -437,8 +437,16 @@ module tb_g6lc_apu_vnfront;
     for (int i = 0; i < PayCacheL; i++)
       if (i_omm.gen_on.pc_vld_q[i] &&
           i_omm.gen_on.pc_ln_q[i] ==
-            $bits(i_omm.gen_on.pc_ln_q[i])'(waddr >> 4))
-        return i_omm.gen_on.i_pc.sram[i][32 * (waddr & 15) +: 32];
+            $bits(i_omm.gen_on.pc_ln_q[i])'(waddr >> 4)) begin
+        // TP3a: i_pc is 4x128b width banks; word (waddr&15) of the 512b
+        // line lives in bank (waddr&15)>>2 at in-bank word (waddr&15)&3.
+        case ((waddr & 15) >> 2)
+          2'd0:    return i_omm.gen_on.g_pcw[0].i_pc.sram[i][32 * ((waddr & 15) & 3) +: 32];
+          2'd1:    return i_omm.gen_on.g_pcw[1].i_pc.sram[i][32 * ((waddr & 15) & 3) +: 32];
+          2'd2:    return i_omm.gen_on.g_pcw[2].i_pc.sram[i][32 * ((waddr & 15) & 3) +: 32];
+          default: return i_omm.gen_on.g_pcw[3].i_pc.sram[i][32 * ((waddr & 15) & 3) +: 32];
+        endcase
+      end
     return i_mem.apm[32'(OM_PAY_OFF >> 2) + waddr -
                      32'(g6lc_apu_objtab_pkg::APU_OBJMEM_OFF >> 2)];
   endfunction
