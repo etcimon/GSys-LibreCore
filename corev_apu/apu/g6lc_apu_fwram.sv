@@ -251,29 +251,64 @@ module g6lc_apu_fwram
       $fatal(1, "APU fwram: SRAM access outside the physical window");
     `endif
 
-    tc_sram #(.NumWords(NumWords), .DataWidth(64), .NumPorts(1),
-              .Latency(1), .SimInit("none")) i_ram (
-      .clk_i, .rst_ni, .req_i(ram_req), .we_i(ram_we), .addr_i(ram_addr),
-      .wdata_i(ram_wdata), .be_i(ram_be), .rdata_o(ram_rdata)
-    );
+    // SRAM-envelope: FirmwareRamBytes is required >=256 KiB when the
+    // feature is on, i.e. NumWords reaches 32768 (>4096).  Depth-tile the
+    // store into <=4096-word macros.  fw_rdt_q latches the in-flight
+    // read's tile because tc_sram rdata_o is registered and ram_addr may
+    // advance before the data is gathered.  ram_* interface unchanged.
+    localparam int unsigned FW_LW = (AddrWidth > 12) ? 12 : AddrWidth;
+    localparam int unsigned FW_NT = (AddrWidth > FW_LW) ? (1 << (AddrWidth - FW_LW)) : 1;
+    localparam int unsigned FW_TW = (FW_NT > 1) ? (AddrWidth - FW_LW) : 1;
+    localparam int unsigned FW_WORDS = 1 << FW_LW;        // rows per tile
+    typedef logic [FW_TW-1:0] fw_tile_t;
+    logic [FW_TW-1:0]         fw_rdt_q;
+    logic [63:0]              fw_rda [FW_NT];
+    wire [FW_TW-1:0]          fw_tile_w = ram_addr[AddrWidth-1 -: FW_TW];
+    for (genvar t = 0; t < FW_NT; t++) begin : g_fw
+      tc_sram #(.NumWords(FW_WORDS), .DataWidth(64), .NumPorts(1),
+                .Latency(1), .SimInit("none")) i_ram (
+        .clk_i, .rst_ni,
+        .req_i(ram_req && ((FW_NT == 1) || (fw_tile_w == fw_tile_t'(t)))),
+        .we_i (ram_we  && ((FW_NT == 1) || (fw_tile_w == fw_tile_t'(t)))),
+        .addr_i(ram_addr[FW_LW-1:0]),
+        .wdata_i(ram_wdata), .be_i(ram_be), .rdata_o(fw_rda[t]));
+    end
+    assign ram_rdata = fw_rda[fw_rdt_q];
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) fw_rdt_q <= '0;
+      else if (ram_req && !ram_we && (FW_NT > 1)) fw_rdt_q <= fw_tile_w;
+    end
 
     `ifndef SYNTHESIS
     if (HexFile != "none") begin : gen_hex
       logic [31:0] hex32 [0:NumWords*2-1];
+      int unsigned fw_lim;
+      bit fw_hex_rdy;
       initial begin
         string hexpath;
-        integer i, n, lim;
+        integer i;
         hexpath = HexFile;
         void'($value$plusargs("APU_FW_HEX=%s", hexpath));
         $readmemh(hexpath, hex32);
         // Prefix only: a full 256 KiB blocking init is Verilator BLKLOOPINIT.
         // Unwritten words stay SimInit("none"). Not a BSS-zero contract.
-        n = 0;
+        fw_lim = 0;
         for (i = 0; i < int'(NumWords * 2); i++)
-          if (hex32[i] != 32'h0) n = i + 1;
-        lim = (n + 1) / 2;
-        for (i = 0; i < lim; i++)
-          i_ram.sram[i] = {hex32[2*i+1], hex32[2*i]};
+          if (hex32[i] != 32'h0) fw_lim = unsigned'((i + 2) / 2);
+        fw_hex_rdy = 1'b1;
+      end
+      // Each tile writes its own slice of the flat image; g_fw[t] is a
+      // constant hierarchical select inside this generate iteration and
+      // fw_hex_rdy orders the writes after the shared hex32/fw_lim load.
+      for (genvar t = 0; t < FW_NT; t++) begin : g_hexw
+        initial begin
+          integer r;
+          wait (fw_hex_rdy);
+          for (r = t * int'(FW_WORDS);
+               r < (t + 1) * int'(FW_WORDS) && r < int'(fw_lim); r++)
+            g_fw[t].i_ram.sram[r - t * int'(FW_WORDS)] =
+                {hex32[2*r+1], hex32[2*r]};
+        end
       end
     end
     `endif
