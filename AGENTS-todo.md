@@ -596,6 +596,15 @@ AI island / ai-matrix FO4 program (2026-10-26/27, hyp tree of record `build-plat
       still detected). Cross-checked against `tb_g6lc_cmo_engine` (unit bench
       expects SUB_LINES=4 acks + block_base+i*16 addresses; PASSES). Remote
       `run_inval_review.py` re-run remains for the record but local evidence is conclusive.
+      **Local runners added 2026-11-15:** `verif/tb/l2/run-coherence-hub.sh`
+      (tb_g6lc_coherence_l2, USE_L3/negative/scenario knobs) and
+      `verif/tb/l2/run-l2-leaf.sh` (tb_g6lc_inval_bus + tb_g6lc_l2_tag_miter +
+      tb_g6lc_pf — the leaf benches that were remote-harness-only). The leaf
+      benches were verified clean end-to-end incl. WRITE_UPDATE miter arm and
+      every negative control; `tb_g6lc_pf` scenario-4-style L3 geometry notes:
+      coherence scenario 4 needs `L3_SET_ASSOC > L2 SET_ASSOC` (L3 must retain
+      more same-set lines than L2's ways) or `COH_L3_PROBE` misfires — a bench
+      precondition, not an RTL bug.
 - [ ] hyp8 harness: split-loops `.vlt` (hyp renames) + `--stats` on the fork; PGO training
       now an MT `g6lc64_hyp8_mc` verilation. The PGO prefix `verilator-v5.008-g6lc-pgo`
       (fork f7fa715, header `e900ec45…`) is not in the runners' qualified tables yet.
