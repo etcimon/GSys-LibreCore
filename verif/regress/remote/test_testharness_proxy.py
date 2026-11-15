@@ -1630,7 +1630,7 @@ class ProxyNonDestructivePreflightTests(unittest.TestCase):
     def test_preflight_refuses_without_killing(self):
         args = argparse.Namespace(
             command=['sha256sum /tmp/Variane_testharness'],
-            timeout=30, no_hang=True, tty=False)
+            timeout=30, no_hang=True, tty=False, allow_overlap=False)
         for name in ('cmd_run', 'cmd_soak', 'cmd_di', 'cmd_shell'):
             with self.subTest(entrypoint=name):
                 rem = Mock()
