@@ -1319,6 +1319,20 @@ remain release requirements; intermediate raster gates do not narrow the product
     path running ≥1 instr ahead — a real FSM/pipeline restructure, not
     a local tweak; wave-interleave avoids same-wave forwarding but
     still needs the adjacent wave decoded first.
+    2026-11-15 SCOPING (tp3a-brief §5a): per-state HIST attributes the
+    operand stream W_LD0+W_LD1 ≈449k cy (~12%) as the largest per-instr
+    cost after W_EX — but it is FETCH-WIDTH-bound (one prog_data_i word/
+    cycle, 32-bit shmod→shwave port), NOT RF-latency-bound: operand k+1's
+    RF read is already issued one stream-cycle early via rc_ik/rc_is_v,
+    so the TP3a-2 dual port buys the stream nothing.  Two real levers:
+    (a) wider operand fetch (shmod i_prog/fetch-width interface change),
+    or (b) decode-lookahead to overlap N+1 fetch/stream with N's
+    W_EX/W_WB.  W_IDLE=1.30M cy (35%) is dispatch-bound → TP6/TP7
+    parallelism, not per-instr pipelining.  END-TO-END: run-apu-vgtop
+    ue_* cohort (real SPIR-V through full Venus) = 366 session logs,
+    0 FAIL, all PASS-COMPUTE/PASS pixel-exact (g1=g2, maxulp=0) across
+    compute+sim phases — every storage/port re-bank verified in the real
+    graphics path.
   - [ ] TP6 raster width (replaced by FP5/FP6/FP7/FP10 below); TP7 `ShaderCores` with a
     dispatcher and in-order fragment-batch commit; TP8 fabric; TP9 object-table bursts.
     Gate G-T3: same results at 1/2/4/8 cores, geometry chosen by the Pareto study.
