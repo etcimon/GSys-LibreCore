@@ -1269,10 +1269,15 @@ remain release requirements; intermediate raster gates do not narrow the product
     rf_rdt_q registers in-flight read tile for the rdata gather; rf_* port
     interface + operand schedule unchanged (bit-identical). VERIFIED:
     tb_g6lc_apu_shwave 548 cases/100,832 checks PASS, cycles 3,666,123 =
-    baseline (cycle-exact); synth Enable=0/1 clean. NEXT TP3a-2: NumPorts(1)→(2)
-    read port for operand prefetch; then wave-interleave pipelined issue →
-    G-T2 ≤4 cy/wave-instr. Hazards (RAW/WAR/WAW, multi-row WB, row-cache) +
-    phased plan TP3a-1..5 in brief.
+    baseline (cycle-exact); synth Enable=0/1 clean.
+    TP3a-1b LANDED: shmod i_prog (the 65,536-deep hot fetch-path table,
+    worst envelope offender) re-banked to PR_NT=16 × 4096×32 depth tiles,
+    same tile-register pattern; pr_* interface unchanged. VERIFIED:
+    tb_g6lc_apu_shwave 548/100,832 PASS, cycles 3,666,123 cycle-exact.
+    NEXT: remaining shmod decode tables (7× 8,192-deep + i_const/i_phi
+    width) same pattern — cold commit path; then TP3a-2 NumPorts(1)→(2)
+    read port for operand prefetch → wave-interleave pipelined issue →
+    G-T2 ≤4 cy/wave-instr. Hazards + phased plan TP3a-1..5 in brief.
   - [ ] TP6 raster width (replaced by FP5/FP6/FP7/FP10 below); TP7 `ShaderCores` with a
     dispatcher and in-order fragment-batch commit; TP8 fabric; TP9 object-table bursts.
     Gate G-T3: same results at 1/2/4/8 cores, geometry chosen by the Pareto study.

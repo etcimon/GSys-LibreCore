@@ -969,10 +969,39 @@ module g6lc_apu_shmod
       end
     end
 
-    tc_sram #(.NumWords(ShaderSlots*ShaderWords), .DataWidth(32),
-              .NumPorts(1)) i_prog (
-      .clk_i, .rst_ni, .req_i(pr_req), .we_i(pr_we), .addr_i(pr_addr),
-      .wdata_i(pr_wdata), .be_i(4'hF), .rdata_o(pr_rdata));
+    // TP3a: program store re-banked into the SRAM macro envelope.  The
+    // flat ShaderSlots*ShaderWords x 32 program table (8*8192 = 65,536
+    // words) exceeds the envelope depth (<= 4096).  It is now PR_NT
+    // depth tiles of <= 4096 x 32 tc_sram; tile t holds in-bank address
+    // pr_addr[PR_LW-1:0] of tile pr_addr[PR_AW-1 -: PR_TW].  The {slot,
+    // word} row access and the pr_* port interface are unchanged
+    // (bit-identical), so the commit/fetch schedule is untouched.
+    // pr_rdt_q registers the tile of the in-flight read: tc_sram
+    // rdata_o is registered and pr_addr may already point at the next
+    // access when the data is captured, so the gather selects the tile
+    // the access used rather than the live address field.
+    localparam int unsigned PR_AW = PW;
+    localparam int unsigned PR_LW = (PR_AW > 12) ? 12 : PR_AW;
+    localparam int unsigned PR_NT = (PR_AW > PR_LW) ? (1 << (PR_AW - PR_LW)) : 1;
+    localparam int unsigned PR_TW = (PR_NT > 1) ? (PR_AW - PR_LW) : 1;
+    typedef logic [PR_TW-1:0]              pr_tile_t;
+    logic [PR_TW-1:0]                      pr_rdt_q;
+    logic [31:0]                           pr_rda [PR_NT];
+    wire [PR_TW-1:0]                       pr_tile_w = pr_addr[PR_AW-1 -: PR_TW];
+    for (genvar t = 0; t < PR_NT; t++) begin : g_prt
+      tc_sram #(.NumWords(1 << PR_LW), .DataWidth(32), .NumPorts(1),
+                .SimInit("none")) i_prog (
+        .clk_i, .rst_ni,
+        .req_i(pr_req && ((PR_NT == 1) || (pr_tile_w == pr_tile_t'(t)))),
+        .we_i (pr_we  && ((PR_NT == 1) || (pr_tile_w == pr_tile_t'(t)))),
+        .addr_i(pr_addr[PR_LW-1:0]),
+        .wdata_i(pr_wdata), .be_i(4'hF), .rdata_o(pr_rda[t]));
+    end
+    assign pr_rdata = pr_rda[pr_rdt_q];
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) pr_rdt_q <= '0;
+      else if (pr_req && !pr_we) pr_rdt_q <= pr_tile_w;
+    end
     tc_sram #(.NumWords(ShaderSlots*ShaderIds), .DataWidth(96),
               .NumPorts(1)) i_type (
       .clk_i, .rst_ni, .req_i(ty_req), .we_i(ty_we), .addr_i(ty_addr),
