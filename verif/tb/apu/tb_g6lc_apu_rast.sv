@@ -59,6 +59,7 @@ module tb_g6lc_apu_rast;
   localparam int unsigned PWB  = 32'h40000;   // private arena word base
   localparam int unsigned PPW  = 32'h08000;   // 128 KiB private window
   localparam int unsigned FB   = 32'h0001000; // framebuffer byte base
+  localparam int unsigned FB2  = 32'h0004000; // MRT attachment-1 byte base
   localparam int unsigned DB   = 32'h0008000; // depth buffer byte base
   localparam int unsigned VB   = 32'h0010000; // vertex buffer byte base
   localparam int unsigned PG_BASE = 32'h100000; // ALLOC_PRIV result
@@ -237,6 +238,14 @@ module tb_g6lc_apu_rast;
             for (int c = 0; c < 4; c++)
               i_mem.apm[apix((ob + f*144 + 4*c) >> 2)] =
                 i_mem.apm[apix((ib + f*144 + 16 + 4*c) >> 2)];
+            // MRT loc1 (case 47): constant marker colour, written
+            // unconditionally — dead when ca_valid bit1 is clear.  Cyan
+            // {r,g,b,a}={0,1,1,1} stays distinct from the interpolated
+            // loc0 vertex colours so a wrong-location read is caught.
+            i_mem.apm[apix((ob + f*144 + 16) >> 2)] = 32'h00000000;
+            i_mem.apm[apix((ob + f*144 + 20) >> 2)] = 32'h3F800000;
+            i_mem.apm[apix((ob + f*144 + 24) >> 2)] = 32'h3F800000;
+            i_mem.apm[apix((ob + f*144 + 28) >> 2)] = 32'h3F800000;
             // G3a-i slot-8 tail: word0 FragDepth, word1 discard flag,
             // word2 sample mask (all-ones), word3 = 0 — same layout
             // shwave's W_F8A/W_F8B emit.  FragCoord = fs_in slot0
@@ -292,6 +301,11 @@ module tb_g6lc_apu_rast;
   // fb pixel {a,b,g,r} packed (R8G8B8A8_UNORM, little-endian byte order)
   function automatic logic [31:0] fbpx(input int x, input int y);
     return i_mem.apm[apw_i(FB + y*FBP + x*4)];
+  endfunction
+
+  // MRT attachment-1 pixel (B8G8R8A8_UNORM -> {a,r,g,b} packed)
+  function automatic logic [31:0] fb2px(input int x, input int y);
+    return i_mem.apm[apw_i(FB2 + y*FBP + x*4)];
   endfunction
 
   // VS-input word.  Vertex 0, byte offset within the 144-byte record.
@@ -3222,6 +3236,82 @@ module tb_g6lc_apu_rast;
       if (got != 32'hFF000000)
         fail($sformatf("case46 out px(%0d,%0d)=%08x expclr", px, py, got));
     end
+
+    // ================= case 47: MRT two attachments ================
+    // ca_valid=3 -> the ROP iterates at_q=0,1: ca[0]=FB R8G8B8A8 gets
+    // the interpolated loc0 vertex colours (same triangle/ref as case
+    // 2), ca[1]=FB2 B8G8R8A8 gets the FS's constant loc1 cyan.  FB2 is
+    // pre-filled with a sentinel so uncovered pixels prove the second
+    // attachment's write is coverage-correct, and the BGRA byte order
+    // proves the per-attachment format decode is re-selected per at_q.
+    cases++;
+    // clear FB (ca[0]) to opaque black; FB2 keeps its sentinel fill.
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    ex = 32'hFF000000;                 // {a=255,b=0,g=0,r=0}
+    // sentinel-fill the whole FB2 image (32x32x4 = 1024 words)
+    for (int i = 0; i < 1024; i++)
+      apwr(FB2 + i*4, 32'h12345678);
+    // case-2 triangle + reference colours (identical coverage)
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(1, 32'h3F400000, 32'hBF200000,
+                32'h00000000, 32'h3F800000, 32'h00000000, 32'h3F800000);
+    put_vert(2, 32'hBF200000, 32'h3F600000,
+                32'h00000000, 32'h00000000, 32'h3F800000, 32'h3F800000);
+    ref_xi = '{512, 7168, 1536}; ref_yi = '{512, 1536, 7680};
+    ref_col[0] = '{1.0, 0.0, 0.0, 1.0};
+    ref_col[1] = '{0.0, 1.0, 0.0, 1.0};
+    ref_col[2] = '{0.0, 0.0, 1.0, 1.0};
+    d = mk_draw();
+    d.ca_valid = 4'h3;                          // ca[0] + ca[1]
+    d.ca[1] = '{base: FB2, size: 32'h1000, w: 16'd32, h: 16'd32,
+               fmt: 8'(APU_IMG_FMT_B8G8R8A8_UNORM), mips: 5'd1,
+               layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case47 code=%0d", w_dpl.code));
+    // loc1 cyan {0,1,1,1} on B8G8R8A8 -> bytes {B=255,G=255,R=0,A=255}
+    // -> packed word 0xFF00FFFF.
+    mism = 0;
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        logic [31:0] rpx = ref_px(x, y);
+        checks++;
+        if (rpx == 32'hFFFF_FFFF) begin
+          // outside: FB keeps clear, FB2 keeps sentinel
+          if (fbpx(x, y) != ex)
+            fail($sformatf("case47 ca0 out px(%0d,%0d)=%08x expclr=%08x",
+                           x, y, fbpx(x, y), ex));
+          if (fb2px(x, y) != 32'h12345678)
+            fail($sformatf("case47 ca1 out px(%0d,%0d)=%08x expsent",
+                           x, y, fb2px(x, y)));
+        end else begin
+          // inside: FB = interpolated loc0 (same tolerance as case2),
+          // FB2 = constant loc1 cyan in BGRA order
+          got = fbpx(x, y);
+          for (int c = 0; c < 4; c++) begin
+            automatic int dv = int'(got[8*c +: 8]) -
+                               int'(rpx[8*c +: 8]);
+            if (dv < -1 || dv > 1) begin
+              mism++;
+              if (mism <= 12)
+                $display("case47 ca0 px(%0d,%0d)=%08x ref=%08x",
+                         x, y, got, rpx);
+            end
+          end
+          checks++;
+          if (fb2px(x, y) != 32'hFF00FFFF)
+            fail($sformatf("case47 ca1 in px(%0d,%0d)=%08x exp=ff00ffff",
+                           x, y, fb2px(x, y)));
+        end
+      end
+    if (mism != 0)
+      fail($sformatf("case47 %0d ca0 channel mismatches", mism));
 
     // ---- report ---------------------------------------------------------
     // draw-path counters: the suite draws and writes pixels, so both
