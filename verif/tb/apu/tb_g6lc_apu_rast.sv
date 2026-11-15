@@ -3313,6 +3313,73 @@ module tb_g6lc_apu_rast;
     if (mism != 0)
       fail($sformatf("case47 %0d ca0 channel mismatches", mism));
 
+    // ================= case 48: MRT + per-attachment blend =========
+    // Same two-attachment draw, but now blend[1].en with op MIN on
+    // ca[1] only (blend[0] stays disabled).  This exercises the
+    // blend[at_q] index under at_q=1 — case47 left both attachments
+    // non-blend, so a blend[0]-for-all bug would slip through.  FB2 is
+    // pre-filled with dst {r1,g1,b0,a1} (BGRA word 0xFFFFFF00); the
+    // loc1 cyan src {0,1,1,1} MINs to {0,1,0,1} -> 0xFF00FF00 inside,
+    // while a wrongly-unblended ca[1] would leave plain cyan 0xFF00FFFF.
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    ex = 32'hFF000000;
+    // FB2 dst prefill: B8G8R8A8 bytes {B=0,G=255,R=255,A=255} = 0xFFFFFF00
+    for (int i = 0; i < 1024; i++)
+      apwr(FB2 + i*4, 32'hFFFFFF00);
+    d = mk_draw();
+    d.ca_valid = 4'h3;
+    d.ca[1] = '{base: FB2, size: 32'h1000, w: 16'd32, h: 16'd32,
+               fmt: 8'(APU_IMG_FMT_B8G8R8A8_UNORM), mips: 5'd1,
+               layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    // blend[1]: MIN on colour and alpha (S_BL_MM ignores factors, so
+    // src/dst factor fields are don't-care but left at legal 0=ZERO).
+    d.blend[1].en = 1'b1;
+    d.blend[1].op_c = 3'd3;  // MIN
+    d.blend[1].op_a = 3'd3;  // MIN
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case48 code=%0d", w_dpl.code));
+    mism = 0;
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        logic [31:0] rpx = ref_px(x, y);
+        checks++;
+        if (rpx == 32'hFFFF_FFFF) begin
+          if (fbpx(x, y) != ex)
+            fail($sformatf("case48 ca0 out px(%0d,%0d)=%08x expclr",
+                           x, y, fbpx(x, y)));
+          if (fb2px(x, y) != 32'hFFFFFF00)
+            fail($sformatf("case48 ca1 out px(%0d,%0d)=%08x expdst",
+                           x, y, fb2px(x, y)));
+        end else begin
+          // ca[0] still the plain interpolated loc0 write
+          got = fbpx(x, y);
+          for (int c = 0; c < 4; c++) begin
+            automatic int dv = int'(got[8*c +: 8]) -
+                               int'(rpx[8*c +: 8]);
+            if (dv < -1 || dv > 1) begin
+              mism++;
+              if (mism <= 12)
+                $display("case48 ca0 px(%0d,%0d)=%08x ref=%08x",
+                         x, y, got, rpx);
+            end
+          end
+          checks++;
+          // ca[1] = min(loc1 cyan {0,1,1,1}, dst {1,1,0,1}) = {0,1,0,1}
+          if (fb2px(x, y) != 32'hFF00FF00)
+            fail($sformatf("case48 ca1 in px(%0d,%0d)=%08x exp=ff00ff00",
+                           x, y, fb2px(x, y)));
+        end
+      end
+    if (mism != 0)
+      fail($sformatf("case48 %0d ca0 channel mismatches", mism));
+
     // ---- report ---------------------------------------------------------
     // draw-path counters: the suite draws and writes pixels, so both
     // must have moved, and no more pixels than busy cycles
