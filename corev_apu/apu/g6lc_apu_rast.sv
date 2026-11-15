@@ -4439,8 +4439,15 @@ module g6lc_apu_rast
             end
           end
           S_BL_F2B: begin
+            // RP3: fuse the dst-factor capture with the src*sf FMA issue that
+            // S_BL_M1 would otherwise spend a dedicated cycle on. df_q is not
+            // an operand of this job (it feeds S_BL_M2 two jobs later), and
+            // src_q/sf_q are already stable, so the merge is operand-safe.
             df_q <= fp_res_q;
-            st_q <= S_BL_M1;
+            fp_kind_q <= 2'd0; fp_o_q <= 2'd2; fp_mod_q <= 1'b0;
+            fp_a_q <= src_q[c_q[1:0]]; fp_b_q <= sf_q;
+            fp_ret_q <= S_BL_M2;
+            t_fpgo();
           end
           S_BL_M1: begin
             fp_kind_q <= 2'd0; fp_o_q <= 2'd2; fp_mod_q <= 1'b0;
