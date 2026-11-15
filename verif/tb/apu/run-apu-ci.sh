@@ -37,7 +37,7 @@ case "$LEVEL" in quick) TIER=0;; standard) TIER=1;; full) TIER=2;;
 
 # Ordered cheapest-first; standard runs the first group, full adds the rest.
 STANDARD_SUITES="${APU_CI_STANDARD_SUITES:-doneq gcs vndec vnrep cmdexec vgctl shmod}"
-FULL_SUITES="${APU_CI_FULL_SUITES:-objtab xfer vgpages vnpump rast vnfront shwave shcore vgtop vgsys sys-venus}"
+FULL_SUITES="${APU_CI_FULL_SUITES:-objtab xfer vgpages vnpump rast vnfront shwave shcore vgtop vgsys sys-venus fwpre}"
 
 command -v python3 >/dev/null 2>&1 || { echo "BLOCKED: python3 missing" >&2; exit 3; }
 python3 -c 'import mako, numpy' 2>/dev/null || {
