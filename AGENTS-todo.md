@@ -1122,10 +1122,17 @@ remain release requirements; intermediate raster gates do not narrow the product
     corresponding fix of (3) is temporarily undone. Added `e1a71f947`:
     `ue_gpos_srgbbopadd_1` / `ue_gpos_bgrasrgbbopadd_1` (ONE/ONE ADD on
     R8G8B8A8_SRGB and B8G8R8A8_SRGB; the generator's blend-op path now models the
-    sRGB encode and destination decode), same pass / undo-fails evidence. Still
-    without a device vector: logic op on sRGB, blend factors and write mask on
-    sRGB (generator raises outside the blend-op path), UNORM16 vertex attributes,
-    D16 late-Z.
+    sRGB encode and destination decode), same pass / undo-fails evidence. Added
+    `4e1fa2792`: `ue_gpos_srgblopinvert_1` (logic op INVERT on R8G8B8A8_SRGB is
+    not applied), same evidence. Still without a device vector: blend factors
+    and write mask on sRGB (generator raises outside the blend-op and logic-op
+    paths), UNORM16 vertex attributes, D16 late-Z. Harness: leaf
+    `apu-leaf-20261115T130136-4f069406f630` (depth-stencil clear tree) has unit
+    17/17 and vgtop rc 0 with the three new clear sessions passing; its vgsys was
+    at 257 passed / 0 failed and running. Leaf
+    `apu-leaf-20261115T160700-b4e4530ae630` covers the commits up to `3e6449cc1`
+    (vector refresh, integer clear truncation, BGRA/D16/sRGB-blend sessions);
+    the sRGB logic-op session came after it.
     (11) Freshness coverage extended (`32316e814`): `regen_vectors.sh` now
     generates the 68 graphics sessions the run scripts execute but it did not
     list, the 128-invocation compute sessions and the two query arms; 56 of them
