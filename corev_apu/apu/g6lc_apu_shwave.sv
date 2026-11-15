@@ -2372,17 +2372,33 @@ module g6lc_apu_shwave
     logic [RF_TW-1:0]                      rf_rdt_q;
     logic [VEC*32-1:0]                     rf_rda [LAN*RF_NT];
     wire [RF_TW-1:0]                       rf_tile_w = rf_addr[RF_AW-1 -: RF_TW];
+    // TP3a-2: every bank macro is now NumPorts(2).  Port 0 carries the
+    // existing single rf_* access unchanged; port 1 is the dedicated
+    // operand-prefetch port and is tied idle here until TP3a-3 drives
+    // next-wave reads, so this is a bit-identical refactor (the RF is
+    // the envelope-sanctioned dual-port exception).  req_i/we_i are the
+    // packed port vectors; addr_i/wdata_i/be_i/rdata_o are the
+    // per-port element arrays (same shape as g6lc_ai_cmd_fifo).
     for (genvar l = 0; l < LAN; l++) begin : g_rfl
       for (genvar t = 0; t < RF_NT; t++) begin : g_rft
-        tc_sram #(.NumWords(1 << RF_LW), .DataWidth(VEC*32), .NumPorts(1),
+        logic [1:0]            q_req, q_we;
+        logic [1:0][RF_LW-1:0]  q_addr;
+        logic [1:0][VEC*32-1:0] q_wdata, q_rdata;
+        logic [1:0][VEC*4-1:0]  q_be;
+        assign q_req   = {1'b0, rf_req && ((RF_NT == 1) || (rf_tile_w == rf_tile_t'(t)))};
+        assign q_we    = {1'b0, rf_we  && ((RF_NT == 1) || (rf_tile_w == rf_tile_t'(t)))};
+        assign q_addr[0]   = rf_addr[RF_LW-1:0];
+        assign q_addr[1]   = '0;
+        assign q_wdata[0]  = rf_wdata[l*(VEC*32) +: (VEC*32)];
+        assign q_wdata[1]  = '0;
+        assign q_be[0]     = rf_be[l*(VEC*4) +: (VEC*4)];
+        assign q_be[1]     = '0;
+        tc_sram #(.NumWords(1 << RF_LW), .DataWidth(VEC*32), .NumPorts(2),
                   .SimInit("none")) i_rf (
           .clk_i, .rst_ni,
-          .req_i(rf_req && ((RF_NT == 1) || (rf_tile_w == rf_tile_t'(t)))),
-          .we_i (rf_we  && ((RF_NT == 1) || (rf_tile_w == rf_tile_t'(t)))),
-          .addr_i(rf_addr[RF_LW-1:0]),
-          .wdata_i(rf_wdata[l*(VEC*32) +: (VEC*32)]),
-          .be_i  (rf_be[l*(VEC*4) +: (VEC*4)]),
-          .rdata_o(rf_rda[l*RF_NT + t]));
+          .req_i(q_req), .we_i(q_we), .addr_i(q_addr),
+          .wdata_i(q_wdata), .be_i(q_be), .rdata_o(q_rdata));
+        assign rf_rda[l*RF_NT + t] = q_rdata[0];
       end
     end
     always_comb begin

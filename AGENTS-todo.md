@@ -1308,10 +1308,17 @@ remain release requirements; intermediate raster gates do not narrow the product
     cmd_rdt_q on cmd_clk) also re-banked + verified.  **APU SRAM
     ENVELOPE NOW FULLY CLOSED — every tc_sram in corev_apu/apu is
     depth ≤4096 × width ≤128 (graphics-path AND config-gated).**
-    NEXT: TP3a-2/3 operand prefetch → wave-interleave pipelined issue →
-    G-T2 ≤4 cy/wave-instr (RF dual-port config-sanctioned; single-port
-    prefetch during execute-idle may avoid it). Hazards + phased plan
-    TP3a-1..5 + APU audit in brief.
+    TP3a-2 LANDED: all 32 RF bank macros now NumPorts(2) — port 0 =
+    existing rf_* access, port 1 = dedicated operand-prefetch port tied
+    idle (req=0) until TP3a-3; dual-port is the envelope-sanctioned RF
+    exception. VERIFIED: tb_g6lc_apu_shwave 548/100,832 PASS,
+    cycles=3,666,123 cycle-exact.  NEXT: TP3a-3 operand prefetch →
+    wave-interleave pipelined issue → G-T2 ≤4 cy/wave-instr.  BLOCKER
+    (documented in tp3a-brief): oidx_q operand addresses come from
+    decoded instruction fields, so prefetch needs a decode-lookahead
+    path running ≥1 instr ahead — a real FSM/pipeline restructure, not
+    a local tweak; wave-interleave avoids same-wave forwarding but
+    still needs the adjacent wave decoded first.
   - [ ] TP6 raster width (replaced by FP5/FP6/FP7/FP10 below); TP7 `ShaderCores` with a
     dispatcher and in-order fragment-batch commit; TP8 fabric; TP9 object-table bursts.
     Gate G-T3: same results at 1/2/4/8 cores, geometry chosen by the Pareto study.
