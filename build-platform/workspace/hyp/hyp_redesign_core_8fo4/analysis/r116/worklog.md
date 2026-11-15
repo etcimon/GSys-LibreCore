@@ -351,3 +351,33 @@ budget 1.75e9, same firmware/tohost/flags) to obtain the direct record.
 r127m's own markers were written on 2026-11-14 17:52, before the disk
 filled; its log has a similar hole after 1,796M, which does not affect
 its verdict.
+
+## 14. Remote disk cleanup (2026-11-15, on request)
+
+All run directories under `/opt/testharness/runs` not in use were deleted:
+1,012 directories, about 405G (166 `storamic*` 93G, r126 89G, 156
+`apu-leaf*` 64G, r128 47G, r127x 19G, r127n-deep 16G, the rest small).
+Disk: 610G used / 223G free before, **207G used / 626G free** after.
+
+Kept: every directory referenced by a live process (the active
+`apu-leaf-20261115T060601`, witnesses r127m, r128b, r129-deep, the queued
+`r129b-mmustaged-diag2` and the four model builds they execute),
+`hyp8-firmware-r116`, `linux-payload-l1s2` and
+`review-private-runtime-20260915`.
+
+The raw traces of the closed witnesses no longer exist, r126's included.
+Before deletion a digest of each of the 22 `hyp8-osbi-scalar-*` runs was
+written to `/opt/testharness/evidence/hyp8-witness-digests/<tag>/`: uart,
+launch record, observer JSONL and exit code, every census line, error
+lines with context, log head/tail, and the last 400k / 200k lines of the
+hart / RVFI traces. A copy is in
+`remote-runs/hyp8-witness-digests-20261115/` (213 files, 39 MiB, sha256
+manifest verified after the pull). r126's digest holds both markers (uart
+lines 288 and 303), observer exit 0 and 2,998 census lines through
+cyc 2,998,000,000.
+
+The digest's `*.gz` members were first written uncompressed with a stray
+empty gzip stream appended (the child process wrote through the GzipFile's
+descriptor); the text was intact and all 38 were recompressed and
+re-read. Tooling: `build-platform/workspace/build/remote-clean/`
+(`clean_runs.py` plan/apply, `repair_digests.py`, `export_digests.py`).
