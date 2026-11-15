@@ -855,11 +855,36 @@ module g6lc_apu_vnfront
 
     // §7b payload staging: KEEP words land here while the decoder
     // runs; post-decode flows read them through StStgRd/StStgCap.
-    tc_sram #(.NumWords(PayStageWords), .DataWidth(32), .NumPorts(1),
-              .Latency(1), .SimInit("none")) i_pay_stage (
-      .clk_i, .rst_ni, .req_i(stg_req), .we_i(stg_we),
-      .addr_i(stg_addr), .wdata_i(stg_wdata), .be_i('1),
-      .rdata_o(stg_rdata));
+    // TP3a envelope: PayStageWords (default 32768) exceeds the 4096 SRAM
+    // depth, so the stage is STG_NT depth tiles of <=4096 x 32 tc_sram.
+    // Tile t holds in-bank address stg_addr[STG_LW-1:0] of tile
+    // stg_addr[STG_AW-1 -: STG_TW]; the stg_* port interface and the
+    // shared write-staging/read-cursor schedule are unchanged
+    // (bit-identical).  stg_rdt_q registers the in-flight read's tile
+    // (tc_sram rdata_o is registered; stg_addr may already point at the
+    // next access at capture time).
+    localparam int unsigned STG_AW = StgBits;
+    localparam int unsigned STG_LW = (STG_AW > 12) ? 12 : STG_AW;
+    localparam int unsigned STG_NT = (STG_AW > STG_LW) ? (1 << (STG_AW - STG_LW)) : 1;
+    localparam int unsigned STG_TW = (STG_NT > 1) ? (STG_AW - STG_LW) : 1;
+    typedef logic [STG_TW-1:0]              stg_tile_t;
+    logic [STG_TW-1:0]                      stg_rdt_q;
+    logic [31:0]                            stg_rda [STG_NT];
+    wire [STG_TW-1:0]                       stg_tile_w = stg_addr[STG_AW-1 -: STG_TW];
+    for (genvar t = 0; t < STG_NT; t++) begin : g_stgt
+      tc_sram #(.NumWords(1 << STG_LW), .DataWidth(32), .NumPorts(1),
+                .Latency(1), .SimInit("none")) i_pay_stage (
+        .clk_i, .rst_ni,
+        .req_i(stg_req && ((STG_NT == 1) || (stg_tile_w == stg_tile_t'(t)))),
+        .we_i (stg_we  && ((STG_NT == 1) || (stg_tile_w == stg_tile_t'(t)))),
+        .addr_i(stg_addr[STG_LW-1:0]),
+        .wdata_i(stg_wdata), .be_i('1), .rdata_o(stg_rda[t]));
+    end
+    assign stg_rdata = stg_rda[stg_rdt_q];
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) stg_rdt_q <= '0;
+      else if (stg_req && !stg_we) stg_rdt_q <= stg_tile_w;
+    end
 
     g6lc_apu_vnrep #(.Enable(1'b1)) i_rep (
       .clk_i(clk_i), .rst_ni(rst_ni),

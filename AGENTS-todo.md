@@ -1288,10 +1288,15 @@ remain release requirements; intermediate raster gates do not narrow the product
     re-bank COMPLETE.**  BROADER APU AUDIT (tp3a-brief): vnfront i_stg
     32768×32 (depth 8×, cmd staging), objmem caches ×512 (width 4×),
     sg ×160, fwram/storage config-gated — separate modules, multi-session.
-    NEXT: TP3a-2/3 operand prefetch → wave-interleave pipelined issue →
-    G-T2 ≤4 cy/wave-instr (RF dual-port config-sanctioned; single-port
-    prefetch during execute-idle may avoid it). Hazards + phased plan
-    TP3a-1..5 + APU audit in brief.
+    TP3a-1e LANDED: vnfront i_pay_stage (PayStageWords=32768×32, cmd
+    staging) re-banked to STG_NT=8 × 4096×32 depth tiles + stg_rdt_q
+    gather; stg_* interface + staging schedule unchanged. VERIFIED:
+    tb_g6lc_apu_vnfront ALL sessions PASS (incl. payfull exercising
+    i_pay_stage).  NEXT: objmem caches (×512 width) + sg (×160) width
+    re-banks; then TP3a-2/3 operand prefetch → wave-interleave pipelined
+    issue → G-T2 ≤4 cy/wave-instr (RF dual-port config-sanctioned;
+    single-port prefetch during execute-idle may avoid it). Hazards +
+    phased plan TP3a-1..5 + APU audit in brief.
   - [ ] TP6 raster width (replaced by FP5/FP6/FP7/FP10 below); TP7 `ShaderCores` with a
     dispatcher and in-order fragment-batch commit; TP8 fabric; TP9 object-table bursts.
     Gate G-T3: same results at 1/2/4/8 cores, geometry chosen by the Pareto study.
