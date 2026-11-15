@@ -949,6 +949,55 @@ module tb_g6lc_apu_rast;
                          x, y, got, ex));
       end
 
+    // ============ case 6b: ONE_MINUS src factor (S_BL_F1B) ============
+    cases++;
+    // same clear (0.2,0.2,0.2,0.4) and same screen-space triangle as case6
+    d = mk_clear();
+    d.clear_color[0] = 32'h3E4CCCCD;
+    d.clear_color[1] = 32'h3E4CCCCD;
+    d.clear_color[2] = 32'h3E4CCCCD;
+    d.clear_color[3] = 32'h3ECCCCCD;   // 0.4 -> byte 102
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    // flat src (1.0,0.0,0.0,0.25); colour src factor OM_SRC_ALPHA routes
+    // RGB through S_BL_F1B with sf=1-srcA=0.75, dst SRC_ALPHA gives
+    // df=srcA=0.25 -> rgb = src*0.75 + dst*0.25 = {0.80,0.05,0.05}.
+    // srcA=0.25 (not 0.5) keeps OM vs non-OM factors numerically distinct
+    // so a broken ONE_MINUS path cannot pass by coincidence. alpha blend
+    // is masked off (mask RGB) so dst alpha byte 102 is kept.
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3E800000);
+    put_vert(1, 32'h3F400000, 32'hBF200000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3E800000);
+    put_vert(2, 32'hBF200000, 32'h3F600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3E800000);
+    ref_xi = '{512, 7168, 1536}; ref_yi = '{512, 1536, 7680};
+    d = mk_draw();
+    d.blend[0] = '{en: 1'b1,
+                  src_c: APU_RAST_BF_OM_SRC_ALPHA,
+                  dst_c: APU_RAST_BF_SRC_ALPHA,
+                  op_c:  APU_RAST_BO_ADD,
+                  src_a: APU_RAST_BF_ONE,
+                  dst_a: APU_RAST_BF_ZERO,
+                  op_a:  APU_RAST_BO_ADD,
+                  mask:  4'h7,
+                  pad:   '0};
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case6b code=%0d", w_dpl.code));
+    // inside: r=1.0*0.75+0.2*0.25=0.80->204, g=b=0.0*0.75+0.2*0.25=0.05->13
+    ex = {8'd102, 8'd13, 8'd13, 8'd204};
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        checks++;
+        got = fbpx(x, y);
+        if (ref_px(x, y) == 32'hFFFF_FFFF) begin
+          if (got != 32'h66333333)
+            fail($sformatf("case6b out px(%0d,%0d)=%08x expclr", x, y, got));
+        end else if (px_bad(got, ex, 1))
+          fail($sformatf("case6b px(%0d,%0d)=%08x exp~%08x",
+                         x, y, got, ex));
+      end
+
     // ================= case 7: D32 depth, two tris ===============
     cases++;
     // colour clear to opaque black
