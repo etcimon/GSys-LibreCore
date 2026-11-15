@@ -377,6 +377,14 @@ module g6lc_apu_rast
     logic [31:0]    fp_a_q, fp_b_q, fp_c_q, fp_res_q;
     st_e            fp_ret_q;
     logic           fp_iss_q;
+    // FP6-opt(i): second FMA lane for the S_F_V0 varying chain.  The 16
+    // per-location jobs form 4 independent per-component accumulator
+    // chains; two component jobs of the same op issue per cycle on
+    // i_fma / i_fma2.  fp2_* mirror the fp_* operand flops for lane B.
+    logic [1:0]     fp2_o_q;
+    logic           fp2_mod_q;
+    logic [31:0]    fp2_a_q, fp2_b_q, fp2_c_q;
+    logic           fp2_iss_q;
     // RP2: per-cycle issue step counters for the two interpolation
     // chains (S_F_LE0 fragment chain, S_F_V0 varying chain).  ik_q is
     // 0 on entry to either and returns to 0 on exit; rsd_q marks a
@@ -396,6 +404,11 @@ module g6lc_apu_rast
     fpnew_pkg::operation_e fma_op;
     logic                 fma_mod, fma_iv, fma_ir, fma_ov;
     logic [31:0]          fma_res;
+    // FP6-opt(i): lane-B FMA wires (S_F_V0 component pairs only).
+    logic [2:0][31:0] fma2_ops;
+    fpnew_pkg::operation_e fma2_op;
+    logic                 fma2_mod, fma2_iv, fma2_ir, fma2_ov;
+    logic [31:0]          fma2_res;
     logic [1:0][31:0]     dq_ops;
     fpnew_pkg::operation_e dq_op;
     logic                 dq_iv, dq_ir, dq_ov;
@@ -426,6 +439,25 @@ module g6lc_apu_rast
       .result_o(fma_res), .status_o(),
       .extension_bit_o(), .tag_o(), .mask_o(), .aux_o(),
       .out_valid_o(fma_ov), .out_ready_i(1'b1),
+      .busy_o(), .reg_ena_i('0), .early_out_valid_o()
+    );
+    // FP6-opt(i): dedicated second FMA lane, used only by the S_F_V0
+    // component-pair issue.  Same parameters as i_fma so both lanes
+    // produce bit-identical results for the same operands/op.
+    fpnew_fma #(
+      .FpFormat(fpnew_pkg::FP32), .NumPipeRegs(0),
+      .PipeConfig(fpnew_pkg::BEFORE),
+      .TagType(logic), .AuxType(logic)
+    ) i_fma2 (
+      .clk_i, .rst_ni,
+      .operands_i(fma2_ops), .is_boxed_i(3'b111),
+      .rnd_mode_i(fpnew_pkg::RNE), .op_i(fma2_op),
+      .op_mod_i(fma2_mod), .tag_i(1'b0), .mask_i(1'b1), .aux_i(1'b0),
+      .in_valid_i(fma2_iv), .in_ready_o(fma2_ir),
+      .flush_i(1'b0),
+      .result_o(fma2_res), .status_o(),
+      .extension_bit_o(), .tag_o(), .mask_o(), .aux_o(),
+      .out_valid_o(fma2_ov), .out_ready_i(1'b1),
       .busy_o(), .reg_ena_i('0), .early_out_valid_o()
     );
     fpnew_divsqrt_th_32 #(
@@ -469,6 +501,12 @@ module g6lc_apu_rast
                      (fp_o_q == 2'd1) ? fpnew_pkg::ADD : fpnew_pkg::MUL;
     assign fma_mod = fp_mod_q;
     assign fma_iv  = fp_iss_q && fp_kind_q == 2'd0;
+    // FP6-opt(i): lane B is FMA-only and dedicated to S_F_V0 pairs.
+    assign fma2_ops = {fp2_c_q, fp2_b_q, fp2_a_q};
+    assign fma2_op  = (fp2_o_q == 2'd0) ? fpnew_pkg::FMADD :
+                      (fp2_o_q == 2'd1) ? fpnew_pkg::ADD : fpnew_pkg::MUL;
+    assign fma2_mod = fp2_mod_q;
+    assign fma2_iv  = fp2_iss_q;
     assign dq_ops  = {fp_b_q, fp_a_q};
     assign dq_op   = fpnew_pkg::DIV;
     assign dq_iv   = fp_iss_q && fp_kind_q == 2'd1;
@@ -979,6 +1017,17 @@ module g6lc_apu_rast
     // next ACTIVE varying location above the cursor (or 8 = fragment
     // done); consumed by S_F_VW1 to skip the LSET dispatch on hits
     wire  [3:0]   nva_w = f_nvar(varm_q, lc_q);
+    // FP6-opt(i): S_F_V0 pair-step decode.  ik_q counts pair-steps
+    // 0..8 (8=done); step p issues the two jobs {2p,2p+1}: op = p[2:1],
+    // comps {fp_ca,fp_cb} = {p[0]?2:0, +1}.  The comp-pair alternates
+    // {0,1}/{2,3} each step so the result capture and the next issue
+    // never touch the same conv_q slot in one cycle.  Meaningful only
+    // inside S_F_V0 (ik_q is shared with S_F_LE0).
+    wire  [1:0]   fp_ca = {ik_q[0], 1'b0};   // lane-A comp: 0 or 2
+    wire  [1:0]   fp_cb = fp_ca + 2'd1;      // lane-B comp: 1 or 3
+    wire  [1:0]   fp_pa = {~ik_q[0], 1'b0};  // prev-step lane-A comp
+    wire  [1:0]   fp_pb = fp_pa + 2'd1;      // prev-step lane-B comp
+    wire  [1:0]   fp_op = ik_q[2:1];         // op 0..3
     // G2b quad scan: (sx_q,sy_q) is the even-aligned 2x2 block base,
     // (px_q,py_q) the pixel of the lane under construction; lane_q
     // is the 0..3 lane cursor inside the block and help_q its flag
@@ -1599,8 +1648,14 @@ module g6lc_apu_rast
           if (st_q == S_MPW) mpw_q <= mpw_q + 32'd1;
           if (mp_req_valid_o && mp_req_ready_i) mpn_q <= mpn_q + 32'd1;
           if (st_q inside {S_FPS, S_FPW}) fpw_q <= fpw_q + 32'd1;
-          if ((fma_iv && fma_ir) || (dq_iv && dq_ir) || (cv_iv && cv_ir))
-            fpn_q <= fpn_q + 32'd1;
+          // FP6-opt(i): count fp OPS not issue-cycles — the shared
+          // i_fma/i_dsq/i_cvt path is mutually exclusive via fp_kind_q
+          // (<=1 op/cycle) but lane-B i_fma2 issues in parallel, so a
+          // V0 pair-step is 2 ops.  Sum the per-lane accept pulses.
+          fpn_q <= fpn_q + {31'd0, (fma_iv  && fma_ir)}
+                        + {31'd0,  fma2_iv}
+                        + {31'd0, (dq_iv   && dq_ir)}
+                        + {31'd0, (cv_iv   && cv_ir)};
           // FP6 diagnostics: S_F_LE0 ik_q>=14 is the post-DIV window
           // (divider result wait); S_F_VW0/VW1 !wq_ok is frag-write
           // queue back-pressure.  Both inside CL_INTERP already.
@@ -1661,6 +1716,8 @@ module g6lc_apu_rast
         wq_strb_q[0] <= '0; wq_strb_q[1] <= '0;
         fp_kind_q <= '0; fp_o_q <= '0; fp_mod_q <= 1'b0;
         fp_a_q <= '0; fp_b_q <= '0; fp_c_q <= '0; fp_res_q <= '0;
+        fp2_o_q <= '0; fp2_mod_q <= 1'b0;
+        fp2_a_q <= '0; fp2_b_q <= '0; fp2_c_q <= '0; fp2_iss_q <= 1'b0;
         fp_ret_q <= S_IDLE; fp_iss_q <= 1'b0;
         ik_q <= '0; rsd_q <= 1'b0; rdiv_q <= 1'b0;
         clr_pix_q <= '0; cy_q <= '0; cx_q <= '0;
@@ -3740,36 +3797,62 @@ module g6lc_apu_rast
             end
           end
           S_F_V0: begin
-            // per-location varying chain (RP2): 16 jobs issue one per
-            // cycle, job k = {op=ik_q[3:2], comp=ik_q[1:0]}:
-            //   op0 MUL   pv0*V0[c]          op1 FMADD pv1*V1[c]+acc
-            //   op2 FMADD pv2*V2[c]+acc      op3 MUL   acc*rs_q
-            // conv_q[c] is the per-component accumulator: job k reads
-            // the value job k-4 wrote, captured at the end of cycle
-            // k-3, so every read sees a settled register.
+            // per-location varying chain (RP2 + FP6-opt(i)): the 16
+            // jobs form 4 independent per-component chains, so they
+            // issue as 8 component PAIRS, two per cycle — ik_q counts
+            // pair-steps 0..8 (8=done).  Step p covers jobs {2p,2p+1}:
+            //   op = p[2:1]: 0 MUL pv0*V0[c]   1 FMADD pv1*V1[c]+acc
+            //                 2 FMADD pv2*V2[c]+acc   3 MUL acc*rs_q
+            //   lane A (i_fma) -> comp fp_ca, lane B (i_fma2) -> fp_cb.
+            // The two jobs in a pair are the same op on adjacent
+            // components — independent, so both lanes run in parallel;
+            // per-component op order is unchanged (bit-identical).
+            // conv_q[c] is the per-component accumulator: a pair-step
+            // captures the previous pair's two results one cycle after
+            // issue; the comp-pairs alternate {0,1}/{2,3} so the capture
+            // and the next issue never touch the same conv_q slot.
             if (ik_q != 5'd0) begin
-              conv_q[2'(ik_q - 5'd1)] <= fma_res;
-              fp_res_q <= fma_res;
+              conv_q[fp_pa] <= fma_res;
+              conv_q[fp_pb] <= fma2_res;
+              fp_res_q <= fma2_res;
             end
-            if (ik_q == 5'd16) begin
-              fp_iss_q <= 1'b0; ik_q <= '0; st_q <= S_F_VW0;
+            if (ik_q == 5'd8) begin
+              fp_iss_q <= 1'b0; fp2_iss_q <= 1'b0;
+              ik_q <= '0; st_q <= S_F_VW0;
             end else begin
               fp_kind_q <= 2'd0; fp_mod_q <= 1'b0; fp_iss_q <= 1'b1;
-              unique case (ik_q[3:2])
-                2'd0: begin fp_o_q <= 2'd2;
-                        fp_a_q <= pv_q[0];
-                        fp_b_q <= var_q[0][lc_q[2:0]][ik_q[1:0]]; end
-                2'd1: begin fp_o_q <= 2'd0;
-                        fp_a_q <= pv_q[1];
-                        fp_b_q <= var_q[1][lc_q[2:0]][ik_q[1:0]];
-                        fp_c_q <= conv_q[ik_q[1:0]]; end
-                2'd2: begin fp_o_q <= 2'd0;
-                        fp_a_q <= pv_q[2];
-                        fp_b_q <= var_q[2][lc_q[2:0]][ik_q[1:0]];
-                        fp_c_q <= conv_q[ik_q[1:0]]; end
-                default: begin fp_o_q <= 2'd2;   // op3: acc*rs_q
-                        fp_a_q <= conv_q[ik_q[1:0]];
-                        fp_b_q <= rs_q; end
+              fp2_mod_q <= 1'b0; fp2_iss_q <= 1'b1;
+              unique case (fp_op)
+                2'd0: begin  // op0: pv0*V0[c]
+                  fp_o_q <= 2'd2; fp_a_q <= pv_q[0];
+                  fp_b_q <= var_q[0][lc_q[2:0]][fp_ca];
+                  fp_c_q <= '0;
+                  fp2_o_q <= 2'd2; fp2_a_q <= pv_q[0];
+                  fp2_b_q <= var_q[0][lc_q[2:0]][fp_cb];
+                  fp2_c_q <= '0;
+                end
+                2'd1: begin  // op1: pv1*V1[c]+conv[c]
+                  fp_o_q <= 2'd0; fp_a_q <= pv_q[1];
+                  fp_b_q <= var_q[1][lc_q[2:0]][fp_ca];
+                  fp_c_q <= conv_q[fp_ca];
+                  fp2_o_q <= 2'd0; fp2_a_q <= pv_q[1];
+                  fp2_b_q <= var_q[1][lc_q[2:0]][fp_cb];
+                  fp2_c_q <= conv_q[fp_cb];
+                end
+                2'd2: begin  // op2: pv2*V2[c]+conv[c]
+                  fp_o_q <= 2'd0; fp_a_q <= pv_q[2];
+                  fp_b_q <= var_q[2][lc_q[2:0]][fp_ca];
+                  fp_c_q <= conv_q[fp_ca];
+                  fp2_o_q <= 2'd0; fp2_a_q <= pv_q[2];
+                  fp2_b_q <= var_q[2][lc_q[2:0]][fp_cb];
+                  fp2_c_q <= conv_q[fp_cb];
+                end
+                default: begin  // op3: conv[c]*rs_q
+                  fp_o_q <= 2'd2; fp_a_q <= conv_q[fp_ca];
+                  fp_b_q <= rs_q; fp_c_q <= '0;
+                  fp2_o_q <= 2'd2; fp2_a_q <= conv_q[fp_cb];
+                  fp2_b_q <= rs_q; fp2_c_q <= '0;
+                end
               endcase
               ik_q <= ik_q + 5'd1;
             end
@@ -4707,7 +4790,7 @@ module g6lc_apu_rast
     //    merged interpolation chains S_F_LE0 / S_F_V0 (RP2); in_valid
     //    is only raised in those states
     assert property (@(posedge clk_i) disable iff (!rst_ni)
-        (fma_iv || dq_iv || cv_iv) |->
+        (fma_iv || fma2_iv || dq_iv || cv_iv) |->
         (st_q == S_FPW || st_q == S_F_LE0 || st_q == S_F_V0 ||
          st_q == S_ROP_DI));
     //  - out_valid pulses are consumed in S_FPW, or land inside the
@@ -4718,7 +4801,7 @@ module g6lc_apu_rast
     //    RP3: S_ROP_DI is the pipelined dst-decode chain (reads
     //    cv_res/fma_res one step after issue, S_F_LE0 discipline).
     assert property (@(posedge clk_i) disable iff (!rst_ni)
-        (fma_ov || cv_ov) |->
+        (fma_ov || fma2_ov || cv_ov) |->
         (st_q == S_FPW || st_q == S_F_LE0 || st_q == S_F_V0 ||
          st_q == S_ROP_DI));
     assert property (@(posedge clk_i) disable iff (!rst_ni)

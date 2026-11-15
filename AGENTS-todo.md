@@ -1449,6 +1449,26 @@ remain release requirements; intermediate raster gates do not narrow the product
       (pipelined shader issue / banked RF) gating the FP6 preamble
       restructure — still multi-session, deferred.  Detail: fp0-brief
       "FP0e LANDED+VERIFIED".
+    - FP0f S_F_V0 second FMA lane (the FP6-recon "extra FP lane(s) for the
+      4 independent varying comps" option i): the 16 per-location interp
+      jobs form 4 independent per-component accumulator chains, so two
+      component jobs of the SAME op issue per cycle on i_fma + a new
+      identical-parameter i_fma2.  ik_q is reused as a pair-step counter
+      0..8 (still 0-on-entry/0-on-exit; S_F_LE0 unaffected); step p covers
+      jobs {2p,2p+1}=op p[2:1], comps {fp_ca={p[0],0}, fp_cb=+1}; the
+      comp-pair alternates {0,1}/{2,3} each step so the conv_q capture and
+      next issue always hit DISJOINT slots.  Per-component op order
+      unchanged -> bit-identical.  New fp2_* operand flops + fp2_iss_q;
+      fma2_iv/fma2_ov added to the fp SVA whitelists; fpn_q changed from
+      issue-cycle count to per-lane op SUM (true fp work).
+      MEASURED: interp 1,464,978->1,195,618 (-18.4%), rast busy
+      2,195,847->1,926,487 (-12.3%), fpn IDENTICAL 1,080,678 (same op
+      count).  Cumulative vs pre-FP0e: interp -29.7%, busy -20.7%.
+      VERIFIED: rast 46c/15,616chk pixel-exact; ALL 144 ue_gpos vgtop
+      sessions PASS (real SPIR-V varyings/gradients/texture/derivatives/
+      depth/blend/MRT/stencil/LOP/instancing/discard, zero failures);
+      yosys Enable=0/1 clean (0 problems, no latches).  Detail: fp0-brief
+      "FP0f LANDED+VERIFIED".
   - [ ] Gate G-F1 (with G-T1): graphics-session cycles ≤ 25% of the frame baseline,
     pixel-identical; unchanged-state draws re-resolve nothing; the 50,784-index draw
     finishes inside Mesa's fence patience. Threshold provisional until FP0.
