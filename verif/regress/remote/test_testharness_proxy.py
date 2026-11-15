@@ -1761,13 +1761,19 @@ class McCacheCounterParseTests(unittest.TestCase):
     def check(self, parser):
         # Six-field (legacy), eight-field (selfinv), ten-field
         # (write-update), fourteen-field (posted-write) and eighteen-field
-        # (M1c hold split) lines all parse.
-        self.assertEqual(parser(self.LINE + '\n'), self.WANT)
-        self.assertEqual(parser('banner\n' + self.LINE + '\ntrailer\n'), self.WANT)
-        self.assertEqual(parser(self.LINE8 + '\n'), self.WANT8)
-        self.assertEqual(parser(self.LINE10 + '\n'), self.WANT10)
-        self.assertEqual(parser(self.LINE14 + '\n'), self.WANT14)
-        self.assertEqual(parser(self.LINE18 + '\n'), self.WANT18)
+        # (M1c hold split) lines all parse.  The two runners' parsers emit
+        # different optional counter sets — run_mc_int2_review adds
+        # hub_aw_hold_*/l2_pf_* and run_opensbi_source_review adds only
+        # hub_ar_hold — so compare on the fields WANT actually tracks rather
+        # than requiring byte-identical key sets.
+        def proj(parsed, want):
+            return {k: parsed.get(k) for k in want}
+        self.assertEqual(proj(parser(self.LINE + '\n'), self.WANT), self.WANT)
+        self.assertEqual(proj(parser('banner\n' + self.LINE + '\ntrailer\n'), self.WANT), self.WANT)
+        self.assertEqual(proj(parser(self.LINE8 + '\n'), self.WANT8), self.WANT8)
+        self.assertEqual(proj(parser(self.LINE10 + '\n'), self.WANT10), self.WANT10)
+        self.assertEqual(proj(parser(self.LINE14 + '\n'), self.WANT14), self.WANT14)
+        self.assertEqual(proj(parser(self.LINE18 + '\n'), self.WANT18), self.WANT18)
         self.assertIsNone(parser('*** [mc_verdict] program exit code 0\n'))
         self.assertIsNone(parser('*** [mc_cache] l2_hit=x l2_miss=1\n'))
 
