@@ -302,7 +302,7 @@ module g6lc_apu_rast
       S_ROP_DI, S_ROP_DM, S_ROP_DS,
       S_BL_SAT, S_BL_MM,
       S_BL_F1, S_BL_F1B, S_BL_F2, S_BL_F2B,
-      S_BL_M1, S_BL_M2, S_BL_OP, S_BL_ST,
+      S_BL_M2, S_BL_OP, S_BL_ST,
       S_ROP_WR, S_ROP_NX,
       S_BATNEXT,
       S_FIN_OK, S_FIN_BAD,
@@ -1627,7 +1627,7 @@ module g6lc_apu_rast
         if (s inside {S_ROP_R0, S_ROP_R1, S_ROP_R2,
                       S_ROP_DI, S_ROP_DM, S_ROP_DS,
                       S_BL_SAT, S_BL_MM, S_BL_F1, S_BL_F1B, S_BL_F2,
-                      S_BL_F2B, S_BL_M1, S_BL_M2, S_BL_OP, S_BL_ST,
+                      S_BL_F2B, S_BL_M2, S_BL_OP, S_BL_ST,
                       S_ROP_WR, S_ROP_NX, S_ROP_LOP}) return CL_MERGE;
         return CL_CTL;
       endfunction
@@ -4452,8 +4452,15 @@ module g6lc_apu_rast
               fp_ret_q <= S_BL_F2B;
               t_fpgo();
             end else begin
+              // RP3: fuse the src*sf FMA issue that S_BL_M1 would otherwise
+              // spend a dedicated cycle on (same operand-safety argument as
+              // S_BL_F2B: df_q feeds S_BL_M2 two jobs later, src_q/sf_q are
+              // stable). This leaves S_BL_M1 unreachable.
               df_q <= f_fbase(bdf_w, c_q[1:0]);
-              st_q <= S_BL_M1;
+              fp_kind_q <= 2'd0; fp_o_q <= 2'd2; fp_mod_q <= 1'b0;
+              fp_a_q <= src_q[c_q[1:0]]; fp_b_q <= sf_q;
+              fp_ret_q <= S_BL_M2;
+              t_fpgo();
             end
           end
           S_BL_F2B: begin
@@ -4462,12 +4469,6 @@ module g6lc_apu_rast
             // an operand of this job (it feeds S_BL_M2 two jobs later), and
             // src_q/sf_q are already stable, so the merge is operand-safe.
             df_q <= fp_res_q;
-            fp_kind_q <= 2'd0; fp_o_q <= 2'd2; fp_mod_q <= 1'b0;
-            fp_a_q <= src_q[c_q[1:0]]; fp_b_q <= sf_q;
-            fp_ret_q <= S_BL_M2;
-            t_fpgo();
-          end
-          S_BL_M1: begin
             fp_kind_q <= 2'd0; fp_o_q <= 2'd2; fp_mod_q <= 1'b0;
             fp_a_q <= src_q[c_q[1:0]]; fp_b_q <= sf_q;
             fp_ret_q <= S_BL_M2;
