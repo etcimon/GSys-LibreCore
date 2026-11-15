@@ -597,11 +597,14 @@ AI island / ai-matrix FO4 program (2026-10-26/27, hyp tree of record `build-plat
       expects SUB_LINES=4 acks + block_base+i*16 addresses; PASSES). Remote
       `run_inval_review.py` re-run remains for the record but local evidence is conclusive.
       **Local runners added 2026-11-15:** `verif/tb/l2/run-coherence-hub.sh`
-      (tb_g6lc_coherence_l2, USE_L3/negative/scenario knobs) and
+      (tb_g6lc_coherence_l2, USE_L3/negative/scenario knobs),
       `verif/tb/l2/run-l2-leaf.sh` (tb_g6lc_inval_bus + tb_g6lc_l2_tag_miter +
-      tb_g6lc_pf — the leaf benches that were remote-harness-only). The leaf
-      benches were verified clean end-to-end incl. WRITE_UPDATE miter arm and
-      every negative control; `tb_g6lc_pf` scenario-4-style L3 geometry notes:
+      tb_g6lc_pf) and `verif/tb/uncore/run-uncore-leaf.sh`
+      (tb_g6lc_inval_retain + tb_g6lc_ooo_snoop_filter + tb_g6lc_snoop_filter +
+      tb_g6lc_axi_2to1_mux) — the leaf benches that were remote-harness-only.
+      All verified clean end-to-end incl. WRITE_UPDATE miter arm and every
+      negative control; `tb_g6lc_hpdcache_cmo` stays remote-only (full
+      hpdcache subsystem). `tb_g6lc_pf` scenario-4-style L3 geometry notes:
       coherence scenario 4 needs `L3_SET_ASSOC > L2 SET_ASSOC` (L3 must retain
       more same-set lines than L2's ways) or `COH_L3_PROBE` misfires — a bench
       precondition, not an RTL bug.
