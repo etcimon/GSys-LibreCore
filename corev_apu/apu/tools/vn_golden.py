@@ -44,7 +44,11 @@ import vkxml               # noqa: E402  (added to sys.path by gen_vn_tables)
 import vn_protocol         # noqa: E402
 
 REPO = G.REPO
-VEC_DIR = REPO / 'verif' / 'tb' / 'apu' / 'vn_vectors'
+# APU_VN_VEC_DIR redirects every generated file (the freshness check
+# regenerates into a scratch directory and compares); inputs are
+# never read from this directory.
+VEC_DIR = (Path(os.environ['APU_VN_VEC_DIR']) if os.environ.get('APU_VN_VEC_DIR')
+           else REPO / 'verif' / 'tb' / 'apu' / 'vn_vectors')
 
 # fault codes reported in the record's `fault` field (apu_vn_fault_e)
 FAULT = {'NONE': 0, 'UNKNOWN_TYPE': 1, 'STYPE': 2, 'PNEXT': 3, 'FLAGS': 4,
