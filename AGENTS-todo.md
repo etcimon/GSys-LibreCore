@@ -1274,8 +1274,13 @@ remain release requirements; intermediate raster gates do not narrow the product
     worst envelope offender) re-banked to PR_NT=16 × 4096×32 depth tiles,
     same tile-register pattern; pr_* interface unchanged. VERIFIED:
     tb_g6lc_apu_shwave 548/100,832 PASS, cycles 3,666,123 cycle-exact.
-    NEXT: remaining shmod decode tables (7× 8,192-deep + i_const/i_phi
-    width) same pattern — cold commit path; then TP3a-2 NumPorts(1)→(2)
+    TP3a-1c LANDED: six 8,192-deep decode tables (i_type/decor/var/rm/
+    blk/func) re-banked to ID_NT=2 × 4096×W tiles via shared
+    ID_AW=IW+SW=13 decode + per-table *_rdt_q gather; interfaces
+    unchanged. VERIFIED: same bench 548/100,832 PASS, cycles
+    3,666,123 cycle-exact — ALL shmod depth violations now cleared.
+    NEXT: i_const (512b→4 banks) + i_phi (160b→2 banks) width re-bank
+    (RF lane-gather pattern, semi-hot/cold); then TP3a-2 NumPorts(1)→(2)
     read port for operand prefetch → wave-interleave pipelined issue →
     G-T2 ≤4 cy/wave-instr. Hazards + phased plan TP3a-1..5 in brief.
   - [ ] TP6 raster width (replaced by FP5/FP6/FP7/FP10 below); TP7 `ShaderCores` with a

@@ -1002,30 +1002,109 @@ module g6lc_apu_shmod
       if (!rst_ni) pr_rdt_q <= '0;
       else if (pr_req && !pr_we) pr_rdt_q <= pr_tile_w;
     end
-    tc_sram #(.NumWords(ShaderSlots*ShaderIds), .DataWidth(96),
-              .NumPorts(1)) i_type (
-      .clk_i, .rst_ni, .req_i(ty_req), .we_i(ty_we), .addr_i(ty_addr),
-      .wdata_i(ty_wdata), .be_i(12'hFFF), .rdata_o(ty_rdata));
+    // TP3a: the ShaderIds-indexed decode tables are 8192 rows deep,
+    // over the 4096 SRAM envelope.  Each is re-banked as ID_NT depth
+    // tiles of <=4096 x DataWidth tc_sram; tile t holds in-bank address
+    // <t>_addr[ID_LW-1:0] of tile <t>_addr[ID_AW-1 -: ID_TW].  The
+    // {slot,id} row access and each table's req/we/addr/wdata/be/rdata
+    // interface are unchanged (bit-identical), so the commit/decode
+    // schedule is untouched.  <t>_rdt_q registers the in-flight read's
+    // tile for the gather (tc_sram rdata_o is registered; the address
+    // may already point at the next access at capture time).
+    localparam int unsigned ID_AW = IW + SW;
+    localparam int unsigned ID_LW = (ID_AW > 12) ? 12 : ID_AW;
+    localparam int unsigned ID_NT = (ID_AW > ID_LW) ? (1 << (ID_AW - ID_LW)) : 1;
+    localparam int unsigned ID_TW = (ID_NT > 1) ? (ID_AW - ID_LW) : 1;
+    typedef logic [ID_TW-1:0]              id_tile_t;
+    logic [ID_TW-1:0]                      ty_rdt_q;
+    logic [95:0]                           ty_rda [ID_NT];
+    wire [ID_TW-1:0]                       ty_tile_w = ty_addr[ID_AW-1 -: ID_TW];
+    for (genvar t = 0; t < ID_NT; t++) begin : g_tyt
+      tc_sram #(.NumWords(1 << ID_LW), .DataWidth(96), .NumPorts(1),
+                .SimInit("none")) i_type (
+        .clk_i, .rst_ni,
+        .req_i(ty_req && ((ID_NT == 1) || (ty_tile_w == id_tile_t'(t)))),
+        .we_i (ty_we  && ((ID_NT == 1) || (ty_tile_w == id_tile_t'(t)))),
+        .addr_i(ty_addr[ID_LW-1:0]),
+        .wdata_i(ty_wdata), .be_i(12'hFFF), .rdata_o(ty_rda[t]));
+    end
+    assign ty_rdata = ty_rda[ty_rdt_q];
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) ty_rdt_q <= '0;
+      else if (ty_req && !ty_we) ty_rdt_q <= ty_tile_w;
+    end
     tc_sram #(.NumWords(ShaderSlots*ShaderIds), .DataWidth(512),
               .NumPorts(1)) i_const (
       .clk_i, .rst_ni, .req_i(co_req), .we_i(co_we), .addr_i(co_addr),
       .wdata_i(co_wdata), .be_i('1), .rdata_o(co_rdata));
-    tc_sram #(.NumWords(ShaderSlots*ShaderIds), .DataWidth(64),
-              .NumPorts(1)) i_decor (
-      .clk_i, .rst_ni, .req_i(de_req), .we_i(de_we), .addr_i(de_addr),
-      .wdata_i(de_wdata), .be_i(8'hFF), .rdata_o(de_rdata));
-    tc_sram #(.NumWords(ShaderSlots*ShaderIds), .DataWidth(64),
-              .NumPorts(1)) i_var (
-      .clk_i, .rst_ni, .req_i(va_req), .we_i(va_we), .addr_i(va_addr),
-      .wdata_i(va_wdata), .be_i(8'hFF), .rdata_o(va_rdata));
-    tc_sram #(.NumWords(ShaderSlots*ShaderIds), .DataWidth(32),
-              .NumPorts(1)) i_rm (
-      .clk_i, .rst_ni, .req_i(rm_req), .we_i(rm_we), .addr_i(rm_addr),
-      .wdata_i(rm_wdata), .be_i(4'hF), .rdata_o(rm_rdata));
-    tc_sram #(.NumWords(ShaderSlots*ShaderIds), .DataWidth(32),
-              .NumPorts(1)) i_blk (
-      .clk_i, .rst_ni, .req_i(bk_req), .we_i(bk_we), .addr_i(bk_addr),
-      .wdata_i(bk_wdata), .be_i(4'hF), .rdata_o(bk_rdata));
+    logic [ID_TW-1:0]                       de_rdt_q;
+    logic [63:0]                            de_rda [ID_NT];
+    wire [ID_TW-1:0]                        de_tile_w = de_addr[ID_AW-1 -: ID_TW];
+    for (genvar t = 0; t < ID_NT; t++) begin : g_det
+      tc_sram #(.NumWords(1 << ID_LW), .DataWidth(64), .NumPorts(1),
+                .SimInit("none")) i_decor (
+        .clk_i, .rst_ni,
+        .req_i(de_req && ((ID_NT == 1) || (de_tile_w == id_tile_t'(t)))),
+        .we_i (de_we  && ((ID_NT == 1) || (de_tile_w == id_tile_t'(t)))),
+        .addr_i(de_addr[ID_LW-1:0]),
+        .wdata_i(de_wdata), .be_i(8'hFF), .rdata_o(de_rda[t]));
+    end
+    assign de_rdata = de_rda[de_rdt_q];
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) de_rdt_q <= '0;
+      else if (de_req && !de_we) de_rdt_q <= de_tile_w;
+    end
+    logic [ID_TW-1:0]                       va_rdt_q;
+    logic [63:0]                            va_rda [ID_NT];
+    wire [ID_TW-1:0]                        va_tile_w = va_addr[ID_AW-1 -: ID_TW];
+    for (genvar t = 0; t < ID_NT; t++) begin : g_vat
+      tc_sram #(.NumWords(1 << ID_LW), .DataWidth(64), .NumPorts(1),
+                .SimInit("none")) i_var (
+        .clk_i, .rst_ni,
+        .req_i(va_req && ((ID_NT == 1) || (va_tile_w == id_tile_t'(t)))),
+        .we_i (va_we  && ((ID_NT == 1) || (va_tile_w == id_tile_t'(t)))),
+        .addr_i(va_addr[ID_LW-1:0]),
+        .wdata_i(va_wdata), .be_i(8'hFF), .rdata_o(va_rda[t]));
+    end
+    assign va_rdata = va_rda[va_rdt_q];
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) va_rdt_q <= '0;
+      else if (va_req && !va_we) va_rdt_q <= va_tile_w;
+    end
+    logic [ID_TW-1:0]                       rm_rdt_q;
+    logic [31:0]                            rm_rda [ID_NT];
+    wire [ID_TW-1:0]                        rm_tile_w = rm_addr[ID_AW-1 -: ID_TW];
+    for (genvar t = 0; t < ID_NT; t++) begin : g_rmt
+      tc_sram #(.NumWords(1 << ID_LW), .DataWidth(32), .NumPorts(1),
+                .SimInit("none")) i_rm (
+        .clk_i, .rst_ni,
+        .req_i(rm_req && ((ID_NT == 1) || (rm_tile_w == id_tile_t'(t)))),
+        .we_i (rm_we  && ((ID_NT == 1) || (rm_tile_w == id_tile_t'(t)))),
+        .addr_i(rm_addr[ID_LW-1:0]),
+        .wdata_i(rm_wdata), .be_i(4'hF), .rdata_o(rm_rda[t]));
+    end
+    assign rm_rdata = rm_rda[rm_rdt_q];
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) rm_rdt_q <= '0;
+      else if (rm_req && !rm_we) rm_rdt_q <= rm_tile_w;
+    end
+    logic [ID_TW-1:0]                       bk_rdt_q;
+    logic [31:0]                            bk_rda [ID_NT];
+    wire [ID_TW-1:0]                        bk_tile_w = bk_addr[ID_AW-1 -: ID_TW];
+    for (genvar t = 0; t < ID_NT; t++) begin : g_bkt
+      tc_sram #(.NumWords(1 << ID_LW), .DataWidth(32), .NumPorts(1),
+                .SimInit("none")) i_blk (
+        .clk_i, .rst_ni,
+        .req_i(bk_req && ((ID_NT == 1) || (bk_tile_w == id_tile_t'(t)))),
+        .we_i (bk_we  && ((ID_NT == 1) || (bk_tile_w == id_tile_t'(t)))),
+        .addr_i(bk_addr[ID_LW-1:0]),
+        .wdata_i(bk_wdata), .be_i(4'hF), .rdata_o(bk_rda[t]));
+    end
+    assign bk_rdata = bk_rda[bk_rdt_q];
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) bk_rdt_q <= '0;
+      else if (bk_req && !bk_we) bk_rdt_q <= bk_tile_w;
+    end
     tc_sram #(.NumWords(ShaderSlots*ShaderMembers), .DataWidth(64),
               .NumPorts(1)) i_memb (
       .clk_i, .rst_ni, .req_i(mb_req), .we_i(mb_we), .addr_i(mb_addr),
@@ -1038,10 +1117,23 @@ module g6lc_apu_shmod
               .NumPorts(1)) i_phi (
       .clk_i, .rst_ni, .req_i(ph_req), .we_i(ph_we), .addr_i(ph_addr),
       .wdata_i(ph_wdata), .be_i('1), .rdata_o(ph_rdata));
-    tc_sram #(.NumWords(ShaderSlots*ShaderIds), .DataWidth(32),
-              .NumPorts(1)) i_func (
-      .clk_i, .rst_ni, .req_i(fu_req), .we_i(fu_we), .addr_i(fu_addr),
-      .wdata_i(fu_wdata), .be_i(4'hF), .rdata_o(fu_rdata));
+    logic [ID_TW-1:0]                       fu_rdt_q;
+    logic [31:0]                            fu_rda [ID_NT];
+    wire [ID_TW-1:0]                        fu_tile_w = fu_addr[ID_AW-1 -: ID_TW];
+    for (genvar t = 0; t < ID_NT; t++) begin : g_fut
+      tc_sram #(.NumWords(1 << ID_LW), .DataWidth(32), .NumPorts(1),
+                .SimInit("none")) i_func (
+        .clk_i, .rst_ni,
+        .req_i(fu_req && ((ID_NT == 1) || (fu_tile_w == id_tile_t'(t)))),
+        .we_i (fu_we  && ((ID_NT == 1) || (fu_tile_w == id_tile_t'(t)))),
+        .addr_i(fu_addr[ID_LW-1:0]),
+        .wdata_i(fu_wdata), .be_i(4'hF), .rdata_o(fu_rda[t]));
+    end
+    assign fu_rdata = fu_rda[fu_rdt_q];
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) fu_rdt_q <= '0;
+      else if (fu_req && !fu_we) fu_rdt_q <= fu_tile_w;
+    end
     tc_sram #(.NumWords(ShaderSlots*MaxFuncs*MaxParams),
               .DataWidth(16), .NumPorts(1)) i_parm (
       .clk_i, .rst_ni, .req_i(pt_req), .we_i(pt_we), .addr_i(pt_addr),
