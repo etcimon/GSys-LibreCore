@@ -105,6 +105,11 @@ package g6lc_apu_cmdexec_pkg;
     logic [31:0] layer_bytes;  // Σ_m pitch_m*h_m per layer
   } apu_xfer_img_t;
 
+  // CLEARI doubles as vkCmdClearDepthStencilImage: dst_size[0]=1 marks
+  // a depth-stencil clear, src_base carries the depth (fp32 bits) and
+  // src_size the stencil; the payload then holds only the 5-word
+  // ranges.  A colour clear drives dst_size=0 and keeps its 4 colour
+  // words ahead of the ranges.
   typedef struct packed {
     apu_xfer_op_e    op;
     logic [31:0]     pay_base;  // PayMem word address (rec.imm[7])
