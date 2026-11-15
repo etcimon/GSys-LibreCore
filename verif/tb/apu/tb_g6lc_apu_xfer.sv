@@ -559,7 +559,7 @@ module tb_g6lc_apu_xfer;
       logic         alpha;
       logic [127:0] cv;
       alpha = nc == 4 && c == 3;
-      if (at[3] || at[4])        cv = 128'(cw[c]);
+      if (at[3] || at[4])        cv = 128'(cw[c]) & ((128'h1 << cb) - 128'h1);
       else if (at[5])            cv = 128'(32'(m_f32_f16(cw[c])));
       else if (at[7] && !alpha)  cv = 128'(32'(m_srgb(m_f32_l16(cw[c]))));
       else                       cv = 128'(32'(m_f32_u8(cw[c])));
@@ -1338,6 +1338,38 @@ module tb_g6lc_apu_xfer;
         check(pl.code == APU_SH_DONE_OK, "clear r32u done code");
         cmp_range(IMGB, IMGB + fp, "clear r32u");
         axi_balance("clear r32u");
+      end
+
+      // fmt=15 R8G8B8A8_UINT bpp=4 ncomp=4 cb=8: integer clear words
+      // truncate to the 8-bit component — values above 0xFF would spill
+      // into the neighbouring components without the mask
+      begin
+        automatic apu_xfer_img_t im5;
+        im5 = '{base: IMGB, size: 1024, w: 16'd16, h: 16'd16, fmt: 8'd15,
+                mips: 5'd1, layers: 10'd1, itype: 2'd1, layer_bytes: 32'd1024};
+        cases++;
+        fp = 1024;
+        poison(IMGB, fp); fill_src(IMGB, fp, 83);
+        cw[0]=32'h0000_01FF; cw[1]=32'h0000_02AB;
+        cw[2]=32'h0000_03CD; cw[3]=32'h0000_04EF;
+        rg = new[5]; rg[0]=1; rg[1]=0; rg[2]=1; rg[3]=0; rg[4]=1;
+        m_apply_clear(im5, cw, 1, rg);
+        run_clear(im5, cw, 1, rg, pl);
+        check(pl.code == APU_SH_DONE_OK, "clear rgba8u done code");
+        cmp_range(IMGB, IMGB + fp, "clear rgba8u");
+        axi_balance("clear rgba8u");
+        // literal read through the aperture (not the mirrored model):
+        // each texel stores FF AB CD EF -> LE word 32'hEFCDABFF
+        check(rd8(AB + 64'(IMGB))         == 8'hFF &&
+              rd8(AB + 64'(IMGB + 1))     == 8'hAB &&
+              rd8(AB + 64'(IMGB + 2))     == 8'hCD &&
+              rd8(AB + 64'(IMGB + 3))     == 8'hEF,
+              "clear rgba8u texel(0,0) = FF AB CD EF");
+        check(rd8(AB + 64'(IMGB + 1020))  == 8'hFF &&
+              rd8(AB + 64'(IMGB + 1021))  == 8'hAB &&
+              rd8(AB + 64'(IMGB + 1022))  == 8'hCD &&
+              rd8(AB + 64'(IMGB + 1023))  == 8'hEF,
+              "clear rgba8u texel(15,15) = FF AB CD EF");
       end
 
       // ---- negatives: every CLEAR range rule faults before a write ----

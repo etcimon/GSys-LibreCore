@@ -2110,7 +2110,9 @@ module g6lc_apu_xfer
             end
             if (go) begin
               if (attr[3] || attr[4])
-                cv = 128'(cw);
+                // integer and float words are stored raw, cast to the
+                // component width (an integer value above it truncates)
+                cv = 128'(cw) & ((128'h1 << cbits) - 128'h1);
               else if (attr[5])
                 cv = 128'(32'(f_f32_f16(cw)));
               else if (attr[7] && !is_alpha)

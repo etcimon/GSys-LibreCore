@@ -1701,7 +1701,7 @@ def img_clear_texel(model, did, cw):
     for c in range(nc):
         alpha = nc == 4 and c == 3
         if at & 0x18:
-            cv = cw[c]
+            cv = cw[c] & ((1 << cb) - 1)
         elif at & 0x20:
             cv = cl_f32_f16(cw[c])
         elif at & 0x80 and not alpha:
