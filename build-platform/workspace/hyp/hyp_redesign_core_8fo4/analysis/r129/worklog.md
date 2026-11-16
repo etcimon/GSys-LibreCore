@@ -208,3 +208,37 @@ message now prints `pend/drn/pubidx/drnidx` so any recurrence exposes the
 arm split. Local lint clean. The deep witness must be re-run to confirm
 it clears 375.9M and reaches userspace; a recurrence with the new fields
 would distinguish a real divergence.
+
+## r129b-mmustaged-diag2 replay: multi-hit root cause (2026-11-16)
+
+The queued diagnostic replay ran to the window and captured the dump the
+instrument was built for. `g6lc_tlb` multi-hit at c=317,424,730 on
+va=ffffffff81313318. The 16-entry dump shows entries **6 and 8 are
+byte-identical valid duplicates**: `v=1 vpn=7f81209 asid=0000 ispg=10
+ppn=81400 pte=…e7`. (Also near-duplicate invalid copies of vpn=480000b,
+580189b, 7f812c7 — invalid, harmless.)
+
+Fill trace — the same vpn written twice, 14 cycles apart, both miss:
+
+    c=317424551  UPD vpn=7f81209 hit_o=0 repl=…01000000 wr=1
+    c=317424565  UPD vpn=7f81209 hit_o=0 repl=…00000001 wr=1   (way bit32)
+
+Both fills reported `hit_o=0`: the second lookup's tag sample preceded
+the first fill's commit — a **fill-visibility latency hazard** in the
+staged pipeline. The second fill therefore wrote a second valid copy of
+an already-present vpn → two live entries match one VA → multi-hit.
+
+This breaks the invariant stated at g6lc_tlb.sv:448-453 ("a second fill
+is suppressed whenever the first entry hits"): coexistence here is an
+EXACT same-page-size duplicate, a third mechanism beyond the
+inconsistent-tables / SFENCE-race cases that comment lists. The
+suppression only works if the first entry is visible to the second
+lookup's hit detect; the ~14-cycle fill latency leaves a window where a
+second lookup for the same vpn still misses.
+
+Fix direction (not yet implemented — needs pipeline analysis + a
+directed repro before touching the staged TLB): either track in-flight
+fills and suppress a second fill for an already-filling vpn, or make
+the fill commit visible to hit detect within the lookup-to-fill window.
+Off-by-default experimental profile; the default (TlbStages=1) TLB is
+unaffected — r126/r127m/r128 all passed on it.
