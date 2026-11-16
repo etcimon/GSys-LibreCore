@@ -11793,6 +11793,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # so the SNORM path is observable; a 0x80 byte (-128) clamps to
         # -1.0 -> u8 0 where an unsigned misread would give 255.
         is_vattr8sn = 'vattr8sn' in gfx
+        # vattr16sn: the vertex-colour attribute is R16G16B16A16_SNORM
+        # (vkfmt 92) — same two-u16-word packing as vattr16u but the
+        # gather sign-extends each u16 and scales by fp32(1/32767)
+        # (Ksn=0x38000100), clamping below -1.0.  Completes the packed
+        # RGBA normalised vertex matrix (UNORM8/16 + SNORM8/16).
+        is_vattr16sn = 'vattr16sn' in gfx
         # colourWriteMask stays logical-channel (R=1,G=2,B=4,A=8): cwmr
         # keeps R only, cwmb keeps B only — paired with is_bgra these
         # expose a mask applied in byte order instead of channel order.
@@ -11828,6 +11834,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                              'the is_bloff path')
         if is_vattr8sn and not is_bloff:
             raise ValueError('vattr8sn vertex attribute only adapted on '
+                             'the is_bloff path')
+        if is_vattr16sn and not is_bloff:
+            raise ValueError('vattr16sn vertex attribute only adapted on '
                              'the is_bloff path')
         # _enc8: store encode for one f32 channel on attachment 0 — on an
         # sRGB attachment RGB goes linear-u12 -> sRGB8 while alpha (and
@@ -12489,6 +12498,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 d = _f32(_f32(s) * _K127)
                 return _f32(-1.0) if d < _f32(-1.0) else d
             COL = tuple(_sn8(b) for b in _S8)
+        elif is_vattr16sn:
+            _Ksn = struct.unpack('<f', struct.pack('<I', 0x38000100))[0]
+            # stored u16 patterns (0x8000 = -32768 two's complement)
+            _N16 = (0x5FFF, 0x1FFF, 0x7FFF, 0x8000)
+            def _sn16(h):
+                s = h - 65536 if h >= 32768 else h      # sign-extend
+                d = _f32(_f32(s) * _Ksn)
+                return _f32(-1.0) if d < _f32(-1.0) else d
+            COL = tuple(_sn16(h) for h in _N16)
         else:
             COL = (1.0, 0.5, 0.25, 0.75) if is_lop else \
                 (1.0, 0.0, 0.0, 0.75) if is_blend else \
@@ -12753,6 +12771,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         vb_words += [(_S8[0] | (_S8[1] << 8) |
                                       (_S8[2] << 16) | (_S8[3] << 24)),
                                      0, 0, 0]
+                    elif is_vattr16sn:
+                        # R16G16B16A16_SNORM colour at byte offset 8:
+                        # same two-u16-word packing as vattr16u.
+                        vb_words += [(_N16[0] | (_N16[1] << 16)),
+                                     (_N16[2] | (_N16[3] << 16)),
+                                     0, 0]
                     else:
                         vb_words += [f32b(c) for c in COL]
         VP = (0.0, 0.0, 64.0, 64.0, 0.0, 1.0)
@@ -14891,7 +14915,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                format=103 if is_tex else
                                37 if is_vattr8u else
                                91 if is_vattr16u else
-                               38 if is_vattr8sn else 109,
+                               38 if is_vattr8sn else
+                               92 if is_vattr16sn else 109,
                                offset=0 if is_wide else
                                16 if is_dpair or is_persp
                                or is_dclamplike else 8)]),

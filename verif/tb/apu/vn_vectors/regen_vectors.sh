@@ -226,6 +226,9 @@ python3 $G --graphics-session ue_gpos_vattr16ubloff_1 1
 # packing but sign-extend + *fp32(1/127) + clamp<-1->-1; byte 0x80 (-128)
 # distinguishes signed (u8 0) from unsigned (u8 255) decode.
 python3 $G --graphics-session ue_gpos_vattr8snbloff_1 1
+# 16-bit signed variant: R16G16B16A16_SNORM (vkfmt 92) — two u16 words,
+# sign-extend + *fp32(1/32767) + clamp; 0x8000 (-32768) -> -1.0 -> u8 0.
+python3 $G --graphics-session ue_gpos_vattr16snbloff_1 1
 
 # Sessions the run scripts execute that this script did not generate
 # (blend ops and factors, logic ops, depth compare/bounds/bias/clamp,
