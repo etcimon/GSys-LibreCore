@@ -1,0 +1,19 @@
+#version 450
+// SPDX-License-Identifier: MIT
+// T3+: R32G32B32A32_UINT (device format 11) through a combined image
+// sampler.  Lane i texelFetches texel (i % 4, i / 4) of a 4x2 rgba32ui
+// image — a full uvec4 of 32-bit integer channels — and spills all
+// four channels to the SSBO (4 words/lane, bit-exact): the
+// SAMPLED_IMAGE path of the fmt-11 uint decode (no filtering:
+// integer formats are NEAREST-only).
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0) uniform usampler2D t;
+layout(set = 0, binding = 1) buffer Out { uint o[]; };
+void main() {
+    uint i = gl_LocalInvocationID.x;
+    uvec4 v = texelFetch(t, ivec2(int(i % 4u), int(i / 4u)), 0);
+    o[i * 4u]      = v.x;
+    o[i * 4u + 1u] = v.y;
+    o[i * 4u + 2u] = v.z;
+    o[i * 4u + 3u] = v.w;
+}

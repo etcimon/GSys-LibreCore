@@ -862,7 +862,7 @@ module tb_g6lc_apu_shwave
   // check — uout[name idx][seed][word pos over out bindings].
   // First dim must cover names[] (indices are position-based):
   // overflow drops the stash silently and opt reads zeros.
-  localparam int UoNames = 83;
+  localparam int UoNames = 96;
   logic [31:0] uout [UoNames][4][2048];
   int          cur_nidx, cur_seed, ou_mism, ou_mism_t, ou_words;
   bit          is_opt;
@@ -1413,7 +1413,7 @@ module tb_g6lc_apu_shwave
   // carry the base offset (flags bit4 header extension)
   string fault_names [3] = '{"fn_deep", "zerodim", "dispbase"};
 
-  string names [83] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
+  string names [96] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
       "builtin_lid", "builtin_lindex", "compare", "composite",
       "intmix", "localsize32", "localsize64", "math450", "oob",
       "pushscale", "vec4arith",
@@ -1434,6 +1434,12 @@ module tb_g6lc_apu_shwave
       // T3+: rgba32ui (device fmt 11) imageLoad + imageStore — the
       // wide-integer (16-byte texel) storage-image path
       "imgcopy_rgba32ui",
+      // T3+: rgba16f (device fmt 6) imageLoad + imageStore — the
+      // half-float (fp16<->fp32) storage-image path
+      "imgcopy_rgba16f",
+      // T3+: r32f (device fmt 7) imageLoad + imageStore — single-channel
+      // float storage-image path
+      "imgcopy_r32f",
       // row-major SSBO matrices (load/column/element/store)
       "ssbo_rowmajor",
       // copy_ssbo_* probe: NumWorkGroups*WorkGroupSize + ArrayLength
@@ -1444,6 +1450,38 @@ module tb_g6lc_apu_shwave
       // §12.3 C/5b image corpus (texelFetch/imageLoad/imageStore/
       // textureLod bilinear+mip/address modes, sRGB, 2D-array, query)
       "texfetch", "texfetch_mip", "texlod_lin", "texlod_mip",
+      // T3+: texfetch on an R16G16B16A16_SFLOAT sampled image — the
+      // fp16->fp32 OpImageFetch texel decode (same format-agnostic
+      // sampler2D shader as texfetch, fmt=6 descriptor)
+      "texfetch_f16",
+      // T3+: texfetch on an R32G32_SFLOAT sampled image — dual-channel
+      // fp32 texel decode; fmt 8 is an extended *storage* format but
+      // sampled images carry no qualifier so it is reachable here
+      "texfetch_rg32f",
+      // T3+: texfetch on R32G32B32A32_SFLOAT / R8_UNORM / R8G8_UNORM
+      // sampled images — full fp32, and the sub-word (1 & 2 byte/px)
+      // normalized texel decode with missing-component defaults
+      "texfetch_rgba32f", "texfetch_r8unorm", "texfetch_rg8unorm",
+      // T3+: texfetch on an R32G32B32A32_UINT sampled image — the
+      // uint32 (uvec4) SAMPLED_IMAGE decode, sampled counterpart of
+      // imgcopy_rgba32ui's storage path
+      "texfetch_rgba32ui",
+      // T3+: texfetch on an R32_SFLOAT sampled image — single-channel
+      // fp32 texel decode (float missing-component defaults)
+      "texfetch_r32f",
+      // T3+: texfetch on an R32_UINT sampled image — the single-u32
+      // SAMPLED_IMAGE decode (uint .x channel, bit-exact)
+      "texfetch_r32ui",
+      // T3+: texfetch on a B8G8R8A8_UNORM sampled image — the ATTR
+      // bgr=1 byte-swizzle decode (storage B,G,R,A surfaces as R,G,B,A)
+      "texfetch_bgra8unorm",
+      // T3+: texfetch on a B8G8R8A8_SRGB sampled image — the combined
+      // bgr=1 byte-swizzle + srgb=1 decode LUT in one fetch
+      "texfetch_bgra8srgb",
+      // T3+: texfetch on an R8G8B8A8_UNORM sampled image whose view
+      // carries a VkComponentMapping swizzle (out = B,0,R,1.0) — the
+      // only session exercising the swz component-swizzle decode
+      "texfetch_swz",
       "imgloadstore", "texarr", "texsrgb", "texquery",
       // §12.3 texel-buffer corpus (Dim=Buffer): OpImageFetch on
       // textureBuffer (kind 4) + OpImageRead/OpImageWrite/OpImageTexelPointer

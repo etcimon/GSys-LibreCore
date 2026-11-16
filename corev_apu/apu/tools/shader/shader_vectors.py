@@ -51,6 +51,7 @@ Buffer address map: binding i gets base ADDR0 + i*0x1000.
 import json
 import os
 import random
+import re
 import struct
 import subprocess
 import sys
@@ -500,6 +501,21 @@ DESC = {
                          bindings=[
         img_bind(0, 1, dict(w=2, h=4, fmt=11), kind=3, out=1),
         (0, 0, 32, 1, 7 << 16)]),
+    # T3+: rgba16f (device format 6) storage image — the half-float
+    # counterpart: imageLoad widens fp16->fp32 exactly (SSBO sees the
+    # four widened fp32 bit patterns per lane), imageStore writes
+    # v+1.0 so the fp32->fp16 RNE store encode is checked on readback.
+    'imgcopy_rgba16f': dict(groups=(1, 1, 1), fmt='z', push=0,
+                         bindings=[
+        img_bind(0, 1, dict(w=2, h=4, fmt=6), kind=3, out=1),
+        (0, 0, 32, 1, 7 << 16)]),
+    # T3+: r32f (device format 7) storage image — single-channel float:
+    # imageLoad's .x fp32 widened value is observed bit-exact in the
+    # SSBO (1 word/lane), imageStore writes .x+1.0 back.
+    'imgcopy_r32f': dict(groups=(1, 1, 1), fmt='z', push=0,
+                         bindings=[
+        img_bind(0, 1, dict(w=2, h=4, fmt=7), kind=3, out=1),
+        (0, 0, 8, 1, 7 << 16)]),
     # imgatom = CTS image_atomic_op_local_size_1 idiom: r32ui storage
     # image + imageAtomicAdd -> OpImageTexelPointer(60) absolute-texel
     # pointer + OpAtomicIAdd(234) lane-serial RMW.  The out=1 image
@@ -518,6 +534,21 @@ DESC = {
     'texfetch_rgba8ui': dict(groups=(1, 1, 1), fmt='z', push=0, cf=False,
                          bindings=[
         img_bind(0, 0, dict(w=4, h=2, fmt=15), kind=1),
+        (0, 1, 8, 1, 7 << 16)]),
+    # T3+: rgba32ui (device format 11) through a combined image sampler —
+    # texelFetch returns a full uvec4 (4 x u32) spilled to the SSBO
+    # (4 words/lane, bit-exact): the SAMPLED_IMAGE uint32 decode, the
+    # sampled counterpart of imgcopy_rgba32ui's storage path.
+    'texfetch_rgba32ui': dict(groups=(1, 1, 1), fmt='z', push=0, cf=False,
+                         bindings=[
+        img_bind(0, 0, dict(w=4, h=2, fmt=11), kind=1),
+        (0, 1, 32, 1, 7 << 16)]),
+    # T3+: r32ui (device format 10) through a combined image sampler —
+    # texelFetch returns the single u32 channel in .x, observed bit-
+    # exact in the SSBO (1 word/lane): the SAMPLED_IMAGE uint decode.
+    'texfetch_r32ui': dict(groups=(1, 1, 1), fmt='z', push=0, cf=False,
+                         bindings=[
+        img_bind(0, 0, dict(w=4, h=2, fmt=10), kind=1),
         (0, 1, 8, 1, 7 << 16)]),
     # cts_b2b = copy_ssbo_* (BufferToBufferInvertTest, SSBO->SSBO):
     # gl_NumWorkGroups*gl_WorkGroupSize sizing, OpArrayLength on the
@@ -686,6 +717,83 @@ DESC = {
                          ucls=True,
                          bindings=[
         img_bind(0, 0, dict(w=4, h=4, fmt=2), kind=1),
+        (0, 1, 32, 1, 7 << 16)]),
+    # texfetch_f16: same sampler2D/texelFetch shader as texfetch (the
+    # combined sampler is format-agnostic — the descriptor carries the
+    # format), but bound to an R16G16B16A16_SFLOAT (device fmt 6)
+    # sampled image so OpImageFetch's fp16->fp32 texel decode is seen.
+    'texfetch_f16': dict(groups=(1, 1, 1), fmt='i', push=0, cf=False,
+                         ucls=True,
+                         bindings=[
+        img_bind(0, 0, dict(w=4, h=4, fmt=6), kind=1),
+        (0, 1, 32, 1, 7 << 16)]),
+    # texfetch_rg32f: same format-agnostic sampler2D/texelFetch shader,
+    # bound to an R32G32_SFLOAT (device fmt 8) sampled image.  fmt 8 is
+    # an *extended* storage format (image2D would need
+    # StorageImageExtendedFormats) but sampled images carry no format
+    # qualifier, so the dual-channel fp32 texel decode is reachable.
+    'texfetch_rg32f': dict(groups=(1, 1, 1), fmt='i', push=0, cf=False,
+                         ucls=True,
+                         bindings=[
+        img_bind(0, 0, dict(w=4, h=4, fmt=8), kind=1),
+        (0, 1, 32, 1, 7 << 16)]),
+    # texfetch_rgba32f / texfetch_r8unorm / texfetch_rg8unorm: the same
+    # format-agnostic sampler2D/texelFetch shader bound to R32G32B32A32_
+    # SFLOAT (fmt 9, full fp32), R8_UNORM (fmt 0, 1-byte normalized)
+    # and R8G8_UNORM (fmt 1, 2-byte normalized) sampled images — the
+    # sub-word/packed texel decode and missing-component defaults.
+    'texfetch_rgba32f': dict(groups=(1, 1, 1), fmt='i', push=0, cf=False,
+                         ucls=True,
+                         bindings=[
+        img_bind(0, 0, dict(w=4, h=4, fmt=9), kind=1),
+        (0, 1, 32, 1, 7 << 16)]),
+    'texfetch_r8unorm': dict(groups=(1, 1, 1), fmt='i', push=0, cf=False,
+                         ucls=True,
+                         bindings=[
+        img_bind(0, 0, dict(w=4, h=4, fmt=0), kind=1),
+        (0, 1, 32, 1, 7 << 16)]),
+    'texfetch_rg8unorm': dict(groups=(1, 1, 1), fmt='i', push=0, cf=False,
+                         ucls=True,
+                         bindings=[
+        img_bind(0, 0, dict(w=4, h=4, fmt=1), kind=1),
+        (0, 1, 32, 1, 7 << 16)]),
+    # texfetch_r32f: same format-agnostic sampler2D/texelFetch shader on
+    # an R32_SFLOAT (device fmt 7) sampled image — single-channel fp32
+    # texel decode with the float missing-component defaults.
+    'texfetch_r32f': dict(groups=(1, 1, 1), fmt='i', push=0, cf=False,
+                         ucls=True,
+                         bindings=[
+        img_bind(0, 0, dict(w=4, h=4, fmt=7), kind=1),
+        (0, 1, 32, 1, 7 << 16)]),
+    # texfetch_bgra8unorm: same format-agnostic sampler2D/texelFetch
+    # shader on a B8G8R8A8_UNORM (device fmt 4) sampled image — the
+    # ATTR bgr=1 byte-swizzle decode: storage order B,G,R,A must surface
+    # to the shader as R,G,B,A (the only sampled session exercising the
+    # bgr path).
+    'texfetch_bgra8unorm': dict(groups=(1, 1, 1), fmt='i', push=0, cf=False,
+                         ucls=True,
+                         bindings=[
+        img_bind(0, 0, dict(w=4, h=4, fmt=4), kind=1),
+        (0, 1, 32, 1, 7 << 16)]),
+    # texfetch_bgra8srgb: same format-agnostic sampler2D/texelFetch shader
+    # on a B8G8R8A8_SRGB (device fmt 5) sampled image — the combined
+    # ATTR bgr=1 + srgb=1 decode: byte swizzle AND sRGB->linear LUT in
+    # one fetch (texsrgb covers fmt 3's srgb-only path).
+    'texfetch_bgra8srgb': dict(groups=(1, 1, 1), fmt='i', push=0, cf=False,
+                         ucls=True,
+                         bindings=[
+        img_bind(0, 0, dict(w=4, h=4, fmt=5), kind=1),
+        (0, 1, 32, 1, 7 << 16)]),
+    # texfetch_swz: same format-agnostic sampler2D/texelFetch shader on
+    # an R8G8B8A8_UNORM (device fmt 2) sampled image whose view carries
+    # a VkComponentMapping swizzle — the only session exercising the
+    # swz decode: out = (src.B, ZERO, src.R, ONE) i.e. R<-B, G<-0,
+    # B<-R, A<-1.0 (swz=0x4CD packs the four 3-bit VkComponentSwizzle
+    # codes 5,1,3,2 little-endian per component).
+    'texfetch_swz': dict(groups=(1, 1, 1), fmt='i', push=0, cf=False,
+                         ucls=True,
+                         bindings=[
+        img_bind(0, 0, dict(w=4, h=4, fmt=2, swz=0x4CD), kind=1),
         (0, 1, 32, 1, 7 << 16)]),
     'texfetch_mip': dict(groups=(1, 1, 1), fmt='i', push=0, cf=False,
                          ucls=True,
@@ -1834,6 +1942,55 @@ def _spec_entries(spec):
     return out
 
 
+def check_opt():
+    """Drift-check the shwave `_opt` vector invariant.
+
+    tb_g6lc_apu_shwave.sv runs `{name}_opt_{1..3}` for every names[]
+    entry NOT in its opt-skip list, with no file-existence guard —
+    wbuf/ebuf clear to '0 before $readmemh, so a missing vector reads
+    an empty module and fails the unopt==opt bit-exact compare.  Every
+    non-skipped names[] entry therefore needs corpus/<n>_opt.spv plus
+    sh_vectors/<n>_opt_{1,2,3}.{hex,exp} and <n>_opt.tab.  Returns 1 on
+    any gap so the failure surfaces at generation time, not on a leaf.
+    """
+    tb = os.path.join(os.path.dirname(OUT), 'tb_g6lc_apu_shwave.sv')
+    src = re.sub(r'//[^\n]*', '', open(tb).read())
+    # names[] literal: `string names [N] = '{...}';`
+    i = src.find('string names [')
+    j = src.find("= '{", i)
+    k = src.find('};', j)
+    # opt-skip: the is_opt=1 section's `if (names[i] == ...) continue;`
+    oi = src.find('is_opt = 1;')
+    b = src.find('if (names[i]', oi)
+    e = src.find('continue;', b)
+    if min(i, j, k, oi, b, e) < 0:
+        print('shwave _opt invariant: could not parse %s — bench '
+              'structure changed?' % os.path.basename(tb))
+        return 1
+    names = re.findall(r'"([^"]+)"', src[j:k])
+    skip = set(re.findall(r'names\[i\] == "([^"]+)"', src[b:e]))
+    need = [n for n in names if n not in skip]
+    bad = []
+    for n in need:
+        if not os.path.exists(os.path.join(CORPUS, n + '_opt.spv')):
+            bad.append('%s: missing corpus/%s_opt.spv' % (n, n))
+        for s in SEEDS:
+            for ext in ('.hex', '.exp'):
+                p = os.path.join(OUT, '%s_opt_%d%s' % (n, s, ext))
+                if not os.path.exists(p):
+                    bad.append('%s: missing %s' % (n, os.path.basename(p)))
+        if not os.path.exists(os.path.join(OUT, n + '_opt.tab')):
+            bad.append('%s: missing %s_opt.tab' % (n, n))
+    if bad:
+        print('shwave _opt invariant: %d gap(s)' % len(bad))
+        for b_ in bad:
+            print('  ' + b_)
+        return 1
+    print('shwave _opt invariant: %d names[], %d opt-skipped, %d need '
+          '_opt — all present' % (len(names), len(skip), len(need)))
+    return 0
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     oracle_ok = build_oracle()
@@ -2055,4 +2212,6 @@ def main():
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == 'gfx':
         sys.exit(gfx_main())
+    if len(sys.argv) > 1 and sys.argv[1] == '--check':
+        sys.exit(check_opt())
     sys.exit(main())

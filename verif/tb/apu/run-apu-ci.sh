@@ -92,6 +92,10 @@ run gen-sfu python3 -B "$ROOT/corev_apu/apu/tools/shader/gen_sfu_tables.py" --ch
 run gen-sh-opcodes python3 -B "$ROOT/corev_apu/apu/tools/shader/gen_sh_opcodes.py" --check
 # `shader_audit.py vectors` is not run here: it needs the lavapipe oracle.
 run gen-fmt-table python3 -B "$ROOT/corev_apu/apu/tools/gen_fmt_table.py" --check
+# shwave `_opt` vector invariant: every non-opt-skipped names[] entry needs
+# corpus/<n>_opt.spv + sh_vectors/<n>_opt_{1,2,3}.* — the bench's opt loop
+# reads them unconditionally, so a gap fails as an empty-module compare.
+run shwave-opt-invariant python3 -B "$ROOT/corev_apu/apu/tools/shader/shader_vectors.py" --check
 run shader-lists python3 -B "$ROOT/corev_apu/apu/tools/shader/shader_audit.py" lists
 run tb-apu-unittests python3 -B -m unittest discover -s "$TB" -p 'test_*.py'
 run venus-model-unittests python3 -B -m unittest discover -s "$ROOT/corev_apu/apu/tools" -p 'test_*.py'

@@ -1,0 +1,15 @@
+#version 450
+// SPDX-License-Identifier: MIT
+// T3+: R32_UINT (device format 10) through a combined image sampler.
+// Lane i texelFetches texel (i % 4, i / 4) of a 4x2 r32ui image — the
+// single 32-bit integer channel lands in .x (yzw read as 0) — and the
+// SSBO observes that uint bit pattern per lane (bit-exact): the
+// SAMPLED_IMAGE path of the fmt-10 uint decode.
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0) uniform usampler2D t;
+layout(set = 0, binding = 1) buffer Out { uint o[]; };
+void main() {
+    uint i = gl_LocalInvocationID.x;
+    uvec4 v = texelFetch(t, ivec2(int(i % 4u), int(i / 4u)), 0);
+    o[i] = v.x;
+}

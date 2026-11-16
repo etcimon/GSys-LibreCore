@@ -1327,7 +1327,13 @@ remain release requirements; intermediate raster gates do not narrow the product
     `sh_opcodes.py`/`shwave.sv`; the module scans `fault=NONE`.  The
     gap is the shcore/shwave `Input` storage-class load for
     integer-typed variables (or the fetch→record→input chain for int
-    types) — needs RTL debug + a stable build window.  Probe files
+    types) — needs RTL debug + a stable build window.  **Also a model
+    gap:** `vn_golden.py` has no integer vertex-attribute decode —
+    every `is_vattr*` flag is UNORM/SNORM/SFLOAT (`vattr8u` is UNORM,
+    not UINT); there is no `is_vattr*u`/UINT path, so the golden model
+    cannot emit expected output for a uint attribute either.  Fixing
+    integer vertex input needs BOTH the vn_golden decode AND the
+    shcore/shwave input path, then a build window.  Probe files
     reverted; no session committed.
     **Storage-image fmt-11 coverage (2026-11-16, `1c8103db8`).**
     `imgcopy_rgba32ui` is a compute session doing imageLoad+imageStore
@@ -1352,6 +1358,74 @@ remain release requirements; intermediate raster gates do not narrow the product
     — a from-source build is infeasible in the window).  Run
     `run-apu-shwave.sh` (or `only=imgcopy_rgba32ui`) in a stable window
     to confirm; review gives high confidence it passes.
+    **`_opt` coverage invariant found + fixed (2026-11-16).**  The
+    shwave bench's 4b-opt loop runs `{name}_opt_{1..3}` for EVERY
+    non-skipped `names[]` entry with no file-existence guard —
+    `wbuf`/`ebuf` clear to `'0` before `$readmemh`, so a missing
+    `_opt_*.hex` reads an empty module and fails the unopt==opt
+    bit-exact check.  Every non-skipped session therefore MUST have a
+    `corpus/<name>_opt.spv` (from `spirv-opt -O`) + `_opt_{1,2,3}`
+    vectors + `_opt.tab`.  `imgcopy_rgba32ui` was committed WITHOUT
+    them — a latent bench failure.  Fixed by generating `_opt.spv`
+    (`spirv-opt -O`) and `_opt` vectors (oracle-validated) for all 14
+    image sessions (imgcopy_rgba32ui/rgba16f/r32f + 11 texfetch_*).
+    Leaves `055847`/`061641` snapshotted BEFORE the fix and will show
+    opt-loop failures on these sessions — expected snapshot artifact,
+    not a real defect; leaf `062516` carries the corrected tree.
+    **Guard added:** `shader_vectors.py --check` now drift-checks this
+    invariant (parses `names[]` + the opt-skip list out of
+    `tb_g6lc_apu_shwave.sv`, then verifies every non-skipped entry has
+    `_opt.spv` + `_opt_{1,2,3}.{hex,exp}` + `_opt.tab`); it runs in
+    `run-apu-ci.sh` as `shwave-opt-invariant`, so a future session added
+    without `_opt` fails at generation/CI time instead of on a leaf.
+    **Storage-image core-format coverage extended + extended-format
+    boundary found (2026-11-16, uncommitted).**  Two more core-format
+    sessions added the same way (model + lavapipe Gate-2 clean, `names[]`
+    now 85): `imgcopy_rgba16f` (device fmt 6, `image2D`/`rgba16f`,
+    fp16→fp32 exact widen observed bit-exact + fp32→fp16 RNE store) and
+    `imgcopy_r32f` (device fmt 7, `image2D`/`r32f`, single-channel fp32).
+    Core STORAGE_IMAGE formats now covered: 2, 6, 7, 9, 10, 11, 15.
+    **Boundary:** reduced/packed formats (`rg32f` fmt 8, `rg8unorm` fmt 1,
+    `r8unorm` fmt 0, BGRA 4/5, sRGB-as-storage 3/5, `rg32ui` etc.) make
+    glslang emit `OpCapability StorageImageExtendedFormats`, which the
+    shwave commit scanner **rejects** (`CAP` fault at scan) — same class
+    of limitation as integer vertex inputs: needs scanner/RTL support for
+    the extended-formats capability before those formats can be tested.
+    An `imgcopy_rg32f` probe was built and cleanly reverted (no vectors
+    emitted — the scan faults before `emit`).
+    **Sampled-image axis opened (2026-11-16, uncommitted).**  The same
+    `StorageImageExtendedFormats` wall does NOT apply to *sampled*
+    images: `sampler2D`/`texture2D` carry no format qualifier in SPIR-V
+    (format is purely a descriptor property), so the format-agnostic
+    `texfetch` shader (`texelFetch`→vec4) covers any float format by
+    cloning `corpus/texfetch.spv` and changing only `img_bind(fmt=)`.
+    Ten sessions added this way (model + lavapipe Gate-2 clean,
+    `names[]` now 95): `texfetch_f16` (fmt 6 fp16), `texfetch_rg32f`
+    (fmt 8 — the format that *failed* as storage, proving the
+    limitation is storage-specific), `texfetch_rgba32f` (fmt 9),
+    `texfetch_r8unorm` (fmt 0, 1-byte normalized), `texfetch_rg8unorm`
+    (fmt 1, 2-byte normalized), `texfetch_bgra8unorm` (fmt 4, the
+    ATTR `bgr=1` byte-swizzle decode — storage B,G,R,A surfaces as
+    R,G,B,A), `texfetch_bgra8srgb` (fmt 5, combined `bgr=1`+`srgb=1`
+    swizzle + sRGB→linear LUT), `texfetch_r32f` (fmt 7, single-channel
+    fp32), `texfetch_rgba32ui` (fmt 11, `usampler2D`/`uvec4` uint32),
+    `texfetch_r32ui` (fmt 10, single-u32 `.x` channel), and
+    `texfetch_swz` (fmt 2 with a `VkComponentMapping` swizzle — the
+    only session exercising the `swz` decode: out = (src.B, ZERO,
+    src.R, ONE); model `swz_sel` and the lavapipe oracle's
+    `VkComponentMapping` agree bit-exact).  The uint sessions use
+    `usampler2D`+`texelFetch`→`uvec4` (cloned from
+    `texfetch_rgba8ui`); `texfetch_bgra8unorm`/`bgra8srgb` are the only
+    sampled sessions exercising the `bgr` attr bit.  Sampled coverage
+    now spans fmt {0,1,2,3(via texsrgb),4,5,6,7,8,9,10,11,15} plus the
+    component-swizzle path.  `names[]` now 96.  Storage-image *reads*
+    (OpImageRead) share the same `tx_finish`/`swz_sel` swizzle path as
+    fetch; storage *writes* (OpImageWrite→`tx_store`) do not take
+    `swz` — whether that matches Vulkan write-side component mapping
+    is an open RTL/model question, not yet probed.
+    Still open on this axis: depth-as-sampled (fmt 12/13/14 — depth
+    returns in `.r`, different sampler semantics; the lavapipe oracle
+    has no depth-image path).
     (5) Stale records: the CTS ledger was last rendered around 2026-11-04 and still
     lists the 71 `descriptor_copy` failures that closed on 2026-11-12; the plan's
     ladder table shows R3 as not started.
