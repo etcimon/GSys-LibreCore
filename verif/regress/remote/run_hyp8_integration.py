@@ -106,6 +106,17 @@ TESTS = [
     # log as well (run_hyp8_smokes.py: no `Response Errored`, no UART read).
     ('hyp8_spec_bus_clean', 'verif/tests/custom/hyp8_spec_bus_clean.S',
      '80001000'),
+    # rfix131a: nothing runs under a stale privilege / translation context --
+    # the firmware's sbi_get_insn MPRV window and its trap-exit mret, the
+    # patterns behind ~21k of the witness's 29k [ptw-err] records. No page
+    # fault is architectural in it: graded on the log (no [ptw-err], no
+    # [mmu-ife], no `Response Errored`).
+    ('hyp8_ctx_switch_clean', 'verif/tests/custom/hyp8_ctx_switch_clean.S',
+     '80001000'),
+    # rfix131a: right-path device loads/stores (CLINT) interleaved with
+    # memory traffic -- the non-idempotent load path (commit-head issue,
+    # hand-back and refetch) that the PMA declaration makes live.
+    ('hyp8_dev_load', 'verif/tests/custom/hyp8_dev_load.S', '80001000'),
 ]
 LINK_LD = 'verif/tests/custom/common/link_verilator.ld'
 GCC_FLAGS = ['-march=rv64imafdc_zicsr_zifencei', '-mabi=lp64d',

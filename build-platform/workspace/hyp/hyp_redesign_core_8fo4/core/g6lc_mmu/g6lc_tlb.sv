@@ -188,6 +188,7 @@ module g6lc_tlb
   logic [G6LCCfg.PtLevels-2:0] rsp_is_page;
   logic rsp_hit;
   logic [TLB_ENTRIES-1:0] lu_hit_rsp;
+  logic [TLB_ENTRIES-1:0] lu_touch;
 
   logic [HYP_EXT*2:0] v_st_enbl_live;
   assign v_st_enbl_live = (G6LCCfg.RVH) ? $bits(v_st_enbl)'({v_i, g_st_enbl_i, s_st_enbl_i}) : '1;
@@ -517,6 +518,12 @@ module g6lc_tlb
   assign lu_is_page_o   = TLB_STAGED ? rsp_is_page_q   : rsp_is_page;
   // per-entry hit vector feeding PLRU (staged verdict when staged)
   assign lu_hit_rsp     = TLB_STAGED ? lu_hit_q        : lu_hit;
+  // rfix131a-07: the entry an answered lookup hit -- what the PLRU records.
+  // Staged, lu_hit_q already carries the access that produced it (t1_vld_q);
+  // it was paired with rq_access, the request register of the NEXT lookup,
+  // so a hit touched the tree only while the requester held its access.
+  assign lu_touch       = TLB_STAGED ? lu_hit_q
+                                     : (lu_hit & {TLB_ENTRIES{lu_access_i}});
 
   logic asid_to_be_flushed_is0;  // ASID from SFENCE.VMA (rs2) is 0, active high
   logic vaddr_to_be_flushed_is0;  // VADDR from SFENCE.VMA (rs1) is 0, active high
@@ -606,42 +613,106 @@ module g6lc_tlb
     assign tl_asid_ok[gi]  = (asid_to_be_flushed_i == tags_q[gi].asid);
     assign tl_gvmid_ok[gi] = (vmid_to_be_flushed_i == tags_q[gi].vmid);
   end
-  // Fill-time upsert duplicate detect (staged fill-visibility hazard): under
-  // TlbStages>1 a fill commits several cycles after its lookup sampled the
-  // tag array, so a second lookup for the same translation can miss the
-  // just-written entry and allocate a duplicate way (observed as a
-  // byte-identical valid pair -> hit_onehot multi-hit). Detect an existing
-  // valid entry already holding update_i's translation key; the fill arm
-  // then refreshes that entry in place instead of allocating a second way.
-  // The key mirrors the stored tag fields exactly (vpn packed identically to
-  // the fill store, plus asid/vmid/hart/is_page/v_st_enbl/is_napot), so a
-  // match is a true same-translation duplicate and legitimate
-  // different-page-size or different-context fills are never merged.
-  localparam int unsigned VPN_FLAT_W =
-      (G6LCCfg.PtLevels + HYP_EXT) * (G6LCCfg.VpnLen / G6LCCfg.PtLevels);
-  logic [VPN_FLAT_W-1:0] upd_vpn_flat;
-  logic [TLB_ENTRIES-1:0] fill_dup;
-  logic fill_dup_any;
+  // ---------------------------------------------------------------------
+  // Fill rule (rfix131a-07): a fill evicts every entry it overlaps.
+  // ---------------------------------------------------------------------
+  // The lookup relies on one array invariant: no two valid entries can hit
+  // the same lookup (the hit vector is one-hot0). The fill is the only
+  // writer that creates entries, so the fill keeps it, for every TlbStages
+  // and every page size: the entries the new translation overlaps are
+  // dropped at the fill edge, and the new translation is written over one
+  // of them (the PLRU victim when there is none).
+  //
+  // Two entries overlap when they are in the same context and their address
+  // ranges intersect:
+  //   - a VPN level is compared only where neither is a larger page, and
+  //     the low four VPN0 bits only where neither is a 64K NAPOT page;
+  //   - the ASID is compared only under S-stage translation and where
+  //     neither PTE is global; the VMID only under G-stage translation.
+  // The test may err only towards "overlaps" (an entry is then replaced
+  // early, never left to collide): under two-stage translation with
+  // different S and G page sizes it takes the larger of the two.
+  //
+  // Why equality of the fill records is not the test (the r129 form): with
+  // a staged lookup a response formed before a fill commits reports a miss
+  // and the translation is walked and filled a second time (r129b: vpn
+  // 7f81209 twice, 14 cycles apart). For a 2M/1G page the second walk
+  // generally starts from another 4K offset, for a global page possibly
+  // under another ASID: the two records name the same translation and are
+  // not equal field by field.
+  localparam int unsigned LVW = G6LCCfg.VpnLen / G6LCCfg.PtLevels;
+  localparam int unsigned NLV = G6LCCfg.PtLevels + HYP_EXT;
 
-  always_comb begin
-    upd_vpn_flat = VPN_FLAT_W'(update_i.vpn);
-    if (update_i.is_napot_64k && G6LCCfg.SvnapotEn) upd_vpn_flat[3:0] = 4'b0;
-  end
+  // Levels a page does not compare: level l is wild for a page mapped at a
+  // level above l (is_page order is [1G, 2M], see is_page_o).
+  function automatic logic [G6LCCfg.PtLevels-1:0] wild_levels(
+      input logic [G6LCCfg.PtLevels-2:0][HYP_EXT:0] is_page);
+    logic [G6LCCfg.PtLevels-1:0] w;
+    w = '0;
+    for (int unsigned l = 0; l + 1 < G6LCCfg.PtLevels; l++)
+      for (int unsigned x = l + 1; x < G6LCCfg.PtLevels; x++)
+        w[l] = w[l] | (|is_page[G6LCCfg.PtLevels-1-x]);
+    return w;
+  endfunction
 
-  always_comb begin
-    fill_dup_any = 1'b0;
-    for (int unsigned j = 0; j < TLB_ENTRIES; j++) begin
-      fill_dup[j] = TLB_STAGED && update_i.valid && tags_q[j].valid &&
-          (VPN_FLAT_W'(tags_q[j].vpn) == upd_vpn_flat) &&
-          (tags_q[j].asid == update_i.asid) &&
-          (tags_q[j].vmid == update_i.vmid) &&
-          (!HART_TAG || (tags_q[j].hart == update_i.hart)) &&
-          (tags_q[j].is_page == update_i.is_page) &&
-          (tags_q[j].v_st_enbl == update_i.v_st_enbl) &&
-          (!G6LCCfg.SvnapotEn || (tags_q[j].is_napot_64k == update_i.is_napot_64k));
-      fill_dup_any |= fill_dup[j];
+  logic [NLV-1:0][LVW-1:0]     fill_vpn;
+  logic [G6LCCfg.PtLevels-1:0] fill_wild;
+  logic                        fill_s_en, fill_g_en;
+  logic [TLB_ENTRIES-1:0]      fill_ovl, fill_ovl_first, fill_we;
+  logic                        fill_fire;
+
+  assign fill_vpn  = (NLV * LVW)'(update_i.vpn);
+  assign fill_wild = wild_levels(update_i.is_page);
+  assign fill_s_en = update_i.v_st_enbl[0];
+  assign fill_g_en = (HYP_EXT != 0) && update_i.v_st_enbl[HYP_EXT];
+
+  for (genvar e = 0; e < TLB_ENTRIES; e++) begin : gen_fill_ovl
+    logic [G6LCCfg.PtLevels-1:0] wild;
+    logic [NLV-1:0]              lv_meet;
+    logic                        napot, ctx_same;
+    assign wild  = wild_levels(tags_q[e].is_page) | fill_wild;
+    assign napot = G6LCCfg.SvnapotEn && (tags_q[e].is_napot_64k || update_i.is_napot_64k);
+    for (genvar l = 0; l < NLV; l++) begin : gen_lv
+      if (l == 0) begin : gen_l0
+        assign lv_meet[l] = wild[l] ||
+            ((tags_q[e].vpn[l][LVW-1:4] == fill_vpn[l][LVW-1:4]) &&
+             (napot || (tags_q[e].vpn[l][3:0] == fill_vpn[l][3:0])));
+      end else if (l < G6LCCfg.PtLevels) begin : gen_ln
+        assign lv_meet[l] = wild[l] || (tags_q[e].vpn[l] == fill_vpn[l]);
+      end else begin : gen_lgpa
+        // supplementary GPA bits: part of the address only without S-stage
+        assign lv_meet[l] = fill_s_en || (tags_q[e].vpn[l] == fill_vpn[l]);
+      end
     end
+    assign ctx_same =
+        (tags_q[e].v_st_enbl == update_i.v_st_enbl) &&
+        (!HART_TAG  || (tags_q[e].hart == update_i.hart)) &&
+        (!fill_g_en || (tags_q[e].vmid == update_i.vmid)) &&
+        (!fill_s_en || (tags_q[e].asid == update_i.asid) ||
+         content_q[e].pte.g || update_i.content.g);
+`ifdef G6LC_MUT_TLB_FILL_NO_EVICT
+    // Review mutation: a fill evicts nothing (the pre-r129 fill). The mmu
+    // leaf's TLB_OVL_* cases must fail.
+    assign fill_ovl[e] = 1'b0;
+`elsif G6LC_MUT_TLB_FILL_EQ_ONLY
+    // Review mutation: the r129 record-equality test. The 2M-from-another-
+    // offset and global-under-another-ASID cases must fail.
+    assign fill_ovl[e] = tags_q[e].valid &&
+        (tags_q[e].vpn == fill_vpn) && (tags_q[e].asid == update_i.asid) &&
+        (tags_q[e].vmid == update_i.vmid) &&
+        (tags_q[e].is_page == update_i.is_page) &&
+        (tags_q[e].v_st_enbl == update_i.v_st_enbl);
+`else
+    assign fill_ovl[e] = tags_q[e].valid && ctx_same && (&lv_meet);
+`endif
   end
+
+  // The fill lands on the lowest overlapped entry, else on the PLRU victim.
+  // !lu_hit_o is the existing install arbitration (see the svt-plan note at
+  // the top of the module); the invariant above does not depend on it.
+  assign fill_fire      = update_i.valid && !lu_hit_o;
+  assign fill_ovl_first = fill_ovl & (~fill_ovl + TLB_ENTRIES'(1));
+  assign fill_we        = (|fill_ovl) ? fill_ovl_first : replace_en;
 
   always_comb begin : update_flush
     tags_n                 = tags_q;
@@ -704,8 +775,10 @@ module g6lc_tlb
             tags_n[i].valid = 1'b0;
         end
         // normal replacement
-      end else if (update_i.valid & !lu_hit_o &
-                   (fill_dup[i] | (replace_en[i] & !fill_dup_any))) begin
+      end else if (fill_fire && fill_ovl[i] && !fill_we[i]) begin
+        // overlapped by the translation being filled: evicted
+        tags_n[i].valid = 1'b0;
+      end else if (fill_fire && fill_we[i]) begin
         vpn_to_store = update_i.vpn;
         if (update_i.is_napot_64k && G6LCCfg.SvnapotEn) begin
           // Svnapot: For a NAPOT entry, normalize the VPN by clearing the lower bits before storage
@@ -772,8 +845,7 @@ module g6lc_tlb
     localparam logic [TLB_ENTRIES-1:0] SETM = plru_node_ents(n, 1'b1);
     localparam logic [TLB_ENTRIES-1:0] CLRM = plru_node_ents(n, 1'b0);
     assign plru_tree_n[n] =
-        (plru_tree_q[n] | (rq_access & |(lu_hit_rsp & SETM))) &
-        ~(rq_access & |(lu_hit_rsp & CLRM));
+        (plru_tree_q[n] | (|(lu_touch & SETM))) & ~(|(lu_touch & CLRM));
   end
 `endif
 
@@ -840,7 +912,7 @@ module g6lc_tlb
       new_index = 0;
       // we got a hit so update the pointer as it was least recently used —
       // hyp8: tracks the staged verdict and the staged access flag
-      if (lu_hit_rsp[i] & rq_access) begin
+      if (lu_touch[i]) begin
         // Set the nodes to the values we would expect
         for (int unsigned lvl = 0; lvl < $clog2(TLB_ENTRIES); lvl++) begin
           idx_base = $unsigned((2 ** lvl) - 1);
@@ -984,8 +1056,8 @@ module g6lc_tlb
           $display("[tlb] %m c=%0d UPD vpn=%h asid=%h vmid=%h ispg=%b vst=%b g=%b ppn=%h hit_o=%b repl=%b wr=%b",
                    tlb_tr_cyc, update_i.vpn, update_i.asid, update_i.vmid,
                    update_i.is_page, update_i.v_st_enbl, update_i.content.g,
-                   update_i.content.ppn, lu_hit_o, replace_en,
-                   update_i.valid && !lu_hit_o && !any_tlb_flush);
+                   update_i.content.ppn, lu_hit_o, fill_we,
+                   fill_fire && !any_tlb_flush);
         if (any_tlb_flush)
           $display("[tlb] %m c=%0d FLUSH f=%b vv=%b gv=%b asid=%h va=%h",
                    tlb_tr_cyc, flush_i, flush_vvma_i, flush_gvma_i,
@@ -1022,7 +1094,7 @@ module g6lc_tlb
       idx_base  = 0;
       shift     = 0;
       new_index = 0;
-      if (lu_hit_rsp[i] & rq_access) begin
+      if (lu_touch[i]) begin
         for (int unsigned lvl = 0; lvl < PLRU_LVL; lvl++) begin
           idx_base  = $unsigned((2 ** lvl) - 1);
           shift     = PLRU_LVL - lvl;

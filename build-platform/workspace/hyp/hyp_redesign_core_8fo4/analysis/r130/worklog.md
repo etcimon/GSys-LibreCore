@@ -245,8 +245,8 @@ DTB (rv64imafdc+Zba/Zbb/Zbs/Zicboz, CLINT@0x2000000, PLIC@0xc000000,
 ## r128b forensics — real failure signature (NOT near-shell)
 
 > **SUPERSEDED / WRONG (see `analysis/rfix131a/worklog.md` section 0).** r128b was
-> alive and progressing through the kernel's UART-quiet phase; its 1.75e9
-> budget could not reach `/init` (~2.53B cycles). No hang, no kill, no
+> alive and progressing through the kernel's UART-quiet phase (r127m prints
+> its next line at 1.23B cycles) when it was stopped by hand. No hang, no
 > regression.
 
 hyp8-osbi-scalar-r128b ran ~27h to ~1.054B cycles then exited (monitor/
@@ -283,8 +283,8 @@ handling / DRAM backend) -> needs tagged addr + directed debug.
 ## r128b hang — deep RTL/kernel forensic (decisive)
 
 > **SUPERSEDED / WRONG (see `analysis/rfix131a/worklog.md` section 0).** r128b was
-> alive and progressing through the kernel's UART-quiet phase; its 1.75e9
-> budget could not reach `/init` (~2.53B cycles). No hang, no kill, no
+> alive and progressing through the kernel's UART-quiet phase (r127m prints
+> its next line at 1.23B cycles) when it was stopped by hand. No hang, no
 > regression.
 
 r128b (closure 2026-11-14, target g6lc64_hyp8 => LoadExPubStages=1,

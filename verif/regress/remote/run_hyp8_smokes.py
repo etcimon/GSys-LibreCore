@@ -73,17 +73,23 @@ def main():
         # `log_dirty`, not a pass.
         bus_err = len(re.findall(r'Response Errored', text))
         uart_rd = len(re.findall(r'^\[uart-axi-ar\]', text, re.M))
-        if state == 'pass' and (bus_err or uart_rd):
+        # A `*_clean` program takes no architectural page fault, so a walk
+        # fault or a fetch exception record in its log is activity under a
+        # wrong context or on a wrong path.
+        walk_err = len(re.findall(r'^\[(?:ptw-err|mmu-ife)\]', text, re.M))
+        if state == 'pass' and (bus_err or uart_rd or
+                                (name.endswith('_clean') and walk_err)):
             state = 'log_dirty'
         summary['tests'][name] = {'rc': p.returncode, 'state': state,
                                   'argv': cmd, 'elfSha256': elf_sha,
                                   'cycles': int(m.group(1)) if m else None,
                                   'busErrors': bus_err, 'uartReads': uart_rd,
+                                  'walkErrors': walk_err,
                                   'verdict': verdict[-1:] , 'log': log.name}
         if state != 'pass':
             rc_all = 1
         print(f'{name}: {state} cycles={summary["tests"][name]["cycles"]} rc={p.returncode} '
-              f'bus_err={bus_err} uart_rd={uart_rd}')
+              f'bus_err={bus_err} uart_rd={uart_rd} walk_err={walk_err}')
     (out / 'smokes-results.json').write_text(json.dumps(summary, indent=2))
     return rc_all
 

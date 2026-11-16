@@ -26,16 +26,22 @@ Scope of the edits: `core/include/g6lc64_hyp8_config_pkg.sv`,
 
 ## Status
 
-| entry | class | isolated test | fix | verified |
-|---|---|---|---|---|
-| RFIX-131a-01 | speculative loads on the bus outside memory (18,131 AXI DECERR, device reads) | `hyp8_spec_bus_clean.S` — reproduced on the r131 model | PMA non-idempotent regions (config) | **no** (model with the fix not built) |
-| RFIX-131a-02 | execution under a stale privilege/translation context (16,553 + 4,635 `[ptw-err]`, 18,130 of the DECERR) | `hyp8_ctx_switch_clean.S` — reproduced on the r131 model; leaves `ctx-barrier`, `csr-credit` | context barrier at dispatch + frontend hold | **no** (leaves and model not run) |
-| RFIX-131a-03 | wrong-path data walks with a garbage base (5,426 `[ptw-err]`) | not yet | not yet | — |
-| RFIX-131a-04 | S-mode fetch exception presentations on squashed fetches (490 `[mmu-ife]`) | not yet | not yet | — |
-| RFIX-131a-05 | commit stalls > 2000 cycles (30 `[hang]` dumps, LR backoff) | `sc-backoff` leaf (r130) | `67f413a63` (r130) | leaf only; not re-observed on a boot |
-| RFIX-131a-06 | memory-order violation replays (706,483; IPC 0.143) | not yet | not yet | — |
-| RFIX-131a-07 | `g6lc_tlb` fill-time upsert is gated by `TLB_STAGED` (`3f3083a64`) | mmu leaf | to restate as an unconditional one-entry-per-key invariant | — |
+"Verified" means: on the remote testharness, pinned fork toolchain
+(`verilator-v5.008-g6lc-44063db8-pgo`: compiler PGO, loop unrolling,
+split-loops, simulation PGO), model `64f3a61f…` built from closure-rfix131a,
+17 directed programs graded on tohost **and** on the log, plus the leaf
+benches. No Linux boot has run on this tree.
 
+| entry | class (r127m count) | isolated test | structural fix | verified |
+|---|---|---|---|---|
+| RFIX-131a-01 | speculative loads on the bus outside memory (18,131 AXI DECERR; device reads) | `hyp8_spec_bus_clean.S` | PMA non-idempotent regions (config) | yes: 3 DECERR + 1 UART read -> 0 |
+| RFIX-131a-02 | execution under a stale privilege/translation context (16,558 + 4,635 `[ptw-err]`; 18,130 of the DECERR) | `hyp8_ctx_switch_clean.S`; leaves `ctx-barrier`, `csr-credit` | context barrier at dispatch + frontend hold | yes: 65 DECERR + 194 walks -> 0 |
+| RFIX-131a-07 | TLB multi-hit (r129b model stop @317,424,744) | mmu leaf `TLB_OVL_*` (6 cases x 3 instances) + 2 mutants | fill evicts every entry it overlaps; PLRU records the answered hit | yes (leaf) |
+| RFIX-131a-08 | non-idempotent load parked at the LSU head (found by -01's own test) | `hyp8_spec_bus_clean.S`, `hyp8_dev_load.S` | a non-idempotent load that is not the commit head is handed back | yes |
+| RFIX-131a-03 | wrong-path data walks, null/garbage base (5,389) | `hyp8_spec_walk_clean.S` — reproduced on the r131 model (3 walks for 0, 8, 0x220); not in the smoke list until fixed | open (see "Open classes") | - |
+| RFIX-131a-04 | S-mode fetch exception presentations (490) | not yet | open | - |
+| RFIX-131a-05 | commit gaps > 2000 cycles: 6 real (LR parked by SC backoff), 24 are WFI idle | `sc-backoff` leaf | `67f413a63` (r130) | leaf only |
+| RFIX-131a-06 | memory-order replays (706,483; IPC 0.25) | not yet | open | - |
 
 ## 0. Correction of the r130 worklog (r128b "hang")
 
@@ -49,13 +55,18 @@ forensic" are wrong and are superseded by this section.
   deliberately on 2026-11-16 at RVFI cycle 1,070,988,199 (this session).
 - The UART silence after `[6.31] Freeing initrd memory` is the kernel's own
   quiet phase. r127m (the run that reached `G6LC_LINUX_SHELL`) prints the
-  identical `[6.312965]` line and then nothing until `[19.39] io scheduler …`,
-  `[23.46] Run /init`, shell at uptime 24.79 s, last RVFI cycle
-  2,670,920,795 with a 3.0e9 budget. Kernel time advances ~107.7M cycles per
-  second, so 6.31 s is ~0.68B cycles and `/init` is ~2.53B cycles.
-- r128b, r130 and r131 were launched with `+max-cycles=1.75e9`: that budget
-  ends at ~16 s of kernel time and **cannot** reach `/init`. None of them
-  could have produced a shell verdict; no RTL defect is implied.
+  identical `[6.312965]` line at cycle 573,422,463 and its next line,
+  `[19.39] io scheduler …`, at 1,227,720,505 (`tq.sh uart -r r127m`).
+  r128b was stopped by hand at 1,070,988,199 — inside that phase.
+- r127m's milestones by cycle: console `ttyS0` enabled 1,322,522,498;
+  `Run /init` 1,430,638,389; `G6LC_LINUX_INIT_UP` 1,473,869,381;
+  `G6LC_LINUX_SHELL` 1,529,110,782; from 1.537B on the hart sits in WFI.
+  The 1.75e9 budget of r128b / r130 / r131 therefore **does** cover the
+  shell. (An earlier version of this section put `/init` at ~2.53B cycles,
+  from a kernel-time extrapolation, and concluded the budget was too small.
+  That figure was wrong.)
+- Consequence: r128b gives no verdict either way. It showed no defect, and
+  it was stopped before it could show a shell.
 - The 6.4M-hit function at `0xffffffff8027fc08` is a XOR/byte-store transform
   followed by `memset(…, 0, 360)` (a hash/cipher state), i.e. kernel self-test
   or entropy work inside that quiet phase, not a livelock.
@@ -248,10 +259,7 @@ correct, conservative; a per-hart hold is a later refinement. Timing: an
 NP-wide prefix AND on the dispatch valid lanes ahead of rename's capture
 enable, and one OR on the frontend hold; to be measured with sv-timing.
 
-**Verification so far.** Local host lint of the core flist
-(`lint_hyp8_core_local.sh`): clean of fatal classes, 7 open warnings, all
-pre-existing `CMPCONST` in `sb_head.sv`. **Nothing has been simulated**: the
-leaves and the two directed tests have not run on a tree with the fix.
+**Verification.** See "Results" below.
 
 **Backport (original RTL).** `core/issue_stage.sv` instantiates
 `core/ooo/g6lc_ooo_dispatch.sv` the same way: add `g6lc_ctx_barrier` in
@@ -264,32 +272,233 @@ has the same `halt_frontend_i` input (`core/controller.sv:398`). The
 directed tests and the `ctx-barrier` leaf apply unchanged; `csr-credit`
 needs the hyp8 table.
 
+## RFIX-131a-07 — TLB fill: a fill evicts every entry it overlaps
+
+**Evidence.** `hyp8-osbi-scalar-r129b-mmustaged-diag2` (staged MMU,
+`TlbStages=3`) stops at cycle 317,424,744 on `g6lc_tlb_hit_onehot0` in the
+DTLB (`tq.sh asserts`). r129 analysis: with a staged lookup a response formed
+before a fill commits reports a miss; the translation is walked and filled a
+second time (vpn 7f81209 twice, 14 cycles apart).
+
+**Review of `3f3083a64`.** It added `fill_dup`: a `TLB_STAGED`-gated,
+field-by-field equality of the fill record against every stored tag (vpn,
+asid, vmid, hart, is_page, v_st_enbl, napot), and refreshed the equal entry
+in place. Two translations that are the same do not have equal records:
+- a 2M / 1G page walked again from another 4K offset stores another
+  `vpn[0]` (`vpn[1]`): not equal, second entry, multi-hit on the next
+  lookup in that page;
+- a global page walked under another ASID: not equal, both entries hit
+  every ASID.
+The mmu leaf shows it (mutant `G6LC_MUT_TLB_FILL_EQ_ONLY` = the r129 test:
+the model stops on the one-hot assertion in the 2M case at t=7905).
+
+**Structural fix.** The invariant the lookup relies on — no two valid
+entries can hit the same lookup — is kept by the only writer that creates
+entries, unconditionally (every `TlbStages`, every page size): *a fill evicts
+every entry it overlaps and is written over one of them (else the PLRU
+victim)*. Overlap = same context (stage enables, hart tag, VMID under
+G-stage, ASID under S-stage unless either PTE is global) and intersecting
+address ranges (a VPN level is compared only where neither is a larger page;
+the low four VPN0 bits only where neither is NAPOT). The test may err only
+towards "overlaps" (two-stage translation with different S/G sizes takes the
+larger). `wild_levels()` states the page-size rule once, for the stored entry
+and for the fill. `!lu_hit_o` on the fill is unchanged (install arbitration).
+
+**Second finding (same leaf): the PLRU did not record staged hits.** The
+PLRU update paired `rq_access` (the T1 *request* register) with `lu_hit_rsp`
+(the T2 *response* register): one cycle apart, so a hit moved the tree only
+when the requester held its access a second cycle. A fill then landed on the
+entry that had just been hit (`TLB_OVL_KEEP_A` on the staged instance). Now
+`lu_touch` = the answered hit (`lu_hit_q` staged, `lu_hit & lu_access_i`
+combinational); the unstaged netlist is unchanged.
+
+**Isolated tests.** `tb_g6lc_hyp8_mmu` T_H, on the three `HYP_EXT=0`
+instances ({4,1}, {4,3}, {16,3} = entries, TlbStages): same 4K twice; 2M from
+two offsets; 4K inside a 2M (the 2M goes); global under two ASIDs; 4K inside
+a NAPOT range; four non-overlapping translations all stay. External checks
+only (hit/miss/PTE) plus the DUT's own one-hot assertion. Mutants:
+`G6LC_MUT_TLB_FILL_NO_EVICT`, `G6LC_MUT_TLB_FILL_EQ_ONLY`.
+
+**Timing note (owed).** The fill arm gains a per-entry compare of the
+registered update record against `tags_q` (27-bit VPN in three levels +
+16-bit ASID), an OR-reduce and a lowest-set pick ahead of `tags_n`.
+
+**Backport.** `core/cva6_mmu/cva6_tlb.sv` is upstream (tier U: do not edit
+in place) and has the single-cycle lookup; the rule applies to any staged
+derivative. The leaf cases are independent of the staging.
+
+## RFIX-131a-08 — a non-idempotent load does not wait at the LSU head
+
+**Evidence.** Found by RFIX-131a-01's own test on the first model with the
+PMA: `hyp8_spec_bus_clean` wedged (budget-out at 400,000 cycles, no bus
+error). `[hang]` dump (`tq.sh hangs`): commit head = the unresolved branch
+`beqz a2` (`fu=4 op=17 pc=80000110`); the IQ window presents it, `take_ok=0`,
+`lsu_rdy=0`; LSU bypass `cnt=4`; load unit `state=256` (WAIT_WB_EMPTY) on
+`vaddr=0000000010001468`, `dtlb_hit=1`, write buffer empty.
+
+**Root cause.** The wrong-path load to the device address was taken into the
+non-idempotent path (`ABORT_TRANSACTION_NI` → `WAIT_WB_EMPTY` →
+`WAIT_TRANSLATION` → `WAIT_GNT`, looping while `stall_ni`) to wait for
+commit time. The load unit serves the LSU queue in order, so every load
+behind it waited too; the queue filled (4); `lsu_ready` fell; the issue
+lane's LSU occupancy gate held the lane the branch was presented on; the
+branch that would squash the parked load never issued. A wait for commit
+time at the head of an in-order queue can only be ended by something that is
+behind it.
+
+**Structural fix.** A non-idempotent load runs as the commit head; one that
+reaches the load unit earlier is *handed back* — popped and replayed,
+refetched at commit (the existing T33 `lu_replay_o` path) — in
+`WAIT_WB_EMPTY` (`ni_yield`); and the `WAIT_SPEC_LOAD` dwell yield (r124) no
+longer requires a DTLB miss: any load still flagged after the dwell yields.
+The reference FSM carries the same two arms (equivalence assertions).
+
+**Isolated tests.** `hyp8_spec_bus_clean.S` (the wedge) and
+`hyp8_dev_load.S` (new): CLINT `mtimecmp` / `mtime` / `msip` loads and
+stores interleaved with memory traffic, 64 rounds, checked for order.
+
+**Cost (measured on `hyp8_dev_load`).** 26,527 cycles for 1,627
+instructions, `lu_replay=192`: every device load that issues before it is
+the commit head costs a replay and refetch. Device-polling loops (UART LSR)
+will pay this; holding such a load at dispatch instead of replaying it is
+the refinement if a boot shows it matters.
+
+**Backport.** `core/load_unit.sv` has the same NI states and no replay
+output; the hand-back needs the scoreboard replay path of the OoO tree
+(`lu_replay_o` → `sb_lifecycle`).
+
+## Results (remote testharness, closure-rfix131a)
+
+Model: `hyp8-rfix131a-aggregate-t4`, target `g6lc64_hyp8` (scalar), lint
+scalar/smt2 0 `%Error`, model `64f3a61f10d43a73…`, simulation PGO 232
+profiles, Verilator binary `d219b63fc4f8fcba`.
+
+Directed programs (pass = tohost **and** clean log; r130 baseline cycles in
+parentheses):
+
+| program | cycles | bus_err | uart_rd | walk_err |
+|---|---|---|---|---|
+| h34_shift_dep | 685 (685) | 0 | 0 | 0 |
+| h33_st_fwd | 1011 (1011) | 0 | 0 | 0 |
+| hyp8_branch_cancel | 492 (492) | 0 | 0 | 0 |
+| hyp8_csr_flush_skip | 2429 (2364) | 0 | 0 | 0 |
+| hyp8_amo_store_order | 2163 (2199) | 0 | 0 | 0 |
+| hyp8_amo_ready_order | 1207 (1231) | 0 | 0 | 0 |
+| hyp8_f14_store_offset | 666 (671) | 0 | 0 | 0 |
+| hyp8_h35_subword | 3038 (3038) | 0 | 0 | 0 |
+| hyp8_h36_strlen_replay | 9095 (9095) | 0 | 0 | 0 |
+| hyp8_h37_ldst_viol_strlen | 5959 (5959) | 0 | 0 | 0 |
+| hyp8_h38_zbb_zero | 883 (883) | 0 | 0 | 0 |
+| hyp8_lrsc_store | 988 (983) | 0 | 0 | 0 |
+| hyp8_sv39_load | 3933 (3893) | 0 | 0 | 0 |
+| hyp8_zkn_kat | 6975 (6949) | 0 | 0 | 0 |
+| hyp8_spec_bus_clean | 13706 (new; r131 model: 3 DECERR + 1 UART read) | 0 | 0 | 0 |
+| hyp8_ctx_switch_clean | 35569 (new; r131 model: 65 DECERR + 194 walks) | 0 | 0 | 0 |
+| hyp8_dev_load | 26527 (new) | 0 | 0 | 0 |
+
+Seven baseline programs changed cycle count (between −36 and +65); the other
+seven are identical. The change set that could move them is the context
+barrier, the PMA gate and the load-unit yield; which one moved which program
+was not separated.
+
+Leaf benches (`run_hyp8_memory.py`, 23 registered):
+
+| result | leaves |
+|---|---|
+| pass | csr (76), csr-credit (5 cases incl. the hold contract), ctx-barrier (4 cases, 131,624 patterns), memory (176), issue, lsq-credit (252), flu, iqleg, dispatch (125), realign, linecheck, queue, alu (19,532), rom, pmp (23), sc-backoff (55), dcache (345), lsq (2,826), mmu (818, miter 990), ctrl, lbuf (22) |
+| mutants fail as required | mmu + `G6LC_MUT_TLB_FILL_NO_EVICT`, mmu + `G6LC_MUT_TLB_FILL_EQ_ONLY` |
+| not runnable | pmp-write, mshr: their reference/candidate sources (`g6lc_hyp8_pmp_bank_reference.sv`, `g6lc_l2_mshr_reference.sv`) are not in the tree |
+
+All 21 runnable leaves and the 17 programs ran on the final tree (one
+closure, round 3).
+
+Leaf infrastructure repaired on the way (each was failing before this round,
+unrelated to the fixes): `csr` / `issue` / `lsq-credit` / `flu` did not
+verilate (`cf_math_pkg` missing from their source lists); `csr` failed
+`CSRTAB_LEGAL_FIRE_1` (the bench predates the r59 one-cycle commit hold
+after a CSR fire; the r127 worklog had recorded it as "pre-existing");
+`lsq-credit` never printed its token (its section runs under
+`+credit_only`); `ctrl` drove main-tree Storamic controller ports the hyp8
+controller does not have (now under `G6LC_CTRL_STORAMIC_PORTS`).
+
+## Trace database (`verif/regress/remote/hyp8/tracedb/`)
+
+`ingest.py` turns the model log of a run (witness, smokes, probe) into rows
+of one SQLite file with categorical columns; `query.py` holds the reports;
+`tq.sh` runs either on the remote host, next to the logs
+(`/opt/testharness/tracedb/hyp8-trace.sqlite`: 45 MB for the witness logs
+r127m … r131, 10.2 GB of text; 13 s for the 5.2 GB r127m log).
+
+| table | content |
+|---|---|
+| `run` | tag, test, kind, rev, model, argv, budget, last cycle, cores, harts, verdict |
+| `event` | cycle, core, hart, class, etype, addr, pc, aux, detail (JSON), raw line |
+| `etype` | error type → class, origin (`wrong-path`, `stale-context`, `liveness`, `model-assert`, `architectural?`, `idle`, …), RFIX entry |
+| `census` | periodic stall census per hart: retired, IPC, flush cycles, replays, memory violations |
+| `uart` | console lines with the cycle they were printed at and the kernel time |
+| `rvfi` | retired instructions around anchor events (bisected out of the per-core traces, never scanned) |
+| `pc_sample` | sampled PC / privilege / region profile over the whole run |
+| `thread` | per core / hart: retired, IPC, last cycle, max retirement gap, WFI |
+| `kv`, `symbol` | `[equiv]` / `mc_*` counters; firmware symbols |
+
+Reports: `runs`, `classes`, `origins`, `timeline`, `top`, `around`,
+`asserts`, `hangs`, `threads`, `uart`, `profile`, `diff`, `sql`.
+
+What it showed that the greps had not:
+- `hangs`: of r127m's 30 commit-gap dumps, 24 have **WFI at the commit
+  head** (`idle.wfi`, 1.537B–1.540B: the idle shell) and 6 are the LR parked
+  by the SC backoff. The class is 6, not 30.
+- `uart`: the boot's cycle clock (section 0) — which is what showed the
+  earlier budget claim to be wrong.
+- `classes` over r127m / r128b / r129-deep / r129b: `stale-context` events
+  21,193 / 16,976 / 13,766 / 4,108, and the 18,131 bus errors are identical
+  in every run that passes 370M cycles: deterministic firmware behaviour.
+- `asserts`: the two model stops with their last retired instructions —
+  r129b `g6lc_tlb_hit_onehot0` @317,424,744 (RFIX-131a-07) and r129-deep
+  `lu_pop_is_presented` @375,989,307 (deep profile, not the boot binding;
+  `56af5ea39` narrowed that assertion afterwards).
+- `timeline -b 200000000`: memory-order replays run at ~193k per 200M
+  cycles through the kernel's quiet phase (600M–1200M), IPC 0.25.
+
+Limits: per-thread columns are populated from what the logs carry — the
+ingested runs are all single-core, single-hart, so the core/hart split has
+not been exercised on a multi-core log; kernel PCs are not symbolized (no
+`vmlinux` on the host, only the firmware ELF).
+
 ## Open classes (analysis so far)
 
-- **RFIX-131a-03** — 5,426 data walks for `vaddr` 0, 3, 4, 8, 0x220 … in
-  S-mode: loads behind a mispredicted branch with a null/garbage base.
-  `tr_idle_ok = dtlb_hit || !spec_ld` already says a load flagged
-  speculative does not request a walk; these loads were not flagged. To
-  establish which loads miss the flag (r71: the bypass does not clear or
-  set it for queued entries) before choosing the rule.
-- **RFIX-131a-04** — 490 S-mode `[mmu-ife] cause=12` presentations (142 of
-  them with `ptw_err=0`: an ITLB hit with a permission error, i.e. a U page
-  looked up under S after trap entry). The frontend's request across a
-  commit-side redirect; candidate rule: no fetch request in a cycle a
-  commit-side flush is pending.
-- **RFIX-131a-05** — 30 `[hang]` dumps: the LR parked by a saturated
-  SC-backoff mask at 396.95M / 429.42M (r130 analysis, fix `67f413a63`,
-  `sc-backoff` leaf). No boot has run with it.
-- **RFIX-131a-06** — `mem_viol=706,483` replays and IPC 0.143 over the
-  boot: not an error record, but the largest structural cost in the census.
-- **RFIX-131a-07** — `g6lc_tlb.sv` `fill_dup` (`3f3083a64`) is a
-  `TLB_STAGED`-gated compare chain in the fill arm. The invariant behind it
-  (at most one valid entry per translation key) holds for every staging if
-  the fill is an upsert unconditionally; to be restated that way and proved
-  on the mmu leaf rather than gated.
+- **RFIX-131a-03** — 5,389 data walks for `vaddr` 0 (2,933), 4, 0x220, 3, 8
+  … in S-mode. `tq.sh around -r r127m -e ptw.data.null`: the walk is
+  requested between two retirements of straight-line code, i.e. by a load
+  that never retires, with a null base. `tr_idle_ok = dtlb_hit || !spec_ld`
+  says a load flagged speculative does not request a walk; the flag
+  (`ex_stage` `speculative_load`) is only "a branch issues on an earlier
+  port in the same cycle", so under OoO almost no wrong-path load carries
+  it. Candidate rule, same shape as -08: a load that misses the DTLB
+  requests its walk only as the commit head. Isolated:
+  `verif/tests/custom/hyp8_spec_walk_clean.S` (S-mode under Sv39, a
+  trained-not-taken branch whose fall-through dereferences a pointer probed
+  with 0, 8, 0x220 and a non-canonical value) shows `[ptw-err] vaddr=0`,
+  `=8`, `=0x220` `instr=0` on the r131 model (`hyp8-rfix131a-probe-walk-base`),
+  tohost pass. Not yet fixed.
+- **RFIX-131a-04** — 490 S-mode `[mmu-ife] cause=12`: 272 are ITLB *hits*
+  on user addresses (a U page fetched under S: the frontend's user window
+  looked up under the kernel context at trap entry — the context switch no
+  instruction announces, so the barrier does not cover it), 189 walk faults
+  on user addresses, 29 on kernel-vm addresses. Candidate rule: no fetch
+  request while a commit-side redirect is pending.
+- **RFIX-131a-05** — 6 real commit gaps (LR parked by a saturated
+  SC-backoff mask, 396.95M / 429.42M; r130 fix `67f413a63`, `sc-backoff`
+  leaf passes). Not re-observed on a boot.
+- **RFIX-131a-06** — `mem_viol=706,483` replays, IPC 0.25 through the boot:
+  the largest structural cost in the census.
 - **RVFI trace fidelity** (found while isolating RFIX-131a-01): the trace
   printed the squashed fall-through of a mispredicted taken branch as
-  retired (`ld t0,1128(a0)` with `mem 0x10001468`, `x5 = 0xca11ab1ebadcab1e`)
-  while the architectural check (fall-through count) passes. To isolate:
-  either the tracer prints a cancelled commit slot or the count check is
-  blind to it.
+  retired (`ld t0,1128(a0)` with `mem 0x10001468`,
+  `x5 = 0xca11ab1ebadcab1e`) while the architectural check (fall-through
+  count) passes. To isolate: the tracer prints a cancelled commit slot, or
+  the count check is blind to it.
+- **Multi-core** — nothing above has run on `g6lc64_hyp8_mc` (4 cores × 2
+  harts, L2/L3, coherence). The PMA declaration is in its config package;
+  the mc model and its directed programs are the next isolated step, before
+  any Linux or OpenWrt boot.

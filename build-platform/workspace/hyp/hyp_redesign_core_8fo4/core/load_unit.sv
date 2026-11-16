@@ -904,6 +904,17 @@ assign ldbuf_full = &ldbuf_valid_q;
   assign inflight_stores = !dcache_wbuffer_not_ni_i ||
                            (G6LCCfg.OoOEn ? !no_st_pending_i : !store_buffer_empty_i);
   assign stall_ni = (inflight_stores || not_commit_time) && (paddr_ni && G6LCCfg.NonIdemPotenceEn);
+  // rfix131a-08: a non-idempotent load runs at the head of the window. One
+  // that reaches this unit before it is the commit head is handed back
+  // (popped, replayed, refetched at commit -- the T33 path) instead of
+  // waiting here: the load unit serves the LSU queue in order, so a load
+  // parked at its head for commit time holds every load behind it, the
+  // queue fills, the issue lane behind it stalls, and the branch that would
+  // resolve (or squash) the parked load can no longer issue
+  // (hyp8_spec_bus_clean: wrong-path `ld 0x468(a0)` to 0x1000_1468 parked,
+  // LSU count 4, the unresolved branch at the commit head never granted).
+  logic ni_yield;
+  assign ni_yield = G6LCCfg.OoOEn && not_commit_time;
 
   // R3a: STQ data forward covers this load's bytes (lsu_ctrl.be already sized/aligned)
   logic st_fwd_covers;
@@ -1193,8 +1204,11 @@ assign ldbuf_full = &ldbuf_valid_q;
           end
           // r124: still flagged after WSL_REPLAY_AFTER cycles -- yield to the
           // older loads behind it (see wsl_cnt_q)
-        end else if (wsl_replay_fire && spec_ld && !dtlb_hit_i &&
+        end else if (wsl_replay_fire && spec_ld &&
                      !req_port_i.data_rvalid) begin
+          // rfix131a-08: any load still flagged after the dwell yields --
+          // a DTLB miss (r124) or a non-idempotent address; both wait for
+          // commit time, which the loads queued behind it may be holding.
           state_d     = LU_S_IDLE;
           pop_ld_o    = 1'b1;
           lu_replay_o = 1'b1;
@@ -1273,7 +1287,15 @@ assign ldbuf_full = &ldbuf_valid_q;
         end
       end
       state_q[LU_B_WAIT_WB_EMPTY]: begin
-        if (G6LCCfg.NonIdemPotenceEn && dcache_wbuffer_not_ni_i) begin
+        if (G6LCCfg.NonIdemPotenceEn && ni_yield) begin
+          // rfix131a-08: not the commit head -- hand the load back (the
+          // request was killed in ABORT_TRANSACTION_NI the cycle before)
+          if (!req_port_i.data_rvalid) begin
+            state_d     = LU_S_IDLE;
+            pop_ld_o    = 1'b1;
+            lu_replay_o = 1'b1;
+          end
+        end else if (G6LCCfg.NonIdemPotenceEn && dcache_wbuffer_not_ni_i) begin
           state_d = LU_S_WAIT_TRANSLATION;
         end else begin
           state_d = LU_S_IDLE;
@@ -2353,7 +2375,7 @@ assign ldbuf_full = &ldbuf_valid_q;
             rf_state_d  = 4'(LU_B_IDLE);
             rf_pop_ld_o = 1'b1;
           end
-        end else if (wsl_replay_fire && spec_ld && !dtlb_hit_i &&
+        end else if (wsl_replay_fire && spec_ld &&
                      !req_port_i.data_rvalid) begin
           rf_state_d     = 4'(LU_B_IDLE);
           rf_pop_ld_o    = 1'b1;
@@ -2490,6 +2512,13 @@ assign ldbuf_full = &ldbuf_valid_q;
           rf_req_port_o.tag_valid = 1'b1;
           // re-do the request
           rf_state_d = 4'(LU_B_WAIT_WB_EMPTY);
+        end else if (rf_state_q == 4'(LU_B_WAIT_WB_EMPTY) && G6LCCfg.NonIdemPotenceEn && ni_yield) begin
+          // rfix131a-08: hand back a non-idempotent load that is not the commit head
+          if (!req_port_i.data_rvalid) begin
+            rf_state_d     = 4'(LU_B_IDLE);
+            rf_pop_ld_o    = 1'b1;
+            rf_lu_replay_o = 1'b1;
+          end
         end else if (rf_state_q == 4'(LU_B_WAIT_WB_EMPTY) && G6LCCfg.NonIdemPotenceEn && dcache_wbuffer_not_ni_i) begin
           // Wait until the write-back buffer is empty in the data cache.
           // the write buffer is empty, so let's go and re-do the translation.

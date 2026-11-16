@@ -72,7 +72,10 @@ LEAFS = {
     },
     'csr': {
         'sources': COMMON + [
-            'g6lc_ooo_pkg.sv',
+            # cf_math_pkg: the bench file's ALU top references it; the whole
+            # file is parsed whichever top is selected (rfix131a: the csr
+            # leaf had stopped verilating on PKGNODECL).
+            'g6lc_ooo_pkg.sv', 'cf_math_pkg.sv',
             'csr_decode.sv', 'csr_read.sv', 'csr_trap.sv', 'csr_irq.sv',
             'csr_counters.sv', 'csr_write.sv', 'csr_regfile.sv',
             'csr_buffer.sv', 'commit_stage.sv',
@@ -107,7 +110,8 @@ LEAFS = {
     },
     'issue': {
         'sources': COMMON + [
-            'g6lc_ooo_pkg.sv', 'g6lc_iq_payload.sv', 'mut_iq_payload_comb.sv',
+            'g6lc_ooo_pkg.sv', 'cf_math_pkg.sv',
+            'g6lc_iq_payload.sv', 'mut_iq_payload_comb.sv',
             'g6lc_iq_arb.sv', 'g6lc_flu_reserve.sv',
             # IRO stale-lane section (h33 regression): the real
             # issue_read_operands; helper packages precede it in compile
@@ -138,7 +142,8 @@ LEAFS = {
     },
     'lsq-credit': {
         'sources': COMMON + [
-            'g6lc_ooo_pkg.sv', 'g6lc_lsq_event.sv', 'g6lc_lsq_slot.sv',
+            'g6lc_ooo_pkg.sv', 'cf_math_pkg.sv',
+            'g6lc_lsq_event.sv', 'g6lc_lsq_slot.sv',
             'g6lc_lsq_cam_bank.sv', 'g6lc_lsq_age.sv', 'g6lc_lsq_reduce.sv',
             'g6lc_lsq_verdict.sv', 'g6lc_lsq_release.sv', 'g6lc_lsq.sv',
             'tb_g6lc_hyp8_control.sv'],
@@ -147,13 +152,18 @@ LEAFS = {
         'top': 'tb_g6lc_hyp8_lsq',
         'model': 'hyp8_lsq_credit',
         'token': 'HYP8_LSQ_CREDIT_PASS',
+        # the credit section of tb_g6lc_hyp8_lsq runs under this plusarg
+        # (rfix131a: without it the leaf ran the full bench and never
+        # printed its own token)
+        'args': ['+credit_only'],
         'verify_manifest': True,
         'x_initial_edge': True,
         'strict_widths': True,
     },
     'flu': {
         'sources': COMMON + [
-            'g6lc_ooo_pkg.sv', 'g6lc_flu_reserve.sv', 'tb_g6lc_hyp8_control.sv'],
+            'g6lc_ooo_pkg.sv', 'cf_math_pkg.sv', 'g6lc_flu_reserve.sv',
+            'tb_g6lc_hyp8_control.sv'],
         'includes': ['g6lc_core_types.svh', 'rvfi_types.svh'],
         'top': 'tb_g6lc_hyp8_flu',
         'model': 'hyp8_flu',
@@ -583,7 +593,7 @@ def main():
     # HYP8_LEAF_ARGS carries explicit plusargs for a single diagnostic run
     # (e.g. '+dispatch_trace'); the empty default leaves the sim command
     # byte-identical to the uninstrumented leaf.
-    leaf_args = shlex.split(os.environ.get('HYP8_LEAF_ARGS', ''))
+    leaf_args = list(spec.get('args', [])) +         shlex.split(os.environ.get('HYP8_LEAF_ARGS', ''))
     run = subprocess.run([str(out / mdir / spec['model']), *leaf_args],
                          capture_output=True, text=True, timeout=60)
     text = run.stdout + run.stderr

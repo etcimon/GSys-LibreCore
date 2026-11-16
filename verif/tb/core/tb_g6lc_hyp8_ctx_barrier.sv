@@ -20,7 +20,7 @@ module g6lc_hyp8_ctx_barrier_case #(
 
   int unsigned checks;
   initial begin
-    logic [N-1:0] ref_keep;
+    logic [N-1:0] ref_keep, below;
     bit           older_csr;
     done_o = 0;
     checks = 0;
@@ -41,8 +41,11 @@ module g6lc_hyp8_ctx_barrier_case #(
                         N, hold, valid, csr, keep, ref_keep);
           if (hold) assert (keep === '0)
             else $fatal(1, "CTX_BARRIER hold leaks n=%0d keep=%b", N, keep);
+          // Same two properties stated per lane with a mask instead of the
+          // running flag the reference uses.
           for (int unsigned p = 1; p < N; p++) begin
-            if (|(valid[p-1:0] & csr[p-1:0]))
+            below = (N'(1) << p) - N'(1);
+            if (|(valid & csr & below))
               assert (!keep[p])
                 else $fatal(1, "CTX_BARRIER lane %0d behind a CSR lane kept n=%0d", p, N);
             else if (!hold)

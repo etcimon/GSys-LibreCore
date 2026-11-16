@@ -513,6 +513,12 @@ module tb_g6lc_hyp8_csr;
     check(buf_credit == 2'd1, "CSRTAB_CREDIT_ONE_FREE");
     csr_present(31, CSR_WRITE, 64'h0000_0000_0000_00B0);
     tick();
+    // r59 (commit_stage csr_hold_q): the cycle after a CSR fire is that
+    // CSR's flush window, so a head presented in it is not requested there
+    // and fires one cycle later. rfix131a: this case predated r59 and had
+    // failed here since (CSRTAB_LEGAL_FIRE_1 at tick 408, r127 worklog).
+    check(ack[0] == 1'b0, "CSRTAB_HOLD_AFTER_FIRE");
+    tick();
     check(ack[0] == 1'b1, "CSRTAB_LEGAL_FIRE_1");
     tick(); csr_release();
     check(!(i_buf.tab_q[0].valid || i_buf.tab_q[1].valid),
@@ -6775,7 +6781,11 @@ module tb_g6lc_hyp8_ctrl;
       .flush_tlb_gvma_o    (f_ftlbg),
       .halt_csr_i          (1'b0),
       .halt_acc_i          (1'b0),
+`ifdef G6LC_CTRL_STORAMIC_PORTS
+      // main-tree controller only (core/controller.sv C4/C5 hooks); the
+      // hyp8 controller has no Storamic pause/resync ports.
       .halt_storamic_i     (1'b0),
+`endif
       .halt_frontend_o     (f_hf),
       .halt_o              (f_halt),
       .eret_i              (eret),
@@ -6795,9 +6805,11 @@ module tb_g6lc_hyp8_ctrl;
       .flush_acc_i         (1'b0),
       .smt_switch_i        (1'b0),
       .drain_force_i       (1'b0),
+`ifdef G6LC_CTRL_STORAMIC_PORTS
       .resync_storamic_flush_i(1'b0),
       .resync_storamic_squash_i(1'b0),
       .resync_storamic_dack_o (),
+`endif
       .pc_commit_i         ('0),
       .pc_commit_hold_o    (f_pchold),
       .drain_pending_o     (f_drainp)
@@ -7595,6 +7607,79 @@ module tb_g6lc_hyp8_mmu;
     tick(); s1drv.upd.valid = 1'b0;
   endtask
 
+  // rfix131a-07 helpers: flush-all, and a lookup with its expected outcome
+  // followed by one idle edge (a staged instance still presents the hit of
+  // the previous response on the next edge, which would hold off a fill).
+  task automatic t0_flush_all(int i);
+    s0sel = i; s0drv.acc = 1'b0; s0drv.upd = '0;
+    s0drv.fa = '0; s0drv.fva = '0;
+    s0drv.fl = 1'b1; tick(); s0drv.fl = 1'b0; tick();
+  endtask
+  task automatic t0_expect(int i, logic [C_G0.VLEN-1:0] va,
+                           logic [C_G0.ASID_WIDTH-1:0] asid, bit hit,
+                           logic [C_G0.PPNW-1:0] ppn, string tag);
+    t0_look(i, va, asid, '0);
+    check(t_hit0[i] === hit, $sformatf("%s_HIT_T%0d", tag, i));
+    if (hit) check(t_ct0[i].ppn === ppn, $sformatf("%s_PPN_T%0d", tag, i));
+    s0drv.acc = 1'b0;
+    tick();
+  endtask
+
+  // rfix131a-07: a fill evicts every entry it overlaps. Each case fills,
+  // looks the entry up (a hit moves the PLRU victim off it, so a second
+  // fill would otherwise land on another entry), fills an overlapping
+  // translation and looks up again: the DUT's one-hot hit assertion stops
+  // the run on a surviving duplicate, and the PTE returned must be the
+  // later fill's. Negative lookups check the eviction, positive ones that
+  // nothing else was evicted.
+  task automatic t0_fill_overlap(int i);
+    // A: the same 4K translation filled twice
+    t0_flush_all(i);
+    t0_fill(i, C_G0.VpnLen'(27'h000_0210), C_G0.ASID_WIDTH'(5), 1'b0, 44'h1111, 2'b00, 1'b0);
+    t0_expect(i, 64'h0000_0000_0021_0abc, C_G0.ASID_WIDTH'(5), 1, 44'h1111, "TLB_OVL_SAME4K_FIRST");
+    t0_fill(i, C_G0.VpnLen'(27'h000_0210), C_G0.ASID_WIDTH'(5), 1'b0, 44'h2222, 2'b00, 1'b0);
+    t0_expect(i, 64'h0000_0000_0021_0abc, C_G0.ASID_WIDTH'(5), 1, 44'h2222, "TLB_OVL_SAME4K");
+    // B: one 2M page walked from two different 4K offsets
+    t0_flush_all(i);
+    t0_fill(i, C_G0.VpnLen'(27'h000_0405), C_G0.ASID_WIDTH'(5), 1'b0, 44'h3000, 2'b10, 1'b0);
+    t0_expect(i, 64'h0000_0000_0040_5000, C_G0.ASID_WIDTH'(5), 1, 44'h3000, "TLB_OVL_MEGA_FIRST");
+    t0_fill(i, C_G0.VpnLen'(27'h000_0409), C_G0.ASID_WIDTH'(5), 1'b0, 44'h3001, 2'b10, 1'b0);
+    t0_expect(i, 64'h0000_0000_0043_3000, C_G0.ASID_WIDTH'(5), 1, 44'h3001, "TLB_OVL_MEGA_OFFSET");
+    // C: a 4K page inside that 2M page (page table changed): the 2M entry goes
+    t0_fill(i, C_G0.VpnLen'(27'h000_0407), C_G0.ASID_WIDTH'(5), 1'b0, 44'h5555, 2'b00, 1'b0);
+    t0_expect(i, 64'h0000_0000_0040_7000, C_G0.ASID_WIDTH'(5), 1, 44'h5555, "TLB_OVL_4K_IN_MEGA");
+    t0_expect(i, 64'h0000_0000_0043_3000, C_G0.ASID_WIDTH'(5), 0, '0, "TLB_OVL_MEGA_EVICTED");
+    // D: a global page walked under two ASIDs
+    t0_flush_all(i);
+    t0_fill(i, C_G0.VpnLen'(27'h000_0777), C_G0.ASID_WIDTH'(1), 1'b1, 44'h4444, 2'b00, 1'b0);
+    t0_expect(i, 64'h0000_0000_0077_7000, C_G0.ASID_WIDTH'(1), 1, 44'h4444, "TLB_OVL_GLB_FIRST");
+    t0_fill(i, C_G0.VpnLen'(27'h000_0777), C_G0.ASID_WIDTH'(2), 1'b1, 44'h4445, 2'b00, 1'b0);
+    t0_expect(i, 64'h0000_0000_0077_7000, C_G0.ASID_WIDTH'(3), 1, 44'h4445, "TLB_OVL_GLB_ASID");
+    // E: a 4K page inside a 64K NAPOT range
+    t0_flush_all(i);
+    t0_fill(i, C_G0.VpnLen'(27'h000_0a00), C_G0.ASID_WIDTH'(5), 1'b0, 44'h7000, 2'b00, 1'b1);
+    // (a NAPOT hit returns the PPN with the low four VPN bits patched in)
+    t0_expect(i, 64'h0000_0000_00a0_7000, C_G0.ASID_WIDTH'(5), 1, 44'h7007, "TLB_OVL_NAPOT_FIRST");
+    t0_fill(i, C_G0.VpnLen'(27'h000_0a03), C_G0.ASID_WIDTH'(5), 1'b0, 44'h7003, 2'b00, 1'b0);
+    t0_expect(i, 64'h0000_0000_00a0_3000, C_G0.ASID_WIDTH'(5), 1, 44'h7003, "TLB_OVL_4K_IN_NAPOT");
+    t0_expect(i, 64'h0000_0000_00a0_7000, C_G0.ASID_WIDTH'(5), 0, '0, "TLB_OVL_NAPOT_EVICTED");
+    // F: translations that do not overlap all stay -- another page, the
+    // same page under another ASID (not global), a page next to a 2M page
+    t0_flush_all(i);
+    t0_fill(i, C_G0.VpnLen'(27'h000_0901), C_G0.ASID_WIDTH'(5), 1'b0, 44'h6001, 2'b00, 1'b0);
+    t0_expect(i, 64'h0000_0000_0090_1000, C_G0.ASID_WIDTH'(5), 1, 44'h6001, "TLB_OVL_KEEP_A0");
+    t0_fill(i, C_G0.VpnLen'(27'h000_0902), C_G0.ASID_WIDTH'(5), 1'b0, 44'h6002, 2'b00, 1'b0);
+    t0_expect(i, 64'h0000_0000_0090_2000, C_G0.ASID_WIDTH'(5), 1, 44'h6002, "TLB_OVL_KEEP_B0");
+    t0_fill(i, C_G0.VpnLen'(27'h000_0901), C_G0.ASID_WIDTH'(6), 1'b0, 44'h6003, 2'b00, 1'b0);
+    t0_expect(i, 64'h0000_0000_0090_1000, C_G0.ASID_WIDTH'(6), 1, 44'h6003, "TLB_OVL_KEEP_C0");
+    t0_fill(i, C_G0.VpnLen'(27'h000_0a00), C_G0.ASID_WIDTH'(5), 1'b0, 44'h6004, 2'b10, 1'b0);
+    t0_expect(i, 64'h0000_0000_00a1_2000, C_G0.ASID_WIDTH'(5), 1, 44'h6004, "TLB_OVL_KEEP_D0");
+    t0_expect(i, 64'h0000_0000_0090_1000, C_G0.ASID_WIDTH'(5), 1, 44'h6001, "TLB_OVL_KEEP_A");
+    t0_expect(i, 64'h0000_0000_0090_2000, C_G0.ASID_WIDTH'(5), 1, 44'h6002, "TLB_OVL_KEEP_B");
+    t0_expect(i, 64'h0000_0000_0090_1000, C_G0.ASID_WIDTH'(6), 1, 44'h6003, "TLB_OVL_KEEP_C");
+    t0_flush_all(i);
+  endtask
+
   logic [31:0] lfsr = 32'h5EED_CAFE;
   task automatic vary();
     // bounded deterministic input variation across both router groups
@@ -7937,6 +8022,10 @@ module tb_g6lc_hyp8_mmu;
     check(t_ct1[1].ppn === 44'h5678, "TLB1_PPN_ST3");
     s1drv.acc = 1'b0;
     tick();
+
+    // T_H (rfix131a-07): fill-overlap rule on every HYP_EXT=0 instance
+    // ({4,1}, {4,3}, {16,3} = entries, TlbStages)
+    for (int i = 0; i < NT0; i++) t0_fill_overlap(i);
 
     check(!miter_bad, "MMU_MITER_EQ_FINAL");
 
