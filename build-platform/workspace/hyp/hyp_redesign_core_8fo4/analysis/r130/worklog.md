@@ -89,3 +89,14 @@ speculative side-effect concern on non-idempotent hardware. The warning
 prints no address/ID; confirming needs either an address-tagged warning or a
 `+soc_trace`/`+trace_from` replay to ~352.5M. Non-fatal (boot passed), so it
 is recorded here as a follow-up, not an opportunistic fix.
+
+## r130 Linux witness launched (2026-11-16)
+
+Witness `hyp8-osbi-scalar-r130` queued on the gated model
+(`hyp8-r130-aggregate-t4`, model 5408f872…, the SC-backoff fix) with
+`HYP8_WAIT_PIDS=2062250` — it auto-starts when r128b exits, avoiding
+oversubscribing the shared host (load was ~18). Budget 1.75e9, same
+plusargs/firmware/tohost as r128b. Boot monitor attached (had to add
+r130 to the tag allowlist in `hyp8-boot-monitor-remote.sh`). This is the
+end-to-end validation that the paired-SC-backoff fix still reaches
+G6LC_LINUX_SHELL and that the ~35k-cycle LR stalls are gone.
