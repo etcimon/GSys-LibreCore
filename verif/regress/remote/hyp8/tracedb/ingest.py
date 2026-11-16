@@ -250,9 +250,14 @@ def parse_log(run):
             # fast paths: the two volume classes
             if line.startswith(b'[l1 dcache'):
                 n_wb += 1
-                if b'plain drop' not in line:
+                # a complete record that is not a plain drop is worth a row; a
+                # record cut short by another stream's line is not
+                if b'freed by' in line and b'plain drop' not in line:
                     run.ev('wbuf', 'wbuf.drop', exact=False, raw=line.decode('utf-8', 'replace'))
-                continue
+                if b'*** ' not in line:
+                    continue
+                # the harness verdict (stderr) glued behind a cut record: fall
+                # through to the verdict parser
             if line.startswith(b'[boot]'):
                 n_boot += 1
                 continue
