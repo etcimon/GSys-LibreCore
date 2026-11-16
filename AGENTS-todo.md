@@ -1314,10 +1314,21 @@ remain release requirements; intermediate raster gates do not narrow the product
       R8*_UNORM component-count matrix nc∈{1,2,3,4}.
     All PASS `cases=26 checks=17016 maxulp=0`; 902 model tests OK.
     Vertex-fetch decode coverage now spans UNORM/SNORM/SFLOAT ×
-    8/16-bit × component counts {1,2,3,4}.  Remaining decode gaps:
-    integer attributes (UINT/SINT — need `uvec`/`ivec` VS inputs and
-    shader-core integer-input support, unverified) and 32-bit
-    component-count colour variants.
+    8/16-bit × component counts {1,2,3,4}.
+    **Integer vertex attributes probed, blocked on shader core
+    (2026-11-16).**  A `uvec4`-input VS (`vs_uintcol`: `float(byte)/255`
+    → float `vcol` → float FS → UNORM8 attachment, isolating integer
+    vertex *input* from integer varyings) against an R8G8B8A8_UINT
+    (vkfmt 41) attribute faults with uniform `got=ffffffff` — a hard
+    shader fault, not wrong data.  Verified clean along the way: the
+    raster gather's `f_is_i8`/`f_icomp`/`f_nc` integer decode (raw bits
+    + `(0,0,0,1-int)` defaults) is correct by review and `APU_RAST_VF_*`
+    == VkFormat wire values; `OpConvertUToF` (opcode 112) is in
+    `sh_opcodes.py`/`shwave.sv`; the module scans `fault=NONE`.  The
+    gap is the shcore/shwave `Input` storage-class load for
+    integer-typed variables (or the fetch→record→input chain for int
+    types) — needs RTL debug + a stable build window.  Probe files
+    reverted; no session committed.
     (5) Stale records: the CTS ledger was last rendered around 2026-11-04 and still
     lists the 71 `descriptor_copy` failures that closed on 2026-11-12; the plan's
     ladder table shows R3 as not started.
