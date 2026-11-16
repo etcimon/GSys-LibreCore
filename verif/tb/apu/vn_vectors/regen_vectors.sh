@@ -218,6 +218,10 @@ python3 $G --graphics-session ue_gpos_rgba8ubloff_1 1
 # byte offset 8, decoded per channel as fp32(b)*fp32(1/255).  vs_pos3
 # forwards all four decoded channels to the attachment.
 python3 $G --graphics-session ue_gpos_vattr8ubloff_1 1
+# 16-bit variant: R16G16B16A16_UNORM (vkfmt 91) — two u16 words per
+# vertex at byte offset 8, decoded *fp32(1/65535); u16=k*257 round-trips
+# to u8=k through the 8-bit attachment.
+python3 $G --graphics-session ue_gpos_vattr16ubloff_1 1
 
 # Sessions the run scripts execute that this script did not generate
 # (blend ops and factors, logic ops, depth compare/bounds/bias/clamp,

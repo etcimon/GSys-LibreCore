@@ -11778,6 +11778,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # all four decoded channels reach the attachment.  Only the
         # blend-disabled is_bloff path is adapted.
         is_vattr8u = 'vattr8u' in gfx
+        # vattr16u: the vertex-colour attribute is R16G16B16A16_UNORM
+        # (vkfmt 91) — two u16 words per vertex at byte offset 8, decoded
+        # per channel as fp32(u16)*fp32(1/65535) (K16=0x37800080).  The
+        # stored u16 are k*257 so 65535=255*257 makes the decode land on
+        # exactly k/255 and the u8 attachment re-encode to k — a clean
+        # round-trip through the 16-bit normalised-fetch path.
+        is_vattr16u = 'vattr16u' in gfx
         # colourWriteMask stays logical-channel (R=1,G=2,B=4,A=8): cwmr
         # keeps R only, cwmb keeps B only — paired with is_bgra these
         # expose a mask applied in byte order instead of channel order.
@@ -11807,6 +11814,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                              'is_bloff path')
         if is_vattr8u and not is_bloff:
             raise ValueError('vattr8u vertex attribute only adapted on '
+                             'the is_bloff path')
+        if is_vattr16u and not is_bloff:
+            raise ValueError('vattr16u vertex attribute only adapted on '
                              'the is_bloff path')
         # _enc8: store encode for one f32 channel on attachment 0 — on an
         # sRGB attachment RGB goes linear-u12 -> sRGB8 while alpha (and
@@ -12455,6 +12465,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             _K8 = struct.unpack('<f', struct.pack('<I', 0x3B808081))[0]
             _C8 = (200, 100, 50, 128)          # stored u8 R,G,B,A bytes
             COL = tuple(_f32(_f32(b) * _K8) for b in _C8)
+        elif is_vattr16u:
+            _K16 = struct.unpack('<f', struct.pack('<I', 0x37800080))[0]
+            # stored u16 = k*257 -> decodes to exactly k/255
+            _W16 = (180 * 257, 60 * 257, 220 * 257, 90 * 257)
+            COL = tuple(_f32(_f32(w) * _K16) for w in _W16)
         else:
             COL = (1.0, 0.5, 0.25, 0.75) if is_lop else \
                 (1.0, 0.0, 0.0, 0.75) if is_blend else \
@@ -12705,6 +12720,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         vb_words += [(_C8[0] | (_C8[1] << 8) |
                                       (_C8[2] << 16) | (_C8[3] << 24)),
                                      0, 0, 0]
+                    elif is_vattr16u:
+                        # R16G16B16A16_UNORM colour at byte offset 8:
+                        # two u16 words {R|G<<16, B|A<<16} at words 2-3
+                        # then two pad words to keep the 24 B stride.
+                        vb_words += [(_W16[0] | (_W16[1] << 16)),
+                                     (_W16[2] | (_W16[3] << 16)),
+                                     0, 0]
                     else:
                         vb_words += [f32b(c) for c in COL]
         VP = (0.0, 0.0, 64.0, 64.0, 0.0, 1.0)
@@ -14841,7 +14863,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                location=1,
                                binding=4 if is_wide else 0,
                                format=103 if is_tex else
-                               37 if is_vattr8u else 109,
+                               37 if is_vattr8u else
+                               91 if is_vattr16u else 109,
                                offset=0 if is_wide else
                                16 if is_dpair or is_persp
                                or is_dclamplike else 8)]),
