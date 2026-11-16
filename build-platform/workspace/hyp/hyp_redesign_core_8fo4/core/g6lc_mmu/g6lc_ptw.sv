@@ -1101,7 +1101,7 @@ module g6lc_ptw
   // error — identifies wrong-base/wrong-index/stale-response corruption.
   always_ff @(posedge clk_i) begin
     if (rst_ni && state_q != PROPAGATE_ERROR && state_d == PROPAGATE_ERROR) begin
-      $display("[ptw-err] t=%0t vaddr=%h lvl=%0d pptr=%h pte=%h (v=%b r=%b w=%b x=%b a=%b d=%b g=%b u=%b) instr=%b hart=%0d req_hart=%0d satp_ppn=%h state=%0d rdata=%h",
+      $display("[ptw-err] t=%0t vaddr=%h lvl=%0d pptr=%h pte=%h (v=%b r=%b w=%b x=%b a=%b d=%b g=%b u=%b) instr=%b hart=%0d req_hart=%0d satp_ppn=%h state=%0d rdata=%h at=%m",
                $time, vaddr_q, ptw_lvl_q[0], ptw_pptr_q, data_rdata_q,
                pte.v, pte.r, pte.w, pte.x, pte.a, pte.d, pte.g, pte.u,
                is_instr_ptw_q, tlb_update_hart_q, req_hart_i, satp_ppn_i,

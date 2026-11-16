@@ -117,6 +117,14 @@ TESTS = [
     # memory traffic -- the non-idempotent load path (commit-head issue,
     # hand-back and refetch) that the PMA declaration makes live.
     ('hyp8_dev_load', 'verif/tests/custom/hyp8_dev_load.S', '80001000'),
+    # rfix131a-03: wrong-path loads with a null / garbage base under Sv39
+    # request no page-table walk (log grade: no [ptw-err], no [mmu-ife]).
+    ('hyp8_spec_walk_clean', 'verif/tests/custom/hyp8_spec_walk_clean.S',
+     '80001000'),
+    # rfix131a multi-core: every hart -- secondary release by IPI, LR/SC and
+    # AMO on shared counters, coherent private slots. NHARTS comes from
+    # HYP8_TEST_DEFINES (default 1: a plain single-hart smoke).
+    ('hyp8_smp_lrsc', 'verif/tests/custom/hyp8_smp_lrsc.S', '80001000'),
 ]
 LINK_LD = 'verif/tests/custom/common/link_verilator.ld'
 GCC_FLAGS = ['-march=rv64imafdc_zicsr_zifencei', '-mabi=lp64d',
@@ -335,7 +343,10 @@ def main():
     for name, src_rel, tohost_addr in TESTS:
         s = src / src_rel
         elf = inputs / f'{name}.elf'
-        rc = run([gcc, *GCC_FLAGS, '-T', str(src / LINK_LD),
+        # HYP8_TEST_DEFINES: preprocessor defines for the test sources of a
+        # target (e.g. NHARTS=8 for the multi-core model)
+        test_defs = [f'-D{d}' for d in os.environ.get('HYP8_TEST_DEFINES', '').split()]
+        rc = run([gcc, *GCC_FLAGS, *test_defs, '-T', str(src / LINK_LD),
                   '-o', str(elf), str(s)],
                  inputs / f'{name}.build.log', env=env, cwd=src, timeout=120)
         entry = {'srcSha256': digest(s), 'rc': rc, 'source': src_rel}

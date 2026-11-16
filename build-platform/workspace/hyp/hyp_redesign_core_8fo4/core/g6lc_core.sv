@@ -2614,7 +2614,7 @@ assign irq_active = irq_i[smt_active_hart];
     endfunction
     function automatic void sc_print(input string why);
       for (int h = 0; h < SCNH; h++) begin
-        $display("[stall-census] %s cyc=%0d hart=%0d ret=%0d ack_cyc=%0d ack_full=%0d ipc=%.3f | retired ld=%0d st=%0d alu=%0d br=%0d mul=%0d csr=%0d fpu=%0d oth=%0d | empty=%0d (flush %0d) | notissued ld=%0d st=%0d alu=%0d br=%0d mul=%0d csr=%0d fpu=%0d oth=%0d | inflight ld=%0d st=%0d alu=%0d br=%0d mul=%0d csr=%0d fpu=%0d oth=%0d | held st_sb=%0d ex=%0d csr=%0d halt=%0d oth=%0d",
+        $display("[stall-census] %s cyc=%0d hart=%0d ret=%0d ack_cyc=%0d ack_full=%0d ipc=%.3f | retired ld=%0d st=%0d alu=%0d br=%0d mul=%0d csr=%0d fpu=%0d oth=%0d | empty=%0d (flush %0d) | notissued ld=%0d st=%0d alu=%0d br=%0d mul=%0d csr=%0d fpu=%0d oth=%0d | inflight ld=%0d st=%0d alu=%0d br=%0d mul=%0d csr=%0d fpu=%0d oth=%0d | held st_sb=%0d ex=%0d csr=%0d halt=%0d oth=%0d at=%m",
                  why, sc_cyc, h, sc_ret[h], sc_ack_cyc[h], sc_ack_full[h],
                  sc_cyc > 0 ? real'(sc_ret[h]) / real'(sc_cyc) : 0.0,
                  sc_rc[h][0], sc_rc[h][1], sc_rc[h][2], sc_rc[h][3], sc_rc[h][4], sc_rc[h][5], sc_rc[h][6], sc_rc[h][7],
@@ -2623,7 +2623,7 @@ assign irq_active = irq_i[smt_active_hart];
                  sc_if[h][0], sc_if[h][1], sc_if[h][2], sc_if[h][3], sc_if[h][4], sc_if[h][5], sc_if[h][6], sc_if[h][7],
                  sc_vw_st[h], sc_vw_ex[h], sc_vw_csr[h], sc_vw_halt[h], sc_vw_oth[h]);
       end
-      $display("[stall-census] %s cyc=%0d mem: flush_cyc=%0d dmiss=%0d dc_req=%0d dc_gnt=%0d mshr_occ{0,1,2-3,4-7,8-15,16+}={%0d,%0d,%0d,%0d,%0d,%0d} mshr_full=%0d rtab_full=%0d wbuf_full=%0d ldbuf_full=%0d lu_replay=%0d mem_viol=%0d",
+      $display("[stall-census] %s cyc=%0d mem: flush_cyc=%0d dmiss=%0d dc_req=%0d dc_gnt=%0d mshr_occ{0,1,2-3,4-7,8-15,16+}={%0d,%0d,%0d,%0d,%0d,%0d} mshr_full=%0d rtab_full=%0d wbuf_full=%0d ldbuf_full=%0d lu_replay=%0d mem_viol=%0d at=%m",
                why, sc_cyc, sc_flush, sc_dmiss, sc_dc_req, sc_dc_gnt,
                sc_mshr_hist[0], sc_mshr_hist[1], sc_mshr_hist[2], sc_mshr_hist[3], sc_mshr_hist[4], sc_mshr_hist[5],
                sc_mshr_full, sc_rtab_full, sc_wbuf_full, sc_ldbuf_full, sc_lu_replay, sc_mem_viol);
@@ -2725,7 +2725,7 @@ assign irq_active = irq_i[smt_active_hart];
       hs = int'(issue_stage_i.i_scoreboard.commit_sel_slot[0]);
       ch = int'(commit_instr_id_commit[0].hart_id) < SCNH
            ? int'(commit_instr_id_commit[0].hart_id) : 0;
-      $display("[hang] cyc=%0d since_ack=%0d sb_empty=%b flush_if=%b flush_ex=%b halt=%b lsu_ready=%b", sc_cyc, sc_cyc - hd_last_ack,
+      $display("[hang] cyc=%0d since_ack=%0d sb_empty=%b flush_if=%b flush_ex=%b halt=%b lsu_ready=%b at=%m", sc_cyc, sc_cyc - hd_last_ack,
                smt_sb_empty, flush_ctrl_if, flush_ctrl_ex, halt_ctrl, ex_stage_i.lsu_i.lsu_ready_o);
       $display("[hang] SB head slot=%0d issued=%b valid=%b cancelled=%b replay=%b fu=%0d op=%0d pc=%h tid=%0d ex=%b | port0 valid=%b fu=%0d pc=%h ack=%b drop=%b | commit_ptr=%0d issue_ptr=%0d",
                hs, issue_stage_i.i_scoreboard.mem_q[hs].issued, issue_stage_i.i_scoreboard.mem_q[hs].sbe.valid,

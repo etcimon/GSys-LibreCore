@@ -44,6 +44,9 @@ def main():
                'tests': {}}
     rc_all = 0
     only = os.environ.get('HYP8_ONLY')
+    # HYP8_TESTS: run only the named programs (the multi-core model runs the
+    # SMP-aware ones; the single-thread programs would race on every hart)
+    subset = os.environ.get('HYP8_TESTS', '').split()
     entries = {name: entry for name, entry in results['inputs'].items()
                if isinstance(entry, dict)}
     assert entries, 'no assembled test inputs'
@@ -52,6 +55,8 @@ def main():
         assert entry['rc'] == 0 and 'tohostPlusarg' in entry, f'incomplete input: {name}'
         assert entry['tohostPlusarg'] == f"+tohost_addr=0x{int(entry['tohost'], 16):x}"
         if only and name != only:
+            continue
+        if subset and name not in subset:
             continue
         elf = intdir / 'inputs' / f'{name}.elf'
         elf_sha = digest(elf)

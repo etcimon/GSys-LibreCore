@@ -1610,7 +1610,7 @@ module frontend
   end
   always_ff @(posedge clk_i) begin
     if (rst_ni && seq_gap && seq_gap_tr && seq_gap_n < seq_gap_lim)
-      $display("[seq-gap] t=%0t front=%h v=%b addr=%h,%h,%h,%h unal=%b carry=%b red=%b src=%0d redpc=%h cons_prev=%b ep=%0d sep=%0d",
+      $display("[seq-gap] t=%0t front=%h v=%b addr=%h,%h,%h,%h unal=%b carry=%b red=%b src=%0d redpc=%h cons_prev=%b ep=%0d sep=%0d at=%m",
                $time, resume_pc_q[meta_d_q.hart], iq_valid,
                s_addr[0], s_addr[(NrInstr > 1) ? 1 : 0], s_addr[(NrInstr > 2) ? 2 : 0],
                s_addr[(NrInstr > 3) ? 3 : 0], s_serving_unaligned, s_carry_done,

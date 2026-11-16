@@ -135,6 +135,12 @@ RE_RVFI_TAIL = re.compile(rb'^(\d) 0x[0-9a-f]+ \(0x[0-9a-f]+\)(?: x\s*(\d+) 0x([
 RE_RVFI_CYC = re.compile(rb'@(\d+)\s*$')
 
 
+def core_of(s):
+    """Physical core of a record that carries its instance path (at=%m)."""
+    m = RE_SCOPE_CORE.search(s)
+    return int(m.group(1)) if m else None
+
+
 def hx(v):
     return f'{int(v, 16):016x}'
 
@@ -231,6 +237,7 @@ def parse_log(run):
         # fu 6 / op 27 is WFI at the commit head: the hart is idle, not stuck
         idle = head.get('fu') == '6' and head.get('op') == '27'
         run.ev('hang', 'idle.wfi' if idle else f"hang.fu{head.get('fu', '?')}.op{head.get('op', '?')}",
+               core=core_of(lines[0]), hart=int(head['hart']) if 'hart' in head else None,
                pc=hx(head['pc']) if 'pc' in head else None,
                addr=hx(lu['vaddr']) if 'vaddr' in lu else None,
                aux=f"since_ack={top.get('since_ack')} lsu_ready={top.get('lsu_ready')} "
@@ -289,12 +296,12 @@ def parse_log(run):
                 run.cycle = int(kv.get('t', run.cycle))
                 a = int(kv['vaddr'], 16)
                 kind = 'fetch' if kv.get('instr') == '1' else 'data'
-                run.ev('ptw', f'ptw.{kind}.{va_class(a)}', hart=int(kv.get('hart', 0)),
+                run.ev('ptw', f'ptw.{kind}.{va_class(a)}', core=core_of(s), hart=int(kv.get('hart', 0)),
                        addr=hx(kv['vaddr']), aux=f"lvl={kv.get('lvl')} satp={kv.get('satp_ppn')}", raw=s)
             elif s.startswith('[mmu-ife]'):
                 kv = dict(RE_KV.findall(s))
                 run.cycle = int(kv.get('t', run.cycle))
-                run.ev('ife', f"ife.priv{kv.get('priv')}.cause{kv.get('cause')}",
+                run.ev('ife', f"ife.priv{kv.get('priv')}.cause{kv.get('cause')}", core=core_of(s),
                        hart=int(kv.get('fetch_hart', 0)), addr=hx(kv['fetch_va']),
                        aux=f"itlb_hit={kv.get('itlb_hit')} ptw_err={kv.get('ptw_err')} "
                            f"ptw_act={kv.get('ptw_act')} walk_instr={kv.get('walk_instr')}", raw=s)
@@ -310,6 +317,7 @@ def parse_log(run):
                 run.cycle = cyc
                 kind = s.split()[1]
                 if ' mem: ' in s:
+                    # the mem line follows its core's last hart line
                     if run.census and run.census[-1][0] == cyc:
                         c = run.census[-1]
                         run.census[-1] = c[:5] + (int(kv.get('flush_cyc', 0)), int(kv.get('lu_replay', 0)),
@@ -317,14 +325,17 @@ def parse_log(run):
                                                   c[9])
                 else:
                     hart = int(kv.get('hart', 0))
-                    run.census.append((cyc, hart, kind, int(kv.get('ret', 0)), float(kv.get('ipc', 0)),
+                    c_ = core_of(s)
+                    run.census.append((cyc, hart, kind if c_ is None else f'{kind}.core{c_}',
+                                       int(kv.get('ret', 0)), float(kv.get('ipc', 0)),
                                        None, None, None, None, s[:1500]))
-                    t = run.threads.setdefault((None, hart), {})
+                    t = run.threads.setdefault((core_of(s), hart), {})
                     t.update(retired=int(kv.get('ret', 0)), ipc=float(kv.get('ipc', 0)), last_cycle=cyc)
             elif s.startswith('[seq-gap]'):
                 kv = dict(RE_KV.findall(s))
                 run.cycle = int(kv.get('t', run.cycle))
-                run.ev('seqgap', 'seqgap', addr=hx(kv['front']) if 'front' in kv else None,
+                run.ev('seqgap', 'seqgap', core=core_of(s),
+                       addr=hx(kv['front']) if 'front' in kv else None,
                        pc=hx(kv['redpc']) if 'redpc' in kv else None, aux=f"src={kv.get('src')}", raw=s)
             elif s.startswith('[tlb]'):
                 kv = dict(RE_KV.findall(s))
@@ -519,6 +530,7 @@ def ingest_run(db, tag, test, kind, log, out_dir, meta, args):
     # RVFI context around the anchors
     n_rv = 0
     if files and args.window:
+        nh = max(1, len(harts))
         for (eid, cyc, cls, _et) in pick_anchors(db, rid, args.anchors):
             back = args.window
             if cls == 'hang':     # the last retirement is `since_ack` cycles back
@@ -526,7 +538,7 @@ def ingest_run(db, tag, test, kind, log, out_dir, meta, args):
                 ms = re.search(r'since_ack=(\d+)', aux)
                 back += int(ms.group(1)) if ms else 2000
             for base_hart, p in files:
-                rows = rvfi_read(p, max(0, cyc - back), cyc + args.window // 4, 400, base_hart)
+                rows = rvfi_read(p, max(0, cyc - back), cyc + args.window // 4, 400, base_hart // nh)
                 db.executemany('INSERT INTO rvfi VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
                                [(rid, eid) + r for r in rows])
                 n_rv += len(rows)
@@ -536,7 +548,7 @@ def ingest_run(db, tag, test, kind, log, out_dir, meta, args):
         for base_hart, p in files:
             c = 0
             while c < run.cycle:
-                for r in rvfi_read(p, c, c + 4000, 48, base_hart):
+                for r in rvfi_read(p, c, c + 4000, 48, base_hart // max(1, len(harts))):
                     db.execute('INSERT INTO pc_sample VALUES(?,?,?,?,?,?,?)',
                                (rid, r[0], r[1], r[2], r[3], r[4], pc_region(int(r[4], 16))))
                     n_pc += 1

@@ -1025,7 +1025,23 @@ assign ldbuf_full = &ldbuf_valid_q;
   // forever (r41a @22,114,642: Linux's first FIX_FDT byte load). The commit
   // head has no older unresolved branch by construction: not speculative.
   logic spec_ld;
+  // rfix131a-03: under OoO a load is speculative until it is the commit
+  // head -- not "a branch issued on an older port in the same cycle" (the
+  // flag), which almost no wrong-path load carries once issue is out of
+  // order. A speculative load issues only on a DTLB hit to idempotent
+  // memory; it requests no page-table walk and no device access. It waits
+  // in WAIT_SPEC_LOAD to become the head and is handed back after the
+  // dwell (wsl_replay_fire), so it never holds the loads queued behind it.
+  // One definition covers the wrong-path walks (5,389 per boot, vaddr 0 /
+  // 4 / 8 / 0x220 ...), the r71 / r124 flagged cases and the
+  // non-idempotent hand-back of rfix131a-08.
+`ifdef G6LC_MUT_LU_SPEC_FLAG_ONLY
+  // Review mutation: the pre-rfix131a definition -- hyp8_spec_walk_clean
+  // must show its wrong-path walks.
   assign spec_ld = lsu_ctrl_i.is_speculative_load && (!G6LCCfg.OoOEn || not_commit_time);
+`else
+  assign spec_ld = G6LCCfg.OoOEn ? not_commit_time : lsu_ctrl_i.is_speculative_load;
+`endif
   assign tr_idle_ok = !G6LCCfg.SpeculativeSb || dtlb_hit_i || !spec_ld;
   assign accept_req_w = valid_i && !ldbuf_full;
   assign st_idle = state_q[0];

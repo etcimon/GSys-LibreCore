@@ -837,7 +837,7 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
   // exception is presented — pairs with [ptw-err] in g6lc_ptw.
   always_ff @(posedge clk_i) begin
     if (rst_ni && icache_areq_o.fetch_valid && icache_areq_o.fetch_exception.valid)
-      $display("[mmu-ife] t=%0t fetch_va=%h fetch_hart=%0d itlb_hit=%b iacc_err=%b en_tr=%b priv=%0d ptw_act=%b walk_instr=%b ptw_err=%b ptw_acc=%b upd_va=%h cause=%0d",
+      $display("[mmu-ife] t=%0t fetch_va=%h fetch_hart=%0d itlb_hit=%b iacc_err=%b en_tr=%b priv=%0d ptw_act=%b walk_instr=%b ptw_err=%b ptw_acc=%b upd_va=%h cause=%0d at=%m",
                $time, icache_areq_i.fetch_vaddr, fetch_hart_i, itlb_lu_hit,
                iaccess_err, enable_translation_i, priv_lvl_i, ptw_active,
                walking_instr, ptw_error, ptw_access_exception, update_vaddr,
