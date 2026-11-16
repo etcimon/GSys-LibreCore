@@ -11722,6 +11722,16 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # bits equal the r32f expectation bit-for-bit — a controlled
         # A/B on FS output type + attachment format alone.
         is_r32u = 'r32u' in gfx
+        # r8un/rg8un: R8_UNORM (vkfmt 9, device fmt 0, 1 B/px) and
+        # R8G8_UNORM (vkfmt 16, device fmt 1, 2 B/px) colour
+        # attachments — the sub-word ROP path.  Several pixels share
+        # one 8 B write word; the stored value is the UNORM8 encoding
+        # of the leading channels only (R for r8un, R+G for rg8un).
+        # Only the blend-disabled is_bloff path is adapted; blend and
+        # logicOp on sub-word attachments are refused UNSUPPORTED, so
+        # every other path raises.
+        is_r8un = 'r8un' in gfx
+        is_rg8un = 'rg8un' in gfx
         # colourWriteMask stays logical-channel (R=1,G=2,B=4,A=8): cwmr
         # keeps R only, cwmb keeps B only — paired with is_bgra these
         # expose a mask applied in byte order instead of channel order.
@@ -11740,6 +11750,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         if is_r32u and not is_bloff:
             raise ValueError('r32u attachment only adapted on the is_bloff '
                              'path')
+        if (is_r8un or is_rg8un) and not is_bloff:
+            raise ValueError('sub-word attachment only adapted on the '
+                             'is_bloff path')
         # _enc8: store encode for one f32 channel on attachment 0 — on an
         # sRGB attachment RGB goes linear-u12 -> sRGB8 while alpha (and
         # every channel on a non-sRGB attachment) stays UNORM8.  Mirrors
@@ -14296,7 +14309,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 device=X['dev'],
                 pCreateInfo=st('VkImageCreateInfo',
                     flags=0, imageType=1,
-                    format=(100 if is_r32f else 98 if is_r32u else
+                    format=(9 if is_r8un else 16 if is_rg8un else
+                        100 if is_r32f else 98 if is_r32u else
                         ((50 if is_bgra else 43) if is_srgb
                         else (44 if is_bgra else 37))),
                     extent=st('VkExtent3D', width=CW, height=CH,
@@ -14312,7 +14326,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 device=X['dev'],
                 pCreateInfo=st('VkImageViewCreateInfo',
                     flags=0, image=X['img'], viewType=1,
-                    format=(100 if is_r32f else 98 if is_r32u else
+                    format=(9 if is_r8un else 16 if is_rg8un else
+                        100 if is_r32f else 98 if is_r32u else
                         ((50 if is_bgra else 43) if is_srgb
                         else (44 if is_bgra else 37))),
                     components=st('VkComponentMapping',
@@ -14532,7 +14547,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     attachmentCount=(n_col
                                      + (1 if is_ds else 0)),
                     pAttachments=[st('VkAttachmentDescription',
-                        flags=0, format=(100 if is_r32f else 98 if is_r32u else
+                        flags=0, format=(9 if is_r8un else 16 if is_rg8un else
+                        100 if is_r32f else 98 if is_r32u else
                         ((50 if is_bgra else 43) if is_srgb
                         else (44 if is_bgra else 37))),
                         samples=1,
@@ -15694,20 +15710,43 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         note("B'' segment B: QueueSubmit + wait")
         run_batches(compile_cmds(seg_b))
 
-        # ---- readback gate: all 4096 words of the packed image ---- #
+        # ---- readback gate: all words of the packed image ---- #
         rst_, _rs, rbe = fm.resolve(X['rb'], KIND['VkBuffer'])
         rb_off = tm.blobs[RES_BLOB0 + 2]['base_w'] << 2
-        if is_bgra:
-            # B8G8R8A8_UNORM stores bytes [B,G,R,A]: exchange bytes 0/2 of
-            # every attachment-0 word (covered and clear alike) now that
-            # blend/mask have run in logical RGBA order.
-            exp_img = [((w & 0xFF00FF00) | ((w >> 16) & 0xFF) |
-                        ((w & 0xFF) << 16)) for w in exp_img]
-        W(TP_CHECK, CK_APR, CW * CH, rb_off)
-        for j in range(CW * CH):
-            rec(EK_APRCHK, rb_off + 4 * j, exp_img[j], exp_img[j], 0)
-        note('readback gate: %d words, %d tri px (0x%08x), %d clear'
-             % (CW * CH, len(cov), tri_w, CW * CH - len(cov)))
+        if is_r8un or is_rg8un:
+            # sub-word colour readback: the copy buffer holds packed
+            # pixels in row-major order — R8_UNORM keeps 4 px/word
+            # (the stored byte is the canonical word's R byte),
+            # R8G8_UNORM keeps 2 px/word (the stored u16 is the
+            # canonical R|G<<8 half).  exp_img stays the canonical
+            # 32-bit RGBA8 word per pixel; only the gate packing
+            # differs.
+            if is_r8un:
+                _npw, _sh, _pm = 4, 8, 0xFF
+            else:
+                _npw, _sh, _pm = 2, 16, 0xFFFF
+            W(TP_CHECK, CK_APR, CW * CH // _npw, rb_off)
+            for k in range(CW * CH // _npw):
+                _w = 0
+                for i in range(_npw):
+                    _w |= (exp_img[_npw * k + i] & _pm) << (_sh * i)
+                rec(EK_APRCHK, rb_off + 4 * k, _w, _w, 0)
+            note('sub-word readback gate: %d words'
+                 % (CW * CH // _npw,))
+        else:
+            if is_bgra:
+                # B8G8R8A8_UNORM stores bytes [B,G,R,A]: exchange bytes
+                # 0/2 of every attachment-0 word (covered and clear
+                # alike) now that blend/mask have run in logical RGBA
+                # order.
+                exp_img = [((w & 0xFF00FF00) | ((w >> 16) & 0xFF) |
+                            ((w & 0xFF) << 16)) for w in exp_img]
+            W(TP_CHECK, CK_APR, CW * CH, rb_off)
+            for j in range(CW * CH):
+                rec(EK_APRCHK, rb_off + 4 * j, exp_img[j],
+                    exp_img[j], 0)
+            note('readback gate: %d words, %d tri px (0x%08x), %d clear'
+                 % (CW * CH, len(cov), tri_w, CW * CH - len(cov)))
         if is_mrt:
             # mrt attachment-1 readback gate: rb3 holds the second colour
             # attachment (img2, colour aspectMask=1) — exp_img2 is the

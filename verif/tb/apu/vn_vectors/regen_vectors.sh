@@ -197,6 +197,12 @@ python3 $G --graphics-session ue_gpos_r32fbloff_1 1
 # so the stored word is bit-identical to the r32fbloff expectation: a
 # controlled A/B on FS output type + attachment format alone.
 python3 $G --graphics-session ue_gpos_r32ubloff_1 1
+# sub-word colour attachments: R8_UNORM (vkfmt 9, 1 B/px) and
+# R8G8_UNORM (vkfmt 16, 2 B/px) on the blend-disabled path — several
+# pixels share one 8 B write word, the strobes pick the pixel's lane,
+# and only the leading channels store (R for r8un, R+G for rg8un).
+python3 $G --graphics-session ue_gpos_r8unbloff_1 1
+python3 $G --graphics-session ue_gpos_rg8unbloff_1 1
 
 # Sessions the run scripts execute that this script did not generate
 # (blend ops and factors, logic ops, depth compare/bounds/bias/clamp,

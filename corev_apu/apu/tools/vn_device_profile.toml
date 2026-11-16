@@ -233,8 +233,13 @@ minImageTransferGranularity = [1, 1, 1]
 # Each entry with 'f' also yields a generated device format id
 # (APU_IMG_FMT_*, in declaration order) used by the descriptor record's
 # fmt field.
-R8_UNORM = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 1, comps = 1 }
-R8G8_UNORM = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 2, comps = 2 }
+# COLOR_ATTACHMENT (sub-word stage 1): the ROP stores UNORM8 channel
+# bytes at bpp=1 — several pixels share one 8 B write word and the
+# strobes pick the pixel's lane.  No COLOR_ATTACHMENT_BLEND: the
+# sub-word dst decode is not implemented (blendEnable refused
+# UNSUPPORTED); logicOpEnable on a sub-word attachment is refused too.
+R8_UNORM = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST|COLOR_ATTACHMENT", bpp = 1, comps = 1 }
+R8G8_UNORM = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST|COLOR_ATTACHMENT", bpp = 2, comps = 2 }
 # G1c: COLOR_ATTACHMENT on the ROP formats; VERTEX_BUFFER on the
 # float vertex-attribute formats the raster gather reads.  G2a: all
 # four 8-bit colour formats attach + blend; sRGB encodes through the

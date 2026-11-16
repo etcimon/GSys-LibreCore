@@ -1174,6 +1174,29 @@ remain release requirements; intermediate raster gates do not narrow the product
     Next formats on the same pattern need wider pixels (RGBA16F 8 bytes,
     RGBA32F 16 bytes) or narrower ones (R8, RG8), i.e. the pixel-size
     generalisation of the ROP.
+    **Sub-word stage 1 (2026-11-16, R8_UNORM + R8G8_UNORM attachments).**
+    The ROP's fixed 4 B pixel model is generalised by `f_cbpp` (bytes per
+    pixel: R8=1, RG8=2, everything else=4): colour pitch `cpitch_w`, clear
+    pitch `clr_bpp`, the three ROP address sites and the clear row walk all
+    take it; `rop_pix` replicates the encoded channel bytes across the 32-bit
+    write half ({4{b0}} for R8, {2{b1,b0}} for RG8) so `{2{rop_pix}}` fills
+    the 8 B beat, `rop_pmask`/`rop_lane`/`rop_strb` turn colourWriteMask's
+    logical channel bits into per-byte-lane strobes ((x*bpp) mod 8), and the
+    clear packs the same replicated pattern with row-tail strobes.  Blend
+    and logicOp on sub-word attachments are refused UNSUPPORTED at record
+    legality (`f_noblend`, `cbpp!=4` logic-op guard, `lop_on_w` cbpp==4).
+    Profile: R8_UNORM/R8G8_UNORM gained COLOR_ATTACHMENT (no BLEND);
+    `g6lc_apu_vn_pkg.sv` regenerated.  Model: `is_r8un`/`is_rg8un` session
+    tokens (vkfmt 9/16, device fmt 0/1), is_bloff-path only, readback packs
+    4 px/word (R byte) or 2 px/word (R|G<<8).  Sessions
+    `ue_gpos_r8unbloff_1`/`ue_gpos_rg8unbloff_1` registered in regen + all
+    three run lists.  Evidence (pinned Verilator 5.008): rast bench 76 cases
+    / 48144 checks PASS (7 new cases: clear, draw, mask-off, partial mask,
+    blend+lop refusal); `f_cbpp`→4 sabotage fails cases 70-76 as expected;
+    vgtop both sessions PASS cases=26 maxulp=0; check_fresh 1007 files 0
+    drifted; 902 model tests OK.  Still open: sub-word dst decode (would
+    enable blend), wider formats (RGBA16F 8 B, RGBA32F 16 B) need the same
+    generalisation extended past 4 B pixels.
     (5) Stale records: the CTS ledger was last rendered around 2026-11-04 and still
     lists the 71 `descriptor_copy` failures that closed on 2026-11-12; the plan's
     ladder table shows R3 as not started.

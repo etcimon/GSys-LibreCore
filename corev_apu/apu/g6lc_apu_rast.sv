@@ -659,9 +659,28 @@ module g6lc_apu_rast
       return f == 8'(APU_IMG_FMT_R32_SFLOAT) ||
              f == 8'(APU_IMG_FMT_R32_UINT);
     endfunction
+    // bytes per pixel for the colour formats the ROP packs into its
+    // 8 B write word.  R8_UNORM and R8G8_UNORM are the sub-word
+    // attachments — several pixels share one write word and the byte
+    // strobes pick the pixel's lanes; every other accepted colour
+    // format is a 4 B pixel.  Depth formats have their own dpitch.
+    function automatic logic [2:0] f_cbpp(input logic [7:0] f);
+      if (f == 8'(APU_IMG_FMT_R8_UNORM))   return 3'd1;
+      if (f == 8'(APU_IMG_FMT_R8G8_UNORM)) return 3'd2;
+      return 3'd4;
+    endfunction
+    // colour formats that carry no blending: integer RGBA8, the raw32
+    // single-word formats, and the sub-word formats (their dst decode
+    // is not implemented — blendEnable on them is refused UNSUPPORTED)
+    function automatic logic f_noblend(input logic [7:0] f);
+      return f == 8'(APU_IMG_FMT_R8G8B8A8_UINT) || f_is_raw32(f) ||
+             f_cbpp(f) != 3'd4;
+    endfunction
     // color-attachment format legality
     function automatic logic f_cfmt_ok(input logic [7:0] f);
-      return f == 8'(APU_IMG_FMT_R8G8B8A8_UNORM) ||
+      return f == 8'(APU_IMG_FMT_R8_UNORM)      ||
+             f == 8'(APU_IMG_FMT_R8G8_UNORM)    ||
+             f == 8'(APU_IMG_FMT_R8G8B8A8_UNORM) ||
              f == 8'(APU_IMG_FMT_B8G8R8A8_UNORM) ||
              f == 8'(APU_IMG_FMT_R8G8B8A8_SRGB)  ||
              f == 8'(APU_IMG_FMT_B8G8R8A8_SRGB)  ||
@@ -1291,9 +1310,10 @@ module g6lc_apu_rast
     wire [31:0] clr_base = clr_is_d ? dr_q.da.base : dr_q.ca[0].base;
     wire [15:0] clr_w    = clr_is_d ? dr_q.da.w    : dr_q.ca[0].w;
     wire [15:0] clr_h    = clr_is_d ? dr_q.da.h    : dr_q.ca[0].h;
-    wire [2:0]  clr_bpp  = (clr_is_d &&
-                          dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM))
-                         ? 3'd2 : 3'd4;
+    wire [2:0]  clr_bpp  = clr_is_d
+                           ? (dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM)
+                              ? 3'd2 : 3'd4)
+                           : f_cbpp(dr_q.ca[0].fmt);
     wire [31:0] clr_pitch = f_pitch2(clr_w, clr_bpp);
     wire [31:0] clr_rowb = 32'(clr_w) * 32'(clr_bpp);
     // clear-target format legality (DRAW legality is per-attachment
@@ -1303,7 +1323,8 @@ module g6lc_apu_rast
                            : f_cfmt_ok(dr_q.ca[0].fmt);
     // pitch of the color attachment under the ROP cursor, and of the
     // depth attachment (early-Z)
-    wire [31:0] cpitch_w = f_pitch2(dr_q.ca[at_q].w, 3'd4);
+    wire [31:0] cpitch_w = f_pitch2(dr_q.ca[at_q].w,
+                                     f_cbpp(dr_q.ca[at_q].fmt));
     wire [31:0] dpitch_w = f_pitch2(
         dr_q.da.w, dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM)
                    ? 3'd2 : 3'd4);
@@ -1455,8 +1476,14 @@ module g6lc_apu_rast
     wire [7:0] rop_b1 = f_enc8(dr_q.ca[at_q].fmt, 2'd1, res_q[1]);
     wire [7:0] rop_b2 = f_enc8(dr_q.ca[at_q].fmt, 2'd2, res_q[2]);
     wire [7:0] rop_b3 = f_enc8(dr_q.ca[at_q].fmt, 2'd3, res_q[3]);
+    // sub-word pixels replicate their bytes across the 32-bit write
+    // half so whichever 8 B lanes the strobes enable carry the pixel
     wire [31:0] rop_pix = f_is_raw32(dr_q.ca[at_q].fmt)
         ? res_q[0]
+        : f_cbpp(dr_q.ca[at_q].fmt) == 3'd1
+        ? {4{rop_b0}}
+        : f_cbpp(dr_q.ca[at_q].fmt) == 3'd2
+        ? {2{rop_b1, rop_b0}}
         : f_is_bgr(dr_q.ca[at_q].fmt)
         ? {rop_b3, rop_b0, rop_b1, rop_b2}
         : {rop_b3, rop_b2, rop_b1, rop_b0};
@@ -1519,14 +1546,27 @@ module g6lc_apu_rast
         ? {dr_q.blend[at_q].mask[3], dr_q.blend[at_q].mask[0],
            dr_q.blend[at_q].mask[1], dr_q.blend[at_q].mask[2]}
         : dr_q.blend[at_q].mask;
-    wire [7:0] rop_strb = {4'h0, rop_msk} << {fr_px[0], 2'b00};
+    // rop_pmask: per-byte-lane write mask inside the pixel, in
+    // attachment byte order.  For the sub-word formats only the
+    // existing components' mask bits apply — R8 keeps mask[0], RG8
+    // keeps mask[1:0]; B/A bits name components the format lacks.
+    wire [7:0] rop_pmask = f_cbpp(dr_q.ca[at_q].fmt) == 3'd1
+        ? {7'h0, dr_q.blend[at_q].mask[0]}
+        : f_cbpp(dr_q.ca[at_q].fmt) == 3'd2
+        ? {6'h0, dr_q.blend[at_q].mask[1:0]}
+        : {4'h0, rop_msk};
+    // byte lane of the pixel inside its 8 B write word: (x*bpp) mod 8
+    wire [2:0] rop_lane =
+        (32'(fr_px) * 32'(f_cbpp(dr_q.ca[at_q].fmt))) & 7;
+    wire [7:0] rop_strb = ({1'b0, rop_pmask} << rop_lane);
     // VkLogicOp applies to integer and normalized-integer attachments
     // only: an sRGB attachment takes the plain source colour, and so
     // does a raw32 float attachment (R32_SFLOAT); R32_UINT is integer
     // and takes the bitwise op on the whole word.  logicOpEnable still
     // disables blending on every attachment.
     wire lop_on_w = dr_q.logic_op_en && !f_is_srgb(dr_q.ca[at_q].fmt) &&
-                    dr_q.ca[at_q].fmt != 8'(APU_IMG_FMT_R32_SFLOAT);
+                    dr_q.ca[at_q].fmt != 8'(APU_IMG_FMT_R32_SFLOAT) &&
+                    f_cbpp(dr_q.ca[at_q].fmt) == 3'd4;
     // Window depth.  Clamp enable uses the viewport range and the
     // near/far planes are not clip planes.  Otherwise the value is
     // held to [0,1], which is what the unclamped fixed path writes.
@@ -1927,6 +1967,16 @@ module g6lc_apu_rast
                     clr_pix_q <=
                       f_is_raw32(dr_q.ca[0].fmt)
                       ? dr_q.clear_color[0]
+                      // sub-word clear pixels replicate across the
+                      // write word exactly like the draw path
+                      : f_cbpp(dr_q.ca[0].fmt) == 3'd1
+                      ? {4{f_enc8(dr_q.ca[0].fmt, 2'd0,
+                                  dr_q.clear_color[0])}}
+                      : f_cbpp(dr_q.ca[0].fmt) == 3'd2
+                      ? {2{f_enc8(dr_q.ca[0].fmt, 2'd1,
+                                  dr_q.clear_color[1]),
+                           f_enc8(dr_q.ca[0].fmt, 2'd0,
+                                  dr_q.clear_color[0])}}
                       : f_is_bgr(dr_q.ca[0].fmt)
                       ? {f_enc8(dr_q.ca[0].fmt, 2'd3,
                                 dr_q.clear_color[3]),
@@ -1967,17 +2017,13 @@ module g6lc_apu_rast
                     // raw32 single-word attachments carry no blend
                     // either (same refusal).
                     (dr_q.ca_valid[0] && dr_q.blend[0].en &&
-                     (dr_q.ca[0].fmt == 8'(APU_IMG_FMT_R8G8B8A8_UINT) ||
-                      f_is_raw32(dr_q.ca[0].fmt))) ||
+                     f_noblend(dr_q.ca[0].fmt)) ||
                     (dr_q.ca_valid[1] && dr_q.blend[1].en &&
-                     (dr_q.ca[1].fmt == 8'(APU_IMG_FMT_R8G8B8A8_UINT) ||
-                      f_is_raw32(dr_q.ca[1].fmt))) ||
+                     f_noblend(dr_q.ca[1].fmt)) ||
                     (dr_q.ca_valid[2] && dr_q.blend[2].en &&
-                     (dr_q.ca[2].fmt == 8'(APU_IMG_FMT_R8G8B8A8_UINT) ||
-                      f_is_raw32(dr_q.ca[2].fmt))) ||
+                     f_noblend(dr_q.ca[2].fmt)) ||
                     (dr_q.ca_valid[3] && dr_q.blend[3].en &&
-                     (dr_q.ca[3].fmt == 8'(APU_IMG_FMT_R8G8B8A8_UINT) ||
-                      f_is_raw32(dr_q.ca[3].fmt))) ||
+                     f_noblend(dr_q.ca[3].fmt)) ||
                     (dr_q.ca_valid[0] && dr_q.blend[0].en &&
                      (dr_q.blend[0].src_c > 5'd14 ||
                       dr_q.blend[0].dst_c > 5'd14 ||
@@ -2005,7 +2051,19 @@ module g6lc_apu_rast
                       dr_q.blend[3].src_a > 5'd14 ||
                       dr_q.blend[3].dst_a > 5'd14 ||
                       dr_q.blend[3].op_c > 3'd4 ||
-                      dr_q.blend[3].op_a > 3'd4))) begin
+                      dr_q.blend[3].op_a > 3'd4)) ||
+                    // logic op on a sub-word attachment is not
+                    // implemented — refuse rather than write the
+                    // un-op'ed source colour
+                    (dr_q.logic_op_en &&
+                     ((dr_q.ca_valid[0] &&
+                       f_cbpp(dr_q.ca[0].fmt) != 3'd4) ||
+                      (dr_q.ca_valid[1] &&
+                       f_cbpp(dr_q.ca[1].fmt) != 3'd4) ||
+                      (dr_q.ca_valid[2] &&
+                       f_cbpp(dr_q.ca[2].fmt) != 3'd4) ||
+                      (dr_q.ca_valid[3] &&
+                       f_cbpp(dr_q.ca[3].fmt) != 3'd4)))) begin
                   code_q <= APU_SH_DONE_UNSUPPORTED;
                   st_q <= S_FIN_BAD;
                 end else if (dr_q.vertex_count == 32'd0 ||
@@ -4247,7 +4305,7 @@ module g6lc_apu_rast
               mp_we_q <= 1'b0;
               mp_addr_q <= {32'h0, dr_q.ca[at_q].base} +
                            64'(fr_py) * 64'(cpitch_w) +
-                           64'((32'(fr_px) * 32'd4) & ~64'd7);
+                           64'((32'(fr_px) * 32'(f_cbpp(dr_q.ca[at_q].fmt))) & ~64'd7);
               mp_data_q <= '0; mp_strb_q <= '0;
               mp_ret_q <= S_ROP_LOP;
               mp_acked_q <= 1'b0;
@@ -4262,7 +4320,7 @@ module g6lc_apu_rast
               mp_we_q <= 1'b0;
               mp_addr_q <= {32'h0, dr_q.ca[at_q].base} +
                            64'(fr_py) * 64'(cpitch_w) +
-                           64'((32'(fr_px) * 32'd4) & ~64'd7);
+                           64'((32'(fr_px) * 32'(f_cbpp(dr_q.ca[at_q].fmt))) & ~64'd7);
               mp_data_q <= '0; mp_strb_q <= '0;
               mp_ret_q <= S_ROP_DI;
               mp_acked_q <= 1'b0;
@@ -4557,7 +4615,7 @@ module g6lc_apu_rast
             if (wq_ok) begin
               t_wq({32'h0, dr_q.ca[at_q].base} +
                    64'(fr_py) * 64'(cpitch_w) +
-                   64'((32'(fr_px) * 32'd4) & ~64'd7),
+                   64'((32'(fr_px) * 32'(f_cbpp(dr_q.ca[at_q].fmt))) & ~64'd7),
                    {2{lop_on_w ? lop_pix_q : rop_pix}},
                    rop_strb);
               st_q <= S_ROP_NX;

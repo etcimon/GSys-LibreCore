@@ -313,6 +313,22 @@ module tb_g6lc_apu_rast;
     return i_mem.apm[apw_i(FB2 + y*FBP + x*4)];
   endfunction
 
+  // R8_UNORM pixel: 1 B/px, w=32 -> row pitch align(32,64)=64 B,
+  // four pixels per 32-bit memory word
+  function automatic logic [7:0] r8px(input int x, input int y);
+    logic [31:0] w;
+    w = i_mem.apm[apw_i(FB + y*64 + (x & ~3))];
+    return w[8*(x & 3) +: 8];
+  endfunction
+
+  // R8G8_UNORM pixel {g,r}: 2 B/px, w=32 -> row pitch 64 B,
+  // two pixels per 32-bit memory word
+  function automatic logic [15:0] rg8px(input int x, input int y);
+    logic [31:0] w;
+    w = i_mem.apm[apw_i(FB + y*64 + ((x & ~1) * 2))];
+    return w[16*(x & 1) +: 16];
+  endfunction
+
   // VS-input word.  Vertex 0, byte offset within the 144-byte record.
   function automatic logic [31:0] vsin(input int off);
     return i_mem.apm[apw_i(PG_BASE + off)];
@@ -4046,6 +4062,223 @@ module tb_g6lc_apu_rast;
                          x, y, got));
       end
     end
+
+    // ============ case 70: R8_UNORM clear ==========================
+    // 1 B/px sub-word attachment: four pixels share one 32-bit word,
+    // row pitch align(32*1,64)=64.  Only the R channel stores.
+    cases++;
+    d = mk_clear();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R8_UNORM);
+    d.clear_color[0] = 32'h3E800000;   // 0.25 -> UNORM8 64
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case70 code=%0d", w_dpl.code));
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        checks++;
+        if (r8px(x, y) != 8'h40)
+          fail($sformatf("case70 px(%0d,%0d)=%02x exp 40",
+                         x, y, r8px(x, y)));
+      end
+
+    // ============ case 71: R8_UNORM draw ============================
+    // covered px store the interpolated R channel as UNORM8; the
+    // uncovered px keep the clear byte.  Same geometry/refs as case2.
+    cases++;
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(1, 32'h3F400000, 32'hBF200000,
+                32'h00000000, 32'h3F800000, 32'h00000000, 32'h3F800000);
+    put_vert(2, 32'hBF200000, 32'h3F600000,
+                32'h00000000, 32'h00000000, 32'h3F800000, 32'h3F800000);
+    ref_xi = '{512, 7168, 1536}; ref_yi = '{512, 1536, 7680};
+    ref_col[0] = '{1.0, 0.0, 0.0, 1.0};
+    ref_col[1] = '{0.0, 1.0, 0.0, 1.0};
+    ref_col[2] = '{0.0, 0.0, 1.0, 1.0};
+    d = mk_draw();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R8_UNORM);
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case71 code=%0d", w_dpl.code));
+    mism = 0;
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        logic [31:0] rpx = ref_px(x, y);
+        logic [7:0]  eb;
+        checks++;
+        if (rpx == 32'hFFFF_FFFF) eb = 8'h40;
+        else eb = rpx[7:0];
+        if (rpx == 32'hFFFF_FFFF) begin
+          if (r8px(x, y) != eb)
+            fail($sformatf("case71 out px(%0d,%0d)=%02x exp %02x",
+                           x, y, r8px(x, y), eb));
+        end else begin
+          automatic int dv = int'(r8px(x, y)) - int'(eb);
+          if (dv < -1 || dv > 1) begin
+            mism++;
+            if (mism <= 12)
+              $display("case71 px(%0d,%0d)=%02x ref=%02x",
+                       x, y, r8px(x, y), eb);
+          end
+        end
+      end
+    checks++;
+    if (mism != 0) fail($sformatf("case71 mism=%0d", mism));
+
+    // ============ case 72: R8G8_UNORM clear =========================
+    // 2 B/px sub-word attachment: two pixels share one 32-bit word,
+    // row pitch align(32*2,64)=64.  R and G channels store.
+    cases++;
+    d = mk_clear();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R8G8_UNORM);
+    d.clear_color[0] = 32'h3E800000;   // R 0.25 -> 64
+    d.clear_color[1] = 32'h3F000000;   // G 0.5  -> 128
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case72 code=%0d", w_dpl.code));
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        checks++;
+        if (rg8px(x, y) != 16'h8040)
+          fail($sformatf("case72 px(%0d,%0d)=%04x exp 8040",
+                         x, y, rg8px(x, y)));
+      end
+
+    // ============ case 73: R8G8_UNORM draw ==========================
+    // covered px store interpolated {G,R} as two UNORM8 lanes.
+    cases++;
+    d = mk_draw();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R8G8_UNORM);
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case73 code=%0d", w_dpl.code));
+    mism = 0;
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        logic [31:0] rpx = ref_px(x, y);
+        logic [15:0] eb;
+        checks++;
+        if (rpx == 32'hFFFF_FFFF) eb = 16'h8040;
+        else eb = {rpx[15:8], rpx[7:0]};   // {g,r}
+        if (rpx == 32'hFFFF_FFFF) begin
+          if (rg8px(x, y) != eb)
+            fail($sformatf("case73 out px(%0d,%0d)=%04x exp %04x",
+                           x, y, rg8px(x, y), eb));
+        end else begin
+          automatic logic [15:0] g16 = rg8px(x, y);
+          automatic int drv = int'(g16[7:0]) - int'(eb[7:0]);
+          automatic int dgv = int'(g16[15:8]) - int'(eb[15:8]);
+          if (drv < -1 || drv > 1 || dgv < -1 || dgv > 1) begin
+            mism++;
+            if (mism <= 12)
+              $display("case73 px(%0d,%0d)=%04x ref=%04x",
+                       x, y, g16, eb);
+          end
+        end
+      end
+    checks++;
+    if (mism != 0) fail($sformatf("case73 mism=%0d", mism));
+
+    // ============ case 74: R8 write mask ============================
+    // colourWriteMask bit0 (R) clear -> the pixel's only lane is
+    // masked: the draw stores nothing and the clear survives.  The
+    // G/B/A mask bits name channels R8 does not have and are ignored.
+    cases++;
+    d = mk_clear();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R8_UNORM);
+    d.clear_color[0] = 32'h3E800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    d = mk_draw();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R8_UNORM);
+    d.blend[0].mask = 4'hE;              // R masked off
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case74 code=%0d", w_dpl.code));
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        checks++;
+        if (r8px(x, y) != 8'h40)
+          fail($sformatf("case74 px(%0d,%0d)=%02x exp 40",
+                         x, y, r8px(x, y)));
+      end
+
+    // ============ case 75: RG8 partial write mask ===================
+    // mask = R only (bit0 set, bit1 clear): covered px keep the clear
+    // G lane and take the shaded R lane — the mask must select lanes
+    // inside the 2-byte pixel, not bytes of a 4-byte word.
+    cases++;
+    d = mk_clear();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R8G8_UNORM);
+    d.clear_color[0] = 32'h3E800000;   // R clear 64
+    d.clear_color[1] = 32'h3F000000;   // G clear 128
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    d = mk_draw();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R8G8_UNORM);
+    d.blend[0].mask = 4'hD;              // R on, G off (B/A bits ignored)
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case75 code=%0d", w_dpl.code));
+    mism = 0;
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        logic [31:0] rpx = ref_px(x, y);
+        logic [15:0] got16;
+        checks++;
+        got16 = rg8px(x, y);
+        if (rpx == 32'hFFFF_FFFF) begin
+          if (got16 != 16'h8040)
+            fail($sformatf("case75 out px(%0d,%0d)=%04x exp 8040",
+                           x, y, got16));
+        end else begin
+          automatic int drv = int'(got16[7:0]) - int'(rpx[7:0]);
+          if (got16[15:8] != 8'h80 || drv < -1 || drv > 1) begin
+            mism++;
+            if (mism <= 12)
+              $display("case75 px(%0d,%0d)=%04x ref_r=%02x",
+                       x, y, got16, rpx[7:0]);
+          end
+        end
+      end
+    checks++;
+    if (mism != 0) fail($sformatf("case75 mism=%0d", mism));
+
+    // ============ case 76: sub-word blend/logic-op refused =========
+    // Neither sub-word format decodes dst for blending, and the logic
+    // op is not implemented on them: both refuse UNSUPPORTED at record
+    // legality and the attachment keeps its clear.
+    cases++;
+    d = mk_clear();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R8_UNORM);
+    d.clear_color[0] = 32'h3E800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    d = mk_draw();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R8_UNORM);
+    d.blend[0].en = 1'b1;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    checks++;
+    if (w_dpl.code != APU_SH_DONE_UNSUPPORTED)
+      fail($sformatf("case76 r8+blend code=%0d exp UNSUPPORTED",
+                     w_dpl.code));
+    d = mk_clear();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R8G8_UNORM);
+    d.clear_color[0] = 32'h3E800000;
+    d.clear_color[1] = 32'h3F000000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    d = mk_draw();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R8G8_UNORM);
+    d.logic_op_en = 1'b1; d.logic_op = 4'd6;   // XOR
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    checks++;
+    if (w_dpl.code != APU_SH_DONE_UNSUPPORTED)
+      fail($sformatf("case76 rg8+lop code=%0d exp UNSUPPORTED",
+                     w_dpl.code));
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        checks++;
+        if (rg8px(x, y) != 16'h8040)
+          fail($sformatf("case76 px(%0d,%0d)=%04x exp 8040",
+                         x, y, rg8px(x, y)));
+      end
 
     // ---- report ---------------------------------------------------------
     // draw-path counters: the suite draws and writes pixels, so both
