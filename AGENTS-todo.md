@@ -1149,8 +1149,16 @@ remain release requirements; intermediate raster gates do not narrow the product
     rasteriser renders to R32_SFLOAT and R32_UINT (raw channel-0 word; R mask bit;
     clear raw; logic op on the integer format only; blend refused). Unit bench 69
     cases / 40,971 checks, cohort unchanged at 1,066,697 cycles, yosys clean.
-    Stage 2 open: advertise COLOR_ATTACHMENT in the profile, model the raw store
-    in the generator, device sessions.
+    Stage 2 DONE (`dd58435fd`): the profile advertises COLOR_ATTACHMENT on both;
+    `vkCreateImage` in vnfront checks attachment usage against the generated
+    `APU_VN_FMT_USAGE` table instead of two hand-kept format lists (this also
+    lets R8G8B8A8_UINT attachments be created, which the profile advertised and
+    the front end refused); device session `ue_gpos_r32fbloff_1` passes on vgtop
+    and fails with the raw store disabled. Open: no R32_UINT device session (the
+    corpus fragment shaders output float); the vnfront Enable=1 synthesis screen
+    did not finish, so no cell count; harness run pending. Next formats on the
+    same pattern need wider pixels (RGBA16F 8 bytes, RGBA32F 16 bytes) or
+    narrower ones (R8, RG8), i.e. the pixel-size generalisation of the ROP.
     (5) Stale records: the CTS ledger was last rendered around 2026-11-04 and still
     lists the 71 `descriptor_copy` failures that closed on 2026-11-12; the plan's
     ladder table shows R3 as not started.
