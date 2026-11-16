@@ -1258,6 +1258,25 @@ remain release requirements; intermediate raster gates do not narrow the product
     RTL/oracle change.  All four PASS cases=43 on the existing vgtop
     binary; rgba8/rgba16f/r32u/srgb clear regressions clean; 902 model
     tests OK.
+    **Clear coverage completed (2026-11-16, `c7f26f827`).**
+    `clear_bgrasrgb` (vkfmt 50, B8G8R8A8_SRGB) adds the last
+    color-attachable format without a clear session — the combined
+    sRGB-LUT + BGRA-swap `img_clear_texel` path.  Every
+    COLOR_ATTACHMENT profile format now has both a raster (`ue_gpos`)
+    and a clear (`ue_cpos`) device session.  PASS cases=43.
+    **First non-float vertex attribute (2026-11-16, `99c41bec7`).**
+    `ue_gpos_vattr8ubloff_1` uses R8G8B8A8_UNORM (vkfmt 37) for the
+    vertex-colour attribute instead of RGBA32_SFLOAT: one packed u8x4
+    word per vertex at byte offset 8 (stride stays 24 B), decoded per
+    channel as `fp32(b)*fp32(1/255)` (`K255=0x3B808081`) by the
+    S_GA_U8I/U8M/U8S chain.  vs_pos3 forwards all four decoded channels.
+    Model-only — decode already in RTL; COL holds the fp32 decode the
+    VS/oracle interpolate.  PASS cases=26 checks=17016 maxulp=0 on the
+    existing binary; bloff/rgba8u/rgba16f/r8un/tri regressions clean;
+    902 model tests OK.  The UNORM/SNORM vertex decode constants were
+    also reviewed against spec: 1/255, 1/127, 1/65535, 1/32767 are all
+    correctly-rounded reciprocals (255→1.0, −128→−1.0 clamp) — the
+    untested normalised-fetch path is spec-correct.
     (5) Stale records: the CTS ledger was last rendered around 2026-11-04 and still
     lists the 71 `descriptor_copy` failures that closed on 2026-11-12; the plan's
     ladder table shows R3 as not started.
