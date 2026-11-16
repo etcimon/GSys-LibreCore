@@ -210,7 +210,11 @@ def main():
                '-f', ('verif/regress/remote/hyp8/Flist.hyp8_mc_sim'
                       if name == 'mc' else FLIST), 'verilator_config.vlt']
         (out / f'command-lint-{name}.json').write_text(json.dumps(cmd, indent=2))
-        rc = run(cmd, log, env=env, cwd=src, timeout=1200)
+        # HYP8_LINT_TIMEOUT: the mc (8-hart SoC) flist elaborates far longer than
+        # the scalar/smt2 flists and can exceed the 1200 s default on a loaded
+        # host; allow an operator override without changing the default gate.
+        lint_timeout = int(os.environ.get('HYP8_LINT_TIMEOUT', '1200'))
+        rc = run(cmd, log, env=env, cwd=src, timeout=lint_timeout)
         results['lint'][name] = {'rc': rc, 'warnings': census(log),
                                  'log': f'lint-{name}.log'}
     if any(lint_failed(entry['rc'], entry['warnings'])
