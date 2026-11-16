@@ -1293,6 +1293,31 @@ remain release requirements; intermediate raster gates do not narrow the product
     clamp — 0x80 gives u8 0 where unsigned would give 255.  PASS
     cases=26 checks=17016 maxulp=0; vattr8u/vattr16u/rgba8u/tri
     regressions clean.
+    **Vertex-attribute matrix extended (2026-11-16).**  Four more
+    sessions close the normalised/float decode families and open the
+    component-count axis, all on the existing vgtop binary (no RTL
+    rebuild):
+    - `ue_gpos_vattr16snbloff_1` (`ecebb6b73`): R16G16B16A16_SNORM
+      (vkfmt 92) — sign-extend u16 + `*fp32(1/32767)`
+      (`Ksn=0x38000100`) + `-1.0` clamp; `0x8000`→−1.0.  Completes the
+      UNORM/SNORM × 8/16-bit normalised matrix.
+    - `ue_gpos_vattr16fbloff_1` (`00774ec74`): R16G16B16A16_SFLOAT
+      (vkfmt 97) — four IEEE binary16 patterns packed two-per-word,
+      decoded by `f_f16_f32` (subnormals flush to signed zero).  First
+      non-integer vertex decode path exercised.
+    - `ue_gpos_vattrrgb8ubloff_1` (`0d0a1291c`): R8G8B8_UNORM (vkfmt
+      23) — three u8 components; the gather's `(0,0,0,1)` missing-
+      component fill supplies alpha=1.0f.  nc=3 loop bound.
+    - `ue_gpos_vattrrg8ubloff_1` + `ue_gpos_vattr8u1bloff_1`
+      (`942977f71`): R8G8_UNORM (vkfmt 16, nc=2) and R8_UNORM
+      (vkfmt 9, nc=1).  With vattr8u/vattrrgb8u this completes the
+      R8*_UNORM component-count matrix nc∈{1,2,3,4}.
+    All PASS `cases=26 checks=17016 maxulp=0`; 902 model tests OK.
+    Vertex-fetch decode coverage now spans UNORM/SNORM/SFLOAT ×
+    8/16-bit × component counts {1,2,3,4}.  Remaining decode gaps:
+    integer attributes (UINT/SINT — need `uvec`/`ivec` VS inputs and
+    shader-core integer-input support, unverified) and 32-bit
+    component-count colour variants.
     (5) Stale records: the CTS ledger was last rendered around 2026-11-04 and still
     lists the 71 `descriptor_copy` failures that closed on 2026-11-12; the plan's
     ladder table shows R3 as not started.
