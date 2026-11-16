@@ -11811,6 +11811,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # = 1.0f, exercising the nc=3 decode loop bound and the
         # (0,0,0,1) vertex-attribute default.
         is_vattrrgb8u = 'vattrrgb8u' in gfx
+        # vattrrg8u / vattr8u1: two- and one-component R8*_UNORM colour
+        # attributes (vkfmt 16 / 9) — the u8n_q loop bound drops to 2
+        # and 1, filling G/B (and alpha) from the (0,0,0,1) default.
+        is_vattrrg8u = 'vattrrg8u' in gfx
+        is_vattr8u1 = 'vattr8u1' in gfx
         # colourWriteMask stays logical-channel (R=1,G=2,B=4,A=8): cwmr
         # keeps R only, cwmb keeps B only — paired with is_bgra these
         # expose a mask applied in byte order instead of channel order.
@@ -11855,6 +11860,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                              'the is_bloff path')
         if is_vattrrgb8u and not is_bloff:
             raise ValueError('vattrrgb8u vertex attribute only adapted on '
+                             'the is_bloff path')
+        if is_vattrrg8u and not is_bloff:
+            raise ValueError('vattrrg8u vertex attribute only adapted on '
+                             'the is_bloff path')
+        if is_vattr8u1 and not is_bloff:
+            raise ValueError('vattr8u1 vertex attribute only adapted on '
                              'the is_bloff path')
         # _enc8: store encode for one f32 channel on attachment 0 — on an
         # sRGB attachment RGB goes linear-u12 -> sRGB8 while alpha (and
@@ -12549,6 +12560,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             _K8 = struct.unpack('<f', struct.pack('<I', 0x3B808081))[0]
             _C8 = (180, 60, 220)                  # stored u8 R,G,B bytes
             COL = tuple(_f32(_f32(b) * _K8) for b in _C8) + (_f32(1.0),)
+        elif is_vattrrg8u or is_vattr8u1:
+            # R8G8_UNORM (nc=2) / R8_UNORM (nc=1): the leading bytes
+            # decode; trailing components and alpha come from the
+            # gather's (0,0,0,1) fill.
+            _K8 = struct.unpack('<f', struct.pack('<I', 0x3B808081))[0]
+            _C8 = (180, 60) if is_vattrrg8u else (220,)
+            _dec = [_f32(_f32(b) * _K8) for b in _C8]
+            _dec += [_f32(0.0)] * (3 - len(_dec))
+            COL = tuple(_dec) + (_f32(1.0),)
         else:
             COL = (1.0, 0.5, 0.25, 0.75) if is_lop else \
                 (1.0, 0.0, 0.0, 0.75) if is_blend else \
@@ -12832,6 +12852,14 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         # unused.
                         vb_words += [(_C8[0] | (_C8[1] << 8) |
                                       (_C8[2] << 16)),
+                                     0, 0, 0]
+                    elif is_vattrrg8u or is_vattr8u1:
+                        # R8G8_UNORM (2 bytes) / R8_UNORM (1 byte) at
+                        # offset 8: only the present bytes are packed;
+                        # the rest of the word is outside f_asz.
+                        vb_words += [(_C8[0] |
+                                      ((_C8[1] if len(_C8) > 1 else 0)
+                                       << 8)),
                                      0, 0, 0]
                     else:
                         vb_words += [f32b(c) for c in COL]
@@ -14974,7 +15002,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                38 if is_vattr8sn else
                                92 if is_vattr16sn else
                                97 if is_vattr16f else
-                               23 if is_vattrrgb8u else 109,
+                               23 if is_vattrrgb8u else
+                               16 if is_vattrrg8u else
+                               9 if is_vattr8u1 else 109,
                                offset=0 if is_wide else
                                16 if is_dpair or is_persp
                                or is_dclamplike else 8)]),
