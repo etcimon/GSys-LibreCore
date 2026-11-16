@@ -1247,6 +1247,17 @@ remain release requirements; intermediate raster gates do not narrow the product
     `f_enc8` keeps only `[7:0]`), so the session proves the UINT
     *format* path — not a distinct shader-typing behaviour; the uvec4
     FS is the Vulkan-correct form regardless.
+    **xfer clear coverage extended (2026-11-16, `46825af53`).**  Four
+    `vkCmdClearColorImage` sessions close the transfer-engine clear gap
+    for the formats that only had raster coverage: `clear_r8un` (vkfmt 9,
+    1 B/px sub-word packing), `clear_rg8un` (vkfmt 16, 2 B/px),
+    `clear_bgra` (vkfmt 44, BGRA byte swap) and `clear_rgba8u` (vkfmt 41,
+    uint8x4 — cw values >255 prove the per-channel `&0xFF` truncation).
+    `img_clear_texel` is the generic `APU_VN_IMG_ATTR` encoder so only
+    `CLEAR_SESSIONS` entries + run-list registration were needed — no
+    RTL/oracle change.  All four PASS cases=43 on the existing vgtop
+    binary; rgba8/rgba16f/r32u/srgb clear regressions clean; 902 model
+    tests OK.
     (5) Stale records: the CTS ledger was last rendered around 2026-11-04 and still
     lists the 71 `descriptor_copy` failures that closed on 2026-11-12; the plan's
     ladder table shows R3 as not started.
