@@ -204,3 +204,13 @@ mc witness = FIRST SMP+coherence Linux boot attempt (never before run).
   relaunched via setsid (gate 21202, proxy 21207) — integration now running.
 - cmd_py (witness launch) is NOT overlap-guarded; only `shell` cmds
   containing Variane_testharness/soft-ladder are. Witnesses launch detached.
+
+## r131-mc lint-timeout fix (bec0c3dbd)
+
+First mc aggregate attempt died: `verilator --lint-only` on
+Flist.hyp8_mc_sim (8-hart SoC) exceeded the hardcoded 1200 s lint budget
+under host contention -> TimeoutExpired before any model build. Patched
+run_hyp8_integration.py to read HYP8_LINT_TIMEOUT (default 1200), relaunched
+mc gate with =5400. mc lint is deterministic-warning-heavy (~472 KB log);
+scalar r131 meanwhile progressed past lint into C++ build (239 objs).
+Host load ~14/12 cores (r128b witness + apu-leaf + both builds).
