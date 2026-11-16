@@ -11739,6 +11739,14 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # is_bloff path is adapted; blend and logicOp on it are refused
         # UNSUPPORTED, so every other path raises.
         is_rgba16f = 'rgba16f' in gfx
+        # rgba8u: R8G8B8A8_UINT colour attachment (vkfmt 41, device fmt
+        # 15, 4 B/px) — integer channels; the FS emits uvec4
+        # (fs_rgba8u floatBitsToUint(vcol)) so res_q[c] holds the f32
+        # bits and f_enc8 keeps the low byte: stored byte_c =
+        # f32b(_v[c])&0xFF.  Only the blend-disabled is_bloff path is
+        # adapted; blend and logicOp on integer formats are refused
+        # UNSUPPORTED, so every other path raises.
+        is_rgba8uint = 'rgba8u' in gfx
         # colourWriteMask stays logical-channel (R=1,G=2,B=4,A=8): cwmr
         # keeps R only, cwmb keeps B only — paired with is_bgra these
         # expose a mask applied in byte order instead of channel order.
@@ -11763,12 +11771,21 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         if is_rgba16f and not is_bloff:
             raise ValueError('rgba16f attachment only adapted on the '
                              'is_bloff path')
+        if is_rgba8uint and not is_bloff:
+            raise ValueError('rgba8u attachment only adapted on the '
+                             'is_bloff path')
         # _enc8: store encode for one f32 channel on attachment 0 — on an
         # sRGB attachment RGB goes linear-u12 -> sRGB8 while alpha (and
         # every channel on a non-sRGB attachment) stays UNORM8.  Mirrors
         # f_enc8; used for the clear word, the blend dst bytes and the
         # covered blend result alike.
         def _enc8(c, v):
+            # rgba8u: integer channels — f_enc8 keeps the low byte of the
+            # 32-bit value; on this path v is the f32 pattern (clear
+            # uint32=f32b(clear) or the interpolated channel's f32b), so
+            # the stored byte is the f32 mantissa-low byte.
+            if is_rgba8uint:
+                return f32b(v) & 0xFF
             if is_srgb and c < 3:
                 return srgb_lut.lin12_to_srgb8(cl_f32_u12(f32b(v)))
             return cl_f32_u8(f32b(v))
@@ -12325,6 +12342,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'fs_mrt.spv' if is_mrt else
                           'fs_color.spv' if is_fcolor else
                           'fs_r32u.spv' if is_r32u else
+                          'fs_rgba8u.spv' if is_rgba8uint else
                           'fs_vcol.spv' if is_persp or is_dclamplike
                           or is_blend or is_lop or is_bop or is_bfac
                           or is_wide
@@ -14346,6 +14364,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     flags=0, imageType=1,
                     format=(9 if is_r8un else 16 if is_rg8un else
                         97 if is_rgba16f else
+                        41 if is_rgba8uint else
                         100 if is_r32f else 98 if is_r32u else
                         ((50 if is_bgra else 43) if is_srgb
                         else (44 if is_bgra else 37))),
@@ -14364,6 +14383,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     flags=0, image=X['img'], viewType=1,
                     format=(9 if is_r8un else 16 if is_rg8un else
                         97 if is_rgba16f else
+                        41 if is_rgba8uint else
                         100 if is_r32f else 98 if is_r32u else
                         ((50 if is_bgra else 43) if is_srgb
                         else (44 if is_bgra else 37))),
@@ -14586,6 +14606,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     pAttachments=[st('VkAttachmentDescription',
                         flags=0, format=(9 if is_r8un else 16 if is_rg8un else
                         97 if is_rgba16f else
+                        41 if is_rgba8uint else
                         100 if is_r32f else 98 if is_r32u else
                         ((50 if is_bgra else 43) if is_srgb
                         else (44 if is_bgra else 37))),

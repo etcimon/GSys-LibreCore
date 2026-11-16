@@ -207,6 +207,11 @@ python3 $G --graphics-session ue_gpos_rg8unbloff_1 1
 # blend-disabled path — one whole 8 B beat per pixel, four fp16
 # channels (f32->f16 per channel), two readback words per pixel.
 python3 $G --graphics-session ue_gpos_rgba16fbloff_1 1
+# integer colour attachment: R8G8B8A8_UINT (vkfmt 41, 4 B/px) on the
+# blend-disabled path — fs_rgba8u emits a uvec4 FS output
+# (floatBitsToUint(vcol)), so res_q[c] holds each channel's f32 bits
+# and f_enc8 keeps the low byte: stored byte_c = f32b(vcol_c)&0xFF.
+python3 $G --graphics-session ue_gpos_rgba8ubloff_1 1
 
 # Sessions the run scripts execute that this script did not generate
 # (blend ops and factors, logic ops, depth compare/bounds/bias/clamp,
