@@ -214,3 +214,13 @@ run_hyp8_integration.py to read HYP8_LINT_TIMEOUT (default 1200), relaunched
 mc gate with =5400. mc lint is deterministic-warning-heavy (~472 KB log);
 scalar r131 meanwhile progressed past lint into C++ build (239 objs).
 Host load ~14/12 cores (r128b witness + apu-leaf + both builds).
+
+## mc per-hart trace mapping (SMP debug ready)
+
+rvfi_tracer writes trace_rvfi_hart_<HART_ID>.dasm per physical core and
+INTERLEAVES SMT harts tagged `core N:` (= HART_ID + local_hart). mc
+(NrHarts=2, NC=4): core0->hart_00(dasms hart0,1), core1->hart_02(hart2,3),
+core2->hart_04(hart4,5), core3->hart_06(hart6,7). To verify SMP bringup:
+grep `core [0-7]:` across the 4 files; a hart never tagged = never retired
+(boot-hold/ipi/release defect). core_retired[] + mc_all_silent_held give
+the testbench's own multicore verdict; +mc_verdict_fault self-tests it.
