@@ -242,3 +242,38 @@ fills and suppress a second fill for an already-filling vpn, or make
 the fill commit visible to hit detect within the lookup-to-fill window.
 Off-by-default experimental profile; the default (TlbStages=1) TLB is
 unaffected — r126/r127m/r128 all passed on it.
+
+## Staged-MMU duplicate-fill: fix design (2026-11-16)
+
+Fill commit is `update_i.valid & replace_en[i] & !lu_hit_o` (g6lc_tlb.sv:670).
+`!lu_hit_o` only suppresses when the *issuing* lookup hit; it never
+rechecks `tags_q` for an entry an earlier fill already wrote. Lookup B
+whose tag sample predates fill A's commit still misses, walks, and fills
+a second valid copy → two live entries match one VA → `g6lc_tlb` multi-hit.
+
+Candidate fix — **fill-time upsert**: in the same `update_i.valid` arm,
+before writing way `replace_en[i]`, evaluate whether any *other* valid
+`tags_q[j]` already matches `update_i`'s translation key; if so, update
+that entry in place (or suppress the write) instead of allocating a
+duplicate way. The match predicate must reuse the lookup's
+`vpn_match`/`level_match`/`match_asid`/`match_vmid`/`match_hart`/
+`match_stage` semantics parameterized on `update_i.vpn`+asid/vmid/hart/
+v_st_enbl — NOT a flat `tags_q[j].vpn == update_i.vpn`, because the stored
+vpn is per-level and masked by `is_page`/NAPOT. Cost: a TLB_ENTRIES-wide
+comparator on the fill path (acceptable for the off-by-default staged
+profile; measure before proposing default).
+
+Rejected alternatives:
+- Fill→lookup tag forwarding: the hazard window is the lookup pipeline
+  depth (~14 cycles here), not a single cycle, so forwarding cannot close it.
+- In-flight fill CAM: fill A has already committed to `tags_q` by the
+  time B fills, so it is not "in-flight" — only a tags_q recheck sees it.
+- Relaxing the multi-hit assert for identical duplicates: masks a real
+  way-wasting defect and hides future divergence.
+
+Verification plan: directed `g6lc_mmu`/memory-leaf case issuing two
+lookups for one vpn inside the fill-commit window (needs a way to stall
+the second lookup's tag sample until after the first fill commits, or a
+back-door fill inject); then re-run `hyp8-osbi-scalar-r129b-mmustaged`
+witness to 317.4M+ and on to shell. Off-by-default; default TlbStages=1
+unaffected.
