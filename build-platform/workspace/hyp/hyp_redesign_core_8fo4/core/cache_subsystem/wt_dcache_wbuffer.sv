@@ -2638,12 +2638,17 @@ module wt_dcache_wbuffer
   // is the violation class.
   int unsigned l1_obl_n       = 0;
   int unsigned l1_obl_plain_n = 0;
+  // rfix131a: the per-event line is opt-in (+wbuf_obl_trace); the counters
+  // and the assertion below always run.
+  bit l1_obl_trace;
+  initial l1_obl_trace = $test$plusargs("wbuf_obl_trace");
   always_ff @(posedge clk_i) begin : p_l1_obl
     if (rst_ni && drop_q && (|entry_freed) && rtrn_tx.vld &&
         rtrn_wb.checked && (|rtrn_wb.hit_oh)) begin
       l1_obl_n <= l1_obl_n + 1;
       if (!leg_l1_q) begin
         l1_obl_plain_n <= l1_obl_plain_n + 1;
+        if (l1_obl_trace)
         $display("[l1 dcache wbuffer] L1 obligation dropped: entry %0d wtag=%h freed by plain drop l1=%b inv=%b chk=%b checkwr=%b ackbe=%h",
                  rtrn_ptr, rtrn_wb.wtag, drop_l1_q, drop_inv_q, drop_chk_q,
                  check_wr, ack_be);
