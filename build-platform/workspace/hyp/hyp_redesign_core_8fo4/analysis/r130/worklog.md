@@ -274,3 +274,45 @@ exception slot, ad6a429b9 held-load-PA, 7eb2f6e1c misaligned fault cause,
 c5c9262de DTLB-miss yield) + SC-backoff (67f413a63, a9c90bece). If r131
 hangs identically the bug is deeper (unstaged MMU PTW / AXI xbar DECERR
 handling / DRAM backend) -> needs tagged addr + directed debug.
+
+## r128b hang — deep RTL/kernel forensic (decisive)
+
+r128b (closure 2026-11-14, target g6lc64_hyp8 => LoadExPubStages=1,
+TlbStages=1) ran ~27h, ~1.054B cycles, then SIGKILL (run-hyp8.log ends
+MID-LINE "L1 obligati" = abrupt kill, NOT model +time_out=1.75B and NOT a
+clean $finish). Monitor (hyp8-boot-monitor-remote.sh) only polls state
+every 1200s and does NOT kill => external/OOM/host cleanup OR the model's
+own +hang_dump path. Core was STILL retiring: stall-census ret=274M->274.9M
+@cyc1.052->1.054B, ipc~0.26, 36,367 unique PCs in last 200K trace lines.
+
+UART: clean boot to "[6.31s] Freeing initrd memory: 908K" then STOPS; no
+panic/oops/"Run /init". Hang window = initrd-free -> do_initcalls/execve.
+
+RVFI tail: NOT a flag-spin — a byte-wise transform+copy function at
+0xffffffff8027fc08 (prologue 0x27fc08): XOR loop (ld/xor/sd) + inner loop
+ld a4; 8x srli extract bytes; 8x sb store; bne a3,t5 + tail + calls
+0xffffffff80657da4 = memmove/memcpy(dst=s3,src=0,n=360). That function's
+address RANGE accounts for 6.4M trace lines => large byte-wise transform
+running in kernel init/execve (candidate: ELF/argv copy_strings, segment
+copy, or a decompress/decode). Broad 36K-PC diversity => progressing work,
+consistent with EITHER a real livelock in an outer retry/poll loop OR a
+very slow UART-quiet phase killed externally before finishing.
+
+r131 scalar == r128b FUNCTIONALLY on the boot path:
+- file-hash diff r128b-closure vs HEAD over load_unit/g6lc_mmu/g6lc_tlb/
+  load_store_unit/store_buffer/store_unit/g6lc_cluster/g6lc_soc/coherence:
+  ONLY g6lc_tlb.sv (+92) and load_unit.sv (+21) differ.
+- load_unit delta = 107c4ca3c (pending-exception slot, LoadExPubStages==2
+  ONLY => NO-OP at boot's ==1) + 56af5ea39 (F15 assertion narrow).
+- g6lc_tlb delta = 3f3083a64 staged-TLB upsert (TlbStages>=2 => NO-OP at
+  boot's ==1) + 23dd03fab (sim-only probe).
+=> r131 will very likely reproduce the r128b outcome. The init-spawn hang
+is UNADDRESSED by HEAD; needs its own debug (symbolize 0xffffffff8027fc08
+caller / identify the 6.4M-call transform / check whether it is livelock
+vs monitor-kill of slow progress).
+
+OpenWrt implication: scalar hang is a CORE bug (load/LSU/MMU/mem path)
+that would also afflict mc; but mc uses g6lc64_hyp8_mc (also
+LoadExPubStages=1, TlbStages=1) => same dormant-fix situation. The mc
+witness is still the first SMP+coherence datapoint; the scalar hang must
+be root-caused independently.
