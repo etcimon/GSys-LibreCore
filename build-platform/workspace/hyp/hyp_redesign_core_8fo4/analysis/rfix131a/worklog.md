@@ -28,7 +28,7 @@ Scope of the edits: `core/include/g6lc64_hyp8_config_pkg.sv`,
 
 "Verified" means: on the remote testharness, pinned fork toolchain
 (`verilator-v5.008-g6lc-44063db8-pgo`: compiler PGO, loop unrolling,
-split-loops, simulation PGO), model `d2b24e58…` built from closure-rfix131a,
+split-loops, simulation PGO), model `5fb248e6…` built from closure-rfix131a,
 19 directed programs graded on tohost **and** on the log, plus the leaf
 benches. No Linux boot has run on this tree.
 
@@ -446,7 +446,7 @@ output; the hand-back needs the scoreboard replay path of the OoO tree
 ## Results (remote testharness, closure-rfix131a)
 
 Model: `hyp8-rfix131a-aggregate-t4`, target `g6lc64_hyp8` (scalar), lint
-scalar/smt2 0 `%Error`, model `d2b24e5891482748…` (final tree: RFIX-131a-01,
+scalar/smt2 0 `%Error`, model `5fb248e681b5f180…` (final tree: RFIX-131a-01,
 -02, -03, -07, -08), simulation PGO profiles applied, Verilator binary `d219b63fc4f8fcba`.
 
 Directed programs (pass = tohost **and** clean log; r130 baseline cycles in
@@ -543,6 +543,25 @@ Limits: per-thread columns are populated from what the logs carry — the
 ingested runs are all single-core, single-hart, so the core/hart split has
 not been exercised on a multi-core log; kernel PCs are not symbolized (no
 `vmlinux` on the host, only the firmware ELF).
+
+## Tracing changes for multi-core logs
+
+- `[ptw-err]`, `[mmu-ife]`, `[seq-gap]`, `[stall-census]` and `[hang]` end
+  with `at=%m` (their instance path); `ingest.py` reads the physical core
+  from `gen_core[N]`, so `event.core`, `thread.core` and the census rows
+  are per core. Not yet exercised: no multi-core log exists.
+- The per-event `[l1 dcache wbuffer] L1 obligation dropped` line is printed
+  only under `+wbuf_obl_trace`. It was 43 M lines (5 GB) of the r127m log,
+  and its volume is what cut other records and the harness verdict mid-line
+  (four passing programs had no verdict row in the database until
+  `ingest.py` learned to read a verdict glued behind a cut record). The
+  ledger counters (`[equiv] … l1_obligation`) and the `g6lc_l1_obl`
+  assertion are unchanged.
+- `hyp8_smp_lrsc.S` (`NHARTS` from `HYP8_TEST_DEFINES`) is the first
+  program meant to run on every hart: IPI release of the secondary cores,
+  LR/SC and AMO on shared counters, per-hart slots on shared lines. It
+  passes built for one hart on the scalar model; the 8-hart run needs the
+  `g6lc64_hyp8_mc` model (`build/rfix131a/mc-model-and-smp.sh`).
 
 ## Open classes (analysis so far)
 
