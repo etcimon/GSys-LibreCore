@@ -487,10 +487,9 @@ Leaf benches (`run_hyp8_memory.py`, 23 registered):
 | mutants fail as required | mmu + `G6LC_MUT_TLB_FILL_NO_EVICT`, mmu + `G6LC_MUT_TLB_FILL_EQ_ONLY` |
 | not runnable | pmp-write, mshr: their reference/candidate sources (`g6lc_hyp8_pmp_bank_reference.sv`, `g6lc_l2_mshr_reference.sv`) are not in the tree |
 
-The 19 programs ran on the final tree. The 21 runnable leaves last ran on
-the tree that still carried the withdrawn RFIX-131a-04 trap hold (a
-`g6lc_core.sv`-only difference, which no leaf except the full-flist ones
-elaborates); they were not rerun after its removal.
+The 19 programs and the 21 runnable leaves ran on the final tree
+(`hyp8-rfix131a-smokes-t4` in the trace database: 19 programs, 19 pass,
+0 error events).
 
 Leaf infrastructure repaired on the way (each was failing before this round,
 unrelated to the fixes): `csr` / `issue` / `lsq-credit` / `flu` did not
