@@ -644,7 +644,7 @@ module g6lc_apu_rast
     // (align(w*bpp,64)); bpp is 4 for the color/D32 formats and 2
     // for D16_UNORM.
     function automatic logic [31:0] f_pitch2(input logic [15:0] w,
-                                             input logic [2:0]  bpp);
+                                             input logic [3:0]  bpp);
       return ((32'(w) * 32'(bpp)) + 32'd63) & ~32'd63;
     endfunction
 
@@ -662,19 +662,21 @@ module g6lc_apu_rast
     // bytes per pixel for the colour formats the ROP packs into its
     // 8 B write word.  R8_UNORM and R8G8_UNORM are the sub-word
     // attachments — several pixels share one write word and the byte
-    // strobes pick the pixel's lanes; every other accepted colour
-    // format is a 4 B pixel.  Depth formats have their own dpitch.
-    function automatic logic [2:0] f_cbpp(input logic [7:0] f);
-      if (f == 8'(APU_IMG_FMT_R8_UNORM))   return 3'd1;
-      if (f == 8'(APU_IMG_FMT_R8G8_UNORM)) return 3'd2;
-      return 3'd4;
+    // strobes pick the pixel's lanes; R16G16B16A16_SFLOAT is the
+    // wide format — one whole 8 B beat per pixel; every other accepted
+    // colour format is a 4 B pixel.  Depth formats have their own dpitch.
+    function automatic logic [3:0] f_cbpp(input logic [7:0] f);
+      if (f == 8'(APU_IMG_FMT_R8_UNORM))           return 4'd1;
+      if (f == 8'(APU_IMG_FMT_R8G8_UNORM))         return 4'd2;
+      if (f == 8'(APU_IMG_FMT_R16G16B16A16_SFLOAT)) return 4'd8;
+      return 4'd4;
     endfunction
     // colour formats that carry no blending: integer RGBA8, the raw32
     // single-word formats, and the sub-word formats (their dst decode
     // is not implemented — blendEnable on them is refused UNSUPPORTED)
     function automatic logic f_noblend(input logic [7:0] f);
       return f == 8'(APU_IMG_FMT_R8G8B8A8_UINT) || f_is_raw32(f) ||
-             f_cbpp(f) != 3'd4;
+             f_cbpp(f) != 4'd4;
     endfunction
     // color-attachment format legality
     function automatic logic f_cfmt_ok(input logic [7:0] f);
@@ -686,6 +688,8 @@ module g6lc_apu_rast
              f == 8'(APU_IMG_FMT_B8G8R8A8_SRGB)  ||
              // T3: integer RGBA8 (f_enc8 keeps the low byte, no blend)
              f == 8'(APU_IMG_FMT_R8G8B8A8_UINT)  ||
+             // RGBA16F: fp16 channels, whole-beat store, no blend yet
+             f == 8'(APU_IMG_FMT_R16G16B16A16_SFLOAT) ||
              f_is_raw32(f);
     endfunction
     function automatic logic f_dfmt_ok(input logic [7:0] f);
@@ -714,6 +718,36 @@ module g6lc_apu_rast
         f_f16_f32 = {h[15], 8'hFF, h[9:0], 13'h0};
       else
         f_f16_f32 = {h[15], 8'(e) + 8'd112, h[9:0], 13'h0};
+    endfunction
+    // fp32 -> fp16 (RNE, saturates to inf) — same bit-exact port the
+    // xfer/shwave engines carry; used by the RGBA16F attachment store
+    function automatic logic [15:0] f_f32_f16(input logic [31:0] f);
+      logic        s;
+      logic [7:0]  e;
+      logic [10:0] mr;
+      logic [9:0]  sh;
+      logic [23:0] m, msh, half;
+      s = f[31]; e = f[30:23];
+      if (e == 8'hff)
+        return {s, 5'h1f, |f[22:0] ? 10'h1 : 10'h0};
+      if (e >= 8'd143) return {s, 5'h1f, 10'h0};
+      if (e < 8'd102)  return {s, 15'h0};
+      m = {1'b1, f[22:0]};
+      if (e >= 8'd113) begin
+        // normal fp16: exponent field e-112 in [1,30], RNE 23->10
+        mr = {1'b0, f[22:13]} +
+             (f[12] && (|f[11:0] || f[13]) ? 11'd1 : 11'd0);
+        return {s, 15'({5'(e - 8'd112), 10'h0} + {4'h0, mr})};
+      end
+      // denormal: D = RNE(m / 2^(126-e)); a carry into bit 10 folds
+      // into exponent bit 0, giving min-normal naturally
+      sh   = 10'(8'd126 - e);                    // e in [102,112]
+      half = 24'h1 << (sh - 10'd1);
+      msh  = m >> sh;
+      if ((m & half) != 24'h0 &&
+          ((m & (half - 24'h1)) != 24'h0 || msh[0]))
+        msh = msh + 24'd1;
+      return {s, 15'(msh[10:0])};
     endfunction
 
     function automatic logic [31:0] f_sxt8(input logic [7:0] b);
@@ -849,7 +883,7 @@ module g6lc_apu_rast
 
     // ---- state -----------------------------------------------------------
     // CLEAR
-    logic [31:0]  clr_pix_q;
+    logic [63:0]  clr_pix_q;
     logic [15:0]  cy_q, cx_q;
     // DRAW setup
     logic [31:0]  vphw_q, vphh_q, vpdz_q;   // vp.w/2, vp.h/2, maxz-minz
@@ -1310,12 +1344,43 @@ module g6lc_apu_rast
     wire [31:0] clr_base = clr_is_d ? dr_q.da.base : dr_q.ca[0].base;
     wire [15:0] clr_w    = clr_is_d ? dr_q.da.w    : dr_q.ca[0].w;
     wire [15:0] clr_h    = clr_is_d ? dr_q.da.h    : dr_q.ca[0].h;
-    wire [2:0]  clr_bpp  = clr_is_d
+    wire [3:0]  clr_bpp  = clr_is_d
                            ? (dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM)
-                              ? 3'd2 : 3'd4)
+                              ? 4'd2 : 4'd4)
                            : f_cbpp(dr_q.ca[0].fmt);
     wire [31:0] clr_pitch = f_pitch2(clr_w, clr_bpp);
     wire [31:0] clr_rowb = 32'(clr_w) * 32'(clr_bpp);
+    // 32-bit clear pattern: an encoded color for 4 B formats, the
+    // replicated sub-word channel bytes for R8/RG8, the raw word for
+    // raw32, {u16,u16} for D16, {depth,stencil} for D24S8.  Every
+    // format but RGBA16F writes {clr_p32, clr_p32} as the 8 B beat;
+    // RGBA16F's pixel is the whole beat (four fp16 channels).
+    wire [31:0] clr_p32 = clr_is_d
+        ? (dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM)
+           ? {2{f_f32_u16(dr_q.clear_color[0])}}
+           : dr_q.da.fmt == 8'(APU_IMG_FMT_D24_UNORM_S8_UINT)
+           // stencil clear byte = clear_color[1][7:0] (the
+           // VkClearDepthStencilValue.stencil wire slot); D32/D16
+           // never reach this branch.
+           ? {dr_q.clear_color[1][7:0],
+              f_f32_u24(dr_q.clear_color[0])}
+           : dr_q.clear_color[0])
+        : (f_is_raw32(dr_q.ca[0].fmt)
+           ? dr_q.clear_color[0]
+           : f_cbpp(dr_q.ca[0].fmt) == 4'd1
+           ? {4{f_enc8(dr_q.ca[0].fmt, 2'd0, dr_q.clear_color[0])}}
+           : f_cbpp(dr_q.ca[0].fmt) == 4'd2
+           ? {2{f_enc8(dr_q.ca[0].fmt, 2'd1, dr_q.clear_color[1]),
+                f_enc8(dr_q.ca[0].fmt, 2'd0, dr_q.clear_color[0])}}
+           : f_is_bgr(dr_q.ca[0].fmt)
+           ? {f_enc8(dr_q.ca[0].fmt, 2'd3, dr_q.clear_color[3]),
+              f_enc8(dr_q.ca[0].fmt, 2'd0, dr_q.clear_color[0]),
+              f_enc8(dr_q.ca[0].fmt, 2'd1, dr_q.clear_color[1]),
+              f_enc8(dr_q.ca[0].fmt, 2'd2, dr_q.clear_color[2])}
+           : {f_enc8(dr_q.ca[0].fmt, 2'd3, dr_q.clear_color[3]),
+              f_enc8(dr_q.ca[0].fmt, 2'd2, dr_q.clear_color[2]),
+              f_enc8(dr_q.ca[0].fmt, 2'd1, dr_q.clear_color[1]),
+              f_enc8(dr_q.ca[0].fmt, 2'd0, dr_q.clear_color[0])});
     // clear-target format legality (DRAW legality is per-attachment
     // in S_OP)
     wire        fmt_ok   = clr_is_d
@@ -1327,7 +1392,7 @@ module g6lc_apu_rast
                                      f_cbpp(dr_q.ca[at_q].fmt));
     wire [31:0] dpitch_w = f_pitch2(
         dr_q.da.w, dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM)
-                   ? 3'd2 : 3'd4);
+                   ? 4'd2 : 4'd4);
     // current scan pixel center, 16.8 fixed
     wire signed [31:0] cpx = {16'(sx_q), 8'd0} + 32'd128;
     wire signed [31:0] cpy = {16'(sy_q), 8'd0} + 32'd128;
@@ -1480,13 +1545,24 @@ module g6lc_apu_rast
     // half so whichever 8 B lanes the strobes enable carry the pixel
     wire [31:0] rop_pix = f_is_raw32(dr_q.ca[at_q].fmt)
         ? res_q[0]
-        : f_cbpp(dr_q.ca[at_q].fmt) == 3'd1
+        : f_cbpp(dr_q.ca[at_q].fmt) == 4'd1
         ? {4{rop_b0}}
-        : f_cbpp(dr_q.ca[at_q].fmt) == 3'd2
+        : f_cbpp(dr_q.ca[at_q].fmt) == 4'd2
         ? {2{rop_b1, rop_b0}}
         : f_is_bgr(dr_q.ca[at_q].fmt)
         ? {rop_b3, rop_b0, rop_b1, rop_b2}
         : {rop_b3, rop_b2, rop_b1, rop_b0};
+    // RGBA16F (bpp 8): the pixel is a whole 8 B beat — four fp16
+    // channels, little-endian R,G,B,A.  f_f32_f16 converts each
+    // interpolated f32 channel (no UNORM scale, no clamp — raw float
+    // store, inf on overflow).
+    wire [63:0] rop_pix64 = {f_f32_f16(res_q[3]), f_f32_f16(res_q[2]),
+                             f_f32_f16(res_q[1]), f_f32_f16(res_q[0])};
+    // 64-bit write-beat data: RGBA16F is the beat itself; every other
+    // format replicates its 32-bit pixel (or logic-op result) so the
+    // enabled byte lanes all carry the pixel.
+    wire [63:0] rop_data = f_cbpp(dr_q.ca[at_q].fmt) == 4'd8
+        ? rop_pix64 : {2{lop_on_w ? lop_pix_q : rop_pix}};
     // VkLogicOp on the encoded attachment bytes.  Blend is not used.
     function automatic logic [7:0] f_lop(input logic [3:0] op,
                                          input logic [7:0] s,
@@ -1550,10 +1626,17 @@ module g6lc_apu_rast
     // attachment byte order.  For the sub-word formats only the
     // existing components' mask bits apply — R8 keeps mask[0], RG8
     // keeps mask[1:0]; B/A bits name components the format lacks.
-    wire [7:0] rop_pmask = f_cbpp(dr_q.ca[at_q].fmt) == 3'd1
+    // RGBA16F channels are fp16 pairs: mask bit c enables both bytes
+    // of channel c (the pixel is the whole beat, lane is always 0).
+    wire [7:0] rop_pmask = f_cbpp(dr_q.ca[at_q].fmt) == 4'd1
         ? {7'h0, dr_q.blend[at_q].mask[0]}
-        : f_cbpp(dr_q.ca[at_q].fmt) == 3'd2
+        : f_cbpp(dr_q.ca[at_q].fmt) == 4'd2
         ? {6'h0, dr_q.blend[at_q].mask[1:0]}
+        : f_cbpp(dr_q.ca[at_q].fmt) == 4'd8
+        ? {dr_q.blend[at_q].mask[3], dr_q.blend[at_q].mask[3],
+           dr_q.blend[at_q].mask[2], dr_q.blend[at_q].mask[2],
+           dr_q.blend[at_q].mask[1], dr_q.blend[at_q].mask[1],
+           dr_q.blend[at_q].mask[0], dr_q.blend[at_q].mask[0]}
         : {4'h0, rop_msk};
     // byte lane of the pixel inside its 8 B write word: (x*bpp) mod 8
     wire [2:0] rop_lane =
@@ -1566,7 +1649,7 @@ module g6lc_apu_rast
     // disables blending on every attachment.
     wire lop_on_w = dr_q.logic_op_en && !f_is_srgb(dr_q.ca[at_q].fmt) &&
                     dr_q.ca[at_q].fmt != 8'(APU_IMG_FMT_R32_SFLOAT) &&
-                    f_cbpp(dr_q.ca[at_q].fmt) == 3'd4;
+                    f_cbpp(dr_q.ca[at_q].fmt) == 4'd4;
     // Window depth.  Clamp enable uses the viewport range and the
     // near/far planes are not clip planes.  Otherwise the value is
     // held to [0,1], which is what the unclamped fixed path writes.
@@ -1950,50 +2033,18 @@ module g6lc_apu_rast
                   begin code_q <= APU_SH_DONE_UNSUPPORTED;
                         st_q <= S_FIN_BAD; end
                 else begin
-                  // clr_pix is the two-pixel write pattern: an encoded
-                  // color for 4 B formats, {u16,u16} for D16
-                  if (clr_is_d)
-                    clr_pix_q <=
-                      dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM)
-                      ? {2{f_f32_u16(dr_q.clear_color[0])}}
-                      : dr_q.da.fmt == 8'(APU_IMG_FMT_D24_UNORM_S8_UINT)
-                      // stencil clear byte = clear_color[1][7:0] (the
-                      // VkClearDepthStencilValue.stencil wire slot); D32/
-                      // D16 never reach this branch.
-                      ? {dr_q.clear_color[1][7:0],
-                         f_f32_u24(dr_q.clear_color[0])}
-                      : dr_q.clear_color[0];
-                  else
-                    clr_pix_q <=
-                      f_is_raw32(dr_q.ca[0].fmt)
-                      ? dr_q.clear_color[0]
-                      // sub-word clear pixels replicate across the
-                      // write word exactly like the draw path
-                      : f_cbpp(dr_q.ca[0].fmt) == 3'd1
-                      ? {4{f_enc8(dr_q.ca[0].fmt, 2'd0,
-                                  dr_q.clear_color[0])}}
-                      : f_cbpp(dr_q.ca[0].fmt) == 3'd2
-                      ? {2{f_enc8(dr_q.ca[0].fmt, 2'd1,
-                                  dr_q.clear_color[1]),
-                           f_enc8(dr_q.ca[0].fmt, 2'd0,
-                                  dr_q.clear_color[0])}}
-                      : f_is_bgr(dr_q.ca[0].fmt)
-                      ? {f_enc8(dr_q.ca[0].fmt, 2'd3,
-                                dr_q.clear_color[3]),
-                         f_enc8(dr_q.ca[0].fmt, 2'd0,
-                                dr_q.clear_color[0]),
-                         f_enc8(dr_q.ca[0].fmt, 2'd1,
-                                dr_q.clear_color[1]),
-                         f_enc8(dr_q.ca[0].fmt, 2'd2,
-                                dr_q.clear_color[2])}
-                      : {f_enc8(dr_q.ca[0].fmt, 2'd3,
-                                dr_q.clear_color[3]),
-                         f_enc8(dr_q.ca[0].fmt, 2'd2,
-                                dr_q.clear_color[2]),
-                         f_enc8(dr_q.ca[0].fmt, 2'd1,
-                                dr_q.clear_color[1]),
-                         f_enc8(dr_q.ca[0].fmt, 2'd0,
-                                dr_q.clear_color[0])};
+                  // clr_pix_q is the 8 B write beat: {clr_p32,clr_p32}
+                  // for every format but RGBA16F, whose pixel is the
+                  // whole beat — four fp16 channels, little-endian
+                  // R,G,B,A (raw float store, no UNORM scale).
+                  clr_pix_q <=
+                    (!clr_is_d &&
+                     f_cbpp(dr_q.ca[0].fmt) == 4'd8)
+                    ? {f_f32_f16(dr_q.clear_color[3]),
+                       f_f32_f16(dr_q.clear_color[2]),
+                       f_f32_f16(dr_q.clear_color[1]),
+                       f_f32_f16(dr_q.clear_color[0])}
+                    : {clr_p32, clr_p32};
                   cy_q <= '0; cx_q <= '0;
                   st_q <= S_CLR_X;
                 end
@@ -2057,13 +2108,13 @@ module g6lc_apu_rast
                     // un-op'ed source colour
                     (dr_q.logic_op_en &&
                      ((dr_q.ca_valid[0] &&
-                       f_cbpp(dr_q.ca[0].fmt) != 3'd4) ||
+                       f_cbpp(dr_q.ca[0].fmt) != 4'd4) ||
                       (dr_q.ca_valid[1] &&
-                       f_cbpp(dr_q.ca[1].fmt) != 3'd4) ||
+                       f_cbpp(dr_q.ca[1].fmt) != 4'd4) ||
                       (dr_q.ca_valid[2] &&
-                       f_cbpp(dr_q.ca[2].fmt) != 3'd4) ||
+                       f_cbpp(dr_q.ca[2].fmt) != 4'd4) ||
                       (dr_q.ca_valid[3] &&
-                       f_cbpp(dr_q.ca[3].fmt) != 3'd4)))) begin
+                       f_cbpp(dr_q.ca[3].fmt) != 4'd4)))) begin
                   code_q <= APU_SH_DONE_UNSUPPORTED;
                   st_q <= S_FIN_BAD;
                 end else if (dr_q.vertex_count == 32'd0 ||
@@ -2090,7 +2141,7 @@ module g6lc_apu_rast
               t_wq({32'h0, clr_base} +
                    64'(cy_q) * 64'(clr_pitch) +
                    {29'h0, cx_q, 3'h0},
-                   {clr_pix_q, clr_pix_q},
+                   clr_pix_q,
                    (clr_rowb - {16'h0, cx_q, 3'h0} >= 32'd8)
                    ? 8'hFF
                    : 8'hFF >> (4'd8 - 4'(clr_rowb -
@@ -4616,7 +4667,7 @@ module g6lc_apu_rast
               t_wq({32'h0, dr_q.ca[at_q].base} +
                    64'(fr_py) * 64'(cpitch_w) +
                    64'((32'(fr_px) * 32'(f_cbpp(dr_q.ca[at_q].fmt))) & ~64'd7),
-                   {2{lop_on_w ? lop_pix_q : rop_pix}},
+                   rop_data,
                    rop_strb);
               st_q <= S_ROP_NX;
             end

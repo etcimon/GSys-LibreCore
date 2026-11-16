@@ -329,6 +329,30 @@ module tb_g6lc_apu_rast;
     return w[16*(x & 1) +: 16];
   endfunction
 
+  // RGBA16F pixel: 8 B/px, w=32 -> row pitch align(32*8,64)=256 B,
+  // one whole pixel per 64-bit beat = two adjacent 32-bit words.
+  // Returns {A16,B16,G16,R16} — the same packing rop_pix64 forms.
+  function automatic logic [63:0] px16f(input int x, input int y);
+    logic [31:0] w0, w1;
+    w0 = i_mem.apm[apw_i(FB + y*256 + x*8)];
+    w1 = i_mem.apm[apw_i(FB + y*256 + x*8 + 4)];
+    return {w1, w0};
+  endfunction
+
+  // fp16 bits -> real value (for tolerance checks against the
+  // double-precision ref_px interpolation oracle)
+  function automatic real f16r(input logic [15:0] h);
+    int signed e;
+    int        m;
+    real       v;
+    e = h[14:10]; m = h[9:0];
+    if (e == 0)      v = real'(m) * 5.9604644775390625e-8;   // m*2^-24
+    else if (e == 31) v = 0.0;                              // inf/nan: n/a
+    else             v = (1.0 + real'(m) / 1024.0) *
+                         (2.0 ** real'(e - 15));
+    return h[15] ? -v : v;
+  endfunction
+
   // VS-input word.  Vertex 0, byte offset within the 144-byte record.
   function automatic logic [31:0] vsin(input int off);
     return i_mem.apm[apw_i(PG_BASE + off)];
@@ -454,6 +478,47 @@ module tb_g6lc_apu_rast;
             8'($rtoi(cc[2]*255.0 + 0.5)),
             8'($rtoi(cc[1]*255.0 + 0.5)),
             8'($rtoi(cc[0]*255.0 + 0.5))};
+  endfunction
+
+  // real-valued sibling of ref_px: same coverage + barycentric
+  // interpolation, but returns the four f32-domain channels unclamped
+  // to u8 so fp16 attachment checks can tolerance-compare.  covered=0
+  // marks an outside pixel.
+  function automatic int ref_pxf(input int px, input int py,
+                                 output real cc[4]);
+    int signed cx, cy;
+    longint signed e[3], ar;
+    logic [2:0] tl;
+    int x0, x1, x2, y0, y1, y2;
+    real l[3];
+    x0 = ref_xi[0]; x1 = ref_xi[1]; x2 = ref_xi[2];
+    y0 = ref_yi[0]; y1 = ref_yi[1]; y2 = ref_yi[2];
+    cx = px*256 + 128;
+    cy = py*256 + 128;
+    ar = longint'(x1-x0)*longint'(y2-y0) -
+         longint'(x2-x0)*longint'(y1-y0);
+    e[0] = longint'(x2-x1)*longint'(cy-y1) -
+           longint'(y2-y1)*longint'(cx-x1);
+    e[1] = longint'(x0-x2)*longint'(cy-y2) -
+           longint'(y0-y2)*longint'(cx-x2);
+    e[2] = longint'(x1-x0)*longint'(cy-y0) -
+           longint'(y1-y0)*longint'(cx-x0);
+    tl[0] = (y1 > y2) || (y1 == y2 && x1 < x2);
+    tl[1] = (y2 > y0) || (y2 == y0 && x2 < x0);
+    tl[2] = (y0 > y1) || (y0 == y1 && x0 < x1);
+    if (!((e[0] > 0 || (e[0] == 0 && tl[0])) &&
+          (e[1] > 0 || (e[1] == 0 && tl[1])) &&
+          (e[2] > 0 || (e[2] == 0 && tl[2]))))
+      return 0;                             // outside
+    for (int k = 0; k < 3; k++)
+      l[k] = real'(e[k]) / real'(ar);
+    for (int c = 0; c < 4; c++) begin
+      cc[c] = l[0]*ref_col[0][c] + l[1]*ref_col[1][c] +
+              l[2]*ref_col[2][c];
+      if (cc[c] < 0.0) cc[c] = 0.0;
+      if (cc[c] > 1.0) cc[c] = 1.0;
+    end
+    return 1;
   endfunction
 
   // draw record skeleton for the smoke cases
@@ -4278,6 +4343,153 @@ module tb_g6lc_apu_rast;
         if (rg8px(x, y) != 16'h8040)
           fail($sformatf("case76 px(%0d,%0d)=%04x exp 8040",
                          x, y, rg8px(x, y)));
+      end
+
+    // ============ case 77: RGBA16F clear ===========================
+    // 8 B/px wide attachment: one whole beat per pixel, four fp16
+    // channels {A,B,G,R}.  The clear colours are exactly fp16-
+    // representable so the packed word is exact: R=0.5->3800,
+    // G=1.0->3C00, B=-2.0->C000, A=0.25->3400.
+    cases++;
+    d = mk_clear();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R16G16B16A16_SFLOAT);
+    d.clear_color[0] = 32'h3F000000;   // R 0.5  -> f16 3800
+    d.clear_color[1] = 32'h3F800000;   // G 1.0  -> f16 3C00
+    d.clear_color[2] = 32'hC0000000;   // B -2.0 -> f16 C000
+    d.clear_color[3] = 32'h3E800000;   // A 0.25 -> f16 3400
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case77 code=%0d", w_dpl.code));
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        checks++;
+        if (px16f(x, y) != 64'h3400_C000_3C00_3800)
+          fail($sformatf("case77 px(%0d,%0d)=%016x exp 3400c0003c003800",
+                         x, y, px16f(x, y)));
+      end
+
+    // ============ case 78: RGBA16F draw ============================
+    // covered px store the four interpolated channels as fp16; the
+    // uncovered px keep the f16 clear.  fp16 interpolation is checked
+    // against the double-precision ref_pxf oracle within tolerance —
+    // the bit-exact oracle is the device session, this is the unit
+    // smoke for the 8 B write path + coverage.
+    cases++;
+    d = mk_clear();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R16G16B16A16_SFLOAT);
+    d.clear_color[0] = 32'h3F000000;   // R 0.5
+    d.clear_color[1] = 32'h3F800000;   // G 1.0
+    d.clear_color[2] = 32'h00000000;   // B 0.0
+    d.clear_color[3] = 32'h3F800000;   // A 1.0
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(1, 32'h3F400000, 32'hBF200000,
+                32'h00000000, 32'h3F800000, 32'h00000000, 32'h3F800000);
+    put_vert(2, 32'hBF200000, 32'h3F600000,
+                32'h00000000, 32'h00000000, 32'h3F800000, 32'h3F800000);
+    ref_xi = '{512, 7168, 1536}; ref_yi = '{512, 1536, 7680};
+    ref_col[0] = '{1.0, 0.0, 0.0, 1.0};
+    ref_col[1] = '{0.0, 1.0, 0.0, 1.0};
+    ref_col[2] = '{0.0, 0.0, 1.0, 1.0};
+    d = mk_draw();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R16G16B16A16_SFLOAT);
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case78 code=%0d", w_dpl.code));
+    // clear f16: R=0.5->3800 G=1.0->3C00 B=0->0000 A=1->3C00
+    begin
+      automatic int ncov = 0;
+      automatic real oc[4], dd;
+      mism = 0;
+      for (int y = 0; y < 32; y++)
+        for (int x = 0; x < 32; x++) begin
+          automatic logic [63:0] px = px16f(x, y);
+          checks++;
+          if (ref_pxf(x, y, oc) == 0) begin
+            // uncovered: must equal the f16 clear exactly
+            if (px != 64'h3C00_0000_3C00_3800) begin
+              mism++;
+              if (mism <= 8)
+                $display("case78 clr px(%0d,%0d)=%016x exp 3c0000003c003800",
+                         x, y, px);
+            end
+          end else begin
+            ncov++;
+            // channels: px[15:0]=R [31:16]=G [47:32]=B [63:48]=A
+            dd = f16r(px[15:0])  - oc[0];
+            if (dd > 0.01 || dd < -0.01) begin mism++; end
+            dd = f16r(px[31:16]) - oc[1];
+            if (dd > 0.01 || dd < -0.01) begin mism++; end
+            dd = f16r(px[47:32]) - oc[2];
+            if (dd > 0.01 || dd < -0.01) begin mism++; end
+            dd = f16r(px[63:48]) - oc[3];
+            if (dd > 0.01 || dd < -0.01) begin
+              mism++;
+              if (mism <= 8)
+                $display("case78 cov px(%0d,%0d)=%016x ref=(%g %g %g %g)",
+                         x, y, px, oc[0], oc[1], oc[2], oc[3]);
+            end
+          end
+        end
+      checks++;
+      if (ncov == 0) fail("case78 no covered px");
+      if (mism != 0) fail($sformatf("case78 mism=%0d cov=%0d", mism, ncov));
+    end
+
+    // ============ case 79: RGBA16F blend refused ===================
+    // No fp16 dst decode exists, so blendEnable is refused at record
+    // legality (UNSUPPORTED, nothing drawn) exactly like the sub-word
+    // formats; the attachment keeps its clear.
+    cases++;
+    d = mk_clear();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R16G16B16A16_SFLOAT);
+    d.clear_color[0] = 32'h3F000000;
+    d.clear_color[1] = 32'h3F800000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    d = mk_draw();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R16G16B16A16_SFLOAT);
+    d.blend[0].en = 1'b1;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    checks++;
+    if (w_dpl.code != APU_SH_DONE_UNSUPPORTED)
+      fail($sformatf("case79 rgba16f+blend code=%0d exp UNSUPPORTED",
+                     w_dpl.code));
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        checks++;
+        if (px16f(x, y) != 64'h3C00_0000_3C00_3800)
+          fail($sformatf("case79 px(%0d,%0d)=%016x exp clear",
+                         x, y, px16f(x, y)));
+      end
+
+    // ============ case 80: RGBA16F logic-op refused ================
+    // The logic op is 32-bit oriented and not implemented on the wide
+    // format: refused UNSUPPORTED, attachment keeps its clear.
+    cases++;
+    d = mk_clear();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R16G16B16A16_SFLOAT);
+    d.clear_color[0] = 32'h3F000000;
+    d.clear_color[1] = 32'h3F800000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    d = mk_draw();
+    d.ca[0].fmt = 8'(APU_IMG_FMT_R16G16B16A16_SFLOAT);
+    d.logic_op_en = 1'b1; d.logic_op = 4'd6;   // XOR
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    checks++;
+    if (w_dpl.code != APU_SH_DONE_UNSUPPORTED)
+      fail($sformatf("case80 rgba16f+lop code=%0d exp UNSUPPORTED",
+                     w_dpl.code));
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        checks++;
+        if (px16f(x, y) != 64'h3C00_0000_3C00_3800)
+          fail($sformatf("case80 px(%0d,%0d)=%016x exp clear",
+                         x, y, px16f(x, y)));
       end
 
     // ---- report ---------------------------------------------------------

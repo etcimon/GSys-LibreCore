@@ -203,6 +203,10 @@ python3 $G --graphics-session ue_gpos_r32ubloff_1 1
 # and only the leading channels store (R for r8un, R+G for rg8un).
 python3 $G --graphics-session ue_gpos_r8unbloff_1 1
 python3 $G --graphics-session ue_gpos_rg8unbloff_1 1
+# wide colour attachment: R16G16B16A16_SFLOAT (vkfmt 97, 8 B/px) on the
+# blend-disabled path — one whole 8 B beat per pixel, four fp16
+# channels (f32->f16 per channel), two readback words per pixel.
+python3 $G --graphics-session ue_gpos_rgba16fbloff_1 1
 
 # Sessions the run scripts execute that this script did not generate
 # (blend ops and factors, logic ops, depth compare/bounds/bias/clamp,

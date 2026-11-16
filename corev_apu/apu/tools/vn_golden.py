@@ -11732,6 +11732,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # every other path raises.
         is_r8un = 'r8un' in gfx
         is_rg8un = 'rg8un' in gfx
+        # rgba16f: R16G16B16A16_SFLOAT colour attachment (vkfmt 97,
+        # device fmt 6, 8 B/px) — the wide stage-1 path: one whole 8 B
+        # beat per pixel, four fp16 channels (f32->f16 per channel, no
+        # UNORM scale, inf on overflow).  Only the blend-disabled
+        # is_bloff path is adapted; blend and logicOp on it are refused
+        # UNSUPPORTED, so every other path raises.
+        is_rgba16f = 'rgba16f' in gfx
         # colourWriteMask stays logical-channel (R=1,G=2,B=4,A=8): cwmr
         # keeps R only, cwmb keeps B only — paired with is_bgra these
         # expose a mask applied in byte order instead of channel order.
@@ -11752,6 +11759,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                              'path')
         if (is_r8un or is_rg8un) and not is_bloff:
             raise ValueError('sub-word attachment only adapted on the '
+                             'is_bloff path')
+        if is_rgba16f and not is_bloff:
+            raise ValueError('rgba16f attachment only adapted on the '
                              'is_bloff path')
         # _enc8: store encode for one f32 channel on attachment 0 — on an
         # sRGB attachment RGB goes linear-u12 -> sRGB8 while alpha (and
@@ -12366,6 +12376,14 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         RES_BLOB0 = 200
 
         CW = CH = 64                     # color attachment extent
+        # packed CopyImageToBuffer footprint: the readback buffer and
+        # its backing memory must hold CH rows of CW*cbpp bytes.  The
+        # sub-word formats pack several texels into each 32-bit word
+        # while rgba16f is a full 8-byte beat per pixel; floor at the
+        # RGBA8 size so smaller formats keep the historical allocation.
+        cbpp = (8 if is_rgba16f else 2 if is_rg8un else
+                1 if is_r8un else 4)
+        rb_bytes = max(0x4000, CW * CH * cbpp)
         # spec-CCW winding: negative framebuffer shoelace (the same
         # geometric triangle and colour as before, verts 1/2 swapped)
         TRI = [(-0.5, -0.5, 0.5, 1.0),
@@ -12882,11 +12900,21 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         (s if s < d else d) if bop_op == 3 else
                         (s if d < s else d))
             exp_img = []
+            # rgba16f stores four fp16 channels per 8 B pixel; the
+            # readback gate emits two 32-bit words per pixel.  exp_img
+            # therefore holds one 64-bit value per pixel on this path:
+            # {A16,B16,G16,R16} with the low word {G,R} first in memory.
+            _clr64 = None
+            if is_rgba16f:
+                _hc = [cl_f32_f16(f32b(_d))
+                       for _d in (0.25, 0.5, 0.125, 0.375)]
+                _clr64 = ((_hc[3] << 48) | (_hc[2] << 32) |
+                          (_hc[1] << 16) | _hc[0])
             for w in range(CW * CH):
                 _px, _py = w % CW, w // CW
                 _v = _gp.get((_px, _py))
                 if _v is None:
-                    exp_img.append(clr_w)
+                    exp_img.append(_clr64 if is_rgba16f else clr_w)
                 elif is_r32f or is_r32u:
                     # raw32 (is_bloff only): the stored pixel is res_q[0]
                     # = the interpolated channel-0 f32 written raw — no
@@ -12894,6 +12922,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     # r32u the FS bitcasts vcol.r to uint, so the stored
                     # bits are the same f32b(_v[0]) word.
                     exp_img.append(f32b(_v[0]))
+                elif is_rgba16f:
+                    # rgba16f (is_bloff only): f32->f16 per channel, RNE,
+                    # saturate to inf — the same conversion the raster
+                    # f_f32_f16 performs.  No UNORM scale, no clamp.
+                    _h = [cl_f32_f16(f32b(_v[c])) for c in range(4)]
+                    exp_img.append((_h[3] << 48) | (_h[2] << 32) |
+                                   (_h[1] << 16) | _h[0])
                 else:
                     _rb = ([_enc8(c, _v[c]) for c in range(4)]
                            if is_bloff else
@@ -14302,7 +14337,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             ('vkAllocateMemory', dict(
                 device=X['dev'],
                 pAllocateInfo=st('VkMemoryAllocateInfo',
-                                 allocationSize=0x4000,
+                                 allocationSize=rb_bytes,
                                  memoryTypeIndex=1, pNext=[]),
                 pMemory=X['rmem'])),
             ('vkCreateImage', dict(
@@ -14310,6 +14345,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 pCreateInfo=st('VkImageCreateInfo',
                     flags=0, imageType=1,
                     format=(9 if is_r8un else 16 if is_rg8un else
+                        97 if is_rgba16f else
                         100 if is_r32f else 98 if is_r32u else
                         ((50 if is_bgra else 43) if is_srgb
                         else (44 if is_bgra else 37))),
@@ -14327,6 +14363,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 pCreateInfo=st('VkImageViewCreateInfo',
                     flags=0, image=X['img'], viewType=1,
                     format=(9 if is_r8un else 16 if is_rg8un else
+                        97 if is_rgba16f else
                         100 if is_r32f else 98 if is_r32u else
                         ((50 if is_bgra else 43) if is_srgb
                         else (44 if is_bgra else 37))),
@@ -14548,6 +14585,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                      + (1 if is_ds else 0)),
                     pAttachments=[st('VkAttachmentDescription',
                         flags=0, format=(9 if is_r8un else 16 if is_rg8un else
+                        97 if is_rgba16f else
                         100 if is_r32f else 98 if is_r32u else
                         ((50 if is_bgra else 43) if is_srgb
                         else (44 if is_bgra else 37))),
@@ -14891,7 +14929,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 memoryOffset=0)),
             ('vkCreateBuffer', dict(
                 device=X['dev'],
-                pCreateInfo=st('VkBufferCreateInfo', size=0x4000,
+                pCreateInfo=st('VkBufferCreateInfo', size=rb_bytes,
                                usage=0x2, sharingMode=0,
                                queueFamilyIndexCount=0,
                                pQueueFamilyIndices=[]),
@@ -15218,7 +15256,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 (RES_BLOB0 + 2, X['rmem'], None)):
             base_b = create_blob_mem(
                 rid, 0x10000 if mem == X['imem']
-                else 0x1000 if mem == X['vmem'] else 0x4000, mem)
+                else 0x1000 if mem == X['vmem'] else rb_bytes, mem)
             assert base_b is not None, 'memory blob refused'
             base_b = map_blob(rid)
             if init is not None:
@@ -15733,6 +15771,19 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 rec(EK_APRCHK, rb_off + 4 * k, _w, _w, 0)
             note('sub-word readback gate: %d words'
                  % (CW * CH // _npw,))
+        elif is_rgba16f:
+            # RGBA16F readback: each 8 B pixel is two little-endian
+            # 32-bit words — low {G16,R16} (bytes R,G), high {A16,B16}
+            # (bytes B,A).  exp_img[j] is the packed 64-bit {A,B,G,R}.
+            W(TP_CHECK, CK_APR, CW * CH * 2, rb_off)
+            for j in range(CW * CH):
+                _p = exp_img[j]
+                rec(EK_APRCHK, rb_off + 8 * j, _p & 0xFFFFFFFF,
+                    _p & 0xFFFFFFFF, 0)
+                rec(EK_APRCHK, rb_off + 8 * j + 4, _p >> 32,
+                    _p >> 32, 0)
+            note('rgba16f readback gate: %d words'
+                 % (CW * CH * 2,))
         else:
             if is_bgra:
                 # B8G8R8A8_UNORM stores bytes [B,G,R,A]: exchange bytes
