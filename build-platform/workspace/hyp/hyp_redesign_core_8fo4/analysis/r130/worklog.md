@@ -100,3 +100,91 @@ plusargs/firmware/tohost as r128b. Boot monitor attached (had to add
 r130 to the tag allowlist in `hyp8-boot-monitor-remote.sh`). This is the
 end-to-end validation that the paired-SC-backoff fix still reaches
 G6LC_LINUX_SHELL and that the ~35k-cycle LR stalls are gone.
+
+## Host reboot + multicore-coherent OpenWrt path (2026-11-16)
+
+Remote host `ovh_calltorch` rebooted (~12:00 remote, was up 64d). Killed
+in-flight work: `hyp8-osbi-scalar-r128b` witness died at ~994M cycles
+(3.5GB run-hyp8.log preserved, died before shell), `hyp8-osbi-scalar-r130`
+(died queued, never started), `hyp8-r131-aggregate-t4` scalar gate (killed
+early). Post-reboot host also took unrelated `apu-leaf` builds.
+
+Relaunched: `hyp8-r131-aggregate-t4` (scalar HEAD gate) and
+`hyp8-r131-mc-aggregate-t4` (multicore). r131 scalar supersedes r130 for
+HEAD validation (closure-r131 = SC-backoff + staged-TLB upsert +
+address-aware TB + F15).
+
+### Multicore coherent target (OpenWrt requirement)
+
+User directive: OpenWrt must run on L2/L3 + 4-core + dual-hart + coherence.
+That is exactly `g6lc64_hyp8_mc`: `G6LCConfigNrHarts=2` (dual-hart),
+`NrCores=4` -> 8 harts, `Flist.hyp8_mc_sim`, `g6lc-hyp8-mc.dts` =
+"4-core dual-hart", L1->shared L2(256KB)->shared L3(1MB, non-inclusive),
+snoop/coherence on. The scalar SoC that has been booting is NC=1
+(coherence hub = identity, NO L2/L3 instantiated) — the coherent path has
+NEVER booted (r115: "no SMT2/MC boot evidence").
+
+mc witness params (ready): intTag `hyp8-r131-mc-aggregate-t4`,
+fw `build-linux-mc/.../fw_payload.elf` sha256
+`04f3b24b2320987a783bafaad9cd276b121362a815b37fd633552c9fe081631b`,
+tohost `0x80041730`. mc model build noted ">7200 s at -j2".
+
+OpenWrt note: `g6lc_qemu/linux-dist/openwrt` + `openwrt/build.sh` target
+the sifiveu QEMU-virt machine, NOT hyp8 RTL; no hyp8-kernel/OpenWrt build
+flow exists in-repo. Literal OpenWrt-on-hyp8-mc is a software bring-up
+(kernel+rootfs+DTB for the 8-hart coherent machine) gated on first getting
+SMP Linux to boot on `g6lc64_hyp8_mc` — the mc witness is that first step.
+
+## OpenWrt payload format findings (for post-mc-boot bring-up)
+
+`fw_payload.elf` = OpenSBI `.text`@0x80000000 + `.payload`@0x80200000.
+`.payload` = `linux-payload-l1s2/payload.bin` (65,943,552 B) — a RAW Linux
+kernel Image (MZ/EFI-stub header `4d5a`, NO FIT magic `d00dfeed`), with the
+BusyBox initramfs embedded (~65MB). SAME blob for scalar/smt2/mc; only the
+DTB differs per profile (`FW_PAYLOAD_PATH`/`FW_FDT_PATH` in
+build_boot_firmware.py). OpenSBI fw_base jumps to 0x80200000 with a0=hartid,
+a1=dtb.
+
+=> OpenWrt-on-hyp8-mc = produce an OpenWrt `payload.bin` (OpenWrt kernel
+Image + OpenWrt rootfs, same raw-Image-at-0x80200000 contract) and relink
+fw_payload.elf with `g6lc-hyp8-mc-linux.dtb`. `g6lc_qemu/openwrt/build.sh`
+builds official openwrt v24.10.2 `sifiveu` target -> kernel `Image` +
+`initramfs-kernel.bin` (FIT). Kernel must be hyp8-compatible (rv64imafdc
++Zba/Zbb/Zbs/Zicboz, 16550-ish UART, CLINT/PLIC). GATED on: (1) mc SMP
+Linux boot working, (2) OpenWrt kernel config compatible with hyp8 DTB.
+No openwrt cache exists on remote yet -> full build needed (hours).
+
+## mc SMP boot-hold mechanism (debugging context for first witness)
+
+`g6lc_cluster.sv`: `BOOT_HOLD=(NC>1)&&(NrHarts>1)` -> mc active (NC=4,T=2).
+Secondary cores c!=0 clock-gated by `i_core_icg` (functional ICG) until
+`rel = (boot_hold_q>=BOOT_HOLD_CYC=200000) || ipi_seen_q[c]`.
+- `ipi_seen_q[c]` sets on `|ipi_i[c]` (any hart IPI via CLINT MSIP), never
+  cleared -> one-way release. `ipi_i` is [NC-1:0][NrHarts-1:0] per-hart.
+- 200k-cycle fallback releases all secondaries early -> they join OpenSBI
+  ~together after core0 head-start (avoids G1dg shared-init race).
+- Core0 always runs. Sleep-gate (CoreSleepGate) separately gates WFI+idle
+  cores with ungated wake (PLIC/CLINT/Sstc/L1inv/CMO/AI).
+Testbench (`g6lc_testharness.sv`): `mc_held[c]=!gen_boot_icg.rel`,
+`core_retired[c]` (>=1 insn retired), `mc_all_silent_held` verdict,
+`+mc_verdict_fault` injects secondary-silence to prove the verdict can fail.
+Per-core `rvfi_tracer` + `gen_secondary_trace` (observe-only) => per-hart
+PC visibility for SMP debug. Monitor markers (G6LC_LINUX_INIT_UP/SHELL)
+are UART/topology-agnostic -> work for mc.
+SMP watch-points for witness: harts1-7 retire (core_retired), "smp: Brought
+up ... 8 CPUs", CLINT MSIP IPI delivery, PLIC per-hart routing, L1<->L2/L3
+snoop + LR/SC across cores.
+
+## r131 dual-track pipeline (auto-armed)
+
+After host churn killed r128b/r130/r131-scalar, relaunched BOTH builds of
+HEAD (closure-r131 / closure-r131-mc) and armed wait-loop witness
+launchers so each fires the moment its model exists:
+- `hyp8-r131-mc-aggregate-t4`: g6lc64_hyp8_mc (4c x 2t = 8 harts, L2/L3 +
+  snoop/coherence) -> `hyp8-mc-witness-launch.sh` -> `hyp8-osbi-mc-r131`
+  (linux-mc fw sha 04f3b24b..., tohost 0x80041730, budget 3e9). pid 14137.
+- `hyp8-r131-aggregate-t4`: scalar HEAD -> `hyp8-scalar-r131-witness-launch.sh`
+  -> `hyp8-osbi-scalar-r131` (linux-scalar fw sha 30e1311e..., tohost
+  0x80041730, budget 1.75e9). pid 19216.
+Monitor allowlists extended: hyp8-osbi-mc-r131, hyp8-osbi-scalar-r131.
+mc witness = FIRST SMP+coherence Linux boot attempt (never before run).
