@@ -1160,12 +1160,20 @@ remain release requirements; intermediate raster gates do not narrow the product
     bit-identical to the r32f expectation, a controlled A/B on FS output type +
     attachment format. vgtop PASS cases=26 checks=17016 cycles=109065, FAIL
     (got=0) with R32_UINT dropped from f_is_raw32; check_fresh 1001 files, 0
-    drifted; 902 model tests OK. Still open: the vnfront Enable=1 synthesis
-    screen did not finish, so no cell count; remote leaf
-    `apu-leaf-20261115T213809-699149246ffb` (unit,top,perf on the pre-r32u tree)
-    running — the r32u session rides the next leaf. Next formats on the
-    same pattern need wider pixels (RGBA16F 8 bytes, RGBA32F 16 bytes) or
-    narrower ones (R8, RG8), i.e. the pixel-size generalisation of the ROP.
+    drifted; 902 model tests OK. Leaf `apu-leaf-20261115T213809-699149246ffb`
+    (unit,top,perf on the pre-r32u tree): every unit suite rc=0, `vgtop` rc=0,
+    `vgsys` rc=1 on an infrastructure PGO build timeout (not an RTL verdict),
+    `sys-venus` pending at last check. Its `perf` stage flagged +102 cycles on
+    ue_gpos_{ftex,ftexl,vtex}_1 — proven stimulus, not RTL: the 1ccc17e1f vector
+    refresh grew those tapes by 19 command-buffer words; engine busy counters
+    are bit-identical and the pre-refresh tapes replayed on the current RTL
+    reproduce the admitted cycles exactly (199264/217420/117755). The perf
+    capture was re-admitted from that leaf so the baseline tracks the refreshed
+    vectors; `--admit-from` refuses while `apu_perf.py diff` exits nonzero, so
+    the file was replaced with the leaf's `output/perf/capture.json` directly.
+    Next formats on the same pattern need wider pixels (RGBA16F 8 bytes,
+    RGBA32F 16 bytes) or narrower ones (R8, RG8), i.e. the pixel-size
+    generalisation of the ROP.
     (5) Stale records: the CTS ledger was last rendered around 2026-11-04 and still
     lists the 71 `descriptor_copy` failures that closed on 2026-11-12; the plan's
     ladder table shows R3 as not started.

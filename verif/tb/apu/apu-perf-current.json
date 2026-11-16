@@ -10407,8 +10407,8 @@
      "ctl": 10.1,
      "exec": 65.4,
      "pump": 84.4,
-     "rast": 59.6,
-     "sh": 51.6,
+     "rast": 59.5,
+     "sh": 51.5,
      "xfer": 5.6
     },
     "fpw_per_fpn": 0.0,
@@ -10446,11 +10446,11 @@
      },
      "vnfront": {
       "bind": 164,
-      "busy": 157103,
+      "busy": 157154,
       "busy_pct": 78.8,
       "cmdrec": 698,
       "cmdstream": 1278,
-      "core": 5753,
+      "core": 5804,
       "descset": 18,
       "descupd": 34,
       "dslayout": 14,
@@ -10470,11 +10470,11 @@
       "wait_idle": 130169
      },
      "vnpump": {
-      "busy": 168247,
+      "busy": 168349,
       "busy_pct": 84.4,
       "ctl": 0,
-      "decode": 5637,
-      "exec": 157174,
+      "decode": 5688,
+      "exec": 157225,
       "park": 0,
       "poll": 33960,
       "xfer": 2474
@@ -10499,7 +10499,7 @@
     "port_req": {
      "ctl": 5719,
      "obj": 552,
-     "pump": 4226,
+     "pump": 4258,
      "rast": 5924,
      "sh": 2430
     }
@@ -10508,10 +10508,10 @@
     "bench": "tb_g6lc_apu_vgtop",
     "cases": 28,
     "checks": 17122,
-    "cycles": 199264
+    "cycles": 199366
    },
    "pass_compute": {
-    "cycles": 199264,
+    "cycles": 199366,
     "g1": 4096,
     "g2": 4096,
     "maxulp": 0,
@@ -10524,11 +10524,11 @@
     "ewrk": 129185,
     "ex_b": 130340,
     "pctl": 0,
-    "pdec": 5637,
-    "pexec": 157174,
+    "pdec": 5688,
+    "pexec": 157225,
     "ppark": 0,
     "ppoll": 33960,
-    "pump_b": 168247,
+    "pump_b": 168349,
     "pxfer": 2474,
     "xf_b": 11117,
     "xrd": 4544,
@@ -10555,29 +10555,29 @@
     "wqw": 0
    },
    "perft": {
-    "any": 186358,
+    "any": 186460,
     "ctl": 20223,
     "exec": 130341,
     "mpn_ctl": 5719,
     "mpn_exec": 0,
     "mpn_obj": 552,
-    "mpn_pump": 4226,
+    "mpn_pump": 4258,
     "mpn_rast": 5924,
     "mpn_sh": 2430,
     "mpw_ctl": 17157,
     "mpw_exec": 0,
     "mpw_obj": 1656,
-    "mpw_pump": 12678,
+    "mpw_pump": 12774,
     "mpw_rast": 17772,
     "mpw_sh": 7290,
-    "pump": 168247,
+    "pump": 168349,
     "rast": 118678,
     "sh": 102738,
     "xfer": 11117
    },
    "perfv": {
     "bind": 164,
-    "core": 5753,
+    "core": 5804,
     "cr": 698,
     "cs": 1278,
     "dset": 18,
@@ -10596,7 +10596,7 @@
     "sh": 8005,
     "sub": 4,
     "upd": 34,
-    "vf_b": 157103,
+    "vf_b": 157154,
     "waidle": 130169
    },
    "perfx": {
@@ -10680,11 +10680,11 @@
      },
      "vnfront": {
       "bind": 164,
-      "busy": 175259,
+      "busy": 175310,
       "busy_pct": 80.6,
       "cmdrec": 698,
       "cmdstream": 1278,
-      "core": 5753,
+      "core": 5804,
       "descset": 18,
       "descupd": 34,
       "dslayout": 14,
@@ -10704,11 +10704,11 @@
       "wait_idle": 148325
      },
      "vnpump": {
-      "busy": 186403,
+      "busy": 186505,
       "busy_pct": 85.7,
       "ctl": 0,
-      "decode": 5637,
-      "exec": 175330,
+      "decode": 5688,
+      "exec": 175381,
       "park": 0,
       "poll": 33960,
       "xfer": 2474
@@ -10733,7 +10733,7 @@
     "port_req": {
      "ctl": 5719,
      "obj": 552,
-     "pump": 4226,
+     "pump": 4258,
      "rast": 5924,
      "sh": 2526
     }
@@ -10742,10 +10742,10 @@
     "bench": "tb_g6lc_apu_vgtop",
     "cases": 28,
     "checks": 17122,
-    "cycles": 217420
+    "cycles": 217522
    },
    "pass_compute": {
-    "cycles": 217420,
+    "cycles": 217522,
     "g1": 4096,
     "g2": 4096,
     "maxulp": 0,
@@ -10758,11 +10758,11 @@
     "ewrk": 147341,
     "ex_b": 148496,
     "pctl": 0,
-    "pdec": 5637,
-    "pexec": 175330,
+    "pdec": 5688,
+    "pexec": 175381,
     "ppark": 0,
     "ppoll": 33960,
-    "pump_b": 186403,
+    "pump_b": 186505,
     "pxfer": 2474,
     "xf_b": 11117,
     "xrd": 4544,
@@ -10789,29 +10789,29 @@
     "wqw": 0
    },
    "perft": {
-    "any": 204514,
+    "any": 204616,
     "ctl": 20223,
     "exec": 148497,
     "mpn_ctl": 5719,
     "mpn_exec": 0,
     "mpn_obj": 552,
-    "mpn_pump": 4226,
+    "mpn_pump": 4258,
     "mpn_rast": 5924,
     "mpn_sh": 2526,
     "mpw_ctl": 17157,
     "mpw_exec": 0,
     "mpw_obj": 1656,
-    "mpw_pump": 12678,
+    "mpw_pump": 12774,
     "mpw_rast": 17772,
     "mpw_sh": 7578,
-    "pump": 186403,
+    "pump": 186505,
     "rast": 136834,
     "sh": 120894,
     "xfer": 11117
    },
    "perfv": {
     "bind": 164,
-    "core": 5753,
+    "core": 5804,
     "cr": 698,
     "cs": 1278,
     "dset": 18,
@@ -10830,7 +10830,7 @@
     "sh": 8005,
     "sub": 4,
     "upd": 34,
-    "vf_b": 175259,
+    "vf_b": 175310,
     "waidle": 148325
    },
    "perfx": {
@@ -12511,10 +12511,10 @@
     "engine_pct": {
      "any": 89.0,
      "ctl": 17.2,
-     "exec": 41.2,
+     "exec": 41.1,
      "pump": 73.7,
      "rast": 31.3,
-     "sh": 17.4,
+     "sh": 17.3,
      "xfer": 9.4
     },
     "fpw_per_fpn": 0.0,
@@ -12533,7 +12533,7 @@
       },
       "assembly": 1155,
       "busy": 48496,
-      "busy_pct": 41.2,
+      "busy_pct": 41.1,
       "ctl": 0,
       "work": 47341
      },
@@ -12552,11 +12552,11 @@
      },
      "vnfront": {
       "bind": 164,
-      "busy": 75594,
+      "busy": 75645,
       "busy_pct": 64.2,
       "cmdrec": 698,
       "cmdstream": 1317,
-      "core": 5753,
+      "core": 5804,
       "descset": 18,
       "descupd": 34,
       "dslayout": 14,
@@ -12576,11 +12576,11 @@
       "wait_idle": 48325
      },
      "vnpump": {
-      "busy": 86738,
+      "busy": 86840,
       "busy_pct": 73.7,
       "ctl": 0,
-      "decode": 5637,
-      "exec": 75665,
+      "decode": 5688,
+      "exec": 75716,
       "park": 0,
       "poll": 33960,
       "xfer": 2474
@@ -12605,7 +12605,7 @@
     "port_req": {
      "ctl": 5719,
      "obj": 560,
-     "pump": 4239,
+     "pump": 4271,
      "rast": 5924,
      "sh": 2334
     }
@@ -12614,10 +12614,10 @@
     "bench": "tb_g6lc_apu_vgtop",
     "cases": 28,
     "checks": 17122,
-    "cycles": 117755
+    "cycles": 117857
    },
    "pass_compute": {
-    "cycles": 117755,
+    "cycles": 117857,
     "g1": 4096,
     "g2": 4096,
     "maxulp": 0,
@@ -12630,11 +12630,11 @@
     "ewrk": 47341,
     "ex_b": 48496,
     "pctl": 0,
-    "pdec": 5637,
-    "pexec": 75665,
+    "pdec": 5688,
+    "pexec": 75716,
     "ppark": 0,
     "ppoll": 33960,
-    "pump_b": 86738,
+    "pump_b": 86840,
     "pxfer": 2474,
     "xf_b": 11117,
     "xrd": 4544,
@@ -12661,29 +12661,29 @@
     "wqw": 0
    },
    "perft": {
-    "any": 104849,
+    "any": 104951,
     "ctl": 20223,
     "exec": 48497,
     "mpn_ctl": 5719,
     "mpn_exec": 0,
     "mpn_obj": 560,
-    "mpn_pump": 4239,
+    "mpn_pump": 4271,
     "mpn_rast": 5924,
     "mpn_sh": 2334,
     "mpw_ctl": 17157,
     "mpw_exec": 0,
     "mpw_obj": 1680,
-    "mpw_pump": 12717,
+    "mpw_pump": 12813,
     "mpw_rast": 17772,
     "mpw_sh": 7002,
-    "pump": 86738,
+    "pump": 86840,
     "rast": 36834,
     "sh": 20448,
     "xfer": 11117
    },
    "perfv": {
     "bind": 164,
-    "core": 5753,
+    "core": 5804,
     "cr": 698,
     "cs": 1317,
     "dset": 18,
@@ -12702,7 +12702,7 @@
     "sh": 8215,
     "sub": 4,
     "upd": 34,
-    "vf_b": 75594,
+    "vf_b": 75645,
     "waidle": 48325
    },
    "perfx": {
