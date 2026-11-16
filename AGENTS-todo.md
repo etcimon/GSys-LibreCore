@@ -1277,6 +1277,14 @@ remain release requirements; intermediate raster gates do not narrow the product
     also reviewed against spec: 1/255, 1/127, 1/65535, 1/32767 are all
     correctly-rounded reciprocals (255→1.0, −128→−1.0 clamp) — the
     untested normalised-fetch path is spec-correct.
+    **UNORM16 vertex attribute (2026-11-16, `c3d67ea39`).**
+    `ue_gpos_vattr16ubloff_1` extends the vertex-format axis to
+    R16G16B16A16_UNORM (vkfmt 91): two u16 words per vertex at byte
+    offset 8, decoded `fp32(u16)*fp32(1/65535)` (`K16=0x37800080`).
+    Stored u16 are `k*257` so `65535=255*257` lands the decode on
+    exactly `k/255` and the u8 attachment re-encodes to `k`.  PASS
+    cases=26 checks=17016 maxulp=0 cycles=108778; vattr8u/rgba8u/
+    bloff/tri regressions clean.
     (5) Stale records: the CTS ledger was last rendered around 2026-11-04 and still
     lists the 71 `descriptor_copy` failures that closed on 2026-11-12; the plan's
     ladder table shows R3 as not started.
