@@ -1225,6 +1225,28 @@ remain release requirements; intermediate raster gates do not narrow the product
     blend, and a device-level blend/lop *refusal* vector (only unit cases
     79/80 cover it).  Rast unit bench 77-80 pending the remote leaf unit
     stage (local WSL too unstable for the ~13 min compile).
+    **Integer attachment coverage complete (2026-11-16, R8G8B8A8_UINT,
+    `058346278`).**  `ue_gpos_rgba8ubloff_1` adds the last
+    color-attachable profile format (vkfmt 41, device fmt 15, 4 B/px) —
+    every `COLOR_ATTACHMENT` format in `vn_device_profile.toml` now has
+    a device session.  The RTL `f_enc8` integer path (keep the low byte
+    per channel, no blend/logicOp) was already present from T3; this is
+    a model+shader increment only, no RTL change.  `fs_rgba8u.frag/.spv`
+    emits `uvec4` `floatBitsToUint(vcol)` — the Vulkan-required integer
+    component type — so `res_q[c]` holds each channel's f32 bits and the
+    stored byte is `f32b(vcol_c)&0xFF` (clear: `f32b(clear)&0xFF`).  Model:
+    `is_rgba8uint` token, is_bloff-path only, a one-line `_enc8` uint
+    branch covering clear + covered pixels, `fs_rgba8u` selection, vkfmt
+    41 at the three VkFormat sites — all gated, so regen of
+    bloff/rgba16f/r32u/r8un is byte-identical.  Registered in regen +
+    all three run lists.  Evidence (pinned Verilator 5.008, existing
+    vgtop binary — RTL untouched): `ue_gpos_rgba8ubloff_1` PASS
+    cases=26 checks=17016 cycles=109133; rgba16f/r32u/bloff regressions
+    clean; 902 model tests OK.  Note: `uvec4` and `vec4` float outputs
+    yield bit-identical `res_q` here (floatBitsToUint is a bitcast and
+    `f_enc8` keeps only `[7:0]`), so the session proves the UINT
+    *format* path — not a distinct shader-typing behaviour; the uvec4
+    FS is the Vulkan-correct form regardless.
     (5) Stale records: the CTS ledger was last rendered around 2026-11-04 and still
     lists the 71 `descriptor_copy` failures that closed on 2026-11-12; the plan's
     ladder table shows R3 as not started.
