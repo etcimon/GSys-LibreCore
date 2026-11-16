@@ -222,6 +222,10 @@ python3 $G --graphics-session ue_gpos_vattr8ubloff_1 1
 # vertex at byte offset 8, decoded *fp32(1/65535); u16=k*257 round-trips
 # to u8=k through the 8-bit attachment.
 python3 $G --graphics-session ue_gpos_vattr16ubloff_1 1
+# signed-normalised variant: R8G8B8A8_SNORM (vkfmt 38) — same u8x4
+# packing but sign-extend + *fp32(1/127) + clamp<-1->-1; byte 0x80 (-128)
+# distinguishes signed (u8 0) from unsigned (u8 255) decode.
+python3 $G --graphics-session ue_gpos_vattr8snbloff_1 1
 
 # Sessions the run scripts execute that this script did not generate
 # (blend ops and factors, logic ops, depth compare/bounds/bias/clamp,
