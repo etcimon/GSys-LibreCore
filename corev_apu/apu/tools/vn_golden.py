@@ -11771,6 +11771,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # adapted; blend and logicOp on integer formats are refused
         # UNSUPPORTED, so every other path raises.
         is_rgba8uint = 'rgba8u' in gfx
+        # vattr8u: the vertex-colour attribute is R8G8B8A8_UNORM (vkfmt
+        # 37) instead of R32G32B32A32_SFLOAT — the VB packs one u8x4 word
+        # per vertex and the rast gather decodes each byte *fp32(1/255)
+        # into the vec4 the VS sees.  vs_pos3 forwards col verbatim so
+        # all four decoded channels reach the attachment.  Only the
+        # blend-disabled is_bloff path is adapted.
+        is_vattr8u = 'vattr8u' in gfx
         # colourWriteMask stays logical-channel (R=1,G=2,B=4,A=8): cwmr
         # keeps R only, cwmb keeps B only — paired with is_bgra these
         # expose a mask applied in byte order instead of channel order.
@@ -11798,6 +11805,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         if is_rgba8uint and not is_bloff:
             raise ValueError('rgba8u attachment only adapted on the '
                              'is_bloff path')
+        if is_vattr8u and not is_bloff:
+            raise ValueError('vattr8u vertex attribute only adapted on '
+                             'the is_bloff path')
         # _enc8: store encode for one f32 channel on attachment 0 — on an
         # sRGB attachment RGB goes linear-u12 -> sRGB8 while alpha (and
         # every channel on a non-sRGB attachment) stays UNORM8.  Mirrors
@@ -12436,11 +12446,20 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # first end-to-end pColorBlendState coverage (ue_gpos_tri_1
         # sends pColorBlendState=None).
         # lopx src colour: (1.0,0.5,0.25,0.75) -> distinct UNORM8 bytes
-        # so the XOR against the clear dst exercises every channel
-        COL = (1.0, 0.5, 0.25, 0.75) if is_lop else \
-            (1.0, 0.0, 0.0, 0.75) if is_blend else \
-            (0.5, 0.25, 0.75, 0.625) if is_bop or is_bfac else \
-            (0.2, 0.4, 0.6, 1.0)
+        # so the XOR against the clear dst exercises every channel.
+        # vattr8u: the stored vertex bytes are u8x4; the gather decodes
+        # each as fp32(b)*fp32(1/255) (K255=0x3B808081) so COL holds the
+        # decoded f32 the VS/oracle interpolate — the same value RTL's
+        # S_GA_U8I/U8M/U8S chain produces.
+        if is_vattr8u:
+            _K8 = struct.unpack('<f', struct.pack('<I', 0x3B808081))[0]
+            _C8 = (200, 100, 50, 128)          # stored u8 R,G,B,A bytes
+            COL = tuple(_f32(_f32(b) * _K8) for b in _C8)
+        else:
+            COL = (1.0, 0.5, 0.25, 0.75) if is_lop else \
+                (1.0, 0.0, 0.0, 0.75) if is_blend else \
+                (0.5, 0.25, 0.75, 0.625) if is_bop or is_bfac else \
+                (0.2, 0.4, 0.6, 1.0)
         # grad: per-vertex distinct colours (draw order) — primaries +
         # distinct alpha so the smooth vcol varying exercises all four
         # interpolated channels; the oracle permutes these with the
@@ -12679,7 +12698,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     vb2_words += [f32b(c) for c in COL]
                 else:
                     vb_words += [f32b(vx_), f32b(vy_)]
-                    vb_words += [f32b(c) for c in COL]
+                    if is_vattr8u:
+                        # R8G8B8A8_UNORM colour at byte offset 8 = word
+                        # 2: one packed u8x4 (R|G<<8|B<<16|A<<24) then
+                        # three pad words to keep the 24 B stride.
+                        vb_words += [(_C8[0] | (_C8[1] << 8) |
+                                      (_C8[2] << 16) | (_C8[3] << 24)),
+                                     0, 0, 0]
+                    else:
+                        vb_words += [f32b(c) for c in COL]
         VP = (0.0, 0.0, 64.0, 64.0, 0.0, 1.0)
         # scis/scio: sub-rectangle scissor clips TRI — gfx_tri_coverage
         # already honours sc, and vkCmdSetScissor below emits the same
@@ -14813,7 +14840,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                             st('VkVertexInputAttributeDescription',
                                location=1,
                                binding=4 if is_wide else 0,
-                               format=103 if is_tex else 109,
+                               format=103 if is_tex else
+                               37 if is_vattr8u else 109,
                                offset=0 if is_wide else
                                16 if is_dpair or is_persp
                                or is_dclamplike else 8)]),

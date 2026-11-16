@@ -213,6 +213,11 @@ python3 $G --graphics-session ue_gpos_rgba16fbloff_1 1
 # (floatBitsToUint(vcol)), so res_q[c] holds each channel's f32 bits
 # and f_enc8 keeps the low byte: stored byte_c = f32b(vcol_c)&0xFF.
 python3 $G --graphics-session ue_gpos_rgba8ubloff_1 1
+# vertex-attribute format: the colour attribute is R8G8B8A8_UNORM
+# (vkfmt 37) not RGBA32_SFLOAT — one packed u8x4 word per vertex at
+# byte offset 8, decoded per channel as fp32(b)*fp32(1/255).  vs_pos3
+# forwards all four decoded channels to the attachment.
+python3 $G --graphics-session ue_gpos_vattr8ubloff_1 1
 
 # Sessions the run scripts execute that this script did not generate
 # (blend ops and factors, logic ops, depth compare/bounds/bias/clamp,
