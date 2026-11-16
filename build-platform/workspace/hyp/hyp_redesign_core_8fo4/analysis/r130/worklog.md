@@ -224,3 +224,20 @@ core2->hart_04(hart4,5), core3->hart_06(hart6,7). To verify SMP bringup:
 grep `core [0-7]:` across the 4 files; a hart never tagged = never retired
 (boot-hold/ipi/release defect). core_retired[] + mc_all_silent_held give
 the testbench's own multicore verdict; +mc_verdict_fault self-tests it.
+
+## payload.bin structure decoded (OpenWrt packaging contract)
+
+linux-payload-l1s2/payload.bin (65,943,552 B) = RISC-V Linux kernel Image
++ EMBEDDED initramfs:
+- head: MZ/PE stub then RISC-V Image header; magic "RISCV"@0x30,
+  "RSC\x05"@0x38; image_size u64@0x10 = 0x132f000 (~20 MB).
+- cpio_newc (070701) @ 0xa0d2b0 (~10.5 MB) lies INSIDE image_size ->
+  initramfs is linked into the kernel image (CONFIG_INITRAMFS_SOURCE),
+  NOT appended. (2nd cpio region @0xccf9d8; gzip@0x4c55a, xz@0xd07768 =
+  compressed payloads inside.)
+=> OpenWrt payload.bin must be a kernel Image with the OpenWrt rootfs
+cpio EMBEDDED the same way. OpenWrt initramfs-kernel produces kernel+
+initramfs; need the raw Image form (strip FIT wrapper) or equivalent.
+GATED on mc SMP Linux booting + OpenWrt kernel config compatible w/ hyp8
+DTB (rv64imafdc+Zba/Zbb/Zbs/Zicboz, CLINT@0x2000000, PLIC@0xc000000,
+16550-ish UART, L2/L3 cache nodes).
