@@ -192,6 +192,11 @@ python3 $G --graphics-session ue_gpos_srgblopinvert_1 1
 # path — covered px hold the raw fp32 bits of the interpolated source
 # channel 0, uncovered px the raw fp32 clear word 0x3E800000.
 python3 $G --graphics-session ue_gpos_r32fbloff_1 1
+# raw32 colour attachment: R32_UINT (vkfmt 98) on the blend-disabled
+# path — fs_r32u emits an integer FS output (floatBitsToUint(vcol.r)),
+# so the stored word is bit-identical to the r32fbloff expectation: a
+# controlled A/B on FS output type + attachment format alone.
+python3 $G --graphics-session ue_gpos_r32ubloff_1 1
 
 # Sessions the run scripts execute that this script did not generate
 # (blend ops and factors, logic ops, depth compare/bounds/bias/clamp,

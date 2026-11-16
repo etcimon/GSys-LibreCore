@@ -11716,6 +11716,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # Only the blend-disabled is_bloff path is adapted (covered px =
         # f32b(_v[0]), uncovered = f32b(0.25)); every other path raises.
         is_r32f = 'r32f' in gfx
+        # r32u: R32_UINT colour attachment (vkfmt 98, device fmt 10) —
+        # same raw32 single-word store of res_q[0]; the FS emits an
+        # integer output (fs_r32u floatBitsToUint(vcol.r)) so the stored
+        # bits equal the r32f expectation bit-for-bit — a controlled
+        # A/B on FS output type + attachment format alone.
+        is_r32u = 'r32u' in gfx
         # colourWriteMask stays logical-channel (R=1,G=2,B=4,A=8): cwmr
         # keeps R only, cwmb keeps B only — paired with is_bgra these
         # expose a mask applied in byte order instead of channel order.
@@ -11730,6 +11736,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                              'is_lop paths')
         if is_r32f and not is_bloff:
             raise ValueError('r32f attachment only adapted on the is_bloff '
+                             'path')
+        if is_r32u and not is_bloff:
+            raise ValueError('r32u attachment only adapted on the is_bloff '
                              'path')
         # _enc8: store encode for one f32 channel on attachment 0 — on an
         # sRGB attachment RGB goes linear-u12 -> sRGB8 while alpha (and
@@ -12292,6 +12301,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'fs_mrt3.spv' if is_mrt3 else
                           'fs_mrt.spv' if is_mrt else
                           'fs_color.spv' if is_fcolor else
+                          'fs_r32u.spv' if is_r32u else
                           'fs_vcol.spv' if is_persp or is_dclamplike
                           or is_blend or is_lop or is_bop or is_bfac
                           or is_wide
@@ -12703,7 +12713,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # On an sRGB attachment the clear stores sRGB-encoded RGB
             # (_enc8) instead of plain UNORM8.  On raw32 the stored word
             # is clear_color[0] raw — the is_bop clear's channel 0 = 0.25.
-            if is_r32f:
+            if is_r32f or is_r32u:
                 clr_w = f32b(0.25)
             else:
                 _cb = [_enc8(c, _d)
@@ -12864,10 +12874,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 _v = _gp.get((_px, _py))
                 if _v is None:
                     exp_img.append(clr_w)
-                elif is_r32f:
+                elif is_r32f or is_r32u:
                     # raw32 (is_bloff only): the stored pixel is res_q[0]
                     # = the interpolated channel-0 f32 written raw — no
-                    # UNORM encode, no clamp, channels 1..3 ignored.
+                    # UNORM encode, no clamp, channels 1..3 ignored.  On
+                    # r32u the FS bitcasts vcol.r to uint, so the stored
+                    # bits are the same f32b(_v[0]) word.
                     exp_img.append(f32b(_v[0]))
                 else:
                     _rb = ([_enc8(c, _v[c]) for c in range(4)]
@@ -14284,7 +14296,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 device=X['dev'],
                 pCreateInfo=st('VkImageCreateInfo',
                     flags=0, imageType=1,
-                    format=(100 if is_r32f else
+                    format=(100 if is_r32f else 98 if is_r32u else
                         ((50 if is_bgra else 43) if is_srgb
                         else (44 if is_bgra else 37))),
                     extent=st('VkExtent3D', width=CW, height=CH,
@@ -14300,7 +14312,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 device=X['dev'],
                 pCreateInfo=st('VkImageViewCreateInfo',
                     flags=0, image=X['img'], viewType=1,
-                    format=(100 if is_r32f else
+                    format=(100 if is_r32f else 98 if is_r32u else
                         ((50 if is_bgra else 43) if is_srgb
                         else (44 if is_bgra else 37))),
                     components=st('VkComponentMapping',
@@ -14520,7 +14532,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     attachmentCount=(n_col
                                      + (1 if is_ds else 0)),
                     pAttachments=[st('VkAttachmentDescription',
-                        flags=0, format=(100 if is_r32f else
+                        flags=0, format=(100 if is_r32f else 98 if is_r32u else
                         ((50 if is_bgra else 43) if is_srgb
                         else (44 if is_bgra else 37))),
                         samples=1,
