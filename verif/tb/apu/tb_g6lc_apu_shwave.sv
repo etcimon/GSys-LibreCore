@@ -862,7 +862,7 @@ module tb_g6lc_apu_shwave
   // check — uout[name idx][seed][word pos over out bindings].
   // First dim must cover names[] (indices are position-based):
   // overflow drops the stash silently and opt reads zeros.
-  localparam int UoNames = 82;
+  localparam int UoNames = 83;
   logic [31:0] uout [UoNames][4][2048];
   int          cur_nidx, cur_seed, ou_mism, ou_mism_t, ou_words;
   bit          is_opt;
@@ -1413,7 +1413,7 @@ module tb_g6lc_apu_shwave
   // carry the base offset (flags bit4 header extension)
   string fault_names [3] = '{"fn_deep", "zerodim", "dispbase"};
 
-  string names [82] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
+  string names [83] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
       "builtin_lid", "builtin_lindex", "compare", "composite",
       "intmix", "localsize32", "localsize64", "math450", "oob",
       "pushscale", "vec4arith",
@@ -1431,6 +1431,9 @@ module tb_g6lc_apu_shwave
       "cts_imgcopy",
       // T3: rgba8ui (device fmt 15) imageLoad + imageStore
       "imgcopy_rgba8ui", "texfetch_rgba8ui",
+      // T3+: rgba32ui (device fmt 11) imageLoad + imageStore — the
+      // wide-integer (16-byte texel) storage-image path
+      "imgcopy_rgba32ui",
       // row-major SSBO matrices (load/column/element/store)
       "ssbo_rowmajor",
       // copy_ssbo_* probe: NumWorkGroups*WorkGroupSize + ArrayLength

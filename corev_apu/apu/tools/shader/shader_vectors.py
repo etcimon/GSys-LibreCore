@@ -491,6 +491,15 @@ DESC = {
                          bindings=[
         img_bind(0, 1, dict(w=2, h=4, fmt=15), kind=3, out=1),
         (0, 0, 8, 1, 7 << 16)]),
+    # T3+: rgba32ui (device format 11) storage image — the wide-integer
+    # counterpart of imgcopy_rgba8ui: imageLoad returns a full uvec4
+    # (16-byte texel) which the SSBO observes bit-exact (4 words/lane),
+    # and imageStore writes v+1 back so the out=1 image readback sees
+    # the 16-byte per-channel store encode.
+    'imgcopy_rgba32ui': dict(groups=(1, 1, 1), fmt='z', push=0,
+                         bindings=[
+        img_bind(0, 1, dict(w=2, h=4, fmt=11), kind=3, out=1),
+        (0, 0, 32, 1, 7 << 16)]),
     # imgatom = CTS image_atomic_op_local_size_1 idiom: r32ui storage
     # image + imageAtomicAdd -> OpImageTexelPointer(60) absolute-texel
     # pointer + OpAtomicIAdd(234) lane-serial RMW.  The out=1 image

@@ -1,0 +1,21 @@
+#version 450
+// SPDX-License-Identifier: MIT
+// T3+: R32G32B32A32_UINT (device format 11) storage-image load + store.
+// Lane i loads texel (i % 2, i / 2) of a 2x4 rgba32ui image — a full
+// uvec4 (4 x u32, 16-byte texel) — spills all four channels to the
+// SSBO so the wide integer decode is observed bit-exact, then writes
+// the texel back with each channel incremented so the 16-byte
+// per-channel store encode is observed on the out=1 image readback.
+layout(local_size_x = 8) in;
+layout(rgba32ui, set = 0, binding = 1) uniform uimage2D img;
+layout(set = 0, binding = 0) buffer Out { uint o[]; };
+void main() {
+    uint i = gl_LocalInvocationID.x;
+    ivec2 p = ivec2(int(i % 2u), int(i / 2u));
+    uvec4 v = imageLoad(img, p);
+    o[i * 4u]      = v.x;
+    o[i * 4u + 1u] = v.y;
+    o[i * 4u + 2u] = v.z;
+    o[i * 4u + 3u] = v.w;
+    imageStore(img, p, v + uvec4(1u));
+}
