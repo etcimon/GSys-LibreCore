@@ -188,6 +188,10 @@ python3 $G --graphics-session ue_gpos_bgrasrgbbopadd_1 1
 # (lop_on_w gates on !f_is_srgb) — covered px hold the plain encoded
 # source colour, not ~clear.
 python3 $G --graphics-session ue_gpos_srgblopinvert_1 1
+# raw32 colour attachment: R32_SFLOAT (vkfmt 100) on the blend-disabled
+# path — covered px hold the raw fp32 bits of the interpolated source
+# channel 0, uncovered px the raw fp32 clear word 0x3E800000.
+python3 $G --graphics-session ue_gpos_r32fbloff_1 1
 
 # Sessions the run scripts execute that this script did not generate
 # (blend ops and factors, logic ops, depth compare/bounds/bias/clamp,

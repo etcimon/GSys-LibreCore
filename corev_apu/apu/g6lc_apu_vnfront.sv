@@ -7455,29 +7455,16 @@ module g6lc_apu_vnfront
                          mips < 32'd1 ||
                          mips > 32'(mipcap) ||
                          op_q.imm[10] == 32'h0 ||
-                         // usage ⊆ TS|TD|S|ST|CA|DSA (0x3F); CA only
-                         // on the four color-attachment formats, DSA
-                         // only on the two depth formats (G2a)
+                         // usage ⊆ TS|TD|S|ST|CA|DSA (0x3F); attachment
+                         // usage (CA|DSA = 0x30) follows the profile's
+                         // COLOR_ATTACHMENT / DEPTH_STENCIL_ATTACHMENT
+                         // features through APU_VN_FMT_USAGE.  imm[2]
+                         // is < 256 here (f_img_fmt==NONE refused above),
+                         // so the [7:0] index is the VkFormat number.
                          (op_q.imm[10] & ~32'h3F) != 32'h0 ||
-                         ((op_q.imm[10] & 32'h10) != 32'h0 &&
-                          f_img_fmt(op_q.imm[2]) !=
-                              8'(APU_IMG_FMT_R8G8B8A8_UNORM) &&
-                          f_img_fmt(op_q.imm[2]) !=
-                              8'(APU_IMG_FMT_R8G8B8A8_SRGB) &&
-                          f_img_fmt(op_q.imm[2]) !=
-                              8'(APU_IMG_FMT_B8G8R8A8_UNORM) &&
-                          f_img_fmt(op_q.imm[2]) !=
-                              8'(APU_IMG_FMT_B8G8R8A8_SRGB)) ||
-                         ((op_q.imm[10] & 32'h20) != 32'h0 &&
-                          f_img_fmt(op_q.imm[2]) !=
-                              8'(APU_IMG_FMT_D32_SFLOAT) &&
-                          f_img_fmt(op_q.imm[2]) !=
-                              8'(APU_IMG_FMT_D16_UNORM) &&
-                          // G6LC stencil: D24S8 is a real depth-stencil
-                          // attachment — the raster stores {stencil[31:24],
-                          // depth_unorm24[23:0]} and runs f_scmp/f_sop.
-                          f_img_fmt(op_q.imm[2]) !=
-                              8'(APU_IMG_FMT_D24_UNORM_S8_UINT))
+                         ((op_q.imm[10] & 32'h30 &
+                           ~APU_VN_FMT_USAGE[int'(op_q.imm[2][7:0])])
+                          != 32'h0)
                         ) begin
               result_q <= APU_VK_ERROR_FEATURE_NOT_PRESENT;
               state_q  <= StRep;

@@ -244,12 +244,18 @@ R8G8B8A8_SRGB = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|TRANSFER_SRC|TR
 B8G8R8A8_UNORM = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST|COLOR_ATTACHMENT|COLOR_ATTACHMENT_BLEND", bpp = 4, bgr = 1 }
 B8G8R8A8_SRGB = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|TRANSFER_SRC|TRANSFER_DST|COLOR_ATTACHMENT|COLOR_ATTACHMENT_BLEND", bpp = 4, bgr = 1, srgb = 1 }
 R16G16B16A16_SFLOAT = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 8, half = 1 }
-R32_SFLOAT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER", bpp = 4, comps = 1, flt = 1 }
+# COLOR_ATTACHMENT (raw32 stage 2): the ROP stores res_q[0] raw — no
+# UNORM, no clamp; colourWriteMask reduces to the R bit.  No
+# COLOR_ATTACHMENT_BLEND: raw32 never blends (record legality refuses).
+R32_SFLOAT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST|COLOR_ATTACHMENT", fb = "VERTEX_BUFFER", bpp = 4, comps = 1, flt = 1 }
 R32G32_SFLOAT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER", bpp = 8, comps = 2, flt = 1 }
 # vertex-buffer-only: an 'fb'-without-'f' row gets no APU_IMG_FMT_* id
 R32G32B32_SFLOAT = { fb = "VERTEX_BUFFER", bpp = 12, comps = 3, flt = 1 }
 R32G32B32A32_SFLOAT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER", bpp = 16, flt = 1 }
-R32_UINT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 4, comps = 1, uint = 1 }
+# COLOR_ATTACHMENT (raw32 stage 2): same single-word raw store as
+# R32_SFLOAT; logic op applies bitwise on the whole word.  No
+# COLOR_ATTACHMENT_BLEND (record legality refuses blend on raw32).
+R32_UINT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST|COLOR_ATTACHMENT", bpp = 4, comps = 1, uint = 1 }
 R32G32B32A32_UINT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 16, uint = 1 }
 # depth formats: D32/D16 attach (G2a) and sample (G3a-ii PCF: dref
 # sampling + LINEAR compare in the shwave texture pipe)

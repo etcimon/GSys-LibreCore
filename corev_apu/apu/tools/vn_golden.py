@@ -4353,11 +4353,14 @@ class FrontModel(ObjectTable, PayloadMemory):
                           not 1 <= mips <= img_mipcap(extmax) or
                           usage == 0 or
                           usage & ~0x3F or
-                          (usage & 0x10 and did not in (2, 3, 4, 5)) or
-                          # G6LC stencil: did 14 = D24_UNORM_S8_UINT joins
-                          # the depth formats for DSA usage (front+back
-                          # stencil ops transport; packed {stn,depth}).
-                          (usage & 0x20 and did not in (12, 13, 14)) or
+                          # attachment usage (CA|DSA = 0x30) must be a
+                          # subset of the format's feature-derived usage
+                          # mask — mirrors vnfront's APU_VN_FMT_USAGE
+                          # check (COLOR_ATTACHMENT / DEPTH_STENCIL_
+                          # ATTACHMENT profile features).
+                          (usage & 0x30 &
+                           ~self.m.fmt_usage()[rec['imm'][2] & 0xFF]
+                           & 0xFFFFFFFF) != 0 or
                           ilay not in (0, 1, 2, 5, 6, 7, 8)):
                         out['result'] = VK_ERR_FEATURE
                     else:
@@ -11708,6 +11711,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # still emitted (state transports) but blending is bypassed, so
         # the covered pixel is the src vcol packed UNORM8, not src OP dst.
         is_bloff = 'bloff' in gfx
+        # r32f: R32_SFLOAT colour attachment (vkfmt 100, device fmt 7) —
+        # the raw32 single-word store of res_q[0], no UNORM, no clamp.
+        # Only the blend-disabled is_bloff path is adapted (covered px =
+        # f32b(_v[0]), uncovered = f32b(0.25)); every other path raises.
+        is_r32f = 'r32f' in gfx
         # colourWriteMask stays logical-channel (R=1,G=2,B=4,A=8): cwmr
         # keeps R only, cwmb keeps B only — paired with is_bgra these
         # expose a mask applied in byte order instead of channel order.
@@ -11720,6 +11728,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         if is_srgb and not (is_bop or is_lop):
             raise ValueError('srgb attachment only adapted on the is_bop/'
                              'is_lop paths')
+        if is_r32f and not is_bloff:
+            raise ValueError('r32f attachment only adapted on the is_bloff '
+                             'path')
         # _enc8: store encode for one f32 channel on attachment 0 — on an
         # sRGB attachment RGB goes linear-u12 -> sRGB8 while alpha (and
         # every channel on a non-sRGB attachment) stays UNORM8.  Mirrors
@@ -12690,11 +12701,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # clear (u8 then f32(u8)*K, K=0x3B808081).  Only clr_w is
             # needed here — the covered word is per-pixel in exp_img.
             # On an sRGB attachment the clear stores sRGB-encoded RGB
-            # (_enc8) instead of plain UNORM8.
-            _cb = [_enc8(c, _d)
-                   for c, _d in enumerate((0.25, 0.5, 0.125, 0.375))]
-            clr_w = (_cb[0] | (_cb[1] << 8) | (_cb[2] << 16) |
-                     (_cb[3] << 24))
+            # (_enc8) instead of plain UNORM8.  On raw32 the stored word
+            # is clear_color[0] raw — the is_bop clear's channel 0 = 0.25.
+            if is_r32f:
+                clr_w = f32b(0.25)
+            else:
+                _cb = [_enc8(c, _d)
+                       for c, _d in enumerate((0.25, 0.5, 0.125, 0.375))]
+                clr_w = (_cb[0] | (_cb[1] << 8) | (_cb[2] << 16) |
+                         (_cb[3] << 24))
             tri_w = clr_w
         elif is_tex:
             # 1x1 texture texel RGBA8 = (200,80,160,255); the FS emits
@@ -12849,6 +12864,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 _v = _gp.get((_px, _py))
                 if _v is None:
                     exp_img.append(clr_w)
+                elif is_r32f:
+                    # raw32 (is_bloff only): the stored pixel is res_q[0]
+                    # = the interpolated channel-0 f32 written raw — no
+                    # UNORM encode, no clamp, channels 1..3 ignored.
+                    exp_img.append(f32b(_v[0]))
                 else:
                     _rb = ([_enc8(c, _v[c]) for c in range(4)]
                            if is_bloff else
@@ -14264,8 +14284,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 device=X['dev'],
                 pCreateInfo=st('VkImageCreateInfo',
                     flags=0, imageType=1,
-                    format=((50 if is_bgra else 43) if is_srgb
-                        else (44 if is_bgra else 37)),
+                    format=(100 if is_r32f else
+                        ((50 if is_bgra else 43) if is_srgb
+                        else (44 if is_bgra else 37))),
                     extent=st('VkExtent3D', width=CW, height=CH,
                               depth=1),
                     mipLevels=1, arrayLayers=1, samples=1, tiling=0,
@@ -14279,8 +14300,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 device=X['dev'],
                 pCreateInfo=st('VkImageViewCreateInfo',
                     flags=0, image=X['img'], viewType=1,
-                    format=((50 if is_bgra else 43) if is_srgb
-                        else (44 if is_bgra else 37)),
+                    format=(100 if is_r32f else
+                        ((50 if is_bgra else 43) if is_srgb
+                        else (44 if is_bgra else 37))),
                     components=st('VkComponentMapping',
                                   r=0, g=0, b=0, a=0),
                     subresourceRange=st('VkImageSubresourceRange',
@@ -14498,8 +14520,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     attachmentCount=(n_col
                                      + (1 if is_ds else 0)),
                     pAttachments=[st('VkAttachmentDescription',
-                        flags=0, format=((50 if is_bgra else 43) if is_srgb
-                        else (44 if is_bgra else 37)),
+                        flags=0, format=(100 if is_r32f else
+                        ((50 if is_bgra else 43) if is_srgb
+                        else (44 if is_bgra else 37))),
                         samples=1,
                         loadOp=1, storeOp=0,
                         stencilLoadOp=2, stencilStoreOp=2,
