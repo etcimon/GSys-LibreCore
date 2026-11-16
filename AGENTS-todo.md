@@ -1329,6 +1329,21 @@ remain release requirements; intermediate raster gates do not narrow the product
     integer-typed variables (or the fetch→record→input chain for int
     types) — needs RTL debug + a stable build window.  Probe files
     reverted; no session committed.
+    **Storage-image fmt-11 coverage (2026-11-16, `1c8103db8`).**
+    `imgcopy_rgba32ui` is a compute session doing imageLoad+imageStore
+    on a 2x4 `R32G32B32A32_UINT` storage image (`uimage2D`, device
+    format 11, 16-byte texels) — the wide-integer counterpart of
+    `imgcopy_rgba8ui`.  It exercises the previously-uncovered
+    uimage2D×16bpp path: the full `uvec4` decode is spilled to the SSBO
+    (4 words/lane, bit-exact) and the `v+1` store is verified on the
+    `out=1` image readback.  New `corpus/imgcopy_rgba32ui.comp/.spv` +
+    DESC entry + generated vectors (3 seeds + mut + bad); registered in
+    `tb_g6lc_apu_shwave.sv` `names[]` (`UoNames`/`names` bumped 82→83).
+    Model + lavapipe oracle agree within Gate-2 tolerance at generation.
+    **RTL shwave sim verification is pending a stable WSL build window**
+    (the bench `names[]` list is compiled in, so it needs a rebuild; WSL
+    was crash-looping).  Run `run-apu-shwave.sh` (or the `only=` arm) in
+    a stable window to confirm the RTL uimage2D×16bpp path.
     (5) Stale records: the CTS ledger was last rendered around 2026-11-04 and still
     lists the 71 `descriptor_copy` failures that closed on 2026-11-12; the plan's
     ladder table shows R3 as not started.
