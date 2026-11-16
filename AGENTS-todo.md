@@ -1340,10 +1340,18 @@ remain release requirements; intermediate raster gates do not narrow the product
     DESC entry + generated vectors (3 seeds + mut + bad); registered in
     `tb_g6lc_apu_shwave.sv` `names[]` (`UoNames`/`names` bumped 82→83).
     Model + lavapipe oracle agree within Gate-2 tolerance at generation.
-    **RTL shwave sim verification is pending a stable WSL build window**
-    (the bench `names[]` list is compiled in, so it needs a rebuild; WSL
-    was crash-looping).  Run `run-apu-shwave.sh` (or the `only=` arm) in
-    a stable window to confirm the RTL uimage2D×16bpp path.
+    **RTL review predicts PASS** (`g6lc_apu_shwave.sv`): image
+    load/store opcodes 98 (`OpImageRead`)/99 (`OpImageWrite`) bypass the
+    opcode-60 atomic gate (`isint && bpp==4`-only restriction, ~line
+    6825); texel addressing is bpp-generic via `tx_bpp_q =
+    APU_VN_IMG_BPP[fmt]` and the `bpp>8` fetch path issues a two-word
+    read (`tx_ta_q[5:3]`/`+1`, ~line 2474), so 16-byte uint texels are
+    covered.  **RTL shwave sim verification is still pending a stable
+    WSL build window** (the bench `names[]` list is compiled in; WSL
+    was crash-looping and `tools/verilator` has no built `verilator_bin`
+    — a from-source build is infeasible in the window).  Run
+    `run-apu-shwave.sh` (or `only=imgcopy_rgba32ui`) in a stable window
+    to confirm; review gives high confidence it passes.
     (5) Stale records: the CTS ledger was last rendered around 2026-11-04 and still
     lists the 71 `descriptor_copy` failures that closed on 2026-11-12; the plan's
     ladder table shows R3 as not started.
