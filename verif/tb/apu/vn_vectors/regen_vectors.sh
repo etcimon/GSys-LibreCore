@@ -232,6 +232,9 @@ python3 $G --graphics-session ue_gpos_vattr16snbloff_1 1
 # half-float variant: R16G16B16A16_SFLOAT (vkfmt 97) — two u16 words of
 # IEEE binary16 patterns decoded by f_f16_f32 (subnormals flush).
 python3 $G --graphics-session ue_gpos_vattr16fbloff_1 1
+# three-component variant: R8G8B8_UNORM (vkfmt 23) — nc=3 decode loop,
+# missing alpha filled to 1.0f by the gather's (0,0,0,1) default.
+python3 $G --graphics-session ue_gpos_vattrrgb8ubloff_1 1
 
 # Sessions the run scripts execute that this script did not generate
 # (blend ops and factors, logic ops, depth compare/bounds/bias/clamp,
