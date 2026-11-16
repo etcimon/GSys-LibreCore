@@ -91,7 +91,7 @@ ue_gpos_fsubo_1 ue_gpos_fsubocopy_1 ue_gpos_inst_1 ue_gpos_vtex_1 ue_gpos_ftex_1
 ue_cpos_clear_rgba8_1 ue_cpos_clear_r32f_1 ue_cpos_clear_r32u_1 \
 ue_cpos_clear_srgb_1 ue_cpos_clear_rgba16f_1 \
 ue_cpos_clear_r8un_1 ue_cpos_clear_rg8un_1 ue_cpos_clear_bgra_1 \
-ue_cpos_clear_rgba8u_1 \
+ue_cpos_clear_rgba8u_1 ue_cpos_clear_bgrasrgb_1 \
 ue_cpos_clear_d32_1 ue_cpos_clear_d16_1 ue_cneg_clear_ds_asp_1 \
 ue_cneg_clear_oob_1 ue_cpos_ctxkill_reuse_1 \
 ue_cpos_rb_mapafter_1 ue_cpos_ubo_bindfirst_1 \

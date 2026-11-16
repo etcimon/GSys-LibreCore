@@ -1869,6 +1869,12 @@ CLEAR_SESSIONS = {
     'clear_rgba8u':  dict(vkfmt=41, w=16, h=16, mips=1, layers=1,
                           cw=[0x11DE, 0x22AD, 0x33BE, 0x44EF],
                           ranges=[(1, 0, 1, 0, 1)]),
+    # B8G8R8A8_SRGB (vkfmt 50): sRGB LUT encode on RGB AND the BGRA
+    # channel-order swap together — the last attachable format without
+    # a clear session.
+    'clear_bgrasrgb': dict(vkfmt=50, w=16, h=16, mips=2, layers=1,
+                           cw=[F32_H, F32_Q, F32_TQ, F32_ONE],
+                           ranges=[(1, 1, 1, 0, 1)]),
     'clear_oob':     dict(vkfmt=37, w=16, h=16, mips=3, layers=2,
                           cw=[F32_H, F32_Q, F32_TQ, F32_ONE],
                           ranges=[(1, 0, 4, 0, 1), (1, 0, 1, 1, 2),
