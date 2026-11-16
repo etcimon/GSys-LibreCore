@@ -1285,6 +1285,14 @@ remain release requirements; intermediate raster gates do not narrow the product
     exactly `k/255` and the u8 attachment re-encodes to `k`.  PASS
     cases=26 checks=17016 maxulp=0 cycles=108778; vattr8u/rgba8u/
     bloff/tri regressions clean.
+    **SNORM8 vertex attribute (2026-11-16, `0e5a5fa82`).**
+    `ue_gpos_vattr8snbloff_1` uses R8G8B8A8_SNORM (vkfmt 38): same u8x4
+    packing as vattr8u but sign-extend + `*fp32(1/127)`
+    (`K127=0x3C010204`) + clamp `<-1.0 -> -1.0`.  Bytes (100,32,127,
+    0x80) exercise positive decode, the +1.0 max and the −128→−1.0
+    clamp — 0x80 gives u8 0 where unsigned would give 255.  PASS
+    cases=26 checks=17016 maxulp=0; vattr8u/vattr16u/rgba8u/tri
+    regressions clean.
     (5) Stale records: the CTS ledger was last rendered around 2026-11-04 and still
     lists the 71 `descriptor_copy` failures that closed on 2026-11-12; the plan's
     ladder table shows R3 as not started.
