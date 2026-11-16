@@ -1154,9 +1154,16 @@ remain release requirements; intermediate raster gates do not narrow the product
     `APU_VN_FMT_USAGE` table instead of two hand-kept format lists (this also
     lets R8G8B8A8_UINT attachments be created, which the profile advertised and
     the front end refused); device session `ue_gpos_r32fbloff_1` passes on vgtop
-    and fails with the raw store disabled. Open: no R32_UINT device session (the
-    corpus fragment shaders output float); the vnfront Enable=1 synthesis screen
-    did not finish, so no cell count; harness run pending. Next formats on the
+    and fails with the raw store disabled. Stage 3 (`685f68751`): R32_UINT device
+    session `ue_gpos_r32ubloff_1` — fs_r32u is the corpus's first integer-typed
+    fragment output (`out uint`, floatBitsToUint(vcol.r)); the stored word is
+    bit-identical to the r32f expectation, a controlled A/B on FS output type +
+    attachment format. vgtop PASS cases=26 checks=17016 cycles=109065, FAIL
+    (got=0) with R32_UINT dropped from f_is_raw32; check_fresh 1001 files, 0
+    drifted; 902 model tests OK. Still open: the vnfront Enable=1 synthesis
+    screen did not finish, so no cell count; remote leaf
+    `apu-leaf-20261115T213809-699149246ffb` (unit,top,perf on the pre-r32u tree)
+    running — the r32u session rides the next leaf. Next formats on the
     same pattern need wider pixels (RGBA16F 8 bytes, RGBA32F 16 bytes) or
     narrower ones (R8, RG8), i.e. the pixel-size generalisation of the ROP.
     (5) Stale records: the CTS ledger was last rendered around 2026-11-04 and still
