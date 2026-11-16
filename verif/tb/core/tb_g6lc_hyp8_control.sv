@@ -5135,6 +5135,8 @@ module tb_g6lc_hyp8_dcache;
       man_rtrn.data[w*64 +: 64] = ~reply;
     for (n = 0; n < 20 && !amo_resp.ack; n++) tick();
     check(amo_resp.ack, {tag, "_CORE_ACK"});
+    $display("  [amo-reply] %s op=%0d result=%h expected=%h",
+             tag, op, amo_resp.result, expected);
     check(amo_resp.result === expected, {tag, "_RESULT"});
     tick(); // Client accepts the response; the retry policy sees that SC.
     amo_req = '0;
@@ -5147,29 +5149,43 @@ module tb_g6lc_hyp8_dcache;
   endtask
 
   task automatic sc_backoff_cases();
-    // The old verdict reads the nonzero prior/invalid bus and treats this
-    // successful SC as a failure. This must be the baseline discriminator.
-    atomic_reply(AMO_SC, 2'b11, 64'h80000100, '1, 64'h0, 64'h0,
-                 16'h0, "SC_D_SUCCESS");
+    // r127m: an SC failure extends the retry exponent only when an LR
+    // completed since the previous SC result — the reservation was held
+    // and lost to contention. Unpaired failures (the kernel's deliberate
+    // post-trap reservation clear) must not grow the mask.
+    //
+    // Unpaired SC failure with no prior LR: exponent stays 0.
+    atomic_reply(AMO_SC, 2'b11, 64'h80000100, '1, 64'h1, 64'h1,
+                 16'h0, "SC_UNPAIRED_FAIL");
+    // LR arms the pairing; the following SC failure counts -> mask 1.
+    // The poisoned reply still owns the verdict (r114 ownership check).
+    atomic_reply(AMO_LR, 2'b11, 64'h80000100, '0, 64'h55, 64'h55,
+                 16'h0, "LR_RESERVATION");
     atomic_reply(AMO_SC, 2'b10, 64'h80000100, '0,
                  64'hffffffff00000001, 64'h1, 16'h1, "SC_W_FAIL_LOW");
-    // Non-SC replies must not update the SC retry exponent.
-    atomic_reply(AMO_LR, 2'b11, 64'h80000100, '0,
-                 64'h55, 64'h55, 16'h1, "LR_NO_VERDICT");
-    atomic_reply(AMO_ADD, 2'b11, 64'h80000100, '1,
-                 64'h0, 64'h0, 16'h1, "ADD_NO_VERDICT");
+    // Non-SC replies must not update the SC retry exponent — and the LR
+    // keeps the next SC paired across the intervening AMO.
+    atomic_reply(AMO_LR, 2'b11, 64'h80000100, '0, 64'h55, 64'h55,
+                 16'h1, "LR_NO_VERDICT");
+    atomic_reply(AMO_ADD, 2'b11, 64'h80000100, '1, 64'h0, 64'h0,
+                 16'h1, "ADD_NO_VERDICT");
     atomic_reply(AMO_SC, 2'b10, 64'h80000104, '0,
                  64'h00000001ffffffff, 64'h1, 16'h3, "SC_W_FAIL_HIGH");
     atomic_reply(AMO_SC, 2'b10, 64'h80000100, '1,
                  64'hffffffff00000000, 64'h0, 16'h0, "SC_W_SUCCESS_LOW");
+    // SC failure with no LR since the last SC result: unpaired, mask holds.
     atomic_reply(AMO_SC, 2'b10, 64'h80000104, '0,
-                 64'h00000001ffffffff, 64'h1, 16'h1, "SC_W_FAIL_HIGH_AGAIN");
+                 64'h00000001ffffffff, 64'h1, 16'h0,
+                 "SC_W_FAIL_UNPAIRED");
     atomic_reply(AMO_SC, 2'b10, 64'h80000104, '1,
                  64'h00000000ffffffff, 64'h0, 16'h0, "SC_W_SUCCESS_HIGH");
-    atomic_reply(AMO_SC, 2'b11, 64'h80000100, '0,
-                 64'h1, 64'h1, 16'h1, "SC_D_FAIL");
-    atomic_reply(AMO_SC, 2'b11, 64'h80000100, '1,
-                 64'h0, 64'h0, 16'h0, "SC_D_SUCCESS_RETRY");
+    // LR + SC failure -> paired -> mask 1; the pass then clears it.
+    atomic_reply(AMO_LR, 2'b11, 64'h80000100, '0, 64'h55, 64'h55,
+                 16'h0, "LR_AGAIN");
+    atomic_reply(AMO_SC, 2'b11, 64'h80000100, '0, 64'h1, 64'h1,
+                 16'h1, "SC_D_FAIL");
+    atomic_reply(AMO_SC, 2'b11, 64'h80000100, '1, 64'h0, 64'h0,
+                 16'h0, "SC_D_SUCCESS_RETRY");
     man_vld = 1'b0;
     man_mode = 1'b0;
   endtask

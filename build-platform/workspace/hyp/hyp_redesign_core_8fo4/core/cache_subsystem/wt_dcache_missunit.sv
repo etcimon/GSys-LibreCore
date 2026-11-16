@@ -610,19 +610,26 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
 
   logic sc_fail, sc_pass, sc_backoff_over;
   logic sc_result_valid;
+  logic lr_pending_q;
   // The retry policy consumes the same owned, registered SC result as the
   // client. At ATOMIC_ACK the result register still belongs to an older beat.
   assign sc_result_valid = G6LCCfg.RVA && (state_q == AMO_RESULT)
                           && (amo_req_i.amo_op == AMO_SC);
   assign sc_fail = sc_result_valid && (amo_resp_o.result != '0);
   assign sc_pass = sc_result_valid && (amo_resp_o.result == '0);
+  // r127m: only a paired SC failure — one where an LR completed since the
+  // previous SC result, so a reservation was actually held and lost — is a
+  // contention retry worth backing off for. SCs that fail with no
+  // outstanding LR (the kernel's deliberate reservation clear after trap
+  // entry) are not retries; ~3.6k of them saturated the mask to 16 bits
+  // and parked the next LR for ~35k cycles.
   g6lc_hyp_exp_backoff #(
       .Seed  (3),
       .MaxExp(16)
   ) i_exp_backoff (
       .clk_i,
       .rst_ni,
-      .set_i    (sc_fail),
+      .set_i    (sc_fail && lr_pending_q),
       .clr_i    (sc_pass),
       .is_zero_o(sc_backoff_over)
   );
@@ -1033,6 +1040,7 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
       stores_inflight_q     <= '0;
       cas_old_q             <= '0;
       cas_new_q             <= '0;
+      lr_pending_q          <= 1'b0;
     end else begin
       state_q               <= state_d;
       cnt_q                 <= cnt_d;
@@ -1052,6 +1060,14 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
       stores_inflight_q     <= stores_inflight_d;
       cas_old_q             <= cas_old_d;
       cas_new_q             <= cas_new_d;
+      // AMO depth-1 keeps LR/SC ordering exact: the flag is set when an LR
+      // result is presented and consumed by the next SC result. It is read
+      // by the backoff set term during AMO_RESULT, before this edge clears
+      // it, so a paired SC failure still counts.
+      if (G6LCCfg.RVA && (state_q == AMO_RESULT)) begin
+        if      (amo_req_i.amo_op == AMO_LR) lr_pending_q <= 1'b1;
+        else if (amo_req_i.amo_op == AMO_SC) lr_pending_q <= 1'b0;
+      end
     end
   end
 
