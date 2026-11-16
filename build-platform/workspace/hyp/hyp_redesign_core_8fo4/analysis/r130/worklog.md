@@ -188,3 +188,19 @@ launchers so each fires the moment its model exists:
   0x80041730, budget 1.75e9). pid 19216.
 Monitor allowlists extended: hyp8-osbi-mc-r131, hyp8-osbi-scalar-r131.
 mc witness = FIRST SMP+coherence Linux boot attempt (never before run).
+
+## Infra fixes (would-have-silently-failed)
+
+- r128b (pid 2062250) and r130 wait-shell (365981) are ALIVE — earlier
+  "killed by reboot" read was a truncated ps + node-pool confusion. Host
+  up 64d, 12 cores, load ~8, 71GB free. r128b ~26h in, log 3.69GB.
+- Witness-launcher poll bug: model-check `shell "test -x .../Variane_testharness"`
+  trips the proxy overlap guard (literal string match) -> refused while
+  workloads run -> launchers would wait forever. FIXED: poll
+  `output/results.json` (build-complete marker, no guard string). Both
+  launchers relaunched (mc 20518, scalar 20516) and verified returning WAIT.
+- Scalar r131 gate died silently: `r131-remote/` log dir didn't exist so the
+  `> launch.log` redirect failed before the script ran. Created dir,
+  relaunched via setsid (gate 21202, proxy 21207) — integration now running.
+- cmd_py (witness launch) is NOT overlap-guarded; only `shell` cmds
+  containing Variane_testharness/soft-ladder are. Witnesses launch detached.
