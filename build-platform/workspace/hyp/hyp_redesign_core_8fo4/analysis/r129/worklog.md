@@ -277,3 +277,58 @@ the second lookup's tag sample until after the first fill commits, or a
 back-door fill inject); then re-run `hyp8-osbi-scalar-r129b-mmustaged`
 witness to 317.4M+ and on to shell. Off-by-default; default TlbStages=1
 unaffected.
+
+## Staged-MMU duplicate-fill: implemented fill-time upsert (2026-11-16)
+
+Implemented in `g6lc_tlb.sv` (`always_comb` before `update_flush` + widened
+fill guard). Two deviations from the design sketch above, both for safety:
+
+- **Match key = strict stored-tag equality, not full lookup-match
+  replication.** `fill_dup[j]` requires `tags_q[j]` valid AND
+  `VPN_FLAT_W'(tags_q[j].vpn) == upd_vpn_flat` (packed identically to the
+  fill store, NAPOT-normalized) AND `asid`/`vmid`/`is_page`/`v_st_enbl`
+  equal, plus `hart` under `HART_TAG` and `is_napot_64k` under
+  `SvnapotEn`. This is *narrower* than parameterizing the lookup's
+  vpn_match/match_asid/match_vmid/match_stage on `update_i` — it only
+  merges byte-identical translation keys (the observed duplicate), so it
+  can never fold legitimate different-page-size or different-context
+  entries. Documented limitation: a *global* entry re-filled under a
+  different asid/vmid, or a dup whose key fields differ at all, still
+  falls through to normal replacement (pre-change behaviour, no
+  regression).
+- **Gated by `TLB_STAGED` (`HypCfg.TlbStages >= 2`).** Hyp8/Hyp8Deep run
+  `TlbStages:3` → upsert active exactly where the fill-visibility hazard
+  exists; HypDefault runs `TlbStages:1` → `fill_dup` is constant-0,
+  `fill_dup_any=0`, and the guard reduces to the original
+  `update_i.valid & replace_en[i] & !lu_hit_o` — bit-identical logic, zero
+  comparator cost on the default profile.
+
+Pipeline placement: `fill_dup`/`fill_dup_any` read `tags_q` at
+`update_i.valid` (fill-commit), not at lookup time. Fill B's lookup missed
+the in-flight fill A, but by the time B's `update_i` commits (~14 cycles
+later, ≫ the 1-cycle `update_i→tags_q` commit) A is already in `tags_q`, so
+the upsert sees it and refreshes A's content in place instead of
+allocating a second way. Residual hazard: two fills for one vpn whose
+`update_i` commits within the same 1-cycle window could still race — far
+rarer than the observed 14-cycle case; would need an in-flight-fill CAM.
+
+On a `fill_dup[i]` hit the fill body is unchanged — it rewrites the same
+tag fields (a no-op, since they already matched) and refreshes
+`content_n[i].pte`/`gpte` with `update_i`'s (fresher) PTE. On no match,
+`replace_en[i] & !fill_dup_any` preserves the original victim fill, and
+`fill_dup_any` suppresses the victim allocation whenever a match exists.
+
+Flush interaction: a same-cycle flush of the matched entry wins via the
+earlier `else if` arm (entry invalidated, not upserted) while
+`fill_dup_any` still suppresses the victim — the translation is dropped
+and re-walked on next miss. Rare and architecturally correct (flush
+semantics preserved); costs one extra PTW walk, never a wrong entry.
+
+Verification: `run_hyp8_leaf_local.sh mmu` → `HYP8_MMU_PASS
+checked=716 miter=771`, rc=0, 0 `%Error`, on both the ungated and
+`TLB_STAGED`-gated revisions — the leaf covers
+{entries 4/16}×{HYP_EXT 0/1}×{TlbStages 1/3}, so both gate states are
+exercised. Remote aggregate gate (lint scalar+SMT2 + 14 smokes) still to
+run for formal qualification; default-profile smokes are expected
+cycle-identical (TlbStages=1 → constant-0). Efficacy on the real witness
+needs an `r129b-mmustaged`/`r129-deep` re-run past cycle 317.4M.

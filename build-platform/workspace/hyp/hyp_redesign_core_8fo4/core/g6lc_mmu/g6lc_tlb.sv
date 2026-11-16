@@ -606,6 +606,43 @@ module g6lc_tlb
     assign tl_asid_ok[gi]  = (asid_to_be_flushed_i == tags_q[gi].asid);
     assign tl_gvmid_ok[gi] = (vmid_to_be_flushed_i == tags_q[gi].vmid);
   end
+  // Fill-time upsert duplicate detect (staged fill-visibility hazard): under
+  // TlbStages>1 a fill commits several cycles after its lookup sampled the
+  // tag array, so a second lookup for the same translation can miss the
+  // just-written entry and allocate a duplicate way (observed as a
+  // byte-identical valid pair -> hit_onehot multi-hit). Detect an existing
+  // valid entry already holding update_i's translation key; the fill arm
+  // then refreshes that entry in place instead of allocating a second way.
+  // The key mirrors the stored tag fields exactly (vpn packed identically to
+  // the fill store, plus asid/vmid/hart/is_page/v_st_enbl/is_napot), so a
+  // match is a true same-translation duplicate and legitimate
+  // different-page-size or different-context fills are never merged.
+  localparam int unsigned VPN_FLAT_W =
+      (G6LCCfg.PtLevels + HYP_EXT) * (G6LCCfg.VpnLen / G6LCCfg.PtLevels);
+  logic [VPN_FLAT_W-1:0] upd_vpn_flat;
+  logic [TLB_ENTRIES-1:0] fill_dup;
+  logic fill_dup_any;
+
+  always_comb begin
+    upd_vpn_flat = VPN_FLAT_W'(update_i.vpn);
+    if (update_i.is_napot_64k && G6LCCfg.SvnapotEn) upd_vpn_flat[3:0] = 4'b0;
+  end
+
+  always_comb begin
+    fill_dup_any = 1'b0;
+    for (int unsigned j = 0; j < TLB_ENTRIES; j++) begin
+      fill_dup[j] = TLB_STAGED && update_i.valid && tags_q[j].valid &&
+          (VPN_FLAT_W'(tags_q[j].vpn) == upd_vpn_flat) &&
+          (tags_q[j].asid == update_i.asid) &&
+          (tags_q[j].vmid == update_i.vmid) &&
+          (!HART_TAG || (tags_q[j].hart == update_i.hart)) &&
+          (tags_q[j].is_page == update_i.is_page) &&
+          (tags_q[j].v_st_enbl == update_i.v_st_enbl) &&
+          (!G6LCCfg.SvnapotEn || (tags_q[j].is_napot_64k == update_i.is_napot_64k));
+      fill_dup_any |= fill_dup[j];
+    end
+  end
+
   always_comb begin : update_flush
     tags_n                 = tags_q;
     content_n              = content_q;
@@ -667,7 +704,8 @@ module g6lc_tlb
             tags_n[i].valid = 1'b0;
         end
         // normal replacement
-      end else if (update_i.valid & replace_en[i] & !lu_hit_o) begin
+      end else if (update_i.valid & !lu_hit_o &
+                   (fill_dup[i] | (replace_en[i] & !fill_dup_any))) begin
         vpn_to_store = update_i.vpn;
         if (update_i.is_napot_64k && G6LCCfg.SvnapotEn) begin
           // Svnapot: For a NAPOT entry, normalize the VPN by clearing the lower bits before storage
