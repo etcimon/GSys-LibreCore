@@ -1197,6 +1197,34 @@ remain release requirements; intermediate raster gates do not narrow the product
     drifted; 902 model tests OK.  Still open: sub-word dst decode (would
     enable blend), wider formats (RGBA16F 8 B, RGBA32F 16 B) need the same
     generalisation extended past 4 B pixels.
+    **Wide stage 1 (2026-11-16, R16G16B16A16_SFLOAT attachment, `623a76e52`).**
+    `f_cbpp` widens `[2:0]`→`[3:0]` and returns 8 for RGBA16F; `f_f32_f16`
+    does exact fp32→fp16 (RNE, inf on overflow, signed zero on underflow —
+    the same algorithm the xfer engine already used); `rop_pix64` packs the
+    four fp16 channels little-endian R,G,B,A into the 64-bit write beat,
+    `rop_data` selects it for `cbpp==8`, `rop_pmask` expands
+    colourWriteMask to paired bytes, and `clr_pix_q` carries the whole beat
+    on clear.  Pitch/address sites already took `cbpp`.  Blend and logicOp
+    stay refused UNSUPPORTED on non-4-byte attachments.  Profile:
+    R16G16B16A16_SFLOAT gained COLOR_ATTACHMENT (keeps SAMPLED/STORAGE/
+    TRANSFER); `g6lc_apu_vn_pkg.sv` regenerated.  Model: `is_rgba16f`
+    session token (vkfmt 97, device fmt 6), is_bloff-path only, f16 pack +
+    two-word readback gate.  **Bug found by the device session:** the
+    readback buffer, backing memory and blob were hardcoded 0x4000 — the
+    32 KiB RGBA16F `CopyImageToBuffer` faulted on the undersized dst and
+    read back all zeros; they are now sized from the packed footprint
+    (`rb_bytes = max(0x4000, CW*CH*cbpp)`, 0x4000 for every ≤4 B format so
+    no regression).  Session `ue_gpos_rgba16fbloff_1` registered in regen
+    + all three run lists; `ue_cpos_clear_rgba16f_1` already existed on the
+    transfer path.  Rast bench cases 77-80 (clear, draw, mask, blend/lop
+    refusal).  Evidence (pinned Verilator 5.008): vgtop
+    `ue_gpos_rgba16fbloff_1` PASS cases=26 checks=33400 maxulp=0 (8192
+    readback words); R8/RG8/RGBA8 regressions PASS; check_fresh 1010 files
+    0 drifted; 902 model tests OK.  Still open: sub-word dst decode for
+    blend, RGBA32F 16 B pixels need a 128-bit beat, fp16 dst decode for
+    blend, and a device-level blend/lop *refusal* vector (only unit cases
+    79/80 cover it).  Rast unit bench 77-80 pending the remote leaf unit
+    stage (local WSL too unstable for the ~13 min compile).
     (5) Stale records: the CTS ledger was last rendered around 2026-11-04 and still
     lists the 71 `descriptor_copy` failures that closed on 2026-11-12; the plan's
     ladder table shows R3 as not started.
