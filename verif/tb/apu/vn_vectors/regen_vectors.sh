@@ -229,6 +229,9 @@ python3 $G --graphics-session ue_gpos_vattr8snbloff_1 1
 # 16-bit signed variant: R16G16B16A16_SNORM (vkfmt 92) — two u16 words,
 # sign-extend + *fp32(1/32767) + clamp; 0x8000 (-32768) -> -1.0 -> u8 0.
 python3 $G --graphics-session ue_gpos_vattr16snbloff_1 1
+# half-float variant: R16G16B16A16_SFLOAT (vkfmt 97) — two u16 words of
+# IEEE binary16 patterns decoded by f_f16_f32 (subnormals flush).
+python3 $G --graphics-session ue_gpos_vattr16fbloff_1 1
 
 # Sessions the run scripts execute that this script did not generate
 # (blend ops and factors, logic ops, depth compare/bounds/bias/clamp,
