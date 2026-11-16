@@ -28,8 +28,8 @@ Scope of the edits: `core/include/g6lc64_hyp8_config_pkg.sv`,
 
 "Verified" means: on the remote testharness, pinned fork toolchain
 (`verilator-v5.008-g6lc-44063db8-pgo`: compiler PGO, loop unrolling,
-split-loops, simulation PGO), model `64f3a61f…` built from closure-rfix131a,
-17 directed programs graded on tohost **and** on the log, plus the leaf
+split-loops, simulation PGO), model `d2b24e58…` built from closure-rfix131a,
+19 directed programs graded on tohost **and** on the log, plus the leaf
 benches. No Linux boot has run on this tree.
 
 | entry | class (r127m count) | isolated test | structural fix | verified |
@@ -38,8 +38,8 @@ benches. No Linux boot has run on this tree.
 | RFIX-131a-02 | execution under a stale privilege/translation context (16,558 + 4,635 `[ptw-err]`; 18,130 of the DECERR) | `hyp8_ctx_switch_clean.S`; leaves `ctx-barrier`, `csr-credit` | context barrier at dispatch + frontend hold | yes: 65 DECERR + 194 walks -> 0 |
 | RFIX-131a-07 | TLB multi-hit (r129b model stop @317,424,744) | mmu leaf `TLB_OVL_*` (6 cases x 3 instances) + 2 mutants | fill evicts every entry it overlaps; PLRU records the answered hit | yes (leaf) |
 | RFIX-131a-08 | non-idempotent load parked at the LSU head (found by -01's own test) | `hyp8_spec_bus_clean.S`, `hyp8_dev_load.S` | a non-idempotent load that is not the commit head is handed back | yes |
-| RFIX-131a-03 | wrong-path data walks, null/garbage base (5,389) | `hyp8_spec_walk_clean.S` — reproduced on the r131 model (3 walks for 0, 8, 0x220); not in the smoke list until fixed | open (see "Open classes") | - |
-| RFIX-131a-04 | S-mode fetch exception presentations (490) | not yet | open | - |
+| RFIX-131a-03 | wrong-path data walks, null/garbage base (5,389) | `hyp8_spec_walk_clean.S` | a load is speculative until it is the commit head | yes: 3 walks -> 0 |
+| RFIX-131a-04 | S-mode fetch faults at trap entry (490) | `hyp8_trap_entry_clean.S` (192 on r131; 64 remain) | open: the barrier covers announced traps only; a trap-cycle frontend hold was tried and withdrawn | no |
 | RFIX-131a-05 | commit gaps > 2000 cycles: 6 real (LR parked by SC backoff), 24 are WFI idle | `sc-backoff` leaf | `67f413a63` (r130) | leaf only |
 | RFIX-131a-06 | memory-order replays (706,483; IPC 0.25) | not yet | open | - |
 
@@ -272,6 +272,82 @@ has the same `halt_frontend_i` input (`core/controller.sv:398`). The
 directed tests and the `ctx-barrier` leaf apply unchanged; `csr-credit`
 needs the hyp8 table.
 
+## RFIX-131a-03 — a load is speculative until it is the commit head
+
+**Evidence.** 5,389 `[ptw-err] … instr=0` per boot for `vaddr` 0 (2,933),
+4, 0x220, 3, 8 … in S-mode. `tq.sh around -r r127m -e ptw.data.null`: the
+walk is requested between two retirements of straight-line code — by a load
+that never retires, with a null base.
+
+**Root cause.** The load unit already had the rule "a speculative load
+issues only on a DTLB hit to idempotent memory and requests no walk"
+(`tr_idle_ok`, `spec_issue_ok`). Its definition of *speculative* was the
+`is_speculative_load` flag: "a branch issues on an older port in the same
+cycle" (`ex_stage`), an in-order-issue notion. Under out-of-order issue
+almost no wrong-path load carries it.
+
+**Structural fix.** One definition: under OoO `spec_ld = not_commit_time`.
+A load that is not the commit head issues only on a DTLB hit to idempotent
+memory; otherwise it waits in `WAIT_SPEC_LOAD` and is handed back after the
+dwell (`wsl_replay_fire`, 32 cycles), so it never holds the loads behind it.
+The same definition subsumes the r71 / r124 flagged cases and the
+non-idempotent hand-back of RFIX-131a-08. Review mutant
+`G6LC_MUT_LU_SPEC_FLAG_ONLY` is the old definition.
+
+**Isolated test.** `verif/tests/custom/hyp8_spec_walk_clean.S`: S-mode under
+Sv39, a trained-not-taken branch whose fall-through dereferences a pointer
+probed with 0, 8, 0x220 and a non-canonical value. r131 model: 3 walks
+(`vaddr=0`, `8`, `0x220`); fixed tree: 0.
+
+**Cost.** A correct-path load that misses the DTLB before it is the commit
+head now waits up to 32 cycles and is replayed. Measured on the directed
+programs only: `hyp8_dev_load` 26,527 → 30,061 cycles, `hyp8_spec_bus_clean`
+13,706 → 13,728, `hyp8_ctx_switch_clean` 35,569 → 35,597; the 14 baseline
+programs unchanged. The effect on a Linux boot's TLB-miss rate is not
+measured.
+
+**Not covered.** Wrong-path *stores* still translate (`store_unit` requests
+its translation on arrival); the witness shows no store walks in the null
+class, and the directed test's wrong-path store produced none.
+
+**Backport.** `core/load_unit.sv`: same `tr_idle_ok` / spec gate on
+`is_speculative_load`; the replacement needs `commit_tran_id_i` and the
+replay path of the OoO tree.
+
+## RFIX-131a-04 — S-mode fetch faults at trap entry (open: reproduced, one fix tried and withdrawn)
+
+**Evidence.** 490 S-mode `[mmu-ife] cause=12` per boot; 272 are ITLB *hits*
+on user addresses (`tq.sh sql` over `aux`): a U page fetched under S.
+
+**Isolated test.** `verif/tests/custom/hyp8_trap_entry_clean.S`: U-mode
+traps 128 times into an S-mode handler — 64 `ecall`, then 64 illegal
+instructions. r131 model: 192 records. Tree with the context barrier
+(RFIX-131a-02): 64 — exactly the illegal-instruction entries, i.e. the
+barrier removes the class for every trap a CSR-class instruction announces
+(`ecall`, and `sret` on the way back) and not for the others (exceptions,
+interrupts). The test is **not** in the smoke list while it is dirty.
+
+**Mechanism (from the test's trace).** `fetch_va=0xf0`, `priv=1`,
+`itlb_hit=1`, 9 cycles after the last U-mode retirement: the faulting fetch
+is the *in-flight* sequential request the I$ already holds (`areq.fetch_req`
+stays up through READ / READ_V / KILL_ATRANS) when the trap commits; the
+MMU evaluates that held request under the new privilege. The request is
+being killed by the trap's flush, so nothing consumes the fault.
+
+**Tried and withdrawn.** Holding the frontend's *new* requests for the trap
+cycle (and, second attempt, the two cycles after it) changed nothing: 64
+records either way — consistent with the mechanism above (the request
+predates the trap). Both variants were removed; the tree carries no trap
+hold.
+
+**Next.** Either the fetch-side translation is evaluated under the context
+the request was issued in (a request-side context tag), or a killed request
+drops its translation request. Both touch the I$ ↔ MMU handshake
+(`KILL_ATRANS` exists to keep the request up until the translation
+answers), so this needs its own leaf before any change. Until then the
+record is a fault presented to a killed fetch: no architectural effect was
+observed in the test (tohost passes) or in the r127m boot.
+
 ## RFIX-131a-07 — TLB fill: a fill evicts every entry it overlaps
 
 **Evidence.** `hyp8-osbi-scalar-r129b-mmustaged-diag2` (staged MMU,
@@ -370,8 +446,8 @@ output; the hand-back needs the scoreboard replay path of the OoO tree
 ## Results (remote testharness, closure-rfix131a)
 
 Model: `hyp8-rfix131a-aggregate-t4`, target `g6lc64_hyp8` (scalar), lint
-scalar/smt2 0 `%Error`, model `64f3a61f10d43a73…`, simulation PGO 232
-profiles, Verilator binary `d219b63fc4f8fcba`.
+scalar/smt2 0 `%Error`, model `d2b24e5891482748…` (final tree: RFIX-131a-01,
+-02, -03, -07, -08), simulation PGO profiles applied, Verilator binary `d219b63fc4f8fcba`.
 
 Directed programs (pass = tohost **and** clean log; r130 baseline cycles in
 parentheses):
@@ -392,9 +468,11 @@ parentheses):
 | hyp8_lrsc_store | 988 (983) | 0 | 0 | 0 |
 | hyp8_sv39_load | 3933 (3893) | 0 | 0 | 0 |
 | hyp8_zkn_kat | 6975 (6949) | 0 | 0 | 0 |
-| hyp8_spec_bus_clean | 13706 (new; r131 model: 3 DECERR + 1 UART read) | 0 | 0 | 0 |
-| hyp8_ctx_switch_clean | 35569 (new; r131 model: 65 DECERR + 194 walks) | 0 | 0 | 0 |
-| hyp8_dev_load | 26527 (new) | 0 | 0 | 0 |
+| hyp8_spec_bus_clean | 13728 (new; r131 model: 3 DECERR + 1 UART read) | 0 | 0 | 0 |
+| hyp8_ctx_switch_clean | 35597 (new; r131 model: 65 DECERR + 194 walks) | 0 | 0 | 0 |
+| hyp8_dev_load | 30061 (new; 26527 before RFIX-131a-03) | 0 | 0 | 0 |
+| hyp8_spec_walk_clean | 13806 (new; r131 model: 3 wrong-path walks) | 0 | 0 | 0 |
+| hyp8_smp_lrsc | 11012 (new; built with NHARTS=1 on this single-hart model) | 0 | 0 | 0 |
 
 Seven baseline programs changed cycle count (between −36 and +65); the other
 seven are identical. The change set that could move them is the context
@@ -409,8 +487,10 @@ Leaf benches (`run_hyp8_memory.py`, 23 registered):
 | mutants fail as required | mmu + `G6LC_MUT_TLB_FILL_NO_EVICT`, mmu + `G6LC_MUT_TLB_FILL_EQ_ONLY` |
 | not runnable | pmp-write, mshr: their reference/candidate sources (`g6lc_hyp8_pmp_bank_reference.sv`, `g6lc_l2_mshr_reference.sv`) are not in the tree |
 
-All 21 runnable leaves and the 17 programs ran on the final tree (one
-closure, round 3).
+The 19 programs ran on the final tree. The 21 runnable leaves last ran on
+the tree that still carried the withdrawn RFIX-131a-04 trap hold (a
+`g6lc_core.sv`-only difference, which no leaf except the full-flist ones
+elaborates); they were not rerun after its removal.
 
 Leaf infrastructure repaired on the way (each was failing before this round,
 unrelated to the fixes): `csr` / `issue` / `lsq-credit` / `flu` did not
@@ -467,26 +547,6 @@ not been exercised on a multi-core log; kernel PCs are not symbolized (no
 
 ## Open classes (analysis so far)
 
-- **RFIX-131a-03** — 5,389 data walks for `vaddr` 0 (2,933), 4, 0x220, 3, 8
-  … in S-mode. `tq.sh around -r r127m -e ptw.data.null`: the walk is
-  requested between two retirements of straight-line code, i.e. by a load
-  that never retires, with a null base. `tr_idle_ok = dtlb_hit || !spec_ld`
-  says a load flagged speculative does not request a walk; the flag
-  (`ex_stage` `speculative_load`) is only "a branch issues on an earlier
-  port in the same cycle", so under OoO almost no wrong-path load carries
-  it. Candidate rule, same shape as -08: a load that misses the DTLB
-  requests its walk only as the commit head. Isolated:
-  `verif/tests/custom/hyp8_spec_walk_clean.S` (S-mode under Sv39, a
-  trained-not-taken branch whose fall-through dereferences a pointer probed
-  with 0, 8, 0x220 and a non-canonical value) shows `[ptw-err] vaddr=0`,
-  `=8`, `=0x220` `instr=0` on the r131 model (`hyp8-rfix131a-probe-walk-base`),
-  tohost pass. Not yet fixed.
-- **RFIX-131a-04** — 490 S-mode `[mmu-ife] cause=12`: 272 are ITLB *hits*
-  on user addresses (a U page fetched under S: the frontend's user window
-  looked up under the kernel context at trap entry — the context switch no
-  instruction announces, so the barrier does not cover it), 189 walk faults
-  on user addresses, 29 on kernel-vm addresses. Candidate rule: no fetch
-  request while a commit-side redirect is pending.
 - **RFIX-131a-05** — 6 real commit gaps (LR parked by a saturated
   SC-backoff mask, 396.95M / 429.42M; r130 fix `67f413a63`, `sc-backoff`
   leaf passes). Not re-observed on a boot.
