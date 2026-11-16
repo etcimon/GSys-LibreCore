@@ -183,3 +183,28 @@ witness fell to about 1 kcyc/s), so the first attempt was stopped after
 five minutes. `run_hyp8_witness.py` gained `HYP8_WAIT_PIDS`; the replay
 starts when either live witness (r128b pid 2062250, r129-deep pid 2630423)
 exits.
+
+## r129-deep witness outcome + F15 assertion fix (2026-11-16)
+
+`hyp8-osbi-scalar-r129-deep` (LoadExPubStages=2) monitor exit=1 at cycle
+**375,989,307** — past the earlier 254.9M `misaligned_entry_excepts` fix
+(107c4ca3c) but short of userspace. Terminal line:
+
+    load_unit.sv lu_pop_is_presented: F15 popped slot not presented
+    (rindex=5 tid=12 tid_o=15 valid=1 head=000)
+
+Analysis: **assertion false-positive, not an RTL bug.** The F15 antecedent
+`ldbuf_r && pub_fire` treats any load-buffer pop during a publish-eligible
+cycle as "the data publish popped". Under EXPEND=2 `ldbuf_r = a_data |
+a_drn`; when `a_pend=1 & drn_any=1 & pub_any=1` the drain arm frees a dead
+slot (rindex=5, tid=12) in the same cycle the pending-exception arm
+presents its own tid (15). The presented tid is correct — the drained
+slot legitimately presents nothing. The RTL priority (pend > data, drain
+frees dead slots only) loses no load.
+
+Fix (sim-only, `translate_off`): antecedent narrowed to `a_data` — the
+literal "data publish arm" pop the property documents — and the error
+message now prints `pend/drn/pubidx/drnidx` so any recurrence exposes the
+arm split. Local lint clean. The deep witness must be re-run to confirm
+it clears 375.9M and reaches userspace; a recurrence with the new fields
+would distinguish a real divergence.

@@ -2041,13 +2041,21 @@ assign ldbuf_full = &ldbuf_valid_q;
   // the FSM-head completion arms may never steal a popped slot's port
   // slot. lu_f15_collide_n counts the collision cycles the gate
   // actually arbitrates (evidence, not a correctness condition).
+  // r129-deep: the antecedent is a_data, not ldbuf_r && pub_fire. ldbuf_r
+  // also rises on the a_drn drain pop (a dead slot freed while an
+  // unrelated pending exception publishes, a_pend=1 & drn_any=1 &
+  // pub_any=1); that pop legitimately presents pend_q[0].tid, not the
+  // drained slot's tid, so the broad form false-fires (rindex=5 tid=12
+  // vs presented tid_o=15 at cycle 375,989,307). a_data is exactly the
+  // data-publish pop the property documents.
   lu_pop_is_presented :
   assert property (@(posedge clk_i) disable iff (~rst_ni)
-      (ldbuf_r && pub_fire) |->
+      a_data |->
           (valid_o && (trans_id_o == ldbuf_q[ldbuf_rindex].trans_id)))
-    else $error("load_unit F15: popped slot not presented (rindex=%0d tid=%0d tid_o=%0d valid=%b head=%b%b%b)",
+    else $error("load_unit F15: data-publish pop not presented (rindex=%0d tid=%0d tid_o=%0d valid=%b head=%b%b%b pend=%b drn=%b pubidx=%0d drnidx=%0d)",
                 ldbuf_rindex, ldbuf_q[ldbuf_rindex].trans_id, trans_id_o,
-                valid_o, head_pub_wt, head_pub_spec, head_pub_fwd);
+                valid_o, head_pub_wt, head_pub_spec, head_pub_fwd,
+                a_pend, a_drn, pub_idx_w, drn_idx_w);
   int unsigned lu_f15_collide_n = 0;
   always_ff @(posedge clk_i) begin
     if (rst_ni && pub_any && head_pub)
