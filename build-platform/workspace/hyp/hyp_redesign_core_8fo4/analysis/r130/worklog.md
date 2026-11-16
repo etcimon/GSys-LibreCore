@@ -241,3 +241,36 @@ initramfs; need the raw Image form (strip FIT wrapper) or equivalent.
 GATED on mc SMP Linux booting + OpenWrt kernel config compatible w/ hyp8
 DTB (rv64imafdc+Zba/Zbb/Zbs/Zicboz, CLINT@0x2000000, PLIC@0xc000000,
 16550-ish UART, L2/L3 cache nodes).
+
+## r128b forensics — real failure signature (NOT near-shell)
+
+hyp8-osbi-scalar-r128b ran ~27h to ~1.054B cycles then exited (monitor/
+timeout, NOT the 1.75B +time_out). uart.txt = 154 lines, ends cleanly at
+"[6.31s] Freeing initrd memory: 908K". NO panic/oops/"Run /init"/login.
+=> HANG in the initrd-free -> /init-spawn transition (heaviest mem activity).
+
+Diagnostics mined from run-hyp8.log:
+- "R Response Errored" first @cyc 5.57M, recurring thru 368M+. These are
+  DECERR (axi2mem DRAM model ALWAYS returns RESP_OKAY; only the xbar emits
+  DECERR for unmapped phys addr). Sporadic+nonfatal (boot reached 6.3s) =>
+  mostly speculative reads to the 0x40001000-0x7FFFFFFF hole / >0xC0000000 /
+  HPS@0xFF800000 (in enum but NOT in the 10 addr_map rules). r131's
+  address-aware TB (a428ed7f3) prints id+addr+resp => classify on sight.
+- [ptw-err] vaddr=0x800004f0 = KNOWN-BENIGN r100/T42 mret foreign-walk
+  (M-mode window looked up under kernel satp, error dropped). RED HERRING.
+- stall-census mem_viol grew to ~112k; ipc~0.26; core still retiring at end
+  => live-lock/stall in mem path, not a hard hang.
+
+Memory map (g6lc_soc_pkg): DRAM 0x80000000+1GiB(0x40000000); DTS memory node
+= 256MiB only (reg 0x80000000/0x10000000) => kernel stays in low 256MiB,
+NO size overflow. Scalar bootargs maxcpus=1 nokaslr rdinit=/init (cmdline
+also shows merged maxcpus=2 + uio_pdrv_genirq.of_id=g6lc,ai-matrix).
+
+MMU staging: ALL boot witnesses run hyp_mmu_unstaged => TlbStages=1,
+PtwDecodeStage=0. Staged MMU (TlbStages=3) needs -DG6LC_HYP8_MMU_STAGED
+(not set for boot). => 3f3083a64 staged-TLB upsert is a NO-OP on boot.
+r131's real functional delta vs r128b = load_unit fixes (107c4ca3c pending-
+exception slot, ad6a429b9 held-load-PA, 7eb2f6e1c misaligned fault cause,
+c5c9262de DTLB-miss yield) + SC-backoff (67f413a63, a9c90bece). If r131
+hangs identically the bug is deeper (unstaged MMU PTW / AXI xbar DECERR
+handling / DRAM backend) -> needs tagged addr + directed debug.
