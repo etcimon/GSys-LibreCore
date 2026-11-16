@@ -1851,6 +1851,24 @@ CLEAR_SESSIONS = {
     'clear_r32u':    dict(vkfmt=98, w=16, h=16, mips=1, layers=1,
                           cw=[0xFFFFFFFF, 0, 0, 0],
                           ranges=[(1, 0, 1, 0, 1)]),
+    # sub-word + integer + BGRA clear coverage on the xfer XClrPat path
+    # (the raster side already has gpos sessions for these formats):
+    # R8_UNORM (vkfmt 9, 1 B/px) and R8G8_UNORM (vkfmt 16, 2 B/px) pack
+    # several pixels per word; B8G8R8A8_UNORM (vkfmt 44) swaps the
+    # stored R/B bytes; R8G8B8A8_UINT (vkfmt 41) keeps each channel's
+    # low byte of the uint32 clear word (values >255 prove truncation).
+    'clear_r8un':    dict(vkfmt=9, w=16, h=16, mips=2, layers=1,
+                          cw=[F32_TQ, F32_Q, F32_H, F32_ONE],
+                          ranges=[(1, 0, 1, 0, 1)]),
+    'clear_rg8un':   dict(vkfmt=16, w=16, h=16, mips=2, layers=1,
+                          cw=[F32_TQ, F32_Q, F32_H, F32_ONE],
+                          ranges=[(1, 1, 1, 0, 1)]),
+    'clear_bgra':    dict(vkfmt=44, w=16, h=16, mips=2, layers=1,
+                          cw=[F32_H, F32_Q, F32_TQ, F32_ONE],
+                          ranges=[(1, 0, 1, 0, 1)]),
+    'clear_rgba8u':  dict(vkfmt=41, w=16, h=16, mips=1, layers=1,
+                          cw=[0x11DE, 0x22AD, 0x33BE, 0x44EF],
+                          ranges=[(1, 0, 1, 0, 1)]),
     'clear_oob':     dict(vkfmt=37, w=16, h=16, mips=3, layers=2,
                           cw=[F32_H, F32_Q, F32_TQ, F32_ONE],
                           ranges=[(1, 0, 4, 0, 1), (1, 0, 1, 1, 2),

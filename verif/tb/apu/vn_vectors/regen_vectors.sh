@@ -93,6 +93,7 @@ done
 
 # §12.3 C/5b-r2 clear sessions + ctx-kill reuse (all on bufcopy_1)
 for v in clear_rgba8 clear_r32f clear_r32u clear_srgb clear_rgba16f \
+         clear_r8un clear_rg8un clear_bgra clear_rgba8u \
          clear_d32 clear_d16; do
   python3 $G --compute-session ue_cpos_${v}_1 bufcopy_1 --variant $v
 done
