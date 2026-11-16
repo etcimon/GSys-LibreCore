@@ -130,6 +130,8 @@ module ex_stage
     input  logic [G6LCCfg.NrIssuePorts-1:0][G6LCCfg.TRANS_ID_BITS-1:0] csr_disp_tid_i,
     input  logic [G6LCCfg.NrIssuePorts-1:0][11:0] csr_disp_addr_i,
     output logic [g6lc_ooo_pkg::ooo_csr_credit_bits(G6LCCfg)-1:0] csr_credit_o,
+    // rfix131a-02 context barrier (csr_buffer) - ISSUE_STAGE, FRONTEND
+    output logic csr_ctx_hold_o,
     // CSR address to write - COMMIT_STAGE
     output logic [11:0] csr_addr_o,
     // CSR commit - COMMIT_STAGE
@@ -712,6 +714,7 @@ assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid
       .disp_tid_i  (csr_disp_tid_i),
       .disp_addr_i (csr_disp_addr_i),
       .csr_credit_o(csr_credit_o),
+      .ctx_hold_o  (csr_ctx_hold_o),
       .fu_data_i   (one_cycle_data),
       .csr_valid_i (|csr_valid_i),
       .csr_ready_o (csr_ready),

@@ -190,9 +190,22 @@ package g6lc_config_pkg;
       PMPEntryReadOnly: 64'd0,
       PMPNapotEn: bit'(1),
       NOCType: config_pkg::NOC_TYPE_AXI4_ATOP,
-      NrNonIdempotentRules: unsigned'(2),
-      NonIdempotentAddrBase: 1024'({64'b0, 64'b0}),
-      NonIdempotentLength: 1024'({64'b0, 64'b0}),
+      // rfix131a PMA: memory is the only idempotent space -- main memory (the
+      // cached region, 1 GiB at 0x8000_0000) and the boot ROM (64 KiB at
+      // 0x1_0000). Everything else is non-idempotent: the debug module and
+      // the vacant hole below the ROM, the devices and holes between the ROM
+      // and main memory (CLINT, PLIC, UART, ...), and everything above main
+      // memory up to 2**PLEN. A load there issues only at commit time with
+      // the store pipe drained (load_unit paddr_ni / stall_ni /
+      // WAIT_SPEC_LOAD), and the I$ does not fetch there speculatively.
+      // With all lengths 0, NonIdemPotenceEn was 0 and wrong-path and
+      // stale-context loads reached the bus: 18,131 AXI DECERR reads per
+      // Linux boot plus speculative reads of device registers
+      // (verif/tests/custom/hyp8_spec_bus_clean.S). Rule 0 is the rightmost
+      // element.
+      NrNonIdempotentRules: unsigned'(3),
+      NonIdempotentAddrBase: 1024'({64'h0000_0000_C000_0000, 64'h0002_0000, 64'h0}),
+      NonIdempotentLength: 1024'({64'h00FF_FFFF_4000_0000, 64'h7FFE_0000, 64'h1_0000}),
       NrExecuteRegionRules: unsigned'(3),
       ExecuteRegionAddrBase: 1024'({64'h8000_0000, 64'h1_0000, 64'h0}),
       ExecuteRegionLength: 1024'({64'h40000000, 64'h10000, 64'h1000}),

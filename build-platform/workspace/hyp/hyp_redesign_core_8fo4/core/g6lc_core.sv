@@ -672,6 +672,9 @@ module g6lc_core
   logic [G6LCCfg.NrIssuePorts-1:0][G6LCCfg.TRANS_ID_BITS-1:0] csr_disp_tid_id_ex;
   logic [G6LCCfg.NrIssuePorts-1:0][11:0] csr_disp_addr_id_ex;
   logic [g6lc_ooo_pkg::ooo_csr_credit_bits(G6LCCfg)-1:0] csr_credit_ex_id;
+  // rfix131a-02 context barrier: a CSR-class instruction is in flight
+  // (csr_buffer). Holds dispatch (issue_stage) and the frontend.
+  logic csr_ctx_hold_ex_id;
   logic [G6LCCfg.TRANS_ID_BITS-1:0] flu_trans_id_ex_id;
   logic flu_valid_ex_id;
   logic [G6LCCfg.XLEN-1:0] flu_result_ex_id;
@@ -1307,7 +1310,12 @@ assign irq_active = irq_i[smt_active_hart];
       // below line is not entirely correct
       .flush_i            (flush_ctrl_if),
       .halt_i             (halt_ctrl),
-      .halt_frontend_i    (halt_frontend),
+      // rfix131a-02: no fetch request while a CSR-class instruction is in
+      // flight -- the request the frontend would present across the context
+      // switch (the still-presented window at mret, the next line at a
+      // satp/mstatus write) is never made, so it is never looked up or
+      // walked under the wrong context.
+      .halt_frontend_i    (halt_frontend | csr_ctx_hold_ex_id),
       .fetch_translation_en_i (enable_translation_csr_ex | enable_g_translation_csr_ex),
       .set_pc_commit_i    (set_pc_ctrl_pcgen),
 `ifdef G6LC_FETCH_B
@@ -3331,6 +3339,7 @@ assign irq_active = irq_i[smt_active_hart];
       .flu_ready_i             (flu_ready_ex_id),
       .csr_ready_i             (csr_ready_ex_id),
       .csr_credit_i            (csr_credit_ex_id),
+      .csr_ctx_hold_i          (csr_ctx_hold_ex_id),
       .csr_disp_valid_o        (csr_disp_valid_id_ex),
       .csr_disp_tid_o          (csr_disp_tid_id_ex),
       .csr_disp_addr_o         (csr_disp_addr_id_ex),
@@ -3510,6 +3519,7 @@ assign irq_active = irq_i[smt_active_hart];
       .csr_disp_tid_i  (csr_disp_tid_id_ex),
       .csr_disp_addr_i (csr_disp_addr_id_ex),
       .csr_credit_o    (csr_credit_ex_id),
+      .csr_ctx_hold_o  (csr_ctx_hold_ex_id),
       .csr_addr_o(csr_addr_ex_csr),
       .csr_commit_i(csr_commit_commit_ex),  // from commit
       .csr_hs_ld_st_inst_o(csr_hs_ld_st_inst_ex),  // signals a Hypervisor Load/Store Instruction

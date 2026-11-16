@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 Etienne Cimon
 # SPDX-License-Identifier: MIT
-"""hyp8 leaf runner: HYP8_LEAF=memory|csr|csr-credit|issue|dispatch|realign|queue|alu|
+"""hyp8 leaf runner: HYP8_LEAF=memory|csr|csr-credit|ctx-barrier|issue|dispatch|realign|queue|alu|
 sc-backoff selects the boundary under test while sharing one
 closure/upload/runtime mechanism. HYP8_VERILATOR_DIR optionally selects an
 alternate compiler prefix; driver and binary hashes remain recorded.
@@ -95,6 +95,15 @@ LEAFS = {
         'verify_manifest': True,
         'x_initial_edge': True,
         'strict_widths': True,
+    },
+    # rfix131a-02: the dispatch context barrier rule, exhaustive over every
+    # lane pattern for 1/2/4/8 lanes against a written-out reference.
+    'ctx-barrier': {
+        'sources': ['g6lc_ctx_barrier.sv', 'tb_g6lc_hyp8_ctx_barrier.sv'],
+        'includes': [],
+        'top': 'tb_g6lc_hyp8_ctx_barrier',
+        'model': 'hyp8_ctx_barrier',
+        'token': 'HYP8_CTX_BARRIER_PASS',
     },
     'issue': {
         'sources': COMMON + [

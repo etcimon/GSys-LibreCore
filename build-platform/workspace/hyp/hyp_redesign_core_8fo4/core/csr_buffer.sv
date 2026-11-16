@@ -59,6 +59,15 @@ module csr_buffer
     input  logic [G6LCCfg.NrIssuePorts-1:0][11:0] disp_addr_i,
     // OoO: free entries after the sweeps, read by the dispatch group gate.
     output logic [g6lc_ooo_pkg::ooo_csr_credit_bits(G6LCCfg)-1:0] csr_credit_o,
+    // rfix131a-02 context barrier - ISSUE_STAGE, FRONTEND: a CSR-class
+    // instruction (fu == CSR: CSR access, xRET, ECALL/EBREAK, WFI, fences)
+    // is in flight between its dispatch and the cycle after its commit.
+    // These are the only instructions that change the privilege /
+    // translation context, and they do it when they commit; while this is
+    // high nothing younger is dispatched and the frontend issues no fetch
+    // request, so nothing executes, walks or fetches under a context an
+    // older in-flight instruction is about to replace.
+    output logic ctx_hold_o,
     // FU data needed to execute instruction - ISSUE_STAGE
     input fu_data_t fu_data_i,
     // CSR FU is ready - ISSUE_STAGE
@@ -95,6 +104,7 @@ module csr_buffer
     assign csr_addr_o = tab_q[0].csr_address;
     // No OoO dispatch consumer exists in this profile.
     assign csr_credit_o = '0;
+    assign ctx_hold_o   = 1'b0;
 
     // write logic
     always_comb begin : write
@@ -144,6 +154,30 @@ module csr_buffer
         free_count += 32'(free_v[i]);
     end
     assign csr_credit_o = CREDIT_W'(free_count);
+    // rfix131a-02 context barrier. An entry is live from the dispatch
+    // consume edge (allocation) to the commit edge (release) of its owner;
+    // a squashed owner drops out through the same liveness terms the credit
+    // uses. rel_q covers the cycle after the commit: the context registers
+    // changed at that edge and the registered flush decision of the CSR
+    // (controller flush_csr_i) and the frontend redirect are presented in
+    // it. Everything read here is registered state.
+    logic [DEPTH-1:0] ctx_live;
+    logic             ctx_rel_q;
+    for (genvar i = 0; i < DEPTH; i++) begin : gen_ctx_live
+      assign ctx_live[i] = tab_q[i].valid && sb_live_i[tab_q[i].tid] &&
+                           !cancelled_mask_i[tab_q[i].tid];
+    end
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) ctx_rel_q <= 1'b0;
+      else ctx_rel_q <= csr_commit_i;
+    end
+`ifdef G6LC_MUT_CTX_BARRIER_OFF
+    // Review mutation: no barrier (the pre-rfix131a behaviour) --
+    // hyp8_ctx_switch_clean must show its stale-context records.
+    assign ctx_hold_o = 1'b0;
+`else
+    assign ctx_hold_o = (|ctx_live) || ctx_rel_q;
+`endif
     // Already-allocated: the presented CSR always owns an entry.
     assign csr_ready_o = 1'b1;
 

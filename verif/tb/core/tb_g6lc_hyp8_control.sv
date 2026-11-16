@@ -127,7 +127,7 @@ module tb_g6lc_hyp8_csr;
       .fu_data_i(fud), .csr_ready_o(buf_ready),
       .csr_valid_i(buf_valid), .csr_result_o(),
       .csr_commit_i(buf_commit), .csr_commit_tid_i(buf_commit_tid),
-      .csr_addr_o(buf_addr));
+      .csr_addr_o(buf_addr), .ctx_hold_o());
 
   mut_csr_buffer_gated #(
       .G6LCCfg(C), .HypCfg(H), .fu_data_t(fu_data_t)

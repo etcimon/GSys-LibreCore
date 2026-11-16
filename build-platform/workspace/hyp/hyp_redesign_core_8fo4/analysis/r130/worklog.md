@@ -244,6 +244,11 @@ DTB (rv64imafdc+Zba/Zbb/Zbs/Zicboz, CLINT@0x2000000, PLIC@0xc000000,
 
 ## r128b forensics — real failure signature (NOT near-shell)
 
+> **SUPERSEDED / WRONG (see `analysis/rfix131a/worklog.md` section 0).** r128b was
+> alive and progressing through the kernel's UART-quiet phase; its 1.75e9
+> budget could not reach `/init` (~2.53B cycles). No hang, no kill, no
+> regression.
+
 hyp8-osbi-scalar-r128b ran ~27h to ~1.054B cycles then exited (monitor/
 timeout, NOT the 1.75B +time_out). uart.txt = 154 lines, ends cleanly at
 "[6.31s] Freeing initrd memory: 908K". NO panic/oops/"Run /init"/login.
@@ -276,6 +281,11 @@ hangs identically the bug is deeper (unstaged MMU PTW / AXI xbar DECERR
 handling / DRAM backend) -> needs tagged addr + directed debug.
 
 ## r128b hang — deep RTL/kernel forensic (decisive)
+
+> **SUPERSEDED / WRONG (see `analysis/rfix131a/worklog.md` section 0).** r128b was
+> alive and progressing through the kernel's UART-quiet phase; its 1.75e9
+> budget could not reach `/init` (~2.53B cycles). No hang, no kill, no
+> regression.
 
 r128b (closure 2026-11-14, target g6lc64_hyp8 => LoadExPubStages=1,
 TlbStages=1) ran ~27h, ~1.054B cycles, then SIGKILL (run-hyp8.log ends

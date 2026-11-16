@@ -67,13 +67,23 @@ def main():
         m = re.search(r'\*\*\* SUCCESS \*\*\*.*after (\d+) cycles', text)
         fail = re.search(r'\*\*\* FAILED \*\*\*.*tohost = (\S+)', text)
         state = 'fail' if p.returncode != 0 or fail else ('pass' if m else 'wedged')
+        # rfix131a log grade: no smoke may put a read or write on the bus that
+        # nothing decodes (speculation leaving idempotent memory), and none
+        # of them reads the UART. A tohost pass with such a record is
+        # `log_dirty`, not a pass.
+        bus_err = len(re.findall(r'Response Errored', text))
+        uart_rd = len(re.findall(r'^\[uart-axi-ar\]', text, re.M))
+        if state == 'pass' and (bus_err or uart_rd):
+            state = 'log_dirty'
         summary['tests'][name] = {'rc': p.returncode, 'state': state,
                                   'argv': cmd, 'elfSha256': elf_sha,
                                   'cycles': int(m.group(1)) if m else None,
+                                  'busErrors': bus_err, 'uartReads': uart_rd,
                                   'verdict': verdict[-1:] , 'log': log.name}
         if state != 'pass':
             rc_all = 1
-        print(f'{name}: {state} cycles={summary["tests"][name]["cycles"]} rc={p.returncode}')
+        print(f'{name}: {state} cycles={summary["tests"][name]["cycles"]} rc={p.returncode} '
+              f'bus_err={bus_err} uart_rd={uart_rd}')
     (out / 'smokes-results.json').write_text(json.dumps(summary, indent=2))
     return rc_all
 

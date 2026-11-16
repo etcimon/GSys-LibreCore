@@ -103,6 +103,8 @@ module issue_stage
     // hyp8 r33: CSR address-table free-entry credit — the OoO dispatch
     // group gate; the dispatched CSR table strobes back to EX_STAGE.
     input  logic [g6lc_ooo_pkg::ooo_csr_credit_bits(G6LCCfg)-1:0] csr_credit_i,
+    // rfix131a-02 context barrier - EX_STAGE (csr_buffer)
+    input  logic csr_ctx_hold_i,
     output logic [G6LCCfg.NrIssuePorts-1:0] csr_disp_valid_o,
     output logic [G6LCCfg.NrIssuePorts-1:0][G6LCCfg.TRANS_ID_BITS-1:0] csr_disp_tid_o,
     output logic [G6LCCfg.NrIssuePorts-1:0][11:0] csr_disp_addr_o,
@@ -427,6 +429,25 @@ assign issue_instr_o    = issue_instr_iro[0];
   logic [G6LCCfg.NrIssuePorts-1:0][1:0] iro_spec_ab;
   logic [G6LCCfg.NrIssuePorts-1:0][1:0][G6LCCfg.TRANS_ID_BITS-1:0] iro_ptid;
 
+  // rfix131a-02 context barrier at dispatch (g6lc_ctx_barrier): no lane is
+  // shown to rename while a CSR-class instruction is in flight, and a
+  // CSR-class lane is the last lane of its group. A lane that is not kept
+  // is not acknowledged; the scoreboard presents it again (the same prefix
+  // acknowledge the in-order issue uses for a CSR on an older port).
+  logic [G6LCCfg.NrIssuePorts-1:0] ctx_lane_csr, ctx_keep, disp_valid_ctx;
+  for (genvar p = 0; p < G6LCCfg.NrIssuePorts; p++) begin : gen_ctx_lane
+    assign ctx_lane_csr[p] = (issue_instr_sb[p].fu == CSR);
+  end
+  g6lc_ctx_barrier #(
+      .NrLanes(G6LCCfg.NrIssuePorts)
+  ) i_ctx_barrier (
+      .hold_i      (csr_ctx_hold_i),
+      .lane_valid_i(issue_instr_valid_sb),
+      .lane_csr_i  (ctx_lane_csr),
+      .keep_o      (ctx_keep)
+  );
+  assign disp_valid_ctx = issue_instr_valid_sb & ctx_keep;
+
   if (G6LCCfg.OoOEn) begin : gen_full_ooo
     logic [G6LCCfg.NrWbPorts-1:0] wb_exc_bits;
     for (genvar wi = 0; wi < G6LCCfg.NrWbPorts; wi++) begin : gen_wb_exc
@@ -448,7 +469,7 @@ assign issue_instr_o    = issue_instr_iro[0];
         .sb_live_i        (sb_live),
         .dispatch_sbe_i   (issue_instr_sb),
         .dispatch_orig_i  (orig_instr_sb),
-        .dispatch_valid_i (issue_instr_valid_sb),
+        .dispatch_valid_i (disp_valid_ctx),
         .dispatch_ack_o   (issue_ack_sb),
         .issue_sbe_o      (issue_instr_iro),
         .issue_orig_o     (orig_instr_iro),

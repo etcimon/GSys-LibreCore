@@ -1,6 +1,9 @@
 // Copyright 2026 Etienne Cimon
 // SPDX-License-Identifier: MIT
 // Address ownership and atomic-group capacity, independent of table placement.
+// rfix131a-02: also the context barrier contract -- ctx_hold_o is high from
+// the cycle after a CSR-class dispatch allocates to the cycle after its
+// commit, and a cancelled or flushed owner releases it without a commit.
 module g6lc_hyp8_csr_credit_case #(
     parameter int unsigned Ports = 2
 ) (
@@ -37,6 +40,8 @@ module g6lc_hyp8_csr_credit_case #(
   logic [Ports-1:0][11:0] disp_addr;
   logic [IDB-1:0] commit_tid;
   logic [CW-1:0] credit;
+  logic ctx_hold;
+  bit prev_commit;
   logic [11:0] addr;
   logic [C.XLEN-1:0] result;
   fu_data_t fu_data;
@@ -47,7 +52,13 @@ module g6lc_hyp8_csr_credit_case #(
     .fu_data_i(fu_data), .csr_ready_o(ready), .csr_valid_i(csr_valid),
     .csr_result_o(result), .csr_commit_i(commit),
     .csr_commit_tid_i(commit_tid), .csr_addr_o(addr)
+`ifndef G6LC_HYP8_CSR_SMALL_ONLY
+    , .ctx_hold_o(ctx_hold)
+`endif
   );
+`ifdef G6LC_HYP8_CSR_SMALL_ONLY
+  assign ctx_hold = 1'b0;
+`endif
 
   bit [SB-1:0] owned;
   logic [11:0] address_by_tid [SB];
@@ -86,6 +97,7 @@ module g6lc_hyp8_csr_credit_case #(
     csr_valid = 0;
     fu_data = '0;
     owned = '0;
+    prev_commit = 0;
     clear_stimulus();
     repeat (3) @(negedge clk_i);
     rst_n = 1;
@@ -122,8 +134,18 @@ module g6lc_hyp8_csr_credit_case #(
       else $fatal(1, "CSR_IDENTITY ports=%0d tid=%0d addr=%h expected=%h",
                   Ports, next_lookup, addr, expected_addr);
     checks += 2;
+`ifndef G6LC_HYP8_CSR_SMALL_ONLY
+    // Barrier: every owner not cancelled this cycle holds it -- including
+    // the one committing now -- and so does the cycle after a commit.
+    assert (ctx_hold === ((|(owned & ~next_cancel)) || prev_commit))
+      else $fatal(1, "CSR_CTX_HOLD ports=%0d hold=%b owned=%0d cancel=%0d prev_commit=%b",
+                  Ports, ctx_hold, $countones(owned), $countones(owned & next_cancel),
+                  prev_commit);
+    checks += 1;
+`endif
     @(posedge clk_i);
     #1;
+    prev_commit = next_commit;
     owned = swept;
     if (next_flush) owned = '0;
     else for (int unsigned p = 0; p < Ports; p++) begin

@@ -100,6 +100,12 @@ TESTS = [
     # functional unit, checksum from Spike). The only smoke that issues to
     # that unit.
     ('hyp8_zkn_kat', 'verif/tests/custom/hyp8_zkn_kat.S', '80001000'),
+    # rfix131a: speculative loads stay off the bus outside idempotent memory --
+    # the OpenSBI MPRV window and a wrong-path device-space load, the two
+    # patterns behind the witness's 18,131 AXI DECERR reads. Graded on the
+    # log as well (run_hyp8_smokes.py: no `Response Errored`, no UART read).
+    ('hyp8_spec_bus_clean', 'verif/tests/custom/hyp8_spec_bus_clean.S',
+     '80001000'),
 ]
 LINK_LD = 'verif/tests/custom/common/link_verilator.ld'
 GCC_FLAGS = ['-march=rv64imafdc_zicsr_zifencei', '-mabi=lp64d',
