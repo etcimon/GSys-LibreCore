@@ -740,10 +740,18 @@ Nothing multi-hart passes yet. Three runs, smallest reproduction last:
 So the failure does not need four cores, the 8-wide geometry, or L2/L3: one
 core with two harts on the boot geometry shows it, in a model that builds in
 ten minutes and runs at scalar speed. That is the reproduction to work
-from. Not yet known: whether the r131 tree has it too (an A/B build of the
-r131 closure for `g6lc64_hyp8_smt2` is the next step; the r76 program
-already lists "mc2 reset fetch" as open, so multi-core has not run since at
-least then).
+from.
+
+It is not a regression of this round. A/B: the r131 closure built for
+`g6lc64_hyp8_smt2` (`hyp8-rfix131a-ab-r131-smt2-aggregate-t4`, toolchain
+44063db8) fails the same program at the same point — hart 1 stops after
+its jump out of the ROM (`@527`), and the records printed for hart 0 then
+run `_start` a second time (again reading `mhartid = 0`), skip from
+`0x80000018` to `0x80000034` and retire that one PC every 62 cycles to the
+budget (6,454 records, no verdict). What differs between the two trees is
+only what the stream does after it has gone wrong. The r76 program already
+lists "mc2 reset fetch" as open: two harts have not run on hyp8 since at
+least then, and every Linux witness so far was single-hart.
 
 **Simulation rate of the multi-core model.** Measured on the instrumented
 model, 4 threads: 206 cycles/s (cycle 68,619 -> 87,957 in 94 s). The scalar
