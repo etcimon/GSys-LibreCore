@@ -932,3 +932,63 @@ of that staging on a boot, not as a defect. Nothing was changed.
   path (RFIX-131a-09); `paddr_ni`, the context barrier and the TLB fill
   compare; boot-level cost of CSR serialization, non-idempotent load
   replays and commit-head walks.
+
+## RFIX-131a-14 — SMP LR/SC lost update: exclusive monitor keyed by split AXI id (mc)
+
+**Symptom.** `hyp8_smp_lrsc` (`-DNHARTS=8`) on `g6lc64_hyp8_mc` (4c x 2t,
+instrumented phase-1 model, commit `16855c27f` LSQ fix) ran all four cores to
+retirement and exited `tohost=1` at 127,611 cycles — `f_lrsc`: the shared
+`lr.d`/`sc.d` counter `CNT_LRSC != ROUNDS*NHARTS` (384). Lost updates, not a
+livelock (DONE==8 was already satisfied).
+
+**Isolation.** `hyp8_smp_lrsc_kill.S` (new, `verif/tests/custom/`) — hart 0
+(core 0) `lr.d X`, hart 2 (core 1) plain-`sd X`, hart 0 `sc.d X` must fail —
+**passed** on the same model. So a remote store does kill a reservation
+(address-wide `clr` in `axi_res_tbl`). The defect is not kill; it is the
+LR→SC *reservation correlation* under contention.
+
+**Root cause (confirmed by `+f14_trace` on the built model).** HPDCACHE issues
+LR/SC as LDEX/STEX on **split AXI ids** — separate read/write id spaces. On
+the DRAM boundary the monitor sees, for one hart's `lr.d`/`sc.d` pair on the
+same word:
+
+    adapter_ar id=3  ->  slv_ar lock=1  id=0x01   (LR  sets tbl[0x01]=addr)
+    adapter_aw id=3  ->  slv_aw lock=1  id=0x00   (SC  checks tbl[0x00]==addr)
+
+The mc build selected the **pulp `axi_riscv_atomics_wrap`**: `axi_riscv_lrsc`
++ `axi_res_tbl`, a reservation table `tbl[2^ID_WIDTH][addr]` that is
+**keyed by AXI id** (`art_set_id=slv_ar_id`, `art_check_id=slv_aw_id`). With
+LR on id 0x01 and SC on id 0x00 the reservation is stored in a slot the SC
+never reads; SC success then depends on coincidental id collisions across the
+8 harts, so `sc.d` commits a stale `base+1` and updates are lost — exactly
+the observed wrong count that still completes.
+
+The SoC already carries the correct monitor: `g6lc_axi_lrsc` /
+`g6lc_axi_atomics_wrap`, an **address-keyed** NRes-entry table that "needs no
+hart id" (its header cites this split-id case). It was gated behind
+`G6LC_AI_EXCL_MULTI`, defined only for `G6LC_AI_DRAM_*` channel configs —
+`g6lc64_hyp8_mc` sets none, so it silently fell back to the pulp wrap.
+
+**Fix (testbench-only, `corev_apu/tb/g6lc_testharness.sv`).** Select
+`g6lc_axi_atomics_wrap` whenever `NR_HARTS > 1` (or `G6LC_AI_EXCL_MULTI`),
+`NRes = NR_HARTS`, `+define+G6LC_AI_LRSC_SINGLE_RES` still forces the
+pre-fix depth-1 negative oracle. Single-hart targets (`g6lc64_hyp8`, `_l3`,
+`_deep`, `_mmu_staged`, `_iqsteer2`, NR_HARTS=1) keep the pulp wrap unchanged.
+Affects `g6lc64_hyp8_mc` (8) and `g6lc64_hyp8_smt2` (2); all required modules
+(`g6lc_axi_lrsc`, `g6lc_axi_atomics_wrap`, `axi_cut_intf` in `axi_cut.sv`,
+`axi_riscv_amos`) are already in both `Flist.hyp8_sim` and
+`Flist.hyp8_mc_sim`. No core-RTL or `core/`/`corev_apu/` src change; no
+synthesis impact. Generate-if keeps `i_axi_riscv_atomics` name; no TB probe
+reaches inside the instance (only `master[DRAM]`/`dram` buses are observed).
+
+**Verify.** Rebuild `g6lc64_hyp8_mc`, rerun `hyp8_smp_lrsc` NHARTS=8: expect
+`tohost=1` with `CNT_LRSC==384`. `hyp8_smp_lrsc_kill` remains a regression
+oracle (its SC must still fail after the remote store). `+f14_trace` after
+the fix should show the g6lc monitor consuming LDEX/STEX regardless of the
+0x01/0x00 id split.
+
+**Backport.** Testbench selection only. If a future coherent-port/SoC needs
+LR/SC at a non-DRAM boundary, the transferable rule is: *key reservations by
+address (or by a hart/transaction tag the initiator controls), never by an
+AXI id that an upstream split-id source does not preserve between the LR's
+read channel and the SC's write channel.*

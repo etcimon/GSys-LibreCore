@@ -850,55 +850,70 @@ module g6lc_testharness #(
   `define G6LC_AI_EXCL_MULTI
 `endif
 
+  // Exclusive-monitor selection. HPDCACHE issues LR/SC as LDEX/STEX on split
+  // AXI IDs (separate read/write id spaces), so the ID-keyed pulp axi_res_tbl
+  // cannot correlate a reservation to its SC — a reservation set under the LR's
+  // read id is invisible to the SC's write-id check, and coincidental id
+  // collisions let SCs succeed on a stale base (lost updates; rfix131a
+  // hyp8_smp_lrsc f_lrsc). g6lc_axi_lrsc keys reservations by address and needs
+  // no hart id. Use it whenever >1 software hart can hold a reservation
+  // concurrently (NR_HARTS>1) or a DRAM-channel config already forces it
+  // (G6LC_AI_EXCL_MULTI). Single-hart non-channel configs keep the pulp wrap.
 `ifdef G6LC_AI_EXCL_MULTI
+  localparam bit EXCL_ADDR_KEYED = 1'b1;
+`else
+  localparam bit EXCL_ADDR_KEYED = (NR_HARTS > 1);
+`endif
   // SIM_CHANS keeps island MaxAROut=2 so dram_aw_out=1 (cookie identity).
   // g6lc wrap + AMOS deadlock an AMO at 1 write slot; S4/CLASS1 already
   // pass 8. Do not change cookie pulp DRAM_AW_OUT.
   localparam int unsigned DRAM_EXCL_AW =
       (DRAM_AW_OUT < unsigned'(2)) ? unsigned'(8) : DRAM_AW_OUT;
-  g6lc_axi_atomics_wrap #(
-    .AXI_ADDR_WIDTH     ( AXI_ADDRESS_WIDTH            ),
-    .AXI_DATA_WIDTH     ( AXI_DATA_WIDTH               ),
-    .AXI_ID_WIDTH       ( g6lc_axi_soc::IdWidthSlave ),
-    .AXI_USER_WIDTH     ( AXI_USER_WIDTH               ),
-    .AXI_MAX_WRITE_TXNS ( DRAM_EXCL_AW ),
-    .RISCV_WORD_WIDTH   ( 64 ),
-    // One reservation per software hart. A single global reservation livelocks
-    // two harts contending on *different* addresses (g6lc_axi_lrsc header), so
-    // this is sized from the SoC's own hart count rather than left at a
-    // default. NR_HARTS = NR_CORES x NrHarts.
-    //
-    // `+define+G6LC_AI_LRSC_SINGLE_RES` forces the pre-fix depth of 1. It
-    // exists so the disjoint LR/SC gate can be shown to FAIL on the old
-    // behaviour: a test that has never failed is not an oracle, and the
-    // same-address snoop gate cannot distinguish the two designs. Keep it --
-    // rediscovering this negative costs a full harness rebuild.
+
+  if (EXCL_ADDR_KEYED) begin : gen_excl_addr
+    g6lc_axi_atomics_wrap #(
+      .AXI_ADDR_WIDTH     ( AXI_ADDRESS_WIDTH            ),
+      .AXI_DATA_WIDTH     ( AXI_DATA_WIDTH               ),
+      .AXI_ID_WIDTH       ( g6lc_axi_soc::IdWidthSlave ),
+      .AXI_USER_WIDTH     ( AXI_USER_WIDTH               ),
+      .AXI_MAX_WRITE_TXNS ( DRAM_EXCL_AW ),
+      .RISCV_WORD_WIDTH   ( 64 ),
+      // One reservation per software hart. A single global reservation livelocks
+      // two harts contending on *different* addresses (g6lc_axi_lrsc header), so
+      // this is sized from the SoC's own hart count rather than left at a
+      // default. NR_HARTS = NR_CORES x NrHarts.
+      //
+      // `+define+G6LC_AI_LRSC_SINGLE_RES` forces the pre-fix depth of 1. It
+      // exists so the disjoint LR/SC gate can be shown to FAIL on the old
+      // behaviour: a test that has never failed is not an oracle, and the
+      // same-address snoop gate cannot distinguish the two designs. Keep it --
+      // rediscovering this negative costs a full harness rebuild.
 `ifdef G6LC_AI_LRSC_SINGLE_RES
-    .NRes               ( 1 )
+      .NRes               ( 1 )
 `else
-    .NRes               ( (NR_HARTS < 1) ? 1 : NR_HARTS )
+      .NRes               ( (NR_HARTS < 1) ? 1 : NR_HARTS )
 `endif
-  ) i_axi_riscv_atomics (
-    .clk_i,
-    .rst_ni ( ndmreset_n               ),
-    .slv    ( master[g6lc_soc::DRAM] ),
-    .mst    ( dram                     )
-  );
-`else
-  axi_riscv_atomics_wrap #(
-    .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
-    .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),
-    .AXI_ID_WIDTH   ( g6lc_axi_soc::IdWidthSlave ),
-    .AXI_USER_WIDTH ( AXI_USER_WIDTH               ),
-    .AXI_MAX_WRITE_TXNS ( DRAM_AW_OUT ),
-    .RISCV_WORD_WIDTH   ( 64 )
-  ) i_axi_riscv_atomics (
-    .clk_i,
-    .rst_ni ( ndmreset_n               ),
-    .slv    ( master[g6lc_soc::DRAM] ),
-    .mst    ( dram                     )
-  );
-`endif
+    ) i_axi_riscv_atomics (
+      .clk_i,
+      .rst_ni ( ndmreset_n               ),
+      .slv    ( master[g6lc_soc::DRAM] ),
+      .mst    ( dram                     )
+    );
+  end else begin : gen_excl_pulp
+    axi_riscv_atomics_wrap #(
+      .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
+      .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),
+      .AXI_ID_WIDTH   ( g6lc_axi_soc::IdWidthSlave ),
+      .AXI_USER_WIDTH ( AXI_USER_WIDTH               ),
+      .AXI_MAX_WRITE_TXNS ( DRAM_AW_OUT ),
+      .RISCV_WORD_WIDTH   ( 64 )
+    ) i_axi_riscv_atomics (
+      .clk_i,
+      .rst_ni ( ndmreset_n               ),
+      .slv    ( master[g6lc_soc::DRAM] ),
+      .mst    ( dram                     )
+    );
+  end
 
   AXI_BUS #(
     .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
