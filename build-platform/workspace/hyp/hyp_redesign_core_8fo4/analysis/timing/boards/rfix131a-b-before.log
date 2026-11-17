@@ -1,0 +1,27 @@
+argv: /e/cva6/sv-timing/target/release/sv-timing.exe analyze --files-from /e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/hyp8-core-rfix131a-before.f --modules sb_commit_bundle,g6lc_icache,scoreboard,sb_cancel --target-mhz 5000 --fo4-ps 20 --budget-margin 0.2 --param-map /e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/../r88-param-map.json --stages --json-out /e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/boards/rfix131a-b-before.json --ir-out /e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/boards/rfix131a-b-before.ir.json
+58e3a789b79ff6e03183dfc6a92e1b0ca640cb2f8e82045dfb1c7595dbd05e47 */e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/../r88-param-map.json
+a44d0cbc08f0d6605fba899e46a0c7c468ee9f0fb2fc76a387b57ac59c16da15 */e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/hyp8-core-rfix131a-before.f
+sv-timing-core 0.1.0 ir=ir-v6 measurement=delay-v50 correction=correction-v5 parser_pin=v0.13.5
+opt=-O2 (max_passes=4 worklist_width=1 cut=cost-balanced stages=1 min_gain=2 slack_target=0 area_weight=0 max_cells_per_fo4=16 reassoc=false effort=balanced cache=unit)
+target_mhz=5000
+from_cache=false
+modules=4
+paths=197
+opportunities=72
+ir_out=E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/boards/rfix131a-b-before.ir.json
+  module sb_cancel nodes=10 regions=5
+  module sb_commit_bundle nodes=61 regions=58
+  module scoreboard nodes=1 regions=1
+  module g6lc_icache nodes=144 regions=56
+json_out=E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/boards/rfix131a-b-before.json
+  module sb_commit_bundle
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    CB           1   0      61   21.9 /   8.0 !             -                       sb_commit_bundle.sv:66-421  
+
+  module scoreboard
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    RDY          1   0       1    0.0 /   8.0               -                       scoreboard.sv:131-467  
+
+  stage users
+    sb_commit_bundle     stages=[CB] used_by=scoreboard.i_sb_commit_bundle (scoreboard.sv)
+    scoreboard           stages=[RDY] used_by=-

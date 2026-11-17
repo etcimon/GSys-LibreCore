@@ -82,7 +82,10 @@ def main():
         # fault or a fetch exception record in its log is activity under a
         # wrong context or on a wrong path.
         walk_err = len(re.findall(r'^\[(?:ptw-err|mmu-ife)\]', text, re.M))
-        if state == 'pass' and (bus_err or uart_rd or
+        # an RTL $error (a simulation-only invariant check) is a model error
+        # whatever tohost says
+        model_err = len(re.findall(r'%Error', text))
+        if state == 'pass' and (bus_err or uart_rd or model_err or
                                 (name.endswith('_clean') and walk_err)):
             state = 'log_dirty'
         summary['tests'][name] = {'rc': p.returncode, 'state': state,
@@ -90,11 +93,13 @@ def main():
                                   'cycles': int(m.group(1)) if m else None,
                                   'busErrors': bus_err, 'uartReads': uart_rd,
                                   'walkErrors': walk_err,
+                                  'modelErrors': model_err,
                                   'verdict': verdict[-1:] , 'log': log.name}
         if state != 'pass':
             rc_all = 1
         print(f'{name}: {state} cycles={summary["tests"][name]["cycles"]} rc={p.returncode} '
-              f'bus_err={bus_err} uart_rd={uart_rd} walk_err={walk_err}')
+              f'bus_err={bus_err} uart_rd={uart_rd} walk_err={walk_err} '
+              f'model_err={model_err}')
     (out / 'smokes-results.json').write_text(json.dumps(summary, indent=2))
     return rc_all
 

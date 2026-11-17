@@ -28,6 +28,21 @@
 // result/exception is only attached for non-cancelled slots; the same
 // combined cancelled_mask that kills the slot gates the PRF write in
 // g6lc_prf, so the data cannot architecturally survive either path.
+//
+// rfix131a-09: "cancelled" has one definition for the presented bundle too.
+// The sticky bit (mem_q.cancelled) is installed at the edge AFTER the
+// mispredict resolves, but the branch itself is committable in its resolve
+// cycle (the same-cycle WB merge above), and the slot behind it is then on
+// port 1 with its result long since written back. Presented with the sticky
+// bit alone that slot was acknowledged as a retirement while the rename
+// stage, keyed on the combined mask, treated it as cancelled: no register
+// was written, but every commit_ack consumer saw an instruction retire --
+// minstret counted it, fflags accrued a wrong-path FP flag, RVFI printed
+// it. cancel_now_i is the same-cycle half of the combined mask
+// (sb_cancel.kill_req_o); ports above 0 present a slot it names as a drop.
+// Port 0 is the oldest entry of its hart and a mispredict only cancels
+// younger entries of that hart, so port 0 keeps the registered bit (its
+// decision path is unchanged) and the invariant is checked in simulation.
 
 module sb_commit_bundle
   import g6lc_core_pkg::*;
@@ -51,6 +66,8 @@ module sb_commit_bundle
     input  exception_t [G6LCCfg.NrWbPorts-1:0]                        ex_i,
     // LSQ load-check (tied high until the LSQ group lands)
     input  logic [G6LCCfg.NR_SB_ENTRIES-1:0]                          ld_checked_i,
+    // Slots a mispredict resolving this cycle cancels (sb_cancel.kill_req_o)
+    input  logic [G6LCCfg.NR_SB_ENTRIES-1:0]                          cancel_now_i,
     // COH_OOO physical-store ordering inputs
     input  logic [G6LCCfg.NR_SB_ENTRIES-1:0]                          phys_pending_i,
     input  logic                                                      phys_mod_i,
@@ -347,9 +364,18 @@ module sb_commit_bundle
     assign sel_mem = sb_mem_t'(sel_flat);
     assign sel_sbe = sel_mem.sbe;
 
+    // rfix131a-09: cancelled = the sticky bit, or (ports above 0) named by
+    // the mispredict resolving this cycle.
+    logic sel_cancelled;
+    if (i == 0) begin : gen_cancel_p0
+      assign sel_cancelled = sel_mem.cancelled;
+    end else begin : gen_cancel_px
+      assign sel_cancelled = sel_mem.cancelled | (|(sel_oh[i] & cancel_now_i));
+    end
+
     // A dropped (cancelled) slot never merges a wrong-path result: its
     // presentation is the drop, not the data.
-    assign wb_hit = (|wh) && !sel_mem.cancelled;
+    assign wb_hit = (|wh) && !sel_cancelled;
     // hyp8: load-check gate -- a LOAD slot is committable only after the
     // LSQ reports its memory-order check. Drops bypass the gate.
     assign ld_ok = (sel_sbe.fu != g6lc_core_pkg::LOAD) ||
@@ -374,7 +400,7 @@ module sb_commit_bundle
       // sel_sbe.ex.valid || (wb_hit && wbex.valid) in every arm of
       // cport_ex; the direct predicate cuts the cross-block dep.
       if (G6LCCfg.CohPolicy == config_pkg::COH_OOO &&
-          !sel_mem.cancelled && !(sel_sbe.ex.valid || (wb_hit && wbex.valid)) &&
+          !sel_cancelled && !(sel_sbe.ex.valid || (wb_hit && wbex.valid)) &&
           (|(sel_oh[i] & phys_pending_i) ||
            (phys_mod_i && sel_sbe.fu == g6lc_core_pkg::LOAD)))
         rec_valid = 1'b0;
@@ -410,7 +436,7 @@ module sb_commit_bundle
     assign commit_instr_o[i].p_frs3      = sel_sbe.p_frs3;
     assign commit_instr_o[i].p_frd       = sel_sbe.p_frd;
     assign commit_instr_o[i].ooo_renamed = sel_sbe.ooo_renamed;
-    assign commit_drop_o[i]   = sel_mem.cancelled;
+    assign commit_drop_o[i]   = sel_cancelled;
     assign commit_replay_o[i] = sel_mem.replay;
     // Bundle validity: the slot is live and decidable this cycle.
     assign commit_bundle_valid_o[i] = sel_mem.issued &&

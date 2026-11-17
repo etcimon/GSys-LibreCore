@@ -40,6 +40,20 @@
 #                                 firmware entry (fw_payload.elf@0x80041730)
 #                                 profiles the OpenSBI/Linux boot path itself.
 #   HYP8_BUILD_PGO_CYCLES=2000000 cycle cap of each training run
+#
+# Long builds (the 8-hart g6lc64_hyp8_mc model verilates for hours and emits
+# ~13 GB of C++): the work of a completed stage is never redone.
+#   HYP8_BUILD_RESUME=1           reuse a completed verilation in the model
+#                                 directory (Vg6lc_testharness.mk and
+#                                 __verFiles.dat present) instead of redoing it
+#   HYP8_BUILD_PGO_STAGE=full|verilate|instrumented|use
+#                                 verilate: stop after verilation (the C++ is
+#                                 generated for the instrumented build).
+#                                 instrumented: stop after the phase-1 build;
+#                                 the instrumented model is functionally the
+#                                 final one and every program run on it is a
+#                                 training run. use (with RESUME): train only
+#                                 if no profile exists yet, then phase 2.
 
 set -euo pipefail
 
@@ -261,20 +275,40 @@ fi
 PGO="${HYP8_BUILD_PGO:-1}"
 [[ "${HYP8_BUILD_VERILATE_ONLY:-0}" == "1" ]] && PGO=0
 PGO_DIR="$VERLIB_DIR/pgo"
+RESUME="${HYP8_BUILD_RESUME:-0}"
+PGO_STAGE="${HYP8_BUILD_PGO_STAGE:-full}"
+case "$PGO_STAGE" in full|verilate|instrumented|use) ;; *) log "bad HYP8_BUILD_PGO_STAGE=$PGO_STAGE"; exit 2 ;; esac
+VER_DONE=0
+if [[ "$RESUME" == "1" && -f "$VERLIB_DIR/Vg6lc_testharness.mk" && -f "$VERLIB_DIR/Vg6lc_testharness__verFiles.dat" ]]; then
+  VER_DONE=1
+fi
+if [[ "$PGO_STAGE" == "use" && "$VER_DONE" != "1" ]]; then
+  log "HYP8_BUILD_PGO_STAGE=use needs HYP8_BUILD_RESUME=1 and a verilated model in $VERLIB_DIR"; exit 2
+fi
 BASE_CXXFLAGS="$BUILD_CXXFLAGS"; BASE_LDFLAGS="$BUILD_LDFLAGS"
 PGO_GEN="-fprofile-generate=$PGO_DIR -fprofile-update=atomic"
 if [[ "$PGO" == "1" ]]; then
-  rm -rf "$PGO_DIR"; mkdir -p "$PGO_DIR"
+  [[ "$PGO_STAGE" == "use" ]] || rm -rf "$PGO_DIR"
+  mkdir -p "$PGO_DIR"
   BUILD_CXXFLAGS="$BUILD_CXXFLAGS $PGO_GEN"
   BUILD_LDFLAGS="$BUILD_LDFLAGS -fprofile-generate=$PGO_DIR"
 fi
 log "C++ opt: fast/global $BUILD_OPT slow $BUILD_OPT_SLOW march=$BUILD_MARCH pgo=$PGO"
 
 BUILD_LOG="${SOFT_LADDER_BUILD_LOG:-$VERLIB_DIR/build.log}"
-rm -f "$BUILD_LOG"
+[[ "$VER_DONE" == "1" ]] || rm -f "$BUILD_LOG"
 log "building; full log -> $BUILD_LOG"
 log "target=$TARGET harts=$TARGET_HARTS flist=$FLIST top=g6lc_testharness"
 
+if [[ "$VER_DONE" == "1" ]]; then
+  # The generated C++ carries the flags of the verilation that produced it:
+  # refuse a model whose instrumentation state contradicts this request.
+  if [[ "$PGO" == "1" && "$PGO_STAGE" != "use" ]] && ! grep -q -- "-fprofile-generate=$PGO_DIR" "$VERLIB_DIR/Vg6lc_testharness.mk"; then
+    log "resume FAIL: $VERLIB_DIR was not verilated for an instrumented build"; exit 1
+  fi
+  log "resume: verilation skipped, reusing $(find "$VERLIB_DIR" -maxdepth 1 -name '*.cpp' | wc -l) generated sources in $VERLIB_DIR"
+  rc=0
+else
 set +e
 "$VERILATOR" --no-timing verilator_config.vlt --assert \
   $TARGET_VLT_DEFS \
@@ -310,6 +344,7 @@ set +e
   >"$BUILD_LOG" 2>&1
 rc=$?
 set -e
+fi
 
 if [[ $rc -ne 0 ]]; then
   log "VERILATE FAIL rc=$rc — last 60 log lines:"
@@ -330,13 +365,25 @@ if [[ "${HYP8_BUILD_VERILATE_ONLY:-0}" == "1" ]]; then
   exit 0
 fi
 
+if [[ "$PGO_STAGE" == "verilate" ]]; then
+  log "VERILATE OK (HYP8_BUILD_PGO_STAGE=verilate): $VERLIB_DIR; continue with HYP8_BUILD_RESUME=1"
+  exit 0
+fi
+
 MK_OPT=("OPT_FAST=$BUILD_OPT" "OPT_SLOW=$BUILD_OPT_SLOW" "OPT_GLOBAL=$BUILD_OPT")
+if [[ "$PGO" == "1" && "$PGO_STAGE" == "use" ]]; then
+  # phase 1 was a previous invocation (HYP8_BUILD_PGO_STAGE=instrumented)
+  [[ -x "$VERLIB_DIR/Variane_testharness" ]] || cp -a "$VERLIB_DIR/pgo-train/Variane_testharness.instrumented" "$VERLIB_DIR/Variane_testharness" 2>/dev/null || true
+  log "resume: PGO stage 'use', phase-1 build skipped"
+  rc=0
+else
 set +e
 make -C "$VERLIB_DIR" -j"$JOBS" -f Vg6lc_testharness.mk \
   CXX="$CXX" CC="$CC" LINK="$CXX" "${MK_OPT[@]}" \
   >>"$BUILD_LOG" 2>&1
 rc=$?
 set -e
+fi
 
 if [[ $rc -ne 0 || ! -x "$VERLIB_DIR/Variane_testharness" ]]; then
   log "COMPILE FAIL rc=$rc — last 60 log lines:"
@@ -344,11 +391,18 @@ if [[ $rc -ne 0 || ! -x "$VERLIB_DIR/Variane_testharness" ]]; then
   exit 1
 fi
 
+if [[ "$PGO" == "1" && "$PGO_STAGE" == "instrumented" ]]; then
+  log "BUILD OK (PGO stage 1 of 2): $VERLIB_DIR/Variane_testharness is the instrumented model; runs on it train the profile in $PGO_DIR"
+  exit 0
+fi
+
 if [[ "$PGO" == "1" ]]; then
   # --- simulation PGO: train the instrumented model, rebuild with the profile
   TRAIN_DIR="$VERLIB_DIR/pgo-train"; mkdir -p "$TRAIN_DIR"
   TRAIN_LIST="${HYP8_BUILD_PGO_TRAIN:-}"
-  if [[ -z "$TRAIN_LIST" ]]; then
+  if [[ "$PGO_STAGE" == "use" && -z "$TRAIN_LIST" && -n "$(find "$PGO_DIR" -name '*.gcda' -print -quit 2>/dev/null)" ]]; then
+    log "PGO: profile already written by runs on the instrumented model; no extra training"
+  elif [[ -z "$TRAIN_LIST" ]]; then
     GCC="$RISCV/bin/riscv-none-elf-gcc"; COMMON="$ROOT/verif/tests/custom/common"
     if "$GCC" -march=rv64imafdc_zicsr_zifencei -mabi=lp64d -static -mcmodel=medany -fvisibility=hidden \
          -nostdlib -nostartfiles -I"$ROOT/verif/tests/custom/env" -I"$COMMON" -T "$COMMON/link_verilator.ld" \

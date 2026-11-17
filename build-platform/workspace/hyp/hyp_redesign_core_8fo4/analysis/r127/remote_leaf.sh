@@ -8,7 +8,7 @@
 # gone from the host, so the integration toolchain is named explicitly together
 # with ITS runtime and digest (run_hyp8_memory.py honours HYP8_RUNTIME_DIR /
 # HYP8_RUNTIME_DIGEST since r127; a driver/runtime mismatch fails to compile).
-TC=/opt/testharness/toolchains/verilator-v5.008-g6lc-44063db8-pgo
+TC="${LEAF_TC:-/opt/testharness/toolchains/verilator-v5.008-g6lc-44063db8-pgo}"
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../../../../../.." && pwd)"

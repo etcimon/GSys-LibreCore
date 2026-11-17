@@ -27,10 +27,14 @@ Scope of the edits: `core/include/g6lc64_hyp8_config_pkg.sv`,
 ## Status
 
 "Verified" means: on the remote testharness, pinned fork toolchain
-(`verilator-v5.008-g6lc-44063db8-pgo`: compiler PGO, loop unrolling,
-split-loops, simulation PGO), model `5fb248e6…` built from closure-rfix131a,
-19 directed programs graded on tohost **and** on the log, plus the leaf
-benches. No Linux boot has run on this tree.
+(compiler PGO, loop unrolling, split-loops, simulation PGO), directed
+programs graded on tohost **and** on the log, plus the leaf benches. Round a
+(entries 01, 02, 03, 07, 08): `verilator-v5.008-g6lc-44063db8-pgo`, model
+`5fb248e6…` from closure-rfix131a, 19 programs. Round b (entries 04, 09):
+`verilator-v5.008-g6lc-6fa24f6f-pgo` (the fork with the split-var fix, see
+"Multi-core model build"), model `db8a7e82…` from closure-rfix131a-b2, 21
+programs. No Linux boot has run on this tree, and nothing has run on the
+multi-core model yet.
 
 | entry | class (r127m count) | isolated test | structural fix | verified |
 |---|---|---|---|---|
@@ -39,9 +43,10 @@ benches. No Linux boot has run on this tree.
 | RFIX-131a-07 | TLB multi-hit (r129b model stop @317,424,744) | mmu leaf `TLB_OVL_*` (6 cases x 3 instances) + 2 mutants | fill evicts every entry it overlaps; PLRU records the answered hit | yes (leaf) |
 | RFIX-131a-08 | non-idempotent load parked at the LSU head (found by -01's own test) | `hyp8_spec_bus_clean.S`, `hyp8_dev_load.S` | a non-idempotent load that is not the commit head is handed back | yes |
 | RFIX-131a-03 | wrong-path data walks, null/garbage base (5,389) | `hyp8_spec_walk_clean.S` | a load is speculative until it is the commit head | yes: 3 walks -> 0 |
-| RFIX-131a-04 | S-mode fetch faults at trap entry (490) | `hyp8_trap_entry_clean.S` (192 on r131; 64 remain) | open: the barrier covers announced traps only; a trap-cycle frontend hold was tried and withdrawn | no |
+| RFIX-131a-04 | S-mode fetch faults at trap entry (490) | `hyp8_trap_entry_clean.S` (192 on r131; 64 after -02) | a killed fetch drops its translation request (I$ `KILL_ATRANS` state removed) | yes: 64 -> 0 |
+| RFIX-131a-09 | a cancelled instruction acknowledged as retired (not in the census: found from the RVFI stream) | `hyp8_ghost_commit.S` | the commit bundle uses the combined cancel mask | yes: minstret +2 -> exact, fflags NX -> clear |
 | RFIX-131a-05 | commit gaps > 2000 cycles: 6 real (LR parked by SC backoff), 24 are WFI idle | `sc-backoff` leaf | `67f413a63` (r130) | leaf only |
-| RFIX-131a-06 | memory-order replays (706,483; IPC 0.25) | not yet | open | - |
+| RFIX-131a-06 | memory-order replays (706,483) | not needed | none: 0.3 % of the boot's cycles (see "Where the boot's cycles go") | - |
 
 ## 0. Correction of the r130 worklog (r128b "hang")
 
@@ -314,39 +319,136 @@ class, and the directed test's wrong-path store produced none.
 `is_speculative_load`; the replacement needs `commit_tran_id_i` and the
 replay path of the OoO tree.
 
-## RFIX-131a-04 — S-mode fetch faults at trap entry (open: reproduced, one fix tried and withdrawn)
+## RFIX-131a-04 — a killed fetch drops its translation request
 
 **Evidence.** 490 S-mode `[mmu-ife] cause=12` per boot; 272 are ITLB *hits*
 on user addresses (`tq.sh sql` over `aux`): a U page fetched under S.
 
 **Isolated test.** `verif/tests/custom/hyp8_trap_entry_clean.S`: U-mode
 traps 128 times into an S-mode handler — 64 `ecall`, then 64 illegal
-instructions. r131 model: 192 records. Tree with the context barrier
-(RFIX-131a-02): 64 — exactly the illegal-instruction entries, i.e. the
-barrier removes the class for every trap a CSR-class instruction announces
-(`ecall`, and `sret` on the way back) and not for the others (exceptions,
-interrupts). The test is **not** in the smoke list while it is dirty.
+instructions. r131 model: 192 records. With the context barrier
+(RFIX-131a-02): 64 — exactly the illegal-instruction entries (a trap no
+CSR-class instruction announces). With this entry: 0. In the smoke list.
 
-**Mechanism (from the test's trace).** `fetch_va=0xf0`, `priv=1`,
-`itlb_hit=1`, 9 cycles after the last U-mode retirement: the faulting fetch
-is the *in-flight* sequential request the I$ already holds (`areq.fetch_req`
-stays up through READ / READ_V / KILL_ATRANS) when the trap commits; the
-MMU evaluates that held request under the new privilege. The request is
-being killed by the trap's flush, so nothing consumes the fault.
+**Mechanism** (`+icf_trace` on the test, one trap; cycle A is the commit
+cycle of the faulting instruction):
 
-**Tried and withdrawn.** Holding the frontend's *new* requests for the trap
-cycle (and, second attempt, the two cycles after it) changed nothing: 64
-records either way — consistent with the mechanism above (the request
-predates the trap). Both variants were removed; the tree carries no trap
-hold.
+| cycle | I$ state | request | context | what happens |
+|---|---|---|---|---|
+| A | READ | `0xf0` (the fall-through), first cycle | U | the trap commits; the controller's flush is combinational, so `kill_s1/kill_s2` are up **in this cycle**; the translation answer is registered (`pmp_data_if`) and not there yet, so READ leaves for `KILL_ATRANS` |
+| A+1 | KILL_ATRANS | `0xf0` held | **S** (`priv_lvl_q` changed at the edge) | the registered answer of cycle A arrives (valid, no fault) and ends the state; meanwhile the MMU evaluates the still-presented request again, now under S: ITLB hit on a U page -> `[mmu-ife]` |
+| A+2 | IDLE | - | S | the fault of A+1 is on the answer register with nobody requesting |
 
-**Next.** Either the fetch-side translation is evaluated under the context
-the request was issued in (a request-side context tag), or a killed request
-drops its translation request. Both touch the I$ ↔ MMU handshake
-(`KILL_ATRANS` exists to keep the request up until the translation
-answers), so this needs its own leaf before any change. Until then the
-record is a fault presented to a killed fetch: no architectural effect was
-observed in the test (tohost passes) or in the r127m boot.
+So the kill and the context change are already aligned (kill in A, new
+context from A+1); the one thing presenting an old-stream address under the
+new context was the I$ state that holds a killed request "until the
+translation answers". The two frontend holds tried earlier could not change
+this: the request predates the trap and the frontend was already killed.
+
+**Root cause.** `KILL_ATRANS` comes from the original cache, where the MMU
+answered combinationally and a walk's result had no owner check: the killed
+request was kept up so the walk it started would be delivered to it and not
+to the next request. Neither holds in hyp8: the answer is a register beside
+the request, valid only for the address on the pins (`if_rsp_current`), and
+a walk result is delivered only to the request whose page it is (r100). The
+state had no function left and one side effect: a translation request
+outliving its kill — on a trap, into the next context (a fault record, or
+on a miss a walk nobody owns; under an M-mode trap the old virtual address
+taken as a physical one).
+
+**Structural change** (`core/cache_subsystem/g6lc_icache.sv`).
+- READ, killed without an answer: -> IDLE (was `KILL_ATRANS`); the state is
+  removed from the FSM (7 -> 6 states; `KILL_MISS` is now encoding 5 in
+  `+icf_trace`).
+- The way-predictor re-read no longer keeps a killed request in READ.
+- `areq_o.fetch_req = READ | READ_V`.
+- Invariant, checked in every simulation including the Verilator model
+  (`$error`, graded as a model error by the smoke runner): no translation
+  request is presented in the cycle after `kill_s1`. With it, the commit
+  cycle of a trap is the last cycle anything is fetched under the old
+  context.
+
+Timing (`sv-timing`, `analysis/timing/boards/rfix131a-b-{before,after2}`):
+`g6lc_icache` worst register-to-register path 27.1 -> 26.75 FO4, 41 -> 40
+paths over the 8-FO4 budget. The first form of the re-read guard (the kill
+ANDed into the re-read condition) measured 27.75; the kill now selects
+last, as in the response arm, and the condition's cone is unchanged.
+
+**Verified.** `hyp8_trap_entry_clean`: 64 -> 0 `[mmu-ife]`, 23,394 cycles
+before and after (a trap's kill lasts two cycles, so the earlier IDLE gains
+nothing there). The 19 other programs pass with unchanged logs; cycle
+counts move by -2 … -64 in four of them (`hyp8_csr_flush_skip` 2429 -> 2427,
+`hyp8_h36_strlen_replay` 9095 -> 9084, `hyp8_zkn_kat` 6975 -> 6973,
+`hyp8_ctx_switch_clean` 35597 -> 35533): a killed fetch frees the cache one
+cycle earlier.
+
+**Backport note.** `core/cache_subsystem/cva6_icache.sv` has the same
+state. Removing it there is only correct together with (a) an owner check
+on the page-table walk result (hyp8 r100, `ptw_walk_is_fetch`) and (b) an
+answer that cannot be taken by a different request (hyp8: the registered
+answer's address compare). Without those two the state is still doing its
+original job.
+
+## RFIX-131a-09 — "cancelled" has one definition at commit
+
+**Evidence.** Not a census class: found from the RVFI stream while
+isolating RFIX-131a-01. On the probe rounds of `hyp8_spec_bus_clean` the
+trace shows the instruction behind the mispredicted branch retiring in the
+branch's own commit cycle (`addi s7,s7,1`, `x23 = 0x31`, both `@10733`),
+98 times for 96 architectural executions — while the next real execution
+writes `0x31` again, i.e. the register was not written.
+
+**Mechanism.** A mispredict cancels the younger slots through a combined
+mask: the registered `cancelled` bit of each slot OR the window of the
+branch resolving this cycle (`sb_cancel`). The registered bit is installed
+at the following edge. The branch itself is committable in its resolve
+cycle (the commit bundle merges a result that lands on the head in the same
+cycle), and the slot behind it is then on commit port 1 with its result
+long since written back. The commit bundle presented that slot with the
+registered bit only, so it was acknowledged as a retirement; the rename
+stage, which keys on the combined mask (`commit_arch`), treated the same
+slot as cancelled.
+
+**What leaked.** No register and no rename state — the PRF write and the
+RAT / free-list commit are gated by the combined mask. Everything that
+listens to `commit_ack` alone did see a retirement:
+- `minstret` counted the instruction;
+- `fflags` accrued the flags of a wrong-path floating-point instruction;
+- RVFI printed it (and with it the trace database's retired counts).
+
+**Isolated test.** `verif/tests/custom/hyp8_ghost_commit.S`: a late branch
+(8 `mul` + 8 `div` behind its condition), trained not-taken, taken twice.
+A: `minstret` between two reads against the exact instruction count. B: an
+`fadd.d` behind the branch that is inexact only with the probe rounds'
+operand; `fflags` must stay clear.
+- model `5fb248e6…` (before): A delta 2253 for 2251 (+1 per probe round);
+  with A's check disabled, B reads `fflags = 0x01` (NX).
+- model `e72c7121…` (after): 2251, `fflags = 0`; RVFI retires the
+  wrong-path `addi` of `hyp8_spec_bus_clean` 96 times, not 98.
+
+**Structural change** (`core/sb_commit_bundle.sv`, `core/scoreboard.sv`).
+The bundle takes the same-cycle half of the combined mask
+(`sb_cancel.kill_req_o`); a slot it names is presented as a drop on every
+port above 0 (`commit_drop_o`, and it merges no result). Port 0 keeps the
+registered bit: it is the oldest entry of its hart and a mispredict cancels
+only younger entries of that hart, so the term would be constant there and
+port 0's decision path is unchanged. A simulation assertion states the rule
+for all ports — a slot the combined mask names is only ever acknowledged as
+a drop (`SBC_CANCELLED_RETIRE`) — which is also the check that the port-0
+argument holds (it has to hold on the multi-core model too: mixed-hart
+commit select).
+
+Timing (`sv-timing`, same boards): `sb_commit_bundle` worst input-to-output
+path unchanged at 21.9 FO4; the port-1 drop path 11.85 -> 14.2 FO4 inside
+the module. Its new input, `sb_cancel.kill_req_o`, is 13.0 FO4 behind the
+registered resolve record; the analyzer does not stitch the two sibling
+modules, so the end-to-end figure (bounded by 13.0 + 14.2) is not measured.
+If it shows on a stitched board, the equivalent cheap form for the
+non-mixed select is "the resolving branch is the slot on port 0".
+
+**Backport note.** Applies to any tree with the speculative scoreboard
+(`sb_cancel` / `sb_commit_bundle`): wherever the architectural write is
+gated by the combined mask and the commit acknowledge is not.
 
 ## RFIX-131a-07 — TLB fill: a fill evicts every entry it overlaps
 
@@ -563,20 +665,134 @@ not been exercised on a multi-core log; kernel PCs are not symbolized (no
   passes built for one hart on the scalar model; the 8-hart run needs the
   `g6lc64_hyp8_mc` model (`build/rfix131a/mc-model-and-smp.sh`).
 
+## Results, round b (remote testharness, closure-rfix131a-b)
+
+Model: `hyp8-rfix131a-b2-aggregate-t4`, target `g6lc64_hyp8`, lint
+scalar/smt2 0 `%Error`, model `db8a7e820c904962…` (round a + RFIX-131a-04,
+-09), 234 simulation-PGO profiles applied, Verilator binary
+`deeede0a7a490c2c` (`tools/verilator` 6fa24f6fa). (`…-b-…`, model
+`e72c7121…`, is the same tree with the first form of the I$ re-read guard;
+identical results.)
+
+21 of 21 directed programs pass with clean logs (no bus error, no UART
+read, no walk / fetch-fault record in the `*_clean` programs, no model
+error): the 19 of round a, `hyp8_trap_entry_clean` (23,394 cycles) and
+`hyp8_ghost_commit` (50,777 cycles).
+
+Leaf benches on closure-rfix131a-b (new toolchain): the 21 runnable leaves
+pass (`dispatch` on a rerun: its model compile hit the 1800 s limit while
+the host was building three models); `pmp-write` and `mshr` are still not
+runnable (reference sources absent).
+
+Same tree, `g6lc64_hyp8_l3` (one core, L2 + L3 on;
+`hyp8-rfix131a-b2-l3-aggregate-t4`): 21 of 21 programs pass with clean
+logs. The cache hierarchy on a single core is not where the multi-hart
+failures below come from.
+
+## Multi-core model build (what it costs and why)
+
+The first `g6lc64_hyp8_mc` build of this round did not finish inside its
+6 h budget: the runner timed out at 21,600 s while Verilator was still
+elaborating, the timeout killed only the wrapper, and the orphaned
+`verilator_bin` ran on to completion five hours later (39,300 s in all,
+13 GB of C++ in 4,540 files; the scalar model is 0.47 GB in 237).
+
+- **Why 13 GB.** The multi-core profile is not four scalar cores: each core
+  is 8-wide issue with a 128-entry ROB and two harts
+  (`g6lc64_hyp8_mc_config_pkg.sv`), against 2-wide / 32 entries / one hart
+  for the scalar boot model. One core's share is ~3.2 GB, 7x the scalar
+  model.
+- **Why 11 h.** 38,660 s of the 39,300 s were one stage, `025_split_var`
+  (`--stats`); every other stage together took 11 minutes. The fork's
+  packed-variable split found the module of *every* variable reference by
+  following `backp()` up to the module, and inside a statement list
+  `backp()` is the previous sibling — linear in the list per reference,
+  quadratic over the netlist, and unroll-before-split makes the lists long.
+  Fixed in `tools/verilator` 6fa24f6fa (one top-down walk recording each
+  split candidate's module, a second comparing it with the module of each
+  reference). Scalar model: stage 025 36 s -> 3.2 s, and all 237 generated
+  sources are byte-identical to the 44063db8 output for the same closure.
+  The commit is local to the submodule checkout (not pushed; the
+  superproject gitlink is unchanged); the builder source is staged from it
+  with its tree id verified (`560aaf2c…`), toolchain
+  `verilator-v5.008-g6lc-6fa24f6f-pgo`, `verilator_bin` `deeede0a…`, runtime
+  header digest unchanged (`e900ec45…`).
+- **Runner changes** (`run_hyp8_integration.py`, `hyp8-build-harness.sh`):
+  a timeout now kills the whole process group; `HYP8_RESUME_TAG` continues
+  an earlier run in place (its verified source, its completed verilation;
+  the data closure of a resume may only carry runner tooling and test
+  sources); `HYP8_BUILD_PGO_STAGE=verilate|instrumented|use` splits the
+  build so no stage is redone and the SMP directed program runs on the
+  instrumented model (functionally the final one; its run is the
+  simulation-PGO training). `build/rfix131a/mc-staged.sh` drives the three
+  stages.
+
+## First multi-hart runs (isolated, `hyp8_smp_lrsc`)
+
+Nothing multi-hart passes yet. Three runs, smallest reproduction last:
+
+| model | harts | result |
+|---|---|---|
+| `g6lc64_hyp8_mc`, round-a tree, instrumented (`hyp8-rfix131a-mc-aggregate-t4`) | 4 cores x 2 | stopped by hand at 156 k cycles: cores 1–3 retire nothing, not even the boot ROM; on core 0 hart 1 retires the 6 ROM instructions and stops, hart 0 reaches `_start`, then retires one PC (`0x80000034`) every 66 cycles for good. A fetch takes 60–120 cycles. |
+| `g6lc64_hyp8_smt2`, round-b tree (`hyp8-rfix131a-b2-smt2-aggregate-t4`) | 1 core x 2 | no verdict in 400 k cycles: hart 1 stops after the ROM (`@637`), hart 0 after `bgeu s0,s1,park` (`@1039`); from then on the window is empty, the instruction queue holds hart 0's next instructions and decode never takes them (`[hang] FE: … fe_v=11 fe_rdy=00`). |
+| `g6lc64_hyp8_l3`, round-b tree | 1 x 1 | passes (above) |
+
+So the failure does not need four cores, the 8-wide geometry, or L2/L3: one
+core with two harts on the boot geometry shows it, in a model that builds in
+ten minutes and runs at scalar speed. That is the reproduction to work
+from. Not yet known: whether the r131 tree has it too (an A/B build of the
+r131 closure for `g6lc64_hyp8_smt2` is the next step; the r76 program
+already lists "mc2 reset fetch" as open, so multi-core has not run since at
+least then).
+
+**Simulation rate of the multi-core model.** Measured on the instrumented
+model, 4 threads: 206 cycles/s (cycle 68,619 -> 87,957 in 94 s). The scalar
+boot model runs ~10.8 k cycles/s and needs 1.53 B cycles to the shell. Even
+at several times the instrumented rate, an 8-hart Linux boot on
+`g6lc64_hyp8_mc` as configured (8-wide issue, 128-entry ROB per core) is
+weeks of wall time per attempt. A multi-core Linux witness needs a smaller
+multi-core profile (the boot geometry per core) or a shorter boot; this is
+a decision, not something the build can fix.
+
+## Where the boot's cycles go (r127m stall census, correction of RFIX-131a-06)
+
+The census counts load replays and memory-order violations together
+(`mem_viol=706,483`); the load unit's own replays are 8,415 of them. All
+flush cycles of the whole run are 8.66 M of 2,671 M (0.3 %). Memory-order
+replays are not what holds IPC at 0.26 and RFIX-131a-06 is closed without a
+change.
+
+At cycle 1.0 B (261.5 M instructions retired, IPC 0.261; `tq.sh sql` over
+`census.detail`), the 813 M cycles without a retirement are:
+
+| commit head is | cycles |
+|---|---|
+| issued, result not back yet (`inflight`): alu 257.7 M, ld 143.7 M, st 118.9 M, br 19.2 M | 542 M |
+| not issued yet (`notissued`): alu 100.3 M, st 26.4 M, br 13.5 M, ld 12.9 M | 155 M |
+| a store waiting for the store buffer (`st_sb`) | 58.5 M |
+| ROB empty | 49.6 M |
+
+An ALU instruction at the commit head that is still unissued or in flight
+(358 M cycles for 170.6 M ALU instructions) means the window is nearly
+empty most of the time: the instruction at the head has only just arrived.
+The backend is supply-limited. The fetch side shows why in the
+`+icf_trace` of the trap test: with translation on, every fetch is READ
+(request), READ (the registered translation / PMP answer), READ_V
+(response) — three cycles per 8-byte fetch at best — and the frontend often
+has no next request ready in READ_V (two further idle cycles in the traced
+loop). This is the staging the 8-FO4 work put there (registered PMP
+verdict, registered hit response); it is recorded here as the measured cost
+of that staging on a boot, not as a defect. Nothing was changed.
+
 ## Open classes (analysis so far)
 
 - **RFIX-131a-05** — 6 real commit gaps (LR parked by a saturated
   SC-backoff mask, 396.95M / 429.42M; r130 fix `67f413a63`, `sc-backoff`
   leaf passes). Not re-observed on a boot.
-- **RFIX-131a-06** — `mem_viol=706,483` replays, IPC 0.25 through the boot:
-  the largest structural cost in the census.
-- **RVFI trace fidelity** (found while isolating RFIX-131a-01): the trace
-  printed the squashed fall-through of a mispredicted taken branch as
-  retired (`ld t0,1128(a0)` with `mem 0x10001468`,
-  `x5 = 0xca11ab1ebadcab1e`) while the architectural check (fall-through
-  count) passes. To isolate: the tracer prints a cancelled commit slot, or
-  the count check is blind to it.
-- **Multi-core** — nothing above has run on `g6lc64_hyp8_mc` (4 cores × 2
-  harts, L2/L3, coherence). The PMA declaration is in its config package;
-  the mc model and its directed programs are the next isolated step, before
-  any Linux or OpenWrt boot.
+- **RFIX-131a-10 (open)** — two harts on one core do not run
+  (`g6lc64_hyp8_smt2`, `hyp8_smp_lrsc` with `NHARTS=2`). See "First
+  multi-hart runs".
+- **Owed measurements** — a stitched `sv-timing` figure for the port-1 drop
+  path (RFIX-131a-09); `paddr_ni`, the context barrier and the TLB fill
+  compare; boot-level cost of CSR serialization, non-idempotent load
+  replays and commit-head walks.

@@ -250,6 +250,7 @@ module scoreboard
       .wbdata_i,
       .ex_i,
       .ld_checked_i,
+      .cancel_now_i     (kill_req),
       .phys_pending_i,
       .phys_mod_i,
       .commit_sel_slot_o (commit_sel_slot),
@@ -275,6 +276,17 @@ module scoreboard
     assert property (
         @(posedge clk_i) disable iff (!rst_ni) commit_ack_i[cp] |-> (commit_instr_o[cp].valid || commit_drop_o[cp]))
     else $fatal(1, "Commit acknowledged but instruction is not valid");
+  end
+  // rfix131a-09: one definition of "cancelled". A slot the combined mask
+  // names (sticky bit, or the mispredict resolving this cycle) is only ever
+  // acknowledged as a drop -- never as a retirement that minstret, fflags
+  // and RVFI would count while the rename stage discards it. On port 0 this
+  // is also the proof that the registered bit alone is sufficient there.
+  for (genvar cp = 0; cp < G6LCCfg.NrCommitPorts; cp++) begin : gen_commit_cancel_chk
+    assert property (
+        @(posedge clk_i) disable iff (!rst_ni)
+        (commit_ack_i[cp] && cancelled_mask_o[commit_sel_slot[cp]]) |-> commit_drop_o[cp])
+    else $fatal(1, "SBC_CANCELLED_RETIRE: a cancelled slot was acknowledged as a retirement");
   end
   // assert that we never give an issue ack signal if the instruction is not valid
   for (genvar i = 0; i < G6LCCfg.NrIssuePorts; i++) begin

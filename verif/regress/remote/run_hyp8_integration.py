@@ -21,6 +21,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 
 # HYP8_RUNTIME_DIR / HYP8_RUNTIME_DIGEST: VERILATOR_ROOT for lint and build.
@@ -125,10 +126,22 @@ TESTS = [
     # AMO on shared counters, coherent private slots. NHARTS comes from
     # HYP8_TEST_DEFINES (default 1: a plain single-hart smoke).
     ('hyp8_smp_lrsc', 'verif/tests/custom/hyp8_smp_lrsc.S', '80001000'),
+    # rfix131a-04: U-mode traps into an S-mode handler (ecall and illegal
+    # instruction): no fetch is evaluated under the context it was not
+    # issued in (log grade: no [mmu-ife], no [ptw-err]).
+    ('hyp8_trap_entry_clean', 'verif/tests/custom/hyp8_trap_entry_clean.S',
+     '80001000'),
+    # rfix131a-09: nothing behind a mispredicted branch retires -- minstret
+    # is exact and fflags takes no wrong-path flag.
+    ('hyp8_ghost_commit', 'verif/tests/custom/hyp8_ghost_commit.S',
+     '80001000'),
 ]
 LINK_LD = 'verif/tests/custom/common/link_verilator.ld'
 GCC_FLAGS = ['-march=rv64imafdc_zicsr_zifencei', '-mabi=lp64d',
              '-mcmodel=medany', '-O2', '-nostdlib', '-nostartfiles']
+# what a resume overlay may replace (never RTL, flists or the testbench)
+RESUME_OVERLAY_PREFIXES = ('verif/regress/remote/hyp8/hyp8-build-harness.sh',
+                           'verif/tests/custom/')
 GUARD_PATTERN = r'[/]Variane_testharness( |$)|[s]oft-ladder'
 
 
@@ -136,11 +149,31 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def run(cmd, log, env=None, cwd=None, timeout=None):
-    with open(log, 'w') as fh:
-        p = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT,
-                           env=env, cwd=cwd, timeout=timeout)
-    return p.returncode
+def run(cmd, log, env=None, cwd=None, timeout=None, append=False):
+    """Run in its own process group; a timeout takes the whole group down.
+
+    The 8-hart verilation outlived a 6 h budget as an orphan for five more
+    hours (rfix131a): killing only the direct child leaves verilator_bin or
+    make running against a run that was already reported as failed.
+    """
+    with open(log, 'a' if append else 'w') as fh:
+        p = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT,
+                             env=env, cwd=cwd, start_new_session=True)
+        try:
+            return p.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.killpg(p.pid, sig)
+                except ProcessLookupError:
+                    break
+                try:
+                    p.wait(timeout=20)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            fh.write(f'\n[run] timed out after {timeout} s; process group killed\n')
+            return 124
 
 
 def census(log):
@@ -162,11 +195,31 @@ def lint_failed(rc, warnings):
 def main():
     data = Path(os.environ['TH_DATA_DIR'])
     out = Path(os.environ['TH_OUT_DIR'])
+    # HYP8_RESUME_TAG: continue the build of an earlier run in place (its
+    # hash-verified source and its completed verilation), instead of paying
+    # for the verilation again. The data closure of a resume is an overlay
+    # restricted to runner tooling and test sources: anything that feeds the
+    # generated C++ would make the reused model stale and is refused.
+    resume_tag = os.environ.get('HYP8_RESUME_TAG')
+    report_out = out
+    if resume_tag:
+        out = Path('/opt/testharness/runs') / resume_tag / 'output'
+        assert (out / 'source').is_dir(), f'no source closure in {out}'
+        assert (out / 'model' / 'Vg6lc_testharness__verFiles.dat').is_file(), \
+            f'no completed verilation in {out}/model'
     src = out / 'source'
     inputs = out / 'inputs'
     inputs.mkdir(parents=True, exist_ok=True)
     results = {'status': 'started', 'lint': {}, 'guard': {},
                'build': {}, 'inputs': {}}
+    if resume_tag:
+        results['resumedFrom'] = resume_tag
+
+    def publish():
+        text = json.dumps(results, indent=2)
+        (out / 'results.json').write_text(text)
+        if report_out != out:
+            (report_out / 'results.json').write_text(text)
 
     # --- 1. hash-verified isolated source ---------------------------------
     # the proxy rsyncs a --data dir into data/<dir-name>/, so the closure
@@ -180,6 +233,16 @@ def main():
         root = matches[0]
     manifest = json.loads((root / 'manifest.json').read_text())
     staged = manifest['files']
+    if resume_tag:
+        foreign = [rel for rel in staged
+                   if not rel.startswith(RESUME_OVERLAY_PREFIXES)]
+        if foreign:
+            results['status'] = 'resume_overlay_rejected'
+            results['rejected'] = foreign
+            publish()
+            raise SystemExit('resume overlay touches model sources: '
+                             + ', '.join(foreign[:8]))
+        results['resumeOverlay'] = sorted(staged)
     bad = []
     for rel, sha in staged.items():
         hit = root / rel
@@ -192,7 +255,7 @@ def main():
     if bad:
         results['status'] = 'input_hash_mismatch'
         results['mismatched'] = bad
-        (out / 'results.json').write_text(json.dumps(results, indent=2))
+        publish()
         raise SystemExit(f'input hash verification failed for {len(bad)} files')
     results['sourceFiles'] = len(staged)
 
@@ -229,6 +292,13 @@ def main():
         lint_profiles.append(('mc', []))
     for name, defs in lint_profiles:
         log = out / f'lint-{name}.log'
+        if resume_tag:
+            # the resumed run linted this same source; its logs are the record
+            assert log.is_file(), f'resumed run has no {log.name}'
+            results['lint'][name] = {'rc': 0, 'warnings': census(log),
+                                     'log': f'lint-{name}.log',
+                                     'rcSource': 'resumed run log census'}
+            continue
         cmd = [VERILATOR, '--lint-only', '--no-timing', '--assert',
                *defs, '-Wall', *WARN_POLICY,
                '--top-module', 'g6lc_testharness',
@@ -245,12 +315,12 @@ def main():
     if any(lint_failed(entry['rc'], entry['warnings'])
            for entry in results['lint'].values()):
         results['status'] = 'lint_failed'
-        (out / 'results.json').write_text(json.dumps(results, indent=2))
+        publish()
         raise SystemExit('full-top lint failed; see lint-*.log')
 
     if os.environ.get('HYP8_LINT_ONLY'):
         results['status'] = 'lint_only'
-        (out / 'results.json').write_text(json.dumps(results, indent=2))
+        publish()
         (out / 'summary.txt').write_text('hyp8-integration: lint_only\n')
         return 0
 
@@ -309,8 +379,11 @@ def main():
             indent=2))
         # HYP8_BUILD_TIMEOUT: the 8-hart mc2 model needs >7200 s at -j2 (r69:
         # the runner timed out while the orphaned make kept compiling).
+        if resume_tag:
+            build_env['HYP8_BUILD_RESUME'] = '1'
         rc = run(cmd, out / 'build-harness.log', env=build_env, cwd=src,
-                 timeout=int(os.environ.get('HYP8_BUILD_TIMEOUT', '7200')))
+                 timeout=int(os.environ.get('HYP8_BUILD_TIMEOUT', '7200')),
+                 append=bool(resume_tag))
         model = out / 'model' / 'Variane_testharness'
         # Full built-model dependency check, same as the leaf runner: the
         # generated .d files must cite the pinned private runtime header.
@@ -331,9 +404,16 @@ def main():
             'buildLog': 'model/build.log',
             # simulation PGO evidence: profiles applied by phase 2 (0 = none)
             'simPgoProfiles': len(list((out / 'model' / 'pgo').rglob('*.gcda'))),
+            # 'instrumented' = phase 1 of the simulation PGO only: the model
+            # is functionally final but not yet rebuilt with its profile
+            'simPgoStage': build_env.get('HYP8_BUILD_PGO_STAGE', 'full'),
         }
         results['status'] = 'build_complete' if (rc == 0 and model.is_file()) \
             else 'build_failed'
+        if (rc == 0 and build_env.get('HYP8_BUILD_PGO_STAGE') == 'verilate'
+                and (out / 'model' / 'Vg6lc_testharness__verFiles.dat').is_file()):
+            # stage 1 of a staged build: generated C++ only, no model yet
+            results['status'] = 'verilated'
 
     # --- 6. bounded test inputs (assembled fresh, never a copied elf) -----
     gcc = f'{RISCV}/bin/riscv-none-elf-gcc'
@@ -342,6 +422,11 @@ def main():
     tohost_bad = []
     for name, src_rel, tohost_addr in TESTS:
         s = src / src_rel
+        if not s.is_file():
+            # an older closure (A/B builds of an earlier tree) predates the
+            # program: recorded, not assembled
+            results['inputs'].setdefault('absent', []).append(name)
+            continue
         elf = inputs / f'{name}.elf'
         # HYP8_TEST_DEFINES: preprocessor defines for the test sources of a
         # target (e.g. NHARTS=8 for the multi-core model)
@@ -374,20 +459,23 @@ def main():
     if tohost_bad:
         results['status'] = 'tohost_missing'
         results['tohostErrors'] = tohost_bad
-        (out / 'results.json').write_text(json.dumps(results, indent=2))
+        publish()
         raise SystemExit('tohost-bearing input failed validation: '
                          + '; '.join(tohost_bad))
 
-    (out / 'results.json').write_text(json.dumps(results, indent=2))
+    publish()
     summary = (f"hyp8-integration: {results['status']} "
                f"lint(scalar rc={results['lint']['scalar']['rc']} "
                f"smt2 rc={results['lint']['smt2']['rc']})")
     (out / 'summary.txt').write_text(summary + '\n')
+    if report_out != out:
+        (report_out / 'summary.txt').write_text(summary + '\n')
+        shutil.copy2(out / 'build-harness.log', report_out / 'build-harness.log')
     print(summary)
     # blocked is a recorded decision state, not a run failure; lint/build
     # failures keep a nonzero rc so the proxy surfaces them as failed runs
     return 0 if results['status'] in ('build_blocked_by_overlap',
-                                      'build_complete') else 1
+                                      'build_complete', 'verilated') else 1
 
 
 if __name__ == '__main__':

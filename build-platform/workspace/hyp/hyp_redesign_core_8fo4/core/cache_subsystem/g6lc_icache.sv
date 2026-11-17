@@ -171,7 +171,6 @@ module g6lc_icache
     READ,
     READ_V,    // hyp8: response presentation, +1 behind the token echo
     MISS,
-    KILL_ATRANS,
     KILL_MISS
   } state_e;
   state_e state_d, state_q;
@@ -511,7 +510,12 @@ assign cl_tag_d  = (areq_i.fetch_valid) ? areq_i.fetch_paddr[G6LCCfg.ICACHE_TAG_
               force_all_ways_d = 1'b1;
               cache_rden       = 1'b1;
               cmp_en_d         = 1'b1;
-              state_d          = READ;
+              // rfix131a-04: a killed request does not re-read (it would
+              // keep its translation request up behind the kill). The kill
+              // selects last, as in the response arm below, so the re-read
+              // condition's cone is unchanged; force_all_ways stays armed
+              // and the next lookup simply reads every way.
+              state_d          = (dreq_i.kill_s1) ? IDLE : READ;
             end else begin
               // hyp8: capture the response record (the comb-selected data and
               // user word for the hit way plus the fetch exception); the
@@ -539,8 +543,18 @@ assign cl_tag_d  = (areq_i.fetch_valid) ? areq_i.fetch_paddr[G6LCCfg.ICACHE_TAG_
             end
           end
           // bail out if this request is being killed (and we missed on the TLB)
+          // rfix131a-04: a killed request ends here and its translation
+          // request ends with it. The kill of a trap is the commit cycle and
+          // the privilege / translation context changes at the next edge:
+          // holding the request for the answer (the former KILL_ATRANS
+          // state) presented an old-stream address to the MMU under the new
+          // context -- an S-mode fault on a U page nobody consumed, or a
+          // walk nobody owned. The answer needs no waiting for: it is
+          // registered behind the request (pmp_data_if) and only valid for
+          // the address on the pins, and a walk this request started is
+          // dropped by the MMU's page compare (r100) like any foreign walk.
         end else if (dreq_i.kill_s2 || flush_d) begin
-          state_d = KILL_ATRANS;
+          state_d = IDLE;
         end
       end
       //////////////////////////////////
@@ -598,15 +612,6 @@ assign cl_tag_d  = (areq_i.fetch_valid) ? areq_i.fetch_paddr[G6LCCfg.ICACHE_TAG_
         end
       end
       //////////////////////////////////
-      // killed address translation,
-      // wait until paddr is valid, and go
-      // back to idle
-      KILL_ATRANS: begin
-        if (areq_i.fetch_valid) begin
-          state_d = IDLE;
-        end
-      end
-      //////////////////////////////////
       // killed miss,
       // wait until memory responds and
       // go back to idle
@@ -633,14 +638,13 @@ assign cl_tag_d  = (areq_i.fetch_valid) ? areq_i.fetch_paddr[G6LCCfg.ICACHE_TAG_
   // process stops the response path from depending on the branch predictor
   // it feeds. Values are identical to the in-FSM assignments they replace:
   // flush_d is only cleared by a completed FLUSH, fetch_req is asserted in
-  // READ/READ_V/KILL_ATRANS, and valid follows the READ_V hit and MISS
-  // refill rules.
+  // READ/READ_V, and valid follows the READ_V hit and MISS refill rules.
   assign flush_d = (flush_q | flush_i) & ~((state_q == FLUSH) & flush_done);
 
-  // READ / READ_V / KILL_ATRANS hold the frontend fetch request (hyp8 adds
-  // READ_V, the registered hit-response state, on top of main's READ set).
-  assign areq_o.fetch_req = (state_q == READ) || (state_q == READ_V) ||
-                            (state_q == KILL_ATRANS);
+  // READ / READ_V hold the frontend fetch request (hyp8 adds READ_V, the
+  // registered hit-response state, on top of main's READ). No state holds it
+  // behind a kill (rfix131a-04): every kill leaves READ / READ_V for IDLE.
+  assign areq_o.fetch_req = (state_q == READ) || (state_q == READ_V);
 
   always_comb begin : p_response_valid
     dreq_o.valid = 1'b0;
@@ -947,6 +951,22 @@ assign cl_tag_d  = (areq_i.fetch_valid) ? areq_i.fetch_paddr[G6LCCfg.ICACHE_TAG_
   ///////////////////////////////////////////////////////
 
   //pragma translate_off
+  // rfix131a-04 (checked in every simulation, Verilator included): no
+  // translation request is presented in the cycle after a kill. The kill
+  // cycle of a trap is the last cycle of the old privilege / translation
+  // context, so this is what keeps a fetch from being evaluated under a
+  // context it was not issued in.
+  logic kill_seen_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin : p_kill_atrans_chk
+    if (!rst_ni) begin
+      kill_seen_q <= 1'b0;
+    end else begin
+      kill_seen_q <= dreq_i.kill_s1;
+      if (kill_seen_q && areq_o.fetch_req)
+        $error("[l1 icache] translation request presented behind a kill (state %0d, vaddr %h)",
+               state_q, vaddr_q);
+    end
+  end
 `ifndef VERILATOR
   repl_inval0 :
   assert property (
@@ -960,7 +980,7 @@ assign cl_tag_d  = (areq_i.fetch_valid) ? areq_i.fetch_paddr[G6LCCfg.ICACHE_TAG_
 
   invalid_state :
   assert property (
-    @(posedge clk_i) disable iff (!rst_ni) (state_q inside {FLUSH, IDLE, READ, READ_V, MISS, KILL_ATRANS, KILL_MISS}))
+    @(posedge clk_i) disable iff (!rst_ni) (state_q inside {FLUSH, IDLE, READ, READ_V, MISS, KILL_MISS}))
   else $fatal(1, "[l1 icache] fsm reached an invalid state");
 
   hot1 :
