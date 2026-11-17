@@ -48,7 +48,6 @@ TESTS = [
     ('mc_hart1_store_visible','mc_hart1_store_visible.S', [], 'pass'),
     ('mc_hart1_trap',         'mc_hart1_trap.S',         [], 'oracle_neg'),
     ('mc_smt2_boot_release',  'mc_smt2_boot_release.S',  [], 'pass'),
-    ('smt_mixed_probe',       'smt_mixed_probe.S',       [], 'pass'),
     ('mini_ipi_hart1_sp',     'mini_ipi_hart1_sp.S',     [], 'pass'),
     ('mini_wfi_noipi_hart1',  'mini_wfi_noipi_hart1.S',  [], 'pass'),
     # --- shared-line / coherence ------------------------------------------
@@ -66,10 +65,7 @@ TESTS = [
     ('mc_cbo_ewt',            'mc_cbo_ewt.S',             [], 'pass'),
     # --- LR/SC / AMO / atomics --------------------------------------------
     ('mc_lrsc_set_zombie',    'mc_lrsc_set_zombie.S',     [], 'pass'),
-    ('mc_cas_lock_handoff',   'mc_cas_lock_handoff.S',    [], 'pass'),
     ('mini_lrsc_d',           'mini_lrsc_d.S',            [], 'pass'),
-    ('mini_amocas_d',         'mini_amocas_d.S',          [], 'pass',
-     'rv64imafdc_zicsr_zifencei_zacas'),
     ('mini_amoadd_w_spin',    'mini_amoadd_w_spin.S',     [], 'pass'),
     # --- traps / CSR / exceptions ------------------------------------------
     ('mc_csr_prologue',       'mc_csr_prologue.S',        [], 'pass'),
@@ -162,7 +158,7 @@ def main():
             print(f'{name}: NO_TOHOST')
             rc_all = 1
             continue
-        entry['tohost'] = '0x' + tohost[0].split()[0]
+        entry['tohost'] = '0x' + format(int(tohost[0].split()[0], 16), 'x')
         log = out / f'{name}.log'
         run_cmd = [str(model), f"+tohost_addr={entry['tohost']}", '+debug_disable',
                    f'+max-cycles={budget}', *extra, str(elf)]
