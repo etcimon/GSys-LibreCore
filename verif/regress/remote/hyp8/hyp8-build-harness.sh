@@ -31,10 +31,12 @@
 #   HYP8_BUILD_OPT=-O2            OPT_FAST/OPT_GLOBAL (verilated.mk default -Os)
 #   HYP8_BUILD_OPT_SLOW=-O1       OPT_SLOW (__Syms/init: not hot, -O2 costs hours)
 #   HYP8_BUILD_MARCH=<isa>|none   default x86-64-v3 on an AVX2+BMI2 host
-#   HYP8_BUILD_PGO=0|1            simulation PGO, default 1: instrumented build ->
-#                                 training runs -> -fprofile-use rebuild of the
-#                                 same generated sources (layout only; the RVFI
-#                                 stream is unchanged)
+#   HYP8_BUILD_PGO=0|1            simulation PGO, default 1 and enforced: an
+#                                 explicit 0 is refused unless
+#                                 HYP8_BUILD_ALLOW_NOPGO=1 opts out. instrumented
+#                                 build -> training runs -> -fprofile-use rebuild
+#                                 of the same generated sources (layout only; the
+#                                 RVFI stream is unchanged)
 #   HYP8_BUILD_PGO_TRAIN="elf[@tohost] ..."  training workloads; default the
 #                                 in-repo ooo_fp_ooo.S probe compiled here. A
 #                                 firmware entry (fw_payload.elf@0x80041730)
@@ -186,7 +188,12 @@ if [[ "$VLT_FLAVOUR" == "g6lc" ]]; then
     VLT_HOME=""
   fi
   if [[ -z "$VLT_HOME" ]]; then
-    for cand in "$ROOT/build-platform/workspace/tooling/verilator-g6lc" \
+    # Prefer a compiler-PGO fork prefix: install-verilator-g6lc.sh VLT_PGO=1
+    # installs the profile-use <prefix> beside the instrumented <prefix>.pgo-train.
+    # Newest -pgo first so the split_var-fixed build wins over older forks; the
+    # plain -g6lc and workspace fallbacks remain for hosts without a PGO prefix.
+    for cand in $(ls -dt /opt/testharness/toolchains/verilator-v5.008-g6lc-*-pgo 2>/dev/null) \
+                "$ROOT/build-platform/workspace/tooling/verilator-g6lc" \
                 "${VERILATOR_INSTALL_DIR:-}" \
                 /opt/testharness/toolchains/verilator-v5.008-g6lc; do
       [[ -n "$cand" && -x "$cand/bin/verilator_bin" && -d "$cand/runtime" ]] || continue
@@ -278,6 +285,17 @@ PGO_DIR="$VERLIB_DIR/pgo"
 RESUME="${HYP8_BUILD_RESUME:-0}"
 PGO_STAGE="${HYP8_BUILD_PGO_STAGE:-full}"
 case "$PGO_STAGE" in full|verilate|instrumented|use) ;; *) log "bad HYP8_BUILD_PGO_STAGE=$PGO_STAGE"; exit 2 ;; esac
+# Simulation PGO is the required default for every hyp8 C++ build: an explicit
+# HYP8_BUILD_PGO=0 is refused unless HYP8_BUILD_ALLOW_NOPGO=1 confirms a
+# non-PGO build is intended (debug / A-B). verilate-only stages emit no C++ and
+# are exempt; HYP8_BUILD_VERILATE_ONLY forces PGO=0 internally (line above) and
+# is checked on the env var, not the resolved PGO, so it never trips this.
+if [[ "${HYP8_BUILD_PGO:-1}" == "0" && "${HYP8_BUILD_ALLOW_NOPGO:-0}" != "1" \
+      && "${HYP8_BUILD_VERILATE_ONLY:-0}" != "1" && "$PGO_STAGE" != "verilate" ]]; then
+  log "refusing HYP8_BUILD_PGO=0: simulation PGO is required for hyp8 builds"
+  log "  (set HYP8_BUILD_ALLOW_NOPGO=1 to build without a profile)"
+  exit 2
+fi
 VER_DONE=0
 if [[ "$RESUME" == "1" && -f "$VERLIB_DIR/Vg6lc_testharness.mk" && -f "$VERLIB_DIR/Vg6lc_testharness__verFiles.dat" ]]; then
   VER_DONE=1

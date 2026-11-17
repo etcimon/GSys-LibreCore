@@ -281,6 +281,12 @@ def main():
     if rt_bin.is_file():
         results['runtimeBinSha256'] = digest(rt_bin)
     results['runtimeVerilatedFuncsSha256'] = digest(RUNTIME / 'include/verilated_funcs.h')
+    # Compiler-PGO evidence: install-verilator-g6lc.sh with VLT_PGO=1 installs
+    # the instrumented pass-1 prefix at <prefix>.pgo-train beside the profile-use
+    # <prefix>. Its presence marks a PGO-built verilator_bin; a plain fork or
+    # src checkout has no such sibling. Recorded (not gated) so a toolchain
+    # switch is always a new instrument on record.
+    results['compilerPgo'] = Path(f'{VERILATOR_DIR}.pgo-train').is_dir()
     env = dict(os.environ, CVA6_REPO_DIR=str(src),
                VERILATOR_ROOT=str(RUNTIME),
                VPATH=f'{RUNTIME}/include:{src}',
@@ -360,7 +366,11 @@ def main():
                          SOFT_LADDER_VERLIB=str(out / 'model'),
                          SOFT_LADDER_BUILD_JOBS=os.environ.get('HYP8_BUILD_JOBS', '2'),
                          SOFT_LADDER_VERILATOR_THREADS=os.environ.get('HYP8_VERILATOR_THREADS', '1'),
-                         VERILATOR_FLAVOUR=os.environ.get('HYP8_VERILATOR_FLAVOUR', 'pinned'),
+                         # g6lc fork is the required default for hyp8 remote
+                         # builds: it carries the split_var/unroll-before-split
+                         # fixes the mc model needs. pinned remains available
+                         # only as an explicit HYP8_VERILATOR_FLAVOUR=pinned A/B.
+                         VERILATOR_FLAVOUR=os.environ.get('HYP8_VERILATOR_FLAVOUR', 'g6lc'),
                          VLT_HOME=VERILATOR_DIR,
                          VERILATOR_INSTALL_DIR=VERILATOR_DIR,
                          VERILATOR_ROOT=str(RUNTIME),
@@ -407,6 +417,13 @@ def main():
             # 'instrumented' = phase 1 of the simulation PGO only: the model
             # is functionally final but not yet rebuilt with its profile
             'simPgoStage': build_env.get('HYP8_BUILD_PGO_STAGE', 'full'),
+            # simPgoApplied: a -fprofile-use rebuild actually consumed profiles.
+            # 'full'/'use' stages must leave .gcda; 'instrumented' is phase-1
+            # only (0 expected until runs write them); 'verilate' has no model.
+            'simPgoApplied': (
+                len(list((out / 'model' / 'pgo').rglob('*.gcda'))) > 0
+                if build_env.get('HYP8_BUILD_PGO_STAGE', 'full') in ('full', 'use')
+                else build_env.get('HYP8_BUILD_PGO_STAGE', 'full') == 'instrumented'),
         }
         results['status'] = 'build_complete' if (rc == 0 and model.is_file()) \
             else 'build_failed'
