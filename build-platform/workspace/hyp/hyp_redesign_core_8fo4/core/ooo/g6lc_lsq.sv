@@ -356,9 +356,17 @@ module g6lc_lsq #(
   // Occupancy status, from registered state only (emit block kept).
   // hyp8: lsq_busy_o also covers the staged records — an in-flight
   // update is conservatively busy until it applies.
+  // rfix131a-13: busy means state owned by this core's in-flight
+  // instructions. A `mod` record is another core's write notification: it
+  // arrives at any time, applies only to load entries (which are busy on
+  // their own) and is not something a thread switch has to wait for. With
+  // it counted, a neighbour's store one cycle after the selector's decision
+  // made the drained-handoff check see a switch "with OoO state resident"
+  // on a core that had dispatched no load or store. ev_count carries the
+  // mod records as one unit, so "anything else staged" is this compare.
   always_comb begin
     store_pending_o       = 1'b0;
-    lsq_busy_o            = (ev_count != '0);
+    lsq_busy_o            = (ev_count != $bits(ev_count)'(|ev_mod_valid));
     st_live_mask_o        = '0;
     st_unresolved_mask_o  = '0;
     st_hart_mask_o        = '0;
