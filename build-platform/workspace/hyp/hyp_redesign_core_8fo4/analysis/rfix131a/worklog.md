@@ -992,3 +992,46 @@ LR/SC at a non-DRAM boundary, the transferable rule is: *key reservations by
 address (or by a hart/transaction tag the initiator controls), never by an
 AXI id that an upstream split-id source does not preserve between the LR's
 read channel and the SC's write channel.*
+
+## RFIX-131a-15 — SMP directed-suite infrastructure + mc witness readiness (prep, no RTL)
+
+While `rfix131a-d` `g6lc64_hyp8_mc` instrumented compiles, the multicore
+directed suite (`verif/tests/custom/multicore/*.S`, 154 programs written for
+the ariane review harness) was wired for the hyp8 model so SMP correctness is
+qualified in fast isolated runs *before* the slow Linux/OpenWrt witness:
+
+- `verif/regress/remote/run_hyp8_mc_directed.py` (new): assembles each .S
+  with the hyp8 `GCC_FLAGS` + `link_verilator.ld`, reads `tohost` via `nm`
+  (auto-detect — no fixed-address assumption), runs the built
+  `output/model/Variane_testharness` with `+tohost_addr/+max-cycles/
+  +debug_disable`, and grades with the same SUCCESS/tohost/wedged/log_dirty
+  rule as `run_hyp8_smokes`. Per-test `-D` defines and an optional `-march`
+  override (zacas). `oracle_neg` entries expect the deliberate fail code.
+  Emits `smokes-results.json` so `tracedb/ingest.py` picks the `.log`s up as
+  `smoke` kind (mc `gen_core[N]`/`hart=` columns already handled).
+- `build_closure.py`: `verif/tests/custom/multicore/*.S` added to
+  `EXTRA_GLOBS` so future closures carry the sources.
+- `build-platform/workspace/build/rfix131a/mc-directed.sh` (workspace,
+  untracked helper): waits for `results.json`, pushes `multicore/`+`common/`
+  as `--data`, runs the suite via `testharness_proxy py`.
+- Curated 34-program suite: SMP bring-up/hart liveness, shared-line + L2/L3
+  coherence, LR/SC+AMO, traps/CSR, icache, PMU.
+
+**mc witness readiness verified.** `hyp8-mc-witness-launch.sh` +
+`g6lc-hyp8-mc-linux.dtb` + `linux-mc` firmware profile confirmed: the
+`fw_payload.elf` for sha `04f3b24b…` is already present at
+`/opt/testharness/runs/hyp8-firmware-r116/output/build-linux-mc/...`.
+Witness fires on the `use` (profile-use) model once `results.json` reports
+`build_complete`.
+
+**Predicted first mc-witness risk.** `hyp8_smp_lrsc` runs identical M-mode
+code on all harts — it does not exercise divergent per-hart architectural
+state. The core banks per-hart CSRs (`priv_lvl_b`, `satp`, `mstatus`,
+`commit_hart`/`whart_commit_id`, `sb_head_pc[hart]`, per-hart `irq_i`/
+`ipi_i`/`time_irq_i`). Linux is the first workload to give SMT2 sibling
+harts different `satp`/`stvec`/`sie` and per-hart timer+IPI; a CSR-bank leak
+or commit-port misroute is the expected first mc-boot failure mode,
+diagnosable via the per-hart tracedb columns + `[mmu-trace]`/commit probes.
+The directed suite's `mc_smt2_boot_release`, `mc_hart1_trap`,
+`mc_icache_switch_storm` and coherence tests are the fast oracle for that
+class before the witness.
