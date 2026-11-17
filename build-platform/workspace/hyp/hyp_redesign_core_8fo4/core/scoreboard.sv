@@ -239,7 +239,8 @@ module scoreboard
       .G6LCCfg (G6LCCfg),
       .sb_mem_t (sb_mem_t),
       .scoreboard_entry_t (scoreboard_entry_t),
-      .exception_t (exception_t)
+      .exception_t (exception_t),
+      .bp_resolve_t (bp_resolve_t)
   ) i_sb_commit_bundle (
       .mem_q_i          (mem_q),
       .commit_ptr_i     (commit_pointer_q),
@@ -250,6 +251,7 @@ module scoreboard
       .wbdata_i,
       .ex_i,
       .ld_checked_i,
+      .resolved_branch_i,
       .cancel_now_i     (kill_req),
       .phys_pending_i,
       .phys_mod_i,

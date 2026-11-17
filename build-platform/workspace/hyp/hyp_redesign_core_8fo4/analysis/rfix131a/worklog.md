@@ -33,8 +33,11 @@ programs graded on tohost **and** on the log, plus the leaf benches. Round a
 `5fb248e6…` from closure-rfix131a, 19 programs. Round b (entries 04, 09):
 `verilator-v5.008-g6lc-6fa24f6f-pgo` (the fork with the split-var fix, see
 "Multi-core model build"), model `db8a7e82…` from closure-rfix131a-b2, 21
-programs. No Linux boot has run on this tree, and nothing has run on the
-multi-core model yet.
+programs. Round c (entries 10, 11, 12): same toolchain, scalar model
+`8c637554…` (21 programs) and two-hart model `2f3d94dd…`
+(`g6lc64_hyp8_smt2`, `hyp8_smp_lrsc` with `NHARTS=2`) from
+closure-rfix131a-c5. No Linux boot has run on this tree, and the four-core
+model has not run on it yet.
 
 | entry | class (r127m count) | isolated test | structural fix | verified |
 |---|---|---|---|---|
@@ -45,6 +48,9 @@ multi-core model yet.
 | RFIX-131a-03 | wrong-path data walks, null/garbage base (5,389) | `hyp8_spec_walk_clean.S` | a load is speculative until it is the commit head | yes: 3 walks -> 0 |
 | RFIX-131a-04 | S-mode fetch faults at trap entry (490) | `hyp8_trap_entry_clean.S` (192 on r131; 64 after -02) | a killed fetch drops its translation request (I$ `KILL_ATRANS` state removed) | yes: 64 -> 0 |
 | RFIX-131a-09 | a cancelled instruction acknowledged as retired (not in the census: found from the RVFI stream) | `hyp8_ghost_commit.S` | the commit bundle uses the combined cancel mask | yes: minstret +2 -> exact, fflags NX -> clear |
+| RFIX-131a-10 | two harts on one core: a hart came back from a thread switch at PC 0 | `hyp8_smp_lrsc.S`, `NHARTS=2`, `g6lc64_hyp8_smt2` | the commit bundle's same-cycle merge carries the resolved successor of a control-flow instruction | yes (with -11, -12) |
+| RFIX-131a-11 | two harts on one core: rename stalled for good ~30 instructions after reset | same | physical register pool has a per-bank liveness floor that scales with the hart count | yes |
+| RFIX-131a-12 | two harts on one core: a hart resumed at the other hart's refetch PC | same | a refetch record is {pc, hart}; the CSR bank's deferred flush belongs to its own bank | yes: LR/SC count 72 -> 96 |
 | RFIX-131a-05 | commit gaps > 2000 cycles: 6 real (LR parked by SC backoff), 24 are WFI idle | `sc-backoff` leaf | `67f413a63` (r130) | leaf only |
 | RFIX-131a-06 | memory-order replays (706,483) | not needed | none: 0.3 % of the boot's cycles (see "Where the boot's cycles go") | - |
 
@@ -450,6 +456,116 @@ non-mixed select is "the resolving branch is the slot on port 0".
 (`sb_cancel` / `sb_commit_bundle`): wherever the architectural write is
 gated by the combined mask and the commit acknowledge is not.
 
+## RFIX-131a-10 / -11 / -12 — two harts on one core
+
+`g6lc64_hyp8_smt2` (one core, two harts, the boot geometry) builds in ten
+minutes and runs at scalar speed; `hyp8_smp_lrsc` with `NHARTS=2` (LR/SC and
+AMO on shared counters, per-hart slots) is the reproduction. It failed on
+the r131 tree too (A/B build), and the four-core model showed the same
+first symptom, so these are not regressions of this round: two harts had
+not run on hyp8 before. Three independent causes, each found from the trace
+of the previous one's fix.
+
+### -10: the resolved successor of a branch that commits in its resolve cycle
+
+**Trace** (`+smt_flow_trace`). Hart 1 retires its `jalr` out of the boot
+ROM; at the next thread switch its banked PC is 0 (`handoff … restore=0`),
+and it fetches address 0 from then on.
+
+**Mechanism.** Under the drained handoff the PC bank's frontier is the
+successor of the last retired instruction, read at commit from
+`bp.predict_address` for a control-flow instruction. That field holds the
+*resolved* target only after `sb_lifecycle` installs it with the writeback.
+The commit bundle already merges a writeback that lands on the head in the
+same cycle (result, exception) — but not this field, so a branch committing
+in its resolve cycle was presented with the registered value: the
+prediction, or zero for an unpredicted `jalr`. A single hart never reads
+the bank; the debug single-step `dpc` reads the same field.
+
+**Change** (`sb_commit_bundle.sv`, `scoreboard.sv`). The same-cycle merge
+carries the resolved successor when the resolve record names the presented
+slot. Timing: one slot compare and a VLEN-wide select on
+`commit_instr_o.bp.predict_address`, from the registered resolve record;
+not measured.
+
+### -11: the free list of one bank could run dry for good
+
+**Trace** (`[dsp-stall]`, new, under `+disp_trace`). After 13 instructions
+per hart the dispatch group is never taken again: `ren_stall=1`,
+`r1_stall=1`, nothing in flight, `free=8 of 72` — and none of the eight in
+the bank lane 0 allocates from.
+
+**Mechanism.** Rename lane p allocates only from free-list bank
+p % FreelistBanks (2 on hyp8). A retirement frees the register its
+destination was mapped to *before*, whichever bank that was in. Lanes fill
+in order, so bank 0 does most of the allocating and the architectural map
+drifts into it. A bank no larger than the architectural state can end up
+entirely mapped: empty, with nothing in flight to free into it. One hart
+fits by construction (72 entries, 36 per bank, at most 32 mapped). The
+default pool size was scaled by hart count for the map but not per bank:
+two harts are 62 mapped registers against 36 per bank.
+
+**Change** (`ooo/g6lc_ooo_dispatch.sv`). The pool has a liveness floor:
+every bank holds the architectural registers of every hart plus one group
+of spares (`FreelistBanks * (1 + 31 * NrHarts) + 4 * NrIssuePorts`; the FP
+pool likewise); a larger configured or default pool is kept. One hart: 72,
+unchanged (the scalar netlist is the same). Two harts, 2-wide: 103 -> 134.
+Four cores x two harts, 8-wide: 199, unchanged (already above the floor).
+The floor removes the stall; it does not make the two banks drain evenly —
+that is a throughput matter for the bank-steering policy, not a liveness
+one.
+
+### -12: a refetch is {pc, hart}
+
+**Trace.** With -10 and -11 both harts run, and the program fails its
+LR/SC count: 72 for 96. Hart 0 retires `bnez t3` 60 times for 48 `sc.d`:
+twelve rounds enter at the `bnez` without their own `lr`/`sc`. In the flow
+trace hart 1's `sc.d` at `0x…84` retires, the counted drain runs, and the
+thread switch that follows restores **hart 0** at `0x…88`.
+
+**Mechanism.** A counted drain (CSR side-effect flush, replay, the flush
+behind an `sc`) raises its refetch several cycles after its trigger, with
+the PC it captured at the trigger. The hart was not captured: the PC was
+banked into whichever hart's instruction sat on commit port 0 in the cycle
+the refetch was raised — after a drain, usually the other hart's head or an
+empty slot. The same pattern one level down: the CSR bank selected the
+registered side-effect flush of "the committing hart" in the cycle after
+the CSR retired, so with another hart on the port the flush was dropped or
+took another bank's PC.
+
+**Change** (`controller.sv`, `csr_write.sv`, `csr_regfile.sv`,
+`smt/g6lc_smt_csr_bank.sv`, `g6lc_core.sv`). The drain captures the hart
+beside the PC (from the CSR for a CSR flush, from the commit port
+otherwise) and the frontend / PC bank use the captured hart for the drain's
+refetch. The CSR bank raises the flush of whichever bank has one (one CSR
+retires per cycle) and names that bank's hart.
+
+The captured hart is selected by a registered "drain past its trigger"
+flag, not by `drain_pending_o`: the latter carries the combinational
+trigger, and the refetch hart feeds the SMT selector and the frontend,
+whose outputs return into the controller's flush legs. The first form
+(model `8c946e83…`, tag `rfix131a-c4`) closed that loop; the multi-threaded
+model then gave different results run to run (`hyp8_h36_strlen_replay`
+failing with three different cycle counts in six runs of one binary). Kept
+here as the signature of a combinational loop in a threaded model:
+identical binary, identical input, varying verdict.
+
+Timing: a hart register beside `drain_pc_q` and a 2:1 select on the hart
+into the frontend and the PC bank; not measured.
+
+### Verified
+
+`hyp8-rfix131a-c5-smt2-aggregate-t4` (model `2f3d94dd…`):
+`hyp8_smp_lrsc`, `NHARTS=2`, passes in 67,448 cycles, four runs identical;
+each hart 48 rounds, LR/SC and AMO counters 96. `hyp8-rfix131a-c5-aggregate-t4`
+(model `8c637554…`): 21 of 21 programs pass with clean logs at the round-b
+cycle counts, repeat runs identical.
+
+**Backport note.** -10 and -12 apply to any tree with the speculative
+scoreboard, the counted drain and the SMT PC bank; -11 to any tree with
+banked free lists and more than one hart. None changes single-hart
+behaviour.
+
 ## RFIX-131a-07 — TLB fill: a fill evicts every entry it overlaps
 
 **Evidence.** `hyp8-osbi-scalar-r129b-mmustaged-diag2` (staged MMU,
@@ -797,9 +913,10 @@ of that staging on a boot, not as a defect. Nothing was changed.
 - **RFIX-131a-05** — 6 real commit gaps (LR parked by a saturated
   SC-backoff mask, 396.95M / 429.42M; r130 fix `67f413a63`, `sc-backoff`
   leaf passes). Not re-observed on a boot.
-- **RFIX-131a-10 (open)** — two harts on one core do not run
-  (`g6lc64_hyp8_smt2`, `hyp8_smp_lrsc` with `NHARTS=2`). See "First
-  multi-hart runs".
+- **Four cores** — `hyp8_smp_lrsc` with `NHARTS=8` on `g6lc64_hyp8_mc`
+  with RFIX-131a-10/-11/-12 is the next isolated step (the round-a model
+  showed cores 1–3 retiring nothing). Only the SMP-aware program runs on a
+  multi-hart model; the other directed programs are single-thread.
 - **Owed measurements** — a stitched `sv-timing` figure for the port-1 drop
   path (RFIX-131a-09); `paddr_ni`, the context barrier and the TLB fill
   compare; boot-level cost of CSR serialization, non-idempotent load

@@ -43,6 +43,16 @@
 // Port 0 is the oldest entry of its hart and a mispredict only cancels
 // younger entries of that hart, so port 0 keeps the registered bit (its
 // decision path is unchanged) and the invariant is checked in simulation.
+//
+// rfix131a-10: the same-cycle writeback merge covers the whole record the
+// lifecycle installs, not only result and exception. A control-flow
+// instruction's resolved successor is written into bp.predict_address by
+// the same writeback (sb_lifecycle w_bpw), and commit reads it there: the
+// SMT PC bank's retirement-driven frontier and the debug single-step dpc.
+// A branch committing in its resolve cycle was presented with the
+// registered field -- the prediction, or zero for an unpredicted jalr --
+// so a hart that retired such a branch as its last instruction before a
+// thread switch came back at PC 0 (two harts never ran together).
 
 module sb_commit_bundle
   import g6lc_core_pkg::*;
@@ -50,7 +60,8 @@ module sb_commit_bundle
     parameter config_pkg::g6lc_cfg_t G6LCCfg = config_pkg::g6lc_cfg_empty,
     parameter type sb_mem_t = logic,
     parameter type scoreboard_entry_t = logic,
-    parameter type exception_t = logic
+    parameter type exception_t = logic,
+    parameter type bp_resolve_t = logic
 ) (
     // Live entry array (read-only)
     input  sb_mem_t [G6LCCfg.NR_SB_ENTRIES-1:0]                      mem_q_i,
@@ -66,6 +77,9 @@ module sb_commit_bundle
     input  exception_t [G6LCCfg.NrWbPorts-1:0]                        ex_i,
     // LSQ load-check (tied high until the LSQ group lands)
     input  logic [G6LCCfg.NR_SB_ENTRIES-1:0]                          ld_checked_i,
+    // Branch resolve record of this cycle (the registered B2 record; its
+    // writeback lane lands in the same cycle)
+    input  bp_resolve_t                                               resolved_branch_i,
     // Slots a mispredict resolving this cycle cancels (sb_cancel.kill_req_o)
     input  logic [G6LCCfg.NR_SB_ENTRIES-1:0]                          cancel_now_i,
     // COH_OOO physical-store ordering inputs
@@ -418,7 +432,16 @@ module sb_commit_bundle
     assign commit_instr_o[i].use_zimm    = sel_sbe.use_zimm;
     assign commit_instr_o[i].use_pc      = sel_sbe.use_pc;
     assign commit_instr_o[i].ex          = ex_merged;
-    assign commit_instr_o[i].bp          = sel_sbe.bp;
+    // rfix131a-10: the resolved successor of a control-flow instruction
+    // whose writeback is merged this cycle (what sb_lifecycle installs).
+    scoreboard_entry_t sbe_cf;
+    always_comb begin : cport_cf
+      sbe_cf = sel_sbe;
+      if (wb_hit && sel_sbe.fu == g6lc_core_pkg::CTRL_FLOW &&
+          resolved_branch_i.valid && resolved_branch_i.trans_id == slot)
+        sbe_cf.bp.predict_address = resolved_branch_i.target_address;
+    end
+    assign commit_instr_o[i].bp          = sbe_cf.bp;
     assign commit_instr_o[i].is_compressed = sel_sbe.is_compressed;
     assign commit_instr_o[i].is_macro_instr = sel_sbe.is_macro_instr;
     assign commit_instr_o[i].is_last_macro_instr =

@@ -598,6 +598,8 @@ module g6lc_core
   logic [G6LCCfg.VLEN-1:0]                        pc_commit_hold;
   logic [G6LCCfg.VLEN-1:0]                        pc_commit_fe;
   assign pc_commit_fe = drain_req ? pc_commit_hold : pc_commit;
+  // rfix131a-12: the hart travels with the refetch pc (declared with the
+  // commit records below).
   logic mbe;  // determines the data endian-ness of the processor
 
   localparam NumPorts = 4;
@@ -802,6 +804,9 @@ module g6lc_core
   logic [G6LCCfg.NrCommitPorts-1:0][G6LCCfg.XLEN-1:0] wdata_commit_id;
   logic [G6LCCfg.NrCommitPorts-1:0] we_gpr_commit_id;
   logic [G6LCCfg.NrCommitPorts-1:0][$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] whart_commit_id;
+  logic [HART_ID_BITS-1:0] hart_commit_hold, hart_commit_fe;
+  logic drain_body;
+  assign hart_commit_fe = drain_body ? hart_commit_hold : HART_ID_BITS'(whart_commit_id[0]);
   logic [G6LCCfg.NrCommitPorts-1:0] we_fpr_commit_id;
   // --------------
   // CSR <-> *
@@ -1064,6 +1069,7 @@ assign irq_active = irq_i[smt_active_hart];
   logic flush_csr_ctrl;
   // r59: pc of the CSR whose deferred side-effect flush is flush_csr_ctrl
   logic [G6LCCfg.VLEN-1:0] flush_csr_pc_ctrl;
+  logic [HART_ID_BITS-1:0] flush_csr_hart_ctrl;
   logic flush_unissued_instr_ctrl_id;
   logic flush_ctrl_if;
   logic flush_ctrl_id;
@@ -1319,7 +1325,7 @@ assign irq_active = irq_i[smt_active_hart];
       .fetch_translation_en_i (enable_translation_csr_ex | enable_g_translation_csr_ex),
       .set_pc_commit_i    (set_pc_ctrl_pcgen),
 `ifdef G6LC_FETCH_B
-      .commit_hart_i      (whart_commit_id[0]),
+      .commit_hart_i      (hart_commit_fe),
       .mem_replay_pc_i    (mem_replay_pc_ctrl_pcgen),
       .peer_restart_valid_i (peer_restart_active),
       .peer_restart_pc_i    (peer_restart_pc),
@@ -1510,7 +1516,7 @@ assign irq_active = irq_i[smt_active_hart];
     end
     if (set_pc_ctrl_pcgen) begin
       smt_arch_redirect_valid = 1'b1;
-      smt_arch_redirect_hart = whart_commit_id[0];
+      smt_arch_redirect_hart = hart_commit_fe;
       // A memory-order replay refetches the committing PC itself, like halt —
       // banking pc+4 would restart the hart one instruction late.
       // r59: the counted drain raises set_pc on its last cycle; the pc is
@@ -3743,6 +3749,7 @@ assign irq_active = irq_i[smt_active_hart];
       .rtc_time_i,
       .flush_o                 (flush_csr_ctrl),
       .flush_pc_o              (flush_csr_pc_ctrl),
+      .flush_hart_o            (flush_csr_hart_ctrl),
       .halt_csr_o              (halt_csr_ctrl),
       .hart_halt_o             (smt_csr_hart_halt),
       .wfi_wake_o              (core_wake_o),
@@ -4028,7 +4035,10 @@ assign irq_active = irq_i[smt_active_hart];
       // commit-stage pc for the refetch below).
       .drain_pending_o       (drain_req),
       .pc_commit_i           (pc_commit),
+      .commit_hart_i         (HART_ID_BITS'(whart_commit_id[0])),
       .pc_commit_hold_o      (pc_commit_hold),
+      .hart_commit_hold_o    (hart_commit_hold),
+      .drain_body_o          (drain_body),
       // virtualization mode of the committing instruction's hart (T6b-2b;
       // identical to the active hart under drained handoff)
       .v_i                   (v_commit_csr),
@@ -4058,6 +4068,7 @@ assign irq_active = irq_i[smt_active_hart];
       .resolved_branch_i     (resolved_branch_ctrl),
       .flush_csr_i           (flush_csr_ctrl),
       .csr_flush_pc_i        (flush_csr_pc_ctrl),
+      .csr_flush_hart_i      (flush_csr_hart_ctrl),
       .fence_i_i             (fence_i_commit_controller),
       .fence_i               (fence_commit_controller),
       .sfence_vma_i          (sfence_vma_commit_controller),

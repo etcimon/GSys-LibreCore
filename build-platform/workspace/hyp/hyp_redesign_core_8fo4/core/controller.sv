@@ -98,6 +98,8 @@ module controller
     // pc_commit_i already names the next head (or a freed slot) when the
     // flush arrives; the refetch must be formed from the CSR's own pc.
     input logic [G6LCCfg.VLEN-1:0] csr_flush_pc_i,
+    // hart of that CSR instruction (rfix131a-12) - CSR_REGFILE
+    input logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] csr_flush_hart_i,
     // fence.i in - ACC_DISPATCH
     input logic fence_i_i,
     // fence in - ACC_DISPATCH
@@ -125,10 +127,26 @@ module controller
     // Live scoreboard head PC - COMMIT_STAGE (hyp8: captured at drain trigger
     // because the head pops while the drain holds the kill)
     input logic [G6LCCfg.VLEN-1:0] pc_commit_i,
+    // Hart of the live scoreboard head - COMMIT_STAGE (rfix131a-12: the
+    // refetch record a counted drain captures is {pc, hart}. The drain
+    // raises the refetch several cycles after its trigger; by then the
+    // commit port can present another hart's head or an empty slot, and
+    // under SMT the refetch pc was banked into that hart: a hart resumed
+    // at the other hart's pc + 4 and skipped its own instructions.)
+    input logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] commit_hart_i,
     // Captured refetch PC, valid while drain_pending_o - FRONTEND (hyp8)
     output logic [G6LCCfg.VLEN-1:0] pc_commit_hold_o,
+    // Captured refetch hart, valid while drain_body_o
+    output logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] hart_commit_hold_o,
     // A counted drain is holding the refetch back - FRONTEND/top mux (hyp8)
-    output logic drain_pending_o
+    output logic drain_pending_o,
+    // The drain is past its trigger cycle (registered; rfix131a-12). The
+    // refetch hart is a control input of the SMT selector and of the
+    // frontend, whose outputs come back into this module's flush legs:
+    // selecting it with drain_pending_o, which carries the combinational
+    // trigger, closes a loop. The trigger cycle withholds the refetch, so
+    // the captured hart is only needed from the next cycle on.
+    output logic drain_body_o
 );
 
   // active fence - high if we are currently flushing the dcache
@@ -190,6 +208,7 @@ module controller
 
   logic [DRAIN_W-1:0]      drain_cnt_q;
   logic [G6LCCfg.VLEN-1:0] drain_pc_q;
+  logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] drain_hart_q;
   logic                    drain_replay_q;
   logic                    drain_setpc_q;
   // captured kill mask (order matches DRAIN_PACK below)
@@ -209,6 +228,8 @@ module controller
   assign drain_pending_o = (drain_cnt_q != '0) |
                            (refetch_flush & (DRAIN_CYCLES > 1));
   assign pc_commit_hold_o = drain_pc_q;
+  assign hart_commit_hold_o = drain_hart_q;
+  assign drain_body_o = (drain_cnt_q != '0);
 
 assign commit_flush = ex_valid_i | eret_i
       | (G6LCCfg.DebugEn & set_debug_pc_i)
@@ -532,6 +553,7 @@ assign commit_flush = ex_valid_i | eret_i
     if (!rst_ni) begin
       drain_cnt_q    <= '0;
       drain_pc_q     <= '0;
+      drain_hart_q   <= '0;
       drain_replay_q <= 1'b0;
       drain_setpc_q  <= 1'b0;
       drain_mask_q   <= '0;
@@ -549,6 +571,7 @@ assign commit_flush = ex_valid_i | eret_i
           // the next instruction -- the old form resumed at next.pc + 4 and
           // dropped one instruction after every flushing CSR write).
           drain_pc_q     <= flush_csr_i ? csr_flush_pc_i : pc_commit_i;
+          drain_hart_q   <= flush_csr_i ? csr_flush_hart_i : commit_hart_i;
           drain_replay_q <= mem_replay_comb;
           // the refetch qualifier is latched separately from the kill
           // mask: drain_force also raises flush_unissued, so a mask bit

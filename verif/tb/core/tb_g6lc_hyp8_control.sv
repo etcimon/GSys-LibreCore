@@ -197,7 +197,7 @@ module tb_g6lc_hyp8_csr;
   ) i_csr (
       .clk_i(clk), .rst_ni(rst_n), .flush_i(flush),
       .time_irq_i(1'b0), .rtc_time_i('0),
-      .flush_o(flush_csr), .flush_pc_o(), .halt_csr_o(halt_csr), .wfi_wake_o(),
+      .flush_o(flush_csr), .flush_pc_o(), .flush_hart_o(), .halt_csr_o(halt_csr), .wfi_wake_o(),
       .commit_instr_i(ci[0]), .commit_ack_i(ack),
       .boot_addr_i(64'h8000_0000), .hart_id_i('0),
       .ex_i(ex_commit),
@@ -6794,6 +6794,7 @@ module tb_g6lc_hyp8_ctrl;
       .resolved_branch_i   (res),
       .flush_csr_i         (1'b0),
       .csr_flush_pc_i      ('0),
+      .csr_flush_hart_i    ('0),
       .fence_i_i           (1'b0),
       .fence_i             (1'b0),
       .sfence_vma_i        (1'b0),
@@ -6811,7 +6812,10 @@ module tb_g6lc_hyp8_ctrl;
       .resync_storamic_dack_o (),
 `endif
       .pc_commit_i         ('0),
+      .commit_hart_i       ('0),
       .pc_commit_hold_o    (f_pchold),
+      .hart_commit_hold_o  (),
+      .drain_body_o        (),
       .drain_pending_o     (f_drainp)
   );
 

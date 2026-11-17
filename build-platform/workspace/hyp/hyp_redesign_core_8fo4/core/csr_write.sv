@@ -29,6 +29,11 @@ module csr_write
     // next_head.pc + 4 and skipped one instruction after every flushing
     // CSR write -- OpenSBI's sbi_hart_switch_mode lost its mret).
     input  logic [G6LCCfg.VLEN-1:0]       flush_pc_i,
+    // rfix131a-12: the hart of that instruction, captured with its pc -- a
+    // refetch record is {pc, hart}; the pc alone was banked into whichever
+    // hart sat on the commit port when the deferred flush was applied.
+    input  logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] flush_hart_i,
+    output logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] flush_hart_o,
     output logic                          flush_o,
     // registered alongside flush_o: valid in the flush_o cycle
     output logic [G6LCCfg.VLEN-1:0]       flush_pc_o
@@ -39,9 +44,11 @@ module csr_write
     if (!rst_ni) begin
       flush_o    <= 1'b0;
       flush_pc_o <= '0;
+      flush_hart_o <= '0;
     end else begin
       flush_o <= flush_req_i;
       if (flush_req_i) flush_pc_o <= flush_pc_i;
+      if (flush_req_i) flush_hart_o <= flush_hart_i;
     end
   end
 

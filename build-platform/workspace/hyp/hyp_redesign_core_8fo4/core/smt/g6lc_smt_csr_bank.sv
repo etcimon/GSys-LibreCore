@@ -55,6 +55,8 @@ module g6lc_smt_csr_bank
     output logic flush_o,
     // pc of the CSR instruction that raised flush_o (valid with flush_o)
     output logic [G6LCCfg.VLEN-1:0] flush_pc_o,
+    // hart of that CSR instruction (valid with flush_o; rfix131a-12)
+    output logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] flush_hart_o,
     output logic halt_csr_o,
     // Per-hart WFI halt (bank-local). Thread select must use this vector so an
     // inactive bank woken by timer/IPI becomes ready without waiting to be active.
@@ -266,6 +268,7 @@ module g6lc_smt_csr_bank
         .rtc_time_i,
         .flush_o,
         .flush_pc_o,
+        .flush_hart_o,
         .halt_csr_o,
         .wfi_wake_o,
         .commit_instr_i,
@@ -521,6 +524,7 @@ module g6lc_smt_csr_bank
           .rtc_time_i,
           .flush_o(flush_b[h]),
           .flush_pc_o(flush_pc_b[h]),
+          .flush_hart_o(),
           .halt_csr_o(halt_b[h]),
           .wfi_wake_o(wake_b[h]),
           .commit_instr_i(commit_instr_i),
@@ -688,9 +692,22 @@ module g6lc_smt_csr_bank
       automatic logic [$bits(lsu_hart_i)-1:0] lsu_ctx, lsu_chk_ctx;
       lsu_ctx     = LSU_CTX_MUT ? active_hart_i : lsu_hart_i;
       lsu_chk_ctx = LSU_CTX_MUT ? active_hart_i : lsu_chk_hart_i;
-      // CSR-write side-effect flush belongs to the committing hart
-      flush_o                  = flush_b[commit_instr_i.hart_id];
-      flush_pc_o               = flush_pc_b[commit_instr_i.hart_id];
+      // rfix131a-12: a bank's side-effect flush is registered one cycle
+      // after its CSR retired and belongs to that bank's hart -- not to
+      // whichever hart the commit port presents in the flush cycle (the
+      // former select: with another hart's head, or an empty slot, on the
+      // port the flush was dropped or carried the wrong pc). One CSR retires
+      // per cycle, so at most one bank raises it.
+      flush_o      = 1'b0;
+      flush_pc_o   = '0;
+      flush_hart_o = '0;
+      for (int unsigned h = 0; h < NH; h++) begin
+        if (flush_b[h]) begin
+          flush_o      = 1'b1;
+          flush_pc_o   = flush_pc_o | flush_pc_b[h];
+          flush_hart_o = flush_hart_o | HID_W'(h);
+        end
+      end
       // WFI: under drained handoff the whole backend is empty at a switch, so
       // a WFI's halt still gates the commit stage globally. Under mixed
       // residency only the per-hart hart_halt_o parks the owning hart in the

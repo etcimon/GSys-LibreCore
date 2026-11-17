@@ -60,6 +60,8 @@ module csr_regfile
     output logic flush_o,
     // pc of the CSR instruction that raised flush_o (valid with flush_o) - CONTROLLER
     output logic [G6LCCfg.VLEN-1:0] flush_pc_o,
+    // hart of that CSR instruction (valid with flush_o) - CONTROLLER
+    output logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] flush_hart_o,
     // halt requested - CONTROLLER
     output logic halt_csr_o,
     // G6LC core sleep gate: the WFI wake-up condition of wfi_ctrl evaluated from the
@@ -370,6 +372,8 @@ module csr_regfile
       .flush_req_i (flush_req),
       // csr_apply holds the CSR head at commit_instr_i on this cycle
       .flush_pc_i  (commit_instr_i.pc),
+      .flush_hart_i(commit_instr_i.hart_id),
+      .flush_hart_o(flush_hart_o),
       .flush_o     (flush_o),
       .flush_pc_o  (flush_pc_o)
   );

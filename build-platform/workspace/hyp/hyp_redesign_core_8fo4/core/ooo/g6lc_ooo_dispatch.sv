@@ -141,17 +141,36 @@ module g6lc_ooo_dispatch
                                                             : G6LCCfg.RobEntries;
   localparam int unsigned NH = G6LCCfg.NrHarts < 1 ? 1 : G6LCCfg.NrHarts;
   localparam int unsigned HID_W = NH <= 1 ? 1 : $clog2(NH);
-  localparam int unsigned PRF_N = (G6LCCfg.PrfEntries == 0) ? (1 + 31 * NH + ROB_N + 8)
-                                                            : G6LCCfg.PrfEntries;
+  localparam int unsigned NP    = G6LCCfg.NrIssuePorts;
+  // rfix131a-11: free-list liveness floor. Rename lane p allocates only from
+  // free-list bank p % FreelistBanks, and a retirement frees the register the
+  // destination was mapped to BEFORE -- whichever bank that is in. Lanes are
+  // filled in order, so lane 0's bank does most of the allocating and the
+  // architectural map drifts into it. If that bank is not larger than the
+  // architectural state of every hart, it can end up entirely mapped: empty,
+  // with nothing in flight to free into it, and rename stalls for good while
+  // the other bank holds every spare register. One hart fits by construction
+  // (72 entries, 36 per bank, 31 + x0 mapped at most); the configured size is
+  // not scaled by NrHarts, and with two harts (62 mapped registers, 36 per
+  // bank) the core stopped about thirty instructions after reset. Each bank
+  // holds every architectural register of every hart plus one group of
+  // spares; a larger configured pool is kept as it is.
+  localparam int unsigned FL_NB = (HypCfg.FreelistBanks < 1) ? 1 : HypCfg.FreelistBanks;
+  localparam int unsigned PRF_REQ = (G6LCCfg.PrfEntries == 0) ? (1 + 31 * NH + ROB_N + 8)
+                                                              : G6LCCfg.PrfEntries;
+  localparam int unsigned PRF_LIVE = FL_NB * (1 + 31 * NH) + NP * 4;
+  localparam int unsigned PRF_N = (PRF_REQ > PRF_LIVE) ? PRF_REQ : PRF_LIVE;
   localparam int unsigned IQ_N  = (G6LCCfg.IqEntries == 0) ? ROB_N : G6LCCfg.IqEntries;
   localparam int unsigned LD_N  = (G6LCCfg.LsqLoadEntries == 0) ? 8 : G6LCCfg.LsqLoadEntries;
   localparam int unsigned ST_N  = (G6LCCfg.LsqStoreEntries == 0) ? 8 : G6LCCfg.LsqStoreEntries;
   localparam int unsigned PRF_W = ooo_prf_w(PRF_N);
-  localparam int unsigned FPRF_N = G6LCCfg.FpPresent ? (32 * NH + ROB_N + 8) : 1;
+  localparam int unsigned FPRF_REQ  = 32 * NH + ROB_N + 8;
+  localparam int unsigned FPRF_LIVE = FL_NB * 32 * NH + NP * 4;
+  localparam int unsigned FPRF_N = !G6LCCfg.FpPresent ? 1 :
+                                   (FPRF_REQ > FPRF_LIVE) ? FPRF_REQ : FPRF_LIVE;
   localparam int unsigned FPRF_W = G6LCCfg.FpPresent ? ooo_prf_w(FPRF_N) : 1;
   localparam int unsigned ROB_W = ooo_rob_w(ROB_N);
   localparam int unsigned CKPT  = (G6LCCfg.BPCkptDepth == 0) ? 8 : G6LCCfg.BPCkptDepth;
-  localparam int unsigned NP    = G6LCCfg.NrIssuePorts;
   localparam int unsigned CSR_W = g6lc_ooo_pkg::ooo_csr_credit_bits(G6LCCfg);
 
   localparam int unsigned CKPT_W = $clog2(CKPT+1);
@@ -815,6 +834,25 @@ module g6lc_ooo_dispatch
     dsp_hi = 3000;
     void'($value$plusargs("trace_from=%d", dsp_lo));
     void'($value$plusargs("trace_to=%d", dsp_hi));
+  end
+  logic [PRF_N-1:0] dsp_bank0;
+  always_comb begin
+    dsp_bank0 = '0;
+    for (int unsigned i = 1; i < PRF_N; i++) if ((i % FL_NB) == 0) dsp_bank0[i] = 1'b1;
+  end
+  // rfix131a-10: why a presented group is not taken -- every term of can_go
+  // and of the rename stall behind it, with the free-list population.
+  always_ff @(negedge clk_i) begin
+    if (rst_ni && disp_trace && $time() >= dsp_lo && $time() <= dsp_hi &&
+        (|dispatch_valid_i) && !can_go) begin
+      $display("[dsp-stall] t=%0t dv=%b | rob_full=%b iq_full=%b ren_stall=%b flush=%b flush_un=%b lsq_blk=%b pend=%b grpv=%b | ren: r1_stall=%b can_cap=%b recovering=%b r1_v=%b s2_v=%b res_vld=%b | free=%0d busy=%0d of %0d, bank0 free=%0d (banks=%0d)",
+        $time, dispatch_valid_i, rob_full, iq_full, ren_stall, flush_i,
+        flush_unissued_i, lsq_disp_block, grp_pend_q, grp_v_q,
+        i_rename.r1_stall, i_rename.can_capture, i_rename.recovering,
+        i_rename.r1_v_q, i_rename.s2_v_q, i_rename.res_vld,
+        $countones(i_rename.free_q), $countones(i_rename.busy_q), PRF_N,
+        $countones(i_rename.free_q & dsp_bank0), FL_NB);
+    end
   end
   always_ff @(negedge clk_i) begin
     if (rst_ni && disp_trace && $time() >= dsp_lo && $time() <= dsp_hi &&
