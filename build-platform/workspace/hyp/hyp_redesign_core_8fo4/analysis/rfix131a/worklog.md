@@ -913,10 +913,21 @@ of that staging on a boot, not as a defect. Nothing was changed.
 - **RFIX-131a-05** — 6 real commit gaps (LR parked by a saturated
   SC-backoff mask, 396.95M / 429.42M; r130 fix `67f413a63`, `sc-backoff`
   leaf passes). Not re-observed on a boot.
-- **Four cores** — `hyp8_smp_lrsc` with `NHARTS=8` on `g6lc64_hyp8_mc`
-  with RFIX-131a-10/-11/-12 is the next isolated step (the round-a model
-  showed cores 1–3 retiring nothing). Only the SMP-aware program runs on a
-  multi-hart model; the other directed programs are single-thread.
+- **RFIX-131a-13 (open) — four cores.** `g6lc64_hyp8_mc` on the round-c
+  tree (`hyp8-rfix131a-c5-mc-aggregate-t4`: verilation 631 s with the fixed
+  fork, 4,363 sources, phase-1 compile ~70 min at -j12), `hyp8_smp_lrsc`
+  with `NHARTS=8`, instrumented model. Progress against the round-a model:
+  cores 0 and 1 both run (harts 0–3 retire; hart 1 is inside its LR/SC
+  round at cycle 3,500), cores 2 and 3 have not retired yet. The run stops
+  at cycle 3,600 on the model's own check `ooo_switch_drained` in core 1:
+  a thread switch while the LSQ reports busy
+  (`[ooo-switch-drained] hart=0 sbem=1 sbn=0 stp=1 lsqb=1 rob=0 iq=0
+  starve=1`), ten cycles after hart 3's `jalr` out of the ROM retired —
+  with no load or store dispatched on that core. `lsq_busy_o` also counts
+  staged update records (`ev_count`); the selector takes its switch
+  decision one cycle before the `switch_o` pulse the check samples. Not
+  seen on the two-hart, 2-wide model. Leaf benches on closure-rfix131a-c5:
+  the 21 runnable leaves pass.
 - **Owed measurements** — a stitched `sv-timing` figure for the port-1 drop
   path (RFIX-131a-09); `paddr_ni`, the context barrier and the TLB fill
   compare; boot-level cost of CSR serialization, non-idempotent load
