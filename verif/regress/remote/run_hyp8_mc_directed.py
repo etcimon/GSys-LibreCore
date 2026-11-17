@@ -206,7 +206,11 @@ def main():
         print(f"{name}: {state}{('/' + oracle) if oracle else ''} "
               f"cycles={entry['cycles']} tohost={tohost_val} rc={p.returncode} "
               f"bus_err={bus_err} uart_rd={uart_rd} walk_err={walk_err} model_err={model_err}")
-    (out / 'mc-directed-results.json').write_text(json.dumps(summary, indent=2))
+    blob = json.dumps(summary, indent=2)
+    (out / 'mc-directed-results.json').write_text(blob)
+    # tracedb ingest discovers runs by results-file name; smokes-results.json
+    # is the recognised 'smoke' kind, so mirror the summary there too.
+    (out / 'smokes-results.json').write_text(blob)
     npass = sum(1 for t in summary['tests'].values() if t.get('state') == 'pass')
     ntot = len(summary['tests'])
     print(f'mc-directed: {npass}/{ntot} pass on {tag}')
