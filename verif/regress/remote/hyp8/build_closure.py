@@ -55,6 +55,7 @@ EXTRA_FILES = [
 EXTRA_GLOBS = [
     'verif/regress/remote/hyp8/*.dts', 'verif/regress/remote/hyp8/*.dtsi',
     'verif/tests/custom/hyp8_*.S',
+    'verif/tests/custom/multicore/*.S',
     'verif/tb/core/tb_g6lc_hyp8_*.sv',
     'corev_apu/tb/dpi/*',
     'build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/neg/*.sv',
