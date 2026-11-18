@@ -135,6 +135,11 @@ TESTS = [
     # is exact and fflags takes no wrong-path flag.
     ('hyp8_ghost_commit', 'verif/tests/custom/hyp8_ghost_commit.S',
      '80001000'),
+    # rfix131a Zacas: AMOCAS.W/D/Q compare-and-swap semantics (success +
+    # mismatch), .W result sign-extension, and the 2-phase register-pair
+    # gather. Strict: an illegal AMOCAS traps to tohost=0xE1, separable
+    # from a wrong compare (fail codes 11..35).
+    ('hyp8_amocas', 'verif/tests/custom/hyp8_amocas.S', '80001000'),
 ]
 LINK_LD = 'verif/tests/custom/common/link_verilator.ld'
 GCC_FLAGS = ['-march=rv64imafdc_zicsr_zifencei', '-mabi=lp64d',
