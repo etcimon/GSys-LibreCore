@@ -262,6 +262,32 @@ module sb_lifecycle
   end
   //pragma translate_on
 
+  //pragma translate_off
+  // rfix131a: violation-triggered dump for "Issue acknowledged but
+  // instruction is not valid" (scoreboard.sv:297). Fires the exact cycle
+  // issue_ack_i is high while decoded_instr_valid_i & issue_open is low,
+  // with the presented instruction + slot state, independent of $time.
+  logic sbl_viol_trace;
+  initial sbl_viol_trace = $test$plusargs("sbl_viol");
+  always_ff @(negedge clk_i) begin
+    if (rst_ni && sbl_viol_trace) begin
+      for (int pi = 0; pi < G6LCCfg.NrIssuePorts; pi++) begin
+        if (issue_ack_i[pi] && !(decoded_instr_valid_i[pi] & issue_open[pi])) begin
+          $display("[sblviol] t=%0t p=%0d dv=%b open=%b ack=%b dack=%b full=%b free=%0d iptr=%0d cptr0=%0d",
+            $time, pi, decoded_instr_valid_i[pi], issue_open[pi], issue_ack_i[pi],
+            decoded_instr_ack_o[pi], issue_full[pi], sb_free_cnt,
+            issue_pointer[pi], commit_pointer_q[0]);
+          $display("[sblviol]  instr pc=%h fu=%0d op=%0d hart=%0d trans=%0d rd=%0d exv=%b | slot_issued=%b",
+            issue_instr_o[pi].pc, issue_instr_o[pi].fu, issue_instr_o[pi].op,
+            issue_instr_o[pi].hart_id, issue_instr_o[pi].trans_id,
+            issue_instr_o[pi].rd, issue_instr_o[pi].ex.valid,
+            mem_q[issue_pointer[pi]].issued);
+        end
+      end
+    end
+  end
+  //pragma translate_on
+
   // maintain a FIFO with issued instructions
 //pragma translate_off
   // O7 alloc trace. Opt-in (`+sb_alloc`).

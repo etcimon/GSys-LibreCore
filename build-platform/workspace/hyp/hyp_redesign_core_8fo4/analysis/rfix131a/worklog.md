@@ -1218,3 +1218,56 @@ Backport note: the mechanism is symmetric with CVXIF (same head-only+port0
 path); no core-RTL change was needed — this was purely a stale-harness fix.
 The ACCEL class/`ord`/`port0` wiring verified here is what the mc RVV model
 relies on; runtime vector execution is still gated on the staged mc build.
+
+## RFIX-131a-20 — RVV mc verilate blocker fixed (serdiv CVA6Cfg alias); mc wedge = scoreboard.sv:297 issue-ack/valid skew
+
+**RVV/Ara mc build (`hyp8-rfix131a-e-mc-aggregate-t4`, stage=verilate) failed
+at elaboration:** `%Error-PINNOTFOUND … vendor/ara/…/lane/simd_div.sv:313
+Parameter pin not found: 'CVA6Cfg'`. Root cause: the mc flist resolves
+`serdiv` to the hyp8 redesign copy
+(`hyp_redesign_core_8fo4/core/serdiv.sv`), whose config parameter is the
+LibreCore `G6LCCfg` (`config_pkg::g6lc_cfg_t`). Tier-U Ara `simd_div`
+instantiates `serdiv` through the *upstream* `CVA6Cfg` parameter name —
+the boundary-rename seam `AGENTS-branding.md` §0.4a warns about. Only
+`serdiv` crosses this boundary with a config-struct parameter: a module-
+name cross-reference of every Ara instantiation against the 238 hyp8-core
+modules in `Flist.hyp8_mc_sim` yields exactly `{serdiv, fpnew_top}`, and
+`fpnew_top` is FPnew-parametric (`Features`/`Implementation`/`DivSqrtSel`/
+`TagType`/`TrueSIMDClass`/`EnableSIMDMask`), not `CVA6Cfg`-typed, so it is
+clean. `g6lc_ara_attach.sv` already binds `.CVA6Cfg(G6LCCfg)` correctly
+(same packed type via the `cva6_cfg_t` typedef alias).
+
+**Fix (`b5d57a451`):** `serdiv` gains `parameter config_pkg::cva6_cfg_t
+CVA6Cfg = config_pkg::cva6_cfg_empty` plus a resolved
+`parameter config_pkg::g6lc_cfg_t CFG = (G6LCCfg != g6lc_cfg_empty) ?
+G6LCCfg : CVA6Cfg`; the three `G6LCCfg.TRANS_ID_BITS` uses (id_i/id_o/id_q)
+now read `CFG`. `cva6_cfg_t`/`cva6_cfg_empty` are typedef/localparam aliases
+of `g6lc_cfg_t`/`g6lc_cfg_empty`, so both names carry the identical packed
+value; exactly one is non-empty per instantiation. G6LCCfg callers
+(`mult.sv`) are unaffected (scalar+smt2 flists share this file). Idiom
+verified on a standalone packed-struct parameter model (per-caller field
+resolution confirmed). Additive, synthesizable, tier-U Ara untouched.
+
+**mc wedge root-cause candidate (`rfix131a-d-mc-isolate`):** the "wedge" is
+not a hang — `mc_hart1_store_visible` aborts at cycle 328980 on
+`scoreboard.sv:297`: `Issue acknowledged but instruction is not valid`
+(`issue_ack_i[i] |-> issue_instr_valid_o[i]`, `gen_core[0]`). The boot trace
+shows npc parked at `0x10040` (a hart spin) before the assert. Mechanism:
+`issue_instr_valid_o[i] = decoded_instr_valid_i[i] & issue_open[i]`
+(sb_lifecycle.sv:243) is the *decode→scoreboard allocation* view —
+combinational, high only the cycle decode presents the instruction.
+`issue_ack_i` is `issue_read_operands.issue_ack_o` (= `issue_ack_pre &
+res_admit`, gated by flush/casq_stall/port-order/AMO rules at
+issue_read_operands.sv:1668-1711) returned through `issue_ack_iro`→
+`issue_ack_sb`→scoreboard, i.e. the *FU-issue* view possibly pipelined
+relative to the allocation view. A one-cycle (or SMT per-hart-window)
+skew between the presented-valid and the ack produces exactly this
+assert. `issue_open[i]=~issue_full[i]` is flow-control, not per-instruction
+validity. NEXT: on the instrumented model, probe `issue_ack_i` vs
+`issue_instr_valid_o`/`decoded_instr_valid_i`/`issue_open` alignment on
+`gen_core[0]` at the failing window (hang_dump already brackets it);
+determine whether the ack is registered one stage deeper than the valid
+(most likely) or an SMT `smt_issue_win` lets a non-head hart's ack reach
+the shared scoreboard port. This is pre-RVV (rfix131a-d), so it is NOT a
+regression from the ACCEL port — it blocks every 2+-active-hart mc test
+and therefore any SMP Linux/OpenWrt boot.
