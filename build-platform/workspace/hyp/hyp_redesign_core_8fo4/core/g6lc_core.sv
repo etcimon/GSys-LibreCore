@@ -3314,8 +3314,13 @@ assign irq_active = irq_i[smt_active_hart];
       .decoded_instr_i         (issue_entry_id_issue),
       .decoded_instr_i_prev    (issue_entry_id_issue_prev),
       .orig_instr_i            (orig_instr_id_issue),
-      .decoded_instr_valid_i   (issue_entry_valid_id_issue & {G6LCCfg.NrIssuePorts{
-          !smt_quiesce && !(G6LCCfg.NrHarts > 1 && halt_ctrl)}}),
+      .decoded_instr_valid_i   (issue_entry_valid_id_issue),
+      // rfix131a-21: SMT quiesce/halt moved off decoded_instr_valid_i onto
+      // the dispatch-capture boundary (issue_quiesce_i). Masking the
+      // scoreboard input dropped issue_instr_valid_o while a captured OoO
+      // group (grp_v_q) could still dispatch_ack_o -> "Issue acknowledged but
+      // instruction is not valid" + an IQ entry with no scoreboard slot.
+      .issue_quiesce_i         (smt_quiesce || (G6LCCfg.NrHarts > 1 && halt_ctrl)),
       .is_ctrl_flow_i          (is_ctrl_fow_id_issue),
       .decoded_instr_ack_o     (issue_instr_issue_id),
       .g1fh_csr_a0_i           (g1fh_csr_a0),

@@ -46,7 +46,12 @@ package g6lc_config_pkg;
   localparam G6LCConfigAExtEn = 1;
   localparam G6LCConfigHExtEn = 0;  // always disabled
   localparam G6LCConfigBExtEn = 1;
-  localparam G6LCConfigVExtEn = 1;
+  // hyp8-mc: RVV/Ara ported (ACCEL head-only+port0 IQ contract, ara_attach,
+  // cva6_config_pkg seam) and leaf-verified, but the full Ara cone pushes the
+  // 4-core/8-hart Verilator elaboration past the remote builder's memory
+  // (signal 9 @ ~104 GiB). Deferred for the mc OpenWrt witness — the mc .dts
+  // advertises no 'v'/'zve' anyway. Flip to 1 once a larger builder lands.
+  localparam G6LCConfigVExtEn = 0;
   localparam G6LCConfigRVZiCond = 1;
 
   // hyp8 SMT2 integration seam: the default source profile stays

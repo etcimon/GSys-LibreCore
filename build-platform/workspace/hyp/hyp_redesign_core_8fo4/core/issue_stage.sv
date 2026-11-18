@@ -64,6 +64,11 @@ module issue_stage
     input logic flush_i,
     // Stall inserted by Acc dispatcher - ACC_DISPATCHER
     input logic stall_i,
+    // rfix131a-21: block NEW dispatch captures during SMT quiesce/halt while
+    // leaving the scoreboard's decoded_instr_valid_i unmasked so an
+    // already-captured OoO group (grp_v_q) can still complete its
+    // scoreboard alloc on dispatch_ack_o. Active-high.
+    input logic issue_quiesce_i,
     // Handshake's data with decode stage - ID_STAGE
     input scoreboard_entry_t [G6LCCfg.NrIssuePorts-1:0] decoded_instr_i,
     input scoreboard_entry_t [G6LCCfg.NrIssuePorts-1:0] decoded_instr_i_prev,
@@ -446,7 +451,10 @@ assign issue_instr_o    = issue_instr_iro[0];
       .lane_csr_i  (ctx_lane_csr),
       .keep_o      (ctx_keep)
   );
-  assign disp_valid_ctx = issue_instr_valid_sb & ctx_keep;
+  // rfix131a-21: quiesce/halt gates only NEW captures here; the scoreboard's
+  // own decoded_instr_valid_i stays unmasked so an in-flight grp_v_q ack can
+  // still allocate its slots (see i_scoreboard / g6lc_ooo_dispatch).
+  assign disp_valid_ctx = issue_instr_valid_sb & ctx_keep & ~issue_quiesce_i;
 
   if (G6LCCfg.OoOEn) begin : gen_full_ooo
     logic [G6LCCfg.NrWbPorts-1:0] wb_exc_bits;
@@ -562,7 +570,7 @@ assign issue_instr_o    = issue_instr_iro[0];
         .flush_unissued_i (flush_unissued_instr_i),
         .dispatch_sbe_i   (issue_instr_sb),
         .dispatch_orig_i  (orig_instr_sb),
-        .dispatch_valid_i (issue_instr_valid_sb),
+        .dispatch_valid_i (issue_instr_valid_sb & ~issue_quiesce_i),
         .dispatch_ack_o   (issue_ack_sb),
         .issue_sbe_o      (issue_instr_iro),
         .issue_orig_o     (orig_instr_iro),
@@ -612,7 +620,7 @@ assign issue_instr_o    = issue_instr_iro[0];
         .rst_ni,
         .flush_i,
         .flush_unissued_instr_i,
-        .issue_valid_sb_i(issue_instr_valid_sb),
+        .issue_valid_sb_i(issue_instr_valid_sb & ~issue_quiesce_i),
         .issue_ack_iro_i (issue_ack_iro),
         .issue_instr_sb_i(issue_instr_sb),
         .decoded_instr_i,

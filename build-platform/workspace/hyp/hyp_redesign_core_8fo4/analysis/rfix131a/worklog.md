@@ -1271,3 +1271,52 @@ determine whether the ack is registered one stage deeper than the valid
 the shared scoreboard port. This is pre-RVV (rfix131a-d), so it is NOT a
 regression from the ACCEL port — it blocks every 2+-active-hart mc test
 and therefore any SMP Linux/OpenWrt boot.
+
+## RFIX-131a-21 — mc scoreboard.sv:297 wedge: SMT quiesce masks in-flight OoO group ack (FIXED)
+
+Supersedes the RFIX-131a-20 "pipeline skew" hypothesis. Root cause is the
+SMT drained-handoff quiesce, not a generic valid/ack alignment:
+
+- `g6lc_core.sv` drove the scoreboard `decoded_instr_valid_i` as
+  `issue_entry_valid_id_issue & {NP{!smt_quiesce && !(NrHarts>1 && halt_ctrl)}}`.
+- `smt_quiesce = thread_select.quiesce_o = drain_pending_q | switch_q` asserts
+  the moment a hart drain is *requested* — long before `drain_ready_i`
+  (which needs `ooo_drained_id` = `!(|grp_v_q) && !grp_pend_q && rob/iq/lsq
+  empty`) lets the switch complete.
+- Meanwhile `g6lc_ooo_dispatch` holds an already-captured group in the
+  *registered* `grp_v_q`; `dispatch_ack_o = iqdisp_ack & grp_v_q & grp_go`
+  still fires once IQ/LSQ/CSR credits arrive — it does not depend on
+  `decoded_instr_valid_i`.
+- On that ack cycle the scoreboard saw `issue_instr_valid_o =
+  decoded_instr_valid_i(=0, masked) & issue_open = 0` while
+  `issue_ack_i = 1` → `scoreboard.sv:297` assert. Worse, `alloc_fire =
+  decoded_instr_valid_i & decoded_instr_ack_o & keep` was 0, so the
+  instruction dispatch had already committed into the IQ got **no
+  scoreboard slot** — an orphaned IQ entry (trans_id never allocated in
+  mem_q) → hang/corruption even if the assert were waived.
+
+Only reachable when `NrHarts>1` (SMT): scalar `NrHarts==1` ties
+`smt_quiesce=0` and the `halt_ctrl` term is masked off, which is why the
+scalar/smt-free directed suite never fired it.
+
+FIX (issue_stage.sv + g6lc_core.sv): move the quiesce/halt mask off the
+scoreboard input onto the *dispatch-capture* boundary.
+- `.decoded_instr_valid_i(issue_entry_valid_id_issue)` — unmasked, so the
+  scoreboard keeps `issue_instr_valid_o`/`alloc_fire` consistent for the
+  in-flight group through its ack (decoded_instr_i still names the held
+  group: decode holds it until `decoded_instr_ack_o`, and drain_ready
+  forbids the switch until `grp_v_q` is empty, so active_hart — and hence
+  issue_entry_* — is still the outgoing hart during the ack window).
+- New `issue_stage.issue_quiesce_i = smt_quiesce || (NrHarts>1 &&
+  halt_ctrl)` ANDed into `disp_valid_ctx` (OoO) and the slice/inorder
+  dispatch-valid inputs — identical gating for NEW captures, none for the
+  already-captured group's completion. `g6lc_ctx_barrier` is purely
+  combinational so its unmasked `lane_valid_i` view is harmless.
+- Scalar/single-hart: `issue_quiesce_i` const-0 → bit-identical behaviour.
+
+RVV note: `g6lc64_hyp8_mc` `G6LCConfigVExtEn` set 1→0 for the witness
+build — the committed Ara cone (VExtEn=1) pushes mc Verilator elaboration
+past the remote builder (~104 GiB → signal 9). The ACCEL/IQ-contract port
+stays committed and leaf-verified; the mc .dts advertises no 'v'/'zve',
+so VExtEn=0 matches the software contract. Flip back to 1 on a larger
+builder to qualify RVV under mc.
