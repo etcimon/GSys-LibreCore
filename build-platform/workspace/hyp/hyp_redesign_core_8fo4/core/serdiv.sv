@@ -40,6 +40,13 @@ module serdiv
   import g6lc_core_pkg::*;
 #(
     parameter config_pkg::g6lc_cfg_t G6LCCfg = config_pkg::g6lc_cfg_empty,
+    // Tier-U Ara (`simd_div`) drives the configuration through the upstream
+    // `CVA6Cfg` parameter name; the hyp8 core uses `G6LCCfg`. `cva6_cfg_t`
+    // is a typedef alias of `g6lc_cfg_t`, so both carry the same packed
+    // configuration value. `CFG` resolves whichever parameter the caller set.
+    parameter config_pkg::cva6_cfg_t CVA6Cfg = config_pkg::cva6_cfg_empty,
+    parameter config_pkg::g6lc_cfg_t CFG =
+        (G6LCCfg != config_pkg::g6lc_cfg_empty) ? G6LCCfg : CVA6Cfg,
     parameter WIDTH = 64,
     parameter STABLE_HANDSHAKE = 0             // Guarantee a stable in_rdy_o during the input handshake. Keep it at 0.
 ) (
@@ -48,7 +55,7 @@ module serdiv
     // Asynchronous reset active low - SUBSYSTEM
     input logic rst_ni,
     // Serdiv translation ID - Mult
-    input logic [G6LCCfg.TRANS_ID_BITS-1:0] id_i,
+    input logic [CFG.TRANS_ID_BITS-1:0] id_i,
     // A operand - Mult
     input logic [WIDTH-1:0] op_a_i,
     // B operand - Mult
@@ -66,7 +73,7 @@ module serdiv
     // Serdiv is ready - Mult
     input logic out_rdy_i,
     // Serdiv transaction ID - Mult
-    output logic [G6LCCfg.TRANS_ID_BITS-1:0] id_o,
+    output logic [CFG.TRANS_ID_BITS-1:0] id_o,
     // Serdiv result - Mult
     output logic [WIDTH-1:0] res_o
 );
@@ -90,7 +97,7 @@ module serdiv
   logic op_b_zero, op_b_zero_q, op_b_zero_d;
   logic op_b_neg_one, op_b_neg_one_q, op_b_neg_one_d;
 
-  logic [G6LCCfg.TRANS_ID_BITS-1:0] id_q, id_d;
+  logic [CFG.TRANS_ID_BITS-1:0] id_q, id_d;
 
   logic rem_sel_d, rem_sel_q;
   logic comp_inv_d, comp_inv_q;
