@@ -142,9 +142,12 @@ ifndef TARGET_CFG
 	export TARGET_CFG = $(target)
 endif
 
-# g6lc_tb C++ probe path: Ara/RVV configs (server_math_v) use gen_acc wrapper.
-# build_config_pkg.sv sets EnableAccelerator = CVA6Cfg.RVV.
-ifneq (,$(findstring server_math_v,$(target)))
+# g6lc_tb C++ probe path: EnableAccelerator = RVV (build_config_pkg.sv),
+# which elaborates ariane gen_acc instead of gen_std. Derive from the
+# package localparam so g6lc64_server_math_v and g6lc64_ooo_int2_l3_v_ai
+# both compile the hang probes against the generated hierarchy.
+G6LC_TB_RVV := $(shell grep -oE "localparam[[:space:]]+CVA6ConfigVExtEn[[:space:]]*=[[:space:]]*[01]" $(root-dir)core/include/$(target)_config_pkg.sv 2>/dev/null | grep -oE "[01]" | head -1)
+ifeq ($(G6LC_TB_RVV),1)
   CFLAGS := $(CFLAGS) -DG6LC_CVA6_GEN_ACC
 endif
 

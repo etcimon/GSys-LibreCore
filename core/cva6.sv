@@ -5828,11 +5828,8 @@ module cva6
     end
   end
 `endif
-
-  initial begin
-    assert (!(CVA6Cfg.SuperscalarEn && CVA6Cfg.EnableAccelerator))
-    else $fatal(1, "Accelerator is not supported by superscalar pipeline");
-  end
+  // Dual-issue Ara is legal: g6lc_iq holds ACCEL at the commit head and
+  // issue_read_operands steers it to port 0 (same contract as CVXIF).
   //pragma translate_on
 
 endmodule  // ariane

@@ -1,0 +1,40 @@
+// g6lc64_ooo_int2_l3_v_ai: OoO+L2+L3 plus RVV/Ara and island MMIO (seam I).
+// Vector token `v`/`zve64d`; island via g6lc-ai-matrix.dtsi. No CVXIF T0 tile.
+/dts-v1/;
+
+/include/ "ariane-ooo-int2-l3.dts"
+/include/ "g6lc-ai-matrix.dtsi"
+
+&CPU0 {
+  riscv,isa = "rv64imafdcv_zba_zbb_zbs_zicbom_zicboz_zacas_zve64d";
+  riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "v", "b", "zicntr", "zicsr", "zifencei", "zihpm", "zba", "zbb", "zbs", "zcb", "zicond", "zicbom", "zicboz", "zicbop", "zacas", "zve64d", "zkn", "sstc", "sscofpmf", "zihintpause", "svpbmt", "xg6lcai";
+};
+
+&CPU1 {
+  riscv,isa = "rv64imafdcv_zba_zbb_zbs_zicbom_zicboz_zacas_zve64d";
+  riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "v", "b", "zicntr", "zicsr", "zifencei", "zihpm", "zba", "zbb", "zbs", "zcb", "zicond", "zicbom", "zicboz", "zicbop", "zacas", "zve64d", "zkn", "sstc", "sscofpmf", "zihintpause", "svpbmt", "xg6lcai";
+};
+
+&CPU2 {
+  riscv,isa = "rv64imafdcv_zba_zbb_zbs_zicbom_zicboz_zacas_zve64d";
+  riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "v", "b", "zicntr", "zicsr", "zifencei", "zihpm", "zba", "zbb", "zbs", "zcb", "zicond", "zicbom", "zicboz", "zicbop", "zacas", "zve64d", "zkn", "sstc", "sscofpmf", "zihintpause", "svpbmt", "xg6lcai";
+};
+
+&CPU3 {
+  riscv,isa = "rv64imafdcv_zba_zbb_zbs_zicbom_zicboz_zacas_zve64d";
+  riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "v", "b", "zicntr", "zicsr", "zifencei", "zihpm", "zba", "zbb", "zbs", "zcb", "zicond", "zicbom", "zicboz", "zicbop", "zacas", "zve64d", "zkn", "sstc", "sscofpmf", "zihintpause", "svpbmt", "xg6lcai";
+};
+
+// Island geometry published to the driver (must track the CAP words of
+// g6lc_ai_island_cfg_pkg::AiIslandLatencyDefault).
+&ai_matrix {
+  g6lc,acc-tile-m = <1024>;
+  g6lc,acc-tile-n = <512>;
+  g6lc,acc-tile-k = <512>;
+  g6lc,macs-per-cycle = <512>;
+  g6lc,queues = <2>;
+  g6lc,queue-depth = <64>;
+  g6lc,noc-width = <64>;
+  g6lc,dram-gbps = <16>;
+  g6lc,clusters = <1>;
+};

@@ -267,6 +267,7 @@ module g6lc_iq
       automatic logic older_st_iq;
       automatic logic is_amo;
       automatic logic is_cvxif;
+      automatic logic is_accel;
       // rs3 participates only when the entry actually has an FP third source;
       // otherwise rs3_rdy is set at dispatch and the term is inert.
       ready[e] = q_chain[e].valid && q_chain[e].rs1_rdy && q_chain[e].rs2_rdy &&
@@ -360,8 +361,18 @@ module g6lc_iq
 `else
       is_cvxif = CVA6Cfg.CvxifEn && (q_chain[e].sbe.fu == CVXIF);
 `endif
+      // Ara / RVV uses the same non-speculative contract as CVXIF: acc_dispatcher
+      // forwards to the vector unit only after commit, and a younger-than-head
+      // issue would still occupy the accelerator while an older op can fault.
+      // Head-only issue plus port-0 steering makes dual-issue Ara legal.
+`ifdef G6LC_MUT_ACCEL_NOHEAD
+      is_accel = 1'b0;   // review mutation: the rule is dropped
+`else
+      is_accel = CVA6Cfg.EnableAccelerator && (q_chain[e].sbe.fu == ACCEL);
+`endif
       ready[e] = ready[e] &&
           !(is_cvxif && (q_chain[e].sbe.trans_id != commit_ptr_i)) &&
+          !(is_accel && (q_chain[e].sbe.trans_id != commit_ptr_i)) &&
           !(is_ld && (mem_stall_i ||
                       (older_unresolved_st && !q_chain[e].may_bypass))) &&
           !(is_csr && older_csr_iq) &&

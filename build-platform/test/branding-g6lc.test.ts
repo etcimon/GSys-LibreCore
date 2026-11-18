@@ -56,6 +56,7 @@ const REQUIRED_CONFIG_PKGS = [
   "g6lc64_smt2_ooo_int_config_pkg.sv",
   "g6lc64_ooo_int2_config_pkg.sv",
   "g6lc64_ooo_int2_l3_config_pkg.sv",
+  "g6lc64_ooo_int2_l3_v_ai_config_pkg.sv",
   "g6lc64_smt2_l3_config_pkg.sv",
   "g6lc64_ooo_config_pkg.sv",
   "g6lc64_ooo_int_config_pkg.sv",

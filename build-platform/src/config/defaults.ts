@@ -1685,6 +1685,7 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       g6lc64_ooo_server: ["corev_apu/Flist.cluster"],
       g6lc64_ooo_int2: ["corev_apu/Flist.cluster"],
       g6lc64_ooo_int2_l3: ["corev_apu/Flist.cluster"],
+      g6lc64_ooo_int2_l3_v_ai: ["corev_apu/Flist.cluster", "vendor/ara/Flist.ara"],
       g6lc64_smt2_l3: ["corev_apu/Flist.cluster"],
       // In-order two-core non-inclusive L3 packages (M6): same reasoning — the
       // L2/L3 hierarchy is only reachable through the cluster lint top.
@@ -1699,6 +1700,7 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       g6lc64_ooo_server: "g6lc_cluster_lint_top",
       g6lc64_ooo_int2: "g6lc_cluster_lint_top",
       g6lc64_ooo_int2_l3: "g6lc_cluster_lint_top",
+      g6lc64_ooo_int2_l3_v_ai: "g6lc_cluster_lint_top",
       g6lc64_smt2_l3: "g6lc_cluster_lint_top",
       g6lc64_server_math_l3: "g6lc_cluster_lint_top",
       g6lc64_stream8_l3: "g6lc_cluster_lint_top",
@@ -1926,6 +1928,7 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       // the server above (N1d/T10g); measured 29w/0e on every remote lint
       // since the N1d gate (ooocoh-n1d-*, fp2, t13c, t16fix).
       g6lc64_ooo_int2_l3: 29,
+      g6lc64_ooo_int2_l3_v_ai: 29,
       g6lc64_smt2_l3: 5,
       // In-order two-core L3 packages (M6): cluster top, measured on the M6
       // archive gates ooocoh-m6-gate-s8l3-r1 / ooocoh-m6-gate-sml3-r1.
@@ -2355,6 +2358,19 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         verilator: {
           target: "g6lc64_ooo_int2_l3",
           warningBudget: 650,
+        },
+      },
+      {
+        id: "diag-ooo-int2-l3-v-ai-lint",
+        description:
+          "Verilator lint of OoO+L2+L3+RVV/Ara+island seam-I package g6lc64_ooo_int2_l3_v_ai.",
+        compartment: "ooo",
+        kind: "verilator-lint",
+        tools: ["verilator"],
+        optional: true,
+        verilator: {
+          target: "g6lc64_ooo_int2_l3_v_ai",
+          warningBudget: 800,
         },
       },
       {

@@ -242,7 +242,7 @@ and option D, and is the single largest hidden cost in the phasing below. Tracke
 
 | Knob | Meaning | Legality rule |
 |---|---|---|
-| `AiMatrixEn` | master enable | requires `CvxifEn` (B) **xor** `AiAccelEn` (D); never with `RVV` |
+| `AiMatrixEn` | master enable | **B** `CvxifEn`; **D** `AiAccelEn`; **I** `Queues>0` and neither core seam (RVV/Ara legal) |
 | `AiAccelEn` | use the accelerator seam (option D) | `!(AiAccelEn && RVV)`, `!(AiAccelEn && CvxifEn)` |
 | `AiTileM/N/K` | native tile geometry | powers of two |
 | `AiAccBanks`, `AiAccDepth` | accumulator SRAM | `AiAccBanks >= NrHarts` when SMT |

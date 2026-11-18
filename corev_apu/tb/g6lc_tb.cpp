@@ -2111,7 +2111,8 @@ done_processing:
                 << std::dec << "\n";
     }
     // S4: _v / Ara is NrCores=2; C0 hangpc can be the lottery loser.
-    // G6LC_CVA6_GEN_ACC is Makefile-only for server_math_v (smt2 stays C0).
+    // G6LC_CVA6_GEN_ACC follows CVA6ConfigVExtEn (server_math_v and
+    // ooo_int2_l3_v_ai); smt2 stays C0.
 #if defined(G6LC_CVA6_GEN_ACC)
     {
       auto npc0 = G6LC_CORE_ROOT(1)->G6LC_CVA6_C1(i_frontend__DOT__npc_q);

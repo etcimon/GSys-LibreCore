@@ -27,6 +27,7 @@ Verilator lint is green for `g6lc64_server_math_v`. Software contract: purpose g
 |---------|---|-------|-----|
 | `g6lc64_server_math_config_pkg.sv` | 0 | 1 | Default server/H/CBO math (no vector IP) |
 | `g6lc64_server_math_v_config_pkg.sv` | **1** | **0** | Server + RVV when Ara is linked |
+| `g6lc64_ooo_int2_l3_v_ai_config_pkg.sv` | **1** | **0** | OoO + L2 + L3 + Ara + island **seam I** |
 | `cv64a6_imafdcv_sv39_config_pkg.sv` | 1 | 0 | Legacy vector-oriented profile |
 
 Select the `_v` package as the active `cva6_config_pkg` only after the flist step below.
@@ -88,6 +89,9 @@ vendor/ara/...           # git-ignored or vendored — not committed if NDA
 | Linux DTS (`v` token) | **Done** — `corev_apu/bootrom/ariane-server-math-v.dts` (only for `_v` package) |
 | Linux/SBI vector context | **Partial** — DTS + `software/vector/opensbi-vrf.md` + `linux.config-fragment`; full SBI/kernel lab |
 | Directed vector memcpy | **Done (directed)** — `v_memcpy_skip` / `v_misa_v` / `v_memcpy_lmul` + `testlist_ara_vector.yaml`; functional LMUL needs live Ara cosim |
+| Seam I + OoO/L2/L3 | **Landed** — `g6lc64_ooo_int2_l3_v_ai`; IQ ACCEL commit-head; dual-issue Ara legal; isolated testharness PGO |
+
+IQ ACCEL head leaf: `verif/tb/core/run-iq-accel-head.sh` (remote testharness; tools/verilator g6lc PGO). Isolated SKU library `work-ver-ooo-int2-l3-v-ai-pgo`: compiler PGO `verilator-v5.008-g6lc-6fa24f6f-pgo`, `--unroll-count 256 --unroll-stmts 131072`, split-loops `.vlt`, sim-PGO. `ooo_fp_ooo.S` STAGE=1 program exit 0 at 7998 cycles (mc_verdict HELD 125: core 1 clock-held; L2 hit/miss 52/27). Ara attach is the stub (`CVA6_ARA_ATTACH` off). `G6LC_CVA6_GEN_ACC` follows `CVA6ConfigVExtEn`.
 
 ### Live Ara IP (operator)
 
