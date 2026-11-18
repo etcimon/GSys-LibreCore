@@ -30,7 +30,8 @@ module reservation_region_check (
 endmodule
 </pre>
 
-<p><strong>CVA6 status:</strong> implemented when <code>CVA6Cfg.RVA</code> is set. LR/SC operations are
+<p><strong>CVA6 status:</strong> implemented when <code>CVA6Cfg.RVZiccrse</code> and
+<code>CVA6Cfg.RVA</code> are set. LR/SC operations are
 routed through <code>core/load_store_unit.sv:728-748</code>, converted to <code>AMO_LR</code>/<code>AMO_SC</code>
 in <code>core/store_unit.sv:134-135,282-319</code>, buffered in <code>core/amo_buffer.sv:50-63</code>, and
 issued to the cache subsystem. The WT cache path implements an SC backoff / pass-fail mechanism in

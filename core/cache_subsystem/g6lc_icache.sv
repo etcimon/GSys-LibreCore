@@ -621,6 +621,7 @@ module g6lc_icache
 
   for (genvar i = 0; i < CVA6Cfg.ICACHE_SET_ASSOC; i++) begin : gen_tag_cmpsel
     assign cl_hit[i] = (cl_tag_rdata[i] == cl_tag_d) & vld_rdata[i];
+    // Ziccif: one contiguous slice of this line (refill is whole-line).
     assign cl_sel[i] = cl_rdata[i][{cl_offset_q, 3'b0}+:CVA6Cfg.FETCH_WIDTH];
     assign cl_user[i] = (CVA6Cfg.FETCH_USER_EN != 32'd0) ? cl_ruser[i][{cl_offset_q, 3'b0}+:CVA6Cfg.FETCH_USER_WIDTH] : '0;
   end

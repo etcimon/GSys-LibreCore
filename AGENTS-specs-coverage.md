@@ -683,22 +683,30 @@ Cluster AMOCAS and SMT cookie soaks remain the named-package controls.
 | Zicntr / Zihpm — counters | Implemented (limited test) |
 | M / Zmmul — multiply/divide | Implemented & tested |
 | Zicond — conditional zero | Partial |
-| Ziccif — fetch atomicity (4.9) | Implemented (limited test) |
+| Ziccif — fetch atomicity (4.9) | Implemented (config; isolated PMA leaf) |
 | Ziccid — I/D coherence (4.10) | Implemented & tested |
-| Zicclsm — misaligned access (4.14) | Partial |
+| Ziccrse — RsrvEventual (4.11) | Implemented (config; isolated PMA leaf) |
+| Zicclsm — misaligned access (4.14) | Implemented (config; isolated leaf) |
 | Zic64b — 64-byte blocks (4.15) | Implemented (limited test) |
 | Control-Flow Integrity — Zicfilp/Zicfiss (4.17) | Not implemented |
-| Zihintntl — non-temporal hints (4.18) | Partial |
+| Zihintntl — non-temporal hints (4.18) | Implemented (config; isolated leaf) |
+| Zimop — mop.r/mop.rr (write 0) | Implemented (config; isolated leaf) |
+| Zcmop — c.mop.n | Implemented (config; isolated leaf) |
 | Zihintpause (4.19) | Implemented (config; limited test) |
 | Cache-Management Ops — Zicbom/Zicboz/Zicbop (4.20) | Zicbom partial; **Zicboz full-line multi-beat (U7ᶜ)**; Zicbop HINT |
 | A — atomics (5.1) | Implemented & tested |
 | Zalrsc — LR/SC (5.2) | Implemented & tested |
-| Zawrs — wait-on-reservation (5.5) | Partial (config; WRS→WFI path) |
+| Zawrs — wait-on-reservation (5.5) | Implemented (config; wait policy + SMT peer snoop; isolated leaves) |
 | Zacas — compare-and-swap (5.9) | Implemented (AMOCAS.W/D/Q config-gated) |
-| Other Za* (Za128rs/Za64rs/Zabha/Zaamo/Zalasr) | Partial |
+| Za64rs — reservation-set ≤64 B (5.4) | Implemented (config; exact-address set; isolated leaf) |
+| Ziccamoa — AMO atomicity PMA | Implemented (config; isolated PMA leaf) |
+| Zabha — byte/half AMOs (5.8) | Implemented (config; isolated decode + RMW leaf) |
+| Other Za* (Za128rs/Zalasr) | Partial |
 | F / D — floating point (ch6) | Implemented & tested |
 | Q — quad float | Not implemented |
-| Zfh — half float | Partial |
+| Zfh — half float | Partial (`XF16`) |
+| Zfhmin — half convert/ldst | Implemented (config; isolated leaf) |
+| Zfa — fminm/fleq/fli/fround/fcvtmod | Implemented (config; isolated decode + execute leaves) |
 | C — compressed (ch7) | Implemented & tested |
 | Zcmt — table jump | Implemented (limited test) |
 | Zcb / Zcmp | Partial |

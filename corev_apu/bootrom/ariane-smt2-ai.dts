@@ -179,7 +179,7 @@
        * which Zawrs permits. What is absent is the SMT wait-for-peer wake, so
        * zawrs is not advertised to Linux and SBI must not use
        * sbi_send_ipi_and_wait. */
-      smt,zawrs = <0>;                    /* no wait-for-peer wake */
+      smt,zawrs = <1>;                    /* wait-for-peer replica snoop */
       smt,default-sku = "experimental";   /* SMT2 not yet a production default SKU */
     };
 

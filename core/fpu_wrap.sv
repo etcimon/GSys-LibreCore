@@ -93,7 +93,8 @@ module fpu_wrap
         Width: unsigned'(CVA6Cfg.FLen),  // parameterized using CVA6Cfg.FLen
         EnableVectors: CVA6Cfg.XFVec,
         EnableNanBox: 1'b1,
-        FpFmtMask: {CVA6Cfg.RVF, CVA6Cfg.RVD, CVA6Cfg.XF16, CVA6Cfg.XF8, CVA6Cfg.XF16ALT},
+        FpFmtMask: {CVA6Cfg.RVF, CVA6Cfg.RVD, (CVA6Cfg.XF16 | CVA6Cfg.RVZfhmin),
+                    CVA6Cfg.XF8, CVA6Cfg.XF16ALT},
         IntFmtMask: {
           CVA6Cfg.XFVec && CVA6Cfg.XF8,
           CVA6Cfg.XFVec && (CVA6Cfg.XF16 || CVA6Cfg.XF16ALT),
@@ -117,9 +118,19 @@ module fpu_wrap
             '{default: unsigned'(LAT_CONV)}
         },  // CONV
         UnitTypes: '{
-            '{default: fpnew_pkg::PARALLEL},  // ADDMUL
-            '{default: fpnew_pkg::MERGED},  // DIVSQRT
-            '{default: fpnew_pkg::PARALLEL},  // NONCOMP
+            '{
+                fpnew_pkg::PARALLEL, fpnew_pkg::PARALLEL,
+                CVA6Cfg.XF16 ? fpnew_pkg::PARALLEL : fpnew_pkg::DISABLED,
+                CVA6Cfg.XF8 ? fpnew_pkg::PARALLEL : fpnew_pkg::DISABLED,
+                CVA6Cfg.XF16ALT ? fpnew_pkg::PARALLEL : fpnew_pkg::DISABLED
+            },  // ADDMUL: zfhmin does not instantiate half arithmetic
+            '{
+                fpnew_pkg::MERGED, fpnew_pkg::MERGED,
+                CVA6Cfg.XF16 ? fpnew_pkg::MERGED : fpnew_pkg::DISABLED,
+                CVA6Cfg.XF8 ? fpnew_pkg::MERGED : fpnew_pkg::DISABLED,
+                CVA6Cfg.XF16ALT ? fpnew_pkg::MERGED : fpnew_pkg::DISABLED
+            },  // DIVSQRT
+            '{default: fpnew_pkg::PARALLEL},  // NONCOMP (FMV via SGNJ)
             '{default: fpnew_pkg::MERGED}
         },  // CONV
         PipeConfig: fpnew_pkg::DISTRIBUTED
@@ -138,6 +149,8 @@ module fpu_wrap
     logic [IFMTBITS-1:0] fpu_ifmt_d, fpu_ifmt_q, fpu_ifmt;
     logic [2:0] fpu_rm_d, fpu_rm_q, fpu_rm;
     logic fpu_vec_op_d, fpu_vec_op_q, fpu_vec_op;
+    logic zfa_sel_d, zfa_sel_q, zfa_sel;
+    fu_op zfa_kind_d, zfa_kind_q, zfa_kind;
 
     logic [CVA6Cfg.TRANS_ID_BITS-1:0] fpu_tag_d, fpu_tag_q, fpu_tag;
 
@@ -177,6 +190,11 @@ module fpu_wrap
     end
 
     logic [4:0] fpu_status;
+    logic fpnew_in_ready, zfa_in_ready;
+    logic zfa_out_valid, zfa_out_ready, fpnew_out_valid_bulk, fpnew_early;
+    logic [CVA6Cfg.FLen-1:0] fpnew_result, zfa_result;
+    logic [4:0] fpnew_status, zfa_status;
+    logic [CVA6Cfg.TRANS_ID_BITS-1:0] fpnew_tag, zfa_tag;
 
     // FSM to handle protocol inversion
     logic hold_inputs;
@@ -203,6 +221,8 @@ module fpu_wrap
       fpu_rm_d        = fpu_rm_i;
       fpu_vec_op_d    = fu_data_i.fu == FPU_VEC;
       fpu_tag_d       = fu_data_i.trans_id;
+      zfa_sel_d       = 1'b0;
+      zfa_kind_d      = fu_data_i.operation;
       vec_replication = fpu_rm_i[0];  // replication bit is sent via rm field
       replicate_c     = 1'b0;
       check_ah        = 1'b0;  // whether set scalar AH encoding from MSB of rm_i
@@ -248,10 +268,10 @@ module fpu_wrap
         FMUL:    fpu_op_d = fpnew_pkg::MUL;
         // Division
         FDIV:    fpu_op_d = fpnew_pkg::DIV;
-        // Min/Max - OP is encoded in rm (000-001)
+        // Min/Max - OP is encoded in rm (000-001); Zfa fminm/fmaxm use 010/011
         FMIN_MAX: begin
           fpu_op_d = fpnew_pkg::MINMAX;
-          fpu_rm_d = {1'b0, fpu_rm_i[1:0]};  // mask out AH encoding bit
+          fpu_rm_d = {1'b0, fpu_rm_i[1:0]};  // mask out AH encoding bit; keeps RDN/RUP
           check_ah = 1'b1;  // AH has RM MSB encoding
         end
         // Square Root
@@ -353,11 +373,21 @@ module fpu_wrap
           check_ah        = 1'b1;  // AH has RM MSB encoding
           vec_replication = 1'b0;  // no replication, we set second operand
         end
-        // Scalar Comparisons - op encoded in rm (000-010)
+        // Scalar Comparisons - op encoded in rm (000-010); Zfa fleq/fltq 100/101
         FCMP: begin
           fpu_op_d = fpnew_pkg::CMP;
-          fpu_rm_d = {1'b0, fpu_rm_i[1:0]};  // mask out AH encoding bit
-          check_ah = 1'b1;  // AH has RM MSB encoding
+          if (CVA6Cfg.RVZfa && !fpu_vec_op_d && fpu_fmt_i != 2'b10 &&
+              (fpu_rm_i == 3'b100 || fpu_rm_i == 3'b101)) begin
+            fpu_rm_d = fpu_rm_i;  // pass RMM/ROD for quiet LE/LT
+            check_ah = 1'b0;
+          end else begin
+            fpu_rm_d = {1'b0, fpu_rm_i[1:0]};  // mask out AH encoding bit
+            check_ah = 1'b1;
+          end
+        end
+        // Zfa: fli / fround / froundnx / fcvtmod — dedicated leaf, not fpnew
+        FLI, FROUND, FROUNDNX, FCVTMOD: begin
+          if (CVA6Cfg.RVZfa) zfa_sel_d = 1'b1;
         end
         // Classification
         FCLASS: begin
@@ -546,6 +576,8 @@ module fpu_wrap
         fpu_rm_q     <= '0;
         fpu_vec_op_q <= '0;
         fpu_tag_q    <= '0;
+        zfa_sel_q    <= 1'b0;
+        zfa_kind_q   <= fu_op'(0);
       end else begin
         state_q <= state_d;
         // Hold register is [TRIGGERED] by FSM
@@ -561,6 +593,8 @@ module fpu_wrap
           fpu_rm_q     <= fpu_rm_d;
           fpu_vec_op_q <= fpu_vec_op_d;
           fpu_tag_q    <= fpu_tag_d;
+          zfa_sel_q    <= zfa_sel_d;
+          zfa_kind_q   <= zfa_kind_d;
         end
       end
     end
@@ -577,6 +611,8 @@ module fpu_wrap
     assign fpu_rm     = use_hold ? fpu_rm_q : fpu_rm_d;
     assign fpu_vec_op = use_hold ? fpu_vec_op_q : fpu_vec_op_d;
     assign fpu_tag    = use_hold ? fpu_tag_q : fpu_tag_d;
+    assign zfa_sel    = use_hold ? zfa_sel_q : zfa_sel_d;
+    assign zfa_kind   = use_hold ? zfa_kind_q : zfa_kind_d;
 
     // Consolidate operands
     logic [2:0][CVA6Cfg.FLen-1:0] fpu_operands;
@@ -588,6 +624,8 @@ module fpu_wrap
     //---------------
     // FPU instance
     //---------------
+
+    assign fpu_in_ready = zfa_sel ? zfa_in_ready : fpnew_in_ready;
 
     fpnew_top #(
         .Features      (FPU_FEATURES),
@@ -606,17 +644,53 @@ module fpu_wrap
         .vectorial_op_i(fpu_vec_op),
         .tag_i         (fpu_tag),
         .simd_mask_i   (1'b1),
-        .in_valid_i    (fpu_in_valid),
-        .in_ready_o    (fpu_in_ready),
+        .in_valid_i    (fpu_in_valid && !zfa_sel),
+        .in_ready_o    (fpnew_in_ready),
         .flush_i,
-        .result_o,
-        .status_o      (fpu_status),
-        .tag_o         (result_tag),
-        .out_valid_o   (fpu_out_valid),
-        .out_ready_i   (fpu_out_ready),
+        .result_o      (fpnew_result),
+        .status_o      (fpnew_status),
+        .tag_o         (fpnew_tag),
+        .out_valid_o   (fpnew_out_valid_bulk),
+        .out_ready_i   (fpu_out_ready && !zfa_out_valid),
         .busy_o        (  /* unused */),
-        .early_valid_o (fpu_early_valid_o)
+        .early_valid_o (fpnew_early)
     );
+
+    if (CVA6Cfg.RVZfa) begin : gen_zfa
+      g6lc_fp_zfa #(
+          .CVA6Cfg (CVA6Cfg),
+          .TagWidth(CVA6Cfg.TRANS_ID_BITS)
+      ) i_zfa (
+          .clk_i,
+          .rst_ni,
+          .flush_i,
+          .valid_i  (fpu_in_valid && zfa_sel),
+          .ready_o  (zfa_in_ready),
+          .op_i     (zfa_kind),
+          .fmt_i    (fpu_dstfmt[1:0]),
+          .rm_i     (fpu_rm),
+          .operand_i(operand_a),
+          .tag_i    (fpu_tag),
+          .ready_i  (zfa_out_ready),
+          .valid_o  (zfa_out_valid),
+          .result_o (zfa_result),
+          .status_o (zfa_status),
+          .tag_o    (zfa_tag)
+      );
+    end else begin : gen_no_zfa
+      assign zfa_in_ready  = 1'b1;
+      assign zfa_out_valid = 1'b0;
+      assign zfa_result    = '0;
+      assign zfa_status    = '0;
+      assign zfa_tag       = '0;
+    end
+
+    assign zfa_out_ready      = fpu_out_ready;
+    assign result_o           = zfa_out_valid ? zfa_result : fpnew_result;
+    assign fpu_status         = zfa_out_valid ? zfa_status : fpnew_status;
+    assign result_tag         = zfa_out_valid ? zfa_tag : fpnew_tag;
+    assign fpu_out_valid      = zfa_out_valid | fpnew_out_valid_bulk;
+    assign fpu_early_valid_o  = zfa_out_valid | fpnew_early;
 
     // Pack status flag into exception cause, tval ignored in wb, exception is always invalid
     assign fpu_exception_o.cause = {59'h0, fpu_status};

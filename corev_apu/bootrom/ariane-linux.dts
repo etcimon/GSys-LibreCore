@@ -47,7 +47,9 @@
         "zicbom", "zicboz", "zicbop",
         "zacas",
         "zkn",
-        "sstc", "sscofpmf", "zihintpause", "svpbmt", "zawrs";
+        "sstc", "sscofpmf", "zihintpause", "svpbmt", "zawrs",
+        "zimop", "zcmop", "zihintntl", "zfhmin", "zfa", "zicclsm", "za64rs",
+        "ziccif", "ziccrse", "ziccamoa", "zabha";
       mmu-type = "riscv,sv39";
       tlb-split;
       riscv,cboz-block-size = <64>;

@@ -80,21 +80,13 @@ C-states.
 
 | Item | Locus | Acceptance | Status | FDT property |
 |------|-------|------------|--------|--------------|
-| `Zawrs` wait-on-pause | `core/controller.sv` / SBI | `sbi_send_ipi_and_wait` works correctly across harts | Open | `smt,zawrs` = 0 |
+| `Zawrs` wait-on-pause | `g6lc_zawrs_peer` / `csr_regfile` replica | peer store/AMO snoops the other hart's WRS replica | **Landed (RTL)** | `smt,zawrs` = 1 |
 
-Scope, precisely: the **instructions are implemented**. `core/decoder.sv` decodes
-`WRS.NTO` (imm `0x00d`) and `WRS.STO` (imm `0x01d`) under `CVA6Cfg.ZawrsEn` and
-retires them as `ariane_pkg::WFI` with WFI's privilege/`TW` rules. Zawrs permits
-`WRS` to terminate for any reason, so that is a conforming implementation, and
-every `g6lc*` package sets `ZawrsEn: bit'(1)`.
-
-What is open is the SMT **wait-for-peer wake** (no reservation-set-invalidation
-wake between the two harts). That is a microarchitectural quality-of-implementation
-item plus a firmware policy, not an ISA-advertisement item. While open: SBI must
-not use `sbi_send_ipi_and_wait`, and `ariane-smt2.dts` does not list `zawrs` in
-`riscv,isa` / `riscv,isa-extensions`. Packages without the SMT wake constraint
-(`ariane-linux`, `ariane-ai`, `ariane-stream8`, `ariane-ooo-server`,
-`ariane-server-math-v`) do advertise `zawrs`, which is correct for them.
+`WRS_NTO`/`WRS_STO` decode under `ZawrsEn`, wait policy in `g6lc_zawrs.sv`
+(NOP if no reservation, STO timeout). SMT wait-for-peer: `g6lc_zawrs_peer`
+snoops every other hart when a store/AMO commits (address-blind; extra wakes
+are ISA-legal). Isolated `tb_g6lc_zawrs_peer.sv`. SMT DTS lists `zawrs`.
+`sbi_send_ipi_and_wait` soak is still a firmware check, not this RTL item.
 
 ---
 
@@ -122,7 +114,7 @@ soc {
         smt,banked-bht = <0>;
         smt,fp-register-banking = <0>;
         smt,idle-clock-gate = <0>;
-        smt,zawrs = <0>;
+        smt,zawrs = <1>;
         smt,default-sku = "experimental";
     };
 };

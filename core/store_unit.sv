@@ -412,8 +412,12 @@ module store_unit
     endian_data = lsu_ctrl_i.data;
     if (mbe_i) begin
       case (lsu_ctrl_i.operation)
-        SB, HSV_B, FSB: endian_data[7:0] = {lsu_ctrl_i.data[7:0]};
-        SH, HSV_H, FSH: endian_data[15:0] = {<<8{lsu_ctrl_i.data[15:0]}};
+        SB, HSV_B, FSB, AMO_SWAPB, AMO_ADDB, AMO_ANDB, AMO_ORB, AMO_XORB,
+        AMO_MAXB, AMO_MAXUB, AMO_MINB, AMO_MINUB:
+        endian_data[7:0] = {lsu_ctrl_i.data[7:0]};
+        SH, HSV_H, FSH, AMO_SWAPH, AMO_ADDH, AMO_ANDH, AMO_ORH, AMO_XORH,
+        AMO_MAXH, AMO_MAXUH, AMO_MINH, AMO_MINUH:
+        endian_data[15:0] = {<<8{lsu_ctrl_i.data[15:0]}};
         SW, HSV_W, FSW, AMO_LRW, AMO_SCW, AMO_SWAPW, AMO_ADDW, AMO_ANDW, AMO_ORW, AMO_XORW, AMO_MAXW,
         AMO_MINW, AMO_MAXWU, AMO_MINWU, AMO_CASW, AMO_CASQ:
         endian_data[31:0] = {<<8{lsu_ctrl_i.data[31:0]}};
@@ -442,15 +446,15 @@ module store_unit
       case (lsu_ctrl_i.operation)
         AMO_LRW, AMO_LRD:     amo_op_d = AMO_LR;
         AMO_SCW, AMO_SCD:     amo_op_d = AMO_SC;
-        AMO_SWAPW, AMO_SWAPD: amo_op_d = AMO_SWAP;
-        AMO_ADDW, AMO_ADDD:   amo_op_d = AMO_ADD;
-        AMO_ANDW, AMO_ANDD:   amo_op_d = AMO_AND;
-        AMO_ORW, AMO_ORD:     amo_op_d = AMO_OR;
-        AMO_XORW, AMO_XORD:   amo_op_d = AMO_XOR;
-        AMO_MAXW, AMO_MAXD:   amo_op_d = AMO_MAX;
-        AMO_MAXWU, AMO_MAXDU: amo_op_d = AMO_MAXU;
-        AMO_MINW, AMO_MIND:   amo_op_d = AMO_MIN;
-        AMO_MINWU, AMO_MINDU: amo_op_d = AMO_MINU;
+        AMO_SWAPW, AMO_SWAPD, AMO_SWAPB, AMO_SWAPH: amo_op_d = AMO_SWAP;
+        AMO_ADDW, AMO_ADDD, AMO_ADDB, AMO_ADDH:     amo_op_d = AMO_ADD;
+        AMO_ANDW, AMO_ANDD, AMO_ANDB, AMO_ANDH:     amo_op_d = AMO_AND;
+        AMO_ORW, AMO_ORD, AMO_ORB, AMO_ORH:         amo_op_d = AMO_OR;
+        AMO_XORW, AMO_XORD, AMO_XORB, AMO_XORH:     amo_op_d = AMO_XOR;
+        AMO_MAXW, AMO_MAXD, AMO_MAXB, AMO_MAXH:     amo_op_d = AMO_MAX;
+        AMO_MAXWU, AMO_MAXDU, AMO_MAXUB, AMO_MAXUH: amo_op_d = AMO_MAXU;
+        AMO_MINW, AMO_MIND, AMO_MINB, AMO_MINH:     amo_op_d = AMO_MIN;
+        AMO_MINWU, AMO_MINDU, AMO_MINUB, AMO_MINUH: amo_op_d = AMO_MINU;
         AMO_CASW, AMO_CASD:   amo_op_d = CVA6Cfg.RVZacas ? AMO_CAS1 : AMO_NONE;
         AMO_CASQ:             amo_op_d = CVA6Cfg.RVZacas ? AMO_CAS1 : AMO_NONE;  // is_quad on req
         default:              amo_op_d = AMO_NONE;

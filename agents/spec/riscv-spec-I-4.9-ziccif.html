@@ -31,13 +31,10 @@ module ziccif_fetch_buffer (
 endmodule
 </pre>
 
-<p><strong>CVA6 status:</strong> implemented/partial; instruction fetches are always aligned to a
-32-bit or 64-bit boundary (<code>core/cache_subsystem/g6lc_icache.sv:22,65-113</code>; selected word
-<code>cl_sel</code> at <code>:113</code>) and refill a whole cache line atomically before the line becomes
-valid (<code>core/cache_subsystem/g6lc_icache.sv:319-321</code>). <code>core/frontend/frontend.sv:149,312-313,318-321</code>
-gates fetches during <code>halt_frontend_i</code> and kills speculative fetches on <code>flush_i</code>,
-preventing stale data from being consumed. Full Ziccif conformance over main-memory PMA regions has not
-been documented as a separately verified artifact.</p>
+<p><strong>CVA6 status:</strong> implemented when <code>CVA6Cfg.RVZiccif</code> is set. Instruction
+fetches are aligned to 32-bit (<code>g6lc_icache</code> ignores PC[1:0]) and refill a whole cache
+line before the line is valid. <code>cl_sel</code> takes one contiguous <code>FETCH_WIDTH</code>
+slice of that line. Isolated leaf <code>core/g6lc_pma_zi.sv</code> / <code>tb_g6lc_pma_zi.sv</code>.</p>
 
 <p><strong>.dts linkage:</strong> the <code>memory@</code> nodes for cacheable instruction regions must keep
 <code>cacheable</code> PMAs aligned with <code>NrCachedRegionRules/CachedRegionAddrBase/CachedRegionLength</code>

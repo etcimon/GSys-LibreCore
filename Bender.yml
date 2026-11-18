@@ -117,6 +117,13 @@ sources:
       - core/alu.sv
       - core/alu_wrapper.sv
       - core/fpu_wrap.sv # depends on fpnew_pkg, above
+      - core/g6lc_fp_zfa.sv # Zfa fli/fround/fcvtmod leaf, muxed in fpu_wrap
+      - core/g6lc_zicclsm.sv # Zicclsm two-beat LSU splitter
+      - core/g6lc_za64rs.sv # Za64rs reservation-set membership / advertise predicate
+      - core/g6lc_pma_zi.sv # Ziccif/Ziccrse/Ziccamoa PMA predicates
+      - core/g6lc_zawrs.sv # Zawrs WRS wait policy (NOP if no reservation)
+      - core/g6lc_zawrs_peer.sv # SMT wait-for-peer reservation snoop
+      - core/g6lc_zabha.sv # Zabha subword AMO extract/merge
       - core/branch_unit.sv
       - core/compressed_decoder.sv
       - core/controller.sv

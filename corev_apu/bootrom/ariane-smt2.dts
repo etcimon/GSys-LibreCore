@@ -60,7 +60,9 @@
         "zicbom", "zicboz", "zicbop",
         "zacas",
         "zkn",
-        "sstc", "sscofpmf", "zihintpause", "svpbmt";
+        "sstc", "sscofpmf", "zihintpause", "svpbmt",
+        "zimop", "zcmop", "zihintntl", "zfhmin", "zfa", "zicclsm", "za64rs",
+        "ziccif", "ziccrse", "ziccamoa", "zawrs", "zabha";
       mmu-type = "riscv,sv39";
       tlb-split;
       // CMO geometry (Zicbo*); block size 64 B is platform CMO, not L1 line width
@@ -94,7 +96,9 @@
         "zicbom", "zicboz", "zicbop",
         "zacas",
         "zkn",
-        "sstc", "sscofpmf", "zihintpause", "svpbmt";
+        "sstc", "sscofpmf", "zihintpause", "svpbmt",
+        "zimop", "zcmop", "zihintntl", "zfhmin", "zfa", "zicclsm", "za64rs",
+        "ziccif", "ziccrse", "ziccamoa", "zawrs", "zabha";
       mmu-type = "riscv,sv39";
       tlb-split;
       riscv,cboz-block-size = <64>;
@@ -156,11 +160,9 @@
       smt,banked-bht = <0>;               /* BHT/BTB shared across harts */
       smt,fp-register-banking = <0>;      /* F/D/V context not per-hart banked */
       smt,idle-clock-gate = <0>;          /* no per-hart clock gating yet */
-      /* WRS.NTO/WRS.STO do decode (decoder.sv, ZawrsEn=1) and retire as WFI,
-       * which Zawrs permits. What is absent is the SMT wait-for-peer wake, so
-       * zawrs is not advertised to Linux and SBI must not use
-       * sbi_send_ipi_and_wait. */
-      smt,zawrs = <0>;                    /* no wait-for-peer wake */
+      /* WRS wait-for-peer: a store/AMO on one SMT hart snoops the peer's
+       * Zawrs replica (g6lc_zawrs_peer). */
+      smt,zawrs = <1>;
       smt,default-sku = "experimental";   /* SMT2 not yet a production default SKU */
     };
 

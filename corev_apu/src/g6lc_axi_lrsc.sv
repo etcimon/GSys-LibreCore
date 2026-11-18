@@ -91,6 +91,10 @@ module g6lc_axi_lrsc #(
   // legal reservation set (the ISA requires only that the set contain the LR
   // address), and it is what the previous single-entry version compared, so
   // the snoop behaviour of existing directed tests is unchanged.
+  // Za64rs (RVZa64rs): a one-address set is contiguous, aligned, and at most
+  // 64 bytes. Do not mask to 64 B here — that would false-share adjacent
+  // OpenSBI/Linux locks. Advertise only when D$ line width is also ≤ 64 B
+  // (see core/g6lc_za64rs.sv).
   logic [NRes-1:0]           res_v;
   logic [AXI_ADDR_WIDTH-1:0] res_addr [NRes];
   logic [RW-1:0]             vic_q;  // rotating victim, so a full table is fair

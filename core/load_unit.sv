@@ -1010,6 +1010,7 @@ module load_unit
   // delivers the exception -- so the cycle after the grant is either the
   // exception completion or the translation abort; misaligned_entry_no_data
   // keeps the "never retires data" half in both cases.
+  if (!CVA6Cfg.RVZicclsm) begin : gen_misalign_trap_asserts
   misaligned_entry_excepts :
   assert property (@(posedge clk_i) disable iff (~rst_ni)
       ldbuf_w && offset_misaligned(ldbuf_wdata.operation, ldbuf_wdata.address_offset)
@@ -1021,6 +1022,7 @@ module load_unit
   assert property (@(posedge clk_i) disable iff (~rst_ni)
       ldbuf_r && valid_o && !ex_o.valid |-> !offset_misaligned(ldbuf_rdata.operation, ldbuf_rdata.address_offset))
   else $error("misaligned load buffer entry retired with data");
+  end
   misaligned_tval :
   assert property (@(posedge clk_i) disable iff (~rst_ni)
       valid_o && ex_o.valid && ex_o.cause == riscv::LD_ADDR_MISALIGNED

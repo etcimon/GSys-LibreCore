@@ -453,6 +453,38 @@ package config_pkg;
     bit                          RVZicntr;
     // Zihpm RISC-V extension
     bit                          RVZihpm;
+    // Zimop: mop.r.n / mop.rr.n write 0 to rd (RVA23; default 0)
+    bit                          RVZimop;
+    // Zcmop: c.mop.n → addi x0,x0,0 (requires RVC)
+    bit                          RVZcmop;
+    // Zihintntl: ntl.{p,pall,s,all} HINT ADDs drop the dummy rs2 wait
+    bit                          RVZihintntl;
+    // Zfhmin: flh/fsh, fmv.{x.h,h.x}, fcvt between H and S/D. Not full Zfh
+    // arithmetic (that remains XF16). Requires RVF.
+    bit                          RVZfhmin;
+    // Zfa: fminm/fmaxm, fleq/fltq, fli, fround/froundnx, fcvtmod.w.d.
+    // Requires RVF. D variants follow RVD. Half variants follow XF16, not Zfhmin.
+    bit                          RVZfa;
+    // Zicclsm: hardware split of misaligned integer/FP loads and stores.
+    // AMOs / LR/SC / AMOCAS / CBO still trap. Default 0.
+    bit                          RVZicclsm;
+    // Za64rs: LR/SC reservation set is contiguous, naturally aligned, and
+    // at most 64 bytes. Exact-address match (g6lc_axi_lrsc) is a legal set.
+    // Requires RVA and DcacheLineWidth <= 512. Default 0.
+    bit                          RVZa64rs;
+    // Ziccif: aligned instruction fetches of at most min(ILEN,XLEN) bits are
+    // atomic on cacheable+coherent main memory. I$ refills a whole line
+    // before the line is valid. Default 0.
+    bit                          RVZiccif;
+    // Ziccrse: cacheable+coherent main memory supports RsrvEventual (LR/SC).
+    // Requires RVA. Default 0.
+    bit                          RVZiccrse;
+    // Ziccamoa: cacheable+coherent main memory supports AMO atomicity.
+    // Requires RVA. Misaligned AMOs still trap. Default 0.
+    bit                          RVZiccamoa;
+    // Zabha: AMOSWAP/ADD/AND/OR/XOR/MIN/MAX/MINU/MAXU .B/.H. No LR/SC/CAS
+    // on subword. Requires RVA. Default 0.
+    bit                          RVZabha;
     // Floating Point
     bit                          RVF;
     // Floating Point
@@ -838,6 +870,17 @@ package config_pkg;
     bit          RVZiCbop;
     bit          RVZicntr;
     bit          RVZihpm;
+    bit          RVZimop;
+    bit          RVZcmop;
+    bit          RVZihintntl;
+    bit          RVZfhmin;
+    bit          RVZfa;
+    bit          RVZicclsm;
+    bit          RVZa64rs;
+    bit          RVZiccif;
+    bit          RVZiccrse;
+    bit          RVZiccamoa;
+    bit          RVZabha;
 
     int unsigned NR_SB_ENTRIES;
     int unsigned TRANS_ID_BITS;
@@ -1153,6 +1196,23 @@ package config_pkg;
     assert (!(Cfg.SvpbmtEn && Cfg.IS_XLEN32));
     // Zacas (AMOCAS.W/D) depends on Zaamo / RVA atomics.
     assert (!(Cfg.RVZacas && !Cfg.RVA));
+    // Zcmop is a compressed encoding; zimop/ntl are independent of C.
+    assert (!(Cfg.RVZcmop && !Cfg.RVC));
+    // Zfhmin is the half convert/ldst subset of F; full Zfh is XF16.
+    assert (!(Cfg.RVZfhmin && !Cfg.RVF));
+    // Zfa extra FP ops require at least F. D encodings stay gated on RVD.
+    assert (!(Cfg.RVZfa && !Cfg.RVF));
+    // Zicclsm is a load/store PMA; no extra ISA dependency.
+    // Za64rs is a max reservation-set size; a wider D$ line can expand the
+    // effective set through invalidation, so refuse lines above 64 B.
+    assert (!(Cfg.RVZa64rs && !Cfg.RVA));
+    assert (!(Cfg.RVZa64rs && (Cfg.DCACHE_LINE_WIDTH == 0 || Cfg.DCACHE_LINE_WIDTH > 512)));
+    // Ziccif: I$ line must hold at least one 32-bit instruction.
+    assert (!(Cfg.RVZiccif && Cfg.ICACHE_LINE_WIDTH < 32));
+    // Ziccrse / Ziccamoa are A-extension PMAs.
+    assert (!(Cfg.RVZiccrse && !Cfg.RVA));
+    assert (!(Cfg.RVZiccamoa && !Cfg.RVA));
+    assert (!(Cfg.RVZabha && !Cfg.RVA));
     // U6 L2 / multi-hart (SMT) / multi-core legality.
     assert (Cfg.NrHarts >= 1 && Cfg.NrHarts <= CVA6_MAX_SMT_HARTS);
     assert (!(Cfg.NrHarts > 1 && !Cfg.RVS));

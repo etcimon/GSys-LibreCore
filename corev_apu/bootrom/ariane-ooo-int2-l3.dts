@@ -60,7 +60,9 @@
         "zicbom", "zicboz", "zicbop",
         "zacas",
         "zkn",
-        "sstc", "sscofpmf", "zihintpause", "svpbmt";
+        "sstc", "sscofpmf", "zihintpause", "svpbmt",
+        "zimop", "zcmop", "zihintntl", "zfhmin", "zfa", "zicclsm", "za64rs",
+        "ziccif", "ziccrse", "ziccamoa", "zawrs", "zabha";
       mmu-type = "riscv,sv39";
       tlb-split;
       riscv,cboz-block-size = <64>;
@@ -94,7 +96,9 @@
         "zicbom", "zicboz", "zicbop",
         "zacas",
         "zkn",
-        "sstc", "sscofpmf", "zihintpause", "svpbmt";
+        "sstc", "sscofpmf", "zihintpause", "svpbmt",
+        "zimop", "zcmop", "zihintntl", "zfhmin", "zfa", "zicclsm", "za64rs",
+        "ziccif", "ziccrse", "ziccamoa", "zawrs", "zabha";
       mmu-type = "riscv,sv39";
       tlb-split;
       riscv,cboz-block-size = <64>;
@@ -127,7 +131,9 @@
         "zicbom", "zicboz", "zicbop",
         "zacas",
         "zkn",
-        "sstc", "sscofpmf", "zihintpause", "svpbmt";
+        "sstc", "sscofpmf", "zihintpause", "svpbmt",
+        "zimop", "zcmop", "zihintntl", "zfhmin", "zfa", "zicclsm", "za64rs",
+        "ziccif", "ziccrse", "ziccamoa", "zawrs", "zabha";
       mmu-type = "riscv,sv39";
       tlb-split;
       riscv,cboz-block-size = <64>;
@@ -160,7 +166,9 @@
         "zicbom", "zicboz", "zicbop",
         "zacas",
         "zkn",
-        "sstc", "sscofpmf", "zihintpause", "svpbmt";
+        "sstc", "sscofpmf", "zihintpause", "svpbmt",
+        "zimop", "zcmop", "zihintntl", "zfhmin", "zfa", "zicclsm", "za64rs",
+        "ziccif", "ziccrse", "ziccamoa", "zawrs", "zabha";
       mmu-type = "riscv,sv39";
       tlb-split;
       riscv,cboz-block-size = <64>;
@@ -225,7 +233,7 @@
       smt,banked-bht = <0>;               /* BHT/BTB shared across harts */
       smt,fp-register-banking = <0>;      /* F/D context banked per hart only inside OoO rename; architectural FS is switched whole (drained handoff) */
       smt,idle-clock-gate = <0>;          /* secondary cores are boot-held, not idle-gated */
-      smt,zawrs = <0>;                    /* no wait-for-peer wake */
+      smt,zawrs = <1>;                    /* wait-for-peer replica snoop */
       smt,default-sku = "experimental";   /* two-core SMT2 OoO not yet a production default SKU */
     };
 

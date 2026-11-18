@@ -320,7 +320,9 @@ module commit_stage
           if (!csr_exception_i.valid) begin
             commit_csr_o = 1'b1;
             wdata_o[0]   = csr_rdata_i;
-            if (CVA6Cfg.OoOEn && commit_instr_i[0].op == WFI) flush_commit_o = 1'b1;
+            if (CVA6Cfg.OoOEn && (commit_instr_i[0].op == WFI ||
+                                  ariane_pkg::is_wrs(commit_instr_i[0].op)))
+              flush_commit_o = 1'b1;
           end else begin
             commit_ack_o[0] = 1'b0;
             we_gpr_o[0] = 1'b0;

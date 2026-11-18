@@ -208,6 +208,18 @@ package build_config_pkg;
     cfg.RVZiCbop = CVA6Cfg.RVZiCbop;
     cfg.RVZicntr = CVA6Cfg.RVZicntr;
     cfg.RVZihpm = CVA6Cfg.RVZihpm;
+    cfg.RVZimop = CVA6Cfg.RVZimop;
+    cfg.RVZcmop = CVA6Cfg.RVZcmop && CVA6Cfg.RVC;
+    cfg.RVZihintntl = CVA6Cfg.RVZihintntl;
+    cfg.RVZfhmin = (CVA6Cfg.RVZfhmin || CVA6Cfg.XF16) && CVA6Cfg.RVF;
+    cfg.RVZfa = CVA6Cfg.RVZfa && CVA6Cfg.RVF;
+    cfg.RVZicclsm = CVA6Cfg.RVZicclsm;
+    cfg.RVZa64rs = CVA6Cfg.RVZa64rs && CVA6Cfg.RVA &&
+                   (CVA6Cfg.DcacheLineWidth != 0) && (CVA6Cfg.DcacheLineWidth <= 512);
+    cfg.RVZiccif = CVA6Cfg.RVZiccif && (CVA6Cfg.IcacheLineWidth >= 32);
+    cfg.RVZiccrse = CVA6Cfg.RVZiccrse && CVA6Cfg.RVA;
+    cfg.RVZiccamoa = CVA6Cfg.RVZiccamoa && CVA6Cfg.RVA;
+    cfg.RVZabha = CVA6Cfg.RVZabha && CVA6Cfg.RVA;
     cfg.NR_SB_ENTRIES = CVA6Cfg.NrScoreboardEntries;
     // FSE S1: deepen in-flight window floor when DeepSpecEn (B3 companion).
     if (CVA6Cfg.DeepSpecEn) begin

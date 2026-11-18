@@ -150,6 +150,13 @@ ${CVA6_REPO_DIR}/core/alu_wrapper.sv
 ${CVA6_REPO_DIR}/core/aes.sv
 // Note: depends on fpnew_pkg, above
 ${CVA6_REPO_DIR}/core/fpu_wrap.sv
+${CVA6_REPO_DIR}/core/g6lc_fp_zfa.sv
+${CVA6_REPO_DIR}/core/g6lc_zicclsm.sv
+${CVA6_REPO_DIR}/core/g6lc_za64rs.sv
+${CVA6_REPO_DIR}/core/g6lc_pma_zi.sv
+${CVA6_REPO_DIR}/core/g6lc_zawrs.sv
+${CVA6_REPO_DIR}/core/g6lc_zawrs_peer.sv
+${CVA6_REPO_DIR}/core/g6lc_zabha.sv
 // EXTRACT E2–E9 + leftover packages (before branch_unit / controller / compressed_decoder)
 // RETIRED SUPPLY: core/fetch_A is not the instruction supply — -f Flist.fetch_B is
 // (see the flavour note above), and core/fetch_A/smt_legacy/frontend.sv does not even

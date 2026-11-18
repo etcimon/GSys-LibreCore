@@ -7,22 +7,22 @@
 
 &CPU0 {
   riscv,isa = "rv64imafdcv_zba_zbb_zbs_zicbom_zicboz_zacas_zve64d";
-  riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "v", "b", "zicntr", "zicsr", "zifencei", "zihpm", "zba", "zbb", "zbs", "zcb", "zicond", "zicbom", "zicboz", "zicbop", "zacas", "zve64d", "zkn", "sstc", "sscofpmf", "zihintpause", "svpbmt", "xg6lcai";
+  riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "v", "b", "zicntr", "zicsr", "zifencei", "zihpm", "zba", "zbb", "zbs", "zcb", "zicond", "zicbom", "zicboz", "zicbop", "zacas", "zve64d", "zkn", "sstc", "sscofpmf", "zihintpause", "svpbmt", "zimop", "zcmop", "zihintntl", "zfhmin", "zfa", "zicclsm", "za64rs", "ziccif", "ziccrse", "ziccamoa", "zawrs", "zabha", "xg6lcai";
 };
 
 &CPU1 {
   riscv,isa = "rv64imafdcv_zba_zbb_zbs_zicbom_zicboz_zacas_zve64d";
-  riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "v", "b", "zicntr", "zicsr", "zifencei", "zihpm", "zba", "zbb", "zbs", "zcb", "zicond", "zicbom", "zicboz", "zicbop", "zacas", "zve64d", "zkn", "sstc", "sscofpmf", "zihintpause", "svpbmt", "xg6lcai";
+  riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "v", "b", "zicntr", "zicsr", "zifencei", "zihpm", "zba", "zbb", "zbs", "zcb", "zicond", "zicbom", "zicboz", "zicbop", "zacas", "zve64d", "zkn", "sstc", "sscofpmf", "zihintpause", "svpbmt", "zimop", "zcmop", "zihintntl", "zfhmin", "zfa", "zicclsm", "za64rs", "ziccif", "ziccrse", "ziccamoa", "zawrs", "zabha", "xg6lcai";
 };
 
 &CPU2 {
   riscv,isa = "rv64imafdcv_zba_zbb_zbs_zicbom_zicboz_zacas_zve64d";
-  riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "v", "b", "zicntr", "zicsr", "zifencei", "zihpm", "zba", "zbb", "zbs", "zcb", "zicond", "zicbom", "zicboz", "zicbop", "zacas", "zve64d", "zkn", "sstc", "sscofpmf", "zihintpause", "svpbmt", "xg6lcai";
+  riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "v", "b", "zicntr", "zicsr", "zifencei", "zihpm", "zba", "zbb", "zbs", "zcb", "zicond", "zicbom", "zicboz", "zicbop", "zacas", "zve64d", "zkn", "sstc", "sscofpmf", "zihintpause", "svpbmt", "zimop", "zcmop", "zihintntl", "zfhmin", "zfa", "zicclsm", "za64rs", "ziccif", "ziccrse", "ziccamoa", "zawrs", "zabha", "xg6lcai";
 };
 
 &CPU3 {
   riscv,isa = "rv64imafdcv_zba_zbb_zbs_zicbom_zicboz_zacas_zve64d";
-  riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "v", "b", "zicntr", "zicsr", "zifencei", "zihpm", "zba", "zbb", "zbs", "zcb", "zicond", "zicbom", "zicboz", "zicbop", "zacas", "zve64d", "zkn", "sstc", "sscofpmf", "zihintpause", "svpbmt", "xg6lcai";
+  riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "v", "b", "zicntr", "zicsr", "zifencei", "zihpm", "zba", "zbb", "zbs", "zcb", "zicond", "zicbom", "zicboz", "zicbop", "zacas", "zve64d", "zkn", "sstc", "sscofpmf", "zihintpause", "svpbmt", "zimop", "zcmop", "zihintntl", "zfhmin", "zfa", "zicclsm", "za64rs", "ziccif", "ziccrse", "ziccamoa", "zawrs", "zabha", "xg6lcai";
 };
 
 // Island geometry published to the driver (must track the CAP words of

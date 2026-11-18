@@ -78,6 +78,13 @@ core/cache_subsystem/axi_adapter.sv
 core/alu.sv
 core/alu_wrapper.sv
 core/fpu_wrap.sv
+core/g6lc_fp_zfa.sv
+core/g6lc_zicclsm.sv
+core/g6lc_za64rs.sv
+core/g6lc_pma_zi.sv
+core/g6lc_zawrs.sv
+core/g6lc_zawrs_peer.sv
+core/g6lc_zabha.sv
 corev_apu/src/ariane.sv
 core/include/build_config_pkg.sv
 core/cva6_rvfi_probes.sv

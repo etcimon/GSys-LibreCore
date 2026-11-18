@@ -1273,12 +1273,15 @@ field; one new MMU→LSU wire; all probes `translate_off`. Evidence:
 | ↳ `mhpmeventN` selector encoding | implemented | 8-bit WARL, split `[7:5]`=group / `[4:0]`=index (`core/include/ariane_pkg.sv` `MHPMEvent*`); group 0 is the legacy 5-bit encoding unchanged; groups 1–7 reserved for feature upgrades (`core/perf_counters.sv`) | `MHPMCounterNum` |
 | M / Zmmul (mul/div) | implemented | `core/mult.sv`, `core/multiplier.sv`, `core/serdiv.sv` | `RVM`/`Zmmul` (target pkg) |
 | Zicond (cond. zero) | config | `core/alu.sv`, `core/decoder.sv` | `RVZicond` |
-| Ziccif fetch atomicity (4.9) | implemented | `core/frontend/`, `core/cache_subsystem/cva6_icache.sv`, `core/instr_realign.sv` | `Icache*` |
+| Ziccif fetch atomicity (4.9) | **implemented (config)** | `g6lc_icache` whole-line refill + 32-bit aligned `cl_sel`; `g6lc_pma_zi.sv` extract leaf | `RVZiccif` |
 | Ziccid I/D coherence (4.10) | implemented | `core/controller.sv` (FENCE.I), cache flush policy | `DcacheFlushOnFenceI` |
-| Zicclsm misaligned (4.14) | partial | `core/load_store_unit.sv`, `core/load_unit.sv`, `core/store_unit.sv` | target-dependent |
+| Ziccrse RsrvEventual (4.11) | **implemented (config)** | aligned W/D LR/SC on cacheable DRAM (`g6lc_axi_lrsc`); `g6lc_pma_zi.sv` | `RVZiccrse` (⇒ `RVA`) |
+| Zicclsm misaligned (4.14) | **implemented (config)** | `g6lc_zicclsm.sv` two-beat wrap split; intra-word uses existing BE/shift; AMOs still trap | `RVZicclsm` |
 | Zic64b 64-byte blocks (4.15) | config | `core/cache_subsystem/*` | `Dcache*LineWidth`/`Icache*LineWidth` |
 | CFI — Zicfilp/Zicfiss (4.17, `#unpriv-cfi`) | absent | — | — |
-| Zihintntl (4.18) | partial | `core/decoder.sv` (hint→NOP) | — |
+| Zihintntl (4.18) | **implemented (config)** | `core/decoder.sv` OpcodeOp ADD: `ntl.{p,pall,s,all}` (`add x0,x0,x2..x5`) drop rs2 so OoO does not wait on a dummy source. Architectural NOP with `rd=x0` either way. | `RVZihintntl` |
+| Zimop (4.x MOP.R/RR) | **implemented (config)** | `core/decoder.sv` SYSTEM funct3=100, `inst[31]=1 && inst[27]=1`: write 0 to rd as ALU ADD x0,x0. Does not collide with HLV/HSV (`inst[31]=0`). | `RVZimop` |
+| Zcmop (compressed MOP) | **implemented (config)** | `core/compressed_decoder.sv` zero-imm C.LUI with odd nonzero rd expands to `addi x0,x0,0`. | `RVZcmop` (⇒ `RVC`) |
 | Zihintpause (4.19) | **implemented (config)** | `core/decoder.sv` (PAUSE→NOP when `ZihintpauseEn`) | `ZihintpauseEn` |
 | CMO — Zicbom/Zicboz/Zicbop (4.20, `#cmo`) | **partial→Zicboz full-line** | Zicbom: decoder/store/HPDCACHE; **U7ᶜ Zicboz multi-beat** (`CBOZ_WAIT`/`ISSUE`); Zicbop: PREFETCH HINT→NOP; server package enables all three | `RVZiCbom`, `RVZiCboz`, `RVZiCbop` |
 | Server math / AVX-like (U10) | partial (C-light + `_v`) | `cv64a6_server_math{,_v}`; HPDCACHE+HWPF+L2 auto; `server-math-tests`; `_v` enables RVV for Ara | `RVB`, `RVZiCbo*`, `HwPrefetchEn`, `RVH`, `RVV` |
@@ -1317,15 +1320,20 @@ field; one new MMU→LSU wire; all probes `translate_off`. Evidence:
 |---|---|---|---|
 | A extension (5.1, `#ext:a`) | config | `core/amo_buffer.sv`, `core/load_store_unit.sv`, `core/store_buffer.sv` | `RVA` (target pkg) |
 | Zalrsc LR/SC (5.2) | config | `core/load_store_unit.sv`, D$ reservation in `core/cache_subsystem/*` | `RVA` |
-| Zawrs wait-on-reservation (5.5) | **partial (config)** | `core/decoder.sv` (WRS.NTO/STO→WFI path), `core/csr_regfile.sv` WFI stall | `ZawrsEn` |
+| Zawrs wait-on-reservation (5.5) | **implemented (config; isolated decode + wait + peer leaves)** | `WRS_NTO`/`WRS_STO`; `g6lc_zawrs` NOP-if-no-res + STO timeout; `g6lc_zawrs_peer` SMT snoop; SMT DTS lists `zawrs` | `ZawrsEn` |
 | Zacas compare-and-swap (5.9, `#ext:zacas`) | **implemented (W/D/Q gated)** | `RVZacas`; decode `AMO_CASW/D/Q` (`core/decoder.sv`); third-op + Q pair RF gather; `amo_req` hi/`is_quad`/`dual_we`; HPDCache multi-beat `CASD_*` (+Q HI beats); dual WB in `commit_stage`; pkgs `server_math{,_v}` / `ooo_server` / `imafdc_sv39`. **Hard RTL golden** `mc-mini-veri` + `zacas-policy` (`mini_amocas_{w,d,q,q_illegal}`); plan `architecture/zacas-amocas-q.md`. Spike has no zacas (not a golden). Spec sub-file `agents/spec/riscv-spec-I-5.9-zacas.html` | `RVZacas` (⇒ `RVA`) |
-| Za128rs/Za64rs/Zabha/Zaamo/Zalasr (5.3-5.10) | partial | (subset via A) `core/amo_buffer.sv` | — |
+| Za64rs reservation-set size (5.4) | **implemented (config)** | exact-address set in `corev_apu/src/g6lc_axi_lrsc.sv`; `core/g6lc_za64rs.sv` membership + `DCACHE_LINE_WIDTH<=512`; `tb_g6lc_za64rs.sv` | `RVZa64rs` (⇒ `RVA`, line ≤64 B) |
+| Zaamo AMO atomicity PMA / Ziccamoa (5.6 / 4.x) | **implemented (config)** | aligned W/D AMOs via `amo_buffer`/`amo_alu`; `g6lc_pma_zi.sv`; misaligned AMOs trap | `RVZiccamoa` (⇒ `RVA`) |
+| Zabha byte/half AMOs (5.8) | **implemented (config)** | `decoder` funct3=000/001; `g6lc_zabha` merge; WT missunit B/H sext; AXI ATOP strb | `RVZabha` (⇒ `RVA`) |
+| Za128rs/Zalasr (5.3-5.10) | partial | (subset via A) `core/amo_buffer.sv` | — |
 
 ### Floating point, compressed, bitmanip, vector, crypto, matrix
 | Spec (anchor) | Status | Primary RTL loci | Config knob |
 |---|---|---|---|
 | F / D floating point (ch6, `#zf`) | config | `core/fpu_wrap.sv`, `core/cvfpu/` | `RVF`, `RVD`, `FpuEn` |
-| Q quad / Zfh half | absent / config | `core/cvfpu/` (Zfh only) | `RVZfh` |
+| Q quad / Zfh half | absent / config | `core/cvfpu/` (full Zfh = `XF16`) | `XF16` |
+| Zfhmin (half convert/ldst) | **implemented (config)** | `decoder.sv` FLH/FSH + FCVT_F2F/FMV with `fmt=H`; `fpu_wrap` enables FP16 CONV/NONCOMP, not ADDMUL | `RVZfhmin` (⇒ `RVF`) |
+| Zfa extra FP (fminm/fleq/fli/fround/fcvtmod) | **implemented (config)** | `decoder.sv` OpcodeOpFp rm/rs2; `fpnew_noncomp` MINMAX RDN/RUP + CMP RMM/ROD; `g6lc_fp_zfa.sv` fli/fround/fcvtmod muxed in `fpu_wrap`; half Zfa follows `XF16` | `RVZfa` (⇒ `RVF`) |
 | C compressed (ch7, `#zc`) | config | `core/compressed_decoder.sv` (identity `c.li`; SMT+SS G1ba leftover-RVI mash recover), `core/instr_realign.sv`, `core/fetch_A/frontend/instr_scan.sv` | `RVC` |
 | Zcmt (table jump) | config | `core/zcmt_decoder.sv` | `RVZCMT` |
 | Zcb / Zcmp | config / partial | `core/compressed_decoder.sv`, `core/macro_decoder.sv` | target-dependent |

@@ -225,7 +225,7 @@
       smt,banked-bht = <0>;               /* BHT/BTB shared across harts */
       smt,fp-register-banking = <0>;      /* no F/D on this package */
       smt,idle-clock-gate = <0>;          /* secondary cores are boot-held, not idle-gated */
-      smt,zawrs = <0>;                    /* no wait-for-peer wake */
+      smt,zawrs = <1>;                    /* wait-for-peer replica snoop */
       smt,default-sku = "experimental";   /* two-core SMT2 OoO not yet a production default SKU */
     };
 

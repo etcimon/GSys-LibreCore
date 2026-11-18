@@ -227,8 +227,9 @@ module load_store_unit
   // e.g.: they keep the value in the stall case
   lsu_ctrl_t lsu_ctrl, lsu_ctrl_byp;
 
-  logic                        pop_st;
-  logic                        pop_ld;
+  logic                        pop_st, pop_st_fu;
+  logic                        pop_ld, pop_ld_fu;
+  lsu_ctrl_t                   lsu_ctrl_pre;
 
   // ------------------------------
   // Address Generation Unit (AGU)
@@ -277,12 +278,12 @@ module load_store_unit
   logic dtlb_hit, cva6_dtlb_hit, acc_dtlb_hit;
   logic [CVA6Cfg.PPNW-1:0] dtlb_ppn, cva6_dtlb_ppn, acc_dtlb_ppn;
 
-  logic                             ld_valid;
-  logic [CVA6Cfg.TRANS_ID_BITS-1:0] ld_trans_id;
-  logic [         CVA6Cfg.XLEN-1:0] ld_result;
-  logic                             st_valid;
-  logic [CVA6Cfg.TRANS_ID_BITS-1:0] st_trans_id;
-  logic [         CVA6Cfg.XLEN-1:0] st_result;
+  logic                             ld_valid, ld_valid_fu;
+  logic [CVA6Cfg.TRANS_ID_BITS-1:0] ld_trans_id, ld_tid_fu;
+  logic [         CVA6Cfg.XLEN-1:0] ld_result, ld_result_fu;
+  logic                             st_valid, st_valid_fu;
+  logic [CVA6Cfg.TRANS_ID_BITS-1:0] st_trans_id, st_tid_fu;
+  logic [         CVA6Cfg.XLEN-1:0] st_result, st_result_fu;
 
   logic [                     11:0] page_offset;
   logic                             page_offset_matches;
@@ -298,8 +299,8 @@ module load_store_unit
   logic [     (CVA6Cfg.XLEN/8)-1:0] st_fwd_be;
 
   exception_t misaligned_exception, cva6_misaligned_exception, acc_misaligned_exception;
-  exception_t ld_ex;
-  exception_t st_ex;
+  exception_t ld_ex, ld_ex_fu;
+  exception_t st_ex, st_ex_fu;
 
   logic       hs_ld_st_inst;
   logic       hlvx_inst;
@@ -588,10 +589,10 @@ module load_store_unit
     end
     always_comb begin
       // Feed forward
-      lsu_ctrl = lsu_ctrl_byp;
+      lsu_ctrl_pre = lsu_ctrl_byp;
       // Mask the lsu valid so that cva6's req gets buffered in the
       // bypass queue when the MMU is being used by the accelerator.
-      lsu_ctrl.valid = (mmu_state_q == ACC) ? 1'b0 : lsu_ctrl_byp.valid;
+      lsu_ctrl_pre.valid = (mmu_state_q == ACC) ? 1'b0 : lsu_ctrl_byp.valid;
     end
   end else begin
     // MMU input
@@ -609,8 +610,40 @@ module load_store_unit
     // No accelerator
     assign acc_mmu_resp_o         = '0;
     // Feed forward the lsu_ctrl bypass
-    assign lsu_ctrl               = lsu_ctrl_byp;
+    assign lsu_ctrl_pre           = lsu_ctrl_byp;
   end
+
+  g6lc_zicclsm #(
+      .CVA6Cfg   (CVA6Cfg),
+      .lsu_ctrl_t(lsu_ctrl_t),
+      .exception_t(exception_t)
+  ) i_zicclsm (
+      .clk_i,
+      .rst_ni,
+      .flush_i,
+      .ctrl_i(lsu_ctrl_pre),
+      .ctrl_o(lsu_ctrl),
+      .pop_ld_fu_i(pop_ld_fu),
+      .pop_st_fu_i(pop_st_fu),
+      .pop_ld_byp_o(pop_ld),
+      .pop_st_byp_o(pop_st),
+      .ld_valid_fu_i(ld_valid_fu),
+      .ld_result_fu_i(ld_result_fu),
+      .ld_ex_fu_i(ld_ex_fu),
+      .ld_tid_fu_i(ld_tid_fu),
+      .ld_valid_o(ld_valid),
+      .ld_result_o(ld_result),
+      .ld_ex_o(ld_ex),
+      .ld_tid_o(ld_trans_id),
+      .st_valid_fu_i(st_valid_fu),
+      .st_result_fu_i(st_result_fu),
+      .st_ex_fu_i(st_ex_fu),
+      .st_tid_fu_i(st_tid_fu),
+      .st_valid_o(st_valid),
+      .st_result_o(st_result),
+      .st_ex_o(st_ex),
+      .st_tid_o(st_trans_id)
+  );
 
   logic store_buffer_empty;
   // ------------------
@@ -637,16 +670,16 @@ module load_store_unit
 
       .valid_i   (st_valid_i),
       .lsu_ctrl_i(lsu_ctrl),
-      .pop_st_o  (pop_st),
+      .pop_st_o  (pop_st_fu),
       .commit_i,
       .commit_ready_o,
       .amo_valid_commit_i,
       .mbe_i     (mbe_i),
 
-      .valid_o              (st_valid),
-      .trans_id_o           (st_trans_id),
-      .result_o             (st_result),
-      .ex_o                 (st_ex),
+      .valid_o              (st_valid_fu),
+      .trans_id_o           (st_tid_fu),
+      .result_o             (st_result_fu),
+      .ex_o                 (st_ex_fu),
       // MMU port
       .translation_req_o    (cva6_st_translation_req),
       .vaddr_o              (st_vaddr),
@@ -696,12 +729,12 @@ module load_store_unit
       .cancelled_mask_i,
       .valid_i   (ld_valid_i),
       .lsu_ctrl_i(lsu_ctrl),
-      .pop_ld_o  (pop_ld),
+      .pop_ld_o  (pop_ld_fu),
 
-      .valid_o              (ld_valid),
-      .trans_id_o           (ld_trans_id),
-      .result_o             (ld_result),
-      .ex_o                 (ld_ex),
+      .valid_o              (ld_valid_fu),
+      .trans_id_o           (ld_tid_fu),
+      .result_o             (ld_result_fu),
+      .ex_o                 (ld_ex_fu),
       .mbe_i                (mbe_i),
       // MMU port
       .translation_req_o    (ld_translation_req),
@@ -902,7 +935,8 @@ module load_store_unit
       endcase
     end
 
-    if (data_misaligned) begin
+    if (data_misaligned &&
+        !(CVA6Cfg.RVZicclsm && zicclsm_eligible(lsu_ctrl.operation, lsu_ctrl.fu))) begin
       case (lsu_ctrl.fu)
         LOAD: begin
           cva6_misaligned_exception.cause = riscv::LD_ADDR_MISALIGNED;

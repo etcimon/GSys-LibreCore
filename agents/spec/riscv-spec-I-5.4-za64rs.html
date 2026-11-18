@@ -29,17 +29,18 @@ module za64rs_check (
 endmodule
 </pre>
 
-<p><strong>CVA6 status:</strong> not guaranteed. CVA6 does not implement a 64-byte reservation-set
-guarantee explicitly. The LR/SC path is in <code>core/load_store_unit.sv:728-748</code>,
-<code>core/store_unit.sv:134-135,282-319</code>, and the cache subsystem (WT
-<code>core/cache_subsystem/wt_dcache_missunit.sv:334-347,576-583</code>; HPDcache
-<code>core/cache_subsystem/hpdcache/rtl/src/hpdcache_ctrl.sv:157-161,1179-1181</code>). The effective
-reservation set is bounded by the cache-line size, but shipped targets use <code>DcacheLineWidth</code>
-of 128 or 256 bits (16 or 32 bytes) in <code>core/include/config_pkg.sv</code>, not 64 bytes, and
-<code>Zic64b</code> is not satisfied. Therefore Za64rs is not currently advertised and should not be
-claimed in the ISA string.</p>
+<p><strong>CVA6 status:</strong> implemented when <code>CVA6Cfg.RVZa64rs</code> is set.
+<code>corev_apu/src/g6lc_axi_lrsc.sv</code> keys the reservation table on exact AXI address
+(a 1-address set: contiguous, aligned, at most 64 bytes). Product D$ lines are 16 B
+(<code>DcacheLineWidth</code> 128), so invalidation cannot grow the set past 64 B.
+<code>core/g6lc_za64rs.sv</code> is the membership leaf and advertise predicate
+(<code>RVA</code> and <code>DCACHE_LINE_WIDTH &lt;= 512</code>). Isolated
+<code>tb_g6lc_za64rs.sv</code>. Do not 64-byte-mask the monitor (adjacent locks must
+stay independent). Za128rs and Zic64b stay unadvertised.</p>
 
-<p><strong>.dts linkage:</strong> no DT node; Za64rs would be exposed through <code>riscv,isa</code> only
-when the reservation-set size and cache-line width are both raised to at least 64 bytes and verified.</p>
+<p><strong>.dts linkage:</strong> advertise <code>za64rs</code> in
+<code>riscv,isa-extensions</code> on packages that set <code>RVZa64rs</code>
+(<code>g6lc64_ooo_int2_l3</code>, <code>_v_ai</code>, <code>ooo_server</code>,
+<code>smt2</code>).</p>
 </body>
 </html>

@@ -412,8 +412,17 @@ module wt_dcache_missunit
       {32{amo_rtrn_mux[amo_req_i.operand_a[2]*32+7]}}, amoResult_32bitBE_NoSign
     };  // +7 to the base address to find the sign bit, as in BE the Most Significant Byte is always at the lowest addressed byte.
 
+    logic [7:0]  amoResult_8bit;
+    logic [15:0] amoResult_16bit;
+    logic [63:0] amoResult_8bitLE, amoResult_16bitLE;
+    assign amoResult_8bit = amo_rtrn_mux[{amo_req_i.operand_a[2:0], 3'b0}+:8];
+    assign amoResult_16bit = amo_rtrn_mux[{amo_req_i.operand_a[2:1], 4'b0}+:16];
+    assign amoResult_8bitLE = {{56{amoResult_8bit[7]}}, amoResult_8bit};
+    assign amoResult_16bitLE = {{48{amoResult_16bit[15]}}, amoResult_16bit};
     assign amoResult_BE = (amo_req_i.size == 2'b10) ? amoResult_32bitBE : amoResult_64bitBE;
-    assign amoResult_LE = (amo_req_i.size == 2'b10) ? amoResult_32bitLE : amo_rtrn_mux;
+    assign amoResult_LE = (amo_req_i.size == 2'b00) ? amoResult_8bitLE :
+                          (amo_req_i.size == 2'b01) ? amoResult_16bitLE :
+                          (amo_req_i.size == 2'b10) ? amoResult_32bitLE : amo_rtrn_mux;
 
     // Local dword CAS returns the saved old value; ATOP path uses mem rtrn mux.
     assign amo_resp_o.result = (state_q inside {AMO_CAS_ST, AMO_CAS_ST_WAIT})

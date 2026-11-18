@@ -312,12 +312,15 @@ module decoder
                     instruction_o.op = ariane_pkg::ADD;
                   end
                 end
-                // Zawrs: WRS.NTO (imm=0x00d) / WRS.STO (imm=0x01d) — wait like WFI
+                // Zawrs: WRS.NTO (imm=0x00d) / WRS.STO (imm=0x01d)
+                // Same privilege/TW rules as WFI. Wait policy is g6lc_zawrs
+                // (NOP if no reservation; STO has a short timeout).
                 12'b0_0000_1101,  // WRS.NTO
                 12'b0_0001_1101: begin  // WRS.STO
                   if (CVA6Cfg.ZawrsEn) begin
-                    // Same privilege/TW rules as WFI; STO timeout is microarch (treat as WFI)
-                    instruction_o.op = ariane_pkg::WFI;
+                    instruction_o.op = (instr.itype.imm == 12'h01d)
+                                           ? ariane_pkg::WRS_STO
+                                           : ariane_pkg::WRS_NTO;
                     if (CVA6Cfg.RVS && priv_lvl_i == riscv::PRIV_LVL_S && tw_i) begin
                       illegal_instr = 1'b1;
                       instruction_o.op = ariane_pkg::ADD;
@@ -384,8 +387,23 @@ module decoder
               endcase
             end
             3'b100: begin
+              // Zimop mop.r.n / mop.rr.n: SYSTEM funct3=100, inst[31]=1,
+              // inst[27]=1. mop.r has inst[24]=1 and inst[23:20]=0; mop.rr
+              // has inst[24]=0 (rs2 in [23:20], so rs2 is x0–x15). Both
+              // write 0 to rd and do not read rs1/rs2 (RVA23). HLV/HSV
+              // share funct3=100 but inst[31]=0, so the arms do not overlap.
+              // hyp8 port: the same match belongs in g6lc_decode_s2.sv
+              // OpcodeSystem / 3'b100, ahead of the HLV/HSV case.
+              if (CVA6Cfg.RVZimop && instr.instr[31] && instr.instr[27] &&
+                  (instr.instr[24] ? (instr.instr[23:20] == 4'b0) : 1'b1)) begin
+                instruction_o.fu  = ALU;
+                instruction_o.op  = ariane_pkg::ADD;
+                instruction_o.rs1 = '0;
+                instruction_o.rs2 = '0;
+                instruction_o.rd  = instr.itype.rd;
+                imm_select        = NOIMM;
+              end else if (CVA6Cfg.RVH) begin
               // Hypervisor load/store instructions
-              if (CVA6Cfg.RVH) begin
                 if (instr.instr[25] != 1'b0) begin
                   instruction_o.fu = STORE;
                   imm_select = NOIMM;
@@ -879,7 +897,18 @@ module decoder
             unique case ({
               instr.rtype.funct7, instr.rtype.funct3
             })
-              {7'b000_0000, 3'b000} : instruction_o.op = ariane_pkg::ADD;  // Add
+              {7'b000_0000, 3'b000} : begin
+                instruction_o.op = ariane_pkg::ADD;  // Add
+                // Zihintntl: ntl.p/pall/s/all are ADD x0,x0,x2..x5 HINTs.
+                // Drop rs2 so OoO does not wait on a dummy source. When the
+                // knob is off they remain architectural NOPs (rd=x0) with a
+                // wasted rs2 wait. hyp8 port: OpcodeOp ADD arm in g6lc_decode_s2.
+                if (CVA6Cfg.RVZihintntl && instr.rtype.rd == 5'd0 &&
+                    instr.rtype.rs1 == 5'd0 &&
+                    (instr.rtype.rs2 == 5'd2 || instr.rtype.rs2 == 5'd3 ||
+                     instr.rtype.rs2 == 5'd4 || instr.rtype.rs2 == 5'd5))
+                  instruction_o.rs2 = '0;
+              end
               {7'b010_0000, 3'b000} : instruction_o.op = ariane_pkg::SUB;  // Sub
               {7'b000_0000, 3'b010} : instruction_o.op = ariane_pkg::SLTS;  // Set Lower Than
               {
@@ -1434,7 +1463,8 @@ module decoder
               if (CVA6Cfg.XF8) instruction_o.op = ariane_pkg::FSB;
               else illegal_instr = 1'b1;
               3'b001:
-              if (CVA6Cfg.XF16 | CVA6Cfg.XF16ALT) instruction_o.op = ariane_pkg::FSH;
+              if (CVA6Cfg.XF16 | CVA6Cfg.XF16ALT | CVA6Cfg.RVZfhmin)
+                instruction_o.op = ariane_pkg::FSH;
               else illegal_instr = 1'b1;
               3'b010:
               if (CVA6Cfg.RVF) instruction_o.op = ariane_pkg::FSW;
@@ -1464,7 +1494,8 @@ module decoder
               if (CVA6Cfg.XF8) instruction_o.op = ariane_pkg::FLB;
               else illegal_instr = 1'b1;
               3'b001:
-              if (CVA6Cfg.XF16 | CVA6Cfg.XF16ALT) instruction_o.op = ariane_pkg::FLH;
+              if (CVA6Cfg.XF16 | CVA6Cfg.XF16ALT | CVA6Cfg.RVZfhmin)
+                instruction_o.op = ariane_pkg::FLH;
               else illegal_instr = 1'b1;
               3'b010:
               if (CVA6Cfg.RVF) instruction_o.op = ariane_pkg::FLW;
@@ -1580,45 +1611,68 @@ module decoder
               5'b00101: begin
                 instruction_o.op = ariane_pkg::FMIN_MAX;  // fmin/fmax.fmt - FP Minimum / Maximum
                 check_fprm       = 1'b0;  // instruction encoded in rm, do the check here
-                if (CVA6Cfg.XF16ALT) begin           // FP16ALT instructions encoded in rm separately (static)
-                  if (!(instr.rftype.rm inside {[3'b000 : 3'b001], [3'b100 : 3'b101]}))
-                    illegal_instr = 1'b1;
-                end else begin
-                  if (!(instr.rftype.rm inside {[3'b000 : 3'b001]})) illegal_instr = 1'b1;
-                end
+                // rm 000/001: fmin/fmax. rm 010/011: Zfa fminm/fmaxm (S/D;
+                // H only with XF16 via the fmt check below). rm 100/101: XF16ALT.
+                // hyp8 port: OpcodeOpFp funct5=00101 in g6lc_decode_s2.
+                if (instr.rftype.rm inside {3'b000, 3'b001}) ;
+                else if (CVA6Cfg.RVZfa && instr.rftype.rm inside {3'b010, 3'b011}) ;
+                else if (CVA6Cfg.XF16ALT && instr.rftype.rm inside {3'b100, 3'b101}) ;
+                else illegal_instr = 1'b1;
               end
               5'b01000: begin
-                instruction_o.op = ariane_pkg::FCVT_F2F;  // fcvt.fmt.fmt - FP to FP Conversion
-                instruction_o.rs2 = instr.rvftype.rs1; // tie rs2 to rs1 to be safe (vectors use rs2)
+                instruction_o.rs2 = '0;  // rs2 is an encoding; do not wait a GPR
                 imm_select = IIMM;  // rs2 holds part of the instruction
-                if (|instr.rftype.rs2[24:23])
-                  illegal_instr = 1'b1;  // bits [22:20] used, other bits must be 0
-                // check source format
-                unique case (instr.rftype.rs2[22:20])
-                  // Only process instruction if corresponding extension is active (static)
-                  3'b000:  if (~CVA6Cfg.RVF) illegal_instr = 1'b1;
-                  3'b001:  if (~CVA6Cfg.RVD) illegal_instr = 1'b1;
-                  3'b010:  if (~CVA6Cfg.XF16) illegal_instr = 1'b1;
-                  3'b110:  if (~CVA6Cfg.XF16ALT) illegal_instr = 1'b1;
-                  3'b011:  if (~CVA6Cfg.XF8) illegal_instr = 1'b1;
-                  default: illegal_instr = 1'b1;
-                endcase
+                // Zfa fround/froundnx: rs2=00100/00101, dest fmt from instr.fmt,
+                // same-format round-to-integral (not F2F). hyp8: OpcodeOpFp in s2.
+                if (CVA6Cfg.RVZfa && instr.rftype.rs2 == 5'b00100) begin
+                  instruction_o.op = ariane_pkg::FROUND;
+                end else if (CVA6Cfg.RVZfa && instr.rftype.rs2 == 5'b00101) begin
+                  instruction_o.op = ariane_pkg::FROUNDNX;
+                end else begin
+                  instruction_o.op = ariane_pkg::FCVT_F2F;  // fcvt.fmt.fmt - FP to FP Conversion
+                  instruction_o.rs2 = instr.rvftype.rs1; // tie rs2 to rs1 to be safe (vectors use rs2)
+                  if (|instr.rftype.rs2[24:23])
+                    illegal_instr = 1'b1;  // bits [22:20] used, other bits must be 0
+                  // check source format
+                  unique case (instr.rftype.rs2[22:20])
+                    // Only process instruction if corresponding extension is active (static)
+                    3'b000:  if (~CVA6Cfg.RVF) illegal_instr = 1'b1;
+                    3'b001:  if (~CVA6Cfg.RVD) illegal_instr = 1'b1;
+                    3'b010:  if (~CVA6Cfg.XF16 && ~CVA6Cfg.RVZfhmin) illegal_instr = 1'b1;
+                    3'b110:  if (~CVA6Cfg.XF16ALT) illegal_instr = 1'b1;
+                    3'b011:  if (~CVA6Cfg.XF8) illegal_instr = 1'b1;
+                    default: illegal_instr = 1'b1;
+                  endcase
+                end
               end
               5'b10100: begin
                 instruction_o.op = ariane_pkg::FCMP;  // feq/flt/fle.fmt - FP Comparisons
                 check_fprm       = 1'b0;  // instruction encoded in rm, do the check here
-                if (CVA6Cfg.XF16ALT) begin       // FP16ALT instructions encoded in rm separately (static)
-                  if (!(instr.rftype.rm inside {[3'b000 : 3'b010], [3'b100 : 3'b110]}))
-                    illegal_instr = 1'b1;
-                end else begin
-                  if (!(instr.rftype.rm inside {[3'b000 : 3'b010]})) illegal_instr = 1'b1;
-                end
+                // rm 000/001/010: fle/flt/feq. rm 100/101 on S/D: Zfa fleq/fltq
+                // (quiet). rm 100-110 with XF16ALT is the AH encoding on fmt=H.
+                if (instr.rftype.rm inside {3'b000, 3'b001, 3'b010}) ;
+                else if (CVA6Cfg.RVZfa && instr.rftype.rm inside {3'b100, 3'b101} &&
+                         instr.rftype.fmt != 2'b10) ;
+                else if (CVA6Cfg.XF16ALT &&
+                         instr.rftype.rm inside {3'b100, 3'b101, 3'b110}) ;
+                else illegal_instr = 1'b1;
               end
               5'b11000: begin
-                instruction_o.op = ariane_pkg::FCVT_F2I;  // fcvt.ifmt.fmt - FP to Int Conversion
-                imm_select       = IIMM;  // rs2 holds part of the instruction
-                if (|instr.rftype.rs2[24:22])
-                  illegal_instr = 1'b1;  // bits [21:20] used, other bits must be 0
+                imm_select = IIMM;  // rs2 holds part of the instruction
+                // Zfa fcvtmod.w.d: rs2=01000, fmt=D, rm=RTZ. Modular wrap, not
+                // saturating F2I. hyp8: OpcodeOpFp funct5=11000 in s2.
+                if (CVA6Cfg.RVZfa && CVA6Cfg.RVD &&
+                    instr.rftype.rs2 == 5'b01000 &&
+                    instr.rftype.fmt == 2'b01 &&
+                    instr.rftype.rm == 3'b001) begin
+                  instruction_o.op  = ariane_pkg::FCVTMOD;
+                  instruction_o.rs2 = '0;  // encoding, do not wait GPR x8
+                  check_fprm        = 1'b0;
+                end else begin
+                  instruction_o.op = ariane_pkg::FCVT_F2I;  // fcvt.ifmt.fmt - FP to Int Conversion
+                  if (|instr.rftype.rs2[24:22])
+                    illegal_instr = 1'b1;  // bits [21:20] used, other bits must be 0
+                end
               end
               5'b11010: begin
                 instruction_o.op = ariane_pkg::FCVT_I2F;  // fcvt.fmt.ifmt - Int to FP Conversion
@@ -1638,13 +1692,22 @@ module decoder
                 if (instr.rftype.rs2 != 5'b00000) illegal_instr = 1'b1;
               end
               5'b11110: begin
-                instruction_o.op = ariane_pkg::FMV_X2F;  // fmv.fmt.ifmt - GPR to FPR Move
-                instruction_o.rs2 = instr.rftype.rs1; // set rs2 = rs1 so we can map FMV to SGNJ in the unit
                 check_fprm = 1'b0;  // instruction encoded in rm, do the check here
-                if (!(instr.rftype.rm == 3'b000 || (CVA6Cfg.XF16ALT && instr.rftype.rm == 3'b100)))
-                  illegal_instr = 1'b1;
-                // rs2 must be zero
-                if (instr.rftype.rs2 != 5'b00000) illegal_instr = 1'b1;
+                // Zfa fli.fmt: rs2=00001, rm=000, rs1 is the 5-bit table index
+                // (use_zimm, no GPR wait). hyp8: OpcodeOpFp funct5=11110 in s2.
+                if (CVA6Cfg.RVZfa && instr.rftype.rs2 == 5'b00001 &&
+                    instr.rftype.rm == 3'b000) begin
+                  instruction_o.op       = ariane_pkg::FLI;
+                  instruction_o.use_zimm = 1'b1;
+                  instruction_o.rs2      = '0;
+                end else begin
+                  instruction_o.op = ariane_pkg::FMV_X2F;  // fmv.fmt.ifmt - GPR to FPR Move
+                  instruction_o.rs2 = instr.rftype.rs1; // set rs2 = rs1 so we can map FMV to SGNJ in the unit
+                  if (!(instr.rftype.rm == 3'b000 || (CVA6Cfg.XF16ALT && instr.rftype.rm == 3'b100)))
+                    illegal_instr = 1'b1;
+                  // rs2 must be zero
+                  if (instr.rftype.rs2 != 5'b00000) illegal_instr = 1'b1;
+                end
               end
               default:  illegal_instr = 1'b1;
             endcase
@@ -1654,7 +1717,16 @@ module decoder
               // Only process instruction if corresponding extension is active (static)
               2'b00:   if (~CVA6Cfg.RVF) illegal_instr = 1'b1;
               2'b01:   if (~CVA6Cfg.RVD) illegal_instr = 1'b1;
-              2'b10:   if (~CVA6Cfg.XF16 & ~CVA6Cfg.XF16ALT) illegal_instr = 1'b1;
+              2'b10: begin
+                // Zfhmin: dest-fmt H is legal only for convert/move, not
+                // fadd.h. hyp8 port: OpcodeOpFp fmt check in g6lc_decode_s2.
+                if (CVA6Cfg.XF16 | CVA6Cfg.XF16ALT) ;
+                else if (CVA6Cfg.RVZfhmin &&
+                         (instruction_o.op inside {ariane_pkg::FCVT_F2F,
+                                                   ariane_pkg::FMV_F2X,
+                                                   ariane_pkg::FMV_X2F})) ;
+                else illegal_instr = 1'b1;  // Zfa half (fli.h/fround.h/fminm.h) needs XF16
+              end
               2'b11:   if (~CVA6Cfg.XF8) illegal_instr = 1'b1;
               default: illegal_instr = 1'b1;
             endcase
@@ -1745,6 +1817,34 @@ module decoder
               5'h14: instruction_o.op = ariane_pkg::AMO_MAXD;
               5'h18: instruction_o.op = ariane_pkg::AMO_MINDU;
               5'h1C: instruction_o.op = ariane_pkg::AMO_MAXDU;
+              default: illegal_instr = 1'b1;
+            endcase
+          // Zabha byte AMOs — funct3=000. No LR/SC/CAS on subword.
+          end else if (CVA6Cfg.RVZabha && CVA6Cfg.RVA && instr.stype.funct3 == 3'h0) begin
+            unique case (instr.instr[31:27])
+              5'h0: instruction_o.op = ariane_pkg::AMO_ADDB;
+              5'h1: instruction_o.op = ariane_pkg::AMO_SWAPB;
+              5'h4: instruction_o.op = ariane_pkg::AMO_XORB;
+              5'h8: instruction_o.op = ariane_pkg::AMO_ORB;
+              5'hC: instruction_o.op = ariane_pkg::AMO_ANDB;
+              5'h10: instruction_o.op = ariane_pkg::AMO_MINB;
+              5'h14: instruction_o.op = ariane_pkg::AMO_MAXB;
+              5'h18: instruction_o.op = ariane_pkg::AMO_MINUB;
+              5'h1C: instruction_o.op = ariane_pkg::AMO_MAXUB;
+              default: illegal_instr = 1'b1;
+            endcase
+          // Zabha halfword AMOs — funct3=001
+          end else if (CVA6Cfg.RVZabha && CVA6Cfg.RVA && instr.stype.funct3 == 3'h1) begin
+            unique case (instr.instr[31:27])
+              5'h0: instruction_o.op = ariane_pkg::AMO_ADDH;
+              5'h1: instruction_o.op = ariane_pkg::AMO_SWAPH;
+              5'h4: instruction_o.op = ariane_pkg::AMO_XORH;
+              5'h8: instruction_o.op = ariane_pkg::AMO_ORH;
+              5'hC: instruction_o.op = ariane_pkg::AMO_ANDH;
+              5'h10: instruction_o.op = ariane_pkg::AMO_MINH;
+              5'h14: instruction_o.op = ariane_pkg::AMO_MAXH;
+              5'h18: instruction_o.op = ariane_pkg::AMO_MINUH;
+              5'h1C: instruction_o.op = ariane_pkg::AMO_MAXUH;
               default: illegal_instr = 1'b1;
             endcase
           // Zacas AMOCAS.Q — funct3=100, RV64 only; register-pair rd/rs2 must be even

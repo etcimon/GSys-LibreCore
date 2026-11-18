@@ -58,6 +58,9 @@ module csr_regfile
     input scoreboard_entry_t commit_instr_i,
     // Commit acknowledged an instruction -> increase instret CSR - COMMIT_STAGE
     input logic [CVA6Cfg.NrCommitPorts-1:0] commit_ack_i,
+    // SMT wait-for-peer: another hart committed a store/AMO. Clears the
+    // Zawrs replica so WRS wakes. Tie 0 when NrHarts==1.
+    input logic res_snoop_i,
     // Address from which to start booting, mtvec is set to the same address - SUBSYSTEM
     input logic [CVA6Cfg.VLEN-1:0] boot_addr_i,
     // Hart id in a multicore environment (reflected in a CSR) - SUBSYSTEM
@@ -404,6 +407,12 @@ module csr_regfile
   logic [CVA6Cfg.XLEN-1:0] aiperm_q, aiperm_d;
 
   logic wfi_d, wfi_q;
+  logic res_v_d, res_v_q;
+  logic wrs_wait_d, wrs_wait_q;
+  logic wrs_sto_d, wrs_sto_q;
+  logic [3:0] sto_cnt_d, sto_cnt_q;
+  logic wfi_irq_wake;
+  logic zawrs_enter, zawrs_wake;
 
   logic [63:0] cycle_q, cycle_d;
   logic [63:0] instret_q, instret_d;
@@ -3067,19 +3076,62 @@ module csr_regfile
   end
 
   // -------------------
-  // Wait for Interrupt
+  // Wait for Interrupt / Zawrs
   // -------------------
+  // Core-local reservation replica for WRS. Authoritative SC is still
+  // g6lc_axi_lrsc. Port-0 commits only (AMOs are port-0). A missed port-1
+  // store leaves the replica set; STO timeout / interrupt still wake.
+  always_comb begin : zawrs_res
+    res_v_d = res_v_q;
+    if (CVA6Cfg.ZawrsEn) begin
+      if (commit_ack_i[0] && !ex_i.valid) begin
+        if (ariane_pkg::is_amo_lr(commit_instr_i.op)) res_v_d = 1'b1;
+        else if (ariane_pkg::is_amo(commit_instr_i.op) || commit_instr_i.fu == STORE)
+          res_v_d = 1'b0;
+      end
+      if (res_snoop_i) res_v_d = 1'b0;
+      if (ex_i.valid) res_v_d = 1'b0;
+    end else begin
+      res_v_d = 1'b0;
+    end
+  end
+
+  g6lc_zawrs #(
+      .CVA6Cfg(CVA6Cfg)
+  ) i_zawrs (
+      .wrs_i(CVA6Cfg.ZawrsEn && ariane_pkg::is_wrs(csr_op_i) && !ex_i.valid &&
+             ((CVA6Cfg.DebugEn && !debug_mode_q) || !CVA6Cfg.DebugEn)),
+      .nto_i(csr_op_i == WRS_NTO),
+      .res_valid_i(res_v_q),
+      .irq_i(wfi_irq_wake),
+      .timeout_i(wrs_sto_q && (sto_cnt_q >= 4'd8)),
+      .enter_wait_o(zawrs_enter),
+      .wake_o(zawrs_wake)
+  );
+
   always_comb begin : wfi_ctrl
-    // wait for interrupt register
-    wfi_d = wfi_q;
-    // if there is any (enabled) interrupt pending un-stall the core
-    // also un-stall if we want to enter debug mode
-    if (|(mip_q & mie_q) || (CVA6Cfg.DebugEn && debug_req_i) || irq_i[1]) begin
-      wfi_d = 1'b0;
-      // or alternatively if there is no exception pending and we are not in debug mode wait here
-      // for the interrupt
-    end else if (((CVA6Cfg.DebugEn && !debug_mode_q) && csr_op_i == WFI && !ex_i.valid) || (!CVA6Cfg.DebugEn && csr_op_i == WFI && !ex_i.valid)) begin
-      wfi_d = 1'b1;
+    wfi_d      = wfi_q;
+    wrs_wait_d = wrs_wait_q;
+    wrs_sto_d  = wrs_sto_q;
+    sto_cnt_d  = (wrs_wait_q && wrs_sto_q) ? (sto_cnt_q + 4'd1) : 4'd0;
+    if (wfi_irq_wake) begin
+      wfi_d      = 1'b0;
+      wrs_wait_d = 1'b0;
+      wrs_sto_d  = 1'b0;
+    end else if (((CVA6Cfg.DebugEn && !debug_mode_q) && csr_op_i == WFI && !ex_i.valid) ||
+                 (!CVA6Cfg.DebugEn && csr_op_i == WFI && !ex_i.valid)) begin
+      wfi_d      = 1'b1;
+      wrs_wait_d = 1'b0;
+      wrs_sto_d  = 1'b0;
+    end else if (zawrs_enter) begin
+      wfi_d      = 1'b1;
+      wrs_wait_d = 1'b1;
+      wrs_sto_d  = (csr_op_i == WRS_STO);
+      sto_cnt_d  = 4'd0;
+    end else if (wrs_wait_q && zawrs_wake) begin
+      wfi_d      = 1'b0;
+      wrs_wait_d = 1'b0;
+      wrs_sto_d  = 1'b0;
     end
   end
 
@@ -3227,15 +3279,17 @@ module csr_regfile
   // lines as they enter mip_d, the registered-but-stable software pending bits, the
   // Sstc comparators (combinational from the ungated rtc_time_i), SEIP and debug.
   always_comb begin : wfi_wake
-    wfi_wake_o = (|(mip_q & mie_q)) || (CVA6Cfg.DebugEn && debug_req_i) || irq_i[1];
-    if (irq_i[0] && mie_q[riscv::IRQ_M_EXT]) wfi_wake_o = 1'b1;
-    if (CVA6Cfg.SoftwareInterruptEn && ipi_i && mie_q[riscv::IRQ_M_SOFT]) wfi_wake_o = 1'b1;
-    if (time_irq_i && mie_q[riscv::IRQ_M_TIMER]) wfi_wake_o = 1'b1;
+    wfi_irq_wake = (|(mip_q & mie_q)) || (CVA6Cfg.DebugEn && debug_req_i) || irq_i[1];
+    if (irq_i[0] && mie_q[riscv::IRQ_M_EXT]) wfi_irq_wake = 1'b1;
+    if (CVA6Cfg.SoftwareInterruptEn && ipi_i && mie_q[riscv::IRQ_M_SOFT]) wfi_irq_wake = 1'b1;
+    if (time_irq_i && mie_q[riscv::IRQ_M_TIMER]) wfi_irq_wake = 1'b1;
     if (CVA6Cfg.SstcEn && mstce_q && stimecmp_hit_d && mie_q[riscv::IRQ_S_TIMER])
-      wfi_wake_o = 1'b1;
+      wfi_irq_wake = 1'b1;
     if (CVA6Cfg.SstcEn && CVA6Cfg.RVH && mstce_q && hstce_q && vstimecmp_hit_d &&
         mie_q[riscv::IRQ_VS_TIMER])
-      wfi_wake_o = 1'b1;
+      wfi_irq_wake = 1'b1;
+    wfi_wake_o = wfi_irq_wake;
+    if (CVA6Cfg.ZawrsEn && wrs_wait_q && zawrs_wake) wfi_wake_o = 1'b1;
   end
 `ifdef PITON_ARIANE
   assign icache_en_o = icache_q[0];
@@ -3406,6 +3460,10 @@ module csr_regfile
       en_ld_st_translation_q <= 1'b0;
       // wait for interrupt
       wfi_q                  <= 1'b0;
+      res_v_q                <= 1'b0;
+      wrs_wait_q             <= 1'b0;
+      wrs_sto_q              <= 1'b0;
+      sto_cnt_q              <= 4'd0;
       // pmp
       for (int i = 0; i < 64; i++) begin
         if (i < CVA6Cfg.NrPMPEntries) begin
@@ -3526,6 +3584,10 @@ module csr_regfile
       en_ld_st_translation_q <= en_ld_st_translation_d;
       // wait for interrupt
       wfi_q                  <= wfi_d;
+      res_v_q                <= res_v_d;
+      wrs_wait_q             <= wrs_wait_d;
+      wrs_sto_q              <= wrs_sto_d;
+      sto_cnt_q              <= sto_cnt_d;
       // pmp
       pmpcfg_q               <= pmpcfg_next;
       pmpaddr_q              <= pmpaddr_next;

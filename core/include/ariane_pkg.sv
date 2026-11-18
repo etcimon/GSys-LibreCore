@@ -425,6 +425,11 @@ package ariane_pkg;
     FCMP,
     // Floating-Point Classify Instruction
     FCLASS,
+    // Zfa (append after FCLASS so existing fu_op ranges stay intact)
+    FLI,       // fli.fmt: rs1 is a 5-bit immediate, use_zimm
+    FROUND,    // fround.fmt: round-to-integral-float
+    FROUNDNX,  // froundnx.fmt: fround + NX
+    FCVTMOD,   // fcvtmod.w.d: modular RTZ D→W
     // Vectorial Floating-Point Instructions that don't directly map onto the scalar ones
     VFMIN,
     VFMAX,
@@ -546,7 +551,29 @@ package ariane_pkg;
     SHA512SIG0,
     SHA512SIG1,
     SHA512SUM0,
-    SHA512SUM1
+    SHA512SUM1,
+    // Zawrs (append so existing fu_op ranges stay intact)
+    WRS_NTO,
+    WRS_STO,
+    // Zabha byte/half AMOs (append; not in [AMO_LRW:AMO_MINDU])
+    AMO_SWAPB,
+    AMO_ADDB,
+    AMO_ANDB,
+    AMO_ORB,
+    AMO_XORB,
+    AMO_MAXB,
+    AMO_MAXUB,
+    AMO_MINB,
+    AMO_MINUB,
+    AMO_SWAPH,
+    AMO_ADDH,
+    AMO_ANDH,
+    AMO_ORH,
+    AMO_XORH,
+    AMO_MAXH,
+    AMO_MAXUH,
+    AMO_MINH,
+    AMO_MINUH
   } fu_op;
 
   typedef struct packed {
@@ -575,6 +602,9 @@ package ariane_pkg;
       FMV_F2X,  // FPR-GPR Moves
       FCMP,  // Comparisons
       FCLASS,  // Classifications
+      FROUND,
+      FROUNDNX,
+      FCVTMOD,
       [VFMIN : VFCPKCD_D],  // Additional Vectorial FP ops
       ACCEL_OP_FS1:
       return 1'b1;  // Accelerator instructions
@@ -621,6 +651,9 @@ package ariane_pkg;
       FCVT_F2F,  // Float-Float Casts
       FSGNJ,  // Sign Injections
       FMV_X2F,  // GPR-FPR Moves
+      FLI,
+      FROUND,
+      FROUNDNX,
       [VFMIN : VFSGNJX],  // Vectorial MIN/MAX and SGNJ
       [VFCPKAB_S : VFCPKCD_D],  // Vectorial FP cast and pack ops
       ACCEL_OP_FD:
@@ -634,7 +667,8 @@ package ariane_pkg;
       FSD, FSW, FSH, FSB,  // stores
       FCVT_F2I,  // conversion to int
       FMV_F2X,  // move as-is to int
-      FCLASS:  // classification (writes output to integer register)
+      FCLASS,  // classification (writes output to integer register)
+      FCVTMOD:  // Zfa modular convert writes a GPR
       return 1'b0;  // floating-point registers are only read
       default: return 1'b1;  // other ops - floating-point registers are written as well
     endcase
@@ -648,18 +682,41 @@ package ariane_pkg;
     return (op == AMO_SCW) || (op == AMO_SCD);
   endfunction
 
+  function automatic logic is_amo_bh(fu_op op);
+    return (op inside {[AMO_SWAPB : AMO_MINUH]});
+  endfunction
+
   function automatic logic is_amo(fu_op op);
     case (op) inside
       [AMO_LRW : AMO_MINDU], AMO_CASW, AMO_CASD, AMO_CASQ: begin
         return 1'b1;
       end
-      default: return 1'b0;
+      default: return is_amo_bh(op);
     endcase
   endfunction
 
   // Zacas: AMOCAS needs GPR[rd] as expected source (third operand).
   function automatic logic is_amo_cas(fu_op op);
     return (op == AMO_CASW) || (op == AMO_CASD) || (op == AMO_CASQ);
+  endfunction
+
+  // Zawrs WRS.NTO / WRS.STO. WFI is a separate wait.
+  function automatic logic is_wrs(fu_op op);
+    return (op == WRS_NTO) || (op == WRS_STO);
+  endfunction
+
+  // Peer store/AMO that must snoop another hart's WRS replica. LR does not.
+  function automatic logic is_zawrs_snoop(fu_op op, fu_t fu);
+    if (is_amo_lr(op)) return 1'b0;
+    return is_amo(op) || (fu == STORE);
+  endfunction
+
+  // Zicclsm covers integer/FP/hypervisor loads and stores. AMOs, LR/SC,
+  // AMOCAS and CBOs stay naturally aligned.
+  function automatic logic zicclsm_eligible(fu_op op, fu_t fu);
+    if (is_amo(op)) return 1'b0;
+    if (op inside {CBO_CLEAN, CBO_FLUSH, CBO_INVAL, CBO_ZERO, CBO_NONE}) return 1'b0;
+    return (fu == LOAD) || (fu == STORE);
   endfunction
 
   // -------------------
@@ -870,8 +927,12 @@ package ariane_pkg;
             AMO_MINWU, AMO_CASW: begin
         return 2'b10;
       end
-      LH, LHU, HLV_H, HLV_HU, HLVX_HU, SH, HSV_H, FLH, FSH: return 2'b01;
-      LB, LBU, HLV_B, HLV_BU, SB, HSV_B, FLB, FSB:          return 2'b00;
+      LH, LHU, HLV_H, HLV_HU, HLVX_HU, SH, HSV_H, FLH, FSH,
+            AMO_SWAPH, AMO_ADDH, AMO_ANDH, AMO_ORH, AMO_XORH,
+            AMO_MAXH, AMO_MAXUH, AMO_MINH, AMO_MINUH: return 2'b01;
+      LB, LBU, HLV_B, HLV_BU, SB, HSV_B, FLB, FSB,
+            AMO_SWAPB, AMO_ADDB, AMO_ANDB, AMO_ORB, AMO_XORB,
+            AMO_MAXB, AMO_MAXUB, AMO_MINB, AMO_MINUB: return 2'b00;
       CBO_CLEAN, CBO_FLUSH, CBO_INVAL:                      return 2'b00;
       // CBO.ZERO: native XLEN zero stores; store_unit multi-beats the full D$ line
       CBO_ZERO:                                             return 2'b11;
