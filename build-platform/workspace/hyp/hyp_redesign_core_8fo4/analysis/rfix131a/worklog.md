@@ -1035,3 +1035,90 @@ diagnosable via the per-hart tracedb columns + `[mmu-trace]`/commit probes.
 The directed suite's `mc_smt2_boot_release`, `mc_hart1_trap`,
 `mc_icache_switch_storm` and coherence tests are the fast oracle for that
 class before the witness.
+
+## RFIX-131a-16 — Zacas (RVZacas / AMOCAS.W/D/Q) enablement + first functional result
+
+**Enablement (done).** `RVZacas: bit'(1)` added to both
+`core/include/g6lc64_hyp8_config_pkg.sv` and `g6lc64_hyp8_mc_config_pkg.sv`
+(RVZacas requires RVA; both already set). `build_config_pkg.sv` now derives
+`NrRgprPorts = NrIssuePorts*3` under `G6LCCfg.RVZacas` (was *2), so
+`OPERANDS_PER_INSTR=3` — scalar 2 issue ports -> 6 GPR read ports; mc scales
+correspondingly. Decode (`g6lc_decode_s2.sv`) has explicit AMOCAS.W/D/Q cases
+with the corrected even-pair check `instr.atype.rd[7] || instr.atype.rs2[20]`
+(packed fields keep instruction bit positions; `[0]` indexing resolved to X/0
+under Verilator and was rejected by slang). `fu_data_t`/`lsu_ctrl_t` carry
+`operand_c` + `_hi` halves; `issue_read_operands.sv` routes rd-sourced
+expected->operand_c, keeps imm=0 for the rs1 address, forwards third-source
+hazards, and does the AMOCAS.Q two-phase register-pair gather. LSU ->
+`g6lc_hpdcache_if_adapter` -> hpdcache AMO/uncached paths plumbed.
+
+**Strict test.** `verif/tests/custom/hyp8_amocas.S` — D/W/Q success + mismatch,
+.W sign-extension, Q pair-gather, and a distinct `0xE1` illegal-instruction
+code so "not implemented" is separable from wrong CAS results. Encodings
+verified by objdump (rd=a0 expected/dest, rs1=a2 addr, rs2=a1 new).
+
+**Scalar build (g6lc64_hyp8, RVZacas=1): CLEAN.**
+`hyp8-rfix131a-zacas-aggregate-t4`: lint scalar+smt2 rc=0, build_complete,
+model `b342ca0e…`, simPgo=237 profiles, verilator `deeede0a…` (-pgo fork,
+unroll+split_var). **All 22 baseline directed tests PASS** incl.
+`hyp8_trap_entry_clean`, `hyp8_spec_walk_clean`, `hyp8_dev_load`,
+`hyp8_ghost_commit`, `hyp8_smp_lrsc` (1-hart).
+
+**FIRST FUNCTIONAL BUG — AMOCAS.D returns rd=0.**
+`hyp8_amocas` fails at `fail_d_ret` (code 11): rvfi trace at the amocas.d
+(0x80000078) shows `x10(a0)=0x0` while the CAS store path was entered.
+Encoding re-verified correct (funct5=00101 funct3=011 rd=a0 rs1=a2 rs2=a1).
+Root-cause analysis of `g6lc_hpdcache_if_adapter.sv` CASD FSM:
+- `is_casd_req` = RVZacas && req && amo_op==AMO_CAS1 && (!word || is_quad);
+  store_unit maps AMO_CASW/D/Q -> AMO_CAS1, so D takes the local CASD RMW FSM.
+- casd_old_q capture (`casd_old_d = hpdcache_rsp_i.rdata[0]` @ CASD_LD_WAIT)
+  and the ack/result mux (`result = casd_old_q` @ CASD_DONE) read correctly;
+  ack is correctly gated to CASD_DONE while casd_busy (no premature ack).
+- Most likely defect: the CASD **load returns 0** (forced
+  `pma.uncacheable` UC path, or addr/tag path), so casd_old=0 and
+  `rdata[0]==operand_c` fails -> CASD_INVAL -> rd=0, mem unchanged.
+  AMOCAS.W (packed HPDCACHE AMO path) and .Q untested — test bails at the
+  first D check.
+- NEXT: confirm whether mem stayed 0x1111 (mismatch path) vs updated; probe
+  the UC load return for a 64-bit CASD LD; check operand_c (expected)
+  routing through data_cmp. Do NOT weaken the strict test.
+
+**mc wedge (parallel finding).** `hyp8_smp_lrsc` on rfix131a-d instrumented
+mc model WEDGED (not a timeout): 2 cores stuck at store-commit, `amo_rdy=0`,
+`since_ack=22000`, IQ arb no grants, frontend `fe_rdy=0`. NRes=8 verified
+correct (NR_HARTS=4x2). Isolation run `rfix131a-d-mc-isolate`
+(mc_boot_sanity/mc_hart1_store_visible/mini_lrsc_d/mini_amoadd_w_spin) launched
+to split atomic-path (my g6lc_axi_lrsc wrap) vs general store/coherence.
+
+**RFIX-131a-16 refinement — CASD path divergence identified.** Comparing
+`hpdcache_req_amo` (normal AMO, works: LR/SC/AMOADD all pass) vs
+`hpdcache_req_casd` (AMOCAS.D/Q local RMW): both use `phys_indexed=1`,
+`addr_tag=amo_tag`, `tid='1`, `need_rsp=1`. The ONE functional divergence is
+`pma.uncacheable`: normal AMO = `hpdcache_req_is_uncacheable || LR || SC`
+(i.e. cacheable for RAM); **CASD hard-codes `uncacheable=1'b1`** (line ~606)
+to force the uncached path for its multi-beat load/store/inval. Since the
+CASD `casd_old`/ack/result logic verified correct and `rd=0` ⇒ the captured
+`rdata[0]` was 0, the defect is almost certainly the **forced-UC 64-bit LOAD
+returning 0** (or the compare operand path). Next probe: check
+`hpdcache_uncached` LOAD handling for `size=2'b11`/dword + `be=8'hff`, and
+whether `operand_c`(expected) reaches `data_cmp` intact; consider whether
+CASD should be cacheable like the normal AMO path instead of forced-UC.
+
+**RFIX-131a-17 — mc secondary-core hold is EXPECTED, not the wedge.**
+`g6lc_cluster.sv`: `BOOT_HOLD=(NC>1 && NrHarts>1)`, `BOOT_HOLD_CYC=200000`.
+Secondary cores (c!=0) get `core_clk` via `tc_clk_gating` with
+`en_i = rel & ~core_sleep_ok`, where
+`rel = (boot_hold_q >= 200000) || ipi_seen_q[c]` and `ipi_seen_q[c]` latches
+on `|ipi_i[c]`. Testbench `mc_held[c] = !gen_boot_icg.rel`; verdict maps held
+cores to **exit 125 / "HELD … not a hang"** (explicitly benign per the
+comment at g6lc_testharness.sv:1745).
+
+`mc_boot_sanity` (1464 cyc) -> held_mask=1110, retired_mask=0001, exit 125:
+cores 1-3 correctly held (test too short for the 200K auto-release and sent
+no IPI). **This is expected bring-up, NOT a defect** — do not chase it.
+`hyp8_smp_lrsc`'s earlier hang showed *active* cores (IQ arb, scoreboard,
+LSU/AMO state), i.e. secondaries WERE released (IPI or >200K cyc) and then
+wedged on the atomic/store path — that remains the real mc defect. For
+OpenWrt/Linux, OpenSBI HSM releases secondaries via IPI and the workload runs
+≫200K cycles, so BOOT_HOLD is not the boot blocker; the post-release
+coherence/atomic wedge is.

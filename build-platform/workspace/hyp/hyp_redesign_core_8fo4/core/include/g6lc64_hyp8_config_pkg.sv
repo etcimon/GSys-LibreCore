@@ -141,7 +141,7 @@ package g6lc_config_pkg;
       XF16ALT: bit'(G6LCConfigF16AltEn),
       XF8: bit'(G6LCConfigF8En),
       RVA: bit'(G6LCConfigAExtEn),
-      RVZacas: bit'(0),  // assignment-pattern field (off; requires RVA)
+      RVZacas: bit'(1),  // Zacas AMOCAS.W/D — Linux-boot DTS advertises zacas
       RVB: bit'(G6LCConfigBExtEn),
       ZKN: bit'(1),
       RVV: bit'(G6LCConfigVExtEn),
