@@ -239,8 +239,12 @@ module g6lc_ooo_dispatch
     assign is_fpr_rs1_c[p] = G6LCCfg.FpPresent && is_rs1_fpr(dispatch_sbe_i[p].op);
     assign is_fpr_rs2_c[p] = G6LCCfg.FpPresent && is_rs2_fpr(dispatch_sbe_i[p].op);
     assign is_fpr_rs3_c[p] = G6LCCfg.FpPresent && is_imm_fpr(dispatch_sbe_i[p].op);
+    // Ara writes the VRF; scalar results (vsetvl) land through the
+    // commit-mirror into the PRF, same as CSR/AMO. Renaming ACCEL.rd as an
+    // integer dest would alias vector register indices onto the GPR map.
     assign need_rd[p] = dispatch_valid_i[p] &&
-                        (is_fpr_rd_c[p] ? 1'b1 : (rd_a[p] != 5'd0));
+                        (dispatch_sbe_i[p].fu == ACCEL ? 1'b0 :
+                         (is_fpr_rd_c[p] ? 1'b1 : (rd_a[p] != 5'd0)));
     assign is_br[p] = dispatch_valid_i[p] && (dispatch_sbe_i[p].fu == CTRL_FLOW);
     assign is_ld[p] = dispatch_valid_i[p] && (dispatch_sbe_i[p].fu == LOAD);
     assign is_st[p] = dispatch_valid_i[p] && (dispatch_sbe_i[p].fu == STORE);

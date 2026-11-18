@@ -75,7 +75,7 @@ module g6lc_iq_legal
     // describe a newly landed occupant in its first live cycle.
     input  logic [BANKS-1:0][ENTRIES-1:0][TID_W-1:0] info_tid_d_i,
     input  logic [BANKS-1:0][ENTRIES-1:0][HID_W-1:0] info_hart_i,
-    input  logic [BANKS-1:0][ENTRIES-1:0][6:0]      info_cls_i,
+    input  logic [BANKS-1:0][ENTRIES-1:0][7:0]      info_cls_i,
     input  logic [BANKS-1:0][ENTRIES-1:0]           info_bypass_i,
     // Bank-local class frontiers.
     input  logic [BANKS-1:0]                        csr_oldest_v_i,
@@ -92,7 +92,7 @@ module g6lc_iq_legal
 );
 
   localparam int unsigned C_LD = 0, C_ST = 1, C_CSR = 2, C_CSYS = 3,
-                          C_AMO = 4, C_CVXI = 5, C_FP = 6;
+                          C_AMO = 4, C_CVXI = 5, C_FP = 6, C_ACCL = 7;
 
   // ----------------------------------------------------------------------
   // Registered global facts
@@ -376,7 +376,7 @@ module g6lc_iq_legal
         automatic logic older_csr, older_st;
         automatic logic [HID_W-1:0] h;
         head_only = info_cls_i[b][e][C_CVXI] | info_cls_i[b][e][C_AMO] |
-                    info_cls_i[b][e][C_CSYS];
+                    info_cls_i[b][e][C_CSYS] | info_cls_i[b][e][C_ACCL];
         is_ld  = info_cls_i[b][e][C_LD];
         is_csr = info_cls_i[b][e][C_CSR];
         is_st  = info_cls_i[b][e][C_ST];
@@ -481,7 +481,7 @@ module g6lc_iq_legal
             r68_iqleg_n <= r68_iqleg_n + 1;
             g6lc_r68_iqleg_head_only: assert (
                 !(info_cls_i[b][e][C_CVXI] | info_cls_i[b][e][C_AMO] |
-                  info_cls_i[b][e][C_CSYS]) ||
+                  info_cls_i[b][e][C_CSYS] | info_cls_i[b][e][C_ACCL]) ||
                 (info_tid_i[b][e] == commit_ptr_i))
               else $error("g6lc_iq_legal: head-only entry b=%0d e=%0d tid=%0d legal while commit_ptr=%0d",
                           b, e, info_tid_i[b][e], commit_ptr_i);

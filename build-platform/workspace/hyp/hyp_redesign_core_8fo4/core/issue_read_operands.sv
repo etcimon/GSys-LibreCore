@@ -612,6 +612,14 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
       end
     end
   end
+  if (G6LCCfg.EnableAccelerator && G6LCCfg.NrIssuePorts > 1) begin : gen_accel_port0_contract
+    always_ff @(posedge clk_i) if (rst_ni) begin
+      for (int unsigned p = 1; p < G6LCCfg.NrIssuePorts; p++) begin
+        assert (!(issue_instr_valid_i[p] && issue_ack_o[p] && issue_instr_i[p].fu == ACCEL))
+          else $error("issue_read_operands: ACCEL instruction acknowledged on port %0d (port-0 steering broken)", p);
+      end
+    end
+  end
   // pragma translate_on
   assign stall_issue_o = stall_raw[0];
   assign tinst_o = G6LCCfg.RVH ? tinst_q : '0;
@@ -769,9 +777,10 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
       for (int unsigned p = 1; p < G6LCCfg.NrIssuePorts; p++) begin
         fus_busy[p] = fus_busy[p-1];
 
-        // CSR / CVXIF only on port 0
+        // CSR / CVXIF / ACCEL (Ara) only on port 0
         fus_busy[p].csr   = 1'b1;
         fus_busy[p].cvxif = 1'b1;
+        fus_busy[p].accel = 1'b1;
 
         // The in-order dual-issue throttle keys on the OLDER lane's
         // presented record and must only apply while that lane holds a
@@ -824,6 +833,7 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
               end
             end
             CVXIF: ;
+            ACCEL: ;
             default: ;
           endcase
         end
@@ -890,6 +900,7 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
         LOAD:  fu_busy[i] = lsu_hold;
         STORE: fu_busy[i] = lsu_hold;
         CVXIF: fu_busy[i] = fus_busy[i].cvxif;
+        ACCEL: fu_busy[i] = fus_busy[i].accel;
         AES: fu_busy[i] = (i == 0) ? fus_busy[i].aes : alu_pipe_hold;
         default:
         if (G6LCCfg.FpPresent) begin

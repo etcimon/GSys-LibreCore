@@ -1060,6 +1060,15 @@ package config_pkg;
   /// you develop a module that resides within the core, assign this constant.
   localparam g6lc_cfg_t g6lc_cfg_empty = g6lc_cfg_t'(0);
 
+  // U10b Ara compatibility aliases. The vendored upstream vector unit
+  // (vendor/ara, tier-U) references the pre-rename cva6_* config surface
+  // (`config_pkg::cva6_cfg_t`, `config_pkg::cva6_cfg_empty`,
+  // `cva6_config_pkg::cva6_cfg`). Alias them onto the g6lc types so Ara
+  // elaborates against the same resolved configuration without forking the
+  // upstream sources.
+  typedef g6lc_cfg_t cva6_cfg_t;
+  localparam g6lc_cfg_t cva6_cfg_empty = g6lc_cfg_empty;
+
   /// Utility function being called to check parameters. Not all values make
   /// sense for all parameters, here is the place to sanity check them.
   function automatic void check_cfg(g6lc_cfg_t Cfg);
@@ -1371,13 +1380,20 @@ package config_pkg;
     assert (!(Cfg.L3PrefetchEn && Cfg.L2PfMaxOutstanding == 0));
 
     // --- Xg6lcai AI matrix plane (architecture/ai-matrix/isa-encoding.md) ---
-    // Seam exclusivity. CVXIF and the accelerator port are already mutually
-    // exclusive (g6lc_core.sv gen_err_xif_and_acc); the AI plane must pick exactly
-    // one of them, and the accelerator seam is incompatible with RVV because
-    // EnableAccelerator is derived from it (build_config_pkg).
+    // Seam exclusivity. CVXIF and the accelerator port remain mutually
+    // exclusive (g6lc_core.sv gen_err_xif_and_acc). The matrix plane picks one of:
+    //   B  CvxifEn && !AccelEn          (8x8x8 T0 tile; no RVV)
+    //   D  AccelEn && !CvxifEn && !RVV  (native ai.ldt; no Ara)
+    //   I  !AccelEn && !CvxifEn && Queues>0  (island MMIO/DMA; RVV/Ara legal)
+    // AccelEn still cannot share acc_dispatcher with RVV.
     assert (!(Cfg.AiCfg.MatrixEn && Cfg.AiCfg.AccelEn && Cfg.CvxifEn));
-    assert (!(Cfg.AiCfg.MatrixEn && !Cfg.AiCfg.AccelEn && !Cfg.CvxifEn));
+    assert (!(Cfg.AiCfg.MatrixEn && !Cfg.AiCfg.AccelEn && !Cfg.CvxifEn &&
+              Cfg.AiCfg.Queues == 0));
     assert (!(Cfg.AiCfg.AccelEn && Cfg.RVV));
+    // Island DMA writes bypass L1/L2/L3; the CMO engine is the inval path.
+    assert (!(Cfg.AiCfg.DmaInvalEn && Cfg.L2En && !Cfg.L2CmoEn));
+    // Dual-issue Ara is legal once the IQ holds ACCEL at the commit head and
+    // issue_read_operands steers it to port 0 (same contract as CVXIF).
     // Native tile load/store needs a memory port. The CVXIF seam has none, so
     // under seam B these are synthesised by the compiler (isa-encoding s3.3).
     assert (!(Cfg.AiCfg.TileLdEn && !Cfg.AiCfg.AccelEn));

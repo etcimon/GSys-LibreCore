@@ -59,7 +59,7 @@ module g6lc_iq_bank
     // Allocation: lanes already steered to this bank by the wrapper; lane
     // order is the intra-group age order (lane 0 older).
     input  logic [NLANES-1:0]                 alloc_i,
-    input  logic [NLANES-1:0][6:0]            alloc_cls_i,   // {needfp,cvxi,amo,csys,csr,st,ld}
+    input  logic [NLANES-1:0][7:0]            alloc_cls_i,   // {accel,fp_consumer,cvxif,amo,csys,csr,st,ld}
     input  logic [NLANES-1:0][3:0]            alloc_fu_i,    // hyp8 g7: fu_t
     input  g6lc_hyp_pkg::hyp_lat_class_e [NLANES-1:0] alloc_lat_i,
     input  logic [NLANES-1:0][TID_W-1:0]      alloc_tid_i,
@@ -150,7 +150,7 @@ module g6lc_iq_bank
     // module registers per-entry facts for the occupant they will serve.
     output logic [ENTRIES-1:0][TID_W-1:0]     info_tid_d_o,
     output logic [ENTRIES-1:0][HID_W-1:0]     info_hart_o,
-    output logic [ENTRIES-1:0][6:0]           info_cls_o,
+    output logic [ENTRIES-1:0][7:0]           info_cls_o,
     output logic [ENTRIES-1:0]                info_bypass_o,
     // hyp8 g10: rdy/prs export for the top-level sim debug windows (the
     // emit's flat i_iq.q_q view went away with the banked iq).
@@ -169,14 +169,14 @@ module g6lc_iq_bank
 
   // cls bit indices
   localparam int unsigned C_LD = 0, C_ST = 1, C_CSR = 2, C_CSYS = 3,
-                          C_AMO = 4, C_CVXI = 5, C_FP = 6;
+                          C_AMO = 4, C_CVXI = 5, C_FP = 6, C_ACCL = 7;
 
   typedef struct packed {
     logic                valid;
     logic                issued;   // candidate taken; waits on ack or cancel
     logic [TID_W-1:0]    tid;
     logic [HID_W-1:0]    hart;
-    logic [6:0]          cls;
+    logic [7:0]          cls;
     logic                may_bypass;
     g6lc_hyp_pkg::hyp_lat_class_e lat;
     logic                is_fprd;   // producer's destination is the FP file
@@ -304,7 +304,7 @@ module g6lc_iq_bank
            ({5{mult}} & 5'd13) | ({5{fpu}} & 5'(6 + wake_cy(lat)));
   endfunction
   function automatic logic [3:0] gate_of(input logic [3:0] fu,
-                                         input logic [6:0] cls,
+                                         input logic [7:0] cls,
                                          input g6lc_hyp_pkg::hyp_lat_class_e lat);
     // {lsu, fpu, csr, mult} ready-gates evaluated at take: a gated op
     // cannot be taken, so a spec-broadcast producer can never stall
@@ -473,7 +473,8 @@ module g6lc_iq_bank
       gate: gate_of(e_q[e].fu, e_q[e].cls, e_q[e].lat),
       div: div_of(e_q[e].fu, e_q[e].lat),
       // serial classes share the single port-0 operand/result path
-      port0: e_q[e].cls[C_CSR] | e_q[e].cls[C_AMO] | e_q[e].cls[C_CVXI]};
+      port0: e_q[e].cls[C_CSR] | e_q[e].cls[C_AMO] | e_q[e].cls[C_CVXI] |
+             e_q[e].cls[C_ACCL]};
     assign cterm1[e] = cterm0[e];
     assign cr0[0][e] = {$bits(crec_t){cand0_oh[e]}} & cterm0[e];
     assign cr1[0][e] = {$bits(crec_t){cand1_oh[e]}} & cterm1[e];
@@ -945,7 +946,9 @@ module g6lc_iq_bank
       rs1_cntz: 1'b1, rs2_cntz: 1'b1, rs3_cntz: 1'b1,
       rs1_ptid: '0, rs2_ptid: '0,
       fu: alloc_fu_i[p],
-      ord: |alloc_cls_i[p][5:0]};
+      // ord routes the entry through g6lc_iq_legal. C_ACCL is head-only like
+      // C_CVXI, so it must be ordered; C_FP(6) stays out (speculative-safe).
+      ord: (|alloc_cls_i[p][5:0]) | alloc_cls_i[p][C_ACCL]};
     for (genvar e = 0; e < ENTRIES; e++) begin : gen_ahp
       assign alloc_hit_p[p][e] = pend_slot_q[p][e];
     end

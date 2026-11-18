@@ -152,12 +152,12 @@ module g6lc_iq
   // cls bit layout shared with g6lc_iq_bank / g6lc_iq_legal:
   //   {fp_consumer, cvxif, amo, csr_system, csr, store, load}
   localparam int unsigned C_LD = 0, C_ST = 1, C_CSR = 2, C_CSYS = 3,
-                          C_AMO = 4, C_CVXI = 5, C_FP = 6;
+                          C_AMO = 4, C_CVXI = 5, C_FP = 6, C_ACCL = 7;
 
   // ----------------------------------------------------------------------
   // Per-lane class encoding (the unbanked ready[] predicate's class tests)
   // ----------------------------------------------------------------------
-  logic [NP-1:0][6:0] alloc_cls;
+  logic [NP-1:0][7:0] alloc_cls;
   g6lc_hyp_pkg::hyp_lat_class_e [NP-1:0] alloc_lat;
   // hyp8 g7: the bank needs the raw FU class for the arb resource gate.
   logic [NP-1:0][3:0] alloc_fu;
@@ -177,6 +177,11 @@ module g6lc_iq
           g6lc_core_pkg::is_amo(disp_sbe_i[p].op);
       alloc_cls[p][C_CVXI] = G6LCCfg.CvxifEn &&
           (disp_sbe_i[p].fu == g6lc_core_pkg::CVXIF);
+      // Ara/RVV uses the same non-speculative contract as CVXIF: the
+      // accelerator is forwarded only after commit, so an ACCEL op must
+      // hold at the commit head (head-only) and issue on port 0 only.
+      alloc_cls[p][C_ACCL] = G6LCCfg.EnableAccelerator &&
+          (disp_sbe_i[p].fu == g6lc_core_pkg::ACCEL);
       alloc_cls[p][C_FP]   = G6LCCfg.FpPresent &&
           (disp_fpr_rs1_i[p] | disp_fpr_rs2_i[p] | disp_fpr_rs3_i[p]);
       alloc_lat[p] = ooo_lat_class(disp_sbe_i[p].fu, disp_sbe_i[p].op);
@@ -396,7 +401,7 @@ module g6lc_iq
   // facts for the occupant present at the next edge).
   logic [BANKS-1:0][ENTRIES-1:0][TID_W-1:0] info_tid_d;
   logic [BANKS-1:0][ENTRIES-1:0][HID_W-1:0] info_hart;
-  logic [BANKS-1:0][ENTRIES-1:0][6:0] info_cls;
+  logic [BANKS-1:0][ENTRIES-1:0][7:0] info_cls;
   logic [BANKS-1:0][ENTRIES-1:0]    info_bypass;
   // hyp8 g10: rdy/prs exports for the top-level sim debug windows.
   logic [BANKS-1:0][ENTRIES-1:0][2:0]     info_rdy;
@@ -742,7 +747,8 @@ module g6lc_iq
             g6lc_r68_take_head_only: assert (
                 !(info_cls[b][take_idx[b][p]][C_CVXI] |
                   info_cls[b][take_idx[b][p]][C_AMO] |
-                  info_cls[b][take_idx[b][p]][C_CSYS]) ||
+                  info_cls[b][take_idx[b][p]][C_CSYS] |
+                  info_cls[b][take_idx[b][p]][C_ACCL]) ||
                 (info_tid[b][take_idx[b][p]] == commit_ptr_i))
               else $error("g6lc_iq: head-only tid=%0d granted (bank %0d port %0d) while commit_ptr=%0d",
                           info_tid[b][take_idx[b][p]], b, p, commit_ptr_i);

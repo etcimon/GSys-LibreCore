@@ -6371,10 +6371,8 @@ assign irq_active = irq_i[smt_active_hart];
 `endif  // G6LC_SIM_NO_HIER_TRACE
 `endif
 
-  initial begin
-    assert (!(G6LCCfg.SuperscalarEn && G6LCCfg.EnableAccelerator))
-    else $fatal(1, "Accelerator is not supported by superscalar pipeline");
-  end
+  // Dual-issue Ara is legal: the IQ holds ACCEL at the commit head and
+  // issue_read_operands steers it to port 0 (same contract as CVXIF).
   //pragma translate_on
 
 endmodule  // g6lc_core

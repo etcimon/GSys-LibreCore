@@ -54,14 +54,18 @@ module g6lc_ara_attach
     ara #(
         .NrLanes           (NrLanes),
         .VLEN              (VLEN),
-        .G6LCCfg           (G6LCCfg),
+        // Upstream Ara (tier-U, unmodified) names its config port CVA6Cfg of
+        // type config_pkg::cva6_cfg_t; config_pkg aliases that onto g6lc_cfg_t
+        // so G6LCCfg binds directly. Same for the cva6_to_acc/acc_to_cva6
+        // handshake types -- the g6lc typedefs are structurally identical.
+        .CVA6Cfg           (G6LCCfg),
         .exception_t       (exception_t),
         .accelerator_req_t (accelerator_req_t),
         .accelerator_resp_t(accelerator_resp_t),
         .acc_mmu_req_t     (acc_mmu_req_t),
         .acc_mmu_resp_t    (acc_mmu_resp_t),
-        .g6lc_to_acc_t     (g6lc_to_acc_t),
-        .acc_to_g6lc_t     (acc_to_g6lc_t),
+        .cva6_to_acc_t     (g6lc_to_acc_t),
+        .acc_to_cva6_t     (acc_to_g6lc_t),
         .AxiDataWidth      (AxiWideDataWidth),
         .AxiAddrWidth      (AxiAddrWidth),
         .axi_ar_t          (ara_axi_ar_t),

@@ -12,6 +12,9 @@
 +incdir+${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/third_party/common/local/util/
 +incdir+${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/core/cache_subsystem/hpdcache/rtl/include
 +define+G6LC_FETCH_B
++define+G6LC_ARA_ATTACH
++incdir+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/include
++incdir+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/include/ara
 +incdir+${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/include/
 +incdir+${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/src/
 +incdir+${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/tb/
@@ -75,16 +78,20 @@ ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cvfpu/
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cvfpu/src/fpu_div_sqrt_mvp/hdl/nrbd_nrsc_mvp.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cvfpu/src/fpu_div_sqrt_mvp/hdl/preprocess_mvp.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/include/config_pkg.sv
+${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/include/build_config_pkg.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/include/g6lc_hyp_pkg.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/include/g6lc64_hyp8_mc_config_pkg.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/include/riscv_pkg.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/include/g6lc_core_pkg.sv
+# U10b Ara: cva6_config_pkg shim (needs config_pkg + g6lc_config_pkg +
+# build_config_pkg, all above) then upstream ariane_pkg, which imports it.
+${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/include/cva6_config_pkg.sv
+${CVA6_REPO_DIR}/core/include/ariane_pkg.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/ooo/g6lc_ooo_pkg.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/third_party/vendor/pulp-platform/axi/src/axi_pkg.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/include/wt_cache_pkg.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/include/std_cache_pkg.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/include/instr_tracer_pkg.sv
-${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/include/build_config_pkg.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/include/aes_pkg.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/include/triggers_pkg.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/cvxif_compressed_if_driver.sv
@@ -533,3 +540,37 @@ ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/tb/common/SimJTAG.sv
 # hyp8: tb/common/spike.sv dropped -- SPIKE_TANDEM-only; needs UVM pkgs not in this build
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/tb/g6lc_testharness.sv
+# --- RVV/Ara (U10b): vendor/ara upstream + cva6_shim. pulp-platform deps
+# (common_cells/axi/tech_cells) already present via hyp-workspace third_party.
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/include/rvv_pkg.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/include/ara_pkg.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/ara.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/ara_dispatcher.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/ara_sequencer.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/segment_sequencer.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/axi_inval_filter.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/ctrl_registers.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/cva6_accel_first_pass_decoder.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/fixed_p_rounding.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/power_gating_generic.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/simd_alu.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/simd_div.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/simd_mul.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/valu.sv
+${CVA6_REPO_DIR}/vendor/ara/cva6_shim/vmfpu.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/vector_regfile.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/operand_queue.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/operand_queues_stage.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/operand_requester.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/vector_fus_stage.sv
+${CVA6_REPO_DIR}/vendor/ara/cva6_shim/lane_sequencer.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/lane.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/masku/masku_operands.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/masku/masku.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/sldu/p2_stride_gen.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/sldu/sldu_op_dp.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/sldu/sldu.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/vlsu/addrgen.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/vlsu/vldu.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/vlsu/vstu.sv
+${CVA6_REPO_DIR}/vendor/ara/cva6_shim/vlsu.sv

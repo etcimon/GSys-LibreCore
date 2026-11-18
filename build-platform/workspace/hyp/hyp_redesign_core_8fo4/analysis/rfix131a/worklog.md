@@ -1122,3 +1122,64 @@ wedged on the atomic/store path — that remains the real mc defect. For
 OpenWrt/Linux, OpenSBI HSM releases secondaries via IPI and the workload runs
 ≫200K cycles, so BOOT_HOLD is not the boot blocker; the post-release
 coherence/atomic wedge is.
+
+**RFIX-131a-18 — RVV/Ara port of 509f4767 onto hyp8-mc (elaboration-clean).**
+Ported the dual-issue accelerator mechanism from
+`g6lc64_ooo_int2_l3_v_ai` (commit `509f4767`) onto the hyp8 OoO backend.
+ACCEL is held at the commit head and steered to issue port 0 — the same
+non-speculative contract as CVXIF — because `acc_dispatcher` forwards to Ara
+only after commit; a younger-than-head issue would occupy the vector unit
+while an older op can still fault. Scalar `rd` renaming is skipped for ACCEL
+(Ara owns VRF state; `vsetvl` results land via the commit-mirror, like CSR/AMO).
+
+Mechanism (all in `core/`):
+- `ooo/g6lc_iq.sv`: class vector widened `[6:0]`→`[8:0]`, added `C_ACCL`;
+  ACCEL classified from `disp_sbe_i[p].fu==ACCEL`; added to head-only assert.
+- `ooo/g6lc_iq_bank.sv`: class ports/records →8b; `C_ACCL` in `port0`; **`ord`
+  predicate extended to include `alloc_cls_i[p][C_ACCL]`** — without this an
+  ACCEL entry would bypass the registered-legality pipeline entirely.
+- `ooo/g6lc_iq_legal.sv`: `info_cls_i`→8b, `C_ACCL` in `head_only` + the
+  runtime head-only legality assert.
+- `issue_read_operands.sv`: ACCEL in the dual-issue FU-busy chain (port-0
+  only), per-FU `fus_busy[p].accel`, and a translate-off assert that ACCEL is
+  never acked on a nonzero port.
+- `ooo/g6lc_ooo_dispatch.sv`: `need_rd` excludes ACCEL (no scalar rename).
+- `g6lc_core.sv`: removed `assert(!(SuperscalarEn && EnableAccelerator))` —
+  dual-issue Ara is legal under the head+port0 contract.
+- `include/config_pkg.sv`: AI seam asserts ported — seam B (Cvxif, no RVV),
+  seam D (AccelEn, no RVV/Cvxif), seam I (`!AccelEn && !CvxifEn && Queues>0`,
+  RVV legal); `AccelEn && RVV` still illegal; added
+  `DmaInvalEn && L2En && !L2CmoEn` legality; added `cva6_cfg_t`/`cva6_cfg_empty`
+  aliases onto `g6lc_cfg_t` for the vendored upstream surface.
+- `include/cva6_config_pkg.sv` (NEW): exposes `cva6_cfg =
+  build_config_pkg::build_config(g6lc_config_pkg::g6lc_cfg)` — the *live* hyp8
+  config, not an empty default — plus `CVA6ConfigDataUserWidth`(=AxiUserWidth)
+  and `CVA6ConfigRvfiTrace`(=G6LCConfigRvfiTrace) that `ariane_pkg` needs for
+  struct widths. Required ordering: after config_pkg+build_config_pkg+mc pkg.
+- `include/g6lc64_hyp8_mc_config_pkg.sv`: `G6LCConfigVExtEn = 1` (RVV live;
+  `build_config` derives `cfg.RVV=1`, `cfg.EnableAccelerator=1`).
+- `corev_apu/src/g6lc_ara_attach.sv`: upstream Ara param is `.CVA6Cfg` (not
+  `.G6LCCfg`); type aliases `cva6_to_acc_t`/`acc_to_cva6_t` bind `g6lc_to_acc_t`/
+  `acc_to_g6lc_t`.
+- `verif/regress/remote/hyp8/Flist.hyp8_mc_sim`: `+define+G6LC_ARA_ATTACH`,
+  Ara incdirs, `vendor/ara/Flist.ara` package+source list, `cva6_config_pkg.sv`,
+  upstream `core/include/ariane_pkg.sv` (decoder's `import ariane_pkg::*`).
+
+Config parity vs reference `g6lc64_ooo_int2_l3_v_ai`: CvxifEn=0, HExtEn=0,
+VExtEn=1, VLEN=64, SuperscalarEn=1, RVZacas=1, CoproType=COPRO_NONE,
+OoOEn=1, L2En=1, L3En=1, NrHarts=2 all match. Intentional hyp8 deltas:
+**NrIssuePorts=8** (hyp8 8-wide issue vs reference 2) and **NrCores=4** (vs 2).
+`AiCfg=AiCfgOff` (vs reference `AiCfgIsland`) is correct for pure RVV: the
+matrix-island DMA plane is absent; `EnableAccelerator`→Ara is independent of
+AiCfg and `AiCfgOff` passes every seam assert trivially (all fields 0).
+
+**Verification:** `verilator --lint-only` on `Flist.hyp8_mc_sim`
+(`-DG6LC_HYP8_MC`, top `g6lc_soc`) → **0 errors**. The `vmfpu.sv` PINMISSING
+warning (`early_valid_o` unconnected, an output) proves the `gen_on`
+(G6LC_ARA_ATTACH) branch elaborated — i.e. `EnableAccelerator`/`RVV` are live,
+not dead-code lint. NOT yet verified: functional vector execution, the
+commit-head/port-0 contract at runtime, or boot. The reference leaf bench
+`verif/tb/core/run-iq-accel-head.sh` + `tb_g6lc_iq_accel_head.sv` targets the
+*reference* `core/ooo/g6lc_iq.sv` (upstream naming); a hyp8-adapted equivalent
+is the next directed check (hyp8 IQ is banked + steered + replayed, so the bench
+needs `G6LCCfg`/`HypCfg`, the extra steer/replay ports, and `ACCEL_OP` fu_ops).

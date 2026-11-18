@@ -46,7 +46,7 @@ package g6lc_config_pkg;
   localparam G6LCConfigAExtEn = 1;
   localparam G6LCConfigHExtEn = 0;  // always disabled
   localparam G6LCConfigBExtEn = 1;
-  localparam G6LCConfigVExtEn = 0;
+  localparam G6LCConfigVExtEn = 1;
   localparam G6LCConfigRVZiCond = 1;
 
   // hyp8 SMT2 integration seam: the default source profile stays
