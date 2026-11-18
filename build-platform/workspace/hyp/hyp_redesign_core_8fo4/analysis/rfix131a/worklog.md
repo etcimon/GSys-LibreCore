@@ -1183,3 +1183,38 @@ commit-head/port-0 contract at runtime, or boot. The reference leaf bench
 *reference* `core/ooo/g6lc_iq.sv` (upstream naming); a hyp8-adapted equivalent
 is the next directed check (hyp8 IQ is banked + steered + replayed, so the bench
 needs `G6LCCfg`/`HypCfg`, the extra steer/replay ports, and `ACCEL_OP` fu_ops).
+
+**RFIX-131a-19 — hyp8 IQ ACCEL-head leaf bench fixed; positive + both negative
+controls pass.** The `tb_g6lc_iq_cvxif_head`-derived bench cloned onto the
+banked hyp8 `g6lc_iq` could not observe `issue_valid_o` for *either* CVXIF or
+ACCEL — the interface outgrew the bench (steer/replay/FU-ready/spec ports) and
+the banked IQ + registered 2-stage arbiter is ~6 cycles dispatch->issue, far
+deeper than the fixed `#2`/`repeat(4)` waits the shallow upstream bench used.
+
+Root causes found by hierarchical probe (`cand_v_i`->`cand_v_q`->`pv_d`/`pv_q`->
+`merged`->`win_v`->`win_s_v`->`take_grant`):
+- **S1/S3 held->issue checks fired too early.** `expect_issue` now POLLS
+  `iv!==0` for positives (issue_valid holds until acked, so waiting cannot
+  drop it) and settles `HELD_CYCLES=60` (> full candidate->issue flight) for
+  held checks, so a NOHEAD mutant that lets the op issue is still caught.
+- **S3 dual-issue was untestable as written.** A plain ALU is not head-only, so
+  op7 issued the moment it was ready — stealing port 0 before op5's head, and
+  (worse) once op5 was presented-but-unacked, op7 kept winning the port-0
+  *selection* while `take_grant[0]` was blocked by `pres_q[0].v`, got marked
+  `used` for port 1, and deadlocked. Fixed by gating op7 on a register
+  writeback (`offer_op_prs` prs=5 rdy=0) and waking it ~1 cycle after
+  `commit_ptr` moves, so op7's candidate reaches the arbiter the same cycle
+  op5's does -> simultaneous grant: ACCEL port0 + ALU port1 (`iv=2'b11`).
+- **`drain_ports`** now acks until `iv==0` (was a single `ia` tick) so no
+  phantom presentation leaks into the next scenario.
+
+Result (`verif/regress/remote/hyp8/run_iqaccel_leaf.sh`, local host Verilator):
+`PASS positive` (checked=5) / `PASS oracle negative` / `PASS mutation caught`
+(`G6LC_MUT_ACCEL_NOHEAD` trips the design's own `g6lc_r68_iqleg_head_only`
+assertion before the bench check). The mutation define is committed in
+`g6lc_iq_legal.sv` beside the existing `G6LC_MUT_*` review-mutant hooks.
+
+Backport note: the mechanism is symmetric with CVXIF (same head-only+port0
+path); no core-RTL change was needed — this was purely a stale-harness fix.
+The ACCEL class/`ord`/`port0` wiring verified here is what the mc RVV model
+relies on; runtime vector execution is still gated on the staged mc build.

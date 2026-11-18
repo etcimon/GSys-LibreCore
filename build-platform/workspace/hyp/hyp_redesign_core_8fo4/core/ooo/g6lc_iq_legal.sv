@@ -375,8 +375,16 @@ module g6lc_iq_legal
         automatic logic head_only, is_ld, is_csr, is_st;
         automatic logic older_csr, older_st;
         automatic logic [HID_W-1:0] h;
+`ifdef G6LC_MUT_ACCEL_NOHEAD
+        // Review mutant (negative control): ACCEL drops out of the head-only
+        // set, so a younger-than-head vector op issues early -- the exact
+        // wrong-path accelerator side effect the contract exists to prevent.
+        head_only = info_cls_i[b][e][C_CVXI] | info_cls_i[b][e][C_AMO] |
+                    info_cls_i[b][e][C_CSYS];
+`else
         head_only = info_cls_i[b][e][C_CVXI] | info_cls_i[b][e][C_AMO] |
                     info_cls_i[b][e][C_CSYS] | info_cls_i[b][e][C_ACCL];
+`endif
         is_ld  = info_cls_i[b][e][C_LD];
         is_csr = info_cls_i[b][e][C_CSR];
         is_st  = info_cls_i[b][e][C_ST];
