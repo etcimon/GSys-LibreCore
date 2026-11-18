@@ -285,6 +285,10 @@ module g6lc_hpdcache_if_adapter
       logic        casd_is_quad_q, casd_is_quad_d;
       logic        is_casd_req;
       logic        casd_busy;
+      // pragma translate_off
+      logic casd_trace /*verilator public*/;
+      initial casd_trace = $test$plusargs("casd_trace");
+      // pragma translate_on
 
       //  DCACHE flush request
       //  {{{
@@ -510,6 +514,11 @@ module g6lc_hpdcache_if_adapter
           CASD_LD_WAIT: begin
             if (hpdcache_rsp_valid_i && (hpdcache_rsp_i.tid == '1)) begin
               casd_old_d = hpdcache_rsp_i.rdata[0];
+              // pragma translate_off
+              if (casd_trace) $display("[casd] LD_WAIT rdata0=%h exp_c=%h new_b=%h addr_a=%h isq=%b",
+                  hpdcache_rsp_i.rdata[0], g6lc_amo_req_i.operand_c, g6lc_amo_req_i.operand_b,
+                  g6lc_amo_req_i.operand_a, casd_is_quad_q);
+              // pragma translate_on
               if (casd_is_quad_q) begin
                 casd_fsm_d = CASD_LD_HI;
               end else if (hpdcache_rsp_i.rdata[0] == g6lc_amo_req_i.operand_c) begin
@@ -570,6 +579,9 @@ module g6lc_hpdcache_if_adapter
             end
           end
           CASD_DONE: begin
+            // pragma translate_off
+            if (casd_trace) $display("[casd] DONE casd_old_q=%h result_hi=%h", casd_old_q, casd_old_hi_q);
+            // pragma translate_on
             casd_fsm_d = CASD_IDLE;
           end
           default: casd_fsm_d = CASD_IDLE;
