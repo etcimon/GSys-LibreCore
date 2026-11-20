@@ -2225,3 +2225,563 @@ Native render-pass clears:569 frozen checks22.433s, all hashes unchanged.
 Bounded attachment-clear writes add no draw/shader/RTL/PGO throughput or
 qualification claim.
 `architecture/uncore/apu-native-render-pass-clear-implementation.md`.
+
+## 14. Dynamic profile: scheduler spin dominates worker self-time (perf record, hyp8_mc, devcase-nopgo, zkn_kat)
+
+`perf record -F 1999` attached to a live `Variane_testharness.nopgo` probe run
+(389K samples / ~100 s, busy builder — use for *structure*, not absolute %):
+
+| self-time | symbol | note |
+|---|---|---|
+| ~70% | `__Vthread__nba__0..3` | 4 MT workers; own-code = dep-spin + dispatch, NOT region bodies |
+| 7.5% | `VlWorkerThread::workerLoop` | dequeWork spin(50K pause)+mutex+cv per task |
+| ~4% | `___eval_nba__0` + triggers/act/eval | main-thread driver, small |
+| <0.1% each | ~500 `___nba/sequent/comb__TOP__*` | region bodies — flat, no single hotspot |
+
+Static structure of `__Vthread__nba__2` (5,248 insns / 25 KB): **34 inlined
+`pause` spin loops, 82 `sched_yield`/`threadContext` calls, ~200 one-shot
+calls to region functions**. The 70% is workers polling `VlMTaskDoneMask`
+(16-word atomic done-bitmap, `verilated_threads.h:132-189`): `spinUntil`
+acquire-loads dep words + `pause` per iter, `sched_yield` every 50K iters.
+
+Implications (generic, idiomatic-SV level):
+
+1. **Parallelism efficiency is the first-order lever, not codegen shape.**
+   Worker self-time is dep-wait, so cycles/s ≈ f(dep-graph critical path).
+   `V3Sched`/`V3Order` MTask edge reduction (or partition balance) moves the
+   metric more than any emitter tweak. Cheap decisive experiment: verilate
+   `--threads 1` vs `--threads 4` same RTL → parallel efficiency directly.
+2. **`workerLoop` 7.5%** is spin-then-cv dispatch (`VL_LOCK_SPINS=50000`,
+   `verilated.h:151`). Probably near-optimal for μs-scale evals; only worth
+   touching if a quiet-box A/B shows wake-latency vs spin-burn trade-off.
+3. **Debug/assert scaffolding tax (static)**: each ~17K-insn
+   `___nba/stl_sequent__TOP__*` carries ~1,464 guarded call sites
+   (`VL_STOP_MT` 366, `sc_time_stamp` 366, `VL_WRITEF` 366,
+   `threadContext` ~366) ≈ **~30% of per-cycle function static size** —
+   RTL-authored `$display`/`assert` under `--assert`+`-DVL_DEBUG`. Dynamic
+   share = guard evals (predictable branches); build-config lever
+   (`--assert` off / display plusarg gating), not a Verilator transform.
+4. Region bodies are too flat (<0.1% each × ~500) for single-function
+   optimization — improvements must be systemic (fewer dynamic insns
+   everywhere), reinforcing the instruction-count-first strategy.
+
+### 14.1 oracc build note
+`devoracc-ab` verilated OK (`-fprio-oracc`, 4 priority encoders lowered,
+`VL_CTZ_W`/`VL_ONEHOT0_W` in generated C++); C++ build running with
+`OPT_FAST=-O2 OPT_SLOW=-O1 OPT_GLOBAL=-O2` (mk default is `-Os` — must pass
+OPT_* explicitly or the A/B is confounded). A/B vs `devcase-ab .nopgo`
+queued in `/tmp/oracc_ab.sh` on `hyp8_zkn_kat.elf` (tohost=0x80001000,
+cap=500K) — 4 interleaved probe reps, `perf stat instructions:u,cycles:u,
+branches:u,branch-misses:u`.
+
+## 15. GCC 16.2.0 toolchain + first clean transform A/B (fw_payload, 150K cycles)
+
+**GCC 16 installed**: `/opt/testharness/toolchains/gcc-16.2.0-znver4`
+(profiledbootstrap, x86-64-v3, znver4). Select via
+`HYP8_BUILD_TOOLCHAIN=`/`SOFT_LADDER_BUILD_TOOLCHAIN=` (harness) or
+`DEV_PGO_TOOLCHAIN=` (dev_pgo_rebuild.sh, now toolchain-aware).
+
+Single-TU measurement (149K-line `DepSet_h53a8106c__121.cpp`, -O2
+x86-64-v3, cold):
+
+| compiler | wall | .text |
+|---|---|---|
+| gcc 13.3.0 | 47.90 s | 537,845 B |
+| gcc 16.2.0 | 41.93 s | 504,465 B (**−6.2%**) |
+| gcc 16.2.0 -O3 | 41.87 s | identical to -O2 |
+
+=> **~12.5% faster cold compile, ~6% smaller code** — matches the commit's
+low-teens estimate; -O3 adds nothing on Verilator TUs. ccache hits => 0.
+
+**GCC16 model build now running** (`/tmp/gcc16_build.sh`,
+`devgcc16-ab/model`): recompiles the *same* devcase verilated sources with
+`CC/CXX/LINK=/opt/testharness/toolchains/gcc-16.2.0-znver4/bin/{gcc,g++,g++}`,
+flags inherited from the model `.mk` (`-march=x86-64-v3`, `-O2` fast /
+`-O1` slow / `-O2` global, `-DVL_DEBUG`, `--assert` sources). Only the
+compiler differs vs `devcase .nopgo` => clean compiler-only A/B. Runs
+`nice -19 -j6` to fill spare CPU on the oversubscribed box.
+
+Gotcha that killed the first attempt: a `cp -a` of the model dir does
+**not** fabricate the `corev_apu`/`verif` symlinks the `.mk` needs for the
+DPI/TB `.cc` sources (`SimDTM.cc`, `hyp8_tb.cpp`, …). Create them before
+`make`:
+`ln -sfn $RSRC/corev_apu corev_apu; ln -sfn $RSRC/verif verif`
+where `RSRC=…/hyp8-rfix131a-phantomprobe-aggregate-t2/output/source`.
+Without them make fails `No rule to make target 'corev_apu/tb/dpi/SimDTM.cc'`.
+
+**Clean transform A/B — `-fprio-oracc` is a REGRESSION on hyp8**:
+`fw_payload.elf`, 150K-cycle cap, `G6LC_METRICS_SIDECAR` guest-retired
+identical on both ([4835,0] — firmware mostly stalled; identical state
+trajectory => host counters directly comparable):
+
+| binary | instructions:u | cycles:u |
+|---|---|---|
+| devoracc (case+oracc) | 6,031,816,228,175 | 71,514,673,534,37 |
+| devcase .nopgo (case only) | 5,251,914,385,854 | 62,356,637,572,09 |
+| **delta** | **+14.8%** | **+14.7%** |
+
+The or-accumulate lowering (onehot-guard + `VL_CTZ_W`/`VL_ONEHOT0_W` +
+variable funnel-shift per set bit) costs MORE dynamic work than the
+counted loop it replaced — likely because multi-bit masks iterate the
+ctz/blsr/shuffle body where the original early-exit-ish scan was cheaper,
+and/or GCC had already vectorized the simple loop. Transform stays
+opt-in (`-fprio-oracc` only; NOT in `-fprio`) — do not enable by default
+without a per-workload win. zkn_kat 4-rep confirmation in flight
+(`/tmp/oracc-ab.log`).
+
+### 15.1 oracc zkn_kat confirmation + mechanism hypothesis
+
+`hyp8_zkn_kat.elf`, 500K-cycle cap (tohost unresolvable -> full cap; both
+binaries show identical `[equiv]`/`[mc_verdict]` trajectories => same guest
+work): rep1 oracc 15.209e12 insns / 72.184e12 cycles:u / 5402s wall vs
+case 10.828e12 / 33.901e12 / 2226s — **+40% insns, +113% cycles, 2.4x
+wall**. insn/cycle 0.21 vs 0.32 (worse IPC too — serial ctz dependency
+chain vs predicted branches). Combined with fw_payload (+14.8%): the
+transform is a robust regression on hyp8-scale code.
+
+Mechanism hypothesis (unverified): `-fprio-oracc` fires in V3Prio BEFORE
+V3Unroll, converting loops that `--unroll-count 256` would have lowered to
+branch-predictable straight-line code into serial
+`while(mask){i=ctz;mask&=mask-1;out|=W'(i)}` chains — data-dependent trip
+count + serial dependency + blsr/shift per element. A salvage would gate
+the transform to loops V3Unroll cannot touch (N > unroll-count) — needs a
+fresh build+A/B to validate; left opt-in pending that evidence.
+
+### 15.2 Experiment chain queued (`/tmp/exp_chain.sh`, sequential)
+
+| phase | build | isolates | probe |
+|---|---|---|---|
+| 1 | `devbase-nopgo-ab` — fork 6fa24f6f (pre-transform), nopgo | case-table alone | fw_payload 150K |
+| 2 | `devnodebug-ab` — dev fork, `--assert`+`-DVL_DEBUG` removed | scaffolding tax | fw_payload 150K |
+| 3 | `devthr1-ab` — dev fork `--threads 1` | MTask parallel efficiency | fw_payload 150K |
+
+Comparators already exist: `devcase-ab .nopgo` (case-table, t4) and
+`devoracc-ab` (case+oracc, t4). Logs `/tmp/exp-chain.log`, probes
+`/tmp/m-{base150,nd150,t1150}.json` + `/tmp/fw-*-perf.log`.
+
+## 16. Phase-1 verdict: case-table is a REGRESSION — gated behind -fcase-table (2026-11-20)
+
+`/tmp/exp_chain.sh` phase-1 built `devbase-nopgo-ab` = fork `6fa24f6f`
+(pre-transform) with identical harness flags (`-O2/-O1/-O2`,
+`x86-64-v3`, threads=4, `HYP8_BUILD_PGO=0`). Stats confirm the only
+codegen delta vs `devcase-ab` is the transform itself: unroll counts
+identical (895026 iters / 124070 loops), `Cases parallelized` 2499 vs
+2475, `Cases to lookup tables` 0 vs 24.
+
+fw_payload 150K-cycle probe, `G6LC_METRICS_SIDECAR` retired identical
+([4835,0] both):
+
+| binary | instructions:u | cycles:u |
+|---|---|---|
+| devbase .nopgo (no transforms) | 3,808,338,356,862 | 19,049,630,467,530 |
+| devcase .nopgo (case-table) | 5,251,914,385,854 | 29,582,734,098,543 |
+| **delta** | **+37.9%** | **+55.3%** |
+
+**This overturns §14's "−23.4% retired insns" claim.** That earlier A/B
+compared baseline-**PGO** vs dev-**noPGO** — it conflated PGO layout
+with the transform and likely an older dev state; it was never a clean
+case-table isolation. The controlled nopgo-vs-nopgo measurement shows
+the 24 lookup tables ADD ~1.44e12 dynamic instructions per 150K cycles
+(~9.6K per simulated cycle). Mechanism: the tabled cases sit in
+per-cycle decode paths where the compare trees were already
+branch-predicted; `table[idx]` costs index arithmetic + a load (plus
+any bounds/assert scaffolding in this build) every evaluation, and the
+AST shape change (ArraySel vs branch tree) perturbs V3Gate/V3Order
+downstream. Static wins (−30% gotos, −0.6% C++ lines, shared .rodata)
+did not translate to dynamic wins — reinforcing that retired-instruction
+count, not code size, is the metric that matters.
+
+**Action**: `tryCaseTable` is now gated behind opt-in `-fcase-table`
+(default OFF), commit `ba2adafb0`, same precedent as `-fprio-oracc`.
+`t_case_table.pl` passes `-fcase-table` explicitly. Do not enable by
+default without a per-workload win; a future salvage would need
+hotness-aware gating (unavailable at V3Case time) or a density/arm-count
+heuristic validated on multiple workloads.
+
+oracc zkn_kat reps 1-2 confirm the §15.1 regression (+37%/+40% insns);
+reps 3-4 in flight. Phase-2 (no-assert/no-VL_DEBUG) and phase-3
+(threads=1) builds proceed on the dev fork — note they still carry
+case-table in generated code, so their absolute numbers include the
++38% offset; only their RELATIVE deltas vs `devcase .nopgo` are
+meaningful.
+
+### 16.1 Why the tables lost — generated-code mechanism
+
+The 24 tabled cases are NOT simple `case(state)` decoders. They are
+scoreboard-forwarding selects in `issue_read_operands` (e.g.
+`gen_fwd_slot__BRA__*__KET__fwd_src`): the case index is a **one-hot
+vector built from the match comparisons themselves** —
+
+```cpp
+__Vtableidx87 = ((tmp0 & (0x1000000U == (0x3f000000U & fwd_o[0x412U]))) << 3)
+             | ((tmp1 & (0x10000U  == (0x3f0000U   & fwd_o[0x410U]))) << 2)
+             | ... ;                       // all 4 compares ALWAYS evaluated
+fwd_src = TABLE_h8c3fbd2e_0[__Vtableidx87]; // then one load
+```
+
+The compare-tree form GCC produced for the same logic fuses each
+comparison with its branch and **early-exits on first match** — on
+biased forwarding data (mostly no-match / one dominant pattern) it
+skips the remaining compares, the index assembly, and the load
+every evaluation. The table form pays full index construction + a
+load unconditionally, in the hottest per-cycle per-operand path
+(`TABLE_h8c3fbd2e` alone has 520 read sites across DepSets). That is
+the +38% instruction mechanism — not the loads themselves but the
+lost early-exit plus downstream AST-shape perturbation.
+
+**Salvage heuristic (future, unvalidated)**: only table cases whose
+index is a *cheap pre-existing value* (state/reg/enum signal — no
+comparisons or wide logic in `exprp`), never `case({cmp,...})`
+one-hot indices. Would keep tables for `case(state)` decoders while
+excluding exactly the pattern that regressed. Not implemented — the
+flag stays off pending multi-workload evidence either way.
+
+### 16.2 Debug-tax experiment constraint: --assert is load-bearing for TB probes
+
+Phase-2 first attempt (drop `--assert` AND `-DVL_DEBUG`) verilated fine
+but `hyp8_tb.cpp` failed to compile: it probes internal model state via
+`__PVT__` members (e.g. `i_ooo_dispatch__DOT__i_rob__DOT__head_q`), and
+without `--assert` those variables are eliminated as dead — assertions
+were their only fanout. **The no-assert configuration is not testable
+with this TB** unless the probed signals get `/*verilator public*/`
+metacomments or `--public-flat-rw` (both change codegen beyond the tax
+being measured).
+
+Revised phase-2 (`/tmp/phase2_retry.sh` v2): keep `--assert`, drop only
+`-DVL_DEBUG` — isolates the VL_DEBUG runtime-header tax
+(`VL_DEBUG_IF`-gated `VL_DBG_MSGF`/debug blocks compile out; generated
+.cpp is identical to devcase). The `--assert` tax itself (VL_ASSERT
+checks emitted at verilate time) remains unmeasured — it needs either a
+TB that doesn't probe internals or public-signal annotations; logged as
+open work. Note `-DVL_DEBUG` is a C++-side define only: it does NOT
+change generated .cpp, only which runtime-header inline blocks compile.
+
+## 17. Phase-3 verdict: scheduler spin = 56% of dynamic instructions (2026-11-20)
+
+`devthr1-ab` = dev fork verilated `--threads 1` (serial eval, no MTask
+workers) vs `devcase .nopgo` = same fork `--threads 4`. fw_payload 150K,
+identical retired [4835,0]:
+
+| | instructions:u | cycles:u | wall |
+|---|---|---|---|
+| threads=1 | 2.305e12 | 1.113e13 | 38.4 min |
+| threads=4 | 5.252e12 | 2.958e13 | ~18 min |
+| delta | **−56.1%** | **−62.4%** | ~2.4x slower |
+
+threads=1 also shows IPC≈0.21 — the serial ordered-eval stream is
+latency/dependency-bound, not throughput-bound; MT wins wall-clock by
+spreading independent regions across cores, not by raising per-core IPC.
+
+**~2.95e12 instructions (56%) in the 4-thread build are pure
+synchronization spin**, not useful work — workers polling
+`VlMTaskDoneMask`/`dequeWork` while waiting on the dependency critical
+path. Yet threads=4 still wins wall-clock ~2.4x: the spin runs on
+non-critical cores, so it inflates instruction count without extending
+the critical path (PF≈2 + wait overlap). threads=1 has zero spin but all
+work is serial.
+
+**The lever**: `VlMTaskDoneMask::spinUntil` only ever `yieldThread()`s
+after `VL_LOCK_SPINS` — it NEVER blocks. A worker waiting on a long
+dependency burns pause+load+yield forever. Converting long waits to a
+condition-variable sleep (signaled by `signal()`) removes the spin
+instructions without touching the critical-path worker. Risks: cv
+wake latency on critical-path deps, notify storms — mitigate with the
+existing `m_waiting`-flag pattern and a spin-then-sleep threshold.
+
+Generated structure confirmed: each `__Vthread__nba__N` inlines many
+mtask segments as `[region calls] → signal(own) → wait(pred_mask) →
+mtaskId → [next regions]`; waits with small masks return after one
+atomic check (~10 insns, negligible) — the cost is ONLY actual spinning
+on unready cross-worker deps.
+
+## 18. Scheduler spin→cv-sleep implemented + smoke-validated (2026-11-20)
+
+Commit `410921e33` (`include/verilated_threads.h`). `VlMTaskDoneMask`
+was the ONLY hot wait — generated hyp8 uses `mtask_done__nba.wait` ×54 /
+`.signal` ×63 and ZERO `VlMTaskVertex::waitUntilUpstreamDone` calls, so
+the per-vertex counter path is dead code for this model (left unchanged;
+candidate for the same treatment only if a future profile shows it hot).
+
+Mechanism: `spinUntil` still polls `ready()` with `VL_CPU_RELAX()` for
+short waits, but after `SLEEP_AFTER_YIELDS=4` yield cycles (~4×50K pause
+iters ≈ 0.1–0.3 ms) it calls `blockUntilReady`, which registers in
+`m_waiters` under `m_mutex` and sleeps on `m_cv`. `signal()` — which
+already runs on every task completion — does one extra atomic load of
+`m_waiters` and only takes `m_mutex`+`notify_all` when a sleeper exists
+(rare). Lost-wakeup is impossible: the waiter holds `m_mutex` across
+registration→`cv.wait` (which atomically releases it), so a `notify_all`
+can't slip between the `ready()` check and the sleep; `cv.wait`'s
+predicate re-checks `ready()` under the lock so spurious/partial signals
+just re-sleep. even/odd polarity is preserved because `ready()` is the
+single source of truth and `signal()` notifies on BOTH set (even) and
+clear (odd) transitions.
+
+Validation: standalone TU smoke (`/tmp/vt_run.cpp` on the remote,
+compiled against `runtime/include`) exercised the exact path — waiter
+spun past the yield threshold, slept, stayed asleep through a 30 ms
+window (no early wake), woke on `signal(0,true)`, and the odd-cycle
+clear-polarity wait returned correctly. `VT_SMOKE_OK`, exit 0. No
+deadlock, no missed wakeup, no spurious proceed.
+
+`devcv-ab` = devcase generated sources rebuilt with ONLY this header
+(same `-O2/-O1/-O2`, `-DVL_DEBUG`, threads=4) — isolates the scheduler
+delta vs `devcase .nopgo` on fw_payload 150K. Building (~68/2535 objs at
+launch; box oversubscribed 22 load / 12 cores with devnodebug + user
+stgfwd run). Expected: `instructions:u` drops from ~5.25e12 toward the
+~2.3–3e12 range (spin removed) while `cycles:u`/wall improves IF cv wake
+latency doesn't lengthen the critical path — the open empirical question.
+
+## 19. cv-sleep v1 SEGFAULT -> ccache ODR contamination (2026-11-20)
+
+`devcv-ab` v1 (devcase sources + new cv header, `make` under ccache)
+built a binary that **SIGSEGV'd ~40 s into the fw150 probe**:
+`___act_sequent__TOP__0+30` doing `testb $0x1,0x1001b2f8(%rbp)` where
+`rbp = *(vlSelf+0x171a8)` was a garbage pointer. gdb bt: main thread,
+`eval_step -> ___eval_settle -> ___eval_stl -> ___act_sequent__TOP__0`.
+
+**Root cause — stale-object ODR, not a logic bug.** `VlMTaskDoneMask`
+gained `m_mutex`/`m_cv`/`m_waiters` (~+100 B), changing
+`sizeof`/member offsets in `___024root`. ccache served ~39%-hit rate
+(153547/396914 cumulative; cache 99.84% full) — it returned devcase's
+OLD-header `.o` for TUs whose preprocessed hash it judged unchanged, so
+the model class layout disagreed across objects → the `vlSymsp`-class
+pointer member was read at the wrong offset → wild deref. devcase
+`.nopgo` ran the identical probe cleanly, isolating the delta to the
+header+build, and the header code itself passed the standalone threaded
+smoke (`VT_SMOKE_OK`).
+
+**Lesson for incremental A/B builds**: any change to a verilated runtime
+header that alters a *class layout* used inside the generated model
+(`VlMTaskDoneMask`, `VlTriggerVec`, sched structs) MUST be built with
+`CCACHE_DISABLE=1` (or a cleared cache) — ccache's include-hash can
+otherwise serve objects compiled against the old layout and produce an
+ODR-corrupt binary that crashes far from the change. `devcv` v2 rebuild
+launched with `CCACHE_DISABLE=1` (~2543 real compiles). This also bit
+`devnodebug` mid-build (127 post-push objects had the new mask mixed
+with 2416 old) — fixed by restoring the pre-cv header and surgically
+rebuilding only the contaminated `.o` (kept objects were genuinely
+old-header, so the set is now uniformly old-header = valid devcase
+comparator).
+
+**Probe queue** (all fw_payload +150K, `perf stat` + guest-retired
+sidecar, tohost=0 → full cap): devnodebug (no `-DVL_DEBUG`, isolates
+the §14 ~30% scaffolding estimate), devthr1 (`--threads 1` serial,
+parallel-efficiency baseline vs devcase threads=4). Results pending.
+
+### 19.1 Fallback design if per-mask cv proves buggy
+
+If `devcv` v2 still faults, the robust alternative keeps
+`VlMTaskDoneMask` **POD** (`m_word[16]` only — zero layout delta, so no
+ODR/ccache hazard ever) and moves sleep state to a function-local-static
+global `std::mutex`+`std::condition_variable`+sleepers count. `signal()`
+notifies the global cv; `spinUntil` sleeps on it after the yield budget
+and re-checks `ready()`. Cross-mask wakeups are harmless (predicate
+re-check → re-sleep); hyp8 has ~1 mask/tag so herd cost ≈ nil. Trade:
+loses per-mask cv precision, gains layout stability + trivially-
+copyable mask (safe under incremental/ccache builds and any future
+model memcpy). Decide on v2 evidence.
+
+## 20. __Vsampled__ shadow copies: measured NEGLIGIBLE (2026-11-20)
+
+Static census of `devcase-ab/model`: **49,035 `__Vsampled__` line-refs**
+across .cpp, **3,659 shadow-member declarations** in the core header,
+concentrated in `___eval`'s "Init" block — per-signal
+`vlSymsp->…__Vsampled__TOP__…X = vlSymsp->…X` snapshots taken every
+settle so always blocks read pre-edge values (NBA semantics). Top
+signals: `ndmreset_n` (8,354 refs), per-core `spec_older_q`/`spec_valid_q`/
+`speculative_queue_q`/`cand_tid_q` replicated ×4 harts.
+
+**But the dynamic cost is ~0.1% — do NOT pursue batching.** Per-sim-cycle
+host work is ~5.25e12 insns / 150K cycles ≈ **35M insns/sim-cycle**; even
+~3,600 sampled copies × ~6 insns (CSE'd base + load + store) ≈ 22K insns
+≈ 0.06%. The copies are scalar/CData/SData/VlWide through deep member
+chains GCC already collapses — cheap relative to the settle+NBA cone
+evaluation and the 56% scheduler spin. The earlier "786 signals × 2
+evals" framing overstated it by ~3 orders of magnitude. Logged as a
+closed negative result; effort is better spent on the MTask dependency
+graph (V3Partition/V3Sched edge reduction) and the debug-scaffolding
+tax, which are the measured first-order costs.
+
+### 19.2 Both cv variants smoke-validated; per-mask kept pending v2
+
+Two functionally-equivalent cv-sleep designs were built and passed the
+same threaded smoke (`VT_SMOKE_OK`): (a) **per-mask cv** — committed
+`410921e33`, mask owns `m_mutex`/`m_cv`/`m_waiters` (~+100 B layout);
+(b) **POD/global-cv** — `verif/regress/remote/vt_pod_mask.inc`, mask
+keeps upstream `m_word[16]`-only layout, sleep state in a
+function-local-static `SleepSync` shared by all masks (cross-mask
+wakeups are harmless via `ready()` predicate re-check; ~1 mask/tag in
+practice). Per-mask is kept as the committed design because it is
+already building for measurement and scales cleanly to many masks; the
+layout delta is a non-issue for version-locked fresh builds — the ODR
+crash was purely an incremental-ccache artifact (§19). POD remains the
+documented fallback (`vt_pod_mask.inc`) if a real logic fault appears
+or if layout-stability for incremental user builds is later preferred.
+The wait/signal *logic* is identical in both, so v2's scale verdict
+transfers to either placement.
+
+## 21. Debug/assert tax — refined mechanism (2026-11-20)
+
+Static census of `devcase-ab/model` generated code:
+- **`-DVL_DEBUG` scope is tiny**: it only gates `VL_DEBUG_IF`/`VL_DEBUG_IFDEF`
+  (→ `if (Verilated::debug()) stmt`, ~3-4 insns/site) and
+  `VerilatedAssertOneThread::check()` — the latter is used ONLY in
+  `verilated_save.h` (save/restore), **zero references in generated hyp8
+  code**. ~16K VL_DEBUG sites exist but mostly sit in cold dump/debug
+  functions; the ones in hot `__Vthread__nba__N`/sequent paths are a
+  handful of cheap guard checks. **Predicted dynamic delta <0.1%** — the
+  earlier "~30% scaffolding" was *static .text size*, not dynamic cost.
+  devnodebug-vs-devcase should confirm ≈ no difference.
+
+- **The REAL candidate is `--assert`, not `-DVL_DEBUG`.** Each `--assert`
+  emits a match-detection computation OUTSIDE the `assertOn()` guard:
+  `if ((parallel_case/full_case multi-match vector) == expect) { if
+  (assertOn()) {VL_WRITEF; VL_STOP_MT} }`. The outer condition —
+  evaluating every arm-match and counting hits — runs **every execution
+  regardless of `assertOn()`**. Census: **39,558 `VL_STOP_MT` sites**
+  (~39K assertions). For wide `parallel_case`/`full_case` this is
+  proportional extra decode work per asserted case per eval — plausibly
+  the largest *removable* per-cycle tax, but it is present in BOTH
+  devcase and devnodebug (phase2 kept `--assert` so `hyp8_tb.cpp` can
+  probe `__PVT__` internals), so the current A/B does NOT isolate it.
+
+**Follow-up needed to measure `--assert` tax**: a build with `--assert`
+removed. Blocker: `hyp8_tb.cpp` accesses generated `__PVT__` internals;
+whether those survive without `--assert` is unverified (earlier failure
+was a missing *renamed* member, may be unrelated). Alternative: keep
+signals alive via `/*verilator public*/`/`--public-flat-rw` annotations
+or a TB that only touches public signals, then rebuild sans `--assert`.
+Queued as next experiment once devnodebug confirms the `-DVL_DEBUG`≈0
+baseline.
+
+## 22. Debug/assert scaffolding — mechanism resolved; -DVL_DEBUG negligible, --assert required + costly (2026-11-20)
+
+**`-DVL_DEBUG` is a NEGLIGIBLE runtime tax (~0.2%)** — single-TU compiles of
+hot DepSet functions and the runtime objects (`verilated.cpp`,
+`verilated_threads.cpp`) show ≤241 B `.text` delta each. `VL_DEBUG_IF` /
+`VL_DEBUG_IFDEF` total only ~6.5K sites model-wide and are mostly
+once-per-region-entry trace messages; without the define
+`Verilated::debug()` is `constexpr 0` so the compiler deletes the bodies
+even in debug builds' callers. The earlier devnodebug full-model delta
+(4.11e12 vs devcase.nopgo 5.25e12 insns, −22%) is therefore a **build
+confound, not a debug tax** — see devclean experiment below.
+
+**`--assert` is load-bearing for this TB and cannot be flag-removed.**
+A no-`--assert` verilate (`devnoassert-ab`, 2193 .cpp) fails
+`hyp8_tb.cpp` compile: `Vg6lc_testharness_g6lc_core__pi37 has no member
+'__PVT__...i_rob__DOT__head_q'` — the microarchitectural observability
+signals the `[rob]` trace/probes read are kept alive *by* `--assert`.
+`--public-flat-rw` is the fallback that preserves all members without
+assert checks (queued experiment).
+
+**The real `--assert` dynamic cost is the case-assertion match vector**
+(`V3Assert.cpp:292-341`, `parallel_case`/`unique`/`full_case`): for each
+such case, Verilator concats a fresh `AstEq(expr,cond)` per item into a
+match vector and wraps it in `AstOneHot[0]` — evaluated **unconditionally
+every cycle** the case evaluates, independent of `assertOn()`. The inner
+`if(vlSymsp->_vm_contextp__->assertOn())` (default `m_assertOn=true`,
+`verilated.h:348`) only gates the `VL_WRITEF`+`VL_STOP_MT` report, NOT the
+match computation. ~54K `assertOn` + ~40K `VL_STOP_MT` sites exist
+model-wide; every `parallel_case`/`unique case` in the RTL pays N compares
++ onehot-reduce per eval. `assert property` statements go through
+`newIfAssertOn` (`if(assertOn()){...}`) and ARE properly gated — the case
+assertions are the ungated hot path.
+
+**Candidate optimization (tools/verilator, in scope)**: the match vector
+duplicates comparisons the case decoder already performs. Either (a)
+reuse/share the decoder's match bits, or (b) wrap the whole
+`!onehot → fireAssert` in `if(assertOn())` so `+assertoff`/non-assert runs
+skip the vector entirely. Quantify first via a `--public-flat-rw` +
+no-`--assert` build (keeps TB probes, drops checks) before implementing.
+
+### 22.1 CRITICAL: verilator output is NONDETERMINISTIC — same input, ~22% instruction swing
+
+`devnodebug` and `devcase` were verilated by the **same**
+`verilator-v5.008-g6lc-dev` binary with **byte-identical arguments**
+(full `Arguments:` token diff = only `-DVL_DEBUG` + Mdir path), same RTL,
+same `+define`/`+incdir` set, same split-loops `.vlt`. Yet they produced
+different generated C++: devnodebug 2619 `.cpp` / +1.32M lines vs devcase
+2535 — the delta is entirely `__Slow`/higher-index `DepSet` partitioning
+(the 84 extra `.cpp` are uncompiled orphans; both built the same 2544
+`.o`). The devnodebug binary then ran **4.11e12 vs devcase.nopgo 5.25e12
+instructions (−22%)** on identical guest work.
+
+**Implication**: `-DVL_DEBUG` cannot be the cause (≈0.2%/TU), so the swing
+comes from nondeterministic partitioning/codegen — most plausibly
+hash-order-dependent `V3SplitVar`/`V3Partition`/`--output-split`
+decisions. Consequences:
+
+- **Every A/B must reuse identical generated sources** (recompile `.cpp`,
+  never re-verilate) — otherwise you measure codegen lottery, not the flag.
+- The `devclean` rebuild (devcase `.cpp` recompiled cleanly) anchors the
+  true devcase number; `devnodebug`'s faster binary is a *different*
+  (luckier) partition, not a debug win.
+- A ±20% run-to-run dynamic-instruction variance is itself a performance
+  bug worth chasing — stable partitioning should be a correctness-adjacent
+  goal for reproducible perf.
+
+### 22.2 Clean fw150 numbers (all retired [4835,0], +debug_disable, 150K cap)
+
+| build | insns:u | cycles:u | IPC | note |
+|---|---|---|---|---|
+| devcase .nopgo (MT4) | 5.252e12 | 2.958e13 | ~0.18 | baseline |
+| devnodebug (no VL_DEBUG) | 4.115e12 | 2.221e13 | 0.185 | **nondeterministic partition, not debug** (§22.1) |
+| devthr1 (--threads 1) | 2.305e12 | 1.113e13 | 0.207 | serial — no MT spin at all |
+
+**MT spin overhead ≈ 5.25e12 − 2.31e12 ≈ 2.95e12 insns (~56%)** — matches
+the §17 profile. cv-sleep targets exactly this.
+
+**IPC ≈ 0.18–0.21 across ALL builds** → the model is memory/port-bound,
+not issue-bound. Reducing spin insns (cv-sleep) frees issue slots AND the
+mask atomic-load bandwidth, but cycles:u may not fall proportionally if
+the residual bottleneck is data-memory traffic. Verdict hinges on
+devcv's cycles:u, not just insns.
+
+### 22.3 Nondeterminism source + A/B validity implications
+
+`emitCFuncImp` (`V3EmitCImp.cpp:490-534`) groups `AstCFunc`s into
+`DepSet_<hash>` files keyed by a `std::map<std::set<string>,…>` of required
+headers — that grouping is order-stable. The variance enters upstream in
+`V3Sched`/`V3Order`/`V3SchedPartition`, which use `unordered_map`/`unordered_set`
+containers (`V3SchedPartition.cpp:130` `m_senVertices`, `V3Order.cpp`,
+`V3Sched*.cpp`). Function boundaries and the `slow()` split
+(`V3Order.cpp:1246`, `V3Sched.cpp:65/246`) therefore vary run-to-run →
+different `__Slow`/DepSet populations → different inlining → the observed
+±20% dynamic-insn swing.
+
+**Transform A/B caveat**: case-table (+38%) and oracc (+14.8%) were each
+verilated with different flags, so their deltas mix the transform's real
+effect with partition noise. Verdicts: **case-table regression is real**
+(+38% >> noise, mechanism understood — early-exit compare-trees beat
+unconditional table loads on biased forwarding data). **oracc +14.8% is
+borderline** — within ~1σ of partition noise; its unroll-gate already
+prevents the bad case, so opt-in-only stands either way. For any future
+transform <~25% delta, reuse identical `.cpp` or repeat verilations.
+
+### 22.4 parallel_case match-vector is UNCONDITIONAL + dense in hot decode
+
+Generated structure (verified in `..._g6lc_core__pi37__DepSet_h53a8106c__10.cpp`):
+
+```
+<concat of N AstEq(expr,cond) shifted into a mask → AstOneHot0/OneHot → !>   // IF cond — ALWAYS evaluated
+    if (VL_UNLIKELY(assertOn())) { VL_WRITEF(...); VL_STOP_MT(...); }        // report only — gated
+```
+
+The compare-chain + onehot-reduce is the `if` **condition**, evaluated every
+call; `assertOn()` (default `true`) only skips the report. So `+assertoff`
+saves the report but NOT the match-vector — the tax is paid whenever
+`--assert` emitted the check, regardless of runtime flag.
+
+**Density**: 371 generated files contain `parallel_case` sites; hot FAST
+DepSet files of `g6lc_core__pi37` carry 9–127 each (e.g. `__10`=122,
+`__102`=127). Many are small decode helpers (`is_rd_fpr`, `is_rs1_fpr` in
+`g6lc_core_pkg`) emitted as separate `__Vfunc_*` calls — function boundary
+blocks GCC CSE, so each call re-pays the compare-chain.
+
+**Why it's not a quick win**: runtime `assertOn`-gating is useless (defaults
+true → zero default savings). Real levers, in order of risk:
+1. `--public-flat-rw` + no `--assert` build (`devpubflat-ab`, staged) →
+   quantifies total assert tax as an upper bound before any codegen change.
+2. Structural: teach the case decoder to expose its match bits so the
+   parallel_case check reuses them instead of re-comparing (deep, risky).
+3. Inline small decode helpers so GCC CSEs repeated compares (broad).
