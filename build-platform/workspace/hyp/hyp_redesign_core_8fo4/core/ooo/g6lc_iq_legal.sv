@@ -88,7 +88,10 @@ module g6lc_iq_legal
     input  logic [NH-1:0][G6LCCfg.NR_SB_ENTRIES-1:0] st_hart_mask_i,
     input  logic                                    mem_stall_i,
     // Registered legality, per bank per entry.
-    output logic [BANKS-1:0][ENTRIES-1:0]           legal_o
+    output logic [BANKS-1:0][ENTRIES-1:0]           legal_o,
+    // Debug: registered per-hart store frontier (oldest unresolved store tid).
+    output logic [NH-1:0]                        dbg_st_front_v_o,
+    output logic [NH-1:0][TID_W-1:0]             dbg_st_front_tid_o
 );
 
   localparam int unsigned C_LD = 0, C_ST = 1, C_CSR = 2, C_CSYS = 3,
@@ -363,6 +366,10 @@ module g6lc_iq_legal
   // which include this occupant only if it was already live then.
   logic [BANKS-1:0][ENTRIES-1:0] info_v_q, warm;
   assign warm = info_v_i & info_v_q;
+
+  // Debug taps: registered per-hart oldest-store frontier.
+  assign dbg_st_front_v_o   = st_front_v_q;
+  assign dbg_st_front_tid_o = st_front_tid_q;
 
   // ----------------------------------------------------------------------
   // Registered legality per entry.

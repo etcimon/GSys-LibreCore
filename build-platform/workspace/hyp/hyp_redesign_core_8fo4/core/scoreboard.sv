@@ -313,10 +313,16 @@ module scoreboard
 
   // hyp8: common retirement event — an ack retires the slot presented
   // THIS cycle: it must be a live decidable bundle entry issued by the
-  // scoreboard, not a previous-cycle presentation.
+  // scoreboard, not a previous-cycle presentation. A cancelled slot's ack
+  // is a drop, not a retirement: a slot cancelled before issue legitimately
+  // has issued==0 / bundle_valid==0 yet is still acknowledged. Exempt on
+  // the combined cancelled_mask_o (sticky + same-cycle kill) rather than
+  // commit_drop_o, because port 0 resolves sel_cancelled from the sticky
+  // bit only and would miss a same-cycle cancel_now drop. A non-cancelled
+  // slot acked without a presented bundle is still a real violation.
   for (genvar p = 0; p < G6LCCfg.NrCommitPorts; p++) begin : gen_ack_slot_chk
     assert property (@(posedge clk_i) disable iff (!rst_ni || flush_i)
-      commit_ack_i[p] |->
+      (commit_ack_i[p] && !cancelled_mask_o[commit_sel_slot[p]]) |->
       (commit_bundle_valid_o[p] && mem_q[commit_sel_slot[p]].issued))
     else $fatal(1, "SBC_ACK_PRESENT: commit ack for a slot that was not presented");
   end
@@ -472,6 +478,41 @@ module scoreboard
           cnc_mask_q[k] = cancelled_mask_o[t];
           cnc_kill_q[k] = kill_req[t];
           cnc_stk_q[k]  = mem_q[t].cancelled;
+        end
+      end
+    end
+  end
+
+  // [cmt] ACK_PRESENT violation probe (+cmt_trace, optional trace_from/to):
+  // fires exactly when a commit ack lands on a slot failing the
+  // ACK_PRESENT predicate, dumping drop/cancelled/issued/sel so a legit
+  // cancelled-before-issue drop-ack is distinguishable from a real
+  // unissued-commit bug. Diagnostic only.
+  bit cmt_tr;
+  int unsigned cmt_cyc = 0;
+  int unsigned cmt_lo, cmt_hi;
+  initial begin
+    cmt_tr  = $test$plusargs("cmt_trace");
+    cmt_lo  = 0;
+    cmt_hi  = 100000;
+    void'($value$plusargs("cmt_from=%d", cmt_lo));
+    void'($value$plusargs("cmt_to=%d",   cmt_hi));
+  end
+  always @(posedge clk_i) begin
+    if (!rst_ni) cmt_cyc = 0;
+    else        cmt_cyc++;
+    if (cmt_tr && (cmt_cyc >= cmt_lo) && (cmt_cyc <= cmt_hi)) begin
+      for (int unsigned p = 0; p < G6LCCfg.NrCommitPorts; p++) begin
+        if (commit_ack_i[p] &&
+            !(commit_bundle_valid_o[p] && mem_q[commit_sel_slot[p]].issued)) begin
+          $display("[cmt] c=%0d p=%0d sel=%0d issued=%b bvalid=%b drop=%b cnclmask=%b sticky=%b replay=%b hart=%0d sbe_tid=%0d",
+                   cmt_cyc, p, commit_sel_slot[p],
+                   mem_q[commit_sel_slot[p]].issued,
+                   commit_bundle_valid_o[p], commit_drop_o[p],
+                   cancelled_mask_o[commit_sel_slot[p]],
+                   mem_q[commit_sel_slot[p]].cancelled,
+                   mem_q[commit_sel_slot[p]].replay,
+                   commit_instr_o[p].hart_id, commit_instr_o[p].trans_id);
         end
       end
     end

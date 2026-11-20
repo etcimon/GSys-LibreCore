@@ -196,6 +196,20 @@ package build_config_pkg;
     cfg.RVZiCbop = G6LCCfg.RVZiCbop;
     cfg.RVZicntr = G6LCCfg.RVZicntr;
     cfg.RVZihpm = G6LCCfg.RVZihpm;
+    // 89d3dadd0 ISA-knob port: cfg-gated zimop/zcmop/ntl/zfhmin/zfa/zicclsm/
+    // za64rs/zawrs(pma-zi)/zabha. Gating mirrors core/include/build_config_pkg.sv.
+    cfg.RVZimop = G6LCCfg.RVZimop;
+    cfg.RVZcmop = G6LCCfg.RVZcmop && G6LCCfg.RVC;
+    cfg.RVZihintntl = G6LCCfg.RVZihintntl;
+    cfg.RVZfhmin = (G6LCCfg.RVZfhmin || G6LCCfg.XF16) && G6LCCfg.RVF;
+    cfg.RVZfa = G6LCCfg.RVZfa && G6LCCfg.RVF;
+    cfg.RVZicclsm = G6LCCfg.RVZicclsm;
+    cfg.RVZa64rs = G6LCCfg.RVZa64rs && G6LCCfg.RVA &&
+                   (G6LCCfg.DcacheLineWidth != 0) && (G6LCCfg.DcacheLineWidth <= 512);
+    cfg.RVZiccif = G6LCCfg.RVZiccif && (G6LCCfg.IcacheLineWidth >= 32);
+    cfg.RVZiccrse = G6LCCfg.RVZiccrse && G6LCCfg.RVA;
+    cfg.RVZiccamoa = G6LCCfg.RVZiccamoa && G6LCCfg.RVA;
+    cfg.RVZabha = G6LCCfg.RVZabha && G6LCCfg.RVA;
     cfg.NR_SB_ENTRIES = G6LCCfg.NrScoreboardEntries;
     // FSE S1: deepen in-flight window floor when DeepSpecEn (B3 companion).
     if (G6LCCfg.DeepSpecEn) begin
@@ -423,8 +437,16 @@ package build_config_pkg;
       automatic int unsigned spec_store_n;
       if (wide_rob > base_rob) base_rob = wide_rob;
       cfg.RobEntries = (G6LCCfg.RobEntries == 0) ? base_rob : G6LCCfg.RobEntries;
+      // RFIX-131a-45: the leading 32 is the per-hart architectural register
+      // budget. g6lc_rename keeps per-hart maps but ONE shared phys file +
+      // freelist; under SMT_RR every hart's committed architectural phys
+      // mappings stay allocated across drained handoffs, so the file must
+      // carry NrHarts architectural sets, not one. Sized for a single hart
+      // the shared pool starves the bank-interleaved freelist (bank0 free->1)
+      // and in-order dispatch wedges in ren_stall -> IQ/ROB/LSU all idle.
       cfg.PrfEntries = (G6LCCfg.PrfEntries == 0)
-                           ? unsigned'(32 + cfg.RobEntries + cfg.NrIssuePorts * 4)
+                           ? unsigned'(32 * cfg.NrHarts + cfg.RobEntries +
+                                       cfg.NrIssuePorts * 4)
                            : G6LCCfg.PrfEntries;
       cfg.IqEntries = (G6LCCfg.IqEntries == 0)
                           ? ((cfg.RobEntries * 3) / 4)

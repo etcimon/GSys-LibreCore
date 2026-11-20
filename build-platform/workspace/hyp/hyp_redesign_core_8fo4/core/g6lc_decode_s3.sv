@@ -165,7 +165,12 @@ module g6lc_decode_s3
     c_sret = sys_f000 && (dec_i.op == g6lc_core_pkg::SRET);
     c_mret = sys_f000 && (dec_i.op == g6lc_core_pkg::MRET);
     c_dret = sys_f000 && (dec_i.op == g6lc_core_pkg::DRET);
-    c_wfi  = sys_f000 && (dec_i.op == g6lc_core_pkg::WFI);
+    // Zawrs WRS.NTO/STO share WFI's privilege/TW/VTW/U legality; when legal
+    // their dedicated op is preserved (opfix stays WRS_*), when illegal or
+    // virtual the shared arms squash to ADD exactly like WFI.
+    c_wfi  = sys_f000 && (dec_i.op inside {g6lc_core_pkg::WFI,
+                                          g6lc_core_pkg::WRS_NTO,
+                                          g6lc_core_pkg::WRS_STO});
     c_sf   = sys_f000 && (dec_i.op == g6lc_core_pkg::SFENCE_VMA);
     c_hvv  = sys_f000 && (dec_i.op == g6lc_core_pkg::HFENCE_VVMA);
     c_hgv  = sys_f000 && (dec_i.op == g6lc_core_pkg::HFENCE_GVMA);

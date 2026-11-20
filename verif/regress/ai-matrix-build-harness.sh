@@ -67,12 +67,44 @@ export LD_LIBRARY_PATH="${SPIKE_INSTALL_DIR}/lib:${LD_LIBRARY_PATH:-}"
 export CVA6_REPO_DIR="${CVA6_REPO_DIR:-$ROOT}"
 export CXX="${CXX:-g++}" CC="${CC:-gcc}"
 
-VLT_HOME="${VLT_HOME:-/root/tools/verilator-v5.008}"
-if [[ ! -e "$VLT_HOME/bin/verilator" && -d /root/tools/verilator-v5.008 ]]; then
-  VLT_HOME=/root/tools/verilator-v5.008
+# Verilator flavour: pinned (default — the -O0 AI-island debug baseline) or
+# g6lc, the LibreCore fork. g6lc is opt-in here because this harness builds
+# debuggable -O0 models for AI-island bring-up; AI_MATRIX_VERILATOR_FLAVOUR=g6lc
+# selects the compiler-PGO fork prefix and turns on unroll-before-split +
+# the split-loops .vlt (same recipe as soft-ladder-build-harness.sh).
+VLT_FLAVOUR="${AI_MATRIX_VERILATOR_FLAVOUR:-pinned}"
+VLT_EXTRA_ARGS=""
+if [[ "$VLT_FLAVOUR" == "g6lc" ]]; then
+  VLT_HOME="${VLT_HOME:-}"
+  if [[ -n "$VLT_HOME" && "$VLT_HOME" != *g6lc* ]]; then VLT_HOME=""; fi
+  if [[ -z "$VLT_HOME" ]]; then
+    for cand in $(ls -dt "$ROOT"/build-platform/workspace/tooling/verilator-g6lc-*-pgo \
+                  /opt/testharness/toolchains/verilator-v5.008-g6lc-*-pgo 2>/dev/null) \
+                "$ROOT/build-platform/workspace/tooling/verilator-g6lc" \
+                "${VERILATOR_INSTALL_DIR:-}" \
+                /opt/testharness/toolchains/verilator-v5.008-g6lc; do
+      [[ -n "$cand" && -x "$cand/bin/verilator" && -d "$cand/runtime" ]] || continue
+      VLT_HOME="$cand"; break
+    done
+  fi
+  if [[ -n "$VLT_HOME" ]]; then
+    VLT_EXTRA_ARGS="--unroll-count 256 --unroll-stmts 131072"
+    _split_vlt="$ROOT/build-platform/scripts/verilator-split-loops.vlt"
+    [[ -f "$_split_vlt" ]] && VLT_EXTRA_ARGS="$_split_vlt $VLT_EXTRA_ARGS"
+    log "verilator flavour g6lc: $VLT_HOME (unroll-before-split + split-loops)"
+  else
+    log "g6lc flavour requested but no fork prefix found; falling back to pinned"
+    VLT_FLAVOUR="pinned"
+  fi
 fi
-if [[ ! -e "$VLT_HOME/bin/verilator" && -d "${HOME}/tools/verilator-v5.008" ]]; then
-  VLT_HOME="${HOME}/tools/verilator-v5.008"
+if [[ "$VLT_FLAVOUR" != "g6lc" ]]; then
+  VLT_HOME="${VLT_HOME:-/root/tools/verilator-v5.008}"
+  if [[ ! -e "$VLT_HOME/bin/verilator" && -d /root/tools/verilator-v5.008 ]]; then
+    VLT_HOME=/root/tools/verilator-v5.008
+  fi
+  if [[ ! -e "$VLT_HOME/bin/verilator" && -d "${HOME}/tools/verilator-v5.008" ]]; then
+    VLT_HOME="${HOME}/tools/verilator-v5.008"
+  fi
 fi
 
 if [[ "${AI_MATRIX_BUILD_CLEAN:-0}" == "1" ]]; then
@@ -90,7 +122,11 @@ fi
 mkdir -p "$VERLIB_DIR"
 echo "$FLAV" >"$STAMP"
 
-export VERILATOR_ROOT="${VERILATOR_ROOT:-$VLT_HOME/share/verilator}"
+if [[ "$VLT_FLAVOUR" == "g6lc" ]]; then
+  export VERILATOR_ROOT="${VERILATOR_ROOT:-$VLT_HOME/runtime}"
+else
+  export VERILATOR_ROOT="${VERILATOR_ROOT:-$VLT_HOME/share/verilator}"
+fi
 if [[ -e "$VLT_HOME/bin/verilator_bin" ]]; then
   [[ -e "$VERILATOR_ROOT/verilator_bin" ]] || ln -sfn "$VLT_HOME/bin/verilator_bin" "$VERILATOR_ROOT/verilator_bin"
   VLT_WRAP=/tmp/ai-matrix-vlt-wrap
@@ -179,7 +215,7 @@ if [[ "${AI_MATRIX_SKIP_VERILATE:-0}" == "1" && -f "$VERLIB_DIR/Variane_testharn
   rc=$?
 else
 make verilate \
-  verilator="verilator -Wno-MODDUP -CFLAGS ${VLT_CFLAGS}" \
+  verilator="verilator -Wno-MODDUP -CFLAGS ${VLT_CFLAGS} ${VLT_EXTRA_ARGS}" \
   target="$TARGET" \
   ver-library="$VERLIB_DIR" \
   TB_CPP=corev_apu/tb/ariane_tb.cpp \

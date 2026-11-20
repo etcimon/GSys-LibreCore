@@ -134,6 +134,12 @@ ${HYP_CORE_DIR}/core/g6lc_decode_s1.sv
 ${HYP_CORE_DIR}/core/g6lc_decode_s2.sv
 ${HYP_CORE_DIR}/core/g6lc_decode_s3.sv
 ${HYP_CORE_DIR}/core/decoder.sv
+${HYP_CORE_DIR}/core/g6lc_pma_zi.sv
+${HYP_CORE_DIR}/core/g6lc_za64rs.sv
+${HYP_CORE_DIR}/core/g6lc_zawrs.sv
+${HYP_CORE_DIR}/core/g6lc_zawrs_peer.sv
+${HYP_CORE_DIR}/core/g6lc_zicclsm.sv
+${HYP_CORE_DIR}/core/g6lc_fp_zfa.sv
 ${HYP_CORE_DIR}/core/ex_stage.sv
 ${HYP_CORE_DIR}/core/id_stage.sv
 ${HYP_CORE_DIR}/core/smt/g6lc_sb_keep.sv

@@ -158,6 +158,28 @@ module g6lc_tlb_miss_router #(
 
   assign flush_busy_o = 1'b0;
 
+  //pragma translate_off
+  // RFIX-131a-45 diag: dump every pick_i term whenever an ITLB access
+  // reaches the router, so a miss that never launches a walk shows which
+  // qualifier held it off (flush-walk / stage_en / dtlb contention / the
+  // itlb_access_i flush-mask upstream in g6lc_mmu). +miss_router_trace.
+  bit mr_trace;
+  int unsigned mr_cyc;
+  initial mr_trace = $test$plusargs("miss_router_trace");
+  always @(posedge clk_i) begin
+    if (!rst_ni) mr_cyc <= 0;
+    else if (mr_trace) begin
+      mr_cyc <= mr_cyc + 1;
+      if (itlb_access_i || dtlb_access_i)
+        $display("[mr] c=%0d Iacc=%b Ihit=%b | Dacc=%b Dhit=%b | walk=%0d allow=%b stageI=%b stageD=%b | pickI=%b pickD=%b ireq=%b dreq=%b | fl=%b%d%d va=%h",
+                 mr_cyc, itlb_access_i, itlb_hit_i, dtlb_access_i, dtlb_hit_i,
+                 int'(walk_q), allow_req, |stage_en[1][HYP_EXT:0], |stage_en[0][HYP_EXT:0],
+                 pick_i, pick_d, ireq_q, dreq_q,
+                 flush_i, flush_vvma_i, flush_gvma_i, itlb_vaddr_i);
+    end
+  end
+  //pragma translate_on
+
   // A returned update hits unconditionally under the bypass and routes
   // to the registered owner; context fields echo the update record and
   // v_st_enbl samples the live stage-enable inputs by registered owner.

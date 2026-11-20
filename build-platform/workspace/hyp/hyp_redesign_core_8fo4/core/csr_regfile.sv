@@ -72,6 +72,9 @@ module csr_regfile
     input scoreboard_entry_t commit_instr_i,
     // Commit acknowledged an instruction -> increase instret CSR - COMMIT_STAGE
     input logic [G6LCCfg.NrCommitPorts-1:0] commit_ack_i,
+    // SMT wait-for-peer: another hart committed a store/AMO. Clears the
+    // Zawrs replica so WRS wakes. Tie 0 when NrHarts==1.
+    input logic res_snoop_i,
     // Address from which to start booting, mtvec is set to the same address - SUBSYSTEM
     input logic [G6LCCfg.VLEN-1:0] boot_addr_i,
     // Hart id in a multicore environment (reflected in a CSR) - SUBSYSTEM
@@ -988,6 +991,16 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
   logic [G6LCCfg.XLEN-1:0] aiperm_q, aiperm_d;
 
   logic wfi_d, wfi_q;
+
+  // Zawrs wait-for-resume: core-local reservation replica (res_v) tracks
+  // whether this hart holds a live LR reservation; wrs_wait/wrs_sto/sto_cnt
+  // hold the WRS.NTO/WRS.STO wait state; zawrs_enter/zawrs_wake are the
+  // g6lc_zawrs policy outputs merged into wfi_ctrl below.
+  logic res_v_d, res_v_q;
+  logic wrs_wait_d, wrs_wait_q;
+  logic wrs_sto_d, wrs_sto_q;
+  logic [3:0] sto_cnt_d, sto_cnt_q;
+  logic zawrs_enter, zawrs_wake;
 
 
   riscv::pmpcfg_t [63:0] pmpcfg_q, pmpcfg_d, pmpcfg_next;
@@ -6141,15 +6154,53 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
     end
   end
   // -------------------
-  // Wait for Interrupt
+  // Wait for Interrupt / Zawrs
   // -------------------
+  // Core-local reservation replica for WRS. Authoritative SC is still
+  // g6lc_axi_lrsc. Port-0 commits only (AMOs are port-0). A missed port-1
+  // store leaves the replica set; STO timeout / interrupt still wake.
+  always_comb begin : zawrs_res
+    res_v_d = res_v_q;
+    if (G6LCCfg.ZawrsEn) begin
+      if (commit_ack_i[0] && !ex_i.valid) begin
+        if (is_amo_lr(commit_instr_i.op)) res_v_d = 1'b1;
+        else if (is_amo(commit_instr_i.op) || commit_instr_i.fu == STORE)
+          res_v_d = 1'b0;
+      end
+      if (res_snoop_i) res_v_d = 1'b0;
+      if (ex_i.valid) res_v_d = 1'b0;
+    end else begin
+      res_v_d = 1'b0;
+    end
+  end
+
+  g6lc_zawrs #(
+      .G6LCCfg(G6LCCfg)
+  ) i_zawrs (
+      // hyp8: the applying WRS transaction is csr_apply-qualified on req_op
+      // (the csr_decode request op), mirroring the WFI arm in wfi_ctrl.
+      .wrs_i(G6LCCfg.ZawrsEn && csr_apply && is_wrs(req_op)),
+      .nto_i(req_op == WRS_NTO),
+      .res_valid_i(res_v_q),
+      .irq_i((|(mip_q & mie_q)) || (G6LCCfg.DebugEn && debug_req_i) || irq_i[1]),
+      .timeout_i(wrs_sto_q && (sto_cnt_q >= 4'd8)),
+      .enter_wait_o(zawrs_enter),
+      .wake_o(zawrs_wake)
+  );
+
   always_comb begin : wfi_ctrl
     // wait for interrupt register
-    wfi_d = wfi_q;
+    wfi_d      = wfi_q;
+    wrs_wait_d = wrs_wait_q;
+    wrs_sto_d  = wrs_sto_q;
+    sto_cnt_d  = (wrs_wait_q && wrs_sto_q) ? (sto_cnt_q + 4'd1) : 4'd0;
     // if there is any (enabled) interrupt pending un-stall the core
     // also un-stall if we want to enter debug mode
     if (|(mip_q & mie_q) || (G6LCCfg.DebugEn && debug_req_i) || irq_i[1]) begin
-      wfi_d = 1'b0;
+      wfi_d      = 1'b0;
+      wrs_wait_d = 1'b0;
+      wrs_sto_d  = 1'b0;
+      sto_cnt_d  = 4'd0;
       // or alternatively if there is no exception pending and we are not in debug mode wait here
       // for the interrupt
     end else if (csr_apply &&
@@ -6157,7 +6208,20 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
       // hyp8: entering sleep is an architectural side effect; only the
       // applying WFI transaction may raise it -- and a WFI that does not
       // apply must never clear an existing sleep
-      wfi_d = 1'b1;
+      wfi_d      = 1'b1;
+      wrs_wait_d = 1'b0;
+      wrs_sto_d  = 1'b0;
+      sto_cnt_d  = 4'd0;
+    end else if (zawrs_enter) begin
+      wfi_d      = 1'b1;
+      wrs_wait_d = 1'b1;
+      wrs_sto_d  = (req_op == WRS_STO);
+      sto_cnt_d  = 4'd0;
+    end else if (wrs_wait_q && zawrs_wake) begin
+      wfi_d      = 1'b0;
+      wrs_wait_d = 1'b0;
+      wrs_sto_d  = 1'b0;
+      sto_cnt_d  = 4'd0;
     end
   end
 
@@ -6271,6 +6335,9 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
     if (G6LCCfg.SstcEn && G6LCCfg.RVH && mstce_q && hstce_q && vstimecmp_hit_d &&
         mie_q[riscv::IRQ_VS_TIMER])
       wfi_wake_o = 1'b1;
+    // Zawrs: a WRS wait cleared by store-snoop/timeout must release the sleep
+    // gate too, or wfi_q clears while the core stays clock-gated (hang).
+    if (G6LCCfg.ZawrsEn && wrs_wait_q && zawrs_wake) wfi_wake_o = 1'b1;
   end
 `ifdef PITON_G6LC
   assign icache_en_o = icache_q[0];
@@ -6441,6 +6508,11 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
       en_ld_st_translation_q <= 1'b0;
       // wait for interrupt
       wfi_q                  <= 1'b0;
+      // zawrs wait state
+      res_v_q                <= 1'b0;
+      wrs_wait_q             <= 1'b0;
+      wrs_sto_q              <= 1'b0;
+      sto_cnt_q              <= 4'd0;
       // pmp
       for (int i = 0; i < 64; i++) begin
         if (i < G6LCCfg.NrPMPEntries) begin
@@ -6561,6 +6633,11 @@ assign stimecmp_hit_d = G6LCCfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
       en_ld_st_translation_q <= en_ld_st_translation_d;
       // wait for interrupt
       wfi_q                  <= wfi_d;
+      // zawrs wait state
+      res_v_q                <= res_v_d;
+      wrs_wait_q             <= wrs_wait_d;
+      wrs_sto_q              <= wrs_sto_d;
+      sto_cnt_q              <= sto_cnt_d;
       // pmp
       pmpcfg_q               <= pmpcfg_next;
       pmpaddr_q              <= pmpaddr_next;

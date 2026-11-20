@@ -155,11 +155,36 @@ package g6lc_config_pkg;
       CoproType: config_pkg::COPRO_NONE,
       AiCfg: config_pkg::AiCfgOff,
       RVZiCond: bit'(G6LCConfigRVZiCond),
-      RVZiCbom: bit'(0),
+      // Zicbom: full execute path implemented (decode_s2/s3 -> store_unit ->
+      // stb_drain -> wt_dcache cmo_op -> hpdcache_subsystem). Held at 0 only
+      // pending CBO-suite qualification; enable for the cbo.clean/inval/flush
+      // directed run per RFIX-131a backlog.
+      RVZiCbom: bit'(1),
       RVZiCboz: bit'(1),
       RVZiCbop: bit'(1),
       RVZicntr: bit'(1),
       RVZihpm: bit'(1),
+      // 89d3dadd0 ISA-knob port. NOP/hint-class decode-only extensions are
+      // implemented+enabled; the complex extensions stay 0 until their RTL
+      // (g6lc_fp_zfa / g6lc_zicclsm / g6lc_za64rs / g6lc_zawrs_peer /
+      // g6lc_pma_zi / g6lc_zabha) is ported and directed-tested — advertising
+      // an unimplemented knob would trap legal code, so keep them off.
+      RVZimop: bit'(1),     // mop.r.n / mop.rr.n -> ADD x0-class write-0
+      RVZcmop: bit'(1),     // c.mop.n -> addi x0,x0,0 (requires RVC)
+      RVZihintntl: bit'(1), // ntl.* drop dummy rs2 operand wait
+      RVZfhmin: bit'(0),    // pending: FLH/FSH + fcvt H<->S/D
+      RVZfa: bit'(0),       // pending: fli/fround/fcvtmod/fminm/fleq/fltq
+      RVZicclsm: bit'(1),   // misaligned ldst 2-beat wrap split (g6lc_zicclsm)
+      // za64rs: monitor g6lc_axi_lrsc keys reservations on exact AXI address
+      // = a legal <=64B contiguous naturally-aligned set; D$ line 128b=16B
+      // <=64B so invalidation cannot grow the set. Monitor appears compliant,
+      // but held at 0 pending a dedicated za64rs reservation-independence
+      // directed test (overlapping-store invalidation edge cases unverified).
+      RVZa64rs: bit'(0),
+      RVZiccif: bit'(0),    // pending: PMA predicate (g6lc_pma_zi)
+      RVZiccrse: bit'(0),   // pending: PMA predicate (g6lc_pma_zi)
+      RVZiccamoa: bit'(0),  // pending: PMA predicate (g6lc_pma_zi)
+      RVZabha: bit'(0),     // pending: AMO .B/.H + missunit sign-extend
       NrScoreboardEntries: unsigned'(G6LCConfigNrScoreboardEntries),
       PerfCounterEn: bit'(G6LCConfigPerfCounterEn),
       MmuPresent: bit'(G6LCConfigMmuPresent),

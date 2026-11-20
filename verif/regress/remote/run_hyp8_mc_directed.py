@@ -63,10 +63,23 @@ TESTS = [
     ('mc_store_load_new_line','mc_store_load_new_line.S', [], 'pass'),
     ('mc_cbo_contended',      'mc_cbo_contended.S',       [], 'pass'),
     ('mc_cbo_ewt',            'mc_cbo_ewt.S',             [], 'pass'),
+    ('mc_cbo_zero_probe',     'mc_cbo_zero_probe.S',      [], 'pass'),
     # --- LR/SC / AMO / atomics --------------------------------------------
     ('mc_lrsc_set_zombie',    'mc_lrsc_set_zombie.S',     [], 'pass'),
     ('mini_lrsc_d',           'mini_lrsc_d.S',            [], 'pass'),
     ('mini_amoadd_w_spin',    'mini_amoadd_w_spin.S',     [], 'pass'),
+    # Za64rs reservation independence: peer store to a nearby-but-different
+    # address (same 64B window) must NOT kill LR.A's reservation (phase 1),
+    # while a same-address store MUST (phase 2 control). Needs 2 cores.
+    ('mc_za64rs_independence','mc_za64rs_independence.S', [], 'pass'),
+    # AMOCAS.D/.W (Zacas) — RFIX-131a-16 CASD rd=0 forced-UC fix coverage on the
+    # coherent hpdcache path. All soft-skip (tohost=1) when AMOCAS is illegal,
+    # so kind='pass' is correct whether they skip or really run the CAS.
+    ('mini_amocas_d',         'mini_amocas_d.S',          [], 'pass'),
+    ('zacas_amocas_d',        'zacas_amocas_d.S',         [], 'pass'),
+    ('zacas_amocas_w',        'zacas_amocas_w.S',         [], 'pass'),
+    ('mc_cas_lock_handoff',   'mc_cas_lock_handoff.S',    [], 'pass'),
+    ('mc_spo_cas_stream',     'mc_spo_cas_stream.S',      [], 'pass'),
     # --- traps / CSR / exceptions ------------------------------------------
     ('mc_csr_prologue',       'mc_csr_prologue.S',        [], 'pass'),
     ('mini_csr_expected_trap','mini_csr_expected_trap.S', [], 'pass'),
@@ -174,6 +187,15 @@ def main():
         uart_rd = len(re.findall(r'^\[uart-axi-ar\]', text, re.M))
         walk_err = len(re.findall(r'^\[(?:ptw-err|mmu-ife)\]', text, re.M))
         model_err = len(re.findall(r'%Error', text))
+        # mc_verdict overlay: a test that ends before the 200k-cycle BOOT_HOLD
+        # releases secondary cores is forced to exit 125 even when the ELF
+        # itself succeeded. Surface the ELF's real exit code + held/retired
+        # masks so a held-125 is not misread as an RTL failure.
+        pe = re.search(r'program exit code (\d+)', text)
+        hm = re.search(r'HELD:.*held_mask=([01]+)\s+retired_mask=([01]+)', text)
+        prog_exit = int(pe.group(1)) if pe else None
+        held_mask = hm.group(1) if hm else None
+        retired_mask = hm.group(2) if hm else None
         if m:
             state = 'pass'
         elif fail:
@@ -187,6 +209,8 @@ def main():
         if kind == 'oracle_neg':
             oracle = 'oracle_ok' if (state == 'fail' and tohost_val not in (None, '0')) else 'oracle_bad'
         entry.update({'state': state, 'kind': kind, 'oracle': oracle,
+                      'progExit': prog_exit, 'heldMask': held_mask,
+                      'retiredMask': retired_mask,
                       'tohostVal': tohost_val, 'cycles': int(m.group(1)) if m else None,
                       'busErrors': bus_err, 'uartReads': uart_rd,
                       'walkErrors': walk_err, 'modelErrors': model_err,

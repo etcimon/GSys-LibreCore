@@ -687,6 +687,40 @@ module instr_queue
       end
     end
   end
+
+  // PHANTOM PROBE (`+phantom_probe`): a fetch_entry presented valid with a
+  // zero payload (address==0) decodes downstream to an un-issuable sbe
+  // (pc=0/fu=NONE) that becomes an IQ zombie -> iq_full -> commit deadlock.
+  // Fire on the signature and dump the queue-side state that produced it:
+  // the mapped FIFO's occupancy (empty/usage), registered head (instr_data_out)
+  // and the drain/push/pop handshake of this cycle.
+  logic ph_en;
+  int unsigned ph_hits;
+  initial begin
+    ph_en = $test$plusargs("phantom_probe");
+    ph_hits = 0;
+  end
+  always @(posedge clk_i) begin
+    if (rst_ni && ph_en && (ph_hits < 64)) begin
+      for (int unsigned p = 0; p < NrIssue; p++) begin
+        if (fetch_entry_valid_o[p] && (fetch_entry_o[p].address == '0)) begin
+          for (int unsigned f = 0; f < NrFifo; f++) begin
+            if (idx_ds[p][f]) begin
+              ph_hits = ph_hits + 1;
+              $display("[PHANTOM-IQ] t=%0t port=%0d fifo=%0d addr=%h instr=%h cf=%0d | empty=%b usage=%0d head_pc=%h head_instr=%h head_cf=%0d | idx_ds_q=%b lane_live=%b pos_present=%b fill_pref=%b idx_any=%b | push=%b pop=%b cons_pos=%b fire=%b full=%b",
+                       $time, p, f, fetch_entry_o[p].address, fetch_entry_o[p].instruction,
+                       fetch_entry_o[p].branch_predict.cf,
+                       instr_queue_empty[f], instr_queue_usage[f],
+                       instr_data_out[f].pc, instr_data_out[f].instr, instr_data_out[f].cf,
+                       idx_ds_q, lane_live[f], pos_present[p], fill_prefix[p], idx_any,
+                       push_instr_fifo[f], pop_instr[f], consumed_pos[p], fetch_entry_fire[p],
+                       instr_queue_full[f]);
+            end
+          end
+        end
+      end
+    end
+  end
 //pragma translate_on
 
   // ----------------------

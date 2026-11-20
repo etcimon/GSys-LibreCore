@@ -273,6 +273,7 @@ module g6lc_smt_csr_bank
         .wfi_wake_o,
         .commit_instr_i,
         .commit_ack_i,
+        .res_snoop_i(1'b0),
         .boot_addr_i,
         .hart_id_i(hart_id_base_i),
         .ex_i,
@@ -450,6 +451,20 @@ module g6lc_smt_csr_bank
       assign ai_setcfg_we_g[h] = ai_setcfg_we_i & commit_sel[h];
     end
 
+    // Zawrs: broadcast each hart's port-0 store/AMO commit so peer harts'
+    // reservation replicas clear and their WRS wakes. Port-0 only, matching
+    // the res_v replica in csr_regfile (AMOs are port-0).
+    logic [NH-1:0] zawrs_store, zawrs_snoop;
+    for (genvar h = 0; h < NH; h++) begin : gen_zawrs_store
+      assign zawrs_store[h] = G6LCCfg.ZawrsEn && commit_ack_g[h][0] &&
+          is_zawrs_snoop(commit_instr_i.op, commit_instr_i.fu);
+    end
+    g6lc_zawrs_peer #(
+        .N(NH), .PeerEn(G6LCCfg.ZawrsEn && (NH > 1))
+    ) i_zawrs_peer (
+        .store_i(zawrs_store), .snoop_o(zawrs_snoop)
+    );
+
     // Bank outputs
     logic flush_b[NH];
     logic [G6LCCfg.VLEN-1:0] flush_pc_b[NH];
@@ -529,6 +544,7 @@ module g6lc_smt_csr_bank
           .wfi_wake_o(wake_b[h]),
           .commit_instr_i(commit_instr_i),
           .commit_ack_i(commit_ack_g[h]),
+          .res_snoop_i(zawrs_snoop[h]),
           .boot_addr_i,
           .hart_id_i(hart_id_base_i + G6LCCfg.XLEN'(h)),
           .ex_i(ex_g[h]),

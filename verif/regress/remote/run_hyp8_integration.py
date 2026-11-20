@@ -140,6 +140,11 @@ TESTS = [
     # gather. Strict: an illegal AMOCAS traps to tohost=0xE1, separable
     # from a wrong compare (fail codes 11..35).
     ('hyp8_amocas', 'verif/tests/custom/hyp8_amocas.S', '80001000'),
+    # Zawrs liveness: WRS.STO timeout-resume + WRS.NTO no-wait-after-invalidate.
+    ('hyp8_wrs', 'verif/tests/custom/hyp8_wrs.S', '80001000'),
+    # Zicclsm: misaligned lh/lw/ld + sh/sw/sd crossing the 8-byte boundary
+    # split into two beats (no LD/ST_ADDR_MISALIGNED). Requires RVZicclsm=1.
+    ('hyp8_zicclsm', 'verif/tests/custom/hyp8_zicclsm.S', '80001000'),
 ]
 LINK_LD = 'verif/tests/custom/common/link_verilator.ld'
 GCC_FLAGS = ['-march=rv64imafdc_zicsr_zifencei', '-mabi=lp64d',

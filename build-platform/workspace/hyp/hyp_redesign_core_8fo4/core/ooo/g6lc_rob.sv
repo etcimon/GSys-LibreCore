@@ -333,6 +333,9 @@ module g6lc_rob #(
 //pragma translate_off
   // Every retire ack must find its tid in the ROB — a miss means the free
   // bookkeeping silently dropped a slot (or the ack carries no allocation).
+  // Exception: an instruction squashed before OoO dispatch is drained by the
+  // scoreboard as a commit-drop whose tid was never allocated into the ROB;
+  // cancelled_mask_i marks exactly those tids, so a miss is only legal there.
   for (genvar r = 0; r < NR_RETIRE; r++) begin : gen_retire_hit_chk
     logic rob_retire_hit;
     always_comb begin
@@ -341,7 +344,7 @@ module g6lc_rob #(
         if (rob_q[i].valid && (rob_q[i].tid == retire_tid_i[r])) rob_retire_hit = 1'b1;
     end
     assert property (@(posedge clk_i) disable iff (!rst_ni || flush_i)
-      retire_ack_i[r] |-> rob_retire_hit)
+      retire_ack_i[r] |-> (rob_retire_hit || cancelled_mask_i[retire_tid_i[r]]))
     else $fatal(1, "ROB_RETIRE_TID: retire ack found no matching ROB entry");
   end
 

@@ -458,6 +458,7 @@ module sb_commit_bundle
     assign commit_instr_o[i].p_frs2      = sel_sbe.p_frs2;
     assign commit_instr_o[i].p_frs3      = sel_sbe.p_frs3;
     assign commit_instr_o[i].p_frd       = sel_sbe.p_frd;
+    assign commit_instr_o[i].p_rs3       = sel_sbe.p_rs3;
     assign commit_instr_o[i].ooo_renamed = sel_sbe.ooo_renamed;
     assign commit_drop_o[i]   = sel_cancelled;
     assign commit_replay_o[i] = sel_mem.replay;

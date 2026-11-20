@@ -425,7 +425,18 @@ module compressed_decoder #(
               };
             end
 
-            if ({instr_i[12], instr_i[6:2]} == 6'b0) illegal_instr_o = 1'b1;
+            // Zero-immediate C.LUI is reserved, except the eight odd-rd
+            // encodings C.MOP.n (n=1,3,5,7,9,11,13,15) under Zcmop:
+            // {inst[12],inst[6:2]}=0, inst[11:7] odd and nonzero, expand to
+            // addi x0,x0,0 (89d3dadd0 hyp8 port).
+            if ({instr_i[12], instr_i[6:2]} == 6'b0) begin
+              if (G6LCCfg.RVZcmop && (instr_i[11:7] != 5'd0) && instr_i[7]) begin
+                instr_o = 32'h00000013;
+                illegal_instr_o = 1'b0;
+              end else begin
+                illegal_instr_o = 1'b1;
+              end
+            end
           end
 
           riscv::OpcodeC1MiscAlu: begin

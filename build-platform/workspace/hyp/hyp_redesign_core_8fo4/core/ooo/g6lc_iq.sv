@@ -379,6 +379,9 @@ module g6lc_iq
   logic [BANKS-1:0][NP-1:0]         aack;
   logic [BANKS-1:0][NP-1:0][EW-1:0] aack_idx;
   logic [BANKS-1:0][ENTRIES-1:0]    legal;
+  // Debug: per-hart oldest-store frontier from g6lc_iq_legal.
+  logic [NH-1:0]                     dbg_st_front_v;
+  logic [NH-1:0][TID_W-1:0]          dbg_st_front_tid;
   logic [BANKS-1:0][NP-1:0]         bcast_v;
   logic [BANKS-1:0][NP-1:0][PRF_W-1:0]  bcast_prd;
   logic [BANKS-1:0][NP-1:0][FPRF_W-1:0] bcast_fprd;
@@ -407,6 +410,15 @@ module g6lc_iq
   logic [BANKS-1:0][ENTRIES-1:0][2:0]     info_rdy;
   logic [BANKS-1:0][ENTRIES-1:0][PRF_W-1:0] info_prs1;
   logic [BANKS-1:0][ENTRIES-1:0][PRF_W-1:0] info_prs2;
+  // hyp8 iqdump2: deep entry state for the hang dump (bank-aggregated).
+  logic [BANKS-1:0][ENTRIES-1:0]          info_iss;
+  logic [BANKS-1:0][ENTRIES-1:0][PRF_W-1:0] info_prd;
+  logic [BANKS-1:0][ENTRIES-1:0][TID_W-1:0] info_pt1;
+  logic [BANKS-1:0][ENTRIES-1:0][TID_W-1:0] info_pt2;
+  logic [BANKS-1:0][ENTRIES-1:0]          info_sp1;
+  logic [BANKS-1:0][ENTRIES-1:0]          info_sp2;
+  logic [BANKS-1:0][ENTRIES-1:0]          info_sp3;
+  logic [BANKS-1:0][ENTRIES-1:0]          info_ord;
   // hyp8 g10: occupancy mirror for the emit's flat i_iq.count_q debug
   // references (occupancy = BANKS*ENTRIES - total free).
   logic [31:0]                         dbg_occ;
@@ -535,6 +547,14 @@ module g6lc_iq
         .info_rdy_o    (info_rdy[b]),
         .info_prs1_o   (info_prs1[b]),
         .info_prs2_o   (info_prs2[b]),
+        .info_iss_o    (info_iss[b]),
+        .info_prd_o    (info_prd[b]),
+        .info_pt1_o    (info_pt1[b]),
+        .info_pt2_o    (info_pt2[b]),
+        .info_sp1_o    (info_sp1[b]),
+        .info_sp2_o    (info_sp2[b]),
+        .info_sp3_o    (info_sp3[b]),
+        .info_ord_o    (info_ord[b]),
         .csr_oldest_v_o  (csr_oldest_v[b]),
         .csr_oldest_tid_o(csr_oldest_tid[b]),
         .st_oldest_v_o   (st_oldest_v[b]),
@@ -598,7 +618,9 @@ module g6lc_iq
       .st_unresolved_mask_i(st_unresolved_mask_i),
       .st_hart_mask_i     (st_hart_mask_i),
       .mem_stall_i        (mem_stall_i),
-      .legal_o            (legal)
+      .legal_o            (legal),
+      .dbg_st_front_v_o   (dbg_st_front_v),
+      .dbg_st_front_tid_o (dbg_st_front_tid)
   );
 
   // ----------------------------------------------------------------------
@@ -762,5 +784,81 @@ module g6lc_iq
       $display("[equiv] g6lc_iq r68 head-only grants: checked=%0d", r68_take_n);
   end
   //pragma translate_on
+
+//pragma translate_off
+  // PHANTOM PROBE (`+phantom_probe`): the IQ zombie is e_q[e].valid=1 with
+  // i_payload.mem_q[e].sbe left at reset (pc=0/fu=NONE/op=0). Three views:
+  //  (A) an empty sbe presented as a valid dispatch (upstream bug),
+  //  (B) a payload write landing on slot 0 / carrying an empty sbe
+  //      (steer-full or wr_entry desync),
+  //  (C) the zombie condition itself, to catch formation + coords.
+  logic ph_iq_en;
+  int unsigned ph_iq_hits;
+  int unsigned ph_wr_n;
+  logic [BANKS-1:0][ENTRIES-1:0] ph_vq;
+  initial begin
+    ph_iq_en = $test$plusargs("phantom_probe");
+    ph_iq_hits = 0;
+    ph_wr_n = 0;
+    ph_vq = '0;
+  end
+  always @(posedge clk_i) begin
+    if (rst_ni && ph_iq_en) begin
+      // (C) zombie detector: valid entry whose payload sbe is still reset.
+      // Detect the valid 0->1 edge so we catch formation, not persistence.
+      for (int unsigned b = 0; b < BANKS; b++) begin
+        for (int unsigned e = 0; e < ENTRIES; e++) begin
+          if (info_v[b][e] && !ph_vq[b][e] &&
+              (i_payload.mem_q[b][e].sbe.pc == '0) &&
+              (i_payload.mem_q[b][e].sbe.fu == g6lc_core_pkg::NONE)) begin
+            if (ph_iq_hits < 48) begin
+              ph_iq_hits = ph_iq_hits + 1;
+              $display("[PHANTOM-ZOMB] t=%0t bank=%0d ent=%0d tid=%0d cls=%h | sbe.pc=%h fu=%0d op=%0d sbe.tid=%0d",
+                       $time, b, e, info_tid[b][e], info_cls[b][e],
+                       i_payload.mem_q[b][e].sbe.pc, i_payload.mem_q[b][e].sbe.fu,
+                       i_payload.mem_q[b][e].sbe.op, i_payload.mem_q[b][e].sbe.trans_id);
+            end
+          end
+          ph_vq[b][e] <= info_v[b][e];
+        end
+      end
+      // (A) empty sbe presented valid to the IQ.
+      for (int unsigned p = 0; p < NP; p++) begin
+        if (disp_valid_i[p] &&
+            ((disp_sbe_i[p].fu == g6lc_core_pkg::NONE) || (disp_sbe_i[p].pc == '0))) begin
+          if (ph_iq_hits < 48) begin
+            ph_iq_hits = ph_iq_hits + 1;
+            $display("[PHANTOM-DISP] t=%0t p=%0d fu=%0d pc=%h op=%0d tid=%0d | asgn=%0d grpfits=%b",
+                     $time, p, disp_sbe_i[p].fu, disp_sbe_i[p].pc, disp_sbe_i[p].op,
+                     disp_sbe_i[p].trans_id, asgn[p], group_fits);
+          end
+        end
+        // (B) payload write targeting slot 0 or carrying empty sbe.
+        if (group_fits && disp_valid_i[p] &&
+            ((wr_entry[p] == '0) || (disp_sbe_i[p].fu == g6lc_core_pkg::NONE))) begin
+          if (ph_iq_hits < 48) begin
+            ph_iq_hits = ph_iq_hits + 1;
+            $display("[PHANTOM-WR] t=%0t p=%0d wbank=%0d went=%0d | sbe.pc=%h fu=%0d tid=%0d asgn=%0d",
+                     $time, p, wr_bank[p], wr_entry[p],
+                     disp_sbe_i[p].pc, disp_sbe_i[p].fu, disp_sbe_i[p].trans_id, asgn[p]);
+          end
+        end
+        // (B2) full write trace: every accepted payload write, so a zombie's
+        // (bank,entry) can be checked for a matching write offline.
+        if (group_fits && disp_valid_i[p]) begin
+          if (ph_wr_n < 4000) begin
+            ph_wr_n = ph_wr_n + 1;
+            $display("[PHANTOM-WRALL] t=%0t p=%0d wbank=%0d went=%0d pc=%h fu=%0d op=%0d tid=%0d",
+                     $time, p, wr_bank[p], wr_entry[p],
+                     disp_sbe_i[p].pc, disp_sbe_i[p].fu, disp_sbe_i[p].op,
+                     disp_sbe_i[p].trans_id);
+          end
+        end
+      end
+    end else begin
+      ph_vq <= '0;
+    end
+  end
+//pragma translate_on
 
 endmodule

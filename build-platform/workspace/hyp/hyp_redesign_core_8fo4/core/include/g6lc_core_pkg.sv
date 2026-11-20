@@ -428,6 +428,11 @@ package g6lc_core_pkg;
     FCMP,
     // Floating-Point Classify Instruction
     FCLASS,
+    // Zfa (append after FCLASS so existing fu_op ranges stay intact)
+    FLI,       // fli.fmt: rs1 is a 5-bit immediate, use_zimm
+    FROUND,    // fround.fmt: round-to-integral-float
+    FROUNDNX,  // froundnx.fmt: fround + NX
+    FCVTMOD,   // fcvtmod.w.d: modular RTZ D→W
     // Vectorial Floating-Point Instructions that don't directly map onto the scalar ones
     VFMIN,
     VFMAX,
@@ -549,7 +554,10 @@ package g6lc_core_pkg;
     SHA512SIG0,
     SHA512SIG1,
     SHA512SUM0,
-    SHA512SUM1
+    SHA512SUM1,
+    // Zawrs WRS.NTO / WRS.STO (append so existing fu_op ranges stay intact)
+    WRS_NTO,
+    WRS_STO
   } fu_op;
 
   typedef struct packed {
@@ -578,6 +586,9 @@ package g6lc_core_pkg;
       FMV_F2X,  // FPR-GPR Moves
       FCMP,  // Comparisons
       FCLASS,  // Classifications
+      FROUND,
+      FROUNDNX,
+      FCVTMOD,
       [VFMIN : VFCPKCD_D],  // Additional Vectorial FP ops
       ACCEL_OP_FS1:
       return 1'b1;  // Accelerator instructions
@@ -624,6 +635,9 @@ package g6lc_core_pkg;
       FCVT_F2F,  // Float-Float Casts
       FSGNJ,  // Sign Injections
       FMV_X2F,  // GPR-FPR Moves
+      FLI,
+      FROUND,
+      FROUNDNX,
       [VFMIN : VFSGNJX],  // Vectorial MIN/MAX and SGNJ
       [VFCPKAB_S : VFCPKCD_D],  // Vectorial FP cast and pack ops
       ACCEL_OP_FD:
@@ -637,7 +651,8 @@ package g6lc_core_pkg;
       FSD, FSW, FSH, FSB,  // stores
       FCVT_F2I,  // conversion to int
       FMV_F2X,  // move as-is to int
-      FCLASS:  // classification (writes output to integer register)
+      FCLASS,  // classification (writes output to integer register)
+      FCVTMOD:  // Zfa modular convert writes a GPR
       return 1'b0;  // floating-point registers are only read
       default: return 1'b1;  // other ops - floating-point registers are written as well
     endcase
@@ -663,6 +678,26 @@ package g6lc_core_pkg;
   // Zacas: AMOCAS needs GPR[rd] as expected source (third operand).
   function automatic logic is_amo_cas(fu_op op);
     return (op == AMO_CASW) || (op == AMO_CASD) || (op == AMO_CASQ);
+  endfunction
+
+  // Zawrs WRS.NTO / WRS.STO. WFI is a separate wait.
+  function automatic logic is_wrs(fu_op op);
+    return (op == WRS_NTO) || (op == WRS_STO);
+  endfunction
+
+  // Peer store/AMO that must snoop another hart's WRS replica. LR does not.
+  function automatic logic is_zawrs_snoop(fu_op op, fu_t fu);
+    if (is_amo_lr(op)) return 1'b0;
+    return is_amo(op) || (fu == STORE);
+  endfunction
+
+  // Zicclsm: only plain loads/stores may take the two-beat wrap split.
+  // AMOs (incl. LR/SC/AMOCAS) and cache-block ops keep their existing path
+  // (they trap / are handled elsewhere and are not word-wrap splittable).
+  function automatic logic zicclsm_eligible(fu_op op, fu_t fu);
+    if (is_amo(op)) return 1'b0;
+    if (op inside {CBO_CLEAN, CBO_FLUSH, CBO_INVAL, CBO_ZERO, CBO_NONE}) return 1'b0;
+    return (fu == LOAD) || (fu == STORE);
   endfunction
 
   // -------------------

@@ -1656,9 +1656,32 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
   // Ack is valid, the unit is free, and either the operand stall is
   // clear or the instruction is an exception (an exception acks even
   // while operands stall). Same predicate as the nested ifs.
+  //
+  // hyp8 RFIX-131a (cont.56): the LSU forwards ONE memory request per
+  // cycle -- ex_stage keeps only the highest-port fu_data while
+  // lsu_valid_i is the OR of all issue ports, so two LOAD/STORE ops
+  // acking the same cycle silently drop the lower one AFTER it is marked
+  // issued (never retried; observed as the commit-head
+  // ld s4,0x20(sp)@0x8001379a deadlock). Grant at most one memory ack per
+  // cycle; losers stay in the IQ and retry next cycle. Exception lanes
+  // (ex.valid) trap and never reach the LSU, so they are not candidates.
+  logic [G6LCCfg.NrIssuePorts-1:0] lsu_mem_cand, lsu_mem_grant;
+  always_comb begin
+    automatic logic mem_seen;
+    mem_seen = 1'b0;
+    for (int unsigned p = 0; p < G6LCCfg.NrIssuePorts; p++) begin
+      lsu_mem_cand[p] = issue_instr_valid_i[p] && !fu_busy[p] &&
+                        !issue_instr_i[p].ex.valid && !stall_raw[p] &&
+                        (issue_instr_i[p].fu == LOAD ||
+                         issue_instr_i[p].fu == STORE);
+      lsu_mem_grant[p] = lsu_mem_cand[p] && !mem_seen;
+      if (lsu_mem_cand[p]) mem_seen = 1'b1;
+    end
+  end
   for (genvar i = 0; i < G6LCCfg.NrIssuePorts; i++) begin : gen_ackpre
     assign issue_ack_pre[i] = issue_instr_valid_i[i] && !fu_busy[i] &&
-                               (!stall_raw[i] || issue_instr_i[i].ex.valid);
+                               (!stall_raw[i] || issue_instr_i[i].ex.valid) &&
+                               (!lsu_mem_cand[i] || lsu_mem_grant[i]);
   end
 
   always_comb begin : issue_scoreboard
@@ -2073,8 +2096,12 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
       else b_src = 2'd2;
     end
     always_comb begin
+      // operand_c renamed source: FP third operand (is_imm_fpr) OR the Zacas
+      // AMOCAS GPR compare operand (is_amo_cas, rd doubles as rs3). Dispatch
+      // now drives issue_op_c_o for both, so the renamed value is preferred.
       if (G6LCCfg.OoOEn && ooo_op_c_valid_i[i] && issue_instr_i[i].ooo_renamed &&
-          G6LCCfg.FpPresent && is_imm_fpr(issue_instr_i[i].op))
+          ((G6LCCfg.FpPresent && is_imm_fpr(issue_instr_i[i].op)) ||
+           (G6LCCfg.RVZacas && g6lc_core_pkg::is_amo_cas(issue_instr_i[i].op))))
         c_src = 2'd0;
       else if ((OPERANDS_PER_INSTR == 3) &&
                !(G6LCCfg.FpPresent && is_imm_fpr(issue_instr_i[i].op)))
@@ -2201,6 +2228,31 @@ assign orig_instr[i] = riscv::instruction_t'(orig_instr_i[i]);
                    $time, p, issue_instr_i[p].trans_id, issue_instr_i[p].hart_id,
                    issue_instr_i[p].pc, issue_instr_i[p].fu, fu_data_n[p].operand_a,
                    fu_data_n[p].operand_b, fu_data_n[p].imm, forward_rs1[p], forward_rs2[p]);
+        // RFIX-131a-16: AMOCAS operand_c (rd=expected) path. Shows whether the
+        // rs3/rd-source forwarded (forward_rs3) or fell back to the raw arch
+        // regfile read, and what each candidate source returned.
+        for (int p = 0; p < G6LCCfg.NrIssuePorts; p++)
+          if (smt_issue_win && issue_instr_valid_i[p] && issue_ack_o[p] && !flush_i &&
+              G6LCCfg.RVZacas && g6lc_core_pkg::is_amo_cas(issue_instr_i[p].op))
+            $display("[smt-flow] amocas time=%0t port=%0d id=%0d pc=%h op=%0d rd=%0d rs1=%0d rs2=%0d res=%h oc=%h ocreg=%h ocgpr=%h rdta=%h fwd3=%b hasraw=%b rdy=%b idx=%0d rs3res=%h fwd3v=%h",
+                     $time, p, issue_instr_i[p].trans_id, issue_instr_i[p].pc,
+                     issue_instr_i[p].op, issue_instr_i[p].rd, issue_instr_i[p].rs1,
+                     issue_instr_i[p].rs2, issue_instr_i[p].result, fu_data_n[p].operand_c,
+                     operand_c_regfile[p], operand_c_gpr[p], rdata[p*OPERANDS_PER_INSTR+2],
+                     forward_rs3[p], rs3_has_raw[p], rs3_valid[p], idx_hzd_rs3[p],
+                     rs3_res[p], imm_forward_rs3[p]);
+      // RFIX-131a-26: catch PC-source instructions (auipc/jal) whenever they are
+      // presented as valid, independent of the issue-ack/flush handshake, so a
+      // stall or flush cannot hide a bad operand_a. Prints the select-field
+      // state that decides operand_a.
+      for (int p = 0; p < G6LCCfg.NrIssuePorts; p++)
+        if (smt_issue_win && issue_instr_valid_i[p] && issue_instr_i[p].use_pc)
+          $display("[smt-flow] usepc time=%0t port=%0d id=%0d hart=%0d pc=%h fu=%0d op=%0d use_pc=%b use_zimm=%b use_imm=%b rs1=%0d oa=%h areg=%h imm=%h ack=%b fl=%b",
+                   $time, p, issue_instr_i[p].trans_id, issue_instr_i[p].hart_id,
+                   issue_instr_i[p].pc, issue_instr_i[p].fu, issue_instr_i[p].op,
+                   issue_instr_i[p].use_pc, issue_instr_i[p].use_zimm, issue_instr_i[p].use_imm,
+                   issue_instr_i[p].rs1, fu_data_n[p].operand_a, operand_a_regfile[p],
+                   fu_data_n[p].imm, issue_ack_o[p], flush_i);
       smt_issue_idle = (issue_instr_valid_i[0] && !issue_ack_o[0]) ? smt_issue_idle + 1 : 0;
       if (smt_issue_win && smt_issue_idle != 0 && smt_issue_idle <= 4096 && smt_issue_idle % 1024 == 0) begin
         $display("[smt-flow] issue_stall time=%0t idle=%0d stall_i=%b valid=%b ack=%b busy=%b raw=%b rs1=%b rs2=%b rs3=%b flu_ready=%b lsu_ready=%b mult=%b casq=%b lrsc=%b live=%b",

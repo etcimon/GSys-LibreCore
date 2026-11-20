@@ -12,6 +12,11 @@
   .section .text.init
   .globl _start
 _start:
+  # Single-hart test: on smt2/mc every hart reaches _start, and two sibling
+  # harts running this uncoordinated lr.d/sc.d stream on the same address
+  # livelock the SMT thread-select (fetch-kill thrash). Park non-zero harts.
+  csrr t0, mhartid
+  bnez t0, park
   li   sp, 0x80008000
   la   t0, trap
   csrw mtvec, t0
@@ -99,6 +104,10 @@ fail:
   la   t0, tohost
   sw   a0, 0(t0)
 3: j    3b
+
+park:
+  wfi
+  j    park
 
   .section .tohost,"aw",@progbits
   .align 6

@@ -197,14 +197,25 @@ if [[ -n "$LINKER" ]]; then
 fi
 
 # --- verilator flavour (same resolution as soft-ladder-build-harness.sh) -----
-VLT_FLAVOUR="${VERILATOR_FLAVOUR:-g6lc}"
+# VERILATOR_FLAVOUR is the hyp8 runner convention (run_hyp8_integration.py and
+# run_vlt_pgo.py set it explicitly and it stays authoritative); fall back to
+# SOFT_LADDER_VERILATOR_FLAVOUR — the var context.ts exports — so a pinned
+# platform config is not silently ignored on a direct invocation.
+VLT_FLAVOUR="${VERILATOR_FLAVOUR:-${SOFT_LADDER_VERILATOR_FLAVOUR:-g6lc}}"
 VLT_HOME="${VLT_HOME:-}"
 if [[ "$VLT_FLAVOUR" == "g6lc" ]]; then
-  # An explicit VLT_HOME with a compiler binary wins (e.g. a PGO prefix or the
-  # instrumented training prefix); otherwise the first installed fork prefix
-  # with an assembled runtime/ dir, in the soft-ladder harness order. The
-  # tools/verilator source checkout is not a prefix: its bin/verilator is the
-  # perl driver without a built verilator_bin.
+  # An explicit VLT_HOME naming a g6lc fork prefix wins (a compiler-PGO -pgo
+  # prefix, the .pgo-train instrumented prefix, or the workspace fork). A
+  # non-g6lc VLT_HOME — e.g. the pinned env.sh default
+  # ($TH_ROOT/toolchains/verilator-v5.008) — is not the fork, so clear it and
+  # let the -pgo glob below select the compiler-PGO build (same rule as
+  # soft-ladder-build-harness.sh). The tools/verilator source checkout is not
+  # a prefix: its bin/verilator is the perl driver without a built
+  # verilator_bin, so it falls through the same way.
+  if [[ -n "$VLT_HOME" && "$VLT_HOME" != *g6lc* ]]; then
+    log "VLT_HOME=$VLT_HOME is not the g6lc fork; searching the fork prefixes"
+    VLT_HOME=""
+  fi
   if [[ -n "$VLT_HOME" && ! -x "$VLT_HOME/bin/verilator_bin" ]]; then
     log "VLT_HOME=$VLT_HOME has no bin/verilator_bin; searching the fork prefixes"
     VLT_HOME=""

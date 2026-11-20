@@ -548,4 +548,34 @@ module g6lc_fe_override
   end
 //pragma translate_on
 
+//pragma translate_off
+  // PHANTOM PROBE (`+phantom_probe`): a stage-S slot marked instruction_valid
+  // while carrying a zero payload (addr==0 and/or instr==0) is pushed into the
+  // instruction queue as a fetch_entry with address==0, which decodes to an
+  // un-issuable sbe (pc=0/fu=NONE) -> IQ zombie -> iq_full -> commit deadlock.
+  // Fire on the signature and dump the stage-L/realigner context that made it.
+  logic ph_fe_en;
+  int unsigned ph_fe_hits;
+  initial begin
+    ph_fe_en = $test$plusargs("phantom_probe");
+    ph_fe_hits = 0;
+  end
+  always @(posedge clk_i) begin
+    if (rst_ni && ph_fe_en && (ph_fe_hits < 64)) begin
+      for (int unsigned i = 0; i < NrInstr; i++) begin
+        if (s_live && instruction_valid[i] &&
+            ((l_addr_q[i] == '0) || (l_instr_q[i] == '0))) begin
+          ph_fe_hits = ph_fe_hits + 1;
+          $display("[PHANTOM-FE] t=%0t slot=%0d l_addr=%h l_instr=%h l_vld=%b l_unal=%b l_exp=%h | iqv=%b saddr=%h sinstr=%h | rvi_jmp=%b rvc_jmp=%b rvi_call=%b rvc_call=%b rvi_br=%b rvc_br=%b",
+                   $time, i, l_addr_q[i], l_instr_q[i], l_vld_q[i], l_unaligned_q,
+                   l_present_exp_q,
+                   iq_valid_o[i], s_addr_o[i], s_instr_o[i],
+                   rvi_jump_i[i], rvc_jump_i[i], rvi_call_i[i], rvc_call_i[i],
+                   rvi_branch_i[i], rvc_branch_i[i]);
+        end
+      end
+    end
+  end
+//pragma translate_on
+
 endmodule

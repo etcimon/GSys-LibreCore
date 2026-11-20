@@ -191,13 +191,19 @@ module g6lc_decode_s2
                   cand.op = g6lc_core_pkg::WFI;
                   // hyp8: WFI tw/vtw/U legality deferred to g6lc_decode_s3
                 end
-                // Zawrs: WRS.NTO (imm=0x00d) / WRS.STO (imm=0x01d) — wait like WFI
-                12'b0_0000_1101,  // WRS.NTO
+                // Zawrs: WRS.NTO (imm=0x00d) / WRS.STO (imm=0x01d) — dedicated ops
+                12'b0_0000_1101: begin  // WRS.NTO
+                  if (G6LCCfg.ZawrsEn) begin
+                    // Same privilege/TW rules as WFI; legality deferred to g6lc_decode_s3
+                    cand.op = g6lc_core_pkg::WRS_NTO;
+                  end else begin
+                    illegal_bit = 1'b1;
+                    cand.op = g6lc_core_pkg::ADD;
+                  end
+                end
                 12'b0_0001_1101: begin  // WRS.STO
                   if (G6LCCfg.ZawrsEn) begin
-                    // Same privilege/TW rules as WFI; STO timeout is microarch (treat as WFI)
-                    cand.op = g6lc_core_pkg::WFI;
-                    // hyp8: WRS tw/vtw/U legality deferred to g6lc_decode_s3
+                    cand.op = g6lc_core_pkg::WRS_STO;
                   end else begin
                     illegal_bit = 1'b1;
                     cand.op = g6lc_core_pkg::ADD;
@@ -224,8 +230,20 @@ module g6lc_decode_s2
               endcase
             end
             3'b100: begin
+              // Zimop mop.r.n / mop.rr.n: SYSTEM funct3=100, inst[31]=1,
+              // inst[27]=1. mop.r has inst[24]=1 and inst[23:20]=0; mop.rr
+              // share funct3=100 but inst[31]=0, so the arms do not overlap.
+              // Decode ahead of the HLV/HSV case (89d3dadd0 hyp8 port).
+              if (G6LCCfg.RVZimop && instr.instr[31] && instr.instr[27] &&
+                  (instr.instr[24] ? (instr.instr[23:20] == 4'b0) : 1'b1)) begin
+                cand.fu  = ALU;
+                cand.op  = g6lc_core_pkg::ADD;
+                cand.rs1 = '0;
+                cand.rs2 = '0;
+                cand.rd  = instr.itype.rd;
+                imm_select = NOIMM;
+              end else if (G6LCCfg.RVH) begin
               // Hypervisor load/store instructions
-              if (G6LCCfg.RVH) begin
                 if (instr.instr[25] != 1'b0) begin
                   cand.fu = STORE;
                   imm_select = NOIMM;
@@ -683,7 +701,16 @@ module g6lc_decode_s2
             unique case ({
               instr.rtype.funct7, instr.rtype.funct3
             })
-              {7'b000_0000, 3'b000} : cand.op = g6lc_core_pkg::ADD;  // Add
+              {7'b000_0000, 3'b000} : begin  // Add
+                cand.op = g6lc_core_pkg::ADD;
+                // Zihintntl: ntl.{p,pall,s,all} are ADD x0,x0,x2..x5 HINTs;
+                // drop the dummy rs2 so no false operand wait (89d3dadd0).
+                if (G6LCCfg.RVZihintntl && instr.rtype.rd == 5'd0 &&
+                    instr.rtype.rs1 == 5'd0 &&
+                    (instr.rtype.rs2 == 5'd2 || instr.rtype.rs2 == 5'd3 ||
+                     instr.rtype.rs2 == 5'd4 || instr.rtype.rs2 == 5'd5))
+                  cand.rs2 = '0;
+              end
               {7'b010_0000, 3'b000} : cand.op = g6lc_core_pkg::SUB;  // Sub
               {7'b000_0000, 3'b010} : cand.op = g6lc_core_pkg::SLTS;  // Set Lower Than
               {

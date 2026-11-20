@@ -157,6 +157,16 @@ module g6lc_iq_bank
     output logic [ENTRIES-1:0][2:0]           info_rdy_o,
     output logic [ENTRIES-1:0][PRF_W-1:0]     info_prs1_o,
     output logic [ENTRIES-1:0][PRF_W-1:0]     info_prs2_o,
+    // hyp8 iqdump2: deep entry state for the hang dump (issued zombie check,
+    // dest phys for producer mapping, spec-arm producer tids, ordering class).
+    output logic [ENTRIES-1:0]                info_iss_o,
+    output logic [ENTRIES-1:0][PRF_W-1:0]     info_prd_o,
+    output logic [ENTRIES-1:0][TID_W-1:0]     info_pt1_o,
+    output logic [ENTRIES-1:0][TID_W-1:0]     info_pt2_o,
+    output logic [ENTRIES-1:0]                info_sp1_o,
+    output logic [ENTRIES-1:0]                info_sp2_o,
+    output logic [ENTRIES-1:0]                info_sp3_o,
+    output logic [ENTRIES-1:0]                info_ord_o,
     // Class frontiers (bank-local oldest live CSR / store by in-bank age).
     output logic                              csr_oldest_v_o,
     output logic [TID_W-1:0]                  csr_oldest_tid_o,
@@ -1406,6 +1416,14 @@ module g6lc_iq_bank
     assign info_rdy_o[e]   = {e_q[e].rs3_rdy, e_q[e].rs2_rdy, e_q[e].rs1_rdy};
     assign info_prs1_o[e]  = e_q[e].prs1;
     assign info_prs2_o[e]  = e_q[e].prs2;
+    assign info_iss_o[e]   = e_q[e].issued;
+    assign info_prd_o[e]   = e_q[e].prd;
+    assign info_pt1_o[e]   = e_q[e].rs1_ptid;
+    assign info_pt2_o[e]   = e_q[e].rs2_ptid;
+    assign info_sp1_o[e]   = e_q[e].rs1_spec;
+    assign info_sp2_o[e]   = e_q[e].rs2_spec;
+    assign info_sp3_o[e]   = e_q[e].rs3_spec;
+    assign info_ord_o[e]   = e_q[e].ord;
   end
   logic [ENTRIES-1:0] live_csr, live_st, front_csr, front_st;
   for (genvar e = 0; e < ENTRIES; e++) begin : gen_front

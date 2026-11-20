@@ -211,7 +211,15 @@ if [[ "$VLT_FLAVOUR" == "g6lc" && "${VLT_HOME:-}" != *g6lc* ]]; then
   fi
   VLT_HOME=""
   VERILATOR_ROOT=""
-  for cand in "$ROOT/build-platform/workspace/tooling/verilator-g6lc"               "${VERILATOR_INSTALL_DIR:-}"               /opt/testharness/toolchains/verilator-v5.008-g6lc; do
+  # Prefer a compiler-PGO fork prefix (install-verilator-g6lc.sh VLT_PGO=1):
+  # the profile-use <prefix> sits beside <prefix>.pgo-train; newest -pgo first
+  # so the split_var-fixed build wins over older forks. The plain -g6lc and
+  # workspace fallbacks remain for hosts without a PGO prefix.
+  for cand in $(ls -dt "$ROOT"/build-platform/workspace/tooling/verilator-g6lc-*-pgo \
+                /opt/testharness/toolchains/verilator-v5.008-g6lc-*-pgo 2>/dev/null) \
+              "$ROOT/build-platform/workspace/tooling/verilator-g6lc" \
+              "${VERILATOR_INSTALL_DIR:-}" \
+              /opt/testharness/toolchains/verilator-v5.008-g6lc; do
     [[ -n "$cand" && -x "$cand/bin/verilator" && -d "$cand/runtime" ]] || continue
     VLT_HOME="$cand"; export VERILATOR_ROOT="$cand/runtime"; break
   done
@@ -234,8 +242,21 @@ done
 SPLIT_VLT_FILE="$ROOT/build-platform/scripts/verilator-split-loops.vlt"
 SPLIT_VLT_ON="${SOFT_LADDER_BUILD_SPLIT_VLT:-$([[ "$VLT_FLAVOUR" == g6lc ]] && echo 1 || echo 0)}"
 if [[ "$SPLIT_VLT_ON" == "1" && -f "$SPLIT_VLT_FILE" ]] && [[ " $BUILD_VLT_ARGS " != *"verilator-split-loops.vlt"* ]]; then
-  BUILD_VLT_ARGS="$SPLIT_VLT_FILE $BUILD_VLT_ARGS"
-  log "split-loops .vlt: on ($SPLIT_VLT_FILE)"
+  # --stats records the SplitVar/Unroll/MTask census next to the model, the
+  # same evidence hyp8-build-harness.sh reports, so split coverage stays
+  # auditable after the build.
+  BUILD_VLT_ARGS="$SPLIT_VLT_FILE --stats $BUILD_VLT_ARGS"
+  log "split-loops .vlt: on ($SPLIT_VLT_FILE, --stats)"
+fi
+
+# Loop unroll-before-split: the g6lc fork unrolls constant-bound loops BEFORE
+# V3SplitVar, which only pays off with the raised unroll limits (same recipe
+# as hyp8-build-harness.sh). Pinned keeps upstream defaults so the qualification
+# reference recipe is unchanged. SOFT_LADDER_BUILD_UNROLL=0|1 overrides.
+if [[ "$VLT_FLAVOUR" == "g6lc" && "${SOFT_LADDER_BUILD_UNROLL:-1}" == "1" \
+      && " $BUILD_VLT_ARGS " != *"--unroll-count"* ]]; then
+  BUILD_VLT_ARGS="--unroll-count 256 --unroll-stmts 131072 $BUILD_VLT_ARGS"
+  log "loop unroll: --unroll-count 256 --unroll-stmts 131072 (g6lc unroll-before-split)"
 fi
 
 # --- Host ISA for the generated C++ (SOFT_LADDER_BUILD_MARCH) ----------------
@@ -288,7 +309,6 @@ log "C++ opt: fast/global $BUILD_OPT slow $BUILD_OPT_SLOW march=${BUILD_MARCH:-n
 PGO_DIR="$VERLIB_DIR/pgo"
 BASE_CXXFLAGS="$BUILD_CXXFLAGS"; BASE_LDFLAGS="$BUILD_LDFLAGS"
 if [[ "$PGO" == "1" ]]; then
-  mkdir -p "$PGO_DIR"
   BUILD_CXXFLAGS="$BUILD_CXXFLAGS -fprofile-generate=$PGO_DIR -fprofile-update=atomic"
   BUILD_LDFLAGS="$BUILD_LDFLAGS -fprofile-generate=$PGO_DIR"
   log "PGO phase 1: instrumented build (profiles -> $PGO_DIR)"
@@ -478,6 +498,15 @@ BUILD_LOG="${SOFT_LADDER_BUILD_LOG:-$VERLIB_DIR/build.log}"
 rm -f "$BUILD_LOG"
 log "building; full log -> $BUILD_LOG"
 
+if [[ "$PGO" == "1" ]]; then
+  # Fresh profile dir (same rule as hyp8-build-harness.sh): a reused VERLIB_DIR
+  # — resume, warm-start seed, or a previous PGO run — must not let stale .gcda
+  # satisfy this build's profile check or leak into phase 2's -fprofile-use.
+  # Done here, after clean/seed, so nothing reintroduces old profiles.
+  rm -rf "$PGO_DIR"
+  mkdir -p "$PGO_DIR"
+fi
+
 set +e
 make -s verilate \
   verilator="verilator --no-timing -Wno-MODDUP -j $JOBS $BUILD_VLT_ARGS" \
@@ -534,7 +563,7 @@ if [[ "$PGO" == "1" ]]; then
          -o "$TRAIN_DIR/train.elf" > "$TRAIN_DIR/gcc.log" 2>&1; then
       TRAIN_ELF="$TRAIN_DIR/train.elf"
     else
-      log "PGO: training ELF did not compile (see $TRAIN_DIR/gcc.log); phase 2 runs without a profile"
+      log "PGO: training ELF did not compile (see $TRAIN_DIR/gcc.log); the profile check below will refuse the build (set SOFT_LADDER_BUILD_PGO=0 to skip PGO)"
     fi
   fi
   TRAIN_CYC="${SOFT_LADDER_BUILD_PGO_CYCLES:-200000}"
@@ -549,6 +578,18 @@ if [[ "$PGO" == "1" ]]; then
         +tohost_addr=0x0000000080000008 "$TRAIN_ELF" > train2.log 2>&1 ) || true
     log "PGO profiles: $(ls "$PGO_DIR" 2>/dev/null | wc -l) files"
   fi
+  # A PGO=1 build with zero profiles is an unprofiled model wearing the PGO
+  # label: phase 2's -fprofile-use would find nothing and the rebuild is
+  # wasted. Refuse, as hyp8-build-harness.sh does; SOFT_LADDER_BUILD_PGO=0
+  # remains the explicit opt-out used by the review runners' cross-check
+  # rebuilds.
+  nprof=$(find "$PGO_DIR" -name '*.gcda' 2>/dev/null | wc -l)
+  if [[ "$nprof" -eq 0 ]]; then
+    log "PGO FAIL: no .gcda profile was written (training log: $TRAIN_DIR/train1.log); refusing to label an unprofiled model as PGO"
+    log "  (set SOFT_LADDER_BUILD_PGO=0 to build without a profile)"
+    exit 1
+  fi
+  log "PGO profiles: $nprof .gcda"
   # --- PGO phase 2: same generated sources, -fprofile-use ------------------
   PGO_USE="-fprofile-use=$PGO_DIR -fprofile-correction -fprofile-partial-training -Wno-missing-profile -Wno-coverage-mismatch"
   log "PGO phase 2: $BUILD_OPT $PGO_USE"

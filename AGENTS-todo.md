@@ -1,5 +1,34 @@
 # AGENTS workflow todo / pending-log
 
+Live tracker for agent work. **Retrieval contract:** every open item below cites the architecture /
+progress files that hold its priors (why it exists, seams, acceptance). Open those first; this file
+is the queue, not the design.
+
+| Layer | Open first | Role |
+|-------|------------|------|
+| Prime directive / nav | [`AGENTS.md`](AGENTS.md) · [`agents/spec/INDEX.md`](agents/spec/INDEX.md) | Spec→code map, SoC §0, standing disciplines |
+| Programs of record | [`architecture/README.md`](architecture/README.md) · [`architecture/router-core-upgrade-program.md`](architecture/router-core-upgrade-program.md) · [`architecture/remaining-upgrade-sequence.md`](architecture/remaining-upgrade-sequence.md) | U1–U10 plan, live next, scaffold contract |
+| Spec ⇄ RTL / tests | [`AGENTS-specs-to-impl.md`](AGENTS-specs-to-impl.md) · [`AGENTS-specs-to-tests.md`](AGENTS-specs-to-tests.md) · [`AGENTS-specs-coverage.md`](AGENTS-specs-coverage.md) | Status vocabulary + suite/testlist rows |
+| Host / verify | [`AGENTS-build-platform.md`](AGENTS-build-platform.md) · [`AGENTS-build.md`](AGENTS-build.md) · [`build-platform/AGENTS.md`](build-platform/AGENTS.md) | CLI, residual soaks, probe→verify |
+| Philosophy / SoC envelope | [`AGENTS-coding-philosophy.md`](AGENTS-coding-philosophy.md) · [`AGENTS-configuration.md`](AGENTS-configuration.md) · [`agents/guides/AGENTS-soc-readiness.md`](agents/guides/AGENTS-soc-readiness.md) | Timing, verify-in-lockstep, target SoC |
+
+**Category routing (exclusive).** Storamic, the graphics-pipeline APU and the hyp RTL are
+separate categories. An entry lives in exactly one of them, chosen by the tree it changes or
+gates; a fact another category needs is a one-line pointer there, not a second copy.
+
+| Category | Trees it owns | Sections |
+|----------|---------------|----------|
+| Storamic | `g6lc_storamic/`, `corev_apu/storamic/`, `verif/tb/storamic/`, `verif/tests/custom/storamic/`, `architecture/storamic/` | `Storamic …` |
+| Graphics-pipeline APU | `corev_apu/apu/`, `verif/tb/apu/`, `architecture/uncore/apu-*` | `APU …` |
+| Hyp RTL | `out_rtl/` → `build-platform/workspace/hyp/` (`hyp_redesign_core_8fo4/`, `hyp_redesign_corev_apu_8fo4/`, `hyp_core_ws/`) | `Hyp RTL …`, `hyp8_mc …` |
+
+- An entry that records a change or evidence in the hyp tree is a Hyp RTL entry, whatever
+  found it. A main-tree fix found through Storamic stays under Storamic; its hyp port is a
+  separate Hyp RTL entry (ledger: `g6lc_storamic/architecture/hyp8-port-ledger.md`).
+- `out_rtl/` carries no Storamic hook and no graphics-pipeline engine; functional Storamic and
+  Vulkan/CTS work stays on `core/` and `corev_apu/` (`AGENTS-configuration.md` §1.0c).
+- Add new entries inside the owning section, not at the end of the file.
+
 ## CI gate: green lanes + APU / Storamic coverage lanes (2026-11-10)
 
 - [x] GitHub `ci` green on all lanes for the first time in this history (run
@@ -14,33 +43,6 @@
 - [x] Coverage-aware suites `apu-ci` / `storamic-ci` + `test --coverage
   quick|standard|full` + `--strict`; CI lanes `apu` / `storamic` at
   `standard` (AGENTS-build.md § Coverage levels).
-- [x] Arising issue: `ue_sm5_session.exp` and `ue_sm5_reply.{hex,exp}` were
-  stale vs the golden model after ab0349843 (one reply field 0x00800000 ->
-  0x02000000); regenerated with `vn_golden.py --session ue_sm5_session 1` /
-  `--reply-vectors ue_sm5_reply 1`. vnfront (all arms) and vnrep pass on the
-  pinned v5.008. Regenerating needs the uapi `virtio_gpu.h` from
-  `g6lc_qemu/linux-dist/ubuntu/kernel` (not in CI; vectors stay committed).
-- [x] gen-sfu host reproducibility: LAPACK `lstsq`, numpy SIMD ufuncs,
-  glibc libm and ndarray `**int` each moved emitted f32 coefficients by
-  tens of ulps across hosts on this ill-conditioned Vandermonde fit.
-  Replaced with deterministic Gram-Schmidt (math.fsum), pure-Python
-  Taylor/argument-reduction transcendentals and fixed-order monomial
-  powers; `--check` now prints the drift diff. GitHub run 42878124082
-  green on all 9 lanes (platform x2, rtl-lint, sv-timing, bios, qemu,
-  ai-tensor, apu standard, storamic standard).
-- [ ] `shwave` RTL bench needs a writable `~/.cache/librecore` (simulator PGO
-  receipt cache); blocked under WSL here, expected fine on CI runners. Watch
-  the `full` dispatch run.
-- [ ] Venus native-bridge tests (`test_vn_native_bridge`) wait 3 s for CLI
-  readiness; flaked once under heavy host load. Raise the bound if CI flakes.
-  **2026-11-11:** readiness wait made cross-platform/robust — the
-  `select()`-on-pipe probe can't monitor a pipe on Windows and the
-  follow-up `readline()` was unbounded; replaced with a daemon-thread
-  `readline()` + `queue.get(timeout=3)` (bounds the whole line read).
-  The subprocess bridge tests remain **POSIX/CI-only regardless**: the
-  bridge itself needs `socket.AF_UNIX`, absent on this Windows Python
-  (`AttributeError: module 'socket' has no attribute 'AF_UNIX'`), so they
-  can't spawn the CLI here. On Linux CI the mechanism is unchanged.
 
 ## Storamic current correctness review
 
@@ -216,27 +218,6 @@ authorize artifact recovery or shared cleanup.
   Fixed in `wt_dcache_wbuffer.sv` (merge keeps the tag-check result); primary
   role and directed core tests pass (`storamic-native-primary-fix-02`,
   `core-directed-fix-01`, `core-directed-delay-01`).
-- [x] `hyp8_amo_ready_order` wedge on in-order `cv64a6_imafdc_sv39` (v3
-  `lr.d; lr.d; sc.d`): the B1 LR→SC window in `issue_read_operands.sv`
-  refused every non-SC STORE-unit op, including the second LR, which waits
-  for an SC behind it. Only plain (non-AMO) stores are held now. Applied to
-  `core/` and to the hyp tree (`hyp_redesign_core_8fo4/core/issue_read_operands.sv`).
-  All 12 directed `verif/tests/custom/*.S` pass on the main tree
-  (`core-directed-fix-02`).
-- [x] WT D-cache merge/`checked` fix ported to the hyp tree
-  (`hyp_redesign_core_8fo4/.../wt_dcache_wbuffer.sv`: a merge keeps
-  `checked`, as it already kept `hit_oh`).
-- [x] In-order `lr; sd; sc` wedge (new directed test
-  `verif/tests/custom/hyp8_lrsc_store.S`, failing before the fix): the B1
-  window is now closed at LR retirement in every mode, not only under OoO.
-  Both trees. The main tree passes 13/13 directed tests
-  (`core-directed-fix-03`).
-- [x] hyp8 (hyp tree, both fixes plus the wbuffer port):
-  `hyp8-integration-amo-02` lints clean for scalar and SMT2 and builds;
-  `hyp8-smokes-amo-02` passes 12/12, including `hyp8_amo_ready_order` and
-  `hyp8_lrsc_store`. The test list is in `run_hyp8_integration.py`.
-- [ ] Repository-wide gate on the issue-stage fix (gate v5 predates it), and
-  the hyp8_mc / OpenSBI boot checks.
 - [x] I/O access shape on the main tree (ST-037C step 4 findings):
   `store_buffer.sv` no longer forwards a store to a load whose physical
   address is outside the cacheable regions, and `wt_dcache_wbuffer.sv` no
@@ -244,19 +225,6 @@ authorize artifact recovery or shared cleanup.
   the same word waits until the first drains. The VirtIO test now uses
   Linux-shaped readl/writel fences, plus unfenced back-to-back stores to one
   word (`-DSTORAMIC_MMIO_FULL_FENCE` restores the old fences).
-- [~] Port the I/O forward/merge gates to the hyp tree:
-  - `stb_fwd.sv`: the non-cacheable flag is computed beside the F1 match
-    cone into `f1_io_q`/`f2_io_q`, and it only masks the F3 response
-    (`rsp_be_o`, `rsp_possible_o`).
-  - `wt_dcache_wbuffer.sv`: `req_nc` is registered as `w1_nc_q` on the
-    pipelined path and used live on the plain path. A live-entry or
-    pending-W3 hit on an I/O store stalls (`rdy`) instead of merging.
-  - `store_buffer.sv` `gen_fwd_live` (non-pipelined) gets the same gate as
-    the main tree.
-  - Evidence with all three edits: `hyp8-integration-io-02` (scalar and SMT2
-    lint with zero errors, build complete) and `hyp8-smokes-io-02` 12/12
-    pass. `-io-01` covered the first two edits.
-  - Still open: the 8-FO4 timing check of both cones (sv-timing).
 - [ ] Gate v4: fetch formal `g6lc_fetch_realign`/`g6lc_fetch_iq` solver
   failures and the cv32a65x Spike `hello_world` timeout (ISS only) remain.
 - [x] Primary-memory role runs programs with `G6LC_STORAMIC+G6LC_STORAMIC_MODEL`
@@ -290,6 +258,47 @@ No tracked-file deletions were found; the prior inventory of ignored artifacts i
 unknown. The owned process tree was stopped and nothing was silently restored.
 Full compliance/boot/board elaboration remains unqualified; board refusal guards
 have static host checks only. These limits are not waived by the leaf results.
+
+## Hyp RTL (`out_rtl/`) — hyp8 core redesign (`hyp_redesign_core_8fo4/`)
+
+### Main-tree fixes carried to the hyp tree
+
+- [x] `hyp8_amo_ready_order` wedge on in-order `cv64a6_imafdc_sv39` (v3
+  `lr.d; lr.d; sc.d`): the B1 LR→SC window in `issue_read_operands.sv`
+  refused every non-SC STORE-unit op, including the second LR, which waits
+  for an SC behind it. Only plain (non-AMO) stores are held now. Applied to
+  `core/` and to the hyp tree (`hyp_redesign_core_8fo4/core/issue_read_operands.sv`).
+  All 12 directed `verif/tests/custom/*.S` pass on the main tree
+  (`core-directed-fix-02`).
+- [x] WT D-cache merge/`checked` fix ported to the hyp tree
+  (`hyp_redesign_core_8fo4/.../wt_dcache_wbuffer.sv`: a merge keeps
+  `checked`, as it already kept `hit_oh`).
+- [x] In-order `lr; sd; sc` wedge (new directed test
+  `verif/tests/custom/hyp8_lrsc_store.S`, failing before the fix): the B1
+  window is now closed at LR retirement in every mode, not only under OoO.
+  Both trees. The main tree passes 13/13 directed tests
+  (`core-directed-fix-03`).
+- [x] hyp8 (hyp tree, both fixes plus the wbuffer port):
+  `hyp8-integration-amo-02` lints clean for scalar and SMT2 and builds;
+  `hyp8-smokes-amo-02` passes 12/12, including `hyp8_amo_ready_order` and
+  `hyp8_lrsc_store`. The test list is in `run_hyp8_integration.py`.
+- [ ] Repository-wide gate on the issue-stage fix (gate v5 predates it), and
+  the hyp8_mc / OpenSBI boot checks.
+- [~] Port the I/O forward/merge gates to the hyp tree:
+  - `stb_fwd.sv`: the non-cacheable flag is computed beside the F1 match
+    cone into `f1_io_q`/`f2_io_q`, and it only masks the F3 response
+    (`rsp_be_o`, `rsp_possible_o`).
+  - `wt_dcache_wbuffer.sv`: `req_nc` is registered as `w1_nc_q` on the
+    pipelined path and used live on the plain path. A live-entry or
+    pending-W3 hit on an I/O store stalls (`rdy`) instead of merging.
+  - `store_buffer.sv` `gen_fwd_live` (non-pipelined) gets the same gate as
+    the main tree.
+  - Evidence with all three edits: `hyp8-integration-io-02` (scalar and SMT2
+    lint with zero errors, build complete) and `hyp8-smokes-io-02` 12/12
+    pass. `-io-01` covered the first two edits.
+  - Still open: the 8-FO4 timing check of both cones (sv-timing).
+
+### Round status r92–r98 (newest first)
 
 Hyp8 r98: retained LSQ credits 36.80→33.20 and PMP write decode 59.47→52.60 FO4
 under matched delay-v50 structural screens. Corrected population-count geometry;
@@ -370,6 +379,137 @@ ReLU indexing 34.10, requant rounding 32.27, and accumulator-read presentation
 `build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r92/worklog.md`.
 Aggregate verify remains unqualified (Hyp8 production-path flist mismatch,
 unrelated CV64 ISS failure and CV32 Spike timeout); no physical/8-FO4 closure.
+
+### Retirement continuation (2026-10-21)
+
+Hyp8 retirement continuation (2026-10-21): source analysis, an aggregate caller-aware repair plan, a frozen source inventory/worklist, and a fresh sixteen-module structural/calibrated screen are in `build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/retirement-plan.md`. The first coordinated batch — held PRF operands, pending store-slot reservations, and forwarding payload lifetime — is implemented under the materialized hyp tree (`analysis/implementation-log.md`) and passed the focused remote leaf `tb_g6lc_hyp8_memory` (`HYP8_MEMORY_PASS`, 43 checks, tag `hyp8-memory-own-r5`); that is leaf evidence only, not full-core elaboration. The second batch — the common-event CSR retirement seam (commit_stage/csr_buffer/csr_decode/csr_regfile/csr_counters), issue-queue payload ownership, arbiter owned-TID exclusion and serial port0 class, in-FF age-matrix capture, IRO-acceptance FLU reservation (`g6lc_flu_reserve`), the IRO candidates/scoreboard split, generic replay encode, and the `IqSpecWakeup=0` WbReserve profile — landed with the consolidated review corrections and passed both control leaves: `HYP8_CSR_PASS checked=50` (tag `hyp8-control-csr-r6`) and `HYP8_ISSUE_PASS checked=67` (tag `hyp8-control-issue-r14`), closure `remote-runs/hyp8-control-r1-closure`. The third batch — full-top integration preparation — now elaborates the real `g6lc_testharness` top for both profiles: scalar and `-DG6LC_HYP8_SMT2` `--lint-only` both rc=0 with a full warning census (tag `hyp8-integration-r4`, closure `remote-runs/hyp8-integration-r1-closure`, 815 hash-verified files, runner `verif/regress/remote/run_hyp8_integration.py`). A `G6LCConfigNrHarts` seam (`ifdef G6LC_HYP8_SMT2` -> 2) feeds `NrHarts`; the explicit `--target g6lc64_hyp8|g6lc64_hyp8_smt2` mapping lives in `hyp8-build-harness.sh`. Under the recorded `HYP8_ALLOW_OVERLAP=1` per-run opt-in (four unrelated Variane workloads preserved; 2 compiler jobs / 1 model thread) the isolated scalar build completed: `Variane_testharness` sha256 `071a989f2c7249921ab425bf1c4b10ac6024f4c834f09efc20b1bac5eaed6988`, `target=g6lc64_hyp8 harts=1`, warnings=108 errors=0 — a build review point, not a run. Bounded inputs `h34_shift_dep`/`h33_st_fwd` are assembled (tohost 0x80001000); the frozen SMT2 OpenSBI inputs are hash-verified but marked NOT configuration-aligned (zicbom/zacas advertised vs hyp8-disabled; Linux DTB advertises H) and must not run until a matched DTS/firmware package exists. Batch F landed the lead-supplied wakeup/recovery fixes: rename-owned `int_busy_o`/`fp_busy_o` feed `grp_rs*_ready` from final held-group phys tags at IQ allocation (the stale R1 snapshot regs are gone), `ex_stage` gates branch redirect publication by the cancellation mask, and `g6lc_rename_recover` uses the current-state `rel2` clamp (retire-between-select-and-repair no longer underflows) plus the scoped latch/SELRANGE rewrites. The new `tb_g6lc_hyp8_dispatch` leaf (`HYP8_LEAF=dispatch`, full `Flist.g6lc_hyp8` closure, tag `hyp8-control-dispatch-r1`, closure `remote-runs/hyp8-control-r2-closure`) built clean on the fatal warning classes but hit the FIRST semantic failure `A_CONSUMER_LOST_WAKEUP` (consumer allocated, never issued within 30 cycles after a WB during its rename) - reported to the lead, no instrumentation series run. The bounded r4 diagnostic `hyp8-prebusy-h34-r1` hit a fetch realign assertion at cycle 396 (unrelated mechanism, recorded not debugged). `verif/tests/custom/hyp8_branch_cancel.S` was added unexecuted for the next snapshot. Open: the case-A stall root cause, then cases B/C/D, the flush_unissued recovery transaction, and the remaining timing/latency review. No full-model rebuild was performed this batch. The user authorized continuation; hyp8 per-source tier/REUSE coverage now preserves existing declarations, and the duplicate AES SPDX was normalized to an outbound offer without changing upstream notices. Current target is single-hart OoO; SMT2 and OpenSBI/Linux boot remain unqualified. Batch G closed the dispatch leaf and repaired the fetch carry transaction: the diag-r3 stale wb_id->tid_prd read was a bench-instrument artifact, fixed by a clocked WB adapter (`HYP8_DISPATCH_PASS checked=16`, tag `hyp8-control-dispatch-r2`, closure `remote-runs/hyp8-control-r5-closure`), and instr_realign's single pending-completion record was replaced by eager bank advance plus an explicit restore_i verdict path wired from the stage-S retained window (frontend `carry_restore`); the new `tb_g6lc_hyp8_realign` leaf proves completion+new-tail, restore, per-hart coexistence, and kill/stale inertness (`HYP8_REALIGN_PASS checked=39`, tag `hyp8-control-realign-r2`, closure `remote-runs/hyp8-control-r6-closure`, with the MIT g6lc_dram_peek64_stub linked as a dead $unit DPI shim - `hyp8-control-realign-r1` records the link failure that motivated it). The r4 boot-path carry assertion was removed by construction, not disabled: the new restore contract keeps equivalent sim assertions. Both runs were normal no-plusarg leaf evidence; no full-model rebuild, firmware, boot, synthesis, or OpenROAD was performed. Batch H rebuilt the whole scalar core post-Batch-G (`hyp8-integration-r5`, 816-file closure incl. the `hyp8_branch_cancel.S` input; scalar+smt2 lint rc=0, build rc=0, model sha256 `ef133ca1369bc65e12af28d6de7c42d4871c797c06427e0cc727a82afc2917a2`) and ran the first bounded smoke `hyp8-h34-r2`: 21 instructions retired (vs r4's cycle-396 carry assertion) before a NEW assertion `instr_queue.sv:890 lane_cf diverged from cf != NoCF` aborted at cycle 488 - sequence stopped at this first semantic failure; h33 and branch-cancel not run, no workaround attempted. Raw logs under C:/Users/etcim/AppData/Local/Temp/cva6-artifacts/{hyp8-integration-r5,hyp8-h34-r2}. Batch I repaired two concrete payload defects (instr_queue cf one-bit-cast gather -> full-width OR; alu A3 result-slot ownership via new result_valid_i through alu/alu_wrapper/ex_stage), added queue+alu leaves (`HYP8_QUEUE_PASS` 89 checks, `HYP8_ALU_PASS` 23 checks on closure r7), rebuilt `hyp8-integration-r6` (816-file closure, lint rc=0 x2, build rc=0, model sha256 `e3eb3b4070bcdbb41db835d6aecfb3fe2f4d7081ef1ec5872b177eab823ac939`) and stopped at the first smoke `hyp8-h34-r3`: NO assertion; a RETIREMENT STALL (not simulator non-convergence) -- the model ran normally to 50k cycles with tohost=0 and 41 retired (last pc 0x80000090). Boot npc prints cover only the first ~63 cycles and do NOT describe the final NPC; `restores/restore_dropped` is the BPU checkpoint census, not realigner carry-restore. h33/branch-cancel not run. No OpenROAD or boot run was performed in this review. Batch J root-caused the stall on the immutable r6 model via trace run `hyp8-h34-epoch-diag-r1`: instr_queue accepted PCs 0x8000005e/62/66 under epoch1 (t=488), delivered 5e, then the epoch2 redirect (t=490) invalidated the stored 62/66 entries while their shared branch-target record for Jump@66 stayed; a second pair (90/94, t=545-547) orphaned a second record, filling the depth-2 target FIFO (observed full=0000 with ready_o=0) -- a permanent starvation. Ownership repair: push epoch guards input acceptance only (win_live); stored entries live until delivery or flush_i (lane_live=~empty, lane_stale=0, lane_epoch_ok removed); target pops still follow actually consumed CFs; flush_i remains the sole cancellation (no early is_mispredict flush). Also repaired the boot-ROM read-latency defect: harness i_axi2rom was the legacy single-cycle axi2mem while the two-register banked bootrom needs three edges (diag trace showed the 0x10008 read returning 0x10000's word); now g6lc_axi2mem_reg RD_LAT=BootromReadLatency=3 behind typed AXI structs (dm legacy path untouched). Queue leaf `hyp8-control-queue-r3`: HYP8_QUEUE_PASS checked=126 (two-orphan starvation counterexample, dead-epoch input rejection, explicit flush). New rom leaf `hyp8-control-rom-r1`: HYP8_ROM_PASS checked=26 (fwd/reverse single-beats, r_ready hold, len=1 INCR burst). hyp8-integration-r7 build complete (model 4764fedd...) but the resumed smoke sequence stopped at the FIRST semantic failure: hyp8-h34-r4 hit store_buffer.sv:1147 speculative_buffer_underflow @649 (commit_i while the speculative store queue is empty) -- a NEW defect class; the epoch/target starvation is gone (54 retired vs 41, reached pc 0x800000de). h33/branch-cancel not run; firmware witness not reached. Batch K repaired the store-commit ownership boundary exposed there: store_unit publishes valid_o and st_valid in the same cycle but stb_insert stages the arrival two edges (S1 capture/S2 install), while commit_ready_o only meant drain capacity + no pend, so commit_stage could commit a store still in S1 - a headless pop that silently lost the store (the underflow SVA caught it). commit_ready_o now also requires commit_tid_present (the committing transaction installed in spec; presence not head - ooo_commit_is_oldest/MIX_COMMIT still own ordering; tid-only since no committing-hart input exists, SMT2 obligation recorded). Caller audit: commit_lsu_ready_o feeds only store_commit_hold + g6lc_core commit gating + store stall census (no non-store consumer, no split needed); all fu==STORE non-AMO commits (plain/FP stores, cbo.zero) insert one spec entry - no op predicate exclusion needed; exception-bearing stores never reach store_commit_hold. Second defect found by the extended leaf: the commit-edge concurrent assertions (speculative_buffer_underflow, ooo_commit_is_oldest) read post-pop state under the pinned verilator (post-NBA evaluation) and fire on every legal commit - reformulated on translate_off shadow registers so the contract holds under either eval order. Memory leaf extended with a REAL store_buffer (full insert/commit/drain, modeled commit_stage gating): HYP8_MEMORY_PASS checked=74 (43+31), tag hyp8-memory-own-r11, closure hyp8-control-r15-closure, model 3777e9ef... hyp8-integration-r8 built clean (lint rc=0 x2, build rc=0, model 35d9864b..., census unchanged); the first smoke hyp8-h34-r5 then hit a NEW assertion at cycle 652: g6lc_lsq_slot.sv:302 ooo_lsq_st_live (a valid LSQ store slot references an id whose scoreboard sb_live bit is 0 - LSQ-slot liveness vs scoreboard, a different defect class; the r7 store_buffer underflow did not recur). Sequence stopped at this first semantic failure; h33/branch-cancel not run; firmware witness not reached; no speculative repair attempted. Raw artifacts remote-runs/hyp8-h34-r5 and the C: cva6-artifacts mirror. Batch L: the r5 assertion was over-strict (lead derivation verified in source - store release is staged one cycle behind the sb_live clear; the dead-tid window is inert and tid reuse cannot overlap it). g6lc_lsq_slot translate_off only: ooo_lsq_st_live now requires pending release, ooo_lsq_st_stale_one_cycle bounds the window to one edge (shadowed-registered facts), and ooo_lsq_alloc_{st,ld}_id_unique check tid uniqueness at allocation. Load side unchanged - COH_FILTERED makes PHYS_VALIDATE inactive and ld_release_i has no one-cycle staging (residual over-strictness noted). Discovered the shared bench broke non-rom leaves on g6lc_axi_soc types; tb_g6lc_hyp8_rom is now ifdef-guarded with a rom-leaf define. Dispatch leaf re-proven: HYP8_DISPATCH_PASS checked=16 (hyp8-control-dispatch-r3c, closure r16). hyp8-integration-r9 built clean (model 729bd57e..., census unchanged). First smoke hyp8-h34-r6: NO assertion; program ran to its end marker - tohost store sw a0,0(t0) retired @637 then park loop - but the committed store never reached the memory port (dc_req=0 dc_gnt=0, tohost=0 at the 50000 budget, rc=120): a NEW defect class (committed store lost between commit and drain). Sequence stopped; h33/branch-cancel not run; firmware witness not reached. Batch M repaired the lost store: hyp pmp_data_if staged the LSU data response two edges behind the pmp registered verdict while store_unit/load_unit consume paddr/ex in the request cycle (diag: wbuffer data=1 be=0f but pa=0). Now pmp REG_VERDICT (default keeps PTW/fetch registered boundary; 0 = reference combinational compare) + pmp_data_if DATA_VERDICT_STAGES (0 = reference comb contract used by load_store_unit; 2 = staged variant preserved for consumers that wait on lsu_valid_o, which the LSU does not). New pmp leaf HYP8_PMP_PASS checked=14 (hyp8-control-pmp-r1). hyp8-integration-r10 built clean (model 34374f4d..., census unchanged). hyp8-h34-r7 is the FIRST full smoke PASS (tohost verdict @656, rc=0). hyp8-h33-r1 then hit ooo_lsq_ld_live @490 - the load-side oracle residual: the first store retired @439 and the following load's LSQ entry went valid on a tid whose sb_live had not yet re-asserted (allocated-but-not-issued window at the START of tid life, the mirror image of the store-side release window; whether it is the freed store tid is not visible in the trace). Same over-strict-oracle class, not debugged. branch-cancel not run; firmware witness not reached. Open timing debt: data PMP verdict is back on the LSU request cone - a staged verdict needs an explicit translation-response handshake in store_unit/load_unit. Open Sv39 risk: g6lc_mmu TlbStages=3 vs lsu_dtlb_hit_o same-cycle contract (unexercised by bare-mode). Batch N (2026-10-21): wt_dcache_ctrl.sv now restores the reference DcacheHitExtra==0 FSM arm behind DCACHE_HIT0 (+2 arm unchanged; DcacheHitExtra in {0,2} elaboration check), and the new real-wt_dcache forwarding leaf tb_g6lc_hyp8_dcache (HYP8_LEAF=dcache, -DG6LC_HYP8_DCHX0 selects the 0 variant) exercises store->load forwarding at distances 0-4, byte-merge, and coalescing. Outcome: BOTH variants fail the leaf with stale forward data (DCHX0: B_LB0; DCHX2: B_LB7; both returned a stale D-section dword). Root cause found: g6lc_hyp_rr_arb_tree is a queued arbiter - gnt_o pulses at request CAPTURE while idx_o/req_o reflect the queue HEAD popped later - but wt_dcache_mem captures compare operands at head pop and both ctrl arms verdict at a fixed delay after the capture-grant, so a congested/queued pop feeds the verdict another request's compare (port-2 store tag-check vs port-1 load). RESOLVED (lead handoff, option A): every queued-unsafe arbiter site now instantiates the vendor common_cells rr_arb_tree (already in the flist): wt_dcache_mem.sv:349 (the defect site - rd_ack is now the gnt_i-qualified same-cycle service grant), wt_dcache_wbuffer.sv:1623/1921/1943 (tx-id pick, dirty drain, check writeback - all index live arrays); wt_axi_adapter.sv:278 was already vendor since M3 bring-up. g6lc_hyp_rr_arb_tree remains in the flist with zero instantiations. Leaf rerun: DCHX0 (hyp8-control-dcache-dchx0-r18) and DCHX2 (hyp8-control-dcache-dchx2-r3) BOTH PASS checked=25 - the +2-path "visibility gap"/"refill alignment" observations were the same queued-arbiter mechanism, not separate defects. DECISION: Hyp8.DcacheHitExtra stays 2 (profile settled unchanged; no issue-leaf rerun needed). hyp8-integration-r11 built clean (model 4d70d7bb...). hyp8-h34-r8 PASS. hyp8-h33-r2 FAILED on the same ooo_lsq_ld_live @476 - but now with CORRECT forwarded data (h33-diag-r2: LU-RSP rdata=1122334455667788, wb data correct, retire @462, entry still valid 14 cycles later, no flush/replay/cancel). The dead-tid residue is decoupled from the D$ defect and is now a candidate real RTL lifetime defect (ld_release_i never fired for a normally-committed load; 14 cycles exceeds any one-cycle staged-release explanation) - oracle unchanged per lead instruction; needs a load-release-contract decision. Follow-up (same handoff): the +lsq_trace probe (sim-only, translate_off, in g6lc_lsq.sv + g6lc_lsq_event.sv; hyp8_tb.cpp allowlist entry) localized the residue precisely in hyp8-h33-lsq-diag-r1d: rel stayed low because done=0 (unres/dwait masks empty at alloc - older=00000000, dwait_set mask=0), and done never set because g6lc_lsq_event's gen_cmp[2] flop never produced ev_complete for tid17 even though its own in-line probe saw complete_valid_i[2]=1 id=17 is_st=0 canc=0 flush=0 at the capture edge. Ports 0/1 show in->out at +1 every time; w=2's only occurrence dropped it. Under strict flop semantics this is impossible - it is either a pinned-Verilator eval-order artifact on the input settle (the known post-edge sampling class) or a capture defect visible only under an unprobed condition; discriminating evidence would be a wave dump or a non-pinned-sim run of the same ELF. RESOLVED (architectural fix, batch OOO-release): LSQ load entries now release unconditionally on the registered commit event ev_commit_ld_i in g6lc_lsq_slot.sv (the release was previously gated under PHYS_VALIDATE / COH_OOO, dead in the WT COH_FILTERED config); ld_release_i remains the early path; PHYS_VALIDATE-gated phys-updates unchanged. The load-live oracle was replaced with the store-like pending-release formulation (rel_pend_ld OR ld_release_i; shadow-flop stale-one-cycle check; alloc-identity preserved). Non-fatal [lsq-ev-miss] per-port counters added in g6lc_lsq_event (translate_off, no $error). Results: dispatch leaf HYP8_DISPATCH_PASS checked=16 (r4); integration r12 clean (model 89961eaf...), census identical; h34-r9 PASS @656; h33-r3 ran past the old assertion -- first st->ld pair architecturally correct (x6=0x1122334455667788) -- but hit a NEW failure class: hang, SB head slot=20 pc=0x80000032 = first c.nop (insn=0x0001, fu=3, rd=0,rs1=0,rs2=0, alloc@468 port=1) never produced an `operands`/`wb` line; second c.nop id=24 (port=1 alloc behind port-0 store id23) sits unissued in IQ[13]; no cancel/flush in window. [lsq-ev-miss] counts 0 on all ports in both h34-r9 and h33-r3 -- the ev_complete capture miss did NOT recur in the r12 model (tid17 fired in@462/out@463). REFINED (hyp8-h33-disp-diag-r1, +disp_trace probe in g6lc_ooo_dispatch): tid20 (first c.nop, fu=3 ALU, all operands ready, prd=0) is allocated bank7/ent1, granted port1 @470, taken @471, staged in iss_v_q[1] and presented on issue_valid_o[1] continuously from c=472 -- but issue_ack_i[1] NEVER asserts (~49000 cycles). This was the FIRST-EVER port-1 presentation (only 2 port-1 grants in the run). tid24 (second c.nop, also fully ready) granted port1 @516 but can never take -- iss_v_q[1] occupied; its bank entry is the hang dump's IQ[13] resident; NO operand/ready-bit wait (ready=0000000 in the older dump was gate bits, not operand rdy). Zero [disp] kill lines; no cancel/flush. Static narrowing of issue_ack_o[1]=0 (issue_read_operands): issue_ack_pre=valid&&!fu_busy[1] OR res_admit[1] stall; stall_raw clean (oa_en=0 renamed, ss_raw excludes rs==0, stall_i=stall_acc_id=0, not amo/casq/flush). Suspects: (a) fus_busy[1].alu <- fus_busy[0].alu = !flu_ready_i||mult_valid_q stuck (flu_ready proven 1 at c=511 -- post-512 stuck mult_ready possible, unprobed; issue_stall print is port0-gated so it never fired); (b) res_admit[1] wedged (g6lc_flu_reserve reserved_q/div_live_q); (c) pinned-Verilator stale-read inside the IRO comb. Discriminator for next pass: probe fu_busy/stall_raw/res_admit/flu_ready_i per port on the iro line, or ungate issue_stall's port0 idle counter. OPEN: the real defect is IRO port-1 never-ack, NOT a nop/dispatch/LSQ problem. Also noted (minor): prd=0 busy-bit aliasing -- stores/branches/nops all busyset prd=0; wb-port wbclr prd=0 not gated while commit mirror is; false-ready direction only. E: DRIVE FULL (200G/200G) -- pulls now go to C:\...\cva6-artifacts; remote run dirs intact. branch-cancel and firmware witness NOT run per stop rule. REPAIRED (batch IRO-stale-lane): the never-ack mechanism was the in-order dual-issue throttle reading issue_instr_i[p-1].fu without issue_instr_valid_i[p-1] (structural_hazards) -- a drained lane's stale fu==STORE held fus_busy[1] forever. Fixed: throttle now valid-qualified (inheritance and port-0-only terms unconditional); same repair applied to is_alu_bypass, use_alu2, gen_ssraw c1/c2/c3 operand-forwarding, and assign_fp_raddr_pack (drained lane could steal port-1 FP raddr); audited-safe sites reported in implementation-log. p0 invariant added: g6lc_rename_recover translate_off !busy_q[0] assert (set paths already unreachable for rd==0; WB/commit clears already prd!=0-gated -- the busyset prd=0/wbclr prd=0 noise was set-clear aliasing, not a correctness hole). Leaf: tb_g6lc_hyp8_issue now drives the real IRO as i_iro (bench NrRgprPorts 2->4, matching build_config OPI=2) with stale-STORE-drain, stale-ALU-drain, and both-valid positive-throttle cases: HYP8_ISSUE_PASS checked=74 (r15), dispatch HYP8_DISPATCH_PASS checked=16 (r5). Integration hyp8-integration-r13 clean: lint x2 rc=0, scalar build rc=0, model 5975665f22732496..., census WIDTHEXPAND325/LATCH3 (vendor baseline). h34-r10 PASS @644. STOPPED at h33-r4: old port-1 deadlock GONE (in-order serialization observed on port0; st->ld forward data correct, tid19 lbu wb c=725 data=0x88, tid18 retired 727) but scoreboard.sv:269 'Commit acknowledged but instruction is not valid' fired at c=741 -- commit_ack_i[0] with commit_instr_o[0].valid=0. Diag read (hyp8-h33-r4-diag): no kill/cancel/flush in window; tid19 was the LAST allocated slot (no allocs after c=678). Analysis: commit_ack_o=fire is a same-cycle decision requiring rec_valid OR the cancelled-drop path; tid19 was never cancelled and mem_q[19].sbe.valid was held since wb c=725 (ld_checked sticky) -- a coherent sim cannot produce ack-on-invalid here. Signature matches the documented pinned-Verilator post-edge sampled-value class: the SVA's commit_instr_o[0].valid comb term (sel_oh=1<<commit_ptr_q -> sel_sbe) re-evaluates after the ack edge's own updates (cf_hit frees mem_q[19], commit_ptr advances 19->20) and reads the never-allocated slot 20; every earlier commit had a live next head so the post-edge read stayed 1. Discriminator if pursued: per-cycle print of commit_ptr/commit_sel_slot/rec_valid at commit_ack, or a non-pinned-sim run. OPEN. branch-cancel-r1 and firmware witness NOT run per stop rule. Runs pulled to C:/Users/etcim/cva6-artifacts; closure under .../closures/. hyp8-integration-r14 (LSQ waited-mask + scoreboard drop-commit SVA): lint x2 rc=0, scalar model 2ef79f26; h34-r11b PASS (tohost_addr now required on Windows-launched runs); h33-r5 FAILED tohost=128 @517 -- the FIRST pair (distance-0 check): `sd t0,0(s0)` mem 0x80001050=0x1122334455667788 @0x22 then `ld t1,0(s0)` (0x00043303) @0x26 returned x6=0, program took FAIL 1 (0x101); first semantic failure, see implementation-log r14 section; branch-cancel/osbi not run per stop rule. REGRESSION vs r13 (h33-r4 retired past pc 0xa0); r14 functional delta = waited_q/CAM suppression only -- candidates: a needed replay wrongly masked, or forward-path loss; diag run hyp8-h33-r5-diag (+smt_flow+lsq+disp+commit traces, same r14 model) completed remote-side, pull pending ssh stability. DIAGNOSED (r5-diag pulled): the waited-mask suppression masked a NEEDED replay -- load tid17 verdicted while store tid16 addr unresolved (dwait=0 at verdict, never re-armed), stale D$ publish at 432, retire drop=0 replay=0 at 434; the unsuppressed model (r6-diag) replayed on store16 first-addr-resolution and recovered the full word -- the prior "false violation" read was wrong (the r6-diag forward delivered partial 0x88 = stale data, replay was legitimate recovery). FIX IN TREE: unsuppressed violation CAM (match_i={vv_match_q,vio_match_q}, g6lc_lsq.sv:826) + contract comment + +lsq_trace kept; waited_q fully removed from g6lc_lsq_release. SEPARATE LATENT DEFECT FOUND (r6-diag): SL-W fixup tag-miss retry livelock -- FIXUP_CHECK miss -> FIXUP_PEND re-probes forever (wt_dcache_wbuffer.sv:1061-1070); fixup head at 0x80001060 never retires (no refill ever), queue wedged, load id=0 gen6 parked at the LSU since c=886 (lsu_ready=0, tohost sw pinned at IRO ack=0 -> commit head pinned -> c.j spin). Load-hold gate unverified (not WAIT_GNT/TAG/WB/WPO/NI -- needs +ld_state probe). Awaiting rebuild (r15) of the unsuppressed tree + smoke rerun + fixup-livelock fix decision. See implementation-log "h33-r5 discrimination + r6-diag LSU wedge analysis". UPDATE (h33-r7, r15 model 93b07779...): fixup MSHR-drop fix VERIFIED WORKING (fixup dropped @889 after tag miss, wbe=1, wbuffer drains); parked load now fully gated by +ld_state: WAIT_PAGE_OFFSET, pom=1 poso=0 (commit-queue-class match to 0x80001090), sbe=0, stb=1, rpl=0 suppressed per T33 (committed store never finishes in STQ bookkeeping) -> circular wedge via lsu_ready=0. Remaining defect is store-buffer commit-side match release (commit_queue/pend/sticky still holds the 0x090 match after the store memory-ACKed and its fixup dropped). +stq_trace does not exist in tree; next probe = store-buffer match-source dump. branch-cancel/osbi not run (stop rule). See implementation-log LSQ r15 section. CLOSED-SEQUENCE r16/r17 (2026-10-22, see implementation-log r16/r17 section): stq_trace proved the h33-r7 held source was the wbuffer W1 producer-acceptance recapture (not a commit-queue/pend/sticky hold); fixed by w1_accepted_q in store_buffer.sv plus the wt_dcache_wbuffer return-snapshot re-arm !evict masks (r8 tx_stat leak, FAIL-126). R17 smokes CORRECTED: the ELFs do carry tohost 0x80001000; r14/r9/r1 were launched without +tohost_addr so those liveness-only results are struck. Corrected runs (+tohost_addr): h34-r15 FAIL + h33-r10 FAIL (SimDTM DEBUG_REQUEST ~t520/572 -> mtvec park loop -> override-#1 misfire to 0x10058 zeros -> cause2 -> debug-mode 0x808 livelock, no tohost verdict); branch-cancel-r2 PASS (real SUCCESS(tohost=0) after 451 cycles, finished before the 500-cycle DMI gate). osbi-scalar-r1 FAIL = witness stop (6M cycles, allocs=17, zero UART, last retire pc=0x10062). Root cause diagnosed: NOT a realigner stale-leftover -- g6lc_fe_btb_check's ov1 unsupported-taken-guess clause fires on line guesses trained by direct Jump/Branch verdicts/resolves that no tagged predictor can ever back (BTB trains JumpR-mispredict only; under TAGE_LITE+BPIndirectEn the check's own tagged BTB is compiled out, leaving RAS-agree the sole adjudicator). Fixed on the r18 tree by identity: train_tagdom qualifies every taken line-table write (g6lc_fe_override pred_tagdom = predicting cf's adjudication domain; frontend nl_train_tagdom per producer; g6lc_fe_nextline masks ltaken writes). New leaf tb_g6lc_hyp8_linecheck: HYP8_LINECHECK_PASS checked=36 (tag hyp8-control-linecheck-r2). r18 (hyp8-integration-r18, model sha 7735a1861ff7d6f9): corrected smokes ALL semantic-pass -- h34-r16/h33-r11/branch-cancel-r3 SUCCESS (tohost = 0) at 656/966/451 cycles with +tohost_addr=0x80001000 +debug_disable (h33 previously wedged; the tagdom gate fixed the OV1 defect). Firmware witness hyp8-osbi-scalar-r2 STOPPED on a NEW latent defect proven at cycle ~24975: g6lc_ooo_dispatch re-captures grp_v_q when a rename publish (ren_pub) coincides with flush_unissued_i -- the if(ren_pub) branch outranks the kill leg and the dispatch_valid_i zombie mask samples pre-flush, so a dead lane is ack'd one cycle later while issue_instr_valid_o=0 (scoreboard.sv:283 SVA, identical edge in +smt_flow diag run hyp8-osbi-r2-diag). The zombie group allocates IQ+LSQ entries on a non-flush edge -- real wrong-path risk, not an SVA gap. Proposed fix (not applied, awaiting decision): mask the grp_v_q re-capture with the kill terms. RECORD-LOSS INCIDENT 2026-10-22: implementation-log.md was truncated by a local write mishap; reconstructed from verbatim transcript fragments + artifact anchors -- see its RECONSTRUCTION NOTICE. Run evidence (remote run dirs + cva6-artifacts closures) is intact. Leaves on the r17 tree: LSQ 17, memory-own-r12 HYP8_MEMORY_PASS checked=88, dcache dchx2-r45 + dchx0-r19d + dchx2-r47 HYP8_DCACHE_PASS checked=115 both arms. DCHX0 disposition: arm already present/legal {0,2}; leaf blocker was optimizer-folded bench probes, fixed port-safe in tb_g6lc_hyp8_control.sv -- no legality narrowing, no debt. r19 (hyp8-integration-r19, model sha 7b7e1365bde8bd83, closure hyp8-integration-r19-closure): kill-dominates-publish LANDED -- the grp_v_q capture in g6lc_ooo_dispatch.sv is reordered so mispredict|flush|flush_unissued clears outrank the ren_pub re-capture (sibling state audited in-comment: grp_sbe_q/grp_orig_q/tid staging and grp_may_bypass_q reach consumers only through grp_v_q/grp_go/dispatch_ack_o, steer_q is a perf hint, grp_pend_q already had kill priority). Dispatch leaf HYP8_DISPATCH_PASS checked=30 (tag hyp8-control-dispatch-r12, closure r50) covering publish@flush_unissued and publish@mispredict coincident edges -- no dack/IQ-alloc/issue for dead lanes, fresh post-kill group acks+issues normally. The leaf's first run failed G_FRESH_NO_ISSUE on a bench artifact only (iack left '0 by section F; reset_all now restores '1) -- not an RTL defect. r19 lint x2 rc=0 (scalar census WIDTHEXPAND 329/WIDTHTRUNC 87/LATCH 3; smt2 339/97/3). Smokes via testharness_proxy.py run (nm-derived +tohost_addr=0x80001000): h34-r17 656, h33-r12 966, branch-cancel-r4 451 -- all SUCCESS (tohost = 0), identical to r18. Witness hyp8-osbi-scalar-r3 (frozen fw_payload sha a9218107, nm tohost 0x80041730, 6M cycles): STOP -- budget-out FAIL 'stopped retiring' (exit 126), zero %Error, zero UART. The r2 defect is verified fixed in vivo: the same bgeu mispredict @0x80013760 resolved ~c24974 and r19 retired the redirect path cleanly (past r2's 24988 SVA point). NEW stop point: hart wedged ~c25030 in the fdt_path_offset_namelen epilogue -- 4 c.ldsp loads to the same stack page (0x80046f38-58) never retired behind a committed c.sdsp s2,48(sp) @0x80046f50; signature matches the r15 parked-load/STQ-record-release family (r16 w1_accepted_q fixes are in the tree -> residual leg or sibling held source; needs +ld_state/+stq_trace diag to name it). stq-diag-r1 (r19 model, probes): resolved -- NOT a parked load; the wedge is a LOST load: commit head id=5 'ld s1,56(sp)'->0x80046f58 entered WAIT_GNT @25034 and evaporated (no tag-port lookup/gnt/wb/kill; ldbuf drained to 0) while two later same-line loads completed via miss->refill; scoreboard stalls decoded=11 ack=00. Suspects: ldbuf/return-beat mis-association vs fixup-record forward-track orphan (fixup for 0x80046f58 was live at entry). stq_trace is capped c<3000 -- blind in the window; next diag needs ldbuf entry dump + data_id + fixup occupancy probes. OPEN PERF DEBT (accepted with the tagdom fix): under untagged-BTB hyp8 the line table keeps only RAS-backed return guesses; direct jumps/branches are re-predicted at verdict every pass -- a prediction-coverage cost, not yet measured against a tag-domain-qualified direct-CF training path. r20 (lost-load fix landed + qualified; tree-level stop attributed to in-flight iq_arb rewrite): ld-diag-r1 proved lsu_bypass depth-2 overwrite (insert tid=9 wp=0 cnt=2 OVERWRITE-FULL clobbered live head tid=5, no pop/flush/cancel; IRO-grant -> lsu_valid_q -> AGU-A2 -> bypass-insert reservation shadow while ready_o=empty allowed 3 grants). Fix: issue_read_operands fus_busy[0].load/store also set while |lsu_valid_q -- 2-cycle grant spacing bounds queue occupancy at depth. Leaf: tb_g6lc_hyp8_issue LSU-shadow section (runs first, arbiter-independent) IRO_LSU_SHADOW_OK checks=14 (tag hyp8-control-issue-r19, closure r54) -- ld/sd blocked exactly one cycle under the strobe, ack on clear, ready gate intact. r20b build (816-file closure; NOTE: closure fixpoint resolve() is CWD-relative -- must run builder from repo root): lint scalar/smt2 rc=0 (341/87/3, 351/97/3), model sha df747e1b. Smokes on r20b: h34-r18 SUCCESS@674, then STOP h33-r13 budget-out -- ld read 0 where merged store data expected, FAIL2 path, tohost sw retired but never visible. A/B: r20arb19 (same tree, iq_arb reverted to r19) -> h33 SUCCESS@970: the wedge is the CONCURRENT iq_arb rewrite (take path broke leaf check ARB_TAKE_P0_TID1), NOT the IRO fix. arb19 smokes all pass: h34 658, h33 970, branch-cancel 454. Witness hyp8-osbi-scalar-r4 launched on the arb19 model (frozen fw sha a9218107, tohost 0x80041730, 6M) -- r20-pure witness blocked until the rewrite settles. Witness r4 verdict: budget-out FAIL but NEW signature -- cause=2 (illegal instr) committed at 0x8001300e (legal c.sd s7,72(sp)) at t=25873, then ZERO fetches (iti ends 0x80013004, rvfi 4965 retires) -- fetch-delivery integrity + post-trap starvation, a frontend-domain wedge downstream of the LSU fix, not the tid-5 lost load. Next: frontend probe of the trap redirect (leftover/realign on cause-2 flush) or check whether the fetch window itself was corrupted. r21/r22 (I$ wrong-line root-caused + repaired; witness advances past it, stops on LSU lost-load sibling): fe-diag-r1 proved the cause-2 'bogus bytes' were a real refill of pa-0x80012000 served for va-0x80013000 (byte-exact ELF content of the wrong line, post-trap fetch healthy -- WFI park, not starvation). External g6lc_iq_arb rewrite repaired by collapsing the extra grant_snap register stage (take_v +1cy divergence); issue leaf PASS checked=88. ifill-diag-r1 (new +trace_from/+trace_to-windowed [ifill]/[wta2]/[soc] probes + ifill_tag_match assert): REQUEST-SIDE -- ICREC paddr 0x80012000, AR 0x80012000, install tag 0x80013; the assert caught the mis-association. Mechanism: pmp_data_if if_req_q snapshots the MMU/PMA areq reply EVERY cycle, so icache_areq_o presents the PREVIOUS cycle's response; the hyp8 READ_V W1-overlap accept chains the next request into the cycle where the old response still stands -> cl_tag_d latches the stale page tag and mem_data_o.paddr stitches it onto the new index (one page down at 4K crossing; latent false-hit leg identical). Fix by identity: fetch_valid &&= (if_fetch_vaddr_q == icache_fetch_vaddr_i) -- the standing response presents only for the request it answers (vaddr key already registered for tval; zero added latency within a held request). pmp leaf new F section: HYP8_PMP_PASS checked=23 (hyp8-control-pmp-r14, closure r59). r22 build lint x2 rc=0 (341/87/3, 351/97/3), model sha dc2dc73c; closure sha-diff vs r21 = pmp_data_if.sv only (no new external edits). Smokes 3/3 real tohost: h34@666, h33@889 (external arbiter tree now passes h33 via the grant_snap collapse), bc@454. Witness hyp8-osbi-scalar-r5 (6M, fw a9218107, tohost 0x80041730): budget-out FAIL exit 126 BUT the wrong-line wedge is dead -- zero %Error, assert never fired, stream retires cleanly through 0x80013000-0x800130dc (13994 rvfi lines vs 9930); UART empty; ckpt restores=51. NEW stop: next unretired insn is c.ld s9,56(sp) @0x800130de -- stack load evaporated (ITI+RVFI both end 0x800130dc), same LSU lost-load family as r19 tid-5/r3, NOT the areq leg just fixed. Next discriminating step: r22-diag with +ld_state/+stq_trace window 33200..33600 (edge ~c33340).  | r25 (2026-10-22): iq_bank phantom-taken fix (taken|=lone&alloc_i[p]; partial iqdisp_ack->stale-lane replay->sb:283 @c57031) + dispatch-leaf J PASS(40); r25 build green sha 8de994ef; smokes 3/3; witness r8 stops on NEW family: wrong-path control skip ~86B in fdt_next_tag (->0x80012a18) -> fdt_path_offset=-8 -> sbi_hart_hang; stale a1=0/a2=0xff0000 proven in callee; suspect=frontend redirect/stale-lopc (fix pending) | r31–r34 (2026-10-23, lead plan `analysis/execution-path-plan.md`): the r13 'never fetched' note was an instrument misread (ITI is a retirement trace); `+stall_census +hang_dump=2000` on the frozen r30 model named the owner — SB head `csrrw mtvec` issued=1 valid=0 with the 2-entry CSR address table full of two YOUNGER CSRs (tid 23 @0xda0, tid 5 @0xc01): an admission-order inversion (resource released in commit order, allocated at IRO grant). `+csrtab_trace` refuted leak/credit hypotheses; `+iqleg_trace` proved X-BLIND — the operand-stalled CSR sat in the arbiter's pres_q, invisible to the IQ-resident N1d frontier (frontier/legal logic correct). r31: loop-buffer inject identity (hit_vaddr/epoch, reseed flush; `HYP8_LBUF_PASS 22` + mutant) + `[hang] CSR seam/FE` owner lines. r32: csr_buffer cancel-qualified arrival + sb_live owner-liveness release (`HYP8_CSR_PASS 63` + mutant) — hardening, not the cause. r33: CSR table allocated at DISPATCH in program order (disp strobes from g6lc_ooo_dispatch, group gate csr_credit>=popcount(CSR lanes), csr_ready constant-true + assertion; `HYP8_CSR_PASS 75`, dispatch 66, mutant G6LC_MUT_CSRTAB_IRO_ALLOC fails the inversion case); witness r16 2,066,236 retires no wedge; r16x (external-free) passed 0x8000ea9e — ownership proof. External edits (lsu_bypass depth-4/IRO credit+port relaxation+ALU2, ooo/* edits) own the h33 store-forward livelock (r32a/r32b: both groups independently) and carried the earlier witness advance by coincidence. r34: T1 rank-0 structural pass with per-item equivalence assertions + [equiv] counters (9 landed: iq_legal 28.8→16.4 / presentation 122→21.9 / IQ stitch 222.7→134.2, sb_lifecycle, rename_recover, fe_override, tlb PLRU, lsq_release, lsq_event, lsq_slot, cam_bank; 2 discarded by measurement: alu one-hot shifter 27.9→48.0, lsq_reduce 38.2→43.5; rename_resolve not landed — hi_last inline 41.6→30.1 shows ~11.5 FO4 of function billing, fixture owed); smokes and r17 witness bit-identical to r33/r16; `analyze-ghz-r2` live clock-setter now csr_buffer:240 39.0. Tools: `inputs/clock_board.py` + `clock_exclude.txt` + `analyze-ghz-r1.cmd` (reproduced r1 at +0.0). OPEN: external-free model wedges at ~3.78M (sb_empty, FE reseed-cycling, fe_v=00; r16xr reproduces without T1); rename_resolve 1′ (prev2 record); F12 contracts for the external edits; h33 external regression unattributed per file. | r35–r38 (2026-10-23): r34 20M witness clean (6.9M retires, no UART). External-free wedge at ~3.78M root-caused by the windowed `[win]` probe: override-#1 leg 2 (g6lc_fe_btb_check, unbacked taken line guess) redirected to the queue frontier = the straddled beqz @0x8000ca1e while killing the completing window — identical-state refire every ~11 cycles (D1), sustained because the ov1 unlearn lost the frontend `resolve > ov2 > ov1` train arbitration every pass (D2). r36: `sq_q` identical-state guard (mutant G6LC_MUT_FE_OV1_REFIRE) + unlearn promoted above ov2 with a never-dropped assertion; HYP8_LINECHECK_PASS 53; r19x past the wedge, r19v2 20M clean. r37: the 20M libfdt residence is a VALUE LIVELOCK (4,903 fdt_next_node restarts at offset 0; caller's lw of the depth cell read 0 while the callee's sw wrote 1; FDT words all correct vs ELF; production reference banner at retire 1,297,731). r38 part 1 localized it: store memory-ACKed before tag check → fixup queue; load T1 matched the positional fixup export, fixup popped between T1 and T2, gen_rsp_pipe (DcacheHitExtra=2) re-read wbuffer_all live at T2 → 0 overlaid the correct array word. r38 fix: T1 registers {hit,be,DATA}, T2 merges the snapshot (mutant G6LC_MUT_WBUF_FWD_LIVE_T2; HYP8_DCACHE_PASS 292 dchx2 / 313 dchx0; fwd_snap equiv 0.99–2.66M checks). **hyp8-osbi-scalar-r20x (r38x, external-free): OpenSBI v1.5 banner + logo printed, first UART at retire 1,531,354 / cycle 4,757,906**; milestones sbi_init→domain→hsm→hart_init→console_init→irqchip; h33 on the tree of record un-wedged (969 cycles, same race). csr_buffer alloc rank-0 39.0→22.9 (HYP8_CSR_PASS 75, r10); sv-timing fixture fn_prefix_or_billing.sv (hi_last call vs inline: 9.0/14.1/15.0/33.4 — context-bound). OPEN: tree-of-record r20 (20M) spins in sbi_ecall_register_extension @~16.26M — node->next at 0x80040648 read as 0 ~600 cycles after its sd (second visibility miss, persistent) → r39 localization; r21x pushes the external-free line to 20M. | r76 (2026-10-27, `analysis/r76-program.md`, log `## r76`): T2 config spine landed in `g6lc_hyp_pkg` (12 `*Stages` fields, `Hyp8Deep`, `-DG6LC_HYP8_DEEP`); F15 found by source trace and fixed — the L5 data-slot publish could be popped while an FSM-head completion (translation fault / spec write-off / STQ-covered load) stole the writeback port (leaf F15 PASS 160, mutant `G6LC_MUT_LU_PUB_COLLIDE` fails at 744; gate formed as a registered superset so the FSM cone stays off the pop); `LoadPubStages=2` registered publish record measured as a countercase (47.0) and reverted — the 41.0 was the rvalid_output bundle makespan; the kept move is the one-hot presentation: load_unit 41.0->37.2, structural clock 0.97->1.08 GHz (`analyze-r76-all`); decode_s3 53.7->52.3, fe_redirect 33.1->30.0 (pres). **F14 RESOLVED as an observer defect**: `[f14]` AW/AR/R probes showed the sc.d intact end-to-end and the tracer print showed `insn=sc.d mem_addr=80001180 mem_paddr=80001000 wdata=ad` — `g6lc_rvfi` reported `mem_paddr` from the STQ speculative head (the younger `sw tohost` issued early under OoO), so the tracer declared tohost from the SC's data; per-instruction store/AMO paddr capture landed (store_buffer/store_unit push strobes -> probes -> g6lc_rvfi), `hyp8_amo_ready_order` and `hyp8_f14_store_offset` now SUCCESS -> **7/7 smokes** on `hyp8-integration-r76f` (sha `173e27c7...`); the r68–r74 'SC write corrupts DRAM / boot blocker' statements are superseded. Witness `hyp8-osbi-scalar-r47b` (FDT-fixed fw, 100 M) running, no `[hang]` at ~12 M — collect with `testharness_proxy.py pull --tag hyp8-osbi-scalar-r47b`. Settled next: B2 latency-neutral early steer (`IqSteerStages`), load_unit §5a item 6a, B3 mmu/decode_s2/csr_regfile, mc2 reset-fetch AR/R probe. | r77 (2026-10-27, log `## r77`): `g6lc_iq` steer P6 split + prepared `ge[k]` eligibility — 101.7->38.3 pres, dispatch stitch 125.2->54.9 (dispatch leaf 125 checks, `r69 steer` equiv 619, smokes 7/7 identical on `hyp8-integration-r77` sha `56d3601d...`); load_unit NI late-select closed (false premise, PMA on page-aligned PPN) and slot-cancel share NULL/reverted; rename_recover family split NULL/reverted (co-limiter `gen_pub_v` :412); clock 1.08 GHz unchanged (load_unit 37.2). r47b alive at ~28 M, no [hang]. Next: collect r47b; rename_recover :412 gather (A120); load_unit 6a census; iq_bank SEL / iq_arb census; tlb tags_n arms. | r78 (2026-10-27, log `## r78`): iq_bank one_older single-hot table 32.3->30.1 (dispatch leaf 125), tlb flush-arm hoist 30.9->24.9; rename_recover gen_pub_v NULL (three co-limiters at 31.8 -> rank-1 two-edge flush repair), load_unit 6a closed by census (no state arm reads the 56-bit select; next = registered NI verdict), iq_bank decode-at-alloc NULL, iq_arb no move; `hyp8-integration-r78` sha `6cc9cc8c...` 7/7 identical; clock 1.08 GHz (load_unit 37.2). Rank-0 inventory on the top rows is exhausted; next tier rank 1 in the order of implementation-log `## r78`. r47b alive ~32 M, no [hang] — collect first next session. | r79 (log `## r79`): load_unit dead-predicate NI gate (paddr_ni is constant 0 on every g6lc profile — zero-length NI rules; sv-timing fixture `fn_zero_len_range.sv` + package todo) and kill-path `last_tid_q` both NULL on the board and reverted; the 37.2 into-L5 cone is the publish datapath (gather -> byte merge -> align -> sign-extend) -> rank-1 cut after the gathered word (LoadPubStages=2 variant b), same-map comparison first. F16 config finding: no NI region declared -> speculative device reads legal (PLIC claim/UART RBR hazard for Linux); decision pending. | r80 (log `## r80`): load_unit cut-after-gather publish record implemented (plain leaf bit-identical) but the same-map boards read 45.2 for BOTH gated arms — delay-v44 does not fold the HypCfg-derived localparam (fixture owed); reverted; rule: config-gated stage arms must be separate modules selected by the caller to be measurable. Clock 1.08 GHz unchanged. | r81 (log `## r81`): L4 result formation extracted to `core/g6lc_lu_result.sv` (18.2 pres; bit-identical, 7/7 smokes on `hyp8-integration-r81` sha `05e9dc3b...`); load_unit's 37.2 into-L5 cone is the same-cycle `ex_pub` exception publish (port-indexed) -> settled next: route all exception completions through the r51 pending record as caller-selected modules (`LoadExPubStages`). r47b alive ~30 M, no [hang]. | r82 (log `## r82`): sv-timing (B) landed — constant-cond ternaries fold to the live arm (`Expr::const_value`, `elaboration_const_seed`, `ir-v6`/`delay-v45`, fixture `localparam_gate_fold.sv`, core tests 270/270); boards +0.0 on the core (semantics correction); (A) package-function folding open with plan in `sv-timing/AGENTS-todo.md`. | r83 (log `## r83`): r47b collected — 40 M harness cap, ret 7.82 M, no [hang], all `[equiv]` counters clean (F15 collision n=0 on firmware); sv-timing (A) part (i) landed (`delay-v46`, unsigned compare folds, `ConstSeed.fns`), the package-function body evaluator remains; load_unit 37.2 unchanged. Next: kernel progress probe / higher cap; (A) interpreter; then the rank-1 ladder (ex_pub -> pending record first). | r84 (log `## r84`): `LoadExPubStages=2` landed — exception completions present from the r51 pending record (+1 on the fault path only); plain bit-identical, deep leaf PASS, mutant fails; `hyp8-integration-r84b`/`-r84d` both 7/7 cycle-identical; boards still 37.2 because sv-timing enumerates region nodes not dep-chains (delay-v47 dep-fold landed; dep-chain/dead-node pruning is the next package item). Rank-1 ladder next: rename_recover two-edge flush repair, IqSelStages. | r85 (log `## r85`): sv-timing dependency-chain path enumeration + dead-node pruning landed (`delay-v48`, fixtures `localparam_gate_fold`/`dead_arm_region`); instrument validated on load_unit's new 54.2 chain (real cone, statement-order under-billed). **New baseline of record `analyze-r85-all`: 0.53 GHz / 75.0 FO4 (`g6lc_ai_exec`), serdiv 69.3, lsq 65.0, shared_tlb 55.2, load_unit 54.2, rename_read 54.1** — all earlier absolute FO4 figures (core r74–r84 AND the AI-island delay-v45 boards) are stale and must be re-boarded under delay-v48 before any further absolute claim; relative A/B results stand as ordering evidence. Next: dep-chain census per top module, load_unit `st_fwd_covers` → `ldbuf_w` chain (rank-1 `st_fwd_covers_q` under StoreFwdCycles>1), AI exec :479. | r86-r90 (log `## r86-r90`): measurement workspace rebuilt as tracked `analysis/timing/`; sv-timing delay-v49 fixed six dep-chain measurement defects (register-only cones, if(const) arms, pkg/struct constants, folded && chains, statement-order fallback, replicated selects) and the map error `NonIdemPotenceEn=1`; baseline `r88-all` -> `r90-all`: g6lc_ai_exec 90.4->79.5, serdiv 73.1->55.3, g6lc_lsq 54.5->36.8, g6lc_shared_tlb 39.3->29.8, load_unit 54.5->47.1, g6lc_rename_read 54.1->51.0, all with translate_off reference asserts; two hyp8 defects found and fixed (F17 U8xU8 MMA truncation, F18 serdiv udiv/urem by b>=2^63) with new leaves. Open: the delay-v43 unbuffered load law makes any 64-bit 2:1 select >= 23.5 FO4 (8 FO4 unreachable for 64-bit datapaths under it) -- a `--load-model repaired` calibration decision for the host; region-path sums; `ld_free_o` serial count; dot4 one-cycle contract.
+
+### Round log: fe-diag-r1, r27–r30, r99–r129 (oldest first)
+
+- fe-diag-r1: cause-2 wedge root-caused to I$-FILL DATA MIS-ASSOCIATION (va 0x80013000/0x80013008 responses carried pa 0x80012000/0x80012008 bytes; realigner/queue/decode faithful, post-trap = benign WFI park). Insertion point below frozen model's bus-probe caps (icf<600, wta<3000, soc<4000) — needs uncapped window probe on next build. Secondary: stale lopc=0x800136b6 leftover survived bpf-kill (same class as SRC_OV1 fix; benign here).
+
+- [r27] rename_recover void-select assert gated on ref_take (empty-ring mispredict: ref underflowed on don't-care level); leaf K PASS checked=45; smokes 3/3; witness r10 confirmed leg at c691969 then wedged in sbi_init prologue (sd s3,152(sp) unretired) — next: LSU lost-op diag at new wedge.
+
+- [r28] sb_cancel dead-slot identity: cancelled_mask |= ~issued (issued is the durable allocation bit; cancelled cleared with it at commit/drop so stale B2 resolves passed). Dispatch leaf L PASS checked=58; r28 closure diff vs r27 = sb_cancel only; integration build running; smokes+witness r11 pending.
+
+- [r28b] Dead-slot resolve authority, REVISED: first r28 mask term (~issued in cancelled_mask) killed post-commit STQ records (h33-r21: store cq0 died 1 edge after push, ld wedged at commit head). Fix kept at resolve gates: sb_cancel bmiss_o &= mem_q[tid].issued; ex_stage br_lane_v &= sb_live_i[tid]; mask reverted to cancelled-only. Leaves dispatch r17 checked=57 + memory 88; smokes 3/3 (h33 back to 889); integration r28b sha 2fba39b8; witness osbi-scalar-r11 running.
+
+- [r29] Controller ghost-flush gate: stale dead-slot resolve (valid=0 but is_mispredict=1 still standing after the r28b sb_live fix) reached the controller UNGATED -> bare flush_if -> FTQ flush+push(npc_q=next_block) destroyed the 0x8000099c redirect head one cycle after apply (witness r11 wedge ~c965.2k; li a0,0x53 dropped). Fix: resolved_branch_i.valid gate at controller.sv:242 (+G6LC_MUT_CTRL_STALE_RESOLVE review mutant). New ctrl leaf PASS checked=6; mutant -> CTRL_STALE_RESOLVE_NO_FLUSH as required. r29 closure diff vs r28b = controller.sv + g6lc_iq_arb.sv (external whitespace-only churn). Build+smokes+witness r12 pending.
+
+- [r30] load_unit ex_pub kill-cycle identity: a killed SEND_TAG request's OWN dummy rvalid now publishes the exception ((ldbuf_last_id_q==rresp_idx)||!kill_req_w; an external rewrite had reverted it to `!=` — re-applied and closure-verified). Memory leaf section F +11 -> HYP8_MEMORY_PASS checked=99 (r30b); mutant `!=` -> LU_MIS_EX_PUBLISH FAIL (r30mut5). r30 closure diff vs r29 = load_unit.sv (fix) + external iq_arb/iq_bank/lsq_verdict (rename_recover churned and returned to r29 content). Lint scalar rc=0 (343/87/3), smt2 rc=0 (353/97/3); model 07a54529. Smokes 3/3 real tohost (h34@682 h33@889 bcancel@475). Witness r13: 2,306,327 retires past the r12 assert (c1,168,793), zero %Error; NEW wedge — fetch+retire both stop at 0x8000ea9a, next insn csrrw mtvec @0x8000ea9e never fetched (frontend starvation boundary in sbi_hart_init).
+
+- Hyp8 r99 MC contract closeout (2026-10-29): resolved the r98 unqualified MC gate without waivers — zero-default LSQ store credits now follow the derived speculative-store depth (MC 16; explicit oversize still `$error`), and the rename checkpoint record/publish/recovery seam carries the full 128-entry slot (`CKPT128_PASS last=127`). Final isolated aggregate `hyp8-r99-aggregate-c2` has scalar/SMT2/MC lint rc=0, `%Error=0`, `%Warning-USERERROR=0`, `%Warning-SELRANGE=0`; dispatch leaf PASS 125; scalar smokes 7/7. Evidence: `build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r99/worklog.md`. Open: remaining ordinary lint warnings (602/623/688 by scalar/SMT2/MC), MC simulation, Linux/OpenSBI boot and physical timing.
+
+- Hyp8 r112: Zbb zero-count defect corrected and remote leaf/11-smoke
+  qualification passed. The earlier issue-6 retired-load replay attribution
+  is withdrawn; H36/H37 pass on the affected baseline. Track corrected
+  OpenSBI/Linux witness separately through `G6LC_LINUX_INIT_UP` and
+  `G6LC_LINUX_SHELL`; full OpenWRT/procd is outside the frozen payload.
+  The local canonical verification gate remains blocked by missing managed
+  Verilator; synthesis/physical timing remain open. Evidence:
+  `build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r100/worklog.md`.
+
+- Hyp8 r113: the residual r112 allocator failure was localized to an
+  OV1 frontend restart at a queued taken branch's fall-through. The branch
+  operands and taken resolution were correct. The accepted-stream
+  successor now retains the queued prediction; leaf PASS 75, prior-behavior
+  mutation fails `G_BRANCH_OV1_TARGET`, scalar/SMT2/MC lint has zero errors
+  and unchanged warning totals, and 11/11 whole-core smokes pass.
+  RTL `a5fc9e4e6`, verification/flists/licensing `f943858cf`.
+  `hyp8-osbi-scalar-r113` ended at its 300M-cycle limit (last RVFI
+  299999987), after the mount-cache tables but without either userspace
+  marker. Observer exit 4: incomplete, not a boot pass. Its two closed
+  traces are preserved as verified `.zst` archives; receipt
+  `remote-runs/hyp8-osbi-scalar-r113/output/compression-r113-final.json`
+  records the 15,301,837,868-byte logical storage reduction.
+  Continue the corrected r114 witness below.
+
+- Hyp8 r114: SC backoff read the previous formed result at the incoming
+  memory-ACK edge. The verdict now follows the owned registered result in
+  `AMO_RESULT`. Frozen r113 baseline fails `SC_D_SUCCESS_MASK`; corrected
+  focused leaf passes 44 checks, full D-cache leaf 334, and all 11 smokes
+  pass. Lint warning totals remain 602/623/688 with zero errors.
+  r113 has completed SLUB and progressed through IRQ/clock/console setup;
+  its LR stalls at cycle 245151461 were transient and motivated the
+  separate backoff investigation. Continue the corrected r114 model to
+  both userspace markers. Commits: RTL `a9c90bece`, tests/runner
+  `5f6e3740b`. Direct remote checks at 2026-11-03 02:09 UTC show r113
+  advancing at cycle 285042210 and r114 at 16784637, with neither marker.
+  The model-log tails show no fatal assertion. Preserve the final UART
+  and verdict; an ended process without both markers is not a boot pass.
+  Latest r114 observation: 2026-11-03 04:41:41 UTC, RVFI 33836506,
+  `Initmem setup node 0`, no markers or reported kernel error. PID
+  2644580 and remote observer 2677910 remain active under the 1B budget.
+
+- Hyp8 r115–r126: fork-PGO toolchain (`tools/verilator` `44063db83`,
+  compiler PGO + `--unroll-count 256 --unroll-stmts 131072` + split-loop
+  `.vlt`), simulation PGO in `hyp8-build-harness.sh`, and the r115–r127
+  FO4 batches qualified on the remote (lint rc 0, 14/14 smokes at
+  baseline cycle counts through closure-r127ag). Boot defects fixed en
+  route: frontend accepted-stream continuity (`6a5d55603`), younger
+  DTLB-miss load replay (`c5c9262de`), misaligned-slot fault-cause
+  assertion (`7eb2f6e1c`), held-load PA capture qualifier (`ad6a429b9`).
+  **r126 PASSED 2026-11-14**: model `3a82cda6…` (ad6a429b9 RTL, t4 +
+  sim-PGO) reached `G6LC_LINUX_INIT_UP` and `G6LC_LINUX_SHELL` — Linux
+  6.6.93 `/init` → BusyBox ash `~ #` — and ran the full 3e9-cycle budget
+  clean (monitor exit 0; ~54.3 h wall on the shared host). Evidence:
+  `analysis/r116/worklog.md` §11. r127 witnesses: r127m (default,
+  closure-r127m model) still running at 1.37B cycles; the OFF-by-default
+  deep (`LoadExPubStages=2`) and staged-MMU profiles each died on
+  assertions (load_unit misaligned-slot @254.9M, g6lc_tlb multi-hit
+  @317.4M) — recorded, not enabled. Committed tree `3438607dc` core ==
+  closure-r127ag; a t4 witness-quality build of HEAD (`closure-r128`,
+  `hyp8-r128-aggregate-t4`) is in flight — no boot witness has yet run
+  on the final committed RTL.
+
+- Hyp8 r128/r129 (2026-11-15). `hyp8-osbi-scalar-r127m` PASSED (both
+  markers). r128 (committed tree `3438607dc`, model `f697e3b9…`, lint rc 0,
+  14/14 smokes) retires exactly what r126 and r127m retire at 100M, 400M,
+  700M, 794M, 1,762M and 1,764M cycles, but the remote disk was full for
+  ~11 h and its UART/log lost cycles 794M–1,762M, markers included: **no
+  marker verdict**. Relaunched as `hyp8-osbi-scalar-r128b` (budget 1.75e9);
+  open until `boot-monitor/*.exit` is 0. Deep profile
+  (`LoadExPubStages=2`): the r127n-deep stop at 254,915,572 was a lost
+  exception (slot drained while its pending record waited for a safe FSM
+  state); fixed in `107c4ca3c` with a leaf reproduction and mutant, default
+  netlist unchanged (14/14 smokes, same counts); witness
+  `hyp8-osbi-scalar-r129-deep` running, must pass 254.9M and reach both
+  markers. Memory leaf repaired (stale since `7d7d7dc5a`): 176 default /
+  177 deep on the pinned toolchain. Staged MMU: multi-hit at 317,424,744
+  follows the kernel ASID probe (satp, satp, sfence.vma) by ~10k cycles;
+  cause not established; `+tlb_trace` probe committed (`23dd03fab`),
+  replay `…-r129b-mmustaged-diag2` queued behind the live witnesses
+  (`HYP8_WAIT_PIDS`). Host note: 12 cores; three 4-thread models plus APU
+  leaf jobs drop witnesses to 1–5 kcyc/s — run at most two, and watch
+  `df` (witness traces are 30–90G each). Details: `analysis/r116/worklog.md`
+  §12–13, `analysis/r129/worklog.md`.
+
+- Canonical verification follow-up: harness selection fixed (`774f9cc6f`);
+  the cv64 depth-8 load buffer now has a derived 3-bit cache ID; the shared
+  testbench reads built-config cache geometry; optional `mtval` storage
+  and RV32 register widths are handled in the C++ diagnostic.
+  Seven RV64 comparisons and one RV32 hello comparison (719 matched)
+  passed. The final `verify --lint --sim --synth` gate passed all eight
+  lint/elaboration, simulation and synthesis-smoke steps at 2026-11-03
+  02:47 UTC (durable `r114-canonical-final-20261103T022156Z` artifacts).
+  Hyp8 userspace and physical timing qualification remain open.
+  Spike's missed HTIF completion, YAML-overridden CLI limit and false
+  success on budget exhaustion are corrected in child `74d780f1`
+  (root pin `b2e1ee422`), with positive, guest-failure and budget controls.
+  The old managed install is preserved as `spike-pre-r114-backup`.
+  Reviewed fixes: config/SV testbench `54528988c`, C++ probes `d07d3c632`.
+  Details and exact identities: `analysis/r100/worklog.md`.
+
+- Evidence storage: closed r107/r109/r112/r112diag hart/RVFI traces now
+  reside as verified `.zst` archives. Eight round-trip hash/size receipts
+  record 10,966,140,023 bytes released. Do not delete these archives or
+  active witness data. Update readers to decompress the archived traces.
+
+## Hyp RTL (`out_rtl/`) — AI island FO4 program (`hyp_redesign_corev_apu_8fo4/`)
+
+AI island / ai-matrix FO4 program (2026-10-26/27, hyp tree of record `build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/` + `hyp_redesign_core_8fo4/core/cvxif_g6lc_ai/`, production `corev_apu/`/`core/` untouched): program doc `hyp_redesign_corev_apu_8fo4/analysis/ai-fo4-program.md` (§5 Results), log `analysis/implementation-log.md` (ai-hyp-r1..r6 + close-out), drift census `analysis/ai-tree-drift.md`, boards `build/sv-timing/hyp8-src/boards/ai-island/analyze-ai-hyp-{r0,final2}.{json,cmd}` (file list `inputs/ai-island-hyp.f` from `inputs/gen_ai_island_f.py --tree hyp`; APU map; delay-v44; structural 8-FO4 screen, never STA). Landed: pe_dot_pipe 45.4->14.8 (explicit partial-product rows, exact-width tree levels, LATENCY kept), default island cell = int+float pipes (`DotPipeInt/DotPipeFloat=1`, comb cells kept as oracles), gemm_seq 347.6->171.2 (D1 clz pitch, D4 wbeat barrel, D5 stripe shift-only — the divider that poisoned the AR bundle, D2a cursors as scaffolding, D6 hoist of the AR pre cone, lc m*n via `g6lc_ai_mul_seq` WA/WB with a 10/10 unit leaf), island_top 1047.9->51.8 (E2 one-hot fetch arms, E2c one `always_ff` per register group, E4 per-queue generate; E1 constant queue decode; E3 masked-OR rdata), addr_check 20.0->8.5, desc_fetch 33.0->29.5, policy_codec 149.7->113.6 (family split), fp_pkg or-fold normalize (C2). Reverted countercases with evidence: D2b AR/C cursors (deterministic fmt=1 golden miss, miter at the wrong consume tuple), D3/D3b AR candidate registers (null, +cycles; the ~170 is beats_for_rem/cap/elems 32-bit arithmetic), G1 desc spans (kick-edge/hold/miter defects; a lead-written ST_SPAN sub-FSM is owed), G2 inval_queue tail copy (`tail_eq` fired), C1 float-pipe S1 split (fmt-3 GEMM golden regression; `run-gemm-backend dpf=1` is now the gate for any float-pipe change). P6 model finding: delay-v44 composes every NBA write of one monolithic `always_ff` as a serial chain regardless of disjoint guards (island_top node walk in the log) — sv-timing fixture owed; rule: lint the touched module with Verilator before any board (sv-timing's parser accepted a file Verilator rejected). Gates of record on the hyp tree (WSL Verilator 5.020): gemm-backend 12 configs (956/1563/1638/1788 cycles, cycle-neutral), desc-island (9 equiv counters @5096), island-wide, inval-queue (+mutant), island-dma (eq 239), pe_dot_pipe Lanes 1/4/16/256, pe_dot_float_pipe Lanes=8, policy-walk + DMA 7339 cycles, mul_seq 10/10, store-align/gemm-wide/gemm-stripe, formal `analysis/formal/g6lc_ai_gemm_flat_hyp.sby` 3/3. Open: policy_steer F1 topology register (178.0), policy_subcode 96.4, cluster_dispatch H1 prologue (150.5, Clusters>1 SKUs), inval_queue 52.3, gemm_seq AR arithmetic 171.2, desc_engine 111.8 (ST_SPAN), island_top :1857 bundle 51.8, pe_dot comb 128.4 / pe_dot_float 47.1 (non-live oracle arms, `inputs/clock_exclude_ai.txt`), the hyp `tb_g6lc_ai_pe_dot` harness artifact, the fork mutant-observability anomaly (SIGNROW; m3+1 control proves the chain), and the `--help/` stray directory at the repo root (untracked, 2026-10-23, not ours to delete without a ruling). r7 phase (caller-purposed segments, program §6, board `analyze-ai-hyp-final3`): R1 job-event outputs registered at every caller-consumed seam (gemm_seq/cluster_dispatch/desc_engine/policy_* ; same-cycle-coupled readies kept combinational with `start |-> ready` assertions) — port-bridged stitches 321.6/229.8/228.5/227.8/223.0 → 40.2/29.5/29.3/29.2/27.9, gemm cycle table identical; R4 desc_engine ST_SPAN (three `g6lc_ai_mul_seq`, sticky seen, span registers with the functions' degenerate/saturation guards — the m=0 descriptor case was caught by desc-island and fixed) 111.8→63.3, `span_eq` checked=175, island DMA bench 7339→8395 cycles; R5 policy_codec 3-cycle window 113.6→85.8 (policy-walk PASS); R7 cap_window A104 (occupancy index 40.6 is the floor), island_top 51.8→43.9. Deferred/open: R2 AR burst planner (`g6lc_ai_gemm_arplan.sv` written and lint-clean, wiring into gemm_seq deferred — gemm_seq 171.2), R3 store planner, R6 inval_queue AW stage, R8 float cell LATENCY+1, R9 cluster_dispatch prologue (its bench hits a Verilator-5.020 `type()` internal error), R10 requant phase; policy_steer 184.0 awaits the R5 topology evaluator. Exec stays 31.6 (the sidekick's close-out table misprinted 62.6). r8 (board `analyze-ai-hyp-final4`): policy_steer 184.0→165.0 via an A134 three-stage `policy_topology` evaluator (policy-walk PASS, DMA 8395); R2 planner integration attempted and reverted (`ar=8` stall — planners pinned at `s1 row=1 t=0`, FIFO/valid/done contract; `g6lc_ai_gemm_arplan.sv` kept staged at 100.0, gemm_seq back at 171.2); subcode COMPARE2 stage null → reverted. Still open: R2 integration, R3 store planner (gemm_seq :2980 C-store bundle), subcode P6 split, R6 inval_queue AW stage, R8 float LATENCY+1, R9 dispatch prologue, R10 requant phase. r9 (board `analyze-ai-hyp-final5`, tree green at the 956-cycle baseline): policy_subcode 96.4→80.3 (P6 three-family split, policy-walk PASS). The R2 AR planner was made to work (duplicate-plan deadlock → one-plan-in-flight → launch-on-drain; 12 configs PASS, nch=2 1468 < 1563 baseline; N>1 kept on the verified arm after gemm-stripe showed the planner lacks a stripe split) and then lost: the S0 split (97.0) dropped a plan, and the green r2c file had no byte-exact snapshot, so R2 is reverted again with the re-land recipe in the APU log `## ai-hyp-r9 — close`. Rule reinforced: zip before every edit. r10 (board `analyze-ai-hyp-final6`, tree green at 956): R2 re-land under snapshot discipline reproduced the plan arithmetic exactly (launch/push/cursor miters all silent) yet the GEMM golden reads C=0 — the consumer side of gemm_seq (receive/MAC bookkeeping that assumed the live `ar_*_pre` timing) is the owner; next discriminator = trace `ar_push`/`ar_lane_push`/`recv_i`/`recv_t`/`r_fire` for the first burst with the planner vs the pre-comb arm. R2 reverted; arplan staged at 140.0. Open: R2 consumer fix, R3 C-store planner, R6, R8, H1, R10, N>1 stripe cap. r11 (board `analyze-ai-hyp-final7`, unchanged maxima): cluster_dispatch bench now builds on Verilator 5.020 (eight explicit `parameter type` channel params replace the `type()`-on-default-`logic` construct; island_top/bench wired) and exposes a hyp-gemm_seq defect on 2-cluster column-sliced jobs (prod PASS / prod-dispatch+hyp-gemm FAIL / hyp-dispatch+prod-gemm PASS) — deferred, default SKU unaffected; remote testharness rc=4 incomplete. H1 prologue (211.6) and R6 AW stage (53.6) measured as rises and reverted; R8 float LATENCY+1 and the R2 consumer trace remain open. r12/r13: no further RTL landed; the large-pass plan (per-module P6/A104/A134/R1/A140 moves with exact loci, pre-r13 zips for every target) is recorded in the APU log `## ai-hyp-r13` for execution in a fresh session; board of record stays `analyze-ai-hyp-final7`. r14 (board `analyze-ai-hyp-final8`): cap_window 40.6→25.8 (A104 one-hot occupancy classes + masked-OR; hyp-tree cap-occupancy PASS; the explicit OR-tree variant read 31.6 and was reverted; `run-cap-occupancy.sh` lacks the hyp path seam). R8 float cell measured 50.8→41.8 but reverted on red leaves (float gate must use /usr/bin/verilator — the 5.008 default binary failed the build; int-pipe O2 sum=0 needs a wave). The rest of the r13/r14 rewrite program (gemm_seq per-family split, steer :335, dispatch :339, codec :331, subcode :387, desc_engine :350/:393, inval_queue skid, R2 consumer trace, Clusters>1 gemm_seq defect) is staged with zips and loci in the APU log.
+
+### Round status r16–r41 (newest first)
 
 AI hyp r40/r41 completed reductions landed and gated
 (`analyze-ai-hyp-r41-final`): policy_subcode **44.55 → 30.40** FO4
@@ -548,21 +688,6 @@ candidates replace the serial balanced allocation. Policy RTL is unchanged.
 Correction to older prose: final8/r16 JSON policy stitches are
 156.84/177.64/181.18 FO4, not all <=40. Full details and provenance are in the
 APU implementation log's r16 entry.
-
-Live tracker for agent work. **Retrieval contract:** every open item below cites the architecture /
-progress files that hold its priors (why it exists, seams, acceptance). Open those first; this file
-is the queue, not the design.
-
-Hyp8 retirement continuation (2026-10-21): source analysis, an aggregate caller-aware repair plan, a frozen source inventory/worklist, and a fresh sixteen-module structural/calibrated screen are in `build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/retirement-plan.md`. The first coordinated batch — held PRF operands, pending store-slot reservations, and forwarding payload lifetime — is implemented under the materialized hyp tree (`analysis/implementation-log.md`) and passed the focused remote leaf `tb_g6lc_hyp8_memory` (`HYP8_MEMORY_PASS`, 43 checks, tag `hyp8-memory-own-r5`); that is leaf evidence only, not full-core elaboration. The second batch — the common-event CSR retirement seam (commit_stage/csr_buffer/csr_decode/csr_regfile/csr_counters), issue-queue payload ownership, arbiter owned-TID exclusion and serial port0 class, in-FF age-matrix capture, IRO-acceptance FLU reservation (`g6lc_flu_reserve`), the IRO candidates/scoreboard split, generic replay encode, and the `IqSpecWakeup=0` WbReserve profile — landed with the consolidated review corrections and passed both control leaves: `HYP8_CSR_PASS checked=50` (tag `hyp8-control-csr-r6`) and `HYP8_ISSUE_PASS checked=67` (tag `hyp8-control-issue-r14`), closure `remote-runs/hyp8-control-r1-closure`. The third batch — full-top integration preparation — now elaborates the real `g6lc_testharness` top for both profiles: scalar and `-DG6LC_HYP8_SMT2` `--lint-only` both rc=0 with a full warning census (tag `hyp8-integration-r4`, closure `remote-runs/hyp8-integration-r1-closure`, 815 hash-verified files, runner `verif/regress/remote/run_hyp8_integration.py`). A `G6LCConfigNrHarts` seam (`ifdef G6LC_HYP8_SMT2` -> 2) feeds `NrHarts`; the explicit `--target g6lc64_hyp8|g6lc64_hyp8_smt2` mapping lives in `hyp8-build-harness.sh`. Under the recorded `HYP8_ALLOW_OVERLAP=1` per-run opt-in (four unrelated Variane workloads preserved; 2 compiler jobs / 1 model thread) the isolated scalar build completed: `Variane_testharness` sha256 `071a989f2c7249921ab425bf1c4b10ac6024f4c834f09efc20b1bac5eaed6988`, `target=g6lc64_hyp8 harts=1`, warnings=108 errors=0 — a build review point, not a run. Bounded inputs `h34_shift_dep`/`h33_st_fwd` are assembled (tohost 0x80001000); the frozen SMT2 OpenSBI inputs are hash-verified but marked NOT configuration-aligned (zicbom/zacas advertised vs hyp8-disabled; Linux DTB advertises H) and must not run until a matched DTS/firmware package exists. Batch F landed the lead-supplied wakeup/recovery fixes: rename-owned `int_busy_o`/`fp_busy_o` feed `grp_rs*_ready` from final held-group phys tags at IQ allocation (the stale R1 snapshot regs are gone), `ex_stage` gates branch redirect publication by the cancellation mask, and `g6lc_rename_recover` uses the current-state `rel2` clamp (retire-between-select-and-repair no longer underflows) plus the scoped latch/SELRANGE rewrites. The new `tb_g6lc_hyp8_dispatch` leaf (`HYP8_LEAF=dispatch`, full `Flist.g6lc_hyp8` closure, tag `hyp8-control-dispatch-r1`, closure `remote-runs/hyp8-control-r2-closure`) built clean on the fatal warning classes but hit the FIRST semantic failure `A_CONSUMER_LOST_WAKEUP` (consumer allocated, never issued within 30 cycles after a WB during its rename) - reported to the lead, no instrumentation series run. The bounded r4 diagnostic `hyp8-prebusy-h34-r1` hit a fetch realign assertion at cycle 396 (unrelated mechanism, recorded not debugged). `verif/tests/custom/hyp8_branch_cancel.S` was added unexecuted for the next snapshot. Open: the case-A stall root cause, then cases B/C/D, the flush_unissued recovery transaction, and the remaining timing/latency review. No full-model rebuild was performed this batch. The user authorized continuation; hyp8 per-source tier/REUSE coverage now preserves existing declarations, and the duplicate AES SPDX was normalized to an outbound offer without changing upstream notices. Current target is single-hart OoO; SMT2 and OpenSBI/Linux boot remain unqualified. Batch G closed the dispatch leaf and repaired the fetch carry transaction: the diag-r3 stale wb_id->tid_prd read was a bench-instrument artifact, fixed by a clocked WB adapter (`HYP8_DISPATCH_PASS checked=16`, tag `hyp8-control-dispatch-r2`, closure `remote-runs/hyp8-control-r5-closure`), and instr_realign's single pending-completion record was replaced by eager bank advance plus an explicit restore_i verdict path wired from the stage-S retained window (frontend `carry_restore`); the new `tb_g6lc_hyp8_realign` leaf proves completion+new-tail, restore, per-hart coexistence, and kill/stale inertness (`HYP8_REALIGN_PASS checked=39`, tag `hyp8-control-realign-r2`, closure `remote-runs/hyp8-control-r6-closure`, with the MIT g6lc_dram_peek64_stub linked as a dead $unit DPI shim - `hyp8-control-realign-r1` records the link failure that motivated it). The r4 boot-path carry assertion was removed by construction, not disabled: the new restore contract keeps equivalent sim assertions. Both runs were normal no-plusarg leaf evidence; no full-model rebuild, firmware, boot, synthesis, or OpenROAD was performed. Batch H rebuilt the whole scalar core post-Batch-G (`hyp8-integration-r5`, 816-file closure incl. the `hyp8_branch_cancel.S` input; scalar+smt2 lint rc=0, build rc=0, model sha256 `ef133ca1369bc65e12af28d6de7c42d4871c797c06427e0cc727a82afc2917a2`) and ran the first bounded smoke `hyp8-h34-r2`: 21 instructions retired (vs r4's cycle-396 carry assertion) before a NEW assertion `instr_queue.sv:890 lane_cf diverged from cf != NoCF` aborted at cycle 488 - sequence stopped at this first semantic failure; h33 and branch-cancel not run, no workaround attempted. Raw logs under C:/Users/etcim/AppData/Local/Temp/cva6-artifacts/{hyp8-integration-r5,hyp8-h34-r2}. Batch I repaired two concrete payload defects (instr_queue cf one-bit-cast gather -> full-width OR; alu A3 result-slot ownership via new result_valid_i through alu/alu_wrapper/ex_stage), added queue+alu leaves (`HYP8_QUEUE_PASS` 89 checks, `HYP8_ALU_PASS` 23 checks on closure r7), rebuilt `hyp8-integration-r6` (816-file closure, lint rc=0 x2, build rc=0, model sha256 `e3eb3b4070bcdbb41db835d6aecfb3fe2f4d7081ef1ec5872b177eab823ac939`) and stopped at the first smoke `hyp8-h34-r3`: NO assertion; a RETIREMENT STALL (not simulator non-convergence) -- the model ran normally to 50k cycles with tohost=0 and 41 retired (last pc 0x80000090). Boot npc prints cover only the first ~63 cycles and do NOT describe the final NPC; `restores/restore_dropped` is the BPU checkpoint census, not realigner carry-restore. h33/branch-cancel not run. No OpenROAD or boot run was performed in this review. Batch J root-caused the stall on the immutable r6 model via trace run `hyp8-h34-epoch-diag-r1`: instr_queue accepted PCs 0x8000005e/62/66 under epoch1 (t=488), delivered 5e, then the epoch2 redirect (t=490) invalidated the stored 62/66 entries while their shared branch-target record for Jump@66 stayed; a second pair (90/94, t=545-547) orphaned a second record, filling the depth-2 target FIFO (observed full=0000 with ready_o=0) -- a permanent starvation. Ownership repair: push epoch guards input acceptance only (win_live); stored entries live until delivery or flush_i (lane_live=~empty, lane_stale=0, lane_epoch_ok removed); target pops still follow actually consumed CFs; flush_i remains the sole cancellation (no early is_mispredict flush). Also repaired the boot-ROM read-latency defect: harness i_axi2rom was the legacy single-cycle axi2mem while the two-register banked bootrom needs three edges (diag trace showed the 0x10008 read returning 0x10000's word); now g6lc_axi2mem_reg RD_LAT=BootromReadLatency=3 behind typed AXI structs (dm legacy path untouched). Queue leaf `hyp8-control-queue-r3`: HYP8_QUEUE_PASS checked=126 (two-orphan starvation counterexample, dead-epoch input rejection, explicit flush). New rom leaf `hyp8-control-rom-r1`: HYP8_ROM_PASS checked=26 (fwd/reverse single-beats, r_ready hold, len=1 INCR burst). hyp8-integration-r7 build complete (model 4764fedd...) but the resumed smoke sequence stopped at the FIRST semantic failure: hyp8-h34-r4 hit store_buffer.sv:1147 speculative_buffer_underflow @649 (commit_i while the speculative store queue is empty) -- a NEW defect class; the epoch/target starvation is gone (54 retired vs 41, reached pc 0x800000de). h33/branch-cancel not run; firmware witness not reached. Batch K repaired the store-commit ownership boundary exposed there: store_unit publishes valid_o and st_valid in the same cycle but stb_insert stages the arrival two edges (S1 capture/S2 install), while commit_ready_o only meant drain capacity + no pend, so commit_stage could commit a store still in S1 - a headless pop that silently lost the store (the underflow SVA caught it). commit_ready_o now also requires commit_tid_present (the committing transaction installed in spec; presence not head - ooo_commit_is_oldest/MIX_COMMIT still own ordering; tid-only since no committing-hart input exists, SMT2 obligation recorded). Caller audit: commit_lsu_ready_o feeds only store_commit_hold + g6lc_core commit gating + store stall census (no non-store consumer, no split needed); all fu==STORE non-AMO commits (plain/FP stores, cbo.zero) insert one spec entry - no op predicate exclusion needed; exception-bearing stores never reach store_commit_hold. Second defect found by the extended leaf: the commit-edge concurrent assertions (speculative_buffer_underflow, ooo_commit_is_oldest) read post-pop state under the pinned verilator (post-NBA evaluation) and fire on every legal commit - reformulated on translate_off shadow registers so the contract holds under either eval order. Memory leaf extended with a REAL store_buffer (full insert/commit/drain, modeled commit_stage gating): HYP8_MEMORY_PASS checked=74 (43+31), tag hyp8-memory-own-r11, closure hyp8-control-r15-closure, model 3777e9ef... hyp8-integration-r8 built clean (lint rc=0 x2, build rc=0, model 35d9864b..., census unchanged); the first smoke hyp8-h34-r5 then hit a NEW assertion at cycle 652: g6lc_lsq_slot.sv:302 ooo_lsq_st_live (a valid LSQ store slot references an id whose scoreboard sb_live bit is 0 - LSQ-slot liveness vs scoreboard, a different defect class; the r7 store_buffer underflow did not recur). Sequence stopped at this first semantic failure; h33/branch-cancel not run; firmware witness not reached; no speculative repair attempted. Raw artifacts remote-runs/hyp8-h34-r5 and the C: cva6-artifacts mirror. Batch L: the r5 assertion was over-strict (lead derivation verified in source - store release is staged one cycle behind the sb_live clear; the dead-tid window is inert and tid reuse cannot overlap it). g6lc_lsq_slot translate_off only: ooo_lsq_st_live now requires pending release, ooo_lsq_st_stale_one_cycle bounds the window to one edge (shadowed-registered facts), and ooo_lsq_alloc_{st,ld}_id_unique check tid uniqueness at allocation. Load side unchanged - COH_FILTERED makes PHYS_VALIDATE inactive and ld_release_i has no one-cycle staging (residual over-strictness noted). Discovered the shared bench broke non-rom leaves on g6lc_axi_soc types; tb_g6lc_hyp8_rom is now ifdef-guarded with a rom-leaf define. Dispatch leaf re-proven: HYP8_DISPATCH_PASS checked=16 (hyp8-control-dispatch-r3c, closure r16). hyp8-integration-r9 built clean (model 729bd57e..., census unchanged). First smoke hyp8-h34-r6: NO assertion; program ran to its end marker - tohost store sw a0,0(t0) retired @637 then park loop - but the committed store never reached the memory port (dc_req=0 dc_gnt=0, tohost=0 at the 50000 budget, rc=120): a NEW defect class (committed store lost between commit and drain). Sequence stopped; h33/branch-cancel not run; firmware witness not reached. Batch M repaired the lost store: hyp pmp_data_if staged the LSU data response two edges behind the pmp registered verdict while store_unit/load_unit consume paddr/ex in the request cycle (diag: wbuffer data=1 be=0f but pa=0). Now pmp REG_VERDICT (default keeps PTW/fetch registered boundary; 0 = reference combinational compare) + pmp_data_if DATA_VERDICT_STAGES (0 = reference comb contract used by load_store_unit; 2 = staged variant preserved for consumers that wait on lsu_valid_o, which the LSU does not). New pmp leaf HYP8_PMP_PASS checked=14 (hyp8-control-pmp-r1). hyp8-integration-r10 built clean (model 34374f4d..., census unchanged). hyp8-h34-r7 is the FIRST full smoke PASS (tohost verdict @656, rc=0). hyp8-h33-r1 then hit ooo_lsq_ld_live @490 - the load-side oracle residual: the first store retired @439 and the following load's LSQ entry went valid on a tid whose sb_live had not yet re-asserted (allocated-but-not-issued window at the START of tid life, the mirror image of the store-side release window; whether it is the freed store tid is not visible in the trace). Same over-strict-oracle class, not debugged. branch-cancel not run; firmware witness not reached. Open timing debt: data PMP verdict is back on the LSU request cone - a staged verdict needs an explicit translation-response handshake in store_unit/load_unit. Open Sv39 risk: g6lc_mmu TlbStages=3 vs lsu_dtlb_hit_o same-cycle contract (unexercised by bare-mode). Batch N (2026-10-21): wt_dcache_ctrl.sv now restores the reference DcacheHitExtra==0 FSM arm behind DCACHE_HIT0 (+2 arm unchanged; DcacheHitExtra in {0,2} elaboration check), and the new real-wt_dcache forwarding leaf tb_g6lc_hyp8_dcache (HYP8_LEAF=dcache, -DG6LC_HYP8_DCHX0 selects the 0 variant) exercises store->load forwarding at distances 0-4, byte-merge, and coalescing. Outcome: BOTH variants fail the leaf with stale forward data (DCHX0: B_LB0; DCHX2: B_LB7; both returned a stale D-section dword). Root cause found: g6lc_hyp_rr_arb_tree is a queued arbiter - gnt_o pulses at request CAPTURE while idx_o/req_o reflect the queue HEAD popped later - but wt_dcache_mem captures compare operands at head pop and both ctrl arms verdict at a fixed delay after the capture-grant, so a congested/queued pop feeds the verdict another request's compare (port-2 store tag-check vs port-1 load). RESOLVED (lead handoff, option A): every queued-unsafe arbiter site now instantiates the vendor common_cells rr_arb_tree (already in the flist): wt_dcache_mem.sv:349 (the defect site - rd_ack is now the gnt_i-qualified same-cycle service grant), wt_dcache_wbuffer.sv:1623/1921/1943 (tx-id pick, dirty drain, check writeback - all index live arrays); wt_axi_adapter.sv:278 was already vendor since M3 bring-up. g6lc_hyp_rr_arb_tree remains in the flist with zero instantiations. Leaf rerun: DCHX0 (hyp8-control-dcache-dchx0-r18) and DCHX2 (hyp8-control-dcache-dchx2-r3) BOTH PASS checked=25 - the +2-path "visibility gap"/"refill alignment" observations were the same queued-arbiter mechanism, not separate defects. DECISION: Hyp8.DcacheHitExtra stays 2 (profile settled unchanged; no issue-leaf rerun needed). hyp8-integration-r11 built clean (model 4d70d7bb...). hyp8-h34-r8 PASS. hyp8-h33-r2 FAILED on the same ooo_lsq_ld_live @476 - but now with CORRECT forwarded data (h33-diag-r2: LU-RSP rdata=1122334455667788, wb data correct, retire @462, entry still valid 14 cycles later, no flush/replay/cancel). The dead-tid residue is decoupled from the D$ defect and is now a candidate real RTL lifetime defect (ld_release_i never fired for a normally-committed load; 14 cycles exceeds any one-cycle staged-release explanation) - oracle unchanged per lead instruction; needs a load-release-contract decision. Follow-up (same handoff): the +lsq_trace probe (sim-only, translate_off, in g6lc_lsq.sv + g6lc_lsq_event.sv; hyp8_tb.cpp allowlist entry) localized the residue precisely in hyp8-h33-lsq-diag-r1d: rel stayed low because done=0 (unres/dwait masks empty at alloc - older=00000000, dwait_set mask=0), and done never set because g6lc_lsq_event's gen_cmp[2] flop never produced ev_complete for tid17 even though its own in-line probe saw complete_valid_i[2]=1 id=17 is_st=0 canc=0 flush=0 at the capture edge. Ports 0/1 show in->out at +1 every time; w=2's only occurrence dropped it. Under strict flop semantics this is impossible - it is either a pinned-Verilator eval-order artifact on the input settle (the known post-edge sampling class) or a capture defect visible only under an unprobed condition; discriminating evidence would be a wave dump or a non-pinned-sim run of the same ELF. RESOLVED (architectural fix, batch OOO-release): LSQ load entries now release unconditionally on the registered commit event ev_commit_ld_i in g6lc_lsq_slot.sv (the release was previously gated under PHYS_VALIDATE / COH_OOO, dead in the WT COH_FILTERED config); ld_release_i remains the early path; PHYS_VALIDATE-gated phys-updates unchanged. The load-live oracle was replaced with the store-like pending-release formulation (rel_pend_ld OR ld_release_i; shadow-flop stale-one-cycle check; alloc-identity preserved). Non-fatal [lsq-ev-miss] per-port counters added in g6lc_lsq_event (translate_off, no $error). Results: dispatch leaf HYP8_DISPATCH_PASS checked=16 (r4); integration r12 clean (model 89961eaf...), census identical; h34-r9 PASS @656; h33-r3 ran past the old assertion -- first st->ld pair architecturally correct (x6=0x1122334455667788) -- but hit a NEW failure class: hang, SB head slot=20 pc=0x80000032 = first c.nop (insn=0x0001, fu=3, rd=0,rs1=0,rs2=0, alloc@468 port=1) never produced an `operands`/`wb` line; second c.nop id=24 (port=1 alloc behind port-0 store id23) sits unissued in IQ[13]; no cancel/flush in window. [lsq-ev-miss] counts 0 on all ports in both h34-r9 and h33-r3 -- the ev_complete capture miss did NOT recur in the r12 model (tid17 fired in@462/out@463). REFINED (hyp8-h33-disp-diag-r1, +disp_trace probe in g6lc_ooo_dispatch): tid20 (first c.nop, fu=3 ALU, all operands ready, prd=0) is allocated bank7/ent1, granted port1 @470, taken @471, staged in iss_v_q[1] and presented on issue_valid_o[1] continuously from c=472 -- but issue_ack_i[1] NEVER asserts (~49000 cycles). This was the FIRST-EVER port-1 presentation (only 2 port-1 grants in the run). tid24 (second c.nop, also fully ready) granted port1 @516 but can never take -- iss_v_q[1] occupied; its bank entry is the hang dump's IQ[13] resident; NO operand/ready-bit wait (ready=0000000 in the older dump was gate bits, not operand rdy). Zero [disp] kill lines; no cancel/flush. Static narrowing of issue_ack_o[1]=0 (issue_read_operands): issue_ack_pre=valid&&!fu_busy[1] OR res_admit[1] stall; stall_raw clean (oa_en=0 renamed, ss_raw excludes rs==0, stall_i=stall_acc_id=0, not amo/casq/flush). Suspects: (a) fus_busy[1].alu <- fus_busy[0].alu = !flu_ready_i||mult_valid_q stuck (flu_ready proven 1 at c=511 -- post-512 stuck mult_ready possible, unprobed; issue_stall print is port0-gated so it never fired); (b) res_admit[1] wedged (g6lc_flu_reserve reserved_q/div_live_q); (c) pinned-Verilator stale-read inside the IRO comb. Discriminator for next pass: probe fu_busy/stall_raw/res_admit/flu_ready_i per port on the iro line, or ungate issue_stall's port0 idle counter. OPEN: the real defect is IRO port-1 never-ack, NOT a nop/dispatch/LSQ problem. Also noted (minor): prd=0 busy-bit aliasing -- stores/branches/nops all busyset prd=0; wb-port wbclr prd=0 not gated while commit mirror is; false-ready direction only. E: DRIVE FULL (200G/200G) -- pulls now go to C:\...\cva6-artifacts; remote run dirs intact. branch-cancel and firmware witness NOT run per stop rule. REPAIRED (batch IRO-stale-lane): the never-ack mechanism was the in-order dual-issue throttle reading issue_instr_i[p-1].fu without issue_instr_valid_i[p-1] (structural_hazards) -- a drained lane's stale fu==STORE held fus_busy[1] forever. Fixed: throttle now valid-qualified (inheritance and port-0-only terms unconditional); same repair applied to is_alu_bypass, use_alu2, gen_ssraw c1/c2/c3 operand-forwarding, and assign_fp_raddr_pack (drained lane could steal port-1 FP raddr); audited-safe sites reported in implementation-log. p0 invariant added: g6lc_rename_recover translate_off !busy_q[0] assert (set paths already unreachable for rd==0; WB/commit clears already prd!=0-gated -- the busyset prd=0/wbclr prd=0 noise was set-clear aliasing, not a correctness hole). Leaf: tb_g6lc_hyp8_issue now drives the real IRO as i_iro (bench NrRgprPorts 2->4, matching build_config OPI=2) with stale-STORE-drain, stale-ALU-drain, and both-valid positive-throttle cases: HYP8_ISSUE_PASS checked=74 (r15), dispatch HYP8_DISPATCH_PASS checked=16 (r5). Integration hyp8-integration-r13 clean: lint x2 rc=0, scalar build rc=0, model 5975665f22732496..., census WIDTHEXPAND325/LATCH3 (vendor baseline). h34-r10 PASS @644. STOPPED at h33-r4: old port-1 deadlock GONE (in-order serialization observed on port0; st->ld forward data correct, tid19 lbu wb c=725 data=0x88, tid18 retired 727) but scoreboard.sv:269 'Commit acknowledged but instruction is not valid' fired at c=741 -- commit_ack_i[0] with commit_instr_o[0].valid=0. Diag read (hyp8-h33-r4-diag): no kill/cancel/flush in window; tid19 was the LAST allocated slot (no allocs after c=678). Analysis: commit_ack_o=fire is a same-cycle decision requiring rec_valid OR the cancelled-drop path; tid19 was never cancelled and mem_q[19].sbe.valid was held since wb c=725 (ld_checked sticky) -- a coherent sim cannot produce ack-on-invalid here. Signature matches the documented pinned-Verilator post-edge sampled-value class: the SVA's commit_instr_o[0].valid comb term (sel_oh=1<<commit_ptr_q -> sel_sbe) re-evaluates after the ack edge's own updates (cf_hit frees mem_q[19], commit_ptr advances 19->20) and reads the never-allocated slot 20; every earlier commit had a live next head so the post-edge read stayed 1. Discriminator if pursued: per-cycle print of commit_ptr/commit_sel_slot/rec_valid at commit_ack, or a non-pinned-sim run. OPEN. branch-cancel-r1 and firmware witness NOT run per stop rule. Runs pulled to C:/Users/etcim/cva6-artifacts; closure under .../closures/. hyp8-integration-r14 (LSQ waited-mask + scoreboard drop-commit SVA): lint x2 rc=0, scalar model 2ef79f26; h34-r11b PASS (tohost_addr now required on Windows-launched runs); h33-r5 FAILED tohost=128 @517 -- the FIRST pair (distance-0 check): `sd t0,0(s0)` mem 0x80001050=0x1122334455667788 @0x22 then `ld t1,0(s0)` (0x00043303) @0x26 returned x6=0, program took FAIL 1 (0x101); first semantic failure, see implementation-log r14 section; branch-cancel/osbi not run per stop rule. REGRESSION vs r13 (h33-r4 retired past pc 0xa0); r14 functional delta = waited_q/CAM suppression only -- candidates: a needed replay wrongly masked, or forward-path loss; diag run hyp8-h33-r5-diag (+smt_flow+lsq+disp+commit traces, same r14 model) completed remote-side, pull pending ssh stability. DIAGNOSED (r5-diag pulled): the waited-mask suppression masked a NEEDED replay -- load tid17 verdicted while store tid16 addr unresolved (dwait=0 at verdict, never re-armed), stale D$ publish at 432, retire drop=0 replay=0 at 434; the unsuppressed model (r6-diag) replayed on store16 first-addr-resolution and recovered the full word -- the prior "false violation" read was wrong (the r6-diag forward delivered partial 0x88 = stale data, replay was legitimate recovery). FIX IN TREE: unsuppressed violation CAM (match_i={vv_match_q,vio_match_q}, g6lc_lsq.sv:826) + contract comment + +lsq_trace kept; waited_q fully removed from g6lc_lsq_release. SEPARATE LATENT DEFECT FOUND (r6-diag): SL-W fixup tag-miss retry livelock -- FIXUP_CHECK miss -> FIXUP_PEND re-probes forever (wt_dcache_wbuffer.sv:1061-1070); fixup head at 0x80001060 never retires (no refill ever), queue wedged, load id=0 gen6 parked at the LSU since c=886 (lsu_ready=0, tohost sw pinned at IRO ack=0 -> commit head pinned -> c.j spin). Load-hold gate unverified (not WAIT_GNT/TAG/WB/WPO/NI -- needs +ld_state probe). Awaiting rebuild (r15) of the unsuppressed tree + smoke rerun + fixup-livelock fix decision. See implementation-log "h33-r5 discrimination + r6-diag LSU wedge analysis". UPDATE (h33-r7, r15 model 93b07779...): fixup MSHR-drop fix VERIFIED WORKING (fixup dropped @889 after tag miss, wbe=1, wbuffer drains); parked load now fully gated by +ld_state: WAIT_PAGE_OFFSET, pom=1 poso=0 (commit-queue-class match to 0x80001090), sbe=0, stb=1, rpl=0 suppressed per T33 (committed store never finishes in STQ bookkeeping) -> circular wedge via lsu_ready=0. Remaining defect is store-buffer commit-side match release (commit_queue/pend/sticky still holds the 0x090 match after the store memory-ACKed and its fixup dropped). +stq_trace does not exist in tree; next probe = store-buffer match-source dump. branch-cancel/osbi not run (stop rule). See implementation-log LSQ r15 section. CLOSED-SEQUENCE r16/r17 (2026-10-22, see implementation-log r16/r17 section): stq_trace proved the h33-r7 held source was the wbuffer W1 producer-acceptance recapture (not a commit-queue/pend/sticky hold); fixed by w1_accepted_q in store_buffer.sv plus the wt_dcache_wbuffer return-snapshot re-arm !evict masks (r8 tx_stat leak, FAIL-126). R17 smokes CORRECTED: the ELFs do carry tohost 0x80001000; r14/r9/r1 were launched without +tohost_addr so those liveness-only results are struck. Corrected runs (+tohost_addr): h34-r15 FAIL + h33-r10 FAIL (SimDTM DEBUG_REQUEST ~t520/572 -> mtvec park loop -> override-#1 misfire to 0x10058 zeros -> cause2 -> debug-mode 0x808 livelock, no tohost verdict); branch-cancel-r2 PASS (real SUCCESS(tohost=0) after 451 cycles, finished before the 500-cycle DMI gate). osbi-scalar-r1 FAIL = witness stop (6M cycles, allocs=17, zero UART, last retire pc=0x10062). Root cause diagnosed: NOT a realigner stale-leftover -- g6lc_fe_btb_check's ov1 unsupported-taken-guess clause fires on line guesses trained by direct Jump/Branch verdicts/resolves that no tagged predictor can ever back (BTB trains JumpR-mispredict only; under TAGE_LITE+BPIndirectEn the check's own tagged BTB is compiled out, leaving RAS-agree the sole adjudicator). Fixed on the r18 tree by identity: train_tagdom qualifies every taken line-table write (g6lc_fe_override pred_tagdom = predicting cf's adjudication domain; frontend nl_train_tagdom per producer; g6lc_fe_nextline masks ltaken writes). New leaf tb_g6lc_hyp8_linecheck: HYP8_LINECHECK_PASS checked=36 (tag hyp8-control-linecheck-r2). r18 (hyp8-integration-r18, model sha 7735a1861ff7d6f9): corrected smokes ALL semantic-pass -- h34-r16/h33-r11/branch-cancel-r3 SUCCESS (tohost = 0) at 656/966/451 cycles with +tohost_addr=0x80001000 +debug_disable (h33 previously wedged; the tagdom gate fixed the OV1 defect). Firmware witness hyp8-osbi-scalar-r2 STOPPED on a NEW latent defect proven at cycle ~24975: g6lc_ooo_dispatch re-captures grp_v_q when a rename publish (ren_pub) coincides with flush_unissued_i -- the if(ren_pub) branch outranks the kill leg and the dispatch_valid_i zombie mask samples pre-flush, so a dead lane is ack'd one cycle later while issue_instr_valid_o=0 (scoreboard.sv:283 SVA, identical edge in +smt_flow diag run hyp8-osbi-r2-diag). The zombie group allocates IQ+LSQ entries on a non-flush edge -- real wrong-path risk, not an SVA gap. Proposed fix (not applied, awaiting decision): mask the grp_v_q re-capture with the kill terms. RECORD-LOSS INCIDENT 2026-10-22: implementation-log.md was truncated by a local write mishap; reconstructed from verbatim transcript fragments + artifact anchors -- see its RECONSTRUCTION NOTICE. Run evidence (remote run dirs + cva6-artifacts closures) is intact. Leaves on the r17 tree: LSQ 17, memory-own-r12 HYP8_MEMORY_PASS checked=88, dcache dchx2-r45 + dchx0-r19d + dchx2-r47 HYP8_DCACHE_PASS checked=115 both arms. DCHX0 disposition: arm already present/legal {0,2}; leaf blocker was optimizer-folded bench probes, fixed port-safe in tb_g6lc_hyp8_control.sv -- no legality narrowing, no debt. r19 (hyp8-integration-r19, model sha 7b7e1365bde8bd83, closure hyp8-integration-r19-closure): kill-dominates-publish LANDED -- the grp_v_q capture in g6lc_ooo_dispatch.sv is reordered so mispredict|flush|flush_unissued clears outrank the ren_pub re-capture (sibling state audited in-comment: grp_sbe_q/grp_orig_q/tid staging and grp_may_bypass_q reach consumers only through grp_v_q/grp_go/dispatch_ack_o, steer_q is a perf hint, grp_pend_q already had kill priority). Dispatch leaf HYP8_DISPATCH_PASS checked=30 (tag hyp8-control-dispatch-r12, closure r50) covering publish@flush_unissued and publish@mispredict coincident edges -- no dack/IQ-alloc/issue for dead lanes, fresh post-kill group acks+issues normally. The leaf's first run failed G_FRESH_NO_ISSUE on a bench artifact only (iack left '0 by section F; reset_all now restores '1) -- not an RTL defect. r19 lint x2 rc=0 (scalar census WIDTHEXPAND 329/WIDTHTRUNC 87/LATCH 3; smt2 339/97/3). Smokes via testharness_proxy.py run (nm-derived +tohost_addr=0x80001000): h34-r17 656, h33-r12 966, branch-cancel-r4 451 -- all SUCCESS (tohost = 0), identical to r18. Witness hyp8-osbi-scalar-r3 (frozen fw_payload sha a9218107, nm tohost 0x80041730, 6M cycles): STOP -- budget-out FAIL 'stopped retiring' (exit 126), zero %Error, zero UART. The r2 defect is verified fixed in vivo: the same bgeu mispredict @0x80013760 resolved ~c24974 and r19 retired the redirect path cleanly (past r2's 24988 SVA point). NEW stop point: hart wedged ~c25030 in the fdt_path_offset_namelen epilogue -- 4 c.ldsp loads to the same stack page (0x80046f38-58) never retired behind a committed c.sdsp s2,48(sp) @0x80046f50; signature matches the r15 parked-load/STQ-record-release family (r16 w1_accepted_q fixes are in the tree -> residual leg or sibling held source; needs +ld_state/+stq_trace diag to name it). stq-diag-r1 (r19 model, probes): resolved -- NOT a parked load; the wedge is a LOST load: commit head id=5 'ld s1,56(sp)'->0x80046f58 entered WAIT_GNT @25034 and evaporated (no tag-port lookup/gnt/wb/kill; ldbuf drained to 0) while two later same-line loads completed via miss->refill; scoreboard stalls decoded=11 ack=00. Suspects: ldbuf/return-beat mis-association vs fixup-record forward-track orphan (fixup for 0x80046f58 was live at entry). stq_trace is capped c<3000 -- blind in the window; next diag needs ldbuf entry dump + data_id + fixup occupancy probes. OPEN PERF DEBT (accepted with the tagdom fix): under untagged-BTB hyp8 the line table keeps only RAS-backed return guesses; direct jumps/branches are re-predicted at verdict every pass -- a prediction-coverage cost, not yet measured against a tag-domain-qualified direct-CF training path. r20 (lost-load fix landed + qualified; tree-level stop attributed to in-flight iq_arb rewrite): ld-diag-r1 proved lsu_bypass depth-2 overwrite (insert tid=9 wp=0 cnt=2 OVERWRITE-FULL clobbered live head tid=5, no pop/flush/cancel; IRO-grant -> lsu_valid_q -> AGU-A2 -> bypass-insert reservation shadow while ready_o=empty allowed 3 grants). Fix: issue_read_operands fus_busy[0].load/store also set while |lsu_valid_q -- 2-cycle grant spacing bounds queue occupancy at depth. Leaf: tb_g6lc_hyp8_issue LSU-shadow section (runs first, arbiter-independent) IRO_LSU_SHADOW_OK checks=14 (tag hyp8-control-issue-r19, closure r54) -- ld/sd blocked exactly one cycle under the strobe, ack on clear, ready gate intact. r20b build (816-file closure; NOTE: closure fixpoint resolve() is CWD-relative -- must run builder from repo root): lint scalar/smt2 rc=0 (341/87/3, 351/97/3), model sha df747e1b. Smokes on r20b: h34-r18 SUCCESS@674, then STOP h33-r13 budget-out -- ld read 0 where merged store data expected, FAIL2 path, tohost sw retired but never visible. A/B: r20arb19 (same tree, iq_arb reverted to r19) -> h33 SUCCESS@970: the wedge is the CONCURRENT iq_arb rewrite (take path broke leaf check ARB_TAKE_P0_TID1), NOT the IRO fix. arb19 smokes all pass: h34 658, h33 970, branch-cancel 454. Witness hyp8-osbi-scalar-r4 launched on the arb19 model (frozen fw sha a9218107, tohost 0x80041730, 6M) -- r20-pure witness blocked until the rewrite settles. Witness r4 verdict: budget-out FAIL but NEW signature -- cause=2 (illegal instr) committed at 0x8001300e (legal c.sd s7,72(sp)) at t=25873, then ZERO fetches (iti ends 0x80013004, rvfi 4965 retires) -- fetch-delivery integrity + post-trap starvation, a frontend-domain wedge downstream of the LSU fix, not the tid-5 lost load. Next: frontend probe of the trap redirect (leftover/realign on cause-2 flush) or check whether the fetch window itself was corrupted. r21/r22 (I$ wrong-line root-caused + repaired; witness advances past it, stops on LSU lost-load sibling): fe-diag-r1 proved the cause-2 'bogus bytes' were a real refill of pa-0x80012000 served for va-0x80013000 (byte-exact ELF content of the wrong line, post-trap fetch healthy -- WFI park, not starvation). External g6lc_iq_arb rewrite repaired by collapsing the extra grant_snap register stage (take_v +1cy divergence); issue leaf PASS checked=88. ifill-diag-r1 (new +trace_from/+trace_to-windowed [ifill]/[wta2]/[soc] probes + ifill_tag_match assert): REQUEST-SIDE -- ICREC paddr 0x80012000, AR 0x80012000, install tag 0x80013; the assert caught the mis-association. Mechanism: pmp_data_if if_req_q snapshots the MMU/PMA areq reply EVERY cycle, so icache_areq_o presents the PREVIOUS cycle's response; the hyp8 READ_V W1-overlap accept chains the next request into the cycle where the old response still stands -> cl_tag_d latches the stale page tag and mem_data_o.paddr stitches it onto the new index (one page down at 4K crossing; latent false-hit leg identical). Fix by identity: fetch_valid &&= (if_fetch_vaddr_q == icache_fetch_vaddr_i) -- the standing response presents only for the request it answers (vaddr key already registered for tval; zero added latency within a held request). pmp leaf new F section: HYP8_PMP_PASS checked=23 (hyp8-control-pmp-r14, closure r59). r22 build lint x2 rc=0 (341/87/3, 351/97/3), model sha dc2dc73c; closure sha-diff vs r21 = pmp_data_if.sv only (no new external edits). Smokes 3/3 real tohost: h34@666, h33@889 (external arbiter tree now passes h33 via the grant_snap collapse), bc@454. Witness hyp8-osbi-scalar-r5 (6M, fw a9218107, tohost 0x80041730): budget-out FAIL exit 126 BUT the wrong-line wedge is dead -- zero %Error, assert never fired, stream retires cleanly through 0x80013000-0x800130dc (13994 rvfi lines vs 9930); UART empty; ckpt restores=51. NEW stop: next unretired insn is c.ld s9,56(sp) @0x800130de -- stack load evaporated (ITI+RVFI both end 0x800130dc), same LSU lost-load family as r19 tid-5/r3, NOT the areq leg just fixed. Next discriminating step: r22-diag with +ld_state/+stq_trace window 33200..33600 (edge ~c33340).  | r25 (2026-10-22): iq_bank phantom-taken fix (taken|=lone&alloc_i[p]; partial iqdisp_ack->stale-lane replay->sb:283 @c57031) + dispatch-leaf J PASS(40); r25 build green sha 8de994ef; smokes 3/3; witness r8 stops on NEW family: wrong-path control skip ~86B in fdt_next_tag (->0x80012a18) -> fdt_path_offset=-8 -> sbi_hart_hang; stale a1=0/a2=0xff0000 proven in callee; suspect=frontend redirect/stale-lopc (fix pending) | r31–r34 (2026-10-23, lead plan `analysis/execution-path-plan.md`): the r13 'never fetched' note was an instrument misread (ITI is a retirement trace); `+stall_census +hang_dump=2000` on the frozen r30 model named the owner — SB head `csrrw mtvec` issued=1 valid=0 with the 2-entry CSR address table full of two YOUNGER CSRs (tid 23 @0xda0, tid 5 @0xc01): an admission-order inversion (resource released in commit order, allocated at IRO grant). `+csrtab_trace` refuted leak/credit hypotheses; `+iqleg_trace` proved X-BLIND — the operand-stalled CSR sat in the arbiter's pres_q, invisible to the IQ-resident N1d frontier (frontier/legal logic correct). r31: loop-buffer inject identity (hit_vaddr/epoch, reseed flush; `HYP8_LBUF_PASS 22` + mutant) + `[hang] CSR seam/FE` owner lines. r32: csr_buffer cancel-qualified arrival + sb_live owner-liveness release (`HYP8_CSR_PASS 63` + mutant) — hardening, not the cause. r33: CSR table allocated at DISPATCH in program order (disp strobes from g6lc_ooo_dispatch, group gate csr_credit>=popcount(CSR lanes), csr_ready constant-true + assertion; `HYP8_CSR_PASS 75`, dispatch 66, mutant G6LC_MUT_CSRTAB_IRO_ALLOC fails the inversion case); witness r16 2,066,236 retires no wedge; r16x (external-free) passed 0x8000ea9e — ownership proof. External edits (lsu_bypass depth-4/IRO credit+port relaxation+ALU2, ooo/* edits) own the h33 store-forward livelock (r32a/r32b: both groups independently) and carried the earlier witness advance by coincidence. r34: T1 rank-0 structural pass with per-item equivalence assertions + [equiv] counters (9 landed: iq_legal 28.8→16.4 / presentation 122→21.9 / IQ stitch 222.7→134.2, sb_lifecycle, rename_recover, fe_override, tlb PLRU, lsq_release, lsq_event, lsq_slot, cam_bank; 2 discarded by measurement: alu one-hot shifter 27.9→48.0, lsq_reduce 38.2→43.5; rename_resolve not landed — hi_last inline 41.6→30.1 shows ~11.5 FO4 of function billing, fixture owed); smokes and r17 witness bit-identical to r33/r16; `analyze-ghz-r2` live clock-setter now csr_buffer:240 39.0. Tools: `inputs/clock_board.py` + `clock_exclude.txt` + `analyze-ghz-r1.cmd` (reproduced r1 at +0.0). OPEN: external-free model wedges at ~3.78M (sb_empty, FE reseed-cycling, fe_v=00; r16xr reproduces without T1); rename_resolve 1′ (prev2 record); F12 contracts for the external edits; h33 external regression unattributed per file. | r35–r38 (2026-10-23): r34 20M witness clean (6.9M retires, no UART). External-free wedge at ~3.78M root-caused by the windowed `[win]` probe: override-#1 leg 2 (g6lc_fe_btb_check, unbacked taken line guess) redirected to the queue frontier = the straddled beqz @0x8000ca1e while killing the completing window — identical-state refire every ~11 cycles (D1), sustained because the ov1 unlearn lost the frontend `resolve > ov2 > ov1` train arbitration every pass (D2). r36: `sq_q` identical-state guard (mutant G6LC_MUT_FE_OV1_REFIRE) + unlearn promoted above ov2 with a never-dropped assertion; HYP8_LINECHECK_PASS 53; r19x past the wedge, r19v2 20M clean. r37: the 20M libfdt residence is a VALUE LIVELOCK (4,903 fdt_next_node restarts at offset 0; caller's lw of the depth cell read 0 while the callee's sw wrote 1; FDT words all correct vs ELF; production reference banner at retire 1,297,731). r38 part 1 localized it: store memory-ACKed before tag check → fixup queue; load T1 matched the positional fixup export, fixup popped between T1 and T2, gen_rsp_pipe (DcacheHitExtra=2) re-read wbuffer_all live at T2 → 0 overlaid the correct array word. r38 fix: T1 registers {hit,be,DATA}, T2 merges the snapshot (mutant G6LC_MUT_WBUF_FWD_LIVE_T2; HYP8_DCACHE_PASS 292 dchx2 / 313 dchx0; fwd_snap equiv 0.99–2.66M checks). **hyp8-osbi-scalar-r20x (r38x, external-free): OpenSBI v1.5 banner + logo printed, first UART at retire 1,531,354 / cycle 4,757,906**; milestones sbi_init→domain→hsm→hart_init→console_init→irqchip; h33 on the tree of record un-wedged (969 cycles, same race). csr_buffer alloc rank-0 39.0→22.9 (HYP8_CSR_PASS 75, r10); sv-timing fixture fn_prefix_or_billing.sv (hi_last call vs inline: 9.0/14.1/15.0/33.4 — context-bound). OPEN: tree-of-record r20 (20M) spins in sbi_ecall_register_extension @~16.26M — node->next at 0x80040648 read as 0 ~600 cycles after its sd (second visibility miss, persistent) → r39 localization; r21x pushes the external-free line to 20M. | r76 (2026-10-27, `analysis/r76-program.md`, log `## r76`): T2 config spine landed in `g6lc_hyp_pkg` (12 `*Stages` fields, `Hyp8Deep`, `-DG6LC_HYP8_DEEP`); F15 found by source trace and fixed — the L5 data-slot publish could be popped while an FSM-head completion (translation fault / spec write-off / STQ-covered load) stole the writeback port (leaf F15 PASS 160, mutant `G6LC_MUT_LU_PUB_COLLIDE` fails at 744; gate formed as a registered superset so the FSM cone stays off the pop); `LoadPubStages=2` registered publish record measured as a countercase (47.0) and reverted — the 41.0 was the rvalid_output bundle makespan; the kept move is the one-hot presentation: load_unit 41.0->37.2, structural clock 0.97->1.08 GHz (`analyze-r76-all`); decode_s3 53.7->52.3, fe_redirect 33.1->30.0 (pres). **F14 RESOLVED as an observer defect**: `[f14]` AW/AR/R probes showed the sc.d intact end-to-end and the tracer print showed `insn=sc.d mem_addr=80001180 mem_paddr=80001000 wdata=ad` — `g6lc_rvfi` reported `mem_paddr` from the STQ speculative head (the younger `sw tohost` issued early under OoO), so the tracer declared tohost from the SC's data; per-instruction store/AMO paddr capture landed (store_buffer/store_unit push strobes -> probes -> g6lc_rvfi), `hyp8_amo_ready_order` and `hyp8_f14_store_offset` now SUCCESS -> **7/7 smokes** on `hyp8-integration-r76f` (sha `173e27c7...`); the r68–r74 'SC write corrupts DRAM / boot blocker' statements are superseded. Witness `hyp8-osbi-scalar-r47b` (FDT-fixed fw, 100 M) running, no `[hang]` at ~12 M — collect with `testharness_proxy.py pull --tag hyp8-osbi-scalar-r47b`. Settled next: B2 latency-neutral early steer (`IqSteerStages`), load_unit §5a item 6a, B3 mmu/decode_s2/csr_regfile, mc2 reset-fetch AR/R probe. | r77 (2026-10-27, log `## r77`): `g6lc_iq` steer P6 split + prepared `ge[k]` eligibility — 101.7->38.3 pres, dispatch stitch 125.2->54.9 (dispatch leaf 125 checks, `r69 steer` equiv 619, smokes 7/7 identical on `hyp8-integration-r77` sha `56d3601d...`); load_unit NI late-select closed (false premise, PMA on page-aligned PPN) and slot-cancel share NULL/reverted; rename_recover family split NULL/reverted (co-limiter `gen_pub_v` :412); clock 1.08 GHz unchanged (load_unit 37.2). r47b alive at ~28 M, no [hang]. Next: collect r47b; rename_recover :412 gather (A120); load_unit 6a census; iq_bank SEL / iq_arb census; tlb tags_n arms. | r78 (2026-10-27, log `## r78`): iq_bank one_older single-hot table 32.3->30.1 (dispatch leaf 125), tlb flush-arm hoist 30.9->24.9; rename_recover gen_pub_v NULL (three co-limiters at 31.8 -> rank-1 two-edge flush repair), load_unit 6a closed by census (no state arm reads the 56-bit select; next = registered NI verdict), iq_bank decode-at-alloc NULL, iq_arb no move; `hyp8-integration-r78` sha `6cc9cc8c...` 7/7 identical; clock 1.08 GHz (load_unit 37.2). Rank-0 inventory on the top rows is exhausted; next tier rank 1 in the order of implementation-log `## r78`. r47b alive ~32 M, no [hang] — collect first next session. | r79 (log `## r79`): load_unit dead-predicate NI gate (paddr_ni is constant 0 on every g6lc profile — zero-length NI rules; sv-timing fixture `fn_zero_len_range.sv` + package todo) and kill-path `last_tid_q` both NULL on the board and reverted; the 37.2 into-L5 cone is the publish datapath (gather -> byte merge -> align -> sign-extend) -> rank-1 cut after the gathered word (LoadPubStages=2 variant b), same-map comparison first. F16 config finding: no NI region declared -> speculative device reads legal (PLIC claim/UART RBR hazard for Linux); decision pending. | r80 (log `## r80`): load_unit cut-after-gather publish record implemented (plain leaf bit-identical) but the same-map boards read 45.2 for BOTH gated arms — delay-v44 does not fold the HypCfg-derived localparam (fixture owed); reverted; rule: config-gated stage arms must be separate modules selected by the caller to be measurable. Clock 1.08 GHz unchanged. | r81 (log `## r81`): L4 result formation extracted to `core/g6lc_lu_result.sv` (18.2 pres; bit-identical, 7/7 smokes on `hyp8-integration-r81` sha `05e9dc3b...`); load_unit's 37.2 into-L5 cone is the same-cycle `ex_pub` exception publish (port-indexed) -> settled next: route all exception completions through the r51 pending record as caller-selected modules (`LoadExPubStages`). r47b alive ~30 M, no [hang]. | r82 (log `## r82`): sv-timing (B) landed — constant-cond ternaries fold to the live arm (`Expr::const_value`, `elaboration_const_seed`, `ir-v6`/`delay-v45`, fixture `localparam_gate_fold.sv`, core tests 270/270); boards +0.0 on the core (semantics correction); (A) package-function folding open with plan in `sv-timing/AGENTS-todo.md`. | r83 (log `## r83`): r47b collected — 40 M harness cap, ret 7.82 M, no [hang], all `[equiv]` counters clean (F15 collision n=0 on firmware); sv-timing (A) part (i) landed (`delay-v46`, unsigned compare folds, `ConstSeed.fns`), the package-function body evaluator remains; load_unit 37.2 unchanged. Next: kernel progress probe / higher cap; (A) interpreter; then the rank-1 ladder (ex_pub -> pending record first). | r84 (log `## r84`): `LoadExPubStages=2` landed — exception completions present from the r51 pending record (+1 on the fault path only); plain bit-identical, deep leaf PASS, mutant fails; `hyp8-integration-r84b`/`-r84d` both 7/7 cycle-identical; boards still 37.2 because sv-timing enumerates region nodes not dep-chains (delay-v47 dep-fold landed; dep-chain/dead-node pruning is the next package item). Rank-1 ladder next: rename_recover two-edge flush repair, IqSelStages. | r85 (log `## r85`): sv-timing dependency-chain path enumeration + dead-node pruning landed (`delay-v48`, fixtures `localparam_gate_fold`/`dead_arm_region`); instrument validated on load_unit's new 54.2 chain (real cone, statement-order under-billed). **New baseline of record `analyze-r85-all`: 0.53 GHz / 75.0 FO4 (`g6lc_ai_exec`), serdiv 69.3, lsq 65.0, shared_tlb 55.2, load_unit 54.2, rename_read 54.1** — all earlier absolute FO4 figures (core r74–r84 AND the AI-island delay-v45 boards) are stale and must be re-boarded under delay-v48 before any further absolute claim; relative A/B results stand as ordering evidence. Next: dep-chain census per top module, load_unit `st_fwd_covers` → `ldbuf_w` chain (rank-1 `st_fwd_covers_q` under StoreFwdCycles>1), AI exec :479. | r86-r90 (log `## r86-r90`): measurement workspace rebuilt as tracked `analysis/timing/`; sv-timing delay-v49 fixed six dep-chain measurement defects (register-only cones, if(const) arms, pkg/struct constants, folded && chains, statement-order fallback, replicated selects) and the map error `NonIdemPotenceEn=1`; baseline `r88-all` -> `r90-all`: g6lc_ai_exec 90.4->79.5, serdiv 73.1->55.3, g6lc_lsq 54.5->36.8, g6lc_shared_tlb 39.3->29.8, load_unit 54.5->47.1, g6lc_rename_read 54.1->51.0, all with translate_off reference asserts; two hyp8 defects found and fixed (F17 U8xU8 MMA truncation, F18 serdiv udiv/urem by b>=2^63) with new leaves. Open: the delay-v43 unbuffered load law makes any 64-bit 2:1 select >= 23.5 FO4 (8 FO4 unreachable for 64-bit datapaths under it) -- a `--load-model repaired` calibration decision for the host; region-path sums; `ld_free_o` serial count; dot4 one-cycle contract.
-AI island / ai-matrix FO4 program (2026-10-26/27, hyp tree of record `build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/` + `hyp_redesign_core_8fo4/core/cvxif_g6lc_ai/`, production `corev_apu/`/`core/` untouched): program doc `hyp_redesign_corev_apu_8fo4/analysis/ai-fo4-program.md` (§5 Results), log `analysis/implementation-log.md` (ai-hyp-r1..r6 + close-out), drift census `analysis/ai-tree-drift.md`, boards `build/sv-timing/hyp8-src/boards/ai-island/analyze-ai-hyp-{r0,final2}.{json,cmd}` (file list `inputs/ai-island-hyp.f` from `inputs/gen_ai_island_f.py --tree hyp`; APU map; delay-v44; structural 8-FO4 screen, never STA). Landed: pe_dot_pipe 45.4->14.8 (explicit partial-product rows, exact-width tree levels, LATENCY kept), default island cell = int+float pipes (`DotPipeInt/DotPipeFloat=1`, comb cells kept as oracles), gemm_seq 347.6->171.2 (D1 clz pitch, D4 wbeat barrel, D5 stripe shift-only — the divider that poisoned the AR bundle, D2a cursors as scaffolding, D6 hoist of the AR pre cone, lc m*n via `g6lc_ai_mul_seq` WA/WB with a 10/10 unit leaf), island_top 1047.9->51.8 (E2 one-hot fetch arms, E2c one `always_ff` per register group, E4 per-queue generate; E1 constant queue decode; E3 masked-OR rdata), addr_check 20.0->8.5, desc_fetch 33.0->29.5, policy_codec 149.7->113.6 (family split), fp_pkg or-fold normalize (C2). Reverted countercases with evidence: D2b AR/C cursors (deterministic fmt=1 golden miss, miter at the wrong consume tuple), D3/D3b AR candidate registers (null, +cycles; the ~170 is beats_for_rem/cap/elems 32-bit arithmetic), G1 desc spans (kick-edge/hold/miter defects; a lead-written ST_SPAN sub-FSM is owed), G2 inval_queue tail copy (`tail_eq` fired), C1 float-pipe S1 split (fmt-3 GEMM golden regression; `run-gemm-backend dpf=1` is now the gate for any float-pipe change). P6 model finding: delay-v44 composes every NBA write of one monolithic `always_ff` as a serial chain regardless of disjoint guards (island_top node walk in the log) — sv-timing fixture owed; rule: lint the touched module with Verilator before any board (sv-timing's parser accepted a file Verilator rejected). Gates of record on the hyp tree (WSL Verilator 5.020): gemm-backend 12 configs (956/1563/1638/1788 cycles, cycle-neutral), desc-island (9 equiv counters @5096), island-wide, inval-queue (+mutant), island-dma (eq 239), pe_dot_pipe Lanes 1/4/16/256, pe_dot_float_pipe Lanes=8, policy-walk + DMA 7339 cycles, mul_seq 10/10, store-align/gemm-wide/gemm-stripe, formal `analysis/formal/g6lc_ai_gemm_flat_hyp.sby` 3/3. Open: policy_steer F1 topology register (178.0), policy_subcode 96.4, cluster_dispatch H1 prologue (150.5, Clusters>1 SKUs), inval_queue 52.3, gemm_seq AR arithmetic 171.2, desc_engine 111.8 (ST_SPAN), island_top :1857 bundle 51.8, pe_dot comb 128.4 / pe_dot_float 47.1 (non-live oracle arms, `inputs/clock_exclude_ai.txt`), the hyp `tb_g6lc_ai_pe_dot` harness artifact, the fork mutant-observability anomaly (SIGNROW; m3+1 control proves the chain), and the `--help/` stray directory at the repo root (untracked, 2026-10-23, not ours to delete without a ruling). r7 phase (caller-purposed segments, program §6, board `analyze-ai-hyp-final3`): R1 job-event outputs registered at every caller-consumed seam (gemm_seq/cluster_dispatch/desc_engine/policy_* ; same-cycle-coupled readies kept combinational with `start |-> ready` assertions) — port-bridged stitches 321.6/229.8/228.5/227.8/223.0 → 40.2/29.5/29.3/29.2/27.9, gemm cycle table identical; R4 desc_engine ST_SPAN (three `g6lc_ai_mul_seq`, sticky seen, span registers with the functions' degenerate/saturation guards — the m=0 descriptor case was caught by desc-island and fixed) 111.8→63.3, `span_eq` checked=175, island DMA bench 7339→8395 cycles; R5 policy_codec 3-cycle window 113.6→85.8 (policy-walk PASS); R7 cap_window A104 (occupancy index 40.6 is the floor), island_top 51.8→43.9. Deferred/open: R2 AR burst planner (`g6lc_ai_gemm_arplan.sv` written and lint-clean, wiring into gemm_seq deferred — gemm_seq 171.2), R3 store planner, R6 inval_queue AW stage, R8 float cell LATENCY+1, R9 cluster_dispatch prologue (its bench hits a Verilator-5.020 `type()` internal error), R10 requant phase; policy_steer 184.0 awaits the R5 topology evaluator. Exec stays 31.6 (the sidekick's close-out table misprinted 62.6). r8 (board `analyze-ai-hyp-final4`): policy_steer 184.0→165.0 via an A134 three-stage `policy_topology` evaluator (policy-walk PASS, DMA 8395); R2 planner integration attempted and reverted (`ar=8` stall — planners pinned at `s1 row=1 t=0`, FIFO/valid/done contract; `g6lc_ai_gemm_arplan.sv` kept staged at 100.0, gemm_seq back at 171.2); subcode COMPARE2 stage null → reverted. Still open: R2 integration, R3 store planner (gemm_seq :2980 C-store bundle), subcode P6 split, R6 inval_queue AW stage, R8 float LATENCY+1, R9 dispatch prologue, R10 requant phase. r9 (board `analyze-ai-hyp-final5`, tree green at the 956-cycle baseline): policy_subcode 96.4→80.3 (P6 three-family split, policy-walk PASS). The R2 AR planner was made to work (duplicate-plan deadlock → one-plan-in-flight → launch-on-drain; 12 configs PASS, nch=2 1468 < 1563 baseline; N>1 kept on the verified arm after gemm-stripe showed the planner lacks a stripe split) and then lost: the S0 split (97.0) dropped a plan, and the green r2c file had no byte-exact snapshot, so R2 is reverted again with the re-land recipe in the APU log `## ai-hyp-r9 — close`. Rule reinforced: zip before every edit. r10 (board `analyze-ai-hyp-final6`, tree green at 956): R2 re-land under snapshot discipline reproduced the plan arithmetic exactly (launch/push/cursor miters all silent) yet the GEMM golden reads C=0 — the consumer side of gemm_seq (receive/MAC bookkeeping that assumed the live `ar_*_pre` timing) is the owner; next discriminator = trace `ar_push`/`ar_lane_push`/`recv_i`/`recv_t`/`r_fire` for the first burst with the planner vs the pre-comb arm. R2 reverted; arplan staged at 140.0. Open: R2 consumer fix, R3 C-store planner, R6, R8, H1, R10, N>1 stripe cap. r11 (board `analyze-ai-hyp-final7`, unchanged maxima): cluster_dispatch bench now builds on Verilator 5.020 (eight explicit `parameter type` channel params replace the `type()`-on-default-`logic` construct; island_top/bench wired) and exposes a hyp-gemm_seq defect on 2-cluster column-sliced jobs (prod PASS / prod-dispatch+hyp-gemm FAIL / hyp-dispatch+prod-gemm PASS) — deferred, default SKU unaffected; remote testharness rc=4 incomplete. H1 prologue (211.6) and R6 AW stage (53.6) measured as rises and reverted; R8 float LATENCY+1 and the R2 consumer trace remain open. r12/r13: no further RTL landed; the large-pass plan (per-module P6/A104/A134/R1/A140 moves with exact loci, pre-r13 zips for every target) is recorded in the APU log `## ai-hyp-r13` for execution in a fresh session; board of record stays `analyze-ai-hyp-final7`. r14 (board `analyze-ai-hyp-final8`): cap_window 40.6→25.8 (A104 one-hot occupancy classes + masked-OR; hyp-tree cap-occupancy PASS; the explicit OR-tree variant read 31.6 and was reverted; `run-cap-occupancy.sh` lacks the hyp path seam). R8 float cell measured 50.8→41.8 but reverted on red leaves (float gate must use /usr/bin/verilator — the 5.008 default binary failed the build; int-pipe O2 sum=0 needs a wave). The rest of the r13/r14 rewrite program (gemm_seq per-family split, steer :335, dispatch :339, codec :331, subcode :387, desc_engine :350/:393, inval_queue skid, R2 consumer trace, Clusters>1 gemm_seq defect) is staged with zips and loci in the APU log.
-
-| Layer | Open first | Role |
-|-------|------------|------|
-| Prime directive / nav | [`AGENTS.md`](AGENTS.md) · [`agents/spec/INDEX.md`](agents/spec/INDEX.md) | Spec→code map, SoC §0, standing disciplines |
-| Programs of record | [`architecture/README.md`](architecture/README.md) · [`architecture/router-core-upgrade-program.md`](architecture/router-core-upgrade-program.md) · [`architecture/remaining-upgrade-sequence.md`](architecture/remaining-upgrade-sequence.md) | U1–U10 plan, live next, scaffold contract |
-| Spec ⇄ RTL / tests | [`AGENTS-specs-to-impl.md`](AGENTS-specs-to-impl.md) · [`AGENTS-specs-to-tests.md`](AGENTS-specs-to-tests.md) · [`AGENTS-specs-coverage.md`](AGENTS-specs-coverage.md) | Status vocabulary + suite/testlist rows |
-| Host / verify | [`AGENTS-build-platform.md`](AGENTS-build-platform.md) · [`AGENTS-build.md`](AGENTS-build.md) · [`build-platform/AGENTS.md`](build-platform/AGENTS.md) | CLI, residual soaks, probe→verify |
-| Philosophy / SoC envelope | [`AGENTS-coding-philosophy.md`](AGENTS-coding-philosophy.md) · [`AGENTS-configuration.md`](AGENTS-configuration.md) · [`agents/guides/AGENTS-soc-readiness.md`](agents/guides/AGENTS-soc-readiness.md) | Timing, verify-in-lockstep, target SoC |
 
 ## hyp8_mc COH_OOO closure: snoop-filter precision, MT/PGO Verilator (2026-11-02)
 
@@ -764,6 +889,36 @@ Design record: [`architecture/RTL-PIPELINE-PLANS.md`](architecture/RTL-PIPELINE-
 - [ ] Continue step 1, then promote step-2
   proposals (ownership/credits) with their consumer protocols. The remaining
   annotations do not implement stages or establish FO4 closure.
+
+## APU CI lane — arising issues (2026-11-10)
+
+- [x] Arising issue: `ue_sm5_session.exp` and `ue_sm5_reply.{hex,exp}` were
+  stale vs the golden model after ab0349843 (one reply field 0x00800000 ->
+  0x02000000); regenerated with `vn_golden.py --session ue_sm5_session 1` /
+  `--reply-vectors ue_sm5_reply 1`. vnfront (all arms) and vnrep pass on the
+  pinned v5.008. Regenerating needs the uapi `virtio_gpu.h` from
+  `g6lc_qemu/linux-dist/ubuntu/kernel` (not in CI; vectors stay committed).
+- [x] gen-sfu host reproducibility: LAPACK `lstsq`, numpy SIMD ufuncs,
+  glibc libm and ndarray `**int` each moved emitted f32 coefficients by
+  tens of ulps across hosts on this ill-conditioned Vandermonde fit.
+  Replaced with deterministic Gram-Schmidt (math.fsum), pure-Python
+  Taylor/argument-reduction transcendentals and fixed-order monomial
+  powers; `--check` now prints the drift diff. GitHub run 42878124082
+  green on all 9 lanes (platform x2, rtl-lint, sv-timing, bios, qemu,
+  ai-tensor, apu standard, storamic standard).
+- [ ] `shwave` RTL bench needs a writable `~/.cache/librecore` (simulator PGO
+  receipt cache); blocked under WSL here, expected fine on CI runners. Watch
+  the `full` dispatch run.
+- [ ] Venus native-bridge tests (`test_vn_native_bridge`) wait 3 s for CLI
+  readiness; flaked once under heavy host load. Raise the bound if CI flakes.
+  **2026-11-11:** readiness wait made cross-platform/robust — the
+  `select()`-on-pipe probe can't monitor a pipe on Windows and the
+  follow-up `readline()` was unbounded; replaced with a daemon-thread
+  `readline()` + `queue.get(timeout=3)` (bounds the whole line read).
+  The subprocess bridge tests remain **POSIX/CI-only regardless**: the
+  bridge itself needs `socket.AF_UNIX`, absent on this Windows Python
+  (`AttributeError: module 'socket' has no attribute 'AF_UNIX'`), so they
+  can't spawn the CLI here. On Linux CI the mechanism is unchanged.
 
 ## APU full-feature continuation (2026-10-10)
 
@@ -1315,6 +1470,24 @@ remain release requirements; intermediate raster gates do not narrow the product
     All PASS `cases=26 checks=17016 maxulp=0`; 902 model tests OK.
     Vertex-fetch decode coverage now spans UNORM/SNORM/SFLOAT ×
     8/16-bit × component counts {1,2,3,4}.
+    **`vattr8u1` latent collision FIXED (2026-11-21, uncommitted).**
+    The nc=1 claim above was illusory: `'vattr8u' in gfx` substring-
+    matches `'vattr8u1'`, so `is_vattr8u` fired first in every chain
+    (COL/VB/vkfmt) and `ue_gpos_vattr8u1bloff_1` silently emitted
+    vkfmt 37 + a 4-byte pack + the 4-component COL — byte-identical
+    coverage to `vattr8u`, the `is_vattr8u1` branches (vkfmt 9,
+    nc=1 `(0,0,0,1)` fill) were dead code.  Fix: `is_vattr8u` now also
+    excludes `'vattr8u1'` (`vn_golden.py` ~11830); the pre-existing
+    `is_vattr8u1` COL `(220*K8,0,0,1.0)` / 1-byte VB / vkfmt-9 /
+    offset-8 branches then activate and `vs_passthru` (default) reads
+    `vec4 col` → `vcol.rgb={R,0,0}` matching the oracle (`fs_flat`
+    discards alpha).  Regenerated vectors now genuinely differ from
+    `vattr8u` (`FF0000DC` vs `803264C8` pixels).  **RTL-verified**:
+    `ue_gpos_vattr8u1bloff_1` PASSes both latency steps
+    (`checks=17016 pixwr=512`, randomized `maxulp=0`) — the nc=1
+    gather + missing-component fill path is correct.  Siblings
+    `vattr8u`/`vattr8uint`/`vattr8sint`/`vattrrg8u` all still PASS;
+    902 model tests OK.  nc=1 `R8_UNORM` coverage is now real.
     **Integer vertex attributes probed, blocked on shader core
     (2026-11-16).**  A `uvec4`-input VS (`vs_uintcol`: `float(byte)/255`
     → float `vcol` → float FS → UNORM8 attachment, isolating integer
@@ -1335,6 +1508,168 @@ remain release requirements; intermediate raster gates do not narrow the product
     integer vertex input needs BOTH the vn_golden decode AND the
     shcore/shwave input path, then a build window.  Probe files
     reverted; no session committed.
+    **Scoping sharpened (2026-11-21).**  Confirmed by direct read:
+    the raster gather side is already DONE — `g6lc_apu_rast.sv`
+    `f_is_int`/`f_is_i8`/`f_is_i16`/`f_is_sint`/`f_nc`/`f_icomp`/`f_asz`
+    (lines ~761-860) implement the full integer decode (raw bits +
+    `(0,0,0,1-int)` missing-component fill); `APU_RAST_VF_*` == VkFormat
+    wire values for every UINT/SINT width.  `VATTR_OK`
+    (`vn_golden.py:1446`) already admits all integer vkfmts
+    (13,14,20,21,27,28,41,42,74-109), and `vn_graphics_fetch.py`
+    `FORMATS`/`_component` already decode `uint`/`sint` raw.  So the
+    remaining gap is exactly two pieces: (a) `vn_golden.py` — add
+    `is_vattr*u`/UINT-SINT selectors (the `COL` oracle tuple is f32;
+    integer attributes carry raw bits to a `uvec4`/`ivec4`-typed Input
+    var, so the oracle must model the shader's int load + any
+    OpConvertUToF/SToF, not a normalised decode) and wire the vkfmt
+    into the attribute description; (b) `g6lc_apu_shwave.sv` (~9k
+    lines) — the `Input` storage-class load for integer-typed
+    variables faults (`got=ffffffff`); `in_base_q`/`vbase_q`/
+    `tx_isint_q` are the entry points to trace.  Needs an RTL debug +
+    build window; do not half-land the model side without the RTL.
+    **Type system confirmed int-capable (2026-11-21):** `g6lc_apu_sh_pkg.sv`
+    has `APU_SH_TK_INT`=3 / `TK_FLOAT`=4 / `TK_VEC`=5 — so "no integer
+    type" is NOT the fault; a `uvec4` Input var decodes kind=VEC->INT
+    fine.  The `ls_*` record load (`shwave.sv:6246-6267`) is
+    type-agnostic — it reads `in_base + rec*stride + off` words
+    regardless of component kind, so the load itself cannot fault on
+    int-vs-float.  The `got=ffffffff` fault is therefore downstream:
+    either the per-variable type-row/`vty` setup for an int-typed
+    Input var, or an arithmetic/convert op the `vs_uintcol` shader
+    issues (its `float(byte)/255` -> `OpConvertUToF`/`OpFDiv` chain).
+    All 902 `unittest discover` model tests PASS post->256 change.
+    **Integer-input implementation recipe (2026-11-21, scoping done):**
+    *Shader toolchain CONFIRMED working* — created
+    `corev_apu/apu/tools/shader/corpus/vs_uintcol.{vert,spv,tab}`
+    (`layout(location=1) in uvec4 col; vcol=vec4(col)*(1.0/255.0)`).
+    `spirv_scan.py` emits `fault=NONE(0)`; the `(1.0/255.0)` form is
+    deliberate — `OpVectorTimesScalar` by fp32(1/255) is bit-exact to
+    the UNORM `*(1/255)` gather path, whereas `/255.0` would emit
+    `OpFDiv` and risk a 1-ulp oracle mismatch.  Corpus addition keeps
+    all 902 model tests green.
+    *Flag collision to handle:* `is_vattr8u = 'vattr8u' in gfx` is a
+    substring test, so a `vattr8uint` session would ALSO set
+    `is_vattr8u` (and emit vkfmt 37 UNORM, not 41 UINT).  Existing
+    `vattr8u1` already collides the same way and is silently absorbed
+    (model+RTL agree on whatever format is emitted — `vattr8u1`'s
+    vkfmt-9 branch is effectively dead).  For the uint session the
+    fix is `is_vattr8u = 'vattr8u' in gfx and 'vattr8uint' not in gfx`
+    plus a separate `is_vattr8uint = 'vattr8uint' in gfx` — surgical,
+    leaves the `vattr8u1` quirk untouched.
+    *vn_golden.py touch points (mirror `is_vattr8u`):* flag def ~11819;
+    `is_vattr* and not is_bloff` guard; `COL` decode ~12569 (reuse the
+    `_C8=(200,100,50,128)`/`_K8` UNORM formula — `vs_uintcol`'s
+    `*(1/255)` makes the expected vcol bit-identical); VB pack ~12871
+    (same `u8x4` word + pad); attribute vkfmt ~15243 (`41` UINT, add
+    BEFORE the `else 109`, after the is_vattr8u branch since
+    is_vattr8u is now False for uint); VS selection ~12448 add
+    `vs_uintcol.spv`.
+    *Oracle caveat RESOLVED (simpler than feared):* `is_bloff` vattr
+    sessions actually pair `vs_pos3` (VS, forwards `col` verbatim) +
+    `fs_flat` (FS).  `fs_flat.frag` emits `o = vec4(vcol.rgb, 1.0)` —
+    it FORCES alpha=1.0 and discards `vcol.a`, so the vertex-alpha
+    channel is NOT checked on this path.  That neutralises any
+    alpha-path difference — only `vcol.rgb` is compared.  `COL` is
+    passed to `gfx_grad_pixels` as `[COL]*3` (the flat varying); for
+    `is_vattr8uint`, `COL = {_f32(b)*_K8 for b in (200,100,50,128)}`
+    (the SAME formula as `is_vattr8u`) is correct because
+    `vs_uintcol`'s `vec4(u8x4)*(1/255)` yields bit-identical
+    `vcol.rgb`.
+    **MODEL SIDE DONE + VERIFIED (2026-11-21):** `is_vattr8uint`
+    implemented in `vn_golden.py` — flag def (with the `is_vattr8u`
+    substring-exclusion fix), `is_bloff` guard, shared COL/VB branches
+    (`is_vattr8u or is_vattr8uint`), vkfmt `41`, and `vs_uintcol.spv`
+    selection.  GOTCHA found+fixed: `vs_pos3` is selected by an EARLIER
+    chain condition (vattr sessions set a vs_pos3 flag — bound 0x1F),
+    so `vs_uintcol.spv if is_vattr8uint` had to be placed BEFORE the
+    `vs_pos3` arm, not at the tail — verified the embedded module
+    bound is now 0x23 (=vs_uintcol).  Session
+    `ue_gpos_vattr8uintbloff_1` generates cleanly: `.exp` is identical
+    to `vattr8u`'s modulo +68 B address relocation (=1032-964 B SPIR-V
+    delta), `.hex` carries vkfmt 41 + vs_uintcol.  Registered in
+    `regen_vectors.sh` AND all three run lists
+    (`run-apu-vgsys/vgtop/vgtop_lf.sh`).  All 902 model tests PASS.
+    **VERIFIED WORKING — earlier fault did NOT reproduce (2026-11-21):**
+    `ue_gpos_vattr8uintbloff_1` run against the PGO `tb_g6lc_apu_vgtop`
+    binary PASSes end-to-end — `cases=26 checks=17016 pixwr=512`
+    (512 covered px, matching the UNORM reference) under BOTH latency
+    steps (step1 default + step2 `+mp_lat_min=1 +mp_lat_max=20
+    +mp_ready_pct=60`).  Sibling `vattr8u`/`vattr8u1` still PASS (no
+    regression).  The `.hex` carries vkfmt 41 + `vs_uintcol` (module
+    bound 0x23) so the integer gather→Input-load→`OpConvertUToF`→
+    `OpVectorTimesScalar` path is genuinely exercised — a wrong
+    decode would mismatch `.exp`.  Conclusion: current RTL already
+    handles R8G8B8A8_UINT vertex input correctly; the earlier
+    `got=ffffffff` observation was a probe-context artifact (a raw
+    shader bench not replicating the gather→aperture→record setup),
+    not a pipeline bug — the uncommitted `shwave.sv` diff is unrelated
+    TP3a RF/envelope work with no input-load changes.
+    **SINT extension DONE + VERIFIED (2026-11-21):** `is_vattr8sint`
+    (R8G8B8A8_SINT, vkfmt 42) added the same way — `'vattr8sint'` has
+    ZERO substring collisions (`'vattr8s'!='vattr8u'`,
+    `'vattr8si'!='vattr8sn'`, so no exclusion guard needed, unlike
+    uint).  New `corpus/vs_sintcol.{vert,spv,tab}`: `ivec4 col` input,
+    `vcol=(vec4(col)+128.0)*(1.0/255.0)` — `OpConvertSToF`→`OpFAdd`→
+    `OpVectorTimesScalar`; the +128/convert are exact so COL=
+    `_D8*K8` with `_D8=sext(b)+128`=`(b-128 if b>=128 else b+128)`.
+    Same `_C8=(200,100,50,128)` bytes (200→-56, 128→-128 edge) give a
+    genuinely DIFFERENT `.exp` than the unsigned sessions — real sign
+    coverage.  `ue_gpos_vattr8sintbloff_1` PASSes both latency steps
+    (`pixwr=512 checks=17016`); all vattr siblings still `maxulp=0`.
+    The 8-bit RGBA integer vertex matrix is now covered:
+    UNORM(37)/UINT(41)/SINT(42).  Wider integer formats
+    (R16G16B16A16 / R32G32B32A32 UINT+SINT) reuse `f_is_i16`/`f_is_int`
+    gather + int-capable type rows — available as further extensions
+    (need u16/u32-packed VB + scaled shaders) but the representative
+    decode classes are proven.
+    **R16G16B16A16_UINT DONE + VERIFIED (2026-11-21, uncommitted).**
+    `is_vattr16uint` (vkfmt 95) — `'vattr16uint'` contains `'vattr16u'`
+    so `is_vattr16u` got the same `and not is_vattr16uint` exclusion as
+    the 8-bit pair.  New `corpus/vs_u16ucol.{vert,spv,tab}`: `uvec4
+    col` (u16 zero-extended to u32), `vcol=vec4(col)*(1.0/65535.0)` —
+    the literal compiles to `0x37800080`, bit-identical to the model's
+    `_K16`, so `vec4(u16)*K16` == the UNORM16 gather decode: a clean
+    A/B on the `f_is_i16` 16-bit integer-fetch path.  Reuses the
+    `is_vattr16u` `_W16=(k*257)` two-u16-word VB pack + COL formula +
+    offset-8/stride-24 layout.  `ue_gpos_vattr16uintbloff_1` PASSes
+    BOTH latency steps (`checks=17016 pixwr=512`, randomized
+    `maxulp=0`); `.exp` identical to `vattr16u` modulo +0x44 address
+    relocation (SPIR-V delta).  Registered in `regen_vectors.sh` +
+    all three run lists; 902 model tests OK.
+    **R16G16B16A16_SINT DONE + VERIFIED (2026-11-21, uncommitted).**
+    `is_vattr16sint` (vkfmt 96) — `'vattr16sint'` has ZERO substring
+    collisions (`'vattr16si'!='vattr16sn'`, no `'vattr16u'`).  New
+    `corpus/vs_s16col.{vert,spv,tab}`: `ivec4 col`, `vcol=(vec4(col)+
+    32768.0)*(1.0/65535.0)` — `OpConvertSToF`→splat32768→`OpFAdd`→
+    `OpVectorTimesScalar(*0x37800080)`; convert/add exact so COL=
+    `_D16*K16` with `_D16=sext16(w)+32768`=`(w-32768 if w>=32768 else
+    w+32768)`.  Same `_W16` u16 packing; `.exp` genuinely differs
+    (`DA5CBC34` vs `5ADC3CB4` pixels — real sign coverage).  Session
+    `ue_gpos_vattr16sintbloff_1` PASSes BOTH latency steps
+    (`checks=17016 pixwr=512`, randomized `maxulp=0`); registered in
+    `regen_vectors.sh` + all three run lists; 902 model tests OK.
+    **16-bit integer vertex matrix now: UNORM(91)/SNORM(92)/
+    UINT(95)/SINT(96)/SFLOAT(97).**
+    **R32G32B32A32 UINT/SINT DONE + VERIFIED (2026-11-21, uncommitted).**
+    `is_vattr32uint` (vkfmt 107, `vs_u32col.spv` `uvec4` *`2^-32`) and
+    `is_vattr32sint` (vkfmt 108, `vs_s32col.spv` `ivec4`
+    `(+2^31)*2^-32`) — `'vattr32uint'`/`'vattr32sint'` have ZERO
+    substring collisions so no exclusion needed.  Both reuse a shared
+    four-u32-word VB pack (16 B at offset 8 fills the 24 B stride, no
+    packing/pad).  The fp32-precision trap is solved by storing
+    `u32=k*2^24` (exact in f32's 24-bit mantissa): UINT `vec4(u)*2^-32`
+    lands on `k/256` bit-exact; SINT reads the same bits as s32 (the
+    `k*2^24` patterns give a real negative/positive mix) and
+    `s32+2^31 == B^0x80000000` so the oracle is `(B^0x80000000)/2^32`.
+    `ue_gpos_vattr32uintbloff_1` + `ue_gpos_vattr32sintbloff_1` each
+    PASS BOTH latency steps (`checks=17016 pixwr=512`, randomized
+    `maxulp=0`) on the `f_is_int` 32-bit fetch path; registered in
+    `regen_vectors.sh` + all three run lists; 902 model tests OK.
+    **Integer vertex matrix now complete across 8/16/32-bit widths:**
+    8-bit UNORM(37)/UINT(41)/SINT(42) + nc=1(9); 16-bit
+    UNORM(91)/SNORM(92)/UINT(95)/SINT(96)/SFLOAT(97); 32-bit
+    UINT(107)/SINT(108).  Remaining vertex work is non-integer-format
+    coverage (packed/depth/stencil fetches) not the integer decode.
     **Storage-image fmt-11 coverage (2026-11-16, `1c8103db8`).**
     `imgcopy_rgba32ui` is a compute session doing imageLoad+imageStore
     on a 2x4 `R32G32B32A32_UINT` storage image (`uimage2D`, device
@@ -1385,14 +1720,47 @@ remain release requirements; intermediate raster gates do not narrow the product
     fp16→fp32 exact widen observed bit-exact + fp32→fp16 RNE store) and
     `imgcopy_r32f` (device fmt 7, `image2D`/`r32f`, single-channel fp32).
     Core STORAGE_IMAGE formats now covered: 2, 6, 7, 9, 10, 11, 15.
-    **Boundary:** reduced/packed formats (`rg32f` fmt 8, `rg8unorm` fmt 1,
-    `r8unorm` fmt 0, BGRA 4/5, sRGB-as-storage 3/5, `rg32ui` etc.) make
-    glslang emit `OpCapability StorageImageExtendedFormats`, which the
-    shwave commit scanner **rejects** (`CAP` fault at scan) — same class
-    of limitation as integer vertex inputs: needs scanner/RTL support for
-    the extended-formats capability before those formats can be tested.
-    An `imgcopy_rg32f` probe was built and cleanly reverted (no vectors
-    emitted — the scan faults before `emit`).
+    **Boundary — now broken for rg32f (2026-11-16).**  Reduced/packed
+    formats make glslang emit `OpCapability StorageImageExtendedFormats`
+    (capability 49), which the scanner rejected (`CAP` fault).  Survey of
+    GLSL storage qualifiers vs the 16-entry device table shows **rg32f
+    (fmt 8, R32G32_SFLOAT) is the only extended storage format reachable**:
+    the unorm/sRGB/BGRA qualifiers (`r8unorm`, `rg8unorm`, `rgba8srgb`,
+    `bgra8*`) are not valid `layout()` image-format identifiers in GLSL at
+    all (sampled-only), and single/dual-channel int + fp16 + packed
+    qualifiers (`r16f`, `rg16f`, `r8ui`, `rg32ui`, `r11f_g11f_b10f`, …)
+    have no device-table entry.  So `StorageImageExtendedFormats` reduces
+    to exactly one addition.  Landed (uncommitted): capability 49 added to
+    `CAP_OK` in `spirv_scan.py` (the OpTypeImage format operand is already
+    descriptor-governed, fmt≤41 accepted); `shaderStorageImageExtendedFormats`
+    enabled conditionally in `vk_compute_oracle.c` (lavapipe exposes it);
+    `imgcopy_rg32f` session — `corpus/imgcopy_rg32f.{comp,spv}` compiled
+    `--target-env vulkan1.0` + `_opt.spv` via `spirv-opt -O`, DESC
+    `kind=3 fmt=8 out=1` + 16-word SSBO observing `.x`/`.y` fp32 bit-exact,
+    `names[]`→97.  Model `tx_store`/`tx_finish` already decode fmt 8;
+    oracle==model on seeds 1-3, `_opt` invariant clean (97 names/63 need).
+    `mut=False` — the selected `IAdd->ISub` flip lands on `o[i*2+1]`→
+    `o[i*2-1]`, the same undefined cross-lane store aliasing as
+    imgcopy_rgba32ui (added to the bench mut-skip list).  Storage core
+    formats now covered: {2,6,7,8,9,10,11,15}.
+    **RTL-verified (2026-11-16, shwave-pgo4).**  The Python `CAP_OK`
+    edit alone was NOT sufficient: the RTL commit scanner in
+    `g6lc_apu_shmod.sv` (`S_OP` case 17, OpCapability) keeps a parallel
+    capability whitelist that still rejected 49 → `commit fault
+    code=3 opc=17 word=7` on all `imgcopy_rg32f` arms (base/opt/bad
+    all faulted at the OpCapability, so even the `bad_0` arm reported
+    the wrong expected code).  Added `ops_q[0] != 32'd49` to that gate
+    with a comment noting the descriptor record governs decode.  After
+    the fix, full sim-PGO bench `run-apu-shwave.sh` →
+    `PASS tb_g6lc_apu_shwave cases=664 checks=109769 ulp1=52 ulp2=0
+    maxulp=1 ouw=16872 oum=0 cycles=3986618`, **0 FAIL** — `imgcopy_rg32f`
+    passes all base/opt/bad arms; the only OpTypeImage gate
+    (dim/sampled/ms/format≤41, descriptor-governed) already accepted
+    rg32f.  Toolchain: `tools/verilator` PGO `apu-verilator-pgo-v1`,
+    `--unroll-count 256 --unroll-stmts 131072`, simulator-PGO
+    `generate`→69 `.gcda`→`use` (`-fprofile-use`).  `StorageImageExtendedFormats`
+    (cap 49) is now a verified APU capability for the single reachable
+    extended storage format (rg32f/fmt 8).
     **Sampled-image axis opened (2026-11-16, uncommitted).**  The same
     `StorageImageExtendedFormats` wall does NOT apply to *sampled*
     images: `sampler2D`/`texture2D` carry no format qualifier in SPIR-V
@@ -1421,11 +1789,112 @@ remain release requirements; intermediate raster gates do not narrow the product
     component-swizzle path.  `names[]` now 96.  Storage-image *reads*
     (OpImageRead) share the same `tx_finish`/`swz_sel` swizzle path as
     fetch; storage *writes* (OpImageWrite→`tx_store`) do not take
-    `swz` — whether that matches Vulkan write-side component mapping
-    is an open RTL/model question, not yet probed.
+    `swz`.
+    **Storage-image swizzle RESOLVED + fixed (2026-11-16, uncommitted).**
+    The open write-side question was settled by the Vulkan spec and a
+    lavapipe probe: `VkComponentMapping` applies ONLY to *sampled*
+    images (COMBINED_IMAGE_SAMPLER/SAMPLED_IMAGE).  Storage images and
+    texel buffers take **no automatic component swizzle** on either
+    reads or writes — components are accessed exactly as stored.  The
+    `imgcopy_swz` probe (imgcopy_rgba16f shader + `swz=0x4CD` on the
+    kind=3 storage bind) exposed that BOTH the model
+    (`spirv_model.py` applied `meta['swz']` on the OpImageRead→
+    `tx_finish` path) and the RTL (`g6lc_apu_shwave.sv` applied
+    `f_swz(tx_rec_q[155:144])` unconditionally in `W_TXA`) wrongly
+    swizzled storage reads — 48-word model-vs-oracle divergence.
+    Fixed both: model gates `swz` to `kind in (1,2)`; RTL adds
+    `tx_swz_eff` (swizzle field forced to 0 unless descriptor kind is
+    1/2) feeding all four `f_swz` sites.  `imgcopy_swz` now
+    oracle==model bit-exact on all seeds; write side was already
+    correct (raw).  `names[]` now 98.  **RTL-verified**: full
+    sim-PGO bench `run-apu-shwave.sh` → `PASS tb_g6lc_apu_shwave
+    cases=671 checks=110951 ulp1=52 ulp2=0 maxulp=1 ouw=17160 oum=0
+    cycles=4012333`, **0 FAIL** — `imgcopy_swz` passes all
+    base/opt/bad arms; every other session regression-free (the
+    `tx_swz_eff` gate is a no-op for all sessions that do not set a
+    non-identity swz on a non-sampled kind).  Toolchain:
+    `tools/verilator` PGO `apu-verilator-pgo-v1`,
+    `--unroll-count 256 --unroll-stmts 131072`, simulator-PGO
+    generate→use.  This closes the storage-image component-swizzle
+    correctness gap — a real Vulkan-spec compliance fix, not just
+    coverage.
     Still open on this axis: depth-as-sampled (fmt 12/13/14 — depth
     returns in `.r`, different sampler semantics; the lavapipe oracle
     has no depth-image path).
+    **Local RTL verdict + mut_0 UB exclusion (2026-11-16, uncommitted).**
+    Built `tb_g6lc_apu_shwave` locally through `run-apu-shwave.sh` with
+    the required toolchain — repo `tools/verilator` PGO build
+    (`apu-verilator-pgo-v1`, source.id = HEAD `44063db8`), compiler PGO
+    (`profile-use`, 132 profiles), loop unroll (`--unroll-count 256
+    --unroll-stmts 131072 --stats`), and simulator PGO
+    (`apu-verilator.sh`→`apu_sim_pgo.py`, `simulator_pgo_required=1`;
+    observed `generate`→`-fprofile-generate` compile → 69–313 `.gcda`
+    training profiles → `use`→`-fprofile-use` recompile).  Result:
+    **every base seed, `_opt`, and `bad_0` arm PASSes for all 14 image
+    sessions — zero non-mutation failures**; the sampled/storage format
+    coverage is RTL-verified.  Three `mut_0` cases FAIL-G1
+    (`imgcopy_rgba32ui`, `imgcopy_rgba16f`, `texfetch_rgba32ui`, 7 words
+    each): the auto-mutation flips `OpIAdd→OpISub` on the `i*4+c` SSBO
+    spill offsets, so lane i+1's component lands on lane i's slot —
+    undefined cross-lane store order (sequential-lane model vs SIMD
+    wave legitimately diverge; lane-0's `i*4-1`→`0xFFFFFFFF` store is
+    OOB-dropped consistently, robust count matched).  Same class as the
+    `imgarr_st` precedent — NOT a shwave/spirv_model bug.  Every
+    flippable op in these shaders is index math, so no clean mutation
+    site exists; applied `mut=False` in DESC + the three names to the
+    bench mut-arm skip-list + removed their `mut_0` artifacts
+    (uncommitted — the committed tree/leaf `062516` still carries the
+    mutants and will show these 21 FAIL-G1 until this lands).  **Confirming
+    rebuild PASSED clean:** after the mut-arm exclusion, a fresh
+    `run-apu-shwave.sh` (OUT=`shwave-pgo2`, sim-PGO identity `d731a29b`)
+    reported `PASS tb_g6lc_apu_shwave cases=657 checks=108779` with **0
+    FAIL** — the 3 excluded sessions emit 6 vec-lines vs 7 for the rest
+    (mut arm skipped, base/opt/bad all ran).  Env
+    notes for local PGO runs: `XDG_CACHE_HOME=/home/etcim/.local/cache`
+    (`~/.cache` is root-owned → sim-PGO cache EACCES), `GIT_OPTIONAL_LOCKS=0`
+    (DrvFs `index.lock` races vs concurrent leaf-sync git),
+    `GIT_INDEX_FILE=/tmp/vlt-index` (a byte-copy of the submodule index on
+    local fs — `git diff` for `source.id` drops from ~3 min/EBADF-prone on
+    DrvFs to ~1 s and yields a byte-identical `source.id`, so the cached
+    PGO build is reused), and
+    `APU_SOURCE_FILES=<shwave-cone list>` scoped to the Flist+TB so the
+    query/hyp8 lanes' concurrent `verif/tb`+`core/` edits don't
+    invalidate the PGO source-hash mid-build.
+    **8 colour attachments end-to-end (2026-11-16, uncommitted).**  The
+    MRT path is widened 4→8 colour attachments across the whole chain:
+    `g6lc_apu_rast_pkg` ca/ca_valid/blend to `[7:0]`, rast `at_q[2:0]` +
+    8-slot legality + per-attachment fmt, cmdexec 10-slot fb/parser +
+    `clearv_q[39:0]` (10 att) + `att_ld_q[9:0]` + `sp_cref_q[3:0][7:0]`,
+    vnfront+cmdexec graphics-pipeline ObjPay 57→61 words (blend[4–7] at
+    w57–60, `gp_natt_q[3:0]`), `fs_mrt8.frag/.spv` (outputs loc 0–7).
+    vn_golden `is_mrt8` session `ue_gpos_mrt8_1` generated (8 distinct
+    image/view/imem/rb blob slots, 8 clear values, byte-permutation
+    oracle matching the FS outputs, 8 readback gates).  **Root-cause
+    fix:** the BeginRenderPass clear-value payload walk was still
+    clipped to 5 attachments (`>5?20` words) after `clearv_q` was widened
+    to 10 — attachments 5–7 read `clear_color=0` and their images stayed
+    unwritten (att0–4 passed, att5+ read back 0).  Clip now `>10?40`
+    matching `clearv_q[39:0]`; ≤5-attachment behaviour is bit-identical.
+    vgtop `ue_gpos_mrt8_1` PASS cases=56 checks=132462 maxulp=0 (all 8
+    clears + draw + FS locs 0–7 + 8 readbacks bit-exact); every MRT/
+    depth/stencil session regression-clean on the production build.
+    rast bench case 81 (real 8-attachment draw, `ca_valid=8'hFF`) PASS.
+    `ue_gpos_mrt8_1` added to the `run-apu-vgtop.sh` cohort.  Debug
+    probes (`attimg`/`clr ak`/`draw ca_valid`/rast clear/`[PROBE]`)
+    fenced under `G6LC_APU_DBG_LOST`+translate_off.  **Follow-up
+    `ue_gpos_mrt8lop_1` (2026-11-16, uncommitted):** composes
+    `is_mrt8`+`is_mrtlop` (`lop_op` stays None) → `n_col=8`, eight
+    `VkPipelineColorBlendAttachmentState` records, and the vn_golden
+    `_lopw` oracle extended to att4..7 (each att's permuted src XORs
+    its own is_mrt8 clear).  vgtop PASS cases=56 checks=132462
+    maxulp=0 — logicOp dst reads + the w57..60 `blend[4..7]` ObjPay
+    tail verified end-to-end at `at_q=0..7`.  **Latent, now bounded:**
+    vnfront still packs blend-attachment count as `natt&7` into ObjPay
+    w25[14:12] (3-bit) so `natt=8` serialises as 0 — mrt8lop proves this
+    is benign because cmdexec decodes the 8 blend slots *positionally*
+    (w26–29 + w57–60) and never consumes the count field; a dedicated
+    alpha-blend-8 session (blendEnable=1 on att4–7) remains the fuller
+    coverage but the transport/count risk is retired.
     (5) Stale records: the CTS ledger was last rendered around 2026-11-04 and still
     lists the 71 `descriptor_copy` failures that closed on 2026-11-12; the plan's
     ladder table shows R3 as not started.
@@ -3697,11 +4166,21 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
             self-contained cones (3-9 files) so the full `synth` is
             minutes, not the shwave-scale hours — the right gate for the
             venus leaf modules.
-          - **Query readback — remaining open item (2026-11-11):**
-            `vkCmdCopyQueryPoolResults` is DONE (see above).  Only
-            *`vkGetQueryPoolResults`* (ctype 49, currently unclassified →
-            UNSUPPORTED): host-side readback, model =
-            `vn_native_submit.py::_query_results`.  `pData` is a
+          - **Query readback — `vkGetQueryPoolResults` DONE (ctype 49).**
+            `vkCmdCopyQueryPoolResults` is DONE (see above).
+            *`vkGetQueryPoolResults`* is IMPLEMENTED + committed in
+            `g6lc_apu_vnfront.sv` (`ExecQueryRes`/`StQryGo` FSM, ctype 49
+            `APU_VN_TYPE_VK_GET_QUERY_POOL_RESULTS_EXT`), with model =
+            `vn_native_submit.py::_query_results`.  Verified:
+            `test_vn_queries.py` 25 tests OK; `run-apu-vnfront.sh`
+            §6 query arms A (`ue_sm5_qry`, unpublished→VK_NOT_READY +
+            validation FEATURE_NOT_PRESENT) and B (`ue_sm5_qry2`,
+            populated slots→real ObjPay readback) are active PASS
+            regression arms; `run-apu-qrydelta.sh` drives the dedicated
+            `tb_g6lc_apu_qrydelta`/`tb_g6lc_apu_qrypool` benches.  Only
+            CTS triage of the real Vulkan query-pool cases remains —
+            a separate larger effort, not an RTL gap.  Historical spec
+            follows.  `pData` is a
             **var_out blob** — the command wire carries only the u64 byte
             count (`gen_vn_tables.py:598`, `elem_bytes=0`); the device
             emits the results in the **reply** as `[needed, result_words…]`
@@ -3842,9 +4321,14 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
             (RTL bounds on dataSize only); `need` capped at
             `(EXEC_WORDS-1)*4`≈540 B (exec-buffer bound, model unbounded);
             `pool_type>2`→VALIDATION_FAILED vs model ValueError (both
-            unreachable — create restricts qtype to {0,1,2}).  **Still
-            open:** directed vnfront session vectors proving the wire
-            output end-to-end (multi-session), then CTS triage.
+            unreachable — create restricts qtype to {0,1,2}).  **Directed
+            vnfront session vectors DONE:** `ue_sm5_qry` (arm A:
+            unpublished→VK_NOT_READY/availability=0 + validation arms)
+            and `ue_sm5_qry2` (arm B: populated timestamp/occlusion/
+            statistics slots→real ObjPay readback) are generated
+            (`vn_golden.py --qry-session/--qry2-session`) and run as
+            active PASS arms in `run-apu-vnfront.sh` §6.  Only CTS
+            triage of the real Vulkan query-pool cases remains.
             **Vector recipe (mapped 2026-11-11):** `vn_golden.py
             build_session()` (L5460) sequences commands via a `cmd(name,
             **over)` helper that runs `enc.command`→`sim.run`→
@@ -4637,16 +5121,371 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
       ulp1=52 ulp2=0 maxulp=1 ouw=14856 oum=0` — zero regression.
       TB names[] 76→77.  Texel-buffer now covers fetch/read/write/
       atomic — the full storage-image op surface for Dim=Buffer.
-      **REMAINING Dim=Buffer gap (analyzed 2026-10-12):** query ops
-      `OpImageQuerySize`(104)/`QueryLevels`(106)/`QuerySizeLod`(103)
-      still `f_tx_kind=k<=3` (RTL) / `IMG_KIND_OK=(0..3)` (oracle), so
-      kind4/5 fault.  NOT a trivial gate flip: `QuerySize` on Dim=Buffer
-      must return ONE component (texel count), but f_bufview_rec folds
-      the record to a Wx1 "2D" image so W_TXQ/oracle would emit {w,h}
-      (2 comps) — an arity mismatch needing dedicated result-width
-      handling (e.g. carry a buffer flag through to W_TXQ and emit a
-      single ntex word; QueryLevels→1 is trivially correct already).
-      Low CTS priority; fetch/read/write/atomic (the hot ops) are done.
+      **Dim=Buffer QUERY OPS — DONE 2026-11-17.**  `OpImageQuerySize`(104)/
+      `QueryLevels`(106)/`QuerySizeLod`(103) now accept kind4/5: RTL
+      `f_tx_kind` gate `k<=3`→`k<=5` (image kinds are exactly 0..5; non-image
+      6..9 still rejected), model `IMG_KIND_OK` extended likewise.  The
+      feared arity mismatch turned out to need NO dedicated result-width
+      handling: `f_bufview_rec` already folds kind4/5 to a `width=ntex`×`h=1`
+      ×`mips=1`×`layers=1` record, so `W_TXQ` emits `wb[0]`=ntex, `wb[1]`=1 —
+      and `wbm_q=(1<<ncomp_q)-1` (latched at `W_EX` for every op) masks the
+      writeback to `ncomp_q`=1 for the scalar Dim=Buffer result, so only
+      component 0 commits.  `shmod` already accepts `Dim=Buffer` TypeImage
+      (depth=0/arrayed=0/sampled∈{1,2}) and cap **50** `ImageQuery` was already
+      whitelisted — no third gate.  New session `texbuf_query` (textureBuffer
+      ntex=8 + imageBuffer ntex=12 → SSBO) verified base×3 + `_opt`×3 all
+      `code=0`/`mism=0`; oracle emits real lavapipe `OpImageQuerySize`
+      results `{8,12}` with zero model divergence.  Full bench:
+      **`PASS cases=677 checks=111746`**, 0 FAIL (was 671).  `mut=False`
+      (SSBO `IAdd`→`ISub` same cross-lane-UB class as `imgcopy*`); bad arm
+      generated but bench-skipped.  **Dim=Buffer fetch/read/write/atomic/
+      query — the full op surface — is now implemented and oracle-verified.**
+      **TEXEL-BUFFER ORACLE PATH — FIXED 2026-11-16.**  The compute oracle
+      (`vk_compute_oracle.c`) had NO texel-buffer (kind 4/5) descriptor
+      path: it created `VkImage`+`VkImageView` and wrote
+      `VkDescriptorImageInfo` for every image bind, so `UNIFORM_TEXEL_BUFFER`/
+      `STORAGE_TEXEL_BUFFER` kinds got a mis-typed `VkImageView*` lavapipe
+      dereferenced as a `VkBufferView*` → **segfault (rc=139)** → the
+      generator silently fell back to model words for all `texbuf*`
+      sessions (coverage was model-only, not oracle-verified).  Fix:
+      kinds 4/5 now create an ordinary `VkBuffer` + `VkBufferView` and
+      write `pTexelBufferView` via `VkWriteDescriptorSet`; image
+      staging/layout/image-copy loops skip texbuf (no `VkImage`).
+      `texbuf`/`texbuf_img`/`texbuf_wr`/`texbuf_atom`/`texbuf_arr`/
+      `texbuf_arr_st` (all six texel-buffer families incl. descriptor
+      arrays) now run lavapipe clean (rc=0, 0 oracle failures in the
+      final generation); normalized `k/255` UNORM values differ ≤1 ULP
+      (Gate-2).  Full corpus regenerated — `texbuf*` `.exp` now carry
+      real oracle words and `shwave` still PASS `cases=671
+      checks=110951` (RTL matches lavapipe within tolerance).  The only
+      remaining model-fallback sessions are the documented
+      `arroob_*`/`sfu_*`/`texquery_*` Gate-2 divergences (transcendental
+      /edge cases where the model is the reference).
+      **PUSH CONSTANTS 128→256 B — IMPLEMENTED + shwave-VERIFIED
+      2026-11-17 (uncommitted).**  Vulkan 1.4 `maxPushConstantsSize`
+      raised 128→256 across the full producer→consumer path: RTL buses
+      `push_i`/`push_o`/`sh_push` `[1023:0]`→`[2047:0]`, counts
+      `push_n`/`push_n_q`/`push_max_q` `[5:0]`→`[6:0]` (word count 0–64),
+      word arrays `push_q[32]`→`[64]`, `push_sh_q` `[1023:0]`→`[2047:0]`,
+      access index `[6:2]`→`[7:2]` clamp 63, byte/word clamps 128→256 /
+      32→64 in `g6lc_apu_{cmdexec,vgtop,shcore,shwave,rast}.sv` + the five
+      `tb_g6lc_apu_{shwave,shcore,cmdexec,rast,vnfront}` benches.  Python/
+      profile parity: `vn_compute_replay.py` + `vn_graphics_bindings.py`
+      push bounds `<=128`→`<=256`, `vn_device_profile.toml`
+      `maxPushConstantsSize`/`pValues` 128→256 (`gen_vn_tables` 1.4
+      minimum already expects 256).  `spec_id`/`spec_val` specialization
+      constants stay 128-bit (separate path, untouched).  New session
+      `pushwide` (64-word/256 B `uint v[64]` push block, `dst[i]=pc.v[i]`,
+      dynamic index) exercises words 32–63: base×3 + `_opt`×3 all
+      `code=0`/`ULP max=0` bit-exact vs real lavapipe 256 B
+      `vkCmdPushConstants`; oracle `pushw[32]`→`[64]`/`npush<64`.
+      Full PGO bench **`PASS cases=684 checks=111776`** 0 FAIL (was 677).
+      **RESOLVED — NOT an RTL bug (vector artifact) 2026-11-17.**
+      The suspected push-address bug was a *test-vector* defect, not
+      shwave.  `pushwide`'s sole SSBO binding was declared `(0,0,64,0)`
+      — the 4th tuple element is the OUTPUT flag, so `o=0` marked
+      dst[] input-only and `emit()` appended ZERO oracle words to
+      `.exp` (11-line header only).  Every output check was vacuous:
+      base "passed" `max=0` on nothing, and `mut_0` "did not differ"
+      because `diffs` stayed 0.  Instrumented sim (`APU_DBG_AC`)
+      proved the RTL was correct all along: the access-chain engine
+      resolves index operands properly (`W_IR3`→`vix_q` const/reg,
+      `W_CHX`→`poff_q`, `ls_o32_w=va_q[0]+comp`), and `ACPUSH` showed
+      `ls_o32=0`→`push_q[0]` for the const-index mutant — i.e. RTL
+      produced the correct mutated output that the empty `.exp`
+      couldn't distinguish.  Fix: binding `o=0`→`1`, `mut` re-enabled;
+      `.exp` regenerated (203 lines, real 64-word oracle section).
+      Now `pushwide` base×3+`_opt`×3 are **genuinely** bit-exact
+      (`ULP max=0`, `OU words=64 mism=0` vs lavapipe) AND `mut_0`
+      passes the differ-check — first real >128 B push coverage.
+      Audit: no other session shares the bug (all other `o=0`
+      bindings are legitimate inputs paired with `o=1` outputs).
+      **PRODUCER-SIDE 256 B — VERIFIED 2026-11-17 (uncommitted).**
+      New cmdexec case 12b streams a `VK_CMD_PUSH_CONSTANTS_EXT`
+      `imm[1]=0`/`imm[2]=256` record with the real 2-word
+      `{offset,size}` arena header + 64 values (`pay_n=66`):
+      `push_n_o==64` and all 64 `push_o` words bit-exact
+      (`pay_magic+i+2`).  `tb_g6lc_apu_cmdexec` **PASS
+      `cases=39 checks=176`** 0 FAIL.  (First attempt failed
+      `push256 data` — the arena leads with the decoder-emitted
+      `{offset,size}` header, so values start at `imm[7]+2`; the
+      executor's `+2` read is correct, matching
+      `vn_graphics_bindings._push`/`vn_compute_replay` `payload_words
+      == 2+size//4`.)  **Residual 128 B caps found + fixed in the same
+      pass:** `g6lc_apu_vnfront.sv` still rejected
+      `imm[2]>128` for `VK_CMD_PUSH_CONSTANTS_EXT` (would have refused
+      legitimate 129–256 B pushes → now `>256`, comments synced); and
+      seven Python-model sites still assumed 32 words/128 B —
+      `vn_graphics_resources._push_words` member bound `>128`→`>256`,
+      `vn_graphics_bindings` push array `[0]*32`→`[0]*64`,
+      `vn_compute`/`vn_graphics_{pshade,raster,shade}` push-length
+      `>32`→`>64`, `vn_compute_replay` push tuple `range(32)`→`range(64)`.
+      (`spirv_model.Model` already reads a variable `n_push`, so 64-word
+      tuples resolve words 32–63; `vn_native_layouts` reads
+      `maxPushConstantsSize` from the profile = 256.)  Unit tests:
+      `test_vn_compute` 17, `test_vn_compute_replay` 27,
+      `test_vn_graphics_{bindings,resources}` 37, `test_vn_graphics_
+      {shade,pshade,raster}` 57 — all OK.  **Forwarding legs
+      inspection-VERIFIED:** the `push_o`→`sh_push_o`→`sh_push`→
+      `push_i` chain (`vgtop` `ex_push`/`rast_sh_own` mux → `shcore` →
+      `shwave`) is a full-width `[2047:0]`/`[6:0]` register/wire path at
+      every stage — `rast push_q[2047:0]<=push_i`, `shwave
+      push_q[i]<=push_i[i*32+:32]` for `i<64` — no bit-slice can drop
+      upper words, so both endpoints' sim proofs (cmdexec `push_o`,
+      shwave `push_q`) compose to end-to-end correctness.  No existing
+      bench drives non-zero push through the middle legs (`tb_vgtop`
+      has no push-constant case; `tb_rast` ties `push_i` to 0) — a
+      dedicated graphics-pipeline push bench is test-infrastructure
+      work, not a correctness risk.  **256 B push feature: COMPLETE and
+      verified producer→consumer.**
+      **Graphics-push bench — implementation recipe (mapped 2026-11-21):**
+      all model/bindings infra already handles PushConstant; only the
+      session emission is missing.  Touch points in `vn_golden.py`:
+      (1) new flag `is_gpush = 'gpush' in gfx` beside the other is_*
+      (~L11800, no substring collisions — 'gpush' is unique);
+      (2) new corpus shader `fs_push.frag` reading
+      `layout(push_constant) uniform PushData { vec4 pc; } pd;` and
+      emitting `o = vec4(vcol.rgb + pd.pc.rgb, 1.0)` (compile+`.tab`,
+      `spirv_scan` fault=NONE) — a *fragment*-stage read exercises the
+      `fs_push` leg, distinct from any vertex read;
+      (3) FS-select elif (~L12563) add `'fs_push.spv' if is_gpush else`
+      BEFORE the `fs_flat` fallthrough (and confirm it precedes any
+      earlier arm that would shadow it, same trap as vs_pos3);
+      (4) pipeline layout (~L15326) `pushConstantRangeCount=1` +
+      `pPushConstantRanges=[st('VkPushConstantRange',
+      stageFlags=0x11 /*VERTEX|FRAGMENT*/, offset=0, size=16)]` when
+      is_gpush (VkPushConstantRange = {stageFlags,offset,size});
+      (5) `draw_recs` (~L16050) inject `('vkCmdPushConstants', dict(
+      commandBuffer=cbdraw, layout=X['pl'], stageFlags=0x11, offset=0,
+      size=16, pValues=b''.join(struct.pack('<f',w) for w in
+      (0.25,0.5,0.75,1.0))))` after BindPipeline, before Draw — the
+      bindings `_push` (vn_graphics_bindings.py:116) validates
+      stages/offset/size≤256 and stages per-(stage,word);
+      (6) oracle: expected pixel = base `vcol`-driven colour `+ pc.rgb`
+      folded through the same fs_flat-style writeback — extend the COL
+      or FS-output path so `o.rgb = vcol.rgb + (0.25,0.5,0.75)` is
+      modelled bit-exact (fp32 add of the push constant);
+      (7) session name e.g. `ue_gpos_gpushbloff_1` (reuse the bloff
+      triangle + `is_bloff` vertex path so only the FS+push differ);
+      generate `.hex/.exp/.json`, confirm vkPushConstantRange +
+      vkCmdPushConstants records present, run `tb_g6lc_apu_vgtop`
+      deterministic + randomized (`+mp_lat_min=1 +mp_lat_max=20
+      +mp_ready_pct=60`), register in `regen_vectors.sh` + the three
+      `run-apu-*.sh` lists, 902 model tests.  **Verify the push actually
+      moved pixels** — diff `.exp` vs the no-push sibling; if
+      identical the FS isn't reading PushConstant (check the SPIR-V
+      PushConstant storage-class load survived `spirv_scan`).
+      **8 COLOUR ATTACHMENTS — RTL PLUMBING MIGRATED (in progress).**
+      The shader core was already 8-location ready (`out_mask_q[7:0]`,
+      FS-out record 8×16 B colour slots + slot 8 FragDepth).  Moved the
+      fixed-function draw record to match: `apu_rast_draw_t.ca`,
+      `.ca_valid`, `.blend` are now `[7:0]` (`blend_const` correctly
+      stays `[3:0]` — Vulkan `blendConstants[4]` is four components, not
+      per-attachment).  `g6lc_apu_rast.sv`: attachment cursor `at_q`
+      `[1:0]`→`[2:0]`, last-index bound `2'd3`→`3'd7` and `+2'd1`→`+3'd1`
+      at both the skip-absent (`S_ROP_R0`) and write-done (`S_ROP_NX`)
+      legs; FS-out slot select `{at_q,4'h0}` already yields `at_q*16` for
+      0..7; the four hand-unrolled legality checks (fmt / noblend /
+      blend-factor-range / logicop-subword) collapsed into one
+      `always_comb` reduction over all 8 `ca_valid` slots
+      (`ca_fmt_bad`/`ca_noblend`/`ca_blend_bad`/`ca_subw`) feeding the
+      same UNSUPPORTED refusal.  `g6lc_apu_cmdexec.sv`: `ca_q`/`ca_valid_q`
+      → `[7:0]`, `ca_valid_q == 4'h0`→`== 8'h0` at both draw guards;
+      `rd_q.ca`/`ca_valid`/`blend` ride the widened struct, `rd_q.blend`
+      upper slots stay `en=0`.  `g6lc_apu_vgtop.sv` forwards `rs_rd`
+      whole — no field slicing, propagates free.  **Framebuffer/parser
+      feed expanded + `--lint-only` clean (cmdexec+rast RC=0):**
+      `att_img_q`/`att_ld_q` `[4:0]`→`[9:0]` (10 slots = 8 colour +
+      depth + stencil), `clearv_q` `[19:0]`→`[39:0]` (10×4 words, write
+      index `5'`→`6'`), `brp_att_q`/`brp_ak_q` `[2:0]`→`[3:0]`,
+      `brp_cj_q` `[1:0]`→`[2:0]`, `sp_ncl_q` count `[2:0]`→`[3:0]`,
+      `sp_cref_q` middle dim `[3:0]`→`[7:0]` (8 colour locations);
+      ObjPay parser bounds `attachmentCount` 5→10, `colorAttachmentCount`
+      4→8; both subpass snapshot loops `l<4`→`l<8` + `3'(l)`→`4'(l)`;
+      `ca_q[l]`/`ca_valid_q[l]` fill all 8 slots.  The render-pass ObjPay
+      is element-count-driven (generic per vk.xml) so vnfront already
+      emits whatever the app declares — the parser/storage were the only
+      caps.  **Pipeline blend ObjPay MIGRATED (append approach, lint
+      clean cmdexec+vnfront RC=0):** rather than inserting 4 words at
+      w26 (which would shift blendConstants/viewport/scissor/stage-desc
+      and the whole `dr_pi_q` decode), the 4 extra blend states ride the
+      block tail — graphics pipeline ObjPay grew 57→**61** words.  w57–60
+      carry `apu_rast_blend_t` for colour attachments 4–7 (w26–29 still
+      carry 0–3); the w44–47 stage-descriptor `pbr` read at offset 44 is
+      untouched.  vnfront: `gp_natt_q` `[2:0]`→`[3:0]` (attachmentCount
+      bound 4→8, `stg_word_q[3:0]`), `gp_blend_q` `[3:0]`→`[7:0]`, blend
+      parse index `gp_i_q[1:0]`→`[2:0]` ×8, reset `'{4{`→`'{8{`,
+      `gp_pay_w` emits `gp_blend_q[3'(i-53)]` at i=57–60, and all three
+      word-count sites (`ret_pw_q`, ObjPay `ALLOC words`, emit-loop and
+      error-path `FREE` bounds) 57→61.  The w25 `nattach` field stays
+      3 bits (`gp_natt_q[2:0]`) so the packed word is bit-identical —
+      cmdexec never reads it (verified: `6'd25` decode touches only
+      rdata[0..23] minus [14:12]).  cmdexec: last READN burst
+      `{48..56}`9w→`{48..60}`13w, new `6'd57..60` decode →
+      `rd_q.blend[dr_pi_q-6'd53]` (=blend[4..7]), walk-end
+      `dr_pi_q==6'd56`→`6'd60`.  Python model `vn_graphics_state`
+      `count<=4`→`<=8` (blend_extra/extras/targets were already
+      count-agnostic, location<8); 123 graphics unit tests pass.
+      **Feature still NOT advertised — profile stays 4** pending
+      end-to-end bench proof of an actual 8-attachment draw (vnfront
+      bench composing real vnfront+cmdexec is the gate).  **A/B proven
+      NOT a regression:** `run-apu-vnfront.sh` on `ue_sm5_session`
+      fails `FAIL rec 109: rep[3]` — a clean detached worktree at HEAD
+      `b8bd72a21` (zero uncommitted changes, only generated `cvfpu`
+      sources copied in) reproduces the **byte-identical** got-value
+      (`61732...09412  179  1  3096  52766`), so the failure is
+      PRE-EXISTING in committed code and unrelated to this migration.
+      `cases++` precedes the checks and `rec++` follows them, so the
+      printed "rec 109" is actually **rec108** =
+      `VK_GET_BUFFER_MEMORY_REQUIREMENTS_EXT` (`cmd_type=0x1e`,
+      `fl=1`, `res=0xfffffff3`, 8-word reply) — a `VkMemoryRequirements`
+      field mismatch (`rep[3]` exp `0x401000`), entirely unrelated to
+      graphics pipelines/blend/attachments and to the ObjPay 57→61
+      append (which only widens the pipeline-state block and cannot
+      alter `vnrep` REPLY_ROM buffer-memory output).  **Re-investigated
+      2026-11-16 — TOOLCHAIN-DEPENDENT, not a clean RTL fix:** the same
+      git-clean `ue_sm5_session` vectors (`.exp`/`.json`/`.pay` all ==
+      HEAD, `rep[3]` exp `0x401000` unchanged) PASS all 7
+      `run-apu-vnfront.sh` arms under **system Verilator 5.020**
+      (`cases=179 checks=3096`, 0 errors) but the identical source STILL
+      fails `rep[3]` under the **PGO `tools/verilator` 5.008** build —
+      an A/B on the same vectors isolates it to the Verilator
+      generation/runtime, exposing a latent RTL reply-path issue
+      (uninitialised/ordering-sensitive state) that 5.020 masks.  The
+      only in-Flist source delta between the two builds was
+      `g6lc_apu_cmdexec.sv` (MRT8 graphics only, no reply-path touch),
+      so this is a real latent bug to chase under the PGO toolchain,
+      not resolved.  **RESOLVED 2026-11-17 — Verilator-5.008 codegen
+      bug, not an RTL logic error:** minimal repro proves a
+      non-unrolled `for`/`while` loop of packed part-select NBA writes
+      (`exec_w_q[32*i +: 32] <= …`, ≥~large trip count) is *elaborated
+      but silently no-ops* under 5.008 while 5.020 unrolls it; small
+      loops (≤~8 iters) and single runtime-variable part-select writes
+      are fine on both.  The reply-path `rep[3]` divergence was the
+      136-iteration command-start profile init
+      `exec_w_q[32*i+:32] <= APU_VN_PROFILE[i]` never firing, leaving
+      `exec_w_q` holding the *previous* command's exec words (word0=`1`).
+      Fix in `g6lc_apu_vnfront.sv`: the profile init is now a single
+      packed `exec_w_q <= EXEC_W_INIT` localparam (the first
+      `APU_VN_EXEC_WORDS` `APU_VN_PROFILE` words, self-maintaining via
+      symbolic refs); the two other 136-iter `exec_w_q` zero-fill loops
+      (`StImgSubRep`, `StQryGo`) became `exec_w_q <= '0`.  Reply
+      protocol unchanged.  **Re-verified under PGO 5.008:** rep[3] GONE.
+      Two follow-on failures surfaced and were resolved/separated:
+      rec3/rec4 `rep[88]`/`rep[98]` `0x80`→`0x100` were a package-vs-vector
+      inconsistency (regen vectors expected the new value, committed
+      `g6lc_apu_vn_pkg.sv` was stale) — fixed by regenerating the package
+      (minimal legit 2-line diff).  **rec147/rec148 ROOT-CAUSED+FIXED - model bug, NOT RTL/Verilator:**
+      `vkCmdPushConstants`/`vkCmdDispatch`/`vkFreeCommandBuffers` in
+      arm-8 ("pValues over limit -> UNKNOWN + INVALID") returned
+      `VK_SUCCESS` where vectors expected `VK_ERROR_UNKNOWN`.  Fails
+      identically under PGO 5.008 AND system 5.020 -> genuine
+      RTL-vs-model discrepancy, not a toolchain bug.  Root cause: the
+      **golden model's push-constant size check was stale at `>128`**
+      (`vn_golden.py` RECORD validation) while the RTL (`StCbGo`,
+      `op_q.imm[2] > 256`) and the device profile
+      (`vn_device_profile.toml` `maxPushConstantsSize = 256`,
+      `vn_native_layouts.py` already reads that limit) all use
+      **256 B** after the 128->256 B widening.  A 132-byte push is
+      *valid* under 256 B -> RTL correctly returns SUCCESS; the stale
+      model wrongly expected UNKNOWN+INVALID and cascaded to the
+      dispatch/free.  **Fix (model+vector only, RTL untouched):**
+      `vn_golden.py` `rec['imm'][2] > 128` -> `> 256` (+comment);
+      arm-8 test `size=132`->`size=260` with `pValues=b'\x01'*256` -
+      `size=260` keeps `imm[2]>256` true (still exercises the
+      error->`CB_INV` path) while `pValues=256 B` stays at the blob
+      `maxw=64` decode bound so it does NOT trip the earlier
+      `FAULT['BOUND']` (a >256 B *payload* faults at decode with
+      UNKNOWN but no INVALID - a different, correct mechanism).
+      Result: rec146 push=UNKNOWN+INVALID, rec147 dispatch=UNKNOWN
+      (INVALID cb fails the RECORD check), rec148 free=SUCCESS
+      (RETIRE ignores recording state - correct per Vulkan).
+      Regenerated `ue_sm5_session`; **ALL 7 vnfront sessions PASS**
+      (`ue_sm5_session/payfull/bindfull/cbfull/qry/qry2/bvw`,
+      `cases=179 checks=3078`).  Blast radius: only `ue_sm5_session`
+      pushes >128 B - `pushscale`=8 B, `pushwide`=256 B is shwave-only
+      (not a vnfront session), graphics pushes are small vertex attribs.
+      bench PASS `cases=39 checks=176` on the dirty tree (consumer
+      decode verified); **rast bench PASS `cases=80 checks=52243`** —
+      built with system Verilator **5.020** (`/usr/bin/verilator`,
+      `APU_RAST_OUT` default PATH), NOT the PGO 5.008 build: the PGO
+      wrapper's unroll policy emitted a pathological **196 MB**
+      `DepSet__0.cpp` that OOM'd at 11+ GB RSS, while 5.020 emits a
+      1.6 MB TU and builds in minutes (matches the run-script comment
+      that unrolling "never finishes compiling").  Functional result
+      is tool-independent — same RTL, same sim semantics.  The ≤4
+      path is provably preserved: `ca_valid[4..7]=0` ⇒ legality loop
+      only iterates slots 0–3 (identical to the old 4-way checks),
+      `at_q` wraps at `3'd7` after skipping invalid 4–7, and
+      `APU_SH_VARY_LOCS=8` already sizes FS-out colour slots 0–7
+      (byte offsets 0–127, depth slot 8 at 128).  **vgtop composition
+      bench VERIFIED (Verilator 5.020, bypassed `apu_select_verilator`'s
+      repo-PGO gate by invoking verilator directly with
+      `CVA6_REPO_DIR`+`apu_vn.vlt`, no unroll flags):** transport step
+      PASS `cases=36 checks=1844`, and **all 8 MRT graphics sessions
+      PASS bit-exact (`maxulp=0`)** — `ue_gpos_mrt_1`/`mrtb_1` (2 att),
+      `mrt3_1`/`mrt3lop_1` (3 att), `mrt4_1`/`mrt4depth_1`/`mrtlop_1`/
+      `mrt4lop_1` (4 att + depth/logicOp/blend) — the real
+      vnfront→cmdexec→rast path preserves ≤4 attachments end-to-end.
+      **CONSUMER-SIDE 8-ATTACHMENT PROOF 2026-10-16 — rast bench case 81
+      PASS** (`run-apu-rast.sh`, Verilator 5.020): `tb_g6lc_apu_rast`
+      `cases=81 checks=60793` (was 80/52243).  New case drives a real
+      draw record with `ca_valid=8'hFF` and `ca[0..7]` spanning eight
+      distinct 0x1000 framebuffer regions (att0 R8G8B8A8 interpolated,
+      att1–7 B8G8R8A8 constant FS-out loc1–7 markers, all distinct) —
+      proving `at_q[2:0]` iterates 0..7, `ca`/`blend`/`ca_valid` `[7:0]`
+      arrays index correctly, FS-out colour slots 0–7 (byte offsets
+      0–112 of the 144-B record) are read per `at_q`, per-attachment
+      format decode re-selects per `at_q`, the widened 8-slot legality
+      reduction accepts a valid 8-attachment draw, and the widened
+      `blend[i].mask` covers slots 4–7.  FS model emits loc2–7 constant
+      markers unconditionally (dead stores while `ca_valid` bits clear,
+      same pattern as loc1).  This proves the RASTER consumer; the
+      producer (vnfront→cmdexec ObjPay) 8-attachment path is verified
+      structurally (61-word layout, `w57–60`→blend[4–7], lint+cmdexec
+      decode) but still lacks a real session vector.
+      Remaining:
+      profile `maxColorAttachments`/`maxFragmentOutputAttachments`/
+      `maxFragmentCombinedOutputResources` 4→8 only after a real
+      end-to-end 8-attachment session vector (the rast case is the
+      consumer proof, not the vnfront→cmdexec→rast session).
+      **vn_golden 8-attachment site map (extracted 2026-10-16):**
+      blend-state emission is ALREADY `n_col`-parametrized
+      (`for _ in range(n_col)`, ~line 15103) so it auto-scales to 8.
+      Hardcoded per-count parts needing img5–8/view5–8/imem5–8/rb6–9/
+      rb6mem–9mem + exp_img5–8: flag/n_col block ~11931–11933
+      (`is_mrt4`/`is_mrt3`/`n_col`≤4 — add `is_mrt8`, `n_col=8`,
+      imply is_mrt4→is_mrt3→is_mrt chain); shader select ~12433
+      (`fs_mrt8.spv` authored, corpus/); resource dict ~12483 (append
+      keys AFTER `cb2` so index-derived handles don't shift); exp_imgN
+      decls ~13062–13064 + oracle compute ~13249–13348 (per-attachment
+      channel-permute — fs_mrt8 loc4–7 perms needed); resource creation
+      ~14705–14806 (vkCreateImage/View/Buffer+mem+bind per attachment);
+      rp attachment list ~14829/14863, fb view list ~14900, clearv
+      ~15729, memory binds ~15507; CopyImageToBuffer readback
+      ~15830–15896 + readback gates ~16061; teardown ~16149–16165;
+      `natt>4` ObjPay-parse cap ~line 2370.
+      **vn_golden additive infrastructure LANDED + VERIFIED 2026-10-16:**
+      `is_mrt8='mrt8' in gfx` (~11936) implies the is_mrt4→is_mrt3→is_mrt
+      chain and sets `n_col=8`; `fs_mrt8.spv` added to shader select
+      (~12440); 20 resource keys `img5..8`/`view5..8`/`imem5..8`/`rb6..9`/
+      `rb6mem..9mem` appended AFTER `cb2` in the `X` handle dict (~12492)
+      — `X` is only ever `X['key']`-looked-up (283 sites, never iterated)
+      so the keys are inert for existing sessions.  **Byte-identical
+      regen PROVEN**: `ue_gpos_mrt_1`/`mrt3_1`/`mrt4_1` `.hex`/`.exp`/
+      `.json` all IDENTICAL after the change.  RES_BLOB slots for
+      att4–7 memory: `+14,+15,+18,+19,+20,+21,+22,+23` are exactly the 8
+      free slots (avoiding +8/+9 ms/dl, +10–13 mrt3/4, +16 EVICT,
+      +17 F, +24 FILL).  STILL NEEDED for a working mrt8 session: the
+      ~50 conditional wiring blocks — per-attachment creation cmds
+      (7×4), rp attachment list, fb view list, clearv, subpass colour
+      refs, `exp_img5..8` channel-permute oracles (fs_mrt8 loc4–7
+      perms), CopyImageToBuffer readback + `EK_APRCHK` gates, teardown,
+      RES_BLOB bind records, `natt>4` cap — then regen all sessions
+      byte-identical + new `ue_gpos_mrt8_1` + vgtop run.
+      Existing ≤4 tests unaffected — blend[4..7]
+      decode to the reset-disabled `32'h7800_0000` and stay unused while
+      `ca_valid[4..7]=0`.
       **IMAGE DESCRIPTOR ARRAYS — VERIFIED 2026-10-12.**  The CTS
       `*_array` failures split into two mechanisms; the *arrayed-image*
       half (`sampler2DArray` layers) already worked (`texarr`,
@@ -21997,124 +22836,9 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
 - Deleted temporary diagnostic fixtures: `ai_gemm_s8_32x32_t51.S`, `ai_gemm_s8_32x32_t51_fn.S`, `ai_gemm_two_s8_probe.S`, `ai_gemm_two_s8_probe2.S`, `ai_gemm_two_s8_inline.S`, `ai_gemm_two_s8_nofn.S`. The retained fix is in `ai_gemm_fmt_pmu_smoke.S` and `ai_gemm_two_s8_smoke.S`.
 - **Committed to local master** as `5d9f35e95`.
 - `ai_gemm_s8_64x64_smoke` on `ai-d8` **timed out at 200,000 cycles** (765 s). The 8-channel class-1 harness is substantially slower for the 64×64 fixture; a `S4_TIME_OUT>=400000` run is required. This is a harness speed/timeout issue, not a functional failure — the same ELF passes on `ai-dt` in 93,194 cycles.
-- The wider-flavour sweep (`ai-d8`, `ai-sc4`, `ai-sc8`) for the 64×64 and large-format fixtures is therefore **blocked by simulation wall-clock**, not by RTL. It needs either longer timeouts, a narrower channel config, or a reduced-size smoke for CI. fe-diag-r1: cause-2 wedge root-caused to I$-FILL DATA MIS-ASSOCIATION (va 0x80013000/0x80013008 responses carried pa 0x80012000/0x80012008 bytes; realigner/queue/decode faithful, post-trap = benign WFI park). Insertion point below frozen model's bus-probe caps (icf<600, wta<3000, soc<4000) — needs uncapped window probe on next build. Secondary: stale lopc=0x800136b6 leftover survived bpf-kill (same class as SRC_OV1 fix; benign here).
+- The wider-flavour sweep (`ai-d8`, `ai-sc4`, `ai-sc8`) for the 64×64 and large-format fixtures is therefore **blocked by simulation wall-clock**, not by RTL. It needs either longer timeouts, a narrower channel config, or a reduced-size smoke for CI.
 
-- [r27] rename_recover void-select assert gated on ref_take (empty-ring mispredict: ref underflowed on don't-care level); leaf K PASS checked=45; smokes 3/3; witness r10 confirmed leg at c691969 then wedged in sbi_init prologue (sd s3,152(sp) unretired) — next: LSU lost-op diag at new wedge.
-
-- [r28] sb_cancel dead-slot identity: cancelled_mask |= ~issued (issued is the durable allocation bit; cancelled cleared with it at commit/drop so stale B2 resolves passed). Dispatch leaf L PASS checked=58; r28 closure diff vs r27 = sb_cancel only; integration build running; smokes+witness r11 pending.
-
-- [r28b] Dead-slot resolve authority, REVISED: first r28 mask term (~issued in cancelled_mask) killed post-commit STQ records (h33-r21: store cq0 died 1 edge after push, ld wedged at commit head). Fix kept at resolve gates: sb_cancel bmiss_o &= mem_q[tid].issued; ex_stage br_lane_v &= sb_live_i[tid]; mask reverted to cancelled-only. Leaves dispatch r17 checked=57 + memory 88; smokes 3/3 (h33 back to 889); integration r28b sha 2fba39b8; witness osbi-scalar-r11 running.
-
-- [r29] Controller ghost-flush gate: stale dead-slot resolve (valid=0 but is_mispredict=1 still standing after the r28b sb_live fix) reached the controller UNGATED -> bare flush_if -> FTQ flush+push(npc_q=next_block) destroyed the 0x8000099c redirect head one cycle after apply (witness r11 wedge ~c965.2k; li a0,0x53 dropped). Fix: resolved_branch_i.valid gate at controller.sv:242 (+G6LC_MUT_CTRL_STALE_RESOLVE review mutant). New ctrl leaf PASS checked=6; mutant -> CTRL_STALE_RESOLVE_NO_FLUSH as required. r29 closure diff vs r28b = controller.sv + g6lc_iq_arb.sv (external whitespace-only churn). Build+smokes+witness r12 pending.
-
-- [r30] load_unit ex_pub kill-cycle identity: a killed SEND_TAG request's OWN dummy rvalid now publishes the exception ((ldbuf_last_id_q==rresp_idx)||!kill_req_w; an external rewrite had reverted it to `!=` — re-applied and closure-verified). Memory leaf section F +11 -> HYP8_MEMORY_PASS checked=99 (r30b); mutant `!=` -> LU_MIS_EX_PUBLISH FAIL (r30mut5). r30 closure diff vs r29 = load_unit.sv (fix) + external iq_arb/iq_bank/lsq_verdict (rename_recover churned and returned to r29 content). Lint scalar rc=0 (343/87/3), smt2 rc=0 (353/97/3); model 07a54529. Smokes 3/3 real tohost (h34@682 h33@889 bcancel@475). Witness r13: 2,306,327 retires past the r12 assert (c1,168,793), zero %Error; NEW wedge — fetch+retire both stop at 0x8000ea9a, next insn csrrw mtvec @0x8000ea9e never fetched (frontend starvation boundary in sbi_hart_init).
-
-- Hyp8 r99 MC contract closeout (2026-10-29): resolved the r98 unqualified MC gate without waivers — zero-default LSQ store credits now follow the derived speculative-store depth (MC 16; explicit oversize still `$error`), and the rename checkpoint record/publish/recovery seam carries the full 128-entry slot (`CKPT128_PASS last=127`). Final isolated aggregate `hyp8-r99-aggregate-c2` has scalar/SMT2/MC lint rc=0, `%Error=0`, `%Warning-USERERROR=0`, `%Warning-SELRANGE=0`; dispatch leaf PASS 125; scalar smokes 7/7. Evidence: `build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r99/worklog.md`. Open: remaining ordinary lint warnings (602/623/688 by scalar/SMT2/MC), MC simulation, Linux/OpenSBI boot and physical timing.
-
-- Hyp8 r112: Zbb zero-count defect corrected and remote leaf/11-smoke
-  qualification passed. The earlier issue-6 retired-load replay attribution
-  is withdrawn; H36/H37 pass on the affected baseline. Track corrected
-  OpenSBI/Linux witness separately through `G6LC_LINUX_INIT_UP` and
-  `G6LC_LINUX_SHELL`; full OpenWRT/procd is outside the frozen payload.
-  The local canonical verification gate remains blocked by missing managed
-  Verilator; synthesis/physical timing remain open. Evidence:
-  `build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/r100/worklog.md`.
-
-- Hyp8 r113: the residual r112 allocator failure was localized to an
-  OV1 frontend restart at a queued taken branch's fall-through. The branch
-  operands and taken resolution were correct. The accepted-stream
-  successor now retains the queued prediction; leaf PASS 75, prior-behavior
-  mutation fails `G_BRANCH_OV1_TARGET`, scalar/SMT2/MC lint has zero errors
-  and unchanged warning totals, and 11/11 whole-core smokes pass.
-  RTL `a5fc9e4e6`, verification/flists/licensing `f943858cf`.
-  `hyp8-osbi-scalar-r113` ended at its 300M-cycle limit (last RVFI
-  299999987), after the mount-cache tables but without either userspace
-  marker. Observer exit 4: incomplete, not a boot pass. Its two closed
-  traces are preserved as verified `.zst` archives; receipt
-  `remote-runs/hyp8-osbi-scalar-r113/output/compression-r113-final.json`
-  records the 15,301,837,868-byte logical storage reduction.
-  Continue the corrected r114 witness below.
-
-- Hyp8 r114: SC backoff read the previous formed result at the incoming
-  memory-ACK edge. The verdict now follows the owned registered result in
-  `AMO_RESULT`. Frozen r113 baseline fails `SC_D_SUCCESS_MASK`; corrected
-  focused leaf passes 44 checks, full D-cache leaf 334, and all 11 smokes
-  pass. Lint warning totals remain 602/623/688 with zero errors.
-  r113 has completed SLUB and progressed through IRQ/clock/console setup;
-  its LR stalls at cycle 245151461 were transient and motivated the
-  separate backoff investigation. Continue the corrected r114 model to
-  both userspace markers. Commits: RTL `a9c90bece`, tests/runner
-  `5f6e3740b`. Direct remote checks at 2026-11-03 02:09 UTC show r113
-  advancing at cycle 285042210 and r114 at 16784637, with neither marker.
-  The model-log tails show no fatal assertion. Preserve the final UART
-  and verdict; an ended process without both markers is not a boot pass.
-  Latest r114 observation: 2026-11-03 04:41:41 UTC, RVFI 33836506,
-  `Initmem setup node 0`, no markers or reported kernel error. PID
-  2644580 and remote observer 2677910 remain active under the 1B budget.
-
-- Hyp8 r115–r126: fork-PGO toolchain (`tools/verilator` `44063db83`,
-  compiler PGO + `--unroll-count 256 --unroll-stmts 131072` + split-loop
-  `.vlt`), simulation PGO in `hyp8-build-harness.sh`, and the r115–r127
-  FO4 batches qualified on the remote (lint rc 0, 14/14 smokes at
-  baseline cycle counts through closure-r127ag). Boot defects fixed en
-  route: frontend accepted-stream continuity (`6a5d55603`), younger
-  DTLB-miss load replay (`c5c9262de`), misaligned-slot fault-cause
-  assertion (`7eb2f6e1c`), held-load PA capture qualifier (`ad6a429b9`).
-  **r126 PASSED 2026-11-14**: model `3a82cda6…` (ad6a429b9 RTL, t4 +
-  sim-PGO) reached `G6LC_LINUX_INIT_UP` and `G6LC_LINUX_SHELL` — Linux
-  6.6.93 `/init` → BusyBox ash `~ #` — and ran the full 3e9-cycle budget
-  clean (monitor exit 0; ~54.3 h wall on the shared host). Evidence:
-  `analysis/r116/worklog.md` §11. r127 witnesses: r127m (default,
-  closure-r127m model) still running at 1.37B cycles; the OFF-by-default
-  deep (`LoadExPubStages=2`) and staged-MMU profiles each died on
-  assertions (load_unit misaligned-slot @254.9M, g6lc_tlb multi-hit
-  @317.4M) — recorded, not enabled. Committed tree `3438607dc` core ==
-  closure-r127ag; a t4 witness-quality build of HEAD (`closure-r128`,
-  `hyp8-r128-aggregate-t4`) is in flight — no boot witness has yet run
-  on the final committed RTL.
-
-- Hyp8 r128/r129 (2026-11-15). `hyp8-osbi-scalar-r127m` PASSED (both
-  markers). r128 (committed tree `3438607dc`, model `f697e3b9…`, lint rc 0,
-  14/14 smokes) retires exactly what r126 and r127m retire at 100M, 400M,
-  700M, 794M, 1,762M and 1,764M cycles, but the remote disk was full for
-  ~11 h and its UART/log lost cycles 794M–1,762M, markers included: **no
-  marker verdict**. Relaunched as `hyp8-osbi-scalar-r128b` (budget 1.75e9);
-  open until `boot-monitor/*.exit` is 0. Deep profile
-  (`LoadExPubStages=2`): the r127n-deep stop at 254,915,572 was a lost
-  exception (slot drained while its pending record waited for a safe FSM
-  state); fixed in `107c4ca3c` with a leaf reproduction and mutant, default
-  netlist unchanged (14/14 smokes, same counts); witness
-  `hyp8-osbi-scalar-r129-deep` running, must pass 254.9M and reach both
-  markers. Memory leaf repaired (stale since `7d7d7dc5a`): 176 default /
-  177 deep on the pinned toolchain. Staged MMU: multi-hit at 317,424,744
-  follows the kernel ASID probe (satp, satp, sfence.vma) by ~10k cycles;
-  cause not established; `+tlb_trace` probe committed (`23dd03fab`),
-  replay `…-r129b-mmustaged-diag2` queued behind the live witnesses
-  (`HYP8_WAIT_PIDS`). Host note: 12 cores; three 4-thread models plus APU
-  leaf jobs drop witnesses to 1–5 kcyc/s — run at most two, and watch
-  `df` (witness traces are 30–90G each). Details: `analysis/r116/worklog.md`
-  §12–13, `analysis/r129/worklog.md`.
-
-- Canonical verification follow-up: harness selection fixed (`774f9cc6f`);
-  the cv64 depth-8 load buffer now has a derived 3-bit cache ID; the shared
-  testbench reads built-config cache geometry; optional `mtval` storage
-  and RV32 register widths are handled in the C++ diagnostic.
-  Seven RV64 comparisons and one RV32 hello comparison (719 matched)
-  passed. The final `verify --lint --sim --synth` gate passed all eight
-  lint/elaboration, simulation and synthesis-smoke steps at 2026-11-03
-  02:47 UTC (durable `r114-canonical-final-20261103T022156Z` artifacts).
-  Hyp8 userspace and physical timing qualification remain open.
-  Spike's missed HTIF completion, YAML-overridden CLI limit and false
-  success on budget exhaustion are corrected in child `74d780f1`
-  (root pin `b2e1ee422`), with positive, guest-failure and budget controls.
-  The old managed install is preserved as `spike-pre-r114-backup`.
-  Reviewed fixes: config/SV testbench `54528988c`, C++ probes `d07d3c632`.
-  Details and exact identities: `analysis/r100/worklog.md`.
-
-- Evidence storage: closed r107/r109/r112/r112diag hart/RVFI traces now
-  reside as verified `.zst` archives. Eight round-trip hash/size receipts
-  record 10,966,140,023 bytes released. Do not delete these archives or
-  active witness data. Update readers to decompress the archived traces.
+## APU native-backend and graphics-pipeline session log
 
 ### APU source-driven continuation: sampler lifetime and sampling policy
 
@@ -22182,91 +22906,6 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   vector-parity and 5.008 results do not validate these newer changes.
 - [ ] Next: decoded dispatch/reply transport and real blob/control-queue
   lifecycle, then bridge framing; immutable samplers remain open.
-
-### Storamic source audit: disjoint implementation and qualification
-
-- [x] Reassess ST-025 against its actual acceptance criteria; reopen the task.
-  Debug generation/address telemetry and a magic key do not constitute a
-  persistent journal or a protected stick-wide ABI. Current architecture,
-  source gaps and gate observations: `g6lc_storamic/architecture/development-status.md`.
-- [x] Author the bounded flash commit/replay correction: SRAM writes only at
-  powered commit retirement, held/repeated-cut retention, save drain/empty
-  completion, one acknowledgement per held flush, no false flash restore success.
-  Extended directed bench now passes the selected pinned dstore leaf below;
-  aggregate and integration qualification remain separate.
-- [x] Add offline `run_remote.py --prepare-only`: source/runner identity and
-  explicit runtime blockers, no remote launch, never a gate pass. Four offline
-  tooling regressions pass.
-- [x] Query remote gates read-only: v3 remains 20 pass/5 fail; collected local
-  v6 remains 22 pass/3 fail (remote outputs absent); dstore ABI is incomplete
-  with `STORAMIC_SOURCE_IDENTITY`. Two long-lived Spike processes remain;
-  no process cancellation, cleanup or remote test launch in this pass.
-- [x] Validate the changed dstore leaf: `storamic-555acfbc60e9` passes delays
-  0/1/4/16 with 51/57/63/87 checks and four rejecting negative oracles.
-  Recreated runtime canaries in `storamic-response-runtime-r1` (original fails,
-  fixed passes). Source/runner/runtime/compiler identities checked; leaf result
-  deliberately has `qualification=false`.
-- [x] Repair delayed response ownership and partial-write readback: preserve
-  accepted data/error/mask, one response per grant including held power loss,
-  merge staged valid bytes over SRAM, and drain responses before flush/save.
-- [ ] Run native reinit/service integration and isolated aggregate lint/formal/
-  sim/synth. Do not assume the `FLASH_RSP=16` integration failure is resolved
-  from a passing leaf. Local aggregate preflight still flags missing patches.
-- [ ] Implement stick-wide drain/checkpoint/restore coordination and last-valid
-  checkpoint metadata bound to module identity/map generation. ST-024 protection
-  budgeting, backup-space reservation and degraded admission remain prerequisites.
-- [x] Repair RAM checkpoint prerequisites: drain response ownership before
-  scans; force save reads independent of live WE; publish an inactive tc_sram
-  checkpoint bank only on its final write; preserve the last image across
-  torn save/restore; clear volatile RAM before post-cut admission.
-  `storamic-7cd4d99acf53` passes paired RAM/flash delays 0/1/4/16 with
-  73/79/85/109 checks and four rejecting negative oracles. This is selected-leaf
-  evidence only; stick-wide coordination and durable metadata remain open.
-
-### Storamic checkpoint coordination session
-
-- [x] Audit the architecture and define dependency-ordered work packages in
-  `g6lc_storamic/architecture/checkpoint-coordination.md`. Producer jobs must
-  drain before RAM ingress is sealed; RAM preparation must be separated from
-  publication before a stick-level checkpoint can be acknowledged.
-- [x] ST-025A: AXI ingress quiesce/drain foundation. Local 29-check directed
-  bench, six model profiles, three rejecting simulation oracles, frontend/top
-  synthesis (no latches/SCC), full and focused depth-12 safety/reachability pass.
-  The real formal-only leaf also passes with an absent Verilator and rejects
-  tampered sources. Six offline runner tests pass. These are local component
-  checks; remote sweep is incomplete after toolchain disappearance, and
-  top-level quiesce stays tied low until coordinator integration.
-- [ ] ST-025B: Pause new VirtIO/DMA jobs without resetting ownership epochs;
-  drain current jobs while RAM remains available, including other enabled writers.
-  - [x] VirtIO job pause/drain and shared-port acknowledgement: 137 device checks
-    plus ring/block/device positive and negative local simulation. Frozen
-    synthesis/formal sweep is separate; other enabled writer integration is open.
-- [ ] ST-025C: Split RAM prepare/publish/abort, then implement one maintenance
-  coordinator for RAM and flash. Never select a partial cross-chip checkpoint.
-  - [x] C1 external RAM prepare/publish/abort and bank lifetime: 139 checks at
-    delays 0/1/4/16, four rejecting oracles, external-mode synthesis and legacy
-    dstore delay-16 109 checks pass locally. External metadata is a fixture.
-  - [ ] C2 coordinator/native wiring, fail-locked recovery and explicit platform
-    cache/reservation/device-state synchronization. Do not activate C1 as a
-    protected-persistence capability before metadata/protection qualification.
-- [ ] ST-025D: Persist identity/map-bound metadata across controller reset;
-  validate commit records and exclude backup/recovery space from block capacity.
-  - [x] Implement model record codec/layout, owned RAM/store word sequencer,
-    alternating reserved-flash copies and untrusted word-port bound. Fixed
-    record addresses preserve foreign-map discovery; commit markers cannot
-    alias zero invalidation. Freeze-only C1 mode eliminates retained shadows.
-  - [x] Require exclusive writer/ingress acknowledgement for recovery and
-    flush retained staging before reading records after owner-only reset.
-    Identity/map/image binding, CRC fallback and saturation remain fail-closed.
-  - [ ] Finish current immutable local simulation/synthesis/formal slice and
-    refresh C2/C1/dstore regressions. Prepared tag `storamic-489af3c88a3e`;
-    local workspace `storamic-checkpoint-record-01`. Local-only evidence,
-    not remote/runtime, aggregate, native, Linux or physical qualification.
-  - [ ] Wire the owner and guard under legal optional native configuration,
-    every enabled writer acknowledgement and real cache/reservation/device
-    synchronization; do not substitute fixture or constant acknowledgements.
-- [ ] ST-024/ST-025E: Freeze protection domain and worst-case time/energy
-  admission, degraded/full/bad-block refusal, and the full interruption matrix.
 
 ### APU RTL descriptor-order correction
 
@@ -25548,6 +26187,93 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
   10816); xfer/rast/gcs/shwave INCOMPLETE on simulator PGO
   provisioning timeouts (infra, unrelated to the diff). Selected-
   stage evidence only; no device/CTS qualification.
+
+## Storamic session log
+
+### Storamic source audit: disjoint implementation and qualification
+
+- [x] Reassess ST-025 against its actual acceptance criteria; reopen the task.
+  Debug generation/address telemetry and a magic key do not constitute a
+  persistent journal or a protected stick-wide ABI. Current architecture,
+  source gaps and gate observations: `g6lc_storamic/architecture/development-status.md`.
+- [x] Author the bounded flash commit/replay correction: SRAM writes only at
+  powered commit retirement, held/repeated-cut retention, save drain/empty
+  completion, one acknowledgement per held flush, no false flash restore success.
+  Extended directed bench now passes the selected pinned dstore leaf below;
+  aggregate and integration qualification remain separate.
+- [x] Add offline `run_remote.py --prepare-only`: source/runner identity and
+  explicit runtime blockers, no remote launch, never a gate pass. Four offline
+  tooling regressions pass.
+- [x] Query remote gates read-only: v3 remains 20 pass/5 fail; collected local
+  v6 remains 22 pass/3 fail (remote outputs absent); dstore ABI is incomplete
+  with `STORAMIC_SOURCE_IDENTITY`. Two long-lived Spike processes remain;
+  no process cancellation, cleanup or remote test launch in this pass.
+- [x] Validate the changed dstore leaf: `storamic-555acfbc60e9` passes delays
+  0/1/4/16 with 51/57/63/87 checks and four rejecting negative oracles.
+  Recreated runtime canaries in `storamic-response-runtime-r1` (original fails,
+  fixed passes). Source/runner/runtime/compiler identities checked; leaf result
+  deliberately has `qualification=false`.
+- [x] Repair delayed response ownership and partial-write readback: preserve
+  accepted data/error/mask, one response per grant including held power loss,
+  merge staged valid bytes over SRAM, and drain responses before flush/save.
+- [ ] Run native reinit/service integration and isolated aggregate lint/formal/
+  sim/synth. Do not assume the `FLASH_RSP=16` integration failure is resolved
+  from a passing leaf. Local aggregate preflight still flags missing patches.
+- [ ] Implement stick-wide drain/checkpoint/restore coordination and last-valid
+  checkpoint metadata bound to module identity/map generation. ST-024 protection
+  budgeting, backup-space reservation and degraded admission remain prerequisites.
+- [x] Repair RAM checkpoint prerequisites: drain response ownership before
+  scans; force save reads independent of live WE; publish an inactive tc_sram
+  checkpoint bank only on its final write; preserve the last image across
+  torn save/restore; clear volatile RAM before post-cut admission.
+  `storamic-7cd4d99acf53` passes paired RAM/flash delays 0/1/4/16 with
+  73/79/85/109 checks and four rejecting negative oracles. This is selected-leaf
+  evidence only; stick-wide coordination and durable metadata remain open.
+
+### Storamic checkpoint coordination session
+
+- [x] Audit the architecture and define dependency-ordered work packages in
+  `g6lc_storamic/architecture/checkpoint-coordination.md`. Producer jobs must
+  drain before RAM ingress is sealed; RAM preparation must be separated from
+  publication before a stick-level checkpoint can be acknowledged.
+- [x] ST-025A: AXI ingress quiesce/drain foundation. Local 29-check directed
+  bench, six model profiles, three rejecting simulation oracles, frontend/top
+  synthesis (no latches/SCC), full and focused depth-12 safety/reachability pass.
+  The real formal-only leaf also passes with an absent Verilator and rejects
+  tampered sources. Six offline runner tests pass. These are local component
+  checks; remote sweep is incomplete after toolchain disappearance, and
+  top-level quiesce stays tied low until coordinator integration.
+- [ ] ST-025B: Pause new VirtIO/DMA jobs without resetting ownership epochs;
+  drain current jobs while RAM remains available, including other enabled writers.
+  - [x] VirtIO job pause/drain and shared-port acknowledgement: 137 device checks
+    plus ring/block/device positive and negative local simulation. Frozen
+    synthesis/formal sweep is separate; other enabled writer integration is open.
+- [ ] ST-025C: Split RAM prepare/publish/abort, then implement one maintenance
+  coordinator for RAM and flash. Never select a partial cross-chip checkpoint.
+  - [x] C1 external RAM prepare/publish/abort and bank lifetime: 139 checks at
+    delays 0/1/4/16, four rejecting oracles, external-mode synthesis and legacy
+    dstore delay-16 109 checks pass locally. External metadata is a fixture.
+  - [ ] C2 coordinator/native wiring, fail-locked recovery and explicit platform
+    cache/reservation/device-state synchronization. Do not activate C1 as a
+    protected-persistence capability before metadata/protection qualification.
+- [ ] ST-025D: Persist identity/map-bound metadata across controller reset;
+  validate commit records and exclude backup/recovery space from block capacity.
+  - [x] Implement model record codec/layout, owned RAM/store word sequencer,
+    alternating reserved-flash copies and untrusted word-port bound. Fixed
+    record addresses preserve foreign-map discovery; commit markers cannot
+    alias zero invalidation. Freeze-only C1 mode eliminates retained shadows.
+  - [x] Require exclusive writer/ingress acknowledgement for recovery and
+    flush retained staging before reading records after owner-only reset.
+    Identity/map/image binding, CRC fallback and saturation remain fail-closed.
+  - [ ] Finish current immutable local simulation/synthesis/formal slice and
+    refresh C2/C1/dstore regressions. Prepared tag `storamic-489af3c88a3e`;
+    local workspace `storamic-checkpoint-record-01`. Local-only evidence,
+    not remote/runtime, aggregate, native, Linux or physical qualification.
+  - [ ] Wire the owner and guard under legal optional native configuration,
+    every enabled writer acknowledgement and real cache/reservation/device
+    synchronization; do not substitute fixture or constant acknowledgements.
+- [ ] ST-024/ST-025E: Freeze protection domain and worst-case time/energy
+  admission, degraded/full/bad-block refusal, and the full interruption matrix.
 
 ### ST-025 Reserved-Media / Coordinated-Model Session
 

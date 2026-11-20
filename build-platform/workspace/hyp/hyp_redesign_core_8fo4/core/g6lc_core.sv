@@ -169,12 +169,16 @@ module g6lc_core
       logic [7:0] p_rs2;
       logic [7:0] p_rd;
       // U6 Phase5 split FP class: its own tags, because the FP physical file
-      // is a separate array. p_frs3 has no integer counterpart -- only FP has
-      // a third source, and its architectural number arrives in result[4:0].
+      // is a separate array. p_frs3's integer counterpart is p_rs3 below,
+      // used only by Zacas AMOCAS (rd doubles as the compare source).
       logic [7:0] p_frs1;
       logic [7:0] p_frs2;
       logic [7:0] p_frs3;
       logic [7:0] p_frd;
+      // Zacas AMOCAS integer third-source tag: the OLD physical register that
+      // rd overwrote (prd_old). For AMOCAS rs3==rd, so this is the expected
+      // value's physical location. Unused for every other op.
+      logic [7:0] p_rs3;
       logic       ooo_renamed;  // tags valid for PRF operand path
     },
     localparam type writeback_t = struct packed {
@@ -2606,6 +2610,9 @@ assign irq_active = irq_i[smt_active_hart];
     // +hang_dump=N state (see below)
     longint unsigned hd_at, hd_last_ack;
     int unsigned hd_n, hd_tot;
+    // +iqdump_from/to/every: windowed hd_print independent of commit_ack
+    // (hang_dump's anyack is masked by sibling-hart/drop acks).
+    longint unsigned iqw_from, iqw_to, iqw_every, iqw_last;
     function automatic int unsigned sc_class(input g6lc_core_pkg::fu_t fu);
       case (fu)
         g6lc_core_pkg::LOAD: return 0;
@@ -2718,11 +2725,24 @@ assign irq_active = irq_i[smt_active_hart];
           hd_tot++;
           hd_print();
         end
+        // +iqdump_from/to/every: windowed hd_print keyed on sc_cyc, not on
+        // commit_ack -- hang_dump's anyack never reaches its threshold while
+        // a sibling hart/drop commit keeps acking. Default spacing when
+        // iqdump_every is unset is one dump at iqw_from.
+        if (iqw_from != 0 && sc_cyc >= iqw_from && sc_cyc <= iqw_to &&
+            sc_cyc - iqw_last >= (iqw_every != 0 ? iqw_every : 64'd1)) begin
+          iqw_last = sc_cyc;
+          hd_print();
+        end
       end
     end
     initial begin
       hd_at = 0; hd_last_ack = 0; hd_n = 0; hd_tot = 0;
       void'($value$plusargs("hang_dump=%d", hd_at));
+      iqw_from = 0; iqw_to = 0; iqw_every = 0; iqw_last = 0;
+      void'($value$plusargs("iqdump_from=%d", iqw_from));
+      void'($value$plusargs("iqdump_to=%d", iqw_to));
+      void'($value$plusargs("iqdump_every=%d", iqw_every));
     end
     function automatic void hd_print();
       automatic int unsigned hs;
@@ -2742,8 +2762,16 @@ assign irq_active = irq_i[smt_active_hart];
                commit_instr_id_commit[0].valid, commit_instr_id_commit[0].fu, commit_instr_id_commit[0].pc,
                commit_ack[0], commit_drop_id_commit[0],
                issue_stage_i.i_scoreboard.commit_pointer_q[0], issue_stage_i.i_scoreboard.issue_pointer_q);
+      for (int unsigned s = 0; s < G6LCCfg.NR_SB_ENTRIES; s++)
+        if (issue_stage_i.i_scoreboard.mem_q[s].issued)
+          $display("[hang] SBX slot=%0d pc=%h fu=%0d op=%0d prd=%0d hart=%0d",
+                   s, issue_stage_i.i_scoreboard.mem_q[s].sbe.pc,
+                   issue_stage_i.i_scoreboard.mem_q[s].sbe.fu,
+                   issue_stage_i.i_scoreboard.mem_q[s].sbe.op,
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.tid_prd_q[s],
+                   issue_stage_i.i_scoreboard.mem_q[s].sbe.hart_id);
       for (int e = 0; e < issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.DEPTH; e++)
-        if (issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.info_v[e/(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)][e%(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)])
+        if (issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.info_v[e/(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)][e%(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)]) begin
           $display("[hang] IQ[%0d] tid=%0d fu=%0d op=%0d pc=%h rs1=%b rs2=%b rs3=%b bypass=%b ready=%b prs1=%0d prs2=%0d", e,
                    issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.info_tid[e/(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)][e%(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)],
                    issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.i_payload.mem_q[e/(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)][e%(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)].sbe.fu,
@@ -2756,10 +2784,25 @@ assign irq_active = irq_i[smt_active_hart];
                    issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.info_cls[e/(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)][e%(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)],
                    issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.info_prs1[e/(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)][e%(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)],
                    issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.info_prs2[e/(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)][e%(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)]);
+          $display("[hang] IQd[%0d] iss=%b prd=%0d pt=%0d,%0d sp=%b%b%b ord=%b leg=%b hart=%0d", e,
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.info_iss[e/(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)][e%(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)],
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.info_prd[e/(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)][e%(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)],
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.info_pt1[e/(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)][e%(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)],
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.info_pt2[e/(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)][e%(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)],
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.info_sp1[e/(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)][e%(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)],
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.info_sp2[e/(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)][e%(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)],
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.info_sp3[e/(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)][e%(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)],
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.info_ord[e/(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)][e%(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)],
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.legal[e/(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)][e%(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)],
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.info_hart[e/(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)][e%(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ENTRIES)]);
+        end
       $display("[hang] IQ issue_valid=%b issue_ack=%b st_unresolved=%h st_live=%h md_stall=%b stl_stall=%b",
                issue_stage_i.gen_full_ooo.i_ooo_dispatch.iqi_valid, issue_stage_i.gen_full_ooo.i_ooo_dispatch.iq_issue_ack,
                issue_stage_i.gen_full_ooo.i_ooo_dispatch.st_unresolved_mask, issue_stage_i.gen_full_ooo.i_ooo_dispatch.st_live_mask,
                |issue_stage_i.gen_full_ooo.i_ooo_dispatch.md_stall_v, issue_stage_i.gen_full_ooo.i_ooo_dispatch.stl_stall);
+      $display("[hang] ST_FRONT v=%b tid=%h",
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.dbg_st_front_v,
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.dbg_st_front_tid);
       // r100 (issue 5): the arbiter / reservation-window state behind a
       // ready-but-never-granted head (hyp8-osbi-scalar-r105 @42,044,921).
       $display("[hang] IQ arb: win_v=%b win_s_v=%b win_s_kill=%b take_ok=%b res_block=%b gate_ok=%b take_kill=%b take_grant=%b | flu_in=%h flu_wb=%h fpu_wb=%h div_live=%b mult_rdy=%b fpu_rdy=%b csr_rdy=%b lsu_rdy=%b | cand_v_q=%h | staged iss_v=%b iqi_take=%b fpblk=%b",

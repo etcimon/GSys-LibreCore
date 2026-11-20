@@ -42,6 +42,22 @@
 #endif
 #include "Vg6lc_testharness__Dpi.h"
 
+// Partitioned (V3Param __piNN class) model detection. Large parameterized
+// netlists (e.g. the 4-core mc build once the redesign crossed Verilator's
+// module-class emission threshold) emit the top module and the
+// cluster/hart/core hierarchy as separate C++ classes reachable through
+// top->g6lc_testharness->i_cluster->... instead of flat rootp-> members.
+// Vg6lc_testharness_g6lc_testharness.h exists only when the top module is
+// emitted as its own class (flat models inline it into ___024root), so it is
+// a stable, pi-number-independent discriminator. When present we pull in
+// __Syms.h (stable name) which includes every module-class header, giving
+// complete types for the pointer traversal below.
+#if defined(__has_include)
+#  if __has_include("Vg6lc_testharness_g6lc_testharness.h")
+#    define G6LC_TB_PARTITIONED 1
+#  endif
+#endif
+
 // Hierarchical MC hang probes (OpenSBI bring-up only). Default bare-metal /
 // Zacas mini builds must NOT compile them — paths assume multi-core + HPDCACHE + L2
 // and fail to build for WT single-core packages (cv64a6_imafdc_sv39).
@@ -85,6 +101,35 @@ static Vg6lc_core_hb___024root* g6lc_core_root(int c) {
 #define G6LC_CVA6_C1(path) g6lc_core_hb__DOT__i_g6lc__DOT__gen_std__DOT__i_g6lc##__DOT__##path
 #endif
 #else
+#if defined(G6LC_TB_PARTITIONED)
+#include "Vg6lc_testharness__Syms.h"
+// Partitioned model: reach core c's g6lc_core instance through the generated
+// module-class objects. Inside each class, members are scope-relative and
+// private state carries a __PVT__ name prefix, so G6LC_CVA6_Cx emits
+// __PVT__##path while G6LC_CORE_ROOT(c) selects the instance (the gen_core
+// generate arms are unrolled members, not an array). Signals that are public
+// (module ports / /*verilator public*/) or whose flat path does not survive
+// partitioning verbatim are handled at their call sites.
+static inline auto g6lc_tb_core_pi(Vg6lc_testharness* t, int c) {
+  auto* cl = t->g6lc_testharness->i_cluster;
+  auto* h = (c == 0) ? cl->gen_core__BRA__0__KET____DOT__i_g6lc
+           : (c == 1) ? cl->gen_core__BRA__1__KET____DOT__i_g6lc
+           : (c == 2) ? cl->gen_core__BRA__2__KET____DOT__i_g6lc
+                     : cl->gen_core__BRA__3__KET____DOT__i_g6lc;
+#if defined(G6LC_CVA6_GEN_ACC)
+  return h->gen_acc__DOT__i_g6lc;
+#else
+  return h->gen_std__DOT__i_g6lc;
+#endif
+}
+#define G6LC_CORE_ROOT(c) (g6lc_tb_core_pi(top.get(), c))
+#define G6LC_CVA6_C0(path) __PVT__##path
+#define G6LC_CVA6_C1(path) __PVT__##path
+// Signals Verilator emits without the __PVT__ prefix in the partitioned class
+// (public module ports / public_flat_rw), e.g. commit_instr_id_commit.
+#define G6LC_CVA6_C0_PUB(path) path
+#define G6LC_CVA6_C1_PUB(path) path
+#else
 #define G6LC_CORE_ROOT(c) (top->rootp)
 #if defined(G6LC_CVA6_GEN_ACC)
 #define G6LC_CVA6_C0(path) g6lc_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_g6lc__DOT__gen_acc__DOT__i_g6lc##__DOT__##path
@@ -92,6 +137,11 @@ static Vg6lc_core_hb___024root* g6lc_core_root(int c) {
 #else
 #define G6LC_CVA6_C0(path) g6lc_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_g6lc__DOT__gen_std__DOT__i_g6lc##__DOT__##path
 #define G6LC_CVA6_C1(path) g6lc_testharness__DOT__i_cluster__DOT__gen_core__BRA__1__KET____DOT__i_g6lc__DOT__gen_std__DOT__i_g6lc##__DOT__##path
+#endif
+// Flat models expose every probed member under its full hierarchical name
+// (no __PVT__ split), so the public variant is identical to the regular one.
+#define G6LC_CVA6_C0_PUB(path) G6LC_CVA6_C0(path)
+#define G6LC_CVA6_C1_PUB(path) G6LC_CVA6_C1(path)
 #endif
 #endif
 // SMT hierarchy flavor: NrHarts>1 builds the banked CSR/RF wrappers and the
@@ -200,6 +250,9 @@ static const char *verilog_plusargs[] = {
     "fetch_kill_check",
     // instr_queue order probe (core/fetch_B/instr_queue.sv).
     "iq_trace",
+    // +phantom_probe: valid=1 + empty-payload (pc=0/fu=NONE) fetch/issue
+    // divergence probes in instr_queue.sv, id_stage.sv, g6lc_fe_override.sv.
+    "phantom_probe",
     // Fetch-supply observer (core/fetch_B/g6lc_fetch_dbg.sv). Same allowlist
     // rule: an unlisted plusarg is handed to HTIF, rejected, and the run dies
     // before the observer arms.
@@ -279,6 +332,10 @@ static const char *verilog_plusargs[] = {
     "stall_census",
     // +hang_dump=N (core/cva6.sv gen_stall_census): state dump after N cycles without a commit ack
     "hang_dump",
+    // +iqdump_from/to/every (core/g6lc_core.sv gen_stall_census): windowed
+    // hd_print keyed on sc_cyc, independent of commit_ack -- hang_dump's
+    // anyack is masked by sibling-hart/drop acks during a per-hart stall.
+    "iqdump_from", "iqdump_to", "iqdump_every",
     // +f14_trace (wt_axi_adapter/g6lc_testharness/g6lc_ai_dram_backend):
     // r76 SC write-address discriminator probes
     "f14_trace",
@@ -293,6 +350,10 @@ static const char *verilog_plusargs[] = {
     "equiv_report",
     // +mmu_trace +mmu_lo +mmu_hi (core/cva6.sv gen_mmu_trace): windowed MMU/PTW/LSU translation state
     "mmu_trace", "mmu_lo", "mmu_hi",
+    // +mmu_fetch_trace (core/g6lc_mmu.sv): fetch-side ITLB->miss_router->PTW
+    // accept anatomy ([mft]); +miss_router_trace (g6lc_tlb_miss_router.sv):
+    // per-access pick_i/pick_d qualifiers ([mr]). mc OpenWrt fetch-hang diag.
+    "mmu_fetch_trace", "miss_router_trace",
     // +smt_drain_strict (core/cva6.sv ooo_switch_drained): stop on any drained-handoff witness, not only on resident OoO state
     "smt_drain_strict",
     // T33/T34: per-event line for load-unit replays (core/cva6.sv census block)
@@ -687,7 +748,13 @@ done_processing:
   // (DramClass=0, DramChannels=1) and this is the right arm. The stripe
   // (`gen_sim_stripe.gen_ch[i]`) and class-1 LiteDRAM paths are AI-only and live
   // in ariane_tb.cpp.
-#if (VERILATOR_VERSION_INTEGER >= 5000000)
+#if defined(G6LC_TB_PARTITIONED)
+  // Partitioned model: i_dram_backend lives in the g6lc_testharness module
+  // class (scope-relative member names, public_flat_rw so no __PVT__ prefix).
+  // sram is the same VlUnpacked the flat model exposed as .m_storage.
+#define MEM top->g6lc_testharness->i_dram_backend__DOT__gen_sim_axi__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__i_tc_sram_wrapper__DOT__i_tc_sram__DOT__sram.m_storage
+#define MEM_USER top->g6lc_testharness->i_dram_backend__DOT__gen_sim_axi__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__gen_mem_user__DOT__i_tc_sram_wrapper_user__DOT__i_tc_sram__DOT__sram.m_storage
+#elif (VERILATOR_VERSION_INTEGER >= 5000000)
   // Verilator v5: Use rootp pointer and .data() accessor.
 #define MEM top->rootp->g6lc_testharness__DOT__i_dram_backend__DOT__gen_sim_axi__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__i_tc_sram_wrapper__DOT__i_tc_sram__DOT__sram.m_storage
 #define MEM_USER top->rootp->g6lc_testharness__DOT__i_dram_backend__DOT__gen_sim_axi__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__gen_mem_user__DOT__i_tc_sram_wrapper_user__DOT__i_tc_sram__DOT__sram.m_storage
@@ -966,6 +1033,129 @@ done_processing:
                   << std::dec << "\n";
       }
 #endif
+#if defined(G6LC_TB_PARTITIONED)
+      // ROB_RETIRE_TID diagnostic v2: reproduce the g6lc_rob.sv:345 assert
+      // predicate per cycle. retire_ack_i = commit_ack (2b); retire_tid_i is
+      // 2x6b scoreboard-slot tids (port r at bits [r*6 +: 6]). hit[r] is the
+      // assert's rob_retire_hit: some valid rob_q slot holds tid[r]. A line
+      // with ack=1 and h=0 is the cycle the assert fires on. rob_slot_t is
+      // 519b {valid@518,complete@517,exc@516,tid@515:510,e@509:0}; slot s at
+      // bit s*519 of the packed VlWide. free_hit[r][s] is the real free
+      // predicate (ack && valid && tid match && !claimed) — cross-checks that
+      // commit_ack is the same net as retire_ack_i.
+      if (main_time >= 1450 && main_time <= 1560) {
+        static uint64_t rob_evermask = 0;  // tids ever seen valid in the ROB
+        auto *rc = G6LC_CORE_ROOT(0);
+        const auto &robq = rc->G6LC_CVA6_C0(
+            issue_stage_i__DOT__gen_full_ooo__DOT__i_ooo_dispatch__DOT__i_rob__DOT__rob_q);
+        const auto &fhit = rc->G6LC_CVA6_C0(
+            issue_stage_i__DOT__gen_full_ooo__DOT__i_ooo_dispatch__DOT__i_rob__DOT__free_hit);
+        unsigned rh = (unsigned)rc->G6LC_CVA6_C0(
+            issue_stage_i__DOT__gen_full_ooo__DOT__i_ooo_dispatch__DOT__i_rob__DOT__head_q);
+        unsigned rt = (unsigned)rc->G6LC_CVA6_C0(
+            issue_stage_i__DOT__gen_full_ooo__DOT__i_ooo_dispatch__DOT__i_rob__DOT__tail_q);
+        unsigned rn = (unsigned)rc->G6LC_CVA6_C0(
+            issue_stage_i__DOT__gen_full_ooo__DOT__i_ooo_dispatch__DOT__i_rob__DOT__count_q);
+        unsigned rtid = (unsigned)rc->G6LC_CVA6_C0_PUB(
+            issue_stage_i__DOT__gen_full_ooo__DOT__i_ooo_dispatch__DOT____Vcellinp__i_rob__retire_tid_i);
+        // retire_ack_i == commit_stage commit_ack_o == `fire` (fires for BOTH
+        // normal commits and commit_drop cancels). `commit_ack` is the MASKED
+        // net (macro_ack & ~drop) and hides the drop acks — wrong signal here.
+        unsigned fire = (unsigned)rc->G6LC_CVA6_C0(commit_stage_i__DOT__fire);
+        unsigned cdec = (unsigned)rc->G6LC_CVA6_C0(commit_stage_i__DOT__commit_dec);
+        unsigned cdrop = (unsigned)rc->G6LC_CVA6_C0(commit_drop_id_commit);
+        // cancelled_mask marks squashed tids; a drop-ack of a tid cancelled
+        // before OoO dispatch legitimately has no ROB entry.
+        uint64_t cmask = (uint64_t)rc->G6LC_CVA6_C0(sb_cancelled_mask);
+        uint64_t vmask = 0;
+        std::string vt;
+        int nvalid = 0;
+        for (int s = 0; s < 128; s++) {
+          int base = s * 519;
+          if (!((robq[(base + 518) / 32] >> ((base + 518) % 32)) & 1u)) continue;
+          unsigned tid = 0;
+          for (int b = 0; b < 6; b++)
+            tid |= ((robq[(base + 510 + b) / 32] >> ((base + 510 + b) % 32)) & 1u) << b;
+          nvalid++;
+          if (tid < 64) vmask |= (1ull << tid);
+          if (vt.size() < 300) {
+            char tmp[16];
+            snprintf(tmp, sizeof(tmp), "%d:%u,", s, tid);
+            vt += tmp;
+          }
+        }
+        rob_evermask |= vmask;
+        std::string ports;
+        for (int r = 0; r < 2; r++) {
+          unsigned ack = (fire >> r) & 1u;
+          unsigned tid = (rtid >> (r * 6)) & 0x3fu;
+          unsigned hit = ack ? (unsigned)((vmask >> tid) & 1ull) : 0u;
+          unsigned drp = (cdrop >> r) & 1u;
+          unsigned dcy = (cdec >> r) & 1u;
+          unsigned cm = (tid < 64) ? (unsigned)((cmask >> tid) & 1ull) : 0u;
+          char tmp[80];
+          snprintf(tmp, sizeof(tmp), " p%u:a%u/t%u/h%u/d%u/c%u/m%u", r, ack, tid, hit, drp, dcy, cm);
+          ports += tmp;
+        }
+        std::string fh;
+        for (int r = 0; r < 2; r++)
+          for (int s = 0; s < 128; s++) {
+            int b = r * 128 + s;
+            if ((fhit[b / 32] >> (b % 32)) & 1u) {
+              char tmp[16];
+              snprintf(tmp, sizeof(tmp), "p%ds%d,", r, s);
+              fh += tmp;
+            }
+          }
+        std::cerr << "[rob] t=" << main_time << " h=" << rh << " tl=" << rt
+                  << " n=" << rn << " nv=" << nvalid << " vt={" << vt << "}"
+                  << " vm=" << std::hex << vmask << " ev=" << rob_evermask
+                  << std::dec << ports << " fh={" << fh << "}\n";
+      }
+      // Store-misaligned fault probe: decode tval/cause out of the REGISTERED
+      // misaligned_ex_q (exception_t {cause[202:139],tval[138:75],tval2,
+      // tinst[33:2],gva[1],valid[0]}). tval == lsu_ctrl.vaddr, the corrupted
+      // store effective address. Registered => holds >=1 cycle, no race.
+      if (main_time >= 1400 && main_time <= 12000) {
+        auto *rc = G6LC_CORE_ROOT(0);
+        const auto &mex = rc->G6LC_CVA6_C0(
+            ex_stage_i__DOT__lsu_i__DOT__gen_mmu__DOT__i_g6lc_mmu__DOT__misaligned_ex_q);
+        if (mex[0] & 1u) {
+          uint64_t tval = ((uint64_t)(mex[4] & 0x7ffu) << 53)
+                        | ((uint64_t)mex[3] << 21)
+                        | (uint64_t)(mex[2] >> 11);
+          uint64_t cause = ((uint64_t)(mex[6] & 0x7ffu) << 53)
+                         | ((uint64_t)mex[5] << 21)
+                         | (uint64_t)(mex[4] >> 11);
+          // Dump candidate regs for BOTH SMT harts of core0 (literal hart idx
+          // required by the ##h## token-paste in G6LC_TB_RF).
+          {
+            const auto &rf0 = rc->G6LC_TB_RF(G6LC_CVA6_C0, 0);
+            auto g0 = [&](int n) -> uint64_t {
+              return (uint64_t)rf0[2 * n] | ((uint64_t)rf0[2 * n + 1] << 32);
+            };
+            std::cerr << "[stf] t=" << main_time << " h=0"
+                      << " cause=0x" << std::hex << cause << " tval=0x" << tval
+                      << " x5=0x" << g0(5) << " x2=0x" << g0(2)
+                      << " x1=0x" << g0(1) << " x8=0x" << g0(8)
+                      << " x10=0x" << g0(10) << " x15=0x" << g0(15)
+                      << std::dec << "\n";
+          }
+          {
+            const auto &rf1 = rc->G6LC_TB_RF(G6LC_CVA6_C0, 1);
+            auto g1 = [&](int n) -> uint64_t {
+              return (uint64_t)rf1[2 * n] | ((uint64_t)rf1[2 * n + 1] << 32);
+            };
+            std::cerr << "[stf] t=" << main_time << " h=1"
+                      << " cause=0x" << std::hex << cause << " tval=0x" << tval
+                      << " x5=0x" << g1(5) << " x2=0x" << g1(2)
+                      << " x1=0x" << g1(1) << " x8=0x" << g1(8)
+                      << " x10=0x" << g1(10) << " x15=0x" << g1(15)
+                      << std::dec << "\n";
+          }
+        }
+      }
+#endif
       if (tick && !rules.empty()) {
         auto *cbytes = reinterpret_cast<const uint8_t *>(MEM);
         auto rd64 = [&](size_t off) -> uint64_t {
@@ -998,7 +1188,7 @@ done_processing:
           // The module-level signal, not the rvfi_probes cell-input copy
           // (__Vcellinp__…): whether that copy exists depends on inlining
           // (it does not on the 4-core, --threads 4 hyp8_mc model).
-          const auto &ci = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(commit_instr_id_commit);
+          const auto &ci = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0_PUB(commit_instr_id_commit);
           const auto &mq_w = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
               issue_stage_i__DOT__i_scoreboard__DOT__i_sb_lifecycle__DOT__mem_q);
           int mwords_w = (int)(sizeof(mq_w) / sizeof(mq_w[0]));

@@ -1244,4 +1244,32 @@ assign itlb_lu_access = icache_areq_i.fetch_req;
                   ld_st_priv_lvl_i, ld_st_v_i, sum_i, vs_sum_i, mxr_i, vmxr_i}))
   else $error("[mmu] LSU architectural context changed during an active data PTW walk");
   //pragma translate_on
+
+  //pragma translate_off
+  // RFIX-131a-45 diag: fetch-side translation path. itlb_lu_access is the
+  // raw icache fetch_req; itlb_acc_dly[0] is the ~mmu_req_flush-masked value
+  // the miss router actually sees as itlb_access_i. Printing both exposes a
+  // flush-masked access (raw=1 masked=0) that would silently starve pick_i.
+  // Also dumps the PTW accept side (shared_tlb_access -> ptw_active).
+  // +mmu_fetch_trace.
+  bit mmu_ft;
+  int unsigned mmu_ft_cyc;
+  initial mmu_ft = $test$plusargs("mmu_fetch_trace");
+  always @(posedge clk_i) begin
+    if (!rst_ni) mmu_ft_cyc <= 0;
+    else if (mmu_ft) begin
+      mmu_ft_cyc <= mmu_ft_cyc + 1;
+      if (itlb_lu_access || dtlb_lu_access || shared_tlb_access ||
+          (ptw_active && walking_instr))
+        $display("[mft] c=%0d | Iacc=%b Ihit=%b IaccM=%b | Dacc=%b Dhit=%b DaccM=%b | fl=%b reqfl=%b tlb=%b%b%b | stA=%b stH=%b stV=%h req=%b | ptw=%b walkI=%b ptwst=%0d | enTr=%b fet_hart=%0d",
+                 mmu_ft_cyc,
+                 itlb_lu_access, itlb_lu_hit, itlb_acc_dly[0],
+                 dtlb_lu_access, dtlb_lu_hit, dtlb_acc_dly[0],
+                 flush_i, mmu_req_flush, flush_tlb_i, flush_tlb_vvma_i, flush_tlb_gvma_i,
+                 shared_tlb_access, shared_tlb_hit, shared_tlb_vaddr, itlb_req,
+                 ptw_active, walking_instr, int'(i_ptw.state_q),
+                 enable_translation_i, fetch_hart_i);
+    end
+  end
+  //pragma translate_on
 endmodule

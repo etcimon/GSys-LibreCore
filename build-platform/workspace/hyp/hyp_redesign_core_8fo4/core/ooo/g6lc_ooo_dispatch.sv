@@ -71,6 +71,11 @@ module g6lc_ooo_dispatch
     input  scoreboard_entry_t [G6LCCfg.NrIssuePorts-1:0]       dispatch_sbe_i,
     input  logic              [G6LCCfg.NrIssuePorts-1:0][31:0] dispatch_orig_i,
     input  logic              [G6LCCfg.NrIssuePorts-1:0]       dispatch_valid_i,
+    // rfix131a-46: unquiesced publish-side view of the same lanes. The
+    // rename publish mask and grp_need/grp_is/sbe_pub state describe the
+    // captured group, so they use this (scoreboard-live, no quiesce term);
+    // dispatch_valid_i stays quiesced for NEW captures (ren_capture).
+    input  logic              [G6LCCfg.NrIssuePorts-1:0]       dispatch_valid_pub_i,
     output logic              [G6LCCfg.NrIssuePorts-1:0]       dispatch_ack_o,
     output scoreboard_entry_t [G6LCCfg.NrIssuePorts-1:0]       issue_sbe_o,
     output logic              [G6LCCfg.NrIssuePorts-1:0][31:0] issue_orig_o,
@@ -193,6 +198,7 @@ module g6lc_ooo_dispatch
   end
 
   logic [NP-1:0] need_rd, is_br, is_ld, is_st;
+  logic [NP-1:0] is_br_p, is_ld_p, is_st_p;
   logic [NP-1:0][HID_W-1:0] dispatch_hart;
   logic [G6LCCfg.NrCommitPorts-1:0][HID_W-1:0] commit_hart;
 
@@ -248,6 +254,15 @@ module g6lc_ooo_dispatch
     assign is_br[p] = dispatch_valid_i[p] && (dispatch_sbe_i[p].fu == CTRL_FLOW);
     assign is_ld[p] = dispatch_valid_i[p] && (dispatch_sbe_i[p].fu == LOAD);
     assign is_st[p] = dispatch_valid_i[p] && (dispatch_sbe_i[p].fu == STORE);
+    // rfix131a-46: publish-side classification on the UNQUIESCED valid. The
+    // grp_is_*/grp_need_*/grp_may_bypass_q/sbe_pub.ooo_renamed state is
+    // registered at ren_pub to describe the captured group; it must reflect
+    // lanes that were alive at capture even if quiesce has since masked
+    // dispatch_valid_i. Capture-path consumers (need_rd/.is_branch_i/
+    // lsq_disp_block via need_ld/need_st) keep the quiesced is_* above.
+    assign is_br_p[p] = dispatch_valid_pub_i[p] && (dispatch_sbe_i[p].fu == CTRL_FLOW);
+    assign is_ld_p[p] = dispatch_valid_pub_i[p] && (dispatch_sbe_i[p].fu == LOAD);
+    assign is_st_p[p] = dispatch_valid_pub_i[p] && (dispatch_sbe_i[p].fu == STORE);
   end
 
   logic rob_full, iq_full, ld_full, st_full;
@@ -593,6 +608,29 @@ module g6lc_ooo_dispatch
   // into housekeeping flops + one per-lane capture block so each lane is
   // its own independent-LHS bundle; the sbe record is assembled
   // combinationally per lane (sbe_pub).
+  // rfix131a: the scoreboard slot allocator and the in-order commit/ROB
+  // contract require dispatch_ack_o (and hence alloc_fire) to be a PREFIX
+  // mask -- a leading contiguous run of lanes. The zombie-kill mask
+  // `ren_group_valid & dispatch_valid_i` samples dispatch_valid_i one edge
+  // after ren_group_valid was captured, so a low lane retracting in between
+  // (squash/consume/issue_open change) leaves a HIGHER lane live and the AND
+  // goes non-prefix -> scoreboard hole + double-alloc desync. Mask the
+  // published group to its leading contiguous run; dropped tail lanes keep
+  // their scoreboard slots (never ack'd) and re-present next group, exactly
+  // like the existing & dispatch_valid_i dead-lane drop.
+  logic [NP-1:0] grp_v_raw, grp_v_pre;
+  // rfix131a-46: mask with the UNQUIESCED publish valid so an in-flight
+  // group captured before SMT quiesce/halt still publishes (dispatch_ack ->
+  // scoreboard alloc -> phys regs owned). Zombie lanes are still dropped:
+  // dispatch_valid_pub_i reflects the scoreboard's live view minus only the
+  // quiesce term, so genuinely consumed/squashed lanes still read 0.
+  assign grp_v_raw = ren_group_valid & dispatch_valid_pub_i;
+  always_comb begin
+    grp_v_pre[0] = grp_v_raw[0];
+    for (int unsigned p = 1; p < NP; p++)
+      grp_v_pre[p] = grp_v_pre[p-1] & grp_v_raw[p];
+  end
+
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       grp_pend_q <= 1'b0;
@@ -628,11 +666,18 @@ module g6lc_ooo_dispatch
         // cancelled slot) still publishes; its dead lanes have
         // dispatch_valid_i == 0 here and must not enter grp_v_q -- a
         // zombie lane would allocate an IQ/ROB entry and issue.
-        grp_v_q <= ren_group_valid & dispatch_valid_i;
+        // rfix131a: publish only the leading contiguous run (grp_v_pre)
+        // so dispatch_ack_o/alloc_fire stay a prefix mask.
+        grp_v_q <= grp_v_pre;
+//pragma translate_off
+        if (grp_v_pre != grp_v_raw)
+          $display("[grpnp] t=%0t raw=%b pre=%b rgv=%b dv=%b",
+                   $time, grp_v_raw, grp_v_pre, ren_group_valid, dispatch_valid_i);
+//pragma translate_on
         // Each lane keeps its own store-set verdict. A hit on one load
         // does not clear bypass on the other lanes or the other hart.
         for (int unsigned p = 0; p < NP; p++)
-          grp_may_bypass_q[p] <= G6LCCfg.MemDepPredEn && is_ld[p] &&
+          grp_may_bypass_q[p] <= G6LCCfg.MemDepPredEn && is_ld_p[p] &&
                                  !md_predict_v[p];
         // hyp8: bank steering -- lanes spread across consecutive banks
         // starting at a rotating base, so consecutive groups rotate and a
@@ -655,7 +700,7 @@ module g6lc_ooo_dispatch
   // is_ld/is_st shape (grp_is_*_q were stored unmasked too).
   logic [NP-1:0] ren_csr_pub;
   for (genvar p = 0; p < NP; p++) begin : gen_ren_csr_pub
-    assign ren_csr_pub[p] = ren_group_valid[p] && dispatch_valid_i[p] &&
+    assign ren_csr_pub[p] = ren_group_valid[p] && dispatch_valid_pub_i[p] &&
                             (dispatch_sbe_i[p].fu == CSR);
   end
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -664,8 +709,8 @@ module g6lc_ooo_dispatch
       grp_need_st_q  <= '0;
       grp_csr_need_q <= '0;
     end else if (ren_pub) begin
-      grp_need_ld_q  <= LDW'($countones(is_ld));
-      grp_need_st_q  <= STW'($countones(is_st));
+      grp_need_ld_q  <= LDW'($countones(is_ld_p));
+      grp_need_st_q  <= STW'($countones(is_st_p));
       grp_csr_need_q <= CSR_W'($countones(ren_csr_pub));
     end
   end
@@ -683,7 +728,11 @@ module g6lc_ooo_dispatch
       sbe_pub[p].p_frs2 = 8'(fprs2[p]);
       sbe_pub[p].p_frs3 = 8'(fprs3[p]);
       sbe_pub[p].p_frd  = 8'(fprd[p]);
-      sbe_pub[p].ooo_renamed = ren_group_valid[p] && dispatch_valid_i[p];
+      // Zacas AMOCAS: the rd field is also the compare (expected) source.
+      // rs3==rd for AMOCAS, so the OLD physical register that rd overwrote
+      // (prd_old) is exactly the expected value's physical location.
+      sbe_pub[p].p_rs3 = 8'(prd_old[p]);
+      sbe_pub[p].ooo_renamed = ren_group_valid[p] && dispatch_valid_pub_i[p];
     end
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
@@ -711,9 +760,9 @@ module g6lc_ooo_dispatch
         grp_is_fpr_rs2_q[p] <= is_fpr_rs2_c[p];
         grp_is_fpr_rs3_q[p] <= is_fpr_rs3_c[p];
         grp_ckpt_q[p]  <= ren_ckpt_id[p];
-        grp_is_st_q[p] <= is_st[p];
-        grp_is_ld_q[p] <= is_ld[p];
-        grp_is_br_q[p] <= is_br[p];
+        grp_is_st_q[p] <= is_st_p[p];
+        grp_is_ld_q[p] <= is_ld_p[p];
+        grp_is_br_q[p] <= is_br_p[p];
         grp_is_fpr_rd_q[p] <= is_fpr_rd_c[p];
       end
     end
@@ -939,7 +988,7 @@ module g6lc_ooo_dispatch
   logic [NP-1:0][BW-1:0] steer_pre_hint;
   assign steer_pre_valid =
       (mispredict_i || flush_i || flush_unissued_i) ? '0 :
-      ren_pub              ? (ren_group_valid & dispatch_valid_i) :
+      ren_pub              ? grp_v_pre :
       (grp_go && grp_done) ? '0 : grp_v_q;
   for (genvar p = 0; p < NP; p++) begin : gen_steer_pre_hint
     assign steer_pre_hint[p] =
@@ -1153,9 +1202,12 @@ module g6lc_ooo_dispatch
   // hyp8: the read address launches at the take cycle; data arrives in the
   // staged cycle (2-step read inside g6lc_prf).
   // ----------------------------------------------------------------------
-  logic [NP*2-1:0][PRF_W-1:0] prf_raddr;
-  logic [NP*2-1:0]           prf_ren;
-  logic [NP*2-1:0][G6LCCfg.XLEN-1:0] prf_rdata;
+  // Zacas: a third read slot per issue port carries the GPR operand_c
+  // (AMOCAS rd/expected source) at index NP*2+p; rs1/rs2 keep p*2+{0,1}.
+  localparam int unsigned PRF_NR = NP * 3;
+  logic [PRF_NR-1:0][PRF_W-1:0] prf_raddr;
+  logic [PRF_NR-1:0]           prf_ren;
+  logic [PRF_NR-1:0][G6LCCfg.XLEN-1:0] prf_rdata;
   localparam int unsigned PRF_WR = G6LCCfg.NrWbPorts + PRF_MIRROR;
   logic [PRF_WR-1:0][PRF_W-1:0] prf_waddr;
   logic [PRF_WR-1:0][G6LCCfg.XLEN-1:0] prf_wdata;
@@ -1181,6 +1233,13 @@ module g6lc_ooo_dispatch
                               ? PRF_W'(iqi_sbe[p].p_rs2) : '0;
     assign prf_ren[p*2+0]   = iqi_take[p];
     assign prf_ren[p*2+1]   = iqi_take[p];
+    // Zacas AMOCAS operand_c (GPR third source = expected value). Only
+    // AMOCAS-family ops read it; p_rs3 carries prd_old (old phys of rd).
+    assign prf_raddr[NP*2+p] = iqi_take[p] && iqi_sbe[p].ooo_renamed &&
+                              is_amo_cas(iqi_sbe[p].op)
+                              ? PRF_W'(iqi_sbe[p].p_rs3) : '0;
+    assign prf_ren[NP*2+p]   = iqi_take[p] && iqi_sbe[p].ooo_renamed &&
+                              is_amo_cas(iqi_sbe[p].op);
   end
   for (genvar w = 0; w < G6LCCfg.NrWbPorts; w++) begin : gen_prf_wa
     assign prf_waddr[w] = wb_prd[w];
@@ -1256,7 +1315,7 @@ module g6lc_ooo_dispatch
   g6lc_prf #(
       .DATA_WIDTH (G6LCCfg.XLEN),
       .PRF_ENTRIES(PRF_N),
-      .NR_READ    (NP * 2),
+      .NR_READ    (PRF_NR),
       .NR_WRITE   (PRF_WR),
       .PRF_W      (PRF_W)
   ) i_prf (
@@ -1425,12 +1484,46 @@ module g6lc_ooo_dispatch
         end
       end
     end
+    // Zacas AMOCAS: GPR operand_c = the expected value, read from the PRF
+    // at p_rs3 (= prd_old, the OLD physical register rd overwrote). An
+    // integer writeback bypass mirrors hit_a/hit_b so a same-cycle producer
+    // forwards correctly; the committed-producer case is covered by the
+    // PRF read itself (arch rdata is stale under renaming).
+    logic amocas_c;
+    logic [G6LCCfg.NrWbPorts-1:0] hit_cg;
+    logic [WLV:0][G6LCCfg.NrWbPorts-1:0][G6LCCfg.XLEN-1:0] ocg;
+    logic [G6LCCfg.XLEN-1:0] op_c_gpr;
+    assign amocas_c = iss_sbe_q[p].ooo_renamed &&
+                      is_amo_cas(iss_sbe_q[p].op);
+    for (genvar w = 0; w < G6LCCfg.NrWbPorts; w++) begin : gen_hit_cg
+      assign hit_cg[w] = wb_value_valid[w] && amocas_c &&
+                        (wb_prd[w] == PRF_W'(iss_sbe_q[p].p_rs3)) &&
+                        (wb_prd[w] != '0);
+      assign ocg[0][w] = {G6LCCfg.XLEN{hit_cg[w]}} & wb_data_i[w];
+    end
+    for (genvar l = 0; l < WLV; l++) begin : gen_lvl_cg
+      for (genvar i = 0; i < G6LCCfg.NrWbPorts; i++) begin : gen_or_cg
+        if (i < ((G6LCCfg.NrWbPorts + (1 << l) - 1) >> (l + 1))) begin : gen_cmp_cg
+          if ((2 * i + 1) < ((G6LCCfg.NrWbPorts + (1 << l) - 1) >> l)) begin : gen_pair_cg
+            assign ocg[l+1][i] = ocg[l][2*i] | ocg[l][2*i+1];
+          end else begin : gen_odd_cg
+            assign ocg[l+1][i] = ocg[l][2*i];
+          end
+        end else begin : gen_pad_cg
+          assign ocg[l+1][i] = '0;
+        end
+      end
+    end
+    assign op_c_gpr = (|hit_cg) ? ocg[WLV][0] : prf_rdata[NP*2+p];
     assign issue_op_a_o[p] = op_a_agu[p];
     assign issue_op_b_o[p] = op_b_pre[p];
     assign issue_op_a_valid_o[p] = issue_valid_o[p] && iss_sbe_q[p].ooo_renamed;
     assign issue_op_b_valid_o[p] = issue_valid_o[p] && iss_sbe_q[p].ooo_renamed;
-    assign issue_op_c_o[p] = (|fh_c) ? oc[WLV][0] : fprf_rdata[2];
-    assign issue_op_c_valid_o[p] = issue_valid_o[p] && iss_fpc_q[p];
+    // operand_c: AMOCAS takes the GPR physical read; FP keeps fprf/bypass.
+    assign issue_op_c_o[p] = amocas_c ? G6LCCfg.FLen'(op_c_gpr)
+                                      : ((|fh_c) ? oc[WLV][0] : fprf_rdata[2]);
+    assign issue_op_c_valid_o[p] = issue_valid_o[p] &&
+                                   (iss_fpc_q[p] || amocas_c);
   end
 
   // Live AGU at issue: vaddr = imm + rs1 (matches load_store_unit AGU)
@@ -1837,6 +1930,35 @@ module g6lc_ooo_dispatch
     if ($test$plusargs("equiv_report"))
       $display("[equiv] g6lc_ooo_dispatch fp_pred: checked=%0d lane0_active_fp=%0d lane0_active_int=%0d",
                fp_pred_checked_n, fp_pred_active_fp_n, fp_pred_active_int_n);
+  end
+//pragma translate_on
+
+//pragma translate_off
+  // PHANTOM PROBE (`+phantom_probe`): a published group lane (grp_v_q) whose
+  // captured payload grp_sbe_q is still the reset scoreboard_entry_t
+  // (fu==NONE / pc==0). This is the valid/payload desync that hands the IQ a
+  // fu=NONE zombie. Also dumps the live dispatch_sbe_i/dispatch_valid_i that
+  // the scoreboard is presenting this cycle for comparison.
+  logic ph_dsp_en;
+  int unsigned ph_dsp_hits;
+  initial begin
+    ph_dsp_en = $test$plusargs("phantom_probe");
+    ph_dsp_hits = 0;
+  end
+  always @(posedge clk_i) begin
+    if (rst_ni && ph_dsp_en && (ph_dsp_hits < 48)) begin
+      for (int unsigned p = 0; p < NP; p++) begin
+        if (grp_v_q[p] &&
+            ((grp_sbe_q[p].fu == g6lc_core_pkg::NONE) || (grp_sbe_q[p].pc == '0))) begin
+          ph_dsp_hits = ph_dsp_hits + 1;
+          $display("[PHANTOM-GRP] t=%0t p=%0d grp_v=%b grp_sbe.pc=%h fu=%0d op=%0d tid=%0d | dsp_sbe.pc=%h fu=%0d dsp_val=%b dsp_pub=%b go=%b",
+                   $time, p, grp_v_q[p], grp_sbe_q[p].pc, grp_sbe_q[p].fu,
+                   grp_sbe_q[p].op, grp_sbe_q[p].trans_id,
+                   dispatch_sbe_i[p].pc, dispatch_sbe_i[p].fu,
+                   dispatch_valid_i[p], dispatch_valid_pub_i[p], grp_go);
+        end
+      end
+    end
   end
 //pragma translate_on
 

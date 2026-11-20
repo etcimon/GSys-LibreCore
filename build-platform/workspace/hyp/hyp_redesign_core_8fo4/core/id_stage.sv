@@ -1873,6 +1873,38 @@ assign g1gy_lo =
   end
 //pragma translate_on
 
+//pragma translate_off
+  // PHANTOM PROBE (`+phantom_probe`): issue_n is the comb next-state about to
+  // be clocked into issue_q. Sampling it at the posedge captures the live
+  // upstream (fetch_entry -> d1 -> d2 -> decode) that produced it, so the
+  // first pc==0/fu==NONE zombie localizes the stage where valid met an empty
+  // scoreboard_entry_t payload.
+  logic ph_id_en;
+  int unsigned ph_id_hits;
+  initial begin
+    ph_id_en = $test$plusargs("phantom_probe");
+    ph_id_hits = 0;
+  end
+  always @(posedge clk_i) begin
+    if (rst_ni && ph_id_en && (ph_id_hits < 64)) begin
+      for (int unsigned i = 0; i < G6LCCfg.NrIssuePorts; i++) begin
+        if (issue_n[i].valid &&
+            ((issue_n[i].sbe.pc == '0) || (issue_n[i].sbe.fu == g6lc_core_pkg::NONE))) begin
+          ph_id_hits = ph_id_hits + 1;
+          $display("[PHANTOM-ID] t=%0t lane=%0d sbe.pc=%h fu=%0d op=%0d tid=%0d | fe_valid=%b fe_addr=%h fe_instr=%h | d1v=%b d1pc=%h | d2v=%b d2sbe_pc=%h d2raw=%h d2cinstr=%h d2c=%b | dec_pc=%h",
+                   $time, i, issue_n[i].sbe.pc, issue_n[i].sbe.fu, issue_n[i].sbe.op,
+                   issue_n[i].sbe.trans_id,
+                   fetch_entry_valid_i[i], fetch_entry_i[i].address, fetch_entry_i[i].instruction,
+                   d1_vq[i], d1_q[i].pc,
+                   d2_vq[i], d2_q[i].sbe.pc, d2_q[i].raw_instr, d2_q[i].cinstr,
+                   d2_q[i].is_compressed,
+                   decoded_instruction[i].pc);
+        end
+      end
+    end
+  end
+//pragma translate_on
+
   // svt-stage: use D1 on=d1_q,d1_vq
   // svt-stage: use D2 on=d2_q,d2_vq
   // svt-stage: class D1 value

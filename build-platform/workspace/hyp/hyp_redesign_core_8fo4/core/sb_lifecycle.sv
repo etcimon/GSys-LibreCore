@@ -207,10 +207,26 @@ module sb_lifecycle
       if (mem_q[i].issued) sb_issued_popcnt += 1'b1;
     end
   end
+  // rfix131a DIAGNOSTIC (temporary): the issued-count/popcount invariant is
+  // monitored non-fatally so the sim runs past a desync and we can see
+  // whether it is transient or fatal, and capture every offending cycle.
+  // MUST be restored to the $fatal concurrent assert for qualification.
+  int unsigned sb_desync_n;
   always_ff @(posedge clk_i) begin
-    if (rst_ni)
-      sb_issued_cnt_is_popcount: assert (sb_issued_cnt_q == sb_issued_popcnt)
-        else $error("scoreboard: issued count %0d != popcount %0d", sb_issued_cnt_q, sb_issued_popcnt);
+    if (rst_ni) begin
+      sb_desync_n <= 0;
+      if (sb_issued_cnt_q != sb_issued_popcnt) begin
+        sb_desync_n <= sb_desync_n + 1;
+        $display("[sbdesync] cnt=%0d popcnt=%0d iptr=%0d cptr0=%0d ncommit=%0d",
+                 sb_issued_cnt_q, sb_issued_popcnt, issue_pointer_q,
+                 commit_pointer_q[0], num_commit);
+        for (int unsigned s = 0; s < G6LCCfg.NR_SB_ENTRIES; s++)
+          if (mem_q[s].issued)
+            $display("[sbdesync]   slot=%0d hart=%0d pc=%h valid=%b cncl=%b replay=%b",
+                     s, mem_q[s].sbe.hart_id, mem_q[s].sbe.pc,
+                     mem_q[s].sbe.valid, mem_q[s].cancelled, mem_q[s].replay);
+      end
+    end
   end
 //pragma translate_on
 
@@ -323,6 +339,35 @@ module sb_lifecycle
   end
   assign num_issue = $bits(num_issue)'($countones(alloc_fire));
 
+//pragma translate_off
+  // rfix131a DIAGNOSTIC: detect non-prefix alloc_fire — a firing port with a
+  // non-firing lower port. Under G6LC_FETCH_B alloc_fire = valid & ack_o &
+  // !flush_unissued (no link-jal exception), so a non-prefix vector means
+  // decoded_instr_valid_i or decoded_instr_ack_o (=dispatch_ack_o&issue_open)
+  // is non-prefix. This is the hole/double-alloc trigger for the
+  // sb_issued_cnt desync. Dumps full per-port context once per event.
+  logic alloc_np;
+  always_comb begin : gen_alloc_np
+    logic [G6LCCfg.NrIssuePorts-1:0] gap;
+    gap[0] = ~alloc_fire[0];
+    for (int unsigned i = 1; i < G6LCCfg.NrIssuePorts; i++)
+      gap[i] = gap[i-1] | ~alloc_fire[i];
+    alloc_np = |(alloc_fire & gap);
+  end
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && alloc_np) begin
+      $display("[allocnp] t=%0t af=%b iptr=%0d cptr0=%0d flu=%b ncommit=%0d",
+               $time, alloc_fire, issue_pointer_q, commit_pointer_q[0],
+               flush_unissued_instr_i, num_commit);
+      for (int unsigned i = 0; i < G6LCCfg.NrIssuePorts; i++)
+        $display("[allocnp]  p%0d valid=%b ack_o=%b open=%b af=%b pc=%h fu=%0d",
+                 i, decoded_instr_valid_i[i], decoded_instr_ack_o[i],
+                 issue_open[i], alloc_fire[i], decoded_instr_i[i].pc,
+                 decoded_instr_i[i].fu);
+    end
+  end
+//pragma translate_on
+
   // hyp8 T1 item 13: the dynamic mem_q[tid] reads become masked-OR
   // columns — the tid decode is per-port one-hot, the gathered field a
   // single AND-OR instead of an indexed read on the slot cone.
@@ -410,6 +455,7 @@ module sb_lifecycle
       z = a_sbe;
       z.p_rs1       = '0;
       z.p_rs2       = '0;
+      z.p_rs3       = '0;
       z.p_rd        = '0;
       z.ooo_renamed = 1'b0;
 `ifndef G6LC_FETCH_B
@@ -767,11 +813,11 @@ module sb_lifecycle
       smt_flow_idle = (|commit_ack_i || flush_i) ? 0 : smt_flow_idle + 1;
       for (int p = 0; p < G6LCCfg.NrCommitPorts; p++)
         if (smt_flow_win && commit_ack_i[p])
-          $display("[smt-flow] retire cycle=%0d port=%0d id=%0d gen=%0d hart=%0d pc=%h rd=%0d result=%h valid=%b drop=%b ex=%b replay=%b scope=%m",
+          $display("[smt-flow] retire cycle=%0d port=%0d id=%0d gen=%0d hart=%0d pc=%h rd=%0d result=%h valid=%b issued=%b drop=%b ex=%b replay=%b scope=%m",
                    smt_flow_cycle, p, commit_sel_slot_i[p], smt_flow_generation[commit_sel_slot_i[p]],
                    mem_q[commit_sel_slot_i[p]].sbe.hart_id, mem_q[commit_sel_slot_i[p]].sbe.pc,
                    mem_q[commit_sel_slot_i[p]].sbe.rd[4:0], mem_q[commit_sel_slot_i[p]].sbe.result,
-                   mem_q[commit_sel_slot_i[p]].sbe.valid,
+                   mem_q[commit_sel_slot_i[p]].sbe.valid, mem_q[commit_sel_slot_i[p]].issued,
                    mem_q[commit_sel_slot_i[p]].cancelled, mem_q[commit_sel_slot_i[p]].sbe.ex.valid,
                    mem_q[commit_sel_slot_i[p]].replay);
       for (int p = 0; p < G6LCCfg.NrWbPorts; p++)

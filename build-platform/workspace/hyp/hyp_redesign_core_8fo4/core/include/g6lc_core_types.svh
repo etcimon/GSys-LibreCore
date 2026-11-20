@@ -108,11 +108,17 @@
   /* FP physical tags. Separate from the integer ones because the split       */\
   /* register class indexes a different file: one shared tag would force the  */\
   /* consumer to re-derive the operand class to know which file to read.      */\
-  /* p_frs3 has no integer counterpart -- only FP has a third source.         */\
+  /* p_frs3's integer counterpart is p_rs3 (below), used only by Zacas AMOCAS.*/\
   logic [7:0]                       p_frs1;                                    \
   logic [7:0]                       p_frs2;                                    \
   logic [7:0]                       p_frs3;                                    \
   logic [7:0]                       p_frd;                                     \
+  /* Integer third-source tag for Zacas AMOCAS (rd field doubles as the     */\
+  /* compare operand). Carries the OLD physical register that rd overwrote  */\
+  /* (prd_old): for AMOCAS rs3==rd, so this is the expected-value's phys.   */\
+  /* Unused (and harmless) for every other op -- only is_amo_cas consumes   */\
+  /* operand_c as a GPR.                                                    */\
+  logic [7:0]                       p_rs3;                                     \
   logic                             ooo_renamed;                               \
 }
 

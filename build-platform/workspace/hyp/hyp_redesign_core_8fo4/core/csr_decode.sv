@@ -62,12 +62,12 @@ module csr_decode
   localparam int unsigned N_READ_OPS = 4;
   // every CSR-class op that carries an architectural effect through this
   // file: ordinary CSR RMW + system/fence/privilege-return operations
-  localparam int unsigned N_REQ_OPS  = 13;
+  localparam int unsigned N_REQ_OPS  = 15;
 
   logic is_req, is_rd_req;
 
   assign is_req = csr_op_i inside {CSR_WRITE, CSR_SET, CSR_CLEAR, CSR_READ,
-                                   MRET, SRET, DRET, WFI,
+                                   MRET, SRET, DRET, WFI, WRS_NTO, WRS_STO,
                                    SFENCE_VMA, HFENCE_VVMA, HFENCE_GVMA,
                                    FENCE, FENCE_I};
   assign is_rd_req = csr_op_i inside {CSR_WRITE, CSR_SET, CSR_CLEAR, CSR_READ};

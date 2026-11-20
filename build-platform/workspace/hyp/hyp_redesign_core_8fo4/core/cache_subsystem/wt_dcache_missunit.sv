@@ -1123,6 +1123,11 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
       if (store_sent)
         $display("[smt-flow] wt_ssent cycle=%0d tid=%0d pa=%h sinf=%0d",
                  smt_mu_cycle, mem_req_c.tid, mem_req_c.paddr, stores_inflight_q);
+      if (G6LCCfg.RVA && cas_st_ack && (!smt_mu_watch ||
+          (amo_paddr_q[G6LCCfg.PLEN-1:3] == smt_mu_address[G6LCCfg.PLEN-1:3])))
+        $display("[smt-flow] wt_cas cycle=%0d pa=%h old=%h new=%h opc=%h opb=%h st=%0d",
+                 smt_mu_cycle, amo_paddr_q, cas_old_q, cas_new_q,
+                 amo_req_i.operand_c, amo_req_i.operand_b, state_q);
       if (|miss_replay_o)
         $display("[smt-flow] wt_replay cycle=%0d idx=%0d paddr=%h txcol=%b rdcol=%b mreq=%b mreqm=%b can=%b st=%0d txv=%h",
                  smt_mu_cycle, miss_port_idx, miss_paddr_i[miss_port_idx],

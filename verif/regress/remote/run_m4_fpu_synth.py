@@ -38,7 +38,7 @@ def main():
              'core/cvfpu/src/fpnew_pkg.sv', 'core/include/ariane_pkg.sv',
              'core/include/g6lc_core_types.svh']
     paths = list(dict.fromkeys(['vendor/pulp-platform/common_cells/src/cf_math_pkg.sv', *fixed,
-                               *common, *fp, 'core/fpu_wrap.sv']))
+                               *common, *fp, 'core/fpu_wrap.sv', 'core/g6lc_fp_zfa.sv']))
     pins = {}
     for rel in paths:
         original = data / Path(rel).name

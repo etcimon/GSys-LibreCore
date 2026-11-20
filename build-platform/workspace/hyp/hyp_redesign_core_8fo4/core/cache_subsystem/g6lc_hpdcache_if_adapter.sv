@@ -615,7 +615,14 @@ module g6lc_hpdcache_if_adapter
         hpdcache_req_casd.phys_indexed = 1'b1;
         hpdcache_req_casd.size = hpdcache_pkg::hpdcache_req_size_t'(2'b11);  // dword
         hpdcache_req_casd.be = 8'hff;
-        hpdcache_req_casd.pma.uncacheable = 1'b1;  // force UC path
+        // RFIX-131a-16: was forced uncacheable=1'b1, which routed a cacheable-RAM
+        // CASD load down the MMIO/UC path that returns rdata=0 -> casd_old=0 ->
+        // CASD_INVAL -> AMOCAS.D rd=0. Match the normal AMO path: honour the PMA
+        // cacheable-region check so cacheable addresses take the cacheable LD/ST
+        // (which returns real data). The local two-phase RMW is not made less
+        // atomic by this -- UC vs cacheable is a multi-transaction race either
+        // way; the trailing CMO_INVAL_NLINE still drops the stale line.
+        hpdcache_req_casd.pma.uncacheable = hpdcache_req_is_uncacheable;
         hpdcache_req_casd.pma.io = 1'b0;
         hpdcache_req_casd.pma.wr_policy_hint = hpdcache_pkg::HPDCACHE_WR_POLICY_AUTO;
         unique case (casd_fsm_q)
@@ -637,7 +644,14 @@ module g6lc_hpdcache_if_adapter
             hpdcache_req_casd.addr_offset = amo_addr_offset + 8;
           end
           CASD_INVAL: begin
-            hpdcache_req_casd.op = hpdcache_pkg::HPDCACHE_REQ_CMO_INVAL_NLINE;
+            // RFIX-131a-16b: the CASD store leaves the line dirty in the
+            // write-back L1. A bare INVAL_NLINE drops that dirty data with
+            // no writeback (dir_updt_wback_o=0 in hpdcache_cmo), so the swap
+            // never reaches memory and the next load refetches the stale
+            // line. FLUSH_INVAL_NLINE writes the dirty line back through the
+            // coherence point first, then invalidates -- preserving both the
+            // store and the drop-stale-line coherence intent.
+            hpdcache_req_casd.op = hpdcache_pkg::HPDCACHE_REQ_CMO_FLUSH_INVAL_NLINE;
             hpdcache_req_casd.wdata = '0;
             hpdcache_req_casd.be = '0;
             hpdcache_req_casd.pma.uncacheable = 1'b0;

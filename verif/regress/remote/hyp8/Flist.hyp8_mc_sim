@@ -12,7 +12,17 @@
 +incdir+${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/third_party/common/local/util/
 +incdir+${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/core/cache_subsystem/hpdcache/rtl/include
 +define+G6LC_FETCH_B
-+define+G6LC_ARA_ATTACH
+# RFIX-131a-p-mc-lint: G6LC_ARA_ATTACH disabled for the no-vector mc build.
+# G6LCConfigVExtEn=0 -> CVA6Cfg.RVV=0 -> EnableAccelerator=0, so g6lc_ara_attach
+# takes gen_off and g6lc_hart takes gen_std; every `ifdef G6LC_ARA_ATTACH` site
+# sits inside a dead generate branch. The define only matters for a future
+# RVV/EnableAccelerator=1 build. With it absent, no `ara`/`vmfpu` cell reference
+# survives preprocessing, so the dead Ara cone below can be excluded from the
+# flist (Verilator link-checks every listed module's cell pins; the vendored
+# vmfpu.sv instantiates fpnew_top without the newer early_valid_o pin ->
+# %Error-PINMISSING). Re-enable the define AND restore the Ara source block when
+# vector is turned on.
+# +define+G6LC_ARA_ATTACH
 +incdir+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/include
 +incdir+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/include/ara
 +incdir+${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_apu/include/
@@ -230,6 +240,9 @@ ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_a
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/acc_dispatcher.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_fifo_v3.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/hyp_cells/g6lc_hyp_fifo.sv
+${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_zawrs.sv
+${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_zawrs_peer.sv
+${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/g6lc_zicclsm.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/btb.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/bht.sv
 ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_core_8fo4/core/frontend/bht2lvl.sv
@@ -544,33 +557,40 @@ ${CVA6_REPO_DIR}/build-platform/workspace/hyp/hyp_redesign_corev_apu_8fo4/corev_
 # (common_cells/axi/tech_cells) already present via hyp-workspace third_party.
 ${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/include/rvv_pkg.sv
 ${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/include/ara_pkg.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/ara.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/ara_dispatcher.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/ara_sequencer.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/segment_sequencer.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/axi_inval_filter.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/ctrl_registers.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/cva6_accel_first_pass_decoder.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/fixed_p_rounding.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/power_gating_generic.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/simd_alu.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/simd_div.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/simd_mul.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/valu.sv
-${CVA6_REPO_DIR}/vendor/ara/cva6_shim/vmfpu.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/vector_regfile.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/operand_queue.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/operand_queues_stage.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/operand_requester.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/vector_fus_stage.sv
-${CVA6_REPO_DIR}/vendor/ara/cva6_shim/lane_sequencer.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/lane.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/masku/masku_operands.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/masku/masku.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/sldu/p2_stride_gen.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/sldu/sldu_op_dp.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/sldu/sldu.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/vlsu/addrgen.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/vlsu/vldu.sv
-${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/vlsu/vstu.sv
-${CVA6_REPO_DIR}/vendor/ara/cva6_shim/vlsu.sv
+# RFIX-131a-p-mc-lint: Ara module cone EXCLUDED for the no-vector mc build
+# (G6LCConfigVExtEn=0 -> CVA6Cfg.RVV=0 -> EnableAccelerator=0 -> g6lc_ara_attach
+# gen_off, g6lc_hart gen_std; nothing instantiates any of these). They are kept
+# commented (not deleted) so a future RVV/EnableAccelerator=1 build can restore
+# them together with `+define+G6LC_ARA_ATTACH` above. The two packages above
+# (rvv_pkg/ara_pkg) are RETAINED: core decode/csr may still `import` them even
+# with vector disabled, and packages carry no cell-pin link checks.
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/ara.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/ara_dispatcher.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/ara_sequencer.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/segment_sequencer.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/axi_inval_filter.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/ctrl_registers.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/cva6_accel_first_pass_decoder.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/fixed_p_rounding.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/power_gating_generic.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/simd_alu.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/simd_div.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/simd_mul.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/valu.sv
+#${CVA6_REPO_DIR}/vendor/ara/cva6_shim/vmfpu.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/vector_regfile.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/operand_queue.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/operand_queues_stage.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/operand_requester.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/vector_fus_stage.sv
+#${CVA6_REPO_DIR}/vendor/ara/cva6_shim/lane_sequencer.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/lane.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/masku/masku_operands.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/masku/masku.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/sldu/p2_stride_gen.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/sldu/sldu_op_dp.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/sldu/sldu.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/vlsu/addrgen.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/vlsu/vldu.sv
+#${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/vlsu/vstu.sv
+#${CVA6_REPO_DIR}/vendor/ara/cva6_shim/vlsu.sv

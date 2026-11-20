@@ -1,0 +1,55 @@
+argv: /e/cva6/sv-timing/target/release/sv-timing.exe analyze --files-from /e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/hyp8-core.f --modules csr_regfile,instr_realign,g6lc_tlb,wt_dcache_wbuffer,alu,g6lc_fe_override --target-mhz 5000 --fo4-ps 20 --budget-margin 0.2 --param-map /e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/../r88-param-map.json --stages --json-out /e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/boards/rfix131a-topnow.json --ir-out /e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/boards/rfix131a-topnow.ir.json
+58e3a789b79ff6e03183dfc6a92e1b0ca640cb2f8e82045dfb1c7595dbd05e47 */e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/../r88-param-map.json
+f7919a93fff647f7f520b3a421bc7e28a6f38979d1a0438c028ce7bff4e8b68a */e/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/hyp8-core.f
+sv-timing-core 0.1.0 ir=ir-v6 measurement=delay-v50 correction=correction-v5 parser_pin=v0.13.5
+opt=-O2 (max_passes=4 worklist_width=1 cut=cost-balanced stages=1 min_gain=2 slack_target=0 area_weight=0 max_cells_per_fo4=16 reassoc=false effort=balanced cache=unit)
+target_mhz=5000
+from_cache=false
+modules=6
+paths=1158
+opportunities=488
+ir_out=E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/boards/rfix131a-topnow.ir.json
+  module alu nodes=354 regions=177
+  module csr_regfile nodes=1304 regions=228
+  module g6lc_fe_override nodes=150 regions=59
+  module instr_realign nodes=153 regions=99
+  module wt_dcache_wbuffer nodes=472 regions=213
+  module g6lc_tlb nodes=148 regions=79
+json_out=E:/cva6/build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/timing/boards/rfix131a-topnow.json
+  module alu
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    A1           1   0     118   13.2 /   8.0 !             -                       alu.sv:155-417  
+      bubble-up: covered — 51 reader(s), worst wait 1 cycle(s)
+    A2           1   0      42   26.1 /   8.0 !             -                       alu.sv:418-529  
+      bubble-up: covered — 37 reader(s), worst wait 1 cycle(s)
+    A3           1   0     194   32.9 /   8.0 !          26.1 /   8.0 (A2) !        alu.sv:530-1246  
+      bubble-up: covered — 11 reader(s), worst wait 1 cycle(s)
+
+  module g6lc_fe_override
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    S            1   0     118   32.5 /   8.0 !             -                       g6lc_fe_override.sv:212-512  
+      bubble-up: covered — 0 reader(s), worst wait 0 cycle(s)
+
+  module wt_dcache_wbuffer
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    W2S          1   0      11    7.5 /   8.0               -                       wt_dcache_wbuffer.sv:1832-1851  
+      bubble-up: covered — 7 reader(s), worst wait 1 cycle(s)
+    W3           1   0      24   11.6 /   8.0 !             -                       wt_dcache_wbuffer.sv:1912-1974  
+      bubble-up: covered — 18 reader(s), worst wait 2 cycle(s)
+    W1           1   0      51   13.8 /   8.0 !          11.1 /   8.0 (-) !         wt_dcache_wbuffer.sv:1976-2223  
+      bubble-up: covered — 30 reader(s), worst wait 2 cycle(s)
+    W2           1   0     102   23.6 /   8.0 !          12.1 /   8.0 (-) !         wt_dcache_wbuffer.sv:2224-2776  
+      bubble-up: covered — 80 reader(s), worst wait 2 cycle(s)
+
+  module g6lc_tlb
+    stage      cyc win   nodes  worst-in FO4 (budget)      worst-into FO4 (from)        decl                findings
+    T1           1   0      41    6.8 /   8.0               -                       g6lc_tlb.sv:166-327  
+      bubble-up: covered — 14 reader(s), worst wait 1 cycle(s)
+    T2           1   0      51    5.5 /   8.0               -                       g6lc_tlb.sv:328-534  
+      bubble-up: covered — 2 reader(s), worst wait 2 cycle(s)
+
+  stage users
+    alu                  stages=[A1,A2,A3] used_by=-
+    g6lc_fe_override     stages=[S] used_by=-
+    wt_dcache_wbuffer    stages=[W2S,W3,W1,W2] used_by=-
+    g6lc_tlb             stages=[T1,T2] used_by=-

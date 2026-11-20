@@ -306,6 +306,17 @@ module issue_stage
   logic              [G6LCCfg.NrIssuePorts-1:0][31:0] orig_instr_sb;
   logic              [G6LCCfg.NrIssuePorts-1:0]       issue_instr_valid_sb;
   logic              [G6LCCfg.NrIssuePorts-1:0]       issue_ack_sb;
+  // rfix131a: prefix-masked dispatch valid. The scoreboard slot allocator,
+  // in-order ROB fill and commit contract all require the OoO dispatch
+  // group to be a leading contiguous run; issue_instr_valid_sb can go
+  // non-prefix when the ID/instr-queue window retracts a low lane while a
+  // higher lane stays live. Masking here (before rename) keeps renamed
+  // lanes a prefix so no post-rename lane is dropped; masked tail lanes
+  // stay valid in the scoreboard and re-present next group.
+  logic              [G6LCCfg.NrIssuePorts-1:0]       dispatch_valid_sb_pre;
+  // rfix131a: same prefix contract for the active OoO path, whose dispatch
+  // valid additionally carries the CSR ctx_keep qualifier.
+  logic              [G6LCCfg.NrIssuePorts-1:0]       disp_valid_ctx_pre;
   // FU issue stream into IRO (identity or U4-selected)
   scoreboard_entry_t [G6LCCfg.NrIssuePorts-1:0]       issue_instr_iro;
   logic              [G6LCCfg.NrIssuePorts-1:0][31:0] orig_instr_iro;
@@ -456,6 +467,36 @@ assign issue_instr_o    = issue_instr_iro[0];
   // still allocate its slots (see i_scoreboard / g6lc_ooo_dispatch).
   assign disp_valid_ctx = issue_instr_valid_sb & ctx_keep & ~issue_quiesce_i;
 
+  // rfix131a: leading-contiguous prefix of the dispatch-valid lanes. The
+  // rename/IQ/ROB/scoreboard all require an in-order (prefix) dispatch
+  // group; a low lane retracting while a higher lane stays live would
+  // otherwise publish a non-prefix group -> scoreboard hole + double-alloc.
+  // Masked tail lanes are never renamed/acked and re-present next group.
+  logic [G6LCCfg.NrIssuePorts-1:0] dispatch_valid_raw;
+  assign dispatch_valid_raw = issue_instr_valid_sb & ~issue_quiesce_i;
+  // rfix131a-46: publish-side valid. The rename publish mask and the
+  // grp_need/grp_is/sbe_pub.ooo_renamed state must describe the group that
+  // was CAPTURED, so they use the scoreboard's live view WITHOUT the
+  // quiesce term -- quiesce gates only NEW captures (ren_capture still uses
+  // the masked dispatch_valid_i). Without this an in-flight group whose
+  // dispatch_valid_i retracts on SMT quiesce/halt publishes empty
+  // (grp_v_q==0), never dispatch_acks, and leaks its rename-allocated phys
+  // regs (kill_all does not cover quiesce; flush_hart_i is tied off).
+  logic [G6LCCfg.NrIssuePorts-1:0] disp_valid_ctx_pub;
+  logic [G6LCCfg.NrIssuePorts-1:0] disp_valid_ctx_pub_pre;
+  assign disp_valid_ctx_pub = issue_instr_valid_sb & ctx_keep;
+  always_comb begin
+    dispatch_valid_sb_pre[0] = dispatch_valid_raw[0];
+    for (int unsigned p = 1; p < G6LCCfg.NrIssuePorts; p++)
+      dispatch_valid_sb_pre[p] = dispatch_valid_sb_pre[p-1] & dispatch_valid_raw[p];
+    disp_valid_ctx_pre[0] = disp_valid_ctx[0];
+    for (int unsigned p = 1; p < G6LCCfg.NrIssuePorts; p++)
+      disp_valid_ctx_pre[p] = disp_valid_ctx_pre[p-1] & disp_valid_ctx[p];
+    disp_valid_ctx_pub_pre[0] = disp_valid_ctx_pub[0];
+    for (int unsigned p = 1; p < G6LCCfg.NrIssuePorts; p++)
+      disp_valid_ctx_pub_pre[p] = disp_valid_ctx_pub_pre[p-1] & disp_valid_ctx_pub[p];
+  end
+
   if (G6LCCfg.OoOEn) begin : gen_full_ooo
     logic [G6LCCfg.NrWbPorts-1:0] wb_exc_bits;
     for (genvar wi = 0; wi < G6LCCfg.NrWbPorts; wi++) begin : gen_wb_exc
@@ -477,7 +518,8 @@ assign issue_instr_o    = issue_instr_iro[0];
         .sb_live_i        (sb_live),
         .dispatch_sbe_i   (issue_instr_sb),
         .dispatch_orig_i  (orig_instr_sb),
-        .dispatch_valid_i (disp_valid_ctx),
+        .dispatch_valid_i (disp_valid_ctx_pre),
+        .dispatch_valid_pub_i (disp_valid_ctx_pub_pre),
         .dispatch_ack_o   (issue_ack_sb),
         .issue_sbe_o      (issue_instr_iro),
         .issue_orig_o     (orig_instr_iro),
@@ -570,7 +612,7 @@ assign issue_instr_o    = issue_instr_iro[0];
         .flush_unissued_i (flush_unissued_instr_i),
         .dispatch_sbe_i   (issue_instr_sb),
         .dispatch_orig_i  (orig_instr_sb),
-        .dispatch_valid_i (issue_instr_valid_sb & ~issue_quiesce_i),
+        .dispatch_valid_i (dispatch_valid_sb_pre),
         .dispatch_ack_o   (issue_ack_sb),
         .issue_sbe_o      (issue_instr_iro),
         .issue_orig_o     (orig_instr_iro),
