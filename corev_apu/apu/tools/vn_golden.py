@@ -569,16 +569,29 @@ class ReplySim:
         out = []
         cpos = [0]          # rec['chain'] cursor
 
+        _tr = bool(__import__('os').environ.get('VN_REPLY_TRACE'))
+        if _tr:
+            print('=== reply type=%s result=%08x reply_prog=%s ==='
+                  % (rec.get('type'), result & 0xFFFFFFFF,
+                     rec.get('reply_prog')))
+
         def u32(v):
             out.append(v & 0xFFFFFFFF)
+            if _tr:
+                print('    emit32 %08x' % (v & 0xFFFFFFFF))
 
         def u64(v):
             out.extend([v & 0xFFFFFFFF, (v >> 32) & 0xFFFFFFFF])
+            if _tr:
+                print('    emit64 %016x' % (v & 0xFFFFFFFFFFFFFFFF))
 
         def run_prog(mpc):
             while True:
                 op, a, b, note = self.rep[mpc]
                 mpc += 1
+                if _tr:
+                    print('  mpc=%d op=%s a=%s b=%s note=%s'
+                          % (mpc - 1, op, a, b, note))
                 if op in ('REND', 'RRET'):
                     return
                 if op == 'RTYPE':
@@ -1428,7 +1441,7 @@ VK_ERR_UNKNOWN = 0xFFFFFFF3
 VK_ERR_VALIDATION_FAILED = 0xC4650B08   # VK_ERROR_VALIDATION_FAILED
 VK_ERR_FEATURE_NOT_PRESENT = 0xFFFFFFF8     # -8
 # graphics-pipeline ObjPay state block (vnfront gp_pay_w w0..w56)
-GP_PAY_WORDS = 57
+GP_PAY_WORDS = 61
 # vertex-attribute formats vnfront f_vattr_ok / rast gather accept
 VATTR_OK = frozenset((9, 10, 13, 14, 16, 17, 20, 21, 23, 24, 27, 28,
                       37, 38, 41, 42, 70, 71, 74, 75, 76, 77, 78, 81,
@@ -2356,7 +2369,8 @@ class FrontModel(ObjectTable, PayloadMemory):
                 for k in range(3):
                     masks[k] = nx() & 0xFF
             dbmin, dbmax = nx(), nx()
-        # optional colour-blend state (up to 4 attachments)
+        # optional colour-blend state (up to 8 attachments — the widened
+        # ca[7:0] path carries blend states for att0..7 at w26..29/w57..60)
         blends = []
         bconst = [0, 0, 0, 0]
         natt = 0
@@ -2367,7 +2381,7 @@ class FrontModel(ObjectTable, PayloadMemory):
             if lop > 15:
                 return fail()
             natt = nx()
-            if natt > 4:
+            if natt > 8:
                 return fail()
             for _a in range(natt):
                 en = 1 if nx() else 0
@@ -2494,6 +2508,12 @@ class FrontModel(ObjectTable, PayloadMemory):
             return (m[2] << 16) | (m[1] << 8) | m[0]
         words += [dbc, dbk, dbs, msk_w(sfm), ops_w(sfo),
                   msk_w(sbm), ops_w(sbo), dbmin, dbmax]
+        # w57..60: colour blend states for attachments 4..7 — the
+        # 8-colour-attachment extension tail (w26..29 carry att0..3).
+        # Unused slots stay blend-disabled 0x78000000 like the RTL's
+        # '{8{32'h7800_0000}} gp_blend_q default.
+        for i in range(4, 8):
+            words.append(blends[i] if i < natt else 0x78000000)
         assert len(words) == GP_PAY_WORDS
         for i, w in enumerate(words):
             self.pay[pbase + i] = w
@@ -3487,7 +3507,9 @@ class FrontModel(ObjectTable, PayloadMemory):
                 rp_pay = ((rpe['aux'] >> 48) & 0xFFFF) << 6
                 rp_w = (rpe['aux'] >> 32) & 0xFFFF
                 na_ = self.pay.get(rp_pay, 0)
-                if na_ == 0 or na_ > 5:
+                # renderpass attachmentCount: up to 10 slots = 8 colour +
+                # depth + stencil (cmdexec att_img_q[9:0] / brp_att_q 1..10)
+                if na_ == 0 or na_ > 10:
                     return True
                 lds = [self.pay.get(rp_pay + 2 + 3 * k, 0)
                        for k in range(na_)]
@@ -3498,7 +3520,9 @@ class FrontModel(ObjectTable, PayloadMemory):
                 crefs, dref = [], 0xFFFFFFFF
                 if ns == 1:
                     nc = self.pay.get(pos, 0)
-                    if nc > 4:
+                    # colour attachment refs per subpass: up to 8
+                    # (cmdexec sp_cref_q[..][7:0])
+                    if nc > 8:
                         return True
                     crefs = [self.pay.get(pos + 1 + j, 0)
                              for j in range(nc)]
@@ -3522,7 +3546,7 @@ class FrontModel(ObjectTable, PayloadMemory):
                     # into ca_q/da_q for subpass 0
                     for si in range(ns):
                         nc = self.pay.get(pos, 0)
-                        if nc > 4:
+                        if nc > 8:
                             return True
                         refs = [self.pay.get(pos + 1 + j, 0)
                                 for j in range(nc)]
@@ -5311,12 +5335,12 @@ class FrontModel(ObjectTable, PayloadMemory):
                     self._cb_reset(d)
                     self.setstate(hnd[cb_q], 0xF, 0)
             else:
-                # §7b: pValues over 128 B joins the INVALID path
+                # §7b: pValues over 256 B joins the INVALID path
                 if not (e['state'] & CB_REC) or \
                         (e['state'] & (CB_INV | CB_PEND)) or \
                         d is None or \
                         (ct == session['T']['vkCmdPushConstants']
-                         and rec['imm'][2] > 128) or \
+                         and rec['imm'][2] > 256) or \
                         (ct == session['T'].get('vkCmdBindVertexBuffers')
                          and (rec['imm'][0] & 0xFFFF) +
                              (rec['imm'][1] & 0xFFFF) > 16):
@@ -5750,6 +5774,10 @@ class FrontModel(ObjectTable, PayloadMemory):
             w = ew[pos[0]:pos[0] + n]
             w += [0] * (n - len(w))
             pos[0] += n
+            if __import__('os').environ.get('VN_REPLY_TRACE'):
+                print('    exec_src mpc=%d n=%d op=%s -> %s'
+                      % (mpc, n, op,
+                         ' '.join('%08x' % (x & 0xFFFFFFFF) for x in w)))
             return w
         out['rep'] = rep_sim.run(words, rec, out['result'], supply,
                                  null_mask=out['null_mask'])
@@ -6776,7 +6804,7 @@ def build_session(model, asm, sim, rep_sim, enc, gen, rng,
         descriptorCopyCount=0, pDescriptorCopies=[])
     dset_teardown(G7)
 
-    # ------- arm 8: pValues over 128 B -> UNKNOWN + INVALID --------------
+    # ------- arm 8: pValues over 256 B -> UNKNOWN + INVALID --------------
     H = {k: newid() for k in ('inst', 'pd', 'dev', 'pl', 'cp', 'cb')}
     dev_prefix(H)
     cmd('vkCreatePipelineLayout', device=H['dev'],
@@ -6798,7 +6826,7 @@ def build_session(model, asm, sim, rep_sim, enc, gen, rng,
         pBeginInfo=struct('VkCommandBufferBeginInfo', flags=0,
                           pInheritanceInfo=None))
     cmd('vkCmdPushConstants', commandBuffer=H['cb'], layout=H['pl'],
-        stageFlags=0x20, offset=0, size=132, pValues=b'\x01' * 132)
+        stageFlags=0x20, offset=0, size=260, pValues=b'\x01' * 256)
     cmd('vkCmdDispatch', commandBuffer=H['cb'],
         groupCountX=1, groupCountY=1, groupCountZ=1)
     cmd('vkFreeCommandBuffers', device=H['dev'], commandPool=H['cp'],
@@ -7882,6 +7910,17 @@ def _lopw(w, cb):
     r = 0
     for c in range(4):
         r |= (((w >> (8 * c)) & 0xFF) ^ cb[c]) << (8 * c)
+    return r
+
+
+def _bperm(w, p):
+    """Pure channel permutation of a packed RGBA8 word: output byte i takes
+    input byte p[i].  Mirrors an FS-out vec4 channel permutation committed
+    to per-channel UNORM8 — the fp32->u8 encode commutes with the permute
+    (same argument the att1..3 oracles rely on)."""
+    r = 0
+    for c in range(4):
+        r |= (((w >> (8 * p[c])) & 0xFF)) << (8 * c)
     return r
 
 
@@ -11777,14 +11816,37 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # into the vec4 the VS sees.  vs_pos3 forwards col verbatim so
         # all four decoded channels reach the attachment.  Only the
         # blend-disabled is_bloff path is adapted.
-        is_vattr8u = 'vattr8u' in gfx
+        # vattr8uint: the vertex-colour attribute is R8G8B8A8_UINT
+        # (vkfmt 41) — same packed u8x4 VB word as vattr8u but the
+        # gather copies raw bits (no UNORM normalise) and vs_uintcol
+        # reads uvec4 then scales by fp32(1/255), yielding the same
+        # vcol.rgb the UNORM path produces; fs_flat forces alpha=1.0 so
+        # the is_bloff oracle is bit-identical — a clean A/B on the
+        # integer fetch+Input-load path.  'vattr8uint' contains the
+        # 'vattr8u' substring, so is_vattr8u must exclude it or both
+        # flags would fire and emit vkfmt 37 instead of 41.
+        is_vattr8uint = 'vattr8uint' in gfx
+        # 'vattr8u1' (R8_UNORM, nc=1) also contains 'vattr8u' — exclude it
+        # too or the 1-component session silently tests 4-component
+        # R8G8B8B8A8_UNORM (vkfmt 37) instead of vkfmt 9.
+        is_vattr8u = 'vattr8u' in gfx and not is_vattr8uint \
+            and 'vattr8u1' not in gfx
         # vattr16u: the vertex-colour attribute is R16G16B16A16_UNORM
         # (vkfmt 91) — two u16 words per vertex at byte offset 8, decoded
         # per channel as fp32(u16)*fp32(1/65535) (K16=0x37800080).  The
         # stored u16 are k*257 so 65535=255*257 makes the decode land on
         # exactly k/255 and the u8 attachment re-encode to k — a clean
         # round-trip through the 16-bit normalised-fetch path.
-        is_vattr16u = 'vattr16u' in gfx
+        # vattr16uint: the vertex-colour attribute is R16G16B16A16_UINT
+        # (vkfmt 95) — same two-u16-word packing as vattr16u but the
+        # gather copies raw u16 (zero-extended, no UNORM normalise)
+        # into a uvec4 the vs_u16ucol shader reads; vcol=vec4(col)*
+        # fp32(1/65535)=*0x37800080 lands bit-identical to the UNORM16
+        # decode, a clean A/B on the f_is_i16 integer-fetch path.
+        # 'vattr16uint' contains 'vattr16u' so is_vattr16u must exclude
+        # it or the UINT session silently emits vkfmt 91 UNORM.
+        is_vattr16uint = 'vattr16uint' in gfx
+        is_vattr16u = 'vattr16u' in gfx and not is_vattr16uint
         # vattr8sn: the vertex-colour attribute is R8G8B8A8_SNORM
         # (vkfmt 38) — same packed u8x4 word as vattr8u but the gather
         # sign-extends each byte and scales by fp32(1/127)
@@ -11799,6 +11861,32 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # (Ksn=0x38000100), clamping below -1.0.  Completes the packed
         # RGBA normalised vertex matrix (UNORM8/16 + SNORM8/16).
         is_vattr16sn = 'vattr16sn' in gfx
+        # vattr16sint: the vertex-colour attribute is R16G16B16A16_SINT
+        # (vkfmt 96) — same two-u16-word packing as vattr16u but the
+        # gather sign-extends each u16 into an ivec4 the vs_s16col
+        # shader reads; vcol=(vec4(col)+32768)*(1/65535) re-centres
+        # signed [-32768,32767] onto [0,1].  'vattr16sint' collides with
+        # no existing flag ('vattr16si'!='vattr16sn', no 'vattr16u').
+        is_vattr16sint = 'vattr16sint' in gfx
+        # vattr32uint: the vertex-colour attribute is R32G32B32A32_UINT
+        # (vkfmt 107) — four u32 components at byte offset 8 (one word
+        # each, no packing).  The gather copies raw u32 (zero-extended)
+        # into a uvec4 the vs_u32col shader reads; vcol=vec4(col)*2^-32.
+        # Stored u32 = k*2^24 keeps the value exact in f32 (k in the top
+        # byte) so vec4(col)*2^-32 lands on exactly k/256 — a clean,
+        # bit-exact oracle on the f_is_int 32-bit fetch path.  The k*2^24
+        # pattern puts the significant bits in [31:24] so a 16-bit
+        # truncation would read 0 and be caught.
+        # 'vattr32uint' collides with no existing flag.
+        is_vattr32uint = 'vattr32uint' in gfx
+        # vattr32sint: the vertex-colour attribute is R32G32B32A32_SINT
+        # (vkfmt 108) — same four-u32-word VB packing as vattr32uint but
+        # the bits are read as signed s32 into an ivec4 the vs_s32col
+        # shader reads; vcol=(vec4(col)+2^31)*2^-32 re-centres signed
+        # [-2^31,2^31-1] onto [0,1].  The stored k*2^24 bit patterns give
+        # a real mix of negative/positive s32 -> genuine sign coverage.
+        # 'vattr32sint' collides with no existing flag.
+        is_vattr32sint = 'vattr32sint' in gfx
         # vattr16f: the vertex-colour attribute is R16G16B16A16_SFLOAT
         # (vkfmt 97) — same two-u16-word packing but each u16 is an IEEE
         # binary16 pattern decoded by f_f16_f32 (subnormals flush to
@@ -11816,6 +11904,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # and 1, filling G/B (and alpha) from the (0,0,0,1) default.
         is_vattrrg8u = 'vattrrg8u' in gfx
         is_vattr8u1 = 'vattr8u1' in gfx
+        # vattr8sint: the vertex-colour attribute is R8G8B8A8_SINT
+        # (vkfmt 42) — same packed u8x4 VB word as vattr8u/uint but the
+        # gather sign-extends each s8 (no normalise) into an ivec4 the
+        # vs_sintcol shader reads; vcol=(vec4(col)+128)*(1/255) re-centres
+        # signed [-128,127] onto [0,1].  'vattr8sint' collides with no
+        # existing flag ('vattr8s'!='vattr8u', 'vattr8si'!='vattr8sn').
+        is_vattr8sint = 'vattr8sint' in gfx
         # colourWriteMask stays logical-channel (R=1,G=2,B=4,A=8): cwmr
         # keeps R only, cwmb keeps B only — paired with is_bgra these
         # expose a mask applied in byte order instead of channel order.
@@ -11846,9 +11941,27 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         if is_vattr8u and not is_bloff:
             raise ValueError('vattr8u vertex attribute only adapted on '
                              'the is_bloff path')
+        if is_vattr8uint and not is_bloff:
+            raise ValueError('vattr8uint vertex attribute only adapted '
+                             'on the is_bloff path')
+        if is_vattr8sint and not is_bloff:
+            raise ValueError('vattr8sint vertex attribute only adapted '
+                             'on the is_bloff path')
         if is_vattr16u and not is_bloff:
             raise ValueError('vattr16u vertex attribute only adapted on '
                              'the is_bloff path')
+        if is_vattr16uint and not is_bloff:
+            raise ValueError('vattr16uint vertex attribute only adapted '
+                             'on the is_bloff path')
+        if is_vattr16sint and not is_bloff:
+            raise ValueError('vattr16sint vertex attribute only adapted '
+                             'on the is_bloff path')
+        if is_vattr32uint and not is_bloff:
+            raise ValueError('vattr32uint vertex attribute only adapted '
+                             'on the is_bloff path')
+        if is_vattr32sint and not is_bloff:
+            raise ValueError('vattr32sint vertex attribute only adapted '
+                             'on the is_bloff path')
         if is_vattr8sn and not is_bloff:
             raise ValueError('vattr8sn vertex attribute only adapted on '
                              'the is_bloff path')
@@ -11904,6 +12017,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # per-fragment FS expression vcol*0.5 + FragCoord.x*0.001 —
         # exercises interpolated varyings AND per-pixel FS arithmetic
         is_fcolor = 'fcolor' in gfx
+        # gpush: fragment reads a push_constant block — fs_push emits
+        # o.rgb = vcol.rgb + pc.rgb.  Exercises the vkCmdPushConstants ->
+        # bindings._push -> operation.push -> pshade -> spirv_model
+        # PushConstant-load path end-to-end through the graphics
+        # pipeline (the only leg with no prior non-zero bench).  'gpush'
+        # collides with no existing flag substring.
+        is_gpush = 'gpush' in gfx
         # mrt: TWO colour attachments (G3a-iv-n).  fs_mrt emits
         # location0->ca[0] (o0 = the fs_color gradient, att0 reuses the
         # is_fcolor oracle) and location1->ca[1] (o1 = R/B swap of o0 —
@@ -11928,9 +12048,16 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # cursor value (S_ROP_NX terminates the fragment after att3).
         # is_mrt4 implies is_mrt3 so the att2 plumbing runs for both;
         # n_col generalises the 1/2/3/4-attachment count.
-        is_mrt4 = 'mrt4' in gfx
+        # is_mrt8: EIGHT colour attachments — the widened ca[7:0]/
+        # ca_valid[7:0]/blend[7:0] + at_q[2:0] path.  mrt8 implies the
+        # is_mrt4->is_mrt3->is_mrt chain so attachments 0..3 reuse the
+        # proven plumbing; attachments 4..7 (img5..8/view5..8/imem5..8/
+        # rb6..9) are wired by the is_mrt8-guarded blocks below.
+        is_mrt8 = 'mrt8' in gfx
+        is_mrt4 = ('mrt4' in gfx) or is_mrt8
         is_mrt3 = ('mrt3' in gfx) or is_mrt4
-        n_col = 4 if is_mrt4 else (3 if is_mrt3 else (2 if is_mrt else 1))
+        n_col = 8 if is_mrt8 else (4 if is_mrt4 else
+               (3 if is_mrt3 else (2 if is_mrt else 1)))
         # mrtlop: MRT + logicOp (VkLogicOp XOR) on EVERY colour attachment.
         # 'mrt{,3,4}lop' keeps is_mrt/is_mrt3/is_mrt4 (2/3/4 att) but each
         # contains NO lop_* token so is_lop/lop_op stay unset — logicOp is
@@ -12409,6 +12536,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'vs_texzw.spv' if (is_ftexpj or is_ftexpi
                                              or is_ftexary)
                           else 'vs_tex.spv' if is_ftex else
+                          'vs_uintcol.spv' if is_vattr8uint else
+                          'vs_sintcol.spv' if is_vattr8sint else
+                          'vs_u16ucol.spv' if is_vattr16uint else
+                          'vs_s16col.spv' if is_vattr16sint else
+                          'vs_u32col.spv' if is_vattr32uint else
+                          'vs_s32col.spv' if is_vattr32sint else
                           'vs_pos3.spv' if is_blend or is_lop or is_bop
                           or is_bfac or is_wide
                           or is_kill
@@ -12430,12 +12563,17 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'fs_deriv.spv' if is_deriv else
                           'fs_deriv2.spv' if is_deriv2 else
                           'fs_demote_deriv.spv' if is_demdrv else
+                          'fs_mrt8.spv' if is_mrt8 else
                           'fs_mrt4.spv' if is_mrt4 else
                           'fs_mrt3.spv' if is_mrt3 else
                           'fs_mrt.spv' if is_mrt else
                           'fs_color.spv' if is_fcolor else
                           'fs_r32u.spv' if is_r32u else
                           'fs_rgba8u.spv' if is_rgba8uint else
+                          # gpush: dedicated push-constant FS — must precede
+                          # fs_vcol, which the is_bop (forced by is_bloff)
+                          # catch-all would otherwise claim first.
+                          'fs_push.spv' if is_gpush else
                           'fs_vcol.spv' if is_persp or is_dclamplike
                           or is_blend or is_lop or is_bop or is_bfac
                           or is_wide
@@ -12483,7 +12621,16 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
              'img4', 'view4', 'imem4', 'rb5', 'rb5mem',
              # secnd secondary command buffer (appended last so every
              # existing key's index-derived handle is unchanged)
-             'cb2'))}
+             'cb2',
+             # mrt8 attachments 4..7 (appended after cb2 so every
+             # existing key's index-derived handle is unchanged):
+             # att a (a>=1) -> img{a+1}/view{a+1}/imem{a+1}/rb{a+2}/
+             # rb{a+2}mem, so att4..7 need img5..8/view5..8/imem5..8/
+             # rb6..9/rb6mem..9mem.
+             'img5', 'view5', 'imem5', 'rb6', 'rb6mem',
+             'img6', 'view6', 'imem6', 'rb7', 'rb7mem',
+             'img7', 'view7', 'imem7', 'rb8', 'rb8mem',
+             'img8', 'view8', 'imem8', 'rb9', 'rb9mem'))}
         RES_BLOB0 = 200
 
         CW = CH = 64                     # color attachment extent
@@ -12506,19 +12653,56 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # sends pColorBlendState=None).
         # lopx src colour: (1.0,0.5,0.25,0.75) -> distinct UNORM8 bytes
         # so the XOR against the clear dst exercises every channel.
-        # vattr8u: the stored vertex bytes are u8x4; the gather decodes
-        # each as fp32(b)*fp32(1/255) (K255=0x3B808081) so COL holds the
-        # decoded f32 the VS/oracle interpolate — the same value RTL's
-        # S_GA_U8I/U8M/U8S chain produces.
-        if is_vattr8u:
+        # vattr8u/vattr8uint: the stored vertex bytes are u8x4; the
+        # gather decodes each as fp32(b)*fp32(1/255) (K255=0x3B808081)
+        # for UNORM, or copies raw u8 for UINT which vs_uintcol then
+        # scales by the same fp32(1/255) — either way COL holds the
+        # decoded f32 the VS/oracle interpolate, matching RTL's
+        # S_GA_U8I/U8M/U8S (UNORM) or integer-load+convert (UINT) chain.
+        if is_vattr8u or is_vattr8uint:
             _K8 = struct.unpack('<f', struct.pack('<I', 0x3B808081))[0]
             _C8 = (200, 100, 50, 128)          # stored u8 R,G,B,A bytes
             COL = tuple(_f32(_f32(b) * _K8) for b in _C8)
-        elif is_vattr16u:
+        elif is_vattr16u or is_vattr16uint:
+            # R16G16B16A16_UNORM decodes fp32(u16)*K16 in the gather;
+            # _UINT delivers the same raw u16 to vs_u16ucol which does
+            # the identical *K16 scale -> same COL either way.
             _K16 = struct.unpack('<f', struct.pack('<I', 0x37800080))[0]
             # stored u16 = k*257 -> decodes to exactly k/255
             _W16 = (180 * 257, 60 * 257, 220 * 257, 90 * 257)
             COL = tuple(_f32(_f32(w) * _K16) for w in _W16)
+        elif is_vattr16sint:
+            # R16G16B16A16_SINT: same stored u16 bits as vattr16u but the
+            # gather sign-extends each to s16->s32 (no normalise) into an
+            # ivec4 vs_s16col reads; vcol=(vec4(col)+32768)*(1/65535)
+            # re-centres signed [-32768,32767] onto [0,1].  sext(w)+32768
+            # == (w-32768 if w>=32768 else w+32768); convert/add exact so
+            # only the *K16 multiply rounds.
+            _K16 = struct.unpack('<f', struct.pack('<I', 0x37800080))[0]
+            _W16 = (180 * 257, 60 * 257, 220 * 257, 90 * 257)
+            _D16 = tuple((w - 32768) if w >= 32768 else (w + 32768)
+                         for w in _W16)
+            COL = tuple(_f32(_f32(d) * _K16) for d in _D16)
+        elif is_vattr32uint:
+            # R32G32B32A32_UINT: the gather copies raw u32 (zero-extended)
+            # into the uvec4 vs_u32col reads; vcol=vec4(col)*2^-32.
+            # Stored u32 = k*2^24 -> f32 exact -> *2^-32 lands on exactly
+            # k/256, so COL = k/256 with no rounding at all.
+            _K32 = struct.unpack('<f', struct.pack('<I', 0x2F800000))[0]
+            _U32 = (180 << 24, 60 << 24, 220 << 24, 90 << 24)
+            COL = tuple(_f32(_f32(u) * _K32) for u in _U32)
+        elif is_vattr32sint:
+            # R32G32B32A32_SINT: same stored u32 bit patterns as
+            # vattr32uint but read as signed s32 into the ivec4
+            # vs_s32col reads; vcol=(vec4(col)+2^31)*2^-32.  Adding 2^31
+            # to a signed s32 flips the top bit, so s32+2^31 ==
+            # (stored ^ 0x80000000); convert/add exact so only *2^-32
+            # (an exact power of two) applies — COL lands on
+            # (B^0x80000000)/2^32 with the mixed-sign patterns giving
+            # genuine sign coverage.
+            _K32 = struct.unpack('<f', struct.pack('<I', 0x2F800000))[0]
+            _U32 = (180 << 24, 60 << 24, 220 << 24, 90 << 24)
+            COL = tuple(_f32(_f32(b ^ 0x80000000) * _K32) for b in _U32)
         elif is_vattr8sn:
             _K127 = struct.unpack('<f', struct.pack('<I', 0x3C010204))[0]
             _S8 = (100, 32, 127, 128)         # stored u8 R,G,B,A bytes
@@ -12569,6 +12753,17 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             _dec = [_f32(_f32(b) * _K8) for b in _C8]
             _dec += [_f32(0.0)] * (3 - len(_dec))
             COL = tuple(_dec) + (_f32(1.0),)
+        elif is_vattr8sint:
+            # R8G8B8A8_SINT: same stored u8x4 bytes as vattr8u/uint but
+            # the gather sign-extends each s8 (raw int, no normalise)
+            # into the ivec4 vs_sintcol reads; vcol=(vec4(col)+128)*(1/255)
+            # re-centres signed [-128,127] onto [0,255] before the *K8
+            # scale.  sext(b)+128 == (b-128 if b>=128 else b+128); the
+            # convert/add are exact so only the *K8 multiply rounds.
+            _K8 = struct.unpack('<f', struct.pack('<I', 0x3B808081))[0]
+            _C8 = (200, 100, 50, 128)          # stored u8 R,G,B,A bytes
+            _D8 = tuple((b - 128) if b >= 128 else (b + 128) for b in _C8)
+            COL = tuple(_f32(_f32(d) * _K8) for d in _D8)
         else:
             COL = (1.0, 0.5, 0.25, 0.75) if is_lop else \
                 (1.0, 0.0, 0.0, 0.75) if is_blend else \
@@ -12812,20 +13007,31 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     vb2_words += [f32b(c) for c in COL]
                 else:
                     vb_words += [f32b(vx_), f32b(vy_)]
-                    if is_vattr8u:
-                        # R8G8B8A8_UNORM colour at byte offset 8 = word
-                        # 2: one packed u8x4 (R|G<<8|B<<16|A<<24) then
-                        # three pad words to keep the 24 B stride.
+                    if is_vattr8u or is_vattr8uint or is_vattr8sint:
+                        # R8G8B8A8_UNORM/_UINT/_SINT colour at byte
+                        # offset 8 = word 2: one packed u8x4
+                        # (R|G<<8|B<<16|A<<24) then three pad words to
+                        # keep the 24 B stride.  The format code
+                        # (37/41/42) selects normalise vs raw-int
+                        # (zero/sign-extend) decode, not the packing.
                         vb_words += [(_C8[0] | (_C8[1] << 8) |
                                       (_C8[2] << 16) | (_C8[3] << 24)),
                                      0, 0, 0]
-                    elif is_vattr16u:
-                        # R16G16B16A16_UNORM colour at byte offset 8:
-                        # two u16 words {R|G<<16, B|A<<16} at words 2-3
-                        # then two pad words to keep the 24 B stride.
+                    elif is_vattr16u or is_vattr16uint or is_vattr16sint:
+                        # R16G16B16A16_UNORM/_UINT/_SINT colour at byte
+                        # offset 8: two u16 words {R|G<<16, B|A<<16} at
+                        # words 2-3 then two pad words to keep the 24 B
+                        # stride (the format code selects the decode).
                         vb_words += [(_W16[0] | (_W16[1] << 16)),
                                      (_W16[2] | (_W16[3] << 16)),
                                      0, 0]
+                    elif is_vattr32uint or is_vattr32sint:
+                        # R32G32B32A32_UINT/_SINT colour at byte offset
+                        # 8: four raw 32-bit components, one word each
+                        # at words 2-5 — 16 bytes fills the rest of the
+                        # 24 B stride exactly (no packing, no pad; the
+                        # format code selects zero- vs sign-extend read).
+                        vb_words += list(_U32)
                     elif is_vattr8sn:
                         # R8G8B8A8_SNORM colour at byte offset 8: same
                         # packed u8x4 layout as vattr8u (the format code
@@ -13062,6 +13268,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         exp_img2 = []                     # mrt attachment-1 expected image
         exp_img3 = []                     # mrt3 attachment-2 expected image
         exp_img4 = []                     # mrt4 attachment-3 expected image
+        exp_img5 = []                     # mrt8 attachment-4 expected image
+        exp_img6 = []                     # mrt8 attachment-5 expected image
+        exp_img7 = []                     # mrt8 attachment-6 expected image
+        exp_img8 = []                     # mrt8 attachment-7 expected image
         if is_deriv:
             # quad-lane derivative oracle over the fullscreen gradient:
             # per-pixel bit-exact vcol neighbours -> dFdx/dFdy/fwidth
@@ -13155,7 +13365,19 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     exp_img.append((_h[3] << 48) | (_h[2] << 32) |
                                    (_h[1] << 16) | _h[0])
                 else:
-                    _rb = ([_enc8(c, _v[c]) for c in range(4)]
+                    # is_gpush: fs_push emits o.rgb = vcol.rgb + pc.rgb,
+                    # o.a = 1.0 (pc = the vkCmdPushConstants vec4
+                    # (0.1,0.2,0.3,1.0), only .rgb consumed).  Model the
+                    # fp32 add exactly: fp32(vcol)+fp32(pc) correctly-
+                    # rounded, then _enc8 store-encodes; alpha is the
+                    # forced 1.0, not vcol.a.  Checked before is_bloff
+                    # (is_bloff forces is_bop, so gpush rides that branch).
+                    _PC = (0.1, 0.2, 0.3)
+                    _rb = ([(_enc8(c, _f32(_v[c] + _f32(_PC[c])))
+                             if c < 3 else _enc8(3, 1.0))
+                            for c in range(4)]
+                           if is_gpush else
+                           [_enc8(c, _v[c]) for c in range(4)]
                            if is_bloff else
                            [_enc8(c, _bopv(_v[c], _df[c]))
                             for c in range(4)])
@@ -13250,6 +13472,14 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                 # att3 has its OWN clear (1,1,0,1)
                                 # ->0xFF00FFFF.
                                 exp_img4.append(0xFF00FFFF)
+                                if is_mrt8:
+                                    # att4..7 each have their OWN clear:
+                                    # (1,0,0,1)->0xFF0000FF (0,1,1,1)->0xFFFFFF00
+                                    # (1,0,1,1)->0xFFFF00FF (1,1,1,1)->0xFFFFFFFF
+                                    exp_img5.append(0xFF0000FF)
+                                    exp_img6.append(0xFFFFFF00)
+                                    exp_img7.append(0xFFFF00FF)
+                                    exp_img8.append(0xFFFFFFFF)
                 elif is_fcolor or is_mrt:
                     # fs_color/fs_mrt o0: o = vcol*0.5 + splat(
                     # FragCoord.x*0.001); fragx = px+0.5.  VectorTimesScalar
@@ -13346,6 +13576,39 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                     _cb3 = [255, 255, 0, 255]
                                     _pw3 = (_lopw(_pw3, _cb3))
                                 exp_img4.append(_pw3)
+                                if is_mrt8:
+                                    # fs_mrt8 o4..o7 -> attachments 4..7:
+                                    # further distinct channel permutations
+                                    # of the same base colour c (packed byte
+                                    # indices into _w0 are [R,G,B,A]=[0,1,2,3]):
+                                    #   o4=(c.r,c.b,c.g,c.a)->[0,2,1,3] att4
+                                    #   o5=(c.g,c.r,c.b,c.a)->[1,0,2,3] att5
+                                    #   o6=(c.b,c.a,c.g,c.r)->[2,3,1,0] att6
+                                    #   o7=(c.a,c.r,c.g,c.b)->[3,0,1,2] att7
+                                    # is_mrtlop: logicOp XOR vs each att's OWN
+                                    # clear — the same _lopw per-byte s^d path
+                                    # att0..3 use (att4-7 clears are the is_mrt8
+                                    # distinct (r,g,b,1) tuples).
+                                    exp_img5.append(
+                                        _lopw(_bperm(_w0, (0, 2, 1, 3)),
+                                              [255, 0, 0, 255])
+                                        if is_mrtlop else
+                                        _bperm(_w0, (0, 2, 1, 3)))
+                                    exp_img6.append(
+                                        _lopw(_bperm(_w0, (1, 0, 2, 3)),
+                                              [0, 255, 255, 255])
+                                        if is_mrtlop else
+                                        _bperm(_w0, (1, 0, 2, 3)))
+                                    exp_img7.append(
+                                        _lopw(_bperm(_w0, (2, 3, 1, 0)),
+                                              [255, 0, 255, 255])
+                                        if is_mrtlop else
+                                        _bperm(_w0, (2, 3, 1, 0)))
+                                    exp_img8.append(
+                                        _lopw(_bperm(_w0, (3, 0, 1, 2)),
+                                              [255, 255, 255, 255])
+                                        if is_mrtlop else
+                                        _bperm(_w0, (3, 0, 1, 2)))
                 else:
                     exp_img.append(_u8pack(_v))
         elif is_dne or is_dnever:
@@ -14528,6 +14791,110 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         note('triangle coverage %d/4096 px; art decimated 4x2'
              % len(cov))
 
+        def _att8(ik, vk, mk, rk, rmk):
+            # one colour-attachment resource quintuple -> the 7
+            # creation/bind commands, mirroring the img4/view4/imem4/
+            # rb5 block exactly (format 37 RGBA8, usage 0x11, aspectMask=1,
+            # imem 0x10000/type0, rb 0x4000/type1).  Used for mrt8 att4..7.
+            return [
+                ('vkAllocateMemory', dict(
+                    device=X['dev'],
+                    pAllocateInfo=st('VkMemoryAllocateInfo',
+                                     allocationSize=0x10000,
+                                     memoryTypeIndex=0, pNext=[]),
+                    pMemory=X[mk])),
+                ('vkCreateImage', dict(
+                    device=X['dev'],
+                    pCreateInfo=st('VkImageCreateInfo',
+                        flags=0, imageType=1, format=37,
+                        extent=st('VkExtent3D', width=CW, height=CH,
+                                  depth=1),
+                        mipLevels=1, arrayLayers=1, samples=1, tiling=0,
+                        usage=0x11, sharingMode=0, queueFamilyIndexCount=0,
+                        pQueueFamilyIndices=[], initialLayout=0),
+                    pImage=X[ik])),
+                ('vkBindImageMemory', dict(
+                    device=X['dev'], image=X[ik], memory=X[mk],
+                    memoryOffset=0)),
+                ('vkCreateImageView', dict(
+                    device=X['dev'],
+                    pCreateInfo=st('VkImageViewCreateInfo',
+                        flags=0, image=X[ik], viewType=1, format=37,
+                        components=st('VkComponentMapping',
+                                      r=0, g=0, b=0, a=0),
+                        subresourceRange=st('VkImageSubresourceRange',
+                                            aspectMask=1, baseMipLevel=0,
+                                            levelCount=1, baseArrayLayer=0,
+                                            layerCount=1)),
+                    pView=X[vk])),
+                ('vkAllocateMemory', dict(
+                    device=X['dev'],
+                    pAllocateInfo=st('VkMemoryAllocateInfo',
+                                     allocationSize=0x4000,
+                                     memoryTypeIndex=1, pNext=[]),
+                    pMemory=X[rmk])),
+                ('vkCreateBuffer', dict(
+                    device=X['dev'],
+                    pCreateInfo=st('VkBufferCreateInfo', size=0x4000,
+                                   usage=0x2, sharingMode=0,
+                                   queueFamilyIndexCount=0,
+                                   pQueueFamilyIndices=[]),
+                    pBuffer=X[rk])),
+                ('vkBindBufferMemory', dict(
+                    device=X['dev'], buffer=X[rk], memory=X[rmk],
+                    memoryOffset=0)),
+            ]
+
+        def _att8_rb(ik, rk):
+            # one attachment's readback: colour-aspect image barrier +
+            # CopyImageToBuffer into its rb buffer — same shape as the
+            # img2->rb3 / img4->rb5 blocks.  Used for mrt8 att4..7.
+            return [
+                ('vkCmdPipelineBarrier', dict(
+                    commandBuffer=X['cb'],
+                    srcStageMask=0x400, dstStageMask=0x1000,
+                    dependencyFlags=0,
+                    memoryBarrierCount=0, pMemoryBarriers=[],
+                    bufferMemoryBarrierCount=0, pBufferMemoryBarriers=[],
+                    imageMemoryBarrierCount=1,
+                    pImageMemoryBarriers=[st('VkImageMemoryBarrier',
+                        srcAccessMask=0x400, dstAccessMask=0x1000,
+                        oldLayout=5, newLayout=5,
+                        srcQueueFamilyIndex=0xFFFFFFFF,
+                        dstQueueFamilyIndex=0xFFFFFFFF,
+                        image=X[ik],
+                        subresourceRange=st('VkImageSubresourceRange',
+                                            aspectMask=1, baseMipLevel=0,
+                                            levelCount=1, baseArrayLayer=0,
+                                            layerCount=1))])),
+                ('vkCmdCopyImageToBuffer', dict(
+                    commandBuffer=X['cb'],
+                    srcImage=X[ik], srcImageLayout=5,
+                    dstBuffer=X[rk], regionCount=1,
+                    pRegions=[st('VkBufferImageCopy',
+                        bufferOffset=0, bufferRowLength=0,
+                        bufferImageHeight=0,
+                        imageSubresource=st('VkImageSubresourceLayers',
+                                            aspectMask=1, mipLevel=0,
+                                            baseArrayLayer=0, layerCount=1),
+                        imageOffset=st('VkOffset3D', x=0, y=0, z=0),
+                        imageExtent=st('VkExtent3D', width=CW, height=CH,
+                                       depth=1))])),
+            ]
+
+        def _att8_td(rk, rmk, vk, ik, mk):
+            # one attachment's teardown: rb buffer+mem, image view,
+            # image+imem — same shape/order as the rb5/view4/img4 block.
+            # Used for mrt8 att4..7.
+            return [
+                ('vkDestroyBuffer', dict(device=X['dev'], buffer=X[rk])),
+                ('vkFreeMemory', dict(device=X['dev'], memory=X[rmk])),
+                ('vkDestroyImageView', dict(device=X['dev'],
+                                            imageView=X[vk])),
+                ('vkDestroyImage', dict(device=X['dev'], image=X[ik])),
+                ('vkFreeMemory', dict(device=X['dev'], memory=X[mk])),
+            ]
+
         seg_a1 = [
             ('vkCreateInstance', dict(pInstance=X['inst'])),
             ('vkEnumeratePhysicalDevices', dict(
@@ -14803,7 +15170,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             ('vkBindBufferMemory', dict(
                 device=X['dev'], buffer=X['rb5'], memory=X['rb5mem'],
                 memoryOffset=0)),
-        ] if is_mrt4 else []) + [
+        ] if is_mrt4 else []) + (
+            _att8('img5', 'view5', 'imem5', 'rb6', 'rb6mem') +
+            _att8('img6', 'view6', 'imem6', 'rb7', 'rb7mem') +
+            _att8('img7', 'view7', 'imem7', 'rb8', 'rb8mem') +
+            _att8('img8', 'view8', 'imem8', 'rb9', 'rb9mem')
+            if is_mrt8 else []) + [
             ('vkCreateRenderPass', dict(
                 device=X['dev'],
                 pCreateInfo=st('VkRenderPassCreateInfo',
@@ -14839,6 +15211,27 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         stencilLoadOp=2, stencilStoreOp=2,
                         initialLayout=0, finalLayout=5)]
                         if is_mrt4 else []) + ([
+                        st('VkAttachmentDescription',
+                        flags=0, format=37, samples=1,
+                        loadOp=1, storeOp=0,
+                        stencilLoadOp=2, stencilStoreOp=2,
+                        initialLayout=0, finalLayout=5),
+                        st('VkAttachmentDescription',
+                        flags=0, format=37, samples=1,
+                        loadOp=1, storeOp=0,
+                        stencilLoadOp=2, stencilStoreOp=2,
+                        initialLayout=0, finalLayout=5),
+                        st('VkAttachmentDescription',
+                        flags=0, format=37, samples=1,
+                        loadOp=1, storeOp=0,
+                        stencilLoadOp=2, stencilStoreOp=2,
+                        initialLayout=0, finalLayout=5),
+                        st('VkAttachmentDescription',
+                        flags=0, format=37, samples=1,
+                        loadOp=1, storeOp=0,
+                        stencilLoadOp=2, stencilStoreOp=2,
+                        initialLayout=0, finalLayout=5)]
+                        if is_mrt8 else []) + ([
                         # depth (126) or depth-stencil D24S8 (129): the
                         # stencil load/store ops are only meaningful on the
                         # packed format — CLEAR the stencil plane and STORE
@@ -14866,7 +15259,16 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                             if is_mrt3 else []) + ([
                             st('VkAttachmentReference',
                                attachment=3, layout=5)]
-                            if is_mrt4 else []),
+                            if is_mrt4 else []) + ([
+                            st('VkAttachmentReference',
+                               attachment=4, layout=5),
+                            st('VkAttachmentReference',
+                               attachment=5, layout=5),
+                            st('VkAttachmentReference',
+                               attachment=6, layout=5),
+                            st('VkAttachmentReference',
+                               attachment=7, layout=5)]
+                            if is_mrt8 else []),
                         pResolveAttachments=[],
                         pDepthStencilAttachment=(
                             st('VkAttachmentReference',
@@ -14905,6 +15307,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                                 if is_mrt3 else []) + (
                                                 [X['view4']]
                                                 if is_mrt4 else []) + (
+                                                [X['view5'], X['view6'],
+                                                 X['view7'], X['view8']]
+                                                if is_mrt8 else []) + (
                                                 [X['dview']]
                                                 if is_ds else []),
                     width=CW, height=CH, layers=1),
@@ -14941,7 +15346,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     setLayoutCount=1 if (is_fsubo or is_tex) else 0,
                     pSetLayouts=[X['dsl']] if (is_fsubo or is_tex)
                     else [],
-                    pushConstantRangeCount=0, pPushConstantRanges=[]),
+                    pushConstantRangeCount=(1 if is_gpush else 0),
+                    pPushConstantRanges=(
+                        [st('VkPushConstantRange',
+                            stageFlags=0x11, offset=0, size=16)]
+                        if is_gpush else [])),
                 pPipelineLayout=X['pl'])),
             ('vkCreateGraphicsPipelines', dict(
                 device=X['dev'], pipelineCache=0, createInfoCount=1,
@@ -14998,7 +15407,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                binding=4 if is_wide else 0,
                                format=103 if is_tex else
                                37 if is_vattr8u else
+                               41 if is_vattr8uint else
+                               42 if is_vattr8sint else
                                91 if is_vattr16u else
+                               95 if is_vattr16uint else
+                               96 if is_vattr16sint else
+                               107 if is_vattr32uint else
+                               108 if is_vattr32sint else
                                38 if is_vattr8sn else
                                92 if is_vattr16sn else
                                97 if is_vattr16f else
@@ -15528,6 +15943,23 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 base_m4 = create_blob_mem(rid, sz, mem)
                 assert base_m4 is not None, 'mrt4 memory blob refused'
                 map_blob(rid)
+        if is_mrt8:
+            # mrt8 attachments 4..7 image+readback memory.  Free RES_BLOB0
+            # slots (clear of +8/+9 ms/dl, +16 RES_EVICT, +17 RES_F,
+            # +24 RES_FILL): att4 +14/+15, att5 +18/+19, att6 +20/+21,
+            # att7 +22/+23.
+            for rid, mem, sz in (
+                    (RES_BLOB0 + 14, X['imem5'], 0x10000),
+                    (RES_BLOB0 + 15, X['rb6mem'], 0x4000),
+                    (RES_BLOB0 + 18, X['imem6'], 0x10000),
+                    (RES_BLOB0 + 19, X['rb7mem'], 0x4000),
+                    (RES_BLOB0 + 20, X['imem7'], 0x10000),
+                    (RES_BLOB0 + 21, X['rb8mem'], 0x4000),
+                    (RES_BLOB0 + 22, X['imem8'], 0x10000),
+                    (RES_BLOB0 + 23, X['rb9mem'], 0x4000)):
+                base_m8 = create_blob_mem(rid, sz, mem)
+                assert base_m8 is not None, 'mrt8 memory blob refused'
+                map_blob(rid)
         if is_tex:
             # 1x1 RGBA8 texel at tmem+0 — the sampled colour (tri_w)
             base_t = create_blob_mem(RES_BLOB0 + 3, 0x1000, X['tmem'])
@@ -15647,6 +16079,17 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 commandBuffer=cbdraw, pipelineBindPoint=0,
                 pipeline=X['gp'])),
         ] + ([
+            # gpush: stage the push_constant block the fs_push FS reads —
+            # vec4 pc = (0.1,0.2,0.3,1.0); stageFlags 0x11 covers
+            # VERTEX|FRAGMENT so the value is visible to the FS stage.
+            # bindings._push validates offset/size/stage coverage and
+            # stages per-(stage,word) into operation.push.
+            ('vkCmdPushConstants', dict(
+                commandBuffer=cbdraw, layout=X['pl'],
+                stageFlags=0x11, offset=0, size=16,
+                pValues=b''.join(struct.pack('<f', w)
+                                 for w in (0.1, 0.2, 0.3, 1.0)))),
+        ] if is_gpush else []) + ([
             ('vkCmdBindDescriptorSets', dict(
                 commandBuffer=cbdraw, pipelineBindPoint=0,
                 layout=X['pl'], firstSet=0, descriptorSetCount=1,
@@ -15744,6 +16187,29 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                     uint32=[f32b(c) for c in
                                             (1.0, 1.0, 0.0, 1.0)]))]
                         if is_mrt4 else []) + ([
+                        # mrt8 attachments 4..7 clears: four further
+                        # DISTINCT (r,g,b,1) tuples -> distinct
+                        # clearv_q[att*4] UNORM8 words so each of att4-7's
+                        # per-attachment clear indexing stays observable:
+                        #   att4 (1,0,0,1)->0xFF0000FF  att5 (0,1,1,1)->0xFFFFFF00
+                        #   att6 (1,0,1,1)->0xFFFF00FF  att7 (1,1,1,1)->0xFFFFFFFF
+                        st('VkClearValue',
+                           color=st('VkClearColorValue',
+                                    uint32=[f32b(c) for c in
+                                            (1.0, 0.0, 0.0, 1.0)])),
+                        st('VkClearValue',
+                           color=st('VkClearColorValue',
+                                    uint32=[f32b(c) for c in
+                                            (0.0, 1.0, 1.0, 1.0)])),
+                        st('VkClearValue',
+                           color=st('VkClearColorValue',
+                                    uint32=[f32b(c) for c in
+                                            (1.0, 0.0, 1.0, 1.0)])),
+                        st('VkClearValue',
+                           color=st('VkClearColorValue',
+                                    uint32=[f32b(c) for c in
+                                            (1.0, 1.0, 1.0, 1.0)]))]
+                        if is_mrt8 else []) + ([
                         # the wire union has no depthStencil arm — cmdexec
                         # reads clearv_q[att*4] as the depth value, so the
                         # bits ride the colour uint32[0] slot (0.5f write,
@@ -15893,7 +16359,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     imageOffset=st('VkOffset3D', x=0, y=0, z=0),
                     imageExtent=st('VkExtent3D', width=CW, height=CH,
                                    depth=1))])),
-        ] if is_mrt4 else []) + ([
+        ] if is_mrt4 else []) + (
+            _att8_rb('img5', 'rb6') + _att8_rb('img6', 'rb7') +
+            _att8_rb('img7', 'rb8') + _att8_rb('img8', 'rb9')
+            if is_mrt8 else []) + ([
             ('vkCmdPipelineBarrier', dict(
                 commandBuffer=X['cb'],
                 srcStageMask=0x400, dstStageMask=0x1000,
@@ -16070,6 +16539,23 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     exp_img4[j], exp_img4[j], 0)
             note('mrt4 att3 readback gate: %d words'
                  % (CW * CH,))
+        if is_mrt8:
+            # mrt8 attachments 4..7 readback gates: rb6..rb9 hold colour
+            # attachments img5..img8 — exp_img5..8 are the fs_mrt8 o4..o7
+            # channel permutations of exp_img.  Blob slots are the rbmem
+            # ids bound above (+15/+19/+21/+23).
+            for _att, _rb, _ex, _sl in (
+                    (4, X['rb6'], exp_img5, 15),
+                    (5, X['rb7'], exp_img6, 19),
+                    (6, X['rb8'], exp_img7, 21),
+                    (7, X['rb9'], exp_img8, 23)):
+                _rst, _rs, _rbe = fm.resolve(_rb, KIND['VkBuffer'])
+                _off = tm.blobs[RES_BLOB0 + _sl]['base_w'] << 2
+                W(TP_CHECK, CK_APR, CW * CH, _off)
+                for j in range(CW * CH):
+                    rec(EK_APRCHK, _off + 4 * j, _ex[j], _ex[j], 0)
+                note('mrt8 att%d readback gate: %d words'
+                     % (_att, CW * CH))
         if is_ds:
             # depth/depth-stencil readback gate: rb2 holds the attachment
             # copied with aspectMask=2 — D32_SFLOAT raw f32 words, the
@@ -16162,7 +16648,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                         imageView=X['view4'])),
             ('vkDestroyImage', dict(device=X['dev'], image=X['img4'])),
             ('vkFreeMemory', dict(device=X['dev'], memory=X['imem4'])),
-        ] if is_mrt4 else []) + [
+        ] if is_mrt4 else []) + (
+            _att8_td('rb6', 'rb6mem', 'view5', 'img5', 'imem5') +
+            _att8_td('rb7', 'rb7mem', 'view6', 'img6', 'imem6') +
+            _att8_td('rb8', 'rb8mem', 'view7', 'img7', 'imem7') +
+            _att8_td('rb9', 'rb9mem', 'view8', 'img8', 'imem8')
+            if is_mrt8 else []) + [
             ('vkDestroyCommandPool', dict(device=X['dev'],
                                           commandPool=X['cp'])),
             ('vkDestroyDevice', dict(device=X['dev'])),

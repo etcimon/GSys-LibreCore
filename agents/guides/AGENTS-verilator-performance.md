@@ -1916,6 +1916,51 @@ applied. For true per-instruction counts, run `perf record` on the builder
 against the same ELF (the archive lacks `.gcno`, so the `.gcda` set is
 unusable without the instrumented objects).
 
+## 14. Dynamic-instruction A/B: case-table measured −23% retired insns (2026-11-20)
+
+`verif/regress/remote/perf_ab.sh` runs `perf stat -e
+instructions,cycles,branches,branch-misses` on the hyp8 mc model
+(`g6lc64_hyp8_mc`, `--threads 4`), same `fw_payload.elf` +
+`+max-cycles=40000 +tohost_addr=0xdeadbeef`, alternating baseline-PGO vs
+dev-noPGO binaries. Retired instructions are the PGO-independent dynamic-work
+metric — profile data changes layout, not the instruction stream — so this
+isolates the §12 codegen delta from the earlier wall-clock confound (dev was
+built `HYP8_BUILD_PGO=0` while the baseline carried simulation PGO).
+
+Measured (2 reps each; `instructions:u` counts all worker threads):
+
+| metric | baseline-PGO | dev (case-table, no PGO) | delta |
+|---|---|---|---|
+| instructions | 1.278e12 avg | 0.979e12 avg | **−23.4%** |
+| host cycles | 6.36e12 | 3.81e12 | −40% |
+| branches | 222.6e9 | 119.1e9 | **−46.5%** |
+| branch-misses | 3.468e9 | 3.370e9 | −2.8% |
+| branch-miss rate | 1.56% | 2.87% | +1.3pp |
+
+Per-pair deltas (B1/D1 = −27.7%, B2/D2 = −19.0%) bracket rep-to-rep noise
+(~2% on baseline, ~10% on dev — MT task partitioning is not perfectly
+deterministic under load). The effect is far above noise: **24 tabled cases
+removed ~300 billion retired instructions per 40K-cycle run (~7.5M per
+simulated cycle, ~23% of all dynamic work)**. The decode trees they replaced
+sat in per-cycle instruction-decode paths replicated across 8 harts.
+
+Mechanism check: dev host IPC rose 0.20→0.30 — table loads shortened the
+dependency chains that branch trees serialized. Branch-miss *rate* doubled
+(1.56%→2.87%) but total misses fell slightly; the compare-tree branches were
+well-predicted, so prediction loss is small next to the retired-work win.
+
+Consequences:
+
+- `.text` size and generated-line count were poor proxies — the win came
+  from removing dynamic work on hot decode paths, exactly the §13 thesis.
+- The transform is generic: any constant-result `case` (enum→field decoders,
+  latency/pipe lookups) benefits; it is not hyp8-specific.
+- Wall-clock verdict pending the dev+PGO rebuild (`dev_pgo_rebuild.sh`,
+  phase-2 `-fprofile-use` done 2026-11-20) — `ab_timing.sh` A/B in flight.
+- `-fprio-oracc` (§12.1) verilated on the same model: `Priority encoders
+  lowered = 4` → 140 `VL_CTZ_W`/`VL_ONEHOT0_W` sites, all in DepSet
+  `h24430560` (the rename/dispatch region). No-PGO build + perf A/B queued.
+
 ## APU Compiler/Simulator PGO And Bounded Unroll
 
 APU RTL leaves now provision the `tools/verilator` fork through

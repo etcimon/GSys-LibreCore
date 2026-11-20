@@ -73,8 +73,8 @@ module tb_g6lc_apu_cmdexec;
   int    m_fill_fault_at = -1;  // fault the Nth FILL attempt
   logic [2:0]         dslot, odslot;
   apu_sh_desc_t       ddesc, oddesc;
-  logic [5:0]         dpushn, odpushn;
-  logic [1023:0]      dpush, odpush;
+  logic [6:0]         dpushn, odpushn;
+  logic [2047:0]      dpush, odpush;
   // §12.3 3d-d: relocation hold — cmdexec must stop dequeuing new
   // submissions while high and report true drain on idle_o
   logic               hold = 1'b0;
@@ -1784,6 +1784,53 @@ module tb_g6lc_apu_cmdexec;
       submit(5'd0, 1, cbd[18], cb_h, 32'h0, 32'h0);
       wait_fence(0, 8000);
       check("qbegidx lost", flost[0] === 1'b1);
+      cases++;
+    end
+
+    // ---- case 12b: 256 B push-constant producer walk -------------------
+    // VK_CMD_PUSH_CONSTANTS_EXT with imm[1]=0 (byte offset) and
+    // imm[2]=256 (64 words) exercises the widened 64-word push shadow.
+    // The recorded payload arena leads with a 2-word {offset,size}
+    // header (decoder emits both kept U32 scalars then the pValues
+    // blob; vn_graphics_bindings._push expects payload_words==2+size/4
+    // and header==[offset,size]), so the walk streams 66 words: arena
+    // [0]=hdr-offset, [1]=hdr-size (both ignored by the executor, which
+    // keys off rec.imm[1]/imm[2]), [2..65]=the 64 values merged into
+    // push_sh_q[0..63].  push_max_q must reach 64 -> push_n_o==64 and
+    // push_o[32*i+:32] == pay_magic+(i+2).  Producer-side proof for
+    // the 128->256 B migration; the consumer (shwave push_q) is covered
+    // bit-exact by the pushwide vector.
+    tb_drv = 1'b1;
+    cr_op(APU_CMDREC_OP_BEGIN, cbd[18], 0, '0);
+    begin
+      apu_cmdrec_rec_t pr = mkrec(
+          APU_VN_TYPE_VK_CMD_PUSH_CONSTANTS_EXT, 0, 0, 0);
+      pr.imm[0] = 32'hCD;   // stageFlags
+      pr.imm[1] = 32'd0;    // byte offset into the push block
+      pr.imm[2] = 32'd256;  // size bytes = 64 words (full 256 B)
+      pay_magic = 32'hBEEF_0000;
+      cr_op(APU_CMDREC_OP_APPEND, cbd[18], 0, pr, 16'd66);
+      pay_magic = 32'hCAFE_0000;
+    end
+    cr_op(APU_CMDREC_OP_APPEND, cbd[18], 0,
+          mkrec(APU_VN_TYPE_VK_CMD_RESOLVE_IMAGE_EXT, 0, 0, 32'hC));
+    cr_op(APU_CMDREC_OP_END, cbd[18], 0, '0);
+    tb_drv = 1'b0;
+    begin
+      int w0 = work_i;
+      fclr[0] = 1'b1; @(negedge clk); fclr[0] = 1'b0; @(negedge clk);
+      submit(5'd0, 1, cbd[18], cb_h, 32'h0, 32'h0);
+      wait_fence(0, 8000);
+      check("push256 work", work_i == w0 + 1);
+      check("push256 no lost", flost[0] === 1'b0);
+      check("push256 n", dpushn === 7'd64);
+      begin
+        automatic logic pok = 1'b1;
+        for (int i = 0; i < 64; i++)
+          if (dpush[32*i +: 32] !== (32'hBEEF_0000 + 32'(i) + 32'd2))
+            pok = 1'b0;
+        check("push256 data", pok);
+      end
       cases++;
     end
 

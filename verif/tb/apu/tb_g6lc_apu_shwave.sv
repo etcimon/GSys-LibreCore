@@ -128,8 +128,8 @@ module tb_g6lc_apu_shwave
   logic [8*32-1:0] work_imm;
   logic [2:0]   disp_slot;
   apu_sh_desc_t desc;
-  logic [5:0]   push_n;
-  logic [1023:0] push;
+  logic [6:0]   push_n;
+  logic [2047:0] push;
   logic         busy, done; apu_sh_done_t done_pl;
   logic         mem_re, mem_we;
   logic [63:0]  mem_addr, mem_wdata;
@@ -1036,9 +1036,9 @@ module tb_g6lc_apu_shwave
       end
       base = q;
     end
-    push_n = np[5:0];
+    push_n = np[6:0];
     push = '0;
-    for (int i = 0; i < np && i < 32; i++)
+    for (int i = 0; i < np && i < 64; i++)
       push[i*32 +: 32] = wbuf[base + i];
     base += np;
     // dynamic-offset section: n entries {set, ord, off}
@@ -1413,10 +1413,10 @@ module tb_g6lc_apu_shwave
   // carry the base offset (flags bit4 header extension)
   string fault_names [3] = '{"fn_deep", "zerodim", "dispbase"};
 
-  string names [96] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
+  string names [100] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
       "builtin_lid", "builtin_lindex", "compare", "composite",
       "intmix", "localsize32", "localsize64", "math450", "oob",
-      "pushscale", "vec4arith",
+      "pushscale", "pushwide", "vec4arith",
       // §7c 4b corpus
       "ifelse", "loopfor", "loopwhile", "switchcase", "shortcircuit",
       "earlyret", "phiflow", "barrier_prefix", "barrier_reduce",
@@ -1440,6 +1440,13 @@ module tb_g6lc_apu_shwave
       // T3+: r32f (device fmt 7) imageLoad + imageStore — single-channel
       // float storage-image path
       "imgcopy_r32f",
+      // StorageImageExtendedFormats: rg32f (device fmt 8,
+      // R32G32_SFLOAT) imageLoad + imageStore — the first extended
+      // storage format; glslang emits OpCapability 49 for it
+      "imgcopy_rg32f",
+      // rgba16f storage image + VkComponentMapping swz=0x4CD — probes
+      // whether OpImageRead/OpImageWrite apply the view swizzle
+      "imgcopy_swz",
       // row-major SSBO matrices (load/column/element/store)
       "ssbo_rowmajor",
       // copy_ssbo_* probe: NumWorkGroups*WorkGroupSize + ArrayLength
@@ -1508,6 +1515,10 @@ module tb_g6lc_apu_shwave
       // imageStore+imageLoad race-free per-lane texels.
       // base seeds only — no mut/bad/opt arm yet
       "texbuf_arr_st",
+      // §12.3 texel-buffer query: OpImageQuerySize(104) on Dim=Buffer —
+      // textureSize (kind4 textureBuffer) + imageSize (kind5 imageBuffer)
+      // return the single texel count as scalar int.  base/opt/bad arms.
+      "texbuf_query",
       // G3a-i: function calls, atomics, integer/bit ops, pack/unpack
       // + Modf/Frexp/Ldexp, dynamic vector ops
       "fn_call", "atomic_hist", "atomic_cas", "bitops", "packops",
@@ -1587,10 +1598,22 @@ module tb_g6lc_apu_shwave
           names[i] == "cl_mix" || names[i] == "agg_arr" ||
           names[i] == "agg_local" || names[i] == "agg_ins" ||
           names[i] == "agg_con" || names[i] == "agg_sel" ||
+          // pushwide mut arm ENABLED for the constant-access-chain-index
+          // probe: pushwide_mut_0.hex/.exp generated; verifies whether
+          // shwave resolves a bare OpConstant index operand (elem -> 0).
+          // (was skip-listed under a disproven lane-index hypothesis)
           // texel-buffer: no mut arm emitted (oracle is model-only)
           names[i] == "texbuf" || names[i] == "texbuf_img" ||
           names[i] == "texbuf_wr" || names[i] == "texbuf_atom" ||
-          names[i] == "imgarr" || names[i] == "imgarr_st" || names[i] == "imgarr_smp" || names[i] == "texbuf_arr" || names[i] == "texbuf_arr_st")
+          names[i] == "imgarr" || names[i] == "imgarr_st" || names[i] == "imgarr_smp" || names[i] == "texbuf_arr" || names[i] == "texbuf_arr_st" ||
+          // image copy/fetch rgba32ui + rgba16f + rg32f + swz: the
+          // selected flippable op is an SSBO spill offset (i*4+c /
+          // i*2+1); IAdd->ISub sign-flip lands lane i+1's component on
+          // lane i's slot -> undefined cross-lane store order
+          // (sequential model vs SIMD wave).
+          names[i] == "imgcopy_rgba32ui" || names[i] == "imgcopy_rgba16f" ||
+          names[i] == "imgcopy_rg32f" || names[i] == "imgcopy_swz" ||
+          names[i] == "texfetch_rgba32ui" || names[i] == "texbuf_query")
         continue;
       cases++;
       run_vec(names[i], {names[i], "_mut_0"});
@@ -1600,7 +1623,7 @@ module tb_g6lc_apu_shwave
       if (names[i] == "ssbo_sarr" || names[i] == "ssbo_cap" ||
           names[i] == "texbuf" || names[i] == "texbuf_img" ||
           names[i] == "texbuf_wr" || names[i] == "texbuf_atom" ||
-          names[i] == "imgarr" || names[i] == "imgarr_st" || names[i] == "imgarr_smp" || names[i] == "texbuf_arr" || names[i] == "texbuf_arr_st") continue;
+          names[i] == "imgarr" || names[i] == "imgarr_st" || names[i] == "imgarr_smp" || names[i] == "texbuf_arr" || names[i] == "texbuf_arr_st" || names[i] == "texbuf_query") continue;
       cases++;
       run_vec(names[i], {names[i], "_bad_0"});
     end

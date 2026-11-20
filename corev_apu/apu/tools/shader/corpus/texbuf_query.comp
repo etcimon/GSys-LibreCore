@@ -1,0 +1,19 @@
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+// §12.3 texel-buffer — OpImageQuerySize(104) on Dim=Buffer returns the
+// single texel count (scalar int) for both UNIFORM_TEXEL_BUFFER(4,
+// textureBuffer) and STORAGE_TEXEL_BUFFER(5, imageBuffer).  The two
+// bindings carry different ntex so a wrong-record/wrong-kind read is
+// observable; the query result is uniform so every lane writes the same
+// {texsize,imgsize,0,0}.
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0) uniform textureBuffer tex;
+layout(set = 0, binding = 1, rgba8) uniform imageBuffer img;
+layout(set = 0, binding = 2) buffer Out { uvec4 o[]; } ob;
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    ob.o[i] = uvec4(uint(textureSize(tex)),
+                    uint(imageSize(img)),
+                    0u, 0u);
+}

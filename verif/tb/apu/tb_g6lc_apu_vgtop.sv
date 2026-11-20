@@ -83,7 +83,10 @@ module tb_g6lc_apu_vgtop
     return 0;
   endfunction
   localparam int unsigned TAPEW   = 32'h100000;
-  localparam int unsigned EXPW    = 32'h40000;
+  // 8-attachment MRT sessions emit ~266K expected words (8 readback
+  // gates x CW*CH); 0x80000 leaves headroom over the 0x40000 that the
+  // <=4-attachment sessions needed.
+  localparam int unsigned EXPW    = 32'h80000;
   localparam int unsigned MAXCYC  = 300_000_000;
 
   logic clk = 0, rst_ni = 0;
@@ -807,6 +810,18 @@ module tb_g6lc_apu_vgtop
                 automatic logic [31:0] got =
                     i_mem.apm[apix(((a1 >> 2) + i))];
                 automatic int unsigned u;
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+                if (a1 == 32'h7f000 && i == 0) begin
+                  $display("[PROBE] imem5=%08x imem6=%08x imem7=%08x imem8=%08x rb7=%08x t=%0t",
+                    i_mem.apm[apix(32'h5b000 >> 2)],
+                    i_mem.apm[apix(32'h6f000 >> 2)],
+                    i_mem.apm[apix(32'h83000 >> 2)],
+                    i_mem.apm[apix(32'h97000 >> 2)],
+                    i_mem.apm[apix(32'h7f000 >> 2)], $time);
+                end
+`endif
+// pragma translate_on
                 check(rec_kind() == 10, "EK_APRCHK kind");
                 check(expm[ep + 1] == a1 + 4 * i,
                       "EK_APRCHK offset");

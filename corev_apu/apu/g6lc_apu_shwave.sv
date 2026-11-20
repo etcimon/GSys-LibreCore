@@ -206,8 +206,8 @@ module g6lc_apu_shwave
   input  logic         disp_i,
   input  apu_sh_dispatch_t disp_pl_i,
   input  apu_sh_desc_t desc_i,         // §12.3 F5 descriptor sideband
-  input  logic [5:0]   push_n_i,       // valid push words (0..32)
-  input  logic [1023:0] push_i,        // push-constant block
+  input  logic [6:0]   push_n_i,       // valid push words (0..64)
+  input  logic [2047:0] push_i,        // push-constant block (256 B)
   output logic         busy_o,
   output logic         done_o,
   output apu_sh_done_t done_pl_o,
@@ -517,8 +517,8 @@ module g6lc_apu_shwave
     // F5: desc_i is NOT latched — cmdexec holds desc_o stable from
     // dispatch until work_done (StDsDone blocks on work_done_i), so a
     // second ~5.3 kbit copy here would be dead area
-    logic [31:0]  push_q [32];
-    logic [5:0]   push_n_q;
+    logic [31:0]  push_q [64];
+    logic [6:0]   push_n_q;
     // F5 descriptor-record fetch: the LSU (W_LS0) and OpArrayLength
     // (W_AL0) enter W_DS0 with the key latched here; the subroutine
     // returns to dret_q with ls_bind/ls_bsz/ls_bok filled.
@@ -1385,8 +1385,14 @@ module g6lc_apu_shwave
         // f_bufview_rec so the pointer's absolute texel address is
         // base + index*bpp; uniform texel(4) stays rejected (read-only)
         16'd60:               f_tx_kind = k == 8'd3 || k == 8'd5;
+        // §12.3 texel-buffer: OpImageQuerySize/Levels/SizeLod are valid on
+        // every image kind incl. texel buffers (4/5).  f_bufview_rec has
+        // already folded a kind4/5 record to a Wx1 image, so QuerySize
+        // emits {texcount,1} — the scalar Dim=Buffer result type keeps
+        // ncomp_q=1 and wbm_q commits texcount only; QueryLevels returns
+        // the folded mips=1.  Kinds 6+ are non-image and stay refused.
         16'd103, 16'd104, 16'd106:
-                              f_tx_kind = k <= 8'd3;
+                              f_tx_kind = k <= 8'd5;
         default:              f_tx_kind = 1'b0;
       endcase
     endfunction
@@ -1612,6 +1618,15 @@ module g6lc_apu_shwave
         f_swz = (w == 3'd0) ? 3'(3 + c) : w;
       end
     endfunction
+    // VkComponentMapping applies ONLY to sampled images —
+    // COMBINED_IMAGE_SAMPLER(1)/SAMPLED_IMAGE(2).  Storage images (3)
+    // and texel buffers (4/5) take no automatic swizzle: the record may
+    // carry a non-identity swz word yet the access must ignore it
+    // (Vulkan spec + lavapipe; imgcopy_swz divergence probe).  Gating
+    // the field to zero makes f_swz return the identity select.
+    wire [11:0] tx_swz_eff = (tx_rec_q[71:64] == 8'd1 ||
+                             tx_rec_q[71:64] == 8'd2)
+                            ? tx_rec_q[155:144] : 12'h0;
     // unit operand source: {cmode[1:0], src[4:0]} → 32-bit operand
     localparam logic [4:0] S_V0 = 0, S_V1 = 1, S_V2 = 2, S_V3 = 3,
                          S_T0 = 4, S_T1 = 5, S_T2 = 6,
@@ -3974,7 +3989,7 @@ module g6lc_apu_shwave
         tx_wbe_q <= '0;
         tx_samp_q <= '0; tx_isflt_q <= '0; tx_isint_q <= '0;
         tx_issr_q <= '0; tx_isf16_q <= '0; tx_nch_q <= '0;
-        for (int i = 0; i < 32; i++) push_q[i] <= '0;
+        for (int i = 0; i < 64; i++) push_q[i] <= '0;
         eoff_q <= '0; escratch_q <= '0; eslab_q <= '0;
         lx_q <= '0; ly_q <= '0; lz_q <= '0; ninit_q <= '0;
         wgx_q <= '0; wgy_q <= '0; wgz_q <= '0;
@@ -4132,7 +4147,7 @@ module g6lc_apu_shwave
             dc_vic_q <= '0;
             txc_v_q <= '0;
             txc_vic_q <= '0;
-            for (int i = 0; i < 32; i++)
+            for (int i = 0; i < 64; i++)
               push_q[i] <= push_i[i*32 +: 32];
             wgx_q <= '0; wgy_q <= '0; wgz_q <= '0;
             wbx_q <= disp_pl_i.gbx; wby_q <= disp_pl_i.gby;
@@ -6277,13 +6292,13 @@ module g6lc_apu_shwave
                   f_bi(ls_tg_w[11:4], ls_lane_q, 3'(ls_o32_w >> 2));
               ls_adv();
             end else if (ls_tg_w[3:0] == APU_SH_SC_PUSHCONST) begin
-              if ((ls_o32_w >> 2) >= {26'h0, push_n_q}) begin
+              if ((ls_o32_w >> 2) >= {25'h0, push_n_q}) begin
                 robust_q <= robust_q + 1;
                 if (!ls_store_q)
                   wb_q[ls_lane_q[2:0]][ls_wc] <= '0;
               end else if (!ls_store_q) begin
                 wb_q[ls_lane_q[2:0]][ls_wc] <=
-                  push_q[ls_o32_w[31:2] > 31 ? 5'd31 : ls_o32_w[6:2]];
+                  push_q[ls_o32_w[31:2] > 63 ? 6'd63 : ls_o32_w[7:2]];
               end
               ls_adv();
             end else if (ls_tg_w[3:0] == APU_SH_SC_IMAGE) begin
@@ -7455,7 +7470,7 @@ module g6lc_apu_shwave
               // component operand picks the texel channel through the
               // view swizzle
               logic [2:0] s;
-              s = f_swz(tx_rec_q[155:144],
+              s = f_swz(tx_swz_eff,
                         2'(va_q[2][ls_lane_q[2:0]][0]));
               if (tx_dref_q) begin
                 wb_q[ls_lane_q[2:0]][tx_gi_q[1:0]] <= tx_fc_q[0];
@@ -7486,7 +7501,7 @@ module g6lc_apu_shwave
               // single-point raw result: swizzle into wb directly
               for (int c = 0; c < VEC; c++) begin
                 logic [2:0] s;
-                s = f_swz(tx_rec_q[155:144], 2'(c));
+                s = f_swz(tx_swz_eff, 2'(c));
                 wb_q[ls_lane_q[2:0]][c] <=
                   s == 3'd1 ? 32'h0 :
                   s == 3'd2 ? 32'd1 : tx_fc_q[s - 3'd3];
@@ -7560,7 +7575,7 @@ module g6lc_apu_shwave
               st_q <= W_TXN;           // wb written in W_TXA
             end else if (tx_isflt_q) begin
               for (int c = 0; c < VEC; c++) begin
-                s = f_swz(tx_rec_q[155:144], 2'(c));
+                s = f_swz(tx_swz_eff, 2'(c));
                 wb_q[ls_lane_q[2:0]][c] <=
                   s == 3'd1 ? 32'h0 :
                   s == 3'd2 ? 32'h3F80_0000 :
@@ -7585,7 +7600,7 @@ module g6lc_apu_shwave
                 end
               end
               for (int c = 0; c < 4; c++) begin
-                s = f_swz(tx_rec_q[155:144], 2'(c));
+                s = f_swz(tx_swz_eff, 2'(c));
                 txfa_q[c] <= s == 3'd1 ? 32'h0 :
                              s == 3'd2 ? 32'd65535 :
                              {16'h0, rrm[s - 3'd3]};
@@ -9003,8 +9018,8 @@ module g6lc_apu_shwave_fixture
   input  logic         disp_i,
   input  apu_sh_dispatch_t disp_pl_i,
   input  apu_sh_desc_t desc_i,
-  input  logic [5:0]   push_n_i,
-  input  logic [1023:0] push_i,
+  input  logic [6:0]   push_n_i,
+  input  logic [2047:0] push_i,
   output logic         busy_o,
   output logic         done_o,
   output apu_sh_done_t done_pl_o,

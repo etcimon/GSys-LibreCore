@@ -84,11 +84,11 @@ package g6lc_apu_rast_pkg;
     logic [1:0]        ib_type;              // 0 none (vkCmdDraw), 1 UINT16, 2 UINT32
     apu_rast_vp_t      vp;                   // dynamic viewport (f32)
     logic [15:0]       sc_x, sc_y, sc_w, sc_h;
-    apu_xfer_img_t [3:0] ca;                 // color attachments (FS out loc l -> ca[l]); CLEAR uses ca[0]
-    logic [3:0]        ca_valid;
+    apu_xfer_img_t [7:0] ca;                 // color attachments (FS out loc l -> ca[l]); CLEAR uses ca[0]
+    logic [7:0]        ca_valid;
     apu_xfer_img_t     da;                   // depth attachment (D32_SFLOAT / D16_UNORM)
     logic              da_valid;
-    apu_rast_blend_t [3:0] blend;            // per-attachment blend state
+    apu_rast_blend_t [7:0] blend;            // per-attachment blend state
     logic [3:0][31:0]  blend_const;          // f32 blendConstants (dynamic or pipeline-static)
     logic              depth_test, depth_write;
     logic [2:0]        depth_op;             // VkCompareOp 0..7

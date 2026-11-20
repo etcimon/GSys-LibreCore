@@ -133,7 +133,7 @@ class ShaderRuntime:
         if (not isinstance(operation.bindings, tuple) or len(operation.bindings) > 16 or
                 not isinstance(operation.groups, tuple) or len(operation.groups) != 3 or
                 any(type(n) is not int or not 0 <= n <= 64 for n in operation.groups) or
-                not isinstance(operation.push, tuple) or len(operation.push) > 32 or
+                not isinstance(operation.push, tuple) or len(operation.push) > 64 or
                 any(type(w) is not int or not 0 <= w < 1 << 32 for w in operation.push) or
                 type(operation.max_steps) is not int or not 0 < operation.max_steps <= 65536 or
                 type(operation.allow_images) is not bool or

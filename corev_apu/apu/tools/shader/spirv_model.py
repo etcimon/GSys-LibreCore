@@ -391,7 +391,12 @@ IMG_KIND_OK = {95: (1, 2, 4), 87: (1, 2), 88: (1, 2), 98: (2, 3, 5),
                93: (1, 2), 94: (1, 2), 96: (1, 2), 97: (1, 2),
                105: (1, 2),
                99: (3, 5),
-               103: (0, 1, 2, 3), 104: (0, 1, 2, 3), 106: (0, 1, 2, 3)}
+               # query ops: every image kind incl. texel buffers 4/5 —
+               # f_bufview_rec folds them to a Wx1 record so QuerySize
+               # returns {texcount,1} (ncomp commits texcount only) and
+               # QueryLevels returns 1
+               103: (0, 1, 2, 3, 4, 5), 104: (0, 1, 2, 3, 4, 5),
+               106: (0, 1, 2, 3, 4, 5)}
 
 
 def f16_f32(h):
@@ -906,7 +911,13 @@ class Model:
         lvl = meta['mdim'] & 0xF
         dim = (meta['mdim'] >> 4) & 3
         layers = meta['layers']
-        swz = meta['swz']
+        # VkComponentMapping applies ONLY to sampled images
+        # (COMBINED_IMAGE_SAMPLER=1 / SAMPLED_IMAGE=2).  Storage images
+        # (3) and texel buffers (4/5) take no automatic swizzle — the
+        # descriptor record may still carry a non-identity swz word but
+        # the access must ignore it (lavapipe agrees; verified by the
+        # imgcopy_swz divergence probe).
+        swz = meta['swz'] if kind in (1, 2) else 0
         bcol = (smp >> 14) & 7
         base = rec[0]
         size = rec[1]

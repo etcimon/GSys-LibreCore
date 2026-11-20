@@ -73,8 +73,8 @@ module g6lc_apu_shcore
   // dispatch sideband (4a: direct slot + descriptor state)
   input  logic [2:0]   disp_slot_i,
   input  apu_sh_desc_t desc_i,
-  input  logic [5:0]   push_n_i,
-  input  logic [1023:0] push_i,
+  input  logic [6:0]   push_n_i,
+  input  logic [2047:0] push_i,
   // completion
   output logic         busy_o,
   output logic         done_o,
@@ -683,8 +683,8 @@ module g6lc_apu_shcore_fixture
   input  logic [8*32-1:0] work_imm_i,
   input  logic [2:0]   disp_slot_i,
   input  apu_sh_desc_t desc_i,
-  input  logic [5:0]   push_n_i,
-  input  logic [1023:0] push_i,
+  input  logic [6:0]   push_n_i,
+  input  logic [2047:0] push_i,
   output logic         busy_o,
   output logic         done_o,
   output apu_sh_done_t done_pl_o,

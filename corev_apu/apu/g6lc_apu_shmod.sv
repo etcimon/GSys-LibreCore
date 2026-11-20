@@ -1401,6 +1401,10 @@ module g6lc_apu_shmod
                 // fragment execution models); G3a-i adds
                 // DemoteToHelperInvocation (5379); §12.3 texel-buffer
                 // adds SampledBuffer (46) and ImageBuffer (47);
+                // StorageImageExtendedFormats (49 — rg32f storage
+                // image; the descriptor record's format governs decode
+                // exactly as for the core set, so the capability only
+                // widens which OpTypeImage formats glslang declares);
                 // §12.3 F5 descriptor arrays add the six
                 // *ArrayDynamicIndexing caps — the dsc_idx_q record
                 // select is storage-class agnostic, so UniformBuffer/
@@ -1409,7 +1413,8 @@ module g6lc_apu_shmod
                 // admitted.  InputAttachment (5303) and the NonUniform
                 // variants (5306-5312) stay refused.
                 if (ops_q[0] != 32'd1 && ops_q[0] != 32'd46 &&
-                    ops_q[0] != 32'd47 && ops_q[0] != 32'd50 &&
+                    ops_q[0] != 32'd47 && ops_q[0] != 32'd49 &&
+                    ops_q[0] != 32'd50 &&
                     ops_q[0] != 32'd51 && ops_q[0] != 32'd5379 &&
                     !(ops_q[0] >= 32'd28 && ops_q[0] <= 32'd31) &&
                     ops_q[0] != 32'd5304 && ops_q[0] != 32'd5305) begin

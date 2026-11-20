@@ -5905,3 +5905,46 @@ G6LC_SIM_NO_HIER_TRACE) prints per-cycle bp_pend/tgt/epoch/ttl, cf_hold,
 FTQ head/push/pop, icache req/resp vaddr+valid, want_*, red_pc/src/reseed,
 mispredict/ov2/flush/kill -> will name the exact record + whether reseed
 fired. Build: hyp8-rfix131a-feprob-mc-aggregate-t4 (verilate clean).
+
+## cont.63 — OV2 reseed @33488 is the trigger; bp_pend NOT stale (redirect_pc_q misread corrected)
+
+fetch_win_trace (+fetch_win_trace +trace_from/to, allowlisted) on the feprob
+model captured the exact transition into the c33490 stall:
+
+  cyc33486  res=0x80012a06 ep=1  normal fetch ~0x80012a98..0x80012ab0
+  cyc33487  ov2=1 (override2 verdict presented) iqr=0 res=0x80012a06
+  cyc33488  OV2 redirect APPLIES: src=10(SRC_OV2) redpc=0x80012a06
+            rsnw=1 ep->2 k1=k2=1 FTQ flushed fhv=0 reseeded->0x80012a06
+            dreq=0 drva=0x80012a06
+  cyc>33488  ZERO [win] events -> frontend fully idle (the stall)
+
+CORRECTION to cont.61/62 "stale bp_pend" hypothesis:
+- hang-dump `red_pc=` prints i_frontend.redirect_pc_q (g6lc_core.sv:2915),
+  the ARCH-redirect tracker (set only on red_is_arch). It reads 0x80012a94
+  = a STALE arch target, NOT the live record.
+- The live redirect record red_pc (record target) = 0x80012a06 == bp_tgt.
+  => bp_pend is CORRECT, filtering for the actual OV2 target window W06.
+  NOT a stale/divergent pend. Deadlock is POST-RESEED starvation, not a
+  wrong filter target.
+
+Post-reseed stall mechanism (hypothesis for feprob-v2 to confirm):
+- OV2 reseed: FTQ flush+push red_pc=0x80012a06 (epoch stamped = fe_epoch=2,
+  verified epoch_q bumps at record-register edge so push gets new epoch).
+- cf_hold_q sets (reseed_now && ftq_push) -> if_ready blocked until
+  icache_take; clears ONLY on icache_take.
+- demand_req needs ftq_head_valid & instr_queue_ready & ~halt & ~lbuf &
+  ~reseed & ~flush & ~replay & ~mispredict.
+- Hang state: ftq_full=0, demand=0, I$ req=0 valid=0 ready=1,
+  red_pend=0 red_inflight=0 (no redirect in flight), iq offered-empty.
+- => reseeded head never produced a demand/icache request: either
+  ftq_head_valid stayed 0 (push lost / epoch-stale / count glitch) OR
+  instr_queue_ready/halt/lbuf blocked demand OR the lone request was
+  killed (kill_drop/want-token) before take.
+
+feprob-v2 probe (frontend.sv): now reads ALLOWLISTED +win_trace/+fe_trace
+enable + +win_lo/+win_hi/+fe_lo/+fe_hi window (felo/fehi were HTIF-rejected).
+Prints EVERY cycle unconditionally: bp_pend/tgt/epoch/ttl, cf_hold,
+ftq emp/full/hv/head/hep, push/pop/ifr/dem/dfire, icache req/resp
+vaddr+valid+token+ready, want_*, red_*, redirect_pend/infl/lost/pc/hit/
+hold/accept, kill_drop, mp/ov1/ov2/fl/k1/k2, faddr/npc. Build:
+hyp8-rfix131a-feprob-mc-aggregate-t4 rebuild in flight.

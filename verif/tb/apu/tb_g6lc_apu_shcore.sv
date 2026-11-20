@@ -54,8 +54,8 @@ module tb_g6lc_apu_shcore;
   logic [8*32-1:0] work_imm;
   logic [2:0]   disp_slot;
   apu_sh_desc_t desc;
-  logic [5:0]   push_n;
-  logic [1023:0] push;
+  logic [6:0]   push_n;
+  logic [2047:0] push;
   logic         busy, done; apu_sh_done_t done_pl;
   logic         mem_re, mem_we;
   logic [63:0]  mem_addr, mem_wdata;
@@ -404,9 +404,9 @@ module tb_g6lc_apu_shcore;
       end
     end
     base += nb * 5;
-    push_n = np[5:0];
+    push_n = np[6:0];
     push = '0;
-    for (int i = 0; i < np && i < 32; i++)
+    for (int i = 0; i < np && i < 64; i++)
       push[i*32 +: 32] = wbuf[base + i];
     base += np;
     // dynamic-offset section: n entries {set, ord, off}

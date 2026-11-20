@@ -239,6 +239,48 @@ python3 $G --graphics-session ue_gpos_vattrrgb8ubloff_1 1
 # loop bound drops to 2 and 1, exercising more of the (0,0,0,1) fill.
 python3 $G --graphics-session ue_gpos_vattrrg8ubloff_1 1
 python3 $G --graphics-session ue_gpos_vattr8u1bloff_1 1
+# integer vertex attribute: R8G8B8A8_UINT (vkfmt 41) — same u8x4 VB
+# packing as vattr8u but the gather copies raw bits (no UNORM
+# normalise) and vs_uintcol reads uvec4 then scales by fp32(1/255).
+# fs_flat forces alpha=1.0 so the is_bloff oracle .exp is identical to
+# vattr8u modulo SPIR-V-size address relocation — a clean A/B on the
+# integer fetch+Input-load path.
+python3 $G --graphics-session ue_gpos_vattr8uintbloff_1 1
+# signed-integer variant: R8G8B8A8_SINT (vkfmt 42) — same u8x4 packing
+# but the gather sign-extends each s8 (incl. the 0x80=-128 edge) into
+# an ivec4; vs_sintcol does (vec4(col)+128)*(1/255) re-centring
+# [-128,127] onto [0,1], so .exp differs from the unsigned sessions —
+# exercises the sign path UINT cannot.
+python3 $G --graphics-session ue_gpos_vattr8sintbloff_1 1
+# 16-bit unsigned-integer variant: R16G16B16A16_UINT (vkfmt 95) — same
+# two-u16-word packing as vattr16u but the gather copies raw u16
+# (zero-extended) into a uvec4; vs_u16ucol does vec4(col)*(1/65535)
+# = *0x37800080, bit-identical to the UNORM16 decode — a clean A/B on
+# the f_is_i16 integer-fetch path.
+python3 $G --graphics-session ue_gpos_vattr16uintbloff_1 1
+# 16-bit signed-integer variant: R16G16B16A16_SINT (vkfmt 96) — same
+# two-u16-word packing but the gather sign-extends each u16 into an
+# ivec4; vs_s16col does (vec4(col)+32768)*(1/65535) re-centring
+# [-32768,32767] onto [0,1] — .exp differs from the unsigned sessions,
+# exercising the 16-bit sign path UINT cannot.
+python3 $G --graphics-session ue_gpos_vattr16sintbloff_1 1
+# 32-bit unsigned-integer variant: R32G32B32A32_UINT (vkfmt 107) — four
+# raw u32 components one word each at offset 8 (16 B fills the 24 B
+# stride, no packing).  vs_u32col reads uvec4 and scales *2^-32; stored
+# u32=k*2^24 is f32-exact so vcol lands on exactly k/256 — a bit-exact
+# oracle on the f_is_int 32-bit fetch path.
+python3 $G --graphics-session ue_gpos_vattr32uintbloff_1 1
+# 32-bit signed-integer variant: R32G32B32A32_SINT (vkfmt 108) — same
+# four-u32-word packing but read as signed s32 into an ivec4;
+# vs_s32col does (vec4(col)+2^31)*2^-32 re-centring [-2^31,2^31-1] onto
+# [0,1]; the k*2^24 bit patterns give mixed-sign s32 -> real sign
+# coverage on the f_is_int path.
+python3 $G --graphics-session ue_gpos_vattr32sintbloff_1 1
+
+# gpush: dedicated graphics push-constant bench — fs_push reads a
+# vkCmdPushConstants vec4 (0.1,0.2,0.3,1.0); proves non-zero push data
+# reaches the fragment stage through the full producer->consumer path.
+python3 $G --graphics-session ue_gpos_gpushbloff_1 1
 
 # Sessions the run scripts execute that this script did not generate
 # (blend ops and factors, logic ops, depth compare/bounds/bias/clamp,
@@ -484,6 +526,11 @@ python3 $G --graphics-session ue_gpos_mrt4_1 1
 # attachments (ca[0..3]+da), 5 readback gates; depth at index n_col=4.
 # depth=0.0 on covered px (vs_pos3 pos.z=0), 0.5f clear elsewhere.
 python3 $G --graphics-session ue_gpos_mrt4depth_1 1
+# mrt8: EIGHT colour attachments — the widened ca[7:0]/at_q[2:0]/
+# clearv_q[39:0] path end-to-end; fs_mrt8 o0..o7 at locations 0..7 ->
+# ca[0..7]; 8 distinct clear colours + 8 image/view/imem/rb blob slots +
+# 8 readback gates; exercises at_q=7 terminal cursor (ulp=0 vgtop).
+python3 $G --graphics-session ue_gpos_mrt8_1 1
 # mrtlop: 2-colour MRT + logicOp XOR (VkLogicOp 6) on EVERY attachment.
 # 'mrtlop' keeps is_mrt (2 att) but no lop_* token so is_lop/lop_op stay
 # unset; logicOp is pipeline-global (logic_op_en) yet the ROP reads
@@ -499,6 +546,14 @@ python3 $G --graphics-session ue_gpos_mrt4lop_1 1
 # mrt3lop: THREE colour attachments + logicOp XOR on all — the middle
 # count of the logicOp x MRT matrix (at_q=0,1,2); same _lopw path.
 python3 $G --graphics-session ue_gpos_mrt3lop_1 1
+# mrt8lop: EIGHT colour attachments + logicOp XOR on every attachment —
+# composes is_mrt8 + is_mrtlop (lop_op stays None): n_col=8, eight
+# VkPipelineColorBlendAttachmentState records, and the oracle _lopw path
+# now extended to att4..7 (each att's permuted src XORs its OWN is_mrt8
+# clear).  Exercises logicOp dst reads at at_q=0..7 AND the w57..60
+# blend[4..7] ObjPay tail; confirms natt=8 is benign (blend decodes
+# positionally) — the coverage the MRT8-with-blend item wanted.
+python3 $G --graphics-session ue_gpos_mrt8lop_1 1
 # stencil: D24_UNORM_S8_UINT depth-stencil attachment (vkfmt 129, device
 # did 14) with stencilTestEnable + front/back VkStencilOpState — compareOp
 # ALWAYS, passOp REPLACE(ref=0x5A), masks 0xFF.  The raster S_DZ_RD->C2

@@ -1,0 +1,8 @@
+#version 450
+layout(location=0) in vec3 pos;
+layout(location=1) in ivec4 col;
+layout(location=0) out vec4 vcol;
+void main() {
+  gl_Position = vec4(pos, 1.0);
+  vcol = (vec4(col) + 2147483648.0) * (1.0 / 4294967296.0);
+}

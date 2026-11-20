@@ -229,8 +229,8 @@ module tb_g6lc_apu_vnfront;
   apu_sh_done_t       w_done_pl;
   logic [2:0]         xdisp_slot;
   apu_sh_desc_t       xdesc;
-  logic [5:0]         xpush_n;
-  logic [1023:0]      xpush;
+  logic [6:0]         xpush_n;
+  logic [2047:0]      xpush;
   // §5a G3b-iii: exec's indirect-fetch aperture port — dom=1 byte
   // reads served one cycle later by the shared shmem model (below)
   logic               xmp_v, xmp_rv;
@@ -891,7 +891,8 @@ module tb_g6lc_apu_vnfront;
         check("rep_words", f_rwords === 16'(ev(rec, 5)));
         nrep = int'(ev(rec, 33));
         for (int i = 0; i < nrep; i++)
-          check($sformatf("rep[%0d]", i),
+          check($sformatf("rep[%0d] got %08x exp %08x", i,
+                          repm[12'(REP_BASE + 16'(i))], ev(rec, 34 + i)),
                 repm[12'(REP_BASE + 16'(i))] === ev(rec, 34 + i));
       end else begin
         check("norep", f_rwords === 16'h0);

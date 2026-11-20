@@ -138,8 +138,8 @@ module g6lc_apu_rast
   input  apu_cmdexec_work_t work_i,
   input  apu_rast_draw_t    rd_i,
   input  apu_sh_desc_t      desc_i,
-  input  logic [5:0]        push_n_i,
-  input  logic [1023:0]     push_i,
+  input  logic [6:0]        push_n_i,
+  input  logic [2047:0]     push_i,
   output logic              done_o,
   output apu_sh_done_t      done_pl_o,
   // ShaderCore work port (VS/FS wave batches; desc/push are the
@@ -150,8 +150,8 @@ module g6lc_apu_rast
   output logic [7:0][31:0]  sh_imm_o,
   output logic [2:0]        sh_slot_o,
   output apu_sh_desc_t      sh_desc_o,
-  output logic [5:0]        sh_push_n_o,
-  output logic [1023:0]     sh_push_o,
+  output logic [6:0]        sh_push_n_o,
+  output logic [2047:0]     sh_push_o,
   input  logic              sh_done_i,
   input  apu_sh_done_t      sh_done_pl_i,
   // shared aperture memory port (dom=1, single outstanding)
@@ -332,8 +332,8 @@ module g6lc_apu_rast
     // ---- latched record + sideband -------------------------------------
     apu_rast_draw_t dr_q;
     apu_sh_desc_t   desc_q;
-    logic [5:0]     push_n_q;
-    logic [1023:0]  push_q;
+    logic [6:0]     push_n_q;
+    logic [2047:0]  push_q;
     logic [31:0]    wid_q;
     logic [31:0]    robust_q;
     logic [7:0]     code_q;
@@ -1135,7 +1135,7 @@ module g6lc_apu_rast
     // early-Z / ROP
     logic [31:0]  dz_q;                     // decoded depth texel
     logic [5:0]   r_q;
-    logic [1:0]   at_q;                     // attachment cursor (0..3)
+    logic [2:0]   at_q;                     // attachment cursor (0..7)
     logic [3:0][31:0] src_q;                // fs_out color (f32)
     logic [3:0][31:0] dst_q;                // decoded dst texel (f32)
     logic [3:0][31:0] res_q;                // blend result / src pass
@@ -1859,6 +1859,29 @@ module g6lc_apu_rast
     assign sh_push_n_o = push_n_q;
     assign sh_push_o = push_q;
 
+    // ---- per-attachment draw legality, reduced over all 8 colour slots -
+    // (was four hand-unrolled checks; the record now carries 8)
+    logic        ca_fmt_bad, ca_noblend, ca_blend_bad, ca_subw;
+    always_comb begin
+      ca_fmt_bad = 1'b0; ca_noblend = 1'b0;
+      ca_blend_bad = 1'b0; ca_subw = 1'b0;
+      for (int i = 0; i < 8; i++) begin
+        if (dr_q.ca_valid[i]) begin
+          if (!f_cfmt_ok(dr_q.ca[i].fmt)) ca_fmt_bad = 1'b1;
+          // T3/raw32/sub-word: blending these is invalid usage — refuse
+          if (dr_q.blend[i].en) begin
+            if (f_noblend(dr_q.ca[i].fmt)) ca_noblend = 1'b1;
+            if (dr_q.blend[i].src_c > 5'd14 || dr_q.blend[i].dst_c > 5'd14 ||
+                dr_q.blend[i].src_a > 5'd14 || dr_q.blend[i].dst_a > 5'd14 ||
+                dr_q.blend[i].op_c  > 3'd4  || dr_q.blend[i].op_a  > 3'd4)
+              ca_blend_bad = 1'b1;
+          end
+          // logic op on a sub-word attachment is not implemented
+          if (f_cbpp(dr_q.ca[i].fmt) != 4'd4) ca_subw = 1'b1;
+        end
+      end
+    end
+
     // ---- the FSM ---------------------------------------------------------
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
@@ -2046,6 +2069,12 @@ module g6lc_apu_rast
                        f_f32_f16(dr_q.clear_color[0])}
                     : {clr_p32, clr_p32};
                   cy_q <= '0; cx_q <= '0;
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+                  $display("[DBG] rast clear base=%08x wh=%0dx%0d pix=%016x daval=%b t=%0t",
+                           clr_base, clr_w, clr_h, clr_pix_q, dr_q.da_valid, $time);
+`endif
+// pragma translate_on
                   st_q <= S_CLR_X;
                 end
               end
@@ -2057,64 +2086,14 @@ module g6lc_apu_rast
                      dr_q.vertex_count > 32'(VSB)) ||
                     dr_q.ib_type > 2'd2 ||
                     (dr_q.ib_type != 2'd0 && dr_q.ib_size == 32'd0) ||
-                    (dr_q.ca_valid == 4'h0 && !dr_q.da_valid) ||
-                    (dr_q.ca_valid[0] && !f_cfmt_ok(dr_q.ca[0].fmt)) ||
-                    (dr_q.ca_valid[1] && !f_cfmt_ok(dr_q.ca[1].fmt)) ||
-                    (dr_q.ca_valid[2] && !f_cfmt_ok(dr_q.ca[2].fmt)) ||
-                    (dr_q.ca_valid[3] && !f_cfmt_ok(dr_q.ca[3].fmt)) ||
+                    (dr_q.ca_valid == 8'h0 && !dr_q.da_valid) ||
+                    ca_fmt_bad ||
                     (dr_q.da_valid && !f_dfmt_ok(dr_q.da.fmt)) ||
-                    // T3: blending an integer attachment is invalid
-                    // usage — refuse rather than blend raw bits as fp.
-                    // raw32 single-word attachments carry no blend
-                    // either (same refusal).
-                    (dr_q.ca_valid[0] && dr_q.blend[0].en &&
-                     f_noblend(dr_q.ca[0].fmt)) ||
-                    (dr_q.ca_valid[1] && dr_q.blend[1].en &&
-                     f_noblend(dr_q.ca[1].fmt)) ||
-                    (dr_q.ca_valid[2] && dr_q.blend[2].en &&
-                     f_noblend(dr_q.ca[2].fmt)) ||
-                    (dr_q.ca_valid[3] && dr_q.blend[3].en &&
-                     f_noblend(dr_q.ca[3].fmt)) ||
-                    (dr_q.ca_valid[0] && dr_q.blend[0].en &&
-                     (dr_q.blend[0].src_c > 5'd14 ||
-                      dr_q.blend[0].dst_c > 5'd14 ||
-                      dr_q.blend[0].src_a > 5'd14 ||
-                      dr_q.blend[0].dst_a > 5'd14 ||
-                      dr_q.blend[0].op_c > 3'd4 ||
-                      dr_q.blend[0].op_a > 3'd4)) ||
-                    (dr_q.ca_valid[1] && dr_q.blend[1].en &&
-                     (dr_q.blend[1].src_c > 5'd14 ||
-                      dr_q.blend[1].dst_c > 5'd14 ||
-                      dr_q.blend[1].src_a > 5'd14 ||
-                      dr_q.blend[1].dst_a > 5'd14 ||
-                      dr_q.blend[1].op_c > 3'd4 ||
-                      dr_q.blend[1].op_a > 3'd4)) ||
-                    (dr_q.ca_valid[2] && dr_q.blend[2].en &&
-                     (dr_q.blend[2].src_c > 5'd14 ||
-                      dr_q.blend[2].dst_c > 5'd14 ||
-                      dr_q.blend[2].src_a > 5'd14 ||
-                      dr_q.blend[2].dst_a > 5'd14 ||
-                      dr_q.blend[2].op_c > 3'd4 ||
-                      dr_q.blend[2].op_a > 3'd4)) ||
-                    (dr_q.ca_valid[3] && dr_q.blend[3].en &&
-                     (dr_q.blend[3].src_c > 5'd14 ||
-                      dr_q.blend[3].dst_c > 5'd14 ||
-                      dr_q.blend[3].src_a > 5'd14 ||
-                      dr_q.blend[3].dst_a > 5'd14 ||
-                      dr_q.blend[3].op_c > 3'd4 ||
-                      dr_q.blend[3].op_a > 3'd4)) ||
+                    ca_noblend || ca_blend_bad ||
                     // logic op on a sub-word attachment is not
                     // implemented — refuse rather than write the
                     // un-op'ed source colour
-                    (dr_q.logic_op_en &&
-                     ((dr_q.ca_valid[0] &&
-                       f_cbpp(dr_q.ca[0].fmt) != 4'd4) ||
-                      (dr_q.ca_valid[1] &&
-                       f_cbpp(dr_q.ca[1].fmt) != 4'd4) ||
-                      (dr_q.ca_valid[2] &&
-                       f_cbpp(dr_q.ca[2].fmt) != 4'd4) ||
-                      (dr_q.ca_valid[3] &&
-                       f_cbpp(dr_q.ca[3].fmt) != 4'd4)))) begin
+                    (dr_q.logic_op_en && ca_subw)) begin
                   code_q <= APU_SH_DONE_UNSUPPORTED;
                   st_q <= S_FIN_BAD;
                 end else if (dr_q.vertex_count == 32'd0 ||
@@ -4319,8 +4298,8 @@ module g6lc_apu_rast
               mp_acked_q <= 1'b0;
               st_q <= S_MPW;
             end else if (!dr_q.ca_valid[at_q]) begin
-              // skip an absent attachment; at 3 the fragment is done
-              if (at_q == 2'd3) begin
+              // skip an absent attachment; at 7 the fragment is done
+              if (at_q == 3'd7) begin
                 at_q <= '0; lzdone_q <= 1'b0;
                 if ({1'b0, r_q} + 7'd1 >= dnf_q) begin pend_v_q <= 1'b0; st_q <= dret_q; end
                 else begin
@@ -4328,7 +4307,7 @@ module g6lc_apu_rast
                   st_q <= S_ROP_R0;
                 end
               end else
-                at_q <= at_q + 2'd1;
+                at_q <= at_q + 3'd1;
             end else begin
               mp_we_q <= 1'b0;
               mp_addr_q <= {32'h0, fso_q} +
@@ -4673,7 +4652,7 @@ module g6lc_apu_rast
             end
           end
           S_ROP_NX: begin
-            if (at_q == 2'd3) begin
+            if (at_q == 3'd7) begin
               at_q <= '0; lzdone_q <= 1'b0;
               if ({1'b0, r_q} + 7'd1 >= dnf_q) begin pend_v_q <= 1'b0; st_q <= dret_q; end
               else begin
@@ -4681,7 +4660,7 @@ module g6lc_apu_rast
                 st_q <= S_ROP_R0;
               end
             end else begin
-              at_q <= at_q + 2'd1;
+              at_q <= at_q + 3'd1;
               st_q <= S_ROP_R0;
             end
           end
@@ -5027,8 +5006,8 @@ module g6lc_apu_rast_fixture
   input  apu_cmdexec_work_t work_i,
   input  apu_rast_draw_t    rd_i,
   input  apu_sh_desc_t      desc_i,
-  input  logic [5:0]        push_n_i,
-  input  logic [1023:0]     push_i,
+  input  logic [6:0]        push_n_i,
+  input  logic [2047:0]     push_i,
   output logic              done_o,
   output apu_sh_done_t      done_pl_o,
   output logic              sh_work_valid_o,
@@ -5037,8 +5016,8 @@ module g6lc_apu_rast_fixture
   output logic [7:0][31:0]  sh_imm_o,
   output logic [2:0]        sh_slot_o,
   output apu_sh_desc_t      sh_desc_o,
-  output logic [5:0]        sh_push_n_o,
-  output logic [1023:0]     sh_push_o,
+  output logic [6:0]        sh_push_n_o,
+  output logic [2047:0]     sh_push_o,
   input  logic              sh_done_i,
   input  apu_sh_done_t      sh_done_pl_i,
   output logic              mp_req_valid_o,

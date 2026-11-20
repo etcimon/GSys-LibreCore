@@ -417,6 +417,16 @@ DESC = {
                        bindings=[(0, 0, 64, 0), (0, 1, 64, 1)]),
     'pushscale':  dict(groups=(4, 1, 1), fmt='f', push=2,
                        bindings=[(0, 0, 32, 0), (0, 1, 32, 1)]),
+    # pushwide: 64-word (256B) push block, dst[i]=pc.v[i] — exercises the
+    # widened push_q[64]/push_i[2047:0] path incl. words 32..63.
+    # binding o=1: dst[] is shader-written (was o=0 -> .exp carried no
+    # output words, so base/mut checks were vacuous).  mut arm: the
+    # AccessChain-index fallback (elem idx -> const 0) IS observed —
+    # verified pc.v[0] for all lanes via APU_DBG_AC trace (the earlier
+    # "lane-index" hypothesis was wrong; access-chain resolves const
+    # indices correctly).
+    'pushwide':   dict(groups=(1, 1, 1), fmt='i', push=64, mut=True,
+                       bindings=[(0, 0, 64, 1)]),
     # math450: 32 invocations x 9 vec4 outputs = 288 vec4 = 1152 words
     'math450':    dict(groups=(4, 1, 1), fmt='f', push=0,
                        bindings=[(0, 0, 256, 0), (0, 1, 1152, 1)]),
@@ -498,6 +508,12 @@ DESC = {
     # and imageStore writes v+1 back so the out=1 image readback sees
     # the 16-byte per-channel store encode.
     'imgcopy_rgba32ui': dict(groups=(1, 1, 1), fmt='z', push=0,
+                         # mut=False: every IAdd->ISub flip site is SSBO
+                         # index math (i*4+c -> i*4-c); the sign flip
+                         # lands lane i+1's component on lane i's slot —
+                         # undefined cross-lane store order (model is
+                         # sequential-lane, RTL is SIMD wave).
+                         mut=False,
                          bindings=[
         img_bind(0, 1, dict(w=2, h=4, fmt=11), kind=3, out=1),
         (0, 0, 32, 1, 7 << 16)]),
@@ -506,6 +522,10 @@ DESC = {
     # four widened fp32 bit patterns per lane), imageStore writes
     # v+1.0 so the fp32->fp16 RNE store encode is checked on readback.
     'imgcopy_rgba16f': dict(groups=(1, 1, 1), fmt='z', push=0,
+                         # mut=False: same as imgcopy_rgba32ui — the only
+                         # flippable ops are i*4+c SSBO index offsets;
+                         # sign-flip aliases adjacent lanes (UB order).
+                         mut=False,
                          bindings=[
         img_bind(0, 1, dict(w=2, h=4, fmt=6), kind=3, out=1),
         (0, 0, 32, 1, 7 << 16)]),
@@ -516,6 +536,33 @@ DESC = {
                          bindings=[
         img_bind(0, 1, dict(w=2, h=4, fmt=7), kind=3, out=1),
         (0, 0, 8, 1, 7 << 16)]),
+    # StorageImageExtendedFormats: rg32f (device format 8,
+    # R32G32_SFLOAT) storage image — the only GLSL storage qualifier that
+    # maps to a device-table format outside the core set, so it is what
+    # makes glslang emit OpCapability StorageImageExtendedFormats (49).
+    # imageLoad's .x/.y fp32 pair is observed bit-exact in the SSBO
+    # (2 words/lane); imageStore writes .x+1.0/.y+2.0 back.
+    # mut=False: the selected IAdd->ISub flip lands on the o[i*2+1] SSBO
+    # spill offset -> o[i*2-1], so lane i's .y store aliases lane i-1's
+    # slot — undefined cross-lane store order (sequential model vs SIMD
+    # wave legitimately diverge), same class as imgcopy_rgba32ui.
+    'imgcopy_rg32f': dict(groups=(1, 1, 1), fmt='z', push=0,
+                         mut=False,
+                         bindings=[
+        img_bind(0, 1, dict(w=2, h=4, fmt=8), kind=3, out=1),
+        (0, 0, 16, 1, 7 << 16)]),
+    # Storage-image component swizzle probe: same rgba16f storage shader
+    # as imgcopy_rgba16f (byte-identical .spv — the VkComponentMapping is
+    # view state, not shader state) but the image bind carries swz=0x4CD
+    # = (B,ZERO,R,ONE): read delivers out=(src.b,0,src.r,1), and the
+    # imageStore writeback exercises whether OpImageWrite applies the
+    # inverse mapping.  out=1 image readback sees the written texels.
+    # mut=False: identical i*4+c SSBO index UB as imgcopy_rgba16f.
+    'imgcopy_swz':  dict(groups=(1, 1, 1), fmt='z', push=0,
+                         mut=False,
+                         bindings=[
+        img_bind(0, 1, dict(w=2, h=4, fmt=6, swz=0x4CD), kind=3, out=1),
+        (0, 0, 32, 1, 7 << 16)]),
     # imgatom = CTS image_atomic_op_local_size_1 idiom: r32ui storage
     # image + imageAtomicAdd -> OpImageTexelPointer(60) absolute-texel
     # pointer + OpAtomicIAdd(234) lane-serial RMW.  The out=1 image
@@ -540,6 +587,11 @@ DESC = {
     # (4 words/lane, bit-exact): the SAMPLED_IMAGE uint32 decode, the
     # sampled counterpart of imgcopy_rgba32ui's storage path.
     'texfetch_rgba32ui': dict(groups=(1, 1, 1), fmt='z', push=0, cf=False,
+                         # mut=False: sampled counterpart of
+                         # imgcopy_rgba32ui — the flippable ops are the
+                         # same i*4+c SSBO spill offsets; sign-flip
+                         # aliases adjacent lanes (UB store order).
+                         mut=False,
                          bindings=[
         img_bind(0, 0, dict(w=4, h=2, fmt=11), kind=1),
         (0, 1, 32, 1, 7 << 16)]),
@@ -957,6 +1009,21 @@ DESC = {
         texel_bind(0, 0, 24, 7, kind=5, idx=2, out=1),
         texel_bind(0, 0, 32, 7, kind=5, idx=3, out=1),
         (0, 1, 128, 1, 7 << 16)]),
+    # texbuf_query: OpImageQuerySize(104) on Dim=Buffer — textureSize on
+    # a textureBuffer (kind4 UNIFORM_TEXEL_BUFFER, ntex=8) and imageSize
+    # on an imageBuffer (kind5 STORAGE_TEXEL_BUFFER, ntex=12) both return
+    # the single texel count as a scalar int.  Distinct ntex per binding
+    # makes a wrong-record/wrong-kind read observable; the result is
+    # uniform so all 16 lanes write {texsize,imgsize,0,0}.
+    # mut=False: the flippable op is the ob.o[i] SSBO store-offset add —
+    # IAdd->ISub sends lane i's uvec4 store to a wrong/aliased slot,
+    # undefined cross-lane store order (same class as imgcopy_rgba16f).
+    'texbuf_query': dict(groups=(2, 1, 1), fmt='i', push=0, cf=False,
+                         mut=False,
+                         bindings=[
+        texel_bind(0, 0, 8,  2, kind=4),
+        texel_bind(0, 1, 12, 2, kind=5),
+        (0, 2, 64, 1, 7 << 16)]),
     # ---- G3a-i corpus ------------------------------------------------
     # fn_call: value-param + inout pointer-param helpers, a depth-3
     # chain, and a two-site early return — OpFunctionCall through the
@@ -1237,11 +1304,16 @@ def inject_bad_cf(words):
 
 
 def push_words(desc, seed):
-    """push constants for pushscale: {scale, bias} as floats."""
-    if not desc.get('push'):
+    """push constants: pushscale {scale,bias} floats; pushwide a 64-word
+    deterministic uint pattern exercising the full widened block."""
+    n = desc.get('push', 0)
+    if not n:
         return []
-    return [struct.unpack('<I', struct.pack('<f', 1.5 + seed * 0.25))[0],
-            struct.unpack('<I', struct.pack('<f', -2.0 + seed))[0]]
+    if n == 2:
+        return [struct.unpack('<I', struct.pack('<f', 1.5 + seed * 0.25))[0],
+                struct.unpack('<I', struct.pack('<f', -2.0 + seed))[0]]
+    return [((i * 0x01010101) ^ (seed * 0x9E3779B9)) & 0xFFFFFFFF
+            for i in range(n)]
 
 
 def run_oracle(spv_path, desc_json, out_bin):

@@ -802,7 +802,7 @@ class RasterShadeRuntime:
         code, push = operation.code, operation.push
         if (not isinstance(code, tuple) or not 5 <= len(code) <= 4096 or
                 code[0] != 0x07230203 or
-                not isinstance(push, tuple) or len(push) > 32 or
+                not isinstance(push, tuple) or len(push) > 64 or
                 any(type(w) is not int or not 0 <= w < 1 << 32
                     for w in push) or
                 type(operation.batch) is not int or

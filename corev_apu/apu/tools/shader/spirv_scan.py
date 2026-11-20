@@ -137,7 +137,7 @@ DEC_MBR_OK = {DEC['RelaxedPrecision'], DEC['RowMajor'], DEC['ColMajor'],
               DEC['NonReadable'], DEC['NoContraction'], DEC['SpecId'],
               DEC['Builtin']}
 
-CAP_OK = {1, 46, 47, 50, 51, 5379,
+CAP_OK = {1, 46, 47, 49, 50, 51, 5379,
           # descriptor-array dynamic indexing — the shwave dsc_idx_q
           # record-select path is storage-class agnostic (UNIFORM /
           # UNIFORMCONST / SBUF), so every array-of-descriptors kind
@@ -147,7 +147,11 @@ CAP_OK = {1, 46, 47, 50, 51, 5379,
           # nonuniformEXT needs divergent-fetch qualification.
           28, 29, 30, 31, 5304, 5305}
 # 1=Shader, 46=SampledBuffer, 47=ImageBuffer (§12.3 Dim=Buffer texel
-# fetch/read — operand values verified from corpus .spv), 50/51=
+# fetch/read — operand values verified from corpus .spv), 49=
+# StorageImageExtendedFormats (rg32f storage image — the device format
+# table already carries fmt 8 and tx_store/tx_finish decode it; the
+# capability only widens which OpTypeImage formats glslang may declare,
+# the descriptor record still governs decode), 50/51=
 # storage-image format caps, 5379=DemoteToHelper; 28-31/5304-5305 =
 # *ArrayDynamicIndexing (UniformBuffer/SampledImage/StorageBuffer/
 # StorageImage/UniformTexelBuffer/StorageTexelBuffer)

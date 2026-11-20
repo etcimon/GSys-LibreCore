@@ -187,7 +187,7 @@ def validate(engine, fields, blobs, render_pass, subpass=0):
         raise ValueError('graphics fixed depthClampEnable exceeds profile')
     colors = render_pass.subpass_colors(subpass)
     count = len(colors)
-    if not 0 < count <= 4 or one('attachmentCount') != count or one('pAttachments') != count:
+    if not 0 < count <= 8 or one('attachmentCount') != count or one('pAttachments') != count:
         raise ValueError('graphics fixed color state differs from subpass')
     for name, limit in (('blendEnable', 1), ('srcColorBlendFactor', 14),
                         ('dstColorBlendFactor', 14), ('colorBlendOp', 4),

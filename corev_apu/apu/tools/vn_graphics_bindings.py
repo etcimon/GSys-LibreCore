@@ -117,7 +117,7 @@ class GraphicsBindings:
         template = self._template(record)
         stages, offset, size = record['imm'][:3]
         if (not stages or offset < 0 or offset % 4 or size % 4 or
-                not 0 < size <= 128 or offset + size > 128 or
+                not 0 < size <= 256 or offset + size > 256 or
                 record['payload_words'] != 2 + size // 4 or
                 self._payload(record, 2) != [offset, size]):
             raise ValueError('graphics binding push payload/range exceeds profile')
@@ -146,7 +146,7 @@ class GraphicsBindings:
         references.extend(((self.recording.command_buffer, self.kinds['VkCommandBuffer']),
                            (pool['gen'] << 16 | cb['parent'], self.kinds['VkCommandPool'])))
         for requirement in snapshot.resources:
-            bindings, push = [], [0] * 32
+            bindings, push = [], [0] * 64
             for resource in requirement.bindings:
                 bound = self.sets.get(resource.descriptor_set)
                 if bound is None or not bound[1].compatible(snapshot.layout, resource.descriptor_set):

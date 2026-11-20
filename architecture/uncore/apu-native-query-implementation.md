@@ -192,5 +192,37 @@ verification is tracked separately.
   depth/stencil test, early-fragment tests or `rasterizerDiscard`
   interaction beyond what the raster stages already model, so counts
   are exact for the admitted draw subset but are not a CTS claim.
-- No capset, CTS, stock-guest, RTL or physical qualification is claimed;
-  zero capsets, host-model evidence only, uncommitted.
+- No capset, CTS, stock-guest, or physical qualification is claimed.
+  `timestampValidBits` stays 0.  The host-model cohort above is not a
+  hardware admission.
+
+## Simultaneous lanes
+
+Two sessions share `E:\cva6`.  The format-matrix session owns the
+files it is extending: `g6lc_apu_rast.sv` and its bench, `g6lc_apu_xfer.sv`
+and its bench, `g6lc_apu_shwave.sv` and `tb_g6lc_apu_shwave.sv`,
+`shader_vectors.py`, `g6lc_apu_vnfront.sv`, `g6lc_apu_cmdexec.sv`,
+`g6lc_apu_vn_pkg.sv`, and `vn_device_profile.toml`.  This query
+lane does not edit those files.
+
+This lane owns `g6lc_apu_qrydelta.sv` (package `g6lc_apu_qry_pkg` plus
+the delta wrapper), `g6lc_apu_qrypool.sv`, their benches, and
+`run-apu-qrydelta.sh`.  The pool holds eight slots and four open
+windows.  It resets a range, stamps a timestamp as the defined value 0,
+begins and ends occlusion and statistics queries, copies a
+first-plus-count range with stride padding, and answers a host read.
+A statistics mask outside `0x87`, a nonzero mask on a non-statistics
+pool, an indexed query whose index is not 0, double-begin, end with
+nothing open, an out-of-range index, a begin flag other than the
+precise bit, a timestamp write on a non-timestamp pool, and a query
+still open at submit end are refused and do not change stored slots.
+Host readback requires 64-bit results.  An unavailable slot in that
+range is not-ready, including when `WAIT` is set, and not-ready is
+distinct from refusal.  Copy of an unavailable slot succeeds with
+zeros.  A footprint whose 64-bit dstOffset+(count-1)*stride+record
+exceeds the extent is refused and leaves the destination unchanged.
+A statistics result with no counters still publishes its availability
+word.  `timestampValidBits` stays 0.  The leaf is not instantiated
+in the product.  Connecting it waits until the format-matrix files
+are quiet.  The gate is `run-apu-qrydelta.sh`, which elaborates only
+this leaf.

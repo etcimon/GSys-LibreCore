@@ -80,8 +80,15 @@ static VkDescriptorType btype(const struct bind *b) {
         return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
 }
+/* §12.3 texel-buffer binds (kind 4/5 = UNIFORM/STORAGE_TEXEL_BUFFER)
+ * carry a VkBufferView, not a VkImageView — they take a dedicated
+ * linear-buffer path with no image staging. */
+static int is_texbuf(const struct bind *b) {
+    return b->kind == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER ||
+           b->kind == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+}
 static unsigned gx = 1, gy = 1, gz = 1;
-static unsigned pushw[32]; static int npush = 0;
+static unsigned pushw[64]; static int npush = 0;
 static unsigned dynw[32]; static int ndyn = 0;
 static struct bind binds[MAXBIND]; static int nbind = 0;
 
@@ -107,7 +114,7 @@ static void parse_desc(const char *txt) {
         const char *a = strchr(q, '[');
         if (a) {
             a++;
-            while (*a && *a != ']' && npush < 32) {
+            while (*a && *a != ']' && npush < 64) {
                 while (*a == ' ' || *a == ',') a++;
                 if (*a == ']') break;
                 pushw[npush++] = strtoul(a, (char **)&a, 0);
@@ -218,6 +225,11 @@ int main(int argc, char **argv) {
         VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, NULL, 0, 0, 1, &prio};
     VkPhysicalDeviceFeatures en = {0};
     en.robustBufferAccess = VK_TRUE;
+    /* StorageImageExtendedFormats sessions (rg32f) need the device
+     * feature; enable it iff lavapipe exposes it so core-only runs are
+     * unaffected. */
+    en.shaderStorageImageExtendedFormats =
+        feat.shaderStorageImageExtendedFormats;
     VkDeviceCreateInfo dci = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, NULL,
                               0, 1, &qci, 0, NULL, 0, NULL, &en};
     VkDevice dev;
@@ -324,6 +336,7 @@ int main(int argc, char **argv) {
     VkDeviceMemory mem[MAXBIND];
     VkImage img[MAXBIND];
     VkImageView view[MAXBIND];
+    VkBufferView bview[MAXBIND];
     VkSampler smp[MAXBIND];
     void *map[MAXBIND];
     VkPhysicalDeviceMemoryProperties mp;
@@ -341,6 +354,57 @@ int main(int argc, char **argv) {
     for (int i = 0; i < nbind; i++) {
         buf[i] = VK_NULL_HANDLE;
         img[i] = VK_NULL_HANDLE;
+        bview[i] = VK_NULL_HANDLE;
+        if (binds[i].img && is_texbuf(&binds[i])) {
+            /* texel buffer: a linear VkBuffer of `size` bytes viewed
+             * through a VkBufferView at imgfmt — no VkImage, no
+             * device-layout staging (texels are already linear).  The
+             * buffer stays mapped so the .out.bin dump below sees the
+             * shader's writes (lavapipe is host-coherent). */
+            VkBufferCreateInfo tbci = {
+                VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0,
+                binds[i].size,
+                VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT |
+                VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT,
+                VK_SHARING_MODE_EXCLUSIVE, 0, NULL};
+            if ((r = vkCreateBuffer(dev, &tbci, NULL, &buf[i]))
+                != VK_SUCCESS)
+                die("vkCreateBuffer(texbuf)", r);
+            VkMemoryRequirements tmr;
+            vkGetBufferMemoryRequirements(dev, buf[i], &tmr);
+            VkMemoryAllocateInfo tmai = {
+                VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL,
+                tmr.size, host_mt};
+            if ((r = vkAllocateMemory(dev, &tmai, NULL, &mem[i]))
+                != VK_SUCCESS)
+                die("vkAllocateMemory(texbuf)", r);
+            vkBindBufferMemory(dev, buf[i], mem[i], 0);
+            vkMapMemory(dev, mem[i], 0, binds[i].size, 0, &map[i]);
+            if (binds[i].init[0]) {
+                size_t n;
+                char *init = slurp(binds[i].init, &n);
+                memcpy(map[i], init,
+                       n < binds[i].size ? n : binds[i].size);
+                free(init);
+            } else {
+                memset(map[i], 0, binds[i].size);
+            }
+            VkBufferViewCreateInfo bvci = {
+                VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, NULL, 0,
+                buf[i], (VkFormat)binds[i].imgfmt, 0, binds[i].size};
+            if ((r = vkCreateBufferView(dev, &bvci, NULL, &bview[i]))
+                != VK_SUCCESS)
+                die("vkCreateBufferView", r);
+            unsigned dsidx = 0;
+            for (int s = 0; s < nsets; s++)
+                if (sets[s] == binds[i].set) dsidx = s;
+            VkWriteDescriptorSet twds = {
+                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL,
+                dsets[dsidx], binds[i].binding, binds[i].idx, 1,
+                btype(&binds[i]), NULL, NULL, &bview[i]};
+            vkUpdateDescriptorSets(dev, 1, &twds, 0, NULL);
+            continue;
+        }
         if (binds[i].img) {
             /* staging buffer carries the device-layout bytes; image
              * gets the same usage bits regardless of descriptor kind
@@ -496,7 +560,7 @@ int main(int argc, char **argv) {
         img_off[MAXBIND][16], img_w[MAXBIND][16], img_h[MAXBIND][16],
         img_layb[MAXBIND];
     for (int i = 0; i < nbind; i++) {
-        if (!binds[i].img) continue;
+        if (!binds[i].img || is_texbuf(&binds[i])) continue;
         /* bpp by VkFormat family */
         unsigned f = binds[i].imgfmt;
         unsigned bpp =
@@ -535,7 +599,7 @@ int main(int argc, char **argv) {
     /* §12.3 C/5b: stage the device-layout bytes into each image
      * (UNDEFINED -> TRANSFER_DST -> per-(layer,mip) B2I -> GENERAL) */
     for (int i = 0; i < nbind; i++) {
-        if (!binds[i].img) continue;
+        if (!binds[i].img || is_texbuf(&binds[i])) continue;
         VkImageMemoryBarrier imb = {
             VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
             0, VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -580,7 +644,7 @@ int main(int argc, char **argv) {
     /* read back every image into its staging buffer (the .out.bin
      * dump below then carries the device-layout bytes) */
     for (int i = 0; i < nbind; i++) {
-        if (!binds[i].img) continue;
+        if (!binds[i].img || is_texbuf(&binds[i])) continue;
         VkImageMemoryBarrier imb = {
             VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,

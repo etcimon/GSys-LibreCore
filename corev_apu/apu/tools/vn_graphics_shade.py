@@ -181,7 +181,7 @@ class ShadeRuntime:
                 not isinstance(operation.code, tuple) or
                 not 5 <= len(operation.code) <= 4096 or
                 operation.code[0] != 0x07230203 or
-                not isinstance(operation.push, tuple) or len(operation.push) > 32 or
+                not isinstance(operation.push, tuple) or len(operation.push) > 64 or
                 any(type(w) is not int or not 0 <= w < 1 << 32
                     for w in operation.push) or
                 type(operation.batch) is not int or

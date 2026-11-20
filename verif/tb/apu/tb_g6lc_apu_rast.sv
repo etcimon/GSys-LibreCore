@@ -60,6 +60,15 @@ module tb_g6lc_apu_rast;
   localparam int unsigned PPW  = 32'h08000;   // 128 KiB private window
   localparam int unsigned FB   = 32'h0001000; // framebuffer byte base
   localparam int unsigned FB2  = 32'h0004000; // MRT attachment-1 byte base
+  // case-81 eight-attachment MRT: attachments 2..7 get distinct 0x1000
+  // B8G8R8A8 regions in the free 0x9000..0xF000 window (between DB@0x8000
+  // and VB@0x10000) so every attachment's write is independently visible.
+  localparam int unsigned FB3  = 32'h0009000; // MRT attachment-2 byte base
+  localparam int unsigned FB4  = 32'h000A000; // MRT attachment-3 byte base
+  localparam int unsigned FB5  = 32'h000B000; // MRT attachment-4 byte base
+  localparam int unsigned FB6  = 32'h000C000; // MRT attachment-5 byte base
+  localparam int unsigned FB7  = 32'h000D000; // MRT attachment-6 byte base
+  localparam int unsigned FB8  = 32'h000E000; // MRT attachment-7 byte base
   localparam int unsigned DB   = 32'h0008000; // depth buffer byte base
   localparam int unsigned VB   = 32'h0010000; // vertex buffer byte base
   localparam int unsigned PG_BASE = 32'h100000; // ALLOC_PRIV result
@@ -75,8 +84,8 @@ module tb_g6lc_apu_rast;
   logic [7:0][31:0]   shim;
   logic [2:0]         shslot;
   apu_sh_desc_t       shdesc;
-  logic [5:0]         shpn;
-  logic [1023:0]      shpush;
+  logic [6:0]         shpn;
+  logic [2047:0]      shpush;
   logic               shdone;
   apu_sh_done_t       shdone_pl;
   logic               mpv, mpr, mpsv;
@@ -251,6 +260,35 @@ module tb_g6lc_apu_rast;
             i_mem.apm[apix((ob + f*144 + 20) >> 2)] = 32'h3F800000;
             i_mem.apm[apix((ob + f*144 + 24) >> 2)] = 32'h3F800000;
             i_mem.apm[apix((ob + f*144 + 28) >> 2)] = 32'h3F800000;
+            // MRT loc2..7 (case 81): constant marker colours for the six
+            // upper attachments, likewise unconditional — dead when
+            // ca_valid bits 2..7 are clear.  Each location is a distinct
+            // {r,g,b,a} so all eight attachments stay independently
+            // observable; on B8G8R8A8 the packed words are:
+            //   loc2 {1,0,0,1}->FFFF0000 loc3 {0,0,1,1}->FF0000FF
+            //   loc4 {1,1,0,1}->FFFFFF00 loc5 {0,1,0,1}->FF00FF00
+            //   loc6 {1,0,1,1}->FFFF00FF loc7 {0,0,0,1}->FF000000
+            for (int l = 2; l < 8; l++) begin
+              automatic logic [31:0] m0, m1, m2, m3;
+              case (l)
+                2: begin m0=32'h3F800000; m1=32'h0; m2=32'h0;
+                          m3=32'h3F800000; end              // {1,0,0,1}
+                3: begin m0=32'h0; m1=32'h0; m2=32'h3F800000;
+                          m3=32'h3F800000; end              // {0,0,1,1}
+                4: begin m0=32'h3F800000; m1=32'h3F800000; m2=32'h0;
+                          m3=32'h3F800000; end              // {1,1,0,1}
+                5: begin m0=32'h0; m1=32'h3F800000; m2=32'h0;
+                          m3=32'h3F800000; end              // {0,1,0,1}
+                6: begin m0=32'h3F800000; m1=32'h0; m2=32'h3F800000;
+                          m3=32'h3F800000; end              // {1,0,1,1}
+                default: begin m0=32'h0; m1=32'h0; m2=32'h0;
+                               m3=32'h3F800000; end         // {0,0,0,1}
+              endcase
+              i_mem.apm[apix((ob + f*144 + 16*l + 0) >> 2)]  = m0;
+              i_mem.apm[apix((ob + f*144 + 16*l + 4) >> 2)]  = m1;
+              i_mem.apm[apix((ob + f*144 + 16*l + 8) >> 2)]  = m2;
+              i_mem.apm[apix((ob + f*144 + 16*l + 12) >> 2)] = m3;
+            end
             // G3a-i slot-8 tail: word0 FragDepth, word1 discard flag,
             // word2 sample mask (all-ones), word3 = 0 — same layout
             // shwave's W_F8A/W_F8B emit.  FragCoord = fs_in slot0
@@ -311,6 +349,13 @@ module tb_g6lc_apu_rast;
   // MRT attachment-1 pixel (B8G8R8A8_UNORM -> {a,r,g,b} packed)
   function automatic logic [31:0] fb2px(input int x, input int y);
     return i_mem.apm[apw_i(FB2 + y*FBP + x*4)];
+  endfunction
+
+  // case-81 generic colour-attachment pixel at an arbitrary byte base
+  // (B8G8R8A8_UNORM -> {a,r,g,b} packed), used for attachments 2..7.
+  function automatic logic [31:0] fbatpx(input int unsigned base,
+                                         input int x, input int y);
+    return i_mem.apm[apw_i(base + y*FBP + x*4)];
   endfunction
 
   // R8_UNORM pixel: 1 B/px, w=32 -> row pitch align(32,64)=64 B,
@@ -4491,6 +4536,133 @@ module tb_g6lc_apu_rast;
           fail($sformatf("case80 px(%0d,%0d)=%016x exp clear",
                          x, y, px16f(x, y)));
       end
+
+    // ============ case 81: MRT eight attachments ================
+    // ca_valid=8'hFF -> the ROP iterates at_q=0..7, the full widened
+    // cursor range.  ca[0]=FB R8G8B8A8 gets the interpolated loc0
+    // vertex colours (same triangle/ref as case47); ca[1..7]=FB2..FB8
+    // B8G8R8A8 get the FS model's constant loc1..7 markers — eight
+    // distinct colours so a wrong at_q->ca/FS-out-slot mapping, a
+    // truncated cursor, or a [3:0]-capped array is caught.  Every
+    // attachment 2..7 lives in its own 0x1000 region and is
+    // sentinel-filled, so uncovered pixels prove per-attachment
+    // coverage and a cross-attachment write is observable.
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    ex = 32'hFF000000;                 // {a=255,b=0,g=0,r=0} R8G8B8A8
+    // sentinel-fill attachments 1..7 (32x32x4 = 1024 words each)
+    for (int i = 0; i < 1024; i++) begin
+      apwr(FB2 + i*4, 32'h12345678);
+      apwr(FB3 + i*4, 32'h12345678);
+      apwr(FB4 + i*4, 32'h12345678);
+      apwr(FB5 + i*4, 32'h12345678);
+      apwr(FB6 + i*4, 32'h12345678);
+      apwr(FB7 + i*4, 32'h12345678);
+      apwr(FB8 + i*4, 32'h12345678);
+    end
+    // case-2 triangle + reference colours (identical coverage)
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(1, 32'h3F400000, 32'hBF200000,
+                32'h00000000, 32'h3F800000, 32'h00000000, 32'h3F800000);
+    put_vert(2, 32'hBF200000, 32'h3F600000,
+                32'h00000000, 32'h00000000, 32'h3F800000, 32'h3F800000);
+    ref_xi = '{512, 7168, 1536}; ref_yi = '{512, 1536, 7680};
+    ref_col[0] = '{1.0, 0.0, 0.0, 1.0};
+    ref_col[1] = '{0.0, 1.0, 0.0, 1.0};
+    ref_col[2] = '{0.0, 0.0, 1.0, 1.0};
+    d = mk_draw();
+    d.ca_valid = 8'hFF;                        // ca[0] .. ca[7]
+    // attachments 1..7: B8G8R8A8, one per FS-out location 1..7
+    d.ca[1] = '{base: FB2, size: 32'h1000, w: 16'd32, h: 16'd32,
+               fmt: 8'(APU_IMG_FMT_B8G8R8A8_UNORM), mips: 5'd1,
+               layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    d.ca[2] = '{base: FB3, size: 32'h1000, w: 16'd32, h: 16'd32,
+               fmt: 8'(APU_IMG_FMT_B8G8R8A8_UNORM), mips: 5'd1,
+               layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    d.ca[3] = '{base: FB4, size: 32'h1000, w: 16'd32, h: 16'd32,
+               fmt: 8'(APU_IMG_FMT_B8G8R8A8_UNORM), mips: 5'd1,
+               layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    d.ca[4] = '{base: FB5, size: 32'h1000, w: 16'd32, h: 16'd32,
+               fmt: 8'(APU_IMG_FMT_B8G8R8A8_UNORM), mips: 5'd1,
+               layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    d.ca[5] = '{base: FB6, size: 32'h1000, w: 16'd32, h: 16'd32,
+               fmt: 8'(APU_IMG_FMT_B8G8R8A8_UNORM), mips: 5'd1,
+               layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    d.ca[6] = '{base: FB7, size: 32'h1000, w: 16'd32, h: 16'd32,
+               fmt: 8'(APU_IMG_FMT_B8G8R8A8_UNORM), mips: 5'd1,
+               layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    d.ca[7] = '{base: FB8, size: 32'h1000, w: 16'd32, h: 16'd32,
+               fmt: 8'(APU_IMG_FMT_B8G8R8A8_UNORM), mips: 5'd1,
+               layers: 10'd1, itype: 2'd1, layer_bytes: 32'h1000};
+    // blend mask must cover all eight slots — mk_draw only presets 0..3.
+    for (int i = 0; i < 8; i++) d.blend[i].mask = 4'hF;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case81 code=%0d", w_dpl.code));
+    // ca[0]: interpolated loc0, same coverage + per-channel tolerance
+    // as case47.  Outside the triangle FB keeps its clear.
+    mism = 0;
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        logic [31:0] rpx = ref_px(x, y);
+        checks++;
+        if (rpx == 32'hFFFF_FFFF) begin
+          if (fbpx(x, y) != ex)
+            fail($sformatf("case81 ca0 out px(%0d,%0d)=%08x expclr",
+                           x, y, fbpx(x, y)));
+        end else begin
+          got = fbpx(x, y);
+          for (int c = 0; c < 4; c++) begin
+            automatic int dv = int'(got[8*c +: 8]) -
+                               int'(rpx[8*c +: 8]);
+            if (dv < -1 || dv > 1) begin
+              mism++;
+              if (mism <= 12)
+                $display("case81 ca0 px(%0d,%0d)=%08x ref=%08x",
+                         x, y, got, rpx);
+            end
+          end
+          checks++;
+        end
+      end
+    if (mism != 0)
+      fail($sformatf("case81 %0d ca0 channel mismatches", mism));
+    // ca[1..7]: constant loc markers, exact per-pixel.  Inside the
+    // triangle each attachment holds its own marker word; outside it
+    // keeps the 0x12345678 sentinel.
+    for (int k = 1; k < 8; k++) begin
+      automatic int unsigned bas;
+      automatic logic [31:0] expw;
+      case (k)
+        1: begin bas = FB2; expw = 32'hFF00FFFF; end
+        2: begin bas = FB3; expw = 32'hFFFF0000; end
+        3: begin bas = FB4; expw = 32'hFF0000FF; end
+        4: begin bas = FB5; expw = 32'hFFFFFF00; end
+        5: begin bas = FB6; expw = 32'hFF00FF00; end
+        6: begin bas = FB7; expw = 32'hFFFF00FF; end
+        default: begin bas = FB8; expw = 32'hFF000000; end
+      endcase
+      for (int y = 0; y < 32; y++)
+        for (int x = 0; x < 32; x++) begin
+          logic [31:0] rpx = ref_px(x, y);
+          checks++;
+          if (rpx == 32'hFFFF_FFFF) begin
+            if (fbatpx(bas, x, y) != 32'h12345678)
+              fail($sformatf("case81 ca%0d out px(%0d,%0d)=%08x expsent",
+                             k, x, y, fbatpx(bas, x, y)));
+          end else begin
+            if (fbatpx(bas, x, y) != expw)
+              fail($sformatf("case81 ca%0d in px(%0d,%0d)=%08x exp=%08x",
+                             k, x, y, fbatpx(bas, x, y), expw));
+          end
+        end
+    end
 
     // ---- report ---------------------------------------------------------
     // draw-path counters: the suite draws and writes pixels, so both

@@ -100,8 +100,8 @@ class ComputeReplay:
         elif name == 'vkCmdPushConstants':
             template = self.template(record)
             stages, offset, size = record['imm'][:3]
-            if (not stages or offset % 4 or size % 4 or not 0 < size <= 128 or
-                    offset + size > 128 or record['payload_words'] != 2 + size // 4):
+            if (not stages or offset % 4 or size % 4 or not 0 < size <= 256 or
+                    offset + size > 256 or record['payload_words'] != 2 + size // 4):
                 raise ValueError('compute push update exceeds recorded payload/profile')
             header = self.payload(record, 2)
             if header != [offset, size]:
@@ -131,7 +131,7 @@ class ComputeReplay:
             image = storage == spirv_scan.SC['UNIFORMCONST']
             if storage == spirv_scan.SC['PUSHCONST']:
                 size = scan.type_size(variable['type_id'])
-                if not 0 < size <= 128 or size % 4:
+                if not 0 < size <= 256 or size % 4:
                     raise ValueError('push block size exceeds compute replay profile')
                 for index in range(size // 4):
                     value = self.push.get(index)
@@ -189,7 +189,7 @@ class ComputeReplay:
                     self.remember(ref, ref_kind)
                 self.guards.append(operand.validate)
                 bindings.append(operand.binding)
-        push = tuple(self.push.get(index, (0, None))[0] for index in range(32))
+        push = tuple(self.push.get(index, (0, None))[0] for index in range(64))
         arguments = None
         if indirect:
             handle, entry = self.remember(record['handle'][0], self.kinds['VkBuffer'])

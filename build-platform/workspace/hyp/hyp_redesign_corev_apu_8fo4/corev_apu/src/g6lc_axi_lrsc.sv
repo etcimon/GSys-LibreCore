@@ -90,6 +90,11 @@ module g6lc_axi_lrsc #(
   // the snoop behaviour of existing directed tests is unchanged.
   logic [NRes-1:0]           res_v;
   logic [AXI_ADDR_WIDTH-1:0] res_addr [NRes];
+  // za64rs: the reservation set is a contiguous naturally-aligned region, not a
+  // point. res_size holds the LR access byte count (1<<ar_size) so a store whose
+  // byte range merely *overlaps* the region invalidates it — an exact-address
+  // compare would let e.g. store.w@A+4 slip past an LR.d@A reservation.
+  logic [7:0]                res_size [NRes];
   logic [RW-1:0]             vic_q;  // rotating victim, so a full table is fair
 
   wire ar_is_ex = slv.ar_lock && (slv.ar_len == 8'd0);
@@ -98,18 +103,42 @@ module g6lc_axi_lrsc #(
   wire aw_room  = naw != OW'(MaxOut);
 
   // --- reservation lookup ----------------------------------------------------
-  // AW side: does any entry reserve the address this write targets? Used both
-  // for the SC verdict and for the store snoop.
-  logic          aw_hit;
-  logic [RW-1:0] aw_hit_idx;
+  // AW side: does any entry reserve the address this write targets? This is
+  // the SC verdict only — kept an exact-base match so an SC to a non-reserved
+  // base conservatively fails (always legal). The store-snoop invalidation uses
+  // the wider region overlap `aw_ov` below, not this point match.
+  logic aw_hit;
   always_comb begin
-    aw_hit     = 1'b0;
-    aw_hit_idx = '0;
+    aw_hit = 1'b0;
     for (int unsigned i = 0; i < NRes; i++) begin
-      if (res_v[i] && (res_addr[i] == slv.aw_addr)) begin
-        aw_hit     = 1'b1;
-        aw_hit_idx = RW'(i);
-      end
+      if (res_v[i] && (res_addr[i] == slv.aw_addr))
+        aw_hit = 1'b1;
+    end
+  end
+
+  // Store byte range for the incoming AW. The SC is a single beat (aw_len==0);
+  // a regular store may burst, so the covered range is (aw_len+1) contiguous
+  // beats of (1<<aw_size) bytes. Used ONLY for the reservation-region overlap
+  // below — the SC verdict (aw_hit) stays an exact-base match.
+  wire [15:0]               aw_nbytes;
+  wire [AXI_ADDR_WIDTH-1:0] aw_end;
+  assign aw_nbytes = (16'(slv.aw_len) + 16'd1) << slv.aw_size;
+  assign aw_end    = slv.aw_addr + AXI_ADDR_WIDTH'(aw_nbytes);
+
+  // aw_ov[i]: the store's byte range [aw_addr,aw_end) overlaps reservation i's
+  // region [res_addr[i], res_addr[i]+res_size[i]). The snoop clear uses this
+  // region test rather than the SC verdict's exact match, so an offset store
+  // inside the reserved region still invalidates (za64rs). Direction is safe:
+  // an overlap that should clear but does not lets SC wrongly succeed; a
+  // spurious clear only makes SC retry, which the ISA always permits.
+  logic [NRes-1:0] aw_ov;
+  always_comb begin
+    aw_ov = '0;
+    for (int unsigned i = 0; i < NRes; i++) begin
+      if (res_v[i] &&
+          (slv.aw_addr < res_addr[i] + AXI_ADDR_WIDTH'(res_size[i])) &&
+          (res_addr[i] < aw_end))
+        aw_ov[i] = 1'b1;
     end
   end
 
@@ -139,6 +168,14 @@ module g6lc_axi_lrsc #(
     end
   end
   wire [RW-1:0] ar_alloc_idx = ar_same ? ar_same_idx : (ar_free ? ar_free_idx : vic_q);
+
+  // Reservation region for an incoming LR: a single beat of (1<<ar_size) bytes
+  // at ar_addr, base aligned down to that size so the set is naturally aligned
+  // (za64rs). Stored into res_addr/res_size at allocation.
+  wire [7:0]                lr_size;
+  wire [AXI_ADDR_WIDTH-1:0] lr_base;
+  assign lr_size = 8'((32'd1) << slv.ar_size);
+  assign lr_base = slv.ar_addr & ~AXI_ADDR_WIDTH'(lr_size - 8'd1);
 
   wire sc_ok    = aw_hit;
   wire aw_drop  = aw_is_ex && !sc_ok;
@@ -177,13 +214,20 @@ module g6lc_axi_lrsc #(
                                  : (mst.aw_ready && aw_fwd && !sc_wait);
 
   wire aw_hs = slv.aw_valid && slv.aw_ready;
+  // w_drop qualifies aw_drop to the AW-handshake cycle only. aw_drop is a live
+  // function of slv.aw_* and stays 1 while the failed SC's aw_lock/addr linger
+  // after its handshake; using it bare in the W path would keep gating
+  // mst.w_valid/slv.w_ready/nwl for *forwarded* writes whose W must pass.
+  // The dropped SC's own W is covered same-cycle here, or by sc_drop/inj_b
+  // afterwards (sc_wait serializes SCs, so nwl==0 at a drop handshake).
+  wire w_drop = aw_drop && aw_hs;
   wire w_has = (nwl != 0) || (aw_hs && !aw_drop);
   assign mst.w_data  = slv.w_data;
   assign mst.w_strb  = slv.w_strb;
   assign mst.w_user  = slv.w_user;
   assign mst.w_last  = slv.w_last;
-  assign mst.w_valid = slv.w_valid && w_has && !sc_drop && !aw_drop;
-  assign slv.w_ready = sc_drop || aw_drop
+  assign mst.w_valid = slv.w_valid && w_has && !sc_drop && !w_drop;
+  assign slv.w_ready = sc_drop || w_drop
                        ? 1'b1
                        : (mst.w_ready && w_has);
 
@@ -216,7 +260,10 @@ module g6lc_axi_lrsc #(
       naw <= '0;
       nwl <= '0;
       res_v <= '0;
-      for (int unsigned i = 0; i < NRes; i++) res_addr[i] <= '0;
+      for (int unsigned i = 0; i < NRes; i++) begin
+        res_addr[i] <= '0;
+        res_size[i] <= '0;
+      end
       vic_q <= '0;
       sc_drop <= 1'b0;
       inj_b <= 1'b0;
@@ -235,7 +282,7 @@ module g6lc_axi_lrsc #(
         2'b01: naw <= naw - OW'(1);
         default: ;
       endcase
-      unique case ({(aw_fwd_hs), (w_hs && !sc_drop && !aw_drop)})
+      unique case ({(aw_fwd_hs), (w_hs && !sc_drop && !w_drop)})
         2'b10: nwl <= nwl + OW'(1);
         2'b01: nwl <= nwl - OW'(1);
         default: ;
@@ -248,7 +295,8 @@ module g6lc_axi_lrsc #(
         ar_ex[slv.ar_id] <= ar_is_ex;
         if (ar_is_ex) begin
           res_v[ar_alloc_idx]    <= 1'b1;
-          res_addr[ar_alloc_idx] <= slv.ar_addr;
+          res_addr[ar_alloc_idx] <= lr_base;
+          res_size[ar_alloc_idx] <= lr_size;
           if (!ar_same && !ar_free)
             vic_q <= (NRes <= 1) ? '0 : RW'((vic_q + 1) % NRes);
         end
@@ -258,13 +306,16 @@ module g6lc_axi_lrsc #(
 
       if (aw_fwd_hs) begin
         aw_ex[slv.aw_id] <= aw_is_ex;
-        // A store clears only the entry it actually hits. Clearing the whole
-        // table here is what destroyed a peer hart's unrelated reservation.
-        // A winning SC consumes its own entry, so a second SC to the same
-        // address fails -- that is the mutual exclusion, and it is why the
-        // clear is unconditional on a hit rather than gated on `!aw_is_ex`.
-        if (aw_hit)
-          res_v[aw_hit_idx] <= 1'b0;
+        // A store clears every reservation whose region its byte range
+        // overlaps (aw_ov), not just an exact-address hit — an offset store
+        // inside a reserved region must still invalidate (za64rs). Per-bit
+        // clears (never a whole-vector assign or a global clear) so this
+        // coexists with the LR `res_v[ar_alloc_idx] <= 1'b1` set on a same-cycle
+        // AR+AW, and cannot destroy a peer hart's unrelated reservation.
+        // A winning SC consumes its own entry the same way, so a second SC to
+        // the same address fails -- that is the mutual exclusion.
+        for (int unsigned i = 0; i < NRes; i++)
+          if (aw_ov[i]) res_v[i] <= 1'b0;
       end
       if (b_hs && !inj_b)
         aw_ex[mst.b_id] <= 1'b0;

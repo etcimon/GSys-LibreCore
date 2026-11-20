@@ -443,8 +443,8 @@ module g6lc_apu_vgtop
     apu_xfer_desc_t ex_xfer;
     logic [2:0]         ex_disp_slot;
     apu_sh_desc_t           ex_desc;
-    logic [5:0]         ex_push_n;
-    logic [1023:0]      ex_push;
+    logic [6:0]         ex_push_n;
+    logic [2047:0]      ex_push;
     logic               ex_done_v;
     apu_sh_done_t       ex_done_pl;
     // G3b-ii: cmdexec's residency-manager client (LOOKUP/FILL/UNPIN of
@@ -692,8 +692,8 @@ module g6lc_apu_vgtop
     logic [7:0][31:0]  rast_sh_imm;
     logic [2:0]        rast_sh_slot;
     apu_sh_desc_t      rast_sh_desc;
-    logic [5:0]        rast_sh_push_n;
-    logic [1023:0]     rast_sh_push;
+    logic [6:0]        rast_sh_push_n;
+    logic [2047:0]     rast_sh_push;
     wire               gfx_done = sh_done &&
                        (sh_done_pl.work_id == APU_SH_WORK_VS ||
                         sh_done_pl.work_id == APU_SH_WORK_FS);

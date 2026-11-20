@@ -98,7 +98,7 @@ maxImageDimension2D = 4096
 maxImageDimension3D = 256
 maxImageDimensionCube = 4096
 maxImageArrayLayers = 256
-maxPushConstantsSize = 128
+maxPushConstantsSize = 256
 maxComputeWorkGroupSize = [128, 128, 64]
 # Dispatch stores groupCountX/Y/Z as full U32 immediates and the
 # issue path does not clamp them.  65535 is the Vulkan minimum.
@@ -412,7 +412,7 @@ default = 256
 # BLOB op byte-count ceilings keyed by member name; 'default' otherwise.
 pCode = 262144              # 65536 words of SPIR-V
 pData = 1048576             # vkCmdUpdateBuffer / query results staging
-pValues = 128               # vkCmdPushConstants <= maxPushConstantsSize
+pValues = 256               # vkCmdPushConstants <= maxPushConstantsSize
 pInitialData = 1048576      # pipeline cache data
 default = 1048576
 

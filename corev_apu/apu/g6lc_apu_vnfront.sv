@@ -88,7 +88,7 @@
 //             resolves each staged set id through ObjTab at record
 //             time (a MISS stores a null handle) and emits {handle,
 //             ndyn} pairs ahead of the dynamic-offset words.
-//             pValues over 128 B takes the INVALID path.
+//             pValues over 256 B takes the INVALID path.
 //   POOL_RESET vkResetDescriptorPool bumps the pool's epoch and
 //             clears {nsets,bump} — minted sets become dead for any
 //             later dispatch (their ObjTab slots persist until
@@ -708,8 +708,8 @@ module g6lc_apu_vnfront
     // G2a: depth/stencil + per-attachment blend + constants
     logic                gp_dte_q, gp_dwr_q, gp_sten_q;
     logic [2:0]          gp_dcmp_q;
-    logic [2:0]          gp_natt_q;   // colorBlend attachmentCount (0..4)
-    logic [3:0][31:0]    gp_blend_q;  // apu_rast_blend_t packing
+    logic [3:0]          gp_natt_q;   // colorBlend attachmentCount (0..8)
+    logic [7:0][31:0]    gp_blend_q;  // apu_rast_blend_t packing
     logic [3:0][31:0]    gp_bconst_q; // static blendConstants f32[4]
     logic                gp_bcdyn_q;  // BLEND_CONSTANTS in pDynamicStates
     logic [7:0]          gp_ndyn_q;   // dynamicStateCount
@@ -837,6 +837,60 @@ module g6lc_apu_vnfront
     logic        rep_start, rep_re, rep_done, rep_busy, rep_fault;
     logic [15:0] rep_addr, rep_n;
     logic [APU_VN_EXEC_WORDS*32-1:0] exec_w_q;
+    // exec_w_q reset image: the first APU_VN_EXEC_WORDS device-profile
+    // words packed with word 0 at [31:0] (EXEC_WORDS == 136).  Loaded
+    // as ONE vector — a per-word for/while loop of packed part-select
+    // non-blocking writes is not unrolled by older Verilator and
+    // silently mis-simulates (exec_w_q keeps stale data; an error-path
+    // reply then emits a previous command's exec word).
+    localparam logic [APU_VN_EXEC_WORDS*32-1:0] EXEC_W_INIT = {
+      APU_VN_PROFILE[135], APU_VN_PROFILE[134], APU_VN_PROFILE[133],
+      APU_VN_PROFILE[132], APU_VN_PROFILE[131], APU_VN_PROFILE[130],
+      APU_VN_PROFILE[129], APU_VN_PROFILE[128], APU_VN_PROFILE[127],
+      APU_VN_PROFILE[126], APU_VN_PROFILE[125], APU_VN_PROFILE[124],
+      APU_VN_PROFILE[123], APU_VN_PROFILE[122], APU_VN_PROFILE[121],
+      APU_VN_PROFILE[120], APU_VN_PROFILE[119], APU_VN_PROFILE[118],
+      APU_VN_PROFILE[117], APU_VN_PROFILE[116], APU_VN_PROFILE[115],
+      APU_VN_PROFILE[114], APU_VN_PROFILE[113], APU_VN_PROFILE[112],
+      APU_VN_PROFILE[111], APU_VN_PROFILE[110], APU_VN_PROFILE[109],
+      APU_VN_PROFILE[108], APU_VN_PROFILE[107], APU_VN_PROFILE[106],
+      APU_VN_PROFILE[105], APU_VN_PROFILE[104], APU_VN_PROFILE[103],
+      APU_VN_PROFILE[102], APU_VN_PROFILE[101], APU_VN_PROFILE[100],
+      APU_VN_PROFILE[99], APU_VN_PROFILE[98], APU_VN_PROFILE[97],
+      APU_VN_PROFILE[96], APU_VN_PROFILE[95], APU_VN_PROFILE[94],
+      APU_VN_PROFILE[93], APU_VN_PROFILE[92], APU_VN_PROFILE[91],
+      APU_VN_PROFILE[90], APU_VN_PROFILE[89], APU_VN_PROFILE[88],
+      APU_VN_PROFILE[87], APU_VN_PROFILE[86], APU_VN_PROFILE[85],
+      APU_VN_PROFILE[84], APU_VN_PROFILE[83], APU_VN_PROFILE[82],
+      APU_VN_PROFILE[81], APU_VN_PROFILE[80], APU_VN_PROFILE[79],
+      APU_VN_PROFILE[78], APU_VN_PROFILE[77], APU_VN_PROFILE[76],
+      APU_VN_PROFILE[75], APU_VN_PROFILE[74], APU_VN_PROFILE[73],
+      APU_VN_PROFILE[72], APU_VN_PROFILE[71], APU_VN_PROFILE[70],
+      APU_VN_PROFILE[69], APU_VN_PROFILE[68], APU_VN_PROFILE[67],
+      APU_VN_PROFILE[66], APU_VN_PROFILE[65], APU_VN_PROFILE[64],
+      APU_VN_PROFILE[63], APU_VN_PROFILE[62], APU_VN_PROFILE[61],
+      APU_VN_PROFILE[60], APU_VN_PROFILE[59], APU_VN_PROFILE[58],
+      APU_VN_PROFILE[57], APU_VN_PROFILE[56], APU_VN_PROFILE[55],
+      APU_VN_PROFILE[54], APU_VN_PROFILE[53], APU_VN_PROFILE[52],
+      APU_VN_PROFILE[51], APU_VN_PROFILE[50], APU_VN_PROFILE[49],
+      APU_VN_PROFILE[48], APU_VN_PROFILE[47], APU_VN_PROFILE[46],
+      APU_VN_PROFILE[45], APU_VN_PROFILE[44], APU_VN_PROFILE[43],
+      APU_VN_PROFILE[42], APU_VN_PROFILE[41], APU_VN_PROFILE[40],
+      APU_VN_PROFILE[39], APU_VN_PROFILE[38], APU_VN_PROFILE[37],
+      APU_VN_PROFILE[36], APU_VN_PROFILE[35], APU_VN_PROFILE[34],
+      APU_VN_PROFILE[33], APU_VN_PROFILE[32], APU_VN_PROFILE[31],
+      APU_VN_PROFILE[30], APU_VN_PROFILE[29], APU_VN_PROFILE[28],
+      APU_VN_PROFILE[27], APU_VN_PROFILE[26], APU_VN_PROFILE[25],
+      APU_VN_PROFILE[24], APU_VN_PROFILE[23], APU_VN_PROFILE[22],
+      APU_VN_PROFILE[21], APU_VN_PROFILE[20], APU_VN_PROFILE[19],
+      APU_VN_PROFILE[18], APU_VN_PROFILE[17], APU_VN_PROFILE[16],
+      APU_VN_PROFILE[15], APU_VN_PROFILE[14], APU_VN_PROFILE[13],
+      APU_VN_PROFILE[12], APU_VN_PROFILE[11], APU_VN_PROFILE[10],
+      APU_VN_PROFILE[9], APU_VN_PROFILE[8], APU_VN_PROFILE[7],
+      APU_VN_PROFILE[6], APU_VN_PROFILE[5], APU_VN_PROFILE[4],
+      APU_VN_PROFILE[3], APU_VN_PROFILE[2], APU_VN_PROFILE[1],
+      APU_VN_PROFILE[0]
+    };
     logic [63:0]         pd_id_q;      // last ALLOC'd VkPhysicalDevice id
     logic        front_re;
     logic [15:0] front_addr;
@@ -1076,7 +1130,7 @@ module g6lc_apu_vnfront
         // cmdexec reads only rdata[15:0] of this word so [31:24] stay pad
         return {8'h0, gp_vsf_q, gp_lop_q, gp_loe_q,
                 gp_sca_q && !gp_scdyn_q, gp_vpa_q && !gp_vpdyn_q,
-                gp_dcl_q, gp_natt_q, gp_rsd_q, gp_poly_q, gp_sten_q, gp_dbe_q,
+                gp_dcl_q, gp_natt_q[2:0], gp_rsd_q, gp_poly_q, gp_sten_q, gp_dbe_q,
                 gp_dcmp_q, gp_dbn_q, gp_bcdyn_q, gp_dwr_q, gp_dte_q};
       if (i < 6'd30)
         return gp_blend_q[2'(i - 6'd26)];
@@ -1103,6 +1157,12 @@ module g6lc_apu_vnfront
         return {20'h0, gp_sbc_q, gp_sbp_q, gp_sbd_q, gp_sbf_q};
       if (i == 6'd55) return gp_dbmin_q;
       if (i == 6'd56) return gp_dbmax_q;
+      // 8-colour-attachment extension: blend states for colour
+      // attachments 4..7 ride the appended tail words w57..60 (the
+      // w26..29 words carry attachments 0..3).  cmdexec decodes them
+      // into rd_q.blend[4..7]; unused slots stay blend-disabled.
+      if (i >= 6'd57 && i <= 6'd60)
+        return gp_blend_q[3'(i - 6'd53)];
       return '0;
     endfunction
     // wire format -> device id, or 8'hFF unsupported
@@ -1488,9 +1548,7 @@ module g6lc_apu_vnfront
             stg_n_q <= '0; pay_ovf_q <= 1'b0;
             payf_q <= 1'b0;
             for (int i = 0; i < 8; i++) hnd_q[i] <= '0;
-            for (int i = 0; i < APU_VN_EXEC_WORDS; i++)
-              exec_w_q[32*i +: 32] <= i < APU_VN_PROFILE_WORDS
-                                      ? APU_VN_PROFILE[i] : 32'h0;
+            exec_w_q <= EXEC_W_INIT;
             // pipeline-create scratch is per-command: a leftover
             // pl_errv masks the next create's error reply, and a
             // leftover pl_pin/pl_modh unpins a stale module handle
@@ -3484,7 +3542,7 @@ module g6lc_apu_vnfront
                 // a graphics pipeline's second handle follows.
                 ret_gp_q   <= ot_cpl_i.entry.aux[6];
                 ret_payb_q <= 32'(ot_cpl_i.entry.aux[31:16]) << 6;
-                ret_pw_q   <= ot_cpl_i.entry.aux[6] ? 16'd57 : 16'd2;
+                ret_pw_q   <= ot_cpl_i.entry.aux[6] ? 16'd61 : 16'd2;
                 opr_q      <= '{op: APU_OBJPAY_OP_READ,
                                addr: (32'(ot_cpl_i.entry.aux[31:16])
                                       << 6) +
@@ -3878,11 +3936,18 @@ module g6lc_apu_vnfront
               end
             end else begin
               // RECORD: requires RECORDING, not PENDING/INVALID
+              // pragma translate_off
+              if ($test$plusargs("VNREC"))
+                $display("VNREC ct=%0d ent_st=%08x ent_aux=%08x hnd=%08x act_cq=%0d",
+                         op_q.cmd_type, ent_q.state, ent_q.aux,
+                         hnd_q[int'(act_q.cmdbuf_qslot)],
+                         act_q.cmdbuf_qslot);
+              // pragma translate_on
               if ((ent_q.state & APU_CB_RECORDING) == 0 ||
                   (ent_q.state & (APU_CB_INVALID | APU_CB_PENDING)) != 0 ||
                   (op_q.cmd_type ==
                    APU_VN_TYPE_VK_CMD_PUSH_CONSTANTS_EXT &&
-                   op_q.imm[2] > 32'd128) ||
+                   op_q.imm[2] > 32'd256) ||
                   // G1c: maxVertexInputBindings = 16; a call whose
                   // [firstBinding, firstBinding+bindingCount) range
                   // exceeds the 16-slot binding table cannot be
@@ -3890,7 +3955,7 @@ module g6lc_apu_vnfront
                   (op_q.cmd_type ==
                    APU_VN_TYPE_VK_CMD_BIND_VERTEX_BUFFERS_EXT &&
                    op_q.imm[0] + op_q.imm[1] > 32'd16)) begin
-                // §7b: pValues over 128 B joins the INVALID path
+                // §7b: pValues over 256 B joins the INVALID path
                 result_q <= APU_VK_ERROR_UNKNOWN;
                 otr_q    <= '{op: APU_OBJTAB_OP_SETSTATE,
                               id: {32'h0,
@@ -6203,7 +6268,7 @@ module g6lc_apu_vnfront
               // G2a: absent per-attachment blend state defaults to
               // {en=0, mask=4'hF} — a NULL pColorBlendState still
               // writes every component
-              gp_blend_q <= '{4{32'h7800_0000}};
+              gp_blend_q <= '{8{32'h7800_0000}};
               gp_bconst_q <= '0;
               // fields of the optional pDepthStencilState /
               // pColorBlendState are not staged when the struct is
@@ -6554,11 +6619,11 @@ module g6lc_apu_vnfront
                   gp_ph_q  <= 6'd28; state_q <= StGpRd;
                 end
               end
-              6'd28: begin // attachmentCount (0..4)
-                if (stg_word_q > 32'd4) begin
+              6'd28: begin // attachmentCount (0..8)
+                if (stg_word_q > 32'd8) begin
                   state_q <= StPipeFail;
                 end else begin
-                  gp_natt_q <= stg_word_q[2:0];
+                  gp_natt_q <= stg_word_q[3:0];
                   gp_i_q    <= '0;
                   gp_ph_q   <= (stg_word_q == 32'h0) ? 6'd37 : 6'd29;
                   state_q   <= StGpRd;
@@ -6567,55 +6632,55 @@ module g6lc_apu_vnfront
               // per-attachment {en, srcC, dstC, opC, srcA, dstA,
               // opA, mask} -> gp_blend_q packed as apu_rast_blend_t
               6'd29: begin // blendEnable
-                gp_blend_q[gp_i_q[1:0]][0] <= |stg_word_q;
+                gp_blend_q[gp_i_q[2:0]][0] <= |stg_word_q;
                 gp_ph_q <= 6'd30; state_q <= StGpRd;
               end
               6'd30: begin // srcColorBlendFactor (0..14)
                 if (stg_word_q > 32'd14) state_q <= StPipeFail;
                 else begin
-                  gp_blend_q[gp_i_q[1:0]][5:1] <= stg_word_q[4:0];
+                  gp_blend_q[gp_i_q[2:0]][5:1] <= stg_word_q[4:0];
                   gp_ph_q <= 6'd31; state_q <= StGpRd;
                 end
               end
               6'd31: begin // dstColorBlendFactor
                 if (stg_word_q > 32'd14) state_q <= StPipeFail;
                 else begin
-                  gp_blend_q[gp_i_q[1:0]][10:6] <= stg_word_q[4:0];
+                  gp_blend_q[gp_i_q[2:0]][10:6] <= stg_word_q[4:0];
                   gp_ph_q <= 6'd32; state_q <= StGpRd;
                 end
               end
               6'd32: begin // colorBlendOp (0..4)
                 if (stg_word_q > 32'd4) state_q <= StPipeFail;
                 else begin
-                  gp_blend_q[gp_i_q[1:0]][13:11] <= stg_word_q[2:0];
+                  gp_blend_q[gp_i_q[2:0]][13:11] <= stg_word_q[2:0];
                   gp_ph_q <= 6'd33; state_q <= StGpRd;
                 end
               end
               6'd33: begin // srcAlphaBlendFactor
                 if (stg_word_q > 32'd14) state_q <= StPipeFail;
                 else begin
-                  gp_blend_q[gp_i_q[1:0]][18:14] <= stg_word_q[4:0];
+                  gp_blend_q[gp_i_q[2:0]][18:14] <= stg_word_q[4:0];
                   gp_ph_q <= 6'd34; state_q <= StGpRd;
                 end
               end
               6'd34: begin // dstAlphaBlendFactor
                 if (stg_word_q > 32'd14) state_q <= StPipeFail;
                 else begin
-                  gp_blend_q[gp_i_q[1:0]][23:19] <= stg_word_q[4:0];
+                  gp_blend_q[gp_i_q[2:0]][23:19] <= stg_word_q[4:0];
                   gp_ph_q <= 6'd35; state_q <= StGpRd;
                 end
               end
               6'd35: begin // alphaBlendOp
                 if (stg_word_q > 32'd4) state_q <= StPipeFail;
                 else begin
-                  gp_blend_q[gp_i_q[1:0]][26:24] <= stg_word_q[2:0];
+                  gp_blend_q[gp_i_q[2:0]][26:24] <= stg_word_q[2:0];
                   gp_ph_q <= 6'd36; state_q <= StGpRd;
                 end
               end
               6'd36: begin // colorWriteMask (RGBA bits)
                 if (stg_word_q > 32'd15) state_q <= StPipeFail;
                 else begin
-                  gp_blend_q[gp_i_q[1:0]][30:27] <= stg_word_q[3:0];
+                  gp_blend_q[gp_i_q[2:0]][30:27] <= stg_word_q[3:0];
                   gp_i_q  <= gp_i_q + 4'd1;
                   gp_ph_q <= (gp_i_q + 4'd1 >= 4'(gp_natt_q))
                              ? 6'd37 : 6'd29;
@@ -6768,11 +6833,14 @@ module g6lc_apu_vnfront
               state_q <= StPipeFail;
             end else begin
               pl_layh_q <= ot_cpl_i.handle;
-              // 57-word ObjPay state block for the draw assembly —
+              // 61-word ObjPay state block for the draw assembly —
               // w44..47 carry the per-stage module {handle,park},
-              // w48..56 depth bias / stencil / depth bounds (StGpPayWd
-              // writes and cmdexec reads all 57)
-              opr_q    <= '{op: APU_OBJPAY_OP_ALLOC, words: 32'd57,
+              // w48..56 depth bias / stencil / depth bounds, and the
+              // 8-colour-attachment extension appends blend states
+              // for colour attachments 4..7 at w57..60 (w26..29 carry
+              // attachments 0..3); StGpPayWd writes and cmdexec reads
+              // all 61
+              opr_q    <= '{op: APU_OBJPAY_OP_ALLOC, words: 32'd61,
                            default: '0};
               op_ret_q <= StGpAlcC;
               state_q  <= StOpReq;
@@ -6803,7 +6871,7 @@ module g6lc_apu_vnfront
             state_q  <= StOpReq;
           end
           StGpPayWd: begin
-            if (pay_i_q + 16'd1 >= 16'd57) begin
+            if (pay_i_q + 16'd1 >= 16'd61) begin
               // ObjTab ALLOC the pipeline object (id = this element's
               // out id); aux writes follow on the completion
               otr_q <= '{op: APU_OBJTAB_OP_ALLOC,
@@ -6828,7 +6896,7 @@ module g6lc_apu_vnfront
               // unwind at StGpUnr
               opr_q    <= '{op: APU_OBJPAY_OP_FREE,
                            addr: op_base_q,
-                           words: 32'd57, default: '0};
+                           words: 32'd61, default: '0};
               op_ret_q <= StGpUnr;
               state_q  <= StOpReq;
             end else begin
@@ -7704,8 +7772,7 @@ module g6lc_apu_vnfront
           // Reply VkSubresourceLayout {offset,size,rowPitch,arrayPitch,
           // depthPitch} = 10 words of exec_w
           StImgSubRep: begin
-            for (int i = 0; i < APU_VN_EXEC_WORDS; i++)
-              exec_w_q[32*i +: 32] <= '0;
+            exec_w_q <= '0;
             if (op_q.imm[0] != 32'd1 ||
                 op_q.imm[1] >= 32'({27'h0, ent_q.aux[44:40]}) ||
                 op_q.imm[2] >= 32'({23'h0, ent_q.aux[53:45]})) begin
@@ -7770,13 +7837,11 @@ module g6lc_apu_vnfront
               exec_w_q[0*32 +: 32] <= 32'h0;
               state_q  <= StRep;
             end else begin
+              // Zero the record arena once up front; word0 carries the
+              // needed byte count.  StQryFmt then writes only each
+              // query's data words, so stride padding stays 0.
+              exec_w_q <= '0;
               exec_w_q[0*32 +: 32] <= 32'(need[31:0]);
-              // Zero the record arena once up front (static bound —
-              // synthesizable).  StQryFmt then writes only each query's
-              // data words, so the stride padding between records stays
-              // 0 without a variable-bound fill loop.
-              for (int i = 1; i < APU_VN_EXEC_WORDS; i++)
-                exec_w_q[32*i +: 32] <= 32'h0;
               gq_needed_q <= 32'(need[31:0]);
               gq_ew_q     <= 32'd1;
               state_q     <= (gq_count_q == 32'h0) ? StQryEnd : StQryRd;

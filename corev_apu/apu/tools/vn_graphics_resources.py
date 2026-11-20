@@ -48,7 +48,7 @@ def _push_words(scan, tid, blocks):
         scalar = scan.types[value['elem']] if value['kind'] == TK['VEC'] else value
         offset = member['offset']
         if (scalar['kind'] not in (TK['BOOL'], TK['INT'], TK['FLOAT']) or
-                not 1 <= count <= 4 or offset % 4 or offset + count * 4 > 128 or
+                not 1 <= count <= 4 or offset % 4 or offset + count * 4 > 256 or
                 'offset' not in scan.mdecor.get((tid, index), {})):
             raise ValueError('graphics resource push member shape/offset exceeds profile')
         used = set(range(offset // 4, offset // 4 + count))

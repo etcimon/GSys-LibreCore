@@ -105,8 +105,8 @@ module g6lc_apu_cmdexec
   output apu_rast_draw_t     rd_o,
   output logic [2:0]         disp_slot_o,
   output apu_sh_desc_t       desc_o, // §12.3 F5 descriptor sideband
-  output logic [5:0]         push_n_o,
-  output logic [1023:0]      push_o,
+  output logic [6:0]         push_n_o,
+  output logic [2047:0]      push_o,
   output logic [15:0]        done_seq_o,
   output logic [Fences-1:0]  fence_signaled_o,
   output logic [Fences-1:0]  fence_lost_o,
@@ -485,8 +485,8 @@ module g6lc_apu_cmdexec
     logic                ds_rh_q;       // row word half (0/1)
     logic [31:0]         ds_rw0_q;      // row word0 {binding,pad,count}
     apu_sh_desc_t        desc_q;        // F5 sideband being assembled
-    logic [1023:0]       push_sh_q;     // 32-word push shadow
-    logic [5:0]          push_max_q;    // highest written word + 1
+    logic [2047:0]       push_sh_q;     // 64-word push shadow (256 B)
+    logic [6:0]          push_max_q;    // highest written word + 1
     // bind-descriptor-set arena walk cursor
     logic                pay_bind_q;
     // §12.3 C/5a: Xfer assembly — operand cursor and resolved extents
@@ -508,13 +508,13 @@ module g6lc_apu_cmdexec
     logic [5:0][31:0]    vp_q;            // viewport f32 words
     logic [3:0][31:0]    sc_q;            // scissor {x,y,w,h}
     // G2a: per-attachment clear values — flat 4-word VkClearValue per
-    // attachment index (4 colour + 1 depth slots, indexed by the
-    // render pass's attachment index, not the subpass position)
-    logic [19:0][31:0]   clearv_q;
-    apu_xfer_img_t [4:0] att_img_q;       // resolved image per att idx
-    logic [4:0][1:0]     att_ld_q;        // per-attachment loadOp
-    apu_xfer_img_t [3:0] ca_q;            // subpass color attachments
-    logic [3:0]          ca_valid_q;
+    // attachment index (10 slots = 8 colour + depth + stencil, indexed
+    // by the render pass's attachment index, not the subpass position)
+    logic [39:0][31:0]   clearv_q;
+    apu_xfer_img_t [9:0] att_img_q;       // resolved image per att idx
+    logic [9:0][1:0]     att_ld_q;        // per-attachment loadOp
+    apu_xfer_img_t [7:0] ca_q;            // subpass color attachments
+    logic [7:0]          ca_valid_q;
     apu_xfer_img_t       da_q;            // subpass depth attachment
     logic                da_valid_q;
     logic [3:0][31:0]    bconst_q;        // vkCmdSetBlendConstants f32
@@ -539,20 +539,20 @@ module g6lc_apu_cmdexec
     logic [31:0]         brp_fpay_q;      // framebuffer ObjPay base
     logic [5:0]          brp_pi_q;        // rp ObjPay word cursor
     logic [2:0]          brp_ph_q;        // rp parse phase
-    logic [2:0]          brp_att_q;       // attachmentCount (1..5)
+    logic [3:0]          brp_att_q;       // attachmentCount (1..10)
     logic [2:0]          brp_nsp_q;       // subpassCount (1..4)
     logic [1:0]          brp_sp_q;        // subpass parse cursor
-    logic [2:0]          brp_ak_q;        // attachment resolve/clear idx
+    logic [3:0]          brp_ak_q;        // attachment resolve/clear idx
     logic [1:0]          brp_ai_q;        // per-attachment word cursor
-    logic [1:0]          brp_cj_q;        // subpass color-ref cursor
+    logic [2:0]          brp_cj_q;        // subpass color-ref cursor (0..7)
     // bounded multi-subpass table: per-subpass {colorAttachmentCount,
     // colour refs, depth ref}; the active subpass's row is snapshotted
     // into ca_q/da_q at BeginRenderPass and re-snapshotted on
     // vkCmdNextSubpass.  S>1 payloads are depth-free (an extra depth
     // word per subpass would be ambiguous with the next block's
     // colorAttachmentCount), so sp_dref_q stays 4'hF for i>0.
-    logic [3:0][2:0]     sp_ncl_q;        // per-subpass colorAttachmentCount
-    logic [3:0][3:0][3:0] sp_cref_q;      // per-subpass colour refs
+    logic [3:0][3:0]     sp_ncl_q;        // per-subpass colorAttachmentCount (0..8)
+    logic [3:0][7:0][3:0] sp_cref_q;      // per-subpass colour refs (8 locs)
     logic [3:0][3:0]     sp_dref_q;       // per-subpass depth ref (F=none)
     logic [63:0]         brp_viewid_q;    // framebuffer view id in flight
     logic [15:0]         brp_islot_q;     // view's image slot
@@ -1154,12 +1154,14 @@ module g6lc_apu_cmdexec
                              kind: 6'(APU_VN_KIND_VK_IMAGE_VIEW),
                              default: '0};
         end
-        // G1c: graphics-pipeline ObjPay — 57-word state block fetched
-        // as four READN bursts {0..15},{16..31},{32..43},{48..56}; the
+        // G1c: graphics-pipeline ObjPay — 61-word state block fetched
+        // as four READN bursts {0..15},{16..31},{32..43},{48..60}; the
         // w44..47 stage descriptors are read separately via pbr.  Each
         // burst stays inside one 16-word ObjPay line (n<=16).  dr_pi_q
         // is the segment base {0,16,32,48} at issue; the beats stream
         // back on op_cpl_valid and StDrPayCpl decodes them by dr_pi_q.
+        // The 8-colour-attachment extension appends colour blend states
+        // for attachments 4..7 at w57..60 (w26..29 carry 0..3).
         StDrPay: begin
           op_req_valid_o = 1'b1;
           if      (dr_pi_q == 6'd0)
@@ -1176,7 +1178,7 @@ module g6lc_apu_cmdexec
                          default: '0};
           else
             op_req_o = '{op: APU_OBJPAY_OP_READN,
-                         addr: rd_gpay_q + 32'd48, words: 32'd9,
+                         addr: rd_gpay_q + 32'd48, words: 32'd13,
                          default: '0};
         end
         // the internal render-pass CLEAR rides the work port with the
@@ -1718,11 +1720,11 @@ module g6lc_apu_cmdexec
 // pragma translate_on
               if (pay_push_q) begin
                 // §7b: merge the PushConstants payload into the
-                // 32-word shadow at the imm[1] word offset
+                // 64-word shadow at the imm[1] word offset
                 push_sh_q[32*(pay_dst_q + pay_i_q[5:0]) +: 32] <=
                     op_cpl_i.rdata;
-                if (pay_dst_q + pay_i_q[5:0] + 6'd1 > push_max_q)
-                  push_max_q <= pay_dst_q + pay_i_q[5:0] + 6'd1;
+                if (pay_dst_q + pay_i_q[5:0] + 7'd1 > push_max_q)
+                  push_max_q <= pay_dst_q + pay_i_q[5:0] + 7'd1;
               end else if (pay_vb_q) begin
                 // G1c: arena = [nbind resolved handles][nbind u64
                 // offsets] — handles land in vb_hnd at firstBinding+i,
@@ -1758,7 +1760,7 @@ module g6lc_apu_cmdexec
                 if (pay_i_q == 7'd0)
                   clr_ok_q <= op_cpl_i.rdata != 32'h0;
                 else if (clr_ok_q)
-                  clearv_q[5'(pay_i_q - 7'd1)] <= op_cpl_i.rdata;
+                  clearv_q[6'(pay_i_q - 7'd1)] <= op_cpl_i.rdata;
               end else if (pay_bind_q) begin
                 // §12.3 F5 bind stream: {set handle, ndyn} pairs for
                 // each bound set, then the call's dynamic-offset
@@ -1903,17 +1905,17 @@ module g6lc_apu_cmdexec
                     snap_q.push_len  <= rec_q.imm[2][15:0];
                     // §7b/5a-ii: merge the arena words into the push
                     // shadow at the imm[1] byte offset (word units),
-                    // clamped to the 32-word shadow
+                    // clamped to the 64-word shadow (256 B)
                     pay_i_q    <= '0;
                     pay_push_q <= 1'b1;
                     pay_bind_q <= 1'b0;
                     pay_dst_q  <= 6'(rec_q.imm[1] >> 2);
-                    pay_n_q    <= rec_q.imm[1] >= 32'd128
-                                  ? 6'd0
+                    pay_n_q    <= rec_q.imm[1] >= 32'd256
+                                  ? 7'd0
                                   : (rec_q.imm[2] >> 2) >
-                                    32'd32 - (rec_q.imm[1] >> 2)
-                                    ? 6'(32'd32 - (rec_q.imm[1] >> 2))
-                                    : 6'(rec_q.imm[2] >> 2);
+                                    32'd64 - (rec_q.imm[1] >> 2)
+                                    ? 7'(32'd64 - (rec_q.imm[1] >> 2))
+                                    : 7'(rec_q.imm[2] >> 2);
                   end
                   APU_VN_TYPE_VK_CMD_SET_BLEND_CONSTANTS_EXT: begin
                     // G2a: four f32 words sit at the record's arena
@@ -1932,7 +1934,7 @@ module g6lc_apu_cmdexec
                     // G2a: attachment resolve runs on the rp/fb record
                     // handles; the walk reads clearValueCount (arena
                     // word 8, also imm[4]) then count*4 clear words —
-                    // clipped to 5 attachments' worth
+                    // clipped to clearv_q's 10-attachment capacity
                     if (rec_q.handle[0] == 32'h0 ||
                         rec_q.handle[1] == 32'h0)
                       lost_q <= 1'b1;
@@ -1943,8 +1945,8 @@ module g6lc_apu_cmdexec
                     pay_ret_q <= StBrpRpReq;
                     pay_i_q   <= '0;
                     pay_n_q   <= 7'd1 +
-                                 7'(rec_q.imm[4] > 32'd5
-                                    ? 32'd20 : rec_q.imm[4] << 2);
+                                 7'(rec_q.imm[4] > 32'd10
+                                    ? 32'd40 : rec_q.imm[4] << 2);
                   end
                   APU_VN_TYPE_VK_CMD_NEXT_SUBPASS_EXT: begin
                     // bounded multi-subpass: advance only inside an
@@ -1961,8 +1963,8 @@ module g6lc_apu_cmdexec
                       ca_valid_q <= '0;
                       da_q       <= '0;
                       da_valid_q <= 1'b0;
-                      for (int l = 0; l < 4; l++)
-                        if (3'(l) <
+                      for (int l = 0; l < 8; l++)
+                        if (4'(l) <
                             sp_ncl_q[snap_q.subpass[1:0] + 2'd1] &&
                             sp_cref_q[snap_q.subpass[1:0] + 2'd1][l]
                                 != 4'hF) begin
@@ -2098,7 +2100,7 @@ module g6lc_apu_cmdexec
                      rec_q.imm[1] < 32'd4 && rec_q.imm[2] != 32'h0) ||
                     (rec_q.ctype ==
                          APU_VN_TYPE_VK_CMD_PUSH_CONSTANTS_EXT &&
-                     rec_q.imm[1] < 32'd128 && rec_q.imm[2] >= 32'd4) ||
+                     rec_q.imm[1] < 32'd256 && rec_q.imm[2] >= 32'd4) ||
                     (rec_q.ctype ==
                          APU_VN_TYPE_VK_CMD_BIND_VERTEX_BUFFERS_EXT &&
                      rec_q.imm[1] != 32'h0) ||
@@ -2171,7 +2173,7 @@ module g6lc_apu_cmdexec
                   // to <= 1 — 0 is a no-op, >1 honours only the first
                   // command
                   if (snap_q.pipeline == 32'h0 ||
-                      (ca_valid_q == 4'h0 && !da_valid_q)) begin
+                      (ca_valid_q == 8'h0 && !da_valid_q)) begin
                     lost_q  <= 1'b1;
                     state_q <= StUnpReq;
                   end else if (rec_q.imm[0] == 32'h0) begin
@@ -2214,7 +2216,7 @@ module g6lc_apu_cmdexec
                   // whose declared subpass (aux[9:8]) matches the
                   // active subpass — also checked at StDsPipeCpl
                   if (snap_q.pipeline == 32'h0 ||
-                      (ca_valid_q == 4'h0 && !da_valid_q)) begin
+                      (ca_valid_q == 8'h0 && !da_valid_q)) begin
                     lost_q  <= 1'b1;
                     state_q <= StUnpReq;
                   end else begin
@@ -2224,6 +2226,12 @@ module g6lc_apu_cmdexec
                     rd_q.ca_valid    <= ca_valid_q;
                     rd_q.da          <= da_q;
                     rd_q.da_valid    <= da_valid_q;
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+                    $display("[DBG] draw ca_valid=%08x daval=%b t=%0t",
+                             ca_valid_q, da_valid_q, $time);
+`endif
+// pragma translate_on
                     rd_q.vp          <= '{x: vp_q[0], y: vp_q[1],
                                           w: vp_q[2], h: vp_q[3],
                                           minz: vp_q[4], maxz: vp_q[5]};
@@ -3143,6 +3151,12 @@ module g6lc_apu_cmdexec
                 // resolves; the CLEAR-issue loop runs after all views
                 att_img_q[brp_ak_q].base <= xb;
                 att_img_q[brp_ak_q].size <= xs;
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+                $display("[DBG] attimg[%0d] base=%016x size=%08x fmt? t=%0t",
+                         brp_ak_q, xb, xs, $time);
+`endif
+// pragma translate_on
                 if (brp_ak_q + 3'd1 < brp_att_q) begin
                   brp_ak_q <= brp_ak_q + 3'd1;
                   state_q  <= StBrpVwLo;
@@ -3227,13 +3241,13 @@ module g6lc_apu_cmdexec
               state_q  <= StBrpPayReq;
               unique case (brp_ph_q)
                 3'd0: begin
-                  // attachmentCount — v1: 1..5 (4 colour + 1 depth)
+                  // attachmentCount — v2: 1..10 (8 colour + depth + stencil)
                   if (op_cpl_i.rdata == 32'd0 ||
-                      op_cpl_i.rdata > 32'd5) begin
+                      op_cpl_i.rdata > 32'd10) begin
                     lost_q  <= 1'b1;
                     state_q <= StUnpReq;
                   end else begin
-                    brp_att_q <= 3'(op_cpl_i.rdata);
+                    brp_att_q <= 4'(op_cpl_i.rdata);
                     brp_ak_q  <= '0;
                     brp_ai_q  <= '0;
                     brp_ph_q  <= 3'd1;
@@ -3270,12 +3284,12 @@ module g6lc_apu_cmdexec
                   end
                 end
                 3'd3: begin
-                  // subpass[brp_sp_q] colorAttachmentCount (0..4)
-                  if (op_cpl_i.rdata > 32'd4) begin
+                  // subpass[brp_sp_q] colorAttachmentCount (0..8)
+                  if (op_cpl_i.rdata > 32'd8) begin
                     lost_q  <= 1'b1;
                     state_q <= StUnpReq;
                   end else begin
-                    sp_ncl_q[brp_sp_q] <= 3'(op_cpl_i.rdata);
+                    sp_ncl_q[brp_sp_q] <= 4'(op_cpl_i.rdata);
                     if (op_cpl_i.rdata == 32'd0) begin
                       // no colour refs — straight to the block tail
                       if (brp_nsp_q == 3'd1) begin
@@ -3420,8 +3434,8 @@ module g6lc_apu_cmdexec
               ca_valid_q <= '0;
               da_q       <= '0;
               da_valid_q <= 1'b0;
-              for (int l = 0; l < 4; l++)
-                if (3'(l) < sp_ncl_q[snap_q.subpass[1:0]] &&
+              for (int l = 0; l < 8; l++)
+                if (4'(l) < sp_ncl_q[snap_q.subpass[1:0]] &&
                     sp_cref_q[snap_q.subpass[1:0]][l] != 4'hF) begin
                   if (sp_cref_q[snap_q.subpass[1:0]][l] <
                       4'(brp_att_q)) begin
@@ -3469,6 +3483,17 @@ module g6lc_apu_cmdexec
                      clearv_q[{brp_ak_q, 2'b00} + 5'd2],
                      clearv_q[{brp_ak_q, 2'b00} + 5'd1],
                      clearv_q[{brp_ak_q, 2'b00}]};
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+                $display("[DBG] clr ak=%0d cv={%08x,%08x,%08x,%08x} base=%08x t=%0t",
+                         brp_ak_q,
+                         clearv_q[{brp_ak_q,2'b00}+5'd3],
+                         clearv_q[{brp_ak_q,2'b00}+5'd2],
+                         clearv_q[{brp_ak_q,2'b00}+5'd1],
+                         clearv_q[{brp_ak_q,2'b00}],
+                         att_img_q[brp_ak_q].base, $time);
+`endif
+// pragma translate_on
               end
               state_q <= StBrpIssue;
             end else begin
@@ -3594,6 +3619,14 @@ module g6lc_apu_cmdexec
                 end
                 6'd55: rd_q.depth_bounds_min <= op_cpl_i.rdata;
                 6'd56: rd_q.depth_bounds_max <= op_cpl_i.rdata;
+                6'd57, 6'd58, 6'd59, 6'd60: begin
+                  // 8-colour-attachment extension: appended tail words
+                  // carry colour blend states for attachments 4..7
+                  // (w26..29 carry attachments 0..3); same
+                  // apu_rast_blend_t packing
+                  rd_q.blend[dr_pi_q - 6'd53] <=
+                      apu_rast_blend_t'(op_cpl_i.rdata);
+                end
                 default:
                   // w40..43: baked static VkRect2D i32[4]
                   dr_sc_q[2'(dr_pi_q - 6'd40)] <= op_cpl_i.rdata;
@@ -3618,7 +3651,7 @@ module g6lc_apu_cmdexec
                 dr_bq   <= '0;
                 dr_pi_q <= 6'd48;
                 state_q <= StDrPay;
-              end else if (dr_pi_q == 6'd56) begin
+              end else if (dr_pi_q == 6'd60) begin
                 state_q <= StDrVbN;
               end else if (dr_pi_q == 6'd15 ||
                            dr_pi_q == 6'd31) begin
@@ -4312,8 +4345,8 @@ module g6lc_apu_cmdexec_fixture
   input  apu_sh_done_t       work_done_pl_i,
   output logic [2:0]         disp_slot_o,
   output apu_sh_desc_t       desc_o,
-  output logic [5:0]         push_n_o,
-  output logic [1023:0]      push_o,
+  output logic [6:0]         push_n_o,
+  output logic [2047:0]      push_o,
   output logic [15:0]        done_seq_o,
   output logic [Fences-1:0]  fence_signaled_o,
   output logic [Fences-1:0]  fence_lost_o,
