@@ -1601,6 +1601,321 @@ have Verilator's shift-and-mask shape, so unlike §10.3 the ISA floor is not a l
 here; `install-formal.sh` / `install-yosys-g6lc.sh` keep the compiler's default ISA,
 and the `stateops` kernels run at 16 bytes (SSE2) in those builds.
 
+## 12. V3Case constant-result case → ConstPool lookup tables (2026-11-19)
+
+A second case-lowering path now runs inside `V3Case::caseAll`, ahead of the
+existing `replaceCaseFast`/`replaceCaseComplicated` compare-tree lowering
+(`tools/verilator/src/V3Case.cpp`, `tryCaseTable`). Motivation from the hyp8
+r125-aggregate model: large constant-result decoders such as
+`extract_transfer_size` (`core/include/g6lc_core_pkg.sv`) and `ooo_lat_class`
+(`core/ooo/g6lc_ooo_pkg.sv`) lower to fully-unrolled bit-test trees — ~1,155 and
+~171 inlined instances respectively, contributing several thousand `goto
+__Vlabel` branch sites to `.text` on top of the §7 I-cache pressure. A 256×N-bit
+`.rodata` table plus one `AstArraySel` replaces the whole tree and deduplicates
+across the design through `AstConstPool::findTable` (the same machinery
+`V3Table` uses for `always` blocks, which cannot see function-internal cases).
+
+Recognized shape (all arms must agree):
+
+- Index expression width 2–12 bits (table ≤ 4096 entries).
+- Every arm is exactly one effective statement — through single-statement
+  `begin` wrappers — of one of:
+  - `<lhs> = const` (`AstAssign`, same lhs tree on every arm),
+  - `<lhs> <= const` (`AstAssignDly`),
+  - `return const` (`AstReturn`, kept as `return TABLE[idx]`; requires an
+    enclosing `AstNodeFTask` with `isFunction()`),
+  - `<fvar> = const; goto exit` — the form `return` actually takes after
+    `V3LinkJump` (which runs long before `V3Case`): a blocking assign to the
+    function return variable followed by an `AstJumpGo`. Emitted as
+    `fvar = TABLE[idx]; goto <first arm's exit label>`. `isFuncExitJump`
+    verifies each jump targets a function-exit label by walking the label's
+    `JumpBlock` chain to the `AstNodeFTask` (only `JumpBlock`/`JumpLabel`
+    nesting may intervene), which rejects `break`/`continue` jumps that
+    share the `[assign, JumpGo]` arm shape inside loops. V3LinkJump wraps the
+    function body per return, so arms may target *different* label nodes —
+    all are semantically the same exit and any one is reused.
+- Arm constants are plain 2-state bit-vector `AstConst`s of identical width,
+  and that width must equal the assignment lhs / function return width
+  exactly (no implicit extension semantics are introduced).
+- Labels are plain constants of the index width; duplicates are rejected so
+  `CASEOVERLAP` lint semantics are preserved. `casex`, `casez`,
+  `case inside`, `notParallel` assertion blocks, and cases inside
+  DPI-import/class-method/recursive/constructor tasks are rejected.
+- A `default` arm supplies uncovered indices; without one the labels must
+  cover all `2^indexWidth` patterns.
+- At least 8 distinct labels — smaller cases stay on the cheaper tree path.
+
+Emission: `AstUnpackArrayDType` + `AstInitArray` registered in
+`typeTablep`, deduplicated via `constPoolp()->findTable`, then a single
+`AstArraySel{tableVarScope, clonedIndexExpr}` feeds a cloned-lhs
+`AstAssign`/`AstAssignDly` or an `AstReturn`. The transform runs before
+`V3Task` inlining, so replicated function instances share one table.
+`V3Slice`/`V3Const`/`V3Simulate` already handle `AstArraySel`-on-`InitArray`
+correctly at this pipeline point (verified against `V3Slice.cpp`,
+`V3Const.cpp`, `V3Simulate.h`).
+
+Expected coverage on hyp8: the `fu_op`-class decoders (`extract_transfer_size`,
+`ooo_lat_class`, latency/pipe lookups) are the canonical targets — small enum
+index, uniform constant results, heavy inline replication. Branchy or
+state-dependent cases are untouched.
+
+Regression: `test_regress/t/t_case_table.{v,pl}` covers blocking/NBA/return
+arms (the return case exercises the post-V3LinkJump assign+JumpGo shape),
+full-coverage-no-default, multi-label items, and the reject paths
+(few arms, `casex`, mixed lhs, non-constant arm), checking results against
+if/else reference functions and asserting the `Cases to lookup tables`
+statistic = 6. **Status: PASSED on the remote dev build**
+(`t_case_table`/`t_prio_oracc`/`t_prio_lzc` all green); hyp8 verilation
+A/B in progress — no speedup claimed until generated-code and runtime
+deltas are measured.
+
+### 12.1 Implemented: `V3Prio` or-accumulate loops → one-hot guard + ctz
+
+`tools/verilator/src/V3Prio.cpp` gained `tryOrAccumulate`, a third loop
+lowering beside `tryFind`/`tryGrant`, targeting the `mask_to_tag`/
+`mask_to_ftag`/`fbank_mask` family in `core/ooo/g6lc_rename_read.sv`
+(~700 inlined sites × ~72 bit-tests each in the r125 model). The RTL shape
+is `for (i = 0; i < N; i++) if (m[i]) out = out | W'(i);` — a loop that ORs
+the index of every set mask bit into `out`.
+
+Recognized shape (all required):
+
+- `matchUpCount` with the bound relaxed from 64 to 4096 trips (`kMaxAccWidth`)
+  via a new `maxTrips` parameter; `kMinAccTrips = 8` keeps tiny loops plain.
+- Body is a single `if (m[i])` with no else; the condition must be an LSB-first
+  bit scan of a plain vector variable. `bitScanAcc` (or-accumulate-only; the
+  shared `bitScan` used by find/grant is untouched) sees through the two
+  V3Width lowerings of this idiom: `W'(i)` size casts become `SEL(i,0,w)`
+  truncations, and dynamic `vec[i]` becomes `AND(rangeGuard, SEL(vec,i,1))`.
+  `idxExprVar` accepts a bare index `VarRef` or a zero-lsb `Sel` of it, and
+  `idxWideEnough` requires `2^w >= vecWidth` so a truncated index cannot wrap
+  inside the loop; `isRangeGuard` accepts only unsigned upper-bound compares
+  (`Lt/Le/Gt/Gte` vs constant) that hold for every `i < vecWidth`. MSB-order
+  scans and every non-index operand still reject.
+- `vecp->width() == trips` — the mask must be exactly the loop bound, so no
+  out-of-range or untested high bits exist.
+- Then-branch is one blocking `AstAssign` whose lhs is a plain `AstVarRef`
+  (`acc`) and whose rhs is `Or(acc, idx)` or `Or(idx, acc)` where the acc side
+  is a plain `AstVarRef` and the index side passes `idxExprVar`+`idxWideEnough`
+  — no part-selects or expressions (`i + 1`, `i[3:0]`, etc. all reject).
+
+Emission: `if (VL_ONEHOT0_*(m)) acc = acc | VL_CTZ_*(m); else <original
+loop>`. For a one-hot mask the loop ORs exactly one index — `ctz(m)`; for an
+empty mask `ctz` is 0 and `acc | 0` preserves the pre-loop value, matching
+the loop's no-op. `VL_ONEHOT0_*` is true for both empty and single-bit masks,
+which is exactly the equivalence domain; multi-bit masks take the untouched
+else branch and stay bit-identical. Helper selection is width-tiered:
+`VL_ONEHOT0_I`/`VL_CTZ_I` ≤32 bits, `_Q` ≤64, and the word-pointer
+`VL_ONEHOT0_W`/`VL_CTZ_W` beyond (`hostCallWI` emits the `(words, data)`
+call form; `VlWide::operator WDataInP` makes the argument conversion
+implicit). Verilator's clean-upper-bits invariant on wide vars keeps the
+extra storage bits of `VL_CTZ_W` reads zero, so indices stay < width.
+
+Because the lowering is guarded rather than proven one-hot, it is exact for
+every input — the else branch is the original loop verbatim. The transform
+counts under the existing `Optimizations, Priority encoders lowered` stat.
+
+Coverage note: `V3Prio` is opt-in (`-fprio`, `V3Options.h`); the transform
+only fires when the flag is on. The hyp8/soft-ladder perf builds currently
+leave `-fprio` off (the pre-existing lzc/find/grant bundle measured negative);
+this transform targets a different, larger pathology and is the reason to
+re-measure `-fprio` on the A/B harness.
+
+Regression: `test_regress/t/t_prio_oracc.{v,pl}` exercises all three helper
+tiers (16/48/72-bit masks in `mask_to_tag`-shaped functions plus a 32-bit
+`always_comb` loop), zero/one-hot/multi-bit masks, and two reject paths
+(descending `m[31-i]` scan, `i + 1` non-index operand) with golden-value
+checks and a stat count of 4. **Status: PASSED on the remote dev build**
+(`verilator-g6lc-dev`, all three of `t_case_table`/`t_prio_oracc`/
+`t_prio_lzc` green); no speedup claimed until an A/B on the hyp8 harness
+exists.
+
+**Pass-order caveat (measured, not yet solved):** `V3Prio` runs at stage
+`022_prio`, *after* the early `V3Unroll` at `021`. Any loop whose trip count
+is ≤ `--unroll-count` is already unrolled before the matcher sees it — the
+hyp8/soft-ladder builds use `--unroll-count 256`, so every or-accumulate
+loop in the 16–256-bit range dies at 021 and `-fprio` cannot reach them.
+Making the transform effective on those builds requires either a lower
+unroll count for this loop class (a `V3Unroll` heuristic, e.g. skip
+unrolling when the body matches the or-accumulate idiom) or moving the
+prio pass earlier — both are open work, and the unroll-count interaction
+must be A/B'd since unrolling also has I-cache costs of its own.
+
+Remaining follow-ups (not yet implemented): `__Vsampled__` shadow
+copies (~786/eval) need lazy-or-batched sampling in `V3Clock`; function
+outlining for high replication × body-size remains the largest I-cache lever.
+
+## 13. objdump → sqlite hot-path forensics on `Variane_testharness` (2026-11-19)
+
+Static generated-C++ census (§7, §12) counts *sites*; this section counts
+*executed-structure reachability* — which machine code the per-cycle eval can
+touch — by disassembling the shipped ELF into sqlite and querying it.
+
+### 13.1 Pipeline
+
+Artifacts (from `remote-runs.drvfs-bak/hyp8-r125-aggregate-t4/output/model/`):
+
+```
+objdump -d --no-show-raw-insn -M intel Variane_testharness > variane.asm   # 2.93M insns
+nm -S --defined-only Variane_testharness                 > nm.txt         # 3,417 syms
+python3 verif/regress/remote/analyze_objdump_hotpaths.py \
+    --asm variane.asm --nm nm.txt --db variane.db --report report.json      # ~17 s
+```
+
+`analyze_objdump_hotpaths.py` (committed, MIT tooling) parses the disassembly
+into `functions / insns / bbs / calls / func_mnem` tables and computes a
+**structural hotness tier** per function by BFS over direct call edges from
+eval roots. Tiers: `HOT` (per-eval cone), `STG`, `INIT`, `FINAL`, `COLD`
+(unreachable), `LIB` (`.plt`). `.text.unlikely` partitions are forced COLD —
+GCC's own hot/cold split is respected. The DB is regenerable (~172 MB);
+queries below are plain sqlite3/python.
+
+**Tier caveat that changed the numbers**: with `--threads 4`, sequent/comb
+partitions run on worker threads through `VlThreadPool`'s queue — indirect
+dispatch invisible to static call graphs. `__Vthread__nba__0/1/2` had *zero*
+static callers and were initially COLD along with their entire cones
+(~1,250 functions). They are now HOT roots; without that fix HOT was
+under-counted by ~4.4 MB. Any static call-graph analysis of an MT model
+must seed thread-entry functions explicitly.
+
+### 13.2 Headline statistics (HOT = per-cycle cone)
+
+| Metric | Value |
+|---|---|
+| HOT functions | 1,999 of 3,168 (63%) |
+| HOT `.text` | **12.73 MB of 13.49 MB total (94%)** |
+| HOT instructions | 2,777,951 of 2,922,158 (95%) |
+| HOT branches (jmp+jcc) | 173,393 |
+| HOT basic blocks | ~208K, avg 13.3 insns, **max 21,789** |
+| COLD remainder | 984 funcs / 605 KB (`.cold` partitions, `__Syms` ctor, `main`, dump/trace) |
+
+Function-size distribution in HOT: p50 = 293 B, p90 = 15 KB, p99 = 98 KB,
+max = **218,752 B** (`___nba_sequent__TOP__131`, 45,675 insns, only 43
+branches — a near-branch-free straight-line monster). Top-20 HOT functions
+are all `___nba_sequent__TOP__*` / `___stl_*` / `___act_comb__TOP__*`
+region functions of 95–218 KB each.
+
+### 13.3 Opcode census (HOT, 2.78M insns)
+
+| Class | Count | Share | Note |
+|---|---|---|---|
+| `mov` | 797,634 | 29% | incl. state-struct traffic |
+| `and`+`or`+`xor` | 756,843 | 27% | bitwise kernels, inlined `_vl_words_*` |
+| shifts (`shl/shr/shrx/shlx/shrd`) | 365,329 | 13% | variable part-selects, funnel shifts |
+| `movzx` | 119,217 | 4.3% | bit/byte field extracts |
+| `cmp`+`test` | 149,521 | 5.4% | compares feeding branches/setcc |
+| branches | ~173K | 6.2% | jmp 60K + je 51K + jne 43K + … |
+| `sete`/`setcc` family | ~45K | 1.6% | GCC if-conversion (branch→setcc+logic) |
+| `call` | 30,895 | 1.1% | see §13.4 |
+| SIMD `ymm`/`zmm` insns | 14,278 | 0.5% | AVX2 only; **zero AVX-512, zero xmm-only** |
+| indirect `jmp`/`call` | 33 / 10 | — | jump tables are rare; GCC already lowered switches to compare trees |
+
+Memory operands: ~440K state-struct accesses (`[reg+disp]` on the
+`___024root` pointer — *not* rip-relative), ~286K stack, ~41K rip-relative.
+≈27% of all HOT instructions touch memory — the D-cache side of the same
+wall as the I-cache side.
+
+### 13.4 The debug/trace tax — biggest single lever found
+
+Top static call targets inside the HOT cone:
+
+| Callee | Call sites | Role |
+|---|---|---|
+| `VL_WRITEF` | 5,800 | `$display`/`$write`/`$monitor` formatting |
+| `sc_time_stamp` | 5,505 | `$time`/`$realtime` evaluation |
+| `Verilated::threadContext` | 5,497 | TLS/context fetch in debug+MT paths |
+| `VL_STOP_MT` | 5,380 | `$stop`/`$fatal`/assertion failure path |
+| `VL_DBG_MSGF` | 2,355 | `VL_DEBUG_IF` message bodies |
+| **subtotal** | **24,537** | **79% of all 30,895 HOT call sites** |
+
+These are mostly *guarded* (debug flag / assertion-fail / display-enable), so
+they rarely execute — but their code, guard branches, and call sites are
+unconditionally resident in `.text` and in the per-cycle call cone. This is
+the concrete machine-level cost of the `-DVL_DEBUG` + `--assert` +
+trace-enabled verification build identified in §7-F: a perf SKU compiled
+without them sheds the majority of remaining call scaffolding and a large
+fraction of the 13.5 MB `.text`. `VL_CVT_PACK_STR_NW` (name packing for
+displays, 114 sites) and `VlTriggerVec::BitRef::operator=` (211 sites, the
+change-detect writes) are the next tier.
+
+Non-inlined compute helpers still called: `VL_SHIFTL_WWI` funnel shift
+(~460 sites across `.constprop`/`.isra` clones — the 365K shift insns'
+outline path), `VL_ASSIGNSEL_WQ`/`_vl_insert_WW` part-select writes
+(~420 sites), `_vl_words_zero` (42).
+
+### 13.5 What the numbers say about generic improvements
+
+Ranked by measured structural impact, all generic (not hyp8-specific):
+
+1. **Code volume is the wall, not branch count.** 95% of `.text` is in the
+   per-cycle cone; the largest functions are *straight-line* (43 branches /
+   45K insns). I-cache misses are driven by bytes-touched-per-eval, so the
+   wins are transforms that shrink generated code: case→ConstPool LUT
+   (§12, kills compare trees), or-accumulate→ctz (§12.1, kills ~72-test
+   chains), and **function outlining / dedup of the ~90×-replicated
+   `__Vfunc` instances** (25K instances / 282 functions — the single largest
+   remaining volume lever).
+2. **Debug/trace scaffolding ≈ 79% of call sites.** A `VL_DEBUG`-free,
+   `--assert`-free perf flavour is worth more than any single RTL transform
+   measured so far — it is a build-config change, zero compiler work.
+   `VL_ATTR_COLD` already isolates `.cold` partitions correctly (605 KB
+   total), proving the mechanism works when applied.
+3. **Shift+extract dominance (17.3% of insns).** `shlx/shrx/andn` prove
+   `-march=x86-64-v3` is live. The residual cost is *dynamic* part-selects
+   and funnel shifts — exactly what `VL_SHIFTL_WWI`/`_vl_insert_WW` outline
+   (~880 combined call sites). Generic target: recognize funnel-shift and
+   variable-bit-slice idioms in `V3Slice`/`V3Prio` and emit `shld/shrd`-class
+   single-insn forms or `bzhi`/`pdep`-style BMI ops where the pattern is
+   provably equivalent; keep the `_W` helper as fallback.
+4. **SIMD is nearly absent (0.5%) and that's structural, not a kernel gap.**
+   State is accessed as scalar words through the root struct (440K disp-mem
+   ops); the `_vl_words_*` AVX2 kernels only fire on ≥256-bit packed ops.
+   AVX-512 masked ops would not move this needle — the blocker is AoS→SoA
+   data layout (`V3Soa` refuses ~13.8K sites), not instruction selection.
+   Confirmed: no hot call site justifies AVX-512 kernels today.
+5. **Branch density leaders are settle/comb regions** (`stl_sequent__TOP__37-39`
+   at 45–47 branches/KB, `act_comb__TOP__198-200`, `nba_comb__TOP__759`) —
+   consistent with the if-chain/decision-tree pathologies the case-table and
+   prio transforms target. `jmp`-table density is negligible (33 indirect
+   jumps HOT-wide), so LUT-vs-tree trade-offs should assume compare trees,
+   not `jmp *`.
+6. **BB granularity**: avg 13.3 insns/BB but 157 BBs exceed 1,000 insns and
+   one reaches 21,789 — straight-line regions where *no* branch predictor or
+   skipping helps; only code-size reduction (outlining/dedup/LUT) shrinks
+   their fetch footprint.
+
+### 13.6 Reusable queries
+
+```sql
+-- top HOT functions by size
+SELECT size, insn_count, n_jcc+n_jmp, name FROM functions
+ WHERE tier='HOT' ORDER BY size DESC LIMIT 25;
+
+-- branch-density hotspots
+SELECT (n_jcc+n_jmp)*1024.0/size AS per_kb, name FROM functions
+ WHERE tier='HOT' AND size>20000 ORDER BY 1 DESC LIMIT 15;
+
+-- debug/trace call-site census
+SELECT c.target_addr, COUNT(*), MAX(c.target_name) FROM calls c
+ JOIN functions f ON f.addr=c.caller_addr WHERE f.tier='HOT'
+ GROUP BY c.target_addr ORDER BY 2 DESC LIMIT 15;
+
+-- opcode mix per tier
+SELECT mnem, SUM(count) FROM func_mnem fm JOIN functions f
+ ON f.addr=fm.func_addr WHERE f.tier='HOT' GROUP BY mnem
+ ORDER BY 2 DESC LIMIT 25;
+
+-- map a function back to its generated .cpp: nm each *.o for the symbol,
+-- the .o basename is the DepSet filename.
+```
+
+Caveats: tiers are *structural* reachability, not sampled frequencies —
+trigger gating inside functions means the dynamically-hot subset is smaller;
+`.cold` partitions and `__Vthread__` seeding are the two corrections already
+applied. For true per-instruction counts, run `perf record` on the builder
+against the same ELF (the archive lacks `.gcno`, so the `.gcda` set is
+unusable without the instrumented objects).
+
 ## APU Compiler/Simulator PGO And Bounded Unroll
 
 APU RTL leaves now provision the `tools/verilator` fork through
