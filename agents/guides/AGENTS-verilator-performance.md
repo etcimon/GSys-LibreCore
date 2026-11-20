@@ -2803,3 +2803,33 @@ logic iteration that feeds `processMoveOneLogic` deterministic by sorting
 on a stable key (fileline/name) at the iteration site, preserving the
 dependency-driven order semantics. Highest-value follow-up: it makes every
 perf A/B reproducible AND stabilizes codegen size.
+
+### 22.6 CRITICAL near-miss: toolchain header was silently reverted → cv experiment void
+
+Discovered while auditing the devcv build: the **installed**
+`runtime/include/verilated_threads.h` (and its hardlink twin
+`share/verilator/include/verilated_threads.h`, same inode) was the
+**pre-cv 10260-byte version** — the earlier "restore pre-cv header" step
+(done to decontaminate devnodebug) had reverted the toolchain header
+*globally*. devcv v2 was therefore compiling ~2543 objects against the OLD
+mask → a cv-less binary that would have falsely read as "cv-sleep no
+help." Caught before the probe ran.
+
+**Facts that matter for any runtime-header experiment:**
+- Model `.mk` sets `VERILATOR_ROOT = .../toolchains/verilator-v5.008-g6lc-dev/runtime`
+  (NOT `share/verilator`); `include $(VERILATOR_ROOT)/include/verilated.mk`.
+- `runtime/include/*` and `share/verilator/include/*` are **hardlinks**
+  (same inode) — editing one edits both; there is no separate copy.
+- Effective `-I` is `$(VERILATOR_ROOT)/include` = `runtime/include`.
+- `verilated.mk` honors a **command-line `VERILATOR_ROOT=` override**
+  (make CLI vars beat file assignments, and the `include` directive +
+  `-I`/`VPATH` all re-resolve through it).
+
+**Isolation pattern used (keeps sibling A/Bs clean):** built
+`/opt/testharness/cvroot` = symlink farm of `share/verilator` with
+`include/verilated_threads.h` replaced by the real 11862-byte cv file.
+`make VERILATOR_ROOT=/opt/testharness/cvroot` → every TU (model +
+`verilated*.cpp` runtime, reached via `VPATH`+quoted-include) sees the cv
+header → consistent new mask layout, while gcc16/pubflat/devclean keep the
+toolchain's old header → uncontaminated A/Bs. Verified `-I.../cvroot/include`
+in the compile lines + `cvroot/include/verilated*.cpp` as VPATH sources.
