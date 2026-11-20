@@ -2785,3 +2785,21 @@ true → zero default savings). Real levers, in order of risk:
 2. Structural: teach the case decoder to expose its match bits so the
    parallel_case check reuses them instead of re-comparing (deep, risky).
 3. Inline small decode helpers so GCC CSEs repeated compares (broad).
+
+### 22.5 Nondeterminism mechanism refined — function-split boundaries
+
+`V3Order.cpp:processMoveOneLogic` (1202-1254) packs logic into `AstCFunc`s,
+splitting when the running statement count exceeds
+`opt.outputSplitCFuncs()`. The per-vertex processing order feeding this
+comes from the ordering/partition passes that iterate `unordered_*`
+containers → the *boundaries* where `newStmtsr` crosses the threshold vary
+run-to-run → different `__Slow`/DepSet populations → different GCC
+inlining → the ±20% insn swing. `slow()` (V3Order.cpp:1246, V3Sched.cpp:65)
+inherits `m_slow`/procedure suspendability, compounding the layout delta.
+
+**Fix direction** (not yet implemented — needs a repro pair + care not to
+perturb the topological order the algorithm depends on): make the vertex/
+logic iteration that feeds `processMoveOneLogic` deterministic by sorting
+on a stable key (fileline/name) at the iteration site, preserving the
+dependency-driven order semantics. Highest-value follow-up: it makes every
+perf A/B reproducible AND stabilizes codegen size.
