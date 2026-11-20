@@ -884,6 +884,7 @@ def cmd_doctor(rem: Remote, args) -> int:
     log("--- remote features ---")
     for tool, probe in (
         ("g++", "g++ --version | head -1"),
+        ("host-gcc", f"ls -d {REMOTE_ROOT}/toolchains/gcc-*/bin/g++ 2>/dev/null | sort -V | tail -1"),
         ("make", "make --version | head -1"),
         ("git", "git --version"),
         ("python3", "python3 --version"),

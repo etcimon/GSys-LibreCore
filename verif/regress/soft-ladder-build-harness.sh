@@ -37,6 +37,8 @@
 #   SOFT_LADDER_BUILD_CCACHE_DIR=/path/to/cache  # persistent ccache directory
 #   SOFT_LADDER_BUILD_CCACHE_MAXSIZE=5G          # default 5 GiB
 #   SOFT_LADDER_BUILD_LINKER=mold                # use mold (default: system ld)
+#   SOFT_LADDER_BUILD_TOOLCHAIN=<prefix>         # host GCC prefix (install-gcc.sh);
+#                                              # bin/gcc+bin/g++ for C++ compile+link
 #   SOFT_LADDER_BUILD_CXXFLAGS=...               # extra C++ compile flags
 #   SOFT_LADDER_BUILD_LDFLAGS=...                # extra C/C++ link flags
 
@@ -109,6 +111,25 @@ export SPIKE_INSTALL_DIR="${SPIKE_INSTALL_DIR:-$ROOT/build-platform/workspace/to
 export RISCV="${RISCV:-/opt/xpack/xpack-riscv-none-elf-gcc-14.2.0-3}"
 export LD_LIBRARY_PATH="$SPIKE_INSTALL_DIR/lib:${LD_LIBRARY_PATH:-}"
 export CVA6_REPO_DIR="${CVA6_REPO_DIR:-$ROOT}"
+
+# Optional host toolchain prefix — build-platform/scripts/install-gcc.sh on the
+# builder produces /opt/testharness/toolchains/gcc-<ver>-<tune>, a newer
+# cc1/cc1plus for the generated-C++ compile and link (LINK defaults to $CXX).
+# SOFT_LADDER_BUILD_TOOLCHAIN=<prefix> selects its bin/gcc+bin/g++. A bare
+# CC=gcc/CXX=g++ — including the pin in the remote env.sh — counts as unset so
+# the prefix wins over distro defaults; an explicit compiler path still wins.
+# Opt-in only: a different compiler is a different instrument — models built
+# with it need re-qualification before they carry evidence.
+TOOLCHAIN="${SOFT_LADDER_BUILD_TOOLCHAIN:-}"
+if [[ -n "$TOOLCHAIN" ]]; then
+  if [[ -x "$TOOLCHAIN/bin/gcc" && -x "$TOOLCHAIN/bin/g++" ]]; then
+    [[ -z "${CC:-}" || "${CC:-}" == "gcc" ]] && CC="$TOOLCHAIN/bin/gcc"
+    [[ -z "${CXX:-}" || "${CXX:-}" == "g++" ]] && CXX="$TOOLCHAIN/bin/g++"
+    log "toolchain: $TOOLCHAIN (CC=$CC CXX=$CXX)"
+  else
+    log "warn: SOFT_LADDER_BUILD_TOOLCHAIN=$TOOLCHAIN has no bin/gcc+bin/g++; keeping the default compiler"
+  fi
+fi
 export CXX="${CXX:-g++}" CC="${CC:-gcc}"
 
 # Compiler/linker cache controls. ccache fronts the C++ compile step; mold

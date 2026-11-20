@@ -108,6 +108,7 @@ Install helpers (`install-spike.sh`, `install-verilator.sh`, …) and `common-ri
 | `STABILITY_SKIP_*` | `stability-regress` | Skip individual legs (`HEDGE`, `SPO_SPIKE`, `MINI`, `SOAK`) |
 | `OUT_DIR` | spike paths | Prefer Linux `/tmp/...` on WSL+NTFS trees |
 | `SOFT_LADDER_VERILATOR_FLAVOUR` / `SOFT_LADDER_BUILD_SPLIT_VLT` / `SOFT_LADDER_BUILD_OPT` / `SOFT_LADDER_BUILD_PGO[_TRAIN,_CYCLES]` / `SOFT_LADDER_VERILATOR_THREADS` / `SOFT_LADDER_BUILD_MARCH` | `soft-ladder-build-harness` | Build of record knobs (defaults `g6lc` / 1 / `-O2` / 1 / 4 / `x86-64-v3` on AVX2 hosts for `g6lc`, else `none`); see §3 |
+| `SOFT_LADDER_BUILD_TOOLCHAIN` / `HYP8_BUILD_TOOLCHAIN` | `soft-ladder-build-harness`, `hyp8-build-harness` | Host GCC prefix from `build-platform/scripts/install-gcc.sh` (e.g. `/opt/testharness/toolchains/gcc-16.2.0-znver4`); its `bin/gcc`+`bin/g++` replace the bare `gcc`/`g++` defaults for the generated-C++ compile/link — an explicit `CC`/`CXX` path still wins. Opt-in only: a different compiler is a different instrument, re-qualify. Proxy: `build <flavour> --env SOFT_LADDER_BUILD_TOOLCHAIN=<prefix>` |
 
 ---
 

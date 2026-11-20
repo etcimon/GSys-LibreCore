@@ -43,6 +43,14 @@
 #                                 profiles the OpenSBI/Linux boot path itself.
 #   HYP8_BUILD_PGO_CYCLES=2000000 cycle cap of each training run
 #
+# Host compiler (same rule as soft-ladder-build-harness.sh):
+#   HYP8_BUILD_TOOLCHAIN=<prefix>  install-gcc.sh prefix -> its bin/gcc+bin/g++
+#                                 for the generated-C++ compile/link;
+#                                 SOFT_LADDER_BUILD_TOOLCHAIN is the fallback.
+#                                 Bare gcc/g++ defaults count as unset; an
+#                                 explicit CC/CXX path still wins. Opt-in: a
+#                                 different compiler is a different instrument.
+#
 # Long builds (the 8-hart g6lc64_hyp8_mc model verilates for hours and emits
 # ~13 GB of C++): the work of a completed stage is never redone.
 #   HYP8_BUILD_RESUME=1           reuse a completed verilation in the model
@@ -145,6 +153,20 @@ export SPIKE_INSTALL_DIR="${SPIKE_INSTALL_DIR:-$ROOT/build-platform/workspace/to
 export RISCV="${RISCV:-/opt/xpack/xpack-riscv-none-elf-gcc-14.2.0-3}"
 export LD_LIBRARY_PATH="$SPIKE_INSTALL_DIR/lib:${LD_LIBRARY_PATH:-}"
 export CVA6_REPO_DIR="${CVA6_REPO_DIR:-$ROOT}"
+
+# Optional host toolchain prefix — same rule as soft-ladder-build-harness.sh:
+# HYP8_BUILD_TOOLCHAIN (SOFT_LADDER_BUILD_TOOLCHAIN fallback) selects the
+# install-gcc.sh prefix's bin/gcc+bin/g++; bare gcc/g++ defaults count as unset.
+TOOLCHAIN="${HYP8_BUILD_TOOLCHAIN:-${SOFT_LADDER_BUILD_TOOLCHAIN:-}}"
+if [[ -n "$TOOLCHAIN" ]]; then
+  if [[ -x "$TOOLCHAIN/bin/gcc" && -x "$TOOLCHAIN/bin/g++" ]]; then
+    [[ -z "${CC:-}" || "${CC:-}" == "gcc" ]] && CC="$TOOLCHAIN/bin/gcc"
+    [[ -z "${CXX:-}" || "${CXX:-}" == "g++" ]] && CXX="$TOOLCHAIN/bin/g++"
+    log "toolchain: $TOOLCHAIN (CC=$CC CXX=$CXX)"
+  else
+    log "warn: toolchain prefix $TOOLCHAIN has no bin/gcc+bin/g++; keeping the default compiler"
+  fi
+fi
 export CXX="${CXX:-g++}" CC="${CC:-gcc}"
 
 OBJCACHE="${SOFT_LADDER_BUILD_OBJCACHE:-}"

@@ -236,6 +236,18 @@ RTL-only by nature and must be `ifdef`-able out of a netlist build.
   Build-speed knobs are not a simulation-speed lever: the C++ of a server model is
   dominated by the few 30 MB units (`__Syms`, the big `_nba_sequent` files) that no
   cache or linker shortens.
+- **The compiler binary itself** (available, not yet A/B-measured):
+  `build-platform/scripts/install-gcc.sh` builds a c/c++-only GCC (`GCC_VER`,
+  default 16.2.0) on the builder into `/opt/testharness/toolchains/gcc-<ver>-<tune>`
+  — `--with-tune=znver4`, `-march=native` for cc1/cc1plus itself, and
+  `make profiledbootstrap` by default (`GCC_PROFILED=0` for a single-stage
+  install). The harnesses select it per build with
+  `SOFT_LADDER_BUILD_TOOLCHAIN=<prefix>` (hyp8: `HYP8_BUILD_TOOLCHAIN`; proxy:
+  `build <flavour> --env SOFT_LADDER_BUILD_TOOLCHAIN=<prefix>`); env.sh's bare
+  `CXX=g++`/`CC=gcc` counts as unset, an explicit `CC`/`CXX` path still wins.
+  Expect at most low-teens % on cold cc1plus-bound builds — the 30 MB units
+  dominate regardless — and zero on ccache hits; a different compiler is a new
+  instrument and needs re-qualification before it carries evidence.
 - **Identity**: the Verilator work lives in the fork `github.com/etcimon/verilator`,
   branch `g6lc` (based on the pinned `v5.008`), pinned as the submodule
   `tools/verilator`; `build-platform/scripts/install-verilator-g6lc.sh` builds the pinned
