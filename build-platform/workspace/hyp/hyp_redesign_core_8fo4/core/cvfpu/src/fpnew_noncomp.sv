@@ -229,8 +229,16 @@ module fpnew_noncomp #(
     // Min/Max use quiet comparisons - only sNaN are invalid
     minmax_status.NV = signalling_nan;
 
+    // RDN/RUP are Zfa fminm/fmaxm: any NaN → canonical qNaN (sNaN still NV).
+    if (inp_pipe_rnd_mode_q[NUM_INP_REGS] inside {fpnew_pkg::RDN, fpnew_pkg::RUP}) begin
+      if (info_a.is_nan || info_b.is_nan)
+        minmax_result = '{sign: 1'b0, exponent: '1, mantissa: 2**(MAN_BITS-1)};
+      else if (inp_pipe_rnd_mode_q[NUM_INP_REGS] == fpnew_pkg::RDN)
+        minmax_result = operand_a_smaller ? operand_a : operand_b; // MINM
+      else
+        minmax_result = operand_a_smaller ? operand_b : operand_a; // MAXM
     // Both NaN inputs cause a NaN output
-    if (info_a.is_nan && info_b.is_nan)
+    end else if (info_a.is_nan && info_b.is_nan)
       minmax_result = '{sign: 1'b0, exponent: '1, mantissa: 2**(MAN_BITS-1)}; // canonical qNaN
     // If one operand is NaN, the non-NaN operand is returned
     else if (info_a.is_nan) minmax_result = operand_b;
@@ -280,6 +288,14 @@ module fpnew_noncomp #(
         fpnew_pkg::RDN: begin // Equal
           if (any_operand_nan) cmp_result = inp_pipe_op_mod_q[NUM_INP_REGS]; // NaN always not equal
           else cmp_result = operands_equal ^ inp_pipe_op_mod_q[NUM_INP_REGS];
+        end
+        fpnew_pkg::RMM: begin // Zfa fleq: quiet LE (qNaN no NV; sNaN already NV above)
+          if (any_operand_nan) cmp_result = inp_pipe_op_mod_q[NUM_INP_REGS];
+          else cmp_result = (operand_a_smaller | operands_equal) ^ inp_pipe_op_mod_q[NUM_INP_REGS];
+        end
+        fpnew_pkg::ROD: begin // Zfa fltq: quiet LT
+          if (any_operand_nan) cmp_result = inp_pipe_op_mod_q[NUM_INP_REGS];
+          else cmp_result = (operand_a_smaller & ~operands_equal) ^ inp_pipe_op_mod_q[NUM_INP_REGS];
         end
         default: cmp_result = '{default: fpnew_pkg::DONT_CARE}; // don't care
       endcase

@@ -1266,7 +1266,7 @@ module g6lc_decode_s2
               if (G6LCCfg.XF8) cand.op = g6lc_core_pkg::FSB;
               else illegal_bit = 1'b1;
               3'b001:
-              if (G6LCCfg.XF16 | G6LCCfg.XF16ALT) cand.op = g6lc_core_pkg::FSH;
+              if (G6LCCfg.XF16 | G6LCCfg.XF16ALT | G6LCCfg.RVZfhmin) cand.op = g6lc_core_pkg::FSH;
               else illegal_bit = 1'b1;
               3'b010:
               if (G6LCCfg.RVF) cand.op = g6lc_core_pkg::FSW;
@@ -1297,7 +1297,7 @@ module g6lc_decode_s2
               if (G6LCCfg.XF8) cand.op = g6lc_core_pkg::FLB;
               else illegal_bit = 1'b1;
               3'b001:
-              if (G6LCCfg.XF16 | G6LCCfg.XF16ALT) cand.op = g6lc_core_pkg::FLH;
+              if (G6LCCfg.XF16 | G6LCCfg.XF16ALT | G6LCCfg.RVZfhmin) cand.op = g6lc_core_pkg::FLH;
               else illegal_bit = 1'b1;
               3'b010:
               if (G6LCCfg.RVF) cand.op = g6lc_core_pkg::FLW;
@@ -1409,45 +1409,67 @@ module g6lc_decode_s2
               5'b00101: begin
                 cand.op = g6lc_core_pkg::FMIN_MAX;  // fmin/fmax.fmt - FP Minimum / Maximum
                 check_fprm       = 1'b0;  // instruction encoded in rm, do the check here
-                if (G6LCCfg.XF16ALT) begin           // FP16ALT instructions encoded in rm separately (static)
-                  if (!(instr.rftype.rm inside {[3'b000 : 3'b001], [3'b100 : 3'b101]}))
-                    illegal_bit = 1'b1;
-                end else begin
-                  if (!(instr.rftype.rm inside {[3'b000 : 3'b001]})) illegal_bit = 1'b1;
-                end
+                // rm 000/001: fmin/fmax. rm 010/011: Zfa fminm/fmaxm (S/D;
+                // H only with XF16 via the fmt check below). rm 100/101: XF16ALT.
+                if (instr.rftype.rm inside {3'b000, 3'b001}) ;
+                else if (G6LCCfg.RVZfa && instr.rftype.rm inside {3'b010, 3'b011}) ;
+                else if (G6LCCfg.XF16ALT && instr.rftype.rm inside {3'b100, 3'b101}) ;
+                else illegal_bit = 1'b1;
               end
               5'b01000: begin
-                cand.op = g6lc_core_pkg::FCVT_F2F;  // fcvt.fmt.fmt - FP to FP Conversion
-                cand.rs2 = instr.rvftype.rs1; // tie rs2 to rs1 to be safe (vectors use rs2)
+                cand.rs2 = '0;  // rs2 is an encoding; do not wait a GPR
                 imm_select = IIMM;  // rs2 holds part of the instruction
-                if (|instr.rftype.rs2[24:23])
-                  illegal_bit = 1'b1;  // bits [22:20] used, other bits must be 0
-                // check source format
-                unique case (instr.rftype.rs2[22:20])
-                  // Only process instruction if corresponding extension is active (static)
-                  3'b000:  if (~G6LCCfg.RVF) illegal_bit = 1'b1;
-                  3'b001:  if (~G6LCCfg.RVD) illegal_bit = 1'b1;
-                  3'b010:  if (~G6LCCfg.XF16) illegal_bit = 1'b1;
-                  3'b110:  if (~G6LCCfg.XF16ALT) illegal_bit = 1'b1;
-                  3'b011:  if (~G6LCCfg.XF8) illegal_bit = 1'b1;
-                  default: illegal_bit = 1'b1;
-                endcase
+                // Zfa fround/froundnx: rs2=00100/00101, dest fmt from instr.fmt,
+                // same-format round-to-integral (not F2F).
+                if (G6LCCfg.RVZfa && instr.rftype.rs2 == 5'b00100) begin
+                  cand.op = g6lc_core_pkg::FROUND;
+                end else if (G6LCCfg.RVZfa && instr.rftype.rs2 == 5'b00101) begin
+                  cand.op = g6lc_core_pkg::FROUNDNX;
+                end else begin
+                  cand.op = g6lc_core_pkg::FCVT_F2F;  // fcvt.fmt.fmt - FP to FP Conversion
+                  cand.rs2 = instr.rvftype.rs1; // tie rs2 to rs1 to be safe (vectors use rs2)
+                  if (|instr.rftype.rs2[24:23])
+                    illegal_bit = 1'b1;  // bits [22:20] used, other bits must be 0
+                  // check source format
+                  unique case (instr.rftype.rs2[22:20])
+                    // Only process instruction if corresponding extension is active (static)
+                    3'b000:  if (~G6LCCfg.RVF) illegal_bit = 1'b1;
+                    3'b001:  if (~G6LCCfg.RVD) illegal_bit = 1'b1;
+                    3'b010:  if (~G6LCCfg.XF16 & ~G6LCCfg.RVZfhmin) illegal_bit = 1'b1;
+                    3'b110:  if (~G6LCCfg.XF16ALT) illegal_bit = 1'b1;
+                    3'b011:  if (~G6LCCfg.XF8) illegal_bit = 1'b1;
+                    default: illegal_bit = 1'b1;
+                  endcase
+                end
               end
               5'b10100: begin
                 cand.op = g6lc_core_pkg::FCMP;  // feq/flt/fle.fmt - FP Comparisons
                 check_fprm       = 1'b0;  // instruction encoded in rm, do the check here
-                if (G6LCCfg.XF16ALT) begin       // FP16ALT instructions encoded in rm separately (static)
-                  if (!(instr.rftype.rm inside {[3'b000 : 3'b010], [3'b100 : 3'b110]}))
-                    illegal_bit = 1'b1;
-                end else begin
-                  if (!(instr.rftype.rm inside {[3'b000 : 3'b010]})) illegal_bit = 1'b1;
-                end
+                // rm 000/001/010: fle/flt/feq. rm 100/101 on S/D: Zfa fleq/fltq
+                // (quiet). rm 100-110 with XF16ALT is the AH encoding on fmt=H.
+                if (instr.rftype.rm inside {3'b000, 3'b001, 3'b010}) ;
+                else if (G6LCCfg.RVZfa && instr.rftype.rm inside {3'b100, 3'b101} &&
+                         instr.rftype.fmt != 2'b10) ;
+                else if (G6LCCfg.XF16ALT &&
+                         instr.rftype.rm inside {3'b100, 3'b101, 3'b110}) ;
+                else illegal_bit = 1'b1;
               end
               5'b11000: begin
-                cand.op = g6lc_core_pkg::FCVT_F2I;  // fcvt.ifmt.fmt - FP to Int Conversion
-                imm_select       = IIMM;  // rs2 holds part of the instruction
-                if (|instr.rftype.rs2[24:22])
-                  illegal_bit = 1'b1;  // bits [21:20] used, other bits must be 0
+                imm_select = IIMM;  // rs2 holds part of the instruction
+                // Zfa fcvtmod.w.d: rs2=01000, fmt=D, rm=RTZ. Modular wrap, not
+                // saturating F2I.
+                if (G6LCCfg.RVZfa && G6LCCfg.RVD &&
+                    instr.rftype.rs2 == 5'b01000 &&
+                    instr.rftype.fmt == 2'b01 &&
+                    instr.rftype.rm == 3'b001) begin
+                  cand.op  = g6lc_core_pkg::FCVTMOD;
+                  cand.rs2 = '0;  // encoding, do not wait GPR x8
+                  check_fprm        = 1'b0;
+                end else begin
+                  cand.op = g6lc_core_pkg::FCVT_F2I;  // fcvt.ifmt.fmt - FP to Int Conversion
+                  if (|instr.rftype.rs2[24:22])
+                    illegal_bit = 1'b1;  // bits [21:20] used, other bits must be 0
+                end
               end
               5'b11010: begin
                 cand.op = g6lc_core_pkg::FCVT_I2F;  // fcvt.fmt.ifmt - Int to FP Conversion
@@ -1467,13 +1489,22 @@ module g6lc_decode_s2
                 if (instr.rftype.rs2 != 5'b00000) illegal_bit = 1'b1;
               end
               5'b11110: begin
-                cand.op = g6lc_core_pkg::FMV_X2F;  // fmv.fmt.ifmt - GPR to FPR Move
-                cand.rs2 = instr.rftype.rs1; // set rs2 = rs1 so we can map FMV to SGNJ in the unit
                 check_fprm = 1'b0;  // instruction encoded in rm, do the check here
-                if (!(instr.rftype.rm == 3'b000 || (G6LCCfg.XF16ALT && instr.rftype.rm == 3'b100)))
-                  illegal_bit = 1'b1;
-                // rs2 must be zero
-                if (instr.rftype.rs2 != 5'b00000) illegal_bit = 1'b1;
+                // Zfa fli.fmt: rs2=00001, rm=000, rs1 is the 5-bit table index
+                // (use_zimm, no GPR wait).
+                if (G6LCCfg.RVZfa && instr.rftype.rs2 == 5'b00001 &&
+                    instr.rftype.rm == 3'b000) begin
+                  cand.op       = g6lc_core_pkg::FLI;
+                  cand.use_zimm = 1'b1;
+                  cand.rs2      = '0;
+                end else begin
+                  cand.op = g6lc_core_pkg::FMV_X2F;  // fmv.fmt.ifmt - GPR to FPR Move
+                  cand.rs2 = instr.rftype.rs1; // set rs2 = rs1 so we can map FMV to SGNJ in the unit
+                  if (!(instr.rftype.rm == 3'b000 || (G6LCCfg.XF16ALT && instr.rftype.rm == 3'b100)))
+                    illegal_bit = 1'b1;
+                  // rs2 must be zero
+                  if (instr.rftype.rs2 != 5'b00000) illegal_bit = 1'b1;
+                end
               end
               default:  illegal_bit = 1'b1;
             endcase
@@ -1483,7 +1514,16 @@ module g6lc_decode_s2
               // Only process instruction if corresponding extension is active (static)
               2'b00:   if (~G6LCCfg.RVF) illegal_bit = 1'b1;
               2'b01:   if (~G6LCCfg.RVD) illegal_bit = 1'b1;
-              2'b10:   if (~G6LCCfg.XF16 & ~G6LCCfg.XF16ALT) illegal_bit = 1'b1;
+              2'b10: begin
+                // Zfhmin: dest-fmt H is legal only for convert/move, not
+                // fadd.h. Zfa half (fli.h/fround.h/fminm.h) needs XF16.
+                if (G6LCCfg.XF16 | G6LCCfg.XF16ALT) ;
+                else if (G6LCCfg.RVZfhmin &&
+                         (cand.op inside {g6lc_core_pkg::FCVT_F2F,
+                                          g6lc_core_pkg::FMV_F2X,
+                                          g6lc_core_pkg::FMV_X2F})) ;
+                else illegal_bit = 1'b1;
+              end
               2'b11:   if (~G6LCCfg.XF8) illegal_bit = 1'b1;
               default: illegal_bit = 1'b1;
             endcase

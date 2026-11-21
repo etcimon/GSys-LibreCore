@@ -175,8 +175,8 @@ package g6lc_config_pkg;
       RVZimop: bit'(1),     // mop.r.n / mop.rr.n -> ADD x0-class write-0
       RVZcmop: bit'(1),     // c.mop.n -> addi x0,x0,0 (requires RVC)
       RVZihintntl: bit'(1), // ntl.* drop dummy rs2 operand wait
-      RVZfhmin: bit'(0),    // pending: FLH/FSH + fcvt H<->S/D
-      RVZfa: bit'(0),       // pending: fli/fround/fcvtmod/fminm/fleq/fltq
+      RVZfhmin: bit'(1),    // FLH/FSH + fcvt H<->S/D (ported: decode+fpnew CONV/NONCOMP)
+      RVZfa: bit'(1),       // fli/fround/froundnx/fcvtmod/fminm/fmaxm/fleq/fltq (ported)
       RVZicclsm: bit'(1),   // misaligned ldst 2-beat wrap split (g6lc_zicclsm)
       // za64rs: monitor g6lc_axi_lrsc keys reservations on exact AXI address
       // = a legal <=64B contiguous naturally-aligned set; D$ line 128b=16B
