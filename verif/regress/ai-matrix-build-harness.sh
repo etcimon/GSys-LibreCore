@@ -65,6 +65,23 @@ export SPIKE_INSTALL_DIR="${SPIKE_INSTALL_DIR:-$ROOT/build-platform/workspace/to
 export RISCV="${RISCV:-/opt/xpack/xpack-riscv-none-elf-gcc-14.2.0-3}"
 export LD_LIBRARY_PATH="${SPIKE_INSTALL_DIR}/lib:${LD_LIBRARY_PATH:-}"
 export CVA6_REPO_DIR="${CVA6_REPO_DIR:-$ROOT}"
+# Optional host toolchain prefix — same contract as soft-ladder-build-harness.sh:
+# a build-platform/scripts/install-gcc.sh prefix; its bin/gcc+bin/g++ compile
+# and link the generated C++. AI_MATRIX_BUILD_TOOLCHAIN selects it,
+# SOFT_LADDER_BUILD_TOOLCHAIN is the fallback; a bare CC=gcc/CXX=g++ — including
+# the pin in the remote env.sh — counts as unset so the prefix wins. The bin
+# also goes on PATH so the -O0 CXX_WRAP's `command -v g++` resolves to it.
+TOOLCHAIN="${AI_MATRIX_BUILD_TOOLCHAIN:-${SOFT_LADDER_BUILD_TOOLCHAIN:-}}"
+if [[ -n "$TOOLCHAIN" ]]; then
+  if [[ -x "$TOOLCHAIN/bin/gcc" && -x "$TOOLCHAIN/bin/g++" ]]; then
+    export PATH="$TOOLCHAIN/bin:$PATH"
+    [[ -z "${CC:-}" || "${CC:-}" == "gcc" ]] && CC="$TOOLCHAIN/bin/gcc"
+    [[ -z "${CXX:-}" || "${CXX:-}" == "g++" ]] && CXX="$TOOLCHAIN/bin/g++"
+    log "toolchain: $TOOLCHAIN (CC=$CC CXX=$CXX)"
+  else
+    log "warn: toolchain $TOOLCHAIN has no bin/gcc+bin/g++; keeping the default compiler"
+  fi
+fi
 export CXX="${CXX:-g++}" CC="${CC:-gcc}"
 
 # Verilator flavour: pinned (default — the -O0 AI-island debug baseline) or
