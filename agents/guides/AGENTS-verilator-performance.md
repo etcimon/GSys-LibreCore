@@ -3507,3 +3507,29 @@ pass (VL_SIMD_WORDS>=16 only) to the elementwise + orxor/orall/xorall/funnel
 kernels -> AVX-512 no longer loses narrow-op coverage vs AVX2. Compile-verified
 on v4/v3/core2; incremental benefit unmeasured (small share of the ~1% domain)
 but strict-superset, cannot regress.
+
+§40 BMI2/VBMI2 EXECUTION-PATH SWEEP (commit 716fa6d4e)
+
+Census of BMI-family instrs in devclean binary: shrx 897k, shlx 269k,
+andn 130k, pext 13.7k, rorx 8.6k, blsr 4.6k -- scalar variable-shift/mask
+lowering was already BMI2-clean. pdep=0 is NOT a gap: SV part-selects emit
+contiguous masked field ops (andn+or), not packed-scatter, so PDEP does not
+apply semantically. PEXT sites already covered; mulx/bzhi/tzcnt have no
+emitted-idiom denominators.
+
+REAL GAP FOUND + FIXED -- hardware funnel shift: _vl_words_funnel serves
+every unaligned wide shift (VL_SHIFTL_WWI 4692 + SHIFTRS_WWI 96 + SHIFTR_WWI
+62 sites) via _vl_insert_WW middle words and VL_SHIFTR_WWI tails. Host has
+avx512_vbmi2 (vpshrdvd/vpshldvd) but gcc does NOT fuse (cur>>s)|(nxt<<shl)
+into it -- 0 vpshrdv in the -march=native binary. Added _VL_HW_FUNNEL
+(AVX512F+VL+VBMI2): _vl_simd_funnel_{f,h,q} pick _mm512/_mm256/_mm
+shrdv_epi32 per tier width -> 1 instr per chunk instead of 3. Callers all
+pass shl==32-shr so the single count operand is exact. Validated standalone
+n=1..79 x shr=1..31 vs scalar ref, 0 fails on native/v4/v3/core2; vpshrdv
+emitted only under native (v4 lacks vbmi2 -> generic path, still vectorized).
+Incremental model gain small (funnel subset of ~1% wide-helper domain) but
+strict improvement, zero-risk: falls back to the committed tiered path.
+
+Also verified NOT profitable: _vl_shiftl_inplace_w has 0 generated sites;
+VL_COUNTONES_W (11 sites, 4-7 words) stays scalar -- a vpopcntdq path would
+cost more in setup than the 4-7 scalar popcnts it replaces.
