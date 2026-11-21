@@ -2906,3 +2906,36 @@ gcc 13.3 (`/usr/bin/g++`). The profiledbootstrap/toolchain work remains
 valid for *build-time* throughput, but the runtime A/B is decisively
 negative — another data point that this memory-bound model (IPC~0.2)
 punishes any codegen that adds instructions or hurts layout.
+
+## 25. Strategic conclusion — wait-primitive space is exhausted; real lever is upstream
+
+After four controlled A/B experiments on identical generated sources, **every
+transform/runtime/compiler lever regressed** on this memory-bound model
+(IPC≈0.2, MT spin ≈56% of insns):
+
+| lever | delta insns | delta cycles | verdict |
+|---|---|---|---|
+| case→table (`-fcase-table`) | +38% | +55% | gated OFF |
+| prio-oracc (`-fprio-oracc`) | +15% | +15% | gated to non-unrollable |
+| mask cv-sleep | +39% | +20-26% | reverted |
+| gcc 16.2 vs 13.3 | +14% | +19% | keep gcc13.3 |
+
+**Why the wait primitive can't be tuned further**: the cv-sleep result
+proved dependency waits are *short* (µs-scale). Any mechanism that trades
+spin-polling for sleep/wake syscalls or reduced poll frequency pays
+latency/syscall overhead that exceeds the saved coherence traffic — the
+spin is already near-optimal *for this wait profile*. Backoff variants
+share the same flaw (detection latency on short waits).
+
+**The actual lever** is reducing the *number* of dependency edges /
+lengthening task granularity in `V3Sched`/`V3Order`/`V3SchedPartition` —
+fewer MTask waits → less spin by construction, no wait-primitive tax.
+That is a scheduler-graph change (bigger blast radius, needs its own
+controlled A/B), not a runtime-header tweak. `threads=1` already proved
+the ceiling: removing sync entirely drops insns 5.25e12→2.31e12.
+
+**Build-config lever still open**: `pubflat` (no `--assert`,
+`--public-flat-rw`) quantifies the parallel_case assert tax — if large,
+the safe win is a *release* model build without `--assert`, not assert
+codegen surgery (the match-vector is the `if` condition; it cannot be
+cheapened without changing semantics).
