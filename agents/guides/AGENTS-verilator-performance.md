@@ -2939,3 +2939,45 @@ the ceiling: removing sync entirely drops insns 5.25e12→2.31e12.
 the safe win is a *release* model build without `--assert`, not assert
 codegen surgery (the match-vector is the `if` condition; it cannot be
 cheapened without changing semantics).
+
+## 26. SIMD/AVX coverage audit + half-width tier (implemented, verified)
+
+Audit of `include/verilated_types.h` word-vector kernels against the
+`-march=x86-64-v3` (AVX2) hyp8 build. `VL_SIMD_WORDS` resolves to **8**
+(256-bit ymm) under AVX2 — confirmed `ymm`/`xmm` VEX ops in model objects.
+
+**The gap found**: every word-kernel chunked at `VL_SIMD_WORDS`=8, so any
+operand of **4–7 words (128–224 bits) got ZERO SIMD** and ran the full
+scalar tail. Static call-site histogram of the hot (non-`__Slow`) FAST
+DepSets shows the dominant wide-op bucket is exactly 128–224 bits
+(~6.8K sites: `SHIFTL_WWI`, `ZERO_W`, `ASSIGNSEL_W*`, `ASSIGN_W`).
+
+**Fix — half-width SIMD tier** (`verilated_types.h`, +67/-4):
+- `VL_SIMD_HALF_WORDS = VL_SIMD_WORDS/2` (=4 → 128-bit xmm under AVX2),
+  with `VlSimdHalf` vector type + `_vl_simd_load_h/_store_h/_or_lanes_h`.
+- Elementwise (`_vl_words_and/or/xor/not/andnot`), reductions
+  (`_vl_words_orxor/orall/xorall` → powers `VL_EQ_W`, wide compares), and
+  `_vl_words_funnel` (→ unaligned `SHIFTL/SHIFTR/SHIFTRS`, `_vl_insert_WW`
+  → `ASSIGNSEL`) now emit a full-width pass, then a half-width pass, then
+  the scalar tail — so every operand ≥ half-width uses a vector op.
+
+**Correctness**: `verif/regress/remote/simd_half_test.cpp` brute-forces all
+kernels vs scalar reference, word counts 1–40, 200 trials →
+`SIMD_HALF_TEST_OK` (compiled `-march=x86-64-v3`, `VL_SIMD_WORDS=8`,
+`VL_SIMD_HALF_WORDS=4`; objdump shows `vmovdqu/vpxor/vpor/vpand/vpsrldq`).
+
+**Safety**: header-only `static inline` + macros — **no class/object layout
+change → no ODR/ccache hazard** (unlike the reverted `VlMTaskDoneMask`
+cv-sleep). Lane-wise ops + already-disjoint funnel preserve aliasing rules.
+
+**Deliberately NOT SIMD'd** (verified carry/branch-bound or already optimal):
+- `VL_ADD_W/SUB_W/NEGATE_W/MUL_W` — sequential carry/borrow, ~100 hot uses.
+- `_vl_cmp_w` (LT/GT/LE/GE) — lexicographic early-exit.
+- `VL_ONEHOT_W/ONEHOT0_W`, `VL_COUNTONES_W` — branchy / already `POPCNT`.
+- `_vl_words_zero/copy` → `memset`/`memmove`; `VL_EQ_W`>64w → `memcmp`;
+  all already AVX2 via libc.
+- `_vl_insert_WW` aliased (non-disjoint) path — must stay scalar.
+
+**Status**: implemented + unit-verified; full-model cycles/s A/B pending
+(a header change forces full recompile of every TU — schedule with the
+next controlled build, reuse identical generated `.cpp`).
