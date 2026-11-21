@@ -3429,3 +3429,23 @@ REMAINING (architectural, multi-session): deferred-cost MTask partitioning;
 emission-model change for comb-function co-location/LTO; runtime pool sizing
 backed by emitted parallelismFactor (does NOT reduce mtask/edge count, so it
 cannot reproduce the threads=2 win by itself).
+
+## 37. Idiom-level SIMD audit — CLOSED (remaining scalars are narrow/serial)
+
+Per-helper audit of every wide-word runtime idiom in generated hyp8 code:
+
+  already SIMD (vector tier or libc memset/memcmp):
+    VL_ZERO_W x4327, VL_ASSIGN_W x704, VL_EQ_W x24 / VL_NEQ_W x4
+    (_vl_words_orxor+memcmp), elementwise and/or/xor/not/andnot
+    (_vl_words_*), aligned VL_SHIFTL/SHIFTR_WWI (memcpy/memset).
+
+  scalar-but-unfixable (inherently serial OR width too small for SIMD):
+    VL_ADD_W x85 (3-6 words, carry chain) / VL_SUB_W x13 / VL_NEGATE_W x40 /
+    VL_MUL_W x8  -- serial carry; _vl_cmp_w (LT/GT) is early-exit (optimal).
+    VL_COUNTONES_W x11 (4-7 words) -- the one genuinely vectorizable op, but
+    only 96-224 bits: 4-7 scalar popcnt ~= 8 cycles, SIMD gives ~nothing.
+
+CONCLUSION: SIMD is closed at runtime-helper, codegen __Vi-loop, AND idiom
+levels. All large-width ops vectorized; all remaining scalar ops run on narrow
+data or small widths (<=7 words) where SIMD cannot help. No further runtime
+SIMD work is justified absent a NEW design with genuinely wide hot vectors.
