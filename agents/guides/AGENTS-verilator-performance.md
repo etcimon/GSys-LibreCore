@@ -3626,3 +3626,38 @@ win is marginal. Methodology note: same-generator A/B (pass toggled,
 not different verilator builds) is REQUIRED -- toolchain-vs-devtree
 comparisons showed +922 COUNTONES/+148 SHIFTL/-ATTR_COLD drift that
 fully confounds attribution.
+§45 WHY DEAD-INIT WAS MARGINAL + THE REAL DENOMINATOR MAP (2026-11-21)
+
+Introspection: static site census measured OCCURRENCES, not dynamic
+weight. 4,146 removed memsets ~= 5-20 insns each, once per eval pass,
+vs ~2e7 insns/pass total -> <=1% measured. Lesson: rank candidates by
+DYNAMIC instruction weight first (perf sampling), site count second.
+
+Steady-state perf record (79k samples, devdeadz 200k-cycle run):
+  ~42%   VlMTaskDoneMask::wait + VlWorkerThread::dequeWork  (spin)
+   6.3%  __eval_nba__0 (dispatch + moves)
+  ~45%   flat tail: thousands of comb/sequent fns, each <0.6%
+
+taskset isolation (same 30k sim, same binary):
+  4 CPUs (3 workers): 1.603e12 insns
+ 12 CPUs (11 wkrs):  0.973e12 insns   -> ~39% of retires are spin/idle.
+
+Tail archetypes (objdump census of top hot fns):
+  a) mask-select: and/or + neg/sbb/sar branchless ?: mux -- ALREADY
+     optimal scalar codegen; no per-instruction ISA swap exists.
+  b) branch+call: je ~155, call ~150 / window -- priority dispatch;
+     fix is emission co-location/LTO, not ISA.
+  c) bit-test sequential: bt+jb, inc, movzbl -- already minimal.
+
+Conclusion: per-instruction AVX-512/BMI2 lane is EXHAUSTED on scalar
+datapath. The two remaining real denominators are architectural:
+  1) Spin ~40-60% of retires -- mtask barrier tails; needs scheduler/
+     balance work (stealing, finer barrier, or reduced mtask count),
+     plus a spin-friendly wait (pause+backoff already present?).
+  2) gen_core[0..3] instance replication: 4 identical cores run the
+     SAME comb expressions on different state. Cross-instance SIMD
+     (SoA member layout + packed lanes over the genvar index) is the
+     only large SIMD lane left -- a generic optimization for SV
+     generate-loop replication, not a helper swap. Requires emitter-
+     level layout flexibility: detect isomorphic instance arrays,
+     emit lane-packed eval. Big effort, big ceiling.
