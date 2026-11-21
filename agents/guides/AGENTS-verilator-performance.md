@@ -3159,3 +3159,74 @@ re-widening over-split signals) — a different, larger scope than runtime
 headers, and §27 already showed split/scheduler granularity is logic-driven.
 No further opportunistic runtime SIMD work is warranted without new profiling
 evidence of a reachable scalar word-loop.
+
+## 30. Thread-count oversubscription — threads=2 is the hyp8 optimum (BREAKTHROUGH)
+
+After the SIMD half-tier, flat `perf record` on the simd150 binary
+(`/opt/testharness/runs/devsimd-ab/model`, `+max-cycles=40000`) shows the
+remaining hot execution paths are **not** word-vector work:
+
+| self-% | function | role |
+|---|---|---|
+| ~45.6% | `__Vthread__nba__0..3` | worker-thread orchestration: dep-poll + dispatch + call glue (~2400 calls each) |
+| 11.0% | `VlWorkerThread::workerLoop` | worker spin loop (`dequeWork<SpinWait:true>`) |
+| ~3% | `htif_*` | testbench I/O (libfesvr, not model) |
+| 2.6% | `__eval_nba__0` | the SIMD wide-compute home (71% vector insns) |
+| tail | `___nba_comb__…i_g6lc__NNNN` ×hundreds @~0.1% | narrow scalar comb logic — not vectorizable |
+
+`nba__0/1/2` contain **zero** xmm/ymm in their own bodies — they are thin
+orchestrators; the SIMD compute is concentrated in `eval_nba__0` + callees.
+~56% of runtime is scheduler/worker orchestration — the same sync bottleneck
+as §17, which SIMD cannot touch.
+
+**Threads sweep (original headers, identical `retired=[4835,0]` guest work):**
+
+| threads | insns:u | cycles:u | IPC |
+|---|---|---|---|
+| 1 | 2.305e12 | 11.13e12 | 0.21 |
+| **2** | **2.425e12** | **4.945e12** | **0.49** |
+| 4 (devclean) | 5.294e12 | 31.10e12 | 0.17 |
+| 4+SIMD (simd150) | 2.605e12 | 6.395e12 | 0.41 |
+
+threads=2 is the clear optimum: lowest cycles, highest IPC, instructions near
+the serial floor. The hyp8 MTask graph has ~59 tasks / ~149 dep-edges with
+parallelism factor ~2 — threads=4 leaves ~2 workers spin-waiting on
+`VlMTaskDoneMask` the whole eval, burning ~2.9e12 insns of sync tax.
+threads=1 is slowest (no parallelism); threads=2 captures the ~2x width.
+
+**threads=2 ORIG (2.425e12/4.945e12) beats threads=4+SIMD (2.605e12/6.395e12)**
+on both metrics — the sync tax exceeds the SIMD compute saving. The two are
+orthogonal; a threads=2+SIMD build is the predicted best config.
+
+**Generic lever found:** `V3Partition.cpp` `PartParallelismEst::parallelismFactor()`
+(= totalGraphCost / longestCpCost) already computes the theoretical parallelism
+at compile time and reports it via `statsReport("final")` — but it is only a
+stat, never used to size the pool. `m_threads` defaults to 1 and `--threads N`
+is a user guess. **`--threads auto`** deriving `ceil(parallelismFactor)` would
+remove the oversubscription generically. cpLimit at line ~2780 already coarsens
+the graph toward `threads`-way parallelism, so an auto value feeds the same path.
+
+**Correction — the mechanism is partition granularity, not worker count.** The
+testbench (`hyp8_tb.cpp`) never calls `VerilatedContext::threads()`, so the
+context `m_threads` still defaults to `hardware_concurrency` (~4) and the pool
+spawns ~3 workers + the eval thread in BOTH builds. What `--threads 2` actually
+changed is the *partition*: `cpLimit = totalGraphCost*3/(threads*5)` coarsens
+the MTask graph toward `threads`-way parallelism. Measured final graphs:
+
+| --threads | MTasks | dep-edges | parallelism factor |
+|---|---|---|---|
+| 4 (devclean/devcase) | 59 | 149 | 2 |
+| 2 (devthr2) | **29** | **53** | 1 |
+| 1 (devthr1) | n/a — `mtasks()` false, serial, no partition | | |
+
+threads=4 over-fragmented a ~2x-parallel graph into 59 tasks / 149 edges — each
+task boundary adds a `VlMTaskDoneMask` dep-mask + spin/dispatch cost per eval.
+threads=2's coarser 29-task / 53-edge graph halves the sync surface while still
+parallelizing enough to beat serial on cycles (4.9e12 vs 11.1e12). **The lever is
+`cpLimit` granularity / MTask coarsening when requested threads exceed real
+parallelism** — not the worker count. A generic fix could (a) auto-pick
+`--threads` from `parallelismFactor`, or (b) make `cpLimit` target
+`min(threads, parallelism)`-way coarsening so an over-large `--threads` does not
+over-fragment. Both feed the same `PartContraction` path; (b) is the lower-risk
+single-pass change since `parallelismFactor` is only known *after* the initial
+(un-coarsened) graph exists.
