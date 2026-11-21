@@ -3399,3 +3399,33 @@ two-pass/deferred partitioning (architectural). All three reverted.
     selection Verilator lacks at compile time. Large/risky, unvalidated.
   - TLS accessor (`_ZTHN9Verilated3t_sE`) x34/eval-region is a minor (~1-2%)
     candidate: cache thread-context pointer instead of repeated PLT calls.
+
+## 36. Campaign summary — SIMD lane CLOSED; remaining work is architectural
+
+End state of the SystemVerilog->executable hot-path optimization campaign:
+
+BANKED (committed, measured):
+  - SIMD half-tier wide-word helpers: -50.8% insns / -79.4% cycles / IPC 0.17->0.41
+    (verilated_types.h, 71fe4877d + 013bef05d). The single biggest model win.
+  - threads=2 measurement: 2.425e12 insns / 4.945e12 cycles / IPC 0.49 vs
+    threads=4's 5.294e12 / 31.10e12 / 0.17 (-84% cycles). Actionable TODAY via
+    `--threads 2`; generic auto-detection blocked (see below).
+
+PROVEN EXHAUSTED / BLOCKED (do not re-investigate without new evidence):
+  - SIMD: all reachable wide-word scalar paths already route through SIMD
+    helpers; generated __Vi loops are cold SRAM-reset/dead scaffolding (§29,§31).
+  - Partition auto-coarsening: achievable parallelism (~2 for hyp8) is only
+    knowable AFTER cost finalization + packing, but LogicMTask partition runs at
+    V3Order with provisional costs. Three triggers (cost-par=6.84, struct-par=
+    4.46, pre-coarsen cap) all overestimate -> no-op. Needs two-pass/deferred
+    partition (§32,§34,§35).
+  - Comb-function inlining: 1293/2424 nba__0 calls target tiny functions defined
+    as external-linkage members across ~775 DepSet .cpp TUs (deliberate
+    compile-parallel split). No cross-TU inline without LTO/emission rework (§35).
+  - Reverted-and-documented regressions: case-table, oracc, scheduler cv-sleep,
+    gcc16.2, debug/assert tax — all measured, none retained.
+
+REMAINING (architectural, multi-session): deferred-cost MTask partitioning;
+emission-model change for comb-function co-location/LTO; runtime pool sizing
+backed by emitted parallelismFactor (does NOT reduce mtask/edge count, so it
+cannot reproduce the threads=2 win by itself).
