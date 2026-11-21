@@ -3001,9 +3001,22 @@ the [half, full) word range plus the sub-full remainder of larger ops —
 strictly fewer instructions or identical. Only cost is one extra bounds
 compare per kernel call.
 
-Full-model fw150 A/B (`devsimd-ab` vs `devclean-ab` control) running;
-expected delta is diluted by the ~56% MT-spin share but directionally
-positive if the 128–224-bit bucket is dynamically hot.
+Full-model fw150 A/B (`devsimd-ab` vs `devclean-ab` control):
+
+| arm | instructions:u | cycles:u | retired |
+|---|---|---|---|
+| devclean (orig header) | 5.294e12 | 31.10e12 | [4835,0] |
+| **simd (half-tier)** | **2.605e12 (−50.8%)** | **6.395e12 (−79.4%)** | [4835,0] |
+
+IPC 0.17→0.41. **A/B validity verified**: `diff -rq` shows 0 `.cpp`
+files differ between the two arms (identical generated code; only
+`verilated_types.h` differs), and `retired` sidecar is identical — a
+clean single-variable measurement, not partitioning noise. The 4–7-word
+ops (`SHIFTL_WWI`/`ASSIGNSEL` scoreboard-forwarding range) were
+stall-dominated scalar loops; the half-tier vectorized them. **KEEP** —
+largest single measured win of the effort, far exceeding every gated
+transform. Note the magnitude is workload-dependent (fw150 is
+wide-op-heavy); benefit scales with how hot the 128–224-bit bucket is.
 
 ## 27. Dependency-graph granularity audit — edges are already logic-level (2026-11-21)
 
