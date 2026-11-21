@@ -3230,3 +3230,23 @@ parallelism** — not the worker count. A generic fix could (a) auto-pick
 over-fragment. Both feed the same `PartContraction` path; (b) is the lower-risk
 single-pass change since `parallelismFactor` is only known *after* the initial
 (un-coarsened) graph exists.
+
+## 31. Codegen-level SIMD audit — generated `__Vi` loops are cold/dead (SIMD exhausted)
+
+Following §29 (runtime helpers exhausted), audited the *generated* C++ for
+scalar packed-data loops — the only remaining conceivable SIMD domain. Grepped
+all `*DepSet*.cpp` in the simd150 model for `for (int __Vi0/__Vi1 = ...)`:
+
+| bound | sites | what it is |
+|---|---|---|
+| `<256`, `<1024`, `<4096`, `<512` | ~85 | **reset-time SRAM clears** — `sram[i]=0`, `VL_ZERO_RESET_W(512,…)` over L2/presence banks. Run once at reset, cold. |
+| `<33554432` | 2 | memory-size init, cold |
+| `<2`,`<4`,`<6`,`<8`,`<9`,`<16`,`<32`,`<68` | ~340 | **empty scaffolding** (`for(i<4){for(j<68){}}` — dead bodies GCC removes) or tiny unpacked-array clears (`vmt[i]=0`, 4 elems) — reset/cold |
+
+No hot per-cycle packed-data scalar loop exists in generated code. Every
+wide op already routes through the `VL_*` helpers (SIMD'd by §26); narrow
+comb functions are single ≤64-bit signal updates (inherently scalar, not
+batchable); `VlUnpacked` is random-index. **SIMD is now provably exhausted
+at both the runtime-helper and generated-code levels.** The only remaining
+lever is non-vector: scheduler/partition granularity (§30) or narrow-op
+scheduling — see §30 for the threads=2/partition breakthrough.
