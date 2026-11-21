@@ -3062,3 +3062,41 @@ Both change the *partitioning* (re-verilate required → subject to the
 §22.1 nondeterminism confound, so results are directional, and the
 threads=2 graph is expected ~identical to threads=4 since the maxMTasks
 cap doesn't bind — the only real variable is worker count).
+
+## 28. Next SIMD frontier — aliased/in-place wide ops (identified, not yet implemented)
+
+After the half-tier (§26) the only remaining scalar wide-op loops are the
+**overlap/alias** paths that `_vl_words_disjoint` rejects:
+
+- `_vl_insert_WW` aliased branch (`verilated_funcs.h:1457-58`) — scalar
+  `iteration(i)` loop over all words when src/dst overlap. Feeds the
+  `VL_ASSIGNSEL_W*` inserts (~8.2K call sites total).
+- `VL_SHIFTR_WWI`/`VL_SHIFTRS_WWI` non-disjoint branch
+  (`verilated_funcs.h:1835-39`, `~1929`) — scalar per-word loop for
+  in-place right shifts (`x <= x >> s` reusing the buffer).
+
+**Why they stay scalar today**: `_vl_words_funnel`/`_vl_insert_WW` SIMD
+requires disjoint src/dst; overlap would let stores corrupt later loads.
+
+**Safety analysis (right-shift direction)**: `owp[i]` reads
+`lwp[i+word_shift]` and `lwp[i+word_shift+1]` — destination trails source.
+The funnel writes `dst[t..t+W-1]` while reading `src[t..t+W]` (one word of
+lookahead). For a fully in-place right shift the lookahead `src[t+W]` is
+strictly above every already-written `dst` index, so forward chunked SIMD
+is safe — each chunk reads only words not yet overwritten. The blocker is
+purely the conservative `_vl_words_disjoint` guard, not a real hazard.
+
+**Candidate implementations** (pick by profiling which alias case is hot):
+1. Ordered chunked funnel for shift-compatible overlap (right-shift only —
+   dest-trails-source). Cheapest, no temp buffer.
+2. Temp-buffer: `memmove` src region to a stack/heap scratch, then run the
+   disjoint funnel/insert on the scratch. General (handles left-shift and
+   arbitrary insert overlap) but adds a copy; bounded scratch size is the
+   constraint (wide signals reach hundreds of words).
+
+**Caution**: correctness-critical (in-place SIMD). Needs a brute-force
+aliasing regression test (random overlap offsets, both shift directions,
+boundary words) + identical-`.cpp` fw150 A/B before keeping. Do NOT rush —
+a subtle overlap bug corrupts state silently. Static site counts show the
+parents are hot but the *alias* sub-path frequency is unprofiled; confirm
+with `perf record` on the §26 binary first if the win looks marginal.
