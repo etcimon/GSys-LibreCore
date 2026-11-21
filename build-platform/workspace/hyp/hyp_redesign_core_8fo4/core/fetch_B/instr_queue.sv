@@ -471,7 +471,13 @@ module instr_queue
     end else if (p < NrFifo) begin : gen_rot
       assign idx_ds[p] = {idx_ds_q[NrFifo-p-1:0], idx_ds_q[NrFifo-1:NrFifo-p]};
     end else begin : gen_z
-      assign idx_ds[p] = '0;
+      // hyp8 rfix131a cont.66: p >= NrFifo still names a real drain lane —
+      // the FIFO ring is circular, so offset p wraps to p mod NrFifo. The
+      // previous '0 here made idx_ds_d = adv_term[..] collapse to 0 when the
+      // highest consumed position was NrIssue-1 (idx_ds[NrIssue] is the
+      // advance-only slot, never read by pos_present), latching idx_ds_q=0
+      // -> drain dead -> i_fifo_address fills -> ready_o=0 -> FE deadlock.
+      assign idx_ds[p] = rotate_left(idx_ds_q, fifo_idx_t'(p % NrFifo));
     end
   end
 
