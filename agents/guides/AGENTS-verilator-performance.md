@@ -3325,3 +3325,48 @@ Open questions to resolve before implementing:
   genuinely-high-parallelism designs (where fine tasks ARE wanted).
 Validate via: verilate hyp8 `--threads 4` → expect ~29-40 tasks (vs 59) →
 model build + fw150 `perf stat` → compare vs devclean/devthr2.
+
+## 34. Iterative coarsening — TESTED, infeasible at V3Partition::go (stale costs)
+
+Implemented the §33 design (re-run `PartContraction` with escalating `cpLimit`
+driven by measured parallelism) in `V3Partition::go()` after the first
+contraction + `removeTransitiveEdges`. Compiled clean, verilated hyp8
+`--threads 4`. Result: **no-op** — final partition identical to baseline
+(58 mtasks / 158 edges).
+
+Root cause, measured via a `std::cout` diagnostic (`V3PART iter=`):
+
+    iter=0 achievedPar=6.83686  effThreads=4  cpLimit 3412264 -> 3412264  (break)
+
+`PartParallelismEst::parallelismFactor()` on the **`mtasksp` LogicMTask graph**
+= **6.84**, but the same estimator on the packed **`execMtaskGraphp`** reports
+**2** in `finalizeCosts` (`V3Partition.cpp:3069`). ~3.4x discrepancy.
+
+Why: `V3Partition::go()` runs during **V3Order** and `vertexCost` uses
+`AbstractMTask::cost()` = **provisional** per-task estimates. `V3LifePost` and
+later optimizations change logic costs before `V3Partition::finalize()` →
+`finalizeCosts()` recomputes costs (`fillinCosts`) and measures the real
+parallelism on the packed graph. The LogicMTask-stage estimate is therefore
+**stale and over-optimistic** — it cannot predict achievable parallelism, so
+the oversubscription trigger never fires (effThreads rounds up to threads).
+
+Conclusion: **auto-coarsening cannot be driven from `V3Partition::go`.** The
+achievable-parallelism signal only exists after cost finalization + packing,
+which is after the LogicMTask partition is already fixed. Viable future paths
+(all larger than a local patch):
+  - two-pass partition: partition → finalize costs → measure packed parallelism
+    → re-run `V3Order` partition with corrected `cpLimit` (rebuilds LogicMTask
+    graph; expensive, invasive);
+  - defer LogicMTask contraction until after `fillinCosts`, i.e. move coarsening
+    later in the pipeline where costs are final;
+  - runtime/emit side: expose measured `parallelismFactor` on the model and let
+    `VerilatedContext` size its pool (but this does NOT reduce MTask/edge count
+    — the actual source of the threads=2 win — so it likely cannot reproduce it).
+
+Reverted `src/V3Partition.cpp` (local + remote `verilator-g6lc-dev`); the
+mechanism (`PartContraction` re-runnable, `PartParallelismEst` self-contained)
+is proven sound — only the *trigger measurement* is unavailable at that stage.
+
+Actionable result stands: for low-parallelism designs, **`--threads` ≈ measured
+`final parallelism factor`** (from `--stats`) avoids over-fragmentation.
+hyp8 optimum = `--threads 2` (29 mtasks/53 edges, −84% cycles vs threads=4).
