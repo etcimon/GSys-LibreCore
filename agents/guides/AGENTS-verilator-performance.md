@@ -3548,3 +3548,36 @@ verilated_types.h, so an -I overlay holding ONLY verilated_types.h silently
 loses to the toolchain copy in verilated.h's own directory. The overlay
 must contain the whole include dir (or at least verilated.h too), else the
 compile "succeeds" against the STOCK header and reports a false negative.
+
+§42 DEAD-INIT ON FUNCTION-LOCAL WIDE TEMPS (scoped, not yet implemented)
+
+FINDING: V3EmitCFunc.cpp:705-710 forces zeroit for EVERY isFuncLocal() var
+("Randomization too slow"), so each function-local VlWide gets a full-width
+VL_ZERO_W in the "// Init" prologue -- even when the var's first touch is an
+unconditional covering write, making the memset fully dead.
+
+CONFIRMED SAMPLE (Vg6lc...DepSet_h53a8106c__101.cpp): scoreboard
+i_sb_lifecycle gen_mn[*] unnamedblk10 z -- VlWide<17>/518b memset at fn
+entry; ALL 17 words then unconditionally written z[k]=a_sbe[k] (no guard in
+the whole preceding region), masked RMWs inside if(is_rd_fpr) only touch
+already-written words, then a_mem[k]=z[k] reads. Zero is 100% dead work:
+17 wasted word-stores per call.
+
+DENOMINATOR: 782/4327 VL_ZERO_W sites (18%) target unnamedblk func locals:
+756 x 518b (17w) scoreboard temps across 29 fast TUs + 8 __Slow. Dynamic
+cost ~= dead memsets x eval frequency of the enclosing comb fns.
+
+WHY NOT YET A PATCH (honesty): sound elimination needs def-use coverage on
+the AST -- prove all words written unconditionally BEFORE first read, where
+conditional blocks contribute nothing. Writes arrive as per-word AstAssign
+(Sel'd lhs), so the pass must accumulate a covered-word mask across
+consecutive top-level assigns, stopping at any control flow/read. That is a
+new analysis pass + emitVarDecl skip hook + rebuild + regression -- sized
+beyond a safe single-session change; a wrong verdict silently corrupts
+semantics (unlike perf-only regressions elsewhere).
+
+IMPLEMENTATION SKETCH (next session): in V3EmitC or a small pre-emit pass,
+per AstCFunc collect func-local wide vars w/o valuep; walk stmtsp in order,
+top-level only; track covered word mask from AstAssignW / consecutive
+word-Sel AstAssign; stop at If/TaskCall/VarRef-read; mask==words -> mark
+varp->user1, emitVarDecl skips the zero. Fallback stays zeroit.
