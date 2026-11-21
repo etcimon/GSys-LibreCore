@@ -3581,3 +3581,15 @@ per AstCFunc collect func-local wide vars w/o valuep; walk stmtsp in order,
 top-level only; track covered word mask from AstAssignW / consecutive
 word-Sel AstAssign; stop at If/TaskCall/VarRef-read; mask==words -> mark
 varp->user1, emitVarDecl skips the zero. Fallback stays zeroit.
+
+§43 DEAD-INIT ELIMINATION IMPLEMENTED (d9d57fd83, compile-verified)
+
+scanCoveredInit in V3EmitCFunc.h marks func-local wide vars whose top-level
+unconditional assigns cover all words before any read (Sel/WordSel/Concat
+lhs coverage; NodeVarRef-based read scan catches all ref forms). Marked
+vars skip emitVarReset at AstCReset. Conservative by construction: any
+unprovable touch keeps the init -- worst case is a missed optimization,
+never a semantic change. TU compiles clean in remote g6lc-dev obj_opt
+(-O3+PGO, real build flags). E2E verilate + memset-count delta pending
+(remote tree rebuild in progress; header transfer via chunked b64 -- ~8KB
+argv-safe chunks with retry, proven method this session).
