@@ -3004,3 +3004,48 @@ compare per kernel call.
 Full-model fw150 A/B (`devsimd-ab` vs `devclean-ab` control) running;
 expected delta is diluted by the ~56% MT-spin share but directionally
 positive if the 128–224-bit bucket is dynamically hot.
+
+## 27. Dependency-graph granularity audit — edges are already logic-level (2026-11-21)
+
+§25 named "fewer dependency edges / longer task granularity" as the real
+lever. Audited whether the edges are *over-conservative* (false sharing on
+coarse signal granularity) before committing to a scheduler-graph change.
+
+**Pass ordering** (`src/Verilator.cpp`): `V3SplitVar`(268) → `V3Slice`(374)
+→ `V3Split::splitAlwaysAll`(397) → `V3Sched::schedule`(447) →
+`V3Premit`(523) → `V3Expand`(528) → `V3Partition::finalize`(578).
+
+Two consequences:
+
+1. **Variable/always granularity is already refined before scheduling.**
+   Packed signals are split by `V3SplitVar`/`V3Slice` and always blocks by
+   `V3Split` *before* `V3Sched` builds the graph — so `OrderVarVertex`
+   deps are on post-split varscopes, not whole packed vectors. The
+   "518-word scoreboard = one dependency" false-sharing hypothesis does
+   not hold; word-level refinement is largely already done.
+
+2. **Wide-op expansion happens AFTER scheduling.** `V3Expand`(528) creates
+   the `VL_ZERO_W`/`VL_SHIFTL_WWI`/`VL_ASSIGNSEL_W*` multi-word helpers
+   *after* the dep graph exists. So the graph reasons about pre-expansion
+   logic; the 149 MTask edges are genuine inter-task data hazards between
+   split always-block regions (pipeline stages), not an artifact of wide
+   ops.
+
+**Conclusion**: the dep edges are logic-level and mostly *necessary* —
+there is no cheap "refine signal granularity" win. The only practical
+levers that reduce the ~2.9e12-insn sync tax without breaking correctness
+are the **count** knobs:
+
+- `--threads N` — fewer workers → fewer idle spinners (parallelism
+  factor ≈2 on hyp8 ⇒ threads=4 likely oversubscribed). `devthr2` A/B
+  staged (verilate→build→probe) to test threads=2 vs the threads=4
+  `devclean` control.
+- `--threads-max-mtasks N` — force `PartContraction` to merge MTasks
+  below the auto cap (`50×threads`=200; hyp8 uses only 59, so the cap is
+  not binding — an explicit lower value coarsens the graph → fewer edges
+  → less spin, at the cost of parallelism).
+
+Both change the *partitioning* (re-verilate required → subject to the
+§22.1 nondeterminism confound, so results are directional, and the
+threads=2 graph is expected ~identical to threads=4 since the maxMTasks
+cap doesn't bind — the only real variable is worker count).
