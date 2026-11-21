@@ -2883,3 +2883,26 @@ cost without benefit when waits are short and numerous. The 56%-of-insns
 spin cost is *inherent to fine-grained MT dependency tracking*, not fixable
 by sleeping — the lever is reducing dep-edge count / critical path
 (V3Sched/V3Partition), not the wait primitive.
+
+## 24. RESULT: GCC 16.2 is a runtime REGRESSION vs GCC 13.3 on hyp8 model
+
+Clean compiler-only A/B: `devgcc16-ab/model` = `cp -a` of `devcase-ab/model`
+(verified **identical** generated `.cpp`, 0 `.gcda` → no PGO either side,
+same `-march=x86-64-v3 -O2/-O1/-O2` `OPT_FAST/OPT_SLOW/OPT_GLOBAL`, threads=4,
+fw150, retired `[4835,0]`). Only variable = compiler:
+
+| compiler | insns:u | cycles:u | IPC |
+|---|---|---|---|
+| gcc 13.3 (devcase .nopgo) | 5.252e12 | 2.958e13 | ~0.18 |
+| **gcc 16.2.0-znver4** | **6.002e12 (+14.3%)** | **3.516e13 (+18.8%)** | 0.17 |
+
+`instructions:u` deterministic → **+14% is real gcc16 codegen regression**,
+not noise. gcc16's changed inlining/heuristics produce more instructions AND
+worse cycles on this 2500-TU generated model. Single-TU compile was −12.5%
+faster (build-time win per the toolchain commit) but **runtime is worse**.
+
+**Verdict**: do NOT adopt gcc-16.2.0-znver4 for hyp8 model builds. Keep
+gcc 13.3 (`/usr/bin/g++`). The profiledbootstrap/toolchain work remains
+valid for *build-time* throughput, but the runtime A/B is decisively
+negative — another data point that this memory-bound model (IPC~0.2)
+punishes any codegen that adds instructions or hurts layout.
