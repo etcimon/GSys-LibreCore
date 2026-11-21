@@ -3370,3 +3370,32 @@ is proven sound — only the *trigger measurement* is unavailable at that stage.
 Actionable result stands: for low-parallelism designs, **`--threads` ≈ measured
 `final parallelism factor`** (from `--stats`) avoids over-fragmentation.
 hyp8 optimum = `--threads 2` (29 mtasks/53 edges, −84% cycles vs threads=4).
+
+## 35. Partition auto-tuning exhausted (3rd failure) + comb-call overhead audit
+
+**Partition auto-coarsening — three independent triggers all fail.** Tried
+driving `PartContraction` re-runs from measured parallelism at `V3Partition::go`:
+  1. `PartParallelismEst::parallelismFactor` on mtasksp = **6.84** (cost-based,
+     provisional V3Order costs) -> effThreads=4 -> no-op.
+  2. Structural `vertexCount/longestChain` = **4.46** (58 verts / 13-deep chain,
+     cost-independent) -> effThreads=4 -> no-op.
+  3. (earlier) pre-coarsening cap -> no-op.
+Achievable parallelism is **~2** (packed `execMtaskGraphp`, final costs) but is
+unmeasurable at `go()`: both cost-based AND vertex-count metrics overestimate
+because they ignore greedy-packing/contention dynamics AND cost staleness. The
+real signal needs the packed graph + final costs -> only exists in
+`finalizeCosts`, after LogicMTask partition is fixed. Auto-coarsening requires
+two-pass/deferred partitioning (architectural). All three reverted.
+
+**Comb-call overhead audit (`__Vthread__nba__0`, 157KB, devclean objdump):**
+  - 2424 `call`s total: **1293 -> `___nba_comb__*`** tiny always_comb logic,
+    **662 -> nba/sequent/eval** scheduling, **452 -> thread/misc** (incl.
+    `_ZTHN9Verilated3t_sE@plt` TLS accessor x34, `sched_yield` x14,
+    `endOfThreadMTaskGuts` x17), 17 -> memory.
+  - The 1293 comb calls are REAL calls (not inlined): functions are defined
+    across ~500 DepSet TUs so gcc cannot inline cross-TU without LTO.
+  - Potential win: co-locate hot caller+callee in one TU or emit `inline`, but
+    2521 functions -> code-explosion/i-cache risk; needs profiling-guided
+    selection Verilator lacks at compile time. Large/risky, unvalidated.
+  - TLS accessor (`_ZTHN9Verilated3t_sE`) x34/eval-region is a minor (~1-2%)
+    candidate: cache thread-context pointer instead of repeated PLT calls.
