@@ -3533,3 +3533,18 @@ strict improvement, zero-risk: falls back to the committed tiered path.
 Also verified NOT profitable: _vl_shiftl_inplace_w has 0 generated sites;
 VL_COUNTONES_W (11 sites, 4-7 words) stays scalar -- a vpopcntdq path would
 cost more in setup than the 4-7 scalar popcnts it replaces.
+
+§41 REAL-TU VALIDATION OF THE VBMI2 FUNNEL (transport + overlay notes)
+
+The real generated TU Vg6lc_..._DepSet_h53a8106c__12.cpp compiled against
+the new header via an overlay include dir (cp -a runtime/include, drop in
+the new verilated_types.h): -march=native -DVL_SIMD_PREFER_512 emits
+vpshrdv (2 sites/TU -- funnels are thin-spread by design), -march=x86-64-v4
+compiles to the generic path (0 vpshrdv, vbmi2 not in v4 baseline). Both
+compile clean; md5-verified header transfer.
+
+GOTCHA recorded for future header A/Bs: verilated.h quote-includes
+verilated_types.h, so an -I overlay holding ONLY verilated_types.h silently
+loses to the toolchain copy in verilated.h's own directory. The overlay
+must contain the whole include dir (or at least verilated.h too), else the
+compile "succeeds" against the STOCK header and reports a false negative.
