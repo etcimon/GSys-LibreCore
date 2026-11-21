@@ -3661,3 +3661,26 @@ datapath. The two remaining real denominators are architectural:
      generate-loop replication, not a helper swap. Requires emitter-
      level layout flexibility: detect isomorphic instance arrays,
      emit lane-packed eval. Big effort, big ceiling.
+§46 FUTEX BLOCK-WAIT ON MTASK BARRIER — TESTED, REJECTED (regression)
+
+Implementation (reverted, 8dfb42597->350e57f24): adaptive
+spin->yield->futex-block in VlMTaskDoneMask -- 32-bit epoch bumped per
+signal(), waiters park on FUTEX_WAIT_PRIVATE after 16 yields, signal()
+only wakes when m_waiters>0. Functionally correct standalone test
+(blocked on partial pred, woke on completion, no lost wake).
+
+Controlled A/B (same model, only runtime header differs), 50k cycles:
+  rep1  OLD(spin+yield)=1.325e12   NEW(futex)=2.151e12   +62%
+  rep2  OLD=1.128e12               NEW=1.698e12          +50%
+
+Mechanism: intra-round DoneMask waits are MICROSECOND-scale dependency
+edges (158 edges/round). Futex wake latency (~2-5us) lands directly on
+the dependency critical path, stretching every round; the stretched
+round makes all other waits accumulate MORE spin. The 42% wait share is
+synchronization load-bearing, not waste heat -- pause-spinning is the
+correct wait strategy at mtask-edge timescales. Sleeping pays a fixed
+latency tax per edge that no amount of saved spin insns repays.
+
+Lesson: retired-instruction reduction that adds latency to a sync
+critical path is anti-productive. The spin overhead can only shrink via
+fewer/coarser barrier edges (partition-level work), not wait mechanics.
