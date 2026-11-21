@@ -3479,3 +3479,31 @@ is (a) thread sync, (b) call dispatch, or (c) narrow scalar control logic too
 small/fragmented to vectorize. Wide-vector work is already SIMD'd and is a
 small share precisely because wide ops aren't the bottleneck. SIMD lane is
 CLOSED at helper, codegen, idiom, AND dynamic-coverage levels.
+
+## 39. AVX-512 (-march=native + VL_SIMD_PREFER_512): -18.3% insns + quarter-tier
+
+The host has full AVX-512 (avx512f/dq/bw/vl/vbmi + avx512_vpopcntdq) but the
+model was built -march=x86-64-v3 (AVX2 -> VL_SIMD_WORDS=8). Rebuilding the SAME
+generated sources with OPT_FAST="-O2 -march=native -DVL_SIMD_PREFER_512"
+activates the opt-in 16-word tier and native codegen.
+
+perf stat, 100k cycles, devclean(avx2) vs devavx512(native+512), rep1
+(instruction count is deterministic for identical work -> load-robust):
+  A x86-64-v3      : 1.8786e12 insns
+  B native+512     : 1.5358e12 insns   -> -18.3% insns
+  Binary check: 39763 zmm insns + 21 vpopcntdq emitted.
+(Cycles were contention-inflated on the shared box and are not reported.)
+
+ATTRIBUTION: the bulk of the -18% is -march=native codegen over the whole
+model (auto-vec, BMI2, more regs, EVEX), NOT the SIMD tier alone -- wide-word
+helpers are only ~1% of the profile. Recommendation: build the model with
+-march=native (or >=v4) on AVX-512 hosts; add -DVL_SIMD_PREFER_512 to widen the
+helper tier too. It is opt-in because old AVX-512 parts downclock; this host
+does not.
+
+QUARTER TIER (commit 1556002c9, verilated_types.h): under AVX-512 the half tier
+is 8 words so 4-7 word operands regressed to scalar. Added a 128-bit quarter
+pass (VL_SIMD_WORDS>=16 only) to the elementwise + orxor/orall/xorall/funnel
+kernels -> AVX-512 no longer loses narrow-op coverage vs AVX2. Compile-verified
+on v4/v3/core2; incremental benefit unmeasured (small share of the ~1% domain)
+but strict-superset, cannot regress.
