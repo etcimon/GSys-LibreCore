@@ -48,6 +48,14 @@ TESTS = [
     ('mc_hart1_store_visible','mc_hart1_store_visible.S', [], 'pass'),
     ('mc_hart1_trap',         'mc_hart1_trap.S',         [], 'oracle_neg'),
     ('mc_smt2_boot_release',  'mc_smt2_boot_release.S',  [], 'pass'),
+    # All-8-hart census: every mhartid stores a flag, hart0 polls all slots.
+    # tohost=0x100|mask names the absent harts -> pinpoints a held physical
+    # core that the clock-gated cycprog heartbeat cannot see.
+    ('mc_all_harts_present',  'mc_all_harts_present.S',  [], 'pass'),
+    # SMT-sibling liveness: hart0 parks after flag-store so core0's thread-1
+    # (mhartid1) gets the core; hart1 is the census reader. Distinguishes
+    # starvation-under-busy-primary from never-activated sibling.
+    ('mc_smt_sibling_yield',  'mc_smt_sibling_yield.S',  [], 'pass'),
     ('mini_ipi_hart1_sp',     'mini_ipi_hart1_sp.S',     [], 'pass'),
     ('mini_wfi_noipi_hart1',  'mini_wfi_noipi_hart1.S',  [], 'pass'),
     # --- shared-line / coherence ------------------------------------------
@@ -93,6 +101,15 @@ TESTS = [
     ('mc_pmu_access',         'mc_pmu_access.S',          [], 'pass'),
     ('mc_pmu_control',        'mc_pmu_control.S',         [], 'pass'),
     ('mc_pmu_l3',             'mc_pmu_l3.S',              [], 'pass'),
+    # --- S-mode / virtual memory (OpenWrt-boot SMP coverage) -----------------
+    # hyp8_sv39_load proves S-mode SV39 on one hart; these put ALL harts in
+    # S-mode under a shared page table and hammer sfence.vma/PTW/AMO — the path
+    # a Linux SMP boot exercises and the g6lc_tlb_hit_onehot0 suspect guards.
+    ('mc_smode_parallel',     'mc_smode_parallel.S',      [], 'pass'),
+    # Real SMP TLB shootdown: hart0 remaps shared page-table entries while the
+    # other harts hold stale translations; each must sfence.vma and observe the
+    # new mapping. Targets g6lc_tlb_hit_onehot0 / PTW invalidate path.
+    ('mc_smode_shootdown',    'mc_smode_shootdown.S',     [], 'pass'),
 ]
 
 

@@ -189,19 +189,54 @@ distinct deadlock frontiers:
    losers stay in the IQ and retry. Verified: boot advanced ~7700 cycles
    past the former stall.
 
-2. **Frontend branch-pend/hold deadlock — CURRENT FRONTIER (cont.60).**
-   hart0 now runs a spin-wait poll loop (`ld x15,9(x10)`@`0x80012880`,
-   x10=`0x8001e000` MMIO/status), exits ~c33490 into `0x800129xx`, then the
-   whole pipeline drains and freezes: `commit_ptr=issue_ptr=27`,
-   `sb_empty=1`, IQ offered-empty, yet `cf_hold=1` + `bp_pend=1`
-   `bp_tgt=0x80012a06` + `red_pc=0x80012a94`. No mispredict after @33055 —
-   the pend is armed via the `hyp_fe_override2_o` (ov2) path which sets
-   `bp_misp_ttl_q<=0` (NO timeout escape). This is the documented
-   r41b/r44b/r45b hold class in `fetch_B/frontend.sv`: `bp_pend` filters a
-   return stream to `bp_tgt` that never gets an `icache_dreq`, while
-   `cf_hold` blocks fetch → circular. Categorized as
-   `hang.fe.bp-pend-cf-hold`. See `analysis/rfix131a/worklog.md`
-   cont.59–60.
+2. **Frontend IQ drain deadlock — FIXED (cont.60–67).** The earlier
+   `cf_hold`/`bp_pend` freeze (c≈33490) was a *symptom*: the real root was
+   `instr_queue` drain pointer `idx_ds_q` collapsing to `0` (an absorbing
+   state — the `p >= NrFifo` generate branch zeroed `idx_ds[p]` on the
+   advance-only slot, so a highest-consumed `NrIssue-1` rotated the drain
+   one-hot to all-zero). `idx_ds_q=0` → `pos_present=0` → `fe_valid=0` →
+   `consumed=0` → predicted-CF target FIFO never pops → `full_address=1` →
+   `ready_o=0` → `demand_req=0`. Fix: `idx_ds[p] =
+   rotate_left(idx_ds_q, p % NrFifo)` in `instr_queue.sv`. Categorized as
+   `hang.fe.iq-drain-idxds0`.
+
+3. **store_buffer witness false-positive — FIXED (cont.68).** The iqfix
+   witness aborted at c≈170756 on `store_buffer.sv` assertion
+   `ooo_no_younger_forward`. Not a younger-store bug: for
+   `StoreFwdCycles==3` the `st_fwd_*_o` outputs are an F3 *held* response,
+   not cycle-aligned with the live `load_paddr_i`/`load_trans_id_i`, so the
+   witness compared a response for one tagged request against the live
+   request of another. The real age contract is enforced inside `stb_fwd`
+   F1. Fix: gate the translate_off witness to `StoreFwdCycles == 1`.
+
+**Current frontier (cont.70).** The `stgfwd` witness
+(`hyp8-osbi-mc-rfix131a-stgfwd-wt1`, model `ca6c8a96`) carries all three
+fixes and has run **deep-clean**: past c170756 into c398k+ with **zero**
+categorized events (`run-hyp8.log` emits `[hang]`/`[stall-census]`/verdict
+only at an endpoint, so a clean mid-run ingests as 0 — that *is* the
+result). ELF `nm` maps the dominant PC region (`0x80012xxx`, 85% of
+retires) to **libfdt** (`fdt_offset_ptr`/`fdt_next_tag`/`fdt_next_node`/
+`fdt_move`…): hart0 is walking the DTB (`fw_fdt_bin`@`0x8001e000`) during
+OpenSBI `sbi_init` — normal coldboot progress, not a stall. Secondary
+harts 2/4/6 sit in `_wait_for_boot_hart` (`0x800002e8`, coldboot-lottery
+losers) as designed. Two detached remote watchers (`watcher.sh`
+cyc/event log; `ingest_watcher.sh` auto-ingest on PID exit →
+`auto_ingest.txt`) pre-stage the tracedb categorization for the endpoint.
+
+**Lean boot witness (cont.71).** Because per-instruction tracing costs
+~10× wall-rate and the goal is a kernel-length boot, a second detached
+witness `hyp8-osbi-mc-rfix131a-stgfwd-lean` (same `ca6c8a96` model) was
+queued via `HYP8_WAIT_PIDS=1951517` — it `exec`s once the diagnostic
+witness exits. It runs `+rvfi_notrace +core_notrace` (the designed
+kernel-boot flags; kills the 48 GB dasm/iti/encaps + RVFI streams) plus
+`+smt_progress` and the endpoint diagnostics (`+stall_census
++hang_dump=2000 +equiv_report +seq_gap_trace`), budget
+`+max-cycles=+time_out=3000000000`. Live signals reduce to `uart.txt`,
+`run-hyp8.log` events, and process liveness; a lean `watcher.sh`
+(120 s poll → `watcher.log`) watches for `UART`/`EVENT`/`EXITED`. If it
+stalls, `hang_dump`+`stall_census` still emit the state needed for
+tracedb classification; if it boots, `uart`/`smt-progress`/`equiv`
+records carry the milestone.
 
 ---
 

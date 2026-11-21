@@ -122,6 +122,7 @@ ETYPES = {
     'tlb': ('trace', '', '+tlb_trace record'),
     'wbuf.drop': ('diagnostic', '', 'write-buffer obligation dropped by other than a plain drop'),
     'verdict': ('verdict', '', 'harness end-of-test line'),
+    'progress.cycprog': ('progress', '', '+smt_cyc_progress per-hart retire/last-pc heartbeat'),
     'warn': ('unknown', '', 'unclassified stamped warning'),
 }
 
@@ -350,6 +351,23 @@ def parse_log(run):
                        core=int(c.group(1)) if c else None,
                        addr=kv.get('vpn') or kv.get('va'), aux=f"c={kv.get('c')}",
                        detail=kv, raw=s)
+            elif s.startswith('[cycprog]'):
+                # +smt_cyc_progress heartbeat (sb_lifecycle.sv): per-core/per-hart
+                # retired + last_pc every N cycles on notrace kernel-length runs.
+                # Emits a queryable progress event and refreshes the thread row so
+                # `threads`/`profile` reflect live boot position, not just endpoint.
+                kv = dict(RE_KV.findall(s))
+                cyc = int(kv.get('cyc', run.cycle))
+                run.cycle = cyc
+                c_ = core_of(s)
+                hart = int(kv.get('hart', 0))
+                ret = int(kv.get('retired', 0))
+                pcv = kv.get('last_pc')
+                run.ev('progress', 'progress.cycprog', core=c_, hart=hart,
+                       pc=hx(pcv) if pcv else None,
+                       aux=f"retired={ret}", detail={'retired': ret, 'cyc': cyc}, raw=s)
+                t = run.threads.setdefault((c_, hart), {})
+                t.update(retired=ret, last_cycle=cyc)
             elif s.startswith('[equiv]') or s.startswith('*** [mc_') or s.startswith('[lsq-ev-miss]'):
                 sec = s.split(']')[0].strip('*[ ')
                 name = s.split(']', 1)[1].strip()
@@ -365,8 +383,18 @@ def parse_log(run):
                 mv = re.search(r'\*\*\* (SUCCESS|FAILED) \*\*\* \(tohost = (\S+)\) after (\d+) cycles(.*)', s)
                 if mv:
                     budget_out = 'budget' in mv.group(4)
-                    run.verdict = ('wedged' if budget_out else
-                                   ('pass' if mv.group(1) == 'SUCCESS' else f'fail(tohost={mv.group(2)})'))
+                    if budget_out:
+                        # Split the old blanket 'wedged': a cycle-budget exit is a
+                        # true wedge only with stall/assert evidence. A clean run
+                        # that simply ran out of cycles while every core still
+                        # retired is 'incomplete' (needs a larger budget), not a
+                        # deadlock. idle.wfi/seqgap/budget-tail are not wedge proof.
+                        wedged = any((r[5] == 'hang' and r[6] != 'idle.wfi') or
+                                     r[5] == 'assert' for r in run.rows)
+                        run.verdict = 'wedged' if wedged else 'incomplete'
+                    else:
+                        run.verdict = ('pass' if mv.group(1) == 'SUCCESS'
+                                       else f'fail(tohost={mv.group(2)})')
                     run.cycle = int(mv.group(3))
                     run.ev('verdict', 'verdict.tohost', aux=run.verdict, raw=s)
             elif line.startswith(b'[uart] ') and b'uart_bytes=' not in line:

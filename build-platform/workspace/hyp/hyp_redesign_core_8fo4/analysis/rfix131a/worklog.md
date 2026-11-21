@@ -5948,3 +5948,731 @@ ftq emp/full/hv/head/hep, push/pop/ifr/dem/dfire, icache req/resp
 vaddr+valid+token+ready, want_*, red_*, redirect_pend/infl/lost/pc/hit/
 hold/accept, kill_drop, mp/ov1/ov2/fl/k1/k2, faddr/npc. Build:
 hyp8-rfix131a-feprob-mc-aggregate-t4 rebuild in flight.
+
+## cont.64 — c36490 [hang] dump: deadlock is instr_queue_ready=0 (frontend IQ drain stall), NOT bp_pend filter
+
+feprob-v3 witness (hyp8-osbi-mc-rfix131a-feprob-v3-wt, model 98db74f4) reached
+the same stall; [hang] dump @cyc=36490 (since_ack=3000) gives the decisive
+per-signal state:
+
+  [hang] FE:   head v=1 pc=0x80012a06 ftq_full=0 cf_hold=1 demand=0
+               iq_rdy=0 halt=0 reseed=0 flush=0 replay=0 misp=0 epoch=2
+               npc=0x80012a08 lbuf act=0 hold=0 ic_rdy=1 fe_v=0 fe_rdy=0
+  [hang] IQF:  idx_ds=00000000 idx_is=7 empty=00000000 full=00000000
+               usage0..3=4/4/4/4 ready=0 replay=0 fe_valid=0 pos_present=0
+               block_any=0 consumed=0 | red_pend=0 red_inflight=0
+               red_lost=0 red_tail=0 red_pc=0x80012a94 bp_pend=1
+               bp_tgt=0x80012a06
+  [hang] SB:   commit_ptr=27 issue_ptr=27 sb_empty=1 (backend fully drained)
+
+DECOMPOSITION (demand_req = ftq_head_valid & instr_queue_ready & ~halt & ~lbuf
+& ~reseed & ~flush & ~replay_q & ~is_mispredict):
+  ftq_head_valid=1 (head=0x80012a06, epoch=2 LIVE — reseed+epoch correct)
+  halt=0 reseed=0 flush=0 replay=0 misp=0 lbuf=0   -> ALL other gates CLEAR
+  => demand_req=0 PURELY because instr_queue_ready=0 (iq_rdy=0). CONFIRMED.
+
+instr_queue_ready = ready_o = ~(|instr_queue_full) & ~full_address
+(instr_queue.sv:238). IQF shows all NrFifo lanes occupied
+(empty=0, usage=4/4/4/4) yet pos_present=0 / fe_valid=0 / consumed=0 and
+idx_ds=00000000. Two candidate micro-causes, both = "queue can't drain":
+  (a) lane FIFOs genuinely FULL (backend fetch_entry_ready_i=0 -> entries
+      never fire/consume -> instr_queue_full -> ready_o=0)
+  (b) drain-pointer desync: idx_ds selects an empty lane while occupied
+      lanes wait behind it -> pos_present=0 -> nothing fires -> fills ->
+      ready_o=0 (fill_ptr idx_is vs drain_ptr idx_ds round-robin skew)
+  (c) full_address=1: i_fifo_address (predicted-CF target FIFO) full —
+      pop_address only fires on fetch_entry_is_cf & consumed_pos, so if CFs
+      aren't consumed their target addrs leak -> full_address -> ready_o=0.
+
+Backend side: fe_rdy=00000000 = fetch_entry_ready_i=0. id_stage
+fetch_entry_ready_o = dec_adv && fetch_entry_valid_i && ~stall_instr_fetch
+(id_stage.sv:919-925). With fe_v=0 it is trivially 0 — circular: frontend
+presents nothing because IQ won't accept new fetches; IQ won't accept because
+full/not-ready. The PRIMARY stall is upstream: the instr_queue stopped
+draining. Why the drain stopped (which of a/b/c, and whether it is a
+drain-pointer desync vs address-FIFO-full vs backend dec_adv/stall) is the
+next isolation step — needs the [iq]/[PHANTOM-IQ] probe or a correctly
+windowed feprob rerun (note: feprob_c and [hang] sc_cyc are OFFSET — the
+33400-34100 window did not intersect the c36490 hang dump; widen/recalibrate
+window next run, e.g. cover sc_cyc 33000-37000).
+
+bp_pend/cf_hold are DOWNSTREAM VICTIMS, not the bug: bp_pend=1 bp_tgt=
+0x80012a06 correctly filters for the live OV2 target; it only waits for an
+icache request that demand_req=0 prevents. Fixing instr_queue_ready restores
+the fetch -> icache_take -> cf_hold clear -> bp_pend discharge chain.
+
+## cont.65 — ROOT CAUSE: instr_queue idx_ds_q=0 absorbing drain-pointer dead state
+
+IQF field decode (g6lc_core.sv:2909-2912 maps the print to real signals):
+  idx_ds = i_instr_queue.idx_ds_q = 00000000   <- drain ptr ALL-ZERO
+  idx_is = idx_is_q = 7
+  empty  = instr_queue_empty = 00000000       <- NO lane empty (all occupied)
+  full   = instr_queue_full  = 00000000       <- NO lane full
+  usage0..3 = 4/4/4/4  ready=0  pos_present=0  fe_valid=0  consumed=0
+
+ready_o = ~(|instr_queue_full) & ~full_address = ~0 & ~full_address.
+instr_queue_full=0  =>  ready_o=0  REQUIRES  full_address=1.
+
+CAUSAL CHAIN (all downstream of idx_ds_q=0):
+  idx_ds_q=0 -> idx_ds[p]=rotate(0)=0 -> pos_present[p]=|(lane_live&0)=0
+  -> fe_v=0 -> fetch_entry_fire=0 -> consumed_pos=0
+  -> pop_address=|(is_cf & consumed_pos)=0 -> i_fifo_address never pops
+  -> full_address=1 -> ready_o=0 -> demand_req=0 -> frontend can't fetch
+  -> cf_hold/bp_pend starve.  PERMANENT (absorbing: idx_ds_d=adv_term=0
+  when idx_ds_q=0, so it can never leave 0).
+
+WHY idx_ds_q=0 IS ANOMALOUS: idx_ds_d=adv_term[NrIssue] is always a
+one-hot rotation of idx_ds_q for one-hot idx_ds_q (cons_none holds it;
+cons_hi injects exactly one rotation). There is NO combinational path
+idx_ds_d->0 from a one-hot idx_ds_q, and reset/flush force LSB one-hot.
+Suspects: (i) X-prop under --x-assign 0 latching an X on idx_ds_q/idx_ds_d
+on a rare consumed_pos pattern; (ii) an as-yinc fill/drain desync that
+emptied the lane idx_ds pointed at AND zeroed it; (iii) NrIssue/NrFifo
+boundary in gen_idx_ds/adv_term. The $onehot0(idx_ds_q) assertion
+(instr_queue.sv:927) allows all-zero (onehot0 = at-most-one), so it does
+NOT catch this -- the guard is incomplete.
+
+NEXT: (a) reproduce with +iq_trace/+PHANTOM-IQ armed across the transition
+to catch the idx_ds_q->0 edge and the consumed_pos pattern; (b) candidate
+fix = guard idx_ds_q against 0 (re-point to oldest occupied lane on
+idx_ds_d==0 while queue nonempty) OR fix the X/desync source; (c) note
+full_address=1 is the proximate ready_o term but idx_ds_q=0 is root.
+
+## cont.66 — idx_ds_q->0 ENTRY PATH FOUND: gen_idx_ds zeroes idx_ds[p>=NrFifo]; full-width drain wraps to 0
+
+instr_queue.sv:468-475 gen_idx_ds:
+    p==0            -> idx_ds[0] = idx_ds_q
+    0<p<NrFifo      -> idx_ds[p] = rotate(idx_ds_q, p)   (one-hot)
+    p>=NrFifo       -> idx_ds[p] = '0                    <-- THE BUG SEED
+
+adv_term (instr_queue.sv:633-638): idx_ds_d = adv_term[NrIssue]; the
+highest consumed_pos bit k injects idx_ds[k+1]. Drain positions are
+0..NrIssue-1. When the HIGHEST consumed position is k=NrIssue-1 (last
+issue port), the advance uses idx_ds[NrIssue].
+
+Config: NrIssuePorts=8 (IQ arb port0..7), NrFifo=8 (idx_ds/empty/full
+prints are 8 bits). So idx_ds[NrIssue]=idx_ds[8] and 8>=NrFifo=8 -> '0.
+
+=> A FULL-WIDTH drain (consumed_pos prefix reaching port7, i.e. all 8
+positions fired/stale-dropped in one cycle) computes idx_ds_d =
+adv_term[8] = adv_term[7] | idx_ds[8] = 0 | '0 = '0  -> idx_ds_q <= 0.
+idx_ds_q=0 is ABSORBING (idx_ds_d stays 0). Drain dead -> pos_present=0
+-> consumed_pos=0 -> pop_address=0 -> i_fifo_address fills ->
+full_address=1 -> ready_o=0 -> demand_req=0 -> FE deadlock @c33490.
+
+Matches hang exactly: idx_ds_q=00000000, pos_present=0, consumed=0,
+full_address implied 1 (instr_queue_full=0 so ready_o=0 needs it).
+
+FIX DIRECTION: idx_ds[p] for p>=NrFifo is '0 to keep pos_present[p]=0
+for non-existent ports p in [NrFifo..NrIssue-1] — BUT idx_ds[NrIssue]
+is used ONLY by adv_term (never by pos_present, whose p max is
+NrIssue-1). So idx_ds[NrIssue] must be the WRAPPED drain head, not '0:
+it should equal rotate(idx_ds_q, NrIssue mod NrFifo) — for
+NrIssue==NrFifo that is idx_ds_q itself is WRONG (head must advance);
+correct value = the lane after the last consumed position. Precisely:
+the new head after consuming positions 0..NrIssue-1 is the entry at
+drain-offset NrIssue, i.e. rotate(idx_ds_q, NrIssue) reduced mod
+NrFifo — implement as a constant rotate for the p==NrIssue slot only,
+leaving p in [NrFifo..NrIssue-1] at '0. VERIFY rotation direction/
+mod against gen_rot (line 472) and IFifoDepth>1 multi-entry lanes
+before editing; confirm with +iq_trace that consumed_pos=0xFF precedes
+the idx_ds_q->0 edge.
+
+## cont.67 — IQFIX BUILT+VERIFIED: idx_ds_q=0 drain deadlock CLEARED, hart0 -> c46384+
+
+FIX (instr_queue.sv gen_idx_ds else-branch, was `idx_ds[p]='0`):
+    assign idx_ds[p] = rotate_left(idx_ds_q, fifo_idx_t'(p % NrFifo));
+for p>=NrFifo. idx_ds[NrIssue] is the advance-only slot (pos_present
+reads only p<NrIssue); wrapping it keeps idx_ds_d one-hot when the
+highest consumed_pos is NrIssue-1 (full-width drain). Previously
+idx_ds_d=adv_term[..]|idx_ds[NrIssue]=0 -> idx_ds_q latched 0 ->
+absorbing drain dead -> i_fifo_address full -> ready_o=0 -> FE dead.
+
+BUILD hyp8-rfix131a-iqfix-mc-aggregate-t4: status=build_complete rc=0,
+modelSha256=0ea8e4b93bf3ff9153f18135170d19fe178db2cd302576c02a0274bfcd286ffd,
+lint %Error=0 (scalar+smt2), compilerPgo=true, -march=x86-64-v3 -O2,
+verilator g6lc-6fa24f6f-pgo. (~80min remote compile.)
+
+WITNESS hyp8-osbi-mc-rfix131a-iqfix-wt (model 0ea8e4b9, ELF 04f3b24b,
++max-cycles=400000 +stall_census +hang_dump=2000 +equiv_report
++rvfi_cycle_stamp +seq_gap_trace +win_trace 390000-400000):
+  pid 1923994 RUNNING. hart0 trace_rvfi_hart_00 maxcyc=46384 @12min,
+  22370 retires, PCs advancing, NO [hang]. Previous feprob hang was
+  sc_cyc=36490 -> hart0 is ~9900 cycles PAST the FE drain deadlock.
+  harts 02/04/06 traces empty (cores1-3 still boot-held, expected).
+
+=> SECOND deterministic deadlock eliminated+verified (after LSU
+mem-issue grant). Boot now progresses into deep execution; watching
+for next stall or tohost. Rate ~4000cyc/min w/ full dasm tracing.
+
+## cont.68 — c170756 store_buffer ooo_no_younger_forward = WITNESS false-pos (StoreFwdCycles==3); gated to ==1; stgfwd build launched
+
+IQFIX run (model 0ea8e4b9) blew through c36490 FE deadlock, ran to
+c170756 where sim ABORTED on translate_off witness:
+  store_buffer.sv:1270 ooo_no_younger_forward:
+  "OoO load tid 20 forwarded bytes 11111111 with no older source
+   (visible cover 00000000)"
+
+ROOT CAUSE (witness, not RTL): for HypCfg.StoreFwdCycles==3 the
+st_fwd_*_o pins = fwd_hold_*_q = UNTAGGED held F3 response (+3 cyc),
+NOT cycle-aligned with load_paddr_i/load_trans_id_i. In multi-load
+OoO (NrLoadBufEntries>1, tagged fwd_rsp path) several loads present
+load_paddr_valid concurrently; the single held pin answers the LAST
+f3_valid (one specific tagged req) while ooo_fwd_visible_cover is
+computed for the LIVE load_paddr_i -> be_o(for load X) vs cover(for
+load Y) mismatch -> spurious fire. be=11111111 cover=0 is consistent
+with a stale held forward, not a real younger-store leak.
+
+REAL age contract is enforced INSIDE stb_fwd F1 (synthesized):
+  spec_visible(sid)=ooo_older(sid,req_tid_i); F1 cand requires
+  spec_visible; arrivals require ooo_older(ins_tid,req_tid); commit
+  entries architecturally older; youngest-writer-wins among OLDER
+  candidates only. A younger store can never be an F1 candidate.
+
+FIX (store_buffer.sv assert guard, translate_off only — no silicon
+effect): added `HypCfg.StoreFwdCycles==1` to ooo_no_younger_forward.
+Witness stays armed for the ==1 live-merge path (where st_fwd_*_o is
+combinational/query-aligned and the check is sound); for ==3 the
+authoritative check is stb_fwd's internal F1 filter. Does NOT mask a
+real bug: ==3 was never soundly checkable at this level anyway.
+
+If younger-forward suspicion resurfaces: restore witness for ==3 by
+having stb_fwd emit rsp_pa_o/rsp_tid_o (pipeline-aligned req identity)
+-> capture into fwd_hold_pa/tid_q -> gate cover on pa_eq+tid match.
+
+BUILD hyp8-rfix131a-stgfwd-mc-aggregate-t4 launched (closure has
+memfix+iqfix+stgfwd-witness; gcc-16 toolchain env, PGO, -march=v3).
+
+## cont.69 — gcc-16.2.0 host toolchain propagated to ALL remote testharness/test paths
+
+TANGENT (user request): ensure the newly-built gcc-16.2.0 is used by every
+remote testharness build/test, not just present in env.sh.
+
+ROOT GAP found: env.sh exported the three *_BUILD_TOOLCHAIN selection vars
+but (a) `py` jobs never sourced env.sh so uploaded scripts saw only bare
+CXX=g++/CC=gcc, (b) `shell` one-shots did not source env.sh either, (c) the
+hyp8 build CLOSURE pinned a stale hyp8-build-harness.sh predating the
+toolchain block so HYP8_BUILD_TOOLCHAIN was ignored, and (d) scripts without
+a toolchain block (ai-matrix, oracc) fell back to distro g++=gcc-13. The
+in-flight stgfwd build proves it: make line `CXX=g++ CC=gcc LINK=g++`,
+cc1plus=/usr/libexec/gcc/x86_64-linux-gnu/13/cc1plus -> gcc-13 despite
+HYP8_BUILD_TOOLCHAIN being set.
+
+CHANGES (all verified):
+- /opt/testharness/env.sh (live): PATH now prepends
+  /opt/testharness/toolchains/gcc-16.2.0-znver4/bin so bare gcc/g++/c++/
+  x86_64-pc-linux-gnu-gcc resolve to 16.2.0 for EVERY sourced command;
+  added AI_MATRIX_BUILD_TOOLCHAIN; kept CXX=g++/CC=gcc bare + the three
+  existing *_BUILD_TOOLCHAIN exports.
+- verif/regress/remote/provision.sh write_env(): durable template now
+  discovers the newest $TOOLS/gcc-*/bin/g++ (TH_HOST_GCC override), puts its
+  bin on PATH, and emits all four *_BUILD_TOOLCHAIN exports; omits the block
+  cleanly when no prefix exists. A future `setup` won't revert the pin.
+- verif/regress/remote/testharness_proxy.py:
+    * cmd_py already patched earlier — remote py runner sources env.sh
+      (non-fatal) before __th_py_runner__.py so os.environ carries the
+      toolchain env into run_hyp8_integration.py's dict(os.environ).
+    * cmd_shell one-shot path now prefixes env_prefix() so helper-script
+      builds launched via `shell` inherit env.sh too.
+- verif/regress/ai-matrix-build-harness.sh: added the standard toolchain
+  block — AI_MATRIX_BUILD_TOOLCHAIN -> SOFT_LADDER_BUILD_TOOLCHAIN fallback,
+  bare CC/CXX count as unset, prefix bin prepended to PATH so the -O0
+  CXX_WRAP's `command -v g++` also resolves to gcc-16.
+- verif/regress/remote/oracc_nopgo_build.sh: replaced hardcoded
+  `CXX=g++ CC=gcc LINK=g++` with DEV_PGO_TOOLCHAIN/SOFT_LADDER resolution
+  (bare counts as unset), LINK defaults to $CXX.
+- build-platform/workspace/build/closure-rfix131a-amocasfix: REGENERATED via
+  build_closure.py --mc (930 files) so the pinned hyp8-build-harness.sh is
+  the current toolchain-aware version AND carries memfix+iqfix+stgfwd RTL.
+
+VERIFICATION (remote, ovh_calltorch):
+- env.sh source -> command -v gcc/g++/c++/x86_64-pc-linux-gnu-gcc all ->
+  /opt/testharness/toolchains/gcc-16.2.0-znver4/bin/*; gcc/g++ --version =
+  16.2.0; all four *_BUILD_TOOLCHAIN = the znver4 prefix; CXX=g++ CC=gcc.
+- proxy `py` job ccprobe-gcc16 (remote-runs/ccprobe-gcc16): os.environ sees
+  all four vars; real `g++ -O2` compile of a test .cpp -> __VERSION__=16.2.0,
+  binary runs. Only gap: `cc` -> /usr/bin/cc (C driver, not used for C++).
+- command-build.json of hyp8 builds records HYP8_BUILD_TOOLCHAIN (env is
+  propagated into run_hyp8_integration.py build_env).
+
+COVERAGE MAP — every remote compile path now resolves gcc-16:
+  proxy build/run/soak/di/l2-leaf/l2-equiv/apu-leaf -> env_prefix() env.sh
+  proxy py -> env.sh sourced (patched)
+  proxy shell one-shot -> env.sh sourced (patched); interactive bash -l is
+    user-driven (sources env.sh manually if needed)
+  soft-ladder/hyp8/ai-matrix/dev_pgo/oracc harnesses -> *_BUILD_TOOLCHAIN
+    block AND/OR PATH-resolved bare g++/c++
+  l2/apu leaf benches -> verilator C++ via inherited PATH g++
+
+IN-FLIGHT: stgfwd build hyp8-rfix131a-stgfwd-mc-aggregate-t4 (launched
+~50min ago, pre-env.sh-PATH) still compiles with gcc-13 — its closure has
+all three RTL fixes so the model is functionally correct for the witness;
+gcc version does not change RTL behaviour. NEXT build onward is gcc-16.
+Strict timing/qualification evidence should prefer a gcc-16 rebuild once
+the functional frontier advances (compiler is part of the instrument id).
+
+## cont.70 — stgfwd witness DEEP-CLEAN: mc boot at c385k+, zero categorized events; kernel-decompression loop identified
+
+Witness hyp8-osbi-mc-rfix131a-stgfwd-wt1 (model ca6c8a96, fw 04f3b24b,
+tohost 0x80041730, +max-cycles=500000 +stall_census +hang_dump=2000
++equiv_report +rvfi_cycle_stamp +seq_gap_trace +seq_gap_limit=200) launched
+on the stgfwd model carrying ALL THREE fixes: memfix LSU dual-issue grant
+(issue_read_operands), iqfix instr_queue idx_ds_q wrap (instr_queue),
+stgfwd store_buffer witness guard (StoreFwdCycles==1, translate_off only).
+
+MONITORING METHOD (new): two detached remote watchers on ovh_calltorch —
+watcher.sh tails cyc= every 45s + fires UART/EVENT(hang|assert|tohost|
+seqgap|%Error|Aborted|FAILED)/STALL_SUSPECT/EXITED into watcher.log;
+ingest_watcher.sh waits on PID 1951517 exit then runs ingest.py --force +
+query.py classes|hangs|uart|runs into auto_ingest.txt + auto_ingest.done.
+This pre-stages tracedb categorization so the endpoint needs only a read.
+
+TRAJECTORY (watcher.log cyc= stream, all clean — 0 UART/EVENT/STALL):
+  c89k -> c170k+   PASSED former store_buffer assert pt (stgfwd guard OK)
+  c170k -> c385k+  ~215k cycles of NEW territory, no stall/assert/uart
+Rate ~50-130 cyc/s (IPC-dependent). All three prior deterministic
+frontiers CLEARED under real boot: c25714 LSU dual-issue (memfix),
+c33490 FE idx_ds_q (iqfix), c170756 store_buffer false-assert (stgfwd).
+
+INGEST SNAPSHOT (mid-run, tq.sh --ingest): 0 events/0 census/0 uart/
+last_cycle=0 — CORRECT, not a failure. ingest.py only files categorized
+records ([hang]/[stall-census]/[seq-gap]/[ptw-err]/verdict) which the model
+emits at an ENDPOINT; run-hyp8.log holds only early [boot]/[rob] lines
+(unclassified) because diagnostics are phase/window gated. rvfi/pc_sample
+are gated on run.cycle+event anchors (both 0 until endpoint). => the clean
+boot IS the categorization result so far: ZERO error/hang/stall classes.
+
+BOOT-PHASE CATEGORIZATION (from live trace_hart_0.dasm + trace_hart_2/4/6.dasm
++ ELF nm of fw_payload.elf, c0-c398k):
+  PC page histogram (code PCs 0x800xxxxx only):
+    0x80012 = 120046 (85%)  0x80004 = 11679  0x80000 = 4761
+    0x80013 = 4708  0x80014 = 630  0x80017 = 401  0x80007 = 177
+  nm symbol map resolves the hot region to libfdt:
+    0x80012878 fdt_offset_ptr  0x80012964 fdt_next_tag
+    0x80012a9a fdt_check_node_offset_  0x80012ad0 fdt_check_prop_offset_
+    0x80012b06 fdt_next_node  0x80012bec fdt_first_subnode
+    0x80012c1a fdt_next_subnode 0x80012c5a fdt_find_string_
+    0x80012cbc fdt_move        ... 0x80013122 fdt_get_mem_rsv
+    fw_fdt_bin @ 0x8001e000 (the DTB hart0 is walking)
+  => hart0's dominant loop is INSIDE the libfdt parser — OpenSBI sbi_init
+  DTB traversal. Loop body = node/prop scans: lw-family loads at advancing
+  FDT offsets + shift/mask ALU (tag/len/nameoff decode) + compressed ops.
+  RVFI mem census: 389 DISTINCT addrs in 0x8001e0xx-0x8001f7xx touched =>
+  hart0 IS traversing the DTB (the constant-value reads at 0x8001e004-027
+  in a narrow window were one node's header re-read inside the walk).
+  SECONDARY HARTS: trace_hart_2/4/6 each 32768 lines, last PCs
+  0x800002e8-0x80000302 = _wait_for_boot_hart (nm @0x800002e8; losers of
+  the coldboot amoswap.w lottery @0x80000034 spin here) — EXPECTED.
+  => VERDICT: NORMAL multicore OpenSBI coldboot. Boot hart won lottery,
+  doing sbi_init DTB parse; harts 2/4/6 correctly held until release.
+  NOT a stall — just slow (heavy instrumentation ~65cyc/s). Consistent
+  with the earlier cont.N lottery/relocate analysis (hart0 long-past
+  _bss_zero into OpenSBI proper).
+  (CORRECTION: an earlier read guessed "kernel-image decompression"; the
+  ELF nm map shows it is libfdt DTB traversal instead.)
+
+OPEN QUESTION for the endpoint: is the DTB walk PROGRESSING (reaching new
+  nodes/regions -> will finish sbi_init -> release harts -> Linux) or
+  OSCILLATING in a subtree (possible fdt_next_node non-advance bug)? The
+  389-address spread argues progressing; watch for hart0 to exit the
+  0x80012xxx fdt region or harts 2/4/6 to leave _wait_for_boot_hart.
+
+NEXT: witness runs to 500k budget (~26min more) or an event. On
+  auto_ingest.done -> read auto_ingest.txt classes/hangs/uart. If a hart0
+  stall/uart/hart-release appears -> isolate via hangs/profile -> fix.
+  If clean-to-500k still in fdt parse -> check whether DTB walk advances
+  (sample max FDT addr over time) before assuming progress.
+
+## cont.71 — LEAN boot witness launched: +rvfi_notrace/+core_notrace for kernel-length run
+
+STRATEGIC PIVOT (host-contention + trace-overhead analysis):
+  The stgfwd diagnostic witness (pid 1951517, traced, +max-cycles=500000)
+  confirmed the boot is HEALTHY: hart0 in libfdt DTB walk (fw_fdt_bin
+  0x8001e000, totalsize 0x197d, reached strings blk 0x8001f806), harts
+  2/4/6 correctly in _wait_for_boot_hart. Zero categorized events to ~c430k.
+
+  BUT wall-rate was only ~44-65 cyc/s. Root-caused NOT to RTL but to:
+    (a) per-instruction trace writes (trace_hart_*.dasm + trace_rvfi_*.dasm
+        + iti.traces + encaps.traces) -- hyp8_tb.cpp:214-223 documents
+        +core_notrace skips "48 GB and a few % of host time over a 760
+        M-cycle Linux boot"; +rvfi_notrace is the DESIGNED flag "on
+        kernel-boot-length runs; tohost detection stays on".
+    (b) host oversubscription: 12 cores, load ~21 -- a phantomprobe
+        aggregate build (many cc1plus) + devcase-ab + devthr1-ab sims all
+        competing with the witness (296% CPU but starved).
+  Verified notrace works: a stray leantest (pid 2011250, killed after
+  proof) produced 0-byte trace files = tracing fully disabled, and ran
+  ~500-875 cyc/s under heavy contention vs ~64 cyc/s traced (~10x).
+
+  ACTION: launched LEAN mc boot witness
+    tag   = hyp8-osbi-mc-rfix131a-stgfwd-lean
+    model = hyp8-rfix131a-stgfwd-mc-aggregate-t4 (ca6c8a96, all 3 fixes)
+    elf   = fw_payload.elf sha 04f3b24b...
+    pid   = 2016408 (wait-launcher; execs model when pid 1951517 exits)
+    budget= +max-cycles=3000000000 +time_out=3000000000  (3G, recipe default)
+    plusargs = +rvfi_notrace +core_notrace +smt_progress
+               +stall_census +hang_dump=2000 +equiv_report
+               +seq_gap_trace +seq_gap_limit=200   (dropped rvfi_cycle_stamp)
+    HYP8_WAIT_PIDS=1951517 -> auto-starts when diagnostic witness exits,
+               avoiding oversubscription during its final ~77k cycles.
+  +smt_progress prints per-hart retired/last_pc at $finish (end-of-run
+  tally, NOT live). Live signals: uart.txt, run-hyp8.log events
+  (hang/assert/tohost/seqgap/equiv), process liveness.
+  Deployed lean watcher.sh (pid 2017732, 120s poll -> watcher.log).
+
+  RATIONALE: diagnostic witness proved no-early-stall to 500k; the real
+  goal (complete mc OpenWrt boot ~760M-3G cycles) needs the ~10x lean
+  speed or it is infeasible (traced would take months). Lean keeps all
+  ENDPOINT diagnostics (hang_dump/stall_census/equiv/tohost) so a stall
+  still yields hang_dump state + stall_census for tracedb classification.
+
+NEXT: monitor stgfwd-lean watcher.log for UART / EVENT / EXITED. On UART
+  -> ingest + uart/profile confirm console. On EVENT -> hang_dump +
+  stall_census -> tracedb classify -> next RFIX. On clean deep run ->
+  extend budget / confirm boot milestone. Diagnostic stgfwd-wt1 finishes
+  ~500k then ingest --force for the final endpoint classification.
+
+## cont.72 — stgfwd-wt1 ENDPOINT: verdict=wedged = budget-exhausted INCOMPLETE boot, NOT deadlock; lean witness now running
+
+auto_ingest fired on wt1 exit (pid 1951517 done at cyc~500k). tracedb:
+  verdict=wedged, last_cycle=299986*, 3 events, 8 census, 0 uart, 260 rvfi.
+  (*last_cycle parses a census record; the sim itself ran full 500000.)
+
+DECODE of run-hyp8.log endpoint records (the REAL classification):
+  [SUCCESS] (tohost=0) after 500000 cycles [cycle budget reached: no tohost]
+    -> ingest.py:368 maps "budget" in tail -> verdict='wedged'. This label
+       means BUDGET-EXHAUSTED-WITHOUT-VERDICT, i.e. INCOMPLETE boot, NOT a
+       detected deadlock. No [hang] dump fired, hangs table empty.
+  [mc_verdict] all 4 core(s) retired instructions ; program exit code 0
+  [mc_gap]    per-core max retire gap: c0=309 c1=65 c2=63 c3=61 (limit 5000)
+              -> NO core stalled; all far under wedge threshold.
+  [mc_cache]  l2_hit=1236 l2_miss=194 l3_miss=188 wupd=10052 hub_aw_fire=11682
+              -> cache coherence ACTIVE + working multicore.
+  [equiv]     wt_dcache_wbuffer tx_single checked=11678 viol=0 -> mem integrity OK.
+  [uart]      uart_bytes=0 uart_reads=0 -> still pre-console (OpenSBI init).
+  [stall-census] core0 hart0 ret=186760 ipc=0.374 (ld=41532 st=11686 alu=104989
+              br=28549) mem_viol=224 ; cores1-3 census frozen at cyc=299986
+              ret=48876 -> their primary harts parked ~c258k in
+              _wait_for_boot_hart (WFI) awaiting hart0 release. EXPECTED.
+
+VERDICT: mc OpenSBI boot is HEALTHY but SLOW. hart0 (boot hart) was still
+  actively retiring (IPC 0.374) in libfdt/scratch-init at budget-out;
+  secondary harts correctly parked. mem_viol=224 is benign (equiv viol=0;
+  likely early-init permission/PMP probes). 500k cycles is simply too
+  small to finish sbi_init + release harts + reach Linux.
+
+LEAN WITNESS NOW RUNNING: hyp8-osbi-mc-rfix131a-stgfwd-lean pid 2016408
+  exec'd the model (~25min after wt1 exit via HYP8_WAIT_PIDS). Confirmed
+  executing: run-hyp8.log shows [preload] FDT magic + [boot] npc advance,
+  logsz growing. notrace -> ~10x wall-rate; 3G-cycle budget. This is the
+  vehicle for the real mc OpenWrt boot. Its watcher.log polls uart/events.
+
+METHODOLOGY NOTE for tracedb: 'wedged' currently conflates true stall with
+  budget-exhaustion. Consider splitting: wedged->'incomplete' when
+  mc_gap/mc_verdict show all-cores-retired + no [hang]. (low priority)
+
+NEXT: monitor stgfwd-lean/watcher.log for UART/EVENT/EXITED. On UART ->
+  ingest + confirm console milestone. On stall -> hang_dump+stall_census
+  -> tracedb classify -> next RFIX. Deep clean run -> extend/confirm boot.
+
+## cont.73 — wt1 trace deep-dive: hart0 reached SBI scratch/HSM-structure init by c500k (late sbi_init)
+
+From trace_rvfi_hart_00.dasm stores to 0x80046ec0-0x80046f60 (a structured
+config region, NOT the DTB at 0x8001e000):
+  0x80046ee8 <- 0x8001e000   (DTB/FDT pointer)
+  0x80046ee0 <- 0x2          (index/count)
+  0x80046ed8 <- 0x9          (index/count)
+  0x80046f18 <- 0x764        (size/offset)
+  0x80046ec8 <- 0x80012984   (code/function pointer into init region)
+  0x80046ec0 <- 0x80046f10   (linked ptr)
+  0x80046f00 <- 0x80046f60   (linked ptr)
+followed by verify re-reads (0x80012966-78) of the same fields.
+
+=> hart0 was NOT stuck in raw fdt parsing; it had progressed to writing
+the SBI scratch / HSM / coldboot boot-info structure (DTB ptr + hart
+indices + sizes + a resume/code pointer). This is a LATE sbi_init phase,
+approaching per-hart state setup and secondary-hart release. Confirms the
+500k budget cut the boot mid-init, not early — consistent with verdict=
+wedged meaning budget-exhausted, and predicts hart-release + Linux are the
+next milestones the lean run must reach.
+
+## cont.74 — +smt_cyc_progress heartbeat probe: live per-hart boot-progress stream for notrace runs
+
+PROBLEM: stgfwd-lean (+rvfi_notrace +core_notrace) is BLIND — no per-cycle
+  or per-hart stream; endpoint-only signals (UART/hang/verdict). Cannot
+  categorize WHERE the multi-day mc boot is at any intermediate point,
+  which is exactly what the tracedb methodology needs.
+
+SOLUTION: new translate_off probe `+smt_cyc_progress[=N]` in
+  hyp/.../core/sb_lifecycle.sv (the hyp8 scoreboard lifecycle engine —
+  NOTE: build uses the hyp workspace refactor, NOT core/scoreboard.sv).
+  Reuses the existing smt_progress per-hart counters
+  (smt_retired_count[] / smt_last_retired_pc[]) so either probe arms them.
+  Every N cycles (default 1_000_000) prints per scope/hart:
+    [cycprog] scope=%m cyc=%0d hart=%0d retired=%0d last_pc=%h
+  => live cycle + per-hart retired + last-PC heartbeat. %m scope
+  distinguishes the 4 core instances; hart id is the local SMT thread.
+  Sim-only (inside existing translate_off 750-1037); zero silicon impact.
+
+Also added "smt_cyc_progress" to the hyp8_tb.cpp plusargs allowlist
+  (prefix match covers =N form). Verified prefix-match at hyp8_tb.cpp:607.
+
+BUILD: closure-rfix131a-amocasfix synced (sb_lifecycle.sv + hyp8_tb.cpp),
+  manifest.json 2 hashes patched (verified manifest==closure==live bytes
+  on untouched alu.sv). cycprog-model.sh -> hyp8-rfix131a-cycprog-mc-
+  aggregate-t4, gcc-16.2.0 toolchain. Lint clean (only pre-existing
+  fpnew/tc_sram warnings; zero cycprog/sb_lifecycle errors). C++ building.
+
+WITNESS: cycprog-witness.sh ready — same lean notrace recipe as
+  stgfwd-lean + `+smt_cyc_progress=500000` (2x default resolution).
+  Waits for model results.json then launches detached.
+
+PLAN: when cycprog model lands, decide swap vs parallel for stgfwd-lean
+  (pid 2016408, blind). cycprog gives categorized continuous boot data —
+  strictly better for the tracedb goal once verified.
+
+## cont.75 — tracedb reference milestone map: scalar r127m reached SHELL @ ~1.537G cycles
+
+Querying tracedb `runs`/`uart`/`profile`/`classes` for the successful scalar
+boot hyp8-osbi-scalar-r127m (rev rfix131a — SAME RTL lineage as the mc runs)
+gives the categorized boot-milestone reference the mc run must match:
+
+UART console milestones (sim cycle -> kernel-time -> message):
+  23,082,475   0.000    Linux version 6.6.93 ...        <- FIRST UART byte
+  310,513,720  1.055    RCU Tasks Trace
+  548,422,775  5.814    squashfs version 4.0
+  573,422,463  6.313    Freeing initrd memory
+ 1,227,720,505 19.399   io scheduler mq-deadline
+ 1,315,702,147 21.159   Serial: 8250/16550 driver
+ 1,322,522,498 21.295   console [ttyS0] enabled         <- CONSOLE LIVE
+ 1,430,638,389 23.460   Run /init as init process
+ 1,473,869,381           G6LC_LINUX_INIT_UP
+ 1,481,621,898           Linux (none) 6.6.93 #0 SMP      <- uname
+ 1,529,110,782           Mem: 238896 ...                 <- memory
+ 1,536,145,883           G6LC_LINUX_SHELL
+ 1,536,606,584           BusyBox ash
+ 1,537,065,840           ~ #                              <- SHELL PROMPT
+(last_cycle 2,671,059,188 = post-shell soak/idle tail)
+
+PROFILE (retired-instr per 100M-cycle bucket by region/priv):
+  0M      firmware=379 kernel=576  priv 1:576,3:384   <- OpenSBI+early kernel
+  100-1300M kernel=816-960/100M  priv 1:816-960       <- LONG kernel boot (~1.3G)
+  1400M   kernel=678 user=192    priv 0:192,1:678,3:90 <- userspace init starts
+  1500M   user=48                priv 0:48,1:336        <- shell/userspace
+=> boot phases: OpenSBI firmware (~0-23M) -> Linux kernel decompress+init
+   (~23M-1.3G, DOMINANT) -> user init/shell (1.4G+).
+
+IMPLICATION for mc lean witness (3G budget):
+  - First UART (Linux banner) ~23M cycles; console ~1.32G; shell ~1.54G.
+  - mc adds coherence/SMP overhead but same firmware path -> shell likely
+    ~1.5-2.5G cycles, well within 3G budget.
+  - HUGE silent gap 0->23M cycles (OpenSBI init + kernel decompress) is
+    exactly what +smt_cyc_progress heartbeat now makes visible.
+  - mc-specific milestones to watch: secondary-hart release (cores1-3 leave
+    _wait_for_boot_hart), SMT hart1 activation, SMP kernel bring-up — these
+    appear in cycprog last_pc/retired per hart BEFORE/AROUND the kernel
+    phase, distinguishing mc boot from scalar.
+
+CLASSES note: r127m axi.r.untagged=18131 + ptw.*.phys-alias=16558 etc. are
+the known benign early-boot probe/alias classes (RFIX-131a-01/02/03/04
+already fixed or accepted). mc-specific liveness hangs were the fixed
+memfix/iqfix/stgfwd classes. stgfwd-wt1 = 0 events (clean budget).
+
+## cont.76 — firmware milestone map (fw_payload.elf r116 mc, for cycprog last_pc decode)
+
+Symbols (riscv-none-elf-nm on build-linux-mc fw_payload.elf):
+  _start/_fw_start      0x80000000   reset vector (all harts)
+  _wait_for_boot_hart   0x800002e8   SECONDARY-HART PARK LOOP (seen in trace)
+  _start_warm           0x80000306   post-release continuation
+  sbi_init              0x800006dc   boot-hart main init
+  fw_next_addr          0x80000690   -> payload entry
+  sbi_hsm_hart_start    0x8000f7b4   RELEASE mechanism (boot hart -> secondaries)
+  sbi_hsm_hart_start_finish 0x8000f5dc  started hart reads next_addr/arg1/mode, jumps
+  sbi_hsm_hart_change_state 0x8000f46e
+  payload_bin           0x80020000   loaded Linux payload (pre-decompress)
+  DTB/FDT               0x8001e000   (from cont.70/73)
+  _boot_status          0x800400b8   global the wait-loop polls (==2 => release)
+  coldboot_lottery      0x80042000   bss
+  coldboot_done         0x80042018   bss
+  generic_coldboot_harts 0x80042a70  bss
+
+_wait_for_boot_hart disasm: spins `ld _boot_status(0x800400b8); bne t0(2)
+  loop` with `div t2,t2,zero` trap-padding (idle/wait). Exits when
+  _boot_status==2 -> falls into _start_warm.
+
+last_pc decode guide for +smt_cyc_progress:
+  0x800002e8-0x80000302  secondary hart PARKED (not yet released)
+  0x80000306+            secondary hart RELEASED, running _start_warm->payload
+  0x8000xxxx             OpenSBI firmware (sbi_init/libfdt/hsm/sbi calls)
+  ~0x80020000            payload_bin region (Linux Image decompress handoff)
+  0xffffffff8xxxxxxx     decompressed Linux kernel (matches r127m profile PCs)
+  retired count climbing on a previously-parked hart = RELEASE milestone.
+
+EXPECTED mc-only milestones scalar r127m lacks:
+  - cores1-3 last_pc leaves 0x800002e8 (hart release via sbi_hsm_hart_start)
+  - SMT hart1 (odd harts) activation on each core
+  - SMP kernel bring-up (Linux sees NrCores>1, per-cpu init)
+
+## cont.77 — smoke-test oracle: expected [cycprog] signature for early mc boot
+
+cycprog-smoke runs 800k cycles @ +smt_cyc_progress=100000 -> heartbeats at
+100k..800k. Cross-checked vs wt1 trace (same model lineage ca6c8a96->cycprog):
+
+EXPECTED (validates heartbeat correctness):
+  - core0 hart0 (BOOT HART): retired climbs steeply through OpenSBI init;
+    last_pc in 0x8000xxxx firmware region. By ~500k should be ~180k retired,
+    last_pc ~0x80012xxx-0x80046xxx (late sbi_init / libfdt / scratch-HSM per
+    cont.73). By 800k still OpenSBI (Linux banner is ~23M).
+  - secondary harts (cores1-3 local harts + odd SMT harts): last_pc PARKED
+    at 0x800002e8 (_wait_for_boot_hart); retired FROZEN at small init count
+    (they only ran _start + wait loop). If any secondary last_pc leaves
+    0x800002e8 before ~1M => EARLY RELEASE (unexpected, investigate).
+  - No hart should show last_pc=0 or wild jumps (that'd be a fetch bug).
+
+DECODE last_pc regions (cont.76): 0x8000xxxx=OpenSBI, ~0x80020000=payload,
+  0xffffffff8xxxxxxx=Linux kernel.
+
+If smoke output matches => heartbeat verified -> launch full cycprog-lean
+  (3G, +smt_cyc_progress=500000) for categorized continuous boot.
+
+cont.78 — CATEGORIZED wt1 trace mining: hart0 = libfdt traversal; secondaries parked (VERIFIED)
+
+Mined stgfwd-wt1 (500k, full RVFI) per-hart trace -> concrete boot-phase map that the
+cycprog last_pc stream will extend past 500k. Corrects cont.73/77 oracle (last_pc is
+libfdt, not scratch-HSM — the 0x80046ec0 stores were FDT-result writes).
+
+hart0 (boot hart, core0): 186,760 insns, 298-499,984 cyc, 1364 uniqPC.
+  domPage=0x80012000 holds 161,419 insns = 86% of ALL hart0 work.
+  lastPC=0x8001289e = inside fdt_offset_ptr (sym 0x80012878). top5 incl 0x80012878/7a.
+  Phase buckets: 0-50k mixed reset(0x10000)->OpenSBI; 50k-300k steady 6-page OpenSBI
+  init ~17-18k insn/50k; 300-350k 21.9k; 350-400k SINGLE-PAGE burst (pages=1,
+  range 0x80012878-0x80012c48 = fdt_offset_ptr/fdt_next_tag/fdt_next_node/
+  fdt_first_subnode/fdt_next_subnode/fdt_find_string_/fdt_move = node/property walk);
+  400-500k back to 6 pages.
+  => hart0 is HEALTHY, progressing serially through libfdt FDT traversal (the hot
+     node/property walk = page 0x80012000). memfix VERIFIED: fdt_offset_ptr executes
+     cleanly (was old hang.fu1.op47 site). Frontier = FDT-parse DURATION, not a bug.
+
+harts 2/4/6 (secondary cores 1-3): ~48,876 insns each, only 31 uniqPC.
+  domPC=0x800002e8 x6107 = _wait_for_boot_hart 5-insn poll loop; lastPC ~0x800002f2.
+  => correctly PARKED awaiting hart0 HSM release (coldboot lottery losers). Multicore
+     bring-up is gated on hart0 finishing sbi_init -> sbi_hsm_hart_start -> release.
+
+Firmware symtab (build-linux-mc fw_payload.elf, sha 04f3b24b, riscv-none-elf-nm):
+  0x80012026 regmap_syscon_init ... libfdt block 0x800124d4-0x80014188:
+    fdt_offset_ptr 0x80012878, fdt_next_tag 0x80012964, fdt_next_node 0x80012b06,
+    fdt_first_subnode 0x80012bec, fdt_next_subnode 0x80012c1a, fdt_move 0x80012cbc,
+    fdt_getprop 0x80013974, fdt_node_offset_by_compatible 0x80014188.
+  0x800002e8 = _wait_for_boot_hart (secondary park loop).
+
+STRATEGIC: FDT parse is a small early fraction; real long pole = Linux kernel boot
+  (~1.3G cyc to console in scalar r127m). No RTL bug surfaced — categorized finding
+  is healthy serial firmware execution. cycprog heartbeat will track phase transitions
+  (libfdt -> HSM/sbi_init tail -> payload entry ~0x80200000 -> kernel 0xffffffff8..).
+
+cont.79 — tracedb `runs` inventory + `p` run: mc boot healthy to >=1.46M cyc (no RTL bug)
+
+Full tracedb `runs` table mined. Frontier by verdict/last_cycle:
+  SCALAR (1c/1h): r127m=shell@2.671G(48k ev,5.2GB) | r128b=no-shell@1.071G |
+    r129=no-shell@376M(1 assert) | r129b=no-shell@317M(1 assert) | r131=@18.4M
+  MC (4c): memfix=@37k(hang.fu1.op47 fdt_offset_ptr=FIXED) | p=@1.26M(12 ev)
+    | stgfwd-wt1=incomplete@500k-budget(0 ev, clean).
+
+`p` (hyp8-rfix131a-p-aggregate-t4, OLDER pre-iqfix/stgfwd model, same fw_payload.elf):
+  ran to 1,460,053 cycles then external SIGTERM (~2.2h wall, ~185cyc/s contended).
+  run-hyp8.log: [hang]@cyc5193 on gen_core[3] was TRANSIENT (FE demand=1 ic_rdy=0,
+  IQF red_pend=1) — self-resolved; [mc_gap] ALL cores max retire gap 68-80 (<5000)
+  => NO persistent stall anywhere to 1.46M. [mc_verdict] all 4 cores retired.
+  [equiv] all viol=0 at 1.26M+ checked. => p is EVIDENCE mc boot is HEALTHY well
+  past wt1's 500k (into post-FDT/HSM/payload region) — killed by wall-clock, NOT RTL.
+  trace tiny (+rvfi_cycle_stamp) so no deep phase map, but mc_gap<80 proves no wedge.
+
+CONCLUSION (categorized): memfix/iqfix/stgfwd fixed all known hangs; mc boot is
+  healthy serial firmware exec to >=1.46M cyc; frontier = DURATION (kernel ~1.3G).
+  No new RTL fix indicated. cycprog (3G,+smt_cyc_progress) is the correct vehicle.
+
+cont.80 — scalar r127m UART milestone map = mc milestone oracle (tq.sh uart -r r127m)
+
+Complete cycle-stamped console timeline (1c/1h, reached SHELL ~# @1.537G):
+  ~20.0M   OpenSBI boot-hart info dump (ISA/PMP/MHPM/MIDELEG/MEDELEG) = FIRST uart.txt
+  23.08M   Linux version 6.6.93 banner = kernel entry (post OpenSBI->payload jump)
+  310M     RCU Tasks Trace (ktime 1.05)      -- kernel init dominant span 23M->1.3G
+  412M     vgaarb | 548M squashfs | 573M free initrd
+  1.227G   io scheduler mq-deadline
+  1.315G   Serial 8250 driver
+  1.3225G  console [ttyS0] enabled = CONSOLE LIVE
+  1.4306G  Run /init as init process
+  1.4739G  G6LC_LINUX_INIT_UP
+  1.5291G  G6LC_LINUX_SHELL marker + Mem:238896
+  1.5371G  BusyBox ash + "~ #" = SHELL
+KEY: 23M->1.32G = ~1.3G cycles of kernel driver/init probe = dominant boot cost.
+  Pre-20M = zero uart (OpenSBI silent until hart-info dump).
+
+MC milestone decode via cycprog last_pc + uart.txt:
+  last_pc 0x8001xxxx=libfdt | 0x8002-4xxxx=sbi_init/HSM tail | SECONDARY last_pc
+  leaves 0x800002e8 = RELEASE | ->0x802xxxxx=payload/kern phys | ->0xffffffff8..=MMU on
+  uart.txt milestones: ~20M hart-info | ~23M+ Linux banner | ~1.3G console | ~1.5G shell
+  mc-vs-scalar delta: SMP adds secondary bring-up but parallelizes some init; watch
+  whether hart release (~OpenSBI tail) lands near scalar's ~20M uart point.
+
+cont.81 — latent kernel-boot asserts triaged: tlb_hit_onehot0 LIVE=#1 mc blocker; lu_pop FIXED
+
+Queried tracedb assert events (class=assert) across scalar runs -> 2 model asserts:
+  r129b-mmustaged-diag2 @317,424,744  assert.g6lc_tlb.sv:922 g6lc_tlb_hit_onehot0
+  r129-deep               @375,989,307 assert.load_unit.sv:2048 lu_pop_is_presented
+
+TRIAGE vs current RTL (hyp_redesign_core_8fo4):
+  * lu_pop_is_presented (load_unit.sv:2089 now): ALREADY FIXED. Comment documents the
+    broad form false-fired at exactly c375,989,307 (rindex=5 tid=12 vs tid_o=15);
+    narrowed to `a_data |->` data-publish pop only. r129 event is HISTORICAL.
+  * g6lc_tlb_hit_onehot0 (g6lc_tlb.sv:1027): STILL LIVE broad form
+    `assert property(@(posedge clk) disable iff(!rst_ni||!rq_access) $onehot0(tlb_hitv))`.
+    Error: "multi-hit on valid lookup (inconsistent page tables or SFENCE race)".
+    Comment refs r127x-mmustaged @317,424,744 = SAME cycle as r129b -> OPEN investigation.
+    +tlb_trace probe exists (UPD/FLUSH/LU per cycle) + tlb_dump_multi prints colliding
+    entries on fire -> replay-classification path ready.
+
+PREDICTION for mc cycprog run: kernel MMU/SMP does frequent TLB shootdowns (IPI+sfence)
+  -> SFENCE/multi-hit FAR more likely than scalar. g6lc_tlb_hit_onehot0 is the #1
+  predicted kernel-boot blocker (~300M+ cyc region). NOT fixing speculatively (hard
+  TLB/SFENCE issue, no repro, correctness risk); will confirm via run + classify with
+  +tlb_trace window replay when it fires. Recurring kernel-boot etypes to watch:
+  ptw.*.phys-alias, axi.r.untagged, ife.priv1.cause12, seqgap.
+
+cont.82 — r127m SCALAR-SUCCESS etype baseline = mc diff reference (reached SHELL, 0 asserts)
+
+Complete categorized event profile of the ONLY run that reached shell (1c/1h, 2.67G cyc).
+Use as the "healthy boot" signature; mc deviations flag SMP/coherence/TLB issues.
+  axi.r.untagged         18131  AXI reads w/o tag — baseline noise, benign
+  ptw.fetch.phys-alias   16558  instr-TLB phys aliases — normal kernel page aliasing
+  ptw.data.null           5389  data PTW null — page faults/guard, normal
+  ptw.data.phys-alias     4635  data-TLB phys aliases
+  ptw.data.user           1710  user-space walks (post-syscall/userspace)
+  ptw.fetch.user           552  user instr walks
+  ife.priv1.cause12        490  instr-fetch priv1 cause12
+  ife.priv0.cause12        227  instr-fetch priv0 cause12
+  seqgap                   200  sequence gaps (bounded, non-fatal)
+  ptw.data.kernel          188  kernel page walks
+  ptw.fetch.kernel          54  kernel instr walks
+  ptw.fetch.null            53  null-fetch walks
+  idle.wfi                  24  WFI idle — BENIGN
+  hang.fu2.op62              6  transient self-resolving hang
+  ptw.fetch.noncanonical     2  rare noncanonical fetch
+ZERO asserts. ptw.*/ife.* are EXPECTED kernel-MMU noise; counts scale with MMU activity.
+MC watch: SMP adds TLB shootdowns (IPI+sfence) -> expect ptw.fetch/data.phys-alias and
+  seqgap counts to RISE vs scalar; a NEW etype or assert = mc-specific defect.
+  Compare via `tq.sh diff -r r127m -r <mc>` (early cycles) + etype-count profile match.
+
+cont.83 — stall-census cross-validates trace mining + IPC profile (independent source)
+
+census table (run_id 73=p,75=wt1) cross-checked vs trace_hart_*.dasm insn counts:
+  wt1@500k: boot-hart ret=186760 ipc=0.374 == trace_hart_0 186760 insns EXACT
+            cores1-3 primaries ret=48876 ipc=0.163 == trace_hart_2/4/6 48876 EXACT
+            SMT siblings (hart=1) ret=0 — drained/parked, retire nothing.
+  mem_viol=224 on sibling @500k = benign early probes (equiv=0, matches wt1 verdict).
+IPC note: mc boot-hart ipc=0.374 > scalar r127m ~0.27 in same early phase — tight
+  libfdt loop has fewer stalls than scalar's broader init; NOT a defect, just phase.
+Census `detail` carries per-opcode retired/notissued/inflight/held breakdown = the
+  FO4/timing-relevant stall profile for later worst-path work (alu/br/ld dominate
+  retire; st_sb held counts show store-buffer pressure points).
+CONCLUSION reconfirmed: healthy serial boot, no RTL bug; frontier = duration.

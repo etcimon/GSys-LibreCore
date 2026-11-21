@@ -2696,7 +2696,10 @@ def cmd_shell(rem: Remote, args) -> int:
                 and not args.allow_overlap):
             _no_overlap_guard(rem, f"shell ({args.command[:60]}...)")
         timeout = command_timeout(args.timeout, DEFAULT_SHELL_TIMEOUT)
-        return rem.run(f"cd {REMOTE_ROOT} && {args.command}",
+        # Source env.sh like every other command so one-shot helper-script
+        # builds/tests inherit the pinned toolchain (PATH gcc-16, *_BUILD_TOOLCHAIN)
+        # instead of silently falling back to the distro compiler.
+        return rem.run(f"{env_prefix()} cd {REMOTE_ROOT} && {args.command}",
                        check=False, timeout=timeout,
                        heartbeat=not args.no_hang, tty=args.tty).returncode
     return rem.run(
@@ -2895,7 +2898,13 @@ def cmd_py(rem: Remote, args) -> int:
 
     log(f"py: running {len(scripts)} script(s) with {args.threads} thread(s) -> {rundir}")
     t0 = time.time()
+    # Source the remote env.sh so py jobs inherit the standard toolchain env
+    # (VERILATOR_ROOT, RISCV, SPIKE_INSTALL_DIR, PATH) and the opt-in host
+    # compiler selection (*_BUILD_TOOLCHAIN, e.g. gcc-16.2.0-znver4). Without
+    # this the py runner saw only --env args and fell back to the distro gcc.
+    # env.sh is sourced non-fatally; explicit --env pieces below still win.
     script = (
+        f"set -a; . {shlex.quote(REMOTE_ROOT + '/env.sh')} 2>/dev/null || true; set +a; "
         f"cd {shlex.quote(rundir)} && "
         f"TH_PROXY_THREADS={shlex.quote(str(args.threads))} "
         f"TH_PROXY_TAG={shlex.quote(tag)} "

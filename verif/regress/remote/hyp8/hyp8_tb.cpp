@@ -231,7 +231,7 @@ static const char *verilog_plusargs[] = {
     // parser hands it to HTIF, which rejects it and the run dies before the
     // checker ever arms -- a silent-oracle failure mode, since a rejected plusarg
     // looks exactly like a check that found nothing.
-    "fetch_i1_check", "smt_flow_trace", "smt_progress", "smt_mem_watch",
+    "fetch_i1_check", "smt_flow_trace", "smt_progress", "smt_cyc_progress", "smt_mem_watch",
     // Service/handoff attribution (core/smt/g6lc_thread_select.sv) and load
     // round-trip observation (core/cva6.sv). Same allowlist rule as above.
     "smt_sched_trace", "smt_rtt_trace",
