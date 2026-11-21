@@ -2833,3 +2833,53 @@ help." Caught before the probe ran.
 header → consistent new mask layout, while gcc16/pubflat/devclean keep the
 toolchain's old header → uncontaminated A/Bs. Verified `-I.../cvroot/include`
 in the compile lines + `cvroot/include/verilated*.cpp` as VPATH sources.
+
+### 22.7 devclean baseline anchor CONFIRMS nondeterminism finding
+
+devclean (devcase `.cpp` recompiled via ccache hits = bit-identical objects,
+old header, `--assert`+`-DVL_DEBUG`, threads=4, fw150, retired [4835,0]):
+
+| build | insns:u | cycles:u | note |
+|---|---|---|---|
+| devcase .nopgo | 5.252e12 | 2.958e13 | recorded baseline |
+| **devclean** | **5.294e12** | 3.110e13 | +0.8% insns (noise), +5% cycles (load) |
+| devnodebug | 4.115e12 | 2.221e13 | re-verilated, different partition |
+
+`instructions:u` is the reliable counter (deterministic); devclean
+5.294e12 ≈ devcase 5.252e12 confirms the baseline is **valid**, and proves
+devnodebug's 4.11e12 came from a genuinely *different* (luckier)
+nondeterministic partition — the §22.1 ±20% swing is real, not a
+baseline artifact. `cycles:u` varies ±5% with box load/frequency.
+
+## 23. RESULT: VlMTaskDoneMask cv-sleep is a REGRESSION on hyp8 → revert
+
+Clean A/B (identical 2535 generated `.cpp` — devcv reused devcase sources,
+only `verilated_threads.h` differed via cvroot; `--assert`+`-DVL_DEBUG`,
+threads=4, fw150, retired `[4835,0]` identical → same guest work):
+
+| build | insns:u | cycles:u | IPC |
+|---|---|---|---|
+| devcase .nopgo (spin) | 5.252e12 | 2.958e13 | ~0.18 |
+| devclean (spin, replica) | 5.294e12 | 3.110e13 | 0.17 |
+| **devcv (cv-sleep)** | **7.357e12 (+39%)** | **3.721e13 (+20-26%)** | 0.20 |
+
+`instructions:u` is deterministic → **+39% is a real regression**, not
+noise. cycles +20-26% (some load variance but consistent sign).
+
+**Why spin→cv-sleep lost here** (mechanism, for the record): hyp8's
+per-dependency waits are *short* — fine-grained MT partitioning means
+upstream tasks finish in ~µs, so workers poll the 16-word mask briefly and
+proceed. `SLEEP_AFTER_YIELDS=4` (~200K pause-iters ≈ tens of µs) is *longer*
+than most waits → workers rarely sleep, so the spin path dominates anyway —
+but now pays extra: `signal()` does an acquire `m_waiters` load on every one
+of ~63 call sites/eval, and when waits DO cross the threshold,
+`blockUntilReady`+`notify_all` wakes **all** waiters → each re-checks
+`ready()` (≤16 acquire-loads) then mostly re-sleeps (mutex+futex churn).
+Sleep/wake syscall+herd overhead exceeds the spin it replaced.
+
+**Verdict**: revert `410921e33`. Pure spin-then-`yieldThread` is already the
+right policy for this dependency-wait profile; the condition-variable adds
+cost without benefit when waits are short and numerous. The 56%-of-insns
+spin cost is *inherent to fine-grained MT dependency tracking*, not fixable
+by sleeping — the lever is reducing dep-edge count / critical path
+(V3Sched/V3Partition), not the wait primitive.
