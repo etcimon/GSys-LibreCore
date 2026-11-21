@@ -3593,3 +3593,36 @@ never a semantic change. TU compiles clean in remote g6lc-dev obj_opt
 (-O3+PGO, real build flags). E2E verilate + memset-count delta pending
 (remote tree rebuild in progress; header transfer via chunked b64 -- ~8KB
 argv-safe chunks with retry, proven method this session).
+§44 DEAD-INIT MEASURED (same-generator controlled A/B, 2026-11-21)
+
+Experiment: two verilator_bin builds differing ONLY in scanCoveredInit
+(pass on vs pass off via CTRL-OFF toggle on the same tree/rev), each
+verilating hyp8_mc into devdeadz-ab vs devctrlz-ab, then model builds.
+
+Static isolation proof: full VL_* helper census diff between the two
+models shows the ONLY change is VL_ZERO_W 4,325 -> 179 sites (-96%);
+unnamedblk temps 781 -> 0. Every other helper count identical --
+single-variable experiment achieved. .text -174,780 B (-0.085%).
+
+Functional equivalence: 150k-cycle fw_payload runs produce IDENTICAL
+results on both models -- sidecar {"cycles":150000,"retired":[4835,0]}
+byte-equal, same mc_gap retirement signatures (309/0/0/0), same
+verdict trace. No execution discrepancy.
+
+Dynamic (interleaved 3-rep A/B, 50k cycles, instructions:u):
+  rep1  A(off)=1.4317e12  B(on)=1.4049e12   -1.87%
+  rep2  A=1.1400e12       B=1.1348e12       -0.46%
+  rep3  A=1.3044e12       B=1.3079e12       +0.27%
+  mean -0.74%; median -0.46%.
+Same-binary rep-to-rep swing is +/-12-25% on this loaded box
+(spin-wait noise from the ~95-worker pool + co-tenant jobs), so the
+true delta is real but small -- on the order of <=1% retired insns on
+this workload. The 4,146 dead memsets (mostly 8-17-word scoreboard
+temps) are a small share of 1.1-1.4e12 insns/50k-cycle.
+
+Verdict: KEEP. It is a provably-dead-store elimination, free of
+downside, shrinks code and store traffic even where the retired-insn
+win is marginal. Methodology note: same-generator A/B (pass toggled,
+not different verilator builds) is REQUIRED -- toolchain-vs-devtree
+comparisons showed +922 COUNTONES/+148 SHIFTL/-ATTR_COLD drift that
+fully confounds attribution.
