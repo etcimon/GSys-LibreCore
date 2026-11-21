@@ -130,9 +130,17 @@ JOBS="${SOFT_LADDER_BUILD_JOBS:-$( (command -v nproc >/dev/null && nproc) || ech
 if [[ "$JOBS" == "$(nproc)" ]] || [[ "$JOBS" == "\$(nproc)" ]]; then
   JOBS=$( (command -v nproc >/dev/null && nproc) || echo 8)
 fi
-VTHREADS="${SOFT_LADDER_VERILATOR_THREADS:-4}"
+# --threads is a PARTITION-GRANULARITY knob, not a worker count: V3Partition
+# coarsens the MTask graph toward `threads`-way parallelism via
+# cpLimit = totalGraphCost*3/(threads*5). These ~2x-parallelism OoO cores get
+# the best partition at threads=2 (coarse ~29-MTask graph); threads=4
+# over-fragments (~59 tasks/149 edges) and pays a VlMTaskDoneMask sync tax that
+# exceeds any SIMD compute saving (AGENTS-verilator-performance.md §30-36).
+# Runtime worker count is set separately by VerilatedContext::threads(), so
+# lowering this does not reduce usable cores — it only coarsens the schedule.
+VTHREADS="${SOFT_LADDER_VERILATOR_THREADS:-2}"
 if [[ "$VTHREADS" == "$(nproc)" ]] || [[ "$VTHREADS" == "\$(nproc)" ]]; then
-  VTHREADS=$( (command -v nproc >/dev/null && nproc) || echo 4)
+  VTHREADS=2
 fi
 
 if [[ "$VERLIB" = /* ]]; then
@@ -303,6 +311,12 @@ BUILD_OPT="${HYP8_BUILD_OPT:--O2}"
 BUILD_OPT_SLOW="${HYP8_BUILD_OPT_SLOW:--O1}"
 if [[ -z "${HYP8_BUILD_MARCH:-}" ]]; then
   if [[ "$VLT_FLAVOUR" == g6lc && "$(uname -m)" == x86_64 ]] \
+     && grep -qw avx512f /proc/cpuinfo 2>/dev/null && grep -qw avx512vl /proc/cpuinfo 2>/dev/null \
+     && grep -qw avx512bw /proc/cpuinfo 2>/dev/null && grep -qw avx512dq /proc/cpuinfo 2>/dev/null; then
+    # Full x86-64-v4 AVX-512 baseline: the wide word-vector helpers widen to the
+    # 16-word SIMD tier (VL_SIMD_PREFER_512) and native codegen improved measurably.
+    BUILD_MARCH="x86-64-v4"
+  elif [[ "$VLT_FLAVOUR" == g6lc && "$(uname -m)" == x86_64 ]] \
      && grep -qw avx2 /proc/cpuinfo 2>/dev/null && grep -qw bmi2 /proc/cpuinfo 2>/dev/null; then
     BUILD_MARCH="x86-64-v3"
   else
@@ -312,6 +326,10 @@ else
   BUILD_MARCH="$HYP8_BUILD_MARCH"
 fi
 [[ "$BUILD_MARCH" == "none" ]] || BUILD_CXXFLAGS="$BUILD_CXXFLAGS -march=$BUILD_MARCH"
+# On an AVX-512 march also opt into the 16-word SIMD helper tier (guarded
+# separately from __AVX512F__ so non-512 targets keep the 8/4-word tiers).
+[[ "$BUILD_MARCH" == x86-64-v4 || "$BUILD_MARCH" == *avx512* || "$BUILD_MARCH" == native ]] \
+  && BUILD_CXXFLAGS="$BUILD_CXXFLAGS -DVL_SIMD_PREFER_512"
 PGO="${HYP8_BUILD_PGO:-1}"
 [[ "${HYP8_BUILD_VERILATE_ONLY:-0}" == "1" ]] && PGO=0
 PGO_DIR="$VERLIB_DIR/pgo"
