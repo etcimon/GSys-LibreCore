@@ -3250,3 +3250,35 @@ batchable); `VlUnpacked` is random-index. **SIMD is now provably exhausted
 at both the runtime-helper and generated-code levels.** The only remaining
 lever is non-vector: scheduler/partition granularity (§30) or narrow-op
 scheduling — see §30 for the threads=2/partition breakthrough.
+
+## 32. cpLimit-parallelism cap — TESTED AND REVERTED (no-op for hyp8)
+
+§30 hypothesized capping `targetParFactor` at pre-coarsening
+`parallelismFactor()` would reproduce the threads=2 coarse partition under
+`--threads 4`. Implemented in `V3Partition.cpp` `go()` (commit `fd3f6b1be`,
+reverted `f590db147`), compile-validated, then verilate-tested.
+
+**Result: NO-OP.** Patched `--threads 4` verilate produced **58 MTasks / 158
+edges** — statistically identical to unpatched threads=4 (**59/149**), nowhere
+near threads=2's **29/53**. The cap did not trigger.
+
+**Why it failed — the model was wrong.** `parallelismFactor() =
+totalGraphCost/longestCpCost` on the *pre-coarsening* fine graph is HIGH
+(>4): thousands of tiny MTaskMoveVertex tasks look parallel. But
+`PartContraction` merges them into dependency chains, collapsing *achievable*
+parallelism to ~2 (final factor). So `ceil(preCoarseningPar) >= threads`
+always → `targetParFactor` never reduced → `cpLimit` unchanged → same
+partition. **Pre-coarsening cost/CP parallelism does not predict achievable
+runtime parallelism** — coarsening itself destroys it.
+
+**The real lever is cpLimit coarseness**, which threads=2 doubled
+(`totalCost*3/(threads*5)`: 0.15→0.30). Achievable parallelism is only known
+*after* coarsening → capturing it generically needs a **two-pass/iterative
+partition** (coarsen → measure final parallelism → re-coarsen with adjusted
+cpLimit if oversubscribed). `PartContraction` is destructive, so pass 2 needs
+a rebuilt graph — a larger, separate change. Not attempted (context).
+
+**Net for hyp8:** the threads=2 result stands as a *build-config*
+recommendation (`--threads 2` for ~2x-parallelism designs), not yet a generic
+compiler fix. SIMD remains exhausted (§29/§31); the only proven remaining
+lever is partition granularity, which needs the iterative approach above.
