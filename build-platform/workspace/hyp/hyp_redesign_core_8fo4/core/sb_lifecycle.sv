@@ -752,6 +752,13 @@ module sb_lifecycle
   localparam int SMT_TRACE_HARTS = G6LCCfg.NrHarts > 0 ? G6LCCfg.NrHarts : 1;
   longint unsigned smt_retired_count[SMT_TRACE_HARTS];
   logic [G6LCCfg.VLEN-1:0] smt_last_retired_pc[SMT_TRACE_HARTS];
+  // +smt_cyc_progress[=N]: periodic per-hart retire heartbeat every N cycles
+  // (default N=1_000_000). translate_off only; gives live boot-progress and
+  // last-PC visibility on +*_notrace kernel-length runs that otherwise emit no
+  // per-cycle stream. Shares the smt_progress counters so either probe arms them.
+  bit smt_cycprog_enabled;
+  int unsigned smt_cycprog_interval;
+  longint unsigned smt_cycprog_cycle;
   // The smt-progress/flow traces read the *presented* commit slots through
   // commit_sel_slot_i + mem_q (the wrapper maps them to commit_*_o).
   function automatic logic [$bits(mem_q[0].sbe.hart_id)-1:0] sbe_hart(input int p);
@@ -764,19 +771,37 @@ module sb_lifecycle
   always_comb
     for (int p = 0; p < G6LCCfg.NrCommitPorts; p++)
       commit_instr_c[p] = mem_q[commit_sel_slot_i[p]].cancelled;
-  initial smt_progress_enabled = $test$plusargs("smt_progress");
+  initial begin
+    smt_progress_enabled = $test$plusargs("smt_progress");
+    if ($value$plusargs("smt_cyc_progress=%d", smt_cycprog_interval))
+      smt_cycprog_enabled = (smt_cycprog_interval != 0);
+    else begin
+      smt_cycprog_interval = $test$plusargs("smt_cyc_progress") ? 32'd1000000 : 32'd0;
+      smt_cycprog_enabled = (smt_cycprog_interval != 0);
+    end
+    smt_cycprog_cycle = 0;
+  end
   always @(posedge clk_i) begin
     if (!rst_ni) begin
       foreach (smt_retired_count[h]) begin
         smt_retired_count[h] = 0;
         smt_last_retired_pc[h] = '0;
       end
-    end else if (smt_progress_enabled) begin
+      smt_cycprog_cycle = 0;
+    end else if (smt_progress_enabled || smt_cycprog_enabled) begin
       for (int p = 0; p < G6LCCfg.NrCommitPorts; p++)
         if (commit_ack_i[p] && !commit_instr_c[p]) begin
           smt_retired_count[sbe_hart(p)] = smt_retired_count[sbe_hart(p)] + 1'b1;
           smt_last_retired_pc[sbe_hart(p)] = sbe_pc(p);
         end
+      if (smt_cycprog_enabled) begin
+        smt_cycprog_cycle = smt_cycprog_cycle + 1;
+        if ((smt_cycprog_cycle % smt_cycprog_interval) == 0) begin
+          foreach (smt_retired_count[h])
+            $display("[cycprog] scope=%m cyc=%0d hart=%0d retired=%0d last_pc=%h",
+                     smt_cycprog_cycle, h, smt_retired_count[h], smt_last_retired_pc[h]);
+        end
+      end
     end
   end
   final begin

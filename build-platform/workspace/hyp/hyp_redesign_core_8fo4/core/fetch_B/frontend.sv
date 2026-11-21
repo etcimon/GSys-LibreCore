@@ -456,7 +456,7 @@ module frontend
     if (!rst_ni) feprob_c <= 0;
     else feprob_c <= feprob_c + 1;
     if (feprob_en && feprob_c >= feprob_lo && feprob_c <= feprob_hi)
-      $display("[feprob] c=%0d h=%0d | bp p=%0d tgt=%h ep=%0d ttl=%0d epQ=%0d | cfh=%0d ftq emp=%0d full=%0d hv=%0d head=%h hep=%0d | push=%0d pv=%h pop=%0d ifr=%0d dem=%0d dfire=%0d | icr=%0d icv=%h icrdy=%0d take=%0d icdv=%0d icdva=%h ictok=%0d kdrop=%0d | want v=%0d tok=%0d wa=%h wep=%0d | red pc=%h rv=%0d rs=%0d ia=%0d rsd=%0d | rpend=%0d rinfl=%0d rlost=%0d rpc=%h rih=%0d rihd=%0d riac=%0d | mp=%0d ov2=%0d ov1=%0d fl=%0d k1=%0d k2=%0d | faddr=%h npc=%h",
+      $display("[feprob] c=%0d h=%0d | bp p=%0d tgt=%h ep=%0d ttl=%0d epQ=%0d | cfh=%0d ftq emp=%0d full=%0d hv=%0d head=%h hep=%0d | push=%0d pv=%h pop=%0d ifr=%0d dem=%0d dfire=%0d | icr=%0d icv=%h icrdy=%0d take=%0d icdv=%0d icdva=%h ictok=%0d kdrop=%0d | want v=%0d tok=%0d wa=%h wep=%0d | red pc=%h rv=%0d rs=%0d ia=%0d rsd=%0d | rpend=%0d rinfl=%0d rlost=%0d rpc=%h rih=%0d rihd=%0d riac=%0d | mp=%0d ov2=%0d ov1=%0d fl=%0d k1=%0d k2=%0d | faddr=%h npc=%h | gate iqr=%0d hlt=%0d lba=%0d lbh=%0d rplq=%0d rpl=%0d",
         feprob_c, int'(smt_hart_i),
         bp_pend_q, bp_tgt_q, bp_pend_epoch_q, bp_misp_ttl_q, fe_epoch,
         cf_hold_q, ftq_empty, ftq_full, ftq_head_valid, ftq_head_vaddr, ftq_head_epoch,
@@ -468,7 +468,9 @@ module frontend
         redirect_pend_q, redirect_inflight_q, redirect_lost_q, redirect_pc_q,
         redirect_hit, redirect_hold, redirect_accept,
         is_mispredict, hyp_fe_override2_o, hyp_fe_override1_o, flush_i, kill_s1, kill_s2,
-        fetch_address, npc_q);
+        fetch_address, npc_q,
+        // demand_req / if_ready gate decomposition
+        instr_queue_ready, halt_frontend_i, lbuf_active, lbuf_hold, replay_q, replay);
   end
 //pragma translate_on
 

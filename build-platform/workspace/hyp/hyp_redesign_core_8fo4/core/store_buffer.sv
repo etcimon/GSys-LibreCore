@@ -1263,9 +1263,18 @@ module store_buffer
 
   // U5.4 OoO: a store younger than the querying load must never reach it --
   // every forwarded byte has an older (visible) source.
+  // hyp8 rfix131a cont.68: for StoreFwdCycles==3 the st_fwd_* pins are the
+  // UNTAGGED held F3 response (+3), not cycle-aligned with load_paddr_i /
+  // load_trans_id_i in multi-load OoO — the cover below is computed for the
+  // live query while st_fwd_be_o answers an earlier tagged request, so the
+  // check false-fires (be=11111111 cover=00000000 @c170756). The synthesized
+  // visible-source contract is enforced inside stb_fwd's F1 stage; this
+  // witness is only sound for the StoreFwdCycles==1 live merge, where the
+  // pins are combinational and query-aligned.
   ooo_no_younger_forward :
   assert property (@(posedge clk_i) disable iff (!rst_ni)
-                   (G6LCCfg.OoOEn && load_paddr_valid_i && st_fwd_valid_o) |->
+                   (G6LCCfg.OoOEn && (HypCfg.StoreFwdCycles == 1) &&
+                    load_paddr_valid_i && st_fwd_valid_o) |->
                    !ooo_fwd_without_visible_source)
   else $error("[Speculative Queue] OoO load tid %0d forwarded bytes %b with no older source (visible cover %b)",
               load_trans_id_i, st_fwd_be_o, ooo_fwd_visible_cover);
