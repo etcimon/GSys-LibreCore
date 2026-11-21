@@ -3449,3 +3449,33 @@ CONCLUSION: SIMD is closed at runtime-helper, codegen __Vi-loop, AND idiom
 levels. All large-width ops vectorized; all remaining scalar ops run on narrow
 data or small widths (<=7 words) where SIMD cannot help. No further runtime
 SIMD work is justified absent a NEW design with genuinely wide hot vectors.
+
+## 38. High-coverage DYNAMIC profile — SIMD exhausted (final proof)
+
+perf record (60k cycles, all threads) on the SIMD-baseline model, coverage-
+weighted by samples (not static site counts):
+
+  WORKER_SYNC    33.34%  VlWorkerThread::workerLoop  -> --threads 2: 10.35%
+  DATAPATH_eval  52.59%  ~12% __Vthread__nba__N orchestration bodies
+                        + ~40% spread across 2518 nba_comb/sequent fns,
+                          each <=0.35% (long tail)
+  HOST_FESVR      8.67%  htif_hexwriter read/write_chunk (ELF load, warmup)
+  LIBC_MEM        1.67%  malloc/memcpy
+  ORCHESTRATION   0.75% / OTHER 0.40%
+
+FINDINGS
+1. workerLoop (33%) is thread idle-spin on m_ready_size + condvar wait. It is
+   SYNCHRONIZATION, not datapath -> SIMD cannot help. Confirmed by threads=2
+   profile dropping it to 10.4% (the oversubscription signature; the fix is
+   --threads 2 or coarser MTasks, not vectors).
+2. The datapath IS high-coverage but is ~40% spread across 2518 tiny comb
+   functions (<=0.35% each) doing narrow scalar logic. No wide-vector loops,
+   no dominant function -> nothing for SIMD to grab.
+3. The ONLY SIMD in the profile is __memcmp_evex_movbe (0.21%) = the existing
+   VL_EQ_W->_vl_words_orxor/memcmp path. SIMD already runs where vectors exist.
+
+VERDICT: along high coverage there is NO remaining SIMD opportunity. Hot code
+is (a) thread sync, (b) call dispatch, or (c) narrow scalar control logic too
+small/fragmented to vectorize. Wide-vector work is already SIMD'd and is a
+small share precisely because wide ops aren't the bottleneck. SIMD lane is
+CLOSED at helper, codegen, idiom, AND dynamic-coverage levels.
