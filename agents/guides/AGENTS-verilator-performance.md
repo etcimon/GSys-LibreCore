@@ -2981,3 +2981,26 @@ cv-sleep). Lane-wise ops + already-disjoint funnel preserve aliasing rules.
 **Status**: implemented + unit-verified; full-model cycles/s A/B pending
 (a header change forces full recompile of every TU — schedule with the
 next controlled build, reuse identical generated `.cpp`).
+
+### 26.1 Micro-benchmark confirms the half-tier win (6-word / 192-bit ops)
+
+`simd_bench.cpp` isolates a hot loop of `_vl_words_{and,or,xor}` +
+`_vl_words_funnel` over a 6-word buffer — the exact size the half-tier
+closes. Same TU, only `verilated_types.h` differs, `-O2 -march=x86-64-v3`:
+
+| header | instructions:u | cycles:u |
+|---|---|---|
+| original (scalar 6-word) | 3.860e9 | 1.099e9 |
+| half-tier SIMD | 1.980e9 (**−48.7%**) | 0.816e9 (**−25.8%**) |
+
+**Monotonicity argument (no regression by construction)**: the half-width
+pass only replaces *scalar tail* iterations with vector ops. Operands
+≥ VL_SIMD_WORDS are fully handled by the full pass (half-check skips);
+operands < half-width were already scalar. The sole behavioral change is
+the [half, full) word range plus the sub-full remainder of larger ops —
+strictly fewer instructions or identical. Only cost is one extra bounds
+compare per kernel call.
+
+Full-model fw150 A/B (`devsimd-ab` vs `devclean-ab` control) running;
+expected delta is diluted by the ~56% MT-spin share but directionally
+positive if the 128–224-bit bucket is dynamically hot.
