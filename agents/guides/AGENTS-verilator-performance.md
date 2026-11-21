@@ -3100,3 +3100,62 @@ boundary words) + identical-`.cpp` fw150 A/B before keeping. Do NOT rush —
 a subtle overlap bug corrupts state silently. Static site counts show the
 parents are hot but the *alias* sub-path frequency is unprofiled; confirm
 with `perf record` on the §26 binary first if the win looks marginal.
+
+## 29. §28 RESOLVED — aliased/in-place wide ops are DEAD CODE; word-vector SIMD domain exhausted (2026-11-21)
+
+§28 hypothesised the `_vl_words_disjoint`-rejected overlap paths might be a
+hot SIMD frontier. Generated-code inspection **disproves** this — they are
+unreachable in emitted models, so no SIMD work is needed there.
+
+**Evidence — Verilator temps every wide expression result.** Sampled
+`VL_SHIFTR_WWI`/`VL_SHIFTL_WWI`/`VL_ASSIGNSEL_WW` call sites in the devsimd
+model (`*.cpp`, 2535 TUs) show src and dst are always *distinct objects*:
+
+- shifts: `VL_SHIFTR_WWI(256,256,7, __Vtemp_h8aaf…, __Vtemp_h2eec…, …)` —
+  two different `__Vtemp_*` buffers.
+- `VL_SHIFTL_WWI(128,128,32, __Vtemp_h0008…, __Vtemp_h6435…, 0x41)` — ditto.
+- `VL_ASSIGNSEL_WW(2048,512, lsb, __PVT__…fill_buf_q, __Vdlyvval__…fill_buf_q__v0)`
+  — dest is the `__PVT__` signal, src a `__Vdlyv*` delayed-value temp.
+
+Every wide op writes a fresh `__Vtemp`/`__Vdlyv` result and reads a *different*
+temp or signal, so `_vl_words_disjoint(iowp+lword, …, lwp, words)` is always
+true and the funnel/memmove SIMD path already runs. `VL_SHIFTL_WWI` even does
+`_vl_words_zero(owp)` *before* `_vl_insert_WW(owp,lwp)` — that is only correct
+because `lwp` is a separate temp; a true in-place `x <= x << n` would zero the
+source first. Verilator's temping makes the alias fallbacks defensive dead
+code, exactly like the `middle < 1` scalar spill.
+
+**Action taken**: drafted the §28 temp-buffer path in `_vl_insert_WW`
+(`VL_INSERT_TMP_WORDS` scratch + snapshot-then-funnel for `!disjoint`),
+verified it compiled, then **reverted** (`git checkout verilated_funcs.h`).
+Rationale: the branch can never execute in generated code → zero benefit, and
+it added a correctness surface (snapshot reads original source, which for a
+hypothetical corrupting overlap would differ from live-read scalar) for no
+upside. Dead speculative code does not belong in a hot header.
+
+**Remaining scalar paths — all correctly scalar or cold:**
+
+| path | why not SIMD |
+|---|---|
+| `_vl_insert_WW/WI/WQ` disjoint interior | already funnel/SIMD (§26) |
+| `VL_SHIFTR*/SHIFTL/SEL_WWII` disjoint | already funnel/SIMD |
+| `_vl_words_copy`/`_zero`/`_fill` | memmove/memset (libc-optimal) |
+| reductions `orxor/orall/xorall` | already SIMD (§26) |
+| `VL_ADD/SUB/MUL/NEGATE_W` | carry-bound across words — not lane-wise |
+| `_vl_cmp_w` lexicographic | early-exit word order; not a reduction |
+| `ONEHOT/COUNTONES` | branchy bit-scan, not word-parallel |
+| narrow `_I/_Q/_S/_CData` | single instructions, nothing to vectorize |
+| overshift checks `rwp[i]` | loop over tiny shift-amount width (≤1-2 words) |
+| `VL_STREAML_WWI` | bit-serial permutation, not word-parallel |
+| `verilated.cpp`/`_dpi.cpp` word loops | init/reset/randomize/DPI — cold |
+| `VlUnpacked` element access | random-index (`arr[computed]`) — scalar by nature; whole-array ops → memset/memcpy |
+
+**Conclusion**: the runtime-header word-vector SIMD frontier is **exhausted**.
+The §26 half-tier captured the only reachable scalar bulk (the 4–7-word
+128–224-bit range); everything wider was already full-width SIMD and everything
+narrower is correctly scalar, dead, or cold. Further SIMD gains would require
+*codegen*-level changes (e.g. batching unpacked-array element loops or
+re-widening over-split signals) — a different, larger scope than runtime
+headers, and §27 already showed split/scheduler granularity is logic-driven.
+No further opportunistic runtime SIMD work is warranted without new profiling
+evidence of a reachable scalar word-loop.
