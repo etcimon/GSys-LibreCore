@@ -3282,3 +3282,46 @@ a rebuilt graph — a larger, separate change. Not attempted (context).
 recommendation (`--threads 2` for ~2x-parallelism designs), not yet a generic
 compiler fix. SIMD remains exhausted (§29/§31); the only proven remaining
 lever is partition granularity, which needs the iterative approach above.
+
+## 33. Iterative coarsening — concrete design for the threads=2 fix (NOT yet implemented)
+
+Goal: reproduce threads=2's coarse partition (29 tasks/53 edges) under an
+oversubscribed `--threads 4`, generically, by driving `cpLimit` from
+*achievable* parallelism instead of requested threads.
+
+Feasibility confirmed: `PartContraction{mtasksp, scoreLimit, slowAsserts}`
+(V3Partition.cpp ~1263) is re-runnable — a fresh instance re-scores all
+`MTaskEdge`s and merges endpoint `LogicMTask`s whose combined critical-path
+score is under `scoreLimit`. The coarsened graph persists with incrementally
+maintained critical paths (`PartPropagateCp`), so a second contraction on the
+same `mtasksp` merges further. `PartParallelismEst{mtasksp}.traverse()` then
+measures the *achievable* (post-coarsening) parallelism.
+
+Sketch (in `V3Partition::go()`, after first `PartContraction` ~line 2790):
+```
+// after first contraction + before removeTransitiveEdges/reassign-IDs:
+for (int iter = 0; iter < K; ++iter) {
+    PartParallelismEst est{mtasksp}; est.traverse();
+    double par = est.parallelismFactor();
+    if (par >= targetParFactor*0.8 || !mergedMore) break;   // parallelism now suffices
+    // oversubscribed: re-contract with a higher scoreLimit to cut task count
+    PartContraction{mtasksp, cpLimit*SCALE, slowAsserts}.go();
+}
+```
+Open questions to resolve before implementing:
+- `scoreLimit` semantics: it is a *critical-path-cost* budget, not a task
+  count — doubling it does not linearly halve tasks. Need the right SCALE and
+  a merge-progress check (`mtasksp` vertex count before/after) to avoid an
+  infinite/coarsening-too-far loop.
+- Stop condition: target `parallelism ≈ min(threads, achievable)` is NOT the
+  objective — threads=2 won on *less sync overhead* (29 tasks), not more
+  parallelism (factor dropped 2→1). The real objective is min total cost
+  (compute + per-task-edge sync). May need a task-count-vs-parallelism
+  heuristic (e.g. tasks ≈ achievablePar × ~15) rather than parallelism==threads.
+- Re-contraction correctness: verify no redundant/transitive-edge or
+  critical-path invariant breaks on the second pass (the `m_slowAsserts`
+  self-checks in `go()` cover some of this).
+- Blast radius: runs on every `--threads>1` compile; must not regress
+  genuinely-high-parallelism designs (where fine tasks ARE wanted).
+Validate via: verilate hyp8 `--threads 4` → expect ~29-40 tasks (vs 59) →
+model build + fw150 `perf stat` → compare vs devclean/devthr2.
